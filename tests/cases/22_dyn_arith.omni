@@ -1,0 +1,47 @@
+// dynamic 上的算术（ADR-0008 第 5 节）：标签在运行期查，**不做** JS 那套强制转换。
+// 规则与静态那半边一致：两个 int 是 int64 回绕，掺进 real 就都按 real 算，
+// 两个 string 只有 '+' 是拼接。
+import "std/json.omni";  // print(dynamic) 要它（ADR-0008）
+
+dynamic a = 7;
+dynamic b = 3;
+print(a + b);
+print(a - b);
+print(a * b);
+print(a / b);
+print(a % b);
+print(-a);
+
+// int64 回绕，和静态的 int 一样
+dynamic big = 9223372036854775807;
+print(big + 1);
+
+// 掺进 real：结果是 real
+dynamic r = 2.5;
+print(a + r);
+print(r * 2);
+print((a + r).tag());
+print((a + b).tag());
+
+// 一边静态一边 dynamic：静态那边先装箱
+print(a + 1);
+print(10 - b);
+print(a * 2.0);
+
+// string 的 '+' 是拼接
+dynamic s = "ab";
+print(s + "cd");
+print((s + "cd").tag());
+
+// 复合赋值也走同一条规则
+dynamic acc = 1;
+acc += 2;
+acc *= 5;
+print(acc);
+
+// 从 json 里取出来的值直接参与算术（这条是这个特性真正的用处）
+dynamic j = {"n": 4, "xs": [1, 2, 3]};
+print(j["n"] * 10);
+print(j["xs"][0] + j["xs"][2]);
+j["n"] += 6;
+print(j["n"]);

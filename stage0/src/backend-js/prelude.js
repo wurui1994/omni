@@ -1120,6 +1120,43 @@ function $dynPush(v, x) { $dynAs(v, "list").push(x); }
 function $dynHas(v, k) { return $dynAs(v, "dict").has($dynAs(k, "string")); }
 function $dynKeys(v) { return [...$dynAs(v, "dict").keys()]; }
 
+// dynamic 上的算术。标签严格，**不做** JS 那套强制转换 —— dynamic 是 Omni 的动态通道，
+// 不是 any："1" + 1 在这里是错误，不是 "11"。规则与静态那半边逐条对齐：
+// 两个 int 是 int64 回绕，掺进 real 就都按 real 算，两个 string 只有 '+' 是拼接。
+// 其余组合是运行期错误，消息点名两边的标签 —— 与 runtime/omni_dyn.c 逐字一致。
+function $dynArith(op, a, b) {
+  const ta = $dynTag(a), tb = $dynTag(b);
+  if (ta === "int" && tb === "int") {
+    if (op === "+") return $W(a + b);
+    if (op === "-") return $W(a - b);
+    if (op === "*") return $W(a * b);
+    if (op === "/") return $div(a, b);
+    return $mod(a, b);
+  }
+  if ((ta === "int" || ta === "real") && (tb === "int" || tb === "real")) {
+    const x = ta === "int" ? Number(a) : a;
+    const y = tb === "int" ? Number(b) : b;
+    if (op === "+") return x + y;
+    if (op === "-") return x - y;
+    if (op === "*") return x * y;
+    if (op === "/") return x / y;
+    return $fmod(x, y);
+  }
+  if (op === "+" && ta === "string" && tb === "string") return a + b;
+  $rt_error("cannot apply '" + op + "' to " + ta + " and " + tb);
+}
+function $dynAdd(a, b) { return $dynArith("+", a, b); }
+function $dynSub(a, b) { return $dynArith("-", a, b); }
+function $dynMul(a, b) { return $dynArith("*", a, b); }
+function $dynDiv(a, b) { return $dynArith("/", a, b); }
+function $dynMod(a, b) { return $dynArith("%", a, b); }
+function $dynNeg(a) {
+  const t = $dynTag(a);
+  if (t === "int") return $W(-a);
+  if (t === "real") return -a;
+  $rt_error("cannot apply unary '-' to " + t);
+}
+
 `;
 
 // 整个 prelude 是一个 String.raw 模板字面量：注释里出现反引号会提前把它闭合，

@@ -560,6 +560,12 @@ class CEmitter {
       case 'dynPush': return `omni_dyn_push(${a[0]}, ${a[1]})`;
       case 'dynHas': return `omni_dyn_has(${a[0]}, ${a[1]})`;
       case 'dynKeys': return `omni_dyn_keys_of(${a[0]})`;
+      case 'dynAdd': return `omni_dyn_arith('+', ${a[0]}, ${a[1]})`;
+      case 'dynSub': return `omni_dyn_arith('-', ${a[0]}, ${a[1]})`;
+      case 'dynMul': return `omni_dyn_arith('*', ${a[0]}, ${a[1]})`;
+      case 'dynDiv': return `omni_dyn_arith('/', ${a[0]}, ${a[1]})`;
+      case 'dynMod': return `omni_dyn_arith('%', ${a[0]}, ${a[1]})`;
+      case 'dynNeg': return `omni_dyn_neg(${a[0]})`;
       // JS 前端的运算语义（ADR-0011）。规则写在 runtime/omni_js.c 里，与 prelude.js 一一对应。
       case 'js_undef': return 'omni_dyn_undef()';
       case 'js_ofFn': return `omni_dyn_of_fn(${a[0]})`;

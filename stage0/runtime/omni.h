@@ -143,6 +143,9 @@ double omni_real_of_string(omni_str s);
 const char *omni_dyn_tag_name(int t);
 omni_str omni_dyn_tag(omni_dyn v);
 bool omni_dyn_eq(omni_dyn a, omni_dyn b);
+/* dynamic 上的算术（严格标签，不是 JS 的强制转换）。op 是 '+' '-' '*' '/' '%' 之一。 */
+omni_dyn omni_dyn_arith(char op, omni_dyn a, omni_dyn b);
+omni_dyn omni_dyn_neg(omni_dyn a);
 
 /* omni_str16.c —— JS 的 String（UTF-16 码元序列，ADR-0011 第 8 节）。
    下标、长度、比较一律按码元；与外界（文件、print、Omni 的 string）之间只有

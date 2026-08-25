@@ -107,8 +107,15 @@ REPL 的输入解释规则（`stage0/src/repl.js`）：括号未闭合就续行�
   **不引入 JS 的 truthiness**（`0`/`""`/`null` 为假）：那是跨后端分叉源，也是 bug 温床。
   JS 子集前端需要 truthiness 时用一个显式的、单独命名的操作。
 - **`dynamic` 的运行期分派面是一张封闭清单**（不是"什么都能干"）：
-  `[]` 读/写、`.length`、`for-in`、`push`、`has`、`keys`、`tag`、`asInt/asReal/asBool/asString/asList/asDict`。
+  `[]` 读/写、`.length`、`for-in`、`push`、`has`、`keys`、`tag`、`asInt/asReal/asBool/asString/asList/asDict`，
+  以及**算术** `+ - * / %` 与一元 `-`。
   标签不符 ⇒ 运行期错误，消息文本两个后端一致（ADR-0005）。
+- **算术的规则与静态那半边逐条一致，不是 JS 的强制转换**：两个 `int` 是 int64 回绕，
+  掺进 `real` 就都按 `real` 算，两个 `string` 只有 `+` 是拼接。`"1" + 1` 在这里是
+  运行期错误而不是 `"11"` —— `dynamic` 是 Omni 的动态通道，不是 JS 的 `any`。
+  位运算刻意不进这张表：它只在 `int` 上成立，放进来就得偷偷截断。
+  做完这条 `.omnid` 才算真能用（在此之前纯动态文件只能取值/索引/迭代，不能计算）。
+  用例：`tests/cases/22_dyn_arith.omni`（差分）、`23_dyn_arith_mismatch.omni`（标签不匹配）。
 - `print(dynamic)` / `string(dynamic)`：**标签是 `string` 取原文，其余取 JSON 文本**
   —— 与 Python 的 `print`/`str` 一致（`print("a")` → `a`，`print(["a"])` → 引号在里面）。
   实现上降级为对 stdlib `dynToText` 的调用，**不在两个运行时里各写一份序列化器**

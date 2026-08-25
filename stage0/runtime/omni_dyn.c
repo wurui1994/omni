@@ -30,3 +30,46 @@ bool omni_dyn_eq(omni_dyn a, omni_dyn b) {
     default: return a.u.ref == b.u.ref;  /* 容器按引用相等，和 JS 侧一致 */
   }
 }
+
+/* dynamic 上的算术。标签严格，**不做** JS 那套强制转换 —— dynamic 是 Omni 的动态通道，
+   不是 any："1" + 1 在这里是错误，不是 "11"。规则与静态那半边逐条对齐：两个 int 是 int64
+   回绕，掺进 real 就都按 real 算，两个 string 只有 '+' 是拼接。其余组合是运行期错误，
+   消息点名两边的标签 —— 与 backend-js/prelude.js 的 $dynArith 逐字一致。 */
+static bool dyn_num(omni_dyn v) { return v.tag == OMNI_DYN_INT || v.tag == OMNI_DYN_REAL; }
+
+static double dyn_r(omni_dyn v) { return v.tag == OMNI_DYN_INT ? (double)v.u.i : v.u.r; }
+
+omni_dyn omni_dyn_arith(char op, omni_dyn a, omni_dyn b) {
+  if (a.tag == OMNI_DYN_INT && b.tag == OMNI_DYN_INT) {
+    int64_t x = a.u.i, y = b.u.i;
+    switch (op) {
+      case '+': return omni_dyn_of_int(omni_add(x, y));
+      case '-': return omni_dyn_of_int(omni_sub(x, y));
+      case '*': return omni_dyn_of_int(omni_mul(x, y));
+      case '/': return omni_dyn_of_int(omni_div(x, y));
+      default: return omni_dyn_of_int(omni_mod(x, y));
+    }
+  }
+  if (dyn_num(a) && dyn_num(b)) {
+    double x = dyn_r(a), y = dyn_r(b);
+    switch (op) {
+      case '+': return omni_dyn_of_real(x + y);
+      case '-': return omni_dyn_of_real(x - y);
+      case '*': return omni_dyn_of_real(x * y);
+      case '/': return omni_dyn_of_real(x / y);
+      default: return omni_dyn_of_real(fmod(x, y));
+    }
+  }
+  if (op == '+' && a.tag == OMNI_DYN_STRING && b.tag == OMNI_DYN_STRING) {
+    return omni_dyn_of_string(omni_str_cat(a.u.s, b.u.s));
+  }
+  omni_errorf("cannot apply '%c' to %s and %s", op, omni_dyn_tag_name(a.tag), omni_dyn_tag_name(b.tag));
+  return omni_dyn_null();
+}
+
+omni_dyn omni_dyn_neg(omni_dyn a) {
+  if (a.tag == OMNI_DYN_INT) return omni_dyn_of_int(omni_neg(a.u.i));
+  if (a.tag == OMNI_DYN_REAL) return omni_dyn_of_real(-a.u.r);
+  omni_errorf("cannot apply unary '-' to %s", omni_dyn_tag_name(a.tag));
+  return omni_dyn_null();
+}

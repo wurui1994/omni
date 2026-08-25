@@ -977,6 +977,16 @@ class Checker {
       return { kind: 'Bin', op, opType: INT, left: a, right: b, type: INT };
     }
 
+    // dynamic 上的算术：标签在运行期查（ADR-0008 第 5 节的封闭清单又多一批 op）。
+    // 静态那一边先装箱，规则与静态语言一致 —— int 掺 real 得 real，string 只有 '+'。
+    // 位运算刻意不进来：那只在 int 上成立，dynamic 上要么是错误要么得偷偷截断。
+    const dynArith = { '+': 'dynAdd', '-': 'dynSub', '*': 'dynMul', '/': 'dynDiv', '%': 'dynMod' }[op];
+    if (dynArith && (a.type.k === 'dynamic' || b.type.k === 'dynamic')) {
+      const l = this.coerce(a, DYNAMIC, node.left.span);
+      const r = this.coerce(b, DYNAMIC, node.right.span);
+      return this.dynOp(dynArith, [l, r], DYNAMIC);
+    }
+
     // 算术：+ 在双方都是 string 时是拼接
     if (op === '+' && a.type.k === 'string' && b.type.k === 'string') {
       return { kind: 'Bin', op: '+', opType: STRING, left: a, right: b, type: STRING };
@@ -999,6 +1009,8 @@ class Checker {
       if (e.type.k !== 'int') this.err(node.span, `operator '~' requires int, found '${typeName(e.type)}'`);
       return { kind: 'Un', op: '~', operand: e, type: INT };
     }
+    // dynamic 上的一元负号也走运行期分派；一元加没有意义，不给它开口子
+    if (e.type.k === 'dynamic' && node.op === '-') return this.dynOp('dynNeg', [e], DYNAMIC);
     if (!isNumeric(e.type)) this.err(node.span, `unary '${node.op}' requires a numeric operand, found '${typeName(e.type)}'`);
     if (node.op === '+') return e;
     return { kind: 'Un', op: '-', operand: e, type: e.type };

@@ -1,0 +1,9 @@
+// 运行期错误：dynamic 的算术标签不匹配。JS 会把 "x" + 1 变成 "x1"，
+// Omni 的 dynamic 不是 any —— 这里必须响亮地失败（ADR-0008 第 5 节）。
+import "std/json.omni";
+
+dynamic s = "x";
+dynamic n = 1;
+print(s + "y");
+print(s + n);
+print(999);

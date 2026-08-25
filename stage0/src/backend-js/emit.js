@@ -341,6 +341,12 @@ class JsEmitter {
       case 'dynPush': return `$dynPush(${a[0]}, ${a[1]})`;
       case 'dynHas': return `$dynHas(${a[0]}, ${a[1]})`;
       case 'dynKeys': return `$dynKeys(${a[0]})`;
+      case 'dynAdd': return `$dynAdd(${a[0]}, ${a[1]})`;
+      case 'dynSub': return `$dynSub(${a[0]}, ${a[1]})`;
+      case 'dynMul': return `$dynMul(${a[0]}, ${a[1]})`;
+      case 'dynDiv': return `$dynDiv(${a[0]}, ${a[1]})`;
+      case 'dynMod': return `$dynMod(${a[0]}, ${a[1]})`;
+      case 'dynNeg': return `$dynNeg(${a[0]})`;
       // JS 前端的运算语义与宿主库（ADR-0011）。这些 op 只由 frontend-js/lower.js 产生，
       // Omni 源码里造不出来 —— truthiness 与 `+` 的双重含义不属于 Omni 语言。
       // 这两个不是函数调用，单列；其余一律走 JS_ABI 表，加 op 不用改这里。
