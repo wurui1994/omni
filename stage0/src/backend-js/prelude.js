@@ -329,6 +329,77 @@ function $js_eq(strict, a, b) {
   return a === b;
 }
 
+// ------------------------------------------------- JS 的 String 方法（ADR-0011）
+// JS 后端这边宿主的 String 本来就是 UTF-16 码元序列，所以这些几乎都是一行；
+// 真正的工作量在 C 侧（runtime/omni_str16.c + omni_js_str.c）。逐条对应。
+function $js_asS16(v) {
+  if ($dynTag(v) !== "string") $rt_error($dynTag(v) + " is not a string");
+  return v;
+}
+// JS 的 ToIntegerOrInfinity。只收 real：字符串下标不可能是 BigInt，收到 int 是降级写错了
+function $js_idx(v, dflt) {
+  if (v === undefined) return dflt;
+  if ($dynTag(v) !== "real") $rt_error("string index must be a number, found " + $dynTag(v));
+  return Number.isNaN(v) ? 0 : Math.trunc(v);
+}
+function $js_println(v) { $print($js_str(v)); }
+// JS 后端这边 Omni 的 string 就是宿主 string，本来就是 UTF-16 码元序列，所以是恒等
+function $js_s16(s) { return s; }
+function $js_str_len(s) { return $js_asS16(s).length; }
+function $js_str_index(s, i) {
+  const v = $js_asS16(s), k = $js_idx(i, 0);
+  return k < 0 || k >= v.length ? undefined : v[k];
+}
+function $js_str_at(s, i) {
+  const v = $js_asS16(s);
+  let k = $js_idx(i, 0);
+  if (k < 0) k += v.length;
+  return k < 0 || k >= v.length ? undefined : v[k];
+}
+function $js_str_char_code_at(s, i) {
+  const v = $js_asS16(s), k = $js_idx(i, 0);
+  return k < 0 || k >= v.length ? NaN : v.charCodeAt(k);
+}
+function $js_str_code_point_at(s, i) {
+  const v = $js_asS16(s), k = $js_idx(i, 0);
+  return k < 0 || k >= v.length ? undefined : v.codePointAt(k);
+}
+function $js_str_slice(s, a, b) {
+  const v = $js_asS16(s);
+  return v.slice($js_idx(a, 0), $js_idx(b, v.length));
+}
+function $js_str_repeat(s, n) {
+  const k = $js_idx(n, 0);
+  if (k < 0) $rt_error("repeat count must not be negative");
+  return $js_asS16(s).repeat(k);
+}
+function $js_str_pad_start(s, n, fill) {
+  return $js_asS16(s).padStart($js_idx(n, 0), fill === undefined ? " " : $js_asS16(fill));
+}
+function $js_str_trim(side, s) {
+  const v = $js_asS16(s);
+  return side === "l" ? v.trimStart() : side === "r" ? v.trimEnd() : v.trim();
+}
+// 只折 ASCII：C 侧不带 Unicode 大小写表，两边必须同样残缺才不会分叉
+function $js_str_lower(s) {
+  return $js_asS16(s).replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
+}
+function $js_str_upper(s) {
+  return $js_asS16(s).replace(/[a-z]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 32));
+}
+function $js_str_index_of(s, needle, from) {
+  return $js_asS16(s).indexOf($js_asS16(needle), $js_idx(from, 0));
+}
+function $js_str_last_index_of(s, needle) {
+  return $js_asS16(s).lastIndexOf($js_asS16(needle));
+}
+function $js_str_includes(s, needle) { return $js_asS16(s).includes($js_asS16(needle)); }
+function $js_str_starts_with(s, pre) { return $js_asS16(s).startsWith($js_asS16(pre)); }
+function $js_str_ends_with(s, suf) { return $js_asS16(s).endsWith($js_asS16(suf)); }
+// 变长的 fromCharCode / fromCodePoint 由降级拆成多次 js_add，这里只收一个实参
+function $js_str_of_char_code(u) { return String.fromCharCode($js_idx(u, 0)); }
+function $js_str_of_code_point(cp) { return String.fromCodePoint($js_idx(cp, 0)); }
+
 // dynamic 的运行期分派面（ADR-0008 第 5 节的封闭清单）。
 // 有了这些，读写 JSON 不需要先 asList()/asDict()，源码里也不需要出现 dyn()。
 function $dynGet(v, k) {

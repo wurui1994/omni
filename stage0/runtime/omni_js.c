@@ -17,23 +17,25 @@ bool omni_js_truthy(omni_dyn v) {
     case OMNI_DYN_INT: return v.u.i != 0;
     /* NaN 与 ±0 都是假 */
     case OMNI_DYN_REAL: return !(v.u.r == 0.0 || isnan(v.u.r));
-    case OMNI_DYN_STRING: return v.u.s.len != 0;
+    case OMNI_DYN_STR16: return v.u.s16.len != 0;
     default: return true;  /* 对象、数组、函数一律真 */
   }
 }
 
-omni_str omni_js_typeof(omni_dyn v) {
+omni_dyn omni_js_typeof(omni_dyn v) {
+  const char *n;
   switch (v.tag) {
-    case OMNI_DYN_UNDEF: return omni_str_new("undefined", 9);
-    case OMNI_DYN_NULL: return omni_str_new("object", 6);
-    case OMNI_DYN_BOOL: return omni_str_new("boolean", 7);
+    case OMNI_DYN_UNDEF: n = "undefined"; break;
+    case OMNI_DYN_NULL: n = "object"; break;
+    case OMNI_DYN_BOOL: n = "boolean"; break;
     /* int 是 BigInt 的映像（ADR-0011 第 5 节），所以 typeof 是 bigint */
-    case OMNI_DYN_INT: return omni_str_new("bigint", 6);
-    case OMNI_DYN_REAL: return omni_str_new("number", 6);
-    case OMNI_DYN_STRING: return omni_str_new("string", 6);
-    case OMNI_DYN_FN: return omni_str_new("function", 8);
-    default: return omni_str_new("object", 6);
+    case OMNI_DYN_INT: n = "bigint"; break;
+    case OMNI_DYN_REAL: n = "number"; break;
+    case OMNI_DYN_STR16: n = "string"; break;
+    case OMNI_DYN_FN: n = "function"; break;
+    default: n = "object"; break;
   }
+  return omni_dyn_of_s16(omni_s16_of_utf8(omni_str_fmt("%s", n)));
 }
 
 /* ---------------------------------------------------------------- 文本化 */
@@ -101,18 +103,29 @@ static omni_str js_num_str(double v) {
   return omni_str_fmt("%s", out);
 }
 
-omni_str omni_js_str(omni_dyn v) {
+/* JS 域里的字符串一律是 str16（ADR-0011 第 8 节）。UTF-8 的 omni_str 只在
+   转码的两个出入口出现，所以这里把 to_s16 收成一个内部函数，op 层只见 str16。 */
+static omni_s16 to_s16(omni_dyn v) {
   switch (v.tag) {
-    case OMNI_DYN_UNDEF: return omni_str_new("undefined", 9);
-    case OMNI_DYN_NULL: return omni_str_new("null", 4);
-    case OMNI_DYN_BOOL: return omni_str_bool(v.u.b);
-    case OMNI_DYN_INT: return omni_str_int(v.u.i);
-    case OMNI_DYN_REAL: return js_num_str(v.u.r);
-    case OMNI_DYN_STRING: return v.u.s;
+    case OMNI_DYN_UNDEF: return omni_s16_of_utf8(omni_str_new("undefined", 9));
+    case OMNI_DYN_NULL: return omni_s16_of_utf8(omni_str_new("null", 4));
+    case OMNI_DYN_BOOL: return omni_s16_of_utf8(omni_str_bool(v.u.b));
+    case OMNI_DYN_INT: return omni_s16_of_utf8(omni_str_int(v.u.i));
+    case OMNI_DYN_REAL: return omni_s16_of_utf8(js_num_str(v.u.r));
+    case OMNI_DYN_STR16: return v.u.s16;
     default:
       omni_errorf("cannot convert %s to string", omni_dyn_tag_name(v.tag));
-      return omni_str_new("", 0);
+      return omni_s16_of_utf8(omni_str_new("", 0));
   }
+}
+
+omni_dyn omni_js_str(omni_dyn v) { return omni_dyn_of_s16(to_s16(v)); }
+
+/* 输出：JS 的 String 是 UTF-16，落到 stdout 得转回 UTF-8。这个 op 存在的意义
+   是让"什么时候转码"变成一处显式的边界，而不是散落在各个打印点上。 */
+void omni_js_println(omni_dyn v) {
+  omni_str s = omni_s16_to_utf8(to_s16(v));
+  printf("%.*s\n", (int)s.len, s.p);
 }
 
 /* ---------------------------------------------------------------- 算术 */
@@ -133,8 +146,8 @@ static void want_num(int op, omni_dyn a, omni_dyn b) {
 }
 
 omni_dyn omni_js_add(omni_dyn a, omni_dyn b) {
-  if (a.tag == OMNI_DYN_STRING || b.tag == OMNI_DYN_STRING) {
-    return omni_dyn_of_string(omni_str_cat(omni_js_str(a), omni_js_str(b)));
+  if (a.tag == OMNI_DYN_STR16 || b.tag == OMNI_DYN_STR16) {
+    return omni_dyn_of_s16(omni_s16_cat(to_s16(a), to_s16(b)));
   }
   want_num('+', a, b);
   if (a.tag == OMNI_DYN_INT) return omni_dyn_of_int(omni_add(a.u.i, b.u.i));
@@ -199,8 +212,8 @@ omni_dyn omni_js_bitnot(omni_dyn a) {
 
 bool omni_js_cmp(int op, omni_dyn a, omni_dyn b) {
   int c;
-  if (a.tag == OMNI_DYN_STRING && b.tag == OMNI_DYN_STRING) {
-    c = omni_str_cmp(a.u.s, b.u.s);
+  if (a.tag == OMNI_DYN_STR16 && b.tag == OMNI_DYN_STR16) {
+    c = omni_s16_cmp(a.u.s16, b.u.s16);
   } else {
     if (!is_num(a) || !is_num(b)) {
       omni_errorf("cannot compare %s with %s", omni_dyn_tag_name(a.tag), omni_dyn_tag_name(b.tag));
@@ -239,7 +252,7 @@ bool omni_js_eq(bool strict, omni_dyn a, omni_dyn b) {
     case OMNI_DYN_INT: return a.u.i == b.u.i;
     /* === 下 NaN 不等于自身、+0 等于 -0（这和 dict 键用的 SameValueZero 不同） */
     case OMNI_DYN_REAL: return a.u.r == b.u.r;
-    case OMNI_DYN_STRING: return omni_str_cmp(a.u.s, b.u.s) == 0;
+    case OMNI_DYN_STR16: return omni_s16_eq(a.u.s16, b.u.s16);
     default: return a.u.ref == b.u.ref;  /* 对象/数组/函数比同一性 */
   }
 }

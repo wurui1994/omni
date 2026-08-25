@@ -30,6 +30,12 @@
 /* string 是不可变 UTF-8 字节序列，带长度。因为不可变，substr 可以直接别名原缓冲区。 */
 typedef struct { const char *p; int64_t len; } omni_str;
 
+/* JS 的 String 是 UTF-16 码元序列（ADR-0011 第 8 节）—— 不能拿 omni_str 顶替。
+   `.length` / `charCodeAt` / `slice` 全是码元口径，而编译器自己的源码里满是中文注释：
+   一个汉字 3 个 UTF-8 字节、1 个 UTF-16 码元。两个口径下词法器切出的位置不同，
+   C1 与 node 直接分叉。同样不可变，所以 slice 也是别名。 */
+typedef struct { const uint16_t *p; int64_t len; } omni_s16;
+
 /* dynamic：带标签的胖值。容器载荷存 void*（容器类型都是指针 typedef），
    这样 omni_dyn 可以先于任何容器实例化定义，避免定义环。
 
@@ -38,12 +44,12 @@ typedef struct { const char *p; int64_t len; } omni_str;
 enum {
   OMNI_DYN_NULL = 0, OMNI_DYN_BOOL, OMNI_DYN_INT, OMNI_DYN_REAL,
   OMNI_DYN_STRING, OMNI_DYN_LIST, OMNI_DYN_DICT,
-  OMNI_DYN_UNDEF, OMNI_DYN_FN
+  OMNI_DYN_UNDEF, OMNI_DYN_FN, OMNI_DYN_STR16
 };
 
 typedef struct {
   int tag;
-  union { bool b; int64_t i; double r; omni_str s; void *ref; } u;
+  union { bool b; int64_t i; double r; omni_str s; omni_s16 s16; void *ref; } u;
 } omni_dyn;
 
 /* 函数值（ADR-0010）：指向闭包记录的指针。记录的第一个字段是被调函数的地址，
@@ -135,11 +141,37 @@ const char *omni_dyn_tag_name(int t);
 omni_str omni_dyn_tag(omni_dyn v);
 bool omni_dyn_eq(omni_dyn a, omni_dyn b);
 
+/* omni_str16.c —— JS 的 String（UTF-16 码元序列，ADR-0011 第 8 节）。
+   下标、长度、比较一律按码元；与外界（文件、print、Omni 的 string）之间只有
+   omni_s16_of_utf8 / omni_s16_to_utf8 两个显式转换。
+   越界与负下标的处理跟着 JS：不报错，按规范夹取或返回 NaN/undefined —— 由调用方的
+   op 决定，这一层只提供"已经规范化过的下标"的原语。 */
+omni_s16 omni_s16_of_utf8(omni_str s);
+omni_str omni_s16_to_utf8(omni_s16 s);
+omni_s16 omni_s16_cat(omni_s16 a, omni_s16 b);
+omni_s16 omni_s16_slice(omni_s16 s, int64_t start, int64_t end);
+omni_s16 omni_s16_repeat(omni_s16 s, int64_t n);
+omni_s16 omni_s16_pad_start(omni_s16 s, int64_t want, omni_s16 fill);
+omni_s16 omni_s16_lower(omni_s16 s);
+omni_s16 omni_s16_upper(omni_s16 s);
+omni_s16 omni_s16_of_code_unit(int64_t u);
+omni_s16 omni_s16_of_code_point(int64_t cp);
+int omni_s16_cmp(omni_s16 a, omni_s16 b);
+bool omni_s16_eq(omni_s16 a, omni_s16 b);
+uint64_t omni_s16_hash(omni_s16 s);
+int64_t omni_s16_index_of(omni_s16 s, omni_s16 needle, int64_t from);
+int64_t omni_s16_last_index_of(omni_s16 s, omni_s16 needle);
+bool omni_s16_starts_with(omni_s16 s, omni_s16 pre);
+bool omni_s16_ends_with(omni_s16 s, omni_s16 suf);
+/* 只按 JS 的 WhiteSpace + LineTerminator 定义裁剪，不做 Unicode 全集 */
+omni_s16 omni_s16_trim(omni_s16 s, bool left, bool right);
+
 /* omni_js.c —— JS 前端的运算语义（ADR-0011 第 4 节）。
    JS 的 truthiness / `+` 的双重含义 / `==` 的强制转换只活在这里，Omni 语言本身不受影响。 */
 bool omni_js_truthy(omni_dyn v);
-omni_str omni_js_typeof(omni_dyn v);
-omni_str omni_js_str(omni_dyn v);
+omni_dyn omni_js_typeof(omni_dyn v);
+omni_dyn omni_js_str(omni_dyn v);
+void omni_js_println(omni_dyn v);
 omni_dyn omni_js_add(omni_dyn a, omni_dyn b);
 omni_dyn omni_js_arith(int op, omni_dyn a, omni_dyn b);
 omni_dyn omni_js_bitop(int op, omni_dyn a, omni_dyn b);
@@ -147,6 +179,29 @@ omni_dyn omni_js_bitnot(omni_dyn a);
 bool omni_js_cmp(int op, omni_dyn a, omni_dyn b);
 bool omni_js_eq(bool strict, omni_dyn a, omni_dyn b);
 omni_dyn omni_js_neg(omni_dyn a);
+
+/* omni_js_str.c —— JS 的 String 方法。收发都是 dynamic（谓词返回 bool）。
+   碰容器的那几个（split / join / match）不在这里：list<dynamic> 是生成 TU 里的
+   宏实例，运行时的翻译单元看不见，只能长在宏里。 */
+omni_dyn omni_js_s16(omni_str s);
+omni_dyn omni_js_str_len(omni_dyn s);
+omni_dyn omni_js_str_index(omni_dyn s, omni_dyn i);
+omni_dyn omni_js_str_at(omni_dyn s, omni_dyn i);
+omni_dyn omni_js_str_char_code_at(omni_dyn s, omni_dyn i);
+omni_dyn omni_js_str_code_point_at(omni_dyn s, omni_dyn i);
+omni_dyn omni_js_str_slice(omni_dyn s, omni_dyn a, omni_dyn b);
+omni_dyn omni_js_str_repeat(omni_dyn s, omni_dyn n);
+omni_dyn omni_js_str_pad_start(omni_dyn s, omni_dyn n, omni_dyn fill);
+omni_dyn omni_js_str_trim(int side, omni_dyn s);
+omni_dyn omni_js_str_lower(omni_dyn s);
+omni_dyn omni_js_str_upper(omni_dyn s);
+omni_dyn omni_js_str_index_of(omni_dyn s, omni_dyn needle, omni_dyn from);
+omni_dyn omni_js_str_last_index_of(omni_dyn s, omni_dyn needle);
+bool omni_js_str_includes(omni_dyn s, omni_dyn needle);
+bool omni_js_str_starts_with(omni_dyn s, omni_dyn pre);
+bool omni_js_str_ends_with(omni_dyn s, omni_dyn suf);
+omni_dyn omni_js_str_of_char_code(omni_dyn u);
+omni_dyn omni_js_str_of_code_point(omni_dyn cp);
 
 /* omni_hash.c —— 键的显示形式，只在 "key not found" 的错误消息里用，都是冷路径 */
 omni_str omni_kstr_int(int64_t k);
@@ -218,6 +273,7 @@ static inline omni_dyn omni_dyn_of_bool(bool v) { omni_dyn d; d.tag = OMNI_DYN_B
 static inline omni_dyn omni_dyn_of_int(int64_t v) { omni_dyn d; d.tag = OMNI_DYN_INT; d.u.i = v; return d; }
 static inline omni_dyn omni_dyn_of_real(double v) { omni_dyn d; d.tag = OMNI_DYN_REAL; d.u.r = v; return d; }
 static inline omni_dyn omni_dyn_of_string(omni_str v) { omni_dyn d; d.tag = OMNI_DYN_STRING; d.u.s = v; return d; }
+static inline omni_dyn omni_dyn_of_s16(omni_s16 v) { omni_dyn d; d.tag = OMNI_DYN_STR16; d.u.s16 = v; return d; }
 static inline omni_dyn omni_dyn_of_ref(void *v, int tag) { omni_dyn d; d.tag = tag; d.u.ref = v; return d; }
 
 static inline void omni_dyn_want(omni_dyn v, int tag) {
@@ -244,6 +300,13 @@ static inline omni_fn omni_fn_ck(omni_fn f) {
 static inline omni_fn omni_js_as_fn(omni_dyn v) {
   if (v.tag != OMNI_DYN_FN) omni_errorf("%s is not a function", omni_dyn_tag_name(v.tag));
   return (omni_fn)v.u.ref;
+}
+
+/* JS 前端：从 dynamic 取回 String。这一层不做隐式 ToString —— 需要转换的地方
+   降级时会显式插一个 js_str，免得"哪里悄悄转了"变成两个后端的分叉点。 */
+static inline omni_s16 omni_js_as_s16(omni_dyn v) {
+  if (v.tag != OMNI_DYN_STR16) omni_errorf("%s is not a string", omni_dyn_tag_name(v.tag));
+  return v.u.s16;
 }
 
 /* --- 键的 hash / eq：dict 的每一次查找都要走，全在最内层 ---

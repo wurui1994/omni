@@ -35,24 +35,21 @@ const VOID = { k: 'void' };
 const box = (e) => ({ kind: 'Box', type: D, from: e.type, expr: e });
 const int = (v) => box({ kind: 'Const', type: I, value: BigInt(v) });
 const real = (v) => box({ kind: 'Const', type: R, value: v });
-const str = (v) => box({ kind: 'Const', type: S, value: v });
 const bool = (v) => box({ kind: 'Const', type: B, value: v });
 const undef = { kind: 'Builtin', name: 'js_undef', args: [], type: D };
 const nul = { kind: 'DynNull', type: D };
 
 const js = (name, args, extra = {}) => ({ kind: 'Builtin', name, args, type: D, ...extra });
 const jsBool = (name, args, extra = {}) => ({ kind: 'Builtin', name, args, type: B, ...extra });
-const jsStr = (name, args) => ({ kind: 'Builtin', name, args, type: S });
 
-/** 把一个表达式变成"打印它的文本"的语句；bool / string / dynamic 各有各的路子 */
+// JS 的字符串是 UTF-16（ADR-0011 第 8 节），所以字面量要过一次 js_s16：
+// 源码里是 UTF-8 的 Omni string，进 JS 域之前转成码元序列。
+const str = (v) => js('js_s16', [{ kind: 'Const', type: S, value: v }]);
+
+/** 打印：一律走 js_println —— 它内部做 js_str + 转回 UTF-8，是唯一的输出边界 */
 function printStmt(e) {
-  if (e.type === B) {
-    return stmt({ kind: 'Builtin', name: 'print', args: [{ kind: 'Builtin', name: 'to_string', args: [e], type: S, argType: B }], type: VOID, recvType: S, argType: S });
-  }
-  if (e.type === S) {
-    return stmt({ kind: 'Builtin', name: 'print', args: [e], type: VOID, recvType: S, argType: S });
-  }
-  return stmt({ kind: 'Builtin', name: 'print', args: [jsStr('js_str', [e])], type: VOID, recvType: S, argType: S });
+  const v = e.type === B ? box(e) : e;
+  return stmt({ kind: 'Builtin', name: 'js_println', args: [v], type: VOID });
 }
 const stmt = (e) => ({ kind: 'ExprStmt', expr: e });
 
@@ -134,8 +131,8 @@ for (const [label, v, src] of [
   ['empty-str', str(''), '""'], ['str', str('x'), '"x"'],
 ]) {
   c(`truthy/${label}`, jsBool('js_truthy', [v]), `Boolean(${src})`);
-  c(`typeof/${label}`, jsStr('js_typeof', [v]), `typeof ${src}`);
-  c(`str/${label}`, jsStr('js_str', [v]), `String(${src})`);
+  c(`typeof/${label}`, js('js_typeof', [v]), `typeof ${src}`);
+  c(`str/${label}`, js('js_str', [v]), `String(${src})`);
 }
 
 // Number -> String 的排布规则（ECMA-262 Number::toString）。这一组是自举收敛的关键：
@@ -147,8 +144,52 @@ for (const src of [
   '1.7976931348623157e308', '-1e-7', '-1e21',
 ]) {
   // eslint-disable-next-line no-eval
-  c(`num/${src}`, jsStr('js_str', [real(eval(src))]), `String(${src})`);
+  c(`num/${src}`, js('js_str', [real(eval(src))]), `String(${src})`);
 }
+
+// String 方法。含中文与 emoji 的用例是这一组的重点：UTF-16 码元口径下 "中" 是 1，
+// UTF-8 字节口径下是 3 —— 如果 C 侧偷懒复用了 omni_str，这里立刻分叉（ADR-0011 第 8 节）。
+const CN = '中文abc';
+const EMO = 'a\u{1f600}b';
+// 空白用 \v 而不是 \n：值里带换行会让"一条用例一行"的约定破掉
+const strs = { ascii: 'hello', cn: CN, emo: EMO, empty: '', ws: '  x\t\v' };
+const q = (s) => JSON.stringify(s);
+for (const [k, s] of Object.entries(strs)) {
+  c(`slen/${k}`, js('js_str_len', [str(s)]), `${q(s)}.length`);
+  c(`slower/${k}`, js('js_str_lower', [str(s)]), `${q(s)}.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32))`);
+  c(`strim/${k}`, js('js_str_trim', [str(s)], { side: 'b' }), `${q(s)}.trim()`);
+  c(`strimL/${k}`, js('js_str_trim', [str(s)], { side: 'l' }), `${q(s)}.trimStart()`);
+  c(`strimR/${k}`, js('js_str_trim', [str(s)], { side: 'r' }), `${q(s)}.trimEnd()`);
+}
+for (const i of [-1, 0, 1, 2, 3, 6, 99]) {
+  c(`sidx/cn/${i}`, js('js_str_index', [str(CN), real(i)]), `${q(CN)}[${i}]`);
+  c(`sat/cn/${i}`, js('js_str_at', [str(CN), real(i)]), `${q(CN)}.at(${i})`);
+  c(`scc/cn/${i}`, js('js_str_char_code_at', [str(CN), real(i)]), `${q(CN)}.charCodeAt(${i})`);
+  c(`scp/emo/${i}`, js('js_str_code_point_at', [str(EMO), real(i)]), `${q(EMO)}.codePointAt(${i})`);
+}
+for (const [a, b] of [[0, 2], [1, 99], [-2, 99], [2, 1], [-99, -1], [0, -1]]) {
+  c(`sslice/cn/${a},${b}`, js('js_str_slice', [str(CN), real(a), real(b)]), `${q(CN)}.slice(${a}, ${b})`);
+  c(`sslice/emo/${a},${b}`, js('js_str_slice', [str(EMO), real(a), real(b)]), `${q(EMO)}.slice(${a}, ${b})`);
+}
+c('sslice/open', js('js_str_slice', [str(CN), real(2), undef]), `${q(CN)}.slice(2)`);
+c('srepeat', js('js_str_repeat', [str(CN), real(3)]), `${q(CN)}.repeat(3)`);
+c('srepeat/0', js('js_str_repeat', [str(CN), real(0)]), `${q(CN)}.repeat(0)`);
+c('spad', js('js_str_pad_start', [str('7'), real(3), str('0')]), '"7".padStart(3, "0")');
+c('spad/dflt', js('js_str_pad_start', [str('7'), real(4), undef]), '"7".padStart(4)');
+c('spad/short', js('js_str_pad_start', [str('abc'), real(2), str('0')]), '"abc".padStart(2, "0")');
+c('spad/multi', js('js_str_pad_start', [str('x'), real(6), str('ab')]), '"x".padStart(6, "ab")');
+c('sindexOf', js('js_str_index_of', [str(CN), str('文'), undef]), `${q(CN)}.indexOf("文")`);
+c('sindexOf/from', js('js_str_index_of', [str('aXaX'), str('X'), real(2)]), '"aXaX".indexOf("X", 2)');
+c('sindexOf/miss', js('js_str_index_of', [str(CN), str('z'), undef]), `${q(CN)}.indexOf("z")`);
+c('slastIndexOf', js('js_str_last_index_of', [str('aXaX'), str('X')]), '"aXaX".lastIndexOf("X")');
+c('sincludes', jsBool('js_str_includes', [str(CN), str('文a')]), `${q(CN)}.includes("文a")`);
+c('sstarts', jsBool('js_str_starts_with', [str(CN), str('中')]), `${q(CN)}.startsWith("中")`);
+c('sends', jsBool('js_str_ends_with', [str(CN), str('bc')]), `${q(CN)}.endsWith("bc")`);
+c('scmp/lt', jsBool('js_cmp', [str('abc'), str('abd')], { op: '<' }), '"abc" < "abd"');
+c('scmp/cn', jsBool('js_cmp', [str('中'), str('文')], { op: '<' }), '"中" < "文"');
+c('seq/cn', jsBool('js_eq', [str(CN), str('中文abc')], { strict: true }), `${q(CN)} === "中文abc"`);
+c('sfromCharCode', js('js_str_of_char_code', [real(0x4e2d)]), 'String.fromCharCode(0x4e2d)');
+c('sfromCodePoint', js('js_str_of_code_point', [real(0x1f600)]), 'String.fromCodePoint(0x1f600)');
 
 // ---------------------------------------------------------------- 跑
 function run(cmd, args, opts = {}) {
@@ -167,6 +208,16 @@ const ref = run(process.execPath, [refPath]);
 if (ref.code !== 0) {
   process.stdout.write(`  FAIL reference program\n${ref.err}\n`);
   process.exit(1);
+}
+
+// 一条用例一行，否则名字和结果就错位了 —— 三方仍然是逐行比的，比较本身有效，
+// 但报出来的名字对不上，失败就没法归因。所以在这里直接卡住。
+{
+  const n = ref.out.replace(/\n$/, '').split('\n').length;
+  if (n !== cases.length) {
+    process.stdout.write(`  FAIL 参照输出 ${n} 行，用例 ${cases.length} 条 —— 有用例的值里带换行\n`);
+    process.exit(1);
+  }
 }
 
 const mod = moduleOf(cases.map((x) => x.oir));
