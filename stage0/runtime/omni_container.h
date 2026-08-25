@@ -33,11 +33,16 @@ static void NAME##_reserve(NAME a, int64_t n) { \
   a->cap = c; \
 } \
 static void NAME##_push(NAME a, T v) { NAME##_reserve(a, a->len + 1); a->items[a->len++] = v; } \
+/* 精确分配，不走 reserve 的"最小 4 + 倍增"：`_from` 最热的用处是**每次动态调用的实参表**
+   （降级后 JS 的形参就是 list<dynamic>；量过：编译整个编译器 160 万次），一个 1 元素的
+   实参表按 cap=4 分配，3/4 的字节是白扔的 —— arena 不回收，扔掉的就是峰值。
+   之后真要 push，reserve 会从 n 起倍增，摊还还是线性。 */ \
 static NAME NAME##_from(const T *src, int64_t n) { \
-  NAME a = NAME##_new(); \
-  NAME##_reserve(a, n); \
-  for (int64_t i = 0; i < n; i++) a->items[i] = src[i]; \
+  NAME a = (NAME)omni_alloc(sizeof(struct NAME##_s)); \
+  a->items = n > 0 ? (T *)omni_alloc(sizeof(T) * (size_t)n) : NULL; \
   a->len = n; \
+  a->cap = n > 0 ? n : 0; \
+  for (int64_t i = 0; i < n; i++) a->items[i] = src[i]; \
   return a; \
 } \
 static int64_t NAME##_len(NAME a) { return a->len; } \
