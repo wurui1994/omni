@@ -133,6 +133,29 @@ Omni 自己的那半个世界里。两者之间只有两个显式的转换 op：
 
 每一步的出口条件与既有规矩一致：js/c 双后端差分全绿 + oracle（对照 node）+ 快照更新。
 
+### throw / try 的降级形状（第 5 步）
+
+运行时只有一个"待处理错误"的槽（`js_throw` / `js_pending` / `js_take_pending`），
+跳转全是 OIR 里已有的结构化控制流 —— OIR **没有 goto/label**，只有 If / While /
+Break / Continue / Return，所以形状是定下来的：
+
+- `throw v` → `js_throw(v)` 之后立刻 `return <零值>`。
+- 可能出错的调用点之后插 `if (js_pending()) { <传播> }`；函数里的传播就是 `return 零值`。
+- `try { A } catch (e) { B }` → 用一次性循环当作 try 的作用域：
+  `while (true) { A（每个可能出错的步骤后 break）; break; }`
+  之后 `if (js_pending()) { e = js_take_pending(); B }`。
+  A 里嵌套的循环要在每一层循环后补一次 `if (js_pending()) break;` —— 无标签的 break
+  只跳一层。
+- `finally` 放在一次性循环之后、catch 分派之前/之后按 JS 的次序排：正常边与出错边
+  都会流过它。
+- 未捕获：生成的 main 在入口返回后查一次，打**一行** `omni: uncaught: <值>` 到 stderr、
+  退出码 70。宿主的栈回溯 C 侧打不出来，所以两侧都不打（`tests/oir` 的
+  `uncaught/exit-70-and-one-line` 钉住这条）。
+
+两处 lower.js 必须**报错而不是猜**的地方（量过：仓库里 0 处）：
+- `break` / `continue` 跨过 try 边界 —— 一次性循环会把它吃掉。
+- `return` 出现在带 `finally` 的 try 里 —— 一次性循环拦不住 return，finally 会被跳过。
+
 ## 已量过的宿主面
 
 盘过一遍才发现几处必须改设计的地方，记在这里免得下一刀又按猜的做：

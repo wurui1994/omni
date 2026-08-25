@@ -32,6 +32,8 @@ class JsEmitter {
     for (const c of this.mod.closures ?? []) this.closureMake(c);
     for (const f of this.mod.funcs) this.func(f);
     this.line(`${this.mod.entry}();`);
+    // 没人接的错误：和 C 侧的 main 一样，在入口返回之后查一次（ADR-0007 决定 1）
+    this.line('$js_check_uncaught();');
     this.line('$flush();');
     return this.out.join('\n') + '\n';
   }

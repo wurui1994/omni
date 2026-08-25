@@ -68,7 +68,7 @@ class CEmitter {
     for (const f of this.mod.funcs) this.func(f);
     // argc/argv 要存下来：process.argv 与"我装在哪"（import.meta.url 的对应物）都要它。
     // 退出码走 omni_host_exit_code —— process.exitCode 是个可写的槽，不是返回值。
-    this.line(`int main(int argc, char **argv) { omni_host_init(argc, argv); ${this.mod.entry}(); fflush(stdout); return omni_host_exit_code(); }`);
+    this.line(`int main(int argc, char **argv) { omni_host_init(argc, argv); ${this.mod.entry}(); omni_js_check_uncaught(); fflush(stdout); return omni_host_exit_code(); }`);
     return this.out.join('\n') + '\n';
   }
 

@@ -182,4 +182,11 @@ export const JS_ABI = {
   js_proc_spawn: { js: '$js_proc_spawn', c: 'omni_js_proc_spawn', arity: 3 },
   js_os_tmpdir: { js: '$js_os_tmpdir', c: 'omni_js_os_tmpdir', arity: 0 },
   js_install_dir: { js: '$js_install_dir', c: 'omni_js_install_dir', arity: 0 },
+
+  // ------------------------------------------------- throw / try（ADR-0007 决定 1）
+  // 只有一个"待处理错误"的槽：throw 往里放，可能出错的调用点之后 pending 查一下，
+  // catch 用 take 取出并清空。跳转本身是 lower.js 发的普通控制流，不进 ABI。
+  js_throw: { js: '$js_throw', c: 'omni_js_throw', arity: 1 },
+  js_pending: { js: '$js_pending', c: 'omni_js_pending', arity: 0 },
+  js_take_pending: { js: '$js_take_pending', c: 'omni_js_take_pending', arity: 0 },
 };

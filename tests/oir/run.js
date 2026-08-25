@@ -492,7 +492,20 @@ c('host/spawn-false', SPAWN('false', [], 'c'),
   + ' return [r.status, r.stdout, r.stderr]; })())');
 
 
-// ---------------------------------------------------------------- 跑
+// ---------------------------------------------- throw / try（ADR-0007 决定 1）
+// 这一层只有"待处理错误"的槽本身：throw 放、pending 查、take 取出并清空。
+// 跳转形状（try/catch/finally 降成普通控制流）是 lower.js 的事，在 js-roundtrip 轴上验。
+// 三个进程都是从"没有待处理错误"开始，用例之间的状态变化是有序的。
+c('throw/pending-clean', jsBool('js_pending', []), 'false');
+c('throw/set', js('js_throw', [str('boom')]), '"undefined"');
+c('throw/pending-after', jsBool('js_pending', []), 'true');
+c('throw/take', js('js_take_pending', []), '"boom"');
+c('throw/pending-cleared', jsBool('js_pending', []), 'false');
+c('throw/take-empty', js('js_typeof', [js('js_take_pending', [])]), '"undefined"');
+c('throw/non-string', js('js_typeof', [js('js_throw', [arr(real(1))])]), '"undefined"');
+c('throw/take-obj', J(js('js_take_pending', [])), 'JSON.stringify([1])');
+
+
 function run(cmd, args, opts = {}) {
   const r = spawnSync(cmd, args, { encoding: 'utf8', cwd: root, maxBuffer: 64 * 1024 * 1024, ...opts });
   return { out: r.stdout ?? '', err: r.stderr ?? '', code: r.status ?? -1 };
@@ -514,7 +527,7 @@ if (ref.code !== 0) {
 // 一条用例一行，否则名字和结果就错位了 —— 三方仍然是逐行比的，比较本身有效，
 // 但报出来的名字对不上，失败就没法归因。所以在这里直接卡住。
 {
-  const n = ref.out.replace(/\n$/, '').split('\n').length;
+  const n = ref.out === '' ? 0 : ref.out.replace(/\n$/, '').split('\n').length;
   if (n !== cases.length) {
     process.stdout.write(`  FAIL 参照输出 ${n} 行，用例 ${cases.length} 条 —— 有用例的值里带换行\n`);
     process.exit(1);
@@ -565,6 +578,38 @@ cases.forEach((x, i) => {
     + `\n    omni-js ${JSON.stringify(gotJs)}\n    omni-c  ${JSON.stringify(gotC)}`);
   process.stdout.write(`  FAIL ${x.name}\n`);
 });
+
+// 未捕获的错误：不是"一行输出"能表达的（要看 stderr 与退出码），所以单独编一个模块。
+// 宿主里未捕获的异常会打栈回溯，C 侧打不出同样的东西 —— 两侧一律只打这一行，
+// 这条用例就是钉住这个约定的。
+if (!filters.length || filters.some((f) => 'uncaught'.includes(f))) {
+  const um = moduleOf([]);
+  um.funcs[0].body.stmts = [
+    printStmt(str('before')),
+    stmt(js('js_throw', [str('nobody catches me')])),
+  ];
+  const uJs = join(dir, 'uncaught.mjs');
+  writeFileSync(uJs, emitJs(um));
+  const uc = join(dir, 'uncaught.c');
+  writeFileSync(uc, emitC(um));
+  const uExe = join(dir, 'uncaught.out');
+  const ub = run(cc, ['-std=c99', '-O1', `-I${RUNTIME_DIR}`, uc, ...runtimeSources(), '-o', uExe, '-lm']);
+  const rJs = run(process.execPath, [uJs]);
+  const rC = ub.code === 0 ? run(uExe, []) : { out: '', err: ub.err, code: ub.code };
+  const want = { out: 'before\n', err: 'omni: uncaught: nobody catches me\n', code: 70 };
+  const same = (r) => r.out === want.out && r.err === want.err && r.code === want.code;
+  if (same(rJs) && same(rC)) {
+    pass++;
+    process.stdout.write('  ok   uncaught/exit-70-and-one-line\n');
+  } else {
+    fail++;
+    failures.push('uncaught/exit-70-and-one-line\n'
+      + `    want    ${JSON.stringify(want)}\n`
+      + `    omni-js ${JSON.stringify({ out: rJs.out, err: rJs.err, code: rJs.code })}\n`
+      + `    omni-c  ${JSON.stringify({ out: rC.out, err: rC.err, code: rC.code })}`);
+    process.stdout.write('  FAIL uncaught/exit-70-and-one-line\n');
+  }
+}
 
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 if (fail) {

@@ -187,6 +187,14 @@ bool omni_js_cmp(int op, omni_dyn a, omni_dyn b);
 bool omni_js_eq(bool strict, omni_dyn a, omni_dyn b);
 omni_dyn omni_js_neg(omni_dyn a);
 
+/* throw / try（ADR-0007 决定 1：静态降级，不用宿主异常）。
+   运行时只有一个"待处理错误"的槽；跳转是 lower.js 发出来的普通控制流。
+   生成的 main 在入口返回后调 omni_js_check_uncaught。 */
+omni_dyn omni_js_throw(omni_dyn v);
+bool omni_js_pending(void);
+omni_dyn omni_js_take_pending(void);
+void omni_js_check_uncaught(void);
+
 /* omni_js_str.c —— JS 的 String 方法。收发都是 dynamic（谓词返回 bool）。
    碰容器的那几个（split / join / match）不在这里：list<dynamic> 是生成 TU 里的
    宏实例，运行时的翻译单元看不见，只能长在宏里。 */

@@ -208,6 +208,41 @@ omni_dyn omni_js_bitnot(omni_dyn a) {
   return omni_dyn_of_int(~a.u.i);
 }
 
+/* ------------------------------------------------ throw / try（ADR-0007 决定 1）
+ *
+ * 错误传播只做静态降级：没有 setjmp/longjmp，也不映射到宿主的 throw。运行时这一层
+ * 只有一个"待处理错误"的槽 —— throw 往里放，每个可能出错的调用点之后查一下，
+ * catch 取出来并清空。跳转本身是普通控制流，由 lower.js 发出来（ADR-0011 第 5 步）。
+ *
+ * 单线程假设：Omni 现在没有线程。真要有的话这个槽跟着线程走，不影响上面的形状。
+ */
+static omni_dyn pending_err;
+static bool pending_set;
+
+omni_dyn omni_js_throw(omni_dyn v) {
+  pending_err = v;
+  pending_set = true;
+  return omni_dyn_undef();
+}
+
+bool omni_js_pending(void) { return pending_set; }
+
+omni_dyn omni_js_take_pending(void) {
+  if (!pending_set) return omni_dyn_undef();
+  pending_set = false;
+  return pending_err;
+}
+
+/* 没人接的错误：生成的 main 在入口返回之后查一次。宿主里未捕获的异常会打栈回溯，
+   C 侧打不出同样的东西，所以两侧一律只打这一行 —— 分叉点越少越好。 */
+void omni_js_check_uncaught(void) {
+  if (!pending_set) return;
+  omni_str s = omni_s16_to_utf8(omni_js_as_s16(omni_js_str(pending_err)));
+  fflush(stdout);
+  fprintf(stderr, "omni: uncaught: %.*s\n", (int)s.len, s.p);
+  exit(70);
+}
+
 /* ---------------------------------------------------------------- 比较 */
 
 bool omni_js_cmp(int op, omni_dyn a, omni_dyn b) {

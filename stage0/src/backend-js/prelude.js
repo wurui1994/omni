@@ -720,6 +720,25 @@ function $js_json_stringify(v, rep, indent) {
   return $js_json_val($js_json_apply(rep, "", v), rep, gap, 0);
 }
 
+// ------------------------------------------- throw / try（ADR-0007 决定 1）
+// 静态降级：不映射到宿主的 throw（那会污染栈、让两个后端的行为分叉）。
+// 运行时只有一个"待处理错误"的槽，跳转由 lower.js 发成普通控制流。
+let $pending = undefined, $pendingSet = false;
+function $js_throw(v) { $pending = v; $pendingSet = true; return undefined; }
+function $js_pending() { return $pendingSet; }
+function $js_take_pending() {
+  if (!$pendingSet) return undefined;
+  $pendingSet = false;
+  return $pending;
+}
+// 未捕获：宿主会打栈回溯，C 侧打不出同样的东西，所以两侧一律只打这一行
+function $js_check_uncaught() {
+  if (!$pendingSet) return;
+  $flush();
+  process.stderr.write("omni: uncaught: " + $js_asS16($js_str($pending)) + "\n");
+  process.exit(70);
+}
+
 // ---------------------------------------------- node 宿主面（ADR-0011 第 4 步）
 // 不能在这里写 import：整个 prelude 也会被 cli.js 用 new Function(code)() 跑
 // （omni run 的快路径），而 new Function 的函数体里 import 是语法错误。
