@@ -494,6 +494,19 @@ class CEmitter {
       case 'dynPush': return `omni_dyn_push(${a[0]}, ${a[1]})`;
       case 'dynHas': return `omni_dyn_has(${a[0]}, ${a[1]})`;
       case 'dynKeys': return `omni_dyn_keys_of(${a[0]})`;
+      // JS 前端的运算语义（ADR-0011）。规则写在 runtime/omni_js.c 里，与 prelude.js 一一对应。
+      case 'js_undef': return 'omni_dyn_undef()';
+      case 'js_ofFn': return `omni_dyn_of_fn(${a[0]})`;
+      case 'js_asFn': return `omni_js_as_fn(${a[0]})`;
+      case 'js_truthy': return `omni_js_truthy(${a[0]})`;
+      case 'js_typeof': return `omni_js_typeof(${a[0]})`;
+      case 'js_str': return `omni_js_str(${a[0]})`;
+      case 'js_add': return `omni_js_add(${a[0]}, ${a[1]})`;
+      case 'js_neg': return `omni_js_neg(${a[0]})`;
+      case 'js_arith': return `omni_js_arith('${e.op}', ${a[0]}, ${a[1]})`;
+      case 'js_bitop': return `omni_js_bitop('${e.op}', ${a[0]}, ${a[1] ?? a[0]})`;
+      case 'js_cmp': return `omni_js_cmp('${e.op}', ${a[0]}, ${a[1]})`;
+      case 'js_eq': return `omni_js_eq(${a[0]}, ${a[1]}, ${e.strict === true})`;
       default: throw new Error(`c.builtin: ${e.name}`);
     }
   }

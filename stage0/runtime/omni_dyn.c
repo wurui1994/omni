@@ -2,7 +2,11 @@
 #include "omni.h"
 
 const char *omni_dyn_tag_name(int t) {
-  static const char *names[] = { "null", "bool", "int", "real", "string", "list", "dict" };
+  static const char *names[] = {
+    "null", "bool", "int", "real", "string", "list", "dict",
+    /* 这两个只由 JS 前端产生（ADR-0011）；Omni 源码造不出来 */
+    "undefined", "function",
+  };
   return names[t];
 }
 

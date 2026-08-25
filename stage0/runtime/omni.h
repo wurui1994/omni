@@ -31,10 +31,14 @@
 typedef struct { const char *p; int64_t len; } omni_str;
 
 /* dynamic：带标签的胖值。容器载荷存 void*（容器类型都是指针 typedef），
-   这样 omni_dyn 可以先于任何容器实例化定义，避免定义环。 */
+   这样 omni_dyn 可以先于任何容器实例化定义，避免定义环。
+
+   UNDEF 与 FN 两个标签是给 JS 前端用的（ADR-0011）：JS 区分 undefined 与 null，
+   而 JS 的函数是值。Omni 源码里造不出这两个标签的值 —— `json` 子集不含它们。 */
 enum {
   OMNI_DYN_NULL = 0, OMNI_DYN_BOOL, OMNI_DYN_INT, OMNI_DYN_REAL,
-  OMNI_DYN_STRING, OMNI_DYN_LIST, OMNI_DYN_DICT
+  OMNI_DYN_STRING, OMNI_DYN_LIST, OMNI_DYN_DICT,
+  OMNI_DYN_UNDEF, OMNI_DYN_FN
 };
 
 typedef struct {
@@ -131,6 +135,18 @@ const char *omni_dyn_tag_name(int t);
 omni_str omni_dyn_tag(omni_dyn v);
 bool omni_dyn_eq(omni_dyn a, omni_dyn b);
 
+/* omni_js.c —— JS 前端的运算语义（ADR-0011 第 4 节）。
+   JS 的 truthiness / `+` 的双重含义 / `==` 的强制转换只活在这里，Omni 语言本身不受影响。 */
+bool omni_js_truthy(omni_dyn v);
+omni_str omni_js_typeof(omni_dyn v);
+omni_str omni_js_str(omni_dyn v);
+omni_dyn omni_js_add(omni_dyn a, omni_dyn b);
+omni_dyn omni_js_arith(int op, omni_dyn a, omni_dyn b);
+omni_dyn omni_js_bitop(int op, omni_dyn a, omni_dyn b);
+bool omni_js_cmp(int op, omni_dyn a, omni_dyn b);
+bool omni_js_eq(omni_dyn a, omni_dyn b, bool strict);
+omni_dyn omni_js_neg(omni_dyn a);
+
 /* omni_hash.c —— 键的显示形式，只在 "key not found" 的错误消息里用，都是冷路径 */
 omni_str omni_kstr_int(int64_t k);
 omni_str omni_kstr_real(double k);
@@ -194,6 +210,9 @@ static inline omni_str omni_substr(omni_str s, int64_t start, int64_t len) {
 /* --- dynamic：构造与取值全是几条指令，必须内联 --- */
 
 static inline omni_dyn omni_dyn_null(void) { omni_dyn d; d.tag = OMNI_DYN_NULL; d.u.i = 0; return d; }
+static inline omni_dyn omni_dyn_undef(void) { omni_dyn d; d.tag = OMNI_DYN_UNDEF; d.u.i = 0; return d; }
+static inline omni_dyn omni_dyn_of_fn(omni_fn f) { omni_dyn d; d.tag = OMNI_DYN_FN; d.u.ref = (void *)f; return d; }
+
 static inline omni_dyn omni_dyn_of_bool(bool v) { omni_dyn d; d.tag = OMNI_DYN_BOOL; d.u.b = v; return d; }
 static inline omni_dyn omni_dyn_of_int(int64_t v) { omni_dyn d; d.tag = OMNI_DYN_INT; d.u.i = v; return d; }
 static inline omni_dyn omni_dyn_of_real(double v) { omni_dyn d; d.tag = OMNI_DYN_REAL; d.u.r = v; return d; }
@@ -216,6 +235,14 @@ static inline void *omni_dyn_as_ref(omni_dyn v, int tag) { omni_dyn_want(v, tag)
 static inline omni_fn omni_fn_ck(omni_fn f) {
   if (!f) omni_error("call of a null function value");
   return f;
+}
+
+/* JS 前端：从 dynamic 取回函数值。JS 的函数在 Omni 里只有一个签名
+   `fn(list<dynamic>) -> dynamic`（实参个数由被调方自己看，和 JS 一样），
+   所以这里不需要按签名分派。 */
+static inline omni_fn omni_js_as_fn(omni_dyn v) {
+  if (v.tag != OMNI_DYN_FN) omni_errorf("%s is not a function", omni_dyn_tag_name(v.tag));
+  return (omni_fn)v.u.ref;
 }
 
 /* --- 键的 hash / eq：dict 的每一次查找都要走，全在最内层 ---

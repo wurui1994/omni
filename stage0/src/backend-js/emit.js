@@ -297,6 +297,20 @@ class JsEmitter {
       case 'dynPush': return `$dynPush(${a[0]}, ${a[1]})`;
       case 'dynHas': return `$dynHas(${a[0]}, ${a[1]})`;
       case 'dynKeys': return `$dynKeys(${a[0]})`;
+      // JS 前端的运算语义（ADR-0011）。这些 op 只由 frontend-js/lower.js 产生，
+      // Omni 源码里造不出来 —— truthiness 与 `+` 的双重含义不属于 Omni 语言。
+      case 'js_undef': return 'undefined';
+      case 'js_ofFn': return a[0];
+      case 'js_asFn': return `$js_asFn(${a[0]})`;
+      case 'js_truthy': return `$js_truthy(${a[0]})`;
+      case 'js_typeof': return `$js_typeof(${a[0]})`;
+      case 'js_str': return `$js_str(${a[0]})`;
+      case 'js_add': return `$js_add(${a[0]}, ${a[1]})`;
+      case 'js_neg': return `$js_neg(${a[0]})`;
+      case 'js_arith': return `$js_arith(${JSON.stringify(e.op)}, ${a[0]}, ${a[1]})`;
+      case 'js_bitop': return `$js_bitop(${JSON.stringify(e.op)}, ${a[0]}${a[1] === undefined ? '' : `, ${a[1]}`})`;
+      case 'js_cmp': return `$js_cmp(${JSON.stringify(e.op)}, ${a[0]}, ${a[1]})`;
+      case 'js_eq': return `$js_eq(${a[0]}, ${a[1]}, ${e.strict === true})`;
       default: throw new Error(`js.builtin: ${e.name}`);
     }
   }

@@ -162,15 +162,20 @@ function $dictGet(m, k) {
 function $dictSet(m, k, v) { m.set(k, v); return v; }
 
 // ---------------------------------------------------------------- dynamic
-// 直接用 JS 原生值：null / boolean / BigInt(int) / number(real) / string / Array / Map
+// 直接用 JS 原生值：null / boolean / BigInt(int) / number(real) / string / Array / Map，
+// 外加两个只由 JS 前端产生的标签（ADR-0011）：undefined，以及函数值（闭包记录）
 function $dynTag(v) {
   if (v === null) return "null";
+  if (v === undefined) return "undefined";
   switch (typeof v) {
     case "boolean": return "bool";
     case "bigint": return "int";
     case "number": return "real";
     case "string": return "string";
-    default: return v instanceof Map ? "dict" : "list";
+    default:
+      if (v instanceof Map) return "dict";
+      if (Array.isArray(v)) return "list";
+      return "function";  // 闭包记录 { fp, c_* }
   }
 }
 function $dynAs(v, want) {
@@ -195,6 +200,127 @@ function $nullCheck(o) {
 function $callFn(f, ...args) {
   if (f === null) $rt_error("call of a null function value");
   return f.fp(f, ...args);
+}
+
+// ------------------------------------------------------ JS 前端的运算语义（ADR-0011）
+// 每一条都必须和 runtime/omni_js.c 里的 omni_js_* 逐位对应。刻意不直接用宿主的
+// 加号 / 小于 / 双等：那样 C 侧就得去模仿 ToPrimitive，而两边模仿不到一起。
+// dynamic 里取回函数值。JS 的函数在 Omni 侧只有一个签名 fn(list<dynamic>) -> dynamic，
+// 所以取回来直接就能调用，不需要按签名分派。
+function $js_asFn(v) {
+  const t = $dynTag(v);
+  if (t !== "function") $rt_error(t + " is not a function");
+  return v;
+}
+function $js_truthy(v) {
+  switch ($dynTag(v)) {
+    case "undefined": case "null": return false;
+    case "bool": return v;
+    case "int": return v !== 0n;
+    case "real": return !(v === 0 || Number.isNaN(v));
+    case "string": return v.length !== 0;
+    default: return true;
+  }
+}
+function $js_typeof(v) {
+  const t = $dynTag(v);
+  if (t === "null") return "object";
+  if (t === "bool") return "boolean";
+  if (t === "int") return "bigint";
+  if (t === "real") return "number";
+  if (t === "string") return "string";
+  if (t === "function") return "function";
+  if (t === "undefined") return "undefined";
+  return "object";
+}
+function $js_str(v) {
+  switch ($dynTag(v)) {
+    case "undefined": return "undefined";
+    case "null": return "null";
+    case "bool": return v ? "true" : "false";
+    case "int": return v.toString();
+    // JS 语义就是宿主的 Number -> String，直接用；C 侧的 js_num_str 照规范复刻它
+    case "real": return String(v);
+    case "string": return v;
+    default: $rt_error("cannot convert " + $dynTag(v) + " to string");
+  }
+}
+function $js_num2(op, a, b) {
+  const ta = $dynTag(a), tb = $dynTag(b);
+  const num = (t) => t === "int" || t === "real";
+  if (!num(ta) || !num(tb)) $rt_error("cannot apply '" + op + "' to " + ta + " and " + tb);
+  if (ta !== tb) $rt_error("cannot mix bigint and number in '" + op + "'");
+}
+function $js_add(a, b) {
+  if ($dynTag(a) === "string" || $dynTag(b) === "string") return $js_str(a) + $js_str(b);
+  $js_num2("+", a, b);
+  return $dynTag(a) === "int" ? $W(a + b) : a + b;
+}
+function $js_arith(op, a, b) {
+  $js_num2(op, a, b);
+  const isInt = $dynTag(a) === "int";
+  switch (op) {
+    case "-": return isInt ? $W(a - b) : a - b;
+    case "*": return isInt ? $W(a * b) : a * b;
+    case "/": return isInt ? $div(a, b) : a / b;
+    case "%": return isInt ? $mod(a, b) : $fmod(a, b);
+    default: $rt_error("unknown arithmetic op '" + op + "'");
+  }
+}
+function $js_neg(a) {
+  const t = $dynTag(a);
+  if (t === "int") return $W(-a);
+  if (t === "real") return -a;
+  $rt_error("cannot negate " + t);
+}
+function $js_bitop(op, a, b) {
+  const ta = $dynTag(a), tb = $dynTag(b);
+  if (ta !== "int" || (op !== "~" && tb !== "int")) {
+    $rt_error("bitwise '" + op + "' requires bigint operands, found " + ta + " and " + tb);
+  }
+  switch (op) {
+    case "&": return a & b;
+    case "|": return a | b;
+    case "^": return a ^ b;
+    case "~": return $W(~a);
+    case "<": return $W(a << (b & 63n));
+    case ">": return a >> (b & 63n);
+    default: $rt_error("unknown bitwise op '" + op + "'");
+  }
+}
+function $js_cmp(op, a, b) {
+  const ta = $dynTag(a), tb = $dynTag(b);
+  let c;
+  if (ta === "string" && tb === "string") {
+    // 与 Omni 的 string 比较走同一条规则（JS 后端一直是宿主的 < ，见 ADR-0005 的已知偏差）
+    c = a < b ? -1 : (a > b ? 1 : 0);
+  } else {
+    const num = (t) => t === "int" || t === "real";
+    if (!num(ta) || !num(tb)) $rt_error("cannot compare " + ta + " with " + tb);
+    const x = Number(a), y = Number(b);
+    if (Number.isNaN(x) || Number.isNaN(y)) return false;
+    c = x < y ? -1 : (x > y ? 1 : 0);
+  }
+  switch (op) {
+    case "<": return c < 0;
+    case ">": return c > 0;
+    case "l": return c <= 0;
+    case "g": return c >= 0;
+    default: $rt_error("unknown comparison op '" + op + "'");
+  }
+}
+function $js_eq(a, b, strict) {
+  const ta = $dynTag(a), tb = $dynTag(b);
+  if (!strict) {
+    const an = ta === "null" || ta === "undefined";
+    const bn = tb === "null" || tb === "undefined";
+    if (an || bn) return an && bn;
+    const num = (t) => t === "int" || t === "real";
+    if (num(ta) && num(tb)) return Number(a) === Number(b);
+  }
+  if (ta !== tb) return false;
+  if (ta === "undefined" || ta === "null") return true;
+  return a === b;
 }
 
 // dynamic 的运行期分派面（ADR-0008 第 5 节的封闭清单）。
@@ -241,3 +367,10 @@ function $dynHas(v, k) { return $dynAs(v, "dict").has($dynAs(k, "string")); }
 function $dynKeys(v) { return [...$dynAs(v, "dict").keys()]; }
 
 `;
+
+// 整个 prelude 是一个 String.raw 模板字面量：注释里出现反引号会提前把它闭合，
+// 于是 JS_PRELUDE 变成某个表达式的值（栽过两次，第二次是布尔）。当场炸掉比让
+// emit 抛 "trim is not a function" 好找。
+if (typeof JS_PRELUDE !== 'string') {
+  throw new Error('prelude.js 里出现了未转义的反引号，模板字面量被提前闭合了');
+}
