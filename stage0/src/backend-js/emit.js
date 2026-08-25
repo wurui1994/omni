@@ -49,7 +49,8 @@ class JsEmitter {
   memberDispatch() {
     for (const d of Object.values(JS_MEMBERS)) {
       const m = d.member;
-      const ps = ['r', ...Array.from({ length: m.argc }, (_, i) => `a${i}`)];
+      const ps = ['r'];
+      for (let i = 0; i < m.argc; i++) ps.push(`a${i}`);
       const lits = Object.values(m.lit ?? {}).map((v) => JSON.stringify(v));
       this.line(`function ${d.js}(${ps.join(', ')}) {`);
       this.indent++;

@@ -38,7 +38,8 @@ class Parser {
     return this.tokens[Math.min(this.pos + offset, this.tokens.length - 1)];
   }
 
-  get atEof() {
+  // 方法而不是 getter：getter 不在 JS 子集里（ADR-0011 决策 13），自举要过这一关
+  atEof() {
     return this.peek().kind === 'eof';
   }
 
@@ -132,7 +133,7 @@ class Parser {
     const start = this.expect('fn');
     this.expect('(');
     const params = [];
-    while (!this.at(')') && !this.atEof) {
+    while (!this.at(')') && !this.atEof()) {
       const before = this.pos;
       params.push(this.parseType());
       if (!this.eat(',')) break;
@@ -155,7 +156,7 @@ class Parser {
     const start = this.expect('fn');
     this.expect('(');
     const params = [];
-    while (!this.at(')') && !this.atEof) {
+    while (!this.at(')') && !this.atEof()) {
       const before = this.pos;
       const type = this.parseType();
       const p = this.peek();
@@ -233,7 +234,7 @@ class Parser {
       }
     }
     const decls = [];
-    while (!this.atEof) {
+    while (!this.atEof()) {
       const before = this.pos;
       const d = this.parseTopLevel();
       if (d) decls.push(d);
@@ -288,14 +289,14 @@ class Parser {
   parseAggregate(keyword) {
     const start = this.expect(keyword);
     const nameTok = this.peek();
-    const name = nameTok.kind === 'ident'
-      ? this.next().value
-      : (this.error(nameTok.span, `expected ${keyword} name`), '<error>');
+    let name = '<error>';
+    if (nameTok.kind === 'ident') name = this.next().value;
+    else this.error(nameTok.span, `expected ${keyword} name`);
     this.typeNames.add(name);
     this.expect('{');
     const fields = [];
     const methods = [];
-    while (!this.at('}') && !this.atEof) {
+    while (!this.at('}') && !this.atEof()) {
       const before = this.pos;
       const head = this.tryDeclHead();
       if (!head) {
@@ -324,7 +325,7 @@ class Parser {
   parseFuncRest(retType, nameTok, owner) {
     this.expect('(');
     const params = [];
-    while (!this.at(')') && !this.atEof) {
+    while (!this.at(')') && !this.atEof()) {
       const before = this.pos;
       const type = this.parseType();
       const p = this.peek();
@@ -346,7 +347,7 @@ class Parser {
   parseBlock() {
     const start = this.expect('{');
     const stmts = [];
-    while (!this.at('}') && !this.atEof) {
+    while (!this.at('}') && !this.atEof()) {
       const before = this.pos;
       const s = this.parseStatement();
       if (s) stmts.push(s);
@@ -551,7 +552,7 @@ class Parser {
   parseCall(callee) {
     this.expect('(');
     const args = [];
-    while (!this.at(')') && !this.atEof) {
+    while (!this.at(')') && !this.atEof()) {
       let name = null;
       if (this.peek().kind === 'ident' && this.at('=', 1) && !this.at('==', 1)) {
         name = this.next().value;
@@ -582,7 +583,7 @@ class Parser {
       const type = this.parseType();
       const args = [];
       if (this.eat('(')) {
-        while (!this.at(')') && !this.atEof) {
+        while (!this.at(')') && !this.atEof()) {
           args.push({ name: null, expr: this.parseExpr(), span: this.peek().span });
           if (!this.eat(',')) break;
         }
@@ -594,7 +595,7 @@ class Parser {
     if (this.at('[')) {
       this.next();
       const items = [];
-      while (!this.at(']') && !this.atEof) {
+      while (!this.at(']') && !this.atEof()) {
         items.push(this.parseExpr());
         if (!this.eat(',')) break;
       }
@@ -610,7 +611,7 @@ class Parser {
         this.expect('}');
         return { kind: 'DictLit', entries, span: this.spanFrom(t) };
       }
-      while (!this.at('}') && !this.atEof) {
+      while (!this.at('}') && !this.atEof()) {
         const key = this.parseExpr();
         this.expect(':');
         const value = this.parseExpr();

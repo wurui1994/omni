@@ -139,3 +139,43 @@ export function installDir() {
   const i = p.lastIndexOf('/');
   return i < 0 ? '.' : p.slice(0, i);
 }
+
+/* ---------------------------------------------------------------- 宿主里的 eval */
+
+// `omni run` 与 REPL 是"生成 JS，在本进程里跑掉"。这件事只有 JS 宿主能做，原生构建里
+// 那两个 op 是一句清楚的错误（runtime/omni_js_host.c）。放进 ABI 而不是直接写
+// `new Function`，是因为编译器自己的源码要能被降级 —— `new Function` 不在语言子集里。
+
+export function evalJs(code) {
+  // eslint-disable-next-line no-new-func
+  new Function(code)();
+  return undefined;
+}
+
+/** 同上，但把 stdout/stderr 收进字符串；结果是 [out, err, failed] */
+export function evalCaptured(code) {
+  const out = [];
+  const err = [];
+  const so = process.stdout.write;
+  const se = process.stderr.write;
+  const ex = process.exit;
+  process.stdout.write = (s) => { out.push(String(s)); return true; };
+  process.stderr.write = (s) => { err.push(String(s)); return true; };
+  process.exit = (c) => { const e = new Error('exit'); e.$exit = c === undefined ? 0 : c; throw e; };
+  let failed = false;
+  try {
+    // eslint-disable-next-line no-new-func
+    new Function(code)();
+  } catch (e) {
+    failed = true;
+    // $exit 是被跑的程序自己的运行期错误（消息已经在 err 里了）；其它异常说明后端生成了坏代码
+    if (e === null || e === undefined || e.$exit === undefined) {
+      err.push(`omni: internal error: generated JS threw ${e && e.stack ? e.stack : String(e)}\n`);
+    }
+  } finally {
+    process.stdout.write = so;
+    process.stderr.write = se;
+    process.exit = ex;
+  }
+  return [out.join(''), err.join(''), failed];
+}

@@ -129,6 +129,19 @@ function capturedNames(stmts) {
 }
 
 /**
+ * 这个**源码层**的语句会不会把控制流带走（switch 的穿透检查用）。
+ * 带花括号的 case 体（`case 'x': { …; return 0; }`）是一个 Block，所以要往里看一层；
+ * if/else 两边都带走也算。其它的（循环里 break、标签之类）一律当"会掉下去"。
+ */
+function endsControl(st) {
+  if (!st) return false;
+  if (['Break', 'Continue', 'Return', 'Throw'].includes(st.type)) return true;
+  if (st.type === 'Block') return endsControl(st.body[st.body.length - 1]);
+  if (st.type === 'If') return !!st.alt && endsControl(st.cons) && endsControl(st.alt);
+  return false;
+}
+
+/**
  * 这段**降完的** OIR 里有没有可能往 pending 槽里放东西（ADR-0011 决策 14）。
  * 调用一律算；成员派发器的兜底会调用户的函数（决策 12），所以 js_m_* 也算；
  * 其余的 op 看表里的 throws 标记（回调类的 op、以及会抛的宿主调用）。
@@ -332,6 +345,8 @@ class Lower {
       captured: capturedNames(bodyStmts), uses: new Set(), isMain: !!opts.isMain,
       // try 的嵌套深度，以及每层 try 进去时的循环层数（用来拦跨 try 的 break/continue）
       tries: 0, tryLoops: [],
+      // 每层 switch 进去时的循环层数，以及那层的"出去之后要 continue"标志位（懒声明）
+      switchLoops: [], switchFlags: [],
     };
     if (opts.outerScopes) {
       // 外层可见的 cell 全摆进捕获层；lookup 命中过的才会真进闭包记录
@@ -684,18 +699,15 @@ class Lower {
         }
         return [{ kind: 'Break' }];
       case 'Continue':
-        // switch 的降级用了一层"只跑一遍的循环"当作用域，continue 会落在它身上；
         // do-while 摊成 while(true) 之后，continue 会跳过尾部的条件检查
         if (this.crossesTry()) {
           this.err(s.span, "'continue' cannot cross a try boundary; restructure the try");
-        } else if (this.fn.switches > 0) {
-          this.err(s.span, "'continue' inside a switch is not lowered yet; restructure the switch");
         } else if ((this.fn.doWhiles ?? 0) > 0) {
           this.err(s.span, "'continue' inside a do-while is not lowered yet; restructure the loop");
         } else if (this.fn.loops === 0) {
           this.err(s.span, "'continue' outside a loop");
         }
-        return [{ kind: 'Continue' }];
+        return this.continueStmts();
       case 'Switch': return this.switchStmt(s);
       case 'Throw':
         return [exprStmt(op('js_throw', [this.expr(s.arg)])), this.unwind()];
@@ -911,6 +923,8 @@ class Lower {
     const d = this.declare('_sw').name;
     const pre = [localStmt(d, this.expr(s.disc))];
     this.fn.switches++;
+    this.fn.switchLoops.push(this.fn.loops);
+    this.fn.switchFlags.push(null);
     /** @type {{tests: any[], body: any[]}[]} */
     const groups = [];
     let pending = [];
@@ -939,9 +953,36 @@ class Lower {
       chain = { kind: 'If', cond, then: block(g.body), otherwise: chain ? block([chain]) : null };
     }
     this.fn.switches--;
+    this.fn.switchLoops.pop();
+    const flag = this.fn.switchFlags.pop();
     this.popScope();
     const body = block(chain ? [chain, { kind: 'Break' }] : [{ kind: 'Break' }]);
-    return [block([...pre, { kind: 'While', cond: { kind: 'Const', type: BOOL, value: true }, body }])];
+    const loop = { kind: 'While', cond: { kind: 'Const', type: BOOL, value: true }, body };
+    if (!flag) return [block([...pre, loop])];
+    // 里面有 continue：合成循环会把它接住，所以改成"置标志位 + break"，出来再补一次
+    // continue（外面还是 switch 的话，continueStmts 会继续往上传一层）
+    return [block([
+      ...pre,
+      localStmt(flag, constBool(false)),
+      loop,
+      { kind: 'If', cond: truthy(varRef(flag)), then: block(this.continueStmts()), otherwise: null },
+    ])];
+  }
+
+  /** 当前位置的 `continue` 该发什么：switch 是一层合成循环，得靠标志位翻出去 */
+  continueStmts() {
+    const top = this.fn.switchLoops.length - 1;
+    if (this.fn.switches > 0 && this.fn.loops === this.fn.switchLoops[top]) {
+      return [exprStmt(assign(varRef(this.switchContFlag()), constBool(true))), { kind: 'Break' }];
+    }
+    return [{ kind: 'Continue' }];
+  }
+
+  /** 最内层 switch 的"出去之后要 continue"标志位；第一次用到才声明 */
+  switchContFlag() {
+    const i = this.fn.switchFlags.length - 1;
+    if (!this.fn.switchFlags[i]) this.fn.switchFlags[i] = this.declare('_cont').name;
+    return this.fn.switchFlags[i];
   }
 
   /**
@@ -988,8 +1029,9 @@ class Lower {
   checkNoFallThrough(cs, isLast) {
     if (isLast) return;
     const last = cs.body[cs.body.length - 1];
-    const ends = last && ['Break', 'Continue', 'Return', 'Throw'].includes(last.type);
-    if (!ends) this.err(last?.span ?? cs.body[0]?.span, 'a switch case must not fall through; end it with break or return');
+    if (!endsControl(last)) {
+      this.err(last?.span ?? cs.body[0]?.span, 'a switch case must not fall through; end it with break or return');
+    }
   }
 
   /* -------------------------------------------------------- 表达式 */
@@ -1101,7 +1143,13 @@ class Lower {
   /** 模板串：从第一段字符串开始一路 js_add —— 有一边是字符串，js_add 就是拼接 */
   template(e) {
     if (e.tag) {
-      this.err(e.span, 'tagged templates are not supported');
+      // String.raw`…`（没有插值）= 一个字面量：raw 就是源码里那段原文，不做转义。
+      // 编译器自己靠它装 JS 前奏（backend-js/prelude.js），所以这一支必须能降。
+      const tag = e.tag.type === 'Member' ? this.staticPath(e.tag) : null;
+      if (tag === 'String.raw' && e.exprs.length === 0) return s16(e.quasis[0].raw);
+      this.err(e.span, tag === 'String.raw'
+        ? 'String.raw`…` with a substitution is not supported'
+        : 'tagged templates are not supported');
       return undefExpr();
     }
     let out = s16(e.quasis[0].cooked);
@@ -1132,12 +1180,12 @@ class Lower {
     return parts.reduce((a, b) => op('js_arr_concat', [a, b]));
   }
 
-  /** 对象字面量：js_obj_set 返回对象本身，所以能纯表达式地串起来 */
+  /** 对象字面量：js_obj_set / js_obj_assign 都返回对象本身，所以能纯表达式地串起来 */
   objectLit(e) {
     let out = op('js_obj_new', []);
     for (const p of e.props) {
       if (p.kind === 'spread') {
-        this.err(p.span, 'spread in an object literal is not supported');
+        out = op('js_obj_assign', [out, this.expr(p.arg)]);
         continue;
       }
       if (p.kind !== 'init' || p.method) {
@@ -1226,9 +1274,12 @@ class Lower {
 
   /** 静态命名空间的点路径（JSON.stringify / process.stdout.write），被局部量遮住就不算 */
   staticPath(node) {
+    // 从里往外收，最后翻过来。刻意不用 unshift：封闭 ABI 里没有它（决策 2），
+    // 而这个文件自己也要被降级
     const parts = [];
     let cur = node;
-    while (cur.type === 'Member' && !cur.computed) { parts.unshift(cur.name); cur = cur.object; }
+    while (cur.type === 'Member' && !cur.computed) { parts.push(cur.name); cur = cur.object; }
+    parts.reverse();
     if (cur.type !== 'Ident') return null;
     if (this.lookup(cur.name) || this.globals.has(cur.name) || !STATIC_NS.has(cur.name)) return null;
     return [cur.name, ...parts].join('.');
@@ -1328,17 +1379,28 @@ class Lower {
     return this.dynCall(this.expr(c), e.args);
   }
 
-  /** 成员派发器的调用：缺席的实参补 js_undef，多了就报错 */
+  /**
+   * 成员派发器的调用：缺席的实参补 js_undef。
+   * 实参比派发器的形参还多就说明这**不是** ABI 表里那个成员，而是用户自己的同名方法
+   * （量过：parse/parser.js 的 `at(kind, n)` 撞上了字符串/数组的 `at`）。那就退回
+   * "取属性、当函数调用"的通用路径 —— 和决策 12 派发器兜底走的是同一条路。
+   * 展开不走这条：ABI 的 op 是定长的，而接收者很可能是 list（js_obj_get 会当场报错），
+   * 所以照旧报错，让调用方自己摊成循环。
+   */
   methodCall(c, e) {
     const name = c.name;
     const argc = JS_ALL[`js_m_${name}`].member.argc;
+    // push 是唯一一个源码里真的会写可变实参的 ABI 成员（量过：14 处 `push(...xs)`）。
+    // 实参先拼成一个 list，再整段追加 —— 定长的 op 表达不了可变实参。
+    if (name === 'push' && (e.args.length !== 1 || e.args[0].type === 'Spread')) {
+      return op('js_arr_push_all', [this.expr(c.object), box(this.argList(e.args), listType(D))]);
+    }
     if (e.args.some((a) => a.type === 'Spread')) {
       this.err(e.span, `spread is not supported in a '${name}' call`);
       return undefExpr();
     }
     if (e.args.length > argc) {
-      this.err(e.span, `'${name}' takes at most ${argc} argument(s), got ${e.args.length}`);
-      return undefExpr();
+      return this.dynCall(op('js_obj_get', [this.expr(c.object), s16(name)]), e.args);
     }
     const args = [this.expr(c.object)];
     for (let i = 0; i < argc; i++) args.push(i < e.args.length ? this.expr(e.args[i]) : undefExpr());
@@ -1401,9 +1463,17 @@ class Lower {
   newExpr(e) {
     const n = e.callee.type === 'Ident' ? e.callee.name : null;
     if ((n === 'Map' || n === 'Set') && !this.lookup(n)) {
-      if (e.args.length) {
-        this.err(e.span, `new ${n}(...) with an initializer is not lowered yet`);
+      if (e.args.length > 1) {
+        this.err(e.span, `new ${n}(...) takes at most 1 argument`);
         return undefExpr();
+      }
+      // 有初值就走 of_pairs / of_list（初值只收 list，见 ABI 表）
+      if (e.args.length) {
+        if (e.args[0].type === 'Spread') {
+          this.err(e.args[0].span, `spread is not supported in a 'new ${n}' call`);
+          return undefExpr();
+        }
+        return op(n === 'Map' ? 'js_map_of_pairs' : 'js_set_of_list', [this.expr(e.args[0])]);
       }
       return op(n === 'Map' ? 'js_map_new' : 'js_set_new', []);
     }
@@ -1541,6 +1611,8 @@ const STATIC_CALLS = {
   'Object.keys': { op: 'js_obj_keys', argc: 1 },
   'Object.values': { op: 'js_obj_values', argc: 1 },
   'Object.entries': { op: 'js_obj_entries', argc: 1 },
+  // 这个值域里的对象没有原型链，所以 hasOwn 就是 js_obj_has（`in` 用的也是它）
+  'Object.hasOwn': { op: 'js_obj_has', argc: 2 },
   'Array.isArray': { op: 'js_arr_is_array', argc: 1 },
   'Array.from': { op: 'js_arr_from', argc: 1 },
   'String.fromCharCode': { op: 'js_str_of_char_code', argc: 1 },

@@ -44,6 +44,8 @@ const NATIVE_OPS = {
   spawn: 'js_proc_spawn',
   tmpDir: 'js_os_tmpdir',
   installDir: 'js_install_dir',
+  evalJs: 'js_eval',
+  evalCaptured: 'js_eval_captured',
 };
 
 
@@ -75,25 +77,25 @@ function declNames(s, out = []) {
   switch (s.type) {
     case 'FuncDecl': case 'ClassDecl': out.push(s.id); break;
     case 'VarDecl':
-      for (const d of s.decls) patternNames(d.id, out);
+      for (const d of s.decls) bindingNames(d.id, out);
       break;
     default: break;
   }
   return out;
 }
 
-function patternNames(pat, out) {
+function bindingNames(pat, out) {
   if (!pat) return out;
   switch (pat.type) {
     case 'Ident': out.push(pat.name); break;
-    case 'AssignPattern': patternNames(pat.left, out); break;
+    case 'AssignPattern': bindingNames(pat.left, out); break;
     case 'ArrayPattern':
-      for (const el of pat.elements) patternNames(el, out);
-      patternNames(pat.rest, out);
+      for (const el of pat.elements) bindingNames(el, out);
+      bindingNames(pat.rest, out);
       break;
     case 'ObjectPattern':
-      for (const p of pat.props) patternNames(p.value, out);
-      patternNames(pat.rest, out);
+      for (const p of pat.props) bindingNames(p.value, out);
+      bindingNames(pat.rest, out);
       break;
     default: break;
   }

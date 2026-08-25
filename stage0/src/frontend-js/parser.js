@@ -13,7 +13,7 @@
 //   1. 语句末尾的 `;` 在下一个 token 是 `}` / eof / 前面有换行时可省。
 //   2. `return` / `throw` / `break` / `continue` 的受限产生式：换行就没有操作数。
 
-import { lex } from './lexer.js';
+import { lexJs } from './lexer.js';
 import { span } from '../source/diag.js';
 
 /** 二元运算符优先级。`**` 右结合，单独标出来。 */
@@ -34,16 +34,19 @@ const BINARY = {
 
 const LOGICAL = new Set(['&&', '||', '??']);
 const UNARY = new Set(['!', '~', '+', '-', 'typeof', 'void', 'delete']);
-const ASSIGN_OPS = new Set([
+const ASSIGN_OPS_JS = new Set([
   '=', '+=', '-=', '*=', '/=', '%=', '**=', '<<=', '>>=', '>>>=', '&=', '|=', '^=', '&&=', '||=', '??=',
 ]);
 
-class Parser {
+// 名字带 Js 前缀：链接之后（frontend-js/link.js）所有模块级名字进同一个作用域，
+// 而 parse/parser.js 里已经有一个 Parser 了 —— 两个同名的类在那里是硬错误。
+class JsParser {
   constructor(file, diags) {
     this.file = file;
     this.diags = diags;
-    this.tokens = lex(file, diags);
-    this.hashbang = this.tokens.hashbang;
+    const lexed = lexJs(file, diags);
+    this.tokens = lexed.tokens;
+    this.hashbang = lexed.hashbang;
     this.pos = 0;
   }
 
@@ -51,9 +54,10 @@ class Parser {
 
   peek(k = 0) { return this.tokens[Math.min(this.pos + k, this.tokens.length - 1)]; }
 
-  get cur() { return this.peek(); }
+  // 都是方法而不是 getter：getter 不在 JS 子集里（ADR-0011 决策 13），自举要过这一关
+  cur() { return this.peek(); }
 
-  get atEof() { return this.cur.kind === 'eof'; }
+  atEof() { return this.cur().kind === 'eof'; }
 
   next() { return this.tokens[this.pos++]; }
 
@@ -70,8 +74,8 @@ class Parser {
 
   expect(value) {
     if (this.at(value)) return this.next();
-    this.error(this.cur.span, `expected '${value}', found ${describe(this.cur)}`);
-    return this.cur;
+    this.error(this.cur().span, `expected '${value}', found ${describeTokJs(this.cur())}`);
+    return this.cur();
   }
 
   error(sp, msg) {
@@ -87,8 +91,8 @@ class Parser {
   /** 语句末尾的分号。ASI：`}`、eof、或下一个 token 前面有换行时可以没有分号。 */
   semicolon() {
     if (this.eat(';')) return;
-    if (this.at('}') || this.atEof || this.cur.nl) return;
-    this.error(this.cur.span, `expected ';' after statement, found ${describe(this.cur)}`);
+    if (this.at('}') || this.atEof() || this.cur().nl) return;
+    this.error(this.cur().span, `expected ';' after statement, found ${describeTokJs(this.cur())}`);
     this.next(); // 吃掉一个，保证外层循环有进展
   }
 
@@ -96,7 +100,7 @@ class Parser {
 
   parseProgram() {
     const body = [];
-    while (!this.atEof) {
+    while (!this.atEof()) {
       const before = this.pos;
       const s = this.statement();
       if (s) body.push(s);
@@ -108,7 +112,7 @@ class Parser {
   // ------------------------------------------------------------ 语句
 
   statement() {
-    const t = this.cur;
+    const t = this.cur();
     if (t.kind === 'punct') {
       if (t.value === '{') return this.block();
       if (t.value === ';') { this.next(); return { type: 'Empty', span: t.span }; }
@@ -144,7 +148,7 @@ class Parser {
   block() {
     const start = this.expect('{');
     const body = [];
-    while (!this.at('}') && !this.atEof) {
+    while (!this.at('}') && !this.atEof()) {
       const before = this.pos;
       const s = this.statement();
       if (s) body.push(s);
@@ -170,7 +174,7 @@ class Parser {
 
   funcDecl() {
     const start = this.expect('function');
-    if (this.at('*')) this.error(this.cur.span, 'generator functions are not supported');
+    if (this.at('*')) this.error(this.cur().span, 'generator functions are not supported');
     const id = this.identName('function name');
     const { params, rest } = this.paramList();
     const body = this.block();
@@ -188,14 +192,14 @@ class Parser {
   classBody() {
     this.expect('{');
     const members = [];
-    while (!this.at('}') && !this.atEof) {
+    while (!this.at('}') && !this.atEof()) {
       const before = this.pos;
       if (this.eat(';')) continue;
-      const mStart = this.cur;
+      const mStart = this.cur();
       const isStatic = this.at('static') && !this.at('(', 1) && !this.at('=', 1) ? !!this.next() : false;
       // getter/setter：`get` / `set` 本身也可以是方法名，所以要看下一个 token
       let kind = 'method';
-      if ((this.cur.kind === 'ident') && (this.cur.value === 'get' || this.cur.value === 'set')
+      if ((this.cur().kind === 'ident') && (this.cur().value === 'get' || this.cur().value === 'set')
           && !this.at('(', 1) && !this.at('=', 1) && !this.at(';', 1) && !this.at('}', 1)) {
         kind = this.next().value;
       }
@@ -261,7 +265,7 @@ class Parser {
     if (this.at(';')) {
       this.next();
     } else if (this.at('const') || this.at('let') || this.at('var')) {
-      declKind = this.cur.value;
+      declKind = this.cur().value;
       const kwTok = this.next();
       left = this.bindingTarget();
       if (this.at('of') || this.at('in')) {
@@ -310,7 +314,7 @@ class Parser {
     const start = this.next();
     const kw = start.value;
     let arg = null;
-    if (!this.at(';') && !this.at('}') && !this.atEof && !this.cur.nl) arg = this.expression();
+    if (!this.at(';') && !this.at('}') && !this.atEof() && !this.cur().nl) arg = this.expression();
     if (kw === 'throw' && !arg) this.error(start.span, "'throw' needs an operand on the same line");
     this.semicolon();
     return { type: kw === 'return' ? 'Return' : 'Throw', arg, span: this.spanFrom(start) };
@@ -319,8 +323,8 @@ class Parser {
   breakLike() {
     const start = this.next();
     // 标签不支持：stage0 里没有，而且带标签的跳转要额外的 CFG 处理
-    if (this.cur.kind === 'ident' && !this.cur.nl) {
-      this.error(this.cur.span, 'labeled break/continue is not supported');
+    if (this.cur().kind === 'ident' && !this.cur().nl) {
+      this.error(this.cur().span, 'labeled break/continue is not supported');
       this.next();
     }
     this.semicolon();
@@ -351,14 +355,14 @@ class Parser {
     this.expect(')');
     this.expect('{');
     const cases = [];
-    while (!this.at('}') && !this.atEof) {
+    while (!this.at('}') && !this.atEof()) {
       const before = this.pos;
       let test = null;
       if (this.eat('case')) test = this.expression();
       else this.expect('default');
       this.expect(':');
       const body = [];
-      while (!this.at('case') && !this.at('default') && !this.at('}') && !this.atEof) {
+      while (!this.at('case') && !this.at('default') && !this.at('}') && !this.atEof()) {
         const b2 = this.pos;
         const s = this.statement();
         if (s) body.push(s);
@@ -379,37 +383,38 @@ class Parser {
     const start = this.expect('import');
     /** @type {{kind: string, imported: string|null, local: string}[]} */
     const specifiers = [];
-    if (this.cur.kind === 'str') {
+    if (this.cur().kind === 'str') {
       // `import "./x.js";` 副作用导入
       const source = this.next().value;
       this.semicolon();
       return { type: 'ImportDecl', specifiers, source, span: this.spanFrom(start) };
     }
-    if (this.cur.kind === 'ident') {
+    if (this.cur().kind === 'ident') {
       specifiers.push({ kind: 'default', imported: null, local: this.next().value });
       this.eat(',');
     }
     if (this.at('*')) {
       this.next();
-      if (this.cur.kind === 'ident' && this.cur.value === 'as') this.next();
-      else this.error(this.cur.span, "expected 'as' after '*' in import");
+      if (this.cur().kind === 'ident' && this.cur().value === 'as') this.next();
+      else this.error(this.cur().span, "expected 'as' after '*' in import");
       specifiers.push({ kind: 'namespace', imported: null, local: this.identName('namespace name') });
     } else if (this.eat('{')) {
-      while (!this.at('}') && !this.atEof) {
+      while (!this.at('}') && !this.atEof()) {
         const before = this.pos;
         const imported = this.identName('imported name');
         let local = imported;
-        if (this.cur.kind === 'ident' && this.cur.value === 'as') { this.next(); local = this.identName('local name'); }
+        if (this.cur().kind === 'ident' && this.cur().value === 'as') { this.next(); local = this.identName('local name'); }
         specifiers.push({ kind: 'named', imported, local });
         if (!this.eat(',')) break;
         if (this.pos === before) break;
       }
       this.expect('}');
     }
-    if (this.cur.kind === 'ident' && this.cur.value === 'from') this.next();
-    else this.error(this.cur.span, "expected 'from' in import declaration");
-    const source = this.cur.kind === 'str' ? this.next().value
-      : (this.error(this.cur.span, 'expected a quoted module path'), '');
+    if (this.cur().kind === 'ident' && this.cur().value === 'from') this.next();
+    else this.error(this.cur().span, "expected 'from' in import declaration");
+    let source = '';
+    if (this.cur().kind === 'str') source = this.next().value;
+    else this.error(this.cur().span, 'expected a quoted module path');
     this.semicolon();
     return { type: 'ImportDecl', specifiers, source, span: this.spanFrom(start) };
   }
@@ -418,20 +423,20 @@ class Parser {
     const start = this.expect('export');
     if (this.eat('{')) {
       const specifiers = [];
-      while (!this.at('}') && !this.atEof) {
+      while (!this.at('}') && !this.atEof()) {
         const before = this.pos;
         const local = this.identName('exported name');
         let exported = local;
-        if (this.cur.kind === 'ident' && this.cur.value === 'as') { this.next(); exported = this.identName('export alias'); }
+        if (this.cur().kind === 'ident' && this.cur().value === 'as') { this.next(); exported = this.identName('export alias'); }
         specifiers.push({ local, exported });
         if (!this.eat(',')) break;
         if (this.pos === before) break;
       }
       this.expect('}');
       let source = null;
-      if (this.cur.kind === 'ident' && this.cur.value === 'from') {
+      if (this.cur().kind === 'ident' && this.cur().value === 'from') {
         this.next();
-        source = this.cur.kind === 'str' ? this.next().value : '';
+        source = this.cur().kind === 'str' ? this.next().value : '';
       }
       this.semicolon();
       return { type: 'ExportNamed', specifiers, source, span: this.spanFrom(start) };
@@ -450,17 +455,17 @@ class Parser {
 
   /** 只接受标识符的位置（函数名、类名、导入名…） */
   identName(what) {
-    if (this.cur.kind === 'ident') return this.next().value;
-    this.error(this.cur.span, `expected ${what}, found ${describe(this.cur)}`);
+    if (this.cur().kind === 'ident') return this.next().value;
+    this.error(this.cur().span, `expected ${what}, found ${describeTokJs(this.cur())}`);
     return '<error>';
   }
 
   /** `.` 之后、以及对象字面量/类成员的名字位置：关键字与 null/true/false 在这里都是普通名字 */
   memberName() {
-    const t = this.cur;
+    const t = this.cur();
     if (t.kind === 'ident' || t.kind === 'kw') return this.next().value;
     if (t.kind === 'lit') { this.next(); return String(t.value); }
-    this.error(t.span, `expected a property name, found ${describe(t)}`);
+    this.error(t.span, `expected a property name, found ${describeTokJs(t)}`);
     return '<error>';
   }
 
@@ -471,7 +476,7 @@ class Parser {
       this.expect(']');
       return { key, computed: true };
     }
-    const t = this.cur;
+    const t = this.cur();
     if (t.kind === 'str') { this.next(); return { key: { type: 'Str', value: t.value, span: t.span }, computed: false }; }
     if (t.kind === 'num') { this.next(); return { key: { type: 'Num', value: t.value, raw: t.raw, span: t.span }, computed: false }; }
     const name = this.memberName();
@@ -480,7 +485,7 @@ class Parser {
 
   /** 绑定目标：标识符、数组解构、对象解构。用在声明、参数、catch、for-of 上。 */
   bindingTarget() {
-    const t = this.cur;
+    const t = this.cur();
     if (this.at('[')) return this.arrayPattern();
     if (this.at('{')) return this.objectPattern();
     return { type: 'Ident', name: this.identName('a binding name'), span: t.span };
@@ -490,7 +495,7 @@ class Parser {
     const start = this.expect('[');
     const elements = [];
     let rest = null;
-    while (!this.at(']') && !this.atEof) {
+    while (!this.at(']') && !this.atEof()) {
       const before = this.pos;
       if (this.at(',')) { this.next(); elements.push(null); continue; } // 空洞
       if (this.eat('...')) { rest = this.bindingTarget(); break; }
@@ -508,7 +513,7 @@ class Parser {
     const start = this.expect('{');
     const props = [];
     let rest = null;
-    while (!this.at('}') && !this.atEof) {
+    while (!this.at('}') && !this.atEof()) {
       const before = this.pos;
       if (this.eat('...')) { rest = this.bindingTarget(); break; }
       const { key, computed } = this.propertyKey();
@@ -527,7 +532,7 @@ class Parser {
     this.expect('(');
     const params = [];
     let rest = null;
-    while (!this.at(')') && !this.atEof) {
+    while (!this.at(')') && !this.atEof()) {
       const before = this.pos;
       if (this.eat('...')) { rest = this.bindingTarget(); break; }
       let p = this.bindingTarget();
@@ -557,7 +562,7 @@ class Parser {
    * 回溯要连诊断一起回滚，容易漏，而且 `(` 嵌套很深时是指数级。
    */
   arrowAhead() {
-    if (this.cur.kind === 'ident' && this.at('=>', 1)) return true;
+    if (this.cur().kind === 'ident' && this.at('=>', 1)) return true;
     if (!this.at('(')) return false;
     let depth = 0;
     for (let k = 0; ; k++) {
@@ -576,8 +581,8 @@ class Parser {
   assignExpr() {
     if (this.arrowAhead()) return this.arrow();
     const left = this.conditional();
-    const t = this.cur;
-    if (t.kind === 'punct' && ASSIGN_OPS.has(t.value)) {
+    const t = this.cur();
+    if (t.kind === 'punct' && ASSIGN_OPS_JS.has(t.value)) {
       this.next();
       const value = this.assignExpr();
       const target = t.value === '=' ? this.toPattern(left) : left;
@@ -588,10 +593,10 @@ class Parser {
   }
 
   arrow() {
-    const start = this.cur;
+    const start = this.cur();
     let params;
     let rest = null;
-    if (this.cur.kind === 'ident') {
+    if (this.cur().kind === 'ident') {
       params = [{ type: 'Ident', name: this.next().value, span: start.span }];
     } else {
       const pl = this.paramList();
@@ -621,7 +626,7 @@ class Parser {
   binary(minPrec) {
     let left = this.unary();
     for (;;) {
-      const t = this.cur;
+      const t = this.cur();
       const op = (t.kind === 'punct' || t.kind === 'kw') ? t.value : null;
       // hasOwn 而不是直接索引：`BINARY['toString']` 会摸到 Object.prototype 上的函数。
       // 这里 op 只可能是标点或关键字，摸不到；但同一个坑在词法器里真的踩过（见 LITERAL_WORDS），
@@ -642,7 +647,7 @@ class Parser {
   }
 
   unary() {
-    const t = this.cur;
+    const t = this.cur();
     const op = (t.kind === 'punct' || t.kind === 'kw') ? t.value : null;
     if (op !== null && UNARY.has(op)) {
       this.next();
@@ -660,7 +665,7 @@ class Parser {
 
   postfix() {
     const e = this.callChain(this.newOrPrimary());
-    const t = this.cur;
+    const t = this.cur();
     // 受限产生式：`a\n++b` 里的 `++` 属于下一行，不是 a 的后缀
     if (t.kind === 'punct' && (t.value === '++' || t.value === '--') && !t.nl) {
       this.next();
@@ -731,7 +736,7 @@ class Parser {
         continue;
       }
       // 标签模板：`String.raw\`...\``。tag 挂在模板节点上，生成时要原样还原。
-      if (this.cur.kind === 'tmpl_full' || this.cur.kind === 'tmpl_head') {
+      if (this.cur().kind === 'tmpl_full' || this.cur().kind === 'tmpl_head') {
         const tpl = this.template();
         tpl.tag = e;
         tpl.span = span(this.file, start.start, tpl.span.end);
@@ -745,7 +750,7 @@ class Parser {
   argList() {
     this.expect('(');
     const args = [];
-    while (!this.at(')') && !this.atEof) {
+    while (!this.at(')') && !this.atEof()) {
       const before = this.pos;
       if (this.at('...')) {
         const sp = this.next();
@@ -763,7 +768,7 @@ class Parser {
 
   /** 模板字符串。`quasis` 比 `exprs` 多一个，和 ESTree 一致。 */
   template() {
-    const start = this.cur;
+    const start = this.cur();
     const quasis = [];
     const exprs = [];
     const head = this.next();
@@ -773,7 +778,7 @@ class Parser {
     }
     for (;;) {
       exprs.push(this.expression());
-      const t = this.cur;
+      const t = this.cur();
       if (t.kind === 'tmpl_middle') {
         this.next();
         quasis.push({ cooked: t.value, raw: t.raw });
@@ -784,14 +789,14 @@ class Parser {
         quasis.push({ cooked: t.value, raw: t.raw });
         break;
       }
-      this.error(t.span, `unterminated template literal near ${describe(t)}`);
+      this.error(t.span, `unterminated template literal near ${describeTokJs(t)}`);
       break;
     }
     return { type: 'Template', tag: null, quasis, exprs, span: this.spanFrom(start) };
   }
 
   primary() {
-    const t = this.cur;
+    const t = this.cur();
     switch (t.kind) {
       case 'num': this.next(); return { type: 'Num', value: t.value, raw: t.raw, span: t.span };
       case 'bigint': this.next(); return { type: 'BigIntLit', value: t.value, raw: t.raw, span: t.span };
@@ -807,15 +812,15 @@ class Parser {
         case 'this': this.next(); return { type: 'This', span: t.span };
         case 'function': {
           const start = this.next();
-          if (this.at('*')) this.error(this.cur.span, 'generator functions are not supported');
-          const id = this.cur.kind === 'ident' ? this.next().value : null;
+          if (this.at('*')) this.error(this.cur().span, 'generator functions are not supported');
+          const id = this.cur().kind === 'ident' ? this.next().value : null;
           const { params, rest } = this.paramList();
           const body = this.block();
           return { type: 'FuncExpr', id, params, rest, body, span: this.spanFrom(start) };
         }
         case 'class': {
           const start = this.next();
-          const id = this.cur.kind === 'ident' ? this.next().value : null;
+          const id = this.cur().kind === 'ident' ? this.next().value : null;
           const superClass = this.eat('extends') ? this.unaryOrCall() : null;
           const members = this.classBody();
           return { type: 'ClassExpr', id, superClass, members, span: this.spanFrom(start) };
@@ -840,7 +845,7 @@ class Parser {
     if (this.at('[')) return this.arrayLit();
     if (this.at('{')) return this.objectLit();
 
-    this.error(t.span, `expected an expression, found ${describe(t)}`);
+    this.error(t.span, `expected an expression, found ${describeTokJs(t)}`);
     this.next();
     return { type: 'Lit', value: null, span: t.span };
   }
@@ -848,7 +853,7 @@ class Parser {
   arrayLit() {
     const start = this.expect('[');
     const elements = [];
-    while (!this.at(']') && !this.atEof) {
+    while (!this.at(']') && !this.atEof()) {
       const before = this.pos;
       if (this.at(',')) { this.next(); elements.push(null); continue; }
       if (this.at('...')) {
@@ -867,15 +872,15 @@ class Parser {
   objectLit() {
     const start = this.expect('{');
     const props = [];
-    while (!this.at('}') && !this.atEof) {
+    while (!this.at('}') && !this.atEof()) {
       const before = this.pos;
       if (this.at('...')) {
         const sp = this.next();
         props.push({ kind: 'spread', arg: this.assignExpr(), span: this.spanFrom(sp) });
       } else {
-        const pStart = this.cur;
+        const pStart = this.cur();
         let kind = 'init';
-        if (this.cur.kind === 'ident' && (this.cur.value === 'get' || this.cur.value === 'set')
+        if (this.cur().kind === 'ident' && (this.cur().value === 'get' || this.cur().value === 'set')
             && !this.at(',', 1) && !this.at(':', 1) && !this.at('(', 1) && !this.at('}', 1)) {
           kind = this.next().value;
         }
@@ -888,7 +893,7 @@ class Parser {
           props.push({ kind: 'init', key, computed, method: false, value: this.assignExpr(), span: this.spanFrom(pStart) });
         } else {
           // 简写 `{ x }`。`{ x = 1 }` 只在解构里合法，这里当错误更好：对象字面量里它没有意义
-          if (this.at('=')) this.error(this.cur.span, "'=' in an object literal is only valid in a destructuring pattern");
+          if (this.at('=')) this.error(this.cur().span, "'=' in an object literal is only valid in a destructuring pattern");
           props.push({ kind: 'init', key, computed, method: false, shorthand: true, value: { type: 'Ident', name: key.name, span: key.span }, span: this.spanFrom(pStart) });
         }
       }
@@ -942,7 +947,7 @@ function isAssignable(e) {
 }
 
 /** 诊断里怎么称呼一个 token */
-function describe(t) {
+function describeTokJs(t) {
   switch (t.kind) {
     case 'eof': return 'end of file';
     case 'str': return 'a string literal';
@@ -959,5 +964,5 @@ function describe(t) {
  * @param {import('../source/diag.js').Diagnostics} diags
  */
 export function parseJs(file, diags) {
-  return new Parser(file, diags).parseProgram();
+  return new JsParser(file, diags).parseProgram();
 }

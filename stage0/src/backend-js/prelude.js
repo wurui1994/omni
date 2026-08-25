@@ -444,6 +444,12 @@ function $js_arr_set(a, i, v) {
   l[k] = v;
 }
 function $js_arr_push(a, v) { return $js_arr_of(a).push(v); }
+// a.push(x, ...ys)：实参先被拼成一个 list，这里整段追加（定长的 op 表达不了可变实参）
+function $js_arr_push_all(a, items) {
+  const l = $js_arr_of(a);
+  for (const v of $js_arr_of(items)) l.push(v);
+  return l.length;
+}
 function $js_arr_pop(a) { return $js_arr_of(a).pop(); }
 function $js_arr_slice(a, s, e) {
   const l = $js_arr_of(a);
@@ -605,6 +611,13 @@ function $js_obj_delete(o, k) { return $js_dict_of(o).delete($js_prop(k)); }
 function $js_obj_keys(o) { return [...$js_dict_of(o).keys()]; }
 function $js_obj_values(o) { return [...$js_dict_of(o).values()]; }
 function $js_obj_entries(o) { return [...$js_dict_of(o)].map(([k, v]) => [k, v]); }
+// { ...src, k: v } 的 src 那一步。undefined / null 当空对象（JS 就是这么规定的）。
+function $js_obj_assign(dst, src) {
+  if (src === undefined || src === null) return dst;
+  const d = $js_dict_of(dst);
+  for (const [k, v] of $js_dict_of(src)) d.set(k, v);
+  return dst;
+}
 
 function $js_map_of(v) {
   if ($dynTag(v) !== "Map") $rt_error($dynTag(v) + " is not a Map");
@@ -633,6 +646,20 @@ function $js_set_has(s, v) { return $js_set_of(s).has($js_key(v)); }
 function $js_set_add(s, v) { $js_set_of(s).set($js_key(v), v); return s; }
 function $js_set_delete(s, v) { return $js_set_of(s).delete($js_key(v)); }
 function $js_set_items(s) { return [...$js_set_of(s).values()]; }
+// new Map(pairs) / new Set(items)。初值只收 list（JS 的可迭代协议不在这个值域里）；
+// 缺参数就是空容器，和 new Map() 一样。
+function $js_map_of_pairs(init) {
+  const m = $js_map_new();
+  if (init === undefined) return m;
+  for (const p of $js_arr_of(init)) $js_map_set(m, $js_arr_get(p, 0), $js_arr_get(p, 1));
+  return m;
+}
+function $js_set_of_list(init) {
+  const s = $js_set_new();
+  if (init === undefined) return s;
+  for (const v of $js_arr_of(init)) $js_set_add(s, v);
+  return s;
+}
 
 // ------------------------------------------- Number / Math / BigInt（ADR-0011）
 // toPrecision 与 toString(radix) 用宿主的即是规范；C 侧照规范复刻了一遍。
@@ -880,6 +907,39 @@ function $js_install_dir() {
   if (p === undefined) return ".";
   const i = p.lastIndexOf("/");
   return i < 0 ? "." : (i === 0 ? "/" : p.slice(0, i));
+}
+// 宿主里跑一段生成的 JS（omni run 与 REPL 的进程内快路径）。原生构建里没有 JS
+// 引擎，C 侧那两个同名函数只会报错 —— 这是宿主面唯一"只有一代能做"的能力。
+function $js_eval(code) {
+  $flush();
+  new Function($js_asS16(code))();
+  return undefined;
+}
+// 同上，但把 stdout/stderr 收进字符串，结果是 [out, err, failed]。REPL 要靠它算
+// "这次输入多打出来的那一段"，而且被跑的代码里 $rt_error 会 process.exit(70)，
+// 那在 REPL 里不能真的退出，所以 exit 也一起截住。
+function $js_eval_captured(code) {
+  $flush();
+  const out = [], err = [];
+  const so = process.stdout.write, se = process.stderr.write, ex = process.exit;
+  process.stdout.write = (s) => { out.push(String(s)); return true; };
+  process.stderr.write = (s) => { err.push(String(s)); return true; };
+  process.exit = (c) => { const e = new Error("exit"); e.$exit = c === undefined ? 0 : c; throw e; };
+  let failed = false;
+  try {
+    new Function($js_asS16(code))();
+  } catch (e) {
+    failed = true;
+    // $exit 是被跑的程序自己的运行期错误（消息已经在 err 里了）；其它异常说明后端生成了坏代码
+    if (e === null || e === undefined || e.$exit === undefined) {
+      err.push("omni: internal error: generated JS threw " + (e && e.stack ? e.stack : String(e)) + "\n");
+    }
+  } finally {
+    process.stdout.write = so;
+    process.stderr.write = se;
+    process.exit = ex;
+  }
+  return [out.join(""), err.join(""), failed];
 }
 
 // ------------------------------------------------------- RegExp（ADR-0011）

@@ -66,6 +66,8 @@ export const JS_ABI = {
   js_arr_get: { js: '$js_arr_get', c: 'omni_js_arr_get', arity: 2 },
   js_arr_set: { js: '$js_arr_set', c: 'omni_js_arr_set', arity: 3, ret: 'void' },
   js_arr_push: { js: '$js_arr_push', c: 'omni_js_arr_push', arity: 2 },
+  // a.push(x, ...ys)：实参拼成一个 list 整段追加（定长的 op 表达不了可变实参）
+  js_arr_push_all: { js: '$js_arr_push_all', c: 'omni_js_arr_push_all', arity: 2 },
   js_arr_pop: { js: '$js_arr_pop', c: 'omni_js_arr_pop', arity: 1 },
   js_arr_slice: { js: '$js_arr_slice', c: 'omni_js_arr_slice', arity: 3 },
   js_arr_concat: { js: '$js_arr_concat', c: 'omni_js_arr_concat', arity: 2 },
@@ -101,6 +103,8 @@ export const JS_ABI = {
   js_obj_keys: { js: '$js_obj_keys', c: 'omni_js_obj_keys', arity: 1 },
   js_obj_values: { js: '$js_obj_values', c: 'omni_js_obj_values', arity: 1 },
   js_obj_entries: { js: '$js_obj_entries', c: 'omni_js_obj_entries', arity: 1 },
+  // { ...src, k: v } 的展开那一步：把 src 的自有键抄进 dst，返回 dst
+  js_obj_assign: { js: '$js_obj_assign', c: 'omni_js_obj_assign', arity: 2 },
 
   js_map_new: { js: '$js_map_new', c: 'omni_js_map_new', arity: 0 },
   js_map_size: { js: '$js_map_size', c: 'omni_js_map_size', arity: 1 },
@@ -118,6 +122,9 @@ export const JS_ABI = {
   js_set_add: { js: '$js_set_add', c: 'omni_js_set_add', arity: 2 },
   js_set_delete: { js: '$js_set_delete', c: 'omni_js_set_delete', arity: 2, ret: 'bool' },
   js_set_items: { js: '$js_set_items', c: 'omni_js_set_items', arity: 1 },
+  // new Map(pairs) / new Set(items)：初值只收 list，缺参数就是空容器
+  js_map_of_pairs: { js: '$js_map_of_pairs', c: 'omni_js_map_of_pairs', arity: 1 },
+  js_set_of_list: { js: '$js_set_of_list', c: 'omni_js_set_of_list', arity: 1 },
 
   // ---------------------------------------------------------------- Number / Math
   // toPrecision 与 toString(radix) 在自举的关键路径上：编译器自己用它们把 double 与
@@ -191,6 +198,11 @@ export const JS_ABI = {
   js_proc_spawn: { js: '$js_proc_spawn', c: 'omni_js_proc_spawn', arity: 3 },
   js_os_tmpdir: { js: '$js_os_tmpdir', c: 'omni_js_os_tmpdir', arity: 0 },
   js_install_dir: { js: '$js_install_dir', c: 'omni_js_install_dir', arity: 0 },
+  // 宿主里跑一段生成的 JS。原生构建里没有 JS 引擎，C 侧只会报错（omni_js_host.c）——
+  // 存在的理由是编译器自己的 `omni run` 与 REPL 要能降级，见 host/native.js 的说明。
+  // captured 版把 stdout/stderr 收进字符串，结果是 [out, err, failed]。
+  js_eval: { js: '$js_eval', c: 'omni_js_eval', arity: 1 },
+  js_eval_captured: { js: '$js_eval_captured', c: 'omni_js_eval_captured', arity: 1 },
 
   // ------------------------------------------------- throw / try（ADR-0007 决定 1）
   // 只有一个"待处理错误"的槽：throw 往里放，可能出错的调用点之后 pending 查一下，
@@ -315,7 +327,12 @@ for (const [name, on] of Object.entries(JS_PROPS)) {
   };
 }
 for (const [name, m] of Object.entries(JS_METHODS)) {
-  const argc = Math.max(...Object.values(m.on).map((op) => abiOf(op).arity - 1));
+  // 派发器的形参个数 = 各标签里最大的那个（Math.max(...arr) 的展开不在语言子集里）
+  let argc = 0;
+  for (const op of Object.values(m.on)) {
+    const a = abiOf(op).arity - 1;
+    if (a > argc) argc = a;
+  }
   JS_MEMBERS[`js_m_${name}`] = {
     js: `$js_m_${name}`, c: `omni_js_m_${name}`, arity: 1 + argc, ret: retOf(name, m.on),
     member: { kind: 'method', name, on: m.on, lit: m.lit, argc },

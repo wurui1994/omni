@@ -1191,7 +1191,8 @@ class Checker {
     let bestTied = false;
 
     for (const sym of group) {
-      const slots = new Array(sym.params.length).fill(null);
+      const slots = [];
+      for (let i = 0; i < sym.params.length; i++) slots.push(null);
       let ok = true;
       let cost = 0;
       let pos = 0;

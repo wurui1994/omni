@@ -81,6 +81,14 @@ static omni_dyn omni_js_arr_push(omni_dyn a, omni_dyn v) { \
   LT##_push(l, v); \
   return omni_dyn_of_real((double)l->len); \
 } \
+/* a.push(x, ...ys) —— 实参先被拼成一个 list，这里整段追加。定长的 op 表达不了
+   可变实参，而 push 的实参个数是源码里定的，所以摊成"一个 list"最省事。 */ \
+static omni_dyn omni_js_arr_push_all(omni_dyn a, omni_dyn items) { \
+  LT l = omni_js_arr_of(a); \
+  LT src = omni_js_arr_of(items); \
+  for (int64_t i = 0; i < src->len; i++) LT##_push(l, src->items[i]); \
+  return omni_dyn_of_real((double)l->len); \
+} \
 static omni_dyn omni_js_arr_pop(omni_dyn a) { \
   LT l = omni_js_arr_of(a); \
   if (l->len == 0) return omni_dyn_undef(); \

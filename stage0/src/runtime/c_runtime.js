@@ -8,18 +8,18 @@
 // 这个模块只负责三件事：告诉编译器运行时在哪、生成的 .c 该 #include 什么、
 // 以及在需要单文件时把整个运行时拼成一个翻译单元。
 
-import { readFileSync, readdirSync } from 'node:fs';
-import { join, dirname, basename } from '../host/path.js';
-import { fileURLToPath } from 'node:url';
+import { readText, readDir, installDir } from '../host/native.js';
+import { join, basename } from '../host/path.js';
 
-export const RUNTIME_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'runtime');
+// installDir() 是"程序镜像所在目录"（node 上就是 src/host）。运行时相对它固定两级上去。
+export const RUNTIME_DIR = join(installDir(), '..', '..', 'runtime');
 
 /** 生成的 .c 开头只需要这一行；其余靠 -I RUNTIME_DIR + 链接 runtimeSources() */
 export const RUNTIME_INCLUDE = '#include "omni.h"';
 
 /** 要一起喂给 cc 的运行时翻译单元 */
 export function runtimeSources() {
-  return readdirSync(RUNTIME_DIR)
+  return readDir(RUNTIME_DIR)
     .filter((f) => f.endsWith('.c'))
     .sort()
     .map((f) => join(RUNTIME_DIR, f));
@@ -27,7 +27,7 @@ export function runtimeSources() {
 
 /** 把 #include "x.h" 递归展开成文件内容；已经展开过的直接删掉（等价于 include guard） */
 function expand(file, seen) {
-  const text = readFileSync(join(RUNTIME_DIR, file), 'utf8');
+  const text = readText(join(RUNTIME_DIR, file));
   return text.replace(/^#include "([^"]+)"[ \t]*\n/gm, (m, name) => {
     if (seen.has(name)) return '';
     seen.add(name);

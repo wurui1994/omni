@@ -96,6 +96,15 @@ static omni_dyn omni_js_obj_entries(omni_dyn o) { \
   } \
   return omni_js_arr_wrap(out); \
 } \
+/* { ...src, k: v } 的 src 那一步：把 src 的自有键逐个抄进 dst，返回 dst。
+   undefined / null 当空对象（JS 就是这么规定的），其余非对象是错误。 */ \
+static omni_dyn omni_js_obj_assign(omni_dyn dst, omni_dyn src) { \
+  if (src.tag == OMNI_DYN_UNDEF || src.tag == OMNI_DYN_NULL) return dst; \
+  DT s = omni_js_dict_of(src); \
+  DT d = omni_js_dict_of(dst); \
+  for (int64_t i = 0; i < s->n; i++) if (s->live[i]) DT##_set(d, s->keys[i], s->vals[i]); \
+  return dst; \
+} \
 OMNI_JS_MAP(LT, DT)
 
 /* Map / Set。条目值是 [原键, 值] 的两元素 list —— 多一次分配，换来 .keys() 能还回
@@ -171,6 +180,26 @@ static omni_dyn omni_js_set_items(omni_dyn s) { \
   LT##_reserve(out, d->count); \
   for (int64_t i = 0; i < d->n; i++) if (d->live[i]) out->items[out->len++] = d->vals[i]; \
   return omni_js_arr_wrap(out); \
+} \
+/* new Map(pairs) / new Set(items)。初值只收 list（JS 的可迭代协议不在这个值域里）；
+   缺参数（undefined）就是空容器，和 new Map() 一样。 */ \
+static omni_dyn omni_js_map_of_pairs(omni_dyn init) { \
+  omni_dyn m = omni_js_map_new(); \
+  if (init.tag == OMNI_DYN_UNDEF) return m; \
+  LT l = omni_js_arr_of(init); \
+  for (int64_t i = 0; i < l->len; i++) { \
+    LT p = omni_js_arr_of(l->items[i]); \
+    omni_js_map_set(m, p->len > 0 ? p->items[0] : omni_dyn_undef(), \
+                    p->len > 1 ? p->items[1] : omni_dyn_undef()); \
+  } \
+  return m; \
+} \
+static omni_dyn omni_js_set_of_list(omni_dyn init) { \
+  omni_dyn s = omni_js_set_new(); \
+  if (init.tag == OMNI_DYN_UNDEF) return s; \
+  LT l = omni_js_arr_of(init); \
+  for (int64_t i = 0; i < l->len; i++) omni_js_set_add(s, l->items[i]); \
+  return s; \
 }
 
 

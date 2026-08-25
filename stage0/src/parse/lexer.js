@@ -3,6 +3,10 @@
 
 import { span } from '../source/diag.js';
 
+// int64 的上界。写成十进制而不是 0x7fffffffffffffffn：十六进制的 bigint 字面量在降级之后
+// 是 BigInt("0x…")，而这个值域的 int_of_string 只认十进制（自举时会当场报错）。
+const INT64_MAX = 9223372036854775807n;
+
 export const KEYWORDS = new Set([
   'int', 'real', 'bool', 'string', 'void', 'struct',
   'dynamic', 'json', 'list', 'dict', 'set', 'class', 'new', 'null', 'in',
@@ -104,7 +108,7 @@ export function lex(file, diags) {
       if (isReal) push('real', start, Number(text), trivia);
       else {
         const v = BigInt(text);
-        if (v > 0x7fffffffffffffffn) diags.error(span(file, start, i), `integer literal out of int64 range: ${text}`);
+        if (v > INT64_MAX) diags.error(span(file, start, i), `integer literal out of int64 range: ${text}`);
         push('int', start, v, trivia);
       }
       continue;

@@ -61,8 +61,8 @@ for (const file of cases) {
     }
   };
   const ast = linkJs(path, read, diags);
-  const mod = diags.hasErrors ? null : lowerJs(ast, diags);
-  if (diags.hasErrors) {
+  const mod = diags.hasErrors() ? null : lowerJs(ast, diags);
+  if (diags.hasErrors()) {
     fail++;
     failures.push(`${name}\n    lowering failed:\n${diags.format()}`);
     process.stdout.write(`  FAIL ${name} (lower)\n`);

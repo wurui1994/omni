@@ -22,7 +22,7 @@
 // 原生 json 都能用，代价是推断出来的变量是单态的（`x = "s"` 会报错，但错误消息里就写了
 // 怎么办）。等 `dynamic` 的算术落地，默认值应该改回 dynamic —— 那时 `:mode` 两边都能用。
 
-import { createInterface } from 'node:readline';
+import { stdout, stderr, stdinIsTty, readLine, evalCaptured } from './host/native.js';
 import { SourceFile, Diagnostics, OmniError } from './source/diag.js';
 import { lex } from './parse/lexer.js';
 import { emitJs } from './backend-js/emit.js';
@@ -36,7 +36,9 @@ const STMT_HEAD = new Set([
   'if', 'else', 'while', 'for', 'return', 'break', 'continue', 'class', 'struct', 'void', 'let', 'var',
 ]);
 
-const ASSIGN_OPS = new Set(['=', '+=', '-=', '*=', '/=', '%=', '<<=', '>>=', '++', '--']);
+// 名字带 REPL_ 前缀：链接之后所有模块级名字进同一个作用域，parse/parser.js 里
+// 已经有一个 ASSIGN_OPS（那是 Omni 的赋值运算符表，这是 REPL 用来判断"像不像表达式"的）
+const REPL_ASSIGN_OPS = new Set(['=', '+=', '-=', '*=', '/=', '%=', '<<=', '>>=', '++', '--']);
 
 const OPEN = { '(': ')', '[': ']', '{': '}' };
 
@@ -45,7 +47,7 @@ const OPEN = { '(': ')', '[': ']', '{': '}' };
 function tokensOf(text) {
   const diags = new Diagnostics();
   const toks = lex(new SourceFile('<repl>', text), diags);
-  if (diags.hasErrors) return null;
+  if (diags.hasErrors()) return null;
   return toks.filter((t) => t.kind !== 'eof');
 }
 
@@ -80,43 +82,17 @@ function looksLikeExpr(text) {
     if (tok.kind !== 'punct') continue;
     if (OPEN[tok.value]) depth++;
     else if (tok.value === ')' || tok.value === ']' || tok.value === '}') depth--;
-    else if (depth === 0 && ASSIGN_OPS.has(tok.value)) return false;
+    else if (depth === 0 && REPL_ASSIGN_OPS.has(tok.value)) return false;
   }
   return true;
 }
 
-/** 生成的 JS 里 `$rt_error` 走 process.exit(70)，REPL 不能真的退出，所以换成抛异常 */
-class ExitSignal extends Error {
-  constructor(code) {
-    super(`exit ${code}`);
-    this.code = code;
-  }
-}
-
-/** 在进程内执行生成的 JS，把 stdout/stderr 收进字符串 */
+/** 在进程内执行生成的 JS，把 stdout/stderr 收进字符串。
+ *  截住 stdout / stderr / exit 这件事本身是宿主能力（决策 17 的 evalCaptured）：
+ *  生成的 JS 里 `$rt_error` 走 process.exit(70)，REPL 不能真的退出。 */
 function runCaptured(code) {
-  const out = [];
-  const err = [];
-  const so = process.stdout.write;
-  const se = process.stderr.write;
-  const ex = process.exit;
-  process.stdout.write = (s) => { out.push(String(s)); return true; };
-  process.stderr.write = (s) => { err.push(String(s)); return true; };
-  process.exit = (c) => { throw new ExitSignal(c ?? 0); };
-  let failed = false;
-  try {
-    // eslint-disable-next-line no-new-func
-    new Function(code)();
-  } catch (e) {
-    failed = true;
-    // ExitSignal 是 omni 自己的运行期错误（消息已经在 err 里了）；其它异常说明后端生成了坏代码
-    if (!(e instanceof ExitSignal)) err.push(`omni: internal error: generated JS threw ${e?.stack ?? e}\n`);
-  } finally {
-    process.stdout.write = so;
-    process.stderr.write = se;
-    process.exit = ex;
-  }
-  return { out: out.join(''), err: err.join(''), failed };
+  const r = evalCaptured(code);
+  return { out: r[0], err: r[1], failed: r[2] };
 }
 
 /** 诊断里的行号是**整个会话**的，对 REPL 没意义；减掉前缀行数，让它指向本次输入 */
@@ -175,8 +151,8 @@ class Session {
   commit(r) {
     // 重放是确定性的，所以新输出必然以上次输出为前缀；万一不是，就整段打出来
     const delta = r.out.startsWith(this.lastOut) ? r.out.slice(this.lastOut.length) : r.out;
-    if (delta) process.stdout.write(delta);
-    if (r.err) process.stderr.write(r.err);
+    if (delta) stdout(delta);
+    if (r.err) stderr(r.err);
     if (r.failed) return false;  // 运行期错误：不收这一块，会话回到上次成功的状态
     this.chunks.push(r.chunk);
     this.lastOut = r.out;
@@ -188,7 +164,7 @@ class Session {
     const t = text.trim();
     const base = this.priorLines();
     const fail = (e) => {
-      process.stderr.write(`${renumber(e.message, base)}\n`);
+      stderr(`${renumber(e.message, base)}\n`);
       return false;
     };
 
@@ -226,39 +202,39 @@ function command(s, line) {
   switch (cmd) {
     case ':help':
     case ':h':
-      process.stdout.write(HELP);
+      stdout(HELP);
       return false;
     case ':quit':
     case ':q':
       return true;
     case ':list':
       // 只列用户输入过的块；隐式前言不是会话内容（见 PRELUDE）
-      process.stdout.write(s.chunks.length ? `${s.chunks.join('\n')}\n` : '(empty session)\n');
+      stdout(s.chunks.length ? `${s.chunks.join('\n')}\n` : '(empty session)\n');
       return false;
     case ':reset':
       s.chunks = [];
       s.lastOut = '';
-      process.stdout.write('session reset\n');
+      stdout('session reset\n');
       return false;
     case ':mode':
-      if (!arg) process.stdout.write(`${s.mode}\n`);
+      if (!arg) stdout(`${s.mode}\n`);
       else if (['mixed', 'dynamic', 'static'].includes(arg)) {
         s.mode = arg;
-        process.stdout.write(`mode = ${arg}\n`);
-      } else process.stderr.write(`omni: mode must be one of mixed, dynamic, static (got '${arg}')\n`);
+        stdout(`mode = ${arg}\n`);
+      } else stderr(`omni: mode must be one of mixed, dynamic, static (got '${arg}')\n`);
       return false;
     case ':js':
     case ':c':
       try {
         const { mod } = s.compile();
-        process.stdout.write(cmd === ':js' ? emitJs(mod) : emitC(mod));
+        stdout(cmd === ':js' ? emitJs(mod) : emitC(mod));
       } catch (e) {
         if (!(e instanceof OmniError)) throw e;
-        process.stderr.write(`${e.message}\n`);
+        stderr(`${e.message}\n`);
       }
       return false;
     default:
-      process.stderr.write(`omni: unknown command '${cmd}' (try :help)\n`);
+      stderr(`omni: unknown command '${cmd}' (try :help)\n`);
       return false;
   }
 }
@@ -270,21 +246,24 @@ function command(s, line) {
  */
 export function startRepl(compileText, mode) {
   const s = new Session(compileText, mode);
-  const tty = Boolean(process.stdin.isTTY);
-  const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: tty });
+  const tty = stdinIsTty();
   let buf = '';
 
   // 提示符只在交互式终端里写，管道输入时保持 stdout 干净（测试要逐字节比对）
-  const prompt = () => { if (tty) process.stdout.write(buf ? CONT : PROMPT); };
+  const prompt = () => { if (tty) stdout(buf ? CONT : PROMPT); };
 
-  if (tty) process.stdout.write(`omni stage0 repl — mode ${mode}, :help for commands\n`);
+  if (tty) stdout(`omni stage0 repl — mode ${mode}, :help for commands\n`);
   prompt();
 
-  rl.on('line', (line) => {
+  // 阻塞地一行一行读（宿主的 readLine，决策 17）。不用 node 的 readline 事件：
+  // 那是宿主独有的东西，而这个文件自己也要被降级；REPL 本来就是"等人打字"的地方。
+  for (;;) {
+    const line = readLine();
+    if (line === undefined) break;  // EOF（Ctrl-D 或管道读完）
     if (!buf && line.trim().startsWith(':')) {
-      if (command(s, line)) { rl.close(); return; }
+      if (command(s, line)) return 0;
       prompt();
-      return;
+      continue;
     }
     // 续行中遇到空行就强制提交（否则括号打错的人出不来），和 python 的 REPL 一样
     if (buf && line.trim() === '') {
@@ -292,22 +271,19 @@ export function startRepl(compileText, mode) {
       buf = '';
       if (text.trim()) s.feed(text);
       prompt();
-      return;
+      continue;
     }
     buf = buf ? `${buf}\n${line}` : line;
-    if (!buf.trim()) { buf = ''; prompt(); return; }
-    if (!isComplete(buf)) { prompt(); return; }
+    if (!buf.trim()) { buf = ''; prompt(); continue; }
+    if (!isComplete(buf)) { prompt(); continue; }
     const text = buf;
     buf = '';
     s.feed(text);
     prompt();
-  });
+  }
 
-  rl.on('close', () => {
-    // 管道输入结束时可能还有没闭合的残料，交给编译器报错而不是静静丢掉
-    if (buf.trim()) s.feed(buf);
-    if (tty) process.stdout.write('\n');
-  });
-
+  // 管道输入结束时可能还有没闭合的残料，交给编译器报错而不是静静丢掉
+  if (buf.trim()) s.feed(buf);
+  if (tty) stdout('\n');
   return 0;
 }

@@ -15,7 +15,7 @@
 
 import { span } from '../source/diag.js';
 
-export const KEYWORDS = new Set([
+export const KEYWORDS_JS = new Set([
   'break', 'case', 'catch', 'class', 'const', 'continue', 'default', 'delete', 'do', 'else',
   'export', 'extends', 'finally', 'for', 'function', 'if', 'import', 'in',
   'instanceof', 'let', 'new', 'of', 'return', 'static', 'switch', 'this',
@@ -33,7 +33,7 @@ export const KEYWORDS = new Set([
 const LITERAL_WORDS = new Map([['null', null], ['true', true], ['false', false]]);
 
 // 长的在前，保证最长匹配
-const PUNCT = [
+const PUNCT_JS = [
   '>>>=', '...', '===', '!==', '**=', '<<=', '>>=', '>>>', '&&=', '||=', '??=',
   '=>', '==', '!=', '<=', '>=', '&&', '||', '??', '?.', '++', '--',
   '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '**', '<<', '>>',
@@ -67,7 +67,7 @@ const RADIX = new Map([['x', 16], ['o', 8], ['b', 2]]);
  * @param {import('../source/diag.js').SourceFile} file
  * @param {import('../source/diag.js').Diagnostics} diags
  */
-export function lex(file, diags) {
+export function lexJs(file, diags) {
   const src = file.text;
   const n = src.length;
   /** @type {any[]} */
@@ -175,7 +175,7 @@ export function lex(file, diags) {
       while (i < n && /[A-Za-z0-9_$]/.test(src[i])) i++;
       const text = src.slice(start, i);
       if (LITERAL_WORDS.has(text)) push('lit', start, LITERAL_WORDS.get(text), nl);
-      else push(KEYWORDS.has(text) ? 'kw' : 'ident', start, text, nl);
+      else push(KEYWORDS_JS.has(text) ? 'kw' : 'ident', start, text, nl);
       continue;
     }
 
@@ -278,7 +278,7 @@ export function lex(file, diags) {
     }
 
     // ---- 运算符 / 标点 ----
-    const p = PUNCT.find((op) => src.startsWith(op, i));
+    const p = PUNCT_JS.find((op) => src.startsWith(op, i));
     if (p) {
       i += p.length;
       push('punct', start, p, nl);
@@ -289,7 +289,8 @@ export function lex(file, diags) {
     err(start, i, `unexpected character: ${JSON.stringify(c)}`);
   }
 
-  // hashbang 挂在数组上而不是当成 token：它不参与任何语法规则，但生成回去时必须原样留着
-  tokens.hashbang = hashbang;
-  return tokens;
+  // hashbang 不是 token（它不参与任何语法规则），但生成回去时必须原样留着，所以单独还回去。
+  // 刻意**不**挂在 tokens 数组上：这个值域里的 list 带不了属性（ADR-0011 决策 1），
+  // 而这个文件自己也要被降级 —— 挂上去在 node 上能跑、降级之后就炸。
+  return { tokens, hashbang };
 }

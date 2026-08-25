@@ -231,6 +231,29 @@ omni_dyn omni_js_install_dir(void) {
   return s16_of_cstr(buf);
 }
 
+/* -------------------------------------------------------------- 宿主里的 eval
+
+   `omni run` 和 REPL 在 node 上是"生成 JS，进程内 new Function 跑掉"。原生构建里
+   没有 JS 引擎，所以这两个 op 只能报错。它们存在的理由是**编译器自己的源码**要能
+   降级：cli.js 里那句 eval 不能写成 `new Function`（那不在封闭 ABI 里），于是变成
+   一个宿主 op —— node 上有实现，原生构建上是一句清楚的错误。 */
+
+static omni_dyn no_js_engine(void) {
+  omni_error("cannot evaluate JavaScript: this is a native build with no JS engine "
+             "('omni run' and 'omni repl' need the node host; try 'omni run-c')");
+  return omni_dyn_undef();
+}
+
+omni_dyn omni_js_eval(omni_dyn code) {
+  (void)code;
+  return no_js_engine();
+}
+
+omni_dyn omni_js_eval_captured(omni_dyn code) {
+  (void)code;
+  return no_js_engine();
+}
+
 /* -------------------------------------------- 给宏用的原语（结果是数组的那几个） */
 
 /* 目录遍历：readdir 的结果是 list<dynamic>，而 list<dynamic> 只在生成的 TU 里存在

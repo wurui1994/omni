@@ -24,6 +24,9 @@ const EQ_FN = {
 };
 const KSTR_FN = { int: 'omni_kstr_int', real: 'omni_kstr_real', bool: 'omni_kstr_bool', string: 'omni_kstr_string' };
 const DYN_TAG = { list: 'OMNI_DYN_LIST', dict: 'OMNI_DYN_DICT' };
+// int64 的下界。写成"减一"而不是 -9223372036854775808n：那个正的字面量本身超出 int64，
+// 自举的时候（编译器自己被降级成 int64 的世界）读它就会报 invalid integer。
+const INT64_MIN_VALUE = -9223372036854775807n - 1n;
 
 class CEmitter {
   constructor(mod, opts = {}) {
@@ -207,7 +210,8 @@ class CEmitter {
   memberDispatch() {
     for (const d of Object.values(JS_MEMBERS)) {
       const m = d.member;
-      const ps = ['r', ...Array.from({ length: m.argc }, (_, i) => `a${i}`)];
+      const ps = ['r'];
+      for (let i = 0; i < m.argc; i++) ps.push(`a${i}`);
       const lits = Object.values(m.lit ?? {}).map((v) => (typeof v === 'string' ? `'${v}'` : String(v)));
       const ret = d.ret === 'bool' ? 'bool' : 'omni_dyn';
       this.line(`static ${ret} ${d.c}(${ps.map((p) => `omni_dyn ${p}`).join(', ')}) {`);
@@ -481,13 +485,13 @@ class CEmitter {
     switch (e.type.k) {
       case 'int': {
         const v = e.value;
-        if (v === -(2n ** 63n)) return 'INT64_MIN';
+        if (v === INT64_MIN_VALUE) return 'INT64_MIN';
         return `INT64_C(${v})`;
       }
       case 'real': return cReal(e.value);
       case 'bool': return e.value ? 'true' : 'false';
       case 'string': {
-        const bytes = Buffer.from(e.value, 'utf8');
+        const bytes = utf8Bytes(e.value);
         return `omni_str_new(${cString(bytes)}, ${bytes.length})`;
       }
       default: throw new Error(`c.const: ${e.type.k}`);
@@ -604,6 +608,41 @@ function hasLoneSurrogate(s) {
     if (c >= 0xdc00 && c <= 0xdfff) return true;
   }
   return false;
+}
+
+/**
+ * 字符串的 UTF-8 字节。不用 Buffer / TextEncoder：那是宿主的东西，而这个文件自己也要
+ * 被降级（封闭 ABI，ADR-0011 决策 2）。全程只用加法、乘法、取模 —— 位运算在这个值域
+ * 里只对 int 成立，而这里的一切都是 real。
+ * 落单的代理项按 node 的 Buffer 一样换成 U+FFFD，否则两代生成的 C 会不一样。
+ */
+function utf8Bytes(s) {
+  const out = [];
+  const push3 = (c) => {
+    out.push(224 + Math.floor(c / 4096));
+    out.push(128 + (Math.floor(c / 64) % 64));
+    out.push(128 + (c % 64));
+  };
+  for (let i = 0; i < s.length; i++) {
+    let c = s.charCodeAt(i);
+    if (c >= 0xdc00 && c <= 0xdfff) { push3(0xfffd); continue; }   // 落单的低位代理项
+    if (c >= 0xd800 && c <= 0xdbff) {
+      const d = i + 1 < s.length ? s.charCodeAt(i + 1) : 0;
+      if (d < 0xdc00 || d > 0xdfff) { push3(0xfffd); continue; }   // 落单的高位代理项
+      c = 0x10000 + (c - 0xd800) * 1024 + (d - 0xdc00);
+      i++;
+    }
+    if (c < 0x80) out.push(c);
+    else if (c < 0x800) { out.push(192 + Math.floor(c / 64)); out.push(128 + (c % 64)); }
+    else if (c < 0x10000) push3(c);
+    else {
+      out.push(240 + Math.floor(c / 262144));
+      out.push(128 + (Math.floor(c / 4096) % 64));
+      out.push(128 + (Math.floor(c / 64) % 64));
+      out.push(128 + (c % 64));
+    }
+  }
+  return out;
 }
 
 function cString(bytes) {

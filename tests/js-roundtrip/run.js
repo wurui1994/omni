@@ -57,7 +57,7 @@ function walk(dir, base = dir) {
 function regen(path, text) {
   const diags = new Diagnostics();
   const ast = parseJs(new SourceFile(path, text), diags);
-  if (diags.hasErrors) throw new Error(diags.format());
+  if (diags.hasErrors()) throw new Error(diags.format());
   return genJs(ast);
 }
 

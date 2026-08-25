@@ -55,12 +55,13 @@ export class Diagnostics {
     return this;
   }
 
-  get errorCount() {
+  // 方法而不是 getter：getter 不在 JS 子集里（ADR-0011 决策 13），自举要过这一关
+  errorCount() {
     return this.items.filter((d) => d.severity === 'error').length;
   }
 
-  get hasErrors() {
-    return this.errorCount > 0;
+  hasErrors() {
+    return this.errorCount() > 0;
   }
 
   /** 渲染成 clang 风格的多行诊断（带 caret） */
@@ -84,6 +85,6 @@ export class Diagnostics {
 
   /** 有错误则抛出，错误文本即格式化后的诊断 */
   throwIfErrors() {
-    if (this.hasErrors) throw new OmniError(this.format());
+    if (this.hasErrors()) throw new OmniError(this.format());
   }
 }

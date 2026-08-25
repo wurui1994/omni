@@ -17,13 +17,13 @@
 //   - 相对路径不能逃出包根：../../ 爬到包外面就不再是这个包的一部分了
 //   - 禁止环：报出整条环路径，而不是给一个半初始化的模块
 
-import { readFileSync, existsSync, realpathSync, readdirSync } from 'node:fs';
+import { readText, exists, realPath, readDir, installDir } from '../host/native.js';
 import { join, dirname, resolve, relative, isAbsolute, basename } from '../host/path.js';
-import { fileURLToPath } from 'node:url';
 import { SourceFile, OmniError } from '../source/diag.js';
 import { parse } from '../parse/parser.js';
 
-const LIB_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'lib');
+// installDir() 是"程序镜像所在目录"（node 上就是 src/host）；lib 相对它固定两级上去
+const LIB_DIR = resolve(installDir(), '..', '..', 'lib');
 
 /** 内置清单。将来会被真正的项目清单文件取代，但形态不变：名字 -> 根目录，一层间接，没有搜索。 */
 export const PACKAGES = new Map([['std', LIB_DIR]]);
@@ -98,8 +98,9 @@ function checkCase(path) {
     cur = parent;
   }
   for (const [parent, name] of parts.reverse()) {
-    let entries;
-    try { entries = readdirSync(parent); } catch { return; }
+    // 读不到目录就当"不存在"，交给上层报 no such module（不用 try：宿主的 readDir 失败是硬错）
+    if (!exists(parent)) return;
+    const entries = readDir(parent);
     if (entries.includes(name)) continue;
     const hit = entries.find((e) => e.toLowerCase() === name.toLowerCase());
     if (hit) fail(`module path case does not match the file on disk: '${name}' vs '${hit}' in ${display(parent)}`);
@@ -125,8 +126,8 @@ function resolveSpec(spec, from) {
     fail(`module path '${spec}' escapes the package root ${display(root)}`);
   }
   checkCase(path);
-  if (!existsSync(path)) fail(`no such module: '${spec}' (looked for ${display(path)})`);
-  return { path: realpathSync(path), root: realpathSync(root) };
+  if (!exists(path)) fail(`no such module: '${spec}' (looked for ${display(path)})`);
+  return { path: realPath(path), root: realPath(root) };
 }
 
 /**
@@ -163,7 +164,7 @@ export function loadProgram({ path, text, mode, diags }) {
     if (seen !== undefined) return seen;
 
     stack.push({ real, spec });
-    const src = file ?? new SourceFile(display(real), readFileSync(real, 'utf8'));
+    const src = file ?? new SourceFile(display(real), readText(real));
     const ast = parse(src, diags);
     const id = nextId++;
     const mine = new Set();
@@ -195,8 +196,8 @@ export function loadProgram({ path, text, mode, diags }) {
     return id;
   };
 
-  const onDisk = text === undefined && existsSync(path);
-  const real = onDisk ? realpathSync(path) : resolve(path);
+  const onDisk = text === undefined && exists(path);
+  const real = onDisk ? realPath(path) : resolve(path);
   const entryFile = onDisk ? null : new SourceFile(path, text ?? '');
   // 入口的包根 = 它自己所在的目录。相对导入不能爬到入口目录之外：入口在哪，包就在哪。
   const root = onDisk ? dirname(real) : process.cwd();
