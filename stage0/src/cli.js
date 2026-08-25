@@ -8,16 +8,18 @@
 //   omni build   f.omni -o a 生成原生可执行文件
 //   omni ast/oir f.omni      打印中间结果（调试用）
 
-import { readFileSync, writeFileSync, mkdtempSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, existsSync, statSync, readdirSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, basename, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { SourceFile, Diagnostics, OmniError } from './source/diag.js';
 import { parse } from './parse/parser.js';
 import { check } from './hir/check.js';
 import { emitJs } from './backend-js/emit.js';
 import { emitC } from './backend-c/emit.js';
+import { RUNTIME_DIR, runtimeSources } from './runtime/c_runtime.js';
 import { startRepl } from './repl.js';
 
 const LIB_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'lib');
@@ -86,14 +88,54 @@ function findCC() {
   throw new OmniError('no C compiler found (tried tcc, clang, gcc, cc; override with OMNI_CC)');
 }
 
+/** tcc 要的是极速编译，clang/gcc 要 -O2；运行时和生成的代码用同一份 flags */
+function ccFlags(cc) {
+  return cc === 'tcc' ? ['-I', RUNTIME_DIR] : ['-O2', '-std=c99', '-w', '-I', RUNTIME_DIR];
+}
+
+/**
+ * 运行时的 .o 缓存。不缓存就是每次 build 都重编 8 个翻译单元：实测 757ms -> 73ms，10 倍。
+ * 自举时编译器要反复重建自己，这条直接决定开发循环还能不能用。
+ * 缓存键 = 编译器 + flags + 运行时目录下每个 .c/.h 的 mtime 与大小（改 omni.h 会让全部失效）。
+ */
+function runtimeObjects(cc) {
+  const flags = ccFlags(cc);
+  const srcs = runtimeSources();
+  const deps = readdirSync(RUNTIME_DIR).filter((f) => /\.[ch]$/.test(f)).sort()
+    .map((f) => {
+      const s = statSync(join(RUNTIME_DIR, f));
+      return `${f}:${s.mtimeMs}:${s.size}`;
+    });
+  const key = createHash('sha256').update([cc, ...flags, ...deps].join('|')).digest('hex').slice(0, 16);
+  const dir = join(tmpdir(), `omni-rt-${key}`);
+  const objs = srcs.map((p) => join(dir, `${basename(p, '.c')}.o`));
+  if (objs.every((o) => existsSync(o))) return objs;
+
+  // 先编进临时目录再整体 rename：中断或并发都不会留下半个缓存
+  const stage = mkdtempSync(join(tmpdir(), 'omni-rt-stage-'));
+  const staged = srcs.map((p) => join(stage, `${basename(p, '.c')}.o`));
+  for (let i = 0; i < srcs.length; i++) {
+    const r = spawnSync(cc, [...flags, '-c', '-o', staged[i], srcs[i]], { encoding: 'utf8' });
+    if (r.status !== 0) {
+      throw new OmniError(`omni runtime failed to compile with ${cc}:\n${r.stderr}`);
+    }
+  }
+  try {
+    renameSync(stage, dir);
+  } catch {
+    /* 目标已存在 = 别人先建好了，下面那句会用它 */
+  }
+  return objs.every((o) => existsSync(o)) ? objs : staged;
+}
+
 function buildNative(mod, outPath) {
   const dir = mkdtempSync(join(tmpdir(), 'omni-'));
   const cPath = join(dir, 'out.c');
   writeFileSync(cPath, emitC(mod));
   const cc = findCC();
-  const args = cc === 'tcc'
-    ? [cPath, '-o', outPath, '-lm']
-    : [cPath, '-o', outPath, '-O2', '-std=c99', '-lm', '-w'];
+  // 运行时是 stage0/runtime/ 下真正的 C 文件，预编成 .o 缓存起来；热的叶子函数是
+  // omni.h 里的 static inline，所以不靠 LTO 也能内联（tcc 没有 -flto）
+  const args = [...ccFlags(cc), cPath, ...runtimeObjects(cc), '-o', outPath, '-lm'];
   const r = spawnSync(cc, args, { encoding: 'utf8', stdio: ['ignore', 'inherit', 'pipe'] });
   if (r.status !== 0) {
     throw new OmniError(`C backend produced code that ${cc} rejected:\n${r.stderr}\n(kept at ${cPath})`);
@@ -135,7 +177,7 @@ function main(argv) {
     }
     case 'emit-c': {
       const { mod } = compile(path, rest);
-      process.stdout.write(emitC(mod));
+      process.stdout.write(emitC(mod, { amalgamate: rest.includes('--amalgamate') }));
       return 0;
     }
     case 'build': {
@@ -186,7 +228,7 @@ commands:
   run-c     compile to C, build with cc, execute
   build     compile to a native executable  (-o NAME)
   emit-js   print generated JavaScript
-  emit-c    print generated C
+  emit-c    print generated C  (--amalgamate: inline the whole runtime into one file)
   ast       print the AST as JSON
   oir       print the OIR as JSON
 

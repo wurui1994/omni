@@ -197,25 +197,26 @@ stage2  原生编译器再编译一次自己 → 与 stage1 输出比对，达�
 ```
 omni/
   docs/adr/                 # 架构决策记录
-  docs/bootstrap-subset.md  # 自举子集白名单
-  stage0/                   # 手写 JS 编译器（P3 冻结，P5 后只读）
+  docs/bootstrap-subset.md  # Omni 自举子集白名单
+  docs/js-bootstrap-subset.md # JS 自举子集白名单（编译器源码只能用这些，ADR-0001 第 6 节）
+  stage0/                   # 编译器（JS 实现，**不重写成 Omni 语法** —— ADR-0001 第 2 节）
+    runtime/                #   C 运行时：真的 .c/.h（omni.h + 8 个 .c + 2 个宏头）
     src/source/             #   SourceMap、文件、诊断
     src/syntax/             #   CST 框架 + trivia + error recovery
-    src/parse-omni/         #   Omni 语法前端
+    src/parse/              #   Omni 语法前端
+    src/frontend-js/        #   JS 语法前端（自举入口，且永久可用）
+    src/frontend-glsl/      #   GLSL 前端
     src/hir/                #   名字解析、类型系统、重载/UFCS、隐式转换
     src/oir/                #   typed SSA + region + dialect + pass 框架
     src/backend-js/
     src/backend-c/
-    src/cli.js              #   omni run / build / emit-c / emit-js / repl
-  src/                      # stage1：用 Omni 重写的编译器（目录结构与 stage0 对应）
-    parse-js/               #   JS 子集前端
-    parse-glsl/             #   GLSL 前端
-    comptime/               #   编译期求值
-    vm/                     #   寄存器字节码 + 解释器 + ARC（编译成 C）
-    backend-llvm/
-  runtime/                  # C 运行时（rc、字符串、字典、异常）+ JS 运行时垫片
+    src/backend-llvm/
+    src/comptime/           #   编译期求值
+    src/vm/                 #   寄存器字节码 + 解释器 + ARC
+    src/cli.js              #   omni run / run-c / build / emit-c / emit-js / repl
   dist/omni.js              # 生成物：永久兼容层
-  tests/                    # 差分测试、跨语言对照测试（oracle）、语料、快照
+  dist/omni                 # 生成物：原生编译器（C0 -> C1 -> C2 不动点的产物）
+  tests/                    # 差分测试、跨语言对照测试（oracle）、js 往返、语料、快照
   bench/
 ```
 
@@ -281,16 +282,46 @@ omni/
 - `print` / `string()` 不支持容器：`print(list<int>)` 是编译错误，所以 REPL 里 `ys`
   回显不出来。两条都不是 REPL 的问题，但都卡着 REPL 的手感。
 
-**接下来**
-1. **ARC**（ADR-0006 落地顺序第 4 项的欠账）：按 ADR-0007 的一张编译期 unwind 表
+**已决定（自举策略，2026-08-25）**：ADR-0001。
+- **语法前端加 JS 并永久可用**，不是自举脚手架；和 GLSL 前端并列，是对"前端/后端分离"
+  这个架构主张最便宜的验证。
+- **不用 Omni 语法重写编译器**。不动点变成：C0（node 上的编译器）用 JS 前端读自己的源码
+  走 C 后端产出原生 C1，C1 再产出 C2，要求 C1 与 C2 的输出逐字节相同。
+  这比重写省一整轮，而且同时证明 JS 前端 / 类型检查 / C 后端三者在自己身上一致。
+- **js → 解析 → 生成 js 要做**，虽然是恒等变换：它是前端唯一的免费 oracle
+  （幂等 + 语义一致），否则前端的 bug 只会在几万行生成的 C 里以段错误现身。第三条测试轴。
+- **C 路径性能底线**：不比 JS 宿主慢**一个数量级**。只做必要优化：热叶子 static inline（已做）、
+  字符串 builder（不能让拼接退化成 O(n²)）、arena 分配（编译器是批处理，比先上 ARC 简单也更快）、
+  `-O2`。明确不做 NaN boxing / 内联缓存 / Grisu / profile 反馈类优化。
+- **JS 自举子集是闸门**：覆盖不到就改编译器源码，不扩前端。量过 4485 行的实际用量，
+  正则只有 4 个字符类（不是拦路虎），真正要支持的是模板字符串、Map/Set、数组方法、解构、展开。
+
+**已完成（运行时出 JS，2026-08-25）**：ADR-0001 第 5 节。
+- `stage0/runtime/`：`omni.h` + 8 个 `.c` + 2 个宏头，都是真的 C 文件（clang 能查、ASan 能扫、
+  能贴 godbolt、能单独编）。每个 TU 单独过 `-Wall -Wextra` 零警告。
+- 热叶子函数（i64 回绕算术、`byte_at`、dict 的 hash/eq）是 `omni.h` 里的 `static inline`：
+  拆成多 TU 后跨 TU 调用没有 LTO 就不内联，而 tcc 不支持 `-flto`。
+- `emit-c --amalgamate` 拼成单文件（ASan / godbolt 用）；运行时 `.o` 缓存实测 757ms → 73ms。
+- 拆分没让 C 路径变慢：`bench/compare.js` 的 c 后端 282ms → **151ms**（原生二进制本身 5ms）。
+
+**接下来**（顺序按 ADR-0001 的落地顺序重排）
+1. **JS 语法前端第一版**：`stage0/src/frontend-js/`，先能解析 `stage0/src` 全部文件。
+2. **`tests/js-roundtrip/`**：幂等（`gen(parse(x))` 再往返一次逐字节相同）+ 语义一致
+   （原始 js 与生成 js 在 node 下输出相同）。
+3. **字符串 builder + arena**（ADR-0001 第 4 节）—— 自举前必须有。
+4. **打通 C0 → C1 → C2，验不动点**（C1 与 C2 产出的 C 逐字节相同）。
+5. 写 `docs/js-bootstrap-subset.md`，冻结 JS 自举子集。
+6. `dynamic` 的算术与 `print`/`string()` 的容器支持（上面两条欠账）—— 做完这两条，
+   `.omnid` 才算真能用，REPL 默认模式也就能按 ADR-0008 改回 `dynamic`。
+7. **ARC**（ADR-0006 落地顺序第 4 项的欠账）：按 ADR-0007 的一张编译期 unwind 表
    （`pc → 存活的 owned 槽位`）同时服务错误路径释放与 GC 根枚举。当前 C 侧只分配不释放。
+   注意 ADR-0001 把它从"自举前置"降级了：编译器用 arena 就够，ARC 的价值在长期运行的程序上。
 2. tagged union + 模块系统（`cli.js` 的 `libsFor` 拼库是显式临时方案，有 `import` 后删掉；
    模式也要从"整程序"改成"按文件"），然后闭包 / 函数值。
-3. `dynamic` 的算术与 `print`/`string()` 的容器支持（上面两条欠账）—— 做完这两条，
-   `.omnid` 才算真能用，REPL 默认模式也就能按 ADR-0008 改回 `dynamic`。
-4. OIR 升级为 SSA + dialect 分层（P2 的真正内容），此时才开始写优化 pass。
-5. 补 `docs/adr/0001-bootstrap-strategy.md`、`0002-ir-strategy.md`、`0003-memory-model.md`、`0004-ufcs-resolution.md`。
-6. 语法调研：Asymptote 与 Jancy 的冲突点（声明语法、运算符、`import` 语义）对照表 → Omni v0 语法定稿。
-7. tcc 在本机无 bottle（`brew install tcc` 失败），暂用 clang；需要毫秒级 C 编译时从
-   `reference/tinycc` 源码构建 —— C 运行时随容器宏变大后，`bench` 里 C 一路的秒级耗时几乎全是
-   clang `-O2` 的编译时间（原生二进制本身约 17ms），这条已经开始疼了。
+3. OIR 升级为 SSA + dialect 分层（P2 的真正内容），此时才开始写优化 pass。
+4. 补 `docs/adr/0002-ir-strategy.md`、`0003-memory-model.md`、`0004-ufcs-resolution.md`
+   （`0001-bootstrap-strategy.md` 已写）。
+5. 语法调研：Asymptote 与 Jancy 的冲突点（声明语法、运算符、`import` 语义）对照表 → Omni v0 语法定稿。
+6. tcc 在本机无 bottle（`brew install tcc` 失败），暂用 clang；需要毫秒级 C 编译时从
+   `reference/tinycc` 源码构建。运行时 `.o` 缓存之后 `bench` 的 c 一路降到 151ms，
+   剩下的仍然基本是 clang `-O2` 编译生成代码的时间（原生二进制本身 5ms）。

@@ -1,7 +1,8 @@
 // Omni stage0 — C 后端：OIR -> C99
 //
 // C 后端是自举的必经之路，因此它的正确性优先于一切。输出要求：
-//   1) 单文件自包含（运行时内联），任何 C99 编译器都能直接编译
+//   1) 只 #include "omni.h"，运行时是 stage0/runtime/ 下真正的 C 文件（不再内联进来）；
+//      需要单文件时走 `emit-c --amalgamate`
 //   2) 可读、可 gdb —— 生成的 C 是给人看的第一手调试材料
 //   3) 无编译器扩展（computed goto 等留到 VM 阶段再作为可选开关）
 //
@@ -11,7 +12,7 @@
 // 引用类型（容器、class）全是指针 typedef，所以互相嵌套无需任何拓扑假设；
 // 只有"按值嵌套"的 struct 需要拓扑排序。
 
-import { C_RUNTIME } from '../runtime/c_runtime.js';
+import { RUNTIME_INCLUDE, amalgamate } from '../runtime/c_runtime.js';
 import { cTypeName, listType } from '../hir/types.js';
 
 /** dict/set 的键需要 hash；list.contains 只需要 eq */
@@ -24,11 +25,12 @@ const KSTR_FN = { int: 'omni_kstr_int', real: 'omni_kstr_real', bool: 'omni_kstr
 const DYN_TAG = { list: 'OMNI_DYN_LIST', dict: 'OMNI_DYN_DICT' };
 
 class CEmitter {
-  constructor(mod) {
+  constructor(mod, opts = {}) {
     this.mod = mod;
     this.out = [];
     this.indent = 0;
     this.tmp = 0;
+    this.opts = opts;
   }
 
   line(s = '') {
@@ -40,7 +42,7 @@ class CEmitter {
     const classes = this.mod.classes ?? [];
     const containers = this.mod.containers ?? [];
 
-    this.out.push(C_RUNTIME.trim());
+    this.out.push(this.opts.amalgamate ? amalgamate().trim() : RUNTIME_INCLUDE);
     this.line();
     for (const t of containers) this.line(`OMNI_REF_DECL(${cTypeName(t)})`);
     for (const c of classes) this.line(`OMNI_REF_DECL(c_${c.name})`);
@@ -463,6 +465,7 @@ function cString(bytes) {
 }
 
 /** @param {any} mod OIR 模块 */
-export function emitC(mod) {
-  return new CEmitter(mod).emit();
+/** @param {any} mod OIR 模块 @param {{amalgamate?: boolean}} opts */
+export function emitC(mod, opts = {}) {
+  return new CEmitter(mod, opts).emit();
 }
