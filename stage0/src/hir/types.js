@@ -18,6 +18,11 @@ export const BUILTINS = {
 
 export function structType(name, fields) { return { k: 'struct', name, fields }; }
 export function classType(name, fields) { return { k: 'class', name, fields }; }
+/**
+ * tagged union（ADR-0012）。`variants` 是有序的 `{name, fields}`，下标就是运行期标签值 ——
+ * 顺序是声明顺序，所以标签是源码里看得见的东西，不依赖任何哈希。
+ */
+export function enumType(name, variants) { return { k: 'enum', name, variants }; }
 export function listType(elem) { return { k: 'list', elem }; }
 export function dictType(key, val) { return { k: 'dict', key, val }; }
 export function setType(elem) { return { k: 'set', elem }; }
@@ -37,6 +42,7 @@ export function typeKey(t) {
   switch (t.k) {
     case 'struct': return `S${t.name}`;
     case 'class': return `C${t.name}`;
+    case 'enum': return `E${t.name}`;
     case 'list': return `list_${typeKey(t.elem)}`;
     case 'dict': return `dict_${typeKey(t.key)}_${typeKey(t.val)}`;
     case 'set': return `set_${typeKey(t.elem)}`;
@@ -49,7 +55,7 @@ export function typeKey(t) {
 export function typeName(t) {
   if (!t) return '<unknown>';
   switch (t.k) {
-    case 'struct': case 'class': return t.name;
+    case 'struct': case 'class': case 'enum': return t.name;
     case 'list': return `list<${typeName(t.elem)}>`;
     case 'dict': return `dict<${typeName(t.key)}, ${typeName(t.val)}>`;
     case 'set': return `set<${typeName(t.elem)}>`;
@@ -120,6 +126,7 @@ export function cTypeName(t) {
     case 'dynamic': return 'omni_dyn';
     case 'struct': return `s_${t.name}`;
     case 'class': return `c_${t.name}`;
+    case 'enum': return `e_${t.name}`;
     // 所有函数值在 C 里是同一个指针类型；签名只出现在调用处的强制转换里
     case 'fn': return 'omni_fn';
     case 'list': case 'dict': case 'set': return `omni_${typeKey(t)}`;
@@ -135,6 +142,9 @@ export function zeroValue(t) {
     case 'bool': return { kind: 'Const', type: t, value: false };
     case 'string': return { kind: 'Const', type: t, value: '' };
     case 'struct': return { kind: 'ZeroStruct', type: t };
+    // enum 的零值 = **第一个变体**，载荷取各自的零值（ADR-0012）。选"第一个"而不是
+    // 造一个 invalid 标签：那会让每次 match 都要处理一个源码里不存在的状态。
+    case 'enum': return { kind: 'ZeroEnum', type: t };
     case 'dynamic': return { kind: 'DynNull', type: t };
     case 'class': return { kind: 'NullRef', type: t };
     case 'fn': return { kind: 'NullFn', type: t };

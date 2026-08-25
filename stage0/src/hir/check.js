@@ -6,7 +6,7 @@
 
 import {
   BUILTINS, INT, REAL, BOOL, STRING, VOID, DYNAMIC, NULLT,
-  structType, classType, listType, dictType, setType, fnType,
+  structType, classType, enumType, listType, dictType, setType, fnType,
   typeName, typeKey, same, isNumeric, isRef, isHashable, castCost, commonType, zeroValue,
 } from './types.js';
 
@@ -56,6 +56,8 @@ class Checker {
     this.structs = [];
     /** @type {any[]} */
     this.classes = [];
+    /** @type {any[]} tagged union（ADR-0012）；变体下标就是运行期标签 */
+    this.enums = [];
     this.scope = new Scope(null);
     this.loopDepth = 0;
     this.currentRet = VOID;
@@ -88,6 +90,8 @@ class Checker {
     this.frames = [];
     /** @type {Map<string, any>} 具名函数 -> 它的适配器闭包节点（同一个函数只包一次） */
     this.adapters = new Map();
+    /** match 主语的临时槽计数（ADR-0012） */
+    this.matchTemps = 0;
   }
 
   /** 进入一个函数体：重置提升表与函数根作用域 */
@@ -327,9 +331,156 @@ class Checker {
     if (inner.k === 'list' || inner.k === 'dict') this.registerBoxDeep(inner);
   }
 
+  /**
+   * 按值嵌套的环（ADR-0012）。enum 的载荷内联在一个 union 里、struct 的字段内联在
+   * struct 里，所以 struct/enum 混着绕回自己都是"大小无解"。必须在这里报诊断 ——
+   * 否则 C 后端的拓扑排序会当场 throw，用户看到的是编译器崩溃而不是错误消息。
+   */
+  checkEnumRecursion(t, decls) {
+    const path = this.valueCycle(t, []);
+    if (!path) return;
+    const d = decls.find((x) => x.name === t.name);
+    this.err(
+      d ? d.span : { start: 0, end: 0 },
+      `enum '${t.name}' contains itself by value (${path.join(' -> ')}); use a class or a container to break the cycle`,
+    );
+  }
+
+  /** 返回构成环的名字链，没有环则 null。只看按值内联的边：struct 字段与 enum 载荷。 */
+  valueCycle(t, stack) {
+    if (!t || (t.k !== 'struct' && t.k !== 'enum')) return null;
+    if (stack.includes(t.name)) return [...stack, t.name];
+    const next = [...stack, t.name];
+    const inner = [];
+    if (t.k === 'struct') {
+      for (const f of t.fields) inner.push(f.type);
+    } else {
+      for (const v of t.variants) for (const f of v.fields) inner.push(f.type);
+    }
+    for (const it of inner) {
+      const found = this.valueCycle(it, next);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  /**
+   * `Shape.Circle` 的左边：一个**类型名**而不是值。变体永远带着类型名写
+   * （`Shape.Empty`），不往当前作用域里灌变体名 —— 那会让 `Empty` 这种普通词
+   * 变成保留名字，也会和函数名撞（ADR-0012）。
+   */
+  enumRef(node) {
+    if (!node || node.kind !== 'Name') return null;
+    if (this.scope.lookup(node.name)) return null; // 同名局部变量优先，遮蔽类型名
+    const t = this.types.get(node.name);
+    if (!t || t.k !== 'enum' || !this.visible(t)) return null;
+    return t;
+  }
+
+  /** 变体构造：`Shape.Circle(2.0)` / `Shape.Empty` */
+  makeEnum(t, variant, args, span) {
+    const tag = t.variants.findIndex((v) => v.name === variant);
+    if (tag < 0) {
+      const names = t.variants.map((v) => v.name).join(', ');
+      this.err(span, `enum '${t.name}' has no variant '${variant}' (variants: ${names})`);
+      return { kind: 'ZeroEnum', type: t };
+    }
+    const v = t.variants[tag];
+    for (const a of args) {
+      if (a.name) this.err(a.span, 'enum variant construction does not take named arguments');
+    }
+    if (args.length !== v.fields.length) {
+      this.err(span, `variant '${t.name}.${variant}' takes ${v.fields.length} payload value(s), got ${args.length}`);
+    }
+    const vals = v.fields.map((f, i) => {
+      const a = args[i];
+      if (!a) return zeroValue(f.type);
+      return this.coerce(a.expr, f.type, a.span);
+    });
+    return { kind: 'MakeEnum', type: t, variant, tag, args: vals };
+  }
+
+  /**
+   * `match` 在这里就被降级成 `if / else if` 链（ADR-0012）：后端因此完全不认识 match。
+   * 刻意不生成 C 的 `switch`：那样分支里的 `break` 会被 switch 接住，而 Omni 的
+   * `break` 只有一个意思 —— 跳出最近的循环。
+   *
+   * 方法名不叫 `match`：JS 自举子集里 `x.match(...)` 是"字符串的正则匹配"那个方法
+   * （frontend-js 只认正则字面量实参），编译器自己的源码不能踩到它。
+   */
+  matchStmt(node) {
+    const subject = this.expr(node.subject);
+    const t = subject.type;
+    if (t.k !== 'enum') {
+      this.err(node.subject.span, `'match' requires an enum value, found '${typeName(t)}'`);
+      return { kind: 'ExprStmt', expr: subject };
+    }
+    // 主语只求值一次。名字用数字开头：Omni 的标识符不能以数字开头，所以这个槽
+    // 在生成的 C/JS 里（`v_0match`）不可能与用户的变量撞名，也就不会遮蔽任何东西。
+    const slot = `${this.matchTemps++}match`;
+    const ref = { kind: 'VarRef', name: slot, type: t };
+
+    const covered = new Map();
+    const arms = [];
+    for (const c of node.cases) {
+      const tag = t.variants.findIndex((v) => v.name === c.variant);
+      if (tag < 0) {
+        const names = t.variants.map((v) => v.name).join(', ');
+        this.err(c.variantSpan, `enum '${t.name}' has no variant '${c.variant}' (variants: ${names})`);
+        continue;
+      }
+      if (covered.has(c.variant)) {
+        this.err(c.variantSpan, `variant '${c.variant}' is already covered by an earlier case`);
+        continue;
+      }
+      covered.set(c.variant, true);
+      const v = t.variants[tag];
+      if (c.binds.length && c.binds.length !== v.fields.length) {
+        this.err(c.variantSpan, `case '${c.variant}' binds ${c.binds.length} name(s) but the variant carries ${v.fields.length}`);
+      }
+      const saved = this.scope;
+      this.scope = new Scope(saved);
+      const head = [];
+      for (const [i, b] of c.binds.entries()) {
+        const f = v.fields[i];
+        if (!f) break;
+        const name = this.scope.declare(b.name, f.type).name;
+        head.push({
+          kind: 'Local',
+          name,
+          type: f.type,
+          init: { kind: 'EnumPayload', object: ref, tag, variant: v.name, name: f.name, type: f.type },
+        });
+      }
+      const body = this.block(c.body);
+      this.scope = saved;
+      arms.push({
+        cond: { kind: 'Cmp', op: '==', opType: INT, left: { kind: 'EnumTag', object: ref, type: INT }, right: { kind: 'Const', type: INT, value: BigInt(tag) }, type: BOOL },
+        body: { kind: 'Block', stmts: [...head, ...body.stmts] },
+      });
+    }
+
+    const fallback = node.fallback ? this.block(node.fallback) : null;
+    if (!fallback) {
+      const missing = t.variants.filter((v) => !covered.has(v.name)).map((v) => v.name);
+      if (missing.length) {
+        this.err(node.span, `match on '${t.name}' does not cover ${missing.join(', ')}; add the missing case(s) or a 'default'`);
+      }
+    }
+
+    // 从后往前串成 if/else 链。后端要求 If 的两支都是 Block，所以 else-if 要裹一层
+    let chain = fallback;
+    for (let i = arms.length - 1; i >= 0; i--) {
+      const otherwise = chain && chain.kind === 'If' ? { kind: 'Block', stmts: [chain] } : chain;
+      chain = { kind: 'If', cond: arms[i].cond, then: arms[i].body, otherwise };
+    }
+    const stmts = [{ kind: 'Local', name: slot, type: t, init: subject }];
+    if (chain) stmts.push(chain);
+    return { kind: 'Block', stmts };
+  }
+
   resolveType(ref) {
-    if (ref.kind === 'FnType') {
-      const params = ref.params.map((p) => this.resolveType(p));
+    if (ref.kind === 'FnType') {      const params = ref.params.map((p) => this.resolveType(p));
       for (const [i, p] of params.entries()) {
         if (p.k === 'void') this.err(ref.params[i].span, 'function parameter type cannot be void');
       }
@@ -401,11 +552,14 @@ class Checker {
       this.mode = d.mode ?? this.defaultMode;
     };
 
-    // pass 1：struct / class 名先占位，允许字段互相前向引用
+    // pass 1：struct / class / enum 名先占位，允许字段互相前向引用
     const aggs = program.decls.filter((d) => d.kind === 'StructDecl' || d.kind === 'ClassDecl');
-    for (const d of aggs) {
+    const enumDecls = program.decls.filter((d) => d.kind === 'EnumDecl');
+    for (const d of [...aggs, ...enumDecls]) {
       if (this.types.has(d.name)) this.err(d.span, `redefinition of type '${d.name}'`);
-      const t = d.kind === 'StructDecl' ? structType(d.name, []) : classType(d.name, []);
+      const t = d.kind === 'StructDecl' ? structType(d.name, [])
+        : d.kind === 'ClassDecl' ? classType(d.name, [])
+        : enumType(d.name, []);
       t.mod = d.mod ?? 0;
       t.isPrivate = d.isPrivate === true;
       this.types.set(d.name, t);
@@ -424,6 +578,31 @@ class Checker {
       if (t.k === 'struct') this.structs.push(t);
       else this.classes.push(t);
     }
+
+    // pass 1b：enum 的变体与载荷。载荷按值内联（C 侧是一个 union），所以**按值递归是错误** ——
+    // `enum L { Cons(int, L), Nil }` 的大小无解；等有了指针再放开（ADR-0012）。
+    for (const d of enumDecls) {
+      at(d);
+      const t = this.types.get(d.name);
+      const seen = new Set();
+      for (const v of d.variants) {
+        if (seen.has(v.name)) this.err(v.span, `duplicate variant '${v.name}' in enum '${d.name}'`);
+        seen.add(v.name);
+        const fields = [];
+        const fseen = new Set();
+        for (const f of v.fields) {
+          if (fseen.has(f.name)) this.err(f.span, `duplicate payload field '${f.name}' in variant '${v.name}'`);
+          fseen.add(f.name);
+          const ft = this.resolveType(f.type);
+          if (ft.k === 'void') this.err(f.type.span, 'payload field cannot have type void');
+          fields.push({ name: f.name, type: ft });
+        }
+        t.variants.push({ name: v.name, fields });
+      }
+      if (t.variants.length === 0) this.err(d.span, `enum '${d.name}' must declare at least one variant`);
+      this.enums.push(t);
+    }
+    for (const t of this.enums) this.checkEnumRecursion(t, enumDecls);
 
     // pass 2：函数签名。**class 方法在这里被降级成第一参数为 this 的自由函数，
     // 并注册进同一张全局重载表** —— ADR-0006 第 5 节：方法与自由函数是同一件事，
@@ -507,7 +686,7 @@ class Checker {
     this.currentRet = VOID;
     const mainStmts = [];
     for (const d of program.decls) {
-      if (d.kind === 'StructDecl' || d.kind === 'ClassDecl' || d.kind === 'FuncDecl') continue;
+      if (d.kind === 'StructDecl' || d.kind === 'ClassDecl' || d.kind === 'EnumDecl' || d.kind === 'FuncDecl') continue;
       at(d);
       const s = this.stmt(d);
       if (s) mainStmts.push(s);
@@ -520,6 +699,7 @@ class Checker {
     return {
       structs: this.structs,
       classes: this.classes,
+      enums: this.enums,
       containers: sortedContainers(this.containers),
       // 深装箱助手（print(list<int>) 之类）：C 侧要按类型生成转换函数，内层先出（ADR-0008）
       boxDeeps: [...this.boxDeeps.keys()].sort().map((k) => this.boxDeeps.get(k)),
@@ -556,6 +736,7 @@ class Checker {
   stmt(node) {
     switch (node.kind) {
       case 'Block': return this.block(node);
+      case 'Match': return this.matchStmt(node);
       case 'VarDecl': return this.varDecl(node);
       case 'ExprStmt': {
         // Python 形态：给未声明的裸名赋值就是声明它（函数作用域），等价于 `var`（ADR-0008 第 2 节）
@@ -835,6 +1016,9 @@ class Checker {
         return { kind: 'Assign', target, value: bin, type: target.type };
       }
       case 'Member': {
+        // `Shape.Empty`：左边是类型名，这是一个无载荷变体的构造（ADR-0012）
+        const et = this.enumRef(node.object);
+        if (et) return this.makeEnum(et, node.name, [], node.nameSpan);
         const object = this.expr(node.object);
         const agg = object.type.k === 'struct' || object.type.k === 'class';
         const field = agg ? object.type.fields.find((f) => f.name === node.name) : null;
@@ -1171,6 +1355,9 @@ class Checker {
     }
 
     if (callee.kind === 'Member') {
+      // `Shape.Circle(2.0)`：带载荷的变体构造
+      const et = this.enumRef(callee.object);
+      if (et) return this.makeEnum(et, callee.name, args, callee.nameSpan);
       const recv = this.expr(callee.object);
       const name = callee.name;
       const recvType = recv.type;

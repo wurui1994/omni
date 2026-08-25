@@ -29,6 +29,7 @@ class JsEmitter {
     this.out.push(JS_PRELUDE.trim());
     this.memberDispatch();
     for (const s of this.mod.structs) this.struct(s);
+    for (const e of this.mod.enums ?? []) this.enumDecl(e);
     for (const c of this.mod.classes ?? []) this.classDecl(c);
     for (const c of this.mod.closures ?? []) this.closureMake(c);
     // JS 前端的模块级变量（ADR-0011）：顶层函数要能互相看见，所以是真全局，
@@ -97,6 +98,38 @@ class JsEmitter {
     this.line(`function $cp_S${s.name}(v) { return { ${copy} }; }`);
   }
 
+  /**
+   * tagged union（ADR-0012）。表示是一个扁平对象：`$t` 是标签（BigInt，与 C 侧的
+   * int64_t tag 同一个值域），载荷字段直接摊在同一层 —— 同一时刻只有一个变体活着，
+   * 所以两个变体的同名字段在运行期不会同时存在。
+   */
+  enumDecl(e) {
+    const v0 = e.variants[0];
+    const init = ['$t: 0n', ...v0.fields.map((f) => `${f.name}: ${this.zero(f.type)}`)].join(', ');
+    this.line(`function $new_E${e.name}() { return { ${init} }; }`);
+    // 值语义的拷贝：先看标签才知道有哪些载荷字段要拷
+    this.line(`function $cp_E${e.name}(v) {`);
+    this.indent++;
+    this.line('switch (v.$t) {');
+    this.indent++;
+    for (const [i, v] of e.variants.entries()) {
+      const fs = ['$t: v.$t', ...v.fields.map((f) => `${f.name}: ${this.copyOf(f.type, `v.${f.name}`)}`)];
+      this.line(`case ${i}n: return { ${fs.join(', ')} };`);
+    }
+    this.indent--;
+    this.line('}');
+    this.line('return v;');
+    this.indent--;
+    this.line('}');
+  }
+
+  /** 值语义字段的拷贝表达式；只有 struct / enum 需要真的拷 */
+  copyOf(t, src) {
+    if (t.k === 'struct') return `$cp_S${t.name}(${src})`;
+    if (t.k === 'enum') return `$cp_E${t.name}(${src})`;
+    return src;
+  }
+
   classDecl(c) {
     const init = c.fields.map((f) => `${f.name}: ${this.zero(f.type)}`).join(', ');
     this.line(`function $new_C${c.name}() { return { ${init} }; }`);
@@ -109,6 +142,7 @@ class JsEmitter {
       case 'bool': return 'false';
       case 'string': return '""';
       case 'struct': return `$new_S${t.name}()`;
+      case 'enum': return `$new_E${t.name}()`;
       case 'class': case 'dynamic': case 'null': case 'fn': return 'null';
       case 'list': return '[]';
       case 'dict': return 'new Map()';
@@ -122,9 +156,11 @@ class JsEmitter {
     const params = [...(f.closureId === undefined ? [] : ['self']), ...f.params.map((p) => `v_${p.name}`)];
     this.line(`function ${f.mangled}(${params.join(', ')}) {`);
     this.indent++;
-    // 结构体形参按值传递：入口处深拷贝，等价于 C 的值语义
+    // 结构体 / enum 形参按值传递：入口处深拷贝，等价于 C 的值语义
     for (const p of f.params) {
-      if (p.type.k === 'struct') this.line(`v_${p.name} = $cp_S${p.type.name}(v_${p.name});`);
+      if (p.type.k === 'struct' || p.type.k === 'enum') {
+        this.line(`v_${p.name} = ${this.copyOf(p.type, `v_${p.name}`)};`);
+      }
     }
     for (const s of f.body.stmts) this.stmt(s);
     this.indent--;
@@ -203,12 +239,11 @@ class JsEmitter {
     return code;
   }
 
-  /** 需要值语义的位置（初始化/赋值/传参/返回）：结构体左值要拷贝 */
+  /** 需要值语义的位置（初始化/赋值/传参/返回）：结构体与 enum 左值要拷贝 */
   rvalue(e, type) {
     const src = this.expr(e);
-    if (type && type.k === 'struct' && (e.kind === 'VarRef' || e.kind === 'Field')) {
-      return `$cp_S${type.name}(${src})`;
-    }
+    const lval = e.kind === 'VarRef' || e.kind === 'Field' || e.kind === 'EnumPayload';
+    if (type && lval && (type.k === 'struct' || type.k === 'enum')) return this.copyOf(type, src);
     return src;
   }
   expr(e) {
@@ -219,6 +254,14 @@ class JsEmitter {
         if (e.type.k === 'bool') return String(e.value);
         return JSON.stringify(e.value);
       case 'ZeroStruct': return `$new_S${e.type.name}()`;
+      case 'ZeroEnum': return `$new_E${e.type.name}()`;
+      case 'MakeEnum': {
+        const v = e.type.variants[e.tag];
+        const fs = [`$t: ${e.tag}n`, ...e.args.map((a, i) => `${v.fields[i].name}: ${this.rvalue(a, a.type)}`)];
+        return `{ ${fs.join(', ')} }`;
+      }
+      case 'EnumTag': return `${this.expr(e.object)}.$t`;
+      case 'EnumPayload': return `${this.expr(e.object)}.${e.name}`;
       case 'NullLit': case 'NullRef': case 'DynNull': case 'NullFn': return 'null';
       case 'NewObject': return `$new_C${e.type.name}()`;
       case 'MakeClosure': return `${e.make}(${e.args.map((x) => this.rvalue(x, x.type)).join(', ')})`;

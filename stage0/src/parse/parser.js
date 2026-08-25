@@ -225,10 +225,10 @@ class Parser {
   // ------------------------------------------------------------ 顶层 / 声明
 
   parseProgram() {
-    // 预扫描 struct / class 名，使前向引用的类型也能被识别
+    // 预扫描 struct / class / enum 名，使前向引用的类型也能被识别
     for (let i = 0; i < this.tokens.length - 1; i++) {
       const t = this.tokens[i];
-      const isTypeDecl = t.kind === 'kw' && (t.value === 'struct' || t.value === 'class');
+      const isTypeDecl = t.kind === 'kw' && (t.value === 'struct' || t.value === 'class' || t.value === 'enum');
       if (isTypeDecl && this.tokens[i + 1].kind === 'ident') {
         this.typeNames.add(this.tokens[i + 1].value);
       }
@@ -248,14 +248,15 @@ class Parser {
     if (this.at('private')) {
       const kw = this.next();
       const d = this.parseTopLevel();
-      const CAN_HIDE = new Set(['FuncDecl', 'StructDecl', 'ClassDecl', 'VarDecl']);
+      const CAN_HIDE = new Set(['FuncDecl', 'StructDecl', 'ClassDecl', 'EnumDecl', 'VarDecl']);
       if (!d || !CAN_HIDE.has(d.kind)) {
-        this.error(kw.span, "'private' can only precede a function, struct, class or variable declaration");
+        this.error(kw.span, "'private' can only precede a function, struct, class, enum or variable declaration");
       } else d.isPrivate = true;
       return d;
     }
     if (this.at('struct')) return this.parseAggregate('struct');
     if (this.at('class')) return this.parseAggregate('class');
+    if (this.at('enum')) return this.parseEnum();
     if (this.at('var') || this.at('let')) return this.parseInferredDecl(true);
     const head = this.tryDeclHead();
     if (head) {
@@ -321,6 +322,128 @@ class Parser {
     return { kind, name, fields, methods, span: this.spanFrom(start) };
   }
 
+  /**
+   * tagged union（ADR-0012）：
+   *
+   *     enum Shape {
+   *       Circle(real r),
+   *       Rect(real w, real h),
+   *       Empty,
+   *     }
+   *
+   * 载荷是"具名字段"而不是位置元组：`case Circle(r)` 里的绑定名可以和字段名不同，
+   * 但字段名本身是声明的一部分，将来加 `Circle(r: 1.0)` 这类构造不用改语法。
+   * 无载荷的变体退化成 C 风格 enum，所以只有一个关键字。
+   */
+  parseEnum() {
+    const start = this.expect('enum');
+    const nameTok = this.peek();
+    let name = '<error>';
+    if (nameTok.kind === 'ident') name = this.next().value;
+    else this.error(nameTok.span, 'expected enum name');
+    this.typeNames.add(name);
+    this.expect('{');
+    const variants = [];
+    while (!this.at('}') && !this.atEof()) {
+      const before = this.pos;
+      const v = this.peek();
+      if (v.kind !== 'ident') {
+        this.error(v.span, `expected variant name in enum '${name}'`);
+        this.next();
+        continue;
+      }
+      this.next();
+      const fields = [];
+      if (this.eat('(')) {
+        while (!this.at(')') && !this.atEof()) {
+          const inner = this.pos;
+          const type = this.parseType();
+          const p = this.peek();
+          if (p.kind !== 'ident') { this.error(p.span, 'expected payload field name'); break; }
+          this.next();
+          fields.push({ type, name: p.value, span: p.span });
+          if (!this.eat(',')) break;
+          if (this.pos === inner) break;
+        }
+        this.expect(')');
+      }
+      variants.push({ name: v.value, fields, span: v.span });
+      if (!this.eat(',')) break;
+      if (this.pos === before) this.next();
+    }
+    this.expect('}');
+    this.eat(';');
+    return { kind: 'EnumDecl', name, variants, span: this.spanFrom(start) };
+  }
+
+  /**
+   * `match (e) { case Circle(r): ...  case Empty: ...  default: ... }`（ADR-0012）
+   *
+   * 一个分支的语句一直收到下一个 `case` / `default` / `}` 为止 —— **没有 fallthrough**，
+   * 所以不用 `break` 收尾；反过来说 `break` 在这里仍然指最近的循环（检查器把 match 降级成
+   * if/else 链，正是为了让 `break` 不被 C 的 switch 吃掉）。
+   */
+  parseMatch() {
+    const start = this.expect('match');
+    this.expect('(');
+    const subject = this.parseExpr();
+    this.expect(')');
+    this.expect('{');
+    const cases = [];
+    let fallback = null;
+    while (!this.at('}') && !this.atEof()) {
+      const before = this.pos;
+      if (this.at('default')) {
+        const kw = this.next();
+        this.expect(':');
+        const stmts = this.parseCaseBody();
+        if (fallback) this.error(kw.span, "duplicate 'default' in match");
+        else fallback = { kind: 'Block', stmts, span: this.spanFrom(kw) };
+        if (this.pos === before) this.next();
+        continue;
+      }
+      if (!this.at('case')) {
+        this.error(this.peek().span, `expected 'case' or 'default' in match, found ${describe(this.peek())}`);
+        this.next();
+        continue;
+      }
+      const kw = this.next();
+      const v = this.peek();
+      let variant = '<error>';
+      if (v.kind === 'ident') variant = this.next().value;
+      else this.error(v.span, "expected a variant name after 'case'");
+      const binds = [];
+      if (this.eat('(')) {
+        while (!this.at(')') && !this.atEof()) {
+          const p = this.peek();
+          if (p.kind !== 'ident') { this.error(p.span, 'expected a binding name'); break; }
+          this.next();
+          binds.push({ name: p.value, span: p.span });
+          if (!this.eat(',')) break;
+        }
+        this.expect(')');
+      }
+      this.expect(':');
+      const stmts = this.parseCaseBody();
+      cases.push({ variant, variantSpan: v.span, binds, body: { kind: 'Block', stmts, span: this.spanFrom(kw) } });
+      if (this.pos === before) this.next();
+    }
+    this.expect('}');
+    return { kind: 'Match', subject, cases, fallback, span: this.spanFrom(start) };
+  }
+
+  /** 一个 case 的语句序列：收到下一个 case / default / `}` 为止 */
+  parseCaseBody() {
+    const stmts = [];
+    while (!this.at('case') && !this.at('default') && !this.at('}') && !this.atEof()) {
+      const before = this.pos;
+      const s = this.parseStatement();
+      if (s) stmts.push(s);
+      if (this.pos === before) this.next();
+    }
+    return stmts;
+  }
+
   /** 头部（返回类型 + 名字）已被消耗；`owner` 非空表示这是 class 方法 */
   parseFuncRest(retType, nameTok, owner) {
     this.expect('(');
@@ -373,6 +496,7 @@ class Parser {
     if (this.at('continue')) { this.next(); this.expect(';'); return { kind: 'Continue', span: this.spanFrom(t) }; }
     if (this.at(';')) { this.next(); return null; }
     if (this.at('var') || this.at('let')) return this.parseInferredDecl(true);
+    if (this.at('match')) return this.parseMatch();
     const head = this.tryDeclHead();
     if (head) return this.parseVarDeclRest(head.type, head.nameTok, true);
     const expr = this.parseExpr();

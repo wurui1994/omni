@@ -42,7 +42,8 @@ class CEmitter {
   }
 
   emit() {
-    const structs = this.sortStructs();
+    const aggs = this.sortAggregates();
+    const enums = this.mod.enums ?? [];
     const classes = this.mod.classes ?? [];
     const containers = this.mod.containers ?? [];
     const closures = this.mod.closures ?? [];
@@ -53,7 +54,10 @@ class CEmitter {
     for (const t of containers) this.line(`OMNI_REF_DECL(${cTypeName(t)})`);
     for (const c of classes) this.line(`OMNI_REF_DECL(c_${c.name})`);
     this.line();
-    for (const s of structs) this.structBody(s);
+    for (const a of aggs) {
+      if (a.k === 'struct') this.structBody(a.t);
+      else this.enumBody(a.t);
+    }
     for (const c of classes) this.classBody(c);
     for (const t of containers) this.containerBody(t);
     this.line();
@@ -68,7 +72,12 @@ class CEmitter {
     for (const c of closures) this.closureBody(c);
     for (const t of fnTypes) this.fnCallHelper(t);
     this.line();
-    for (const s of structs) this.structNew(s);
+    // 零值构造按拓扑序发：enum 的零值要调它第一个变体载荷的零值构造，struct 反过来也一样
+    for (const a of aggs) {
+      if (a.k === 'struct') this.structNew(a.t);
+      else this.enumNew(a.t);
+    }
+    for (const e of enums) this.enumMakers(e);
     for (const c of classes) this.classNew(c);
     // JS 前端的模块级变量（ADR-0011）：顶层函数要能互相看见，所以是真全局，
     // 不是 omni_main 的局部量。初值一律 undefined，赋值发生在 omni_main 里。
@@ -124,24 +133,96 @@ class CEmitter {
     this.line('}');
   }
 
-  /** 结构体按字段依赖拓扑排序：C 里按值嵌套要求被嵌套者已是完整类型 */
-  sortStructs() {
-    const byName = new Map(this.mod.structs.map((s) => [s.name, s]));
+  /**
+   * struct 与 enum 一起按"按值嵌套"拓扑排序：C 里按值嵌套要求被嵌套者已是完整类型，
+   * 而 struct 的字段可以是 enum、enum 的载荷也可以是 struct，两者必须排在同一张序里。
+   * 返回 `{k, t}` 的有序表。环在检查器里已经报过诊断（ADR-0012），这里只留一个断言。
+   */
+  sortAggregates() {
+    const structs = new Map(this.mod.structs.map((s) => [s.name, s]));
+    const enums = new Map((this.mod.enums ?? []).map((e) => [e.name, e]));
     const done = new Set();
     const order = [];
-    const visit = (s, stack) => {
-      if (done.has(s.name)) return;
-      if (stack.has(s.name)) throw new Error(`recursive struct by value: ${s.name}`);
-      stack.add(s.name);
-      for (const f of s.fields) {
-        if (f.type.k === 'struct') visit(byName.get(f.type.name), stack);
+    const visit = (t, stack) => {
+      if (!t || (t.k !== 'struct' && t.k !== 'enum')) return;
+      const key = `${t.k}:${t.name}`;
+      if (done.has(key)) return;
+      if (stack.has(key)) throw new Error(`recursive aggregate by value: ${t.name}`);
+      stack.add(key);
+      const inner = [];
+      if (t.k === 'struct') {
+        for (const f of t.fields) inner.push(f.type);
+      } else {
+        for (const v of t.variants) for (const f of v.fields) inner.push(f.type);
       }
-      stack.delete(s.name);
-      done.add(s.name);
-      order.push(s);
+      for (const it of inner) {
+        const dep = it.k === 'struct' ? structs.get(it.name) : it.k === 'enum' ? enums.get(it.name) : null;
+        visit(dep, stack);
+      }
+      stack.delete(key);
+      done.add(key);
+      order.push({ k: t.k, t });
     };
     for (const s of this.mod.structs) visit(s, new Set());
+    for (const e of enums.values()) visit(e, new Set());
     return order;
+  }
+
+  /**
+   * tagged union（ADR-0012）：`int64_t tag` + 一个 union。tag 用 int64_t 而不是 int，
+   * 因为 `EnumTag` 在 OIR 里的类型是 `int`（= i64），这样比较不需要任何转换。
+   * 无载荷的变体不进 union —— C99 没有空结构体；全都无载荷时连 union 都不发。
+   */
+  enumBody(e) {
+    const withPayload = e.variants.filter((v) => v.fields.length > 0);
+    this.line(`struct e_${e.name}_s {`);
+    this.indent++;
+    this.line('int64_t tag;');
+    if (withPayload.length) {
+      this.line('union {');
+      this.indent++;
+      for (const v of withPayload) {
+        const fs = v.fields.map((f) => `${cTypeName(f.type)} f_${f.name};`).join(' ');
+        this.line(`struct { ${fs} } v_${v.name};`);
+      }
+      this.indent--;
+      this.line('} u;');
+    }
+    this.indent--;
+    this.line('};');
+    this.line(`typedef struct e_${e.name}_s e_${e.name};`);
+  }
+
+  /** 零值 = 第一个变体 + 各载荷字段的零值（与 JS 后端的 $new_E 对齐） */
+  enumNew(e) {
+    this.line(`static e_${e.name} omni_new_E_${e.name}(void) {`);
+    this.indent++;
+    this.line(`e_${e.name} v;`);
+    this.line('v.tag = INT64_C(0);');
+    for (const f of e.variants[0].fields) {
+      this.line(`v.u.v_${e.variants[0].name}.f_${f.name} = ${this.zeroExpr(f.type)};`);
+    }
+    this.line('return v;');
+    this.indent--;
+    this.line('}');
+  }
+
+  /**
+   * 每个变体一个构造函数。不用 C99 的复合字面量 + 指定初始化：那样在
+   * `-Wextra` 下会为"union 里没被初始化的成员"报一片 missing-field-initializers。
+   */
+  enumMakers(e) {
+    for (const [i, v] of e.variants.entries()) {
+      const ps = v.fields.map((f) => `${cTypeName(f.type)} f_${f.name}`);
+      this.line(`static e_${e.name} omni_mk_E_${e.name}_${v.name}(${ps.length ? ps.join(', ') : 'void'}) {`);
+      this.indent++;
+      this.line(`e_${e.name} v;`);
+      this.line(`v.tag = INT64_C(${i});`);
+      for (const f of v.fields) this.line(`v.u.v_${v.name}.f_${f.name} = f_${f.name};`);
+      this.line('return v;');
+      this.indent--;
+      this.line('}');
+    }
   }
 
   structBody(s) {
@@ -314,6 +395,7 @@ class CEmitter {
       case 'bool': return 'false';
       case 'string': return 'omni_str_new("", 0)';
       case 'struct': return `omni_new_S_${t.name}()`;
+      case 'enum': return `omni_new_E_${t.name}()`;
       case 'class': case 'fn': return 'NULL';
       case 'dynamic': return 'omni_dyn_null()';
       case 'list': case 'dict': case 'set': return `${cTypeName(t)}_new()`;
@@ -447,6 +529,11 @@ class CEmitter {
     switch (e.kind) {
       case 'Const': return this.constant(e);
       case 'ZeroStruct': return `omni_new_S_${e.type.name}()`;
+      case 'ZeroEnum': return `omni_new_E_${e.type.name}()`;
+      case 'MakeEnum':
+        return `omni_mk_E_${e.type.name}_${e.variant}(${e.args.map((x) => this.expr(x)).join(', ')})`;
+      case 'EnumTag': return `(${this.expr(e.object)}).tag`;
+      case 'EnumPayload': return `(${this.expr(e.object)}).u.v_${e.variant}.f_${e.name}`;
       case 'NullLit': case 'NullRef': case 'NullFn': return 'NULL';
       case 'DynNull': return 'omni_dyn_null()';
       case 'NewObject': return `omni_new_C_${e.type.name}()`;

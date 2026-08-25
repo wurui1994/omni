@@ -18,6 +18,8 @@ export const KEYWORDS = new Set([
   'import', 'private',
   // 函数值（ADR-0010）：`fn(int, int) -> int` 是类型，`fn(int x) -> int { ... }` 是 lambda
   'fn',
+  // tagged union（ADR-0012）：`enum` 声明，`match` / `case` / `default` 解构
+  'enum', 'match', 'case', 'default',
 ]);
 
 // 长的放前面，保证最长匹配

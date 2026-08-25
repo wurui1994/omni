@@ -90,6 +90,8 @@ REPL 的输入解释规则（`stage0/src/repl.js`）：括号未闭合就续行�
   `list<dynamic>` / `dict<string,dynamic>`。所以 `[[1, {"a": [2]}]]` 合法，类型是 `list<dynamic>`。
 - **不做联合类型**（`list<int|string>`）。要么装箱（那就是 `list<dynamic>` 绕远路），
   要么按元素带标签（等于把 tagged union 提前塞进容器）。**异质 ⇒ 统一降为 `dynamic`**，一条规则。
+  （tagged union 本身已经有了，见 ADR-0012：想要异质就**显式声明**一个 `enum`，
+  而不是让类型推断替你造一个匿名的和类型。）
 - 异质推断是**自上而下**的：一旦某层决定用 `dynamic`，它的子字面量就以 `dynamic` 为期望类型
   重新推断，于是嵌套的异质 JSON 字面量整棵树都落在 `list<dynamic>` / `dict<string,dynamic>` 上。
 - **dict 的键不降级为 `dynamic`**：键要参与哈希与插入序，跨标签比较/哈希是泥潭。

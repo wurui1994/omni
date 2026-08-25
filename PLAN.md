@@ -414,18 +414,40 @@ omni/
 - 测试：`tests/cases/22_dyn_arith`（差分）、`23_dyn_arith_mismatch`（运行期错误两边同文）、
   `24_print_containers`（差分，含嵌套/空/异质），加 `tests/js-exec/cases/03` 的回归行。
 
+**已完成（tagged union，2026-08-26）**：ADR-0012。异质记录的底座 —— 在它之前"这个值可能是
+A 也可能是 B"只有两条路：塞进 `dynamic`（丢掉静态类型，值域被限死在 JSON 那七种），
+或者手工维护一个带 `int kind` 字段的 struct（编译器帮不上任何忙）。
+- **一个关键字 `enum`**，载荷可选，所以 C 风格枚举是它的退化情形。`union` 留给将来那个
+  与 C ABI 兼容的**无标签** union（Jancy 的 FFI 要它）—— 现在把这个词用掉，那个就废了。
+- **变体名不进作用域**：只能写 `Shape.Circle(2.0)` / `Shape.Empty`。`Empty` / `Node` / `Red`
+  都是普通词，一旦灌进作用域就和函数名抢同一张表，而抢的时机是"别的模块加了个变体"。
+  与 ADR-0009 对模块名字的调子一致（不做隐式注入）。
+- **解构只有 `match`，且必须穷尽**：覆盖不全又没 `default` 是编译错误，加一个变体会让所有
+  不完整的 match 亮起来 —— 这是和类型最主要的收益。不提供 `s.tag` / `s is Circle` /
+  载荷直读，于是"读了错误变体的载荷"在语言层面不存在，也就不需要运行期检查。
+- **match 在检查器里就降级成 if/else 链**，后端完全不认识 match（只多认
+  `MakeEnum` / `EnumTag` / `EnumPayload` / `ZeroEnum` 四个节点）。刻意不生成 C 的 `switch`：
+  那样分支里的 `break` 会被 switch 接住，而 Omni 的 `break` 只有一个意思。
+- 值语义、载荷按值内联：C 侧 `int64_t tag` + union（无载荷变体不进 union，C99 没有空结构体），
+  JS 侧一个扁平对象 `{ $t: 0n, r: 2.0 }`。**按值绕回自己是编译错误**（大小无解），
+  而且环检测与 C 后端的拓扑排序都是 struct 与 enum **一起**做的。
+- 零值 = 第一个变体。不造 invalid 标签：那会让每个 match 都要处理一个源码里不存在的状态。
+- 测试：`tests/cases/25_enum`（js==c 差分，含"`break` 不被 match 吃掉"与"变体里的容器
+  仍是引用语义"）、`tests/errors/enum_rules`（13 条诊断）。
+- 自举顺带逮到一件事：检查器那个方法本来叫 `match`，而 JS 子集里 `x.match(...)` 是字符串的
+  正则匹配（`frontend-js` 只认正则字面量实参），于是 C1 生成不出来 —— 第三条轴的正常作用。
+
 **接下来**（顺序按 ADR-0001 的落地顺序重排）
 1. **原生侧的内存**：编译整个编译器 RSS 811 MB。低垂果实已经摘完（见上），剩下的
-   要靠生命周期信息 —— 并进第 3 条 ARC 一起做，而不是继续在分配器上抠。
-2. tagged union（异质记录的底座）。
-3. **ARC**（ADR-0006 落地顺序第 4 项的欠账）：按 ADR-0007 的一张编译期 unwind 表
+   要靠生命周期信息 —— 并进第 2 条 ARC 一起做，而不是继续在分配器上抠。
+2. **ARC**（ADR-0006 落地顺序第 4 项的欠账）：按 ADR-0007 的一张编译期 unwind 表
    （`pc → 存活的 owned 槽位`）同时服务错误路径释放与 GC 根枚举。当前 C 侧只分配不释放。
    注意 ADR-0001 把它从"自举前置"降级了：编译器用 arena 就够，ARC 的价值在长期运行的程序上。
-4. OIR 升级为 SSA + dialect 分层（P2 的真正内容），此时才开始写优化 pass。
+3. OIR 升级为 SSA + dialect 分层（P2 的真正内容），此时才开始写优化 pass。
    顺带可做的一条：`MakeClosure` 紧跟 `CallFn` 时直调消解，去掉适配器那一次多余调用。
-5. 补 `docs/adr/0002-ir-strategy.md`、`0003-memory-model.md`、`0004-ufcs-resolution.md`
-   （`0001`、`0009`、`0010` 已写）。
-6. 语法调研：Asymptote 与 Jancy 的冲突点（声明语法、运算符、`import` 语义）对照表 → Omni v0 语法定稿。
-7. tcc 在本机无 bottle（`brew install tcc` 失败），暂用 clang；需要毫秒级 C 编译时从
+4. 补 `docs/adr/0002-ir-strategy.md`、`0003-memory-model.md`、`0004-ufcs-resolution.md`
+   （`0001`、`0009`、`0010`、`0012` 已写）。
+5. 语法调研：Asymptote 与 Jancy 的冲突点（声明语法、运算符、`import` 语义）对照表 → Omni v0 语法定稿。
+6. tcc 在本机无 bottle（`brew install tcc` 失败），暂用 clang；需要毫秒级 C 编译时从
    `reference/tinycc` 源码构建。运行时 `.o` 缓存之后 `bench` 的 c 一路降到 151ms，
    剩下的仍然基本是 clang `-O2` 编译生成代码的时间（原生二进制本身 5ms）。

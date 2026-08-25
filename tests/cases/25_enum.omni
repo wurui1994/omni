@@ -1,0 +1,107 @@
+// tagged union（ADR-0012）：构造用 `类型.变体`，解构只有 match 一条路。
+// 差分测试的重点是"C 的 union 与 JS 的扁平对象在可观察行为上没有区别"。
+
+enum Shape {
+  Circle(real r),
+  Rect(real w, real h),
+  Empty,
+}
+
+// 无载荷的 enum 就是 C 风格枚举，同一个关键字
+enum Color {
+  Red,
+  Green,
+  Blue,
+}
+
+struct Point {
+  real x;
+  real y;
+}
+
+// 载荷可以是 struct、容器、另一个 enum
+enum Node {
+  Leaf(Point p, Color c),
+  Group(list<int> ids),
+  Nil,
+}
+
+real area(Shape s) {
+  match (s) {
+    case Circle(r): return 3.0 * r * r;
+    case Rect(w, h): return w * h;
+    case Empty: return 0.0;
+  }
+  return -1.0;
+}
+
+string name(Color c) {
+  match (c) {
+    case Red: return "red";
+    default: return "other";
+  }
+  return "?";
+}
+
+// 绑定名不必等于载荷字段名；这里故意都换掉
+int describe(Node n) {
+  match (n) {
+    case Leaf(pt, col): {
+      print(pt.x + pt.y);
+      print(name(col));
+      return 1;
+    }
+    case Group(xs): {
+      int sum = 0;
+      for (int v in xs) sum += v;
+      print(sum);
+      return 2;
+    }
+    case Nil: print("nil");
+  }
+  return 0;
+}
+
+print(area(Shape.Circle(2.0)));
+print(area(Shape.Rect(3.0, 4.0)));
+print(area(Shape.Empty));
+
+print(name(Color.Red));
+print(name(Color.Green));
+print(name(Color.Blue));
+
+Point p;
+p.x = 1.5;
+p.y = 2.5;
+print(describe(Node.Leaf(p, Color.Red)));
+print(describe(Node.Group([1, 2, 3])));
+print(describe(Node.Nil));
+
+// 值语义：改 p 之后，已经塞进变体里的那份不跟着变
+Node n = Node.Leaf(p, Color.Blue);
+p.x = 99.0;
+match (n) {
+  case Leaf(q, c): print(q.x);
+  default: print("?");
+}
+
+// 零值 = 第一个变体（Circle，载荷取零值）
+Shape z;
+print(area(z));
+
+// match 不吃 break：这里的 break 跳出的是 while
+int i = 0;
+while (true) {
+  match (Shape.Empty) {
+    case Empty: break;
+    default: print("unreachable");
+  }
+  i = i + 1;
+}
+print(i);
+
+// 变体里的容器是引用语义（和 struct 字段里的容器一样）
+list<int> shared = [7];
+Node g = Node.Group(shared);
+shared.push(8);
+print(describe(g));

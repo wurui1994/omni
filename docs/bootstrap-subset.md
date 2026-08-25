@@ -26,7 +26,7 @@ stage0 的能力边界与本文件一致，P3 冻结后不再扩展。
 3. `dynamic` 值表示 + **原生 json**（解析/序列化，复用 1、2）
 4. `class`（引用语义 + ARC）+ 方法降级为「第一参数为 this 的自由函数」+ UFCS 合并重载集
 5. `set<T>`（复用 dict 索引，无字面量语法）
-6. tagged union + 模块系统 `import` / `access` / `unravel`
+6. tagged union（ADR-0012：`enum` + `match`）+ 模块系统 `import` / `access` / `unravel`
 7. 闭包 / 函数值
 
 容器一律先做**编译器内建参数化**，用户自定义泛型推到 comptime 参数化之后。

@@ -1,0 +1,41 @@
+tests/errors/enum_rules.omni:10:1: error: enum 'Tree' contains itself by value (Tree -> Tree); use a class or a container to break the cycle
+  enum Tree {
+  ^^^^^^^^^^^
+tests/errors/enum_rules.omni:20:3: error: match on 'Shape' does not cover Empty; add the missing case(s) or a 'default'
+    match (s) {
+    ^^^^^^^^^^^
+tests/errors/enum_rules.omni:26:10: error: enum 'Shape' has no variant 'Triangle' (variants: Circle, Rect, Empty)
+      case Triangle(a): return a;
+           ^^^^^^^^
+tests/errors/enum_rules.omni:32:10: error: variant 'Empty' is already covered by an earlier case
+      case Empty: return 1.0;
+           ^^^^^
+tests/errors/enum_rules.omni:37:10: error: case 'Rect' binds 1 name(s) but the variant carries 2
+      case Rect(w): return w;
+           ^^^^
+tests/errors/enum_rules.omni:16:12: error: undefined function 'Circle'
+  print(area(Circle(1.0)));
+             ^^^^^^
+tests/errors/enum_rules.omni:16:7: error: no matching overload for 'area'
+  candidates:
+    real area(Shape s): cannot convert 'int' to 'Shape' for 's'
+  print(area(Circle(1.0)));
+        ^^^^^^^^^^^^^^^^^
+tests/errors/enum_rules.omni:43:17: error: enum 'Shape' has no variant 'Oval' (variants: Circle, Rect, Empty)
+  Shape a = Shape.Oval(1.0);
+                  ^^^^
+tests/errors/enum_rules.omni:44:17: error: variant 'Shape.Circle' takes 1 payload value(s), got 2
+  Shape b = Shape.Circle(1.0, 2.0);
+                  ^^^^^^
+tests/errors/enum_rules.omni:45:28: error: enum variant construction does not take named arguments
+  Shape c = Shape.Circle(r = 1.0);
+                             ^^^
+tests/errors/enum_rules.omni:49:8: error: 'match' requires an enum value, found 'int'
+  match (n) {
+         ^
+tests/errors/enum_rules.omni:54:13: error: cannot convert 'Shape' to 'dynamic'
+  dynamic d = Shape.Empty;
+              ^^^^^^^^^^^
+tests/errors/enum_rules.omni:55:7: error: cannot print a value of type 'Shape'
+  print(Shape.Empty);
+        ^^^^^^^^^^^

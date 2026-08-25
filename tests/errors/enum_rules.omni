@@ -1,0 +1,55 @@
+// tagged union 的规矩（ADR-0012）：每条错误都对应一个刻意不放开的东西。
+
+enum Shape {
+  Circle(real r),
+  Rect(real w, real h),
+  Empty,
+}
+
+// 按值绕回自己：载荷内联在 union 里，大小无解
+enum Tree {
+  Node(Tree left, Tree right),
+  Leaf,
+}
+
+// 变体名不进作用域，只能带着类型名写
+print(area(Circle(1.0)));
+
+real area(Shape s) {
+  // 少一个变体，且没有 default
+  match (s) {
+    case Circle(r): return r;
+    case Rect(w, h): return w * h;
+  }
+  // 不存在的变体
+  match (s) {
+    case Triangle(a): return a;
+    default: return 0.0;
+  }
+  // 同一个变体来两次
+  match (s) {
+    case Empty: return 0.0;
+    case Empty: return 1.0;
+    default: return 2.0;
+  }
+  // 绑定个数与载荷不符
+  match (s) {
+    case Rect(w): return w;
+    default: return 0.0;
+  }
+}
+
+// 变体名写错、载荷个数不对、命名实参
+Shape a = Shape.Oval(1.0);
+Shape b = Shape.Circle(1.0, 2.0);
+Shape c = Shape.Circle(r = 1.0);
+
+// match 的主语必须是 enum
+int n = 1;
+match (n) {
+  default: print("no");
+}
+
+// enum 装不进 dynamic（没有对应的标签）
+dynamic d = Shape.Empty;
+print(Shape.Empty);
