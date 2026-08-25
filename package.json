@@ -12,7 +12,10 @@
     "test": "node tests/run.js",
     "test:oracle": "node tests/oracle/run.js",
     "test:js": "node tests/js-roundtrip/run.js",
-    "test:all": "node tests/run.js && node tests/oracle/run.js && node tests/js-roundtrip/run.js",
+    "test:oir": "node tests/oir/run.js",
+    "test:js-exec": "node tests/js-exec/run.js",
+    "test:bootstrap": "node tests/bootstrap/run.js",
+    "test:all": "node tests/run.js && node tests/oracle/run.js && node tests/js-roundtrip/run.js && node tests/oir/run.js && node tests/js-exec/run.js && node tests/bootstrap/run.js",
     "bench": "node bench/compare.js",
     "lint": "tsc --noEmit -p jsconfig.json"
   },

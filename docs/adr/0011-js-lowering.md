@@ -263,6 +263,30 @@ import 树拼成一个 `Program`：后序遍历（依赖排在前面）、拆掉
 - 判据只有一条：真的要问操作系统才进这个文件。路径计算（`host/path.js`）与 sha256
   是纯计算，写成普通模块，链接器照常拼进来。
 
+### 18. 自举把值域钉死的几条（第 7 步量出来的）
+
+C0 → C1 → C2 走通之前，编译器自己的源码里有一批"JS 能跑、这个值域里不成立"的写法。
+它们不是降级器的缺口，是**语言的边界**，所以改的是源码，不是降级器：
+
+- **list 带不了属性**。`tokens.hashbang = h` 这类"顺手挂一个字段"要改成返回
+  `{ tokens, hashbang }`。同理 `xs.length = n` 不是截断而是给 list 写属性 ——
+  诊断的试探性回滚因此改成 `Diagnostics.mark()` / `rollback()`（内部 pop）。
+- **Map / Set 的键是值，没有对象标识**。`new Set(astNodes)` 这种靠引用去重的写法当场报错
+  （`cannot use a dict as a Map/Set key`），要改成按某个标量键去重。
+- **位运算只在 `int` 上**。`(lo + hi) >> 1` 里两边是 `real`，要写 `Math.floor(…/2)`。
+- **`int` 是 int64**，所以源码里不能出现越界字面量，十六进制的 bigint 字面量也要换成十进制常量。
+- **`BigInt(string)` 不是十进制的 `int_of_string`**：它认 `0x`/`0o`/`0b` 与正负号，
+  越界要报错。两个运行时各实现了一份（`$js_str_to_int` / `js_str_to_int`）。
+- **可变实参的 `push`** 定长 op 表达不了，单独给一个 `js_arr_push_all`；
+  对象展开、`new Map(pairs)` / `new Set(list)` 同理各占一个 op。
+- **`?.` 的短路是整条链的**：`a?.b.find(f)` 里 a 为空，`.b`、`find` 都不发生。
+  判空要提到"链上剩下部分"的外面（`lower.js` 的 `onObject`），就地包住一个成员访问是错的。
+- **跨文件的模块级名字在链接后共用一个作用域**（决策 16），重名是硬错 ——
+  前端里的 `Parser` / `lex` / `KEYWORDS` 之类因此都带上了 `Js` 后缀。
+
+安装布局也在这一步定下来：**std 的根是 `installDir()/../../lib`**，`installDir()` 是
+程序镜像所在目录。所以换个位置放的编译器要按这个布局摆，`tests/bootstrap/run.js` 就是这么摆的。
+
 ## 落地顺序
 
 1. `dynamic` 扩成完整 JS 值域：函数标签 + 动态调用（实参个数运行期检查）+ `js_*` 运算 op
@@ -271,7 +295,7 @@ import 树拼成一个 `Program`：后序遍历（依赖排在前面）、拆掉
 4. node 宿主面：fs / path / process / child_process / url
 5. `throw` / `try` 的静态降级
 6. `lower.js`：45 种节点全部降级
-7. C0 → C1 → C2，验不动点，并入测试轴
+7. C0 → C1 → C2，验不动点，并入测试轴（`tests/bootstrap/run.js`，第六条轴）
 
 每一步的出口条件与既有规矩一致：js/c 双后端差分全绿 + oracle（对照 node）+ 快照更新。
 

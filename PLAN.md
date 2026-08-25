@@ -372,12 +372,22 @@ omni/
   （7 条规矩）、`tests/oracle/closures.{omni,py}`（Python 参照里那句 `lambda x, i=i:`
   正是两种捕获语义的差别本身）。
 
+**已完成（自举，2026-08-26）**：ADR-0011 落地顺序第 7 步。`tests/bootstrap/run.js`，第六条测试轴。
+- 不动点成立：C0（`node stage0/src/cli.js`）→ C1（C0 emit-js 自己）→ C2（C1 emit-js 自己），
+  C1 与 C2 **逐字节相同**（36648 行）。逐用例还核对了"C1 的产物 == C0 的产物"
+  （11 个 js-exec + 21 个 `.omni`），并让 C1 真跑一个 `.omni` 程序。
+- 六条轴：`tests/run.js` 33 / `oracle` 7 / `js-roundtrip` 43 / `oir` 451 / `js-exec` 11 / `bootstrap` 34。
+- 值域边界（记进 ADR-0011 决策 18）：list 带不了属性、Map/Set 的键没有对象标识、
+  位运算只在 `int` 上、`BigInt(string)` 不是十进制的 `int_of_string`、`?.` 的短路是整条链的。
+  最后一条是这一步逮到的真 bug：`a?.b.find(f)` 原来只把判空包住 `.b`，a 为空照样去调 `find`。
+- 安装布局定死一条：**std 的根是 `installDir()/../../lib`**，换位置放的编译器要按这个布局摆。
+- 原生路径（emit C → clang）能构建出编译器（9.4s），但用它编译整个编译器会被 `Killed: 9`
+  ——只分配不释放（ARC 欠账，见下面第 4 条），是已知的下一块。
+
 **接下来**（顺序按 ADR-0001 的落地顺序重排）
-1. **JS AST → OIR 的降级**，也就是 C0 → C1 → C2 不动点（C1 与 C2 产出的 C 逐字节相同）。
-   解析已经通了，函数值也有了；还差的语言特性是**异质记录对象**（AST 节点）与**异常**
-   （`throw` / `try`），以及 `docs/js-bootstrap-subset.md` 里那张宿主库清单在 Omni 里的
-   对应物。**C 路径自举仍未开始。**
-2. tagged union（第 1 条里"异质记录"的底座）。
+1. **原生自举**：C 路径的 C1 编译整个编译器时内存跑飞（`Killed: 9`，user 时间只 1.6s）。
+   JS 路径的不动点已经成立，所以这条是运行时的账，不是前端的账。
+2. tagged union（异质记录的底座）。
 3. `dynamic` 的算术与 `print`/`string()` 的容器支持 —— 做完这两条，`.omnid` 才算真能用，
    REPL 默认模式也就能按 ADR-0008 改回 `dynamic`。
 4. **ARC**（ADR-0006 落地顺序第 4 项的欠账）：按 ADR-0007 的一张编译期 unwind 表
