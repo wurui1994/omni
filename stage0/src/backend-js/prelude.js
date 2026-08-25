@@ -536,6 +536,36 @@ function $js_utf8_bytes(s) { return [...new TextEncoder().encode($js_asS16(s))];
 function $js_num_parse_int(s, radix) {
   return parseInt($js_asS16(s), radix === undefined ? undefined : Math.trunc(radix));
 }
+// for-of 的取值面：数组原样返回（所以下标迭代是活的），字符串按**码点**切，
+// Map 给 [k, v] 对，Set 给元素。普通对象不可迭代 —— JS 也是这样。
+function $js_iter(v) {
+  switch ($dynTag(v)) {
+    case "list": return v;
+    case "Map": return $js_map_entries(v);
+    case "Set": return $js_set_items(v);
+    case "string": return [...v];
+    default: $rt_error($dynTag(v) + " is not iterable");
+  }
+}
+// o[k]：数组按下标、字符串按码元（只读）、普通对象按属性名。
+// Map/Set 上的 o[k] 在 JS 里是属性访问而不是条目，量过的源码里没有，所以报错。
+function $js_idx_get(o, k) {
+  switch ($dynTag(o)) {
+    case "list": return $js_arr_get(o, k);
+    case "string": return $js_str_index(o, k);
+    case "dict": return $js_obj_get(o, k);
+    default: $rt_error("cannot index a " + $dynTag(o));
+  }
+}
+// idx_set 的结果是**被赋的值**（JS 里赋值表达式的值就是右边），不是容器本身 ——
+// 和 obj_set 那个"返回对象好串成字面量"的约定不一样，别混。
+function $js_idx_set(o, k, v) {
+  switch ($dynTag(o)) {
+    case "list": $js_arr_set(o, k, v); return v;
+    case "dict": $js_obj_set(o, k, v); return v;
+    default: $rt_error("cannot assign to an index of a " + $dynTag(o));
+  }
+}
 
 // ------------------------------------------- 普通对象 / Map / Set（ADR-0011）
 // 刻意不用宿主 Map 的任意键能力：C 侧只有 dict<string, dynamic>，键得规范化成带标签的

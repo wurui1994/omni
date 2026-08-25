@@ -64,7 +64,7 @@ export const JS_ABI = {
   js_arr_new: { js: '$js_arr_new', c: 'omni_js_arr_new', arity: 0 },
   js_arr_len: { js: '$js_arr_len', c: 'omni_js_arr_len', arity: 1 },
   js_arr_get: { js: '$js_arr_get', c: 'omni_js_arr_get', arity: 2 },
-  js_arr_set: { js: '$js_arr_set', c: 'omni_js_arr_set', arity: 3 },
+  js_arr_set: { js: '$js_arr_set', c: 'omni_js_arr_set', arity: 3, ret: 'void' },
   js_arr_push: { js: '$js_arr_push', c: 'omni_js_arr_push', arity: 2 },
   js_arr_pop: { js: '$js_arr_pop', c: 'omni_js_arr_pop', arity: 1 },
   js_arr_slice: { js: '$js_arr_slice', c: 'omni_js_arr_slice', arity: 3 },
@@ -155,6 +155,13 @@ export const JS_ABI = {
   js_utf8_bytes: { js: '$js_utf8_bytes', c: 'omni_js_utf8_bytes', arity: 1 },
   js_num_parse_int: { js: '$js_num_parse_int', c: 'omni_js_num_parse_int', arity: 2 },
   js_arr_entries: { js: '$js_arr_entries', c: 'omni_js_arr_entries', arity: 1 },
+
+  // ------------------------------------------------- for-of 与 o[k]（lower.js 用）
+  // iter：数组原样返回（下标迭代是活的），字符串按码点切，Map 给 [k,v]，Set 给元素。
+  // idx_get/idx_set：o[k] 按接收者标签派发 —— 这不是"成员名"，进不了 JS_METHODS 表。
+  js_iter: { js: '$js_iter', c: 'omni_js_iter', arity: 1 },
+  js_idx_get: { js: '$js_idx_get', c: 'omni_js_idx_get', arity: 2 },
+  js_idx_set: { js: '$js_idx_set', c: 'omni_js_idx_set', arity: 3 },
 
   // ---------------------------------------------------------------- node 宿主面
   // 只收"真的要问操作系统"的东西。path 的 join/dirname/basename/resolve/relative/

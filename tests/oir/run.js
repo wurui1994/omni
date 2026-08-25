@@ -313,6 +313,22 @@ c('disp/toPrecision', m('toPrecision', [real(1 / 3), real(17)]), '(1/3).toPrecis
 c('disp/charCodeAt', m('charCodeAt', [H(), real(1)]), `${HS}.charCodeAt(1)`);
 c('disp/split', m('join', [m('split', [str('a/b/c'), str('/')]), str('|')]), '"a/b/c".split("/").join("|")');
 
+// for-of 的取值面与 o[k]。字符串那条盯的是"按码点不按码元"：😀 是一个码点两个码元。
+c('iter/list', m('join', [js('js_iter', [A()]), str('|')]), `[...${AS}].join("|")`);
+c('iter/str', p('length', js('js_iter', [str('a😀b')])), '[..."a😀b"].length');
+c('iter/str-join', m('join', [js('js_iter', [str('a😀b')]), str('|')]), '[..."a😀b"].join("|")');
+c('iter/map', p('length', js('js_iter', [MAP()])), `[...${MAPS}].length`);
+c('iter/set', m('join', [js('js_iter', [SET()]), str('|')]), `[...${SETS}].join("|")`);
+c('idx/list', js('js_idx_get', [A(), real(1)]), `${AS}[1]`);
+c('idx/list-oob', js('js_idx_get', [A(), real(9)]), `${AS}[9]`);
+c('idx/str', js('js_idx_get', [H(), real(1)]), `${HS}[1]`);
+c('idx/obj', js('js_idx_get', [OBJ(), str('中')]), `${OBJS}.get("中")`);
+c('idx/obj-miss', js('js_idx_get', [OBJ(), str('zz')]), `${OBJS}.get("zz")`);
+// idx_set 的值是被赋的值（JS 的赋值表达式语义），副作用另外读回来验
+c('idxset/value', js('js_idx_set', [A(), real(0), str('x')]), '"x"');
+c('idxset/list', js('js_idx_get', [js('js_arr_from', [A()]), real(0)]), `${AS}[0]`);
+c('idxset/obj', js('js_idx_get', [OBJ(), str('a')]), `${OBJS}.get("a")`);
+
 // Number / Math。toPrecision(17) 与 toString(8/16) 是自举的关键路径：编译器自己用它们
 // 把 double 与字节写进生成的 C，差一个字符两代产出就不一样。
 for (const src of ['0', '0.1', '1/3', '-2.5', '1e21', '1e-7', '123456789012345680000', '1.7976931348623157e308']) {
