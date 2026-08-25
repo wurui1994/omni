@@ -133,13 +133,42 @@ omni_str omni_s16_to_utf8(omni_s16 s) {
 
 /* ---------------------------------------------------------------- 拼接与切片 */
 
+/* 累加缓存：`s = s + piece` 一段一段往后拼是这个值域里最常见的写法（编译器自己的输出就是
+   这么攒出来的），而 omni_s16 是不可变的 {p,len}，没有容量字段 —— 每次 cat 都重新分配全长
+   就是**平方级**。所以这里记住最近一次 cat 产出的缓冲区（起点/长度/容量）：下一次 cat 的
+   左串正好是它时，直接写进预留出来的容量里。指针+长度相同就必然是同一个串，别名安全：
+   只往 len 之后写，已有码元一个都不动。
+   （arena 顶那条快路径不够用：两次追加之间只要有任何别的分配，累加串就不在顶上了。） */
+static uint16_t *acc_p;
+static int64_t acc_len, acc_cap;
+
+/* 超过这个长度才预留容量 —— 小串占多数，给它们留白只是浪费 */
+#define S16_SLACK_MIN 512
+
 omni_s16 omni_s16_cat(omni_s16 a, omni_s16 b) {
   if (a.len == 0) return b;
   if (b.len == 0) return a;
-  uint16_t *out = alloc16(a.len + b.len);
+  if (a.p == acc_p && a.len == acc_len && acc_cap - acc_len >= b.len) {
+    memcpy(acc_p + acc_len, b.p, (size_t)b.len * 2);
+    acc_len += b.len;
+    return mk(acc_p, acc_len);
+  }
+#ifndef OMNI_NO_ARENA
+  /* a 正好是 arena 顶上那块时，把 b 直接追加上去 = 真正的原地扩容（同 omni_str_cat） */
+  size_t bb = (size_t)b.len * sizeof(uint16_t);
+  if ((const char *)(a.p + a.len) == omni_arena_ptr && bb <= (size_t)(omni_arena_end - omni_arena_ptr)) {
+    memcpy(omni_arena_ptr, b.p, bb);
+    omni_arena_ptr += bb;
+    return mk(a.p, a.len + b.len);
+  }
+#endif
+  int64_t need = a.len + b.len;
+  int64_t cap = need >= S16_SLACK_MIN ? need * 2 : need;
+  uint16_t *out = alloc16(cap);
   memcpy(out, a.p, (size_t)a.len * 2);
   memcpy(out + a.len, b.p, (size_t)b.len * 2);
-  return mk(out, a.len + b.len);
+  if (cap > need) { acc_p = out; acc_len = need; acc_cap = cap; }
+  return mk(out, need);
 }
 
 /* start/end 必须是调用方按 JS 规则夹好的（0 <= start <= end <= len）；
