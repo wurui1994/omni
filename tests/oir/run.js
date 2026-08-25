@@ -229,6 +229,41 @@ c('aincludes', jsBool('js_arr_includes', [A(), real(1)]), `${AS}.includes(1)`);
 c('aincludes/nan', jsBool('js_arr_includes', [arr(real(NaN)), real(NaN)]), '[NaN].includes(NaN)');
 c('aindexOf/nan', js('js_arr_index_of', [arr(real(NaN)), real(NaN)]), '[NaN].indexOf(NaN)');
 
+// 普通对象 / Map / Set。set/add 都返回容器本身，所以能纯表达式地搭出来。
+// 数字键那两条是重点：C 侧把键规范化成带标签的字符串，"1" 不能和 1n 撞。
+const OBJ = () => js('js_obj_set', [js('js_obj_set', [js('js_obj_new', []), str('a'), real(1)]), str('中'), str('v')]);
+const OBJS = 'new Map([["a", 1], ["中", "v"]])';
+c('oget', js('js_obj_get', [OBJ(), str('a')]), `${OBJS}.get("a")`);
+c('oget/cn', js('js_obj_get', [OBJ(), str('中')]), `${OBJS}.get("中")`);
+c('oget/miss', js('js_obj_get', [OBJ(), str('zz')]), `${OBJS}.get("zz")`);
+c('ohas', jsBool('js_obj_has', [OBJ(), str('中')]), `${OBJS}.has("中")`);
+c('ohas/miss', jsBool('js_obj_has', [OBJ(), str('zz')]), `${OBJS}.has("zz")`);
+c('odelete', jsBool('js_obj_delete', [OBJ(), str('a')]), `${OBJS}.delete("a")`);
+c('okeys', js('js_arr_join', [js('js_obj_keys', [OBJ()]), str(',')]), `[...${OBJS}.keys()].join(",")`);
+c('ovalues', js('js_arr_join', [js('js_obj_values', [OBJ()]), str(',')]), `[...${OBJS}.values()].join(",")`);
+c('oentries/len', js('js_arr_len', [js('js_obj_entries', [OBJ()])]), `[...${OBJS}].length`);
+c('oentries/k', js('js_arr_get', [js('js_arr_get', [js('js_obj_entries', [OBJ()]), real(1)]), real(0)]), `[...${OBJS}][1][0]`);
+
+const MAP = () => js('js_map_set', [js('js_map_set', [js('js_map_new', []), real(1), str('num')]), str('1'), str('str')]);
+const MAPS = 'new Map([[1, "num"], ["1", "str"]])';
+c('mget/num', js('js_map_get', [MAP(), real(1)]), `${MAPS}.get(1)`);
+c('mget/str', js('js_map_get', [MAP(), str('1')]), `${MAPS}.get("1")`);
+c('mget/miss', js('js_map_get', [MAP(), real(2)]), `${MAPS}.get(2)`);
+c('msize', js('js_map_size', [MAP()]), `${MAPS}.size`);
+c('mhas', jsBool('js_map_has', [MAP(), real(1)]), `${MAPS}.has(1)`);
+c('mdelete', jsBool('js_map_delete', [MAP(), str('1')]), `${MAPS}.delete("1")`);
+c('mkeys', js('js_arr_join', [js('js_map_keys', [MAP()]), str('|')]), `[...${MAPS}.keys()].join("|")`);
+c('mvalues', js('js_arr_join', [js('js_map_values', [MAP()]), str('|')]), `[...${MAPS}.values()].join("|")`);
+c('mkeys/tag', js('js_typeof', [js('js_arr_get', [js('js_map_keys', [MAP()]), real(0)])]), `typeof [...${MAPS}.keys()][0]`);
+
+const SET = () => js('js_set_add', [js('js_set_add', [js('js_set_add', [js('js_set_new', []), str('x')]), real(2)]), str('x')]);
+const SETS = 'new Set(["x", 2, "x"])';
+c('ssize', js('js_set_size', [SET()]), `${SETS}.size`);
+c('shas', jsBool('js_set_has', [SET(), real(2)]), `${SETS}.has(2)`);
+c('shas/miss', jsBool('js_set_has', [SET(), str('2')]), `${SETS}.has("2")`);
+c('sdelete', jsBool('js_set_delete', [SET(), str('x')]), `${SETS}.delete("x")`);
+c('sitems', js('js_arr_join', [js('js_set_items', [SET()]), str('|')]), `[...${SETS}].join("|")`);
+
 
 // ---------------------------------------------------------------- 跑
 function run(cmd, args, opts = {}) {

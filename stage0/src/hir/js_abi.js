@@ -86,4 +86,34 @@ export const JS_ABI = {
   js_arr_reduce: { js: '$js_arr_reduce', c: 'omni_js_arr_reduce', arity: 3 },
   js_arr_flat_map: { js: '$js_arr_flat_map', c: 'omni_js_arr_flat_map', arity: 2 },
   js_arr_sort: { js: '$js_arr_sort', c: 'omni_js_arr_sort', arity: 2 },
+
+  // ------------------------------------------------- 普通对象 / Map / Set
+  // 对象 -> dict<string, dynamic>，键是属性名的 UTF-8（进出转码）。
+  // Map/Set -> 同一种 dict，但键是带标签的规范化字符串，条目里存着原键 ——
+  // 量过的源码里有两张 Map 用数字键，"1" 不能和 1n 撞（见 ADR-0011 的"已量过的宿主面"）。
+  js_obj_new: { js: '$js_obj_new', c: 'omni_js_obj_new', arity: 0 },
+  js_obj_get: { js: '$js_obj_get', c: 'omni_js_obj_get', arity: 2 },
+  js_obj_set: { js: '$js_obj_set', c: 'omni_js_obj_set', arity: 3 },
+  js_obj_has: { js: '$js_obj_has', c: 'omni_js_obj_has', arity: 2 },
+  js_obj_delete: { js: '$js_obj_delete', c: 'omni_js_obj_delete', arity: 2 },
+  js_obj_keys: { js: '$js_obj_keys', c: 'omni_js_obj_keys', arity: 1 },
+  js_obj_values: { js: '$js_obj_values', c: 'omni_js_obj_values', arity: 1 },
+  js_obj_entries: { js: '$js_obj_entries', c: 'omni_js_obj_entries', arity: 1 },
+
+  js_map_new: { js: '$js_map_new', c: 'omni_js_map_new', arity: 0 },
+  js_map_size: { js: '$js_map_size', c: 'omni_js_map_size', arity: 1 },
+  js_map_has: { js: '$js_map_has', c: 'omni_js_map_has', arity: 2 },
+  js_map_get: { js: '$js_map_get', c: 'omni_js_map_get', arity: 2 },
+  js_map_set: { js: '$js_map_set', c: 'omni_js_map_set', arity: 3 },
+  js_map_delete: { js: '$js_map_delete', c: 'omni_js_map_delete', arity: 2 },
+  js_map_keys: { js: '$js_map_keys', c: 'omni_js_map_keys', arity: 1 },
+  js_map_values: { js: '$js_map_values', c: 'omni_js_map_values', arity: 1 },
+  js_map_entries: { js: '$js_map_entries', c: 'omni_js_map_entries', arity: 1 },
+
+  js_set_new: { js: '$js_set_new', c: 'omni_js_set_new', arity: 0 },
+  js_set_size: { js: '$js_set_size', c: 'omni_js_set_size', arity: 1 },
+  js_set_has: { js: '$js_set_has', c: 'omni_js_set_has', arity: 2 },
+  js_set_add: { js: '$js_set_add', c: 'omni_js_set_add', arity: 2 },
+  js_set_delete: { js: '$js_set_delete', c: 'omni_js_set_delete', arity: 2 },
+  js_set_items: { js: '$js_set_items', c: 'omni_js_set_items', arity: 1 },
 };

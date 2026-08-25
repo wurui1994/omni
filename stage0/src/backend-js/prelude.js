@@ -515,6 +515,59 @@ function $js_arr_cmp(f, x, y) {
 }
 function $js_arr_sort(a, f) { $js_arr_of(a).sort((x, y) => $js_arr_cmp(f, x, y)); return a; }
 
+// ------------------------------------------- 普通对象 / Map / Set（ADR-0011）
+// 刻意不用宿主 Map 的任意键能力：C 侧只有 dict<string, dynamic>，键得规范化成带标签的
+// 字符串。两边必须同样地绕这一圈，否则键碰撞的边角行为会不一样。
+function $js_dict_of(v) {
+  if ($dynTag(v) !== "dict") $rt_error($dynTag(v) + " is not an object");
+  return v;
+}
+function $js_key(k) {
+  switch ($dynTag(k)) {
+    case "string": return "s" + k;
+    case "int": return "i" + k.toString();
+    case "real": return "n" + $js_str(k);
+    case "bool": return "b" + (k ? 1 : 0);
+    case "null": return "z";
+    case "undefined": return "u";
+    default: $rt_error("cannot use a " + $dynTag(k) + " as a Map/Set key");
+  }
+}
+function $js_prop(k) { return $js_asS16(k); }
+function $js_obj_new() { return new Map(); }
+function $js_obj_get(o, k) {
+  const d = $js_dict_of(o), key = $js_prop(k);
+  return d.has(key) ? d.get(key) : undefined;
+}
+// set 返回对象本身，这样对象字面量可以降级成一串链式调用，不需要临时变量
+function $js_obj_set(o, k, v) { $js_dict_of(o).set($js_prop(k), v); return o; }
+function $js_obj_has(o, k) { return $js_dict_of(o).has($js_prop(k)); }
+function $js_obj_delete(o, k) { return $js_dict_of(o).delete($js_prop(k)); }
+function $js_obj_keys(o) { return [...$js_dict_of(o).keys()]; }
+function $js_obj_values(o) { return [...$js_dict_of(o).values()]; }
+function $js_obj_entries(o) { return [...$js_dict_of(o)].map(([k, v]) => [k, v]); }
+
+function $js_map_new() { return new Map(); }
+function $js_map_size(m) { return $js_dict_of(m).size; }
+function $js_map_has(m, k) { return $js_dict_of(m).has($js_key(k)); }
+function $js_map_get(m, k) {
+  const d = $js_dict_of(m), key = $js_key(k);
+  return d.has(key) ? d.get(key)[1] : undefined;
+}
+function $js_map_set(m, k, v) { $js_dict_of(m).set($js_key(k), [k, v]); return m; }
+function $js_map_delete(m, k) { return $js_dict_of(m).delete($js_key(k)); }
+function $js_map_keys(m) { return [...$js_dict_of(m).values()].map((p) => p[0]); }
+function $js_map_values(m) { return [...$js_dict_of(m).values()].map((p) => p[1]); }
+function $js_map_entries(m) { return [...$js_dict_of(m).values()]; }
+
+function $js_set_new() { return new Map(); }
+function $js_set_size(s) { return $js_dict_of(s).size; }
+function $js_set_has(s, v) { return $js_dict_of(s).has($js_key(v)); }
+function $js_set_add(s, v) { $js_dict_of(s).set($js_key(v), v); return s; }
+function $js_set_delete(s, v) { return $js_dict_of(s).delete($js_key(v)); }
+function $js_set_items(s) { return [...$js_dict_of(s).values()]; }
+
+
 
 // dynamic 的运行期分派面（ADR-0008 第 5 节的封闭清单）。
 // 有了这些，读写 JSON 不需要先 asList()/asDict()，源码里也不需要出现 dyn()。
