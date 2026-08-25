@@ -16,8 +16,8 @@ import { tmpdir } from 'node:os';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { SourceFile, Diagnostics } from '../../stage0/src/source/diag.js';
-import { parseJs } from '../../stage0/src/frontend-js/parser.js';
+import { Diagnostics } from '../../stage0/src/source/diag.js';
+import { linkJs } from '../../stage0/src/frontend-js/link.js';
 import { lowerJs } from '../../stage0/src/frontend-js/lower.js';
 import { emitJs } from '../../stage0/src/backend-js/emit.js';
 import { emitC } from '../../stage0/src/backend-c/emit.js';
@@ -42,7 +42,6 @@ const failures = [];
 for (const file of cases) {
   const name = basename(file, '.js');
   const path = join(here, 'cases', file);
-  const text = readFileSync(path, 'utf8');
 
   const ref = run(process.execPath, [path]);
   if (ref.code !== 0) {
@@ -52,8 +51,16 @@ for (const file of cases) {
     continue;
   }
 
+  // 单文件的用例也走链接器：没有 import 的话结果就是它自己（ADR-0011 落地 6e）
   const diags = new Diagnostics();
-  const ast = parseJs(new SourceFile(path, text), diags);
+  const read = (p) => {
+    try {
+      return readFileSync(p, 'utf8');
+    } catch {
+      return null;
+    }
+  };
+  const ast = linkJs(path, read, diags);
   const mod = diags.hasErrors ? null : lowerJs(ast, diags);
   if (diags.hasErrors) {
     fail++;
