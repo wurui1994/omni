@@ -67,7 +67,7 @@ OMNI_JS_RE_2(LT, DT)
    全局匹配的空匹配推进规则两侧必须一样：匹配到空串时下一次从 end+1 找，
    跳过的那个码元由"下一段原文"自然带出来，不需要单独补。 */
 #define OMNI_JS_RE_2(LT, DT) \
-static omni_dyn omni_js_re_replace(omni_str pat, omni_str flags, omni_dyn sd, omni_dyn repl) { \
+static omni_dyn omni_js_re_replace(omni_dyn pat, omni_dyn flags, omni_dyn sd, omni_dyn repl) { \
   omni_re re = omni_js_re_get(pat, flags); \
   omni_s16 s = omni_js_as_s16(sd); \
   int ng = omni_re_groups(re); \
@@ -91,7 +91,7 @@ static omni_dyn omni_js_re_replace(omni_str pat, omni_str flags, omni_dyn sd, om
   omni_s16_buf_add(&out, omni_s16_slice(s, copied, s.len)); \
   return omni_dyn_of_s16(omni_s16_buf_done(&out)); \
 } \
-static omni_dyn omni_js_re_match(omni_str pat, omni_str flags, omni_dyn sd) { \
+static omni_dyn omni_js_re_match(omni_dyn pat, omni_dyn flags, omni_dyn sd) { \
   omni_re re = omni_js_re_get(pat, flags); \
   if (!omni_re_global(re)) { \
     omni_error("regexp: .match without /g/ is not supported (the result object has index/input on it)"); \
@@ -112,7 +112,7 @@ OMNI_JS_RE_3(LT, DT)
    目标），空串输入只在整体匹配得上时才返回空数组，末尾那段总要补上。
    空匹配不许停在当前段的起点（否则 /x*​/ 会切出无穷多个空串），所以 q 从 p 起逐位试。 */
 #define OMNI_JS_RE_3(LT, DT) \
-static omni_dyn omni_js_re_split(omni_str pat, omni_str flags, omni_dyn sd, omni_dyn limit) { \
+static omni_dyn omni_js_re_split(omni_dyn pat, omni_dyn flags, omni_dyn sd, omni_dyn limit) { \
   omni_re re = omni_js_re_get(pat, flags); \
   omni_s16 s = omni_js_as_s16(sd); \
   int ng = omni_re_groups(re); \

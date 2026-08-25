@@ -327,27 +327,27 @@ c('json/indent-nested', J(J(js('js_obj_set', [js('js_obj_new', []), str('o'), OB
   'JSON.stringify(JSON.stringify({"o": {"a": 1, "中": "v"}}, null, 2))');
 
 // ---------------------------------------------------------------- RegExp
-// 模式与 flags 是普通的 Omni string（不进 UTF-16 域）：它们是编译期字面量，
-// 两侧都拿它当缓存键。参照侧统一用 new RegExp(...) 而不是字面量，省掉一层转义。
-const sc = (v) => ({ kind: 'Const', type: S, value: v });
+// 模式与 flags 是 JS 域的字符串（正则字面量降下来是个带 source/flags 的对象，
+// 那两个字段是运行期取出来的），所以两侧都按内容做编译缓存，不按字面量身份。
+// 参照侧统一用 new RegExp(...) 而不是字面量，省掉一层转义。
 const P = (v) => JSON.stringify(v);
 const RE = (p, f) => `new RegExp(${P(p)}, ${P(f)})`;
 function reTest(p, f, s) {
-  c(`re/test/${p}${f && `|${f}`}|${P(s)}`, jsBool('js_re_test', [sc(p), sc(f), str(s)]),
+  c(`re/test/${p}${f && `|${f}`}|${P(s)}`, jsBool('js_re_test', [str(p), str(f), str(s)]),
     `${RE(p, f)}.test(${P(s)})`);
 }
 function reMatch(p, f, s) {
-  c(`re/match/${p}|${f}|${P(s)}`, J(js('js_re_match', [sc(p), sc(f), str(s)])),
+  c(`re/match/${p}|${f}|${P(s)}`, J(js('js_re_match', [str(p), str(f), str(s)])),
     `JSON.stringify(${P(s)}.match(${RE(p, f)}))`);
 }
 function reSplit(p, f, s, lim) {
   c(`re/split/${p}|${f}|${P(s)}${lim === undefined ? '' : `|${lim}`}`,
-    J(js('js_re_split', [sc(p), sc(f), str(s), lim === undefined ? undef : real(lim)])),
+    J(js('js_re_split', [str(p), str(f), str(s), lim === undefined ? undef : real(lim)])),
     `JSON.stringify(${P(s)}.split(${RE(p, f)}${lim === undefined ? '' : `, ${lim}`}))`);
 }
 function reReplace(p, f, s, r) {
   c(`re/replace/${p}|${f}|${P(s)}|${P(r)}`,
-    J(js('js_re_replace', [sc(p), sc(f), str(s), str(r)])),
+    J(js('js_re_replace', [str(p), str(f), str(s), str(r)])),
     `JSON.stringify(${P(s)}.replace(${RE(p, f)}, ${P(r)}))`);
 }
 

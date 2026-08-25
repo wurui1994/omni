@@ -822,7 +822,10 @@ function $js_install_dir() {
 // 已知的不完整：i 在宿主这边是完整 Unicode 折叠，C 侧只折 ASCII。两边都只在
 // ASCII 上用 i（量过），真越界时 tests/oir 会先炸。
 const $RE_CACHE = new Map();
-function $js_re_get(pat, flags) {
+function $js_re_get(pat_, flags_) {
+  // 模式与 flags 是 JS 域的字符串（正则字面量降下来是个带 source/flags 的对象），
+  // 所以两侧都按内容做缓存键，不按字面量身份
+  const pat = $js_asS16(pat_), flags = $js_asS16(flags_);
   const key = pat + "\u0000" + flags;
   let re = $RE_CACHE.get(key);
   if (re === undefined) {
@@ -837,11 +840,13 @@ function $js_re_find(re, s, start) {
   re.lastIndex = start;
   return re.exec(s);
 }
-function $js_re_test(pat, flags, s) {
+function $js_re_test(pat, flags_, s) {
+  const flags = $js_asS16(flags_);
   if (flags.includes("g")) $rt_error("regexp: .test on a /g/ regexp is not supported (lastIndex has no home here)");
   return $js_re_find($js_re_get(pat, flags), $js_asS16(s), 0) !== null;
 }
-function $js_re_match(pat, flags, s) {
+function $js_re_match(pat, flags_, s) {
+  const flags = $js_asS16(flags_);
   if (!flags.includes("g")) {
     $rt_error("regexp: .match without /g/ is not supported (the result object has index/input on it)");
   }
@@ -880,7 +885,8 @@ function $js_re_sub(repl, s, m) {
   }
   return out;
 }
-function $js_re_replace(pat, flags, s, repl) {
+function $js_re_replace(pat, flags_, s, repl) {
+  const flags = $js_asS16(flags_);
   const re = $js_re_get(pat, flags), str = $js_asS16(s);
   const g = flags.includes("g"), isFn = $dynTag(repl) === "function";
   let out = "", copied = 0, at = 0;

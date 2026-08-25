@@ -751,28 +751,31 @@ bool omni_re_search(omni_re re, omni_s16 s, int64_t start, int64_t *caps) {
    每个字符都要重新解析一遍模式。
    开放寻址，满了就整表丢掉重来：条目数是源码里正则字面量的条数（量过 35 条），
    撑不到需要淘汰策略的地步，而"丢掉重来"比"退化成不缓存"更容易解释。 */
+/* 缓存的键是模式与 flags 的**内容**，不是指针。
+   一开始按字面量指针做键，是因为源码里的正则全是字面量；但 `const IDENT_KEY = /re/`
+   这种把正则存进变量再用的写法也是量出来的，那时模式串是运行期拼出来的对象字段，
+   指针每次都不同。按内容做键两种写法都命中，代价只是一次哈希 + 一次比较。 */
 #define RE_CACHE_N 128
 
 typedef struct {
-  const char *pat;
-  int64_t patlen;
-  const char *flags;
-  int64_t flaglen;
+  omni_s16 pat;
+  omni_s16 flags;
   omni_re re;
 } re_cache_ent;
 
 static re_cache_ent re_cache[RE_CACHE_N];
 static int re_cache_count;
 
-omni_re omni_js_re_get(omni_str pattern, omni_str flags) {
-  size_t h = (size_t)(uintptr_t)pattern.p * 31u + (size_t)(uintptr_t)flags.p;
+omni_re omni_js_re_get(omni_dyn pattern_d, omni_dyn flags_d) {
+  omni_s16 pattern = omni_js_as_s16(pattern_d);
+  omni_s16 flags = omni_js_as_s16(flags_d);
+  size_t h = (size_t)omni_s16_hash(pattern) * 31u + (size_t)omni_s16_hash(flags);
   for (int probe = 0; probe < 8; probe++) {
     re_cache_ent *e = &re_cache[(h + (size_t)probe) % RE_CACHE_N];
     if (!e->re) break;
-    if (e->pat == pattern.p && e->patlen == pattern.len
-        && e->flags == flags.p && e->flaglen == flags.len) return e->re;
+    if (omni_s16_eq(e->pat, pattern) && omni_s16_eq(e->flags, flags)) return e->re;
   }
-  omni_re re = omni_re_compile(omni_s16_of_utf8(pattern), omni_s16_of_utf8(flags));
+  omni_re re = omni_re_compile(pattern, flags);
   if (omni_re_groups(re) > OMNI_RE_MAX_CAPS - 1) omni_error("regexp: too many capturing groups");
   if (re_cache_count >= RE_CACHE_N / 2) {
     memset(re_cache, 0, sizeof re_cache);
@@ -781,10 +784,8 @@ omni_re omni_js_re_get(omni_str pattern, omni_str flags) {
   for (int probe = 0; probe < 8; probe++) {
     re_cache_ent *e = &re_cache[(h + (size_t)probe) % RE_CACHE_N];
     if (e->re) continue;
-    e->pat = pattern.p;
-    e->patlen = pattern.len;
-    e->flags = flags.p;
-    e->flaglen = flags.len;
+    e->pat = pattern;
+    e->flags = flags;
     e->re = re;
     re_cache_count++;
     break;
@@ -794,7 +795,7 @@ omni_re omni_js_re_get(omni_str pattern, omni_str flags) {
 
 /* test：仓库里所有 `.test()` 的正则都没有 g（量过），所以没有 lastIndex 这回事，
    永远从 0 开始找。真出现带 g 的 test，语义会和 JS 分叉，所以那种情况直接报错。 */
-bool omni_js_re_test(omni_str pattern, omni_str flags, omni_dyn s) {
+bool omni_js_re_test(omni_dyn pattern, omni_dyn flags, omni_dyn s) {
   omni_re re = omni_js_re_get(pattern, flags);
   if (omni_re_global(re)) omni_error("regexp: .test on a /g/ regexp is not supported (lastIndex has no home here)");
   int64_t caps[2 * OMNI_RE_MAX_CAPS];

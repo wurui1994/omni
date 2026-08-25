@@ -233,8 +233,8 @@ int omni_re_groups(omni_re re);
 bool omni_re_global(omni_re re);
 bool omni_re_multiline(omni_re re);
 bool omni_re_search(omni_re re, omni_s16 s, int64_t start, int64_t *caps);
-omni_re omni_js_re_get(omni_str pattern, omni_str flags);
-bool omni_js_re_test(omni_str pattern, omni_str flags, omni_dyn s);
+omni_re omni_js_re_get(omni_dyn pattern, omni_dyn flags);
+bool omni_js_re_test(omni_dyn pattern, omni_dyn flags, omni_dyn s);
 
 /* omni_js_num.c —— JS 的 Number / Math / BigInt。
    toPrecision 与 toString(radix) 是自举的关键路径：编译器自己用它们把 double 与字节
