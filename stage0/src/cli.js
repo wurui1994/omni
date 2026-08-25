@@ -11,6 +11,7 @@
 import {
   writeText, readText, exists, readDir, mtimeMs, fileSize, mkdTemp, rename,
   args as procArgs, env, stdout, stderr, setExitCode, spawn, tmpDir, evalJs,
+  cwd, installDir,
 } from './host/native.js';
 import { join, basename } from './host/path.js';
 import { hash16 } from './host/hash.js';
@@ -23,6 +24,7 @@ import { emitC } from './backend-c/emit.js';
 import { RUNTIME_DIR, runtimeSources } from './runtime/c_runtime.js';
 import { loadProgram, MODE_BY_EXT } from './module/load.js';
 import { startRepl } from './repl.js';
+import { bootstrapSelf } from './bootstrap.js';
 
 /** 文件后缀决定默认的类型模式（ADR-0008 第 1 节）；`--mode` 可覆盖，REPL 用它 */
 function modeFor(path, argv, fallback = 'mixed') {
@@ -158,6 +160,26 @@ function main(argv) {
   }
   // repl 没有源文件；默认模式是 ADR-0008 第 3 节的 dynamic（沿革见 repl.js 文件头）
   if (cmd === 'repl') return startRepl(compileText, modeFor('', rest, 'dynamic'));
+  // 自举也没有源文件参数（默认就是编译器自己）。整条链与四条门槛见 bootstrap.js
+  if (cmd === 'bootstrap') {
+    const oi = rest.indexOf('-o');
+    const outDir = oi >= 0 ? rest[oi + 1] : join(cwd(), 'dist');
+    const source = path === undefined ? join(installDir(), '..', 'cli.js') : path;
+    if (!exists(source)) {
+      throw new OmniError(`bootstrap: no compiler source at ${source}; pass the path explicitly`);
+    }
+    const r = bootstrapSelf({
+      source,
+      outDir,
+      quick: rest.includes('-q') || rest.includes('--quick'),
+      emitOf: (kind, p) => {
+        const { mod } = compile(p, []);
+        return kind === 'c' ? emitC(mod, {}) : emitJs(mod);
+      },
+      buildTo: (p, out) => buildNative(compile(p, []).mod, out).cc,
+    });
+    return r.fail > 0 ? 1 : 0;
+  }
   if (!path) throw new OmniError(`command '${cmd}' needs a source file`);
   if (!exists(path)) throw new OmniError(`no such file: ${path}`);
 
@@ -228,6 +250,8 @@ commands:
   emit-c    print generated C  (--amalgamate: inline the whole runtime into one file)
   ast       print the AST as JSON
   oir       print the OIR as JSON
+  bootstrap build the whole chain into a tree and check the four fixpoints
+            (no file = the compiler itself; -o DIR, default ./dist; -q skips the C path)
 
 type modes (ADR-0008) — chosen by extension, overridable with --mode:
   .omni     mixed   omitted type is inferred from the initializer, else dynamic

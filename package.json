@@ -9,6 +9,7 @@
   },
   "scripts": {
     "omni": "node stage0/src/cli.js",
+    "build:self": "node stage0/src/cli.js bootstrap -o dist",
     "test": "node tests/run.js",
     "test:oracle": "node tests/oracle/run.js",
     "test:js": "node tests/js-roundtrip/run.js",

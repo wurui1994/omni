@@ -31,6 +31,7 @@ const NATIVE_OPS = {
   mtimeMs: 'js_fs_mtime_ms',
   fileSize: 'js_fs_size',
   mkdTemp: 'js_fs_mkdtemp',
+  mkdirAll: 'js_fs_mkdir_all',
   rename: 'js_fs_rename',
   realPath: 'js_fs_realpath',
   args: 'js_proc_args',

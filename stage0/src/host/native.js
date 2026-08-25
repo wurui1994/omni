@@ -45,6 +45,12 @@ export function mkdTemp(prefix) {
   return node('node:fs').mkdtempSync(prefix);
 }
 
+/** mkdir -p。`omni bootstrap` 要摆出一棵安装布局的目录树，所以这条也得进 ABI */
+export function mkdirAll(p) {
+  node('node:fs').mkdirSync(p, { recursive: true });
+  return undefined;
+}
+
 export function rename(a, b) {
   node('node:fs').renameSync(a, b);
   return undefined;
@@ -120,7 +126,9 @@ export function spawn(cmd, argv, mode) {
   const stdio = mode === 'c' ? ['ignore', 'pipe', 'pipe']
     : mode === 'o' ? ['ignore', 'inherit', 'pipe']
       : 'inherit';
-  const r = node('node:child_process').spawnSync(cmd, argv, { encoding: 'utf8', stdio });
+  // maxBuffer 必须显式给：node 的默认是 1 MiB，而 C 侧的实现没有这个上限。
+  // `omni bootstrap` 要收下另一代编译器 1.7 MB 的 stdout，默认值会 ENOBUFS。
+  const r = node('node:child_process').spawnSync(cmd, argv, { encoding: 'utf8', stdio, maxBuffer: 1 << 28 });
   if (r.error !== undefined && r.error !== null) throw new Error(`cannot spawn: ${r.error.message}`);
   return [r.status === null ? 128 : r.status, r.stdout === null ? '' : r.stdout, r.stderr === null ? '' : r.stderr];
 }

@@ -184,6 +184,7 @@ export const JS_ABI = {
   js_fs_mtime_ms: { js: '$js_fs_mtime_ms', c: 'omni_js_fs_mtime_ms', arity: 1 },
   js_fs_size: { js: '$js_fs_size', c: 'omni_js_fs_size', arity: 1 },
   js_fs_mkdtemp: { js: '$js_fs_mkdtemp', c: 'omni_js_fs_mkdtemp', arity: 1 },
+  js_fs_mkdir_all: { js: '$js_fs_mkdir_all', c: 'omni_js_fs_mkdir_all', arity: 1 },
   js_fs_rename: { js: '$js_fs_rename', c: 'omni_js_fs_rename', arity: 2 },
   js_fs_realpath: { js: '$js_fs_realpath', c: 'omni_js_fs_realpath', arity: 1 },
   js_proc_args: { js: '$js_proc_args', c: 'omni_js_proc_args', arity: 0 },

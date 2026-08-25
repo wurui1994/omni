@@ -122,6 +122,23 @@ omni_dyn omni_js_fs_mkdtemp(omni_dyn prefix) {
   return s16_of_cstr(tpl);
 }
 
+/* mkdirSync(p, { recursive: true })：逐段建，已存在就跳过。
+   `omni bootstrap` 要摆出一棵安装布局的目录树，所以这条也得进 ABI。 */
+omni_dyn omni_js_fs_mkdir_all(omni_dyn path) {
+  char *p = cpath(path);
+  size_t n = strlen(p);
+  for (size_t i = 1; i <= n; i++) {
+    if (p[i] != '/' && p[i] != '\0') continue;
+    char save = p[i];
+    p[i] = '\0';
+    if (mkdir(p, 0777) != 0 && errno != EEXIST) {
+      omni_errorf("cannot mkdir '%s': %s", p, strerror(errno));
+    }
+    p[i] = save;
+  }
+  return omni_dyn_undef();
+}
+
 omni_dyn omni_js_fs_rename(omni_dyn from, omni_dyn to) {
   char *a = cpath(from);
   char *b = cpath(to);

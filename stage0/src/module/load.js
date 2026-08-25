@@ -22,8 +22,9 @@ import { join, dirname, resolve, relative, isAbsolute, basename } from '../host/
 import { SourceFile, OmniError } from '../source/diag.js';
 import { parse } from '../parse/parser.js';
 
-// installDir() 是"程序镜像所在目录"（node 上就是 src/host）；lib 相对它固定两级上去
-const LIB_DIR = resolve(installDir(), '..', '..', 'lib');
+// installDir() 是"程序镜像所在目录"（node 上就是 src/host）；lib 相对它固定两级上去。
+// 导出是给 `omni bootstrap` 用的：它要把这棵 lib 复制进产物目录，布局才立得住。
+export const LIB_DIR = resolve(installDir(), '..', '..', 'lib');
 
 /** 内置清单。将来会被真正的项目清单文件取代，但形态不变：名字 -> 根目录，一层间接，没有搜索。 */
 export const PACKAGES = new Map([['std', LIB_DIR]]);

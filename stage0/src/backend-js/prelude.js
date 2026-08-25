@@ -860,6 +860,10 @@ function $js_fs_readdir(p) { return $node("node:fs").readdirSync($js_asS16(p)); 
 function $js_fs_mtime_ms(p) { return $node("node:fs").statSync($js_asS16(p)).mtimeMs; }
 function $js_fs_size(p) { return $node("node:fs").statSync($js_asS16(p)).size; }
 function $js_fs_mkdtemp(pre) { return $node("node:fs").mkdtempSync($js_asS16(pre)); }
+function $js_fs_mkdir_all(p) {
+  $node("node:fs").mkdirSync($js_asS16(p), { recursive: true });
+  return undefined;
+}
 function $js_fs_rename(a, b) {
   $node("node:fs").renameSync($js_asS16(a), $js_asS16(b));
   return undefined;
@@ -906,8 +910,11 @@ function $js_proc_spawn(cmd, args, mode) {
   const stdio = m === "c" ? ["ignore", "pipe", "pipe"]
     : m === "o" ? ["ignore", "inherit", "pipe"]
       : "inherit";
+  // maxBuffer 必须显式给：node 的默认是 1 MiB，而 C 侧的实现没有这个上限。
+  // omni bootstrap 要收下另一代编译器 1.7 MB 的 stdout，默认值会 ENOBUFS。
   const r = $node("node:child_process").spawnSync(
-    $js_asS16(cmd), $js_arr_of(args).map((x) => $js_asS16(x)), { encoding: "utf8", stdio });
+    $js_asS16(cmd), $js_arr_of(args).map((x) => $js_asS16(x)),
+    { encoding: "utf8", stdio, maxBuffer: 1 << 28 });
   if (r.error !== undefined && r.error !== null) $rt_error("cannot spawn: " + r.error.message);
   return [r.status === null ? 128 : r.status, r.stdout === null ? "" : r.stdout, r.stderr === null ? "" : r.stderr];
 }

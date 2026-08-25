@@ -11,7 +11,8 @@
 // 要求：
 //   1. C1 == C2 逐字节相同（不动点 —— 说明 C1 是个和 C0 语义等价的编译器）
 //   2. 每个 js-exec / omni 用例，C1 的产物和 C0 的产物逐字节相同
-//   3. C 路径同样闭环：N1 = clang(C0 emit-c cli.js)，N1 产出的 C 与 JS 都等于 C0 的
+//   3. C 路径与 stage2：交给编译器的内置命令 `omni bootstrap`（stage0/src/bootstrap.js）——
+//      它摆出可安装的产物树、验证 N1 的产出等于 C0、并让 N1 编译出 N2 再比对两代的产出
 //
 //   node tests/bootstrap/run.js
 //   node tests/bootstrap/run.js -q     只测 JS 侧的不动点，跳过逐用例对照与 C 路径
@@ -123,29 +124,17 @@ if (c1 && !quick) {
   else bad('C1 run cases/01_basics', `    exit=${r.code}\n${r.out}${r.err}`);
 }
 
-// ---- 阶段 5：C 路径（ADR-0001 真正的那条）------------------------------------
-// N1 = clang(C0 emit-c cli.js)。要求 N1 产出的 C 与 JS 都和 C0 的逐字节相同 ——
-// 到这一步"编译器编译自己"在原生侧也闭环了。没有 C 编译器就跳过。
+// ---- 阶段 5：C 路径 + stage2 -----------------------------------------------
+// 这一段**不再自己实现**：自举是编译器的内置命令（`omni bootstrap`，见 stage0/src/bootstrap.js），
+// 测试只负责调用它并检查退出码。它比这里原来那段多做两件事 —— 摆出可安装的产物树、
+// 让 N1 编译出 N2 并比对两代原生编译器的产出（真正的 stage2）。
 if (c1 && !quick) {
-  const exe = join(binDir, 'omni-n1');
-  const t0 = Date.now();
-  const built = node([cli, 'build', cli, '-o', exe]);
-  if (built.code !== 0) {
-    bad('N1 = clang(C0 emit-c cli.js)', `    exit=${built.code}\n${built.err}`);
-  } else {
-    ok(`N1 = clang(C0 emit-c cli.js)  ${((Date.now() - t0) / 1000).toFixed(1)}s`);
-    const native = (args) => {
-      const rr = spawnSync(exe, args, { encoding: 'utf8', maxBuffer: 1 << 28 });
-      return { out: rr.stdout ?? '', err: rr.stderr ?? '', code: rr.status ?? 1 };
-    };
-    for (const [what, args] of [['emit-c', 'emit-c'], ['emit-js', 'emit-js']]) {
-      const ref = node([cli, args, cli]);
-      const via = native([args, cli]);
-      if (via.code !== 0) bad(`N1 ${what} cli.js`, `    exit=${via.code}\n${via.err}`);
-      else if (via.out !== ref.out) bad(`N1 ${what} cli.js`, `    C0 ${ref.out.length} bytes != N1 ${via.out.length} bytes`);
-      else ok(`fixpoint N1 ${what} cli.js == C0  ${ref.out.length} bytes`);
-    }
+  const r = node([cli, 'bootstrap', '-o', join(dir, 'dist')]);
+  for (const line of r.out.split('\n')) {
+    if (line.trim()) process.stdout.write(`    ${line.trim()}\n`);
   }
+  if (r.code === 0) ok('omni bootstrap  layout + C1/C2 + C path + stage2');
+  else bad('omni bootstrap', `    exit=${r.code}\n${r.err}`);
 }
 
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);

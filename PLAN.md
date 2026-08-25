@@ -197,6 +197,7 @@ stage2  原生编译器再编译一次自己 → 与 stage1 输出比对，达�
 ```
 omni/
   docs/adr/                 # 架构决策记录
+  docs/bootstrap-build.md   # 怎么跑自举构建（内置命令 `omni bootstrap` 与四条门槛）
   docs/bootstrap-subset.md  # Omni 自举子集白名单
   docs/js-bootstrap-subset.md # JS 自举子集白名单（编译器源码只能用这些，ADR-0001 第 6 节）
   stage0/                   # 编译器（JS 实现，**不重写成 Omni 语法** —— ADR-0001 第 2 节）
@@ -214,9 +215,11 @@ omni/
     src/backend-llvm/
     src/comptime/           #   编译期求值
     src/vm/                 #   寄存器字节码 + 解释器 + ARC
-    src/cli.js              #   omni run / run-c / build / emit-c / emit-js / repl
-  dist/omni.js              # 生成物：永久兼容层
-  dist/omni                 # 生成物：原生编译器（C0 -> C1 -> C2 不动点的产物）
+    src/cli.js              #   omni run / run-c / build / emit-c / emit-js / repl / bootstrap
+  dist/                     # 生成物（`omni bootstrap` 产出的**可安装目录树**，不进版本库）
+    src/host/omni.mjs       #   C1：永久兼容层（纯 JS）
+    src/host/omni           #   N1：原生编译器（C0 -> N1 -> N2 不动点的产物）
+    lib/  runtime/          #   std 与 C 运行时 —— 布局由 installDir()/../../ 定死
   tests/                    # 差分测试、跨语言对照测试（oracle）、js 往返、语料、快照
   bench/
 ```
@@ -436,6 +439,30 @@ A 也可能是 B"只有两条路：塞进 `dynamic`（丢掉静态类型，值�
   仍是引用语义"）、`tests/errors/enum_rules`（13 条诊断）。
 - 自举顺带逮到一件事：检查器那个方法本来叫 `match`，而 JS 子集里 `x.match(...)` 是字符串的
   正则匹配（`frontend-js` 只认正则字面量实参），于是 C1 生成不出来 —— 第三条轴的正常作用。
+
+**已完成（自举变成内置命令，2026-08-26）**：`omni bootstrap`，`stage0/src/bootstrap.js`，
+`docs/bootstrap-build.md`。之前自举只存在于**测试**里：产物写进 mkdtemp 跑完就扔，
+第 12 节承诺的 `dist/` 从来没有东西，"怎么跑自举"也没有任何说明。
+- **一条命令跑完整条链**：`npm run build:self`（= `omni bootstrap -o dist`）。
+  只用封闭 ABI 里的宿主操作，不调 `mkdir -p` / `cp` / `cmp` —— 所以**任何一代编译器都能执行它**，
+  包括原生的 `dist/src/host/omni bootstrap`。为此给 ABI 加了一个 op（`js_fs_mkdir_all`，
+  三份实现照旧：native.js / prelude.js / omni_js_host.c）。
+- **产物是一棵可安装的目录树**，不是两个裸文件：`dist/src/host/omni{.mjs,}` + `dist/lib` +
+  `dist/runtime`。布局不是审美问题：std 与 runtime 都相对 `installDir()` **固定两级上去**，
+  编译器扔在 `dist/` 根下就会去 `/lib`、`/runtime` 找东西。lib/runtime 是复制不是符号链接，
+  打包带走不会断。实测 `dist/src/host/omni run-c tests/cases/07_json.omni`（要 `import "std/json.omni"`）
+  只靠这棵树就能跑通。
+- **补上了第四条门槛**：`N2 = N1 build 自己`，再比对 N1 与 N2 的产出。之前的测试只验证
+  "N1 的输出等于 C0"，从没让原生编译器**造出下一代**——那才是 ADR-0001 说的 stage2。
+  一次就成立：两代的 C（2 984 788 字节）与 JS（1 742 173 字节）都逐字节相同。
+- 判据写清楚了：是**编译器的输出**逐字节相同，不是二进制镜像。链接每次写进新的 `LC_UUID`，
+  macOS 还对整个镜像做 ad-hoc 签名，所以 `cmp` 两个原生二进制必然不同（实测同尺寸、
+  13385 字节有差异）。这条不写下来，下一个人会以为自举坏了。
+- 顺带修掉一处 ABI 上的真分叉：`spawn` 在 JS 侧用 node 的默认 `maxBuffer`（1 MiB），
+  而 C 侧没有上限。收另一代编译器 1.7 MB 的 stdout 时 JS 侧 ENOBUFS、C 侧正常 ——
+  这类"只在一个宿主上成立"的行为差异必须消掉。
+- `tests/bootstrap/run.js` 的第 5 阶段不再自己实现 C 路径，直接调这个命令（一份实现）。
+  这条轴现在 39 项。
 
 **接下来**（顺序按 ADR-0001 的落地顺序重排）
 1. **原生侧的内存**：编译整个编译器 RSS 811 MB。低垂果实已经摘完（见上），剩下的

@@ -268,6 +268,7 @@ bool omni_js_fs_exists(omni_dyn path);
 omni_dyn omni_js_fs_mtime_ms(omni_dyn path);
 omni_dyn omni_js_fs_size(omni_dyn path);
 omni_dyn omni_js_fs_mkdtemp(omni_dyn prefix);
+omni_dyn omni_js_fs_mkdir_all(omni_dyn path);
 omni_dyn omni_js_fs_rename(omni_dyn from, omni_dyn to);
 omni_dyn omni_js_fs_realpath(omni_dyn path);
 omni_dyn omni_js_proc_cwd(void);
