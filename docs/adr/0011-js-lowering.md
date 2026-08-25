@@ -198,6 +198,40 @@ JS 的闭包按**引用**捕获，OIR 的闭包按**值**捕获（ADR-0010，为
   改成方法（`d.hasErrors` -> `d.hasErrors()`），属于"把编译器源码改到封闭 ABI 上"那步。
 - `extends` 与 `instanceof` 留给落地顺序 6d：量过它们只服务于异常路由。
 
+### 14. throw 的传播：一个 pending 槽 + 每句之后查一下，一级一级退
+
+C 里没有异常，两个后端又必须给同一个答案，所以沿用 ADR-0007 决定 1 的槽：`js_throw`
+往里放，`js_pending` 查，`js_take_pending` 取出并清空。跳转全是 lower.js 发的普通控制流：
+
+- **可能抛的子表达式先算进临时量**，紧跟一次 `if (js_pending()) …`。图的是精确：
+  `console.log(f())` 里 f 抛了，`println` 就不该再跑。判定"可能抛"看降完的 OIR 里有没有
+  `Call` / `CallFn` / `js_m_*`（派发器的兜底会调用户函数）/ 表里标了 `throws` 的 op
+  （回调类的、会抛的宿主调用）。
+- **惰性位置**（`&&` 的右边、`?:` 的分支、循环条件与 for 的 update）提不出来，那里保持
+  内联：抛出来的表达式值是 undefined，靠语句末尾那次检查退出去。循环条件抛的情况正好
+  自洽 —— 条件成了假、循环退出、循环后面那次检查接住。
+- **退出的方式**：在 try 体里是 `Break`（try 体本身摊成一个只跑一遍的 `while (true)`，
+  Break 正好落到 catch 前面），不在 try 体里是 `Return`。循环里的 Break 只退一层，
+  循环语句后面还有一次检查 —— 一级一级地退，只用 Break 就够，不需要 goto 或标号。
+- `try { A } catch (e) { B }` 就是：`while(true){ A; break; }` 之后
+  `if (js_pending()) { e = js_take_pending(); B }`。`catch` 不绑名字也要取一次（不取的话
+  下一次检查会把同一个错误再抛一遍）。
+- **不支持 `finally`**（量过：全仓库 1 处，在 repl 里），也**不许 break/continue 跨过 try
+  的边界** —— 它们会被那层合成的循环接住，语义就变了。两种都是当场报错。
+
+### 15. 异常对象就是普通对象：`{ $cls: [类名…], message }`
+
+`new Error(m)` 造的是 `{ $cls: ["Error"], message: m }`；`class X extends Error {}` 造的是
+`{ $cls: ["X", "Error"], message }`。`x instanceof C` 就是查 `$cls` 链（`js_is_a`），
+被抛出来的东西可能是任何值（字符串也行），所以不认的一律 false，不报错。
+
+- `extends` **只允许 `extends Error`**（量过：全仓库三处，全是异常类），`instanceof` 也只
+  对 Error 与它的子类有意义，别的当场报错。
+- `super(msg)` 的作用就是把 `message` 填上；不写构造器时，第一个实参就是 message。
+- 与宿主的两处偏差，都不作为兼容目标：宿主的 `message` / `name` 是不可枚举的，所以
+  `JSON.stringify(err)` 在那边是 `"{}"`、`String(err)` 是 `"Error: m"`；这边分别是把
+  `$cls` / `message` 也打出来、和普通对象一样。异常对象不进 JSON、也不靠 `String()` 打印。
+
 ## 落地顺序
 
 1. `dynamic` 扩成完整 JS 值域：函数标签 + 动态调用（实参个数运行期检查）+ `js_*` 运算 op

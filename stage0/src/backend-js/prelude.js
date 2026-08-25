@@ -791,6 +791,20 @@ function $js_check_uncaught() {
   process.stderr.write("omni: uncaught: " + $js_asS16($js_str($pending)) + "\n");
   process.exit(70);
 }
+// 异常对象就是普通对象：{ $cls: [类名…，最派生的在前], message }（ADR-0011 决策 15）
+function $js_err_new(msg, cls) {
+  const o = $js_obj_new();
+  $js_obj_set(o, "$cls", cls);
+  $js_obj_set(o, "message", msg);
+  return o;
+}
+function $js_is_a(v, n) {
+  if ($dynTag(v) !== "dict") return false;
+  const c = $js_obj_get(v, "$cls");
+  if ($dynTag(c) !== "list") return false;
+  for (let i = 0; i < c.length; i++) if ($js_eq(true, c[i], n)) return true;
+  return false;
+}
 
 // ---------------------------------------------- node 宿主面（ADR-0011 第 4 步）
 // 不能在这里写 import：整个 prelude 也会被 cli.js 用 new Function(code)() 跑

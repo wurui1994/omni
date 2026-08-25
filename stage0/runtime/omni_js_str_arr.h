@@ -96,6 +96,25 @@ static omni_dyn omni_js_idx_set(omni_dyn o, omni_dyn k, omni_dyn v) { \
       omni_errorf("cannot assign to an index of a %s", omni_dyn_tag_name(o.tag)); \
       return omni_dyn_undef(); \
   } \
+} \
+/* 异常对象就是普通对象：{ $cls: [类名…，最派生的在前], message }（ADR-0011 决策 15）。
+   `x instanceof C` 查 $cls 链 —— 被抛出来的可以是任何值（字符串也行），所以不认的
+   一律给 false，不报错。 */ \
+static omni_dyn omni_js_err_new(omni_dyn msg, omni_dyn cls) { \
+  omni_dyn o = omni_js_obj_new(); \
+  omni_js_obj_set(o, omni_dyn_of_s16(omni_js_s16_lit("$cls")), cls); \
+  omni_js_obj_set(o, omni_dyn_of_s16(omni_js_s16_lit("message")), msg); \
+  return o; \
+} \
+static bool omni_js_is_a(omni_dyn v, omni_dyn n) { \
+  if (v.tag != OMNI_DYN_DICT) return false; \
+  omni_dyn c = omni_js_obj_get(v, omni_dyn_of_s16(omni_js_s16_lit("$cls"))); \
+  if (c.tag != OMNI_DYN_LIST) return false; \
+  LT l = omni_js_arr_of(c); \
+  for (int64_t i = 0; i < l->len; i++) { \
+    if (omni_js_eq(true, l->items[i], n)) return true; \
+  } \
+  return false; \
 }
 
 #endif /* OMNI_JS_STR_ARR_H */

@@ -77,16 +77,17 @@ export const JS_ABI = {
   js_arr_last_index_of: { js: '$js_arr_last_index_of', c: 'omni_js_arr_last_index_of', arity: 2 },
   js_arr_includes: { js: '$js_arr_includes', c: 'omni_js_arr_includes', arity: 2, ret: 'bool' },
   js_arr_join: { js: '$js_arr_join', c: 'omni_js_arr_join', arity: 2 },
-  js_arr_map: { js: '$js_arr_map', c: 'omni_js_arr_map', arity: 2 },
-  js_arr_filter: { js: '$js_arr_filter', c: 'omni_js_arr_filter', arity: 2 },
-  js_arr_for_each: { js: '$js_arr_for_each', c: 'omni_js_arr_for_each', arity: 2, ret: 'void' },
-  js_arr_some: { js: '$js_arr_some', c: 'omni_js_arr_some', arity: 2, ret: 'bool' },
-  js_arr_every: { js: '$js_arr_every', c: 'omni_js_arr_every', arity: 2, ret: 'bool' },
-  js_arr_find: { js: '$js_arr_find', c: 'omni_js_arr_find', arity: 2 },
-  js_arr_find_index: { js: '$js_arr_find_index', c: 'omni_js_arr_find_index', arity: 2 },
-  js_arr_reduce: { js: '$js_arr_reduce', c: 'omni_js_arr_reduce', arity: 3 },
-  js_arr_flat_map: { js: '$js_arr_flat_map', c: 'omni_js_arr_flat_map', arity: 2 },
-  js_arr_sort: { js: '$js_arr_sort', c: 'omni_js_arr_sort', arity: 2 },
+  // throws: true —— 回调是用户代码，会往 pending 槽里放东西（见文件末尾 throw/try 那节）
+  js_arr_map: { js: '$js_arr_map', c: 'omni_js_arr_map', arity: 2, throws: true },
+  js_arr_filter: { js: '$js_arr_filter', c: 'omni_js_arr_filter', arity: 2, throws: true },
+  js_arr_for_each: { js: '$js_arr_for_each', c: 'omni_js_arr_for_each', arity: 2, ret: 'void', throws: true },
+  js_arr_some: { js: '$js_arr_some', c: 'omni_js_arr_some', arity: 2, ret: 'bool', throws: true },
+  js_arr_every: { js: '$js_arr_every', c: 'omni_js_arr_every', arity: 2, ret: 'bool', throws: true },
+  js_arr_find: { js: '$js_arr_find', c: 'omni_js_arr_find', arity: 2, throws: true },
+  js_arr_find_index: { js: '$js_arr_find_index', c: 'omni_js_arr_find_index', arity: 2, throws: true },
+  js_arr_reduce: { js: '$js_arr_reduce', c: 'omni_js_arr_reduce', arity: 3, throws: true },
+  js_arr_flat_map: { js: '$js_arr_flat_map', c: 'omni_js_arr_flat_map', arity: 2, throws: true },
+  js_arr_sort: { js: '$js_arr_sort', c: 'omni_js_arr_sort', arity: 2, throws: true },
 
   // ------------------------------------------------- 普通对象 / Map / Set
   // 对象 -> dict<string, dynamic>，键是属性名的 UTF-8（进出转码）。
@@ -136,7 +137,7 @@ export const JS_ABI = {
   // 只有 stringify：量过一遍，JSON.parse 全仓库 0 处用到，封闭的 ABI 就不收它。
   // 实参形态也是量出来的 —— 绝大多数是一个实参给字符串加引号，只有 cli 的 dump
   // 用了 (v, replacer, 2)。replacer 只支持函数形式。
-  js_json_stringify: { js: '$js_json_stringify', c: 'omni_js_json_stringify', arity: 3 },
+  js_json_stringify: { js: '$js_json_stringify', c: 'omni_js_json_stringify', arity: 3, throws: true },
 
   // ---------------------------------------------------------------- RegExp
   // 模式与 flags 是普通的 string 实参（不是 lit）：两侧都按字面量做编译缓存，C 侧的键
@@ -145,7 +146,7 @@ export const JS_ABI = {
   js_re_test: { js: '$js_re_test', c: 'omni_js_re_test', arity: 3, ret: 'bool' },
   js_re_match: { js: '$js_re_match', c: 'omni_js_re_match', arity: 3 },
   js_re_split: { js: '$js_re_split', c: 'omni_js_re_split', arity: 4 },
-  js_re_replace: { js: '$js_re_replace', c: 'omni_js_re_replace', arity: 4 },
+  js_re_replace: { js: '$js_re_replace', c: 'omni_js_re_replace', arity: 4, throws: true },
 
   // -------------------------------------------------- 字符串/数组的其余缺口
   // 都是量出来的：split 的字符串分隔符形式 4 处（'/' 与 '\n'，都不带 limit），
@@ -194,9 +195,16 @@ export const JS_ABI = {
   // ------------------------------------------------- throw / try（ADR-0007 决定 1）
   // 只有一个"待处理错误"的槽：throw 往里放，可能出错的调用点之后 pending 查一下，
   // catch 用 take 取出并清空。跳转本身是 lower.js 发的普通控制流，不进 ABI。
-  js_throw: { js: '$js_throw', c: 'omni_js_throw', arity: 1 },
+  //
+  // throws: true 的意思是"这个 op 可能往槽里放东西"，lower.js 据此决定要不要在语句
+  // 后面插 pending 检查（ADR-0011 决策 14）。回调类的 op 全算 —— 用户的回调会抛。
+  js_throw: { js: '$js_throw', c: 'omni_js_throw', arity: 1, throws: true },
   js_pending: { js: '$js_pending', c: 'omni_js_pending', arity: 0, ret: 'bool' },
   js_take_pending: { js: '$js_take_pending', c: 'omni_js_take_pending', arity: 0 },
+  // 异常对象就是普通对象：{ $cls: [类名…], message }。is_a 查 $cls 链，不认的值给 false
+  // （`e instanceof X` 里的 e 可能是任何被抛出来的东西，包括字符串）
+  js_err_new: { js: '$js_err_new', c: 'omni_js_err_new', arity: 2 },
+  js_is_a: { js: '$js_is_a', c: 'omni_js_is_a', arity: 2, ret: 'bool' },
 };
 
 /* ----------------------------------------- 成员派发（ADR-0011 第 9 节）

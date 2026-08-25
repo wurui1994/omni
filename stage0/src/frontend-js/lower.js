@@ -128,6 +128,24 @@ function capturedNames(stmts) {
   return out;
 }
 
+/**
+ * 这段**降完的** OIR 里有没有可能往 pending 槽里放东西（ADR-0011 决策 14）。
+ * 调用一律算；成员派发器的兜底会调用户的函数（决策 12），所以 js_m_* 也算；
+ * 其余的 op 看表里的 throws 标记（回调类的 op、以及会抛的宿主调用）。
+ */
+function mayThrow(node) {
+  if (Array.isArray(node)) return node.some(mayThrow);
+  if (!node || typeof node !== 'object') return false;
+  if (node.kind === 'Call' || node.kind === 'CallFn') return true;
+  if (node.kind === 'Builtin' && (node.name.startsWith('js_m_') || JS_ALL[node.name]?.throws)) return true;
+  for (const k of Object.keys(node)) {
+    // type / from / fnType 里装的是类型，不是 OIR 节点
+    if (k === 'type' || k === 'from' || k === 'fnType') continue;
+    if (mayThrow(node[k])) return true;
+  }
+  return false;
+}
+
 class Lower {
   /** @param {import('../source/diag.js').Diagnostics} diags */
   constructor(diags) {
@@ -212,10 +230,15 @@ class Lower {
           for (const n of patternNames(d.id, this, s.span)) this.globals.set(n, { name: cSafe(n) });
         }
         break;
-      case 'ClassDecl':
+      case 'ClassDecl': {
         if (this.classes.has(s.id)) this.err(s.span, `duplicate class '${s.id}'`);
-        this.classes.set(s.id, { mangled: this.mangle('n_', s.id), node: s });
+        // 继承只支持 `extends Error`（量过：全仓库三处，全是异常类）。异常类的实例带一条
+        // $cls 链，instanceof 查的就是它（ADR-0011 决策 15）
+        const sup = s.superClass;
+        const isError = !!(sup && sup.type === 'Ident' && sup.name === 'Error');
+        this.classes.set(s.id, { mangled: this.mangle('n_', s.id), node: s, isError });
         break;
+      }
       case 'ImportDecl': case 'ExportNamed': case 'ExportDefault': case 'ExportDecl':
         this.err(s.span, 'import/export are not lowered yet (ADR-0011 landing step 6e)');
         break;
@@ -303,6 +326,8 @@ class Lower {
       temps: 0, prelude: [], loops: 0, switches: 0,
       scopes: [new Map()], locals: new Set(['args']), sink: [], lazies: 0,
       captured: capturedNames(bodyStmts), uses: new Set(), isMain: !!opts.isMain,
+      // try 的嵌套深度，以及每层 try 进去时的循环层数（用来拦跨 try 的 break/continue）
+      tries: 0, tryLoops: [],
     };
     if (opts.outerScopes) {
       // 外层可见的 cell 全摆进捕获层；lookup 命中过的才会真进闭包记录
@@ -403,7 +428,9 @@ class Lower {
    */
   classDecl(s) {
     const rec = this.classes.get(s.id);
-    if (s.superClass) this.err(s.span, "'extends' is not lowered yet (ADR-0011 landing step 6d)");
+    if (s.superClass && !rec.isError) {
+      this.err(s.span, "'extends' is only supported for Error (ADR-0011 decision 15)");
+    }
     const methods = [];
     let ctor = null;
     for (const m of s.members) {
@@ -422,8 +449,16 @@ class Lower {
     for (const [, m] of methods) refNames(m.body, this.fn.captured);
     this.fn.captured.add('this');
     this.fn.isCtor = true;
+    this.fn.superIsError = rec.isError;
     const self = this.declare('this');
-    const stmts = [localStmt(self.name, arrLit([op('js_obj_new', [])]))];
+    // 异常类的实例是 { $cls: [类名, "Error"], message }；没写构造器时 message 就是第一个实参
+    const init = rec.isError
+      ? op('js_err_new', [
+        ctor ? undefExpr() : op('js_arr_get', [argsDyn(), constReal(0)]),
+        arrLit([s16(s.id), s16('Error')]),
+      ])
+      : op('js_obj_new', []);
+    const stmts = [localStmt(self.name, arrLit([init]))];
     for (const [name, m] of methods) {
       stmts.push(exprStmt(op('js_obj_set',
         [this.readEntry(self), s16(name), this.closureExpr(m, `${s.id}_${name}`)])));
@@ -529,7 +564,51 @@ class Lower {
     this.fn.sink = pre;
     const out = this.stmtInner(s);
     this.fn.sink = outer;
-    return pre.length ? [...pre, ...out] : out;
+    const all = pre.length ? [...pre, ...out] : out;
+    return this.withCheck(s, all);
+  }
+
+  /**
+   * throw 的传播（ADR-0011 决策 14）。C 里没有异常，所以每条**可能抛**的语句后面插一句
+   * `if (js_pending()) <退出这一层>`：
+   *   - 在 try 体里 -> Break（try 体本身摊成一个只跑一遍的循环，Break 正好落到 catch 前）
+   *   - 不在 try 体里 -> Return（一路返回给调用者，调用者自己的检查会接着往上走）
+   * 循环里的检查只跳出**当前**这一层，循环语句后面还有一次检查 —— 一级一级地退，
+   * 这样只用 Break 就够，不需要 goto 或者标号。
+   */
+  withCheck(s, stmts) {
+    if (s.type === 'Throw' || s.type === 'Return' || s.type === 'Break' || s.type === 'Continue') return stmts;
+    if (!mayThrow(stmts)) return stmts;
+    return [...stmts, { kind: 'If', cond: boolOp('js_pending', []), then: block([this.unwind()]), otherwise: null }];
+  }
+
+  unwind() {
+    if (this.fn.tries > 0) return { kind: 'Break' };
+    return { kind: 'Return', value: this.fn.isMain ? null : undefExpr() };
+  }
+
+  /** 直接待在 try 体里（没有再套一层自己的循环）—— 这时 break/continue 会被 try 接住 */
+  crossesTry() {
+    return this.fn.tries > 0 && this.fn.loops === this.fn.tryLoops[this.fn.tryLoops.length - 1];
+  }
+
+  /**
+   * 可能抛的**子表达式**：先算进临时量，紧跟一次 pending 检查，再把临时量交出去。
+   * 图的是精确 —— `console.log(f())` 里 f 抛了，println 就不该再跑。
+   * 惰性位置（&& 的右边、Ternary 的分支、循环条件）提不出来，那里保持内联，
+   * 由语句末尾那次检查兜着：抛出来的值是 undefined，接着这条语句就退出去了。
+   */
+  guard(e) {
+    if (this.fn.lazies > 0) return e;
+    const t = this.temp();
+    this.fn.sink.push(exprStmt(assign(varRef(t), e)));
+    this.fn.sink.push({ kind: 'If', cond: boolOp('js_pending', []), then: block([this.unwind()]), otherwise: null });
+    return varRef(t);
+  }
+
+  /** 只有真会抛的才值得占一个临时量 */
+  guarded(e) {
+    return mayThrow(e) ? this.guard(e) : e;
   }
 
   /**
@@ -562,7 +641,11 @@ class Lower {
         return [block(out)];
       }
       case 'VarDecl': return this.varDecl(s);
-      case 'ExprStmt': return [exprStmt(this.exprDiscard(s.expr))];
+      case 'ExprStmt': {
+        // 调用被 guard 提到 sink 里之后，这里剩下的常常只是那个临时量 —— 不必再发一句
+        const e = this.exprDiscard(s.expr);
+        return e.kind === 'VarRef' ? [] : [exprStmt(e)];
+      }
       case 'If': return [{
         kind: 'If',
         cond: truthy(this.expr(s.test)),
@@ -590,12 +673,18 @@ class Lower {
         }
         return [{ kind: 'Return', value: s.arg ? this.expr(s.arg) : undefExpr() }];
       case 'Break':
-        if (this.fn.loops === 0 && this.fn.switches === 0) this.err(s.span, "'break' outside a loop or switch");
+        if (this.crossesTry()) {
+          this.err(s.span, "'break' cannot cross a try boundary; restructure the try");
+        } else if (this.fn.loops === 0 && this.fn.switches === 0) {
+          this.err(s.span, "'break' outside a loop or switch");
+        }
         return [{ kind: 'Break' }];
       case 'Continue':
         // switch 的降级用了一层"只跑一遍的循环"当作用域，continue 会落在它身上；
         // do-while 摊成 while(true) 之后，continue 会跳过尾部的条件检查
-        if (this.fn.switches > 0) {
+        if (this.crossesTry()) {
+          this.err(s.span, "'continue' cannot cross a try boundary; restructure the try");
+        } else if (this.fn.switches > 0) {
           this.err(s.span, "'continue' inside a switch is not lowered yet; restructure the switch");
         } else if ((this.fn.doWhiles ?? 0) > 0) {
           this.err(s.span, "'continue' inside a do-while is not lowered yet; restructure the loop");
@@ -604,9 +693,9 @@ class Lower {
         }
         return [{ kind: 'Continue' }];
       case 'Switch': return this.switchStmt(s);
-      case 'Throw': case 'Try':
-        this.err(s.span, 'throw/try are not lowered yet (ADR-0011 landing step 6d)');
-        return [];
+      case 'Throw':
+        return [exprStmt(op('js_throw', [this.expr(s.arg)])), this.unwind()];
+      case 'Try': return this.tryStmt(s);
       case 'FuncDecl':
         // 提升过了：funcOf 在栈帧入口就把 cell 和闭包都摆好了（hoistFuncDecls）
         if (this.fn.hoisted?.has(s)) return [];
@@ -851,6 +940,46 @@ class Lower {
     return [block([...pre, { kind: 'While', cond: { kind: 'Const', type: BOOL, value: true }, body }])];
   }
 
+  /**
+   * try / catch（ADR-0011 决策 14）。try 体摊成一个只跑一遍的循环，unwind 的 Break
+   * 正好落到循环后面；catch 就是"循环之后 pending 还在着"：
+   *   while (true) { …体（每句后面查 pending -> break）…; break; }
+   *   if (js_pending()) { e = js_take_pending(); …catch 体… }
+   * finally 不支持（量过：全仓库 1 处），break/continue 也不许跨过 try 的边界 ——
+   * 它们会被这层合成的循环接住，语义就变了。
+   */
+  tryStmt(s) {
+    if (s.finalizer) {
+      this.err(s.span, "'finally' is not lowered; duplicate the cleanup into both paths");
+      return [];
+    }
+    if (!s.handler) { this.err(s.span, "'try' needs a 'catch'"); return []; }
+    this.fn.tries++;
+    this.fn.tryLoops.push(this.fn.loops);
+    this.pushScope();
+    const body = s.block.body.flatMap((x) => this.stmt(x));
+    this.popScope();
+    this.fn.tryLoops.pop();
+    this.fn.tries--;
+    const loop = {
+      kind: 'While',
+      cond: { kind: 'Const', type: BOOL, value: true },
+      body: block([...body, { kind: 'Break' }]),
+    };
+    this.pushScope();
+    // 绑不绑名字都要把槽取空 —— 不取的话下一次 pending 检查会重新抛一遍
+    const head = s.param ? this.bindPattern(s.param, op('js_take_pending', []))
+      : [exprStmt(op('js_take_pending', []))];
+    const handler = s.handler.body.flatMap((x) => this.stmt(x));
+    this.popScope();
+    return [loop, {
+      kind: 'If',
+      cond: boolOp('js_pending', []),
+      then: block([...head, ...handler]),
+      otherwise: null,
+    }];
+  }
+
   /** 最后一个 case 掉出去没关系（后面没有 case 可穿）；中间的必须自己结束 */
   checkNoFallThrough(cs, isLast) {
     if (isLast) return;
@@ -872,8 +1001,8 @@ class Lower {
       case 'Array': return this.arrayLit(e);
       case 'Object': return this.objectLit(e);
       case 'Member': return this.member(e);
-      case 'Call': return this.call(e);
-      case 'New': return this.newExpr(e);
+      case 'Call': return this.guarded(this.call(e));
+      case 'New': return this.guarded(this.newExpr(e));
       case 'Assign': return this.assignExpr(e);
       case 'Update': return this.update(e, false);
       case 'Unary': return this.unary(e);
@@ -936,7 +1065,7 @@ class Lower {
       case 'NaN': return constReal(NaN);
       case 'Infinity': return constReal(Infinity);
       case 'super':
-        this.err(e.span, "'super' is not lowered yet (ADR-0011 landing step 6c)");
+        this.err(e.span, "'super' can only be called as super(...) in an Error subclass constructor");
         return undefExpr();
       default: break;
     }
@@ -1055,9 +1184,16 @@ class Lower {
       case '<<': return op('js_bitop', [A(), B()], { op: '<' });
       case '>>': return op('js_bitop', [A(), B()], { op: '>' });
       case 'in': return op('js_obj_has', [B(), A()]);
-      case 'instanceof':
-        this.err(e.span, "'instanceof' is not lowered yet (ADR-0011 landing step 6c)");
-        return undefExpr();
+      case 'instanceof': {
+        // instanceof 查 $cls 链（决策 15），所以只对 Error 与 Error 的子类有意义
+        const rhs = e.right.type === 'Ident' ? e.right.name : null;
+        const ok = rhs === 'Error' || (rhs && this.classes.get(rhs)?.isError);
+        if (!ok) {
+          this.err(e.span, "'instanceof' only works with Error and its subclasses (ADR-0011 decision 15)");
+          return undefExpr();
+        }
+        return op('js_is_a', [A(), s16(rhs)]);
+      }
       default:
         this.err(e.span, `binary '${e.op}' is not supported`);
         return undefExpr();
@@ -1143,6 +1279,15 @@ class Lower {
     }
     const c = e.callee;
     if (c.type === 'Ident') {
+      // super(msg)：只有 Error 子类有 super，作用就是把 message 填上（决策 15）
+      if (c.name === 'super' && !this.lookup('super')) {
+        if (!this.fn.isCtor || !this.fn.superIsError) {
+          this.err(e.span, "'super(...)' is only available in the constructor of an Error subclass");
+          return undefExpr();
+        }
+        const msg = e.args.length ? this.expr(e.args[0]) : undefExpr();
+        return op('js_obj_set', [this.readEntry(this.lookup('this')), s16('message'), msg]);
+      }
       if (!this.lookup(c.name) && !this.globals.has(c.name)) {
         if (this.topFns.has(c.name)) {
           return { kind: 'Call', func: this.topFns.get(c.name), name: c.name, args: [this.argList(e.args)], type: D };
@@ -1250,6 +1395,11 @@ class Lower {
         return undefExpr();
       }
       return op(n === 'Map' ? 'js_map_new' : 'js_set_new', []);
+    }
+    // new Error(msg)：异常对象就是 { $cls: ["Error"], message }（决策 15）
+    if (n === 'Error' && !this.lookup(n) && !this.classes.has(n)) {
+      const msg = e.args.length ? this.expr(e.args[0]) : s16('');
+      return op('js_err_new', [msg, arrLit([s16('Error')])]);
     }
     // 类的构造：造实例的函数和普通顶层函数同一套调用约定
     if (n && this.classes.has(n) && !this.lookup(n)) {
