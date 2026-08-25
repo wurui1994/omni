@@ -17,7 +17,8 @@ export class SourceFile {
   lineCol(offset) {
     let lo = 0, hi = this.lineStarts.length - 1;
     while (lo < hi) {
-      const mid = (lo + hi + 1) >> 1;
+      // 用除法而不是 >> 1：位运算在这个值域里只对 int 成立，而下标都是 real（决策 1）
+      const mid = Math.floor((lo + hi + 1) / 2);
       if (this.lineStarts[mid] <= offset) lo = mid; else hi = mid - 1;
     }
     return { line: lo + 1, col: offset - this.lineStarts[lo] + 1 };

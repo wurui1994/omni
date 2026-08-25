@@ -683,6 +683,18 @@ function $js_num_of(v) {
     default: $rt_error("cannot convert " + $dynTag(v) + " to a number");
   }
 }
+// JS 的 StringToBigInt。刻意**不**走 $int_of_string：那是 Omni 的 int(string) 语义
+// （只认十进制），而 BigInt("0xf0") 在 JS 里是 240n —— 编译器自己的 js 词法器就靠它
+// 读十六进制的 bigint 字面量。超出 int64 报错（这个值域的 int 就是 int64）。
+function $js_str_to_int(s) {
+  const t = $js_asS16(s).trim();
+  if (!/^([+-]?[0-9]+|0[xX][0-9a-fA-F]+|0[oO][0-7]+|0[bB][01]+)$/.test(t)) {
+    $rt_error('invalid integer: "' + s + '"');
+  }
+  const v = BigInt(t);
+  if (v < $INT_MIN || v > 9223372036854775807n) $rt_error('invalid integer: "' + s + '"');
+  return v;
+}
 function $js_bigint_of(v) {
   const t = $dynTag(v);
   if (t === "int") return v;
@@ -693,7 +705,7 @@ function $js_bigint_of(v) {
     }
     return BigInt(v);
   }
-  if (t === "string") return $int_of_string(v);
+  if (t === "string") return $js_str_to_int(v);
   $rt_error("cannot convert " + t + " to a bigint");
 }
 function $js_bigint_as_int_n(bits, v) {

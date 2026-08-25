@@ -397,7 +397,9 @@ class Lower {
   hoistFuncDecls(bodyStmts) {
     const decls = bodyStmts.filter((s) => s.type === 'FuncDecl');
     if (!decls.length) return [];
-    this.fn.hoisted = new Set(decls);
+    // 记名字而不是记节点：这个值域里的 Set 键是"值"，对象没有身份（决策 1），
+    // 而这个文件自己也要被降级。同一个函数体里的函数名本来就不会重
+    this.fn.hoisted = new Set(decls.map((d) => d.id));
     const out = [];
     const ents = [];
     for (const d of decls) {
@@ -714,7 +716,7 @@ class Lower {
       case 'Try': return this.tryStmt(s);
       case 'FuncDecl':
         // 提升过了：funcOf 在栈帧入口就把 cell 和闭包都摆好了（hoistFuncDecls）
-        if (this.fn.hoisted?.has(s)) return [];
+        if (this.fn.hoisted?.has(s.id)) return [];
         this.err(s.span, 'a nested function declaration is only supported at the top of a function body');
         return [];
       case 'ClassDecl':

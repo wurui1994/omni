@@ -88,6 +88,45 @@ omni_dyn omni_js_num_parse_int(omni_dyn sd, omni_dyn radixd) {
   return omni_dyn_of_real(sign * acc);
 }
 
+/* JS 的 StringToBigInt。刻意**不**走 omni_int_of_string：那是 Omni 的 int(string)
+   语义（只认十进制），而 BigInt("0xf0") 在 JS 里是 240n —— 编译器自己的 js 词法器
+   就靠它读十六进制的 bigint 字面量。超出 int64 报错（这个值域的 int 就是 int64）。 */
+static int64_t js_str_to_int(omni_str s) {
+  int64_t i = 0, n = s.len;
+  while (i < n && (s.p[i] == ' ' || s.p[i] == '\t' || s.p[i] == '\n' || s.p[i] == '\r')) i++;
+  while (n > i && (s.p[n - 1] == ' ' || s.p[n - 1] == '\t' || s.p[n - 1] == '\n' || s.p[n - 1] == '\r')) n--;
+  bool neg = false;
+  int base = 10;
+  if (i < n && (s.p[i] == '+' || s.p[i] == '-')) {
+    neg = s.p[i] == '-';
+    i++;
+  } else if (i + 1 < n && s.p[i] == '0') {
+    char k = s.p[i + 1];
+    if (k == 'x' || k == 'X') { base = 16; i += 2; }
+    else if (k == 'o' || k == 'O') { base = 8; i += 2; }
+    else if (k == 'b' || k == 'B') { base = 2; i += 2; }
+  }
+  uint64_t acc = 0;
+  int64_t digits = 0;
+  for (; i < n; i++, digits++) {
+    char c = s.p[i];
+    int d = 99;
+    if (c >= '0' && c <= '9') d = c - '0';
+    else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+    else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+    if (d >= base) omni_errorf("invalid integer: \"%.*s\"", (int)s.len, s.p);
+    if (acc > (UINT64_MAX - (uint64_t)d) / (uint64_t)base) {
+      omni_errorf("invalid integer: \"%.*s\"", (int)s.len, s.p);
+    }
+    acc = acc * (uint64_t)base + (uint64_t)d;
+    uint64_t limit = (uint64_t)INT64_MAX + (neg ? 1u : 0u);
+    if (acc > limit) omni_errorf("invalid integer: \"%.*s\"", (int)s.len, s.p);
+  }
+  if (digits == 0) omni_errorf("invalid integer: \"%.*s\"", (int)s.len, s.p);
+  if (neg) return acc == (uint64_t)INT64_MAX + 1u ? INT64_MIN : -(int64_t)acc;
+  return (int64_t)acc;
+}
+
 /* BigInt(x)：只认整数值的 number 与十进制/0x/0o/0b 字符串。JS 在小数上抛
    RangeError，这里报错 —— 两边都得拒绝，不能一边悄悄截尾。 */
 omni_dyn omni_js_bigint_of(omni_dyn v) {
@@ -100,7 +139,7 @@ omni_dyn omni_js_bigint_of(omni_dyn v) {
     return omni_dyn_of_int((int64_t)v.u.r);
   }
   if (v.tag == OMNI_DYN_STR16) {
-    return omni_dyn_of_int(omni_int_of_string(omni_s16_to_utf8(v.u.s16)));
+    return omni_dyn_of_int(js_str_to_int(omni_s16_to_utf8(v.u.s16)));
   }
   omni_errorf("cannot convert %s to a bigint", omni_dyn_tag_name(v.tag));
   return omni_dyn_null();
