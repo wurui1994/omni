@@ -116,4 +116,18 @@ export const JS_ABI = {
   js_set_add: { js: '$js_set_add', c: 'omni_js_set_add', arity: 2 },
   js_set_delete: { js: '$js_set_delete', c: 'omni_js_set_delete', arity: 2 },
   js_set_items: { js: '$js_set_items', c: 'omni_js_set_items', arity: 1 },
+
+  // ---------------------------------------------------------------- Number / Math
+  // toPrecision 与 toString(radix) 在自举的关键路径上：编译器自己用它们把 double 与
+  // 字节写进生成的 C（cReal 的 toPrecision(17)、cString 的 toString(8)）。
+  js_num_is_nan: { js: '$js_num_is_nan', c: 'omni_js_num_is_nan', arity: 1 },
+  js_num_is_finite: { js: '$js_num_is_finite', c: 'omni_js_num_is_finite', arity: 1 },
+  js_num_is_integer: { js: '$js_num_is_integer', c: 'omni_js_num_is_integer', arity: 1 },
+  js_num_of: { js: '$js_num_of', c: 'omni_js_num_of', arity: 1 },
+  js_bigint_of: { js: '$js_bigint_of', c: 'omni_js_bigint_of', arity: 1 },
+  js_bigint_as_int_n: { js: '$js_bigint_as_int_n', c: 'omni_js_bigint_as_int_n', arity: 2 },
+  js_num_to_precision: { js: '$js_num_to_precision', c: 'omni_js_num_to_precision', arity: 2 },
+  js_num_to_string: { js: '$js_num_to_string', c: 'omni_js_num_to_string', arity: 2 },
+  // op: 'a' abs / 't' trunc / 'f' floor / 'c' ceil / 'M' max / 'm' min
+  js_math: { js: '$js_math', c: 'omni_js_math', arity: 2, lit: ['op'] },
 };

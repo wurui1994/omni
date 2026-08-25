@@ -203,6 +203,19 @@ bool omni_js_str_ends_with(omni_dyn s, omni_dyn suf);
 omni_dyn omni_js_str_of_char_code(omni_dyn u);
 omni_dyn omni_js_str_of_code_point(omni_dyn cp);
 
+/* omni_js_num.c —— JS 的 Number / Math / BigInt。
+   toPrecision 与 toString(radix) 是自举的关键路径：编译器自己用它们把 double 与字节
+   写进生成的 C，格式差一个字符，两代产出的 C 就不一样。 */
+bool omni_js_num_is_nan(omni_dyn v);
+bool omni_js_num_is_finite(omni_dyn v);
+bool omni_js_num_is_integer(omni_dyn v);
+omni_dyn omni_js_num_of(omni_dyn v);
+omni_dyn omni_js_bigint_of(omni_dyn v);
+omni_dyn omni_js_bigint_as_int_n(omni_dyn bits, omni_dyn v);
+omni_dyn omni_js_math(int op, omni_dyn a, omni_dyn b);
+omni_dyn omni_js_num_to_precision(omni_dyn v, omni_dyn digits);
+omni_dyn omni_js_num_to_string(omni_dyn v, omni_dyn radix);
+
 /* omni_hash.c —— 键的显示形式，只在 "key not found" 的错误消息里用，都是冷路径 */
 omni_str omni_kstr_int(int64_t k);
 omni_str omni_kstr_real(double k);

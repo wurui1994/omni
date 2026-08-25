@@ -567,6 +567,75 @@ function $js_set_add(s, v) { $js_dict_of(s).set($js_key(v), v); return s; }
 function $js_set_delete(s, v) { return $js_dict_of(s).delete($js_key(v)); }
 function $js_set_items(s) { return [...$js_dict_of(s).values()]; }
 
+// ------------------------------------------- Number / Math / BigInt（ADR-0011）
+// toPrecision 与 toString(radix) 用宿主的即是规范；C 侧照规范复刻了一遍。
+function $js_real(v, who) {
+  const t = $dynTag(v);
+  if (t === "real") return v;
+  if (t === "int") return Number(v);
+  $rt_error(who + " expects a number, found " + t);
+}
+function $js_num_is_nan(v) { return $dynTag(v) === "real" && Number.isNaN(v); }
+function $js_num_is_finite(v) { return $dynTag(v) === "real" && Number.isFinite(v); }
+function $js_num_is_integer(v) { return $dynTag(v) === "real" && Number.isInteger(v); }
+function $js_num_of(v) {
+  switch ($dynTag(v)) {
+    case "real": return v;
+    case "int": return Number(v);
+    case "bool": return v ? 1 : 0;
+    case "null": return 0;
+    case "undefined": return NaN;
+    case "string": return Number(v);
+    default: $rt_error("cannot convert " + $dynTag(v) + " to a number");
+  }
+}
+function $js_bigint_of(v) {
+  const t = $dynTag(v);
+  if (t === "int") return v;
+  if (t === "bool") return v ? 1n : 0n;
+  if (t === "real") {
+    if (!Number.isFinite(v) || !Number.isInteger(v)) {
+      $rt_error("cannot convert a non-integer number to a bigint");
+    }
+    return BigInt(v);
+  }
+  if (t === "string") return $int_of_string(v);
+  $rt_error("cannot convert " + t + " to a bigint");
+}
+function $js_bigint_as_int_n(bits, v) {
+  const n = $js_real(bits, "BigInt.asIntN");
+  if (n !== 64) $rt_error("only BigInt.asIntN(64, ..) is supported, got " + n);
+  if ($dynTag(v) !== "int") $rt_error("BigInt.asIntN expects a bigint, found " + $dynTag(v));
+  return v;
+}
+function $js_num_to_precision(v, digits) {
+  const p = $js_real(digits, "toPrecision");
+  if (p < 1 || p > 100) $rt_error("toPrecision() argument must be between 1 and 100, got " + p);
+  return $js_real(v, "toPrecision").toPrecision(p);
+}
+function $js_num_to_string(v, radix) {
+  const x = $js_real(v, "toString");
+  const r = radix === undefined ? 10 : $js_real(radix, "toString");
+  if (r < 2 || r > 36) $rt_error("toString() radix must be between 2 and 36, got " + r);
+  if (r === 10) return $js_str(x);
+  if (!Number.isFinite(x) || !Number.isInteger(x)) {
+    $rt_error("toString(radix) with a non-integer value is not supported");
+  }
+  return x.toString(r);
+}
+function $js_math(op, a, b) {
+  const x = $js_real(a, "Math");
+  if (op === "a") return Math.abs(x);
+  if (op === "t") return Math.trunc(x);
+  if (op === "f") return Math.floor(x);
+  if (op === "c") return Math.ceil(x);
+  const y = $js_real(b, "Math");
+  if (op === "M") return Math.max(x, y);
+  if (op === "m") return Math.min(x, y);
+  $rt_error("unknown Math op '" + op + "'");
+}
+
+
 
 
 // dynamic 的运行期分派面（ADR-0008 第 5 节的封闭清单）。

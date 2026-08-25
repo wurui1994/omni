@@ -264,6 +264,41 @@ c('shas/miss', jsBool('js_set_has', [SET(), str('2')]), `${SETS}.has("2")`);
 c('sdelete', jsBool('js_set_delete', [SET(), str('x')]), `${SETS}.delete("x")`);
 c('sitems', js('js_arr_join', [js('js_set_items', [SET()]), str('|')]), `[...${SETS}].join("|")`);
 
+// Number / Math。toPrecision(17) 与 toString(8/16) 是自举的关键路径：编译器自己用它们
+// 把 double 与字节写进生成的 C，差一个字符两代产出就不一样。
+for (const src of ['0', '0.1', '1/3', '-2.5', '1e21', '1e-7', '123456789012345680000', '1.7976931348623157e308']) {
+  // eslint-disable-next-line no-eval
+  c(`prec17/${src}`, js('js_num_to_precision', [real(eval(src)), real(17)]), `(${src}).toPrecision(17)`);
+}
+for (const [v, r] of [[0, 16], [255, 16], [8, 8], [0x1f600, 16], [-255, 16], [35, 36], [10, 2]]) {
+  c(`radix/${v}/${r}`, js('js_num_to_string', [real(v), real(r)]), `(${v}).toString(${r})`);
+}
+c('radix/dflt', js('js_num_to_string', [real(2.5), undef]), '(2.5).toString()');
+c('isNaN/nan', jsBool('js_num_is_nan', [real(NaN)]), 'Number.isNaN(NaN)');
+c('isNaN/str', jsBool('js_num_is_nan', [str('x')]), 'Number.isNaN("x")');
+c('isFinite/inf', jsBool('js_num_is_finite', [real(Infinity)]), 'Number.isFinite(Infinity)');
+c('isFinite/1', jsBool('js_num_is_finite', [real(1)]), 'Number.isFinite(1)');
+c('isInteger/2.5', jsBool('js_num_is_integer', [real(2.5)]), 'Number.isInteger(2.5)');
+c('isInteger/2', jsBool('js_num_is_integer', [real(2)]), 'Number.isInteger(2)');
+c('isInteger/int', jsBool('js_num_is_integer', [int(2)]), 'Number.isInteger(2n)');
+for (const s of ['12', '  12  ', '1.5e3', '', '  ', 'x', '12x', '-7']) {
+  c(`Number/${JSON.stringify(s)}`, js('js_num_of', [str(s)]), `Number(${JSON.stringify(s)})`);
+}
+c('Number/int', js('js_num_of', [int(-5)]), 'Number(-5n)');
+c('Number/bool', js('js_num_of', [bool(true)]), 'Number(true)');
+c('Number/null', js('js_num_of', [nul]), 'Number(null)');
+c('Number/undef', js('js_num_of', [undef]), 'Number(undefined)');
+c('BigInt/real', js('js_bigint_of', [real(7)]), 'BigInt(7)');
+c('BigInt/str', js('js_bigint_of', [str('-9007199254740993')]), 'BigInt("-9007199254740993")');
+c('asIntN', js('js_bigint_as_int_n', [real(64), int(5)]), 'BigInt.asIntN(64, 5n)');
+c('math/max', js('js_math', [real(3), real(7)], { op: 'M' }), 'Math.max(3, 7)');
+c('math/max-nan', js('js_math', [real(NaN), real(7)], { op: 'M' }), 'Math.max(NaN, 7)');
+c('math/min', js('js_math', [real(3), real(-7)], { op: 'm' }), 'Math.min(3, -7)');
+c('math/abs', js('js_math', [real(-3.5), undef], { op: 'a' }), 'Math.abs(-3.5)');
+c('math/trunc', js('js_math', [real(-3.9), undef], { op: 't' }), 'Math.trunc(-3.9)');
+c('math/floor', js('js_math', [real(-3.1), undef], { op: 'f' }), 'Math.floor(-3.1)');
+c('math/ceil', js('js_math', [real(-3.9), undef], { op: 'c' }), 'Math.ceil(-3.9)');
+
 
 // ---------------------------------------------------------------- 跑
 function run(cmd, args, opts = {}) {
