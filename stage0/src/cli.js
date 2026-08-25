@@ -10,7 +10,7 @@
 
 import { writeFileSync, mkdtempSync, existsSync, statSync, readdirSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, basename } from 'node:path';
+import { join, basename } from './host/path.js';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { Diagnostics, OmniError } from './source/diag.js';

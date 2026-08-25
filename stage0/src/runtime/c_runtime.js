@@ -9,7 +9,7 @@
 // 以及在需要单文件时把整个运行时拼成一个翻译单元。
 
 import { readFileSync, readdirSync } from 'node:fs';
-import { join, dirname, basename } from 'node:path';
+import { join, dirname, basename } from '../host/path.js';
 import { fileURLToPath } from 'node:url';
 
 export const RUNTIME_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'runtime');

@@ -18,7 +18,7 @@
 //   - 禁止环：报出整条环路径，而不是给一个半初始化的模块
 
 import { readFileSync, existsSync, realpathSync, readdirSync } from 'node:fs';
-import { join, dirname, resolve, relative, isAbsolute, basename } from 'node:path';
+import { join, dirname, resolve, relative, isAbsolute, basename } from '../host/path.js';
 import { fileURLToPath } from 'node:url';
 import { SourceFile, OmniError } from '../source/diag.js';
 import { parse } from '../parse/parser.js';
