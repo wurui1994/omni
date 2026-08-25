@@ -140,6 +140,8 @@ class Lower {
     /** 初始化式是正则字面量的模块级 const：名字 -> {body, flags}（ADR-0011 决策 10） */
     this.regexConsts = new Map();
     this.used = new Set();
+    /** 顶层类声明：名字 -> {mangled, node}（降成一个"造实例"的函数，ADR-0011 决策 13） */
+    this.classes = new Map();
     /** 闭包记录（ADR-0010 的布局），MakeClosure 的 closure 下标就是这里的位置 */
     this.closures = [];
     /** 顶层函数当值用时的转发闭包：名字 -> 闭包记录（一个函数只生成一次） */
@@ -164,6 +166,9 @@ class Lower {
     for (const s of program.body) this.collectTop(s);
     for (const s of program.body) {
       if (s.type === 'FuncDecl') this.funcDecl(s);
+    }
+    for (const s of program.body) {
+      if (s.type === 'ClassDecl') this.classDecl(s);
     }
     // 顶层的其余语句是 omni_main 的函数体；模块级变量的初始化也在这里发生
     const main = { name: 'main', mangled: 'omni_main', ret: { k: 'void' }, params: [], body: null };
@@ -208,7 +213,8 @@ class Lower {
         }
         break;
       case 'ClassDecl':
-        this.err(s.span, "class declarations are not lowered yet (ADR-0011 landing step 6c)");
+        if (this.classes.has(s.id)) this.err(s.span, `duplicate class '${s.id}'`);
+        this.classes.set(s.id, { mangled: this.mangle('n_', s.id), node: s });
         break;
       case 'ImportDecl': case 'ExportNamed': case 'ExportDefault': case 'ExportDecl':
         this.err(s.span, 'import/export are not lowered yet (ADR-0011 landing step 6e)');
@@ -389,6 +395,54 @@ class Lower {
     return rec;
   }
 
+  /**
+   * 类（ADR-0011 决策 13）。降成一个"造实例"的函数：实例就是普通对象，方法是**每个
+   * 实例一份的闭包**，都捕获同一个 `this` cell。量过：编译器源码里 14 个类，每个类的
+   * 实例只有 1~6 个，所以"每实例一份闭包"这点开销换来的是不用动 dynamic 的标签、也
+   * 不用给 js_obj_* 家族加分支 —— `o.m()` 走成员派发的兜底（决策 12）就是对的。
+   */
+  classDecl(s) {
+    const rec = this.classes.get(s.id);
+    if (s.superClass) this.err(s.span, "'extends' is not lowered yet (ADR-0011 landing step 6d)");
+    const methods = [];
+    let ctor = null;
+    for (const m of s.members) {
+      const what = m.computed ? '<computed>' : this.keyName(m.key, m.span);
+      if (m.static) { this.err(m.span, `static class members are not supported ('${what}')`); continue; }
+      if (m.kind === 'field') { this.err(m.span, `class fields are not supported; assign '${what}' in the constructor`); continue; }
+      if (m.kind === 'get' || m.kind === 'set') { this.err(m.span, `accessors are not supported; make '${what}' a method`); continue; }
+      if (m.computed) { this.err(m.span, 'computed method names are not supported'); continue; }
+      if (what === 'constructor') ctor = m; else methods.push([what, m]);
+    }
+
+    const outer = this.fn;
+    const bodyStmts = ctor ? ctor.body.body : [];
+    this.fn = this.newFrame(bodyStmts, {});
+    // 方法体提到的名字都可能被捕获；`this` 一定被捕获，所以必须是 cell
+    for (const [, m] of methods) refNames(m.body, this.fn.captured);
+    this.fn.captured.add('this');
+    this.fn.isCtor = true;
+    const self = this.declare('this');
+    const stmts = [localStmt(self.name, arrLit([op('js_obj_new', [])]))];
+    for (const [name, m] of methods) {
+      stmts.push(exprStmt(op('js_obj_set',
+        [this.readEntry(self), s16(name), this.closureExpr(m, `${s.id}_${name}`)])));
+    }
+    if (ctor) {
+      ctor.params.forEach((p, i) => stmts.push(...this.bindParam(p, i, ctor.span)));
+      if (ctor.rest) {
+        if (ctor.rest.type !== 'Ident') this.err(ctor.span, 'destructuring a rest parameter is not supported');
+        const ent = this.declare(ctor.rest.type === 'Ident' ? ctor.rest.name : '_rest');
+        stmts.push(this.declStmt(ent, op('js_arr_slice', [argsDyn(), constReal(ctor.params.length), undefExpr()])));
+      }
+      stmts.push(...this.hoistFuncDecls(bodyStmts));
+      for (const st of bodyStmts) stmts.push(...this.stmt(st));
+    }
+    const body = block([...this.fn.prelude, ...stmts, { kind: 'Return', value: this.readEntry(self) }]);
+    this.fn = outer;
+    this.funcs.push({ name: s.id, mangled: rec.mangled, ret: D, params: [{ name: 'args', type: listType(D) }], body });
+  }
+
   /** 闭包值的构造表达式（在**外层**栈帧里求值） */
   closureExpr(node, label) {
     return this.makeClosure(this.closureOf(node, label));
@@ -529,6 +583,11 @@ class Lower {
         this.err(s.span, "for-in is not supported; iterate Object.keys(o) instead");
         return [];
       case 'Return':
+        // 构造器的 return 只能是空的（值就是实例），别的形状拒掉
+        if (this.fn.isCtor) {
+          if (s.arg) this.err(s.span, 'a constructor cannot return a value');
+          return [{ kind: 'Return', value: this.readEntry(this.lookup('this')) }];
+        }
         return [{ kind: 'Return', value: s.arg ? this.expr(s.arg) : undefExpr() }];
       case 'Break':
         if (this.fn.loops === 0 && this.fn.switches === 0) this.err(s.span, "'break' outside a loop or switch");
@@ -554,7 +613,9 @@ class Lower {
         this.err(s.span, 'a nested function declaration is only supported at the top of a function body');
         return [];
       case 'ClassDecl':
-        this.err(s.span, 'class declarations are not lowered yet (ADR-0011 landing step 6c)');
+        // 顶层的类在 module() 里已经降过了（collectTop 收，classDecl 降）
+        if (this.classes.get(s.id)?.node === s) return [];
+        this.err(s.span, 'a class declaration is only supported at the top level of a module');
         return [];
       case 'ImportDecl': case 'ExportNamed': case 'ExportDefault': case 'ExportDecl':
         return [];   // collectTop 已经报过了
@@ -826,9 +887,13 @@ class Lower {
         for (const x of e.exprs.slice(0, -1)) this.emitPre(exprStmt(this.exprDiscard(x)), e.span);
         return this.expr(e.exprs[e.exprs.length - 1]);
       }
-      case 'This':
-        this.err(e.span, "'this' is not lowered yet (ADR-0011 landing step 6c)");
+      case 'This': {
+        // `this` 就是构造器里那个 cell（方法闭包捕获它）；别处出现就是错的
+        const ent = this.lookup('this');
+        if (ent) return this.readEntry(ent);
+        this.err(e.span, "'this' is only available inside a class constructor or method");
         return undefExpr();
+      }
       case 'Arrow': case 'FuncExpr':
         return this.closureExpr(e, e.type === 'FuncExpr' && e.id ? e.id : 'fn');
       case 'ClassExpr':
@@ -884,6 +949,10 @@ class Lower {
     if (this.globals.has(e.name)) return globalRef(this.globals.get(e.name).name);
     // 顶层函数当值用：包一个零捕获的转发闭包（每个函数只包一次）
     if (this.topFns.has(e.name)) return this.topFnValue(e.name);
+    if (this.classes.has(e.name)) {
+      this.err(e.span, `'${e.name}' is a class, which can only be used in 'new ${e.name}(...)'`);
+      return undefExpr();
+    }
     if (STATIC_NS.has(e.name)) {
       this.err(e.span, `'${e.name}' can only be used as a member base, e.g. ${e.name}.something`);
       return undefExpr();
@@ -1182,7 +1251,11 @@ class Lower {
       }
       return op(n === 'Map' ? 'js_map_new' : 'js_set_new', []);
     }
-    this.err(e.span, `'new' is only supported for Map and Set so far (ADR-0011 landing step 6c)`);
+    // 类的构造：造实例的函数和普通顶层函数同一套调用约定
+    if (n && this.classes.has(n) && !this.lookup(n)) {
+      return { kind: 'Call', func: this.classes.get(n).mangled, name: n, args: [this.argList(e.args)], type: D };
+    }
+    this.err(e.span, `'new ${n ?? '<expr>'}' is not supported; only Map, Set and classes declared in this file`);
     return undefExpr();
   }
 

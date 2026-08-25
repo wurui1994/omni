@@ -179,6 +179,25 @@ JS 的闭包按**引用**捕获，OIR 的闭包按**值**捕获（ADR-0010，为
 `undefined`** —— `box.get()` 经过 `js_m_get(r, a0)` 之后不能变成 `get(undefined)`，
 否则 `(...xs) => xs.length` 两边就不一样。C 侧 `omni_js_call_n`，JS 侧 `$js_call_n`。
 
+### 13. 类降成"造实例的函数"：实例是普通对象，方法是每实例一份的闭包
+
+量过：编译器源码里 14 个类（`Lexer` / `Parser` / `Checker` / 两个发射器 / `Scope` /
+`Diagnostics` / `Session` …），每个类的实例只有 1~6 个，`static` 成员 0 处，`extends`
+只出现在三个 `Error` 子类上。所以不给 dynamic 加"实例"标签、也不给 `js_obj_*` 家族加
+分支，而是：
+
+- `class C { constructor(…){…} m(…){…} }` 降成一个普通函数 `n_C(args)`：先
+  `js_obj_new()`，再把每个方法当闭包 `js_obj_set` 进去，然后跑构造器体，最后返回实例。
+- `this` 就是构造器栈帧里的一个 cell（决策 11），方法闭包捕获它。所以 `o.m()` 不需要
+  "传接收者"这回事 —— 走成员派发的兜底（决策 12）取出闭包直接调即可。
+- 代价是每个实例带 N 个闭包（宿主那边方法在原型上共享）。以实例数量看这点开销无关紧要，
+  换来的是一条新路都不用开。
+- 一个有意的偏差：方法是**绑好的**，`const f = o.m; f()` 在这里能用，在宿主上会丢
+  `this`。丢 `this` 本来就是坏写法，不作为兼容目标（测试里也不写）。
+- `static` / 类字段 / getter-setter / 计算方法名 / 类当值用 一律当场报错。5 处 getter
+  改成方法（`d.hasErrors` -> `d.hasErrors()`），属于"把编译器源码改到封闭 ABI 上"那步。
+- `extends` 与 `instanceof` 留给落地顺序 6d：量过它们只服务于异常路由。
+
 ## 落地顺序
 
 1. `dynamic` 扩成完整 JS 值域：函数标签 + 动态调用（实参个数运行期检查）+ `js_*` 运算 op
