@@ -285,6 +285,21 @@ static omni_dyn omni_js_arr_sort(omni_dyn a, omni_dyn f) { \
     } \
   } \
   return a; \
+} \
+static omni_dyn omni_js_arr_entries(omni_dyn a) { \
+  LT l = omni_js_arr_of(a); \
+  LT out = LT##_new(); \
+  LT##_reserve(out, l->len); \
+  for (int64_t i = 0; i < l->len; i++) { \
+    LT pair = LT##_new(); \
+    LT##_reserve(pair, 2); \
+    pair->items[0] = omni_dyn_of_real((double)i); \
+    pair->items[1] = l->items[i]; \
+    pair->len = 2; \
+    out->items[i] = omni_js_arr_wrap(pair); \
+  } \
+  out->len = l->len; \
+  return omni_js_arr_wrap(out); \
 }
 
 

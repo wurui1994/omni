@@ -52,6 +52,42 @@ omni_dyn omni_js_num_of(omni_dyn v) {
   }
 }
 
+/* parseInt(s, radix)：和 Number(s) 不是一回事 —— 它吃前缀、后面有垃圾也不报错。
+   量过的用法只有 parseInt(hex, 16) 两处（词法器里解 \x / \u 转义），但照规范写全：
+   跳前导空白、认符号、radix 16 时允许 0x 前缀、一个合法数字都没有就是 NaN。 */
+omni_dyn omni_js_num_parse_int(omni_dyn sd, omni_dyn radixd) {
+  omni_str s = omni_s16_to_utf8(omni_js_as_s16(sd));
+  int radix = 10;
+  if (radixd.tag == OMNI_DYN_REAL && !isnan(radixd.u.r) && radixd.u.r != 0) {
+    radix = (int)radixd.u.r;
+    if (radix < 2 || radix > 36) return omni_dyn_of_real((double)NAN);
+  } else if (radixd.tag != OMNI_DYN_UNDEF && radixd.tag != OMNI_DYN_REAL) {
+    omni_errorf("parseInt radix must be a number, found %s", omni_dyn_tag_name(radixd.tag));
+  }
+  const char *p = omni_cstr(s);
+  while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '\v' || *p == '\f') p++;
+  double sign = 1;
+  if (*p == '+' || *p == '-') { if (*p == '-') sign = -1; p++; }
+  if ((radix == 16 || radixd.tag == OMNI_DYN_UNDEF) && p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+    radix = 16;
+    p += 2;
+  }
+  double acc = 0;
+  int digits = 0;
+  for (; *p; p++) {
+    int d;
+    if (*p >= '0' && *p <= '9') d = *p - '0';
+    else if (*p >= 'a' && *p <= 'z') d = *p - 'a' + 10;
+    else if (*p >= 'A' && *p <= 'Z') d = *p - 'A' + 10;
+    else break;
+    if (d >= radix) break;
+    acc = acc * radix + d;
+    digits++;
+  }
+  if (digits == 0) return omni_dyn_of_real((double)NAN);
+  return omni_dyn_of_real(sign * acc);
+}
+
 /* BigInt(x)：只认整数值的 number 与十进制/0x/0o/0b 字符串。JS 在小数上抛
    RangeError，这里报错 —— 两边都得拒绝，不能一边悄悄截尾。 */
 omni_dyn omni_js_bigint_of(omni_dyn v) {

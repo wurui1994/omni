@@ -392,6 +392,105 @@ reReplace('x*', 'g', 'abc', '-');
 reReplace('^', 'gm', 'a\vb', '> ');
 reReplace('(z)?a', '', 'ba', '[$1]');
 
+// -------------------------------------------- 字符串/数组的其余缺口（量出来的四个）
+const SPL = (s, sep) => J(js('js_str_split', [str(s), str(sep)]));
+c('split/str/slash', SPL('a/b/c', '/'), 'JSON.stringify("a/b/c".split("/"))');
+c('split/str/none', SPL('abc', '/'), 'JSON.stringify("abc".split("/"))');
+c('split/str/empty-sep', SPL('a中b', ''), 'JSON.stringify("a中b".split(""))');
+c('split/str/adjacent', SPL('a,,b', ','), 'JSON.stringify("a,,b".split(","))');
+c('split/str/edges', SPL(',a,', ','), 'JSON.stringify(",a,".split(","))');
+c('split/str/empty-input', SPL('', ','), 'JSON.stringify("".split(","))');
+c('split/str/multi', SPL('a::b', '::'), 'JSON.stringify("a::b".split("::"))');
+
+const BYTES = (s) => J(js('js_utf8_bytes', [str(s)]));
+c('utf8/ascii', BYTES('AZ'), 'JSON.stringify([...new TextEncoder().encode("AZ")])');
+c('utf8/cjk', BYTES('中'), 'JSON.stringify([...new TextEncoder().encode("中")])');
+c('utf8/astral', BYTES('a\u{1f600}'), 'JSON.stringify([...new TextEncoder().encode("a\u{1f600}")])');
+c('utf8/lone-surrogate', BYTES('\ud800'), 'JSON.stringify([...new TextEncoder().encode("\\ud800")])');
+
+const PI = (s, r) => js('js_num_parse_int', [str(s), r === undefined ? undef : real(r)]);
+c('parseInt/hex', PI('ff', 16), 'parseInt("ff", 16)');
+c('parseInt/hex-upper', PI('7F', 16), 'parseInt("7F", 16)');
+c('parseInt/dec', PI('42', 10), 'parseInt("42", 10)');
+c('parseInt/trailing', PI('12abc', 10), 'parseInt("12abc", 10)');
+c('parseInt/none', PI('zz', 10), 'parseInt("zz", 10)');
+c('parseInt/sign', PI('-1f', 16), 'parseInt("-1f", 16)');
+c('parseInt/space', PI('  7 ', 10), 'parseInt("  7 ", 10)');
+c('parseInt/no-radix', PI('0x1f'), 'parseInt("0x1f")');
+c('parseInt/no-radix-dec', PI('08'), 'parseInt("08")');
+c('parseInt/0x-with-16', PI('0x1f', 16), 'parseInt("0x1f", 16)');
+c('parseInt/empty', PI('', 10), 'parseInt("", 10)');
+
+c('arr/entries', J(js('js_arr_entries', [arr(str('a'), real(2), nul)])),
+  'JSON.stringify([...["a", 2, null].entries()])');
+c('arr/entries-empty', J(js('js_arr_entries', [arr()])), 'JSON.stringify([...[].entries()])');
+
+// ---------------------------------------------------------------- node 宿主面
+// 三个进程（ref.mjs / out.mjs / a.out）是**顺序**跑的，cwd 都是仓库根，所以
+// "同一个固定路径先写后读"这种跨用例的状态是各自独立且一致的。
+const TMP = js('js_os_tmpdir', []);
+const PATH1 = js('js_add', [TMP, str('/omni-oir-host-1.txt')]);
+const PATH2 = js('js_add', [TMP, str('/omni-oir-host-2.txt')]);
+const JTMP = 'require("node:os").tmpdir()';
+const REF_OS = 'process.getBuiltinModule("node:os").tmpdir()';
+const REF_FS = 'process.getBuiltinModule("node:fs")';
+const P1 = `(${REF_OS} + "/omni-oir-host-1.txt")`;
+const P2 = `(${REF_OS} + "/omni-oir-host-2.txt")`;
+void JTMP;
+
+c('host/write', js('js_fs_write_text', [PATH1, str('hi中\n')]),
+  `(${REF_FS}.writeFileSync(${P1}, "hi中\\n"), undefined)`);
+c('host/read', J(js('js_fs_read_text', [PATH1])),
+  `JSON.stringify(${REF_FS}.readFileSync(${P1}, "utf8"))`);
+c('host/size', js('js_fs_size', [PATH1]), `${REF_FS}.statSync(${P1}).size`);
+c('host/exists', jsBool('js_fs_exists', [PATH1]), `${REF_FS}.existsSync(${P1})`);
+c('host/exists-not', jsBool('js_fs_exists', [js('js_add', [PATH1, str('.nope')])]),
+  `${REF_FS}.existsSync(${P1} + ".nope")`);
+c('host/mtime-type', js('js_typeof', [js('js_fs_mtime_ms', [PATH1])]),
+  `typeof ${REF_FS}.statSync(${P1}).mtimeMs`);
+c('host/rename', js('js_fs_rename', [PATH1, PATH2]),
+  `(${REF_FS}.renameSync(${P1}, ${P2}), undefined)`);
+c('host/renamed-gone', jsBool('js_fs_exists', [PATH1]), `${REF_FS}.existsSync(${P1})`);
+c('host/renamed-read', J(js('js_fs_read_text', [PATH2])),
+  `JSON.stringify(${REF_FS}.readFileSync(${P2}, "utf8"))`);
+
+// 读一个满是中文注释的真文件：码元口径的长度对上，说明 UTF-8 -> UTF-16 两侧一致
+c('host/read-len', js('js_str_len', [js('js_fs_read_text', [str('stage0/runtime/omni.h')])]),
+  `${REF_FS}.readFileSync("stage0/runtime/omni.h", "utf8").length`);
+c('host/readdir', J(js('js_arr_sort', [js('js_fs_readdir', [str('stage0/runtime')]), undef])),
+  `JSON.stringify(${REF_FS}.readdirSync("stage0/runtime").sort())`);
+c('host/realpath', js('js_fs_realpath', [str('stage0/runtime')]),
+  `${REF_FS}.realpathSync("stage0/runtime")`);
+// mkdtemp 的结果是随机的，能对照的是长度（前缀相同 + 六个随机字符）
+c('host/mkdtemp-len', js('js_str_len', [js('js_fs_mkdtemp', [js('js_add', [TMP, str('/omni-oir-')])])]),
+  `${REF_FS}.mkdtempSync(${REF_OS} + "/omni-oir-").length`);
+
+c('host/cwd', js('js_proc_cwd', []), 'process.cwd()');
+c('host/tmpdir', TMP, REF_OS);
+c('host/args', J(js('js_proc_args', [])), 'JSON.stringify(process.argv.slice(2))');
+c('host/env', js('js_typeof', [js('js_proc_env', [str('PATH')])]), 'typeof process.env.PATH');
+c('host/env-missing', js('js_typeof', [js('js_proc_env', [str('OMNI_NO_SUCH_VAR')])]),
+  'typeof process.env.OMNI_NO_SUCH_VAR');
+c('host/exit-code-0', js('js_proc_exit_code', [real(0)]), '(process.exitCode = 0, undefined)');
+c('host/stdin-tty', jsBool('js_proc_stdin_is_tty', []), 'process.stdin.isTTY === true');
+c('host/read-line-eof', js('js_typeof', [js('js_proc_read_line', [])]), '"undefined"');
+// 写一段不带换行的东西，再由 println 补上行尾：一条用例还是一行
+c('host/stdout-write', js('js_proc_stdout_write', [str('sw')]),
+  '(process.stdout.write("sw"), undefined)');
+c('host/install-dir', js('js_install_dir', []),
+  '(() => { const p = process.argv[1]; const i = p.lastIndexOf("/"); return i < 0 ? "." : (i === 0 ? "/" : p.slice(0, i)); })()');
+
+const SPAWN = (cmd, args, mode) =>
+  J(js('js_proc_spawn', [str(cmd), box({ kind: 'ListLit', type: listType(D), items: args.map(str) }), str(mode)]));
+c('host/spawn-echo', SPAWN('echo', ['hi'], 'c'),
+  'JSON.stringify((() => { const r = process.getBuiltinModule("node:child_process")'
+  + '.spawnSync("echo", ["hi"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });'
+  + ' return [r.status, r.stdout, r.stderr]; })())');
+c('host/spawn-false', SPAWN('false', [], 'c'),
+  'JSON.stringify((() => { const r = process.getBuiltinModule("node:child_process")'
+  + '.spawnSync("false", [], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });'
+  + ' return [r.status, r.stdout, r.stderr]; })())');
+
 
 // ---------------------------------------------------------------- 跑
 function run(cmd, args, opts = {}) {

@@ -235,11 +235,44 @@ bool omni_js_num_is_nan(omni_dyn v);
 bool omni_js_num_is_finite(omni_dyn v);
 bool omni_js_num_is_integer(omni_dyn v);
 omni_dyn omni_js_num_of(omni_dyn v);
+omni_dyn omni_js_num_parse_int(omni_dyn s, omni_dyn radix);
 omni_dyn omni_js_bigint_of(omni_dyn v);
 omni_dyn omni_js_bigint_as_int_n(omni_dyn bits, omni_dyn v);
 omni_dyn omni_js_math(int op, omni_dyn a, omni_dyn b);
 omni_dyn omni_js_num_to_precision(omni_dyn v, omni_dyn digits);
 omni_dyn omni_js_num_to_string(omni_dyn v, omni_dyn radix);
+
+/* omni_js_host.c —— node 宿主面（ADR-0011 落地顺序第 4 步）。
+   只有"真的要问操作系统"的东西：path 那一套是纯字符串计算，写在编译器源码里
+   （stage0/src/host/path.js）两个后端一起用，不进 ABI。
+   结果是数组的三个（readdir / argv / spawnSync）在 omni_js_host.h 的宏里。 */
+void omni_host_init(int argc, char **argv);
+int omni_host_exit_code(void);
+omni_dyn omni_js_fs_read_text(omni_dyn path);
+omni_dyn omni_js_fs_write_text(omni_dyn path, omni_dyn text);
+bool omni_js_fs_exists(omni_dyn path);
+omni_dyn omni_js_fs_mtime_ms(omni_dyn path);
+omni_dyn omni_js_fs_size(omni_dyn path);
+omni_dyn omni_js_fs_mkdtemp(omni_dyn prefix);
+omni_dyn omni_js_fs_rename(omni_dyn from, omni_dyn to);
+omni_dyn omni_js_fs_realpath(omni_dyn path);
+omni_dyn omni_js_proc_cwd(void);
+omni_dyn omni_js_proc_env(omni_dyn name);
+omni_dyn omni_js_proc_stdout_write(omni_dyn s);
+omni_dyn omni_js_proc_stderr_write(omni_dyn s);
+omni_dyn omni_js_proc_exit_code(omni_dyn n);
+bool omni_js_proc_stdin_is_tty(void);
+omni_dyn omni_js_proc_read_line(void);
+omni_dyn omni_js_os_tmpdir(void);
+omni_dyn omni_js_install_dir(void);
+/* 上面那批的原语，只给 omni_js_host.h 的宏用 */
+void *omni_host_dir_open(omni_dyn path);
+const char *omni_host_dir_next(void *d);
+void omni_host_dir_close(void *d);
+int omni_host_user_argc(void);
+const char *omni_host_user_arg(int i);
+omni_dyn omni_host_str_of_cstr(const char *p);
+int omni_host_spawn(const char *cmd, char *const *argv, int mode, omni_str *out, omni_str *err);
 
 /* omni_hash.c —— 键的显示形式，只在 "key not found" 的错误消息里用，都是冷路径 */
 omni_str omni_kstr_int(int64_t k);
@@ -388,5 +421,7 @@ static inline bool omni_eq_ref(void *a, void *b) { return a == b; }
 #include "omni_js_obj.h"
 #include "omni_js_json.h"
 #include "omni_js_re.h"
+#include "omni_js_str_arr.h"
+#include "omni_js_host.h"
 
 #endif /* OMNI_H */

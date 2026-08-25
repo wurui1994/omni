@@ -66,7 +66,9 @@ class CEmitter {
     this.line();
     for (const c of closures) this.closureMake(c);
     for (const f of this.mod.funcs) this.func(f);
-    this.line(`int main(void) { ${this.mod.entry}(); fflush(stdout); return 0; }`);
+    // argc/argv 要存下来：process.argv 与"我装在哪"（import.meta.url 的对应物）都要它。
+    // 退出码走 omni_host_exit_code —— process.exitCode 是个可写的槽，不是返回值。
+    this.line(`int main(int argc, char **argv) { omni_host_init(argc, argv); ${this.mod.entry}(); fflush(stdout); return omni_host_exit_code(); }`);
     return this.out.join('\n') + '\n';
   }
 
@@ -188,6 +190,8 @@ class CEmitter {
       this.line('OMNI_JS_JSON(omni_list_dynamic, omni_dict_string_dynamic)');
       // RE 也在 ARR 之后：回调走 ARR 里的 omni_js_call，match/split 的结果是 list<dynamic>
       this.line('OMNI_JS_RE(omni_list_dynamic, omni_dict_string_dynamic)');
+      this.line('OMNI_JS_STR_ARR(omni_list_dynamic, omni_dict_string_dynamic)');
+      this.line('OMNI_JS_HOST(omni_list_dynamic, omni_dict_string_dynamic)');
     }
   }
 

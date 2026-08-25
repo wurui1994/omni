@@ -145,4 +145,41 @@ export const JS_ABI = {
   js_re_match: { js: '$js_re_match', c: 'omni_js_re_match', arity: 3 },
   js_re_split: { js: '$js_re_split', c: 'omni_js_re_split', arity: 4 },
   js_re_replace: { js: '$js_re_replace', c: 'omni_js_re_replace', arity: 4 },
+
+  // -------------------------------------------------- 字符串/数组的其余缺口
+  // 都是量出来的：split 的字符串分隔符形式 4 处（'/' 与 '\n'，都不带 limit），
+  // parseInt(hex, 16) 2 处，Buffer.from(s, 'utf8') 1 处（backend-c 发字符串字面量），
+  // Array.prototype.entries() 1 处（hir/check.js 的 params.entries()）。
+  js_str_split: { js: '$js_str_split', c: 'omni_js_str_split', arity: 2 },
+  js_utf8_bytes: { js: '$js_utf8_bytes', c: 'omni_js_utf8_bytes', arity: 1 },
+  js_num_parse_int: { js: '$js_num_parse_int', c: 'omni_js_num_parse_int', arity: 2 },
+  js_arr_entries: { js: '$js_arr_entries', c: 'omni_js_arr_entries', arity: 1 },
+
+  // ---------------------------------------------------------------- node 宿主面
+  // 只收"真的要问操作系统"的东西。path 的 join/dirname/basename/resolve/relative/
+  // isAbsolute 是纯字符串计算，写在 stage0/src/host/path.js 里两个后端一起用 ——
+  // 进 ABI 只会多出一处"宿主实现与我的实现是否逐字符一致"的分叉点。crypto 的
+  // sha256 同理，不进 ABI。
+  // 失败一律抛（和 node 的同步 API 一致），到 try/catch 落地时接进 pending-error 槽。
+  js_fs_read_text: { js: '$js_fs_read_text', c: 'omni_js_fs_read_text', arity: 1 },
+  js_fs_write_text: { js: '$js_fs_write_text', c: 'omni_js_fs_write_text', arity: 2 },
+  js_fs_exists: { js: '$js_fs_exists', c: 'omni_js_fs_exists', arity: 1 },
+  js_fs_readdir: { js: '$js_fs_readdir', c: 'omni_js_fs_readdir', arity: 1 },
+  js_fs_mtime_ms: { js: '$js_fs_mtime_ms', c: 'omni_js_fs_mtime_ms', arity: 1 },
+  js_fs_size: { js: '$js_fs_size', c: 'omni_js_fs_size', arity: 1 },
+  js_fs_mkdtemp: { js: '$js_fs_mkdtemp', c: 'omni_js_fs_mkdtemp', arity: 1 },
+  js_fs_rename: { js: '$js_fs_rename', c: 'omni_js_fs_rename', arity: 2 },
+  js_fs_realpath: { js: '$js_fs_realpath', c: 'omni_js_fs_realpath', arity: 1 },
+  js_proc_args: { js: '$js_proc_args', c: 'omni_js_proc_args', arity: 0 },
+  js_proc_cwd: { js: '$js_proc_cwd', c: 'omni_js_proc_cwd', arity: 0 },
+  js_proc_env: { js: '$js_proc_env', c: 'omni_js_proc_env', arity: 1 },
+  js_proc_stdout_write: { js: '$js_proc_stdout_write', c: 'omni_js_proc_stdout_write', arity: 1 },
+  js_proc_stderr_write: { js: '$js_proc_stderr_write', c: 'omni_js_proc_stderr_write', arity: 1 },
+  js_proc_exit_code: { js: '$js_proc_exit_code', c: 'omni_js_proc_exit_code', arity: 1 },
+  js_proc_stdin_is_tty: { js: '$js_proc_stdin_is_tty', c: 'omni_js_proc_stdin_is_tty', arity: 0 },
+  js_proc_read_line: { js: '$js_proc_read_line', c: 'omni_js_proc_read_line', arity: 0 },
+  // 结果是 [status, stdout, stderr]；mode 'c' 全捕获 / 'o' stdout 直通 / 'i' 全直通
+  js_proc_spawn: { js: '$js_proc_spawn', c: 'omni_js_proc_spawn', arity: 3 },
+  js_os_tmpdir: { js: '$js_os_tmpdir', c: 'omni_js_os_tmpdir', arity: 0 },
+  js_install_dir: { js: '$js_install_dir', c: 'omni_js_install_dir', arity: 0 },
 };

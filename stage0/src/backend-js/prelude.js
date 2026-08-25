@@ -73,6 +73,12 @@ function $print(s) {
   $out += s + "\n";
   if ($out.length > 8192) { process.stdout.write($out); $out = ""; }
 }
+// 不补换行的那一路（process.stdout.write 的落点）。必须和 $print 共用同一个缓冲区，
+// 否则直写的那段会插到已经缓冲、还没落盘的输出前面去。
+function $print_raw(s) {
+  $out += s;
+  if ($out.length > 8192) { process.stdout.write($out); $out = ""; }
+}
 function $flush() { if ($out.length) { process.stdout.write($out); $out = ""; } }
 
 const $trunc = (x) => {
@@ -514,6 +520,15 @@ function $js_arr_cmp(f, x, y) {
   return Number.isNaN(d) ? 0 : (d < 0 ? -1 : (d > 0 ? 1 : 0));
 }
 function $js_arr_sort(a, f) { $js_arr_of(a).sort((x, y) => $js_arr_cmp(f, x, y)); return a; }
+function $js_arr_entries(a) { return $js_arr_of(a).map((v, i) => [i, v]); }
+// split 的字符串分隔符形式（正则形式是 $js_re_split）。空分隔符按码元切，不按码点。
+function $js_str_split(s, sep) { return $js_asS16(s).split($js_asS16(sep)); }
+// Buffer.from(s, "utf8") 的替身：只要"UTF-8 字节的数组"这一个形状。
+// 落单的代理项两侧都替成 U+FFFD（TextEncoder 与 omni_s16_to_utf8 一致）。
+function $js_utf8_bytes(s) { return [...new TextEncoder().encode($js_asS16(s))]; }
+function $js_num_parse_int(s, radix) {
+  return parseInt($js_asS16(s), radix === undefined ? undefined : Math.trunc(radix));
+}
 
 // ------------------------------------------- 普通对象 / Map / Set（ADR-0011）
 // 刻意不用宿主 Map 的任意键能力：C 侧只有 dict<string, dynamic>，键得规范化成带标签的
@@ -703,6 +718,82 @@ function $js_json_stringify(v, rep, indent) {
   let gap = 0;
   if ($dynTag(indent) === "real" && indent > 0) gap = Math.min(Math.trunc(indent), 10);
   return $js_json_val($js_json_apply(rep, "", v), rep, gap, 0);
+}
+
+// ---------------------------------------------- node 宿主面（ADR-0011 第 4 步）
+// 不能在这里写 import：整个 prelude 也会被 cli.js 用 new Function(code)() 跑
+// （omni run 的快路径），而 new Function 的函数体里 import 是语法错误。
+// process.getBuiltinModule 是同步的、不需要 import，两条路都能用。
+function $node(name) { return process.getBuiltinModule(name); }
+function $js_fs_read_text(p) { return $node("node:fs").readFileSync($js_asS16(p), "utf8"); }
+function $js_fs_write_text(p, t) {
+  $node("node:fs").writeFileSync($js_asS16(p), $js_asS16(t));
+  return undefined;
+}
+function $js_fs_exists(p) { return $node("node:fs").existsSync($js_asS16(p)); }
+function $js_fs_readdir(p) { return $node("node:fs").readdirSync($js_asS16(p)); }
+function $js_fs_mtime_ms(p) { return $node("node:fs").statSync($js_asS16(p)).mtimeMs; }
+function $js_fs_size(p) { return $node("node:fs").statSync($js_asS16(p)).size; }
+function $js_fs_mkdtemp(pre) { return $node("node:fs").mkdtempSync($js_asS16(pre)); }
+function $js_fs_rename(a, b) {
+  $node("node:fs").renameSync($js_asS16(a), $js_asS16(b));
+  return undefined;
+}
+function $js_fs_realpath(p) { return $node("node:fs").realpathSync($js_asS16(p)); }
+function $js_proc_args() { return process.argv.slice(2); }
+function $js_proc_cwd() { return process.cwd(); }
+function $js_proc_env(n) { return process.env[$js_asS16(n)]; }
+function $js_proc_stdout_write(s) { $print_raw($js_asS16(s)); return undefined; }
+function $js_proc_stderr_write(s) {
+  // stdout 先落盘：诊断与正常输出的相对次序在快照测试里是要对上的（C 侧同样先 fflush）
+  $flush();
+  process.stderr.write($js_asS16(s));
+  return undefined;
+}
+function $js_proc_exit_code(n) {
+  process.exitCode = n === undefined ? 0 : Math.trunc(n);
+  return undefined;
+}
+function $js_proc_stdin_is_tty() { return process.stdin.isTTY === true; }
+// 阻塞读一行：C 侧只有阻塞读，所以这边也用 readSync 而不是 readline 的事件。
+// 一次一个字节够用 —— 用它的只有 REPL，那是等人打字的地方。
+function $js_proc_read_line() {
+  const fs = $node("node:fs"), one = Buffer.alloc(1), bytes = [];
+  let sawEof = false;
+  for (;;) {
+    let n = 0;
+    try { n = fs.readSync(0, one, 0, 1, null); }
+    catch (e) {
+      if (e.code === "EAGAIN") continue;
+      if (e.code === "EOF") { sawEof = true; break; }
+      throw e;
+    }
+    if (n === 0) { sawEof = true; break; }
+    if (one[0] === 10) break;
+    bytes.push(one[0]);
+  }
+  if (sawEof && bytes.length === 0) return undefined;
+  const s = new TextDecoder().decode(new Uint8Array(bytes));
+  return s.endsWith("\r") ? s.slice(0, -1) : s;
+}
+function $js_proc_spawn(cmd, args, mode) {
+  const m = $js_asS16(mode);
+  const stdio = m === "c" ? ["ignore", "pipe", "pipe"]
+    : m === "o" ? ["ignore", "inherit", "pipe"]
+      : "inherit";
+  const r = $node("node:child_process").spawnSync(
+    $js_asS16(cmd), $js_arr_of(args).map((x) => $js_asS16(x)), { encoding: "utf8", stdio });
+  if (r.error !== undefined && r.error !== null) $rt_error("cannot spawn: " + r.error.message);
+  return [r.status === null ? 128 : r.status, r.stdout === null ? "" : r.stdout, r.stderr === null ? "" : r.stderr];
+}
+function $js_os_tmpdir() { return $node("node:os").tmpdir(); }
+// "运行中的程序镜像所在目录"。JS 侧是脚本所在目录，C 侧是可执行文件所在目录 ——
+// 从这里怎么走到 runtime/ 与 lib/ 是调用方的事（两代的布局本来就不同）。
+function $js_install_dir() {
+  const p = process.argv[1];
+  if (p === undefined) return ".";
+  const i = p.lastIndexOf("/");
+  return i < 0 ? "." : (i === 0 ? "/" : p.slice(0, i));
 }
 
 // ------------------------------------------------------- RegExp（ADR-0011）

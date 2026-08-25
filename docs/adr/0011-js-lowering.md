@@ -152,6 +152,30 @@ Omni 自己的那半个世界里。两者之间只有两个显式的转换 op：
 `list<dynamic>` 与 `dict<string, dynamic>` 是生成 TU 里的宏实例，运行时的翻译单元看不见
 它们。这批只能像 `omni_dyn_bridge.h` 那样长在宏里，在生成的文件里展开。
 
+### node 宿主面（量完之后的四个决定）
+
+编译器自己只有 6 个文件碰宿主（`cli.js` / `repl.js` / `module/load.js` /
+`runtime/c_runtime.js` / `backend-c/emit.js` / `source/diag.js`），量完得出四条：
+
+- **`path` 与 `crypto` 不进 ABI**。`join`/`dirname`/`basename`/`resolve`/`relative`/
+  `isAbsolute` 是纯字符串计算，sha256 也是纯计算；写在编译器自己的源码里
+  （`stage0/src/host/path.js`）两个后端一起用，进 ABI 反而多出一处"宿主实现与我的实现
+  是否逐字符一致"的分叉点。ABI 里只留真的要问操作系统的 `cwd`。
+- **`readline` 换成阻塞读**。`rl.on('line')` 是全编译器唯一的事件驱动 API，C 侧没有
+  对应物；`js_proc_read_line()` 读一行、EOF 返回 `undefined`，两侧都成立，REPL 的驱动
+  改成 while 循环。
+- **`spawnSync` 的结果是三元数组 `[status, stdout, stderr]`**，mode 只有量出来的三种：
+  `'c'` 全捕获 / `'o'` stdout 直通 / `'i'` 全直通。
+- **`import.meta.url` 换成 `js_install_dir()`**："运行中的程序镜像所在目录"，JS 侧是
+  `dirname(process.argv[1])`，C 侧是 `dirname(argv[0])`（刻意不过 realpath —— node 不解
+  符号链接，解了就会在 `/var` 与 `/private/var` 上分叉）。从这个目录怎么走到 `runtime/`
+  与 `lib/` 是调用方的事：C0 是 `stage0/src` 下的脚本，C1 是一个可执行文件，两代的布局
+  本来就不同，得靠往上找 `runtime/omni.h` 来定位，不能写死相对层数。
+- **`new Function(code)()` 没有 C 侧对应物**（`omni run` 的 JS 快路径）。原生编译器上的
+  `omni run` 只能走"编成 C 再执行"那条路，这条快路径要挂在能力检查后面。
+  顺带：prelude 里因此不能出现 `import` —— 它整段也会被 `new Function` 吃进去，
+  宿主模块一律走 `process.getBuiltinModule`。
+
 ## 已知风险
 
 - **正则**原以为是最大的一块未知，用自己的 JS 词法器数完之后反而是最小的一块：49 个字面量，
