@@ -16,6 +16,37 @@
 import { parseJs } from './parser.js';
 import { SourceFile } from '../source/diag.js';
 
+/**
+ * 原生模块（ADR-0011 决策 17）：`src/host/native.js` 里的每个导出对应一个 ABI op。
+ * 这个文件**不会**被拼进程序 —— 它在 node 上是真实现，降级之后就是那个 op。
+ * 表在这里而不在 lower.js：只有链接器知道"这个名字是从哪个文件导入来的"。
+ */
+const NATIVE_SUFFIX = 'src/host/native.js';
+
+const NATIVE_OPS = {
+  readText: 'js_fs_read_text',
+  writeText: 'js_fs_write_text',
+  exists: 'js_fs_exists',
+  readDir: 'js_fs_readdir',
+  mtimeMs: 'js_fs_mtime_ms',
+  fileSize: 'js_fs_size',
+  mkdTemp: 'js_fs_mkdtemp',
+  rename: 'js_fs_rename',
+  realPath: 'js_fs_realpath',
+  args: 'js_proc_args',
+  cwd: 'js_proc_cwd',
+  env: 'js_proc_env',
+  stdout: 'js_proc_stdout_write',
+  stderr: 'js_proc_stderr_write',
+  setExitCode: 'js_proc_exit_code',
+  stdinIsTty: 'js_proc_stdin_is_tty',
+  readLine: 'js_proc_read_line',
+  spawn: 'js_proc_spawn',
+  tmpDir: 'js_os_tmpdir',
+  installDir: 'js_install_dir',
+};
+
+
 /** posix 风格的 dirname：这个文件自己将来也要被降级，所以不碰宿主的 path */
 function dirOf(p) {
   const i = p.lastIndexOf('/');
@@ -92,7 +123,21 @@ function scan(m, diags) {
             diags.error(s.span, `only named imports are supported (found a ${sp.kind} import)`);
           }
         }
-        m.imports.push({ path: resolvePath(base, s.source), specs: s.specifiers, span: s.span });
+        const target = resolvePath(base, s.source);
+        // 原生模块：只登记"名字 -> op"，文件本身不加载、不拼进来
+        if (target.endsWith(NATIVE_SUFFIX)) {
+          for (const sp of s.specifiers) {
+            if (sp.kind !== 'named') continue;
+            const op = NATIVE_OPS[sp.imported];
+            if (!op) {
+              diags.error(s.span, `'${sp.imported}' is not part of the native host surface`);
+              continue;
+            }
+            m.natives.push({ local: sp.local, op, span: s.span });
+          }
+          break;
+        }
+        m.imports.push({ path: target, specs: s.specifiers, span: s.span });
         break;
       }
       case 'ExportDecl': {
@@ -152,7 +197,7 @@ export function linkJs(entry, read, diags) {
       return;
     }
     state.set(path, 'loading');
-    const m = { path, ast: parseJs(new SourceFile(path, text), diags), body: [], exports: new Map(), imports: [] };
+    const m = { path, ast: parseJs(new SourceFile(path, text), diags), body: [], exports: new Map(), imports: [], natives: [] };
     mods.set(path, m);
     scan(m, diags);
     for (const imp of m.imports) load(imp.path, imp.span);
@@ -177,7 +222,16 @@ export function linkJs(entry, read, diags) {
   }
 
   const body = [];
+  const natives = new Map();
   for (const m of order) {
+    for (const n of m.natives) {
+      const prev = natives.get(n.local);
+      if (prev && prev !== n.op) {
+        diags.error(n.span, `'${n.local}' is bound to two different native ops; rename one`);
+        continue;
+      }
+      natives.set(n.local, n.op);
+    }
     for (const imp of m.imports) {
       const target = mods.get(imp.path);
       if (!target) continue;   // 读不到，上面已经报过
@@ -203,5 +257,5 @@ export function linkJs(entry, read, diags) {
     }
     body.push(...m.body);
   }
-  return { type: 'Program', body, modules: order.map((m) => m.path) };
+  return { type: 'Program', body, natives, modules: order.map((m) => m.path) };
 }

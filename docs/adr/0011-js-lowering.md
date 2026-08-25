@@ -248,6 +248,21 @@ import 树拼成一个 `Program`：后序遍历（依赖排在前面）、拆掉
 - `node:*` 的导入报错，让它去走封闭 ABI。量过：12 处，都在"把编译器源码改到封闭 ABI 上"
   那步里换掉。
 
+### 17. 宿主原生面是一个"不被链接进来的模块"
+
+编译器源码今天要能被 node 直接跑，明天要能被降级 —— 所以宿主调用不能写成
+`import { readFileSync } from 'node:fs'`（降级那边没有 node），也不能只写在 ABI 里
+（node 那边没有 op）。做法是一个特别的模块 `src/host/native.js`：
+
+- 它导出的每个名字在 `link.js` 的 `NATIVE_OPS` 表里对应一个 ABI op。链接器见到从这个
+  文件的导入，**不加载、不拼进程序**，只登记"名字 -> op"，交给 lower.js 当调用降下去。
+- node 上跑的就是 native.js 里那份用 `process.getBuiltinModule` 写的实现。于是同一语义
+  有三份实现（native.js / prelude.js 的 `$js_*` / runtime 的 C），第五条测试轴
+  （`tests/js-exec/cases/11-host-native.js`）逼它们三份逐字节一致。
+- 这些名字**只能被调用**，当值用当场报错 —— 它们不是函数值，是 op。
+- 判据只有一条：真的要问操作系统才进这个文件。路径计算（`host/path.js`）与 sha256
+  是纯计算，写成普通模块，链接器照常拼进来。
+
 ## 落地顺序
 
 1. `dynamic` 扩成完整 JS 值域：函数标签 + 动态调用（实参个数运行期检查）+ `js_*` 运算 op

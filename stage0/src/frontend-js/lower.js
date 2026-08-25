@@ -160,6 +160,8 @@ class Lower {
     this.used = new Set();
     /** 顶层类声明：名字 -> {mangled, node}（降成一个"造实例"的函数，ADR-0011 决策 13） */
     this.classes = new Map();
+    /** 原生宿主面：名字 -> ABI op（由链接器给出，见 frontend-js/link.js） */
+    this.natives = new Map();
     /** 闭包记录（ADR-0010 的布局），MakeClosure 的 closure 下标就是这里的位置 */
     this.closures = [];
     /** 顶层函数当值用时的转发闭包：名字 -> 闭包记录（一个函数只生成一次） */
@@ -181,6 +183,8 @@ class Lower {
 
   /** 模块：先把顶层的声明收全（JS 的函数声明是提升的），再逐个降级 */
   module(program) {
+    // 原生宿主面（ADR-0011 决策 17）：链接器给出"名字 -> ABI op"，这些名字只能被调用
+    this.natives = program.natives ?? new Map();
     for (const s of program.body) this.collectTop(s);
     for (const s of program.body) {
       if (s.type === 'FuncDecl') this.funcDecl(s);
@@ -1082,6 +1086,10 @@ class Lower {
       this.err(e.span, `'${e.name}' is a class, which can only be used in 'new ${e.name}(...)'`);
       return undefExpr();
     }
+    if (this.natives.has(e.name)) {
+      this.err(e.span, `'${e.name}' is a native host function; it can only be called, not used as a value`);
+      return undefExpr();
+    }
     if (STATIC_NS.has(e.name)) {
       this.err(e.span, `'${e.name}' can only be used as a member base, e.g. ${e.name}.something`);
       return undefExpr();
@@ -1292,6 +1300,9 @@ class Lower {
         if (this.topFns.has(c.name)) {
           return { kind: 'Call', func: this.topFns.get(c.name), name: c.name, args: [this.argList(e.args)], type: D };
         }
+        // 原生宿主面：名字直接就是一个 ABI op（决策 17）
+        const nat = this.natives.get(c.name);
+        if (nat) return this.abiCall({ op: nat, argc: JS_ALL[nat].arity }, e.args, e.span, c.name);
         const g = GLOBAL_CALLS[c.name];
         if (g) return this.abiCall(g, e.args, e.span, c.name);
         this.err(e.span, `unresolved function '${c.name}'`);
