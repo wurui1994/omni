@@ -62,6 +62,9 @@ class CEmitter {
     this.line();
     for (const s of structs) this.structNew(s);
     for (const c of classes) this.classNew(c);
+    // JS 前端的模块级变量（ADR-0011）：顶层函数要能互相看见，所以是真全局，
+    // 不是 omni_main 的局部量。初值一律 undefined，赋值发生在 omni_main 里。
+    for (const g of this.mod.jsGlobals ?? []) this.line(`static omni_dyn g_${g.name} = { .tag = OMNI_DYN_UNDEF };`);
     for (const f of this.mod.funcs) this.line(`${this.proto(f)};`);
     this.line();
     for (const c of closures) this.closureMake(c);
@@ -428,6 +431,8 @@ class CEmitter {
         return `(${this.expr(e.left)} ${e.op} ${this.expr(e.right)})`;
       }
       case 'Bin': return this.bin(e);
+      // JS 前端的模块级变量（ADR-0011）：一个真全局，可读可写
+      case 'JsGlobal': return `g_${e.name}`;
       case 'Ternary': return `(${this.expr(e.cond)} ? ${this.expr(e.then)} : ${this.expr(e.otherwise)})`;
       case 'Assign': return `(${this.expr(e.target)} = ${this.expr(e.value)})`;
       case 'IndexGet': return `${cTypeName(e.recvType)}_get(${this.expr(e.obj)}, ${this.expr(e.index)})`;
