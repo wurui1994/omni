@@ -186,6 +186,8 @@ class CEmitter {
       // OBJ 在 ARR 之后：Map 的条目值是个两元素 list，要用到 ARR 里的 omni_js_arr_wrap
       this.line('OMNI_JS_OBJ(omni_list_dynamic, omni_dict_string_dynamic)');
       this.line('OMNI_JS_JSON(omni_list_dynamic, omni_dict_string_dynamic)');
+      // RE 也在 ARR 之后：回调走 ARR 里的 omni_js_call，match/split 的结果是 list<dynamic>
+      this.line('OMNI_JS_RE(omni_list_dynamic, omni_dict_string_dynamic)');
     }
   }
 

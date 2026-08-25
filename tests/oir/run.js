@@ -326,6 +326,72 @@ c('json/indent', J(J(js('js_obj_set', [js('js_obj_new', []), str('xs'), arr(real
 c('json/indent-nested', J(J(js('js_obj_set', [js('js_obj_new', []), str('o'), OBJ()]), undef, real(2))),
   'JSON.stringify(JSON.stringify({"o": {"a": 1, "中": "v"}}, null, 2))');
 
+// ---------------------------------------------------------------- RegExp
+// 模式与 flags 是普通的 Omni string（不进 UTF-16 域）：它们是编译期字面量，
+// 两侧都拿它当缓存键。参照侧统一用 new RegExp(...) 而不是字面量，省掉一层转义。
+const sc = (v) => ({ kind: 'Const', type: S, value: v });
+const P = (v) => JSON.stringify(v);
+const RE = (p, f) => `new RegExp(${P(p)}, ${P(f)})`;
+function reTest(p, f, s) {
+  c(`re/test/${p}${f && `|${f}`}|${P(s)}`, jsBool('js_re_test', [sc(p), sc(f), str(s)]),
+    `${RE(p, f)}.test(${P(s)})`);
+}
+function reMatch(p, f, s) {
+  c(`re/match/${p}|${f}|${P(s)}`, J(js('js_re_match', [sc(p), sc(f), str(s)])),
+    `JSON.stringify(${P(s)}.match(${RE(p, f)}))`);
+}
+function reSplit(p, f, s, lim) {
+  c(`re/split/${p}|${f}|${P(s)}${lim === undefined ? '' : `|${lim}`}`,
+    J(js('js_re_split', [sc(p), sc(f), str(s), lim === undefined ? undef : real(lim)])),
+    `JSON.stringify(${P(s)}.split(${RE(p, f)}${lim === undefined ? '' : `, ${lim}`}))`);
+}
+function reReplace(p, f, s, r) {
+  c(`re/replace/${p}|${f}|${P(s)}|${P(r)}`,
+    J(js('js_re_replace', [sc(p), sc(f), str(s), str(r)])),
+    `JSON.stringify(${P(s)}.replace(${RE(p, f)}, ${P(r)}))`);
+}
+
+reTest('[;}]$', '', 'x;');
+reTest('[;}]$', '', 'x');
+reTest('^[+-]?[0-9]+$', '', '-123');
+reTest('^[+-]?[0-9]+$', '', '12a');
+reTest('^[+-]?([0-9]+\\.?[0-9]*|\\.[0-9]+)([eE][+-]?[0-9]+)?$', '', '.5e-3');
+reTest('^[+-]?([0-9]+\\.?[0-9]*|\\.[0-9]+)([eE][+-]?[0-9]+)?$', '', '1e');
+reTest('^[A-Za-z_][A-Za-z0-9_-]*$', '', '_a-b9');
+reTest('^\\.\\.?/', '', '../x');
+reTest('^[0-9a-fA-F]{2}$', '', '0F');
+reTest('^[0-9a-fA-F]{2}$', 'i', '0f');
+reTest('^[0-9a-fA-F]{1,6}$', '', 'abcdef');
+reTest('://', '', 'http://x');
+reTest('^a', 'm', 'b\va');
+reTest('^[A-Za-z_$][A-Za-z0-9_$]*$', '', '$x1');
+
+reMatch("'", 'g', "a'b'c");
+reMatch("'", 'g', 'abc');
+reMatch('[0-9]+', 'g', 'a12b345');
+reMatch('x*', 'g', 'axb');
+
+reSplit('\\s+', '', 'a b  c');
+reSplit('\\s+', '', 'a b  c', 2);
+reSplit('\\s+', '', '  a b');
+reSplit(',', '', 'a,b,,c');
+reSplit('(,)', '', 'a,b');
+reSplit('x', '', '');
+reSplit('', '', 'abc');
+reSplit('[;}]', '', 'a;b}c', 0);
+
+reReplace('_', 'g', 'a_b_c', '');
+reReplace('0+$', '', '1.2300', '');
+reReplace('n$', '', '12n', '');
+reReplace('\\.omni$', '', 'x.omni', '');
+reReplace('(a)(b)', '', 'zab', '[$2$1]');
+reReplace('a', 'g', 'aaa', '$$');
+reReplace('b', '', 'abc', '<$&>');
+reReplace('b', '', 'abc', '[$`|$\']');
+reReplace('x*', 'g', 'abc', '-');
+reReplace('^', 'gm', 'a\vb', '> ');
+reReplace('(z)?a', '', 'ba', '[$1]');
+
 
 // ---------------------------------------------------------------- 跑
 function run(cmd, args, opts = {}) {

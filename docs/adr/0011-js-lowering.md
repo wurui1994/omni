@@ -125,7 +125,7 @@ Omni 自己的那半个世界里。两者之间只有两个显式的转换 op：
 
 1. `dynamic` 扩成完整 JS 值域：函数标签 + 动态调用（实参个数运行期检查）+ `js_*` 运算 op
 2. 宿主 ABI 第一批：Array / String / Map / Set / Object / JSON / Number / Math
-3. C 侧正则引擎（`test` / `exec` / `replace` 带回调）
+3. C 侧正则引擎（`test` / `match` / `split` / `replace`，含回调形式）
 4. node 宿主面：fs / path / process / child_process / url
 5. `throw` / `try` 的静态降级
 6. `lower.js`：45 种节点全部降级
@@ -160,6 +160,17 @@ Omni 自己的那半个世界里。两者之间只有两个显式的转换 op：
   **一个 `|` 都没有**，没有 lookahead、没有反向引用、没有懒惰量词、没有 unicode 属性转义。
   所以 C 侧要的是一个几百行的回溯匹配器，不是一个正则引擎。（顺带：在 UTF-16 定长码元上
   写回溯比在 UTF-8 上简单，见第 8 条。）
+  已落地（`runtime/omni_js_re.c` 引擎 + `omni_js_re.h` 的 match/split/replace）。
+  落地时定下的四件事，都是"宁可响亮地失败"而不是悄悄分叉：
+  - **没有 RegExp 对象**：模式与 flags 当普通字符串实参传，两侧各按字面量做编译缓存
+    （C 侧的键就是字面量指针）。前提是量过的事实 —— 没有一处读写 `lastIndex`，
+    所有 `.test` 的正则都不带 `g`。带 `g` 的 `.test` 与不带 `g` 的 `.match` 直接报错。
+  - **只借宿主 `exec` 当匹配原语**，`match`/`split`/`replace` 的算法两侧各写一遍
+    （空匹配推进、`$` 替换、split 插捕获组与 limit），不走 `String.prototype` 那几个 ——
+    否则边角就有两套语义。
+  - **`i` 只折 ASCII**：两个后端一样不完整，否则"不完整"本身就是分叉点。
+  - `[\s\S]` 这类**类内的取反转义**不支持（会报错）。量过：仓库里 0 处。
+
 - **`sort` 的稳定性与比较器语义**、**Map/Set 的迭代序**、**`toString`/数字格式化**这些细节
   是不动点的常见杀手：两次产出的 C 只要有一个字节不同就算没自举。其中数字格式化已经按
   ECMA-262 复刻并对照 node 验过（`tests/oir` 的 `num/*`）。

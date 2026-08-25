@@ -149,6 +149,12 @@ bool omni_dyn_eq(omni_dyn a, omni_dyn b);
 omni_s16 omni_s16_of_utf8(omni_str s);
 omni_s16 omni_s16_of_units(const uint16_t *p, int64_t len);
 omni_str omni_s16_to_utf8(omni_s16 s);
+/* 增量拼接：{0} 起手，add 若干次，done 收尾。replace/split/JSON 这些要在长串上
+   一段段拼的地方必须用它，用 omni_s16_cat 串起来是平方级的。 */
+typedef struct { uint16_t *p; int64_t len, cap; } omni_s16_buf;
+void omni_s16_buf_add(omni_s16_buf *b, omni_s16 s);
+void omni_s16_buf_add_unit(omni_s16_buf *b, uint16_t u);
+omni_s16 omni_s16_buf_done(omni_s16_buf *b);
 omni_s16 omni_s16_cat(omni_s16 a, omni_s16 b);
 omni_s16 omni_s16_slice(omni_s16 s, int64_t start, int64_t end);
 omni_s16 omni_s16_repeat(omni_s16 s, int64_t n);
@@ -203,6 +209,24 @@ bool omni_js_str_starts_with(omni_dyn s, omni_dyn pre, omni_dyn pos);
 bool omni_js_str_ends_with(omni_dyn s, omni_dyn suf);
 omni_dyn omni_js_str_of_char_code(omni_dyn u);
 omni_dyn omni_js_str_of_code_point(omni_dyn cp);
+
+/* omni_js_re.c —— JS 的 RegExp（手写回溯匹配器，ADR-0011）。
+   编译器源码里的正则全是字面量，而且没有一处读写 lastIndex（`.test` 用的都是无 g 的
+   常量正则），所以这一层不需要 RegExp 对象：模式与 flags 当普通字符串参数传进来，
+   编译结果按字面量指针缓存（见 omni_js_re_get）。
+   caps 的布局：caps[2i] / caps[2i+1] 是第 i 组的 [起, 止)，i=0 是整个匹配，
+   没参与匹配的组是 -1。 */
+typedef struct omni_re_s *omni_re;
+/* caps 数组的固定上界：整个匹配算第 0 组，所以最多 OMNI_RE_MAX_CAPS-1 个捕获组。
+   宏里的 match / split / replace 也照这个上界开栈上数组，超了在编译模式时就报错。 */
+#define OMNI_RE_MAX_CAPS 33
+omni_re omni_re_compile(omni_s16 pattern, omni_s16 flags);
+int omni_re_groups(omni_re re);
+bool omni_re_global(omni_re re);
+bool omni_re_multiline(omni_re re);
+bool omni_re_search(omni_re re, omni_s16 s, int64_t start, int64_t *caps);
+omni_re omni_js_re_get(omni_str pattern, omni_str flags);
+bool omni_js_re_test(omni_str pattern, omni_str flags, omni_dyn s);
 
 /* omni_js_num.c —— JS 的 Number / Math / BigInt。
    toPrecision 与 toString(radix) 是自举的关键路径：编译器自己用它们把 double 与字节
@@ -363,5 +387,6 @@ static inline bool omni_eq_ref(void *a, void *b) { return a == b; }
 #include "omni_js_arr.h"
 #include "omni_js_obj.h"
 #include "omni_js_json.h"
+#include "omni_js_re.h"
 
 #endif /* OMNI_H */

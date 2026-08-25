@@ -136,4 +136,13 @@ export const JS_ABI = {
   // 实参形态也是量出来的 —— 绝大多数是一个实参给字符串加引号，只有 cli 的 dump
   // 用了 (v, replacer, 2)。replacer 只支持函数形式。
   js_json_stringify: { js: '$js_json_stringify', c: 'omni_js_json_stringify', arity: 3 },
+
+  // ---------------------------------------------------------------- RegExp
+  // 模式与 flags 是普通的 string 实参（不是 lit）：两侧都按字面量做编译缓存，C 侧的键
+  // 就是字面量指针，JS 侧是 "模式\0flags"。仓库里的正则全是字面量，而且没有一处读写
+  // lastIndex（量过：所有 .test 的正则都不带 g），所以这一层不需要 RegExp 对象。
+  js_re_test: { js: '$js_re_test', c: 'omni_js_re_test', arity: 3 },
+  js_re_match: { js: '$js_re_match', c: 'omni_js_re_match', arity: 3 },
+  js_re_split: { js: '$js_re_split', c: 'omni_js_re_split', arity: 4 },
+  js_re_replace: { js: '$js_re_replace', c: 'omni_js_re_replace', arity: 4 },
 };

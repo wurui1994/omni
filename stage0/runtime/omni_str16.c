@@ -20,6 +20,36 @@ static omni_s16 mk(const uint16_t *p, int64_t len) {
 
 /* ---------------------------------------------------------------- 转码 */
 
+/* ------------------------------------------------------------ 增量拼接 */
+
+/* 一段一段往后拼的缓冲区。为什么不用 omni_s16_cat 串起来：replace / split 要在
+   整个源文件量级的串上做（c_runtime.js 那个 include 展开就是），一次 cat 拷一遍全串
+   会退化成平方级。这里按倍增分配，总拷贝是线性的。
+   arena 上没有 free，所以倍增浪费的那部分等于一次编译的临时开销，可接受。 */
+void omni_s16_buf_add(omni_s16_buf *b, omni_s16 s) {
+  if (b->len + s.len > b->cap) {
+    int64_t cap = b->cap ? b->cap : 32;
+    while (cap < b->len + s.len) cap *= 2;
+    uint16_t *p = alloc16(cap);
+    if (b->len) memcpy(p, b->p, (size_t)b->len * sizeof(uint16_t));
+    b->p = p;
+    b->cap = cap;
+  }
+  if (s.len) memcpy(b->p + b->len, s.p, (size_t)s.len * sizeof(uint16_t));
+  b->len += s.len;
+}
+
+void omni_s16_buf_add_unit(omni_s16_buf *b, uint16_t u) {
+  omni_s16 one;
+  one.p = &u;
+  one.len = 1;
+  omni_s16_buf_add(b, one);
+}
+
+omni_s16 omni_s16_buf_done(omni_s16_buf *b) {
+  return mk(b->p ? b->p : alloc16(0), b->len);
+}
+
 /* 直接给码元序列建串：只给 C 后端的字面量用。
    源码里的字符串常量平时走 UTF-8（生成的 C 才不会被大括号数组撑肿），但落单的代理项
    在 UTF-8 里没有合法编码 —— JSON.stringify("\ud800") 这种用例只能按码元发。

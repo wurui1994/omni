@@ -705,6 +705,120 @@ function $js_json_stringify(v, rep, indent) {
   return $js_json_val($js_json_apply(rep, "", v), rep, gap, 0);
 }
 
+// ------------------------------------------------------- RegExp（ADR-0011）
+// 只借宿主 RegExp 的 exec 当"从某个下标起找最左匹配"这一个原语，match / split /
+// replace 的算法自己走一遍 —— C 侧只有同一个原语（omni_re_search），把边角
+// （空匹配推进、$ 替换、split 插捕获组、limit）交给宿主实现就等于放两套语义进来。
+// 已知的不完整：i 在宿主这边是完整 Unicode 折叠，C 侧只折 ASCII。两边都只在
+// ASCII 上用 i（量过），真越界时 tests/oir 会先炸。
+const $RE_CACHE = new Map();
+function $js_re_get(pat, flags) {
+  const key = pat + "\u0000" + flags;
+  let re = $RE_CACHE.get(key);
+  if (re === undefined) {
+    // 一律加 g：lastIndex 是"从下标起找"的唯一入口，是否真的全局由 flags 自己说
+    re = new RegExp(pat, flags.includes("g") ? flags : flags + "g");
+    $RE_CACHE.set(key, re);
+  }
+  return re;
+}
+function $js_re_find(re, s, start) {
+  if (start > s.length) return null;
+  re.lastIndex = start;
+  return re.exec(s);
+}
+function $js_re_test(pat, flags, s) {
+  if (flags.includes("g")) $rt_error("regexp: .test on a /g/ regexp is not supported (lastIndex has no home here)");
+  return $js_re_find($js_re_get(pat, flags), $js_asS16(s), 0) !== null;
+}
+function $js_re_match(pat, flags, s) {
+  if (!flags.includes("g")) {
+    $rt_error("regexp: .match without /g/ is not supported (the result object has index/input on it)");
+  }
+  const re = $js_re_get(pat, flags), str = $js_asS16(s), out = [];
+  let at = 0;
+  for (;;) {
+    const m = $js_re_find(re, str, at);
+    if (m === null) break;
+    out.push(m[0]);
+    at = m[0].length > 0 ? m.index + m[0].length : m.index + 1;
+  }
+  return out.length === 0 ? null : out;
+}
+// $ 记号照 ECMA-262 的 GetSubstitution：$$ / $& / 前缀 / 后缀 / $n / $nn，越界的 $n 原样留着
+// （这里不能写出反引号：整个 prelude 是一个 String.raw 模板，反引号会当场把它截断）
+function $js_re_sub(repl, s, m) {
+  const ng = m.length - 1;
+  let out = "";
+  for (let i = 0; i < repl.length; i++) {
+    const c = repl[i];
+    if (c !== "$" || i + 1 >= repl.length) { out += c; continue; }
+    const d = repl[i + 1];
+    if (d === "$") { out += "$"; i++; }
+    else if (d === "&") { out += m[0]; i++; }
+    else if (d === "\u0060") { out += s.slice(0, m.index); i++; }
+    else if (d === "'") { out += s.slice(m.index + m[0].length); i++; }
+    else if (d >= "0" && d <= "9") {
+      let n = +d, used = 1;
+      if (i + 2 < repl.length && repl[i + 2] >= "0" && repl[i + 2] <= "9" && n * 10 + +repl[i + 2] <= ng) {
+        n = n * 10 + +repl[i + 2];
+        used = 2;
+      }
+      if (n >= 1 && n <= ng) { out += m[n] === undefined ? "" : m[n]; i += used; }
+      else out += c;
+    } else out += c;
+  }
+  return out;
+}
+function $js_re_replace(pat, flags, s, repl) {
+  const re = $js_re_get(pat, flags), str = $js_asS16(s);
+  const g = flags.includes("g"), isFn = $dynTag(repl) === "function";
+  let out = "", copied = 0, at = 0;
+  for (;;) {
+    const m = $js_re_find(re, str, at);
+    if (m === null) break;
+    out += str.slice(copied, m.index);
+    out += isFn
+      ? $js_str($callFn(repl, [...m, m.index, str]))
+      : $js_re_sub($js_asS16(repl), str, m);
+    copied = m.index + m[0].length;
+    at = m[0].length > 0 ? copied : copied + 1;
+    if (!g) break;
+  }
+  return out + str.slice(copied);
+}
+// split 照 ECMA-262 22.1.3.23：捕获组要插进结果，limit 是结果长度的上界，
+// 空匹配不许停在当前段的起点（否则会切出无穷多个空串），末尾那段总要补上。
+function $js_re_split(pat, flags, s, limit) {
+  const re = $js_re_get(pat, flags), str = $js_asS16(s);
+  let lim = Infinity;
+  if ($dynTag(limit) === "real") lim = Number.isNaN(limit) || limit < 0 ? 0 : Math.trunc(limit);
+  else if (limit !== undefined) $rt_error("split limit must be a number, found " + $dynTag(limit));
+  const out = [];
+  if (lim === 0) return out;
+  if (str.length === 0) {
+    if ($js_re_find(re, str, 0) === null) out.push(str);
+    return out;
+  }
+  let p = 0, q = 0;
+  while (q < str.length) {
+    const m = $js_re_find(re, str, q);
+    if (m === null || m.index >= str.length) break;
+    const e = m.index + m[0].length;
+    if (e === p) { q = m.index + 1; continue; }
+    out.push(str.slice(p, m.index));
+    if (out.length >= lim) return out;
+    for (let i = 1; i < m.length; i++) {
+      out.push(m[i]);
+      if (out.length >= lim) return out;
+    }
+    p = e;
+    q = e;
+  }
+  out.push(str.slice(p));
+  return out;
+}
+
 
 
 
