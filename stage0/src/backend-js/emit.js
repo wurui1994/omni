@@ -28,10 +28,22 @@ class JsEmitter {
     this.out.push(JS_PRELUDE.trim());
     for (const s of this.mod.structs) this.struct(s);
     for (const c of this.mod.classes ?? []) this.classDecl(c);
+    for (const c of this.mod.closures ?? []) this.closureMake(c);
     for (const f of this.mod.funcs) this.func(f);
     this.line(`${this.mod.entry}();`);
     this.line('$flush();');
     return this.out.join('\n') + '\n';
+  }
+
+  /**
+   * 闭包记录的构造函数。捕获**在这里**被拷进记录 —— 不靠 JS 的词法作用域，
+   * 因为 JS 的闭包是按引用捕获的，而 Omni 规定按值（ADR-0010）；靠宿主的话
+   * `for` 循环里创建的闭包在 JS 与 C 上会给出不同答案。
+   */
+  closureMake(c) {
+    const ps = c.captures.map((f) => `c_${f.name}`);
+    const fields = c.captures.map((f) => `c_${f.name}: c_${f.name}`);
+    this.line(`function ${c.make}(${ps.join(', ')}) { return { fp: ${c.mangled}${fields.length ? `, ${fields.join(', ')}` : ''} }; }`);
   }
 
   struct(s) {
@@ -55,7 +67,7 @@ class JsEmitter {
       case 'bool': return 'false';
       case 'string': return '""';
       case 'struct': return `$new_S${t.name}()`;
-      case 'class': case 'dynamic': case 'null': return 'null';
+      case 'class': case 'dynamic': case 'null': case 'fn': return 'null';
       case 'list': return '[]';
       case 'dict': return 'new Map()';
       case 'set': return 'new Set()';
@@ -64,8 +76,9 @@ class JsEmitter {
   }
 
   func(f) {
-    const params = f.params.map((p) => `v_${p.name}`).join(', ');
-    this.line(`function ${f.mangled}(${params}) {`);
+    // 闭包体的第一个形参是闭包记录本身：捕获从它上面读（C 侧同一套约定）
+    const params = [...(f.closureId === undefined ? [] : ['self']), ...f.params.map((p) => `v_${p.name}`)];
+    this.line(`function ${f.mangled}(${params.join(', ')}) {`);
     this.indent++;
     // 结构体形参按值传递：入口处深拷贝，等价于 C 的值语义
     for (const p of f.params) {
@@ -164,8 +177,12 @@ class JsEmitter {
         if (e.type.k === 'bool') return String(e.value);
         return JSON.stringify(e.value);
       case 'ZeroStruct': return `$new_S${e.type.name}()`;
-      case 'NullLit': case 'NullRef': case 'DynNull': return 'null';
+      case 'NullLit': case 'NullRef': case 'DynNull': case 'NullFn': return 'null';
       case 'NewObject': return `$new_C${e.type.name}()`;
+      case 'MakeClosure': return `${e.make}(${e.args.map((x) => this.rvalue(x, x.type)).join(', ')})`;
+      case 'CaptureRef': return `self.c_${e.name}`;
+      case 'CallFn':
+        return `$callFn(${[this.expr(e.callee), ...e.args.map((a) => this.rvalue(a, a.type))].join(', ')})`;
       case 'NewContainer': return this.zero(e.type);
       case 'ListLit': return `[${e.items.map((x) => this.rvalue(x, x.type)).join(', ')}]`;
       case 'SetLit': return `new Set([${e.items.map((x) => this.expr(x)).join(', ')}])`;

@@ -1,0 +1,72 @@
+// 闭包的跨语言对照（ADR-0010）。这里比的不是"闭包能不能用"，是**捕获时机**：
+// Omni 在创建闭包的那一刻把值拷进记录，所以循环里建的闭包各看到自己那一轮的值。
+// Python 与 JS 的 lambda 捕获的是变量本身（晚绑定），要写成默认参数才等价 ——
+// 参照实现里那句 `lambda x, i=i:` 就是这条差异的落点。
+
+int step(int x) { return x + 1; }
+
+fn(int) -> int adder(int n) {
+  return fn(int x) -> int { return x + n; };
+}
+
+// 循环里建闭包
+list<fn(int) -> int> fs = [];
+int i = 0;
+while (i < 10) {
+  fs.push(fn(int x) -> int { return x * 10 + i; });
+  i = i + 1;
+}
+int j = 0;
+string out = "";
+while (j < 10) {
+  out = out + string(fs[j](j)) + ",";
+  j = j + 1;
+}
+print(out);
+
+// 捕获后改外面的变量：闭包不受影响
+int base = 1;
+fn(int) -> int f = fn(int x) -> int { return x + base; };
+print(f(0));
+base = 1000;
+print(f(0));
+
+// 闭包工厂
+list<int> made = [];
+int k = 0;
+while (k < 5) {
+  fn(int) -> int g = adder(k * k);
+  made.push(g(100));
+  k = k + 1;
+}
+print(made.length);
+int s = 0;
+for (int m in made) { s = s + m; }
+print(s);
+
+// 把函数值传下去
+int fold(list<int> xs, fn(int) -> int t) {
+  int acc = 0;
+  for (int x in xs) { acc = acc + t(x); }
+  return acc;
+}
+print(fold([1, 2, 3, 4, 5], step));
+print(fold([1, 2, 3, 4, 5], fn(int x) -> int { return x * x; }));
+print(fold([1, 2, 3, 4, 5], adder(-1)));
+
+// 捕获引用类型：拷的是引用，内容照样共享
+list<int> sink = [];
+fn(int) -> void push = fn(int x) -> void { sink.push(x * 2); };
+int n = 0;
+while (n < 6) { push(n); n = n + 1; }
+print(sink.length);
+string dump = "";
+for (int v in sink) { dump = dump + string(v) + "|"; }
+print(dump);
+
+// 嵌套捕获：内层要穿过外层拿到最外面的值
+fn(int) -> fn(int) -> int outer = fn(int a) -> fn(int) -> int {
+  return fn(int b) -> int { return (a + b) * 2; };
+};
+print(outer(3)(4));
+print(outer(-5)(5));

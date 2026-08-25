@@ -1,0 +1,21 @@
+tests/errors/fn_value_rules.omni:9:35: error: 'outer' is captured by value, so a lambda cannot assign to it — return the new value, or capture a class/container and mutate that
+  fn() -> void bad = fn() -> void { outer = 2; };
+                                    ^^^^^
+tests/errors/fn_value_rules.omni:12:17: error: 'pick' has 2 overloads, so using it as a value is ambiguous; wrap the one you mean in a lambda, e.g. 'fn(int x) -> int { return pick(x); }'
+  var ambiguous = pick;
+                  ^^^^
+tests/errors/fn_value_rules.omni:15:7: error: 'fn(int) -> int' takes 1 argument(s), got 2
+  print(f(1, 2));          // 实参个数不对
+        ^^^^^^^
+tests/errors/fn_value_rules.omni:16:7: error: a function value has no parameter names, so named arguments cannot be used here
+  print(f(x = 1));         // 函数值没有形参名
+        ^^^^^^^^
+tests/errors/fn_value_rules.omni:17:7: error: 'outer' is a variable of type 'int', not a function
+  print(outer(1));         // outer 不是函数
+        ^^^^^
+tests/errors/fn_value_rules.omni:18:7: error: cannot print a value of type 'fn(int) -> int'
+  print(f);                // 函数值不能打印
+        ^
+tests/errors/fn_value_rules.omni:20:7: error: 'notFn' is a variable of type 'int', not a function
+  print(notFn(1));
+        ^^^^^

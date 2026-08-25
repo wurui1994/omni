@@ -21,10 +21,15 @@ export function classType(name, fields) { return { k: 'class', name, fields }; }
 export function listType(elem) { return { k: 'list', elem }; }
 export function dictType(key, val) { return { k: 'dict', key, val }; }
 export function setType(elem) { return { k: 'set', elem }; }
+/**
+ * 函数值类型（ADR-0010）。只有签名，没有参数名 —— 参数名属于 lambda，不属于类型，
+ * 否则 `fn(int a)->int` 和 `fn(int b)->int` 会是两个类型。
+ */
+export function fnType(params, ret) { return { k: 'fn', params, ret }; }
 
 /** 引用语义的类型（赋值传引用，不拷贝） */
 export function isRef(t) {
-  return t.k === 'list' || t.k === 'dict' || t.k === 'set' || t.k === 'class';
+  return t.k === 'list' || t.k === 'dict' || t.k === 'set' || t.k === 'class' || t.k === 'fn';
 }
 
 /** 规范化类型键：同时用于类型相等判断、容器实例化去重、C 符号命名 */
@@ -35,6 +40,8 @@ export function typeKey(t) {
     case 'list': return `list_${typeKey(t.elem)}`;
     case 'dict': return `dict_${typeKey(t.key)}_${typeKey(t.val)}`;
     case 'set': return `set_${typeKey(t.elem)}`;
+    // 参数与返回之间用 `__` 分隔：参数之间是 `_`，所以零参也不会和别的键撞
+    case 'fn': return `fn_${t.params.map(typeKey).join('_')}__${typeKey(t.ret)}`;
     default: return t.k;
   }
 }
@@ -46,6 +53,7 @@ export function typeName(t) {
     case 'list': return `list<${typeName(t.elem)}>`;
     case 'dict': return `dict<${typeName(t.key)}, ${typeName(t.val)}>`;
     case 'set': return `set<${typeName(t.elem)}>`;
+    case 'fn': return `fn(${t.params.map(typeName).join(', ')}) -> ${typeName(t.ret)}`;
     default: return t.k;
   }
 }
@@ -80,7 +88,7 @@ export function boxable(t) {
 export function castCost(from, to) {
   if (same(from, to)) return 0;
   if (from.k === 'int' && to.k === 'real') return 1;
-  if (from.k === 'null') return (to.k === 'class' || to.k === 'dynamic') ? 0 : -1;
+  if (from.k === 'null') return (to.k === 'class' || to.k === 'dynamic' || to.k === 'fn') ? 0 : -1;
   // 装箱代价刻意高于 int->real，保证重载解析优先选具体类型
   if (to.k === 'dynamic' && boxable(from)) return 2;
   return -1;
@@ -94,8 +102,8 @@ export function assignable(from, to) {
 export function commonType(a, b) {
   if (same(a, b)) return a;
   if (isNumeric(a) && isNumeric(b)) return REAL;
-  if (a.k === 'null' && (b.k === 'class' || b.k === 'dynamic')) return b;
-  if (b.k === 'null' && (a.k === 'class' || a.k === 'dynamic')) return a;
+  if (a.k === 'null' && (b.k === 'class' || b.k === 'dynamic' || b.k === 'fn')) return b;
+  if (b.k === 'null' && (a.k === 'class' || a.k === 'dynamic' || a.k === 'fn')) return a;
   if (a.k === 'dynamic' && boxable(b)) return DYNAMIC;
   if (b.k === 'dynamic' && boxable(a)) return DYNAMIC;
   return null;
@@ -112,6 +120,8 @@ export function cTypeName(t) {
     case 'dynamic': return 'omni_dyn';
     case 'struct': return `s_${t.name}`;
     case 'class': return `c_${t.name}`;
+    // 所有函数值在 C 里是同一个指针类型；签名只出现在调用处的强制转换里
+    case 'fn': return 'omni_fn';
     case 'list': case 'dict': case 'set': return `omni_${typeKey(t)}`;
     default: throw new Error(`cTypeName: ${t.k}`);
   }
@@ -127,6 +137,7 @@ export function zeroValue(t) {
     case 'struct': return { kind: 'ZeroStruct', type: t };
     case 'dynamic': return { kind: 'DynNull', type: t };
     case 'class': return { kind: 'NullRef', type: t };
+    case 'fn': return { kind: 'NullFn', type: t };
     case 'list': case 'dict': case 'set': return { kind: 'NewContainer', type: t };
     default: return null;
   }

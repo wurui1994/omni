@@ -79,6 +79,7 @@ class Parser {
   atTypeStart() {
     const t = this.peek();
     if (t.kind === 'kw' && (BUILTIN_TYPES.has(t.value) || GENERIC_TYPES.has(t.value))) return true;
+    if (t.kind === 'kw' && t.value === 'fn') return true;
     return t.kind === 'ident' && this.typeNames.has(t.value);
   }
 
@@ -100,6 +101,7 @@ class Parser {
   }
 
   parseType() {
+    if (this.at('fn')) return this.parseFnType();
     const t = this.next();
     const arity = t.kind === 'kw' ? GENERIC_TYPES.get(t.value) : undefined;
     if (arity !== undefined) {
@@ -123,12 +125,63 @@ class Parser {
   }
 
   /**
+   * 函数值类型：`fn(int, string) -> bool`、`fn() -> void`。
+   * 只有类型，没有参数名 —— 参数名属于 lambda 不属于类型（ADR-0010）。
+   */
+  parseFnType() {
+    const start = this.expect('fn');
+    this.expect('(');
+    const params = [];
+    while (!this.at(')') && !this.atEof) {
+      const before = this.pos;
+      params.push(this.parseType());
+      if (!this.eat(',')) break;
+      if (this.pos === before) break;
+    }
+    this.expect(')');
+    this.expect('->', "-> after the parameter list of a 'fn' type");
+    const ret = this.parseType();
+    return { kind: 'FnType', params, ret, span: this.spanFrom(start) };
+  }
+
+  /**
+   * lambda：`fn(int x, int y) -> int { return x + y; }`。
+   *
+   * 参数与返回类型都必须写出来。理由是实参在重载解析**之前**就要定型：如果 lambda 的类型
+   * 要靠形参位置的期望类型倒推，那"选哪个重载"和"实参是什么类型"就互相依赖了。
+   * 写全注解让 lambda 自带类型，这个环就不存在。
+   */
+  parseLambda() {
+    const start = this.expect('fn');
+    this.expect('(');
+    const params = [];
+    while (!this.at(')') && !this.atEof) {
+      const before = this.pos;
+      const type = this.parseType();
+      const p = this.peek();
+      if (p.kind !== 'ident') { this.error(p.span, 'expected parameter name'); break; }
+      this.next();
+      params.push({ type, name: p.value, def: null, span: p.span });
+      if (!this.eat(',')) break;
+      if (this.pos === before) break;
+    }
+    this.expect(')');
+    this.expect('->', "-> and a return type after a lambda's parameter list");
+    const retType = this.parseType();
+    const body = this.parseBlock();
+    return { kind: 'Lambda', retType, params, body, span: this.spanFrom(start) };
+  }
+
+  /**
    * tentative：`Type ident` 前缀？用于区分变量声明与表达式语句。
    * 未知标识符 + 标识符 也判定为声明（本子集无并置表达式），这样前向引用的类型也能工作。
    */
   looksLikeVarDecl() {
     const t0 = this.peek();
     if (t0.kind === 'kw' && GENERIC_TYPES.has(t0.value)) return true;
+    // `fn` 开头：可能是 `fn(int)->int f = ...`（声明），也可能是一个 lambda 表达式语句。
+    // tryDeclHead 会试着解析类型再要求一个名字，不成就整体回滚，所以这里放行即可。
+    if (t0.kind === 'kw' && t0.value === 'fn') return true;
     const t1 = this.peek(1);
     const typeStart = (t0.kind === 'kw' && BUILTIN_TYPES.has(t0.value)) || t0.kind === 'ident';
     return typeStart && t1.kind === 'ident';
@@ -523,6 +576,7 @@ class Parser {
       default: break;
     }
     if (this.at('null')) { this.next(); return { kind: 'NullLit', span: t.span }; }
+    if (this.at('fn')) return this.parseLambda();
     if (this.at('new')) {
       this.next();
       const type = this.parseType();

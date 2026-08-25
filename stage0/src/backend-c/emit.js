@@ -13,7 +13,7 @@
 // 只有"按值嵌套"的 struct 需要拓扑排序。
 
 import { RUNTIME_INCLUDE, amalgamate } from '../runtime/c_runtime.js';
-import { cTypeName, listType } from '../hir/types.js';
+import { cTypeName, listType, typeKey } from '../hir/types.js';
 
 /** dict/set 的键需要 hash；list.contains 只需要 eq */
 const HASH_FN = { int: 'omni_hash_int', real: 'omni_hash_real', bool: 'omni_hash_bool', string: 'omni_hash_string' };
@@ -41,6 +41,8 @@ class CEmitter {
     const structs = this.sortStructs();
     const classes = this.mod.classes ?? [];
     const containers = this.mod.containers ?? [];
+    const closures = this.mod.closures ?? [];
+    const fnTypes = this.mod.fnTypes ?? [];
 
     this.out.push(this.opts.amalgamate ? amalgamate().trim() : RUNTIME_INCLUDE);
     this.line();
@@ -54,13 +56,58 @@ class CEmitter {
     for (const t of containers) this.containerDefine(t);
     this.dynBridge(containers);
     this.line();
+    for (const c of closures) this.closureBody(c);
+    for (const t of fnTypes) this.fnCallHelper(t);
+    this.line();
     for (const s of structs) this.structNew(s);
     for (const c of classes) this.classNew(c);
     for (const f of this.mod.funcs) this.line(`${this.proto(f)};`);
     this.line();
+    for (const c of closures) this.closureMake(c);
     for (const f of this.mod.funcs) this.func(f);
     this.line(`int main(void) { ${this.mod.entry}(); fflush(stdout); return 0; }`);
     return this.out.join('\n') + '\n';
+  }
+
+  /**
+   * 闭包记录（ADR-0010）。第一个字段必须是 `fp`，与 `struct omni_closure_s` 布局一致 ——
+   * 调用助手只认得那一个字段，捕获的部分由被调函数自己按本布局解释。
+   */
+  closureBody(c) {
+    this.line(`struct ${c.mangled}_env {`);
+    this.indent++;
+    this.line('omni_fnptr fp;');
+    for (const f of c.captures) this.line(`${cTypeName(f.type)} c_${f.name};`);
+    this.indent--;
+    this.line('};');
+  }
+
+  closureMake(c) {
+    const ps = c.captures.map((f) => `${cTypeName(f.type)} c_${f.name}`);
+    this.line(`static omni_fn ${c.make}(${ps.length ? ps.join(', ') : 'void'}) {`);
+    this.indent++;
+    this.line(`struct ${c.mangled}_env *e = (struct ${c.mangled}_env *)omni_alloc(sizeof *e);`);
+    this.line(`e->fp = (omni_fnptr)${c.mangled};`);
+    for (const f of c.captures) this.line(`e->c_${f.name} = c_${f.name};`);
+    this.line('return (omni_fn)e;');
+    this.indent--;
+    this.line('}');
+  }
+
+  /**
+   * 每个函数值签名一个类型化的调用助手。为什么不在调用处直接展开强制转换：那样 `f` 会被
+   * 求值两次（一次取 fp、一次当 self 传进去），`get_handler()(x)` 就会调用两次 get_handler。
+   */
+  fnCallHelper(t) {
+    const ret = cTypeName(t.ret);
+    const decl = t.params.map((p, i) => `${cTypeName(p)} a${i}`);
+    const sig = `${ret} (*)(omni_fn${t.params.map((p) => `, ${cTypeName(p)}`).join('')})`;
+    const call = `((${sig})omni_fn_ck(f)->fp)(f${t.params.map((_, i) => `, a${i}`).join('')})`;
+    this.line(`static inline ${ret} omni_call_${typeKey(t)}(omni_fn f${decl.length ? `, ${decl.join(', ')}` : ''}) {`);
+    this.indent++;
+    this.line(t.ret.k === 'void' ? `${call};` : `return ${call};`);
+    this.indent--;
+    this.line('}');
   }
 
   /** 结构体按字段依赖拓扑排序：C 里按值嵌套要求被嵌套者已是完整类型 */
@@ -163,22 +210,27 @@ class CEmitter {
       case 'bool': return 'false';
       case 'string': return 'omni_str_new("", 0)';
       case 'struct': return `omni_new_S_${t.name}()`;
-      case 'class': return 'NULL';
+      case 'class': case 'fn': return 'NULL';
       case 'dynamic': return 'omni_dyn_null()';
       case 'list': case 'dict': case 'set': return `${cTypeName(t)}_new()`;
       default: throw new Error(`c.zero: ${t.k}`);
     }
   }
   proto(f) {
-    const params = f.params.length
-      ? f.params.map((p) => `${cTypeName(p.type)} v_${p.name}`).join(', ')
-      : 'void';
-    return `static ${cTypeName(f.ret)} ${f.mangled}(${params})`;
+    // 闭包体的第一个形参是闭包记录自己：既是"环境"，也是被 self 指针解释的那块内存
+    const self = f.closureId === undefined ? [] : ['omni_fn self_'];
+    const params = [...self, ...f.params.map((p) => `${cTypeName(p.type)} v_${p.name}`)];
+    return `static ${cTypeName(f.ret)} ${f.mangled}(${params.length ? params.join(', ') : 'void'})`;
   }
 
   func(f) {
     this.line(`${this.proto(f)} {`);
     this.indent++;
+    if (f.closureId !== undefined) {
+      const c = (this.mod.closures ?? [])[f.closureId];
+      if (c.captures.length) this.line(`struct ${c.mangled}_env *self = (struct ${c.mangled}_env *)self_;`);
+      else this.line('(void)self_;');
+    }
     for (const s of f.body.stmts) this.stmt(s);
     this.indent--;
     this.line('}');
@@ -291,9 +343,13 @@ class CEmitter {
     switch (e.kind) {
       case 'Const': return this.constant(e);
       case 'ZeroStruct': return `omni_new_S_${e.type.name}()`;
-      case 'NullLit': case 'NullRef': return 'NULL';
+      case 'NullLit': case 'NullRef': case 'NullFn': return 'NULL';
       case 'DynNull': return 'omni_dyn_null()';
       case 'NewObject': return `omni_new_C_${e.type.name}()`;
+      case 'MakeClosure': return `${e.make}(${e.args.map((x) => this.expr(x)).join(', ')})`;
+      case 'CaptureRef': return `self->c_${e.name}`;
+      case 'CallFn':
+        return `omni_call_${typeKey(e.fnType)}(${[this.expr(e.callee), ...e.args.map((a) => this.expr(a))].join(', ')})`;
       case 'NewContainer': return `${cTypeName(e.type)}_new()`;
       case 'ListLit': return this.listLit(e);
       case 'DictLit': return this.dictLit(e);

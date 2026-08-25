@@ -6,7 +6,7 @@
 
 import {
   BUILTINS, INT, REAL, BOOL, STRING, VOID, DYNAMIC, NULLT,
-  structType, classType, listType, dictType, setType,
+  structType, classType, listType, dictType, setType, fnType,
   typeName, typeKey, same, isNumeric, isRef, isHashable, castCost, commonType, zeroValue,
 } from './types.js';
 
@@ -73,6 +73,19 @@ class Checker {
     this.hoist = null;
     /** @type {Scope | null} 当前函数的根作用域，`var` 与裸赋值绑定在这里 */
     this.fnScope = null;
+    /**
+     * lambda（ADR-0010）。每个 lambda 被提升成一个顶层函数 + 一份闭包记录：
+     *  - `lifted`   提升出来的 OIR 函数，最后并进 funcs
+     *  - `closures` 闭包记录的布局（捕获了哪些名字、哪些类型）
+     *  - `fnTypes`  用到的函数值签名，C 后端要为每个签名发一个类型化的调用助手
+     *  - `frames`   正在检查的 lambda 栈，名字查找靠它决定"这是捕获还是外面的变量"
+     */
+    this.lifted = [];
+    this.closures = [];
+    this.fnTypes = new Map();
+    this.frames = [];
+    /** @type {Map<string, any>} 具名函数 -> 它的适配器闭包节点（同一个函数只包一次） */
+    this.adapters = new Map();
   }
 
   /** 进入一个函数体：重置提升表与函数根作用域 */
@@ -92,6 +105,148 @@ class Checker {
     return decls.length ? { kind: 'Block', stmts: [...decls, ...body.stmts] } : body;
   }
 
+  // ------------------------------------------------------- 函数值 / lambda（ADR-0010）
+
+  /**
+   * lambda 字面量。做法是**提升成顶层函数 + 一份闭包记录**，而不是给后端一个"嵌套函数"节点：
+   * C 没有嵌套函数，把这层降级放在检查器里，两个后端就都只看见普通函数。
+   *
+   * 捕获**按值**：闭包创建的那一刻把值拷进记录。JS 的词法闭包是按引用的，所以这里绝不能
+   * 依赖宿主的作用域，必须显式把捕获写进记录 —— 否则 C 与 JS 会在"循环变量被闭包捕获"
+   * 这种经典场景上给出不同答案。
+   */
+  lambda(node) {
+    const params = node.params.map((p) => ({ name: p.name, type: this.resolveType(p.type) }));
+    const ret = this.resolveType(node.retType);
+    const type = this.useType(fnType(params.map((p) => p.type), ret));
+    const seen = new Set();
+    for (const p of params) {
+      if (seen.has(p.name)) this.err(node.span, `duplicate parameter '${p.name}' in lambda`);
+      seen.add(p.name);
+    }
+
+    const frame = { outerScope: this.scope, captures: new Map() };
+    const saved = {
+      scope: this.scope,
+      fnScope: this.fnScope,
+      hoist: this.hoist,
+      ret: this.currentRet,
+      loopDepth: this.loopDepth,
+    };
+    this.frames.push(frame);
+    this.enterFunction();
+    this.currentRet = ret;
+    this.loopDepth = 0; // break / continue 不能穿过 lambda 边界
+    for (const p of params) this.scope.declare(p.name, p.type);
+    const body = this.exitFunction(this.block(node.body));
+    this.frames.pop();
+    this.scope = saved.scope;
+    this.fnScope = saved.fnScope;
+    this.hoist = saved.hoist;
+    this.currentRet = saved.ret;
+    this.loopDepth = saved.loopDepth;
+
+    const captures = [...frame.captures.values()];
+    return this.addClosure(`lambda#${this.closures.length}`, { ret, params, body }, captures, type);
+  }
+
+  /** 登记一个闭包（lambda 或具名函数的适配器），返回创建它的 OIR 节点 */
+  addClosure(name, fn, captures, type) {
+    const id = this.closures.length;
+    const mangled = `omni_clo_${id}`;
+    const make = `omni_mk_${id}`;
+    this.closures.push({ id, mangled, make, captures: captures.map((c) => ({ name: c.name, type: c.type })) });
+    this.lifted.push({ name, mangled, ret: fn.ret, params: fn.params, body: fn.body, closureId: id });
+    return { kind: 'MakeClosure', closure: id, make, args: captures.map((c) => c.value), type };
+  }
+
+  /**
+   * 在 lambda 里引用外层的名字。逐层往外找，**每一层都登记一次捕获**：内层的值来自外层的
+   * 捕获槽，而不是直接跨层读外面的栈 —— 外层函数早就返回了，跨层读会读到已经失效的帧。
+   */
+  captureRef(name) {
+    const find = (depth) => {
+      const frame = this.frames[depth];
+      const outer = frame.outerScope.lookup(name);
+      const src = outer
+        ? { kind: 'VarRef', name: outer.name, type: outer.type }
+        : (depth > 0 ? find(depth - 1) : null);
+      if (!src) return null;
+      if (!frame.captures.has(name)) frame.captures.set(name, { name, type: src.type, value: src });
+      return { kind: 'CaptureRef', name, type: src.type };
+    };
+    return this.frames.length ? find(this.frames.length - 1) : null;
+  }
+
+  /** 变量查找的唯一入口：先看本函数的作用域，再看外层（触发捕获） */
+  lookupValue(name) {
+    const v = this.scope.lookup(name);
+    if (v) return { kind: 'VarRef', name: v.name, type: v.type };
+    return this.captureRef(name);
+  }
+
+  /** 具名函数当值用。有多个重载时必须有期望类型来定案，否则报错让用户写 lambda。 */
+  funcValue(name, group, expected, span) {
+    const sig = (sym) => fnType(sym.params.map((p) => p.type), sym.ret);
+    let sym = null;
+    if (expected?.k === 'fn') sym = group.find((s) => same(sig(s), expected)) ?? null;
+    else if (group.length === 1) sym = group[0];
+    if (!sym) {
+      const why = expected?.k === 'fn'
+        ? `no overload of '${name}' has type '${typeName(expected)}'`
+        : `'${name}' has ${group.length} overloads, so using it as a value is ambiguous`;
+      this.err(span, `${why}; wrap the one you mean in a lambda, e.g. 'fn(int x) -> int { return ${name}(x); }'`);
+      return { kind: 'Const', type: INT, value: 0n };
+    }
+    return this.funcRef(sym);
+  }
+
+  /**
+   * 具名函数 -> 函数值。生成一个薄适配器（形参照抄、转手调用），让**所有**函数值共用
+   * 同一套调用约定（第一个参数是闭包记录自己）。代价是一次多余的调用，换来的是调用处
+   * 不需要区分"这是 lambda 还是具名函数"。
+   */
+  funcRef(sym) {
+    const type = this.useType(fnType(sym.params.map((p) => p.type), sym.ret));
+    const cached = this.adapters.get(sym.mangled);
+    if (cached) return { ...cached, args: [] };
+    const params = sym.params.map((p, i) => ({ name: `a${i}`, type: p.type }));
+    const call = {
+      kind: 'Call',
+      func: sym.mangled,
+      name: sym.name,
+      args: params.map((p) => ({ kind: 'VarRef', name: p.name, type: p.type })),
+      type: sym.ret,
+    };
+    const body = {
+      kind: 'Block',
+      stmts: [sym.ret.k === 'void' ? { kind: 'ExprStmt', expr: call } : { kind: 'Return', value: call }],
+    };
+    const node = this.addClosure(`&${sym.name}`, { ret: sym.ret, params, body }, [], type);
+    this.adapters.set(sym.mangled, node);
+    return node;
+  }
+
+  /** 调用一个函数值。函数值没有参数名，所以命名实参与默认值在这里都不存在。 */
+  callFnValue(callee, args, span) {
+    const t = callee.type;
+    if (args.some((a) => a.name !== null)) {
+      this.err(span, 'a function value has no parameter names, so named arguments cannot be used here');
+    }
+    if (args.length !== t.params.length) {
+      this.err(span, `'${typeName(t)}' takes ${t.params.length} argument(s), got ${args.length}`);
+      return zeroValue(t.ret) ?? { kind: 'Const', type: INT, value: 0n };
+    }
+    this.useType(t);
+    return {
+      kind: 'CallFn',
+      callee,
+      fnType: t,
+      args: args.map((a, i) => this.coerce(a.expr, t.params[i], a.span)),
+      type: t.ret,
+    };
+  }
+
   err(span, msg) {
     this.diags.error(span, msg);
   }
@@ -106,6 +261,13 @@ class Checker {
       case 'list': this.useType(t.elem); break;
       case 'dict': this.useType(t.key); this.useType(t.val); this.useType(listType(t.key)); break;
       case 'set': this.useType(t.elem); this.useType(listType(t.elem)); break;
+      case 'fn': {
+        for (const p of t.params) this.useType(p);
+        this.useType(t.ret);
+        const fk = typeKey(t);
+        if (!this.fnTypes.has(fk)) this.fnTypes.set(fk, t);
+        return t;
+      }
       default: return t;
     }
     const key = typeKey(t);
@@ -123,6 +285,13 @@ class Checker {
   dynListType() { return listType(DYNAMIC); }
 
   resolveType(ref) {
+    if (ref.kind === 'FnType') {
+      const params = ref.params.map((p) => this.resolveType(p));
+      for (const [i, p] of params.entries()) {
+        if (p.k === 'void') this.err(ref.params[i].span, 'function parameter type cannot be void');
+      }
+      return this.useType(fnType(params, this.resolveType(ref.ret)));
+    }
     if (ref.kind === 'GenericType') {
       const args = ref.args.map((a) => this.resolveType(a));
       switch (ref.name) {
@@ -309,7 +478,10 @@ class Checker {
       structs: this.structs,
       classes: this.classes,
       containers: sortedContainers(this.containers),
-      funcs,
+      // lambda 提升出来的函数排在最后：它们是编译器合成的，放在用户函数之后便于阅读生成物
+      funcs: [...funcs, ...this.lifted],
+      closures: this.closures,
+      fnTypes: [...this.fnTypes.keys()].sort().map((k) => this.fnTypes.get(k)),
       entry: 'omni_main',
     };
   }
@@ -437,9 +609,20 @@ class Checker {
     const t = expr.target;
     if (!t || t.kind !== 'Name') return null;
     if (this.scope.lookup(t.name)) return null;
+    // lambda 里给外层的名字赋值不是"声明一个新变量"：让它走正常路径，由 requireLvalue
+    // 报出"捕获是按值的"这条更准确的错误
+    if (this.outerHas(t.name)) return null;
     if (this.thisType?.fields.some((f) => f.name === t.name)) return null;
     if (!this.fnScope) return null;
     return t.name;
+  }
+
+  /** 这个名字是否存在于任何外层 lambda 之外的作用域里（只查，不登记捕获） */
+  outerHas(name) {
+    for (let i = this.frames.length - 1; i >= 0; i--) {
+      if (this.frames[i].outerScope.lookup(name)) return true;
+    }
+    return false;
   }
 
   stmtAsBlock(node) {
@@ -560,21 +743,25 @@ class Checker {
       case 'New': return this.newExpr(node);
       case 'Index': return this.indexGet(node);
       case 'Name': {
-        const v = this.scope.lookup(node.name);
-        if (v) return { kind: 'VarRef', name: v.name, type: v.type };
+        const v = this.lookupValue(node.name);
+        if (v) return v;
         // class 方法体内的裸名可以解析到字段（"数据成员自动挂钩"）
         const field = this.thisType?.fields.find((f) => f.name === node.name);
         if (field) {
-          const self = { kind: 'VarRef', name: 'this', type: this.thisType };
-          return { kind: 'Field', object: self, name: field.name, type: field.type, viaThis: true };
+          const self = this.lookupValue('this');
+          if (self) return { kind: 'Field', object: self, name: field.name, type: field.type, viaThis: true };
         }
-        if (this.lookupFuncs(node.name) || BUILTIN_FUNCS.has(node.name)) {
-          this.err(node.span, `'${node.name}' is a function; first-class function values are not supported yet`);
+        // 具名函数当值用（ADR-0010）：唯一重载直接成立，多重载要靠期望类型定案
+        const group = this.lookupFuncs(node.name);
+        if (group) return this.funcValue(node.name, group, opts.expected, node.span);
+        if (BUILTIN_FUNCS.has(node.name)) {
+          this.err(node.span, `'${node.name}' is a builtin, and builtins cannot be used as function values; wrap it in a lambda`);
         } else {
           this.err(node.span, `undefined variable '${node.name}'`);
         }
         return { kind: 'Const', type: INT, value: 0n };
       }
+      case 'Lambda': return this.lambda(node);
       case 'Binary': return this.binary(node);
       case 'Unary': return this.unary(node);
       case 'Ternary': {
@@ -745,7 +932,16 @@ class Checker {
   }
   requireLvalue(e, span) {
     let cur = e;
-    while (cur.kind === 'Field') cur = cur.object;
+    while (cur.kind === 'Field') {
+      // 通过 class 引用改字段是允许的，即使这个引用是被捕获来的：改的是对象，不是引用
+      if (cur.object.type.k === 'class') return true;
+      cur = cur.object;
+    }
+    if (cur.kind === 'CaptureRef') {
+      this.err(span, `'${cur.name}' is captured by value, so a lambda cannot assign to it`
+        + ' — return the new value, or capture a class/container and mutate that');
+      return false;
+    }
     if (cur.kind !== 'VarRef') {
       this.err(span, 'expression is not assignable');
       return false;
@@ -890,6 +1086,14 @@ class Checker {
     }
 
     if (callee.kind === 'Name') {
+      // 函数值优先：`f(x)` 里的 f 如果是一个 fn 类型的变量（或被捕获的变量），
+      // 那它就是被调用的东西，具名函数表在这一层根本不参与 —— 局部名字遮蔽全局名字
+      const value = this.lookupValue(callee.name);
+      if (value && value.type.k === 'fn') return this.callFnValue(value, args, node.span);
+      if (value) {
+        this.err(callee.span, `'${callee.name}' is a variable of type '${typeName(value.type)}', not a function`);
+        return { kind: 'Const', type: INT, value: 0n };
+      }
       if (BUILTIN_FUNCS.has(callee.name)) return this.builtinCall(callee.name, args, node.span);
       const group = this.lookupFuncs(callee.name);
       if (!group) {
@@ -913,7 +1117,15 @@ class Checker {
       const recv = this.expr(callee.object);
       const name = callee.name;
       const recvType = recv.type;
-      if ((recvType.k === 'struct' || recvType.k === 'class') && recvType.fields.some((f) => f.name === name)) {
+      const field = (recvType.k === 'struct' || recvType.k === 'class')
+        ? recvType.fields.find((f) => f.name === name)
+        : null;
+      if (field) {
+        // 字段里存着函数值就调用它；否则维持原来的诊断（字段不是函数）
+        if (field.type.k === 'fn') {
+          const target = { kind: 'Field', object: recv, name: field.name, type: field.type };
+          return this.callFnValue(target, args, node.span);
+        }
         this.err(callee.nameSpan, `member '${name}' is a field, not a function`);
         return { kind: 'Const', type: INT, value: 0n };
       }
@@ -929,7 +1141,11 @@ class Checker {
       return { kind: 'Const', type: INT, value: 0n };
     }
 
-    this.err(node.span, 'callee is not a function');
+    // 其它形态的被调方：`fs[0](x)`、`adder(1)(2)`、`(cond ? f : g)(x)` ——
+    // 一律求值出来看类型，是函数值就调用。这里不再枚举语法形态，免得每加一种表达式就漏一次。
+    const value = this.expr(callee);
+    if (value.type.k === 'fn') return this.callFnValue(value, args, node.span);
+    this.err(node.span, `cannot call a value of type '${typeName(value.type)}'`);
     return { kind: 'Const', type: INT, value: 0n };
   }
 
@@ -1120,7 +1336,7 @@ const CMP_OPS = new Set(['==', '!=', '<', '<=', '>', '>=']);
 const BIT_OPS = new Set(['&', '|', '^', '<<', '>>']);
 const LENGTH_TYPES = new Set(['list', 'dict', 'set', 'string']);
 /** 只支持 == / != 的类型 */
-const EQ_ONLY = new Set(['bool', 'class', 'dynamic']);
+const EQ_ONLY = new Set(['bool', 'class', 'dynamic', 'fn']);
 const NOT_COMPARABLE = new Set(['struct', 'list', 'dict', 'set', 'void']);
 /** 有相等语义的类型：list.contains / `in` 要求元素落在这里（两个后端才能给出同一答案） */
 const EQUATABLE = new Set(['int', 'real', 'bool', 'string', 'class', 'dynamic']);
@@ -1212,6 +1428,7 @@ function mentionsDynamic(t) {
     case 'dynamic': return true;
     case 'list': case 'set': return mentionsDynamic(t.elem);
     case 'dict': return mentionsDynamic(t.key) || mentionsDynamic(t.val);
+    case 'fn': return t.params.some(mentionsDynamic) || mentionsDynamic(t.ret);
     default: return false;
   }
 }

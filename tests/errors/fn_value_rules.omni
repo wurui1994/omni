@@ -1,0 +1,20 @@
+// 函数值的规矩（ADR-0010）：每条错误都对应一个刻意不支持的东西。
+
+int pick(int x) { return x; }
+real pick(real x) { return x; }
+
+int outer = 1;
+
+// 捕获是按值的，所以 lambda 不能往回写
+fn() -> void bad = fn() -> void { outer = 2; };
+
+// 多个重载，又没有期望类型来定案
+var ambiguous = pick;
+
+fn(int) -> int f = fn(int x) -> int { return x; };
+print(f(1, 2));          // 实参个数不对
+print(f(x = 1));         // 函数值没有形参名
+print(outer(1));         // outer 不是函数
+print(f);                // 函数值不能打印
+int notFn = 3;
+print(notFn(1));

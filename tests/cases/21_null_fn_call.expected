@@ -1,0 +1,5 @@
+exit 70
+--- stdout ---
+2
+--- stderr ---
+omni: runtime error: call of a null function value

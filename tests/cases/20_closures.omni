@@ -1,0 +1,130 @@
+// 函数值与闭包（ADR-0010）。这条用例的重点不是"能跑"，是**两个后端的答案必须一样**：
+// 捕获按值这条规矩只有在循环里创建闭包时才看得出来，而 JS 的原生闭包按引用捕获，
+// 所以生成的 JS 必须显式把捕获拷进记录，而不是靠宿主的作用域。
+
+int twice(int x) { return x * 2; }
+
+int applyTo(fn(int) -> int f, int v) { return f(v); }
+
+// 返回闭包：外层的形参在函数返回后还要能用，所以捕获必须是拷贝而不是指向栈的指针
+fn(int) -> int adder(int n) {
+  return fn(int x) -> int { return x + n; };
+}
+
+// 最基本的形态
+fn(int) -> int inc = fn(int x) -> int { return x + 1; };
+print(inc(41));
+print(applyTo(inc, 10));
+
+// 具名函数当值用：唯一重载可以直接写名字
+fn(int) -> int t = twice;
+print(t(21));
+print(applyTo(twice, 8));
+
+// 捕获
+int base = 100;
+fn(int) -> int addBase = fn(int x) -> int { return x + base; };
+print(addBase(5));
+base = 200;              // 捕获是拷贝，改外面的变量不影响已经建好的闭包
+print(addBase(5));
+
+fn(int) -> int add10 = adder(10);
+fn(int) -> int add20 = adder(20);
+print(add10(1));
+print(add20(1));
+
+// 循环里建闭包：每一轮的 i 都被拷进各自的记录，所以结果是 0,1,2，不是 3,3,3
+list<fn(int) -> int> fs = [];
+int i = 0;
+while (i < 3) {
+  fs.push(fn(int x) -> int { return x + i; });
+  i = i + 1;
+}
+print(fs.length);
+print(fs[0](0));
+print(fs[1](0));
+print(fs[2](0));
+
+// 嵌套：内层 lambda 捕获外层 lambda 的形参（要逐层登记捕获）
+fn(int) -> fn(int) -> int mul = fn(int a) -> fn(int) -> int {
+  return fn(int b) -> int { return a * b; };
+};
+print(mul(6)(7));
+
+// 捕获引用类型：拷的是引用，所以透过它改内容是可见的（这是引用语义，不是"按引用捕获"）
+list<int> seen = [];
+fn(int) -> void record = fn(int x) -> void { seen.push(x); };
+record(1);
+record(2);
+print(seen.length);
+print(seen[0]);
+print(seen[1]);
+
+// dict 里存函数值
+dict<string, fn(int) -> int> ops = {:};
+ops["inc"] = inc;
+ops["twice"] = twice;
+fn(int) -> int op = ops["twice"];
+print(op(50));
+print(ops["inc"](9));
+
+// 空值与相等：函数值的相等是**同一性**（同一个闭包记录），不是"同一个函数"
+fn(int) -> int nothing = null;
+print(nothing == null);
+print(inc == null);
+fn(int) -> int alias = inc;
+print(alias == inc);
+
+// 字符串上的闭包，顺带验证捕获的 string 也是按值拷进去的
+string prefix = "n=";
+fn(int) -> string label = fn(int x) -> string { return prefix + string(x); };
+print(label(7));
+prefix = "changed";
+print(label(7));
+
+// 高阶：把 fn 当参数、又在里面建 fn
+int sumWith(list<int> xs, fn(int) -> int f) {
+  int acc = 0;
+  for (int x in xs) { acc = acc + f(x); }
+  return acc;
+}
+print(sumWith([1, 2, 3], twice));
+print(sumWith([1, 2, 3], fn(int x) -> int { return x * x; }));
+print(sumWith([1, 2, 3], adder(10)));
+
+// 捕获 struct 是整份拷贝：改原来的字段不影响闭包看到的那份
+struct P { int x; int y; }
+P p;
+p.x = 3;
+p.y = 4;
+fn() -> int area = fn() -> int { return p.x * p.y; };
+print(area());
+p.x = 100;
+print(area());
+
+// class 方法里的 lambda 捕获 this。this 是引用，所以透过它读到的是**当前**的字段值 ——
+// 捕获的是引用的拷贝，不是字段的拷贝，这和上面的 struct 恰好成对照
+class Counter {
+  int n;
+  fn(int) -> int bump() {
+    return fn(int d) -> int { return n + d; };
+  }
+  int callIt(int d) {
+    fn(int) -> int g = bump();
+    return g(d);
+  }
+}
+Counter c = new Counter();
+c.n = 10;
+fn(int) -> int bumped = c.bump();
+print(bumped(5));
+c.n = 99;
+print(bumped(5));
+print(c.callIt(1));
+
+// 函数值当 class 字段
+class Holder { fn(int) -> int op; }
+Holder h = new Holder();
+print(h.op == null);
+h.op = fn(int v) -> int { return v * 3; };
+print(h.op(7));

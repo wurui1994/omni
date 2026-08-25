@@ -189,6 +189,14 @@ function $nullCheck(o) {
   return o;
 }
 
+// 函数值（ADR-0010）：{ fp, c_* }。fp 是被调函数，c_* 是**按值**捕获的变量。
+// 记录自己当第一个实参传进去，与 C 侧的 omni_fn self 是同一套调用约定；
+// 捕获绝不依赖 JS 的词法作用域 —— JS 按引用捕获，Omni 按值，靠宿主会两边分叉。
+function $callFn(f, ...args) {
+  if (f === null) $rt_error("call of a null function value");
+  return f.fp(f, ...args);
+}
+
 // dynamic 的运行期分派面（ADR-0008 第 5 节的封闭清单）。
 // 有了这些，读写 JSON 不需要先 asList()/asDict()，源码里也不需要出现 dyn()。
 function $dynGet(v, k) {

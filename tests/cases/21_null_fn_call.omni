@@ -1,0 +1,7 @@
+// 运行期错误：调用空函数值。C 侧同样要显式检查 —— 不检查就是"跳到地址 0"，
+// 那是段错误，和 JS 抛出的诊断分叉。
+fn(int) -> int f = fn(int x) -> int { return x + 1; };
+print(f(1));
+fn(int) -> int g = null;
+print(g(1));
+print(999);

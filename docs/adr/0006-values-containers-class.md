@@ -131,7 +131,7 @@ V8 的路子：稀疏索引表 + 紧凑 entries 数组，迭代顺序 = 插入�
    当前只分配不释放，等 ADR-0007 的 unwind 表落地
 5. ✅ `set<T>`（复用 dict 索引）
 6. ✅ 模块系统 `import` + `private`（ADR-0009，`libsFor` 已删除）；tagged union 未做
-7. 闭包 / 函数值
+7. ✅ 闭包 / 函数值（ADR-0010：`fn(...) -> T`，捕获按值，lambda 提升在检查器里做）
 8. …… pointer / unsafe 在这之后
 
 每一步的出口条件不变：js/c 双后端差分全绿 + 快照更新 + 基准无回退。

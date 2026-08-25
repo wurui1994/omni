@@ -42,6 +42,16 @@ typedef struct {
   union { bool b; int64_t i; double r; omni_str s; void *ref; } u;
 } omni_dyn;
 
+/* 函数值（ADR-0010）：指向闭包记录的指针。记录的第一个字段是被调函数的地址，
+   后面紧跟捕获的变量 —— 每个 lambda 有自己的记录布局，由生成的 C 定义。
+   闭包记录本身当作 self 传进被调函数，所以函数只要一个参数就能同时拿到
+   "去哪儿" 和 "带了什么"，调用处不需要把函数值求值两次。
+   fp 声明成函数指针而不是 void*：函数指针与对象指针之间的转换在 C 里不保证，
+   而函数指针之间的互转是允许的（只要按真实类型调用）。 */
+typedef void (*omni_fnptr)(void);
+struct omni_closure_s { omni_fnptr fp; };
+typedef struct omni_closure_s *omni_fn;
+
 /* ================================================================ 声明 */
 
 /* omni_error.c */
@@ -201,6 +211,12 @@ static inline int64_t omni_dyn_as_int(omni_dyn v) { omni_dyn_want(v, OMNI_DYN_IN
 static inline double omni_dyn_as_real(omni_dyn v) { omni_dyn_want(v, OMNI_DYN_REAL); return v.u.r; }
 static inline omni_str omni_dyn_as_string(omni_dyn v) { omni_dyn_want(v, OMNI_DYN_STRING); return v.u.s; }
 static inline void *omni_dyn_as_ref(omni_dyn v, int tag) { omni_dyn_want(v, tag); return v.u.ref; }
+
+/* --- 函数值：调用前的空值检查（两个后端消息一致，不让 C 侧退化成段错误） --- */
+static inline omni_fn omni_fn_ck(omni_fn f) {
+  if (!f) omni_error("call of a null function value");
+  return f;
+}
 
 /* --- 键的 hash / eq：dict 的每一次查找都要走，全在最内层 ---
    eq 语义对齐 JS 的 SameValueZero：NaN 等于自身，+0 等于 -0 */
