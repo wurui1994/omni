@@ -130,6 +130,7 @@ static omni_s16 omni_js_json_val(omni_dyn v, omni_dyn rep, int64_t gap, int64_t 
       out = omni_s16_cat(out, omni_js_json_nl(gap, depth)); \
       return omni_s16_cat(out, omni_js_s16_lit("}")); \
     } \
+    case OMNI_DYN_MAP: case OMNI_DYN_SET: return omni_js_s16_lit("{}"); \
     default: \
       omni_errorf("do not know how to serialize a %s", omni_dyn_tag_name(v.tag)); \
       return omni_js_json_absent(); \

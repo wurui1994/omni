@@ -2,7 +2,8 @@
  *
  * 同样是宏：要造和读 dict<string, dynamic> 与 list<dynamic>，那是生成 TU 里的实例。
  *
- * 三种东西的表示：
+ * 三种东西的表示（标签是三个：DICT / MAP / SET —— 底子同是 dict，但成员派发
+ * （o.has(k) 到底是 Map 还是普通对象）只有标签能分开，往字典里塞隐藏键会污染迭代）：
  *   - 普通对象 -> dict<string, dynamic>，键是属性名的 UTF-8。属性名进出都要转码
  *     （JS 域里是 str16），这是 ADR-0011 第 8 节的代价，先接受。
  *   - Map -> dict<string, dynamic>，键是**带标签的规范化字符串**，值是一个两元素的
@@ -24,6 +25,10 @@
 #define OMNI_JS_OBJ(LT, DT) \
 static DT omni_js_dict_of(omni_dyn v) { return (DT)omni_dyn_as_ref(v, OMNI_DYN_DICT); } \
 static omni_dyn omni_js_dict_wrap(DT d) { return omni_dyn_of_ref((void *)d, OMNI_DYN_DICT); } \
+static DT omni_js_map_of(omni_dyn v) { return (DT)omni_dyn_as_ref(v, OMNI_DYN_MAP); } \
+static omni_dyn omni_js_map_wrap(DT d) { return omni_dyn_of_ref((void *)d, OMNI_DYN_MAP); } \
+static DT omni_js_set_of(omni_dyn v) { return (DT)omni_dyn_as_ref(v, OMNI_DYN_SET); } \
+static omni_dyn omni_js_set_wrap(DT d) { return omni_dyn_of_ref((void *)d, OMNI_DYN_SET); } \
 static omni_str omni_js_key(omni_dyn k) { \
   omni_str u; \
   switch (k.tag) { \
@@ -96,15 +101,15 @@ OMNI_JS_MAP(LT, DT)
 /* Map / Set。条目值是 [原键, 值] 的两元素 list —— 多一次分配，换来 .keys() 能还回
    原来的键（数字键的那两张表指着这个）。Set 的条目值直接是原元素。 */
 #define OMNI_JS_MAP(LT, DT) \
-static omni_dyn omni_js_map_new(void) { return omni_js_dict_wrap(DT##_new()); } \
+static omni_dyn omni_js_map_new(void) { return omni_js_map_wrap(DT##_new()); } \
 static omni_dyn omni_js_map_size(omni_dyn m) { \
-  return omni_dyn_of_real((double)omni_js_dict_of(m)->count); \
+  return omni_dyn_of_real((double)omni_js_map_of(m)->count); \
 } \
 static bool omni_js_map_has(omni_dyn m, omni_dyn k) { \
-  return DT##_contains(omni_js_dict_of(m), omni_js_key(k)); \
+  return DT##_contains(omni_js_map_of(m), omni_js_key(k)); \
 } \
 static omni_dyn omni_js_map_get(omni_dyn m, omni_dyn k) { \
-  DT d = omni_js_dict_of(m); \
+  DT d = omni_js_map_of(m); \
   omni_str key = omni_js_key(k); \
   if (!DT##_contains(d, key)) return omni_dyn_undef(); \
   return ((LT)DT##_get(d, key).u.ref)->items[1]; \
@@ -115,14 +120,14 @@ static omni_dyn omni_js_map_set(omni_dyn m, omni_dyn k, omni_dyn v) { \
   pair->items[0] = k; \
   pair->items[1] = v; \
   pair->len = 2; \
-  DT##_set(omni_js_dict_of(m), omni_js_key(k), omni_js_arr_wrap(pair)); \
+  DT##_set(omni_js_map_of(m), omni_js_key(k), omni_js_arr_wrap(pair)); \
   return m; \
 } \
 static bool omni_js_map_delete(omni_dyn m, omni_dyn k) { \
-  return DT##_remove(omni_js_dict_of(m), omni_js_key(k)); \
+  return DT##_remove(omni_js_map_of(m), omni_js_key(k)); \
 } \
 static omni_dyn omni_js_map_keys(omni_dyn m) { \
-  DT d = omni_js_dict_of(m); \
+  DT d = omni_js_map_of(m); \
   LT out = LT##_new(); \
   LT##_reserve(out, d->count); \
   for (int64_t i = 0; i < d->n; i++) { \
@@ -131,7 +136,7 @@ static omni_dyn omni_js_map_keys(omni_dyn m) { \
   return omni_js_arr_wrap(out); \
 } \
 static omni_dyn omni_js_map_values(omni_dyn m) { \
-  DT d = omni_js_dict_of(m); \
+  DT d = omni_js_map_of(m); \
   LT out = LT##_new(); \
   LT##_reserve(out, d->count); \
   for (int64_t i = 0; i < d->n; i++) { \
@@ -140,28 +145,28 @@ static omni_dyn omni_js_map_values(omni_dyn m) { \
   return omni_js_arr_wrap(out); \
 } \
 static omni_dyn omni_js_map_entries(omni_dyn m) { \
-  DT d = omni_js_dict_of(m); \
+  DT d = omni_js_map_of(m); \
   LT out = LT##_new(); \
   LT##_reserve(out, d->count); \
   for (int64_t i = 0; i < d->n; i++) if (d->live[i]) out->items[out->len++] = d->vals[i]; \
   return omni_js_arr_wrap(out); \
 } \
-static omni_dyn omni_js_set_new(void) { return omni_js_dict_wrap(DT##_new()); } \
+static omni_dyn omni_js_set_new(void) { return omni_js_set_wrap(DT##_new()); } \
 static omni_dyn omni_js_set_size(omni_dyn s) { \
-  return omni_dyn_of_real((double)omni_js_dict_of(s)->count); \
+  return omni_dyn_of_real((double)omni_js_set_of(s)->count); \
 } \
 static bool omni_js_set_has(omni_dyn s, omni_dyn v) { \
-  return DT##_contains(omni_js_dict_of(s), omni_js_key(v)); \
+  return DT##_contains(omni_js_set_of(s), omni_js_key(v)); \
 } \
 static omni_dyn omni_js_set_add(omni_dyn s, omni_dyn v) { \
-  DT##_set(omni_js_dict_of(s), omni_js_key(v), v); \
+  DT##_set(omni_js_set_of(s), omni_js_key(v), v); \
   return s; \
 } \
 static bool omni_js_set_delete(omni_dyn s, omni_dyn v) { \
-  return DT##_remove(omni_js_dict_of(s), omni_js_key(v)); \
+  return DT##_remove(omni_js_set_of(s), omni_js_key(v)); \
 } \
 static omni_dyn omni_js_set_items(omni_dyn s) { \
-  DT d = omni_js_dict_of(s); \
+  DT d = omni_js_set_of(s); \
   LT out = LT##_new(); \
   LT##_reserve(out, d->count); \
   for (int64_t i = 0; i < d->n; i++) if (d->live[i]) out->items[out->len++] = d->vals[i]; \

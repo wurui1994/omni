@@ -44,7 +44,10 @@ typedef struct { const uint16_t *p; int64_t len; } omni_s16;
 enum {
   OMNI_DYN_NULL = 0, OMNI_DYN_BOOL, OMNI_DYN_INT, OMNI_DYN_REAL,
   OMNI_DYN_STRING, OMNI_DYN_LIST, OMNI_DYN_DICT,
-  OMNI_DYN_UNDEF, OMNI_DYN_FN, OMNI_DYN_STR16
+  OMNI_DYN_UNDEF, OMNI_DYN_FN, OMNI_DYN_STR16,
+  /* Map 与 Set 的底子也是 dict<string,dynamic>，但标签必须分开：`o.has(k)` 这种
+     成员派发只有标签能区分 Map 和 Set，靠字典里塞个隐藏键会污染迭代（ADR-0011）。 */
+  OMNI_DYN_MAP, OMNI_DYN_SET
 };
 
 typedef struct {

@@ -7,6 +7,9 @@ const char *omni_dyn_tag_name(int t) {
     /* 这三个只由 JS 前端产生（ADR-0011）；Omni 源码造不出来。str16 在 JS 的 typeof 里
        报 "string"，但错误信息里要能和 UTF-8 的 string 区分开，所以标签名不一样 */
     "undefined", "function", "str16",
+    /* Map / Set：底子还是 dict<string, dynamic>，但标签必须分开 —— o.has(k) 这类成员
+       派发只有标签能区分 Map 和普通对象（ADR-0011） */
+    "Map", "Set",
   };
   return names[t];
 }

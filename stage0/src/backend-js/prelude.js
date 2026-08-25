@@ -170,6 +170,11 @@ function $dictSet(m, k, v) { m.set(k, v); return v; }
 // ---------------------------------------------------------------- dynamic
 // 直接用 JS 原生值：null / boolean / BigInt(int) / number(real) / string / Array / Map，
 // 外加两个只由 JS 前端产生的标签（ADR-0011）：undefined，以及函数值（闭包记录）
+//
+// Map 与 Set 的底子也是 Map（键都规范化成带标签的字符串，和 C 侧一样），但标签必须
+// 和普通对象分开 —— o.has(k) 这种成员派发只有标签能区分。所以造两个子类。
+class $JsMap extends Map {}
+class $JsSet extends Map {}
 function $dynTag(v) {
   if (v === null) return "null";
   if (v === undefined) return "undefined";
@@ -179,6 +184,8 @@ function $dynTag(v) {
     case "number": return "real";
     case "string": return "string";
     default:
+      if (v instanceof $JsMap) return "Map";
+      if (v instanceof $JsSet) return "Set";
       if (v instanceof Map) return "dict";
       if (Array.isArray(v)) return "list";
       return "function";  // 闭包记录 { fp, c_* }
@@ -562,25 +569,33 @@ function $js_obj_keys(o) { return [...$js_dict_of(o).keys()]; }
 function $js_obj_values(o) { return [...$js_dict_of(o).values()]; }
 function $js_obj_entries(o) { return [...$js_dict_of(o)].map(([k, v]) => [k, v]); }
 
-function $js_map_new() { return new Map(); }
-function $js_map_size(m) { return $js_dict_of(m).size; }
-function $js_map_has(m, k) { return $js_dict_of(m).has($js_key(k)); }
+function $js_map_of(v) {
+  if ($dynTag(v) !== "Map") $rt_error($dynTag(v) + " is not a Map");
+  return v;
+}
+function $js_set_of(v) {
+  if ($dynTag(v) !== "Set") $rt_error($dynTag(v) + " is not a Set");
+  return v;
+}
+function $js_map_new() { return new $JsMap(); }
+function $js_map_size(m) { return $js_map_of(m).size; }
+function $js_map_has(m, k) { return $js_map_of(m).has($js_key(k)); }
 function $js_map_get(m, k) {
-  const d = $js_dict_of(m), key = $js_key(k);
+  const d = $js_map_of(m), key = $js_key(k);
   return d.has(key) ? d.get(key)[1] : undefined;
 }
-function $js_map_set(m, k, v) { $js_dict_of(m).set($js_key(k), [k, v]); return m; }
-function $js_map_delete(m, k) { return $js_dict_of(m).delete($js_key(k)); }
-function $js_map_keys(m) { return [...$js_dict_of(m).values()].map((p) => p[0]); }
-function $js_map_values(m) { return [...$js_dict_of(m).values()].map((p) => p[1]); }
-function $js_map_entries(m) { return [...$js_dict_of(m).values()]; }
+function $js_map_set(m, k, v) { $js_map_of(m).set($js_key(k), [k, v]); return m; }
+function $js_map_delete(m, k) { return $js_map_of(m).delete($js_key(k)); }
+function $js_map_keys(m) { return [...$js_map_of(m).values()].map((p) => p[0]); }
+function $js_map_values(m) { return [...$js_map_of(m).values()].map((p) => p[1]); }
+function $js_map_entries(m) { return [...$js_map_of(m).values()]; }
 
-function $js_set_new() { return new Map(); }
-function $js_set_size(s) { return $js_dict_of(s).size; }
-function $js_set_has(s, v) { return $js_dict_of(s).has($js_key(v)); }
-function $js_set_add(s, v) { $js_dict_of(s).set($js_key(v), v); return s; }
-function $js_set_delete(s, v) { return $js_dict_of(s).delete($js_key(v)); }
-function $js_set_items(s) { return [...$js_dict_of(s).values()]; }
+function $js_set_new() { return new $JsSet(); }
+function $js_set_size(s) { return $js_set_of(s).size; }
+function $js_set_has(s, v) { return $js_set_of(s).has($js_key(v)); }
+function $js_set_add(s, v) { $js_set_of(s).set($js_key(v), v); return s; }
+function $js_set_delete(s, v) { return $js_set_of(s).delete($js_key(v)); }
+function $js_set_items(s) { return [...$js_set_of(s).values()]; }
 
 // ------------------------------------------- Number / Math / BigInt（ADR-0011）
 // toPrecision 与 toString(radix) 用宿主的即是规范；C 侧照规范复刻了一遍。
@@ -712,6 +727,7 @@ function $js_json_val(v, rep, gap, depth) {
     }
     return first ? "{}" : out + $js_json_nl(gap, depth) + "}";
   }
+  if (t === "Map" || t === "Set") return "{}";
   $rt_error("do not know how to serialize a " + t);
 }
 function $js_json_stringify(v, rep, indent) {

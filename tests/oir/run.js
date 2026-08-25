@@ -264,6 +264,16 @@ c('shas/miss', jsBool('js_set_has', [SET(), str('2')]), `${SETS}.has("2")`);
 c('sdelete', jsBool('js_set_delete', [SET(), str('x')]), `${SETS}.delete("x")`);
 c('sitems', js('js_arr_join', [js('js_set_items', [SET()]), str('|')]), `[...${SETS}].join("|")`);
 
+// 标签分家（普通对象 / Map / Set 三个不同的 DYN 标签）：成员派发要靠标签，但从
+// JS 语义看这三样都还是 "object"，而 JSON.stringify 对 Map/Set 一律给 "{}"。
+c('tag/map-typeof', js('js_typeof', [MAP()]), `typeof ${MAPS}`);
+c('tag/set-typeof', js('js_typeof', [SET()]), `typeof ${SETS}`);
+c('tag/obj-typeof', js('js_typeof', [OBJ()]), `typeof ${OBJS}`);
+c('tag/map-json', js('js_json_stringify', [MAP(), undef, undef]), `JSON.stringify(${MAPS})`);
+c('tag/set-json', js('js_json_stringify', [SET(), undef, undef]), `JSON.stringify(${SETS})`);
+c('tag/map-truthy', jsBool('js_truthy', [MAP()]), `${MAPS} ? true : false`);
+c('tag/map-ne-obj', jsBool('js_eq', [MAP(), OBJ()], { strict: true }), `${MAPS} === ${OBJS}`);
+
 // Number / Math。toPrecision(17) 与 toString(8/16) 是自举的关键路径：编译器自己用它们
 // 把 double 与字节写进生成的 C，差一个字符两代产出就不一样。
 for (const src of ['0', '0.1', '1/3', '-2.5', '1e21', '1e-7', '123456789012345680000', '1.7976931348623157e308']) {
