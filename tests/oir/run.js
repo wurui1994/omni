@@ -104,6 +104,8 @@ c('bit/or', js('js_bitop', [int(0xf0), int(0x0f)], { op: '|' }), '0xf0n | 0x0fn'
 c('bit/xor', js('js_bitop', [int(0xff), int(0x0f)], { op: '^' }), '0xffn ^ 0x0fn');
 c('bit/shl', js('js_bitop', [int(1), int(62)], { op: '<' }), 'BigInt.asIntN(64, 1n << 62n)');
 c('bit/shr', js('js_bitop', [int(-8), int(2)], { op: '>' }), '-8n >> 2n');
+c('bit/not', js('js_bitnot', [int(0x0f)]), '~0x0fn');
+c('bit/not-neg', js('js_bitnot', [int(-1)]), '~-1n');
 
 c('cmp/lt-int', jsBool('js_cmp', [int(1), int(2)], { op: '<' }), '1n < 2n');
 c('cmp/gt-real', jsBool('js_cmp', [real(2.5), real(2.5)], { op: '>' }), '2.5 > 2.5');

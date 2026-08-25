@@ -100,6 +100,27 @@ eval。降级成 `js_run_module(code)`：JS 后端 = `new Function(code)()`，C 
 代价：每个实例都持有自己的方法闭包（内存换简单）。`new Scope()` 这类高频构造会因此变重，
 等不动点成立后再用共享方法表优化。
 
+### 8. JS 的 string 是 **UTF-16 码元序列**，不是 Omni 的 UTF-8 字节串
+
+这条是在盘宿主 ABI 时发现的，而且是必须的，不是洁癖。
+
+Omni 的 `string` 按 UTF-8 字节索引（ADR-0005）；JS 的 `String` 按 UTF-16 码元索引。
+`.length`、`charCodeAt`、`slice`、`indexOf` 全都是码元口径。词法器就是靠下标切源码的，
+而**编译器自己的源码里满是中文注释** —— 一个汉字是 3 个 UTF-8 字节、1 个 UTF-16 码元。
+两个口径下 `lexer` 对同一个文件切出的 token 位置不同，C1 与 node 直接分叉，谈不上不动点。
+
+所以 JS 降级出来的字符串不复用 `omni_str`，而是一个独立的运行时类型：`omni_js_str16`
+（长度 + `uint16_t*`）。字面量在降级时就从源文件的 UTF-8 转成 UTF-16 存进常量表；只有在
+真的要和外界打交道时（写文件、`print`）才转回 UTF-8。
+
+代价：C 侧多一套字符串实现，而且每次 IO 都要转码。**接受** —— 这是"JS 语义"的一部分，
+不是可以省的开销。反过来说也划得来：`charCodeAt` / `slice` 变成 O(1) 的定长索引，
+比在 UTF-8 上模拟码元下标要快也要简单。
+
+`js_*` 的字符串 op 一律收发 `omni_js_str16`；`omni_str` 只出现在 `js_str` 之外的、
+Omni 自己的那半个世界里。两者之间只有两个显式的转换 op：`js_str16_of_utf8` /
+`js_str16_to_utf8`。
+
 ## 落地顺序
 
 1. `dynamic` 扩成完整 JS 值域：函数标签 + 动态调用（实参个数运行期检查）+ `js_*` 运算 op

@@ -143,8 +143,9 @@ omni_str omni_js_str(omni_dyn v);
 omni_dyn omni_js_add(omni_dyn a, omni_dyn b);
 omni_dyn omni_js_arith(int op, omni_dyn a, omni_dyn b);
 omni_dyn omni_js_bitop(int op, omni_dyn a, omni_dyn b);
+omni_dyn omni_js_bitnot(omni_dyn a);
 bool omni_js_cmp(int op, omni_dyn a, omni_dyn b);
-bool omni_js_eq(omni_dyn a, omni_dyn b, bool strict);
+bool omni_js_eq(bool strict, omni_dyn a, omni_dyn b);
 omni_dyn omni_js_neg(omni_dyn a);
 
 /* omni_hash.c —— 键的显示形式，只在 "key not found" 的错误消息里用，都是冷路径 */

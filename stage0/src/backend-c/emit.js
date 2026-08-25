@@ -14,6 +14,7 @@
 
 import { RUNTIME_INCLUDE, amalgamate } from '../runtime/c_runtime.js';
 import { cTypeName, listType, typeKey } from '../hir/types.js';
+import { JS_ABI } from '../hir/js_abi.js';
 
 /** dict/set 的键需要 hash；list.contains 只需要 eq */
 const HASH_FN = { int: 'omni_hash_int', real: 'omni_hash_real', bool: 'omni_hash_bool', string: 'omni_hash_string' };
@@ -497,17 +498,15 @@ class CEmitter {
       // JS 前端的运算语义（ADR-0011）。规则写在 runtime/omni_js.c 里，与 prelude.js 一一对应。
       case 'js_undef': return 'omni_dyn_undef()';
       case 'js_ofFn': return `omni_dyn_of_fn(${a[0]})`;
-      case 'js_asFn': return `omni_js_as_fn(${a[0]})`;
-      case 'js_truthy': return `omni_js_truthy(${a[0]})`;
-      case 'js_typeof': return `omni_js_typeof(${a[0]})`;
-      case 'js_str': return `omni_js_str(${a[0]})`;
-      case 'js_add': return `omni_js_add(${a[0]}, ${a[1]})`;
-      case 'js_neg': return `omni_js_neg(${a[0]})`;
-      case 'js_arith': return `omni_js_arith('${e.op}', ${a[0]}, ${a[1]})`;
-      case 'js_bitop': return `omni_js_bitop('${e.op}', ${a[0]}, ${a[1] ?? a[0]})`;
-      case 'js_cmp': return `omni_js_cmp('${e.op}', ${a[0]}, ${a[1]})`;
-      case 'js_eq': return `omni_js_eq(${a[0]}, ${a[1]}, ${e.strict === true})`;
-      default: throw new Error(`c.builtin: ${e.name}`);
+      default: {
+        const abi = JS_ABI[e.name];
+        if (!abi) throw new Error(`c.builtin: ${e.name}`);
+        const lits = (abi.lit ?? []).map((k) => {
+          const v = e[k];
+          return typeof v === 'string' ? `'${v}'` : String(v === true);
+        });
+        return `${abi.c}(${[...lits, ...a].join(', ')})`;
+      }
     }
   }
 }

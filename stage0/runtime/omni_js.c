@@ -180,12 +180,19 @@ omni_dyn omni_js_bitop(int op, omni_dyn a, omni_dyn b) {
     case '&': return omni_dyn_of_int(a.u.i & b.u.i);
     case '|': return omni_dyn_of_int(a.u.i | b.u.i);
     case '^': return omni_dyn_of_int(a.u.i ^ b.u.i);
-    case '~': return omni_dyn_of_int(~a.u.i);
     case '<': return omni_dyn_of_int(omni_shl(a.u.i, b.u.i));
     case '>': return omni_dyn_of_int(omni_shr(a.u.i, b.u.i));
     default: omni_errorf("unknown bitwise op '%c'", op);
   }
   return omni_dyn_null();
+}
+
+/* 一元 ~ 单独一个 op：ABI 里所有 op 的实参个数是定的，不做可变长 */
+omni_dyn omni_js_bitnot(omni_dyn a) {
+  if (a.tag != OMNI_DYN_INT) {
+    omni_errorf("bitwise '~' requires a bigint operand, found %s", omni_dyn_tag_name(a.tag));
+  }
+  return omni_dyn_of_int(~a.u.i);
 }
 
 /* ---------------------------------------------------------------- 比较 */
@@ -213,7 +220,7 @@ bool omni_js_cmp(int op, omni_dyn a, omni_dyn b) {
   return false;
 }
 
-bool omni_js_eq(omni_dyn a, omni_dyn b, bool strict) {
+bool omni_js_eq(bool strict, omni_dyn a, omni_dyn b) {
   if (!strict) {
     /* == 的强制转换只保留编译器源码真正会用到的两条：
        null 与 undefined 互等；bigint 与 number 按数值比 */

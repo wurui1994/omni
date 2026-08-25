@@ -275,18 +275,23 @@ function $js_neg(a) {
 }
 function $js_bitop(op, a, b) {
   const ta = $dynTag(a), tb = $dynTag(b);
-  if (ta !== "int" || (op !== "~" && tb !== "int")) {
+  if (ta !== "int" || tb !== "int") {
     $rt_error("bitwise '" + op + "' requires bigint operands, found " + ta + " and " + tb);
   }
   switch (op) {
     case "&": return a & b;
     case "|": return a | b;
     case "^": return a ^ b;
-    case "~": return $W(~a);
     case "<": return $W(a << (b & 63n));
     case ">": return a >> (b & 63n);
     default: $rt_error("unknown bitwise op '" + op + "'");
   }
+}
+// 一元 ~ 单独一个 op：ABI 里所有 op 的实参个数是定的，不做可变长
+function $js_bitnot(a) {
+  const t = $dynTag(a);
+  if (t !== "int") $rt_error("bitwise '~' requires a bigint operand, found " + t);
+  return $W(~a);
 }
 function $js_cmp(op, a, b) {
   const ta = $dynTag(a), tb = $dynTag(b);
@@ -309,7 +314,8 @@ function $js_cmp(op, a, b) {
     default: $rt_error("unknown comparison op '" + op + "'");
   }
 }
-function $js_eq(a, b, strict) {
+// 编译期常量参数排在实参前面，整张 ABI 表都是这个约定（hir/js_abi.js）
+function $js_eq(strict, a, b) {
   const ta = $dynTag(a), tb = $dynTag(b);
   if (!strict) {
     const an = ta === "null" || ta === "undefined";

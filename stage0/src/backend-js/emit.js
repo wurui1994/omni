@@ -11,6 +11,7 @@
 
 import { JS_PRELUDE } from './prelude.js';
 import { typeKey } from '../hir/types.js';
+import { JS_ABI } from '../hir/js_abi.js';
 
 class JsEmitter {
   constructor(mod) {
@@ -297,21 +298,20 @@ class JsEmitter {
       case 'dynPush': return `$dynPush(${a[0]}, ${a[1]})`;
       case 'dynHas': return `$dynHas(${a[0]}, ${a[1]})`;
       case 'dynKeys': return `$dynKeys(${a[0]})`;
-      // JS 前端的运算语义（ADR-0011）。这些 op 只由 frontend-js/lower.js 产生，
+      // JS 前端的运算语义与宿主库（ADR-0011）。这些 op 只由 frontend-js/lower.js 产生，
       // Omni 源码里造不出来 —— truthiness 与 `+` 的双重含义不属于 Omni 语言。
+      // 这两个不是函数调用，单列；其余一律走 JS_ABI 表，加 op 不用改这里。
       case 'js_undef': return 'undefined';
       case 'js_ofFn': return a[0];
-      case 'js_asFn': return `$js_asFn(${a[0]})`;
-      case 'js_truthy': return `$js_truthy(${a[0]})`;
-      case 'js_typeof': return `$js_typeof(${a[0]})`;
-      case 'js_str': return `$js_str(${a[0]})`;
-      case 'js_add': return `$js_add(${a[0]}, ${a[1]})`;
-      case 'js_neg': return `$js_neg(${a[0]})`;
-      case 'js_arith': return `$js_arith(${JSON.stringify(e.op)}, ${a[0]}, ${a[1]})`;
-      case 'js_bitop': return `$js_bitop(${JSON.stringify(e.op)}, ${a[0]}${a[1] === undefined ? '' : `, ${a[1]}`})`;
-      case 'js_cmp': return `$js_cmp(${JSON.stringify(e.op)}, ${a[0]}, ${a[1]})`;
-      case 'js_eq': return `$js_eq(${a[0]}, ${a[1]}, ${e.strict === true})`;
-      default: throw new Error(`js.builtin: ${e.name}`);
+      default: {
+        const abi = JS_ABI[e.name];
+        if (!abi) throw new Error(`js.builtin: ${e.name}`);
+        const lits = (abi.lit ?? []).map((k) => {
+          const v = e[k];
+          return typeof v === 'string' ? JSON.stringify(v) : String(v === true);
+        });
+        return `${abi.js}(${[...lits, ...a].join(', ')})`;
+      }
     }
   }
 }
