@@ -422,6 +422,8 @@ class CEmitter {
       case 'byteAt': return `omni_byte_at(${a[0]}, ${a[1]})`;
       case 'substr': return `omni_substr(${a[0]}, ${a[1]}, ${a[2]})`;
       case 'indexOf': return `omni_index_of(${a[0]}, ${a[1]})`;
+      // list<string>.join：直接把条目数组交给运行时，一次算总长一次分配
+      case 'join': return `omni_str_join(${a[0]}->items, ${a[0]}->len, ${a[1]})`;
       case 'tag': return `omni_dyn_tag(${a[0]})`;
       case 'asInt': return `omni_dyn_as_int(${a[0]})`;
       case 'asReal': return `omni_dyn_as_real(${a[0]})`;

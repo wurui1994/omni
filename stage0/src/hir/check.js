@@ -895,6 +895,9 @@ class Checker {
     if (sig.requireEq && !EQUATABLE.has(sig.requireEq.k)) {
       this.err(span, `'${typeName(recvType)}.${name}' requires an element type with equality, found '${typeName(sig.requireEq)}'`);
     }
+    if (sig.requireKind && sig.requireKind.type.k !== sig.requireKind.kind) {
+      this.err(span, `'${typeName(recvType)}.${name}' requires '${sig.requireKind.kind}' elements, found '${typeName(sig.requireKind.type)}'`);
+    }
     if (sig.ret.k === 'list' || sig.ret.k === 'dict' || sig.ret.k === 'set') this.useType(sig.ret);
     // dynamic 的运行期分派需要 list<dynamic> / dict<string,dynamic> 这两个具体容器兜底
     if (recvType.k === 'dynamic') {
@@ -1073,6 +1076,9 @@ const BUILTIN_METHODS = {
     clear: () => ({ params: [], ret: VOID }),
     length: () => ({ params: [], ret: INT, op: 'len' }),
     contains: (t) => ({ params: [t.elem], ret: BOOL, requireEq: t.elem }),
+    // 一次算总长、一次分配。编译器最热的形态就是 out.push(片段) 然后 join，
+    // 逐个 + 起来即使有 arena 的原地追加快路径，也要多走 n 次调用和 n 次长度检查。
+    join: (t) => ({ params: [STRING], ret: STRING, requireKind: { type: t.elem, kind: 'string' } }),
   },
   dict: {
     has: (t) => ({ params: [t.key], ret: BOOL, op: 'contains' }),

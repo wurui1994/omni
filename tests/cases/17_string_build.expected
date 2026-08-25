@@ -1,0 +1,24 @@
+exit 0
+--- stdout ---
+400
+200
+true
+true
+97
+98
+100
+xxxxx
+100
+noise99
+hello world
+hello
+hello!!!
+5
+a,bb,ccc
+abbccc
+a -> bb -> ccc
+solo
+true
+8
+a,bb,ccc|a;bb;ccc
+--- stderr ---

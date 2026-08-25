@@ -50,15 +50,52 @@ OMNI_NORETURN void omni_errorf(const char *fmt, ...);
 OMNI_NORETURN void omni_fail(omni_str msg);
 
 /* omni_mem.c */
-void *omni_alloc(size_t n);
-void *omni_realloc(void *p, size_t n);
 void *omni_nullck(void *p);
+/* 增长：调用方必须传旧字节数 —— arena 不给每次分配加尺寸头（小对象上太贵），
+   所以尺寸只能由知道它的容器代码传进来。语义等价于 realloc。 */
+void *omni_grow(void *p, size_t oldBytes, size_t newBytes);
+
+/* ---------------------------------------------------------------- 分配器
+ * arena（bump 指针）。理由见 omni_mem.c 的文件头。分配是整个运行时最热的函数，
+ * 所以快路径必须内联；慢路径（开新块）在 .c 里。
+ * -DOMNI_NO_ARENA 换成一次一个 malloc：ASan 才能看见容器越界，消毒扫描走那条。
+ */
+#define OMNI_ALIGN 16
+
+#ifdef OMNI_NO_ARENA
+void *omni_alloc(size_t n);
+char *omni_alloc_bytes(int64_t n);
+#else
+extern char *omni_arena_ptr;
+extern char *omni_arena_end;
+void *omni_alloc_slow(size_t n);
+char *omni_alloc_bytes_slow(int64_t n);
+
+/* 对齐的分配，给结构体和容器用 */
+static inline void *omni_alloc(size_t n) {
+  char *p = (char *)(((uintptr_t)omni_arena_ptr + (OMNI_ALIGN - 1)) & ~(uintptr_t)(OMNI_ALIGN - 1));
+  if (p > omni_arena_end || n > (size_t)(omni_arena_end - p)) return omni_alloc_slow(n);
+  omni_arena_ptr = p + n;
+  return p;
+}
+
+/* 不对齐的分配，给字符串用：字符串是字节序列，不需要对齐，而且不对齐才能让
+   omni_str_cat 的"在 arena 顶上原地追加"命中（见 omni_str.c） */
+static inline char *omni_alloc_bytes(int64_t n) {
+  if (n < 0) omni_error("negative allocation");
+  if ((size_t)n > (size_t)(omni_arena_end - omni_arena_ptr)) return omni_alloc_bytes_slow(n);
+  char *p = omni_arena_ptr;
+  omni_arena_ptr = p + n;
+  return p;
+}
+#endif
 
 /* omni_int.c */
 int64_t omni_trunc(double v);
 
 /* omni_str.c */
 omni_str omni_str_cat(omni_str a, omni_str b);
+omni_str omni_str_join(const omni_str *items, int64_t n, omni_str sep);
 omni_str omni_str_fmt(const char *fmt, ...);
 int64_t omni_index_of(omni_str s, omni_str needle);
 omni_str omni_chr(int64_t cp);

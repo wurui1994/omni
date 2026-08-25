@@ -1,0 +1,56 @@
+// 字符串拼接：`acc = acc + x` 在循环里必须是 O(n) 摊还，不能是 O(n²)。
+// C 侧靠 arena 的"最后一次分配可以原地长大"实现（omni_str.c 的 omni_str_cat）。
+// 这个用例测的是那条快路径的**正确性**，尤其是别名安全：原地追加只写 acc 结尾之后
+// 那段没分配过的字节，所以任何还持有旧串的人看到的内容必须完全不变。
+
+string acc = "";
+string snap = "";
+int i = 0;
+while (i < 200) {
+  acc = acc + "ab";
+  if (i == 99) { snap = acc; }   // 在这里抓一份，后面继续往 acc 上追加
+  i = i + 1;
+}
+print(acc.length);
+print(snap.length);
+print(snap == "ababababab" + "ababababab" + "ababababab" + "ababababab" + "ababababab" + "ababababab" + "ababababab" + "ababababab" + "ababababab" + "ababababab" + "ababababab" + "ababababab" + "ababababab" + "ababababab" + "ababababab" + "ababababab" + "ababababab" + "ababababab" + "ababababab" + "ababababab");
+print(acc.substr(0, 200) == snap);
+print(acc.byteAt(0));
+print(acc.byteAt(399));
+
+// 中间插入别的分配：快路径会失手，走"新分配 + 拷贝"那条，结果必须一样
+string mixed = "";
+list<string> junk = [];
+int j = 0;
+while (j < 100) {
+  mixed = mixed + "x";
+  junk.push("noise" + string(j));   // 打断 arena 顶部，让 mixed 不再是最后一次分配
+  j = j + 1;
+}
+print(mixed.length);
+print(mixed.substr(0, 5));
+print(junk.length);
+print(junk[99]);
+
+// substr 是别名切片，在它后面追加不能改坏原串
+string base = "hello world";
+string head = base.substr(0, 5);
+string grown = head + "!!!";
+print(base);
+print(head);
+print(grown);
+print(head.length);
+
+// join：一次算总长、一次分配。空表 / 单元素 / 空分隔符都要对
+list<string> parts = ["a", "bb", "ccc"];
+print(parts.join(","));
+print(parts.join(""));
+print(parts.join(" -> "));
+list<string> one = ["solo"];
+print(one.join(","));
+list<string> none = [];
+print(none.join(",") == "");
+print(parts.join(",").length);
+
+// join 的结果继续参与拼接
+print(parts.join(",") + "|" + parts.join(";"));

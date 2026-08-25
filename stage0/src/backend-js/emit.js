@@ -265,6 +265,7 @@ class JsEmitter {
       case 'byteAt': return `$byteAt(${a[0]}, ${a[1]})`;
       case 'substr': return `$substr(${a[0]}, ${a[1]}, ${a[2]})`;
       case 'indexOf': return `$indexOf(${a[0]}, ${a[1]})`;
+      case 'join': return `${a[0]}.join(${a[1]})`;
       case 'tag': return `$dynTag(${a[0]})`;
       case 'asInt': return `$dynAs(${a[0]}, "int")`;
       case 'asReal': return `$dynAs(${a[0]}, "real")`;

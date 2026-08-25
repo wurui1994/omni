@@ -29,7 +29,7 @@ static void NAME##_reserve(NAME a, int64_t n) { \
   if (n <= a->cap) return; \
   int64_t c = a->cap ? a->cap * 2 : 4; \
   while (c < n) c *= 2; \
-  a->items = (T *)omni_realloc(a->items, sizeof(T) * (size_t)c); \
+  a->items = (T *)omni_grow(a->items, sizeof(T) * (size_t)a->cap, sizeof(T) * (size_t)c); \
   a->cap = c; \
 } \
 static void NAME##_push(NAME a, T v) { NAME##_reserve(a, a->len + 1); a->items[a->len++] = v; } \
@@ -103,7 +103,7 @@ static void NAME##_rebuild(NAME d) { \
   d->n = w; \
   int64_t ic = d->icap ? d->icap : 8; \
   while (ic < (d->n + 1) * 2) ic *= 2; \
-  d->idx = (int64_t *)omni_realloc(d->idx, sizeof(int64_t) * (size_t)ic); \
+  d->idx = (int64_t *)omni_alloc(sizeof(int64_t) * (size_t)ic); \
   d->icap = ic; \
   for (int64_t i = 0; i < ic; i++) d->idx[i] = 0; \
   uint64_t mask = (uint64_t)ic - 1; \
@@ -120,9 +120,9 @@ static VT NAME##_set(NAME d, KT k, VT v) { \
   if (e >= 0) { d->vals[e] = v; return v; } \
   if (d->n + 1 > d->cap) { \
     int64_t c = d->cap ? d->cap * 2 : 4; \
-    d->keys = (KT *)omni_realloc(d->keys, sizeof(KT) * (size_t)c); \
-    d->vals = (VT *)omni_realloc(d->vals, sizeof(VT) * (size_t)c); \
-    d->live = (bool *)omni_realloc(d->live, sizeof(bool) * (size_t)c); \
+    d->keys = (KT *)omni_grow(d->keys, sizeof(KT) * (size_t)d->cap, sizeof(KT) * (size_t)c); \
+    d->vals = (VT *)omni_grow(d->vals, sizeof(VT) * (size_t)d->cap, sizeof(VT) * (size_t)c); \
+    d->live = (bool *)omni_grow(d->live, sizeof(bool) * (size_t)d->cap, sizeof(bool) * (size_t)c); \
     d->cap = c; \
   } \
   if ((d->n + 1) * 2 > d->icap) NAME##_rebuild(d); \
@@ -200,7 +200,7 @@ static void NAME##_rebuild(NAME d) { \
   d->n = w; \
   int64_t ic = d->icap ? d->icap : 8; \
   while (ic < (d->n + 1) * 2) ic *= 2; \
-  d->idx = (int64_t *)omni_realloc(d->idx, sizeof(int64_t) * (size_t)ic); \
+  d->idx = (int64_t *)omni_alloc(sizeof(int64_t) * (size_t)ic); \
   d->icap = ic; \
   for (int64_t i = 0; i < ic; i++) d->idx[i] = 0; \
   uint64_t mask = (uint64_t)ic - 1; \
@@ -216,8 +216,8 @@ static void NAME##_add(NAME d, T k) { \
   if (NAME##_find(d, k) >= 0) return; \
   if (d->n + 1 > d->cap) { \
     int64_t c = d->cap ? d->cap * 2 : 4; \
-    d->keys = (T *)omni_realloc(d->keys, sizeof(T) * (size_t)c); \
-    d->live = (bool *)omni_realloc(d->live, sizeof(bool) * (size_t)c); \
+    d->keys = (T *)omni_grow(d->keys, sizeof(T) * (size_t)d->cap, sizeof(T) * (size_t)c); \
+    d->live = (bool *)omni_grow(d->live, sizeof(bool) * (size_t)d->cap, sizeof(bool) * (size_t)c); \
     d->cap = c; \
   } \
   if ((d->n + 1) * 2 > d->icap) NAME##_rebuild(d); \

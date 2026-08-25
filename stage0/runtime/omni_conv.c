@@ -14,7 +14,6 @@ int64_t omni_int_of_string(omni_str s) {
   char *end = NULL;
   long long v = strtoll(c, &end, 10);
   if (errno == ERANGE || *end) omni_errorf("invalid integer: \"%.*s\"", (int)s.len, s.p);
-  free(c);
   return (int64_t)v;
 }
 
@@ -39,6 +38,5 @@ double omni_real_of_string(omni_str s) {
   if (!ok || i != s.len) omni_errorf("invalid real: \"%.*s\"", (int)s.len, s.p);
   char *c = omni_cstr(s);
   double v = strtod(c, NULL);
-  free(c);
   return v;
 }
