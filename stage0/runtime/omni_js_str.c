@@ -119,8 +119,14 @@ bool omni_js_str_includes(omni_dyn s, omni_dyn needle) {
   return omni_s16_index_of(want_s16(s), want_s16(needle), 0) >= 0;
 }
 
-bool omni_js_str_starts_with(omni_dyn s, omni_dyn pre) {
-  return omni_s16_starts_with(want_s16(s), want_s16(pre));
+/* startsWith 的第二个实参（起始位置）是必需的：词法器的标点匹配就靠它
+   （`PUNCT.find((op) => src.startsWith(op, i))`），而且在热路径上。 */
+bool omni_js_str_starts_with(omni_dyn s, omni_dyn pre, omni_dyn pos) {
+  omni_s16 v = want_s16(s);
+  int64_t at = to_int_arg(pos, 0);
+  if (at < 0) at = 0;
+  if (at > v.len) at = v.len;
+  return omni_s16_starts_with(omni_s16_slice(v, at, v.len), want_s16(pre));
 }
 
 bool omni_js_str_ends_with(omni_dyn s, omni_dyn suf) {

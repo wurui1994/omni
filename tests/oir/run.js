@@ -183,7 +183,10 @@ c('sindexOf/from', js('js_str_index_of', [str('aXaX'), str('X'), real(2)]), '"aX
 c('sindexOf/miss', js('js_str_index_of', [str(CN), str('z'), undef]), `${q(CN)}.indexOf("z")`);
 c('slastIndexOf', js('js_str_last_index_of', [str('aXaX'), str('X')]), '"aXaX".lastIndexOf("X")');
 c('sincludes', jsBool('js_str_includes', [str(CN), str('文a')]), `${q(CN)}.includes("文a")`);
-c('sstarts', jsBool('js_str_starts_with', [str(CN), str('中')]), `${q(CN)}.startsWith("中")`);
+c('sstarts', jsBool('js_str_starts_with', [str(CN), str('中'), undef]), `${q(CN)}.startsWith("中")`);
+c('sstarts/at', jsBool('js_str_starts_with', [str(CN), str('文'), real(1)]), `${q(CN)}.startsWith("文", 1)`);
+c('sstarts/at-miss', jsBool('js_str_starts_with', [str(CN), str('中'), real(1)]), `${q(CN)}.startsWith("中", 1)`);
+c('sstarts/at-end', jsBool('js_str_starts_with', [str(CN), str(''), real(99)]), `${q(CN)}.startsWith("", 99)`);
 c('sends', jsBool('js_str_ends_with', [str(CN), str('bc')]), `${q(CN)}.endsWith("bc")`);
 c('scmp/lt', jsBool('js_cmp', [str('abc'), str('abd')], { op: '<' }), '"abc" < "abd"');
 c('scmp/cn', jsBool('js_cmp', [str('中'), str('文')], { op: '<' }), '"中" < "文"');

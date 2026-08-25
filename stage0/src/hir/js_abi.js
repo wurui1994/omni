@@ -52,7 +52,7 @@ export const JS_ABI = {
   js_str_index_of: { js: '$js_str_index_of', c: 'omni_js_str_index_of', arity: 3 },
   js_str_last_index_of: { js: '$js_str_last_index_of', c: 'omni_js_str_last_index_of', arity: 2 },
   js_str_includes: { js: '$js_str_includes', c: 'omni_js_str_includes', arity: 2 },
-  js_str_starts_with: { js: '$js_str_starts_with', c: 'omni_js_str_starts_with', arity: 2 },
+  js_str_starts_with: { js: '$js_str_starts_with', c: 'omni_js_str_starts_with', arity: 3 },
   js_str_ends_with: { js: '$js_str_ends_with', c: 'omni_js_str_ends_with', arity: 2 },
   js_str_of_char_code: { js: '$js_str_of_char_code', c: 'omni_js_str_of_char_code', arity: 1 },
   js_str_of_code_point: { js: '$js_str_of_code_point', c: 'omni_js_str_of_code_point', arity: 1 },

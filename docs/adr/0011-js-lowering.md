@@ -133,6 +133,25 @@ Omni 自己的那半个世界里。两者之间只有两个显式的转换 op：
 
 每一步的出口条件与既有规矩一致：js/c 双后端差分全绿 + oracle（对照 node）+ 快照更新。
 
+## 已量过的宿主面
+
+盘过一遍才发现几处必须改设计的地方，记在这里免得下一刀又按猜的做：
+
+- **`startsWith` 有两实参形式**（`src.startsWith(op, i)`，两个词法器的标点匹配都用它，在热
+  路径上）。ABI 里 `js_str_starts_with` 因此收三个参数，不是两个。
+- **有两张 Map 用数字键**：`Map<number, Set<number>>`，模块 id -> 它导入的模块 id
+  （`module/load.js` 与 `hir/check.js` 各一处）。其余 Map 全是字符串键，没有对象键，
+  没有 `WeakMap`/`WeakSet`。所以 Map 不能直接摊成 `dict<string, dynamic>` —— 键要先
+  规范化成带标签的字符串（`n:1` / `s:foo`），并且把原键存下来供 `.keys()` 返回。
+- **`substring` / `substr` / `replaceAll` / `trimStart` 一次都没用**，不进 ABI。
+- **`replace` 的模式全是正则**，没有一次是字符串；替换串里**没有任何 `$1`**；只有两处用
+  回调（都是 `gm` + 一个捕获组）。`split` 只有一处用正则（还带 limit=2，在 REPL 里）。
+- **字符串负下标只有三处**，都是 `op.slice(0, -1)`（把复合赋值的 `=` 削掉）。
+
+碰容器的 op（`split` / `join` / `Object.keys` / 数组那一批）**不能放在运行时的 .c 里**：
+`list<dynamic>` 与 `dict<string, dynamic>` 是生成 TU 里的宏实例，运行时的翻译单元看不见
+它们。这批只能像 `omni_dyn_bridge.h` 那样长在宏里，在生成的文件里展开。
+
 ## 已知风险
 
 - **正则**原以为是最大的一块未知，用自己的 JS 词法器数完之后反而是最小的一块：49 个字面量，

@@ -198,7 +198,7 @@ omni_dyn omni_js_str_upper(omni_dyn s);
 omni_dyn omni_js_str_index_of(omni_dyn s, omni_dyn needle, omni_dyn from);
 omni_dyn omni_js_str_last_index_of(omni_dyn s, omni_dyn needle);
 bool omni_js_str_includes(omni_dyn s, omni_dyn needle);
-bool omni_js_str_starts_with(omni_dyn s, omni_dyn pre);
+bool omni_js_str_starts_with(omni_dyn s, omni_dyn pre, omni_dyn pos);
 bool omni_js_str_ends_with(omni_dyn s, omni_dyn suf);
 omni_dyn omni_js_str_of_char_code(omni_dyn u);
 omni_dyn omni_js_str_of_code_point(omni_dyn cp);

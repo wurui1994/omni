@@ -394,7 +394,10 @@ function $js_str_last_index_of(s, needle) {
   return $js_asS16(s).lastIndexOf($js_asS16(needle));
 }
 function $js_str_includes(s, needle) { return $js_asS16(s).includes($js_asS16(needle)); }
-function $js_str_starts_with(s, pre) { return $js_asS16(s).startsWith($js_asS16(pre)); }
+// 第二个实参是起始位置：词法器的标点匹配靠它，而且在热路径上
+function $js_str_starts_with(s, pre, pos) {
+  return $js_asS16(s).startsWith($js_asS16(pre), $js_idx(pos, 0));
+}
 function $js_str_ends_with(s, suf) { return $js_asS16(s).endsWith($js_asS16(suf)); }
 // 变长的 fromCharCode / fromCodePoint 由降级拆成多次 js_add，这里只收一个实参
 function $js_str_of_char_code(u) { return String.fromCharCode($js_idx(u, 0)); }
