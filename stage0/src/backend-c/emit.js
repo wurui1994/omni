@@ -180,6 +180,9 @@ class CEmitter {
     const names = new Set(containers.map((t) => cTypeName(t)));
     if (names.has('omni_list_dynamic') && names.has('omni_dict_string_dynamic')) {
       this.line('OMNI_DYN_BRIDGE(omni_list_dynamic, omni_dict_string_dynamic)');
+      // JS 宿主库里碰容器的那批 op（ADR-0011）。同一个理由：要具体的容器类型，
+      // 所以只能在这两个实例化之后展开。
+      this.line('OMNI_JS_ARR(omni_list_dynamic, omni_dict_string_dynamic)');
     }
   }
 

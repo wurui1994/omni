@@ -346,5 +346,6 @@ static inline bool omni_eq_ref(void *a, void *b) { return a == b; }
 
 #include "omni_container.h"
 #include "omni_dyn_bridge.h"
+#include "omni_js_arr.h"
 
 #endif /* OMNI_H */

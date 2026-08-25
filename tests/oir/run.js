@@ -19,6 +19,7 @@ import { spawnSync } from 'node:child_process';
 import { emitJs } from '../../stage0/src/backend-js/emit.js';
 import { emitC } from '../../stage0/src/backend-c/emit.js';
 import { runtimeSources, RUNTIME_DIR } from '../../stage0/src/runtime/c_runtime.js';
+import { listType, dictType } from '../../stage0/src/hir/types.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
@@ -57,7 +58,9 @@ function moduleOf(exprs) {
   return {
     structs: [],
     classes: [],
-    containers: [],
+    // 这三个实例化是 OMNI_DYN_BRIDGE 与 OMNI_JS_ARR 的发射条件（见 backend-c 的 dynBridge）。
+    // list<string> 是被 dict 的 _keys 拖进来的 —— 真实程序里检查器会替我们登记。
+    containers: [listType(S), listType(D), dictType(S, D)],
     closures: [],
     fnTypes: [],
     funcs: [{
@@ -193,6 +196,39 @@ c('scmp/cn', jsBool('js_cmp', [str('中'), str('文')], { op: '<' }), '"中" < "
 c('seq/cn', jsBool('js_eq', [str(CN), str('中文abc')], { strict: true }), `${q(CN)} === "中文abc"`);
 c('sfromCharCode', js('js_str_of_char_code', [real(0x4e2d)]), 'String.fromCharCode(0x4e2d)');
 c('sfromCodePoint', js('js_str_of_code_point', [real(0x1f600)]), 'String.fromCodePoint(0x1f600)');
+
+// Array。手搭 OIR 造不出闭包，所以这一轮先验不带回调的那些；带回调的（map/filter/sort）
+// 等 lower.js 能产出闭包之后一起验。
+const arr = (...items) => box({ kind: 'ListLit', type: listType(D), items });
+const A = () => arr(real(3), real(1), real(2));
+const AS = '[3, 1, 2]';
+c('alen', js('js_arr_len', [A()]), `${AS}.length`);
+c('alen/empty', js('js_arr_len', [arr()]), '[].length');
+for (const i of [-1, 0, 2, 3]) {
+  c(`aget/${i}`, js('js_arr_get', [A(), real(i)]), `${AS}[${i}]`);
+}
+c('apop', js('js_arr_pop', [A()]), `${AS}.pop()`);
+c('apop/empty', js('js_arr_pop', [arr()]), '[].pop()');
+c('apush', js('js_arr_push', [A(), real(9)]), `${AS}.push(9)`);
+c('ajoin', js('js_arr_join', [A(), str('-')]), `${AS}.join("-")`);
+c('ajoin/dflt', js('js_arr_join', [A(), undef]), `${AS}.join()`);
+c('ajoin/holes', js('js_arr_join', [arr(real(1), nul, undef, str('x')), str(',')]), '[1, null, undefined, "x"].join(",")');
+c('ajoin/empty', js('js_arr_join', [arr(), str('-')]), '[].join("-")');
+c('aslice', js('js_arr_join', [js('js_arr_slice', [A(), real(1), real(3)]), str(',')]), `${AS}.slice(1, 3).join(",")`);
+c('aslice/neg', js('js_arr_join', [js('js_arr_slice', [A(), real(-2), undef]), str(',')]), `${AS}.slice(-2).join(",")`);
+c('aconcat', js('js_arr_join', [js('js_arr_concat', [A(), arr(real(7))]), str(',')]), `${AS}.concat([7]).join(",")`);
+c('areverse', js('js_arr_join', [js('js_arr_reverse', [A()]), str(',')]), `${AS}.reverse().join(",")`);
+c('afill', js('js_arr_join', [js('js_arr_fill', [A(), real(0)]), str(',')]), `${AS}.fill(0).join(",")`);
+c('afrom', js('js_arr_join', [js('js_arr_from', [A()]), str(',')]), `Array.from(${AS}).join(",")`);
+c('aisArray', jsBool('js_arr_is_array', [A()]), `Array.isArray(${AS})`);
+c('aisArray/no', jsBool('js_arr_is_array', [real(1)]), 'Array.isArray(1)');
+c('aindexOf', js('js_arr_index_of', [A(), real(2)]), `${AS}.indexOf(2)`);
+c('aindexOf/miss', js('js_arr_index_of', [A(), real(8)]), `${AS}.indexOf(8)`);
+c('alastIndexOf', js('js_arr_last_index_of', [arr(real(1), real(2), real(1)), real(1)]), '[1, 2, 1].lastIndexOf(1)');
+c('aincludes', jsBool('js_arr_includes', [A(), real(1)]), `${AS}.includes(1)`);
+c('aincludes/nan', jsBool('js_arr_includes', [arr(real(NaN)), real(NaN)]), '[NaN].includes(NaN)');
+c('aindexOf/nan', js('js_arr_index_of', [arr(real(NaN)), real(NaN)]), '[NaN].indexOf(NaN)');
+
 
 // ---------------------------------------------------------------- 跑
 function run(cmd, args, opts = {}) {

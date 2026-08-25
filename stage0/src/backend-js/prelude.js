@@ -403,6 +403,119 @@ function $js_str_ends_with(s, suf) { return $js_asS16(s).endsWith($js_asS16(suf)
 function $js_str_of_char_code(u) { return String.fromCharCode($js_idx(u, 0)); }
 function $js_str_of_code_point(cp) { return String.fromCodePoint($js_idx(cp, 0)); }
 
+// ------------------------------------------------- JS 的 Array（ADR-0011）
+// 宿主的 Array 就是 Omni 的 list<dynamic>，所以这些也几乎都是一行。
+// 回调按统一签名调用：JS 函数在 Omni 里只有 fn(list<dynamic>) -> dynamic 一种。
+function $js_arr_of(v) {
+  if ($dynTag(v) !== "list") $rt_error($dynTag(v) + " is not an array");
+  return v;
+}
+function $js_call3(f, x, i, self) { return $callFn(f, [x, i, self]); }
+function $js_arr_new() { return []; }
+function $js_arr_len(a) { return $js_arr_of(a).length; }
+function $js_arr_get(a, i) {
+  const l = $js_arr_of(a), k = $js_idx(i, 0);
+  return k < 0 || k >= l.length ? undefined : l[k];
+}
+function $js_arr_set(a, i, v) {
+  const l = $js_arr_of(a), k = $js_idx(i, 0);
+  if (k < 0) $rt_error("negative array index " + k);
+  while (l.length < k) l.push(undefined);
+  l[k] = v;
+}
+function $js_arr_push(a, v) { return $js_arr_of(a).push(v); }
+function $js_arr_pop(a) { return $js_arr_of(a).pop(); }
+function $js_arr_slice(a, s, e) {
+  const l = $js_arr_of(a);
+  return l.slice($js_idx(s, 0), $js_idx(e, l.length));
+}
+function $js_arr_concat(a, b) { return $js_arr_of(a).concat($js_arr_of(b)); }
+function $js_arr_reverse(a) { $js_arr_of(a).reverse(); return a; }
+function $js_arr_fill(a, v) { $js_arr_of(a).fill(v); return a; }
+function $js_arr_is_array(v) { return $dynTag(v) === "list"; }
+function $js_arr_from(v) { return $js_arr_of(v).slice(); }
+function $js_arr_index_of(a, v) { return $js_arr_of(a).findIndex((x) => $js_eq(true, x, v)); }
+function $js_arr_last_index_of(a, v) {
+  const l = $js_arr_of(a);
+  for (let i = l.length - 1; i >= 0; i--) if ($js_eq(true, l[i], v)) return i;
+  return -1;
+}
+function $js_arr_includes(a, v) {
+  const l = $js_arr_of(a);
+  const nan = typeof v === "number" && Number.isNaN(v);
+  for (const x of l) {
+    if (nan ? (typeof x === "number" && Number.isNaN(x)) : $js_eq(true, x, v)) return true;
+  }
+  return false;
+}
+function $js_arr_join(a, sep) {
+  const s = sep === undefined ? "," : $js_asS16(sep);
+  let out = "";
+  const l = $js_arr_of(a);
+  for (let i = 0; i < l.length; i++) {
+    if (i) out += s;
+    const x = l[i];
+    if (x === null || x === undefined) continue;
+    out += $js_str(x);
+  }
+  return out;
+}
+function $js_arr_map(a, f) { return $js_arr_of(a).map((x, i) => $js_call3(f, x, i, a)); }
+function $js_arr_filter(a, f) {
+  return $js_arr_of(a).filter((x, i) => $js_truthy($js_call3(f, x, i, a)));
+}
+function $js_arr_for_each(a, f) { $js_arr_of(a).forEach((x, i) => { $js_call3(f, x, i, a); }); }
+function $js_arr_some(a, f) {
+  return $js_arr_of(a).some((x, i) => $js_truthy($js_call3(f, x, i, a)));
+}
+function $js_arr_every(a, f) {
+  return $js_arr_of(a).every((x, i) => $js_truthy($js_call3(f, x, i, a)));
+}
+function $js_arr_find(a, f) {
+  const l = $js_arr_of(a);
+  for (let i = 0; i < l.length; i++) if ($js_truthy($js_call3(f, l[i], i, a))) return l[i];
+  return undefined;
+}
+function $js_arr_find_index(a, f) {
+  const l = $js_arr_of(a);
+  for (let i = 0; i < l.length; i++) if ($js_truthy($js_call3(f, l[i], i, a))) return i;
+  return -1;
+}
+function $js_arr_reduce(a, f, init) {
+  const l = $js_arr_of(a);
+  let i = 0, acc;
+  if (init === undefined) {
+    if (l.length === 0) $rt_error("reduce of empty array with no initial value");
+    acc = l[0]; i = 1;
+  } else {
+    acc = init;
+  }
+  for (; i < l.length; i++) acc = $callFn(f, [acc, l[i], i, a]);
+  return acc;
+}
+function $js_arr_flat_map(a, f) {
+  const out = [];
+  const l = $js_arr_of(a);
+  for (let i = 0; i < l.length; i++) {
+    const r = $js_call3(f, l[i], i, a);
+    if ($dynTag(r) === "list") out.push(...r); else out.push(r);
+  }
+  return out;
+}
+// 不给比较器时按字符串形式比码元（[10,9] 排出来还是 [10,9]），这是 JS 的规定。
+// 宿主的 sort 自 ES2019 起保证稳定，C 侧用的是归并，两边都稳定。
+function $js_arr_cmp(f, x, y) {
+  if (f === undefined) {
+    const a = $js_str(x), b = $js_str(y);
+    return a < b ? -1 : (a > b ? 1 : 0);
+  }
+  const r = $callFn(f, [x, y]);
+  const d = $dynTag(r) === "real" ? r : ($dynTag(r) === "int" ? Number(r) : 0);
+  return Number.isNaN(d) ? 0 : (d < 0 ? -1 : (d > 0 ? 1 : 0));
+}
+function $js_arr_sort(a, f) { $js_arr_of(a).sort((x, y) => $js_arr_cmp(f, x, y)); return a; }
+
+
 // dynamic 的运行期分派面（ADR-0008 第 5 节的封闭清单）。
 // 有了这些，读写 JSON 不需要先 asList()/asDict()，源码里也不需要出现 dyn()。
 function $dynGet(v, k) {
