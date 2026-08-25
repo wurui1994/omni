@@ -12,6 +12,7 @@ abcd
 4
 3
 4
+[1,2,3,4]
 {"a":[1,2,{"b":true}],"n":1000.0}
 true
 1000.0
@@ -36,6 +37,7 @@ ys = [1, 2, 3];
 print(ys.length);
 ys.push(4);
 print(ys.length);
+print(ys);
 j = parseJson("{\"a\": [1, 2, {\"b\": true}], \"n\": 1000.0}");
 print(j);
 print(j["a"][2]["b"]);
@@ -45,9 +47,6 @@ print(x);
 session reset
 (empty session)
 --- stderr ---
-<repl>:1:7: error: cannot print a value of type 'list<int>'
-  print(ys);
-        ^^
 <repl>:1:7: error: undefined variable 'zzz'
   print(zzz + 1);
         ^^^

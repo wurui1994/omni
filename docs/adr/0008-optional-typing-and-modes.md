@@ -120,6 +120,14 @@ REPL 的输入解释规则（`stage0/src/repl.js`）：括号未闭合就续行�
   —— 与 Python 的 `print`/`str` 一致（`print("a")` → `a`，`print(["a"])` → 引号在里面）。
   实现上降级为对 stdlib `dynToText` 的调用，**不在两个运行时里各写一份序列化器**
   （json 的唯一实现仍在 `stage0/lib/json.omni`）。
+- **`print(容器)` / `string(容器)` 走同一条路**：容器先**深装箱**成 `list<dynamic>` /
+  `dict<string,dynamic>`（一个显式 op `boxDeep`），再交给 `dynToText`。
+  - JS 侧这个 op 是**恒等** —— 那边的 dynamic 无标签，`list<int>` 本来就是个数组。
+  - C 侧容器是单态的（`list<int>` 与 `list<dynamic>` 是两个类型），所以转换函数**按类型生成**，
+    嵌套容器靠前置声明解决顺序。
+  - 能装箱的形状：元素一路下去是 int/real/bool/string/dynamic 或嵌套的 list/dict，
+    且 dict 的键是 `string`。`set` 不行 —— dynamic 里没有 set 这个标签。
+  - 用例：`tests/cases/24_print_containers.omni`。REPL 里 `ys` 现在能回显了。
 
 ## 被否决的方案
 

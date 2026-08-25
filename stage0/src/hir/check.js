@@ -63,6 +63,8 @@ class Checker {
     this.mangled = new Set();
     /** @type {Map<string, any>} 用到的容器类型实例化（typeKey -> type），供后端生成代码 */
     this.containers = new Map();
+    /** @type {Map<string, any>} 需要"深装箱成 dynamic"的容器类型（typeKey -> type），见 boxDeepOp */
+    this.boxDeeps = new Map();
     /** 当前正在检查的 class（方法体内裸名可解析到字段） */
     this.thisType = null;
     /**
@@ -284,6 +286,47 @@ class Checker {
 
   dynListType() { return listType(DYNAMIC); }
 
+  /**
+   * 容器能不能"深装箱"成 dynamic：元素一路下去都得是 dynamic 装得下的东西。
+   * dict 的键只能是 string —— dynamic 的 dict 就是 dict<string,dynamic>（json 的形状）。
+   * set 不在其中：dynamic 没有 set 这个标签。
+   */
+  boxable(t) {
+    if (t.k === 'list') return this.boxableElem(t.elem);
+    if (t.k === 'dict') return t.key.k === 'string' && this.boxableElem(t.val);
+    return false;
+  }
+
+  boxableElem(t) {
+    if (['int', 'real', 'bool', 'string', 'dynamic'].includes(t.k)) return true;
+    return this.boxable(t);
+  }
+
+  /**
+   * `print(list<int>)` / `string(dict<string,real>)` 的装箱（ADR-0008）：容器按元素转成
+   * `list<dynamic>` / `dict<string,dynamic>`，再走 print(dynamic) 那条路（dynToText）。
+   *
+   * 为什么不在两个运行时里各写一份容器序列化器：那就有第二份 json 实现了。
+   * 为什么是一个 op 而不是在检查器里摊成循环：C 侧的容器是单态的，转换函数必须**按类型生成**，
+   * 这件事只有后端知道怎么做（JS 侧的 dynamic 是无标签的，所以那边这个 op 就是恒等）。
+   */
+  boxDeepOp(e, span) {
+    if (!this.boxable(e.type)) return null;
+    this.useType(this.dynListType());
+    this.useType(dictType(STRING, DYNAMIC));
+    this.registerBoxDeep(e.type);
+    return { kind: 'Builtin', name: 'boxDeep', args: [e], type: DYNAMIC, argType: e.type, recvType: e.type };
+  }
+
+  /** 登记这个容器与它内层所有容器：C 侧要按类型生成转换函数，内层的先生成 */
+  registerBoxDeep(t) {
+    const key = typeKey(t);
+    if (this.boxDeeps.has(key)) return;
+    this.boxDeeps.set(key, t);
+    const inner = t.k === 'list' ? t.elem : t.val;
+    if (inner.k === 'list' || inner.k === 'dict') this.registerBoxDeep(inner);
+  }
+
   resolveType(ref) {
     if (ref.kind === 'FnType') {
       const params = ref.params.map((p) => this.resolveType(p));
@@ -478,6 +521,8 @@ class Checker {
       structs: this.structs,
       classes: this.classes,
       containers: sortedContainers(this.containers),
+      // 深装箱助手（print(list<int>) 之类）：C 侧要按类型生成转换函数，内层先出（ADR-0008）
+      boxDeeps: [...this.boxDeeps.keys()].sort().map((k) => this.boxDeeps.get(k)),
       // lambda 提升出来的函数排在最后：它们是编译器合成的，放在用户函数之后便于阅读生成物
       funcs: [...funcs, ...this.lifted],
       closures: this.closures,
@@ -1275,7 +1320,15 @@ class Checker {
           const text = this.dynText(a, args[0].span);
           return { kind: 'Builtin', name: 'print', args: [text], type: VOID, recvType: STRING, argType: STRING };
         }
-        if (!PRINTABLE.has(k)) this.err(args[0].span, `cannot print a value of type '${typeName(a.type)}'`);
+        if (!PRINTABLE.has(k)) {
+          // 容器：深装箱成 dynamic 再走 dynToText（ADR-0008）—— 序列化实现只有 json 那一份
+          const boxed = this.boxDeepOp(a, args[0].span);
+          if (boxed) {
+            const text = this.dynText(boxed, args[0].span);
+            return { kind: 'Builtin', name: 'print', args: [text], type: VOID, recvType: STRING, argType: STRING };
+          }
+          this.err(args[0].span, `cannot print a value of type '${typeName(a.type)}'`);
+        }
         return { kind: 'Builtin', name: 'print', args: [a], type: VOID, recvType: a.type, argType: a.type };
       case 'int':
         if (k === 'int') return a;
@@ -1294,7 +1347,11 @@ class Checker {
       case 'string':
         if (k === 'string') return a;
         if (k === 'dynamic') return this.dynText(a, args[0].span);
-        if (!PRINTABLE.has(k)) this.err(args[0].span, `cannot convert '${typeName(a.type)}' to string`);
+        if (!PRINTABLE.has(k)) {
+          const boxed = this.boxDeepOp(a, args[0].span);
+          if (boxed) return this.dynText(boxed, args[0].span);
+          this.err(args[0].span, `cannot convert '${typeName(a.type)}' to string`);
+        }
         return { kind: 'Builtin', name: 'to_string', args: [a], type: STRING, argType: a.type };
       case 'chr':
         return { kind: 'Builtin', name: 'chr', args: [this.coerce(a, INT, args[0].span)], type: STRING, argType: INT };
@@ -1308,7 +1365,7 @@ class Checker {
         this.err(args[0].span, `repr() takes int or real, found '${typeName(a.type)}'`);
         return { kind: 'Const', type: STRING, value: '' };
       case 'dyn':
-        return this.coerce(a, DYNAMIC, args[0].span);
+        return this.boxDeepOp(a, args[0].span) ?? this.coerce(a, DYNAMIC, args[0].span);
       default:
         throw new Error(`builtinCall: ${name}`);
     }

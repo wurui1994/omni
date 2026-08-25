@@ -341,6 +341,8 @@ class JsEmitter {
       case 'dynPush': return `$dynPush(${a[0]}, ${a[1]})`;
       case 'dynHas': return `$dynHas(${a[0]}, ${a[1]})`;
       case 'dynKeys': return `$dynKeys(${a[0]})`;
+      // 深装箱在 JS 侧是恒等：这里的 dynamic 是无标签的，list<int> 本来就是一个数组（ADR-0008）
+      case 'boxDeep': return a[0];
       case 'dynAdd': return `$dynAdd(${a[0]}, ${a[1]})`;
       case 'dynSub': return `$dynSub(${a[0]}, ${a[1]})`;
       case 'dynMul': return `$dynMul(${a[0]}, ${a[1]})`;

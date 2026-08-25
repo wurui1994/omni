@@ -1,0 +1,42 @@
+// print(容器) / string(容器)：容器按元素深装箱成 dynamic，再走 dynToText（ADR-0008）。
+// 序列化实现仍然只有 lib/json.omni 那一份 —— 两个运行时里都没有第二个序列化器。
+import "std/json.omni";
+
+list<int> xs = [1, 2, 3];
+print(xs);
+print(string(xs));
+
+list<string> ss = ["a", "b"];
+print(ss);
+
+list<real> rs = [1.5, 2.0];
+print(rs);
+
+list<bool> bs = [true, false];
+print(bs);
+
+dict<string, int> m = {"a": 1, "b": 2};
+print(m);
+print(string(m));
+
+// 嵌套：内层也要转（C 侧是按类型生成的转换函数，内层先出）
+list<list<int>> nested = [[1, 2], [3]];
+print(nested);
+dict<string, list<string>> dls = {"k": ["x", "y"]};
+print(dls);
+
+// 空容器
+list<int> empty = [];
+print(empty);
+
+// 已经是 dynamic 的元素不再转一遍
+list<dynamic> mixed = [1, "two", true, null];
+print(mixed);
+
+// dyn(容器) 现在也成立：装箱之后就是普通的 dynamic
+print(dyn(xs).length);
+print(dyn(m).has("a"));
+print(dyn(xs)[0]);
+
+// 拼接：string(容器) 就是普通的 string
+print("xs=" + string(xs));

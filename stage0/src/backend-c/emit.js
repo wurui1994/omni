@@ -59,6 +59,11 @@ class CEmitter {
     this.line();
     for (const t of containers) this.containerDefine(t);
     this.dynBridge(containers);
+    // 深装箱助手（print(list<int>) 之类，ADR-0008）：先全部前置声明，再出函数体 ——
+    // 嵌套容器的内外顺序不用管，交给前置声明
+    const boxDeeps = this.mod.boxDeeps ?? [];
+    for (const t of boxDeeps) this.line(`static omni_dyn omni_box_${cTypeName(t)}(${cTypeName(t)} a);`);
+    for (const t of boxDeeps) this.boxDeepFn(t);
     this.line();
     for (const c of closures) this.closureBody(c);
     for (const t of fnTypes) this.fnCallHelper(t);
@@ -178,6 +183,41 @@ class CEmitter {
     }
     this.line(`OMNI_SET_DEFINE(${n}, ${cTypeName(t.elem)}, `
       + `${HASH_FN[t.elem.k]}, ${EQ_FN[t.elem.k]}, ${cTypeName(listType(t.elem))})`);
+  }
+
+  /**
+   * 深装箱（ADR-0008）：把一个静态容器按元素转成 dynamic。C 侧的容器是单态的，
+   * `list<int>` 与 `list<dynamic>` 是两个类型，所以转换函数只能**按类型生成**。
+   * JS 侧不需要这一步（那边 dynamic 是无标签的，boxDeep 就是恒等）。
+   */
+  boxDeepFn(t) {
+    const n = cTypeName(t);
+    this.line(`static omni_dyn omni_box_${n}(${n} a) {`);
+    if (t.k === 'list') {
+      this.line('  omni_list_dynamic out = omni_list_dynamic_new();');
+      this.line('  omni_list_dynamic_reserve(out, a->len);');
+      this.line(`  for (int64_t i = 0; i < a->len; i++) out->items[out->len++] = ${this.boxElem(t.elem, 'a->items[i]')};`);
+      this.line('  return omni_dyn_of_ref((void *)out, OMNI_DYN_LIST);');
+    } else {
+      this.line('  omni_dict_string_dynamic out = omni_dict_string_dynamic_new();');
+      this.line(`  ${cTypeName(listType(t.key))} ks = ${n}_keys(a);`);
+      this.line('  for (int64_t i = 0; i < ks->len; i++) {');
+      this.line(`    omni_dict_string_dynamic_set(out, ks->items[i], ${this.boxElem(t.val, `${n}_get(a, ks->items[i])`)});`);
+      this.line('  }');
+      this.line('  return omni_dyn_of_ref((void *)out, OMNI_DYN_DICT);');
+    }
+    this.line('}');
+  }
+
+  boxElem(t, expr) {
+    switch (t.k) {
+      case 'int': return `omni_dyn_of_int(${expr})`;
+      case 'real': return `omni_dyn_of_real(${expr})`;
+      case 'bool': return `omni_dyn_of_bool(${expr})`;
+      case 'string': return `omni_dyn_of_string(${expr})`;
+      case 'dynamic': return expr;
+      default: return `omni_box_${cTypeName(t)}(${expr})`;
+    }
   }
 
   /**
@@ -560,6 +600,7 @@ class CEmitter {
       case 'dynPush': return `omni_dyn_push(${a[0]}, ${a[1]})`;
       case 'dynHas': return `omni_dyn_has(${a[0]}, ${a[1]})`;
       case 'dynKeys': return `omni_dyn_keys_of(${a[0]})`;
+      case 'boxDeep': return `omni_box_${cTypeName(e.argType)}(${a[0]})`;
       case 'dynAdd': return `omni_dyn_arith('+', ${a[0]}, ${a[1]})`;
       case 'dynSub': return `omni_dyn_arith('-', ${a[0]}, ${a[1]})`;
       case 'dynMul': return `omni_dyn_arith('*', ${a[0]}, ${a[1]})`;
