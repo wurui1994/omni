@@ -138,6 +138,14 @@ export function tmpDir() {
 }
 
 /**
+ * 墙上时钟毫秒。刻意不是 CPU 时间：要计的是"这一步花了多久"，而其中大头是 clang
+ * 和另一代编译器这些**子进程**，CPU 时间量不到它们。
+ */
+export function nowMs() {
+  return Date.now();
+}
+
+/**
  * "运行中的程序镜像所在目录"。node 上是这个文件所在的目录（src/host），C 侧是可执行
  * 文件所在目录 —— 从这里怎么走到 runtime/ 与 lib/ 是调用方的事，两代的布局本来就不同。
  */

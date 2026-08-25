@@ -10,6 +10,13 @@
 //   dist/src/host/omni       N1 —— 原生编译器
 //   dist/lib/                std（json.omni …）
 //   dist/runtime/            C 运行时的 .c/.h（`build` 时要 -I 它）
+//   dist/build/              中间产物：omni.c（N1 的 C）、c2.mjs（C2 的产出）、omni-n2 与 omni-n2.c
+//
+// 中间产物刻意**不进临时目录**：链断在哪一代都要能直接翻出那一份 C 或那一份 JS 来 diff，
+// 而不是去 /var/folders 里捞一个随机名字。所以 `build` 收 `--work DIR`，这里全指到 dist/build。
+//
+// 每一步都报墙上时间。自举是分钟级的操作，"卡在哪一步"必须一眼看得出来 —— 而其中大头是
+// clang 与另一代编译器这些子进程，所以计的是墙上时间而不是 CPU 时间。
 //
 // 布局不是随便摆的：`installDir()` 是"镜像所在目录"，std 与 runtime 都相对它**固定两级
 // 上去**（module/load.js、runtime/c_runtime.js）。把编译器直接扔在 dist/ 下，它就会去
@@ -25,7 +32,7 @@
 // 镜像做 ad-hoc 签名，所以 `cmp` 两个原生二进制必然不同。那不是自举失败。
 
 import {
-  readText, writeText, exists, readDir, mkdirAll, mkdTemp, tmpDir, spawn, env, stdout,
+  readText, writeText, exists, readDir, mkdirAll, nowMs, spawn, env, stdout,
 } from './host/native.js';
 import { join, basename } from './host/path.js';
 import { RUNTIME_DIR } from './runtime/c_runtime.js';
@@ -55,29 +62,52 @@ function firstDiff(a, b) {
 }
 
 /**
+ * 毫秒 -> 人看的时长。刻意只用 Math.trunc 和整数算术：`toFixed` 不在语言子集里，
+ * 而这段代码必须能被每一代编译器编出来。
+ */
+function fmtMs(dt) {
+  const t = Math.trunc(dt);
+  if (t < 1000) return `${t}ms`;
+  const tenths = Math.trunc(t / 100);
+  const s = Math.trunc(tenths / 10);
+  return `${s}.${tenths - s * 10}s`;
+}
+
+/**
  * @param {{source: string, outDir: string, quick: boolean,
  *          emitOf: (kind: string, path: string) => string,
- *          buildTo: (path: string, out: string) => string}} o
+ *          buildTo: (path: string, out: string, work: string) => string}} o
  * @returns {{pass: number, fail: number}}
  */
 export function bootstrapSelf(o) {
   const bin = join(o.outDir, 'src', 'host');
+  const work = join(o.outDir, 'build');
   const name = basename(o.source);
   let pass = 0;
   let fail = 0;
   const details = [];
+  const t00 = nowMs();
+  // 每条结果行末尾的时间是"上一条结果到这一条之间"花的墙上时间，也就是这一步本身
+  let mark = t00;
+  const lap = () => {
+    const now = nowMs();
+    const d = now - mark;
+    mark = now;
+    return fmtMs(d);
+  };
   const ok = (msg) => {
     pass = pass + 1;
-    stdout(`  ok   ${msg}\n`);
+    stdout(`  ok   ${msg}  [${lap()}]\n`);
   };
   const bad = (msg, detail) => {
     fail = fail + 1;
     details.push(`${msg}\n    ${detail}`);
-    stdout(`  FAIL ${msg}\n`);
+    stdout(`  FAIL ${msg}  [${lap()}]\n`);
   };
 
   // ---- 阶段 0：安装布局
   mkdirAll(bin);
+  mkdirAll(work);
   const libN = copyTree(LIB_DIR, join(o.outDir, 'lib'), ['.omni']);
   const rtN = copyTree(RUNTIME_DIR, join(o.outDir, 'runtime'), ['.c', '.h']);
   if (libN > 0 && rtN > 0) ok(`layout ${o.outDir}  lib ${libN} files, runtime ${rtN} files`);
@@ -95,19 +125,21 @@ export function bootstrapSelf(o) {
   const nodeExe = env('OMNI_NODE') === undefined ? 'node' : env('OMNI_NODE');
   const probe = spawn(nodeExe, ['--version'], 'c');
   if (probe[0] !== 0) {
-    stdout(`  skip C2 == C1: no JS engine ('${nodeExe}' not runnable)\n`);
+    stdout(`  skip C2 == C1: no JS engine ('${nodeExe}' not runnable)  [${lap()}]\n`);
   } else {
     const r = spawn(nodeExe, [c1, 'emit-js', o.source], 'c');
+    // C2 的产出留在构建目录里：不动点失败时要能离线 diff 这两份 JS
+    if (r[0] === 0) writeText(join(work, 'c2.mjs'), r[1]);
     if (r[0] !== 0) bad('C2 = C1 emit-js', `exit=${r[0]}\n${r[2]}`);
     else if (r[1] !== c1Text) bad('fixpoint C1 == C2', firstDiff(c1Text, r[1]));
     else ok(`fixpoint C1 == C2  ${c1Text.split('\n').length} lines`);
   }
 
-  if (o.quick) return summarize(pass, fail, details);
+  if (o.quick) return summarize(pass, fail, details, nowMs() - t00);
 
   // ---- 阶段 3：N1 = clang(我 emit-c 我自己)
   const n1 = join(bin, 'omni');
-  const cc = o.buildTo(o.source, n1);
+  const cc = o.buildTo(o.source, n1, work);
   ok(`N1 = ${cc}(emit-c ${name}) -> ${n1}`);
 
   // ---- 阶段 4：N1 的产出必须与 C0 的逐字节相同（C 路径闭环）
@@ -120,12 +152,11 @@ export function bootstrapSelf(o) {
   }
 
   // ---- 阶段 5：N2 = N1 编译出来的下一代原生编译器（真正的 stage2）
-  const stage = mkdTemp(join(tmpDir(), 'omni-stage2-'));
-  const n2 = join(stage, 'omni-n2');
-  const built = spawn(n1, ['build', o.source, '-o', n2], 'c');
+  const n2 = join(work, 'omni-n2');
+  const built = spawn(n1, ['build', o.source, '-o', n2, '--work', work], 'c');
   if (built[0] !== 0 || !exists(n2)) {
     bad('N2 = N1 build (stage2)', `exit=${built[0]}\n${built[2]}`);
-    return summarize(pass, fail, details);
+    return summarize(pass, fail, details, nowMs() - t00);
   }
   ok(`N2 = N1 build ${name} -> ${n2}`);
   for (const kind of ['c', 'js']) {
@@ -136,11 +167,11 @@ export function bootstrapSelf(o) {
     else ok(`fixpoint N1 emit-${kind} == N2  ${a[1].length} bytes`);
   }
 
-  return summarize(pass, fail, details);
+  return summarize(pass, fail, details, nowMs() - t00);
 }
 
-function summarize(pass, fail, details) {
-  stdout(`\n${pass} passed, ${fail} failed\n`);
+function summarize(pass, fail, details, total) {
+  stdout(`\n${pass} passed, ${fail} failed  in ${fmtMs(total)}\n`);
   if (fail > 0) stdout(`\n${details.join('\n\n')}\n`);
   return { pass, fail };
 }

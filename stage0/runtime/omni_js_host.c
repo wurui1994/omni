@@ -21,6 +21,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 /* ---------------------------------------------------------------- 进程状态 */
@@ -224,6 +225,15 @@ omni_dyn omni_js_os_tmpdir(void) {
   size_t n = strlen(t);
   while (n > 1 && t[n - 1] == '/') n--;
   return s16_of_bytes(t, (int64_t)n);
+}
+
+/* Date.now()：墙上时钟毫秒。要计的是"这一步花了多久"，而其中大头是 clang 和另一代
+   编译器这些**子进程**，CPU 时间量不到它们，所以只能是墙上时间。
+   刻意是 real 而不是 int：node 那边 Date.now() 是 number，两侧的 dynamic 得同类。 */
+omni_dyn omni_js_now_ms(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  return omni_dyn_of_real((double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6);
 }
 
 /* "运行中的程序镜像所在目录"。JS 侧是 dirname(process.argv[1])，C 侧是

@@ -198,6 +198,9 @@ export const JS_ABI = {
   // 结果是 [status, stdout, stderr]；mode 'c' 全捕获 / 'o' stdout 直通 / 'i' 全直通
   js_proc_spawn: { js: '$js_proc_spawn', c: 'omni_js_proc_spawn', arity: 3 },
   js_os_tmpdir: { js: '$js_os_tmpdir', c: 'omni_js_os_tmpdir', arity: 0 },
+  // 墙上时钟毫秒。要计的是"这一步花了多久"，大头是子进程（clang、另一代编译器），
+  // 所以必须是墙上时间而不是 CPU 时间。
+  js_now_ms: { js: '$js_now_ms', c: 'omni_js_now_ms', arity: 0 },
   js_install_dir: { js: '$js_install_dir', c: 'omni_js_install_dir', arity: 0 },
   // 宿主里跑一段生成的 JS。原生构建里没有 JS 引擎，C 侧只会报错（omni_js_host.c）——
   // 存在的理由是编译器自己的 `omni run` 与 REPL 要能降级，见 host/native.js 的说明。

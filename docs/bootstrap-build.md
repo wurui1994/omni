@@ -6,8 +6,25 @@
 ```bash
 npm run build:self          # = node stage0/src/cli.js bootstrap -o dist
 node stage0/src/cli.js bootstrap -q        # 只跑 JS 侧不动点（秒级），跳过 C 路径
-node stage0/src/cli.js bootstrap -o /tmp/x # 换个产物目录
-dist/src/host/omni bootstrap               # 原生编译器也能执行同一条链
+node stage0/src/cli.js bootstrap -o out/x  # 换个产物目录
+dist/src/host/omni bootstrap stage0/src/cli.js   # 原生编译器也能执行同一条链
+```
+
+每一步都报墙上时间（`[12.4s]`），末尾报总时长。自举是分钟级的操作，"卡在哪一步"必须一眼
+看得出来；计的是墙上时间而不是 CPU 时间，因为大头是 clang 与另一代编译器这些子进程：
+
+```
+  ok   layout dist  lib 1 files, runtime 23 files  [8ms]
+  ok   C1 = emit-js cli.js  1746006 bytes -> dist/src/host/omni.mjs  [213ms]
+  ok   fixpoint C1 == C2  40470 lines  [3.1s]
+  ok   N1 = clang(emit-c cli.js) -> dist/src/host/omni  [12.4s]
+  ok   fixpoint N1 emit-c cli.js == C0  2991702 bytes  [1.3s]
+  ok   fixpoint N1 emit-js cli.js == C0  1746006 bytes  [1.3s]
+  ok   N2 = N1 build cli.js -> dist/build/omni-n2  [12.0s]
+  ok   fixpoint N1 emit-c == N2  2991702 bytes  [2.1s]
+  ok   fixpoint N1 emit-js == N2  1746006 bytes  [1.8s]
+
+9 passed, 0 failed  in 34.5s
 ```
 
 ## 产物
@@ -17,7 +34,12 @@ dist/src/host/omni.mjs   C1 —— 纯 JS 的永久兼容层（node dist/src/hos
 dist/src/host/omni       N1 —— 原生编译器
 dist/lib/                std（json.omni …）
 dist/runtime/            C 运行时的 .c/.h（build 时要 -I 它）
+dist/build/              中间产物：omni.c、c2.mjs、omni-n2、omni-n2.c
 ```
+
+中间产物**不进临时目录**：链断在哪一代都要能直接翻出那份 C 或那份 JS 来 diff，而不是去
+`/var/folders` 里捞一个随机名字的目录。`omni build` 因此收 `--work DIR`（生成的 C 留在
+`DIR/<产物名>.c`），`bootstrap` 把每一代都指到 `dist/build`。
 
 **布局不能改。** `installDir()` 是"运行中的程序镜像所在目录"（JS 侧是脚本所在目录，
 C 侧是可执行文件所在目录），而 std 与 runtime 都相对它**固定两级上去**：
@@ -29,6 +51,9 @@ C 侧是可执行文件所在目录），而 std 与 runtime 都相对它**固�
 `/runtime` 找东西，报的是 `no such module: 'std/json.omni'` 或
 `ENOENT: cannot read directory '/runtime'` —— 那是布局错，不是编译器错。
 产物里的 `lib/` 与 `runtime/` 是**复制**而不是符号链接，打包带走不会断。
+
+产物树里没有编译器源码（那是 `stage0/`），所以让产物里的 N1 再跑一遍自举时要**显式给出源
+文件**：默认值是 `installDir()/../cli.js`，在 `dist/` 里不存在，命令会直接说清这一点。
 
 ## 四条门槛
 

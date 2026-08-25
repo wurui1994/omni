@@ -919,6 +919,7 @@ function $js_proc_spawn(cmd, args, mode) {
   return [r.status === null ? 128 : r.status, r.stdout === null ? "" : r.stdout, r.stderr === null ? "" : r.stderr];
 }
 function $js_os_tmpdir() { return $node("node:os").tmpdir(); }
+function $js_now_ms() { return Date.now(); }
 // "运行中的程序镜像所在目录"。JS 侧是脚本所在目录，C 侧是可执行文件所在目录 ——
 // 从这里怎么走到 runtime/ 与 lib/ 是调用方的事（两代的布局本来就不同）。
 function $js_install_dir() {

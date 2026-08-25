@@ -9,7 +9,7 @@
 //   omni ast/oir f.omni      打印中间结果（调试用）
 
 import {
-  writeText, readText, exists, readDir, mtimeMs, fileSize, mkdTemp, rename,
+  writeText, readText, exists, readDir, mtimeMs, fileSize, mkdTemp, mkdirAll, rename,
   args as procArgs, env, stdout, stderr, setExitCode, spawn, tmpDir, evalJs,
   cwd, installDir,
 } from './host/native.js';
@@ -128,9 +128,15 @@ function runtimeObjects(cc) {
   return objs.every((o) => exists(o)) ? objs : staged;
 }
 
-function buildNative(mod, outPath) {
-  const dir = mkdTemp(join(tmpDir(), 'omni-'));
-  const cPath = join(dir, 'out.c');
+/**
+ * workDir 给的时候，生成的 .c 就留在那里（名字跟着产物走），不进临时目录 ——
+ * `omni bootstrap` 与 `build --work DIR` 要的是"中间产物留在构建目录里"：链断在哪一代
+ * 都能直接翻出那份 C 来看，而不是去 /var/folders 里捞一个随机名字的目录。
+ */
+function buildNative(mod, outPath, workDir) {
+  const dir = workDir === undefined ? mkdTemp(join(tmpDir(), 'omni-')) : workDir;
+  if (workDir !== undefined) mkdirAll(dir);
+  const cPath = join(dir, `${basename(outPath)}.c`);
   writeText(cPath, emitC(mod));
   const cc = findCC();
   // 运行时是 stage0/runtime/ 下真正的 C 文件，预编成 .o 缓存起来；热的叶子函数是
@@ -149,7 +155,7 @@ function main(argv) {
   const files = [];
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
-    if (a === '-o' || a === '--mode') { i++; continue; }
+    if (a === '-o' || a === '--mode' || a === '--work') { i++; continue; }
     if (a.startsWith('-')) continue;
     files.push(a);
   }
@@ -176,7 +182,7 @@ function main(argv) {
         const { mod } = compile(p, []);
         return kind === 'c' ? emitC(mod, {}) : emitJs(mod);
       },
-      buildTo: (p, out) => buildNative(compile(p, []).mod, out).cc,
+      buildTo: (p, out, work) => buildNative(compile(p, []).mod, out, work).cc,
     });
     return r.fail > 0 ? 1 : 0;
   }
@@ -204,7 +210,9 @@ function main(argv) {
       const { mod } = compile(path, rest);
       const oi = rest.indexOf('-o');
       const out = oi >= 0 ? rest[oi + 1] : basename(path).replace(/\.(omni|omnis|omnid|js)$/, '');
-      const { cc } = buildNative(mod, out);
+      // --work DIR：生成的 C 留在 DIR 里而不是临时目录（自举链要能事后翻中间产物）
+      const wi = rest.indexOf('--work');
+      const { cc } = buildNative(mod, out, wi >= 0 ? rest[wi + 1] : undefined);
       stderr(`omni: built ${out} via ${cc}\n`);
       return 0;
     }
@@ -245,7 +253,7 @@ commands:
   repl      interactive session (no file; defaults to --mode dynamic)
   run       compile to JS and execute in-process
   run-c     compile to C, build with cc, execute
-  build     compile to a native executable  (-o NAME)
+  build     compile to a native executable  (-o NAME; --work DIR keeps the generated C there)
   emit-js   print generated JavaScript
   emit-c    print generated C  (--amalgamate: inline the whole runtime into one file)
   ast       print the AST as JSON

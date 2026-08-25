@@ -44,6 +44,7 @@ const NATIVE_OPS = {
   readLine: 'js_proc_read_line',
   spawn: 'js_proc_spawn',
   tmpDir: 'js_os_tmpdir',
+  nowMs: 'js_now_ms',
   installDir: 'js_install_dir',
   evalJs: 'js_eval',
   evalCaptured: 'js_eval_captured',
