@@ -11,7 +11,7 @@
 
 import { JS_PRELUDE } from './prelude.js';
 import { typeKey } from '../hir/types.js';
-import { JS_ABI } from '../hir/js_abi.js';
+import { JS_ABI, JS_ALL, JS_MEMBERS } from '../hir/js_abi.js';
 
 class JsEmitter {
   constructor(mod) {
@@ -27,6 +27,7 @@ class JsEmitter {
 
   emit() {
     this.out.push(JS_PRELUDE.trim());
+    this.memberDispatch();
     for (const s of this.mod.structs) this.struct(s);
     for (const c of this.mod.classes ?? []) this.classDecl(c);
     for (const c of this.mod.closures ?? []) this.closureMake(c);
@@ -36,6 +37,34 @@ class JsEmitter {
     this.line('$js_check_uncaught();');
     this.line('$flush();');
     return this.out.join('\n') + '\n';
+  }
+
+  /**
+   * 成员派发器（ADR-0011 第 9 节）。表在 hir/js_abi.js，这里只按表生成：
+   * 接收者的标签决定叫哪个 op，表外的成员名当场报错。C 后端有一份逐行对应的生成。
+   */
+  memberDispatch() {
+    for (const d of Object.values(JS_MEMBERS)) {
+      const m = d.member;
+      const ps = ['r', ...Array.from({ length: m.argc }, (_, i) => `a${i}`)];
+      const lits = Object.values(m.lit ?? {}).map((v) => JSON.stringify(v));
+      this.line(`function ${d.js}(${ps.join(', ')}) {`);
+      this.indent++;
+      this.line('switch ($dynTag(r)) {');
+      this.indent++;
+      for (const [tag, op] of Object.entries(m.on)) {
+        const abi = JS_ABI[op];
+        // arity 只数 dynamic 实参（含接收者），lit 是额外排在前面的编译期常量
+        const args = [...lits, ...ps.slice(0, abi.arity)];
+        this.line(`case ${JSON.stringify(tag)}: return ${abi.js}(${args.join(', ')});`);
+      }
+      const what = m.kind === 'prop' ? 'property' : 'method';
+      this.line(`default: $rt_error("no ${what} ${m.name} on " + $dynTag(r));`);
+      this.indent--;
+      this.line('}');
+      this.indent--;
+      this.line('}');
+    }
   }
 
   /**
@@ -306,7 +335,7 @@ class JsEmitter {
       case 'js_undef': return 'undefined';
       case 'js_ofFn': return a[0];
       default: {
-        const abi = JS_ABI[e.name];
+        const abi = JS_ALL[e.name];
         if (!abi) throw new Error(`js.builtin: ${e.name}`);
         const lits = (abi.lit ?? []).map((k) => {
           const v = e[k];

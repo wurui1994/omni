@@ -14,7 +14,7 @@
 
 import { RUNTIME_INCLUDE, amalgamate } from '../runtime/c_runtime.js';
 import { cTypeName, listType, typeKey } from '../hir/types.js';
-import { JS_ABI } from '../hir/js_abi.js';
+import { JS_ABI, JS_ALL, JS_MEMBERS, JS_TAG_C } from '../hir/js_abi.js';
 
 /** dict/set 的键需要 hash；list.contains 只需要 eq */
 const HASH_FN = { int: 'omni_hash_int', real: 'omni_hash_real', bool: 'omni_hash_bool', string: 'omni_hash_string' };
@@ -192,6 +192,40 @@ class CEmitter {
       this.line('OMNI_JS_RE(omni_list_dynamic, omni_dict_string_dynamic)');
       this.line('OMNI_JS_STR_ARR(omni_list_dynamic, omni_dict_string_dynamic)');
       this.line('OMNI_JS_HOST(omni_list_dynamic, omni_dict_string_dynamic)');
+      // 成员派发器：调的全是上面这些宏摊出来的 static 函数，所以只能在这之后生成
+      this.memberDispatch();
+    }
+  }
+
+  /**
+   * 成员派发器（ADR-0011 第 9 节）。表在 hir/js_abi.js，这里只按表生成 —— 发射器里
+   * 不出现任何成员名。JS 后端 backend-js/emit.js 的 memberDispatch 是逐行的孪生。
+   */
+  memberDispatch() {
+    for (const d of Object.values(JS_MEMBERS)) {
+      const m = d.member;
+      const ps = ['r', ...Array.from({ length: m.argc }, (_, i) => `a${i}`)];
+      const lits = Object.values(m.lit ?? {}).map((v) => (typeof v === 'string' ? `'${v}'` : String(v)));
+      const ret = d.ret === 'bool' ? 'bool' : 'omni_dyn';
+      this.line(`static ${ret} ${d.c}(${ps.map((p) => `omni_dyn ${p}`).join(', ')}) {`);
+      this.indent++;
+      this.line('switch (r.tag) {');
+      this.indent++;
+      for (const [tag, op] of Object.entries(m.on)) {
+        const abi = JS_ABI[op];
+        // arity 只数 dynamic 实参（含接收者），lit 是额外排在前面的编译期常量
+        const call = `${abi.c}(${[...lits, ...ps.slice(0, abi.arity)].join(', ')})`;
+        this.line(abi.ret === 'void'
+          ? `case ${JS_TAG_C[tag]}: ${call}; return omni_dyn_undef();`
+          : `case ${JS_TAG_C[tag]}: return ${call};`);
+      }
+      const what = m.kind === 'prop' ? 'property' : 'method';
+      this.line(`default: omni_errorf("no ${what} ${m.name} on %s", omni_dyn_tag_name(r.tag));`);
+      this.indent--;
+      this.line('}');
+      this.line(d.ret === 'bool' ? 'return false;' : 'return omni_dyn_undef();');
+      this.indent--;
+      this.line('}');
     }
   }
 
@@ -523,7 +557,7 @@ class CEmitter {
         return `omni_js_s16(${a[0]})`;
       }
       default: {
-        const abi = JS_ABI[e.name];
+        const abi = JS_ALL[e.name];
         if (!abi) throw new Error(`c.builtin: ${e.name}`);
         const lits = (abi.lit ?? []).map((k) => {
           const v = e[k];

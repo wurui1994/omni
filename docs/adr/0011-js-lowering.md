@@ -121,6 +121,36 @@ Omni 的 `string` 按 UTF-8 字节索引（ADR-0005）；JS 的 `String` 按 UTF
 Omni 自己的那半个世界里。两者之间只有两个显式的转换 op：`js_str16_of_utf8` /
 `js_str16_to_utf8`。
 
+### 9. 成员访问按**接收者标签**在运行期派发，派发器由表生成
+
+`x.length`、`x.push(v)`、`m.has(k)` 的接收者是什么，静态不知道 —— 编译器源码是无标注的
+JS。所以 `hir/js_abi.js` 里多两张表（`JS_PROPS` / `JS_METHODS`）：成员名 -> 每个标签用哪个
+op。两个后端各自**生成**一个按标签 switch 的派发函数（`js_p_<名>` / `js_m_<名>`），
+发射器里不出现任何成员名，加一个成员还是只改表。
+
+三个连带的决定：
+
+- **Map / Set 的 DYN 标签必须和普通对象分开。** 三样的底子都是 `dict<string, dynamic>`，
+  标签一样 `o.has(k)` 就没法派发。往字典里塞隐藏标记键的做法否掉了：
+  `keys()/values()/entries()/size` 全都要绕开它，迭代序也会被污染。于是
+  `OMNI_DYN_MAP` / `OMNI_DYN_SET`（载荷仍是同一个 dict 指针），JS 侧对应
+  `class $JsMap extends Map` / `class $JsSet extends Map`。可见行为三样一致：
+  `typeof` 是 `"object"`、真假为真、相等按引用；`JSON.stringify` 对 Map/Set 给 `"{}"`。
+- **派发器的形参个数取各分支里最多的那个**，缺席的实参由 lower.js 补 `js_undef`，
+  每个分支只吃自己需要的前几个（`indexOf` 在 string 上带 `from`，在 list 上不带）。
+  返回类型也从分支取，同名分支必须一致 —— 表写错了在 `js_abi.js` 里就炸。
+- **表外的成员名落到 default 分支当场报错**，这也是将来类实例方法表（落地顺序 6c）
+  接进来的位置。
+
+### 10. 正则不是值：`/re/` 只能出现在使用点上
+
+量过：全仓库只有 `frontend-js/gen.js:83` 一处把正则存进变量（`IDENT_KEY`），
+用法全是 `IDENT_KEY.test(x)`。所以不给 dynamic 加 RegExp 标签，也不做 RegExp 对象：
+lower.js 把**初始化式是正则字面量的 const 当编译期常量**传播到使用点，
+`.test` / `replace` / `match` / `split` 那四个位置直接发 `js_re_*`（模式与 flags 是
+普通的字符串实参，两侧按内容缓存已编译的正则）。正则值逃出这四种位置 —— 传参、
+进容器、当返回值 —— 一律编译期报错，而不是悄悄换一种语义。
+
 ## 落地顺序
 
 1. `dynamic` 扩成完整 JS 值域：函数标签 + 动态调用（实参个数运行期检查）+ `js_*` 运算 op

@@ -274,6 +274,45 @@ c('tag/set-json', js('js_json_stringify', [SET(), undef, undef]), `JSON.stringif
 c('tag/map-truthy', jsBool('js_truthy', [MAP()]), `${MAPS} ? true : false`);
 c('tag/map-ne-obj', jsBool('js_eq', [MAP(), OBJ()], { strict: true }), `${MAPS} === ${OBJS}`);
 
+// 成员派发器（js_p_* / js_m_*，两个后端各自按 js_abi.js 的表生成）。
+// 盯的是"同一个成员名落到不同标签上要选对 op"，尤其是 length（list/string）、
+// has/delete（Map/Set）、slice 与 indexOf（list 的分支比 string 少吃一个实参）。
+const m = (name, args, extra = {}) => js(`js_m_${name}`, args, extra);
+const mBool = (name, args) => jsBool(`js_m_${name}`, args);
+const p = (name, recv) => js(`js_p_${name}`, [recv]);
+const HS = '"héllo"';
+const H = () => str('héllo');
+c('disp/length-list', p('length', A()), `${AS}.length`);
+c('disp/length-str', p('length', H()), `${HS}.length`);
+c('disp/size-map', p('size', MAP()), `${MAPS}.size`);
+c('disp/size-set', p('size', SET()), `${SETS}.size`);
+c('disp/push', m('push', [A(), real(9)]), `${AS}.push(9)`);
+c('disp/join', m('join', [A(), str('-')]), `${AS}.join("-")`);
+c('disp/slice-list', m('join', [m('slice', [A(), real(1), real(3)]), str(',')]), `${AS}.slice(1, 3).join(",")`);
+c('disp/slice-str', m('slice', [H(), real(1), undef]), `${HS}.slice(1)`);
+c('disp/indexOf-list', m('indexOf', [A(), real(2), undef]), `${AS}.indexOf(2)`);
+c('disp/indexOf-str', m('indexOf', [H(), str('l'), real(4)]), `${HS}.indexOf("l", 4)`);
+c('disp/includes-list', mBool('includes', [A(), real(1)]), `${AS}.includes(1)`);
+c('disp/includes-str', mBool('includes', [H(), str('é')]), `${HS}.includes("é")`);
+c('disp/entries-list', js('js_arr_get', [js('js_arr_get', [m('entries', [A()]), real(1)]), real(1)]), `[...${AS}.entries()][1][1]`);
+c('disp/entries-map', js('js_arr_get', [js('js_arr_get', [m('entries', [MAP()]), real(0)]), real(0)]), `[...${MAPS}.entries()][0][0]`);
+c('disp/has-map', mBool('has', [MAP(), str('1')]), `${MAPS}.has("1")`);
+c('disp/has-set', mBool('has', [SET(), real(2)]), `${SETS}.has(2)`);
+c('disp/delete-map', mBool('delete', [MAP(), real(1)]), `${MAPS}.delete(1)`);
+c('disp/delete-set', mBool('delete', [SET(), str('x')]), `${SETS}.delete("x")`);
+c('disp/get', m('get', [MAP(), real(1)]), `${MAPS}.get(1)`);
+c('disp/keys', m('join', [m('keys', [MAP()]), str('|')]), `[...${MAPS}.keys()].join("|")`);
+// 大小写只折 ASCII（两个后端同样残缺，见 omni_js_str.c 的注释），所以这条用纯 ASCII
+c('disp/upper', m('toUpperCase', [str('hello')]), '"hello".toUpperCase()');
+c('disp/trim', m('trim', [str('  x  ')]), '"  x  ".trim()');
+c('disp/trimStart', m('trimStart', [str('  x  ')]), '"  x  ".trimStart()');
+c('disp/trimEnd', m('trimEnd', [str('  x  ')]), '"  x  ".trimEnd()');
+c('disp/startsWith', mBool('startsWith', [H(), str('é'), real(1)]), `${HS}.startsWith("é", 1)`);
+c('disp/toString-radix', m('toString', [real(255), real(16)]), '(255).toString(16)');
+c('disp/toPrecision', m('toPrecision', [real(1 / 3), real(17)]), '(1/3).toPrecision(17)');
+c('disp/charCodeAt', m('charCodeAt', [H(), real(1)]), `${HS}.charCodeAt(1)`);
+c('disp/split', m('join', [m('split', [str('a/b/c'), str('/')]), str('|')]), '"a/b/c".split("/").join("|")');
+
 // Number / Math。toPrecision(17) 与 toString(8/16) 是自举的关键路径：编译器自己用它们
 // 把 double 与字节写进生成的 C，差一个字符两代产出就不一样。
 for (const src of ['0', '0.1', '1/3', '-2.5', '1e21', '1e-7', '123456789012345680000', '1.7976931348623157e308']) {
