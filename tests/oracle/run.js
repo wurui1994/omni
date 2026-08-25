@@ -22,7 +22,7 @@ import { spawnSync } from 'node:child_process';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
-const CLI = join(root, 'stage0', 'src', 'cli.js');
+const CLI = process.env.OMNI_CLI || join(root, 'stage0', 'src', 'cli.js');
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 
 function have(cmd) {

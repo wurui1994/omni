@@ -10,3 +10,6 @@ package-lock.json
 # C 后端的中间产物（正常情况下落在 mktemp 目录里，这几条是手工 emit-c 时的落点）
 *.o
 /*.c
+
+# js 往返测试重新生成出来的编译器树（留在磁盘上是为了能直接 diff / 直接跑）
+/.omni-build/

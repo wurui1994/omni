@@ -936,7 +936,10 @@ class Checker {
   /** 内建类型的方法表；命中则返回 Builtin 节点，否则 null */
   builtinMethod(recvType, name, recv, args, span) {
     const table = BUILTIN_METHODS[recvType.k];
-    const make = table?.[name];
+    // hasOwn 而不是直接索引：`name` 是用户写下的字符串，`a.constructor()` / `a.toString()`
+    // 会摸到 Object.prototype 上的函数，于是 make(recvType) 返回的不是签名而是一个对象，
+    // 编译器当场崩在读 sig.params 上。这类"用户输入索引对象字面量"的地方一律要护栏。
+    const make = table && Object.hasOwn(table, name) ? table[name] : undefined;
     if (!make) return null;
     const sig = make(recvType);
     if (args.some((a) => a.name !== null)) {

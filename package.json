@@ -11,7 +11,8 @@
     "omni": "node stage0/src/cli.js",
     "test": "node tests/run.js",
     "test:oracle": "node tests/oracle/run.js",
-    "test:all": "node tests/run.js && node tests/oracle/run.js",
+    "test:js": "node tests/js-roundtrip/run.js",
+    "test:all": "node tests/run.js && node tests/oracle/run.js && node tests/js-roundtrip/run.js",
     "bench": "node bench/compare.js",
     "lint": "tsc --noEmit -p jsconfig.json"
   },

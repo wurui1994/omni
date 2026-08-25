@@ -1,0 +1,11 @@
+// 用户写下的方法名会被拿去索引编译器内部的内建方法表。表是对象字面量，于是
+// `constructor` / `toString` / `valueOf` 这些名字会摸到 Object.prototype 上的函数：
+// 一度让编译器当场崩在读 sig.params 上，而不是报"没有这个方法"。
+// 这一类 bug 是 js 语法前端的往返测试先在词法器里抓到的（见 frontend-js/lexer.js 的 LITERAL_WORDS）。
+list<int> a = [1];
+print(a.constructor());
+print(a.toString());
+dict<string, int> d = {:};
+print(d.hasOwnProperty("x"));
+string s = "x";
+print(s.valueOf());

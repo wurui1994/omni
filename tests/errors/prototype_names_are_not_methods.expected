@@ -1,0 +1,12 @@
+tests/errors/prototype_names_are_not_methods.omni:6:9: error: no method or function 'constructor' applicable to 'list<int>'
+  print(a.constructor());
+          ^^^^^^^^^^^
+tests/errors/prototype_names_are_not_methods.omni:7:9: error: no method or function 'toString' applicable to 'list<int>'
+  print(a.toString());
+          ^^^^^^^^
+tests/errors/prototype_names_are_not_methods.omni:9:9: error: no method or function 'hasOwnProperty' applicable to 'dict<string, int>'
+  print(d.hasOwnProperty("x"));
+          ^^^^^^^^^^^^^^
+tests/errors/prototype_names_are_not_methods.omni:11:9: error: no method or function 'valueOf' applicable to 'string'
+  print(s.valueOf());
+          ^^^^^^^

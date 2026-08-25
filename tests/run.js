@@ -19,7 +19,9 @@ import { spawnSync } from 'node:child_process';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
-const CLI = join(root, 'stage0', 'src', 'cli.js');
+// `OMNI_CLI` 可以把整套用例指向另一份编译器。js 语法前端的往返测试用它：把 stage0/src 整棵树
+// 重新生成一遍，再用生成出来的编译器跑这里的全部用例，输出必须一模一样（ADR-0001 第三条测试轴）。
+const CLI = process.env.OMNI_CLI || join(root, 'stage0', 'src', 'cli.js');
 const args = process.argv.slice(2);
 const update = args.includes('--update');
 const filters = args.filter((a) => !a.startsWith('-'));

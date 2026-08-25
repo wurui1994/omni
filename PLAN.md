@@ -325,25 +325,49 @@ omni/
 - 已知局限（记在 ADR-0009）：类型名与顶层变量仍在一张全局表里，两个模块各有一个同名
   `private class` / 顶层 `var` 会撞；没有 `access` / `unravel`；清单只硬编码了一条 `std`。
 
+**已完成（JS 语法前端 + 第三条测试轴，2026-08-25）**：`stage0/src/frontend-js/`、
+`tests/js-roundtrip/`、`docs/js-bootstrap-subset.md`。
+- 词法器（`lexer.js`）：`/` 是除号还是正则只能看前一个有意义的 token；模板字符串的 `${}`
+  可以嵌套模板，所以词法器自己维护一个栈；每个 token 记"前面有没有换行"，ASI 全靠它；
+  hashbang 只在文件首字节合法，但生成时必须原样留着（cli.js 是可执行脚本）。
+- 语法分析器（`parser.js`）：ESTree 的子集。箭头函数是唯一需要**数括号往前看**的地方
+  （`(a, b)` 是括号表达式还是形参表，要看后面有没有 `=>`）—— 刻意不回溯，回溯要连诊断
+  一起回滚，容易漏。**未覆盖的语法一律报错，绝不静默跳过。**
+- 生成器（`gen.js`）：括号不照抄源码，一律按优先级重算。照抄的话 `(a)` 会永远留着那层括号，
+  幂等就失去意义；重算之后输出是规范形式，幂等成为一个真断言。
+- 闸门 1（幂等）：`stage0/src` + `tests` + `bench` 三棵树里的 19 个 `.js`、约 52000 token，
+  `gen(parse(x))` 第二轮逐字节不动。把测试脚本和 bench 也纳进来不是凑数：它们也是我们写的
+  JS，不去解析它们，"支持的子集"就是靠"没去解析"撑起来的。
+- 闸门 2（语义一致）：整棵 `stage0/` 树重新生成到 `.omni-build/js-roundtrip/`，用**生成出来的
+  编译器**跑 `tests/run.js` 与 `tests/oracle/run.js`，输出与原编译器逐字节相同
+  （`OMNI_CLI` 环境变量把测试套件指向另一份编译器）。
+- 这条轴上线当天抓到三个 bug，**没有一个是"解析失败"，全是"解析/生成成了错的东西"**：
+  1. `'toString' in {null:null,...}` 因为 `in` 走原型链而为真，于是 `x.toString(16)` 里的
+     `toString` 被当成字面量、值还是 `Object.prototype.toString` 那个函数。
+  2. 同一个坑在 `check.js` 的内建方法表上，`a.constructor()` 把编译器直接打崩（现在是
+     `tests/errors/prototype_names_are_not_methods.omni`）。查表一律改走 `Object.hasOwn`。
+  3. 数组空洞多发一个逗号：`[, r]` 生成成 `[,, r]`，元素整体右移一位。第一轮输出是合法
+     JS，只有幂等的第二轮才暴露 —— 这条说明幂等判据必须是"逐字节相同"而不是"还能解析"。
+
+  第 1、3 条只有"生成回去再逐字节比"才会现形；第 3 条还得靠把闸门范围扩到整个仓库的 JS
+  （同一次扩围顺带逼出了 `delete`：我在子集文档里把它列为不支持，自己的测试脚本却在用它）。
+
 **接下来**（顺序按 ADR-0001 的落地顺序重排）
-1. **JS 语法前端第一版**：`stage0/src/frontend-js/`，先能解析 `stage0/src` 全部文件。
-2. **`tests/js-roundtrip/`**：幂等（`gen(parse(x))` 再往返一次逐字节相同）+ 语义一致
-   （原始 js 与生成 js 在 node 下输出相同）。
-3. **打通 C0 → C1 → C2，验不动点**（C1 与 C2 产出的 C 逐字节相同）。
-   注意真正的拦路虎不是解析，而是编译器源码要用的**语言特性**：闭包 / 函数值
-   （4485 行里 110 个箭头函数、161 处带回调的数组方法）与异质记录对象（AST 节点），
-   两者 Omni 都还没有。
-4. 写 `docs/js-bootstrap-subset.md`，冻结 JS 自举子集。
-5. `dynamic` 的算术与 `print`/`string()` 的容器支持（上面两条欠账）—— 做完这两条，
-   `.omnid` 才算真能用，REPL 默认模式也就能按 ADR-0008 改回 `dynamic`。
-6. **ARC**（ADR-0006 落地顺序第 4 项的欠账）：按 ADR-0007 的一张编译期 unwind 表
+1. **JS AST → OIR 的降级**，也就是 C0 → C1 → C2 不动点（C1 与 C2 产出的 C 逐字节相同）。
+   拦路虎不是解析 —— 解析已经通了 —— 而是编译器源码要用的**语言特性**：闭包 / 函数值
+   （110 个箭头函数、161 处带回调的数组方法）、异质记录对象（AST 节点）、异常
+   （`throw` / `try`），以及 `docs/js-bootstrap-subset.md` 里那张宿主库清单在 Omni 里的对应物。
+   这些 Omni 都还没有，所以 **C 路径自举尚未开始**。
+2. tagged union，然后闭包 / 函数值（第 1 条的前置，先做这个）。
+3. `dynamic` 的算术与 `print`/`string()` 的容器支持 —— 做完这两条，`.omnid` 才算真能用，
+   REPL 默认模式也就能按 ADR-0008 改回 `dynamic`。
+4. **ARC**（ADR-0006 落地顺序第 4 项的欠账）：按 ADR-0007 的一张编译期 unwind 表
    （`pc → 存活的 owned 槽位`）同时服务错误路径释放与 GC 根枚举。当前 C 侧只分配不释放。
    注意 ADR-0001 把它从"自举前置"降级了：编译器用 arena 就够，ARC 的价值在长期运行的程序上。
-7. tagged union，然后闭包 / 函数值（第 3 条的前置）。
-8. OIR 升级为 SSA + dialect 分层（P2 的真正内容），此时才开始写优化 pass。
-9. 补 `docs/adr/0002-ir-strategy.md`、`0003-memory-model.md`、`0004-ufcs-resolution.md`
+5. OIR 升级为 SSA + dialect 分层（P2 的真正内容），此时才开始写优化 pass。
+6. 补 `docs/adr/0002-ir-strategy.md`、`0003-memory-model.md`、`0004-ufcs-resolution.md`
    （`0001-bootstrap-strategy.md`、`0009-module-paths.md` 已写）。
-10. 语法调研：Asymptote 与 Jancy 的冲突点（声明语法、运算符、`import` 语义）对照表 → Omni v0 语法定稿。
-11. tcc 在本机无 bottle（`brew install tcc` 失败），暂用 clang；需要毫秒级 C 编译时从
-    `reference/tinycc` 源码构建。运行时 `.o` 缓存之后 `bench` 的 c 一路降到 151ms，
-    剩下的仍然基本是 clang `-O2` 编译生成代码的时间（原生二进制本身 5ms）。
+7. 语法调研：Asymptote 与 Jancy 的冲突点（声明语法、运算符、`import` 语义）对照表 → Omni v0 语法定稿。
+8. tcc 在本机无 bottle（`brew install tcc` 失败），暂用 clang；需要毫秒级 C 编译时从
+   `reference/tinycc` 源码构建。运行时 `.o` 缓存之后 `bench` 的 c 一路降到 151ms，
+   剩下的仍然基本是 clang `-O2` 编译生成代码的时间（原生二进制本身 5ms）。
