@@ -271,17 +271,17 @@ omni/
   只打增量 stdout。重放在当前语言下语义精确（可观察副作用只有 `print`）。副产品是失败的
   那一块直接不进会话，状态自动回到上次成功的样子，不需要回滚代码。
 - 默认 `--mode mixed`（不是 ADR 写的 dynamic）：`dynamic` 上还没有算术，`x * x` 会报错，
-  做不了乘法的 REPL 没有意义。`:mode` 可以随时切。
+  做不了乘法的 REPL 没有意义。`:mode` 可以随时切。**（已于 2026-08-26 改回 `dynamic`）**
 - 表达式回显（`1 + 2` → `3`）、括号未闭合续行、`:help :quit :list :reset :mode :js :c`。
 - 测试：`tests/repl/session.in` + `.expected`，走 stdin 管道（管道输入时不打提示符，
   stdout 可以逐字节比对），已并入 `node tests/run.js`。
 - 顺带修掉 `libsFor` 的一个真 bug：`/\bJson\b/` 在 `parseJson` 里匹配不上，
   所以 `j = parseJson(s)` 会报 "undefined function 'parseJson'" —— json 库根本没被拼进来。
 
-**已知欠账（REPL 暴露出来的）**
-- `dynamic` 上没有算术运算符，`.omnid` 模式因此只能做取值/索引/迭代，不能计算。
-- `print` / `string()` 不支持容器：`print(list<int>)` 是编译错误，所以 REPL 里 `ys`
-  回显不出来。两条都不是 REPL 的问题，但都卡着 REPL 的手感。
+**已知欠账（REPL 暴露出来的）** —— 两条都已在 2026-08-26 补掉，见下面「dynamic 可算 + 容器可打印」。
+- ~~`dynamic` 上没有算术运算符，`.omnid` 模式因此只能做取值/索引/迭代，不能计算。~~
+- ~~`print` / `string()` 不支持容器：`print(list<int>)` 是编译错误，所以 REPL 里 `ys`
+  回显不出来。~~
 
 **已决定（自举策略，2026-08-25）**：ADR-0001。
 - **语法前端加 JS 并永久可用**，不是自举脚手架；和 GLSL 前端并列，是对"前端/后端分离"
@@ -393,20 +393,39 @@ omni/
   最后一条是这一步逮到的真 bug：`a?.b.find(f)` 原来只把判空包住 `.b`，a 为空照样去调 `find`。
 - 安装布局定死一条：**std 的根是 `installDir()/../../lib`**，换位置放的编译器要按这个布局摆。
 
+**已完成（dynamic 可算 + 容器可打印，2026-08-26）**：ADR-0008 第 5 节的闭合清单再扩一批，
+上面「REPL 暴露出来的两条欠账」就是被这一步还掉的。
+- **`dynamic` 上的算术**：`+ - * / %` 与一元 `-`。标签严格、**不做任何强制转换**：
+  int⊕int 走 i64 回绕、掺一个 real 就全按 f64、`string + string` 拼接，其余组合是运行期
+  错误（`cannot apply '+' to string and int`）。刻意不要 JS 的 `"a" + 1` —— 那条规则是
+  JS 里 bug 最多产的地方之一，而 Omni 的 dynamic 是"值域收窄的动态"，不是 `any`。
+- **`print(容器)` / `string(容器)`**：容器先**深装箱**成 `list<dynamic>` /
+  `dict<string,dynamic>`（一个显式 op `boxDeep`），再交给已有的 `dynToText`。
+  **不新造第二个序列化器**，`lib/json.omni` 依然是唯一那份。
+  两个后端的形状差别很大，这也是它必须是一个 op 而非运行时函数的原因：JS 侧 dynamic 无标签、
+  `list<int>` 本来就是数组，所以 `boxDeep` 是**恒等**、直接消解；C 侧容器是宏模板单态的、
+  没有通用遍历，所以转换函数**按类型生成**，嵌套容器靠前置声明解决生成顺序。
+  能装箱的形状：元素是 int/real/bool/string/dynamic 或又是容器，且 dict 键是 `string`。
+  **`set` 不行** —— dynamic 里没有 set 这个标签，与其造一个假的不如让它继续报错。
+- **REPL 默认模式改回 `dynamic`**（ADR-0008 第 3 节，偏差消除）：同一份
+  `tests/repl/session.in` 在 mixed / dynamic 下除 `:mode` 那行输出**逐字节相同**，
+  而 dynamic 额外给出 REPL 真正需要的那条性质 —— `x = 10` 之后 `x = "s"` 能过。
+  快照里现在就有这一对（`x = "now a string"`）。
+- 测试：`tests/cases/22_dyn_arith`（差分）、`23_dyn_arith_mismatch`（运行期错误两边同文）、
+  `24_print_containers`（差分，含嵌套/空/异质），加 `tests/js-exec/cases/03` 的回归行。
+
 **接下来**（顺序按 ADR-0001 的落地顺序重排）
 1. **原生侧的内存**：编译整个编译器 RSS 811 MB。低垂果实已经摘完（见上），剩下的
-   要靠生命周期信息 —— 并进第 4 条 ARC 一起做，而不是继续在分配器上抠。
+   要靠生命周期信息 —— 并进第 3 条 ARC 一起做，而不是继续在分配器上抠。
 2. tagged union（异质记录的底座）。
-3. `dynamic` 的算术与 `print`/`string()` 的容器支持 —— 做完这两条，`.omnid` 才算真能用，
-   REPL 默认模式也就能按 ADR-0008 改回 `dynamic`。
-4. **ARC**（ADR-0006 落地顺序第 4 项的欠账）：按 ADR-0007 的一张编译期 unwind 表
+3. **ARC**（ADR-0006 落地顺序第 4 项的欠账）：按 ADR-0007 的一张编译期 unwind 表
    （`pc → 存活的 owned 槽位`）同时服务错误路径释放与 GC 根枚举。当前 C 侧只分配不释放。
    注意 ADR-0001 把它从"自举前置"降级了：编译器用 arena 就够，ARC 的价值在长期运行的程序上。
-5. OIR 升级为 SSA + dialect 分层（P2 的真正内容），此时才开始写优化 pass。
+4. OIR 升级为 SSA + dialect 分层（P2 的真正内容），此时才开始写优化 pass。
    顺带可做的一条：`MakeClosure` 紧跟 `CallFn` 时直调消解，去掉适配器那一次多余调用。
-6. 补 `docs/adr/0002-ir-strategy.md`、`0003-memory-model.md`、`0004-ufcs-resolution.md`
+5. 补 `docs/adr/0002-ir-strategy.md`、`0003-memory-model.md`、`0004-ufcs-resolution.md`
    （`0001`、`0009`、`0010` 已写）。
-7. 语法调研：Asymptote 与 Jancy 的冲突点（声明语法、运算符、`import` 语义）对照表 → Omni v0 语法定稿。
-8. tcc 在本机无 bottle（`brew install tcc` 失败），暂用 clang；需要毫秒级 C 编译时从
+6. 语法调研：Asymptote 与 Jancy 的冲突点（声明语法、运算符、`import` 语义）对照表 → Omni v0 语法定稿。
+7. tcc 在本机无 bottle（`brew install tcc` 失败），暂用 clang；需要毫秒级 C 编译时从
    `reference/tinycc` 源码构建。运行时 `.o` 缓存之后 `bench` 的 c 一路降到 151ms，
    剩下的仍然基本是 clang `-O2` 编译生成代码的时间（原生二进制本身 5ms）。

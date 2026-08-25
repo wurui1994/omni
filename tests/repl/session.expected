@@ -18,7 +18,8 @@ true
 1000.0
 2
 10
-mixed
+now a string
+dynamic
 x = 10;
 print(x * x);
 print(x + 1);
@@ -43,6 +44,8 @@ print(j);
 print(j["a"][2]["b"]);
 print(j["n"]);
 print(j.length);
+print(x);
+x = "now a string";
 print(x);
 session reset
 (empty session)

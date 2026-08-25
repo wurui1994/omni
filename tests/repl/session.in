@@ -25,6 +25,8 @@ j.length
 zzz + 1
 1 / 0
 x
+x = "now a string"
+x
 :mode
 :list
 :reset

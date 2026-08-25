@@ -156,8 +156,8 @@ function main(argv) {
     stdout(USAGE);
     return 0;
   }
-  // repl 没有源文件；默认模式见 repl.js 的文件头（不是 ADR-0008 说的 dynamic，有原因）
-  if (cmd === 'repl') return startRepl(compileText, modeFor('', rest, 'mixed'));
+  // repl 没有源文件；默认模式是 ADR-0008 第 3 节的 dynamic（沿革见 repl.js 文件头）
+  if (cmd === 'repl') return startRepl(compileText, modeFor('', rest, 'dynamic'));
   if (!path) throw new OmniError(`command '${cmd}' needs a source file`);
   if (!exists(path)) throw new OmniError(`no such file: ${path}`);
 
@@ -220,7 +220,7 @@ const USAGE = `omni — stage0 bootstrap compiler
 usage: omni <command> <file.omni>
 
 commands:
-  repl      interactive session (no file; defaults to --mode mixed, see repl.js)
+  repl      interactive session (no file; defaults to --mode dynamic)
   run       compile to JS and execute in-process
   run-c     compile to C, build with cc, execute
   build     compile to a native executable  (-o NAME)

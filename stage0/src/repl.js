@@ -15,12 +15,11 @@
 //
 // 默认模式是 `dynamic`（ADR-0008 第 3 节）：REPL 里 `x = 1` 之后 `x = "s"` 必须能过，
 // 而混合模式下推断出来的变量是单态的。`--mode` 可覆盖。
-
-// 默认模式是 **mixed**，不是 ADR-0008 第 3 节写的 dynamic。原因是 stage0 的 `dynamic` 上
-// 还没有算术：`x = 10` 之后 `x * x` 会报 "operator '*' cannot be applied to 'dynamic' and
-// 'dynamic'"，一个连乘法都做不了的 REPL 没有意义。mixed 下 `x = 10` 推断成 int，算术、UFCS、
-// 原生 json 都能用，代价是推断出来的变量是单态的（`x = "s"` 会报错，但错误消息里就写了
-// 怎么办）。等 `dynamic` 的算术落地，默认值应该改回 dynamic —— 那时 `:mode` 两边都能用。
+//
+// 这个默认值曾经被临时改成 mixed，因为那时 `dynamic` 上没有算术，`x = 10` 之后 `x * x`
+// 会报错，一个连乘法都做不了的 REPL 没有意义。`dynamic` 的算术与 `print(容器)` 落地后
+// （2026-08-26）已改回 ADR 写的 dynamic：同一份 tests/repl/session.in 在两个模式下
+// 除 `:mode` 那行外输出逐字节相同，而 dynamic 额外拿到了重新赋不同类型的能力。
 
 import { stdout, stderr, stdinIsTty, readLine, evalCaptured } from './host/native.js';
 import { SourceFile, Diagnostics, OmniError } from './source/diag.js';
