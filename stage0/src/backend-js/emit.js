@@ -61,8 +61,14 @@ class JsEmitter {
         const args = [...lits, ...ps.slice(0, abi.arity)];
         this.line(`case ${JSON.stringify(tag)}: return ${abi.js}(${args.join(', ')});`);
       }
-      const what = m.kind === 'prop' ? 'property' : 'method';
-      this.line(`default: $rt_error("no ${what} ${m.name} on " + $dynTag(r));`);
+      // 表外的接收者：属性就是普通属性，方法就是"取属性再当函数调"（ADR-0011 决策 12）
+      const get = `$js_obj_get(r, ${JSON.stringify(m.name)})`;
+      if (m.kind === 'prop') {
+        this.line(`default: return ${get};`);
+      } else {
+        const call = `$js_call_n(${get}, [${ps.slice(1).join(', ')}])`;
+        this.line(`default: return ${d.ret === 'bool' ? `$js_truthy(${call})` : call};`);
+      }
       this.indent--;
       this.line('}');
       this.indent--;

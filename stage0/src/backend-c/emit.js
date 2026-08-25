@@ -222,8 +222,18 @@ class CEmitter {
           ? `case ${JS_TAG_C[tag]}: ${call}; return omni_dyn_undef();`
           : `case ${JS_TAG_C[tag]}: return ${call};`);
       }
-      const what = m.kind === 'prop' ? 'property' : 'method';
-      this.line(`default: omni_errorf("no ${what} ${m.name} on %s", omni_dyn_tag_name(r.tag));`);
+      // 表外的接收者：属性就是普通属性，方法就是"取属性再当函数调"（ADR-0011 决策 12）
+      const get = `omni_js_obj_get(r, omni_dyn_of_s16(omni_js_s16_lit(${JSON.stringify(m.name)})))`;
+      if (m.kind === 'prop') {
+        this.line(`default: return ${get};`);
+      } else {
+        const argv = m.argc ? `${m.argc}, a_` : '0, NULL';
+        const call = `omni_js_call_n(${get}, ${argv})`;
+        const ret = d.ret === 'bool' ? `omni_js_truthy(${call})` : call;
+        this.line(m.argc
+          ? `default: { const omni_dyn a_[] = { ${ps.slice(1).join(', ')} }; return ${ret}; }`
+          : `default: return ${ret};`);
+      }
       this.indent--;
       this.line('}');
       this.line(d.ret === 'bool' ? 'return false;' : 'return omni_dyn_undef();');

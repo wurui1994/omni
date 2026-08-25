@@ -23,6 +23,8 @@ const JS_FN = fnType([listType(DYNAMIC)], DYNAMIC);
 
 /** 形参数组：静态类型是 list&lt;dynamic&gt;，喂给 js_* op 之前要装箱 */
 const argsDyn = () => box({ kind: 'VarRef', name: 'args', type: listType(DYNAMIC) }, listType(DYNAMIC));
+/** 没装箱的形参数组：转发给另一个函数时要的就是这个（形参类型本来就是 list&lt;dynamic&gt;） */
+const argsRaw = () => ({ kind: 'VarRef', name: 'args', type: listType(DYNAMIC) });
 
 /* ---------------------------------------------------------------- OIR 构造助手 */
 
@@ -82,6 +84,50 @@ function patternNames(pat, lower, span, out = []) {
   return out;
 }
 
+/* ---- 捕获分析（6b）：只需要"哪些名字被内层函数引用过"，宁可多算不能少算 ---- */
+
+/** 遍历一个 AST 节点的子节点。跳过 span（里面挂着整个 SourceFile） */
+function eachChild(node, f) {
+  for (const k of Object.keys(node)) {
+    if (k === 'span' || k === 'type') continue;
+    const v = node[k];
+    if (Array.isArray(v)) {
+      for (const x of v) if (x && typeof x === 'object') f(x);
+    } else if (v && typeof v === 'object') {
+      f(v);
+    }
+  }
+}
+
+/**
+ * 子树里出现的所有标识符名。刻意**过度估计**（属性名、模式里的名字也收进来）：
+ * 多算一个名字只会多做一个 cell 或多捕获一个已有的 cell，语义不会错；少算会错。
+ */
+function refNames(node, out = new Set()) {
+  if (!node || typeof node !== 'object') return out;
+  if (node.type === 'Ident' && typeof node.name === 'string') out.add(node.name);
+  eachChild(node, (x) => refNames(x, out));
+  return out;
+}
+
+/** 子树里最外层的那些函数节点（不再往里钻 —— refNames 会把更深层一起收） */
+function nestedFns(node, out = []) {
+  if (!node || typeof node !== 'object') return out;
+  if (node.type === 'Arrow' || node.type === 'FuncExpr' || node.type === 'FuncDecl') {
+    out.push(node);
+    return out;
+  }
+  eachChild(node, (x) => nestedFns(x, out));
+  return out;
+}
+
+/** 这一层函数里，会被内层函数引用到的名字 —— 它们的局部量要装进 cell */
+function capturedNames(stmts) {
+  const out = new Set();
+  for (const s of stmts) for (const fn of nestedFns(s)) refNames(fn, out);
+  return out;
+}
+
 class Lower {
   /** @param {import('../source/diag.js').Diagnostics} diags */
   constructor(diags) {
@@ -94,6 +140,10 @@ class Lower {
     /** 初始化式是正则字面量的模块级 const：名字 -> {body, flags}（ADR-0011 决策 10） */
     this.regexConsts = new Map();
     this.used = new Set();
+    /** 闭包记录（ADR-0010 的布局），MakeClosure 的 closure 下标就是这里的位置 */
+    this.closures = [];
+    /** 顶层函数当值用时的转发闭包：名字 -> 闭包记录（一个函数只生成一次） */
+    this.fnValues = new Map();
     this.fn = null;
   }
 
@@ -117,7 +167,7 @@ class Lower {
     }
     // 顶层的其余语句是 omni_main 的函数体；模块级变量的初始化也在这里发生
     const main = { name: 'main', mangled: 'omni_main', ret: { k: 'void' }, params: [], body: null };
-    this.fn = { temps: 0, prelude: [], loops: 0, switches: 0, scopes: [new Map()], locals: new Set(), isMain: true, sink: [], lazies: 0 };
+    this.fn = this.newFrame(program.body, { isMain: true });
     const stmts = [];
     for (const s of program.body) {
       if (s.type === 'FuncDecl') continue;
@@ -132,7 +182,7 @@ class Lower {
       // dyn 桥与所有 js_* op 的发射条件（backend-c 的 dynBridge）：这两个实例必须在。
       // list<string> 是被 dict<string,dynamic> 的 _keys 拖进来的。
       containers: [listType(STRING), listType(D), dictType(STRING, D)],
-      closures: [],
+      closures: this.closures,
       // JS 的函数值只有一种签名，所以调用助手也只需要一个
       fnTypes: [JS_FN],
       jsGlobals: [...this.globals.values()],
@@ -176,22 +226,55 @@ class Lower {
   /**
    * 声明一个局部量。名字在**整个函数里**去重（不靠块级作用域来遮蔽）：OIR 的 Block
    * 虽然会发花括号，但 for-of / switch 的降级会插进合成的块，去重最省心。
+   *
+   * 会被内层函数引用到的名字装进 **cell**（一个单元素数组）：JS 的捕获是按引用的，
+   * 闭包里写一下、外面就得看见；而 OIR 的闭包捕获是按值的（ADR-0010）。让捕获变成
+   * "共享同一个数组对象"就对上了，代价是这些变量多一层下标。不做赋值分析：只要有
+   * 内层函数提到过这个名字就装 cell（宁可多装，不能少装）。
    */
   declare(name) {
     let uniq = cSafe(name);
     let i = 2;
     while (this.fn.locals.has(uniq)) uniq = `${cSafe(name)}__${i++}`;
     this.fn.locals.add(uniq);
-    this.fn.scopes[this.fn.scopes.length - 1].set(name, uniq);
-    return uniq;
+    const ent = { kind: this.fn.captured.has(name) ? 'cell' : 'local', name: uniq };
+    this.fn.scopes[this.fn.scopes.length - 1].set(name, ent);
+    return ent;
   }
 
+  /** @returns {{kind:'local'|'cell'|'capture', name:string}|null} */
   lookup(name) {
     for (let i = this.fn.scopes.length - 1; i >= 0; i--) {
       const hit = this.fn.scopes[i].get(name);
-      if (hit !== undefined) return hit;
+      if (hit !== undefined) {
+        // 捕获层里的名字只有**真被引用**才进闭包记录：refNames 是过度估计的
+        if (hit.kind === 'capture') this.fn.uses.add(name);
+        return hit;
+      }
     }
     return null;
+  }
+
+  /** 声明落地成一条 Local：cell 要包一层单元素数组 */
+  declStmt(ent, init) {
+    return localStmt(ent.name, ent.kind === 'cell' ? arrLit([init]) : init);
+  }
+
+  /** cell 本身：局部量里存着，或者从闭包记录上读 */
+  cellOf(ent) {
+    return ent.kind === 'capture' ? dyn('CaptureRef', { name: ent.name }) : varRef(ent.name);
+  }
+
+  /** 读一个绑定 */
+  readEntry(ent) {
+    if (ent.kind === 'local') return varRef(ent.name);
+    return op('js_arr_get', [this.cellOf(ent), constReal(0)]);
+  }
+
+  /** 写一个绑定；这是个表达式，值是刚写进去的那个 */
+  writeEntry(ent, v) {
+    if (ent.kind === 'local') return assign(varRef(ent.name), v);
+    return op('js_idx_set', [this.cellOf(ent), constReal(0), v]);
   }
 
   /** 临时量：声明提到函数开头（声明没有副作用，提上去是安全的），赋值留在表达式里 */
@@ -208,16 +291,37 @@ class Lower {
     this.funcs.push(this.funcOf(s.id, this.topFns.get(s.id), s.params, s.rest, s.body.body, s.span));
   }
 
-  funcOf(name, mangled, params, rest, bodyStmts, span) {
+  /** 一个新的函数栈帧。opts.outerScopes 给出捕获层（只有 cell 能被捕获） */
+  newFrame(bodyStmts, opts) {
+    const fn = {
+      temps: 0, prelude: [], loops: 0, switches: 0,
+      scopes: [new Map()], locals: new Set(['args']), sink: [], lazies: 0,
+      captured: capturedNames(bodyStmts), uses: new Set(), isMain: !!opts.isMain,
+    };
+    if (opts.outerScopes) {
+      // 外层可见的 cell 全摆进捕获层；lookup 命中过的才会真进闭包记录
+      const cap = new Map();
+      for (const sc of opts.outerScopes) {
+        for (const [n, ent] of sc) {
+          if (ent.kind === 'cell' || ent.kind === 'capture') cap.set(n, { kind: 'capture', name: ent.name });
+        }
+      }
+      fn.scopes = [cap, new Map()];
+    }
+    return fn;
+  }
+
+  funcOf(name, mangled, params, rest, bodyStmts, span, opts = {}) {
     const outer = this.fn;
-    this.fn = { temps: 0, prelude: [], loops: 0, switches: 0, scopes: [new Map()], locals: new Set(['args']), sink: [], lazies: 0 };
+    this.fn = this.newFrame(bodyStmts, opts);
     const stmts = [];
     params.forEach((p, i) => stmts.push(...this.bindParam(p, i, span)));
     if (rest) {
       if (rest.type !== 'Ident') this.err(span, 'destructuring a rest parameter is not supported');
-      const n = this.declare(rest.type === 'Ident' ? rest.name : '_rest');
-      stmts.push(localStmt(n, op('js_arr_slice', [argsDyn(), constReal(params.length), undefExpr()])));
+      const ent = this.declare(rest.type === 'Ident' ? rest.name : '_rest');
+      stmts.push(this.declStmt(ent, op('js_arr_slice', [argsDyn(), constReal(params.length), undefExpr()])));
     }
+    stmts.push(...this.hoistFuncDecls(bodyStmts));
     for (const st of bodyStmts) stmts.push(...this.stmt(st));
     const f = {
       name,
@@ -227,23 +331,131 @@ class Lower {
       // JS 的函数走到底没 return 就是 undefined；OIR 要求非 void 的函数有返回值
       body: block([...this.fn.prelude, ...stmts, { kind: 'Return', value: undefExpr() }]),
     };
+    const uses = this.fn.uses;
+    const capScope = opts.outerScopes ? this.fn.scopes[0] : null;
     this.fn = outer;
+    // 捕获表在**外层**这边解释：MakeClosure 的实参是外层的那些 cell
+    f.captureList = capScope ? [...uses].map((n) => capScope.get(n)) : [];
     return f;
   }
+
+  /**
+   * 嵌套的函数声明是提升的，而且可以互相递归。所以在栈帧入口分两趟：先给每个名字
+   * 立一个 cell（值先是 undefined），再逐个造闭包填进去 —— 这样第二趟里造的闭包
+   * 捕获到的都是已经存在的 cell，互相递归就通了。
+   */
+  hoistFuncDecls(bodyStmts) {
+    const decls = bodyStmts.filter((s) => s.type === 'FuncDecl');
+    if (!decls.length) return [];
+    this.fn.hoisted = new Set(decls);
+    const out = [];
+    const ents = [];
+    for (const d of decls) {
+      this.fn.captured.add(d.id);   // 提升的函数名一律装 cell，两趟才好分
+      const ent = this.declare(d.id);
+      ents.push(ent);
+      out.push(this.declStmt(ent, undefExpr()));
+    }
+    decls.forEach((d, i) => {
+      out.push(exprStmt(this.writeEntry(ents[i], this.closureExpr(d, d.id))));
+    });
+    return out;
+  }
+
+
+  /**
+   * 函数值（Arrow / FuncExpr / 嵌套的 FuncDecl），ADR-0011 落地第 6b 步。
+   * 体降级成一个独立的 OIR 函数（带 closureId），捕获的 cell 拷进闭包记录。
+   * @returns {{expr: any, closure: any}}
+   */
+  closureOf(node, label) {
+    const id = this.closures.length;
+    const mangled = this.mangle('l_', label);
+    const rec = { id, mangled, make: `omni_mk_${mangled}`, captures: [] };
+    this.closures.push(rec);   // 先占位：体里的嵌套闭包会往后追加，id 不能变
+    // 箭头的表达式体等价于 { return expr; }
+    const bodyStmts = node.type === 'Arrow' && node.expression
+      ? [{ type: 'Return', arg: node.body, span: node.span }]
+      : node.body.body;
+    if (node.type === 'FuncExpr' && node.id && refNames(node).has(node.id)) {
+      this.err(node.span, `a named function expression cannot refer to itself ('${node.id}'); use a const arrow instead`);
+    }
+    const f = this.funcOf(label, mangled, node.params, node.rest, bodyStmts, node.span, {
+      outerScopes: this.fn.scopes,
+    });
+    f.closureId = id;
+    rec.captures = f.captureList.map((e) => ({ name: e.name, type: D }));
+    this.funcs.push(f);
+    return rec;
+  }
+
+  /** 闭包值的构造表达式（在**外层**栈帧里求值） */
+  closureExpr(node, label) {
+    return this.makeClosure(this.closureOf(node, label));
+  }
+
+  makeClosure(rec) {
+    return op('js_ofFn', [{
+      kind: 'MakeClosure',
+      closure: rec.id,
+      make: rec.make,
+      args: rec.captures.map((c) => this.cellOf(this.lookupCell(c.name))),
+      type: JS_FN,
+    }]);
+  }
+
+  /**
+   * 按 cell 的**落地名**在当前栈帧里找回它（捕获表存的就是这个名字）。命中捕获层时
+   * 要记一笔：内层闭包捕获的名字，本层自己也得捕获才能传下去（捕获是一级一级传的）。
+   */
+  lookupCell(uniq) {
+    for (let i = this.fn.scopes.length - 1; i >= 0; i--) {
+      for (const [n, ent] of this.fn.scopes[i]) {
+        if (ent.name !== uniq) continue;
+        if (ent.kind === 'capture') this.fn.uses.add(n);
+        return ent;
+      }
+    }
+    throw new Error(`lower.js: captured cell '${uniq}' is not in scope`);
+  }
+
+  /** 顶层函数当值用：包一个零捕获的转发闭包，按需生成一次 */
+  topFnValue(name) {
+    const hit = this.fnValues.get(name);
+    if (hit) return this.makeClosure(hit);
+    const id = this.closures.length;
+    const mangled = this.mangle('a_', name);
+    const rec = { id, mangled, make: `omni_mk_${mangled}`, captures: [] };
+    this.closures.push(rec);
+    this.funcs.push({
+      name: `${name}#value`,
+      mangled,
+      ret: D,
+      params: [{ name: 'args', type: listType(D) }],
+      closureId: id,
+      body: block([{
+        kind: 'Return',
+        value: { kind: 'Call', func: this.topFns.get(name), name, args: [argsRaw()], type: D },
+      }]),
+    });
+    this.fnValues.set(name, rec);
+    return this.makeClosure(rec);
+  }
+
 
   /** 形参从 args 数组里取；缺席就是 undefined，默认值只在 === undefined 时生效 */
   bindParam(p, i, span) {
     const get = op('js_arr_get', [argsDyn(), constReal(i)]);
-    if (p.type === 'Ident') return [localStmt(this.declare(p.name), get)];
+    if (p.type === 'Ident') return [this.declStmt(this.declare(p.name), get)];
     if (p.type === 'AssignPattern' && p.left.type === 'Ident') {
-      const n = this.declare(p.left.name);
+      const ent = this.declare(p.left.name);
       const dflt = this.expr(p.right);
       return [
-        localStmt(n, get),
+        this.declStmt(ent, get),
         {
           kind: 'If',
-          cond: boolOp('js_eq', [varRef(n), undefExpr()], { strict: true }),
-          then: block([exprStmt(assign(varRef(n), dflt))]),
+          cond: boolOp('js_eq', [this.readEntry(ent), undefExpr()], { strict: true }),
+          then: block([exprStmt(this.writeEntry(ent, dflt))]),
           otherwise: null,
         },
       ];
@@ -337,7 +549,9 @@ class Lower {
         this.err(s.span, 'throw/try are not lowered yet (ADR-0011 landing step 6d)');
         return [];
       case 'FuncDecl':
-        this.err(s.span, 'nested function declarations are not lowered yet (ADR-0011 landing step 6b)');
+        // 提升过了：funcOf 在栈帧入口就把 cell 和闭包都摆好了（hoistFuncDecls）
+        if (this.fn.hoisted?.has(s)) return [];
+        this.err(s.span, 'a nested function declaration is only supported at the top of a function body');
         return [];
       case 'ClassDecl':
         this.err(s.span, 'class declarations are not lowered yet (ADR-0011 landing step 6c)');
@@ -368,26 +582,43 @@ class Lower {
       // 记成编译期常量了，这里什么都不发
       if (d.id.type === 'Ident' && this.fn.isMain && this.fn.scopes.length === 1
           && this.regexConsts.has(d.id.name)) continue;
-      const init = d.init ? this.expr(d.init) : undefExpr();
-      if (d.id.type === 'Ident') out.push(this.defineVar(d.id.name, init));
-      else out.push(...this.bindPattern(d.id, init));
+      const init = () => (d.init ? this.expr(d.init) : undefExpr());
+      if (d.id.type === 'Ident') out.push(...this.defineVar(d.id.name, init));
+      else out.push(...this.bindPattern(d.id, init()));
     }
     return out;
   }
 
-  /** 声明一个变量：模块级的是全局槽（顶层函数要能看见），函数里的是普通局部量 */
-  defineVar(name, init) {
+  /**
+   * 声明一个变量：模块级的是全局槽（顶层函数要能看见），函数里的是普通局部量或 cell。
+   * 初始化式是**惰性**给的：cell 要先立起来才能算初始化式，`const f = x => f(x-1)`
+   * 这种自递归的箭头靠的就是这个顺序。
+   */
+  defineVar(name, initFn) {
     if (this.fn.isMain && this.fn.scopes.length === 1 && this.globals.has(name)) {
-      return exprStmt(assign(globalRef(this.globals.get(name).name), init));
+      return [exprStmt(assign(globalRef(this.globals.get(name).name), initFn()))];
     }
-    return localStmt(this.declare(name), init);
+    if (this.fn.captured.has(name)) {
+      const ent = this.declare(name);
+      return [localStmt(ent.name, arrLit([undefExpr()])), exprStmt(this.writeEntry(ent, initFn()))];
+    }
+    // 普通局部量：先算初始化式再声明 —— `let x = x` 里右边的 x 是外层那个
+    const init = initFn();
+    return [localStmt(this.declare(name).name, init)];
   }
 
-  /** defineVar 之后引用它 */
+  /** defineVar 之后读它 */
   refVar(name) {
-    const local = this.lookup(name);
-    if (local) return varRef(local);
+    const ent = this.lookup(name);
+    if (ent) return this.readEntry(ent);
     return globalRef(this.globals.get(name).name);
+  }
+
+  /** defineVar 之后写它（表达式） */
+  writeVar(name, v) {
+    const ent = this.lookup(name);
+    if (ent) return this.writeEntry(ent, v);
+    return assign(globalRef(this.globals.get(name).name), v);
   }
 
   /**
@@ -395,9 +626,9 @@ class Lower {
    * （和 for-of 的循环变量），所以这里只管声明。嵌套的模式支持，但计算键不支持。
    */
   bindPattern(pat, value) {
-    if (pat.type === 'Ident') return [this.defineVar(pat.name, value)];
+    if (pat.type === 'Ident') return this.defineVar(pat.name, () => value);
     // 右值只算一次，存进一个临时量再按位取
-    const t = this.declare('_d');
+    const t = this.declare('_d').name;
     const out = [localStmt(t, value)];
     if (pat.type === 'ArrayPattern') {
       pat.elements.forEach((el, i) => {
@@ -431,11 +662,11 @@ class Lower {
         return this.bindPattern(el.left, value);
       }
       const ref = () => this.refVar(el.left.name);
-      const decl = this.defineVar(el.left.name, value);
-      return [decl, {
+      const decl = this.defineVar(el.left.name, () => value);
+      return [...decl, {
         kind: 'If',
         cond: boolOp('js_eq', [ref(), undefExpr()], { strict: true }),
-        then: block([exprStmt(assign(ref(), this.expr(el.right)))]),
+        then: block([exprStmt(this.writeVar(el.left.name, this.expr(el.right)))]),
         otherwise: null,
       }];
     }
@@ -473,6 +704,13 @@ class Lower {
     if (s.init) {
       pre = s.init.type === 'VarDecl' ? this.varDecl(s.init) : [exprStmt(this.expr(s.init.expr))];
     }
+    // `for (let i = …)` 的绑定在 JS 里是**每轮一个新的**，而这里的循环变量只有一个 cell。
+    // 闭包捕获它就会两边（其实是和 JS 自己）分叉，所以直接拒绝，不悄悄给出 var 的语义。
+    for (const [n, ent] of this.fn.scopes[this.fn.scopes.length - 1]) {
+      if (ent.kind === 'cell') {
+        this.err(s.span, `'${n}' is a for-loop variable captured by a closure; copy it into a body-local const first`);
+      }
+    }
     const cond = s.test ? this.lazy(() => truthy(this.expr(s.test))) : { kind: 'Const', type: BOOL, value: true };
     const step = s.update ? this.lazy(() => this.exprDiscard(s.update)) : null;
     this.fn.loops++;
@@ -494,8 +732,8 @@ class Lower {
       return [];
     }
     this.pushScope();
-    const it = this.declare('_it');
-    const i = this.declare('_i');
+    const it = this.declare('_it').name;
+    const i = this.declare('_i').name;
     const pre = [localStmt(it, op('js_iter', [this.expr(s.right)])), localStmt(i, constReal(0))];
     const cond = boolOp('js_cmp', [varRef(i), op('js_p_length', [varRef(it)])], { op: '<' });
     const step = assign(varRef(i), op('js_add', [varRef(i), constReal(1)]));
@@ -516,7 +754,7 @@ class Lower {
    */
   switchStmt(s) {
     this.pushScope();
-    const d = this.declare('_sw');
+    const d = this.declare('_sw').name;
     const pre = [localStmt(d, this.expr(s.disc))];
     this.fn.switches++;
     /** @type {{tests: any[], body: any[]}[]} */
@@ -592,8 +830,7 @@ class Lower {
         this.err(e.span, "'this' is not lowered yet (ADR-0011 landing step 6c)");
         return undefExpr();
       case 'Arrow': case 'FuncExpr':
-        this.err(e.span, 'function values are not lowered yet (ADR-0011 landing step 6b)');
-        return undefExpr();
+        return this.closureExpr(e, e.type === 'FuncExpr' && e.id ? e.id : 'fn');
       case 'ClassExpr':
         this.err(e.span, 'class expressions are not lowered yet (ADR-0011 landing step 6c)');
         return undefExpr();
@@ -638,17 +875,15 @@ class Lower {
         return undefExpr();
       default: break;
     }
-    const local = this.lookup(e.name);
-    if (local) return varRef(local);
+    const ent = this.lookup(e.name);
+    if (ent) return this.readEntry(ent);
     if (this.regexConsts.has(e.name)) {
       this.err(e.span, `'${e.name}' holds a regex, which can only be used directly in .test / .replace / .match / .split`);
       return undefExpr();
     }
     if (this.globals.has(e.name)) return globalRef(this.globals.get(e.name).name);
-    if (this.topFns.has(e.name)) {
-      this.err(e.span, `'${e.name}' is a function used as a value, which is not lowered yet (ADR-0011 landing step 6b)`);
-      return undefExpr();
-    }
+    // 顶层函数当值用：包一个零捕获的转发闭包（每个函数只包一次）
+    if (this.topFns.has(e.name)) return this.topFnValue(e.name);
     if (STATIC_NS.has(e.name)) {
       this.err(e.span, `'${e.name}' can only be used as a member base, e.g. ${e.name}.something`);
       return undefExpr();
@@ -972,8 +1207,8 @@ class Lower {
    */
   lvalue(node, span) {
     if (node.type === 'Ident') {
-      const local = this.lookup(node.name);
-      if (local) return { get: () => varRef(local), set: (v) => assign(varRef(local), v) };
+      const ent = this.lookup(node.name);
+      if (ent) return { get: () => this.readEntry(ent), set: (v) => this.writeEntry(ent, v) };
       if (this.globals.has(node.name)) {
         const g = this.globals.get(node.name).name;
         return { get: () => globalRef(g), set: (v) => assign(globalRef(g), v) };

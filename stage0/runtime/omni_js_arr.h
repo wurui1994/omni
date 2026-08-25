@@ -32,6 +32,19 @@ static omni_dyn omni_js_call3(omni_dyn f, omni_dyn a, int64_t i, omni_dyn self) 
   args->len = 3; \
   return omni_js_call(f, args); \
 } \
+/* 成员派发的兜底（ADR-0011 决策 12）：接收者的标签没有内建实现时，o.m(x) 就是
+   "取属性，再当函数调"。派发器的形参个数是表里的最大值，末尾多出来的 undefined
+   等于没给 —— 削掉再调，这样 (...xs) => xs.length 两边才一致。 */ \
+static omni_dyn omni_js_call_n(omni_dyn f, int64_t n, const omni_dyn *a) { \
+  while (n > 0 && a[n - 1].tag == OMNI_DYN_UNDEF) n--; \
+  LT args = LT##_new(); \
+  if (n > 0) { \
+    LT##_reserve(args, n); \
+    for (int64_t i = 0; i < n; i++) args->items[i] = a[i]; \
+    args->len = n; \
+  } \
+  return omni_js_call(f, args); \
+} \
 static LT omni_js_arr_of(omni_dyn v) { return (LT)omni_dyn_as_ref(v, OMNI_DYN_LIST); } \
 static omni_dyn omni_js_arr_wrap(LT l) { return omni_dyn_of_ref((void *)l, OMNI_DYN_LIST); } \
 static omni_dyn omni_js_arr_new(void) { return omni_js_arr_wrap(LT##_new()); } \

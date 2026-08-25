@@ -214,6 +214,13 @@ function $callFn(f, ...args) {
   if (f === null) $rt_error("call of a null function value");
   return f.fp(f, ...args);
 }
+// 成员派发的兜底（ADR-0011 决策 12）：派发器的形参个数是表里的最大值，末尾多出来的
+// undefined 等于没给 —— 削掉再调，C 侧的 omni_js_call_n 是同一套。
+function $js_call_n(f, args) {
+  let n = args.length;
+  while (n > 0 && args[n - 1] === undefined) n--;
+  return $callFn($js_asFn(f), args.slice(0, n));
+}
 
 // ------------------------------------------------------ JS 前端的运算语义（ADR-0011）
 // 每一条都必须和 runtime/omni_js.c 里的 omni_js_* 逐位对应。刻意不直接用宿主的
