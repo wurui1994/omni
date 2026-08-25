@@ -205,6 +205,9 @@ export const JS_ABI = {
   // 宿主里跑一段生成的 JS。原生构建里没有 JS 引擎，C 侧只会报错（omni_js_host.c）——
   // 存在的理由是编译器自己的 `omni run` 与 REPL 要能降级，见 host/native.js 的说明。
   // captured 版把 stdout/stderr 收进字符串，结果是 [out, err, failed]。
+  // has_engine 是"先问能力"：宿主的错误不是可以 catch 的异常，所以 `omni run` 必须先
+  // 知道这一代有没有引擎，才能决定是进程内 eval 还是走 C 路径。
+  js_has_engine: { js: '$js_has_engine', c: 'omni_js_has_engine', arity: 0, ret: 'bool' },
   js_eval: { js: '$js_eval', c: 'omni_js_eval', arity: 1 },
   js_eval_captured: { js: '$js_eval_captured', c: 'omni_js_eval_captured', arity: 1 },
 

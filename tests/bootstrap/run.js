@@ -135,6 +135,19 @@ if (c1 && !quick) {
   }
   if (r.code === 0) ok('omni bootstrap  layout + C1/C2 + C path + stage2');
   else bad('omni bootstrap', `    exit=${r.code}\n${r.err}`);
+
+  // ---- 阶段 6：原生编译器上的 `run` --------------------------------------------
+  // 那一代没有 JS 引擎，`run` 于是走 C 路径（cli.js 里先问 hasJsEngine 再决定）。
+  // 门槛是**逐字节等于 node 上 run 的输出**：换了执行方式不等于换了语义。
+  const n1 = join(dir, 'dist', 'src', 'host', 'omni');
+  if (r.code === 0) {
+    const sample2 = join(root, 'tests', 'cases', '01_basics.omni');
+    const ref = spawnSync('node', [cli, 'run', sample2], { encoding: 'utf8' });
+    const via = spawnSync(n1, ['run', sample2], { encoding: 'utf8' });
+    if (via.status !== 0) bad('N1 run cases/01_basics', `    exit=${via.status}\n${via.stderr}`);
+    else if (via.stdout !== ref.stdout) bad('N1 run == C0 run', `    C0 ${ref.stdout.length} bytes != N1 ${via.stdout.length} bytes`);
+    else ok(`N1 run cases/01_basics == C0 run  ${ref.stdout.length} bytes`);
+  }
 }
 
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);

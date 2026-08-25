@@ -48,6 +48,7 @@ const NATIVE_OPS = {
   installDir: 'js_install_dir',
   evalJs: 'js_eval',
   evalCaptured: 'js_eval_captured',
+  hasJsEngine: 'js_has_engine',
 };
 
 

@@ -55,6 +55,38 @@ C 侧是可执行文件所在目录），而 std 与 runtime 都相对它**固�
 产物树里没有编译器源码（那是 `stage0/`），所以让产物里的 N1 再跑一遍自举时要**显式给出源
 文件**：默认值是 `installDir()/../cli.js`，在 `dist/` 里不存在，命令会直接说清这一点。
 
+## 产物能做什么
+
+`dist/src/host/omni` 是**不依赖 node 的完整编译器**：`emit-js` / `emit-c` / `build` /
+`run` / `run-c` / `ast` / `oir` 都在。包括跑 JS：
+
+```bash
+dist/src/host/omni run hello.js       # JS 前端 -> OIR -> C -> 执行，全程不碰 node
+dist/src/host/omni run f.omni         # 同上
+```
+
+`run` 的意思是"解析完直接执行"，**怎么执行是这一代宿主的事**：node 上是生成 JS 在本进程里
+eval（毫秒级）；原生构建里没有 JS 引擎，那条路就是 C 路径（cc 一次，秒级）。cli.js 先问
+`hasJsEngine()`（封闭 ABI 里的 `js_has_engine`）再决定 —— 宿主的错误不是可以 catch 的异常，
+能力只能先问，不能试了再说。两条路的输出逐字节相同，这一条是 `tests/bootstrap` 的门槛之一。
+
+`repl` 目前仍然只在 node 宿主上：它靠 `evalCaptured` 一行一行重跑会话。原生构建上的 REPL
+要等 OIR 解释器（见下）。
+
+## 还没有的：进程内的 JS 执行
+
+原生构建里"执行"必须过一次 C 编译器。要做到**不带 cc 也能执行**，正确的做法是给 OIR 写一个
+解释器，而且写在编译器自己的源码里（`stage0/src/`）——这样它会被一起降级，每一代都自带，
+不需要第三方引擎：
+
+- 嵌 mujs 走不通：mujs 是 ES5（ISC 许可没问题），而生成的 JS 用了 BigInt 字面量（int64
+  就是靠它）、箭头函数、`class`、`const`/`let`、展开。实测一个最小用例里 BigInt 出现 20 次、
+  箭头函数 27 次。要喂给 mujs 就得先把生成的 JS 降到 ES5 并换掉整个 int64 表示 —— 比自己写
+  解释器更大、更脏。
+- OIR 解释器则是第三份"同一语义的实现"，正好能被现有的六条测试轴按同样的口径卡住：
+  `node == omni-js == omni-c == omni-interp`。
+
+
 ## 四条门槛
 
 `bootstrap` 的每一项都是硬门槛，任何一项不成立就非零退出：

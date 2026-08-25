@@ -282,7 +282,9 @@ omni_dyn omni_js_os_tmpdir(void);
 omni_dyn omni_js_now_ms(void);
 omni_dyn omni_js_install_dir(void);
 /* 宿主里跑一段生成的 JS（omni run 与 REPL 的快路径）。原生构建里没有 JS 引擎，
-   所以这两个只会报错 —— 见 omni_js_host.c 的说明。 */
+   所以这两个只会报错 —— 见 omni_js_host.c 的说明。has_engine 就是那个"先问一句"：
+   原生构建返回 false，`omni run` 于是改走 C 路径而不是撞上错误。 */
+bool omni_js_has_engine(void);
 omni_dyn omni_js_eval(omni_dyn code);
 omni_dyn omni_js_eval_captured(omni_dyn code);
 /* 上面那批的原语，只给 omni_js_host.h 的宏用 */

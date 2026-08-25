@@ -271,6 +271,10 @@ static omni_dyn no_js_engine(void) {
   return omni_dyn_undef();
 }
 
+/* 先问能力：原生构建里没有引擎。宿主的错误不是可以 catch 的异常，所以 `omni run`
+   只能先问一句再决定走哪条路（cli.js 里那个分支）。 */
+bool omni_js_has_engine(void) { return false; }
+
 omni_dyn omni_js_eval(omni_dyn code) {
   (void)code;
   return no_js_engine();

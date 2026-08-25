@@ -162,6 +162,15 @@ export function installDir() {
 // 那两个 op 是一句清楚的错误（runtime/omni_js_host.c）。放进 ABI 而不是直接写
 // `new Function`，是因为编译器自己的源码要能被降级 —— `new Function` 不在语言子集里。
 
+/**
+ * 这个宿主有没有 JS 引擎。node 上有，原生构建上没有 —— `omni run` 靠它决定走"生成 JS
+ * 在本进程里跑掉"还是走 C 路径，而不是撞上 js_eval 那句错误。宿主的错误不是可以 catch
+ * 的异常，所以能力必须**先问**，不能试了再说。
+ */
+export function hasJsEngine() {
+  return true;
+}
+
 export function evalJs(code) {
   // eslint-disable-next-line no-new-func
   new Function(code)();

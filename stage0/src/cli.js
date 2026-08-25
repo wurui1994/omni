@@ -10,7 +10,7 @@
 
 import {
   writeText, readText, exists, readDir, mtimeMs, fileSize, mkdTemp, mkdirAll, rename,
-  args as procArgs, env, stdout, stderr, setExitCode, spawn, tmpDir, evalJs,
+  args as procArgs, env, stdout, stderr, setExitCode, spawn, tmpDir, evalJs, hasJsEngine,
   cwd, installDir,
 } from './host/native.js';
 import { join, basename } from './host/path.js';
@@ -149,6 +149,20 @@ function buildNative(mod, outPath, workDir) {
   return { cPath, cc };
 }
 
+/**
+ * C 路径上的"直接执行"：编出一个可执行文件再跑掉，退出码原样传回。
+ * `run-c` 就是它；原生构建上的 `run` 也是它（那一代没有 JS 引擎）。
+ * `--work DIR` 会把可执行文件和生成的 C 都留在 DIR 里，方便事后看。
+ */
+function runViaC(mod, argv) {
+  const wi = argv.indexOf('--work');
+  const dir = wi >= 0 ? argv[wi + 1] : mkdTemp(join(tmpDir(), 'omni-run-'));
+  if (wi >= 0) mkdirAll(dir);
+  const exe = join(dir, 'a.out');
+  buildNative(mod, exe, wi >= 0 ? dir : undefined);
+  return spawn(exe, [], 'i')[0];
+}
+
 function main(argv) {
   const [cmd, ...rest] = argv;
   // 带值的开关（-o NAME / --mode M）的值不能被当成源文件
@@ -192,9 +206,14 @@ function main(argv) {
   switch (cmd) {
     case 'run': {
       const { mod } = compile(path, rest);
-      // 宿主里跑生成的 JS。原生构建里没有 JS 引擎，这条会给一句清楚的错误（决策 17）
-      evalJs(emitJs(mod));
-      return 0;
+      // `run` 的意思是"解析完直接执行"，怎么执行是**这一代宿主的事**：node 上是生成 JS
+      // 在本进程里 eval；原生构建里没有 JS 引擎，那条路就是 C 路径。所以先问一句能力，
+      // 而不是让 js_eval 报错 —— 用户要的是执行，不是一句"换个命令重试"。
+      if (hasJsEngine()) {
+        evalJs(emitJs(mod));
+        return 0;
+      }
+      return runViaC(mod, rest);
     }
     case 'emit-js': {
       const { mod } = compile(path, rest);
@@ -218,10 +237,7 @@ function main(argv) {
     }
     case 'run-c': {
       const { mod } = compile(path, rest);
-      const dir = mkdTemp(join(tmpDir(), 'omni-run-'));
-      const exe = join(dir, 'a.out');
-      buildNative(mod, exe);
-      return spawn(exe, [], 'i')[0];
+      return runViaC(mod, rest);
     }
     case 'ast': {
       const { ast } = compile(path, rest);
@@ -251,7 +267,7 @@ usage: omni <command> <file.omni>
 
 commands:
   repl      interactive session (no file; defaults to --mode dynamic)
-  run       compile to JS and execute in-process
+  run       parse and execute (node host: in-process JS; native build: via the C path)
   run-c     compile to C, build with cc, execute
   build     compile to a native executable  (-o NAME; --work DIR keeps the generated C there)
   emit-js   print generated JavaScript

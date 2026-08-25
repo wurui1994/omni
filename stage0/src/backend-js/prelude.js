@@ -928,6 +928,11 @@ function $js_install_dir() {
   const i = p.lastIndexOf("/");
   return i < 0 ? "." : (i === 0 ? "/" : p.slice(0, i));
 }
+// 这个宿主有没有 JS 引擎。node 上有，原生构建上没有 —— omni run 靠它决定走进程内
+// eval 还是走 C 路径，而不是撞上 $js_eval 那句错误。
+function $js_has_engine() {
+  return true;
+}
 // 宿主里跑一段生成的 JS（omni run 与 REPL 的进程内快路径）。原生构建里没有 JS
 // 引擎，C 侧那两个同名函数只会报错 —— 这是宿主面唯一"只有一代能做"的能力。
 function $js_eval(code) {
