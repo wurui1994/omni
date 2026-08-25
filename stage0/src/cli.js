@@ -10,7 +10,7 @@
 
 import {
   writeText, readText, exists, readDir, mtimeMs, fileSize, mkdTemp, mkdirAll, rename,
-  args as procArgs, env, stdout, stderr, setExitCode, spawn, tmpDir, evalJs, hasJsEngine,
+  args as procArgs, env, stdout, stderr, setExitCode, spawn, tmpDir, evalJs, hasJsEngine, nowMs,
   cwd, installDir,
 } from './host/native.js';
 import { join, basename } from './host/path.js';
@@ -40,6 +40,23 @@ function modeFor(path, argv, fallback = 'mixed') {
   return MODE_BY_EXT[ext] ?? fallback;
 }
 
+/* ---------------------------------------------------------------- --verbose
+ *
+ * 把内部执行摊开：每一步是什么、多大、花了多久。日志一律走 **stderr** —— stdout 上是
+ * 编译产物与被执行程序的输出，那两样在测试里是逐字节比对的，不能被日志污染。
+ * 时间是墙上时间（js_now_ms）：大头是 cc 与子进程，CPU 时间量不到它们。
+ */
+let VERBOSE = false;
+let vMark = 0;
+
+function vStep(msg) {
+  if (!VERBOSE) return;
+  const now = nowMs();
+  const d = Math.trunc(now - vMark);
+  vMark = now;
+  stderr(`omni: ${msg}  [${d}ms]\n`);
+}
+
 /**
  * `.js` 入口走 JS 语法前端：链接整棵 import 树，再降级成 OIR（ADR-0011 第 6 步）。
  * 自举就是这一条路 —— 编译器自己的源码是 JS，喂给它自己就得到下一代。
@@ -49,8 +66,10 @@ function compileJs(path) {
   const diags = new Diagnostics();
   const ast = linkJs(path, (p) => (exists(p) ? readText(p) : null), diags);
   diags.throwIfErrors();
+  vStep(`js front end  link ${path}`);
   const mod = lowerJs(ast, diags);
   diags.throwIfErrors();
+  vStep(`js lower -> OIR  ${mod.funcs.length} funcs, ${mod.structs.length} structs`);
   return { ast, mod, diags };
 }
 
@@ -71,11 +90,13 @@ export function compileText(path, text, mode) {
  */
 function compileProgram(path, text, mode) {
   const diags = new Diagnostics();
-  const { decls, imports } = loadProgram({ path, text, mode, diags });
+  const { decls, imports, files } = loadProgram({ path, text, mode, diags });
   diags.throwIfErrors();
+  vStep(`front end  ${path}  mode ${mode}, ${files.length} files, ${decls.length} decls, ${imports.size} imports`);
   const program = { kind: 'Program', decls, imports };
   const mod = check(program, diags, mode);
   diags.throwIfErrors();
+  vStep(`check -> OIR  ${mod.funcs.length} funcs, ${mod.structs.length} structs`);
   return { ast: program, mod, diags };
 }
 
@@ -111,7 +132,10 @@ function runtimeObjects(cc) {
   const key = hash16([cc, ...flags, ...deps].join('|'));
   const dir = join(tmpDir(), `omni-rt-${key}`);
   const objs = srcs.map((p) => join(dir, `${basename(p, '.c')}.o`));
-  if (objs.every((o) => exists(o))) return objs;
+  if (objs.every((o) => exists(o))) {
+    vStep(`runtime .o  ${objs.length} objects, cache hit ${dir}`);
+    return objs;
+  }
 
   // 先编进临时目录再整体 rename：中断或并发都不会留下半个缓存
   const stage = mkdTemp(join(tmpDir(), 'omni-rt-stage-'));
@@ -125,6 +149,7 @@ function runtimeObjects(cc) {
   // 目标已存在 = 别人先建好了，下面那句会用它（rename 到一个非空目录在两个宿主上都是硬错，
   // 而宿主的错误不是可以 catch 的异常，所以先看一眼）
   if (!exists(dir)) rename(stage, dir);
+  vStep(`runtime .o  ${srcs.length} objects compiled with ${cc}`);
   return objs.every((o) => exists(o)) ? objs : staged;
 }
 
@@ -137,7 +162,9 @@ function buildNative(mod, outPath, workDir) {
   const dir = workDir === undefined ? mkdTemp(join(tmpDir(), 'omni-')) : workDir;
   if (workDir !== undefined) mkdirAll(dir);
   const cPath = join(dir, `${basename(outPath)}.c`);
-  writeText(cPath, emitC(mod));
+  const cText = emitC(mod);
+  writeText(cPath, cText);
+  vStep(`backend c  ${cText.length} bytes -> ${cPath}`);
   const cc = findCC();
   // 运行时是 stage0/runtime/ 下真正的 C 文件，预编成 .o 缓存起来；热的叶子函数是
   // omni.h 里的 static inline，所以不靠 LTO 也能内联（tcc 没有 -flto）
@@ -146,6 +173,7 @@ function buildNative(mod, outPath, workDir) {
   if (r[0] !== 0) {
     throw new OmniError(`C backend produced code that ${cc} rejected:\n${r[2]}\n(kept at ${cPath})`);
   }
+  vStep(`${cc}  ${cargs.length} args -> ${outPath}  ${fileSize(outPath)} bytes`);
   return { cPath, cc };
 }
 
@@ -160,11 +188,16 @@ function runViaC(mod, argv) {
   if (wi >= 0) mkdirAll(dir);
   const exe = join(dir, 'a.out');
   buildNative(mod, exe, wi >= 0 ? dir : undefined);
-  return spawn(exe, [], 'i')[0];
+  const code = spawn(exe, [], 'i')[0];
+  vStep(`exec ${exe}  exit=${code}`);
+  return code;
 }
 
 function main(argv) {
   const [cmd, ...rest] = argv;
+  // --verbose 要在做任何事之前生效，否则第一步的耗时就丢了
+  VERBOSE = rest.includes('--verbose') || rest.includes('-v');
+  vMark = nowMs();
   // 带值的开关（-o NAME / --mode M）的值不能被当成源文件
   const files = [];
   for (let i = 0; i < rest.length; i++) {
@@ -210,9 +243,13 @@ function main(argv) {
       // 在本进程里 eval；原生构建里没有 JS 引擎，那条路就是 C 路径。所以先问一句能力，
       // 而不是让 js_eval 报错 —— 用户要的是执行，不是一句"换个命令重试"。
       if (hasJsEngine()) {
-        evalJs(emitJs(mod));
+        const js = emitJs(mod);
+        vStep(`backend js  ${js.length} bytes`);
+        evalJs(js);
+        vStep('exec in-process (node host, new Function)');
         return 0;
       }
+      // 这一代没有 JS 引擎，"直接执行"就是 C 路径
       return runViaC(mod, rest);
     }
     case 'emit-js': {
@@ -276,6 +313,10 @@ commands:
   oir       print the OIR as JSON
   bootstrap build the whole chain into a tree and check the four fixpoints
             (no file = the compiler itself; -o DIR, default ./dist; -q skips the C path)
+
+flags:
+  -v, --verbose  trace every internal step to stderr with its wall-clock time
+                 (front end, check, backend, runtime .o cache, cc, exec)
 
 type modes (ADR-0008) — chosen by extension, overridable with --mode:
   .omni     mixed   omitted type is inferred from the initializer, else dynamic

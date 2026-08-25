@@ -73,6 +73,31 @@ eval（毫秒级）；原生构建里没有 JS 引擎，那条路就是 C 路径
 `repl` 目前仍然只在 node 宿主上：它靠 `evalCaptured` 一行一行重跑会话。原生构建上的 REPL
 要等 OIR 解释器（见下）。
 
+### `--verbose`：把内部执行摊开
+
+`-v` / `--verbose` 把每一步与它的墙上时间打到 **stderr**（stdout 留给产物和程序输出，
+测试是逐字节比对的）：
+
+```
+$ omni run -v tests/cases/18_import.omni
+omni: front end  tests/cases/18_import.omni  mode mixed, 4 files, 29 decls, 4 imports  [8ms]
+omni: check -> OIR  20 funcs, 0 structs  [9ms]
+omni: backend js  61992 bytes  [1ms]
+omni: exec in-process (node host, new Function)  [2ms]
+
+$ dist/src/host/omni run -v tests/cases/01_basics.omni
+omni: front end  ...  mode mixed, 1 files, 48 decls, 1 imports  [3ms]
+omni: check -> OIR  6 funcs, 1 structs  [1ms]
+omni: backend c  3600 bytes -> .../a.out.c  [1ms]
+omni: runtime .o  14 objects, cache hit .../omni-rt-8ccd2205760b8560  [7ms]
+omni: clang  23 args -> .../a.out  77240 bytes  [103ms]
+omni: exec .../a.out  exit=0  [5ms]
+```
+
+两代的日志形状一样：`.js` 入口显示的是 `js front end link` + `js lower -> OIR`（走的是
+JS 语法前端），`.omni` 入口显示 `front end` + `check -> OIR`。运行时 `.o` 那行会说清是
+缓存命中还是重编 —— 这条决定开发循环的手感（757ms -> 73ms）。
+
 ## 还没有的：进程内的 JS 执行
 
 原生构建里"执行"必须过一次 C 编译器。要做到**不带 cc 也能执行**，正确的做法是给 OIR 写一个
