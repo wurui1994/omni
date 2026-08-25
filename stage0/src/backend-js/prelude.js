@@ -635,6 +635,76 @@ function $js_math(op, a, b) {
   $rt_error("unknown Math op '" + op + "'");
 }
 
+// ------------------------------------------------- JSON.stringify（ADR-0011）
+// 不能直接用宿主的 JSON.stringify：这边的对象是 Map、int 是 BigInt，宿主会当成
+// 普通对象序列化成 {} 并且在 BigInt 上抛 TypeError。所以照 C 侧同一套走一遍。
+// 只有 stringify —— 量过，JSON.parse 全仓库 0 处用到。
+function $js_json_quote(s) {
+  let out = '"';
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    // 低位代理只有在前一个码元不是高位代理时才算孤立，否则成对的低位也会被转义
+    const lone = c >= 0xd800 && c <= 0xdbff
+      ? !(i + 1 < s.length && s.charCodeAt(i + 1) >= 0xdc00 && s.charCodeAt(i + 1) <= 0xdfff)
+      : c >= 0xdc00 && c <= 0xdfff
+        ? !(i > 0 && s.charCodeAt(i - 1) >= 0xd800 && s.charCodeAt(i - 1) <= 0xdbff)
+        : false;
+    if (c === 0x22 || c === 0x5c) out += "\\" + s[i];
+    else if (c === 8) out += "\\b";
+    else if (c === 12) out += "\\f";
+    else if (c === 10) out += "\\n";
+    else if (c === 13) out += "\\r";
+    else if (c === 9) out += "\\t";
+    else if (c < 0x20 || lone) out += "\\u" + c.toString(16).padStart(4, "0");
+    else out += s[i];
+  }
+  return out + '"';
+}
+function $js_json_apply(rep, key, v) {
+  return rep === undefined ? v : $callFn(rep, [key, v]);
+}
+function $js_json_nl(gap, depth) { return gap > 0 ? "\n" + " ".repeat(gap * depth) : ""; }
+// undefined 与函数值"该省略"：在对象里跳过、在数组里变成 null。用 undefined 当哨兵。
+function $js_json_val(v, rep, gap, depth) {
+  const t = $dynTag(v);
+  if (t === "undefined" || t === "function") return undefined;
+  if (t === "null") return "null";
+  if (t === "bool") return v ? "true" : "false";
+  if (t === "real") return Number.isFinite(v) ? $js_str(v) : "null";
+  if (t === "string") return $js_json_quote(v);
+  if (t === "int") $rt_error("do not know how to serialize a bigint");
+  if (t === "list") {
+    if (v.length === 0) return "[]";
+    const sep = $js_json_nl(gap, depth + 1);
+    let out = "[";
+    for (let i = 0; i < v.length; i++) {
+      if (i) out += ",";
+      out += sep;
+      const s = $js_json_val($js_json_apply(rep, $js_str(i), v[i]), rep, gap, depth + 1);
+      out += s === undefined ? "null" : s;
+    }
+    return out + $js_json_nl(gap, depth) + "]";
+  }
+  if (t === "dict") {
+    let out = "{", first = true;
+    const sep = $js_json_nl(gap, depth + 1);
+    for (const [k, val] of v) {
+      const s = $js_json_val($js_json_apply(rep, k, val), rep, gap, depth + 1);
+      if (s === undefined) continue;
+      if (!first) out += ",";
+      first = false;
+      out += sep + $js_json_quote(k) + (gap > 0 ? ": " : ":") + s;
+    }
+    return first ? "{}" : out + $js_json_nl(gap, depth) + "}";
+  }
+  $rt_error("do not know how to serialize a " + t);
+}
+function $js_json_stringify(v, rep, indent) {
+  let gap = 0;
+  if ($dynTag(indent) === "real" && indent > 0) gap = Math.min(Math.trunc(indent), 10);
+  return $js_json_val($js_json_apply(rep, "", v), rep, gap, 0);
+}
+
 
 
 

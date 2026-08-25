@@ -299,6 +299,33 @@ c('math/trunc', js('js_math', [real(-3.9), undef], { op: 't' }), 'Math.trunc(-3.
 c('math/floor', js('js_math', [real(-3.1), undef], { op: 'f' }), 'Math.floor(-3.1)');
 c('math/ceil', js('js_math', [real(-3.9), undef], { op: 'c' }), 'Math.ceil(-3.9)');
 
+// JSON.stringify。参照那边用普通对象/数组字面量，这边用 js_obj_set 链 —— 两种表示
+// 印出来必须一样，这正是要验的那件事。
+const J = (v, rep = undef, ind = undef) => js('js_json_stringify', [v, rep, ind]);
+for (const s of ['x', 'a"b', 'a\\b', 'tab\there', '中文', 'a\u{1f600}b', '\u0001\u001f', '\ud800',
+                 '\udc00', 'a\ud800\ud800\udc00b', '\ud800\udc00\udc00']) {
+  c(`json/str/${JSON.stringify(s)}`, J(str(s)), `JSON.stringify(${JSON.stringify(s)})`);
+}
+c('json/num', J(real(2.5)), 'JSON.stringify(2.5)');
+c('json/nan', J(real(NaN)), 'JSON.stringify(NaN)');
+c('json/inf', J(real(Infinity)), 'JSON.stringify(Infinity)');
+c('json/null', J(nul), 'JSON.stringify(null)');
+c('json/bool', J(bool(false)), 'JSON.stringify(false)');
+c('json/undef', J(undef), 'String(JSON.stringify(undefined))');
+c('json/arr', J(arr(real(1), str('a'), nul)), 'JSON.stringify([1, "a", null])');
+c('json/arr-undef', J(arr(real(1), undef)), 'JSON.stringify([1, undefined])');
+c('json/arr-empty', J(arr()), 'JSON.stringify([])');
+c('json/obj', J(OBJ()), 'JSON.stringify({"a": 1, "中": "v"})');
+c('json/obj-empty', J(js('js_obj_new', [])), 'JSON.stringify({})');
+c('json/obj-undef', J(js('js_obj_set', [js('js_obj_new', []), str('k'), undef])), 'JSON.stringify({"k": undefined})');
+c('json/nested', J(js('js_obj_set', [js('js_obj_new', []), str('xs'), arr(real(1), OBJ())])),
+  'JSON.stringify({"xs": [1, {"a": 1, "中": "v"}]})');
+// 带缩进的结果有换行，会破掉"一条用例一行"的约定，所以再套一层 stringify 把它引起来
+c('json/indent', J(J(js('js_obj_set', [js('js_obj_new', []), str('xs'), arr(real(1), real(2))]), undef, real(2))),
+  'JSON.stringify(JSON.stringify({"xs": [1, 2]}, null, 2))');
+c('json/indent-nested', J(J(js('js_obj_set', [js('js_obj_new', []), str('o'), OBJ()]), undef, real(2))),
+  'JSON.stringify(JSON.stringify({"o": {"a": 1, "中": "v"}}, null, 2))');
+
 
 // ---------------------------------------------------------------- 跑
 function run(cmd, args, opts = {}) {

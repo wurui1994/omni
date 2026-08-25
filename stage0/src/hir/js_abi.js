@@ -130,4 +130,10 @@ export const JS_ABI = {
   js_num_to_string: { js: '$js_num_to_string', c: 'omni_js_num_to_string', arity: 2 },
   // op: 'a' abs / 't' trunc / 'f' floor / 'c' ceil / 'M' max / 'm' min
   js_math: { js: '$js_math', c: 'omni_js_math', arity: 2, lit: ['op'] },
+
+  // ---------------------------------------------------------------- JSON
+  // 只有 stringify：量过一遍，JSON.parse 全仓库 0 处用到，封闭的 ABI 就不收它。
+  // 实参形态也是量出来的 —— 绝大多数是一个实参给字符串加引号，只有 cli 的 dump
+  // 用了 (v, replacer, 2)。replacer 只支持函数形式。
+  js_json_stringify: { js: '$js_json_stringify', c: 'omni_js_json_stringify', arity: 3 },
 };

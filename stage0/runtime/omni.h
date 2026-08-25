@@ -147,6 +147,7 @@ bool omni_dyn_eq(omni_dyn a, omni_dyn b);
    越界与负下标的处理跟着 JS：不报错，按规范夹取或返回 NaN/undefined —— 由调用方的
    op 决定，这一层只提供"已经规范化过的下标"的原语。 */
 omni_s16 omni_s16_of_utf8(omni_str s);
+omni_s16 omni_s16_of_units(const uint16_t *p, int64_t len);
 omni_str omni_s16_to_utf8(omni_s16 s);
 omni_s16 omni_s16_cat(omni_s16 a, omni_s16 b);
 omni_s16 omni_s16_slice(omni_s16 s, int64_t start, int64_t end);
@@ -361,5 +362,6 @@ static inline bool omni_eq_ref(void *a, void *b) { return a == b; }
 #include "omni_dyn_bridge.h"
 #include "omni_js_arr.h"
 #include "omni_js_obj.h"
+#include "omni_js_json.h"
 
 #endif /* OMNI_H */

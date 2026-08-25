@@ -185,6 +185,7 @@ class CEmitter {
       this.line('OMNI_JS_ARR(omni_list_dynamic, omni_dict_string_dynamic)');
       // OBJ 在 ARR 之后：Map 的条目值是个两元素 list，要用到 ARR 里的 omni_js_arr_wrap
       this.line('OMNI_JS_OBJ(omni_list_dynamic, omni_dict_string_dynamic)');
+      this.line('OMNI_JS_JSON(omni_list_dynamic, omni_dict_string_dynamic)');
     }
   }
 
@@ -503,6 +504,18 @@ class CEmitter {
       // JS 前端的运算语义（ADR-0011）。规则写在 runtime/omni_js.c 里，与 prelude.js 一一对应。
       case 'js_undef': return 'omni_dyn_undef()';
       case 'js_ofFn': return `omni_dyn_of_fn(${a[0]})`;
+      // 字符串字面量平时经 UTF-8 进来，但落单的代理项在 UTF-8 里没有合法编码
+      // （Buffer.from 会替成 U+FFFD），这一种只能按码元发。JS 侧不需要对应处理：
+      // JSON.stringify 自己就会把落单代理项转义成 \uXXXX，那边天然无损。
+      case 'js_s16': {
+        const arg = e.args[0];
+        if (arg && arg.kind === 'Const' && typeof arg.value === 'string' && hasLoneSurrogate(arg.value)) {
+          const units = [];
+          for (let i = 0; i < arg.value.length; i++) units.push(`0x${arg.value.charCodeAt(i).toString(16)}`);
+          return `omni_dyn_of_s16(omni_s16_of_units((const uint16_t[]){${units.join(', ')}}, ${units.length}))`;
+        }
+        return `omni_js_s16(${a[0]})`;
+      }
       default: {
         const abi = JS_ABI[e.name];
         if (!abi) throw new Error(`c.builtin: ${e.name}`);
@@ -523,6 +536,19 @@ function cReal(v) {
   // 17 位有效数字保证 double 往返无损
   const s = v.toPrecision(17);
   return s.includes('.') || s.includes('e') ? s : `${s}.0`;
+}
+
+function hasLoneSurrogate(s) {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c >= 0xd800 && c <= 0xdbff) {
+      const next = i + 1 < s.length ? s.charCodeAt(i + 1) : 0;
+      if (next >= 0xdc00 && next <= 0xdfff) { i++; continue; }
+      return true;
+    }
+    if (c >= 0xdc00 && c <= 0xdfff) return true;
+  }
+  return false;
 }
 
 function cString(bytes) {

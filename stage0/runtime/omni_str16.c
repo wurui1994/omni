@@ -20,6 +20,16 @@ static omni_s16 mk(const uint16_t *p, int64_t len) {
 
 /* ---------------------------------------------------------------- 转码 */
 
+/* 直接给码元序列建串：只给 C 后端的字面量用。
+   源码里的字符串常量平时走 UTF-8（生成的 C 才不会被大括号数组撑肿），但落单的代理项
+   在 UTF-8 里没有合法编码 —— JSON.stringify("\ud800") 这种用例只能按码元发。
+   参数一般是复合字面量（块作用域），所以这里必须拷进 arena。 */
+omni_s16 omni_s16_of_units(const uint16_t *p, int64_t len) {
+  uint16_t *out = alloc16(len);
+  memcpy(out, p, (size_t)len * sizeof(uint16_t));
+  return mk(out, len);
+}
+
 /* UTF-8 -> UTF-16。非法字节序列按 U+FFFD 吞掉一个字节：解析器不该因为源文件里
    有一段坏字节就崩，而且 node 读文件时也是这么替换的。 */
 omni_s16 omni_s16_of_utf8(omni_str s) {
