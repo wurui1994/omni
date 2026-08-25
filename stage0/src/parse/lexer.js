@@ -10,6 +10,8 @@ export const KEYWORDS = new Set([
   'true', 'false',
   // 省略类型的声明形态（ADR-0008）：let 块作用域，var 函数作用域
   'var', 'let',
+  // 模块（ADR-0009）：import 引入另一个模块，private 把顶层名字挡在本模块内
+  'import', 'private',
 ]);
 
 // 长的放前面，保证最长匹配

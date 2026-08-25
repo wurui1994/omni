@@ -1,6 +1,8 @@
 // 对照 Python 的 json 模块：结构、键顺序、转义、i64 精度。
 // 浮点的**文本**形式 JSON 没有规范（Python 保 `.0`、JS 不保、我们又是另一套），
 // 所以浮点单独放在 json_floats 里按数值对照，这里只放整数与非数值。
+import "std/json.omni";
+
 list<string> docs = [
   "{\"a\":1,\"b\":2}",
   "{\"z\":1,\"a\":2,\"m\":3,\"b\":4}",

@@ -207,6 +207,7 @@ omni/
     src/frontend-js/        #   JS 语法前端（自举入口，且永久可用）
     src/frontend-glsl/      #   GLSL 前端
     src/hir/                #   名字解析、类型系统、重载/UFCS、隐式转换
+    src/module/             #   模块图与导入路径解析（ADR-0009）
     src/oir/                #   typed SSA + region + dialect + pass 框架
     src/backend-js/
     src/backend-c/
@@ -303,25 +304,46 @@ omni/
   拆成多 TU 后跨 TU 调用没有 LTO 就不内联，而 tcc 不支持 `-flto`。
 - `emit-c --amalgamate` 拼成单文件（ASan / godbolt 用）；运行时 `.o` 缓存实测 757ms → 73ms。
 - 拆分没让 C 路径变慢：`bench/compare.js` 的 c 后端 282ms → **151ms**（原生二进制本身 5ms）。
+  注意这个数字随机器状态漂移很大：同一份代码在忙的机器上量到 250–560ms。判断有没有回归要在
+  同一次会话里 A/B（`git worktree add` 一份 HEAD 并排量），不要拿隔天的绝对值比。
+
+**已完成（模块系统 / import，2026-08-25）**：ADR-0009，`stage0/src/module/load.js`。
+- `import "./util.omni";` / `import "std/json.omni";` —— **只有两类 specifier**，判别只看第一个字符，
+  没有回退。`libsFor`（"源码里提到 json 就整体拼库"）已删除。
+- 刻意不做：隐式相对导入（Python 2）、向上逐级查找（node_modules）、猜后缀与目录索引（node）、
+  URL 当导入路径（Go 早期）、有序搜索路径（Java classpath）。每条的来历记在 ADR-0009 的表里。
+- 模块身份 = `realpath`；相对路径不能逃出包根；basename 大小写必须与磁盘逐字节一致
+  （mac 过、CI 炸的那类问题挪到本地）；**环是错误**并报出整条链。
+- 初始化顺序靠**后序拼接**得到，不需要初始化调度器 —— 这也是必须禁环的原因。
+- 可见性：默认公开、`private` 收回，且**不传递**（A→B→C，A 看不见 C）。不可见的候选在查找时
+  当作不存在，所以报的是 `undefined function`，别人的私有名字不进我的诊断。
+- **模式因此真正按文件**了（ADR-0008 的已知限制修掉）：`19_per_file_mode.omnis` 导入
+  `imports/loose.omnid`，静态与动态两套规则同时成立。
+- `lib/json.omni` 公开面收缩到 `parseJson` / `stringifyJson` / `dynToText`，12 个 helper 加了 `private`。
+- 测试从 24 涨到 29：`18_import`（菱形只加载一次 + 初始化后序）、`19_per_file_mode`、
+  `import_bad_paths`（9 条拒绝规则一次看全）、`import_private`、`import_cycle`。
+- 已知局限（记在 ADR-0009）：类型名与顶层变量仍在一张全局表里，两个模块各有一个同名
+  `private class` / 顶层 `var` 会撞；没有 `access` / `unravel`；清单只硬编码了一条 `std`。
 
 **接下来**（顺序按 ADR-0001 的落地顺序重排）
 1. **JS 语法前端第一版**：`stage0/src/frontend-js/`，先能解析 `stage0/src` 全部文件。
 2. **`tests/js-roundtrip/`**：幂等（`gen(parse(x))` 再往返一次逐字节相同）+ 语义一致
    （原始 js 与生成 js 在 node 下输出相同）。
-3. **字符串 builder + arena**（ADR-0001 第 4 节）—— 自举前必须有。
-4. **打通 C0 → C1 → C2，验不动点**（C1 与 C2 产出的 C 逐字节相同）。
-5. 写 `docs/js-bootstrap-subset.md`，冻结 JS 自举子集。
-6. `dynamic` 的算术与 `print`/`string()` 的容器支持（上面两条欠账）—— 做完这两条，
+3. **打通 C0 → C1 → C2，验不动点**（C1 与 C2 产出的 C 逐字节相同）。
+   注意真正的拦路虎不是解析，而是编译器源码要用的**语言特性**：闭包 / 函数值
+   （4485 行里 110 个箭头函数、161 处带回调的数组方法）与异质记录对象（AST 节点），
+   两者 Omni 都还没有。
+4. 写 `docs/js-bootstrap-subset.md`，冻结 JS 自举子集。
+5. `dynamic` 的算术与 `print`/`string()` 的容器支持（上面两条欠账）—— 做完这两条，
    `.omnid` 才算真能用，REPL 默认模式也就能按 ADR-0008 改回 `dynamic`。
-7. **ARC**（ADR-0006 落地顺序第 4 项的欠账）：按 ADR-0007 的一张编译期 unwind 表
+6. **ARC**（ADR-0006 落地顺序第 4 项的欠账）：按 ADR-0007 的一张编译期 unwind 表
    （`pc → 存活的 owned 槽位`）同时服务错误路径释放与 GC 根枚举。当前 C 侧只分配不释放。
    注意 ADR-0001 把它从"自举前置"降级了：编译器用 arena 就够，ARC 的价值在长期运行的程序上。
-2. tagged union + 模块系统（`cli.js` 的 `libsFor` 拼库是显式临时方案，有 `import` 后删掉；
-   模式也要从"整程序"改成"按文件"），然后闭包 / 函数值。
-3. OIR 升级为 SSA + dialect 分层（P2 的真正内容），此时才开始写优化 pass。
-4. 补 `docs/adr/0002-ir-strategy.md`、`0003-memory-model.md`、`0004-ufcs-resolution.md`
-   （`0001-bootstrap-strategy.md` 已写）。
-5. 语法调研：Asymptote 与 Jancy 的冲突点（声明语法、运算符、`import` 语义）对照表 → Omni v0 语法定稿。
-6. tcc 在本机无 bottle（`brew install tcc` 失败），暂用 clang；需要毫秒级 C 编译时从
-   `reference/tinycc` 源码构建。运行时 `.o` 缓存之后 `bench` 的 c 一路降到 151ms，
-   剩下的仍然基本是 clang `-O2` 编译生成代码的时间（原生二进制本身 5ms）。
+7. tagged union，然后闭包 / 函数值（第 3 条的前置）。
+8. OIR 升级为 SSA + dialect 分层（P2 的真正内容），此时才开始写优化 pass。
+9. 补 `docs/adr/0002-ir-strategy.md`、`0003-memory-model.md`、`0004-ufcs-resolution.md`
+   （`0001-bootstrap-strategy.md`、`0009-module-paths.md` 已写）。
+10. 语法调研：Asymptote 与 Jancy 的冲突点（声明语法、运算符、`import` 语义）对照表 → Omni v0 语法定稿。
+11. tcc 在本机无 bottle（`brew install tcc` 失败），暂用 clang；需要毫秒级 C 编译时从
+    `reference/tinycc` 源码构建。运行时 `.o` 缓存之后 `bench` 的 c 一路降到 151ms，
+    剩下的仍然基本是 clang `-O2` 编译生成代码的时间（原生二进制本身 5ms）。

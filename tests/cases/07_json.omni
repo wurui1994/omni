@@ -1,4 +1,6 @@
 // dynamic 与原生 json：json 就是 dynamic 的可序列化子集（ADR-0006 第 1 节）
+import "std/json.omni";
+
 dynamic a = 42;
 print(a.tag());
 print(a.asInt());

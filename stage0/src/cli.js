@@ -8,39 +8,20 @@
 //   omni build   f.omni -o a 生成原生可执行文件
 //   omni ast/oir f.omni      打印中间结果（调试用）
 
-import { readFileSync, writeFileSync, mkdtempSync, existsSync, statSync, readdirSync, renameSync } from 'node:fs';
+import { writeFileSync, mkdtempSync, existsSync, statSync, readdirSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, basename, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join, basename } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { SourceFile, Diagnostics, OmniError } from './source/diag.js';
-import { parse } from './parse/parser.js';
+import { Diagnostics, OmniError } from './source/diag.js';
 import { check } from './hir/check.js';
 import { emitJs } from './backend-js/emit.js';
 import { emitC } from './backend-c/emit.js';
 import { RUNTIME_DIR, runtimeSources } from './runtime/c_runtime.js';
+import { loadProgram, MODE_BY_EXT } from './module/load.js';
 import { startRepl } from './repl.js';
 
-const LIB_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'lib');
-
-/**
- * 标准库暂时没有模块系统（ADR-0006 落地顺序第 6 项），先按"提到就整体拼入"的粗粒度规则处理。
- * 这是显式的临时方案：有了 import / access 之后删掉。
- * `dynamic` 也触发 json 库，因为 `print(dynamic)` 会降级成对 `dynToText` 的调用（ADR-0008 第 5 节）；
- * 纯动态模式下一切缺省注解都是 dynamic，所以无条件拼入。
- */
-function libsFor(text, mode) {
-  const libs = [];
-  // `Json` 不加词边界：公开入口叫 parseJson / stringifyJson，`\bJson\b` 在 "parseJson" 里匹配不上，
-  // 于是 `j = parseJson(s)` 会莫名其妙地报 "undefined function 'parseJson'"。
-  if (mode === 'dynamic' || /\bjson\b|Json|\bdynamic\b/.test(text)) libs.push('json.omni');
-  return libs;
-}
-
 /** 文件后缀决定默认的类型模式（ADR-0008 第 1 节）；`--mode` 可覆盖，REPL 用它 */
-const MODE_BY_EXT = { '.omni': 'mixed', '.omnid': 'dynamic', '.omnis': 'static' };
-
 function modeFor(path, argv, fallback = 'mixed') {
   const i = argv.indexOf('--mode');
   if (i >= 0) {
@@ -55,26 +36,27 @@ function modeFor(path, argv, fallback = 'mixed') {
 }
 
 function compile(path, argv = []) {
-  return compileText(path, readFileSync(path, 'utf8'), modeFor(path, argv));
+  return compileProgram(path, undefined, modeFor(path, argv));
 }
 
-/** 从内存里的源文本编译。REPL 走这条（它没有文件），`compile` 只是它加一次读盘。 */
+/** 从内存里的源文本编译。REPL 走这条（它没有文件），`compile` 只是把 text 交给加载器去读盘。 */
 export function compileText(path, text, mode) {
-  const file = new SourceFile(path, text);
+  return compileProgram(path, text, mode);
+}
+
+/**
+ * 入口 -> 模块图 -> 检查 -> OIR。
+ * 依赖不再靠"提到 json 就整体拼进来"的猜测（旧的 libsFor），而是靠源码里写下的 import（ADR-0009）。
+ * `--mode` 只覆盖入口文件的模式；被导入模块的模式由它自己的后缀决定。
+ */
+function compileProgram(path, text, mode) {
   const diags = new Diagnostics();
-  const decls = [];
-  for (const lib of libsFor(file.text, mode)) {
-    const libPath = join(LIB_DIR, lib);
-    const libFile = new SourceFile(libPath, readFileSync(libPath, 'utf8'));
-    decls.push(...parse(libFile, diags).decls);
-  }
-  const ast = parse(file, diags);
-  decls.push(...ast.decls);
+  const { decls, imports } = loadProgram({ path, text, mode, diags });
   diags.throwIfErrors();
-  // 模式目前是整程序的（lib 与用户代码并成一个 program），按文件的模式等模块系统
-  const mod = check({ kind: 'Program', decls }, diags, mode);
+  const program = { kind: 'Program', decls, imports };
+  const mod = check(program, diags, mode);
   diags.throwIfErrors();
-  return { file, ast, mod, diags };
+  return { ast: program, mod, diags };
 }
 
 /** 找一个可用的 C 编译器：tcc 最快，适合开发循环；clang/gcc 用于发布 */
@@ -223,7 +205,7 @@ const USAGE = `omni — stage0 bootstrap compiler
 usage: omni <command> <file.omni>
 
 commands:
-  repl      interactive session (no file; defaults to --mode dynamic)
+  repl      interactive session (no file; defaults to --mode mixed, see repl.js)
   run       compile to JS and execute in-process
   run-c     compile to C, build with cc, execute
   build     compile to a native executable  (-o NAME)

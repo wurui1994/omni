@@ -7,31 +7,34 @@
 // （18 位是保守规则：i64 上限是 19 位，避免在语言里做溢出判定。）
 // 局限：字符串内容目前按字节拷贝，非 ASCII 字符会被逐字节切分 —— 等 char/码点 API 到位再修。
 
-class JsonParser {
+// 公开的只有三个入口：parseJson / stringifyJson / dynToText。
+// 其余全部 `private`（ADR-0009）—— 逐字符扫描的那些 helper 名字很通用（jsonStr、jsonValue），
+// 让它们泄进每个 import 者的作用域，迟早撞上用户自己的同名函数。
+private class JsonParser {
   string src;
   int pos;
 }
 
-int jsonCur(JsonParser p) {
+private int jsonCur(JsonParser p) {
   if (p.pos >= p.src.length) { return -1; }
   return p.src.byteAt(p.pos);
 }
 
-void jsonSkipWs(JsonParser p) {
+private void jsonSkipWs(JsonParser p) {
   while (true) {
     int c = jsonCur(p);
     if (c == 32 || c == 9 || c == 10 || c == 13) { p.pos = p.pos + 1; } else { break; }
   }
 }
 
-void jsonExpectWord(JsonParser p, string word) {
+private void jsonExpectWord(JsonParser p, string word) {
   if (p.pos + word.length > p.src.length || p.src.substr(p.pos, word.length) != word) {
     fail("json: expected '" + word + "' at offset " + string(p.pos));
   }
   p.pos = p.pos + word.length;
 }
 
-int jsonHex4(JsonParser p) {
+private int jsonHex4(JsonParser p) {
   int v = 0;
   int i = 0;
   while (i < 4) {
@@ -48,7 +51,7 @@ int jsonHex4(JsonParser p) {
   return v;
 }
 
-string jsonStr(JsonParser p) {
+private string jsonStr(JsonParser p) {
   jsonSkipWs(p);
   if (jsonCur(p) != 34) { fail("json: expected string at offset " + string(p.pos)); }
   p.pos = p.pos + 1;
@@ -79,7 +82,7 @@ string jsonStr(JsonParser p) {
   return out;
 }
 
-dynamic jsonNumber(JsonParser p) {
+private dynamic jsonNumber(JsonParser p) {
   int start = p.pos;
   bool isReal = false;
   int digits = 0;
@@ -109,7 +112,7 @@ dynamic jsonNumber(JsonParser p) {
   return dyn(real(text));
 }
 
-dynamic jsonArray(JsonParser p) {
+private dynamic jsonArray(JsonParser p) {
   p.pos = p.pos + 1;
   list<dynamic> items = [];
   jsonSkipWs(p);
@@ -125,7 +128,7 @@ dynamic jsonArray(JsonParser p) {
   return dyn(items);
 }
 
-dynamic jsonObject(JsonParser p) {
+private dynamic jsonObject(JsonParser p) {
   p.pos = p.pos + 1;
   dict<string, dynamic> obj = {:};
   jsonSkipWs(p);
@@ -146,7 +149,7 @@ dynamic jsonObject(JsonParser p) {
   return dyn(obj);
 }
 
-dynamic jsonValue(JsonParser p) {
+private dynamic jsonValue(JsonParser p) {
   jsonSkipWs(p);
   int c = jsonCur(p);
   if (c == 123) { return jsonObject(p); }
@@ -168,7 +171,7 @@ dynamic parseJson(string text) {
   return v;
 }
 
-string jsonQuote(string s) {
+private string jsonQuote(string s) {
   string out = "\"";
   int i = 0;
   while (i < s.length) {
@@ -187,7 +190,7 @@ string jsonQuote(string s) {
   return out + "\"";
 }
 
-string jsonHexByte(int c) {
+private string jsonHexByte(int c) {
   string digits = "0123456789abcdef";
   return digits.substr((c >> 4) & 15, 1) + digits.substr(c & 15, 1);
 }

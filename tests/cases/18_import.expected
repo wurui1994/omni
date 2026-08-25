@@ -1,0 +1,11 @@
+exit 0
+--- stdout ---
+geom init
+shape init
+main init
+12
+14
+26
+0
+{"k":1}
+--- stderr ---

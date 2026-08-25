@@ -1,0 +1,17 @@
+// import：两类 specifier、菱形依赖只加载一次、初始化按依赖后序、private 不外泄（ADR-0009）
+import "./imports/shape.omni";
+import "./imports/geom.omni";
+import "std/json.omni";
+
+// 初始化顺序：geom -> shape -> main。后序拼接把被依赖模块的顶层语句排在前面，
+// 所以"用到时还没初始化"这件事在结构上不可能发生，不需要初始化调度器。
+print("main init");
+
+print(area(3, 4));
+print(perimeter(3, 4));
+print(describe(3, 4));
+print(areaClamped(-5, 4));
+
+// 包 specifier：std 经清单查到 stage0/lib，不是靠向上找目录
+dynamic j = parseJson("{\"k\": 1}");
+print(stringifyJson(j));

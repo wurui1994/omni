@@ -1,0 +1,6 @@
+// 纯动态模式（.omnid）：省略注解一律是 dynamic。
+// 被一个 .omnis（纯静态、禁止隐式 dynamic）文件导入也不受影响 —— 模式是**按文件**的。
+dynamic bump(dynamic v) {
+  x = v;   // 无注解：这一行在静态模式下是错误，在本文件里合法
+  return x;
+}

@@ -1,0 +1,6 @@
+// private 的名字不进入导入方的作用域，而且错误文本和"根本没定义"一致 ——
+// 别人的私有名字不该出现在我的诊断里（ADR-0009）
+import "./imports/vault.omni";
+
+print(visible(1));
+print(secret(1));

@@ -41,7 +41,13 @@ class Checker {
    */
   constructor(diags, mode = 'mixed') {
     this.diags = diags;
+    /** 整程序缺省模式；每个 decl 自带的 `mode`（来自它所在文件的后缀）会覆盖它 */
+    this.defaultMode = mode;
     this.mode = mode;
+    /** @type {Map<number, Set<number>>} 模块 id -> 它直接导入的模块 id（ADR-0009） */
+    this.imports = new Map();
+    /** 当前正在检查哪个模块的代码；决定私有名字是否可见 */
+    this.curMod = 0;
     /** @type {Map<string, any>} 类型名 -> 类型 */
     this.types = new Map(Object.entries(BUILTINS));
     /** @type {Map<string, any[]>} 函数名 -> 重载组 */
@@ -142,24 +148,58 @@ class Checker {
       }
     }
     const t = this.types.get(ref.name);
-    if (!t) {
+    if (!t || !this.visible(t)) {
       this.err(ref.span, `unknown type '${ref.name}'`);
       return INT;
     }
     return t;
   }
 
+  // ------------------------------------------------------- 模块可见性（ADR-0009）
+
+  /**
+   * 一个顶层名字对当前模块可见，当且仅当：它就在本模块里，或者本模块**直接**导入了
+   * 它所在的模块且它没被 `private` 挡住。
+   *
+   * 传递性刻意没有：A 导入 B、B 导入 C，A 看不见 C 的名字。否则 B 换个实现依赖就会
+   * 悄悄改变 A 能用的名字集合，而 A 的源码里根本没提到 C。
+   */
+  visible(sym) {
+    if (sym.mod === undefined || sym.mod === this.curMod) return true;
+    if (sym.isPrivate) return false;
+    return this.imports.get(this.curMod)?.has(sym.mod) ?? false;
+  }
+
+  /** 名字查找的唯一入口：不可见的候选当作不存在，于是错误文本和"没定义"一致 —— 别人的私有名字不该出现在诊断里 */
+  lookupFuncs(name) {
+    const group = this.funcs.get(name);
+    if (!group) return undefined;
+    const vis = group.filter((s) => this.visible(s));
+    return vis.length ? vis : undefined;
+  }
+
   // ---------------------------------------------------------------- 顶层
 
   /** @param {any} program */
   run(program) {
+    this.imports = program.imports ?? new Map();
+    // 每个 decl 自带所属模块与所在文件的模式；`at` 在检查它之前把这两个"当前上下文"摆好
+    const at = (d) => {
+      this.curMod = d.mod ?? 0;
+      this.mode = d.mode ?? this.defaultMode;
+    };
+
     // pass 1：struct / class 名先占位，允许字段互相前向引用
     const aggs = program.decls.filter((d) => d.kind === 'StructDecl' || d.kind === 'ClassDecl');
     for (const d of aggs) {
       if (this.types.has(d.name)) this.err(d.span, `redefinition of type '${d.name}'`);
-      this.types.set(d.name, d.kind === 'StructDecl' ? structType(d.name, []) : classType(d.name, []));
+      const t = d.kind === 'StructDecl' ? structType(d.name, []) : classType(d.name, []);
+      t.mod = d.mod ?? 0;
+      t.isPrivate = d.isPrivate === true;
+      this.types.set(d.name, t);
     }
     for (const d of aggs) {
+      at(d);
       const t = this.types.get(d.name);
       const seen = new Set();
       for (const f of d.fields) {
@@ -180,10 +220,17 @@ class Checker {
     for (const d of program.decls) if (d.kind === 'FuncDecl') decls.push({ decl: d, owner: null });
     for (const d of aggs) {
       if (d.kind !== 'ClassDecl') continue;
-      for (const m of d.methods ?? []) decls.push({ decl: m, owner: this.types.get(d.name) });
+      // 方法跟着它的 class 走：模块归属与可见性都取 class 的（方法没有单独的 private）
+      for (const m of d.methods ?? []) {
+        m.mod = d.mod;
+        m.mode = d.mode;
+        m.isPrivate = d.isPrivate;
+        decls.push({ decl: m, owner: this.types.get(d.name) });
+      }
     }
 
     for (const { decl, owner } of decls) {
+      at(decl);
       const ret = this.resolveType(decl.retType);
       const declared = decl.params.map((p) => ({
         name: p.name,
@@ -196,12 +243,17 @@ class Checker {
         : declared;
       const group = this.funcs.get(decl.name) ?? [];
       for (const prev of group) {
-        if (prev.params.length === params.length && prev.params.every((p, i) => same(p.type, params[i].type))) {
-          this.err(decl.span, `redefinition of '${decl.name}' with the same parameter types`);
-        }
+        if (prev.params.length !== params.length) continue;
+        if (!prev.params.every((p, i) => same(p.type, params[i].type))) continue;
+        // 两个模块各自的 private 同名同签名函数不冲突 —— 谁也看不见谁
+        const clash = prev.mod === (decl.mod ?? 0) || !(prev.isPrivate || decl.isPrivate);
+        if (clash) this.err(decl.span, `redefinition of '${decl.name}' with the same parameter types`);
       }
       const base = owner ? `${owner.name}_${decl.name}` : decl.name;
-      const sym = { name: decl.name, mangled: this.mangle(base), ret, params, ast: decl, owner };
+      const sym = {
+        name: decl.name, mangled: this.mangle(base), ret, params, ast: decl, owner,
+        mod: decl.mod ?? 0, isPrivate: decl.isPrivate === true, mode: decl.mode ?? this.defaultMode,
+      };
       group.push(sym);
       this.funcs.set(decl.name, group);
     }
@@ -209,6 +261,7 @@ class Checker {
     // pass 3：默认实参（在空作用域里求值，只允许常量表达式的简单形式）
     for (const group of this.funcs.values()) {
       for (const sym of group) {
+        at(sym);
         for (const p of sym.params) {
           if (!p.defAst) continue;
           p.def = this.coerce(this.expr(p.defAst, { expected: p.type }), p.type, p.defAst.span);
@@ -220,6 +273,7 @@ class Checker {
     const funcs = [];
     for (const group of this.funcs.values()) {
       for (const sym of group) {
+        at(sym);
         this.enterFunction();
         this.currentRet = sym.ret;
         this.thisType = sym.owner;
@@ -242,6 +296,7 @@ class Checker {
     const mainStmts = [];
     for (const d of program.decls) {
       if (d.kind === 'StructDecl' || d.kind === 'ClassDecl' || d.kind === 'FuncDecl') continue;
+      at(d);
       const s = this.stmt(d);
       if (s) mainStmts.push(s);
     }
@@ -513,7 +568,7 @@ class Checker {
           const self = { kind: 'VarRef', name: 'this', type: this.thisType };
           return { kind: 'Field', object: self, name: field.name, type: field.type, viaThis: true };
         }
-        if (this.funcs.has(node.name) || BUILTIN_FUNCS.has(node.name)) {
+        if (this.lookupFuncs(node.name) || BUILTIN_FUNCS.has(node.name)) {
           this.err(node.span, `'${node.name}' is a function; first-class function values are not supported yet`);
         } else {
           this.err(node.span, `undefined variable '${node.name}'`);
@@ -836,7 +891,7 @@ class Checker {
 
     if (callee.kind === 'Name') {
       if (BUILTIN_FUNCS.has(callee.name)) return this.builtinCall(callee.name, args, node.span);
-      const group = this.funcs.get(callee.name);
+      const group = this.lookupFuncs(callee.name);
       if (!group) {
         this.err(callee.span, `undefined function '${callee.name}'`);
         return { kind: 'Const', type: INT, value: 0n };
@@ -866,7 +921,7 @@ class Checker {
       const builtin = this.builtinMethod(recvType, name, recv, args, node.span);
       if (builtin) return builtin;
       // UFCS：候选合并成一个重载集（ADR-0006 第 5 节）。class 方法此时已在同一张表里。
-      const group = this.funcs.get(name);
+      const group = this.lookupFuncs(name);
       const ufcsArgs = [{ name: null, expr: recv, span: callee.object.span }, ...args];
       if (group) return this.buildCall(name, this.tryResolve(group, ufcsArgs), node.span);
       if (BUILTIN_FUNCS.has(name)) return this.builtinCall(name, ufcsArgs, node.span);
@@ -1032,9 +1087,11 @@ class Checker {
    * 刻意降级为对 stdlib `dynToText` 的调用 —— json 的序列化实现只有一份，在 `lib/json.omni` 里。
    */
   dynText(e, span) {
+    // 这是编译器内部的降级钩子，不是用户写下的名字，所以**不过可见性**：
+    // 只要模块图里有人导入了 std/json，`print(dynamic)` 就该能用。
     const group = this.funcs.get('dynToText');
     if (!group) {
-      this.err(span, "printing a dynamic value needs the json library; mention 'json' in this file, or call x.asString() explicitly");
+      this.err(span, 'printing a dynamic value needs the json library; add \'import "std/json.omni";\', or call x.asString() explicitly');
       return { kind: 'Const', type: STRING, value: '' };
     }
     return this.buildCall('dynToText', this.tryResolve(group, [{ name: null, expr: e, span }]), span);

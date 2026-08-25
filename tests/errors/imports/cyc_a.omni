@@ -1,0 +1,3 @@
+import "./cyc_b.omni";
+
+int a() { return 1; }

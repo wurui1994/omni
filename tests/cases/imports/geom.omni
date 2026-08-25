@@ -1,0 +1,17 @@
+// 被 18_import.omni 与 ./shape.omni 共同导入：菱形依赖只该加载一次，
+// 所以这行 "geom init" 在输出里只能出现一遍。
+print("geom init");
+
+int area(int w, int h) {
+  return w * h;
+}
+
+// 私有。像 clampLow 这种名字到处都有，让它泄进每个导入方的作用域迟早撞名（ADR-0009）。
+private int clampLow(int v) {
+  if (v < 0) { return 0; }
+  return v;
+}
+
+int areaClamped(int w, int h) {
+  return area(clampLow(w), clampLow(h));
+}

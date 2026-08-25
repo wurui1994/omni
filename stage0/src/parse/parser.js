@@ -190,6 +190,16 @@ class Parser {
   }
 
   parseTopLevel() {
+    if (this.at('import')) return this.parseImport();
+    if (this.at('private')) {
+      const kw = this.next();
+      const d = this.parseTopLevel();
+      const CAN_HIDE = new Set(['FuncDecl', 'StructDecl', 'ClassDecl', 'VarDecl']);
+      if (!d || !CAN_HIDE.has(d.kind)) {
+        this.error(kw.span, "'private' can only precede a function, struct, class or variable declaration");
+      } else d.isPrivate = true;
+      return d;
+    }
     if (this.at('struct')) return this.parseAggregate('struct');
     if (this.at('class')) return this.parseAggregate('class');
     if (this.at('var') || this.at('let')) return this.parseInferredDecl(true);
@@ -199,6 +209,26 @@ class Parser {
       return this.parseVarDeclRest(head.type, head.nameTok, true);
     }
     return this.parseStatement();
+  }
+
+  /**
+   * `import "./util";` / `import "std/json";`
+   *
+   * 只有一种形态：一个带引号的路径，别的什么都没有 —— 没有 `from`、没有名字列表、
+   * 没有别名、没有 `import *`。被导入模块的公开顶层名字整体进入导入方的作用域
+   * （Asymptote 的 import 模型），要藏的东西由被导入方自己写 `private`，
+   * 而不是由导入方挑选。路径的合法形态与解析规则见 ADR-0009 与 module/load.js。
+   */
+  parseImport() {
+    const start = this.expect('import');
+    const t = this.peek();
+    if (t.kind !== 'str') {
+      this.error(t.span, "expected a quoted module path after 'import', e.g. import \"./util\";");
+      return { kind: 'Import', path: '', pathSpan: t.span, span: this.spanFrom(start) };
+    }
+    this.next();
+    this.expect(';');
+    return { kind: 'Import', path: t.value, pathSpan: t.span, span: this.spanFrom(start) };
   }
 
   /** struct 与 class 的语法相同；差别在语义（值语义 vs 引用语义 + 方法） */

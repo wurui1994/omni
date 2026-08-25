@@ -1,0 +1,4 @@
+// 环：报出整条 import 链，而不是给一个半初始化的模块（ADR-0009）
+import "./imports/cyc_a.omni";
+
+print(0);

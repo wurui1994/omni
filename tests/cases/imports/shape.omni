@@ -1,0 +1,13 @@
+// 直接导入的模块的公开名字是可见的（describe 里直接叫 area），但可见性**不传递**：
+// 18_import.omni 想用 area 得自己 import geom，光 import shape 不算。
+import "./geom.omni";
+
+print("shape init");
+
+int perimeter(int w, int h) {
+  return 2 * (w + h);
+}
+
+int describe(int w, int h) {
+  return area(w, h) + perimeter(w, h);
+}

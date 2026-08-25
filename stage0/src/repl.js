@@ -124,6 +124,16 @@ function renumber(text, base) {
   return text.replace(/^<repl>:(\d+):/gm, (m, l) => `<repl>:${Number(l) - base}:`);
 }
 
+/**
+ * REPL 的隐式前言。
+ *
+ * 交互式会话里回显的值随时可能是 dynamic（json 字面量、parseJson 的结果、动态模式下的一切），
+ * 而 `print(dynamic)` 要降级成 std/json 的 dynToText —— 每开一个会话先手打一行 import 没有意义。
+ * 这是**唯一**一处隐式导入，而且只在 REPL 里：源文件不享受这个待遇，文件的依赖必须写在文件里
+ * （ADR-0009）。`:list` 刻意不显示它，它不是用户输入的一部分。
+ */
+const PRELUDE = 'import "std/json.omni";';
+
 class Session {
   /** @param {(path: string, text: string, mode: string) => any} compileText */
   constructor(compileText, mode) {
@@ -137,12 +147,12 @@ class Session {
 
   source(extra) {
     const parts = extra === undefined ? this.chunks : [...this.chunks, extra];
-    return parts.length ? `${parts.join('\n')}\n` : '\n';
+    return `${[PRELUDE, ...parts].join('\n')}\n`;
   }
 
-  /** 前缀占了多少行 —— 诊断行号要减掉它 */
+  /** 前缀（前言 + 已接受的块）占了多少行 —— 诊断行号要减掉它 */
   priorLines() {
-    return this.chunks.length ? this.source().split('\n').length - 1 : 0;
+    return this.source().split('\n').length - 1;
   }
 
   compile(extra) {
@@ -222,7 +232,8 @@ function command(s, line) {
     case ':q':
       return true;
     case ':list':
-      process.stdout.write(s.chunks.length ? s.source() : '(empty session)\n');
+      // 只列用户输入过的块；隐式前言不是会话内容（见 PRELUDE）
+      process.stdout.write(s.chunks.length ? `${s.chunks.join('\n')}\n` : '(empty session)\n');
       return false;
     case ':reset':
       s.chunks = [];

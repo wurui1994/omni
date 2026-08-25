@@ -1,0 +1,27 @@
+tests/errors/import_bad_paths.omni:2:8: error: no such module: './nope.omni' (looked for tests/errors/nope.omni)
+  import "./nope.omni";                 // 不存在：只报找过的那一个位置，没有"又试了 N 处"
+         ^^^^^^^^^^^^^
+tests/errors/import_bad_paths.omni:3:8: error: 'util.omni' is not a module path: a path without '/' would be a package name with nothing after it — write './util.omni' for a file next to this one, or 'pkg/util.omni' for a file in package 'pkg'
+  import "util.omni";                   // 裸名字 = 包名，不会先试本地再试全局（Python 2）
+         ^^^^^^^^^^^
+tests/errors/import_bad_paths.omni:4:8: error: module path must name a file with its extension (.omni, .omnid, .omnis): './imports/vault' — the extension also selects the type mode, so guessing it would mean guessing the mode
+  import "./imports/vault";             // 不猜后缀 —— 后缀还决定类型模式（node）
+         ^^^^^^^^^^^^^^^^^
+tests/errors/import_bad_paths.omni:5:8: error: '.' and '..' are only allowed at the start of a module path: './imports/./vault.omni'
+  import "./imports/./vault.omni";      // 中途的 . 段
+         ^^^^^^^^^^^^^^^^^^^^^^^^
+tests/errors/import_bad_paths.omni:6:8: error: module path '../cases/07_json.omni' escapes the package root tests/errors
+  import "../cases/07_json.omni";       // 爬出包根
+         ^^^^^^^^^^^^^^^^^^^^^^^
+tests/errors/import_bad_paths.omni:7:8: error: module path case does not match the file on disk: 'Vault.omni' vs 'vault.omni' in tests/errors/imports
+  import "./imports/Vault.omni";        // 大小写必须与磁盘一致（mac 过、CI 炸）
+         ^^^^^^^^^^^^^^^^^^^^^^
+tests/errors/import_bad_paths.omni:8:8: error: module path must not be a URL: 'https://example.com/a.omni' — depend on a package name, not a download address
+  import "https://example.com/a.omni";  // URL 不是导入路径（Go 早期）
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/errors/import_bad_paths.omni:9:8: error: module path must not be absolute: '/etc/passwd.omni'
+  import "/etc/passwd.omni";            // 绝对路径
+         ^^^^^^^^^^^^^^^^^^
+tests/errors/import_bad_paths.omni:10:8: error: unknown package 'nosuchpkg' in module path 'nosuchpkg/mod.omni' (known packages: std)
+  import "nosuchpkg/mod.omni";          // 未知包：列出清单里有什么，不做搜索
+         ^^^^^^^^^^^^^^^^^^^^

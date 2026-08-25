@@ -1,0 +1,10 @@
+// 模式按文件（ADR-0008 第 1 节，靠 ADR-0009 的模块系统才真正落地）：
+// 这个文件是纯静态的 —— 隐式 dynamic 就是错误；它导入的 .omnid 文件却是纯动态的。
+// 两边同时成立，才叫"按文件的模式"。在 import 之前整程序只有一个模式，这个用例不可能通过。
+import "./imports/loose.omnid";
+import "std/json.omni";
+
+int n = 7;
+print(n);
+print(bump(dyn(1)).asInt());
+print(bump(dyn("s")).asString());

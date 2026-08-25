@@ -1,0 +1,10 @@
+// 路径形态的全部拒绝规则，一次看全（ADR-0009）。每条都是别的语言踩过的坑。
+import "./nope.omni";                 // 不存在：只报找过的那一个位置，没有"又试了 N 处"
+import "util.omni";                   // 裸名字 = 包名，不会先试本地再试全局（Python 2）
+import "./imports/vault";             // 不猜后缀 —— 后缀还决定类型模式（node）
+import "./imports/./vault.omni";      // 中途的 . 段
+import "../cases/07_json.omni";       // 爬出包根
+import "./imports/Vault.omni";        // 大小写必须与磁盘一致（mac 过、CI 炸）
+import "https://example.com/a.omni";  // URL 不是导入路径（Go 早期）
+import "/etc/passwd.omni";            // 绝对路径
+import "nosuchpkg/mod.omni";          // 未知包：列出清单里有什么，不做搜索

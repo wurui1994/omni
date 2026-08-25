@@ -1,6 +1,8 @@
 // 对照 Python 的 strtod + printf：json 的浮点**解析**精度，以及 repr(real) 的规格（ADR-0005）。
 // 参照实现按 ADR 的文字重新表达一遍 repr 规则（15/16/17 位里第一个能往返的），
 // 因此这里真正被检验的是：我们手写的 JS $fmt_g、C 的 snprintf 用法、以及 json 的数字扫描。
+import "std/json.omni";
+
 list<string> docs = [
   "0.0", "1.0", "-1.0", "-0.0",
   "0.1", "0.5", "1.5", "-0.25", "0.3",

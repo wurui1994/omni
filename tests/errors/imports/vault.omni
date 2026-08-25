@@ -1,0 +1,7 @@
+private int secret(int x) {
+  return x + 1;
+}
+
+int visible(int x) {
+  return secret(x) * 10;
+}

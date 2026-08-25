@@ -130,7 +130,7 @@ V8 的路子：稀疏索引表 + 紧凑 entries 数组，迭代顺序 = 插入�
 4. ✅ `class`（引用）+ 方法降级为自由函数 + UFCS 合并重载集 —— **ARC 未做**，
    当前只分配不释放，等 ADR-0007 的 unwind 表落地
 5. ✅ `set<T>`（复用 dict 索引）
-6. tagged union + 模块系统（`cli.js` 的 `libsFor` 是显式临时方案，有 import 后删掉）
+6. ✅ 模块系统 `import` + `private`（ADR-0009，`libsFor` 已删除）；tagged union 未做
 7. 闭包 / 函数值
 8. …… pointer / unsafe 在这之后
 

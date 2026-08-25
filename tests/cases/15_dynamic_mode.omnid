@@ -1,5 +1,9 @@
 // 纯动态模式（.omnid）：省略类型一律是 dynamic，不做推断（ADR-0008 第 1 节）
 // 这是 REPL / 脚本 / JS 子集的落点。
+// 动态模式下 print 一律经过 dynToText，所以 std/json 是这类文件的必备依赖 —— 显式写出来，
+// 不再由编译器"看到 dynamic 就偷偷拼进来"（ADR-0009 废掉了那个 hack）。
+import "std/json.omni";
+
 x = 1;
 print(x);
 x = "now a string";

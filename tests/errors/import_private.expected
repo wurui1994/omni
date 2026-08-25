@@ -1,0 +1,3 @@
+tests/errors/import_private.omni:6:7: error: undefined function 'secret'
+  print(secret(1));
+        ^^^^^^

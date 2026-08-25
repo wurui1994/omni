@@ -1,0 +1,4 @@
+omni: error: import cycle:
+    ./imports/cyc_a.omni
+    imports ./cyc_b.omni
+    imports ./cyc_a.omni
