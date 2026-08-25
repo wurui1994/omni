@@ -832,10 +832,10 @@ class Checker {
    */
   probeElem(items, span) {
     if (this.mode === 'dynamic') return DYNAMIC;
-    const mark = this.diags.items.length;
+    const mark = this.diags.mark();
     const probe = items.map((it) => this.expr(it));
     const t = this.unifyElems(probe);
-    this.diags.items.length = mark;
+    this.diags.rollback(mark);
     if (t) return t;
     this.err(span, "cannot infer element type of empty list literal; annotate the target (e.g. 'list<int> xs = [];')");
     return INT;
@@ -863,10 +863,10 @@ class Checker {
         keyT = keyT ?? STRING;
         valT = valT ?? INT;
       } else {
-        const mark = this.diags.items.length;
+        const mark = this.diags.mark();
         const pk = node.entries.map((e) => this.expr(e.key));
         const pv = node.entries.map((e) => this.expr(e.value));
-        this.diags.items.length = mark;
+        this.diags.rollback(mark);
         if (!keyT) keyT = this.mode === 'dynamic' ? STRING : this.unifyElems(pk);
         if (!valT) valT = this.mode === 'dynamic' ? DYNAMIC : this.unifyElems(pv);
         if (keyT.k === 'dynamic') {

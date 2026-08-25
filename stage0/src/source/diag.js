@@ -65,6 +65,18 @@ export class Diagnostics {
     return this.errorCount() > 0;
   }
 
+  /**
+   * 试探性求值的存档/回滚：检查器与解析器都要"先试一遍，不满意就把诊断丢掉"。
+   * 回滚用 pop 而不是 `items.length = n` —— 给 list 写 .length 不在值域里（ADR-0011）。
+   */
+  mark() {
+    return this.items.length;
+  }
+
+  rollback(mark) {
+    while (this.items.length > mark) this.items.pop();
+  }
+
   /** 渲染成 clang 风格的多行诊断（带 caret） */
   format() {
     const out = [];

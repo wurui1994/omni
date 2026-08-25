@@ -192,12 +192,12 @@ class Parser {
   tryDeclHead() {
     if (!this.looksLikeVarDecl()) return null;
     const savePos = this.pos;
-    const saveDiags = this.diags.items.length;
+    const saveDiags = this.diags.mark();
     const type = this.parseType();
     const nameTok = this.peek();
     if (nameTok.kind !== 'ident') {
       this.pos = savePos;
-      this.diags.items.length = saveDiags;
+      this.diags.rollback(saveDiags);
       return null;
     }
     this.next();

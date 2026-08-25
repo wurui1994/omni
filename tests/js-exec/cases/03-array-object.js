@@ -76,4 +76,9 @@ let flag = 1;
 flag ||= 99;
 console.log(String(flag));
 console.log(String(nested.nope?.deep));
+// ?. 的短路是整条链的：nope 是 undefined，后面的 .list / .find / [0] 都不该发生
+console.log(String(nested.nope?.list.find((x) => x > 0)));
+console.log(String(nested.nope?.list[0]));
+console.log(String(nested.nope?.list.join(",")));
+console.log(String(nested.list?.find((x) => x > 1)));
 console.log(String(JSON.stringify({ k: [1, "s", true, null] })));

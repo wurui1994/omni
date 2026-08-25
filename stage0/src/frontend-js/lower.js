@@ -1296,12 +1296,31 @@ class Lower {
       this.err(e.span, `'${path}' is not in the closed ABI (ADR-0011 decision 2)`);
       return undefExpr();
     }
-    if (e.optional) {
+    return this.onObject(e.object, e.optional, (obj) => this.memberOn(obj, e));
+  }
+
+  /**
+   * 链上的接收者：先把 objNode 求出来，再把 build 接在后面。
+   *
+   * `?.` 的短路是**整条链**的 —— `a?.b.find(f)` 里 a 为 null，`.fields` 与 `find` 都
+   * 不该发生。所以判空不能就地包住那一个成员访问，而要把"链上剩下的部分"整体放进
+   * else 分支（lazy）里。为此这里穿过成员链往里递归，把每个 `?.` 的守卫从内往外套。
+   *
+   * @param {any} objNode  接收者的 AST
+   * @param {boolean} optional  消费这个接收者的那一环是不是 `?.`
+   * @param {(obj: any) => any} build  拿到接收者的值以后继续降级
+   */
+  onObject(objNode, optional, build) {
+    const next = !optional ? build : (obj) => {
       const t = this.temp();
-      const cond = boolOp('js_eq', [assign(varRef(t), this.expr(e.object)), nullExpr()], { strict: false });
-      return ternary(cond, undefExpr(), this.lazy(() => this.memberOn(varRef(t), e)));
+      const cond = boolOp('js_eq', [assign(varRef(t), obj), nullExpr()], { strict: false });
+      return ternary(cond, undefExpr(), this.lazy(() => build(varRef(t))));
+    };
+    // 静态路径（Math.PI 之类）不是普通成员访问，交给 expr 走 ABI 那条路
+    if (objNode.type === 'Member' && !this.staticPath(objNode)) {
+      return this.onObject(objNode.object, objNode.optional, (obj) => next(this.memberOn(obj, objNode)));
     }
-    return this.memberOn(this.expr(e.object), e);
+    return next(this.expr(objNode));
   }
 
   memberOn(obj, e) {
@@ -1375,8 +1394,7 @@ class Lower {
       if (re) return re;
       if (!c.computed && JS_METHODS[c.name]) return this.methodCall(c, e);
       // 兜底：属性里存着的函数值，动态调用
-      const f = this.memberOn(this.expr(c.object), c);
-      return this.dynCall(f, e.args);
+      return this.onObject(c.object, c.optional, (obj) => this.dynCall(this.memberOn(obj, c), e.args));
     }
     return this.dynCall(this.expr(c), e.args);
   }
@@ -1392,21 +1410,23 @@ class Lower {
   methodCall(c, e) {
     const name = c.name;
     const argc = JS_ALL[`js_m_${name}`].member.argc;
-    // push 是唯一一个源码里真的会写可变实参的 ABI 成员（量过：14 处 `push(...xs)`）。
-    // 实参先拼成一个 list，再整段追加 —— 定长的 op 表达不了可变实参。
-    if (name === 'push' && (e.args.length !== 1 || e.args[0].type === 'Spread')) {
-      return op('js_arr_push_all', [this.expr(c.object), box(this.argList(e.args), listType(D))]);
-    }
-    if (e.args.some((a) => a.type === 'Spread')) {
-      this.err(e.span, `spread is not supported in a '${name}' call`);
-      return undefExpr();
-    }
-    if (e.args.length > argc) {
-      return this.dynCall(op('js_obj_get', [this.expr(c.object), s16(name)]), e.args);
-    }
-    const args = [this.expr(c.object)];
-    for (let i = 0; i < argc; i++) args.push(i < e.args.length ? this.expr(e.args[i]) : undefExpr());
-    return op(`js_m_${name}`, args);
+    return this.onObject(c.object, c.optional, (recv) => {
+      // push 是唯一一个源码里真的会写可变实参的 ABI 成员（量过：14 处 `push(...xs)`）。
+      // 实参先拼成一个 list，再整段追加 —— 定长的 op 表达不了可变实参。
+      if (name === 'push' && (e.args.length !== 1 || e.args[0].type === 'Spread')) {
+        return op('js_arr_push_all', [recv, box(this.argList(e.args), listType(D))]);
+      }
+      if (e.args.some((a) => a.type === 'Spread')) {
+        this.err(e.span, `spread is not supported in a '${name}' call`);
+        return undefExpr();
+      }
+      if (e.args.length > argc) {
+        return this.dynCall(op('js_obj_get', [recv, s16(name)]), e.args);
+      }
+      const args = [recv];
+      for (let i = 0; i < argc; i++) args.push(i < e.args.length ? this.expr(e.args[i]) : undefExpr());
+      return op(`js_m_${name}`, args);
+    });
   }
 
   abiCall(spec, args, span, what) {
