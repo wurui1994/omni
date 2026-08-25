@@ -1,0 +1,41 @@
+exit 0
+--- stdout ---
+int
+42
+string
+hi
+real
+2.5
+bool
+true
+null
+5
+two
+int
+null
+7
+2
+list
+5
+dict
+ann
+31
+int
+1.5
+true
+null
+2
+b
+{"name":"ann","age":31,"tags":["a","b"],"score":1.5,"ok":true,"nil":null}
+[1,2,[3,{"a":false}]]
+[]
+{}
+"esc: \n \t \" \\ A"
+-12
+0.1
+1000.0
+1.2345678901234567e+19
+0.1
+1.0
+9007199254740993
+--- stderr ---

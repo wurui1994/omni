@@ -1,0 +1,66 @@
+// 基础语义：算术 / 控制流 / 重载 / 默认与命名实参 / UFCS / struct 值语义 / 字符串
+int fib(int n) {
+  if (n < 2) { return n; }
+  return fib(n - 1) + fib(n - 2);
+}
+
+int add(int a, int b) { return a + b; }
+real add(real a, real b) { return a + b; }
+
+int scale(int x, int k = 10) { return x * k; }
+
+struct Point { int x; int y; }
+int sum(Point p) { return p.x + p.y; }
+
+print(fib(20));
+print(add(2, 3));
+print(add(2.5, 1.0));
+print(add(1, 2.5));
+print(scale(7));
+print(scale(7, k = 3));
+print(scale(k = 3, x = 7));
+
+Point p;
+p.x = 3;
+p.y = 4;
+print(sum(p));
+print(p.sum());
+
+Point q = p;
+q.x = 100;
+print(p.x);
+print(q.x);
+
+string s = "he" + "llo";
+print(s + " world");
+print(s == "hello");
+print(s < "hellp");
+print(string(42) + "/" + string(2.5) + "/" + string(true));
+
+int i = 0;
+int acc = 0;
+while (i < 10) { acc += i; i++; }
+print(acc);
+
+for (int j = 0; j < 5; j++) {
+  if (j == 2) { continue; }
+  if (j == 4) { break; }
+  print(j);
+}
+
+print(7 / 2);
+print(-7 / 2);
+print(7 % 3);
+print(-7 % 3);
+print(7.0 / 2.0);
+print(1 << 10);
+print(int(3.9));
+print(int(-3.9));
+print(real(3) / 2.0);
+print(true && false);
+print(!false);
+print(3 > 2 ? "yes" : "no");
+print(1.0 / 3.0);
+print(1e100);
+print(0.000012345);
+print(2147483647 * 2147483647);

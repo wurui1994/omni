@@ -1,0 +1,83 @@
+// 对照 Python 的 dict / list：插入序是 ADR-0006 的硬约束，Python 的 dict 有同样的语义，
+// 是现成的参照实现。C 侧那张手写哈希表（条目数组 + 墓碑）真正被检验的就是这一条。
+dict<string, int> d = {:};
+
+// 插入 40 个键；i*7%40 会重复命中已有键 —— 更新已有键**不改**它的位置
+int i = 0;
+while (i < 120) {
+  d[string(i * 7 % 40)] = i;
+  i = i + 1;
+}
+print(d.length);
+string ks = "";
+for (string k in d) { ks = ks + k + ","; }
+print(ks);
+string vs = "";
+for (string k in d) { vs = vs + string(d[k]) + ","; }
+print(vs);
+
+// 删除 3 的倍数，剩下的保持原相对顺序
+i = 0;
+while (i < 40) {
+  if (i % 3 == 0) { d.remove(string(i)); }
+  i = i + 1;
+}
+print(d.length);
+ks = "";
+for (string k in d) { ks = ks + k + ","; }
+print(ks);
+
+// 删除后重新插入：键移到末尾
+i = 0;
+while (i < 40) {
+  if (i % 3 == 0) { d[string(i)] = 1000 + i; }
+  i = i + 1;
+}
+print(d.length);
+ks = "";
+for (string k in d) { ks = ks + k + ","; }
+print(ks);
+print(d["0"]);
+print(d["39"]);
+
+// 触发多次扩容：500 个键，再删一半，再插回来
+dict<string, int> big = {:};
+i = 0;
+while (i < 500) { big["k" + string(i)] = i * i; i = i + 1; }
+print(big.length);
+i = 0;
+while (i < 500) { if (i % 2 == 0) { big.remove("k" + string(i)); } i = i + 1; }
+print(big.length);
+i = 0;
+while (i < 500) { if (i % 2 == 0) { big["k" + string(i)] = -i; } i = i + 1; }
+print(big.length);
+int checksum = 0;
+int pos = 0;
+for (string k in big) {
+  checksum = checksum + big[k] * (pos + 1);
+  pos = pos + 1;
+}
+print(checksum);
+print(big.keys().length);
+
+// int 键：哈希函数不同也不能影响顺序
+dict<int, int> di = {:};
+i = 0;
+while (i < 50) { di[i * i - 25 * i] = i; i = i + 1; }
+print(di.length);
+string kis = "";
+for (int k in di) { kis = kis + string(k) + ","; }
+print(kis);
+
+// list 的语义对照（append / pop / 索引）
+list<int> xs = [];
+i = 0;
+while (i < 30) { xs.push(i * 3); i = i + 1; }
+print(xs.length);
+print(xs[7]);
+print(xs.pop());
+print(xs.pop());
+print(xs.length);
+int total = 0;
+for (int v in xs) { total = total + v; }
+print(total);

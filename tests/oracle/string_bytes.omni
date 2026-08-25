@@ -1,0 +1,56 @@
+// 对照 Python 的 str.encode()：string 是 UTF-8 字节序列，.length / byteAt 按字节（ADR-0005）。
+// 这条在 JS 后端上是靠 TextEncoder 手工桥接的，没有外部参照就没人发现它和 C 一起错。
+// 最后一个是分解形式的 é（e + U+0301 组合尖音符）：字节长 3、码点数 2、"字符"数 1。
+// 刻意用 chr() 拼而不是写字面量 —— 编辑器/文件系统会把字面量归一化成预组合的 U+00E9，
+// 那样就测不到这个点了。按字节数应该是 3，任何按码点或按字符算长度的实现都会在这里露出来。
+list<string> strs = ["", "a", "abc", "hello world", "héllo", "世界", "a→b", "ÿ", "𝄞", chr(101) + chr(769)];
+
+for (string s in strs) { print(s.length); }
+
+for (string s in strs) {
+  int i = 0;
+  string acc = "";
+  while (i < s.length) {
+    acc = acc + string(s.byteAt(i)) + ",";
+    i = i + 1;
+  }
+  print(acc);
+}
+
+// substr / indexOf 只在 ASCII 上对照：切在多字节序列中间是已记录的偏差（ADR-0005）
+string t = "the quick brown fox jumps";
+print(t.length);
+print(t.substr(4, 5));
+print(t.substr(0, 3));
+print(t.substr(t.length - 3, 3));
+print(t.substr(0, 0) == "");
+print(t.indexOf("quick"));
+print(t.indexOf("fox"));
+print(t.indexOf("the"));
+print(t.indexOf("zzz"));
+print(t.indexOf(""));
+print(t.indexOf(t));
+
+// 拼接、比较（ASCII）、以及在多字节串上的字节级拼接
+print("ab" + "cd");
+print(("ab" + "cd").length);
+print("héllo" + "世界");
+print(("héllo" + "世界").length);
+print("abc" < "abd");
+print("abc" < "ab");
+print("abc" == "abc");
+print("Z" < "a");
+
+// chr()：码点 -> UTF-8 字节
+list<int> cps = [65, 233, 19990, 8594, 255, 119070, 0, 127];
+for (int c in cps) {
+  string s = chr(c);
+  print(s.length);
+  int i = 0;
+  string acc = "";
+  while (i < s.length) {
+    acc = acc + string(s.byteAt(i)) + ",";
+    i = i + 1;
+  }
+  print(acc);
+}

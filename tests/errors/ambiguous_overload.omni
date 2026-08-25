@@ -1,0 +1,4 @@
+int f(real a, int b) { return 1; }
+int f(int a, real b) { return 2; }
+
+print(f(1, 1));

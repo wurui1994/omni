@@ -1,0 +1,9 @@
+tests/errors/inferred_is_monomorphic.omni:3:5: error: cannot assign 'string' to 'x', whose type was inferred as 'int'; inferred variables are monomorphic — declare it as 'dynamic x' or put this code in a '.omnid' file
+  x = "not an int";
+      ^^^^^^^^^^^^
+tests/errors/inferred_is_monomorphic.omni:6:9: error: dict keys must share one hashable type; only values may degrade to dynamic
+  let d = {1: "a", "b": 2};
+          ^^^^^^^^^^^^^^^^
+tests/errors/inferred_is_monomorphic.omni:6:10: error: cannot convert 'int' to 'string'
+  let d = {1: "a", "b": 2};
+           ^

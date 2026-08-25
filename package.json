@@ -1,0 +1,21 @@
+{
+  "name": "omni-lang",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Omni: cross-language parsing / multi-backend compilation architecture (stage0 bootstrap compiler, plain JS)",
+  "bin": {
+    "omni": "./stage0/src/cli.js"
+  },
+  "scripts": {
+    "omni": "node stage0/src/cli.js",
+    "test": "node tests/run.js",
+    "test:oracle": "node tests/oracle/run.js",
+    "test:all": "node tests/run.js && node tests/oracle/run.js",
+    "bench": "node bench/compare.js",
+    "lint": "tsc --noEmit -p jsconfig.json"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

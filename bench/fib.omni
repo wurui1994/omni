@@ -1,0 +1,15 @@
+// 对照基准：同一算法在 Omni / LuaJIT / Python / C 上跑，既比对结果也比对耗时。
+// 结果一致性是"语言对照测试"的目的；耗时只是顺手记下的基线，stage0 阶段不追求性能。
+int fib(int n) {
+  if (n < 2) { return n; }
+  return fib(n - 1) + fib(n - 2);
+}
+
+int sumTo(int n) {
+  int acc = 0;
+  for (int i = 1; i <= n; i++) { acc += i * i % 1000003; }
+  return acc;
+}
+
+print(fib(27));
+print(sumTo(2000000));

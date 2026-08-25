@@ -1,0 +1,5 @@
+exit 70
+--- stdout ---
+dict
+--- stderr ---
+omni: runtime error: dynamic value is dict, expected int

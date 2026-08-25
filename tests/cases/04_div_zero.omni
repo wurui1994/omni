@@ -1,0 +1,6 @@
+// 运行时错误：整数除零必须在两个后端上产生相同的 stderr 与退出码 70
+print(1);
+int a = 10;
+int b = 0;
+print(a / b);
+print(2);

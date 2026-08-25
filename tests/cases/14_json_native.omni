@@ -1,0 +1,51 @@
+// 原生 json：源码里不需要出现 dyn()（ADR-0008 第 5 节）
+dynamic j = {"name": "ann", "age": 31, "tags": ["a", "b"], "nested": {"k": [1, 2, 3]}, "ok": true, "nil": null};
+
+// 读取：直接索引，不用先 asDict()/asList()
+print(j["name"]);
+print(j["age"]);
+print(j["tags"][1]);
+print(j["nested"]["k"][2]);
+print(j.length);
+print(j.has("age"));
+print(j.has("zzz"));
+print(j["nil"].tag());
+
+// 条件里直接用 dynamic：运行期要求标签是 bool（不引入 JS truthiness）
+if (j["ok"]) { print("ok is true"); }
+
+// 迭代：dict 给键，list 给元素
+for (dynamic k in j) { print(k); }
+for (dynamic t in j["tags"]) { print(t); }
+print(j.keys().length);
+
+// 写入
+j["age"] = 32;
+print(j["age"]);
+j["tags"].push("c");
+print(j["tags"].length);
+print(j["tags"][2]);
+j["tags"][0] = "z";
+print(j["tags"][0]);
+
+// 异质嵌套字面量：整棵树自上而下落到 list<dynamic> / dict<string,dynamic>
+let mixed = [1, "two", 3.5, true, null, [1, 2], {"k": "v"}];
+print(mixed.length);
+for (var x in mixed) { print(x); }
+
+// print(dynamic)：标签是 string 取原文，其余取 JSON 文本（对齐 Python 的 print/str）
+print(j);
+print(parseJson("[1,2,{\"a\":null}]"));
+
+// 往返
+dynamic back = parseJson(stringifyJson(j));
+print(back["name"]);
+print(back["nested"]["k"].length);
+print(stringifyJson(back) == stringifyJson(j));
+
+// 静态容器与 dynamic 之间不需要显式装箱
+list<dynamic> arr = [1, "x", true];
+print(arr.length);
+print(arr[1]);
+dict<string, dynamic> obj = {"n": 1, "s": "t"};
+print(obj["s"]);

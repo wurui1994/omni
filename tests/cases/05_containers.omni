@@ -1,0 +1,69 @@
+// 容器：list / dict / set / 迭代协议 / in 运算符
+list<int> xs = [3, 1, 4, 1, 5];
+print(xs.length);
+print(xs[0]);
+print(xs[4]);
+xs[0] = 99;
+print(xs[0]);
+xs.push(9);
+print(xs.length);
+print(xs.pop());
+print(xs.contains(4));
+print(xs.contains(7));
+print(4 in xs);
+
+int total = 0;
+for (int x in xs) { total += x; }
+print(total);
+
+list<list<int>> grid = [[1, 2], [3, 4]];
+print(grid[1][0]);
+print(grid.length);
+
+list<int> empty = [];
+print(empty.length);
+
+dict<string, int> ages = {"ann": 31, "bob": 25};
+print(ages.length);
+print(ages["ann"]);
+ages["cid"] = 40;
+print(ages.length);
+print(ages.has("bob"));
+print("zed" in ages);
+print(ages.remove("bob"));
+print(ages.length);
+
+// 插入序：dict 的迭代顺序必须是插入顺序（ADR-0006 硬约束）
+string order = "";
+for (string k in ages) { order = order + k + ","; }
+print(order);
+
+dict<int, string> byId = {:};
+byId[7] = "seven";
+print(byId[7]);
+
+set<int> s = set(1, 2, 2, 3);
+print(s.length);
+print(s.contains(2));
+print(2 in s);
+print(s.remove(2));
+print(s.length);
+s.add(10);
+int sum = 0;
+for (int v in s) { sum += v; }
+print(sum);
+
+set<string> names = set("a", "b");
+print(names.contains("a"));
+print(names.length);
+
+// string 按字节
+string t = "hello";
+print(t.length);
+print(t.byteAt(1));
+print(t.substr(1, 3));
+print(t.indexOf("ll"));
+print(t.indexOf("z"));
+print(chr(65) + chr(66));
+print(int("-42"));
+print(real("2.5") * 2.0);

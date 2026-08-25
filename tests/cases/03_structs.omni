@@ -1,0 +1,38 @@
+// struct 值语义：嵌套、按值传参、按值返回、整体赋值
+struct Inner { int a; real b; }
+struct Outer { Inner nest; string tag; }
+
+Inner make(int a) {
+  Inner r;
+  r.a = a;
+  r.b = real(a) / 2.0;
+  return r;
+}
+
+void bump(Inner v) {
+  v.a = v.a + 100;
+}
+
+int total(Outer o) { return o.nest.a * 2; }
+
+Outer o;
+o.nest = make(7);
+o.tag = "outer";
+print(o.nest.a);
+print(o.nest.b);
+print(o.tag);
+
+Inner i = o.nest;
+bump(i);
+print(i.a);
+
+Outer o2 = o;
+o2.nest.a = 999;
+print(o.nest.a);
+print(o2.nest.a);
+print(total(o));
+print(o.total());
+
+Inner z;
+print(z.a);
+print(z.b);

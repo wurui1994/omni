@@ -1,0 +1,19 @@
+exit 0
+--- stdout ---
+3
+3
+13
+hits=3
+6
+6
+x:hits
+y:hits
+5
+6
+true
+false
+true
+2
+7
+2
+--- stderr ---

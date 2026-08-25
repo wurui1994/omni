@@ -1,0 +1,61 @@
+// 混合模式（.omni）：省略类型就从初始化器推断（ADR-0008 第 2、3 节）
+let a = 1;
+print(a + 2);
+
+let s = "hi";
+print(s + "!");
+
+let r = 2.5;
+print(r * 2.0);
+
+var b = true;
+print(b);
+
+// 推断结果此后单态：a 是 int，参与 int 运算而不是装箱
+let n = a * 10;
+print(n);
+
+// 容器：元素类型也是推断出来的静态类型
+let xs = [1, 2, 3];
+print(xs.length);
+print(xs[1]);
+xs.push(4);
+print(xs.pop());
+print(xs.length);
+
+let d = {"a": 1, "b": 2};
+print(d["a"] + d["b"]);
+print(d.length);
+
+// int/real 混排仍然统一到 real，不降级成 dynamic
+let mixedNum = [1, 2.5];
+print(mixedNum[0]);
+print(mixedNum[1]);
+
+// 裸赋值 = Python 形态：函数作用域，等价于 var
+total = 0;
+for (int i = 0; i < 5; i = i + 1) { total = total + i; }
+print(total);
+
+// 函数作用域提升：两个分支里各赋一次，出了 if 仍然可见
+if (a == 1) { pick = "one"; } else { pick = "other"; }
+print(pick);
+
+// for-in 也能省略类型
+let names = ["x", "y"];
+for (var nm in names) { print(nm); }
+
+// 函数里的推断与顶层同一套规则
+int triple(int v) {
+  let t = v * 3;
+  return t;
+}
+print(triple(7));
+
+// let 是块作用域：块内的 inner 不会泄漏到块外
+{
+  let inner = 100;
+  print(inner);
+}
+let inner = 1;
+print(inner);

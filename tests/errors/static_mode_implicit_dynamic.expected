@@ -1,0 +1,12 @@
+tests/errors/static_mode_implicit_dynamic.omnis:3:5: error: 'let a' would be inferred as 'dynamic', and this file's static mode forbids implicit dynamic; write the type explicitly or use a '.omni' file
+  let a = null;
+      ^
+tests/errors/static_mode_implicit_dynamic.omnis:4:5: error: 'let b' would be inferred as 'list<dynamic>', and this file's static mode forbids implicit dynamic; write the type explicitly or use a '.omni' file
+  let b = [1, "two"];
+      ^
+tests/errors/static_mode_implicit_dynamic.omnis:5:5: error: 'var c' has no initializer, so its type cannot be inferred; write the type explicitly
+  var c;
+      ^
+tests/errors/static_mode_implicit_dynamic.omnis:6:1: error: 'd' is not declared; this file's static mode requires an explicit type (or use 'let'/'var' in a '.omni' file)
+  d = 5;
+  ^

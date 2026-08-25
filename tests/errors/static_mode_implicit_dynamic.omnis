@@ -1,0 +1,14 @@
+// 纯静态模式（.omnis）：隐式 dynamic 是错误（ADR-0008 第 1 节）
+// stage1 会用这个模式写，保证零意外装箱。
+let a = null;
+let b = [1, "two"];
+var c;
+d = 5;
+
+// 显式写出来的 dynamic 仍然合法 —— 禁的是"隐式"，否则没法解析 json
+dynamic ok = 1;
+print(ok.asInt());
+
+// 推得出具体静态类型的省略仍然合法
+let fine = 41 + 1;
+print(fine);

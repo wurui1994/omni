@@ -1,0 +1,47 @@
+// 对照 Python 的 bignum + 显式掩码：i64 回绕、截断除、移位计数 & 63（ADR-0005）
+// 两个后端各自靠 BigInt.asIntN / uint64 回绕实现同一份规格，参照实现在这里把规格独立算一遍。
+list<int> vals = [
+  0, 1, -1, 2, -2, 7, -7,
+  3037000500, -3037000500,
+  9223372036854775807, -9223372036854775807 - 1,
+  4294967296, -4294967296,
+  1000000007, -1000000007
+];
+list<int> shifts = [0, 1, 7, 31, 32, 63, 64, 65, 127];
+
+for (int a in vals) {
+  for (int b in vals) {
+    print(a + b);
+    print(a - b);
+    print(a * b);
+    print(a & b);
+    print(a | b);
+    print(a ^ b);
+    if (b != 0) {
+      print(a / b);
+      print(a % b);
+    }
+  }
+}
+
+for (int a in vals) {
+  print(-a);
+  print(~a);
+  for (int k in shifts) {
+    print(a << k);
+    print(a >> k);
+  }
+}
+
+// 复合赋值与自增走的是同一条降级路径，一起对照
+int acc = 1;
+for (int a in vals) {
+  acc = acc * 31;
+  acc = acc + a;
+  print(acc);
+}
+int i = 9223372036854775807;
+i = i + 1;
+print(i);
+i = i - 1;
+print(i);

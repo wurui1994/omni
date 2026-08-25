@@ -1,0 +1,5 @@
+// 运行期错误：dynamic 标签不匹配（json 取值走错分支时最常见的错误）
+dynamic v = parseJson("{\"n\": 1}");
+print(v.tag());
+print(v.asInt());
+print(999);

@@ -1,0 +1,57 @@
+exit 0
+--- stdout ---
+100
+11
+3
+abcd
+4
+49
+49
+0
+1
+4
+3
+4
+{"a":[1,2,{"b":true}],"n":1000.0}
+true
+1000.0
+2
+10
+mixed
+x = 10;
+print(x * x);
+print(x + 1);
+real r = 1.5;
+print(r * 2.0);
+s = "ab" + "cd";
+print(s);
+print(s.length);
+int sq(int n) { return n * n; }
+print(sq(7));
+print(7.sq());
+for (int i = 0; i < 3; i++) {
+  print(i * i);
+}
+ys = [1, 2, 3];
+print(ys.length);
+ys.push(4);
+print(ys.length);
+j = parseJson("{\"a\": [1, 2, {\"b\": true}], \"n\": 1000.0}");
+print(j);
+print(j["a"][2]["b"]);
+print(j["n"]);
+print(j.length);
+print(x);
+session reset
+(empty session)
+--- stderr ---
+<repl>:1:7: error: cannot print a value of type 'list<int>'
+  print(ys);
+        ^^
+<repl>:1:7: error: undefined variable 'zzz'
+  print(zzz + 1);
+        ^^^
+omni: runtime error: division by zero
+<repl>:1:7: error: undefined variable 'x'
+  print(x);
+        ^

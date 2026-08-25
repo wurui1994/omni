@@ -1,0 +1,12 @@
+# node
+node_modules/
+package-lock.json
+
+# `omni build` 的产物：默认输出是去掉后缀的源文件名，没有固定后缀，只能按目录约定挡
+/out
+/a.out
+*.dSYM/
+
+# C 后端的中间产物（正常情况下落在 mktemp 目录里，这几条是手工 emit-c 时的落点）
+*.o
+/*.c

@@ -1,0 +1,229 @@
+// Omni 标准库 —— JSON
+//
+// 关键决定（ADR-0006）：解析与序列化都用 **Omni 自己写**，两个后端共享同一份实现。
+// 于是"JS 后端与 C 后端的 JSON 行为一致"是构造性保证，而不是靠两份手写运行时对齐。
+//
+// 数字模型：无小数点/指数且位数不超过 18 位 -> int，否则 -> real。
+// （18 位是保守规则：i64 上限是 19 位，避免在语言里做溢出判定。）
+// 局限：字符串内容目前按字节拷贝，非 ASCII 字符会被逐字节切分 —— 等 char/码点 API 到位再修。
+
+class JsonParser {
+  string src;
+  int pos;
+}
+
+int jsonCur(JsonParser p) {
+  if (p.pos >= p.src.length) { return -1; }
+  return p.src.byteAt(p.pos);
+}
+
+void jsonSkipWs(JsonParser p) {
+  while (true) {
+    int c = jsonCur(p);
+    if (c == 32 || c == 9 || c == 10 || c == 13) { p.pos = p.pos + 1; } else { break; }
+  }
+}
+
+void jsonExpectWord(JsonParser p, string word) {
+  if (p.pos + word.length > p.src.length || p.src.substr(p.pos, word.length) != word) {
+    fail("json: expected '" + word + "' at offset " + string(p.pos));
+  }
+  p.pos = p.pos + word.length;
+}
+
+int jsonHex4(JsonParser p) {
+  int v = 0;
+  int i = 0;
+  while (i < 4) {
+    int c = jsonCur(p);
+    int d = 0;
+    if (c >= 48 && c <= 57) { d = c - 48; }
+    else if (c >= 97 && c <= 102) { d = c - 87; }
+    else if (c >= 65 && c <= 70) { d = c - 55; }
+    else { fail("json: bad \\u escape at offset " + string(p.pos)); }
+    v = v * 16 + d;
+    p.pos = p.pos + 1;
+    i = i + 1;
+  }
+  return v;
+}
+
+string jsonStr(JsonParser p) {
+  jsonSkipWs(p);
+  if (jsonCur(p) != 34) { fail("json: expected string at offset " + string(p.pos)); }
+  p.pos = p.pos + 1;
+  string out = "";
+  while (true) {
+    int c = jsonCur(p);
+    if (c < 0) { fail("json: unterminated string"); return out; }
+    if (c == 34) { p.pos = p.pos + 1; return out; }
+    if (c == 92) {
+      p.pos = p.pos + 1;
+      int e = jsonCur(p);
+      p.pos = p.pos + 1;
+      if (e == 110) { out = out + chr(10); }
+      else if (e == 116) { out = out + chr(9); }
+      else if (e == 114) { out = out + chr(13); }
+      else if (e == 98) { out = out + chr(8); }
+      else if (e == 102) { out = out + chr(12); }
+      else if (e == 47) { out = out + "/"; }
+      else if (e == 92) { out = out + chr(92); }
+      else if (e == 34) { out = out + chr(34); }
+      else if (e == 117) { out = out + chr(jsonHex4(p)); }
+      else { fail("json: bad escape at offset " + string(p.pos)); }
+    } else {
+      out = out + p.src.substr(p.pos, 1);
+      p.pos = p.pos + 1;
+    }
+  }
+  return out;
+}
+
+dynamic jsonNumber(JsonParser p) {
+  int start = p.pos;
+  bool isReal = false;
+  int digits = 0;
+  bool neg = false;
+  if (jsonCur(p) == 45) { neg = true; p.pos = p.pos + 1; }
+  while (true) {
+    int c = jsonCur(p);
+    if (c >= 48 && c <= 57) { p.pos = p.pos + 1; digits = digits + 1; }
+    else if (c == 46 || c == 101 || c == 69) { isReal = true; p.pos = p.pos + 1; }
+    else if ((c == 43 || c == 45) && isReal) { p.pos = p.pos + 1; }
+    else { break; }
+  }
+  if (digits == 0) { fail("json: expected value at offset " + string(start)); }
+  string text = p.src.substr(start, p.pos - start);
+  if (isReal) { return dyn(real(text)); }
+  if (digits <= 18) { return dyn(int(text)); }
+  // 19 位十进制整数可能正好落在 i64 里（雪花 ID 就是 19 位），按字典序和上界比一次。
+  // JSON 数字不允许前导零，所以位数就是量级，19 位定长比较等价于数值比较。
+  if (digits == 19) {
+    int dstart = start;
+    if (neg) { dstart = start + 1; }
+    string ds = text.substr(dstart - start, digits);
+    string limit = "9223372036854775807";
+    if (neg) { limit = "9223372036854775808"; }
+    if (ds <= limit) { return dyn(int(text)); }
+  }
+  return dyn(real(text));
+}
+
+dynamic jsonArray(JsonParser p) {
+  p.pos = p.pos + 1;
+  list<dynamic> items = [];
+  jsonSkipWs(p);
+  if (jsonCur(p) == 93) { p.pos = p.pos + 1; return dyn(items); }
+  while (true) {
+    items.push(jsonValue(p));
+    jsonSkipWs(p);
+    int c = jsonCur(p);
+    p.pos = p.pos + 1;
+    if (c == 93) { return dyn(items); }
+    if (c != 44) { fail("json: expected ',' or ']' at offset " + string(p.pos - 1)); return dyn(items); }
+  }
+  return dyn(items);
+}
+
+dynamic jsonObject(JsonParser p) {
+  p.pos = p.pos + 1;
+  dict<string, dynamic> obj = {:};
+  jsonSkipWs(p);
+  if (jsonCur(p) == 125) { p.pos = p.pos + 1; return dyn(obj); }
+  while (true) {
+    string key = jsonStr(p);
+    jsonSkipWs(p);
+    if (jsonCur(p) != 58) { fail("json: expected ':' at offset " + string(p.pos)); }
+    p.pos = p.pos + 1;
+    obj[key] = jsonValue(p);
+    jsonSkipWs(p);
+    int c = jsonCur(p);
+    p.pos = p.pos + 1;
+    if (c == 125) { return dyn(obj); }
+    if (c != 44) { fail("json: expected ',' or '}' at offset " + string(p.pos - 1)); return dyn(obj); }
+    jsonSkipWs(p);
+  }
+  return dyn(obj);
+}
+
+dynamic jsonValue(JsonParser p) {
+  jsonSkipWs(p);
+  int c = jsonCur(p);
+  if (c == 123) { return jsonObject(p); }
+  if (c == 91) { return jsonArray(p); }
+  if (c == 34) { return dyn(jsonStr(p)); }
+  if (c == 116) { jsonExpectWord(p, "true"); return dyn(true); }
+  if (c == 102) { jsonExpectWord(p, "false"); return dyn(false); }
+  if (c == 110) { jsonExpectWord(p, "null"); return dyn(null); }
+  return jsonNumber(p);
+}
+
+dynamic parseJson(string text) {
+  JsonParser p = new JsonParser();
+  p.src = text;
+  p.pos = 0;
+  dynamic v = jsonValue(p);
+  jsonSkipWs(p);
+  if (p.pos != text.length) { fail("json: trailing input at offset " + string(p.pos)); }
+  return v;
+}
+
+string jsonQuote(string s) {
+  string out = "\"";
+  int i = 0;
+  while (i < s.length) {
+    int c = s.byteAt(i);
+    if (c == 34) { out = out + "\\\""; }
+    else if (c == 92) { out = out + "\\\\"; }
+    else if (c == 10) { out = out + "\\n"; }
+    else if (c == 13) { out = out + "\\r"; }
+    else if (c == 9) { out = out + "\\t"; }
+    else if (c == 8) { out = out + "\\b"; }
+    else if (c == 12) { out = out + "\\f"; }
+    else if (c < 32) { out = out + "\\u00" + jsonHexByte(c); }
+    else { out = out + s.substr(i, 1); }
+    i = i + 1;
+  }
+  return out + "\"";
+}
+
+string jsonHexByte(int c) {
+  string digits = "0123456789abcdef";
+  return digits.substr((c >> 4) & 15, 1) + digits.substr(c & 15, 1);
+}
+
+string stringifyJson(dynamic v) {
+  string t = v.tag();
+  if (t == "null") { return "null"; }
+  if (t == "bool") { return string(v.asBool()); }
+  if (t == "int") { return string(v.asInt()); }
+  if (t == "real") { return repr(v.asReal()); }
+  if (t == "string") { return jsonQuote(v.asString()); }
+  if (t == "list") {
+    string out = "[";
+    bool first = true;
+    for (dynamic x in v.asList()) {
+      if (!first) { out = out + ","; }
+      first = false;
+      out = out + stringifyJson(x);
+    }
+    return out + "]";
+  }
+  string out = "{";
+  bool first = true;
+  dict<string, dynamic> d = v.asDict();
+  for (string k in d) {
+    if (!first) { out = out + ","; }
+    first = false;
+    out = out + jsonQuote(k) + ":" + stringifyJson(d[k]);
+  }
+  return out + "}";
+}
+
+// print(dynamic) / string(dynamic) 的落点（ADR-0008 第 5 节）：
+// 标签是 string 就取原文，其余取 JSON 文本 —— 与 Python 的 print/str 一致。
+// 序列化实现只有这一份，两个运行时里都没有第二份。
+string dynToText(dynamic v) {
+  if (v.tag() == "string") { return v.asString(); }
+  return stringifyJson(v);
+}

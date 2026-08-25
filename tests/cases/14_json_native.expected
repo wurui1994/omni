@@ -1,0 +1,41 @@
+exit 0
+--- stdout ---
+ann
+31
+b
+3
+6
+true
+false
+null
+ok is true
+name
+age
+tags
+nested
+ok
+nil
+a
+b
+6
+32
+3
+c
+z
+7
+1
+two
+3.5
+true
+null
+[1,2]
+{"k":"v"}
+{"name":"ann","age":32,"tags":["z","b","c"],"nested":{"k":[1,2,3]},"ok":true,"nil":null}
+[1,2,{"a":null}]
+ann
+3
+true
+3
+x
+t
+--- stderr ---

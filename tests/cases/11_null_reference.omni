@@ -1,0 +1,10 @@
+// 运行期错误：空引用。C 侧必须显式检查，否则就是段错误，和 JS 的诊断分叉
+class Node {
+  int value;
+}
+Node a = new Node();
+a.value = 1;
+print(a.value);
+Node b = null;
+print(b.value);
+print(999);

@@ -1,0 +1,32 @@
+// 数值边界：i64 回绕 / 位移 / IEEE 特殊值 / %.6g 打印格式
+int big = 9223372036854775807;
+print(big);
+print(big + 1);
+print(big * 3);
+print(0 - big - 1);
+print(1 << 63);
+print(1 << 64);
+print(-1 >> 1);
+print(8 >> 2);
+print(5 & 3);
+print(5 | 3);
+print(5 ^ 3);
+print(~5);
+print(-9223372036854775807 - 1);
+
+real inf = 1.0 / 0.0;
+print(inf);
+print(-inf);
+print(inf - inf);
+print(0.1 + 0.2);
+print(100000.0);
+print(1000000.0);
+print(123456789.0);
+print(-0.0);
+print(0.5);
+print(1.0);
+print(1e-5);
+print(1e-4);
+print(999999.0);
+print(1000000.5);
+print(2.0 % 0.75);

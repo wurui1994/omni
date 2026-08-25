@@ -1,0 +1,62 @@
+// class：引用语义 + 方法降级为「第一参数是 this 的自由函数」+ UFCS 合并（ADR-0006 第 5 节）
+class Counter {
+  int n;
+  string label;
+
+  void bump() { n = n + 1; }          // 裸名直接访问字段（"数据成员自动挂钩"）
+  int get() { return n; }
+  int addTo(int k) { return n + k; }
+  string describe() { return label + "=" + string(n); }
+  int bumpTwiceAndGet() { bump(); bump(); return get(); }   // 方法体内裸调用方法
+}
+
+// 自由函数：UFCS 让它以方法形式可用，不需要原型也不需要 partial class
+int twice(Counter c) { return c.get() * 2; }
+string tagOf(Counter c, string prefix) { return prefix + ":" + c.label; }
+
+Counter c = new Counter();
+c.label = "hits";
+c.bump();
+c.bump();
+c.bump();
+print(c.get());
+print(c.n);
+print(c.addTo(10));
+print(c.describe());
+print(twice(c));
+print(c.twice());
+print(c.tagOf("x"));
+print(tagOf(c, "y"));
+print(c.bumpTwiceAndGet());
+
+// 引用语义：赋值不拷贝
+Counter d = c;
+d.bump();
+print(c.get());
+print(c == d);
+
+Counter e = new Counter();
+print(c == e);
+
+Counter z = null;
+print(z == null);
+
+// class 里放 struct 与容器字段
+struct Pt { int x; int y; }
+class Shape {
+  Pt origin;
+  list<int> sides;
+  int perimeter() {
+    int p = 0;
+    for (int s in sides) { p += s; }
+    return p;
+  }
+}
+
+Shape sh = new Shape();
+sh.origin.x = 2;
+sh.sides.push(3);
+sh.sides.push(4);
+print(sh.origin.x);
+print(sh.perimeter());
+print(sh.sides.length);

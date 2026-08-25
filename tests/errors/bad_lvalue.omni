@@ -1,0 +1,12 @@
+struct P { int x; }
+
+int h() { return 1; }
+
+h() = 5;
+
+P p;
+p.nope = 1;
+p.x();
+
+int i = 0;
+int j = i++;

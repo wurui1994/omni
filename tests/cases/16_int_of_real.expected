@@ -1,0 +1,13 @@
+exit 70
+--- stdout ---
+3
+-3
+0
+0
+2
+-2
+9007199254740992
+-9223372036854775808
+9223372036854773760
+--- stderr ---
+omni: runtime error: real 1e+20 is out of int range

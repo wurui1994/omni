@@ -1,0 +1,3 @@
+tests/errors/type_mismatch.omni:1:9: error: cannot convert 'string' to 'int'
+  int x = "not an int";
+          ^^^^^^^^^^^^

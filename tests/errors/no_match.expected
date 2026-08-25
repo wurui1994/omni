@@ -1,0 +1,13 @@
+tests/errors/no_match.omni:3:7: error: no matching overload for 'g'
+  candidates:
+    int g(int a): cannot convert 'string' to 'int' for 'a'
+  print(g("x"));
+        ^^^^^^
+tests/errors/no_match.omni:4:7: error: undefined variable 'undefined_variable'
+  print(undefined_variable);
+        ^^^^^^^^^^^^^^^^^^
+tests/errors/no_match.omni:5:7: error: no matching overload for 'g'
+  candidates:
+    int g(int a): too many arguments
+  print(g(1, 2));
+        ^^^^^^^

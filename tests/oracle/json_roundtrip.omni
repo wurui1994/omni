@@ -1,0 +1,44 @@
+// 对照 Python 的 json 模块：结构、键顺序、转义、i64 精度。
+// 浮点的**文本**形式 JSON 没有规范（Python 保 `.0`、JS 不保、我们又是另一套），
+// 所以浮点单独放在 json_floats 里按数值对照，这里只放整数与非数值。
+list<string> docs = [
+  "{\"a\":1,\"b\":2}",
+  "{\"z\":1,\"a\":2,\"m\":3,\"b\":4}",
+  "[1,2,3]",
+  "[]",
+  "{}",
+  "null",
+  "true",
+  "false",
+  "123",
+  "-456",
+  "0",
+  "\"hello\"",
+  "\"\"",
+  "\"with \\\"quotes\\\" and \\\\ backslash\"",
+  "\"tab\\there\"",
+  "\"nl\\nhere\"",
+  "\"\\u0041\\u005a\"",
+  "\"\\u0001\\u001f\"",
+  "\"\\b\\f\\r\"",
+  "\"slash \\/ solidus\"",
+  "{\"a\":[1,{\"b\":[true,null,\"x\"]}],\"c\":{\"d\":{}}}",
+  "  { \"a\" : [ 1 , 2 ] , \"b\" : null }  ",
+  "[[[[[1]]]]]",
+  "{\"n\":9007199254740993}",
+  "{\"id\":1234567890123456789}",
+  "9223372036854775807",
+  "-9223372036854775808",
+  "[0,-0,1,-1]",
+  "{\"dup\":1,\"other\":2}",
+  "[\"\",\" \",\"  \"]"
+];
+
+for (string s in docs) { print(stringifyJson(parseJson(s))); }
+
+// 往返两次必须收敛到同一文本（序列化是幂等的）
+for (string s in docs) {
+  string once = stringifyJson(parseJson(s));
+  string twice = stringifyJson(parseJson(once));
+  print(once == twice);
+}

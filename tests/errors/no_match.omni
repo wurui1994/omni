@@ -1,0 +1,5 @@
+int g(int a) { return a; }
+
+print(g("x"));
+print(undefined_variable);
+print(g(1, 2));

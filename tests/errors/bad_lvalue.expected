@@ -1,0 +1,15 @@
+tests/errors/bad_lvalue.omni:5:1: error: expression is not assignable
+  h() = 5;
+  ^^^
+tests/errors/bad_lvalue.omni:8:3: error: type 'P' has no member 'nope'
+  p.nope = 1;
+    ^^^^
+tests/errors/bad_lvalue.omni:8:1: error: expression is not assignable
+  p.nope = 1;
+  ^^^^^^
+tests/errors/bad_lvalue.omni:9:3: error: member 'x' is a field, not a function
+  p.x();
+    ^
+tests/errors/bad_lvalue.omni:12:9: error: '++' may only be used as a statement in this version (its value cannot be used)
+  int j = i++;
+          ^^^

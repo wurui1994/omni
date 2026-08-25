@@ -1,0 +1,3 @@
+tests/errors/ambiguous_overload.omni:4:7: error: ambiguous call to 'f': multiple overloads match equally well
+  print(f(1, 1));
+        ^^^^^^^

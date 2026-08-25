@@ -1,0 +1,140 @@
+// 容器压力用例：扩容、墓碑（删除后的插入序）、嵌套、非字符串键、
+// class/struct 的容器字段零值。这些正是 C 侧手写哈希表最容易和 JS 的 Map/Set 分叉的地方。
+
+// ---- dict 扩容 ----
+dict<string, int> d = {:};
+int i = 0;
+while (i < 50) { d[string(i)] = i * i; i = i + 1; }
+print(d.length);
+print(d["49"]);
+print(d.has("7"));
+print(d.has("50"));
+
+// ---- 删除一半：剩下的必须保持原插入序 ----
+i = 0;
+while (i < 50) {
+  if (i % 2 == 0) { d.remove(string(i)); }
+  i = i + 1;
+}
+print(d.length);
+string acc = "";
+for (string k in d) { acc = acc + k + ","; }
+print(acc);
+
+// ---- 删除后重新插入：键移到末尾（与 JS Map 语义一致）----
+print(d.remove("1"));
+print(d.remove("1"));
+d["1"] = 111;
+string acc2 = "";
+for (string k in d) { acc2 = acc2 + k + ","; }
+print(acc2);
+print(d["1"]);
+print(d.keys().length);
+
+// ---- 非 string 键 ----
+dict<int, string> di = {1: "a", 2: "b"};
+di[100] = "c";
+print(di.length);
+print(di[100]);
+for (int k in di) { print(k); }
+
+dict<bool, int> db = {:};
+db[true] = 1;
+db[false] = 0;
+print(db[true] + db[false]);
+print(db.length);
+
+dict<real, string> dr = {:};
+dr[0.5] = "half";
+dr[2.0] = "two";
+print(dr[0.5]);
+print(dr[2.0]);
+
+// ---- set：插入序 + 删除后重新加入 ----
+set<int> s = set(3, 1, 2, 3, 1);
+print(s.length);
+string sacc = "";
+for (int x in s) { sacc = sacc + string(x) + ","; }
+print(sacc);
+print(s.remove(1));
+print(s.contains(1));
+print(s.length);
+s.add(1);
+sacc = "";
+for (int x in s) { sacc = sacc + string(x) + ","; }
+print(sacc);
+list<int> si = s.items();
+print(si.length);
+print(si[0]);
+
+// ---- 嵌套容器 ----
+list<list<int>> grid = [];
+i = 0;
+while (i < 5) {
+  list<int> row = [];
+  int j = 0;
+  while (j < 4) { row.push(i * 10 + j); j = j + 1; }
+  grid.push(row);
+  i = i + 1;
+}
+print(grid.length);
+print(grid[3][2]);
+int total = 0;
+for (list<int> row in grid) {
+  for (int v in row) { total = total + v; }
+}
+print(total);
+
+dict<string, list<int>> dm = {:};
+list<int> one = [1, 2];
+dm["a"] = one;
+one.push(3);
+print(dm["a"].length);
+print(dm.keys().length);
+
+// ---- list 扩容 / pop / clear / in ----
+list<string> xs = ["a"];
+i = 0;
+while (i < 20) { xs.push("x" + string(i)); i = i + 1; }
+print(xs.length);
+print(xs[20]);
+print(xs.pop());
+print(xs.length);
+print("x0" in xs);
+print("zz" in xs);
+xs.clear();
+print(xs.length);
+
+// ---- class 的容器字段：零值必须是新建的空容器，不是空引用 ----
+class Bag {
+  list<int> items;
+  dict<string, int> tally;
+  string name;
+  int count;
+}
+Bag b = new Bag();
+b.items.push(7);
+b.tally["k"] = 1;
+print(b.items.length);
+print(b.tally["k"]);
+print(b.name == "");
+print(b.count);
+
+// ---- struct 是值类型，但它的容器字段仍是引用 ----
+struct Row {
+  list<int> cells;
+  int id;
+}
+Row r;
+r.id = 9;
+r.cells.push(5);
+Row r2 = r;
+r2.cells.push(6);
+print(r.cells.length);
+print(r2.id);
+
+// ---- 容器里的 dynamic ----
+list<dynamic> dl = [];
+dl.push(dyn(1));
+dl.push(dyn("s"));
+for (dynamic v in dl) { print(v.tag()); }

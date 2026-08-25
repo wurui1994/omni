@@ -1,0 +1,35 @@
+// 纯动态模式（.omnid）：省略类型一律是 dynamic，不做推断（ADR-0008 第 1 节）
+// 这是 REPL / 脚本 / JS 子集的落点。
+x = 1;
+print(x);
+x = "now a string";
+print(x);
+x = [1, 2];
+print(x);
+
+let xs = [1, "two", 3.0, null];
+print(xs.length);
+for (var v in xs) { print(v); }
+xs.push(true);
+print(xs.length);
+print(xs[4]);
+
+d = {"a": 1};
+d["b"] = "two";
+d["c"] = [1, {"deep": true}];
+print(d.length);
+print(d["a"]);
+print(d["b"]);
+print(d["c"][1]["deep"]);
+print(d);
+for (var k in d) { print(k); }
+
+// 显式类型在动态模式下依然被检查，不是注释
+int n = 7;
+print(n * 2);
+string label = "n=" + string(n);
+print(label);
+
+// 函数签名照旧是静态接口：无注解的形参不存在（不做按调用点推断）
+int twice(int v) { return v * 2; }
+print(twice(21));

@@ -1,0 +1,65 @@
+// dynamic 与原生 json：json 就是 dynamic 的可序列化子集（ADR-0006 第 1 节）
+dynamic a = 42;
+print(a.tag());
+print(a.asInt());
+
+dynamic b = "hi";
+print(b.tag());
+print(b.asString());
+
+dynamic r = 2.5;
+print(r.tag());
+print(r.asReal());
+
+dynamic t = true;
+print(t.tag());
+print(t.asBool());
+
+dynamic n = null;
+print(n.tag());
+
+list<dynamic> arr = [dyn(1), dyn("two"), dyn(3.5), dyn(true), dyn(null)];
+print(arr.length);
+print(arr[1].asString());
+print(arr[0].tag());
+print(arr[4].tag());
+
+dict<string, dynamic> obj = {:};
+obj["k"] = dyn(7);
+obj["s"] = dyn("v");
+print(obj["k"].asInt());
+print(obj.length);
+
+dynamic boxedList = arr;
+print(boxedList.tag());
+print(boxedList.asList().length);
+
+// ---- json 往返 ----
+dynamic parsed = parseJson("{\"name\": \"ann\", \"age\": 31, \"tags\": [\"a\", \"b\"], \"score\": 1.5, \"ok\": true, \"nil\": null}");
+print(parsed.tag());
+dict<string, dynamic> o = parsed.asDict();
+print(o["name"].asString());
+print(o["age"].asInt());
+print(o["age"].tag());
+print(o["score"].asReal());
+print(o["ok"].asBool());
+print(o["nil"].tag());
+print(o["tags"].asList().length);
+print(o["tags"].asList()[1].asString());
+
+// 键顺序保持插入序 -> 序列化文本可预测
+print(stringifyJson(parsed));
+
+print(stringifyJson(parseJson("[1,2,[3,{\"a\":false}]]")));
+print(stringifyJson(parseJson("  [ ]  ")));
+print(stringifyJson(parseJson("{}")));
+print(stringifyJson(parseJson("\"esc: \\n \\t \\\" \\\\ \\u0041\"")));
+print(stringifyJson(parseJson("-12")));
+print(stringifyJson(parseJson("0.1")));
+print(stringifyJson(parseJson("1e3")));
+print(stringifyJson(parseJson("12345678901234567890")));
+print(stringifyJson(dyn(0.1)));
+print(stringifyJson(dyn(1.0)));
+
+// 整数不退化成浮点：i64 保真优先（ADR-0006）
+print(stringifyJson(parseJson("9007199254740993")));
