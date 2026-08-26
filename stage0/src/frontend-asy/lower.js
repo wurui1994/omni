@@ -23,12 +23,18 @@
 // （含 real 的 %.15g —— 核心方言的 `(tostr E N)` 就是为它加的）、内建数学函数
 // sqrt/fabs/abs/floor/ceil/round/fmod（核心方言的 `(rmath …)`）、
 // **一维数组**：`T[] a`、`new T[n]`、`{…}` 与 `new T[] {…}`、`a[i]` 读写（写会扩长）、
-// `a.length`、`a.push(v)`、`a.pop()`、数组当形参/返回值（引用语义，核心方言的 `(arr T)`）。
+// `a.length`、`a.push(v)`、`a.pop()`、数组当形参/返回值（引用语义，核心方言的 `(arr T)`）、
+// **pair**：`(x,y)` 字面量、`+ - * /`（后两个是复数乘除）、一元 `-`、`== !=`、
+// `z.x`/`z.y`/`xpart`/`ypart`、`abs`/`length`/`conj`、int/real 到 pair 的隐式转换、
+// `(pair)` 强制转换、`write`（`(x,y)` 两个分量各 %.15g）、pair 当形参/返回值/`?:` 的两支。
 //
-// 不支持（见到就报错，报错里说清是哪一条）：pair/triple、struct、import/access、
+// 不支持（见到就报错，报错里说清是哪一条）：triple、struct、import/access、
 // typedef、算符重载、重载解析、默认实参、命名实参、for-each、切片（`a[1:3]`）、
-// 多维数组、`write` 一整个数组、超越函数（exp/log/trig —— 量过 libm 与 V8 在
-// atan/tan/log/cos 的最后一位就分叉，收进来六条腿必然有一天对不上）、
+// 多维数组、`pair[]`（核心方言的 `(arr T)` 只收标量元素）、`write` 一整个数组、
+// 超越函数（exp/log/trig —— 量过 libm 与 V8 在 atan/tan/log/cos 的最后一位就分叉，
+// 收进来六条腿必然有一天对不上；`angle`/`dir`/`expi` 因此也在门外）、
+// `unit`（能用 sqrt 加除法写出来，但量不出 asy 用的是"乘倒数"还是"逐分量除" ——
+// 两种写法的差别在 %.15g 底下看不见，所以宁可不收也不猜）、
 // 循环条件里的 `?:`（摊出来的赋值只能落在循环外面，条件就只
 // 算一次了 —— 语义会变，所以报错而不是悄悄换个意思）。
 //
@@ -44,6 +50,9 @@
 // - 反过来的一条**已经对齐**了：后缀 `x++` asy 自己不收（"postfix expressions are not
 //   allowed"），所以这一层也拒 —— 比 asy 多接受一门语言不会让任何用例变红，只会让
 //   "等价"这两个字变虚。`tests/asy/strict/` 那一节专门盯这种漏洞。
+// - **除以零**：asy 是运行期报错，而且**实数除法也报**（量过：`1.0/0.0`、`(1,2)/0`、
+//   `(1,2)/(0,0)` 全是 "Divide by zero"）；我们按 IEEE 出 inf/nan。这一条不是 pair
+//   才有的，`/` 从第一刀起就这样，量到了就记在这里。
 
 import { isList, isAtom, isStr, head } from '../sexpr/read.js';
 
@@ -62,7 +71,23 @@ const asyOpText = (n) => (isStr(n) || isAtom(n) ? n.value : null);
  *  为数组另造一个对象型会把每处比较都改成函数调用。名字带 asy 前缀：模块级名字全仓唯一。 */
 const asyIsArr = (t) => t !== null && t !== undefined && t.endsWith('[]');
 const asyElem = (t) => t.slice(0, -2);
-const asyCore = (t) => (asyIsArr(t) ? `(arr ${asyElem(t)})` : t);
+
+/**
+ * pair 就是核心方言的 `(vec real 2)`：第 0 道是 x，第 1 道是 y。
+ *
+ * 为什么不给核心方言加一条 `pair` 类型：`+` 和 `-` 在 pair 上就是**逐分量**的，
+ * 而向量的 `+ -` 已经是逐道的；`(vlit …)`、`(lane …)` 正好是"造一个"和"取一个分量"。
+ * 剩下的复数 `*`、`/`、`abs`、`==` 和 `(x,y)` 的印法都是 **asy 的语义**，不是"向量"的
+ * 语义 —— 那几条落在这一层的 helper 里，六条腿共用同一份，不会分叉。
+ *
+ * 代价写在明处：`pair[]` 这一刀没有（`(arr T)` 的元素只收标量），`?:` 的两支是 pair
+ * 时靠 ZERO 里那个零向量占位。
+ */
+const ASY_PAIR_TY = '(vec real 2)';
+const asyCore = (t) => {
+  if (asyIsArr(t)) return `(arr ${asyElem(t)})`;
+  return t === 'pair' ? ASY_PAIR_TY : t;
+};
 
 /**
  * asy 运行时自带的数学函数（不是 plain.asy 里的定义，所以这一层认它们不算偷偷补模块系统）。
@@ -81,8 +106,25 @@ const ASY_MATH = new Map([
   ['fmod', { fn: 'fmod', arity: 2, ret: 'real' }],
 ]);
 
-/** 没写初值时的零值。asy 也是这么定的（未初始化的 int 是 0，string 是空串）。 */
-const ZERO = new Map([['int', '(int 0)'], ['real', '(real 0.0)'], ['bool', '(bool false)'], ['string', '(str "")']]);
+/** 没写初值时的零值。asy 也是这么定的（未初始化的 int 是 0，string 是空串，pair 是 (0,0)）。 */
+const ZERO = new Map([
+  ['int', '(int 0)'],
+  ['real', '(real 0.0)'],
+  ['bool', '(bool false)'],
+  ['string', '(str "")'],
+  ['pair', `(vlit ${ASY_PAIR_TY} (real 0.0) (real 0.0))`],
+]);
+
+/**
+ * pair 上的内建函数。返回类型是量出来的（`asy -noV`）：
+ *   abs((3,-4)) / length((1,2))  -> real（模）
+ *   conj((1,2))                  -> (1,-2)
+ *   xpart/ypart                  -> real（`z.x`/`z.y` 是同一件事）
+ * `angle`/`dir`/`expi` 要 atan2/cos/sin，白名单里没有；`unit` 见文件头。
+ * `realpart`/`imagpart` **asy 自己就没有**（量过："no matching variable 'realpart'"），
+ * 所以这里也没有 —— 补上就是比 asy 多接受一门语言。
+ */
+const ASY_PAIRFN = new Set(['length', 'conj', 'xpart', 'ypart']);
 
 /** 核心方言的字符串字面量。刻意不用 JSON.stringify：它对控制字符发 \uXXXX，
  *  而 sexpr/read.js 的转义表里没有 \u（那是 WAT 的方言）。只转必须转的五个。 */
@@ -141,6 +183,39 @@ const HELPERS = new Map([
     ;; write("a",false) 是 "afalse "，所以不是对齐到 5，是算符自带的尾空格）
     (if (var b) (do (ret (str "true "))))
     (ret (str "false ")))`],
+  ['asy__pmul', `  (fn asy__pmul ((a ${ASY_PAIR_TY}) (b ${ASY_PAIR_TY})) ${ASY_PAIR_TY}
+    ;; pair 的 * 是**复数乘法**（量过：(1,2)*(3,-4) = (11,2)）。乘法的形状照抄
+    ;; 教科书那一份：x = ax*bx - ay*by，y = ax*by + ay*bx —— 加减顺序是浮点结果的
+    ;; 一部分，所以写死，不敢换成"更聪明"的写法。
+    (ret (vlit ${ASY_PAIR_TY}
+      (bin "-" (bin "*" (lane (var a) 0) (lane (var b) 0)) (bin "*" (lane (var a) 1) (lane (var b) 1)))
+      (bin "+" (bin "*" (lane (var a) 0) (lane (var b) 1)) (bin "*" (lane (var a) 1) (lane (var b) 0))))))`],
+  ['asy__pdiv', `  (fn asy__pdiv ((a ${ASY_PAIR_TY}) (b ${ASY_PAIR_TY})) ${ASY_PAIR_TY}
+    ;; pair 的 / 是**复数除法**，而且是**朴素**那一份（不是 Smith 的防溢出算法）——
+    ;; 量出来的：(1,1)/(1e200,1e200) 是 (0,0)（分母平方和溢出成 inf），
+    ;; (1e300,1)/1e300 是 (nan,0)（右边那个实数先被提成 (1e300,0)，t 还是 inf）。
+    ;; 后一条同时证明了 asy **没有** pair/real 这个重载：实数是先转成 pair 的。
+    (let t real (bin "+" (bin "*" (lane (var b) 0) (lane (var b) 0)) (bin "*" (lane (var b) 1) (lane (var b) 1))))
+    (ret (vlit ${ASY_PAIR_TY}
+      (bin "/" (bin "+" (bin "*" (lane (var a) 0) (lane (var b) 0)) (bin "*" (lane (var a) 1) (lane (var b) 1))) (var t))
+      (bin "/" (bin "-" (bin "*" (lane (var a) 1) (lane (var b) 0)) (bin "*" (lane (var a) 0) (lane (var b) 1))) (var t)))))`],
+  ['asy__pabs', `  (fn asy__pabs ((a ${ASY_PAIR_TY})) real
+    ;; 模。也是朴素那一份 —— 量过 abs((1e200,1e200)) 是 inf，所以不是 hypot。
+    (ret (rmath "sqrt" (bin "+" (bin "*" (lane (var a) 0) (lane (var a) 0)) (bin "*" (lane (var a) 1) (lane (var a) 1))))))`],
+  ['asy__pconj', `  (fn asy__pconj ((a ${ASY_PAIR_TY})) ${ASY_PAIR_TY}
+    (ret (vlit ${ASY_PAIR_TY} (lane (var a) 0) (un "-" (lane (var a) 1)))))`],
+  ['asy__pneg', `  (fn asy__pneg ((a ${ASY_PAIR_TY})) ${ASY_PAIR_TY}
+    ;; 逐分量取负。刻意不写成 (0,0) - a：那样 -0.0 会变成 0.0，而 asy 是 pair(-x,-y)。
+    (ret (vlit ${ASY_PAIR_TY} (un "-" (lane (var a) 0)) (un "-" (lane (var a) 1)))))`],
+  ['asy__peq', `  (fn asy__peq ((a ${ASY_PAIR_TY}) (b ${ASY_PAIR_TY})) bool
+    ;; 向量上没有比较（掩码类型这一刀没有），所以逐道比。写成函数而不是内联展开：
+    ;; 内联要把两边的代码各印两遍，f() == g() 就会把 f 和 g 各调两次。
+    (ret (bin "&&" (bin "==" (lane (var a) 0) (lane (var b) 0)) (bin "==" (lane (var a) 1) (lane (var b) 1)))))`],
+  ['asy__pairstr', `  (fn asy__pairstr ((a ${ASY_PAIR_TY})) string
+    ;; write(pair) 的格式：两个分量各 %.15g，夹在圆括号里，中间一个逗号、没有空格
+    ;; （量过：(0.333333333333333,0.666666666666667)、(1e+20,1e-05)、(-0,0)）
+    (ret (bin "+" (str "(") (bin "+" (tostr (lane (var a) 0) (int 15))
+      (bin "+" (str ",") (bin "+" (tostr (lane (var a) 1) (int 15)) (str ")")))))))`],
 ]);
 
 /** 写下标时的自动扩长。asy 量过：`int[] e; e[2]=5;` 之后 `e.length` 是 **3**（= 下标+1），
@@ -235,7 +310,8 @@ class AsyLower {
     const nm = this.plainName(node.items[1]);
     if (nm === null) return this.nope(node, '带点的类型名');
     if (nm === 'void') return 'void';
-    if (!SCALARS.has(nm)) return this.nope(node, `类型 '${nm}'（这一刀只有 int/real/bool/string）`);
+    if (nm === 'pair') return 'pair';
+    if (!SCALARS.has(nm)) return this.nope(node, `类型 '${nm}'（这一刀只有 int/real/bool/string/pair）`);
     return nm;
   }
 
@@ -270,19 +346,38 @@ class AsyLower {
     return this.nope(n, `字面量 '${t}'`);
   }
 
-  /** 数值提升：asy 允许 `3 == 3.0`（量过），核心方言两边必须同型，于是这里显式插 toreal */
+  /** 数值提升：asy 允许 `3 == 3.0`（量过），核心方言两边必须同型，于是这里显式插 toreal。
+   *  pair 也在这条链上：`2+(1,2)` 是 (3,2)、`(1,2)==3` 是 false —— int/real 会被
+   *  提成 `(v,0)`（量过，见 asy__pdiv 的注释：连 `/` 都是先转 pair 再算的）。 */
   promote(a, b) {
     if (a.type === b.type) return a.type;
+    if (a.type === 'pair' && (b.type === 'int' || b.type === 'real')) {
+      const v = this.toPair(b);
+      b.code = v.code; b.type = 'pair';
+      return 'pair';
+    }
+    if (b.type === 'pair' && (a.type === 'int' || a.type === 'real')) {
+      const v = this.toPair(a);
+      a.code = v.code; a.type = 'pair';
+      return 'pair';
+    }
     if (a.type === 'int' && b.type === 'real') { a.code = `(toreal ${a.code})`; a.type = 'real'; return 'real'; }
     if (a.type === 'real' && b.type === 'int') { b.code = `(toreal ${b.code})`; b.type = 'real'; return 'real'; }
     return null;
   }
 
-  /** 往目标类型靠：只有 int -> real 这一个方向，其余不匹配就是错 */
+  /** int/real -> pair，就是 `(v, 0)`。asy 那边这是一条隐式转换，不是重载。 */
+  toPair(v) {
+    const x = v.type === 'int' ? `(toreal ${v.code})` : v.code;
+    return { code: `(vlit ${ASY_PAIR_TY} ${x} (real 0.0))`, type: 'pair' };
+  }
+
+  /** 往目标类型靠：int -> real、int/real -> pair，其余不匹配就是错 */
   coerce(v, want, node, what) {
     if (v === null) return null;
     if (v.type === want) return v;
     if (v.type === 'int' && want === 'real') return { code: `(toreal ${v.code})`, type: 'real' };
+    if (want === 'pair' && (v.type === 'int' || v.type === 'real')) return this.toPair(v);
     return this.err(node, `${what}：要 ${want}，这里是 ${v.type}`);
   }
 
@@ -290,10 +385,10 @@ class AsyLower {
     if (h === 'name-exp') {
       const nm = this.plainName(n.items[1]);
       if (nm === null) {
-        // `a.length`：词法上"点"是名字的一部分（`name -> name "." ID`），所以数组的
-        // 字段不是 `(field …)` 而是一个**带点的名字**。只有接收者是数组变量时才认。
-        const q = this.arrQual(n.items[1]);
-        if (q !== null) return this.arrField(n, q.recv, q.field);
+        // `a.length` / `z.x`：词法上"点"是名字的一部分（`name -> name "." ID`），所以
+        // 数组和 pair 的字段都不是 `(field …)` 而是一个**带点的名字**。
+        const q = this.dotQual(n.items[1]);
+        if (q !== null) return this.member(n, q.recv, q.field);
         return this.nope(n, '带点的名字或算符名');
       }
       const t = this.lookup(nm);
@@ -313,7 +408,7 @@ class AsyLower {
     if (h === 'assign' || h === 'self' || h === 'prefix' || h === 'postfix') {
       return this.nope(n, `赋值/自增出现在表达式位置（'${h}'）—— 这一刀只认它们当语句`);
     }
-    if (h === 'tuple-exp') return this.nope(n, 'pair / triple');
+    if (h === 'tuple-exp') return this.pairLit(n);
     if (h === 'subscript') return this.index(n);
     if (h === 'slice-exp') return this.nope(n, '切片（`a[1:3]`）');
     if (h === 'field') return this.field(n);
@@ -340,30 +435,67 @@ class AsyLower {
     return { code: `(aget ${a.code} ${i.code})`, type: asyElem(a.type) };
   }
 
-  /** `(qualified (name a) F)` 且 a 是数组变量时回 `{recv, field}`，否则回 null。 */
-  arrQual(node) {
+  /** `(qualified (name a) F)` 且 a 是**变量**时回 `{recv, field}`，否则回 null。
+   *  只认变量：`模块.名字` 也是这个形状，那要模块系统，这一刀没有。 */
+  dotQual(node) {
     if (!isList(node) || head(node) !== 'qualified') return null;
     const base = this.plainName(node.items[1]);
     const f = isAtom(node.items[2]) ? node.items[2].value : null;
     if (base === null || f === null) return null;
     const t = this.lookup(base);
-    if (t === null || !asyIsArr(t)) return null;
+    if (t === null) return null;
     return { recv: { code: `(var ${base})`, type: t }, field: f };
   }
 
-  /** `(field 值 ID)`：`a[0].x` 这种。接收者不是数组就报"取字段还没做"。 */
+  /** `(field 值 ID)`：`a[0].x` 这种（点后面跟的不是名字而是别的表达式时走这条） */
   field(n) {
     const nm = isAtom(n.items[2]) ? n.items[2].value : null;
     const a = this.expr(n.items[1]);
     if (a === null) return null;
-    if (!asyIsArr(a.type)) return this.nope(n, `取字段 '.${nm}'`);
-    return this.arrField(n, a, nm);
+    return this.member(n, a, nm);
   }
 
-  /** 数组的字段。只有 `.length`；别的（`.cyclic` 之类）要属性，这一刀没有。 */
-  arrField(n, recv, nm) {
-    if (nm === 'length') return { code: `(alen ${recv.code})`, type: 'int' };
-    return this.nope(n, `数组的 '.${nm}'（这一刀只有 .length / .push / .pop）`);
+  /** 取字段。数组只有 `.length`，pair 只有 `.x`/`.y`；别的都还没做。 */
+  member(n, recv, nm) {
+    if (asyIsArr(recv.type)) {
+      if (nm === 'length') return { code: `(alen ${recv.code})`, type: 'int' };
+      return this.nope(n, `数组的 '.${nm}'（这一刀只有 .length / .push / .pop）`);
+    }
+    if (recv.type === 'pair') {
+      if (nm === 'x') return { code: `(lane ${recv.code} 0)`, type: 'real' };
+      if (nm === 'y') return { code: `(lane ${recv.code} 1)`, type: 'real' };
+      return this.nope(n, `pair 的 '.${nm}'（这一刀只有 .x / .y）`);
+    }
+    return this.nope(n, `取字段 '.${nm}'`);
+  }
+
+  /* -------------------------------------------------------------------- pair */
+
+  /** `(x,y)`。三个以上就是 triple，这一刀没有。分量按 int -> real 提升。 */
+  pairLit(n) {
+    const parts = this.flat(n.items[1], 'args');
+    if (parts.length !== 2) return this.nope(n, `${parts.length} 个分量的字面量（triple 这一刀没有）`);
+    const x = this.coerce(this.expr(parts[0]), 'real', parts[0], 'pair 的 x');
+    const y = this.coerce(this.expr(parts[1]), 'real', parts[1], 'pair 的 y');
+    if (x === null || y === null) return null;
+    return { code: `(vlit ${ASY_PAIR_TY} ${x.code} ${y.code})`, type: 'pair' };
+  }
+
+  /** pair 上的内建函数（名单见 ASY_PAIRFN）。实参是 int/real 时先隐式转成 pair。 */
+  pairCall(n, nm) {
+    const args = this.args(n.items[2]);
+    if (args === null) return null;
+    if (args.length !== 1) return this.err(n, `'${nm}' 要 1 个实参，给了 ${args.length} 个`);
+    const v = this.coerce(this.expr(args[0]), 'pair', args[0], `'${nm}' 的实参`);
+    if (v === null) return null;
+    if (nm === 'xpart') return { code: `(lane ${v.code} 0)`, type: 'real' };
+    if (nm === 'ypart') return { code: `(lane ${v.code} 1)`, type: 'real' };
+    if (nm === 'conj') {
+      this.used.add('asy__pconj');
+      return { code: `(call asy__pconj ${v.code})`, type: 'pair' };
+    }
+    this.used.add('asy__pabs');
+    return { code: `(call asy__pabs ${v.code})`, type: 'real' };
   }
 
   /**
@@ -378,6 +510,7 @@ class AsyLower {
     const el = this.type(n.items[1], 'new 的元素类型');
     if (el === null) return null;
     if (asyIsArr(el) || el === 'void') return this.nope(n, '多维数组');
+    if (!SCALARS.has(el)) return this.nope(n, `${el}[] （数组元素这一刀只有 int/real/bool/string）`);
     const dimexps = n.items[2];
     const hasCount = isList(dimexps) && head(dimexps) === 'dimexps';
     if (isList(dimexps) && head(dimexps) === 'dimexps-add') return this.nope(n, '多维数组');
@@ -450,11 +583,17 @@ class AsyLower {
       return { code: `(call asy__quot ${a.code} ${b.code})`, type: 'int' };
     }
     if (op === '%') {
+      // pair 上 asy 自己就没有 `%`（量过："no matching function 'operator %(pair, int)'"），
+      // 所以这条是**错**，不是"还没做"；real 上的 `%` 是真的还没做。
+      if (a.type === 'pair' || b.type === 'pair') return this.err(n, `pair 上没有 '%'（asy 那边也没有这个算符）`);
       if (a.type !== 'int' || b.type !== 'int') return this.nope(n, "real 上的 '%'");
       this.used.add('asy__mod');
       return { code: `(call asy__mod ${a.code} ${b.code})`, type: 'int' };
     }
     if (op === '^') {
+      // pair 上的 `^` asy **是有**的（量过：(1,2)^2 是 (-3,4)，复数幂），我们这一刀没做 ——
+      // 整数指数能靠 asy__pmul 迭代，但实数指数要 exp/log/atan2，白名单里没有。
+      if (a.type === 'pair' || b.type === 'pair') return this.nope(n, "pair 上的 '^'（复数幂）");
       if (a.type === 'int' && b.type === 'int') {
         this.used.add('asy__ipow');
         return { code: `(call asy__ipow ${a.code} ${b.code})`, type: 'int' };
@@ -466,6 +605,8 @@ class AsyLower {
       return { code: `(rmath "pow" ${av.code} ${bv.code})`, type: 'real' };
     }
     if (op === '/') {
+      // pair 上的 `/` 是复数除法（两边都先转成 pair —— 量过，见 asy__pdiv）
+      if (a.type === 'pair' || b.type === 'pair') return this.pairArith(n, op, a, b);
       // asy 的 `/` 永远是实数除法：`1/3` 是 0.333…，整数商要写 `#`（量过）
       const av = this.coerce(a, 'real', n, "'/' 的左边");
       const bv = this.coerce(b, 'real', n, "'/' 的右边");
@@ -473,6 +614,7 @@ class AsyLower {
       return { code: `(bin "/" ${av.code} ${bv.code})`, type: 'real' };
     }
     if (op !== '+' && op !== '-' && op !== '*') return this.nope(n, `算符 '${op}'`);
+    if (a.type === 'pair' || b.type === 'pair') return this.pairArith(n, op, a, b);
     const t = this.promote(a, b);
     if (t === null) return this.err(n, `'${op}' 两边要同型：左是 ${a.type}，右是 ${b.type}`);
     if (t === 'string' && op !== '+') return this.err(n, `字符串上只有 '+'，这里是 '${op}'`);
@@ -480,9 +622,22 @@ class AsyLower {
     return { code: `(bin "${op}" ${a.code} ${b.code})`, type: t };
   }
 
+  /** pair 上的 `+ - * /`。`+ -` 是逐分量的（向量的 `+ -` 正好就是），`* /` 是复数乘除。 */
+  pairArith(n, op, a, b) {
+    const av = this.coerce(a, 'pair', n, `'${op}' 的左边`);
+    const bv = this.coerce(b, 'pair', n, `'${op}' 的右边`);
+    if (av === null || bv === null) return null;
+    if (op === '+' || op === '-') return { code: `(bin "${op}" ${av.code} ${bv.code})`, type: 'pair' };
+    const helper = op === '*' ? 'asy__pmul' : 'asy__pdiv';
+    this.used.add(helper);
+    return { code: `(call ${helper} ${av.code} ${bv.code})`, type: 'pair' };
+  }
+
   cmpCode(n, op, a, b) {
     const t = this.promote(a, b);
     if (t === null) return this.err(n, `'${op}' 两边要同型：左是 ${a.type}，右是 ${b.type}`);
+    // pair 上没有大小 —— asy 那边也没有（没有 `operator <(pair,pair)`）
+    if (t === 'pair') return this.err(n, `pair 上没有 '${op}'（asy 那边也没有这个算符）`);
     return { code: `(bin "${op}" ${a.code} ${b.code})`, type: 'bool' };
   }
 
@@ -490,6 +645,12 @@ class AsyLower {
     const a = this.expr(n.items[2]);
     const b = this.expr(n.items[3]);
     if (a === null || b === null) return null;
+    const t = this.promote(a, b);
+    if (t === 'pair') {
+      this.used.add('asy__peq');
+      const eq = `(call asy__peq ${a.code} ${b.code})`;
+      return { code: op === '==' ? eq : `(un "!" ${eq})`, type: 'bool' };
+    }
     return this.cmpCode(n, op, a, b);
   }
 
@@ -542,13 +703,17 @@ class AsyLower {
     }
     if (op === '+') return v;
     if (op === '-') {
-      if (v.type !== 'int' && v.type !== 'real') return this.err(n, `一元 '-' 要 int/real，这里是 ${v.type}`);
+      if (v.type === 'pair') {
+        this.used.add('asy__pneg');
+        return { code: `(call asy__pneg ${v.code})`, type: 'pair' };
+      }
+      if (v.type !== 'int' && v.type !== 'real') return this.err(n, `一元 '-' 要 int/real/pair，这里是 ${v.type}`);
       return { code: `(un "-" ${v.code})`, type: v.type };
     }
     return this.nope(n, `一元算符 '${op}'`);
   }
 
-  /** `(int) e` / `(real) e`。别的目标类型这一刀不做。 */
+  /** `(int) e` / `(real) e` / `(pair) e`。别的目标类型这一刀不做。 */
   cast(n) {
     const t = this.type(n.items[1], '强制转换');
     if (t === null) return null;
@@ -557,6 +722,7 @@ class AsyLower {
     if (t === v.type) return v;
     if (t === 'real' && v.type === 'int') return { code: `(toreal ${v.code})`, type: 'real' };
     if (t === 'int' && v.type === 'real') return { code: `(toint ${v.code})`, type: 'int' };
+    if (t === 'pair' && (v.type === 'int' || v.type === 'real')) return this.toPair(v);
     return this.nope(n, `把 ${v.type} 转成 ${t}`);
   }
 
@@ -587,14 +753,18 @@ class AsyLower {
     const nm = isList(n.items[1]) && head(n.items[1]) === 'name-exp' ? this.plainName(n.items[1].items[1]) : null;
     if (nm === null && isList(callee) && head(callee) === 'name-exp') {
       // `c.push(8)`：同上，点是名字的一部分，所以方法调用也是"调一个带点的名字"
-      const q = this.arrQual(callee.items[1]);
-      if (q !== null) return this.arrMethod(n, q.recv, q.field);
+      const q = this.dotQual(callee.items[1]);
+      if (q !== null) {
+        if (!asyIsArr(q.recv.type)) return this.nope(n, `${q.recv.type} 上的方法调用 '.${q.field}(…)'`);
+        return this.arrMethod(n, q.recv, q.field);
+      }
     }
     if (nm === null) return this.nope(n, '调用一个不是普通名字的东西（函数值、方法、算符名）');
     if (nm === 'write') return this.err(n, `${ASY_NOPE}：write 出现在表达式位置（它是语句）`);
     // 内建数学函数先看：asy 里 sqrt/floor/… 是运行时自带的，不是 plain.asy 里的定义，
     // 所以这一层认它们不算"偷偷补模块系统"。用户自己定义了同名函数时以用户的为准
     // （asy 那边是重载，这一刀没有重载，让用户的定义赢至少不会静悄悄换掉语义）。
+    if (!this.funcs.has(nm) && ASY_PAIRFN.has(nm)) return this.pairCall(n, nm);
     if (!this.funcs.has(nm) && ASY_MATH.has(nm)) return this.mathCall(n, nm);
     const d = this.funcs.get(nm);
     if (d === undefined) return this.nope(n, `内建函数 '${nm}'（这一刀只有 write 和你自己定义的函数）`);
@@ -635,6 +805,11 @@ class AsyLower {
       this.used.add('asy__iabs');
       return { code: `(call asy__iabs ${vs[0].code})`, type: 'int' };
     }
+    if (nm === 'abs' && vs[0].type === 'pair') {
+      // abs(pair) 是模，和 length(pair) 同一条（量过：abs((3,-4)) 与 length((3,-4)) 都是 5）
+      this.used.add('asy__pabs');
+      return { code: `(call asy__pabs ${vs[0].code})`, type: 'real' };
+    }
     const parts = [];
     for (let i = 0; i < vs.length; i++) {
       const v = this.coerce(vs[i], 'real', args[i], `'${nm}' 的第 ${i + 1} 个实参`);
@@ -674,19 +849,31 @@ class AsyLower {
     }
     // 只有实参多于一个时第一个串才是前缀 —— 单个 write("a") 里 "a" 就是那个 T
     const prefix = vals.length > 1 && vals[0].type === 'string';
-    const rest = vals.slice(prefix ? 1 : 0);
-    const t = rest[0].type;
-    for (let i = 0; i < rest.length; i++) {
-      if (rest[i].type === t) continue;
-      const at = args[(prefix ? 1 : 0) + i];
+    const first = prefix ? 1 : 0;
+    // T 的判定：asy 那边是重载解析。有一个实参是 pair 时 T 就是 pair，别的 int/real
+    // 按隐式转换补成 `(v,0)`（量过：`write(3,(1,2))` 印的是 "(3,0)" TAB "(1,2)"）。
+    let t = vals[first].type;
+    for (let i = first; i < vals.length; i++) {
+      if (vals[i].type === 'pair') t = 'pair';
+    }
+    for (let i = first; i < vals.length; i++) {
+      if (t === 'pair' && (vals[i].type === 'int' || vals[i].type === 'real')) {
+        vals[i] = this.toPair(vals[i]);
+        continue;
+      }
+      if (vals[i].type === t) continue;
       const shape = vals.map((v) => v.type).join(', ');
-      return this.err(at, `write 的实参要同型 —— asy 那边 write(${shape}) 就是 no matching function`);
+      return this.err(args[i], `write 的实参要同型 —— asy 那边 write(${shape}) 就是 no matching function`);
     }
     const parts = vals.map((v) => {
       if (v.type === 'string') return v.code;
       // real 用 15 位有效数字 —— asy 的默认输出就是 %.15g（量过：1/3 是
       // 0.333333333333333、sqrt(2) 是 1.4142135623731、1e-5 是 1e-05、-0.0 是 -0）
       if (v.type === 'real') return `(tostr ${v.code} (int 15))`;
+      if (v.type === 'pair') {
+        this.used.add('asy__pairstr');
+        return `(call asy__pairstr ${v.code})`;
+      }
       if (v.type !== 'bool') return `(tostr ${v.code})`;
       this.used.add('asy__boolstr');
       return `(call asy__boolstr ${v.code})`;
@@ -851,6 +1038,7 @@ class AsyLower {
         const dims = start.items[2];
         if (!isList(dims) || head(dims) !== 'dims') return this.nope(start, '声明里带多维数组或形参表');
         if (asyIsArr(t)) return this.nope(start, '多维数组');
+        if (!SCALARS.has(t)) return this.nope(start, `${t}[] （数组元素这一刀只有 int/real/bool/string）`);
         t = `${t}[]`;
       }
       const nm = isAtom(start.items[1]) ? start.items[1].value : null;
@@ -921,6 +1109,13 @@ class AsyLower {
     const one = rhs === null ? { code: t === 'real' ? '(real 1.0)' : '(int 1)', type: t } : this.expr(rhs);
     if (one === null) return null;
     if (rhs === null && t !== 'int' && t !== 'real') return this.err(node, `'${nm}' 是 ${t}，不能自增自减`);
+    if (t === 'pair') {
+      // `z += w` 是逐分量，`z *= 2` 与 `z /= (0,1)` 走复数乘除（量过：(4,6)*=2 是
+      // (8,12)、(8,12)/=(0,1) 是 (12,-8)）。`#= %= ^=` pair 上没有。
+      if (op !== '+' && op !== '-' && op !== '*' && op !== '/') return this.err(node, `pair 上没有 '${op}='`);
+      const v = this.pairArith(node, op, { code: `(var ${nm})`, type: 'pair' }, one);
+      return v === null ? null : [`(set ${nm} ${v.code})`];
+    }
     if (op === '#' || op === '%') {
       if (t !== 'int' || one.type !== 'int') return this.err(node, `'${op}=' 两边要是 int`);
       const helper = op === '#' ? 'asy__quot' : 'asy__mod';
