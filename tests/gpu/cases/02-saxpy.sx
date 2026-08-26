@@ -1,0 +1,40 @@
+;; 设备比对用的 case（ADR-0014 门槛 7 前半句）：real 道 + 三个缓冲 + 一个标量。
+;;
+;; 形状与 01-bump 相同：dispatch 前后各把三个缓冲按 binding 顺序（a、b、out）印一遍。
+;; 网格刻意 6 > 长度 4 —— 多出来的道靠 blen 挡住，这是两边能对上的前提。
+;;
+;; 这份 case 在**这台机器上跑不到设备**：Metal 没有双精度（探针量的：Apple M1 的
+;; shaderFloat64 = 0），所以宿主会以退出码 3 退出，测试轴把它记成 skip。
+;; 留着它不是摆设 —— 它钉住的是「f64 kernel 发得出来、能过 validator、
+;; 而且拒绝的理由是设备缺特性，不是我们降错了」。
+(module
+  (fn dump ((v (buf real))) void
+    (let i int (int 0))
+    (while (bin "<" (var i) (blen (var v))) (do
+      (print (bget (var v) (var i)))
+      (set i (bin "+" (var i) (int 1))))))
+
+  (kernel saxpy ((a (buf real)) (b (buf real)) (out (buf real)) (k real))
+    (if (bin "<" (gid) (blen (var out))) (do
+      (bset (var out) (gid)
+        (bin "+" (bin "*" (bget (var a) (gid)) (var k)) (bget (var b) (gid))))))) 
+
+  (main
+    (let n int (int 4))
+    (let a (buf real) (bnew (buf real) (var n)))
+    (let b (buf real) (bnew (buf real) (var n)))
+    (let out (buf real) (bnew (buf real) (var n)))
+    (let i int (int 0))
+    (let x real (real 1.0))
+    (while (bin "<" (var i) (var n)) (do
+      (bset (var a) (var i) (var x))
+      (bset (var b) (var i) (bin "*" (real 10.0) (var x)))
+      (set i (bin "+" (var i) (int 1)))
+      (set x (bin "+" (var x) (real 1.0)))))
+    (expr (call dump (var a)))
+    (expr (call dump (var b)))
+    (expr (call dump (var out)))
+    (dispatch saxpy (int 6) (var a) (var b) (var out) (real 2.0))
+    (expr (call dump (var a)))
+    (expr (call dump (var b)))
+    (expr (call dump (var out)))))

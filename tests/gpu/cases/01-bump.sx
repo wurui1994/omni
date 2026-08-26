@@ -1,0 +1,29 @@
+;; 设备比对用的 case（ADR-0014 门槛 7 前半句）：整数道。
+;;
+;; 形状是刻意的：**dispatch 前后各把整个缓冲印一遍**。于是这份 case 一份源同时给出
+;; 两件东西 —— 「设备上该拿什么当输入」（前一半）和「设备上该算出什么」（后一半）。
+;; tests/gpu/kernels.js 里那份 DEVICE 表写的初值必须与前一半逐字相同，测试轴会核对；
+;; 不这么做的话，表和 case 迟早各说一套，而那时"设备答案对不对"就没有参照物了。
+;;
+;; 守门用 blen 而不是网格：设备上的调用数会被向上取整到工作组的整数倍（64 的倍数），
+;; CPU 上跑的是恰好 grid 次。两边能对上正是因为多出来的道被 blen 挡住了。
+(module
+  (fn dump ((v (buf int))) void
+    (let i int (int 0))
+    (while (bin "<" (var i) (blen (var v))) (do
+      (print (bget (var v) (var i)))
+      (set i (bin "+" (var i) (int 1))))))
+
+  (kernel bump ((v (buf int)) (d int))
+    (if (bin "<" (gid) (blen (var v))) (do
+      (bset (var v) (gid) (bin "+" (bget (var v) (gid)) (var d))))))
+
+  (main
+    (let v (buf int) (bnew (buf int) (int 4)))
+    (bset (var v) (int 0) (int 9223372036854775807))   ;; 回绕：设备上也必须回绕
+    (bset (var v) (int 1) (int -3))
+    (bset (var v) (int 2) (int 0))
+    (bset (var v) (int 3) (int 41))
+    (expr (call dump (var v)))
+    (dispatch bump (int 4) (var v) (int 1))
+    (expr (call dump (var v)))))

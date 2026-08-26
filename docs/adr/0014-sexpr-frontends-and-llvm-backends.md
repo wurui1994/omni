@@ -615,9 +615,29 @@ GLOAD 的全局下标、AGGLIT 的类型下标，还有落在 `REF_BIAS` 以下�
 不同的 id 编号或装饰顺序，症状会是「spirv-as 不认」或者更糟：认了，但描述符绑到了
 别的 binding 上。
 
-还差的只剩「有设备时真跑一遍」：要一个 Vulkan 宿主（建 device、按描述符集绑缓冲、
-灌 push constant、`vkCmdDispatch`、读回来和 `interp` 的输出比）。那是一份独立的 C 程序
-（决策 4 的 C_ABI 正好能接），`tests/gpu` 里现在是一条明写的 skip，而不是假装比过了。
+还差的只剩「有设备时真跑一遍」—— 下一小节就是它。
+
+### 已落地（真设备上跑一遍：`stage0/gpu/omni_vk.c`）
+
+`omni_vk MODULE.spv ENTRY --grid N [--buf i64:v,...] [--push i64:v]`：把一份模块在设备上
+跑一遍，把缓冲的内容印出来。**它是测试轴的工具，不是后端的一部分** —— `dispatch` 在
+CPU 那五条腿上是降级期展开的循环，main 本来就在 CPU 上跑，要上设备的只有 kernel 那一段。
+
+- **参照物怎么来的**：`tests/gpu/cases/*.sx` 在 dispatch **前后各把整个缓冲印一遍**。
+  于是一份源同时给出「设备该拿什么当输入」（前一半）和「设备该算出什么」（后一半）。
+  `tests/gpu/kernels.js` 的 `DEVICE` 表写的初值必须与前一半逐字相同，测试轴会核对 ——
+  表和 case 因此不会各说一套，而那正是这类比对最容易烂掉的地方。
+- **模块自述，不靠约定**：宿主自己走一遍 SPIR-V 的字，从 `OpCapability` 读出要不要
+  Float64 / Int64，从 `OpExecutionMode` 的 `LocalSize` 读出工作组多大。所以工作组大小
+  只在发射器里定义一次，宿主不会和它各记一份。
+- **组数 = ceil(grid / LocalSize.x)**：设备上实际起的调用数被向上取整到 64 的倍数，
+  而 CPU 那边跑的是恰好 grid 次。**两边能对上正是因为守门条件是 `blen` 而不是网格** ——
+  门槛 7 那条「kernel 自己用 blen 守门」的约定在这里第一次变成可观测的东西。
+- **量出来的平台事实**：Apple M1 + MoltenVK 报 `shaderInt64=1`、**`shaderFloat64=0`**
+  （Metal 没有双精度）。所以 `01-bump`（int 道，含 `INT64_MAX + 1` 的回绕）在真 GPU 上
+  与 CPU 逐个数值相同，而 `02-saxpy`（real 道）在这台机器上必然 skip，理由由宿主印出来：
+  「模块要 Float64=1；设备 0（Apple M1）给 shaderFloat64=0」。这是平台的边界，
+  不是降级出了错 —— 换一台有双精度的设备，同一份 case 不改一个字就能跑。
 
 ## 决策 7：闭包编译解释器保留，身份是 oracle 与 REPL
 
@@ -690,11 +710,13 @@ LuaJIT 的教训：`ffi.C.foo(x)` 之所以是一条直调，不是因为它的�
    从容器加载向量、宽度 16 及以上。
 7. **GPU**：`kernel` 的 SPIR-V 输出与同一份 MIR 在 CPU 上的结果一致；
    无 GPU 时至少过官方 validator。
-   **后半句已达成**：`buf` + `kernel`/`dispatch` 在六条腿上逐字节相同（CPU 那一半），
-   `omni emit-spirv` 发出的每个 kernel 过 `spirv-as --target-env vulkan1.1` + `spirv-val`
-   （见决策 6 的两个门槛 7 落地小节）。前半句还差一个 Vulkan 宿主：绑描述符、灌
-   push constant、dispatch、把结果读回来比对。还没做：kernel 里的循环、整数 `/` `%`、
-   工作组大小可配、多入口。
+   **两句都达成，但前一句受这台设备的精度所限**：`buf` + `kernel`/`dispatch` 在六条腿上
+   逐字节相同（CPU 那一半）；每个 kernel 过 `spirv-as --target-env vulkan1.1` + `spirv-val`；
+   整数 kernel 在 Apple M1（MoltenVK）上与 CPU 逐个数值相同，含 `INT64_MAX + 1` 的回绕。
+   real 的 kernel 在这台机器上过不了设备 —— Metal 没有双精度（量出来的：`shaderFloat64=0`），
+   宿主以退出码 3 报出「模块要什么、设备给什么」，测试轴记 skip。
+   还没做：kernel 里的循环、整数 `/` `%`、工作组大小可配、多入口、
+   把 dispatch 真正接到 GPU 上（现在设备只在测试轴里跑，`omni run` 走的还是 CPU 循环）。
 
 ## 借鉴与对照（本地快照，行号是这些快照里的）
 
