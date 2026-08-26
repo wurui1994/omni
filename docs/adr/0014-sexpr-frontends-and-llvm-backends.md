@@ -580,9 +580,44 @@ GLOAD 的全局下标、AGGLIT 的类型下标，还有落在 `REF_BIAS` 以下�
   **不换分配器**：换一个的话缓冲的地址来自另一个池，同一个程序里就有两套内存管理。
   越界与负长度走变参的 `omni_errorf`，格式串与实参和 C 那条腿逐字相同，于是 stderr 也一致。
 
-`tests/sexpr/cases/04-buffers.sx` 六条腿逐字节相同。还差的正是门槛 7 的另一半：
-把带 `kernel: true` 的那些 MIR 函数发成 SPIR-V，用 `spirv-val` 过一遍，有设备时再跑一遍
-比对这份输出。
+`tests/sexpr/cases/04-buffers.sx` 六条腿逐字节相同。
+
+### 已落地（SPIR-V：门槛 7 的 GPU 那一半，`stage0/src/backend-spirv/emit.js`）
+
+`omni emit-spirv FILE [--kernel NAME]`：一个 kernel 一份 SPIR-V **汇编文本**。
+
+- **发汇编文本，不打包二进制字。** 和 LLVM 那条腿同一个理由：这一层真正的工作量在降级，
+  跟谁来打包字无关。文本让它能被 `spirv-as --target-env vulkan1.1` + `spirv-val`
+  单独校验 —— 那是官方工具，它们认了就说明字是对的，不必自己再实现一遍二进制布局。
+- **一个模块一个入口。** SPIR-V 允许多个 `OpEntryPoint`，但每个入口有自己的接口与
+  描述符布局，合在一起只会让「这份模块对应哪次 dispatch」变模糊，而 Vulkan 那边
+  一个 pipeline 就是一个入口。所以有多个 kernel 时必须 `--kernel` 指名。
+- 映射都用 GPU 本来就有的东西：`buf<T>` 形参 → StorageBuffer 描述符（set 0，binding
+  按缓冲形参序），类型是 `OpTypeStruct { OpTypeRuntimeArray T }` + `Block` + `ArrayStride 8`；
+  标量形参 → push constant 块的成员（每个 8 字节，偏移 = 序号 × 8）；`(gid)` →
+  `GlobalInvocationId` 的第 0 分量；槽位 → Function 存储类的 `OpVariable`；
+  `blen` → **`OpArrayLength`**，所以长度不必另传一个 uniform，宿主绑多长就是多长。
+- **MIR 把结构化控制流留到后端才拆，这一步是它的兑现**：`IF/ELSE/END` 直接成
+  `OpSelectionMerge` + 显式 merge 块，不必先建 CFG 再找汇合点。（`OpSelectionMerge`
+  必须紧接 `OpBranchConditional`，所以 `BLOCK` 那条标记借不了它 —— 循环留到第二阶段。）
+- **`T_BUF` 不带元素类型这件事在这里第一次要付代价**：描述符必须在函数体之前声明，
+  所以这条腿先扫一遍「谁读写了哪个槽」反推元素类型。从没被读写的缓冲形参因此发不出来 ——
+  那不是"支持不了"，是信息不在 MIR 里，与其猜一个发出去，不如报错说清（`tests/gpu/bad/unused-buf.sx`）。
+- 刻意不支持、一律报错的：**整数 `/` `%`**（CPU 那几条腿要在除零时报错、`INT64_MIN / -1`
+  要特判，而设备上没有报错这条路径 —— 给个"差不多"的答案就等于让门槛 7 变成摆设）、
+  循环、`bnew`（设备上没有 arena）、print/字符串/dyn/容器/调用/闭包/向量、越界检查。
+  每一条在 `tests/gpu/bad/` 里有一份 case，且**同一份源在 CPU 那条腿上照跑** ——
+  边界是这一层的，不是语言的。
+
+第十五条测试轴 `tests/gpu`：清单里的每个 kernel 过 `spirv-as` + `spirv-val`（工具不在
+就 skip，不该成为 `npm test` 的硬依赖），加一份汇编快照，加上面那些拒绝。自举门槛比的是
+`emit-spirv` 的文本在两代之间相同 —— 原生构建里 Map 与字符串是另一套实现，两代发出
+不同的 id 编号或装饰顺序，症状会是「spirv-as 不认」或者更糟：认了，但描述符绑到了
+别的 binding 上。
+
+还差的只剩「有设备时真跑一遍」：要一个 Vulkan 宿主（建 device、按描述符集绑缓冲、
+灌 push constant、`vkCmdDispatch`、读回来和 `interp` 的输出比）。那是一份独立的 C 程序
+（决策 4 的 C_ABI 正好能接），`tests/gpu` 里现在是一条明写的 skip，而不是假装比过了。
 
 ## 决策 7：闭包编译解释器保留，身份是 oracle 与 REPL
 
@@ -655,6 +690,11 @@ LuaJIT 的教训：`ffi.C.foo(x)` 之所以是一条直调，不是因为它的�
    从容器加载向量、宽度 16 及以上。
 7. **GPU**：`kernel` 的 SPIR-V 输出与同一份 MIR 在 CPU 上的结果一致；
    无 GPU 时至少过官方 validator。
+   **后半句已达成**：`buf` + `kernel`/`dispatch` 在六条腿上逐字节相同（CPU 那一半），
+   `omni emit-spirv` 发出的每个 kernel 过 `spirv-as --target-env vulkan1.1` + `spirv-val`
+   （见决策 6 的两个门槛 7 落地小节）。前半句还差一个 Vulkan 宿主：绑描述符、灌
+   push constant、dispatch、把结果读回来比对。还没做：kernel 里的循环、整数 `/` `%`、
+   工作组大小可配、多入口。
 
 ## 借鉴与对照（本地快照，行号是这些快照里的）
 

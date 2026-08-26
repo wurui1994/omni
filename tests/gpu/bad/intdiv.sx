@@ -1,0 +1,15 @@
+;; kernel 里的整数除法：刻意不发。
+;;
+;; CPU 那几条腿在除零时报错、`INT64_MIN / -1` 要特判（omni.h:332..343），
+;; 而设备上没有"报错"这条路径 —— 发一个 OpSDiv 就是在两条腿之间开一个静默的分叉，
+;; 而门槛 7 要比的正是「同一份 MIR 在两边给同一个答案」。
+(module
+  (kernel scale ((v (buf int)) (d int))
+    (if (bin "<" (gid) (blen (var v))) (do
+      (bset (var v) (gid) (bin "/" (bget (var v) (gid)) (var d))))))
+
+  (main
+    (let v (buf int) (bnew (buf int) (int 2)))
+    (bset (var v) (int 0) (int 10))
+    (dispatch scale (int 2) (var v) (int 2))
+    (print (bget (var v) (int 0)))))

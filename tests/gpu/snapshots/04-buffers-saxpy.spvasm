@@ -1,0 +1,85 @@
+; SPIR-V
+; Omni stage0 — MIR -> SPIR-V（ADR-0014 门槛 7）：kernel k_saxpy
+OpCapability Shader
+OpCapability Int64
+OpCapability Float64
+OpMemoryModel Logical GLSL450
+OpEntryPoint GLCompute %main "k_saxpy" %gid
+OpExecutionMode %main LocalSize 64 1 1
+OpName %main "k_saxpy"
+OpName %pc "omni_args"
+OpName %gid "gl_GlobalInvocationID"
+OpDecorate %rta_f64 ArrayStride 8
+OpMemberDecorate %sbuf_f64 0 Offset 0
+OpDecorate %sbuf_f64 Block
+OpDecorate %buf0 DescriptorSet 0
+OpDecorate %buf0 Binding 0
+OpDecorate %buf1 DescriptorSet 0
+OpDecorate %buf1 Binding 1
+OpDecorate %buf2 DescriptorSet 0
+OpDecorate %buf2 Binding 2
+OpMemberDecorate %pc_ty 0 Offset 0
+OpDecorate %pc_ty Block
+OpDecorate %gid BuiltIn GlobalInvocationId
+%f64 = OpTypeFloat 64
+%rta_f64 = OpTypeRuntimeArray %f64
+%sbuf_f64 = OpTypeStruct %rta_f64
+%ptr_sb_sbuf_f64 = OpTypePointer StorageBuffer %sbuf_f64
+%buf0 = OpVariable %ptr_sb_sbuf_f64 StorageBuffer
+%buf1 = OpVariable %ptr_sb_sbuf_f64 StorageBuffer
+%buf2 = OpVariable %ptr_sb_sbuf_f64 StorageBuffer
+%pc_ty = OpTypeStruct %f64
+%ptr_pc_pc_ty = OpTypePointer PushConstant %pc_ty
+%pc = OpVariable %ptr_pc_pc_ty PushConstant
+%void = OpTypeVoid
+%fn_void = OpTypeFunction %void
+%i64 = OpTypeInt 64 1
+%ptr_fn_i64 = OpTypePointer Function %i64
+%ptr_fn_f64 = OpTypePointer Function %f64
+%u32 = OpTypeInt 32 0
+%v3u32 = OpTypeVector %u32 3
+%ptr_in_v3u32 = OpTypePointer Input %v3u32
+%gid = OpVariable %ptr_in_v3u32 Input
+%ptr_pc_f64 = OpTypePointer PushConstant %f64
+%k0 = OpConstant %u32 0
+%bool = OpTypeBool
+%ptr_sb_f64 = OpTypePointer StorageBuffer %f64
+%main = OpFunction %void None %fn_void
+%entry = OpLabel
+  %s0 = OpVariable %ptr_fn_i64 Function
+  %s4 = OpVariable %ptr_fn_f64 Function
+  %t0 = OpLoad %v3u32 %gid
+  %t1 = OpCompositeExtract %u32 %t0 0
+  %t2 = OpSConvert %i64 %t1
+  OpStore %s0 %t2
+  %t3 = OpAccessChain %ptr_pc_f64 %pc %k0
+  %t4 = OpLoad %f64 %t3
+  OpStore %s4 %t4
+  %v0 = OpLoad %i64 %s0
+  %t5 = OpArrayLength %u32 %buf2 0
+  %v2 = OpSConvert %i64 %t5
+  %v3 = OpSLessThan %bool %v0 %v2
+  OpSelectionMerge %ifend2 None
+  OpBranchConditional %v3 %then0 %else1
+%then0 = OpLabel
+  %v6 = OpLoad %i64 %s0
+  %v8 = OpLoad %i64 %s0
+  %t6 = OpSConvert %u32 %v8
+  %t7 = OpAccessChain %ptr_sb_f64 %buf0 %k0 %t6
+  %v9 = OpLoad %f64 %t7
+  %v10 = OpLoad %f64 %s4
+  %v11 = OpFMul %f64 %v9 %v10
+  %v13 = OpLoad %i64 %s0
+  %t8 = OpSConvert %u32 %v13
+  %t9 = OpAccessChain %ptr_sb_f64 %buf1 %k0 %t8
+  %v14 = OpLoad %f64 %t9
+  %v15 = OpFAdd %f64 %v11 %v14
+  %t10 = OpSConvert %u32 %v6
+  %t11 = OpAccessChain %ptr_sb_f64 %buf2 %k0 %t10
+  OpStore %t11 %v15
+  OpBranch %ifend2
+%else1 = OpLabel
+  OpBranch %ifend2
+%ifend2 = OpLabel
+  OpReturn
+OpFunctionEnd

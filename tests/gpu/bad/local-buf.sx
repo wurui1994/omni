@@ -1,0 +1,15 @@
+;; kernel 里的局部缓冲：设备上分配不了。
+;;
+;; `bnew` 在 CPU 那几条腿上走 arena 的 bump 快路径，而设备上没有 arena ——
+;; 缓冲是宿主分配好、按描述符绑上来的。所以「kernel 自己开一块」在这一层没有对应物：
+;; 报错，而不是悄悄换一个分配器。
+(module
+  (kernel scratch ((v (buf int)))
+    (let t (buf int) (bnew (buf int) (int 4)))
+    (if (bin "<" (gid) (blen (var v))) (do
+      (bset (var v) (gid) (blen (var t))))))
+
+  (main
+    (let v (buf int) (bnew (buf int) (int 2)))
+    (dispatch scratch (int 2) (var v))
+    (print (bget (var v) (int 0)))))

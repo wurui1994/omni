@@ -1,0 +1,15 @@
+;; 从没被读写的缓冲形参：元素类型定不下来。
+;;
+;; MIR 的 `buf` 类型码刻意不带元素类型（mir/ir.js:57）—— CPU 那几条腿不需要它，
+;; 步长与零值只在 BNEW/BGET/BSET 的 `t` 上出现。可是 SPIR-V 的描述符必须在函数体
+;; 之前声明，于是这条腿得从「谁读写了哪个槽」反推。一个从没被读写的缓冲形参因此
+;; 发不出来 —— 这不是"支持不了"，是**信息不在 MIR 里**：与其猜一个元素类型发出去，
+;; 不如说清。（真要发，就在 kernel 里读它一次。）
+(module
+  (kernel idle ((v (buf real)) (d int))
+    (let x int (bin "+" (gid) (var d))))
+
+  (main
+    (let v (buf real) (bnew (buf real) (int 2)))
+    (dispatch idle (int 2) (var v) (int 1))
+    (print (blen (var v)))))

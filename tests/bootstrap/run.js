@@ -278,6 +278,27 @@ if (c1 && !quick) {
       else ok(`N1 ${cmd} sexpr/03-simd == C0  ${vRef.stdout.length} bytes`);
     }
 
+    // 缓冲 + kernel/dispatch（ADR-0014 门槛 7）。三条腿都比：C 与 LLVM 是 CPU 那一半，
+    // SPIR-V 是 GPU 那一半。SPIR-V 这条在原生构建里的风险很具体 —— 那份发射器全靠
+    // Map 记 id、靠字符串拼指令，而原生构建里 Map 与字符串是另一套实现（封闭 ABI）。
+    // 两代发出不同的 id 编号或不同的装饰顺序，症状是「原生编译器发的模块 spirv-as 不认」
+    // 或者更糟：认了，但描述符绑到了别的 binding 上。node 上永远看不出来。
+    const caseBuf = join(root, 'tests', 'sexpr', 'cases', '04-buffers.sx');
+    for (const cmd of ['emit-llvm', 'emit-c']) {
+      const bRef = spawnSync('node', [cli, cmd, caseBuf], { encoding: 'utf8' });
+      const bVia = spawnSync(n1, [cmd, caseBuf], { encoding: 'utf8' });
+      if (bVia.status !== 0) bad(`N1 ${cmd} sexpr/04-buffers`, `    exit=${bVia.status}\n${bVia.stderr}`);
+      else if (bVia.stdout !== bRef.stdout) bad(`N1 ${cmd} buffers == C0`, `    C0 ${bRef.stdout.length} bytes != N1 ${bVia.stdout.length} bytes`);
+      else ok(`N1 ${cmd} sexpr/04-buffers == C0  ${bRef.stdout.length} bytes`);
+    }
+    for (const kn of ['saxpy', 'bump']) {
+      const gRef = spawnSync('node', [cli, 'emit-spirv', caseBuf, '--kernel', kn], { encoding: 'utf8' });
+      const gVia = spawnSync(n1, ['emit-spirv', caseBuf, '--kernel', kn], { encoding: 'utf8' });
+      if (gVia.status !== 0) bad(`N1 emit-spirv ${kn}`, `    exit=${gVia.status}\n${gVia.stderr}`);
+      else if (gVia.stdout !== gRef.stdout) bad(`N1 emit-spirv ${kn} == C0`, `    C0 ${gRef.stdout.length} bytes != N1 ${gVia.stdout.length} bytes`);
+      else ok(`N1 emit-spirv ${kn} == C0  ${gRef.stdout.length} bytes`);
+    }
+
     // ---- 核心 S 表达式方言 + $*k 摊平（ADR-0014 决策 1）
     // 走的是整条链：mini 的 grammar -> `omni glr`（摊平在这里）-> 核心方言文本 ->
     // `omni run`（sexpr/lower.js 在这里）。两代都得给同一份文本、同一份输出。

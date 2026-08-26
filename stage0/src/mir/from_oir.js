@@ -110,6 +110,9 @@ class ToMir {
     this.f = mf;
     this.scopes = [new Map()];
     this.regions = [];
+    // kernel 标注原样带过来（sexpr 前端的 `kernel: true`）。MIR 不因它改任何一条指令 ——
+    // 它只是让 SPIR-V 那条腿认得出「这个函数是要发到设备上的」。
+    if (src.kernel === true) mf.kernel = true;
     if (src.closureId !== undefined) {
       mf.closureId = src.closureId;
       this.captures = this.mod.closures[src.closureId].captures;

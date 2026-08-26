@@ -35,6 +35,7 @@ import { cAbiLibs } from './hir/c_abi.js';
 import { emitJs, emitJsFunc } from './backend-js/emit.js';
 import { emitC } from './backend-c/emit.js';
 import { emitLlvm } from './backend-llvm/emit.js';
+import { emitSpirv } from './backend-spirv/emit.js';
 import { RUNTIME_DIR, JIT_DIR, runtimeSources } from './runtime/c_runtime.js';
 import { loadProgram, MODE_BY_EXT } from './module/load.js';
 import { startRepl } from './repl.js';
@@ -479,6 +480,17 @@ function main(argv) {
       const { mod } = compile(path, rest);
       return runViaLlvm(mod, rest);
     }
+    // GPU 路径（ADR-0014 门槛 7 的另一半）：一个 kernel 一份 SPIR-V 汇编。
+    // 只发文本 —— 打包成二进制字是 spirv-as 的活，而它是官方工具（见 backend-spirv 的文件头）。
+    case 'emit-spirv': {
+      const { mod } = compile(path, rest);
+      const mir = lowerToMir(mod);
+      const errs = verifyMir(mir);
+      if (errs.length > 0) throw new OmniError(`mir is not well-formed:\n  ${errs.join('\n  ')}`);
+      const ki = rest.indexOf('--kernel');
+      stdout(emitSpirv(mir, ki >= 0 ? rest[ki + 1] : undefined));
+      return 0;
+    }
     case 'run-jit': {
       const { mod } = compile(path, rest);
       return runViaJit(mod, rest);
@@ -610,6 +622,7 @@ commands:
   run-llvm  compile through LLVM IR with clang and execute
   build-llvm  same, but keep the executable  (-o NAME; --work DIR keeps the .ll)
   run-jit   compile through LLVM IR and execute it with the ORC JIT (no cc at run time)
+  emit-spirv print SPIR-V assembly for one kernel (ADR-0014 gate 7; --kernel NAME)
   ast       print the AST as JSON
   oir       print the OIR as JSON
   mir       print the MIR (ADR-0014 decision 6): SSA values + slots + structured

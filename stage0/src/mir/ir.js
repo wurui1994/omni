@@ -284,6 +284,10 @@ export class MirFunc {
     this.slots = [];         // [{name, t}]，下标就是槽号
     this.args = [];          // 实参池：一串 ref，指令用 (起点, 个数) 指进来
     this.closureId = undefined;  // 闭包体：第一个隐含形参是闭包记录
+    // GPU 核（ADR-0014 门槛 7）。**标注，不是语义**：六条 CPU 腿完全不看它，
+    // SPIR-V 那条腿按它挑要发哪个函数。放在 MirFunc 上而不是另开一张表，是因为
+    // 「这个函数是个 kernel」和「它的形参是什么」是同一件事的两半。
+    this.kernel = false;
   }
 
   /** 指令条数。刻意是方法而不是 getter —— 访问器不在语言子集里（ADR-0011）。 */
