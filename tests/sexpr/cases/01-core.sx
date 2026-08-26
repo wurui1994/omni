@@ -1,5 +1,5 @@
 ;; 直接写核心方言：这是汇聚点本身的用例（没有 grammar 参与）。
-;; 覆盖 fn/main、let/set、if/else、while、ret、print、call、bin/un 的每一种。
+;; 覆盖 fn/main、let/set、if/else、while、brk/cont、ret、print、call、bin/un 的每一种。
 (module
   (fn sum_to ((n int)) int
     (let acc int (int 0))
@@ -21,6 +21,19 @@
   (fn scale ((x real) (k real)) real
     (ret (bin "*" (var x) (var k))))
 
+  ;; (brk) / (cont)：3 的倍数跳过，攒过 20 就停。两条写在同一个循环里 ——
+  ;; "跳出去"和"跳到下一轮"是同一处控制流，分开写反而看不出它们的关系。
+  (fn oddsum ((n int)) int
+    (let acc int (int 0))
+    (let i int (int 0))
+    (while (bin "<" (var i) (var n))
+      (do
+        (set i (bin "+" (var i) (int 1)))
+        (if (bin "==" (bin "%" (var i) (int 3)) (int 0)) (do (cont)))
+        (if (bin ">" (var acc) (int 20)) (do (brk)))
+        (set acc (bin "+" (var acc) (var i)))))
+    (ret (var acc)))
+
   (main
     (print (call sum_to (int 100)))
     (print (call classify (un "-" (int 3))))
@@ -28,4 +41,5 @@
     (print (call classify (int 7)))
     (print (call scale (real 1.5) (real 4.0)))
     (print (bin "&&" (bin ">" (call sum_to (int 3)) (int 5)) (un "!" (bool false))))
-    (print (bin "+" (str "core") (str " dialect")))))
+    (print (bin "+" (str "core") (str " dialect")))
+    (print (call oddsum (int 100)))))

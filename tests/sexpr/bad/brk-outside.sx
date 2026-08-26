@@ -1,0 +1,5 @@
+;; (brk) 只在循环里有意义。方言不猜"你是想 return 吧" —— 循环外的 brk 是写错了
+(module
+  (main
+    (print (str "before"))
+    (brk)))

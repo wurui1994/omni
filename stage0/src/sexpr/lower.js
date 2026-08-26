@@ -19,6 +19,7 @@
  *   TYPE  = int | real | bool | string | void | (vec int|real 2|4|8) | (buf int|real)
  *   STMT  = (let NAME TYPE E) | (set NAME E) | (do STMT...)
  *         | (if E (do ...) [(do ...)]) | (while E (do ...))
+ *         | (brk) | (cont)
  *         | (ret [E]) | (print E) | (expr E)
  *         | (bset E E E) | (dispatch NAME E E...)
  *   E     = (int TEXT) | (real TEXT) | (bool TEXT) | (str "…")
@@ -58,6 +59,7 @@ class CoreLowerer {
     this.kernels = new Map();
     this.inKernel = false;
     this.tmpNo = 0;           // dispatch 展开出来的临时量编号，保证名字唯一
+    this.loopDepth = 0;       // (brk) / (cont) 只在循环里合法，跟 hir/check.js 同一条规矩
   }
 
   err(node, msg) {
@@ -261,9 +263,18 @@ class CoreLowerer {
     if (h === 'while') {
       const c = this.cond(n.items[1]);
       if (c === null) return null;
+      this.loopDepth++;
       const body = this.stmt(n.items[2], ret);
+      this.loopDepth--;
       if (body === null) return null;
       return { kind: 'While', cond: c, body: body };
+    }
+    // `(brk)` / `(cont)`：OIR 里 Break / Continue 早就有，方言这边一直没开口。
+    // 补上不是为 asy 特设的 —— 任何 C 系语言的循环都要它，而"用标志位绕开 break"
+    // 会把控制流塞进数据流里，六条腿上都更难读。
+    if (h === 'brk' || h === 'cont') {
+      if (this.loopDepth === 0) return this.err(n, `(${h}) 只能写在循环里`);
+      return { kind: h === 'brk' ? 'Break' : 'Continue' };
     }
     if (h === 'ret') {
       if (n.items[1] === undefined) {
