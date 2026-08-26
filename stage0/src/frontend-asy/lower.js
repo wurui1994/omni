@@ -30,13 +30,17 @@
 // **pair**：`(x,y)` 字面量、`+ - * /`（后两个是复数乘除）、一元 `-`、`== !=`、
 // `z.x`/`z.y`/`xpart`/`ypart`、`abs`/`length`/`conj`、int/real 到 pair 的隐式转换、
 // `(pair)` 强制转换、`write`（`(x,y)` 两个分量各 %.15g）、pair 当形参/返回值/`?:` 的两支、
+// **`pair[]`**（第八刀：核心方言的 `(arr T)` 现在收 `(vec T N)` 元素，上面那一整套数组
+// 操作 —— 下标读写、切片、`write` 整数组、for-each、当形参 —— 在 pair 上一条不少）、
 // **字符串函数**：`length`、`substr`、`find`、`rfind`、`replace`、`erase`
 // （核心方言为此加了 `(slen E)`/`(ssub E I N)`/`(sfind E T)` 三条 —— OIR 那边本来就有
 // len/substr/indexOf 三个 Builtin，所以四条腿是白捡的，只有 LLVM 那条腿要三行 ABI）。
 //
 // 不支持（见到就报错，报错里说清是哪一条）：triple、struct、import/access、
 // typedef、算符重载、重载解析、默认实参、命名实参、给切片赋值（`a[0:2] = b`）、
-// 多维数组、`pair[]`（核心方言的 `(arr T)` 只收标量元素）、复数幂、
+// 多维数组（`int[][]` —— 核心方言的 `(arr T)` 不收数组元素：MIR 那一层元素类型只有
+// 一个 8 位类型码，`(arr (arr int))` 与 `(arr (arr string))` 在那里是同一个码，
+// 类型身份丢了。向量元素能收是因为道数就在那个码的高位上）、复数幂、
 // 超越函数（exp/log/trig —— 量过 libm 与 V8 在 atan/tan/log/cos 的最后一位就分叉，
 // 收进来六条腿必然有一天对不上；`angle`/`dir`/`expi` 因此也在门外）、
 // `unit`（能用 sqrt 加除法写出来，但量不出 asy 用的是"乘倒数"还是"逐分量除" ——
@@ -45,7 +49,7 @@
 // （ADR-0005）—— 非 ASCII 倒过来在 C 那条腿上是一串坏字节，在 JS 那条腿上要看
 // 宿主怎么处理，"六条腿逐字节相同"这句话就保不住了，所以门外）、
 // 字符串的 `insert`/`split`（`insert` 要的 `substr` 拼接现成，但 asy 的越界行为
-// 还没量全；`split` 要 `string[]`，而 `pair[]` 那条同样的坎还没过）、
+// 还没量全；`split` 要 `string[]` 的返回值，那条路还没走通）、
 // 循环条件里的 `?:`（摊出来的赋值只能落在循环外面，条件就只
 // 算一次了 —— 语义会变，所以报错而不是悄悄换个意思）。
 //
@@ -84,6 +88,10 @@ export const ASY_NOPE = 'asy 前端第一刀还不支持';
 
 const SCALARS = new Set(['int', 'real', 'bool', 'string']);
 
+/** 能当数组元素的类型。pair 是第八刀加的（核心方言的 `(arr T)` 现在收向量元素）；
+ *  数组本身仍然不在里面 —— 多维数组是另一刀。 */
+const ASY_ARRELEM = new Set(['int', 'real', 'bool', 'string', 'pair']);
+
 /** 算符文本。语法模板里有两种写法：`(bin "+" …)` 给的是字符串节点，
  *  `(self $2 $1 $3)` 直接把 SELFOP **词法 token**（原子）搬过来。两种都要认。
  *  名字带 asy 前缀是封闭 ABI 的要求：模块级的名字全局唯一（mir/print.js 已有一个 opText）。 */
@@ -103,12 +111,13 @@ const asyElem = (t) => t.slice(0, -2);
  * 剩下的复数 `*`、`/`、`abs`、`==` 和 `(x,y)` 的印法都是 **asy 的语义**，不是"向量"的
  * 语义 —— 那几条落在这一层的 helper 里，六条腿共用同一份，不会分叉。
  *
- * 代价写在明处：`pair[]` 这一刀没有（`(arr T)` 的元素只收标量），`?:` 的两支是 pair
- * 时靠 ZERO 里那个零向量占位。
+ * 代价写在明处：`?:` 的两支是 pair 时靠 ZERO 里那个零向量占位。
+ * `pair[]` 第八刀通了：核心方言的 `(arr T)` 现在收 `(vec T N)` 元素，运行时那一份
+ * 按字节的实现管长度与增长，元素的读写由每条腿自己发（见 omni_arr.c 尾部）。
  */
 const ASY_PAIR_TY = '(vec real 2)';
 const asyCore = (t) => {
-  if (asyIsArr(t)) return `(arr ${asyElem(t)})`;
+  if (asyIsArr(t)) return `(arr ${asyCore(asyElem(t))})`;
   return t === 'pair' ? ASY_PAIR_TY : t;
 };
 
@@ -179,7 +188,7 @@ const ASY_STR_DEPS = new Map([
 const ASY_STR_NOPE = new Map([
   ['reverse', "字符串的 reverse（asy 是按字节倒的，而 Omni 的 string 是 UTF-8 字节序列 —— 非 ASCII 倒出来在 C 与 JS 两条腿上不是同一件事）"],
   ['insert', "字符串的 insert（substr 拼接就够，但 asy 的越界行为还没量全，不猜）"],
-  ['split', '字符串的 split（要 string[] 的返回值，跟 pair[] 是同一道坎）'],
+  ['split', '字符串的 split（要 string[] 的返回值，函数返回数组那条路还没走通）'],
 ]);
 
 /** 核心方言的字符串字面量。刻意不用 JSON.stringify：它对控制字符发 \uXXXX，
@@ -328,10 +337,12 @@ const HELPERS = new Map([
 
 /** 写下标时的自动扩长。asy 量过：`int[] e; e[2]=5;` 之后 `e.length` 是 **3**（= 下标+1），
  *  中间那些格子在 asy 那边是"未初始化"，读会报错；我们填零值，差别写在文件头。
- *  四种元素各一份，因为核心方言的 `(apush …)` 要具体的零值字面量。
+ *  五种元素各一份，因为核心方言的 `(apush …)` 要具体的零值字面量。pair 那一份是第八刀
+ *  加的，元素类型写的是 `(vec real 2)` —— 三条 helper 的**正文一个字都没改**。
  *  这里刻意不用解构（`for (const [a, b] of …)`）：封闭子集里那不是保证能降级的写法。 */
-for (const t of ['int', 'real', 'bool', 'string']) {
-  HELPERS.set(`asy__grow_${t}`, `  (fn asy__grow_${t} ((a (arr ${t})) (i int)) void
+for (const t of ['int', 'real', 'bool', 'string', 'pair']) {
+  const et = asyCore(t);
+  HELPERS.set(`asy__grow_${t}`, `  (fn asy__grow_${t} ((a (arr ${et})) (i int)) void
     (while (bin "<=" (alen (var a)) (var i))
       (do (apush (var a) ${ZERO.get(t)}))))`);
   // 切片。量过的三条：半开区间、**是复制不是视图**（`b=a[0:2]; b[0]=99;` 之后 a[0] 还是 10）、
@@ -339,8 +350,8 @@ for (const t of ['int', 'real', 'bool', 'string']) {
   // （"invalid negative index in slice of non-cyclic array"），落到 (aget …) 上也是运行期
   // 错误，只是话不一样。`a[3:1]` asy 报 "slice ends before it begins"，我们给空数组 ——
   // 这条差别写在文件头。
-  HELPERS.set(`asy__slice_${t}`, `  (fn asy__slice_${t} ((a (arr ${t})) (i int) (j int)) (arr ${t})
-    (let r (arr ${t}) (anew (arr ${t}) (int 0)))
+  HELPERS.set(`asy__slice_${t}`, `  (fn asy__slice_${t} ((a (arr ${et})) (i int) (j int)) (arr ${et})
+    (let r (arr ${et}) (anew (arr ${et}) (int 0)))
     (let k int (var i))
     (let e int (var j))
     (if (bin ">" (var e) (alen (var a))) (do (set e (alen (var a)))))
@@ -351,7 +362,7 @@ for (const t of ['int', 'real', 'bool', 'string']) {
     (ret (var r)))`);
   // `a[i:]`：末端默认是长度。单独一条 helper 而不是在调用处写 `(alen …)` —— 那样接收者
   // 的代码要印两遍，`f()[1:]` 就会把 f 调两次。
-  HELPERS.set(`asy__slicefrom_${t}`, `  (fn asy__slicefrom_${t} ((a (arr ${t})) (i int)) (arr ${t})
+  HELPERS.set(`asy__slicefrom_${t}`, `  (fn asy__slicefrom_${t} ((a (arr ${et})) (i int)) (arr ${et})
     (ret (call asy__slice_${t} (var a) (var i) (alen (var a)))))`);
 }
 
@@ -430,7 +441,7 @@ class AsyLower {
       if (isList(dims) && head(dims) !== 'dims') return this.nope(node, '多维数组');
       const el = this.plainName(node.items[1]);
       if (el === null) return this.nope(node, '带点的类型名');
-      if (!SCALARS.has(el)) return this.nope(node, `${el}[] （数组元素这一刀只有 int/real/bool/string）`);
+      if (!ASY_ARRELEM.has(el)) return this.nope(node, `${el}[] （数组元素这一刀只有 int/real/bool/string/pair）`);
       return `${el}[]`;
     }
     if (h !== 'name-ty') return this.err(node, `${what}：认不出的类型形状 '${h}'`);
@@ -716,7 +727,7 @@ class AsyLower {
     const el = this.type(n.items[1], 'new 的元素类型');
     if (el === null) return null;
     if (asyIsArr(el) || el === 'void') return this.nope(n, '多维数组');
-    if (!SCALARS.has(el)) return this.nope(n, `${el}[] （数组元素这一刀只有 int/real/bool/string）`);
+    if (!ASY_ARRELEM.has(el)) return this.nope(n, `${el}[] （数组元素这一刀只有 int/real/bool/string/pair）`);
     const dimexps = n.items[2];
     const hasCount = isList(dimexps) && head(dimexps) === 'dimexps';
     if (isList(dimexps) && head(dimexps) === 'dimexps-add') return this.nope(n, '多维数组');
@@ -730,7 +741,7 @@ class AsyLower {
       ? this.coerce(this.expr(dimexps.items[1]), 'int', n, 'new T[n] 的长度')
       : { code: '(int 0)', type: 'int' };
     if (count === null) return null;
-    return { code: `(anew (arr ${el}) ${count.code})`, type: `${el}[]` };
+    return { code: `(anew ${asyCore(`${el}[]`)} ${count.code})`, type: `${el}[]` };
   }
 
   /**
@@ -745,7 +756,7 @@ class AsyLower {
     if (head(n) === 'arrayinit-rest') return this.nope(n, '`{…, ...rest}` 这种初值');
     for (const x of this.flat(n, 'arrayinit')) items.push(x);
     const nm = `asy__a${this.tmp++}`;
-    this.pre.push(`(let ${nm} (arr ${el}) (anew (arr ${el}) (int 0)))`);
+    this.pre.push(`(let ${nm} ${asyCore(t)} (anew ${asyCore(t)} (int 0)))`);
     for (const x of items) {
       const v = this.coerce(this.expr(x), el, x, `${t} 初值里的一项`);
       if (v === null) return null;
@@ -771,7 +782,7 @@ class AsyLower {
     // 摊成 pre：先把值绑到临时量（只算一次），push 它，再把临时量当结果。
     if (this.pre === null) return this.nope(n, '这个位置的 `.push(…)`（它要摊成语句，这里放不下）');
     const tmp = `asy__p${this.tmp++}`;
-    this.pre.push(`(let ${tmp} ${el} ${v.code})`);
+    this.pre.push(`(let ${tmp} ${asyCore(el)} ${v.code})`);
     this.pre.push(`(apush ${recv.code} (var ${tmp}))`);
     return { code: `(var ${tmp})`, type: el };
   }
@@ -1122,7 +1133,7 @@ class AsyLower {
     for (let i = first; i < vals.length; i++) {
       const nm = `asy__wa${this.tmp++}`;
       names.push(nm);
-      out.push(`(let ${nm} (arr ${el}) ${vals[i].code})`);
+      out.push(`(let ${nm} ${asyCore(vals[first].type)} ${vals[i].code})`);
     }
     const nmax = `asy__wn${this.tmp++}`;
     out.push(`(let ${nmax} int (int 0))`);
@@ -1328,7 +1339,7 @@ class AsyLower {
         const dims = start.items[2];
         if (!isList(dims) || head(dims) !== 'dims') return this.nope(start, '声明里带多维数组或形参表');
         if (asyIsArr(t)) return this.nope(start, '多维数组');
-        if (!SCALARS.has(t)) return this.nope(start, `${t}[] （数组元素这一刀只有 int/real/bool/string）`);
+        if (!ASY_ARRELEM.has(t)) return this.nope(start, `${t}[] （数组元素这一刀只有 int/real/bool/string/pair）`);
         t = `${t}[]`;
       }
       const nm = isAtom(start.items[1]) ? start.items[1].value : null;
@@ -1452,7 +1463,7 @@ class AsyLower {
     const el = asyElem(a.type);
     const av = `asy__d${this.tmp++}`;
     const iv = `asy__i${this.tmp++}`;
-    this.pre.push(`(let ${av} (arr ${el}) ${a.code})`);
+    this.pre.push(`(let ${av} ${asyCore(a.type)} ${a.code})`);
     this.pre.push(`(let ${iv} int ${idx.code})`);
     const grow = `asy__grow_${el}`;
     this.used.add(grow);

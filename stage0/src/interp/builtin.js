@@ -329,9 +329,15 @@ export function arrNew(n, zero) {
   const len = Number(n);
   if (len < 0) rtError('array length cannot be negative: ' + len);
   const out = [];
-  for (let i = 0; i < len; i++) out.push(zero);
+  for (let i = 0; i < len; i++) out.push(arrCopy(zero));
   return out;
 }
+
+/** 向量元素存进数组前要拷一份：向量是值类型，C/LLVM 那两条腿存的是 16 字节副本，
+ *  而 JS 侧一个向量就是一个 JS 数组，直接存进去是别名。能当元素的类型里只有向量
+ *  在 JS 侧是数组（int 是 BigInt、real 是 number、bool 是布尔、string 是字符串），
+ *  所以 `Array.isArray` 这一问不会误伤。名字带 arr 前缀：模块级名字全仓唯一。 */
+export function arrCopy(v) { return Array.isArray(v) ? v.slice() : v; }
 
 export function arrGet(a, i) {
   const n = Number(i);
@@ -346,11 +352,11 @@ export function arrSet(a, i, v) {
   if (n < 0 || n >= a.length) {
     rtError('array index out of range: ' + n + ' (length ' + a.length + ')');
   }
-  a[n] = v;
+  a[n] = arrCopy(v);
   return v;
 }
 
-export function arrPush(a, v) { a.push(v); return v; }
+export function arrPush(a, v) { a.push(arrCopy(v)); return v; }
 
 export function arrPop(a) {
   if (a.length === 0) rtError('pop from empty array');

@@ -22,6 +22,10 @@
       (set i (bin "+" (var i) (int 1)))))
     (ret (var s)))
 
+  ;; 聚合元素的数组穿过函数（第八刀）：句柄同样是指针，就地 push
+  (fn addpair ((p (arr (vec real 2))) (x real)) void
+    (apush (var p) (vlit (vec real 2) (var x) (bin "*" (var x) (real 2.0)))))
+
   (main
     ;; 新数组：长度对得上，每个元素是零值
     (let a (arr int) (anew (arr int) (int 3)))
@@ -74,4 +78,27 @@
     (let z (arr int) (anew (arr int) (int 0)))
     (print (alen (var z)))
     (apush (var z) (int 5))
-    (print (aget (var z) (int 0)))))
+    (print (aget (var z) (int 0)))
+
+    ;; **聚合元素**（第八刀：asy 的 pair[]）。元素是 (vec real 2)，走的是另一条实现：
+    ;; 运行时那份按字节的 blob（长度/增长/越界消息与上面四份是同一套话），元素的读写
+    ;; 由 C 与 LLVM 各自 load/store。这一段要钉的就是"另一条实现给出同样的答案"。
+    (let p (arr (vec real 2)) (anew (arr (vec real 2)) (int 2)))
+    (print (alen (var p)))
+    (print (lane (aget (var p) (int 0)) 0))
+    (aset (var p) (int 0) (vlit (vec real 2) (real 1.5) (real 2.5)))
+    (print (lane (aget (var p) (int 0)) 0))
+    (print (lane (aget (var p) (int 0)) 1))
+    ;; 隔壁那格没被写：anew 填的零值是**每格一份**，不是共享的同一个
+    (print (lane (aget (var p) (int 1)) 1))
+    (apush (var p) (vlit (vec real 2) (real 3.0) (un "-" (real 4.0))))
+    (print (alen (var p)))
+    (print (lane (aget (var p) (int 2)) 1))
+    ;; 逐道算术照旧：取出来的是一个正常的向量值
+    (print (lane (bin "+" (aget (var p) (int 0)) (aget (var p) (int 2))) 0))
+    (print (lane (apop (var p)) 0))
+    (print (alen (var p)))
+    ;; 穿过函数：句柄是指针，就地 push 在调用方也看得见
+    (expr (call addpair (var p) (real 7.5)))
+    (print (alen (var p)))
+    (print (lane (aget (var p) (int 2)) 1))))

@@ -69,3 +69,54 @@ OMNI_ARR_IMPL(i64, int64_t)
 OMNI_ARR_IMPL(f64, double)
 OMNI_ARR_IMPL(b8, bool)
 OMNI_ARR_IMPL(str, omni_str)
+
+/* 聚合元素（第一个用户是 asy 的 `pair[]`，元素是 (vec real 2)）走这一份**按字节**的实现。
+ *
+ * 为什么不再多几行 X 宏：向量的 C 结构体是**逐形状生成在那份 .c 里**的
+ * （`omni_vec_real_2` 之类，见 backend-c 的 vecLines），而这个文件是**预编译**的运行时 ——
+ * 顺序反了，宏在这里展开不出那个类型。反过来"让 C 后端逐形状生成一份数组实现"也不行：
+ * run-llvm 那条腿发的是 call，它只能调运行时里的符号，两条腿就会各有一份增长逻辑 ——
+ * 那正是这个文件开头说的"必然分叉的地方"。
+ *
+ * 所以这一份只管字节：长度/容量/增长/越界消息都在这里（与上面四份逐字同一套话），
+ * 元素的**读写**留给两条腿各自去做 —— 那是一条 load / 一条 store，与它们发局部变量
+ * 读写用的是同一份代码，不存在"数组里的向量和局部变量里的向量不一样"的可能。
+ * `_at`/`_push`/`_pop` 回的是**格子的地址**，值从不经过这里。 */
+struct omni_arr_blob_s { int64_t len; int64_t cap; int64_t esz; char *items; };
+
+static void omni_arr_blob_reserve(omni_arr_blob a, int64_t n) {
+  if (n <= a->cap) return;
+  int64_t c = a->cap ? a->cap * 2 : 4;
+  while (c < n) c *= 2;
+  a->items = (char *)omni_grow(a->items, (size_t)(a->esz * a->cap), (size_t)(a->esz * c));
+  a->cap = c;
+}
+
+omni_arr_blob omni_arr_blob_new(int64_t n, int64_t esz, const void *zero) {
+  if (n < 0) omni_errorf("array length cannot be negative: %lld", (long long)n);
+  omni_arr_blob a = (omni_arr_blob)omni_alloc(sizeof(struct omni_arr_blob_s));
+  a->len = n;
+  a->cap = n;
+  a->esz = esz;
+  a->items = n > 0 ? (char *)omni_alloc((size_t)(esz * n)) : NULL;
+  for (int64_t i = 0; i < n; i++) memcpy(a->items + esz * i, zero, (size_t)esz);
+  return a;
+}
+
+int64_t omni_arr_blob_len(omni_arr_blob a) { return a->len; }
+
+void *omni_arr_blob_at(omni_arr_blob a, int64_t i) {
+  if (i < 0 || i >= a->len)
+    omni_errorf("array index out of range: %lld (length %lld)", (long long)i, (long long)a->len);
+  return a->items + a->esz * i;
+}
+
+void *omni_arr_blob_push(omni_arr_blob a) {
+  omni_arr_blob_reserve(a, a->len + 1);
+  return a->items + a->esz * a->len++;
+}
+
+void *omni_arr_blob_pop(omni_arr_blob a) {
+  if (a->len == 0) omni_error("pop from empty array");
+  return a->items + a->esz * --a->len;
+}

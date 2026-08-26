@@ -13,7 +13,7 @@
 // 只有"按值嵌套"的 struct 需要拓扑排序。
 
 import { RUNTIME_INCLUDE, amalgamate } from '../runtime/c_runtime.js';
-import { cTypeName, listType, typeKey } from '../hir/types.js';
+import { cTypeName, listType, typeKey, cArrOps, arrIsBlob } from '../hir/types.js';
 import { JS_ABI, JS_ALL, JS_MEMBERS, JS_TAG_C } from '../hir/js_abi.js';
 import { C_ABI, C_TYPE, C_IN, C_OUT } from '../hir/c_abi.js';
 import { utf8Bytes } from '../host/utf8.js';
@@ -51,6 +51,9 @@ class CEmitter {
     // 用到的缓冲形状（门槛 7 第一阶段）。和向量共用那个回填位：两者都是"按 (元素) 生成
     // 一小段定义"，分两个位置只会多一处要对齐的顺序。
     this.bufs = new Map();
+    // 用到的**聚合元素**数组形状（门槛 2 第八刀：asy 的 pair[]）。标量元素不进这里 ——
+    // 那四份在运行时里已经单态好了，这张表只管"要在这份 .c 里包一层"的那些。
+    this.arrs = new Map();
   }
 
   line(s = '') {
@@ -83,7 +86,38 @@ class CEmitter {
     if (t !== undefined && t !== null && t.k === 'buf' && !this.bufs.has(typeKey(t))) {
       this.bufs.set(typeKey(t), t);
     }
+    // 聚合元素的数组：形状要记，**元素也要记** —— 元素的那个 struct 只在数组里出现过
+    // 的话（只有 anew/apush，没有一处裸的向量表达式），vecLines 就不会发它的定义。
+    if (t !== undefined && t !== null && t.k === 'arr' && arrIsBlob(t.elem)) {
+      if (!this.arrs.has(typeKey(t))) this.arrs.set(typeKey(t), t);
+      this.noteVec(t.elem);
+    }
     return t;
+  }
+
+  /**
+   * 聚合元素的数组：句柄类型是运行时那个 `omni_arr_blob`（长度/容量/增长/越界消息都在
+   * omni_arr.c 里，与标量那四份逐字同一套话），这里逐形状包一层，把"格子的地址"变成
+   * 一次按元素类型的读或写。
+   *
+   * 为什么读写留在这一层而不是也塞进运行时：那个结构体（`omni_vec_real_2`）是逐形状
+   * 生成在这份 .c 里的，预编译的运行时看不见它。反过来"整份数组实现都逐形状生成"也不行 ——
+   * run-llvm 那条腿只能 call 运行时里的符号，增长逻辑就会有两份。
+   */
+  arrLines() {
+    if (this.arrs.size === 0) return [];
+    const out = ['/* 聚合元素的数组（ADR-0014 门槛 2 第八刀）：按字节的 blob 实现 + 逐形状的读写 */'];
+    for (const t of this.arrs.values()) {
+      const n = cArrOps(t);
+      const el = cTypeName(t.elem);
+      out.push(`static inline omni_arr_blob ${n}_new(int64_t n, ${el} zero) { return omni_arr_blob_new(n, (int64_t)sizeof(${el}), &zero); }`);
+      out.push(`static inline int64_t ${n}_len(omni_arr_blob a) { return omni_arr_blob_len(a); }`);
+      out.push(`static inline ${el} ${n}_get(omni_arr_blob a, int64_t i) { return *(${el} *)omni_arr_blob_at(a, i); }`);
+      out.push(`static inline ${el} ${n}_set(omni_arr_blob a, int64_t i, ${el} v) { *(${el} *)omni_arr_blob_at(a, i) = v; return v; }`);
+      out.push(`static inline ${el} ${n}_push(omni_arr_blob a, ${el} v) { *(${el} *)omni_arr_blob_push(a) = v; return v; }`);
+      out.push(`static inline ${el} ${n}_pop(omni_arr_blob a) { return *(${el} *)omni_arr_blob_pop(a); }`);
+    }
+    return out;
   }
 
   /**
@@ -238,7 +272,9 @@ class CEmitter {
     // 退出码走 omni_host_exit_code —— process.exitCode 是个可写的槽，不是返回值。
     this.line(`int main(int argc, char **argv) { omni_host_init(argc, argv); ${this.mod.entry}(); omni_js_check_uncaught(); fflush(stdout); return omni_host_exit_code(); }`);
     this.out[this.s16At] = this.s16PoolLines().join('\n');
-    this.out[this.vecAt] = this.vecLines().concat(this.bufLines()).join('\n');
+    // 三段各自 concat 一次：封闭 ABI 里 `concat` 的 arity 是 2（js_abi.js），
+    // 写成 `concat(a, b)` 两个实参在自举出来的编译器上不是同一件事
+    this.out[this.vecAt] = this.vecLines().concat(this.bufLines()).concat(this.arrLines()).join('\n');
     return this.out.join('\n') + '\n';
   }
 
@@ -801,21 +837,22 @@ class CEmitter {
       case 'BufSet':
         this.noteVec(e.buf.type);
         return `${cTypeName(e.buf.type)}_set(${this.expr(e.buf)}, ${this.expr(e.index)}, ${this.expr(e.value)})`;
-      // 数组六条（门槛 2 第四刀）。这里不生成任何结构体或助手 —— 实现在运行时的
-      // omni_arr.c 里已经按元素单态好了，`cTypeName` 给出的就是那四个 typedef 之一，
-      // 函数名就是它加后缀。run-llvm 那条腿调的是同一个符号，所以两边不可能分叉。
+      // 数组六条（门槛 2 第四刀）。标量元素这里不生成任何东西 —— 实现在运行时的
+      // omni_arr.c 里已经按元素单态好了，`cArrOps` 给出的就是那四组符号名之一。
+      // 聚合元素（第八刀的 pair[]）多一层 arrLines 发的 static inline，句柄仍是
+      // 运行时那一个 blob 头。run-llvm 那条腿调的是同一个符号，所以两边不可能分叉。
       case 'ArrNew':
-        return `${cTypeName(e.type)}_new(${this.expr(e.count)}, ${this.expr(e.zero)})`;
+        return `${cArrOps(this.noteVec(e.type))}_new(${this.expr(e.count)}, ${this.expr(e.zero)})`;
       case 'ArrLen':
-        return `${cTypeName(e.arr.type)}_len(${this.expr(e.arr)})`;
+        return `${cArrOps(this.noteVec(e.arr.type))}_len(${this.expr(e.arr)})`;
       case 'ArrGet':
-        return `${cTypeName(e.arr.type)}_get(${this.expr(e.arr)}, ${this.expr(e.index)})`;
+        return `${cArrOps(this.noteVec(e.arr.type))}_get(${this.expr(e.arr)}, ${this.expr(e.index)})`;
       case 'ArrSet':
-        return `${cTypeName(e.arr.type)}_set(${this.expr(e.arr)}, ${this.expr(e.index)}, ${this.expr(e.value)})`;
+        return `${cArrOps(this.noteVec(e.arr.type))}_set(${this.expr(e.arr)}, ${this.expr(e.index)}, ${this.expr(e.value)})`;
       case 'ArrPush':
-        return `${cTypeName(e.arr.type)}_push(${this.expr(e.arr)}, ${this.expr(e.value)})`;
+        return `${cArrOps(this.noteVec(e.arr.type))}_push(${this.expr(e.arr)}, ${this.expr(e.value)})`;
       case 'ArrPop':
-        return `${cTypeName(e.arr.type)}_pop(${this.expr(e.arr)})`;
+        return `${cArrOps(this.noteVec(e.arr.type))}_pop(${this.expr(e.arr)})`;
       case 'Field': {
         const obj = this.expr(e.object);
         // class 是引用，可能为 null：显式检查，避免"段错误 vs 异常"的跨后端分叉

@@ -182,14 +182,32 @@ export function cTypeName(t) {
     // 缓冲在 C 侧是 `{长度, 指针}` 按值传（16 字节）。长度跟着值走，不放在别处：
     // 六个执行器里 blen 都要 O(1) 拿到它，而"长度存在调用方"意味着每条腿各自记一份。
     case 'buf': return `omni_${typeKey(t)}`;
-    // 数组在 C 侧就是运行时那四个 typedef 之一（`omni_arr_i64` 等）：一个指针。
-    // 不按 typeKey 拼名字，因为实现不是逐形状生成的，是运行时里已经单态好的四份。
-    case 'arr': return `omni_arr_${arrSuffix(t.elem)}`;
+    // 数组在 C 侧就是运行时那几个 typedef 之一（`omni_arr_i64` 等）：一个指针。
+    // 不按 typeKey 拼名字，因为实现不是逐形状生成的，是运行时里已经单态好的四份 ——
+    // 聚合元素（向量）没法单态在运行时里（那个结构体是逐形状生成在 .c 里的），
+    // 走按字节的 `omni_arr_blob`，元素的 load/store 由两条腿自己发。
+    case 'arr': return arrIsBlob(t.elem) ? 'omni_arr_blob' : `omni_arr_${arrSuffix(t.elem)}`;
     default: throw new Error(`cTypeName: ${t.k}`);
   }
 }
 
-/** 数组的元素后缀：运行时符号名（omni_arr_i64_get 之类）和 LLVM 那条腿共用这一份 */
+/** 元素是聚合（现在只有向量）时数组走按字节那一份，see omni_arr.c 尾部 */
+export function arrIsBlob(elem) {
+  return elem.k === 'vec';
+}
+
+/**
+ * 数组六条操作在 C 侧的名字前缀。标量元素直接就是运行时里那四份单态
+ * （`omni_arr_i64_get` 之类）；聚合元素的**句柄类型**是同一个 `omni_arr_blob`，
+ * 但六条操作要按形状各有一份（读写元素的类型不同），所以名字按 typeKey 生成，
+ * 由 backend-c 逐形状发一组 static inline 包在 blob 那五个符号外面。
+ */
+export function cArrOps(t) {
+  return arrIsBlob(t.elem) ? `omni_${typeKey(t)}` : `omni_arr_${arrSuffix(t.elem)}`;
+}
+
+/** 数组的元素后缀：运行时符号名（omni_arr_i64_get 之类）和 LLVM 那条腿共用这一份。
+ *  聚合元素没有后缀（走 blob），调用方要先问 arrIsBlob。 */
 export function arrSuffix(elem) {
   switch (elem.k) {
     case 'int': return 'i64';

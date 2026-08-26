@@ -64,11 +64,17 @@ function $bset(a, i, v) {
 // 越界与空 pop 的消息照 C 那份（omni_arr.c）逐字抄，那边只有一份实现，这边只有一份字符串。
 // 零值是**参数**传进来的，不在这里按类型猜：int 是 0n、real 是 0、string 是 ""，
 // 那是各前端的事，运行时不掺和（C 那条腿的签名也是这样）。
+//
+// 元素是**向量**（asy 的 pair[]，第八刀）时要拷一份再存：向量是值类型，C 与 LLVM 两条腿
+// 存进数组的是 16 字节的**副本**，JS 这边一个向量是一个 JS 数组，直接存进去就成了别名。
+// 判据是 Array.isArray：能当数组元素的类型里只有向量在 JS 侧是数组（int 是 BigInt、
+// real 是 number、bool 是布尔、string 是字符串），所以这一问不会误伤。
+function $acopy(v) { return Array.isArray(v) ? v.slice() : v; }
 function $anew(n, zero) {
   const len = Number(n);
   if (len < 0) $rt_error("array length cannot be negative: " + len);
   const o = [];
-  for (let i = 0; i < len; i++) o.push(zero);
+  for (let i = 0; i < len; i++) o.push($acopy(zero));
   return o;
 }
 function $aget(a, i) {
@@ -79,10 +85,10 @@ function $aget(a, i) {
 function $aset(a, i, v) {
   const n = Number(i);
   if (n < 0 || n >= a.length) $rt_error("array index out of range: " + n + " (length " + a.length + ")");
-  a[n] = v;
+  a[n] = $acopy(v);
   return v;
 }
-function $apush(a, v) { a.push(v); return v; }
+function $apush(a, v) { a.push($acopy(v)); return v; }
 function $apop(a) {
   if (a.length === 0) $rt_error("pop from empty array");
   return a.pop();

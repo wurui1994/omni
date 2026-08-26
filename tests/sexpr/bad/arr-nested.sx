@@ -1,0 +1,8 @@
+;; 数组套数组还不收。理由不是"少写几行"：MIR 那一层元素类型只有**一个 8 位类型码**，
+;; `(arr (arr int))` 与 `(arr (arr string))` 在那里是同一个码 —— 类型身份丢了。
+;; 收进来的正确做法是给 MIR 加一处能带聚合身份的地方，那是另一刀的事。
+;; 向量元素能收，是因为道数就在那个类型码的高位上（`(arr (vec real 2))` 有用例）。
+(module
+  (main
+    (let a (arr (arr int)) (anew (arr (arr int)) (int 1)))
+    (print (alen (var a)))))

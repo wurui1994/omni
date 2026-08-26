@@ -1,0 +1,1 @@
+(arr 元素) 的元素只能是 int / real / bool / string / (vec T N)

@@ -164,6 +164,17 @@ OMNI_ARR_DECL(f64, double)
 OMNI_ARR_DECL(b8, bool)
 OMNI_ARR_DECL(str, omni_str)
 
+/* 聚合元素（asy 的 `pair[]`，元素是逐形状生成的向量结构体）走这一份按字节的实现：
+   头里多一个 esz，`_at`/`_push`/`_pop` 回**格子的地址**，值的读写由两条腿各自 load/store。
+   理由（生成的结构体在运行时里不可见、而两条腿必须共用同一份增长逻辑）见 omni_arr.c。 */
+typedef struct omni_arr_blob_s *omni_arr_blob;
+
+omni_arr_blob omni_arr_blob_new(int64_t n, int64_t esz, const void *zero);
+int64_t omni_arr_blob_len(omni_arr_blob a);
+void *omni_arr_blob_at(omni_arr_blob a, int64_t i);
+void *omni_arr_blob_push(omni_arr_blob a);
+void *omni_arr_blob_pop(omni_arr_blob a);
+
 void omni_print_int(int64_t v);
 void omni_print_real(double v);
 void omni_print_bool(bool v);

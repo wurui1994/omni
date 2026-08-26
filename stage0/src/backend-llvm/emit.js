@@ -134,6 +134,8 @@ class LlvmEmitter {
     // 用到的数组元素类型。这一组不生成任何函数体，只 declare 运行时里已有的符号 ——
     // 数组的实现在 omni_arr.c，run-c 那条腿调的是同一个符号。
     this.arrElems = new Map();
+    // 聚合元素的数组用到了没有：那一组符号与元素类型无关（按字节），一份 declare 就够
+    this.needArrBlob = false;
   }
 
   line(s) { this.out.push(s); }
@@ -281,6 +283,13 @@ class LlvmEmitter {
       this.line(`declare ${e.r} @omni_arr_${s}_push(ptr, ${e.p})`);
       this.line(`declare ${e.r} @omni_arr_${s}_pop(ptr)`);
     }
+    if (this.needArrBlob) {
+      this.line('declare ptr @omni_arr_blob_new(i64, i64, ptr)');
+      this.line('declare i64 @omni_arr_blob_len(ptr)');
+      this.line('declare ptr @omni_arr_blob_at(ptr, i64)');
+      this.line('declare ptr @omni_arr_blob_push(ptr)');
+      this.line('declare ptr @omni_arr_blob_pop(ptr)');
+    }
     // 字符串字面量的字节。放在最后是因为它们是函数体发到一半才登记的；
     // 顺序按登记顺序，所以同一份输入两次发出来逐字节相同（快照轴要这个）。
     for (const e of this.strs.values()) {
@@ -328,6 +337,19 @@ class LlvmEmitter {
       const t = this.ty(f.params[p].t, 'param');
       this.line(`  store ${t} %a${p}, ptr %s${p}`);
       p++;
+    }
+    // 聚合元素的 `anew` 要把零值的**地址**交给运行时（blob 那份实现按字节拷）。
+    // 承载它的 alloca 一律发在入口块、每种元素类型一个：发在 anew 那一行的话，
+    // 循环里的 anew 每转一圈就多一块栈 —— alloca 不出循环，栈就一直长。
+    this.blobZero = new Map();
+    let z = 0;
+    while (z < f.count()) {
+      if (f.op[z] === OP.ANEW && typeLanes(f.aux[z]) > 1 && !this.blobZero.has(f.aux[z])) {
+        const name = `%zb${this.blobZero.size}`;
+        this.blobZero.set(f.aux[z], name);
+        this.line(`  ${name} = alloca ${this.ty(f.aux[z], 'anew 的零值')}`);
+      }
+      z++;
     }
     let i = 0;
     while (i < f.count()) { this.insn(f, i); i++; }
@@ -584,6 +606,7 @@ class LlvmEmitter {
   arrInsn(f, i, op, dst, t) {
     // ANEW 的元素类型在 aux 上（结果类型是数组本身）；其余的元素类型就是 `t`
     const el = op === OP.ANEW ? f.aux[i] : t;
+    if (typeLanes(el) > 1) { this.arrBlobInsn(f, i, op, dst, el); return; }
     const e = this.noteArrElem(el);
     const s = e.suffix;
     const a = this.val(f.a[i]);
@@ -610,6 +633,57 @@ class LlvmEmitter {
     const args = f.argsOf(f.b[i]);
     this.line(`  ${dst} = call ${e.r} @omni_arr_${s}_set(ptr ${a}, i64 ${this.val(args[0])}, `
       + `${e.p} ${this.val(args[1])})`);
+  }
+
+  /**
+   * 聚合元素（现在只有向量：asy 的 `pair[]`）的数组。运行时那一份按字节的 blob 实现
+   * 管长度/容量/增长/越界消息，`_at`/`_push`/`_pop` 回的是**格子的地址** ——
+   * 元素的读写在这里发一条 load / 一条 store，与这条腿发局部变量读写用的是同一份类型
+   * 映射（`this.ty`）。C 那条腿是同一个符号加一层 static inline，两边不可能分叉。
+   *
+   * 元素大小按道数算：向量的元素只有 int/real 两种，两者都是 8 字节
+   * （`(vec T N)` 的检查在 sexpr 那一层，这里到不了别的）。
+   */
+  arrBlobInsn(f, i, op, dst, el) {
+    this.needArrBlob = true;
+    const ety = this.ty(el, '数组的元素');
+    const esz = typeLanes(el) * 8;
+    const a = this.val(f.a[i]);
+    if (op === OP.ANEW) {
+      const zp = this.blobZero.get(el);
+      this.line(`  store ${ety} ${this.val(f.b[i])}, ptr ${zp}`);
+      this.line(`  ${dst} = call ptr @omni_arr_blob_new(i64 ${a}, i64 ${esz}, ptr ${zp})`);
+      return;
+    }
+    if (op === OP.ALEN) {
+      this.line(`  ${dst} = call i64 @omni_arr_blob_len(ptr ${a})`);
+      return;
+    }
+    if (op === OP.AGET) {
+      const p = this.fresh();
+      this.line(`  ${p} = call ptr @omni_arr_blob_at(ptr ${a}, i64 ${this.val(f.b[i])})`);
+      this.line(`  ${dst} = load ${ety}, ptr ${p}`);
+      return;
+    }
+    if (op === OP.APUSH) {
+      const p = this.fresh();
+      const v = this.val(f.b[i]);
+      this.line(`  ${p} = call ptr @omni_arr_blob_push(ptr ${a})`);
+      this.line(`  store ${ety} ${v}, ptr ${p}`);
+      this.line(`  ${dst} = load ${ety}, ptr ${p}`);
+      return;
+    }
+    if (op === OP.APOP) {
+      const p = this.fresh();
+      this.line(`  ${p} = call ptr @omni_arr_blob_pop(ptr ${a})`);
+      this.line(`  ${dst} = load ${ety}, ptr ${p}`);
+      return;
+    }
+    const args = f.argsOf(f.b[i]);
+    const p = this.fresh();
+    this.line(`  ${p} = call ptr @omni_arr_blob_at(ptr ${a}, i64 ${this.val(args[0])})`);
+    this.line(`  store ${ety} ${this.val(args[1])}, ptr ${p}`);
+    this.line(`  ${dst} = load ${ety}, ptr ${p}`);
   }
 
   /** 记下用到的数组元素类型。表外的报错（阶段边界）——  方言只许四种标量。 */
