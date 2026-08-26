@@ -25,13 +25,14 @@
 // **一维数组**：`T[] a`、`new T[n]`、`{…}` 与 `new T[] {…}`、`a[i]` 读写（写会扩长）、
 // `a.length`、`a.push(v)`、`a.pop()`、数组当形参/返回值（引用语义，核心方言的 `(arr T)`）、
 // **切片** `a[i:j]`/`a[i:]`/`a[:j]`/`a[:]`（是复制不是视图）、`write` 一整个数组
-// （每行「下标 : TAB 值」，多个数组并排）、
+// （每行「下标 : TAB 值」，多个数组并排）、**for-each**（`for (T x : a)`，循环变量是复制，
+// 迭代是活的）、
 // **pair**：`(x,y)` 字面量、`+ - * /`（后两个是复数乘除）、一元 `-`、`== !=`、
 // `z.x`/`z.y`/`xpart`/`ypart`、`abs`/`length`/`conj`、int/real 到 pair 的隐式转换、
 // `(pair)` 强制转换、`write`（`(x,y)` 两个分量各 %.15g）、pair 当形参/返回值/`?:` 的两支。
 //
 // 不支持（见到就报错，报错里说清是哪一条）：triple、struct、import/access、
-// typedef、算符重载、重载解析、默认实参、命名实参、for-each、给切片赋值（`a[0:2] = b`）、
+// typedef、算符重载、重载解析、默认实参、命名实参、给切片赋值（`a[0:2] = b`）、
 // 多维数组、`pair[]`（核心方言的 `(arr T)` 只收标量元素）、复数幂、
 // 超越函数（exp/log/trig —— 量过 libm 与 V8 在 atan/tan/log/cos 的最后一位就分叉，
 // 收进来六条腿必然有一天对不上；`angle`/`dir`/`expi` 因此也在门外）、
@@ -1055,7 +1056,7 @@ class AsyLower {
     }
     if (h === 'do') return this.doWhile(n, ret);
     if (h === 'for') return this.forStmt(n, ret);
-    if (h === 'for-each') return this.nope(n, 'for-each（要数组）');
+    if (h === 'for-each') return this.forEach(n, ret);
     if (h === 'break') return ['(brk)'];
     if (h === 'continue') {
       // C 式 for 降成 while 之后，continue 要**先跑更新**再跳（量过 asy 的行为）
@@ -1090,6 +1091,40 @@ class AsyLower {
       if (s === '(cont)' || s.includes(' (cont)')) return this.nope(n, 'do-while 里的 continue');
     }
     return [`(while (bool true) (do ${b.join(' ')} (if (un "!" ${c.code}) (do (brk)))))`];
+  }
+
+  /**
+   * `for (T x : a) S` -> 绑一次数组**句柄**，按下标走。
+   *
+   * 量过的两条：循环变量是**复制**（体里 `x = 99` 不动数组），而且迭代是**活的** ——
+   * 体里 push 进去的元素会被走到（`int[] a={1,2}; int n=0; for(int x:a){++n; if(n<5) a.push(9);}`
+   * 走了 6 轮，末了 a.length 是 6）。所以这里绑句柄、每轮重读 `(alen …)`，
+   * 而不是先拷一份快照 —— 快照会让那个程序只走 2 轮。
+   */
+  forEach(n, ret) {
+    const el = this.type(n.items[1], 'for-each 的元素类型');
+    if (el === null) return null;
+    const nm = isAtom(n.items[2]) ? n.items[2].value : null;
+    if (nm === null) return this.err(n, 'for-each 少了循环变量名');
+    const a = this.expr(n.items[3]);
+    if (a === null) return null;
+    if (!asyIsArr(a.type)) return this.err(n, `for-each 要一个数组，这里是 ${a.type}`);
+    if (asyElem(a.type) !== el) return this.err(n, `for-each 的元素写的是 ${el}，数组是 ${a.type}`);
+    const av = `asy__f${this.tmp++}`;
+    const iv = `asy__fi${this.tmp++}`;
+    const upd = [`(set ${iv} (bin "+" (var ${iv}) (int 1)))`];
+    this.push();
+    if (this.declare(n, nm, el) === null) { this.pop(); return null; }
+    this.updates.push(upd);
+    const body = this.stmt(n.items[4], ret);
+    this.updates.pop();
+    this.pop();
+    if (body === null) return null;
+    const inner = [`(let ${nm} ${asyCore(el)} (aget (var ${av}) (var ${iv})))`];
+    for (const s of body) inner.push(s);
+    for (const s of upd) inner.push(s);
+    const head3 = `(let ${av} ${asyCore(a.type)} ${a.code}) (let ${iv} int (int 0))`;
+    return [`(do ${head3} (while (bin "<" (var ${iv}) (alen (var ${av}))) (do ${inner.join(' ')})))`];
   }
 
   /** `for (init; test; upd) body` -> `init; while (test) { body; upd }`（continue 见上） */
