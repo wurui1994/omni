@@ -1,0 +1,238 @@
+;; mir module  entry=omni_main
+;; 6 funcs, 30 consts, 1 types, 0 globals, 8 ops
+type T0  struct Point  (x y)
+const k0     i64    2
+const k1     i64    1
+const k2     i64    20
+const k3     i64    3
+const k4     f64    2.5
+const k5     f64    1.0
+const k6     i64    7
+const k7     i64    10
+const k8     i64    4
+const k9     i64    100
+const k10    str    "he"
+const k11    str    "llo"
+const k12    str    " world"
+const k13    str    "hello"
+const k14    str    "hellp"
+const k15    i64    42
+const k16    str    "/"
+const k17    bool   true
+const k18    i64    0
+const k19    i64    5
+const k20    f64    7.0
+const k21    f64    2.0
+const k22    f64    3.9
+const k23    bool   false
+const k24    str    "yes"
+const k25    str    "no"
+const k26    f64    3.0
+const k27    f64    1e+100
+const k28    f64    0.000012345
+const k29    i64    2147483647
+op o0    print.int
+op o1    print.real
+op o2    print.string
+op o3    print.bool
+op o4    to_string.int
+op o5    to_string.real
+op o6    to_string.bool
+op o7    trunc.real
+
+func u_fib(n:i64) -> i64   1 slots, 14 insns
+  %0     LOAD     i64     slot0:n
+  %1     LT       i64     %0 k0
+  %2     IF       void    %1
+  %3       LOAD     i64     slot0:n
+  %4       RET      void    %3
+  %5     END      void
+  %6     LOAD     i64     slot0:n
+  %7     SUB      i64     %6 k1
+  %8     CALL     i64     u_fib (%7)
+  %9     LOAD     i64     slot0:n
+  %10    SUB      i64     %9 k0
+  %11    CALL     i64     u_fib (%10)
+  %12    ADD      i64     %8 %11
+  %13    RET      void    %12
+
+func u_add(a:i64 b:i64) -> i64   2 slots, 4 insns
+  %0     LOAD     i64     slot0:a
+  %1     LOAD     i64     slot1:b
+  %2     ADD      i64     %0 %1
+  %3     RET      void    %2
+
+func u_add__2(a:f64 b:f64) -> f64   2 slots, 4 insns
+  %0     LOAD     f64     slot0:a
+  %1     LOAD     f64     slot1:b
+  %2     ADD      f64     %0 %1
+  %3     RET      void    %2
+
+func u_scale(x:i64 k:i64) -> i64   2 slots, 4 insns
+  %0     LOAD     i64     slot0:x
+  %1     LOAD     i64     slot1:k
+  %2     MUL      i64     %0 %1
+  %3     RET      void    %2
+
+func u_sum(p:agg) -> i64   1 slots, 9 insns
+  %0     LOAD     agg     slot0:p
+  %1     COPY     agg     %0 struct:Point
+  %2     STORE    void    %1 slot0:p
+  %3     LOAD     agg     slot0:p
+  %4     FLD      i64     %3 Point.x
+  %5     LOAD     agg     slot0:p
+  %6     FLD      i64     %5 Point.y
+  %7     ADD      i64     %4 %6
+  %8     RET      void    %7
+
+func omni_main() -> void   8 slots, 150 insns
+  %0     CALL     i64     u_fib (k2)
+  %1     CALLOP   void    print.int (%0)
+  %2     CALL     i64     u_add (k0 k3)
+  %3     CALLOP   void    print.int (%2)
+  %4     CALL     f64     u_add__2 (k4 k5)
+  %5     CALLOP   void    print.real (%4)
+  %6     CVT      f64     k1 i2f
+  %7     CALL     f64     u_add__2 (%6 k4)
+  %8     CALLOP   void    print.real (%7)
+  %9     CALL     i64     u_scale (k6 k7)
+  %10    CALLOP   void    print.int (%9)
+  %11    CALL     i64     u_scale (k6 k3)
+  %12    CALLOP   void    print.int (%11)
+  %13    CALL     i64     u_scale (k6 k3)
+  %14    CALLOP   void    print.int (%13)
+  %15    NEW      agg     struct:Point
+  %16    STORE    void    %15 slot0:p
+  %17    LOAD     agg     slot0:p
+  %18    FLDSET   void    %17 k3 Point.x
+  %19    LOAD     agg     slot0:p
+  %20    FLDSET   void    %19 k8 Point.y
+  %21    LOAD     agg     slot0:p
+  %22    COPY     agg     %21 struct:Point
+  %23    CALL     i64     u_sum (%22)
+  %24    CALLOP   void    print.int (%23)
+  %25    LOAD     agg     slot0:p
+  %26    COPY     agg     %25 struct:Point
+  %27    CALL     i64     u_sum (%26)
+  %28    CALLOP   void    print.int (%27)
+  %29    LOAD     agg     slot0:p
+  %30    COPY     agg     %29 struct:Point
+  %31    STORE    void    %30 slot1:q
+  %32    LOAD     agg     slot1:q
+  %33    FLDSET   void    %32 k9 Point.x
+  %34    LOAD     agg     slot0:p
+  %35    FLD      i64     %34 Point.x
+  %36    CALLOP   void    print.int (%35)
+  %37    LOAD     agg     slot1:q
+  %38    FLD      i64     %37 Point.x
+  %39    CALLOP   void    print.int (%38)
+  %40    ADD      str     k10 k11
+  %41    STORE    void    %40 slot2:s
+  %42    LOAD     str     slot2:s
+  %43    ADD      str     %42 k12
+  %44    CALLOP   void    print.string (%43)
+  %45    LOAD     str     slot2:s
+  %46    EQ       str     %45 k13
+  %47    CALLOP   void    print.bool (%46)
+  %48    LOAD     str     slot2:s
+  %49    LT       str     %48 k14
+  %50    CALLOP   void    print.bool (%49)
+  %51    CALLOP   str     to_string.int (k15)
+  %52    ADD      str     %51 k16
+  %53    CALLOP   str     to_string.real (k4)
+  %54    ADD      str     %52 %53
+  %55    ADD      str     %54 k16
+  %56    CALLOP   str     to_string.bool (k17)
+  %57    ADD      str     %55 %56
+  %58    CALLOP   void    print.string (%57)
+  %59    STORE    void    k18 slot3:i
+  %60    STORE    void    k18 slot4:acc
+  %61    BLOCK    void
+  %62      LOOP     void
+  %63        LOAD     i64     slot3:i
+  %64        LT       i64     %63 k7
+  %65        NOT      bool    %64
+  %66        BRIF     void    %65 ^1
+  %67        LOAD     i64     slot4:acc
+  %68        LOAD     i64     slot3:i
+  %69        ADD      i64     %67 %68
+  %70        STORE    void    %69 slot4:acc
+  %71        LOAD     i64     slot3:i
+  %72        ADD      i64     %71 k1
+  %73        STORE    void    %72 slot3:i
+  %74        BR       void    ^0
+  %75      END      void
+  %76    END      void
+  %77    LOAD     i64     slot4:acc
+  %78    CALLOP   void    print.int (%77)
+  %79    BLOCK    void
+  %80      STORE    void    k18 slot5:j
+  %81      LOOP     void
+  %82        LOAD     i64     slot5:j
+  %83        LT       i64     %82 k19
+  %84        NOT      bool    %83
+  %85        BRIF     void    %84 ^1
+  %86        BLOCK    void
+  %87          LOAD     i64     slot5:j
+  %88          EQ       i64     %87 k0
+  %89          IF       void    %88
+  %90            BR       void    ^1
+  %91          END      void
+  %92          LOAD     i64     slot5:j
+  %93          EQ       i64     %92 k8
+  %94          IF       void    %93
+  %95            BR       void    ^3
+  %96          END      void
+  %97          LOAD     i64     slot5:j
+  %98          CALLOP   void    print.int (%97)
+  %99        END      void
+  %100       LOAD     i64     slot5:j
+  %101       ADD      i64     %100 k1
+  %102       STORE    void    %101 slot5:j
+  %103       BR       void    ^0
+  %104     END      void
+  %105   END      void
+  %106   DIV      i64     k6 k0
+  %107   CALLOP   void    print.int (%106)
+  %108   NEG      i64     k6
+  %109   DIV      i64     %108 k0
+  %110   CALLOP   void    print.int (%109)
+  %111   MOD      i64     k6 k3
+  %112   CALLOP   void    print.int (%111)
+  %113   NEG      i64     k6
+  %114   MOD      i64     %113 k3
+  %115   CALLOP   void    print.int (%114)
+  %116   DIV      f64     k20 k21
+  %117   CALLOP   void    print.real (%116)
+  %118   SHL      i64     k1 k7
+  %119   CALLOP   void    print.int (%118)
+  %120   CALLOP   i64     trunc.real (k22)
+  %121   CALLOP   void    print.int (%120)
+  %122   NEG      f64     k22
+  %123   CALLOP   i64     trunc.real (%122)
+  %124   CALLOP   void    print.int (%123)
+  %125   CVT      f64     k3 i2f
+  %126   DIV      f64     %125 k21
+  %127   CALLOP   void    print.real (%126)
+  %128   STORE    void    k17 slot6:$logic6
+  %129   IF       void    k17
+  %130     STORE    void    k23 slot6:$logic6
+  %131   END      void
+  %132   LOAD     bool    slot6:$logic6
+  %133   CALLOP   void    print.bool (%132)
+  %134   NOT      bool    k23
+  %135   CALLOP   void    print.bool (%134)
+  %136   GT       i64     k3 k0
+  %137   IF       void    %136
+  %138     STORE    void    k24 slot7:$sel7
+  %139   ELSE     void
+  %140     STORE    void    k25 slot7:$sel7
+  %141   END      void
+  %142   LOAD     str     slot7:$sel7
+  %143   CALLOP   void    print.string (%142)
+  %144   DIV      f64     k5 k26
+  %145   CALLOP   void    print.real (%144)
+  %146   CALLOP   void    print.real (k27)
+  %147   CALLOP   void    print.real (k28)
+  %148   MUL      i64     k29 k29
+  %149   CALLOP   void    print.int (%148)

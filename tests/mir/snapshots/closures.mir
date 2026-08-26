@@ -1,0 +1,388 @@
+;; mir module  entry=omni_main
+;; 20 funcs, 23 consts, 6 types, 0 globals, 6 ops
+type T0  list list_int
+type T1  list list_fn_int__int
+type T2  dict dict_string_fn_int__int
+type T3  struct P  (x y)
+type T4  class Counter  (n)
+type T5  class Holder  (op)
+const k0     i64    2
+const k1     i64    0
+const k2     i64    1
+const k3     i64    41
+const k4     i64    10
+const k5     i64    21
+const k6     i64    8
+const k7     i64    100
+const k8     i64    5
+const k9     i64    200
+const k10    i64    20
+const k11    i64    3
+const k12    i64    6
+const k13    i64    7
+const k14    str    "inc"
+const k15    str    "twice"
+const k16    i64    50
+const k17    i64    9
+const k18    agg    null
+const k19    str    "n="
+const k20    str    "changed"
+const k21    i64    4
+const k22    i64    99
+closure omni_mk_0 -> omni_clo_0  captures: n
+closure omni_mk_1 -> omni_clo_1  captures: this
+closure omni_mk_2 -> omni_clo_2  captures: 
+closure omni_mk_3 -> omni_clo_3  captures: 
+closure omni_mk_4 -> omni_clo_4  captures: base
+closure omni_mk_5 -> omni_clo_5  captures: i
+closure omni_mk_6 -> omni_clo_6  captures: a
+closure omni_mk_7 -> omni_clo_7  captures: 
+closure omni_mk_8 -> omni_clo_8  captures: seen
+closure omni_mk_9 -> omni_clo_9  captures: prefix
+closure omni_mk_10 -> omni_clo_10  captures: 
+closure omni_mk_11 -> omni_clo_11  captures: p
+closure omni_mk_12 -> omni_clo_12  captures: 
+op o0    len.list
+op o1    print.int
+op o2    push.list
+op o3    print.bool
+op o4    print.string
+op o5    to_string.int
+
+func u_twice(x:i64) -> i64   1 slots, 3 insns
+  %0     LOAD     i64     slot0:x
+  %1     MUL      i64     %0 k0
+  %2     RET      void    %1
+
+func u_applyTo(f:agg v:i64) -> i64   2 slots, 4 insns
+  %0     LOAD     agg     slot0:f
+  %1     LOAD     i64     slot1:v
+  %2     CALLFN   i64     %0 (%1)
+  %3     RET      void    %2
+
+func u_adder(n:i64) -> agg   1 slots, 3 insns
+  %0     LOAD     i64     slot0:n
+  %1     CLOSURE  agg     omni_mk_0 (%0)
+  %2     RET      void    %1
+
+func u_sumWith(xs:agg f:agg) -> i64   6 slots, 29 insns
+  %0     STORE    void    k1 slot2:acc
+  %1     LOAD     agg     slot0:xs
+  %2     STORE    void    %1 slot4:$seq4
+  %3     STORE    void    k1 slot3:$i3
+  %4     BLOCK    void
+  %5       LOOP     void
+  %6         LOAD     agg     slot4:$seq4
+  %7         LOAD     i64     slot3:$i3
+  %8         CALLOP   i64     len.list (%6)
+  %9         GE       bool    %7 %8
+  %10        BRIF     void    %9 ^1
+  %11        IDXGET   i64     %6 %7 list:list_int
+  %12        STORE    void    %11 slot5:x
+  %13        BLOCK    void
+  %14          LOAD     i64     slot2:acc
+  %15          LOAD     agg     slot1:f
+  %16          LOAD     i64     slot5:x
+  %17          CALLFN   i64     %15 (%16)
+  %18          ADD      i64     %14 %17
+  %19          STORE    void    %18 slot2:acc
+  %20        END      void
+  %21        LOAD     i64     slot3:$i3
+  %22        ADD      i64     %21 k2
+  %23        STORE    void    %22 slot3:$i3
+  %24        BR       void    ^0
+  %25      END      void
+  %26    END      void
+  %27    LOAD     i64     slot2:acc
+  %28    RET      void    %27
+
+func u_Counter_bump(this:agg) -> agg   1 slots, 3 insns
+  %0     LOAD     agg     slot0:this
+  %1     CLOSURE  agg     omni_mk_1 (%0)
+  %2     RET      void    %1
+
+func u_Counter_callIt(this:agg d:i64) -> i64   3 slots, 7 insns
+  %0     LOAD     agg     slot0:this
+  %1     CALL     agg     u_Counter_bump (%0)
+  %2     STORE    void    %1 slot2:g
+  %3     LOAD     agg     slot2:g
+  %4     LOAD     i64     slot1:d
+  %5     CALLFN   i64     %3 (%4)
+  %6     RET      void    %5
+
+func omni_main() -> void   22 slots, 198 insns
+  %0     CLOSURE  agg     omni_mk_2 ()
+  %1     STORE    void    %0 slot0:inc
+  %2     LOAD     agg     slot0:inc
+  %3     CALLFN   i64     %2 (k3)
+  %4     CALLOP   void    print.int (%3)
+  %5     LOAD     agg     slot0:inc
+  %6     CALL     i64     u_applyTo (%5 k4)
+  %7     CALLOP   void    print.int (%6)
+  %8     CLOSURE  agg     omni_mk_3 ()
+  %9     STORE    void    %8 slot1:t
+  %10    LOAD     agg     slot1:t
+  %11    CALLFN   i64     %10 (k5)
+  %12    CALLOP   void    print.int (%11)
+  %13    CLOSURE  agg     omni_mk_3 ()
+  %14    CALL     i64     u_applyTo (%13 k6)
+  %15    CALLOP   void    print.int (%14)
+  %16    STORE    void    k7 slot2:base
+  %17    LOAD     i64     slot2:base
+  %18    CLOSURE  agg     omni_mk_4 (%17)
+  %19    STORE    void    %18 slot3:addBase
+  %20    LOAD     agg     slot3:addBase
+  %21    CALLFN   i64     %20 (k8)
+  %22    CALLOP   void    print.int (%21)
+  %23    STORE    void    k9 slot2:base
+  %24    LOAD     agg     slot3:addBase
+  %25    CALLFN   i64     %24 (k8)
+  %26    CALLOP   void    print.int (%25)
+  %27    CALL     agg     u_adder (k4)
+  %28    STORE    void    %27 slot4:add10
+  %29    CALL     agg     u_adder (k10)
+  %30    STORE    void    %29 slot5:add20
+  %31    LOAD     agg     slot4:add10
+  %32    CALLFN   i64     %31 (k2)
+  %33    CALLOP   void    print.int (%32)
+  %34    LOAD     agg     slot5:add20
+  %35    CALLFN   i64     %34 (k2)
+  %36    CALLOP   void    print.int (%35)
+  %37    AGGLIT   agg     () list:list_fn_int__int
+  %38    STORE    void    %37 slot6:fs
+  %39    STORE    void    k1 slot7:i
+  %40    BLOCK    void
+  %41      LOOP     void
+  %42        LOAD     i64     slot7:i
+  %43        LT       i64     %42 k11
+  %44        NOT      bool    %43
+  %45        BRIF     void    %44 ^1
+  %46        LOAD     agg     slot6:fs
+  %47        LOAD     i64     slot7:i
+  %48        CLOSURE  agg     omni_mk_5 (%47)
+  %49        CALLOP   void    push.list (%46 %48)
+  %50        LOAD     i64     slot7:i
+  %51        ADD      i64     %50 k2
+  %52        STORE    void    %51 slot7:i
+  %53        BR       void    ^0
+  %54      END      void
+  %55    END      void
+  %56    LOAD     agg     slot6:fs
+  %57    CALLOP   i64     len.list (%56)
+  %58    CALLOP   void    print.int (%57)
+  %59    LOAD     agg     slot6:fs
+  %60    IDXGET   agg     %59 k1 list:list_fn_int__int
+  %61    CALLFN   i64     %60 (k1)
+  %62    CALLOP   void    print.int (%61)
+  %63    LOAD     agg     slot6:fs
+  %64    IDXGET   agg     %63 k2 list:list_fn_int__int
+  %65    CALLFN   i64     %64 (k1)
+  %66    CALLOP   void    print.int (%65)
+  %67    LOAD     agg     slot6:fs
+  %68    IDXGET   agg     %67 k0 list:list_fn_int__int
+  %69    CALLFN   i64     %68 (k1)
+  %70    CALLOP   void    print.int (%69)
+  %71    CLOSURE  agg     omni_mk_7 ()
+  %72    STORE    void    %71 slot8:mul
+  %73    LOAD     agg     slot8:mul
+  %74    CALLFN   agg     %73 (k12)
+  %75    CALLFN   i64     %74 (k13)
+  %76    CALLOP   void    print.int (%75)
+  %77    AGGLIT   agg     () list:list_int
+  %78    STORE    void    %77 slot9:seen
+  %79    LOAD     agg     slot9:seen
+  %80    CLOSURE  agg     omni_mk_8 (%79)
+  %81    STORE    void    %80 slot10:record
+  %82    LOAD     agg     slot10:record
+  %83    CALLFN   void    %82 (k2)
+  %84    LOAD     agg     slot10:record
+  %85    CALLFN   void    %84 (k0)
+  %86    LOAD     agg     slot9:seen
+  %87    CALLOP   i64     len.list (%86)
+  %88    CALLOP   void    print.int (%87)
+  %89    LOAD     agg     slot9:seen
+  %90    IDXGET   i64     %89 k1 list:list_int
+  %91    CALLOP   void    print.int (%90)
+  %92    LOAD     agg     slot9:seen
+  %93    IDXGET   i64     %92 k2 list:list_int
+  %94    CALLOP   void    print.int (%93)
+  %95    AGGLIT   agg     () dict:dict_string_fn_int__int
+  %96    STORE    void    %95 slot11:ops
+  %97    LOAD     agg     slot11:ops
+  %98    LOAD     agg     slot0:inc
+  %99    IDXSET   agg     %97 (k14 %98) dict:dict_string_fn_int__int
+  %100   LOAD     agg     slot11:ops
+  %101   CLOSURE  agg     omni_mk_3 ()
+  %102   IDXSET   agg     %100 (k15 %101) dict:dict_string_fn_int__int
+  %103   LOAD     agg     slot11:ops
+  %104   IDXGET   agg     %103 k15 dict:dict_string_fn_int__int
+  %105   STORE    void    %104 slot12:op
+  %106   LOAD     agg     slot12:op
+  %107   CALLFN   i64     %106 (k16)
+  %108   CALLOP   void    print.int (%107)
+  %109   LOAD     agg     slot11:ops
+  %110   IDXGET   agg     %109 k14 dict:dict_string_fn_int__int
+  %111   CALLFN   i64     %110 (k17)
+  %112   CALLOP   void    print.int (%111)
+  %113   STORE    void    k18 slot13:nothing
+  %114   LOAD     agg     slot13:nothing
+  %115   EQ       agg     %114 k18
+  %116   CALLOP   void    print.bool (%115)
+  %117   LOAD     agg     slot0:inc
+  %118   EQ       agg     %117 k18
+  %119   CALLOP   void    print.bool (%118)
+  %120   LOAD     agg     slot0:inc
+  %121   STORE    void    %120 slot14:alias
+  %122   LOAD     agg     slot14:alias
+  %123   LOAD     agg     slot0:inc
+  %124   EQ       agg     %122 %123
+  %125   CALLOP   void    print.bool (%124)
+  %126   STORE    void    k19 slot15:prefix
+  %127   LOAD     str     slot15:prefix
+  %128   CLOSURE  agg     omni_mk_9 (%127)
+  %129   STORE    void    %128 slot16:label
+  %130   LOAD     agg     slot16:label
+  %131   CALLFN   str     %130 (k13)
+  %132   CALLOP   void    print.string (%131)
+  %133   STORE    void    k20 slot15:prefix
+  %134   LOAD     agg     slot16:label
+  %135   CALLFN   str     %134 (k13)
+  %136   CALLOP   void    print.string (%135)
+  %137   AGGLIT   agg     (k2 k0 k11) list:list_int
+  %138   CLOSURE  agg     omni_mk_3 ()
+  %139   CALL     i64     u_sumWith (%137 %138)
+  %140   CALLOP   void    print.int (%139)
+  %141   AGGLIT   agg     (k2 k0 k11) list:list_int
+  %142   CLOSURE  agg     omni_mk_10 ()
+  %143   CALL     i64     u_sumWith (%141 %142)
+  %144   CALLOP   void    print.int (%143)
+  %145   AGGLIT   agg     (k2 k0 k11) list:list_int
+  %146   CALL     agg     u_adder (k4)
+  %147   CALL     i64     u_sumWith (%145 %146)
+  %148   CALLOP   void    print.int (%147)
+  %149   NEW      agg     struct:P
+  %150   STORE    void    %149 slot17:p
+  %151   LOAD     agg     slot17:p
+  %152   FLDSET   void    %151 k11 P.x
+  %153   LOAD     agg     slot17:p
+  %154   FLDSET   void    %153 k21 P.y
+  %155   LOAD     agg     slot17:p
+  %156   COPY     agg     %155 struct:P
+  %157   CLOSURE  agg     omni_mk_11 (%156)
+  %158   STORE    void    %157 slot18:area
+  %159   LOAD     agg     slot18:area
+  %160   CALLFN   i64     %159 ()
+  %161   CALLOP   void    print.int (%160)
+  %162   LOAD     agg     slot17:p
+  %163   FLDSET   void    %162 k7 P.x
+  %164   LOAD     agg     slot18:area
+  %165   CALLFN   i64     %164 ()
+  %166   CALLOP   void    print.int (%165)
+  %167   NEW      agg     class:Counter
+  %168   STORE    void    %167 slot19:c
+  %169   LOAD     agg     slot19:c
+  %170   FLDSET   void    %169 k4 Counter.n
+  %171   LOAD     agg     slot19:c
+  %172   CALL     agg     u_Counter_bump (%171)
+  %173   STORE    void    %172 slot20:bumped
+  %174   LOAD     agg     slot20:bumped
+  %175   CALLFN   i64     %174 (k8)
+  %176   CALLOP   void    print.int (%175)
+  %177   LOAD     agg     slot19:c
+  %178   FLDSET   void    %177 k22 Counter.n
+  %179   LOAD     agg     slot20:bumped
+  %180   CALLFN   i64     %179 (k8)
+  %181   CALLOP   void    print.int (%180)
+  %182   LOAD     agg     slot19:c
+  %183   CALL     i64     u_Counter_callIt (%182 k2)
+  %184   CALLOP   void    print.int (%183)
+  %185   NEW      agg     class:Holder
+  %186   STORE    void    %185 slot21:h
+  %187   LOAD     agg     slot21:h
+  %188   FLD      agg     %187 Holder.op
+  %189   EQ       agg     %188 k18
+  %190   CALLOP   void    print.bool (%189)
+  %191   CLOSURE  agg     omni_mk_12 ()
+  %192   LOAD     agg     slot21:h
+  %193   FLDSET   void    %192 %191 Holder.op
+  %194   LOAD     agg     slot21:h
+  %195   FLD      agg     %194 Holder.op
+  %196   CALLFN   i64     %195 (k13)
+  %197   CALLOP   void    print.int (%196)
+
+func omni_clo_0(x:i64) -> i64 [closure]   1 slots, 4 insns
+  %0     LOAD     i64     slot0:x
+  %1     CAPTURE  i64     0
+  %2     ADD      i64     %0 %1
+  %3     RET      void    %2
+
+func omni_clo_1(d:i64) -> i64 [closure]   1 slots, 5 insns
+  %0     CAPTURE  agg     0
+  %1     FLD      i64     %0 Counter.n
+  %2     LOAD     i64     slot0:d
+  %3     ADD      i64     %1 %2
+  %4     RET      void    %3
+
+func omni_clo_2(x:i64) -> i64 [closure]   1 slots, 3 insns
+  %0     LOAD     i64     slot0:x
+  %1     ADD      i64     %0 k2
+  %2     RET      void    %1
+
+func omni_clo_3(a0:i64) -> i64 [closure]   1 slots, 3 insns
+  %0     LOAD     i64     slot0:a0
+  %1     CALL     i64     u_twice (%0)
+  %2     RET      void    %1
+
+func omni_clo_4(x:i64) -> i64 [closure]   1 slots, 4 insns
+  %0     LOAD     i64     slot0:x
+  %1     CAPTURE  i64     0
+  %2     ADD      i64     %0 %1
+  %3     RET      void    %2
+
+func omni_clo_5(x:i64) -> i64 [closure]   1 slots, 4 insns
+  %0     LOAD     i64     slot0:x
+  %1     CAPTURE  i64     0
+  %2     ADD      i64     %0 %1
+  %3     RET      void    %2
+
+func omni_clo_6(b:i64) -> i64 [closure]   1 slots, 4 insns
+  %0     CAPTURE  i64     0
+  %1     LOAD     i64     slot0:b
+  %2     MUL      i64     %0 %1
+  %3     RET      void    %2
+
+func omni_clo_7(a:i64) -> agg [closure]   1 slots, 3 insns
+  %0     LOAD     i64     slot0:a
+  %1     CLOSURE  agg     omni_mk_6 (%0)
+  %2     RET      void    %1
+
+func omni_clo_8(x:i64) -> void [closure]   1 slots, 3 insns
+  %0     CAPTURE  agg     0
+  %1     LOAD     i64     slot0:x
+  %2     CALLOP   void    push.list (%0 %1)
+
+func omni_clo_9(x:i64) -> str [closure]   1 slots, 5 insns
+  %0     CAPTURE  str     0
+  %1     LOAD     i64     slot0:x
+  %2     CALLOP   str     to_string.int (%1)
+  %3     ADD      str     %0 %2
+  %4     RET      void    %3
+
+func omni_clo_10(x:i64) -> i64 [closure]   1 slots, 4 insns
+  %0     LOAD     i64     slot0:x
+  %1     LOAD     i64     slot0:x
+  %2     MUL      i64     %0 %1
+  %3     RET      void    %2
+
+func omni_clo_11() -> i64 [closure]   0 slots, 6 insns
+  %0     CAPTURE  agg     0
+  %1     FLD      i64     %0 P.x
+  %2     CAPTURE  agg     0
+  %3     FLD      i64     %2 P.y
+  %4     MUL      i64     %1 %3
+  %5     RET      void    %4
+
+func omni_clo_12(v:i64) -> i64 [closure]   1 slots, 3 insns
+  %0     LOAD     i64     slot0:v
+  %1     MUL      i64     %0 k11
+  %2     RET      void    %1

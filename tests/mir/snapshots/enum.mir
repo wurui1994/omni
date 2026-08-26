@@ -1,0 +1,279 @@
+;; mir module  entry=omni_main
+;; 4 funcs, 20 consts, 5 types, 0 globals, 5 ops
+type T0  enum Shape  (Circle.r Rect.w Rect.h)
+type T1  enum Color  ()
+type T2  enum Node  (Leaf.p Leaf.c Group.ids)
+type T3  struct Point  (x y)
+type T4  list list_int
+const k0     i64    0
+const k1     f64    3.0
+const k2     i64    1
+const k3     i64    2
+const k4     f64    0.0
+const k5     f64    1.0
+const k6     str    "red"
+const k7     str    "other"
+const k8     str    "?"
+const k9     str    "nil"
+const k10    f64    2.0
+const k11    f64    4.0
+const k12    f64    1.5
+const k13    f64    2.5
+const k14    i64    3
+const k15    f64    99.0
+const k16    bool   true
+const k17    str    "unreachable"
+const k18    i64    7
+const k19    i64    8
+op o0    print.real
+op o1    print.string
+op o2    len.list
+op o3    print.int
+op o4    push.list
+
+func u_area(s:agg) -> f64   5 slots, 44 insns
+  %0     LOAD     agg     slot0:s
+  %1     COPY     agg     %0 enum:Shape
+  %2     STORE    void    %1 slot0:s
+  %3     LOAD     agg     slot0:s
+  %4     COPY     agg     %3 enum:Shape
+  %5     STORE    void    %4 slot1:0match
+  %6     LOAD     agg     slot1:0match
+  %7     ETAG     i64     %6 enum:Shape
+  %8     EQ       i64     %7 k0
+  %9     IF       void    %8
+  %10      LOAD     agg     slot1:0match
+  %11      FLD      f64     %10 Shape.r
+  %12      STORE    void    %11 slot2:r
+  %13      LOAD     f64     slot2:r
+  %14      MUL      f64     k1 %13
+  %15      LOAD     f64     slot2:r
+  %16      MUL      f64     %14 %15
+  %17      RET      void    %16
+  %18    ELSE     void
+  %19      LOAD     agg     slot1:0match
+  %20      ETAG     i64     %19 enum:Shape
+  %21      EQ       i64     %20 k2
+  %22      IF       void    %21
+  %23        LOAD     agg     slot1:0match
+  %24        FLD      f64     %23 Shape.w
+  %25        STORE    void    %24 slot3:w
+  %26        LOAD     agg     slot1:0match
+  %27        FLD      f64     %26 Shape.h
+  %28        STORE    void    %27 slot4:h
+  %29        LOAD     f64     slot3:w
+  %30        LOAD     f64     slot4:h
+  %31        MUL      f64     %29 %30
+  %32        RET      void    %31
+  %33      ELSE     void
+  %34        LOAD     agg     slot1:0match
+  %35        ETAG     i64     %34 enum:Shape
+  %36        EQ       i64     %35 k3
+  %37        IF       void    %36
+  %38          RET      void    k4
+  %39        END      void
+  %40      END      void
+  %41    END      void
+  %42    NEG      f64     k5
+  %43    RET      void    %42
+
+func u_name(c:agg) -> str   2 slots, 15 insns
+  %0     LOAD     agg     slot0:c
+  %1     COPY     agg     %0 enum:Color
+  %2     STORE    void    %1 slot0:c
+  %3     LOAD     agg     slot0:c
+  %4     COPY     agg     %3 enum:Color
+  %5     STORE    void    %4 slot1:1match
+  %6     LOAD     agg     slot1:1match
+  %7     ETAG     i64     %6 enum:Color
+  %8     EQ       i64     %7 k0
+  %9     IF       void    %8
+  %10      RET      void    k6
+  %11    ELSE     void
+  %12      RET      void    k7
+  %13    END      void
+  %14    RET      void    k8
+
+func u_describe(n:agg) -> i64   9 slots, 75 insns
+  %0     LOAD     agg     slot0:n
+  %1     COPY     agg     %0 enum:Node
+  %2     STORE    void    %1 slot0:n
+  %3     LOAD     agg     slot0:n
+  %4     COPY     agg     %3 enum:Node
+  %5     STORE    void    %4 slot1:2match
+  %6     LOAD     agg     slot1:2match
+  %7     ETAG     i64     %6 enum:Node
+  %8     EQ       i64     %7 k0
+  %9     IF       void    %8
+  %10      LOAD     agg     slot1:2match
+  %11      FLD      agg     %10 Node.p
+  %12      COPY     agg     %11 struct:Point
+  %13      STORE    void    %12 slot2:pt
+  %14      LOAD     agg     slot1:2match
+  %15      FLD      agg     %14 Node.c
+  %16      COPY     agg     %15 enum:Color
+  %17      STORE    void    %16 slot3:col
+  %18      LOAD     agg     slot2:pt
+  %19      FLD      f64     %18 Point.x
+  %20      LOAD     agg     slot2:pt
+  %21      FLD      f64     %20 Point.y
+  %22      ADD      f64     %19 %21
+  %23      CALLOP   void    print.real (%22)
+  %24      LOAD     agg     slot3:col
+  %25      COPY     agg     %24 enum:Color
+  %26      CALL     str     u_name (%25)
+  %27      CALLOP   void    print.string (%26)
+  %28      RET      void    k2
+  %29    ELSE     void
+  %30      LOAD     agg     slot1:2match
+  %31      ETAG     i64     %30 enum:Node
+  %32      EQ       i64     %31 k2
+  %33      IF       void    %32
+  %34        LOAD     agg     slot1:2match
+  %35        FLD      agg     %34 Node.ids
+  %36        STORE    void    %35 slot4:xs
+  %37        STORE    void    k0 slot5:sum
+  %38        LOAD     agg     slot4:xs
+  %39        STORE    void    %38 slot7:$seq7
+  %40        STORE    void    k0 slot6:$i6
+  %41        BLOCK    void
+  %42          LOOP     void
+  %43            LOAD     agg     slot7:$seq7
+  %44            LOAD     i64     slot6:$i6
+  %45            CALLOP   i64     len.list (%43)
+  %46            GE       bool    %44 %45
+  %47            BRIF     void    %46 ^1
+  %48            IDXGET   i64     %43 %44 list:list_int
+  %49            STORE    void    %48 slot8:v
+  %50            BLOCK    void
+  %51              LOAD     i64     slot5:sum
+  %52              LOAD     i64     slot8:v
+  %53              ADD      i64     %51 %52
+  %54              STORE    void    %53 slot5:sum
+  %55            END      void
+  %56            LOAD     i64     slot6:$i6
+  %57            ADD      i64     %56 k2
+  %58            STORE    void    %57 slot6:$i6
+  %59            BR       void    ^0
+  %60          END      void
+  %61        END      void
+  %62        LOAD     i64     slot5:sum
+  %63        CALLOP   void    print.int (%62)
+  %64        RET      void    k3
+  %65      ELSE     void
+  %66        LOAD     agg     slot1:2match
+  %67        ETAG     i64     %66 enum:Node
+  %68        EQ       i64     %67 k3
+  %69        IF       void    %68
+  %70          CALLOP   void    print.string (k9)
+  %71        END      void
+  %72      END      void
+  %73    END      void
+  %74    RET      void    k0
+
+func omni_main() -> void   10 slots, 105 insns
+  %0     MKENUM   agg     enum:Shape (k10) enum:Shape
+  %1     CALL     f64     u_area (%0)
+  %2     CALLOP   void    print.real (%1)
+  %3     MKENUM   agg     enum:Color (k1 k11) enum:Shape
+  %4     CALL     f64     u_area (%3)
+  %5     CALLOP   void    print.real (%4)
+  %6     MKENUM   agg     enum:Node () enum:Shape
+  %7     CALL     f64     u_area (%6)
+  %8     CALLOP   void    print.real (%7)
+  %9     MKENUM   agg     enum:Shape () enum:Color
+  %10    CALL     str     u_name (%9)
+  %11    CALLOP   void    print.string (%10)
+  %12    MKENUM   agg     enum:Color () enum:Color
+  %13    CALL     str     u_name (%12)
+  %14    CALLOP   void    print.string (%13)
+  %15    MKENUM   agg     enum:Node () enum:Color
+  %16    CALL     str     u_name (%15)
+  %17    CALLOP   void    print.string (%16)
+  %18    NEW      agg     struct:Point
+  %19    STORE    void    %18 slot0:p
+  %20    LOAD     agg     slot0:p
+  %21    FLDSET   void    %20 k12 Point.x
+  %22    LOAD     agg     slot0:p
+  %23    FLDSET   void    %22 k13 Point.y
+  %24    LOAD     agg     slot0:p
+  %25    COPY     agg     %24 struct:Point
+  %26    MKENUM   agg     enum:Shape () enum:Color
+  %27    MKENUM   agg     enum:Shape (%25 %26) enum:Node
+  %28    CALL     i64     u_describe (%27)
+  %29    CALLOP   void    print.int (%28)
+  %30    AGGLIT   agg     (k2 k3 k14) list:list_int
+  %31    MKENUM   agg     enum:Color (%30) enum:Node
+  %32    CALL     i64     u_describe (%31)
+  %33    CALLOP   void    print.int (%32)
+  %34    MKENUM   agg     enum:Node () enum:Node
+  %35    CALL     i64     u_describe (%34)
+  %36    CALLOP   void    print.int (%35)
+  %37    LOAD     agg     slot0:p
+  %38    COPY     agg     %37 struct:Point
+  %39    MKENUM   agg     enum:Node () enum:Color
+  %40    MKENUM   agg     enum:Shape (%38 %39) enum:Node
+  %41    STORE    void    %40 slot1:n
+  %42    LOAD     agg     slot0:p
+  %43    FLDSET   void    %42 k15 Point.x
+  %44    LOAD     agg     slot1:n
+  %45    COPY     agg     %44 enum:Node
+  %46    STORE    void    %45 slot2:3match
+  %47    LOAD     agg     slot2:3match
+  %48    ETAG     i64     %47 enum:Node
+  %49    EQ       i64     %48 k0
+  %50    IF       void    %49
+  %51      LOAD     agg     slot2:3match
+  %52      FLD      agg     %51 Node.p
+  %53      COPY     agg     %52 struct:Point
+  %54      STORE    void    %53 slot3:q
+  %55      LOAD     agg     slot2:3match
+  %56      FLD      agg     %55 Node.c
+  %57      COPY     agg     %56 enum:Color
+  %58      STORE    void    %57 slot4:c
+  %59      LOAD     agg     slot3:q
+  %60      FLD      f64     %59 Point.x
+  %61      CALLOP   void    print.real (%60)
+  %62    ELSE     void
+  %63      CALLOP   void    print.string (k8)
+  %64    END      void
+  %65    NEW      agg     enum:Shape
+  %66    STORE    void    %65 slot5:z
+  %67    LOAD     agg     slot5:z
+  %68    COPY     agg     %67 enum:Shape
+  %69    CALL     f64     u_area (%68)
+  %70    CALLOP   void    print.real (%69)
+  %71    STORE    void    k0 slot6:i
+  %72    BLOCK    void
+  %73      LOOP     void
+  %74        NOT      bool    k16
+  %75        BRIF     void    %74 ^1
+  %76        MKENUM   agg     enum:Node () enum:Shape
+  %77        STORE    void    %76 slot7:4match
+  %78        LOAD     agg     slot7:4match
+  %79        ETAG     i64     %78 enum:Shape
+  %80        EQ       i64     %79 k3
+  %81        IF       void    %80
+  %82          BR       void    ^2
+  %83        ELSE     void
+  %84          CALLOP   void    print.string (k17)
+  %85        END      void
+  %86        LOAD     i64     slot6:i
+  %87        ADD      i64     %86 k2
+  %88        STORE    void    %87 slot6:i
+  %89        BR       void    ^0
+  %90      END      void
+  %91    END      void
+  %92    LOAD     i64     slot6:i
+  %93    CALLOP   void    print.int (%92)
+  %94    AGGLIT   agg     (k18) list:list_int
+  %95    STORE    void    %94 slot8:shared
+  %96    LOAD     agg     slot8:shared
+  %97    MKENUM   agg     enum:Color (%96) enum:Node
+  %98    STORE    void    %97 slot9:g
+  %99    LOAD     agg     slot8:shared
+  %100   CALLOP   void    push.list (%99 k19)
+  %101   LOAD     agg     slot9:g
+  %102   COPY     agg     %101 enum:Node
+  %103   CALL     i64     u_describe (%102)
+  %104   CALLOP   void    print.int (%103)

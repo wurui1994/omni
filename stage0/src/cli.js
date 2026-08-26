@@ -24,6 +24,10 @@ import { readGrammar } from './glr/grammar.js';
 import { buildTable, dumpTable } from './glr/table.js';
 import { lexText } from './glr/lex.js';
 import { glrParse } from './glr/driver.js';
+import { lowerToMir } from './mir/from_oir.js';
+import { printMir } from './mir/print.js';
+import { verifyMir } from './mir/verify.js';
+import { dumpBytes } from './mir/bytes.js';
 import { Diagnostics, OmniError, SourceFile } from './source/diag.js';
 import { check } from './hir/check.js';
 import { cAbiLibs } from './hir/c_abi.js';
@@ -323,6 +327,23 @@ function main(argv) {
       stdout(JSON.stringify(mod, replacer, 2) + '\n');
       return 0;
     }
+    // MIR（ADR-0014 决策 6）：OIR 之下那一层 —— 线性定长记录、显式类型、结构化控制流。
+    // 印的是文本形式，它的身份是快照比对对象；要持久化或哈希用字节形式（mir/bytes.js）。
+    case 'mir': {
+      const { mod } = compile(path, rest);
+      const mir = lowerToMir(mod);
+      let insns = 0;
+      for (const f of mir.funcs) insns += f.count();
+      vStep(`OIR -> MIR  ${mir.funcs.length} funcs, ${insns} insns, ${mir.consts.items.length} consts`);
+      // 良构检查**默认开着**，不是可选的调试开关：MIR 的下游有四个后端，一条破了
+      // 不变量的指令在四处会各自表现成不同的错答案（理由见 mir/verify.js 文件头）。
+      const errs = verifyMir(mir);
+      if (errs.length > 0) throw new OmniError(`mir is not well-formed:\n  ${errs.join('\n  ')}`);
+      vStep('mir verify  ok');
+      // --bytes：印字节形式的摘要与每个函数的内容哈希（增量编译的缓存键，决策 5）
+      stdout(rest.includes('--bytes') ? dumpBytes(mir) : printMir(mir));
+      return 0;
+    }
     // ---- GLR（ADR-0014 决策 2）。语法是数据，这两条命令读的都是 .grammar 文件。
     // 它们摆在 CLI 上不只是为了调试：自举链要能让**原生编译器自己**跑一遍这条路，
     // 那是唯一能抓住封闭 ABI 违规的门槛（详见 tests/bootstrap/run.js 阶段 8）。
@@ -390,6 +411,9 @@ commands:
   emit-c    print generated C  (--amalgamate: inline the whole runtime into one file)
   ast       print the AST as JSON
   oir       print the OIR as JSON
+  mir       print the MIR (ADR-0014 decision 6): SSA values + slots + structured
+            control flow, one 8-byte record per instruction (--bytes: sizes and
+            per-function content hashes instead of the listing)
   glr-table print the parsing table for a .grammar file (ADR-0014 decision 2)
             (--brief: rules and remaining conflicts only, no per-state dump)
   glr       parse a source file with a .grammar and print the resulting s-expr
