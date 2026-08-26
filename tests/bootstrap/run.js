@@ -240,6 +240,17 @@ if (c1 && !quick) {
     if (uVia.status !== 0) bad('N1 interp utf8', `    exit=${uVia.status}\n${uVia.stderr}`);
     else if (uVia.stdout !== uRef.stdout) bad('N1 interp utf8 == C0', `    C0 ${JSON.stringify(uRef.stdout)}\n    N1 ${JSON.stringify(uVia.stdout)}`);
     else ok(`N1 interp utf8 == C0  ${uRef.stdout.length} bytes`);
+
+    // LLVM 后端也只有这条门槛能证它在封闭 ABI 里成立（它是新代码，而且原生构建里
+    // 走的是另一套 Map/字符串实现）。比的是**发出来的 IR 文本**，不是跑的结果 ——
+    // 文本一样就说明降级的每一步在两代里都一样；跑的结果由 tests/llvm 那条轴管。
+    // 用 02_numeric 而不是 01_basics：第一阶段只降标量，01_basics 里有容器，会被拒。
+    const caseLl = join(root, 'tests', 'cases', '02_numeric.omni');
+    const llRef = spawnSync('node', [cli, 'emit-llvm', caseLl], { encoding: 'utf8' });
+    const llVia = spawnSync(n1, ['emit-llvm', caseLl], { encoding: 'utf8' });
+    if (llVia.status !== 0) bad('N1 emit-llvm cases/02_numeric', `    exit=${llVia.status}\n${llVia.stderr}`);
+    else if (llVia.stdout !== llRef.stdout) bad('N1 emit-llvm == C0', `    C0 ${llRef.stdout.length} bytes != N1 ${llVia.stdout.length} bytes`);
+    else ok(`N1 emit-llvm cases/02_numeric == C0  ${llRef.stdout.length} bytes`);
   }
 
   // 增量：这一条钉的不是"跑得通"，是**缓存键在两代之间相同**。键是 hash16(规范化文本)，

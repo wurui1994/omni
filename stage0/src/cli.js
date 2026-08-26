@@ -33,6 +33,7 @@ import { check } from './hir/check.js';
 import { cAbiLibs } from './hir/c_abi.js';
 import { emitJs, emitJsFunc } from './backend-js/emit.js';
 import { emitC } from './backend-c/emit.js';
+import { emitLlvm } from './backend-llvm/emit.js';
 import { RUNTIME_DIR, runtimeSources } from './runtime/c_runtime.js';
 import { loadProgram, MODE_BY_EXT } from './module/load.js';
 import { startRepl } from './repl.js';
@@ -211,8 +212,7 @@ function buildNative(mod, outPath, workDir) {
  * `run-c` 就是它；原生构建上的 `run` 也是它（那一代没有 JS 引擎）。
  * `--work DIR` 会把可执行文件和生成的 C 都留在 DIR 里，方便事后看。
  */
-/** 解释器（ADR-0013）：不经过任何别的执行器，OIR 直接跑 */
-function runInterp(mod) {
+/** 解释器（ADR-0013）：不经过任何别的执行器，OIR 直接跑 */function runInterp(mod) {
   const code = interpret(mod);
   vStep(`exec interp  OIR ${mod.funcs.length} funcs  exit=${code}`);
   return code;
@@ -234,6 +234,58 @@ function runViaC(mod, argv) {  const wi = argv.indexOf('--work');
   vStep(`exec ${exe}  exit=${code}`);
   return code;
 }
+
+/**
+ * LLVM 路径（ADR-0014 决策 3）。第一阶段是 **AOT via 文本 IR**：MIR -> .ll -> clang。
+ *
+ * 为什么还要外部 clang：ORC JIT 那一步要通过 C-FFI 调 libLLVM-C，而它需要的是同一份
+ * 文本 IR（`LLVMParseIRInContext`）—— 也就是说**发射器不用重写**，先把降级这一半做对。
+ * 「运行期不需要 cc」那条约束因此还没兑现，这是明说的阶段边界，不是忘了。
+ *
+ * tcc 不认 .ll，所以这条路只用 clang（`OMNI_CLANG` 可覆盖）。运行时目标文件仍然复用
+ * runtimeObjects 那份缓存：LLVM 只负责用户代码，运行时永远是 C。
+ */
+function findClang() {
+  const explicit = env('OMNI_CLANG');
+  if (explicit) return explicit;
+  for (const cc of ['clang', '/opt/homebrew/opt/llvm/bin/clang', 'gcc']) {
+    const r = spawn('which', [cc], 'c');
+    if (r[0] === 0 && r[1].trim()) return cc;
+  }
+  throw new OmniError('no clang found for the llvm backend (override with OMNI_CLANG)');
+}
+
+function buildLlvm(mod, outPath, workDir) {
+  const mir = lowerToMir(mod);
+  const errs = verifyMir(mir);
+  if (errs.length > 0) throw new OmniError(`mir is not well-formed:\n  ${errs.join('\n  ')}`);
+  const ir = emitLlvm(mir);
+  const dir = workDir === undefined ? mkdTemp(join(tmpDir(), 'omni-ll-')) : workDir;
+  if (workDir !== undefined) mkdirAll(dir);
+  const llPath = join(dir, `${basename(outPath)}.ll`);
+  writeText(llPath, ir);
+  vStep(`backend llvm  ${ir.length} bytes -> ${llPath}`);
+  const cc = findClang();
+  const args = ['-O2', '-w', '-I', RUNTIME_DIR, llPath, ...runtimeObjects(cc), '-o', outPath, '-lm'];
+  const r = spawn(cc, args, 'o');
+  if (r[0] !== 0) {
+    throw new OmniError(`llvm backend produced IR that ${cc} rejected:\n${r[2]}\n(kept at ${llPath})`);
+  }
+  vStep(`${cc}  ${args.length} args -> ${outPath}  ${fileSize(outPath)} bytes`);
+  return { llPath, cc };
+}
+
+function runViaLlvm(mod, argv) {
+  const wi = argv.indexOf('--work');
+  const dir = wi >= 0 ? argv[wi + 1] : mkdTemp(join(tmpDir(), 'omni-run-ll-'));
+  if (wi >= 0) mkdirAll(dir);
+  const exe = join(dir, 'a.out');
+  buildLlvm(mod, exe, wi >= 0 ? dir : undefined);
+  const code = spawn(exe, [], 'i')[0];
+  vStep(`exec ${exe}  exit=${code}`);
+  return code;
+}
+
 
 function main(argv) {
   const [cmd, ...rest] = argv;
@@ -319,6 +371,28 @@ function main(argv) {
     case 'run-c': {
       const { mod } = compile(path, rest);
       return runViaC(mod, rest);
+    }
+    // LLVM 路径（ADR-0014 决策 3，第一阶段 = AOT via 文本 IR）
+    case 'emit-llvm': {
+      const { mod } = compile(path, rest);
+      const mir = lowerToMir(mod);
+      const errs = verifyMir(mir);
+      if (errs.length > 0) throw new OmniError(`mir is not well-formed:\n  ${errs.join('\n  ')}`);
+      stdout(emitLlvm(mir));
+      return 0;
+    }
+    case 'run-llvm': {
+      const { mod } = compile(path, rest);
+      return runViaLlvm(mod, rest);
+    }
+    case 'build-llvm': {
+      const { mod } = compile(path, rest);
+      const oi = rest.indexOf('-o');
+      const out = oi >= 0 ? rest[oi + 1] : basename(path).replace(/\.(omni|omnis|omnid|js|wat)$/, '');
+      const wi = rest.indexOf('--work');
+      const { cc } = buildLlvm(mod, out, wi >= 0 ? rest[wi + 1] : undefined);
+      stderr(`omni: built ${out} via llvm ir + ${cc}\n`);
+      return 0;
     }
     // 自己的解释器（ADR-0013 阶段 1）：不生成 JS、不生成 C，直接走 OIR。
     // `--mir` 换成 MIR 那条（ADR-0014 决策 7）：闭包编译 + 值窗口帧，分派只付一次。
@@ -434,6 +508,9 @@ commands:
   build     compile to a native executable  (-o NAME; --work DIR keeps the generated C there)
   emit-js   print generated JavaScript
   emit-c    print generated C  (--amalgamate: inline the whole runtime into one file)
+  emit-llvm print generated LLVM IR (ADR-0014 decision 3; scalars only so far)
+  run-llvm  compile through LLVM IR with clang and execute
+  build-llvm  same, but keep the executable  (-o NAME; --work DIR keeps the .ll)
   ast       print the AST as JSON
   oir       print the OIR as JSON
   mir       print the MIR (ADR-0014 decision 6): SSA values + slots + structured
@@ -467,6 +544,7 @@ linked into one program and lowered to OIR. That is how omni compiles itself.
 
 env:
   OMNI_CC   C compiler to use (default: first of tcc, clang, gcc, cc)
+  OMNI_CLANG  compiler for the llvm path (.ll input; default: clang)
 `;
 
 try {
