@@ -42,7 +42,10 @@ class Env {
   lookup(name) {
     let e = this;
     while (e !== undefined) {
-      if (e.vars.has(name)) return e.vars.get(name);
+      // 一次探测就够：值是 undefined 的槽才多探一次（JS 里 undefined 是个正经值，
+      // 所以不能只看 get 的结果）
+      const v = e.vars.get(name);
+      if (v !== undefined || e.vars.has(name)) return v;
       e = e.parent;
     }
     throw new OmniError(`interp: unbound variable '${name}'`);
@@ -117,11 +120,29 @@ class Interp {
     return NEXT;
   }
 
+  /**
+   * 块要不要新开一层作用域：只有**直接**声明了局部量的块才需要。判断结果缓存在节点上。
+   * 嵌套的块与 for 的初始化各自会开自己那一层，所以只看直接子语句就够。
+   * 循环体每轮仍然是新的一层（scope 每次都造），闭包捕获本来是按值拷（ADR-0010），
+   * 所以少开的那些层不影响语义 —— 少的是分配。
+   */
+  scope(b, env) {
+    let s = b.iscoped;
+    if (s === undefined) {
+      s = false;
+      for (const st of b.stmts) {
+        if (st.kind === 'Local') { s = true; break; }
+      }
+      b.iscoped = s;
+    }
+    return s ? new Env(env) : env;
+  }
+
   stmt(s, env, frame) {
     switch (s.kind) {
       case 'Block':
         // transparent 的块不开作用域：降级器用它把多条语句塞进一个位置（if 的分支等）
-        return this.block(s, s.transparent ? env : new Env(env), frame);
+        return this.block(s, s.transparent ? env : this.scope(s, env), frame);
       case 'Local':
         env.declare(s.name, this.rvalue(s.init, s.type, env, frame));
         return NEXT;
@@ -129,13 +150,13 @@ class Interp {
         this.eval(s.expr, env, frame);
         return NEXT;
       case 'If': {
-        if (this.cond(s.cond, env, frame)) return this.block(s.then, new Env(env), frame);
+        if (this.cond(s.cond, env, frame)) return this.block(s.then, this.scope(s.then, env), frame);
         if (s.otherwise) return this.stmt(s.otherwise, env, frame);
         return NEXT;
       }
       case 'While':
         while (this.cond(s.cond, env, frame)) {
-          const sig = this.block(s.body, new Env(env), frame);
+          const sig = this.block(s.body, this.scope(s.body, env), frame);
           if (sig === BREAK) break;
           if (sig === RETURN) return sig;
         }
@@ -145,7 +166,7 @@ class Interp {
         const outer = new Env(env);
         if (s.init) this.stmt(s.init, outer, frame);
         while (s.cond === undefined || s.cond === null || this.cond(s.cond, outer, frame)) {
-          const sig = this.block(s.body, new Env(outer), frame);
+          const sig = this.block(s.body, this.scope(s.body, outer), frame);
           if (sig === BREAK) break;
           if (sig === RETURN) return sig;
           if (s.step) this.eval(s.step, outer, frame);

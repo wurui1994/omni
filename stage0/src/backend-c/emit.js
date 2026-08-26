@@ -35,10 +35,47 @@ class CEmitter {
     this.indent = 0;
     this.tmp = 0;
     this.opts = opts;
+    // JS 字符串字面量池（见 s16Lit）。Map 保证发射顺序稳定 —— 自举要逐字节可复现。
+    this.s16pool = new Map();
+    this.s16At = -1;
   }
 
   line(s = '') {
     this.out.push(s ? '  '.repeat(this.indent) + s : '');
+  }
+
+  /**
+   * JS 的字符串字面量：静态 UTF-16 数据，取用时零成本。
+   *
+   * 以前是 `omni_js_s16(omni_str_new("kind", 4))`，每求值一次就 UTF-8 -> UTF-16 转一遍、
+   * 在 arena 里分配一块（omni_js_s16_lit 更狠，还过一次 omni_str_fmt 也就是 printf）。
+   * 解释器把 OIR 节点当 dict 读，`e.kind` 这种取字段全是字符串字面量，于是这条成了
+   * 原生构建上最热的分配点：量过，原生解释器 90% 的时间在 obj_get/memcmp/of_utf8 上，
+   * 500MB 常驻里绝大部分是这些一次性的键。字面量是编译期已知的，转换也就该在编译期做完。
+   */
+  s16Lit(s) {
+    let id = this.s16pool.get(s);
+    if (id === undefined) {
+      id = `k_s16_${this.s16pool.size}`;
+      this.s16pool.set(s, id);
+    }
+    return id;
+  }
+
+  s16PoolLines() {
+    const out = [];
+    for (const [s, id] of this.s16pool) {
+      const units = [];
+      for (let i = 0; i < s.length; i++) units.push(`0x${s.charCodeAt(i).toString(16)}`);
+      // 空串也得有个合法的数组：C 里 {} 不是有效的初始化式
+      out.push(`static const uint16_t ${id}_u[] = { ${units.length > 0 ? units.join(', ') : '0'} };`);
+      out.push(`static const omni_s16 ${id} = { ${id}_u, ${s.length} };`);
+      // UTF-8 的孪生体：对象的键在字典里就是 UTF-8，取属性走 ${id}_s 直接免掉一次转换和分配
+      const bytes = utf8Bytes(s);
+      out.push(`static const char ${id}_b[] = ${cString(bytes)};`);
+      out.push(`static const omni_str ${id}_s = { ${id}_b, ${bytes.length} };`);
+    }
+    return out;
   }
 
   emit() {
@@ -53,6 +90,9 @@ class CEmitter {
     this.line();
     for (const t of containers) this.line(`OMNI_REF_DECL(${cTypeName(t)})`);
     for (const c of classes) this.line(`OMNI_REF_DECL(c_${c.name})`);
+    this.line();
+    // 字符串字面量池的落点：只需要 omni.h 里的 omni_s16，所以放在最前面（内容最后回填）
+    this.s16At = this.out.length;
     this.line();
     for (const a of aggs) {
       if (a.k === 'struct') this.structBody(a.t);
@@ -89,6 +129,7 @@ class CEmitter {
     // argc/argv 要存下来：process.argv 与"我装在哪"（import.meta.url 的对应物）都要它。
     // 退出码走 omni_host_exit_code —— process.exitCode 是个可写的槽，不是返回值。
     this.line(`int main(int argc, char **argv) { omni_host_init(argc, argv); ${this.mod.entry}(); omni_js_check_uncaught(); fflush(stdout); return omni_host_exit_code(); }`);
+    this.out[this.s16At] = this.s16PoolLines().join('\n');
     return this.out.join('\n') + '\n';
   }
 
@@ -329,23 +370,32 @@ class CEmitter {
    * 按名字调 op 的分派器（`js_call_op`，ADR-0013）。JS 后端 backend-js/emit.js 的
    * callOpDispatch 是逐行的孪生。解释器是唯一的用户 —— 它手里的 op 名字是运行期的值。
    *
-   * 名字先一次转码成 UTF-8，再按**长度**分组 memcmp：138 条 op 顺着比一遍太贵，
-   * 按长度分完每组只剩几条。lit 排在 args 前面由调用方铺平，这里按类型取出来：
-   * 字符串 lit 是单个字符（`'<'`），bool lit 走 truthy。
+   * 比较**在 UTF-16 上直接做**，比的是字面量池里的静态数据：转码成 UTF-8 再 memcmp
+   * 要在每次 op 调用上分配一块并走一遍转换，量过是原生解释器最热的分配点之一。
+   * 先按长度分组（138 条顺着比一遍太贵，分完每组只剩几条），组内逐条 s16 相等。
+   * lit 排在 args 前面由调用方铺平，这里按类型取出来：字符串 lit 是单个码元（`'<'`），
+   * bool lit 走 truthy。
    */
   callOpDispatch() {
     const A = (i) => `omni_js_arr_get(args, omni_dyn_of_real(${i}.0))`;
+    // op 名字（与 raw:'str' 那一条的实参）取 s16。STRING 标签也认：Omni 侧的 string
+    // 传进来时是 UTF-8，那一路要转，但它不在热路径上。
+    this.line('static omni_s16 omni_js_op_key_(omni_dyn v) {');
+    this.indent++;
+    this.line('if (v.tag == OMNI_DYN_STR16) return v.u.s16;');
+    this.line('if (v.tag == OMNI_DYN_STRING) return omni_s16_of_utf8(v.u.s);');
+    this.line('omni_error("op name must be a string");');
+    this.line('return omni_s16_of_utf8(omni_str_new("", 0));');
+    this.indent--;
+    this.line('}');
     this.line('static omni_str omni_js_op_name_(omni_dyn v) {');
     this.indent++;
-    this.line('if (v.tag == OMNI_DYN_STR16) return omni_s16_to_utf8(v.u.s16);');
-    this.line('if (v.tag == OMNI_DYN_STRING) return v.u.s;');
-    this.line('omni_error("op name must be a string");');
-    this.line('return omni_str_new("", 0);');
+    this.line('return omni_s16_to_utf8(omni_js_op_key_(v));');
     this.indent--;
     this.line('}');
     this.line('static omni_dyn omni_js_call_op(omni_dyn name, omni_dyn args) {');
     this.indent++;
-    this.line('omni_str nm_ = omni_js_op_name_(name);');
+    this.line('omni_s16 nm_ = omni_js_op_key_(name);');
     this.line('switch (nm_.len) {');
     this.indent++;
     const byLen = new Map();
@@ -360,7 +410,7 @@ class CEmitter {
       for (const [name, abi] of byLen.get(len)) {
         const lits = (abi.lit ?? []).map((k, i) => (k === 'strict'
           ? `omni_js_truthy(${A(i)})`
-          : `omni_js_op_name_(${A(i)}).p[0]`));
+          : `(char)omni_js_op_key_(${A(i)}).p[0]`));
         const as = [];
         for (let ai = 0; ai < abi.arity; ai++) {
           const x = A(ai + lits.length);
@@ -371,14 +421,15 @@ class CEmitter {
         const ret = abi.ret === 'void' ? `${call}; return omni_dyn_undef();`
           : abi.ret === 'bool' ? `return omni_dyn_of_bool(${call});`
             : `return ${call};`;
-        this.line(`if (memcmp(nm_.p, ${JSON.stringify(name)}, ${len}) == 0) { ${ret} }`);
+        this.line(`if (omni_s16_eq(nm_, ${this.s16Lit(name)})) { ${ret} }`);
       }
       this.line('break;');
       this.indent--;
     }
     this.indent--;
     this.line('}');
-    this.line('omni_errorf("no such op: %.*s", (int)nm_.len, nm_.p);');
+    this.line('omni_str bad_ = omni_s16_to_utf8(nm_);');
+    this.line('omni_errorf("no such op: %.*s", (int)bad_.len, bad_.p);');
     this.line('return omni_dyn_undef();');
     this.indent--;
     this.line('}');
@@ -408,7 +459,7 @@ class CEmitter {
           : `case ${JS_TAG_C[tag]}: return ${call};`);
       }
       // 表外的接收者：属性就是普通属性，方法就是"取属性再当函数调"（ADR-0011 决策 12）
-      const get = `omni_js_obj_get(r, omni_dyn_of_s16(omni_js_s16_lit(${JSON.stringify(m.name)})))`;
+      const get = `omni_js_obj_getk(r, ${this.s16Lit(m.name)}_s)`;
       if (m.kind === 'prop') {
         this.line(`default: return ${get};`);
       } else {
@@ -757,17 +808,43 @@ class CEmitter {
       // JS 前端的运算语义（ADR-0011）。规则写在 runtime/omni_js.c 里，与 prelude.js 一一对应。
       case 'js_undef': return 'omni_dyn_undef()';
       case 'js_ofFn': return `omni_dyn_of_fn(${a[0]})`;
-      // 字符串字面量平时经 UTF-8 进来，但落单的代理项在 UTF-8 里没有合法编码
-      // （Buffer.from 会替成 U+FFFD），这一种只能按码元发。JS 侧不需要对应处理：
-      // JSON.stringify 自己就会把落单代理项转义成 \uXXXX，那边天然无损。
+      // 字符串字面量走字面量池（见 s16Lit）：编译期就是 UTF-16 静态数据，取用时零成本。
+      // 落单的代理项在 UTF-8 里没有合法编码（Buffer.from 会替成 U+FFFD），按码元发这一条
+      // 顺带也解决了 —— 池子存的本来就是码元。JS 侧不需要对应处理：JSON.stringify 自己
+      // 就会把落单代理项转义成 \uXXXX，那边天然无损。
       case 'js_s16': {
         const arg = e.args[0];
-        if (arg && arg.kind === 'Const' && typeof arg.value === 'string' && hasLoneSurrogate(arg.value)) {
-          const units = [];
-          for (let i = 0; i < arg.value.length; i++) units.push(`0x${arg.value.charCodeAt(i).toString(16)}`);
-          return `omni_dyn_of_s16(omni_s16_of_units((const uint16_t[]){${units.join(', ')}}, ${units.length}))`;
+        if (arg && arg.kind === 'Const' && typeof arg.value === 'string') {
+          return `omni_dyn_of_s16(${this.s16Lit(arg.value)})`;
         }
         return `omni_js_s16(${a[0]})`;
+      }
+      // 下标是编译期常量时走 geti：实参表读参数（arr_get(args, 0)）是最高频的一条
+      case 'js_arr_get': {
+        const k = constIndex(e.args[1]);
+        if (k !== null) return `omni_js_arr_geti(${a[0]}, ${k})`;
+        return `omni_js_arr_get(${a[0]}, ${a[1]})`;
+      }
+      // `x === "字面量"`：特化成能内联的 omni_js_eq_s16k（见 omni.h）。switch 降下来是
+      // 一条 if-else 链，编译器自己的 switch (e.kind) 动辄四十路，省下的是四十次调用。
+      case 'js_eq': {
+        if (e.strict === true) {
+          const l = constKey(e.args[0]);
+          const r = constKey(e.args[1]);
+          if (r !== null) return `omni_js_eq_s16k(${a[0]}, ${this.s16Lit(r)})`;
+          if (l !== null) return `omni_js_eq_s16k(${a[1]}, ${this.s16Lit(l)})`;
+        }
+        return `omni_js_eq(${e.strict === true}, ${a[0]}, ${a[1]})`;
+      }
+      // 键是字面量时走 ...k：字典的键口径是 UTF-8，字面量池里已经算好了一份静态的，
+      // 免掉 omni_js_prop 每次的 UTF-16 -> UTF-8 转换和 arena 分配（见 omni_js_obj.h）。
+      case 'js_obj_get': case 'js_obj_set': case 'js_obj_has': case 'js_obj_delete': {
+        const k = constKey(e.args[1]);
+        if (k !== null) {
+          const args = [a[0], `${this.s16Lit(k)}_s`, ...a.slice(2)];
+          return `omni_${e.name}k(${args.join(', ')})`;
+        }
+        return `${JS_ALL[e.name].c}(${a.join(', ')})`;
       }
       default: {
         const abi = JS_ALL[e.name];
@@ -837,6 +914,31 @@ function utf8Bytes(s) {
     }
   }
   return out;
+}
+
+/**
+ * 属性键里编译期就定下来的那个字符串。前端把 `o.k` / `o['k']` / `'k' in o` 都降成
+ * `js_s16(Const)`（见 frontend-js/lower.js 的 s16），所以只认这一个形状。
+ * 不是字面量就返回 null，调用点退回通用的那条。
+ * @returns {string | null}
+ */
+function constKey(n) {
+  if (!n || n.kind !== 'Builtin' || n.name !== 'js_s16') return null;
+  const c = n.args[0];
+  if (!c || c.kind !== 'Const' || typeof c.value !== 'string') return null;
+  return c.value;
+}
+
+/**
+ * 下标里编译期就定下来的那个整数。JS 域的数只有 real 一种，所以还要确认它真是个整数
+ * 且落在安全整数范围里 —— 不然 `(int64_t)` 的口径和 omni_js_arr_i 的就不是一回事了。
+ * @returns {string | null}
+ */
+function constIndex(n) {
+  if (n && n.kind === 'Box') n = n.expr;
+  if (!n || n.kind !== 'Const' || typeof n.value !== 'number') return null;
+  if (!Number.isInteger(n.value) || Math.abs(n.value) > 9007199254740991) return null;
+  return String(n.value);
 }
 
 function cString(bytes) {

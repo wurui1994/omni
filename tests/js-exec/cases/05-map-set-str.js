@@ -71,3 +71,12 @@ console.log("a1b22c".split(/\d+/).join("|"));
 console.log(String("a1b22c".match(/\d+/g).join(",")));
 console.log(JSON.stringify({ n: 1, s: "x", arr: [true, null] }));
 console.log(JSON.stringify([1, 2], undefined, 2));
+
+// U+0000 是合法的字符串内容、也是合法的 Map 键（词法器的转义表里就有 '0' -> '\0' 这条）。
+// C 侧的键规范化曾经用 printf 的 "%.*s" 拼标签前缀，%s 在第一个 NUL 处就停 —— "" 与
+// "\u0000" 于是撞成同一个键，node 上却是两个。自举时表现为字面量池少一条、id 全体错位。
+const nulKeys = new Map();
+nulKeys.set("", "empty");
+nulKeys.set("\u0000", "nul");
+console.log(`${nulKeys.size} ${String(nulKeys.get(""))} ${String(nulKeys.get("\u0000"))}`);
+console.log(`${"\u0000".length} ${String("\u0000" === "")} ${"a\u0000b".length}`);

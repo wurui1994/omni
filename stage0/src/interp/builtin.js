@@ -455,6 +455,11 @@ function strOf(kind, v) {
 
 function builtinOp(I, e, env, frame) {
   const a = e.args.map((x) => I.eval(x, env, frame));
+  // 负缓存（第一次落到默认支时打上）。JS 程序里几乎每条 Builtin 都是 JS 域的 op，而下面
+  // 这个 switch 是顺着比字符串比过去的 —— 每次都白比一百来次才到默认支。量过：原生构建上
+  // builtinOp 自己就占 22%。节点是可写的（OIR 在两代产物里都是普通对象/dict），缓存就挂在
+  // 节点上，一个节点只解析一次。
+  if (e.jsop === true) return jsOp(I, e, a);
   const recv = e.recvType;
   switch (e.name) {
     case 'print': printLine(strOf(e.argType.k, a[0])); return undefined;
@@ -532,6 +537,7 @@ function builtinOp(I, e, env, frame) {
     default:
       // 降级后的 JS 用的是宿主库那批 op（ADR-0011）。不在这里重新实现 —— 按名字调到宿主
       // 自己的那一份去（js_call_op），见下面 jsOp 与 ADR-0013 决策 5。
+      e.jsop = true;
       return jsOp(I, e, a);
   }
 }
@@ -560,6 +566,13 @@ let pendingVal = undefined;
 let pendingSet = false;
 
 function jsOp(I, e, a) {
+  // 解析结果挂在节点上（imem：成员描述符，null 表示"不是成员"；iabi/ilits：直调那一路）。
+  // 表查询本身在原生构建上是带哈希的 dict 取值，每次 op 调用查三次就成了热点。
+  const cached = e.imem;
+  if (cached !== undefined) {
+    if (cached !== null) return memberOp(cached, a);
+    return invoke(e.name, e.iabi, e.ilits.length > 0 ? e.ilits.concat(a) : a);
+  }
   switch (e.name) {
     case 'js_throw': pendingVal = a[0]; pendingSet = true; return undefined;
     case 'js_pending': return pendingSet;
@@ -577,14 +590,20 @@ function jsOp(I, e, a) {
     default: break;
   }
   const mem = JS_MEMBERS[e.name];
-  if (mem !== undefined) return memberOp(mem, a);
+  if (mem !== undefined) {
+    e.imem = mem;
+    return memberOp(mem, a);
+  }
   const abi = JS_ABI[e.name];
   if (abi === undefined) throw new OmniError(`interp: no such op '${e.name}'`);
-  if (abi.raw === true) throw new OmniError(`interp: op '${e.name}' is not callable by name`);  // lit 是编译期常量，排在实参前面 —— 和两个后端的发射器同一套（emit.js 的 builtin）
-  const args = [];
-  for (const k of abi.lit ?? []) args.push(e[k]);
-  for (const x of a) args.push(x);
-  return invoke(e.name, abi, args);
+  if (abi.raw === true) throw new OmniError(`interp: op '${e.name}' is not callable by name`);
+  // lit 是编译期常量，排在实参前面 —— 和两个后端的发射器同一套（emit.js 的 builtin）
+  const lits = [];
+  for (const k of abi.lit ?? []) lits.push(e[k]);
+  e.iabi = abi;
+  e.ilits = lits;
+  e.imem = null;
+  return invoke(e.name, abi, lits.length > 0 ? lits.concat(a) : a);
 }
 
 function takePending() {
@@ -615,18 +634,40 @@ function invoke(name, abi, args) {
  * 成员派发（ADR-0011 第 9 节）。表在 hir/js_abi.js，两个后端各自**生成**一份派发器，
  * 解释器这一份是同一张表的第三个读者 —— 是同一套规则的第三次应用，不是第三份语义。
  * 标签口径必须是 JS 域的（Map/Set 而不是 dict/set），所以问的是 js_type_tag 这条 op。
+ *
+ * 单态内联缓存挂在**描述符**上（不是节点上）：同一个成员名收到的接收者标签几乎总是同一个
+ * （`xs.push` 的 xs 一直是 list），命中了就省掉 m.on 与 JS_ABI 两次表查询。标签不同就
+ * 重新查一遍再换掉缓存 —— 只是缓存，答案仍然由表决定。
  */
 function memberOp(d, a) {
   const m = d.member;
-  const op = m.on[callJsOp('js_type_tag', [a[0]])];
+  const tag = callJsOp('js_type_tag', [a[0]]);
+  if (tag === d.ctag) {
+    const cabi = d.cabi;
+    if (cabi === null) return memberFallback(d, m, a);
+    const args = d.clits.length > 0 ? d.clits.slice(0) : [];
+    for (let i = 0; i < cabi.arity; i++) args.push(a[i]);
+    return invoke(d.cop, cabi, args);
+  }
+  const op = m.on[tag];
+  d.ctag = tag;
   if (op !== undefined) {
     const abi = JS_ABI[op];
-    const args = [];
-    for (const v of Object.values(m.lit ?? {})) args.push(v);
+    const lits = [];
+    for (const v of Object.values(m.lit ?? {})) lits.push(v);
+    d.cop = op;
+    d.cabi = abi;
+    d.clits = lits;
+    const args = lits.slice(0);
     for (let i = 0; i < abi.arity; i++) args.push(a[i]);
     return invoke(op, abi, args);
   }
-  // 表外的接收者：属性就是普通属性，方法就是"取属性再当函数调"（ADR-0011 决策 12）
+  d.cabi = null;
+  return memberFallback(d, m, a);
+}
+
+/** 表外的接收者：属性就是普通属性，方法就是"取属性再当函数调"（ADR-0011 决策 12） */
+function memberFallback(d, m, a) {
   flushOut();
   const got = callJsOp('js_obj_get', [a[0], m.name]);
   if (m.kind === 'prop') return got;

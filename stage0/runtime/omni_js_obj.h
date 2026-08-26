@@ -21,7 +21,11 @@
 #define OMNI_JS_OBJ_H
 
 /* 规范化键：标签前缀保证不同类型的键不会撞。对象引用当键会直接报错 —— 量过的源码里
-   没有这种用法，与其编一套引用 id，不如撞上了当场说清楚。 */
+   没有这种用法，与其编一套引用 id，不如撞上了当场说清楚。
+
+   前缀刻意**不**用 omni_str_fmt("s%.*s")：printf 的 %s 在第一个 NUL 处就停了，于是
+   "" 与 "\0" 撞成同一个键，而 node 上它们是两个键 —— 一处静默分叉。字符串键里真的会
+   出现 U+0000（词法器的转义表里就有一条 '0' -> '\0'）。 */
 #define OMNI_JS_OBJ(LT, DT) \
 static DT omni_js_dict_of(omni_dyn v) { return (DT)omni_dyn_as_ref(v, OMNI_DYN_DICT); } \
 static omni_dyn omni_js_dict_wrap(DT d) { return omni_dyn_of_ref((void *)d, OMNI_DYN_DICT); } \
@@ -29,16 +33,18 @@ static DT omni_js_map_of(omni_dyn v) { return (DT)omni_dyn_as_ref(v, OMNI_DYN_MA
 static omni_dyn omni_js_map_wrap(DT d) { return omni_dyn_of_ref((void *)d, OMNI_DYN_MAP); } \
 static DT omni_js_set_of(omni_dyn v) { return (DT)omni_dyn_as_ref(v, OMNI_DYN_SET); } \
 static omni_dyn omni_js_set_wrap(DT d) { return omni_dyn_of_ref((void *)d, OMNI_DYN_SET); } \
+static omni_str omni_js_key_tag_(char t, omni_str u) { \
+  char *p = (char *)omni_alloc((size_t)u.len + 1); \
+  p[0] = t; \
+  if (u.len > 0) memcpy(p + 1, u.p, (size_t)u.len); \
+  omni_str r; r.p = p; r.len = u.len + 1; return r; \
+} \
 static omni_str omni_js_key(omni_dyn k) { \
-  omni_str u; \
   switch (k.tag) { \
-    case OMNI_DYN_STR16: \
-      u = omni_s16_to_utf8(k.u.s16); \
-      return omni_str_fmt("s%.*s", (int)u.len, u.p); \
+    case OMNI_DYN_STR16: return omni_js_key_tag_('s', omni_s16_to_utf8(k.u.s16)); \
     case OMNI_DYN_INT: return omni_str_fmt("i%lld", (long long)k.u.i); \
     case OMNI_DYN_REAL: \
-      u = omni_s16_to_utf8(omni_js_as_s16(omni_js_str(k))); \
-      return omni_str_fmt("n%.*s", (int)u.len, u.p); \
+      return omni_js_key_tag_('n', omni_s16_to_utf8(omni_js_as_s16(omni_js_str(k)))); \
     case OMNI_DYN_BOOL: return omni_str_fmt("b%d", k.u.b ? 1 : 0); \
     case OMNI_DYN_NULL: return omni_str_new("z", 1); \
     case OMNI_DYN_UNDEF: return omni_str_new("u", 1); \
@@ -49,21 +55,37 @@ static omni_str omni_js_key(omni_dyn k) { \
 } \
 static omni_str omni_js_prop(omni_dyn k) { return omni_s16_to_utf8(omni_js_as_s16(k)); } \
 static omni_dyn omni_js_obj_new(void) { return omni_js_dict_wrap(DT##_new()); } \
-static omni_dyn omni_js_obj_get(omni_dyn o, omni_dyn k) { \
+/* 键是编译期字面量时走这四条：字典里的键本来就是 UTF-8，字面量池已经把它算好了
+ * （见 backend-c/emit.js 的 s16PoolLines），omni_js_prop 那次转换和分配就整个省掉。
+ * 解释器把 OIR 节点当 dict 读，`e.kind` 这类取字段全落在这里，是原生构建最热的一条。 */ \
+static omni_dyn omni_js_obj_getk(omni_dyn o, omni_str key) { \
   DT d = omni_js_dict_of(o); \
-  omni_str key = omni_js_prop(k); \
-  if (!DT##_contains(d, key)) return omni_dyn_undef(); \
-  return DT##_get(d, key); \
+  /* contains + get 是两次哈希 —— 取属性是解释器最热的一条，只探一次 */ \
+  int64_t e = DT##_find(d, key); \
+  if (e < 0) return omni_dyn_undef(); \
+  return d->vals[e]; \
 } \
-static omni_dyn omni_js_obj_set(omni_dyn o, omni_dyn k, omni_dyn v) { \
-  DT##_set(omni_js_dict_of(o), omni_js_prop(k), v); \
+static omni_dyn omni_js_obj_setk(omni_dyn o, omni_str key, omni_dyn v) { \
+  DT##_set(omni_js_dict_of(o), key, v); \
   return o; \
 } \
+static bool omni_js_obj_hask(omni_dyn o, omni_str key) { \
+  return DT##_contains(omni_js_dict_of(o), key); \
+} \
+static bool omni_js_obj_deletek(omni_dyn o, omni_str key) { \
+  return DT##_remove(omni_js_dict_of(o), key); \
+} \
+static omni_dyn omni_js_obj_get(omni_dyn o, omni_dyn k) { \
+  return omni_js_obj_getk(o, omni_js_prop(k)); \
+} \
+static omni_dyn omni_js_obj_set(omni_dyn o, omni_dyn k, omni_dyn v) { \
+  return omni_js_obj_setk(o, omni_js_prop(k), v); \
+} \
 static bool omni_js_obj_has(omni_dyn o, omni_dyn k) { \
-  return DT##_contains(omni_js_dict_of(o), omni_js_prop(k)); \
+  return omni_js_obj_hask(o, omni_js_prop(k)); \
 } \
 static bool omni_js_obj_delete(omni_dyn o, omni_dyn k) { \
-  return DT##_remove(omni_js_dict_of(o), omni_js_prop(k)); \
+  return omni_js_obj_deletek(o, omni_js_prop(k)); \
 } \
 static omni_dyn omni_js_obj_keys(omni_dyn o) { \
   DT d = omni_js_dict_of(o); \
@@ -119,9 +141,9 @@ static bool omni_js_map_has(omni_dyn m, omni_dyn k) { \
 } \
 static omni_dyn omni_js_map_get(omni_dyn m, omni_dyn k) { \
   DT d = omni_js_map_of(m); \
-  omni_str key = omni_js_key(k); \
-  if (!DT##_contains(d, key)) return omni_dyn_undef(); \
-  return ((LT)DT##_get(d, key).u.ref)->items[1]; \
+  int64_t e = DT##_find(d, omni_js_key(k)); \
+  if (e < 0) return omni_dyn_undef(); \
+  return ((LT)d->vals[e].u.ref)->items[1]; \
 } \
 static omni_dyn omni_js_map_set(omni_dyn m, omni_dyn k, omni_dyn v) { \
   LT pair = LT##_new(); \

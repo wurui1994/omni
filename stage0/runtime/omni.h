@@ -199,6 +199,14 @@ omni_dyn omni_js_bitop(int op, omni_dyn a, omni_dyn b);
 omni_dyn omni_js_bitnot(omni_dyn a);
 bool omni_js_cmp(int op, omni_dyn a, omni_dyn b);
 bool omni_js_eq(bool strict, omni_dyn a, omni_dyn b);
+/* `x === "字面量"`。JS 的 switch 降成的是一条 if-else 链（lower.js 的 switchStmt），
+   而编译器自己满是 switch (e.kind) 这种四十路的字符串分派：一路走下来就是四十次
+   omni_js_eq 调用。特化成能内联的一条之后，不匹配的绝大多数只花"比标签 + 比长度"。
+   语义与 omni_js_eq(true, a, of_s16(k)) 逐位一致 —— JS 域的字符串只有 STR16 这一个标签。 */
+static inline bool omni_js_eq_s16k(omni_dyn a, omni_s16 k) {
+  return a.tag == OMNI_DYN_STR16 && a.u.s16.len == k.len
+    && (k.len == 0 || memcmp(a.u.s16.p, k.p, (size_t)k.len * 2) == 0);
+}
 omni_dyn omni_js_neg(omni_dyn a);
 
 /* throw / try（ADR-0007 决定 1：静态降级，不用宿主异常）。

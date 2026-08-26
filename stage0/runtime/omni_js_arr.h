@@ -67,10 +67,14 @@ static int64_t omni_js_arr_i(omni_dyn i) { \
   if (i.u.r <= -9.2233720368547758e18) return INT64_MIN; \
   return (int64_t)i.u.r; \
 } \
-static omni_dyn omni_js_arr_get(omni_dyn a, omni_dyn i) { \
+/* 下标是编译期常量时走这条：省掉把它装成 omni_dyn 再过一遍 NaN/范围检查。
+   JS 域的实参表就是一条 list，`v_x = arr_get(args, 0)` 是每次调用都要走的一步。 */ \
+static omni_dyn omni_js_arr_geti(omni_dyn a, int64_t k) { \
   LT l = omni_js_arr_of(a); \
-  int64_t k = omni_js_arr_i(i); \
   return (k < 0 || k >= l->len) ? omni_dyn_undef() : l->items[k]; \
+} \
+static omni_dyn omni_js_arr_get(omni_dyn a, omni_dyn i) { \
+  return omni_js_arr_geti(a, omni_js_arr_i(i)); \
 } \
 static void omni_js_arr_set(omni_dyn a, omni_dyn i, omni_dyn v) { \
   LT l = omni_js_arr_of(a); \

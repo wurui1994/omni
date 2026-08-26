@@ -291,14 +291,16 @@ export function evalCaptured(code) {
  * 一个字符都不会分叉 —— 决策 5 的做法在这里是最省的：省掉 138 份手抄的包装。
  */
 const JS_OPS = (() => {
-  const names = Object.values(JS_ABI).map((a) => a.js).filter((n) => n !== '$js_call_op');
-  const pick = names.map((n) => `${JSON.stringify(n)}: typeof ${n} === 'function' ? ${n} : null`);
+  const entries = Object.entries(JS_ABI).filter(([, a]) => a.js !== '$js_call_op');
+  // 按 **op 名字** 建表（不是 $ 前缀的实现名）：调用点手里拿的是 op 名字，每次调用再拼一次
+  // `$${name}` 是白花的字符串拼接 —— 这条路每个 JS op 都要过。
+  const pick = entries.map(([n, a]) => `${JSON.stringify(n)}: typeof ${a.js} === 'function' ? ${a.js} : null`);
   // eslint-disable-next-line no-new-func
   return new Function(`${JS_PRELUDE}\nreturn {${pick.join(',')}};`)();
 })();
 
 export function callJsOp(name, args) {
-  const f = JS_OPS[`$${name}`];
+  const f = JS_OPS[name];
   if (!f) throw new Error(`no such op: ${name}`);
   return f(...args);
 }
