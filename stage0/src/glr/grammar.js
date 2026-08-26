@@ -26,6 +26,9 @@
 //   里面的 `$1`..`$n` 按 RHS 位置替换；整个 ACTION 就是一个 `$k` 表示原样传上去。
 // - `(prec X)` 可选，紧跟在 RHS 之后，等价于 bison 的 `%prec`。
 // - 优先级只认终结符（包括只用来标 `%prec` 的伪终结符：在 `tokens` 里声明就行）。
+// - `(prefer N)` 可选，与 `(prec X)` 同位置、可换序，N 是整数，默认 0。它**不参与建表**，
+//   只在运行期"两支都归约成功、值又不同"的时候定胜负（见 driver.js 头部）。这就是 bison 的
+//   `%dprec`：GLR 下处理真歧义的唯一声明式手段，C 系语言的「声明 vs 表达式」绕不开它。
 
 import { isList, isAtom, isStr, head } from '../sexpr/read.js';
 import { readLexSpec, litName } from './lex.js';
@@ -125,17 +128,27 @@ export function readGrammar(nodes, diags) {
       }
       let k = 1;
       let rulePrec = null;
-      if (head(parts[k]) === 'prec') {
-        const p = parts[k].items[1];
-        const nm = isAtom(p) ? p.value : isStr(p) ? litName(p.value) : null;
-        if (nm === null || !prec.has(nm)) err(parts[k], `(prec X) needs a terminal that has a precedence level`);
-        else rulePrec = nm;
+      let prefer = 0;
+      // 标注可以有零个、一个或两个，次序不限 —— 两条各判一次，判到就往后挪
+      while (head(parts[k]) === 'prec' || head(parts[k]) === 'prefer') {
+        if (head(parts[k]) === 'prec') {
+          const p = parts[k].items[1];
+          const nm = isAtom(p) ? p.value : isStr(p) ? litName(p.value) : null;
+          if (nm === null || !prec.has(nm)) err(parts[k], `(prec X) needs a terminal that has a precedence level`);
+          else rulePrec = nm;
+        } else {
+          const p = parts[k].items[1];
+          // 刻意不用 Number.isInteger：它不在封闭 ABI 里。正则字面量在（从字面量降下来的那几个）
+          const txt = isAtom(p) ? p.value : '';
+          if (!/^-?[0-9]+$/.test(txt)) err(parts[k], '(prefer N) needs an integer');
+          else prefer = Number(txt);
+        }
         k++;
       }
       const action = parts[k] ?? null;
       if (action === null) err(alt, 'a rule alternative needs an action template');
       nonterms.get(lhs).rules.push(rules.length);
-      rules.push({ lhs, rhs, action, prec: rulePrec, span: alt.span });
+      rules.push({ lhs, rhs, action, prec: rulePrec, prefer, span: alt.span });
     }
   }
 

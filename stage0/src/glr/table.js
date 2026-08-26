@@ -112,7 +112,7 @@ function closure(g, kernel) {
 export function buildTable(g) {
   // 增广：`$accept -> start`。归约它就是接受，所以它不进 rules，单独认。
   const acceptRule = g.rules.length;
-  const rules = [...g.rules, { lhs: ACCEPT, rhs: [g.start], action: null, prec: null, span: null }];
+  const rules = [...g.rules, { lhs: ACCEPT, rhs: [g.start], action: null, prec: null, prefer: 0, span: null }];
   // Map 的拷贝手写一遍。刻意不写 `new Map(g.nonterms)`：封闭 ABI 里 `new Map(x)` 落到
   // `js_map_of_pairs`，它要的是"成对的列表"而不是 Map —— node 上照跑，原生构建里当场
   // 报 "dynamic value is Map, expected list"。量出来的（自举链阶段 9）。
@@ -236,7 +236,9 @@ export function dumpTable(tb, brief = false) {
   lines.push(`grammar ${tb.grammar.name}: ${tb.grammar.terms.size} terminals, ${tb.grammar.nonterms.size} nonterminals, ${tb.grammar.rules.length} rules, ${tb.states.length} states`);
   for (let i = 0; i < tb.rules.length; i++) {
     const r = tb.rules[i];
-    lines.push(`  r${i}  ${r.lhs} -> ${r.rhs.length === 0 ? '<empty>' : r.rhs.map(sym).join(' ')}`);
+    // 印出 prefer：它不影响表，但它影响运行期定胜负，快照要能看住它
+    const tail = r.prefer === undefined || r.prefer === 0 ? '' : `   [prefer ${r.prefer}]`;
+    lines.push(`  r${i}  ${r.lhs} -> ${r.rhs.length === 0 ? '<empty>' : r.rhs.map(sym).join(' ')}${tail}`);
   }
   for (let i = 0; i < tb.states.length && !brief; i++) {
     const st = tb.states[i];

@@ -331,21 +331,27 @@ function main(argv) {
       return 0;
     }
     case 'glr': {
-      const src = files[1];
-      if (src === undefined) throw new OmniError('glr needs a grammar file and an input file');
-      if (!exists(src)) throw new OmniError(`no such file: ${src}`);
+      const srcs = files.slice(1);
+      if (srcs.length === 0) throw new OmniError('glr needs a grammar file and at least one input file');
+      for (const s of srcs) if (!exists(s)) throw new OmniError(`no such file: ${s}`);
       const tb = loadGrammar(path);
       if (tb.grammar.lex === null) {
         throw new OmniError(`grammar '${tb.grammar.name}' has no (lex ...) form, so it cannot read source text`);
       }
-      const diags = new Diagnostics();
-      const toks = lexText(tb.grammar.lex, new SourceFile(src, readText(src)), diags);
-      diags.throwIfErrors();
-      vStep(`lexer          ${src} -> ${toks.length} tokens`);
-      const tree = glrParse(tb, toks, diags);
-      diags.throwIfErrors();
-      if (tree === null) throw new OmniError('glr: the parse failed without a diagnostic — that is a bug');
-      stdout(printSexpr([tree]));
+      // 收多个输入是刻意的：真实语言的表有几百个状态，建一次要一两秒，而测试轴有上百条
+      // case。一条命令喂一批输入，表就只建一次。只给一个文件时输出与从前逐字节相同 ——
+      // 自举链阶段 9 对的是那一份。
+      for (const src of srcs) {
+        const diags = new Diagnostics();
+        const toks = lexText(tb.grammar.lex, new SourceFile(src, readText(src)), diags);
+        diags.throwIfErrors();
+        vStep(`lexer          ${src} -> ${toks.length} tokens`);
+        const tree = glrParse(tb, toks, diags);
+        diags.throwIfErrors();
+        if (tree === null) throw new OmniError('glr: the parse failed without a diagnostic — that is a bug');
+        if (srcs.length > 1) stdout(`;; ==== ${src}\n`);
+        stdout(printSexpr([tree]));
+      }
       return 0;
     }
     default:
@@ -387,7 +393,7 @@ commands:
   glr-table print the parsing table for a .grammar file (ADR-0014 decision 2)
             (--brief: rules and remaining conflicts only, no per-state dump)
   glr       parse a source file with a .grammar and print the resulting s-expr
-            (usage: omni glr FILE.grammar FILE)
+            (usage: omni glr FILE.grammar FILE...; 多个输入只建一次表)
   bootstrap build the whole chain into a tree and check the four fixpoints
             (no file = the compiler itself; -o DIR, default ./dist; -q skips the C path)
 

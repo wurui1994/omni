@@ -10,7 +10,19 @@
 //   我们合并的条件更严一点：状态与前驱都相同、**而且值也逐节点相同**。值不同就两支都留 ——
 //   那正是"这里真有两棵树"的意思，留着才能在最后说清楚是哪两棵。
 // - bison 的硬边界照收：真歧义（两支都活到接受）不猜，直接报错（doc/bison.texi:1321..1325）。
-//   `%merge`/`%dprec` 那套我们没有，也不打算有。
+//
+// 关于 `%dprec`：**原先写的是"不打算有"，这条改了**。理由是 jancy 逼出来的 ——
+// `C1* c;` 既是"声明一个 C1 指针"又是"C1 乘 c"这条语句，两棵树都合法，而**任何 LR 语法都
+// 分不开它**：要分开必须知道 `C1` 是不是类型名，那是符号表的事。jancy 自己也是这么干的
+// （`qualified_type_name_rslv` 里调 `findType()`，DeclarationSpecifier.llk:258..278），
+// C 系语言全都绕不开。GLR 下唯一的声明式手段就是 bison 的 `%dprec`，所以照收，写成
+// `(prefer N)`。要紧的是：**驱动仍然不猜** —— 没有声明过偏好的两棵树照旧报错，胜负只在
+// 语法文件里明写过偏好时才判。`%merge`（把两棵树合成一棵）仍然没有，那才是真的猜。
+//
+// 偏好是**沿栈累加**的：顶点上记一个 pref，归约时 `新 pref = 顶点 pref + 规则的 prefer`。
+// 两个顶点前驱相同就意味着栈下面那截一样，于是比 pref 就等于比"这一段派生里声明过的偏好之和"。
+// 合并点上严格低的那支当场丢掉（bison 也是在合并点定胜负），接受点上再判一次 —— 后者是权威，
+// 所以结果与归约次序无关，合并点的丢弃只是省掉一支反正会输的分叉。
 //
 // 顶点是**单前驱**的：不做 DAG。代价是最坏情况下分叉数会涨，所以有一道上限，撞到就报错
 // 而不是挂住。真遇到需要 DAG 的语法再说 —— 位置就在这一个文件里。
@@ -32,7 +44,35 @@ function sameValue(a, b) {
   return true;
 }
 
-/** 把若干子节点的 span 并成一个 */
+/**
+ * 两棵树最小的那处分歧。返回 `[a 的子树, b 的子树]`，完全相同时返回 null。
+ *
+ * 名字里的 Tree 不是修饰，是**必须的**：自举那一版把所有模块摊进同一个作用域，
+ * 模块级的名字全局唯一才行，而 `bootstrap.js` 已经有一个按文本比的 `firstDiff` 了。
+ */
+function firstTreeDiff(a, b) {
+  if (sameValue(a, b)) return null;
+  if (a === null || b === null || a === undefined || b === undefined) return [a, b];
+  if (a.kind === 'list' && b.kind === 'list' && a.items.length === b.items.length) {
+    for (let i = 0; i < a.items.length; i++) {
+      const d = firstTreeDiff(a.items[i], b.items[i]);
+      if (d !== null) return d;
+    }
+  }
+  return [a, b];
+}
+
+/** 一处分歧印成一行：只印形状的头，够定位就行 —— 整棵树印出来没人看得完。 */
+function sketch(n) {
+  if (n === null || n === undefined) return '<nothing>';
+  if (n.kind === 'atom') return n.value;
+  if (n.kind === 'string') return n.raw === undefined ? JSON.stringify(n.value) : n.raw;
+  if (n.items.length === 0) return '()';
+  const h = sketch(n.items[0]);
+  return n.items.length === 1 ? `(${h})` : `(${h} ...)`;
+}
+
+
 function spanOf(kids) {
   // 刻意不用 Infinity 当初值：它不在封闭 ABI 的数值词汇里。第一个有 span 的子节点就是初值。
   let file = null;
@@ -62,8 +102,10 @@ function applyTemplate(tpl, kids, span) {
   }
   // 非列表的模板项（atom / string）照抄一份。刻意不写 `{...tpl}`：三种节点的字段是
   // 数得清的，手写比展开稳 —— 展开一个 dict 在原生构建里还要多走一条动态路径。
-  if (tpl.kind === 'atom') return { kind: 'atom', value: tpl.value, span: tpl.span === undefined ? span : tpl.span };
-  if (tpl.kind === 'string') return { kind: 'string', value: tpl.value, raw: tpl.raw, span: tpl.span === undefined ? span : tpl.span };
+  // span 一律换成**输入的** span：模板节点自己的 span 指向语法文件，留着它诊断就会
+  // 指到语法文件里去（量出来过：一句歧义报错指在 jnc.grammar:339）。
+  if (tpl.kind === 'atom') return { kind: 'atom', value: tpl.value, span };
+  if (tpl.kind === 'string') return { kind: 'string', value: tpl.value, raw: tpl.raw, span };
   return { kind: 'list', items: tpl.items.map((x) => applyTemplate(x, kids, span)), span };
 }
 
@@ -77,8 +119,8 @@ function applyTemplate(tpl, kids, span) {
 export function glrParse(tb, toks, diags) {
   const { states, rules } = tb;
   let nextId = 0;
-  const mk = (state, pred, value) => ({ id: nextId++, state, pred, value });
-  let tops = [mk(0, null, null)];
+  const mk = (state, pred, value, pref) => ({ id: nextId++, state, pred, value, pref });
+  let tops = [mk(0, null, null, 0)];
 
   for (let i = 0; i <= toks.length; i++) {
     const tk = i < toks.length ? toks[i] : { type: '$end', node: null, span: i > 0 ? toks[i - 1].span : null };
@@ -112,11 +154,14 @@ export function glrParse(tb, toks, diags) {
         const to = states[base.state].gotos.get(r.lhs);
         if (to === undefined) continue;
         const value = applyTemplate(r.action, kids, spanOf(kids.length > 0 ? kids : [tk]));
-        // 合并：状态、前驱、值三者都一样才算同一支
+        const pref = n.pref + r.prefer;
+        // 合并：状态、前驱、值三者都一样才算同一支。值不同就看偏好 —— 严格低的那支现在就丢，
+        // 反正它在接受点也要输（见文件头）。没声明过偏好时两边都是 0，谁也不丢，照旧两支都留。
         const key = `${to}#${base.id}`;
         const prev = merged.get(key);
         if (prev !== undefined && sameValue(prev.value, value)) continue;
-        const nn = mk(to, base, value);
+        if (prev !== undefined && pref < prev.pref) continue;
+        const nn = mk(to, base, value, pref);
         merged.set(prev === undefined ? key : `${key}#${nn.id}`, nn);
         work.push(nn);
         if (merged.size > MAX_PARSES) {
@@ -126,30 +171,71 @@ export function glrParse(tb, toks, diags) {
       }
     }
 
+    // ---- 1.5) 按偏好剪支。归约全做完了才能剪，所以这一步在不动点之后：
+    // 同一个 `(状态, 前驱)` 上只留偏好最高的那些。归约期只能丢"后来的、偏好更低的那支"
+    // （先到的那支可能已经往下长了），单靠那一手不够 —— `T* x;`（声明还是乘法）每写一行就
+    // 让分叉翻一倍，七行连着写就撞 MAX_PARSES。量出来的：jnc_sample_03_dialog/script.jnc。
+    //
+    // 归约把输掉的那棵子树**装进了**新顶点的值里，而胜负双方的新顶点 `(状态, 前驱)` 相同，
+    // 所以在这一层剪就正好剪掉它。前驱被剪掉的顶点跟着剪：它带的也是输掉的那条派生。
+    let live = canShift;
+    let liveAccepted = accepted;
+    const nodes = [...merged.values()];
+    const groupOf = (n) => `${n.state}#${n.pred === null ? -1 : n.pred.id}`;
+    const bestOf = new Map();
+    for (const n of nodes) {
+      const b = bestOf.get(groupOf(n));
+      if (b === undefined || n.pref > b) bestOf.set(groupOf(n), n.pref);
+    }
+    const cut = new Set();
+    for (const n of nodes) {
+      if (n.pref < bestOf.get(groupOf(n))) cut.add(n.id);
+    }
+    if (cut.size > 0) {
+      let again = true;
+      while (again) {
+        again = false;
+        for (const n of nodes) {
+          if (!cut.has(n.id) && n.pred !== null && cut.has(n.pred.id)) { cut.add(n.id); again = true; }
+        }
+      }
+      live = canShift.filter((s) => !cut.has(s.n.id));
+      liveAccepted = accepted.filter((n) => !cut.has(n.id));
+    }
+
     // ---- 2) 接受
     if (tk.type === '$end') {
-      if (accepted.length === 0) {
+      if (liveAccepted.length === 0) {
         diags.error(tk.span, 'unexpected end of input');
         return null;
       }
-      const first = accepted[0];
-      for (const other of accepted.slice(1)) {
-        if (!sameValue(first.value, other.value)) {
-          // bison 的硬边界：真歧义不猜（doc/bison.texi:1321..1325）
-          diags.error(tk.span, 'the input is ambiguous: two different parses both succeed — the grammar needs disambiguating');
+      // 偏好最高的那些支才有资格。它们之间还不一致，就是真歧义 —— 报错，不猜。
+      let best = liveAccepted[0];
+      for (const other of liveAccepted) {
+        if (other.pref > best.pref) best = other;
+      }
+      for (const other of liveAccepted) {
+        if (other.pref < best.pref) continue;
+        if (!sameValue(best.value, other.value)) {
+          // bison 的硬边界：真歧义不猜（doc/bison.texi:1321..1325）。
+          // 报错时把**最小的那处分歧**指出来 —— 只说"两棵树"没法改语法，得知道分在哪。
+          const d = firstTreeDiff(best.value, other.value);
+          const at = d === null ? null : d[0] !== null && d[0] !== undefined && d[0].span ? d[0].span : tk.span;
+          const what = d === null ? '' : `: one parse says ${sketch(d[0])}, the other ${sketch(d[1])}`;
+          diags.error(at, `the input is ambiguous — two different parses both succeed${what}`);
           return null;
         }
       }
-      return first.value;
+      return best.value;
     }
 
     // ---- 3) 移进
-    if (canShift.length === 0) {
+    if (live.length === 0) {
       const expected = expectedAt(tb, tops);
       diags.error(tk.span, `unexpected ${describeToken(tk)}${expected === '' ? '' : `; expected ${expected}`}`);
       return null;
     }
-    tops = canShift.map((s) => mk(s.to, s.n, tk.node));
+    tops = live.map((s) => mk(s.to, s.n, tk.node, s.n.pref));
   }
   return null;
 }

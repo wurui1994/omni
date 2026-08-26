@@ -108,9 +108,12 @@ for (const file of grammars) {
     continue;
   }
   const gpath = join(here, 'grammars', file);
-  let n = 0;
   const bad = [];
   const lines = text.split('\n');
+  // 该过的那些**一条命令批着跑**：真实语言的表有几百个状态，建一次一两秒，逐条 spawn
+  // 的话这一条轴要跑几分钟。该拒的那几条数量少，还是逐条跑 —— 要的就是那句错误文本。
+  const okCases = [];
+  let errCases = 0;
   for (let li = 0; li < lines.length; li++) {
     const line = lines[li].trim();
     if (line === '' || line.startsWith(';;')) continue;
@@ -122,21 +125,48 @@ for (const file of grammars) {
     }
     const input = line.slice(0, at).trim();
     const want = line.slice(at + 3).trim();
-    // 输入落到临时文件：走的是 CLI，跟真实用法一条路
     const ipath = join(dir, `${name}-${li}.in`);
     writeFileSync(ipath, input + '\n');
+    if (!isErr) { okCases.push({ li, input, want, ipath }); continue; }
+    errCases++;
     const r = run(['glr', gpath, ipath]);
-    n++;
-    if (isErr) {
-      if (r.code === 0) bad.push(`    line ${li + 1}: ${JSON.stringify(input)} should have been rejected, but it parsed as ${r.out.trim()}`);
-      else if (!r.err.includes(want)) bad.push(`    line ${li + 1}: ${JSON.stringify(input)} was rejected for the wrong reason\n      want: ${JSON.stringify(want)}\n      got:  ${r.err.trim()}`);
-      continue;
-    }
-    if (r.code !== 0) bad.push(`    line ${li + 1}: ${JSON.stringify(input)} did not parse\n${r.err}`);
-    else if (norm(r.out) !== norm(want)) bad.push(`    line ${li + 1}: ${JSON.stringify(input)}\n      want: ${norm(want)}\n      got:  ${norm(r.out)}`);
+    if (r.code === 0) bad.push(`    line ${li + 1}: ${JSON.stringify(input)} should have been rejected, but it parsed as ${r.out.trim()}`);
+    else if (!r.err.includes(want)) bad.push(`    line ${li + 1}: ${JSON.stringify(input)} was rejected for the wrong reason\n      want: ${JSON.stringify(want)}\n      got:  ${r.err.trim()}`);
   }
-  if (bad.length === 0) ok(`cases/${name} [${n} inputs]`);
+  if (okCases.length > 0) {
+    const r = run(['glr', gpath, ...okCases.map((c) => c.ipath)]);
+    if (r.code !== 0) {
+      // 批跑时一条挂了整批就停，错误文本里带着是哪个文件 —— 够定位
+      bad.push(`    the batch stopped on a failing input\n${r.err}`);
+    } else {
+      const got = splitBatch(r.out, okCases.map((c) => c.ipath));
+      for (const c of okCases) {
+        const g = got.get(c.ipath);
+        if (g === undefined) bad.push(`    line ${c.li + 1}: ${JSON.stringify(c.input)} produced no tree`);
+        else if (norm(g) !== norm(c.want)) bad.push(`    line ${c.li + 1}: ${JSON.stringify(c.input)}\n      want: ${norm(c.want)}\n      got:  ${norm(g)}`);
+      }
+    }
+  }
+  if (bad.length === 0) ok(`cases/${name} [${okCases.length} accepted, ${errCases} rejected]`);
   else no(`cases/${name}`, bad.join('\n'));
+}
+
+/** 批跑的输出按 `;; ==== 路径` 切开。只有一条输入时 CLI 不印那行，所以单独处理。 */
+function splitBatch(out, paths) {
+  const byPath = new Map();
+  if (paths.length === 1) {
+    byPath.set(paths[0], out);
+    return byPath;
+  }
+  let cur = null;
+  const buf = [];
+  const flush = () => { if (cur !== null) byPath.set(cur, buf.join('\n')); buf.length = 0; };
+  for (const line of out.split('\n')) {
+    if (line.startsWith(';; ==== ')) { flush(); cur = line.slice(8); continue; }
+    buf.push(line);
+  }
+  flush();
+  return byPath;
 }
 
 // ------------------------------------------------------------ 3. lookahead 必须留下冲突

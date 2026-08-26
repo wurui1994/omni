@@ -203,6 +203,18 @@ if (c1 && !quick) {
     both('glr-table expr', ['glr-table', gExpr], false);
     both('glr expr', ['glr', gExpr, inExpr], false);
     both('glr dangling (ambiguous)', ['glr', gDang, inAmbig], true);
+
+    // 再加一条 jancy：`(prefer N)` 和按偏好剪支那段只在**声明过偏好**的语法上才走到，
+    // expr/dangling 两份都没声明，等于那段代码在原生构建里从没被碰过。顺带压一遍
+    // 632 状态的构表（前三条的表都只有几十个状态，Map 的负载完全不是一个量级）。
+    // `C1* c;` 是那三处真歧义之一 —— 它非要走剪支才能只剩一棵树。
+    //
+    // 这一条要 14s（node 1.8s + 原生 9s，另有 clang 那边的常数）：原生构表比 node 慢 5 倍，
+    // 慢在 Map 上。这个比值本身是要记住的数 —— C 后端的 Map/Set 是待优化项，不是这条门槛的问题。
+    const gJnc = join(root, 'tests', 'glr', 'grammars', 'jnc.grammar');
+    const inJnc = join(dir, 'glr-jnc.in');
+    writeFileSync(inJnc, 'class C1 { int m_x; }\nC1* c;\nint f(int a) { return a * 2; }\n');
+    both('glr jnc (prefer)', ['glr', gJnc, inJnc], false);
   }
 }
 

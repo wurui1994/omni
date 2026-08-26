@@ -1,0 +1,118 @@
+;; jancy —— 一行一条，`输入 ==> 期望的 s-expr`。这份文件是 tests/glr/grammars/jnc.grammar
+;; 的回归网：语法一改，形状变没变一眼看得出来。
+;;
+;; 挑的不是"覆盖所有产生式"，是**那些当初真判错过的地方**：说明符表能不能没有类型、
+;; 修饰符归说明符还是归指针前缀、带体的命名类型能不能再当类型用、构造实参与形参表、
+;; 空位实参、属性块的位置、赋值的结合方向。每一条后面都躺着一次量错。
+
+;; ---- 说明符表：修饰符与类型混排，类型可以完全没有 --------------------------------
+int x; ==> (unit-add (unit) (var-decl (specs int (mods) (mods)) (dcls (dcl (ptrs) (name x) (suffixes) (no-ctor)))))
+int const x = 1; ==> (unit-add (unit) (var-decl (specs int (mods) (mods-add (mods) const)) (dcls (init (dcl (ptrs) (name x) (suffixes) (no-ctor)) 1))))
+char const* s; ==> (unit-add (unit) (var-decl (specs char (mods) (mods-add (mods) const)) (dcls (dcl (ptrs-add (ptrs) (ptr (mods))) (name s) (suffixes) (no-ctor)))))
+C1* c; ==> (unit-add (unit) (var-decl (specs (name C1) (mods) (mods)) (dcls (dcl (ptrs-add (ptrs) (ptr (mods))) (name c) (suffixes) (no-ctor)))))
+C1 weak* wc; ==> (unit-add (unit) (var-decl (specs (name C1) (mods) (mods-add (mods) weak)) (dcls (dcl (ptrs-add (ptrs) (ptr (mods))) (name wc) (suffixes) (no-ctor)))))
+event m_e(); ==> (unit-add (unit) (var-decl (specs (no-type) (mods-add (mods) event)) (dcls (dcl (ptrs) (name m_e) (suffixes-add (suffixes) (fn-suffix (formals))) (no-ctor)))))
+weak multicast wm(); ==> (unit-add (unit) (var-decl (specs (no-type) (mods-add (mods-add (mods) weak) multicast)) (dcls (dcl (ptrs) (name wm) (suffixes-add (suffixes) (fn-suffix (formals))) (no-ctor)))))
+bindable event m_be(); ==> (unit-add (unit) (var-decl (specs (no-type) (mods-add (mods-add (mods) bindable) event)) (dcls (dcl (ptrs) (name m_be) (suffixes-add (suffixes) (fn-suffix (formals))) (no-ctor)))))
+function weak* wf(int, int); ==> (unit-add (unit) (var-decl (specs (no-type) (mods-add (mods-add (mods) function) weak)) (dcls (dcl (ptrs-add (ptrs) (ptr (mods))) (name wf) (suffixes-add (suffixes) (fn-suffix (formals-add (formals (formal-anon (specs int (mods) (mods)) (ptrs))) (formal-anon (specs int (mods) (mods)) (ptrs))))) (no-ctor)))))
+alias dispose = release; ==> (unit-add (unit) (var-decl (specs (no-type) (mods-add (mods) alias)) (dcls (init (dcl (ptrs) (name dispose) (suffixes) (no-ctor)) (name release)))))
+multicast m(int); ==> (unit-add (unit) (var-decl (specs (no-type) (mods-add (mods) multicast)) (dcls (dcl (ptrs) (name m) (suffixes-add (suffixes) (fn-suffix (formals (formal-anon (specs int (mods) (mods)) (ptrs))))) (no-ctor)))))
+
+;; ---- 类型声明：有名的只当声明，无名的只当类型说明符 ------------------------------
+class C1 { int m_x; } ==> (unit-add (unit) (type-decl (agg class (name C1) (bases) (unit-add (unit) (var-decl (specs int (mods) (mods)) (dcls (dcl (ptrs) (name m_x) (suffixes) (no-ctor))))))))
+struct { int x; } s; ==> (unit-add (unit) (var-decl (specs (agg struct (anon) (bases) (unit-add (unit) (var-decl (specs int (mods) (mods)) (dcls (dcl (ptrs) (name x) (suffixes) (no-ctor)))))) (mods) (mods)) (dcls (dcl (ptrs) (name s) (suffixes) (no-ctor)))))
+enum { A = 1, B } ==> (unit-add (unit) (type-decl (enum enum (anon) (no-base) (enums-add (enums (enum-item A 1)) (enum-item B)))))
+enum State: char { Idle, Busy } ==> (unit-add (unit) (type-decl (enum enum (name State) (specs char (mods) (mods)) (enums-add (enums (enum-item Idle)) (enum-item Busy)))))
+opaque class Foo { } ==> (unit-add (unit) (type-decl (agg opaque class (name Foo) (bases) (unit))))
+extension C1Ext: C1 { void foo() { } } ==> (unit-add (unit) (extension (name C1Ext) (qnames (name C1)) (unit-add (unit) (fn-def (specs void (mods) (mods)) (dcl (ptrs) (name foo) (suffixes-add (suffixes) (fn-suffix (formals))) (no-ctor)) (compound (unit))))))
+namespace ns { int g; } ==> (unit-add (unit) (namespace (name ns) (unit-add (unit) (var-decl (specs int (mods) (mods)) (dcls (dcl (ptrs) (name g) (suffixes) (no-ctor)))))))
+using namespace ns; ==> (unit-add (unit) (using-namespace (name ns)))
+using extension C1Ext; ==> (unit-add (unit) (using-extension (name C1Ext)))
+pragma(Alignment, 1) ==> (unit-add (unit) (pragma (args-add (args (name Alignment)) 1)))
+pragma(ExposedEnums, default) ==> (unit-add (unit) (pragma (args-add (args (name ExposedEnums)) (pragma-default))))
+import "io_base.jncx" ==> (unit-add (unit) (import "io_base.jncx"))
+typedef int myint; ==> (unit-add (unit) (typedef (specs int (mods) (mods)) (dcls (dcl (ptrs) (name myint) (suffixes) (no-ctor)))))
+
+;; ---- 特殊成员与类外定义 ----------------------------------------------------------
+static construct(); ==> (unit-add (unit) (fn-proto (specs) (dcl (ptrs) (special "static construct") (suffixes-add (suffixes) (fn-suffix (formals))))))
+construct(int x) { } ==> (unit-add (unit) (fn-def (specs) (dcl (ptrs) (special "construct") (suffixes-add (suffixes) (fn-suffix (formals (formal (specs int (mods) (mods)) (dcl (ptrs) (name x) (suffixes) (no-ctor))))))) (compound (unit))))
+destruct() { } ==> (unit-add (unit) (fn-def (specs) (dcl (ptrs) (special "destruct") (suffixes-add (suffixes) (fn-suffix (formals)))) (compound (unit))))
+operator += (int d); ==> (unit-add (unit) (fn-proto (specs) (dcl (ptrs) (operator +=) (suffixes-add (suffixes) (fn-suffix (formals (formal (specs int (mods) (mods)) (dcl (ptrs) (name d) (suffixes) (no-ctor)))))))))
+C1.static construct() { } ==> (unit-add (unit) (fn-def (specs) (dcl (ptrs) (qualified-special (name C1) (special "static construct")) (suffixes-add (suffixes) (fn-suffix (formals)))) (compound (unit))))
+C1.operator += (int d) { } ==> (unit-add (unit) (fn-def (specs) (dcl (ptrs) (qualified-special (name C1) (operator +=)) (suffixes-add (suffixes) (fn-suffix (formals (formal (specs int (mods) (mods)) (dcl (ptrs) (name d) (suffixes) (no-ctor))))))) (compound (unit))))
+int g_prop.get() { return 1; } ==> (unit-add (unit) (fn-def (specs int (mods) (mods)) (dcl (ptrs) (qualified-special (name g_prop) (accessor "get")) (suffixes-add (suffixes) (fn-suffix (formals))) (no-ctor)) (compound (unit-add (unit) (return 1)))))
+void foo() const { } ==> (unit-add (unit) (fn-def (specs void (mods) (mods)) (dcl (ptrs) (name foo) (suffixes-add (suffixes-add (suffixes) (fn-suffix (formals))) (post-modifier const)) (no-ctor)) (compound (unit))))
+override schedule(function* f()) { } ==> (unit-add (unit) (fn-def (specs (no-type) (mods-add (mods) override)) (dcl (ptrs) (name schedule) (suffixes-add (suffixes) (fn-suffix (formals (formal (specs (no-type) (mods-add (mods) function)) (dcl (ptrs-add (ptrs) (ptr (mods))) (name f) (suffixes-add (suffixes) (fn-suffix (formals))) (no-ctor)))))) (no-ctor)) (compound (unit))))
+
+;; ---- 声明符尾巴：构造实参、花括号初始化、位域 ------------------------------------
+C1 c(100, 200); ==> (unit-add (unit) (var-decl (specs (name C1) (mods) (mods)) (dcls (dcl (ptrs) (name c) (suffixes) (ctor (args-add (args 100) 200))))))
+C1 g construct(10); ==> (unit-add (unit) (var-decl (specs (name C1) (mods) (mods)) (dcls (dcl (ptrs) (name g) (suffixes) (ctor (args 10))))))
+int b[10] = { ,, 3, 4,,, 7 } ==> (unit-add (unit) (var-decl-curly (specs int (mods) (mods)) (dcl (ptrs) (name b) (suffixes-add (suffixes) (array-suffix 10)) (no-ctor)) (curly (items-add (items-add (items-add (items-add (items-add (items-add (items (skip-item)) (skip-item)) 3) 4) (skip-item)) (skip-item)) 7))))
+int a[2][2] = { { 1, 2 }, { 3, 4 } } ==> (unit-add (unit) (var-decl-curly (specs int (mods) (mods)) (dcl (ptrs) (name a) (suffixes-add (suffixes-add (suffixes) (array-suffix 2)) (array-suffix 2)) (no-ctor)) (curly (items-add (items (curly (items-add (items 1) 2))) (curly (items-add (items 3) 4))))))
+Point* p = new Point { m_y = 2000 }; ==> (unit-add (unit) (var-decl (specs (name Point) (mods) (mods)) (dcls (init (dcl (ptrs-add (ptrs) (ptr (mods))) (name p) (suffixes) (no-ctor)) (new-curly (type-name (specs (name Point) (mods) (mods)) (ptrs)) (curly (items (named-item m_y 2000))))))))
+p = new C1; ==> (unit-add (unit) (expr-stmt (assign "=" (name p) (new (type-name (specs (name C1) (mods) (mods)) (ptrs))))))
+p = new ui.LoginDlg; ==> (unit-add (unit) (expr-stmt (assign "=" (name p) (new (type-name (specs (qualified (name ui) LoginDlg) (mods) (mods)) (ptrs))))))
+p = new ui.Option[count]; ==> (unit-add (unit) (expr-stmt (assign "=" (name p) (new-array (type-name (specs (qualified (name ui) Option) (mods) (mods)) (ptrs)) (name count)))))
+p = new Layout(Layout.Direction.LeftToRight); ==> (unit-add (unit) (expr-stmt (assign "=" (name p) (new (type-name (specs (name Layout) (mods) (mods)) (ptrs)) (args (field (field (name Layout) Direction) LeftToRight))))))
+uint8_t m_flag : 1; ==> (unit-add (unit) (var-decl (specs (name uint8_t) (mods) (mods)) (dcls (dcl (ptrs) (name m_flag) (suffixes-add (suffixes) (bitfield 1)) (no-ctor)))))
+
+;; ---- 属性块：声明前、语句前、枚举项前 --------------------------------------------
+[ RegexAnchored ] switch (text) { case "foo+": break; } ==> (unit-add (unit) (attributed (attrs (attrs (attr RegexAnchored))) (switch (exprs (name text)) (unit-add (unit-add (unit) (case "foo+")) (break 1)))))
+[ displayName = "Hop count", ] dyfield uint8_t hopCount; ==> (unit-add (unit) (attributed (attrs (attrs (attr displayName "Hop count"))) (var-decl (specs (name uint8_t) (mods-add (mods) dyfield) (mods)) (dcls (dcl (ptrs) (name hopCount) (suffixes) (no-ctor))))))
+[ @MsTpAttr ] struct S { int x; } ==> (unit-add (unit) (attributed (attrs (attrs (attr-ref (name MsTpAttr)))) (type-decl (agg struct (name S) (bases) (unit-add (unit) (var-decl (specs int (mods) (mods)) (dcls (dcl (ptrs) (name x) (suffixes) (no-ctor)))))))))
+enum E: char { [ structType = typeof(W) ] Write = 0 } ==> (unit-add (unit) (type-decl (enum enum (name E) (specs char (mods) (mods)) (enums (attributed (attrs (attrs (attr structType (typeof-expr (name W))))) (enum-item Write 0))))))
+
+;; ---- 表达式：偏好与优先级各管一半 ------------------------------------------------
+;; `x = a * b` 是 `x = (a * b)`；`a = b + c = d` 见语法里优先级块那段说明
+x = a * b; ==> (unit-add (unit) (expr-stmt (assign "=" (name x) (binary "*" (name a) (name b)))))
+a = b + c = d; ==> (unit-add (unit) (expr-stmt (assign "=" (name a) (assign "=" (binary "+" (name b) (name c)) (name d)))))
+f(x * y); ==> (unit-add (unit) (expr-stmt (call (name f) (args (binary "*" (name x) (name y))))))
+f(); ==> (unit-add (unit) (expr-stmt (call (name f) (args))))
+f(a,, b); ==> (unit-add (unit) (expr-stmt (call (name f) (args-add (args-add (args (name a)) (unbound)) (name b)))))
+wf = c.foo ~(,, 3); ==> (unit-add (unit) (expr-stmt (assign "=" (name wf) (call-operator-new (field (name c) foo) (args-add (args-add (args (unbound)) (unbound)) 3)))))
+m += bar ~(, 1000); ==> (unit-add (unit) (expr-stmt (assign "+=" (name m) (call-operator-new (name bar) (args-add (args (unbound)) 1000)))))
+role = (io.Role)(i & 1); ==> (unit-add (unit) (expr-stmt (assign "=" (name role) (cast (type-name (specs (qualified (name io) Role) (mods) (mods)) (ptrs)) (binary "&" (name i) 1)))))
+i = (int) 3; ==> (unit-add (unit) (expr-stmt (assign "=" (name i) (cast (type-name (specs int (mods) (mods)) (ptrs)) 3))))
+n = sizeof(io.PcapPacketHdr) + size; ==> (unit-add (unit) (expr-stmt (assign "=" (name n) (binary "+" (sizeof (field (name io) PcapPacketHdr)) (name size)))))
+n = sizeof(int); ==> (unit-add (unit) (expr-stmt (assign "=" (name n) (sizeof (type-name (specs int (mods) (mods)) (ptrs))))))
+n = countof(a); ==> (unit-add (unit) (expr-stmt (assign "=" (name n) (countof (name a)))))
+x = dynamic (Foo*) y; ==> (unit-add (unit) (expr-stmt (assign "=" (name x) (dynamic-cast (type-name (specs (name Foo) (mods) (mods)) (ptrs-add (ptrs) (ptr (mods)))) (name y)))))
+x = dynamic sizeof(y); ==> (unit-add (unit) (expr-stmt (assign "=" (name x) (dynamic-sizeof (name y)))))
+x = declof(y); ==> (unit-add (unit) (expr-stmt (assign "=" (name x) (declof (name y)))))
+x = bindingof(y); ==> (unit-add (unit) (expr-stmt (assign "=" (name x) (bindingof (name y)))))
+x = basetype2.foo(); ==> (unit-add (unit) (expr-stmt (assign "=" (name x) (call (field basetype2 foo) (args)))))
+x = await f(); ==> (unit-add (unit) (expr-stmt (assign "=" (name x) (await (call (name f) (args))))))
+x = try f(); ==> (unit-add (unit) (expr-stmt (assign "=" (name x) (try-expr (call (name f) (args))))))
+
+;; ---- 字面量：格式化、原样、十六进制串、捕获组、相邻拼接 --------------------------
+printf($"color $i = $name\n"); ==> (unit-add (unit) (expr-stmt (call (name printf) (args (fmt $"color $i = $name\n")))))
+printf($"a" $"b" (1, 2)); ==> (unit-add (unit) (expr-stmt (call (name printf) (args (call (concat (fmt $"a") (fmt $"b")) (args-add (args 1) 2))))))
+printf("x: %d\n", $0); ==> (unit-add (unit) (expr-stmt (call (name printf) (args-add (args "x: %d\n") (capture $0)))))
+c = 0x"61 62 63"; ==> (unit-add (unit) (expr-stmt (assign "=" (name c) 0x"61 62 63")))
+ip = 0d"127.0.0.1"; ==> (unit-add (unit) (expr-stmt (assign "=" (name ip) 0d"127.0.0.1")))
+s = r"\d+"; ==> (unit-add (unit) (expr-stmt (assign "=" (name s) r"\d+")))
+try usbDb.load(__DIR__ "/usb.ids"); ==> (unit-add (unit) (expr-stmt (try-expr (call (field (name usbDb) load) (args (concat __DIR__ "/usb.ids"))))))
+
+;; ---- 语句 ------------------------------------------------------------------------
+if (c) f(); else g(); ==> (unit-add (unit) (if (name c) (expr-stmt (call (name f) (args))) (expr-stmt (call (name g) (args)))))
+for (int i = 0; i < n; i++, off += 4) f(i); ==> (unit-add (unit) (for (var-decl (specs int (mods) (mods)) (dcls (init (dcl (ptrs) (name i) (suffixes) (no-ctor)) 0))) (binary "<" (name i) (name n)) (exprs-add (exprs (post-inc (name i))) (assign "+=" (name off) 4)) (expr-stmt (call (name f) (args (name i))))))
+switch (state, string_t(p, 1)) { case "a": break2; } ==> (unit-add (unit) (switch (exprs-add (exprs (name state)) (call (name string_t) (args-add (args (name p)) 1))) (unit-add (unit-add (unit) (case "a")) (expr-stmt break2))))
+assert(x > 0) ==> (unit-add (unit) (assert (binary ">" (name x) 0)))
+dyfield myproto { int x; } ==> (unit-add (unit) (dyfield myproto (unit-add (unit) (var-decl (specs int (mods) (mods)) (dcls (dcl (ptrs) (name x) (suffixes) (no-ctor)))))))
+reactor r { onevent bindingof(g_use)() { f(); } } ==> (unit-add (unit) (fn-def (specs (no-type) (mods-add (mods) reactor)) (dcl (ptrs) (name r) (suffixes) (no-ctor)) (compound (unit-add (unit) (onevent (events (bindingof (name g_use))) (formals) (compound (unit-add (unit) (expr-stmt (call (name f) (args))))))))))
+reactor r { onevent (bindingof(a), bindingof(b))() { f(); } } ==> (unit-add (unit) (fn-def (specs (no-type) (mods-add (mods) reactor)) (dcl (ptrs) (name r) (suffixes) (no-ctor)) (compound (unit-add (unit) (onevent (events-list (exprs-add (exprs (bindingof (name a))) (bindingof (name b)))) (formals) (compound (unit-add (unit) (expr-stmt (call (name f) (args))))))))))
+reactor r { onevent g_onApply() { f(); } } ==> (unit-add (unit) (fn-def (specs (no-type) (mods-add (mods) reactor)) (dcl (ptrs) (name r) (suffixes) (no-ctor)) (compound (unit-add (unit) (onevent (events (name g_onApply)) (formals) (compound (unit-add (unit) (expr-stmt (call (name f) (args))))))))))
+once f(); ==> (unit-add (unit) (once (expr-stmt (call (name f) (args)))))
+try { f(); } catch: g(); ==> (unit-add (unit-add (unit-add (unit) (try (compound (unit-add (unit) (expr-stmt (call (name f) (args))))))) (label "catch")) (expr-stmt (call (name g) (args))))
+unsafe { f(); } ==> (unit-add (unit) (unsafe (compound (unit-add (unit) (expr-stmt (call (name f) (args)))))))
+nestedscope: ==> (unit-add (unit) (label "nestedscope"))
+dylayout (p) { dyfield int x; } ==> (unit-add (unit) (dylayout (name p) (compound (unit-add (unit) (var-decl (specs int (mods-add (mods) dyfield) (mods)) (dcls (dcl (ptrs) (name x) (suffixes) (no-ctor))))))))
+break3; ==> (unit-add (unit) (expr-stmt break3))
+continue2; ==> (unit-add (unit) (expr-stmt continue2))
+throw; ==> (unit-add (unit) (throw))
+
+;; ---- 该拒的要拒 ------------------------------------------------------------------
+int x !!> unexpected end of input
+class C1 { !!> unexpected end of input
+f(a b); !!> unexpected
+

@@ -1,0 +1,652 @@
+;; Jancy —— 从 7 份 .llk（LL(2) + graco）手写转写。
+;;
+;; 与 asymptote 那份的差别不在规模，在**为什么非 GLR 不可**：
+;;
+;; jancy 的 12 处 `resolver(...)` 全是给 LL(2) 打的补丁 —— LL 只能看两个 token，看不出
+;; `(io.Socket) x` 是强制转换还是括号表达式、`new Foo(1)` 里 `Foo` 是类型还是函数、
+;; `{ x = 1 }` 里 `x =` 是命名初始化项还是赋值表达式。graco 的办法是**回头再扫一遍
+;; token 串**（那些 `*_rslv` 产生式就是拿来做前瞻子语法的），拿命令式谓词把歧义压掉。
+;;
+;; LR 天生就不需要大部分这些：项集里同时带着两条路，读到能区分的那个 token 时错的那条自然死。
+;; 12 处 resolver 里有 9 处在这份语法里**一条都没有对应物** —— 不是省掉了，是不存在。
+;;
+;; 剩下 3 处不是 LL 的毛病，是**语言本身真歧义**：要分开必须知道"这个名字是不是类型"，
+;; 那是符号表的事，任何 LR 语法都办不到。它们在这里写成 `(prefer N)`（= bison 的 %dprec）：
+;;
+;;   - `C1* c;`       声明还是乘法        → `decl -> specs dcl-list ";"` 标 (prefer 1)
+;;   - `(io.Role)(x)` 强制转换还是调用    → 强制转换那条标 (prefer 1)
+;;   - `C1 c(x)`      构造实参还是形参表  → 构造那条标 (prefer -1)（jancy 也是偏函数后缀）
+;;
+;; 另外 5 处偏好是"两棵树意思相同，只是想钉一棵"或"LL(2) 靠往前看一个 token 定的事"：
+;; 无名 curly 项、`class C {}`、`sizeof(x)` 里的名字、`new T(x)`、`dyfield x {}`、位域。
+;; 全部**明写在规则上**，驱动本身仍然不猜：没声明过偏好的两棵树照旧报错。
+;;
+;; 表达式部分刻意**不照抄 .llk 的级联**（`conditional_expr -> logical_or_expr -> ...`
+;; 十四层非终结符），改写成一个 `expr` 加一块优先级声明。两者接受的语言相同，但级联在 LR
+;; 表里会多出十几个只做单产生式归约的状态，白付代价。唯一一处语义上的偏差是赋值的结合位置，
+;; 理由与代价写在优先级块那里。
+;;
+;; 量过的覆盖率：jancy 自带的 528 份 `.jnc`（samples/ 51 份 + test/ 477 份）里 526 份
+;; 分析出**唯一**一棵树，0 处歧义。剩下两份：
+;;   - test/ioninja/api/ui_Layout.jnc:70 —— 那一行源码本身少了个分号
+;;   - test/ioninja/common/log_ThroughputCalc.jnc:110 —— `$"...$(f(x, "a:b"))"`，
+;;     格式化字面量里嵌了带引号的子表达式。见下面的边界。
+;;
+;; 第一阶段的边界（都写在这儿，不是忘了）：
+;;   - 格式化字面量 `$"..."` 整块当一个 FMT_LITERAL token，**内部不解析** —— jancy 自己也是
+;;     先整块存 token 串（expression_pass1）等第二遍再展开。代价是内层不能出现 `"`。
+;;   - `dynamic(` 那对合成 token（Lexer.cpp:534..543）：这里当成 "dynamic" "(" 两个普通 token
+;;   - `break2` / `continue3` / `basetype2` 的层号后缀：词法上当作单独的关键字列出前三档
+;;   - `dylib`、reactor 体里的绑定语法只到形状，语义留给后续阶段
+(grammar jnc
+  (tokens
+    ID INTEGER FP LITERAL FMT_LITERAL CAPTURE
+    INC DEC PTR IMPLY SHL SHR LOGAND LOGOR EQ NE LE GE
+    REFASSIGN ADDASSIGN SUBASSIGN MULASSIGN DIVASSIGN MODASSIGN
+    SHLASSIGN SHRASSIGN ANDASSIGN XORASSIGN ORASSIGN ATASSIGN
+    MATCH NOTMATCH ELLIPSIS
+    ;; 只用来标 %prec 的伪终结符
+    THEN UNARY CAST DECL_ID EXP_IN_PARENS)
+
+  ;; ---- 优先级：次序照 Expr.llk 的级联，从低到高 ------------------------------
+  (prec nonassoc DECL_ID)
+  (prec nonassoc THEN)
+  (prec nonassoc "else")
+  ;; 赋值最低、右结合。
+  ;;
+  ;; 这里跟 jancy 的级联**有一处刻意的偏差**，值得写清楚。jancy 的赋值是不对称的
+  ;; （Expr.llk:543..546）：`assignment_expr : unary_expr assignment_operator_expr?`，
+  ;; 左边只能是 unary_expr，右边却是完整的 conditional_expr。于是那边同时成立两件事：
+  ;;   - `x = a * b` 是 `x = (a * b)`（右边吃整条级联）
+  ;;   - `a + b = c` 是 `a + (b = c)`（赋值被夹在乘法层里，比 `+` 结合得更紧）
+  ;; 一个 `expr` 加一块优先级表达不出这种不对称 —— 要么把 unary_expr 那一层单独留出来，
+  ;; 那就等于把级联抄回来。这里选 C 的规矩：赋值最低、右结合。第一条一样，第二条变成
+  ;; `(a + b) = c`。量过：jancy 自带的 528 份源码里没有一处依赖第二条。
+  (prec right "=" REFASSIGN ADDASSIGN SUBASSIGN MULASSIGN DIVASSIGN MODASSIGN
+              SHLASSIGN SHRASSIGN ANDASSIGN XORASSIGN ORASSIGN ATASSIGN)
+  (prec right "?" ":")
+  (prec left LOGOR)
+  (prec left LOGAND)
+  (prec left "|")
+  (prec left "^")
+  (prec left "&")
+  (prec left EQ NE MATCH NOTMATCH)
+  (prec left "<" ">" LE GE)
+  (prec left SHL SHR)
+  (prec left "+" "-")
+  (prec left "*" "/" "%")
+  (prec left "@")
+  (prec right UNARY)
+  (prec left CAST)
+  (prec left EXP_IN_PARENS)
+  (prec left "(" ")" "[" "]" "." "~" PTR INC DEC)
+
+  (start unit)
+
+  ;; ---- 词法：Lexer.rl 的 token 表 ---------------------------------------------
+  (lex
+    (skip space)
+    ;; UTF-8 BOM。别人的源码开头真的会有（NetSnifferLog.jnc:1）。
+    (skip "\u{FEFF}")
+    (comment "//" (* (not "\n")))
+    (block-comment "/*" "*/")
+    (token FP (+ digit) "." (* digit) (? (or "e" "E") (? (set "+-")) (+ digit)))
+    (token FP (+ digit) (or "e" "E") (? (set "+-")) (+ digit))
+    ;; `0x"61 62 63"` —— 十六进制字面量，出来的是个 char 数组（60_HexLiterals.jnc:26）。
+    ;; 放在 INTEGER 那几条前面：同样长的匹配里声明在前的赢，而这条本来就更长。
+    (token LITERAL "0" (or "x" "X") "\"" (* (or (seq "\\" any) (not "\""))) "\"")
+    ;; `0d"127.0.0.1"` —— 十进制串字面量（JLinkRttSession.jnc:201）
+    (token LITERAL "0" (or "d" "D") "\"" (* (or (seq "\\" any) (not "\""))) "\"")
+    (token INTEGER "0" (or "x" "X") (+ hex))
+    (token INTEGER "0" (or "b" "B") (+ (set "01")))
+    (token INTEGER "0" (or "o" "O") (+ digit))
+    (token INTEGER (+ digit))
+    ;; `r"\d+"` —— 原样字面量（反斜杠不转义），正则 case 用的就是它（70_RegexSwitch.jnc:44）
+    (token LITERAL "r" "\"" (* (not "\"")) "\"")
+    ;; `$"色 $i = $name\n"` —— 格式化字面量。**内部不在这里解析**：jancy 自己也是先整块存下
+    ;; token 串（`expression_pass1`），等第二遍再展开。所以它在这份语法里就是一个原子字面量，
+    ;; `$(...)` 里的表达式留给后续阶段。`$0` 那种正则捕获是另一条（CAPTURE）。
+    (token FMT_LITERAL "$" "\"" (* (or (seq "\\" any) (not "\""))) "\"")
+    (token CAPTURE "$" (+ digit))
+    (token ID (or alpha "_") (* (or alnum "_")))
+    (string LITERAL "\"")
+    (string LITERAL "'")
+    ;; 词法期就融成一个 token 的多词关键字（Lexer.rl:263..301）。放在 keyword 里没用 ——
+    ;; 那是"一个 ID 改判"，这几条是"两个词并成一个"，所以走 punct，靠最长匹配吃掉。
+    (punct "bitflag enum" "bitflag enum")
+    (punct "opaque class" "opaque class")
+    (punct "static construct" "static construct")
+    (punct "postfix operator" "postfix operator")
+    (punct "dynamic sizeof" "dynamic sizeof")
+    (punct "dynamic countof" "dynamic countof")
+    (punct "dynamic typeof" "dynamic typeof")
+    (punct "dynamic offsetof" "dynamic offsetof")
+    (keyword ID INTEGER "break2" "break3" "continue2" "continue3" "basetype2")
+    ;; 预定义的字面量宏（Lexer.rl 里就是 LITERAL）：`__DIR__ "/usb.ids"` 靠相邻拼接接上
+    (keyword ID LITERAL "__DIR__" "__FILE__" "__FUNC__" "__LINE__" "__DATE__" "__TIME__")
+    (keyword ID
+      "import" "namespace" "extension" "dylib" "using" "friend" "public" "protected"
+      "pragma" "setas" "typedef" "alias" "static" "threadlocal" "abstract" "virtual"
+      "override" "mutable" "disposable" "dyfield" "unsigned" "bigendian" "const"
+      "readonly" "cmut" "volatile" "weak" "thin" "safe" "unsafe" "errorcode"
+      "cdecl" "stdcall" "jnccall" "thiscall" "array" "function" "property" "bindable"
+      "autoget" "indexed" "multicast" "event" "reactor" "async" "anydata"
+      "void" "bool" "int" "intptr" "char" "short" "long" "float" "double"
+      "enum" "struct" "union" "class" "get" "set" "construct" "destruct" "operator"
+      "new" "sizeof" "countof" "typeof" "declof" "offsetof" "bindingof"
+      "if" "else" "for" "while" "do" "break" "continue" "return" "switch" "case"
+      "default" "once" "onevent" "try" "throw" "catch" "finally" "nestedscope"
+      "assert" "await" "dylayout" "basetype" "this" "true" "false" "null"
+      "dynamic")
+    (punct SHLASSIGN "<<=")
+    (punct SHRASSIGN ">>=")
+    (punct ELLIPSIS "...")
+    (punct INC "++")
+    (punct DEC "--")
+    (punct PTR "->")
+    (punct IMPLY "=>")
+    (punct SHL "<<")
+    (punct SHR ">>")
+    (punct LOGAND "&&")
+    (punct LOGOR "||")
+    (punct EQ "==")
+    (punct NE "!=")
+    (punct LE "<=")
+    (punct GE ">=")
+    (punct REFASSIGN ":=")
+    (punct ADDASSIGN "+=")
+    (punct SUBASSIGN "-=")
+    (punct MULASSIGN "*=")
+    (punct DIVASSIGN "/=")
+    (punct MODASSIGN "%=")
+    (punct ANDASSIGN "&=")
+    (punct XORASSIGN "^=")
+    (punct ORASSIGN "|=")
+    (punct ATASSIGN "@=")
+    (punct MATCH "=~")
+    (punct NOTMATCH "!~")
+    (op "+" "-" "*" "/" "%" "^" "&" "|" "~" "!" "<" ">" "?" ":" "="
+        "(" ")" "[" "]" "{" "}" "," ";" "." "@"))
+
+  ;; ---- 顶层与声明 --------------------------------------------------------------
+  (rule unit
+    (-> () (unit))
+    (-> (unit decl) (unit-add $1 $2)))
+
+  (rule decl
+    (-> ("import" LITERAL) (import $2))
+    (-> ("namespace" qname "{" unit "}") (namespace $2 $4))
+    (-> ("extension" qname base-list "{" unit "}") (extension $2 $3 $5))
+    (-> ("dylib" qname "{" unit "}") (dylib $2 $4))
+    (-> ("using" "namespace" qname ";") (using-namespace $3))
+    (-> ("using" "extension" qname ";") (using-extension $3))
+    ;; pragma 后面**不带**分号 —— 分号由空语句收（跟命名类型那条同一个理由：两条都留，
+    ;; `pragma(A, 1);` 就既是"带分号的 pragma"又是"pragma + 空语句"）。实参里还能出现
+    ;; `default` 这个关键字（81_Enums.jnc:54）：它是"恢复默认值"，不是表达式。
+    (-> ("pragma" "(" pragma-args ")") (pragma $3))
+    (-> ("friend" qname ";") (friend $2))
+    (-> ("public" ":") (access "public"))
+    (-> ("protected" ":") (access "protected"))
+    (-> ("typedef" specs dcl-list ";") (typedef $2 $3))
+    ;; 属性块（`[ RegexAnchored ]`）挂在它后面那条声明/语句上
+    (-> (attr-block decl) (attributed $1 $2))
+    ;; 带体的命名类型自己就是一条声明。**后面不带分号那一条** —— 分号由空语句收。
+    ;; 两条都留就有歧义：`struct S { };` 会既是"带分号的类型声明"又是"类型声明 + 空语句"。
+    (-> (named-type) (type-decl $1))
+    ;; 无名聚合光秃秃一条也是声明：命名空间里的 `enum { A = 1, }`（io_PcapFile.jnc:13）、
+    ;; 结构体里的匿名 `union { ... }`（UsbLogRecordCode.jnc:79）都没有声明符也没有分号。
+    (-> (anon-type) (type-decl $1))
+    ;; `(prefer 1)`：`C1* c;` 既是"声明一个 C1 指针"又是"C1 乘 c 这条语句"，两棵树都合法。
+    ;; **任何 LR 语法都分不开它** —— 要分开得知道 C1 是不是类型名，那是符号表的事，jancy 也
+    ;; 是这么干的（DeclarationSpecifier.llk:258..278 的 findType）。这里把偏好明写出来：
+    ;; 两条都能走通时算声明。`a * b;` 这种"纯乘法语句"于是被判成声明 —— 与 C 的规矩一致。
+    (-> (specs dcl-list ";") (prefer 1) (var-decl $1 $2))
+    (-> (specs dcl compound) (fn-def $1 $2 $3))
+    ;; 完全没有说明符的那一类：`construct() {}`、`get() {}`、`operator += (int d);`。
+    ;; **只收特殊 core** —— 否则 `x;` 既是表达式语句又是函数原型，那是真歧义。
+    (-> (special-dcl compound) (fn-def (specs) $1 $2))
+    ;; `(prefer -1)`：`m_field.construct(x);` 既是"调用一个构造函数"又是"声明一个
+    ;; 限定名构造原型"（03_Storage.jnc:51）。带体的那条没这个问题（体不像表达式），
+    ;; 光一个分号的这条要让路给表达式语句。
+    (-> (special-dcl ";") (prefer -1) (fn-proto (specs) $1))
+    ;; 花括号初始化之后 jancy 允许省掉分号（samples/jnc/10_DataPtrRange.jnc:29）。
+    ;; 所以带花括号初始化的这条**不带**分号，`;` 由 empty-decl 收 —— 两条不重叠。
+    (-> (specs dcl "=" curly) (var-decl-curly $1 $2 $4)))
+
+  ;; 属性块。jancy 的 `[ name, name = expr ]`，挂在下一条声明上。
+  (rule attr-block
+    (-> ("[" attr-list "]") (attrs $2)))
+  (rule pragma-args
+    (-> (pragma-arg) (args $1))
+    (-> (pragma-args "," pragma-arg) (args-add $1 $3)))
+  (rule pragma-arg
+    (-> ("default") (pragma-default))
+    (-> (expr) $1))
+  (rule attr-list
+    (-> (attr) (attrs $1))
+    (-> (attr-list "," attr) (attrs-add $1 $3))
+    ;; 结尾可以多一个逗号（io_Loopback.jnc:20..22）
+    (-> (attr-list ",") $1))
+  (rule attr
+    (-> (ID) (attr $1))
+    (-> (ID "=" expr) (attr $1 $3))
+    ;; `[ @MsTpAttr ]` —— 引用一个属性集（io_EthernetTemplates.jnc:32）
+    (-> ("@" qname) (attr-ref $2)))
+
+  ;; 说明符表。照 DeclarationSpecifier.llk:15..42：修饰符与类型说明符混着排，**至少一个**，
+  ;; 类型说明符可以完全没有（`event m_e();`、`alias dispose = release;` 都是这样）。
+  ;;
+  ;; 但**语法层就把"最多一个类型说明符"钉死**，写成 `mods type-spec mods` —— 不能写成
+  ;; 一串 spec 混排。理由是量出来的：混排的话 `void set(int x)` 里的 `int x` 既是
+  ;; "类型 int + 声明符 x"又是"两个类型说明符 + 无名形参"，一半的语料当场变歧义。
+  ;; jancy 用的是命令式的 `setType` 去撞第二次赋值，我们用产生式的形状去挡。
+  (rule specs
+    (-> (mods modifier) (specs (no-type) (mods-add $1 $2)))
+    (-> (mods type-spec mods) (specs $2 $1 $3)))
+  (rule mods
+    (-> () (mods))
+    (-> (mods modifier) (mods-add $1 $2)))
+  (rule modifier
+    (-> ("static") $1) (-> ("threadlocal") $1) (-> ("abstract") $1) (-> ("virtual") $1)
+    (-> ("override") $1) (-> ("mutable") $1) (-> ("disposable") $1) (-> ("const") $1)
+    (-> ("readonly") $1) (-> ("cmut") $1) (-> ("volatile") $1) (-> ("weak") $1)
+    (-> ("thin") $1) (-> ("unsigned") $1) (-> ("bigendian") $1) (-> ("safe") $1)
+    (-> ("unsafe") $1) (-> ("errorcode") $1) (-> ("cdecl") $1) (-> ("stdcall") $1)
+    (-> ("jnccall") $1) (-> ("thiscall") $1) (-> ("property") $1) (-> ("bindable") $1)
+    (-> ("autoget") $1) (-> ("indexed") $1) (-> ("multicast") $1) (-> ("event") $1)
+    (-> ("reactor") $1) (-> ("async") $1) (-> ("public") $1) (-> ("protected") $1)
+    (-> ("alias") $1) (-> ("dyfield") $1) (-> ("setas") $1) (-> ("function") $1)
+    (-> ("array") $1))
+  (rule type-spec
+    (-> ("void") $1) (-> ("bool") $1) (-> ("int") $1) (-> ("intptr") $1)
+    (-> ("char") $1) (-> ("short") $1) (-> ("long") $1) (-> ("float") $1)
+    (-> ("double") $1) (-> ("anydata") $1)
+    ;; 光一个 `class` 就是"抽象类"这个类型（DeclarationSpecifier.llk:169..172）。
+    ;; `(prefer -1)`：`class C1 { ... }` 否则既是"命名类型声明"又是"抽象类类型 + 声明符 C1
+    ;; + 函数体"。jancy 靠 LL(2) 往前看一个 token 分开，我们把偏好明写出来：命名类型赢。
+    (-> ("class") (prefer -1) (abstract-class))
+    ;; 属性模板：`property { ... }` 整块当一个类型（同上 300..315）
+    (-> ("property" "{" unit "}") (property-template $3))
+    ;; `(prec DECL_ID)`：`.` 在优先级表的最高一级，所以这条规则一挂上最低的那级，
+    ;; "把 `.ID` 继续吃进 qname"就永远赢过"先把 qname 归约成类型说明符"。少了这一条，
+    ;; `new ui.LoginDlg` 会既是"new 一个 ui.LoginDlg"又是"取 (new ui) 的 LoginDlg 成员"。
+    (-> (qname) (prec DECL_ID) $1)
+    (-> (anon-type) $1)
+    (-> ("typeof" "(" type-or-expr ")") (typeof $3)))
+
+  ;; 带体的聚合分成**有名**与**无名**两条，这是刻意的分家：
+  ;;
+  ;;   - 有名的（`class C1 { ... }`）只当声明用，不当类型说明符用；
+  ;;   - 无名的（`struct { int x; } s;`）只当类型说明符用。
+  ;;
+  ;; 不分家就会有这么一处真歧义（量出来的，01_Classes.jnc 缩到七行就是它）：
+  ;;
+  ;;   class C1 { }
+  ;;   C1.construct() { }
+  ;;
+  ;; 后面那条既是"C1 的构造函数的类外定义"，又是"声明一个类型为 `class C1{}`、名字叫
+  ;; `C1.construct`、带函数体的东西"。jancy 那边是命令式地"读完体就结束这条声明"
+  ;; （setDeclarationBody），语法层要表达同一件事，就得让有名聚合不能出现在说明符位置。
+  (rule named-type
+    (-> (agg-key qname base-list "{" unit "}") (agg $1 $2 $3 $5))
+    (-> (enum-key qname enum-base "{" enum-body "}") (enum $1 $2 $3 $5)))
+  (rule anon-type
+    (-> (agg-key base-list "{" unit "}") (agg $1 (anon) $2 $4))
+    (-> (enum-key enum-base "{" enum-body "}") (enum $1 (anon) $2 $4)))
+  (rule agg-key
+    (-> ("struct") $1) (-> ("union") $1) (-> ("class") $1) (-> ("opaque class") $1))
+  (rule enum-key
+    (-> ("enum") $1) (-> ("bitflag enum") $1))
+  (rule base-list
+    (-> () (bases))
+    (-> (":" qname-list) $2))
+  (rule enum-base
+    (-> () (no-base))
+    (-> (":" specs) $2))
+  (rule qname-list
+    (-> (qname) (qnames $1))
+    (-> (qname-list "," qname) (qnames-add $1 $3)))
+  (rule enum-body
+    (-> () (enums))
+    (-> (enum-items) $1)
+    (-> (enum-items ",") $1))
+  (rule enum-items
+    (-> (enum-item) (enums $1))
+    (-> (enum-items "," enum-item) (enums-add $1 $3)))
+  (rule enum-item
+    (-> (ID) (enum-item $1))
+    (-> (ID "=" expr) (enum-item $1 $3))
+    ;; 枚举项也能带属性块（io_Df1.jnc:63）
+    (-> (attr-block enum-item) (attributed $1 $2)))
+  (rule qname
+    (-> (ID) (name $1))
+    (-> (qname "." ID) (qualified $1 $3)))
+
+  ;; ---- 声明符 ------------------------------------------------------------------
+  (rule dcl-list
+    (-> (init-dcl) (dcls $1))
+    (-> (dcl-list "," init-dcl) (dcls-add $1 $3)))
+  (rule init-dcl
+    (-> (dcl) $1)
+    (-> (dcl "=" initializer) (init $1 $3))
+    (-> (dcl REFASSIGN initializer) (ref-init $1 $3)))
+  (rule dcl
+    (-> (ptrs dcl-core suffixes ctor) (dcl $1 $2 $3 $4)))
+  ;; 指针前缀。照 Declarator.llk:392..402：**只有 `*`**，而且修饰符只能跟在 `*` 后面。
+  ;; 早先写成 `ptr -> "*" | "&" | "^" | modifier` 是错的 —— 让 `int const x` 有了两棵树
+  ;; （const 归说明符表还是归前缀）。`char const*` 里的 const 在 jancy 里就属于说明符表。
+  (rule ptrs
+    (-> () (ptrs))
+    (-> (ptrs ptr-group) (ptrs-add $1 $2)))
+  (rule ptr-group
+    (-> ("*" mods) (ptr $2)))
+  ;; C++ 式的"可构造对象声明"：`C1 c(100, 200);`、`C1 g construct(10);`
+  ;; （Declarator.llk:503..508）。裸括号那条与函数后缀重叠 —— `C1 c(x)` 既像"形参是无名的
+  ;; x 类型"又像"用 x 构造"。jancy 的 function_suffix_rslv 是"能当函数后缀就当函数后缀"，
+  ;; 这里把同一条偏好明写成 `(prefer -1)`：两条都通时函数后缀赢。
+  ;;
+  ;; 裸括号刻意**拆成两条**（恰好一个实参 / 至少两个实参），就是为了不去碰空的 `()` ——
+  ;; 那一对括号只归函数后缀。实参里也能有空位：`state(flags,,, len)`（jnc/test53.jnc:17）。
+  (rule ctor
+    (-> () (no-ctor))
+    (-> ("construct" "(" opt-args ")") (ctor $3))
+    (-> ("(" expr ")") (prefer -1) (ctor (args $2)))
+    (-> ("(" opt-arg-list "," opt-arg ")") (prefer -1) (ctor (args-add $2 $4))))
+  (rule dcl-core
+    (-> (qname) $1)
+    (-> (special) $1)
+    ;; `int g_simpleProp.get() { ... }` —— 限定名以特殊名收尾（samples/jnc/30_*.jnc:25）
+    (-> (qname "." special) (qualified-special $1 $3)))
+  (rule special-dcl
+    (-> (ptrs special suffixes) (dcl $1 $2 $3))
+    (-> (ptrs qname "." special suffixes) (dcl $1 (qualified-special $2 $4) $5)))
+  (rule special
+    (-> ("get") (accessor "get"))
+    (-> ("set") (accessor "set"))
+    (-> ("construct") (special "construct"))
+    (-> ("destruct") (special "destruct"))
+    (-> ("static construct") (special "static construct"))
+    (-> ("operator" op-name) (operator $2))
+    (-> ("postfix operator" op-name) (postfix-operator $2)))
+  (rule op-name
+    (-> ("+") $1) (-> ("-") $1) (-> ("*") $1) (-> ("/") $1) (-> ("%") $1)
+    (-> ("^") $1) (-> ("&") $1) (-> ("|") $1) (-> ("~") $1) (-> ("!") $1)
+    (-> ("<") $1) (-> (">") $1) (-> ("@") $1)
+    (-> (EQ) $1) (-> (NE) $1) (-> (LE) $1) (-> (GE) $1)
+    (-> (SHL) $1) (-> (SHR) $1) (-> (LOGAND) $1) (-> (LOGOR) $1)
+    (-> (INC) $1) (-> (DEC) $1) (-> ("=") $1) (-> (PTR) $1)
+    (-> (ADDASSIGN) $1) (-> (SUBASSIGN) $1) (-> (MULASSIGN) $1) (-> (DIVASSIGN) $1)
+    (-> (MODASSIGN) $1) (-> (SHLASSIGN) $1) (-> (SHRASSIGN) $1) (-> (ANDASSIGN) $1)
+    (-> (XORASSIGN) $1) (-> (ORASSIGN) $1) (-> (ATASSIGN) $1) (-> (REFASSIGN) $1)
+    (-> ("(" ")") (call-op))
+    (-> ("[" "]") (index-op))
+    (-> (specs ptrs) (cast-op $1 $2)))
+  (rule suffixes
+    (-> () (suffixes))
+    (-> (suffixes suffix) (suffixes-add $1 $2)))
+  ;; 刻意**没有**花括号后缀：属性体与函数体是同一个形状（`{ 一串声明 }`），
+  ;; 所以两者共用 `specs dcl compound` 那一条。留个花括号后缀只会凭空造出歧义。
+  (rule suffix
+    (-> ("(" formals ")") (fn-suffix $2))
+    (-> ("[" expr-or-empty "]") (array-suffix $2))
+    ;; `void foo() const { }` —— 形参表之后的修饰符。jancy 这里**只收 const**
+    ;; （Declarator.llk:484..489），照收：放宽成任意修饰符只会凭空造歧义。
+    (-> ("const") (post-modifier $1))
+    ;; 位域：`uint8_t m_flag : 1;`（Declarator.llk:494..499）。jancy 在那条上挂了
+    ;; `resolver({ return false; })`，注释写得很清楚："宁可当条件表达式"（`p = new int : 3`）。
+    ;; 同一句话在这儿写成 `(prefer -1)`。
+    (-> (":" INTEGER) (prefer -1) (bitfield $2)))
+
+  (rule formals
+    (-> () (formals))
+    (-> (formal-list) $1)
+    (-> (ELLIPSIS) (formals-varargs (formals)))
+    (-> (formal-list "," ELLIPSIS) (formals-varargs $1)))
+  (rule formal-list
+    (-> (formal) (formals $1))
+    (-> (formal-list "," formal) (formals-add $1 $3)))
+  (rule formal
+    (-> (specs dcl) (formal $1 $2))
+    (-> (specs dcl "=" expr) (formal $1 $2 $4))
+    ;; 无名形参：只有类型（可带 `*`/`&`）。dcl 里的 core 是必须的，所以两条不重叠。
+    (-> (specs ptrs) (formal-anon $1 $2)))
+
+  (rule type-name
+    (-> (specs ptrs) (type-name $1 $2))
+    (-> (specs ptrs "(" formals ")") (fn-type $1 $2 $4)))
+  (rule type-or-expr
+    ;; `sizeof(x)` 里的 x 既能是类型名又能是表达式。`(prefer -1)`：两条都通时算表达式 ——
+    ;; `countof(a)` 里的 a 是个数组变量，那才是这行代码的意思。`sizeof(int)` 只有类型这一条路，
+    ;; 偏好在那儿不起作用。这是 Expr.llk 那处 sizeof resolver 在 LR 里的对应物。
+    (-> (type-name) (prefer -1) $1)
+    (-> (expr) $1))
+
+  ;; 初始化式里刻意**不含**裸花括号：那条走 decl 的 var-decl-curly（见上面的理由）
+  (rule initializer
+    (-> (expr) $1))
+  (rule curly
+    (-> ("{" curly-items "}") (curly $2)))
+  ;; 空项是**一个产生式**（`curly-item -> <空>`），不是"可选的逗号"。理由是唯一性：
+  ;; 再留一条 `curly-items -> <空>` 或者 `curly-list ","`，`{}` 和 `{1,}` 就各有两棵树了。
+  ;; jancy 的 `{ ,, 3, 4,,, 7 }`（84_CurlyInitializers.jnc:45）于是是七项，其中四项是空的。
+  (rule curly-items
+    (-> (curly-list) $1))
+  (rule curly-list
+    (-> (curly-item) (items $1))
+    (-> (curly-list "," curly-item) (items-add $1 $3)))
+  ;; 前两条正是 Expr.llk:995 那处 `resolver(TokenKind_Identifier '=')` 要判的东西。
+  ;; `(prefer 1)`：`{ m_y = 2000 }` 里的 `m_y = 2000` 既是"命名初始化项"又是"赋值表达式"，
+  ;; 两棵树都合法 —— 花括号里写这个只可能是前一个意思，把偏好明写出来。
+  (rule curly-item
+    (-> () (skip-item))
+    (-> (ID "=" initializer) (prefer 1) (named-item $1 $3))
+    (-> ("[" expr "]" "=" initializer) (prefer 1) (indexed-item $2 $5))
+    (-> (curly) $1)
+    (-> (initializer) $1))
+
+  ;; ---- 语句（Stmt.llk:77..104 那张表）-------------------------------------------
+  (rule compound
+    (-> ("{" unit "}") (compound $2)))
+  (rule stmt
+    (-> (";") (empty-stmt))
+    (-> (compound) $1)
+    (-> (expr ";") (expr-stmt $1))
+    ;; 控制语句的**体是 decl，不是 stmt**。看着奇怪，理由很实在：属性块挂在 decl 上
+    ;; （`decl -> attr-block decl`），而 jancy 真的会往 if 的体上挂属性 ——
+    ;;
+    ;;   if (hdr.m_control & ...)
+    ;;       [ displayName = "Hop count" ]
+    ;;       dyfield uint8_t hopCount;
+    ;;
+    ;; （BacNetNpdu.jnc:65..67）。`decl -> stmt` 本来就成立，所以这里换成 decl 只是放宽，
+    ;; 不会多出第二条派生 —— 换成"再给 stmt 也加一条 attr-block"才会（那两条会重叠）。
+    (-> ("if" "(" expr ")" decl) (prec THEN) (if $3 $5))
+    (-> ("if" "(" expr ")" decl "else" decl) (if $3 $5 $7))
+    (-> ("while" "(" expr ")" decl) (while $3 $5))
+    (-> ("do" decl "while" "(" expr ")" ";") (do $2 $5))
+    (-> ("for" "(" for-init ";" expr-or-empty ";" for-step ")" decl) (for $3 $5 $7 $9))
+    ;; switch 的括号里是**逗号串**：正则 switch 拿第二个表达式喂状态
+    ;; （`switch (state, string_t(p, 1))`，72_StreamRegexSwitch.jnc:37）
+    (-> ("switch" "(" expr-list ")" "{" unit "}") (switch $3 $6))
+    (-> ("case" expr ":") (case $2))
+    (-> ("default" ":") (default))
+    (-> ("break" ";") (break 1))
+    (-> ("break2" ";") (break 2))
+    (-> ("break3" ";") (break 3))
+    (-> ("continue" ";") (continue 1))
+    (-> ("continue2" ";") (continue 2))
+    (-> ("continue3" ";") (continue 3))
+    (-> ("return" ";") (return))
+    (-> ("return" expr ";") (return $2))
+    (-> ("throw" ";") (throw))
+    (-> ("throw" expr ";") (throw $2))
+    (-> ("once" stmt) (once $2))
+    (-> ("try" compound) (try $2))
+    (-> ("unsafe" compound) (unsafe $2))
+    (-> ("nestedscope" ":") (label "nestedscope"))
+    (-> ("catch" ":") (label "catch"))
+    (-> ("finally" ":") (label "finally"))
+    ;; assert 后面**不带分号** —— jancy 的 assert_stmt 就是读到 `)` 为止
+    ;; （Stmt.llk:416..436，那条产生式末尾没有 `';'`）。分号照旧由空语句收。
+    (-> ("assert" "(" expr ")") (assert $3))
+    (-> ("assert" "(" expr "," expr ")") (assert $3 $5))
+    (-> ("dylayout" "(" expr ")" compound) (dylayout $3 $5))
+    ;; `(prefer 1)`：`dyfield 名字 { ... }` 里的 `dyfield` 既是存储说明符（于是整条变成
+    ;; "声明一个叫这个名字、带函数体的东西"）又是这条语句的关键字。后者才对。
+    (-> ("dyfield" "{" unit "}") (prefer 1) (dyfield (anon) $3))
+    (-> ("dyfield" ID "{" unit "}") (prefer 1) (dyfield $2 $4))
+    ;; `onevent 事件名 (形参) { 体 }`（Stmt.llk:466..483）。事件名要么是一个表达式，
+    ;; 要么是一对括号里的一串。`(prefer 1)` 给括号那条：`onevent (x)()` 里的 `(x)` 既是
+    ;; "括号表达式"又是"只有一项的事件串"，两者意思一样，钉成后者省一次歧义报错。
+    (-> ("onevent" event-name "(" formals ")" compound) (onevent $2 $4 $6)))
+  (rule event-name
+    (-> (expr) (events $1))
+    (-> ("(" expr-list ")") (prefer 1) (events-list $2)))
+  (rule for-init
+    (-> () (none))
+    (-> (expr-list) $1)
+    (-> (specs dcl-list) (prefer 1) (var-decl $1 $2)))
+  ;; 步进那一格是**逗号串**：`for (...; ...; i++, bitOffset += reportSize)`
+  ;; （HidUtils.jnc:213）。jancy 没有逗号算符，逗号只在这几处成串。
+  (rule for-step
+    (-> () (none))
+    (-> (expr-list) $1))
+
+  ;; 语句与声明混在同一串里 —— jancy 的 local_declaration_list 就是这样，函数体里
+  ;; `int i = 0;` 与 `i = 0;` 是同一层的两条选择。这也是这份语法里冲突最多的地方，
+  ;; 而它恰好是 LR 最擅长的：两条路一起带着走，读到分号前那个 token 时错的那条死。
+  (rule decl
+    (-> (stmt) $1))
+
+  ;; ---- 表达式：一个 expr 加一块优先级，不照抄 .llk 那十四层级联 -----------------
+  (rule expr-or-empty
+    (-> () (none))
+    (-> (expr) $1))
+  (rule expr-list
+    (-> (expr) (exprs $1))
+    (-> (expr-list "," expr) (exprs-add $1 $3)))
+  ;; `bar ~(, 1000)` / `f(a,, b)` —— 空位表示"这一格先不绑"（23_Multicasts.jnc:44、
+  ;; ui_SocketUi.jnc:107）。空位跟花括号初始化那边一样，是一条空产生式，不是"可选的逗号"。
+  ;; 三条刻意分开写（空 / 恰好一个 / 至少两格）：不这么分，`()` 就既是"没有实参"又是
+  ;; "一个空位"，那是白送的歧义。
+  (rule opt-args
+    (-> () (args))
+    (-> (expr) (args $1))
+    (-> (opt-arg-list "," opt-arg) (args-add $1 $3)))
+  (rule opt-arg-list
+    (-> (opt-arg) (args $1))
+    (-> (opt-arg-list "," opt-arg) (args-add $1 $3)))
+  (rule opt-arg
+    (-> () (unbound))
+    (-> (expr) $1))
+  (rule member
+    (-> (ID) $1)
+    (-> ("get") $1)
+    (-> ("set") $1)
+    (-> ("construct") $1)
+    (-> ("destruct") $1))
+
+  (rule expr
+    (-> (expr LOGOR expr) (binary "||" $1 $3))
+    (-> (expr LOGAND expr) (binary "&&" $1 $3))
+    (-> (expr "|" expr) (binary "|" $1 $3))
+    (-> (expr "^" expr) (binary "^" $1 $3))
+    (-> (expr "&" expr) (binary "&" $1 $3))
+    (-> (expr EQ expr) (binary "==" $1 $3))
+    (-> (expr NE expr) (binary "!=" $1 $3))
+    (-> (expr MATCH expr) (binary "=~" $1 $3))
+    (-> (expr NOTMATCH expr) (binary "!~" $1 $3))
+    (-> (expr "<" expr) (binary "<" $1 $3))
+    (-> (expr ">" expr) (binary ">" $1 $3))
+    (-> (expr LE expr) (binary "<=" $1 $3))
+    (-> (expr GE expr) (binary ">=" $1 $3))
+    (-> (expr SHL expr) (binary "<<" $1 $3))
+    (-> (expr SHR expr) (binary ">>" $1 $3))
+    (-> (expr "+" expr) (binary "+" $1 $3))
+    (-> (expr "-" expr) (binary "-" $1 $3))
+    (-> (expr "*" expr) (binary "*" $1 $3))
+    (-> (expr "/" expr) (binary "/" $1 $3))
+    (-> (expr "%" expr) (binary "%" $1 $3))
+    (-> (expr "@" expr) (binary "@" $1 $3))
+    (-> (expr "?" expr ":" expr) (cond $1 $3 $5))
+    (-> (expr "=" expr) (assign "=" $1 $3))
+    (-> (expr "=" curly) (assign "=" $1 $3))
+    (-> (expr REFASSIGN expr) (assign ":=" $1 $3))
+    (-> (expr ADDASSIGN expr) (assign "+=" $1 $3))
+    (-> (expr SUBASSIGN expr) (assign "-=" $1 $3))
+    (-> (expr MULASSIGN expr) (assign "*=" $1 $3))
+    (-> (expr DIVASSIGN expr) (assign "/=" $1 $3))
+    (-> (expr MODASSIGN expr) (assign "%=" $1 $3))
+    (-> (expr SHLASSIGN expr) (assign "<<=" $1 $3))
+    (-> (expr SHRASSIGN expr) (assign ">>=" $1 $3))
+    (-> (expr ANDASSIGN expr) (assign "&=" $1 $3))
+    (-> (expr XORASSIGN expr) (assign "^=" $1 $3))
+    (-> (expr ORASSIGN expr) (assign "|=" $1 $3))
+    (-> (expr ATASSIGN expr) (assign "@=" $1 $3))
+    (-> ("+" expr) (prec UNARY) (unary "+" $2))
+    (-> ("-" expr) (prec UNARY) (unary "-" $2))
+    (-> ("~" expr) (prec UNARY) (unary "~" $2))
+    (-> ("!" expr) (prec UNARY) (unary "!" $2))
+    (-> ("&" expr) (prec UNARY) (addr $2))
+    (-> ("*" expr) (prec UNARY) (indirect $2))
+    (-> (INC expr) (prec UNARY) (pre-inc $2))
+    (-> (DEC expr) (prec UNARY) (pre-dec $2))
+    (-> ("await" expr) (prec UNARY) (await $2))
+    (-> ("try" expr) (prec UNARY) (try-expr $2))
+    (-> ("new" type-name) (prec UNARY) (new $2))
+    ;; `(prefer 1)`：`new Layout(x)` 里的括号既能读成"构造实参"，又能读成 type-name 尾巴上的
+    ;; 函数类型后缀（`Layout(无名形参 x)`）。前者才是这行代码的意思。
+    (-> ("new" type-name "(" opt-args ")") (prec UNARY) (prefer 1) (new $2 $4))
+    ;; `new ui.EnumPropertyOption[count]` —— 分配一个数组。`[` 的优先级最高，所以
+    ;; "先归约 new 再取下标"那条在建表时就被移进赢掉了，这里是唯一解。
+    (-> ("new" type-name "[" expr "]") (prec UNARY) (new-array $2 $4))
+    ;; `new Point { m_y = 2000, m_z = 3000 }`（84_CurlyInitializers.jnc:66）
+    (-> ("new" type-name curly) (prec UNARY) (new-curly $2 $3))
+    ;; C 式强制转换。跟 asymptote 一样，靠 `(` `)` 那一级最高的优先级把它与括号
+    ;; 表达式分开 —— 而括号表达式那条标 EXP_IN_PARENS。这是 Expr.llk:700 那处
+    ;; `resolver(cast_operator_rslv)` 在 LR 里的对应物。
+    ;;
+    ;; 但优先级只挡得住"括号里是表达式还是类型"这一半。剩下的一半是 `(io.Role)(i & 1)`：
+    ;; 括号里光一个限定名时，"强制转换"与"调用一个括号里的函数"两棵树都合法，要分开必须
+    ;; 知道那个名字是不是类型 —— 又是符号表的事。`(prefer 1)` 把偏好明写出来：算强制转换。
+    ;; 代价是 `(a) - b` 这种写法会被判成"把 -b 转成 a 类型"。jancy 那边靠 findType 分，
+    ;; 我们这一层分不了，这是**明写下来的取舍**，不是漏掉。
+    (-> ("(" type-name ")" expr) (prec CAST) (prefer 1) (cast $2 $4))
+    (-> ("dynamic" "(" type-name ")" expr) (prec CAST) (dynamic-cast $3 $5))
+    (-> (expr "(" opt-args ")") (call $1 $3))
+    (-> (expr "~" "(" opt-args ")") (call-operator-new $1 $4))
+    (-> (expr "[" expr-or-empty "]") (index $1 $3))
+    (-> (expr INC) (post-inc $1))
+    (-> (expr DEC) (post-dec $1))
+    (-> (expr "." member) (field $1 $3))
+    (-> (expr PTR member) (ptr-field $1 $3))
+    (-> ("(" expr ")") (prec EXP_IN_PARENS) $2)
+    (-> (ID) (name $1))
+    (-> ("this") (this))
+    (-> ("basetype") (basetype 1))
+    (-> ("basetype2") (basetype 2))
+    (-> (INTEGER) $1)
+    (-> (FP) $1)
+    (-> (literal) $1)
+    ;; `$0` / `$1` —— 正则 switch 里的捕获组（70_RegexSwitch.jnc:39）
+    (-> (CAPTURE) (capture $1))
+    (-> ("true") (true))
+    (-> ("false") (false))
+    (-> ("null") (null))
+    (-> ("sizeof" "(" type-or-expr ")") (sizeof $3))
+    (-> ("countof" "(" type-or-expr ")") (countof $3))
+    (-> ("typeof" "(" type-or-expr ")") (typeof-expr $3))
+    (-> ("declof" "(" type-or-expr ")") (declof $3))
+    (-> ("offsetof" "(" expr ")") (offsetof $3))
+    (-> ("bindingof" "(" expr ")") (bindingof $3))
+    (-> ("dynamic sizeof" "(" expr ")") (dynamic-sizeof $3))
+    (-> ("dynamic countof" "(" expr ")") (dynamic-countof $3))
+    (-> ("dynamic typeof" "(" expr ")") (dynamic-typeof $3))
+    (-> ("dynamic offsetof" "(" expr ")") (dynamic-offsetof $3)))
+  ;; 相邻的字面量自动拼接（Expr.llk:literal 是 `literal_atom+`），再可以直接跟一对括号。
+  ;; 格式化字面量也在这场拼接里：`$"a" $"b" (1, 2)`（61_FormattingLiterals.jnc:58..71）。
+  (rule literal
+    (-> (LITERAL) $1)
+    (-> (FMT_LITERAL) (fmt $1))
+    (-> (literal LITERAL) (concat $1 $2))
+    (-> (literal FMT_LITERAL) (concat $1 (fmt $2)))))
