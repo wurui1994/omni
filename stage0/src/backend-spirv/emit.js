@@ -19,12 +19,13 @@
  *   - `blen` -> `OpArrayLength`，所以长度不必另传一个 uniform。
  *   - IF/ELSE/END -> OpSelectionMerge + 显式 merge 块。MIR 把结构化控制流留到后端才拆，
  *     正是为了这一步（决策 6 的第 2 条）。
+ *   - BLOCK{LOOP{…}} -> OpLoopMerge + merge 块 + continue 目标。SPIR-V 那两条硬规矩
+ *     （回边只许从 continue 出发、跳出构造只许跳它的 merge）决定了这个映射的形状，
+ *     见 insn 里 LOOP 那一支的注释。
  *
  * **刻意不支持**（一律报错，不给近似答案）：
  *   - 整数 `/` `%`：CPU 那几条腿要在除零时报错、`INT64_MIN / -1` 要特判，而设备上
  *     没有报错这条路径。给个"差不多"的答案就等于让门槛 7 变成摆设。
- *   - 循环（LOOP/BLOCK/BR/BRIF）：能做，但 merge 块 + continue 目标的合法性要单独验，
- *     放在下一阶段和「有设备时真跑一遍」一起做。
  *   - `bnew`：设备上没有 arena，缓冲是宿主分配好再绑上来的。
  *   - print / 字符串 / dyn / 容器 / 调用 / 闭包 / 向量：kernel 里都还没有。
  *   - 越界检查：约定是 kernel 自己用 `blen` 守门（见 ADR-0014 门槛 7 的落地小节）。
@@ -434,7 +435,8 @@ class SpirvEmitter {
       this.line(`  OpSelectionMerge ${end} None`);
       this.term(`OpBranchConditional ${this.val(f.a[i])} ${then} ${els}`);
       this.startBlock(then);
-      this.regions.push({ kind: 'if', end: end, els: els, seenElse: false });
+      this.regions.push({ kind: 'if', end: end, els: els, seenElse: false,
+        head: null, cont: null, at: this.body.length, loaned: false });
       return;
     }
     if (op === OP.ELSE) {
@@ -447,6 +449,21 @@ class SpirvEmitter {
     if (op === OP.END) {
       const r = this.regions.pop();
       if (r === undefined) this.nope('END 多了一条（MIR 形状不对）');
+      if (r.kind === 'loop') {
+        // 体的最后一条边进 continue 块，continue 块里那一条 OpBranch 才是回边
+        this.term(`OpBranch ${r.cont}`);
+        this.startBlock(r.cont);
+        this.term(`OpBranch ${r.head}`);
+        this.startBlock(r.end);
+        return;
+      }
+      if (r.kind === 'block') {
+        // 标签借给循环当 merge 块了的话，此刻就已经在那个块里，什么都不用发
+        if (r.loaned) return;
+        this.term(`OpBranch ${r.end}`);
+        this.startBlock(r.end);
+        return;
+      }
       this.term(`OpBranch ${r.end}`);
       // 没有 ELSE 的 IF：假分支也得有个块，直接跳汇合点（与 LLVM 那条腿同一处理）
       if (!r.seenElse) { this.startBlock(r.els); this.term(`OpBranch ${r.end}`); }
@@ -458,8 +475,49 @@ class SpirvEmitter {
       this.term('OpReturn');
       return;
     }
-    if (op === OP.BLOCK || op === OP.LOOP || op === OP.BR || op === OP.BRIF) {
-      this.nope(`循环与跳转（${OP_NAMES[op]}）—— merge 块与 continue 目标留到第二阶段`);
+    // ---- 循环。MIR 里 `while` 的形状是 BLOCK{ LOOP{ BRIF ^1 跳出; 体; BR ^0 回头 } }
+    // （wasm 的层数语义，见 mir/ir.js 的 op 表），SPIR-V 要的是 OpLoopMerge 同时给
+    // **merge 块与 continue 目标**，而且规矩很硬：
+    //   - 回边只许从 continue 目标出发 —— 所以 `BR 到 LOOP` 发的是「跳 continue」，
+    //     不是「跳循环头」。continue 块里那一条 OpBranch 才是回边。
+    //   - 跳出一个构造只许跳到它的 merge 块 —— 所以外层 BLOCK 的出口标签必须**就是**
+    //     这个循环的 merge 块，否则 `BRIF ^1`（break）就是一条非法的跨构造跳转。
+    //     于是 LOOP 见到「自己是刚开的 BLOCK 里第一条东西」时，直接借用那个标签。
+    if (op === OP.BLOCK) {
+      this.regions.push({ kind: 'block', end: this.label('bend'), els: null, seenElse: false,
+        head: null, cont: null, at: this.body.length, loaned: false });
+      return;
+    }
+    if (op === OP.LOOP) {
+      const top = this.regions[this.regions.length - 1];
+      const wrap = top !== undefined && top.kind === 'block' && top.at === this.body.length;
+      const merge = wrap ? top.end : this.label('lend');
+      if (wrap) top.loaned = true;
+      const head = this.label('lhead');
+      const body = this.label('lbody');
+      const cont = this.label('lcont');
+      this.term(`OpBranch ${head}`);
+      this.startBlock(head);
+      this.line(`  OpLoopMerge ${merge} ${cont} None`);
+      this.term(`OpBranch ${body}`);
+      this.startBlock(body);
+      this.regions.push({ kind: 'loop', end: merge, els: null, seenElse: false,
+        head: head, cont: cont, at: this.body.length, loaned: false });
+      return;
+    }
+    if (op === OP.BR || op === OP.BRIF) {
+      const r = this.regions[this.regions.length - 1 - f.aux[i]];
+      if (r === undefined) this.nope(`${OP_NAMES[op]} 的层数越界`);
+      // 跳到 LOOP = continue（回边由 continue 块负责）；跳到 BLOCK/IF = 跳它的汇合点
+      if (r.kind === 'block' && !r.loaned) {
+        this.nope('跳到一个不是循环出口的 BLOCK —— SPIR-V 里跳出构造只能跳它的 merge 块');
+      }
+      const target = r.kind === 'loop' ? r.cont : r.end;
+      if (op === OP.BR) { this.term(`OpBranch ${target}`); return; }
+      const next = this.label('brnext');
+      this.term(`OpBranchConditional ${this.val(f.a[i])} ${target} ${next}`);
+      this.startBlock(next);
+      return;
     }
     this.dataInsn(i, op, dst, t);
   }

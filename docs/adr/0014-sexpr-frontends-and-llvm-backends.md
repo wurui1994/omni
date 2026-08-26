@@ -598,14 +598,20 @@ GLOAD 的全局下标、AGGLIT 的类型下标，还有落在 `REF_BIAS` 以下�
   `GlobalInvocationId` 的第 0 分量；槽位 → Function 存储类的 `OpVariable`；
   `blen` → **`OpArrayLength`**，所以长度不必另传一个 uniform，宿主绑多长就是多长。
 - **MIR 把结构化控制流留到后端才拆，这一步是它的兑现**：`IF/ELSE/END` 直接成
-  `OpSelectionMerge` + 显式 merge 块，不必先建 CFG 再找汇合点。（`OpSelectionMerge`
-  必须紧接 `OpBranchConditional`，所以 `BLOCK` 那条标记借不了它 —— 循环留到第二阶段。）
+  `OpSelectionMerge` + 显式 merge 块，不必先建 CFG 再找汇合点。
+- **循环**：MIR 里 `while` 的形状是 `BLOCK{ LOOP{ BRIF 跳出; 体; BR 回头 } }`，SPIR-V 要的是
+  `OpLoopMerge` 同时给 merge 块与 continue 目标。两条硬规矩决定了映射的形状：**回边只许
+  从 continue 目标出发**（所以「BR 到 LOOP」发的是跳 continue，回边是 continue 块里那一条）、
+  **跳出一个构造只许跳它的 merge 块**（所以外层 `BLOCK` 的出口标签必须*就是*这个循环的
+  merge 块 —— LOOP 见到自己是刚开的 BLOCK 里第一条东西时直接借用那个标签）。
+  拿不到这个借用的 `BLOCK`（多层 break 那种）一律报错，而不是发一份 validator 恰好放过、
+  语义却漂了的模块。
 - **`T_BUF` 不带元素类型这件事在这里第一次要付代价**：描述符必须在函数体之前声明，
   所以这条腿先扫一遍「谁读写了哪个槽」反推元素类型。从没被读写的缓冲形参因此发不出来 ——
   那不是"支持不了"，是信息不在 MIR 里，与其猜一个发出去，不如报错说清（`tests/gpu/bad/unused-buf.sx`）。
 - 刻意不支持、一律报错的：**整数 `/` `%`**（CPU 那几条腿要在除零时报错、`INT64_MIN / -1`
   要特判，而设备上没有报错这条路径 —— 给个"差不多"的答案就等于让门槛 7 变成摆设）、
-  循环、`bnew`（设备上没有 arena）、print/字符串/dyn/容器/调用/闭包/向量、越界检查。
+  `bnew`（设备上没有 arena）、print/字符串/dyn/容器/调用/闭包/向量、越界检查。
   每一条在 `tests/gpu/bad/` 里有一份 case，且**同一份源在 CPU 那条腿上照跑** ——
   边界是这一层的，不是语言的。
 
@@ -634,10 +640,21 @@ CPU 那五条腿上是降级期展开的循环，main 本来就在 CPU 上跑，
   而 CPU 那边跑的是恰好 grid 次。**两边能对上正是因为守门条件是 `blen` 而不是网格** ——
   门槛 7 那条「kernel 自己用 blen 守门」的约定在这里第一次变成可观测的东西。
 - **量出来的平台事实**：Apple M1 + MoltenVK 报 `shaderInt64=1`、**`shaderFloat64=0`**
-  （Metal 没有双精度）。所以 `01-bump`（int 道，含 `INT64_MAX + 1` 的回绕）在真 GPU 上
+  （Metal 没有双精度）。所以 `01-bump`（int 道，含循环与 `INT64_MAX + 2` 的回绕）在真 GPU 上
   与 CPU 逐个数值相同，而 `02-saxpy`（real 道）在这台机器上必然 skip，理由由宿主印出来：
   「模块要 Float64=1；设备 0（Apple M1）给 shaderFloat64=0」。这是平台的边界，
   不是降级出了错 —— 换一台有双精度的设备，同一份 case 不改一个字就能跑。
+- **另一条量出来的平台事实（Apple 编译器的坑）**：循环体里**累加另一个归纳变量**
+  （`s = s + k`，两个都是 64 位）会让 Metal 的着色器编译服务在 `vkCreateComputePipelines`
+  时死掉：`XPC_ERROR_CONNECTION_INTERRUPTED ... after multiple retries`。缩小到最小差别
+  才敢这么说 —— 同样的循环把它换成常量增量（`s = s + 1`）就跑得过，圈数与道号有关也跑得过，
+  只有「在循环里累加变量」这一条会崩；而 `spirv-val` 接受那份模块，MoltenVK 生成的 MSL
+  肉眼看也是对的（`while (!(!(_22 < (_20 + 1l)))) { _21 += _22; _22 += 1l; }`）。
+  所以设备侧的 case 刻意避开这个形状，而不是把它记成"我们的 bug"或者悄悄不测循环。
+- **`.sx` 只是把中间形式钉住的最小份量**：核心方言是汇聚层，不是写例子的语言（决策 1）。
+  所以整数那条路只有一份 case、一个 kernel，把缓冲读写 / push constant / `gid` / `blen`
+  守门 / 循环 / 回绕全压在里面。GPU 这条腿真正缺的不是更多 `.sx`，是**从一门真实语法
+  写得出 kernel** —— 那要么走 Omni 自己的前端，要么走一份 grammar，届时这些文本是生成的。
 
 ## 决策 7：闭包编译解释器保留，身份是 oracle 与 REPL
 
@@ -715,8 +732,10 @@ LuaJIT 的教训：`ffi.C.foo(x)` 之所以是一条直调，不是因为它的�
    整数 kernel 在 Apple M1（MoltenVK）上与 CPU 逐个数值相同，含 `INT64_MAX + 1` 的回绕。
    real 的 kernel 在这台机器上过不了设备 —— Metal 没有双精度（量出来的：`shaderFloat64=0`），
    宿主以退出码 3 报出「模块要什么、设备给什么」，测试轴记 skip。
-   还没做：kernel 里的循环、整数 `/` `%`、工作组大小可配、多入口、
-   把 dispatch 真正接到 GPU 上（现在设备只在测试轴里跑，`omni run` 走的还是 CPU 循环）。
+   还没做：整数 `/` `%`、工作组大小可配、多入口、把 dispatch 真正接到 GPU 上
+   （现在设备只在测试轴里跑，`omni run` 走的还是 CPU 循环）；以及**最要紧的一条：
+   从一门真实语法写得出 kernel** —— 核心方言是汇聚层，不是写例子的地方（决策 1），
+   所以 `.sx` 的 case 只留钉住中间形式的最小份量。
 
 ## 借鉴与对照（本地快照，行号是这些快照里的）
 

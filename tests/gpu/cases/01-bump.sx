@@ -1,12 +1,18 @@
-;; 设备比对用的 case（ADR-0014 门槛 7 前半句）：整数道。
+;; 设备比对用的**唯一一份**整数 case（ADR-0014 门槛 7）。
 ;;
-;; 形状是刻意的：**dispatch 前后各把整个缓冲印一遍**。于是这份 case 一份源同时给出
-;; 两件东西 —— 「设备上该拿什么当输入」（前一半）和「设备上该算出什么」（后一半）。
-;; tests/gpu/kernels.js 里那份 DEVICE 表写的初值必须与前一半逐字相同，测试轴会核对；
-;; 不这么做的话，表和 case 迟早各说一套，而那时"设备答案对不对"就没有参照物了。
+;; 核心方言是中间形式，不是写例子的语言 —— 所以这里刻意只有一份 case、一个 kernel，
+;; 把设备侧要验的东西全压进去：缓冲读写、push constant、`(gid)`、`blen` 守门、
+;; 循环（上界与道号有关，所以每道圈数不同）、以及 int64 的回绕。
+;; 加一条特性不该加一份文件；GPU 那条腿真正缺的是「从一门真实语法能写出 kernel」，
+;; 那是前端的事，不是往这里堆 .sx。
 ;;
-;; 守门用 blen 而不是网格：设备上的调用数会被向上取整到工作组的整数倍（64 的倍数），
-;; CPU 上跑的是恰好 grid 次。两边能对上正是因为多出来的道被 blen 挡住了。
+;; 形状上有两处是刻意的：
+;;   - dispatch 前后各把整个缓冲印一遍：一份源同时给出"设备该拿什么当输入"与
+;;     "设备该算出什么"，tests/gpu/kernels.js 里的初值必须与前一半逐字相同（测试轴核对）。
+;;   - 每道只写自己那一格。写成"每道遍历整个缓冲"的话 64 个调用互相盖，
+;;     答案由调度决定，"与 CPU 一致"这句话本身就没有意义了。
+;;   - 循环体里只有常量增量。`s = s + k`（在循环里累加另一个归纳变量）会让
+;;     Apple 的着色器编译器当场崩掉 —— 量出来的，理由记在 ADR-0014 门槛 7 的落地小节。
 (module
   (fn dump ((v (buf int))) void
     (let i int (int 0))
@@ -14,9 +20,14 @@
       (print (bget (var v) (var i)))
       (set i (bin "+" (var i) (int 1))))))
 
+  ;; v[gid] += d + (gid + 1)，其中 (gid + 1) 是数圈数数出来的
   (kernel bump ((v (buf int)) (d int))
     (if (bin "<" (gid) (blen (var v))) (do
-      (bset (var v) (gid) (bin "+" (bget (var v) (gid)) (var d))))))
+      (let k int (int 0))
+      (while (bin "<" (var k) (bin "+" (gid) (int 1))) (do
+        (set k (bin "+" (var k) (int 1)))))
+      (bset (var v) (gid)
+        (bin "+" (bget (var v) (gid)) (bin "+" (var d) (var k)))))))
 
   (main
     (let v (buf int) (bnew (buf int) (int 4)))
