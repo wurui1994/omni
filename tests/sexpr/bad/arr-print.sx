@@ -1,0 +1,6 @@
+;; print 不接受数组。理由和 buf/向量那两条一样：给数组定一个"打印格式"意味着六个执行器
+;; 各实现一遍格式化，而那是最容易悄悄分叉的地方。要看就用 (aget a i) 逐个印。
+(module
+  (main
+    (let a (arr int) (anew (arr int) (int 2)))
+    (print (var a))))

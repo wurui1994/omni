@@ -60,6 +60,34 @@ function $bset(a, i, v) {
   return v;
 }
 
+// 可增长数组（门槛 2 第四刀）：JS 侧就是一个 JS 数组 —— 引用语义、push/pop 都是现成的。
+// 越界与空 pop 的消息照 C 那份（omni_arr.c）逐字抄，那边只有一份实现，这边只有一份字符串。
+// 零值是**参数**传进来的，不在这里按类型猜：int 是 0n、real 是 0、string 是 ""，
+// 那是各前端的事，运行时不掺和（C 那条腿的签名也是这样）。
+function $anew(n, zero) {
+  const len = Number(n);
+  if (len < 0) $rt_error("array length cannot be negative: " + len);
+  const o = [];
+  for (let i = 0; i < len; i++) o.push(zero);
+  return o;
+}
+function $aget(a, i) {
+  const n = Number(i);
+  if (n < 0 || n >= a.length) $rt_error("array index out of range: " + n + " (length " + a.length + ")");
+  return a[n];
+}
+function $aset(a, i, v) {
+  const n = Number(i);
+  if (n < 0 || n >= a.length) $rt_error("array index out of range: " + n + " (length " + a.length + ")");
+  a[n] = v;
+  return v;
+}
+function $apush(a, v) { a.push(v); return v; }
+function $apop(a) {
+  if (a.length === 0) $rt_error("pop from empty array");
+  return a.pop();
+}
+
 // C 的 %.6g，逐字符复刻：-4 <= exp < P 用定点，否则用指数形式；去掉尾随零。
 function $fmt_g(x, P) {
   if (Number.isNaN(x)) return "nan";

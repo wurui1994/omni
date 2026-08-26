@@ -141,6 +141,27 @@ double omni_r_ceil(double x);
 double omni_r_round(double x);
 double omni_r_fmod(double x, double y);
 
+/* omni_arr.c —— 可增长数组（asy 的 `T[]`）。句柄是**指针**（buf 是按值的 {len, ptr}，
+   push 改不了别名看到的那个长度），len/cap/items 都在被指向的头里。四种元素各一份单态，
+   理由见那份文件的头注。`_new` 的零值当参数传进去：运行时不该替各前端决定"零"长什么样。 */
+typedef struct omni_arr_i64_s *omni_arr_i64;
+typedef struct omni_arr_f64_s *omni_arr_f64;
+typedef struct omni_arr_b8_s *omni_arr_b8;
+typedef struct omni_arr_str_s *omni_arr_str;
+
+#define OMNI_ARR_DECL(SUF, T)                               \
+  omni_arr_##SUF omni_arr_##SUF##_new(int64_t n, T zero);   \
+  int64_t omni_arr_##SUF##_len(omni_arr_##SUF a);           \
+  T omni_arr_##SUF##_get(omni_arr_##SUF a, int64_t i);      \
+  T omni_arr_##SUF##_set(omni_arr_##SUF a, int64_t i, T v); \
+  T omni_arr_##SUF##_push(omni_arr_##SUF a, T v);           \
+  T omni_arr_##SUF##_pop(omni_arr_##SUF a);
+
+OMNI_ARR_DECL(i64, int64_t)
+OMNI_ARR_DECL(f64, double)
+OMNI_ARR_DECL(b8, bool)
+OMNI_ARR_DECL(str, omni_str)
+
 void omni_print_int(int64_t v);
 void omni_print_real(double v);
 void omni_print_bool(bool v);

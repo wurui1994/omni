@@ -1,0 +1,77 @@
+;; 可增长数组（ADR-0014 门槛 2 第四刀）。这一份的存在理由是**引用语义 + 会变的长度**：
+;; buf 是按值传的 {长度, 指针}，push 改不了别名看到的长度，所以数组的句柄必须是指针。
+;; 这里要钉住的正是那件事——别名、穿过函数、push 之后长度在**两端**都变了。
+;;
+;; 六条腿的实现来源刻意收成一份：C 与 LLVM 都 call 运行时的 omni_arr_*（同一个符号），
+;; 两个解释器都走 interp/builtin.js 那一份，JS 后端走 prelude 里同名的四个函数。
+;; 越界与空 pop 的消息因此只有一份字符串（bad/ 里另有用例钉住那两条）。
+(module
+  ;; 数组穿过普通函数：引用语义，就地 push —— 回来之后调用方看到的长度也变了
+  (fn squares ((a (arr int)) (n int)) void
+    (let i int (int 0))
+    (while (bin "<" (var i) (var n)) (do
+      (apush (var a) (bin "*" (var i) (var i)))
+      (set i (bin "+" (var i) (int 1))))))
+
+  ;; 读侧穿过函数：求和。alen 每轮都问，因为长度是会变的
+  (fn total ((a (arr int))) int
+    (let s int (int 0))
+    (let i int (int 0))
+    (while (bin "<" (var i) (alen (var a))) (do
+      (set s (bin "+" (var s) (aget (var a) (var i))))
+      (set i (bin "+" (var i) (int 1)))))
+    (ret (var s)))
+
+  (main
+    ;; 新数组：长度对得上，每个元素是零值
+    (let a (arr int) (anew (arr int) (int 3)))
+    (print (alen (var a)))
+    (print (aget (var a) (int 0)))
+
+    (aset (var a) (int 1) (int 42))
+    (print (aget (var a) (int 1)))
+
+    ;; push 之后长度变 4，新元素在末尾
+    (apush (var a) (int 7))
+    (print (alen (var a)))
+    (print (aget (var a) (int 3)))
+
+    ;; pop 摘掉并返回最后一个
+    (print (apop (var a)))
+    (print (alen (var a)))
+
+    ;; 穿过函数 push：0 1 4 9 追加到 [0, 42, 0] 后面
+    (expr (call squares (var a) (int 4)))
+    (print (alen (var a)))
+    (print (aget (var a) (int 5)))
+    (print (call total (var a)))
+
+    ;; 别名：赋值传的是同一段存储，写 b 就是写 a
+    (let b (arr int) (var a))
+    (aset (var b) (int 0) (un "-" (int 1)))
+    (print (aget (var a) (int 0)))
+    (apush (var b) (int 100))
+    (print (alen (var a)))
+
+    ;; 四种元素各一条 —— LLVM 那条腿是按元素单态查符号的（omni_arr_str_get 之类），
+    ;; 漏一种就只有那一种元素会炸；bool 的 zeroext 还在形参与返回位置写法不同。
+    (let s (arr string) (anew (arr string) (int 2)))
+    (print (bin "+" (str "[") (bin "+" (aget (var s) (int 0)) (str "]"))))
+    (aset (var s) (int 0) (str "hi"))
+    (apush (var s) (str "there"))
+    (print (aget (var s) (int 0)))
+    (print (aget (var s) (int 2)))
+    (let r (arr real) (anew (arr real) (int 1)))
+    (print (aget (var r) (int 0)))
+    (apush (var r) (real 1.5))
+    (print (aget (var r) (int 1)))
+    (let q (arr bool) (anew (arr bool) (int 1)))
+    (print (aget (var q) (int 0)))
+    (apush (var q) (bool true))
+    (print (aget (var q) (int 1)))
+
+    ;; 长度 0 的数组是合法的：alen 能答，push 从空开始倍增
+    (let z (arr int) (anew (arr int) (int 0)))
+    (print (alen (var z)))
+    (apush (var z) (int 5))
+    (print (aget (var z) (int 0)))))

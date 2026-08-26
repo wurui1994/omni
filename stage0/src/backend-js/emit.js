@@ -315,6 +315,14 @@ class JsEmitter {
       case 'BufLen': return `BigInt(${this.expr(e.buf)}.length)`;
       case 'BufGet': return `$bget(${this.expr(e.buf)}, ${this.expr(e.index)})`;
       case 'BufSet': return `$bset(${this.expr(e.buf)}, ${this.expr(e.index)}, ${this.expr(e.value)})`;
+      // 数组六条（门槛 2 第四刀）：也是 JS 数组，也是引用语义。零值当参数传 ——
+      // BufNew 那条传的是"是不是 int"的布尔，那是只有两种元素时的省事写法，数组有四种。
+      case 'ArrNew': return `$anew(${this.expr(e.count)}, ${this.expr(e.zero)})`;
+      case 'ArrLen': return `BigInt(${this.expr(e.arr)}.length)`;
+      case 'ArrGet': return `$aget(${this.expr(e.arr)}, ${this.expr(e.index)})`;
+      case 'ArrSet': return `$aset(${this.expr(e.arr)}, ${this.expr(e.index)}, ${this.expr(e.value)})`;
+      case 'ArrPush': return `$apush(${this.expr(e.arr)}, ${this.expr(e.value)})`;
+      case 'ArrPop': return `$apop(${this.expr(e.arr)})`;
       case 'Field': {
         const obj = this.expr(e.object);
         // class 是引用类型，可能为 null；两个后端都显式检查，错误消息一致

@@ -17,27 +17,31 @@
  *         | (kernel NAME ((p TYPE)...) STMT...)     GPU 核（隐含第一个形参是 gid）
  *         | (main STMT...)                          入口体
  *   TYPE  = int | real | bool | string | void | (vec int|real 2|4|8) | (buf int|real)
+ *         | (arr int|real|bool|string)
  *   STMT  = (let NAME TYPE E) | (set NAME E) | (do STMT...)
  *         | (if E (do ...) [(do ...)]) | (while E (do ...))
  *         | (brk) | (cont)
  *         | (ret [E]) | (print E) | (expr E)
  *         | (bset E E E) | (dispatch NAME E E...)
+ *         | (aset E E E) | (apush E E)
  *   E     = (int TEXT) | (real TEXT) | (bool TEXT) | (str "…") | (tostr E) | (tostr E N)
  *         | (rmath "NAME" A [B])
  *         | (toreal E) | (toint E)
  *         | (var NAME) | (bin "OP" E E) | (un "OP" E) | (call NAME E...)
  *         | (splat TYPE E) | (vlit TYPE E...) | (lane E N) | (hsum E)
  *         | (bnew TYPE E) | (bget E E) | (blen E) | (gid)
+ *         | (anew TYPE E) | (aget E E) | (alen E) | (apop E)
  *
  * 向量那四条是 ADR-0014 门槛 6 的第一阶段，见 vecExpr 的注释；
- * 缓冲与 kernel/dispatch 是门槛 7 的第一阶段，见 bufExpr 与 dispatch 的注释。
+ * 缓冲与 kernel/dispatch 是门槛 7 的第一阶段，见 bufExpr 与 dispatch 的注释；
+ * 数组那六条是门槛 2 的第四刀（asy 的 `T[]`），见 arrExpr 的注释。
  *
  * 类型不推导，只**检查**：声明处写死，表达式自底向上定型，两边类型不一致就报错 ——
  * 不插隐式转换。理由与 ADR-0008 一致：这一层的职责是把树接进 OIR，
  * 而"什么能悄悄转成什么"是语言设计决定，不该由汇聚层替某门语言定。
  */
 
-import { INT, REAL, BOOL, STRING, VOID, vecType, bufType, zeroValue } from '../hir/types.js';
+import { INT, REAL, BOOL, STRING, VOID, vecType, bufType, arrType, zeroValue } from '../hir/types.js';
 import { readSexpr, isList, isAtom, isStr, head } from './read.js';
 
 const TYPES = new Map([['int', INT], ['real', REAL], ['bool', BOOL], ['string', STRING], ['void', VOID]]);
@@ -85,6 +89,15 @@ class CoreLowerer {
       }
       return bufType(e);
     }
+    // `(arr int|real|bool|string)`：可增长数组（门槛 2 第四刀）。元素比 buf 宽 ——
+    // asy 的 `string[]` 到处都是，而数组不用上 GPU，没有"只能是数"的约束。
+    if (isList(node) && head(node) === 'arr') {
+      const e = isAtom(node.items[1]) ? TYPES.get(node.items[1].value) : undefined;
+      if (e === undefined || e === VOID) {
+        return this.err(node, `${what}：(arr 元素) 的元素只能是 int / real / bool / string`);
+      }
+      return arrType(e);
+    }
     // `(vec int 4)`：元素只能是 int/real（bool/string 的向量没有意义，也没有硬件对应）
     if (isList(node) && head(node) === 'vec') {
       const e = isAtom(node.items[1]) ? TYPES.get(node.items[1].value) : undefined;
@@ -96,7 +109,7 @@ class CoreLowerer {
       return vecType(e, n);
     }
     if (!isAtom(node) || !TYPES.has(node.value)) {
-      return this.err(node, `${what} 的类型只能是 int / real / bool / string / void / (vec T N) / (buf T)`);
+      return this.err(node, `${what} 的类型只能是 int / real / bool / string / void / (vec T N) / (buf T) / (arr T)`);
     }
     return TYPES.get(node.value);
   }
@@ -304,6 +317,7 @@ class CoreLowerer {
       // 各自实现一遍格式化 —— 那是最容易分叉的地方。要看向量就 (lane v k) 逐道印。
       if (v.type.k === 'vec') return this.err(n, 'print 不接受向量：用 (lane v N) 逐道印');
       if (v.type.k === 'buf') return this.err(n, 'print 不接受缓冲：用 (bget b i) 逐个印');
+      if (v.type.k === 'arr') return this.err(n, 'print 不接受数组：用 (aget a i) 逐个印');
       return { kind: 'ExprStmt', expr: { kind: 'Builtin', name: 'print', args: [v], type: VOID, argType: v.type } };
     }
     if (h === 'expr') {
@@ -312,6 +326,7 @@ class CoreLowerer {
       return { kind: 'ExprStmt', expr: v };
     }
     if (h === 'bset') return this.bufSet(n);
+    if (h === 'aset' || h === 'apush') return this.arrWrite(n, h);
     if (h === 'dispatch') return this.dispatch(n);
     return this.err(n, `不认识的语句 '${h}'`);
   }
@@ -328,6 +343,31 @@ class CoreLowerer {
       return this.err(n, `这个缓冲装 ${b.type.elem.k}，写进去的是 ${coreTypeText(v.type)}`);
     }
     return { kind: 'ExprStmt', expr: { kind: 'BufSet', buf: b, index: i, value: v, type: b.type.elem } };
+  }
+
+  /**
+   * 数组的两条写侧：`(aset 数组 下标 值)` 与 `(apush 数组 值)`。
+   * 跟 bset 一样是**语句** —— 它们在 C 里返回写进去的值（省一个分支），但方言里不给出口：
+   * 「表达式带副作用」会让求值顺序变成语义的一部分，而这一层的六条腿都得给同一个答案。
+   */
+  arrWrite(n, h) {
+    const a = this.expr(n.items[1]);
+    if (a === null) return null;
+    if (a.type.k !== 'arr') return this.err(n, `${h} 的第一个实参要是数组，这里是 ${coreTypeText(a.type)}`);
+    const vNode = h === 'aset' ? n.items[3] : n.items[2];
+    if (vNode === undefined) return this.err(n, h === 'aset' ? '(aset 数组 下标 值) 要三个实参' : '(apush 数组 值) 要两个实参');
+    const v = this.expr(vNode);
+    if (v === null) return null;
+    if (!sameCoreType(v.type, a.type.elem)) {
+      return this.err(n, `这个数组装 ${a.type.elem.k}，写进去的是 ${coreTypeText(v.type)}`);
+    }
+    if (h === 'apush') {
+      return { kind: 'ExprStmt', expr: { kind: 'ArrPush', arr: a, value: v, type: a.type.elem } };
+    }
+    const i = this.expr(n.items[2]);
+    if (i === null) return null;
+    if (i.type !== INT) return this.err(n, `aset 的下标要是 int，这里是 ${coreTypeText(i.type)}`);
+    return { kind: 'ExprStmt', expr: { kind: 'ArrSet', arr: a, index: i, value: v, type: a.type.elem } };
   }
 
   /**
@@ -533,6 +573,7 @@ class CoreLowerer {
     }
     if (h === 'splat' || h === 'vlit' || h === 'lane' || h === 'hsum') return this.vecExpr(n, h);
     if (h === 'bnew' || h === 'bget' || h === 'blen') return this.bufExpr(n, h);
+    if (h === 'anew' || h === 'aget' || h === 'alen' || h === 'apop') return this.arrExpr(n, h);
     if (h === 'gid') {
       if (!this.inKernel) return this.err(n, '(gid) 只在 kernel 里有意义');
       return { kind: 'VarRef', name: '$gid', type: INT };
@@ -569,6 +610,42 @@ class CoreLowerer {
     if (i === null) return null;
     if (i.type !== INT) return this.err(n, `bget 的下标要是 int，这里是 ${coreTypeText(i.type)}`);
     return { kind: 'BufGet', buf: b, index: i, type: b.type.elem };
+  }
+
+  /**
+   * 数组的四条读侧（写侧是语句 `aset` / `apush`）。
+   *
+   *   (anew (arr T) N)   新建长度 N 的零数组
+   *   (aget a i)         读第 i 个
+   *   (alen a)           当前长度（会变，所以每次都问）
+   *   (apop a)           摘掉并返回最后一个；空数组是运行期错误
+   *
+   * 越界与空 pop 都是**运行期错误**，消息在运行时里只有一份（omni_arr.c），
+   * 五条腿共用同一个字符串 —— buf 那边是逐形状生成的 C + 另写一份 IR 助手，
+   * 那是两份实现，这次不重复那个决定。
+   *
+   * 刻意**没有**的东西：负下标（asy 也没有）、切片、`==`、print。切片要新建数组，
+   * 那是一条独立的语义（拷贝还是视图？），留给需要它的那一刀去定。
+   */
+  arrExpr(n, h) {
+    if (h === 'anew') {
+      const t = this.ty(n.items[1], 'anew 的类型');
+      if (t === null) return null;
+      if (t.k !== 'arr') return this.err(n, '(anew TYPE N) 的 TYPE 要是 (arr T)');
+      const c = this.expr(n.items[2]);
+      if (c === null) return null;
+      if (c.type !== INT) return this.err(n, `anew 的长度要是 int，这里是 ${coreTypeText(c.type)}`);
+      return { kind: 'ArrNew', type: t, count: c, zero: zeroValue(t.elem) };
+    }
+    const a = this.expr(n.items[1]);
+    if (a === null) return null;
+    if (a.type.k !== 'arr') return this.err(n, `${h} 的实参要是数组，这里是 ${coreTypeText(a.type)}`);
+    if (h === 'alen') return { kind: 'ArrLen', arr: a, type: INT };
+    if (h === 'apop') return { kind: 'ArrPop', arr: a, type: a.type.elem };
+    const i = this.expr(n.items[2]);
+    if (i === null) return null;
+    if (i.type !== INT) return this.err(n, `aget 的下标要是 int，这里是 ${coreTypeText(i.type)}`);
+    return { kind: 'ArrGet', arr: a, index: i, type: a.type.elem };
   }
 
   /**
@@ -698,6 +775,7 @@ function sameCoreType(a, b) {
   if (a.k !== b.k) return false;
   if (a.k === 'vec') return a.elem.k === b.elem.k && a.lanes === b.lanes;
   if (a.k === 'buf') return a.elem.k === b.elem.k;
+  if (a.k === 'arr') return a.elem.k === b.elem.k;
   return true;
 }
 
@@ -708,6 +786,7 @@ function sameCoreType(a, b) {
 function coreTypeText(t) {
   if (t.k === 'vec') return `vec<${t.elem.k},${t.lanes}>`;
   if (t.k === 'buf') return `buf<${t.elem.k}>`;
+  if (t.k === 'arr') return `arr<${t.elem.k}>`;
   return t.k;
 }
 

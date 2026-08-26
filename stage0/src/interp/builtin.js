@@ -318,6 +318,45 @@ export function bufSet(a, i, v) {
   return v;
 }
 
+/* ---------------------------------------------------------------- 数组
+ * 门槛 2 第四刀：可增长的引用语义数组（asy 的 `T[]`）。宿主表示同样是普通数组 ——
+ * push/pop 都是现成的，别名天然共享。零值由**调用方**给（OIR 的 ArrNew 挂着一个零值
+ * 子节点），这里不按类型猜：那样这份代码就得知道四种元素各自的零长什么样，
+ * 而 C 那条腿的签名本来就是"零值当参数"。
+ * 越界与空 pop 的消息与 omni_arr.c 逐字相同 —— 五条腿要逐字节一致。
+ */
+export function arrNew(n, zero) {
+  const len = Number(n);
+  if (len < 0) rtError('array length cannot be negative: ' + len);
+  const out = [];
+  for (let i = 0; i < len; i++) out.push(zero);
+  return out;
+}
+
+export function arrGet(a, i) {
+  const n = Number(i);
+  if (n < 0 || n >= a.length) {
+    rtError('array index out of range: ' + n + ' (length ' + a.length + ')');
+  }
+  return a[n];
+}
+
+export function arrSet(a, i, v) {
+  const n = Number(i);
+  if (n < 0 || n >= a.length) {
+    rtError('array index out of range: ' + n + ' (length ' + a.length + ')');
+  }
+  a[n] = v;
+  return v;
+}
+
+export function arrPush(a, v) { a.push(v); return v; }
+
+export function arrPop(a) {
+  if (a.length === 0) rtError('pop from empty array');
+  return a.pop();
+}
+
 /** dynamic 的标签名。这一条是封闭 ABI 里的 js_type_tag —— `instanceof Map` 不在语言
  *  子集里（ADR-0011 决策 15），而 C 侧本来就有标签，所以只能走宿主 op。
  *

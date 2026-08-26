@@ -22,7 +22,7 @@ import { typeKey } from '../hir/types.js';
 import { JS_ALL } from '../hir/js_abi.js';
 import {
   OP, REF_NONE, MirFunc, MirModule, mkType,
-  T_VOID, T_I64, T_F64, T_BOOL, T_STR, T_DYN, T_AGG, T_BUF,
+  T_VOID, T_I64, T_F64, T_BOOL, T_STR, T_DYN, T_AGG, T_BUF, T_ARR,
   CVT_I2F, CVT_F2I, CVT_BOX,
 } from './ir.js';
 
@@ -83,6 +83,8 @@ class ToMir {
       case 'vec': return mkType(this.ty(t.elem), t.lanes);
       // 缓冲：一个码就够（元素类型只在 BGET/BSET 的 `t` 上出现，见 ir.js 的 T_BUF）
       case 'buf': return T_BUF;
+      // 数组：同理，一个码。元素类型在 ANEW 的 aux 与 AGET/ASET/APOP 的 `t` 上
+      case 'arr': return T_ARR;
       // null 字面量：能赋给 class 引用、函数值与 dynamic，三者在 MIR 里都是「一个引用」
       case 'null': return T_AGG;
       default: return T_AGG;
@@ -461,6 +463,26 @@ class ToMir {
         const v = this.expr(e.value);
         return f.emit(OP.BSET, this.ty(e.type), b, f.pushArgs([i, v]), 0);
       }
+      // 数组六条。ANEW 的零值是一个普通操作数（b），不是 aux 上的常量 ——
+      // string 的零值是一个字符串常量，塞不进 aux。
+      case 'ArrNew':
+        return f.emit(OP.ANEW, T_ARR, this.expr(e.count), this.expr(e.zero), this.ty(e.type.elem));
+      case 'ArrLen':
+        return f.emit(OP.ALEN, T_I64, this.expr(e.arr), REF_NONE, 0);
+      case 'ArrGet':
+        return f.emit(OP.AGET, this.ty(e.type), this.expr(e.arr), this.expr(e.index), 0);
+      case 'ArrSet': {
+        const a = this.expr(e.arr);
+        const i = this.expr(e.index);
+        const v = this.expr(e.value);
+        return f.emit(OP.ASET, this.ty(e.type), a, f.pushArgs([i, v]), 0);
+      }
+      case 'ArrPush': {
+        const a = this.expr(e.arr);
+        return f.emit(OP.APUSH, this.ty(e.type), a, this.expr(e.value), 0);
+      }
+      case 'ArrPop':
+        return f.emit(OP.APOP, this.ty(e.type), this.expr(e.arr), REF_NONE, 0);
       default:
         throw new OmniError(`mir: 还没有处理的表达式 ${e.kind}`);
     }

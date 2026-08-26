@@ -33,7 +33,7 @@ import { OmniError } from '../source/diag.js';
 import { utf8Bytes } from '../host/utf8.js';
 import {
   OP, OP_NAMES, REF_NONE, REF_BIAS, isConstRef, typeText, typeKind, typeLanes,
-  T_VOID, T_I64, T_F64, T_BOOL, T_STR, T_BUF, CVT_I2F, CVT_F2I,
+  T_VOID, T_I64, T_F64, T_BOOL, T_STR, T_BUF, T_ARR, CVT_I2F, CVT_F2I,
 } from '../mir/ir.js';
 
 /**
@@ -46,6 +46,22 @@ const LL_TYPES = new Map([
   // 缓冲：`{长度, 指针}`。这一个不是量出来的 ABI，是**我们自己定的** —— 运行时里没有
   // 任何函数收发缓冲（print 不接受缓冲），所以这条腿只要自洽就够，和 [2 x i64] 那条不同。
   [T_BUF, '{ i64, ptr }'],
+  // 数组：就是一个不透明指针。头（len/cap/items）只有运行时看得见 —— 这条腿一个字段
+  // 都不摸，六条指令全是 call，所以布局不构成这里与 C 那条腿之间的约定。
+  [T_ARR, 'ptr'],
+]);
+
+/**
+ * 数组元素的 LLVM 拼写。`p` 是**形参/实参**位置的写法，`r` 是**返回**位置的写法 ——
+ * 两者对 bool 不一样：clang 把 `bool` 的形参写成 `i1 zeroext`（属性在类型后），
+ * 返回写成 `zeroext i1`（属性在类型前）。把两处都写成前者，clang 当场
+ * `error: expected value token`（量过，不是查文档查来的）。
+ */
+const ARR_ELEMS = new Map([
+  [T_I64, { p: 'i64', r: 'i64', suffix: 'i64' }],
+  [T_F64, { p: 'double', r: 'double', suffix: 'f64' }],
+  [T_BOOL, { p: 'i1 zeroext', r: 'zeroext i1', suffix: 'b8' }],
+  [T_STR, { p: '[2 x i64]', r: '[2 x i64]', suffix: 'str' }],
 ]);
 
 /**
@@ -109,6 +125,9 @@ class LlvmEmitter {
     this.needStrCat = false;
     // 用到的缓冲元素类型（类型码 -> true）。每种要发一组 new/get/set 的私有函数。
     this.bufElems = new Map();
+    // 用到的数组元素类型。这一组不生成任何函数体，只 declare 运行时里已有的符号 ——
+    // 数组的实现在 omni_arr.c，run-c 那条腿调的是同一个符号。
+    this.arrElems = new Map();
   }
 
   line(s) { this.out.push(s); }
@@ -244,6 +263,17 @@ class LlvmEmitter {
       for (const t of this.bufElems.keys()) {
         this.line(t === T_F64 ? bufHelpers('double', 8, '0.0') : bufHelpers('i64', 8, '0'));
       }
+    }
+    // 数组：只 declare，不生成。六条指令全是 call 运行时符号，所以这一节没有一行 IR 逻辑。
+    for (const t of this.arrElems.keys()) {
+      const e = ARR_ELEMS.get(t);
+      const s = e.suffix;
+      this.line(`declare ptr @omni_arr_${s}_new(i64, ${e.p})`);
+      this.line(`declare i64 @omni_arr_${s}_len(ptr)`);
+      this.line(`declare ${e.r} @omni_arr_${s}_get(ptr, i64)`);
+      this.line(`declare ${e.r} @omni_arr_${s}_set(ptr, i64, ${e.p})`);
+      this.line(`declare ${e.r} @omni_arr_${s}_push(ptr, ${e.p})`);
+      this.line(`declare ${e.r} @omni_arr_${s}_pop(ptr)`);
     }
     // 字符串字面量的字节。放在最后是因为它们是函数体发到一半才登记的；
     // 顺序按登记顺序，所以同一份输入两次发出来逐字节相同（快照轴要这个）。
@@ -382,6 +412,12 @@ class LlvmEmitter {
     // 缓冲四条：三条走私有函数（越界检查带分支，展开会搅乱区域记账），BLEN 就地取字段
     if (op === OP.BNEW || op === OP.BLEN || op === OP.BGET || op === OP.BSET) {
       this.bufInsn(f, i, op, dst, t);
+      return;
+    }
+    // 数组六条：全是 call 运行时符号，没有一处 IR 逻辑
+    if (op === OP.ANEW || op === OP.ALEN || op === OP.AGET || op === OP.ASET
+        || op === OP.APUSH || op === OP.APOP) {
+      this.arrInsn(f, i, op, dst, t);
       return;
     }
     // 向量三条 + 向量上的四则运算。分流要在标量表之前：`add <4 x i64>` 是合法的，
@@ -532,6 +568,52 @@ class LlvmEmitter {
     }
     this.bufElems.set(t, true);
     return t === T_F64 ? 'f64' : 'i64';
+  }
+
+  /**
+   * 数组六条。跟缓冲那四条的差别就一句话：**这里一行 IR 逻辑都没有**，六条全是
+   * call 到 omni_arr.c 里的符号，而 run-c 那条腿调的是同一个符号的同一份机器码。
+   * 越界检查、倍增、错误消息因此不存在"两条腿各写一份"的可能。
+   */
+  arrInsn(f, i, op, dst, t) {
+    // ANEW 的元素类型在 aux 上（结果类型是数组本身）；其余的元素类型就是 `t`
+    const el = op === OP.ANEW ? f.aux[i] : t;
+    const e = this.noteArrElem(el);
+    const s = e.suffix;
+    const a = this.val(f.a[i]);
+    if (op === OP.ANEW) {
+      this.line(`  ${dst} = call ptr @omni_arr_${s}_new(i64 ${a}, ${e.p} ${this.val(f.b[i])})`);
+      return;
+    }
+    if (op === OP.ALEN) {
+      this.line(`  ${dst} = call i64 @omni_arr_${s}_len(ptr ${a})`);
+      return;
+    }
+    if (op === OP.AGET) {
+      this.line(`  ${dst} = call ${e.r} @omni_arr_${s}_get(ptr ${a}, i64 ${this.val(f.b[i])})`);
+      return;
+    }
+    if (op === OP.APUSH) {
+      this.line(`  ${dst} = call ${e.r} @omni_arr_${s}_push(ptr ${a}, ${e.p} ${this.val(f.b[i])})`);
+      return;
+    }
+    if (op === OP.APOP) {
+      this.line(`  ${dst} = call ${e.r} @omni_arr_${s}_pop(ptr ${a})`);
+      return;
+    }
+    const args = f.argsOf(f.b[i]);
+    this.line(`  ${dst} = call ${e.r} @omni_arr_${s}_set(ptr ${a}, i64 ${this.val(args[0])}, `
+      + `${e.p} ${this.val(args[1])})`);
+  }
+
+  /** 记下用到的数组元素类型。表外的报错（阶段边界）——  方言只许四种标量。 */
+  noteArrElem(t) {
+    const e = ARR_ELEMS.get(t);
+    if (e === undefined) {
+      throw new OmniError(`${NOPE} ${typeText(t)} 的数组（函数 ${this.f.name}）`);
+    }
+    this.arrElems.set(t, true);
+    return e;
   }
 
   /**

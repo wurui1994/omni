@@ -57,11 +57,14 @@ export const T_AGG = 7;   // struct/class/enum/容器/函数值：身份在 aux
 export const T_BUF = 8;   // 缓冲：{长度, 指针}（ADR-0014 门槛 7）。元素类型**不在这个码里** ——
                           // 指针在 LLVM 里早就是不透明的，元素只在 BGET/BSET 的 `t` 上出现，
                           // 于是「一个缓冲」这件事一个码就够，不必按元素分裂成两个码。
+export const T_ARR = 9;   // 可增长数组：**一个指针**（长度会变，所以长度不能跟着值走）。
+                          // 元素类型同样不在这个码里，只在 AGET/ASET/APOP 的 `t` 上；
+                          // ANEW 的元素类型在 aux 上（要按它选运行时符号与零值）。
 export const T_KIND_BITS = 5;
 export const T_KIND_MASK = 31;
 export const T_KIND_SPAN = 32;   // = 2^T_KIND_BITS。位运算不可用，见 mkType
 
-export const TYPE_NAMES = ['void', 'i64', 'f64', 'bool', 'str', 'dyn', 'ptr', 'agg', 'buf'];
+export const TYPE_NAMES = ['void', 'i64', 'f64', 'bool', 'str', 'dyn', 'ptr', 'agg', 'buf', 'arr'];
 
 /**
  * `t` 字段：种类 + 向量宽度（1 = 标量）。宽度必须是 2 的幂。
@@ -198,6 +201,16 @@ const OPS = [
   ['BLEN', 'r', '-', '-'],      // a = 缓冲，t = T_I64
   ['BGET', 'r', 'r', '-'],      // a = 缓冲，b = 下标；t = 元素类型（= 结果类型）
   ['BSET', 'r', 'p', '-'],      // a = 缓冲，池 = [下标, 值]；t = 元素类型
+
+  // ---- 数组（ADR-0014 门槛 2 第四刀）。一个指针，引用语义，长度会变。
+  // 六条都落到运行时的 omni_arr_* 符号上（run-c 与 run-llvm 调同一个），
+  // 所以越界与空 pop 的消息在两条腿上不可能分叉。
+  ['ANEW', 'r', 'r', 'n'],      // a = 长度，b = 元素零值，t = T_ARR，aux = 元素类型码
+  ['ALEN', 'r', '-', '-'],      // a = 数组，t = T_I64
+  ['AGET', 'r', 'r', '-'],      // a = 数组，b = 下标；t = 元素类型（= 结果类型）
+  ['ASET', 'r', 'p', '-'],      // a = 数组，池 = [下标, 值]；t = 元素类型
+  ['APUSH', 'r', 'r', '-'],     // a = 数组，b = 值；t = 元素类型
+  ['APOP', 'r', '-', '-'],      // a = 数组；t = 元素类型
 ];
 
 /** opcode 常量：`OP.ADD` 等。加 op 只改 OPS 一行。 */

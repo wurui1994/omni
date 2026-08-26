@@ -1,0 +1,7 @@
+;; 元素类型不匹配：方言不插隐式转换（跟 `+` 两边必须同型是同一条规则）。
+;; 这条要有用例，因为"悄悄把 int 转成 real 再存进去"在 JS 那两条腿上会**看不出来**
+;; （宿主表示都是数组），到 C 和 LLVM 上才炸。
+(module
+  (main
+    (let a (arr real) (anew (arr real) (int 2)))
+    (apush (var a) (int 1))))

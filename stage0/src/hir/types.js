@@ -53,11 +53,26 @@ export function vecType(elem, lanes) { return { k: 'vec', elem, lanes }; }
  * 引用语义（赋值共享同一段存储）：所以 isRef 里有它。
  */
 export function bufType(elem) { return { k: 'buf', elem }; }
+/**
+ * 可增长数组（ADR-0014 门槛 2 的第四刀：asy 的 `T[]`）。`elem` 是四种标量之一，
+ * 长度是运行期的，而且**会变**（push/pop）。
+ *
+ * 为什么不是 buf：buf 是按值传的 `{长度, 指针}`，引用语义靠"副本里的指针指向同一段存储"
+ * 得来 —— 但 push 要改长度，而长度在每份副本里各有一个。所以数组的句柄必须是**指针**，
+ * len/cap/items 都在被指向的头里。buf 的形状不动：GPU 那条腿要的正是按值的 {len, ptr}。
+ *
+ * 为什么不是 `list<T>`：list 是 `.omni` 那门语言的容器，带装箱进 dynamic、UFCS 方法表、
+ * 值语义拷贝规则一整套；而 LLVM 那条腿根本没实现 list（grep 不到一处）。数组刻意只有
+ * new/len/get/set/push/pop 六条，于是五条腿都能实现，实现还都在运行时里共用同一份。
+ *
+ * 引用语义：所以 isRef 里有它。
+ */
+export function arrType(elem) { return { k: 'arr', elem }; }
 
 /** 引用语义的类型（赋值传引用，不拷贝） */
 export function isRef(t) {
   return t.k === 'list' || t.k === 'dict' || t.k === 'set' || t.k === 'class' || t.k === 'fn'
-    || t.k === 'buf';
+    || t.k === 'buf' || t.k === 'arr';
 }
 
 /** 规范化类型键：同时用于类型相等判断、容器实例化去重、C 符号命名 */
@@ -71,6 +86,7 @@ export function typeKey(t) {
     case 'set': return `set_${typeKey(t.elem)}`;
     case 'vec': return `vec_${typeKey(t.elem)}_${t.lanes}`;
     case 'buf': return `buf_${typeKey(t.elem)}`;
+    case 'arr': return `arr_${typeKey(t.elem)}`;
     // 参数与返回之间用 `__` 分隔：参数之间是 `_`，所以零参也不会和别的键撞
     case 'fn': return `fn_${t.params.map(typeKey).join('_')}__${typeKey(t.ret)}`;
     default: return t.k;
@@ -86,6 +102,7 @@ export function typeName(t) {
     case 'set': return `set<${typeName(t.elem)}>`;
     case 'vec': return `vec<${typeName(t.elem)}, ${t.lanes}>`;
     case 'buf': return `buf<${typeName(t.elem)}>`;
+    case 'arr': return `arr<${typeName(t.elem)}>`;
     case 'fn': return `fn(${t.params.map(typeName).join(', ')}) -> ${typeName(t.ret)}`;
     default: return t.k;
   }
@@ -165,7 +182,21 @@ export function cTypeName(t) {
     // 缓冲在 C 侧是 `{长度, 指针}` 按值传（16 字节）。长度跟着值走，不放在别处：
     // 六个执行器里 blen 都要 O(1) 拿到它，而"长度存在调用方"意味着每条腿各自记一份。
     case 'buf': return `omni_${typeKey(t)}`;
+    // 数组在 C 侧就是运行时那四个 typedef 之一（`omni_arr_i64` 等）：一个指针。
+    // 不按 typeKey 拼名字，因为实现不是逐形状生成的，是运行时里已经单态好的四份。
+    case 'arr': return `omni_arr_${arrSuffix(t.elem)}`;
     default: throw new Error(`cTypeName: ${t.k}`);
+  }
+}
+
+/** 数组的元素后缀：运行时符号名（omni_arr_i64_get 之类）和 LLVM 那条腿共用这一份 */
+export function arrSuffix(elem) {
+  switch (elem.k) {
+    case 'int': return 'i64';
+    case 'real': return 'f64';
+    case 'bool': return 'b8';
+    case 'string': return 'str';
+    default: throw new Error(`arrSuffix: ${elem.k}`);
   }
 }
 
@@ -190,6 +221,14 @@ export function zeroValue(t) {
     // 缓冲的零值是**空缓冲**（长度 0），不是空指针：`blen` 在任何缓冲上都得能答，
     // 而"有时候是 null"意味着六条腿各要一处判空。
     case 'buf': return { kind: 'BufNew', type: t, count: { kind: 'Const', type: INT, value: 0n } };
+    // 数组的零值同理：长度 0 的空数组，不是空指针。`alen`/`apush` 在它上面都得能用。
+    // 元素零值当**子节点**挂着（跟 VecSplat 一个套路）：这样四个消费者都只是"求一个表达式"，
+    // 不必各自知道"string 的零"在自己那条腿上怎么拼。
+    case 'arr': return {
+      kind: 'ArrNew', type: t,
+      count: { kind: 'Const', type: INT, value: 0n },
+      zero: zeroValue(t.elem),
+    };
     default: return null;
   }
 }

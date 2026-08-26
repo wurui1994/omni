@@ -801,6 +801,21 @@ class CEmitter {
       case 'BufSet':
         this.noteVec(e.buf.type);
         return `${cTypeName(e.buf.type)}_set(${this.expr(e.buf)}, ${this.expr(e.index)}, ${this.expr(e.value)})`;
+      // 数组六条（门槛 2 第四刀）。这里不生成任何结构体或助手 —— 实现在运行时的
+      // omni_arr.c 里已经按元素单态好了，`cTypeName` 给出的就是那四个 typedef 之一，
+      // 函数名就是它加后缀。run-llvm 那条腿调的是同一个符号，所以两边不可能分叉。
+      case 'ArrNew':
+        return `${cTypeName(e.type)}_new(${this.expr(e.count)}, ${this.expr(e.zero)})`;
+      case 'ArrLen':
+        return `${cTypeName(e.arr.type)}_len(${this.expr(e.arr)})`;
+      case 'ArrGet':
+        return `${cTypeName(e.arr.type)}_get(${this.expr(e.arr)}, ${this.expr(e.index)})`;
+      case 'ArrSet':
+        return `${cTypeName(e.arr.type)}_set(${this.expr(e.arr)}, ${this.expr(e.index)}, ${this.expr(e.value)})`;
+      case 'ArrPush':
+        return `${cTypeName(e.arr.type)}_push(${this.expr(e.arr)}, ${this.expr(e.value)})`;
+      case 'ArrPop':
+        return `${cTypeName(e.arr.type)}_pop(${this.expr(e.arr)})`;
       case 'Field': {
         const obj = this.expr(e.object);
         // class 是引用，可能为 null：显式检查，避免"段错误 vs 异常"的跨后端分叉

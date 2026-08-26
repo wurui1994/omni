@@ -25,7 +25,8 @@ import { OmniError } from '../source/diag.js';
 import { stderr, wrapFn, callFnValue } from '../host/native.js';
 import {
   applyBuiltin, zeroOf, newInstance, flushOut, failRt, jsCallFn,
-  InterpFail, InterpUncaught, binOp, cmpOp, vecBinOp, bufNew, bufGet, bufSet, listGet, listSet, dictGet, dynTag, W,
+  InterpFail, InterpUncaught, binOp, cmpOp, vecBinOp, bufNew, bufGet, bufSet,
+  arrNew, arrGet, arrSet, arrPush, arrPop, listGet, listSet, dictGet, dynTag, W,
 } from '../interp/builtin.js';
 import { JS_ALL } from '../hir/js_abi.js';
 import { lowerToMir } from './from_oir.js';
@@ -367,6 +368,36 @@ class MirInterp {
         const b = rd(f.a[i]);
         const args = rdArgs(f.b[i]);
         return (F) => { F.v[i] = bufSet(b(F), args[0](F), args[1](F)); return next; };
+      }
+      // 数组六条。同样走 interp/builtin.js 那一份 —— 两个解释器共用一份实现，
+      // 而它的消息文本又与 omni_arr.c 逐字对齐，于是五条腿只有一个字符串。
+      case OP.ANEW: {
+        const c = rd(f.a[i]);
+        const z = rd(f.b[i]);
+        return (F) => { F.v[i] = arrNew(c(F), z(F)); return next; };
+      }
+      case OP.ALEN: {
+        const a = rd(f.a[i]);
+        return (F) => { F.v[i] = BigInt(a(F).length); return next; };
+      }
+      case OP.AGET: {
+        const a = rd(f.a[i]);
+        const k = rd(f.b[i]);
+        return (F) => { F.v[i] = arrGet(a(F), k(F)); return next; };
+      }
+      case OP.ASET: {
+        const a = rd(f.a[i]);
+        const args = rdArgs(f.b[i]);
+        return (F) => { F.v[i] = arrSet(a(F), args[0](F), args[1](F)); return next; };
+      }
+      case OP.APUSH: {
+        const a = rd(f.a[i]);
+        const v = rd(f.b[i]);
+        return (F) => { F.v[i] = arrPush(a(F), v(F)); return next; };
+      }
+      case OP.APOP: {
+        const a = rd(f.a[i]);
+        return (F) => { F.v[i] = arrPop(a(F)); return next; };
       }
       default:
         return this.step3(f, i, rd, rdArgs, readAll, I);

@@ -93,6 +93,18 @@ LLVM 走 `omni_str_realg`。加它的理由是别的语言有别的默认位数�
 - struct 的容器字段是**引用**：拷贝 struct 不深拷贝它的容器。C 侧天然如此，JS 侧 `$cp_S` 按引用搬。
 - 容器字段的零值是**新建的空容器**，不是空引用：C 侧生成 `omni_new_S_*` / `omni_new_C_*` 逐字段初始化。
 
+**数组是另一个东西**（核心方言的 `(arr T)`，ADR-0014 决策 1）：引用语义、长度会变、
+元素只能是四种标量、**不能装箱进 dynamic、没有方法表**。它不是 `list<T>` 的别名 ——
+list 是 `.omni` 那门语言的容器，而数组是给"从语法长出来的语言"（asy 的 `T[]`）用的最小形状，
+六条操作 new/len/get/set/push/pop，五条腿都实现得起（LLVM 那条腿没有 list）。
+- 零值是**长度 0 的空数组**，不是空引用：`alen` 在任何数组上都得能答。
+- 新建的元素是**零值填充**的（int 0 / real 0.0 / bool false / string ""）。
+- 越界 / 空 pop / 负长度都是运行时错误，消息只有一份（`stage0/runtime/omni_arr.c`）：
+  `array index out of range: I (length N)`、`pop from empty array`、
+  `array length cannot be negative: N`。量过五条腿逐字节相同。
+- 没有负下标、没有切片、没有 `==`、`print` 不接受数组（要看就 `(aget a i)` 逐个印）。
+  切片留给需要它的那一刀去定：拷贝还是视图是一条独立的语义决定。
+
 **class 是引用类型**：赋值传引用，`==` 是引用相等，默认值是 `null`。
 - 空引用解引用在两个后端都是显式检查：`omni: runtime error: null reference`。
   C 侧走 `omni_nullck`，绝不允许退化成段错误 —— 否则诊断就和 JS 分叉了。

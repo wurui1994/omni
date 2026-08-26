@@ -312,6 +312,32 @@ bison **隐式**的选择写成**显式**的优先级声明 —— 悬垂 else�
 `floor/ceil/round` 回 **int**（量的：`int i = floor(2.7)` 编得过），所以外面再套一层
 `(toint …)`；`abs(int)` 走一个 `asy__iabs` 的纯整数比较，绕一趟 real 会在 2^53 以上丢精度。
 
+**可增长数组**：`(arr int|real|bool|string)` 加六条 —— `(anew TYPE N)` / `(aget a i)` /
+`(alen a)` / `(apop a)` 是表达式，`(aset a i v)` / `(apush a v)` 是语句。加它的理由只有一个：
+asy 的 `T[]` 在那 84 个模块里无处不在，门槛 2 的下一刀绕不过去。
+
+**为什么不复用 buf**：buf 是按值传的 `{长度, 指针}`，引用语义靠"副本里的指针指向同一段
+存储"得来 —— 但 push 要改**长度**，而长度在每份副本里各有一个，别名看不到。所以数组的
+句柄必须是指针，len/cap/items 都在被指向的头里。buf 的形状一个字节都没动：GPU 那条腿
+（StorageBuffer 里的 runtime array）要的正是按值的 `{len, ptr}`，而数组在 SPIR-V 上直接
+被拒（堆增长在设备上没有对应物，`spirv 后端目前不支持 arr 形参`）。
+
+**为什么不复用 `list<T>`**：list 是 `.omni` 那门语言的容器，带装箱进 dynamic、UFCS 方法表、
+值语义拷贝规则一整套；更关键的是 **LLVM 那条腿根本没实现过 list**（`backend-llvm/emit.js`
+里 grep 不到一处）。数组收成六条，五条腿就都能实现。
+
+**实现只有一份，这是刻意的**：七个符号在 `stage0/runtime/omni_arr.c` 里按元素单态化成四份
+（X 宏展开，源码一份），`run-c` 与 `run-llvm` 调的是**同一个符号的同一份机器码** ——
+越界检查、倍增策略、错误消息都不存在"两条腿各写一份"的可能。buf 那边是"逐形状生成的
+static inline C + 另写一份 IR 助手"，是两份实现；这次不重复那个决定。两个解释器共用
+`interp/builtin.js` 的一份，JS 后端走 prelude 里同名的四个函数，消息文本与 C 那份逐字对齐。
+量过：`array index out of range: 5 (length 2)`、`pop from empty array`、
+`array length cannot be negative: -1` 三条在五条腿上逐字节相同。
+
+踩到的一处 ABI：`bool` 在 LLVM 里，**形参写 `i1 zeroext`（属性在类型后）、返回写
+`zeroext i1`（属性在类型前）**。两处都写成前者，clang 当场 `error: expected value token`。
+这条记下来是因为它只在 `bool[]` 上出现，而四种元素里只有它这样。
+
 ### 已落地的形状：asy 前端第一刀（第十五条测试轴 `tests/asy/`，17 条）
 
 `stage0/src/frontend-asy/lower.js`（约 820 行）把 asy 语法树降成核心方言的**文本**，
