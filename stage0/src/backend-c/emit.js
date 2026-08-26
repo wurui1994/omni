@@ -15,6 +15,7 @@
 import { RUNTIME_INCLUDE, amalgamate } from '../runtime/c_runtime.js';
 import { cTypeName, listType, typeKey } from '../hir/types.js';
 import { JS_ABI, JS_ALL, JS_MEMBERS, JS_TAG_C } from '../hir/js_abi.js';
+import { C_ABI, C_TYPE, C_IN, C_OUT } from '../hir/c_abi.js';
 
 /** dict/set 的键需要 hash；list.contains 只需要 eq */
 const HASH_FN = { int: 'omni_hash_int', real: 'omni_hash_real', bool: 'omni_hash_bool', string: 'omni_hash_string' };
@@ -62,6 +63,25 @@ class CEmitter {
     return id;
   }
 
+  /**
+   * 用到的外部 C 符号的 extern 原型（ADR-0014 决策 4）。
+   * 不 `#include <stdlib.h>` 之类：那会把别人的整套声明拖进来，而我们只想要这几条，
+   * 且原型必须与 `C_ABI` 里写的**逐字一致** —— 声明就在这里，对不对一眼看得见。
+   * libc 的那几条在 omni.h 已经 include 的头里也有声明，重复声明同一个原型是合法的。
+   */
+  cAbiExterns() {
+    const used = this.mod.cabi ?? [];
+    if (used.length === 0) return [];
+    const out = ['/* 外部 C 符号（src/hir/c_abi.js） */'];
+    for (const name of used) {
+      const sig = C_ABI[name];
+      if (sig.std) continue;   // 标准头已经声明过，见 c_abi.js 里 std 的说明
+      const ps = sig.params.length > 0 ? sig.params.map((p) => C_TYPE[p]).join(', ') : 'void';
+      out.push(`extern ${C_TYPE[sig.ret]} ${sig.sym}(${ps});`);
+    }
+    return out.length > 1 ? out : [];
+  }
+
   s16PoolLines() {
     const out = [];
     for (const [s, id] of this.s16pool) {
@@ -94,6 +114,7 @@ class CEmitter {
     // 字符串字面量池的落点：只需要 omni.h 里的 omni_s16，所以放在最前面（内容最后回填）
     this.s16At = this.out.length;
     this.line();
+    for (const line of this.cAbiExterns()) this.line(line);
     for (const a of aggs) {
       if (a.k === 'struct') this.structBody(a.t);
       else this.enumBody(a.t);
@@ -692,6 +713,15 @@ class CEmitter {
         return `${cTypeName(e.recvType)}_set(${this.expr(e.obj)}, ${this.expr(e.index)}, ${this.expr(e.value)})`;
       case 'Call': return `${e.func}(${e.args.map((a) => this.expr(a)).join(', ')})`;
       case 'Builtin': return this.builtin(e);
+      // 外部 C 符号（ADR-0014 决策 4）：实参逐个 marshal，返回值再 marshal 回来。
+      // void 的那些包成逗号表达式，让整条仍然是个 dynamic 表达式。
+      case 'CCall': {
+        const sig = C_ABI[e.entry];
+        const args = e.args.map((a, i) => `${C_IN[sig.params[i]]}(${this.expr(a)})`);
+        const call = `${sig.sym}(${args.join(', ')})`;
+        if (sig.ret === 'void') return `(${call}, omni_dyn_undef())`;
+        return `${C_OUT[sig.ret]}(${call})`;
+      }
       default: throw new Error(`c.expr: ${e.kind}`);
     }
   }

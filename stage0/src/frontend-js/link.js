@@ -15,6 +15,7 @@
 
 import { parseJs } from './parser.js';
 import { SourceFile } from '../source/diag.js';
+import { C_ABI } from '../hir/c_abi.js';
 
 /**
  * 原生模块（ADR-0011 决策 17）：`src/host/native.js` 里的每个导出对应一个 ABI op。
@@ -22,6 +23,13 @@ import { SourceFile } from '../source/diag.js';
  * 表在这里而不在 lower.js：只有链接器知道"这个名字是从哪个文件导入来的"。
  */
 const NATIVE_SUFFIX = 'src/host/native.js';
+
+/**
+ * 外部 C 符号（ADR-0014 决策 4）：`src/host/native_c.js` 里的每个导出对应 `C_ABI` 里
+ * 一条。和上面那条同一个套路，区别只在另一端是**别人的**共享库而不是我们的运行时。
+ * node 宿主上那份实现是抛错的 —— C-ABI 只存在于原生构建。
+ */
+const CABI_SUFFIX = 'src/host/native_c.js';
 
 const NATIVE_OPS = {
   readText: 'js_fs_read_text',
@@ -148,6 +156,17 @@ function scan(m, diags) {
           }
           break;
         }
+        if (target.endsWith(CABI_SUFFIX)) {
+          for (const sp of s.specifiers) {
+            if (sp.kind !== 'named') continue;
+            if (!C_ABI[sp.imported]) {
+              diags.error(s.span, `'${sp.imported}' is not in the C ABI table (ADR-0014 decision 4)`);
+              continue;
+            }
+            m.cnatives.push({ local: sp.local, entry: sp.imported, span: s.span });
+          }
+          break;
+        }
         m.imports.push({ path: target, specs: s.specifiers, span: s.span });
         break;
       }
@@ -208,7 +227,7 @@ export function linkJs(entry, read, diags) {
       return;
     }
     state.set(path, 'loading');
-    const m = { path, ast: parseJs(new SourceFile(path, text), diags), body: [], exports: new Map(), imports: [], natives: [] };
+    const m = { path, ast: parseJs(new SourceFile(path, text), diags), body: [], exports: new Map(), imports: [], natives: [], cnatives: [] };
     mods.set(path, m);
     scan(m, diags);
     for (const imp of m.imports) load(imp.path, imp.span);
@@ -234,7 +253,16 @@ export function linkJs(entry, read, diags) {
 
   const body = [];
   const natives = new Map();
+  const cnatives = new Map();
   for (const m of order) {
+    for (const n of m.cnatives) {
+      const prev = cnatives.get(n.local);
+      if (prev && prev !== n.entry) {
+        diags.error(n.span, `'${n.local}' is bound to two different C symbols; rename one`);
+        continue;
+      }
+      cnatives.set(n.local, n.entry);
+    }
     for (const n of m.natives) {
       const prev = natives.get(n.local);
       if (prev && prev !== n.op) {
@@ -268,5 +296,5 @@ export function linkJs(entry, read, diags) {
     }
     body.push(...m.body);
   }
-  return { type: 'Program', body, natives, modules: order.map((m) => m.path) };
+  return { type: 'Program', body, natives, cnatives, modules: order.map((m) => m.path) };
 }

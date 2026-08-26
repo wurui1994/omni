@@ -17,6 +17,7 @@
 
 import { DYNAMIC, STRING, BOOL, REAL, INT, listType, dictType, fnType } from '../hir/types.js';
 import { JS_ALL, JS_METHODS, JS_PROPS } from '../hir/js_abi.js';
+import { C_ABI } from '../hir/c_abi.js';
 
 /** JS 的函数签名只有一种：fn(list&lt;dynamic&gt;) -&gt; dynamic（ADR-0011） */
 const JS_FN = fnType([listType(DYNAMIC)], DYNAMIC);
@@ -175,6 +176,10 @@ class Lower {
     this.classes = new Map();
     /** 原生宿主面：名字 -> ABI op（由链接器给出，见 frontend-js/link.js） */
     this.natives = new Map();
+    /** 外部 C 符号：名字 -> C_ABI 里那一条（ADR-0014 决策 4） */
+    this.cnatives = new Map();
+    /** 这个模块真用到的 C_ABI 条目，按首次出现排序 —— C 后端靠它发 extern 与 -l */
+    this.cused = [];
     /** 闭包记录（ADR-0010 的布局），MakeClosure 的 closure 下标就是这里的位置 */
     this.closures = [];
     /** 顶层函数当值用时的转发闭包：名字 -> 闭包记录（一个函数只生成一次） */
@@ -198,6 +203,7 @@ class Lower {
   module(program) {
     // 原生宿主面（ADR-0011 决策 17）：链接器给出"名字 -> ABI op"，这些名字只能被调用
     this.natives = program.natives ?? new Map();
+    this.cnatives = program.cnatives ?? new Map();
     for (const s of program.body) this.collectTop(s);
     for (const s of program.body) {
       if (s.type === 'FuncDecl') this.funcDecl(s);
@@ -232,6 +238,8 @@ class Lower {
       // 形参不是位置实参，而是**整条实参表**。解释器造闭包记录时要按这个口径接
       // （interp/eval.js 的 makeClosure）—— 两个后端是发射期就知道的，解释器只能看模块。
       js: true,
+      // 用到的外部 C 符号（ADR-0014 决策 4）。空数组是常态 —— 只有真去调 C 的模块才非空。
+      cabi: this.cused,
     };
   }
 
@@ -1379,6 +1387,9 @@ class Lower {
         // 原生宿主面：名字直接就是一个 ABI op（决策 17）
         const nat = this.natives.get(c.name);
         if (nat) return this.abiCall({ op: nat, argc: JS_ALL[nat].arity }, e.args, e.span, c.name);
+        // 外部 C 符号（ADR-0014 决策 4）：实参个数由 C 的原型定死，不补 undefined
+        const cn = this.cnatives.get(c.name);
+        if (cn) return this.cCall(cn, e.args, e.span, c.name);
         const g = GLOBAL_CALLS[c.name];
         if (g) return this.abiCall(g, e.args, e.span, c.name);
         this.err(e.span, `unresolved function '${c.name}'`);
@@ -1445,6 +1456,25 @@ class Lower {
     const lowered = [];
     for (let i = 0; i < spec.argc; i++) lowered.push(i < args.length ? this.expr(args[i]) : undefExpr());
     return op(spec.op, lowered, spec.lit ?? {});
+  }
+
+  /**
+   * 外部 C 符号的调用（ADR-0014 决策 4）。和 abiCall 的两处不同都来自「另一端是 C」：
+   * 实参个数必须**正好**对上原型（C 没有"缺席就是 undefined"这回事），
+   * 而且要把用到的条目记在模块上 —— C 后端靠它发 extern 原型、链接命令靠它加 -l。
+   */
+  cCall(entry, args, span, what) {
+    const sig = C_ABI[entry];
+    if (args.some((a) => a.type === 'Spread')) {
+      this.err(span, `spread is not supported in a C call ('${what}')`);
+      return undefExpr();
+    }
+    if (args.length !== sig.params.length) {
+      this.err(span, `'${what}' takes exactly ${sig.params.length} argument(s), got ${args.length}`);
+      return undefExpr();
+    }
+    if (!this.cused.includes(entry)) this.cused.push(entry);
+    return { kind: 'CCall', entry, args: args.map((a) => this.expr(a)), type: D };
   }
 
   dynCall(f, args) {

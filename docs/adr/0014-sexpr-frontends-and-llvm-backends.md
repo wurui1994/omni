@@ -112,6 +112,31 @@ SROA 4.2% + InstCombine 8.8% + MemCpyOpt 1.5% + DSE 3.5% + EarlyCSE 2.2% ≈ 20%
 - 自举顺序上的后果：LLVM 后端**只存在于原生构建**。node 宿主继续用 JS 后端。
   这和现在「C 后端只在原生构建上完整」的分工同构，不新增复杂度。
 
+### 已落地的形状
+
+机制本身做完了，落成六个件：
+
+- `src/hir/c_abi.js` —— 封闭表 `C_ABI`，和 `JS_ABI` 同一条纪律：表里没有的名字不许调。
+  类型词汇刻意只有七个标量（`i32/i64/f64/bool/cstr/ptr/void`），聚合一律不支持 ——
+  要它们的时候再开 ADR，因为那牵扯 ABI 的实参分类，jancy 为此手写了十六个调用约定类。
+- `runtime/omni_cabi.h` —— marshal 层，每类型一进一出。三条口径：JS 的数是 `REAL`、
+  Omni 的是 `INT`，两种都收；`cstr` 靠 `omni_s16_to_utf8` 已经补的 NUL；
+  `ptr` 用 **INT** 标签承载地址（double 只有 53 位尾数，地址是 64 位）。
+- `src/host/native_c.js` —— 声明面。node 宿主上每条都抛错，于是 `emit-js` 仍能把整个
+  编译器发出来（自举不动点依赖这一点），只是真去调 C 的那一刻当场停下。
+- `link.js` 认这条 import 路径并查表，`lower.js` 发 `CCall` 并把用到的条目记在模块上
+  （`mod.cabi`），C 后端据此发 `extern` 原型、`cli.js` 据此加 `-l`。
+- 实参个数必须**正好**对上原型，展开实参不许用 —— C 没有「缺席就是 undefined」这回事。
+- `std: true` 的条目**不发** extern 原型：libc 的真原型用 `size_t`/`int`，我们表里写
+  `i64`/`i32`，重复声明成不同类型在 C 里是硬错误（不是警告）。调用处的隐式转换是合法的。
+
+第六条测试轴 `tests/cabi/` 量的就是它。这条轴**不能**建立在「多方逐字节相同」上 ——
+node / omni-js / interp 三条腿按设计都抛错，只有 omni-c 真调到了 libc，所以参照是
+`.expected` 而不是 node。三条腿必须失败、而且失败在正确的理由上，这后半条才是防退化的
+那一半：少了它，一个把 `CCall` 悄悄降成 `undefined` 的 bug 会让三条腿都「通过」。
+表里留了 `c_getpid`（POSIX，在 `<unistd.h>` 里，生成的翻译单元看不到那份原型）专门用来
+钉住 `cAbiExterns()` 那条路 —— 第三方库走的全是它，而 libc 那几条一条都不发。
+
 ## 决策 5：增量 —— 函数级编译单元 + 内容哈希 + 缓存目标码
 
 不变的部分（第二稿已定，与 LLVM 正交）：

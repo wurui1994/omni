@@ -19,6 +19,7 @@ import { linkJs } from './frontend-js/link.js';
 import { lowerJs } from './frontend-js/lower.js';
 import { Diagnostics, OmniError } from './source/diag.js';
 import { check } from './hir/check.js';
+import { cAbiLibs } from './hir/c_abi.js';
 import { emitJs } from './backend-js/emit.js';
 import { emitC } from './backend-c/emit.js';
 import { RUNTIME_DIR, runtimeSources } from './runtime/c_runtime.js';
@@ -169,7 +170,9 @@ function buildNative(mod, outPath, workDir) {
   const cc = findCC();
   // 运行时是 stage0/runtime/ 下真正的 C 文件，预编成 .o 缓存起来；热的叶子函数是
   // omni.h 里的 static inline，所以不靠 LTO 也能内联（tcc 没有 -flto）
-  const cargs = [...ccFlags(cc), cPath, ...runtimeObjects(cc), '-o', outPath, '-lm'];
+  // 外部 C 符号用到的库跟在后面（ADR-0014 决策 4）；libc 的那些 lib 是 null，不产生 -l
+  const libs = cAbiLibs(mod.cabi ?? []).map((l) => `-l${l}`);
+  const cargs = [...ccFlags(cc), cPath, ...runtimeObjects(cc), '-o', outPath, '-lm', ...libs];
   const r = spawn(cc, cargs, 'o');
   if (r[0] !== 0) {
     throw new OmniError(`C backend produced code that ${cc} rejected:\n${r[2]}\n(kept at ${cPath})`);

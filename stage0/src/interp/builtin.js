@@ -396,6 +396,13 @@ export function callBuiltin(I, e, env, frame) {
       return v;
     }
     case 'Builtin': return builtinOp(I, e, env, frame);
+    // 外部 C 符号（ADR-0014 决策 4）：解释器里过不去。名字要到运行期才知道，
+    // 而按名字查一张 C 函数指针表需要每条 op 的签名都一样 —— C_ABI 的签名恰恰各不相同
+    // （这和 js_asFn 过不了 dynamic 边界是同一类问题，见 ADR-0013 决策 5）。
+    // 报错而不是给个错答案：解释执行是 oracle，它不该假装能做 FFI。
+    case 'CCall':
+      failRt(`interp: C ABI call '${e.entry}' is not supported by the interpreter`);
+      return undefined;
     default: throw new OmniError(`interp.expr: ${e.kind}`);
   }
 }

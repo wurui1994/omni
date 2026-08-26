@@ -12,6 +12,7 @@
 import { JS_PRELUDE } from './prelude.js';
 import { typeKey } from '../hir/types.js';
 import { JS_ABI, JS_ALL, JS_MEMBERS } from '../hir/js_abi.js';
+import { C_ABI } from '../hir/c_abi.js';
 
 class JsEmitter {
   constructor(mod) {
@@ -341,6 +342,12 @@ class JsEmitter {
       case 'Call':
         return `${e.func}(${e.args.map((a) => this.rvalue(a, a.type)).join(', ')})`;
       case 'Builtin': return this.builtin(e);
+      // 外部 C 符号（ADR-0014 决策 4）：JS 后端上没有 C 调用约定，发一条当场报错的。
+      // 仍然要把实参发出来 —— 它们可能有副作用，而且这样这份 JS 依然是可读的。
+      case 'CCall': {
+        const args = e.args.map((a) => this.rvalue(a, a.type)).join(', ');
+        return `$js_cabi_unavailable(${JSON.stringify(C_ABI[e.entry].sym)}${args ? `, ${args}` : ''})`;
+      }
       default: throw new Error(`js.expr: ${e.kind}`);
     }
   }

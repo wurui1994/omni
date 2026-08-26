@@ -966,6 +966,12 @@ function $js_wrap_fn(f) {
   return { fp: (self, args) => $callFn($js_asFn(f), [self, args]) };
 }
 function $js_call_fn(f, args) { return $callFn($js_asFn(f), args); }
+// 外部 C 符号在 JS 后端上不存在（ADR-0014 决策 4）：C-ABI 只活在原生构建里。
+// 报错而不是给个错答案 —— 这份 JS 仍然要能被发出来（自举的不动点依赖它），
+// 只是真去调 C 的那一刻当场停下。
+function $js_cabi_unavailable(sym) {
+  throw new Error("C ABI symbol '" + sym + "' is only available in a native build (ADR-0014 decision 4)");
+}
 // 宿主里跑一段生成的 JS（omni run 与 REPL 的进程内快路径）。原生构建里没有 JS
 // 引擎，C 侧那两个同名函数只会报错 —— 这是宿主面唯一"只有一代能做"的能力。
 function $js_eval(code) {
