@@ -29,7 +29,10 @@
 // 迭代是活的）、
 // **pair**：`(x,y)` 字面量、`+ - * /`（后两个是复数乘除）、一元 `-`、`== !=`、
 // `z.x`/`z.y`/`xpart`/`ypart`、`abs`/`length`/`conj`、int/real 到 pair 的隐式转换、
-// `(pair)` 强制转换、`write`（`(x,y)` 两个分量各 %.15g）、pair 当形参/返回值/`?:` 的两支。
+// `(pair)` 强制转换、`write`（`(x,y)` 两个分量各 %.15g）、pair 当形参/返回值/`?:` 的两支、
+// **字符串函数**：`length`、`substr`、`find`、`rfind`、`replace`、`erase`
+// （核心方言为此加了 `(slen E)`/`(ssub E I N)`/`(sfind E T)` 三条 —— OIR 那边本来就有
+// len/substr/indexOf 三个 Builtin，所以四条腿是白捡的，只有 LLVM 那条腿要三行 ABI）。
 //
 // 不支持（见到就报错，报错里说清是哪一条）：triple、struct、import/access、
 // typedef、算符重载、重载解析、默认实参、命名实参、给切片赋值（`a[0:2] = b`）、
@@ -38,6 +41,11 @@
 // 收进来六条腿必然有一天对不上；`angle`/`dir`/`expi` 因此也在门外）、
 // `unit`（能用 sqrt 加除法写出来，但量不出 asy 用的是"乘倒数"还是"逐分量除" ——
 // 两种写法的差别在 %.15g 底下看不见，所以宁可不收也不猜）、
+// 字符串的 `reverse`（asy 是**按字节**倒的，而 Omni 的 string 是 UTF-8 字节序列
+// （ADR-0005）—— 非 ASCII 倒过来在 C 那条腿上是一串坏字节，在 JS 那条腿上要看
+// 宿主怎么处理，"六条腿逐字节相同"这句话就保不住了，所以门外）、
+// 字符串的 `insert`/`split`（`insert` 要的 `substr` 拼接现成，但 asy 的越界行为
+// 还没量全；`split` 要 `string[]`，而 `pair[]` 那条同样的坎还没过）、
 // 循环条件里的 `?:`（摊出来的赋值只能落在循环外面，条件就只
 // 算一次了 —— 语义会变，所以报错而不是悄悄换个意思）。
 //
@@ -59,6 +67,15 @@
 // - **切片的两条边界检查**：`a[3:1]` asy 报 "slice ends before it begins"，我们给空数组；
 //   `a[-1:2]` asy 报 "invalid negative index in slice of non-cyclic array"，我们落到
 //   `(aget …)` 的越界检查上（也是运行期错误，只是话不一样）。
+// - **字符串函数的越界是"静静地失败"，不是钳位**——这一条量完才敢写，而且量出来的
+//   跟直觉相反，所以 helper 是照量出来的写的，不是照"应该怎样"写的：
+//   `substr("abc",-1,2)` 是 `""` 不是 `"ab"`（起点为负直接空串，不是从 0 算）；
+//   `substr("abc",1,-1)` 也是 `""`（长度为负不当成"到末尾"）；起点越界同样是 `""`，
+//   而长度过长是钳到末尾。`find("abc","b",-5)` 是 `-1` 不是 `1`（起点为负不当 0）；
+//   起点等于长度时找空串给的是长度本身。`erase("abc",-1,2)` 原串不动。
+//   `replace("aaa","aa","b")` 是 `"ba"`（从左往右不重叠地换），空针不换。
+//   `length(int[])` 在 asy 那边是 "no matching function" —— length 只有 string 和
+//   pair 两个重载，数组的长度写 `a.length`；这一条落在 `tests/asy/strict/` 里。
 
 import { isList, isAtom, isStr, head } from '../sexpr/read.js';
 
@@ -130,7 +147,40 @@ const ZERO = new Map([
  * `realpart`/`imagpart` **asy 自己就没有**（量过："no matching variable 'realpart'"），
  * 所以这里也没有 —— 补上就是比 asy 多接受一门语言。
  */
-const ASY_PAIRFN = new Set(['length', 'conj', 'xpart', 'ypart']);
+const ASY_PAIRFN = new Set(['conj', 'xpart', 'ypart']);
+
+/**
+ * 字符串上的内建函数。`params` 是每个实参要的类型，`min` 是最少给几个 ——
+ * asy 那边 `substr(s,i)` 与 `find(s,t)` 是靠**默认实参**少给一个，这一刀没有默认实参
+ * 机制，所以按"给了几个"分派：substr 少给走"到末尾"那条 helper，find 少给补起点 0。
+ * `reverse` 刻意不收：它按字节翻转，非 ASCII 翻出来不是合法 UTF-8，而"印一串非法字节"
+ * 在 C 与 JS 两条腿上不是同一件事 —— 没量准的东西不收。
+ */
+const ASY_STRFN = new Map([
+  ['substr', { params: ['string', 'int', 'int'], min: 2, fn: 'asy__ssub', short: 'asy__ssubto', ret: 'string' }],
+  ['find', { params: ['string', 'string', 'int'], min: 2, fn: 'asy__sfindp', ret: 'int' }],
+  ['rfind', { params: ['string', 'string'], min: 2, fn: 'asy__srfind', ret: 'int' }],
+  ['replace', { params: ['string', 'string', 'string'], min: 3, fn: 'asy__srepl', ret: 'string' }],
+  ['erase', { params: ['string', 'int', 'int'], min: 3, fn: 'asy__serase', ret: 'string' }],
+]);
+
+/** helper 之间的依赖：发了外层那条，被它调用的也要发。 */
+const ASY_STR_DEPS = new Map([
+  ['asy__ssubto', ['asy__ssub']],
+  ['asy__serase', ['asy__ssub', 'asy__ssubto']],
+  ['asy__sfindp', ['asy__ssub', 'asy__ssubto']],
+  ['asy__srepl', ['asy__ssub', 'asy__ssubto']],
+]);
+
+/**
+ * 字符串上**刻意没做**的那几个，各自带上理由 —— 落到"内建函数 'xxx' 没有"那条通用
+ * 消息里的话，看的人分不清是"这一刀没做"还是"asy 也没有"。
+ */
+const ASY_STR_NOPE = new Map([
+  ['reverse', "字符串的 reverse（asy 是按字节倒的，而 Omni 的 string 是 UTF-8 字节序列 —— 非 ASCII 倒出来在 C 与 JS 两条腿上不是同一件事）"],
+  ['insert', "字符串的 insert（substr 拼接就够，但 asy 的越界行为还没量全，不猜）"],
+  ['split', '字符串的 split（要 string[] 的返回值，跟 pair[] 是同一道坎）'],
+]);
 
 /** 核心方言的字符串字面量。刻意不用 JSON.stringify：它对控制字符发 \uXXXX，
  *  而 sexpr/read.js 的转义表里没有 \u（那是 WAT 的方言）。只转必须转的五个。 */
@@ -222,6 +272,58 @@ const HELPERS = new Map([
     ;; （量过：(0.333333333333333,0.666666666666667)、(1e+20,1e-05)、(-0,0)）
     (ret (bin "+" (str "(") (bin "+" (tostr (lane (var a) 0) (int 15))
       (bin "+" (str ",") (bin "+" (tostr (lane (var a) 1) (int 15)) (str ")")))))))`],
+  // 字符串函数。核心方言给的是**严格**的三条（越界报错），asy 的这几个是**静静地失败**：
+  // 量过 substr("abc",5,1) 与 substr("abc",-1,2) 都是空串（不是报错、也不是 clamp 到 0 ——
+  // clamp 的话第二个会给 "ab"），substr("abc",1,100) 是 "bc"，erase("abc",-1,2) 原样返回，
+  // find("abc","b",-5) 是 -1（clamp 的话会是 1）。所以"负数当无效"这条要照着写。
+  ['asy__ssub', `  (fn asy__ssub ((s string) (i int) (n int)) string
+    (if (bin "<" (var i) (int 0)) (do (ret (str ""))))
+    (if (bin ">" (var i) (slen (var s))) (do (ret (str ""))))
+    (let m int (var n))
+    (if (bin ">" (bin "+" (var i) (var m)) (slen (var s)))
+      (do (set m (bin "-" (slen (var s)) (var i)))))
+    (if (bin "<" (var m) (int 0)) (do (ret (str ""))))
+    (ret (ssub (var s) (var i) (var m))))`],
+  ['asy__ssubto', `  (fn asy__ssubto ((s string) (i int)) string
+    ;; substr(s,i)：到末尾。写成 helper 而不是在调用处补 (slen …)，
+    ;; 那样接收者的代码要印两遍，substr(f(),1) 就会把 f 调两次。
+    (ret (call asy__ssub (var s) (var i) (slen (var s)))))`],
+  ['asy__serase', `  (fn asy__serase ((s string) (i int) (n int)) string
+    (if (bin "<" (var i) (int 0)) (do (ret (var s))))
+    (ret (bin "+" (call asy__ssub (var s) (int 0) (var i))
+                  (call asy__ssubto (var s) (bin "+" (var i) (var n))))))`],
+  ['asy__sfindp', `  (fn asy__sfindp ((s string) (t string) (p int)) int
+    (if (bin "<" (var p) (int 0)) (do (ret (int -1))))
+    (if (bin ">" (var p) (slen (var s))) (do (ret (int -1))))
+    (let r int (sfind (call asy__ssubto (var s) (var p)) (var t)))
+    (if (bin "<" (var r) (int 0)) (do (ret (int -1))))
+    (ret (bin "+" (var r) (var p))))`],
+  ['asy__srfind', `  (fn asy__srfind ((s string) (t string)) int
+    ;; 最后一次出现。核心方言只有"从前往后找"，所以扫一遍记最后一次
+    ;; （量过 rfind("hello world","o") 是 7）。空针在末尾命中，和 std::string::rfind 一致。
+    (let best int (int -1))
+    (let i int (int 0))
+    (while (bin "<=" (bin "+" (var i) (slen (var t))) (slen (var s)))
+      (do
+        (if (bin "==" (ssub (var s) (var i) (slen (var t))) (var t)) (do (set best (var i))))
+        (set i (bin "+" (var i) (int 1)))))
+    (ret (var best)))`],
+  ['asy__srepl', `  (fn asy__srepl ((s string) (a string) (b string)) string
+    ;; 换掉**所有**不重叠的出现，从左到右（量过 replace("aaa","aa","b") 是 "ba" ——
+    ;; 换掉头两个之后从第三个字符接着走）。空的被换串原样返回（量过）。
+    (if (bin "==" (slen (var a)) (int 0)) (do (ret (var s))))
+    (let r string (str ""))
+    (let i int (int 0))
+    (while (bin "<=" (bin "+" (var i) (slen (var a))) (slen (var s)))
+      (do
+        (if (bin "==" (ssub (var s) (var i) (slen (var a))) (var a))
+          (do
+            (set r (bin "+" (var r) (var b)))
+            (set i (bin "+" (var i) (slen (var a)))))
+          (do
+            (set r (bin "+" (var r) (ssub (var s) (var i) (int 1))))
+            (set i (bin "+" (var i) (int 1)))))))
+    (ret (bin "+" (var r) (call asy__ssubto (var s) (var i)))))`],
 ]);
 
 /** 写下标时的自动扩长。asy 量过：`int[] e; e[2]=5;` 之后 `e.length` 是 **3**（= 下标+1），
@@ -551,12 +653,55 @@ class AsyLower {
     if (v === null) return null;
     if (nm === 'xpart') return { code: `(lane ${v.code} 0)`, type: 'real' };
     if (nm === 'ypart') return { code: `(lane ${v.code} 1)`, type: 'real' };
-    if (nm === 'conj') {
-      this.used.add('asy__pconj');
-      return { code: `(call asy__pconj ${v.code})`, type: 'pair' };
+    this.used.add('asy__pconj');
+    return { code: `(call asy__pconj ${v.code})`, type: 'pair' };
+  }
+
+  /* ----------------------------------------------------------------- 字符串 */
+
+  /**
+   * `length(…)`：asy 只有 string 和 pair 两个重载 —— 量过 `length(int[])` 是
+   * "no matching function 'length(int[])'"（数组用 `a.length`），所以这里也拒，
+   * 而且拒得不带 ASY_NOPE：这不是"还没做"，是 asy 自己就没有。
+   */
+  lengthCall(n) {
+    const args = this.args(n.items[2]);
+    if (args === null) return null;
+    if (args.length !== 1) return this.err(n, `'length' 要 1 个实参，给了 ${args.length} 个`);
+    const v = this.expr(args[0]);
+    if (v === null) return null;
+    if (v.type === 'string') return { code: `(slen ${v.code})`, type: 'int' };
+    if (v.type === 'pair' || v.type === 'int' || v.type === 'real') {
+      const p = this.coerce(v, 'pair', args[0], "'length' 的实参");
+      if (p === null) return null;
+      this.used.add('asy__pabs');
+      return { code: `(call asy__pabs ${p.code})`, type: 'real' };
     }
-    this.used.add('asy__pabs');
-    return { code: `(call asy__pabs ${v.code})`, type: 'real' };
+    return this.err(args[0], `length(${v.type}) 在 asy 那边就是 no matching function（数组的长度写 a.length）`);
+  }
+
+  /** 字符串上的内建函数（名单与形参类型见 ASY_STRFN）。 */
+  strCall(n, nm) {
+    const spec = ASY_STRFN.get(nm);
+    const args = this.args(n.items[2]);
+    if (args === null) return null;
+    const max = spec.params.length;
+    if (args.length < spec.min || args.length > max) {
+      const want = spec.min === max ? `${max}` : `${spec.min} 或 ${max}`;
+      return this.err(n, `'${nm}' 要 ${want} 个实参，给了 ${args.length} 个`);
+    }
+    const parts = [];
+    for (let i = 0; i < args.length; i++) {
+      const v = this.coerce(this.expr(args[i]), spec.params[i], args[i], `'${nm}' 的第 ${i + 1} 个实参`);
+      if (v === null) return null;
+      parts.push(v.code);
+    }
+    let fn = spec.fn;
+    if (nm === 'substr' && args.length === 2) fn = spec.short;
+    else if (nm === 'find' && args.length === 2) parts.push('(int 0)');
+    this.used.add(fn);
+    for (const d of ASY_STR_DEPS.get(fn) ?? []) this.used.add(d);
+    return { code: `(call ${fn} ${parts.join(' ')})`, type: spec.ret };
   }
 
   /**
@@ -825,6 +970,9 @@ class AsyLower {
     // 内建数学函数先看：asy 里 sqrt/floor/… 是运行时自带的，不是 plain.asy 里的定义，
     // 所以这一层认它们不算"偷偷补模块系统"。用户自己定义了同名函数时以用户的为准
     // （asy 那边是重载，这一刀没有重载，让用户的定义赢至少不会静悄悄换掉语义）。
+    if (!this.funcs.has(nm) && nm === 'length') return this.lengthCall(n);
+    if (!this.funcs.has(nm) && ASY_STRFN.has(nm)) return this.strCall(n, nm);
+    if (!this.funcs.has(nm) && ASY_STR_NOPE.has(nm)) return this.nope(n, ASY_STR_NOPE.get(nm));
     if (!this.funcs.has(nm) && ASY_PAIRFN.has(nm)) return this.pairCall(n, nm);
     if (!this.funcs.has(nm) && ASY_MATH.has(nm)) return this.mathCall(n, nm);
     const d = this.funcs.get(nm);

@@ -54,4 +54,26 @@
     (print (tostr (real 123456789012345678.0) (int 15)))
     ;; 两头：1 位和 17 位（%.0g 没有定义，18 位对 double 没有意义 —— 方言把 N 限在 1..17）
     (print (tostr (real 1234.5678) (int 1)))
-    (print (tostr (real 1234.5678) (int 17)))))
+    (print (tostr (real 1234.5678) (int 17)))
+
+    ;; (slen E) / (ssub E I N) / (sfind E T)：长度、子串、找子串，全**按字节**。
+    ;; OIR 侧这三个 Builtin 早就在（Omni 自己的 s.length / s.substr / s.indexOf），
+    ;; 所以四条腿一行没改；LLVM 那条腿是三条新 ABI（omni_str_length / omni_str_sub /
+    ;; omni_index_of），漏一个就只有那一条炸，所以每条都要有用例。
+    (let s string (str "hello world"))
+    (print (tostr (slen (var s))))
+    (print (ssub (var s) (int 0) (int 5)))
+    (print (ssub (var s) (int 6) (int 5)))
+    (print (ssub (var s) (int 11) (int 0)))
+    (print (tostr (sfind (var s) (str "o"))))
+    (print (tostr (sfind (var s) (str "world"))))
+    (print (tostr (sfind (var s) (str "zz"))))
+    ;; 空串在 0 命中（和 JS 的 indexOf 一致），空串的长度是 0
+    (print (tostr (sfind (var s) (str ""))))
+    (print (tostr (slen (str ""))))
+    ;; 非 ASCII：长度是**字节数**不是字符数，子串切在字节上
+    (print (tostr (slen (str "中文"))))
+    (print (ssub (str "中文") (int 0) (int 3)))
+    (print (tostr (sfind (str "中文") (str "文"))))
+    ;; 拼起来用：取首尾两个字节
+    (print (bin "+" (ssub (var s) (int 0) (int 1)) (ssub (var s) (int 10) (int 1))))))

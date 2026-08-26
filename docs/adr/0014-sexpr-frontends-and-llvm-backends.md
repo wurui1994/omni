@@ -233,10 +233,11 @@ bison **隐式**的选择写成**显式**的优先级声明 —— 悬垂 else�
    自动扩长、`.length`/`.push`/`.pop`、数组当形参与返回值、**切片** `a[i:j]`、
    **`write` 一整个数组**、**for-each**）、**pair**（复数四则、
    `.x`/`.y`/`xpart`/`ypart`、`abs`/`length`/`conj`、int/real 到 pair 的隐式转换、
-   `(x,y)` 的印法），十二份用例在五个执行器上与 `asy -noV` 逐字节相同。
+   `(x,y)` 的印法）、**字符串函数**（`length`/`substr`/`find`/`rfind`/`replace`/`erase`），
+   十三份用例在五个执行器上与 `asy -noV` 逐字节相同。
    **还没做**的是给切片赋值、多维数组、`pair[]`、复数幂、triple、
-   struct + `operator init`、重载解析 —— 每一条都在 `tests/asy/bad/` 里有一份带
-   `ASY_NOPE` 的用例钉着，不是含糊的"待办"。
+   struct + `operator init`、重载解析、字符串的 `reverse`/`insert`/`split` —— 每一条都在
+   `tests/asy/bad/` 里有一份带 `ASY_NOPE` 的用例钉着，不是含糊的"待办"。
    超越函数（exp/log/trig）是**另一回事**：不是没做，是量过 libm 与 V8 在最后一位就分叉，
    收进来这条轴必然有一天变红，所以按边界拒掉（`tests/asy/bad/sin.asy`；pair 上的
    `angle`/`dir`/`expi` 同理，见下面 pair 那一节）。
@@ -322,6 +323,21 @@ bison **隐式**的选择写成**显式**的优先级声明 —— 悬垂 else�
 `(alen a)` / `(apop a)` 是表达式，`(aset a i v)` / `(apush a v)` 是语句。加它的理由只有一个：
 asy 的 `T[]` 在那 84 个模块里无处不在，门槛 2 的下一刀绕不过去。
 
+**字符串的三条原语**：`(slen E)` / `(ssub E I N)` / `(sfind E T)`。这一条最便宜，
+理由值得记下来：OIR 里 `len` / `substr` / `indexOf` 三个 Builtin **本来就在**（JS 前端
+一直在用），方言只是没开口。于是四条腿（run / run-c / interp / interp --mir）**一行执行
+代码都没加**就通了 —— 特别是 MIR 那条：`mir/from_oir.js` 把 Builtin 降成带单态化名字的
+`CALLOP`（`len.string`、`substr.string`），`mir/interp.js` 再把它路回 OIR 解释器同一个
+`applyBuiltin`。所以"加一个内建"的成本只在 **LLVM** 那条腿上。
+
+LLVM 那边要三行 `RT_OPS`（`len.string` → `omni_str_length`、`substr.string` →
+`omni_str_sub`、`indexOf.string` → `omni_index_of`，签名按 `omni_str = [2 x i64]`
+那条规则），外加 `omni_str.c` 里**两个真符号**：`omni_str_len` 和 `omni_substr` 在
+`omni.h` 里是 `static inline`，C 后端内联掉它们，但 LLVM 发的是 `call` —— 链接期就没有
+这个符号。所以补了 `omni_str_length` / `omni_str_sub` 两个薄包装。`omni_str_cmp` 不用管：
+那条路径 LLVM 直接发 memcmp。这类"C 后端能用而 LLVM 不能用"的静态内联是 ADR-0011 那条
+封闭 ABI 的一个副作用，写在这里免得下次再撞。
+
 **为什么不复用 buf**：buf 是按值传的 `{长度, 指针}`，引用语义靠"副本里的指针指向同一段
 存储"得来 —— 但 push 要改**长度**，而长度在每份副本里各有一个，别名看不到。所以数组的
 句柄必须是指针，len/cap/items 都在被指向的头里。buf 的形状一个字节都没动：GPU 那条腿
@@ -353,8 +369,9 @@ static inline C + 另写一份 IR 助手"，是两份实现；这次不重复那
 `1/3` 是实数除法而 `1#3` 是整数商、`3 == 3.0` 要提左边、`write` 的分隔符取决于第一个
 实参是不是字符串。类型是符号表的事，动作模板里没有符号表。
 
-**判分的人不是我**：`tests/asy` 的十二份用例（算术 / 字符串 / 两种引号 / 控制流 / 函数 /
-real 的 %.15g / `? :` / 数学函数 / 数组 / pair / 切片与整数组输出 / for-each）每份都是
+**判分的人不是我**：`tests/asy` 的十三份用例（算术 / 字符串 / 两种引号 / 控制流 / 函数 /
+real 的 %.15g / `? :` / 数学函数 / 数组 / pair / 切片与整数组输出 / for-each /
+字符串函数）每份都是
 「五条腿逐字节相同 == `.expected` == `asy -noV` 当场重跑」。`.expected` 本身就是真 asy 的
 输出生成的；机器上没装 asymptote 时那一节打印 skip，但 `.expected` 仍然把答案钉住。
 
@@ -374,11 +391,12 @@ real 的 %.15g / `? :` / 数学函数 / 数组 / pair / 切片与整数组输出
 （只算中选那支）跟着编码保住。代价写在明处：**循环条件里的 `? :` 直接报错**，因为那些
 赋值只能落在循环外面，条件就只算一次了。这条边界在 `tests/asy/bad/cond-in-loop.asy` 里。
 
-第一刀的边界都在 `tests/asy/bad/`（13 条，每条的期望值都必须以 `ASY_NOPE` 开头 ——
+第一刀的边界都在 `tests/asy/bad/`（16 条，每条的期望值都必须以 `ASY_NOPE` 开头 ——
 "还没做"和"做错了"必须能一眼分开）：struct、triple、`pair[]`、复数幂、重载、
 模块（import/access）、隐式缩放（`105cm`）、超越函数（`sin`、pair 上的 `angle` ——
 理由是上面那条 ULP 测量）、函数里读文件级变量（核心方言没有全局量）、
-循环条件里的 `? :`、给切片赋值（`a[0:2] = b`）、多维数组。
+循环条件里的 `? :`、给切片赋值（`a[0:2] = b`）、多维数组、
+字符串的 `reverse`/`insert`/`split`。
 
 **for-each 的两条语义也是量出来的**：循环变量是**复制**（体里 `x = 99` 不动数组），
 而迭代是**活的** —— `int[] g={1,2}; int n=0; for(int x:g){++n; if(n<5) g.push(9);}`
@@ -386,12 +404,30 @@ real 的 %.15g / `? :` / 数学函数 / 数组 / pair / 切片与整数组输出
 "先拷一份快照再走"那种实现只会走 2 轮，这条用例就是为了把那种实现挡在外面
 （`cases/12-foreach.asy`）。`continue` 走的还是 C 式 for 那套「先跑更新再跳」。
 
+**字符串函数的越界语义全是量出来的，而且跟直觉相反。** 直觉写法是"钳到合法区间"
+（`substr("abc",-1,2)` 给 `"ab"`），真 asy 不是：越界的**起点**让整个调用静静地失败，
+只有过长的**长度**才钳。逐条量的结果（`asy -noV`，24 行覆盖到每个负数与溢出组合）：
+
+- `substr("abc",-1,2)` → `""`（不是 `"ab"`）；`substr("abc",1,-1)` → `""`（负长度不当
+  "到末尾"）；`substr("abc",5,1)` → `""`；`substr("abc",1,99)` → `"bc"`（长度钳到末尾）。
+- `find("abc","b",-5)` → `-1`（不是 `1` —— 负起点不当 0）；`find("abc","",3)` → `3`。
+- `erase("abc",-1,2)` → `"abc"`（原串不动）。
+- `replace("aaa","aa","b")` → `"ba"`（从左往右**不重叠**地替换）；空针不换。
+- `length(int[])` 在 asy 那边是 `no matching function` —— `length` 只有 string 和 pair
+  两个重载，数组的长度写 `a.length`。这一条落在 `strict/length-array`（第四节，不是 bad/：
+  它不是"我们还没做"，是 asy 自己就没有）。
+
+所以 helper 是照量出来的写的，六条腿共用同一份。`reverse` 刻意在门外：它是**按字节**倒的，
+而 Omni 的 string 是 UTF-8 字节序列（ADR-0005）—— 非 ASCII 倒出来是一串坏字节，C 那条腿
+原样吐、JS 那条腿看宿主怎么处理，"逐字节相同"这句话就保不住了。`insert`（越界行为还没量全）
+和 `split`（要 `string[]` 的返回值，跟 `pair[]` 是同一道坎）同样在门外，各有一份 bad/。
+
 **第四节 `strict/`：asy 自己就不收的，我们也不能收。** 这一节是数组这一刀顺手加的，起因是
 一次测量：`int b=1; b++;` 在真 asy 上直接编不过（"postfix expressions are not allowed"），
 而我们的降级器照收。这类漏洞**不会让任何用例输出不同** —— 它只让"等价"这两个字变虚。
-所以 `strict/` 里的用例要求：我们拒，且装了 asy 的话**真 asy 也拒**。现在有三条：后缀
-`++`、pair 上的 `<`、pair 上的 `%`（后两条 asy 报的是 "no matching function
-'operator <(pair, pair)'"）。
+所以 `strict/` 里的用例要求：我们拒，且装了 asy 的话**真 asy 也拒**。现在有四条：后缀
+`++`、pair 上的 `<`、pair 上的 `%`（这两条 asy 报的是 "no matching function
+'operator <(pair, pair)'"）、`length(int[])`（`length` 只有 string 和 pair 两个重载）。
 
 **数组这一刀的语义全是量出来的**（`asy -noV`，逐条问）：
 

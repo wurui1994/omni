@@ -1,0 +1,1 @@
+length(int[]) 在 asy 那边就是 no matching function（数组的长度写 a.length）

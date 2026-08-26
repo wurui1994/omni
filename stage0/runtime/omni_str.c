@@ -68,6 +68,19 @@ int64_t omni_index_of(omni_str s, omni_str needle) {
   return -1;
 }
 
+/* 子串。omni.h 里的 omni_substr 是 static inline，LLVM 那条腿 call 不到一个 inline 函数，
+   所以这里给它一个**真符号**的外壳 —— 实现只有一行转发，两条腿因此不可能分叉
+   （越界的话与检查都在那一份 inline 里）。C 那条腿仍然直接用 inline 的那个。
+   omni_str_length 同理：长度就是结构体的第二个 i64，LLVM 那边本可以 extractvalue，
+   但那样"取长度"就有了两份实现；多走一层符号的代价是一次调用，换的是不会分叉。 */
+omni_str omni_str_sub(omni_str s, int64_t start, int64_t len) {
+  return omni_substr(s, start, len);
+}
+
+int64_t omni_str_length(omni_str s) {
+  return omni_str_len(s);
+}
+
 /* JS 的 String.fromCodePoint 对代理区返回孤立代理，写出去就是 U+FFFD，这里保持一致 */
 omni_str omni_chr(int64_t cp) {
   if (cp < 0 || cp > 0x10ffff) {

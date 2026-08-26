@@ -1,0 +1,5 @@
+;; (slen …) 只吃 string。这条要有用例是因为 OIR 的 `len` 是**多态**的（list/dict 也有），
+;; 方言这一层要是不挡，`(slen 一个数组)` 就会静悄悄降成另一条 Builtin。
+(module
+  (main
+    (print (tostr (slen (int 1))))))

@@ -94,6 +94,12 @@ const RT_OPS = new Map([
   ['rmath_round.real', { sym: 'omni_r_round', ret: 'double', params: ['double'] }],
   ['rmath_pow.real', { sym: 'omni_r_pow', ret: 'double', params: ['double', 'double'] }],
   ['rmath_fmod.real', { sym: 'omni_r_fmod', ret: 'double', params: ['double', 'double'] }],
+  // 字符串上的三条（核心方言的 `(slen …)` / `(ssub …)` / `(sfind …)`，ADR-0014 决策 1）。
+  // 全走真符号：omni_index_of 本来就是，另两个是 omni_str.c 里给 static inline 加的外壳
+  // （理由写在那里 —— 取长度和取子串各只有一份实现，两条腿不会分叉）。
+  ['len.string', { sym: 'omni_str_length', ret: 'i64', params: ['[2 x i64]'] }],
+  ['substr.string', { sym: 'omni_str_sub', ret: '[2 x i64]', params: ['[2 x i64]', 'i64', 'i64'] }],
+  ['indexOf.string', { sym: 'omni_index_of', ret: 'i64', params: ['[2 x i64]', '[2 x i64]'] }],
 ]);
 
 /** i64 比较 -> icmp 谓词；f64 -> fcmp 谓词。顺序与 OP.EQ..OP.GT 一致。 */

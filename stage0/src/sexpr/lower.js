@@ -26,6 +26,7 @@
  *         | (aset E E E) | (apush E E)
  *   E     = (int TEXT) | (real TEXT) | (bool TEXT) | (str "…") | (tostr E) | (tostr E N)
  *         | (rmath "NAME" A [B])
+ *         | (slen E) | (ssub E I N) | (sfind E T)
  *         | (toreal E) | (toint E)
  *         | (var NAME) | (bin "OP" E E) | (un "OP" E) | (call NAME E...)
  *         | (splat TYPE E) | (vlit TYPE E...) | (lane E N) | (hsum E)
@@ -522,6 +523,37 @@ class CoreLowerer {
       }
       if (n.items.length !== 2 + want) return this.err(n, `(rmath "${fn}") 要 ${want} 个参数`);
       return { kind: 'Builtin', name: `rmath_${fn}`, args, type: REAL, argType: REAL };
+    }
+    // 字符串上的三条：长度、子串、找子串。OIR 侧三个 `Builtin` 早就在（Omni 自己的
+    // `s.length` / `s.substr(i,n)` / `s.indexOf(t)` 就是它们），所以 run / run-c /
+    // interp / interp --mir 四条腿一行没改就通了；LLVM 那条腿要三条 ABI（见 RT_OPS）。
+    //
+    // **按字节**，不按码点：Omni 的 string 就是 UTF-8 字节序列（ADR-0005），asy 的
+    // string 是 C++ 的 std::string，也是字节。所以两边的 length/substr 说的是同一件事。
+    // 越界**报错**而不是截断（`(ssub …)` 用的就是 Omni 自己那份检查，消息也是同一句）——
+    // 哪门语言要 clamp，clamp 就写在那门语言的前端里，不写进这一层。
+    if (h === 'slen' || h === 'ssub' || h === 'sfind') {
+      const s = this.expr(n.items[1]);
+      if (s === null) return null;
+      if (s.type.k !== 'string') return this.err(n, `(${h} …) 的第一个参数要是 string，这里是 ${coreTypeText(s.type)}`);
+      if (h === 'slen') {
+        if (n.items.length !== 2) return this.err(n, '(slen E) 要 1 个参数');
+        return { kind: 'Builtin', name: 'len', args: [s], recvType: STRING, type: INT };
+      }
+      if (h === 'sfind') {
+        if (n.items.length !== 3) return this.err(n, '(sfind E T) 要 2 个参数');
+        const t = this.expr(n.items[2]);
+        if (t === null) return null;
+        if (t.type.k !== 'string') return this.err(n.items[2], `(sfind E T) 的 T 要是 string，这里是 ${coreTypeText(t.type)}`);
+        return { kind: 'Builtin', name: 'indexOf', args: [s, t], recvType: STRING, type: INT };
+      }
+      if (n.items.length !== 4) return this.err(n, '(ssub E I N) 要 3 个参数');
+      const at = this.expr(n.items[2]);
+      const len = this.expr(n.items[3]);
+      if (at === null || len === null) return null;
+      if (at.type.k !== 'int') return this.err(n.items[2], `(ssub E I N) 的起点要是 int，这里是 ${coreTypeText(at.type)}`);
+      if (len.type.k !== 'int') return this.err(n.items[3], `(ssub E I N) 的长度要是 int，这里是 ${coreTypeText(len.type)}`);
+      return { kind: 'Builtin', name: 'substr', args: [s, at, len], recvType: STRING, type: STRING };
     }
     // `(toreal E)` / `(toint E)`：int <-> real 的**显式**转换。同一条纪律：类型不推导、
     // 不插隐式转换，所以两个方向都得写出来。OIR 侧两个都是现成的（Cast int->real、

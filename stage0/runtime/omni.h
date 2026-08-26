@@ -121,6 +121,8 @@ omni_str omni_str_cat(omni_str a, omni_str b);
 omni_str omni_str_join(const omni_str *items, int64_t n, omni_str sep);
 omni_str omni_str_fmt(const char *fmt, ...);
 int64_t omni_index_of(omni_str s, omni_str needle);
+omni_str omni_str_sub(omni_str s, int64_t start, int64_t len);
+int64_t omni_str_length(omni_str s);
 omni_str omni_chr(int64_t cp);
 char *omni_cstr(omni_str s);
 

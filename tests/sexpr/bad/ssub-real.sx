@@ -1,0 +1,4 @@
+;; (ssub E I N) 的起点与长度都是 int —— 方言不插隐式转换，real 下标要自己 toint。
+(module
+  (main
+    (print (ssub (str "abc") (real 1.0) (int 1)))))
