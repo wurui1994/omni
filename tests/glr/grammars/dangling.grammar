@@ -1,0 +1,19 @@
+;; 悬垂 else：不加优先级它就是**真歧义**的语法，这里刻意不加。
+;;
+;; `if a then if b then x else y` 有两棵树（else 配里面那个 if，还是配外面那个）。
+;; GLR 会把两支都带到接受，然后 driver 撞上 bison 的那条硬边界：不猜，报错
+;; （doc/bison.texi:1321..1325）。这条 case 存在的意义就是把那条边界钉住 ——
+;; 一个"能分析任何语法"的驱动最容易悄悄退化成"随便挑一棵"。
+;;
+;; 真要消歧就加一行 `(prec right "else")`，跟 bison 一样。刻意不加。
+(grammar dangling
+  (tokens ID)
+  (start S)
+  (lex
+    (skip space)
+    (token ID (+ alpha))
+    (keyword ID "if" "then" "else"))
+  (rule S
+    (-> ("if" ID "then" S) (if $2 $4))
+    (-> ("if" ID "then" S "else" S) (if $2 $4 $6))
+    (-> (ID) $1)))

@@ -174,6 +174,36 @@ if (c1 && !quick) {
     else if (via.stdout !== ref.stdout) bad('N1 interp wat == C0 interp', `    C0 ${JSON.stringify(ref.stdout)}\n    N1 ${JSON.stringify(via.stdout)}`);
     else ok(`N1 interp wat/01-numeric == C0 interp  ${ref.stdout.length} bytes`);
   }
+
+  // ---- 阶段 9：原生编译器上的 GLR ------------------------------------------------
+  // 同一条理由（见阶段 8），换一段更险的代码：GLR 那四个文件里 Map/Set 用得比 WAT 前端多，
+  // 还有 `[...set].sort()`、对象展开 `{...g}`、`Array.prototype.find/filter` 这些容易越界的
+  // 写法。三步都要跟 C0 逐字节相同：构表、分析出树、真歧义要报错 ——
+  // 错误路径跟成功路径一样容易踩封闭 ABI（诊断格式化那一段全是字符串操作）。
+  if (r.code === 0) {
+    const gExpr = join(root, 'tests', 'glr', 'grammars', 'expr.grammar');
+    const gDang = join(root, 'tests', 'glr', 'grammars', 'dangling.grammar');
+    const inExpr = join(dir, 'glr-expr.in');
+    const inAmbig = join(dir, 'glr-ambig.in');
+    writeFileSync(inExpr, '-1+2*3^4^5\n');
+    writeFileSync(inAmbig, 'if a then if b then x else y\n');
+    const both = (label, args, wantFail) => {
+      const ref = spawnSync('node', [cli, ...args], { encoding: 'utf8' });
+      const via = spawnSync(n1, args, { encoding: 'utf8' });
+      const refOut = wantFail ? ref.stderr : ref.stdout;
+      const viaOut = wantFail ? via.stderr : via.stdout;
+      if (wantFail ? via.status === 0 : via.status !== 0) {
+        bad(`N1 ${label}`, `    exit=${via.status} (wanted ${wantFail ? 'failure' : 'success'})\n${via.stderr}`);
+      } else if (viaOut !== refOut) {
+        bad(`N1 ${label} == C0`, `    C0 ${JSON.stringify(refOut)}\n    N1 ${JSON.stringify(viaOut)}`);
+      } else {
+        ok(`N1 ${label} == C0  ${refOut.length} bytes`);
+      }
+    };
+    both('glr-table expr', ['glr-table', gExpr], false);
+    both('glr expr', ['glr', gExpr, inExpr], false);
+    both('glr dangling (ambiguous)', ['glr', gDang, inAmbig], true);
+  }
 }
 
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);

@@ -1,0 +1,399 @@
+;; Asymptote —— 从 camp.y（bison LALR(1)，721 行）与 camp.l（flex，450 行）转写。
+;;
+;; 这是 GLR 层的第一份**真实语言**语法：216 条产生式、77 个终结符、一整块优先级声明。
+;; 它证的不是"能分析算术表达式"，是"一门有 13 处 %prec、还有真歧义的语言能照原样搬过来"。
+;;
+;; 转写时做的三处改动，每一处都写清楚为什么：
+;;
+;; 1. **关键字与单字符算符写成字面量终结符**。camp.y 里它们是 IF / ELSE / '+' 这样的 token
+;;    名，我们直接写 "if" / "+"。词法那边 `(keyword ID ...)` 负责把 ID 改判成字面量。
+;;    等价，而且读规则时不用来回查 token 表。MODIFIER / PERM 同理拆成 "static" / "public" 等。
+;;
+;; 2. **悬垂 else 用优先级消掉**，而不是留给 GLR。camp.y 靠 `%expect 4` 容忍它，
+;;    再吃 bison"冲突时默认移进"的兜底。我们没有那条兜底（ADR-0014 决策 2：真歧义不猜），
+;;    所以照教科书的写法显式声明：`(prec nonassoc THEN)` 低于 `(prec nonassoc "else")`，
+;;    短的那条 if 规则标 `(prec THEN)`。这是把 bison 隐式的选择写成了显式的声明。
+;;
+;; 3. **`(prec left "(" ")")` 保留在最高级**，跟 camp.y 一样 —— C 式强制转换
+;;    （`'(' name ')' exp`）与括号表达式之间那处消歧全靠它。
+;;
+;; 4. **命名实参也用优先级消掉**。camp.y 的四处冲突里有一处是「`f(x=1)` 里的 `x=1`
+;;    算实参名还是算赋值表达式」，bison 默默选了前者。我们不能默默选，于是给
+;;    `name -> ID` 标一个最低的伪优先级 NAME_ID：这样在"归约成 name（走赋值）还是
+;;    移进 `=`（走命名实参）"这处冲突上，移进赢 —— 跟 bison 选的一样，只是写下来了。
+;;    这一条只影响真的有冲突的那些状态：`x = y;` 照旧是赋值（那个状态里没有
+;;    `argument -> ID . ASSIGN exp` 这个项，因此根本不是冲突点）。量过：改完
+;;    冲突从 45 降到 43，`f(x=1, 2)` 出 `(arg-named x 1)`，`x = y;` 仍是 `(assign ...)`。
+;;
+;; SLR 留下 43 处冲突（bison 的 LALR 只剩 4 处）。这个差是刻意的：多出来的都由 GLR
+;; 在运行期分叉解决，走不通的那支自己死。cases/asy.cases 里那一批真实片段全部只出一棵树。
+;;
+;; 还没覆盖的（第一阶段边界，都是词法层的事）：`operator +` 这种算符名、TeX 字符串的
+;; 转义细节、`'...'` 单引号串、EXTRAOPS 里的 `<<`/`>>`/`@`/`~`/`<>`。语法层是全的。
+(grammar asy
+  (tokens
+    ID LIT STRING OPERATOR SELFOP
+    ASSIGN EQ NEQ LT LE GT GE CAND COR BAR AMPERSAND CARETS
+    DOTS COLONS DASHES LONGDASH INCR ELLIPSIS
+    ;; 只用来标 %prec 的伪终结符，跟 camp.y 一一对应
+    THEN JOIN_PREC DIRTAG UNARY EXP_IN_PARENS
+    ;; 转写时加的一个：见文件头第 4 条（命名实参 vs 赋值表达式）
+    NAME_ID)
+
+  ;; ---- 优先级：从低到高，一行一级。次序照 camp.y:126..146 原样搬 ----------------
+  ;; THEN 与 "else" 是转写时加的（见文件头第 2 条），放在最低级：它们只跟彼此比。
+  (prec nonassoc NAME_ID)
+  (prec nonassoc THEN)
+  (prec nonassoc "else")
+  (prec right ASSIGN SELFOP)
+  (prec right "?" ":")
+  (prec left COR)
+  (prec left CAND)
+  (prec left BAR)
+  (prec left AMPERSAND)
+  (prec left EQ NEQ)
+  (prec left LT LE GT GE)
+  (prec left OPERATOR)
+  (prec left CARETS)
+  (prec left JOIN_PREC DOTS COLONS DASHES INCR LONGDASH)
+  (prec left DIRTAG "controls" "tension" "atleast" "and")
+  (prec left "curl" "{" "}")
+  (prec left "+" "-")
+  (prec left "*" "/" "%" "#" LIT)
+  (prec left UNARY)
+  (prec right "^")
+  (prec left EXP_IN_PARENS)
+  (prec left "(" ")")
+
+  (start file)
+
+  ;; ---- 词法：camp.l 的 token 表，一行一行搬 ------------------------------------
+  ;; 最长匹配自动把 `---` / `--` / `-` 和 `...` / `..` / `.` 分开，不用另排次序。
+  (lex
+    (skip space)
+    (comment "//" (* (not "\n")))
+    (block-comment "/*" "*/")
+    (token LIT (+ digit) (? "." (* digit)) (? (or "e" "E") (? (set "+-")) (+ digit)))
+    (token LIT "." (+ digit) (? (or "e" "E") (? (set "+-")) (+ digit)))
+    (token ID (or alpha "_") (* (or alnum "_")))
+    (string STRING "\"")
+    (string STRING "'")
+    ;; camp.l 里这五个走 LIT 而不是关键字（intExp/booleanExp/... 都是 yylval.e）
+    (keyword ID LIT "true" "false" "null" "cycle" "newframe")
+    (keyword ID
+      "if" "else" "while" "for" "do" "return" "break" "continue"
+      "struct" "typedef" "using" "new" "access" "import" "unravel"
+      "from" "include" "quote" "this" "explicit"
+      "and" "controls" "tension" "atleast" "curl"
+      "static" "autounravel" "public" "private" "restricted")
+    (punct SELFOP "+=" "-=" "*=" "/=" "#=" "%=" "^=")
+    (punct ELLIPSIS "...")
+    (punct LONGDASH "---")
+    (punct DASHES "--")
+    (punct INCR "++")
+    (punct DOTS "..")
+    (punct COLONS "::")
+    (punct CARETS "^^")
+    (punct EQ "==")
+    (punct NEQ "!=")
+    (punct LE "<=")
+    (punct GE ">=")
+    (punct CAND "&&")
+    (punct COR "||")
+    (punct AMPERSAND "&")
+    (punct BAR "|")
+    (punct ASSIGN "=")
+    (punct LT "<")
+    (punct GT ">")
+    ;; camp.l 的 EXTRAOPS：都当 OPERATOR（带文本的一元/二元算符）
+    (punct OPERATOR "!" "<<" ">>" "@@" "@" "~" "<>" "$$" "$")
+    ;; `**` 在 camp.l 里就是 `^` 的别名
+    (punct "^" "**")
+    (op "+" "-" "*" "/" "#" "%" "^" "?" ":" "," ";" "(" ")" "[" "]" "{" "}" "."))
+
+  ;; ---- 产生式：camp.y:194..721，顺序一致 ---------------------------------------
+  ;; 动作是纯模板，所以 camp.y 里那些"往列表里 add"的副作用写成了嵌套：
+  ;; `(block-add 上一段 新的一条)`。树更深，但语义一样，而且能直接比对。
+  (rule file
+    (-> (fileblock) $1))
+  (rule fileblock
+    (-> () (block))
+    (-> (fileblock runnable) (block-add $1 $2)))
+  (rule bareblock
+    (-> () (block))
+    (-> (bareblock runnable) (block-add $1 $2)))
+  (rule name
+    (-> (ID) (prec NAME_ID) (name $1))
+    (-> (name "." ID) (qualified $1 $3))
+    (-> ("%") (name "operator answer")))
+  (rule runnable
+    (-> (dec) $1)
+    (-> (stm) $1)
+    (-> (modifiers dec) (modified $1 $2))
+    (-> (modifiers stm) (modified $1 $2)))
+  ;; camp.y 的 MODIFIER / PERM 两个 token 类在这里拆成了字面量关键字（见文件头第 1 条）
+  (rule modifier
+    (-> ("static") $1)
+    (-> ("autounravel") $1)
+    (-> ("public") $1)
+    (-> ("private") $1)
+    (-> ("restricted") $1))
+  (rule modifiers
+    (-> (modifier) (mods $1))
+    (-> (modifiers modifier) (mods-add $1 $2)))
+  (rule dec
+    (-> (vardec) $1)
+    (-> (fundec) $1)
+    (-> (typedec) $1)
+    (-> ("access" stridpairlist ";") (access $2))
+    (-> ("from" name "unravel" idpairlist ";") (unravel $2 $4))
+    (-> ("from" name "unravel" "*" ";") (unravel $2 (wildcard)))
+    (-> ("unravel" name ";") (unravel $2 (wildcard)))
+    (-> ("from" strid "access" idpairlist ";") (from-access $2 $4))
+    (-> ("from" strid "access" "*" ";") (from-access $2 (wildcard)))
+    (-> ("import" stridpair ";") (import $2))
+    (-> ("include" ID ";") (include $2))
+    (-> ("include" STRING ";") (include $2))
+    (-> ("typedef" "import" "(" typeparamlist ")" ";") (receive-typedef $4))
+    (-> ("import" "typedef" "(" typeparamlist ")" ";") (bad-dec "expected 'typedef import(<types>);'"))
+    (-> ("access" strid "(" decdeclist ")" ID ID ";") (template-access $2 $4 $6 $7))
+    (-> ("access" strid "(" decdeclist ")" ";") (bad-dec "expected 'as'"))
+    (-> ("import" strid "(" decdeclist ")" ";") (bad-dec "parametrized imports are disallowed"))
+    (-> ("from" strid "(" decdeclist ")" "access" idpairlist ";") (from-access $2 $7 $4)))
+
+  (rule decdec
+    (-> (ID ASSIGN type) (formal $3 (decidstart $1)))
+    (-> (type) (formal $1)))
+  (rule decdeclist
+    (-> (decdec) (formals $1))
+    (-> (decdeclist "," decdec) (formals-add $1 $3)))
+  (rule typeparam
+    (-> (ID) (typeparam $1)))
+  (rule typeparamlist
+    (-> (typeparam) (typeparams $1))
+    (-> (typeparamlist "," typeparam) (typeparams-add $1 $3)))
+  (rule idpair
+    (-> (ID) (idpair $1))
+    (-> (ID ID ID) (idpair $1 $2 $3)))
+  (rule idpairlist
+    (-> (idpair) (idpairs $1))
+    (-> (idpairlist "," idpair) (idpairs-add $1 $3)))
+  (rule strid
+    (-> (ID) $1)
+    (-> (STRING) $1))
+  (rule stridpair
+    (-> (ID) (idpair $1))
+    (-> (strid ID ID) (idpair $1 $2 $3)))
+  (rule stridpairlist
+    (-> (stridpair) (idpairs $1))
+    (-> (stridpairlist "," stridpair) (idpairs-add $1 $3)))
+  (rule vardec
+    (-> (barevardec ";") $1))
+  (rule barevardec
+    (-> (type decidlist) (vardec $1 $2)))
+  (rule type
+    (-> (celltype) $1)
+    (-> (name dims) (array-ty $1 $2)))
+  (rule celltype
+    (-> (name) (name-ty $1)))
+  (rule dims
+    (-> ("[" "]") (dims))
+    (-> (dims "[" "]") (dims+ $1)))
+  (rule dimexps
+    (-> ("[" exp "]") (dimexps $2))
+    (-> (dimexps "[" exp "]") (dimexps-add $1 $3)))
+  (rule decidlist
+    (-> (decid) (decids $1))
+    (-> (decidlist "," decid) (decids-add $1 $3)))
+  (rule decid
+    (-> (decidstart) (decid $1))
+    (-> (decidstart ASSIGN varinit) (decid $1 $3)))
+  (rule decidstart
+    (-> (ID) (decidstart $1))
+    (-> (ID dims) (decidstart $1 $2))
+    (-> (ID "(" ")") (fundecidstart $1 (formals)))
+    (-> (ID "(" formals ")") (fundecidstart $1 $3)))
+  (rule varinit
+    (-> (exp) $1)
+    (-> (arrayinit) $1))
+  (rule block
+    (-> ("{" bareblock "}") $2))
+  (rule arrayinit
+    (-> ("{" "}") (arrayinit))
+    (-> ("{" ELLIPSIS varinit "}") (arrayinit-rest (arrayinit) $3))
+    (-> ("{" basearrayinit "}") $2)
+    (-> ("{" basearrayinit ELLIPSIS varinit "}") (arrayinit-rest $2 $4)))
+  (rule basearrayinit
+    (-> (",") (arrayinit))
+    (-> (varinits) $1)
+    (-> (varinits ",") $1))
+  (rule varinits
+    (-> (varinit) (arrayinit $1))
+    (-> (varinits "," varinit) (arrayinit-add $1 $3)))
+  (rule formals
+    (-> (formal) (formals $1))
+    (-> (ELLIPSIS formal) (formals-rest $2))
+    (-> (formals "," formal) (formals-add $1 $3))
+    (-> (formals ELLIPSIS formal) (formals-rest $1 $3)))
+  (rule explicitornot
+    (-> ("explicit") (explicit))
+    (-> () (implicit)))
+  (rule formal
+    (-> (explicitornot type) (formal $1 $2))
+    (-> (explicitornot type decidstart) (formal $1 $2 $3))
+    (-> (explicitornot type decidstart ASSIGN varinit) (formal $1 $2 $3 $5))
+    (-> (explicitornot type ID decidstart) (formal-kw $1 $2 $3 $4))
+    (-> (explicitornot type ID decidstart ASSIGN varinit) (formal-kw $1 $2 $3 $4 $6)))
+  (rule fundec
+    (-> (type ID "(" ")" blockstm) (fundec $1 $2 (formals) $5))
+    (-> (type ID "(" formals ")" blockstm) (fundec $1 $2 $4 $6)))
+  (rule typedec
+    (-> ("struct" ID block) (recorddec $2 $3))
+    (-> ("typedef" vardec) (typedec $2))
+    (-> ("using" ID ASSIGN type ";") (typedec-using (decidstart $2) $4))
+    (-> ("using" ID ASSIGN type "(" ")" ";") (typedec-using (fundecidstart $2 (formals)) $4))
+    (-> ("using" ID ASSIGN type "(" formals ")" ";") (typedec-using (fundecidstart $2 $6) $4)))
+  (rule slice
+    (-> (":") (slice))
+    (-> (exp ":") (slice-from $1))
+    (-> (":" exp) (slice-to $2))
+    (-> (exp ":" exp) (slice $1 $3)))
+
+  (rule value
+    (-> (value "." ID) (field $1 $3))
+    (-> (name "[" exp "]") (subscript (name-exp $1) $3))
+    (-> (value "[" exp "]") (subscript $1 $3))
+    (-> (name "[" slice "]") (slice-exp (name-exp $1) $3))
+    (-> (value "[" slice "]") (slice-exp $1 $3))
+    (-> (name "(" ")") (call (name-exp $1) (args)))
+    (-> (name "(" arglist ")") (call (name-exp $1) $3))
+    (-> (value "(" ")") (call $1 (args)))
+    (-> (value "(" arglist ")") (call $1 $3))
+    (-> ("(" exp ")") (prec EXP_IN_PARENS) $2)
+    (-> ("(" name ")") (prec EXP_IN_PARENS) (name-exp $2))
+    (-> ("this") (this)))
+  (rule argument
+    (-> (exp) (arg $1))
+    (-> (ID ASSIGN exp) (arg-named $1 $3)))
+  (rule arglist
+    (-> (argument) (args $1))
+    (-> (ELLIPSIS argument) (args-rest $2))
+    (-> (arglist "," argument) (args-add $1 $3))
+    (-> (arglist ELLIPSIS argument) (args-rest $1 $3)))
+  ;; 两个以上、逗号分开的表达式 —— 这就是 asymptote 的 pair/triple 字面量
+  (rule tuple
+    (-> (exp "," exp) (args $1 $3))
+    (-> (tuple "," exp) (args-add $1 $3)))
+
+  (rule exp
+    (-> (name) (name-exp $1))
+    (-> (value) $1)
+    (-> (LIT) $1)
+    (-> (STRING) $1)
+    ;; `105cm` 这种缩放写法。LIT 有自己的优先级级别，靠的就是这一条
+    (-> (LIT exp) (scale $1 $2))
+    (-> ("(" name ")" exp) (cast (name-ty $2) $4))
+    (-> ("(" name dims ")" exp) (cast (array-ty $2 $3) $5))
+    (-> ("+" exp) (prec UNARY) (unary "+" $2))
+    (-> ("-" exp) (prec UNARY) (unary "-" $2))
+    (-> (OPERATOR exp) (unary $1 $2))
+    (-> (exp "+" exp) (binary "+" $1 $3))
+    (-> (exp "-" exp) (binary "-" $1 $3))
+    (-> (exp "*" exp) (binary "*" $1 $3))
+    (-> (exp "/" exp) (binary "/" $1 $3))
+    (-> (exp "%" exp) (binary "%" $1 $3))
+    (-> (exp "#" exp) (binary "#" $1 $3))
+    (-> (exp "^" exp) (binary "^" $1 $3))
+    (-> (exp LT exp) (binary "<" $1 $3))
+    (-> (exp LE exp) (binary "<=" $1 $3))
+    (-> (exp GT exp) (binary ">" $1 $3))
+    (-> (exp GE exp) (binary ">=" $1 $3))
+    (-> (exp EQ exp) (equality "==" $1 $3))
+    (-> (exp NEQ exp) (equality "!=" $1 $3))
+    (-> (exp CAND exp) (and-exp $1 $3))
+    (-> (exp COR exp) (or-exp $1 $3))
+    (-> (exp CARETS exp) (binary "^^" $1 $3))
+    (-> (exp AMPERSAND exp) (binary "&" $1 $3))
+    (-> (exp BAR exp) (binary "|" $1 $3))
+    (-> (exp OPERATOR exp) (binary $2 $1 $3))
+    (-> (exp INCR exp) (binary "++" $1 $3))
+    (-> ("new" celltype) (new-record $2))
+    (-> ("new" celltype dimexps) (new-array $2 $3))
+    (-> ("new" celltype dimexps dims) (new-array $2 $3 $4))
+    (-> ("new" celltype dims) (new-array $2 (none) $3))
+    (-> ("new" celltype dims arrayinit) (new-array $2 (none) $3 $4))
+    (-> ("new" celltype "(" ")" blockstm) (new-function $2 (formals) $5))
+    (-> ("new" celltype dims "(" ")" blockstm) (new-function (array-ty $2 $3) (formals) $6))
+    (-> ("new" celltype "(" formals ")" blockstm) (new-function $2 $4 $6))
+    (-> ("new" celltype dims "(" formals ")" blockstm) (new-function (array-ty $2 $3) $5 $7))
+    (-> (exp "?" exp ":" exp) (cond $1 $3 $5))
+    (-> (exp ASSIGN exp) (assign $1 $3))
+    (-> ("(" tuple ")") (tuple-exp $2))
+    (-> (exp join exp) (prec JOIN_PREC) (join-exp $1 $2 $3))
+    (-> (exp dir) (prec DIRTAG) (join-dir $1 $2))
+    (-> (INCR exp) (prec UNARY) (prefix "+" $2))
+    (-> (DASHES exp) (prec UNARY) (prefix "-" $2))
+    ;; camp.y 里注明这条非法、留到翻译期才报 —— 语法上照收
+    (-> (exp INCR) (prec UNARY) (postfix "+" $1))
+    (-> (exp SELFOP exp) (self $2 $1 $3))
+    (-> ("quote" "{" fileblock "}") (quote-exp $3)))
+
+  ;; camp.y 原注：dir 这条不写成"可空"，因为那样会炸出一堆 reduce/reduce。照抄。
+  (rule join
+    (-> (DASHES) (join "--"))
+    (-> (basicjoin) (prec JOIN_PREC) $1)
+    (-> (dir basicjoin) (prec JOIN_PREC) (join-out $1 $2))
+    (-> (basicjoin dir) (prec JOIN_PREC) (join-in $1 $2))
+    (-> (dir basicjoin dir) (prec JOIN_PREC) (join-both $1 $2 $3)))
+  (rule dir
+    (-> ("{" "curl" exp "}") (spec-curl $3))
+    (-> ("{" exp "}") (spec $2))
+    (-> ("{" exp "," exp "}") (spec (pair $2 $4)))
+    (-> ("{" exp "," exp "," exp "}") (spec (triple $2 $4 $6))))
+  (rule basicjoin
+    (-> (DOTS) (join ".."))
+    (-> (DOTS tension DOTS) (join ".." $2))
+    (-> (DOTS controls DOTS) (join ".." $2))
+    (-> (COLONS) (join "::"))
+    (-> (LONGDASH) (join "---")))
+  (rule tension
+    (-> ("tension" exp) (tension $2 (atleast false)))
+    (-> ("tension" exp "and" exp) (tension $2 $4 (atleast false)))
+    (-> ("tension" "atleast" exp) (tension $3 (atleast true)))
+    (-> ("tension" "atleast" exp "and" exp) (tension $3 $5 (atleast true))))
+  (rule controls
+    (-> ("controls" exp) (controls $2))
+    (-> ("controls" exp "and" exp) (controls $2 $4)))
+
+  (rule stm
+    (-> (";") (empty-stm))
+    (-> (blockstm) $1)
+    (-> (stmexp ";") $1)
+    ;; 悬垂 else 就在这两条之间。`(prec THEN)` 是转写时加的（见文件头第 2 条）
+    (-> ("if" "(" exp ")" stm) (prec THEN) (if $3 $5))
+    (-> ("if" "(" exp ")" stm "else" stm) (if $3 $5 $7))
+    (-> ("while" "(" exp ")" stm) (while $3 $5))
+    (-> ("do" stm "while" "(" exp ")" ";") (do $2 $5))
+    (-> ("for" "(" forinit ";" fortest ";" forupdate ")" stm) (for $3 $5 $7 $9))
+    (-> ("for" "(" type ID ":" exp ")" stm) (for-each $3 $4 $6 $8))
+    (-> ("break" ";") (break))
+    (-> ("continue" ";") (continue))
+    (-> ("return" ";") (return))
+    (-> ("return" exp ";") (return $2)))
+  (rule stmexp
+    (-> (exp) (exp-stm $1)))
+  (rule blockstm
+    (-> (block) (block-stm $1)))
+  (rule forinit
+    (-> () (none))
+    (-> (stmexplist) $1)
+    (-> (barevardec) $1))
+  (rule fortest
+    (-> () (none))
+    (-> (exp) $1))
+  (rule forupdate
+    (-> () (none))
+    (-> (stmexplist) $1))
+  (rule stmexplist
+    (-> (stmexp) (stmexps $1))
+    (-> (stmexplist "," stmexp) (stmexps-add $1 $3))))

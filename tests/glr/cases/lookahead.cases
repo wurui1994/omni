@@ -1,0 +1,9 @@
+;; `b d a` 与 `b d c` 走的是同一个状态里那对冲突动作的两支。两条都必须过 ——
+;; 只过一条说明驱动在冲突处只挑了一支，那就是退化成 LR 了。
+b d a            ==> (s4)
+b d c            ==> (s2 (A))
+d a              ==> (s1 (A))
+d c              ==> (s3)
+
+b d              !!> unexpected end of input
+b a              !!> unexpected

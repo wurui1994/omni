@@ -1,0 +1,264 @@
+grammar asy: 78 terminals, 54 nonterminals, 218 rules, 429 states
+  r0  file -> fileblock
+  r1  fileblock -> <empty>
+  r2  fileblock -> fileblock runnable
+  r3  bareblock -> <empty>
+  r4  bareblock -> bareblock runnable
+  r5  name -> ID
+  r6  name -> name "." ID
+  r7  name -> "%"
+  r8  runnable -> dec
+  r9  runnable -> stm
+  r10  runnable -> modifiers dec
+  r11  runnable -> modifiers stm
+  r12  modifier -> "static"
+  r13  modifier -> "autounravel"
+  r14  modifier -> "public"
+  r15  modifier -> "private"
+  r16  modifier -> "restricted"
+  r17  modifiers -> modifier
+  r18  modifiers -> modifiers modifier
+  r19  dec -> vardec
+  r20  dec -> fundec
+  r21  dec -> typedec
+  r22  dec -> "access" stridpairlist ";"
+  r23  dec -> "from" name "unravel" idpairlist ";"
+  r24  dec -> "from" name "unravel" "*" ";"
+  r25  dec -> "unravel" name ";"
+  r26  dec -> "from" strid "access" idpairlist ";"
+  r27  dec -> "from" strid "access" "*" ";"
+  r28  dec -> "import" stridpair ";"
+  r29  dec -> "include" ID ";"
+  r30  dec -> "include" STRING ";"
+  r31  dec -> "typedef" "import" "(" typeparamlist ")" ";"
+  r32  dec -> "import" "typedef" "(" typeparamlist ")" ";"
+  r33  dec -> "access" strid "(" decdeclist ")" ID ID ";"
+  r34  dec -> "access" strid "(" decdeclist ")" ";"
+  r35  dec -> "import" strid "(" decdeclist ")" ";"
+  r36  dec -> "from" strid "(" decdeclist ")" "access" idpairlist ";"
+  r37  decdec -> ID ASSIGN type
+  r38  decdec -> type
+  r39  decdeclist -> decdec
+  r40  decdeclist -> decdeclist "," decdec
+  r41  typeparam -> ID
+  r42  typeparamlist -> typeparam
+  r43  typeparamlist -> typeparamlist "," typeparam
+  r44  idpair -> ID
+  r45  idpair -> ID ID ID
+  r46  idpairlist -> idpair
+  r47  idpairlist -> idpairlist "," idpair
+  r48  strid -> ID
+  r49  strid -> STRING
+  r50  stridpair -> ID
+  r51  stridpair -> strid ID ID
+  r52  stridpairlist -> stridpair
+  r53  stridpairlist -> stridpairlist "," stridpair
+  r54  vardec -> barevardec ";"
+  r55  barevardec -> type decidlist
+  r56  type -> celltype
+  r57  type -> name dims
+  r58  celltype -> name
+  r59  dims -> "[" "]"
+  r60  dims -> dims "[" "]"
+  r61  dimexps -> "[" exp "]"
+  r62  dimexps -> dimexps "[" exp "]"
+  r63  decidlist -> decid
+  r64  decidlist -> decidlist "," decid
+  r65  decid -> decidstart
+  r66  decid -> decidstart ASSIGN varinit
+  r67  decidstart -> ID
+  r68  decidstart -> ID dims
+  r69  decidstart -> ID "(" ")"
+  r70  decidstart -> ID "(" formals ")"
+  r71  varinit -> exp
+  r72  varinit -> arrayinit
+  r73  block -> "{" bareblock "}"
+  r74  arrayinit -> "{" "}"
+  r75  arrayinit -> "{" ELLIPSIS varinit "}"
+  r76  arrayinit -> "{" basearrayinit "}"
+  r77  arrayinit -> "{" basearrayinit ELLIPSIS varinit "}"
+  r78  basearrayinit -> ","
+  r79  basearrayinit -> varinits
+  r80  basearrayinit -> varinits ","
+  r81  varinits -> varinit
+  r82  varinits -> varinits "," varinit
+  r83  formals -> formal
+  r84  formals -> ELLIPSIS formal
+  r85  formals -> formals "," formal
+  r86  formals -> formals ELLIPSIS formal
+  r87  explicitornot -> "explicit"
+  r88  explicitornot -> <empty>
+  r89  formal -> explicitornot type
+  r90  formal -> explicitornot type decidstart
+  r91  formal -> explicitornot type decidstart ASSIGN varinit
+  r92  formal -> explicitornot type ID decidstart
+  r93  formal -> explicitornot type ID decidstart ASSIGN varinit
+  r94  fundec -> type ID "(" ")" blockstm
+  r95  fundec -> type ID "(" formals ")" blockstm
+  r96  typedec -> "struct" ID block
+  r97  typedec -> "typedef" vardec
+  r98  typedec -> "using" ID ASSIGN type ";"
+  r99  typedec -> "using" ID ASSIGN type "(" ")" ";"
+  r100  typedec -> "using" ID ASSIGN type "(" formals ")" ";"
+  r101  slice -> ":"
+  r102  slice -> exp ":"
+  r103  slice -> ":" exp
+  r104  slice -> exp ":" exp
+  r105  value -> value "." ID
+  r106  value -> name "[" exp "]"
+  r107  value -> value "[" exp "]"
+  r108  value -> name "[" slice "]"
+  r109  value -> value "[" slice "]"
+  r110  value -> name "(" ")"
+  r111  value -> name "(" arglist ")"
+  r112  value -> value "(" ")"
+  r113  value -> value "(" arglist ")"
+  r114  value -> "(" exp ")"
+  r115  value -> "(" name ")"
+  r116  value -> "this"
+  r117  argument -> exp
+  r118  argument -> ID ASSIGN exp
+  r119  arglist -> argument
+  r120  arglist -> ELLIPSIS argument
+  r121  arglist -> arglist "," argument
+  r122  arglist -> arglist ELLIPSIS argument
+  r123  tuple -> exp "," exp
+  r124  tuple -> tuple "," exp
+  r125  exp -> name
+  r126  exp -> value
+  r127  exp -> LIT
+  r128  exp -> STRING
+  r129  exp -> LIT exp
+  r130  exp -> "(" name ")" exp
+  r131  exp -> "(" name dims ")" exp
+  r132  exp -> "+" exp
+  r133  exp -> "-" exp
+  r134  exp -> OPERATOR exp
+  r135  exp -> exp "+" exp
+  r136  exp -> exp "-" exp
+  r137  exp -> exp "*" exp
+  r138  exp -> exp "/" exp
+  r139  exp -> exp "%" exp
+  r140  exp -> exp "#" exp
+  r141  exp -> exp "^" exp
+  r142  exp -> exp LT exp
+  r143  exp -> exp LE exp
+  r144  exp -> exp GT exp
+  r145  exp -> exp GE exp
+  r146  exp -> exp EQ exp
+  r147  exp -> exp NEQ exp
+  r148  exp -> exp CAND exp
+  r149  exp -> exp COR exp
+  r150  exp -> exp CARETS exp
+  r151  exp -> exp AMPERSAND exp
+  r152  exp -> exp BAR exp
+  r153  exp -> exp OPERATOR exp
+  r154  exp -> exp INCR exp
+  r155  exp -> "new" celltype
+  r156  exp -> "new" celltype dimexps
+  r157  exp -> "new" celltype dimexps dims
+  r158  exp -> "new" celltype dims
+  r159  exp -> "new" celltype dims arrayinit
+  r160  exp -> "new" celltype "(" ")" blockstm
+  r161  exp -> "new" celltype dims "(" ")" blockstm
+  r162  exp -> "new" celltype "(" formals ")" blockstm
+  r163  exp -> "new" celltype dims "(" formals ")" blockstm
+  r164  exp -> exp "?" exp ":" exp
+  r165  exp -> exp ASSIGN exp
+  r166  exp -> "(" tuple ")"
+  r167  exp -> exp join exp
+  r168  exp -> exp dir
+  r169  exp -> INCR exp
+  r170  exp -> DASHES exp
+  r171  exp -> exp INCR
+  r172  exp -> exp SELFOP exp
+  r173  exp -> "quote" "{" fileblock "}"
+  r174  join -> DASHES
+  r175  join -> basicjoin
+  r176  join -> dir basicjoin
+  r177  join -> basicjoin dir
+  r178  join -> dir basicjoin dir
+  r179  dir -> "{" "curl" exp "}"
+  r180  dir -> "{" exp "}"
+  r181  dir -> "{" exp "," exp "}"
+  r182  dir -> "{" exp "," exp "," exp "}"
+  r183  basicjoin -> DOTS
+  r184  basicjoin -> DOTS tension DOTS
+  r185  basicjoin -> DOTS controls DOTS
+  r186  basicjoin -> COLONS
+  r187  basicjoin -> LONGDASH
+  r188  tension -> "tension" exp
+  r189  tension -> "tension" exp "and" exp
+  r190  tension -> "tension" "atleast" exp
+  r191  tension -> "tension" "atleast" exp "and" exp
+  r192  controls -> "controls" exp
+  r193  controls -> "controls" exp "and" exp
+  r194  stm -> ";"
+  r195  stm -> blockstm
+  r196  stm -> stmexp ";"
+  r197  stm -> "if" "(" exp ")" stm
+  r198  stm -> "if" "(" exp ")" stm "else" stm
+  r199  stm -> "while" "(" exp ")" stm
+  r200  stm -> "do" stm "while" "(" exp ")" ";"
+  r201  stm -> "for" "(" forinit ";" fortest ";" forupdate ")" stm
+  r202  stm -> "for" "(" type ID ":" exp ")" stm
+  r203  stm -> "break" ";"
+  r204  stm -> "continue" ";"
+  r205  stm -> "return" ";"
+  r206  stm -> "return" exp ";"
+  r207  stmexp -> exp
+  r208  blockstm -> block
+  r209  forinit -> <empty>
+  r210  forinit -> stmexplist
+  r211  forinit -> barevardec
+  r212  fortest -> <empty>
+  r213  fortest -> exp
+  r214  forupdate -> <empty>
+  r215  forupdate -> stmexplist
+  r216  stmexplist -> stmexp
+  r217  stmexplist -> stmexplist "," stmexp
+  r218  $accept -> file
+conflicts left to the GLR driver: 43
+  state 6 on "[": shift/reduce (2 actions)
+  state 6 on "(": shift/reduce (2 actions)
+  state 6 on "]": reduce/reduce (2 actions)
+  state 6 on ";": reduce/reduce (2 actions)
+  state 6 on ",": reduce/reduce (2 actions)
+  state 6 on ":": reduce/reduce (2 actions)
+  state 6 on ")": reduce/reduce (2 actions)
+  state 6 on "+": reduce/reduce (2 actions)
+  state 6 on "-": reduce/reduce (2 actions)
+  state 6 on "*": reduce/reduce (2 actions)
+  state 6 on "/": reduce/reduce (2 actions)
+  state 6 on "%": reduce/reduce (2 actions)
+  state 6 on "#": reduce/reduce (2 actions)
+  state 6 on "^": reduce/reduce (2 actions)
+  state 6 on LT: reduce/reduce (2 actions)
+  state 6 on LE: reduce/reduce (2 actions)
+  state 6 on GT: reduce/reduce (2 actions)
+  state 6 on GE: reduce/reduce (2 actions)
+  state 6 on EQ: reduce/reduce (2 actions)
+  state 6 on NEQ: reduce/reduce (2 actions)
+  state 6 on CAND: reduce/reduce (2 actions)
+  state 6 on COR: reduce/reduce (2 actions)
+  state 6 on CARETS: reduce/reduce (2 actions)
+  state 6 on AMPERSAND: reduce/reduce (2 actions)
+  state 6 on BAR: reduce/reduce (2 actions)
+  state 6 on OPERATOR: reduce/reduce (2 actions)
+  state 6 on INCR: reduce/reduce (2 actions)
+  state 6 on "?": reduce/reduce (2 actions)
+  state 6 on ASSIGN: reduce/reduce (2 actions)
+  state 6 on DASHES: reduce/reduce (2 actions)
+  state 6 on DOTS: reduce/reduce (2 actions)
+  state 6 on COLONS: reduce/reduce (2 actions)
+  state 6 on LONGDASH: reduce/reduce (2 actions)
+  state 6 on "{": reduce/reduce (2 actions)
+  state 6 on SELFOP: reduce/reduce (2 actions)
+  state 6 on "}": reduce/reduce (2 actions)
+  state 6 on "and": reduce/reduce (2 actions)
+  state 6 on ELLIPSIS: reduce/reduce (2 actions)
+  state 66 on ")": shift/reduce (2 actions)
+  state 126 on "(": reduce/reduce (2 actions)
+  state 126 on ID: reduce/reduce (2 actions)
+  state 135 on "[": shift/reduce (2 actions)
+  state 202 on "{": shift/reduce (2 actions)

@@ -1,0 +1,251 @@
+grammar expr: 10 terminals, 1 nonterminals, 8 rules, 18 states
+  r0  E -> E "+" E
+  r1  E -> E "-" E
+  r2  E -> E "*" E
+  r3  E -> E "/" E
+  r4  E -> E "^" E
+  r5  E -> "-" E
+  r6  E -> "(" E ")"
+  r7  E -> NUM
+  r8  $accept -> E
+state 0
+  item E -> . E "+" E
+  item E -> . E "-" E
+  item E -> . E "*" E
+  item E -> . E "/" E
+  item E -> . E "^" E
+  item E -> . "-" E
+  item E -> . "(" E ")"
+  item E -> . NUM
+  item $accept -> . E
+  on "(": shift 3
+  on "-": shift 2
+  on NUM: shift 4
+  goto E: 1
+state 1
+  item E -> E . "+" E
+  item E -> E . "-" E
+  item E -> E . "*" E
+  item E -> E . "/" E
+  item E -> E . "^" E
+  item $accept -> E .
+  on "*": shift 7
+  on "+": shift 5
+  on "-": shift 6
+  on "/": shift 8
+  on "^": shift 9
+  on $end: accept
+state 2
+  item E -> . E "+" E
+  item E -> . E "-" E
+  item E -> . E "*" E
+  item E -> . E "/" E
+  item E -> . E "^" E
+  item E -> . "-" E
+  item E -> "-" . E
+  item E -> . "(" E ")"
+  item E -> . NUM
+  on "(": shift 3
+  on "-": shift 2
+  on NUM: shift 4
+  goto E: 10
+state 3
+  item E -> . E "+" E
+  item E -> . E "-" E
+  item E -> . E "*" E
+  item E -> . E "/" E
+  item E -> . E "^" E
+  item E -> . "-" E
+  item E -> . "(" E ")"
+  item E -> "(" . E ")"
+  item E -> . NUM
+  on "(": shift 3
+  on "-": shift 2
+  on NUM: shift 4
+  goto E: 11
+state 4
+  item E -> NUM .
+  on ")": reduce r7
+  on "*": reduce r7
+  on "+": reduce r7
+  on "-": reduce r7
+  on "/": reduce r7
+  on "^": reduce r7
+  on $end: reduce r7
+state 5
+  item E -> . E "+" E
+  item E -> E "+" . E
+  item E -> . E "-" E
+  item E -> . E "*" E
+  item E -> . E "/" E
+  item E -> . E "^" E
+  item E -> . "-" E
+  item E -> . "(" E ")"
+  item E -> . NUM
+  on "(": shift 3
+  on "-": shift 2
+  on NUM: shift 4
+  goto E: 12
+state 6
+  item E -> . E "+" E
+  item E -> . E "-" E
+  item E -> E "-" . E
+  item E -> . E "*" E
+  item E -> . E "/" E
+  item E -> . E "^" E
+  item E -> . "-" E
+  item E -> . "(" E ")"
+  item E -> . NUM
+  on "(": shift 3
+  on "-": shift 2
+  on NUM: shift 4
+  goto E: 13
+state 7
+  item E -> . E "+" E
+  item E -> . E "-" E
+  item E -> . E "*" E
+  item E -> E "*" . E
+  item E -> . E "/" E
+  item E -> . E "^" E
+  item E -> . "-" E
+  item E -> . "(" E ")"
+  item E -> . NUM
+  on "(": shift 3
+  on "-": shift 2
+  on NUM: shift 4
+  goto E: 14
+state 8
+  item E -> . E "+" E
+  item E -> . E "-" E
+  item E -> . E "*" E
+  item E -> . E "/" E
+  item E -> E "/" . E
+  item E -> . E "^" E
+  item E -> . "-" E
+  item E -> . "(" E ")"
+  item E -> . NUM
+  on "(": shift 3
+  on "-": shift 2
+  on NUM: shift 4
+  goto E: 15
+state 9
+  item E -> . E "+" E
+  item E -> . E "-" E
+  item E -> . E "*" E
+  item E -> . E "/" E
+  item E -> . E "^" E
+  item E -> E "^" . E
+  item E -> . "-" E
+  item E -> . "(" E ")"
+  item E -> . NUM
+  on "(": shift 3
+  on "-": shift 2
+  on NUM: shift 4
+  goto E: 16
+state 10
+  item E -> E . "+" E
+  item E -> E . "-" E
+  item E -> E . "*" E
+  item E -> E . "/" E
+  item E -> E . "^" E
+  item E -> "-" E .
+  on ")": reduce r5
+  on "*": reduce r5
+  on "+": reduce r5
+  on "-": reduce r5
+  on "/": reduce r5
+  on "^": reduce r5
+  on $end: reduce r5
+state 11
+  item E -> E . "+" E
+  item E -> E . "-" E
+  item E -> E . "*" E
+  item E -> E . "/" E
+  item E -> E . "^" E
+  item E -> "(" E . ")"
+  on ")": shift 17
+  on "*": shift 7
+  on "+": shift 5
+  on "-": shift 6
+  on "/": shift 8
+  on "^": shift 9
+state 12
+  item E -> E . "+" E
+  item E -> E "+" E .
+  item E -> E . "-" E
+  item E -> E . "*" E
+  item E -> E . "/" E
+  item E -> E . "^" E
+  on ")": reduce r0
+  on "*": shift 7
+  on "+": reduce r0
+  on "-": reduce r0
+  on "/": shift 8
+  on "^": shift 9
+  on $end: reduce r0
+state 13
+  item E -> E . "+" E
+  item E -> E . "-" E
+  item E -> E "-" E .
+  item E -> E . "*" E
+  item E -> E . "/" E
+  item E -> E . "^" E
+  on ")": reduce r1
+  on "*": shift 7
+  on "+": reduce r1
+  on "-": reduce r1
+  on "/": shift 8
+  on "^": shift 9
+  on $end: reduce r1
+state 14
+  item E -> E . "+" E
+  item E -> E . "-" E
+  item E -> E . "*" E
+  item E -> E "*" E .
+  item E -> E . "/" E
+  item E -> E . "^" E
+  on ")": reduce r2
+  on "*": reduce r2
+  on "+": reduce r2
+  on "-": reduce r2
+  on "/": reduce r2
+  on "^": shift 9
+  on $end: reduce r2
+state 15
+  item E -> E . "+" E
+  item E -> E . "-" E
+  item E -> E . "*" E
+  item E -> E . "/" E
+  item E -> E "/" E .
+  item E -> E . "^" E
+  on ")": reduce r3
+  on "*": reduce r3
+  on "+": reduce r3
+  on "-": reduce r3
+  on "/": reduce r3
+  on "^": shift 9
+  on $end: reduce r3
+state 16
+  item E -> E . "+" E
+  item E -> E . "-" E
+  item E -> E . "*" E
+  item E -> E . "/" E
+  item E -> E . "^" E
+  item E -> E "^" E .
+  on ")": reduce r4
+  on "*": reduce r4
+  on "+": reduce r4
+  on "-": reduce r4
+  on "/": reduce r4
+  on "^": shift 9
+  on $end: reduce r4
+state 17
+  item E -> "(" E ")" .
+  on ")": reduce r6
+  on "*": reduce r6
+  on "+": reduce r6
+  on "-": reduce r6
+  on "/": reduce r6
+  on "^": reduce r6
+  on $end: reduce r6
+conflicts left to the GLR driver: none (this grammar is SLR(1))

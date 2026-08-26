@@ -1,0 +1,23 @@
+;; 经典算术表达式：语法本身有歧义，全靠优先级消掉。
+;; 门槛是**零冲突** —— 如果优先级实现错了，这份语法立刻会剩下一堆移进/归约。
+(grammar expr
+  (tokens NUM UMINUS)
+  (prec left "+" "-")
+  (prec left "*" "/")
+  (prec right "^")
+  (prec right UMINUS)
+  (start E)
+  (lex
+    (skip space)
+    (comment ";;" (* (not "\n")))
+    (token NUM (+ digit) (? "." (+ digit)))
+    (op "+" "-" "*" "/" "^" "(" ")"))
+  (rule E
+    (-> (E "+" E) (add $1 $3))
+    (-> (E "-" E) (sub $1 $3))
+    (-> (E "*" E) (mul $1 $3))
+    (-> (E "/" E) (div $1 $3))
+    (-> (E "^" E) (pow $1 $3))
+    (-> ("-" E) (prec UMINUS) (neg $2))
+    (-> ("(" E ")") $2)
+    (-> (NUM) $1)))

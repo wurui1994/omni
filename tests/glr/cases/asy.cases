@@ -1,0 +1,43 @@
+;; 真实 asymptote 片段。camp.y 那四处冲突各有一条对应的 case：
+;;   悬垂 else -> "if (a) if (b) f(); else g();"
+;;   命名实参   -> "f(x=1, 2);"
+;;   强制转换   -> "x = (int) y;"
+;;   隐式缩放   -> "write(105cm);"
+;; 每一条都必须只出**一棵**树 —— 出两棵就会撞硬边界，那说明消歧写漏了。
+;;
+;; `3 ..b` 中间那个空格不是排版：`3..b` 的最长匹配把 `3.` 吃成一个 LIT（flex 的规矩
+;; 一样，camp.l 那份词法在这里也是这么断的），于是后面只剩一个 `.`。这是词法固有的，
+;; 不是分析器的毛病 —— 留一条 case 把它记在这儿。
+
+int i = 3; ==> (block-add (block) (vardec (name-ty (name int)) (decids (decid (decidstart i) 3))))
+real y = 3.; ==> (block-add (block) (vardec (name-ty (name real)) (decids (decid (decidstart y) 3.))))
+x = y; ==> (block-add (block) (exp-stm (assign (name-exp (name x)) (name-exp (name y)))))
+a.b.c = 1; ==> (block-add (block) (exp-stm (assign (name-exp (qualified (qualified (name a) b) c)) 1)))
+a[0] = a[1:2]; ==> (block-add (block) (exp-stm (assign (subscript (name-exp (name a)) 0) (slice-exp (name-exp (name a)) (slice 1 2)))))
+if (a) f(); else g(); ==> (block-add (block) (if (name-exp (name a)) (exp-stm (call (name-exp (name f)) (args))) (exp-stm (call (name-exp (name g)) (args)))))
+if (a) if (b) f(); else g(); ==> (block-add (block) (if (name-exp (name a)) (if (name-exp (name b)) (exp-stm (call (name-exp (name f)) (args))) (exp-stm (call (name-exp (name g)) (args))))))
+while (a) { f(); } ==> (block-add (block) (while (name-exp (name a)) (block-stm (block-add (block) (exp-stm (call (name-exp (name f)) (args)))))))
+do f(); while (a); ==> (block-add (block) (do (exp-stm (call (name-exp (name f)) (args))) (name-exp (name a))))
+for (int i = 0; i < 10; ++i) write(i); ==> (block-add (block) (for (vardec (name-ty (name int)) (decids (decid (decidstart i) 0))) (binary "<" (name-exp (name i)) 10) (stmexps (exp-stm (prefix "+" (name-exp (name i))))) (exp-stm (call (name-exp (name write)) (args (arg (name-exp (name i))))))))
+for (int x : a) write(x); ==> (block-add (block) (for-each (name-ty (name int)) x (name-exp (name a)) (exp-stm (call (name-exp (name write)) (args (arg (name-exp (name x))))))))
+real f(real x) { return x^2; } ==> (block-add (block) (fundec (name-ty (name real)) f (formals (formal (implicit) (name-ty (name real)) (decidstart x))) (block-stm (block-add (block) (return (binary "^" (name-exp (name x)) 2))))))
+struct P { real x; real y; } ==> (block-add (block) (recorddec P (block-add (block-add (block) (vardec (name-ty (name real)) (decids (decid (decidstart x))))) (vardec (name-ty (name real)) (decids (decid (decidstart y)))))))
+typedef real fn(real); ==> (block-add (block) (typedec (vardec (name-ty (name real)) (decids (decid (fundecidstart fn (formals (formal (implicit) (name-ty (name real))))))))))
+import graph; ==> (block-add (block) (import (idpair graph)))
+from graph access Label; ==> (block-add (block) (from-access graph (idpairs (idpair Label))))
+access settings; ==> (block-add (block) (access (idpairs (idpair settings))))
+real[] a = {1, 2, 3}; ==> (block-add (block) (vardec (array-ty (name real) (dims)) (decids (decid (decidstart a) (arrayinit-add (arrayinit-add (arrayinit 1) 2) 3)))))
+pair z = (1,2); ==> (block-add (block) (vardec (name-ty (name pair)) (decids (decid (decidstart z) (tuple-exp (args 1 2))))))
+f(x=1, 2); ==> (block-add (block) (exp-stm (call (name-exp (name f)) (args-add (args (arg-named x 1)) (arg 2)))))
+label("$x$", (0,0), align=N); ==> (block-add (block) (exp-stm (call (name-exp (name label)) (args-add (args-add (args (arg "$x$")) (arg (tuple-exp (args 0 0)))) (arg-named align (name-exp (name N)))))))
+x = (int) y; ==> (block-add (block) (exp-stm (assign (name-exp (name x)) (cast (name-ty (name int)) (name-exp (name y))))))
+write(105cm); ==> (block-add (block) (exp-stm (call (name-exp (name write)) (args (arg (scale 105 (name-exp (name cm))))))))
+draw((0,0)--(1,1)); ==> (block-add (block) (exp-stm (call (name-exp (name draw)) (args (arg (join-exp (tuple-exp (args 0 0)) (join "--") (tuple-exp (args 1 1))))))))
+path p = (0,0)..controls (1,0) and (1,1)..(1,2); ==> (block-add (block) (vardec (name-ty (name path)) (decids (decid (decidstart p) (join-exp (tuple-exp (args 0 0)) (join ".." (controls (tuple-exp (args 1 0)) (tuple-exp (args 1 1)))) (tuple-exp (args 1 2)))))))
+path q = a..tension atleast 2 and 3 ..b; ==> (block-add (block) (vardec (name-ty (name path)) (decids (decid (decidstart q) (join-exp (name-exp (name a)) (join ".." (tension 2 3 (atleast true))) (name-exp (name b)))))))
+draw(g, p{up}); ==> (block-add (block) (exp-stm (call (name-exp (name draw)) (args-add (args (arg (name-exp (name g)))) (arg (join-dir (name-exp (name p)) (spec (name-exp (name up)))))))))
+private static real k = 1; ==> (block-add (block) (modified (mods-add (mods private) static) (vardec (name-ty (name real)) (decids (decid (decidstart k) 1)))))
+
+int i = ;                    !!> unexpected
+struct { }                   !!> unexpected
+f(;                          !!> unexpected

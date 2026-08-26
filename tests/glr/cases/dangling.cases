@@ -1,0 +1,8 @@
+;; 前两条不歧义，必须出树。第三条是真歧义，必须撞上硬边界 —— 那是这份 case 的全部意义。
+if a then x                  ==> (if a x)
+if a then x else y           ==> (if a x y)
+if a then if b then x        ==> (if a (if b x))
+
+if a then if b then x else y !!> the input is ambiguous
+if a then                    !!> unexpected end of input
+then x                       !!> unexpected

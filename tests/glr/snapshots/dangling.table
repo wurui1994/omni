@@ -1,0 +1,56 @@
+grammar dangling: 5 terminals, 1 nonterminals, 3 rules, 9 states
+  r0  S -> "if" ID "then" S
+  r1  S -> "if" ID "then" S "else" S
+  r2  S -> ID
+  r3  $accept -> S
+state 0
+  item S -> . "if" ID "then" S
+  item S -> . "if" ID "then" S "else" S
+  item S -> . ID
+  item $accept -> . S
+  on "if": shift 1
+  on ID: shift 2
+  goto S: 3
+state 1
+  item S -> "if" . ID "then" S
+  item S -> "if" . ID "then" S "else" S
+  on ID: shift 4
+state 2
+  item S -> ID .
+  on "else": reduce r2
+  on $end: reduce r2
+state 3
+  item $accept -> S .
+  on $end: accept
+state 4
+  item S -> "if" ID . "then" S
+  item S -> "if" ID . "then" S "else" S
+  on "then": shift 5
+state 5
+  item S -> . "if" ID "then" S
+  item S -> "if" ID "then" . S
+  item S -> . "if" ID "then" S "else" S
+  item S -> "if" ID "then" . S "else" S
+  item S -> . ID
+  on "if": shift 1
+  on ID: shift 2
+  goto S: 6
+state 6
+  item S -> "if" ID "then" S .
+  item S -> "if" ID "then" S . "else" S
+  on "else": shift 7 | reduce r0
+  on $end: reduce r0
+state 7
+  item S -> . "if" ID "then" S
+  item S -> . "if" ID "then" S "else" S
+  item S -> "if" ID "then" S "else" . S
+  item S -> . ID
+  on "if": shift 1
+  on ID: shift 2
+  goto S: 8
+state 8
+  item S -> "if" ID "then" S "else" S .
+  on "else": reduce r1
+  on $end: reduce r1
+conflicts left to the GLR driver: 1
+  state 6 on "else": shift/reduce (2 actions)

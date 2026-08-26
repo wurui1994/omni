@@ -1,0 +1,58 @@
+grammar lookahead: 5 terminals, 2 nonterminals, 5 rules, 11 states
+  r0  S -> A "a"
+  r1  S -> "b" A "c"
+  r2  S -> "d" "c"
+  r3  S -> "b" "d" "a"
+  r4  A -> "d"
+  r5  $accept -> S
+state 0
+  item S -> . A "a"
+  item S -> . "b" A "c"
+  item S -> . "d" "c"
+  item S -> . "b" "d" "a"
+  item A -> . "d"
+  item $accept -> . S
+  on "b": shift 2
+  on "d": shift 3
+  goto A: 1
+  goto S: 4
+state 1
+  item S -> A . "a"
+  on "a": shift 5
+state 2
+  item S -> "b" . A "c"
+  item S -> "b" . "d" "a"
+  item A -> . "d"
+  on "d": shift 7
+  goto A: 6
+state 3
+  item S -> "d" . "c"
+  item A -> "d" .
+  on "a": reduce r4
+  on "c": shift 8 | reduce r4
+state 4
+  item $accept -> S .
+  on $end: accept
+state 5
+  item S -> A "a" .
+  on $end: reduce r0
+state 6
+  item S -> "b" A . "c"
+  on "c": shift 9
+state 7
+  item S -> "b" "d" . "a"
+  item A -> "d" .
+  on "a": shift 10 | reduce r4
+  on "c": reduce r4
+state 8
+  item S -> "d" "c" .
+  on $end: reduce r2
+state 9
+  item S -> "b" A "c" .
+  on $end: reduce r1
+state 10
+  item S -> "b" "d" "a" .
+  on $end: reduce r3
+conflicts left to the GLR driver: 2
+  state 3 on "c": shift/reduce (2 actions)
+  state 7 on "a": shift/reduce (2 actions)

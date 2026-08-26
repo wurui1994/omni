@@ -114,6 +114,47 @@ SROA 4.2% + InstCombine 8.8% + MemCpyOpt 1.5% + DSE 3.5% + EarlyCSE 2.2% ≈ 20%
 不抄的：bison 的 m4 骨架生成方式、C++ 骨架、以及它的错误恢复（我们的诊断是
 编译期 span 制，见 `source/diag.js`）。
 
+### 已落地的形状：语法即数据
+
+四个文件，都在 `stage0/src/glr/`：
+
+- `grammar.js` —— 语法文件本身写成 S 表达式，读它用的就是 `sexpr/read.js`，不另起一个
+  词法层。`(tokens ...)` / `(prec left ...)` / `(start N)` / `(lex ...)` / `(rule N (-> (RHS...) 模板))`。
+  动作是**纯 s-expr 模板**（`$1`..`$n`），这是与 bison 最大的分野：动作没有副作用，
+  于是分叉后不必延迟求值，`yySemanticOption` 那整套机器（含 lookahead 快照与
+  沿 `yypred` 的深递归）一条都不需要。上面那两条「必须明说的坑」因此不适用于我们。
+- `lex.js` —— 数据驱动的词法器。**不用正则**：封闭 ABI 里只有从字面量降下来的
+  `js_re_test/match/split/replace`，`new RegExp(str)` 不在表里，而语法文件里的模式是
+  运行期才知道的字符串。于是模式语言是一把字符类原语（`digit/alpha/alnum/hex/space/any`、
+  `(set ..)` `(not ..)` `(or ..)` `(seq ..)` `(* ..)` `(+ ..)` `(? ..)`），贪心不回溯 ——
+  flex 生成的 DFA 也不回溯，这不是能力上的退让。规矩照 flex：最长匹配优先，等长则声明在前的赢。
+- `table.js` —— SLR(1) + bison 那套优先级消歧。**选 SLR 而不是 LALR** 的理由写在文件头：
+  在 GLR 驱动下两者接受的语言完全相同，差别只是「错的那支什么时候死」，也就是速度。
+- `driver.js` —— 单前驱 GSS，逐 token「归约到不动点 → 接受检查 → 移进」。合并条件比
+  bison 严一点：状态、前驱、**值**三者都相同才算同一支；值不同就两支都留，最后才好说清楚
+  是哪两棵树。硬边界照收：两支都活到接受就报错，不猜。
+
+CLI 两条命令：`omni glr-table F.grammar [--brief]`、`omni glr F.grammar F`。
+
+**第八条测试轴** `tests/glr/`：表的快照、每条输入的树、以及两道方向相反的门槛 ——
+`lookahead.grammar`（SLR 不够但语言不歧义）**必须**留下冲突且两支输入都要过，
+`dangling.grammar`（真歧义）**必须**撞上硬边界。
+
+**自举链阶段 9** 让原生编译器自己跑一遍 `glr-table` / `glr` / 真歧义报错，三者与 C0 逐字节
+相同。这道门槛当场抓出四处封闭 ABI 违规（`new Map(map)`、`splice`、`unshift`、`Infinity`），
+全都是 node 上照跑、原生构建里才炸的那一类。
+
+### 已落地的形状：第一门真实语言（asymptote）
+
+`tests/glr/grammars/asy.grammar` 是从 `camp.y`（bison LALR(1)，721 行）与 `camp.l`
+（flex，450 行）转写的：**78 终结符 / 54 非终结符 / 218 产生式 / 429 状态**，对上 bison
+自己报的 77/54/216/427。转写只做了三处实质改动，每处都在文件头写明理由；其中两处是把
+bison **隐式**的选择写成**显式**的优先级声明 —— 悬垂 else，以及 `f(x=1)` 里「命名实参
+还是赋值表达式」。camp.y 靠 `%expect 4` 容忍这四处冲突，再吃 bison「冲突默认移进」的兜底；
+我们没有那条兜底，所以必须写下来。SLR 留下 43 处冲突（LALR 只剩 4 处），差额全由运行期
+分叉解决：`cases/asy.cases` 里 31 条真实片段（含路径连接 `..controls..and..`、
+隐式缩放 `105cm`、C 式强制转换、命名实参）全部只出一棵树。
+
 ## 决策 3：LLVM 是 JIT 与 AOT 的首选后端；自写机器码不是主导
 
 - **JIT**：ORC v2。按函数惰性编译，延迟量级 ~28ms/函数（上文推算，落地后要实测替换

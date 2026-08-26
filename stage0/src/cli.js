@@ -18,6 +18,12 @@ import { hash16 } from './host/hash.js';
 import { linkJs } from './frontend-js/link.js';
 import { lowerJs } from './frontend-js/lower.js';
 import { lowerWat } from './frontend-wat/lower.js';
+import { readSexpr } from './sexpr/read.js';
+import { printSexpr } from './sexpr/print.js';
+import { readGrammar } from './glr/grammar.js';
+import { buildTable, dumpTable } from './glr/table.js';
+import { lexText } from './glr/lex.js';
+import { glrParse } from './glr/driver.js';
 import { Diagnostics, OmniError, SourceFile } from './source/diag.js';
 import { check } from './hir/check.js';
 import { cAbiLibs } from './hir/c_abi.js';
@@ -317,13 +323,49 @@ function main(argv) {
       stdout(JSON.stringify(mod, replacer, 2) + '\n');
       return 0;
     }
+    // ---- GLR（ADR-0014 决策 2）。语法是数据，这两条命令读的都是 .grammar 文件。
+    // 它们摆在 CLI 上不只是为了调试：自举链要能让**原生编译器自己**跑一遍这条路，
+    // 那是唯一能抓住封闭 ABI 违规的门槛（详见 tests/bootstrap/run.js 阶段 8）。
+    case 'glr-table': {
+      stdout(dumpTable(loadGrammar(path), rest.includes('--brief')));
+      return 0;
+    }
+    case 'glr': {
+      const src = files[1];
+      if (src === undefined) throw new OmniError('glr needs a grammar file and an input file');
+      if (!exists(src)) throw new OmniError(`no such file: ${src}`);
+      const tb = loadGrammar(path);
+      if (tb.grammar.lex === null) {
+        throw new OmniError(`grammar '${tb.grammar.name}' has no (lex ...) form, so it cannot read source text`);
+      }
+      const diags = new Diagnostics();
+      const toks = lexText(tb.grammar.lex, new SourceFile(src, readText(src)), diags);
+      diags.throwIfErrors();
+      vStep(`lexer          ${src} -> ${toks.length} tokens`);
+      const tree = glrParse(tb, toks, diags);
+      diags.throwIfErrors();
+      if (tree === null) throw new OmniError('glr: the parse failed without a diagnostic — that is a bug');
+      stdout(printSexpr([tree]));
+      return 0;
+    }
     default:
       throw new OmniError(`unknown command '${cmd}'\n${USAGE}`);
   }
 }
 
+/** 读一份语法文件并构表。诊断在这里就抛掉 —— 语法写错了不该拖到分析期 */
+function loadGrammar(path) {
+  const diags = new Diagnostics();
+  const g = readGrammar(readSexpr(new SourceFile(path, readText(path)), diags), diags);
+  diags.throwIfErrors();
+  const tb = buildTable(g);
+  vStep(`grammar ${g.name}  ${tb.states.length} states, ${tb.conflicts.length} conflicts left to GLR`);
+  return tb;
+}
+
 /** span 里有 SourceFile 循环引用，BigInt 也不能直接序列化 */
 function replacer(key, value) {
+
   if (key === 'span' || key === 'nameSpan' || key === 'ast' || key === 'defAst') return undefined;
   if (typeof value === 'bigint') return `${value}n`;
   return value;
@@ -342,6 +384,10 @@ commands:
   emit-c    print generated C  (--amalgamate: inline the whole runtime into one file)
   ast       print the AST as JSON
   oir       print the OIR as JSON
+  glr-table print the parsing table for a .grammar file (ADR-0014 decision 2)
+            (--brief: rules and remaining conflicts only, no per-state dump)
+  glr       parse a source file with a .grammar and print the resulting s-expr
+            (usage: omni glr FILE.grammar FILE)
   bootstrap build the whole chain into a tree and check the four fixpoints
             (no file = the compiler itself; -o DIR, default ./dist; -q skips the C path)
 
