@@ -69,6 +69,12 @@
 `node:fs` / `node:path` / `node:os` / `node:url` / `node:child_process` / `node:crypto`、
 `process`（`argv` / `stdout.write` / `exit` / `env` / `hrtime` / `execPath`）。
 
+表里没有的成员**不会在 node 上报错**，这是这份清单最危险的地方：`xs.findLastIndex(...)`
+在 node 宿主上照跑，降级时它退回"取属性再当函数调用"的兜底路径，到原生构建里就变成
+"在 list 上取属性"，运行到那一行才炸。量过一次 —— 写 WAT 前端时就是这么掉进去的。
+所以加新代码时别只看 node 跑不跑得过：`tests/bootstrap` 的阶段 8 让原生编译器亲自跑一遍
+新前端，这类洞只有那条门槛能守。
+
 ## 现状与还差什么
 
 **已完成**：词法器、语法分析器、生成器（`stage0/src/frontend-js/`），以及上面两条闸门。

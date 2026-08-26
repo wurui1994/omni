@@ -17,7 +17,8 @@ import { join, basename } from './host/path.js';
 import { hash16 } from './host/hash.js';
 import { linkJs } from './frontend-js/link.js';
 import { lowerJs } from './frontend-js/lower.js';
-import { Diagnostics, OmniError } from './source/diag.js';
+import { lowerWat } from './frontend-wat/lower.js';
+import { Diagnostics, OmniError, SourceFile } from './source/diag.js';
 import { check } from './hir/check.js';
 import { cAbiLibs } from './hir/c_abi.js';
 import { emitJs } from './backend-js/emit.js';
@@ -75,8 +76,21 @@ function compileJs(path) {
   return { ast, mod, diags };
 }
 
+/**
+ * WAT（WebAssembly 文本格式）-> OIR。S 表达式那条路径上的第一个真语法前端，
+ * 也是 OIR 的第三个生产者 —— 边界与理由见 frontend-wat/lower.js 的文件头。
+ */
+function compileWat(path) {
+  const diags = new Diagnostics();
+  const mod = lowerWat(new SourceFile(path, readText(path)), diags);
+  diags.throwIfErrors();
+  vStep(`wat front end  ${path} -> OIR  ${mod.funcs.length} funcs`);
+  return { ast: null, mod, diags };
+}
+
 function compile(path, argv = []) {
   if (path.endsWith('.js')) return compileJs(path);
+  if (path.endsWith('.wat')) return compileWat(path);
   return compileProgram(path, undefined, modeFor(path, argv));
 }
 
@@ -339,6 +353,10 @@ type modes (ADR-0008) — chosen by extension, overridable with --mode:
   .omni     mixed   omitted type is inferred from the initializer, else dynamic
   .omnid    dynamic omitted type is always dynamic
   .omnis    static  omitted type is inferred; implicit dynamic is an error
+
+other front ends — chosen by extension, no --mode:
+  .js       the JS subset (ADR-0011), the language the compiler itself is written in
+  .wat      WebAssembly text format, a subset (ADR-0014); see frontend-wat/lower.js
 
 a .js entry goes through the JS front end instead (ADR-0011): the import tree is
 linked into one program and lowered to OIR. That is how omni compiles itself.

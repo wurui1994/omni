@@ -161,6 +161,19 @@ if (c1 && !quick) {
     else if (via.stdout !== ref.stdout) bad('N1 interp == C0 run', `    C0 ${ref.stdout.length} bytes != N1 ${via.stdout.length} bytes`);
     else ok(`N1 interp cases/08_container_stress == C0 run  ${ref.stdout.length} bytes`);
   }
+
+  // ---- 阶段 8：原生编译器上的 WAT 前端 -------------------------------------------
+  // 新前端最容易踩的坑不是逻辑错，是**用了封闭 ABI 之外的东西**（ADR-0011 决策 2）：
+  // node 上 `labels.findLastIndex(...)` 照跑，原生构建里它变成"在 list 上取属性"当场报错。
+  // 量过一次，就是这么掉进去的 —— 所以让 N1 亲自读一遍 .wat，这类洞只有这条门槛能守。
+  if (r.code === 0) {
+    const sample4 = join(root, 'tests', 'wat', 'cases', '01-numeric.wat');
+    const ref = spawnSync('node', [cli, 'interp', sample4], { encoding: 'utf8' });
+    const via = spawnSync(n1, ['interp', sample4], { encoding: 'utf8' });
+    if (via.status !== 0) bad('N1 interp wat/01-numeric', `    exit=${via.status}\n${via.stderr}`);
+    else if (via.stdout !== ref.stdout) bad('N1 interp wat == C0 interp', `    C0 ${JSON.stringify(ref.stdout)}\n    N1 ${JSON.stringify(via.stdout)}`);
+    else ok(`N1 interp wat/01-numeric == C0 interp  ${ref.stdout.length} bytes`);
+  }
 }
 
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);

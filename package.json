@@ -16,8 +16,9 @@
     "test:oir": "node tests/oir/run.js",
     "test:js-exec": "node tests/js-exec/run.js",
     "test:cabi": "node tests/cabi/run.js",
+    "test:wat": "node tests/wat/run.js",
     "test:bootstrap": "node tests/bootstrap/run.js",
-    "test:all": "node tests/run.js && node tests/oracle/run.js && node tests/js-roundtrip/run.js && node tests/oir/run.js && node tests/js-exec/run.js && node tests/cabi/run.js && node tests/bootstrap/run.js",
+    "test:all": "node tests/run.js && node tests/oracle/run.js && node tests/js-roundtrip/run.js && node tests/oir/run.js && node tests/js-exec/run.js && node tests/cabi/run.js && node tests/wat/run.js && node tests/bootstrap/run.js",
     "bench": "node bench/compare.js",
     "lint": "tsc --noEmit -p jsconfig.json"
   },
