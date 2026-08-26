@@ -278,6 +278,46 @@ span，于是报错会指到 `jnc.grammar:339` 那种地方去。
 不能让它悄悄漂移。另有一份 IR 快照钉控制流的形状（层数算错、汇合点接错、死块漏标签
 这三类错都只在 IR 文本里看得见）。
 
+### 已落地（第二阶段：ORC JIT，`stage0/jit/omni_jit.c` + `omni run-jit`）
+
+「运行期不需要 cc」兑现了：文本 IR 直接进 `LLVMParseIRInContext`，ORC 惰性物化，
+查到地址就跳进去 —— 磁盘上不落目标文件、不链接、不 exec 新二进制。第十四条测试轴
+`tests/jit/` 有一条断言专门盯这件事（`--work` 目录里跑完只该剩那份 `.ll`），
+因为光比输出区分不了 AOT 和 JIT。
+
+发射器**一行没改**。这是当初选文本 IR 而不是 C API 建模块的全部回报，也是两条轴
+共用一张 `SUPPORTED` 表的理由：同一个发射器，支持面必须是同一张表，分开维护的话
+某条路悄悄多支持一点没人拦得住。
+
+**一处必须承认的边界，而且它不是偷懒：** ORC 那一段是一个独立的 C 程序，
+node 与原生两侧都是 spawn 它，而不是编译器自己 in-process 调 libLLVM-C。
+原因不是决策 4 那条 FFI 机制不够 —— 出参可以用 `malloc` + 一条 peek 绕，
+真正拦住的是**封闭 C_ABI 里没有「按一个 ptr 间接调用」这条操作**，而 JIT 的
+最后一步恰恰就是它。补上它等于把任意函数指针交给 JS 域，那是 ADR 级别的能力扩张，
+不该顺手做。所以现在的分界是：**编译**这一半已经不需要 cc，**宿主**那一半还是 C。
+形状上与 jancy 同构（它的 ORC 集成也只有 345 行），区别是我们连它那十六个
+CallConv 类都不需要 —— 我们只有一个调用约定。
+
+运行时符号（`omni_print_int` 之类）**不逐个注册**（jancy 的 `createBareJITDylib`
+那条路要手写几十条）：运行时的 `.o` 就链在宿主进程里，交给 ORC 的
+`LLVMOrcCreateDynamicLibrarySearchGeneratorForProcess`。macOS 上要加
+`-Wl,-export_dynamic`，否则可执行文件的符号不进动态符号表，ORC 找不到。
+这条正好是 ADR-0013 那个 C-FFI 主张的现场证明：**JIT 出来的代码直接 call 到 C，
+中间没有一层胶水、没有一次装箱** —— 换成 v8 那种 GC 堆，这里必须有一层。
+
+`LLVMInitializeNativeTarget` 一族是 `Target.h` 里的 static inline，不可链接；
+宿主是 C 所以直接用宏。（这与第一阶段 `omni_add`/`omni_div` 那条坑同源：
+LLVM 与我们的运行时都爱把热函数写成 static inline，跨语言用的时候都得留意。）
+
+宿主本身要编一次（约 1s），按 `[cc, LLVM 版本, 源文件, 运行时 .o]` 做内容寻址缓存，
+和 `runtimeObjects` 同一套路。自举链第 10 阶段加一条 `N1 run-jit == C0`；
+环境里没有 libLLVM 就跳过 —— 这条不该让整条自举链变成"必须装 LLVM"。
+
+**还没做的**：验收门槛 5 要的是六方比对 + 同进程内解释与 JIT 混合执行 +
+单函数 JIT 延迟上界。现在只有四方（jit / aot / interp / omni-c）和整模块粒度。
+混合执行要先有 in-process 宿主（即上面那条能力扩张），延迟上界要先有按函数
+物化的入口 —— 两件都排在后面。
+
 ## 决策 4：调用 LLVM 需要 extern-C FFI —— 这是新要求，也是 dogfood
 
 编译器源码是 JS 子集降到 C（ADR-0011 决策 2 的封闭 ABI），要调 `libLLVM-C` 就必须有
@@ -495,6 +535,9 @@ LuaJIT 的教训：`ffi.C.foo(x)` 之所以是一条直调，不是因为它的�
    不靠计时。**已达成**（见决策 5 的落地小节）。
 5. **LLVM JIT**：六方比对；同一进程内解释与 JIT 混合执行结果一致；
    单函数 JIT 延迟有上界断言（先用 28ms 当草稿值，实测后替换）。
+   **部分达成**：`run-jit` 与 aot / interp / omni-c 四方逐字节相同，运行期不需要 cc
+   （见决策 3 的第二个落地小节）。混合执行与延迟上界都还没做，两者都要先有
+   in-process 宿主。
 6. **SIMD**：LLVM 向量路径与 C 备选的标量化路径结果**逐位相同**
    （浮点固定求值顺序，禁 fast-math）。
 7. **GPU**：`kernel` 的 SPIR-V 输出与同一份 MIR 在 CPU 上的结果一致；

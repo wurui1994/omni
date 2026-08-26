@@ -35,7 +35,7 @@ import { cAbiLibs } from './hir/c_abi.js';
 import { emitJs, emitJsFunc } from './backend-js/emit.js';
 import { emitC } from './backend-c/emit.js';
 import { emitLlvm } from './backend-llvm/emit.js';
-import { RUNTIME_DIR, runtimeSources } from './runtime/c_runtime.js';
+import { RUNTIME_DIR, JIT_DIR, runtimeSources } from './runtime/c_runtime.js';
 import { loadProgram, MODE_BY_EXT } from './module/load.js';
 import { startRepl } from './repl.js';
 import { interpret } from './interp/eval.js';
@@ -301,6 +301,85 @@ function runViaLlvm(mod, argv) {
   return code;
 }
 
+/**
+ * ORC JIT（ADR-0014 决策 3 第二阶段）。
+ *
+ * 兑现的是「运行期不需要 cc」：磁盘上不落目标文件、不链接、不 exec 一个新二进制 ——
+ * 文本 IR 直接进 `LLVMParseIRInContext`，ORC 惰性物化，查到地址就跳进去。
+ * 与 AOT 共用**同一个发射器**，这正是当初选文本 IR 而不是 C API 建 IR 的回报。
+ *
+ * 还有一层间接没去掉：ORC 那一段在 `stage0/jit/omni_jit.c` 里，node 这一侧是 spawn 它。
+ * 原因写在那个文件的头上 —— 封闭的 C_ABI 没有「按 ptr 间接调用」，而 JIT 的最后一步
+ * 就是它。补上等于给 JS 域一把任意函数指针，那要另开一条 ADR。所以这条边界是划的，
+ * 不是忘了：**编译**这一半已经不需要 cc 了，**宿主**那一半还是一个 C 程序。
+ *
+ * 宿主本身要编一次（约 1s），所以按 [编译器, LLVM 版本, 源文件, 运行时 .o] 做内容寻址
+ * 缓存，和 runtimeObjects 同一套路。
+ */
+function findLlvmConfig() {
+  const explicit = env('OMNI_LLVM_CONFIG');
+  if (explicit) return explicit;
+  for (const lc of ['llvm-config', '/opt/homebrew/opt/llvm/bin/llvm-config',
+    '/usr/local/opt/llvm/bin/llvm-config']) {
+    const r = spawn('which', [lc], 'c');
+    if (r[0] === 0 && r[1].trim()) return lc;
+  }
+  throw new OmniError(
+    'no llvm-config found; the jit host needs LLVM headers and libLLVM '
+    + '(override with OMNI_LLVM_CONFIG, or use run-llvm for the AOT path)');
+}
+
+/** JIT 宿主的源码位置在 c_runtime.js 里定（和 RUNTIME_DIR 同一处，布局知识只有一份） */
+function buildJitHost() {
+  const cc = findClang();
+  const lc = findLlvmConfig();
+  const ver = spawn(lc, ['--version'], 'c');
+  if (ver[0] !== 0) throw new OmniError(`${lc} --version failed:\n${ver[2]}`);
+  const inc = spawn(lc, ['--includedir'], 'c');
+  const libdir = spawn(lc, ['--libdir'], 'c');
+  if (inc[0] !== 0 || libdir[0] !== 0) throw new OmniError(`${lc} did not report its paths`);
+  const src = join(JIT_DIR, 'omni_jit.c');
+  if (!exists(src)) throw new OmniError(`jit host source is missing: ${src}`);
+
+  const objs = runtimeObjects(cc);
+  const key = hash16([cc, ver[1].trim(), src, mtimeMs(src), fileSize(src), ...objs].join('|'));
+  const dir = join(tmpDir(), `omni-jit-${key}`);
+  const exe = join(dir, 'omni-jit');
+  if (exists(exe)) {
+    vStep(`jit host  cache hit ${exe}`);
+    return exe;
+  }
+  // 运行时的 .o 直接链进宿主，JIT 出来的代码靠「进程符号搜索」找到它们（见 omni_jit.c）。
+  // -Wl,-export_dynamic 是必须的：默认情况下可执行文件的符号不进动态符号表，
+  // ORC 就找不到 omni_print_int 这些。
+  const stage = mkdTemp(join(tmpDir(), 'omni-jit-stage-'));
+  const staged = join(stage, 'omni-jit');
+  const args = ['-O2', '-w', '-I', inc[1].trim(), '-I', RUNTIME_DIR, src, ...objs,
+    '-L', libdir[1].trim(), '-lLLVM', '-lm', '-Wl,-export_dynamic', '-o', staged];
+  const r = spawn(cc, args, 'o');
+  if (r[0] !== 0) throw new OmniError(`the jit host failed to build with ${cc}:\n${r[2]}`);
+  if (!exists(exe)) rename(stage, dir);
+  vStep(`jit host  built with ${cc} + LLVM ${ver[1].trim()} -> ${exists(exe) ? exe : staged}`);
+  return exists(exe) ? exe : staged;
+}
+
+function runViaJit(mod, argv) {
+  const wi = argv.indexOf('--work');
+  const dir = wi >= 0 ? argv[wi + 1] : mkdTemp(join(tmpDir(), 'omni-run-jit-'));
+  if (wi >= 0) mkdirAll(dir);
+  const mir = lowerToMir(mod);
+  const errs = verifyMir(mir);
+  if (errs.length > 0) throw new OmniError(`mir is not well-formed:\n  ${errs.join('\n  ')}`);
+  const ir = emitLlvm(mir);
+  const llPath = join(dir, 'jit.ll');
+  writeText(llPath, ir);
+  vStep(`backend llvm  ${ir.length} bytes -> ${llPath}`);
+  const host = buildJitHost();
+  const code = spawn(host, [llPath], 'i')[0];
+  vStep(`orc jit ${llPath}  exit=${code}`);
+  return code;
+}
+
 
 function main(argv) {
   const [cmd, ...rest] = argv;
@@ -399,6 +478,10 @@ function main(argv) {
     case 'run-llvm': {
       const { mod } = compile(path, rest);
       return runViaLlvm(mod, rest);
+    }
+    case 'run-jit': {
+      const { mod } = compile(path, rest);
+      return runViaJit(mod, rest);
     }
     case 'build-llvm': {
       const { mod } = compile(path, rest);
@@ -526,6 +609,7 @@ commands:
   emit-llvm print generated LLVM IR (ADR-0014 decision 3; scalars only so far)
   run-llvm  compile through LLVM IR with clang and execute
   build-llvm  same, but keep the executable  (-o NAME; --work DIR keeps the .ll)
+  run-jit   compile through LLVM IR and execute it with the ORC JIT (no cc at run time)
   ast       print the AST as JSON
   oir       print the OIR as JSON
   mir       print the MIR (ADR-0014 decision 6): SSA values + slots + structured
@@ -560,6 +644,7 @@ linked into one program and lowered to OIR. That is how omni compiles itself.
 env:
   OMNI_CC   C compiler to use (default: first of tcc, clang, gcc, cc)
   OMNI_CLANG  compiler for the llvm path (.ll input; default: clang)
+  OMNI_LLVM_CONFIG  llvm-config used to locate LLVM headers/libs for run-jit
 `;
 
 try {

@@ -10,6 +10,7 @@
 //   dist/src/host/omni       N1 —— 原生编译器
 //   dist/lib/                std（json.omni …）
 //   dist/runtime/            C 运行时的 .c/.h（`build` 时要 -I 它）
+//   dist/jit/                ORC JIT 宿主的 C 源码（`run-jit` 时现编一次并缓存）
 //   dist/build/              中间产物：omni.c（N1 的 C）、c2.mjs（C2 的产出）、omni-n2 与 omni-n2.c
 //
 // 中间产物刻意**不进临时目录**：链断在哪一代都要能直接翻出那一份 C 或那一份 JS 来 diff，
@@ -35,7 +36,7 @@ import {
   readText, writeText, exists, readDir, mkdirAll, nowMs, spawn, env, stdout,
 } from './host/native.js';
 import { join, basename } from './host/path.js';
-import { RUNTIME_DIR } from './runtime/c_runtime.js';
+import { RUNTIME_DIR, JIT_DIR } from './runtime/c_runtime.js';
 import { LIB_DIR } from './module/load.js';
 
 /** 文本树复制。产物要自包含，所以是复制而不是 symlink —— 打包带走才不会断。 */
@@ -110,8 +111,10 @@ export function bootstrapSelf(o) {
   mkdirAll(work);
   const libN = copyTree(LIB_DIR, join(o.outDir, 'lib'), ['.omni']);
   const rtN = copyTree(RUNTIME_DIR, join(o.outDir, 'runtime'), ['.c', '.h']);
-  if (libN > 0 && rtN > 0) ok(`layout ${o.outDir}  lib ${libN} files, runtime ${rtN} files`);
-  else bad(`layout ${o.outDir}`, `lib ${libN} files, runtime ${rtN} files (both must be > 0)`);
+  // JIT 宿主的 C 源码也要带走，否则 N1 的 run-jit 找不到它（布局错，不是编译器错）
+  const jitN = copyTree(JIT_DIR, join(o.outDir, 'jit'), ['.c', '.h']);
+  if (libN > 0 && rtN > 0 && jitN > 0) ok(`layout ${o.outDir}  lib ${libN} files, runtime ${rtN} files, jit ${jitN} files`);
+  else bad(`layout ${o.outDir}`, `lib ${libN} files, runtime ${rtN} files, jit ${jitN} files (all must be > 0)`);
 
   // ---- 阶段 1：C1 = 我 emit-js 我自己
   const c1Text = o.emitOf('js', o.source);

@@ -17,6 +17,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { readdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { SUPPORTED } from './supported.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '../..');
@@ -33,14 +34,7 @@ const bad = (label, detail) => {
   process.stdout.write(`  FAIL ${label}\n`);
 };
 
-/** 第一阶段能降的那些。加一条支持面就来这里加一行 —— 这张表本身是断言。 */
-const SUPPORTED = [
-  join('tests', 'wat', 'cases', '01-numeric.wat'),
-  join('tests', 'wat', 'cases', '02-control.wat'),
-  join('tests', 'cases', '02_numeric.omni'),
-  join('tests', 'cases', '04_div_zero.omni'),
-  join('tests', 'cases', '16_int_of_real.omni'),
-];
+/** 第一阶段能降的那些在 supported.js 里 —— tests/jit 也读同一份，见那个文件的头 */
 
 function run(args) {
   const r = spawnSync('node', [cli, ...args], { encoding: 'utf8' });

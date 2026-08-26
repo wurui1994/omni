@@ -272,6 +272,23 @@ if (c1 && !quick) {
       else if (runVia.stdout !== runRef.stdout) bad('N1 run mini.sx == C0', `    C0 ${JSON.stringify(runRef.stdout)}\n    N1 ${JSON.stringify(runVia.stdout)}`);
       else ok(`N1 glr mini -> run .sx == C0  ${sxRef.stdout.length} + ${runRef.stdout.length} bytes`);
     }
+
+    // ---- ORC JIT（ADR-0014 决策 3 第二阶段）
+    // 宿主是 C 代码，不由 Omni 编译；这条门槛管的是 cli.js 里那段新的 Omni 子集代码
+    // （findLlvmConfig / buildJitHost / runViaJit：llvm-config 的三次 spawn、内容寻址
+    // 缓存键、一串 -I/-L 参数拼装）。而且它顺带证了 dist/jit/ 真被带走了 ——
+    // 布局漏一个目录的症状是"原生那一代根本没有 JIT"，node 上永远看不出来。
+    // 环境里没有 libLLVM 就跳过：这条轴不该让整条自举链变成"必须装 LLVM"。
+    const caseJit = join(root, 'tests', 'cases', '02_numeric.omni');
+    const jitRef = spawnSync('node', [cli, 'run-jit', caseJit], { encoding: 'utf8' });
+    if (jitRef.status !== 0 && /llvm-config|libLLVM|jit host/.test(jitRef.stderr)) {
+      ok('N1 run-jit  skipped (no libLLVM in this environment)');
+    } else {
+      const jitVia = spawnSync(n1, ['run-jit', caseJit], { encoding: 'utf8' });
+      if (jitVia.status !== 0) bad('N1 run-jit cases/02_numeric', `    exit=${jitVia.status}\n${jitVia.stderr}`);
+      else if (jitVia.stdout !== jitRef.stdout) bad('N1 run-jit == C0', `    C0 ${JSON.stringify(jitRef.stdout)}\n    N1 ${JSON.stringify(jitVia.stdout)}`);
+      else ok(`N1 run-jit cases/02_numeric == C0  ${jitRef.stdout.length} bytes`);
+    }
   }
 
   // 增量：这一条钉的不是"跑得通"，是**缓存键在两代之间相同**。键是 hash16(规范化文本)，

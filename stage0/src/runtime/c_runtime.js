@@ -14,6 +14,13 @@ import { join, basename } from '../host/path.js';
 // installDir() 是"程序镜像所在目录"（node 上就是 src/host）。运行时相对它固定两级上去。
 export const RUNTIME_DIR = join(installDir(), '..', '..', 'runtime');
 
+/**
+ * ORC JIT 宿主的 C 源码（ADR-0014 决策 3 第二阶段）。
+ * 和运行时分开放，因为它要 LLVM 头，而普通的 C 后端不该因此依赖 LLVM ——
+ * runtimeSources() 是把 runtime/*.c **全都**喂给 cc 的，混在一起就等于强制依赖。
+ */
+export const JIT_DIR = join(installDir(), '..', '..', 'jit');
+
 /** 生成的 .c 开头只需要这一行；其余靠 -I RUNTIME_DIR + 链接 runtimeSources() */
 export const RUNTIME_INCLUDE = '#include "omni.h"';
 
