@@ -116,34 +116,82 @@ function encodeUtf8(s) {
     if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length) {
       const lo = s.charCodeAt(i + 1);
       if (lo >= 0xdc00 && lo <= 0xdfff) {
-        c = 0x10000 + ((c - 0xd800) << 10) + (lo - 0xdc00);
+        c = 0x10000 + (c - 0xd800) * 1024 + (lo - 0xdc00);
         i = i + 1;
       }
     }
+    // 全程乘除取模，一处位运算都没有：码点在 JS 子集里是 real，而封闭 ABI 的 js_bitop
+    // 只对 bigint 成立（ADR-0011 决策 2）。写成 `c >> 6` 在 node 上照跑，原生构建里报错 ——
+    // 而这一段只有非 ASCII 才走到，所以那种错会藏得很深。
     if (c < 0x80) out.push(c);
-    else if (c < 0x800) { out.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f)); }
-    else if (c < 0x10000) { out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f)); }
-    else {
-      out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 0x3f), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
+    else if (c < 0x800) { out.push(0xc0 + bitsAbove(c, 64), 0x80 + c % 64); }
+    else if (c < 0x10000) {
+      out.push(0xe0 + bitsAbove(c, 4096), 0x80 + bitsAbove(c, 64) % 64, 0x80 + c % 64);
+    } else {
+      out.push(0xf0 + bitsAbove(c, 262144), 0x80 + bitsAbove(c, 4096) % 64,
+        0x80 + bitsAbove(c, 64) % 64, 0x80 + c % 64);
     }
   }
   return out;
 }
 
+/** `v >> log2(span)`：整数右移，写成除法。 */
+function bitsAbove(v, span) {
+  return (v - (v % span)) / span;
+}
+
+/**
+ * UTF-8 -> 宿主字符串。非法字节按 **WHATWG 的「最大子部分」规则**换成一个 U+FFFD，
+ * 而不是一个字节换一个。
+ *
+ * 为什么要抄这条规则：JS 后端那条腿用的是 `TextDecoder`（见 backend-js/prelude.js 的
+ * `$substr`），而解释器要跟它**逐字节相同** —— 那是 js-exec 与主轴上的门槛。
+ * 这门语言的 string 是 UTF-8 字节序列、`substr` 按字节，所以「从多字节字符中间切一刀」
+ * 是合法操作，非法序列的落法因此不是边角情况，是要对齐的语义。
+ *
+ * 量过一次：原来这里没有校验，`"中".substr(0,2)` 在解释器上会打印成一个 NUL
+ * （`undefined % 64` 是 NaN，`fromCharCode(NaN)` 是 `\0`）—— 既不是 node 的答案，
+ * 也不是 C 的答案。C 后端那条腿是第三种：它的字符串就是字节，原样打印出去。
+ */
 function decodeUtf8(b) {
   let s = '';
   let i = 0;
   while (i < b.length) {
     const c = b[i];
-    let cp = c;
-    let n = 1;
-    if (c >= 0xf0) { cp = c & 0x07; n = 4; } else if (c >= 0xe0) { cp = c & 0x0f; n = 3; } else if (c >= 0xc0) { cp = c & 0x1f; n = 2; }
-    for (let k = 1; k < n; k++) cp = (cp << 6) | (b[i + k] & 0x3f);
+    if (c < 0x80) { s = s + String.fromCharCode(c); i = i + 1; continue; }
+    // 起头字节决定长度，也决定**第一个续字节的合法区间**（超长形式、代理项、
+    // 超过 U+10FFFF 都靠这张表挡掉，与 TextDecoder 一致）
+    let n = 0;
+    let cp = 0;
+    let lo = 0x80;
+    let hi = 0xbf;
+    if (c >= 0xc2 && c <= 0xdf) { n = 2; cp = c - 0xc0; }
+    else if (c >= 0xe0 && c <= 0xef) {
+      n = 3;
+      cp = c - 0xe0;
+      if (c === 0xe0) lo = 0xa0;
+      if (c === 0xed) hi = 0x9f;
+    } else if (c >= 0xf0 && c <= 0xf4) {
+      n = 4;
+      cp = c - 0xf0;
+      if (c === 0xf0) lo = 0x90;
+      if (c === 0xf4) hi = 0x8f;
+    }
+    if (n === 0) { s = s + String.fromCharCode(0xfffd); i = i + 1; continue; }
+    // 走到哪断在哪：非法子部分整段算一个 U+FFFD，下一轮从断点继续
+    let k = 1;
+    let bad = false;
+    while (k < n && !bad) {
+      const x = i + k < b.length ? b[i + k] : -1;
+      if (x < lo || x > hi) bad = true;
+      else { cp = cp * 64 + x % 64; lo = 0x80; hi = 0xbf; k++; }
+    }
+    if (bad) { s = s + String.fromCharCode(0xfffd); i = i + k; continue; }
     i = i + n;
     if (cp >= 0x10000) {
       const v = cp - 0x10000;
       // fromCharCode 在这里只传一个实参：多实参不在语言子集里
-      s = s + String.fromCharCode(0xd800 + (v >> 10)) + String.fromCharCode(0xdc00 + (v & 0x3ff));
+      s = s + String.fromCharCode(0xd800 + bitsAbove(v, 1024)) + String.fromCharCode(0xdc00 + v % 1024);
     } else {
       s = s + String.fromCharCode(cp);
     }

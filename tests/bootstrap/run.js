@@ -216,6 +216,54 @@ if (c1 && !quick) {
     writeFileSync(inJnc, 'class C1 { int m_x; }\nC1* c;\nint f(int a) { return a * 2; }\n');
     both('glr jnc (prefer)', ['glr', gJnc, inJnc], false);
   }
+
+  // ---- 阶段 10：原生编译器上的 MIR 与增量缓存 -----------------------------------
+  // MIR 在这条门槛之前**从没在原生构建里跑过** —— 它一进来就抓到 `ir.js` 里的
+  // `kind | (log << 5)`：封闭 ABI 的 js_bitop 只对 bigint 成立，而这些量在 JS 子集里
+  // 全是 real，于是 node 上照跑、原生构建里报「bitwise '>' requires bigint operands」。
+  // 这正是阶段 8/9 那条理由的第三次复现：新代码的洞不在逻辑里，在**用了子集外的东西**。
+  if (r.code === 0) {
+    const caseMir = join(root, 'tests', 'cases', '01_basics.omni');
+    const ref = spawnSync('node', [cli, 'interp', caseMir, '--mir'], { encoding: 'utf8' });
+    const via = spawnSync(n1, ['interp', caseMir, '--mir'], { encoding: 'utf8' });
+    if (via.status !== 0) bad('N1 interp --mir cases/01_basics', `    exit=${via.status}\n${via.stderr}`);
+    else if (via.stdout !== ref.stdout) bad('N1 interp --mir == C0', `    C0 ${JSON.stringify(ref.stdout)}\n    N1 ${JSON.stringify(via.stdout)}`);
+    else ok(`N1 interp --mir cases/01_basics == C0  ${ref.stdout.length} bytes`);
+
+    // 非 ASCII 那条路单列一条：UTF-8 的编解码在 `interp/builtin.js` 里是手写的
+    // （TextEncoder 不在封闭 ABI 里），而它整段只有非 ASCII 才走到 —— 上面那份用例
+    // 一个字节都碰不到它。切在多字节字符中间是刻意的：非法序列的落法也要两代一致。
+    const u8 = join(dir, 'utf8.omni');
+    writeFileSync(u8, 'string s = "héllo 中文 😀";\nprint(s.length);\nprint(s);\nprint(s.byteAt(1));\nprint(s.substr(6, 3));\n');
+    const uRef = spawnSync('node', [cli, 'interp', u8], { encoding: 'utf8' });
+    const uVia = spawnSync(n1, ['interp', u8], { encoding: 'utf8' });
+    if (uVia.status !== 0) bad('N1 interp utf8', `    exit=${uVia.status}\n${uVia.stderr}`);
+    else if (uVia.stdout !== uRef.stdout) bad('N1 interp utf8 == C0', `    C0 ${JSON.stringify(uRef.stdout)}\n    N1 ${JSON.stringify(uVia.stdout)}`);
+    else ok(`N1 interp utf8 == C0  ${uRef.stdout.length} bytes`);
+  }
+
+  // 增量：这一条钉的不是"跑得通"，是**缓存键在两代之间相同**。键是 hash16(规范化文本)，
+  // 而 hash16 只用加乘取模、刻意不用位运算，就是为了 node 与原生给出同一个值
+  // （见 host/hash.js 文件头）。哪天它们分叉，N1 写下的缓存条目 C0 就认不出来，
+  // 而那种 bug 不会报错 —— 只会表现成"缓存永远不命中"。所以逐字节对。
+  // 两代各用自己的缓存目录，否则第二个跑的那个会去命中第一个写的条目。
+  if (r.code === 0) {
+    const caseIncr = join(root, 'tests', 'cases', '01_basics.omni');
+    const cacheRef = join(dir, 'incr-c0');
+    const cacheVia = join(dir, 'incr-n1');
+    const args = ['incr', caseIncr, '--list', '--cache'];
+    const ref = spawnSync('node', [cli, ...args, cacheRef], { encoding: 'utf8' });
+    const via = spawnSync(n1, [...args, cacheVia], { encoding: 'utf8' });
+    if (via.status !== 0) bad('N1 incr cases/01_basics', `    exit=${via.status}\n${via.stderr}`);
+    else if (via.stdout !== ref.stdout) bad('N1 incr == C0 incr', `    C0 ${JSON.stringify(ref.stdout)}\n    N1 ${JSON.stringify(via.stdout)}`);
+    else {
+      // 再跑一遍：条目是原生这一代自己写的，它必须认得（落盘 + 读回 + 键复算）
+      const warm = spawnSync(n1, [...args, cacheVia], { encoding: 'utf8' });
+      const line = warm.stdout.trim().split('\n').pop();
+      if (!/ hit=(\d+) miss=0 /.test(line)) bad('N1 incr warm', `    第二遍应该全命中，实得 ${JSON.stringify(line)}`);
+      else ok(`N1 incr cases/01_basics == C0  ${ref.stdout.length} bytes，第二遍 ${line}`);
+    }
+  }
 }
 
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);

@@ -454,3 +454,20 @@ function fmtRealLit(v) {
 export function emitJs(mod) {
   return new JsEmitter(mod).emit();
 }
+
+/**
+ * **一个函数**的产物文本。增量编译（ADR-0014 决策 5）的缓存条目就是它。
+ *
+ * 这条路在 JS 后端成立、在 C 后端**不成立**，原因值得记下：C 后端有一个模块级的
+ * 字符串字面量池（`emit.js` 的 `constIndex`），函数体里出现的是 `omni_s16_7` 这样的
+ * **下标**，于是同一个函数在两个模块里会得到不同的文本 —— 缓存条目就不再是内容寻址的。
+ * JS 后端里字面量直接内联，函数体引用外部世界只靠**名字**，所以它可以整段搬走。
+ *
+ * 这正是决策 5 说「缓存条目 = 目标码 buffer + 重定位信息」的原因：重定位是把
+ * 「按下标引用」换成「按符号引用」的那一步，缺了它任何一层都会退化成全量。
+ */
+export function emitJsFunc(mod, f) {
+  const e = new JsEmitter(mod);
+  e.func(f);
+  return e.out.join('\n') + '\n';
+}

@@ -56,21 +56,29 @@ export const T_PTR = 6;   // ptr(T, addrspace)：addrspace 在 aux 的高 4 位
 export const T_AGG = 7;   // struct/class/enum/容器/函数值：身份在 aux
 export const T_KIND_BITS = 5;
 export const T_KIND_MASK = 31;
+export const T_KIND_SPAN = 32;   // = 2^T_KIND_BITS。位运算不可用，见 mkType
 
 export const TYPE_NAMES = ['void', 'i64', 'f64', 'bool', 'str', 'dyn', 'ptr', 'agg'];
 
-/** `t` 字段：种类 + 向量宽度（1 = 标量）。宽度必须是 2 的幂。 */
+/**
+ * `t` 字段：种类 + 向量宽度（1 = 标量）。宽度必须是 2 的幂。
+ *
+ * 布局是位域，但**这里只能用乘除取模**：封闭 ABI 的 `js_bitop` 只对 bigint 成立
+ * （ADR-0011 决策 2），而这些量在 JS 子集里全是 real —— `kind | (log << 5)` 在 node 上
+ * 照跑，在原生构建里当场报「bitwise '>' requires bigint operands」。
+ * 这个洞是 `omni incr` 那条自举门槛抓出来的：在它之前 MIR 从没在原生构建里跑过。
+ */
 export function mkType(kind, lanes) {
   const n = lanes === undefined ? 1 : lanes;
   let log = 0;
   let w = n;
   while (w > 1) { w = w / 2; log++; }
-  return kind | (log << T_KIND_BITS);
+  return kind + log * T_KIND_SPAN;
 }
-export function typeKind(t) { return t & T_KIND_MASK; }
+export function typeKind(t) { return t % T_KIND_SPAN; }
 export function typeLanes(t) {
   let n = 1;
-  let log = t >> T_KIND_BITS;
+  let log = (t - (t % T_KIND_SPAN)) / T_KIND_SPAN;
   while (log > 0) { n = n * 2; log--; }
   return n;
 }
@@ -187,10 +195,13 @@ for (const row of OPS) {
   opNoCounter++;
 }
 
-/** 取反比较：靠编号算术，不用 switch（LuaJIT `lj_ir.h:154..158` 的做法）。 */
+/**
+ * 取反比较：靠编号算术，不用 switch（LuaJIT `lj_ir.h:154..158` 的做法）。
+ * 它那边是 `op ^ 1`，这里只能是「偶数 +1、奇数 -1」—— 同一件事，理由见 mkType。
+ */
 export function negCmp(op) {
   if (op < OP.EQ || op > OP.GT) throw new Error(`negCmp: ${OP_NAMES[op]} 不是比较`);
-  return op ^ 1;
+  return op % 2 === 0 ? op + 1 : op - 1;
 }
 
 /** 开一个区域的 op（要配一条 END）。 */

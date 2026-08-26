@@ -16,8 +16,7 @@ import {
 import { join, basename } from './host/path.js';
 import { hash16 } from './host/hash.js';
 import { linkJs } from './frontend-js/link.js';
-import { lowerJs } from './frontend-js/lower.js';
-import { lowerWat } from './frontend-wat/lower.js';
+import { lowerJs } from './frontend-js/lower.js';import { lowerWat } from './frontend-wat/lower.js';
 import { readSexpr } from './sexpr/read.js';
 import { printSexpr } from './sexpr/print.js';
 import { readGrammar } from './glr/grammar.js';
@@ -28,10 +27,11 @@ import { lowerToMir } from './mir/from_oir.js';
 import { printMir } from './mir/print.js';
 import { verifyMir } from './mir/verify.js';
 import { dumpBytes } from './mir/bytes.js';
+import { IncrCache, compileIncremental, incrReport } from './incr/cache.js';
 import { Diagnostics, OmniError, SourceFile } from './source/diag.js';
 import { check } from './hir/check.js';
 import { cAbiLibs } from './hir/c_abi.js';
-import { emitJs } from './backend-js/emit.js';
+import { emitJs, emitJsFunc } from './backend-js/emit.js';
 import { emitC } from './backend-c/emit.js';
 import { RUNTIME_DIR, runtimeSources } from './runtime/c_runtime.js';
 import { loadProgram, MODE_BY_EXT } from './module/load.js';
@@ -244,7 +244,7 @@ function main(argv) {
   const files = [];
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
-    if (a === '-o' || a === '--mode' || a === '--work') { i++; continue; }
+    if (a === '-o' || a === '--mode' || a === '--work' || a === '--cache') { i++; continue; }
     if (a.startsWith('-')) continue;
     files.push(a);
   }
@@ -354,6 +354,21 @@ function main(argv) {
       stdout(rest.includes('--bytes') ? dumpBytes(mir) : printMir(mir));
       return 0;
     }
+    // 增量编译（ADR-0014 决策 5）：函数级单元 + 内容哈希 + 内容寻址的产物缓存。
+    // 印的是命中/未命中计数 —— 门槛 4 要的是计数断言，不是计时。
+    case 'incr': {
+      const { mod } = compile(path, rest);
+      const mir = lowerToMir(mod);
+      const ci = rest.indexOf('--cache');
+      const dir = ci >= 0 ? rest[ci + 1] : join(tmpDir(), 'omni-incr');
+      const byName = new Map();
+      for (const f of mod.funcs) byName.set(f.mangled, f);
+      const cache = new IncrCache(dir);
+      const res = compileIncremental(mir, 'js', cache, (name) => emitJsFunc(mod, byName.get(name)));
+      vStep(`incr  ${res.units.length} units, ${res.hits} hit, ${res.misses} miss  cache ${dir}`);
+      stdout(incrReport(res, rest.includes('--list')));
+      return 0;
+    }
     // ---- GLR（ADR-0014 决策 2）。语法是数据，这两条命令读的都是 .grammar 文件。
     // 它们摆在 CLI 上不只是为了调试：自举链要能让**原生编译器自己**跑一遍这条路，
     // 那是唯一能抓住封闭 ABI 违规的门槛（详见 tests/bootstrap/run.js 阶段 8）。
@@ -424,6 +439,9 @@ commands:
   mir       print the MIR (ADR-0014 decision 6): SSA values + slots + structured
             control flow, one 8-byte record per instruction (--bytes: sizes and
             per-function content hashes instead of the listing)
+  incr      compile function by function through the content-addressed cache
+            (ADR-0014 decision 5) and print hit/miss counts
+            (--cache DIR, default \$TMPDIR/omni-incr; --list: one line per unit)
   glr-table print the parsing table for a .grammar file (ADR-0014 decision 2)
             (--brief: rules and remaining conflicts only, no per-state dump)
   glr       parse a source file with a .grammar and print the resulting s-expr
