@@ -92,14 +92,17 @@ function checkSnapshot(name, expectedPath, actual) {
 // ------------------------------------------------------------ 可执行用例：差分 + 快照
 
 const casesDir = join(here, 'cases');
-process.stdout.write('differential (js vs c) + snapshot\n');
+process.stdout.write('differential (js vs c vs interp) + snapshot\n');
 for (const f of readdirSync(casesDir).filter((f) => SRC_EXT.test(f)).sort()) {
   if (filters.length && !filters.some((x) => f.includes(x))) continue;
   const path = join(casesDir, f);
   const js = run('run', path);
   const c = run('run-c', path);
+  // 第三个执行器（ADR-0013）：解释 OIR，不借宿主的 JS 引擎也不借 cc。它和前两个不共用
+  // 任何一条执行路径，所以三方比对里任何一方写错都会当场露出来。
+  const it = run('interp', path);
 
-  const crashed = [['js', js], ['c', c]].filter(([, r]) => hostCrash(r.stderr));
+  const crashed = [['js', js], ['c', c], ['interp', it]].filter(([, r]) => hostCrash(r.stderr));
   if (crashed.length) {
     record(`${f} [host crash]`, false, crashed.map(([l, r]) => show(l, r)).join('\n'));
     continue;
@@ -107,6 +110,8 @@ for (const f of readdirSync(casesDir).filter((f) => SRC_EXT.test(f)).sort()) {
 
   const same = js.stdout === c.stdout && js.code === c.code && js.stderr === c.stderr;
   record(`${f} [js==c]`, same, same ? '' : `${show('js', js)}\n${show('c', c)}\n${diffLine(js.stdout, c.stdout)}`);
+  const sameI = js.stdout === it.stdout && js.code === it.code && js.stderr === it.stderr;
+  record(`${f} [js==interp]`, sameI, sameI ? '' : `${show('js', js)}\n${show('interp', it)}\n${diffLine(js.stdout, it.stdout)}`);
   if (same) checkSnapshot(f, path.replace(SRC_EXT, '.expected'), `exit ${js.code}\n--- stdout ---\n${js.stdout}--- stderr ---\n${js.stderr}`);
 }
 

@@ -148,6 +148,19 @@ if (c1 && !quick) {
     else if (via.stdout !== ref.stdout) bad('N1 run == C0 run', `    C0 ${ref.stdout.length} bytes != N1 ${via.stdout.length} bytes`);
     else ok(`N1 run cases/01_basics == C0 run  ${ref.stdout.length} bytes`);
   }
+
+  // ---- 阶段 7：原生编译器上的解释器 -----------------------------------------------
+  // 这一代既没有 JS 引擎也不一定有 cc，`interp` 是它唯一不依赖外部工具的执行路径
+  // （ADR-0013）。门槛同上：逐字节等于 node 上 run 的输出。解释器本身在这一代里
+  // 是 C —— 这条门槛因此也是"解释器能被自己的后端编译出来"的证明。
+  if (r.code === 0) {
+    const sample3 = join(root, 'tests', 'cases', '08_container_stress.omni');
+    const ref = spawnSync('node', [cli, 'run', sample3], { encoding: 'utf8' });
+    const via = spawnSync(n1, ['interp', sample3], { encoding: 'utf8' });
+    if (via.status !== 0) bad('N1 interp cases/08_container_stress', `    exit=${via.status}\n${via.stderr}`);
+    else if (via.stdout !== ref.stdout) bad('N1 interp == C0 run', `    C0 ${ref.stdout.length} bytes != N1 ${via.stdout.length} bytes`);
+    else ok(`N1 interp cases/08_container_stress == C0 run  ${ref.stdout.length} bytes`);
+  }
 }
 
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);

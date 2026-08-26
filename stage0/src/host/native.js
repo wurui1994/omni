@@ -171,10 +171,81 @@ export function hasJsEngine() {
   return true;
 }
 
+/**
+ * dynamic 的运行期标签名（"int" / "real" / "list" / "dict" / "set" / "function" …）。
+ * 解释器要靠它认出一个 dynamic 里装的是什么（ADR-0013）：`instanceof Map` 不在语言子集里
+ * （ADR-0011 决策 15），而 C 侧本来就有标签，所以这件事只能是一条 ABI op。
+ * 名字必须与 prelude 的 $dynTag 逐字相同 —— 它们会进错误消息。
+ */
+export function typeTag(v) {
+  if (v === null) return 'null';
+  if (v === undefined) return 'undefined';
+  switch (typeof v) {
+    case 'boolean': return 'bool';
+    case 'bigint': return 'int';
+    case 'number': return 'real';
+    case 'string': return 'string';
+    case 'function': return 'function';
+    default:
+      if (v instanceof Map) return 'dict';
+      if (v instanceof Set) return 'set';
+      if (Array.isArray(v)) return 'list';
+      return 'function';  // 闭包记录 { fp, c_* }
+  }
+}
+
 export function evalJs(code) {
   // eslint-disable-next-line no-new-func
   new Function(code)();
   return undefined;
+}
+
+/**
+ * real 的两种文本化，作为宿主 op（ADR-0013）。
+ *
+ * 为什么是 op 而不是解释器里的一份 JS：语言的 print 与 repr 在两代产物里已经各有一份
+ * 实现（prelude 的 $fmt_g/$repr_real 与 runtime 的 omni_str_real/omni_repr_real），
+ * 解释器再写第三份，就等于给"同一个 double 打印出同一串字符"这件事多开一条会分叉的路。
+ * 收成 op 之后，解释器在哪个宿主上就用那个宿主的那一份 —— 和后端逐字节一致是构造性的。
+ *
+ * 这一份（node 宿主）是 $fmt_g 的同一套算法：C 的 %.6g，-4 <= exp < P 用定点，
+ * 否则指数形式，去掉尾随零。
+ */
+function fmtG(x, P) {
+  if (Number.isNaN(x)) return 'nan';
+  if (x === Infinity) return 'inf';
+  if (x === -Infinity) return '-inf';
+  if (x === 0) return Object.is(x, -0) ? '-0' : '0';
+  const exp = Number(x.toExponential(P - 1).split('e')[1]);
+  if (exp >= -4 && exp < P) {
+    let s = x.toFixed(Math.max(0, P - 1 - exp));
+    if (s.indexOf('.') >= 0) s = s.replace(/0+$/, '').replace(/\.$/, '');
+    return s;
+  }
+  const parts = x.toExponential(P - 1).split('e');
+  let m = parts[0];
+  if (m.indexOf('.') >= 0) m = m.replace(/0+$/, '').replace(/\.$/, '');
+  const sign = parts[1][0] === '-' ? '-' : '+';
+  const digits = parts[1].replace(/^[+-]/, '').padStart(2, '0');
+  return m + 'e' + sign + digits;
+}
+
+/** print / to_string 上的 real：%.6g */
+export function fmtReal(x) {
+  return fmtG(x, 6);
+}
+
+/** repr 上的 real：15/16/17 位里第一个能往返的，末尾补 ".0" 让类型也往返 */
+export function reprReal(x) {
+  for (let p = 15; p <= 17; p++) {
+    const s = fmtG(x, p);
+    if (Number(s) === x) return reprTail(s);
+  }
+  return reprTail(fmtG(x, 17));
+}
+
+function reprTail(s) {
+  return /[.eE]/.test(s) ? s : `${s}.0`;
 }
 
 /** 同上，但把 stdout/stderr 收进字符串；结果是 [out, err, failed] */

@@ -49,6 +49,9 @@ const NATIVE_OPS = {
   evalJs: 'js_eval',
   evalCaptured: 'js_eval_captured',
   hasJsEngine: 'js_has_engine',
+  typeTag: 'js_type_tag',
+  fmtReal: 'js_fmt_real',
+  reprReal: 'js_repr_real',
 };
 
 

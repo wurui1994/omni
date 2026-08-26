@@ -38,6 +38,46 @@ omni_dyn omni_js_typeof(omni_dyn v) {
   return omni_dyn_of_s16(omni_s16_of_utf8(omni_str_fmt("%s", n)));
 }
 
+/* dynamic 的运行期标签名（JS 域口径）。解释器靠它认出一个 dynamic 里装的是什么
+   （ADR-0013）：`instanceof Map` 不在语言子集里，而 C 侧本来就有标签。
+   名字必须与 host/native.js 的 typeTag 和 prelude 的 $js_type_tag 逐字一致 ——
+   它们会进错误消息。JS 域的 Map/Set 与 Omni 的 dict/set 在这里是**不同**的标签。 */
+omni_dyn omni_js_type_tag(omni_dyn v) {
+  const char *n;
+  switch (v.tag) {
+    case OMNI_DYN_UNDEF: n = "undefined"; break;
+    case OMNI_DYN_NULL: n = "null"; break;
+    case OMNI_DYN_BOOL: n = "bool"; break;
+    case OMNI_DYN_INT: n = "int"; break;
+    case OMNI_DYN_REAL: n = "real"; break;
+    case OMNI_DYN_STRING: case OMNI_DYN_STR16: n = "string"; break;
+    case OMNI_DYN_LIST: n = "list"; break;
+    case OMNI_DYN_DICT: n = "dict"; break;
+    case OMNI_DYN_MAP: n = "Map"; break;
+    case OMNI_DYN_SET: n = "Set"; break;
+    default: n = "function"; break;
+  }
+  return omni_dyn_of_s16(omni_s16_of_utf8(omni_str_fmt("%s", n)));
+}
+
+/* real 的两种文本化，给解释器用（ADR-0013）。刻意就是 print / repr 自己用的那两个
+   函数：解释器不写第三份浮点格式化，于是解释执行与编译执行打印出同一串字符，
+   是构造性的，而不是三份代码碰巧一致。 */
+static double want_fmt_num(omni_dyn v, const char *who) {
+  if (v.tag == OMNI_DYN_REAL) return v.u.r;
+  if (v.tag == OMNI_DYN_INT) return (double)v.u.i;
+  omni_errorf("%s expects a number, found %s", who, omni_dyn_tag_name(v.tag));
+  return 0.0;
+}
+
+omni_dyn omni_js_fmt_real(omni_dyn v) {
+  return omni_dyn_of_s16(omni_s16_of_utf8(omni_str_real(want_fmt_num(v, "fmtReal"))));
+}
+
+omni_dyn omni_js_repr_real(omni_dyn v) {
+  return omni_dyn_of_s16(omni_s16_of_utf8(omni_repr_real(want_fmt_num(v, "reprReal"))));
+}
+
 /* ---------------------------------------------------------------- 文本化 */
 
 /* JS 的 Number -> String（ECMA-262 Number::toString）。

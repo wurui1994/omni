@@ -183,6 +183,12 @@ omni_s16 omni_s16_trim(omni_s16 s, bool left, bool right);
    JS 的 truthiness / `+` 的双重含义 / `==` 的强制转换只活在这里，Omni 语言本身不受影响。 */
 bool omni_js_truthy(omni_dyn v);
 omni_dyn omni_js_typeof(omni_dyn v);
+/* dynamic 的运行期标签名（JS 域口径）。解释器靠它认标签，见 ADR-0013 与 omni_js.c */
+omni_dyn omni_js_type_tag(omni_dyn v);
+/* real 的两种文本化，给解释器用（ADR-0013）。就是 print / repr 自己用的那两个函数，
+   所以解释执行与编译执行打印出同一串字符 —— 不是两份代码碰巧一致。 */
+omni_dyn omni_js_fmt_real(omni_dyn v);
+omni_dyn omni_js_repr_real(omni_dyn v);
 omni_dyn omni_js_str(omni_dyn v);
 void omni_js_println(omni_dyn v);
 omni_dyn omni_js_add(omni_dyn a, omni_dyn b);

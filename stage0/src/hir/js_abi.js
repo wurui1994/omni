@@ -208,6 +208,14 @@ export const JS_ABI = {
   // has_engine 是"先问能力"：宿主的错误不是可以 catch 的异常，所以 `omni run` 必须先
   // 知道这一代有没有引擎，才能决定是进程内 eval 还是走 C 路径。
   js_has_engine: { js: '$js_has_engine', c: 'omni_js_has_engine', arity: 0, ret: 'bool' },
+  // dynamic 的运行期标签名。解释器（ADR-0013）靠它认出一个 dynamic 里装的是什么 ——
+  // `instanceof Map` 不在语言子集里（ADR-0011 决策 15），而 C 侧本来就有标签。
+  js_type_tag: { js: '$js_type_tag', c: 'omni_js_type_tag', arity: 1 },
+  // real 的两种文本化。解释器不写第三份浮点格式化：在哪个宿主上就用那个宿主已有的那一份
+  // （prelude 的 $fmt_real/$repr_real、runtime 的 omni_str_real/omni_repr_real），
+  // 于是解释执行与编译执行打印出同一串字符是构造性的，不靠三份代码碰巧一致。
+  js_fmt_real: { js: '$js_fmt_real', c: 'omni_js_fmt_real', arity: 1 },
+  js_repr_real: { js: '$js_repr_real', c: 'omni_js_repr_real', arity: 1 },
   js_eval: { js: '$js_eval', c: 'omni_js_eval', arity: 1 },
   js_eval_captured: { js: '$js_eval_captured', c: 'omni_js_eval_captured', arity: 1 },
 

@@ -933,6 +933,31 @@ function $js_install_dir() {
 function $js_has_engine() {
   return true;
 }
+// dynamic 的运行期标签名。解释器靠它认出装的是什么（ADR-0013）。
+// 与 host/native.js 的 typeTag 和 runtime 的 omni_js_type_tag 逐字一致 —— 这些名字会进
+// 错误消息。JS 域的 Map/Set 与 Omni 的 dict/set 在这里是**不同**的标签。
+function $js_type_tag(v) {
+  if (v === null) return "null";
+  if (v === undefined) return "undefined";
+  switch (typeof v) {
+    case "boolean": return "bool";
+    case "bigint": return "int";
+    case "number": return "real";
+    case "string": return "string";
+    case "function": return "function";
+    default:
+      if (v instanceof $JsMap) return "Map";
+      if (v instanceof $JsSet) return "Set";
+      if (v instanceof Map) return "dict";
+      if (v instanceof Set) return "set";
+      if (Array.isArray(v)) return "list";
+      return "function";
+  }
+}
+// real 的两种文本化，给解释器用（ADR-0013）。刻意就是 print / repr 自己用的那两个函数 ——
+// 解释器不再写第三份浮点格式化，于是"同一个 double 打印成同一串字符"是构造性的。
+function $js_fmt_real(x) { return $fmt_real(x); }
+function $js_repr_real(x) { return $repr_real(x); }
 // 宿主里跑一段生成的 JS（omni run 与 REPL 的进程内快路径）。原生构建里没有 JS
 // 引擎，C 侧那两个同名函数只会报错 —— 这是宿主面唯一"只有一代能做"的能力。
 function $js_eval(code) {

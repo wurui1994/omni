@@ -24,6 +24,7 @@ import { emitC } from './backend-c/emit.js';
 import { RUNTIME_DIR, runtimeSources } from './runtime/c_runtime.js';
 import { loadProgram, MODE_BY_EXT } from './module/load.js';
 import { startRepl } from './repl.js';
+import { interpret } from './interp/eval.js';
 import { bootstrapSelf } from './bootstrap.js';
 
 /** 文件后缀决定默认的类型模式（ADR-0008 第 1 节）；`--mode` 可覆盖，REPL 用它 */
@@ -182,8 +183,14 @@ function buildNative(mod, outPath, workDir) {
  * `run-c` 就是它；原生构建上的 `run` 也是它（那一代没有 JS 引擎）。
  * `--work DIR` 会把可执行文件和生成的 C 都留在 DIR 里，方便事后看。
  */
-function runViaC(mod, argv) {
-  const wi = argv.indexOf('--work');
+/** 解释器（ADR-0013）：不经过任何别的执行器，OIR 直接跑 */
+function runInterp(mod) {
+  const code = interpret(mod);
+  vStep(`exec interp  OIR ${mod.funcs.length} funcs  exit=${code}`);
+  return code;
+}
+
+function runViaC(mod, argv) {  const wi = argv.indexOf('--work');
   const dir = wi >= 0 ? argv[wi + 1] : mkdTemp(join(tmpDir(), 'omni-run-'));
   if (wi >= 0) mkdirAll(dir);
   const exe = join(dir, 'a.out');
@@ -239,6 +246,8 @@ function main(argv) {
   switch (cmd) {
     case 'run': {
       const { mod } = compile(path, rest);
+      // 自己的解释器（ADR-0013）。阶段 1 还没覆盖全部 op，所以要显式要它
+      if (rest.includes('--interp')) return runInterp(mod);
       // `run` 的意思是"解析完直接执行"，怎么执行是**这一代宿主的事**：node 上是生成 JS
       // 在本进程里 eval；原生构建里没有 JS 引擎，那条路就是 C 路径。所以先问一句能力，
       // 而不是让 js_eval 报错 —— 用户要的是执行，不是一句"换个命令重试"。
@@ -275,6 +284,11 @@ function main(argv) {
     case 'run-c': {
       const { mod } = compile(path, rest);
       return runViaC(mod, rest);
+    }
+    // 自己的解释器（ADR-0013 阶段 1）：不生成 JS、不生成 C，直接走 OIR
+    case 'interp': {
+      const { mod } = compile(path, rest);
+      return runInterp(mod);
     }
     case 'ast': {
       const { ast } = compile(path, rest);
