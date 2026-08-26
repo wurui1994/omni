@@ -29,8 +29,14 @@ export const SUPPORTED = [
   // 结构体（门槛 2 第十二刀）：值是指向自己那块内存的指针，NEW/COPY 从 arena 拿，
   // FLD/FLDSET 是 getelementptr + load/store。
   join('tests', 'sexpr', 'cases', '06-structs.sx'),
+  // 类（门槛 2 第十三刀）：与结构体只差引用语义，字段访问多一次 @omni_nullck。
+  join('tests', 'sexpr', 'cases', '07-classes.sx'),
   // 这一份是**边界那节推过来的**：结构体一支持，01_basics 就整份能降了（它原先被拒
   // 只是因为里面有 struct）。它的输出与 run / interp / omni-c 逐字节相同，所以留在门外
   // 就变成了"其实支持却假装不支持"—— 那正是这张表要防的另一半。
   join('tests', 'cases', '01_basics.omni'),
+  // 同一句断言推过来的第二份：类一支持，11_null_reference 也整份能降了。它盯的正是
+  // 「空引用在 C 那条腿上必须显式检查，否则是段错误」，所以 LLVM 这条腿也必须在
+  // 访问点 call omni_nullck —— 三条腿的 stdout / stderr / 退出码逐字节相同才算过。
+  join('tests', 'cases', '11_null_reference.omni'),
 ];

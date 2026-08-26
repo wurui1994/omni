@@ -1,0 +1,6 @@
+;; print 不接受类，与结构体/向量/缓冲/数组同一条规矩。
+(module
+  (class Node (v int))
+  (main
+    (let o Node (cnew Node))
+    (print (var o))))

@@ -145,6 +145,7 @@ class LlvmEmitter {
     this.needArrBlob = false;
     // 结构体用到了没有：用到就要发 arena 的那个私有分配器（缓冲那一节本来就要它）
     this.aggUsed = false;
+    this.needNullck = false;   // 类的字段访问要判空，用到才 declare
   }
 
   line(s) { this.out.push(s); }
@@ -183,6 +184,9 @@ class LlvmEmitter {
     if (c.t === T_BOOL) return c.text === 'true' ? 'true' : 'false';
     if (c.t === T_F64) return llFloat(c.text);
     if (c.t === T_STR) return this.strConst(c.text);
+    // 类的空引用（OIR 的 NullRef）。方言里写不出 null，但"非 void 的函数掉出尾巴"
+    // 会补一个零值 return，类的零值就是它 —— 所以这条路是走得到的。
+    if (typeKind(c.t) === T_AGG && c.text === 'null') return 'null';
     throw new OmniError(`${NOPE} ${typeText(c.t)} 常量（${c.text}）`);
   }
 
@@ -252,10 +256,10 @@ class LlvmEmitter {
     // 字段偏移交给 LLVM 算（getelementptr 的第三个下标就是字段号），这一层不自己算字节。
     let sawStruct = false;
     for (const t of this.mir.types) {
-      if (t.kind !== 'struct') continue;
+      if (t.kind !== 'struct' && t.kind !== 'class') continue;
       const fs = [];
       for (const fd of t.oir.fields) fs.push(this.fieldTy(fd.type, `${t.name}.${fd.name}`));
-      this.line(`%s_${t.name} = type { ${fs.join(', ')} }`);
+      this.line(`%${t.kind === 'class' ? 'c' : 's'}_${t.name} = type { ${fs.join(', ')} }`);
       sawStruct = true;
     }
     if (sawStruct) this.line('');
@@ -286,6 +290,10 @@ class LlvmEmitter {
       this.line('@omni_arena_end = external global ptr');
       this.line('');
       this.line(ALLOC_HELPER);
+    }
+    if (this.needNullck) {
+      this.line('declare ptr @omni_nullck(ptr)');
+      this.line('');
     }
     if (this.bufElems.size > 0) {
       this.line('declare void @omni_errorf(ptr, ...)');
@@ -611,9 +619,19 @@ class LlvmEmitter {
    */
   aggInsn(f, i, op, dst, t) {
     if (op === OP.FLD || op === OP.FLDSET) {
-      const g = this.fresh();
       const acc = this.access(f.aux[i]);
-      this.line(`  ${g} = getelementptr ${acc.type}, ptr ${this.val(f.a[i])}, i32 0, i32 ${acc.index}`);
+      let obj = this.val(f.a[i]);
+      // 类是引用类型，可能是空引用：两个后端都在**访问点**显式判空，消息也是同一句
+      // （运行时的 omni_nullck，omni.h:76）。判空不在 MIR 里 —— MIR 没有 NULLCK 指令，
+      // C 那条腿也是在发射时插的，所以这里跟着插，两条腿的行为才是同一份。
+      if (acc.isClass) {
+        const p = this.fresh();
+        this.needNullck = true;
+        this.line(`  ${p} = call ptr @omni_nullck(ptr ${obj})`);
+        obj = p;
+      }
+      const g = this.fresh();
+      this.line(`  ${g} = getelementptr ${acc.type}, ptr ${obj}, i32 0, i32 ${acc.index}`);
       if (op === OP.FLD) this.line(`  ${dst} = load ${this.ty(t, 'field')}, ptr ${g}`);
       else this.line(`  store ${this.typed(f.b[i])}, ptr ${g}`);
       return;
@@ -641,24 +659,25 @@ class LlvmEmitter {
     }
   }
 
-  /** 类型池的第 n 项 -> `{name: '%s_Foo', plain: 'Foo', fields}`。只认 struct。 */
+  /** 类型池的第 n 项 -> `{name: '%s_Foo', plain: 'Foo', fields, isClass}`。只认 struct 与 class。 */
   aggType(n) {
     const t = this.mir.types[n];
-    if (t === undefined || t.kind !== 'struct') {
+    if (t === undefined || (t.kind !== 'struct' && t.kind !== 'class')) {
       throw new OmniError(`${NOPE}聚合 ${t === undefined ? n : t.kind}`
         + `（函数 ${this.f === null ? '?' : this.f.name}）`);
     }
-    return { name: `%s_${t.name}`, plain: t.name, fields: t.oir.fields };
+    const cls = t.kind === 'class';
+    return { name: `%${cls ? 'c' : 's'}_${t.name}`, plain: t.name, fields: t.oir.fields, isClass: cls };
   }
 
-  /** 访问描述符的第 n 项 -> `{type: '%s_Foo', index}`。字段号就是声明顺序。 */
+  /** 访问描述符的第 n 项 -> `{type: '%s_Foo', index, isClass}`。字段号就是声明顺序。 */
   access(n) {
     const acc = this.mir.accs[n];
     if (acc === undefined) throw new OmniError(`llvm: 没有第 ${n} 个字段访问描述符`);
     const ty = this.aggType(acc.type);
     let k = 0;
     while (k < ty.fields.length) {
-      if (ty.fields[k].name === acc.field) return { type: ty.name, index: k };
+      if (ty.fields[k].name === acc.field) return { type: ty.name, index: k, isClass: ty.isClass };
       k++;
     }
     throw new OmniError(`llvm: ${ty.plain} 没有字段 ${acc.field}`);

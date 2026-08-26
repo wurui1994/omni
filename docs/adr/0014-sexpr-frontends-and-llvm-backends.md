@@ -767,6 +767,32 @@ struct），输出与 run / interp / omni-c 逐字节相同，于是它进了 `S
 第 2 节那句断言逼出来的 ——「降下来了却不在表里」和「其实支持却假装不支持」是同一个洞的
 两半，那一节两半都盯。
 
+### 已落地（支持面第四阶段：类，门槛 2 第十三刀）
+
+方言又加了两条：`(class NAME (字段 类型)...)` 与 `(cnew NAME)`，`(fld …)` / `(fldset …)` 两条
+读写复用。**与结构体只差一件事：引用语义** —— `from_oir` 的 `rvalue` 只给 struct 与 enum 发
+`OP.COPY`，class 一条不发，所以赋值/传参/返回都不复制。
+
+为什么两种都要：**asy 的 struct 是引用语义的**。量过 `struct A { int x; } A a = new A;
+a.x = 5; A b = a; b.x = 7;` 之后 `a.x` 是 **7**，`void f(A q) { q.x = 99; } f(a);` 之后
+`a.x` 是 **99**，而 `A c;`（不写 `new`）之后 `c == null` 是 **false**（asy 给结构体变量
+隐式跑一次 `operator init`）。所以 asy 的 struct 对应 OIR 的 **class**，不是 OIR 的 struct；
+把它降成值语义的那个会在"改了副本还是改了本体"上静静地给错答案。两个构造名字刻意分开
+（`(new …)` / `(cnew …)`）：值语义和引用语义要一眼分得开，而不是回头去查那个名字是
+`struct` 还是 `class` 声明的。`tests/sexpr/bad/cnew-struct.sx` 与 `new-class.sx` 是这条的两半。
+
+LLVM 那条腿多的只有一处：**类的字段访问要判空**，`call ptr @omni_nullck(ptr %o)` 之后再
+`getelementptr`。判空不在 MIR 里（没有 NULLCK 指令），C 那条腿也是发射时插的，所以这里
+跟着插 —— 两条腿的行为才是同一份，而不是"一条腿段错误、另一条腿有诊断"。命名类型上
+class 用 `%c_Foo`、struct 用 `%s_Foo`，与 C 后端的 `c_` / `s_` 前缀对齐。
+`val()` 还补了一条：类的空引用常量（OIR 的 `NullRef`）发成 `null` —— 方言里写不出 null，
+但"非 void 的函数掉出尾巴"会补一个零值 return，那条路走得到。
+
+于是 `tests/cases/11_null_reference.omni` 也整份能降了（三条腿的 stdout / stderr / 退出码
+逐字节相同：`1` / `omni: runtime error: null reference` / 70），进了 `SUPPORTED`。它盯的正是
+「空引用在 C 那条腿上必须显式检查，否则是段错误、和 JS 的诊断分叉」，现在这句话对
+LLVM 那条腿也成立了。
+
 ## 决策 4：调用 LLVM 需要 extern-C FFI —— 这是新要求，也是 dogfood
 
 编译器源码是 JS 子集降到 C（ADR-0011 决策 2 的封闭 ABI），要调 `libLLVM-C` 就必须有

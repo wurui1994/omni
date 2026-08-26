@@ -1,0 +1,7 @@
+;; (cnew …) 只造类，(new …) 只造结构体。两个名字分开是刻意的：值语义和引用语义
+;; 必须一眼分得开，而不是回头去查那个名字是 struct 还是 class 声明的。
+(module
+  (struct Val (v int))
+  (main
+    (let s Val (cnew Val))
+    (print (fld (var s) v))))

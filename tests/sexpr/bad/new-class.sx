@@ -1,0 +1,6 @@
+;; 反过来的一半：类要用 (cnew …)。
+(module
+  (class Node (v int))
+  (main
+    (let o Node (new Node))
+    (print (fld (var o) v))))

@@ -1,0 +1,65 @@
+(module
+  ;; 类 —— 门槛 2 第十三刀。与结构体只差一条：**引用**语义，赋值/传参/返回都不复制。
+  ;; asy 的 struct 就是这一种（量过：`A b = a; b.x = 7;` 之后 `a.x` 是 7），
+  ;; 所以两种都要有。字段暂时只收标量，与结构体同一条边界。
+  (class Node (v int) (tag string))
+  (struct Val (v int))
+
+  ;; 传参不复制：函数里改字段，外面看得见
+  (fn poke ((o Node)) void
+    (fldset (var o) v (int 99)))
+
+  ;; 值语义那边作对照：改形参不动实参
+  (fn poke2 ((s Val)) void
+    (fldset (var s) v (int 99)))
+
+  (fn mk ((n int)) Node
+    (let o Node (cnew Node))
+    (fldset (var o) v (var n))
+    (ret (var o)))
+
+  (main
+    ;; 零值
+    (let a Node (cnew Node))
+    (print (fld (var a) v))
+    (print (fld (var a) tag))
+
+    ;; 赋值是**别名**：改 b 就是改 a
+    (fldset (var a) v (int 1))
+    (let b Node (var a))
+    (fldset (var b) v (int 7))
+    (print (fld (var a) v))
+    (print (fld (var b) v))
+
+    ;; 传参也是别名
+    (expr (call poke (var a)))
+    (print (fld (var a) v))
+
+    ;; 对照：结构体是复制
+    (let s Val (new Val))
+    (fldset (var s) v (int 1))
+    (expr (call poke2 (var s)))
+    (print (fld (var s) v))
+
+    ;; cnew 每次都是新的一个
+    (let c Node (cnew Node))
+    (fldset (var c) v (int 5))
+    (print (fld (var a) v))
+    (print (fld (var c) v))
+
+    ;; 返回的是同一个对象
+    (let d Node (call mk (int 42)))
+    (fldset (var d) tag (str "x"))
+    (print (fld (var d) v))
+    (print (fld (var d) tag))
+
+    ;; 循环里造一串，只留最后一个的引用
+    (let i int (int 0))
+    (let last Node (cnew Node))
+    (while (bin "<" (var i) (int 3))
+      (do
+        (let e Node (cnew Node))
+        (fldset (var e) v (bin "*" (var i) (int 10)))
+        (set last (var e))
+        (set i (bin "+" (var i) (int 1)))))
+    (print (fld (var last) v))))
