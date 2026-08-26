@@ -1,9 +1,9 @@
 ;; Asymptote —— 从 camp.y（bison LALR(1)，721 行）与 camp.l（flex，450 行）转写。
 ;;
-;; 这是 GLR 层的第一份**真实语言**语法：216 条产生式、77 个终结符、一整块优先级声明。
+;; 这是 GLR 层的第一份**真实语言**语法：220 条产生式、78 个终结符、一整块优先级声明。
 ;; 它证的不是"能分析算术表达式"，是"一门有 13 处 %prec、还有真歧义的语言能照原样搬过来"。
 ;;
-;; 转写时做的三处改动，每一处都写清楚为什么：
+;; 转写时做的七处改动，每一处都写清楚为什么：
 ;;
 ;; 1. **关键字与单字符算符写成字面量终结符**。camp.y 里它们是 IF / ELSE / '+' 这样的 token
 ;;    名，我们直接写 "if" / "+"。词法那边 `(keyword ID ...)` 负责把 ID 改判成字面量。
@@ -25,11 +25,28 @@
 ;;    `argument -> ID . ASSIGN exp` 这个项，因此根本不是冲突点）。量过：改完
 ;;    冲突从 45 降到 43，`f(x=1, 2)` 出 `(arg-named x 1)`，`x = y;` 仍是 `(assign ...)`。
 ;;
+;; 5. **`(T) (e)` 是强制转换而不是调用**。camp.y 那四处冲突里的另一处：`(string) (n/2)`
+;;    既能读成"把 `(n/2)` 转成 string"，也能读成"把 `(string)` 这个值当函数调用"。分歧点在
+;;    括号里那个名字上 —— 先把它归约成 exp 就只能走括号表达式（然后是调用），移进 `)`
+;;    才留得住转换那条路。于是给 `exp -> name` 标最低的 NAME_ID：移进赢。bison 靠"冲突时
+;;    默认移进"得到同一个结果，我们把它写下来。量过：冲突 45→43，`(x)+1` 仍是加法。
+;;
+;; 6. **`new T[] {1,2}` 里的花括号是数组初值**。`exp -> exp dir` 让 `{...}` 也能是方向标，
+;;    于是 `new real[] {20,5}` 出两棵树。给 `exp -> "new" celltype dims` 标一个比 `{` 低的
+;;    优先级（DIRTAG），移进赢，花括号归 arrayinit。这一条是量出来的：语料里 16 个模块
+;;    报「两棵树」栽在它上面，还有 10 个因为分叉翻倍撞了 MAX_PARSES。
+;;
+;; 7. **参数化模块名放宽成 name**。camp.y 那四条模板声明写的是 strid（ID 或 STRING），
+;;    但 plain.asy 里是 `from collections.iter(T=int) access ...` —— 带点的模块路径。
+;;    多出一个 templatename（name 或 STRING）接住它。量过：冲突数没变。
+;;
 ;; SLR 留下 43 处冲突（bison 的 LALR 只剩 4 处）。这个差是刻意的：多出来的都由 GLR
 ;; 在运行期分叉解决，走不通的那支自己死。cases/asy.cases 里那一批真实片段全部只出一棵树。
 ;;
-;; 还没覆盖的（第一阶段边界，都是词法层的事）：`operator +` 这种算符名、TeX 字符串的
-;; 转义细节、`'...'` 单引号串、EXTRAOPS 里的 `<<`/`>>`/`@`/`~`/`<>`。语法层是全的。
+;; 覆盖率是量过的，不是估的：asymptote 自带的 84 个 .asy 模块**全部**只出一棵树
+;; （tests/glr/run.js 第 4 节，语料不在就跳过）。第一次量是 32/84，缺的绝大多数是
+;; `operator` 一族 —— 那一族现在由词法层的 `(fuse ID "operator" ...)` 接住，跟 camp.l 的
+;; opname 起始条件同一个形状。语法层还没覆盖的：TeX 字符串的转义细节。
 (grammar asy
   (tokens
     ID LIT STRING OPERATOR SELFOP
@@ -87,6 +104,14 @@
       "and" "controls" "tension" "atleast" "curl"
       "static" "autounravel" "public" "private" "restricted")
     (punct SELFOP "+=" "-=" "*=" "/=" "#=" "%=" "^=")
+    ;; camp.l 的 opname 起始条件：`operator` 把后面那个算符名吃掉，回一个叫 `operator +`
+    ;; 的 ID。所以语法层没有一条产生式提到算符重载 —— `name -> ID` 就把它全包了，而且
+    ;; `fold(operator +, ...)` 这种把算符当值传的写法也顺带成立。候选项照 camp.l 的表：
+    ;; 字母名（init/cast/ecast/...）、单字符算符、EXTRAOPS、以及路径连接那几个。
+    (fuse ID "operator"
+      "init" "cast" "ecast" "spec" "curl" "tension" "controls" "answer" "iter"
+      "---" "--" ".." "::" "^^" "==" "!=" "<=" ">=" "<<" ">>" "<>" "&&" "||" "@@" "++"
+      "+" "-" "*" "/" "#" "%" "^" "&" "|" "<" ">" "!" "@" "~" "$" "?" ":")
     (punct ELLIPSIS "...")
     (punct LONGDASH "---")
     (punct DASHES "--")
@@ -156,10 +181,17 @@
     (-> ("include" STRING ";") (include $2))
     (-> ("typedef" "import" "(" typeparamlist ")" ";") (receive-typedef $4))
     (-> ("import" "typedef" "(" typeparamlist ")" ";") (bad-dec "expected 'typedef import(<types>);'"))
-    (-> ("access" strid "(" decdeclist ")" ID ID ";") (template-access $2 $4 $6 $7))
-    (-> ("access" strid "(" decdeclist ")" ";") (bad-dec "expected 'as'"))
-    (-> ("import" strid "(" decdeclist ")" ";") (bad-dec "parametrized imports are disallowed"))
-    (-> ("from" strid "(" decdeclist ")" "access" idpairlist ";") (from-access $2 $7 $4)))
+    (-> ("access" templatename "(" decdeclist ")" ID ID ";") (template-access $2 $4 $6 $7))
+    (-> ("access" templatename "(" decdeclist ")" ";") (bad-dec "expected 'as'"))
+    (-> ("import" templatename "(" decdeclist ")" ";") (bad-dec "parametrized imports are disallowed"))
+    (-> ("from" templatename "(" decdeclist ")" "access" idpairlist ";") (from-access $2 $7 $4)))
+
+  ;; 参数化模块名。camp.y 的这四条写的是 strid（ID 或 STRING），但真实代码里是
+  ;; `from collections.map(K=string, V=string) access ...` —— 带点的模块路径。
+  ;; 于是这里放宽成 name（它自己就管点号）或字符串；量过：冲突没因此变多。
+  (rule templatename
+    (-> (name) $1)
+    (-> (STRING) $1))
 
   (rule decdec
     (-> (ID ASSIGN type) (formal $3 (decidstart $1)))
@@ -286,7 +318,9 @@
     (-> (tuple "," exp) (args-add $1 $3)))
 
   (rule exp
-    (-> (name) (name-exp $1))
+    ;; `(prec NAME_ID)` 是转写时加的（见文件头第 5 条）：让 `(x)` 里的 `)` 移进赢过
+    ;; 「先把 name 归约成 exp」，于是括号里那个名字只走 `value -> "(" name ")"` 一条路
+    (-> (name) (prec NAME_ID) (name-exp $1))
     (-> (value) $1)
     (-> (LIT) $1)
     (-> (STRING) $1)
@@ -320,7 +354,9 @@
     (-> ("new" celltype) (new-record $2))
     (-> ("new" celltype dimexps) (new-array $2 $3))
     (-> ("new" celltype dimexps dims) (new-array $2 $3 $4))
-    (-> ("new" celltype dims) (new-array $2 (none) $3))
+    ;; `(prec DIRTAG)` 是转写时加的（见文件头第 6 条）：`new real[] {1,2}` 里那对花括号
+    ;; 是数组初值，不是方向标 —— 给这条归约标一个比 `{` 低的优先级，移进就赢了
+    (-> ("new" celltype dims) (prec DIRTAG) (new-array $2 (none) $3))
     (-> ("new" celltype dims arrayinit) (new-array $2 (none) $3 $4))
     (-> ("new" celltype "(" ")" blockstm) (new-function $2 (formals) $5))
     (-> ("new" celltype dims "(" ")" blockstm) (new-function (array-ty $2 $3) (formals) $6))

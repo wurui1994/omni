@@ -38,6 +38,18 @@ path q = a..tension atleast 2 and 3 ..b; ==> (block-add (block) (vardec (name-ty
 draw(g, p{up}); ==> (block-add (block) (exp-stm (call (name-exp (name draw)) (args-add (args (arg (name-exp (name g)))) (arg (join-dir (name-exp (name p)) (spec (name-exp (name up)))))))))
 private static real k = 1; ==> (block-add (block) (modified (mods-add (mods private) static) (vardec (name-ty (name real)) (decids (decid (decidstart k) 1)))))
 
+;; 算符重载。词法层把 `operator` 和后面那个算符名粘成一个 ID（见 asy.grammar 的 (fuse ...)），
+;; 所以这三条走的都是普通产生式：前两条是 fundec，第三条证「算符能当值传」。
+real operator +(real a, real b) { return a; } ==> (block-add (block) (fundec (name-ty (name real)) operator + (formals-add (formals (formal (implicit) (name-ty (name real)) (decidstart a))) (formal (implicit) (name-ty (name real)) (decidstart b))) (block-stm (block-add (block) (return (name-exp (name a)))))))
+void operator init(int x) { } ==> (block-add (block) (fundec (name-ty (name void)) operator init (formals (formal (implicit) (name-ty (name int)) (decidstart x))) (block-stm (block))))
+x = fold(operator ^^, a); ==> (block-add (block) (exp-stm (assign (name-exp (name x)) (call (name-exp (name fold)) (args-add (args (arg (name-exp (name operator ^^)))) (arg (name-exp (name a))))))))
+;; 这两条是转写时新加的两处消歧（asy.grammar 文件头第 5、6 条）：花括号是数组初值不是方向标，
+;; `(T) (e)` 是强制转换不是调用。两条都曾经出两棵树。
+real[] d = new real[] {1, 2}; ==> (block-add (block) (vardec (array-ty (name real) (dims)) (decids (decid (decidstart d) (new-array (name-ty (name real)) (none) (dims) (arrayinit-add (arrayinit 1) 2))))))
+s = (string) (n/2); ==> (block-add (block) (exp-stm (assign (name-exp (name s)) (cast (name-ty (name string)) (binary "/" (name-exp (name n)) 2)))))
+;; 参数化模块：模块名带点
+from collections.map(K=string, V=int) access Map_K_V as M; ==> (block-add (block) (from-access (qualified (name collections) map) (idpairs (idpair Map_K_V as M)) (formals-add (formals (formal (name-ty (name string)) (decidstart K))) (formal (name-ty (name int)) (decidstart V)))))
+
 int i = ;                    !!> unexpected
 struct { }                   !!> unexpected
 f(;                          !!> unexpected

@@ -571,6 +571,10 @@ function main(argv) {
       // 收多个输入是刻意的：真实语言的表有几百个状态，建一次要一两秒，而测试轴有上百条
       // case。一条命令喂一批输入，表就只建一次。只给一个文件时输出与从前逐字节相同 ——
       // 自举链阶段 9 对的是那一份。
+      // `--count` 只印一行摘要，不印树。为的是**整份真实语料**：84 个 asy 模块的树印出来是
+      // 133 MB，光排版就吃掉大半时间，而覆盖率那道门槛要的只是"每份都出、且只出一棵树"。
+      // 节点数是那棵树的廉价指纹 —— 分析结果变了它基本一定跟着变。
+      const countOnly = rest.includes('--count');
       for (const src of srcs) {
         const diags = new Diagnostics();
         const toks = lexText(tb.grammar.lex, new SourceFile(src, readText(src)), diags);
@@ -579,6 +583,7 @@ function main(argv) {
         const tree = glrParse(tb, toks, diags);
         diags.throwIfErrors();
         if (tree === null) throw new OmniError('glr: the parse failed without a diagnostic — that is a bug');
+        if (countOnly) { stdout(`${src}  ${toks.length} tokens, ${countNodes(tree)} nodes\n`); continue; }
         if (srcs.length > 1) stdout(`;; ==== ${src}\n`);
         stdout(printSexpr([tree]));
       }
@@ -587,6 +592,15 @@ function main(argv) {
     default:
       throw new OmniError(`unknown command '${cmd}'\n${USAGE}`);
   }
+}
+
+/** 一棵 s-expr 的节点数。`glr --count` 的指纹，刻意只数节点：够灵敏，又不依赖排版。 */
+function countNodes(n) {
+  if (n === null || n === undefined) return 0;
+  if (n.kind !== 'list') return 1;
+  let sum = 1;
+  for (const x of n.items) sum += countNodes(x);
+  return sum;
 }
 
 /** 读一份语法文件并构表。诊断在这里就抛掉 —— 语法写错了不该拖到分析期 */
@@ -635,6 +649,7 @@ commands:
             (--brief: rules and remaining conflicts only, no per-state dump)
   glr       parse a source file with a .grammar and print the resulting s-expr
             (usage: omni glr FILE.grammar FILE...; 多个输入只建一次表)
+            (--count: one summary line per input instead of the tree)
   bootstrap build the whole chain into a tree and check the four fixpoints
             (no file = the compiler itself; -o DIR, default ./dist; -q skips the C path)
 

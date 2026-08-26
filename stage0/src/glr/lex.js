@@ -18,7 +18,15 @@
 //     (keyword ID "if" "else" "while")        ;; ID 命中这些字面量就改判成 "if" 之类
 //     (keyword ID LIT "true" "false")         ;; 多写一个名字 = 改判成那个 token 类型
 //     (punct SELFOP "+=" "-=")                ;; 字面量，但出指定的 token 类型
+//     (fuse ID "operator" "+" "-" "init")     ;; 「一个词 + 一个算符名」粘成一个 token
 //     (op "+" "-" "->" "(" ")"))              ;; = punct，类型就是字面量自己
+//
+// `fuse` 是给 flex 的**起始条件**留的位置。camp.l 里 `operator` 会 `BEGIN opname`，把后面那个
+// 算符读掉，回一个名字叫 `operator +` 的 ID —— 于是 asymptote 的语法层根本不知道有算符重载
+// 这回事，`operator +` 在能写名字的地方都能写。我们没有起始条件（那要求词法器有状态机），
+// 但这个模式只需要"前缀词 + 跨过空白 + 一个候选项"，够小，就照这个形状给一条规则。
+// 出来的 token 文本是规范化的 `前缀 空格 候选项`，跟 asymptote 内部的符号名一致。
+// 只跨空白，不跨注释：`operator /*x*/ +` 不认 —— 真实代码里没有，多出来的状态不值得。
 //
 // 项的词汇表：
 //   字符类：space nl digit alpha alnum hex any
@@ -106,6 +114,33 @@ function matchTerm(t, src, pos) {
 
 // ---- 规格的读入 ------------------------------------------------------------
 
+/** 标识符字符（含下划线）。fuse 的词边界判断要用，别跟 inClass('alnum') 混起来。 */
+const isWordChar = (cc) => inClass('alnum', cc) || cc === 95;
+
+/**
+ * `(fuse TYPE "前缀" 候选...)`：前缀词 + 跨过空白 + 最长的那个候选项。
+ * 返回 `{end, value}`，`end < 0` 表示不匹配 —— 那时前缀词会照常被 token 规则收成普通 ID。
+ */
+function matchFuse(rule, src, pos) {
+  const miss = { end: -1, value: null };
+  if (!src.startsWith(rule.text, pos)) return miss;
+  let p = pos + rule.text.length;
+  // 前缀词自己的词边界：`operatorx` 不是 `operator` + `x`
+  if (p < src.length && isWordChar(src.charCodeAt(p))) return miss;
+  while (p < src.length && inClass('space', src.charCodeAt(p))) p++;
+  let bestAlt = null;
+  let bestEnd = -1;
+  for (const a of rule.alts) {
+    if (!src.startsWith(a, p)) continue;
+    const e = p + a.length;
+    // `init` 这种字母候选项也要词边界，否则 `operator initial` 会被咬掉一半
+    if (isWordChar(a.charCodeAt(a.length - 1)) && e < src.length && isWordChar(src.charCodeAt(e))) continue;
+    if (e > bestEnd) { bestEnd = e; bestAlt = a; }
+  }
+  if (bestAlt === null) return miss;
+  return { end: bestEnd, value: `${rule.text} ${bestAlt}` };
+}
+
 /** 项的合法性当场查掉，别留到运行期才报"这个 head 我不认识" */
 function checkTerm(t, diags) {
   if (isStr(t)) return;
@@ -134,7 +169,7 @@ function checkTerm(t, diags) {
  * 读 `(lex ...)`。返回 `{skips, blocks, rules, keywords}`：
  *   skips    : 要跳过的模式（项数组），来自 skip / comment
  *   blocks   : [{open, close, nest}] 块注释
- *   rules    : [{kind:'token'|'string'|'op', type, terms|quote|text, span}] 按声明顺序
+ *   rules    : [{kind:'token'|'string'|'op'|'fuse', type, terms|quote|text, span}] 按声明顺序
  *   keywords : Map<tokenType, Set<text>>
  */
 export function readLexSpec(node, diags) {
@@ -190,6 +225,21 @@ export function readLexSpec(node, diags) {
         if (isStr(w)) keywords.get(nm).set(w.value, to === null ? litName(w.value) : to);
         else diags.error(w.span, 'a keyword must be a string');
       }
+      continue;
+    }
+    if (h === 'fuse') {
+      const nm = isAtom(it.items[1]) ? it.items[1].value : null;
+      const w = it.items[2];
+      if (nm === null || !isStr(w) || w.value.length === 0 || it.items.length < 4) {
+        diags.error(it.span, '(fuse TYPE "word" alt...) needs a token type, a prefix word and at least one alternative');
+        continue;
+      }
+      const alts = [];
+      for (const a of it.items.slice(3)) {
+        if (isStr(a) && a.value.length > 0) alts.push(a.value);
+        else diags.error(a === null || a === undefined ? it.span : a.span, 'a fused alternative must be a non-empty string');
+      }
+      rules.push({ kind: 'fuse', type: nm, text: w.value, alts, span: it.span });
       continue;
     }
     if (h === 'op' || h === 'punct') {
@@ -297,7 +347,11 @@ export function lexText(spec, file, diags) {
       let value = null;
       if (rule.kind === 'token') end = matchSeq(rule.terms, 0, src, i);
       else if (rule.kind === 'op') end = src.startsWith(rule.text, i) ? i + rule.text.length : -1;
-      else if (src.slice(i, i + 1) === rule.quote) {
+      else if (rule.kind === 'fuse') {
+        const f = matchFuse(rule, src, i);
+        end = f.end;
+        value = f.value;
+      } else if (src.slice(i, i + 1) === rule.quote) {
         const s = scanString(src, i, rule.quote);
         end = s.end;
         value = s.value;
@@ -319,7 +373,8 @@ export function lexText(spec, file, diags) {
     // ---- 3) 造节点
     const rule = spec.rules[best];
     const span = mkSpan(file, i, bestEnd);
-    const text = src.slice(i, bestEnd);
+    // fuse 的文本是**规范化**的（`operator +`），不是源码里那一段
+    const text = rule.kind === 'fuse' ? bestValue : src.slice(i, bestEnd);
     i = bestEnd;
     if (rule.kind === 'string') {
       toks.push({ type: rule.type, node: { kind: 'string', value: bestValue, raw: text.slice(1, text.length - 1), span }, span });

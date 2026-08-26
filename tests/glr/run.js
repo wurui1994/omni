@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Omni — GLR（第八条测试轴，ADR-0014 决策 2）
 //
-// 「加一门语言 = 一份 grammar + 一份映射标注」这句话要立得住，得先证三件事：
+// 「加一门语言 = 一份 grammar + 一份映射标注」这句话要立得住，得先证四件事：
 //
 //   1. **表是稳定的**：dumpTable 的输出对上 snapshots/NAME.table。快照测试在这里不是懒 ——
 //      项集族、FOLLOW、优先级消歧三者任一改错，症状都是"某个输入分析结果变了"，那种错
@@ -10,6 +10,8 @@
 //      两条输入分别走冲突的两支，两条都要过。只过一条 = 驱动退化成 LR 了。
 //   3. **真歧义要报错，不许猜**：dangling.grammar 不加优先级，
 //      `if a then if b then x else y` 必须撞上 bison 的那条硬边界。
+//   4. **真实语料一份不落**：asymptote 自带的 84 个 .asy 模块全都要出且只出一棵树。
+//      前三条测的是机制，这一条测的是覆盖 —— 自己挑的片段挑不到的地方就是漏的地方。
 //
 // 每条都走 CLI（`omni glr-table` / `omni glr`），不是直接调库函数：这样同一条命令
 // 自举链里能让原生编译器再跑一遍，封闭 ABI 违规才有地方被抓住。
@@ -180,6 +182,57 @@ if (grammars.includes('lookahead.grammar')) {
     no('lookahead/has-conflicts', '    this grammar is supposed to be beyond SLR(1), but the table came out clean');
   } else {
     ok('lookahead/has-conflicts [the driver really does the splitting]');
+  }
+}
+
+// ------------------------------------------------------------ 4. asy 真实语料的覆盖率
+//
+// 这一节是「完整等效实现」的第一道**可量**门槛：asymptote 自带的那批 .asy 模块，
+// 一份不落地都要出一棵树。cases/asy.cases 里的片段证不了这件事 —— 它们是我自己挑的，
+// 挑不到的地方就是覆盖不到的地方（第一次量出来只有 32/84 过，`operator` 一族全缺）。
+//
+// 语料在机器上（asymptote 装了才有），所以找不到就跳过，跳过要说清楚：这条轴不能
+// 因为"没装 asymptote"而假装绿。找到了就一条命令批着跑，`--count` 只印摘要 ——
+// 84 个模块的树印出来是 133 MB，光排版就 33 秒，摘要 1.8 秒。
+
+const ASY_DIRS = [
+  process.env.ASY_LIB ?? '',
+  '/opt/homebrew/opt/asymptote/share/asymptote',
+  '/usr/local/share/asymptote',
+  '/usr/share/asymptote',
+];
+
+if (grammars.includes('asy.grammar')) {
+  let mods = null;
+  let from = null;
+  for (const d of ASY_DIRS) {
+    if (d === '') continue;
+    let names = null;
+    try {
+      names = readdirSync(d);
+    } catch {
+      continue;
+    }
+    const asy = names.filter((f) => f.endsWith('.asy')).sort();
+    if (asy.length === 0) continue;
+    mods = asy.map((f) => join(d, f));
+    from = d;
+    break;
+  }
+  if (mods === null) {
+    process.stdout.write('  skip corpus/asy [no asymptote module directory found; set ASY_LIB]\n');
+  } else {
+    const r = run(['glr', join(here, 'grammars', 'asy.grammar'), ...mods, '--count']);
+    const lines = r.out.split('\n').filter((l) => l.trim() !== '');
+    if (r.code !== 0) {
+      // 批跑撞到第一个不过的就停。诊断里带着 `文件:行:列`，够定位；后面还有几个不知道，
+      // 所以把"已经过了几个"一起印出来。
+      no('corpus/asy', `    ${lines.length}/${mods.length} modules parsed, then the batch stopped\n${r.err.split('\n').slice(0, 4).map((l) => `    ${l}`).join('\n')}`);
+    } else if (lines.length !== mods.length) {
+      no('corpus/asy', `    expected ${mods.length} summary lines, got ${lines.length}`);
+    } else {
+      ok(`corpus/asy [${mods.length}/${mods.length} modules, one tree each] ${from}`);
+    }
   }
 }
 
