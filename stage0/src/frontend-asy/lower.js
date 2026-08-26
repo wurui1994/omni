@@ -24,13 +24,15 @@
 // sqrt/fabs/abs/floor/ceil/round/fmod（核心方言的 `(rmath …)`）、
 // **一维数组**：`T[] a`、`new T[n]`、`{…}` 与 `new T[] {…}`、`a[i]` 读写（写会扩长）、
 // `a.length`、`a.push(v)`、`a.pop()`、数组当形参/返回值（引用语义，核心方言的 `(arr T)`）、
+// **切片** `a[i:j]`/`a[i:]`/`a[:j]`/`a[:]`（是复制不是视图）、`write` 一整个数组
+// （每行「下标 : TAB 值」，多个数组并排）、
 // **pair**：`(x,y)` 字面量、`+ - * /`（后两个是复数乘除）、一元 `-`、`== !=`、
 // `z.x`/`z.y`/`xpart`/`ypart`、`abs`/`length`/`conj`、int/real 到 pair 的隐式转换、
 // `(pair)` 强制转换、`write`（`(x,y)` 两个分量各 %.15g）、pair 当形参/返回值/`?:` 的两支。
 //
 // 不支持（见到就报错，报错里说清是哪一条）：triple、struct、import/access、
-// typedef、算符重载、重载解析、默认实参、命名实参、for-each、切片（`a[1:3]`）、
-// 多维数组、`pair[]`（核心方言的 `(arr T)` 只收标量元素）、`write` 一整个数组、
+// typedef、算符重载、重载解析、默认实参、命名实参、for-each、给切片赋值（`a[0:2] = b`）、
+// 多维数组、`pair[]`（核心方言的 `(arr T)` 只收标量元素）、复数幂、
 // 超越函数（exp/log/trig —— 量过 libm 与 V8 在 atan/tan/log/cos 的最后一位就分叉，
 // 收进来六条腿必然有一天对不上；`angle`/`dir`/`expi` 因此也在门外）、
 // `unit`（能用 sqrt 加除法写出来，但量不出 asy 用的是"乘倒数"还是"逐分量除" ——
@@ -53,6 +55,9 @@
 // - **除以零**：asy 是运行期报错，而且**实数除法也报**（量过：`1.0/0.0`、`(1,2)/0`、
 //   `(1,2)/(0,0)` 全是 "Divide by zero"）；我们按 IEEE 出 inf/nan。这一条不是 pair
 //   才有的，`/` 从第一刀起就这样，量到了就记在这里。
+// - **切片的两条边界检查**：`a[3:1]` asy 报 "slice ends before it begins"，我们给空数组；
+//   `a[-1:2]` asy 报 "invalid negative index in slice of non-cyclic array"，我们落到
+//   `(aget …)` 的越界检查上（也是运行期错误，只是话不一样）。
 
 import { isList, isAtom, isStr, head } from '../sexpr/read.js';
 
@@ -226,6 +231,25 @@ for (const t of ['int', 'real', 'bool', 'string']) {
   HELPERS.set(`asy__grow_${t}`, `  (fn asy__grow_${t} ((a (arr ${t})) (i int)) void
     (while (bin "<=" (alen (var a)) (var i))
       (do (apush (var a) ${ZERO.get(t)}))))`);
+  // 切片。量过的三条：半开区间、**是复制不是视图**（`b=a[0:2]; b[0]=99;` 之后 a[0] 还是 10）、
+  // 右边界超长就截到末尾（`a[2:100]` 给到末尾）。左边界不 clamp：负数在 asy 是运行期错误
+  // （"invalid negative index in slice of non-cyclic array"），落到 (aget …) 上也是运行期
+  // 错误，只是话不一样。`a[3:1]` asy 报 "slice ends before it begins"，我们给空数组 ——
+  // 这条差别写在文件头。
+  HELPERS.set(`asy__slice_${t}`, `  (fn asy__slice_${t} ((a (arr ${t})) (i int) (j int)) (arr ${t})
+    (let r (arr ${t}) (anew (arr ${t}) (int 0)))
+    (let k int (var i))
+    (let e int (var j))
+    (if (bin ">" (var e) (alen (var a))) (do (set e (alen (var a)))))
+    (while (bin "<" (var k) (var e))
+      (do
+        (apush (var r) (aget (var a) (var k)))
+        (set k (bin "+" (var k) (int 1)))))
+    (ret (var r)))`);
+  // `a[i:]`：末端默认是长度。单独一条 helper 而不是在调用处写 `(alen …)` —— 那样接收者
+  // 的代码要印两遍，`f()[1:]` 就会把 f 调两次。
+  HELPERS.set(`asy__slicefrom_${t}`, `  (fn asy__slicefrom_${t} ((a (arr ${t})) (i int)) (arr ${t})
+    (ret (call asy__slice_${t} (var a) (var i) (alen (var a)))))`);
 }
 
 class AsyLower {
@@ -410,7 +434,7 @@ class AsyLower {
     }
     if (h === 'tuple-exp') return this.pairLit(n);
     if (h === 'subscript') return this.index(n);
-    if (h === 'slice-exp') return this.nope(n, '切片（`a[1:3]`）');
+    if (h === 'slice-exp') return this.slice(n);
     if (h === 'field') return this.field(n);
     if (h === 'new-array') return this.newArray(n);
     if (h === 'new-record' || h === 'new-function') return this.nope(n, 'new');
@@ -433,6 +457,42 @@ class AsyLower {
     const i = this.coerce(this.expr(n.items[2]), 'int', n, '下标');
     if (i === null) return null;
     return { code: `(aget ${a.code} ${i.code})`, type: asyElem(a.type) };
+  }
+
+  /**
+   * `a[i:j]` / `a[i:]` / `a[:j]` / `a[:]`。**是复制不是视图**（量过），半开区间，
+   * 右边界超长截到末尾。四种形状都落到那两条 helper 上，接收者只印一遍。
+   *
+   * 形状要按**项数**分，不能只看头：语法里 `[:]` 与 `[i:j]` 的头都是 `slice`
+   * （`(-> (":") (slice))` 和 `(-> (exp ":" exp) (slice $1 $3))`）。
+   */
+  slice(n) {
+    const a = this.expr(n.items[1]);
+    if (a === null) return null;
+    if (!asyIsArr(a.type)) return this.err(n, `切片只能用在数组上，这里是 ${a.type}`);
+    const s = n.items[2];
+    if (!isList(s)) return this.err(n, '认不出的切片');
+    const hs = head(s);
+    const el = asyElem(a.type);
+    const both = hs === 'slice' && s.items.length === 3;
+    if (!both && hs !== 'slice' && hs !== 'slice-from' && hs !== 'slice-to') {
+      return this.nope(n, `切片的形状 '${hs}'`);
+    }
+    const loNode = both ? s.items[1] : (hs === 'slice-from' ? s.items[1] : null);
+    const hiNode = both ? s.items[2] : (hs === 'slice-to' ? s.items[1] : null);
+    const lo = loNode === null
+      ? { code: '(int 0)', type: 'int' }
+      : this.coerce(this.expr(loNode), 'int', n, '切片的起点');
+    if (lo === null) return null;
+    this.used.add(`asy__slice_${el}`);
+    if (hiNode !== null) {
+      const hi = this.coerce(this.expr(hiNode), 'int', n, '切片的终点');
+      if (hi === null) return null;
+      return { code: `(call asy__slice_${el} ${a.code} ${lo.code} ${hi.code})`, type: a.type };
+    }
+    // `a[i:]` 与 `a[:]`：末端是长度
+    this.used.add(`asy__slicefrom_${el}`);
+    return { code: `(call asy__slicefrom_${el} ${a.code} ${lo.code})`, type: a.type };
   }
 
   /** `(qualified (name a) F)` 且 a 是**变量**时回 `{recv, field}`，否则回 null。
@@ -831,7 +891,7 @@ class AsyLower {
    *   write(1,"b",2)        -> no matching function 'write(int, string, int)'
    *   write("a","b",1)      -> no matching function（前缀吃掉 "a" 之后 T 定成了 string）
    *   write(true,"x")       -> no matching function（没有前缀，T 定成了 bool）
-   * real 这一刀不收：格式对不上（见文件头）。
+   * T 是**数组**时是另一条格式，见 writeArrays。
    */
   writeStmt(n) {
     const args = this.args(n.items[2]);
@@ -842,9 +902,6 @@ class AsyLower {
       const v = this.expr(a);
       if (v === null) return null;
       if (v.type === 'void') return this.err(a, 'write 的实参不能是 void');
-      // 整个数组：asy 印的是「下标 制表符 值」逐行（量过 write(new int[]{1,2,3})
-      // 是 "0:\t1\n1:\t2\n2:\t3\n"）。那是另一条格式规则，这一刀没做。
-      if (asyIsArr(v.type)) return this.nope(a, 'write 一整个数组（asy 印的是「下标 tab 值」逐行）');
       vals.push(v);
     }
     // 只有实参多于一个时第一个串才是前缀 —— 单个 write("a") 里 "a" 就是那个 T
@@ -865,19 +922,9 @@ class AsyLower {
       const shape = vals.map((v) => v.type).join(', ');
       return this.err(args[i], `write 的实参要同型 —— asy 那边 write(${shape}) 就是 no matching function`);
     }
-    const parts = vals.map((v) => {
-      if (v.type === 'string') return v.code;
-      // real 用 15 位有效数字 —— asy 的默认输出就是 %.15g（量过：1/3 是
-      // 0.333333333333333、sqrt(2) 是 1.4142135623731、1e-5 是 1e-05、-0.0 是 -0）
-      if (v.type === 'real') return `(tostr ${v.code} (int 15))`;
-      if (v.type === 'pair') {
-        this.used.add('asy__pairstr');
-        return `(call asy__pairstr ${v.code})`;
-      }
-      if (v.type !== 'bool') return `(tostr ${v.code})`;
-      this.used.add('asy__boolstr');
-      return `(call asy__boolstr ${v.code})`;
-    });
+    // T 是数组：那是另一条格式（每行「下标 : TAB 值」），见 writeArrays
+    if (asyIsArr(t)) return this.writeArrays(n, vals, first);
+    const parts = vals.map((v) => this.fmtStr(v.type, v.code));
     // 前缀与第一个值之间不加分隔符，值与值之间加制表符
     let code = parts[0];
     for (let i = 1; i < parts.length; i++) {
@@ -885,6 +932,66 @@ class AsyLower {
       code = `(bin "+" ${code} ${parts[i]})`;
     }
     return [`(print ${code})`];
+  }
+
+  /** 一个值印成字符串时的形状。write 的两条路（标量与数组）共用这一份。 */
+  fmtStr(t, code) {
+    if (t === 'string') return code;
+    // real 用 15 位有效数字 —— asy 的默认输出就是 %.15g（量过：1/3 是
+    // 0.333333333333333、sqrt(2) 是 1.4142135623731、1e-5 是 1e-05、-0.0 是 -0）
+    if (t === 'real') return `(tostr ${code} (int 15))`;
+    if (t === 'pair') {
+      this.used.add('asy__pairstr');
+      return `(call asy__pairstr ${code})`;
+    }
+    if (t === 'bool') {
+      this.used.add('asy__boolstr');
+      return `(call asy__boolstr ${code})`;
+    }
+    return `(tostr ${code})`;
+  }
+
+  /**
+   * `write` 一个或多个**整数组**。格式是量出来的（`asy -noV`，od -c 看字节）：
+   *   int[] a={10,20}; write(a);       -> "0:\tab10\n1:\tab20\n"   即每行「下标 : TAB 值」
+   *   write("P",a);                    -> "P\n" 然后才是那些行（前缀**自己占一行**）
+   *   int[] b={30}; write(a,b);        -> "0:\tab10\tab30\n1:\tab20\n"
+   *                                       行数按最长的那个数组，短的那个到头就不印了
+   *   write(new int[0]);               -> 什么都不印
+   *   write(a,5);                      -> no matching function 'write(int[], int)'
+   *
+   * 这一条刻意**不**发 helper 函数，直接摊成语句：数组的个数是变的（helper 要按个数各发
+   * 一份），而摊成语句只用一个 while。数组都先绑临时量 —— `write(f(),g())` 里 f 和 g
+   * 各只能调一次。
+   */
+  writeArrays(n, vals, first) {
+    if (this.pre === null) return this.nope(n, '这个位置的 write（它要摊成语句，这里放不下）');
+    const el = asyElem(vals[first].type);
+    const out = [];
+    if (first === 1) out.push(`(print ${vals[0].code})`);
+    const names = [];
+    for (let i = first; i < vals.length; i++) {
+      const nm = `asy__wa${this.tmp++}`;
+      names.push(nm);
+      out.push(`(let ${nm} (arr ${el}) ${vals[i].code})`);
+    }
+    const nmax = `asy__wn${this.tmp++}`;
+    out.push(`(let ${nmax} int (int 0))`);
+    for (const nm of names) {
+      out.push(`(if (bin "<" (var ${nmax}) (alen (var ${nm}))) (do (set ${nmax} (alen (var ${nm})))))`);
+    }
+    const iv = `asy__wi${this.tmp++}`;
+    const sv = `asy__ws${this.tmp++}`;
+    const body = [`(let ${sv} string (bin "+" (tostr (var ${iv})) (str ":")))`];
+    for (const nm of names) {
+      const cell = this.fmtStr(el, `(aget (var ${nm}) (var ${iv}))`);
+      body.push(`(if (bin "<" (var ${iv}) (alen (var ${nm}))) (do (set ${sv} (bin "+" (var ${sv}) (bin "+" (str "\\t") ${cell})))))`);
+    }
+    body.push(`(print (var ${sv}))`);
+    body.push(`(set ${iv} (bin "+" (var ${iv}) (int 1)))`);
+    out.push(`(let ${iv} int (int 0))`);
+    out.push(`(while (bin "<" (var ${iv}) (var ${nmax})) (do ${body.join(' ')}))`);
+    return out;
   }
 
   /* ---------------------------------------------------------------- 语句 */
@@ -1094,6 +1201,9 @@ class AsyLower {
   /** 赋值、复合赋值、自增自减都归到这里：目标是普通变量名，或者数组下标 */
   assign(node, lhs, rhs, op) {
     if (isList(lhs) && head(lhs) === 'subscript') return this.assignIndex(node, lhs, rhs, op);
+    // 切片赋值 asy **有**（量过：`int[] a={1,2,3}; a[0:2]=b;` 之后 a 是 7,8,3），
+    // 而且右边长度不同时整个数组的长度会跟着变 —— 那是另一条语义，这一刀没做。
+    if (isList(lhs) && head(lhs) === 'slice-exp') return this.nope(node, '给切片赋值（`a[0:2] = b`）');
     const nm = isList(lhs) && head(lhs) === 'name-exp' ? this.plainName(lhs.items[1]) : null;
     if (nm === null) return this.nope(node, '赋值给不是普通变量或数组下标的东西（字段、切片、算符名）');
     const t = this.lookup(nm);
