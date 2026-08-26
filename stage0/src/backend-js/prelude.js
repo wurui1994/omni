@@ -958,6 +958,14 @@ function $js_type_tag(v) {
 // 解释器不再写第三份浮点格式化，于是"同一个 double 打印成同一串字符"是构造性的。
 function $js_fmt_real(x) { return $fmt_real(x); }
 function $js_repr_real(x) { return $repr_real(x); }
+// 解释器的函数值（ADR-0013 决策 3）。传进来的 f 是解释器自己那个两形参的 lambda，降级后
+// 它的实参是**一条表**（JS 域的唯一签名），所以这里要造一条转接记录：宿主按 fp(self, args)
+// 调这个值，转接把 (self, args) 装成那条表再调 f。恒等是不行的 —— 那样 f 会把 args[0]
+// 当 self、args[1] 当实参表。
+function $js_wrap_fn(f) {
+  return { fp: (self, args) => $callFn($js_asFn(f), [self, args]) };
+}
+function $js_call_fn(f, args) { return $callFn($js_asFn(f), args); }
 // 宿主里跑一段生成的 JS（omni run 与 REPL 的进程内快路径）。原生构建里没有 JS
 // 引擎，C 侧那两个同名函数只会报错 —— 这是宿主面唯一"只有一代能做"的能力。
 function $js_eval(code) {

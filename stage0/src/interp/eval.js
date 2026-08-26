@@ -18,8 +18,8 @@
 // 普通闭包记录，所以 C 侧的 ABI op（`xs.sort(cmp)` 之类）拿到它就能直接调，不需要任何胶水。
 
 import { OmniError } from '../source/diag.js';
-import { stderr } from '../host/native.js';
-import { callBuiltin, zeroOf, newInstance, flushOut, failRt, InterpFail } from './builtin.js';
+import { stderr, wrapFn, callFnValue } from '../host/native.js';
+import { callBuiltin, zeroOf, newInstance, flushOut, failRt, jsCallFn, InterpFail, InterpUncaught } from './builtin.js';
 
 // 语句的结果：正常走完 / break / continue / return。刻意不用异常做控制流 —— C 侧的
 // throw 是"待决错误标志 + 普通跳转"（ADR-0007），用信号值两个宿主上形状一致。
@@ -236,9 +236,20 @@ class Interp {
       case 'MakeClosure': return this.makeClosure(e, env, frame);
       case 'CaptureRef': return frame.captures.get(e.name);
       case 'CallFn': {
-        const f = this.eval(e.callee, env, frame);
+        const c = e.callee;
+        if (c.kind === 'Builtin' && c.name === 'js_asFn') {
+          // JS 的动态调用（lower.js 的 dynCall）。js_asFn 是条 raw op —— 它返回的是函数值
+          // 本身，过不了 dynamic 的边界，所以整条并成宿主的 js_call_fn：函数值不是函数时的
+          // 检查与消息也就留在宿主那一份里（$js_asFn / omni_js_as_fn），和后端发射的
+          // $js_call / omni_js_call 是同一条路。实参已经是一条实参表，直接交过去。
+          const fv = this.eval(c.args[0], env, frame);
+          return jsCallFn(fv, this.rvalue(e.args[0], e.args[0].type, env, frame));
+        }
+        const f = this.eval(c, env, frame);
         if (f === null || f === undefined) failRt('call of a null function value');
-        return f(...e.args.map((a) => this.rvalue(a, a.type, env, frame)));
+        // 走 ABI 的调用口（js_call_fn）：函数值是这一代的闭包记录，实参是一条 list。
+        // 不能写成 `f(...args)` —— 那在 node 上成立、在原生构建上是另一回事（决策 3）。
+        return callFnValue(f, e.args.map((a) => this.rvalue(a, a.type, env, frame)));
       }
       case 'ListLit': return e.items.map((x) => this.rvalue(x, x.type, env, frame));
       case 'SetLit': return new Set(e.items.map((x) => this.eval(x, env, frame)));
@@ -300,7 +311,12 @@ class Interp {
     }
     const body = this.funcs.get(def.mangled);
     if (body === undefined) throw new OmniError(`interp: closure body '${def.mangled}' is missing`);
-    return (...args) => this.callFunc(body, caps, args);
+    // wrapFn：解释器造出来的函数值必须**就是**这一代的闭包记录，宿主库那些回调 op
+    // （xs.map(f) 之类）拿到它才能直接调（ADR-0013 决策 3）。fp 收到的那条 list 是
+    // **实参表**：JS 域的函数体只有一个形参，绑的就是整条表，所以要再包一层；Omni 域的
+    // 函数体形参是按位置绑的，那条表本身就是位置实参。判据在模块上（lower.js 的 js: true）。
+    if (this.mod.js === true) return wrapFn((self, args) => this.callFunc(body, caps, [args]));
+    return wrapFn((self, args) => this.callFunc(body, caps, args));
   }
 
   assign(e, env, frame) {
@@ -334,6 +350,11 @@ export function interpret(mod) {
   } catch (e) {
     if (e instanceof InterpFail) {
       stderr(`omni: runtime error: ${e.message}\n`);
+      return 70;
+    }
+    // 没被 catch 住的 throw：两个后端都只打这一行（宿主的栈回溯 C 侧打不出来）
+    if (e instanceof InterpUncaught) {
+      stderr(`omni: uncaught: ${e.message}\n`);
       return 70;
     }
     throw e;

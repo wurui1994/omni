@@ -28,6 +28,7 @@ class JsEmitter {
   emit() {
     this.out.push(JS_PRELUDE.trim());
     this.memberDispatch();
+    this.callOpDispatch();
     for (const s of this.mod.structs) this.struct(s);
     for (const e of this.mod.enums ?? []) this.enumDecl(e);
     for (const c of this.mod.classes ?? []) this.classDecl(c);
@@ -76,6 +77,33 @@ class JsEmitter {
       this.indent--;
       this.line('}');
     }
+  }
+
+  /**
+   * 按名字调 op 的分派器（`js_call_op`，ADR-0013）。解释器是唯一的用户：它手里的 op 名字
+   * 是运行期的值，而两个后端里 op 调用都是编译期展开的，所以需要这一层。
+   * 表驱动 —— 往 JS_ABI 加一条 op 就自动进解释器。lit 排在 args 前面，由调用方铺平。
+   */
+  callOpDispatch() {
+    this.line('function $js_call_op(name, args) {');
+    this.indent++;
+    this.line('switch (name) {');
+    this.indent++;
+    for (const [name, abi] of Object.entries(JS_ABI)) {
+      if (name === 'js_call_op' || abi.raw === true) continue;  // 不自递归；raw 的签名不统一
+      const n = (abi.lit ?? []).length + abi.arity;
+      const as = [];
+      for (let i = 0; i < n; i++) as.push(`args[${i}]`);
+      const call = `${abi.js}(${as.join(', ')})`;
+      this.line(abi.ret === 'void'
+        ? `case ${JSON.stringify(name)}: ${call}; return undefined;`
+        : `case ${JSON.stringify(name)}: return ${call};`);
+    }
+    this.line('default: $rt_error("no such op: " + name); return undefined;');
+    this.indent--;
+    this.line('}');
+    this.indent--;
+    this.line('}');
   }
 
   /**

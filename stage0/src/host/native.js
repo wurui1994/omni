@@ -10,6 +10,11 @@
 // 不放这里的东西：路径计算（host/path.js，纯字符串）、sha256（host/sha256.js，纯计算）。
 // 判据只有一条 —— 真的要问操作系统才进来。
 
+// 这两个 import 只在 node 上成立，而这个文件在 node 上才被执行 —— 降级之后它整个不参与
+// 编译（链接器只登记"名字 -> op"）。callJsOp 靠它们把 prelude 当自己的实现跑起来。
+import { JS_PRELUDE } from '../backend-js/prelude.js';
+import { JS_ABI } from '../hir/js_abi.js';
+
 function node(name) {
   return process.getBuiltinModule(name);
 }
@@ -274,4 +279,43 @@ export function evalCaptured(code) {
     process.exit = ex;
   }
   return [out.join(''), err.join(''), failed];
+}
+
+/* ------------------------------------------------------------ 按名字调一条 op
+ * 解释器（ADR-0013）唯一的出口：它手里的 op 名字是运行期的值，而两个后端里 op 调用
+ * 都是编译期展开的。降级之后这一条走 js_call_op —— 两个后端各自按 JS_ABI 表生成那个
+ * 分派函数（emit.js 的 callOpDispatch）。
+ *
+ * node 这一份刻意**就是 prelude 自己**：prelude.js 导出的是源码文本，这里把它跑起来，
+ * 取出那 138 个 $js_* 当实现。于是"解释执行"和"编译成 JS 再执行"用的是同一份代码，
+ * 一个字符都不会分叉 —— 决策 5 的做法在这里是最省的：省掉 138 份手抄的包装。
+ */
+const JS_OPS = (() => {
+  const names = Object.values(JS_ABI).map((a) => a.js).filter((n) => n !== '$js_call_op');
+  const pick = names.map((n) => `${JSON.stringify(n)}: typeof ${n} === 'function' ? ${n} : null`);
+  // eslint-disable-next-line no-new-func
+  return new Function(`${JS_PRELUDE}\nreturn {${pick.join(',')}};`)();
+})();
+
+export function callJsOp(name, args) {
+  const f = JS_OPS[`$${name}`];
+  if (!f) throw new Error(`no such op: ${name}`);
+  return f(...args);
+}
+
+/**
+ * 解释器造出来的函数值，补成这一代的闭包记录（ADR-0013 决策 3）。
+ *
+ * 只有这一代需要：在 node 上直接跑源码的时候，解释器的 lambda 就是个裸 JS 函数，而宿主库
+ * 那些回调 op 调函数值走的是 `f.fp(f, args)`（prelude 的 $callFn、C 的 omni_js_call）。
+ * 编译出来的两代里 lambda 本来就是 `{ fp, c_* }` / 闭包记录，所以那两边 js_wrap_fn 是恒等。
+ */
+export function wrapFn(f) {
+  return { fp: (self, args) => f(self, args) };
+}
+
+/** 调一个函数值：实参是一条 list（JS 的函数在 Omni 里只有这一个签名） */
+export function callFnValue(f, args) {
+  if (f === null || f === undefined) throw new Error('call of a null function value');
+  return f.fp(f, args);
 }

@@ -79,17 +79,22 @@ for (const file of cases) {
   const build = run(cc, ['-std=c99', '-O1', `-I${RUNTIME_DIR}`, cPath, ...runtimeSources(), '-o', exe, '-lm']);
   const viaC = build.code === 0 ? run(exe, []) : { out: '', err: build.err, code: build.code };
 
+  // 第三条腿：自己的执行器（ADR-0013）。同一段 JS，同一棵 OIR，解释一遍 —— 参照还是 node。
+  // 走 CLI 而不是在进程内 new Interp：解释器的输出缓冲、退出码、uncaught 都在那条路上。
+  const viaI = run(process.execPath, [join(here, '../../stage0/src/cli.js'), 'interp', path]);
+
   const okJs = viaJs.code === 0 && viaJs.out === ref.out;
   const okC = viaC.code === 0 && viaC.out === ref.out;
-  if (okJs && okC) {
+  const okI = viaI.code === 0 && viaI.out === ref.out;
+  if (okJs && okC && okI) {
     pass++;
     const n = ref.out === '' ? 0 : ref.out.replace(/\n$/, '').split('\n').length;
-    process.stdout.write(`  ok   ${name} [node == omni-js == omni-c] ${n} lines\n`);
+    process.stdout.write(`  ok   ${name} [node == omni-js == omni-c == interp] ${n} lines\n`);
     continue;
   }
   fail++;
   const show = (label, r) => `    ${label} exit=${r.code}\n${r.out}${r.err ? `    stderr: ${r.err}` : ''}`;
-  failures.push(`${name}\n    node    exit=${ref.code}\n${ref.out}${show('omni-js', viaJs)}${show('omni-c ', viaC)}`);
+  failures.push(`${name}\n    node    exit=${ref.code}\n${ref.out}${show('omni-js', viaJs)}${show('omni-c ', viaC)}${show('interp ', viaI)}`);
   process.stdout.write(`  FAIL ${name}\n`);
 }
 

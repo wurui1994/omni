@@ -18,7 +18,9 @@
 /** @type {Record<string, {js: string, c: string, arity: number, lit?: string[], ret?: string, pure?: boolean}>} */
 export const JS_ABI = {
   // ---------------------------------------------------------------- 值与运算
-  js_asFn: { js: '$js_asFn', c: 'omni_js_as_fn', arity: 1 },
+  // raw：签名不是清一色的 omni_dyn（这一条返回 omni_fn），所以按名字调不了 —— 见
+  // js_call_op 与两个后端的 callOpDispatch。它只出现在降级器静态发出来的位置上。
+  js_asFn: { js: '$js_asFn', c: 'omni_js_as_fn', arity: 1, raw: true },
   js_truthy: { js: '$js_truthy', c: 'omni_js_truthy', arity: 1, ret: 'bool' },
   js_typeof: { js: '$js_typeof', c: 'omni_js_typeof', arity: 1 },
   js_str: { js: '$js_str', c: 'omni_js_str', arity: 1 },
@@ -33,12 +35,14 @@ export const JS_ABI = {
   // ---------------------------------------------------------------- 输出
   // JS 的 String 是 UTF-16，落到 stdout 要转回 UTF-8。收成一个 op，让"什么时候转码"
   // 是一处显式边界，而不是散在各个打印点上。
-  js_println: { js: '$js_println', c: 'omni_js_println', arity: 1 },
+  js_println: { js: '$js_println', c: 'omni_js_println', arity: 1, ret: 'void' },
 
   // ---------------------------------------------------------------- String
   // 下标、长度一律按 UTF-16 码元（ADR-0011 第 8 节）。缺席的实参传 js_undef。
   // js_s16 是入口：源码里的字面量是 UTF-8 的 Omni string，进 JS 域先转成码元序列。
-  js_s16: { js: '$js_s16', c: 'omni_js_s16', arity: 1 },
+  // raw: 'str' —— C 侧的形参是 omni_str 而不是 omni_dyn，按名字调的时候要先取出字符串
+  // （见两个后端的 callOpDispatch）。解释器要用它：Omni 的 string 进 JS 域得转成码元序列。
+  js_s16: { js: '$js_s16', c: 'omni_js_s16', arity: 1, raw: 'str' },
   js_str_len: { js: '$js_str_len', c: 'omni_js_str_len', arity: 1 },
   js_str_index: { js: '$js_str_index', c: 'omni_js_str_index', arity: 2 },
   js_str_at: { js: '$js_str_at', c: 'omni_js_str_at', arity: 2 },
@@ -211,6 +215,17 @@ export const JS_ABI = {
   // dynamic 的运行期标签名。解释器（ADR-0013）靠它认出一个 dynamic 里装的是什么 ——
   // `instanceof Map` 不在语言子集里（ADR-0011 决策 15），而 C 侧本来就有标签。
   js_type_tag: { js: '$js_type_tag', c: 'omni_js_type_tag', arity: 1 },
+  // 按名字调一条 op：`js_call_op("js_arr_get", [xs, i])`。解释器（ADR-0013）唯一的出口 ——
+  // 它拿到的 op 名字是运行期的值，而 op 调用在两个后端里都是编译期展开的。
+  // 两个后端各自**按这张表生成**那个分派函数（emit.js 的 callOpDispatch），所以往表里加
+  // 一条 op 自动就进了解释器，没有手抄 138 份包装的余地。
+  js_call_op: { js: '$js_call_op', c: 'omni_js_call_op', arity: 2 },
+  // 解释器造出来的函数值要能被宿主库那些回调 op 调（`xs.map(f)`），所以它必须**就是**
+  // 这一代的闭包记录（ADR-0013 决策 3）。编译出来的两代里它本来就是，于是 wrap 是恒等；
+  // 只有"在 node 上直接跑源码"那一代不是（那里它是个裸 JS 函数），由 native.js 补成记录。
+  js_wrap_fn: { js: '$js_wrap_fn', c: 'omni_js_wrap_fn', arity: 1 },
+  // 调一个函数值：实参是一条 list（JS 的函数在 Omni 里只有这一个签名，ADR-0011 第 1 节）。
+  js_call_fn: { js: '$js_call_fn', c: 'omni_js_call_fn', arity: 2 },
   // real 的两种文本化。解释器不写第三份浮点格式化：在哪个宿主上就用那个宿主已有的那一份
   // （prelude 的 $fmt_real/$repr_real、runtime 的 omni_str_real/omni_repr_real），
   // 于是解释执行与编译执行打印出同一串字符是构造性的，不靠三份代码碰巧一致。

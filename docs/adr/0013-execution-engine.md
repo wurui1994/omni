@@ -85,9 +85,10 @@ GC 语义，跨界就要搬值，正好违反约束 1。两者都读了、都值
 - 门槛（已落地）：`tests/run.js` 的可执行用例轴上多一条腿 `[js==interp]`，25 个用例
   `node == omni-js == omni-interp` 逐字节相同（stdout、stderr、退出码）；
   `tests/bootstrap` 阶段 7 把原生构建也钉住：`N1 interp == C0 run`。
-- 门槛（未落地）：`tests/js-exec/cases`（11 个真 JS 程序）还没进这条轴 —— 降级后的 JS
-  用的是宿主库那 139 个 `js_*` op，解释器里还没接（见决策 5），碰到就报
-  "not in the interpreter yet"。刻意报错而不是给个错答案。
+- 门槛（已落地）：`tests/js-exec` 这条轴也多了第三条腿，11 个真 JS 程序
+  `node == omni-js == omni-c == interp` 逐字节相同，原生构建上手工复核过同样的 11 个。
+  接法见决策 5 的第二半：一条通用 op `js_call_op(name, args)`，两个后端各自按表**生成**
+  那个 205 路的分派函数，所以加 op 自动进解释器，没有手抄 205 份包装的余地。
 - 不做：运行期回溯、字节码、优化、`generator` / `async` / `Proxy` / getter-setter /
   完整原型链。这些在阶段 1 里由**编译期**报"尚未支持"，不是悄悄给个错答案。
 
@@ -118,11 +119,34 @@ GC 语义，跨界就要搬值，正好违反约束 1。两者都读了、都值
 | `js_fmt_real`（print 的 `%.6g`） | `host/native.js` 的 `fmtReal` | `omni_js_fmt_real` -> `omni_str_real` |
 | `js_repr_real`（repr 的 15/16/17 位往返） | `host/native.js` 的 `reprReal` | `omni_js_repr_real` -> `omni_repr_real` |
 | `js_type_tag`（dynamic 的标签名） | `typeTag` | `omni_js_type_tag` |
+| `js_call_op(name, args)`（按名字调任意一条 op） | 直接跑 `JS_PRELUDE` 那一份 | 后端**生成**的 205 路分派器 |
+| `js_wrap_fn` / `js_call_fn`（函数值的造与调） | `wrapFn` / `callFnValue` | 转接记录 / `omni_js_call` |
 
 这样"解释执行与编译执行打印出同一串字符"是**构造性的**，而不是三份浮点格式化代码碰巧
-一致。同一条理由指向阶段 1 之后的下一步：降级后的 JS 用的是宿主库那 139 个 `js_*` op，
-解释器要接的方式也是这个 —— 在 `host/native.js` 里给出 node 的那一份、在 `link.js` 的
-`NATIVE_OPS` 里连到同名 op，而**不是**在解释器里再实现一遍 JS 的语义。
+一致。降级后的 JS 用的宿主库那 139 个 `js_*` op 也是这么接的：不在解释器里重写一遍 JS 的
+语义，而是**一条通用 op** `js_call_op(name, args)`，两个后端各自按 `JS_ALL` 表生成那个
+205 路的分派函数（和生成成员分派器 `omni_js_m_*` 完全一样的做法）。要单独处理的只有三处：
+
+- pending 标志（`js_throw` / `js_pending` / `js_take_pending` / `js_check_uncaught`）必须落在
+  解释器自己的槽上，不是宿主的全局标志 —— 不然解释器和它跑的程序共用一个抛出状态。
+- 输出（`js_println` / `js_proc_stdout_write`）走解释器自己的缓冲。宿主那份缓冲和这边是两个，
+  交错落盘就分叉了；字符串化仍然只有一份（`js_str`）。
+- `js_asFn` 是 raw op（返回的是函数值本身，过不了 dynamic 的边界），所以 `CallFn` 上那一整条
+  并成宿主的 `js_call_fn` —— "不是函数"的检查和消息也就留在宿主那一份里。
+
+### 函数值的实参口径：`js_wrap_fn` 是转接，不是恒等
+
+JS 域的函数只有一个签名 `fn(list<dynamic>) -> dynamic`，形参**是整条实参表**；Omni 域的函数
+形参是按位置绑的。解释器造出来的函数值要同时被两边调，所以：
+
+- `MakeClosure` 按模块口径（`lower.js` 给的 `js: true`）决定把 fp 收到的那条 list 当成
+  "整条实参表"（JS 域，再包一层交给唯一那个形参）还是"位置实参"（Omni 域）。
+- `js_wrap_fn(f)` 造一条转接记录：宿主按 `fp(self, args)` 调它，转接把 `(self, args)` 装成
+  一条表再调 `f`。**恒等是错的** —— 编译出来的两代里 `f` 自己也是"实参表"口径的函数，
+  恒等会让它把 `args[0]` 当 `self`、`args[1]` 当实参表。node 宿主上那一份是
+  `{ fp: (self, args) => f(self, args) }`，C 侧是 `omni_js_arr.h` 里的
+  `struct omni_js_wrap_s { fp; inner; }` 加一个 trampoline（第一字段是函数指针，所以转接
+  自己也是一条普通闭包记录，在 C 侧和 AOT 编出来的函数不可区分）。
 
 ### 副产物：这条纪律会当场抓出"子集违规"
 
@@ -134,6 +158,10 @@ GC 语义，跨界就要搬值，正好违反约束 1。两者都读了、都值
   `dynamic value is int, expected dict`。用 `String(x)`（`js_str`）。
 - `xs.length = 0`：`length` 只可读，写它会降级成"往 list 里按 str16 下标写"，原生构建报
   `array index must be a number, found str16`。用 `while (xs.length > 0) xs.pop()`。
+
+顺带还抓出一个不属于子集、属于 C 后端的 bug：`??=` 这个字面量在产出的 C 里被**三字符组**
+换成了 `#`（C99 的 `??=`，clang 只给个 warning 就换），于是自举出来的编译器认不出 `??=`
+运算符 —— 词法器的标点表里正有它。`cString` 现在把问号一律转义成 `\?`。
 
 两条都不是解释器的 bug，是子集的边界。挡住它们的是 `tests/bootstrap` 阶段 7 —— 只有
 在原生构建上真跑一遍解释器，这类分歧才会暴露。

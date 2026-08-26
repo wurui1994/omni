@@ -189,6 +189,8 @@ omni_dyn omni_js_type_tag(omni_dyn v);
    所以解释执行与编译执行打印出同一串字符 —— 不是两份代码碰巧一致。 */
 omni_dyn omni_js_fmt_real(omni_dyn v);
 omni_dyn omni_js_repr_real(omni_dyn v);
+/* 解释器的函数值那两条（js_wrap_fn / js_call_fn，ADR-0013 决策 3）都要用 omni_js_call，
+   那个是 OMNI_JS_ARR 摊出来的 static，所以它们在 omni_js_arr.h 里，不在这里。 */
 omni_dyn omni_js_str(omni_dyn v);
 void omni_js_println(omni_dyn v);
 omni_dyn omni_js_add(omni_dyn a, omni_dyn b);

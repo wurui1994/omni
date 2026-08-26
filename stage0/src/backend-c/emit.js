@@ -321,7 +321,67 @@ class CEmitter {
       this.line('OMNI_JS_HOST(omni_list_dynamic, omni_dict_string_dynamic)');
       // 成员派发器：调的全是上面这些宏摊出来的 static 函数，所以只能在这之后生成
       this.memberDispatch();
+      this.callOpDispatch();
     }
+  }
+
+  /**
+   * 按名字调 op 的分派器（`js_call_op`，ADR-0013）。JS 后端 backend-js/emit.js 的
+   * callOpDispatch 是逐行的孪生。解释器是唯一的用户 —— 它手里的 op 名字是运行期的值。
+   *
+   * 名字先一次转码成 UTF-8，再按**长度**分组 memcmp：138 条 op 顺着比一遍太贵，
+   * 按长度分完每组只剩几条。lit 排在 args 前面由调用方铺平，这里按类型取出来：
+   * 字符串 lit 是单个字符（`'<'`），bool lit 走 truthy。
+   */
+  callOpDispatch() {
+    const A = (i) => `omni_js_arr_get(args, omni_dyn_of_real(${i}.0))`;
+    this.line('static omni_str omni_js_op_name_(omni_dyn v) {');
+    this.indent++;
+    this.line('if (v.tag == OMNI_DYN_STR16) return omni_s16_to_utf8(v.u.s16);');
+    this.line('if (v.tag == OMNI_DYN_STRING) return v.u.s;');
+    this.line('omni_error("op name must be a string");');
+    this.line('return omni_str_new("", 0);');
+    this.indent--;
+    this.line('}');
+    this.line('static omni_dyn omni_js_call_op(omni_dyn name, omni_dyn args) {');
+    this.indent++;
+    this.line('omni_str nm_ = omni_js_op_name_(name);');
+    this.line('switch (nm_.len) {');
+    this.indent++;
+    const byLen = new Map();
+    for (const [name, abi] of Object.entries(JS_ABI)) {
+      if (name === 'js_call_op' || abi.raw === true) continue;  // 不自递归；raw 的签名不统一
+      if (!byLen.has(name.length)) byLen.set(name.length, []);
+      byLen.get(name.length).push([name, abi]);
+    }
+    for (const len of [...byLen.keys()].sort((a, b) => a - b)) {
+      this.line(`case ${len}:`);
+      this.indent++;
+      for (const [name, abi] of byLen.get(len)) {
+        const lits = (abi.lit ?? []).map((k, i) => (k === 'strict'
+          ? `omni_js_truthy(${A(i)})`
+          : `omni_js_op_name_(${A(i)}).p[0]`));
+        const as = [];
+        for (let ai = 0; ai < abi.arity; ai++) {
+          const x = A(ai + lits.length);
+          // raw: 'str' 的 C 形参是 omni_str（js_s16 是唯一一条）—— 取出字符串再传
+          as.push(abi.raw === 'str' && ai === 0 ? `omni_js_op_name_(${x})` : x);
+        }
+        const call = `${abi.c}(${[...lits, ...as].join(', ')})`;
+        const ret = abi.ret === 'void' ? `${call}; return omni_dyn_undef();`
+          : abi.ret === 'bool' ? `return omni_dyn_of_bool(${call});`
+            : `return ${call};`;
+        this.line(`if (memcmp(nm_.p, ${JSON.stringify(name)}, ${len}) == 0) { ${ret} }`);
+      }
+      this.line('break;');
+      this.indent--;
+    }
+    this.indent--;
+    this.line('}');
+    this.line('omni_errorf("no such op: %.*s", (int)nm_.len, nm_.p);');
+    this.line('return omni_dyn_undef();');
+    this.indent--;
+    this.line('}');
   }
 
   /**
@@ -787,6 +847,10 @@ function cString(bytes) {
     else if (b === 0x0a) s += '\\n';
     else if (b === 0x0d) s += '\\r';
     else if (b === 0x09) s += '\\t';
+    // 问号一律转义：C99 里 ??= ??( ??/ ... 是三字符组，编译器会在**看字符串之前**替换掉
+    // （clang 只给个 warning 就换了），于是 '??=' 这个字面量在产出里变成 '#'，长度还对不上。
+    // 词法器的标点表里就有它，所以自举出来的编译器认不出 ??= —— 是这么发现的。
+    else if (b === 0x3f) s += '\\?';
     else if (b >= 0x20 && b < 0x7f) s += String.fromCharCode(b);
     else s += `\\${b.toString(8).padStart(3, '0')}`;
   }

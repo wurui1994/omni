@@ -228,6 +228,10 @@ class Lower {
       jsGlobals: [...this.globals.values()],
       funcs: this.funcs,
       entry: 'omni_main',
+      // 这个模块里的函数值一律是 ABI 里 JS 的那个唯一签名 fn(list<dynamic>) -> dynamic：
+      // 形参不是位置实参，而是**整条实参表**。解释器造闭包记录时要按这个口径接
+      // （interp/eval.js 的 makeClosure）—— 两个后端是发射期就知道的，解释器只能看模块。
+      js: true,
     };
   }
 

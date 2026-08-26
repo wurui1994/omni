@@ -15,6 +15,10 @@
 #ifndef OMNI_JS_ARR_H
 #define OMNI_JS_ARR_H
 
+/* js_wrap_fn 的转接记录（ADR-0013 决策 3）。第一字段是函数指针，所以它就是一条普通的
+   闭包记录，宿主库里所有拿 omni_fn 的地方都不知道自己拿的是转接。 */
+struct omni_js_wrap_s { omni_fnptr fp; omni_dyn inner; };
+
 /* omni_js_call：JS 的函数在 Omni 里只有一个签名 fn(list<dynamic>) -> dynamic
    （ADR-0011 第 1 节），所以回调不需要按签名分派，装好实参表直接调。
    omni_js_call3 是 map/filter/forEach 那批的固定三实参形式（值、下标、数组本身）。 */
@@ -23,6 +27,12 @@ static omni_dyn omni_js_call(omni_dyn f, LT args) { \
   omni_fn fp = omni_js_as_fn(f); \
   return ((omni_dyn (*)(omni_fn, LT))omni_fn_ck(fp)->fp)(fp, args); \
 } \
+/* 按名字调 op 的那条路（js_call_fn，ADR-0013）：实参已经是一条 list。解释器造出来的
+   函数值在这一代里就是一条闭包记录，所以这里没有任何胶水，就是上面那次普通 C 调用。 */ \
+static omni_dyn omni_js_call_fn(omni_dyn f, omni_dyn args) { \
+  return omni_js_call(f, (LT)omni_dyn_as_ref(args, OMNI_DYN_LIST)); \
+} \
+OMNI_JS_ARR_WRAP(LT, DT) \
 static omni_dyn omni_js_call3(omni_dyn f, omni_dyn a, int64_t i, omni_dyn self) { \
   /* 精确三格，不走 reserve（那按最小 4 分配，1/4 是白扔的，而 arena 不回收）： \
      这是整个运行时最热的分配点 —— 量过，编译整个编译器有 127 万次回调从这里过。 */ \
@@ -92,6 +102,26 @@ static omni_dyn omni_js_arr_pop(omni_dyn a) { \
   return l->items[--l->len]; \
 } \
 OMNI_JS_ARR_2(LT, DT)
+
+/* js_wrap_fn（ADR-0013 决策 3）：解释器造函数值走这一条。传进来的 f 是解释器自己那个
+   两形参的 lambda，降级后它的实参是**一条表**（JS 域的唯一签名），所以这里造一条转接
+   记录：宿主按 fp(self, args) 调这个值，转接把 (self, args) 装成那条表再调 f。
+   恒等是不行的 —— 那样 f 会把 args[0] 当 self、args[1] 当实参表。
+   转接自己也是一条闭包记录，所以在 C 侧和 AOT 编出来的函数不可区分。 */
+#define OMNI_JS_ARR_WRAP(LT, DT) \
+static omni_dyn omni_js_wrap_call_(omni_fn me, LT args) { \
+  const omni_dyn tmp[2] = { \
+    omni_dyn_of_fn(me), \
+    omni_dyn_of_ref((void *)args, OMNI_DYN_LIST), \
+  }; \
+  return omni_js_call(((struct omni_js_wrap_s *)me)->inner, LT##_from(tmp, 2)); \
+} \
+static omni_dyn omni_js_wrap_fn(omni_dyn f) { \
+  struct omni_js_wrap_s *w = (struct omni_js_wrap_s *)omni_alloc(sizeof *w); \
+  w->fp = (omni_fnptr)omni_js_wrap_call_; \
+  w->inner = f; \
+  return omni_dyn_of_fn((omni_fn)w); \
+}
 
 /* 第二段：切/拼/查/排序/高阶。分两个宏纯粹是为了别写出一个几百行的单条 #define，
    展开出来是同一批 static 函数。

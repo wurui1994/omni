@@ -11,7 +11,8 @@
 // 语言子集里的东西：不用 TextEncoder（自己按 UTF-8 编）、不用 new Function、不用正则字面量
 // 以外的正则。
 
-import { stdout, typeTag, fmtReal, reprReal } from '../host/native.js';
+import { stdout, typeTag, fmtReal, reprReal, callJsOp } from '../host/native.js';
+import { JS_ABI, JS_MEMBERS } from '../hir/js_abi.js';
 import { OmniError } from '../source/diag.js';
 
 // int64 的下界。写成 "最大负数再减一"：`**` 不在语言子集里，而 -9223372036854775808n
@@ -24,6 +25,9 @@ const INT_MIN = -9223372036854775807n - 1n;
  * 走 stderr，退出码 70（ADR-0005）。所以单独一个类，在 interpret() 的边界上收住。
  */
 export class InterpFail extends Error {}
+
+/** 被解释程序里没被 catch 住的 throw。前缀和 runtime error 不一样，所以单独一个类 */
+export class InterpUncaught extends Error {}
 
 /** 64 位回绕。int 的 + - * << 都要过它（ADR-0005） */
 function W(x) {
@@ -526,10 +530,9 @@ function builtinOp(I, e, env, frame) {
     case 'js_undef': return undefined;
     case 'js_ofFn': return a[0];
     default:
-      // 阶段 1 的边界（ADR-0013）：JS 宿主库那 139 个 op 与 dynamic 上的运算还没接进来。
-      // 刻意报错而不是给个错答案 —— 错答案会在四方比对里变成一次难查的分叉。
-      throw new OmniError(`interp: builtin '${e.name}' is not in the interpreter yet `
-        + '(ADR-0013 stage 1); use `omni run --via-c` for now');
+      // 降级后的 JS 用的是宿主库那批 op（ADR-0011）。不在这里重新实现 —— 按名字调到宿主
+      // 自己的那一份去（js_call_op），见下面 jsOp 与 ADR-0013 决策 5。
+      return jsOp(I, e, a);
   }
 }
 
@@ -542,6 +545,96 @@ function realOfString(s) {
   const v = Number(s);
   if (s.trim() === '' || Number.isNaN(v)) rtError(`cannot parse real from '${s}'`);
   return v;
+}
+
+/* ------------------------------------------------------ JS 域的 op（ADR-0013 决策 5）
+ * 降级后的 JS 用的是宿主库那批 op（ADR-0011）。这里一条都**不重新实现**：按名字调到
+ * 宿主自己的那一份去（js_call_op），于是"解释执行"与"编译成 JS/C 再执行"用的是同一份
+ * 代码，往 JS_ABI 表里加一条 op 自动就进了解释器。
+ */
+
+// 被解释程序的待决错误（ADR-0007 的那套：标志 + 普通跳转）。刻意**不**用宿主那一个 ——
+// 原生构建里解释器自己就是编译出来的代码，它的 throw 用的正是宿主那个全局标志，共用会让
+// 被解释程序的一次 throw 把解释器自己的控制流也带走。
+let pendingVal = undefined;
+let pendingSet = false;
+
+function jsOp(I, e, a) {
+  switch (e.name) {
+    case 'js_throw': pendingVal = a[0]; pendingSet = true; return undefined;
+    case 'js_pending': return pendingSet;
+    case 'js_take_pending': return takePending();
+    case 'js_check_uncaught': {
+      if (!pendingSet) return undefined;
+      const v = takePending();
+      flushOut();
+      throw new InterpUncaught(callJsOp('js_str', [v]));
+    }
+    // 输出的两条 op 落在解释器自己的缓冲上，不走宿主的那一份。宿主的缓冲和这边的是
+    // 两个缓冲区，谁先落盘由冲刷时机决定 —— 交错就分叉了。字符串化仍然只有一份（js_str）。
+    case 'js_println': printLine(callJsOp('js_str', [a[0]])); return undefined;
+    case 'js_proc_stdout_write': printRaw(callJsOp('js_str', [a[0]])); return undefined;
+    default: break;
+  }
+  const mem = JS_MEMBERS[e.name];
+  if (mem !== undefined) return memberOp(mem, a);
+  const abi = JS_ABI[e.name];
+  if (abi === undefined) throw new OmniError(`interp: no such op '${e.name}'`);
+  if (abi.raw === true) throw new OmniError(`interp: op '${e.name}' is not callable by name`);  // lit 是编译期常量，排在实参前面 —— 和两个后端的发射器同一套（emit.js 的 builtin）
+  const args = [];
+  for (const k of abi.lit ?? []) args.push(e[k]);
+  for (const x of a) args.push(x);
+  return invoke(e.name, abi, args);
+}
+
+function takePending() {
+  if (!pendingSet) return undefined;
+  pendingSet = false;
+  const v = pendingVal;
+  pendingVal = undefined;
+  return v;
+}
+
+/**
+ * JS 的动态调用（eval.js 的 CallFn 走 js_asFn 那一支）。args 已经是**一条实参表**，
+ * 按 ABI 直接交给宿主的 js_call_fn —— 函数值不是函数时的检查和消息都在宿主那一份里。
+ */
+export function jsCallFn(f, args) {
+  flushOut();
+  return callJsOp('js_call_fn', [f, args]);
+}
+
+/** op 里的运行期错误会直接退出，所以缓冲要先落盘 —— 不然错误消息会跑到正常输出前面 */
+function invoke(name, abi, args) {
+  flushOut();
+  const r = callJsOp(name, args);
+  return abi.ret === 'void' ? undefined : r;
+}
+
+/**
+ * 成员派发（ADR-0011 第 9 节）。表在 hir/js_abi.js，两个后端各自**生成**一份派发器，
+ * 解释器这一份是同一张表的第三个读者 —— 是同一套规则的第三次应用，不是第三份语义。
+ * 标签口径必须是 JS 域的（Map/Set 而不是 dict/set），所以问的是 js_type_tag 这条 op。
+ */
+function memberOp(d, a) {
+  const m = d.member;
+  const op = m.on[callJsOp('js_type_tag', [a[0]])];
+  if (op !== undefined) {
+    const abi = JS_ABI[op];
+    const args = [];
+    for (const v of Object.values(m.lit ?? {})) args.push(v);
+    for (let i = 0; i < abi.arity; i++) args.push(a[i]);
+    return invoke(op, abi, args);
+  }
+  // 表外的接收者：属性就是普通属性，方法就是"取属性再当函数调"（ADR-0011 决策 12）
+  flushOut();
+  const got = callJsOp('js_obj_get', [a[0], m.name]);
+  if (m.kind === 'prop') return got;
+  // 派发器的形参个数是表里的最大值，末尾多出来的 undefined 等于没给 —— 削掉再调
+  let n = a.length;
+  while (n > 1 && a[n - 1] === undefined) n--;
+  const r = callJsOp('js_call_fn', [got, a.slice(1, n)]);
+  return d.ret === 'bool' ? callJsOp('js_truthy', [r]) : r;
 }
 
 
