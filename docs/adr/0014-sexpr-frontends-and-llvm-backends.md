@@ -229,9 +229,11 @@ bison **隐式**的选择写成**显式**的优先级声明 —— 悬垂 else�
    struct + `operator init`、重载解析、`write`。`asy` 装在机器上，所以这道门槛有现成的
    oracle —— 跟 `tests/oracle` 那条轴同一个口径。**第一刀已落地**（`tests/asy` 那一节）：
    int/real 算术与输出（含 `%.15g`）、两种引号的字符串、bool、控制流（含 `? :`）、函数、
-   `write`，六份用例在五个执行器上与 `asy -noV` 逐字节相同。**还没做**的是数组与切片、
-   pair/triple、struct + `operator init`、重载解析、real 上的 `^` —— 每一条都在
-   `tests/asy/bad/` 里有一份带 `ASY_NOPE` 的用例钉着，不是含糊的"待办"。
+   `write`、七个内建数学函数与 real 上的 `^`，八份用例在五个执行器上与 `asy -noV` 逐字节
+   相同。**还没做**的是数组与切片、pair/triple、struct + `operator init`、重载解析 ——
+   每一条都在 `tests/asy/bad/` 里有一份带 `ASY_NOPE` 的用例钉着，不是含糊的"待办"。
+   超越函数（exp/log/trig）是**另一回事**：不是没做，是量过 libm 与 V8 在最后一位就分叉，
+   收进来这条轴必然有一天变红，所以按边界拒掉（`tests/asy/bad/sin.asy`）。
 3. **绘图层**：path/guide 的 Bezier（含 tension / 方向求解）、pen、transform、
    picture 的延迟绘制、EPS 输出。「执行全部 asy 模块」的大头在这里。**还没做。**
 4. **jancy 核心语法与执行** —— 语法已经有（下一节），执行**还没做**；而且要先有一份
@@ -292,10 +294,25 @@ bison **隐式**的选择写成**显式**的优先级声明 —— 悬垂 else�
 所以那条腿一行没改就通了。默认的 `(tostr E)` 仍然是 `%.6g`（ADR-0005 那条"看值用的"规则
 没动）。
 
-**还欠一条同样形状的**：real 上的 `^` 要一个 `pow`，那也是运行时的新符号，单独一刀
-（`tests/asy/bad/pow-real.asy` 钉着）。
+**real 上的数学函数**：`(rmath "NAME" A [B])`，白名单只有七个 —— `sqrt` / `fabs` /
+`floor` / `ceil` / `round` / `pow` / `fmod`。白名单不是保守，是**量出来的**：这条轴要求五条
+腿逐字节相同，而宿主的 libm 和 V8 并不是同一份实现。量的结果是 `sqrt` 相同（IEEE 规定它
+唯一正确）、`fabs`/`floor`/`ceil`/`round`/`fmod` 相同（都是精确运算）、`pow` 80 组随机
+输入 0 差异；而 `atan`/`tan`/`log`/`cos` **在最后一位（1 ULP）就分叉**，所以 exp/log/trig
+一个都没收。收进来会得到一份"大多数输入都对"的实现，那比拒掉难查得多。
 
-### 已落地的形状：asy 前端第一刀（第十五条测试轴 `tests/asy/`，15 条）
+第一次量出来的 pow/fmod"差异"是假的：C 那边用表达式算输入，clang 合成了 FMA，两边比的
+根本不是同一个 double。用 `float.hex()` 的位精确字面量重跑才是 0 差异 —— 记在这里是因为
+这类"测量方法本身有 bug"的坑会重复踩。
+
+落地同样是"接上已有的那一份"：`omni_math.c` 的七个 `omni_r_*` 包一层 libm、JS prelude 的
+`$r_*` 全部走同一个 `$js_math`（`round` 那条要自己绕过 `Math.round` 的向上舍入：C 是**离零**
+舍入，`-2.5 → -3`）、解释器走 `callJsOp('js_math', …)`、LLVM 补七条 `RT_OPS`，MIR 照旧
+一行没改。asy 的 `sqrt/fabs/abs/floor/ceil/round/fmod` 和 real 上的 `^` 都降到它；
+`floor/ceil/round` 回 **int**（量的：`int i = floor(2.7)` 编得过），所以外面再套一层
+`(toint …)`；`abs(int)` 走一个 `asy__iabs` 的纯整数比较，绕一趟 real 会在 2^53 以上丢精度。
+
+### 已落地的形状：asy 前端第一刀（第十五条测试轴 `tests/asy/`，17 条）
 
 `stage0/src/frontend-asy/lower.js`（约 820 行）把 asy 语法树降成核心方言的**文本**，
 `omni emit-asy x.asy` 印出那份文本，`omni run/run-c/interp/interp --mir/run-llvm x.asy`
@@ -304,9 +321,10 @@ bison **隐式**的选择写成**显式**的优先级声明 —— 悬垂 else�
 `1/3` 是实数除法而 `1#3` 是整数商、`3 == 3.0` 要提左边、`write` 的分隔符取决于第一个
 实参是不是字符串。类型是符号表的事，动作模板里没有符号表。
 
-**判分的人不是我**：`tests/asy` 的五份用例（算术 / 字符串 / 两种引号 / 控制流 / 函数）
-每份都是「五条腿逐字节相同 == `.expected` == `asy -noV` 当场重跑」。`.expected` 本身就是
-真 asy 的输出生成的；机器上没装 asymptote 时那一节打印 skip，但 `.expected` 仍然把答案钉住。
+**判分的人不是我**：`tests/asy` 的八份用例（算术 / 字符串 / 两种引号 / 控制流 / 函数 /
+real 的 %.15g / `? :` / 数学函数）每份都是「五条腿逐字节相同 == `.expected` ==
+`asy -noV` 当场重跑」。`.expected` 本身就是真 asy 的输出生成的；机器上没装 asymptote 时
+那一节打印 skip，但 `.expected` 仍然把答案钉住。
 
 这一刀顺手改对了三处**先前记错或没做对的东西**，每处都是量出来才发现的：
 
@@ -326,8 +344,8 @@ bison **隐式**的选择写成**显式**的优先级声明 —— 悬垂 else�
 
 第一刀的边界都在 `tests/asy/bad/`（9 条，每条的期望值都必须以 `ASY_NOPE` 开头 ——
 "还没做"和"做错了"必须能一眼分开）：数组、struct、pair、重载、模块（import/access）、
-隐式缩放（`105cm`）、real 上的 `^`（要 pow）、函数里读文件级变量（核心方言没有全局量）、
-循环条件里的 `? :`。
+隐式缩放（`105cm`）、超越函数（`sin` —— 理由是上面那条 ULP 测量）、函数里读文件级变量
+（核心方言没有全局量）、循环条件里的 `? :`。
 
 两处**明写的语义差**（不是漏，是这一刀不打算做那条运行期检查）：整数溢出按位回绕而不报错；
 `2^-1` 返回 0，而 asy 报 "Only 1 and -1 can be raised to negative exponents as integers"。

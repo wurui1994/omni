@@ -772,11 +772,27 @@ function $js_math(op, a, b) {
   if (op === "t") return Math.trunc(x);
   if (op === "f") return Math.floor(x);
   if (op === "c") return Math.ceil(x);
+  if (op === "s") return Math.sqrt(x);
+  // C 的 round 是"离零舍入"（round(-2.5) = -3），JS 的 Math.round 是"向 +inf 舍入"
+  // （-2.5 -> -2）。核心方言的 (rmath "round" …) 要的是 C 那一条。
+  if (op === "r") return x < 0 ? -Math.round(-x) : Math.round(x);
   const y = $js_real(b, "Math");
   if (op === "M") return Math.max(x, y);
   if (op === "m") return Math.min(x, y);
+  if (op === "p") return Math.pow(x, y);
+  if (op === "o") return x % y;   // JS 的 % 在 number 上就是 C 的 fmod
   $rt_error("unknown Math op '" + op + "'");
 }
+
+// real 上的数学函数（核心方言的 (rmath "NAME" …)）。生成的代码走这几个，解释器走
+// $js_math 的同名 op —— 两条路同一份算法，不是两份碰巧一致的实现。
+const $r_sqrt = (x) => $js_math("s", x, 0);
+const $r_pow = (x, y) => $js_math("p", x, y);
+const $r_fabs = (x) => $js_math("a", x, 0);
+const $r_floor = (x) => $js_math("f", x, 0);
+const $r_ceil = (x) => $js_math("c", x, 0);
+const $r_round = (x) => $js_math("r", x, 0);
+const $r_fmod = (x, y) => $js_math("o", x, y);
 
 // ------------------------------------------------- JSON.stringify（ADR-0011）
 // 不能直接用宿主的 JSON.stringify：这边的对象是 Map、int 是 BigInt，宿主会当成

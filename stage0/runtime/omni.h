@@ -131,6 +131,16 @@ omni_str omni_str_realg(double v, int64_t p);
 omni_str omni_str_bool(bool v);
 omni_str omni_str_string(omni_str v);
 omni_str omni_repr_real(double v);
+
+/* omni_math.c —— 只收各家实现必然一致的那几个（那份文件的头注里写了量过什么） */
+double omni_r_sqrt(double x);
+double omni_r_pow(double x, double y);
+double omni_r_fabs(double x);
+double omni_r_floor(double x);
+double omni_r_ceil(double x);
+double omni_r_round(double x);
+double omni_r_fmod(double x, double y);
+
 void omni_print_int(int64_t v);
 void omni_print_real(double v);
 void omni_print_bool(bool v);

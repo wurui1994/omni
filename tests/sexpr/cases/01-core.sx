@@ -47,4 +47,22 @@
     ;; 这一条在五条腿上都得一样，而它正是那种"错了也不报错"的地方。
     (print (bin "/" (toreal (int 1)) (toreal (int 3))))
     (print (toint (real 3.7)))
-    (print (toint (real -3.7)))))
+    (print (toint (real -3.7)))
+    ;; (rmath "NAME" A [B])：real 上的数学函数。白名单只有七个，判据是**量过五条腿逐字节
+    ;; 相同**：sqrt 是 IEEE 规定唯一正确的，fabs/floor/ceil/round/fmod 是精确运算，pow 量了
+    ;; 80 组随机输入 0 差异。超越函数（exp/log/trig）没收 —— libm 与 V8 在 atan/tan/log/cos
+    ;; 的最后一位就分叉，收进来等于给这条轴埋一个"哪天才红"的雷。
+    (print (rmath "sqrt" (real 2.0)))
+    (print (rmath "fabs" (un "-" (real 2.5))))
+    (print (rmath "pow" (real 2.0) (real 10.0)))
+    ;; 舍入的三个：负数各来一条。round 是**离零**舍入（-2.5 -> -3），而 JS 的 Math.round
+    ;; 会给 -2 —— 两条 JS 腿要自己绕过去，所以这一条必须在。
+    (print (rmath "floor" (un "-" (real 2.5))))
+    (print (rmath "ceil" (un "-" (real 2.5))))
+    (print (rmath "round" (un "-" (real 2.5))))
+    (print (rmath "round" (real 2.5)))
+    ;; fmod 的符号跟**被除数**一致（不是数学上的模）
+    (print (rmath "fmod" (un "-" (real 7.5)) (real 2.0)))
+    (print (rmath "fmod" (real 7.5) (un "-" (real 2.0))))
+    ;; 结果照常参与运算，不是只能直接 print
+    (print (bin "<" (rmath "sqrt" (real 2.0)) (real 1.4142136)))))

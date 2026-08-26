@@ -20,11 +20,13 @@
 // 支持：int / real / bool / string 四种标量、变量与赋值、`+ - * / # % ^` 与比较、
 // `&& ||`、一元 `- !`、`++ --` 与 `+= -= *= /=`、`?:`、if/else、while、do-while、
 // C 式 for、break/continue、函数（含递归）、`(int)`/`(real)` 强制转换、`write`
-// （含 real 的 %.15g —— 核心方言的 `(tostr E N)` 就是为它加的）。
+// （含 real 的 %.15g —— 核心方言的 `(tostr E N)` 就是为它加的）、内建数学函数
+// sqrt/fabs/abs/floor/ceil/round/fmod（核心方言的 `(rmath …)`）。
 //
 // 不支持（见到就报错，报错里说清是哪一条）：数组、pair/triple、struct、import/access、
-// typedef、算符重载、重载解析、默认实参、命名实参、for-each、real 上的 `^`（要 pow，
-// 运行时还没有这个符号）、循环条件里的 `?:`（摊出来的赋值只能落在循环外面，条件就只
+// typedef、算符重载、重载解析、默认实参、命名实参、for-each、超越函数（exp/log/trig ——
+// 量过 libm 与 V8 在 atan/tan/log/cos 的最后一位就分叉，收进来六条腿必然有一天对不上）、
+// 循环条件里的 `?:`（摊出来的赋值只能落在循环外面，条件就只
 // 算一次了 —— 语义会变，所以报错而不是悄悄换个意思）。
 //
 // ## 与真 asy 的差别，写在这里而不是等着被发现
@@ -45,6 +47,23 @@ const SCALARS = new Set(['int', 'real', 'bool', 'string']);
  *  名字带 asy 前缀是封闭 ABI 的要求：模块级的名字全局唯一（mir/print.js 已有一个 opText）。 */
 const asyOpText = (n) => (isStr(n) || isAtom(n) ? n.value : null);
 
+/**
+ * asy 运行时自带的数学函数（不是 plain.asy 里的定义，所以这一层认它们不算偷偷补模块系统）。
+ * 返回类型是量出来的（`asy -noV`）：`floor/ceil/round` 回 **int**（`int i = floor(2.7)`
+ * 编得过），`sqrt/fabs/fmod` 回 real，`abs` 按实参分 int/real。
+ * 名单只到核心方言 `(rmath …)` 收的那几个为止 —— exp/log/sin 这些各家最后一位就分叉，
+ * 方言那边没收（理由在 runtime/omni_math.c 的头注里）。
+ */
+const ASY_MATH = new Map([
+  ['sqrt', { fn: 'sqrt', arity: 1, ret: 'real' }],
+  ['fabs', { fn: 'fabs', arity: 1, ret: 'real' }],
+  ['abs', { fn: 'fabs', arity: 1, ret: 'real' }],
+  ['floor', { fn: 'floor', arity: 1, ret: 'int' }],
+  ['ceil', { fn: 'ceil', arity: 1, ret: 'int' }],
+  ['round', { fn: 'round', arity: 1, ret: 'int' }],
+  ['fmod', { fn: 'fmod', arity: 2, ret: 'real' }],
+]);
+
 /** 没写初值时的零值。asy 也是这么定的（未初始化的 int 是 0，string 是空串）。 */
 const ZERO = new Map([['int', '(int 0)'], ['real', '(real 0.0)'], ['bool', '(bool false)'], ['string', '(str "")']]);
 
@@ -64,10 +83,16 @@ function strLit(s) {
 }
 
 /**
- * 按需发的 helper 函数。三条都是「asy 的算符与核心方言的算符不是同一个」逼出来的：
- * `#` 向下取整、`%` 的符号跟着除数、`^` 是幂。每条都只发一次，且只在用到时发。
+ * 按需发的 helper 函数。多数是「asy 的算符与核心方言的算符不是同一个」逼出来的：
+ * `#` 向下取整、`%` 的符号跟着除数、int 上的 `^` 是幂、`abs(int)` 回 int。
+ * 每条都只发一次，且只在用到时发。
  */
 const HELPERS = new Map([
+  ['asy__iabs', `  (fn asy__iabs ((a int)) int
+    ;; 整数取绝对值。核心方言的 (rmath "fabs" …) 只吃 real，而 asy 的 abs(int) 回 int ——
+    ;; 绕一趟 real 会在 2^53 以上丢精度，所以这里就是一个比较。
+    (if (bin "<" (var a) (int 0)) (do (ret (un "-" (var a)))))
+    (ret (var a)))`],
   ['asy__quot', `  (fn asy__quot ((a int) (b int)) int
     ;; asy 的 # 是**向下**取整；核心方言的 / 是截断。差别只在"除不尽且异号"时。
     (let q int (bin "/" (var a) (var b)))
@@ -278,7 +303,11 @@ class AsyLower {
         this.used.add('asy__ipow');
         return { code: `(call asy__ipow ${a.code} ${b.code})`, type: 'int' };
       }
-      return this.nope(n, "real 上的 '^'（要 pow，运行时还没有这个符号）");
+      // 有一边是 real 就走 pow（量过：`2.0^3` 是 8、`2^0.5` 是 1.4142135623731）
+      const av = this.coerce(a, 'real', n, "'^' 的左边");
+      const bv = this.coerce(b, 'real', n, "'^' 的右边");
+      if (av === null || bv === null) return null;
+      return { code: `(rmath "pow" ${av.code} ${bv.code})`, type: 'real' };
     }
     if (op === '/') {
       // asy 的 `/` 永远是实数除法：`1/3` 是 0.333…，整数商要写 `#`（量过）
@@ -393,6 +422,10 @@ class AsyLower {
     const nm = isList(n.items[1]) && head(n.items[1]) === 'name-exp' ? this.plainName(n.items[1].items[1]) : null;
     if (nm === null) return this.nope(n, '调用一个不是普通名字的东西（函数值、方法、算符名）');
     if (nm === 'write') return this.err(n, `${ASY_NOPE}：write 出现在表达式位置（它是语句）`);
+    // 内建数学函数先看：asy 里 sqrt/floor/… 是运行时自带的，不是 plain.asy 里的定义，
+    // 所以这一层认它们不算"偷偷补模块系统"。用户自己定义了同名函数时以用户的为准
+    // （asy 那边是重载，这一刀没有重载，让用户的定义赢至少不会静悄悄换掉语义）。
+    if (!this.funcs.has(nm) && ASY_MATH.has(nm)) return this.mathCall(n, nm);
     const d = this.funcs.get(nm);
     if (d === undefined) return this.nope(n, `内建函数 '${nm}'（这一刀只有 write 和你自己定义的函数）`);
     const args = this.args(n.items[2]);
@@ -408,6 +441,39 @@ class AsyLower {
     }
     if (d.ret === 'void') return { code: `(call ${nm}${parts.length === 0 ? '' : ' '}${parts.join(' ')})`, type: 'void' };
     return { code: `(call ${nm}${parts.length === 0 ? '' : ' '}${parts.join(' ')})`, type: d.ret };
+  }
+
+  /**
+   * 内建数学函数。整数上的 `abs` 走一条 helper（核心方言里没有整数取绝对值），
+   * 回 int 的那三个在 `(rmath …)` 外面套一层 `(toint …)` —— 结果本来就是整数，
+   * 截断是精确的。
+   */
+  mathCall(n, nm) {
+    const spec = ASY_MATH.get(nm);
+    const args = this.args(n.items[2]);
+    if (args === null) return null;
+    if (args.length !== spec.arity) {
+      return this.err(n, `'${nm}' 要 ${spec.arity} 个实参，给了 ${args.length} 个`);
+    }
+    const vs = [];
+    for (const a of args) {
+      const v = this.expr(a);
+      if (v === null) return null;
+      vs.push(v);
+    }
+    if (nm === 'abs' && vs[0].type === 'int') {
+      this.used.add('asy__iabs');
+      return { code: `(call asy__iabs ${vs[0].code})`, type: 'int' };
+    }
+    const parts = [];
+    for (let i = 0; i < vs.length; i++) {
+      const v = this.coerce(vs[i], 'real', args[i], `'${nm}' 的第 ${i + 1} 个实参`);
+      if (v === null) return null;
+      parts.push(v.code);
+    }
+    const code = `(rmath "${spec.fn}" ${parts.join(' ')})`;
+    if (spec.ret === 'int') return { code: `(toint ${code})`, type: 'int' };
+    return { code, type: 'real' };
   }
 
   /**

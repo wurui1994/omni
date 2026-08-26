@@ -23,6 +23,7 @@
  *         | (ret [E]) | (print E) | (expr E)
  *         | (bset E E E) | (dispatch NAME E E...)
  *   E     = (int TEXT) | (real TEXT) | (bool TEXT) | (str "…") | (tostr E) | (tostr E N)
+ *         | (rmath "NAME" A [B])
  *         | (toreal E) | (toint E)
  *         | (var NAME) | (bin "OP" E E) | (un "OP" E) | (call NAME E...)
  *         | (splat TYPE E) | (vlit TYPE E...) | (lane E N) | (hsum E)
@@ -48,6 +49,12 @@ const VEC_LANES = new Set([2, 4, 8]);
 const ARITH = new Set(['+', '-', '*', '/', '%', '&', '|', '^', '<<', '>>']);
 const COMPARE = new Set(['==', '!=', '<', '<=', '>', '>=']);
 const LOGIC = new Set(['&&', '||']);
+
+/** `(rmath "NAME" …)` 的名单与参数个数。为什么只有这七个，见 runtime/omni_math.c 的头注。 */
+const RMATH = new Map([
+  ['sqrt', 1], ['fabs', 1], ['floor', 1], ['ceil', 1], ['round', 1],
+  ['pow', 2], ['fmod', 2],
+]);
 
 class CoreLowerer {
   constructor(diags) {
@@ -453,6 +460,28 @@ class CoreLowerer {
         return this.err(n.items[2], `(tostr E N) 的 N 要在 1..17 之间，这里是 ${digits}`);
       }
       return { kind: 'Builtin', name: 'to_string_g', args: [v, p], type: STRING, argType: REAL };
+    }
+    // `(rmath "NAME" A [B])`：real 上的数学函数。名单是**量出来的**（runtime/omni_math.c
+    // 的头注里写着）：只有各家实现必然一致的那几个进得来 —— sqrt 是 IEEE-754 强制正确
+    // 舍入，fabs/floor/ceil/round/fmod 是精确运算，pow 在 80 组随机输入上 libm 与 V8
+    // 逐位相同。exp/log/tan/atan/cos 那一类刻意不收：它们在最后一位就分叉，收了
+    // "五条腿逐字节相同"这条纪律就成了摆设。
+    if (h === 'rmath') {
+      if (!isStr(n.items[1])) return this.err(n, '(rmath "NAME" A [B]) 的第一项要是函数名字符串');
+      const fn = n.items[1].value;
+      const want = RMATH.get(fn);
+      if (want === undefined) {
+        return this.err(n.items[1], `(rmath) 不认识 '${fn}'，能用的是 ${[...RMATH.keys()].join(' / ')}`);
+      }
+      const args = [];
+      for (let i = 0; i < want; i++) {
+        const v = this.expr(n.items[2 + i]);
+        if (v === null) return null;
+        if (v.type.k !== 'real') return this.err(n.items[2 + i], `(rmath "${fn}") 的参数要是 real，这里是 ${coreTypeText(v.type)}`);
+        args.push(v);
+      }
+      if (n.items.length !== 2 + want) return this.err(n, `(rmath "${fn}") 要 ${want} 个参数`);
+      return { kind: 'Builtin', name: `rmath_${fn}`, args, type: REAL, argType: REAL };
     }
     // `(toreal E)` / `(toint E)`：int <-> real 的**显式**转换。同一条纪律：类型不推导、
     // 不插隐式转换，所以两个方向都得写出来。OIR 侧两个都是现成的（Cast int->real、

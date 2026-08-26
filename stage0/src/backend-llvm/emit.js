@@ -69,6 +69,15 @@ const RT_OPS = new Map([
   // `(tostr E N)`：按 N 位有效数字。位数是普通 i64 实参，不是常量折进符号名 ——
   // 那样每多一个位数就多一个符号，而 ABI 里多一个 i64 什么都不用改。
   ['to_string_g.real', { sym: 'omni_str_realg', ret: '[2 x i64]', params: ['double', 'i64'] }],
+  // real 上的数学函数。刻意 call 运行时的包装而不是发 LLVM 的 intrinsic：`llvm.sqrt.f64`
+  // 有 intrinsic，`fmod` / `round` 没有对得上的，统一走一层符号，五条腿就是同一份 libm。
+  ['rmath_sqrt.real', { sym: 'omni_r_sqrt', ret: 'double', params: ['double'] }],
+  ['rmath_fabs.real', { sym: 'omni_r_fabs', ret: 'double', params: ['double'] }],
+  ['rmath_floor.real', { sym: 'omni_r_floor', ret: 'double', params: ['double'] }],
+  ['rmath_ceil.real', { sym: 'omni_r_ceil', ret: 'double', params: ['double'] }],
+  ['rmath_round.real', { sym: 'omni_r_round', ret: 'double', params: ['double'] }],
+  ['rmath_pow.real', { sym: 'omni_r_pow', ret: 'double', params: ['double', 'double'] }],
+  ['rmath_fmod.real', { sym: 'omni_r_fmod', ret: 'double', params: ['double', 'double'] }],
 ]);
 
 /** i64 比较 -> icmp 谓词；f64 -> fcmp 谓词。顺序与 OP.EQ..OP.GT 一致。 */

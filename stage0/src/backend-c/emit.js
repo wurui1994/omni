@@ -932,6 +932,11 @@ class CEmitter {
       case 'print': return `omni_print_${e.argType.k}(${a[0]})`;
       case 'to_string': return `omni_str_${e.argType.k}(${a[0]})`;
       case 'to_string_g': return `omni_str_realg(${a[0]}, ${a[1]})`;
+      // real 上的数学函数：`rmath_sqrt` -> `omni_r_sqrt`（runtime/omni_math.c）。
+      // 名单由核心方言把关（sexpr/lower.js 的 RMATH）。
+      case 'rmath_sqrt': case 'rmath_fabs': case 'rmath_floor': case 'rmath_ceil':
+      case 'rmath_round': case 'rmath_pow': case 'rmath_fmod':
+        return `omni_r_${e.name.slice(6)}(${a.join(', ')})`;
       case 'trunc': return `omni_trunc(${a[0]})`;
       case 'chr': return `omni_chr(${a[0]})`;
       case 'fail': return `omni_fail(${a[0]})`;

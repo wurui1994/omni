@@ -406,6 +406,11 @@ class JsEmitter {
       case 'print': return `$print($str_${e.argType.k}(${a[0]}))`;
       case 'to_string': return `$str_${e.argType.k}(${a[0]})`;
       case 'to_string_g': return `$str_real_g(${a[0]}, ${a[1]})`;
+      // real 上的数学函数：名字里的后缀就是 prelude 里那个 helper（`rmath_sqrt` -> `$r_sqrt`）。
+      // 名单由核心方言把关（sexpr/lower.js 的 RMATH），这里不再重复一遍。
+      case 'rmath_sqrt': case 'rmath_fabs': case 'rmath_floor': case 'rmath_ceil':
+      case 'rmath_round': case 'rmath_pow': case 'rmath_fmod':
+        return `$r_${e.name.slice(6)}(${a.join(', ')})`;
       case 'trunc': return `$trunc(${a[0]})`;
       case 'chr': return `$chr(${a[0]})`;
       case 'fail': return `$rt_error(${a[0]})`;

@@ -142,6 +142,8 @@ export const JS_ABI = {
   js_num_to_precision: { js: '$js_num_to_precision', c: 'omni_js_num_to_precision', arity: 2 },
   js_num_to_string: { js: '$js_num_to_string', c: 'omni_js_num_to_string', arity: 2 },
   // op: 'a' abs / 't' trunc / 'f' floor / 'c' ceil / 'M' max / 'm' min
+  //     后加的四个只给核心方言的 (rmath …) 用：'s' sqrt / 'r' round（C 的离零舍入，
+  //     不是 Math.round）/ 'p' pow / 'o' fmod
   js_math: { js: '$js_math', c: 'omni_js_math', arity: 2, lit: ['op'] },
 
   // ---------------------------------------------------------------- JSON

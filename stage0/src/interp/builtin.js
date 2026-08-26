@@ -560,6 +560,12 @@ export function vecHsum(t, v) {
   return acc;
 }
 
+/** 核心方言的 `(rmath "NAME" …)` -> js_math 的 op 码（js_abi.js 那张表里注着） */
+const RMATH_OP = new Map([
+  ['rmath_sqrt', 's'], ['rmath_fabs', 'a'], ['rmath_floor', 'f'], ['rmath_ceil', 'c'],
+  ['rmath_round', 'r'], ['rmath_pow', 'p'], ['rmath_fmod', 'o'],
+]);
+
 /** to_string / print 的四种标量。容器与 dynamic 不到这里 —— 检查器把它们改写成
  *  "深装箱 + 走 std 的序列化器"，那份代码本身也是被解释执行的（check.js 的 print 分支）。 */
 function strOf(kind, v) {
@@ -594,6 +600,14 @@ export function applyBuiltin(I, e, a) {
     case 'print': printLine(strOf(e.argType.k, a[0])); return undefined;
     case 'to_string': return strOf(e.argType.k, a[0]);
     case 'to_string_g': return fmtRealG(a[0], a[1]);
+    // real 上的数学函数。刻意走 js_math 那条宿主 op（prelude 的 $js_math / runtime 的
+    // omni_js_math），而不是在这里再写一份：`round` 的舍入方向、`fmod` 的符号这些
+    // 差别只该在一处定下来。
+    case 'rmath_sqrt': case 'rmath_fabs': case 'rmath_floor': case 'rmath_ceil':
+    case 'rmath_round': case 'rmath_pow': case 'rmath_fmod': {
+      const op = RMATH_OP.get(e.name);
+      return callJsOp('js_math', [op, a[0], a.length > 1 ? a[1] : 0]);
+    }
     case 'trunc': return truncReal(a[0]);
     case 'chr': return chrOf(a[0]);
     case 'fail': rtError(a[0]); return undefined;

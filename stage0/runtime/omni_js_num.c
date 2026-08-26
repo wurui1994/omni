@@ -160,12 +160,17 @@ omni_dyn omni_js_math(int op, omni_dyn a, omni_dyn b) {
     case 't': return omni_dyn_of_real(trunc(x));
     case 'f': return omni_dyn_of_real(floor(x));
     case 'c': return omni_dyn_of_real(ceil(x));
+    case 's': return omni_dyn_of_real(sqrt(x));
+    /* C 的 round 就是"离零舍入"；prelude 那边为此没用 Math.round（它向 +inf 舍入） */
+    case 'r': return omni_dyn_of_real(round(x));
     default: break;
   }
   double y = want_real(b, "Math");
   /* NaN 会传染，而且 Math.max(-0, 0) 是 0 —— 用 fmax/fmin 正好是这个语义 */
   if (op == 'M') return omni_dyn_of_real(isnan(x) || isnan(y) ? (double)NAN : fmax(x, y));
   if (op == 'm') return omni_dyn_of_real(isnan(x) || isnan(y) ? (double)NAN : fmin(x, y));
+  if (op == 'p') return omni_dyn_of_real(pow(x, y));
+  if (op == 'o') return omni_dyn_of_real(fmod(x, y));
   omni_errorf("unknown Math op '%c'", op);
   return omni_dyn_null();
 }
