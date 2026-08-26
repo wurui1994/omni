@@ -60,10 +60,12 @@ const RT_OPS = new Map([
   ['trunc', { sym: 'omni_trunc', ret: 'i64', params: ['double'] }],
   // 同一件事的两个名字：WAT 前端发的是 `trunc`，Omni 前端按接收者单态化成 `trunc.real`
   ['trunc.real', { sym: 'omni_trunc', ret: 'i64', params: ['double'] }],
-  // 刻意**没有** str.int / str.real / str.bool 这些转换：它们都是真符号、签名也照
-  // `[2 x i64]` 那条规则推得出来，但现在没有一份 case 走得到（核心方言不含类型转换，
-  // 而 Omni 那边用到它们的程序都带容器，早在别处就被拒了）。没测过的 ABI 断言
-  // 和猜是一回事 —— 等有用例了再加，那时它是被验证的，不是被推断的。
+  // 数值/布尔 -> 字符串。这三条**原先刻意没有**，理由是"没有一份 case 走得到，
+  // 没测过的 ABI 断言和猜是一回事"。现在有了：核心方言的 `(tostr E)` 就走它们
+  // （ADR-0014 决策 1）。三个都是 omni.h 里声明的真符号，返回 omni_str = [2 x i64]。
+  ['to_string.int', { sym: 'omni_str_int', ret: '[2 x i64]', params: ['i64'] }],
+  ['to_string.real', { sym: 'omni_str_real', ret: '[2 x i64]', params: ['double'] }],
+  ['to_string.bool', { sym: 'omni_str_bool', ret: '[2 x i64]', params: ['i1 zeroext'] }],
 ]);
 
 /** i64 比较 -> icmp 谓词；f64 -> fcmp 谓词。顺序与 OP.EQ..OP.GT 一致。 */

@@ -22,7 +22,7 @@
  *         | (brk) | (cont)
  *         | (ret [E]) | (print E) | (expr E)
  *         | (bset E E E) | (dispatch NAME E E...)
- *   E     = (int TEXT) | (real TEXT) | (bool TEXT) | (str "…")
+ *   E     = (int TEXT) | (real TEXT) | (bool TEXT) | (str "…") | (tostr E)
  *         | (var NAME) | (bin "OP" E E) | (un "OP" E) | (call NAME E...)
  *         | (splat TYPE E) | (vlit TYPE E...) | (lane E N) | (hsum E)
  *         | (bnew TYPE E) | (bget E E) | (blen E) | (gid)
@@ -424,6 +424,19 @@ class CoreLowerer {
     if (h === 'str') {
       if (!isStr(n.items[1])) return this.err(n, '(str "…") 要一个字符串字面量');
       return { kind: 'Const', type: STRING, value: n.items[1].value };
+    }
+    // `(tostr E)`：数值/布尔 -> 字符串。OIR 的 `to_string` 早就在（四个消费方都认它），
+    // 方言这边一直没开口，于是"把数拼进一句话里"在这一层根本写不出来 —— 而那是任何
+    // 语言的 `write("x = ", x)` 都要的。刻意**不**做隐式转换：`+` 两边照旧必须同型，
+    // 要拼就显式写出这一步。格式跟 print 的同一份（ADR-0005 的 %.6g），不另造一份。
+    if (h === 'tostr') {
+      const v = this.expr(n.items[1]);
+      if (v === null) return null;
+      const k = v.type.k;
+      if (k !== 'int' && k !== 'real' && k !== 'bool') {
+        return this.err(n, `(tostr E) 只接受 int / real / bool，这里是 ${coreTypeText(v.type)}`);
+      }
+      return { kind: 'Builtin', name: 'to_string', args: [v], type: STRING, argType: v.type };
     }
     if (h === 'var') {
       const nm = isAtom(n.items[1]) ? n.items[1].value : null;

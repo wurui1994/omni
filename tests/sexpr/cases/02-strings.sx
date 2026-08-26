@@ -33,4 +33,12 @@
     ;; 非 ASCII：Omni string 是 UTF-8 字节序列（ADR-0005），比较就是字节序
     (print (bin "+" (str "中") (str "文")))
     (print (bin "<" (str "a") (str "中")))
-    (print (call twice (str "😀")))))
+    (print (call twice (str "😀")))
+
+    ;; (tostr E)：数值/布尔拼进句子里。三种参数类型各一条 —— LLVM 那条腿是按
+    ;; `to_string.类型` 单态查符号表的，漏一个就只有那一种类型会炸。
+    ;; 格式跟 print 的同一份（real 是 %.6g），所以这里的期望值也钉住了"不另造一份格式"。
+    (print (bin "+" (str "n = ") (tostr (int -42))))
+    (print (bin "+" (str "r = ") (tostr (bin "/" (real 1.0) (real 3.0)))))
+    (print (bin "+" (bin "+" (tostr (bool true)) (str "/")) (tostr (bool false))))
+    (print (bin "+" (bin "+" (tostr (int 1)) (str "\t")) (tostr (int 2))))))

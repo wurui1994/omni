@@ -1,0 +1,1 @@
+(tostr E) 只接受 int / real / bool，这里是 string

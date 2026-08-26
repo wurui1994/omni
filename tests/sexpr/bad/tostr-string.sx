@@ -1,0 +1,5 @@
+;; (tostr E) 不接受 string：那是"已经是字符串了"，写它说明想的是别的事。
+;; 也不做隐式转换 —— `+` 两边照旧必须同型，要拼就显式写出 tostr 这一步。
+(module
+  (main
+    (print (bin "+" (str "s = ") (tostr (str "already"))))))
