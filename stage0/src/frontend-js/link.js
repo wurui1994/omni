@@ -59,6 +59,7 @@ const NATIVE_OPS = {
   hasJsEngine: 'js_has_engine',
   typeTag: 'js_type_tag',
   fmtReal: 'js_fmt_real',
+  fmtRealG: 'js_fmt_real_g',
   reprReal: 'js_repr_real',
   callJsOp: 'js_call_op',
   wrapFn: 'js_wrap_fn',

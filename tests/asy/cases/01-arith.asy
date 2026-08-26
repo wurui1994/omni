@@ -30,8 +30,8 @@ write(c);
 --c;
 write(c);
 real r = 2.5;
-// real 的**打印**还没做（asy 是 %.15g，这一层是 %.6g，见 bad/write-real.asy）；
-// real 的**算术**照样要钉住，所以这里比较而不是打印。
+// real 的**打印**在 06-reals.asy 里单独钉（asy 是 %.15g）；这里钉的是 real 的**算术**，
+// 所以比较而不是打印 —— 一份用例只证一件事。
 write(r * 2 == 5.0);
 write(r + 0.5 == 3.0);
 write(-r < 0);

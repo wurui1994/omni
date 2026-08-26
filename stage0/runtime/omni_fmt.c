@@ -4,6 +4,16 @@
 
 omni_str omni_str_int(int64_t v) { return omni_str_fmt("%lld", (long long)v); }
 omni_str omni_str_real(double v) { return omni_str_fmt("%.6g", v); }
+
+/* `(tostr E N)`：按 N 位有效数字。位数由方言限死在 1..17（那里检查，这里只兜底），
+   因为 %.0g 在 C 里没有定义，而超过 17 位对 double 没有意义。 */
+omni_str omni_str_realg(double v, int64_t p) {
+  int n = (int)p;
+  if (n < 1) n = 1;
+  if (n > 17) n = 17;
+  return omni_str_fmt("%.*g", n, v);
+}
+
 omni_str omni_str_bool(bool v) { return omni_str_new(v ? "true" : "false", v ? 4 : 5); }
 omni_str omni_str_string(omni_str v) { return v; }
 

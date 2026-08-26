@@ -228,10 +228,10 @@ bison **隐式**的选择写成**显式**的优先级声明 —— 悬垂 else�
 2. **非绘图部分的执行**，与真正的 `asy` 二进制逐字节比对：pair/triple、数组与切片、
    struct + `operator init`、重载解析、`write`。`asy` 装在机器上，所以这道门槛有现成的
    oracle —— 跟 `tests/oracle` 那条轴同一个口径。**第一刀已落地**（`tests/asy` 那一节）：
-   int/real 算术、两种引号的字符串、bool、控制流（含 `? :`）、函数、`write`，五份用例
-   在五个执行器上与 `asy -noV` 逐字节相同。**还没做**的是 real 的 `%.15g` 打印、数组与
-   切片、pair/triple、struct + `operator init`、重载解析 —— 每一条都在 `tests/asy/bad/`
-   里有一份带 `ASY_NOPE` 的用例钉着，不是含糊的"待办"。
+   int/real 算术与输出（含 `%.15g`）、两种引号的字符串、bool、控制流（含 `? :`）、函数、
+   `write`，六份用例在五个执行器上与 `asy -noV` 逐字节相同。**还没做**的是数组与切片、
+   pair/triple、struct + `operator init`、重载解析、real 上的 `^` —— 每一条都在
+   `tests/asy/bad/` 里有一份带 `ASY_NOPE` 的用例钉着，不是含糊的"待办"。
 3. **绘图层**：path/guide 的 Bezier（含 tension / 方向求解）、pen、transform、
    picture 的延迟绘制、EPS 输出。「执行全部 asy 模块」的大头在这里。**还没做。**
 4. **jancy 核心语法与执行** —— 语法已经有（下一节），执行**还没做**；而且要先有一份
@@ -282,11 +282,20 @@ bison **隐式**的选择写成**显式**的优先级声明 —— 悬垂 else�
   理由写的是「没有一份 case 走得到，没测过的 ABI 断言和猜是一回事」。现在有 case 了，
   三条按 `omni_str = [2 x i64]` 那条规则加上，五条腿输出逐字节相同（量过，不是推的）。
 
-**real 的格式仍然对不上**：`tostr` 与 `print` 共用 `%.6g` 那一份，asy 要 `%.15g`。
-这一步刻意没顺手做 —— 「按有效位数格式化」是运行时那一层的新符号，六条腿都要动，
-该单独一刀，而不是塞在这一刀里。
+**real 的格式对上了**：`(tostr E N)` 按 **N 位有效数字**格式化（N 只收 1..17 的字面量：
+位数是格式的一部分，不是运行期才知道的东西）。asy 那边就是 `(tostr E (int 15))`，逐条量过
+都相同：`1/3` → `0.333333333333333`、`sqrt(2)` → `1.4142135623731`、`1e-5` → `1e-05`、
+`-0.0` → `-0`、`1.23456789012346e+17`。这一刀动了六个地方，都是"接上已有的那一份"而不是
+新写一份浮点格式化：`omni_str_realg`（C 运行时的 `%.*g`）、`$str_real_g`（JS prelude 的
+`$fmt_g`）、`fmtRealG`（node 宿主）、`js_fmt_real_g`（js_abi，给解释器）、LLVM 的
+`RT_OPS['to_string_g.real']`、以及 MIR ——  MIR 的 `CALLOP` 名字是从 OIR 直接带过去的，
+所以那条腿一行没改就通了。默认的 `(tostr E)` 仍然是 `%.6g`（ADR-0005 那条"看值用的"规则
+没动）。
 
-### 已落地的形状：asy 前端第一刀（第十五条测试轴 `tests/asy/`，14 条）
+**还欠一条同样形状的**：real 上的 `^` 要一个 `pow`，那也是运行时的新符号，单独一刀
+（`tests/asy/bad/pow-real.asy` 钉着）。
+
+### 已落地的形状：asy 前端第一刀（第十五条测试轴 `tests/asy/`，15 条）
 
 `stage0/src/frontend-asy/lower.js`（约 820 行）把 asy 语法树降成核心方言的**文本**，
 `omni emit-asy x.asy` 印出那份文本，`omni run/run-c/interp/interp --mir/run-llvm x.asy`
@@ -317,7 +326,7 @@ bison **隐式**的选择写成**显式**的优先级声明 —— 悬垂 else�
 
 第一刀的边界都在 `tests/asy/bad/`（9 条，每条的期望值都必须以 `ASY_NOPE` 开头 ——
 "还没做"和"做错了"必须能一眼分开）：数组、struct、pair、重载、模块（import/access）、
-隐式缩放（`105cm`）、real 的 `%.15g` 打印、函数里读文件级变量（核心方言没有全局量）、
+隐式缩放（`105cm`）、real 上的 `^`（要 pow）、函数里读文件级变量（核心方言没有全局量）、
 循环条件里的 `? :`。
 
 两处**明写的语义差**（不是漏，是这一刀不打算做那条运行期检查）：整数溢出按位回绕而不报错；

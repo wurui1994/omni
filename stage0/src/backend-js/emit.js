@@ -405,6 +405,7 @@ class JsEmitter {
     switch (e.name) {
       case 'print': return `$print($str_${e.argType.k}(${a[0]}))`;
       case 'to_string': return `$str_${e.argType.k}(${a[0]})`;
+      case 'to_string_g': return `$str_real_g(${a[0]}, ${a[1]})`;
       case 'trunc': return `$trunc(${a[0]})`;
       case 'chr': return `$chr(${a[0]})`;
       case 'fail': return `$rt_error(${a[0]})`;

@@ -66,6 +66,9 @@ const RT_OPS = new Map([
   ['to_string.int', { sym: 'omni_str_int', ret: '[2 x i64]', params: ['i64'] }],
   ['to_string.real', { sym: 'omni_str_real', ret: '[2 x i64]', params: ['double'] }],
   ['to_string.bool', { sym: 'omni_str_bool', ret: '[2 x i64]', params: ['i1 zeroext'] }],
+  // `(tostr E N)`：按 N 位有效数字。位数是普通 i64 实参，不是常量折进符号名 ——
+  // 那样每多一个位数就多一个符号，而 ABI 里多一个 i64 什么都不用改。
+  ['to_string_g.real', { sym: 'omni_str_realg', ret: '[2 x i64]', params: ['double', 'i64'] }],
 ]);
 
 /** i64 比较 -> icmp 谓词；f64 -> fcmp 谓词。顺序与 OP.EQ..OP.GT 一致。 */

@@ -931,6 +931,7 @@ class CEmitter {
     switch (e.name) {
       case 'print': return `omni_print_${e.argType.k}(${a[0]})`;
       case 'to_string': return `omni_str_${e.argType.k}(${a[0]})`;
+      case 'to_string_g': return `omni_str_realg(${a[0]}, ${a[1]})`;
       case 'trunc': return `omni_trunc(${a[0]})`;
       case 'chr': return `omni_chr(${a[0]})`;
       case 'fail': return `omni_fail(${a[0]})`;

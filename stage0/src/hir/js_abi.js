@@ -230,6 +230,8 @@ export const JS_ABI = {
   // （prelude 的 $fmt_real/$repr_real、runtime 的 omni_str_real/omni_repr_real），
   // 于是解释执行与编译执行打印出同一串字符是构造性的，不靠三份代码碰巧一致。
   js_fmt_real: { js: '$js_fmt_real', c: 'omni_js_fmt_real', arity: 1 },
+  // 同上，但按 N 位有效数字 —— 核心方言的 `(tostr E N)` 在解释器上走这一条。
+  js_fmt_real_g: { js: '$js_fmt_real_g', c: 'omni_js_fmt_real_g', arity: 2 },
   js_repr_real: { js: '$js_repr_real', c: 'omni_js_repr_real', arity: 1 },
   js_eval: { js: '$js_eval', c: 'omni_js_eval', arity: 1 },
   js_eval_captured: { js: '$js_eval_captured', c: 'omni_js_eval_captured', arity: 1 },

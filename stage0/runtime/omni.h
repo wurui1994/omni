@@ -127,6 +127,7 @@ char *omni_cstr(omni_str s);
 /* omni_fmt.c */
 omni_str omni_str_int(int64_t v);
 omni_str omni_str_real(double v);
+omni_str omni_str_realg(double v, int64_t p);
 omni_str omni_str_bool(bool v);
 omni_str omni_str_string(omni_str v);
 omni_str omni_repr_real(double v);
@@ -188,6 +189,7 @@ omni_dyn omni_js_type_tag(omni_dyn v);
 /* real 的两种文本化，给解释器用（ADR-0013）。就是 print / repr 自己用的那两个函数，
    所以解释执行与编译执行打印出同一串字符 —— 不是两份代码碰巧一致。 */
 omni_dyn omni_js_fmt_real(omni_dyn v);
+omni_dyn omni_js_fmt_real_g(omni_dyn v, omni_dyn p);
 omni_dyn omni_js_repr_real(omni_dyn v);
 /* 解释器的函数值那两条（js_wrap_fn / js_call_fn，ADR-0013 决策 3）都要用 omni_js_call，
    那个是 OMNI_JS_ARR 摊出来的 static，所以它们在 omni_js_arr.h 里，不在这里。 */

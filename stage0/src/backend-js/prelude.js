@@ -82,6 +82,10 @@ function $fmt_g(x, P) {
 
 const $fmt_real = (x) => $fmt_g(x, 6);
 
+// (tostr E N)：按 N 位有效数字。位数在 Omni 里是 int，也就是 BigInt，$fmt_g 要的是
+// 普通数，所以这里转一下 —— 别的地方谁都别再自己转。
+const $str_real_g = (x, p) => $fmt_g(x, Number(p));
+
 // 序列化用：取 15/16/17 位里第一个能往返的，两个后端都做同一件事，结果逐位一致。
 // 末尾补 ".0"：否则整数值的 real 序列化成 "1000"，再解析回来就变成 int 了 —— 类型往返也要无损。
 function $repr_real(x) {
@@ -990,6 +994,7 @@ function $js_type_tag(v) {
 // real 的两种文本化，给解释器用（ADR-0013）。刻意就是 print / repr 自己用的那两个函数 ——
 // 解释器不再写第三份浮点格式化，于是"同一个 double 打印成同一串字符"是构造性的。
 function $js_fmt_real(x) { return $fmt_real(x); }
+function $js_fmt_real_g(x, p) { return $str_real_g(x, p); }
 function $js_repr_real(x) { return $repr_real(x); }
 // 解释器的函数值（ADR-0013 决策 3）。传进来的 f 是解释器自己那个两形参的 lambda，降级后
 // 它的实参是**一条表**（JS 域的唯一签名），所以这里要造一条转接记录：宿主按 fp(self, args)

@@ -22,7 +22,7 @@
  *         | (brk) | (cont)
  *         | (ret [E]) | (print E) | (expr E)
  *         | (bset E E E) | (dispatch NAME E E...)
- *   E     = (int TEXT) | (real TEXT) | (bool TEXT) | (str "…") | (tostr E)
+ *   E     = (int TEXT) | (real TEXT) | (bool TEXT) | (str "…") | (tostr E) | (tostr E N)
  *         | (toreal E) | (toint E)
  *         | (var NAME) | (bin "OP" E E) | (un "OP" E) | (call NAME E...)
  *         | (splat TYPE E) | (vlit TYPE E...) | (lane E N) | (hsum E)
@@ -437,7 +437,22 @@ class CoreLowerer {
       if (k !== 'int' && k !== 'real' && k !== 'bool') {
         return this.err(n, `(tostr E) 只接受 int / real / bool，这里是 ${coreTypeText(v.type)}`);
       }
-      return { kind: 'Builtin', name: 'to_string', args: [v], type: STRING, argType: v.type };
+      if (n.items[2] === undefined) {
+        return { kind: 'Builtin', name: 'to_string', args: [v], type: STRING, argType: v.type };
+      }
+      // `(tostr E N)`：按 **N 位有效数字** 格式化，只对 real 有意义。加它是因为默认那份
+      // %.6g 是"看值用的"（ADR-0005），而别的语言有自己的默认位数 —— asy 是 %.15g，
+      // 逐字节对不上就等于没做。N 只收 1..17 的字面量：位数是格式的一部分，不是运行期
+      // 才知道的东西，写死了后端就能把它当常量传下去，也不会出现 %.0g 这种没有定义的东西。
+      if (k !== 'real') return this.err(n, `(tostr E N) 的位数只对 real 有意义，这里是 ${coreTypeText(v.type)}`);
+      const p = this.expr(n.items[2]);
+      if (p === null) return null;
+      if (p.kind !== 'Const' || p.type.k !== 'int') return this.err(n.items[2], '(tostr E N) 的 N 要是 int 字面量');
+      const digits = Number(p.value);
+      if (!Number.isInteger(digits) || digits < 1 || digits > 17) {
+        return this.err(n.items[2], `(tostr E N) 的 N 要在 1..17 之间，这里是 ${digits}`);
+      }
+      return { kind: 'Builtin', name: 'to_string_g', args: [v, p], type: STRING, argType: REAL };
     }
     // `(toreal E)` / `(toint E)`：int <-> real 的**显式**转换。同一条纪律：类型不推导、
     // 不插隐式转换，所以两个方向都得写出来。OIR 侧两个都是现成的（Cast int->real、

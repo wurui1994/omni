@@ -41,4 +41,17 @@
     (print (bin "+" (str "n = ") (tostr (int -42))))
     (print (bin "+" (str "r = ") (tostr (bin "/" (real 1.0) (real 3.0)))))
     (print (bin "+" (bin "+" (tostr (bool true)) (str "/")) (tostr (bool false))))
-    (print (bin "+" (bin "+" (tostr (int 1)) (str "\t")) (tostr (int 2))))))
+    (print (bin "+" (bin "+" (tostr (int 1)) (str "\t")) (tostr (int 2))))
+
+    ;; (tostr E N)：按 N 位有效数字。加它的理由是别的语言有别的默认位数（asy 是 %.15g），
+    ;; 而"看值用的" %.6g 逐字节对不上。五条腿必须给出同一串字符 —— C 走 %.*g、两条 JS
+    ;; 走同一份 $fmt_g、LLVM 走 omni_str_realg，四份实现只有这一条用例盯着。
+    (print (tostr (bin "/" (real 1.0) (real 3.0)) (int 15)))
+    (print (tostr (bin "+" (real 0.1) (real 0.2)) (int 15)))
+    (print (tostr (real 1e20) (int 15)))
+    (print (tostr (real 1e-5) (int 15)))
+    (print (tostr (un "-" (real 0.0)) (int 15)))
+    (print (tostr (real 123456789012345678.0) (int 15)))
+    ;; 两头：1 位和 17 位（%.0g 没有定义，18 位对 double 没有意义 —— 方言把 N 限在 1..17）
+    (print (tostr (real 1234.5678) (int 1)))
+    (print (tostr (real 1234.5678) (int 17)))))

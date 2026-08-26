@@ -240,6 +240,11 @@ export function fmtReal(x) {
   return fmtG(x, 6);
 }
 
+/** `(tostr E N)` 上的 real：N 位有效数字。位数是 int，也就是 BigInt，这里转一次 */
+export function fmtRealG(x, p) {
+  return fmtG(x, Number(p));
+}
+
 /** repr 上的 real：15/16/17 位里第一个能往返的，末尾补 ".0" 让类型也往返 */
 export function reprReal(x) {
   for (let p = 15; p <= 17; p++) {

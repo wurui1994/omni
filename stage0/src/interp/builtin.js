@@ -11,7 +11,7 @@
 // 语言子集里的东西：不用 TextEncoder（自己按 UTF-8 编）、不用 new Function、不用正则字面量
 // 以外的正则。
 
-import { stdout, typeTag, fmtReal, reprReal, callJsOp } from '../host/native.js';
+import { stdout, typeTag, fmtReal, fmtRealG, reprReal, callJsOp } from '../host/native.js';
 import { JS_ABI, JS_MEMBERS } from '../hir/js_abi.js';
 import { OmniError } from '../source/diag.js';
 
@@ -593,6 +593,7 @@ export function applyBuiltin(I, e, a) {
   switch (e.name) {
     case 'print': printLine(strOf(e.argType.k, a[0])); return undefined;
     case 'to_string': return strOf(e.argType.k, a[0]);
+    case 'to_string_g': return fmtRealG(a[0], a[1]);
     case 'trunc': return truncReal(a[0]);
     case 'chr': return chrOf(a[0]);
     case 'fail': rtError(a[0]); return undefined;

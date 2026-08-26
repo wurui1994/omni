@@ -18,14 +18,14 @@
 // ## 第一刀的边界（都是**刻意**的，不是漏的）
 //
 // 支持：int / real / bool / string 四种标量、变量与赋值、`+ - * / # % ^` 与比较、
-// `&& ||`、一元 `- !`、`++ --` 与 `+= -= *= /=`、if/else、while、do-while、C 式 for、
-// break/continue、函数（含递归）、`(int)`/`(real)` 强制转换、`write`。
+// `&& ||`、一元 `- !`、`++ --` 与 `+= -= *= /=`、`?:`、if/else、while、do-while、
+// C 式 for、break/continue、函数（含递归）、`(int)`/`(real)` 强制转换、`write`
+// （含 real 的 %.15g —— 核心方言的 `(tostr E N)` 就是为它加的）。
 //
 // 不支持（见到就报错，报错里说清是哪一条）：数组、pair/triple、struct、import/access、
-// typedef、算符重载、重载解析、默认实参、命名实参、`?:`、for-each、real 的 write。
-// 最后一条是量出来的硬边界：asy 的实数默认输出是 `%.15g`，核心方言的 print 是 `%.6g`
-// （ADR-0005），格式对不上就不该假装能跑 —— 那要给运行时补一个按有效位数格式化的符号，
-// 是另一刀的事。
+// typedef、算符重载、重载解析、默认实参、命名实参、for-each、real 上的 `^`（要 pow，
+// 运行时还没有这个符号）、循环条件里的 `?:`（摊出来的赋值只能落在循环外面，条件就只
+// 算一次了 —— 语义会变，所以报错而不是悄悄换个意思）。
 //
 // ## 与真 asy 的差别，写在这里而不是等着被发现
 //
@@ -430,7 +430,6 @@ class AsyLower {
     for (const a of args) {
       const v = this.expr(a);
       if (v === null) return null;
-      if (v.type === 'real') return this.nope(a, 'write 一个 real（asy 是 %.15g，这一层的 print 是 %.6g）');
       if (v.type === 'void') return this.err(a, 'write 的实参不能是 void');
       vals.push(v);
     }
@@ -446,6 +445,9 @@ class AsyLower {
     }
     const parts = vals.map((v) => {
       if (v.type === 'string') return v.code;
+      // real 用 15 位有效数字 —— asy 的默认输出就是 %.15g（量过：1/3 是
+      // 0.333333333333333、sqrt(2) 是 1.4142135623731、1e-5 是 1e-05、-0.0 是 -0）
+      if (v.type === 'real') return `(tostr ${v.code} (int 15))`;
       if (v.type !== 'bool') return `(tostr ${v.code})`;
       this.used.add('asy__boolstr');
       return `(call asy__boolstr ${v.code})`;

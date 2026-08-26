@@ -74,6 +74,14 @@ omni_dyn omni_js_fmt_real(omni_dyn v) {
   return omni_dyn_of_s16(omni_s16_of_utf8(omni_str_real(want_fmt_num(v, "fmtReal"))));
 }
 
+/* 按 N 位有效数字。解释器上的 `(tostr E N)` 走这一条，于是它与两个后端印出的是同一串
+   字符（用的就是后端自己那份 omni_str_realg）。 */
+omni_dyn omni_js_fmt_real_g(omni_dyn v, omni_dyn p) {
+  double x = want_fmt_num(v, "fmtRealG");
+  int64_t n = (int64_t)want_fmt_num(p, "fmtRealG");
+  return omni_dyn_of_s16(omni_s16_of_utf8(omni_str_realg(x, n)));
+}
+
 omni_dyn omni_js_repr_real(omni_dyn v) {
   return omni_dyn_of_s16(omni_s16_of_utf8(omni_repr_real(want_fmt_num(v, "reprReal"))));
 }
