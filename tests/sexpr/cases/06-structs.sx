@@ -1,0 +1,85 @@
+(module
+  ;; 结构体 —— 门槛 2 第十二刀。值语义（ADR-0005）：赋值、传参、返回都是复制。
+  ;; 字段这一刀只收标量，理由见 sexpr/lower.js 的 structDec（每条腿的"结构体零值"
+  ;; 是各自一个小函数，今天只认标量）。
+  (struct Point (x real) (y real))
+  (struct Tag (name string) (n int) (ok bool))
+
+  ;; 传参是复制：改形参不动实参
+  (fn bump ((p Point)) real
+    (fldset (var p) x (bin "+" (fld (var p) x) (real 100.0)))
+    (ret (fld (var p) x)))
+
+  ;; 返回也是复制
+  (fn mk ((a real) (b real)) Point
+    (let p Point (new Point))
+    (fldset (var p) x (var a))
+    (fldset (var p) y (var b))
+    (ret (var p)))
+
+  ;; 结构体当形参、只读
+  (fn dist2 ((p Point)) real
+    (ret (bin "+" (bin "*" (fld (var p) x) (fld (var p) x))
+                  (bin "*" (fld (var p) y) (fld (var p) y)))))
+
+  (main
+    ;; 零值
+    (let z Point (new Point))
+    (print (fld (var z) x))
+    (print (fld (var z) y))
+
+    ;; 读写字段
+    (let p Point (call mk (real 1.5) (real 2.5)))
+    (print (fld (var p) x))
+    (print (fld (var p) y))
+    (fldset (var p) y (bin "*" (fld (var p) y) (real 2.0)))
+    (print (fld (var p) y))
+    (print (call dist2 (var p)))
+
+    ;; 赋值是复制：改 q 不动 p
+    (let q Point (var p))
+    (fldset (var q) x (real 9.0))
+    (print (fld (var p) x))
+    (print (fld (var q) x))
+
+    ;; 传参是复制：bump 里 +100，回来 p 还是原来的
+    (print (call bump (var p)))
+    (print (fld (var p) x))
+
+    ;; 三种标量字段
+    (let t Tag (new Tag))
+    (print (fld (var t) name))
+    (print (fld (var t) n))
+    (print (fld (var t) ok))
+    (fldset (var t) name (bin "+" (str "ab") (str "c")))
+    (fldset (var t) n (int 7))
+    (fldset (var t) ok (bool true))
+    (print (fld (var t) name))
+    (print (fld (var t) n))
+    (print (fld (var t) ok))
+    (print (slen (fld (var t) name)))
+
+    ;; 字段进条件与算术
+    (if (fld (var t) ok)
+      (do (print (bin "*" (fld (var t) n) (int 3))))
+      (do (print (int -1))))
+
+    ;; 循环里反复新建：每次都是新的零值（LLVM 那条腿的 alloca 提到入口块，
+    ;; 所以这一段同时在盯"同一块栈被复用会不会串味"）
+    (let i int (int 0))
+    (let acc real (real 0.0))
+    (while (bin "<" (var i) (int 3))
+      (do
+        (let e Point (new Point))
+        (fldset (var e) x (toreal (var i)))
+        (set acc (bin "+" (var acc) (fld (var e) x)))
+        (set i (bin "+" (var i) (int 1)))))
+    (print (var acc))
+
+    ;; 复制之后原件与副本各写一次，两边都要独立
+    (let a Tag (new Tag))
+    (fldset (var a) n (int 1))
+    (let b Tag (var a))
+    (fldset (var b) n (int 2))
+    (print (fld (var a) n))
+    (print (fld (var b) n))))

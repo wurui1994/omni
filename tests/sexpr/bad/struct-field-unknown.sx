@@ -1,0 +1,7 @@
+;; 字段名写错了。诊断要把有哪些字段一起说出来 —— 拼错字段名是最常见的手误，
+;; "没有这个字段"这句话本身帮不上忙。
+(module
+  (struct Point (x real) (y real))
+  (main
+    (let p Point (new Point))
+    (print (fld (var p) z))))

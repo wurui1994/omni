@@ -24,4 +24,13 @@ export const SUPPORTED = [
   // 缓冲 + kernel/dispatch（门槛 7 第一阶段）：`{i64, ptr}` 与 arena 快路径都在 IR 里重建，
   // 所以这条腿和 C 那条腿分到的内存在同一个池里。
   join('tests', 'sexpr', 'cases', '04-buffers.sx'),
+  // 数组（门槛 2 第四刀）：六条指令全是 call 运行时符号，run-c 那条腿调的是同一个符号。
+  join('tests', 'sexpr', 'cases', '05-arrays.sx'),
+  // 结构体（门槛 2 第十二刀）：值是指向自己那块内存的指针，NEW/COPY 从 arena 拿，
+  // FLD/FLDSET 是 getelementptr + load/store。
+  join('tests', 'sexpr', 'cases', '06-structs.sx'),
+  // 这一份是**边界那节推过来的**：结构体一支持，01_basics 就整份能降了（它原先被拒
+  // 只是因为里面有 struct）。它的输出与 run / interp / omni-c 逐字节相同，所以留在门外
+  // 就变成了"其实支持却假装不支持"—— 那正是这张表要防的另一半。
+  join('tests', 'cases', '01_basics.omni'),
 ];

@@ -1,0 +1,1 @@
+字段 Seg.a：这一刀的字段只能是 int / real / bool / string，这里是 Point

@@ -33,7 +33,7 @@ import { OmniError } from '../source/diag.js';
 import { utf8Bytes } from '../host/utf8.js';
 import {
   OP, OP_NAMES, REF_NONE, REF_BIAS, isConstRef, typeText, typeKind, typeLanes,
-  T_VOID, T_I64, T_F64, T_BOOL, T_STR, T_BUF, T_ARR, CVT_I2F, CVT_F2I,
+  T_VOID, T_I64, T_F64, T_BOOL, T_STR, T_AGG, T_BUF, T_ARR, CVT_I2F, CVT_F2I,
 } from '../mir/ir.js';
 
 /**
@@ -49,6 +49,13 @@ const LL_TYPES = new Map([
   // 数组：就是一个不透明指针。头（len/cap/items）只有运行时看得见 —— 这条腿一个字段
   // 都不摸，六条指令全是 call，所以布局不构成这里与 C 那条腿之间的约定。
   [T_ARR, 'ptr'],
+  // 结构体（ADR-0014 门槛 2 第十二刀）：**一个指向自己那块内存的指针**，不是 LLVM 的
+  // 一等聚合值。这不是偷懒，是 MIR 决定的：`FLDSET a b` 里的 `a` 是那个聚合的**值**，
+  // 指令要就地改它（两个解释器那边就是"在 JS 对象上写字段"）。一等聚合值是 SSA 的，
+  // `insertvalue` 出来的是新值，改不到原处 —— 那就要在这一层反推"这个值是从哪个槽装载
+  // 来的、再存回去"，一层脆弱的别名分析。值语义靠的是 from_oir 在右值位置发的 `OP.COPY`
+  // （形参入口也发一条），所以"句柄可变 + 显式复制"这套在五条腿上是同一个模型。
+  [T_AGG, 'ptr'],
 ]);
 
 /**
@@ -136,6 +143,8 @@ class LlvmEmitter {
     this.arrElems = new Map();
     // 聚合元素的数组用到了没有：那一组符号与元素类型无关（按字节），一份 declare 就够
     this.needArrBlob = false;
+    // 结构体用到了没有：用到就要发 arena 的那个私有分配器（缓冲那一节本来就要它）
+    this.aggUsed = false;
   }
 
   line(s) { this.out.push(s); }
@@ -238,6 +247,18 @@ class LlvmEmitter {
     this.line('declare void @omni_js_check_uncaught()');
     this.line('declare i32 @fflush(ptr)');
     this.line('');
+    // 结构体的命名类型。按类型池的顺序发，与用到没用到无关 —— 判断"用到了"要先扫一遍
+    // 函数体，而多一个没人用的 `type` 在 LLVM 里没有代价，扫一遍的那点代码却要维护。
+    // 字段偏移交给 LLVM 算（getelementptr 的第三个下标就是字段号），这一层不自己算字节。
+    let sawStruct = false;
+    for (const t of this.mir.types) {
+      if (t.kind !== 'struct') continue;
+      const fs = [];
+      for (const fd of t.oir.fields) fs.push(this.fieldTy(fd.type, `${t.name}.${fd.name}`));
+      this.line(`%s_${t.name} = type { ${fs.join(', ')} }`);
+      sawStruct = true;
+    }
+    if (sawStruct) this.line('');
 
     for (const f of this.mir.funcs) this.func(f);
 
@@ -257,17 +278,20 @@ class LlvmEmitter {
       this.line('declare [2 x i64] @omni_str_cat([2 x i64], [2 x i64])');
       this.line('');
     }
-    // 缓冲：分配器的快路径 + 每种元素类型的 new/get/set。arena 的两个指针是真符号，
-    // 所以这条腿分配到的内存和 C 那条腿在同一个池里（见 ALLOC_HELPER 的注释）。
-    if (this.bufElems.size > 0) {
+    // 缓冲与结构体都从 arena 里拿内存：分配器的两个指针是真符号，所以这条腿分配到的
+    // 内存和 C 那条腿在同一个池里（见 ALLOC_HELPER 的注释）。谁先用到就谁把它发出来。
+    if (this.bufElems.size > 0 || this.aggUsed) {
       this.line('declare ptr @omni_alloc_slow(i64)');
-      this.line('declare void @omni_errorf(ptr, ...)');
       this.line('@omni_arena_ptr = external global ptr');
       this.line('@omni_arena_end = external global ptr');
+      this.line('');
+      this.line(ALLOC_HELPER);
+    }
+    if (this.bufElems.size > 0) {
+      this.line('declare void @omni_errorf(ptr, ...)');
       this.line(llCStr('@.omni_boob', 'buffer index out of range: %lld (length %lld)'));
       this.line(llCStr('@.omni_bneg', 'buffer length cannot be negative: %lld'));
       this.line('');
-      this.line(ALLOC_HELPER);
       for (const t of this.bufElems.keys()) {
         this.line(t === T_F64 ? bufHelpers('double', 8, '0.0') : bufHelpers('i64', 8, '0'));
       }
@@ -437,6 +461,13 @@ class LlvmEmitter {
       this.line(`  store ${st} ${this.val(f.a[i])}, ptr %s${f.aux[i]}`);
       return;
     }
+    // 结构体四条（ADR-0014 门槛 2 第十二刀）：NEW/COPY 从 arena 拿一块，FLD/FLDSET 是
+    // getelementptr + load/store。身份全在 aux 上（类型池 / 访问描述符池），所以这条腿
+    // 不需要"槽位上的聚合类型"这种东西 —— MIR 刻意没有它，见 mir/ir.js 的类型码那一节。
+    if (op === OP.NEW || op === OP.COPY || op === OP.FLD || op === OP.FLDSET) {
+      this.aggInsn(f, i, op, dst, t);
+      return;
+    }
     // 缓冲四条：三条走私有函数（越界检查带分支，展开会搅乱区域记账），BLEN 就地取字段
     if (op === OP.BNEW || op === OP.BLEN || op === OP.BGET || op === OP.BSET) {
       this.bufInsn(f, i, op, dst, t);
@@ -559,6 +590,97 @@ class LlvmEmitter {
     this.line(`  ${c} = call i32 @omni_ll_strcmp([2 x i64] ${this.val(f.a[i])}, `
       + `[2 x i64] ${this.val(f.b[i])})`);
     this.line(`  ${dst} = icmp ${ICMP.get(op)} i32 ${c}, 0`);
+  }
+
+  /**
+   * 结构体四条（门槛 2 第十二刀）。值是**指向自己那块内存的指针**（见 LL_TYPES 的注释）。
+   *
+   *   NEW    从 arena 拿一块，逐字段写零值
+   *   COPY   再拿一块，逐字段 load/store —— 这就是 ADR-0005 的值语义在这条腿上的落点
+   *   FLD    getelementptr + load
+   *   FLDSET getelementptr + store
+   *
+   * 内存来自 **arena**（omni_ll_alloc），不是入口块的 alloca。理由是返回值：
+   * `(fn mk () Point (ret (new Point)))` 里那块内存要活过 mk 的栈帧，alloca 出来的会悬空。
+   * arena 从不回收 —— 这与运行时其它部分（数组、字符串、class）一样，不是这一刀新引入的
+   * 取舍，见 runtime/omni.h 的分配器那一节。
+   *
+   * 逐字段而不是 memcpy：字段类型这一层本来就要认（零值要按类型写），而 memcpy 要多
+   * declare 一个 intrinsic、还要自己算大小。逐字段的另一个好处是"复制到底多深"这件事
+   * 在 IR 里看得见 —— 数组/字符串字段复制的是句柄，与 JS 后端的 `$cp_S` 逐字段拷同一个意思。
+   */
+  aggInsn(f, i, op, dst, t) {
+    if (op === OP.FLD || op === OP.FLDSET) {
+      const g = this.fresh();
+      const acc = this.access(f.aux[i]);
+      this.line(`  ${g} = getelementptr ${acc.type}, ptr ${this.val(f.a[i])}, i32 0, i32 ${acc.index}`);
+      if (op === OP.FLD) this.line(`  ${dst} = load ${this.ty(t, 'field')}, ptr ${g}`);
+      else this.line(`  store ${this.typed(f.b[i])}, ptr ${g}`);
+      return;
+    }
+    const ty = this.aggType(f.aux[i]);
+    this.aggUsed = true;
+    this.line(`  ${dst} = call ptr @omni_ll_alloc(i64 ptrtoint `
+      + `(ptr getelementptr (${ty.name}, ptr null, i32 1) to i64))`);
+    let k = 0;
+    while (k < ty.fields.length) {
+      const fd = ty.fields[k];
+      const g = this.fresh();
+      this.line(`  ${g} = getelementptr ${ty.name}, ptr ${dst}, i32 0, i32 ${k}`);
+      const lt = this.fieldTy(fd.type, `${ty.plain}.${fd.name}`);
+      if (op === OP.NEW) {
+        this.line(`  store ${lt} ${this.fieldZero(fd.type, `${ty.plain}.${fd.name}`)}, ptr ${g}`);
+      } else {
+        const s = this.fresh();
+        const v = this.fresh();
+        this.line(`  ${s} = getelementptr ${ty.name}, ptr ${this.val(f.a[i])}, i32 0, i32 ${k}`);
+        this.line(`  ${v} = load ${lt}, ptr ${s}`);
+        this.line(`  store ${lt} ${v}, ptr ${g}`);
+      }
+      k++;
+    }
+  }
+
+  /** 类型池的第 n 项 -> `{name: '%s_Foo', plain: 'Foo', fields}`。只认 struct。 */
+  aggType(n) {
+    const t = this.mir.types[n];
+    if (t === undefined || t.kind !== 'struct') {
+      throw new OmniError(`${NOPE}聚合 ${t === undefined ? n : t.kind}`
+        + `（函数 ${this.f === null ? '?' : this.f.name}）`);
+    }
+    return { name: `%s_${t.name}`, plain: t.name, fields: t.oir.fields };
+  }
+
+  /** 访问描述符的第 n 项 -> `{type: '%s_Foo', index}`。字段号就是声明顺序。 */
+  access(n) {
+    const acc = this.mir.accs[n];
+    if (acc === undefined) throw new OmniError(`llvm: 没有第 ${n} 个字段访问描述符`);
+    const ty = this.aggType(acc.type);
+    let k = 0;
+    while (k < ty.fields.length) {
+      if (ty.fields[k].name === acc.field) return { type: ty.name, index: k };
+      k++;
+    }
+    throw new OmniError(`llvm: ${ty.plain} 没有字段 ${acc.field}`);
+  }
+
+  /** 字段的 LLVM 类型。这一刀只有四种标量，表外的报错（阶段边界，与 ty() 同一条规矩）。 */
+  fieldTy(t, what) {
+    if (t.k === 'int') return 'i64';
+    if (t.k === 'real') return 'double';
+    if (t.k === 'bool') return 'i1';
+    if (t.k === 'string') return '[2 x i64]';
+    throw new OmniError(`${NOPE}结构体字段的类型 ${t.k}：${what}`);
+  }
+
+  /** 字段的零值。字符串走 strConst('')，与常量池里那份空串**同一条路** —— 不另造一个
+   *  `zeroinitializer`（空指针 + 长度 0 在运行时是另一种东西，不必去试它对不对）。 */
+  fieldZero(t, what) {
+    if (t.k === 'int') return '0';
+    if (t.k === 'real') return '0.0';
+    if (t.k === 'bool') return 'false';
+    if (t.k === 'string') return this.strConst('');
+    throw new OmniError(`${NOPE}结构体字段的零值 ${t.k}：${what}`);
   }
 
   /**

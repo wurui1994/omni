@@ -15,15 +15,16 @@
  *   (module FORM...)
  *   FORM  = (fn NAME ((p TYPE)...) TYPE STMT...)   函数
  *         | (kernel NAME ((p TYPE)...) STMT...)     GPU 核（隐含第一个形参是 gid）
+ *         | (struct NAME (字段 TYPE)...)            结构体（值语义，ADR-0005）
  *         | (main STMT...)                          入口体
  *   TYPE  = int | real | bool | string | void | (vec int|real 2|4|8) | (buf int|real)
- *         | (arr int|real|bool|string) | (arr (vec T N))
+ *         | (arr int|real|bool|string) | (arr (vec T N)) | 结构体名
  *   STMT  = (let NAME TYPE E) | (set NAME E) | (do STMT...)
  *         | (if E (do ...) [(do ...)]) | (while E (do ...))
  *         | (brk) | (cont)
  *         | (ret [E]) | (print E) | (expr E)
  *         | (bset E E E) | (dispatch NAME E E...)
- *         | (aset E E E) | (apush E E)
+ *         | (aset E E E) | (apush E E) | (fldset E 字段 E)
  *   E     = (int TEXT) | (real TEXT) | (bool TEXT) | (str "…") | (tostr E) | (tostr E N)
  *         | (rmath "NAME" A [B])
  *         | (slen E) | (ssub E I N) | (sfind E T)
@@ -32,17 +33,19 @@
  *         | (splat TYPE E) | (vlit TYPE E...) | (lane E N) | (hsum E)
  *         | (bnew TYPE E) | (bget E E) | (blen E) | (gid)
  *         | (anew TYPE E) | (aget E E) | (alen E) | (apop E)
+ *         | (new NAME) | (fld E 字段)
  *
  * 向量那四条是 ADR-0014 门槛 6 的第一阶段，见 vecExpr 的注释；
  * 缓冲与 kernel/dispatch 是门槛 7 的第一阶段，见 bufExpr 与 dispatch 的注释；
- * 数组那六条是门槛 2 的第四刀（asy 的 `T[]`），见 arrExpr 的注释。
+ * 数组那六条是门槛 2 的第四刀（asy 的 `T[]`），见 arrExpr 的注释；
+ * 结构体那三条是门槛 2 的第十二刀（asy 的 struct），见 structDec 的注释。
  *
  * 类型不推导，只**检查**：声明处写死，表达式自底向上定型，两边类型不一致就报错 ——
  * 不插隐式转换。理由与 ADR-0008 一致：这一层的职责是把树接进 OIR，
  * 而"什么能悄悄转成什么"是语言设计决定，不该由汇聚层替某门语言定。
  */
 
-import { INT, REAL, BOOL, STRING, VOID, vecType, bufType, arrType, zeroValue } from '../hir/types.js';
+import { INT, REAL, BOOL, STRING, VOID, vecType, bufType, arrType, structType, zeroValue } from '../hir/types.js';
 import { readSexpr, isList, isAtom, isStr, head } from './read.js';
 
 const TYPES = new Map([['int', INT], ['real', REAL], ['bool', BOOL], ['string', STRING], ['void', VOID]]);
@@ -73,6 +76,9 @@ class CoreLowerer {
     this.inKernel = false;
     this.tmpNo = 0;           // dispatch 展开出来的临时量编号，保证名字唯一
     this.loopDepth = 0;       // (brk) / (cont) 只在循环里合法，跟 hir/check.js 同一条规矩
+    // 结构体：名字 -> OIR 的 struct 类型对象。**声明就是类型**（hir/types.js 的 structType），
+    // 所以这张表里的对象和每个 (fld …) 节点上挂的 `type` 是同一个对象，与 hir/check.js 一致。
+    this.structs = new Map();
   }
 
   err(node, msg) {
@@ -119,7 +125,10 @@ class CoreLowerer {
       return vecType(e, n);
     }
     if (!isAtom(node) || !TYPES.has(node.value)) {
-      return this.err(node, `${what} 的类型只能是 int / real / bool / string / void / (vec T N) / (buf T) / (arr T)`);
+      // 结构体名（第十二刀）：方言里用户能起的类型名只有这一种，所以放在内建名单后面查 ——
+      // 内建名字不可能被遮蔽（struct 那一遍会拒掉重名）。
+      if (isAtom(node) && this.structs.has(node.value)) return this.structs.get(node.value);
+      return this.err(node, `${what} 的类型只能是 int / real / bool / string / void / (vec T N) / (buf T) / (arr T) / 结构体名`);
     }
     return TYPES.get(node.value);
   }
@@ -142,7 +151,13 @@ class CoreLowerer {
       return null;
     }
     const forms = top.items.slice(1);
-    // 两遍：先收签名，函数才能互相调用（也才能递归）
+    // 三遍。第一遍收结构体：函数签名与字段类型都可能提到它，所以它必须最先成型。
+    // 字段类型里**不许再出现结构体**（见 structDec），于是结构体之间没有顺序问题，
+    // 一遍就够 —— 这条限制不是省事，理由写在 structDec 的注释里。
+    for (const f of forms) {
+      if (head(f) === 'struct') this.structDec(f);
+    }
+    // 第二遍收函数签名，函数才能互相调用（也才能递归）
     for (const f of forms) {
       const h = head(f);
       if (h !== 'fn' && h !== 'kernel') continue;
@@ -181,6 +196,46 @@ class CoreLowerer {
       out.push({ name: p.items[0].value, type: t });
     }
     return out;
+  }
+
+  /**
+   * `(struct Point (x real) (y real))` -> 一个 OIR struct 类型，登记进 this.structs。
+   *
+   * **值语义**（ADR-0005）：赋值、传参、返回都是复制。这一层不为它写任何代码 ——
+   * OIR 的消费者早就各有一份（解释器的 copyOf、JS 后端的 `$cp_S`、C 后端的原生 `=`、
+   * MIR 的 `OP.COPY`），方言这边只要把节点发对。
+   *
+   * **字段类型这一刀只收 int / real / bool / string**。不是懒：每条腿的"结构体零值"
+   * 都是一个**独立**的小函数（JS 后端的 `zero`、C 后端的 `zeroExpr`、解释器的 `zeroOf`），
+   * 它们今天只认标量 —— 向量/数组字段要先把这三处各补一遍，还要在 LLVM 那条腿上决定
+   * "字段是数组时复制的是句柄还是内容"。那是下一刀，`tests/sexpr/bad/struct-field-arr.sx`
+   * 与 `struct-in-struct.sx` 钉着现在的边界。
+   */
+  structDec(n) {
+    const nm = isAtom(n.items[1]) ? n.items[1].value : null;
+    if (nm === null) return this.err(n, '(struct NAME (字段 类型)...) 缺名字');
+    if (TYPES.has(nm)) return this.err(n, `'${nm}' 是内建类型名，不能当结构体名`);
+    if (this.structs.has(nm)) return this.err(n, `结构体 '${nm}' 重复定义`);
+    const fields = [];
+    const seen = new Map();
+    for (const fd of n.items.slice(2)) {
+      if (!isList(fd) || fd.items.length !== 2 || !isAtom(fd.items[0])) {
+        return this.err(fd, '一个字段是 (名字 类型)');
+      }
+      const fn = fd.items[0].value;
+      if (seen.has(fn)) return this.err(fd, `结构体 '${nm}' 里有两个字段叫 '${fn}'`);
+      const t = this.ty(fd.items[1], `字段 ${nm}.${fn}`);
+      if (t === null) return null;
+      if (t !== INT && t !== REAL && t !== BOOL && t !== STRING) {
+        return this.err(fd, `字段 ${nm}.${fn}：这一刀的字段只能是 int / real / bool / string，`
+          + `这里是 ${coreTypeText(t)}`);
+      }
+      seen.set(fn, true);
+      fields.push({ name: fn, type: t });
+    }
+    if (fields.length === 0) return this.err(n, `结构体 '${nm}' 至少要有一个字段`);
+    this.structs.set(nm, structType(nm, fields));
+    return null;
   }
 
   assemble(forms) {
@@ -224,13 +279,18 @@ class CoreLowerer {
         for (const s of this.block(f.items.slice(1), VOID)) mainStmts.push(s);
         continue;
       }
-      this.err(f, `(module ...) 里只能是 (fn ...) / (kernel ...) / (main ...)，见到 '${h}'`);
+      if (h === 'struct') continue;   // 第一遍已经收过了
+      this.err(f, `(module ...) 里只能是 (struct ...) / (fn ...) / (kernel ...) / (main ...)，见到 '${h}'`);
     }
     if (!sawMain) this.err(null, '缺入口：加一个 (main ...)');
     mainStmts.push({ kind: 'Return', value: null });
     funcs.push({ name: 'main', mangled: 'omni_main', ret: VOID, params: [], body: { kind: 'Block', stmts: mainStmts } });
+    // 结构体按**声明顺序**发出去：C 后端会按值嵌套关系拓扑排序，但字段里不许再有结构体，
+    // 所以这里的顺序就是最终顺序 —— 同一份输入两次降出来的文本因此逐字节相同。
+    const structs = [];
+    for (const s of this.structs.values()) structs.push(s);
     return {
-      structs: [], classes: [], enums: [], containers: [], closures: [], fnTypes: [],
+      structs: structs, classes: [], enums: [], containers: [], closures: [], fnTypes: [],
       funcs: funcs,
       entry: 'omni_main',
     };
@@ -328,6 +388,7 @@ class CoreLowerer {
       if (v.type.k === 'vec') return this.err(n, 'print 不接受向量：用 (lane v N) 逐道印');
       if (v.type.k === 'buf') return this.err(n, 'print 不接受缓冲：用 (bget b i) 逐个印');
       if (v.type.k === 'arr') return this.err(n, 'print 不接受数组：用 (aget a i) 逐个印');
+      if (v.type.k === 'struct') return this.err(n, 'print 不接受结构体：用 (fld s 字段) 逐个印');
       return { kind: 'ExprStmt', expr: { kind: 'Builtin', name: 'print', args: [v], type: VOID, argType: v.type } };
     }
     if (h === 'expr') {
@@ -337,8 +398,41 @@ class CoreLowerer {
     }
     if (h === 'bset') return this.bufSet(n);
     if (h === 'aset' || h === 'apush') return this.arrWrite(n, h);
+    if (h === 'fldset') return this.fldSet(n);
     if (h === 'dispatch') return this.dispatch(n);
     return this.err(n, `不认识的语句 '${h}'`);
+  }
+
+  /**
+   * `(fldset 结构体 字段 值)`。跟 bset/aset 一样是**语句**：写回的"值"没人用。
+   *
+   * 目标只能是一个**表达式**（通常是 `(var p)`），不是名字 —— 于是 `(fldset (aget a i) x …)`
+   * 这种写法在方言层面就是通的，各条腿按自己的左值规则处理（C 是 `a[i].f_x = v`，
+   * 两个解释器是"对象引用上写字段"）。
+   */
+  fldSet(n) {
+    const o = this.expr(n.items[1]);
+    const nm = isAtom(n.items[2]) ? n.items[2].value : null;
+    if (o === null) return null;
+    if (nm === null) return this.err(n, '(fldset 结构体 字段 值)：字段要是一个名字');
+    if (o.type.k !== 'struct') return this.err(n, `fldset 的第一个实参要是结构体，这里是 ${coreTypeText(o.type)}`);
+    const fd = this.field(n, o.type, nm);
+    if (fd === null) return null;
+    const v = this.expr(n.items[3]);
+    if (v === null) return null;
+    if (!sameCoreType(v.type, fd.type)) {
+      return this.err(n, `${o.type.name}.${nm} 是 ${coreTypeText(fd.type)}，写进去的是 ${coreTypeText(v.type)}`);
+    }
+    const tgt = { kind: 'Field', object: o, name: nm, type: fd.type };
+    return { kind: 'ExprStmt', expr: { kind: 'Assign', target: tgt, value: v, type: fd.type } };
+  }
+
+  /** 字段查表。找不到时把有哪些字段一起说出来 —— 拼错字段名是最常见的手误。 */
+  field(n, t, nm) {
+    for (const f of t.fields) if (f.name === nm) return f;
+    const names = [];
+    for (const f of t.fields) names.push(f.name);
+    return this.err(n, `结构体 ${t.name} 没有字段 '${nm}' —— 有的是 ${names.join(' / ')}`);
   }
 
   /** `(bset 缓冲 下标 值)`。写回是语句而不是表达式：它的"值"没人用，留着只会多一条路。 */
@@ -615,6 +709,26 @@ class CoreLowerer {
     if (h === 'splat' || h === 'vlit' || h === 'lane' || h === 'hsum') return this.vecExpr(n, h);
     if (h === 'bnew' || h === 'bget' || h === 'blen') return this.bufExpr(n, h);
     if (h === 'anew' || h === 'aget' || h === 'alen' || h === 'apop') return this.arrExpr(n, h);
+    // 结构体的两条读侧（写侧是语句 fldset）：`(new Point)` 零值，`(fld p x)` 读字段。
+    // 没有"结构体字面量"：字段一多，字面量就要么按顺序（改字段顺序会静默改语义）、
+    // 要么带名字（那是命名实参那套东西，属于各语言的前端）。零值 + 逐个 fldset 少一条路。
+    if (h === 'new') {
+      const nm = isAtom(n.items[1]) ? n.items[1].value : null;
+      if (nm === null || !this.structs.has(nm)) {
+        return this.err(n, `(new NAME)：'${nm === null ? '?' : nm}' 不是这份模块里的结构体`);
+      }
+      return zeroValue(this.structs.get(nm));
+    }
+    if (h === 'fld') {
+      const o = this.expr(n.items[1]);
+      const nm = isAtom(n.items[2]) ? n.items[2].value : null;
+      if (o === null) return null;
+      if (nm === null) return this.err(n, '(fld 结构体 字段)：字段要是一个名字');
+      if (o.type.k !== 'struct') return this.err(n, `fld 的第一个实参要是结构体，这里是 ${coreTypeText(o.type)}`);
+      const fd = this.field(n, o.type, nm);
+      if (fd === null) return null;
+      return { kind: 'Field', object: o, name: nm, type: fd.type };
+    }
     if (h === 'gid') {
       if (!this.inKernel) return this.err(n, '(gid) 只在 kernel 里有意义');
       return { kind: 'VarRef', name: '$gid', type: INT };
@@ -816,6 +930,9 @@ function sameCoreType(a, b) {
   if (a.k !== b.k) return false;
   if (a.k === 'vec') return sameCoreType(a.elem, b.elem) && a.lanes === b.lanes;
   if (a.k === 'buf') return sameCoreType(a.elem, b.elem);
+  // 结构体按**名字**认（标称类型，不是结构类型）：字段一样的两个结构体是两个类型，
+  // 与 hir/check.js 的 typeKey（`S<名字>`）同一条规矩。
+  if (a.k === 'struct') return a.name === b.name;
   // 递归而不是比 `elem.k`：`(arr (vec real 2))` 与 `(arr (vec int 4))` 的 elem.k 都是 'vec'
   if (a.k === 'arr') return sameCoreType(a.elem, b.elem);
   return true;
@@ -830,6 +947,7 @@ function coreTypeText(t) {
   if (t.k === 'vec') return `vec<${coreTypeText(t.elem)},${t.lanes}>`;
   if (t.k === 'buf') return `buf<${coreTypeText(t.elem)}>`;
   if (t.k === 'arr') return `arr<${coreTypeText(t.elem)}>`;
+  if (t.k === 'struct') return t.name;
   return t.k;
 }
 

@@ -731,6 +731,42 @@ tests/llvm 与 tests/jit 也各多两份 case（`01-core.sx`、`02-strings.sx`�
 多字节几支，而那几支只用加乘取模写（封闭 ABI 没有位运算），两代分叉的症状是
 「原生编译器发的 IR 里字符串是乱码」，node 上永远看不出来。
 
+### 已落地（支持面第三阶段：结构体，门槛 2 第十二刀）
+
+核心方言这一刀开了 `(struct NAME (字段 类型)...)` / `(new NAME)` / `(fld E 字段)` /
+`(fldset E 字段 E)` 四条，五条腿里有四条**一行没改** —— OIR 早就有 `ZeroStruct` / `Field` /
+`Assign(Field)` 三个节点，解释器、JS 后端、C 后端、MIR 都各有一份现成实现（`.omni` 那门
+语言一直在用）。这一刀真正的工作量全在 LLVM 那条腿，它之前对聚合是零支持。
+
+**结构体在 LLVM 里是"一个指向自己那块内存的指针"，不是一等聚合值。** 这不是建模偏好，
+是 MIR 定的：`FLDSET a b` 里的 `a` 是那个聚合的**值**，指令要就地改它（两个解释器那边
+就是"在 JS 对象上写字段"）。一等聚合值是 SSA 的，`insertvalue` 出来的是新值，改不到原处 ——
+要用它就得在发射器里反推"这个值是从哪个槽装载来的、再存回去"，一层脆弱的别名分析。
+值语义不靠表示，靠 `from_oir` 在**右值位置**（含形参入口）发的 `OP.COPY`，所以
+"句柄可变 + 显式复制"这套在五条腿上是同一个模型。
+
+内存来自 **arena**（`@omni_ll_alloc`，缓冲那一节本来就要它），不是入口块的 alloca。
+理由是返回值：`(fn mk () Point (ret (new Point)))` 里那块内存要活过 mk 的栈帧，
+alloca 出来的会悬空。arena 从不回收，这与数组/字符串/class 一样，不是这一刀新引入的取舍。
+
+字段偏移**交给 LLVM 算**：每个结构体发一条 `%s_Point = type { double, double }`，
+访问是 `getelementptr %s_Point, ptr %p, i32 0, i32 <字段号>`，字段号就是声明顺序。
+自己算字节偏移的版本要在这一层重建一份布局规则，而 C 那条腿用的是编译器的布局 ——
+两份布局规则迟早在某个字段类型上分叉。`sizeof` 同理用 `getelementptr (T, ptr null, i32 1)`
+再 `ptrtoint`，是常量表达式，不占指令。
+
+**字段类型这一刀只收 int / real / bool / string。** 卡在这里的不是 LLVM，是另外三条腿：
+每条腿的"结构体零值"都是各自一个小函数（JS 后端的 `zero`、C 后端的 `zeroExpr`、
+解释器的 `zeroOf`），它们今天只认标量；数组字段还要先定"复制结构体时复制的是句柄还是
+内容"（JS 后端的 `$cp_S` 是逐字段浅拷，asy 的 `T[]` 也是引用，两边一致，但那要写进用例
+才算定下来）。`tests/sexpr/bad/struct-field-arr.sx` 与 `struct-in-struct.sx` 钉着这条边界。
+
+顺带被推出来一件事：**`tests/cases/01_basics.omni` 整份能降了**（它原先被拒只是因为里面有
+struct），输出与 run / interp / omni-c 逐字节相同，于是它进了 `SUPPORTED`，tests/llvm 变成
+三方一致、tests/jit 变成四方一致的第一份 `.omni` case。这条不是我去加的，是 tests/llvm
+第 2 节那句断言逼出来的 ——「降下来了却不在表里」和「其实支持却假装不支持」是同一个洞的
+两半，那一节两半都盯。
+
 ## 决策 4：调用 LLVM 需要 extern-C FFI —— 这是新要求，也是 dogfood
 
 编译器源码是 JS 子集降到 C（ADR-0011 决策 2 的封闭 ABI），要调 `libLLVM-C` 就必须有

@@ -1,0 +1,7 @@
+;; print 不接受结构体：格式要六个执行器各实现一遍，那是最容易分叉的地方
+;; （向量、缓冲、数组同一条规矩）。要看就逐字段印。
+(module
+  (struct Point (x real) (y real))
+  (main
+    (let p Point (new Point))
+    (print (var p))))
