@@ -220,7 +220,7 @@ if (c1 && !quick) {
     // 于是 matchFuse 在原生构建里一次都没被碰过 —— 那段全是 startsWith / charCodeAt /
     // 模板串拼接，正是封闭 ABI 最容易漏的一类。输入里三样东西各占一条：算符重载的声明、
     // 把算符当值传、`new T[]{...}` 那处靠优先级消掉的歧义。
-    const gAsy = join(root, 'tests', 'glr', 'grammars', 'asy.grammar');
+    const gAsy = join(root, 'stage0', 'src', 'frontend-asy', 'asy.grammar');
     const inAsy = join(dir, 'glr-asy.in');
     writeFileSync(inAsy, 'real operator +(real a, real b) { return a; }\nx = fold(operator ^^, a);\nreal[] d = new real[] {1, 2};\n');
     both('glr asy (fuse)', ['glr', gAsy, inAsy], false);

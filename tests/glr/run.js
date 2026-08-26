@@ -54,7 +54,15 @@ const failures = [];
 const ok = (msg) => { pass++; process.stdout.write(`  ok   ${msg}\n`); };
 const no = (name, why) => { fail++; failures.push(`${name}\n${why}`); process.stdout.write(`  FAIL ${name}\n`); };
 
-const grammars = readdirSync(join(here, 'grammars')).filter((f) => f.endsWith('.grammar')).sort()
+// asy 那份语法**不在** grammars/ 下：它是前端的一部分（stage0/src/frontend-asy/asy.grammar），
+// 因为 `omni run x.asy` 要读同一份文件 —— 语法是那门语言的前端，不是这条轴的测试夹具。
+// 这条轴照旧管它（表快照、cases、语料覆盖三节都算在内）。
+const FRONTEND_GRAMMARS = new Map([
+  ['asy.grammar', join(here, '..', '..', 'stage0', 'src', 'frontend-asy', 'asy.grammar')],
+]);
+const gpathOf = (file) => FRONTEND_GRAMMARS.get(file) ?? join(here, 'grammars', file);
+
+const grammars = [...readdirSync(join(here, 'grammars')).filter((f) => f.endsWith('.grammar')), ...FRONTEND_GRAMMARS.keys()].sort()
   .filter((f) => !filters.length || filters.some((x) => f.includes(x)));
 
 // ------------------------------------------------------------ 1. 表的快照
@@ -65,7 +73,7 @@ const FULL_DUMP_STATES = 64;
 
 for (const file of grammars) {
   const name = basename(file, '.grammar');
-  const gpath = join(here, 'grammars', file);
+  const gpath = gpathOf(file);
   let r = run(['glr-table', gpath, '--brief']);
   if (r.code === 0) {
     const m = /(\d+) states/.exec(r.out.split('\n')[0]);
@@ -109,7 +117,7 @@ for (const file of grammars) {
     no(`cases/${name}`, `    missing cases/${name}.cases`);
     continue;
   }
-  const gpath = join(here, 'grammars', file);
+  const gpath = gpathOf(file);
   const bad = [];
   const lines = text.split('\n');
   // 该过的那些**一条命令批着跑**：真实语言的表有几百个状态，建一次一两秒，逐条 spawn
@@ -177,7 +185,7 @@ function splitBatch(out, paths) {
 // 这份 case 的意义（"冲突处两支都要活"）已经换了地方，得另找一份语法来担。
 
 if (grammars.includes('lookahead.grammar')) {
-  const r = run(['glr-table', join(here, 'grammars', 'lookahead.grammar')]);
+  const r = run(['glr-table', gpathOf('lookahead.grammar')]);
   if (r.out.includes('conflicts left to the GLR driver: none')) {
     no('lookahead/has-conflicts', '    this grammar is supposed to be beyond SLR(1), but the table came out clean');
   } else {
@@ -222,7 +230,7 @@ if (grammars.includes('asy.grammar')) {
   if (mods === null) {
     process.stdout.write('  skip corpus/asy [no asymptote module directory found; set ASY_LIB]\n');
   } else {
-    const r = run(['glr', join(here, 'grammars', 'asy.grammar'), ...mods, '--count']);
+    const r = run(['glr', gpathOf('asy.grammar'), ...mods, '--count']);
     const lines = r.out.split('\n').filter((l) => l.trim() !== '');
     if (r.code !== 0) {
       // 批跑撞到第一个不过的就停。诊断里带着 `文件:行:列`，够定位；后面还有几个不知道，
