@@ -234,10 +234,11 @@ bison **隐式**的选择写成**显式**的优先级声明 —— 悬垂 else�
    **`write` 一整个数组**、**for-each**）、**pair**（复数四则、
    `.x`/`.y`/`xpart`/`ypart`、`abs`/`length`/`conj`、int/real 到 pair 的隐式转换、
    `(x,y)` 的印法）、**字符串函数**（`length`/`substr`/`find`/`rfind`/`replace`/`erase`）、
-   **`pair[]`**（数组那一整套操作在 pair 上一条不少）、**默认实参与命名实参**，
-   十五份用例在五个执行器上与 `asy -noV` 逐字节相同。
+   **`pair[]`**（数组那一整套操作在 pair 上一条不少）、**默认实参与命名实参**、
+   **重载解析**（同型优先、转换算分、并列即歧义、候选按声明顺序可见），
+   十六份用例在五个执行器上与 `asy -noV` 逐字节相同。
    **还没做**的是给切片赋值、多维数组、复数幂、triple、
-   struct + `operator init`、重载解析、字符串的 `reverse`/`insert`/`split` —— 每一条都在
+   struct + `operator init`、算符重载、字符串的 `reverse`/`insert`/`split` —— 每一条都在
    `tests/asy/bad/` 里有一份带 `ASY_NOPE` 的用例钉着，不是含糊的"待办"。
    超越函数（exp/log/trig）是**另一回事**：不是没做，是量过 libm 与 V8 在最后一位就分叉，
    收进来这条轴必然有一天变红，所以按边界拒掉（`tests/asy/bad/sin.asy`；pair 上的
@@ -411,9 +412,9 @@ static inline C + 另写一份 IR 助手"，是两份实现；这次不重复那
 `1/3` 是实数除法而 `1#3` 是整数商、`3 == 3.0` 要提左边、`write` 的分隔符取决于第一个
 实参是不是字符串。类型是符号表的事，动作模板里没有符号表。
 
-**判分的人不是我**：`tests/asy` 的十五份用例（算术 / 字符串 / 两种引号 / 控制流 / 函数 /
+**判分的人不是我**：`tests/asy` 的十六份用例（算术 / 字符串 / 两种引号 / 控制流 / 函数 /
 real 的 %.15g / `? :` / 数学函数 / 数组 / pair / 切片与整数组输出 / for-each /
-字符串函数 / `pair[]` / 默认实参与命名实参）每份都是
+字符串函数 / `pair[]` / 默认实参与命名实参 / 重载解析）每份都是
 「五条腿逐字节相同 == `.expected` == `asy -noV` 当场重跑」。`.expected` 本身就是真 asy 的
 输出生成的；机器上没装 asymptote 时那一节打印 skip，但 `.expected` 仍然把答案钉住。
 
@@ -433,8 +434,8 @@ real 的 %.15g / `? :` / 数学函数 / 数组 / pair / 切片与整数组输出
 （只算中选那支）跟着编码保住。代价写在明处：**循环条件里的 `? :` 直接报错**，因为那些
 赋值只能落在循环外面，条件就只算一次了。这条边界在 `tests/asy/bad/cond-in-loop.asy` 里。
 
-第一刀的边界都在 `tests/asy/bad/`（15 条，每条的期望值都必须以 `ASY_NOPE` 开头 ——
-"还没做"和"做错了"必须能一眼分开）：struct、triple、复数幂、重载、
+第一刀的边界都在 `tests/asy/bad/`（14 条，每条的期望值都必须以 `ASY_NOPE` 开头 ——
+"还没做"和"做错了"必须能一眼分开）：struct、triple、复数幂、算符重载、
 模块（import/access）、隐式缩放（`105cm`）、超越函数（`sin`、pair 上的 `angle` ——
 理由是上面那条 ULP 测量）、函数里读文件级变量（核心方言没有全局量）、
 循环条件里的 `? :`、给切片赋值（`a[0:2] = b`）、多维数组、
@@ -467,10 +468,13 @@ real 的 %.15g / `? :` / 数学函数 / 数组 / pair / 切片与整数组输出
 **第四节 `strict/`：asy 自己就不收的，我们也不能收。** 这一节是数组这一刀顺手加的，起因是
 一次测量：`int b=1; b++;` 在真 asy 上直接编不过（"postfix expressions are not allowed"），
 而我们的降级器照收。这类漏洞**不会让任何用例输出不同** —— 它只让"等价"这两个字变虚。
-所以 `strict/` 里的用例要求：我们拒，且装了 asy 的话**真 asy 也拒**。现在有五条：后缀
+所以 `strict/` 里的用例要求：我们拒，且装了 asy 的话**真 asy 也拒**。现在有七条：后缀
 `++`、pair 上的 `<`、pair 上的 `%`（这两条 asy 报的是 "no matching function
 'operator <(pair, pair)'"）、`length(int[])`（`length` 只有 string 和 pair 两个重载）、
-按不存在的形参名给命名实参（asy 报 "cannot call 'void f(int a)' with parameter 'int b'"）。
+按不存在的形参名给命名实参（asy 报 "cannot call 'void f(int a)' with parameter 'int b'"）、
+**歧义的重载**（`p(real)` 与 `p(pair)` 遇上 `p(1)`：asy 报 "call of function 'p(int)' is
+ambiguous"）、**引用后面才声明的函数**（asy 报 "no matching variable 'b'"）—— 后两条是
+重载这一刀加的，第二条尤其要紧：我们是两遍降级，不专门裁一刀就会比 asy 多接受一门语言。
 
 **默认实参是"每次调用求一次、只在没给时求"**，而且**能引用前面的形参** —— 两条都是量出来的
 （`void d(int x = bump())`：`d(); d(); d(99);` 之后计数器是 2；`void q(int a, int b = a + 10)`：
@@ -480,6 +484,31 @@ real 的 %.15g / `? :` / 数学函数 / 数组 / pair / 切片与整数组输出
 同一形状只生一份，顺序按第一次用到，所以同一份输入两次降出来的文本逐字节相同。
 命名实参乱序时（`two(b=show(1), a=show(2))`）先按**源码顺序**把每个实参绑到临时量再按
 形参顺序传，否则核心方言的 `(call f a b)` 会把求值顺序改掉 —— 量过 asy 是源码顺序。
+
+**重载解析（第十一刀）：候选表 + 打分 + 按声明顺序裁。** 核心方言没有重载，所以同名的第 2 个
+及以后的候选在降级时改名成 `asy__ov<i>_<名>`（第一个保留原名，绝大多数函数不重载，输出的
+文本因此跟以前一样好读）。挑哪一个是量出来的三条规则：
+
+- **同型优先，一次隐式转换算一分，取最小**：`f(int)` 与 `f(real)` 都在时 `f(1)` 走 int 那份、
+  `f(1.0)` 走 real 那份；只有 `h(real)` 时 `h(3)` 走提升。
+- **并列就是歧义**：`p(real)` 与 `p(pair)` 遇上 `p(1)` 两边各要一次转换，asy 报
+  "call of function 'p(int)' is ambiguous"，我们也报（`strict/overload-ambiguous`）。
+- **同一份签名写两次是替换，不是错**：`int s(int x)` 之后 `real s(int x)`，`s(5)` 给 `2.5`。
+  所以 `sig()` 里同签名是覆盖，而 `func()` 认候选按**节点身份**认 —— 被覆盖掉的那份不发。
+
+实参**只求一次**：先按源码顺序把每个实参（连它摊出来的语句）求出来攒着，再拿类型去挑候选，
+挑定了才把语句放回去。求两次会让 `g(show(1))` 那种带输出的实参印两遍。重载与默认实参是**一起**
+解析的：候选的"缺了哪几个"由 `fit()` 给出，缺的那几个走上面那套包装函数。
+
+**asy 的名字解析是顺序的**，这一条不改就会比 asy 多接受一门语言 —— 量出来的两条证据：
+`int a(int n){ return b(n)+1; } int b(int n){...}` 报 "no matching variable 'b'"；
+`int rec(int n){ ... rec(n-1,2) ... } int rec(int,int)` 报 "cannot call 'int rec(int n)'
+with parameters 'int, int'"。我们是两遍降级（先收签名再降体），天然看得见后面的声明，所以每个
+候选记一个声明下标，降每个函数体/每条主语句时记住"现在在第几项"，`visible()` 只交出
+`c.at <= this.at` 的候选。等号是故意的：一个函数看得见自己，单函数递归 asy 允许。连带的一条
+好处是内建名字的遮蔽也对了 —— 用户把 `sqrt` 定义在后面时，前面那句 `sqrt(...)` 走的还是内建
+的那个，因为 callExpr 问的是"此处可见的候选"，不是"整个文件有没有同名函数"。
+两条边界在 `strict/forward-ref` 与 `strict/overload-ambiguous` 里。
 
 
 **数组这一刀的语义全是量出来的**（`asy -noV`，逐条问）：

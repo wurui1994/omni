@@ -1,0 +1,1 @@
+'b' 在这里还看不见 —— 它声明在后面，而 asy 的名字解析是顺序的（那边报 "no matching variable"）

@@ -36,10 +36,13 @@
 // （核心方言为此加了 `(slen E)`/`(ssub E I N)`/`(sfind E T)` 三条 —— OIR 那边本来就有
 // len/substr/indexOf 三个 Builtin，所以四条腿是白捡的，只有 LLVM 那条腿要三行 ABI）、
 // **默认实参与命名实参**（第十刀：缺实参时按"缺了哪几个"生成一个包装函数，默认值在
-// 包装里求 —— 量过 asy 的默认值是每次调用求一次、只在没给时求、而且能引用前面的形参）。
+// 包装里求 —— 量过 asy 的默认值是每次调用求一次、只在没给时求、而且能引用前面的形参）、
+// **重载解析**（第十一刀：同名多份签名，按"同型优先、每次隐式转换算一分"挑最小的那个，
+// 并列就是歧义；核心方言没有重载，所以第 2 个及以后的候选降级时改名成 `asy__ov<i>_<名>`。
+// 候选表按**声明顺序**裁：asy 的名字解析是顺序的，见下面的差别一节）。
 //
 // 不支持（见到就报错，报错里说清是哪一条）：triple、struct、import/access、
-// typedef、算符重载、重载解析、给切片赋值（`a[0:2] = b`）、
+// typedef、算符重载、给切片赋值（`a[0:2] = b`）、
 // 多维数组（`int[][]` —— 核心方言的 `(arr T)` 不收数组元素：MIR 那一层元素类型只有
 // 一个 8 位类型码，`(arr (arr int))` 与 `(arr (arr string))` 在那里是同一个码，
 // 类型身份丢了。向量元素能收是因为道数就在那个码的高位上）、复数幂、
@@ -82,6 +85,14 @@
 //   `replace("aaa","aa","b")` 是 `"ba"`（从左往右不重叠地换），空针不换。
 //   `length(int[])` 在 asy 那边是 "no matching function" —— length 只有 string 和
 //   pair 两个重载，数组的长度写 `a.length`；这一条落在 `tests/asy/strict/` 里。
+// - **asy 的名字解析是顺序的**，这一条也是**对齐过的**（而不是差别）：量过
+//   `int a(int n) { return b(n)+1; } int b(int n){...}` 报 "no matching variable 'b'"，
+//   `int rec(int n){ rec(n-1,2); } int rec(int,int)` 报 "cannot call 'int rec(int n)'
+//   with parameters 'int, int'"。我们是两遍降级（先收签名再降体），天然会看见后面的
+//   声明，所以候选表要按声明下标裁一刀（见 visible）—— 不裁就是"比 asy 多接受一门
+//   语言"。等号是故意留的：一个函数看得见自己，单函数递归 asy 允许。
+//   连带的一条：用户把 `sqrt` 定义在后面时，前面那句 `sqrt(...)` 走的还是内建的那个
+//   （callExpr 里问的是"此处可见的候选"，不是"整个文件有没有同名函数"）。
 
 import { isList, isAtom, isStr, head } from '../sexpr/read.js';
 
@@ -93,6 +104,20 @@ const SCALARS = new Set(['int', 'real', 'bool', 'string']);
 /** 能当数组元素的类型。pair 是第八刀加的（核心方言的 `(arr T)` 现在收向量元素）；
  *  数组本身仍然不在里面 —— 多维数组是另一刀。 */
 const ASY_ARRELEM = new Set(['int', 'real', 'bool', 'string', 'pair']);
+
+/**
+ * 实参类型 -> 形参类型要走几次隐式转换：0 = 同型，1 = 一次转换，-1 = 不行。
+ * 表就是 asy 的那三条（int->real、int/real->pair，见 coerce）。重载解析按这个打分：
+ * 同型优先，两个候选各要一次转换就是歧义（量过 asy 也报 ambiguous）。
+ * 名字带 asy 前缀是封闭 ABI 的要求：模块级名字全仓唯一。
+ */
+function asyConvCost(from, to) {
+  if (from === to) return 0;
+  if (from === 'int' && to === 'real') return 1;
+  if (to === 'pair' && (from === 'int' || from === 'real')) return 1;
+  return -1;
+}
+
 
 /** 算符文本。语法模板里有两种写法：`(bin "+" …)` 给的是字符串节点，
  *  `(self $2 $1 $3)` 直接把 SELFOP **词法 token**（原子）搬过来。两种都要认。
@@ -390,6 +415,10 @@ class AsyLower {
     // 同一份输入两次降出来的文本因此逐字节相同。
     this.wrapNames = new Map();
     this.wraps = [];
+    // 现在降的是**第几个**顶层项。asy 的名字解析是顺序的（量过：函数体里引用后面
+    // 才声明的名字是 "no matching variable"），所以候选表要按这个下标裁一刀。
+    // 自己那条也算可见（`c.at <= this.at`）—— 单函数递归 asy 是允许的。
+    this.at = 0;
   }
 
   err(node, msg) {
@@ -987,21 +1016,41 @@ class AsyLower {
     if (nm === 'write') return this.err(n, `${ASY_NOPE}：write 出现在表达式位置（它是语句）`);
     // 内建数学函数先看：asy 里 sqrt/floor/… 是运行时自带的，不是 plain.asy 里的定义，
     // 所以这一层认它们不算"偷偷补模块系统"。用户自己定义了同名函数时以用户的为准
-    // （asy 那边是重载，这一刀没有重载，让用户的定义赢至少不会静悄悄换掉语义）。
-    if (!this.funcs.has(nm) && nm === 'length') return this.lengthCall(n);
-    if (!this.funcs.has(nm) && ASY_STRFN.has(nm)) return this.strCall(n, nm);
-    if (!this.funcs.has(nm) && ASY_STR_NOPE.has(nm)) return this.nope(n, ASY_STR_NOPE.get(nm));
-    if (!this.funcs.has(nm) && ASY_PAIRFN.has(nm)) return this.pairCall(n, nm);
-    if (!this.funcs.has(nm) && ASY_MATH.has(nm)) return this.mathCall(n, nm);
-    const d = this.funcs.get(nm);
-    if (d === undefined) return this.nope(n, `内建函数 '${nm}'（这一刀只有 write 和你自己定义的函数）`);
-    return this.userCall(n, nm, d);
+    // （asy 那边是重载，重载表里用户那份更同型时它赢）。
+    // 这里问的是 **此处可见的**候选（顺序解析，见 visible）—— 用户的 sqrt 写在后面时，
+    // 前面那句 sqrt 在 asy 那边也还是内建的那个。
+    const vis = this.visible(nm);
+    if (vis.length === 0 && nm === 'length') return this.lengthCall(n);
+    if (vis.length === 0 && ASY_STRFN.has(nm)) return this.strCall(n, nm);
+    if (vis.length === 0 && ASY_STR_NOPE.has(nm)) return this.nope(n, ASY_STR_NOPE.get(nm));
+    if (vis.length === 0 && ASY_PAIRFN.has(nm)) return this.pairCall(n, nm);
+    if (vis.length === 0 && ASY_MATH.has(nm)) return this.mathCall(n, nm);
+    if (vis.length === 0) {
+      if (this.funcs.has(nm)) {
+        return this.err(n, `'${nm}' 在这里还看不见 —— 它声明在后面，而 asy 的名字解析是顺序的（那边报 "no matching variable"）`);
+      }
+      return this.nope(n, `内建函数 '${nm}'（这一刀只有 write 和你自己定义的函数）`);
+    }
+    return this.userCall(n, nm, vis);
   }
 
   /**
-   * 调用用户定义的函数：位置实参 + **命名实参** + **默认实参**（第十刀）。
+   * `nm` 在**当前位置**能看见的候选。asy 的名字解析是顺序的 —— 量过：
+   *   `void a() { b(); } void b() {}` 报 "no matching variable 'b'"，
+   *   `int rec(int)` 的体里调 `rec(int,int)` 报 "cannot call 'int rec(int n)'"。
+   * `c.at <= this.at` 里的等号是故意的：一个函数看得见自己（单函数递归 asy 允许）。
+   */
+  visible(nm) {
+    const out = [];
+    if (!this.funcs.has(nm)) return out;
+    for (const c of this.funcs.get(nm)) if (c.at <= this.at) out.push(c);
+    return out;
+  }
+
+  /**
+   * 调用用户定义的函数：**重载解析**（第十一刀）+ 位置实参 + 命名实参 + 默认实参。
    *
-   * 量出来的四条规则（`asy -noV`，不是照文档抄的）：
+   * 量出来的规则（`asy -noV`，不是照文档抄的）：
    *   1. 默认值是**每次调用**求一次，而且只在那个实参没给的时候求
    *      （`void d(int x = bump())`：`d(); d(); d(99);` 之后 bump 只被调了 2 次）。
    *   2. 默认值能引用**前面的形参**（`void q(int a, int b = a + 10)`：`q(1)` 印 11）——
@@ -1010,78 +1059,131 @@ class AsyLower {
    *      （`h(1, c=3, b=2)` 印 1 2 3）。
    *   4. 求值顺序：给了的实参按**源码顺序**先求，默认值最后（量过 tick 的输出是
    *      101 202 303）。
+   *   5. 重载按**同型优先**：`f(int)` 与 `f(real)` 都在时 `f(1)` 走 int 那份、`f(1.0)`
+   *      走 real 那份；只有 `g(real)` 时 `g(2)` 走隐式提升。两个候选各要一次转换就是
+   *      **歧义**，asy 当场报错（`p(real)` 与 `p(pair)` 遇上 `p(1)`：
+   *      "call of function 'p(int)' is ambiguous"）—— 我们也报。
+   *   6. 同一份签名写两次是**替换**，不是错（`int s(int)` 之后 `real s(int)`，`s(5)` 给 2.5）。
    *
-   * 落法：缺实参时不在调用点补，而是按"缺了哪几个"生成一个**包装函数** ——
-   * 形参就是给了的那几个，函数体里逐个 `(let 缺的 T 默认值)` 再调真函数。
-   * 规则 2 因此自动成立（前面的形参在那个作用域里就是可见的），规则 1 也成立
-   * （没给才走包装，给了就直接调）。包装按 (函数, 缺哪几个) 缓存，同一形状只生一份。
+   * 落法：实参**先按源码顺序求一次**（连它摊出来的语句一起攒着），再拿类型去挑候选 ——
+   * 求两次会把 `show(1)` 那种带输出的实参印两遍。缺实参时不在调用点补，而是按
+   * "缺了哪几个"生成一个包装函数（见 defWrapper），默认值在包装里求，规则 1、2 因此自动成立。
    */
-  userCall(n, nm, d) {
-    const b = this.bindArgs(n, nm, d);
-    if (b === null) return null;
-    const parts = [];
+  userCall(n, nm, list) {
+    const raw = this.callArgs(n);
+    if (raw === null) return null;
+    const fits = [];
+    for (const c of list) {
+      const f = this.fit(c, raw);
+      if (f !== null) fits.push({ c, f });
+    }
+    if (fits.length === 0) {
+      const got = [];
+      for (const r of raw) got.push(r.key === null ? r.v.type : `${r.key}=${r.v.type}`);
+      const sigs = [];
+      for (const c of list) sigs.push(`${c.ret}(${c.params.join(', ')})`);
+      return this.err(n, `没有能匹配 '${nm}(${got.join(', ')})' 的签名 —— 有的是 ${sigs.join(' / ')}`);
+    }
+    let best = fits[0];
+    let tie = false;
+    for (let i = 1; i < fits.length; i++) {
+      if (fits[i].f.cost < best.f.cost) { best = fits[i]; tie = false; continue; }
+      if (fits[i].f.cost === best.f.cost) tie = true;
+    }
+    if (tie) {
+      const got = [];
+      for (const r of raw) got.push(r.key === null ? r.v.type : `${r.key}=${r.v.type}`);
+      return this.err(n, `'${nm}(${got.join(', ')})' 有多个同样合适的重载 —— asy 那边这也是 ambiguous`);
+    }
+    const d = best.c;
+    const f = best.f;
     // 命名实参可能把顺序打乱，而核心方言的 `(call f a b c)` 是按写的顺序求值的 ——
     // 乱序时先把每个实参按**源码顺序**绑到临时量，再按形参顺序引用它们。
-    const reorder = b.reordered && b.given.length > 1;
+    const reorder = f.reordered && raw.length > 1;
     if (reorder && this.pre === null) return this.nope(n, '这个位置的乱序命名实参（要摊成语句，这里放不下）');
     const codes = new Map();
-    for (const g of b.given) {
-      const v = this.coerce(this.expr(g.node), d.ps[g.at].type, g.node, `'${nm}' 的实参 ${d.ps[g.at].name}`);
+    for (let i = 0; i < raw.length; i++) {
+      const r = raw[i];
+      if (r.lines !== null) for (const s of r.lines) this.pre.push(s);
+      const at = f.slot[i];
+      const v = this.coerce(r.v, d.ps[at].type, r.node, `'${nm}' 的实参 ${d.ps[at].name}`);
       if (v === null) return null;
-      if (!reorder) { codes.set(g.at, v.code); continue; }
+      if (!reorder) { codes.set(at, v.code); continue; }
       const tmp = `asy__na${this.tmp++}`;
-      this.pre.push(`(let ${tmp} ${asyCore(d.ps[g.at].type)} ${v.code})`);
-      codes.set(g.at, `(var ${tmp})`);
+      this.pre.push(`(let ${tmp} ${asyCore(d.ps[at].type)} ${v.code})`);
+      codes.set(at, `(var ${tmp})`);
     }
+    const parts = [];
     for (let i = 0; i < d.ps.length; i++) if (codes.has(i)) parts.push(codes.get(i));
-    const target = b.missing.length === 0 ? nm : this.defWrapper(n, nm, d, b);
+    const target = f.missing.length === 0 ? d.sym : this.defWrapper(n, nm, d, f);
     if (target === null) return null;
     const sp = parts.length === 0 ? '' : ' ';
     return { code: `(call ${target}${sp}${parts.join(' ')})`, type: d.ret };
   }
 
   /**
-   * 把实参表摊到形参槽上。回 `{given:[{at,node}…按源码顺序], missing:[槽号…], reordered}`。
-   * 报错都在这里：名字不认识、同一个槽给了两次、缺的那个没有默认值。
+   * 按**源码顺序**把实参求出来。每个实参连它摊出来的语句（`? :`、`.push(…)` 那种）
+   * 一起攒在自己的 `lines` 里，等挑定候选之后再按顺序放回 `this.pre` ——
+   * 挑候选要知道实参的类型，而实参不能求两次（`show(1)` 那种会印两遍）。
    */
-  bindArgs(n, nm, d) {
-    const given = [];
-    const filled = new Map();
-    let pos = 0;
-    let reordered = false;
+  callArgs(n) {
+    const out = [];
     for (const a of this.flat(n.items[2], 'args')) {
       if (!isList(a)) { this.nope(a, '认不出的实参'); return null; }
-      if (head(a) === 'arg') {
-        while (filled.has(pos)) pos++;
-        if (pos >= d.ps.length) {
-          this.err(a, `'${nm}' 只有 ${d.ps.length} 个形参，位置实参给多了`);
-          return null;
-        }
-        filled.set(pos, true);
-        given.push({ at: pos, node: a.items[1] });
-        pos++;
-        continue;
-      }
-      if (head(a) !== 'arg-named') { this.nope(a, '展开实参'); return null; }
-      const key = isAtom(a.items[1]) ? a.items[1].value : null;
+      let key = null;
+      let node = null;
+      if (head(a) === 'arg') node = a.items[1];
+      else if (head(a) === 'arg-named') {
+        key = isAtom(a.items[1]) ? a.items[1].value : null;
+        node = a.items[2];
+      } else { this.nope(a, '展开实参'); return null; }
+      const save = this.pre;
+      const lines = save === null ? null : [];
+      if (lines !== null) this.pre = lines;
+      const v = this.expr(node);
+      this.pre = save;
+      if (v === null) return null;
+      out.push({ key, node, v, lines });
+    }
+    return out;
+  }
+
+  /**
+   * 一个候选合不合用。回 `{cost, slot, missing, reordered}` 或 null（不合用）。
+   * `cost` 是要走几次隐式转换 —— 0 就是逐个同型。挑最小的那个，并列就是歧义。
+   */
+  fit(cand, raw) {
+    const filled = new Map();
+    const slot = [];
+    let pos = 0;
+    let cost = 0;
+    let reordered = false;
+    let last = -1;
+    for (const r of raw) {
       let at = -1;
-      for (let i = 0; i < d.ps.length; i++) if (d.ps[i].name === key) at = i;
-      if (at < 0) { this.err(a, `'${nm}' 没有名叫 '${key}' 的形参`); return null; }
-      if (filled.has(at)) { this.err(a, `'${nm}' 的形参 '${key}' 给了两次`); return null; }
+      if (r.key === null) {
+        while (filled.has(pos)) pos++;
+        at = pos;
+        pos++;
+      } else {
+        for (let k = 0; k < cand.ps.length; k++) if (cand.ps[k].name === r.key) at = k;
+      }
+      if (at < 0 || at >= cand.ps.length || filled.has(at)) return null;
+      const c = asyConvCost(r.v.type, cand.ps[at].type);
+      if (c < 0) return null;
+      cost += c;
       filled.set(at, true);
-      if (given.length > 0 && at < given[given.length - 1].at) reordered = true;
-      given.push({ at, node: a.items[2] });
+      slot.push(at);
+      if (at < last) reordered = true;
+      last = at;
     }
     const missing = [];
-    for (let i = 0; i < d.ps.length; i++) {
-      if (filled.has(i)) continue;
-      if (d.ps[i].def === null) {
-        this.err(n, `'${nm}' 的形参 '${d.ps[i].name}' 没给实参，而它没有默认值`);
-        return null;
-      }
-      missing.push(i);
+    for (let k = 0; k < cand.ps.length; k++) {
+      if (filled.has(k)) continue;
+      if (cand.ps[k].def === null) return null;
+      missing.push(k);
     }
-    return { given, missing, reordered };
+    return { cost, slot, missing, reordered };
   }
 
   /**
@@ -1089,23 +1191,33 @@ class AsyLower {
    * 包装的形参就是给了的那几个（按形参顺序），体里逐个 `(let 缺的 T 默认值)` ——
    * 默认值因此在**被调方的作用域**里求：能看见前面的形参，也只在没给时才求。
    */
-  defWrapper(n, nm, d, b) {
-    const key = `${nm}|${b.missing.join(',')}`;
+  defWrapper(n, nm, d, f) {
+    const key = `${d.sym}|${f.missing.join(',')}`;
     const had = this.wrapNames.get(key);
     if (had !== undefined) return had;
     const wname = `asy__def${this.wrapNames.size}_${nm}`;
     this.wrapNames.set(key, wname);
+    // 给了的那几个槽（按形参顺序）：包装的形参表就是它
+    const gave = [];
+    for (let i = 0; i < d.ps.length; i++) {
+      let has = false;
+      for (const m of f.missing) if (m === i) has = true;
+      if (!has) gave.push(i);
+    }
     // 换掉正在降级的那份状态：包装函数是另一个作用域、另一串语句。用完还回去。
+    // `at` 也要换：默认值是在**被调方的声明处**求的，能看见的候选也是那时候的那些。
     const savePre = this.pre;
     const saveUpd = this.updates;
     const saveScopes = this.scopes;
+    const saveAt = this.at;
+    this.at = d.at;
     this.scopes = [new Map()];
     this.updates = [];
     const lines = [];
     this.pre = lines;
     let bad = false;
-    for (const g of b.given) this.declare(n, d.ps[g.at].name, d.ps[g.at].type);
-    for (const i of b.missing) {
+    for (const i of gave) this.declare(n, d.ps[i].name, d.ps[i].type);
+    for (const i of f.missing) {
       const p = d.ps[i];
       const v = this.coerce(this.expr(p.def), p.type, p.def, `'${nm}' 的形参 '${p.name}' 的默认值`);
       if (v === null) { bad = true; break; }
@@ -1115,15 +1227,16 @@ class AsyLower {
     const args = [];
     for (const p of d.ps) args.push(`(var ${p.name})`);
     lines.push(d.ret === 'void'
-      ? `(expr (call ${nm} ${args.join(' ')}))`
-      : `(ret (call ${nm} ${args.join(' ')}))`);
+      ? `(expr (call ${d.sym} ${args.join(' ')}))`
+      : `(ret (call ${d.sym} ${args.join(' ')}))`);
     const params = [];
-    for (const g of b.given) params.push(`(${d.ps[g.at].name} ${asyCore(d.ps[g.at].type)})`);
+    for (const i of gave) params.push(`(${d.ps[i].name} ${asyCore(d.ps[i].type)})`);
     const text = [`  (fn ${wname} (${params.join(' ')}) ${asyCore(d.ret)}`];
     for (const s of lines) text.push(`    ${s}`);
     this.pre = savePre;
     this.updates = saveUpd;
     this.scopes = saveScopes;
+    this.at = saveAt;
     if (bad) return null;
     this.wraps.push(`${text.join('\n')})`);
     return wname;
@@ -1678,8 +1791,12 @@ class AsyLower {
     return out;
   }
 
-  /** 第一遍：登记签名。没有重载 —— 同名第二次就是错。 */
-  sig(n) {
+  /**
+   * 第一遍：登记签名。**同名可以有多个**（第十一刀的重载）——`funcs` 里存的是一张
+   * 候选表。同一份签名（形参类型逐个相同）第二次出现是**替换**，不是错：量过 asy 的
+   * `int s(int x)` 后面再写 `real s(int x)`，调 `s(5)` 走的是后者。
+   */
+  sig(n, at) {
     const nm = isAtom(n.items[2]) ? n.items[2].value : null;
     if (nm === null) return;
     if (nm.startsWith('operator ')) { this.nope(n, '算符重载的定义'); return; }
@@ -1687,12 +1804,21 @@ class AsyLower {
     const ret = this.type(n.items[1], `函数 ${nm} 的返回类型`);
     const ps = this.formals(n.items[3]);
     if (ret === null || ps === null) return;
-    if (this.funcs.has(nm)) { this.nope(n, `重载：'${nm}' 定义了不止一次`); return; }
     const types = [];
     for (const p of ps) types.push(p.type);
     // `ps` 带名字与默认值节点（命名实参与默认实参要它）；`params` 只是类型，
     // 保留是因为别处的实参检查一直按下标读它。
-    this.funcs.set(nm, { ret, params: types, ps });
+    const cand = { ret, params: types, ps, node: n, sym: nm, at };
+    const list = this.funcs.has(nm) ? this.funcs.get(nm) : [];
+    const key = types.join(',');
+    for (let i = 0; i < list.length; i++) {
+      if (list[i].params.join(',') !== key) continue;
+      list[i] = cand;
+      this.funcs.set(nm, list);
+      return;
+    }
+    list.push(cand);
+    this.funcs.set(nm, list);
   }
 
   /** 第一遍也收文件级变量的名字（只为了给函数里那句错话） */
@@ -1708,8 +1834,13 @@ class AsyLower {
   /** 第二遍：函数体。核心方言要求非 void 的函数每条路径都有 ret，asy 不要求 —— 差别见下。 */
   func(n) {
     const nm = isAtom(n.items[2]) ? n.items[2].value : null;
-    const d = nm === null ? undefined : this.funcs.get(nm);
-    if (d === undefined) return null;
+    const list = nm === null || !this.funcs.has(nm) ? null : this.funcs.get(nm);
+    if (list === null) return null;
+    // 这份声明对应哪个候选：按**节点**认，不按签名 —— 同签名被后面那份替换掉时，
+    // 前面那份就没有候选了（asy 那边它也确实调不到），于是这里不发它。
+    let d = null;
+    for (const c of list) if (c.node === n) d = c;
+    if (d === null) return null;
     const ps = this.formals(n.items[3]);
     if (ps === null) return null;
     this.push();
@@ -1725,7 +1856,7 @@ class AsyLower {
     }
     const params = [];
     for (const p of ps) params.push(`(${p.name} ${asyCore(p.type)})`);
-    const lines = [`  (fn ${nm} (${params.join(' ')}) ${asyCore(d.ret)}`];
+    const lines = [`  (fn ${d.sym} (${params.join(' ')}) ${asyCore(d.ret)}`];
     for (const s of body) lines.push(`    ${s}`);
     return `${lines.join('\n')})`;
   }
@@ -1733,24 +1864,31 @@ class AsyLower {
   /** 整个文件 -> 核心方言文本。函数提到模块层，其余全进 (main ...)。 */
   run(tree) {
     const rs = this.flat(tree, 'block');
-    for (const r0 of rs) {
-      const r = this.unwrapMod(r0);
+    for (let i = 0; i < rs.length; i++) {
+      const r = this.unwrapMod(rs[i]);
       if (!isList(r)) continue;
-      if (head(r) === 'fundec') this.sig(r);
+      if (head(r) === 'fundec') this.sig(r, i);
       else if (head(r) === 'vardec') this.globalNames(r);
     }
+    // 重载的名字在这里定：核心方言没有重载，所以第 2 个及以后的候选要改名。
+    // 第一个保留原名 —— 绝大多数函数不重载，输出的文本因此跟以前一样好读。
+    for (const list of this.funcs.values()) {
+      for (let i = 1; i < list.length; i++) list[i].sym = `asy__ov${i}_${list[i].sym}`;
+    }
     const fns = [];
-    for (const r0 of rs) {
-      const r = this.unwrapMod(r0);
+    for (let i = 0; i < rs.length; i++) {
+      const r = this.unwrapMod(rs[i]);
       if (!isList(r) || head(r) !== 'fundec') continue;
+      this.at = i;
       const f = this.func(r);
       if (f !== null) fns.push(f);
     }
     this.push();
     const main = [];
-    for (const r0 of rs) {
-      const r = this.unwrapMod(r0);
+    for (let i = 0; i < rs.length; i++) {
+      const r = this.unwrapMod(rs[i]);
       if (isList(r) && head(r) === 'fundec') continue;
+      this.at = i;
       const s = this.stmt(r, 'void');
       if (s === null) continue;
       for (const x of s) main.push(x);
