@@ -140,13 +140,40 @@ GC 语义，跨界就要搬值，正好违反约束 1。两者都读了、都值
 
 ## 借鉴与对照
 
-- **quickjs**（`reference/quickjs-2026-06-04`）：值是 tagged union / NaN boxing，
-  引用计数 + 环收集器，**不移动对象**；原生函数签名收 `(ctx, this_val, argc, argv)`，
-  按值传 `JSValue`。这套"不移动 + 按值传"正是我们要的形状，也证明了它够跑一个完整的 JS。
-  差别：我们不做引用计数在 ABI 边界上的 dup/free 纪律（阶段 1 靠 arena，之后靠 ARC 的
-  编译期插入），所以 C 侧调用点比 quickjs 更干净。
+量过 `reference/quickjs-2026-06-04` 的源码之后，逐条对照（行号是那份快照里的）：
+
+- **值表示**：64 位平台上 quickjs 用的就是 `struct { union {...}; int64_t tag; }`，16 字节
+  两个字，**按值传参与返回**（`quickjs.h:216..282`）；NaN boxing 只在 32 位平台上自动开启
+  （`quickjs.h:56..65`）。也就是说我们的 `omni_dyn` 和它在 64 位上是同一个形状 —— 这条不是
+  巧合，16 字节结构体在 SysV AMD64 / AArch64 上走两个寄存器不落栈，是选它的直接动机。
+  一处刻意的差别：quickjs 把 tag 编号排成"带引用计数的全为负"，于是 `需不需要 refcount`
+  是一次无分支比较（`quickjs.h:287`）。我们阶段 1 靠 arena，用不上；等 ARC 落地时值得抄。
+- **不移动**：没有 copying/compacting，环收集器只 free 不搬。但要分清两层 ——
+  **对象本体（`JSObject *`）永不移动，对象内部的属性数组会 realloc**，所以源码里到处是
+  `/* Note: this call can reallocate the properties of 'p' */`（`quickjs.c:9439`）。
+  我们的约定比这条更强：载荷在 arena 里，**连内部数组都不搬**（决策 3），C 侧因此可以长期
+  持有任何一层指针，而不只是对象头。
+- **refcount 放在 malloc 块头里**（用户指针之前，`quickjs.h:682..685`、`quickjs.c:270..280`），
+  `mark` 位与 `gc_obj_type` 一起塞进块头的位域 —— 对象自身为 GC 元数据付 0 字节。ARC 落地
+  时这是现成的答案。
+- **原生函数约定**：`(ctx, this_val, argc, argv)`，`JSValueConst` 就是 `JSValue`（不是句柄、
+  不是引用，`quickjs.h:149`），返回值按值，异常走 `JS_EXCEPTION` 哨兵值 + `current_exception`
+  边带（`quickjs.h:294`）。最后这条与我们的"待决错误标志 + 普通跳转"（ADR-0007）是同一个
+  形状 —— 一个完整 JS 实现走的也是这条路，不是异常展开。
+  值得抄的一处细节：**实参数组零拷贝** —— `arg_buf = argv` 直接复用调用者求值栈上的连续
+  slot，只有实参少于声明形参时才 `alloca` 一份补 `undefined`（`quickjs.c:17616`）。这样
+  C 函数总能安全读满声明的形参数，省掉了每个 C 函数里的 `argc` 边界检查。我们阶段 1 每次
+  调用都新建一个 args 列表，阶段 2 应该换成"args 是槽位数组上的一个窗口"。
 - **mujs**：一个可读的 ES5 解释器，值表示与字符串 interning 值得看；但 ES5 这条线对我们
   没用（int64 = BigInt）。
+
+这两条进阶段 2 的清单：
+
+- 分派用 `SWITCH/CASE/DEFAULT/BREAK` 四个宏抽象，**同一份 opcode 实现同时编译成 switch 与
+  计算 goto**（`quickjs.c:17787..17811`）—— 正好对上我们"编译期二选一，不是运行期"的要求。
+- 分派表 `static const void *dispatch_table[256]`，用 range designator 把 `OP_COUNT..255`
+  全填成 `case_default`，于是**一个字节的 opcode 永远索引到合法目标，分派不需要范围检查**。
+  表和 label 都由 X-macro 从 opcode 列表生成，编号与顺序天然同步。
 
 ## 后果
 
