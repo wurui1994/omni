@@ -16,6 +16,7 @@ import { RUNTIME_INCLUDE, amalgamate } from '../runtime/c_runtime.js';
 import { cTypeName, listType, typeKey } from '../hir/types.js';
 import { JS_ABI, JS_ALL, JS_MEMBERS, JS_TAG_C } from '../hir/js_abi.js';
 import { C_ABI, C_TYPE, C_IN, C_OUT } from '../hir/c_abi.js';
+import { utf8Bytes } from '../host/utf8.js';
 
 /** dict/set 的键需要 hash；list.contains 只需要 eq */
 const HASH_FN = { int: 'omni_hash_int', real: 'omni_hash_real', bool: 'omni_hash_bool', string: 'omni_hash_string' };
@@ -912,39 +913,9 @@ function hasLoneSurrogate(s) {
 }
 
 /**
- * 字符串的 UTF-8 字节。不用 Buffer / TextEncoder：那是宿主的东西，而这个文件自己也要
- * 被降级（封闭 ABI，ADR-0011 决策 2）。全程只用加法、乘法、取模 —— 位运算在这个值域
- * 里只对 int 成立，而这里的一切都是 real。
- * 落单的代理项按 node 的 Buffer 一样换成 U+FFFD，否则两代生成的 C 会不一样。
+ * 字符串的 UTF-8 字节：搬到 `host/utf8.js` 了 —— LLVM 后端第二阶段也要它，
+ * 而复制第二份的下场是两条腿在落单代理项上分叉（见那个文件的头）。
  */
-function utf8Bytes(s) {
-  const out = [];
-  const push3 = (c) => {
-    out.push(224 + Math.floor(c / 4096));
-    out.push(128 + (Math.floor(c / 64) % 64));
-    out.push(128 + (c % 64));
-  };
-  for (let i = 0; i < s.length; i++) {
-    let c = s.charCodeAt(i);
-    if (c >= 0xdc00 && c <= 0xdfff) { push3(0xfffd); continue; }   // 落单的低位代理项
-    if (c >= 0xd800 && c <= 0xdbff) {
-      const d = i + 1 < s.length ? s.charCodeAt(i + 1) : 0;
-      if (d < 0xdc00 || d > 0xdfff) { push3(0xfffd); continue; }   // 落单的高位代理项
-      c = 0x10000 + (c - 0xd800) * 1024 + (d - 0xdc00);
-      i++;
-    }
-    if (c < 0x80) out.push(c);
-    else if (c < 0x800) { out.push(192 + Math.floor(c / 64)); out.push(128 + (c % 64)); }
-    else if (c < 0x10000) push3(c);
-    else {
-      out.push(240 + Math.floor(c / 262144));
-      out.push(128 + (Math.floor(c / 4096) % 64));
-      out.push(128 + (Math.floor(c / 64) % 64));
-      out.push(128 + (c % 64));
-    }
-  }
-  return out;
-}
 
 /**
  * 属性键里编译期就定下来的那个字符串。前端把 `o.k` / `o['k']` / `'k' in o` 都降成

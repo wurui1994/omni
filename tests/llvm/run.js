@@ -76,7 +76,7 @@ for (const rel of others) {
   const r = run(['emit-llvm', join(root, rel)]);
   if (r.code === 0) { wrong.push(`    ${rel} 居然降下来了 —— 要么真支持了（那就加进 SUPPORTED），要么是在悄悄给错答案`); continue; }
   // 报错必须说清是阶段边界，而不是随便崩一个
-  if (!r.err.includes('llvm 后端第一阶段')) wrong.push(`    ${rel} 报错的理由不对：${JSON.stringify(r.err.slice(0, 120))}`);
+  if (!r.err.includes('llvm 后端目前不支持')) wrong.push(`    ${rel} 报错的理由不对：${JSON.stringify(r.err.slice(0, 120))}`);
   else declined++;
 }
 if (wrong.length > 0) bad('boundary/declared', wrong.join('\n'));

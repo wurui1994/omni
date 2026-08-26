@@ -9,26 +9,41 @@
  *     于是 AOT 与 JIT 共用一个发射器，而不是「C API 版」和「文本版」两份语义。
  *     这一条同时省掉几百个 IRBuilder 的 extern-C 声明。
  *
- * 第一阶段的边界（**报错而不是给错答案**，与 WAT 前端同一条规矩）：只认标量
- * i64 / f64 / bool / void。字符串、dyn、聚合、容器、闭包都在 MIR 里，但它们的语义
- * 依赖 C 运行时里按模块生成的类型，那是下一步的事。
+ * 支持面按阶段扩，边界一律**报错而不是给错答案**（与 WAT 前端同一条规矩）：
  *
- * 语义对齐的两处硬约束：
- *   - i64 的加减乘取负按**无符号回绕**（omni.h:325..330 的 omni_add 一族），LLVM 的
- *     `add`/`mul` 不带 nsw 就正好是回绕，所以直接发指令。
- *   - `/` `%` `<<` `>>` 在运行时是 `static inline`（omni.h:329..343），**不是可链接符号**，
- *     所以不能 call —— 这里把它们的语义原地展开（移位量 `& 63`，除零报错，
- *     INT64_MIN / -1 特判）。少一条就是一个只在边角上出现的答案分叉。
+ *   第一阶段：标量 i64 / f64 / bool / void。
+ *   第二阶段：**字符串**。这一步的关键不在代码量，在 ABI —— `omni_str` 是
+ *     `{const char *p; int64_t len;}`，16 字节，clang 在 AArch64 上把它降成
+ *     `[2 x i64]` 按值传（量出来的，不是猜的：拿一份只声明这些签名的 C 过一遍
+ *     `clang -emit-llvm` 看它发什么）。所以这里也必须发 `[2 x i64]`，
+ *     一个字节都不能差，否则每一次字符串调用都在悄悄给错答案。
+ *   还没做：dyn（24 字节，clang 走**间接传**：入参 `ptr`、返回 `sret`）、
+ *     聚合、容器、闭包。它们在 MIR 里都有，缺的是这一层。
+ *
+ * 语义对齐的硬约束 —— 都源自同一件事：**运行时把热的叶子函数写成 `static inline`，
+ * 那不是可链接符号，call 不到**，所以必须在 IR 里原地重建：
+ *   - i64 的加减乘取负按无符号回绕（omni.h:325..330），LLVM 不带 nsw 正好是回绕。
+ *   - `/` `%` `<<` `>>`（omni.h:329..343）：移位量 `& 63`、除零报错、INT64_MIN / -1 特判。
+ *   - 字符串比较（`omni_str_cmp`，omni.h:353..358）：memcmp 前 n 字节，相同则短者在前。
+ *     memcmp 本身是真符号，call 得到。
+ * 少一条就是一个只在边角上出现的答案分叉，而这类分叉正是多方比对要抓的东西。
  */
 
 import { OmniError } from '../source/diag.js';
+import { utf8Bytes } from '../host/utf8.js';
 import {
   OP, OP_NAMES, REF_NONE, REF_BIAS, isConstRef, typeText,
-  T_VOID, T_I64, T_F64, T_BOOL, CVT_I2F, CVT_F2I,
+  T_VOID, T_I64, T_F64, T_BOOL, T_STR, CVT_I2F, CVT_F2I,
 } from '../mir/ir.js';
 
-/** MIR 的类型码 -> LLVM 类型名。表外的一律报错（第一阶段边界）。 */
-const LL_TYPES = new Map([[T_VOID, 'void'], [T_I64, 'i64'], [T_F64, 'double'], [T_BOOL, 'i1']]);
+/**
+ * MIR 的类型码 -> LLVM 类型名。表外的一律报错（阶段边界）。
+ * `[2 x i64]` 不是「一个长度 2 的数组」这种建模选择，是 clang 对 16 字节聚合的
+ * 实参降级结果 —— 我们必须跟它一模一样，见文件头。
+ */
+const LL_TYPES = new Map([
+  [T_VOID, 'void'], [T_I64, 'i64'], [T_F64, 'double'], [T_BOOL, 'i1'], [T_STR, '[2 x i64]'],
+]);
 
 /**
  * 支持的运行时 op：单态名字 -> 可链接的 C 符号与签名。
@@ -38,14 +53,26 @@ const RT_OPS = new Map([
   ['print.int', { sym: 'omni_print_int', ret: 'void', params: ['i64'] }],
   ['print.real', { sym: 'omni_print_real', ret: 'void', params: ['double'] }],
   ['print.bool', { sym: 'omni_print_bool', ret: 'void', params: ['i1 zeroext'] }],
+  ['print.string', { sym: 'omni_print_string', ret: 'void', params: ['[2 x i64]'] }],
   ['trunc', { sym: 'omni_trunc', ret: 'i64', params: ['double'] }],
   // 同一件事的两个名字：WAT 前端发的是 `trunc`，Omni 前端按接收者单态化成 `trunc.real`
   ['trunc.real', { sym: 'omni_trunc', ret: 'i64', params: ['double'] }],
+  // 刻意**没有** str.int / str.real / str.bool 这些转换：它们都是真符号、签名也照
+  // `[2 x i64]` 那条规则推得出来，但现在没有一份 case 走得到（核心方言不含类型转换，
+  // 而 Omni 那边用到它们的程序都带容器，早在别处就被拒了）。没测过的 ABI 断言
+  // 和猜是一回事 —— 等有用例了再加，那时它是被验证的，不是被推断的。
 ]);
 
 /** i64 比较 -> icmp 谓词；f64 -> fcmp 谓词。顺序与 OP.EQ..OP.GT 一致。 */
 const ICMP = new Map([[OP.EQ, 'eq'], [OP.NE, 'ne'], [OP.LT, 'slt'], [OP.GE, 'sge'], [OP.LE, 'sle'], [OP.GT, 'sgt']]);
 const FCMP = new Map([[OP.EQ, 'oeq'], [OP.NE, 'une'], [OP.LT, 'olt'], [OP.GE, 'oge'], [OP.LE, 'ole'], [OP.GT, 'ogt']]);
+
+/**
+ * 所有「这一层还没做」的报错都带上这句。
+ * 它是测试轴上的断言字串（tests/llvm、tests/jit 都按它判「拒得对不对」），
+ * 所以是一个常量而不是散在各处的字面量 —— 措辞改了，两条轴不会静默失配。
+ */
+const NOPE = 'llvm 后端目前不支持';
 
 class LlvmEmitter {
   constructor(mir) {
@@ -58,6 +85,11 @@ class LlvmEmitter {
     this.labels = 0;
     this.regions = [];      // 结构化控制流的区域栈，层数语义与 wasm 相同
     this.live = false;      // 当前基本块还没被终结子关掉
+    // 字符串常量的字节池。函数体里遇到才登记，模块末尾统一发 —— LLVM 不要求
+    // 全局在使用之前出现，所以不必先扫一遍。键是内容，同一份字面量只发一次。
+    this.strs = new Map();
+    this.needStrCmp = false;
+    this.needStrCat = false;
   }
 
   line(s) { this.out.push(s); }
@@ -66,7 +98,7 @@ class LlvmEmitter {
   ty(t, what) {
     const s = LL_TYPES.get(t);
     if (s === undefined) {
-      throw new OmniError(`llvm 后端第一阶段只支持 i64/f64/bool/void：${what} 是 ${typeText(t)}`
+      throw new OmniError(`${NOPE} ${typeText(t)}：${what}`
         + `（函数 ${this.f === null ? '?' : this.f.name}）`);
     }
     return s;
@@ -91,7 +123,28 @@ class LlvmEmitter {
     if (c.t === T_I64) return c.text;
     if (c.t === T_BOOL) return c.text === 'true' ? 'true' : 'false';
     if (c.t === T_F64) return llFloat(c.text);
-    throw new OmniError(`llvm 后端第一阶段不支持 ${typeText(c.t)} 常量（${c.text}）`);
+    if (c.t === T_STR) return this.strConst(c.text);
+    throw new OmniError(`${NOPE} ${typeText(c.t)} 常量（${c.text}）`);
+  }
+
+  /**
+   * 字符串字面量 -> 一个 `[2 x i64]` 的**常量表达式**：{字节的地址, 字节数}。
+   *
+   * 之所以能内联成常量表达式（而不是在函数入口 alloca 再 store 两次），是因为
+   * `ptrtoint` 作用在全局上是合法的常量表达式。于是字符串常量和整数常量在这个
+   * 发射器里走同一条路 —— `val()` 的调用者不需要知道类型。
+   *
+   * 长度是**字节数**（UTF-8），不是字符数：ADR-0005 的 Omni string 就是字节序列。
+   * 编码用的是与 C 后端同一份 utf8Bytes（host/utf8.js），落单代理项的处理也因此一致。
+   */
+  strConst(text) {
+    let e = this.strs.get(text);
+    if (e === undefined) {
+      const bytes = utf8Bytes(text);
+      e = { name: `@.omni_s${this.strs.size}`, bytes: bytes };
+      this.strs.set(text, e);
+    }
+    return `[i64 ptrtoint (ptr ${e.name} to i64), i64 ${e.bytes.length}]`;
   }
 
   /** ref 的类型码。 */
@@ -145,6 +198,22 @@ class LlvmEmitter {
       this.line('@.omni_divzero = private unnamed_addr constant [17 x i8] c"division by zero\\00"');
       this.line('');
     }
+    if (this.needStrCmp) {
+      this.line(STRCMP_HELPER);
+      this.line('declare i32 @memcmp(ptr, ptr, i64)');
+      this.line('');
+    }
+    if (this.needStrCat) {
+      this.line('declare [2 x i64] @omni_str_cat([2 x i64], [2 x i64])');
+      this.line('');
+    }
+    // 字符串字面量的字节。放在最后是因为它们是函数体发到一半才登记的；
+    // 顺序按登记顺序，所以同一份输入两次发出来逐字节相同（快照轴要这个）。
+    for (const e of this.strs.values()) {
+      const bs = e.bytes.map((b) => `i8 ${b}`).join(', ');
+      this.line(`${e.name} = private unnamed_addr constant [${e.bytes.length} x i8] [${bs}]`);
+    }
+    if (this.strs.size > 0) this.line('');
 
     // main 与 C 后端那一行逐句对应（backend-c/emit.js:152）：argc/argv 要存下来，
     // 退出码是 omni_host_exit_code 里的槽，不是 omni_main 的返回值。
@@ -168,7 +237,7 @@ class LlvmEmitter {
     this.labels = 0;
     this.regions = [];
     if (f.closureId !== undefined) {
-      throw new OmniError(`llvm 后端第一阶段不支持闭包（函数 ${f.name}）`);
+      throw new OmniError(`${NOPE} 闭包（函数 ${f.name}）`);
     }
     const ps = f.params.map((p, i) => `${this.ty(p.t, `参数 ${p.name}`)} %a${i}`);
     this.line(`define ${this.ty(f.ret, '返回值')} @${f.name}(${ps.join(', ')}) {`);
@@ -271,6 +340,14 @@ class LlvmEmitter {
       this.line(`  store ${st} ${this.val(f.a[i])}, ptr %s${f.aux[i]}`);
       return;
     }
+    // 字符串要**在标量表之前**分流：`t` 是 T_STR 时 isF 为假，落到 BIN_LL 会发出
+    // `add [2 x i64]` 这种既不合法又语义全错的东西。先拦住。
+    // 只截运算与比较 —— CALL / CALLOP 的 `t` 也可能是 T_STR（返回字符串的函数），
+    // 那两条走下面的通路，类型由 ty() 统一映射。
+    if (t === T_STR && (op === OP.ADD || (op >= OP.EQ && op <= OP.GT))) {
+      this.strInsn(f, i, op, dst);
+      return;
+    }
     if (BIN_LL.has(op)) {
       const kind = BIN_LL.get(op);
       const ll = isF ? kind[1] : kind[0];
@@ -314,7 +391,7 @@ class LlvmEmitter {
     if (op === OP.CVT) {
       if (f.aux[i] === CVT_I2F) { this.line(`  ${dst} = sitofp i64 ${this.val(f.a[i])} to double`); return; }
       if (f.aux[i] === CVT_F2I) { this.line(`  ${dst} = fptosi double ${this.val(f.a[i])} to i64`); return; }
-      throw new OmniError(`llvm 后端第一阶段不支持 CVT ${f.aux[i]}（函数 ${f.name}）`);
+      throw new OmniError(`${NOPE} CVT ${f.aux[i]}（函数 ${f.name}）`);
     }
     if (op === OP.CALL) {
       const g = this.mir.funcs[f.a[i]];
@@ -328,7 +405,7 @@ class LlvmEmitter {
       const entry = this.mir.ops[f.a[i]];
       const d = RT_OPS.get(entry.name);
       if (d === undefined) {
-        throw new OmniError(`llvm 后端第一阶段还没有 op '${entry.name}'（函数 ${f.name}）`);
+        throw new OmniError(`${NOPE} op '${entry.name}'（函数 ${f.name}）`);
       }
       const refs = f.argsOf(f.b[i]);
       if (refs.length !== d.params.length) {
@@ -339,7 +416,32 @@ class LlvmEmitter {
       this.line(d.ret === 'void' ? `  ${call}` : `  ${dst} = ${call}`);
       return;
     }
-    throw new OmniError(`llvm 后端第一阶段不支持 ${OP_NAMES[op]}（函数 ${f.name}）`);
+    throw new OmniError(`${NOPE} ${OP_NAMES[op]}（函数 ${f.name}）`);
+  }
+
+  /* -------------------------------------------------------------- 字符串 */
+
+  /**
+   * `t` 是 T_STR 的运算与比较。
+   *
+   * 拼接是真符号（`omni_str_cat`），直接 call。比较不是 —— `omni_str_cmp` 在
+   * omni.h 里是 static inline，所以在 IR 里重建成一个私有函数（见 STRCMP_HELPER），
+   * 语义逐句对着那八行抄。相等/不等本可以短路成「长度不同直接 false」，
+   * **故意不这么写**：那是另一条语义路径，与 C 那边就不再是同一份代码了，
+   * 而这一层的全部风险就在「两条腿在边角上分叉」。
+   */
+  strInsn(f, i, op, dst) {
+    if (op === OP.ADD) {
+      this.needStrCat = true;
+      this.line(`  ${dst} = call [2 x i64] @omni_str_cat([2 x i64] ${this.val(f.a[i])}, `
+        + `[2 x i64] ${this.val(f.b[i])})`);
+      return;
+    }
+    this.needStrCmp = true;
+    const c = this.fresh();
+    this.line(`  ${c} = call i32 @omni_ll_strcmp([2 x i64] ${this.val(f.a[i])}, `
+      + `[2 x i64] ${this.val(f.b[i])})`);
+    this.line(`  ${dst} = icmp ${ICMP.get(op)} i32 ${c}, 0`);
   }
 }
 
@@ -430,6 +532,38 @@ sat:
 ok:
   %r = srem i64 %a, %b
   ret i64 %r
+}
+`;
+
+/* 字符串比较（omni.h:353..358 的 omni_str_cmp，也是 static inline 所以 call 不到）：
+ * 前 min(len) 字节走 memcmp，相同则短者在前。memcmp 是真符号。
+ * `%lt` 在 entry 里算好，bylen 里再用 —— entry 支配全图，合法。 */
+const STRCMP_HELPER = `define private i32 @omni_ll_strcmp([2 x i64] %a, [2 x i64] %b) {
+entry:
+  %ai = extractvalue [2 x i64] %a, 0
+  %an = extractvalue [2 x i64] %a, 1
+  %bi = extractvalue [2 x i64] %b, 0
+  %bn = extractvalue [2 x i64] %b, 1
+  %ap = inttoptr i64 %ai to ptr
+  %bp = inttoptr i64 %bi to ptr
+  %lt = icmp slt i64 %an, %bn
+  %n = select i1 %lt, i64 %an, i64 %bn
+  %pos = icmp sgt i64 %n, 0
+  br i1 %pos, label %cmp, label %tail
+cmp:
+  %c = call i32 @memcmp(ptr %ap, ptr %bp, i64 %n)
+  %nz = icmp ne i32 %c, 0
+  br i1 %nz, label %diff, label %tail
+diff:
+  ret i32 %c
+tail:
+  %eq = icmp eq i64 %an, %bn
+  br i1 %eq, label %same, label %bylen
+same:
+  ret i32 0
+bylen:
+  %s = select i1 %lt, i32 -1, i32 1
+  ret i32 %s
 }
 `;
 

@@ -1,0 +1,36 @@
+;; 字符串：拼接、比较、UTF-8。这一份的存在理由是 LLVM 后端第二阶段 ——
+;; `omni_str` 是 16 字节聚合，clang 把它降成 `[2 x i64]` 按值传，而 `omni_str_cmp`
+;; 是 static inline（call 不到，只能在 IR 里用 memcmp 重建）。两处都错得很安静，
+;; 所以要有一份用例把「前缀相同时短者在前」「非 ASCII 按字节序」这些边角钉住。
+(module
+  (fn cmp2 ((a string) (b string)) string
+    (if (bin "<" (var a) (var b)) (do (ret (str "lt"))))
+    (if (bin ">" (var a) (var b)) (do (ret (str "gt"))))
+    (ret (str "eq")))
+
+  (fn twice ((s string)) string
+    (ret (bin "+" (var s) (var s))))
+
+  (main
+    ;; 拼接：空串、多次、嵌套
+    (print (bin "+" (str "") (str "a")))
+    (print (bin "+" (bin "+" (str "x") (str "y")) (str "z")))
+    (print (call twice (str "ab")))
+
+    ;; 相等与不等
+    (print (bin "==" (str "abc") (str "abc")))
+    (print (bin "==" (str "abc") (str "abd")))
+    (print (bin "!=" (str "abc") (str "ab")))
+    (print (bin "==" (str "") (str "")))
+
+    ;; 前缀相同时短者在前 —— memcmp 只比 min(len) 字节，剩下的靠长度定序
+    (print (call cmp2 (str "ab") (str "abc")))
+    (print (call cmp2 (str "abc") (str "ab")))
+    (print (call cmp2 (str "abc") (str "abc")))
+    (print (bin "<=" (str "ab") (str "ab")))
+    (print (bin ">=" (str "b") (str "a")))
+
+    ;; 非 ASCII：Omni string 是 UTF-8 字节序列（ADR-0005），比较就是字节序
+    (print (bin "+" (str "中") (str "文")))
+    (print (bin "<" (str "a") (str "中")))
+    (print (call twice (str "😀")))))

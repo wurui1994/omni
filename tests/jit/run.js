@@ -96,7 +96,7 @@ let declined = 0;
 for (const rel of others) {
   const j = run(['run-jit', join(root, rel)]);
   if (j.code === 0) { wrong.push(`    ${rel} 在 JIT 上居然跑通了 —— 两条路的边界必须一样`); continue; }
-  if (!j.err.includes('llvm 后端第一阶段')) wrong.push(`    ${rel} 报错的理由不对：${JSON.stringify(j.err.slice(0, 120))}`);
+  if (!j.err.includes('llvm 后端目前不支持')) wrong.push(`    ${rel} 报错的理由不对：${JSON.stringify(j.err.slice(0, 120))}`);
   else declined++;
 }
 if (wrong.length > 0) bad('boundary/same-as-aot', wrong.join('\n'));

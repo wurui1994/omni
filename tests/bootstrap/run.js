@@ -252,6 +252,18 @@ if (c1 && !quick) {
     else if (llVia.stdout !== llRef.stdout) bad('N1 emit-llvm == C0', `    C0 ${llRef.stdout.length} bytes != N1 ${llVia.stdout.length} bytes`);
     else ok(`N1 emit-llvm cases/02_numeric == C0  ${llRef.stdout.length} bytes`);
 
+    // 第二阶段（字符串）也要一条：`[2 x i64]` 的 ABI 之外，字符串常量要经 utf8Bytes
+    // 发成一段 `[N x i8]`，而那个函数是**两个后端共用**的（host/utf8.js）。
+    // 挑这份 case 是因为它里面有 CJK 与 emoji：非 ASCII 才走得到多字节那几支，
+    // 而那几支只用加乘取模写（封闭 ABI 没有位运算），两代算出不同字节的话
+    // 症状是「原生编译器发的 IR 里字符串是乱码」—— node 上永远看不出来。
+    const caseStr = join(root, 'tests', 'sexpr', 'cases', '02-strings.sx');
+    const sRef = spawnSync('node', [cli, 'emit-llvm', caseStr], { encoding: 'utf8' });
+    const sVia = spawnSync(n1, ['emit-llvm', caseStr], { encoding: 'utf8' });
+    if (sVia.status !== 0) bad('N1 emit-llvm sexpr/02-strings', `    exit=${sVia.status}\n${sVia.stderr}`);
+    else if (sVia.stdout !== sRef.stdout) bad('N1 emit-llvm strings == C0', `    C0 ${sRef.stdout.length} bytes != N1 ${sVia.stdout.length} bytes`);
+    else ok(`N1 emit-llvm sexpr/02-strings == C0  ${sRef.stdout.length} bytes`);
+
     // ---- 核心 S 表达式方言 + $*k 摊平（ADR-0014 决策 1）
     // 走的是整条链：mini 的 grammar -> `omni glr`（摊平在这里）-> 核心方言文本 ->
     // `omni run`（sexpr/lower.js 在这里）。两代都得给同一份文本、同一份输出。

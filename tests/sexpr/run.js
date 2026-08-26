@@ -7,11 +7,11 @@
 // 而 mini 这门语言除了 tests/glr/grammars/mini.grammar 之外没有任何实现文件。
 //
 // 四件事：
-//   1. **方言本身能跑**：cases/*.sx 在 run / run-c / interp / interp --mir 四个执行器上
-//      逐字节相同，且等于 .expected。四方一致比对上期望值更强 —— 期望值只钉住答案，
-//      四方一致同时钉住"哪一条腿偏了"。
+//   1. **方言本身能跑**：cases/*.sx 在 run / run-c / interp / interp --mir / run-llvm
+//      五个执行器上逐字节相同，且等于 .expected。五方一致比对上期望值更强 ——
+//      期望值只钉住答案，多方一致同时钉住"哪一条腿偏了"。
 //   2. **grammar 出来的树也能跑**：mini/*.mini 经 `omni glr` 得到核心方言文本，
-//      再喂给同样四个执行器，同样对上 .expected。这中间没有一行为 mini 写的代码。
+//      再喂给同样五个执行器，同样对上 .expected。这中间没有一行为 mini 写的代码。
 //   3. **硬指标**：编译器源码里不存在 'mini' 这个词。这条断言是决策 1 的验收本体 ——
 //      哪天有人为了让 mini 跑通去 stage0/src 里加个特例，这条会红。
 //   4. **bad/ 里的必须被拒绝，且拒在正确的理由上**：类型不推导只检查、条件不真值化、
@@ -51,12 +51,21 @@ const ok = (msg) => { pass++; process.stdout.write(`  ok   ${msg}\n`); };
 const no = (name, why) => { fail++; failures.push(`${name}\n${why}`); process.stdout.write(`  FAIL ${name}\n`); };
 const want = (f) => (!filters.length || filters.some((x) => f.includes(x)));
 
-/** 四条腿：同一份 .sx，四个执行器，stdout 必须逐字节相同 */
+/**
+ * 五条腿：同一份 .sx，五个执行器，stdout 必须逐字节相同。
+ *
+ * `run-llvm` 是从 LLVM 后端第二阶段（字符串）起加进来的 —— 在那之前核心方言里只要
+ * 出现一个 string 就降不下去。现在整套方言（int/real/bool/string，无容器无 dyn）
+ * 都能降，所以这条轴顺带成了「后端支持面覆盖整个汇聚层」的断言：
+ * 哪天方言加了新节点而 LLVM 那边没跟上，这里立刻红。
+ * `run-jit` 不在这里 —— 它要 libLLVM，可能不在环境里，由 tests/jit 那条轴管。
+ */
 const LEGS = [
   { tag: 'run', args: (p) => ['run', p] },
   { tag: 'run-c', args: (p) => ['run-c', p] },
   { tag: 'interp', args: (p) => ['interp', p] },
   { tag: 'interp --mir', args: (p) => ['interp', p, '--mir'] },
+  { tag: 'run-llvm', args: (p) => ['run-llvm', p] },
 ];
 
 /** 一份 .sx + 一份期望值 -> 四方一致 + 对上期望值。返回失败明细（空数组 = 过） */
@@ -84,18 +93,16 @@ for (const f of readdirSync(join(here, 'cases')).filter((x) => x.endsWith('.sx')
   if (!want(f)) continue;
   const name = basename(f, '.sx');
   const bad = agree(join(here, 'cases', f), read(join(here, 'cases', `${name}.expected`)));
-  if (bad.length === 0) ok(`core/${name} [四方一致 == ${name}.expected]`);
+  if (bad.length === 0) ok(`core/${name} [五方一致 == ${name}.expected]`);
   else no(`core/${name}`, bad.join('\n'));
 }
 
-// ------------------------------------------------- 2. grammar -> 方言 -> 四方一致
+// ------------------------------------------------- 2. grammar -> 方言 -> 五方一致
 //
 // mini 只有 grammar：`omni glr` 的动作模板（`(bin "+" $1 $3)`、`(fn $2 $4 $6 $*7)`）
 // 直接拼出核心方言，印出来就是一份合法的 .sx。
 
 const gram = join(root, 'tests', 'glr', 'grammars', 'mini.grammar');
-/** LLVM 后端第一阶段只降标量，所以这份额外多跑一条腿 */
-const LLVM_OK = new Set(['02-numeric']);
 
 for (const f of readdirSync(join(here, 'mini')).filter((x) => x.endsWith('.mini')).sort()) {
   if (!want(f)) continue;
@@ -105,14 +112,7 @@ for (const f of readdirSync(join(here, 'mini')).filter((x) => x.endsWith('.mini'
   const sx = join(dir, `${name}.sx`);
   writeFileSync(sx, g.out);
   const bad = agree(sx, read(join(here, 'mini', `${name}.expected`)));
-  if (LLVM_OK.has(name)) {
-    const l = cmd(['run-llvm', sx]);
-    if (l.code !== 0) bad.push(`    run-llvm exit=${l.code}\n${l.err}`);
-    else if (l.out !== read(join(here, 'mini', `${name}.expected`))) {
-      bad.push(`    run-llvm 对不上期望值\n      got: ${JSON.stringify(l.out)}`);
-    }
-  }
-  if (bad.length === 0) ok(`mini/${name} [grammar -> 核心方言 -> ${LLVM_OK.has(name) ? '五' : '四'}方一致]`);
+  if (bad.length === 0) ok(`mini/${name} [grammar -> 核心方言 -> 五方一致]`);
   else no(`mini/${name}`, bad.join('\n'));
 }
 
