@@ -412,7 +412,15 @@ export function jsTruthy(v) {
 
 export function callBuiltin(I, e, env, frame) {
   switch (e.kind) {
-    case 'Bin': return binOp(e.op, e.opType.k, I.eval(e.left, env, frame), I.eval(e.right, env, frame));
+    case 'Bin': {
+      const a = I.eval(e.left, env, frame);
+      const b = I.eval(e.right, env, frame);
+      // 向量是逐道做同一条标量运算（ADR-0014 决策 6）。刻意复用 binOp 而不另写一份
+      // int/real 的语义：回绕、除零的消息、`%` 的符号 —— 那些必须和标量**同一份代码**，
+      // 否则「向量道上的 int」和「标量 int」会在某个边界上分叉。
+      if (e.opType.k === 'vec') return vecBinOp(e.op, e.opType, a, b);
+      return binOp(e.op, e.opType.k, a, b);
+    }
     case 'Un': {
       const v = I.eval(e.operand, env, frame);
       // 一元负号也会溢出：-INT64_MIN == INT64_MIN，必须回绕
@@ -496,6 +504,27 @@ export function binOp(op, kind, a, b) {
   }
   if (kind === 'string' && op === '+') return a + b;
   throw new OmniError(`interp.bin: ${op} on ${kind}`);
+}
+
+/**
+ * 向量的逐元素运算。宿主表示是一条长度 = 宽度的普通数组，每道一个标量 ——
+ * 解释器是 oracle，要的是「每道的答案和标量运算逐位相同」，不是速度。
+ */
+export function vecBinOp(op, t, a, b) {
+  const out = [];
+  for (let i = 0; i < t.lanes; i++) out.push(binOp(op, t.elem.k, a[i], b[i]));
+  return out;
+}
+
+/**
+ * 水平求和，**严格左到右**：((v0+v1)+v2)+v3。浮点加法不结合，所以这条顺序是
+ * ADR-0014 门槛 6 的落点：六个执行器都得发这一棵树，谁改成两两配对就会被
+ * tests/sexpr/cases/03-simd.sx 最后一行抓住。
+ */
+export function vecHsum(t, v) {
+  let acc = v[0];
+  for (let i = 1; i < t.lanes; i++) acc = binOp('+', t.elem.k, acc, v[i]);
+  return acc;
 }
 
 /** to_string / print 的四种标量。容器与 dynamic 不到这里 —— 检查器把它们改写成

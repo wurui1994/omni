@@ -18,4 +18,7 @@ export const SUPPORTED = [
   // 没有容器也没有 dyn，正好是这一阶段支持面的边界。
   join('tests', 'sexpr', 'cases', '01-core.sx'),
   join('tests', 'sexpr', 'cases', '02-strings.sx'),
+  // SIMD 第一阶段（门槛 6）：`<N x T>` 那条腿。它和 C 的标量化腿必须逐位相同，
+  // 所以这条 case 在这张表里的意义比"又多支持一点"更重 —— 它是那条门槛的度量点。
+  join('tests', 'sexpr', 'cases', '03-simd.sx'),
 ];

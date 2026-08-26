@@ -21,7 +21,7 @@ import { OmniError } from '../source/diag.js';
 import { typeKey } from '../hir/types.js';
 import { JS_ALL } from '../hir/js_abi.js';
 import {
-  OP, REF_NONE, MirFunc, MirModule,
+  OP, REF_NONE, MirFunc, MirModule, mkType,
   T_VOID, T_I64, T_F64, T_BOOL, T_STR, T_DYN, T_AGG,
   CVT_I2F, CVT_F2I, CVT_BOX,
 } from './ir.js';
@@ -78,6 +78,9 @@ class ToMir {
       case 'bool': return T_BOOL;
       case 'string': return T_STR;
       case 'dynamic': return T_DYN;
+      // 向量：种类是元素的种类，宽度进 `t` 的高 3 位（ir.js 的 mkType）——
+      // 所以向量不占类型池，也不是 T_AGG：它是"带宽度的标量"，后端要的就是这个事实。
+      case 'vec': return mkType(this.ty(t.elem), t.lanes);
       // null 字面量：能赋给 class 引用、函数值与 dynamic，三者在 MIR 里都是「一个引用」
       case 'null': return T_AGG;
       default: return T_AGG;
@@ -438,9 +441,42 @@ class ToMir {
         return f.emit(OP.CLOSURE, T_AGG, no, this.args(e.args), 0);
       }
       case 'Builtin': return this.builtin(e);
+      case 'VecSplat': case 'VecLit': case 'VecLane': case 'VecHsum': return this.vec(e);
       default:
         throw new OmniError(`mir: 还没有处理的表达式 ${e.kind}`);
     }
+  }
+
+  /**
+   * 向量四条。`(vlit ...)` 落成「splat 第 0 道 + 逐道 VINS」，`(hsum v)` 落成
+   * 「逐道 VEXT + 严格左到右的 ADD 链」—— 后者是门槛 6 的落点：求值树成了
+   * MIR 里看得见的指令序列，LLVM 与闭包解释器都只是照着走，没有挑规约形状的余地。
+   */
+  vec(e) {
+    const f = this.f;
+    if (e.kind === 'VecSplat') {
+      return f.emit(OP.VSPLAT, this.ty(e.type), this.expr(e.value), REF_NONE, 0);
+    }
+    if (e.kind === 'VecLit') {
+      const t = this.ty(e.type);
+      let v = f.emit(OP.VSPLAT, t, this.expr(e.lanes[0]), REF_NONE, 0);
+      for (let i = 1; i < e.lanes.length; i++) {
+        v = f.emit(OP.VINS, t, v, this.expr(e.lanes[i]), i);
+      }
+      return v;
+    }
+    // VEXT 的 `t` 是元素类型（= 结果类型）；"从哪个向量取"由 a 的类型说明
+    if (e.kind === 'VecLane') {
+      return f.emit(OP.VEXT, this.ty(e.type), this.expr(e.vec), REF_NONE, e.lane);
+    }
+    const vt = e.vec.type;
+    const et = this.ty(vt.elem);
+    const v = this.expr(e.vec);
+    let acc = f.emit(OP.VEXT, et, v, REF_NONE, 0);
+    for (let i = 1; i < vt.lanes; i++) {
+      acc = f.emit(OP.ADD, et, acc, f.emit(OP.VEXT, et, v, REF_NONE, i), 0);
+    }
+    return acc;
   }
 
   /**

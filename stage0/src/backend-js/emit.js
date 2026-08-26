@@ -268,10 +268,11 @@ class JsEmitter {
     return code;
   }
 
-  /** 需要值语义的位置（初始化/赋值/传参/返回）：结构体与 enum 左值要拷贝 */
+  /** 需要值语义的位置（初始化/赋值/传参/返回）：结构体、enum 与向量的左值要拷贝 */
   rvalue(e, type) {
     const src = this.expr(e);
     const lval = e.kind === 'VarRef' || e.kind === 'Field' || e.kind === 'EnumPayload';
+    if (type && lval && type.k === 'vec') return `$vcopy(${src})`;
     if (type && lval && (type.k === 'struct' || type.k === 'enum')) return this.copyOf(type, src);
     return src;
   }
@@ -303,6 +304,12 @@ class JsEmitter {
       case 'DictLit':
         return `new Map([${e.entries.map((en) => `[${this.expr(en.key)}, ${this.rvalue(en.value, en.value.type)}]`).join(', ')}])`;
       case 'VarRef': return `v_${e.name}`;
+      // 向量四条（ADR-0014 门槛 6 第一阶段）。表示 = 数组，取道就是取下标；
+      // 下标是降级期就定死的字面量，所以这里没有边界检查那条路。
+      case 'VecSplat': return `$vsplat(${this.expr(e.value)}, ${e.type.lanes})`;
+      case 'VecLit': return `[${e.lanes.map((x) => this.expr(x)).join(', ')}]`;
+      case 'VecLane': return `${this.expr(e.vec)}[${e.lane}]`;
+      case 'VecHsum': return `$vhsum(${this.expr(e.vec)}, ${this.laneOp('+', e.type)})`;
       case 'Field': {
         const obj = this.expr(e.object);
         // class 是引用类型，可能为 null；两个后端都显式检查，错误消息一致
@@ -355,23 +362,36 @@ class JsEmitter {
   bin(e) {
     const a = this.expr(e.left);
     const b = this.expr(e.right);
-    if (e.opType.k === 'int') {
-      switch (e.op) {
-        case '+': case '-': case '*': return `$W(${a} ${e.op} ${b})`;
+    // 向量：逐道走同一条标量表达式。lane 函数由 binCode 拼出来，所以道上的
+    // 回绕/除零消息和标量那份是**同一份发射代码**（ADR-0014 决策 6）。
+    if (e.opType.k === 'vec') return `$vbin(${a}, ${b}, ${this.laneOp(e.op, e.opType.elem)})`;
+    return this.binCode(e.op, e.opType, a, b);
+  }
+
+  /** 一道上的标量运算，包成 `(x, y) => …` —— $vbin / $vhsum 的实参 */
+  laneOp(op, elem) {
+    return `(x, y) => ${this.binCode(op, elem, 'x', 'y')}`;
+  }
+
+  /** 二元运算的代码拼装。操作数已经是代码串：标量路径与向量的逐道路径共用它 */
+  binCode(op, opType, a, b) {
+    if (opType.k === 'int') {
+      switch (op) {
+        case '+': case '-': case '*': return `$W(${a} ${op} ${b})`;
         case '/': return `$div(${a}, ${b})`;
         case '%': return `$mod(${a}, ${b})`;
         case '<<': return `$W(${a} << (${b} & 63n))`;
         case '>>': return `(${a} >> (${b} & 63n))`;
-        case '&': case '|': case '^': return `(${a} ${e.op} ${b})`;
-        default: throw new Error(`js.bin int: ${e.op}`);
+        case '&': case '|': case '^': return `(${a} ${op} ${b})`;
+        default: throw new Error(`js.bin int: ${op}`);
       }
     }
-    if (e.opType.k === 'real') {
-      if (e.op === '%') return `$fmod(${a}, ${b})`;
-      return `(${a} ${e.op} ${b})`;
+    if (opType.k === 'real') {
+      if (op === '%') return `$fmod(${a}, ${b})`;
+      return `(${a} ${op} ${b})`;
     }
-    if (e.opType.k === 'string' && e.op === '+') return `(${a} + ${b})`;
-    throw new Error(`js.bin: ${e.op} on ${e.opType.k}`);
+    if (opType.k === 'string' && op === '+') return `(${a} + ${b})`;
+    throw new Error(`js.bin: ${op} on ${opType.k}`);
   }
 
   builtin(e) {

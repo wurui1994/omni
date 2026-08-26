@@ -31,6 +31,16 @@ export function setType(elem) { return { k: 'set', elem }; }
  * 否则 `fn(int a)->int` 和 `fn(int b)->int` 会是两个类型。
  */
 export function fnType(params, ret) { return { k: 'fn', params, ret }; }
+/**
+ * 定长向量（ADR-0014 决策 6 / 门槛 6）。`elem` 只能是 int 或 real，`lanes` 是 2 的幂。
+ *
+ * 为什么它必须出现在 **OIR** 而不只是 MIR：C 后端与 JS 后端消费的是 OIR，MIR 只喂
+ * LLVM 与 MIR 解释器。门槛 6 要的「LLVM 向量路径 == C 标量化路径逐位相同」
+ * 因此两层都得有它 —— 只放 MIR 的话 C 那条腿根本看不见向量，比对无从谈起。
+ *
+ * 值语义（赋值即拷贝，同 struct）：向量是一串数，不是对象。所以 isRef 里没有它。
+ */
+export function vecType(elem, lanes) { return { k: 'vec', elem, lanes }; }
 
 /** 引用语义的类型（赋值传引用，不拷贝） */
 export function isRef(t) {
@@ -46,6 +56,7 @@ export function typeKey(t) {
     case 'list': return `list_${typeKey(t.elem)}`;
     case 'dict': return `dict_${typeKey(t.key)}_${typeKey(t.val)}`;
     case 'set': return `set_${typeKey(t.elem)}`;
+    case 'vec': return `vec_${typeKey(t.elem)}_${t.lanes}`;
     // 参数与返回之间用 `__` 分隔：参数之间是 `_`，所以零参也不会和别的键撞
     case 'fn': return `fn_${t.params.map(typeKey).join('_')}__${typeKey(t.ret)}`;
     default: return t.k;
@@ -59,6 +70,7 @@ export function typeName(t) {
     case 'list': return `list<${typeName(t.elem)}>`;
     case 'dict': return `dict<${typeName(t.key)}, ${typeName(t.val)}>`;
     case 'set': return `set<${typeName(t.elem)}>`;
+    case 'vec': return `vec<${typeName(t.elem)}, ${t.lanes}>`;
     case 'fn': return `fn(${t.params.map(typeName).join(', ')}) -> ${typeName(t.ret)}`;
     default: return t.k;
   }
@@ -130,6 +142,11 @@ export function cTypeName(t) {
     // 所有函数值在 C 里是同一个指针类型；签名只出现在调用处的强制转换里
     case 'fn': return 'omni_fn';
     case 'list': case 'dict': case 'set': return `omni_${typeKey(t)}`;
+    // 向量在 C 侧是一个按值传的定长数组结构体，按 (元素, 宽度) 生成，与容器同一套路。
+    // C 备选路径上向量是**标量化**的（ADR-0014 决策 6 唯一许可的合法化），
+    // 所以这里不是 `double __attribute__((vector_size(32)))` 之类的编译器扩展 ——
+    // 那会把「两条腿逐位相同」的责任交给 clang 的自动向量化，而它不保证求值顺序。
+    case 'vec': return `omni_${typeKey(t)}`;
     default: throw new Error(`cTypeName: ${t.k}`);
   }
 }
@@ -149,6 +166,9 @@ export function zeroValue(t) {
     case 'class': return { kind: 'NullRef', type: t };
     case 'fn': return { kind: 'NullFn', type: t };
     case 'list': case 'dict': case 'set': return { kind: 'NewContainer', type: t };
+    // 向量的零值就是「零值 splat」，不另开一个 ZeroVec 节点：每多一种 OIR 节点，
+    // 三个 OIR 消费者（C / JS / 解释器）就各多一处分支，而这里的语义已经有节点表达了。
+    case 'vec': return { kind: 'VecSplat', type: t, value: zeroValue(t.elem) };
     default: return null;
   }
 }

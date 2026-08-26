@@ -32,7 +32,7 @@
 import { OmniError } from '../source/diag.js';
 import { utf8Bytes } from '../host/utf8.js';
 import {
-  OP, OP_NAMES, REF_NONE, REF_BIAS, isConstRef, typeText,
+  OP, OP_NAMES, REF_NONE, REF_BIAS, isConstRef, typeText, typeKind, typeLanes,
   T_VOID, T_I64, T_F64, T_BOOL, T_STR, CVT_I2F, CVT_F2I,
 } from '../mir/ir.js';
 
@@ -96,6 +96,10 @@ class LlvmEmitter {
 
   /** 类型码 -> LLVM 类型。表外的报错，带上函数名与类型名 —— 边界要说得清。 */
   ty(t, what) {
+    // 向量（ADR-0014 门槛 6）：`<N x 元素>`。宽度在 `t` 的高 3 位上，所以不查表 ——
+    // 查表就要为 2/4/8 三种宽度各列一行，而宽度本来就是算得出来的。
+    const lanes = typeLanes(t);
+    if (lanes > 1) return `<${lanes} x ${this.ty(typeKind(t), what)}>`;
     const s = LL_TYPES.get(t);
     if (s === undefined) {
       throw new OmniError(`${NOPE} ${typeText(t)}：${what}`
@@ -330,7 +334,8 @@ class LlvmEmitter {
   /* -------------------------------------------------- 数据指令（不改控制流） */
 
   dataInsn(f, i, op, dst, t) {
-    const isF = t === T_F64;
+    const lanes = typeLanes(t);
+    const isF = typeKind(t) === T_F64;
     if (op === OP.LOAD) {
       this.line(`  ${dst} = load ${this.ty(t, 'slot')}, ptr %s${f.aux[i]}`);
       return;
@@ -338,6 +343,15 @@ class LlvmEmitter {
     if (op === OP.STORE) {
       const st = this.ty(f.slots[f.aux[i]].t, 'slot');
       this.line(`  store ${st} ${this.val(f.a[i])}, ptr %s${f.aux[i]}`);
+      return;
+    }
+    // 向量三条 + 向量上的四则运算。分流要在标量表之前：`add <4 x i64>` 是合法的，
+    // 但 `/`（整数）和 `& 63` 那些辅助函数是标量签名，落进去会发出对不上的 IR。
+    // 条件里刻意**不是**"只要 t 是向量"：返回向量的 CALL、装载向量的 LOAD 的 `t` 也是向量，
+    // 而它们的发射方式与元素类型无关，走下面那条通路就对。
+    if (op === OP.VSPLAT || op === OP.VINS || op === OP.VEXT
+      || (lanes > 1 && (BIN_LL.has(op) || op === OP.NEG))) {
+      this.vecInsn(f, i, op, dst, t);
       return;
     }
     // 字符串要**在标量表之前**分流：`t` 是 T_STR 时 isF 为假，落到 BIN_LL 会发出
@@ -442,6 +456,78 @@ class LlvmEmitter {
     this.line(`  ${c} = call i32 @omni_ll_strcmp([2 x i64] ${this.val(f.a[i])}, `
       + `[2 x i64] ${this.val(f.b[i])})`);
     this.line(`  ${dst} = icmp ${ICMP.get(op)} i32 ${c}, 0`);
+  }
+
+  /**
+   * 向量（ADR-0014 门槛 6 第一阶段）。这条腿走 LLVM 的原生向量类型 `<N x T>`，
+   * C 那条腿是标量化 —— 两者必须逐位相同，所以这里只用**逐道语义确定**的指令：
+   *
+   *   - `+ - *`：`add`/`fadd` 等在向量上就是逐道；i64 不带 nsw，回绕与 C 的 omni_add 一致。
+   *   - `/`：f64 直接 `fdiv`（IEEE 逐道，无 fast-math）；**i64 要标量化** ——
+   *     除零要报错、INT64_MIN/-1 要特判，那些在 @omni_ll_div 里，而它是标量签名。
+   *   - splat：`insertelement` + 全零掩码的 `shufflevector`，clang 发的就是这个形状。
+   *   - hsum 不在这里：它在 OIR -> MIR 那步就成了「VEXT + 左到右 ADD 链」，
+   *     所以求值顺序是 MIR 的事实，不是这一层的选择（这正是门槛 6 要的）。
+   *
+   * 刻意**不发** `llvm.vector.reduce.fadd`：那条 intrinsic 的规约顺序由目标决定，
+   * 用它就等于把「固定求值顺序」交给后端心情。
+   */
+  vecInsn(f, i, op, dst, t) {
+    const lanes = typeLanes(t);
+    const isF = typeKind(t) === T_F64;
+    if (op === OP.VSPLAT) {
+      const el = this.ty(typeKind(t), 'splat 的元素');
+      const vt = this.ty(t, 'splat');
+      const one = this.fresh();
+      this.line(`  ${one} = insertelement ${vt} poison, ${el} ${this.val(f.a[i])}, i64 0`);
+      this.line(`  ${dst} = shufflevector ${vt} ${one}, ${vt} poison, <${lanes} x i32> zeroinitializer`);
+      return;
+    }
+    if (op === OP.VINS) {
+      const el = this.ty(typeKind(t), 'insert 的元素');
+      this.line(`  ${dst} = insertelement ${this.ty(t, 'insert')} ${this.val(f.a[i])}, `
+        + `${el} ${this.val(f.b[i])}, i64 ${f.aux[i]}`);
+      return;
+    }
+    if (op === OP.VEXT) {
+      // `t` 是元素类型（结果类型）；被取的向量类型看操作数
+      this.line(`  ${dst} = extractelement ${this.typed(f.a[i])}, i64 ${f.aux[i]}`);
+      return;
+    }
+    if (op === OP.DIV && !isF) {
+      this.needDiv = true;
+      const vt = this.ty(t, 'div');
+      let acc = 'poison';
+      let k = 0;
+      while (k < lanes) {
+        const la = this.fresh();
+        const lb = this.fresh();
+        const q = this.fresh();
+        const ins = k + 1 === lanes ? dst : this.fresh();
+        this.line(`  ${la} = extractelement ${vt} ${this.val(f.a[i])}, i64 ${k}`);
+        this.line(`  ${lb} = extractelement ${vt} ${this.val(f.b[i])}, i64 ${k}`);
+        this.line(`  ${q} = call i64 @omni_ll_div(i64 ${la}, i64 ${lb})`);
+        this.line(`  ${ins} = insertelement ${vt} ${acc}, i64 ${q}, i64 ${k}`);
+        acc = ins;
+        k++;
+      }
+      return;
+    }
+    if (BIN_LL.has(op)) {
+      const kind = BIN_LL.get(op);
+      const ll = isF ? kind[1] : kind[0];
+      if (ll !== null) {
+        this.line(`  ${dst} = ${ll} ${this.ty(t, OP_NAMES[op])} ${this.val(f.a[i])}, ${this.val(f.b[i])}`);
+        return;
+      }
+    }
+    if (op === OP.NEG) {
+      const vt = this.ty(t, 'neg');
+      if (isF) this.line(`  ${dst} = fneg ${vt} ${this.val(f.a[i])}`);
+      else this.line(`  ${dst} = sub ${vt} zeroinitializer, ${this.val(f.a[i])}`);
+      return;
+    }
+    throw new OmniError(`${NOPE} 向量上的 ${OP_NAMES[op]}（函数 ${f.name}）`);
   }
 }
 

@@ -1,0 +1,50 @@
+;; SIMD 第一阶段（ADR-0014 门槛 6）：LLVM 的 <N x T> 与 C 的标量化必须逐位相同。
+;;
+;; 最后那份 hsum 是这条门槛的要害：浮点加法不结合，所以「水平求和」不是一个确定的
+;; 运算，除非把顺序钉死。这里钉的是严格左到右 ((v0+v1)+v2)+v3。
+;; 取的四道值刻意让两种顺序给出不同答案：
+;;   左到右：((1e16 + 1) + -1e16) + 1 = (1e16 + -1e16) + 1 = 1
+;;   两两配对：(1e16 + 1) + (-1e16 + 1) = 1e16 + -1e16 = 0
+;; 所以这一行印出 1 就是「两条腿用了同一棵求值树」，印出 0 就是有人偷偷换了规约形状。
+(module
+  (fn scale4 ((v (vec real 4)) (k real)) (vec real 4)
+    (ret (bin "*" (var v) (splat (vec real 4) (var k)))))
+
+  (fn dot4 ((a (vec real 4)) (b (vec real 4))) real
+    (ret (hsum (bin "*" (var a) (var b)))))
+
+  (fn wrap4 ((a (vec int 4))) (vec int 4)
+    ;; 整数向量按无符号回绕，和标量 int 同一条规则
+    (ret (bin "+" (var a) (splat (vec int 4) (int 1)))))
+
+  (main
+    ;; splat + 逐道取值
+    (let s (vec real 4) (splat (vec real 4) (real 2.5)))
+    (print (lane (var s) 0))
+    (print (lane (var s) 3))
+
+    ;; vlit + 逐元素四则
+    (let a (vec real 4) (vlit (vec real 4) (real 1.0) (real 2.0) (real 3.0) (real 4.0)))
+    (let b (vec real 4) (vlit (vec real 4) (real 10.0) (real 20.0) (real 30.0) (real 40.0)))
+    (print (lane (bin "+" (var a) (var b)) 1))
+    (print (lane (bin "-" (var b) (var a)) 2))
+    (print (lane (bin "*" (var a) (var b)) 3))
+    (print (lane (bin "/" (var b) (var a)) 0))
+
+    ;; 向量进出函数（C 那边是结构体按值传，LLVM 那边是 <4 x double>）
+    (print (lane (call scale4 (var a) (real 3.0)) 2))
+    (print (call dot4 (var a) (var b)))
+
+    ;; 整数道：回绕
+    (let i (vec int 4) (vlit (vec int 4) (int 1) (int -1) (int 0) (int 9223372036854775807)))
+    (print (lane (call wrap4 (var i)) 0))
+    (print (lane (call wrap4 (var i)) 1))
+    (print (lane (call wrap4 (var i)) 3))
+    (print (hsum (bin "*" (var i) (splat (vec int 4) (int 2)))))
+
+    ;; 宽度 2 与 8 也要走一遍：宽度是类型的一部分，只测 4 的话别的宽度是没被覆盖的
+    (print (hsum (vlit (vec int 2) (int 3) (int 4))))
+    (print (lane (bin "+" (splat (vec int 8) (int 7)) (splat (vec int 8) (int 1))) 7))
+
+    ;; 求值顺序：见文件头
+    (print (hsum (vlit (vec real 4) (real 1e16) (real 1.0) (real -1e16) (real 1.0))))))

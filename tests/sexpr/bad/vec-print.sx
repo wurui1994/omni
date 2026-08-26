@@ -1,0 +1,5 @@
+;; 向量没有 print：格式化会在六个执行器里各写一遍，那是最容易分叉的地方
+(module
+  (main
+    (let v (vec real 2) (vlit (vec real 2) (real 1.0) (real 2.0)))
+    (print (var v))))

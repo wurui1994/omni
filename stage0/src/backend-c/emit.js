@@ -30,6 +30,9 @@ const DYN_TAG = { list: 'OMNI_DYN_LIST', dict: 'OMNI_DYN_DICT' };
 // 自举的时候（编译器自己被降级成 int64 的世界）读它就会报 invalid integer。
 const INT64_MIN_VALUE = -9223372036854775807n - 1n;
 
+/** 向量上第一阶段只有这四条（ADR-0014 决策 6）：算符 -> C 侧助手名的后缀 */
+const C_VEC_OPS = [['+', 'add'], ['-', 'sub'], ['*', 'mul'], ['/', 'div']];
+
 class CEmitter {
   constructor(mod, opts = {}) {
     this.mod = mod;
@@ -40,6 +43,11 @@ class CEmitter {
     // JS 字符串字面量池（见 s16Lit）。Map 保证发射顺序稳定 —— 自举要逐字节可复现。
     this.s16pool = new Map();
     this.s16At = -1;
+    // 用到的向量形状（typeKey -> 类型）。和字面量池同一套路：边发射边收，最后回填。
+    // 为什么不在 mod 里像 containers 那样先算好：向量没有实例化那一层（没有方法、
+    // 没有装箱桥），一个形状要发的就是几个 static inline，边遇边记最省事。
+    this.vecs = new Map();
+    this.vecAt = -1;
   }
 
   line(s = '') {
@@ -62,6 +70,47 @@ class CEmitter {
       this.s16pool.set(s, id);
     }
     return id;
+  }
+
+  /** 用到一个向量形状就记下来，最后在 vecAt 那个位置把它的定义回填进去 */
+  noteVec(t) {
+    if (t !== undefined && t !== null && t.k === 'vec' && !this.vecs.has(typeKey(t))) {
+      this.vecs.set(typeKey(t), t);
+    }
+    return t;
+  }
+
+  /**
+   * 每个用到的向量形状在 C 侧的定义：一个按值传的定长数组结构体，加几个 static inline。
+   *
+   * C 备选路径上向量是**标量化**的（ADR-0014 决策 6 唯一许可的合法化）。刻意不用
+   * `__attribute__((vector_size(...)))`：那等于把「与 LLVM 那条腿逐位相同」的责任交给
+   * clang 的自动向量化，而它不承诺求值顺序 —— 门槛 6 要的恰恰是求值顺序。
+   *
+   * 每一道上的运算由 binCode 拼出来，和标量表达式是**同一份发射代码**：
+   * int 的回绕、除零的消息文本因此不可能在"向量道"和"标量"之间分叉。
+   */
+  vecLines() {
+    if (this.vecs.size === 0) return [''];
+    const out = ['/* 定长向量（ADR-0014 决策 6）：结构体按值传 + 逐道标量化 */'];
+    for (const t of this.vecs.values()) {
+      const n = cTypeName(t);
+      const el = cTypeName(t.elem);
+      const w = t.lanes;
+      out.push(`typedef struct { ${el} l[${w}]; } ${n};`);
+      out.push(`static inline ${n} ${n}_splat(${el} x) { ${n} r; for (int i = 0; i < ${w}; i++) r.l[i] = x; return r; }`);
+      // 取道走函数而不是就地 `.l[i]`：`f(x).l[2]` 是在非左值结构体的数组成员上取下标，
+      // C99 里那是没定义的（形参是左值，所以搬进函数就没这个问题）
+      out.push(`static inline ${el} ${n}_lane(${n} v, int i) { return v.l[i]; }`);
+      for (const op of C_VEC_OPS) {
+        const lane = this.binCode(op[0], t.elem, 'a.l[i]', 'b.l[i]');
+        out.push(`static inline ${n} ${n}_${op[1]}(${n} a, ${n} b) { ${n} r; for (int i = 0; i < ${w}; i++) r.l[i] = ${lane}; return r; }`);
+      }
+      // 严格左到右：((v0+v1)+v2)+v3。浮点加法不结合，所以这个顺序就是规格（门槛 6）
+      const step = this.binCode('+', t.elem, 'acc', 'v.l[i]');
+      out.push(`static inline ${el} ${n}_hsum(${n} v) { ${el} acc = v.l[0]; for (int i = 1; i < ${w}; i++) acc = ${step}; return acc; }`);
+    }
+    return out;
   }
 
   /**
@@ -116,6 +165,9 @@ class CEmitter {
     this.s16At = this.out.length;
     this.line();
     for (const line of this.cAbiExterns()) this.line(line);
+    // 向量的定义位（内容最后回填）：放在聚合体之前，将来 struct 里能按值嵌套向量
+    this.vecAt = this.out.length;
+    this.line();
     for (const a of aggs) {
       if (a.k === 'struct') this.structBody(a.t);
       else this.enumBody(a.t);
@@ -152,6 +204,7 @@ class CEmitter {
     // 退出码走 omni_host_exit_code —— process.exitCode 是个可写的槽，不是返回值。
     this.line(`int main(int argc, char **argv) { omni_host_init(argc, argv); ${this.mod.entry}(); omni_js_check_uncaught(); fflush(stdout); return omni_host_exit_code(); }`);
     this.out[this.s16At] = this.s16PoolLines().join('\n');
+    this.out[this.vecAt] = this.vecLines().join('\n');
     return this.out.join('\n') + '\n';
   }
 
@@ -538,6 +591,10 @@ class CEmitter {
   proto(f) {
     // 闭包体的第一个形参是闭包记录自己：既是"环境"，也是被 self 指针解释的那块内存
     const self = f.closureId === undefined ? [] : ['omni_fn self_'];
+    // 形参/返回值里的向量形状也要登记：一个只做"接进来再传出去"的函数体里
+    // 可能一条向量运算都没有，但它的原型仍然要那个 typedef
+    this.noteVec(f.ret);
+    for (const p of f.params) this.noteVec(p.type);
     const params = [...self, ...f.params.map((p) => `${cTypeName(p.type)} v_${p.name}`)];
     return `static ${cTypeName(f.ret)} ${f.mangled}(${params.length ? params.join(', ') : 'void'})`;
   }
@@ -567,6 +624,7 @@ class CEmitter {
         this.line('}');
         break;
       case 'Local':
+        this.noteVec(s.type);
         this.line(`${cTypeName(s.type)} v_${s.name} = ${this.expr(s.init)};`);
         break;
       case 'ExprStmt':
@@ -679,6 +737,22 @@ class CEmitter {
       case 'DictLit': return this.dictLit(e);
       case 'SetLit': return this.setLit(e);
       case 'VarRef': return `v_${e.name}`;
+      // 向量四条（ADR-0014 门槛 6 第一阶段）。splat / lane / hsum 都走那个形状的助手：
+      // 复合字面量里把标量重复 N 次会把子表达式求值 N 次，而 (lane E N) 的 E 可能有副作用。
+      case 'VecSplat':
+        this.noteVec(e.type);
+        return `${cTypeName(e.type)}_splat(${this.expr(e.value)})`;
+      case 'VecLit': {
+        this.noteVec(e.type);
+        const lanes = e.lanes.map((x) => this.expr(x)).join(', ');
+        return `(${cTypeName(e.type)}){{${lanes}}}`;
+      }
+      case 'VecLane':
+        this.noteVec(e.vec.type);
+        return `${cTypeName(e.vec.type)}_lane(${this.expr(e.vec)}, ${e.lane})`;
+      case 'VecHsum':
+        this.noteVec(e.vec.type);
+        return `${cTypeName(e.vec.type)}_hsum(${this.expr(e.vec)})`;
       case 'Field': {
         const obj = this.expr(e.object);
         // class 是引用，可能为 null：显式检查，避免"段错误 vs 异常"的跨后端分叉
@@ -770,8 +844,20 @@ class CEmitter {
   bin(e) {
     const a = this.expr(e.left);
     const b = this.expr(e.right);
-    if (e.opType.k === 'int') {
-      switch (e.op) {
+    // 向量：整条运算收进那个形状的助手里（逐道展开在助手体内，见 vecLines）
+    if (e.opType.k === 'vec') {
+      this.noteVec(e.opType);
+      const suffix = C_VEC_OPS.find((x) => x[0] === e.op);
+      if (suffix === undefined) throw new Error(`c.bin vec: ${e.op}`);
+      return `${cTypeName(e.opType)}_${suffix[1]}(${a}, ${b})`;
+    }
+    return this.binCode(e.op, e.opType, a, b);
+  }
+
+  /** 二元运算的代码拼装。操作数已经是代码串：标量路径与向量的逐道路径共用它 */
+  binCode(op, opType, a, b) {
+    if (opType.k === 'int') {
+      switch (op) {
         case '+': return `omni_add(${a}, ${b})`;
         case '-': return `omni_sub(${a}, ${b})`;
         case '*': return `omni_mul(${a}, ${b})`;
@@ -779,16 +865,16 @@ class CEmitter {
         case '%': return `omni_mod(${a}, ${b})`;
         case '<<': return `omni_shl(${a}, ${b})`;
         case '>>': return `omni_shr(${a}, ${b})`;
-        case '&': case '|': case '^': return `(${a} ${e.op} ${b})`;
-        default: throw new Error(`c.bin int: ${e.op}`);
+        case '&': case '|': case '^': return `(${a} ${op} ${b})`;
+        default: throw new Error(`c.bin int: ${op}`);
       }
     }
-    if (e.opType.k === 'real') {
-      if (e.op === '%') return `fmod(${a}, ${b})`;
-      return `(${a} ${e.op} ${b})`;
+    if (opType.k === 'real') {
+      if (op === '%') return `fmod(${a}, ${b})`;
+      return `(${a} ${op} ${b})`;
     }
-    if (e.opType.k === 'string' && e.op === '+') return `omni_str_cat(${a}, ${b})`;
-    throw new Error(`c.bin: ${e.op} on ${e.opType.k}`);
+    if (opType.k === 'string' && op === '+') return `omni_str_cat(${a}, ${b})`;
+    throw new Error(`c.bin: ${op} on ${opType.k}`);
   }
 
   builtin(e) {

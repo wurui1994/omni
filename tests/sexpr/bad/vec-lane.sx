@@ -1,0 +1,5 @@
+;; 道号是降级期的字面量，越界当场报错 —— 不生成一条"运行期再说"的路径
+(module
+  (main
+    (let v (vec int 4) (splat (vec int 4) (int 1)))
+    (print (lane (var v) 4))))

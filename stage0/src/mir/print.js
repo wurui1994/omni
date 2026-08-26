@@ -56,6 +56,7 @@ function operands(mod, f, i) {
     if (op === OP.FLD || op === OP.FLDSET) { out.push(accText(mod, v)); continue; }
     if (op === OP.GLOAD || op === OP.GSTORE) { out.push(`g_${mod.globals[v]}`); continue; }
     if (op === OP.BR || op === OP.BRIF) { out.push(`^${v}`); continue; }
+    if (op === OP.VINS || op === OP.VEXT) { out.push(`lane${v}`); continue; }
     out.push(String(v));
   }
   return out.join(' ');

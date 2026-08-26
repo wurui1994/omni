@@ -15,22 +15,28 @@
  *   (module FORM...)
  *   FORM  = (fn NAME ((p TYPE)...) TYPE STMT...)   函数
  *         | (main STMT...)                          入口体
- *   TYPE  = int | real | bool | string | void
+ *   TYPE  = int | real | bool | string | void | (vec int|real 2|4|8)
  *   STMT  = (let NAME TYPE E) | (set NAME E) | (do STMT...)
  *         | (if E (do ...) [(do ...)]) | (while E (do ...))
  *         | (ret [E]) | (print E) | (expr E)
  *   E     = (int TEXT) | (real TEXT) | (bool TEXT) | (str "…")
  *         | (var NAME) | (bin "OP" E E) | (un "OP" E) | (call NAME E...)
+ *         | (splat TYPE E) | (vlit TYPE E...) | (lane E N) | (hsum E)
+ *
+ * 向量那四条是 ADR-0014 门槛 6 的第一阶段，见 vecExpr 的注释。
  *
  * 类型不推导，只**检查**：声明处写死，表达式自底向上定型，两边类型不一致就报错 ——
  * 不插隐式转换。理由与 ADR-0008 一致：这一层的职责是把树接进 OIR，
  * 而"什么能悄悄转成什么"是语言设计决定，不该由汇聚层替某门语言定。
  */
 
-import { INT, REAL, BOOL, STRING, VOID, zeroValue } from '../hir/types.js';
+import { INT, REAL, BOOL, STRING, VOID, vecType, zeroValue } from '../hir/types.js';
 import { readSexpr, isList, isAtom, isStr, head } from './read.js';
 
 const TYPES = new Map([['int', INT], ['real', REAL], ['bool', BOOL], ['string', STRING], ['void', VOID]]);
+
+/** 向量宽度：2 的幂，上界 8。放宽之前先想清楚 C 那条腿要展开多少行。 */
+const VEC_LANES = new Set([2, 4, 8]);
 
 /** 算术/位运算：两边同型，结果同型。字符串只允许 `+`（拼接，与 Omni 一致）。 */
 const ARITH = new Set(['+', '-', '*', '/', '%', '&', '|', '^', '<<', '>>']);
@@ -51,8 +57,18 @@ class CoreLowerer {
 
   /** 类型名 -> OIR 类型。写错就报错，不猜。 */
   ty(node, what) {
+    // `(vec int 4)`：元素只能是 int/real（bool/string 的向量没有意义，也没有硬件对应）
+    if (isList(node) && head(node) === 'vec') {
+      const e = isAtom(node.items[1]) ? TYPES.get(node.items[1].value) : undefined;
+      const n = isAtom(node.items[2]) ? Number(node.items[2].value) : NaN;
+      if (e === undefined || (e !== INT && e !== REAL)) {
+        return this.err(node, `${what}：(vec 元素 宽度) 的元素只能是 int 或 real`);
+      }
+      if (!VEC_LANES.has(n)) return this.err(node, `${what}：向量宽度只能是 2 / 4 / 8`);
+      return vecType(e, n);
+    }
     if (!isAtom(node) || !TYPES.has(node.value)) {
-      return this.err(node, `${what} 的类型只能是 int / real / bool / string / void`);
+      return this.err(node, `${what} 的类型只能是 int / real / bool / string / void / (vec T N)`);
     }
     return TYPES.get(node.value);
   }
@@ -170,7 +186,7 @@ class CoreLowerer {
       if (t === null) return null;
       const v = this.expr(n.items[3]);
       if (v === null) return null;
-      if (!sameCoreType(v.type, t)) return this.err(n, `变量 ${nm} 是 ${t.k}，初值是 ${v.type.k}`);
+      if (!sameCoreType(v.type, t)) return this.err(n, `变量 ${nm} 是 ${coreTypeText(t)}，初值是 ${coreTypeText(v.type)}`);
       // 同一层里重名是错的；外层同名是遮蔽，合法
       if (this.scopes[this.scopes.length - 1].has(nm)) return this.err(n, `'${nm}' 在这一层已经声明过了`);
       this.scopes[this.scopes.length - 1].set(nm, t);
@@ -183,7 +199,7 @@ class CoreLowerer {
       if (t === null) return this.err(n, `未声明的变量 '${nm}'`);
       const v = this.expr(n.items[2]);
       if (v === null) return null;
-      if (!sameCoreType(v.type, t)) return this.err(n, `'${nm}' 是 ${t.k}，赋的值是 ${v.type.k}`);
+      if (!sameCoreType(v.type, t)) return this.err(n, `'${nm}' 是 ${coreTypeText(t)}，赋的值是 ${coreTypeText(v.type)}`);
       return { kind: 'ExprStmt', expr: { kind: 'Assign', target: { kind: 'VarRef', name: nm, type: t }, value: v, type: t } };
     }
     return this.stmt2(n, h, ret);
@@ -212,7 +228,7 @@ class CoreLowerer {
       }
       const v = this.expr(n.items[1]);
       if (v === null) return null;
-      if (!sameCoreType(v.type, ret)) return this.err(n, `要返回 ${ret.k}，给的是 ${v.type.k}`);
+      if (!sameCoreType(v.type, ret)) return this.err(n, `要返回 ${coreTypeText(ret)}，给的是 ${coreTypeText(v.type)}`);
       return { kind: 'Return', value: v };
     }
     // 宿主面只有 print 一条，和 WAT 前端同一条理由：格式、换行、四个执行器之间的
@@ -221,6 +237,9 @@ class CoreLowerer {
       const v = this.expr(n.items[1]);
       if (v === null) return null;
       if (v.type === VOID) return this.err(n, 'print 的实参不能是 void');
+      // 向量没有 print：运行时没有对应的输出函数，而"随便定一个格式"意味着六个执行器
+      // 各自实现一遍格式化 —— 那是最容易分叉的地方。要看向量就 (lane v k) 逐道印。
+      if (v.type.k === 'vec') return this.err(n, 'print 不接受向量：用 (lane v N) 逐道印');
       return { kind: 'ExprStmt', expr: { kind: 'Builtin', name: 'print', args: [v], type: VOID, argType: v.type } };
     }
     if (h === 'expr') {
@@ -280,13 +299,69 @@ class CoreLowerer {
       let i = 0;
       while (i < args.length) {
         if (!sameCoreType(args[i].type, d.params[i].type)) {
-          return this.err(n, `'${nm}' 的第 ${i + 1} 个形参是 ${d.params[i].type.k}，给的是 ${args[i].type.k}`);
+          return this.err(n, `'${nm}' 的第 ${i + 1} 个形参是 ${coreTypeText(d.params[i].type)}，给的是 ${coreTypeText(args[i].type)}`);
         }
         i++;
       }
       return { kind: 'Call', func: d.mangled, name: d.name, args: args, type: d.ret };
     }
+    if (h === 'splat' || h === 'vlit' || h === 'lane' || h === 'hsum') return this.vecExpr(n, h);
     return this.operator(n, h);
+  }
+
+  /**
+   * 向量的四条（ADR-0014 门槛 6 第一阶段）。刻意只有这四条 —— 比较、select、shuffle、
+   * 从容器加载都还没有，因为每一条都要在六个执行器上各实现一次，而它们的答案要逐位相同。
+   *
+   *   (splat TYPE E)     标量铺满所有道
+   *   (vlit TYPE E...)   逐道给值，个数必须等于宽度
+   *   (lane E N)         取第 N 道（N 是字面量，不是表达式 —— 变量下标要边界检查，
+   *                      而那会给两条腿各引入一条错误路径，下一阶段再说）
+   *   (hsum E)           水平求和。**求值顺序写死成严格左到右**：((v0+v1)+v2)+v3。
+   *                      浮点加法不结合，这一条就是门槛 6 里「固定求值顺序」的落点 ——
+   *                      两条腿必须发同一棵树，而不是各自挑一个规约形状。
+   */
+  vecExpr(n, h) {
+    if (h === 'lane') {
+      const v = this.expr(n.items[1]);
+      if (v === null) return null;
+      if (v.type.k !== 'vec') return this.err(n, `lane 的实参要是向量，这里是 ${v.type.k}`);
+      const i = isAtom(n.items[2]) ? Number(n.items[2].value) : NaN;
+      if (!Number.isInteger(i) || i < 0 || i >= v.type.lanes) {
+        return this.err(n, `(lane v N) 的 N 要是 0..${v.type.lanes - 1} 的字面量`);
+      }
+      return { kind: 'VecLane', vec: v, lane: i, type: v.type.elem };
+    }
+    if (h === 'hsum') {
+      const v = this.expr(n.items[1]);
+      if (v === null) return null;
+      if (v.type.k !== 'vec') return this.err(n, `hsum 的实参要是向量，这里是 ${v.type.k}`);
+      return { kind: 'VecHsum', vec: v, type: v.type.elem };
+    }
+    const t = this.ty(n.items[1], h === 'splat' ? 'splat 的类型' : 'vlit 的类型');
+    if (t === null) return null;
+    if (t.k !== 'vec') return this.err(n, `(${h} TYPE ...) 的 TYPE 要是 (vec T N)`);
+    if (h === 'splat') {
+      const v = this.expr(n.items[2]);
+      if (v === null) return null;
+      if (!sameCoreType(v.type, t.elem)) {
+        return this.err(n, `splat 的值要是 ${t.elem.k}，这里是 ${v.type.k}`);
+      }
+      return { kind: 'VecSplat', value: v, type: t };
+    }
+    const lanes = [];
+    for (const a of n.items.slice(2)) {
+      const v = this.expr(a);
+      if (v === null) return null;
+      if (!sameCoreType(v.type, t.elem)) {
+        return this.err(a, `vlit 的每一道要是 ${t.elem.k}，这里是 ${v.type.k}`);
+      }
+      lanes.push(v);
+    }
+    if (lanes.length !== t.lanes) {
+      return this.err(n, `vlit 要 ${t.lanes} 个值，给了 ${lanes.length} 个`);
+    }
+    return { kind: 'VecLit', lanes: lanes, type: t };
   }
 
   /** `(bin "OP" a b)` / `(un "OP" a)`。算符写成字符串，所以映射模板里可以直接 `(bin $2 $1 $3)`。 */
@@ -311,7 +386,15 @@ class CoreLowerer {
     const a = this.expr(n.items[2]);
     const b = this.expr(n.items[3]);
     if (a === null || b === null) return null;
-    if (!sameCoreType(a.type, b.type)) return this.err(n, `'${op}' 两边要同型：左是 ${a.type.k}，右是 ${b.type.k}`);
+    if (!sameCoreType(a.type, b.type)) return this.err(n, `'${op}' 两边要同型：左是 ${coreTypeText(a.type)}，右是 ${coreTypeText(b.type)}`);
+    // 向量：只有逐元素的四则运算。比较要出 vec<bool,N>（掩码类型），select 要三目 ——
+    // 两条都得先在六个执行器上定好语义，第一阶段不做，所以在这里挡住而不是给错答案。
+    if (a.type.k === 'vec') {
+      if (op !== '+' && op !== '-' && op !== '*' && op !== '/') {
+        return this.err(n, `向量上第一阶段只有 + - * /，不能用 '${op}'`);
+      }
+      return { kind: 'Bin', op: op, opType: a.type, left: a, right: b, type: a.type };
+    }
     if (LOGIC.has(op)) {
       if (a.type !== BOOL) return this.err(n, `'${op}' 要 bool，这里是 ${a.type.k}`);
       return { kind: 'Logic', op: op, left: a, right: b, type: BOOL };
@@ -344,12 +427,23 @@ class CoreLowerer {
 }
 
 /**
- * OIR 类型相等。这一层的类型只有五个标量，比一个 `k` 就够。
+ * OIR 类型相等。标量比一个 `k` 就够；向量还要比元素与宽度，
+ * 否则 vec<int,4> 与 vec<real,8> 会被当成同一个类型（两者的 `k` 都是 'vec'）。
  * 名字带 Core 不是啰嗦：自举构建把所有模块拍平，模块级名字必须全仓唯一，
  * 而 `hir/types.js` 里已经有一个 `same` —— 撞了只在自举链上报，node 上照跑。
  */
 function sameCoreType(a, b) {
-  return a.k === b.k;
+  if (a.k !== b.k) return false;
+  if (a.k === 'vec') return a.elem.k === b.elem.k && a.lanes === b.lanes;
+  return true;
+}
+
+/**
+ * 诊断里的类型拼写。标量就是 `k`，向量要连元素和宽度一起说 ——
+ * 否则「左是 vec，右是 vec」这种消息等于没说（vec<int,2> 和 vec<real,4> 的 `k` 都是 vec）。
+ */
+function coreTypeText(t) {
+  return t.k === 'vec' ? `vec<${t.elem.k},${t.lanes}>` : t.k;
 }
 
 /**

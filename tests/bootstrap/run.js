@@ -264,6 +264,20 @@ if (c1 && !quick) {
     else if (sVia.stdout !== sRef.stdout) bad('N1 emit-llvm strings == C0', `    C0 ${sRef.stdout.length} bytes != N1 ${sVia.stdout.length} bytes`);
     else ok(`N1 emit-llvm sexpr/02-strings == C0  ${sRef.stdout.length} bytes`);
 
+    // SIMD 第一阶段（ADR-0014 门槛 6）。这条门槛的原生风险不在向量本身，在**宽度的编码**：
+    // `t` 的高 3 位放的是宽度的对数，而 mkType/typeLanes 只能用乘除取模算（封闭 ABI 的
+    // js_bitop 只对 bigint 成立，ADR-0011 决策 2）。两代算出不同的宽度，症状是
+    // 「原生编译器发的 IR 里 <4 x double> 变成了 <1 x double>」—— node 上永远看不出来。
+    // 两条腿都比：LLVM 那条是 `<N x T>` + insert/extract，C 那条是 typedef + 标量化助手。
+    const caseSimd = join(root, 'tests', 'sexpr', 'cases', '03-simd.sx');
+    for (const cmd of ['emit-llvm', 'emit-c']) {
+      const vRef = spawnSync('node', [cli, cmd, caseSimd], { encoding: 'utf8' });
+      const vVia = spawnSync(n1, [cmd, caseSimd], { encoding: 'utf8' });
+      if (vVia.status !== 0) bad(`N1 ${cmd} sexpr/03-simd`, `    exit=${vVia.status}\n${vVia.stderr}`);
+      else if (vVia.stdout !== vRef.stdout) bad(`N1 ${cmd} simd == C0`, `    C0 ${vRef.stdout.length} bytes != N1 ${vVia.stdout.length} bytes`);
+      else ok(`N1 ${cmd} sexpr/03-simd == C0  ${vRef.stdout.length} bytes`);
+    }
+
     // ---- 核心 S 表达式方言 + $*k 摊平（ADR-0014 决策 1）
     // 走的是整条链：mini 的 grammar -> `omni glr`（摊平在这里）-> 核心方言文本 ->
     // `omni run`（sexpr/lower.js 在这里）。两代都得给同一份文本、同一份输出。

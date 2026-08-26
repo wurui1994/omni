@@ -19,7 +19,7 @@
 
 import { OmniError } from '../source/diag.js';
 import { stderr, wrapFn, callFnValue } from '../host/native.js';
-import { callBuiltin, zeroOf, newInstance, flushOut, failRt, jsCallFn, InterpFail, InterpUncaught } from './builtin.js';
+import { callBuiltin, zeroOf, newInstance, flushOut, failRt, jsCallFn, vecHsum, InterpFail, InterpUncaught } from './builtin.js';
 
 // 语句的结果：正常走完 / break / continue / return。刻意不用异常做控制流 —— C 侧的
 // throw 是"待决错误标志 + 普通跳转"（ADR-0007），用信号值两个宿主上形状一致。
@@ -216,9 +216,11 @@ class Interp {
     return v;
   }
 
-  /** struct / enum 是值类型，深拷贝；其余（含 class）是引用，原样 */
+  /** struct / enum / vec 是值类型，深拷贝；其余（含 class）是引用，原样 */
   copyOf(t, v) {
     if (t === undefined || v === null || v === undefined) return v;
+    // 向量的道都是标量，一层浅拷贝就是深拷贝
+    if (t.k === 'vec') return v.slice();
     if (t.k === 'struct') {
       const def = this.structs.get(t.name);
       const out = {};
@@ -282,6 +284,17 @@ class Interp {
         return m;
       }
       case 'VarRef': return env.lookup(e.name);
+      // 向量四条（ADR-0014 门槛 6 第一阶段）。宿主表示 = 长度等于宽度的数组，
+      // 每道一个标量；hsum 的求值顺序在 vecHsum 里钉死。
+      case 'VecSplat': {
+        const v = this.eval(e.value, env, frame);
+        const out = [];
+        for (let i = 0; i < e.type.lanes; i++) out.push(v);
+        return out;
+      }
+      case 'VecLit': return e.lanes.map((x) => this.eval(x, env, frame));
+      case 'VecLane': return this.eval(e.vec, env, frame)[e.lane];
+      case 'VecHsum': return vecHsum(e.vec.type, this.eval(e.vec, env, frame));
       case 'JsGlobal': return this.globals.get(e.name);
       case 'Field': {
         const o = this.eval(e.object, env, frame);

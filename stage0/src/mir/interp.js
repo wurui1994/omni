@@ -25,13 +25,13 @@ import { OmniError } from '../source/diag.js';
 import { stderr, wrapFn, callFnValue } from '../host/native.js';
 import {
   applyBuiltin, zeroOf, newInstance, flushOut, failRt, jsCallFn,
-  InterpFail, InterpUncaught, binOp, cmpOp, listGet, listSet, dictGet, dynTag, W,
+  InterpFail, InterpUncaught, binOp, cmpOp, vecBinOp, listGet, listSet, dictGet, dynTag, W,
 } from '../interp/builtin.js';
 import { JS_ALL } from '../hir/js_abi.js';
 import { lowerToMir } from './from_oir.js';
 import { verifyMir } from './verify.js';
 import {
-  OP, OP_NAMES, REF_NONE, REF_BIAS, isConstRef,
+  OP, OP_NAMES, REF_NONE, REF_BIAS, isConstRef, typeKind, typeLanes,
   T_I64, T_F64, T_STR, T_DYN, CVT_I2F, CVT_BOX,
 } from './ir.js';
 
@@ -271,6 +271,12 @@ class MirInterp {
       const kind = kindOf(t);
       const l = rd(f.a[i]);
       const r = rd(f.b[i]);
+      // 向量：宿主表示是一条长度 = 宽度的数组，逐道走 **同一份** binOp（vecBinOp 就在
+      // interp/builtin.js 里，OIR 解释器用的也是它）—— 两个解释器不会在道上分叉。
+      if (typeLanes(t) > 1) {
+        const vt = { lanes: typeLanes(t), elem: { k: kindOf(typeKind(t)) } };
+        return (F) => { F.v[i] = vecBinOp(o, vt, l(F), r(F)); return next; };
+      }
       return (F) => { F.v[i] = binOp(o, kind, l(F), r(F)); return next; };
     }
     if (CMP_STR.has(op)) {
@@ -313,6 +319,33 @@ class MirInterp {
         // 所以指令留着 —— 「哪里发生装箱」是后端要知道的事实。
         if (x === CVT_BOX) return (F) => { F.v[i] = v(F); return next; };
         throw new OmniError(`mir.interp: 还不支持的转换模式 ${x}`);
+      }
+      // 向量三条。VINS **拷一份再改**，不就地改：MIR 的值是 SSA，就地改会让源向量
+      // 在别处也变了（`(vlit ...)` 就是一串 VINS，第一条的输入是那个 splat）。
+      case OP.VSPLAT: {
+        const v = rd(f.a[i]);
+        const n = typeLanes(t);
+        return (F) => {
+          const s = v(F);
+          const out = [];
+          for (let k = 0; k < n; k++) out.push(s);
+          F.v[i] = out;
+          return next;
+        };
+      }
+      case OP.VINS: {
+        const v = rd(f.a[i]);
+        const s = rd(f.b[i]);
+        return (F) => {
+          const out = v(F).slice();
+          out[x] = s(F);
+          F.v[i] = out;
+          return next;
+        };
+      }
+      case OP.VEXT: {
+        const v = rd(f.a[i]);
+        return (F) => { F.v[i] = v(F)[x]; return next; };
       }
       default:
         return this.step3(f, i, rd, rdArgs, readAll, I);

@@ -1,0 +1,6 @@
+;; 宽度是类型的一部分：vec<int,2> 和 vec<int,4> 不是同一个类型，也没有隐式拓宽
+(module
+  (main
+    (let a (vec int 2) (splat (vec int 2) (int 1)))
+    (let b (vec int 4) (splat (vec int 4) (int 1)))
+    (print (lane (bin "+" (var a) (var b)) 0))))

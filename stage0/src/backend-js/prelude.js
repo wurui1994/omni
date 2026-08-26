@@ -27,6 +27,17 @@ function $mod(a, b) {
 
 function $fmod(a, b) { return a % b; }
 
+// 向量（ADR-0014 决策 6）：一条长度 = 宽度的普通数组，每道一个标量。
+// 逐道的运算刻意**不在这里写死**：道上的语义就是标量语义（int 的回绕、除零的消息文本），
+// 后端把标量那份表达式包成一个 lane 函数传进来，这里只负责走遍每一道 ——
+// 这样"向量道上的 int"和"标量 int"用的是同一份发射代码，不可能分叉。
+function $vsplat(x, n) { const o = []; for (let i = 0; i < n; i++) o.push(x); return o; }
+const $vcopy = (v) => v.slice();
+function $vbin(a, b, f) { const o = []; for (let i = 0; i < a.length; i++) o.push(f(a[i], b[i])); return o; }
+// 水平求和，**严格左到右**：((v0+v1)+v2)+v3。浮点加法不结合，所以这个顺序就是规格本身
+// （门槛 6 的「固定求值顺序」），六个执行器都得发这一棵树。
+function $vhsum(v, f) { let acc = v[0]; for (let i = 1; i < v.length; i++) acc = f(acc, v[i]); return acc; }
+
 // C 的 %.6g，逐字符复刻：-4 <= exp < P 用定点，否则用指数形式；去掉尾随零。
 function $fmt_g(x, P) {
   if (Number.isNaN(x)) return "nan";

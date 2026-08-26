@@ -18,7 +18,7 @@
  */
 
 import {
-  OP, OP_NAMES, OP_MODES, REF_NONE, REF_BIAS, isConstRef, refText, typeText, T_BOOL,
+  OP, OP_NAMES, OP_MODES, REF_NONE, REF_BIAS, isConstRef, refText, typeText, typeLanes, T_BOOL,
 } from './ir.js';
 
 export function verifyMir(mod) {
@@ -115,6 +115,13 @@ function checkRef(mod, f, i, ref, live, regionOf, bad) {
 
 function checkIndex(mod, f, i, op, v, bad) {
   if (op === OP.BR || op === OP.BRIF) return;   // 层数在 verifyFunc 的栈深里查
+  // 道号：向量的宽度在 `t` 上，所以这一条不用查类型池，一次比较就够。
+  // 越界的道在 LLVM 里是 poison、在 C 里是越界读 —— 两条腿会给出不同的错答案，所以查。
+  if (op === OP.VEXT || op === OP.VINS) {
+    const vt = op === OP.VEXT ? f.typeOf(f.a[i], mod.consts) : f.t[i];
+    if (v >= typeLanes(vt)) bad(i, `道号 ${v} 越界（${typeText(vt)} 只有 ${typeLanes(vt)} 道）`);
+    return;
+  }
   if (op === OP.CALL && mod.funcs[v] === undefined) bad(i, `函数号 ${v} 越界`);
   if (op === OP.CALLOP && mod.ops[v] === undefined) bad(i, `op 号 ${v} 越界`);
   if (op === OP.CCALL && mod.cabi[v] === undefined) bad(i, `C 入口号 ${v} 越界`);
