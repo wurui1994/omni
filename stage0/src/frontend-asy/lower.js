@@ -18,14 +18,17 @@
 // ## 第一刀的边界（都是**刻意**的，不是漏的）
 //
 // 支持：int / real / bool / string 四种标量、变量与赋值、`+ - * / # % ^` 与比较、
-// `&& ||`、一元 `- !`、`++ --` 与 `+= -= *= /=`、`?:`、if/else、while、do-while、
+// `&& ||`、一元 `- !`、前缀 `++ --` 与 `+= -= *= /=`、`?:`、if/else、while、do-while、
 // C 式 for、break/continue、函数（含递归）、`(int)`/`(real)` 强制转换、`write`
 // （含 real 的 %.15g —— 核心方言的 `(tostr E N)` 就是为它加的）、内建数学函数
-// sqrt/fabs/abs/floor/ceil/round/fmod（核心方言的 `(rmath …)`）。
+// sqrt/fabs/abs/floor/ceil/round/fmod（核心方言的 `(rmath …)`）、
+// **一维数组**：`T[] a`、`new T[n]`、`{…}` 与 `new T[] {…}`、`a[i]` 读写（写会扩长）、
+// `a.length`、`a.push(v)`、`a.pop()`、数组当形参/返回值（引用语义，核心方言的 `(arr T)`）。
 //
-// 不支持（见到就报错，报错里说清是哪一条）：数组、pair/triple、struct、import/access、
-// typedef、算符重载、重载解析、默认实参、命名实参、for-each、超越函数（exp/log/trig ——
-// 量过 libm 与 V8 在 atan/tan/log/cos 的最后一位就分叉，收进来六条腿必然有一天对不上）、
+// 不支持（见到就报错，报错里说清是哪一条）：pair/triple、struct、import/access、
+// typedef、算符重载、重载解析、默认实参、命名实参、for-each、切片（`a[1:3]`）、
+// 多维数组、`write` 一整个数组、超越函数（exp/log/trig —— 量过 libm 与 V8 在
+// atan/tan/log/cos 的最后一位就分叉，收进来六条腿必然有一天对不上）、
 // 循环条件里的 `?:`（摊出来的赋值只能落在循环外面，条件就只
 // 算一次了 —— 语义会变，所以报错而不是悄悄换个意思）。
 //
@@ -34,6 +37,13 @@
 // - 整数溢出：asy 是运行期报错（量过：`2^62 * 4` -> "Integer overflow"），我们回绕。
 // - `2^-1`：asy 报 "Only 1 and -1 can be raised to negative exponents as integers"，
 //   我们的 helper 对负指数返回 0（`^` 那条 helper 里写着）。
+// - **数组的未初始化格子**：asy 每个格子带一个"写过没有"的标记，`new int[2]` 之后读
+//   `a[0]` 是运行期错误（量过："read uninitialized value from array at index 0"）；
+//   我们填零值。写下标扩长时中间跳过的格子同理。这类程序本来就有 bug，但"我们给 0
+//   而 asy 报错"必须写在明处。
+// - 反过来的一条**已经对齐**了：后缀 `x++` asy 自己不收（"postfix expressions are not
+//   allowed"），所以这一层也拒 —— 比 asy 多接受一门语言不会让任何用例变红，只会让
+//   "等价"这两个字变虚。`tests/asy/strict/` 那一节专门盯这种漏洞。
 
 import { isList, isAtom, isStr, head } from '../sexpr/read.js';
 
@@ -46,6 +56,13 @@ const SCALARS = new Set(['int', 'real', 'bool', 'string']);
  *  `(self $2 $1 $3)` 直接把 SELFOP **词法 token**（原子）搬过来。两种都要认。
  *  名字带 asy 前缀是封闭 ABI 的要求：模块级的名字全局唯一（mir/print.js 已有一个 opText）。 */
 const asyOpText = (n) => (isStr(n) || isAtom(n) ? n.value : null);
+
+/** 数组类型在这一层就是「元素名 + []」的字符串（`'real[]'`），核心方言那边是 `(arr real)`。
+ *  用字符串是因为这个文件里所有类型都是字符串，Map 查表与 `===` 比较都现成 ——
+ *  为数组另造一个对象型会把每处比较都改成函数调用。名字带 asy 前缀：模块级名字全仓唯一。 */
+const asyIsArr = (t) => t !== null && t !== undefined && t.endsWith('[]');
+const asyElem = (t) => t.slice(0, -2);
+const asyCore = (t) => (asyIsArr(t) ? `(arr ${asyElem(t)})` : t);
 
 /**
  * asy 运行时自带的数学函数（不是 plain.asy 里的定义，所以这一层认它们不算偷偷补模块系统）。
@@ -126,6 +143,16 @@ const HELPERS = new Map([
     (ret (str "false ")))`],
 ]);
 
+/** 写下标时的自动扩长。asy 量过：`int[] e; e[2]=5;` 之后 `e.length` 是 **3**（= 下标+1），
+ *  中间那些格子在 asy 那边是"未初始化"，读会报错；我们填零值，差别写在文件头。
+ *  四种元素各一份，因为核心方言的 `(apush …)` 要具体的零值字面量。
+ *  这里刻意不用解构（`for (const [a, b] of …)`）：封闭子集里那不是保证能降级的写法。 */
+for (const t of ['int', 'real', 'bool', 'string']) {
+  HELPERS.set(`asy__grow_${t}`, `  (fn asy__grow_${t} ((a (arr ${t})) (i int)) void
+    (while (bin "<=" (alen (var a)) (var i))
+      (do (apush (var a) ${ZERO.get(t)}))))`);
+}
+
 class AsyLower {
   constructor(diags) {
     this.diags = diags;
@@ -191,11 +218,19 @@ class AsyLower {
 
   /* ------------------------------------------------------------------ 类型 */
 
-  /** `(name-ty (name int))` -> 'int'。数组/记录/pair 这一刀不做。 */
+  /** `(name-ty (name int))` -> 'int'；`(array-ty (name int) (dims))` -> 'int[]'。
+   *  记录/pair 这一刀不做，多维数组也不做（`(dims+ …)` 就是两层以上）。 */
   type(node, what) {
     if (!isList(node)) return this.err(node, `${what}：这里要一个类型`);
     const h = head(node);
-    if (h === 'array-ty') return this.nope(node, '数组类型');
+    if (h === 'array-ty') {
+      const dims = node.items[2];
+      if (isList(dims) && head(dims) !== 'dims') return this.nope(node, '多维数组');
+      const el = this.plainName(node.items[1]);
+      if (el === null) return this.nope(node, '带点的类型名');
+      if (!SCALARS.has(el)) return this.nope(node, `${el}[] （数组元素这一刀只有 int/real/bool/string）`);
+      return `${el}[]`;
+    }
     if (h !== 'name-ty') return this.err(node, `${what}：认不出的类型形状 '${h}'`);
     const nm = this.plainName(node.items[1]);
     if (nm === null) return this.nope(node, '带点的类型名');
@@ -254,7 +289,13 @@ class AsyLower {
   exprList(n, h) {
     if (h === 'name-exp') {
       const nm = this.plainName(n.items[1]);
-      if (nm === null) return this.nope(n, '带点的名字或算符名');
+      if (nm === null) {
+        // `a.length`：词法上"点"是名字的一部分（`name -> name "." ID`），所以数组的
+        // 字段不是 `(field …)` 而是一个**带点的名字**。只有接收者是数组变量时才认。
+        const q = this.arrQual(n.items[1]);
+        if (q !== null) return this.arrField(n, q.recv, q.field);
+        return this.nope(n, '带点的名字或算符名');
+      }
       const t = this.lookup(nm);
       if (t === null) {
         if (this.globals.has(nm)) return this.nope(n, `函数里引用文件级变量 '${nm}'（核心方言没有全局量）`);
@@ -273,12 +314,127 @@ class AsyLower {
       return this.nope(n, `赋值/自增出现在表达式位置（'${h}'）—— 这一刀只认它们当语句`);
     }
     if (h === 'tuple-exp') return this.nope(n, 'pair / triple');
-    if (h === 'subscript' || h === 'slice-exp') return this.nope(n, '下标与切片');
-    if (h === 'field') return this.nope(n, '取字段');
-    if (h === 'new-array' || h === 'new-record' || h === 'new-function') return this.nope(n, 'new');
+    if (h === 'subscript') return this.index(n);
+    if (h === 'slice-exp') return this.nope(n, '切片（`a[1:3]`）');
+    if (h === 'field') return this.field(n);
+    if (h === 'new-array') return this.newArray(n);
+    if (h === 'new-record' || h === 'new-function') return this.nope(n, 'new');
+    if (h === 'arrayinit' || h === 'arrayinit-add' || h === 'arrayinit-rest') {
+      // `{1,2,3}` 自己没有类型，类型来自左边的声明 —— 所以只在知道目标类型的地方处理
+      return this.nope(n, '花括号数组初值出现在推不出元素类型的位置（只支持 `T[] a = {…}` 与 `new T[] {…}`）');
+    }
     if (h === 'scale') return this.nope(n, '隐式缩放（`105cm` 这种）');
     if (h === 'join-exp' || h === 'join-dir' || h === 'spec' || h === 'spec-curl') return this.nope(n, '路径连接');
     return this.nope(n, `表达式 '${h}'`);
+  }
+
+  /* ------------------------------------------------------------------ 数组 */
+
+  /** `a[i]` 的**读**侧。写侧在 assign 里，因为写要先扩长（asy 的下标写会长）。 */
+  index(n) {
+    const a = this.expr(n.items[1]);
+    if (a === null) return null;
+    if (!asyIsArr(a.type)) return this.err(n, `下标只能用在数组上，这里是 ${a.type}`);
+    const i = this.coerce(this.expr(n.items[2]), 'int', n, '下标');
+    if (i === null) return null;
+    return { code: `(aget ${a.code} ${i.code})`, type: asyElem(a.type) };
+  }
+
+  /** `(qualified (name a) F)` 且 a 是数组变量时回 `{recv, field}`，否则回 null。 */
+  arrQual(node) {
+    if (!isList(node) || head(node) !== 'qualified') return null;
+    const base = this.plainName(node.items[1]);
+    const f = isAtom(node.items[2]) ? node.items[2].value : null;
+    if (base === null || f === null) return null;
+    const t = this.lookup(base);
+    if (t === null || !asyIsArr(t)) return null;
+    return { recv: { code: `(var ${base})`, type: t }, field: f };
+  }
+
+  /** `(field 值 ID)`：`a[0].x` 这种。接收者不是数组就报"取字段还没做"。 */
+  field(n) {
+    const nm = isAtom(n.items[2]) ? n.items[2].value : null;
+    const a = this.expr(n.items[1]);
+    if (a === null) return null;
+    if (!asyIsArr(a.type)) return this.nope(n, `取字段 '.${nm}'`);
+    return this.arrField(n, a, nm);
+  }
+
+  /** 数组的字段。只有 `.length`；别的（`.cyclic` 之类）要属性，这一刀没有。 */
+  arrField(n, recv, nm) {
+    if (nm === 'length') return { code: `(alen ${recv.code})`, type: 'int' };
+    return this.nope(n, `数组的 '.${nm}'（这一刀只有 .length / .push / .pop）`);
+  }
+
+  /**
+   * `new T[n]` / `new T[]` / `new T[] {…}`。
+   *
+   * `new T[n]` 的 n 个格子在 asy 那边是**未初始化**的，读会当场报错
+   * （量过：`int[] b = new int[2]; write(b[0]);` -> "read uninitialized value from array
+   * at index 0"）；我们填零值。差别写在文件头 —— 这类程序本来就是有 bug 的，
+   * 但"我们给 0 而 asy 报错"必须写在明处，不能等着被发现。
+   */
+  newArray(n) {
+    const el = this.type(n.items[1], 'new 的元素类型');
+    if (el === null) return null;
+    if (asyIsArr(el) || el === 'void') return this.nope(n, '多维数组');
+    const dimexps = n.items[2];
+    const hasCount = isList(dimexps) && head(dimexps) === 'dimexps';
+    if (isList(dimexps) && head(dimexps) === 'dimexps-add') return this.nope(n, '多维数组');
+    const init = n.items[hasCount ? 3 : 4];
+    if (init !== undefined && isList(init) && head(init).startsWith('arrayinit')) {
+      if (hasCount) return this.nope(n, '既给长度又给花括号初值');
+      return this.arrLit(init, `${el}[]`);
+    }
+    if (init !== undefined && isList(init) && head(init) === 'dims+') return this.nope(n, '多维数组');
+    const count = hasCount
+      ? this.coerce(this.expr(dimexps.items[1]), 'int', n, 'new T[n] 的长度')
+      : { code: '(int 0)', type: 'int' };
+    if (count === null) return null;
+    return { code: `(anew (arr ${el}) ${count.code})`, type: `${el}[]` };
+  }
+
+  /**
+   * 花括号数组初值。核心方言里没有"数组字面量"这一条，所以摊成一串语句：
+   * 先 anew 一个空的，再逐个 apush，最后把临时量当值用。这跟 `? :` 用的是同一套
+   * `this.pre` 机制 —— 摊出来的语句落在**当前语句之前**，求值顺序不变。
+   */
+  arrLit(n, t) {
+    if (this.pre === null) return this.nope(n, '这个位置的花括号数组初值（它要摊成语句，这里放不下）');
+    const el = asyElem(t);
+    const items = [];
+    if (head(n) === 'arrayinit-rest') return this.nope(n, '`{…, ...rest}` 这种初值');
+    for (const x of this.flat(n, 'arrayinit')) items.push(x);
+    const nm = `asy__a${this.tmp++}`;
+    this.pre.push(`(let ${nm} (arr ${el}) (anew (arr ${el}) (int 0)))`);
+    for (const x of items) {
+      const v = this.coerce(this.expr(x), el, x, `${t} 初值里的一项`);
+      if (v === null) return null;
+      this.pre.push(`(apush (var ${nm}) ${v.code})`);
+    }
+    return { code: `(var ${nm})`, type: t };
+  }
+
+  /** `a.push(v)` / `a.pop()`。asy 里 push 返回压进去的那个值（量过 `int x = c.push(9);`）。 */
+  arrMethod(n, recv, nm) {
+    const args = this.args(n.items[2]);
+    if (args === null) return null;
+    const el = asyElem(recv.type);
+    if (nm === 'pop') {
+      if (args.length !== 0) return this.err(n, `'pop' 不要实参，给了 ${args.length} 个`);
+      return { code: `(apop ${recv.code})`, type: el };
+    }
+    if (nm !== 'push') return this.nope(n, `数组的 '.${nm}(…)'（这一刀只有 .push / .pop）`);
+    if (args.length !== 1) return this.err(n, `'push' 要 1 个实参，给了 ${args.length} 个`);
+    const v = this.coerce(this.expr(args[0]), el, args[0], "'push' 的实参");
+    if (v === null) return null;
+    // apush 在核心方言里是**语句**（它的"值"没人用），而 asy 的 push 是表达式且返回那个值。
+    // 摊成 pre：先把值绑到临时量（只算一次），push 它，再把临时量当结果。
+    if (this.pre === null) return this.nope(n, '这个位置的 `.push(…)`（它要摊成语句，这里放不下）');
+    const tmp = `asy__p${this.tmp++}`;
+    this.pre.push(`(let ${tmp} ${el} ${v.code})`);
+    this.pre.push(`(apush ${recv.code} (var ${tmp}))`);
+    return { code: `(var ${tmp})`, type: el };
   }
 
   /** 算术。asy 与核心方言不一致的四个算符（`/` `#` `%` `^`）全在这里换掉。 */
@@ -364,7 +520,7 @@ class AsyLower {
     const nm = `asy__c${this.tmp++}`;
     const yes = aPre.concat([`(set ${nm} ${av.code})`]).join(' ');
     const no = bPre.concat([`(set ${nm} ${bv.code})`]).join(' ');
-    this.pre.push(`(let ${nm} ${t} ${ZERO.get(t)})`);
+    this.pre.push(`(let ${nm} ${asyCore(t)} ${asyIsArr(t) ? `(anew ${asyCore(t)} (int 0))` : ZERO.get(t)})`);
     this.pre.push(`(if ${c.code} (do ${yes}) (do ${no}))`);
     return { code: `(var ${nm})`, type: t };
   }
@@ -419,7 +575,21 @@ class AsyLower {
 
   /** 调用。`write` 是语句（void），在表达式位置见到它就报错。 */
   call(n) {
+    // `a.push(v)` / `a.pop()`：被调的是 `(field 接收者 名字)`，不是普通名字
+    const callee = n.items[1];
+    if (isList(callee) && head(callee) === 'field') {
+      const recv = this.expr(callee.items[1]);
+      if (recv === null) return null;
+      const mname = isAtom(callee.items[2]) ? callee.items[2].value : null;
+      if (!asyIsArr(recv.type)) return this.nope(n, `方法调用 '.${mname}(…)'`);
+      return this.arrMethod(n, recv, mname);
+    }
     const nm = isList(n.items[1]) && head(n.items[1]) === 'name-exp' ? this.plainName(n.items[1].items[1]) : null;
+    if (nm === null && isList(callee) && head(callee) === 'name-exp') {
+      // `c.push(8)`：同上，点是名字的一部分，所以方法调用也是"调一个带点的名字"
+      const q = this.arrQual(callee.items[1]);
+      if (q !== null) return this.arrMethod(n, q.recv, q.field);
+    }
     if (nm === null) return this.nope(n, '调用一个不是普通名字的东西（函数值、方法、算符名）');
     if (nm === 'write') return this.err(n, `${ASY_NOPE}：write 出现在表达式位置（它是语句）`);
     // 内建数学函数先看：asy 里 sqrt/floor/… 是运行时自带的，不是 plain.asy 里的定义，
@@ -497,6 +667,9 @@ class AsyLower {
       const v = this.expr(a);
       if (v === null) return null;
       if (v.type === 'void') return this.err(a, 'write 的实参不能是 void');
+      // 整个数组：asy 印的是「下标 制表符 值」逐行（量过 write(new int[]{1,2,3})
+      // 是 "0:\t1\n1:\t2\n2:\t3\n"）。那是另一条格式规则，这一刀没做。
+      if (asyIsArr(v.type)) return this.nope(a, 'write 一整个数组（asy 印的是「下标 tab 值」逐行）');
       vals.push(v);
     }
     // 只有实参多于一个时第一个串才是前缀 —— 单个 write("a") 里 "a" 就是那个 T
@@ -664,25 +837,37 @@ class AsyLower {
 
   /** `int a = 1, b;`：没有初值的按类型给零值 —— asy 也是这么定的 */
   vardec(n) {
-    const t = this.type(n.items[1], '变量声明');
-    if (t === null) return null;
-    if (t === 'void') return this.err(n, 'void 变量');
+    const base = this.type(n.items[1], '变量声明');
+    if (base === null) return null;
+    if (base === 'void') return this.err(n, 'void 变量');
     const out = [];
     for (const d of this.flat(n.items[2], 'decids')) {
       if (!isList(d) || head(d) !== 'decid') return this.err(d, '认不出的声明项');
       const start = d.items[1];
       if (!isList(start) || head(start) !== 'decidstart') return this.err(start, '认不出的声明项');
-      if (start.items.length > 2) return this.nope(start, '声明里带数组维度或形参表');
+      // `real a[];`：维度写在名字后面。一层就是数组，两层以上不做
+      let t = base;
+      if (start.items.length > 2) {
+        const dims = start.items[2];
+        if (!isList(dims) || head(dims) !== 'dims') return this.nope(start, '声明里带多维数组或形参表');
+        if (asyIsArr(t)) return this.nope(start, '多维数组');
+        t = `${t}[]`;
+      }
       const nm = isAtom(start.items[1]) ? start.items[1].value : null;
       if (nm === null) return this.err(start, '声明里少了名字');
-      let init = ZERO.get(t);
+      let init = asyIsArr(t) ? `(anew ${asyCore(t)} (int 0))` : ZERO.get(t);
       if (d.items[2] !== undefined) {
-        const v = this.coerce(this.expr(d.items[2]), t, d, `'${nm}' 的初值`);
+        // `T[] a = {1,2,3}`：花括号初值自己没有类型，元素类型从左边的声明来
+        const raw = d.items[2];
+        const lit = asyIsArr(t) && isList(raw) && head(raw).startsWith('arrayinit')
+          ? this.arrLit(raw, t)
+          : this.expr(raw);
+        const v = this.coerce(lit, t, d, `'${nm}' 的初值`);
         if (v === null) return null;
         init = v.code;
       }
       if (this.declare(start, nm, t) === null) return null;
-      out.push(`(let ${nm} ${t} ${init})`);
+      out.push(`(let ${nm} ${asyCore(t)} ${init})`);
     }
     return out;
   }
@@ -699,7 +884,11 @@ class AsyLower {
       if (op === null || op.length !== 2 || !'+-*/#%^'.includes(op.slice(0, 1))) return this.nope(e, `复合赋值 '${op}'`);
       return this.assign(e, e.items[2], e.items[3], op.slice(0, 1));
     }
-    if (h === 'prefix' || h === 'postfix') {
+    // 后缀 `x++` / `a[0]++`：**asy 自己就不收**（量过：`int b=1; b++;` 报
+    // "postfix expressions are not allowed"，`a[0]++` 也一样）。这一层照着拒 ——
+    // 语法认得它（camp.y 里有那条产生式），但收下来就等于比 asy 多接受一门语言。
+    if (h === 'postfix') return this.err(e, 'asy 自己就不收后缀 ++/--（postfix expressions are not allowed）：写成 ++x');
+    if (h === 'prefix') {
       const op = asyOpText(e.items[1]);
       if (op !== '+' && op !== '-') return this.nope(e, `自增/自减 '${op}'`);
       return this.assign(e, e.items[2], null, op);
@@ -714,10 +903,11 @@ class AsyLower {
     return this.nope(e, `语句位置的表达式 '${h}'`);
   }
 
-  /** 赋值、复合赋值、自增自减都归到这里：目标只能是一个普通变量名 */
+  /** 赋值、复合赋值、自增自减都归到这里：目标是普通变量名，或者数组下标 */
   assign(node, lhs, rhs, op) {
+    if (isList(lhs) && head(lhs) === 'subscript') return this.assignIndex(node, lhs, rhs, op);
     const nm = isList(lhs) && head(lhs) === 'name-exp' ? this.plainName(lhs.items[1]) : null;
-    if (nm === null) return this.nope(node, '赋值给不是普通变量的东西（下标、字段、算符名）');
+    if (nm === null) return this.nope(node, '赋值给不是普通变量或数组下标的东西（字段、切片、算符名）');
     const t = this.lookup(nm);
     if (t === null) {
       if (this.globals.has(nm)) return this.nope(node, `函数里改文件级变量 '${nm}'（核心方言没有全局量）`);
@@ -752,6 +942,67 @@ class AsyLower {
     if (t === 'string' && op !== '+') return this.err(node, `字符串上只有 '+='`);
     if (t === 'bool') return this.err(node, `bool 上没有 '${op}='`);
     return [`(set ${nm} (bin "${op}" (var ${nm}) ${v.code}))`];
+  }
+
+  /**
+   * `a[i] = v` / `a[i] += v` / `a[i]++`。
+   *
+   * 两件事和变量赋值不一样：
+   *
+   *  1. **写下标会把数组长到 i+1**（量过：`int[] e; e[2]=5;` 之后 `e.length` 是 3）。
+   *     所以先调一个 `asy__grow_元素` 把长度顶上去，再 aset。
+   *  2. 数组和下标都要**只算一次**：复合赋值要读一次写一次，`a[f()] += 1` 里的 f 不能调两遍。
+   *     所以两者都先绑到临时量（用 `? :` 那套 `this.pre`）。
+   */
+  assignIndex(node, lhs, rhs, op) {
+    const a = this.expr(lhs.items[1]);
+    if (a === null) return null;
+    if (!asyIsArr(a.type)) return this.err(node, `下标只能用在数组上，这里是 ${a.type}`);
+    const idx = this.coerce(this.expr(lhs.items[2]), 'int', node, '下标');
+    if (idx === null) return null;
+    if (this.pre === null) return this.nope(node, '这个位置的下标赋值（它要摊成语句，这里放不下）');
+    const el = asyElem(a.type);
+    const av = `asy__d${this.tmp++}`;
+    const iv = `asy__i${this.tmp++}`;
+    this.pre.push(`(let ${av} (arr ${el}) ${a.code})`);
+    this.pre.push(`(let ${iv} int ${idx.code})`);
+    const grow = `asy__grow_${el}`;
+    this.used.add(grow);
+    const head2 = `(expr (call ${grow} (var ${av}) (var ${iv})))`;
+    const cur = `(aget (var ${av}) (var ${iv}))`;
+    const put = (code) => [head2, `(aset (var ${av}) (var ${iv}) ${code})`];
+    if (op === null) {
+      const v = this.coerce(this.expr(rhs), el, node, '赋给数组元素的值');
+      return v === null ? null : put(v.code);
+    }
+    const one = rhs === null ? { code: el === 'real' ? '(real 1.0)' : '(int 1)', type: el } : this.expr(rhs);
+    if (one === null) return null;
+    if (rhs === null && el !== 'int' && el !== 'real') return this.err(node, `${el} 的数组元素不能自增自减`);
+    if (op === '#' || op === '%') {
+      if (el !== 'int' || one.type !== 'int') return this.err(node, `'${op}=' 两边要是 int`);
+      const helper = op === '#' ? 'asy__quot' : 'asy__mod';
+      this.used.add(helper);
+      return put(`(call ${helper} ${cur} ${one.code})`);
+    }
+    if (op === '^') {
+      if (el === 'int' && one.type === 'int') {
+        this.used.add('asy__ipow');
+        return put(`(call asy__ipow ${cur} ${one.code})`);
+      }
+      if (el !== 'real') return this.err(node, `'^=' 的两边要是 int 或 real`);
+      const v = this.coerce(one, 'real', node, "'^=' 的右边");
+      return v === null ? null : put(`(rmath "pow" ${cur} ${v.code})`);
+    }
+    if (op === '/') {
+      if (el !== 'real') return this.nope(node, `int 数组元素上的 '/='（asy 的 / 是实数除法，赋回 int 要写 #=）`);
+      const v = this.coerce(one, 'real', node, "'/=' 的右边");
+      return v === null ? null : put(`(bin "/" ${cur} ${v.code})`);
+    }
+    const v = this.coerce(one, el, node, `'${op}=' 的右边`);
+    if (v === null) return null;
+    if (el === 'string' && op !== '+') return this.err(node, `字符串上只有 '+='`);
+    if (el === 'bool') return this.err(node, `bool 上没有 '${op}='`);
+    return put(`(bin "${op}" ${cur} ${v.code})`);
   }
 
   /** 一段花括号里的东西：`(block-stm BLOCK)` 或直接一条 BLOCK 链 */
@@ -836,10 +1087,12 @@ class AsyLower {
     // 掉出函数尾巴：asy 是运行期报 "function did not return a value"，我们补一条零值 ret。
     // 这是**明写的**差别，不是漏的：核心方言的检查在编译期，而这条 ret 永远走不到才对。
     const last = body.length === 0 ? '' : body[body.length - 1];
-    if (d.ret !== 'void' && !last.startsWith('(ret ')) body.push(`(ret ${ZERO.get(d.ret)})`);
+    if (d.ret !== 'void' && !last.startsWith('(ret ')) {
+      body.push(`(ret ${asyIsArr(d.ret) ? `(anew ${asyCore(d.ret)} (int 0))` : ZERO.get(d.ret)})`);
+    }
     const params = [];
-    for (const p of ps) params.push(`(${p.name} ${p.type})`);
-    const lines = [`  (fn ${nm} (${params.join(' ')}) ${d.ret}`];
+    for (const p of ps) params.push(`(${p.name} ${asyCore(p.type)})`);
+    const lines = [`  (fn ${nm} (${params.join(' ')}) ${asyCore(d.ret)}`];
     for (const s of body) lines.push(`    ${s}`);
     return `${lines.join('\n')})`;
   }

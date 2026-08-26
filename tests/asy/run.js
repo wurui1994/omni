@@ -9,9 +9,12 @@
 //   2. **.expected 是真 asy 的输出**：装了 asymptote 就当场用 `asy -noV` 重新生成一遍
 //      比对 —— 期望值不是我写的，是量出来的。没装就跳过这一节并打印 skip（这条轴仍然
 //      靠 .expected 把答案钉住，不会因为环境缺工具就什么都不查）。
-//   3. **bad/ 里的必须被拒绝，且拒在正确的理由上**。这一刀故意没做的东西（数组、struct、
-//      pair、重载、模块、隐式缩放、全局量、超越函数、循环条件里的 `? :`）都在这里，
-//      每条都带 ASY_NOPE 前缀 —— "还没做"和"做错了"必须能一眼分开。
+//   3. **bad/ 里的必须被拒绝，且拒在正确的理由上**。这一刀故意没做的东西（struct、
+//      pair、重载、模块、隐式缩放、超越函数、切片、多维数组、for-each、循环条件里的
+//      `? :`）都在这里，每条都带 ASY_NOPE 前缀 —— "还没做"和"做错了"必须能一眼分开。
+//   4. **strict/ 里的是 asy 自己就不收的**（后缀 `x++` 那种）：我们要拒，而且装了 asy
+//      的话真 asy 也要拒。这一节盯的是"比 asy 多接受一门语言"——那种漏洞不会让任何
+//      用例输出不同，只会让"等价"两个字变虚。
 //
 //   node tests/asy/run.js
 //   node tests/asy/run.js arith
@@ -129,6 +132,35 @@ for (const f of readdirSync(join(here, 'bad')).filter((x) => x.endsWith('.asy'))
     continue;
   }
   ok(`bad/${name} [拒绝：${msg.slice(ASY_NOPE.length + 1)}]`);
+}
+
+// ------------------------------------------- 4. strict/：asy 自己就不收，我们也不能收
+//
+// bad/ 收的是"这一刀还没做"（消息带 ASY_NOPE）。这一节收的是另一件事：**asy 自己就报错**
+// 的写法（例如后缀 `x++` —— 量过 asy 说 "postfix expressions are not allowed"）。
+// 判分的人还是真 asy：装了就要求它**也**失败。这一节盯的是"我们比 asy 多接受了一门语言"
+// 这类漏洞 —— 那种漏洞不会让任何用例输出不同，只会让人以为等价。
+
+for (const f of readdirSync(join(here, 'strict')).filter((x) => x.endsWith('.asy')).sort()) {
+  if (!want(f)) continue;
+  const name = basename(f, '.asy');
+  const p = join(here, 'strict', f);
+  const exp = read(join(here, 'strict', `${name}.expected`));
+  if (exp === null) { no(`strict/${name}`, `    缺 ${name}.expected`); continue; }
+  const msg = exp.trim();
+  const r = cmd(['run', p]);
+  if (r.code === 0) { no(`strict/${name}`, '    我们收下了，而 asy 不收 —— 那就是多接受了一门语言'); continue; }
+  if (!r.err.includes(msg)) {
+    no(`strict/${name}`, `    拒的理由不对\n      want: ${JSON.stringify(msg)}\n      got:  ${JSON.stringify(r.err.split('\n')[0])}`);
+    continue;
+  }
+  let judged = '';
+  if (asyBin !== null) {
+    const a = spawnSync(asyBin, ['-noV', p], { encoding: 'utf8' });
+    if ((a.status ?? 1) === 0) { no(`strict/${name}`, '    真 asy 居然收了 —— 这条边界划错了'); continue; }
+    judged = '；真 asy 也拒';
+  }
+  ok(`strict/${name} [拒绝${judged}]`);
 }
 
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);

@@ -229,9 +229,11 @@ bison **隐式**的选择写成**显式**的优先级声明 —— 悬垂 else�
    struct + `operator init`、重载解析、`write`。`asy` 装在机器上，所以这道门槛有现成的
    oracle —— 跟 `tests/oracle` 那条轴同一个口径。**第一刀已落地**（`tests/asy` 那一节）：
    int/real 算术与输出（含 `%.15g`）、两种引号的字符串、bool、控制流（含 `? :`）、函数、
-   `write`、七个内建数学函数与 real 上的 `^`，八份用例在五个执行器上与 `asy -noV` 逐字节
-   相同。**还没做**的是数组与切片、pair/triple、struct + `operator init`、重载解析 ——
-   每一条都在 `tests/asy/bad/` 里有一份带 `ASY_NOPE` 的用例钉着，不是含糊的"待办"。
+   `write`、七个内建数学函数与 real 上的 `^`、**一维数组**（`new T[n]`、`{…}`、下标读写与
+   自动扩长、`.length`/`.push`/`.pop`、数组当形参与返回值），九份用例在五个执行器上与
+   `asy -noV` 逐字节相同。**还没做**的是切片、多维数组、`write` 一整个数组、pair/triple、
+   struct + `operator init`、重载解析、for-each —— 每一条都在 `tests/asy/bad/` 里有一份带
+   `ASY_NOPE` 的用例钉着，不是含糊的"待办"。
    超越函数（exp/log/trig）是**另一回事**：不是没做，是量过 libm 与 V8 在最后一位就分叉，
    收进来这条轴必然有一天变红，所以按边界拒掉（`tests/asy/bad/sin.asy`）。
 3. **绘图层**：path/guide 的 Bezier（含 tension / 方向求解）、pen、transform、
@@ -338,7 +340,7 @@ static inline C + 另写一份 IR 助手"，是两份实现；这次不重复那
 `zeroext i1`（属性在类型前）**。两处都写成前者，clang 当场 `error: expected value token`。
 这条记下来是因为它只在 `bool[]` 上出现，而四种元素里只有它这样。
 
-### 已落地的形状：asy 前端第一刀（第十五条测试轴 `tests/asy/`，17 条）
+### 已落地的形状：asy 前端第一刀（第十五条测试轴 `tests/asy/`，22 条）
 
 `stage0/src/frontend-asy/lower.js`（约 820 行）把 asy 语法树降成核心方言的**文本**，
 `omni emit-asy x.asy` 印出那份文本，`omni run/run-c/interp/interp --mir/run-llvm x.asy`
@@ -347,8 +349,8 @@ static inline C + 另写一份 IR 助手"，是两份实现；这次不重复那
 `1/3` 是实数除法而 `1#3` 是整数商、`3 == 3.0` 要提左边、`write` 的分隔符取决于第一个
 实参是不是字符串。类型是符号表的事，动作模板里没有符号表。
 
-**判分的人不是我**：`tests/asy` 的八份用例（算术 / 字符串 / 两种引号 / 控制流 / 函数 /
-real 的 %.15g / `? :` / 数学函数）每份都是「五条腿逐字节相同 == `.expected` ==
+**判分的人不是我**：`tests/asy` 的九份用例（算术 / 字符串 / 两种引号 / 控制流 / 函数 /
+real 的 %.15g / `? :` / 数学函数 / 数组）每份都是「五条腿逐字节相同 == `.expected` ==
 `asy -noV` 当场重跑」。`.expected` 本身就是真 asy 的输出生成的；机器上没装 asymptote 时
 那一节打印 skip，但 `.expected` 仍然把答案钉住。
 
@@ -368,10 +370,30 @@ real 的 %.15g / `? :` / 数学函数）每份都是「五条腿逐字节相同 
 （只算中选那支）跟着编码保住。代价写在明处：**循环条件里的 `? :` 直接报错**，因为那些
 赋值只能落在循环外面，条件就只算一次了。这条边界在 `tests/asy/bad/cond-in-loop.asy` 里。
 
-第一刀的边界都在 `tests/asy/bad/`（9 条，每条的期望值都必须以 `ASY_NOPE` 开头 ——
-"还没做"和"做错了"必须能一眼分开）：数组、struct、pair、重载、模块（import/access）、
+第一刀的边界都在 `tests/asy/bad/`（12 条，每条的期望值都必须以 `ASY_NOPE` 开头 ——
+"还没做"和"做错了"必须能一眼分开）：struct、pair、重载、模块（import/access）、
 隐式缩放（`105cm`）、超越函数（`sin` —— 理由是上面那条 ULP 测量）、函数里读文件级变量
-（核心方言没有全局量）、循环条件里的 `? :`。
+（核心方言没有全局量）、循环条件里的 `? :`、切片（`a[1:3]`）、多维数组、
+`write` 一整个数组、for-each。
+
+**第四节 `strict/`：asy 自己就不收的，我们也不能收。** 这一节是数组这一刀顺手加的，起因是
+一次测量：`int b=1; b++;` 在真 asy 上直接编不过（"postfix expressions are not allowed"），
+而我们的降级器照收。这类漏洞**不会让任何用例输出不同** —— 它只让"等价"这两个字变虚。
+所以 `strict/` 里的用例要求：我们拒，且装了 asy 的话**真 asy 也拒**。第一条就是后缀 `++`。
+
+**数组这一刀的语义全是量出来的**（`asy -noV`，逐条问）：
+
+- `a.push(v)` **返回压进去的那个值**（`int x = c.push(9);` 编得过且 x 是 9）；`a.pop()` 返回
+  被摘掉的那个。核心方言里 `(apush …)` 是语句，所以前端摊成"绑临时量 + apush + 用临时量"。
+- **写下标会把长度顶到 下标+1**：`int[] e; e[2]=5;` 之后 `e.length` 是 **3**。所以每个下标写
+  前面都插一次 `asy__grow_元素`（四种元素各一份 helper）。
+- 数组和下标都**只算一次**：复合赋值要读一次写一次，`a[f()] += 1` 里的 f 不能调两遍，
+  所以两者都先绑临时量（用 `? :` 那套 `this.pre`）。
+- `a.length` 在语法上不是 `(field …)` 而是**带点的名字**（camp.y 的 `name -> name "." ID`），
+  `c.push(8)` 同理是"调用一个带点的名字"。这不是猜的，是照着树写的。
+- **一处明写的差别**：asy 的每个格子带"写过没有"的标记，`new int[2]` 之后读 `a[0]` 是运行期
+  错误（"read uninitialized value from array at index 0"）；我们填零值。这类程序本来就有
+  bug，但差别写在明处（`frontend-asy/lower.js` 的文件头与 `cases/09-arrays.asy` 的注释里）。
 
 两处**明写的语义差**（不是漏，是这一刀不打算做那条运行期检查）：整数溢出按位回绕而不报错；
 `2^-1` 返回 0，而 asy 报 "Only 1 and -1 can be raised to negative exponents as integers"。
