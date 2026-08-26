@@ -17,6 +17,7 @@ import { join, basename } from './host/path.js';
 import { hash16 } from './host/hash.js';
 import { linkJs } from './frontend-js/link.js';
 import { lowerJs } from './frontend-js/lower.js';import { lowerWat } from './frontend-wat/lower.js';
+import { lowerAsy } from './frontend-asy/lower.js';
 import { readSexpr } from './sexpr/read.js';
 import { lowerCoreSexpr } from './sexpr/lower.js';
 import { printSexpr } from './sexpr/print.js';
@@ -106,7 +107,36 @@ function compile(path, argv = []) {
   if (path.endsWith('.js')) return compileJs(path);
   if (path.endsWith('.wat')) return compileWat(path);
   if (path.endsWith('.sx')) return compileSexpr(path);
+  if (path.endsWith('.asy')) return compileAsy(path);
   return compileProgram(path, undefined, modeFor(path, argv));
+}
+
+/**
+ * asymptote -> 核心方言 -> OIR（ADR-0014 第 2 道门槛）。
+ * 语法那一半是数据（`frontend-asy/asy.grammar`，从 camp.y 照原样转写）；这里只做
+ * 类型定向的那一半，出来的仍然是核心方言文本 —— 于是六条腿一条都不知道 asy 存在。
+ */
+function asyText(path) {
+  const gpath = join(installDir(), '..', 'frontend-asy', 'asy.grammar');
+  if (!exists(gpath)) throw new OmniError(`找不到 asy 语法文件：${gpath}`);
+  const tb = loadGrammar(gpath);
+  const diags = new Diagnostics();
+  const toks = lexText(tb.grammar.lex, new SourceFile(path, readText(path)), diags);
+  diags.throwIfErrors();
+  vStep(`asy lexer      ${path} -> ${toks.length} tokens`);
+  const tree = glrParse(tb, toks, diags);
+  diags.throwIfErrors();
+  const text = lowerAsy(tree, diags);
+  diags.throwIfErrors();
+  vStep(`asy front end  ${path} -> 核心方言 ${text.length} bytes`);
+  return text;
+}
+
+function compileAsy(path) {
+  const diags = new Diagnostics();
+  const mod = lowerCoreSexpr(new SourceFile(`${path}.sx`, asyText(path)), diags);
+  diags.throwIfErrors();
+  return { ast: null, mod, diags };
 }
 
 /**
@@ -556,6 +586,11 @@ function main(argv) {
     // ---- GLR（ADR-0014 决策 2）。语法是数据，这两条命令读的都是 .grammar 文件。
     // 它们摆在 CLI 上不只是为了调试：自举链要能让**原生编译器自己**跑一遍这条路，
     // 那是唯一能抓住封闭 ABI 违规的门槛（详见 tests/bootstrap/run.js 阶段 8）。
+    // asy 前端的中间形态：印出核心方言，`omni run x.asy` 吃的就是它（ADR-0014 第 2 道门槛）
+    case 'emit-asy': {
+      stdout(asyText(path));
+      return 0;
+    }
     case 'glr-table': {
       stdout(dumpTable(loadGrammar(path), rest.includes('--brief')));
       return 0;

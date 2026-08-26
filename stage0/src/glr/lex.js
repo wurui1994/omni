@@ -209,7 +209,11 @@ export function readLexSpec(node, diags) {
       const nm = isAtom(it.items[1]) ? it.items[1].value : null;
       const q = it.items[2];
       if (nm === null || !isStr(q) || q.value.length !== 1) { diags.error(it.span, '(string NAME "Q") needs a name and a one-character quote'); continue; }
-      rules.push({ kind: 'string', type: nm, quote: q.value, span: it.span });
+      // `verbatim` = 反斜杠只对引号本身有效，别的位置就是一个普通反斜杠。asy 的双引号串
+      // 就是这样（量过：`"a\tb"` 是 4 个字符 a \ t b），因为它要直接往 TeX 里塞。
+      const verbatim = isAtom(it.items[3]) && it.items[3].value === 'verbatim';
+      if (it.items.length > 3 && !verbatim) diags.error(it.span, "the only flag after (string NAME \"Q\") is 'verbatim'");
+      rules.push({ kind: 'string', type: nm, quote: q.value, verbatim, span: it.span });
       continue;
     }
     if (h === 'keyword') {
@@ -272,14 +276,27 @@ export function readLexSpec(node, diags) {
 /**
  * 引号串。转义表跟 sexpr/read.js 保持一致（`\t \n \r \" \' \\` 与 `\xXX`），
  * 但这里**不**支持 `\u{...}`：那是 WAT 的方言，通用词法器不该替目标语言决定。
+ * `verbatim` 的串只认 `\Q`（Q 就是那个引号），别处的反斜杠原样留着。
  * 返回 `{end, value}`，`end < 0` 表示没闭合。
  */
-function scanString(src, pos, quote) {
+function scanString(src, pos, quote, verbatim = false) {
   let i = pos + 1;
   let out = '';
   while (i < src.length && src.slice(i, i + 1) !== quote) {
     if (src.slice(i, i + 1) !== '\\') { out += src.slice(i, i + 1); i++; continue; }
     const e = src.slice(i + 1, i + 2);
+    if (verbatim) {
+      // 只有 `\Q` 变成 Q；`\\` 是**一对**（两个反斜杠都留着，但它不再让后面那个引号变成
+      // 转义），别的 `\x` 就是两个普通字符。三条都量过（asy，od -c）：
+      //   "\\"        -> 2 字节 \ \      （串在第三个引号处正常收尾）
+      //   "\""        -> 1 字节 "
+      //   "a\\\"b"    -> 5 字节 a \ \ " b
+      if (e === quote) { out += quote; i += 2; continue; }
+      if (e === '\\') { out += '\\\\'; i += 2; continue; }
+      out += '\\';
+      i++;
+      continue;
+    }
     i += 2;
     if (e === 't') { out += '\t'; continue; }
     if (e === 'n') { out += '\n'; continue; }
@@ -352,7 +369,7 @@ export function lexText(spec, file, diags) {
         end = f.end;
         value = f.value;
       } else if (src.slice(i, i + 1) === rule.quote) {
-        const s = scanString(src, i, rule.quote);
+        const s = scanString(src, i, rule.quote, rule.verbatim);
         end = s.end;
         value = s.value;
         if (end < 0) {

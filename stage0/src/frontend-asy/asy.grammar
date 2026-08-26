@@ -93,7 +93,10 @@
     (token LIT (+ digit) (? "." (* digit)) (? (or "e" "E") (? (set "+-")) (+ digit)))
     (token LIT "." (+ digit) (? (or "e" "E") (? (set "+-")) (+ digit)))
     (token ID (or alpha "_") (* (or alnum "_")))
-    (string STRING "\"")
+    ;; 双引号串是 **verbatim** 的：只有 `\"` 是转义，别处的反斜杠原样留着 —— asy 要把串
+    ;; 直接塞进 TeX。量过（od -c）：`"a\tb"` 是 a \ t b 四个字符，`"a\\b"` 是 a \ \ b；
+    ;; 而单引号串走 C 转义：`'a\tb'` 里那是一个制表符，`'a\\b'` 是一个反斜杠。
+    (string STRING "\"" verbatim)
     (string STRING "'")
     ;; camp.l 里这五个走 LIT 而不是关键字（intExp/booleanExp/... 都是 yylval.e）
     (keyword ID LIT "true" "false" "null" "cycle" "newframe")

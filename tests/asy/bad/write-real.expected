@@ -1,0 +1,1 @@
+asy 前端第一刀还不支持：write 一个 real（asy 是 %.15g，这一层的 print 是 %.6g）
