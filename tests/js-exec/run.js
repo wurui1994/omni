@@ -82,19 +82,24 @@ for (const file of cases) {
   // 第三条腿：自己的执行器（ADR-0013）。同一段 JS，同一棵 OIR，解释一遍 —— 参照还是 node。
   // 走 CLI 而不是在进程内 new Interp：解释器的输出缓冲、退出码、uncaught 都在那条路上。
   const viaI = run(process.execPath, [join(here, '../../stage0/src/cli.js'), 'interp', path]);
+  // 第四条腿：MIR 上的闭包编译解释器（ADR-0014 决策 7）。同一棵 OIR 再往下降一层。
+  // 它与上一条的差别不是"换个写法"：求值顺序、短路的落法、循环层数都在 MIR 里被钉死了，
+  // 而槽位取代了作用域链 —— 两条给出同一串字节，才说明那一层降级没有偷偷改语义。
+  const viaM = run(process.execPath, [join(here, '../../stage0/src/cli.js'), 'interp', path, '--mir']);
 
   const okJs = viaJs.code === 0 && viaJs.out === ref.out;
   const okC = viaC.code === 0 && viaC.out === ref.out;
   const okI = viaI.code === 0 && viaI.out === ref.out;
-  if (okJs && okC && okI) {
+  const okM = viaM.code === 0 && viaM.out === ref.out;
+  if (okJs && okC && okI && okM) {
     pass++;
     const n = ref.out === '' ? 0 : ref.out.replace(/\n$/, '').split('\n').length;
-    process.stdout.write(`  ok   ${name} [node == omni-js == omni-c == interp] ${n} lines\n`);
+    process.stdout.write(`  ok   ${name} [node == omni-js == omni-c == interp == interp-mir] ${n} lines\n`);
     continue;
   }
   fail++;
   const show = (label, r) => `    ${label} exit=${r.code}\n${r.out}${r.err ? `    stderr: ${r.err}` : ''}`;
-  failures.push(`${name}\n    node    exit=${ref.code}\n${ref.out}${show('omni-js', viaJs)}${show('omni-c ', viaC)}${show('interp ', viaI)}`);
+  failures.push(`${name}\n    node    exit=${ref.code}\n${ref.out}${show('omni-js', viaJs)}${show('omni-c ', viaC)}${show('interp ', viaI)}${show('interp-mir', viaM)}`);
   process.stdout.write(`  FAIL ${name}\n`);
 }
 

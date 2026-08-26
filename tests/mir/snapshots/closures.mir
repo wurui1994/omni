@@ -57,7 +57,7 @@ func u_twice(x:i64) -> i64   1 slots, 3 insns
 func u_applyTo(f:agg v:i64) -> i64   2 slots, 4 insns
   %0     LOAD     agg     slot0:f
   %1     LOAD     i64     slot1:v
-  %2     CALLFN   i64     %0 (%1)
+  %2     CALLFN   i64     %0 (%1) 0
   %3     RET      void    %2
 
 func u_adder(n:i64) -> agg   1 slots, 3 insns
@@ -83,7 +83,7 @@ func u_sumWith(xs:agg f:agg) -> i64   6 slots, 29 insns
   %14          LOAD     i64     slot2:acc
   %15          LOAD     agg     slot1:f
   %16          LOAD     i64     slot5:x
-  %17          CALLFN   i64     %15 (%16)
+  %17          CALLFN   i64     %15 (%16) 0
   %18          ADD      i64     %14 %17
   %19          STORE    void    %18 slot2:acc
   %20        END      void
@@ -107,14 +107,14 @@ func u_Counter_callIt(this:agg d:i64) -> i64   3 slots, 7 insns
   %2     STORE    void    %1 slot2:g
   %3     LOAD     agg     slot2:g
   %4     LOAD     i64     slot1:d
-  %5     CALLFN   i64     %3 (%4)
+  %5     CALLFN   i64     %3 (%4) 0
   %6     RET      void    %5
 
 func omni_main() -> void   22 slots, 198 insns
   %0     CLOSURE  agg     omni_mk_2 ()
   %1     STORE    void    %0 slot0:inc
   %2     LOAD     agg     slot0:inc
-  %3     CALLFN   i64     %2 (k3)
+  %3     CALLFN   i64     %2 (k3) 0
   %4     CALLOP   void    print.int (%3)
   %5     LOAD     agg     slot0:inc
   %6     CALL     i64     u_applyTo (%5 k4)
@@ -122,7 +122,7 @@ func omni_main() -> void   22 slots, 198 insns
   %8     CLOSURE  agg     omni_mk_3 ()
   %9     STORE    void    %8 slot1:t
   %10    LOAD     agg     slot1:t
-  %11    CALLFN   i64     %10 (k5)
+  %11    CALLFN   i64     %10 (k5) 0
   %12    CALLOP   void    print.int (%11)
   %13    CLOSURE  agg     omni_mk_3 ()
   %14    CALL     i64     u_applyTo (%13 k6)
@@ -132,21 +132,21 @@ func omni_main() -> void   22 slots, 198 insns
   %18    CLOSURE  agg     omni_mk_4 (%17)
   %19    STORE    void    %18 slot3:addBase
   %20    LOAD     agg     slot3:addBase
-  %21    CALLFN   i64     %20 (k8)
+  %21    CALLFN   i64     %20 (k8) 0
   %22    CALLOP   void    print.int (%21)
   %23    STORE    void    k9 slot2:base
   %24    LOAD     agg     slot3:addBase
-  %25    CALLFN   i64     %24 (k8)
+  %25    CALLFN   i64     %24 (k8) 0
   %26    CALLOP   void    print.int (%25)
   %27    CALL     agg     u_adder (k4)
   %28    STORE    void    %27 slot4:add10
   %29    CALL     agg     u_adder (k10)
   %30    STORE    void    %29 slot5:add20
   %31    LOAD     agg     slot4:add10
-  %32    CALLFN   i64     %31 (k2)
+  %32    CALLFN   i64     %31 (k2) 0
   %33    CALLOP   void    print.int (%32)
   %34    LOAD     agg     slot5:add20
-  %35    CALLFN   i64     %34 (k2)
+  %35    CALLFN   i64     %34 (k2) 0
   %36    CALLOP   void    print.int (%35)
   %37    AGGLIT   agg     () list:list_fn_int__int
   %38    STORE    void    %37 slot6:fs
@@ -172,21 +172,21 @@ func omni_main() -> void   22 slots, 198 insns
   %58    CALLOP   void    print.int (%57)
   %59    LOAD     agg     slot6:fs
   %60    IDXGET   agg     %59 k1 list:list_fn_int__int
-  %61    CALLFN   i64     %60 (k1)
+  %61    CALLFN   i64     %60 (k1) 0
   %62    CALLOP   void    print.int (%61)
   %63    LOAD     agg     slot6:fs
   %64    IDXGET   agg     %63 k2 list:list_fn_int__int
-  %65    CALLFN   i64     %64 (k1)
+  %65    CALLFN   i64     %64 (k1) 0
   %66    CALLOP   void    print.int (%65)
   %67    LOAD     agg     slot6:fs
   %68    IDXGET   agg     %67 k0 list:list_fn_int__int
-  %69    CALLFN   i64     %68 (k1)
+  %69    CALLFN   i64     %68 (k1) 0
   %70    CALLOP   void    print.int (%69)
   %71    CLOSURE  agg     omni_mk_7 ()
   %72    STORE    void    %71 slot8:mul
   %73    LOAD     agg     slot8:mul
-  %74    CALLFN   agg     %73 (k12)
-  %75    CALLFN   i64     %74 (k13)
+  %74    CALLFN   agg     %73 (k12) 0
+  %75    CALLFN   i64     %74 (k13) 0
   %76    CALLOP   void    print.int (%75)
   %77    AGGLIT   agg     () list:list_int
   %78    STORE    void    %77 slot9:seen
@@ -194,9 +194,9 @@ func omni_main() -> void   22 slots, 198 insns
   %80    CLOSURE  agg     omni_mk_8 (%79)
   %81    STORE    void    %80 slot10:record
   %82    LOAD     agg     slot10:record
-  %83    CALLFN   void    %82 (k2)
+  %83    CALLFN   void    %82 (k2) 0
   %84    LOAD     agg     slot10:record
-  %85    CALLFN   void    %84 (k0)
+  %85    CALLFN   void    %84 (k0) 0
   %86    LOAD     agg     slot9:seen
   %87    CALLOP   i64     len.list (%86)
   %88    CALLOP   void    print.int (%87)
@@ -218,11 +218,11 @@ func omni_main() -> void   22 slots, 198 insns
   %104   IDXGET   agg     %103 k15 dict:dict_string_fn_int__int
   %105   STORE    void    %104 slot12:op
   %106   LOAD     agg     slot12:op
-  %107   CALLFN   i64     %106 (k16)
+  %107   CALLFN   i64     %106 (k16) 0
   %108   CALLOP   void    print.int (%107)
   %109   LOAD     agg     slot11:ops
   %110   IDXGET   agg     %109 k14 dict:dict_string_fn_int__int
-  %111   CALLFN   i64     %110 (k17)
+  %111   CALLFN   i64     %110 (k17) 0
   %112   CALLOP   void    print.int (%111)
   %113   STORE    void    k18 slot13:nothing
   %114   LOAD     agg     slot13:nothing
@@ -242,11 +242,11 @@ func omni_main() -> void   22 slots, 198 insns
   %128   CLOSURE  agg     omni_mk_9 (%127)
   %129   STORE    void    %128 slot16:label
   %130   LOAD     agg     slot16:label
-  %131   CALLFN   str     %130 (k13)
+  %131   CALLFN   str     %130 (k13) 0
   %132   CALLOP   void    print.string (%131)
   %133   STORE    void    k20 slot15:prefix
   %134   LOAD     agg     slot16:label
-  %135   CALLFN   str     %134 (k13)
+  %135   CALLFN   str     %134 (k13) 0
   %136   CALLOP   void    print.string (%135)
   %137   AGGLIT   agg     (k2 k0 k11) list:list_int
   %138   CLOSURE  agg     omni_mk_3 ()
@@ -271,12 +271,12 @@ func omni_main() -> void   22 slots, 198 insns
   %157   CLOSURE  agg     omni_mk_11 (%156)
   %158   STORE    void    %157 slot18:area
   %159   LOAD     agg     slot18:area
-  %160   CALLFN   i64     %159 ()
+  %160   CALLFN   i64     %159 () 0
   %161   CALLOP   void    print.int (%160)
   %162   LOAD     agg     slot17:p
   %163   FLDSET   void    %162 k7 P.x
   %164   LOAD     agg     slot18:area
-  %165   CALLFN   i64     %164 ()
+  %165   CALLFN   i64     %164 () 0
   %166   CALLOP   void    print.int (%165)
   %167   NEW      agg     class:Counter
   %168   STORE    void    %167 slot19:c
@@ -286,12 +286,12 @@ func omni_main() -> void   22 slots, 198 insns
   %172   CALL     agg     u_Counter_bump (%171)
   %173   STORE    void    %172 slot20:bumped
   %174   LOAD     agg     slot20:bumped
-  %175   CALLFN   i64     %174 (k8)
+  %175   CALLFN   i64     %174 (k8) 0
   %176   CALLOP   void    print.int (%175)
   %177   LOAD     agg     slot19:c
   %178   FLDSET   void    %177 k22 Counter.n
   %179   LOAD     agg     slot20:bumped
-  %180   CALLFN   i64     %179 (k8)
+  %180   CALLFN   i64     %179 (k8) 0
   %181   CALLOP   void    print.int (%180)
   %182   LOAD     agg     slot19:c
   %183   CALL     i64     u_Counter_callIt (%182 k2)
@@ -307,7 +307,7 @@ func omni_main() -> void   22 slots, 198 insns
   %193   FLDSET   void    %192 %191 Holder.op
   %194   LOAD     agg     slot21:h
   %195   FLD      agg     %194 Holder.op
-  %196   CALLFN   i64     %195 (k13)
+  %196   CALLFN   i64     %195 (k13) 0
   %197   CALLOP   void    print.int (%196)
 
 func omni_clo_0(x:i64) -> i64 [closure]   1 slots, 4 insns

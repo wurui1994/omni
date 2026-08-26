@@ -30,9 +30,10 @@ const filters = args.filter((a) => !a.startsWith('-'));
 const SRC_EXT = /\.omni[ds]?$/;
 
 /** 用相对路径 + 固定 cwd 运行，保证诊断快照里不出现机器相关的绝对路径 */
-function run(cmd, file) {
+function run(cmd, file, flag) {
   const rel = relative(root, file);
-  const r = spawnSync(process.execPath, [CLI, cmd, rel], { encoding: 'utf8', cwd: root });
+  const argv = flag === undefined ? [CLI, cmd, rel] : [CLI, cmd, rel, flag];
+  const r = spawnSync(process.execPath, argv, { encoding: 'utf8', cwd: root });
   return {
     stdout: r.stdout ?? '',
     stderr: r.stderr ?? '',
@@ -92,7 +93,7 @@ function checkSnapshot(name, expectedPath, actual) {
 // ------------------------------------------------------------ 可执行用例：差分 + 快照
 
 const casesDir = join(here, 'cases');
-process.stdout.write('differential (js vs c vs interp) + snapshot\n');
+process.stdout.write('differential (js vs c vs interp vs interp-mir) + snapshot\n');
 for (const f of readdirSync(casesDir).filter((f) => SRC_EXT.test(f)).sort()) {
   if (filters.length && !filters.some((x) => f.includes(x))) continue;
   const path = join(casesDir, f);
@@ -101,8 +102,11 @@ for (const f of readdirSync(casesDir).filter((f) => SRC_EXT.test(f)).sort()) {
   // 第三个执行器（ADR-0013）：解释 OIR，不借宿主的 JS 引擎也不借 cc。它和前两个不共用
   // 任何一条执行路径，所以三方比对里任何一方写错都会当场露出来。
   const it = run('interp', path);
+  // 第四个：同一棵 OIR 再降一层到 MIR，闭包编译后跑（ADR-0014 决策 7）。它测的是
+  // **那一层降级**：求值顺序、短路的落法、循环层数、槽位取代作用域链，全在 MIR 里定死了。
+  const mi = run('interp', path, '--mir');
 
-  const crashed = [['js', js], ['c', c], ['interp', it]].filter(([, r]) => hostCrash(r.stderr));
+  const crashed = [['js', js], ['c', c], ['interp', it], ['interp-mir', mi]].filter(([, r]) => hostCrash(r.stderr));
   if (crashed.length) {
     record(`${f} [host crash]`, false, crashed.map(([l, r]) => show(l, r)).join('\n'));
     continue;
@@ -112,6 +116,8 @@ for (const f of readdirSync(casesDir).filter((f) => SRC_EXT.test(f)).sort()) {
   record(`${f} [js==c]`, same, same ? '' : `${show('js', js)}\n${show('c', c)}\n${diffLine(js.stdout, c.stdout)}`);
   const sameI = js.stdout === it.stdout && js.code === it.code && js.stderr === it.stderr;
   record(`${f} [js==interp]`, sameI, sameI ? '' : `${show('js', js)}\n${show('interp', it)}\n${diffLine(js.stdout, it.stdout)}`);
+  const sameM = js.stdout === mi.stdout && js.code === mi.code && js.stderr === mi.stderr;
+  record(`${f} [js==interp-mir]`, sameM, sameM ? '' : `${show('js', js)}\n${show('interp-mir', mi)}\n${diffLine(js.stdout, mi.stdout)}`);
   if (same) checkSnapshot(f, path.replace(SRC_EXT, '.expected'), `exit ${js.code}\n--- stdout ---\n${js.stdout}--- stderr ---\n${js.stderr}`);
 }
 

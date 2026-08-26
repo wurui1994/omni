@@ -37,6 +37,7 @@ import { RUNTIME_DIR, runtimeSources } from './runtime/c_runtime.js';
 import { loadProgram, MODE_BY_EXT } from './module/load.js';
 import { startRepl } from './repl.js';
 import { interpret } from './interp/eval.js';
+import { interpretMir } from './mir/interp.js';
 import { bootstrapSelf } from './bootstrap.js';
 
 /** 文件后缀决定默认的类型模式（ADR-0008 第 1 节）；`--mode` 可覆盖，REPL 用它 */
@@ -217,6 +218,13 @@ function runInterp(mod) {
   return code;
 }
 
+/** MIR 上的闭包编译解释器（ADR-0014 决策 7）：降级 -> verify -> 编成闭包 -> 跑 */
+function runInterpMir(mod) {
+  const code = interpretMir(mod);
+  vStep(`exec interp --mir  ${mod.funcs.length} funcs  exit=${code}`);
+  return code;
+}
+
 function runViaC(mod, argv) {  const wi = argv.indexOf('--work');
   const dir = wi >= 0 ? argv[wi + 1] : mkdTemp(join(tmpDir(), 'omni-run-'));
   if (wi >= 0) mkdirAll(dir);
@@ -312,10 +320,12 @@ function main(argv) {
       const { mod } = compile(path, rest);
       return runViaC(mod, rest);
     }
-    // 自己的解释器（ADR-0013 阶段 1）：不生成 JS、不生成 C，直接走 OIR
+    // 自己的解释器（ADR-0013 阶段 1）：不生成 JS、不生成 C，直接走 OIR。
+    // `--mir` 换成 MIR 那条（ADR-0014 决策 7）：闭包编译 + 值窗口帧，分派只付一次。
+    // 两条**必须给出同样的输出** —— 这是「五方逐字节相同」里的第四方与第五方。
     case 'interp': {
       const { mod } = compile(path, rest);
-      return runInterp(mod);
+      return rest.includes('--mir') ? runInterpMir(mod) : runInterp(mod);
     }
     case 'ast': {
       const { ast } = compile(path, rest);

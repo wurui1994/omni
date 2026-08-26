@@ -93,7 +93,10 @@ class ToMir {
       fs = [];
       for (const v of t.variants) for (const x of v.fields) fs.push(`${v.name}.${x.name}`);
     }
-    return this.mod.typeNo(typeKey(t), { kind: t.k, name: nameOf(t), fields: fs });
+    // `oir` 是**元数据**，不进指令字节、也不进哈希（哈希只用 kind:name）：消费者要按值语义
+    // 拷一个 struct、要造一个零值容器，就得知道字段类型。挂在类型池上比让每个后端各自
+    // 再持有一份 OIR 便宜，也不会分叉。
+    return this.mod.typeNo(typeKey(t), { kind: t.k, name: nameOf(t), fields: fs, oir: t });
   }
 
   /* ------------------------------------------------------------ 函数与作用域 */
@@ -417,8 +420,16 @@ class ToMir {
       }
       case 'Call':
         return f.emit(OP.CALL, this.ty(e.type), this.mod.funcNo(e.func), this.args(e.args), 0);
-      case 'CallFn':
-        return f.emit(OP.CALLFN, this.ty(e.type), this.expr(e.callee), this.args(e.args), 0);
+      case 'CallFn': {
+        const c = e.callee;
+        // `js_asFn` 是条 raw op：它返回的是**函数值本身**，过不了 dynamic 的边界，
+        // 所以不发它 —— 直接把它的实参当函数值，aux=1 记下「JS 域的动态调用，
+        // 实参是一条实参表」。OIR 解释器在这里做的是同一件事（eval.js 的 CallFn 分支）。
+        if (c.kind === 'Builtin' && c.name === 'js_asFn') {
+          return f.emit(OP.CALLFN, this.ty(e.type), this.expr(c.args[0]), this.args(e.args), 1);
+        }
+        return f.emit(OP.CALLFN, this.ty(e.type), this.expr(c), this.args(e.args), 0);
+      }
       case 'CCall':
         return f.emit(OP.CCALL, this.ty(e.type), this.mod.cabiNo(e.entry), this.args(e.args), 0);
       case 'MakeClosure': {

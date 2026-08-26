@@ -30,7 +30,7 @@ export class InterpFail extends Error {}
 export class InterpUncaught extends Error {}
 
 /** 64 位回绕。int 的 + - * << 都要过它（ADR-0005） */
-function W(x) {
+export function W(x) {
   return BigInt.asIntN(64, x);
 }
 
@@ -215,7 +215,7 @@ function keyStr(k) {
   return '"' + k + '"';
 }
 
-function listGet(a, i) {
+export function listGet(a, i) {
   const n = Number(i);
   if (n < 0 || n >= a.length) {
     rtError('list index out of range: ' + n + ' (length ' + a.length + ')');
@@ -223,7 +223,7 @@ function listGet(a, i) {
   return a[n];
 }
 
-function listSet(a, i, v) {
+export function listSet(a, i, v) {
   const n = Number(i);
   if (n < 0 || n >= a.length) {
     rtError('list index out of range: ' + n + ' (length ' + a.length + ')');
@@ -232,7 +232,7 @@ function listSet(a, i, v) {
   return v;
 }
 
-function dictGet(m, k) {
+export function dictGet(m, k) {
   if (!m.has(k)) rtError('key not found: ' + keyStr(k));
   return m.get(k);
 }
@@ -243,7 +243,7 @@ function dictGet(m, k) {
  *  Map/Set 要翻一下：解释器自己的容器在 node 上就是宿主的 Map/Set，降级成 C 之后带的是
  *  **JS 域**的 Map/Set 标签；而被解释的程序看到的必须是 Omni 域的 dict/set。不翻的话
  *  同一个程序在两个宿主上会走进不同分支（实测：原生构建上 dict 被认成 Map 而报错）。 */
-function dynTag(v) {
+export function dynTag(v) {
   const t = typeTag(v);
   if (t === 'Map') return 'dict';
   if (t === 'Set') return 'set';
@@ -408,7 +408,7 @@ export function callBuiltin(I, e, env, frame) {
 }
 
 /** 比较。静态那半边的类型已经定好了，所以宿主的 === / < 就是对的语义 */
-function cmpOp(op, a, b) {
+export function cmpOp(op, a, b) {
   switch (op) {
     case '==': return a === b;
     case '!=': return a !== b;
@@ -420,7 +420,7 @@ function cmpOp(op, a, b) {
   }
 }
 
-function binOp(op, kind, a, b) {
+export function binOp(op, kind, a, b) {
   if (kind === 'int') {
     switch (op) {
       case '+': return W(a + b);
@@ -462,6 +462,18 @@ function strOf(kind, v) {
 
 function builtinOp(I, e, env, frame) {
   const a = e.args.map((x) => I.eval(x, env, frame));
+  return applyBuiltin(I, e, a);
+}
+
+/**
+ * 内建的**值层**入口：实参已经求好了，节点只当描述符用（读 name / recvType / argType /
+ * lit 字段，以及把解析结果缓存回去）。
+ *
+ * 拆出来是给 MIR 解释器用的（ADR-0014 决策 7）：它手里没有 OIR 节点，但可以在**装载期**
+ * 为每条 `CALLOP` 造一个一次性的描述符对象，于是下面那些挂在节点上的负缓存照样成立 ——
+ * 「分派只付一次」这条对两个解释器同时生效。语义只有这一份，不会分叉。
+ */
+export function applyBuiltin(I, e, a) {
   // 负缓存（第一次落到默认支时打上）。JS 程序里几乎每条 Builtin 都是 JS 域的 op，而下面
   // 这个 switch 是顺着比字符串比过去的 —— 每次都白比一百来次才到默认支。量过：原生构建上
   // builtinOp 自己就占 22%。节点是可写的（OIR 在两代产物里都是普通对象/dict），缓存就挂在

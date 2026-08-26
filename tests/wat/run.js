@@ -98,6 +98,9 @@ for (const file of pick('cases')) {
   const viaJs = run(process.execPath, [cli, 'run', path]);
   const viaC = run(process.execPath, [cli, 'run-c', path]);
   const viaI = run(process.execPath, [cli, 'interp', path]);
+  // 第四个执行器：MIR 上的闭包编译解释器（ADR-0014 决策 7）。.wat 这一支特别值得比 ——
+  // wasm 的 block/loop/br 与 MIR 的区域标记是**同一套层数语义**，两边都对了才算真的同一套。
+  const viaM = run(process.execPath, [cli, 'interp', path, '--mir']);
   const check = (label, r) => {
     if (r.code !== 0) bad.push(`    ${label} exit=${r.code}\n${r.err}`);
     else if (r.out !== want) bad.push(`    ${label} output differs\n    want: ${JSON.stringify(want)}\n    got:  ${JSON.stringify(r.out)}`);
@@ -105,11 +108,12 @@ for (const file of pick('cases')) {
   check('omni-js', viaJs);
   check('omni-c ', viaC);
   check('interp ', viaI);
+  check('interp-mir', viaM);
 
   if (bad.length === 0) {
     pass++;
     const n = want === '' ? 0 : want.replace(/\n$/, '').split('\n').length;
-    process.stdout.write(`  ok   ${name} [omni-js == omni-c == interp == expected] ${n} lines\n`);
+    process.stdout.write(`  ok   ${name} [omni-js == omni-c == interp == interp-mir == expected] ${n} lines\n`);
     continue;
   }
   fail++;
