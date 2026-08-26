@@ -1,0 +1,4 @@
+;; 二元算符两边不同型，也不提升
+(module
+  (main
+    (print (bin "+" (int 1) (real 2.0)))))

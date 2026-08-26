@@ -251,6 +251,27 @@ if (c1 && !quick) {
     if (llVia.status !== 0) bad('N1 emit-llvm cases/02_numeric', `    exit=${llVia.status}\n${llVia.stderr}`);
     else if (llVia.stdout !== llRef.stdout) bad('N1 emit-llvm == C0', `    C0 ${llRef.stdout.length} bytes != N1 ${llVia.stdout.length} bytes`);
     else ok(`N1 emit-llvm cases/02_numeric == C0  ${llRef.stdout.length} bytes`);
+
+    // ---- 核心 S 表达式方言 + $*k 摊平（ADR-0014 决策 1）
+    // 走的是整条链：mini 的 grammar -> `omni glr`（摊平在这里）-> 核心方言文本 ->
+    // `omni run`（sexpr/lower.js 在这里）。两代都得给同一份文本、同一份输出。
+    // 分两条断言而不是一条：文本对不上是摊平错了，文本对了输出不对是降级错了 ——
+    // 一条断言看不出是哪头。
+    const gMini = join(root, 'tests', 'glr', 'grammars', 'mini.grammar');
+    const inMini = join(root, 'tests', 'sexpr', 'mini', '01-basics.mini');
+    const sxRef = spawnSync('node', [cli, 'glr', gMini, inMini], { encoding: 'utf8' });
+    const sxVia = spawnSync(n1, ['glr', gMini, inMini], { encoding: 'utf8' });
+    if (sxVia.status !== 0) bad('N1 glr mini', `    exit=${sxVia.status}\n${sxVia.stderr}`);
+    else if (sxVia.stdout !== sxRef.stdout) bad('N1 glr mini == C0', `    C0 ${JSON.stringify(sxRef.stdout)}\n    N1 ${JSON.stringify(sxVia.stdout)}`);
+    else {
+      const sx = join(dir, 'mini.sx');
+      writeFileSync(sx, sxVia.stdout);
+      const runRef = spawnSync('node', [cli, 'run', sx], { encoding: 'utf8' });
+      const runVia = spawnSync(n1, ['run', sx], { encoding: 'utf8' });
+      if (runVia.status !== 0) bad('N1 run mini.sx', `    exit=${runVia.status}\n${runVia.stderr}`);
+      else if (runVia.stdout !== runRef.stdout) bad('N1 run mini.sx == C0', `    C0 ${JSON.stringify(runRef.stdout)}\n    N1 ${JSON.stringify(runVia.stdout)}`);
+      else ok(`N1 glr mini -> run .sx == C0  ${sxRef.stdout.length} + ${runRef.stdout.length} bytes`);
+    }
   }
 
   // 增量：这一条钉的不是"跑得通"，是**缓存键在两代之间相同**。键是 hash16(规范化文本)，

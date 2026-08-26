@@ -30,6 +30,7 @@
 const MAX_PARSES = 400;
 
 const isTemplateHole = (n) => n.kind === 'atom' && /^\$[0-9]+$/.test(n.value);
+const isSpliceHole = (n) => n.kind === 'atom' && /^\$\*[0-9]+$/.test(n.value);
 
 /** 两个 s-expr 值是否逐节点相同（不看 span） */
 function sameValue(a, b) {
@@ -90,8 +91,14 @@ function spanOf(kids) {
 }
 
 /**
- * 套模板。`$k` 换成第 k 个子节点的值，其它原样复制。
- * 整个模板就是一个 `$k` 时等于"原样传上去" —— 那是最常见的一条（`(-> (E) $1)`）。
+ * 套模板。`$k` 换成第 k 个子节点的值，`$*k` 把第 k 个子节点（必须是列表）的**元素摊开**，
+ * 其它原样复制。整个模板就是一个 `$k` 时等于"原样传上去" —— 那是最常见的一条
+ * （`(-> (E) $1)`）。
+ *
+ * `$*k` 是为**列表**加的，而列表是映射标注绕不过去的东西：语句序列、实参表、形参表
+ * 都是「左递归攒一串」的形状。没有它，`(-> (Stmts Stmt) ...)` 只能造出右嵌套的链，
+ * 消费方（核心方言那份降级）就得反过来认那条链 —— 等于把某门语言的语法形状泄进
+ * 唯一的那份降级里。有了它，语法写 `($*1 $2)` 就直接攒出一条平的列表。
  */
 function applyTemplate(tpl, kids, span) {
   if (tpl === null) return null;
@@ -106,7 +113,21 @@ function applyTemplate(tpl, kids, span) {
   // 指到语法文件里去（量出来过：一句歧义报错指在 jnc.grammar:339）。
   if (tpl.kind === 'atom') return { kind: 'atom', value: tpl.value, span };
   if (tpl.kind === 'string') return { kind: 'string', value: tpl.value, raw: tpl.raw, span };
-  return { kind: 'list', items: tpl.items.map((x) => applyTemplate(x, kids, span)), span };
+  const items = [];
+  for (const x of tpl.items) {
+    if (isSpliceHole(x)) {
+      const got = kids[Number(x.value.slice(2)) - 1];
+      // 要摊开的东西不是列表时不静默：那是语法写错了，在这里报比在降级里报清楚得多
+      if (got === undefined || got === null || got.kind !== 'list') {
+        items.push({ kind: 'atom', value: '$notalist', span });
+        continue;
+      }
+      for (const y of got.items) items.push(y);
+      continue;
+    }
+    items.push(applyTemplate(x, kids, span));
+  }
+  return { kind: 'list', items: items, span };
 }
 
 /**

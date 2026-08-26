@@ -18,6 +18,7 @@ import { hash16 } from './host/hash.js';
 import { linkJs } from './frontend-js/link.js';
 import { lowerJs } from './frontend-js/lower.js';import { lowerWat } from './frontend-wat/lower.js';
 import { readSexpr } from './sexpr/read.js';
+import { lowerCoreSexpr } from './sexpr/lower.js';
 import { printSexpr } from './sexpr/print.js';
 import { readGrammar } from './glr/grammar.js';
 import { buildTable, dumpTable } from './glr/table.js';
@@ -103,7 +104,21 @@ function compileWat(path) {
 function compile(path, argv = []) {
   if (path.endsWith('.js')) return compileJs(path);
   if (path.endsWith('.wat')) return compileWat(path);
+  if (path.endsWith('.sx')) return compileSexpr(path);
   return compileProgram(path, undefined, modeFor(path, argv));
+}
+
+/**
+ * 核心 S 表达式方言 -> OIR（ADR-0014 决策 1 的汇聚点）。
+ * `omni glr GRAMMAR FILE` 的输出就是这份方言，所以「加一门语言 = grammar + 映射标注」
+ * 走的是同一条路：那边印出来，这边读进来，中间没有为那门语言写的代码。
+ */
+function compileSexpr(path) {
+  const diags = new Diagnostics();
+  const mod = lowerCoreSexpr(new SourceFile(path, readText(path)), diags);
+  diags.throwIfErrors();
+  vStep(`core sexpr front end  ${path} -> OIR  ${mod.funcs.length} funcs`);
+  return { ast: null, mod, diags };
 }
 
 /** 从内存里的源文本编译。REPL 走这条（它没有文件），`compile` 只是把 text 交给加载器去读盘。 */

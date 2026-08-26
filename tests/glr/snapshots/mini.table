@@ -1,0 +1,78 @@
+grammar mini: 42 terminals, 13 nonterminals, 55 rules, 106 states
+  r0  Program -> Decls
+  r1  Decls -> <empty>
+  r2  Decls -> Decls Decl
+  r3  Decl -> "fn" ID "(" Params ")" Type Block
+  r4  Decl -> "main" Block
+  r5  Params -> <empty>
+  r6  Params -> ParamList
+  r7  ParamList -> Param
+  r8  ParamList -> ParamList "," Param
+  r9  Param -> Type ID
+  r10  Type -> "int"
+  r11  Type -> "real"
+  r12  Type -> "bool"
+  r13  Type -> "string"
+  r14  Type -> "void"
+  r15  Block -> "{" Stmts "}"
+  r16  Stmts -> <empty>
+  r17  Stmts -> Stmts Stmt
+  r18  Stmt -> "let" ID Type "=" E ";"
+  r19  Stmt -> ID "=" E ";"
+  r20  Stmt -> "if" "(" E ")" Block
+  r21  Stmt -> "if" "(" E ")" Block "else" Block
+  r22  Stmt -> "while" "(" E ")" Block
+  r23  Stmt -> "return" ";"
+  r24  Stmt -> "return" E ";"
+  r25  Stmt -> "print" E ";"
+  r26  Stmt -> E ";"
+  r27  Stmt -> Block
+  r28  E -> E "+" E
+  r29  E -> E "-" E
+  r30  E -> E "*" E
+  r31  E -> E "/" E
+  r32  E -> E "%" E
+  r33  E -> E "==" E
+  r34  E -> E "!=" E
+  r35  E -> E "<" E
+  r36  E -> E "<=" E
+  r37  E -> E ">" E
+  r38  E -> E ">=" E
+  r39  E -> E "&&" E
+  r40  E -> E "||" E
+  r41  E -> "-" E
+  r42  E -> "!" E
+  r43  E -> "(" E ")"
+  r44  E -> ID "(" Args ")"
+  r45  E -> INT
+  r46  E -> REAL
+  r47  E -> STR
+  r48  E -> "true"
+  r49  E -> "false"
+  r50  E -> ID
+  r51  Args -> <empty>
+  r52  Args -> ArgList
+  r53  ArgList -> E
+  r54  ArgList -> ArgList "," E
+  r55  $accept -> Program
+conflicts left to the GLR driver: 20
+  state 83 on "==": nonassoc (0 actions)
+  state 83 on "!=": nonassoc (0 actions)
+  state 84 on "==": nonassoc (0 actions)
+  state 84 on "!=": nonassoc (0 actions)
+  state 85 on "<": nonassoc (0 actions)
+  state 85 on "<=": nonassoc (0 actions)
+  state 85 on ">": nonassoc (0 actions)
+  state 85 on ">=": nonassoc (0 actions)
+  state 86 on "<": nonassoc (0 actions)
+  state 86 on "<=": nonassoc (0 actions)
+  state 86 on ">": nonassoc (0 actions)
+  state 86 on ">=": nonassoc (0 actions)
+  state 87 on "<": nonassoc (0 actions)
+  state 87 on "<=": nonassoc (0 actions)
+  state 87 on ">": nonassoc (0 actions)
+  state 87 on ">=": nonassoc (0 actions)
+  state 88 on "<": nonassoc (0 actions)
+  state 88 on "<=": nonassoc (0 actions)
+  state 88 on ">": nonassoc (0 actions)
+  state 88 on ">=": nonassoc (0 actions)

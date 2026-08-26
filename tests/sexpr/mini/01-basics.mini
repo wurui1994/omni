@@ -1,0 +1,33 @@
+// mini：递归、循环、条件、字符串拼接，都走同一条 grammar -> 核心方言 -> OIR 的路
+fn fib(int n) int {
+  if (n < 2) { return n; }
+  return fib(n - 1) + fib(n - 2);
+}
+
+fn gcd(int a, int b) int {
+  while (b != 0) {
+    let t int = b;
+    b = a % b;
+    a = t;
+  }
+  return a;
+}
+
+fn area(real r) real {
+  return 3.14159 * r * r;
+}
+
+main {
+  print fib(10);
+  print gcd(1071, 462);
+  print area(2.0);
+  let i int = 0;
+  let sum int = 0;
+  while (i < 10) {
+    if (i % 2 == 0) { sum = sum + i; } else { sum = sum - i; }
+    i = i + 1;
+  }
+  print sum;
+  print "mini" + " " + "works";
+  print !(sum > 100) && true;
+}

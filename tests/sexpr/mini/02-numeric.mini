@@ -1,0 +1,24 @@
+// 只用标量：这一份也要能过 LLVM 那条腿（第一阶段不降字符串）
+fn pow(int base, int n) int {
+  let acc int = 1;
+  let i int = 0;
+  while (i < n) {
+    acc = acc * base;
+    i = i + 1;
+  }
+  return acc;
+}
+
+fn hypot2(real a, real b) real {
+  return a * a + b * b;
+}
+
+main {
+  print pow(2, 16);
+  print pow(3, 5);
+  print hypot2(3.0, 4.0);
+  print -pow(2, 3) % 5;
+  print 7 / 2;
+  print 7.0 / 2.0;
+  print 1 < 2 && 2 < 3;
+}

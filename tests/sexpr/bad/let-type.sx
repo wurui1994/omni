@@ -1,0 +1,5 @@
+;; 类型不推导只检查：int 变量给 real 初值，报错，不插隐式转换
+(module
+  (main
+    (let n int (real 1.5))
+    (print (var n))))

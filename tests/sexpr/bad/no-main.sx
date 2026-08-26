@@ -1,0 +1,4 @@
+;; 只有函数没有入口
+(module
+  (fn f ((x int)) int
+    (ret (var x))))

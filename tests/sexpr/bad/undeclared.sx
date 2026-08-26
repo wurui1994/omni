@@ -1,0 +1,4 @@
+;; 没声明就用
+(module
+  (main
+    (print (var nope))))

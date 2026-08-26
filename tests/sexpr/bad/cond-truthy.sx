@@ -1,0 +1,5 @@
+;; 条件位置不做真值化：int 不是 bool
+(module
+  (main
+    (let n int (int 1))
+    (if (var n) (do (print (str "yes"))))))

@@ -1,0 +1,117 @@
+;; mini —— 一门小语言，用来证「加一门语言 = grammar + 映射标注」不是口号。
+;;
+;; 这份文件里**没有一行降级代码**：动作模板直接拼出核心 S 表达式方言
+;; （见 stage0/src/sexpr/lower.js 的文件头），`omni glr` 把它印出来，`omni run` 把它跑掉。
+;; 所以这门语言的「前端」就是这一个文件，而它走的是所有执行器（js / c / interp /
+;; interp --mir / llvm）—— 那些执行器一个字都不知道 mini 存在。
+;;
+;; 语法本身刻意平淡：C 风格的花括号、显式类型、只有标量。有意思的地方全在映射上。
+;; `$*k` 是摊开列表（driver.js 的 applyTemplate）：语句序列、形参表、实参表都靠它攒平。
+(grammar mini
+  (tokens ID INT REAL STR UMINUS)
+  (prec left "||")
+  (prec left "&&")
+  (prec nonassoc "==" "!=")
+  (prec nonassoc "<" "<=" ">" ">=")
+  (prec left "+" "-")
+  (prec left "*" "/" "%")
+  (prec right UMINUS "!")
+  (start Program)
+
+  (lex
+    (skip space)
+    (comment "//" (* (not "\n")))
+    (block-comment "/*" "*/")
+    (token REAL (+ digit) "." (* digit))
+    (token INT (+ digit))
+    (token ID (or alpha "_") (* (or alnum "_")))
+    (string STR "\"")
+    (keyword ID "fn" "main" "let" "if" "else" "while" "return" "print"
+      "int" "real" "bool" "string" "void" "true" "false")
+    (op "==" "!=" "<=" ">=" "&&" "||" "+" "-" "*" "/" "%" "<" ">" "!" "="
+      "(" ")" "{" "}" "," ";"))
+
+  ;; ---- 顶层：一串声明，摊成 (module ...)
+  (rule Program
+    (-> (Decls) (module $*1)))
+
+  (rule Decls
+    (-> () ())
+    (-> (Decls Decl) ($*1 $2)))
+
+  (rule Decl
+    (-> ("fn" ID "(" Params ")" Type Block) (fn $2 $4 $6 $*7))
+    (-> ("main" Block) (main $*2)))
+
+  (rule Params
+    (-> () ())
+    (-> (ParamList) $1))
+
+  (rule ParamList
+    (-> (Param) ($1))
+    (-> (ParamList "," Param) ($*1 $3)))
+
+  ;; 声明里写 `int a`，核心方言要 `(a int)` —— 顺序在模板里换过来就行
+  (rule Param
+    (-> (Type ID) ($2 $1)))
+
+  (rule Type
+    (-> ("int") $1)
+    (-> ("real") $1)
+    (-> ("bool") $1)
+    (-> ("string") $1)
+    (-> ("void") $1))
+
+  ;; ---- 语句。Block 出的是**一条裸列表**，用到语句位置时再包成 (do ...)
+  (rule Block
+    (-> ("{" Stmts "}") $2))
+
+  (rule Stmts
+    (-> () ())
+    (-> (Stmts Stmt) ($*1 $2)))
+
+  (rule Stmt
+    (-> ("let" ID Type "=" E ";") (let $2 $3 $5))
+    (-> (ID "=" E ";") (set $1 $3))
+    (-> ("if" "(" E ")" Block) (if $3 (do $*5)))
+    (-> ("if" "(" E ")" Block "else" Block) (if $3 (do $*5) (do $*7)))
+    (-> ("while" "(" E ")" Block) (while $3 (do $*5)))
+    (-> ("return" ";") (ret))
+    (-> ("return" E ";") (ret $2))
+    (-> ("print" E ";") (print $2))
+    (-> (E ";") (expr $1))
+    (-> (Block) (do $*1)))
+
+  ;; ---- 表达式。算符写成字符串传给 (bin ...)，所以这里一行一条、没有 switch
+  (rule E
+    (-> (E "+" E) (bin "+" $1 $3))
+    (-> (E "-" E) (bin "-" $1 $3))
+    (-> (E "*" E) (bin "*" $1 $3))
+    (-> (E "/" E) (bin "/" $1 $3))
+    (-> (E "%" E) (bin "%" $1 $3))
+    (-> (E "==" E) (bin "==" $1 $3))
+    (-> (E "!=" E) (bin "!=" $1 $3))
+    (-> (E "<" E) (bin "<" $1 $3))
+    (-> (E "<=" E) (bin "<=" $1 $3))
+    (-> (E ">" E) (bin ">" $1 $3))
+    (-> (E ">=" E) (bin ">=" $1 $3))
+    (-> (E "&&" E) (bin "&&" $1 $3))
+    (-> (E "||" E) (bin "||" $1 $3))
+    (-> ("-" E) (prec UMINUS) (un "-" $2))
+    (-> ("!" E) (un "!" $2))
+    (-> ("(" E ")") $2)
+    (-> (ID "(" Args ")") (call $1 $*3))
+    (-> (INT) (int $1))
+    (-> (REAL) (real $1))
+    (-> (STR) (str $1))
+    (-> ("true") (bool true))
+    (-> ("false") (bool false))
+    (-> (ID) (var $1)))
+
+  (rule Args
+    (-> () ())
+    (-> (ArgList) $1))
+
+  (rule ArgList
+    (-> (E) ($1))
+    (-> (ArgList "," E) ($*1 $3))))
