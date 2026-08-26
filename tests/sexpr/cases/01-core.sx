@@ -42,4 +42,9 @@
     (print (call scale (real 1.5) (real 4.0)))
     (print (bin "&&" (bin ">" (call sum_to (int 3)) (int 5)) (un "!" (bool false))))
     (print (bin "+" (str "core") (str " dialect")))
-    (print (call oddsum (int 100)))))
+    (print (call oddsum (int 100)))
+    ;; int <-> real 的显式转换。两个方向都要有用例：截断是**朝零**的（-3.7 -> -3），
+    ;; 这一条在五条腿上都得一样，而它正是那种"错了也不报错"的地方。
+    (print (bin "/" (toreal (int 1)) (toreal (int 3))))
+    (print (toint (real 3.7)))
+    (print (toint (real -3.7)))))

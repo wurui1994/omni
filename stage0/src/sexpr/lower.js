@@ -23,6 +23,7 @@
  *         | (ret [E]) | (print E) | (expr E)
  *         | (bset E E E) | (dispatch NAME E E...)
  *   E     = (int TEXT) | (real TEXT) | (bool TEXT) | (str "…") | (tostr E)
+ *         | (toreal E) | (toint E)
  *         | (var NAME) | (bin "OP" E E) | (un "OP" E) | (call NAME E...)
  *         | (splat TYPE E) | (vlit TYPE E...) | (lane E N) | (hsum E)
  *         | (bnew TYPE E) | (bget E E) | (blen E) | (gid)
@@ -437,6 +438,20 @@ class CoreLowerer {
         return this.err(n, `(tostr E) 只接受 int / real / bool，这里是 ${coreTypeText(v.type)}`);
       }
       return { kind: 'Builtin', name: 'to_string', args: [v], type: STRING, argType: v.type };
+    }
+    // `(toreal E)` / `(toint E)`：int <-> real 的**显式**转换。同一条纪律：类型不推导、
+    // 不插隐式转换，所以两个方向都得写出来。OIR 侧两个都是现成的（Cast int->real、
+    // trunc real->int），方言这边原先没开口 —— 而 asy 的 `1/3` 是实数除法、`(int) 3.7`
+    // 是截断，没有这两条就一句都降不下来。
+    if (h === 'toreal' || h === 'toint') {
+      const v = this.expr(n.items[1]);
+      if (v === null) return null;
+      const want = h === 'toreal' ? 'int' : 'real';
+      if (v.type.k !== want) {
+        return this.err(n, `(${h} E) 的参数要是 ${want}，这里是 ${coreTypeText(v.type)}`);
+      }
+      if (h === 'toreal') return { kind: 'Cast', type: REAL, from: INT, expr: v };
+      return { kind: 'Builtin', name: 'trunc', args: [v], type: INT, argType: REAL };
     }
     if (h === 'var') {
       const nm = isAtom(n.items[1]) ? n.items[1].value : null;
