@@ -54,11 +54,14 @@ export const T_STR = 4;   // Omni string：UTF-8 字节序列（ADR-0005）
 export const T_DYN = 5;   // omni_dyn：16 字节聚合，MIR 里不是特例
 export const T_PTR = 6;   // ptr(T, addrspace)：addrspace 在 aux 的高 4 位
 export const T_AGG = 7;   // struct/class/enum/容器/函数值：身份在 aux
+export const T_BUF = 8;   // 缓冲：{长度, 指针}（ADR-0014 门槛 7）。元素类型**不在这个码里** ——
+                          // 指针在 LLVM 里早就是不透明的，元素只在 BGET/BSET 的 `t` 上出现，
+                          // 于是「一个缓冲」这件事一个码就够，不必按元素分裂成两个码。
 export const T_KIND_BITS = 5;
 export const T_KIND_MASK = 31;
 export const T_KIND_SPAN = 32;   // = 2^T_KIND_BITS。位运算不可用，见 mkType
 
-export const TYPE_NAMES = ['void', 'i64', 'f64', 'bool', 'str', 'dyn', 'ptr', 'agg'];
+export const TYPE_NAMES = ['void', 'i64', 'f64', 'bool', 'str', 'dyn', 'ptr', 'agg', 'buf'];
 
 /**
  * `t` 字段：种类 + 向量宽度（1 = 标量）。宽度必须是 2 的幂。
@@ -188,6 +191,13 @@ const OPS = [
   ['VSPLAT', 'r', '-', '-'],    // t = 向量类型，a = 标量（铺满所有道）
   ['VINS', 'r', 'r', 'n'],      // a = 向量，b = 标量，aux = 第几道
   ['VEXT', 'r', '-', 'n'],      // a = 向量，aux = 第几道；t = **元素**类型（= 结果类型）
+
+  // ---- 缓冲（ADR-0014 门槛 7 第一阶段）。`{长度, 指针}`，引用语义。
+  // 越界在 CPU 那几条腿上是运行期错误；GPU 上约定 kernel 自己用 BLEN 守门。
+  ['BNEW', 'r', '-', 'n'],      // a = 长度，t = T_BUF，aux = 元素类型码（要按它算步长与零值）
+  ['BLEN', 'r', '-', '-'],      // a = 缓冲，t = T_I64
+  ['BGET', 'r', 'r', '-'],      // a = 缓冲，b = 下标；t = 元素类型（= 结果类型）
+  ['BSET', 'r', 'p', '-'],      // a = 缓冲，池 = [下标, 值]；t = 元素类型
 ];
 
 /** opcode 常量：`OP.ADD` 等。加 op 只改 OPS 一行。 */

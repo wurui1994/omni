@@ -25,7 +25,7 @@ import { OmniError } from '../source/diag.js';
 import { stderr, wrapFn, callFnValue } from '../host/native.js';
 import {
   applyBuiltin, zeroOf, newInstance, flushOut, failRt, jsCallFn,
-  InterpFail, InterpUncaught, binOp, cmpOp, vecBinOp, listGet, listSet, dictGet, dynTag, W,
+  InterpFail, InterpUncaught, binOp, cmpOp, vecBinOp, bufNew, bufGet, bufSet, listGet, listSet, dictGet, dynTag, W,
 } from '../interp/builtin.js';
 import { JS_ALL } from '../hir/js_abi.js';
 import { lowerToMir } from './from_oir.js';
@@ -346,6 +346,27 @@ class MirInterp {
       case OP.VEXT: {
         const v = rd(f.a[i]);
         return (F) => { F.v[i] = v(F)[x]; return next; };
+      }
+      // 缓冲四条。走的是 interp/builtin.js 里那一份（OIR 解释器用的也是它）：
+      // 越界的消息文本因此不可能在两个解释器之间分叉。
+      case OP.BNEW: {
+        const c = rd(f.a[i]);
+        const kind = kindOf(x);
+        return (F) => { F.v[i] = bufNew(kind, c(F)); return next; };
+      }
+      case OP.BLEN: {
+        const b = rd(f.a[i]);
+        return (F) => { F.v[i] = BigInt(b(F).length); return next; };
+      }
+      case OP.BGET: {
+        const b = rd(f.a[i]);
+        const k = rd(f.b[i]);
+        return (F) => { F.v[i] = bufGet(b(F), k(F)); return next; };
+      }
+      case OP.BSET: {
+        const b = rd(f.a[i]);
+        const args = rdArgs(f.b[i]);
+        return (F) => { F.v[i] = bufSet(b(F), args[0](F), args[1](F)); return next; };
       }
       default:
         return this.step3(f, i, rd, rdArgs, readAll, I);

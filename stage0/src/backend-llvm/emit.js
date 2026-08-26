@@ -33,7 +33,7 @@ import { OmniError } from '../source/diag.js';
 import { utf8Bytes } from '../host/utf8.js';
 import {
   OP, OP_NAMES, REF_NONE, REF_BIAS, isConstRef, typeText, typeKind, typeLanes,
-  T_VOID, T_I64, T_F64, T_BOOL, T_STR, CVT_I2F, CVT_F2I,
+  T_VOID, T_I64, T_F64, T_BOOL, T_STR, T_BUF, CVT_I2F, CVT_F2I,
 } from '../mir/ir.js';
 
 /**
@@ -43,6 +43,9 @@ import {
  */
 const LL_TYPES = new Map([
   [T_VOID, 'void'], [T_I64, 'i64'], [T_F64, 'double'], [T_BOOL, 'i1'], [T_STR, '[2 x i64]'],
+  // 缓冲：`{长度, 指针}`。这一个不是量出来的 ABI，是**我们自己定的** —— 运行时里没有
+  // 任何函数收发缓冲（print 不接受缓冲），所以这条腿只要自洽就够，和 [2 x i64] 那条不同。
+  [T_BUF, '{ i64, ptr }'],
 ]);
 
 /**
@@ -90,6 +93,8 @@ class LlvmEmitter {
     this.strs = new Map();
     this.needStrCmp = false;
     this.needStrCat = false;
+    // 用到的缓冲元素类型（类型码 -> true）。每种要发一组 new/get/set 的私有函数。
+    this.bufElems = new Map();
   }
 
   line(s) { this.out.push(s); }
@@ -210,6 +215,21 @@ class LlvmEmitter {
     if (this.needStrCat) {
       this.line('declare [2 x i64] @omni_str_cat([2 x i64], [2 x i64])');
       this.line('');
+    }
+    // 缓冲：分配器的快路径 + 每种元素类型的 new/get/set。arena 的两个指针是真符号，
+    // 所以这条腿分配到的内存和 C 那条腿在同一个池里（见 ALLOC_HELPER 的注释）。
+    if (this.bufElems.size > 0) {
+      this.line('declare ptr @omni_alloc_slow(i64)');
+      this.line('declare void @omni_errorf(ptr, ...)');
+      this.line('@omni_arena_ptr = external global ptr');
+      this.line('@omni_arena_end = external global ptr');
+      this.line(llCStr('@.omni_boob', 'buffer index out of range: %lld (length %lld)'));
+      this.line(llCStr('@.omni_bneg', 'buffer length cannot be negative: %lld'));
+      this.line('');
+      this.line(ALLOC_HELPER);
+      for (const t of this.bufElems.keys()) {
+        this.line(t === T_F64 ? bufHelpers('double', 8, '0.0') : bufHelpers('i64', 8, '0'));
+      }
     }
     // 字符串字面量的字节。放在最后是因为它们是函数体发到一半才登记的；
     // 顺序按登记顺序，所以同一份输入两次发出来逐字节相同（快照轴要这个）。
@@ -345,6 +365,11 @@ class LlvmEmitter {
       this.line(`  store ${st} ${this.val(f.a[i])}, ptr %s${f.aux[i]}`);
       return;
     }
+    // 缓冲四条：三条走私有函数（越界检查带分支，展开会搅乱区域记账），BLEN 就地取字段
+    if (op === OP.BNEW || op === OP.BLEN || op === OP.BGET || op === OP.BSET) {
+      this.bufInsn(f, i, op, dst, t);
+      return;
+    }
     // 向量三条 + 向量上的四则运算。分流要在标量表之前：`add <4 x i64>` 是合法的，
     // 但 `/`（整数）和 `& 63` 那些辅助函数是标量签名，落进去会发出对不上的 IR。
     // 条件里刻意**不是**"只要 t 是向量"：返回向量的 CALL、装载向量的 LOAD 的 `t` 也是向量，
@@ -456,6 +481,43 @@ class LlvmEmitter {
     this.line(`  ${c} = call i32 @omni_ll_strcmp([2 x i64] ${this.val(f.a[i])}, `
       + `[2 x i64] ${this.val(f.b[i])})`);
     this.line(`  ${dst} = icmp ${ICMP.get(op)} i32 ${c}, 0`);
+  }
+
+  /**
+   * 缓冲四条（门槛 7 第一阶段）。`{i64, ptr}` 里第 0 个字段是长度，第 1 个是数据。
+   * new/get/set 都调私有函数（见 bufHelpers）：越界检查带分支，而调用点在结构化控制流的
+   * 中间，就地展开会把 live/regions 那套记账搅乱。BLEN 没有分支，所以就地取字段。
+   */
+  bufInsn(f, i, op, dst, t) {
+    if (op === OP.BLEN) {
+      this.line(`  ${dst} = extractvalue { i64, ptr } ${this.val(f.a[i])}, 0`);
+      return;
+    }
+    // BNEW 的元素类型在 aux 上（结果类型是缓冲本身）；get/set 的元素类型就是 `t`
+    const el = op === OP.BNEW ? f.aux[i] : t;
+    const s = this.noteBufElem(el);
+    if (op === OP.BNEW) {
+      this.line(`  ${dst} = call { i64, ptr } @omni_ll_bnew_${s}(i64 ${this.val(f.a[i])})`);
+      return;
+    }
+    const et = this.ty(el, 'buffer element');
+    if (op === OP.BGET) {
+      this.line(`  ${dst} = call ${et} @omni_ll_bget_${s}({ i64, ptr } ${this.val(f.a[i])}, `
+        + `i64 ${this.val(f.b[i])})`);
+      return;
+    }
+    const args = f.argsOf(f.b[i]);
+    this.line(`  ${dst} = call ${et} @omni_ll_bset_${s}({ i64, ptr } ${this.val(f.a[i])}, `
+      + `i64 ${this.val(args[0])}, ${et} ${this.val(args[1])})`);
+  }
+
+  /** 记下用到的元素类型，返回助手名字的后缀。表外的报错 —— 缓冲只装 int/real。 */
+  noteBufElem(t) {
+    if (t !== T_I64 && t !== T_F64) {
+      throw new OmniError(`${NOPE} ${typeText(t)} 的缓冲（函数 ${this.f.name}）`);
+    }
+    this.bufElems.set(t, true);
+    return t === T_F64 ? 'f64' : 'i64';
   }
 
   /**
@@ -652,6 +714,118 @@ bylen:
   ret i32 %s
 }
 `;
+
+/** 一个 C 字符串常量（只用于 ASCII 的格式串）。长度算出来，不手数 —— 数错就 IR 不合法。 */
+function llCStr(name, text) {
+  return `${name} = private unnamed_addr constant [${text.length + 1} x i8] c"${text}\\00"`;
+}
+
+/* arena 的 bump 快路径（omni.h:98..103 的 omni_alloc，又一条 static inline，call 不到）。
+ * 慢路径 omni_alloc_slow 与两个 arena 指针都是真符号 —— 所以这里重建的是那六行，
+ * 不是另换一个分配器：换一个的话缓冲的地址来自别的池，同一个程序里两套内存管理。 */
+const ALLOC_HELPER = `define private ptr @omni_ll_alloc(i64 %n) {
+entry:
+  %cur = load ptr, ptr @omni_arena_ptr
+  %ci = ptrtoint ptr %cur to i64
+  %a1 = add i64 %ci, 15
+  %al = and i64 %a1, -16
+  %end = load ptr, ptr @omni_arena_end
+  %ei = ptrtoint ptr %end to i64
+  %over = icmp ugt i64 %al, %ei
+  br i1 %over, label %slow, label %chk
+chk:
+  %room = sub i64 %ei, %al
+  %big = icmp ugt i64 %n, %room
+  br i1 %big, label %slow, label %fast
+fast:
+  %np = add i64 %al, %n
+  %p = inttoptr i64 %al to ptr
+  %newp = inttoptr i64 %np to ptr
+  store ptr %newp, ptr @omni_arena_ptr
+  ret ptr %p
+slow:
+  %r = call ptr @omni_alloc_slow(i64 %n)
+  ret ptr %r
+}
+`;
+
+/**
+ * 一种元素类型的缓冲三条：new / get / set。发成私有函数而不是在调用点展开 ——
+ * 越界检查带分支，而调用点在结构化控制流里，展开会把 this.live/regions 那套记账搅乱。
+ *
+ * 越界与负长度的消息走 `omni_errorf`（真符号，变参）：格式串与实参和 C 那条腿**逐字相同**
+ * （backend-c 的 bufLines / omni_container.h:50），所以两条腿的 stderr 是同一串字节。
+ */
+function bufHelpers(elem, sizeOf, zero) {
+  const s = elem === 'double' ? 'f64' : 'i64';
+  return `define private { i64, ptr } @omni_ll_bnew_${s}(i64 %n) {
+entry:
+  %neg = icmp slt i64 %n, 0
+  br i1 %neg, label %err, label %chk
+err:
+  call void (ptr, ...) @omni_errorf(ptr @.omni_bneg, i64 %n)
+  unreachable
+chk:
+  %z = icmp eq i64 %n, 0
+  br i1 %z, label %empty, label %alloc
+empty:
+  %e0 = insertvalue { i64, ptr } undef, i64 0, 0
+  %e1 = insertvalue { i64, ptr } %e0, ptr null, 1
+  ret { i64, ptr } %e1
+alloc:
+  %bytes = mul i64 %n, ${sizeOf}
+  %p = call ptr @omni_ll_alloc(i64 %bytes)
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %alloc ], [ %i1, %body ]
+  %done = icmp sge i64 %i, %n
+  br i1 %done, label %fin, label %body
+body:
+  %sl = getelementptr ${elem}, ptr %p, i64 %i
+  store ${elem} ${zero}, ptr %sl
+  %i1 = add i64 %i, 1
+  br label %loop
+fin:
+  %b0 = insertvalue { i64, ptr } undef, i64 %n, 0
+  %b1 = insertvalue { i64, ptr } %b0, ptr %p, 1
+  ret { i64, ptr } %b1
+}
+
+define private ${elem} @omni_ll_bget_${s}({ i64, ptr } %b, i64 %i) {
+entry:
+  %n = extractvalue { i64, ptr } %b, 0
+  %p = extractvalue { i64, ptr } %b, 1
+  %lo = icmp slt i64 %i, 0
+  %hi = icmp sge i64 %i, %n
+  %oob = or i1 %lo, %hi
+  br i1 %oob, label %err, label %ok
+err:
+  call void (ptr, ...) @omni_errorf(ptr @.omni_boob, i64 %i, i64 %n)
+  unreachable
+ok:
+  %sl = getelementptr ${elem}, ptr %p, i64 %i
+  %v = load ${elem}, ptr %sl
+  ret ${elem} %v
+}
+
+define private ${elem} @omni_ll_bset_${s}({ i64, ptr } %b, i64 %i, ${elem} %v) {
+entry:
+  %n = extractvalue { i64, ptr } %b, 0
+  %p = extractvalue { i64, ptr } %b, 1
+  %lo = icmp slt i64 %i, 0
+  %hi = icmp sge i64 %i, %n
+  %oob = or i1 %lo, %hi
+  br i1 %oob, label %err, label %ok
+err:
+  call void (ptr, ...) @omni_errorf(ptr @.omni_boob, i64 %i, i64 %n)
+  unreachable
+ok:
+  %sl = getelementptr ${elem}, ptr %p, i64 %i
+  store ${elem} %v, ptr %sl
+  ret ${elem} %v
+}
+`;
+}
 
 /** MIR 模块 -> LLVM IR 文本。 */
 export function emitLlvm(mir) {

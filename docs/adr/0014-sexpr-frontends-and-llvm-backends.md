@@ -555,6 +555,35 @@ GLOAD 的全局下标、AGGLIT 的类型下标，还有落在 `REF_BIAS` 以下�
 （封闭 ABI 的位运算只对 bigint 成立），而算错宽度的症状是"原生编译器发的 IR 里
 `<4 x double>` 变成 `<1 x double>`"，node 上永远看不出来。
 
+### 已落地（缓冲 + kernel/dispatch：门槛 7 的 CPU 那一半）
+
+门槛 7 要的是「`kernel` 的 SPIR-V 输出与**同一份 MIR 在 CPU 上**的结果一致」。所以这一步
+先把「CPU 上的那个答案」做出来，而且是在六个执行器上都做出来 —— 否则"一致"没有参照物。
+
+- **缓冲是新类型 `buf<T>`，不是 `list<T>`。** list 带长度/容量/增删和一整套按值语义的
+  拷贝规则；把它映到 GPU 等于把 Omni 的容器 ABI 搬进 SPIR-V。`buf<int|real>` 只有
+  `bnew` / `bget` / `bset` / `blen`：一段连续的元素 + 一个运行期长度，引用语义，
+  不能装箱进 dynamic。这个形状和 StorageBuffer 里的 runtime array 是对应的。
+- **kernel 在 OIR 里就是普通 void 函数，隐含第一个形参是 gid**；`(gid)` 读它，
+  `(dispatch k 网格 实参...)` 在**降级期**就展开成「临时量 + while + 普通调用」。
+  于是 CPU 那五条腿一行都不用改，而 `kernel: true` 只是给 SPIR-V 那条腿挑函数用的标注。
+  循环是"没有 GPU 时怎么执行"的定义，不是语义的一部分。
+- **越界在 CPU 上是运行期错误，消息与 list 那句逐字对齐**（`omni_container.h:50`）。
+  GPU 上没有这条路径 —— 约定是 kernel 自己用 `blen` 守门（`03-simd` 之外
+  `04-buffers.sx` 的网格刻意 6 > 4 就是在测这件事）。这是刻意的不对称：越界要在
+  CPU 上暴露，而不是在设备上变成随机内存。
+- MIR 只加一个类型码 `T_BUF` 与四条 op（`BNEW`/`BLEN`/`BGET`/`BSET`）。`T_BUF` 里
+  **不带元素类型**：LLVM 的指针早就是不透明的，元素只在 `BNEW` 的 aux 与
+  `BGET`/`BSET` 的 `t` 上出现，所以「一个缓冲」一个码就够。
+- LLVM 那条腿把 `omni_alloc` 的 bump 快路径（omni.h:98..103，又一条 `static inline`）
+  在 IR 里重建，慢路径调真符号 `omni_alloc_slow`、arena 的两个指针是 extern 全局 ——
+  **不换分配器**：换一个的话缓冲的地址来自另一个池，同一个程序里就有两套内存管理。
+  越界与负长度走变参的 `omni_errorf`，格式串与实参和 C 那条腿逐字相同，于是 stderr 也一致。
+
+`tests/sexpr/cases/04-buffers.sx` 六条腿逐字节相同。还差的正是门槛 7 的另一半：
+把带 `kernel: true` 的那些 MIR 函数发成 SPIR-V，用 `spirv-val` 过一遍，有设备时再跑一遍
+比对这份输出。
+
 ## 决策 7：闭包编译解释器保留，身份是 oracle 与 REPL
 
 - 装载期把每条 MIR 指令编成一个函数值（ADR-0013 决策 3 的闭包记录），执行是

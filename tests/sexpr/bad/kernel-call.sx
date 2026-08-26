@@ -1,0 +1,8 @@
+;; kernel 不是函数：启动方式只有 dispatch，(call ...) 要说清这件事
+(module
+  (kernel k ((v (buf int)))
+    (bset (var v) (gid) (int 1)))
+
+  (main
+    (let b (buf int) (bnew (buf int) (int 1)))
+    (expr (call k (var b)))))

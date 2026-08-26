@@ -310,6 +310,11 @@ class JsEmitter {
       case 'VecLit': return `[${e.lanes.map((x) => this.expr(x)).join(', ')}]`;
       case 'VecLane': return `${this.expr(e.vec)}[${e.lane}]`;
       case 'VecHsum': return `$vhsum(${this.expr(e.vec)}, ${this.laneOp('+', e.type)})`;
+      // 缓冲四条（门槛 7 第一阶段）：表示是数组，引用语义 —— 所以 rvalue 不拷它
+      case 'BufNew': return `$bnew(${this.expr(e.count)}, ${e.type.elem.k === 'int'})`;
+      case 'BufLen': return `BigInt(${this.expr(e.buf)}.length)`;
+      case 'BufGet': return `$bget(${this.expr(e.buf)}, ${this.expr(e.index)})`;
+      case 'BufSet': return `$bset(${this.expr(e.buf)}, ${this.expr(e.index)}, ${this.expr(e.value)})`;
       case 'Field': {
         const obj = this.expr(e.object);
         // class 是引用类型，可能为 null；两个后端都显式检查，错误消息一致

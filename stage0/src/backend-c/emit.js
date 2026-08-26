@@ -48,6 +48,9 @@ class CEmitter {
     // 没有装箱桥），一个形状要发的就是几个 static inline，边遇边记最省事。
     this.vecs = new Map();
     this.vecAt = -1;
+    // 用到的缓冲形状（门槛 7 第一阶段）。和向量共用那个回填位：两者都是"按 (元素) 生成
+    // 一小段定义"，分两个位置只会多一处要对齐的顺序。
+    this.bufs = new Map();
   }
 
   line(s = '') {
@@ -77,7 +80,38 @@ class CEmitter {
     if (t !== undefined && t !== null && t.k === 'vec' && !this.vecs.has(typeKey(t))) {
       this.vecs.set(typeKey(t), t);
     }
+    if (t !== undefined && t !== null && t.k === 'buf' && !this.bufs.has(typeKey(t))) {
+      this.bufs.set(typeKey(t), t);
+    }
     return t;
+  }
+
+  /**
+   * 每个用到的缓冲形状：`{长度, 指针}` 按值传，加上 new / get / set 三个 static inline。
+   *
+   * 长度跟着值走（不是"调用方另记一个 n"）：`blen` 在六条腿上都要 O(1) 答得出来，
+   * 而这个形状和 GPU 上 StorageBuffer 里的 runtime array + 一个长度 uniform 是对应的。
+   * 越界的消息与 list 那句逐字对齐（omni_container.h:50）—— 那句已经在三份实现里
+   * 对过一次，照抄比再对一次便宜。
+   */
+  bufLines() {
+    const out = [];
+    for (const t of this.bufs.values()) {
+      const n = cTypeName(t);
+      const el = cTypeName(t.elem);
+      const zero = t.elem.k === 'int' ? 'INT64_C(0)' : '0.0';
+      const oob = `omni_errorf("buffer index out of range: %lld (length %lld)", (long long)i, (long long)b.n)`;
+      out.push(`typedef struct { int64_t n; ${el} *p; } ${n};`);
+      out.push(`static inline ${n} ${n}_new(int64_t n) {`);
+      out.push(`  if (n < 0) omni_errorf("buffer length cannot be negative: %lld", (long long)n);`);
+      out.push(`  ${n} b; b.n = n; b.p = n == 0 ? NULL : (${el} *)omni_alloc((size_t)n * sizeof(${el}));`);
+      out.push(`  for (int64_t i = 0; i < n; i++) b.p[i] = ${zero};`);
+      out.push('  return b;');
+      out.push('}');
+      out.push(`static inline ${el} ${n}_get(${n} b, int64_t i) { if (i < 0 || i >= b.n) ${oob}; return b.p[i]; }`);
+      out.push(`static inline ${el} ${n}_set(${n} b, int64_t i, ${el} v) { if (i < 0 || i >= b.n) ${oob}; b.p[i] = v; return v; }`);
+    }
+    return out;
   }
 
   /**
@@ -204,7 +238,7 @@ class CEmitter {
     // 退出码走 omni_host_exit_code —— process.exitCode 是个可写的槽，不是返回值。
     this.line(`int main(int argc, char **argv) { omni_host_init(argc, argv); ${this.mod.entry}(); omni_js_check_uncaught(); fflush(stdout); return omni_host_exit_code(); }`);
     this.out[this.s16At] = this.s16PoolLines().join('\n');
-    this.out[this.vecAt] = this.vecLines().join('\n');
+    this.out[this.vecAt] = this.vecLines().concat(this.bufLines()).join('\n');
     return this.out.join('\n') + '\n';
   }
 
@@ -753,6 +787,20 @@ class CEmitter {
       case 'VecHsum':
         this.noteVec(e.vec.type);
         return `${cTypeName(e.vec.type)}_hsum(${this.expr(e.vec)})`;
+      // 缓冲四条（门槛 7 第一阶段）。结构体按值传，但里面的指针是共享的 —— 引用语义
+      // 因此不需要任何拷贝助手：传一份 {n, p} 的副本，指向的还是同一段存储。
+      case 'BufNew':
+        this.noteVec(e.type);
+        return `${cTypeName(e.type)}_new(${this.expr(e.count)})`;
+      case 'BufLen':
+        this.noteVec(e.buf.type);
+        return `(${this.expr(e.buf)}).n`;
+      case 'BufGet':
+        this.noteVec(e.buf.type);
+        return `${cTypeName(e.buf.type)}_get(${this.expr(e.buf)}, ${this.expr(e.index)})`;
+      case 'BufSet':
+        this.noteVec(e.buf.type);
+        return `${cTypeName(e.buf.type)}_set(${this.expr(e.buf)}, ${this.expr(e.index)}, ${this.expr(e.value)})`;
       case 'Field': {
         const obj = this.expr(e.object);
         // class 是引用，可能为 null：显式检查，避免"段错误 vs 异常"的跨后端分叉

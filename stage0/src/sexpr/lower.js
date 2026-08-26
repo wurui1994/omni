@@ -14,23 +14,27 @@
  *
  *   (module FORM...)
  *   FORM  = (fn NAME ((p TYPE)...) TYPE STMT...)   函数
+ *         | (kernel NAME ((p TYPE)...) STMT...)     GPU 核（隐含第一个形参是 gid）
  *         | (main STMT...)                          入口体
- *   TYPE  = int | real | bool | string | void | (vec int|real 2|4|8)
+ *   TYPE  = int | real | bool | string | void | (vec int|real 2|4|8) | (buf int|real)
  *   STMT  = (let NAME TYPE E) | (set NAME E) | (do STMT...)
  *         | (if E (do ...) [(do ...)]) | (while E (do ...))
  *         | (ret [E]) | (print E) | (expr E)
+ *         | (bset E E E) | (dispatch NAME E E...)
  *   E     = (int TEXT) | (real TEXT) | (bool TEXT) | (str "…")
  *         | (var NAME) | (bin "OP" E E) | (un "OP" E) | (call NAME E...)
  *         | (splat TYPE E) | (vlit TYPE E...) | (lane E N) | (hsum E)
+ *         | (bnew TYPE E) | (bget E E) | (blen E) | (gid)
  *
- * 向量那四条是 ADR-0014 门槛 6 的第一阶段，见 vecExpr 的注释。
+ * 向量那四条是 ADR-0014 门槛 6 的第一阶段，见 vecExpr 的注释；
+ * 缓冲与 kernel/dispatch 是门槛 7 的第一阶段，见 bufExpr 与 dispatch 的注释。
  *
  * 类型不推导，只**检查**：声明处写死，表达式自底向上定型，两边类型不一致就报错 ——
  * 不插隐式转换。理由与 ADR-0008 一致：这一层的职责是把树接进 OIR，
  * 而"什么能悄悄转成什么"是语言设计决定，不该由汇聚层替某门语言定。
  */
 
-import { INT, REAL, BOOL, STRING, VOID, vecType, zeroValue } from '../hir/types.js';
+import { INT, REAL, BOOL, STRING, VOID, vecType, bufType, zeroValue } from '../hir/types.js';
 import { readSexpr, isList, isAtom, isStr, head } from './read.js';
 
 const TYPES = new Map([['int', INT], ['real', REAL], ['bool', BOOL], ['string', STRING], ['void', VOID]]);
@@ -48,6 +52,12 @@ class CoreLowerer {
     this.diags = diags;
     this.funcs = new Map();   // 名字 -> {name, mangled, ret, params}
     this.scopes = [];         // 名字 -> OIR 类型
+    // kernel 与函数分开登记：kernel 只能被 (dispatch ...) 启动，(call ...) 要报错说清这件事。
+    // 它在 OIR 里就是一个普通函数，第一个形参是隐含的 gid —— 于是「同一份 MIR 在 CPU 上跑」
+    // 不需要任何新机制（门槛 7 要比的就是这个 CPU 结果），dispatch 只是一个循环。
+    this.kernels = new Map();
+    this.inKernel = false;
+    this.tmpNo = 0;           // dispatch 展开出来的临时量编号，保证名字唯一
   }
 
   err(node, msg) {
@@ -57,6 +67,14 @@ class CoreLowerer {
 
   /** 类型名 -> OIR 类型。写错就报错，不猜。 */
   ty(node, what) {
+    // `(buf int|real)`：一段连续的元素 + 一个运行期长度（门槛 7 第一阶段）
+    if (isList(node) && head(node) === 'buf') {
+      const e = isAtom(node.items[1]) ? TYPES.get(node.items[1].value) : undefined;
+      if (e === undefined || (e !== INT && e !== REAL)) {
+        return this.err(node, `${what}：(buf 元素) 的元素只能是 int 或 real`);
+      }
+      return bufType(e);
+    }
     // `(vec int 4)`：元素只能是 int/real（bool/string 的向量没有意义，也没有硬件对应）
     if (isList(node) && head(node) === 'vec') {
       const e = isAtom(node.items[1]) ? TYPES.get(node.items[1].value) : undefined;
@@ -68,7 +86,7 @@ class CoreLowerer {
       return vecType(e, n);
     }
     if (!isAtom(node) || !TYPES.has(node.value)) {
-      return this.err(node, `${what} 的类型只能是 int / real / bool / string / void / (vec T N)`);
+      return this.err(node, `${what} 的类型只能是 int / real / bool / string / void / (vec T N) / (buf T)`);
     }
     return TYPES.get(node.value);
   }
@@ -93,10 +111,21 @@ class CoreLowerer {
     const forms = top.items.slice(1);
     // 两遍：先收签名，函数才能互相调用（也才能递归）
     for (const f of forms) {
-      if (head(f) !== 'fn') continue;
+      const h = head(f);
+      if (h !== 'fn' && h !== 'kernel') continue;
       const nm = isAtom(f.items[1]) ? f.items[1].value : null;
-      if (nm === null) { this.err(f, '(fn NAME ...) 缺函数名'); continue; }
-      if (this.funcs.has(nm)) { this.err(f, `函数 '${nm}' 重复定义`); continue; }
+      if (nm === null) { this.err(f, `(${h} NAME ...) 缺名字`); continue; }
+      if (this.funcs.has(nm) || this.kernels.has(nm)) { this.err(f, `'${nm}' 重复定义`); continue; }
+      if (h === 'kernel') {
+        const ps = this.params(f.items[2]);
+        if (ps === null) continue;
+        // 隐含的第一个形参就是 gid。名字带 `$` 是刻意的：方言里写不出这个标识符，
+        // 所以它不可能被用户的名字遮蔽，(gid) 是读它的唯一途径。
+        const all = [{ name: '$gid', type: INT }];
+        for (const p of ps) all.push(p);
+        this.kernels.set(nm, { name: nm, mangled: `k_${nm}`, ret: VOID, params: all });
+        continue;
+      }
       const ps = this.params(f.items[2]);
       const ret = this.ty(f.items[3], `函数 ${nm} 的返回值`);
       if (ps === null || ret === null) continue;
@@ -140,6 +169,21 @@ class CoreLowerer {
         funcs.push({ name: d.name, mangled: d.mangled, ret: d.ret, params: d.params, body: { kind: 'Block', stmts: body } });
         continue;
       }
+      if (h === 'kernel') {
+        const nm = isAtom(f.items[1]) ? f.items[1].value : null;
+        const d = nm === null ? undefined : this.kernels.get(nm);
+        if (d === undefined) continue;
+        this.scopes = [new Map()];
+        for (const p of d.params) this.scopes[0].set(p.name, p.type);
+        this.inKernel = true;
+        const body = this.block(f.items.slice(3), VOID);
+        this.inKernel = false;
+        body.push({ kind: 'Return', value: null });
+        // kernel 在 OIR 里就是一个普通 void 函数。`kernel: true` 是给后端的**标注**，
+        // 不改语义：SPIR-V 那条腿按它挑要发的函数，其余五条腿完全不看它。
+        funcs.push({ name: d.name, mangled: d.mangled, ret: VOID, params: d.params, kernel: true, body: { kind: 'Block', stmts: body } });
+        continue;
+      }
       if (h === 'main') {
         if (sawMain) { this.err(f, '(main ...) 只能有一个'); continue; }
         sawMain = true;
@@ -147,7 +191,7 @@ class CoreLowerer {
         for (const s of this.block(f.items.slice(1), VOID)) mainStmts.push(s);
         continue;
       }
-      this.err(f, `(module ...) 里只能是 (fn ...) 或 (main ...)，见到 '${h}'`);
+      this.err(f, `(module ...) 里只能是 (fn ...) / (kernel ...) / (main ...)，见到 '${h}'`);
     }
     if (!sawMain) this.err(null, '缺入口：加一个 (main ...)');
     mainStmts.push({ kind: 'Return', value: null });
@@ -240,6 +284,7 @@ class CoreLowerer {
       // 向量没有 print：运行时没有对应的输出函数，而"随便定一个格式"意味着六个执行器
       // 各自实现一遍格式化 —— 那是最容易分叉的地方。要看向量就 (lane v k) 逐道印。
       if (v.type.k === 'vec') return this.err(n, 'print 不接受向量：用 (lane v N) 逐道印');
+      if (v.type.k === 'buf') return this.err(n, 'print 不接受缓冲：用 (bget b i) 逐个印');
       return { kind: 'ExprStmt', expr: { kind: 'Builtin', name: 'print', args: [v], type: VOID, argType: v.type } };
     }
     if (h === 'expr') {
@@ -247,7 +292,101 @@ class CoreLowerer {
       if (v === null) return null;
       return { kind: 'ExprStmt', expr: v };
     }
+    if (h === 'bset') return this.bufSet(n);
+    if (h === 'dispatch') return this.dispatch(n);
     return this.err(n, `不认识的语句 '${h}'`);
+  }
+
+  /** `(bset 缓冲 下标 值)`。写回是语句而不是表达式：它的"值"没人用，留着只会多一条路。 */
+  bufSet(n) {
+    const b = this.expr(n.items[1]);
+    const i = this.expr(n.items[2]);
+    const v = this.expr(n.items[3]);
+    if (b === null || i === null || v === null) return null;
+    if (b.type.k !== 'buf') return this.err(n, `bset 的第一个实参要是缓冲，这里是 ${coreTypeText(b.type)}`);
+    if (i.type !== INT) return this.err(n, `bset 的下标要是 int，这里是 ${coreTypeText(i.type)}`);
+    if (!sameCoreType(v.type, b.type.elem)) {
+      return this.err(n, `这个缓冲装 ${b.type.elem.k}，写进去的是 ${coreTypeText(v.type)}`);
+    }
+    return { kind: 'ExprStmt', expr: { kind: 'BufSet', buf: b, index: i, value: v, type: b.type.elem } };
+  }
+
+  /**
+   * `(dispatch NAME 网格 实参...)`：把一个 kernel 在 `[0, 网格)` 上跑一遍。
+   *
+   * 在这里就展开成「临时量 + while 循环 + 普通调用」，不留一个 OIR 节点 ——
+   * 于是六个执行器一行都不用改，而 CPU 上的答案就是门槛 7 要比的那个答案。
+   * GPU 那条腿看的是 kernel 函数本身（`kernel: true` 标注）与这里的网格大小，
+   * 不是这个循环：循环是"没有 GPU 时怎么执行"的定义，不是语义的一部分。
+   *
+   * 实参先各绑一个临时量再进循环：`(dispatch k (blen b) (bget b 0))` 这种写法里
+   * 实参表达式只该求值一次。
+   */
+  dispatch(n) {
+    const nm = isAtom(n.items[1]) ? n.items[1].value : null;
+    if (nm === null) return this.err(n, '(dispatch NAME 网格 实参...)');
+    const d = this.kernels.get(nm);
+    if (d === undefined) {
+      return this.err(n, this.funcs.has(nm) ? `'${nm}' 是函数，不是 kernel` : `未声明的 kernel '${nm}'`);
+    }
+    const grid = this.expr(n.items[2]);
+    if (grid === null) return null;
+    if (grid.type !== INT) return this.err(n, `网格大小要是 int，这里是 ${coreTypeText(grid.type)}`);
+    const args = [];
+    for (const a of n.items.slice(3)) {
+      const v = this.expr(a);
+      if (v === null) return null;
+      args.push(v);
+    }
+    // 形参表里第一个是隐含的 gid，所以实参个数比形参个数少一个
+    if (args.length !== d.params.length - 1) {
+      return this.err(n, `kernel '${nm}' 要 ${d.params.length - 1} 个实参，给了 ${args.length} 个`);
+    }
+    let i = 0;
+    while (i < args.length) {
+      if (!sameCoreType(args[i].type, d.params[i + 1].type)) {
+        return this.err(n, `kernel '${nm}' 的第 ${i + 1} 个形参是 ${coreTypeText(d.params[i + 1].type)}，给的是 ${coreTypeText(args[i].type)}`);
+      }
+      i++;
+    }
+    const tag = this.tmpNo;
+    this.tmpNo++;
+    const nVar = `$n${tag}`;
+    const gVar = `$g${tag}`;
+    const stmts = [
+      { kind: 'Local', name: nVar, type: INT, init: grid },
+      { kind: 'Local', name: gVar, type: INT, init: { kind: 'Const', type: INT, value: 0n } },
+    ];
+    const callArgs = [{ kind: 'VarRef', name: gVar, type: INT }];
+    let k = 0;
+    while (k < args.length) {
+      const an = `$a${tag}_${k}`;
+      stmts.push({ kind: 'Local', name: an, type: args[k].type, init: args[k] });
+      callArgs.push({ kind: 'VarRef', name: an, type: args[k].type });
+      k++;
+    }
+    const gRef = { kind: 'VarRef', name: gVar, type: INT };
+    const step = {
+      kind: 'ExprStmt',
+      expr: {
+        kind: 'Assign',
+        target: gRef,
+        value: { kind: 'Bin', op: '+', opType: INT, left: gRef, right: { kind: 'Const', type: INT, value: 1n }, type: INT },
+        type: INT,
+      },
+    };
+    stmts.push({
+      kind: 'While',
+      cond: { kind: 'Cmp', op: '<', opType: INT, left: gRef, right: { kind: 'VarRef', name: nVar, type: INT }, type: BOOL },
+      body: {
+        kind: 'Block',
+        stmts: [
+          { kind: 'ExprStmt', expr: { kind: 'Call', func: d.mangled, name: d.name, args: callArgs, type: VOID } },
+          step,
+        ],
+      },
+    });
+    return { kind: 'Block', stmts: stmts };
   }
 
   /** 条件位置：必须是 bool，不做真值化 —— 那是各门语言自己的规则。 */
@@ -286,7 +425,11 @@ class CoreLowerer {
       const nm = isAtom(n.items[1]) ? n.items[1].value : null;
       if (nm === null) return this.err(n, '(call 名字 实参...)');
       const d = this.funcs.get(nm);
-      if (d === undefined) return this.err(n, `未声明的函数 '${nm}'`);
+      if (d === undefined) {
+        return this.err(n, this.kernels.has(nm)
+          ? `'${nm}' 是 kernel，要用 (dispatch ${nm} 网格 实参...) 启动`
+          : `未声明的函数 '${nm}'`);
+      }
       const args = [];
       for (const a of n.items.slice(2)) {
         const v = this.expr(a);
@@ -306,7 +449,43 @@ class CoreLowerer {
       return { kind: 'Call', func: d.mangled, name: d.name, args: args, type: d.ret };
     }
     if (h === 'splat' || h === 'vlit' || h === 'lane' || h === 'hsum') return this.vecExpr(n, h);
+    if (h === 'bnew' || h === 'bget' || h === 'blen') return this.bufExpr(n, h);
+    if (h === 'gid') {
+      if (!this.inKernel) return this.err(n, '(gid) 只在 kernel 里有意义');
+      return { kind: 'VarRef', name: '$gid', type: INT };
+    }
     return this.operator(n, h);
+  }
+
+  /**
+   * 缓冲的三条读侧（写侧是语句 `bset`）。
+   *
+   *   (bnew (buf T) N)   新建长度 N 的零缓冲
+   *   (bget b i)         读第 i 个
+   *   (blen b)           长度
+   *
+   * 越界是**运行期错误**，消息与 list 那套同一个形状（`buffer index out of range: i (length n)`）。
+   * GPU 上没有这条错误路径 —— 那边的约定是 kernel 自己用 `(blen b)` 守门，
+   * 越界属于程序的 bug；CPU 这五条腿会当场报出来，正是想要的：错误在 CPU 上暴露。
+   */
+  bufExpr(n, h) {
+    if (h === 'bnew') {
+      const t = this.ty(n.items[1], 'bnew 的类型');
+      if (t === null) return null;
+      if (t.k !== 'buf') return this.err(n, '(bnew TYPE N) 的 TYPE 要是 (buf T)');
+      const c = this.expr(n.items[2]);
+      if (c === null) return null;
+      if (c.type !== INT) return this.err(n, `bnew 的长度要是 int，这里是 ${coreTypeText(c.type)}`);
+      return { kind: 'BufNew', type: t, count: c };
+    }
+    const b = this.expr(n.items[1]);
+    if (b === null) return null;
+    if (b.type.k !== 'buf') return this.err(n, `${h} 的实参要是缓冲，这里是 ${coreTypeText(b.type)}`);
+    if (h === 'blen') return { kind: 'BufLen', buf: b, type: INT };
+    const i = this.expr(n.items[2]);
+    if (i === null) return null;
+    if (i.type !== INT) return this.err(n, `bget 的下标要是 int，这里是 ${coreTypeText(i.type)}`);
+    return { kind: 'BufGet', buf: b, index: i, type: b.type.elem };
   }
 
   /**
@@ -435,6 +614,7 @@ class CoreLowerer {
 function sameCoreType(a, b) {
   if (a.k !== b.k) return false;
   if (a.k === 'vec') return a.elem.k === b.elem.k && a.lanes === b.lanes;
+  if (a.k === 'buf') return a.elem.k === b.elem.k;
   return true;
 }
 
@@ -443,7 +623,9 @@ function sameCoreType(a, b) {
  * 否则「左是 vec，右是 vec」这种消息等于没说（vec<int,2> 和 vec<real,4> 的 `k` 都是 vec）。
  */
 function coreTypeText(t) {
-  return t.k === 'vec' ? `vec<${t.elem.k},${t.lanes}>` : t.k;
+  if (t.k === 'vec') return `vec<${t.elem.k},${t.lanes}>`;
+  if (t.k === 'buf') return `buf<${t.elem.k}>`;
+  return t.k;
 }
 
 /**

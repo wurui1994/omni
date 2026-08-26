@@ -19,7 +19,7 @@
 
 import { OmniError } from '../source/diag.js';
 import { stderr, wrapFn, callFnValue } from '../host/native.js';
-import { callBuiltin, zeroOf, newInstance, flushOut, failRt, jsCallFn, vecHsum, InterpFail, InterpUncaught } from './builtin.js';
+import { callBuiltin, zeroOf, newInstance, flushOut, failRt, jsCallFn, vecHsum, bufNew, bufGet, bufSet, InterpFail, InterpUncaught } from './builtin.js';
 
 // 语句的结果：正常走完 / break / continue / return。刻意不用异常做控制流 —— C 侧的
 // throw 是"待决错误标志 + 普通跳转"（ADR-0007），用信号值两个宿主上形状一致。
@@ -295,6 +295,15 @@ class Interp {
       case 'VecLit': return e.lanes.map((x) => this.eval(x, env, frame));
       case 'VecLane': return this.eval(e.vec, env, frame)[e.lane];
       case 'VecHsum': return vecHsum(e.vec.type, this.eval(e.vec, env, frame));
+      // 缓冲四条（门槛 7 第一阶段）。宿主表示是普通数组，引用语义 —— 所以 copyOf 不动它。
+      case 'BufNew': return bufNew(e.type.elem.k, this.eval(e.count, env, frame));
+      case 'BufLen': return BigInt(this.eval(e.buf, env, frame).length);
+      case 'BufGet': return bufGet(this.eval(e.buf, env, frame), this.eval(e.index, env, frame));
+      case 'BufSet': {
+        const b = this.eval(e.buf, env, frame);
+        const i = this.eval(e.index, env, frame);
+        return bufSet(b, i, this.eval(e.value, env, frame));
+      }
       case 'JsGlobal': return this.globals.get(e.name);
       case 'Field': {
         const o = this.eval(e.object, env, frame);

@@ -1,0 +1,68 @@
+;; 缓冲 + kernel/dispatch（ADR-0014 门槛 7 第一阶段）。
+;;
+;; 这份 case 的身份是「CPU 上的那个答案」—— 门槛 7 要比的是 SPIR-V 那条腿与它逐字节相同。
+;; 所以 kernel 体里刻意只有缓冲读写、gid、标量算术与 if：没有 print（kernel 里不能有）、
+;; 没有字符串、没有递归。守门一律用 blen，和 GPU 上的写法一样 —— 网格可能大于缓冲长度
+;; （工作组要对齐），多出来的那几道必须自己挡住。
+(module
+  ;; 逐元素：out[i] = a[i] * k + b[i]
+  (kernel saxpy ((a (buf real)) (b (buf real)) (out (buf real)) (k real))
+    (if (bin "<" (gid) (blen (var out))) (do
+      (bset (var out) (gid)
+        (bin "+" (bin "*" (bget (var a) (gid)) (var k)) (bget (var b) (gid)))))))
+
+  ;; 整数道：回绕与标量 int 同一条规则
+  (kernel bump ((v (buf int)) (d int))
+    (if (bin "<" (gid) (blen (var v))) (do
+      (bset (var v) (gid) (bin "+" (bget (var v) (gid)) (var d))))))
+
+  ;; 缓冲进普通函数：引用语义，就地改
+  (fn shift ((b (buf real)) (base real)) void
+    (let i int (int 0))
+    (while (bin "<" (var i) (blen (var b))) (do
+      (bset (var b) (var i) (bin "+" (var base) (bget (var b) (var i))))
+      (set i (bin "+" (var i) (int 1))))))
+
+  (main
+    (let n int (int 4))
+    (let a (buf real) (bnew (buf real) (var n)))
+    (let b (buf real) (bnew (buf real) (var n)))
+    (let out (buf real) (bnew (buf real) (var n)))
+
+    ;; 新缓冲：长度对得上，每个元素是零值
+    (print (blen (var a)))
+    (print (bget (var a) (int 0)))
+
+    ;; a[i] = i+1，b[i] = 10*(i+1)。方言里没有 int -> real 的转换（那是各门语言自己的
+    ;; 规则，汇聚层不替谁定），所以用一个 real 计数器跟着走。
+    (let i int (int 0))
+    (let x real (real 1.0))
+    (while (bin "<" (var i) (var n)) (do
+      (bset (var a) (var i) (var x))
+      (bset (var b) (var i) (bin "*" (real 10.0) (var x)))
+      (set i (bin "+" (var i) (int 1)))
+      (set x (bin "+" (var x) (real 1.0)))))
+    (print (bget (var a) (int 3)))
+    (print (bget (var b) (int 3)))
+
+    ;; 网格刻意比缓冲长（6 > 4）
+    (dispatch saxpy (int 6) (var a) (var b) (var out) (real 2.0))
+    (print (bget (var out) (int 0)))
+    (print (bget (var out) (int 3)))
+
+    ;; 引用语义：别名与原缓冲是同一段存储
+    (let alias (buf real) (var out))
+    (bset (var alias) (int 0) (real -1.0))
+    (print (bget (var out) (int 0)))
+
+    ;; 整数缓冲：回绕
+    (let iv (buf int) (bnew (buf int) (int 2)))
+    (bset (var iv) (int 0) (int 9223372036854775807))
+    (dispatch bump (int 2) (var iv) (int 1))
+    (print (bget (var iv) (int 0)))
+    (print (bget (var iv) (int 1)))
+
+    ;; 缓冲穿过普通函数
+    (expr (call shift (var out) (real 100.0)))
+    (print (bget (var out) (int 0)))
+    (print (bget (var out) (int 3)))))

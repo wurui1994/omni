@@ -285,6 +285,39 @@ export function dictGet(m, k) {
   return m.get(k);
 }
 
+/* ---------------------------------------------------------------- 缓冲
+ * 门槛 7 第一阶段：一段连续的 int/real + 一个长度。宿主表示是普通数组。
+ * 越界的消息与 list 同一个形状 —— 六条腿要逐字节一致，而 list 那句已经在
+ * 三份实现里对齐过了，照它写就不必再对一次。
+ * GPU 上没有这条错误路径（约定是 kernel 自己用 blen 守门），所以 CPU 这几条腿
+ * 报错正是想要的：越界要在 CPU 上暴露，而不是在设备上变成随机内存。
+ */
+export function bufNew(kind, n) {
+  const len = Number(n);
+  if (len < 0) rtError('buffer length cannot be negative: ' + len);
+  const zero = kind === 'int' ? 0n : 0;
+  const out = [];
+  for (let i = 0; i < len; i++) out.push(zero);
+  return out;
+}
+
+export function bufGet(a, i) {
+  const n = Number(i);
+  if (n < 0 || n >= a.length) {
+    rtError('buffer index out of range: ' + n + ' (length ' + a.length + ')');
+  }
+  return a[n];
+}
+
+export function bufSet(a, i, v) {
+  const n = Number(i);
+  if (n < 0 || n >= a.length) {
+    rtError('buffer index out of range: ' + n + ' (length ' + a.length + ')');
+  }
+  a[n] = v;
+  return v;
+}
+
 /** dynamic 的标签名。这一条是封闭 ABI 里的 js_type_tag —— `instanceof Map` 不在语言
  *  子集里（ADR-0011 决策 15），而 C 侧本来就有标签，所以只能走宿主 op。
  *

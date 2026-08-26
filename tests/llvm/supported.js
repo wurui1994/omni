@@ -21,4 +21,7 @@ export const SUPPORTED = [
   // SIMD 第一阶段（门槛 6）：`<N x T>` 那条腿。它和 C 的标量化腿必须逐位相同，
   // 所以这条 case 在这张表里的意义比"又多支持一点"更重 —— 它是那条门槛的度量点。
   join('tests', 'sexpr', 'cases', '03-simd.sx'),
+  // 缓冲 + kernel/dispatch（门槛 7 第一阶段）：`{i64, ptr}` 与 arena 快路径都在 IR 里重建，
+  // 所以这条腿和 C 那条腿分到的内存在同一个池里。
+  join('tests', 'sexpr', 'cases', '04-buffers.sx'),
 ];

@@ -38,6 +38,28 @@ function $vbin(a, b, f) { const o = []; for (let i = 0; i < a.length; i++) o.pus
 // （门槛 6 的「固定求值顺序」），六个执行器都得发这一棵树。
 function $vhsum(v, f) { let acc = v[0]; for (let i = 1; i < v.length; i++) acc = f(acc, v[i]); return acc; }
 
+// 缓冲（ADR-0014 门槛 7 第一阶段）：一段连续的 int/real + 一个长度，引用语义。
+// 越界的消息与 list 那句同一个形状 —— 那句已经在三份实现里对齐过，照它写就不必再对一次。
+function $bnew(n, isInt) {
+  const len = Number(n);
+  if (len < 0) $rt_error("buffer length cannot be negative: " + len);
+  const z = isInt ? 0n : 0;
+  const o = [];
+  for (let i = 0; i < len; i++) o.push(z);
+  return o;
+}
+function $bget(a, i) {
+  const n = Number(i);
+  if (n < 0 || n >= a.length) $rt_error("buffer index out of range: " + n + " (length " + a.length + ")");
+  return a[n];
+}
+function $bset(a, i, v) {
+  const n = Number(i);
+  if (n < 0 || n >= a.length) $rt_error("buffer index out of range: " + n + " (length " + a.length + ")");
+  a[n] = v;
+  return v;
+}
+
 // C 的 %.6g，逐字符复刻：-4 <= exp < P 用定点，否则用指数形式；去掉尾随零。
 function $fmt_g(x, P) {
   if (Number.isNaN(x)) return "nan";

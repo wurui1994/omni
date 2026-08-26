@@ -22,7 +22,7 @@ import { typeKey } from '../hir/types.js';
 import { JS_ALL } from '../hir/js_abi.js';
 import {
   OP, REF_NONE, MirFunc, MirModule, mkType,
-  T_VOID, T_I64, T_F64, T_BOOL, T_STR, T_DYN, T_AGG,
+  T_VOID, T_I64, T_F64, T_BOOL, T_STR, T_DYN, T_AGG, T_BUF,
   CVT_I2F, CVT_F2I, CVT_BOX,
 } from './ir.js';
 
@@ -81,6 +81,8 @@ class ToMir {
       // 向量：种类是元素的种类，宽度进 `t` 的高 3 位（ir.js 的 mkType）——
       // 所以向量不占类型池，也不是 T_AGG：它是"带宽度的标量"，后端要的就是这个事实。
       case 'vec': return mkType(this.ty(t.elem), t.lanes);
+      // 缓冲：一个码就够（元素类型只在 BGET/BSET 的 `t` 上出现，见 ir.js 的 T_BUF）
+      case 'buf': return T_BUF;
       // null 字面量：能赋给 class 引用、函数值与 dynamic，三者在 MIR 里都是「一个引用」
       case 'null': return T_AGG;
       default: return T_AGG;
@@ -442,6 +444,20 @@ class ToMir {
       }
       case 'Builtin': return this.builtin(e);
       case 'VecSplat': case 'VecLit': case 'VecLane': case 'VecHsum': return this.vec(e);
+      // 缓冲四条。元素类型在 BNEW 的 aux 上（要按它算步长与零值），
+      // 在 BGET/BSET 上则是指令的 `t` —— 两处都不用查类型池。
+      case 'BufNew':
+        return f.emit(OP.BNEW, T_BUF, this.expr(e.count), REF_NONE, this.ty(e.type.elem));
+      case 'BufLen':
+        return f.emit(OP.BLEN, T_I64, this.expr(e.buf), REF_NONE, 0);
+      case 'BufGet':
+        return f.emit(OP.BGET, this.ty(e.type), this.expr(e.buf), this.expr(e.index), 0);
+      case 'BufSet': {
+        const b = this.expr(e.buf);
+        const i = this.expr(e.index);
+        const v = this.expr(e.value);
+        return f.emit(OP.BSET, this.ty(e.type), b, f.pushArgs([i, v]), 0);
+      }
       default:
         throw new OmniError(`mir: 还没有处理的表达式 ${e.kind}`);
     }

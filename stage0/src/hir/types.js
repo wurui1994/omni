@@ -41,10 +41,23 @@ export function fnType(params, ret) { return { k: 'fn', params, ret }; }
  * 值语义（赋值即拷贝，同 struct）：向量是一串数，不是对象。所以 isRef 里没有它。
  */
 export function vecType(elem, lanes) { return { k: 'vec', elem, lanes }; }
+/**
+ * 缓冲（ADR-0014 门槛 7 的第一阶段）。`elem` 只能是 int 或 real，长度是**运行期**的。
+ *
+ * 为什么不用 `list<T>`：list 是 Omni 的容器，带长度/容量/增删和一整套按值语义的
+ * 拷贝规则，把它映到 GPU 上等于把 Omni 的容器 ABI 搬进 SPIR-V。缓冲刻意只有
+ * 「一段连续的 T + 一个长度」：`bget` / `bset` / `blen`，没有增删、没有拷贝、
+ * 不能装箱进 dynamic。这样它在六个执行器上的实现都是几行，而且和 GPU 上
+ * StorageBuffer 里的 runtime array 是同一个形状。
+ *
+ * 引用语义（赋值共享同一段存储）：所以 isRef 里有它。
+ */
+export function bufType(elem) { return { k: 'buf', elem }; }
 
 /** 引用语义的类型（赋值传引用，不拷贝） */
 export function isRef(t) {
-  return t.k === 'list' || t.k === 'dict' || t.k === 'set' || t.k === 'class' || t.k === 'fn';
+  return t.k === 'list' || t.k === 'dict' || t.k === 'set' || t.k === 'class' || t.k === 'fn'
+    || t.k === 'buf';
 }
 
 /** 规范化类型键：同时用于类型相等判断、容器实例化去重、C 符号命名 */
@@ -57,6 +70,7 @@ export function typeKey(t) {
     case 'dict': return `dict_${typeKey(t.key)}_${typeKey(t.val)}`;
     case 'set': return `set_${typeKey(t.elem)}`;
     case 'vec': return `vec_${typeKey(t.elem)}_${t.lanes}`;
+    case 'buf': return `buf_${typeKey(t.elem)}`;
     // 参数与返回之间用 `__` 分隔：参数之间是 `_`，所以零参也不会和别的键撞
     case 'fn': return `fn_${t.params.map(typeKey).join('_')}__${typeKey(t.ret)}`;
     default: return t.k;
@@ -71,6 +85,7 @@ export function typeName(t) {
     case 'dict': return `dict<${typeName(t.key)}, ${typeName(t.val)}>`;
     case 'set': return `set<${typeName(t.elem)}>`;
     case 'vec': return `vec<${typeName(t.elem)}, ${t.lanes}>`;
+    case 'buf': return `buf<${typeName(t.elem)}>`;
     case 'fn': return `fn(${t.params.map(typeName).join(', ')}) -> ${typeName(t.ret)}`;
     default: return t.k;
   }
@@ -147,6 +162,9 @@ export function cTypeName(t) {
     // 所以这里不是 `double __attribute__((vector_size(32)))` 之类的编译器扩展 ——
     // 那会把「两条腿逐位相同」的责任交给 clang 的自动向量化，而它不保证求值顺序。
     case 'vec': return `omni_${typeKey(t)}`;
+    // 缓冲在 C 侧是 `{长度, 指针}` 按值传（16 字节）。长度跟着值走，不放在别处：
+    // 六个执行器里 blen 都要 O(1) 拿到它，而"长度存在调用方"意味着每条腿各自记一份。
+    case 'buf': return `omni_${typeKey(t)}`;
     default: throw new Error(`cTypeName: ${t.k}`);
   }
 }
@@ -169,6 +187,9 @@ export function zeroValue(t) {
     // 向量的零值就是「零值 splat」，不另开一个 ZeroVec 节点：每多一种 OIR 节点，
     // 三个 OIR 消费者（C / JS / 解释器）就各多一处分支，而这里的语义已经有节点表达了。
     case 'vec': return { kind: 'VecSplat', type: t, value: zeroValue(t.elem) };
+    // 缓冲的零值是**空缓冲**（长度 0），不是空指针：`blen` 在任何缓冲上都得能答，
+    // 而"有时候是 null"意味着六条腿各要一处判空。
+    case 'buf': return { kind: 'BufNew', type: t, count: { kind: 'Const', type: INT, value: 0n } };
     default: return null;
   }
 }

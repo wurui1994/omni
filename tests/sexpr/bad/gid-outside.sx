@@ -1,0 +1,4 @@
+;; (gid) 只在 kernel 里有意义 —— 主体里没有"第几道"这回事
+(module
+  (main
+    (print (gid))))

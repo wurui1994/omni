@@ -1,0 +1,1 @@
+'k' 是 kernel，要用 (dispatch k 网格 实参...) 启动
