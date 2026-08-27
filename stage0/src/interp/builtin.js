@@ -325,21 +325,36 @@ export function bufSet(a, i, v) {
  * 而 C 那条腿的签名本来就是"零值当参数"。
  * 越界与空 pop 的消息与 omni_arr.c 逐字相同 —— 五条腿要逐字节一致。
  */
-export function arrNew(n, zero) {
+export function arrNew(n, zero, cp) {
   const len = Number(n);
   if (len < 0) rtError('array length cannot be negative: ' + len);
   const out = [];
-  for (let i = 0; i < len; i++) out.push(arrCopy(zero));
+  for (let i = 0; i < len; i++) out.push(arrCopy(zero, cp));
   return out;
 }
 
 /** 向量元素存进数组前要拷一份：向量是值类型，C/LLVM 那两条腿存的是 16 字节副本，
- *  而 JS 侧一个向量就是一个 JS 数组，直接存进去是别名。能当元素的类型里只有向量
- *  在 JS 侧是数组（int 是 BigInt、real 是 number、bool 是布尔、string 是字符串），
- *  所以 `Array.isArray` 这一问不会误伤。名字带 arr 前缀：模块级名字全仓唯一。 */
-export function arrCopy(v) { return Array.isArray(v) ? v.slice() : v; }
+ *  而 JS 侧一个向量就是一个 JS 数组，直接存进去是别名。
+ *  拷不拷由**调用方按元素的静态类型**给（`cp`）—— 多维数组那一刀之后"元素在 JS 侧是数组"
+ *  有两种意思了：向量（值语义，要拷）与行（引用语义，拷了就与 C/LLVM 分叉）。
+ *  名字带 arr 前缀：模块级名字全仓唯一。 */
+export function arrCopy(v, cp) { return cp === true && Array.isArray(v) ? v.slice() : v; }
+
+/** 数组句柄可以是 null —— 多维数组的行（`(anew (arr (arr T)) 3)` 之后每行都还没构造）。
+ *  五条腿都要在这里冒同一句话：C 侧是 omni_arr.c 每个操作开头的 omni_nullck，
+ *  JS 后端是 prelude 的 $nullCheck。不查的话宿主自己会冒 TypeError / 段错误。 */
+export function arrNullck(a) {
+  if (a === null || a === undefined) rtError('null reference');
+  return a;
+}
+
+export function arrLen(a) {
+  arrNullck(a);
+  return BigInt(a.length);
+}
 
 export function arrGet(a, i) {
+  arrNullck(a);
   const n = Number(i);
   if (n < 0 || n >= a.length) {
     rtError('array index out of range: ' + n + ' (length ' + a.length + ')');
@@ -347,18 +362,20 @@ export function arrGet(a, i) {
   return a[n];
 }
 
-export function arrSet(a, i, v) {
+export function arrSet(a, i, v, cp) {
+  arrNullck(a);
   const n = Number(i);
   if (n < 0 || n >= a.length) {
     rtError('array index out of range: ' + n + ' (length ' + a.length + ')');
   }
-  a[n] = arrCopy(v);
+  a[n] = arrCopy(v, cp);
   return v;
 }
 
-export function arrPush(a, v) { a.push(arrCopy(v)); return v; }
+export function arrPush(a, v, cp) { arrNullck(a); a.push(arrCopy(v, cp)); return v; }
 
 export function arrPop(a) {
+  arrNullck(a);
   if (a.length === 0) rtError('pop from empty array');
   return a.pop();
 }

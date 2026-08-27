@@ -19,7 +19,7 @@
 
 import { OmniError } from '../source/diag.js';
 import { stderr, wrapFn, callFnValue } from '../host/native.js';
-import { callBuiltin, zeroOf, newInstance, flushOut, failRt, jsCallFn, vecHsum, bufNew, bufGet, bufSet, arrNew, arrGet, arrSet, arrPush, arrPop, InterpFail, InterpUncaught } from './builtin.js';
+import { callBuiltin, zeroOf, newInstance, flushOut, failRt, jsCallFn, vecHsum, bufNew, bufGet, bufSet, arrNew, arrLen, arrGet, arrSet, arrPush, arrPop, InterpFail, InterpUncaught } from './builtin.js';
 
 // 语句的结果：正常走完 / break / continue / return。刻意不用异常做控制流 —— C 侧的
 // throw 是"待决错误标志 + 普通跳转"（ADR-0007），用信号值两个宿主上形状一致。
@@ -308,17 +308,19 @@ class Interp {
         return bufSet(b, i, this.eval(e.value, env, frame));
       }
       // 数组六条（门槛 2 第四刀）。也是普通数组、也是引用语义，copyOf 同样不动它。
-      case 'ArrNew': return arrNew(this.eval(e.count, env, frame), this.eval(e.zero, env, frame));
-      case 'ArrLen': return BigInt(this.eval(e.arr, env, frame).length);
+      // 末位那个布尔是"元素是值语义、存进去要拷一份"（只有向量），按**静态类型**给 ——
+      // 多维数组那一刀之后 Array.isArray 分不开向量与行（见 builtin.js 的 arrCopy）。
+      case 'ArrNew': return arrNew(this.eval(e.count, env, frame), this.eval(e.zero, env, frame), e.type.elem.k === 'vec');
+      case 'ArrLen': return arrLen(this.eval(e.arr, env, frame));
       case 'ArrGet': return arrGet(this.eval(e.arr, env, frame), this.eval(e.index, env, frame));
       case 'ArrSet': {
         const a = this.eval(e.arr, env, frame);
         const i = this.eval(e.index, env, frame);
-        return arrSet(a, i, this.eval(e.value, env, frame));
+        return arrSet(a, i, this.eval(e.value, env, frame), e.arr.type.elem.k === 'vec');
       }
       case 'ArrPush': {
         const a = this.eval(e.arr, env, frame);
-        return arrPush(a, this.eval(e.value, env, frame));
+        return arrPush(a, this.eval(e.value, env, frame), e.arr.type.elem.k === 'vec');
       }
       case 'ArrPop': return arrPop(this.eval(e.arr, env, frame));
       case 'JsGlobal': return this.globals.get(e.name);

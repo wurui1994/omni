@@ -67,29 +67,40 @@ function $bset(a, i, v) {
 //
 // 元素是**向量**（asy 的 pair[]，第八刀）时要拷一份再存：向量是值类型，C 与 LLVM 两条腿
 // 存进数组的是 16 字节的**副本**，JS 这边一个向量是一个 JS 数组，直接存进去就成了别名。
-// 判据是 Array.isArray：能当数组元素的类型里只有向量在 JS 侧是数组（int 是 BigInt、
-// real 是 number、bool 是布尔、string 是字符串），所以这一问不会误伤。
-function $acopy(v) { return Array.isArray(v) ? v.slice() : v; }
-function $anew(n, zero) {
+//
+// 拷不拷由**调用方按元素的静态类型**给（末位那个 cp），不在这里问 Array.isArray：
+// 多维数组那一刀之后"元素在 JS 侧是数组"有两种意思了 —— 向量（值语义，要拷）与**行**
+// （引用语义，不能拷）。量过：按 Array.isArray 猜的话 a.push(row) 会存进一份副本，
+// 于是 C/LLVM 说"两处是同一条"、JS 说"两条"，一句静默的分叉。
+function $acopy(v, cp) { return cp === true && Array.isArray(v) ? v.slice() : v; }
+function $anew(n, zero, cp) {
   const len = Number(n);
   if (len < 0) $rt_error("array length cannot be negative: " + len);
   const o = [];
-  for (let i = 0; i < len; i++) o.push($acopy(zero));
+  for (let i = 0; i < len; i++) o.push($acopy(zero, cp));
   return o;
 }
+// 数组句柄可以是 null（多维数组的行：new real[3][] 之后每行都还没构造），所以
+// 长度/下标/push/pop 都要先查 —— C 侧那四份单态实现与 blob 实现开头是同一句 omni_nullck。
+// 不查的话 JS 这边冒的是 TypeError（Cannot read properties of null），C 那边直接段错误。
+function $alen(a) { $nullCheck(a); return BigInt(a.length); }
 function $aget(a, i) {
+  $nullCheck(a);
   const n = Number(i);
   if (n < 0 || n >= a.length) $rt_error("array index out of range: " + n + " (length " + a.length + ")");
   return a[n];
 }
-function $aset(a, i, v) {
+function $aset(a, i, v, cp) {
+  $nullCheck(a);
   const n = Number(i);
   if (n < 0 || n >= a.length) $rt_error("array index out of range: " + n + " (length " + a.length + ")");
-  a[n] = $acopy(v);
+  a[n] = $acopy(v, cp);
   return v;
 }
-function $apush(a, v) { a.push($acopy(v)); return v; }
+function $apush(a, v, cp) { $nullCheck(a); a.push($acopy(v, cp)); return v; }
+
 function $apop(a) {
+  $nullCheck(a);
   if (a.length === 0) $rt_error("pop from empty array");
   return a.pop();
 }

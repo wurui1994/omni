@@ -209,9 +209,11 @@ class LlvmEmitter {
     if (c.t === T_BOOL) return c.text === 'true' ? 'true' : 'false';
     if (c.t === T_F64) return llFloat(c.text);
     if (c.t === T_STR) return this.strConst(c.text);
-    // 类的空引用（OIR 的 NullRef）。方言里写不出 null，但"非 void 的函数掉出尾巴"
-    // 会补一个零值 return，类的零值就是它 —— 所以这条路是走得到的。
-    if (typeKind(c.t) === T_AGG && c.text === 'null') return 'null';
+    // 空引用（OIR 的 NullRef）。方言里写不出 null，但两条路走得到它：「非 void 的函数掉出
+    // 尾巴」会补一个零值 return（类的零值就是它），以及多维数组那一刀 —— `(anew (arr (arr T)) N)`
+    // 的行零值是空引用（见 sexpr/lower.js 的 anew），那个常量的类型码是 T_ARR 而不是 T_AGG。
+    const k = typeKind(c.t);
+    if ((k === T_AGG || k === T_ARR) && c.text === 'null') return 'null';
     throw new OmniError(`${NOPE} ${typeText(c.t)} 常量（${c.text}）`);
   }
 
@@ -798,7 +800,7 @@ class LlvmEmitter {
     // 长度 0 时 blob_new **不会**碰零值那个指针（omni_arr.c 里那个 memcpy 循环跑 n 次），
     // 所以这里传 null，不为它开一块 alloca —— 开的话还要在入口块预扫一遍 NEW，
     // 而这条路上零值本来就没人读。
-    if (t.elem.k === 'vec' || t.elem.k === 'class') {
+    if (t.elem.k === 'vec' || t.elem.k === 'class' || t.elem.k === 'arr') {
       const esz = t.elem.k === 'vec' ? t.elem.lanes * 8 : 8;
       this.needArrBlob = true;
       this.line(`  ${dst} = call ptr @omni_arr_blob_new(i64 0, i64 ${esz}, ptr null)`);
@@ -979,10 +981,12 @@ class LlvmEmitter {
     const el = ty.oir.elem;
     // 向量元素：格子里躺内容，步长 = 道数 × 8（向量的元素只有 int/real，都是 8 字节）
     if (el.k === 'vec') return { el, blob: true, ety: this.fieldTy(el, what), esz: el.lanes * 8 };
-    // 类元素：格子里躺句柄。**结构体元素还不收** —— 那是值语义，格子里躺的是内容，
-    // 于是 anew/aset/apush 三处都要按元素类型拷一份，而 JS 与解释器那两条腿的
-    // `arrCopy` 是类型擦除的（只认 Array.isArray），拷不动一个普通对象。
-    if (el.k === 'class') return { el, blob: true, ety: 'ptr', esz: 8 };
+    // 类元素与**数组元素**：格子里躺句柄（一个指针 = 8）。后者是多维数组那一刀 ——
+    // 行的零值是空引用（见 sexpr/lower.js 的 anew），所以"复制零值 N 遍"不会让 N 行共享。
+    // **结构体元素还不收** —— 那是值语义，格子里躺的是内容，于是 anew/aset/apush 三处都要
+    // 按元素类型拷一份，而 JS 与解释器那两条腿的 `arrCopy` 是类型擦除的（只认
+    // Array.isArray），拷不动一个普通对象。
+    if (el.k === 'class' || el.k === 'arr') return { el, blob: true, ety: 'ptr', esz: 8 };
     return { el, blob: false };
   }
 

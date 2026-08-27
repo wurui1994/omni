@@ -1,0 +1,9 @@
+;; 多维数组的**行零值是空引用**（见 sexpr/lower.js 的 anew）：定长外层刚造好时每一行都是
+;; 空引用，读它的元素就是运行期的判空。这一条钉的是"那个设计是刻意的"——
+;; 空数组做零值的话 N 行会共用同一条（`a[0]` 上 push 一格 `a[1]` 也长），
+;; 那是一句静默的错答案，比这条运行期错误坏得多。asy 那边同一个写法也是运行期错误：
+;; `new real[3][]` 之后 `a[0][0]` 报 "dereference of null array"。
+(module
+  (main
+    (let a (arr (arr int)) (anew (arr (arr int)) (int 3)))
+    (print (alen (aget (var a) (int 0))))))

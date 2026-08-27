@@ -1,0 +1,95 @@
+(module
+  ;; 多维数组 —— asy 的 `real[][]`。量出来的理由：真 base 在场时，asymptote 那 220 个
+  ;; examples 里 163 个**第一个撞的**就是这个（`emit-asy` 的第一条诊断），
+  ;; 是这条线上最大的一块。
+  ;;
+  ;; 表示：元素是引用语义，格子里躺一个句柄（步长 8），与类元素同一套（arrIsBlob）。
+  ;; 原先不收的理由是 `(anew T N)` 的零值**求一次、复制 N 遍**，于是 N 行共用同一条。
+  ;; 解法不是新开一条指令，而是让**行的零值是空引用**：空引用复制多少遍也不共享。
+  ;; 这与 asy 一致 —— 量过 `new real[3][]` 之后 `a[0][0]` 在真 asy 那边是运行期错误。
+  ;;
+  ;; 这一份盯的是：外层长度、逐行各自 anew、行与行**互不影响**（那个错法的反面）、
+  ;; 元素读写、行当函数实参传（引用语义）、行数组本身也能 push。
+  (fn rowsum ((r (arr int))) int
+    (let s int (int 0))
+    (let i int (int 0))
+    (while (bin "<" (var i) (alen (var r)))
+      (do
+        (set s (bin "+" (var s) (aget (var r) (var i))))
+        (set i (bin "+" (var i) (int 1)))))
+    (ret (var s)))
+
+  ;; 行是引用：函数里 push，调用方看得见
+  (fn grow ((r (arr int)) (v int)) void
+    (apush (var r) (var v)))
+
+  ;; 二维的总和：a[i][j] 就是 (aget (aget a i) j)
+  (fn total ((a (arr (arr int)))) int
+    (let s int (int 0))
+    (let i int (int 0))
+    (while (bin "<" (var i) (alen (var a)))
+      (do
+        (set s (bin "+" (var s) (call rowsum (aget (var a) (var i)))))
+        (set i (bin "+" (var i) (int 1)))))
+    (ret (var s)))
+
+  (main
+    ;; 定长外层：三个格子，每格是空引用（读它的元素会撞判空，那条在 bad/ 里钉着）
+    (let a (arr (arr int)) (anew (arr (arr int)) (int 3)))
+    (print (alen (var a)))
+
+    ;; 逐行造：行长度各不相同（`real[][]` 在 asy 里本来就是"行可以不齐"）
+    (let i int (int 0))
+    (while (bin "<" (var i) (alen (var a)))
+      (do
+        (aset (var a) (var i) (anew (arr int) (bin "+" (var i) (int 1))))
+        (set i (bin "+" (var i) (int 1)))))
+    (print (alen (aget (var a) (int 0))))
+    (print (alen (aget (var a) (int 1))))
+    (print (alen (aget (var a) (int 2))))
+
+    ;; 元素读写：a[1][0] = 5，a[2][2] = 7
+    (aset (aget (var a) (int 1)) (int 0) (int 5))
+    (aset (aget (var a) (int 2)) (int 2) (int 7))
+    (print (aget (aget (var a) (int 1)) (int 0)))
+    (print (aget (aget (var a) (int 2)) (int 2)))
+    (print (call total (var a)))
+
+    ;; **行与行互不影响** —— 这一条就是那个错法的反面：往第 0 行 push 之后
+    ;; 第 1 行的长度不能变（共用同一条的话两行会一起长）
+    (apush (aget (var a) (int 0)) (int 9))
+    (print (alen (aget (var a) (int 0))))
+    (print (alen (aget (var a) (int 1))))
+    (print (alen (aget (var a) (int 2))))
+
+    ;; 行传进函数：引用语义，函数里 push，这里看得见
+    (expr (call grow (aget (var a) (int 1)) (int 4)))
+    (print (alen (aget (var a) (int 1))))
+    (print (call total (var a)))
+
+    ;; 外层也能 push：先造一条行，再挂上去
+    (let r (arr int) (anew (arr int) (int 0)))
+    (apush (var r) (int 100))
+    (apush (var r) (int 200))
+    (apush (var a) (var r))
+    (print (alen (var a)))
+    (print (call rowsum (aget (var a) (int 3))))
+    (print (call total (var a)))
+
+    ;; 同一条行挂两处：改一次，两处都看得见（句柄，不是拷贝）
+    (apush (var a) (var r))
+    (apush (aget (var a) (int 3)) (int 300))
+    (print (alen (aget (var a) (int 4))))
+    (print (call total (var a)))
+
+    ;; 空的外层：长度 0，push 进去就长
+    (let e (arr (arr int)) (anew (arr (arr int)) (int 0)))
+    (print (alen (var e)))
+    (apush (var e) (var r))
+    (print (alen (var e)))
+    (print (call total (var e)))
+
+    ;; apop 回来的是那条行本身
+    (let last (arr int) (apop (var e)))
+    (print (alen (var last)))
+    (print (alen (var e)))))

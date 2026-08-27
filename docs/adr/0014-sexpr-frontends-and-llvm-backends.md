@@ -485,7 +485,9 @@ LLVM 那边要三行 `RT_OPS`（`len.string` → `omni_str_length`、`substr.str
 类型身份丢了。向量元素能收恰恰因为道数就在那个码的高位上（`mkType(T_F64, 2)`）。
 所以多维数组要等 MIR 有一处能带聚合身份的地方，`tests/sexpr/bad/arr-nested.sx`
 把这条边界钉住了。（后话：那处地方在第十八刀有了 —— 数组指令的 aux 现在是数组类型号，
-所以这条边界的理由换成了"每格要造一个新的，而 anew 的零值只求一次"，见「支持面第八阶段」。）
+所以这条边界的理由换成了"每格要造一个新的，而 anew 的零值只求一次"，见「支持面第八阶段」。
+再后来这条边界整个拆了，见「多维数组」那一节：零值就是空引用，`bad/arr-nested` 退役，
+换成 `cases/14-ndarrays` 与 `bad/arr-nullrow`。）
 
 顺带修掉一处在标量元素下**不可观测**的隐患：两个 JS 侧的实现（`interp/builtin.js` 与
 `backend-js/prelude.js`）把元素**原样**存进 JS 数组，而向量在 JS 侧就是一个 JS 数组 ——
@@ -1177,6 +1179,8 @@ stdout/stderr/退出码逐字节相同）—— 又一次是 tests/llvm 第 2 �
 **多维数组**的理由也换了：身份有了，缺的是"每格造一个新的" —— `anew` 的零值是一个
 **求过一次**的操作数，复制 N 遍得到的是 N 个别名。类元素要的正是这个（空引用铺满），
 多维数组要的却是 N 条各自独立的行，收进来就是 `a[0]` 上 push 一格之后 `a[1]` 也长了。
+（后话：这条边界后来整个拆了 —— 行的零值就取**空引用**，读它是运行期判空，
+与 asy 的 `new real[3][]` 一致，见「多维数组」那一节。）
 
 asy 那一侧落地的是 `A[]`（`cases/21-structarr.asy`，与 `asy -noV` 逐字节相同）。裸数组
 那一整套在它上面一条不少，因为句柄进数组不用拷；三条量出来的语义都对上了：句柄进数组
@@ -1957,6 +1961,28 @@ EPS 那一头与真 asy 逐字节对过（`asy -noV -f eps`，只差 `%%Creator`
 `run` 与 `run-llvm` 两条腿（`OMNI_LEGS=all` 跑齐五条，提交前那一遍用它），每一节印耗时；
 C 与 LLVM 两条腿的 `clang` 默认 `-O0`（`OMNI_OPT=2` 要性能数字时开）。
 量出来的：74s -> 29s（五条腿 53s），而 `-ffp-contract=off` 与档位无关，所以语义没松。
+
+### 多维数组（`(arr (arr T))`）
+
+量出来的理由：真 `base/` 在场时，asymptote 那 220 个 examples 里 **163 个第一个撞的就是这个**。
+
+做法上只动了两处，其余是既有的路：`arrIsBlob(elem)` 把"元素是句柄"这件事从
+"只有 vec/class"扩到 `arr`（`hir/types.js`），LLVM 后端的 `fieldInit`/`arrRep`/`val()`
+跟着认 `T_ARR`（元素宽 8，零是 `ptr null`）。行的零值是**空引用**而不是空数组：
+`ANEW` 把一个**求过一次**的零值复制 N 遍，空数组做零值的话 N 行会共用同一条
+（`a[0]` 上 push 一格 `a[1]` 也长）—— 那是一句静默的错答案。asy 那边同一个写法
+（`new real[3][]` 之后 `a[0][0]`）也是运行期错误，所以这条边界与它对齐，
+`tests/sexpr/bad/arr-nullrow` 钉着它，原先的 `bad/arr-nested` 退役。
+
+放开之后抓到第二处真的分叉：**存进数组时拷不拷不能按 `Array.isArray` 猜**。
+多维之前"元素在 JS 侧是数组"只有一个意思（向量，值语义，要拷），多维之后多了
+"行"（引用语义，拷了就与 C/LLVM 分叉）。改成由调用方按**元素的静态类型**给一个
+`cp`（`backend-js/prelude.js` 的 `$acopy`、`interp/builtin.js` 的 `arrCopy`），
+`tests/sexpr/cases/14-ndarrays` 原先 JS 两条腿答 2/925、C 与 LLVM 答 3/1225。
+
+判空也补齐了：`omni_arr.c` 里四份单态实现与 blob 实现的 len/get/set/push/pop 开头都是
+`omni_nullck`，JS 侧对应 `$alen`/`$aget`/…（ALEN 原先是内联的 `.length`，读空行冒的是
+宿主的 `TypeError`，C 那条腿直接段错误）。五条腿现在都是 `omni: runtime error: null reference`。
 
 ## 后果与代价
 

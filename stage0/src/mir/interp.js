@@ -26,7 +26,7 @@ import { stderr, wrapFn, callFnValue } from '../host/native.js';
 import {
   applyBuiltin, zeroOf, newInstance, flushOut, failRt, jsCallFn,
   InterpFail, InterpUncaught, binOp, cmpOp, vecBinOp, bufNew, bufGet, bufSet,
-  arrNew, arrGet, arrSet, arrPush, arrPop, listGet, listSet, dictGet, dynTag, W,
+  arrNew, arrLen, arrGet, arrSet, arrPush, arrPop, listGet, listSet, dictGet, dynTag, W,
 } from '../interp/builtin.js';
 import { JS_ALL } from '../hir/js_abi.js';
 import { lowerToMir } from './from_oir.js';
@@ -121,6 +121,14 @@ class MirInterp {
     if (no === undefined) throw new OmniError(`mir.interp: no entry function '${this.mir.entry}'`);
     this.callFunc(no, undefined, []);
     return 0;
+  }
+
+  /** 数组类型号 -> 元素是不是向量（"存进去要拷一份"的唯一一种）。类型池的 oir 上挂着
+   *  元素的完整类型；8 位类型码分不出向量与行，所以这一问必须走池子。 */
+  elemIsVec(n) {
+    const ty = this.mir.types[n];
+    if (ty === undefined || ty.kind !== 'arr') return false;
+    return ty.oir.elem.k === 'vec';
   }
 
   /** struct / enum 是值类型，深拷贝；其余（含 class）是引用。与 eval.js 的 copyOf 同一套。 */
@@ -371,14 +379,18 @@ class MirInterp {
       }
       // 数组六条。同样走 interp/builtin.js 那一份 —— 两个解释器共用一份实现，
       // 而它的消息文本又与 omni_arr.c 逐字对齐，于是五条腿只有一个字符串。
+      // 末位那个布尔是"元素是值语义、存进去要拷一份"（只有向量）。它从 aux 上那个
+      // **数组类型号**问出来（类型池的 oir 挂着元素的完整类型）—— 8 位类型码分不出
+      // 向量与行，而多维数组那一刀之后两者在 JS 侧都是数组（见 builtin.js 的 arrCopy）。
       case OP.ANEW: {
         const c = rd(f.a[i]);
         const z = rd(f.b[i]);
-        return (F) => { F.v[i] = arrNew(c(F), z(F)); return next; };
+        const cp = this.elemIsVec(f.aux[i]);
+        return (F) => { F.v[i] = arrNew(c(F), z(F), cp); return next; };
       }
       case OP.ALEN: {
         const a = rd(f.a[i]);
-        return (F) => { F.v[i] = BigInt(a(F).length); return next; };
+        return (F) => { F.v[i] = arrLen(a(F)); return next; };
       }
       case OP.AGET: {
         const a = rd(f.a[i]);
@@ -388,12 +400,14 @@ class MirInterp {
       case OP.ASET: {
         const a = rd(f.a[i]);
         const args = rdArgs(f.b[i]);
-        return (F) => { F.v[i] = arrSet(a(F), args[0](F), args[1](F)); return next; };
+        const cp = this.elemIsVec(f.aux[i]);
+        return (F) => { F.v[i] = arrSet(a(F), args[0](F), args[1](F), cp); return next; };
       }
       case OP.APUSH: {
         const a = rd(f.a[i]);
         const v = rd(f.b[i]);
-        return (F) => { F.v[i] = arrPush(a(F), v(F)); return next; };
+        const cp = this.elemIsVec(f.aux[i]);
+        return (F) => { F.v[i] = arrPush(a(F), v(F), cp); return next; };
       }
       case OP.APOP: {
         const a = rd(f.a[i]);

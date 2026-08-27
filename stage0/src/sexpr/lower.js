@@ -141,6 +141,15 @@ class CoreLowerer {
         const e = this.ty(en, what);
         return e === null ? null : arrType(e);
       }
+      // **数组套数组**（多维数组那一刀）：元素是引用语义，格子里躺一个句柄，与类元素同一套
+      // 表示（arrIsBlob，步长 8）。原先不收的理由是 `(anew T N)` 的零值求一次、复制 N 遍，
+      // 于是 N 行共用同一条 —— 解法不是新开一条指令，而是让**行的零值是空引用**
+      // （见 arrExpr 的 anew）：空引用没法共享，谁要用哪一行谁先造。这与 asy 一致，
+      // 量过：`new real[3][]` 之后 `a[0][0]` 在真 asy 那边是运行期错误。
+      if (isList(en) && head(en) === 'arr') {
+        const e = this.ty(en, what);
+        return e === null ? null : arrType(e);
+      }
       const nm = isAtom(en) ? en.value : null;
       if (nm !== null && this.classes.has(nm)) return arrType(this.classes.get(nm));
       if (nm !== null && this.structs.has(nm)) {
@@ -978,7 +987,15 @@ class CoreLowerer {
       const c = this.expr(n.items[2]);
       if (c === null) return null;
       if (c.type !== INT) return this.err(n, `anew 的长度要是 int，这里是 ${coreTypeText(c.type)}`);
-      return { kind: 'ArrNew', type: t, count: c, zero: zeroValue(t.elem) };
+      // 元素是数组时，格子的零值是**空引用**而不是空数组（多维数组那一刀）：`zero` 是一个
+      // **求过一次**的操作数，运行时把那一份复制 N 遍，所以零值必须是"复制了也不共享"的
+      // 东西。空数组共享 —— 那会让 `a[0]` 上 push 一格之后 `a[1]` 也长一格（静默的错答案）。
+      // 空引用没有这个问题，而且与 asy 对得上：`new real[3][]` 的行是 null，
+      // `a[0][0]` 在真 asy 那边就是运行期错误。要行就自己 `(aset a i (anew (arr T) M))`。
+      const zero = t.elem.k === 'arr'
+        ? { kind: 'NullRef', type: t.elem }
+        : zeroValue(t.elem);
+      return { kind: 'ArrNew', type: t, count: c, zero };
     }
     const a = this.expr(n.items[1]);
     if (a === null) return null;

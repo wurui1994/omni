@@ -37,9 +37,10 @@
     return a;                                                                          \
   }                                                                                    \
                                                                                        \
-  int64_t omni_arr_##SUF##_len(omni_arr_##SUF a) { return a->len; }                     \
+  int64_t omni_arr_##SUF##_len(omni_arr_##SUF a) { omni_nullck(a); return a->len; }      \
                                                                                        \
   T omni_arr_##SUF##_get(omni_arr_##SUF a, int64_t i) {                                 \
+    omni_nullck(a);                                                                     \
     if (i < 0 || i >= a->len)                                                           \
       omni_errorf("array index out of range: %lld (length %lld)",                       \
                   (long long)i, (long long)a->len);                                     \
@@ -47,6 +48,7 @@
   }                                                                                     \
                                                                                         \
   T omni_arr_##SUF##_set(omni_arr_##SUF a, int64_t i, T v) {                             \
+    omni_nullck(a);                                                                      \
     if (i < 0 || i >= a->len)                                                            \
       omni_errorf("array index out of range: %lld (length %lld)",                        \
                   (long long)i, (long long)a->len);                                      \
@@ -55,12 +57,14 @@
   }                                                                                      \
                                                                                          \
   T omni_arr_##SUF##_push(omni_arr_##SUF a, T v) {                                        \
+    omni_nullck(a);                                                                       \
     omni_arr_##SUF##_reserve(a, a->len + 1);                                              \
     a->items[a->len++] = v;                                                                \
     return v;                                                                              \
   }                                                                                        \
                                                                                            \
   T omni_arr_##SUF##_pop(omni_arr_##SUF a) {                                                \
+    omni_nullck(a);                                                                         \
     if (a->len == 0) omni_error("pop from empty array");                                     \
     return a->items[--a->len];                                                               \
   }
@@ -106,20 +110,23 @@ omni_arr_blob omni_arr_blob_new(int64_t n, int64_t esz, const void *zero) {
   return a;
 }
 
-int64_t omni_arr_blob_len(omni_arr_blob a) { return a->len; }
+int64_t omni_arr_blob_len(omni_arr_blob a) { omni_nullck(a); return a->len; }
 
 void *omni_arr_blob_at(omni_arr_blob a, int64_t i) {
+  omni_nullck(a);
   if (i < 0 || i >= a->len)
     omni_errorf("array index out of range: %lld (length %lld)", (long long)i, (long long)a->len);
   return a->items + a->esz * i;
 }
 
 void *omni_arr_blob_push(omni_arr_blob a) {
+  omni_nullck(a);
   omni_arr_blob_reserve(a, a->len + 1);
   return a->items + a->esz * a->len++;
 }
 
 void *omni_arr_blob_pop(omni_arr_blob a) {
+  omni_nullck(a);
   if (a->len == 0) omni_error("pop from empty array");
   return a->items + a->esz * --a->len;
 }

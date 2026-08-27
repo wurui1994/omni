@@ -14,6 +14,11 @@ import { typeKey } from '../hir/types.js';
 import { JS_ABI, JS_ALL, JS_MEMBERS } from '../hir/js_abi.js';
 import { C_ABI } from '../hir/c_abi.js';
 
+/** 数组的元素存进去要不要先拷一份（$anew/$aset/$apush 的末位实参）。只有向量要 ——
+ *  它是值语义，而 C 与 LLVM 两条腿存的是副本。类与**数组**元素是引用语义，拷了就分叉
+ *  （多维数组那一刀量出来的：`a.push(row)` 拷一份之后，"两处是同一条"在五条腿上不一致）。 */
+const jsElemCopy = (t) => (t.elem.k === 'vec' ? 'true' : 'false');
+
 class JsEmitter {
   constructor(mod) {
     this.mod = mod;
@@ -187,7 +192,7 @@ class JsEmitter {
       case 'vec': return `$vsplat(${this.zero(t.elem)}, ${t.lanes})`;
       // 数组（第十六刀：结构体的数组字段）。空数组，不是 null —— `$anew` 就是
       // ArrNew 那条路发的东西，元素零值当实参传进去。
-      case 'arr': return `$anew(0n, ${this.zero(t.elem)})`;
+      case 'arr': return `$anew(0n, ${this.zero(t.elem)}, ${jsElemCopy(t)})`;
       default: throw new Error(`zero: ${t.k}`);
     }
   }
@@ -332,11 +337,14 @@ class JsEmitter {
       case 'BufSet': return `$bset(${this.expr(e.buf)}, ${this.expr(e.index)}, ${this.expr(e.value)})`;
       // 数组六条（门槛 2 第四刀）：也是 JS 数组，也是引用语义。零值当参数传 ——
       // BufNew 那条传的是"是不是 int"的布尔，那是只有两种元素时的省事写法，数组有四种。
-      case 'ArrNew': return `$anew(${this.expr(e.count)}, ${this.expr(e.zero)})`;
-      case 'ArrLen': return `BigInt(${this.expr(e.arr)}.length)`;
+      // 末尾那个布尔是"元素是值语义、存进去要拷一份"（只有向量），按**静态类型**给：
+      // 多维数组那一刀之后 `Array.isArray` 分不开向量与行（见 prelude 的 $acopy）。
+      case 'ArrNew': return `$anew(${this.expr(e.count)}, ${this.expr(e.zero)}, ${jsElemCopy(e.type)})`;
+      case 'ArrLen': return `$alen(${this.expr(e.arr)})`;
       case 'ArrGet': return `$aget(${this.expr(e.arr)}, ${this.expr(e.index)})`;
-      case 'ArrSet': return `$aset(${this.expr(e.arr)}, ${this.expr(e.index)}, ${this.expr(e.value)})`;
-      case 'ArrPush': return `$apush(${this.expr(e.arr)}, ${this.expr(e.value)})`;
+      case 'ArrSet': return `$aset(${this.expr(e.arr)}, ${this.expr(e.index)}, ${this.expr(e.value)}, ${jsElemCopy(e.arr.type)})`;
+      case 'ArrPush': return `$apush(${this.expr(e.arr)}, ${this.expr(e.value)}, ${jsElemCopy(e.arr.type)})`;
+
       case 'ArrPop': return `$apop(${this.expr(e.arr)})`;
       case 'Field': {
         const obj = this.expr(e.object);
