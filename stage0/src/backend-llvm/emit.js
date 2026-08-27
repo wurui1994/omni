@@ -683,22 +683,27 @@ class LlvmEmitter {
     throw new OmniError(`llvm: ${ty.plain} 没有字段 ${acc.field}`);
   }
 
-  /** 字段的 LLVM 类型。这一刀只有四种标量，表外的报错（阶段边界，与 ty() 同一条规矩）。 */
+  /** 字段的 LLVM 类型。四种标量加向量（第十五刀），表外的报错（阶段边界，与 ty() 同一条规矩）。 */
   fieldTy(t, what) {
     if (t.k === 'int') return 'i64';
     if (t.k === 'real') return 'double';
     if (t.k === 'bool') return 'i1';
     if (t.k === 'string') return '[2 x i64]';
+    // 向量字段就是原生的 `<N x T>` —— 与这条腿别处的向量表示同一个（见 ty()）。
+    // 对齐不用操心：`omni_ll_alloc` 后面就是 malloc，而 malloc 保证的对齐够 16 字节。
+    if (t.k === 'vec') return `<${t.lanes} x ${this.fieldTy(t.elem, what)}>`;
     throw new OmniError(`${NOPE}结构体字段的类型 ${t.k}：${what}`);
   }
 
   /** 字段的零值。字符串走 strConst('')，与常量池里那份空串**同一条路** —— 不另造一个
-   *  `zeroinitializer`（空指针 + 长度 0 在运行时是另一种东西，不必去试它对不对）。 */
+   *  `zeroinitializer`（空指针 + 长度 0 在运行时是另一种东西，不必去试它对不对）。
+   *  向量反过来正好用 `zeroinitializer`：它就是逐道的零，没有第二种表示。 */
   fieldZero(t, what) {
     if (t.k === 'int') return '0';
     if (t.k === 'real') return '0.0';
     if (t.k === 'bool') return 'false';
     if (t.k === 'string') return this.strConst('');
+    if (t.k === 'vec') return 'zeroinitializer';
     throw new OmniError(`${NOPE}结构体字段的零值 ${t.k}：${what}`);
   }
 

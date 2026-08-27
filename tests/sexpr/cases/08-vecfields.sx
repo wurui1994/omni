@@ -1,0 +1,74 @@
+(module
+  ;; 结构体/类的**向量字段** —— 门槛 2 第十五刀。asy 的 `struct { pair p; }` 要它，
+  ;; 门槛 3 的 transform（六个 real）也要它。
+  ;;
+  ;; 这一份盯的是同一条语义在五条腿上是同一件事：向量字段是**值语义**。
+  ;; 要害在 JS 那条腿 —— 那边向量的宿主表示是一个普通数组，`$cp_S` 不显式 `$vcopy`
+  ;; 就会让两个结构体共用同一条道，而 C/LLVM 拷的是 16 字节的副本。下面
+  ;; 「复制之后各写一道」那一段就是为了把那种实现挡在外面。
+  (struct Seg (a (vec real 2)) (b (vec real 2)) (tag int))
+  (class Box (v (vec int 4)) (name string))
+
+  ;; 向量字段进出函数：形参是复制，改它不动实参
+  (fn slide ((s Seg) (d (vec real 2))) real
+    (fldset (var s) a (bin "+" (fld (var s) a) (var d)))
+    (ret (lane (fld (var s) a) 0)))
+
+  (fn mkseg ((x real) (y real)) Seg
+    (let s Seg (new Seg))
+    (fldset (var s) a (vlit (vec real 2) (var x) (var y)))
+    (fldset (var s) b (splat (vec real 2) (real 1.0)))
+    (ret (var s)))
+
+  (main
+    ;; 零值：向量字段每道都是零
+    (let z Seg (new Seg))
+    (print (lane (fld (var z) a) 0))
+    (print (lane (fld (var z) a) 1))
+    (print (fld (var z) tag))
+
+    ;; 读写
+    (let s Seg (call mkseg (real 1.5) (real 2.5)))
+    (print (lane (fld (var s) a) 0))
+    (print (lane (fld (var s) a) 1))
+    (print (lane (fld (var s) b) 1))
+    (fldset (var s) a (bin "*" (fld (var s) a) (splat (vec real 2) (real 2.0))))
+    (print (lane (fld (var s) a) 0))
+    (print (lane (fld (var s) a) 1))
+
+    ;; 字段之间的向量运算，结果再喂给 hsum
+    (print (hsum (bin "+" (fld (var s) a) (fld (var s) b))))
+
+    ;; 传参是复制：slide 里 +10，回来 s 还是原来的
+    (print (call slide (var s) (splat (vec real 2) (real 10.0))))
+    (print (lane (fld (var s) a) 0))
+
+    ;; 结构体赋值是复制，而且向量字段也得是**独立**的那一条道
+    (let t Seg (var s))
+    (fldset (var t) a (vlit (vec real 2) (real 7.0) (real 8.0)))
+    (print (lane (fld (var s) a) 0))
+    (print (lane (fld (var t) a) 0))
+    (print (lane (fld (var t) a) 1))
+
+    ;; 类是引用语义：改 c 就是改 b（向量字段也一样，句柄只有一个）
+    (let bx Box (cnew Box))
+    (print (lane (fld (var bx) v) 0))
+    (print (fld (var bx) name))
+    (fldset (var bx) v (vlit (vec int 4) (int 1) (int 2) (int 3) (int 4)))
+    (fldset (var bx) name (str "box"))
+    (let cx Box (var bx))
+    (fldset (var cx) v (bin "+" (fld (var cx) v) (splat (vec int 4) (int 10))))
+    (print (lane (fld (var bx) v) 2))
+    (print (lane (fld (var cx) v) 3))
+    (print (fld (var bx) name))
+
+    ;; 循环里反复新建：每次都是新的零值
+    (let i int (int 0))
+    (let acc real (real 0.0))
+    (while (bin "<" (var i) (int 3))
+      (do
+        (let e Seg (new Seg))
+        (fldset (var e) a (splat (vec real 2) (toreal (var i))))
+        (set acc (bin "+" (var acc) (hsum (fld (var e) a))))
+        (set i (bin "+" (var i) (int 1)))))
+    (print (var acc))))

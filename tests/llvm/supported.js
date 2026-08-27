@@ -31,6 +31,10 @@ export const SUPPORTED = [
   join('tests', 'sexpr', 'cases', '06-structs.sx'),
   // 类（门槛 2 第十三刀）：与结构体只差引用语义，字段访问多一次 @omni_nullck。
   join('tests', 'sexpr', 'cases', '07-classes.sx'),
+  // 向量字段（门槛 2 第十五刀）：字段的类型就是 `<N x T>`、零值是 zeroinitializer，
+  // 值语义靠 COPY 那条逐字段 load/store 拷那 16 字节。C 那条腿的同一个字段是标量化的
+  // 结构体，两边要逐字节相同 —— 所以这份 case 同时是"向量字段"与"两种向量表示"的度量点。
+  join('tests', 'sexpr', 'cases', '08-vecfields.sx'),
   // 这一份是**边界那节推过来的**：结构体一支持，01_basics 就整份能降了（它原先被拒
   // 只是因为里面有 struct）。它的输出与 run / interp / omni-c 逐字节相同，所以留在门外
   // 就变成了"其实支持却假装不支持"—— 那正是这张表要防的另一半。

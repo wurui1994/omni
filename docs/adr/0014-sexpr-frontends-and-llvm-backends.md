@@ -236,11 +236,12 @@ bison **隐式**的选择写成**显式**的优先级声明 —— 悬垂 else�
    `(x,y)` 的印法）、**字符串函数**（`length`/`substr`/`find`/`rfind`/`replace`/`erase`）、
    **`pair[]`**（数组那一整套操作在 pair 上一条不少）、**默认实参与命名实参**、
    **重载解析**（同型优先、转换算分、并列即歧义、候选按声明顺序可见）、
-   **struct**（引用语义、隐式 `operator init`、字段默认值每次构造重求、`== !=` 比身份），
-   十七份用例在五个执行器上与 `asy -noV` 逐字节相同。
+   **struct**（引用语义、隐式 `operator init`、字段默认值每次构造重求、`== !=` 比身份）、
+   **pair 字段**（第十五刀：核心方言的类字段收 `(vec T N)`，pair 就是 `(vec real 2)`），
+   十八份用例在五个执行器上与 `asy -noV` 逐字节相同。
    **还没做**的是给切片赋值、多维数组、复数幂、triple、
    用户自定义的 `operator init`、算符重载、字符串的 `reverse`/`insert`/`split`、
-   struct 的非标量字段与成员函数 —— 每一条都在
+   struct 的数组字段与成员函数 —— 每一条都在
    `tests/asy/bad/` 里有一份带 `ASY_NOPE` 的用例钉着，不是含糊的"待办"。
    超越函数（exp/log/trig）是**另一回事**：不是没做，是量过 libm 与 V8 在最后一位就分叉，
    收进来这条轴必然有一天变红，所以按边界拒掉（`tests/asy/bad/sin.asy`；pair 上的
@@ -414,9 +415,9 @@ static inline C + 另写一份 IR 助手"，是两份实现；这次不重复那
 `1/3` 是实数除法而 `1#3` 是整数商、`3 == 3.0` 要提左边、`write` 的分隔符取决于第一个
 实参是不是字符串。类型是符号表的事，动作模板里没有符号表。
 
-**判分的人不是我**：`tests/asy` 的十七份用例（算术 / 字符串 / 两种引号 / 控制流 / 函数 /
+**判分的人不是我**：`tests/asy` 的十八份用例（算术 / 字符串 / 两种引号 / 控制流 / 函数 /
 real 的 %.15g / `? :` / 数学函数 / 数组 / pair / 切片与整数组输出 / for-each /
-字符串函数 / `pair[]` / 默认实参与命名实参 / 重载解析 / struct）每份都是
+字符串函数 / `pair[]` / 默认实参与命名实参 / 重载解析 / struct / struct 的 pair 字段）每份都是
 「五条腿逐字节相同 == `.expected` == `asy -noV` 当场重跑」。`.expected` 本身就是真 asy 的
 输出生成的；机器上没装 asymptote 时那一节打印 skip，但 `.expected` 仍然把答案钉住。
 
@@ -436,13 +437,13 @@ real 的 %.15g / `? :` / 数学函数 / 数组 / pair / 切片与整数组输出
 （只算中选那支）跟着编码保住。代价写在明处：**循环条件里的 `? :` 直接报错**，因为那些
 赋值只能落在循环外面，条件就只算一次了。这条边界在 `tests/asy/bad/cond-in-loop.asy` 里。
 
-第一刀的边界都在 `tests/asy/bad/`（18 条，每条的期望值都必须以 `ASY_NOPE` 开头 ——
+第一刀的边界都在 `tests/asy/bad/`（17 条，每条的期望值都必须以 `ASY_NOPE` 开头 ——
 "还没做"和"做错了"必须能一眼分开）：triple、复数幂、算符重载、
 模块（import/access）、隐式缩放（`105cm`）、超越函数（`sin`、pair 上的 `angle` ——
 理由是上面那条 ULP 测量）、函数里读文件级变量（核心方言没有全局量）、
 循环条件里的 `? :`、给切片赋值（`a[0:2] = b`）、多维数组、
-字符串的 `reverse`/`insert`/`split`、struct 的五条（pair 字段 / 数组字段 / 嵌套
-struct 字段 / 成员函数 / `A[]`）。
+字符串的 `reverse`/`insert`/`split`、struct 的四条（数组字段 / 嵌套 struct 字段 /
+成员函数 / `A[]`）。
 
 **for-each 的两条语义也是量出来的**：循环变量是**复制**（体里 `x = 99` 不动数组），
 而迭代是**活的** —— `int[] g={1,2}; int n=0; for(int x:g){++n; if(n<5) g.push(9);}`
@@ -471,15 +472,17 @@ struct 字段 / 成员函数 / `A[]`）。
 **第四节 `strict/`：asy 自己就不收的，我们也不能收。** 这一节是数组这一刀顺手加的，起因是
 一次测量：`int b=1; b++;` 在真 asy 上直接编不过（"postfix expressions are not allowed"），
 而我们的降级器照收。这类漏洞**不会让任何用例输出不同** —— 它只让"等价"这两个字变虚。
-所以 `strict/` 里的用例要求：我们拒，且装了 asy 的话**真 asy 也拒**。现在有八条：后缀
+所以 `strict/` 里的用例要求：我们拒，且装了 asy 的话**真 asy 也拒**。现在有九条：后缀
 `++`、pair 上的 `<`、pair 上的 `%`（这两条 asy 报的是 "no matching function
 'operator <(pair, pair)'"）、`length(int[])`（`length` 只有 string 和 pair 两个重载）、
 按不存在的形参名给命名实参（asy 报 "cannot call 'void f(int a)' with parameter 'int b'"）、
 **歧义的重载**（`p(real)` 与 `p(pair)` 遇上 `p(1)`：asy 报 "call of function 'p(int)' is
 ambiguous"）、**引用后面才声明的函数**（asy 报 "no matching variable 'b'"）、
-**`write` 一个 struct**（asy 报 "no matching function 'write(A)'"）—— 中间那两条是
-重载这一刀加的，第二条尤其要紧：我们是两遍降级，不专门裁一刀就会比 asy 多接受一门语言。
-最后一条是 struct 这一刀加的，它守的不只是"拒"：不在 asy 这层拦，漏出去的是核心方言那句
+**`write` 一个 struct**（asy 报 "no matching function 'write(A)'"）、
+**给 pair 的分量赋值**（`z.x = 5` 与 `a.p.x = 5`：asy 报 "virtual field is read-only"）——
+中间那两条是重载这一刀加的，第二条尤其要紧：我们是两遍降级，不专门裁一刀就会比 asy
+多接受一门语言。最后两条是 struct 与 pair 字段那两刀加的，它们守的不只是"拒"：
+`write(struct)` 不在 asy 这层拦，漏出去的是核心方言那句
 `(tostr E) 只接受 int / real / bool`——拒对了但理由指着错的一层。
 
 **默认实参是"每次调用求一次、只在没给时求"**，而且**能引用前面的形参** —— 两条都是量出来的
@@ -823,6 +826,44 @@ class 用 `%c_Foo`、struct 用 `%s_Foo`，与 C 后端的 `c_` / `s_` 前缀对
 逐字节相同：`1` / `omni: runtime error: null reference` / 70），进了 `SUPPORTED`。它盯的正是
 「空引用在 C 那条腿上必须显式检查，否则是段错误、和 JS 的诊断分叉」，现在这句话对
 LLVM 那条腿也成立了。
+
+### 已落地（支持面第五阶段：向量字段，门槛 2 第十五刀）
+
+结构体/类的字段从"四种标量"放宽到"四种标量 + `(vec T N)`"。**动机是门槛 3**：asy 的
+`struct { pair p; }` 要它，而绘图层的 `transform`（六个 real）、`pen`、`path` 的控制点都是
+同一个形状。这一刀是**四个"零值"函数各补一条臂**，不是新的 IR：
+
+- JS 后端 `zero` → `$vsplat(零, N)`；C 后端 `zeroExpr` → `omni_vec_real_2_splat(0.0)`；
+  解释器 `zeroOf` → 一个长度 N 的数组；LLVM `fieldZero` → `zeroinitializer`。
+- LLVM `fieldTy` → `<N x T>`，与这条腿别处的向量表示是同一个；对齐不必操心，
+  arena 后面就是 malloc。
+- MIR 一个字节都没改：向量的宽度就在那 8 位类型码的高 3 位上，`FLD` 的 `t` 自带宽度，
+  而字段类型仍然从类型池的 `oir` 元数据上取。
+
+**一处真实的洞是这一刀补的**：JS 后端的 `$cp_S` 原来对非 struct 字段一律 `v.f`，
+而向量在那条腿上的宿主表示是普通数组 —— 拷出来会**共用同一条道**，C/LLVM 那边拷的是
+16 字节副本。现在 `$cp_S` 走的是 `copyOf`（enum 早就走它），向量字段发 `$vcopy`。
+`tests/sexpr/cases/08-vecfields.sx` 里「复制之后原件与副本各写一道」那一段就是为了把
+那种实现挡在外面，它同时进了 `tests/llvm/supported.js`（五方一致）。
+
+**数组字段仍然在门外**，理由收窄到一句话：向量的零值是**常量**，数组的零值是一次
+运行时调用（`omni_arr_*_new(0, 零值)`），而 LLVM 那条腿的 `OP.NEW` 现在只会
+`store 一个常量`。嵌套聚合另外还欠"复制要递归下去"。`tests/sexpr/bad/struct-field-arr.sx`
+与 `struct-in-struct.sx` 写着这两句。
+
+asy 那一侧同一刀落地的是 **pair 字段**（`cases/18-structpair.asy`，与 `asy -noV` 逐字节
+相同）。pair 上那一整套在字段上一条不少，两处是这一刀新发现的：
+
+- `s.p.x` 是**三层的点**。词法上点是名字的一部分（`name -> name "." ID`），所以
+  `dotQual` 原来只认"一层变量 + 一个字段"，遇到 `a.p.x` 直接报"认不出的带点名字"。
+  现在它递归下去（接收者只可能是变量读或字段读，两者都没有副作用，所以重复求值无害）。
+- `a.p *= 2` 必须走**复数**乘法。量过 `(4,5) *= 2` 是 `(8,10)`；`assignFld` 原来缺 pair
+  那条臂，会先把 `2` 提成 `(2,0)` 再逐分量乘，给出 `(8,0)` —— 一条静默的错答案。
+  现在字段复合赋值与变量复合赋值走同一个 `pairArith`。
+
+反过来一条是**对齐**：pair 的分量是只读的虚字段（asy 报 "virtual field is read-only"），
+所以 `a.p.x = 5` 要拒，且理由不能带 `ASY_NOPE`（那是"还没做"的意思）——
+`tests/asy/strict/pair-field-set` 钉着它。
 
 ## 决策 4：调用 LLVM 需要 extern-C FFI —— 这是新要求，也是 dogfood
 

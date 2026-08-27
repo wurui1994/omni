@@ -1,1 +1,1 @@
-asy 前端第一刀还不支持：struct B 的 A 字段（这一刀的字段只有 int/real/bool/string）
+asy 前端第一刀还不支持：struct B 的 A 字段（这一刀的字段只有 int/real/bool/string/pair）

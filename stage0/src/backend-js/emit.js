@@ -122,7 +122,7 @@ class JsEmitter {
     const init = s.fields.map((f) => `${f.name}: ${this.zero(f.type)}`).join(', ');
     this.line(`function $new_S${s.name}() { return { ${init} }; }`);
     const copy = s.fields
-      .map((f) => `${f.name}: ${f.type.k === 'struct' ? `$cp_S${f.type.name}(v.${f.name})` : `v.${f.name}`}`)
+      .map((f) => `${f.name}: ${this.copyOf(f.type, `v.${f.name}`)}`)
       .join(', ');
     this.line(`function $cp_S${s.name}(v) { return { ${copy} }; }`);
   }
@@ -152,10 +152,13 @@ class JsEmitter {
     this.line('}');
   }
 
-  /** 值语义字段的拷贝表达式；只有 struct / enum 需要真的拷 */
+  /** 值语义字段的拷贝表达式；只有 struct / enum / vec 需要真的拷 */
   copyOf(t, src) {
     if (t.k === 'struct') return `$cp_S${t.name}(${src})`;
     if (t.k === 'enum') return `$cp_E${t.name}(${src})`;
+    // 向量字段：宿主表示是普通数组，不切一刀两个结构体就共用同一条道
+    // （C 与 LLVM 那边拷的是 16 字节的副本，那才是这一层要对齐的语义）
+    if (t.k === 'vec') return `$vcopy(${src})`;
     return src;
   }
 
@@ -176,6 +179,9 @@ class JsEmitter {
       case 'list': return '[]';
       case 'dict': return 'new Map()';
       case 'set': return 'new Set()';
+      // 向量（第十五刀：结构体的向量字段）。`$vsplat` 就是 VecSplat 那条路发的东西，
+      // 所以"字段的零"与"裸的零向量"在这条腿上是同一个表示。
+      case 'vec': return `$vsplat(${this.zero(t.elem)}, ${t.lanes})`;
       default: throw new Error(`zero: ${t.k}`);
     }
   }

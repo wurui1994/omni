@@ -448,6 +448,13 @@ export function zeroOf(t, I) {
     case 'bool': return false;
     case 'string': return '';
     case 'list': return [];
+    // 向量：每道一个标量的普通数组（与 VecSplat 的求值结果同一种东西）。
+    // 这一条是结构体的向量字段（第十五刀）逼出来的 —— 零值要能一层层递归下去。
+    case 'vec': {
+      const out = [];
+      for (let i = 0; i < t.lanes; i++) out.push(zeroOf(t.elem, I));
+      return out;
+    }
     case 'dict': return new Map();
     case 'set': return new Set();
     case 'struct': {

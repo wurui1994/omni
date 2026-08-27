@@ -46,7 +46,11 @@
 // `(class …)` 而不是 `(struct …)`：那一层的值语义只由 from_oir 里显式的 OP.COPY 给，
 // class 不发 COPY，五条腿都是引用。`A a;` 隐式跑一遍 `operator init`（= `new A` 加上
 // 字段默认值），默认值是**每次构造**求一次，所以有默认值的类型会生成一个
-// `asy__new_<T>` 包装，`A a;` 降成对它的调用）。
+// `asy__new_<T>` 包装，`A a;` 降成对它的调用）、
+// **pair 字段**（第十五刀：核心方言的类字段现在收 `(vec T N)`，而 pair 就是
+// `(vec real 2)`。pair 上那一整套 —— 复数乘除、`+= *=`、`abs`/`conj`、`z.x`/`xpart`、
+// `== !=`、当形参/返回值 —— 在字段上一条不少；`s.p.x` 这条三层的点也认了，
+// 但**写**不认：pair 的分量在 asy 那边是只读的虚字段）。
 //
 // 不支持（见到就报错，报错里说清是哪一条）：triple、import/access、
 // typedef、算符重载、给切片赋值（`a[0:2] = b`）、
@@ -64,11 +68,10 @@
 // 还没量全；`split` 要 `string[]` 的返回值，那条路还没走通）、
 // 循环条件里的 `?:`（摊出来的赋值只能落在循环外面，条件就只
 // 算一次了 —— 语义会变，所以报错而不是悄悄换个意思）、
-// struct 的这五条边界（第十四刀刻意留在门外，每条都有 bad/ 用例钉着）：
-// 字段是 pair / 数组 / 另一个 struct（核心方言的类字段只收 int/real/bool/string ——
-// 每条腿的"零值"各是一个只认标量的小函数，见 sexpr/lower.js 的 structDec）、
-// struct 里的成员函数（这一刀只有字段声明）、`A[]`（数组元素还只有
-// int/real/bool/string/pair）。
+// struct 的这四条边界（每条都有 bad/ 用例钉着）：字段是数组或另一个 struct
+// （核心方言的类字段现在收标量与 `(vec T N)`，但数组字段的零值不是常量而是一次运行时
+// 调用，见 sexpr/lower.js 的 structDec）、struct 里的成员函数（这一刀只有字段声明）、
+// `A[]`（数组元素还只有 int/real/bool/string/pair）。
 //
 // ## 与真 asy 的差别，写在这里而不是等着被发现
 //
@@ -112,6 +115,9 @@
 //   （"no matching function 'write(A)'"），所以 writeStmt 里有一条专门的拦截 ——
 //   不拦的话漏出去的是核心方言那句 `(tostr E) 只接受 int / real / bool`，
 //   拒得对但理由不对；`tests/asy/strict/write-struct` 钉着这一条。
+// - **pair 的分量是只读的**（第十五刀量的，也是对齐的一条）：`z.x = 5` 与 `a.p.x = 5`
+//   asy 都报 "virtual field is read-only"，所以 assign 里有一条专门的诊断 ——
+//   读（`s.p.x`）认，写不认。`tests/asy/strict/pair-field-set` 钉着这一条。
 
 import { isList, isAtom, isStr, head } from '../sexpr/read.js';
 
@@ -119,6 +125,9 @@ import { isList, isAtom, isStr, head } from '../sexpr/read.js';
 export const ASY_NOPE = 'asy 前端第一刀还不支持';
 
 const SCALARS = new Set(['int', 'real', 'bool', 'string']);
+
+/** dotQual 的第三种答案："是带点的名字，但接收者那一层已经报过错了" */
+const DOT_BAD = { bad: true };
 
 /** 能当数组元素的类型。pair 是第八刀加的（核心方言的 `(arr T)` 现在收向量元素）；
  *  数组本身仍然不在里面 —— 多维数组是另一刀。 */
@@ -525,9 +534,10 @@ class AsyLower {
   /**
    * `struct A { int x; real y = 1.5; }` -> 一条记录声明。
    *
-   * 字段**这一刀只收 int / real / bool / string**：核心方言的类字段就卡在这里
-   * （每条腿的"零值"是各自一个只认标量的小函数，见 sexpr/lower.js 的 structDec）。
-   * 所以 `pair` 字段、数组字段、记录套记录都在门外，各有一份 bad/ 钉着。
+   * 字段**这一刀收 int / real / bool / string 与 pair**（pair 是第十五刀加的：核心方言的
+   * 类字段现在收 `(vec T N)`，而 asy 的 pair 就降成 `(vec real 2)`）。
+   * 数组字段与记录套记录还在门外（核心方言那边数组字段的零值是一次运行时调用，
+   * 不是常量），各有一份 bad/ 钉着。
    * 方法（struct 里的函数定义）也在门外：那要 this 与闭包，是另一刀。
    */
   recordDec(n) {
@@ -545,8 +555,8 @@ class AsyLower {
       if (head(r) !== 'vardec') return this.nope(r, `struct 里的 '${head(r)}'（这一刀只有字段声明）`);
       const ft = this.type(r.items[1], `struct ${nm} 的字段`);
       if (ft === null) return null;
-      if (!SCALARS.has(ft)) {
-        return this.nope(r, `struct ${nm} 的 ${ft} 字段（这一刀的字段只有 int/real/bool/string）`);
+      if (!SCALARS.has(ft) && ft !== 'pair') {
+        return this.nope(r, `struct ${nm} 的 ${ft} 字段（这一刀的字段只有 int/real/bool/string/pair）`);
       }
       for (const d of this.flat(r.items[2], 'decids')) {
         if (!isList(d) || head(d) !== 'decid') return this.err(d, '认不出的字段声明');
@@ -689,6 +699,7 @@ class AsyLower {
         // `a.length` / `z.x`：词法上"点"是名字的一部分（`name -> name "." ID`），所以
         // 数组和 pair 的字段都不是 `(field …)` 而是一个**带点的名字**。
         const q = this.dotQual(n.items[1]);
+        if (q === DOT_BAD) return null;
         if (q !== null) return this.member(n, q.recv, q.field);
         return this.nope(n, '带点的名字或算符名');
       }
@@ -781,16 +792,27 @@ class AsyLower {
     return { code: `(call asy__slicefrom_${el} ${a.code} ${lo.code})`, type: a.type };
   }
 
-  /** `(qualified (name a) F)` 且 a 是**变量**时回 `{recv, field}`，否则回 null。
-   *  只认变量：`模块.名字` 也是这个形状，那要模块系统，这一刀没有。 */
+  /** `(qualified (name a) F)` 且 a 是**变量**时回 `{recv, field}`，否则回 null；
+   *  接收者已经报过错的那种回 DOT_BAD（调用方就不再补一句"认不出的带点名字"）。
+   *  只认变量与「变量再点几层」：`模块.名字` 也是这个形状，那要模块系统，这一刀没有。 */
   dotQual(node) {
     if (!isList(node) || head(node) !== 'qualified') return null;
-    const base = this.plainName(node.items[1]);
     const f = isAtom(node.items[2]) ? node.items[2].value : null;
-    if (base === null || f === null) return null;
-    const t = this.lookup(base);
-    if (t === null) return null;
-    return { recv: { code: `(var ${base})`, type: t }, field: f };
+    if (f === null) return null;
+    const base = this.plainName(node.items[1]);
+    if (base !== null) {
+      const t = this.lookup(base);
+      if (t === null) return null;
+      return { recv: { code: `(var ${base})`, type: t }, field: f };
+    }
+    // `a.p.x`：接收者自己又是一个带点的名字（第十五刀的 pair 字段逼出来的 ——
+    // struct 的 pair 字段一进来，`s.p.x` 就成了三层）。递归先把它降成一个值。
+    // 这里不怕重复求值：能走到这条路的接收者只有变量读与字段读，两者都没有副作用。
+    const inner = this.dotQual(node.items[1]);
+    if (inner === null) return null;
+    if (inner === DOT_BAD) return DOT_BAD;
+    const recv = this.member(node.items[1], inner.recv, inner.field);
+    return recv === null ? DOT_BAD : { recv, field: f };
   }
 
   /** `(field 值 ID)`：`a[0].x` 这种（点后面跟的不是名字而是别的表达式时走这条） */
@@ -1147,6 +1169,7 @@ class AsyLower {
     if (nm === null && isList(callee) && head(callee) === 'name-exp') {
       // `c.push(8)`：同上，点是名字的一部分，所以方法调用也是"调一个带点的名字"
       const q = this.dotQual(callee.items[1]);
+      if (q === DOT_BAD) return null;
       if (q !== null) {
         if (!asyIsArr(q.recv.type)) return this.nope(n, `${q.recv.type} 上的方法调用 '.${q.field}(…)'`);
         return this.arrMethod(n, q.recv, q.field);
@@ -1790,7 +1813,14 @@ class AsyLower {
     // 复合赋值要把它求两次，而变量读没有副作用。
     if (isList(lhs) && head(lhs) === 'name-exp') {
       const q = this.dotQual(lhs.items[1]);
+      if (q === DOT_BAD) return null;
       if (q !== null && this.isRec(q.recv.type)) return this.assignFld(node, q, rhs, op);
+      // pair 的分量是**只读**的虚字段：量过 asy 对 `z.x = 5` 与 `a.p.x = 5` 都报
+      // "virtual field is read-only"。这条不是"还没做"，所以不带 ASY_NOPE ——
+      // `tests/asy/strict/pair-field-set` 钉着它。
+      if (q !== null && q.recv.type === 'pair') {
+        return this.err(node, `pair 的 '${q.field}' 是只读的虚字段 —— asy 那边就是 "virtual field is read-only"`);
+      }
     }
     if (isList(lhs) && head(lhs) === 'field') return this.nope(node, '给"不是普通变量的东西"的字段赋值');
     // 切片赋值 asy **有**（量过：`int[] a={1,2,3}; a[0:2]=b;` 之后 a 是 7,8,3），
@@ -1859,6 +1889,14 @@ class AsyLower {
     const one = rhs === null ? { code: t === 'real' ? '(real 1.0)' : '(int 1)', type: t } : this.expr(rhs);
     if (one === null) return null;
     if (rhs === null && t !== 'int' && t !== 'real') return this.err(node, `'${q.field}' 是 ${t}，不能自增自减`);
+    if (t === 'pair') {
+      // pair 字段上的复合赋值与 pair 变量上那份是同一条规则（同一批测量）：`+= -=`
+      // 逐分量，`*= /=` 走**复数**乘除 —— 量过 `p *= 2` 是 (4,5)->(8,10)，走
+      // "coerce 成 (2,0) 再逐分量乘"会给出 (8,0)，所以这条不能少。
+      if (op !== '+' && op !== '-' && op !== '*' && op !== '/') return this.err(node, `pair 上没有 '${op}='`);
+      const v = this.pairArith(node, op, { code: cur, type: 'pair' }, one);
+      return v === null ? null : put(v.code);
+    }
     if (op === '#' || op === '%') {
       if (t !== 'int' || one.type !== 'int') return this.err(node, `'${op}=' 两边要是 int`);
       const helper = op === '#' ? 'asy__quot' : 'asy__mod';

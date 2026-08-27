@@ -414,7 +414,10 @@ class CEmitter {
   structBody(s) {
     this.line(`struct s_${s.name}_s {`);
     this.indent++;
-    for (const f of s.fields) this.line(`${cTypeName(f.type)} f_${f.name};`);
+    // 字段类型里的向量形状也要登记 —— 一个形状只出现在字段上时（结构体里放个 pair，
+    // 函数体里一条向量运算都没有），vecLines 那边没别的地方会记下它。回填的位置
+    // （vecAt）在结构体本体之前，所以在这里登记来得及。
+    for (const f of s.fields) this.line(`${cTypeName(this.noteVec(f.type))} f_${f.name};`);
     this.indent--;
     this.line(`};`);
     this.line(`typedef struct s_${s.name}_s s_${s.name};`);
@@ -423,7 +426,7 @@ class CEmitter {
   classBody(c) {
     this.line(`struct c_${c.name}_s {`);
     this.indent++;
-    for (const f of c.fields) this.line(`${cTypeName(f.type)} f_${f.name};`);
+    for (const f of c.fields) this.line(`${cTypeName(this.noteVec(f.type))} f_${f.name};`);
     this.indent--;
     this.line(`};`);
   }
@@ -655,6 +658,10 @@ class CEmitter {
       case 'class': case 'fn': return 'NULL';
       case 'dynamic': return 'omni_dyn_null()';
       case 'list': case 'dict': case 'set': return `${cTypeName(t)}_new()`;
+      // 向量（第十五刀：结构体的向量字段）。走逐形状生成的 `_splat` —— 与裸的
+      // VecSplat 表达式同一个函数，"字段的零"不另开一条路。noteVec 是必需的：
+      // 一个形状只作为字段类型出现过时，vecLines 那边没别的地方会记下它。
+      case 'vec': return `${cTypeName(this.noteVec(t))}_splat(${this.zeroExpr(t.elem)})`;
       default: throw new Error(`c.zero: ${t.k}`);
     }
   }

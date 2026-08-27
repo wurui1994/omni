@@ -213,11 +213,17 @@ class CoreLowerer {
    * OIR 的消费者早就各有一份（解释器的 copyOf、JS 后端的 `$cp_S`、C 后端的原生 `=`、
    * MIR 的 `OP.COPY`），方言这边只要把节点发对。
    *
-   * **字段类型这一刀只收 int / real / bool / string**。不是懒：每条腿的"结构体零值"
-   * 都是一个**独立**的小函数（JS 后端的 `zero`、C 后端的 `zeroExpr`、解释器的 `zeroOf`），
-   * 它们今天只认标量 —— 向量/数组字段要先把这三处各补一遍，还要在 LLVM 那条腿上决定
-   * "字段是数组时复制的是句柄还是内容"。那是下一刀，`tests/sexpr/bad/struct-field-arr.sx`
-   * 与 `struct-in-struct.sx` 钉着现在的边界。
+   * **字段类型这一刀收 int / real / bool / string 与 `(vec T N)`**（第十五刀把向量放了
+   * 进来：asy 的 `struct { pair p; }` 要它，门槛 3 的 transform 那种"六个 real"也要它）。
+   * 向量字段是**值语义**，跟标量字段一样。每条腿的"结构体零值"都是一个**独立**的小函数
+   * （JS 后端的 `zero`、C 后端的 `zeroExpr`、解释器的 `zeroOf`、LLVM 的 `fieldZero`），
+   * 四处各补了一条向量的臂；JS 那条腿还要在 `$cp_S` 里对向量字段发 `$vcopy` ——
+   * 不发的话它拷出来的是同一个宿主数组，而 C/LLVM 拷的是 16 字节的副本。
+   *
+   * **数组字段还在门外**：数组的零值不是常量而是一次运行时调用
+   * （`omni_arr_*_new(0, 零值)`），而 LLVM 那条腿的 `NEW` 现在只会 `store 一个常量`。
+   * 那是下一刀。`tests/sexpr/bad/struct-field-arr.sx` 与 `struct-in-struct.sx`
+   * 钉着现在的边界。
    */
   structDec(n, kind) {
     const what = kind === 'struct' ? '结构体' : '类';
@@ -235,9 +241,9 @@ class CoreLowerer {
       if (seen.has(fn)) return this.err(fd, `${what} '${nm}' 里有两个字段叫 '${fn}'`);
       const t = this.ty(fd.items[1], `字段 ${nm}.${fn}`);
       if (t === null) return null;
-      if (t !== INT && t !== REAL && t !== BOOL && t !== STRING) {
-        return this.err(fd, `字段 ${nm}.${fn}：这一刀的字段只能是 int / real / bool / string，`
-          + `这里是 ${coreTypeText(t)}`);
+      if (t !== INT && t !== REAL && t !== BOOL && t !== STRING && t.k !== 'vec') {
+        return this.err(fd, `字段 ${nm}.${fn}：这一刀的字段只能是 int / real / bool / string `
+          + `或 (vec T N)，这里是 ${coreTypeText(t)}`);
       }
       seen.set(fn, true);
       fields.push({ name: fn, type: t });
