@@ -1,0 +1,1 @@
+'f' 在这里还看不见 —— struct S 里它声明在后面，而成员也是顺序解析的（asy 那边报 "no matching variable 'f'"）

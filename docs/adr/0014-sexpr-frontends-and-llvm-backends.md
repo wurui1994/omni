@@ -3103,6 +3103,37 @@ if (this.isRec(eel) && !this.recHere(eel)) return this.recLate(node, eel);
 `frontend-asy/`（decls.js、calls.js），tests/sexpr 与 tests/run.js 跳掉 —— 核心方言与
 后端这一刀没碰。
 
+### 字段默认值看得见前面的成员：那个局部量改名叫 `this`
+
+顺着 struct 体往里走时量到的一个**旧洞**：`struct S { int x = 1; int y = x + 1; }`
+asy 印 2，我们报"未声明的变量 'x'"。隐式构造那份 `asy__new_T` 是自己攒出来的一串
+`fldset`，攒的时候 `L.self` 是关着的，于是字段默认值里的裸字段名无处可查。
+
+量出来的四条，正好就是方法体里那套 `self` 规矩：
+
+- `int x = 1; int y = x + 1;` -> 2（**前面**的字段看得见）；
+- 反序 `int y = x + 1; int x = 1;` -> `no matching variable 'x'`（退 1）；
+- `int y = f(); int f() {…}` 同样 `no matching variable 'f'`（退 1）；
+- 方法写在前面 `int f() {…} int y = f();` -> 7。
+
+也就是 `selfField` 的 `f.mat < self.mat` 与 `visibleMethods` 的 `c.mat <= self.mat`
+两条现成的裁法。所以落地只有一处：把 `recNew` 里那个局部量从 `o` **改名叫 `this`**，
+再按这一格的成员号把 `L.self` 开着 —— 裸字段名于是走的就是方法体里那条老路
+（`(fld (var this) f)`），一条新代码路径都没多。
+
+顺带修的是**理由**：`int y = f();` 那条以前会漏到内建名单那一层，报出带 `ASY_NOPE` 的
+"内建函数 'f'" —— 把"程序本来就不对"说成"我们还没做"。现在方法体那一档后面多问一句
+"这个名字是不是这个 struct 里声明在后面的成员"，报 err。两条都进了 strict
+（`field-def-later`、`field-def-later-method`，真 asy 也退 1）。
+
+`import plain;` 还是 1（`map.asy:115`），`import graph;` 还是 183 —— 这一刀是补洞，
+不是推墙。下一格才是 struct 体里的**语句**（量过：每个实例构造时按体内顺序跑一遍，
+能裸读写字段 —— 与字段默认值同一串，所以这一刀的 `this` 是它的地基）。
+
+跑的轴：`tests/asy`（135 passed，46.9s）、`tests/bootstrap`（60 passed）。只动
+`frontend-asy/`（lower.js、calls.js），tests/sexpr 与 tests/run.js 跳掉。
+
+
 
 
 

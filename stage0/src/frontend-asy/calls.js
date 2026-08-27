@@ -85,6 +85,17 @@ export function asyCall(L, n) {
     if (sf !== null && asyIsFn(sf.type)) {
       return asyFnValCall(L, n, nm, sf.type, `(fld (var this) ${nm})`);
     }
+    // 声明在**后面**的成员（第三十五刀，字段默认值那一档把它显出来了）：
+    // `struct S { int y = f(); int f() {…} }` asy 报 "no matching variable 'f'" 并退 1 ——
+    // 它自己也拒。不专门问一句就会漏到下面的内建名单，报出带 ASY_NOPE 的"内建函数 'f'"，
+    // 那是把"程序本来就不对"说成"我们还没做"。
+    const all = L.units[L.self.rec.unit].funcs.get(`${L.self.rec.name}.${nm}`);
+    let lateFld = false;
+    for (const f of L.self.rec.fields) if (f.name === nm) lateFld = true;
+    if ((all !== undefined && all.length > 0) || lateFld) {
+      return L.err(n, `'${nm}' 在这里还看不见 —— struct ${L.self.rec.name} 里它声明在后面，`
+        + `而成员也是顺序解析的（asy 那边报 "no matching variable '${nm}'"）`);
+    }
   }
   // 内建数学函数先看：asy 里 sqrt/floor/… 是运行时自带的，不是 plain.asy 里的定义，
   // 所以这一层认它们不算"偷偷补模块系统"。用户自己定义了同名函数时以用户的为准

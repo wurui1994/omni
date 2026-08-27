@@ -1164,12 +1164,20 @@ class AsyLower {
     const saveUpd = this.updates;
     const saveScopes = this.scopes;
     const saveAt = this.at;
+    const saveSelf = this.self;
     if (rec.at !== undefined) this.at = rec.at;
     this.scopes = [new Map()];
     this.updates = [];
-    const lines = [`(let o ${t} (cnew ${t}))`];
+    // 那个局部量就叫 `this` —— 于是字段默认值里的裸字段名（走 `(fld (var this) f)`）
+    // 与方法体里那条路一模一样，不用另开一套。量出来的四条正好就是 self 那套规矩：
+    //   - `struct S { int x = 1; int y = x + 1; }` -> 2（**前面**的字段看得见）；
+    //   - 反序 `int y = x + 1; int x = 1;` -> "no matching variable 'x'"；
+    //   - `int y = f(); int f() {…}` 同样报 "no matching variable 'f'"；
+    //   - 方法写在前面 `int f() {…} int y = f();` -> 7。
+    // 也就是 selfField 的 `f.mat < self.mat` 与 visibleMethods 的 `c.mat <= self.mat`。
+    const lines = [`(let this ${t} (cnew ${t}))`];
     this.pre = lines;
-    this.declare(n, 'o', t);
+    this.declare(n, 'this', t);
     let bad = false;
     for (const f of rec.fields) {
       if (f.def === null) {
@@ -1178,19 +1186,23 @@ class AsyLower {
         if (this.isRec(f.type)) {
           const mk = this.recInit(n, f.type);
           if (mk === null) { bad = true; break; }
-          lines.push(`(fldset (var o) ${f.name} ${mk})`);
+          lines.push(`(fldset (var this) ${f.name} ${mk})`);
         }
         continue;
       }
+      // 这一格的可见位置就是它自己的成员号（mat）
+      this.self = { rec: rec, mat: f.mat };
       const v = asyCoerce(this, asyExpr(this, f.def), f.type, f.def, `字段 '${t}.${f.name}' 的默认值`);
+      this.self = saveSelf;
       if (v === null) { bad = true; break; }
-      lines.push(`(fldset (var o) ${f.name} ${v.code})`);
+      lines.push(`(fldset (var this) ${f.name} ${v.code})`);
     }
-    lines.push('(ret (var o))');
+    lines.push('(ret (var this))');
     this.pre = savePre;
     this.updates = saveUpd;
     this.scopes = saveScopes;
     this.at = saveAt;
+    this.self = saveSelf;
     if (bad) return null;
     const text = [`  (fn ${fname} () ${t}`];
     for (const s of lines) text.push(`    ${s}`);
