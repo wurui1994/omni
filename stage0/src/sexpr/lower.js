@@ -17,6 +17,7 @@
  *         | (kernel NAME ((p TYPE)...) STMT...)     GPU 核（隐含第一个形参是 gid）
  *         | (struct NAME (字段 TYPE)...)            结构体（值语义，ADR-0005）
  *         | (class NAME (字段 TYPE)...)             类（引用语义）
+ *         | (global NAME TYPE)                      模块级变量（零初始化，跨函数共享）
  *         | (main STMT...)                          入口体
  *   TYPE  = int | real | bool | string | void | (vec int|real 2|4|8) | (buf int|real)
  *         | (arr int|real|bool|string) | (arr (vec T N)) | 结构体名 | 类名
@@ -41,6 +42,11 @@
  * 数组那六条是门槛 2 的第四刀（asy 的 `T[]`），见 arrExpr 的注释；
  * 结构体那三条是门槛 2 的第十二刀（asy 的 struct），见 structDec 的注释；
  * 类是第十三刀 —— 与结构体**只差值语义/引用语义**这一条，asy 的 struct 是引用的那种。
+ * `(global …)` 是第二十四刀（asy 的文件级变量、也是模块那一刀的前置）：它**没有初值** ——
+ * 零初始化，真正的赋值就是 `(main …)` 或某个函数里的一句 `(set …)`。这样定是因为
+ * 「初值什么时候求」在有模块以后是门语言设计（asy 是按文件顺序、在那一行求），
+ * 汇聚层不替谁定；而零初始化在六条腿上都是现成的（见 zeroValue）。
+ * 读写就用现成的 `(var NAME)` / `(set NAME E)`：没有局部量遮盖时它们落到全局上。
  *
  * 类型不推导，只**检查**：声明处写死，表达式自底向上定型，两边类型不一致就报错 ——
  * 不插隐式转换。理由与 ADR-0008 一致：这一层的职责是把树接进 OIR，
@@ -76,6 +82,9 @@ class CoreLowerer {
     // 不需要任何新机制（门槛 7 要比的就是这个 CPU 结果），dispatch 只是一个循环。
     this.kernels = new Map();
     this.inKernel = false;
+    // 模块级变量（第二十四刀）：名字 -> OIR 类型。查名字时它是**最外层的兜底** ——
+    // 局部量与形参先赢，所以同名的局部量是遮蔽而不是错。
+    this.globals = new Map();
     this.tmpNo = 0;           // dispatch 展开出来的临时量编号，保证名字唯一
     this.loopDepth = 0;       // (brk) / (cont) 只在循环里合法，跟 hir/check.js 同一条规矩
     // 结构体：名字 -> OIR 的 struct 类型对象。**声明就是类型**（hir/types.js 的 structType），
@@ -163,6 +172,17 @@ class CoreLowerer {
     return null;
   }
 
+  /**
+   * 名字的类型：先局部再全局（第二十四刀）。回 `{type, global}` 而不是光一个类型，
+   * 因为发出去的 OIR 节点是两种（`VarRef` / `GlobalRef`），调用方要分得开。
+   */
+  nameRef(name) {
+    const local = this.lookup(name);
+    if (local !== null) return { type: local, global: false };
+    if (this.globals.has(name)) return { type: this.globals.get(name), global: true };
+    return null;
+  }
+
   /* -------------------------------------------------------------- 模块 */
 
   run(nodes) {
@@ -186,7 +206,24 @@ class CoreLowerer {
       if (head(f) === 'struct') this.structDec(f, 'struct');
       else if (head(f) === 'class') this.structDec(f, 'class');
     }
-    // 第二遍收函数签名，函数才能互相调用（也才能递归）
+    // 第二遍收模块级变量（第二十四刀）：函数体与 (main …) 都可能提到它，所以要在
+    // 那些体降级之前成型。这一刀只收标量 —— MIR 那边全局的类型就是一个 8 位类型码，
+    // 聚合的**身份**在类型池里，全局要带身份得先给那张池子加一列，那是另一刀。
+    for (const f of forms) {
+      if (head(f) !== 'global') continue;
+      const nm = isAtom(f.items[1]) ? f.items[1].value : null;
+      if (nm === null) { this.err(f, '(global 名字 类型)'); continue; }
+      if (this.globals.has(nm)) { this.err(f, `模块级变量 '${nm}' 重复定义`); continue; }
+      const t = this.ty(f.items[2], `模块级变量 ${nm}`);
+      if (t === null) continue;
+      if (t !== INT && t !== REAL && t !== BOOL && t !== STRING) {
+        this.err(f, `模块级变量 ${nm} 这一刀只收 int / real / bool / string，`
+          + `不收 ${coreTypeText(t)}（聚合的身份不在 MIR 的 8 位类型码里，那是另一刀）`);
+        continue;
+      }
+      this.globals.set(nm, t);
+    }
+    // 第三遍收函数签名，函数才能互相调用（也才能递归）
     for (const f of forms) {
       const h = head(f);
       if (h !== 'fn' && h !== 'kernel') continue;
@@ -294,6 +331,18 @@ class CoreLowerer {
     const funcs = [];
     const mainStmts = [];
     let sawMain = false;
+    // 模块级变量的零初始化就是 `(main …)` 最前面的几句赋值（第二十四刀）。放在这一层
+    // 而不是让六个后端各写一份"这个类型的零长什么样"：零值节点 OIR 里现成（zeroValue），
+    // 而后端只要会存取一个全局就够。顺序是声明序，所以两次降级出来的文本一样。
+    for (const [nm, t] of this.globals) {
+      mainStmts.push({
+        kind: 'ExprStmt',
+        expr: {
+          kind: 'Assign', target: { kind: 'GlobalRef', name: nm, type: t },
+          value: zeroValue(t), type: t,
+        },
+      });
+    }
     for (const f of forms) {
       const h = head(f);
       if (h === 'fn') {
@@ -332,7 +381,8 @@ class CoreLowerer {
         continue;
       }
       if (h === 'struct' || h === 'class') continue;   // 第一遍已经收过了
-      this.err(f, `(module ...) 里只能是 (struct ...) / (class ...) / (fn ...) / (kernel ...) / (main ...)，见到 '${h}'`);
+      if (h === 'global') continue;                    // 第二遍已经收过了
+      this.err(f, `(module ...) 里只能是 (struct ...) / (class ...) / (global ...) / (fn ...) / (kernel ...) / (main ...)，见到 '${h}'`);
     }
     if (!sawMain) this.err(null, '缺入口：加一个 (main ...)');
     mainStmts.push({ kind: 'Return', value: null });
@@ -343,9 +393,14 @@ class CoreLowerer {
     for (const s of this.structs.values()) structs.push(s);
     const classes = [];
     for (const c of this.classes.values()) classes.push(c);
+    // 模块级变量按**声明顺序**发出去（Map 记的就是插入序）：MIR 的全局号按这个顺序分配，
+    // 所以同一份输入两次编译出来的字节与哈希都一样。
+    const globals = [];
+    for (const [nm, t] of this.globals) globals.push({ name: nm, mangled: `g_${nm}`, type: t });
     return {
       structs: structs, classes: classes, enums: [], containers: [], closures: [], fnTypes: [],
       funcs: funcs,
+      globals: globals,
       entry: 'omni_main',
     };
   }
@@ -386,12 +441,20 @@ class CoreLowerer {
     if (h === 'set') {
       const nm = isAtom(n.items[1]) ? n.items[1].value : null;
       if (nm === null) return this.err(n, '(set 名字 值)');
-      const t = this.lookup(nm);
-      if (t === null) return this.err(n, `未声明的变量 '${nm}'`);
+      const r = this.nameRef(nm);
+      if (r === null) return this.err(n, `未声明的变量 '${nm}'`);
+      if (r.global && this.inKernel) {
+        return this.err(n, `kernel 里改模块级变量 '${nm}'（GPU 那条腿上没有它，`
+          + '结果写回 (buf …) 形参）');
+      }
+      const t = r.type;
       const v = this.expr(n.items[2]);
       if (v === null) return null;
       if (!sameCoreType(v.type, t)) return this.err(n, `'${nm}' 是 ${coreTypeText(t)}，赋的值是 ${coreTypeText(v.type)}`);
-      return { kind: 'ExprStmt', expr: { kind: 'Assign', target: { kind: 'VarRef', name: nm, type: t }, value: v, type: t } };
+      const tgt = r.global
+        ? { kind: 'GlobalRef', name: nm, type: t }
+        : { kind: 'VarRef', name: nm, type: t };
+      return { kind: 'ExprStmt', expr: { kind: 'Assign', target: tgt, value: v, type: t } };
     }
     return this.stmt2(n, h, ret);
   }
@@ -732,9 +795,16 @@ class CoreLowerer {
     if (h === 'var') {
       const nm = isAtom(n.items[1]) ? n.items[1].value : null;
       if (nm === null) return this.err(n, '(var 名字)');
-      const t = this.lookup(nm);
-      if (t === null) return this.err(n, `未声明的变量 '${nm}'`);
-      return { kind: 'VarRef', name: nm, type: t };
+      const r = this.nameRef(nm);
+      if (r === null) return this.err(n, `未声明的变量 '${nm}'`);
+      // kernel 里读全局是不收的：GPU 那条腿上"模块级变量"没有对应物（SPIR-V 的
+      // 全局变量得挂在某个存储类上，而选哪个是接口设计，不是降级能替它定的）。
+      if (r.global && this.inKernel) {
+        return this.err(n, `kernel 里读模块级变量 '${nm}'（GPU 那条腿上没有它，`
+          + '要的数据从 (buf …) 形参进来）');
+      }
+      if (r.global) return { kind: 'GlobalRef', name: nm, type: r.type };
+      return { kind: 'VarRef', name: nm, type: r.type };
     }
     if (h === 'call') {
       const nm = isAtom(n.items[1]) ? n.items[1].value : null;

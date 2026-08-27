@@ -1,0 +1,1 @@
+'g' 在这里还不是一个变量 —— 文件级的 g 声明在后面，而 asy 的名字解析是顺序的（那边报 "no matching variable of name 'g'"）

@@ -264,6 +264,10 @@ class CEmitter {
     // JS 前端的模块级变量（ADR-0011）：顶层函数要能互相看见，所以是真全局，
     // 不是 omni_main 的局部量。初值一律 undefined，赋值发生在 omni_main 里。
     for (const g of this.mod.jsGlobals ?? []) this.line(`static omni_dyn g_${g.name} = { .tag = OMNI_DYN_UNDEF };`);
+    // 核心方言的模块级变量（第二十四刀）：有类型，所以发的是那个类型的静态量。
+    // 不给初值 —— C 的静态存储本来就零，而真正的初值是 omni_main 最前面那几句赋值
+    // （字符串的"零"是个池子里的空串常量，那不是常量表达式，只能在运行时赋）。
+    for (const g of this.mod.globals ?? []) this.line(`static ${cTypeName(g.type)} g_${g.name};`);
     for (const f of this.mod.funcs) this.line(`${this.proto(f)};`);
     this.line();
     for (const c of closures) this.closureMake(c);
@@ -891,6 +895,7 @@ class CEmitter {
       case 'Bin': return this.bin(e);
       // JS 前端的模块级变量（ADR-0011）：一个真全局，可读可写
       case 'JsGlobal': return `g_${e.name}`;
+      case 'GlobalRef': return `g_${e.name}`;
       case 'Ternary': return `(${this.expr(e.cond)} ? ${this.expr(e.then)} : ${this.expr(e.otherwise)})`;
       case 'Assign': return `(${this.expr(e.target)} = ${this.expr(e.value)})`;
       case 'IndexGet': return `${cTypeName(e.recvType)}_get(${this.expr(e.obj)}, ${this.expr(e.index)})`;

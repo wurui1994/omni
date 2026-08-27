@@ -78,6 +78,9 @@ class Interp {
     // JS 前端的模块级变量（ADR-0011）：顶层函数要互相看见，所以是一张真全局表
     this.globals = new Map();
     for (const g of mod.jsGlobals ?? []) this.globals.set(g.name, undefined);
+    // 核心方言的模块级变量（第二十四刀）：同一张表。初值是 omni_main 最前面那几句赋的，
+    // 这里只要把格子开出来。
+    for (const g of mod.globals ?? []) this.globals.set(g.name, undefined);
     this.ret = undefined;
     this.depth = 0;
   }
@@ -211,7 +214,7 @@ class Interp {
   rvalue(e, type, env, frame) {
     const v = this.eval(e, env, frame);
     const lval = e.kind === 'VarRef' || e.kind === 'Field' || e.kind === 'EnumPayload'
-      || e.kind === 'CaptureRef' || e.kind === 'JsGlobal';
+      || e.kind === 'CaptureRef' || e.kind === 'JsGlobal' || e.kind === 'GlobalRef';
     if (type && lval) return this.copyOf(type, v);
     return v;
   }
@@ -319,6 +322,7 @@ class Interp {
       }
       case 'ArrPop': return arrPop(this.eval(e.arr, env, frame));
       case 'JsGlobal': return this.globals.get(e.name);
+      case 'GlobalRef': return this.globals.get(e.name);
       case 'Field': {
         const o = this.eval(e.object, env, frame);
         // class 是引用类型，可能为 null：两个后端都显式检查，消息一致（prelude 的 $nullCheck）
@@ -382,6 +386,7 @@ class Interp {
     switch (t.kind) {
       case 'VarRef': return env.assign(t.name, v);
       case 'JsGlobal': this.globals.set(t.name, v); return v;
+      case 'GlobalRef': this.globals.set(t.name, v); return v;
       case 'CaptureRef': frame.captures.set(t.name, v); return v;
       case 'Field': case 'EnumPayload': {
         const o = this.eval(t.object, env, frame);

@@ -92,6 +92,13 @@
 // 定义 `==` 不白得 `!=`，定义 `<` 不白得 `<=`；③ 一元 `- !`、复合赋值 `+= -= *= /=`
 // （摊成 `a = a + b`，所以自动落到用户那份）、以及 `--`（那是 guide 的连接产生式，
 // 内建的要等绘图层，但自己定义一份是通的）都走同一张表）。
+// **文件级变量**（第二十四刀：`int counter = 7;` 之后**函数里**读得到、改得到 ——
+// 核心方言这一刀加了 `(global 名字 类型)`，asy 的那份声明降成「一个全局 + 原地一句
+// `(set …)`」，于是"初值在它那一行求"这条语义是照搬的而不是模拟的。顺序解析照旧：
+// 函数体只看得见前面声明的那些（strict/global-fwd 钉着 —— asy 自己也拒）；局部量与
+// 形参是**遮蔽**；同名再声明一次就是另一个变量，所以每份声明各出一个符号
+// `asy__g<序号>_<名字>`。只收 int/real/bool/string —— pair/记录/数组照旧当
+// `(main …)` 的局部量，函数里看不见，bad/global-pair 钉着那条边界）。
 //
 // 不支持（见到就报错，报错里说清是哪一条）：triple、import/access、
 // typedef、`operator cast`（asy 的隐式转换 —— 形态好认，但它会改**重载解析的打分**：
@@ -264,6 +271,11 @@ const ASY_OPSYM = new Map([
 
 /** asy 的语法本身就拒的算符名（量过）。见 strict/op-logic.asy。 */
 const ASY_OPBAD = new Set(['&&', '||']);
+
+/** 文件级变量这一刀（第二十四刀）收得下的类型：核心方言的 `(global …)` 只收标量。
+ *  pair 是 `(vec real 2)`、记录是类、数组是 `(arr T)` —— 那三种的身份不在 MIR 的
+ *  8 位类型码里，全局池要带身份得先加一列，那是另一刀（bad/global-pair 钉着）。 */
+const ASY_GLOBAL_OK = new Set(['int', 'real', 'bool', 'string']);
 
 
 /** 数组类型在这一层就是「元素名 + []」的字符串（`'real[]'`），核心方言那边是 `(arr real)`。
@@ -558,9 +570,18 @@ class AsyLower {
     // 那两条 if/else 就攒在这里，由 stmt() 的外壳补在这条语句前面。
     // null = 不在语句上下文里（那时见到 `? :` 只能报错，不能悄悄丢）。
     this.pre = null;
-    // 文件级变量的名字。核心方言没有全局量，所以函数里碰到它们要给一句**说得清**的错，
-    // 而不是"未声明的变量"——后者会让人以为是拼错了。
+    // 文件级变量（第二十四刀）：名字 -> 一串声明 {sym, type, at, ok}。
+    // **一串**而不是一个，因为 asy 的名字解析是顺序的，而同一个名字可以在文件里声明
+    // 多次（量过：`int a = 1; write(a); int a = 7; write(a);` 印 1 再印 7）——
+    // 于是每份声明各出一个全局，用到的地方挑"此处可见的最后一份"。
+    // `ok:false` 的那些是这一刀的全局量还收不下的类型（pair/记录/数组），
+    // 留在表里只为让函数里那句错话说得清是哪一条。
     this.globals = new Map();
+    // 按声明顺序攒起来的 `(global sym 类型)`，最后发到模块层
+    this.gdecls = [];
+    // 正在降级**文件级**的语句（`(main …)` 那一层）。vardec 要靠它分清
+    // "这是个全局"还是"这是 main 里某个块的局部量"。
+    this.fileLevel = false;
     // 默认实参的包装函数（第十刀）：`函数名|缺的槽号` -> 包装名，正文攒在 wraps 里，
     // 最后跟别的函数一起发到模块层。同一形状只生一份，顺序按第一次用到的顺序 ——
     // 同一份输入两次降出来的文本因此逐字节相同。
@@ -986,7 +1007,15 @@ class AsyLower {
         // 所以这一问在"未声明的变量"之前、也在文件级变量那句话之前。
         const f = this.selfField(nm);
         if (f !== null) return { code: `(fld (var this) ${nm})`, type: f.type };
-        if (this.globals.has(nm)) return this.nope(n, `函数里引用文件级变量 '${nm}'（核心方言没有全局量）`);
+        // 文件级变量（第二十四刀）：核心方言的 `(global …)`。顺序解析 —— 后面才声明的
+        // 那份在这里不算（量过 asy 报 "no matching variable of name 'g'"）。
+        const g = this.gvarHere(nm);
+        if (g !== null && g.ok) return { code: `(var ${g.sym})`, type: g.type };
+        if (g !== null) {
+          return this.nope(n, `函数里引用文件级变量 '${nm}'（这一刀的模块级变量`
+            + '只收 int/real/bool/string —— pair/记录/数组的身份不在 MIR 的类型码里）');
+        }
+        if (this.globals.has(nm)) return this.gvarLate(n, nm);
         return this.err(n, `未声明的变量 '${nm}'`);
       }
       return { code: `(var ${nm})`, type: t };
@@ -2256,9 +2285,18 @@ class AsyLower {
         if (v === null) return null;
         init = v.code;
       }
+      // 文件级的那一层（第二十四刀）：**标量**在这里不是局部量，是个全局。声明本身已经
+      // 在 globalNames 里收过了（函数体要先看得见它），这里只发那句赋值 —— 全局是
+      // 零初始化的，所以没有初值的声明什么都不发。
+      // 收不下的类型（pair/记录/数组）照旧当 `(main …)` 的局部量，与这一刀之前一样：
+      // 文件级还能用，只是函数里看不见（那句 nope 还在，见 expr 那边）。
+      const g = this.fileLevel && this.scopes.length === 1 ? this.gvarAt(nm) : null;
+      if (g !== null && g.ok) {
+        if (d.items[2] !== undefined) out.push(`(set ${g.sym} ${init})`);
+        continue;
+      }
       if (this.declare(start, nm, t) === null) return null;
-      out.push(`(let ${nm} ${asyCore(t)} ${init})`);
-    }
+      out.push(`(let ${nm} ${asyCore(t)} ${init})`);    }
     return out;
   }
 
@@ -2330,19 +2368,27 @@ class AsyLower {
     if (isList(lhs) && head(lhs) === 'slice-exp') return this.nope(node, '给切片赋值（`a[0:2] = b`）');
     const nm = isList(lhs) && head(lhs) === 'name-exp' ? this.plainName(lhs.items[1]) : null;
     if (nm === null) return this.nope(node, '赋值给不是普通变量或数组下标的东西（字段、切片、算符名）');
-    const t = this.lookup(nm);
+    // 下面发出去的代码用 `sym`（核心方言里那个名字），错话里用 `nm`（源码里那个名字）——
+    // 文件级变量的两者不同：它降成了一个全局，符号名带前缀（第二十四刀）。
+    let sym = nm;
+    let t = this.lookup(nm);
     if (t === null) {
       // 方法体里给裸字段名赋值（第二十刀）：`x += k` 就是 `this.x += k`
       const sf = this.selfField(nm);
       if (sf !== null) {
         return this.assignFld(node, { recv: { code: '(var this)', type: this.self.rec.name }, field: nm }, rhs, op);
       }
-      if (this.globals.has(nm)) return this.nope(node, `函数里改文件级变量 '${nm}'（核心方言没有全局量）`);
-      return this.err(node, `未声明的变量 '${nm}'`);
+      const g = this.gvarHere(nm);
+      if (g !== null && g.ok) { sym = g.sym; t = g.type; }
+      else if (g !== null) {
+        return this.nope(node, `函数里改文件级变量 '${nm}'（这一刀的模块级变量`
+          + '只收 int/real/bool/string —— pair/记录/数组的身份不在 MIR 的类型码里）');
+      } else if (this.globals.has(nm)) return this.gvarLate(node, nm);
+      else return this.err(node, `未声明的变量 '${nm}'`);
     }
     if (op === null) {
       const v = this.coerce(this.expr(rhs), t, node, `给 '${nm}' 赋的值`);
-      return v === null ? null : [`(set ${nm} ${v.code})`];
+      return v === null ? null : [`(set ${sym} ${v.code})`];
     }
     // 自增自减：右边就是 1，类型跟着变量
     const one = rhs === null ? { code: t === 'real' ? '(real 1.0)' : '(int 1)', type: t } : this.expr(rhs);
@@ -2350,40 +2396,40 @@ class AsyLower {
     if (rhs === null && t !== 'int' && t !== 'real') return this.err(node, `'${nm}' 是 ${t}，不能自增自减`);
     // 复合赋值走的是同一个二元算符（第二十三刀）：`x op= y` 就是 `x = x op y`，
     // 量过只定义了 `V operator +(V,V)` 时 `a += b` 是通的
-    const cv = { code: `(var ${nm})`, type: t };
+    const cv = { code: `(var ${sym})`, type: t };
     const uv = this.opUser(node, op, [cv, one], this.opBuiltinSig([cv, one]));
     if (uv !== null) {
       const v = this.coerce(uv, t, node, `'${nm} ${op}=' 的结果`);
-      return v === null ? null : [`(set ${nm} ${v.code})`];
+      return v === null ? null : [`(set ${sym} ${v.code})`];
     }
     if (t === 'pair') {
       // `z += w` 是逐分量，`z *= 2` 与 `z /= (0,1)` 走复数乘除（量过：(4,6)*=2 是
       // (8,12)、(8,12)/=(0,1) 是 (12,-8)）。`#= %= ^=` pair 上没有。
       if (op !== '+' && op !== '-' && op !== '*' && op !== '/') return this.err(node, `pair 上没有 '${op}='`);
-      const v = this.pairArith(node, op, { code: `(var ${nm})`, type: 'pair' }, one);
-      return v === null ? null : [`(set ${nm} ${v.code})`];
+      const v = this.pairArith(node, op, { code: `(var ${sym})`, type: 'pair' }, one);
+      return v === null ? null : [`(set ${sym} ${v.code})`];
     }
     if (op === '#' || op === '%') {
       if (t !== 'int' || one.type !== 'int') return this.err(node, `'${op}=' 两边要是 int`);
       const helper = op === '#' ? 'asy__quot' : 'asy__mod';
       this.used.add(helper);
-      return [`(set ${nm} (call ${helper} (var ${nm}) ${one.code}))`];
+      return [`(set ${sym} (call ${helper} (var ${sym}) ${one.code}))`];
     }
     if (op === '^') {
       if (t !== 'int' || one.type !== 'int') return this.nope(node, "real 上的 '^='");
       this.used.add('asy__ipow');
-      return [`(set ${nm} (call asy__ipow (var ${nm}) ${one.code}))`];
+      return [`(set ${sym} (call asy__ipow (var ${sym}) ${one.code}))`];
     }
     if (op === '/') {
       if (t !== 'real') return this.nope(node, `int 上的 '/='（asy 的 / 是实数除法，赋回 int 要写 #=）`);
       const v = this.coerce(one, 'real', node, "'/=' 的右边");
-      return v === null ? null : [`(set ${nm} (bin "/" (var ${nm}) ${v.code}))`];
+      return v === null ? null : [`(set ${sym} (bin "/" (var ${sym}) ${v.code}))`];
     }
     const v = this.coerce(one, t, node, `'${op}=' 的右边`);
     if (v === null) return null;
     if (t === 'string' && op !== '+') return this.err(node, `字符串上只有 '+='`);
     if (t === 'bool') return this.err(node, `bool 上没有 '${op}='`);
-    return [`(set ${nm} (bin "${op}" (var ${nm}) ${v.code}))`];
+    return [`(set ${sym} (bin "${op}" (var ${sym}) ${v.code}))`];
   }
 
   /**
@@ -2757,14 +2803,67 @@ class AsyLower {
     return `${text}\n${outer.join('\n')})`;
   }
 
-  /** 第一遍也收文件级变量的名字（只为了给函数里那句错话） */
-  globalNames(n) {
+  /**
+   * 第一遍收文件级变量（第二十四刀）：名字、类型、**位置**。位置要记，因为 asy 的名字
+   * 解析是顺序的 —— 量过函数体里引用后面才声明的文件级变量，asy 报
+   * "no matching variable of name 'g'"。
+   *
+   * 每份声明各出一个全局符号 `asy__g<序号>_<名字>`：同一个名字在文件里可以声明多次
+   * （量过 `int a = 1; write(a); int a = 7; write(a);` 印 1 再印 7 —— 那是两个变量），
+   * 而核心方言的模块级名字要全局唯一。
+   *
+   * 类型在这里是**照着节点看**出来的，不走 this.type()：那一路会报诊断，而这一遍
+   * 只是收表，真正的检查在 vardec 里（同一句报两遍是噪音）。看不出是标量的就 ok:false，
+   * 留在表里让函数里那句错话说得清是哪一条。
+   */
+  globalNames(n, at) {
+    const tn = n.items[1];
+    let base = null;
+    if (isList(tn) && head(tn) === 'name-ty') {
+      const inner = tn.items[1];
+      if (isList(inner) && head(inner) === 'name' && isAtom(inner.items[1])) base = inner.items[1].value;
+    }
     for (const d of this.flat(n.items[2], 'decids')) {
       if (!isList(d) || head(d) !== 'decid') continue;
       const start = d.items[1];
       if (!isList(start) || !isAtom(start.items[1])) continue;
-      this.globals.set(start.items[1].value, true);
+      const nm = start.items[1].value;
+      // 名字后面挂了维度（`real a[];`）就不是标量了
+      const dims = isList(start) && start.items.length > 2;
+      const ok = !dims && base !== null && ASY_GLOBAL_OK.has(base);
+      const g = { sym: `asy__g${this.gdecls.length}_${nm}`, type: ok ? base : null, at, ok };
+      const list = this.globals.has(nm) ? this.globals.get(nm) : [];
+      list.push(g);
+      this.globals.set(nm, list);
+      if (ok) this.gdecls.push(g);
     }
+  }
+
+  /**
+   * 名字 `nm` 在**当前位置**看得见的那份文件级变量（没有就 null）。顺序解析：
+   * 挑 `at <= this.at` 的最后一份 —— 与 visible()（函数候选）、recHere()（类型名）
+   * 是同一条规矩的第四处。
+   */
+  gvarHere(nm) {
+    const list = this.globals.get(nm);
+    if (list === undefined) return null;
+    let cur = null;
+    for (const g of list) if (g.at <= this.at) cur = g;
+    return cur;
+  }
+
+  /** 正在降级的这一句（`this.at`）声明的那份文件级变量。vardec 用它拿符号名。 */
+  gvarAt(nm) {
+    const list = this.globals.get(nm);
+    if (list === undefined) return null;
+    for (const g of list) if (g.at === this.at) return g;
+    return null;
+  }
+
+  /** 名字对得上，但那份文件级变量声明在**后面**。asy 自己也拒，所以是 err 不是 nope。 */
+  gvarLate(node, nm) {
+    return this.err(node, `'${nm}' 在这里还不是一个变量 —— 文件级的 ${nm} 声明在后面，`
+      + `而 asy 的名字解析是顺序的（那边报 "no matching variable of name '${nm}'"）`);
   }
 
   /** 第二遍：函数体。核心方言要求非 void 的函数每条路径都有 ret，asy 不要求 —— 差别见下。 */
@@ -2821,7 +2920,7 @@ class AsyLower {
       // 这一遍也要摆好 at：签名里的记录名按**这一句的位置**判可见（recHere）。
       this.at = i;
       if (head(r) === 'fundec') this.sig(r, i);
-      else if (head(r) === 'vardec') this.globalNames(r);
+      else if (head(r) === 'vardec') this.globalNames(r, i);
     }
     // 重载的名字在这里定：核心方言没有重载，所以第 2 个及以后的候选要改名。
     // 第一个保留原名 —— 绝大多数函数不重载，输出的文本因此跟以前一样好读。
@@ -2842,6 +2941,7 @@ class AsyLower {
       if (f !== null) fns.push(f);
     }
     this.push();
+    this.fileLevel = true;
     const main = [];
     for (let i = 0; i < rs.length; i++) {
       const r = this.unwrapMod(rs[i]);
@@ -2852,6 +2952,7 @@ class AsyLower {
       if (s === null) continue;
       for (const x of s) main.push(x);
     }
+    this.fileLevel = false;
     this.pop();
     const out = ['(module'];
     // 记录按**声明顺序**发（字段里不许再有记录，所以这就是最终顺序）
@@ -2860,6 +2961,10 @@ class AsyLower {
       for (const f of rec.fields) fs.push(`(${f.name} ${asyCore(f.type)})`);
       out.push(`  (class ${rec.name} ${fs.join(' ')})`);
     }
+    // 文件级变量（第二十四刀）：按声明顺序的一批 `(global …)`。零初始化，
+    // 真正的初值是 `(main …)` 里那一句 `(set …)` —— 位置就是源码里的位置，
+    // 所以「初值在那一行求」这条 asy 语义是照搬的，不是模拟的。
+    for (const g of this.gdecls) out.push(`  (global ${g.sym} ${asyCore(g.type)})`);
     for (const [hnm, text] of HELPERS) {
       if (this.used.has(hnm)) out.push(text);
     }

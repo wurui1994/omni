@@ -52,6 +52,9 @@ class ToMir {
   run() {
     const m = this.mod;
     for (const g of this.oir.jsGlobals ?? []) m.globalNo(g.name);
+    // 核心方言的模块级变量（第二十四刀）：同一个全局池，先按声明顺序登记，
+    // 全局号因此是稳定的（bytes.js 的哈希要它稳定）。
+    for (const g of this.oir.globals ?? []) m.setGlobalTy(m.globalNo(g.name), this.ty(g.type));
     // 闭包模板先登记：MakeClosure 要按 make 名字查号，而它可能出现在模板之前
     for (const c of this.oir.closures ?? []) {
       m.closures.push({ make: c.make, funcName: c.mangled, captures: c.captures.map((x) => x.name) });
@@ -373,6 +376,10 @@ class ToMir {
         return f.emit(OP.LOAD, this.ty(e.type), REF_NONE, REF_NONE, this.lookup(e.name));
       case 'JsGlobal':
         return f.emit(OP.GLOAD, T_DYN, REF_NONE, REF_NONE, this.mod.globalNo(e.name));
+      // 核心方言的模块级变量（第二十四刀）：与上面只差一件事 —— 它**有类型**，
+      // 所以 GLOAD 的类型码是真类型而不是 T_DYN。
+      case 'GlobalRef':
+        return f.emit(OP.GLOAD, this.ty(e.type), REF_NONE, REF_NONE, this.mod.globalNo(e.name));
       case 'CaptureRef': {
         const i = this.captures.indexOf(e.name);
         if (i < 0) throw new OmniError(`mir: 捕获 '${e.name}' 不在 ${f.name} 的捕获表里`);
@@ -577,7 +584,7 @@ class ToMir {
       f.emit(OP.STORE, T_VOID, v, REF_NONE, this.lookup(tgt.name));
       return v;
     }
-    if (tgt.kind === 'JsGlobal') {
+    if (tgt.kind === 'JsGlobal' || tgt.kind === 'GlobalRef') {
       f.emit(OP.GSTORE, T_VOID, v, REF_NONE, this.mod.globalNo(tgt.name));
       return v;
     }

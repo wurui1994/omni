@@ -37,6 +37,9 @@ class JsEmitter {
     // JS 前端的模块级变量（ADR-0011）：顶层函数要能互相看见，所以是真全局，
     // 不是 omni_main 的局部量。C 侧对应一批 static omni_dyn。
     for (const g of this.mod.jsGlobals ?? []) this.line(`let g_${g.name} = undefined;`);
+    // 核心方言的模块级变量（第二十四刀）：有类型，初值由 omni_main 最前面那几句赋 ——
+    // 所以这里只要把存储声明出来。
+    for (const g of this.mod.globals ?? []) this.line(`let g_${g.name} = undefined;`);
     for (const f of this.mod.funcs) this.func(f);
     this.line(`${this.mod.entry}();`);
     // 没人接的错误：和 C 侧的 main 一样，在入口返回之后查一次（ADR-0007 决定 1）
@@ -358,6 +361,8 @@ class JsEmitter {
       case 'Bin': return this.bin(e);
       // JS 前端的模块级变量（ADR-0011）：一个真全局，可读可写
       case 'JsGlobal': return `g_${e.name}`;
+      // 核心方言的模块级变量（第二十四刀）：同一个形状，只是有类型
+      case 'GlobalRef': return `g_${e.name}`;
       case 'Ternary': return `(${this.expr(e.cond)} ? ${this.expr(e.then)} : ${this.expr(e.otherwise)})`;
       case 'Assign': return `(${this.expr(e.target)} = ${this.rvalue(e.value, e.type)})`;
       case 'IndexGet': {

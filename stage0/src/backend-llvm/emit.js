@@ -263,6 +263,15 @@ class LlvmEmitter {
       sawStruct = true;
     }
     if (sawStruct) this.line('');
+    // 模块级变量（第二十四刀）：一个 internal global，零初始化。真正的初值是
+    // omni_main 最前面那几句 store —— 字符串的零是池子里的空串，不是常量表达式。
+    let sawGlobal = false;
+    for (let i = 0; i < this.mir.globals.length; i++) {
+      const t = this.mir.globalTy[i];
+      this.line(`@g_${this.mir.globals[i]} = internal global ${this.ty(t, `模块级变量 ${this.mir.globals[i]}`)} zeroinitializer`);
+      sawGlobal = true;
+    }
+    if (sawGlobal) this.line('');
 
     for (const f of this.mir.funcs) this.func(f);
 
@@ -472,6 +481,17 @@ class LlvmEmitter {
     if (op === OP.STORE) {
       const st = this.ty(f.slots[f.aux[i]].t, 'slot');
       this.line(`  store ${st} ${this.val(f.a[i])}, ptr %s${f.aux[i]}`);
+      return;
+    }
+    // 模块级变量（第二十四刀）：与槽位那两条同一个形状，只是地址是 `@g_名字` 而不是
+    // `%s号`。类型从全局池取（GLOAD 的 `t` 也是它，两处必须一致 —— verify 盯着这条）。
+    if (op === OP.GLOAD) {
+      this.line(`  ${dst} = load ${this.ty(t, 'global')}, ptr @g_${this.mir.globals[f.aux[i]]}`);
+      return;
+    }
+    if (op === OP.GSTORE) {
+      const gt = this.ty(this.mir.globalTy[f.aux[i]], 'global');
+      this.line(`  store ${gt} ${this.val(f.a[i])}, ptr @g_${this.mir.globals[f.aux[i]]}`);
       return;
     }
     // 结构体四条（ADR-0014 门槛 2 第十二刀）：NEW/COPY 从 arena 拿一块，FLD/FLDSET 是

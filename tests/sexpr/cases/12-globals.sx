@@ -1,0 +1,65 @@
+(module
+  ;; 模块级变量 —— 门槛 2 第二十四刀。asy 的文件级变量要它（`int n = 3;` 之后函数里
+  ;; 读得到、改得到），而 asy 的**模块**（import）更要它：那边的模块状态就是一批全局。
+  ;;
+  ;; 方言里它刻意**没有初值**：零初始化，真正的赋值就是某处的一句 `(set …)`。
+  ;; 「初值什么时候求」是门语言设计（asy 是按文件顺序、在那一行求），汇聚层不替谁定。
+  ;; 这一份盯的是三条：
+  ;;   - 跨函数是**同一份存储**（一个函数改，另一个函数看得见）；
+  ;;   - 局部量同名是**遮蔽**而不是错，而且被遮蔽的那份没被动过；
+  ;;   - 字符串全局也通（它的零是空串，不是空指针 —— 六条腿都得能打印）。
+  (global counter int)
+  (global label string)
+  (global ratio real)
+  (global on bool)
+
+  (fn bump ((k int)) int
+    (set counter (bin "+" (var counter) (var k)))
+    (ret (var counter)))
+
+  (fn peek () int (ret (var counter)))
+
+  (fn rename ((s string)) void
+    (set label (bin "+" (var label) (var s))))
+
+  ;; 形参遮蔽全局：这里的 `counter` 是形参，全局那份一动不动
+  (fn shadow ((counter int)) int (ret (bin "*" (var counter) (int 2))))
+
+  (main
+    ;; 零初始化：四种标量各印一遍
+    (print (var counter))
+    (print (var label))
+    (print (var ratio))
+    (print (var on))
+
+    ;; 跨函数共享
+    (print (call bump (int 5)))
+    (print (call bump (int 3)))
+    (print (call peek))
+    (set counter (bin "-" (var counter) (int 1)))
+    (print (call peek))
+
+    ;; 字符串全局：函数里追加，入口里读
+    (expr (call rename (str "ab")))
+    (expr (call rename (str "cd")))
+    (print (var label))
+
+    ;; real 与 bool 也是真存储
+    (set ratio (bin "/" (real 1.0) (real 8.0)))
+    (print (var ratio))
+    (set on (bin "==" (var counter) (int 7)))
+    (print (var on))
+
+    ;; 遮蔽：形参那份
+    (print (call shadow (int 50)))
+    (print (call peek))
+
+    ;; 遮蔽：入口里的局部量。`(var counter)` 从这里起是局部的那个，
+    ;; 而函数里的 `counter` 还是全局那份
+    (let counter int (int 100))
+    (print (var counter))
+    (print (call peek))
+    (set counter (int 101))
+    (print (var counter))
+    (print (call bump (int 1)))
+    (print (var counter))))

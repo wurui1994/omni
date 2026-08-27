@@ -1,0 +1,11 @@
+;; kernel 里没有模块级变量（第二十四刀）。GPU 那条腿上「模块级变量」没有对应物 ——
+;; SPIR-V 的全局得挂在某个存储类上，选哪个是接口设计（要不要跨 dispatch 保留？
+;; 主机端怎么读？），不是降级能替它定的。要的数据从 `(buf …)` 形参进来。
+(module
+  (global scale int)
+  (kernel bump ((out (buf int)))
+    (bset (var out) (gid) (bin "*" (gid) (var scale))))
+  (main
+    (let b (buf int) (bnew (buf int) (int 4)))
+    (dispatch bump (int 4) (var b))
+    (print (bget (var b) (int 2)))))

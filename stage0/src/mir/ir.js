@@ -379,6 +379,11 @@ export class MirModule {
     this.typeIndex = new Map();
     this.globals = [];            // 模块级变量名，GLOAD/GSTORE 的 aux
     this.globalIndex = new Map();
+    // 与 globals 同下标的类型码（第二十四刀）。JS 前端那批全是 T_DYN，核心方言的
+    // `(global …)` 是真类型。**没有**把类型塞进 globals 的元素里：那个数组的元素是
+    // 字符串这件事被 bytes.js 的哈希与 print.js 的清单直接用着，换成对象会静悄悄
+    // 改掉「同一份输入两次编译逐字节相同」。
+    this.globalTy = [];
     this.ops = [];                // {name, lits}：运行时 op，CALLOP 的 a
     this.opIndex = new Map();
     this.accs = [];               // {type, field}：字段访问描述符，FLD/FLDSET 的 aux
@@ -415,9 +420,13 @@ export class MirModule {
     if (hit !== undefined) return hit;
     const i = this.globals.length;
     this.globals.push(name);
+    this.globalTy.push(T_DYN);
     this.globalIndex.set(name, i);
     return i;
   }
+
+  /** 给一个已登记的全局钉上类型（核心方言的 `(global …)`；不叫就还是 T_DYN）。 */
+  setGlobalTy(i, t) { this.globalTy[i] = t; }
 
   /**
    * 运行时 op。名字是**单态**的（`len.list`、`print.int`）—— MIR 不带 OIR 的

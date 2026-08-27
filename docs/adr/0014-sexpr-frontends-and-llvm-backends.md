@@ -247,11 +247,13 @@ bison **隐式**的选择写成**显式**的优先级声明 —— 悬垂 else�
    **文件级的 `T operator init()`**（第二十二刀：换掉 `T t;` 的隐式构造，内嵌记录字段
    一并管）、
    **算符重载**（第二十三刀：`V operator +(V,V)` 降成叫 `asy__op_add` 的普通函数，
-   于是重载解析那一套白捡；用户算符与内建的在同一张候选表里，同签名是替换），
-   二十六份用例在五个执行器上与 `asy -noV` 逐字节相同。
+   于是重载解析那一套白捡；用户算符与内建的在同一张候选表里，同签名是替换）、
+   **文件级变量**（第二十四刀：核心方言加了 `(global 名字 类型)`，函数里读得到、改得到），
+   二十七份用例在五个执行器上与 `asy -noV` 逐字节相同。
    **还没做**的是给切片赋值、多维数组、复数幂、triple、`operator cast`、
    字符串的 `reverse`/`insert`/`split`、
-   自引用字段、把方法当值取出来、struct 体里的算符，与 `operator init` 剩下的两种形态
+   自引用字段、把方法当值取出来、struct 体里的算符、函数里用文件级的 pair/记录/数组变量，
+   与 `operator init` 剩下的两种形态
    —— 每一条都在
    `tests/asy/bad/` 里有一份带 `ASY_NOPE` 的用例钉着，不是含糊的"待办"。
    超越函数（exp/log/trig）是**另一回事**：不是没做，是量过 libm 与 V8 在最后一位就分叉，
@@ -427,11 +429,11 @@ static inline C + 另写一份 IR 助手"，是两份实现；这次不重复那
 `1/3` 是实数除法而 `1#3` 是整数商、`3 == 3.0` 要提左边、`write` 的分隔符取决于第一个
 实参是不是字符串。类型是符号表的事，动作模板里没有符号表。
 
-**判分的人不是我**：`tests/asy` 的二十六份用例（算术 / 字符串 / 两种引号 / 控制流 / 函数 /
+**判分的人不是我**：`tests/asy` 的二十七份用例（算术 / 字符串 / 两种引号 / 控制流 / 函数 /
 real 的 %.15g / `? :` / 数学函数 / 数组 / pair / 切片与整数组输出 / for-each /
 字符串函数 / `pair[]` / 默认实参与命名实参 / 重载解析 / struct / struct 的 pair 字段 /
 struct 的数组字段 / struct 的记录字段 / `A[]` / struct 的方法 / 构造函数 /
-文件级 operator init / 算符重载 / 用户算符与内建算符的关系）每份都是
+文件级 operator init / 算符重载 / 用户算符与内建算符的关系 / 文件级变量）每份都是
 「五条腿逐字节相同 == `.expected` == `asy -noV` 当场重跑」。`.expected` 本身就是真 asy 的
 输出生成的；机器上没装 asymptote 时那一节打印 skip，但 `.expected` 仍然把答案钉住。
 
@@ -454,7 +456,9 @@ struct 的数组字段 / struct 的记录字段 / `A[]` / struct 的方法 / 构
 第一刀的边界都在 `tests/asy/bad/`（18 条，每条的期望值都必须以 `ASY_NOPE` 开头 ——
 "还没做"和"做错了"必须能一眼分开）：triple、复数幂、`operator cast`、
 模块（import/access）、隐式缩放（`105cm`）、超越函数（`sin`、pair 上的 `angle` ——
-理由是上面那条 ULP 测量）、函数里读文件级变量（核心方言没有全局量）、
+理由是上面那条 ULP 测量）、函数里用文件级的 **pair/记录/数组**变量
+（标量的那些第二十四刀通了，见下面那一节；`bad/global-read.asy` 因此换成了
+`bad/global-pair.asy`）、
 循环条件里的 `? :`、给切片赋值（`a[0:2] = b`）、多维数组、
 字符串的 `reverse`/`insert`/`split`、struct 的三条（自引用字段 / 把方法当值取出来 /
 `operator init` 剩下的两种形态：带形参的文件级那份、非 void 的那份）。
@@ -486,7 +490,7 @@ struct 的数组字段 / struct 的记录字段 / `A[]` / struct 的方法 / 构
 **第四节 `strict/`：asy 自己就不收的，我们也不能收。** 这一节是数组这一刀顺手加的，起因是
 一次测量：`int b=1; b++;` 在真 asy 上直接编不过（"postfix expressions are not allowed"），
 而我们的降级器照收。这类漏洞**不会让任何用例输出不同** —— 它只让"等价"这两个字变虚。
-所以 `strict/` 里的用例要求：我们拒，且装了 asy 的话**真 asy 也拒**。现在有十三条：后缀
+所以 `strict/` 里的用例要求：我们拒，且装了 asy 的话**真 asy 也拒**。现在有十四条：后缀
 `++`、pair 上的 `<`、pair 上的 `%`（这两条 asy 报的是 "no matching function
 'operator <(pair, pair)'"）、`length(int[])`（`length` 只有 string 和 pair 两个重载）、
 按不存在的形参名给命名实参（asy 报 "cannot call 'void f(int a)' with parameter 'int b'"）、
@@ -496,7 +500,10 @@ ambiguous"）、**引用后面才声明的函数**（asy 报 "no matching variab
 **给 pair 的分量赋值**（`z.x = 5` 与 `a.p.x = 5`：asy 报 "virtual field is read-only"）、
 没有 `void operator init` 时写 `A(…)`、在 struct 声明之前拿它当类型、
 **记录上的大小比较**（只定义了 `operator <` 不白得 `<=`）、
-**声明 `operator &&`**（asy 那边是 syntax error）——
+**声明 `operator &&`**（asy 那边是 syntax error）、
+**函数里引用后面才声明的文件级变量**（asy 报 "no matching variable of name 'g'" ——
+第二十四刀加的，与"引用后面才声明的函数"、"在 struct 声明前拿它当类型"是同一条规矩的
+第三处）——
 中间那两条是重载这一刀加的，第二条尤其要紧：我们是两遍降级，不专门裁一刀就会比 asy
 多接受一门语言。`write(struct)` 与 `z.x = 5` 是 struct 与 pair 字段那两刀加的，
 它们守的不只是"拒"：
@@ -1134,6 +1141,46 @@ asy 那一侧落地的是 `A[]`（`cases/21-structarr.asy`，与 `asy -noV` 逐�
 `operator &&`/`operator ||` 是另一类：量过 asy 那边是 **syntax error**（camp.y 的 operator
 产生式里没这两个 token），所以它是 `strict/op-logic` 而不是 `bad/` —— 这一条最初就放错了
 地方，是"每条规则都得量一遍"这句话的又一个例子。
+
+### 已落地（支持面第十三阶段：模块级变量，门槛 2 第二十四刀）
+
+这一刀**不是**零后端改动 —— 它给核心方言加了一条形式，而且是**模块那一刀的前置**：
+asy 的模块状态就是一批文件级变量（量过 `import m;` 之后 `m.counter` 与裸的 `counter`
+是同一份存储、`m` 里的函数改的也是它），没有全局量就没有 import。
+
+方言里的形式刻意只有声明，**没有初值**：
+
+    (global NAME TYPE)      ;; 零初始化；读写就用现成的 (var NAME) / (set NAME E)
+
+理由是「初值什么时候求」是门语言设计：asy 是**按文件顺序、在那一行**求（量过
+`int t = tick();` 与前后两句 write 的顺序看得出来），别的语言可能提前、可能懒。汇聚层
+不替谁定，于是 asy 前端把一句 `int counter = 7;` 降成「一个 `(global …)` + 原地一句
+`(set …)`」——那条语义是**照搬**的，不是模拟的。
+
+一路上真正改了的地方比想象中少，因为 MIR 早就有全局：`GLOAD`/`GSTORE` 两条指令、
+`MirModule.globals` 池、验证器、字节哈希、打印器、MIR 解释器、OIR 解释器、JS 与 C 后端
+**全都是现成的** —— JS 前端的 `jsGlobals`（ADR-0011）早就需要它。这一刀补的是四处：
+
+- 核心方言的语法入口与「名字先局部再全局」的解析（`sexpr/lower.js` 的 `nameRef`）；
+- OIR 侧一个**带类型**的全局概念（`globals` + `GlobalRef` 节点）—— 不复用 `JsGlobal`，
+  那个节点的类型被硬编码成 `T_DYN`；
+- MIR 的 `globalTy[]`（与 `globals[]` 同下标的类型码）。**没有**把类型塞进 `globals`
+  的元素里：那个数组的元素是字符串这件事被 `bytes.js` 的哈希与 `print.js` 的清单直接
+  用着，换成对象会静悄悄改掉「同一份输入两次编译逐字节相同」；
+- LLVM 那条腿：`@g_名字 = internal global T zeroinitializer` 加 GLOAD/GSTORE 两条
+  （`load`/`store`，与槽位那两条同一个形状，只是地址是全局符号）。
+
+两条边界，各有一份 `bad/`：**聚合的全局**（`(global here Node)`）——聚合的身份不在 MIR 的
+8 位类型码里（`(arr int)` 与 `(arr string)` 在那里是同一个码），全局池要带身份得先加
+一列，那是另一刀；**kernel 里读全局**（`bad/global-kernel.sx`）——SPIR-V 的全局得挂在
+某个存储类上，选哪个是接口设计，要的数据从 `(buf …)` 形参进来。
+
+asy 那边因此只收 int/real/bool/string 的文件级变量；pair/记录/数组照旧当 `(main …)` 的
+局部量（文件级还能用，函数里看不见），`bad/global-read.asy` 换成了更窄的
+`bad/global-pair.asy`。顺序解析多了第三处：函数体只看得见**前面**声明的文件级变量
+（量过 asy 报 "no matching variable of name 'g'"，`strict/global-fwd` 钉着）；
+同一个名字声明两次是**两个变量**（量过），所以每份声明各出一个符号
+`asy__g<序号>_<名字>`。
 
 ## 决策 4：调用 LLVM 需要 extern-C FFI —— 这是新要求，也是 dogfood
 
