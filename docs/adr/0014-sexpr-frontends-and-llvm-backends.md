@@ -2573,6 +2573,41 @@ stmts.js 里实际调了哪些，就是这十七个。于是依赖变成一条�
 lower.js 现在剩下的是"要看符号表的那一半"：单元与 include、作用域与类型名（含 typedef
 与 struct 体里的 using）、记录声明与构造、模块加载与合并，以及入口那几只。
 
+### 第五刀：模块与顶层声明，2322 -> 1380。lower.js 到此成了入口 + 转接表
+
+两个文件一次落地：`modules.js`（230 行，import / access / unravel / from-access）与
+`decls.js`（785 行，修饰剥离、static 字段、`operator init`/`operator cast`、形参表与函数类型、
+签名与方法、文件级变量、函数体，以及"声明遍 + 正文遍"那个骨架）。
+
+这两族之间**互相**调，量出来是三对一：modules 只往 decls 要一个（`declPass` ——
+加载一个模块要先给它跑一遍声明遍），decls 往 modules 要三个（`modLoad`/`modMerge`/`modStmt`）。
+所以把少的那一条改成转接（`declPass(u) { return asyDeclPass(this, u); }`），
+多的那三条走 import：`decls -> modules`。加上上一刀那条链，整张图是
+
+```
+lower.js（入口 + 27 个转接方法）
+  └─> decls -> modules -> calls
+      └─> exprs -> stmts -> calls -> runtime -> types
+```
+
+一条 DAG，没有环。转接方法一共 27 个（表达式 17 + 这一刀 10），全是一行。
+
+到这里 lower.js 的 1380 行里有 240 行是文件头那篇"边界与差别"的说明、
+27 行转接、剩下的是单元与 include、作用域与类型名、记录声明与构造，以及
+`chunk`/`run`/`initFn`/`lowerAsy`/`AsySession` 那几只入口。原来的 5407 行现在是七个文件：
+
+- `lower.js` 1380 —— 入口、单元、作用域、类型名、记录
+- `exprs.js` 1070 —— 表达式
+- `decls.js` 785 —— 顶层声明
+- `calls.js` 804 —— 调用与重载解析
+- `stmts.js` 702 —— 语句
+- `runtime.js` 430 —— 零值表、内建名字表、helper 源码
+- `modules.js` 230 —— 模块
+- `types.js` 202 —— 类型字符串
+
+五刀下来每一刀都是 `tests/asy` 107/107 + `tests/bootstrap` 60/60，
+且 `import graph;` 一直是 187 条、`import plain;` 一直是 2 条 —— 一个数都没动过。
+
 ## 后果与代价
 
 
