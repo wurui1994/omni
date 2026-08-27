@@ -1984,6 +1984,20 @@ C 与 LLVM 两条腿的 `clang` 默认 `-O0`（`OMNI_OPT=2` 要性能数字时�
 `omni_nullck`，JS 侧对应 `$alen`/`$aget`/…（ALEN 原先是内联的 `.length`，读空行冒的是
 宿主的 `TypeError`，C 那条腿直接段错误）。五条腿现在都是 `omni: runtime error: null reference`。
 
+asy 那一侧（`frontend-asy/lower.js`）落地得比预想便宜 —— 那一层的类型本来就是字符串，
+`real[][]` 天然可写，`asyCore` 也早就是递归的。真正要改的只有四处：
+`dimsDepth` 认 `(dims+ …)` 的层数（原先只认一层）、`arrElemOk` 对元素递归、
+helper 名字过 `asyMangle`（`asy__grow_real[]` 不是标识符，`asy__grow_arr_real` 才是）、
+以及 `new T[n][m]` 生一个构造器函数 `asy__anew2_real`（长度是运行期表达式，铺行要循环；
+生函数而不是往 `this.pre` 摊语句，因为 `new` 能出现在 `?:` 的两支里，那里 `this.pre` 是 null）。
+花括号初值套花括号初值（`new real[][] {{1,2},{3,4,5}}`）在 `arrLit` 里递归 ——
+里面那一层走 `this.expr` 是看不见"我该是 `real[]`"的。
+
+量出来的三条 asy 行为逐条对上（`tests/asy/cases/41-ndarray`，与 `asy -noV` 逐字节相同）：
+`new real[2][3]` 两层铺满、`new real[2][]` 外层 2 格每格空引用、`new real[][]` 长度 0。
+`bad/arr-2d` 退役。收益：`import graph` 的第一个拦路虎从多维数组前进到
+**函数类型的形参**（`math.asy:446` 的 `real findroot(real f(real), …)`）—— 那要闭包，是另一刀。
+
 ## 后果与代价
 
 - **依赖 LLVM**：本机 `libLLVM.dylib` 157MB。产物变大，但仍然自带执行器、

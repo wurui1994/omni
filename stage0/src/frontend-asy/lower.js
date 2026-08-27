@@ -125,9 +125,6 @@
 // 不支持（见到就报错，报错里说清是哪一条）：标准库模块（`import graph;`）、
 // typedef、
 // 给切片赋值（`a[0:2] = b`）、
-// 多维数组（`int[][]` —— 核心方言的 `(arr T)` 不收数组元素：MIR 那一层元素类型只有
-// 一个 8 位类型码，`(arr (arr int))` 与 `(arr (arr string))` 在那里是同一个码，
-// 类型身份丢了。向量元素能收是因为道数就在那个码的高位上）、
 // 字符串的 `reverse`（asy 是**按字节**倒的，而 Omni 的 string 是 UTF-8 字节序列
 // （ADR-0005）—— 非 ASCII 倒过来在 C 那条腿上是一串坏字节，在 JS 那条腿上要看
 // 宿主怎么处理，"六条腿逐字节相同"这句话就保不住了，所以门外）、
@@ -247,11 +244,11 @@ const ASY_MODSTM = new Set(['import', 'access', 'from-access', 'unravel', 'inclu
 
 /** 能当数组元素的**内建**类型。pair 是第八刀加的（核心方言的 `(arr T)` 现在收向量元素）；
  *  记录（struct）是第十九刀加的，但它不在这个表里 —— 记录是逐文件声明的，问 isRec。
- *  数组本身仍然不在里面 —— 多维数组是另一刀。 */
+ *  数组也不在里面 —— 多维数组那一刀问的是 arrElemOk（它对元素递归）。 */
 const ASY_ARRELEM = new Set(['int', 'real', 'bool', 'string', 'pair', 'triple']);
 
 /** 数组元素这一刀收的东西写成一句话，四处报错共用（免得四处各写一遍走样） */
-const ASY_ARRELEM_TEXT = '数组元素这一刀只有 int/real/bool/string/pair/triple 与 struct';
+const ASY_ARRELEM_TEXT = '数组元素这一刀只有 int/real/bool/string/pair/triple、struct 与它们的数组';
 
 /**
  * 实参类型 -> 形参类型要走几次隐式转换：0 = 同型，1 = 一次转换，-1 = 不行。
@@ -311,6 +308,10 @@ const ASY_CYCLE = 'cyclepath';
  *  为数组另造一个对象型会把每处比较都改成函数调用。名字带 asy 前缀：模块级名字全仓唯一。 */
 const asyIsArr = (t) => t !== null && t !== undefined && t.endsWith('[]');
 const asyElem = (t) => t.slice(0, -2);
+
+/** 类型名 -> 能当标识符片段的名字（`real[]` -> `arr_real`）。数组 helper 的名字要用它 ——
+ *  `asy__grow_real[]` 不是一个标识符。递归，所以 `real[][]` 是 `arr_arr_real`。 */
+const asyMangle = (t) => (asyIsArr(t) ? `arr_${asyMangle(asyElem(t))}` : t);
 
 /**
  * pair 就是核心方言的 `(vec real 2)`：第 0 道是 x，第 1 道是 y。
@@ -1015,19 +1016,59 @@ class AsyLower {
   }
 
   /**
-   * 数组 helper 的名字：标量元素就是 HELPERS 里那份（标记用到），记录元素按同一个工厂
-   * （asyArrHelpers）生一份 —— 三条一起生，因为 slicefrom 要调 slice。
-   * 扩长填的是 `(cnew T)`：方言里写不出空引用，而 asy 那边那些格子是"未初始化"、读就报错，
-   * 这一条与其他元素类型的零值填充是同一条差别（见文件头）。
+   * 数组 helper 的名字：标量元素就是 HELPERS 里那份（标记用到），记录元素与**数组元素**
+   * 按同一个工厂（asyArrHelpers）生一份 —— 三条一起生，因为 slicefrom 要调 slice。
+   * 名字过 asyMangle：`asy__grow_real[]` 不是标识符，`asy__grow_arr_real` 才是。
+   * 扩长填的是零值：记录填 `(cnew T)`、数组填一条**新的空行**（每次循环各求一次，不共用）。
+   * 方言里写不出空引用，而 asy 那边那些格子是"未初始化"、读就报错，这一条与其他元素类型
+   * 的零值填充是同一条差别（见文件头）。
    */
   arrHelper(kind, el) {
-    const nm = `asy__${kind}_${el}`;
-    if (!this.isRec(el)) { this.used.add(nm); return nm; }
+    const nm = `asy__${kind}_${asyMangle(el)}`;
+    const gen = this.isRec(el) || asyIsArr(el);
+    if (!gen) { this.used.add(nm); return nm; }
     if (!this.arrGen.has(nm)) {
-      for (const pair of asyArrHelpers(el, asyCore(el), `(cnew ${asyCore(el)})`)) {
+      const zero = asyIsArr(el) ? `(anew ${asyCore(el)} (int 0))` : `(cnew ${asyCore(el)})`;
+      for (const pair of asyArrHelpers(asyMangle(el), asyCore(el), zero)) {
         if (!this.arrGen.has(pair[0])) this.arrGen.set(pair[0], pair[1]);
       }
     }
+    return nm;
+  }
+
+  /**
+   * `new T[n][m]…`（两维起）用的构造器。counts 是**运行期**表达式，所以铺行要一个循环 ——
+   * 生成一个函数而不是往 this.pre 摊语句：`new` 能出现在任何表达式位置，而 this.pre
+   * 在有些位置是 null（`?:` 的两支里就没有）。外层 `anew` 铺的是**空引用**（核心方言
+   * 那一刀的决定），所以每一行都要显式 aset 一条新的 —— 这正是"N 行各自独立"。
+   * k 维的正文里调 k-1 维那一份，所以只有一处循环。
+   */
+  arrNewHelper(el, k) {
+    const nm = `asy__anew${k}_${asyMangle(el)}`;
+    if (this.arrGen.has(nm)) return nm;
+    let t = el;
+    let i = 0;
+    while (i < k) { t = `${t}[]`; i++; }
+    let ps = '';
+    i = 0;
+    while (i < k) { ps = i === 0 ? `(n0 int)` : `${ps} (n${i} int)`; i++; }
+    let row = '';
+    if (k === 2) {
+      row = `(anew ${asyCore(asyElem(t))} (var n1))`;
+    } else {
+      let as = '';
+      i = 1;
+      while (i < k) { as = `${as} (var n${i})`; i++; }
+      row = `(call ${this.arrNewHelper(el, k - 1)}${as})`;
+    }
+    this.arrGen.set(nm, `  (fn ${nm} (${ps}) ${asyCore(t)}
+    (let r ${asyCore(t)} (anew ${asyCore(t)} (var n0)))
+    (let i int (int 0))
+    (while (bin "<" (var i) (var n0))
+      (do
+        (aset (var r) (var i) ${row})
+        (set i (bin "+" (var i) (int 1)))))
+    (ret (var r)))`);
     return nm;
   }
 
@@ -1077,19 +1118,22 @@ class AsyLower {
 
   /* ------------------------------------------------------------------ 类型 */
 
-  /** `(name-ty (name int))` -> 'int'；`(array-ty (name int) (dims))` -> 'int[]'。
-   *  记录/pair 这一刀不做，多维数组也不做（`(dims+ …)` 就是两层以上）。 */
+  /** `(name-ty (name int))` -> 'int'；`(array-ty (name int) (dims))` -> 'int[]'；
+   *  `(dims+ (dims))` 是两层，`int[][]`（多维数组这一刀收下了）。 */
   type(node, what) {
     if (!isList(node)) return this.err(node, `${what}：这里要一个类型`);
     const h = head(node);
     if (h === 'array-ty') {
-      const dims = node.items[2];
-      if (isList(dims) && head(dims) !== 'dims') return this.nope(node, '多维数组');
+      const d = this.dimsDepth(node.items[2]);
+      if (d === null) return this.err(node, `${what}：认不出的数组维数形状`);
       const el = this.plainName(node.items[1]);
       if (el === null) return this.nope(node, '带点的类型名');
       if (!this.arrElemOk(el)) return this.nope(node, `${el}[] （${ASY_ARRELEM_TEXT}）`);
       if (this.isRec(el) && !this.recHere(el)) return this.recLate(node, el);
-      return `${el}[]`;
+      let t = el;
+      let k = 0;
+      while (k < d) { t = `${t}[]`; k++; }
+      return t;
     }
     if (h !== 'name-ty') return this.err(node, `${what}：认不出的类型形状 '${h}'`);
     const nm = this.plainName(node.items[1]);
@@ -1132,8 +1176,22 @@ class AsyLower {
   /** `t` 是声明过的记录（asy 的 struct）吗。`t` 已经是解析好的类型名，所以查全局那张表 */
   isRec(t) { return t !== null && t !== undefined && this.records.has(t); }
 
-  /** `el` 能当数组元素吗（第十九刀起记录也能：asy 的 struct 是引用类型，`A[]` 是一串句柄） */
-  arrElemOk(el) { return ASY_ARRELEM.has(el) || this.isRec(el); }
+  /** `el` 能当数组元素吗（第十九刀起记录也能：asy 的 struct 是引用类型，`A[]` 是一串句柄；
+   *  多维数组这一刀起数组自己也能 —— 格子里躺的同样是句柄） */
+  arrElemOk(el) {
+    if (asyIsArr(el)) return this.arrElemOk(asyElem(el));
+    return ASY_ARRELEM.has(el) || this.isRec(el);
+  }
+
+  /** `(dims)` 是 1 层，`(dims+ X)` 是 X 再加一层。认不出来给 null。 */
+  dimsDepth(node) {
+    if (!isList(node)) return null;
+    const h = head(node);
+    if (h === 'dims') return 1;
+    if (h !== 'dims+') return null;
+    const inner = this.dimsDepth(node.items[1]);
+    return inner === null ? null : inner + 1;
+  }
 
   /**
    * `struct A { int x; real y = 1.5; int get() { return x; } }` -> 一条记录声明。
@@ -1826,38 +1884,71 @@ class AsyLower {
   }
 
   /**
-   * `new T[n]` / `new T[]` / `new T[] {…}`。
+   * `new T[n]` / `new T[]` / `new T[] {…}`，以及多维的 `new T[n][m]` / `new T[n][]`。
    *
    * `new T[n]` 的 n 个格子在 asy 那边是**未初始化**的，读会当场报错
    * （量过：`int[] b = new int[2]; write(b[0]);` -> "read uninitialized value from array
    * at index 0"）；我们填零值。差别写在文件头 —— 这类程序本来就是有 bug 的，
    * 但"我们给 0 而 asy 报错"必须写在明处，不能等着被发现。
+   *
+   * 多维的三种写法量过 asy 的行为，我们逐条对上：
+   *   `new real[2][3]` 两层都铺满（我们生一个构造器函数，逐行 aset 一条新的）；
+   *   `new real[2][]`  外层铺 2 格、**每格是空引用**（`a[0][0]` 报 dereference of null array，
+   *                    我们的 `anew` 铺的正是空引用，读它是同一句运行期错误）；
+   *   `new real[][]`   长度 0。
    */
   newArray(n) {
     const el = this.type(n.items[1], 'new 的元素类型');
     if (el === null) return null;
-    if (asyIsArr(el) || el === 'void') return this.nope(n, '多维数组');
+    if (el === 'void') return this.err(n, 'new void[] 不是一个类型');
     if (!this.arrElemOk(el)) return this.nope(n, `${el}[] （${ASY_ARRELEM_TEXT}）`);
     const dimexps = n.items[2];
-    const hasCount = isList(dimexps) && head(dimexps) === 'dimexps';
-    if (isList(dimexps) && head(dimexps) === 'dimexps-add') return this.nope(n, '多维数组');
+    const hasCount = isList(dimexps) && (head(dimexps) === 'dimexps' || head(dimexps) === 'dimexps-add');
+    const tail = n.items[3];
     const init = n.items[hasCount ? 3 : 4];
+    // 尾巴上那串空 `[]`（`new real[2][]` 的第二层）。有初值时 items[3] 就是它。
+    let empty = 0;
+    if (tail !== undefined && isList(tail) && (head(tail) === 'dims' || head(tail) === 'dims+')) {
+      const d = this.dimsDepth(tail);
+      if (d === null) return this.err(n, 'new 里认不出的数组维数形状');
+      empty = d;
+    }
+    // 元素类型 = celltype 再套上那串空 `[]`；`new real[2][]` 的元素就是 `real[]`。
+    // 没给长度时（`new real[]`）那串空 `[]` **就是**数组本身的维数，不是额外的一层。
+    const counts = hasCount ? this.flat(dimexps, 'dimexps') : [];
+    const under = hasCount ? empty : empty - 1;
+    const over = hasCount ? counts.length : 1;
+    let base = el;
+    let i = 0;
+    while (i < under) { base = `${base}[]`; i++; }
+    let t = base;
+    i = 0;
+    while (i < over) { t = `${t}[]`; i++; }
     if (init !== undefined && isList(init) && head(init).startsWith('arrayinit')) {
       if (hasCount) return this.nope(n, '既给长度又给花括号初值');
-      return this.arrLit(init, `${el}[]`);
+      return this.arrLit(init, t);
     }
-    if (init !== undefined && isList(init) && head(init) === 'dims+') return this.nope(n, '多维数组');
-    const count = hasCount
-      ? this.coerce(this.expr(dimexps.items[1]), 'int', n, 'new T[n] 的长度')
-      : { code: '(int 0)', type: 'int' };
-    if (count === null) return null;
-    return { code: `(anew ${asyCore(`${el}[]`)} ${count.code})`, type: `${el}[]` };
+    if (!hasCount) return { code: `(anew ${asyCore(t)} (int 0))`, type: t };
+    const vals = [];
+    for (const c of counts) {
+      const v = this.coerce(this.expr(c), 'int', c, 'new T[n] 的长度');
+      if (v === null) return null;
+      vals.push(v.code);
+    }
+    if (counts.length === 1) return { code: `(anew ${asyCore(t)} ${vals[0]})`, type: t };
+    let as = '';
+    for (const v of vals) as = `${as} ${v}`;
+    return { code: `(call ${this.arrNewHelper(base, counts.length)}${as})`, type: t };
   }
 
   /**
    * 花括号数组初值。核心方言里没有"数组字面量"这一条，所以摊成一串语句：
    * 先 anew 一个空的，再逐个 apush，最后把临时量当值用。这跟 `? :` 用的是同一套
    * `this.pre` 机制 —— 摊出来的语句落在**当前语句之前**，求值顺序不变。
+   *
+   * 元素本身是数组时（`new real[][] {{1,2},{3,4,5}}`）里面那一层花括号**递归**走这里 ——
+   * 走 this.expr(x) 是不行的：那一层看不见"我该是 real[]"，只会报"推不出元素类型"。
+   * 每一项各摊一个临时量，所以两行不会共用同一条（asy 那边也是两条独立的行）。
    */
   arrLit(n, t) {
     if (this.pre === null) return this.nope(n, '这个位置的花括号数组初值（它要摊成语句，这里放不下）');
@@ -1868,7 +1959,9 @@ class AsyLower {
     const nm = `asy__a${this.tmp++}`;
     this.pre.push(`(let ${nm} ${asyCore(t)} (anew ${asyCore(t)} (int 0)))`);
     for (const x of items) {
-      const v = this.coerce(this.expr(x), el, x, `${t} 初值里的一项`);
+      const nested = asyIsArr(el) && isList(x) && head(x).startsWith('arrayinit');
+      const v = nested ? this.arrLit(x, el)
+        : this.coerce(this.expr(x), el, x, `${t} 初值里的一项`);
       if (v === null) return null;
       this.pre.push(`(apush (var ${nm}) ${v.code})`);
     }
@@ -3015,14 +3108,15 @@ class AsyLower {
           + ' 那要闭包：核心方言里函数不是值）');
       }
       if (!isList(start) || head(start) !== 'decidstart') return this.err(start, '认不出的声明项');
-      // `real a[];`：维度写在名字后面。一层就是数组，两层以上不做
+      // `real a[];`：维度写在名字后面。`real a[][]` 也收（多维数组这一刀），
+      // 形参表那一种（`fundecidstart`）在上面就分岔走了。
       let t = base;
       if (start.items.length > 2) {
-        const dims = start.items[2];
-        if (!isList(dims) || head(dims) !== 'dims') return this.nope(start, '声明里带多维数组或形参表');
-        if (asyIsArr(t)) return this.nope(start, '多维数组');
+        const d = this.dimsDepth(start.items[2]);
+        if (d === null) return this.nope(start, '声明里带形参表');
         if (!this.arrElemOk(t)) return this.nope(start, `${t}[] （${ASY_ARRELEM_TEXT}）`);
-        t = `${t}[]`;
+        let k = 0;
+        while (k < d) { t = `${t}[]`; k++; }
       }
       const nm = isAtom(start.items[1]) ? start.items[1].value : null;
       if (nm === null) return this.err(start, '声明里少了名字');
@@ -3907,10 +4001,11 @@ class AsyLower {
     //   `pair[] a;`   -> (array-ty (name pair) (dims))     里面是 (name …)，没有 name-ty
     //   `real a[];`   -> (name-ty (name real)) + decidstart 上挂 dims
     let base = null;
-    let arr = false;
+    let arr = 0;
     let inner = tn;
     if (isList(inner) && head(inner) === 'array-ty') {
-      arr = true;
+      const d = this.dimsDepth(inner.items[2]);
+      arr = d === null ? 0 : d;
       inner = inner.items[1];
     }
     if (isList(inner) && head(inner) === 'name-ty') inner = inner.items[1];
@@ -3921,10 +4016,16 @@ class AsyLower {
       if (!isList(start) || !isAtom(start.items[1])) continue;
       const nm = start.items[1].value;
       // 名字后面挂了维度（`real a[];`）—— 那也是数组，与 `real[] a;` 同一件事
-      const dims = isList(start) && start.items.length > 2;
+      let dims = 0;
+      if (isList(start) && start.items.length > 2) {
+        const dd = this.dimsDepth(start.items[2]);
+        dims = dd === null ? 0 : dd;
+      }
       const el = base === null ? null
         : (SCALARS.has(base) || base === 'pair' || base === 'triple' || this.records.has(base) ? base : null);
-      const ty = el === null ? null : ((arr || dims) ? `${el}[]` : el);
+      let ty = el;
+      let k = 0;
+      while (ty !== null && k < arr + dims) { ty = `${ty}[]`; k++; }
       const ok = ty !== null;
       const g = { sym: `asy__g${this.gdecls.length}_${nm}`, type: ty, at, ok };
       const list = this.globals.has(nm) ? this.globals.get(nm) : [];
