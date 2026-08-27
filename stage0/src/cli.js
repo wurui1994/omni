@@ -136,13 +136,30 @@ function asyFrontEnd() {
   };
   // 模块的找法是量出来的 —— asy 按**当前目录**找，不是按引它的那个文件所在的目录
   // （量过：`asy -noV sub/user.asy` 里的 `import mm;` 找不到 sub/mm.asy）。
+  // 当前目录之后按 `ASYMPTOTE_DIR`（asy 自己的那个环境变量，冒号分隔）找，最后是
+  // 我们自己的 stage0/lib/asy。**base/*.asy 不抄一份**：plain/graph 那一堆是 asy
+  // 源码，要引的就是真的那些；我们只补 C++ 那一侧的内建面（lib/asy 里那一份）。
+  const libDir = join(installDir(), '..', '..', 'lib', 'asy');
+  const searchDirs = [];
+  const envDir = env('ASYMPTOTE_DIR');
+  if (envDir !== undefined && envDir !== '') {
+    for (const d of envDir.split(':')) if (d !== '') searchDirs.push(d);
+  }
+  searchDirs.push(libDir);
   const loader = (diags) => (name) => {
-    const p = join(cwd(), `${name}.asy`);
-    if (!exists(p)) return null;
+    let p = join(cwd(), `${name}.asy`);
+    if (!exists(p)) {
+      p = '';
+      for (const d of searchDirs) {
+        const q = join(d, `${name}.asy`);
+        if (exists(q)) { p = q; break; }
+      }
+    }
+    if (p === '' || !exists(p)) return null;
     vStep(`asy module    ${name} -> ${p}`);
     return parseText(p, readText(p), diags);
   };
-  return { parseText: parseText, loader: loader, builtins: builtins };
+  return { parseText: parseText, loader: loader, builtins: builtins, libDir: libDir };
 }
 
 /**
@@ -154,7 +171,15 @@ function asyText(path) {
   const fe = asyFrontEnd();
   const diags = new Diagnostics();
   const tree = fe.parseText(path, readText(path), diags);
-  const text = lowerAsy(tree, diags, { path, load: fe.loader(diags), builtins: fe.builtins });
+  const text = lowerAsy(tree, diags, {
+    path, load: fe.loader(diags), builtins: fe.builtins,
+    // asy 的 C++ 内建面（path/pen/frame/… 那一族）做成一个模块，每个单元隐式 import
+    // 一次（见 lower.js 的 builtinsIn）。**默认开着** —— 真 asy 那边这一面是运行时自带的，
+    // `size(100);` 不用 import 任何东西就能跑，所以要它对上就不能靠环境变量。
+    // 与 ASYMPTOTE_DIR 一起用就是"引真的 base/*.asy"。OMNI_ASY_BUILTINS=0 关掉（
+    // 调这一面自己的时候用：它自己是 asy 源码，不能隐式引进自己）。
+    prelude: env('OMNI_ASY_BUILTINS') === '0' ? '' : 'asy_builtins',
+  });
   diags.throwIfErrors();
   vStep(`asy front end  ${path} -> 核心方言 ${text.length} bytes`);
   return text;
@@ -209,7 +234,18 @@ function findCC() {
 }
 
 /**
- * tcc 要的是极速编译，clang/gcc 要 -O2；运行时和生成的代码用同一份 flags。
+ * 优化档。**默认 -O0**：这条腿在测试轴上的角色是"另一份语义实现"，不是性能基线，
+ * 而 clang -O2 在这些几百行的翻译单元上就是纯粹的等待（量过：run-c 一次 0.42s -> 0.28s，
+ * 五条腿 × 四十个用例乘起来就是半分钟）。要性能数字的场合显式开：`OMNI_OPT=2`。
+ * 语义不因此改变 —— 逐个运算的语义靠的是下面那条 `-ffp-contract=off`，与档位无关。
+ */
+function optFlag() {
+  const o = env('OMNI_OPT');
+  return o === undefined || o === '' ? '-O0' : `-O${o}`;
+}
+
+/**
+ * tcc 要的是极速编译，clang/gcc 用 optFlag()；运行时和生成的代码用同一份 flags。
  * `-ffp-contract=off` 不是可选的：clang 默认允许在一条语句里把 `a + b*c` 合成 FMA，
  * 那条 FMA 少一次中间舍入，于是 C 那条腿与 JS 那条腿的浮点结果**会分叉**。
  * 这条是量出来的 —— 曾经在运行库里自己写过一版 `exp`（Horner 全是 `a + r*s`），
@@ -219,7 +255,7 @@ function findCC() {
  */
 function ccFlags(cc) {
   return cc === 'tcc' ? ['-I', RUNTIME_DIR]
-    : ['-O2', '-std=c99', '-ffp-contract=off', '-w', '-I', RUNTIME_DIR];
+    : [optFlag(), '-std=c99', '-ffp-contract=off', '-w', '-I', RUNTIME_DIR];
 }
 
 /**
@@ -344,7 +380,7 @@ function buildLlvm(mod, outPath, workDir) {
   writeText(llPath, ir);
   vStep(`backend llvm  ${ir.length} bytes -> ${llPath}`);
   const cc = findClang();
-  const args = ['-O2', '-w', '-ffp-contract=off', '-I', RUNTIME_DIR, llPath,
+  const args = [optFlag(), '-w', '-ffp-contract=off', '-I', RUNTIME_DIR, llPath,
     ...runtimeObjects(cc), '-o', outPath, '-lm'];
   const r = spawn(cc, args, 'o');
   if (r[0] !== 0) {

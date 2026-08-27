@@ -1,0 +1,29 @@
+%!PS-Adobe-3.0 EPSF-3.0
+%%BoundingBox: 255 355 356 436
+%%HiResBoundingBox: 255.5 355.8 355.5 435.2
+%%Creator: Omni asy
+%%Pages: 1
+%%Page: 1 1
+/Setlinewidth {0 exch dtransform dup abs 1 lt {pop 0}{round} ifelse
+idtransform setlinewidth pop} bind def
+gsave
+ 256.5 356.8 translate
+newpath 0 0 moveto
+ 98 0 lineto
+ 49 78.4 lineto
+ 0 0 lineto
+closepath
+1 0 0 setrgbcolor
+0.5 Setlinewidth
+1 setlinecap
+1 setlinejoin
+10 setmiterlimit
+fill
+newpath 0 0 moveto
+ 98 0 lineto
+0 0 1 setrgbcolor
+2 Setlinewidth
+stroke
+grestore
+showpage
+%%EOF

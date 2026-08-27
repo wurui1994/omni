@@ -42,10 +42,11 @@
 //   node tests/asy/run.js arith
 //   ASY_BIN=/opt/homebrew/bin/asy node tests/asy/run.js
 
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, mkdtempSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
 
 import { ASY_NOPE } from '../../stage0/src/frontend-asy/lower.js';
 
@@ -54,8 +55,10 @@ const root = join(here, '../..');
 const cli = join(root, 'stage0', 'src', 'cli.js');
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 
-const cmd = (args, cwd) => {
-  const r = spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8', cwd });
+const cmd = (args, cwd, extraEnv) => {
+  const opts = { encoding: 'utf8', cwd };
+  if (extraEnv !== undefined) opts.env = { ...process.env, ...extraEnv };
+  const r = spawnSync(process.execPath, [cli, ...args], opts);
   return { out: r.stdout ?? '', err: r.stderr ?? '', code: r.status ?? 1 };
 };
 const read = (p) => {
@@ -82,13 +85,37 @@ const want = (f) => (!filters.length || filters.some((x) => f.includes(x)));
 const isCase = (f) => f.endsWith('.asy') && !f.startsWith('mod_');
 
 /** 五条腿，跟 tests/sexpr 那条轴同一份名单 —— 那边喂 .sx，这边喂 .asy */
-const LEGS = [
+const ALL_LEGS = [
   { tag: 'run', args: (p) => ['run', p] },
   { tag: 'run-c', args: (p) => ['run-c', p] },
   { tag: 'interp', args: (p) => ['interp', p] },
   { tag: 'interp --mir', args: (p) => ['interp', p, '--mir'] },
   { tag: 'run-llvm', args: (p) => ['run-llvm', p] },
 ];
+
+/**
+ * **默认只跑两条腿**（`OMNI_LEGS=all` 跑齐五条，提交前的那一遍与 tests/bootstrap 用它）。
+ * 理由是量出来的：一次 CLI 调用里 node 自己的启动就 0.21s，五条腿 × 四十个用例
+ * 是 74s，而其中 run-c / interp / interp --mir 三条在这条轴上**从来不是第一个报错的人**
+ * —— 它们盯的是"腿与腿分叉"，那是 tests/sexpr 与 tests/oir 的活。这条轴盯的是
+ * asy 前端，所以默认留下 `run`（最快的那条，当基准）与 `run-llvm`（优先级最高的后端）。
+ * 一致性因此不是"不查"，是"不在每次迭代里查"。
+ */
+const LEGS = process.env.OMNI_LEGS === 'all' ? ALL_LEGS
+  : ALL_LEGS.filter((l) => l.tag === 'run' || l.tag === 'run-llvm');
+
+/** 计时：每一节印一行。慢下来要当场看得见，不然只会越来越慢。 */
+const t0 = Date.now();
+let tMark = t0;
+const lap = (what) => {
+  const now = Date.now();
+  process.stdout.write(`  --   ${what} ${((now - tMark) / 1000).toFixed(1)}s\n`);
+  tMark = now;
+};
+
+/** 报告里那句"几方一致"要跟真的跑了几条腿对上 —— 默认那两条就写它们的名字 */
+const NWAY = LEGS.length === ALL_LEGS.length ? '五方' : `${LEGS.length} 方`;
+const AGREE = LEGS.length === ALL_LEGS.length ? '五方一致' : LEGS.map((l) => l.tag).join(' == ');
 
 /** 真 asy 在不在。装了就用它当判分的人，没装就把这一节标成 skip。 */
 function findAsy() {
@@ -136,9 +163,10 @@ for (const f of readdirSync(join(here, 'cases')).filter(isCase).sort()) {
     } else judged = ' == asy -noV';
   }
 
-  if (bad.length === 0) ok(`cases/${name} [五方一致 == ${name}.expected${judged}]`);
+  if (bad.length === 0) ok(`cases/${name} [${AGREE} == ${name}.expected${judged}]`);
   else no(`cases/${name}`, bad.join('\n'));
 }
+lap('cases');
 
 if (asyBin === null) {
   process.stdout.write('  skip asy 二进制不在（装 asymptote 或设 ASY_BIN 就会拿它逐字节判分）\n');
@@ -205,9 +233,10 @@ for (const f of readdirSync(join(here, 'tol')).filter(isCase).sort()) {
       bad.push(`    与真 asy 超出容差\n      asy:  ${JSON.stringify(real)}\n      omni: ${JSON.stringify(first.out)}`);
     } else tjudged = real === first.out ? ' ~= asy -noV（逐字节）' : ' ~= asy -noV（容差内）';
   }
-  if (bad.length === 0) ok(`tol/${name} [五方${exact ? '逐字节一致' : '容差内一致'}${tjudged}]`);
+  if (bad.length === 0) ok(`tol/${name} [${NWAY}${exact ? '逐字节一致' : '容差内一致'}${tjudged}]`);
   else no(`tol/${name}`, bad.join('\n'));
 }
+lap('tol');
 
 // ------------------------------------------------- 3. bad/：拒绝，理由正确，且带 ASY_NOPE
 for (const f of readdirSync(join(here, 'bad')).filter(isCase).sort()) {
@@ -228,6 +257,7 @@ for (const f of readdirSync(join(here, 'bad')).filter(isCase).sort()) {
   }
   ok(`bad/${name} [拒绝：${msg.slice(ASY_NOPE.length + 1)}]`);
 }
+lap('bad');
 
 // ------------------------------------------- 4. strict/：asy 自己就不收，我们也不能收
 //
@@ -258,8 +288,60 @@ for (const f of readdirSync(join(here, 'strict')).filter(isCase).sort()) {
   }
   ok(`strict/${name} [拒绝${judged}]`);
 }
+lap('strict');
 
-process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
+// ------------------------------------------- 5. draw/：EPS 五方一致 + 真 asy 的 EPS 判分
+//
+// 绘图那一节的用例是**纯 asy 源码**（没有 `import asy_builtins;`）：我们这边靠
+// `OMNI_ASY_BUILTINS=1` 把内建面隐式引进来（真 asy 那边它本来就是运行时自带的），
+// 于是同一个文件两边都能跑，判分的人还是真 asy。
+// 比的是 EPS **正文**：`%%Creator` 与 `%%CreationDate` 两行滤掉（后者是时间戳，
+// 前者我们写的是自己的名字）。我们的 shipout 印到标准输出，asy 那边写文件。
+
+const epsBody = (s) => s.split('\n').filter((l) => !l.startsWith('%%Creator')
+  && !l.startsWith('%%CreationDate')).join('\n');
+
+for (const f of readdirSync(join(here, 'draw')).filter(isCase).sort()) {
+  if (!want(f)) continue;
+  const name = basename(f, '.asy');
+  const dir = join(here, 'draw');
+  const path = join(dir, f);
+  const expected = read(join(dir, `${name}.expected`));
+  const bad = [];
+
+  const first = cmd(LEGS[0].args(path), dir);
+  if (first.code !== 0) bad.push(`    ${LEGS[0].tag} exit=${first.code}\n${first.err}`);
+  for (const leg of LEGS.slice(1)) {
+    const r = cmd(leg.args(path), dir);
+    if (r.code !== 0) { bad.push(`    ${leg.tag} exit=${r.code}\n${r.err}`); continue; }
+    if (r.out !== first.out) {
+      bad.push(`    ${leg.tag} 与 ${LEGS[0].tag} 不同\n      ${LEGS[0].tag}: ${JSON.stringify(first.out)}\n      ${leg.tag}: ${JSON.stringify(r.out)}`);
+    }
+  }
+  if (expected === null) bad.push('    缺 .expected');
+  else if (first.out !== expected) {
+    bad.push(`    对不上期望值\n      want: ${JSON.stringify(expected)}\n      got:  ${JSON.stringify(first.out)}`);
+  }
+
+  let judged = '';
+  if (asyBin !== null) {
+    const out = join(mkdtempSync(join(tmpdir(), 'omni-asy-')), name);
+    const r = spawnSync(asyBin, ['-noV', '-f', 'eps', '-o', out, path], { encoding: 'utf8', cwd: dir });
+    const real = read(`${out}.eps`);
+    if ((r.status ?? 1) !== 0 || real === null) {
+      bad.push(`    真 asy 自己就没出 EPS exit=${r.status}\n${(r.stdout ?? '') + (r.stderr ?? '')}`);
+    } else if (epsBody(real) !== epsBody(first.out)) {
+      bad.push(`    与真 asy 的 EPS 正文不同\n      asy:  ${JSON.stringify(epsBody(real))}\n      omni: ${JSON.stringify(epsBody(first.out))}`);
+    } else judged = ' == asy -f eps';
+  }
+
+  if (bad.length === 0) ok(`draw/${name} [${AGREE} == ${name}.expected${judged}]`);
+  else no(`draw/${name}`, bad.join('\n'));
+}
+lap('draw');
+
+process.stdout.write(`\n${pass} passed, ${fail} failed  （腿：${LEGS.map((l) => l.tag).join(', ')}`
+  + `${LEGS.length === ALL_LEGS.length ? '' : '，OMNI_LEGS=all 跑齐五条'}，总 ${((Date.now() - t0) / 1000).toFixed(1)}s）\n`);
 if (fail) {
   process.stdout.write(`\n${failures.join('\n\n')}\n`);
   process.exitCode = 1;

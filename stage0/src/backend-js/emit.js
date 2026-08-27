@@ -280,10 +280,13 @@ class JsEmitter {
     return code;
   }
 
-  /** 需要值语义的位置（初始化/赋值/传参/返回）：结构体、enum 与向量的左值要拷贝 */
+  /** 需要值语义的位置（初始化/赋值/传参/返回）：结构体、enum 与向量的左值要拷贝。
+   *  `GlobalRef`：这条腿的全局是一个 JS 绑定，结构体躺在里面就是个对象 —— 少了拷贝
+   *  `let v_p = g_origin;` 是别名。种类列表与 from_oir 的 rvalue 逐条相同。 */
   rvalue(e, type) {
     const src = this.expr(e);
-    const lval = e.kind === 'VarRef' || e.kind === 'Field' || e.kind === 'EnumPayload';
+    const lval = e.kind === 'VarRef' || e.kind === 'Field' || e.kind === 'EnumPayload'
+      || e.kind === 'GlobalRef';
     if (type && lval && type.k === 'vec') return `$vcopy(${src})`;
     if (type && lval && (type.k === 'struct' || type.k === 'enum')) return this.copyOf(type, src);
     return src;

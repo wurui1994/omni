@@ -294,10 +294,16 @@ const ASY_OPSYM = new Map([
 /** asy 的语法本身就拒的算符名（量过）。见 strict/op-logic.asy。 */
 const ASY_OPBAD = new Set(['&&', '||']);
 
-/** 文件级变量这一刀（第二十四刀）收得下的类型：核心方言的 `(global …)` 只收标量。
- *  pair 是 `(vec real 2)`、记录是类、数组是 `(arr T)` —— 那三种的身份不在 MIR 的
- *  8 位类型码里，全局池要带身份得先加一列，那是另一刀（bad/global-pair 钉着）。 */
-const ASY_GLOBAL_OK = new Set(['int', 'real', 'bool', 'string']);
+/** `cycle` 那个字面量落到哪个名字上（见 lit）：绘图层 stage0/lib/asy/plain.asy 里
+ *  的 `path cyclepath;`。前端与绘图层之间**只有这一个**约定的名字。 */
+const ASY_CYCLE = 'cyclepath';
+
+/** 文件级变量收得下的类型（第三十刀放开）：int/real/bool/string、pair/triple、
+ *  记录，以及它们的一维数组。核心方言的 `(global …)` 原先只收标量，理由写的是
+ *  「聚合的身份不在 MIR 的 8 位类型码里」—— 量下来那个身份**根本不需要**：class 与
+ *  数组在四条腿上都是一个指针（LLVM 的 T_AGG/T_ARR 都是 `ptr`），字段与元素的身份
+ *  是从表达式的 OIR 类型来的。绘图层要 currentpicture/defaultpen 这种模块级单件，
+ *  所以这一条是那一刀的前置。判定在 globalNames 里（要看 this.records）。 */
 
 
 /** 数组类型在这一层就是「元素名 + []」的字符串（`'real[]'`），核心方言那边是 `(arr real)`。
@@ -883,22 +889,65 @@ class AsyLower {
    * 前缀：主文件是空串 —— 于是**不带 import 的程序降出来的文本一字不变**，
    * 老用例的 .expected 与逐字节重编译都不受这一刀影响。
    */
+  /**
+   * `include m;` / `include "m";` —— **文本级**的引入，不是模块：那个文件的顶层项就摆在
+   * 这一行的位置上，名字直接落进当前单元，体也在这里跑（asy 的 include 就是这个意思，
+   * base/plain.asy 那一串 `include plain_pens;` 全靠它）。
+   *
+   * 所以它在**收表之前**就摊平：`rs` 是一个平坦的顶层项数组，下标就是"可见位置"，
+   * 摊平之后后面那几遍（declPass / bodyPass / 顺序解析）一个字都不用改。
+   * 循环 include 靠深度兜住 —— 真 asy 那边也是重复 include 就再摊一遍。
+   */
+  expandIncludes(rs, depth) {
+    let has = false;
+    for (const r of rs) {
+      const u = this.unwrapMod(r);
+      if (isList(u) && head(u) === 'include') has = true;
+    }
+    if (!has) return rs;
+    const out = [];
+    for (const r of rs) {
+      const u = this.unwrapMod(r);
+      if (!isList(u) || head(u) !== 'include') { out.push(r); continue; }
+      if (depth >= 32) {
+        this.nope(u, 'include 套了 32 层以上（八成是自己 include 自己）');
+        continue;
+      }
+      let nm = null;
+      const a = u.items[1];
+      if (isAtom(a)) nm = a.value;
+      else if (isStr(a)) nm = a.value;
+      if (nm === null) { this.nope(u, 'include 的这种写法'); continue; }
+      if (nm.endsWith('.asy')) nm = nm.slice(0, nm.length - 4);
+      if (this.opts === null || this.opts.load === undefined || this.opts.load === null) {
+        this.nope(u, `include '${nm}'（这条路上没有模块加载器）`);
+        continue;
+      }
+      const tree = this.opts.load(nm);
+      if (tree === null || tree === undefined) {
+        this.nope(u, `include '${nm}' 找不到 —— 当前目录与 ASYMPTOTE_DIR 里都没有 ${nm}.asy`);
+        continue;
+      }
+      for (const x of this.expandIncludes(this.flat(tree, 'block'), depth + 1)) out.push(x);
+    }
+    return out;
+  }
+
   unitNew(tree, key) {
     const id = this.units.length;
     const u = {
-      id, key, rs: this.flat(tree, 'block'), pfx: id === 0 ? '' : `asy__m${id}_`,
+      id, key, rs: this.expandIncludes(this.flat(tree, 'block'), 0), pfx: id === 0 ? '' : `asy__m${id}_`,
       init: id === 0 ? null : `asy__init${id}`, ran: id === 0 ? null : `asy__ran${id}`,
       funcs: new Map(), globals: new Map(), oinits: new Map(), oiByNode: new Map(),
       casts: new Map(), castByNode: new Map(),
       recVis: new Map(), mods: new Map(), methodDecls: [], callAt: new Map(), at: 0,
-      auFns: [],
+      auFns: [], bi: null,
     };
     this.units.push(u);
     return u;
   }
 
-  /** 当前那几张表存回单元 `u`（表本身是同一个对象，真要存的只有 at） */
-  unitSave(u) {
+  /** 当前那几张表存回单元 `u`（表本身是同一个对象，真要存的只有 at） */  unitSave(u) {
     u.funcs = this.funcs;
     u.globals = this.globals;
     u.oinits = this.oinits;
@@ -1317,7 +1366,35 @@ class AsyLower {
       const real = t.includes('.') || t.includes('e') || t.includes('E');
       return real ? { code: `(real ${t})`, type: 'real' } : { code: `(int ${t})`, type: 'int' };
     }
+    // `cycle` 在词法上是 LIT（camp.l 里它走 yylval.e，不是关键字），但在语义上它是
+     // 一个**值** —— 绘图层里那个"闭合记号"。所以这里把它解析成一个名字：
+    // `cyclepath`（不能就叫 cycle —— 那是 LIT，asy 源码里声明不出这个名字）。
+    // 于是 `a--cycle` 是普通的 `operator --(path, path)`，前端不必知道 path 是什么。
+    // 没引绘图层时报的是「未声明的变量 'cyclepath'」—— 那句话指得有点偏，所以这里
+    // 自己给一句。
+    if (t === 'cycle') {
+      if (!this.globals.has(ASY_CYCLE) && this.lookup(ASY_CYCLE) === null) {
+        return this.nope(n, "'cycle'（它是绘图层的闭合记号，要 `import plain;`）");
+      }
+      return this.nameOf(n, ASY_CYCLE);
+    }
     return this.nope(n, `字面量 '${t}'`);
+  }
+
+  /** 一个裸名字当表达式：局部 -> this 的字段 -> 文件级。name-exp 与 `cycle` 共用这一份。 */
+  nameOf(n, nm) {
+    const t = this.lookup(nm);
+    if (t !== null) return { code: `(var ${nm})`, type: t };
+    const f = this.selfField(nm);
+    if (f !== null) return { code: `(fld (var this) ${nm})`, type: f.type };
+    const g = this.gvarHere(nm);
+    if (g !== null && g.ok) return { code: `(var ${g.sym})`, type: g.type };
+    if (g !== null) {
+      return this.nope(n, `函数里引用文件级变量 '${nm}'（模块级变量收 int/real/bool/string、`
+        + 'pair/triple、struct，与它们的一维数组 —— 这一条不在里面）');
+    }
+    if (this.globals.has(nm)) return this.gvarLate(n, nm);
+    return this.err(n, `未声明的变量 '${nm}'`);
   }
 
   /** 数值提升：asy 允许 `3 == 3.0`（量过），核心方言两边必须同型，于是这里显式插 toreal。
@@ -1373,24 +1450,10 @@ class AsyLower {
         if (mq !== null) return this.modVar(n, mq);
         return this.nope(n, '带点的名字或算符名');
       }
-      const t = this.lookup(nm);
-      if (t === null) {
-        // 方法体里的裸字段名（第二十刀）：量过 struct 的成员**遮住**同名的文件级名字，
-        // 所以这一问在"未声明的变量"之前、也在文件级变量那句话之前。
-        const f = this.selfField(nm);
-        if (f !== null) return { code: `(fld (var this) ${nm})`, type: f.type };
-        // 文件级变量（第二十四刀）：核心方言的 `(global …)`。顺序解析 —— 后面才声明的
-        // 那份在这里不算（量过 asy 报 "no matching variable of name 'g'"）。
-        const g = this.gvarHere(nm);
-        if (g !== null && g.ok) return { code: `(var ${g.sym})`, type: g.type };
-        if (g !== null) {
-          return this.nope(n, `函数里引用文件级变量 '${nm}'（这一刀的模块级变量`
-            + '只收 int/real/bool/string —— pair/记录/数组的身份不在 MIR 的类型码里）');
-        }
-        if (this.globals.has(nm)) return this.gvarLate(n, nm);
-        return this.err(n, `未声明的变量 '${nm}'`);
-      }
-      return { code: `(var ${nm})`, type: t };
+      // 局部 -> this 的字段 -> 文件级，三档都在 nameOf 里（`cycle` 那个字面量共用它）。
+      // 顺序解析：后面才声明的那份文件级变量在这里不算（量过 asy 报
+      // "no matching variable of name 'g'"）；struct 的成员遮住同名的文件级名字。
+      return this.nameOf(n, nm);
     }
     if (h === 'binary') return this.binary(n);
     // `this`（第二十刀）：方法体里就是那个接收者形参。asy 那边 `this` 只在 struct 的
@@ -1493,8 +1556,12 @@ class AsyLower {
       if (t !== null) return { recv: { code: `(var ${base})`, type: t }, field: f };
       // 方法体里的裸字段名当接收者（第二十刀）：`inner.get()` 里的 inner 是 this 的字段
       const sf = this.selfField(base);
-      if (sf === null) return null;
-      return { recv: { code: `(fld (var this) ${base})`, type: sf.type }, field: f };
+      if (sf !== null) return { recv: { code: `(fld (var this) ${base})`, type: sf.type }, field: f };
+      // 文件级变量当接收者（第三十刀）：`currentpicture.nodes` 这一族。次序与 name-exp
+      // 那边一致 —— 局部、this 的字段、文件级，三档。
+      const g = this.gvarHere(base);
+      if (g !== null && g.ok) return { recv: { code: `(var ${g.sym})`, type: g.type }, field: f };
+      return null;
     }
     // `a.p.x`：接收者自己又是一个带点的名字（第十五刀的 pair 字段逼出来的 ——
     // struct 的 pair 字段一进来，`s.p.x` 就成了三层）。递归先把它降成一个值。
@@ -1684,9 +1751,15 @@ class AsyLower {
     if (args.length !== 1) return this.err(n, `'length' 要 1 个实参，给了 ${args.length} 个`);
     const v = this.expr(args[0]);
     if (v === null) return null;
+    return this.lengthOf(v, args[0]);
+  }
+
+  /** length 的后半段：实参**已经降好**。按值分出来是给"同名的模块函数一个都不合用"那条
+   *  回退路用的（见 callName / builtinRaw）—— 实参不能求两次。 */
+  lengthOf(v, at) {
     if (v.type === 'string') return { code: `(slen ${v.code})`, type: 'int' };
     if (v.type === 'pair' || v.type === 'int' || v.type === 'real') {
-      const p = this.coerce(v, 'pair', args[0], "'length' 的实参");
+      const p = this.coerce(v, 'pair', at, "'length' 的实参");
       if (p === null) return null;
       this.used.add('asy__pabs');
       return { code: `(call asy__pabs ${p.code})`, type: 'real' };
@@ -1695,7 +1768,7 @@ class AsyLower {
       this.used.add('asy__tabs');
       return { code: `(call asy__tabs ${v.code})`, type: 'real' };
     }
-    return this.err(args[0], `length(${v.type}) 在 asy 那边就是 no matching function（数组的长度写 a.length）`);
+    return this.err(at, `length(${v.type}) 在 asy 那边就是 no matching function（数组的长度写 a.length）`);
   }
 
   /** 字符串上的内建函数（名单与形参类型见 ASY_STRFN）。 */
@@ -1720,6 +1793,36 @@ class AsyLower {
     this.used.add(fn);
     for (const d of ASY_STR_DEPS.get(fn) ?? []) this.used.add(d);
     return { code: `(call ${fn} ${parts.join(' ')})`, type: spec.ret };
+  }
+
+  /**
+   * `string(x)` —— asy 只有两条重载（量过 `asy -noV`，别的都是 no matching function）：
+   *   `string(Int)`                          -> 整数的十进制
+   *   `string(real x, Int digits=DBL_DIG)`   -> DBL_DIG 就是 15；`string(3,4)` 走这一条
+   * bool / pair / string 都**不收**（量过：`string(true)`、`string((1,2))`、`string("a")`
+   * 那边全是 no matching function），所以这里也不收 —— 多收就是比 asy 多接受一门语言。
+   * 印出来的形状与 `write` 是同一份，所以借 fmtStr（real 那一档正好是 %.15g）。
+   * 绘图层（stage0/lib/asy/）要拼 PostScript 文本，它缺的就是这一个。
+   */
+  strConvCall(n) {
+    const args = this.args(n.items[2]);
+    if (args === null) return null;
+    if (args.length === 1) {
+      const v = this.expr(args[0]);
+      if (v === null) return null;
+      if (v.type !== 'int' && v.type !== 'real') {
+        return this.err(n, `string(${v.type}) 在 asy 那边就是 no matching function`
+          + '（string 只有 string(int) 与 string(real, int)）');
+      }
+      return { code: this.fmtStr(v.type, v.code), type: 'string' };
+    }
+    if (args.length === 2) {
+      const v = this.coerce(this.expr(args[0]), 'real', args[0], "'string' 的第 1 个实参");
+      const d = this.coerce(this.expr(args[1]), 'int', args[1], "'string' 的第 2 个实参（有效位数）");
+      if (v === null || d === null) return null;
+      return { code: `(tostr ${v.code} ${d.code})`, type: 'string' };
+    }
+    return this.err(n, `'string' 要 1 或 2 个实参，给了 ${args.length} 个`);
   }
 
   /**
@@ -2108,21 +2211,77 @@ class AsyLower {
     // 这里问的是 **此处可见的**候选（顺序解析，见 visible）—— 用户的 sqrt 写在后面时，
     // 前面那句 sqrt 在 asy 那边也还是内建的那个。
     const vis = this.visible(nm);
+    // 同名的用户/模块函数与内建那一族在这里**一起打分**：asy 那边内建与库里的定义是
+    // 同一个重载集（builtin.cc 把内建也塞进那张表），而我们的内建面写死在这个前端里，
+    // 所以判据既不是"有没有同名的函数"、也不是"合不合用"，而是**谁更同型**。
+    // 两头都量过：
+    //   - `length("ab")`：内建那份是同型（0 次转换），asy_builtins.asy 里的 `length(path)`
+    //     要走一次 `pair -> path` 的 cast（1 次），所以内建赢 —— 少了这一比，
+    //     `length(z)` 会去数一条单点路径的段数，印 0 而不是 sqrt(5)（量出来的错法）。
+    //   - `length(g)`（g 是 path）：内建那份根本不适用，模块那份赢。
+    // 实参在这条路上**只求一次**（callArgs 把它摊出来的语句攒在自己的 lines 里）；
+    // 内建那一族因此走按值的入口（builtinRaw）。
+    if (vis.length > 0) {
+      const raw = this.callArgs(n);
+      if (raw === null) return null;
+      let best = null;
+      for (const c of vis) {
+        const f = this.fit(c, raw);
+        if (f !== null && (best === null || f.cost < best)) best = f.cost;
+      }
+      const bc = this.builtinCost(nm, raw);
+      if (best !== null && (bc === null || best <= bc)) return this.applyCall(n, nm, vis, raw, null);
+      // 内建赢；或者两边都没有能匹配的、而这个名字**本来就是内建那一族的** ——
+      // 后一种要让内建那份去报诊断（`length(int[])` 那条话说得清楚得多，
+      // 比"有的是 int(path)"有用）。两条都走 builtinRaw：它回 null 时诊断已经发过了。
+      if (bc !== null || (best === null && this.builtinOwns(nm, raw))) return this.builtinRaw(n, nm, raw);
+      // 两边都没有能匹配的：让 applyCall 照原样报那条诊断
+      return this.applyCall(n, nm, vis, raw, null);
+    }
     // `A(3)`：**构造调用**（第二十一刀）。`A` 是记录名，不是变量也不是函数名，所以这一问
     // 放在内建名单前面 —— 记录名与内建那几个（sqrt/length/…）撞不上。
-    if (vis.length === 0 && this.isRec(nm)) return this.ctorCall(n, nm);
-    if (vis.length === 0 && nm === 'length') return this.lengthCall(n);
-    if (vis.length === 0 && ASY_STRFN.has(nm)) return this.strCall(n, nm);
-    if (vis.length === 0 && ASY_STR_NOPE.has(nm)) return this.nope(n, ASY_STR_NOPE.get(nm));
-    if (vis.length === 0 && ASY_PAIRFN.has(nm)) return this.pairCall(n, nm);
-    if (vis.length === 0 && this.math.has(nm)) return this.mathCall(n, nm);
-    if (vis.length === 0) {
-      if (this.funcs.has(nm)) {
-        return this.err(n, `'${nm}' 在这里还看不见 —— 它声明在后面，而 asy 的名字解析是顺序的（那边报 "no matching variable"）`);
-      }
-      return this.nope(n, `内建函数 '${nm}'（这一刀只有 write 和你自己定义的函数）`);
+    if (this.isRec(nm)) return this.ctorCall(n, nm);
+    if (nm === 'length') return this.lengthCall(n);
+    if (nm === 'string') return this.strConvCall(n);
+    if (ASY_STRFN.has(nm)) return this.strCall(n, nm);
+    if (ASY_STR_NOPE.has(nm)) return this.nope(n, ASY_STR_NOPE.get(nm));
+    if (ASY_PAIRFN.has(nm)) return this.pairCall(n, nm);
+    if (this.math.has(nm)) return this.mathCall(n, nm);
+    if (this.funcs.has(nm)) {
+      return this.err(n, `'${nm}' 在这里还看不见 —— 它声明在后面，而 asy 的名字解析是顺序的（那边报 "no matching variable"）`);
     }
-    return this.userCall(n, nm, vis);
+    return this.nope(n, `内建函数 '${nm}'（这一刀只有 write 和你自己定义的函数）`);
+  }
+
+  /**
+   * 内建那一族的**按值**入口：实参已经降好（`raw`），谁都没求两次。
+   * 前提是 `builtinOwns` 为真；实参类型这一族接不住时它自己发诊断并回 null。
+   */
+  builtinRaw(n, nm, raw) {
+    const r = raw[0];
+    if (r.lines !== null) for (const s of r.lines) this.pre.push(s);
+    return this.lengthOf(r.v, r.node);
+  }
+
+  /**
+   * 这个名字加这个实参形状**是不是内建那一族的**（不看实参类型）。现在只有 `length` ——
+   * 那是唯一与 asy_builtins.asy 撞名的内建（`length(path)`）。
+   */
+  builtinOwns(nm, raw) {
+    return nm === 'length' && raw.length === 1 && raw[0].key === null;
+  }
+
+  /**
+   * 内建那一族接这次实参要走几次转换（null = 这一族接不住）。与 `fit` 的 cost 同一个刻度：
+   * 0 是逐个同型，1 是一次隐式提升。别的内建名字将来与模块撞上时**要在这里补一行**，
+   * 不补的后果是"模块那份靠一次 cast 赢过同型的内建"，那是错的答案而不是报错。
+   */
+  builtinCost(nm, raw) {
+    if (!this.builtinOwns(nm, raw)) return null;
+    const t = raw[0].v.type;
+    if (t === 'string' || t === 'pair' || t === 'triple') return 0;
+    if (t === 'int' || t === 'real') return 1;
+    return null;
   }
 
   /**
@@ -2887,14 +3046,14 @@ class AsyLower {
         if (v === null) return null;
         init = v.code;
       }
-      // 文件级的那一层（第二十四刀）：**标量**在这里不是局部量，是个全局。声明本身已经
-      // 在 globalNames 里收过了（函数体要先看得见它），这里只发那句赋值 —— 全局是
-      // 零初始化的，所以没有初值的声明什么都不发。
-      // 收不下的类型（pair/记录/数组）照旧当 `(main …)` 的局部量，与这一刀之前一样：
-      // 文件级还能用，只是函数里看不见（那句 nope 还在，见 expr 那边）。
+      // 文件级的那一层（第二十四刀）：这里不是局部量，是个全局。声明本身已经在
+      // globalNames 里收过了（函数体要先看得见它），这里只发那句赋值。
+      // 标量的全局是零初始化的，所以没有初值的声明什么都不发；**聚合不行**（第三十刀）——
+      // 记录要 `new`、数组要 `anew`，零就是 null，一读就是 null reference。
       const g = this.fileLevel && this.scopes.length === 1 ? this.gvarAt(nm) : null;
       if (g !== null && g.ok) {
-        if (d.items[2] !== undefined) out.push(`(set ${g.sym} ${init})`);
+        const need = d.items[2] !== undefined || this.isRec(t) || asyIsArr(t);
+        if (need) out.push(`(set ${g.sym} ${init})`);
         continue;
       }
       if (this.declare(start, nm, t) === null) return null;
@@ -3743,20 +3902,31 @@ class AsyLower {
    */
   globalNames(n, at) {
     const tn = n.items[1];
+    // 类型是**照着节点看**出来的（不走 this.type()，那一路会报诊断）。三种形状：
+    //   `pen p;`      -> (name-ty (name pen))
+    //   `pair[] a;`   -> (array-ty (name pair) (dims))     里面是 (name …)，没有 name-ty
+    //   `real a[];`   -> (name-ty (name real)) + decidstart 上挂 dims
     let base = null;
-    if (isList(tn) && head(tn) === 'name-ty') {
-      const inner = tn.items[1];
-      if (isList(inner) && head(inner) === 'name' && isAtom(inner.items[1])) base = inner.items[1].value;
+    let arr = false;
+    let inner = tn;
+    if (isList(inner) && head(inner) === 'array-ty') {
+      arr = true;
+      inner = inner.items[1];
     }
+    if (isList(inner) && head(inner) === 'name-ty') inner = inner.items[1];
+    if (isList(inner) && head(inner) === 'name' && isAtom(inner.items[1])) base = inner.items[1].value;
     for (const d of this.flat(n.items[2], 'decids')) {
       if (!isList(d) || head(d) !== 'decid') continue;
       const start = d.items[1];
       if (!isList(start) || !isAtom(start.items[1])) continue;
       const nm = start.items[1].value;
-      // 名字后面挂了维度（`real a[];`）就不是标量了
+      // 名字后面挂了维度（`real a[];`）—— 那也是数组，与 `real[] a;` 同一件事
       const dims = isList(start) && start.items.length > 2;
-      const ok = !dims && base !== null && ASY_GLOBAL_OK.has(base);
-      const g = { sym: `asy__g${this.gdecls.length}_${nm}`, type: ok ? base : null, at, ok };
+      const el = base === null ? null
+        : (SCALARS.has(base) || base === 'pair' || base === 'triple' || this.records.has(base) ? base : null);
+      const ty = el === null ? null : ((arr || dims) ? `${el}[]` : el);
+      const ok = ty !== null;
+      const g = { sym: `asy__g${this.gdecls.length}_${nm}`, type: ty, at, ok };
       const list = this.globals.has(nm) ? this.globals.get(nm) : [];
       list.push(g);
       this.globals.set(nm, list);
@@ -3839,9 +4009,38 @@ class AsyLower {
    * 记录与模块声明在**同一遍**里按下标走：`import` 进来的 struct 要能当后面那些
    * struct 的字段类型，而 asy 的类型名是顺序解析的。
    */
+  /**
+   * asy 的 **C++ 内建面**（path / pen / guide / frame / transform 那一族类型，与
+   * runpath.in / runpen.in / runpicture.in 里那些函数）在真 asy 里是运行时自带的，
+   * 每个文件、每个模块里都看得见 —— 它不是 `base/plain.asy` 的一部分。
+   *
+   * 我们把它做成**一个模块**（`stage0/lib/asy/asy_builtins.asy`，名字从 opts.prelude 来），
+   * 在每个单元的声明遍开头隐式 import 一次：
+   *   - struct 只声明一份（核心方言的 class 名是全局唯一的，摊进每个单元会撞名）；
+   *   - 类型名与函数通过 modMerge 进到这个单元里，可见位置是 0（比所有顶层项都早）；
+   *   - 体只跑一遍（modLoad 缓存 + `ran` 那道闸）。
+   * 于是 `base/*.asy` 那一堆**引真的那些**就够了 —— 我们不抄 plain.asy。
+   */
+  builtinsIn(u, off) {
+    const nm = this.opts === null || this.opts.prelude === undefined ? null : this.opts.prelude;
+    if (nm === null || nm === '' || u.key === nm) return;
+    const keep = this.at;
+    this.at = off;
+    const b = this.modLoad(null, nm);
+    if (b !== null) {
+      this.modMerge(null, b, off, null);
+      // 体在**这个单元的正文最前面**跑（bodyPass 开头那一句）。不能挂 callAt[off] ——
+      // 那张表是"源码里 import 那一行"的位置，而 off 就是第一条顶层项的位置，
+      // 挂上去会把用户的第一句吃掉。init 自己有 `ran` 那道闸，多调一次不会重跑。
+      u.bi = b.init;
+    }
+    this.at = keep;
+  }
+
   declPass(u) {
     const rs = u.rs;
     const off = this.atOff;
+    this.builtinsIn(u, off);
     for (let i = 0; i < rs.length; i++) {
       const r = this.unwrapMod(rs[i]);
       if (!isList(r)) continue;
@@ -3901,6 +4100,8 @@ class AsyLower {
     }
     this.fileLevel = true;
     const main = [];
+    // 隐式引进来的内建面（builtinsIn）：体在这个单元的最前面跑
+    if (u.bi !== undefined && u.bi !== null) main.push(`(expr (call ${u.bi}))`);
     for (let i = 0; i < u.rs.length; i++) {
       const r = this.unwrapMod(u.rs[i]);
       this.at = off + i;

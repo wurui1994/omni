@@ -1,0 +1,1 @@
+string(bool) 在 asy 那边就是 no matching function（string 只有 string(int) 与 string(real, int)）

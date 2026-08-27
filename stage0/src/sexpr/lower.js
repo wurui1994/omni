@@ -224,8 +224,12 @@ class CoreLowerer {
       else if (head(f) === 'class') this.structDec(f, 'class');
     }
     // 第二遍收模块级变量（第二十四刀）：函数体与 (main …) 都可能提到它，所以要在
-    // 那些体降级之前成型。这一刀只收标量 —— MIR 那边全局的类型就是一个 8 位类型码，
-    // 聚合的**身份**在类型池里，全局要带身份得先给那张池子加一列，那是另一刀。
+    // 那些体降级之前成型。**聚合也收**（第三十刀，绘图层要 currentpicture/defaultpen
+    // 这种模块级的单件）：MIR 那边全局的类型是一个 8 位类型码，装不下聚合的身份 ——
+    // 但那个身份在这里根本不需要，因为 class/数组在四条腿上都是**一个指针**
+    // （LLVM 的 T_AGG/T_ARR 都是 `ptr`，两个解释器按名字存 JS 对象，C 那条腿拿的是
+    // OIR 的完整类型）。字段/元素的身份是从**表达式**的 OIR 类型来的，不是从全局的类型码
+    // 来的，所以 `(fld (var g) x)` 一直是准的。
     for (const f of forms) {
       if (head(f) !== 'global') continue;
       const nm = isAtom(f.items[1]) ? f.items[1].value : null;
@@ -233,9 +237,8 @@ class CoreLowerer {
       if (this.globals.has(nm)) { this.err(f, `模块级变量 '${nm}' 重复定义`); continue; }
       const t = this.ty(f.items[2], `模块级变量 ${nm}`);
       if (t === null) continue;
-      if (t !== INT && t !== REAL && t !== BOOL && t !== STRING) {
-        this.err(f, `模块级变量 ${nm} 这一刀只收 int / real / bool / string，`
-          + `不收 ${coreTypeText(t)}（聚合的身份不在 MIR 的 8 位类型码里，那是另一刀）`);
+      if (t === VOID) {
+        this.err(f, `模块级变量 ${nm} 不能是 void`);
         continue;
       }
       this.globals.set(nm, t);

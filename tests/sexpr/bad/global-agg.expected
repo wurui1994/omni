@@ -1,1 +1,0 @@
-模块级变量 here 这一刀只收 int / real / bool / string，不收 Node（聚合的身份不在 MIR 的 8 位类型码里，那是另一刀）

@@ -793,12 +793,15 @@ class LlvmEmitter {
   fieldInit(t, what) {
     if (t.k !== 'arr') return this.fieldZero(t, what);
     const dst = this.fresh();
-    if (t.elem.k === 'vec') {
-      // 向量元素走运行时那份按字节的 blob 实现。长度 0 时它**不会**碰零值那个指针
-      // （omni_arr.c 里那个 memcpy 循环跑 n 次），所以这里传 null，不为它开一块 alloca ——
-      // 开的话还要在入口块预扫一遍 NEW，而这条路上零值本来就没人读。
+    // 向量元素与类元素都走运行时那份按字节的 blob 实现 —— 步长各来自一处，与 arrRep 同一套：
+    // 向量的格子里躺内容（道数 × 8），类的格子里躺句柄（一个指针 = 8）。
+    // 长度 0 时 blob_new **不会**碰零值那个指针（omni_arr.c 里那个 memcpy 循环跑 n 次），
+    // 所以这里传 null，不为它开一块 alloca —— 开的话还要在入口块预扫一遍 NEW，
+    // 而这条路上零值本来就没人读。
+    if (t.elem.k === 'vec' || t.elem.k === 'class') {
+      const esz = t.elem.k === 'vec' ? t.elem.lanes * 8 : 8;
       this.needArrBlob = true;
-      this.line(`  ${dst} = call ptr @omni_arr_blob_new(i64 0, i64 ${t.elem.lanes * 8}, ptr null)`);
+      this.line(`  ${dst} = call ptr @omni_arr_blob_new(i64 0, i64 ${esz}, ptr null)`);
       return dst;
     }
     const e = this.noteArrElem(this.fieldElem(t.elem, what));

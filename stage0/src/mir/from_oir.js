@@ -333,12 +333,18 @@ class ToMir {
 
   /**
    * 需要值语义的位置（初始化 / 赋值 / 传参 / 返回）：struct 与 enum 的左值要拷贝。
-   * 判「是不是左值」的三个节点种类与 JS 后端逐条相同 —— 两边不一致就会在
+   * 判「是不是左值」的节点种类与 JS 后端逐条相同 —— 两边不一致就会在
    * 「改了副本还是改了本体」上分叉，而那种 bug 只在深层容器里才看得见。
+   *
+   * `GlobalRef` 是量出来补的（第二十四刀把聚合的模块级变量放开之后）：`(let p Pt (var g))`
+   * 里 g 是全局的结构体，这两条腿的全局槽躺的是**句柄**（LLVM 把 T_AGG 映射成 ptr、
+   * MIR 解释器存对象），少了这条 COPY 就是别名 —— 改 p 会改到 g。树解释器那边
+   * eval.js 的 rvalue 一直认它，所以当时的分叉是"树解释器对、这两条腿错"。
    */
   rvalue(e, type) {
     const v = this.expr(e);
-    const lval = e.kind === 'VarRef' || e.kind === 'Field' || e.kind === 'EnumPayload';
+    const lval = e.kind === 'VarRef' || e.kind === 'Field' || e.kind === 'EnumPayload'
+      || e.kind === 'GlobalRef';
     if (type && lval && (type.k === 'struct' || type.k === 'enum')) {
       return this.f.emit(OP.COPY, this.ty(type), v, REF_NONE, this.aggNo(type));
     }

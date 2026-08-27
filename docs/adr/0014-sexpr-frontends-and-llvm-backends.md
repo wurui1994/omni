@@ -1871,6 +1871,93 @@ LuaJIT 的教训：`ffi.C.foo(x)` 之所以是一条直调，不是因为它的�
   规范输入形态、先验证后执行、类型驱动特化、编译成闭包、结构化控制流要求）。
   落地前需各自找一份核对，本文不当作读码所得。
 
+### 已落地（绘图层的分界：C++ 那一面自己做，`base/*.asy` 引真的，2026-08-27）
+
+asy 的绘图层是**两层**，这一刀先把界划清：
+
+- **C++ 那一面**（19 个 primitive 类型 + `run*.in` 里那些函数）在真 asy 里是运行时自带的，
+  每个文件、每个模块里都看得见，`base/` 里一行都没有它的声明。我们这一侧是
+  `stage0/lib/asy/asy_builtins.asy` —— **用 asy 写的**，不是前端里的特例：
+  `path` 是一个 struct（`knot[] nodes` + `cyclic`，照 `path.h` 的 solvedKnot 摆），
+  `--` 是 `operator --`，EPS 是拼出来的字符串。每个单元在声明遍开头隐式 import 它一次
+  （`builtinsIn`）：struct 只声明一份（核心方言的 class 名全局唯一，摊进每个单元会撞名），
+  类型名与函数通过 `modMerge` 进来，可见位置是 0。
+- **asy 那一面**（`base/plain*.asy`、`graph.asy`…）**不抄**：那本来就是 asy 源码，
+  按 `ASYMPTOTE_DIR` 引真的那些文件。模块的找法因此是「当前目录 → ASYMPTOTE_DIR
+  的每一段 → 我们的 lib/asy」。
+
+前端为此只多了四样东西，都不是绘图层的知识：
+
+1. **模块级变量收聚合**（`(global …)` 原来只收标量）。理由原先写的是「聚合的身份不在
+   MIR 的 8 位类型码里」—— 量下来那个身份**根本不需要**：class 与数组在四条腿上都是
+   一个指针（LLVM 的 `T_AGG`/`T_ARR` 都是 `ptr`，两个解释器按名字存对象，C 那条腿拿的是
+   OIR 的完整类型），字段与元素的身份是从**表达式**的 OIR 类型来的。
+   没有初值的聚合全局要发那句 `(set g (cnew A))`：零就是 null，一读就是 null reference。
+   `dotQual` 也补了第三档（局部 → this 的字段 → 文件级），不然 `currentpicture.ops` 不认。
+   五条腿与真 asy 逐字节一致，`cases/37-global` 钉着；原来的 `bad/global-pair` 退役。
+2. **`string(x)`**：只有 `string(Int)` 与 `string(real, Int digits=DBL_DIG)` 两条重载
+   （量过，bool/pair/string 那三档 asy 自己就报 no matching function，钉在
+   `strict/string-bool`）。绘图层拼 PS 文本要的就是它 —— 坐标是 `%.6g`。
+3. **`include m;`**：文本级引入，在收表**之前**就把那个文件的顶层项摊进当前单元的 `rs`
+   （下标就是可见位置，后面几遍一个字不改）。`base/plain.asy` 那一串
+   `include plain_pens;` 全靠它。`cases/39-include` 钉着，`bad/mod-include` 退役。
+4. **`cycle` 落到一个名字上**：它在词法上是 LIT（camp.l 里走 `yylval.e`），所以
+   asy 源码里声明不出这个名字；前端把它解析成 `cyclepath`，绘图层里 `path cyclepath;`
+   带一个 `ismark` 标志。于是 `a--cycle` 就是普通的 `operator --(path, path)`。
+   这是前端与绘图层之间**唯一**约定的名字。
+
+EPS 那一头与真 asy 逐字节对过（`asy -noV -f eps`，只差 `%%Creator` 与 `%%CreationDate`
+两行，`tests/asy/draw/tri` 钉着 —— 那一节的用例是**纯 asy 源码**，判分的人是真 asy）。
+对上的都是量出来的，不是猜的：
+
+- 坐标 `%.6g`（`psfile.h:160` 的 `*out << " " << x`，ostream 默认精度 6），
+  HiResBoundingBox 是 `%.9g`（`psfile.h:30` 的 `setprecision(9)`）
+- `size(200)` 解的是 `s*w + 笔宽 = 200`（150 宽的图出来是 199.5 = 150*1.33），
+  笔宽**不**跟着缩放，所以宽度是 s 的分段线性函数 —— asy 那边是
+  `plain_bounds.asy` 里的小线性规划，我们用二分（单调，64 次折半）
+- 摆放：信纸 612×792 居中再各减 0.5（那 0.5 与笔宽无关，三个尺寸两种笔宽都对上），
+  `translate` 把 bbox 左下角搬过去；描边按笔宽的一半外扩、填充不外扩
+- 笔的状态是**增量**发的（`psfile.cc:242` 的 `setpen`：颜色/宽/cap/join/miter 各自比
+  `lastpen`），闭合路径末尾多一句回到起点的 lineto 再 `closepath`（`psfile.h:295..312`）
+
+还没做的（下一刀按"引真的 base"这条线推）：参数化模块
+（`from collections.map(K=string, V=string) access Map_K_V as Map_string_string;`，
+`plain_strings.asy:260`）、struct 体里的 `using` 类型别名（`plain_filldraw.asy:93`）、
+`guide` 与 `..` 的 Hobby 求解（`knot.cc` 的三对角）、`transform`、Label（要 TeX）、clip。
+`access settings` / `access version`（asy 那边是 C++ 模块）这一刀做了：
+`stage0/lib/asy/settings.asy` 与 `version.asy`，字段的类型逐个照 `settings.cc` 的
+`addOption(new …Setting)` 抄，只放 `base/plain*.asy` 真的读到的那些（量出来的 20 个）。
+于是 `import plain;` 从"第 9 行就停"推到了上面那两条 —— 这一段是引真的 base，
+`plain_constants` / `plain_strings` / `plain_pens` / `plain_paths` 这些 include 都进去了。
+
+内建面**默认就在**（`OMNI_ASY_BUILTINS=0` 关掉，调它自己时用）：真 asy 那边这一面是运行时
+自带的，`size(100);` 不 import 任何东西就跑得起来，要对上就不能靠环境变量。开了之后撞出
+两件事，两件都是我们这边的模型错，改的是模型不是用例：
+
+- **内建与库里的同名函数在 asy 那边是一个重载集**（`builtin.cc` 把内建也塞进那张表），
+  而我们的内建面写死在前端里。原先的判据是"有没有同名的用户函数"，于是 `int length(path)`
+  一可见就把 `length("ab")` 挡在门外；改成"两边**一起打分**、谁更同型谁赢"
+  （`callName` / `builtinCost` / `builtinRaw`）。中间试过"没有一个合用才回退"，那是错的：
+  `length(z)`（z 是 pair）会靠一次 `pair -> path` 的 cast 走到 `length(path)`，
+  印 0 而不是 sqrt(5) —— 错的答案，不是报错。
+- **`--` 只留 `operator --(path, path)`，pair 那三种重载换成 `path operator cast(pair)`**
+  （真 asy 那条是 `guide operator cast(pair)`）。留着的话 `1 -- 2` 会在"用户的
+  `operator --(real,real)`"与"我们的 `(pair,pair)`"之间打平（各一次转换），而真 asy 走用户
+  那份。走 cast 就自动对上：`int -> pair -> path` 是串两次，第二十七刀刻意不收。
+
+聚合的模块级变量（第二十四刀原先只收标量）也在这一刀放开了 —— 那条边界的理由
+（"聚合的身份不在 MIR 的 8 位类型码里，全局池要先加一列"）量过是错的：LLVM 把
+`T_AGG`/`T_ARR` 一律映射成 `ptr`，两个解释器按名字存对象，C 那条腿发全局用的是 OIR 的类型，
+字段/元素的身份来自表达式的 OIR 类型。放开之后抓到一处真的分叉：
+`from_oir` 与 JS 后端的 `rvalue` 判"是不是左值"时**漏了 `GlobalRef`**，于是
+`(let p Pt (var g))` 在这两条腿上是别名而不是拷贝（树解释器一直是对的）。
+`tests/sexpr/cases/13-aggglobals` 钉着这四条，原先的 `bad/global-agg` 退役。
+
+测试的默认档也跟着调了（迭代速度是可用性的一部分）：`tests/asy/run.js` 默认只跑
+`run` 与 `run-llvm` 两条腿（`OMNI_LEGS=all` 跑齐五条，提交前那一遍用它），每一节印耗时；
+C 与 LLVM 两条腿的 `clang` 默认 `-O0`（`OMNI_OPT=2` 要性能数字时开）。
+量出来的：74s -> 29s（五条腿 53s），而 `-ffp-contract=off` 与档位无关，所以语义没松。
+
 ## 后果与代价
 
 - **依赖 LLVM**：本机 `libLLVM.dylib` 157MB。产物变大，但仍然自带执行器、
@@ -1890,7 +1977,10 @@ LuaJIT 的教训：`ffi.C.foo(x)` 之所以是一条直调，不是因为它的�
 
 - clang `-O2`：编 24.6s（`-c` 21.13s），编出来的编译器跑 `link + lower cli.js` 0.86s
 - clang `-O1`：18.13s ——「降一档优化」基本无用
-- clang `-O0`：编 3.5s，跑 2.39s
+- clang `-O0`：编 3.5s，跑 2.39s；但**自举过不去** —— 这么编出来的 N1 一跑
+  `emit-c cli.js` 就 SIGSEGV（深递归的降级 + `-O0` 的大栈帧，撞 8MB 主线程栈）。
+  所以 `tests/bootstrap` 自己把 `OMNI_OPT` 钉在 2；`cli.js` 的默认是 `-O0`（迭代速度）。
+  真正的修法是给那个进程要一条更大的栈，那是另一刀。
 - tcc（本地快照 0.9.28rc，现编）：编 **0.41s**，跑 4.97s；
   端到端全量自构建 1.80s 冷 / 0.99s 热；`emit-c` 与 C0 逐字节相同
 

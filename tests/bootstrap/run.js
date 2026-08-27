@@ -29,6 +29,13 @@ const quick = process.argv.includes('-q');
 const cli = join(root, 'stage0', 'src', 'cli.js');
 const dir = mkdtempSync(join(tmpdir(), 'omni-boot-'));
 
+// 自举这条路上的 C **必须带优化**，与 cli.js 的默认档（-O0，为了迭代速度）分开。
+// 量出来的：-O0 编出来的 N1 一跑 `emit-c cli.js` 就 SIGSEGV（那份编译器的降级是深递归，
+// -O0 的栈帧大得多，机器默认 8MB 的主线程栈不够）。真正的修法是给这个进程要一条更大的栈，
+// 那是另一刀；这里先把档位钉住，免得"自举过不过"取决于一个为了跑得快而调的默认值。
+// 显式给了 OMNI_OPT 就听显式的（子进程都继承 process.env，所以这一句管到底）。
+if (process.env.OMNI_OPT === undefined || process.env.OMNI_OPT === '') process.env.OMNI_OPT = '2';
+
 // C1/C2 是"另一个安装位置的编译器"，得按安装布局摆：std 的根是 installDir()/../../lib
 // （module/load.js），而 installDir() 在 node 上就是镜像所在目录。摆错了 import "std/..."
 // 就找不到 —— 那是布局问题，不是编译器问题。

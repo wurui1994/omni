@@ -1,0 +1,121 @@
+(module
+  ;; 聚合的模块级变量 —— 第二十四刀原先刻意只收标量，理由写的是"聚合的**身份**不在 MIR
+  ;; 的 8 位类型码里，全局池要先加一列"。量过之后那个理由是错的：五条腿都不需要那一列。
+  ;;   - LLVM 把 T_AGG / T_ARR 一律映射成 `ptr`（全局槽就是一个指针大小的槽）；
+  ;;   - 两个解释器按名字存对象，本来就没有类型码这一说；
+  ;;   - C 那条腿发全局用的是 OIR 的类型，身份在那里是齐的。
+  ;; 字段/元素的身份来自**表达式的 OIR 类型**（`(fld …)` / `(aget …)` 各自带着），
+  ;; 不来自全局槽。所以这一刀只是把 `(global …)` 的类型检查放开。
+  ;;
+  ;; 这一份盯四条：类全局、数组全局、结构体全局（值语义）、以及**元素是类的数组**做字段
+  ;; （asy 的 `path` 里那条 `knot[] nodes` 就是它，LLVM 那条腿的 fieldInit 原先在这里抛
+  ;; "不支持数组字段的元素类型 class"）。
+  ;;
+  ;; 「零初始化」对聚合分两种，量出来的（五条腿一致）：
+  ;;   - 结构体是**值语义**，槽里躺的就是内容，所以它的零是字段逐个铺零，直接读得到；
+  ;;   - 类与数组是**引用语义**，槽里躺的是句柄，零就是**空引用** —— 读它撞判空诊断。
+  ;;     真正的构造是某处的一句 `(set g (cnew …))` / `(set g (anew …))`；asy 前端就是
+  ;;     这么发的（文件级 `A a;` 那一行按 asy 的顺序求值）。汇聚层不替谁定"什么时候构造"。
+  (class Node (v int) (tag string))
+  (class Poly (nodes (arr Node)))
+  (struct Pt (x int) (y int))
+
+  (global hub Node)
+  (global nums (arr int))
+  (global names (arr string))
+  (global origin Pt)
+  (global shape Poly)
+
+  (fn mk ((n int)) Node
+    (let o Node (cnew Node))
+    (fldset (var o) v (var n))
+    (fldset (var o) tag (str "n"))
+    (ret (var o)))
+
+  ;; 跨函数是同一份存储：这里改，入口里看得见
+  (fn touch ((k int)) void
+    (fldset (var hub) v (bin "+" (fld (var hub) v) (var k)))
+    (apush (var nums) (var k)))
+
+  (fn total () int
+    (let s int (int 0))
+    (let i int (int 0))
+    (while (bin "<" (var i) (alen (var nums)))
+      (do
+        (set s (bin "+" (var s) (aget (var nums) (var i))))
+        (set i (bin "+" (var i) (int 1)))))
+    (ret (var s)))
+
+  ;; 类全局的字段是**元素为类的数组**：往里 push 的是句柄
+  (fn grow ((n int)) void
+    (apush (fld (var shape) nodes) (call mk (var n))))
+
+  (fn span () int
+    (let a (arr Node) (fld (var shape) nodes))
+    (let s int (int 0))
+    (let i int (int 0))
+    (while (bin "<" (var i) (alen (var a)))
+      (do
+        (set s (bin "+" (var s) (fld (aget (var a) (var i)) v)))
+        (set i (bin "+" (var i) (int 1)))))
+    (ret (var s)))
+
+  (main
+    ;; 结构体全局：零就是字段铺零，不用先构造
+    (print (fld (var origin) x))
+    (print (fld (var origin) y))
+
+    ;; 类与数组全局：零是空引用，所以这里先构造。这三句就是 asy 前端替
+    ;; `Node hub; int[] nums; ...` 发的那三句
+    (set hub (cnew Node))
+    (set nums (anew (arr int) (int 0)))
+    (set names (anew (arr string) (int 0)))
+    (set shape (cnew Poly))
+    (print (fld (var hub) v))
+    (print (fld (var hub) tag))
+    (print (alen (var nums)))
+    (print (alen (var names)))
+    ;; `(cnew Poly)` 把那条 class[] 字段铺成**空数组**（不是空引用）—— fieldInit 干的
+    (print (alen (fld (var shape) nodes)))
+
+    ;; 跨函数共享：函数里改的就是这一份
+    (expr (call touch (int 5)))
+    (expr (call touch (int 3)))
+    (print (fld (var hub) v))
+    (print (alen (var nums)))
+    (print (call total))
+    (fldset (var hub) v (bin "*" (fld (var hub) v) (int 10)))
+    (print (fld (var hub) v))
+
+    ;; 字符串数组的全局：零是空数组，push 进去照样是真存储
+    (apush (var names) (str "ab"))
+    (apush (var names) (str "cd"))
+    (print (alen (var names)))
+    (print (aget (var names) (int 1)))
+
+    ;; 结构体全局：值语义，取出来是一份拷贝，改拷贝改不到全局那份
+    (fldset (var origin) x (int 7))
+    (fldset (var origin) y (int 9))
+    (let p Pt (var origin))
+    (fldset (var p) x (int 100))
+    (print (fld (var p) x))
+    (print (fld (var origin) x))
+    (print (fld (var origin) y))
+
+    ;; 类全局的 class[] 字段
+    (expr (call grow (int 1)))
+    (expr (call grow (int 2)))
+    (expr (call grow (int 4)))
+    (print (alen (fld (var shape) nodes)))
+    (print (call span))
+    ;; 引用语义：手上的句柄与格子里的是同一个对象
+    (let o Node (aget (fld (var shape) nodes) (int 0)))
+    (fldset (var o) v (int 10))
+    (print (call span))
+    (print (fld (aget (fld (var shape) nodes) (int 0)) v))
+
+    ;; 类全局本身也是引用：换掉 hub 之后，函数里看到的是新的那个
+    (set hub (call mk (int 2)))
+    (expr (call touch (int 1)))
+    (print (fld (var hub) v))
+    (print (call total))))
