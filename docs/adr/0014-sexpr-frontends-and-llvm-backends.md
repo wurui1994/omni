@@ -237,11 +237,12 @@ bison **隐式**的选择写成**显式**的优先级声明 —— 悬垂 else�
    **`pair[]`**（数组那一整套操作在 pair 上一条不少）、**默认实参与命名实参**、
    **重载解析**（同型优先、转换算分、并列即歧义、候选按声明顺序可见）、
    **struct**（引用语义、隐式 `operator init`、字段默认值每次构造重求、`== !=` 比身份）、
-   **pair 字段与数组字段**（第十五、十六刀：核心方言的类字段收 `(vec T N)` 与 `(arr T)`），
-   十九份用例在五个执行器上与 `asy -noV` 逐字节相同。
+   **pair 字段与数组字段**（第十五、十六刀：核心方言的类字段收 `(vec T N)` 与 `(arr T)`）、
+   **内嵌记录字段**（第十七刀：`struct B { A a; }`、`b.a.x` 读写、任意层的点），
+   二十份用例在五个执行器上与 `asy -noV` 逐字节相同。
    **还没做**的是给切片赋值、多维数组、复数幂、triple、
    用户自定义的 `operator init`、算符重载、字符串的 `reverse`/`insert`/`split`、
-   struct 套 struct 与成员函数 —— 每一条都在
+   自引用字段与成员函数 —— 每一条都在
    `tests/asy/bad/` 里有一份带 `ASY_NOPE` 的用例钉着，不是含糊的"待办"。
    超越函数（exp/log/trig）是**另一回事**：不是没做，是量过 libm 与 V8 在最后一位就分叉，
    收进来这条轴必然有一天变红，所以按边界拒掉（`tests/asy/bad/sin.asy`；pair 上的
@@ -415,10 +416,10 @@ static inline C + 另写一份 IR 助手"，是两份实现；这次不重复那
 `1/3` 是实数除法而 `1#3` 是整数商、`3 == 3.0` 要提左边、`write` 的分隔符取决于第一个
 实参是不是字符串。类型是符号表的事，动作模板里没有符号表。
 
-**判分的人不是我**：`tests/asy` 的十九份用例（算术 / 字符串 / 两种引号 / 控制流 / 函数 /
+**判分的人不是我**：`tests/asy` 的二十份用例（算术 / 字符串 / 两种引号 / 控制流 / 函数 /
 real 的 %.15g / `? :` / 数学函数 / 数组 / pair / 切片与整数组输出 / for-each /
 字符串函数 / `pair[]` / 默认实参与命名实参 / 重载解析 / struct / struct 的 pair 字段 /
-struct 的数组字段）每份都是
+struct 的数组字段 / struct 的记录字段）每份都是
 「五条腿逐字节相同 == `.expected` == `asy -noV` 当场重跑」。`.expected` 本身就是真 asy 的
 输出生成的；机器上没装 asymptote 时那一节打印 skip，但 `.expected` 仍然把答案钉住。
 
@@ -443,7 +444,7 @@ struct 的数组字段）每份都是
 模块（import/access）、隐式缩放（`105cm`）、超越函数（`sin`、pair 上的 `angle` ——
 理由是上面那条 ULP 测量）、函数里读文件级变量（核心方言没有全局量）、
 循环条件里的 `? :`、给切片赋值（`a[0:2] = b`）、多维数组、
-字符串的 `reverse`/`insert`/`split`、struct 的三条（嵌套 struct 字段 /
+字符串的 `reverse`/`insert`/`split`、struct 的三条（自引用字段 /
 成员函数 / `A[]`）。
 
 **for-each 的两条语义也是量出来的**：循环变量是**复制**（体里 `x = 99` 不动数组），
@@ -540,6 +541,8 @@ with parameters 'int, int'"。我们是两遍降级（先收签名再降体）�
 嵌套 struct 字段、成员函数、`A[]`。前三条卡在核心方言而不是 asy 前端 —— 每条腿的"类零值"
 各是一个只认标量的小函数（`backend-js` 的 `zero`、`backend-c` 的 `zeroExpr`、`interp` 的
 `zeroOf`），要放开就得同时改三处，那是下一刀的事。
+（后话：前三条分别在第十五、十六、十七刀放开了，见下面「支持面第五/六/七阶段」；
+留在门外的只剩成员函数、`A[]`，和第十七刀新划的那条**自引用**。）
 
 **复合赋值的接收者只求一次**：`a.x += f()` 里 `a` 不能求两遍，所以 `(field …)` 形式的左值在
 `assignFld` 里单独走一条路（先绑接收者再 `(fldset …)`），而 `(field …)` 出现在需要重复求值的
@@ -795,6 +798,9 @@ alloca 出来的会悬空。arena 从不回收，这与数组/字符串/class �
 解释器的 `zeroOf`），它们今天只认标量；数组字段还要先定"复制结构体时复制的是句柄还是
 内容"（JS 后端的 `$cp_S` 是逐字段浅拷，asy 的 `T[]` 也是引用，两边一致，但那要写进用例
 才算定下来）。`tests/sexpr/bad/struct-field-arr.sx` 与 `struct-in-struct.sx` 钉着这条边界。
+（后话：这三条在第十五/十六/十七刀依次放开了，那两份 bad/ 也因此**通过**了，于是删掉
+换成更窄的两条 —— `bad/struct-self.sx`（字段类型就是它自己）与 `bad/struct-fwd.sx`
+（字段类型声明在后面）。「边界因为功能落地而通过」时删掉重划，而不是留着当摆设。）
 
 顺带被推出来一件事：**`tests/cases/01_basics.omni` 整份能降了**（它原先被拒只是因为里面有
 struct），输出与 run / interp / omni-c 逐字节相同，于是它进了 `SUPPORTED`，tests/llvm 变成
@@ -850,7 +856,7 @@ LLVM 那条腿也成立了。
 **数组字段仍然在门外**，理由收窄到一句话：向量的零值是**常量**，数组的零值是一次
 运行时调用（`omni_arr_*_new(0, 零值)`），而 LLVM 那条腿的 `OP.NEW` 现在只会
 `store 一个常量`。嵌套聚合另外还欠"复制要递归下去"。`tests/sexpr/bad/struct-field-arr.sx`
-与 `struct-in-struct.sx` 写着这两句。
+与 `struct-in-struct.sx` 写着这两句（两份都在后面两刀里被删了 —— 功能落地，边界重划）。
 
 asy 那一侧同一刀落地的是 **pair 字段**（`cases/18-structpair.asy`，与 `asy -noV` 逐字节
 相同）。pair 上那一整套在字段上一条不少，两处是这一刀新发现的：
@@ -891,6 +897,47 @@ asy 那一侧落地的是 `struct S { int[] xs; pair[] pts; }`（`cases/19-struc
 **只剩两条边界**：struct 套 struct（复制要递归下去，而 LLVM 的 COPY 是逐字段
 load/store）与成员函数（要 this 与闭包）。`tests/sexpr/bad/struct-in-struct.sx` 与
 `tests/asy/bad/struct-nested.asy` / `struct-method.asy` 钉着。
+
+### 已落地（支持面第七阶段：内嵌聚合，门槛 2 第十七刀）
+
+字段最后一格：**另一个结构体/类**。`(struct Line (a Point) (b Point))`、
+`(class Node (p Point))` 都收，`(fld …)` / `(fldset …)` / `OP.COPY` 一路照走。
+动机还是门槛 3：`path` 是一串控制点、`transform` 装在 `pen` 里，绘图层没有一层是平的。
+
+LLVM 那条腿这一刀有**一个真正新的表示决定**：内嵌结构体字段就是**那个命名类型本身**
+（`%s_Line = type { %s_Point, %s_Point }`），不是指向它的指针。三件事因此变简单：
+
+- `FLD` 变成一条**光秃秃的 `getelementptr`**，后面不跟 `load` —— 取出来的就是那块内存的
+  地址，而这条腿的"结构体值"本来就是"指向 arena 的指针"，两者是同一件东西。
+- `COPY` 于是是 `load %s_Point` / `store %s_Point`，LLVM 的**头等聚合**替我把递归复制
+  展开了；我不必在发射器里写一遍"逐字段递归下去"。
+- `NEW` 的零值靠 `aggZero` 递归：内嵌字段就 GEP 进去再往下铺一层，不是发一次
+  `omni_ll_alloc`。所以一个 `(new Line)` 仍然只有一次分配。
+
+反过来的代价写在明处：内嵌是**值语义**（那一格就在父对象里），所以内嵌一个 `class`
+字段仍然是 `ptr` + 访问点判空 —— 两种语义在字段上也分得开，跟 `(new …)` / `(cnew …)`
+那对构造名同一条理由。
+
+字段类型只收**前面已经声明过**的那个：自引用与前向引用的零值会无限递归。核心方言这边
+为此在 `run()` 里先扫一遍所有聚合名（`aggLater`），好让"声明在后面"和"根本没这个类型"
+给出不同的诊断 —— `tests/sexpr/bad/struct-self.sx` 与 `struct-fwd.sx` 是这两半。
+
+asy 那一侧落地的是 `struct B { A a; }`（`cases/20-structnest.asy`，与 `asy -noV` 逐字节
+相同）。三件事是量出来才对上的：
+
+- **内嵌记录要跑 `operator init`**：量过 `struct B { A a; }` 之后 `b.a.y` 是 A 的字段
+  默认值，不是空引用。所以"有记录字段"和"有默认值"一样会逼出 `asy__new_<T>` 包装，
+  里面把内嵌对象一个个造出来。
+- **`f(x).字段 = v` asy 收**（struct 是引用类型，返回的就是句柄），所以 `assign` 不再
+  只认"普通变量的字段"；复合赋值先把接收者绑成临时量，免得函数调两次。
+- **`?:` 的两支是记录时**要一个临时量的初值，而记录的"零值"只能是一个对象 ——
+  发的是 `(cnew T)`（不跑默认值：那个对象一定会被两支之一覆盖，语义上看不见）。
+- 反过来一条是**差别**，不是对齐：`struct A { A next; }` **asy 收**（量过印 0 退 0，
+  它的字段是懒的），我们拒。`tests/asy/bad/struct-self.asy` 钉着，理由带 `ASY_NOPE`。
+
+`tests/asy/bad/struct-nested.asy` 因为这一刀**通过**了，所以删掉换成上面那份自引用；
+`tests/cases/03_structs.omni` 同理整份能降了，进了 `tests/llvm/supported.js`（四条腿
+stdout/stderr/退出码逐字节相同）—— 又一次是 tests/llvm 第 2 节那句双向断言逼出来的。
 
 ## 决策 4：调用 LLVM 需要 extern-C FFI —— 这是新要求，也是 dogfood
 

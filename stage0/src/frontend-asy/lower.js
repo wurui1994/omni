@@ -54,7 +54,12 @@
 // **数组字段**（第十六刀：`struct S { int[] xs; pair[] pts; }`。数组是引用语义，
 // 所以复制 struct 搬的是句柄 —— 量过 `S b = a; b.xs.push(1000);` 之后 `a.xs.length`
 // 也变了。字段上那一整套数组操作 —— `push`/`pop`/`.length`/下标读写/复合赋值/切片/
-// for-each/`write` 整条数组 —— 与裸数组同一条路，因为 `(fld …)` 出来的就是那个句柄）。
+// for-each/`write` 整条数组 —— 与裸数组同一条路，因为 `(fld …)` 出来的就是那个句柄）、
+// **内嵌记录字段**（第十七刀：`struct A { int x; } struct B { A a; }`，`b.a.x` 读写、
+// `a.b.c.d` 任意层。asy 给记录字段跑一遍 `operator init`（量过 `struct B { A a; }` 之后
+// `b.a.y` 是 A 的字段默认值，不是空引用），所以有记录字段的类型一定走生成的构造函数，
+// 里面把内嵌对象一个个造出来。字段类型只收**前面已经声明过**的记录 —— 自引用在门外，
+// 见下面的差别一节）。
 //
 // 不支持（见到就报错，报错里说清是哪一条）：triple、import/access、
 // typedef、算符重载、给切片赋值（`a[0:2] = b`）、
@@ -72,9 +77,9 @@
 // 还没量全；`split` 要 `string[]` 的返回值，那条路还没走通）、
 // 循环条件里的 `?:`（摊出来的赋值只能落在循环外面，条件就只
 // 算一次了 —— 语义会变，所以报错而不是悄悄换个意思）、
-// struct 的这三条边界（每条都有 bad/ 用例钉着）：字段是另一个 struct
-// （复制要递归下去，而 LLVM 那条腿的 COPY 是逐字段 load/store，见 sexpr/lower.js 的
-// structDec）、struct 里的成员函数（这一刀只有字段声明）、
+// struct 的这三条边界（每条都有 bad/ 用例钉着）：**自引用**字段
+// （`struct A { A next; }` —— asy 收，我们不收，见下面的差别一节）、
+// struct 里的成员函数（这一刀只有字段声明）、
 // `A[]`（数组元素还只有 int/real/bool/string/pair）。
 //
 // ## 与真 asy 的差别，写在这里而不是等着被发现
@@ -122,6 +127,14 @@
 // - **pair 的分量是只读的**（第十五刀量的，也是对齐的一条）：`z.x = 5` 与 `a.p.x = 5`
 //   asy 都报 "virtual field is read-only"，所以 assign 里有一条专门的诊断 ——
 //   读（`s.p.x`）认，写不认。`tests/asy/strict/pair-field-set` 钉着这一条。
+// - **自引用字段：asy 收，我们不收**（第十七刀量的）：`struct A { A next; int x; } A a;
+//   write(a.x);` 在 asy 那边印 0 退 0 —— 它的字段是懒的，`next` 搁着不造。我们的隐式
+//   `operator init` 要把内嵌的记录**造出来**（不造就是空引用，而量过 asy 那边内嵌记录
+//   的字段拿得到默认值），自引用于是无限递归，所以拦在字段类型那一关。这是"我们比 asy
+//   少接受"的一条，`tests/asy/bad/struct-self` 钉着。
+// - **`f(x).字段 = v` 认**（第十七刀顺出来的）：量过 asy 收，因为 struct 是引用类型，
+//   函数返回的就是那个句柄。所以 assign 不再只认"普通变量的字段"，接收者可以是任意
+//   表达式；复合赋值（`f(x).n += 1`）要先把接收者绑成临时量，免得调两次。
 
 import { isList, isAtom, isStr, head } from '../sexpr/read.js';
 
@@ -538,10 +551,10 @@ class AsyLower {
   /**
    * `struct A { int x; real y = 1.5; }` -> 一条记录声明。
    *
-   * 字段**这一刀收 int / real / bool / string 与 pair**（pair 是第十五刀加的：核心方言的
-   * 类字段现在收 `(vec T N)`，而 asy 的 pair 就降成 `(vec real 2)`）。
-   * 数组字段与记录套记录还在门外（核心方言那边数组字段的零值是一次运行时调用，
-   * 不是常量），各有一份 bad/ 钉着。
+   * 字段**这一刀收 int / real / bool / string、pair、它们的一维数组，与前面已经声明过的
+   * 记录**（pair 是第十五刀、数组是第十六刀、记录套记录是第十七刀）。
+   * 剩下两条边界各有一份 bad/ 钉着：自引用（`struct A { A next; }` —— asy 收，我们不收，
+   * 见文件头的差别一节）、`A[]`（数组元素还只有标量与 pair）。
    * 方法（struct 里的函数定义）也在门外：那要 this 与闭包，是另一刀。
    */
   recordDec(n) {
@@ -557,11 +570,20 @@ class AsyLower {
       const r = this.unwrapMod(item);
       if (!isList(r)) continue;
       if (head(r) !== 'vardec') return this.nope(r, `struct 里的 '${head(r)}'（这一刀只有字段声明）`);
+      // 字段类型是**这个 struct 自己**：asy 收（量过 `struct A { A next; int x; } A a; write(a.x);`
+      // 印 0 退 0 —— 它的字段是懒的，next 就搁着不造）。我们不收：隐式 operator init 要把
+      // 内嵌的对象造出来，自引用就是无限递归。这一条要拦在 type() 前面，不然 'A' 还没进
+      // this.records，漏出去的是那句泛泛的「类型 'A'」。
+      if (isList(r.items[1]) && head(r.items[1]) === 'name-ty'
+          && this.plainName(r.items[1].items[1]) === nm) {
+        return this.nope(r, `struct ${nm} 里放一个 ${nm} 字段（自引用）`);
+      }
       const ft = this.type(r.items[1], `struct ${nm} 的字段`);
       if (ft === null) return null;
-      if (!SCALARS.has(ft) && ft !== 'pair' && !(asyIsArr(ft) && ASY_ARRELEM.has(asyElem(ft)))) {
+      if (!SCALARS.has(ft) && ft !== 'pair' && !this.isRec(ft)
+          && !(asyIsArr(ft) && ASY_ARRELEM.has(asyElem(ft)))) {
         return this.nope(r, `struct ${nm} 的 ${ft} 字段（这一刀的字段只有 `
-          + `int/real/bool/string/pair 与它们的一维数组）`);
+          + `int/real/bool/string/pair、它们的一维数组，与**前面已经声明过**的 struct）`);
       }
       for (const d of this.flat(r.items[2], 'decids')) {
         if (!isList(d) || head(d) !== 'decid') return this.err(d, '认不出的字段声明');
@@ -598,7 +620,9 @@ class AsyLower {
   recNew(n, t) {
     const rec = this.records.get(t);
     let any = false;
-    for (const f of rec.fields) if (f.def !== null) any = true;
+    // 记录类型的字段也算"有默认值"：asy 给它跑一遍 operator init（量过 `struct B { A a; }`
+    // 之后 `b.a.y` 是 A 的字段默认值，不是空引用），所以这种记录一定要走构造函数。
+    for (const f of rec.fields) if (f.def !== null || this.isRec(f.type)) any = true;
     if (!any) return `(cnew ${t})`;
     const had = this.recInits.get(t);
     if (had !== undefined) return `(call ${had})`;
@@ -615,7 +639,12 @@ class AsyLower {
     this.declare(n, 'o', t);
     let bad = false;
     for (const f of rec.fields) {
-      if (f.def === null) continue;
+      if (f.def === null) {
+        // 内嵌的记录：没写默认值也要给它一个**新对象**（字段类型只能是前面声明过的记录，
+        // 所以这里的递归一定会到底）
+        if (this.isRec(f.type)) lines.push(`(fldset (var o) ${f.name} ${this.recNew(n, f.type)})`);
+        continue;
+      }
       const v = this.coerce(this.expr(f.def), f.type, f.def, `字段 '${t}.${f.name}' 的默认值`);
       if (v === null) { bad = true; break; }
       lines.push(`(fldset (var o) ${f.name} ${v.code})`);
@@ -1101,7 +1130,12 @@ class AsyLower {
     const nm = `asy__c${this.tmp++}`;
     const yes = aPre.concat([`(set ${nm} ${av.code})`]).join(' ');
     const no = bPre.concat([`(set ${nm} ${bv.code})`]).join(' ');
-    this.pre.push(`(let ${nm} ${asyCore(t)} ${asyIsArr(t) ? `(anew ${asyCore(t)} (int 0))` : ZERO.get(t)})`);
+    // 临时量要先有个初值（核心方言的 `(let …)` 要一个表达式）。记录类型给 `(cnew T)`：
+    // 它**不跑**字段默认值，所以这个马上被覆盖的对象在语义上看不见（代价是一次白分配）；
+    // 而写 null 是不行的 —— 方言里写不出 null。
+    const init = this.isRec(t) ? `(cnew ${t})`
+      : (asyIsArr(t) ? `(anew ${asyCore(t)} (int 0))` : ZERO.get(t));
+    this.pre.push(`(let ${nm} ${asyCore(t)} ${init})`);
     this.pre.push(`(if ${c.code} (do ${yes}) (do ${no}))`);
     return { code: `(var ${nm})`, type: t };
   }
@@ -1827,7 +1861,21 @@ class AsyLower {
         return this.err(node, `pair 的 '${q.field}' 是只读的虚字段 —— asy 那边就是 "virtual field is read-only"`);
       }
     }
-    if (isList(lhs) && head(lhs) === 'field') return this.nope(node, '给"不是普通变量的东西"的字段赋值');
+    // `f(x).字段 = v`：接收者不是名字而是一个表达式。asy 收这种（struct 是引用类型，
+    // 回来的是句柄，写进去就是写那个对象 —— 量过 `pick(p,true).x = 11` 之后 p.lo.x 是 11）。
+    // 接收者**只求一次**：简单赋值直接用，复合赋值先绑个临时量。
+    if (isList(lhs) && head(lhs) === 'field') {
+      const recv = this.expr(lhs.items[1]);
+      if (recv === null) return null;
+      const fname = isAtom(lhs.items[2]) ? lhs.items[2].value : null;
+      if (fname === null) return this.nope(node, '给"点后面不是名字"的东西赋值');
+      if (!this.isRec(recv.type)) return this.nope(node, `给 ${recv.type} 的字段赋值`);
+      if (op === null) return this.assignFld(node, { recv, field: fname }, rhs, op);
+      if (this.pre === null) return this.nope(node, '这个位置的复合字段赋值（它要绑一个临时量）');
+      const tv = `asy__r${this.tmp++}`;
+      this.pre.push(`(let ${tv} ${asyCore(recv.type)} ${recv.code})`);
+      return this.assignFld(node, { recv: { code: `(var ${tv})`, type: recv.type }, field: fname }, rhs, op);
+    }
     // 切片赋值 asy **有**（量过：`int[] a={1,2,3}; a[0:2]=b;` 之后 a 是 7,8,3），
     // 而且右边长度不同时整个数组的长度会跟着变 —— 那是另一条语义，这一刀没做。
     if (isList(lhs) && head(lhs) === 'slice-exp') return this.nope(node, '给切片赋值（`a[0:2] = b`）');

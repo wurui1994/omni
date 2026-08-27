@@ -1,8 +1,0 @@
-;; 结构体套结构体还不收：字段只能是标量或向量（见 struct-field-arr 的理由）。
-;; 嵌套聚合另外还欠一件事 —— 复制要递归下去，而 LLVM 那条腿的 COPY 是逐字段 load/store。
-(module
-  (struct Point (x real) (y real))
-  (struct Seg (a Point) (b Point))
-  (main
-    (let s Seg (new Seg))
-    (print (fld (fld (var s) a) x))))

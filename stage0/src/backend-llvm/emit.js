@@ -630,31 +630,60 @@ class LlvmEmitter {
         this.line(`  ${p} = call ptr @omni_nullck(ptr ${obj})`);
         obj = p;
       }
+      // 内嵌的结构体字段（第十七刀）：它的存储就在父对象那块内存里，所以"字段的值"
+      // 就是那个地址本身 —— 一条 getelementptr，没有 load。这正是 struct 的值语义能
+      // 落在这条腿上的原因：`(fld …)` 交出去的指针指着父对象，而 from_oir 在需要值的
+      // 地方会先发 OP.COPY。
+      const inner = acc.field.type.k === 'struct' ? `%s_${acc.field.type.name}` : null;
+      if (op === OP.FLD && inner !== null) {
+        this.line(`  ${dst} = getelementptr ${acc.type}, ptr ${obj}, i32 0, i32 ${acc.index}`);
+        return;
+      }
       const g = this.fresh();
       this.line(`  ${g} = getelementptr ${acc.type}, ptr ${obj}, i32 0, i32 ${acc.index}`);
       if (op === OP.FLD) this.line(`  ${dst} = load ${this.ty(t, 'field')}, ptr ${g}`);
-      else this.line(`  store ${this.typed(f.b[i])}, ptr ${g}`);
+      else if (inner !== null) {
+        // 往内嵌字段里赋值：搬的是**内容**，不是指针（右边那个 ptr 指着另一块内存）
+        const v = this.fresh();
+        this.line(`  ${v} = load ${inner}, ptr ${this.val(f.b[i])}`);
+        this.line(`  store ${inner} ${v}, ptr ${g}`);
+      } else this.line(`  store ${this.typed(f.b[i])}, ptr ${g}`);
       return;
     }
     const ty = this.aggType(f.aux[i]);
     this.aggUsed = true;
     this.line(`  ${dst} = call ptr @omni_ll_alloc(i64 ptrtoint `
       + `(ptr getelementptr (${ty.name}, ptr null, i32 1) to i64))`);
+    if (op === OP.NEW) { this.aggZero(ty.name, ty.fields, dst, ty.plain); return; }
     let k = 0;
     while (k < ty.fields.length) {
       const fd = ty.fields[k];
       const g = this.fresh();
       this.line(`  ${g} = getelementptr ${ty.name}, ptr ${dst}, i32 0, i32 ${k}`);
+      // 内嵌结构体字段也走这一条：`load %s_Point` 是一次首类聚合读，搬的是那几个字节 ——
+      // 递归的深拷贝因此不必手写，而里面的数组/字符串字段搬的仍然是句柄（引用语义）。
       const lt = this.fieldTy(fd.type, `${ty.plain}.${fd.name}`);
-      if (op === OP.NEW) {
-        this.line(`  store ${lt} ${this.fieldInit(fd.type, `${ty.plain}.${fd.name}`)}, ptr ${g}`);
-      } else {
-        const s = this.fresh();
-        const v = this.fresh();
-        this.line(`  ${s} = getelementptr ${ty.name}, ptr ${this.val(f.a[i])}, i32 0, i32 ${k}`);
-        this.line(`  ${v} = load ${lt}, ptr ${s}`);
-        this.line(`  store ${lt} ${v}, ptr ${g}`);
-      }
+      const s = this.fresh();
+      const v = this.fresh();
+      this.line(`  ${s} = getelementptr ${ty.name}, ptr ${this.val(f.a[i])}, i32 0, i32 ${k}`);
+      this.line(`  ${v} = load ${lt}, ptr ${s}`);
+      this.line(`  store ${lt} ${v}, ptr ${g}`);
+      k++;
+    }
+  }
+
+  /** 零值：往 `base` 那块内存里逐字段铺一遍。内嵌结构体字段递归下去 —— 不发
+   *  `zeroinitializer`，因为字符串字段的零是常量池里那份空串、数组字段的零是一次
+   *  运行时调用，两者都不是全零位。 */
+  aggZero(tyName, fields, base, plain) {
+    let k = 0;
+    while (k < fields.length) {
+      const fd = fields[k];
+      const g = this.fresh();
+      this.line(`  ${g} = getelementptr ${tyName}, ptr ${base}, i32 0, i32 ${k}`);
+      const what = `${plain}.${fd.name}`;
+      if (fd.type.k === 'struct') this.aggZero(`%s_${fd.type.name}`, fd.type.fields, g, fd.type.name);
+      else this.line(`  store ${this.fieldTy(fd.type, what)} ${this.fieldInit(fd.type, what)}, ptr ${g}`);
       k++;
     }
   }
@@ -670,21 +699,23 @@ class LlvmEmitter {
     return { name: `%${cls ? 'c' : 's'}_${t.name}`, plain: t.name, fields: t.oir.fields, isClass: cls };
   }
 
-  /** 访问描述符的第 n 项 -> `{type: '%s_Foo', index, isClass}`。字段号就是声明顺序。 */
+  /** 访问描述符的第 n 项 -> `{type: '%s_Foo', index, isClass, field}`。字段号就是声明顺序。 */
   access(n) {
     const acc = this.mir.accs[n];
     if (acc === undefined) throw new OmniError(`llvm: 没有第 ${n} 个字段访问描述符`);
     const ty = this.aggType(acc.type);
     let k = 0;
     while (k < ty.fields.length) {
-      if (ty.fields[k].name === acc.field) return { type: ty.name, index: k, isClass: ty.isClass };
+      if (ty.fields[k].name === acc.field) {
+        return { type: ty.name, index: k, isClass: ty.isClass, field: ty.fields[k] };
+      }
       k++;
     }
     throw new OmniError(`llvm: ${ty.plain} 没有字段 ${acc.field}`);
   }
 
-  /** 字段的 LLVM 类型。四种标量、向量（第十五刀）、数组（第十六刀，就是个不透明指针），
-   *  表外的报错（阶段边界，与 ty() 同一条规矩）。 */
+  /** 字段的 LLVM 类型。四种标量、向量（第十五刀）、数组（第十六刀，就是个不透明指针）、
+   *  内嵌的结构体与类（第十七刀），表外的报错（阶段边界，与 ty() 同一条规矩）。 */
   fieldTy(t, what) {
     if (t.k === 'int') return 'i64';
     if (t.k === 'real') return 'double';
@@ -696,6 +727,11 @@ class LlvmEmitter {
     // 数组字段存的是**句柄**（一个指针）。所以 COPY 那条逐字段 load/store 拷出来的
     // 两个结构体共用同一条数组 —— 引用语义，与"数组当形参"是同一条规则。
     if (t.k === 'arr') return 'ptr';
+    // 内嵌的结构体（值语义）：**摊在父对象里**，所以字段类型就是那个命名类型本身 ——
+    // 一次 `load %s_Point` 就是把那几个字节搬走，深拷贝不用手写。
+    if (t.k === 'struct') return `%s_${t.name}`;
+    // 内嵌的类（引用语义）：只存一个指针，与裸的类变量同一个表示。
+    if (t.k === 'class') return 'ptr';
     throw new OmniError(`${NOPE}结构体字段的类型 ${t.k}：${what}`);
   }
 
@@ -738,6 +774,8 @@ class LlvmEmitter {
     if (t.k === 'bool') return 'false';
     if (t.k === 'string') return this.strConst('');
     if (t.k === 'vec') return 'zeroinitializer';
+    // 内嵌的类：零值是空引用。结构体走不到这里 —— 它的零值是 aggZero 递归铺的。
+    if (t.k === 'class') return 'null';
     throw new OmniError(`${NOPE}结构体字段的零值 ${t.k}：${what}`);
   }
 

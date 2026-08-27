@@ -1,0 +1,77 @@
+(module
+  ;; 结构体/类**套结构体** —— 门槛 2 第十七刀。门槛 3 的 path（一串控制点、每个点自己是
+  ;; 一小组数）要它。
+  ;;
+  ;; 表示上这一刀只有一句话：内嵌的结构体**摊在父对象里**（LLVM 那边字段类型就是
+  ;; `%s_Point` 本身），所以 `(fld …)` 交出去的是"父对象里那一段"的地址、没有 load，
+  ;; 而值语义仍然只由 from_oir 那条显式的 OP.COPY 给。内嵌的类反过来只存一个指针。
+  ;;
+  ;; 字段类型要**先声明后使用**：一遍收记录，所以 Box 提到 Point 时 Point 必须在前面。
+  ;; 顺带把自引用挡在门外（`struct A (n A)` 的零值会无限递归）。
+  (struct Point (x real) (y real))
+  (struct Tag (name string) (n int))
+  (struct Box (lo Point) (hi Point) (t Tag))
+  (class Node (p Point) (label string))
+
+  (fn mk ((a real) (b real)) Point
+    (let p Point (new Point))
+    (fldset (var p) x (var a))
+    (fldset (var p) y (var b))
+    (ret (var p)))
+
+  (fn width ((b Box)) real
+    (ret (bin "-" (fld (fld (var b) hi) x) (fld (fld (var b) lo) x))))
+
+  (main
+    ;; 零值是递归铺的：内嵌结构体的字符串字段是那份空串，不是全零位
+    (let b Box (new Box))
+    (print (fld (fld (var b) lo) x))
+    (print (fld (fld (var b) t) name))
+    (print (slen (fld (fld (var b) t) name)))
+    (print (fld (fld (var b) t) n))
+
+    ;; 往内嵌字段里赋值：搬内容
+    (fldset (var b) lo (call mk (real 1.0) (real 2.0)))
+    (fldset (var b) hi (call mk (real 5.0) (real 7.0)))
+    (print (fld (fld (var b) lo) x))
+    (print (fld (fld (var b) hi) y))
+    (print (call width (var b)))
+
+    ;; 穿过一层写里面的标量
+    (fldset (fld (var b) lo) x (real 100.0))
+    (print (fld (fld (var b) lo) x))
+    (print (call width (var b)))
+
+    ;; 取出内嵌的结构体是**复制**：改 q 不动 b
+    (let q Point (fld (var b) hi))
+    (fldset (var q) x (real -1.0))
+    (print (fld (fld (var b) hi) x))
+    (print (fld (var q) x))
+
+    ;; 整个 Box 复制是深的（内嵌那两层都独立）
+    (let c Box (var b))
+    (fldset (fld (var c) hi) y (real 42.0))
+    (print (fld (fld (var b) hi) y))
+    (print (fld (fld (var c) hi) y))
+    (fldset (fld (var c) t) name (str "hi"))
+    (print (fld (fld (var b) t) name))
+    (print (fld (fld (var c) t) name))
+
+    ;; 类里内嵌结构体：类是引用，所以 n2 就是 n1
+    (let n1 Node (cnew Node))
+    (fldset (fld (var n1) p) x (real 3.5))
+    (let n2 Node (var n1))
+    (fldset (fld (var n2) p) x (real 9.5))
+    (print (fld (fld (var n1) p) x))
+    (print (fld (var n1) label))
+
+    ;; 循环里反复新建：每轮的内嵌字段都是新铺的零值
+    (let i int (int 0))
+    (let acc real (real 0.0))
+    (while (bin "<" (var i) (int 3))
+      (do
+        (let e Box (new Box))
+        (fldset (fld (var e) lo) y (toreal (var i)))
+        (set acc (bin "+" (var acc) (fld (fld (var e) lo) y)))
+        (set i (bin "+" (var i) (int 1)))))
+    (print (var acc))))

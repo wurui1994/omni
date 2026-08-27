@@ -85,6 +85,9 @@ class CoreLowerer {
     // （from_oir 的 rvalue 只给 struct 与 enum 发 OP.COPY）。asy 的 struct 就是这种
     // （量过：`A b = a; b.x = 7;` 之后 `a.x` 是 7），所以这两种都要有，不是重复。
     this.classes = new Map();
+    // 这一份源文件里所有结构体/类的名字（run 的第 0 遍扫出来）。只为诊断服务：
+    // 字段类型提到自己或后面那个时，能说"声明在后面"而不是"认不出的类型"。
+    this.aggLater = new Set();
   }
 
   err(node, msg) {
@@ -159,8 +162,15 @@ class CoreLowerer {
     }
     const forms = top.items.slice(1);
     // 三遍。第一遍收结构体：函数签名与字段类型都可能提到它，所以它必须最先成型。
-    // 字段类型里**不许再出现结构体**（见 structDec），于是结构体之间没有顺序问题，
-    // 一遍就够 —— 这条限制不是省事，理由写在 structDec 的注释里。
+    // 字段类型里**可以**提到别的结构体/类（第十七刀），但只能提**前面已经声明过**的 ——
+    // 一遍就够，而且自引用（`(struct A (n A))`）天然挡在门外：它的零值会无限递归。
+    // 先把所有名字扫出来，好让"提到的是后面那个"给出准的诊断而不是"认不出的类型"。
+    const later = new Set();
+    for (const f of forms) {
+      if (head(f) !== 'struct' && head(f) !== 'class') continue;
+      if (isAtom(f.items[1])) later.add(f.items[1].value);
+    }
+    this.aggLater = later;
     for (const f of forms) {
       if (head(f) === 'struct') this.structDec(f, 'struct');
       else if (head(f) === 'class') this.structDec(f, 'class');
@@ -213,9 +223,10 @@ class CoreLowerer {
    * OIR 的消费者早就各有一份（解释器的 copyOf、JS 后端的 `$cp_S`、C 后端的原生 `=`、
    * MIR 的 `OP.COPY`），方言这边只要把节点发对。
    *
-   * **字段类型这一刀收 int / real / bool / string、`(vec T N)` 与 `(arr T)`**
+   * **字段类型这一刀收 int / real / bool / string、`(vec T N)`、`(arr T)`
+   * 与另一个结构体/类**
    * （第十五刀放进向量：asy 的 `struct { pair p; }` 与门槛 3 的 transform 要它；
-   * 第十六刀放进数组：`path` 那种"一串控制点"要它）。
+   * 第十六刀放进数组：`path` 那种"一串控制点"要它；第十七刀放进聚合本身）。
    * 向量字段是**值语义**（跟标量一样），数组字段是**引用语义** —— 复制结构体时搬的是
    * 句柄，两个副本共用同一条数组，与"数组当形参"那条规则是同一件事（ADR-0005）。
    * 每条腿的"结构体零值"都是一个**独立**的小函数
@@ -223,8 +234,12 @@ class CoreLowerer {
    * 四处各补了向量与数组两条臂；JS 那条腿还要在 `$cp_S` 里对向量字段发 `$vcopy` ——
    * 不发的话它拷出来的是同一个宿主数组，而 C/LLVM 拷的是 16 字节的副本。
    *
-   * **结构体套结构体还在门外**：复制要递归下去，而 LLVM 那条腿的 COPY 是逐字段
-   * load/store。`tests/sexpr/bad/struct-in-struct.sx` 钉着这条边界。
+   * **结构体套结构体是第十七刀放进来的**：内嵌字段在 LLVM 那条腿上就是那个命名类型本身
+   * （`%s_Point`），所以 `FLD` 是一条光秃秃的 `getelementptr`，而 COPY 的
+   * `load %s_Point` / `store %s_Point` 是头等聚合的复制 —— 递归是 LLVM 展开的，
+   * 发射器里没有第二份"逐字段递归"。字段类型只收**前面已经声明过**的那个：自引用与
+   * 前向引用的零值会无限递归（`run()` 里先扫一遍聚合名，好让这两种给出不同的诊断）。
+   * `tests/sexpr/bad/struct-self.sx` 与 `struct-fwd.sx` 钉着这两半。
    */
   structDec(n, kind) {
     const what = kind === 'struct' ? '结构体' : '类';
@@ -240,11 +255,20 @@ class CoreLowerer {
       }
       const fn = fd.items[0].value;
       if (seen.has(fn)) return this.err(fd, `${what} '${nm}' 里有两个字段叫 '${fn}'`);
+      // 字段类型提到的是**自己**或**后面才声明**的那个：单独报，别落到"认不出的类型"上。
+      // 自引用是真的不行（零值会无限递归）；提到后面那个也不收 —— 一遍收记录，
+      // 而"两遍收记录"要先答"互相嵌套的零值怎么铺"，那不是这一刀的事。
+      const tn = isAtom(fd.items[1]) ? fd.items[1].value : null;
+      if (tn !== null && !this.structs.has(tn) && !this.classes.has(tn) && this.aggLater.has(tn)) {
+        return this.err(fd, `字段 ${nm}.${fn}：${tn === nm ? '字段的类型就是它自己' : `'${tn}' 声明在后面`}`
+          + ` —— 字段类型只能是**前面已经声明过**的结构体/类（自引用的零值会无限递归）`);
+      }
       const t = this.ty(fd.items[1], `字段 ${nm}.${fn}`);
       if (t === null) return null;
-      if (t !== INT && t !== REAL && t !== BOOL && t !== STRING && t.k !== 'vec' && t.k !== 'arr') {
+      if (t !== INT && t !== REAL && t !== BOOL && t !== STRING
+          && t.k !== 'vec' && t.k !== 'arr' && t.k !== 'struct' && t.k !== 'class') {
         return this.err(fd, `字段 ${nm}.${fn}：这一刀的字段只能是 int / real / bool / string、`
-          + `(vec T N) 或 (arr T)，这里是 ${coreTypeText(t)}`);
+          + `(vec T N)、(arr T) 或另一个结构体/类，这里是 ${coreTypeText(t)}`);
       }
       seen.set(fn, true);
       fields.push({ name: fn, type: t });
