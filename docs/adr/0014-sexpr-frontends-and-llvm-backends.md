@@ -2029,6 +2029,22 @@ MIR 的闭包表因此多带一列 `capTypes`（类型码）：C 那条腿从 OI
 逐字节相同。`tests/sexpr/cases/15-fnvalues` 五条腿一致，`bad/fn-null` 钉住那句判空
 （不判就是"跳到地址 0"，那是段错误而不是一句话）。
 
+### asy 那一侧：函数类型只是一个字符串
+
+asy 前端的类型系统全是**字符串**（`real[]`、`real(int,string)`），这一刀因此只动了四处：
+`asyIsFn`/`asyFnSplit` 认 `R(P,…)` 这个拼法（`real(real)(int)` 那种歧义拼法直接不认）、
+`asyCore` 多一个分支把它翻成 `(fnty …)`、`formals()` 多认 `fundecidstart`（形参表里的
+形参表，也就是 `real f(real)` 这种形参）、调用点先查一次局部量：名字若绑着函数类型的值，
+就发 `(callfn (var f) …)` 而不是按名字找重载。裸函数名当值用走 `nameOf` 的兜底 ——
+只有**恰好一个**可见候选时才发 `(fnref …)`，多个重载或带默认值的一律 `nope`：
+真 asy 那里选哪一个要看目标类型，我们还没有那个方向的推断。
+
+量出来的收益：`math.asy:446` 从榜上**整条消失**，第一名换成
+`graph_splinetype.asy` 的 `typedef real[] splinetype(real[], real[]);`（143 份）——
+还是函数类型这一家，只是隔了一层 typedef；第二名是 `three.asy` 的自引用 struct 字段（46 份）。
+还在门外的是**函数值类型的变量声明**（`real g(real) = twice;`，`bad/fn-value` 钉着）：
+asy 收，而且方法取出来是绑住接收者的闭包，那要 `vardec` 走 `(mkclo …)`。
+
 ## 后果与代价
 
 - **依赖 LLVM**：本机 `libLLVM.dylib` 157MB。产物变大，但仍然自带执行器、

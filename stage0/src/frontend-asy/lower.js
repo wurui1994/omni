@@ -314,6 +314,51 @@ const asyElem = (t) => t.slice(0, -2);
 const asyMangle = (t) => (asyIsArr(t) ? `arr_${asyMangle(asyElem(t))}` : t);
 
 /**
+ * 函数类型在这一层也是字符串，拼法照 asy 自己的：`real(real)`、`void(int,string)`。
+ * 量出来的理由：真 base 在场时 304 个 examples 里 203 个第一个撞的就是
+ * `math.asy:446` 的 `real findroot(real f(real), …)` —— 函数类型的形参。
+ *
+ * 用 asy 的拼法而不是另造一个（`fn<real|real>` 之类）是为了诊断：报错里印的类型
+ * 就是用户写的那几个字。代价是**返回类型自己是函数类型**时这个拼法有歧义
+ * （`real(real)(int)` 的第一对括号分不清是谁的），所以那一种在 asyFnSplit 里认不出来、
+ * 由调用方报"还没做" —— 认不出比猜错好。
+ */
+const asyIsFn = (t) => t !== null && t !== undefined && t.length > 2 && t.endsWith(')');
+
+/** `real(int,string)` -> `{ ret: 'real', params: ['int','string'] }`；认不出给 null。 */
+function asyFnSplit(t) {
+  let i = 0;
+  while (i < t.length && t.charAt(i) !== '(') i++;
+  if (i === 0 || i >= t.length) return null;
+  // 那个 '(' 必须与**最后一个字符**配对，否则就是 `real(real)(int)` 那种歧义拼法
+  let d = 0;
+  let k = i;
+  while (k < t.length) {
+    const c = t.charAt(k);
+    if (c === '(') d++;
+    else if (c === ')') { d--; if (d === 0) break; }
+    k++;
+  }
+  if (k !== t.length - 1) return null;
+  const inner = t.slice(i + 1, t.length - 1);
+  const params = [];
+  if (inner !== '') {
+    let cur = '';
+    let j = 0;
+    d = 0;
+    while (j < inner.length) {
+      const c = inner.charAt(j);
+      if (c === '(') d++;
+      else if (c === ')') d--;
+      if (c === ',' && d === 0) { params.push(cur); cur = ''; } else cur = `${cur}${c}`;
+      j++;
+    }
+    params.push(cur);
+  }
+  return { ret: t.slice(0, i), params: params };
+}
+
+/**
  * pair 就是核心方言的 `(vec real 2)`：第 0 道是 x，第 1 道是 y。
  *
  * 为什么不给核心方言加一条 `pair` 类型：`+` 和 `-` 在 pair 上就是**逐分量**的，
@@ -337,6 +382,12 @@ const ASY_PAIR_TY = '(vec real 2)';
 const ASY_TRIPLE_TY = '(vec real 4)';
 const asyCore = (t) => {
   if (asyIsArr(t)) return `(arr ${asyCore(asyElem(t))})`;
+  if (asyIsFn(t)) {
+    const s = asyFnSplit(t);
+    let ps = '';
+    for (const p of s.params) ps = ps === '' ? asyCore(p) : `${ps} ${asyCore(p)}`;
+    return `(fnty (${ps}) ${asyCore(s.ret)})`;
+  }
   if (t === 'pair') return ASY_PAIR_TY;
   return t === 'triple' ? ASY_TRIPLE_TY : t;
 };
@@ -1452,6 +1503,26 @@ class AsyLower {
         + 'pair/triple、struct，与它们的一维数组 —— 这一条不在里面）');
     }
     if (this.globals.has(nm)) return this.gvarLate(n, nm);
+    // 裸的**函数名**当值用（`findroot(f, a, b)` 的那个 f）。只有一个候选时才收 ——
+    // 有多个重载时"是哪一个"要靠期望类型定案，而这一层是自底向上定型的，
+    // 没有期望类型可问，所以那种情况报"还没做"而不是猜一个（与 hir/check.js 的
+    // funcValue 同一条判据：拿不准就让用户写清楚）。
+    const cands = this.visible(nm);
+    if (cands.length === 1) {
+      const c = cands[0];
+      if (c.ps !== undefined) {
+        for (const p of c.ps) if (p.def !== null && p.def !== undefined) {
+          return this.nope(n, `把带默认值的函数 '${nm}' 当值用（函数值没有默认值）`);
+        }
+      }
+      let ps = '';
+      for (const p of c.params) ps = ps === '' ? p : `${ps},${p}`;
+      return { code: `(fnref ${c.sym})`, type: `${c.ret}(${ps})` };
+    }
+    if (cands.length > 1) {
+      return this.nope(n, `把有 ${cands.length} 个重载的 '${nm}' 当值用`
+        + '（是哪一个要靠期望类型定案，这一层是自底向上定型的）');
+    }
     return this.err(n, `未声明的变量 '${nm}'`);
   }
 
@@ -2303,6 +2374,11 @@ class AsyLower {
     // （asy 那边是重载，重载表里用户那份更同型时它赢）。
     // 这里问的是 **此处可见的**候选（顺序解析，见 visible）—— 用户的 sqrt 写在后面时，
     // 前面那句 sqrt 在 asy 那边也还是内建的那个。
+    // 函数类型的局部量/形参（`real f(real)` 那个槽）：`f(x)` 是**间接调用**，
+    // 不是查候选表。放在候选表前面问：asy 那边这个名字在这一层就是个变量，
+    // 而 findroot 那种形参正是要遮住同名的文件级函数。
+    const lv = this.lookup(nm);
+    if (lv !== null && asyIsFn(lv)) return this.fnValCall(n, nm, lv);
     const vis = this.visible(nm);
     // 同名的用户/模块函数与内建那一族在这里**一起打分**：asy 那边内建与库里的定义是
     // 同一个重载集（builtin.cc 把内建也塞进那张表），而我们的内建面写死在这个前端里，
@@ -2591,6 +2667,34 @@ class AsyLower {
    * 一起攒在自己的 `lines` 里，等挑定候选之后再按顺序放回 `this.pre` ——
    * 挑候选要知道实参的类型，而实参不能求两次（`show(1)` 那种会印两遍）。
    */
+  /**
+   * 通过一个函数类型的值调用（`real f(real)` 那个形参上的 `f(x)`）。
+   * 函数值没有形参名，所以命名实参与默认值在这里都不存在 —— 与 hir/check.js 的
+   * callFnValue 是同一条规矩。实参照签名逐个 coerce（int -> real 那条照旧要走）。
+   */
+  fnValCall(n, nm, ft) {
+    const s = asyFnSplit(ft);
+    if (s === null) return this.nope(n, `认不出的函数类型 '${ft}'`);
+    const args = this.callArgs(n);
+    if (args === null) return null;
+    if (args.length !== s.params.length) {
+      return this.err(n, `'${nm}' 是 ${ft}，要 ${s.params.length} 个实参，给了 ${args.length} 个`);
+    }
+    let code = `(callfn (var ${nm})`;
+    let i = 0;
+    while (i < args.length) {
+      if (args[i].key !== null) {
+        return this.err(n, `函数值没有形参名，这里不能写 '${args[i].key}='`);
+      }
+      if (args[i].lines !== null) for (const l of args[i].lines) this.pre.push(l);
+      const v = this.coerce(args[i].v, s.params[i], args[i].node, `'${nm}' 的第 ${i + 1} 个实参`);
+      if (v === null) return null;
+      code = `${code} ${v.code}`;
+      i++;
+    }
+    return { code: `${code})`, type: s.ret };
+  }
+
   callArgs(n) {
     const out = [];
     for (const a of this.flat(n.items[2], 'args')) {
@@ -3806,12 +3910,61 @@ class AsyLower {
       const t = this.type(f.items[2], '形参');
       const start = f.items[3];
       if (t === null) return null;
-      if (!isList(start) || head(start) !== 'decidstart' || start.items.length !== 2) return this.nope(start, '带维度或形参表的形参名');
+      // `real f(real)`：形参名后面挂一个形参表 —— 这个槽的类型是**函数类型**
+      // （量出来的第一拦路虎，见 asyIsFn 的注释）。
+      if (isList(start) && head(start) === 'fundecidstart') {
+        const ft = this.fnTypeOf(t, start.items[2], start);
+        if (ft === null) return null;
+        const fnm = isAtom(start.items[1]) ? start.items[1].value : null;
+        if (fnm === null) return this.err(start, '形参少了名字');
+        out.push({ name: fnm, type: ft, exp: exp, def: f.items.length === 5 ? f.items[4] : null });
+        continue;
+      }
+      if (!isList(start) || head(start) !== 'decidstart' || start.items.length !== 2) return this.nope(start, '带维度的形参名');
       const nm = isAtom(start.items[1]) ? start.items[1].value : null;
       if (nm === null) return this.err(start, '形参少了名字');
       out.push({ name: nm, type: t, exp: exp, def: f.items.length === 5 ? f.items[4] : null });
     }
     return out;
+  }
+
+  /**
+   * `RET` + 一个形参表节点 -> 函数类型的字符串（`real(int,string)`）。
+   * 这里**只要类型**：函数类型里的形参名在 asy 那边可以没有（`real f(real)`），
+   * 有也不进类型身份 —— 所以不能走 formals()（它要求有名字，也要收默认值）。
+   */
+  fnTypeOf(ret, formalsNode, at) {
+    if (asyIsFn(ret)) {
+      return this.nope(at, '返回类型自己是函数类型（`real(real)(int)` 那种拼法有歧义）');
+    }
+    const ps = [];
+    for (const f of this.flat(formalsNode, 'formals')) {
+      if (!isList(f) || head(f) !== 'formal') return this.nope(f, '函数类型里的关键字形参或可变形参');
+      const t = this.type(f.items[2], '函数类型里的形参');
+      if (t === null) return null;
+      if (f.items.length > 3) {
+        const st = f.items[3];
+        if (isList(st) && head(st) === 'fundecidstart') {
+          const inner = this.fnTypeOf(t, st.items[2], st);
+          if (inner === null) return null;
+          ps.push(inner);
+          continue;
+        }
+        if (isList(st) && head(st) === 'decidstart' && st.items.length > 2) {
+          const d = this.dimsDepth(st.items[2]);
+          if (d === null) return this.nope(st, '函数类型的形参名后面那串东西');
+          let a = t;
+          let k = 0;
+          while (k < d) { a = `${a}[]`; k++; }
+          ps.push(a);
+          continue;
+        }
+      }
+      ps.push(t);
+    }
+    let inner = '';
+    for (const p of ps) inner = inner === '' ? p : `${inner},${p}`;
+    return `${ret}(${inner})`;
   }
 
   /**
