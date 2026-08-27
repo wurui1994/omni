@@ -384,7 +384,7 @@ addRealFunc(sin,SYM(sin));   addRealFunc(exp,SYM(exp));   addRealFunc(log,SYM(lo
 可扩展**，所以形状改成三层：
 
 - **运行库**：`stage0/lib/*.sx`，核心方言写的、语言中立的实现。`math.sx` 现在有
-  `omni_pow2` / `omni_exp` / `omni_sin` / `omni_cos`（后面是 log/atan）。它只用
+  `omni_pow2` / `omni_exp` / `omni_sin` / `omni_cos` / `omni_log`（后面是反三角）。它只用
   `+ - * / floor`，
   于是六条腿算出的位一模一样 —— 这正是不能转手宿主 libm 的那条测量的直接结论。
 - **绑定表**：`stage0/src/frontend-asy/builtins.tab`，一张数据表（名字 / 实参个数 /
@@ -427,9 +427,24 @@ pi/2 拆 P0+P1+P2 三段）之后：`|x|` 从 pi 一路量到 1e9，每组 5 万
 整数实参提升、`sin^2+cos^2`）五条腿逐字节相同，而且这次**与真 asy 逐字节也相同** ——
 容差没用上，但契约仍然只承诺容差内。
 
-还没进运行库的（`log`/`atan`/`asin`/`acos`/`tan` 等）在绑定表里是 `nope`，
-`tests/asy/bad/log` 钉住这条边界：报的是「绑定表里有它，但实现还没进运行库」，
+还没进运行库的（`atan`/`asin`/`acos`/`tan` 等）在绑定表里是 `nope`，
+`tests/asy/bad/atan` 钉住这条边界：报的是「绑定表里有它，但实现还没进运行库」，
 而不是偷偷转手宿主的 libm。
+
+**运行库第三批：`log`**（`omni_log`）。形状和 sin/cos 相反 —— 归约这次是**精确**的：
+`x = m * 2^k` 只用乘/除 2 的幂（二分十步，从 2^512 到 2^1），每一步都不丢位；次正规
+也不用特殊照顾（次正规乘 2^512 就是正规数，尾数一位不丢）。真正要选对的是 m 的落点：
+挪进 `[sqrt2/2, sqrt2)` 而不是 `[1,2)`，这样 x 在 1 附近时 k=0 —— 否则 `k*ln2` 与
+`2*atanh(s)` 互相抵消，而 log 在那里本来就趋 0，最不经得起抵消。级数是
+`ln(m) = 2*atanh(s)`，`s = (m-1)/(m+1)`，`|s| <= 0.1716`，取到 s^21。
+
+量过（对比 V8 的 `Math.log`，每组 5 万个随机输入）：`[1e-300,1e300]` 最大 1 ULP、
+`[1e-8,1e8]` 2 ULP、1 附近 3 ULP、次正规 1 ULP。中间抓到一个 9237 ULP 的错：
+二分缩放的低端漏了 p=1 那一步，m 停在 `[0.25,0.5)` 就进了级数（`s=-1/3`，早出了收敛
+的好区间）。这条错只在 `log(0.5)` 这类恰好落在边界上的输入上现形 —— 随机采样 41% 的
+结果都不同、最差 9237 ULP，是**量**把它顶出来的，不是看代码看出来的。
+`tol/log` 也是五条腿逐字节相同、与真 asy 逐字节相同（含 `log(exp(2.5))`、`exp(log(7))`
+这两条互逆的）。
 
 落地同样是"接上已有的那一份"：`omni_math.c` 的七个 `omni_r_*` 包一层 libm、JS prelude 的
 `$r_*` 全部走同一个 `$js_math`（`round` 那条要自己绕过 `Math.round` 的向上舍入：C 是**离零**
@@ -561,8 +576,8 @@ struct 的数组字段 / struct 的记录字段 / `A[]` / struct 的方法 / 构
 第一刀的边界都在 `tests/asy/bad/`（22 条，每条的期望值都必须以 `ASY_NOPE` 开头 ——
 "还没做"和"做错了"必须能一眼分开）：triple、复数幂、
 标准库模块（`import graph;` —— 用户自己写的模块第二十五刀通了；
-`operator cast` 那条第二十七刀通了，那份用例搬成了 `cases/33-castback`）、隐式缩放（`105cm`）、还没进运行库的超越函数（`log`、pair 上的 `angle`；
-`exp`/`sin`/`cos` 已经在运行库里，走 `tests/asy/tol/`）、函数里用文件级的 **pair/记录/数组**变量
+`operator cast` 那条第二十七刀通了，那份用例搬成了 `cases/33-castback`）、隐式缩放（`105cm`）、还没进运行库的超越函数（`atan`、pair 上的 `angle`；
+`exp`/`sin`/`cos`/`log` 已经在运行库里，走 `tests/asy/tol/`）、函数里用文件级的 **pair/记录/数组**变量
 （标量的那些第二十四刀通了，见下面那一节；`bad/global-read.asy` 因此换成了
 `bad/global-pair.asy`）、
 循环条件里的 `? :`、给切片赋值（`a[0:2] = b`）、多维数组、

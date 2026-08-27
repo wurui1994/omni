@@ -50,7 +50,7 @@ gamma      1 real nope  -
 hypot      2 real nope  -
 identity   1 real nope  -
 ldexp      2 real nope  -
-log        1 real nope  -
+log        1 real lib   omni_log
 log10      1 real nope  -
 log1p      1 real nope  -
 popcount   1 int  nope  -
