@@ -508,7 +508,7 @@ export function asySig(L, n, at) {
  * `at` 是**结构体在文件里的下标**：方法体里能看见的文件级函数，正好是声明在这个结构体
  * 前面的那些（asy 的名字解析是顺序的，量过）。`mat` 是成员下标，管结构体内部的可见性。
  */
-export function asyMethodSig(L, rec, n, mat, at) {
+export function asyMethodSig(L, rec, n, mat, at, stat) {
   const nm = isAtom(n.items[2]) ? n.items[2].value : null;
   if (nm === null) return null;
   // `void operator init(…)`（第二十一刀）：**构造函数**，调用形态是 `A(…)`。
@@ -517,6 +517,13 @@ export function asyMethodSig(L, rec, n, mat, at) {
   // （`int z = 8;` 加体里 `z = z + 1` 出来是 9）、而 `A a;` **不**走它（量过是 0，不是
   // 体里赋的值 —— `A a;` 只认文件级的 `A operator init()`，那一条还在门外）。
   const ctor = nm === 'operator init';
+  // `static` 的方法（第三十八刀）：它是**没有接收者**的那一种成员 —— 名字挂在 struct 上，
+  // 调用形态有三种，都量过：`C.make(3)`、struct 的方法体里裸写 `make(3)`、
+  // 以及**实例上**也能调（`a.make(7)` 通 —— 接收者算白搭）。构造函数与下标算符不收 static：
+  // 那两个名字的调用形态本身就带接收者。
+  if (stat === true && ctor) {
+    return L.nope(n, `static 的 'operator init'（构造函数的调用形态本来就带接收者）`);
+  }
   // `operator []` 与 `operator [=]`（collections/map.asy:26/29）当**普通方法**收下：
   // 名字里带算符，但调用形态是下标（`v[i]` / `v[i] = x`，见 asyIndex 与赋值那一侧），
   // 重载解析、默认实参、`v.operator [](2)` 这种直呼全跟着白捡。
@@ -554,10 +561,11 @@ export function asyMethodSig(L, rec, n, mat, at) {
   let mtail = nm;
   if (nm === 'operator []') mtail = 'idx';
   if (nm === 'operator [=]') mtail = 'idxset';
-  const msym = ctor ? `asy__ctor_${rec.name}` : `asy__m_${rec.name}_${mtail}`;
+  const msym = ctor ? `asy__ctor_${rec.name}`
+    : `${stat === true ? 'asy__sm_' : 'asy__m_'}${rec.name}_${mtail}`;
   const cand = {
     ret: ctor ? rec.name : ret, params: types, ps, node: n, at: -1, dat: at, mat, rec, ctor,
-    sym: msym, base: msym, pfx: '', unit: L.unit.id,
+    sym: msym, base: msym, pfx: '', unit: L.unit.id, stat: stat === true,
     // 体里的项序号：正文是第二遍才降的，那时候要靠它裁 struct 体里的 `using`（见 aliasAt）
     abi: L.recAlias === null ? 0 : L.recAlias.bi,
   };
@@ -593,13 +601,17 @@ export function asyMethod(L, rec, cand, at) {
   const ps = asyFormals(L, cand.node.items[3]);
   if (ps === null) { L.recAlias = keepAl; return null; }
   const isCtor = cand.ctor === true;
+  const isStat = cand.stat === true;
   const bodyRet = isCtor ? 'void' : cand.ret;
   const bodySym = isCtor ? `${cand.sym}_body` : cand.sym;
   const keepAt = L.at;
   L.at = at;
-  L.self = { rec, mat: cand.mat };
+  // static 的方法体里**没有接收者**：`self` 照样开着（同一个 struct 的 static 成员要看得见），
+  // 但带上 stat 标记 —— 实例字段与实例方法在这里不可见（量过 asy 报
+  // "static use of dynamic variable"，见 strict/static-method-inst）。
+  L.self = { rec, mat: cand.mat, stat: isStat };
   L.push();
-  L.declare(cand.node, 'this', rec.name);
+  if (!isStat) L.declare(cand.node, 'this', rec.name);
   for (const p of ps) L.declare(cand.node, p.name, p.type);
   const body = asyBody(L, cand.node.items[4], bodyRet);
   L.pop();
@@ -616,7 +628,8 @@ export function asyMethod(L, rec, cand, at) {
     if (zero === null) return null;
     body.push(`(ret ${zero})`);
   }
-  const params = [`(this ${asyCore(rec.name)})`];
+  // static 的那份没有 `this` 形参 —— 它就是一个名字挂在 struct 上的普通函数
+  const params = isStat ? [] : [`(this ${asyCore(rec.name)})`];
   for (const p of ps) params.push(`(${p.name} ${asyCore(p.type)})`);
   const lines = [`  (fn ${bodySym} (${params.join(' ')}) ${asyCore(bodyRet)}`];
   for (const s of body) lines.push(`    ${s}`);

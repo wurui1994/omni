@@ -125,6 +125,9 @@ export function asyNameOf(L, n, nm) {
     if (usable.length === 1) return { code: `(fnref ${usable[0].sym})`, type: asyCandFnType(L, usable[0]) };
     return { code: null, type: `<${nm} 的重载集>`, over: usable };
   }
+  // static 的方法体里提到了实例成员：asy 自己也拒（"static use of dynamic variable"），
+  // 所以这一句要在那句泛泛的"未声明的变量"之前问 —— 拒的理由不能说错（第三十八刀）。
+  if (L.selfInstMember(nm)) return L.selfStatBad(n, nm);
   return L.err(n, `未声明的变量 '${nm}'`);
 }
 

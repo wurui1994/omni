@@ -1,0 +1,1 @@
+'inst' 是 struct C 的实例成员，static 的方法里没有接收者，用不了它（asy 那边报 "static use of dynamic variable"）

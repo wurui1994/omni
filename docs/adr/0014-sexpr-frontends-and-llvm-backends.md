@@ -3190,6 +3190,37 @@ asy 的 struct 体其实就是一个 **block**。量出来的四条：
 `tests/asy`（138 passed，52.9s）、`tests/bootstrap`（60 passed）——
 这一刀动了方言与 LLVM 后端，所以四条轴一条都不能跳。
 
+### `static` 的方法：没有接收者的那一种成员
+
+`plain_scaling.asy:9` 的 `static coord build(real, real)` 与 `:166` 的
+`static scaling build(real, real)` 是 plain 里最后两条 static 相关的墙。
+
+量出来的五条：
+
+- `C.make(3)`（类型名限定）、struct 的方法体里裸写 `make(…)`、**实例上** `a.make(7)`
+  也通（接收者算白搭）—— 三种调用形态；
+- static 的体里能调另一个 static、能读 static 字段；
+- 实例字段与实例方法在 static 的体里**用不了**：asy 报 "static use of dynamic variable"
+  并退 1（两条都进了 strict）。
+
+落地就是"名字挂在 struct 上、**没有 `this` 形参**的普通函数"：符号
+`asy__sm_<记录>_<名字>`，候选表还是那张 `记录名.方法名`（重载解析、默认实参、命名实参
+全跟着白捡），`applyCall` 里"丢掉接收者"只有一句 —— `d.stat !== true` 才 push `recv.code`。
+方法体那边 `L.self` 多带一个 `stat` 标记，`selfField` 与 `visibleMethods` 各按它裁一刀。
+
+诊断上多问了一句（`selfInstMember` / `selfStatBad`）：不问的话"实例字段"会漏成那句泛泛的
+"未声明的变量"，"实例方法"更糟 —— 会漏成上一刀那条"声明在后面"，而它明明写在前面。
+拒的理由不能说错，所以这一句排在那两条**前面**。
+
+`import plain;` 6 -> **4**（剩 `plain_bounds.asy:92` 的嵌套 static struct、`:657` 的 `var`、
+`plain_picture.asy:203` 重复定义的 `picture`、`plain.asy:67` 返回函数类型）。
+`import graph;` 还是 182。
+
+跑的轴：`tests/asy`（141 passed，55.8s）、`tests/bootstrap`（60 passed）。只动
+`frontend-asy/`（lower.js、decls.js、calls.js、exprs.js），tests/sexpr 与 tests/run.js
+跳掉 —— 方言与后端这一刀没碰。
+
+
 
 
 

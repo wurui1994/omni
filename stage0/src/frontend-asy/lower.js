@@ -545,6 +545,9 @@ class AsyLower {
    */
   selfField(nm) {
     if (this.self === null) return null;
+    // static 的方法体里实例字段**不可见**（量过 asy 报 "static use of dynamic variable"）。
+    // 这里回 null，那句诊断由调用处发（说清是"静态的地方用了实例的东西"，见 selfStatBad）。
+    if (this.self.stat === true) return null;
     if (this.lookup(nm) !== null) return null;
     if (nm === ASY_FILLER) return null;   // 占位字段看不见，方法体里也一样（见 recField）
     for (const f of this.self.rec.fields) if (f.name === nm && f.mat < this.self.mat) return f;
@@ -562,10 +565,32 @@ class AsyLower {
     if (!funcs.has(key)) return out;
     // 刻意不用 `Infinity` 当"不裁"的上界：它不在封闭 ABI 的数值词汇里（同 glr/driver.js）。
     const inSelf = this.self !== null && this.self.rec === rec;
+    // static 的方法体里只看得见 static 的方法（量过实例方法在那儿报
+    // "static use of dynamic variable"）
+    const statOnly = inSelf && this.self.stat === true;
     for (const c of funcs.get(key)) {
+      if (statOnly && c.stat !== true) continue;
       if (!inSelf || c.mat <= this.self.mat) out.push(c);
     }
     return out;
+  }
+
+  /** static 的地方用了实例的东西：asy 自己也拒（量过 "static use of dynamic variable"，退 1），
+   *  所以是 err 不是 nope。这一句由调用处在"名字查不着"之后问一遍。 */
+  selfStatBad(node, nm) {
+    return this.err(node, `'${nm}' 是 struct ${this.self.rec.name} 的实例成员，`
+      + `static 的方法里没有接收者，用不了它（asy 那边报 "static use of dynamic variable"）`);
+  }
+
+  /** 这个名字是当前 struct 的**实例**成员吗（static 方法体里那句诊断要问它） */
+  selfInstMember(nm) {
+    if (this.self === null || this.self.stat !== true) return false;
+    for (const f of this.self.rec.fields) if (f.name === nm) return true;
+    const funcs = this.units[this.self.rec.unit].funcs;
+    const list = funcs.get(`${this.self.rec.name}.${nm}`);
+    if (list === undefined) return false;
+    for (const c of list) if (c.stat !== true) return true;
+    return false;
   }
 
   /**
@@ -1013,11 +1038,10 @@ class AsyLower {
         continue;
       }
       if (head(r) === 'fundec') {
-        if (asyStMod(this, item)) {
-          return this.nope(r, `static 的方法（这一刀只有 static 的字段 —— `
-            + `它是"名字挂在 struct 上的文件级变量"，函数还没接这条路）`);
-        }
-        if (asyMethodSig(this, rec, r, mat, at) === null) return null;
+        // `static` 的方法（第三十八刀）：没有接收者的那一种成员。三种调用形态都量过 ——
+        // `C.make(3)`、struct 的方法体里裸写 `make(3)`、实例上 `a.make(7)`（接收者算白搭）。
+        const st = asyStMod(this, item);
+        if (asyMethodSig(this, rec, r, mat, at, st) === null) return null;
         mat++;
         continue;
       }
@@ -1133,8 +1157,23 @@ class AsyLower {
     return this.statOf(base, nm);
   }
 
-  recField(n, t, nm) {
-    const rec = this.records.get(t);
+  /**
+   * `C.f(…)` 里的 `C.f`：**类型名**限定的 static 方法（第三十八刀）。回候选表（空数组表示
+   * 没有）。`C` 要是这个单元看得见的记录名 —— 与 statQual 同一条（同名的变量在点号左边赢，
+   * 所以调用处先问 dotQual）。
+   */
+  statMethods(node, nm) {
+    if (!isList(node) || head(node) !== 'qualified') return [];
+    const base = this.plainName(node.items[1]);
+    if (base === null || !this.recVis.has(base)) return [];
+    const rec = this.recOf(base);
+    if (rec === null) return [];
+    const out = [];
+    for (const c of this.visibleMethods(rec, nm)) if (c.stat === true) out.push(c);
+    return out;
+  }
+
+  recField(n, t, nm) {    const rec = this.records.get(t);
     // 占位字段是**看不见的** —— 名字虽然合法，`x.asy__filler` 在真 asy 那边是没有这个成员，
     // 所以这里也当没有（不然就是收得比 asy 多，strict 那条纪律不许）
     if (nm === ASY_FILLER) return this.err(n, `struct ${t} 没有字段 '${nm}'`);

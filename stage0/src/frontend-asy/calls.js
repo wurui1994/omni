@@ -61,6 +61,13 @@ export function asyCall(L, n) {
     // `m.f(…)`：模块限定的函数调用（第二十五刀）
     const mq = L.modAlias(callee.items[1]);
     if (mq !== null) return L.modCall(n, mq);
+    // `C.make(3)`：**类型名**限定的 static 方法（第三十八刀）。位置与 statQual 同一档、
+    // 排在它前面：static 的方法与 static 的字段不会同名（一个 struct 里那是两个成员槽）。
+    const qn2 = isAtom(callee.items[1].items[2]) ? callee.items[1].items[2].value : null;
+    if (qn2 !== null) {
+      const sm = L.statMethods(callee.items[1], qn2);
+      if (sm.length > 0) return asyUserCall(L, n, `${L.plainName(callee.items[1].items[1])}.${qn2}`, sm, null);
+    }
     // `Box.sf(3)`：**类型名**限定的 static，而它是个函数值（第三十八刀）。位置照 name-exp
     // 那边的顺序 —— dotQual 之后（同名的变量在点号左边赢），模块别名之后。
     const sq = L.statQual(callee.items[1]);
@@ -96,6 +103,9 @@ export function asyCall(L, n) {
     if (sf !== null && asyIsFn(sf.type)) {
       return asyFnValCall(L, n, nm, sf.type, `(fld (var this) ${nm})`);
     }
+    // static 的方法体里调了实例方法：asy 自己也拒（"static use of dynamic variable"）。
+    // 这一句要排在"声明在后面"那条**前面** —— 实例方法明明写在前面，只是这儿够不着它。
+    if (L.selfInstMember(nm)) return L.selfStatBad(n, nm);
     // 声明在**后面**的成员（第三十五刀，字段默认值那一档把它显出来了）：
     // `struct S { int y = f(); int f() {…} }` asy 报 "no matching variable 'f'" 并退 1 ——
     // 它自己也拒。不专门问一句就会漏到下面的内建名单，报出带 ASY_NOPE 的"内建函数 'f'"，
@@ -442,7 +452,9 @@ export function asyApplyCall(L, n, nm, list, raw, recv) {
     codes.set(at, `(var ${tmp})`);
   }
   const parts = [];
-  if (recv !== null && recv !== undefined) parts.push(recv.code);
+  // static 的方法没有接收者（第三十八刀）：三条调用路径（`C.f(…)`、方法体里裸名、
+  // 实例上 `a.f(…)`）都走这里，所以"丢掉接收者"这件事只在这一句里做一次。
+  if (recv !== null && recv !== undefined && d.stat !== true) parts.push(recv.code);
   // 可变那一格：现造一条新数组。**总是**造 —— 量过 `... a` 是拷进去的（回调里改 x[0]
   // 之后 a[0] 没变），所以散着写的与展开的能拼在一起，也不用为"只有一个展开"开特例。
   // 造要摊成语句，所以要有地方放；没地方就拒得明白，与乱序命名实参那条同一个理由。
