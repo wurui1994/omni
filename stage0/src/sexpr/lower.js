@@ -1165,6 +1165,29 @@ class CoreLowerer {
       if (!this.inKernel) return this.err(n, '(gid) 只在 kernel 里有意义');
       return { kind: 'VarRef', name: '$gid', type: INT };
     }
+    // `(null TYPE)`：**空引用**（第三十三刀）。只对引用类型成立 —— 类、函数、数组，
+    // 也就是运行时躺着一个句柄的那三种。标量没有空引用这回事，写了就是错。
+    //
+    // OIR 那边这个概念本来就有（`NullRef` / `NullFn`：类与函数的**零值**就是它们，
+    // 多维数组那一刀还在 `(anew (arr (arr T)) N)` 的格子零值上用过），六条腿也都认
+    // （JS `null`、C `NULL`、LLVM `null`、两个解释器的 `null`、MIR `K.nul`）——
+    // 缺的只是**方言里写不出来**。asy 的 `null` 字面量要它：
+    // `restricted bool isNullValue(V) = null;`（collections/map.asy:11）、
+    // `map.isNullValue != null`（:130）与 math.asy:160 那一族。
+    //
+    // 函数类型上发的是 `NullFn` 而不是 `NullRef`，为的是跟 `zeroValue` 出同一个节点 ——
+    // 同一个语义两种节点，后端迟早有一边漏。数组则**没有**这条对应：
+    // `zeroValue((arr T))` 是长度 0 的空数组而不是空引用（`alen`/`apush` 在任何数组上
+    // 都得能答），所以 `(null (arr T))` 是一个只能显式写出来的值，不是谁的零值。
+    if (h === 'null') {
+      const t = this.ty(n.items[1], 'null 的类型');
+      if (t === null) return null;
+      if (t.k !== 'class' && t.k !== 'fn' && t.k !== 'arr') {
+        return this.err(n, `(null TYPE) 的 TYPE 要是引用类型（类 / 函数 / 数组），`
+          + `这里是 ${coreTypeText(t)}`);
+      }
+      return { kind: t.k === 'fn' ? 'NullFn' : 'NullRef', type: t };
+    }
     return this.operator(n, h);
   }
 

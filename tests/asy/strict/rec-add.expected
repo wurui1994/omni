@@ -1,0 +1,1 @@
+A 上没有 '+'（asy 那边报 "no matching function 'operator +(A, A)'" —— 自己定义一个 `operator +` 就有了）

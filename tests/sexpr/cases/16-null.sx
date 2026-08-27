@@ -1,0 +1,58 @@
+;; 空引用（第三十三刀）。OIR 那边 `NullRef` 本来就有 —— `(cnew …)` 铺零值、
+;; `(anew (arr (arr T)) N)` 的每一格都是它，六条腿也早就各自认（JS `null`、C `NULL`、
+;; LLVM `null`、两个解释器的 `null`）。缺的只是**方言里写不出来**：没有一个 `(null TYPE)`。
+;;
+;; 量出来的理由：asy 的 `null` 字面量。`collections/map.asy:11` 是
+;; `restricted bool isNullValue(V) = null;`，:130 是 `map.isNullValue != null`，
+;; `math.asy:160` 也是它 —— 三处形状分别是「函数值 = null」「函数值 != null」和比较。
+;;
+;; 边界：只有引用类型有空引用（类 / 函数 / 数组）。标量没有这回事，
+;; `(null int)` 是错的（bad/null-scalar.sx）。结构体也不是引用，同样拒。
+;; 自引用的字段（`(class Node … (next Node))`）还是不收 —— 那是另一条边界
+;; （lower.js 里"字段类型只能是前面已经声明过的"），这一刀不动它。
+(module
+  (class Leaf (v int))
+  ;; 三种引用各当一次字段：`(cnew Box)` 铺的零值就是三个空引用，现在能把这句话写出来验
+  (class Box (l Leaf) (f (fnty (int) int)) (a (arr int)) (n int))
+  (fn twice ((x int)) int (ret (bin "*" (var x) (int 2))))
+  ;; null 能当实参传：形参是引用类型就收
+  (fn isnil ((o Leaf)) bool
+    (ret (bin "==" (var o) (null Leaf))))
+  ;; 也能当返回值 —— 「没有」这件事第一次说得出来
+  (fn pick ((o Leaf) (yes bool)) Leaf
+    (if (var yes) (do (ret (var o))))
+    (ret (null Leaf)))
+  (main
+    ;; 类引用
+    (let a Leaf (null Leaf))
+    (print (bin "==" (var a) (null Leaf)))
+    (set a (cnew Leaf))
+    (print (bin "==" (var a) (null Leaf)))
+    (print (bin "!=" (var a) (null Leaf)))
+    ;; 函数值
+    (let f (fnty (int) int) (null (fnty (int) int)))
+    (print (bin "==" (var f) (null (fnty (int) int))))
+    (set f (fnref twice))
+    (print (bin "!=" (var f) (null (fnty (int) int))))
+    ;; 数组引用：句柄本身可以是空的（取下标就是未定义，与空类引用同级）
+    (let r (arr int) (null (arr int)))
+    (print (bin "==" (var r) (null (arr int))))
+    (set r (anew (arr int) (int 3)))
+    (print (bin "==" (var r) (null (arr int))))
+    ;; `(cnew …)` 铺的零值：类字段与函数字段**就是**空引用（zeroValue 的 NullRef/NullFn），
+    ;; 数组字段**不是** —— 它是长度 0 的空数组，所以下面第三条量出来是 false。
+    ;; 这条不对称是刻意的：`alen`/`apush` 在任何数组上都得能答，不能"有时候是 null"。
+    (let b Box (cnew Box))
+    (print (bin "==" (fld (var b) l) (null Leaf)))
+    (print (bin "==" (fld (var b) f) (null (fnty (int) int))))
+    (print (bin "==" (fld (var b) a) (null (arr int))))
+    ;; 赋进去再赋回 null：引用能被清掉
+    (fldset (var b) l (var a))
+    (print (bin "==" (fld (var b) l) (null Leaf)))
+    (fldset (var b) l (null Leaf))
+    (print (bin "==" (fld (var b) l) (null Leaf)))
+    ;; 传参与返回
+    (print (call isnil (null Leaf)))
+    (print (call isnil (var a)))
+    (print (bin "==" (call pick (var a) (bool true)) (null Leaf)))
+    (print (bin "==" (call pick (var a) (bool false)) (null Leaf)))))

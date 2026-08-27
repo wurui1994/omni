@@ -18,7 +18,7 @@
 import { isList, isAtom, head } from '../sexpr/read.js';
 import {
   ASY_NOPE, DOT_BAD, asyConvCost, asyOpText, asyIsRestP, asyRestBase,
-  asyIsArr, asyElem, asyIsFn, asyFnSplit, asyCore,
+  asyIsArr, asyElem, asyIsFn, asyFnSplit, asyCore, ASY_NULL, asyRefTy,
 } from './types.js';
 import { ASY_PAIRFN, ASY_STRFN, ASY_STR_DEPS, ASY_STR_NOPE } from './runtime.js';
 
@@ -713,6 +713,16 @@ export function asyFit(L, cand, raw) {
       let hit = false;
       for (const c of r.v.over) if (L.candFnType(c) === cand.ps[at].type) hit = true;
       if (!hit) return null;
+      filled.set(at, true);
+      slot.push(at);
+      if (at < last) reordered = true;
+      last = at;
+      continue;
+    }
+    // `null` 当实参：类型来自**这个槽**（asy 就是这么定的，与重载集那一格同一条路子）。
+    // 槽不是引用类型这个候选就不合用；是的话算同型，cost 不加 —— 落地在 coerce 里。
+    if (r.v.type === ASY_NULL) {
+      if (!asyRefTy(L, cand.ps[at].type)) return null;
       filled.set(at, true);
       slot.push(at);
       if (at < last) reordered = true;

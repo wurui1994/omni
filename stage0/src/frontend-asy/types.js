@@ -110,6 +110,21 @@ export const asyMangle = (t) => (asyIsArr(t) ? `arr_${asyMangle(asyElem(t))}` : 
  */
 export const asyIsFn = (t) => t !== null && t !== undefined && t.length > 2 && t.endsWith(')');
 
+/**
+ * `null` 的类型记号（第三十三刀）。asy 的 `null` **自己没有类型** —— 类型从目标来
+ * （左边的声明、槽的类型、比较的另一边），量过：`int x = null;` 报
+ * "cannot cast 'null' to 'int'"、`write(null)` 报 "call of function 'write(null)'
+ * is ambiguous"、`null == null` 也报 ambiguous。所以 lit 出这个记号（`code` 是 null，
+ * 漏出去就是一处硬错而不是一个错答案），由 coerce / promote / fit 落成 `(null 核心类型)`。
+ * 与花括号初值 `{1,2,3}` 同一条路子：只在知道目标类型的地方处理。
+ */
+export const ASY_NULL = '<null>';
+
+/** 有空引用的那三种类型：struct（asy 的 struct 是引用语义）、函数类型、数组。
+ *  与核心方言 `(null TYPE)` 的边界一模一样（sexpr/lower.js）。 */
+export const asyRefTy = (L, t) => asyIsArr(t) || asyIsFn(t) || L.isRec(t);
+
+
 /** `real(int,string)` -> `{ ret: 'real', params: ['int','string'] }`；认不出给 null。 */
 export function asyFnSplit(t) {
   let i = 0;

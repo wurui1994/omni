@@ -2826,6 +2826,58 @@ plain 现在停在 `collections/iter.asy:42` 的 `autounravel` 一个 vardec。
 
 跑的轴：`tests/asy`（117 passed，31.3s）、`tests/bootstrap`（60 passed）。
 
+### `null`：方言里补一个 `(null TYPE)`，asy 那边补一个「类型从目标来」的记号
+
+上一刀量完 graph 时冒出来的那条 —— `math.asy:160` 的 `null` 字面量。先量清六条腿上
+到底缺什么：**什么都不缺**。OIR 的 `NullRef` / `NullFn` 本来就是类与函数的零值
+（`hir/types.js` 的 `zeroValue`），多维数组那一刀还在 `(anew (arr (arr T)) N)` 的格子
+零值上用过它；MIR 是 `K.nul`，JS 是 `null`、C 是 `NULL`、LLVM 是 `null`、两个解释器
+也都是 `null`。缺的只有**方言里写不出来**这一件事。（上一轮的会话报告把这句说反了，
+写成"要一路通到后端"，那是错的 —— 更正在此。）
+
+于是方言侧就一条产生式：`(null TYPE)`，TYPE 只收引用类型。函数类型上发的是 `NullFn`
+而不是 `NullRef`，为的是跟 `zeroValue` 出**同一个**节点 —— 同一个语义两种节点，
+六条腿里迟早有一条漏。数组**没有**这条对应，`zeroValue((arr T))` 是长度 0 的空数组
+（`alen`/`apush` 在任何数组上都得能答），所以 `(null (arr T))` 是一个只能显式写出来的值，
+不是谁的零值。这条不对称在 `cases/16-null.sx` 里量了出来：`(cnew Box)` 之后
+`b.l == (null Leaf)` 与 `b.f == (null (fnty (int) int))` 都是 true，`b.a == (null (arr int))`
+是 **false**。
+
+asy 侧的形状是：**`null` 自己没有类型**，类型从目标来。量过的四条：
+`int x = null;` 报 "cannot cast 'null' to 'int'"；`write(null)` 报
+"call of function 'write(null)' is ambiguous"；`null == null` 同样 ambiguous；
+而 `A a = null; a == null; null == a; return null; isnil(null)` 全都通。
+所以走的是与花括号初值 `{1,2,3}` 同一条路子：`asyLit` 出一个 `code` 为空的**记号**
+（`ASY_NULL`），落地在三个知道目标类型的地方 —— `asyCoerce`（声明初值、赋值、
+return、实参）、`asyPromote`（`x == null` 的类型从另一边来）、`fit`（重载解析里
+那一格按槽的类型算同型）。记号的 `code` 故意留空：漏出去就是一处硬错，不会变成一个错答案。
+
+三处漏点是量出来的，各补了一条：`null == null`（记号相等但定不下类型 —— 那条判断要写在
+`asyPromote` 的"两边同型"**之前**）、`write(null)`、以及顺手撞出来的一个**旧洞**：
+`a + a` 在 struct 上原先一路落到 `(bin "+" …)`，在 JS 后端崩成 `js.bin: + on class` ——
+一处内部错，不是诊断。asy 那边它是 "no matching function 'operator +(A, A)'"，
+所以补成普通错误；数组上的 `+` 是另一回事（asy 那边**逐元素**，量过 `{1,2}+{3,4}` 给
+4 6），那条是 nope。
+
+数组的 `null` 只收**声明**不收比较：`int[] r = null;` asy 通，但 `r == null` 是运行期
+错误 "dereference of null array" —— 因为 asy 的 `operator ==(int[],int[])` 是逐元素的。
+这一条写进了 `cases/59-null.asy` 的注释里，测试本体只声明、不比较。
+
+新增 `tests/sexpr/cases/16-null.sx`（五方一致）、`tests/sexpr/bad/null-scalar.sx`、
+`bad/null-struct.sx`（struct 是值语义，没有空引用 —— 那条线正好把 struct 与 class 分开）、
+`tests/asy/cases/59-null.asy`，以及四条 strict：`null-int`、`null-both`、`null-write`、
+`rec-add`。
+
+`import graph;` **185 -> 184**，差得明白：两条 `字面量 'null'` 全没了
+（`math.asy:160`、`graph_splinetype.asy:253`），紧跟着在 `graph_splinetype.asy:261`
+冒出一条别的（路径连接 `..`）。`import plain;` 还是 1，墙还在 `collections/iter.asy:42`
+的 `autounravel` vardec 上，没动。
+
+跑的轴：这一刀动了**核心方言**，所以轴比前六刀多两条 —— `tests/sexpr`（51 passed，10.0s）、
+`tests/run.js`（91 passed，10.2s）、`tests/asy`（122 passed，32.4s）、
+`tests/bootstrap`（60 passed）。前六刀只动 `frontend-asy/`，跳掉 sexpr 与 run.js 是对的。
+
+
 ## 后果与代价
 
 

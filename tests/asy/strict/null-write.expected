@@ -1,0 +1,1 @@
+write 的实参不能是 null —— null 没有类型，asy 那边报 call of function 'write(null)' is ambiguous

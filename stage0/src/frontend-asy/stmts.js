@@ -15,7 +15,7 @@
 
 import { isList, isAtom, head } from '../sexpr/read.js';
 import {
-  ASY_NOPE, DOT_BAD, ASY_ARRELEM_TEXT, asyOpText, asyIsArr, asyElem, asyIsFn, asyCore,
+  ASY_NOPE, DOT_BAD, ASY_ARRELEM_TEXT, asyOpText, asyIsArr, asyElem, asyIsFn, asyCore, ASY_NULL,
 } from './types.js';
 import { ZERO } from './runtime.js';
 import { asyArgs, asyCall, asyOpUser, asyOpBuiltinSig, asyIdxOpCall } from './calls.js';
@@ -41,6 +41,13 @@ export function asyWriteStmt(L, n) {
     const v = L.expr(a);
     if (v === null) return null;
     if (v.type === 'void') return L.err(a, 'write 的实参不能是 void');
+    // `write(null)`：null 没有类型，重载解析定不下 T。asy 那边报的就是
+    // "call of function 'write(null)' is ambiguous"（量过）。拦在这一层，
+    // 不然 `code` 是 null 的那个记号会漏成核心方言里的一处语法错。
+    if (v.type === ASY_NULL) {
+      return L.err(a, "write 的实参不能是 null —— null 没有类型，asy 那边报 "
+        + "call of function 'write(null)' is ambiguous");
+    }
     // asy 自己也不给结构体印（量过：`no matching function 'write(A)'`）。拦在这一层，
     // 不然漏出去的是核心方言那句 `(tostr E) 只接受 int / real / bool`。
     if (L.isRec(v.type)) {

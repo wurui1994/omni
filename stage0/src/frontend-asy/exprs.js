@@ -19,7 +19,7 @@
 import { isList, isAtom, isStr, head } from '../sexpr/read.js';
 import {
   ASY_NOPE, DOT_BAD, CAP_BAD, ASY_ARRELEM_TEXT, ASY_CYCLE, ASY_RESTPFX, asyOpText,
-  asyIsArr, asyElem, asyIsFn, ASY_PAIR_TY, ASY_TRIPLE_TY, asyCore,
+  asyIsArr, asyElem, asyIsFn, ASY_PAIR_TY, ASY_TRIPLE_TY, asyCore, ASY_NULL, asyRefTy,
 } from './types.js';
 import { ZERO, ASY_PAIRFN, ASY_STRFN, ASY_STR_DEPS, strLit } from './runtime.js';
 import { asyArgs, asyCall, asyVisible, asyJoinExp, asyOpUser, asyOpBuiltinSig, asyIdxOpCall } from './calls.js';
@@ -56,6 +56,9 @@ export function asyLit(L, n) {
     }
     return asyNameOf(L, n, ASY_CYCLE);
   }
+  // `null`（第三十三刀）：词法上它跟 `true` 一样是 LIT，语义上是**空引用**。
+  // 它自己没有类型，所以这里只出一个记号（见 ASY_NULL），落地在 coerce / promote / fit。
+  if (t === 'null') return { code: null, type: ASY_NULL };
   return L.nope(n, `字面量 '${t}'`);
 }
 
@@ -281,6 +284,19 @@ export function asyAssignsTo(L, node, nm) {
  *  pair 也在这条链上：`2+(1,2)` 是 (3,2)、`(1,2)==3` 是 false —— int/real 会被
  *  提成 `(v,0)`（量过，见 asy__pdiv 的注释：连 `/` 都是先转 pair 再算的）。 */
 export function asyPromote(L, a, b) {
+  // `null` 的类型从**另一边**来（`x == null`）。这一条要在"两边同型"那句**之前** ——
+  // 两边都是 null 时它们的记号确实相等，但那定不下类型，asy 那边也报歧义
+  // （量过：`call of function 'operator ==(null, null)' is ambiguous`），所以回 null，
+  // 让调用方那句"两边要同型"去报。
+  if (a.type === ASY_NULL || b.type === ASY_NULL) {
+    if (a.type === b.type) return null;
+    const nv = a.type === ASY_NULL ? a : b;
+    const ov = a.type === ASY_NULL ? b : a;
+    if (!asyRefTy(L, ov.type)) return null;
+    nv.code = `(null ${asyCore(ov.type)})`;
+    nv.type = ov.type;
+    return ov.type;
+  }
   if (a.type === b.type) return a.type;
   if (a.type === 'pair' && (b.type === 'int' || b.type === 'real')) {
     const v = asyToPair(L, b);
@@ -306,6 +322,16 @@ export function asyToPair(L, v) {
 /** 往目标类型靠：int -> real、int/real -> pair，其余不匹配就是错 */
 export function asyCoerce(L, v, want, node, what) {
   if (v === null) return null;
+  // `null`：类型就是目标类型。目标不是引用类型时这是一处**真错误**（不带 ASY_NOPE）——
+  // asy 那边报 "cannot cast 'null' to 'int'"，同一个判断，不是我们还没做。
+  if (v.type === ASY_NULL) {
+    if (!asyRefTy(L, want)) {
+      return L.err(node, `${what}：不能把 null 当成 ${want}`
+        + `（asy 那边报 "cannot cast 'null' to '${want}'" —— 只有 struct、`
+        + '函数类型与数组有空引用）');
+    }
+    return { code: `(null ${asyCore(want)})`, type: want };
+  }
   if (v.type === want) return v;
   if (v.type === 'int' && want === 'real') return { code: `(toreal ${v.code})`, type: 'real' };
   if (want === 'pair' && (v.type === 'int' || v.type === 'real')) return asyToPair(L, v);
@@ -959,6 +985,17 @@ export function asyArith(L, n, op, a, b) {
   if (t === null) return L.err(n, `'${op}' 两边要同型：左是 ${a.type}，右是 ${b.type}`);
   if (t === 'string' && op !== '+') return L.err(n, `字符串上只有 '+'，这里是 '${op}'`);
   if (t === 'bool') return L.err(n, `'${op}' 不接受 bool`);
+  // 记录与函数类型上 asy 自己就没有 `+ - *`（量过：`A a; a+a` 报 "no matching function
+  // 'operator +(A, A)'"、`F f; f+f` 报 "'operator +(int(), int())'"）—— 用户自己定义一个
+  // 是通的，那一条在上面 opUser 里先问过了。所以到这里就是**错**，不是"还没做"。
+  // 这个洞是量 `a + null` 时撞出来的：原先它一路落到 `(bin "+" …)`，在 JS 后端上
+  // 崩成 `js.bin: + on class`（一处内部错，不是诊断）。数组是另一回事 ——
+  // asy 那边 `int[]+int[]` 是**逐元素**的（量过给 4 6），那是还没做。
+  if (asyIsArr(t)) return L.nope(n, `数组上的 '${op}'（asy 那边它是逐元素的）`);
+  if (L.isRec(t) || asyIsFn(t)) {
+    return L.err(n, `${t} 上没有 '${op}'（asy 那边报 "no matching function `
+      + `'operator ${op}(${t}, ${t})'" —— 自己定义一个 \`operator ${op}\` 就有了）`);
+  }
   return { code: `(bin "${op}" ${a.code} ${b.code})`, type: t };
 }
 

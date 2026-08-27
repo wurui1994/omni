@@ -1,0 +1,1 @@
+'x' 的初值：不能把 null 当成 int（asy 那边报 "cannot cast 'null' to 'int'" —— 只有 struct、函数类型与数组有空引用）

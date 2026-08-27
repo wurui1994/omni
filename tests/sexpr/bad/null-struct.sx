@@ -1,0 +1,7 @@
+;; 结构体是**值语义**（`(new Val)` 铺零值、赋值就是复制），所以它也没有空引用 ——
+;; 那条线正好把 struct 与 class 分开：`(null Val)` 错，`(null Node)` 对（cases/16-null.sx）。
+(module
+  (struct Val (v int))
+  (main
+    (let s Val (null Val))
+    (print (fld (var s) v))))
