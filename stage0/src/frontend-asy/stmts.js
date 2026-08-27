@@ -367,15 +367,10 @@ export function asyVardec(L, n) {
       init = L.recInit(start, t);
       if (init === null) return null;
     } else if (asyIsFn(t)) {
-      // 函数值的零值是**空引用**，而核心方言的 `(let …)` 一定要一个初值表达式 ——
-      // 那个"空函数值"的字面量方言里还没有（`(global f (fnty …))` 不用写：零值是后端
-      // 给的，`tests/sexpr/bad/fn-null` 走的就是那条）。所以带初值的收（量过五条腿
-      // 都对），不带初值的先拦住 —— 不拦就把 JS 的 undefined 拼进方言文本里了。
-      if (d.items[2] === undefined) {
-        return L.nope(start, `没有初值的函数值变量（\`${t} g;\` —— 它的零值是空引用，`
-          + '核心方言的 let 还说不出那个字面量）');
-      }
-      init = '';
+      // 函数值的零值是**空引用**。这一句原先拦着不带初值的声明，理由是"那个空函数值的
+      // 字面量方言里还没有" —— 第三十三刀补上了 `(null TYPE)`，所以现在直接发它。
+      // 量过 asy：`F f; write(f == null)` 是 true，赋一个闭包之后是 false。
+      init = `(null ${asyCore(t)})`;
     } else {
       init = asyIsArr(t) ? `(anew ${asyCore(t)} (int 0))` : ZERO.get(t);
       if (init === undefined) return L.nope(start, `${t} 的变量声明（这一刀给不出它的零值）`);

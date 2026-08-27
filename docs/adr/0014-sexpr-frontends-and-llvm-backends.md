@@ -2951,6 +2951,30 @@ plain 的墙在 `iter.asy:42`，那一行是
 跑的轴：`tests/asy`（124 passed，40.6s）、`tests/bootstrap`（60 passed）。只动
 `frontend-asy/`（exprs.js、stmts.js），所以 sexpr 与 run.js 跳掉。
 
+### 没有初值的函数值变量：那条 nope 的理由已经不成立了
+
+`graph_splinetype.asy:5` 的 `real[](real[],real[]) g;`。这一条原先拦着，理由写在代码里：
+「那个空函数值的字面量方言里还没有」。第三十三刀补上 `(null TYPE)` 之后这句话就不成立了，
+所以这一刀只有**一行**：零值发 `(null <核心类型>)`。
+
+量过 asy 的四条：`F f;` 之后 `f == null` 是 true、`f != null` 是 false；赋一个闭包之后
+反过来；赋一个普通函数名一样；`f = null` 能把它清回去。新增
+`cases/62-fnvalue-null.asy`（局部、文件级、一句里混着有初值与没初值的两项、
+struct 字段当对照）。
+
+`import graph;` **184 -> 183**，而且这次是**净减一条**：diff 只有那一行没了，没有新的冒出来。
+`import plain;` 还是 1（墙在 `iter.asy:42`，与这条无关）。
+
+顺带把边界记清楚：这一条通的是**局部**与**文件级落在入口里**的那种。真正的
+**模块级函数值变量**（函数体里也看得见的那种）还在门外 —— `asyGlobalNames` 那一遍只按
+节点形状认标量/聚合，`fundecidstart` 与 typedef 别名两种形状都落成 `ok:false`，
+于是它退化成入口里的一个 `(let …)`。`iter.asy:42` 要的正是那个（而且名字还是
+`operator cast`），所以那一刀比这一刀大。
+
+跑的轴：`tests/asy`（125 passed，45.7s）、`tests/bootstrap`（60 passed）。只动
+`frontend-asy/stmts.js`，sexpr 与 run.js 跳掉。
+
+
 
 
 
