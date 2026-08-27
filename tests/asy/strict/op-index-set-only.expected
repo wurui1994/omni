@@ -1,0 +1,1 @@
+struct D 里有 'operator [=]' 却没有 'operator []' —— asy 那边报 "operator[=] defined without operator[]"

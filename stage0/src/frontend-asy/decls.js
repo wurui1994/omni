@@ -447,7 +447,11 @@ export function asyMethodSig(L, rec, n, mat, at) {
   // （`int z = 8;` 加体里 `z = z + 1` 出来是 9）、而 `A a;` **不**走它（量过是 0，不是
   // 体里赋的值 —— `A a;` 只认文件级的 `A operator init()`，那一条还在门外）。
   const ctor = nm === 'operator init';
-  if (nm.startsWith('operator ') && !ctor) {
+  // `operator []` 与 `operator [=]`（collections/map.asy:26/29）当**普通方法**收下：
+  // 名字里带算符，但调用形态是下标（`v[i]` / `v[i] = x`，见 asyIndex 与赋值那一侧），
+  // 重载解析、默认实参、`v.operator [](2)` 这种直呼全跟着白捡。
+  const idxOp = nm === 'operator []' || nm === 'operator [=]';
+  if (nm.startsWith('operator ') && !ctor && !idxOp) {
     return L.nope(n, `struct ${rec.name} 里的算符重载 '${nm}'`);
   }
   const ret = L.type(n.items[1], `方法 ${rec.name}.${nm} 的返回类型`);
@@ -461,10 +465,26 @@ export function asyMethodSig(L, rec, n, mat, at) {
   for (const p of ps) types.push(p.type);
   for (const p of ps) if (p.name === 'this') return L.nope(n, "叫 'this' 的形参");
   const key = `${rec.name}.${nm}`;
+  // 一个 struct 里 `operator []` 与 `operator [=]` 各只能有**一个**（asy 自己就拒：量过
+  // 报 "multiple operator[] definitions in one struct" / "…operator[=]…"）。所以这两个
+  // 名字不是普通的重载集 —— 不裁就是"比 asy 多接受一门语言"，strict/op-index-dup 钉着。
+  if (idxOp) {
+    const had = L.funcs.get(key);
+    if (had !== undefined && had.length > 0) {
+      const w = nm === 'operator []' ? 'operator[]' : 'operator[=]';
+      return L.err(n, `struct ${rec.name} 里有两个 '${nm}' —— asy 一个 struct 只收一个`
+        + `（那边报 "multiple ${w} definitions in one struct"）`);
+    }
+  }
   // 构造函数的候选**看起来像个回记录的普通函数**（`ret` 是记录名、没有接收者），
   // 重载解析与默认实参那两套因此一字不改就能用；`ctor` 标记只在发正文时用。
   // 符号名不带单元前缀（第二十五刀）：记录名本身就是全局唯一的（见 recordDec）。
-  const msym = ctor ? `asy__ctor_${rec.name}` : `asy__m_${rec.name}_${nm}`;
+  // `operator []` / `operator [=]` 那两个名字里有空格和方括号，直接拼进符号名方言那边
+  // 读不出来（量到的是 `unexpected character "["`），所以这里换成 idx / idxset。
+  let mtail = nm;
+  if (nm === 'operator []') mtail = 'idx';
+  if (nm === 'operator [=]') mtail = 'idxset';
+  const msym = ctor ? `asy__ctor_${rec.name}` : `asy__m_${rec.name}_${mtail}`;
   const cand = {
     ret: ctor ? rec.name : ret, params: types, ps, node: n, at: -1, dat: at, mat, rec, ctor,
     sym: msym, base: msym, pfx: '', unit: L.unit.id,

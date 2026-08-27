@@ -302,6 +302,27 @@ export function asyUserCall(L, n, nm, list, recv) {
 }
 
 /**
+ * 记录上的下标：`v[i]` 与 `v[i] = x`（第三十二刀）。asy 那边它们就是
+ * `v.operator [](i)` 与 `v.operator [=](i, x)` —— 量过 `v.operator [](2)` 直呼也通，
+ * 所以这里不新开一条路，只是把"实参"手攒出来再交给 applyCall（重载解析、隐式转换、
+ * 默认实参全跟着白捡）。`argNodes` 是语法树上的实参节点，按位置传。
+ */
+export function asyIdxOpCall(L, n, recv, mname, argNodes) {
+  const rec = L.records.get(recv.type);
+  const ms = rec === undefined ? [] : L.visibleMethods(rec, mname);
+  if (ms.length === 0) {
+    return L.err(n, `${recv.type} 上没有 '${mname}' —— 下标要 struct 里定义了它才能用`);
+  }
+  const raw = [];
+  for (const a of argNodes) {
+    const v = L.expr(a);
+    if (v === null) return null;
+    raw.push({ key: null, node: a, spread: false, v: v, lines: null });
+  }
+  return asyApplyCall(L, n, mname, ms, raw, recv);
+}
+
+/**
  * userCall 的后半段：实参已经求好（`raw`），剩下的是挑候选、转换、发调用。
  * 分出来是给算符重载用的（第二十三刀）—— 那边的"实参"是已经降好的两个操作数，
  * 没有 callArgs 那一步，别的规则一条不差。

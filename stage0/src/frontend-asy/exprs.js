@@ -22,7 +22,7 @@ import {
   asyIsArr, asyElem, asyIsFn, ASY_PAIR_TY, ASY_TRIPLE_TY, asyCore,
 } from './types.js';
 import { ZERO, ASY_PAIRFN, ASY_STRFN, ASY_STR_DEPS, strLit } from './runtime.js';
-import { asyArgs, asyCall, asyVisible, asyJoinExp, asyOpUser, asyOpBuiltinSig } from './calls.js';
+import { asyArgs, asyCall, asyVisible, asyJoinExp, asyOpUser, asyOpBuiltinSig, asyIdxOpCall } from './calls.js';
 import { asyFmtStr, asyBody } from './stmts.js';
 
 /* ---------------------------------------------------------------- 表达式 */
@@ -385,6 +385,8 @@ export function asyExprList(L, n, h) {
 export function asyIndex(L, n) {
   const a = asyExpr(L, n.items[1]);
   if (a === null) return null;
+  // 记录上的下标：那是 `operator []` 那个方法（第三十二刀，collections/map.asy:26）
+  if (L.isRec(a.type)) return asyIdxOpCall(L, n, a, 'operator []', [n.items[2]]);
   if (!asyIsArr(a.type)) return L.err(n, `下标只能用在数组上，这里是 ${a.type}`);
   const i = asyCoerce(L, asyExpr(L, n.items[2]), 'int', n, '下标');
   if (i === null) return null;

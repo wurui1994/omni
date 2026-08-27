@@ -1060,6 +1060,13 @@ class AsyLower {
       // 所以 mat 是按声明语句加一，不是按字段加一。
       mat++;
     }
+    // `operator [=]` 必须配一个 `operator []`（asy 自己就拒：量过报 "operator[=] defined
+    // without operator[]"）。这一条要在这里问 —— 方法是逐条登记的，"缺另一半"只有走完
+    // 整个体才看得出来。
+    if (this.funcs.has(`${nm}.operator [=]`) && !this.funcs.has(`${nm}.operator []`)) {
+      return this.err(n, `struct ${nm} 里有 'operator [=]' 却没有 'operator []' ——`
+        + ' asy 那边报 "operator[=] defined without operator[]"');
+    }
     // 核心方言的 class 至少要一个字段，而 asy 那边"只有方法的 struct"、"只有 static 成员的
     // struct"都合法 —— math.asy:442 的 `struct rootfinder_settings` 就是后者（里面全是
     // static）。所以这里补一个**看不见的**占位字段，而不是把这一族拒掉。

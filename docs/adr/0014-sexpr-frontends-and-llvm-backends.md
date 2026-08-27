@@ -2748,6 +2748,46 @@ Iterable、`unravel` 当语句、`Iterable_T` 当函数值）。`import graph;` 
 `tests/sexpr` 与 `tests/run.js` 没跑 —— 只碰 `frontend-asy/`（lower 的字段那一段、calls 的
 一档），方言与后端没动。
 
+### `operator []` 与 `operator [=]`：语法一行、语义一条转接、边界三条
+
+`collections/map.asy:26/29` 的 `V operator [] (K key);` / `void operator [=] (K key, V value);`
+是 plain 剩下那一条里最外面的一层，而它先是个**词法**问题：`operator` 一族靠
+`(fuse ID "operator" …)` 接住，那张表里没有 `[]` 与 `[=]`（camp.l 的 opname 表里有）。
+补上两项（`[=]` 排在 `[]` 前面 —— 更长的先试），`operator []` 就成了一个普通 ID。
+
+语义量出来也不新鲜：`v[i]` 就是 `v.operator [](i)`、`v[i] = x` 就是
+`v.operator [=](i, x)`，量过 `v.operator [](2)` 直呼也通。所以：
+
+- `asyMethodSig` 放这两个名字过（原来除了 `operator init` 一概 nope）；
+- 符号名里的空格与方括号方言读不出来（量到 `unexpected character "["`），
+  所以 `operator []` / `operator [=]` 的符号后缀换成 `idx` / `idxset`；
+- 新函数 `asyIdxOpCall(L, n, recv, mname, argNodes)`：把"实参"手攒成 applyCall 要的形状，
+  重载解析、隐式转换、默认实参全跟着白捡。读侧接在 `asyIndex` 的数组那一问**前面**，
+  写侧接在 `asyAssignIndex` 里。
+
+asy 自己的三条边界也量了，而且都得抄下来 —— 不抄就是"比 asy 多接受一门语言"：
+
+- 一个 struct 里只能有**一个** `operator []`（"multiple operator[] definitions in one struct"）；
+- 只能有**一个** `operator [=]`（"multiple operator[=] definitions in one struct"）；
+- `operator [=]` 必须配 `operator []`（"operator[=] defined without operator[]"）。
+
+前两条在 `asyMethodSig` 里问（登记之前看那张候选表已经有没有），第三条要走完整个 struct 体
+才看得出来，所以在 `recordBody` 的末尾。三条都进 strict：`strict/op-index-dup`、
+`strict/op-index-set-only`。这一条是量出来才知道的 —— 第一版测试里我写了两个
+`operator []` 的重载，跑 `asy -noV` 才发现 asy 拒。
+
+新增 `tests/asy/cases/56-operator-index.asy`（int 下标、string 下标、`v.operator [](2)` 直呼、
+struct 里别的方法用 `this[0]`）。复合赋值（`v[i] += 1`）与 `++`/`--` 还是 nope ——
+那要先读再写，两个算符各自还能重载，摊法与数组那边不一样。
+
+**墙又往后挪了一步，还是 1 条**：`collections/map.asy` 整个过了（26/29 两句都收下），
+plain 现在停在 `collections/iter.asy:42` 的 `autounravel` 一个 vardec。
+`import graph;` 还是 186。
+
+跑的轴：`tests/asy`（115 passed，30.5s）、`tests/bootstrap`（60 passed）。
+`tests/sexpr` 与 `tests/run.js` 没跑 —— 改的是 asy 的词法表与 `frontend-asy/`，
+核心方言的语法、OIR、后端都没动。
+
 ## 后果与代价
 
 

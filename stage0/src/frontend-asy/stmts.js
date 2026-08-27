@@ -18,7 +18,7 @@ import {
   ASY_NOPE, DOT_BAD, ASY_ARRELEM_TEXT, asyOpText, asyIsArr, asyElem, asyIsFn, asyCore,
 } from './types.js';
 import { ZERO } from './runtime.js';
-import { asyArgs, asyCall, asyOpUser, asyOpBuiltinSig } from './calls.js';
+import { asyArgs, asyCall, asyOpUser, asyOpBuiltinSig, asyIdxOpCall } from './calls.js';
 
 /**
  * `write` 的重载是量出来的，形状是 `write(string s="", T x, T[] more..., suffix=endl)`：
@@ -632,6 +632,16 @@ export function asyAssignFld(L, node, q, rhs, op) {
 export function asyAssignIndex(L, node, lhs, rhs, op) {
   const a = L.expr(lhs.items[1]);
   if (a === null) return null;
+  // 记录上的下标写：`operator [=]`（第三十二刀，collections/map.asy:29）。复合赋值那一档
+  // 还没做 —— 它要先读（`operator []`）再写，两个算符各自还能重载，摊法与数组那边不一样。
+  if (L.isRec(a.type)) {
+    if (op !== null || rhs === null) {
+      const what = rhs === null ? '++/--' : `${op}=`;
+      return L.nope(node, `${a.type} 的下标上的 '${what}'`);
+    }
+    const c = asyIdxOpCall(L, node, a, 'operator [=]', [lhs.items[2], rhs]);
+    return c === null ? null : [`(expr ${c.code})`];
+  }
   if (!asyIsArr(a.type)) return L.err(node, `下标只能用在数组上，这里是 ${a.type}`);
   const idx = L.coerce(L.expr(lhs.items[2]), 'int', node, '下标');
   if (idx === null) return null;

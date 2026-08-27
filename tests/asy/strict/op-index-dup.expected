@@ -1,0 +1,1 @@
+struct D 里有两个 'operator []' —— asy 一个 struct 只收一个（那边报 "multiple operator[] definitions in one struct"）
