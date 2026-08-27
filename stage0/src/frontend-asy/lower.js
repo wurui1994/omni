@@ -961,7 +961,8 @@ class AsyLower {
     // 记录先登记（字段还空着）：方法的签名可以提到这个记录自己（`A copy()`），
     // 而 type() 是查 recVis 认记录名的。自引用字段那一条拦在 type() 前面，
     // 所以"字段还空着"这件事在这里看不出问题。
-    const rec = { name: tname, fields: fields, at: at, unit: this.unit.id, tyAlias: new Map() };
+    const rec = { name: tname, fields: fields, at: at, unit: this.unit.id, tyAlias: new Map(),
+      stmts: [] };
     this.records.set(tname, rec);
     this.recVis.set(nm, { rec, at });
     // 体里的类型名按**这个 struct 的位置**判可见（recHere）：字段与方法签名只能提到
@@ -1032,7 +1033,16 @@ class AsyLower {
         continue;
       }
       if (head(r) !== 'vardec') {
-        return this.nope(r, `struct 里的 '${head(r)}'（这一刀只有字段声明与方法）`);
+        // struct 体里的**语句**（第三十六刀）：asy 的 struct 体其实就是一个 block ——
+        // 量过它是**每个实例**构造时按体内顺序跑一遍，而且能裸读写前面的成员
+        //   `struct S { int x = 1; write("body"); int y = x + 1; x = 5; }`
+        //   -> body / x=5 / y=2，造第二个实例又印一遍 body。
+        // 名字的可见性与字段默认值同一条（量过后面的字段/方法都报 "no matching variable"），
+        // 所以这里只记下位置，正文在 recNew 里与字段默认值**同一串**里发。
+        // collections/map.asy:115 的 `map.size = new int() { return size; };` 靠这一条。
+        this.records.get(nm).stmts.push({ node: r, mat: mat });
+        mat++;
+        continue;
       }
       // 字段类型是**这个 struct 自己**：asy 收（量过 `struct A { A next; int x; } A a; write(a.x);`
       // 印 0 退 0 —— 它的字段是懒的，next 就搁着不造）。我们不收：隐式 operator init 要把
@@ -1145,12 +1155,28 @@ class AsyLower {
    * 因为默认值要**每次构造都重新求**（量过：`struct B { int n = bump(); }`，
    * `new B` 两次之后计数器是 2）。同一个记录只生一份构造函数。
    */
+  /**
+   * struct 体里的一条语句（第三十六刀）。发到隐式构造那一串里去 —— 它与字段默认值
+   * **同一串**，可见位置也按同一条规矩（这一条的成员号）。回 false 表示这一条没降下来。
+   */
+  recStmt(s, rec, lines, saveSelf) {
+    this.self = { rec: rec, mat: s.mat };
+    const out = asyStmt(this, s.node, 'void');
+    this.self = saveSelf;
+    if (out === null) return false;
+    for (const l of out) lines.push(l);
+    return true;
+  }
+
   recNew(n, t) {
     const rec = this.records.get(t);
     let any = false;
     // 记录类型的字段也算"有默认值"：asy 给它跑一遍 operator init（量过 `struct B { A a; }`
     // 之后 `b.a.y` 是 A 的字段默认值，不是空引用），所以这种记录一定要走构造函数。
     for (const f of rec.fields) if (f.def !== null || this.isRec(f.type)) any = true;
+    // struct 体里的语句也算"有话要说"：一个字段都没默认值、但体里有 `write(…)` 时
+    // 也得走生成的构造函数（量过它每造一个实例就跑一遍）
+    if (rec.stmts !== undefined && rec.stmts.length > 0) any = true;
     if (!any) return `(cnew ${t})`;
     const had = this.recInits.get(t);
     if (had !== undefined) return `(call ${had})`;
@@ -1179,7 +1205,17 @@ class AsyLower {
     this.pre = lines;
     this.declare(n, 'this', t);
     let bad = false;
+    // 体里的语句与字段默认值是**同一串**，按成员号（mat）交错着发 —— 那个顺序就是
+    // 源码里的顺序（量过：`int x = 1; write("body"); int y = x + 1; x = 5;`
+    // 印 body、x 是 5、y 是 2）。
+    const sts = rec.stmts === undefined ? [] : rec.stmts;
+    let si = 0;
     for (const f of rec.fields) {
+      while (si < sts.length && sts[si].mat < f.mat) {
+        if (!this.recStmt(sts[si], rec, lines, saveSelf)) { bad = true; break; }
+        si++;
+      }
+      if (bad) break;
       if (f.def === null) {
         // 内嵌的记录：没写默认值也要给它一个**新对象**（字段类型只能是前面声明过的记录，
         // 所以这里的递归一定会到底）。走 recInit：文件级的 operator init 管得到这一格。
@@ -1196,6 +1232,10 @@ class AsyLower {
       this.self = saveSelf;
       if (v === null) { bad = true; break; }
       lines.push(`(fldset (var this) ${f.name} ${v.code})`);
+    }
+    while (!bad && si < sts.length) {
+      if (!this.recStmt(sts[si], rec, lines, saveSelf)) bad = true;
+      si++;
     }
     lines.push('(ret (var this))');
     this.pre = savePre;

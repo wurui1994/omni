@@ -3133,6 +3133,35 @@ asy 印 2，我们报"未声明的变量 'x'"。隐式构造那份 `asy__new_T` 
 跑的轴：`tests/asy`（135 passed，46.9s）、`tests/bootstrap`（60 passed）。只动
 `frontend-asy/`（lower.js、calls.js），tests/sexpr 与 tests/run.js 跳掉。
 
+### struct 体里的语句：`collections/` 整族过了，墙退到 plain 自己家里
+
+asy 的 struct 体其实就是一个 **block**。量出来的四条：
+
+- `struct S { int x = 1; write('body'); int y = x + 1; x = 5; }` -> `body` / `x` 是 5 /
+  `y` 是 2，造第二个实例又印一遍 `body` —— 也就是**每个实例**按体内顺序跑一遍；
+- 与字段默认值是**同一串**（`x = 5` 排在 `int y = x + 1` 前面，所以 y 是 2 不是 6）；
+- 能裸读写前面的成员（字段与方法都算）；
+- 后面的成员看不见：`struct S { write(x); int x = 4; }` 报 `no matching variable 'x'`（退 1）。
+
+上一刀的 `this` 就是为这个铺的，所以这一刀只有三处：`recordBody` 把认不出成员的那一项
+记进 `rec.stmts`（带成员号），`recNew` 按成员号把它们与字段默认值**交错**发，
+外加一个 `recStmt` —— 正文直接过 `asyStmt(L, node, 'void')`，语句那一层一行没动。
+
+`import plain;` **1 -> 7**：这是墙倒了，不是回退。`map.asy:115` 那条没了，
+`collections/`（iter / genericpair / map）整族过完，露出来的 7 条全在 plain 自己的文件里：
+
+- 2 条 `plain_scaling.asy:9/166` static 的**方法**；
+- `plain_bounds.asy:92` `transformedBounds[]`（元素是 struct 的**函数字段**那一族）与
+  `:657` 的 `var` 类型；
+- `plain_picture.asy:95` `void()[]`（函数类型的数组）与 `:203` 重复定义的 `picture`；
+- `plain.asy:67` 返回类型自己是函数类型。
+
+`import graph;` 还是 183（graph 的 183 条在更前面就挡住了）。
+
+跑的轴：`tests/asy`（137 passed，45.5s）、`tests/bootstrap`（60 passed）。只动
+`frontend-asy/lower.js`，tests/sexpr 与 tests/run.js 跳掉。
+
+
 
 
 
