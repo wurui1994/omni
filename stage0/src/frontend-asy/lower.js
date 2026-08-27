@@ -119,6 +119,8 @@
 // **用户定义的转换**（第二十七刀：`T operator cast(S)` 管所有隐式位置、`operator ecast`
 // 只管 `(T) x`。它原来在门外，理由是会改**重载解析的打分**；量清了才收：跟内建提升
 // **同价**（打平就是 ambiguous）、而且**不串**（源类型必须一模一样），见 castSig）。
+// **`autounravel`**（第二十八刀：struct 体里带它的声明其实是**文件级**的声明 ——
+// 形参显式、没有 this，可见位置是那个 struct 的位置，见 auMod）。
 //
 // 不支持（见到就报错，报错里说清是哪一条）：triple、标准库模块（`import graph;`）、
 // typedef、
@@ -657,6 +659,9 @@ class AsyLower {
     // 本质上就是这个：量过 `A b = a; b.bump(1);` 改的是同一个对象（struct 是引用类型），
     // 所以传句柄就够。
     this.methodDecls = [];
+    // struct 体里带 `autounravel` 的那些声明（第二十八刀）：它们其实是**文件级**函数，
+    // 正文在这里攒着，第二遍跟文件级函数一起发。
+    this.auFns = [];
   }
 
   /* ------------------------------------------------------------------ 单元 */
@@ -674,6 +679,7 @@ class AsyLower {
       funcs: new Map(), globals: new Map(), oinits: new Map(), oiByNode: new Map(),
       casts: new Map(), castByNode: new Map(),
       recVis: new Map(), mods: new Map(), methodDecls: [], callAt: new Map(), at: 0,
+      auFns: [],
     };
     this.units.push(u);
     return u;
@@ -690,6 +696,7 @@ class AsyLower {
     u.recVis = this.recVis;
     u.mods = this.mods;
     u.methodDecls = this.methodDecls;
+    u.auFns = this.auFns;
     u.at = this.at;
   }
 
@@ -707,6 +714,7 @@ class AsyLower {
     this.recVis = u.recVis;
     this.mods = u.mods;
     this.methodDecls = u.methodDecls;
+    this.auFns = u.auFns;
     this.pfx = u.pfx;
     this.at = u.at;
     return prev;
@@ -917,6 +925,17 @@ class AsyLower {
     for (const item of this.flat(n.items[2], 'block')) {
       const r = this.unwrapMod(item);
       if (!isList(r)) continue;
+      // `autounravel`（第二十八刀）：这个成员其实是**文件级**声明 —— 交给 sig，
+      // 正文攒在 auFns 里跟文件级函数一起发。它不占成员槽（不是字段也不是方法）。
+      if (this.auMod(item)) {
+        if (head(r) !== 'fundec') {
+          this.nope(r, `autounravel 的 '${head(r)}'（这一刀只有 autounravel 的函数与算符）`);
+          return null;
+        }
+        this.sig(r, at);
+        this.auFns.push({ node: r, at });
+        continue;
+      }
       if (head(r) === 'fundec') {
         if (this.methodSig(rec, r, mat, at) === null) return null;
         mat++;
@@ -2954,6 +2973,27 @@ class AsyLower {
   }
 
   /**
+   * 这一句带 `autounravel` 吗（第二十八刀）。树形是 `(modified (mods "autounravel"…) DEC)`。
+   * struct 体里它的意思是"这个成员其实是**文件级**的声明"：量过 `asy -noV`
+   *   - `autounravel real operator cast(R r)` 之后 `real x = a;` 通（不带 autounravel 的
+   *     那份 asy 收声明但**不用**它 —— 报 "cannot cast 'R' to 'real'"）；
+   *   - `autounravel int twice(R r)` 之后 `twice(z)` 是**裸名字**调用，不是方法；
+   *   - 可见位置是**这个 struct 的位置**：写在 struct 前面的地方看不见（"no matching
+   *     variable 'k'"）。
+   * 所以降级就是把它交给文件级那条路（sig），`at` 用 struct 的下标。
+   */
+  auMod(n) {
+    let cur = n;
+    while (isList(cur) && head(cur) === 'modified') {
+      for (const m of this.flat(cur.items[1], 'mods')) {
+        if (isAtom(m) && m.value === 'autounravel') return true;
+      }
+      cur = cur.items[2];
+    }
+    return false;
+  }
+
+  /**
    * 文件级的 `T operator init()`（第二十二刀）：asy 用它换掉 `T t;` 的隐式构造。
    * 四条都量过（`asy -noV`）：
    *   - `A operator init() { A r = new A; r.x = 5; return r; } A a;` 之后 `a.x` 是 5，
@@ -3405,6 +3445,12 @@ class AsyLower {
     for (const m of u.methodDecls) {
       const text = this.method(m.rec, m.cand, m.at);
       if (text !== null) fns.push(text);
+    }
+    // struct 体里 `autounravel` 的那些（第二十八刀）：它们就是文件级函数，只是写在体里
+    for (const m of u.auFns) {
+      this.at = m.at;
+      const f = this.func(m.node);
+      if (f !== null) fns.push(f);
     }
     for (let i = 0; i < u.rs.length; i++) {
       const r = this.unwrapMod(u.rs[i]);

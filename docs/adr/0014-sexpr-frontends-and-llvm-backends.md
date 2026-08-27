@@ -266,8 +266,9 @@ bison **隐式**的选择写成**显式**的优先级声明 —— 悬垂 else�
    一份文件一个单元，模块体成为 `asy__init<k>`，调用点就在 import 那一行）、
    **`explicit` 形参**（第二十六刀：那个槽只收类型一模一样的实参，连内建提升都挡）、
    **用户定义的转换**（第二十七刀：`T operator cast(S)` 管所有隐式位置、
-   `operator ecast` 只管 `(T) x`；代价与内建提升同价，不串），
-   三十三份用例在五个执行器上与 `asy -noV` 逐字节相同。
+   `operator ecast` 只管 `(T) x`；代价与内建提升同价，不串）、
+   **`autounravel`**（第二十八刀：struct 体里带它的声明其实是**文件级**的），
+   三十四份用例在五个执行器上与 `asy -noV` 逐字节相同。
    **还没做**的是给切片赋值、多维数组、复数幂、triple、
    字符串的 `reverse`/`insert`/`split`、
    自引用字段、把方法当值取出来、struct 体里的算符、函数里用文件级的 pair/记录/数组变量、
@@ -448,13 +449,13 @@ static inline C + 另写一份 IR 助手"，是两份实现；这次不重复那
 `1/3` 是实数除法而 `1#3` 是整数商、`3 == 3.0` 要提左边、`write` 的分隔符取决于第一个
 实参是不是字符串。类型是符号表的事，动作模板里没有符号表。
 
-**判分的人不是我**：`tests/asy` 的三十三份用例（算术 / 字符串 / 两种引号 / 控制流 / 函数 /
+**判分的人不是我**：`tests/asy` 的三十四份用例（算术 / 字符串 / 两种引号 / 控制流 / 函数 /
 real 的 %.15g / `? :` / 数学函数 / 数组 / pair / 切片与整数组输出 / for-each /
 字符串函数 / `pair[]` / 默认实参与命名实参 / 重载解析 / struct / struct 的 pair 字段 /
 struct 的数组字段 / struct 的记录字段 / `A[]` / struct 的方法 / 构造函数 /
 文件级 operator init / 算符重载 / 用户算符与内建算符的关系 / 文件级变量 / 模块 /
 模块里的 struct 与默认实参 / `explicit` 形参 / 用户定义的转换 / 模块里的转换 /
-反方向的转换）每份都是
+反方向的转换 / `autounravel`）每份都是
 「五条腿逐字节相同 == `.expected` == `asy -noV` 当场重跑」。`.expected` 本身就是真 asy 的
 输出生成的；机器上没装 asymptote 时那一节打印 skip，但 `.expected` 仍然把答案钉住。
 用例目录里 `mod_*.asy` 不是用例而是**被 import 的模块**，三节测试都在用例文件自己的目录里
@@ -476,7 +477,7 @@ struct 的数组字段 / struct 的记录字段 / `A[]` / struct 的方法 / 构
 （只算中选那支）跟着编码保住。代价写在明处：**循环条件里的 `? :` 直接报错**，因为那些
 赋值只能落在循环外面，条件就只算一次了。这条边界在 `tests/asy/bad/cond-in-loop.asy` 里。
 
-第一刀的边界都在 `tests/asy/bad/`（21 条，每条的期望值都必须以 `ASY_NOPE` 开头 ——
+第一刀的边界都在 `tests/asy/bad/`（22 条，每条的期望值都必须以 `ASY_NOPE` 开头 ——
 "还没做"和"做错了"必须能一眼分开）：triple、复数幂、
 标准库模块（`import graph;` —— 用户自己写的模块第二十五刀通了；
 `operator cast` 那条第二十七刀通了，那份用例搬成了 `cases/33-castback`）、隐式缩放（`105cm`）、超越函数（`sin`、pair 上的 `angle` ——
@@ -514,7 +515,7 @@ struct 的数组字段 / struct 的记录字段 / `A[]` / struct 的方法 / 构
 **第四节 `strict/`：asy 自己就不收的，我们也不能收。** 这一节是数组这一刀顺手加的，起因是
 一次测量：`int b=1; b++;` 在真 asy 上直接编不过（"postfix expressions are not allowed"），
 而我们的降级器照收。这类漏洞**不会让任何用例输出不同** —— 它只让"等价"这两个字变虚。
-所以 `strict/` 里的用例要求：我们拒，且装了 asy 的话**真 asy 也拒**。现在有二十条：后缀
+所以 `strict/` 里的用例要求：我们拒，且装了 asy 的话**真 asy 也拒**。现在有二十一条：后缀
 `++`、pair 上的 `<`、pair 上的 `%`（这两条 asy 报的是 "no matching function
 'operator <(pair, pair)'"）、`length(int[])`（`length` 只有 string 和 pair 两个重载）、
 按不存在的形参名给命名实参（asy 报 "cannot call 'void f(int a)' with parameter 'int b'"）、
@@ -536,7 +537,9 @@ with parameter 'int'" —— 第二十六刀加的：explicit 连**内建提升*
 只有 `V operator cast(real)` 时 int 到 V 也不通 —— asy 报 "cannot call … with
 parameter 'int'"）、**隐式位置用 `operator ecast`**（asy 报 "cannot cast 'int' to 'U'"）、
 **用户转换与内建提升打平**（`p(real)` 与 `p(V)` 遇上 `p(3)`：asy 报 ambiguous ——
-这三条是第二十七刀加的，它们钉住的是转换的**代价与传递性**：同价、不串）——
+这三条是第二十七刀加的，它们钉住的是转换的**代价与传递性**：同价、不串）、
+**在 struct 前面用它体里 `autounravel` 的名字**（asy 报 "no matching variable 'auq'" ——
+第二十八刀加的：`autounravel` 铺出来的名字，可见位置是那个 struct 的位置）——
 中间那两条是重载这一刀加的，第二条尤其要紧：我们是两遍降级，不专门裁一刀就会比 asy
 多接受一门语言。`write(struct)` 与 `z.x = 5` 是 struct 与 pair 字段那两刀加的，
 它们守的不只是"拒"：
@@ -1301,6 +1304,27 @@ asy 那边因此只收 int/real/bool/string 的文件级变量；pair/记录/数
 `cases/33-castback` 是原来那份 `bad/op-cast` 搬过来的（struct -> int 的反方向），
 `strict/cast-chain-user`、`strict/cast-chain-promote`、`strict/cast-ecast-implicit`、
 `strict/cast-tie-real` 钉住四条拒绝。
+
+### 已落地（支持面第十七阶段：`autounravel`，门槛 2 第二十八刀）
+
+**核心方言零改动，降级器加了三十行。** 起因是量出来的：`rational.asy` 卡在
+`autounravel rational operator cast(int p)` 上 —— 那是**写在 struct 体里的文件级声明**。
+先量清它到底是什么（`asy -noV`）：
+
+- 不带 `autounravel` 的 `real operator cast(R r)` 写在体里，asy **收这个声明但不用它**
+  （`real x = r;` 报 "cannot cast 'R' to 'real'"）—— 跟 struct 体里的二元算符同一回事；
+- 带上 `autounravel` 就通了：`real x = a;`、`R a = 4;`、`a + 3`、`size(z)` 全都按
+  **文件级**的规矩走，形参是显式的（没有 `this`）；
+- 可见位置是**这个 struct 的位置**：写在 struct 前面的地方报 "no matching variable"；
+- `autounravel int k = 9;`（变量）也铺到文件级 —— 这半边还没做，见 `bad/au-var`：
+  它要在 struct 那一行求初值并发一个 `(global …)`，而那一行现在只走声明遍、不发语句。
+
+于是实现就是"别把它当成员"：`auMod()` 认出 `(modified (mods "autounravel") …)`，
+`recordBody` 把这样的 `fundec` 交给 `sig()`（`at` 用 struct 的下标，于是顺序解析白捡），
+正文攒在 `auFns` 里由 `bodyPass` 跟文件级函数一起发。算符与 `operator cast` 因此
+一并落地 —— 它们本来就是走 `sig()` 的。`cases/34-autounravel` 钉住转换、算符、普通函数、
+默认实参、"真方法还是方法"与重载共表六条，`strict/au-fwd` 钉住可见位置。
+量到的收益：`rational.asy` 的拦路虎从 struct 体里的 cast 前进到**多维数组**。
 
 ## 决策 4：调用 LLVM 需要 extern-C FFI —— 这是新要求，也是 dogfood
 
