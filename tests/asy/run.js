@@ -48,7 +48,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 
-import { ASY_NOPE } from '../../stage0/src/frontend-asy/lower.js';
+import { ASY_NOPE } from '../../stage0/src/frontend-asy/types.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '../..');

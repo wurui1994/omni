@@ -2463,6 +2463,38 @@ C++ 内建类型，都不在我们的内建面上。所以 plain_paths 真正的
 （连着 joinExp 那一族：`..` / `controls…and…` / `tension` / `::` / `{dir}` 现在全是 nope），
 不是函数类型里的那一格。这一条改了下一刀的顺序。
 
+### 拆 lower.js：先搬"不带 this"的那两摊，5407 -> 4808
+
+标准是「feature 多的语言，`lower.js` 至多是一个薄入口」。那个文件长到 5407 行，
+其中 `class AsyLower` 一个人占 4450 行 —— 类体是大头，但**类体不是先该动的地方**。
+
+先量了两条：仓里有没有 prototype mixin（`Object.assign(X.prototype, …)`）—— **一个都没有**；
+`extends` 出现在哪 —— 只有 `extends Error` / `extends Map` 那种空体的琐碎子类。
+也就是说"把一个类拆到几个文件里"这件事在自举那条路上**没有先例**，
+而这个文件正好在自举路径上（`tests/bootstrap` 要用它自己编译自己）。
+所以第一刀只搬**模块级**的那两摊，它们一行都不碰 `this`：
+
+- `frontend-asy/types.js`（202 行）：类型在这一层就是字符串，这个文件是那些字符串的全部规矩 ——
+  `asyIsArr`/`asyElem`/`asyMangle`/`asyIsFn`/`asyFnSplit`/`asyCore`、`ASY_PAIR_TY`/`ASY_TRIPLE_TY`、
+  `asyConvCost`、算符名表、`ASY_NOPE`，以及读 `builtins.tab` 的 `parseAsyBuiltins`。
+- `frontend-asy/runtime.js`（430 行）：零值表、pair/字符串内建的名字表，以及降级时按需拉进来的
+  核心方言 helper 源码（`HELPERS`，300 多行）。这一摊单独成文件的理由最硬：
+  helper 只有一份源码、**六条腿共用**，改一处等于改六条腿。
+
+名字一个都没改。封闭 ABI 的那条纪律是"模块级名字全仓唯一"，改名等于换 ABI；
+`ASY_NOPE` 与 `parseAsyBuiltins` 原先从 `lower.js` 导出，现在改成从 `types.js` 导出，
+三个引用处（`cli.js`、`tests/asy/run.js`、`tests/repl/incremental.js`）跟着改了 import 路径 ——
+**没有**用 `export { X } from './types.js'` 那种转出写法：那条在自举的模块加载器上没验过，
+而三行 import 是验过的。
+
+搬完逐行对了一遍：老文件里每一行都还在这三个文件之一，唯一的差别是 28 行多了个 `export ` 前缀。
+`node tests/asy/run.js` 107/107、`node tests/bootstrap/run.js` 60/60 —— 后者是必须跑的，
+因为新文件与跨文件 import 要能被它自己编译。
+
+类体那 4450 行是下一刀：不靠 extends、不靠 mixin，而是把成组的方法改成
+`函数(L, …)` 的普通函数（`L` 就是那个降级器），调用处写 `asyAssign(this, …)`。
+普通函数调用在封闭子集里是保证能降级的，这也是唯一不引入新语言特性的拆法。
+
 ## 后果与代价
 
 
