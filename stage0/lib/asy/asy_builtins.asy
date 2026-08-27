@@ -27,6 +27,78 @@
 // 还没做的：guide 与 `..` 的 Hobby 求解（knot.cc 的三对角）、transform、Label（要 TeX）、
 // clip、3D。
 
+// ---------------------------------------------------------------- 数与数组
+// asy 在 C++ 里带的一批非绘图内建。量出来的理由：`import graph;` 一句话下去 193 条诊断，
+// 「缺的内建函数」占 33 条，而这几个是里面**现在就写得起**的（不需要方言加东西）。
+// 每一条的行为都是 `asy -noV` 量的，写在各自那一行。
+
+// pi 在真 asy 里是 C++ 的常量（`pi=acos(-1)`），不是 base 里声明的
+real pi = acos(-1);
+
+// sgn：量过 sgn(-3.5)=-1、sgn(0.0)=0、sgn(2.1)=1，回的是 int
+int sgn(real x) {
+  if (x > 0) return 1;
+  if (x < 0) return -1;
+  return 0;
+}
+
+// 弧度/度。real 那一版**不**归一化（量过 degrees(-pi/2) = -90）
+real degrees(real r) { return r * 180 / pi; }
+real radians(real d) { return d * pi / 180; }
+
+// pair 那一版归一化到 [0,360)（量过：(0,1)->90、(-1,0)->180、(0,-1)->270、
+// (-1,-1)->225、(1,-1)->315）。`warn` 在真 asy 那边只管零向量要不要出警告，
+// 我们这一刀不出警告，所以它只是把签名对上（graph.asy 里 `degrees(dir,warn=false)`）。
+real degrees(pair z, bool warn = true) {
+  real a = degrees(atan2(z.y, z.x));
+  if (a < 0) a = a + 360;
+  return a;
+}
+
+// copy：深拷一份（量过 `int[] b=copy(a); b[0]=99;` 之后 a[0] 还是原值）。
+// 没有泛型，所以按 base 用到的元素类型各写一份（math.asy 用的是 real[] 与 bool[]）。
+real[] copy(real[] a) {
+  real[] b;
+  for (int i = 0; i < a.length; ++i) b.push(a[i]);
+  return b;
+}
+int[] copy(int[] a) {
+  int[] b;
+  for (int i = 0; i < a.length; ++i) b.push(a[i]);
+  return b;
+}
+bool[] copy(bool[] a) {
+  bool[] b;
+  for (int i = 0; i < a.length; ++i) b.push(a[i]);
+  return b;
+}
+
+// search：**最后一个 <= key 的下标**，key 比首元素还小给 -1
+// （量过 {1,3,5,7,9}：key=5 -> 2、key=6 -> 2、key=0 -> -1、key=100 -> 4）
+int search(real[] a, real key) {
+  int lo = -1;
+  int hi = a.length;
+  while (hi - lo > 1) {
+    int mid = (lo + hi) # 2;
+    if (a[mid] <= key) lo = mid; else hi = mid;
+  }
+  return lo;
+}
+
+// sequence(n) = 0..n-1；sequence(a,b) = a..b（两头都要，a>b 给空数组）
+// 量过：sequence(4)={0,1,2,3}、sequence(1,5)={1,2,3,4,5}、sequence(3,3)={3}、
+// sequence(4,2)={}。带函数实参的那两个重载要匿名函数（`new real(int){…}`），还在门外。
+int[] sequence(int n) {
+  int[] a;
+  for (int i = 0; i < n; ++i) a.push(i);
+  return a;
+}
+int[] sequence(int a, int b) {
+  int[] r;
+  for (int i = a; i <= b; ++i) r.push(i);
+  return r;
+}
+
 // ---------------------------------------------------------------- pen
 // asy 的 pen 是值类型，我们的 struct 是引用类型 —— 所以凡是"改一支笔"的地方都
 // 先 pencopy。setwidth/setcolor 是 `p + q` 要的：q 显式设过的属性盖住 p 的那一份。
