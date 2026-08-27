@@ -1,0 +1,29 @@
+exit 0
+--- stdout ---
+3
+7
+25
+1.5
+abcd
+0
+1
+4
+25
+3
+int x = 3;
+write(x);
+write(x + 4);
+int sq(int n) { return n*n; }
+write(sq(5));
+real[] xs = new real[3];
+xs[0] = 1.5;
+write(xs[0]);
+string s = "ab" + "cd";
+write(s);
+for (int i = 0; i < 3; ++i) write(i*i);
+write(sq(x) + sq(4));
+write(x);
+--- stderr ---
+<repl>:1:7: error: 未声明的变量 'zzz'
+  write(zzz);
+        ^^^

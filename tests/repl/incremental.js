@@ -10,7 +10,16 @@ import { CheckSession } from '../../stage0/src/hir/check.js';
 import { CoreSession } from '../../stage0/src/sexpr/lower.js';
 import { InterpSession } from '../../stage0/src/interp/eval.js';
 import { loadProgram, newLoadState } from '../../stage0/src/module/load.js';
-import { Diagnostics } from '../../stage0/src/source/diag.js';
+import { Diagnostics, SourceFile } from '../../stage0/src/source/diag.js';
+import { AsySession, parseAsyBuiltins } from '../../stage0/src/frontend-asy/lower.js';
+import { readSexpr } from '../../stage0/src/sexpr/read.js';
+import { readGrammar } from '../../stage0/src/glr/grammar.js';
+import { buildTable } from '../../stage0/src/glr/table.js';
+import { lexText } from '../../stage0/src/glr/lex.js';
+import { glrParse } from '../../stage0/src/glr/driver.js';
+import { readFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const N = 40;
 let fail = 0;
@@ -75,6 +84,47 @@ const ok = (msg) => process.stdout.write(`  ok   ${msg}\n`);
   const flat = counts.slice(1).every((c) => c === first);
   if (!flat) bad(`sx 每批新降级的函数个数不是常数：${counts.join(',')}`);
   else ok(`sx 40 批，每批新降级 ${first} 个函数（常数）`);
+}
+
+// ---------------------------------------------------------------- asy（语法驱动的前端）
+
+{
+  const here = dirname(fileURLToPath(import.meta.url));
+  const src = join(here, '..', '..', 'stage0', 'src', 'frontend-asy');
+  const d0 = new Diagnostics();
+  const gtext = readFileSync(join(src, 'asy.grammar'), 'utf8');
+  const g = readGrammar(readSexpr(new SourceFile('asy.grammar', gtext), d0), d0);
+  d0.throwIfErrors();
+  const tb = buildTable(g);
+  const builtins = parseAsyBuiltins(readFileSync(join(src, 'builtins.tab'), 'utf8'));
+  const as = new AsySession({ path: '<repl>', load: null, builtins: builtins });
+  const cs = new CoreSession();
+  const rt = new InterpSession();
+  const counts = [];
+  const M = 20;   // asy 这条腿要建语法表，20 批够看出是不是常数了
+  for (let i = 1; i <= M; i++) {
+    const diags = new Diagnostics();
+    const call = i === M ? `write(f${i}(base));` : `int r${i} = f${i}(base);`;
+    const text = i === 1
+      ? 'int f1(int n) { return n + 1; }\nint base = 100;\nint r1 = f1(base);\n'
+      : `int f${i}(int n) { return f${i - 1}(n) + 1; }\n${call}\n`;
+    const toks = lexText(tb.grammar.lex, new SourceFile('<repl>', text), diags);
+    diags.throwIfErrors();
+    const tree = glrParse(tb, toks, diags);
+    diags.throwIfErrors();
+    const sx = as.add(tree, diags);
+    diags.throwIfErrors();
+    const delta = cs.add(sx, diags);
+    diags.throwIfErrors();
+    rt.install(delta);
+    const run = rt.runEntry(delta.entry);
+    if (run.failed) bad(`asy 第 ${i} 批跑挂了：${run.err.trim()}`);
+    counts.push(delta.funcs.length);
+  }
+  const first = counts[1];
+  const flat = counts.slice(1).every((c) => c === first);
+  if (!flat) bad(`asy 每批新降级的函数个数不是常数：${counts.join(',')}`);
+  else ok(`asy ${M} 批，每批新降级 ${first} 个函数（常数）`);
 }
 
 // ---------------------------------------------------------------- 失败要能回滚

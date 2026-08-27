@@ -96,11 +96,16 @@
 `stage0/src/repl.js` 的驱动里，一门语言只要给出这套口子就有 REPL：
 `getMode/setMode`、`blank`、`complete`、`echo`、`asStmt`、`snapshot/restore`、
 `add(text, diags) -> OIR delta`、`full(chunks) -> 整程序 OIR`。
-`omni repl --lang omni|sx` 现在是同一份驱动的两个实例，`tests/repl/` 里两门语言各一份快照。
+`omni repl --lang omni|sx|asy` 现在是同一份驱动的三个实例，`tests/repl/` 里三门语言各一份快照。
 `sx` 那条不是"给 .sx 文件加的功能"，而是 ADR-0014 那条路的落点：语法驱动的前端
 （asy/jancy）印出来的就是核心方言，所以它们的 REPL 落在 `CoreSession` 这一层上，
-增量与回滚不用各写一遍。**asy 自己的 REPL 还没接**：`AsyLower` 每次 run 都发一整份
-`(module …)`（记录、helper、包装函数都在里面），要接上得先让它按批发 delta —— 那是下一刀。
+增量与回滚不用各写一遍。**asy 那条落地时新写的只有"每批只印这一批"**（`AsySession`
++ `AsyLower.chunk`：记录、`(global …)`、helper、数组工厂、包装函数、函数体都只发这一批的），
+跨批可见性靠三样东西：单元 0 的那几张名字表一直活着、顶层项下标接着往下数（`atOff`）、
+文件级那一层作用域跨批留住（`fileScope` —— 数组/pair/记录这些非标量的文件级变量在那里，
+标量走的是 `(global …)`）。`AsyLower.run` 变成 `chunk` 的特例（所有 base 都是 0），
+所以整份文件的输出逐字节没变。asy 的回显包成它自己的 `write(...)`。
+**jancy 还没有 REPL**，而理由不在 REPL 这一层：它连降级器都还没有（只有语法与解析用例）。
 
 REPL 的输入解释规则（`stage0/src/repl.js`）：括号未闭合就续行；表达式单独一行会回显
 （`1 + 2` 打印 `3`），但以 `;`/`}` 收尾、以语句关键字开头、或顶层带赋值/自增的输入算语句，

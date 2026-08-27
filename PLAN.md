@@ -304,8 +304,13 @@ omni/
   新增 `tests/repl/session-sx.in`（第二门语言）与 `tests/repl/incremental.js`——
   后者是结构性判据，钉住"每批新检查的函数个数是常数"（量得 2），O(n²) 与 O(n) 的
   差别就落在这一个数上。时间不作判据：它随机器飘，钉不住。
-- **asy 的 REPL 还没接**（asy 本身是有 REPL 的，所以这条要记着）：`AsyLower` 每次 run
-  都发一整份 `(module …)`（记录、helper、默认实参包装都在里面），接上之前得先让它按批发 delta。
+- **asy 的 REPL 也接上了（同一天，第二刀）**：`omni repl --lang asy`。新写的只有"每批只印
+  这一批"（`AsySession` + `AsyLower.chunk`）；增量与回滚那一半是与 sx 共用的 `CoreSession`。
+  跨批可见性靠三样：单元 0 的名字表一直活着、顶层项下标接着往下数（`atOff`），
+  以及文件级作用域跨批留住（`fileScope`，非标量的文件级变量在那里）。
+  `AsyLower.run` 成了 `chunk` 的特例，所以 `tests/asy` 的 81 项输出逐字节没变。
+  判据：`tests/repl/session-asy.in` 快照 + `incremental.js` 里 asy 那一段（20 批，每批常数 2）。
+  **jancy 还没有 REPL**，理由不在这一层：它连降级器都还没有（只有语法与解析用例）。
 
 **已决定（自举策略，2026-08-25）**：ADR-0001。
 - **语法前端加 JS 并永久可用**，不是自举脚手架；和 GLSL 前端并列，是对"前端/后端分离"

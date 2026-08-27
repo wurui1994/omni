@@ -1,0 +1,19 @@
+// asy 的 REPL（`omni repl --lang asy`）。asy 本身就是有交互式会话的语言，所以这一条不是
+// 附赠品；而它落地时新写的只有"每批只印这一批"（AsySession），增量与回滚那一半是与 sx
+// 共用的（CoreSession）—— 这就是"语法驱动的前端自动有 REPL"这句话的实际含义。
+// 回显包成 asy 自己的 `write(...)`；跨批要看得见前面几批的变量、函数、记录。
+int x = 3;
+write(x);
+x + 4
+int sq(int n) { return n*n; }
+sq(5)
+real[] xs = new real[3];
+xs[0] = 1.5;
+write(xs[0]);
+string s = "ab" + "cd";
+s
+for (int i = 0; i < 3; ++i) write(i*i);
+sq(x) + sq(4)
+zzz
+write(x);
+:list

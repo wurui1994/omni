@@ -651,6 +651,15 @@ class AsyLower {
     // 才声明的名字是 "no matching variable"），所以候选表要按这个下标裁一刀。
     // 自己那条也算可见（`c.at <= this.at`）—— 单函数递归 asy 是允许的。
     this.at = 0;
+    // REPL 的批与批之间，顶层项的下标要**接着往下数**：第 2 批的第 0 句在第 1 批的
+    // 所有声明**之后**，所以 `at` 是 `atOff + i`。不这样做，第 1 批声明的记录/函数
+    // 在第 2 批看起来就成了"声明在后面"，顺序可见性会整批失效。整程序降级时它一直是 0。
+    this.atOff = 0;
+    /** REPL：这个降级器在跑一个**会话**（一批一批来），不是一份文件 */
+    this.sessionRoot = false;
+    /** @type {Map|null} 会话根的文件级作用域：跨批留住（第 1 批的 `real[] xs` 第 2 批还在） */
+    this.fileScope = null;
+
     // 记录（asy 的 struct）：名字 -> {name, fields:[{name,type,def}]}。
     // **asy 的 struct 是引用语义的**（量过：`A b = a; b.x = 7;` 之后 `a.x` 是 7，
     // `void f(A q){q.x=99;} f(a);` 之后 `a.x` 是 99），所以它降成核心方言的 **class**，
@@ -3430,20 +3439,21 @@ class AsyLower {
    */
   declPass(u) {
     const rs = u.rs;
+    const off = this.atOff;
     for (let i = 0; i < rs.length; i++) {
       const r = this.unwrapMod(rs[i]);
       if (!isList(r)) continue;
-      this.at = i;
-      if (head(r) === 'recorddec') this.recordDec(r, i);
-      else if (ASY_MODSTM.has(head(r))) this.modStmt(r, i);
+      this.at = off + i;
+      if (head(r) === 'recorddec') this.recordDec(r, off + i);
+      else if (ASY_MODSTM.has(head(r))) this.modStmt(r, off + i);
     }
     for (let i = 0; i < rs.length; i++) {
       const r = this.unwrapMod(rs[i]);
       if (!isList(r)) continue;
       // 这一遍也要摆好 at：签名里的记录名按**这一句的位置**判可见（recHere）。
-      this.at = i;
-      if (head(r) === 'fundec') this.sig(r, i);
-      else if (head(r) === 'vardec') this.globalNames(r, i);
+      this.at = off + i;
+      if (head(r) === 'fundec') this.sig(r, off + i);
+      else if (head(r) === 'vardec') this.globalNames(r, off + i);
     }
     // 重载的名字在这里定：核心方言没有重载，所以第 2 个及以后的候选要改名。
     // 第一个保留原名 —— 绝大多数函数不重载，输出的文本因此跟以前一样好读。
@@ -3460,6 +3470,7 @@ class AsyLower {
 
   /** 一个单元的正文：方法体、文件级函数体，与"剩下那些语句"（模块是初始化函数，主文件是 main） */
   bodyPass(u, fns) {
+    const off = this.atOff;
     for (const m of u.methodDecls) {
       const text = this.method(m.rec, m.cand, m.at);
       if (text !== null) fns.push(text);
@@ -3473,19 +3484,27 @@ class AsyLower {
     for (let i = 0; i < u.rs.length; i++) {
       const r = this.unwrapMod(u.rs[i]);
       if (!isList(r) || head(r) !== 'fundec') continue;
-      this.at = i;
+      this.at = off + i;
       const f = this.func(r);
       if (f !== null) fns.push(f);
     }
-    this.push();
+    // 文件级那一层作用域：REPL 里要**跨批留住**（第 1 批的 `real[] xs` 第 2 批还看得见）。
+    // 只有会话根有这个待遇：模块单元的文件级作用域随它自己那一遍结束。
+    // 标量的文件级变量走的是另一条路（`(global …)`），这一层管的是数组/pair/记录那些。
+    if (this.sessionRoot && u.id === 0) {
+      if (this.fileScope === null) this.fileScope = new Map();
+      this.scopes.push(this.fileScope);
+    } else {
+      this.push();
+    }
     this.fileLevel = true;
     const main = [];
     for (let i = 0; i < u.rs.length; i++) {
       const r = this.unwrapMod(u.rs[i]);
-      this.at = i;
+      this.at = off + i;
       // 模块声明（第二十五刀）：声明遍已经把名字并进来了，这里发的是**体在那一行跑**
       // 的那一下 —— 初始化函数的调用，位置就是源码里 import 的位置。
-      const calls = u.callAt.get(i);
+      const calls = u.callAt.get(off + i);
       if (calls !== undefined) {
         for (const c of calls) main.push(`(expr (call ${c}))`);
         continue;
@@ -3503,9 +3522,33 @@ class AsyLower {
     return main;
   }
 
-  /** 整个程序 -> 核心方言文本。函数提到模块层，主文件剩下的语句进 (main ...)。 */
-  run(tree) {
-    const root = this.unitNew(tree, this.opts === null ? '' : this.opts.path);
+  /**
+   * 一批顶层项 -> 只含**这一批新增内容**的核心方言文本。
+   * 整份文件（run）是"只有一批"的特例：那时所有的 base 都是 0，输出与从前逐字节一样。
+   *
+   * REPL 的增量在这一层是"发 delta"：记录、`(global …)`、helper、数组工厂、包装函数
+   * 都只发这一批新出来的，函数体也只有这一批的。跨批可见性靠两样东西：单元 0 的那几张
+   * 表（funcs/globals/recVis…）一直活着，以及 `atOff` —— 顶层项的下标接着往下数。
+   */
+  chunk(tree) {
+    const baseUnits = this.units.length;
+    const baseRecords = this.records.size;
+    const baseGdecls = this.gdecls.length;
+    const baseWraps = this.wraps.length;
+    const baseUsed = new Set(this.used);
+    const baseArr = new Set(this.arrGen.keys());
+    let root;
+    if (baseUnits === 0) {
+      root = this.unitNew(tree, this.opts === null ? '' : this.opts.path);
+    } else {
+      // 会话根是同一个单元 0（前缀是空串、名字表一直活着），换掉的只有"这一批的顶层项"。
+      // 方法体与 autounravel 那两张表也清空：上一批的已经发过了，重发就是重复定义。
+      root = this.units[0];
+      root.rs = this.flat(tree, 'block');
+      root.callAt = new Map();
+      root.methodDecls = [];
+      root.auFns = [];
+    }
     this.unitIn(root);
     this.declPass(root);
     // 正文：按加载顺序一个单元一遍（declPass 里的递归加载已经把 units 填全了）。
@@ -3513,6 +3556,7 @@ class AsyLower {
     const fns = [];
     let main = [];
     for (const u of this.units) {
+      if (u.id !== 0 && u.id < baseUnits) continue;   // 前面几批加载过的模块不重发
       const prev = this.unitIn(u);
       const stmts = this.bodyPass(u, fns);
       if (u.id === 0) main = stmts;
@@ -3521,29 +3565,46 @@ class AsyLower {
     }
     const out = ['(module'];
     // 记录按**声明顺序**发（字段里不许再有记录，所以这就是最终顺序）
+    let ri = 0;
     for (const rec of this.records.values()) {
+      if (ri++ < baseRecords) continue;
       const fs = [];
       for (const f of rec.fields) fs.push(`(${f.name} ${asyCore(f.type)})`);
       out.push(`  (class ${rec.name} ${fs.join(' ')})`);
     }
     // 模块跑过了没有（第二十五刀）：`import m; import m;` 只跑一遍体，量过
-    for (const u of this.units) if (u.ran !== null) out.push(`  (global ${u.ran} bool)`);
+    for (const u of this.units) {
+      if (u.id < baseUnits || u.ran === null) continue;
+      out.push(`  (global ${u.ran} bool)`);
+    }
     // 文件级变量（第二十四刀）：按声明顺序的一批 `(global …)`。零初始化，
     // 真正的初值是 `(main …)` 里那一句 `(set …)` —— 位置就是源码里的位置，
     // 所以「初值在那一行求」这条 asy 语义是照搬的，不是模拟的。
-    for (const g of this.gdecls) out.push(`  (global ${g.sym} ${asyCore(g.type)})`);
+    for (let i = baseGdecls; i < this.gdecls.length; i++) {
+      const g = this.gdecls[i];
+      out.push(`  (global ${g.sym} ${asyCore(g.type)})`);
+    }
     for (const [hnm, text] of HELPERS) {
-      if (this.used.has(hnm)) out.push(text);
+      if (this.used.has(hnm) && !baseUsed.has(hnm)) out.push(text);
     }
     // 元素是记录的数组 helper：正文是降级过程中按同一个工厂生成的，顺序按第一次用到
-    for (const text of this.arrGen.values()) out.push(text);
+    for (const [akey, text] of this.arrGen) {
+      if (!baseArr.has(akey)) out.push(text);
+    }
     for (const f of fns) out.push(f);
     // 默认实参的包装：正文是降级过程中生成的，所以只能在这里发（顺序按第一次用到）
-    for (const w of this.wraps) out.push(w);
+    for (let i = baseWraps; i < this.wraps.length; i++) out.push(this.wraps[i]);
     const body = [];
     for (const s of main) body.push(`    ${s}`);
     out.push(`  (main${body.length === 0 ? '' : `\n${body.join('\n')}`}))`);
+    // 下一批的顶层项从这一批之后接着数
+    this.atOff = this.atOff + root.rs.length;
     return out.join('\n') + '\n';
+  }
+
+  /** 整个程序 -> 核心方言文本。函数提到模块层，主文件剩下的语句进 (main ...)。 */
+  run(tree) {
+    return this.chunk(tree);
   }
 
   /**
@@ -3569,4 +3630,93 @@ class AsyLower {
  */
 export function lowerAsy(tree, diags, opts) {
   return new AsyLower(diags, opts).run(tree);
+}
+
+/** 重载候选表的浅拷贝：值是数组，所以每一组也要拷一份 */
+function copyAsyFuncs(m) {
+  const out = new Map();
+  for (const [k, list] of m) out.set(k, [...list]);
+  return out;
+}
+
+/**
+ * asy 的增量会话（REPL）。
+ *
+ * 只管前半段：一批语法树 -> 只含这一批新增内容的核心方言文本。后半段（方言 -> OIR 的
+ * 增量、跨批可见性、失败回滚）在 sexpr/lower.js 的 CoreSession 上，那一层是所有语法驱动
+ * 前端共用的 —— 这就是"新语言从语法来"这条路上 REPL 不用各写一遍的地方。
+ *
+ * 失败要能回到上一批成功的样子：这一层的改动都是"往表里加"，所以复原容器就够
+ * （单元 0 的那几张表 + 模块级的记录/全局/helper/包装）。
+ */
+export class AsySession {
+  constructor(opts) {
+    this.lw = new AsyLower(null, opts);
+    this.lw.sessionRoot = true;
+  }
+
+  snapshot() {
+    const l = this.lw;
+    const u = l.units.length === 0 ? null : l.units[0];
+    return {
+      units: [...l.units],
+      u0: u === null ? null : {
+        u: u,
+        funcs: copyAsyFuncs(u.funcs), globals: new Map(u.globals), recVis: new Map(u.recVis),
+        mods: new Map(u.mods), oinits: new Map(u.oinits), oiByNode: new Map(u.oiByNode),
+        casts: new Map(u.casts), castByNode: new Map(u.castByNode), at: u.at,
+      },
+      records: new Map(l.records), recInits: new Map(l.recInits), byKey: new Map(l.byKey),
+      gdecls: [...l.gdecls], wraps: [...l.wraps], wrapNames: new Map(l.wrapNames),
+      used: new Set(l.used), arrGen: new Map(l.arrGen),
+      castNo: l.castNo, tmp: l.tmp, atOff: l.atOff,
+    };
+  }
+
+  restore(s) {
+    const l = this.lw;
+    l.units = s.units;
+    l.records = s.records;
+    l.recInits = s.recInits;
+    l.byKey = s.byKey;
+    l.gdecls = s.gdecls;
+    l.wraps = s.wraps;
+    l.wrapNames = s.wrapNames;
+    l.used = s.used;
+    l.arrGen = s.arrGen;
+    l.castNo = s.castNo;
+    l.tmp = s.tmp;
+    l.atOff = s.atOff;
+    if (s.u0 === null) {
+      l.unit = null;
+      return;
+    }
+    const u = s.u0.u;
+    u.funcs = s.u0.funcs;
+    u.globals = s.u0.globals;
+    u.recVis = s.u0.recVis;
+    u.mods = s.u0.mods;
+    u.oinits = s.u0.oinits;
+    u.oiByNode = s.u0.oiByNode;
+    u.casts = s.u0.casts;
+    u.castByNode = s.u0.castByNode;
+    u.at = s.u0.at;
+    // 当前那几张表是单元里那几张的别名（见 unitIn），所以两边都要摆回去
+    l.unit = u;
+    l.funcs = u.funcs;
+    l.globals = u.globals;
+    l.recVis = u.recVis;
+    l.mods = u.mods;
+    l.oinits = u.oinits;
+    l.oiByNode = u.oiByNode;
+    l.casts = u.casts;
+    l.castByNode = u.castByNode;
+    l.at = u.at;
+  }
+
+  /** 一批语法树 -> 这一批的核心方言文本 */
+  add(tree, diags) {
+    this.lw.diags = diags;
+    return this.lw.chunk(tree);
+  }
 }

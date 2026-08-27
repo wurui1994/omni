@@ -34,6 +34,7 @@ import { emitC } from './backend-c/emit.js';
 import { loadProgram, newLoadState } from './module/load.js';
 import { check, CheckSession } from './hir/check.js';
 import { lowerCoreSession, CoreSession } from './sexpr/lower.js';
+import { lowerAsy, AsySession } from './frontend-asy/lower.js';
 import { InterpSession } from './interp/eval.js';
 
 const PROMPT = 'omni> ';
@@ -242,20 +243,142 @@ class CoreLang {
   }
 }
 
+/**
+ * asy 那条腿。前半段是 asy 自己的（语法表解析 + 降成核心方言），后半段与 `sx` **同一份**
+ * （CoreSession：方言 -> OIR 的增量、跨批可见性、失败回滚）。asy 本身是有 REPL 的，
+ * 所以这一条不是附赠品；而它落地时唯一新写的东西是"每批只印这一批"（AsySession），
+ * 增量的那一半没有第二份实现。
+ *
+ * 语法零件由 cli.js 注入（`deps.asy()`）：文件 IO 与表加载归它，这边只拿解析好的东西。
+ */
+class AsyLang {
+  constructor(deps) {
+    this.name = 'asy';
+    if (deps === undefined || deps.asy === undefined) {
+      throw new OmniError('omni: repl --lang asy 需要 asy 的语法零件（由 cli 注入）');
+    }
+    this.fe = deps.asy();
+    this.as = new AsySession({ path: '<repl>', load: null, builtins: this.fe.builtins });
+    this.cs = new CoreSession();
+  }
+
+  // asy 的类型都写在源码里，没有"缺省注解怎么办"这回事
+  getMode() { return 'static'; }
+
+  setMode(m) { throw new OmniError('omni: asy has no type modes to switch'); }
+
+  prelude() { return null; }
+
+  blank(text) {
+    return text.replace(/\/\/[^\n]*/g, '').trim() === '';
+  }
+
+  complete(text) { return asyBalanced(text); }
+
+  /** asy 里"打印一个值"是 `write(...)`，所以回显就是包成它 */
+  echo(text) { return asyLooksLikeExpr(text) ? `write(${text});` : null; }
+
+  echoOptional(text) { return text.trim().endsWith(')'); }
+
+  asStmt(text) { return /[;}]$/.test(text.trim()) ? text : `${text};`; }
+
+  snapshot() { return { as: this.as.snapshot(), cs: this.cs.snapshot() }; }
+
+  restore(s) {
+    this.as.restore(s.as);
+    this.cs.restore(s.cs);
+  }
+
+  add(text, diags) {
+    const tree = this.fe.parseText('<repl>', `${text}\n`, diags);
+    diags.throwIfErrors();
+    const sx = this.as.add(tree, diags);
+    diags.throwIfErrors();
+    const delta = this.cs.add(sx, diags);
+    diags.throwIfErrors();
+    return delta;
+  }
+
+  full(chunks) {
+    const diags = new Diagnostics();
+    const text = `${chunks.join('\n')}\n`;
+    const tree = this.fe.parseText('<repl>', text, diags);
+    diags.throwIfErrors();
+    const sx = lowerAsy(tree, diags, { path: '<repl>', load: null, builtins: this.fe.builtins });
+    diags.throwIfErrors();
+    const mod = lowerCoreSession(sx, diags);
+    diags.throwIfErrors();
+    return mod;
+  }
+}
+
+/** 括号平衡（字符串与注释里的不算）。asy 与核心方言的续行判断都用它，只是括号集不同。 */
+function asyBalanced(text) {
+  let depth = 0;
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === '"' || c === "'") {
+      const q = c;
+      i++;
+      while (i < text.length && text[i] !== q) {
+        if (text[i] === '\\') i++;
+        i++;
+      }
+      i++;
+      continue;
+    }
+    if (c === '/' && text[i + 1] === '/') {
+      while (i < text.length && text[i] !== '\n') i++;
+      continue;
+    }
+    if (c === '/' && text[i + 1] === '*') {
+      i += 2;
+      while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) i++;
+      i += 2;
+      continue;
+    }
+    if (c === '(' || c === '[' || c === '{') depth++;
+    else if (c === ')' || c === ']' || c === '}') depth--;
+    i++;
+  }
+  return depth <= 0;
+}
+
+/** 要不要回显。与 Omni 那条同一套判据，只是不借词法器（asy 的词法表在 cli 那边）。 */
+function asyLooksLikeExpr(text) {
+  const t = text.trim();
+  if (!t || /[;}]$/.test(t)) return false;
+  if (/^(if|else|while|for|do|return|break|continue|struct|typedef|import|access|include|from|void|new)\b/.test(t)) return false;
+  // 顶层的赋值/自增算语句（`x = 5`、`i++` 不回显，和 Python 一致）
+  const bare = t.replace(/"[^"]*"/g, '""').replace(/'[^']*'/g, "''");
+  if (/(\+\+|--)/.test(bare)) return false;
+  let depth = 0;
+  for (let i = 0; i < bare.length; i++) {
+    const c = bare[i];
+    if (c === '(' || c === '[' || c === '{') depth++;
+    else if (c === ')' || c === ']' || c === '}') depth--;
+    else if (depth === 0 && c === '=' && bare[i + 1] !== '=' && '=!<>+-*/%'.indexOf(bare[i - 1] ?? ' ') < 0) return false;
+  }
+  return true;
+}
+
 /** `--lang` -> 语言模块。加一门语言就是加一行（前提是它能印出核心方言）。 */
-function replLang(name, mode) {
+function replLang(name, mode, deps) {
   if (name === 'omni') return new OmniLang(mode);
   if (name === 'sx') return new CoreLang();
-  throw new OmniError(`omni: repl: unknown language '${name}' (have: omni, sx)`);
+  if (name === 'asy') return new AsyLang(deps);
+  throw new OmniError(`omni: repl: unknown language '${name}' (have: omni, sx, asy)`);
 }
 
 /**
  * 会话驱动。与语言无关：它只知道"编译一批、装进运行期、跑这一批的入口"。
  */
 class Session {
-  constructor(langName, mode) {
+  constructor(langName, mode, deps) {
     this.langName = langName;
     this.mode = mode;
+    this.deps = deps;
     this.lang = null;
     this.rt = null;
     /** @type {string[]} 已接受的源码块，按输入顺序（只为 `:list` 与 `:js`/`:c` 而留） */
@@ -265,7 +388,7 @@ class Session {
 
   /** 开一份干净的会话状态。`:reset` 就是再开一份 —— 没有"要清哪些表"的清单要维护。 */
   boot() {
-    this.lang = replLang(this.langName, this.mode);
+    this.lang = replLang(this.langName, this.mode, this.deps);
     this.rt = new InterpSession();
     this.chunks = [];
     const pre = this.lang.prelude();
@@ -406,9 +529,10 @@ function command(s, line) {
 /**
  * @param {string} mode 缺省类型注解的处理方式（ADR-0008）
  * @param {string} [lang] 语言（`--lang`）；默认 omni
+ * @param {any} [deps] 需要文件 IO / 语法表的那些零件，由 cli.js 注入（asy 用）
  */
-export function startRepl(mode, lang = 'omni') {
-  const s = new Session(lang, mode);
+export function startRepl(mode, lang = 'omni', deps = undefined) {
+  const s = new Session(lang, mode, deps);
   const tty = stdinIsTty();
   let buf = '';
 

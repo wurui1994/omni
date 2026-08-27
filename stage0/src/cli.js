@@ -112,44 +112,49 @@ function compile(path, argv = []) {
 }
 
 /**
- * asymptote -> 核心方言 -> OIR（ADR-0014 第 2 道门槛）。
- * 语法那一半是数据（`frontend-asy/asy.grammar`，从 camp.y 照原样转写）；这里只做
- * 类型定向的那一半，出来的仍然是核心方言文本 —— 于是六条腿一条都不知道 asy 存在。
- *
- * 模块（第二十五刀）：文件 IO 与语法表留在这里，降级器只拿一个 `load(名字)`。
- * 找法是量出来的 —— asy 是按**当前目录**找的，不是按引它的那个文件所在的目录
- * （量过：`asy -noV sub/user.asy` 里的 `import mm;` 找不到 sub/mm.asy）。
+ * asy 前端的零件：语法表 + 词法 + 内建绑定表。**文件 IO 与表加载都在这里**，
+ * 降级器只拿解析好的东西 —— 整份文件的编译（asyText）与 REPL（repl.js 的 AsyLang）
+ * 共用这一份，所以"从哪里找模块"这类规则不会有两份实现。
  */
-function asyText(path) {
+function asyFrontEnd() {
   const gpath = join(installDir(), '..', 'frontend-asy', 'asy.grammar');
   if (!exists(gpath)) throw new OmniError(`找不到 asy 语法文件：${gpath}`);
   const tb = loadGrammar(gpath);
-  const diags = new Diagnostics();
-  const parse = (p) => {
-    const toks = lexText(tb.grammar.lex, new SourceFile(p, readText(p)), diags);
-    diags.throwIfErrors();
-    const t = glrParse(tb, toks, diags);
-    diags.throwIfErrors();
-    return t;
-  };
-  const load = (name) => {
-    const p = join(cwd(), `${name}.asy`);
-    if (!exists(p)) return null;
-    vStep(`asy module    ${name} -> ${p}`);
-    return parse(p);
-  };
-  const toks = lexText(tb.grammar.lex, new SourceFile(path, readText(path)), diags);
-  diags.throwIfErrors();
-  vStep(`asy lexer      ${path} -> ${toks.length} tokens`);
-  const tree = glrParse(tb, toks, diags);
-  diags.throwIfErrors();
-  // 内建函数的绑定表是**数据**，跟语法表一个路子：文件 IO 在这里，降级器只拿解析好的表。
-  // 数学不是 asy 的语法（asy 自己那边也是 builtin.cc 里一张表）。
+  // 内建函数的绑定表是**数据**，跟语法表一个路子。数学不是 asy 的语法
+  //（asy 自己那边也是 builtin.cc 里一张表）。
   const btab = join(installDir(), '..', 'frontend-asy', 'builtins.tab');
   if (!exists(btab)) throw new OmniError(`找不到 asy 内建绑定表：${btab}`);
   const builtins = parseAsyBuiltins(readText(btab));
   vStep(`asy builtins   ${builtins.size} 条绑定`);
-  const text = lowerAsy(tree, diags, { path, load, builtins });
+  const parseText = (p, text, diags) => {
+    const toks = lexText(tb.grammar.lex, new SourceFile(p, text), diags);
+    diags.throwIfErrors();
+    vStep(`asy lexer      ${p} -> ${toks.length} tokens`);
+    const t = glrParse(tb, toks, diags);
+    diags.throwIfErrors();
+    return t;
+  };
+  // 模块的找法是量出来的 —— asy 按**当前目录**找，不是按引它的那个文件所在的目录
+  // （量过：`asy -noV sub/user.asy` 里的 `import mm;` 找不到 sub/mm.asy）。
+  const loader = (diags) => (name) => {
+    const p = join(cwd(), `${name}.asy`);
+    if (!exists(p)) return null;
+    vStep(`asy module    ${name} -> ${p}`);
+    return parseText(p, readText(p), diags);
+  };
+  return { parseText: parseText, loader: loader, builtins: builtins };
+}
+
+/**
+ * asymptote -> 核心方言 -> OIR（ADR-0014 第 2 道门槛）。
+ * 语法那一半是数据（`frontend-asy/asy.grammar`，从 camp.y 照原样转写）；这里只做
+ * 类型定向的那一半，出来的仍然是核心方言文本 —— 于是六条腿一条都不知道 asy 存在。
+ */
+function asyText(path) {
+  const fe = asyFrontEnd();
+  const diags = new Diagnostics();
+  const tree = fe.parseText(path, readText(path), diags);
+  const text = lowerAsy(tree, diags, { path, load: fe.loader(diags), builtins: fe.builtins });
   diags.throwIfErrors();
   vStep(`asy front end  ${path} -> 核心方言 ${text.length} bytes`);
   return text;
@@ -459,10 +464,11 @@ function main(argv) {
     return 0;
   }
   // repl 没有源文件；默认模式是 ADR-0008 第 3 节的 dynamic（沿革见 repl.js 文件头）。
-  // `--lang` 选前端：驱动是与语言无关的，omni 走检查器的增量会话，sx 走核心方言的增量会话。
+  // `--lang` 选前端：驱动是与语言无关的，omni 走检查器的增量会话，sx/asy 走核心方言的。
+  // asy 要语法表与内建绑定表，那是文件 IO，所以由这里注入（repl.js 不碰盘）。
   if (cmd === 'repl') {
     const li = rest.indexOf('--lang');
-    return startRepl(modeFor('', rest, 'dynamic'), li >= 0 ? rest[li + 1] : 'omni');
+    return startRepl(modeFor('', rest, 'dynamic'), li >= 0 ? rest[li + 1] : 'omni', { asy: asyFrontEnd });
   }
   // 自举也没有源文件参数（默认就是编译器自己）。整条链与四条门槛见 bootstrap.js
   if (cmd === 'bootstrap') {
