@@ -533,6 +533,15 @@ class CoreLowerer {
     }
     // 宿主面只有 print 一条，和 WAT 前端同一条理由：格式、换行、四个执行器之间的
     // 一致性全是现成的，不必为新方言再造一份
+    // `(fail E)`：运行期错误，六条腿都是"印 omni: runtime error: 消息、退 70"（OIR 里
+    // 就是 Omni 的 fail，所以这一条没有给任何后端加新东西）。方言需要它是因为被降级的
+    // 语言有**自己的**运行期错误 —— 比如 asy 的 angle((0,0))：那不是"还没做"，是照搬。
+    if (h === 'fail') {
+      const v = this.expr(n.items[1]);
+      if (v === null) return null;
+      if (v.type !== STRING) return this.err(n, `(fail E) 的实参要是 string，这里是 ${coreTypeText(v.type)}`);
+      return { kind: 'ExprStmt', expr: { kind: 'Builtin', name: 'fail', args: [v], type: VOID, argType: STRING } };
+    }
     if (h === 'print') {
       const v = this.expr(n.items[1]);
       if (v === null) return null;

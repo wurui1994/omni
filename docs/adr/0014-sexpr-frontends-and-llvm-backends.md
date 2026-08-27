@@ -105,6 +105,12 @@ WAT 前端证的是「s-expr 能当前端汇聚点」，但它降的是**别人�
   条件位置同理 —— 必须是 `bool`，不做真值化。`tests/sexpr/bad/` 逐条钉住这些。
 - **算符写成字符串**（`(bin "+" a b)`），不是每个算符一个节点。这样映射模板里可以直接
   `(bin $2 $1 $3)` 把源码里的算符原样搬过来，语法文件里不需要 switch。
+- **`(fail E)`（2026-08-27 加的）**：运行期错误，实参是 string。加它的理由不是"方言缺个
+  异常"，而是被降级的语言**自己有**运行期错误，而那些错误必须照搬而不是省掉 —— 第一个
+  用户是 asy 的 `angle((0,0))`（量过：真 asy 报 "taking angle of (0,0)" 并非零退出，
+  而 `angle(z,false)` 给 0；libm 的 `atan2(0,0)` 是 0 不报错，所以这一刀必须在 atan2 之前）。
+  OIR 里它就是 Omni 的 `fail`，所以五条腿里四条一行没改；LLVM 那条补了一行 `RT_OPS`
+  （`omni_fail` 本来就是运行库的真符号，C 那条腿一直在用）。
 
 配套加了 `$*k` **摊平洞**（`glr/driver.js` 的 `applyTemplate`）：`$k` 把第 k 个子节点
 整个塞进去，`$*k` 把它的元素摊开。语句序列、形参表、实参表都要攒成平列表，没有它
@@ -277,8 +283,8 @@ bison **隐式**的选择写成**显式**的优先级声明 —— 悬垂 else�
    —— 每一条都在
    `tests/asy/bad/` 里有一份带 `ASY_NOPE` 的用例钉着，不是含糊的"待办"。
    超越函数（exp/log/trig）是**另一回事**：不是没做，是量过 libm 与 V8 在最后一位就分叉，
-   收进来这条轴必然有一天变红，所以按边界拒掉（`tests/asy/bad/sin.asy`；pair 上的
-   `angle`/`dir`/`expi` 同理，见下面 pair 那一节）。
+   所以它们走 `rmath` 转手宿主、用例落在 `tests/asy/tol/` 而不是逐字节那一节；
+   pair 上的 `angle`/`unit`/`dir`/`expi` 同一条路（`tol/pair`，见下面 pair 那一节）。
 3. **绘图层**：path/guide 的 Bezier（含 tension / 方向求解）、pen、transform、
    picture 的延迟绘制、EPS 输出。「执行全部 asy 模块」的大头在这里。**还没做。**
 4. **jancy 核心语法与执行** —— 语法已经有（下一节），执行**还没做**；而且要先有一份
@@ -726,7 +732,8 @@ with parameters 'int, int'"。我们是两遍降级（先收签名再降体）�
 **pair 就是核心方言的 `(vec real 2)`**，没有为它加类型。第 0 道是 x，第 1 道是 y ——
 向量的 `+ -` 本来就是逐道的，`(vlit …)` 是"造一个"，`(lane …)` 是"取一个分量"，
 正好对上 pair 的构造与 `.x`/`.y`。剩下的是 **asy 的语义**、不是"向量"的语义，落在这一层的
-七条 helper 里（`asy__pmul` / `pdiv` / `pabs` / `pconj` / `pneg` / `peq` / `pairstr`），
+七条 helper 里（`asy__pmul` / `pdiv` / `pabs` / `pconj` / `pneg` / `peq` / `pairstr`，
+后来又加了四条：`pangle` / `punit` / `pexpi` / `pdir`），
 六条腿共用同一份文本，所以不会分叉。代价写在明处：`pair[]` 没有（`(arr T)` 的元素只收标量）。
 
 **每条语义都是量出来的，而且推翻了两个想当然**：
@@ -742,9 +749,17 @@ with parameters 'int, int'"。我们是两遍降级（先收签名再降体）�
 - `write` 的 T 也跟着这条隐式转换走：`write(3,(1,2))` 印的是 `(3,0)⇥(1,2)`。
 - `realpart`/`imagpart` **asy 自己就没有**（"no matching variable 'realpart'"），所以这里
   也没有 —— 补上就是比 asy 多接受一门语言。取分量只有 `z.x`/`z.y`/`xpart`/`ypart`。
-- `unit` **能**用 sqrt 加除法写出来，但量不出 asy 用的是"乘倒数"还是"逐分量除"：
-  两者在 `%.15g` 底下印得一样（找到的分叉点 `unit((758,188))` 也只差最后一位，印出来仍相同）。
-  所以宁可不收也不猜 —— 猜错了，这条轴不会红，但"等价"是假的。
+- `angle`/`unit`/`dir`/`expi` 这一族（2026-08-27 收进来）：先前它们在门外，理由是
+  「量不出 `unit` 用的是乘倒数还是逐分量除」。真正的出路不是继续猜，而是**换判据** ——
+  超越函数改成转手宿主数学库之后，这一族的用例落在 `tol/`（`tol/pair`，16 行与真 asy
+  逐字节相同），而 `unit` 的那道分叉本来就在 `%.15g` 底下印不出来。量出来的形状：
+  `unit` 是**逐分量除以朴素 `abs`**（`unit((1e200,1e200))` 因此是 `(nan,nan)`，
+  不是 hypot 的 `(0.707…,0.707…)`）、`unit((0,0))` 是 `(0,0)`（不报错）、
+  `expi(t)` 是 `(cos t, sin t)`、`dir(deg)` 是 `expi(deg*pi/180)`（所以 `dir(45)`
+  两个分量不对称：…548 与 …547）、`dir(pair)` 就是 `unit`。
+- `angle((0,0))` 是**运行期错误** "taking angle of (0,0)"，而 `angle(z,false)` 给 0。
+  libm 的 `atan2(0,0)` 是 0 不报错，所以这一刀必须在 atan2 之前 —— 它是核心方言
+  `(fail E)` 的第一个用户。原来那份 `bad/pair-angle` 因此退役。
 
 顺带被自举链抓到一条封闭 ABI 规矩：模块级的名字**全局唯一**。新写的 `opText` 与
 `mir/print.js` 里同名的那个撞了，`C1 = C0 emit-js` 当场红，改成 `asyOpText`。

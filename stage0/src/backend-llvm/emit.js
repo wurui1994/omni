@@ -80,6 +80,11 @@ const RT_OPS = new Map([
   ['print.real', { sym: 'omni_print_real', ret: 'void', params: ['double'] }],
   ['print.bool', { sym: 'omni_print_bool', ret: 'void', params: ['i1 zeroext'] }],
   ['print.string', { sym: 'omni_print_string', ret: 'void', params: ['[2 x i64]'] }],
+  // `fail`：运行期错误。这条腿原先没有它 —— 补的理由是核心方言现在有 `(fail E)`
+  // （被降级的语言有自己的运行期错误，比如 asy 的 angle((0,0)) 就是照搬来的），
+  // 而 `omni_fail` 本来就是运行库里的真符号（omni.h），C 那条腿一直在用。
+  // 这里不标 noreturn：调用点后面还跟着这一块的收尾指令，标了要另改一处控制流。
+  ['fail.string', { sym: 'omni_fail', ret: 'void', params: ['[2 x i64]'] }],
   ['trunc', { sym: 'omni_trunc', ret: 'i64', params: ['double'] }],
   // 同一件事的两个名字：WAT 前端发的是 `trunc`，Omni 前端按接收者单态化成 `trunc.real`
   ['trunc.real', { sym: 'omni_trunc', ret: 'i64', params: ['double'] }],

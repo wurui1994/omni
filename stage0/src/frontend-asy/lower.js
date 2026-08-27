@@ -370,7 +370,7 @@ const ZERO = new Map([
  * `realpart`/`imagpart` **asy 自己就没有**（量过："no matching variable 'realpart'"），
  * 所以这里也没有 —— 补上就是比 asy 多接受一门语言。
  */
-const ASY_PAIRFN = new Set(['conj', 'xpart', 'ypart']);
+const ASY_PAIRFN = new Set(['conj', 'xpart', 'ypart', 'angle', 'unit', 'dir', 'expi']);
 
 /**
  * 字符串上的内建函数。`params` 是每个实参要的类型，`min` 是最少给几个 ——
@@ -483,6 +483,31 @@ const HELPERS = new Map([
     (ret (rmath "sqrt" (bin "+" (bin "*" (lane (var a) 0) (lane (var a) 0)) (bin "*" (lane (var a) 1) (lane (var a) 1))))))`],
   ['asy__pconj', `  (fn asy__pconj ((a ${ASY_PAIR_TY})) ${ASY_PAIR_TY}
     (ret (vlit ${ASY_PAIR_TY} (lane (var a) 0) (un "-" (lane (var a) 1)))))`],
+  // 下面这四个都要超越函数。它们能落地是因为 rmath 的白名单已经是"宿主数学库的交集"
+  // （atan2/cos/sin 都在里面），所以这里没有自己写的实现，只有 asy 那几行的形状。
+  ['asy__pangle', `  (fn asy__pangle ((a ${ASY_PAIR_TY}) (warn bool)) real
+    ;; angle((0,0)) 在 asy 是**运行期错误** "taking angle of (0,0)"，而 angle(z,false) 给 0
+    ;; （两条都量过）。所以零点这一问必须在 atan2 之前 —— libm 的 atan2(0,0) 是 0，不报错。
+    (if (bin "&&" (bin "==" (lane (var a) 0) (real 0.0)) (bin "==" (lane (var a) 1) (real 0.0)))
+      (do
+        (if (var warn) (do (fail (str "taking angle of (0,0)"))))
+        (ret (real 0.0))))
+    (ret (rmath "atan2" (lane (var a) 1) (lane (var a) 0))))`],
+  ['asy__punit', `  (fn asy__punit ((a ${ASY_PAIR_TY})) ${ASY_PAIR_TY}
+    ;; z / abs(z)，逐分量除。零点要挡一刀：量过 unit((0,0)) 是 (0,0) 而不是 (nan,nan)。
+    ;; abs 是朴素那一份（见 asy__pabs），所以 unit((1e200,1e200)) 是 (0,0) —— 量过，一致。
+    (let r real (call asy__pabs (var a)))
+    (if (bin "==" (var r) (real 0.0)) (do (ret (var a))))
+    (ret (vlit ${ASY_PAIR_TY} (bin "/" (lane (var a) 0) (var r)) (bin "/" (lane (var a) 1) (var r)))))`],
+  ['asy__pexpi', `  (fn asy__pexpi ((t real)) ${ASY_PAIR_TY}
+    ;; expi(t) = (cos t, sin t)。量过 expi(0.5) = (0.877582561890373,0.479425538604203)，
+    ;; 与宿主的 cos/sin 一致 —— 两个分量各自舍入，不是"先算一个再推另一个"。
+    (ret (vlit ${ASY_PAIR_TY} (rmath "cos" (var t)) (rmath "sin" (var t)))))`],
+  ['asy__pdir', `  (fn asy__pdir ((d real)) ${ASY_PAIR_TY}
+    ;; dir(度) = expi(radians(度))，radians 就是 deg*pi/180（照 asy 的源码顺序写，
+    ;; 乘除的次序是浮点结果的一部分）。量过 dir(45) 的两个分量是 ...548 / ...547：
+    ;; 不对称，正是 cos 与 sin 各自舍入的样子。
+    (ret (call asy__pexpi (bin "/" (bin "*" (var d) (real 3.14159265358979311600)) (real 180.0)))))`],
   ['asy__pneg', `  (fn asy__pneg ((a ${ASY_PAIR_TY})) ${ASY_PAIR_TY}
     ;; 逐分量取负。刻意不写成 (0,0) - a：那样 -0.0 会变成 0.0，而 asy 是 pair(-x,-y)。
     (ret (vlit ${ASY_PAIR_TY} (un "-" (lane (var a) 0)) (un "-" (lane (var a) 1)))))`],
@@ -1357,13 +1382,50 @@ class AsyLower {
   pairCall(n, nm) {
     const args = this.args(n.items[2]);
     if (args === null) return null;
+    // dir/expi 收的是**实数**（度 / 弧度），不是 pair —— dir 另有一个 pair 重载（= unit）
+    if (nm === 'dir' || nm === 'expi') {
+      if (args.length !== 1) return this.err(n, `'${nm}' 要 1 个实参，给了 ${args.length} 个`);
+      const v0 = this.expr(args[0]);
+      if (v0 === null) return null;
+      if (nm === 'dir' && v0.type === 'pair') return this.unitOf(v0);
+      const r = this.coerce(v0, 'real', args[0], `'${nm}' 的实参`);
+      if (r === null) return null;
+      this.used.add('asy__pexpi');
+      if (nm === 'expi') return { code: `(call asy__pexpi ${r.code})`, type: 'pair' };
+      this.used.add('asy__pdir');
+      return { code: `(call asy__pdir ${r.code})`, type: 'pair' };
+    }
+    // angle(z) / angle(z, warn)：第二个实参量过是 bool，默认 true
+    if (nm === 'angle') {
+      if (args.length < 1 || args.length > 2) {
+        return this.err(n, `'angle' 要 1 或 2 个实参，给了 ${args.length} 个`);
+      }
+      const z = this.coerce(this.expr(args[0]), 'pair', args[0], "'angle' 的实参");
+      if (z === null) return null;
+      let warn = '(bool true)';
+      if (args.length === 2) {
+        const w = this.coerce(this.expr(args[1]), 'bool', args[1], "'angle' 的 warn");
+        if (w === null) return null;
+        warn = w.code;
+      }
+      this.used.add('asy__pangle');
+      return { code: `(call asy__pangle ${z.code} ${warn})`, type: 'real' };
+    }
     if (args.length !== 1) return this.err(n, `'${nm}' 要 1 个实参，给了 ${args.length} 个`);
     const v = this.coerce(this.expr(args[0]), 'pair', args[0], `'${nm}' 的实参`);
     if (v === null) return null;
     if (nm === 'xpart') return { code: `(lane ${v.code} 0)`, type: 'real' };
     if (nm === 'ypart') return { code: `(lane ${v.code} 1)`, type: 'real' };
+    if (nm === 'unit') return this.unitOf(v);
     this.used.add('asy__pconj');
     return { code: `(call asy__pconj ${v.code})`, type: 'pair' };
+  }
+
+  /** unit(z)：`dir(pair)` 也走它（量过两者同值） */
+  unitOf(v) {
+    this.used.add('asy__pabs');
+    this.used.add('asy__punit');
+    return { code: `(call asy__punit ${v.code})`, type: 'pair' };
   }
 
   /* ----------------------------------------------------------------- 字符串 */
