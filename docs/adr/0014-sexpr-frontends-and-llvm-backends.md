@@ -2251,6 +2251,62 @@ overload-value-init` 钉着。
 "未声明的变量" 14 -> 20、picture 缺字段 12 -> 16）。这已经是同一条规矩的第四次出现，
 所以**这条尺子从此只看分桶，不看总数**。
 
+### 剩下的桶大半够不着：picture 是 base 的，不是内建面的
+
+补完匿名函数之后重新分桶，`import graph;` 的 189 条里最大的几个是：认不出的类型 76
+（`Label` 35、`interpolate` 12、`ticks` 10、`scaleT` 9、`bool3` 3、`autoscaleT` 3、
+`arrowbar` 2、`scalefcn` 1、`align` 1）、缺的内建函数 28（`abort` 7、`format` 3、
+`tridiagonal` 2、`times` 2，其余都是单条）、未声明的变量 20（`infinity` 5、`right` 3、
+`left` 3、`realEpsilon` 2…）、`picture` 缺字段 16（全是 `scale`）加缺方法 4。
+
+`picture` 那 20 条看着像"内建面再补一批字段"就能过，**不是**：`struct picture` 声明在
+`plain_picture.asy:203`，它是 **base 的**，我们那份只是文件头标着「**垫的**」的临时替身。
+往替身上长字段就是抄 base，那条线一开始就划掉了。同理 `Label` / `ticks` / `scaleT` /
+`interpolate` / `autoscaleT` / `arrowbar` 全是 base 自己的 struct。
+
+所以这条尺子已经到顶了：`import graph;` 再往下走要先让 **plain 装得进来**。而 plain 现在
+正好剩三条（`import plain;` 一句下去就这三条诊断，不多不少）：
+
+- `plain_paths.asy:3`：`using interpolate=guide(... guide[]);` —— 函数类型里的变长形参
+- `plain_filldraw.asy:93`：struct 体里的 `using` + 静态字段 + `fill2 fill2;`（类型名与
+  字段名同名，asy 两个命名空间）。**匿名函数这一刀补完之后**，这个 struct 里
+  `new void(frame f, path[] g, pen fillpen){…}` 那几处已经不是障碍了
+- `plain_strings.asy:260`：`from collections.map(K=string,V=string) access …` —— 模板模块
+
+### 下一刀之前先量清：static 字段就是"名字挂在 struct 上的文件级变量"
+
+`plain_filldraw.asy` 的 filltype 里有五个 `static int Fill=1;`，`three.asy` 的
+`static interaction defaultinteraction;` 也是同一条 —— 后者是 46 个 examples 的门。
+动手之前先把语义量准（`asy -noV`）：
+
+```
+struct Box {
+  static int n = 1;
+  int x = 5;
+  static int bump() {n = n + 1; return n;}
+  int get() {return x + n;}
+}
+write(Box.n);        // 1     —— 用**类型名**取
+Box a; Box b;
+a.n = 7;             //        —— 用**实例**写，写的是同一格
+write(Box.n);        // 7
+write(b.n);          // 7     —— 另一个实例看到的也是那一格
+write(a.get());      // 12    —— 实例方法里裸名字就是它（5 + 7）
+write(Box.bump());   // 8
+write(Box.n);        // 8
+```
+
+所以 static 字段**不是字段**：它是一个文件级变量，只是名字挂在 struct 上。这与第二十八刀
+的 `autounravel` 是同一个形状（"写在体里、其实是文件级的声明"），落法应该沿用 auMod 那条路：
+一个 `(global asy__sf_Box_n …)`，初值在单元的 init 里跑，四条取值路径各接一处 ——
+`Box.n`（类型名限定）、`a.n`（实例限定，同一格）、方法体里的裸 `n`、以及 `Box.bump()`
+（静态方法，可以先不做：filltype 只要静态**字段**）。
+
+量这一条时踩了一个坑，值得记：第一版测试用的 struct 叫 `S`，报的是
+`type 'pair' is not a structure` —— 因为 base 的 plain_constants.asy 里 `S` 是**南**那个
+方向常量（N/S/E/W）。拿 base 在场的环境量语义时，测试用的名字得先躲开 base 的名字空间，
+不然量到的是名字碰撞而不是语义。
+
 ## 后果与代价
 
 
