@@ -368,6 +368,49 @@ bison **隐式**的选择写成**显式**的优先级声明 —— 悬垂 else�
 
 在把这条写进测试轴之前，`sin`/`exp`/`log`/trig 与 pair 的 `angle`/`dir`/`expi` 继续拒。
 
+### 分层修正：内建函数属于**运行库 + 绑定表**，不属于降级器
+
+上面那份 exp 一开始是写进 `frontend-asy/lower.js` 的（一张 `ASY_MATH` 常量表加一段
+HELPERS 正文）。那是**放错了层**：数学不是 asy 的语法。看一眼 asy 自己怎么组织的就清楚 ——
+`builtin.cc` 里是
+
+```cpp
+addRealFunc(sin,SYM(sin));   addRealFunc(exp,SYM(exp));   addRealFunc(log,SYM(log));
+```
+
+一张「名字 -> 实现」的表（而且 `addRealFunc` 一次注册两条：`real f(real)` 与自动抬升的
+`real[] f(real[])`），实现本身在 libm；再往上 84 个 `base/*.asy` 才是库。语言那边都不把
+这些当语法，我们更不该按语言各写一份。**每支持一门语言就手写一大堆 lower.js，这条路不
+可扩展**，所以形状改成三层：
+
+- **运行库**：`stage0/lib/*.sx`，核心方言写的、语言中立的实现。`math.sx` 现在有
+  `omni_pow2` / `omni_exp`（后面是 sin/cos/log/atan）。它只用 `+ - * / floor`，
+  于是六条腿算出的位一模一样 —— 这正是不能转手宿主 libm 的那条测量的直接结论。
+- **绑定表**：`stage0/src/frontend-asy/builtins.tab`，一张数据表（名字 / 实参个数 /
+  返回类型 / 实现在哪 / 符号），三种去处：`rmath`（核心方言白名单）、`lib`（运行库）、
+  `nope`（还没做，报错里说清是哪一个）。它是**生成的** ——
+  `gen-builtins.js` 读 asy 自己的两份数据：`runmath.in` 里带签名的声明
+  （`Int ceil(real x)` / `real fmod(real x, real y)`）与 `builtin.cc` 里
+  `addRealFunc(sin,SYM(sin))` 那一族，现在出 44 行。手抄一份等于把别人的表复制进我们的
+  代码里，下次 asy 升级没人知道差了什么。「实现在哪」那一列是**我们的**策略（生成器里的
+  `POLICY`），不是从 asy 抄的。`real f(real)` 到 `real[] f(real[])` 的自动抬升
+  是这一层的**通用规则**，将来是表上加一列，不是 22 个分支。
+- **库**：asy 的 `base/*.asy`（含 `plain.asy`）用我们自己的模块系统编（第二十五刀已经
+  通了），不重新实现。看起来像"内建"的一大半其实在这里。
+
+降级器只留**真正的语言语义**：名字解析的顺序、重载打分、隐式转换、语句形态。
+文件 IO 仍然在驱动（cli.js）里 —— 语法表、模块、现在的绑定表与运行库都是它读进来的数据，
+降级器只拿解析好的表。这条跟 `loadGrammar` 是同一个路子，不是新机制。
+
+第一份运行库函数（`omni_exp`）落地时当场抓到一个**真 bug**，而且是自举链与逐字节纪律
+都漏掉的那种：`exp(-10.0)` 在 `run` 与 `run-c` 上差 1 ULP。原因是 clang 默认
+`-ffp-contract=on`，把 Horner 里的 `a + r*s` 合成了 FMA —— 少一次中间舍入。
+核心方言的 `(bin "*" …)` / `(bin "+" …)` 是**逐个运算**的语义，编译器不许替我们改写，
+所以 C 与 LLVM 那两条腿都加上了 `-ffp-contract=off`。
+先前的用例碰不到这条只是因为没有一处浮点表达式长到出现 `a + b*c` 的形状 ——
+运行库是第一个。第八条测试轴因此多了一节 `tests/asy/tol/`：腿与腿之间仍然逐字节，
+与真 asy 只要求最后一位十进制差不超过 1。
+
 落地同样是"接上已有的那一份"：`omni_math.c` 的七个 `omni_r_*` 包一层 libm、JS prelude 的
 `$r_*` 全部走同一个 `$js_math`（`round` 那条要自己绕过 `Math.round` 的向上舍入：C 是**离零**
 舍入，`-2.5 → -3`）、解释器走 `callJsOp('js_math', …)`、LLVM 补七条 `RT_OPS`，MIR 照旧

@@ -327,21 +327,64 @@ const asyCore = (t) => {
 };
 
 /**
- * asy 运行时自带的数学函数（不是 plain.asy 里的定义，所以这一层认它们不算偷偷补模块系统）。
- * 返回类型是量出来的（`asy -noV`）：`floor/ceil/round` 回 **int**（`int i = floor(2.7)`
- * 编得过），`sqrt/fabs/fmod` 回 real，`abs` 按实参分 int/real。
- * 名单只到核心方言 `(rmath …)` 收的那几个为止 —— exp/log/sin 这些各家最后一位就分叉，
- * 方言那边没收（理由在 runtime/omni_math.c 的头注里）。
+ * asy 的内建实数函数是一张**数据表**（`frontend-asy/builtins.tab`），不是这里的代码 ——
+ * asy 自己也是这么组织的（builtin.cc 里 `addRealFunc(sin,SYM(sin))` 那一段就是一张
+ * 名字->实现的表）。这个函数只负责把那张表读成 Map；实现分三种：
+ *   rmath = 核心方言白名单里的 `(rmath …)`；
+ *   lib   = Omni 运行库（stage0/lib/math.sx）里我们自己算的那份；
+ *   nope  = 还没做。
+ * 表由驱动（cli.js）读进来 —— 文件 IO 不在降级器里，跟语法表、模块一个路子。
  */
-const ASY_MATH = new Map([
-  ['sqrt', { fn: 'sqrt', arity: 1, ret: 'real' }],
-  ['fabs', { fn: 'fabs', arity: 1, ret: 'real' }],
-  ['abs', { fn: 'fabs', arity: 1, ret: 'real' }],
-  ['floor', { fn: 'floor', arity: 1, ret: 'int' }],
-  ['ceil', { fn: 'ceil', arity: 1, ret: 'int' }],
-  ['round', { fn: 'round', arity: 1, ret: 'int' }],
-  ['fmod', { fn: 'fmod', arity: 2, ret: 'real' }],
-]);
+export function parseAsyBuiltins(text) {
+  const out = new Map();
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (line === '' || line.startsWith('#')) continue;
+    const cols = [];
+    for (const c of line.split(' ')) if (c !== '') cols.push(c);
+    if (cols.length !== 5) continue;
+    out.set(cols[0], {
+      arity: Number(cols[1]), ret: cols[2], kind: cols[3],
+      fn: cols[3] === 'rmath' ? cols[4] : undefined,
+      help: cols[3] === 'lib' ? cols[4] : undefined,
+    });
+  }
+  return out;
+}
+
+/**
+ * 运行库（核心方言写的 `.sx`）读成"名字 -> 正文"。块的形状是**两个空格 + `(fn 名字`**，
+ * 一直到下一个这样的行为止；`;;` 开头的是注释。
+ * 语言中立 —— 等第二个前端用到它时这个函数应该搬去一个共用的地方，现在只有 asy 用。
+ */
+export function parseSxLib(text) {
+  const out = new Map();
+  let name = null;
+  let buf = [];
+  const flush = () => {
+    if (name === null) return;
+    while (buf.length > 0 && buf[buf.length - 1].trim() === '') buf.pop();
+    out.set(name, buf.join('\n'));
+  };
+  for (const line of text.split('\n')) {
+    if (line.startsWith('  (fn ')) {
+      flush();
+      const rest = line.slice('  (fn '.length);
+      let nm = '';
+      for (const ch of rest) {
+        if (ch === ' ' || ch === '(' || ch === ')') break;
+        nm += ch;
+      }
+      name = nm;
+      buf = [line];
+      continue;
+    }
+    if (name !== null) buf.push(line);
+  }
+  flush();
+  return out;
+}
+
 
 /** 没写初值时的零值。asy 也是这么定的（未初始化的 int 是 0，string 是空串，pair 是 (0,0)）。 */
 const ZERO = new Map([
@@ -586,6 +629,12 @@ class AsyLower {
     // 模块（第二十五刀）。`opts` = `{path, load(名字) -> 树|null}` —— 文件 IO 与语法表
     // 都留在 cli.js，这里只管"给我这个模块的树"。null = 没人给加载器（那时 import 就报错）。
     this.opts = opts === undefined ? null : opts;
+    // 内建函数的**绑定表**与**运行库**都是驱动读进来的数据（builtins.tab / lib/math.sx）——
+    // 数学不是 asy 的语法，它在 asy 自己那边也是 builtin.cc 里一张表。见 parseAsyBuiltins。
+    this.math = this.opts !== null && this.opts.builtins !== undefined
+      ? this.opts.builtins : new Map();
+    this.lib = this.opts !== null && this.opts.lib !== undefined
+      ? this.opts.lib : new Map();
     // 一份 .asy 文件是一个**单元**。逐单元的表有 funcs / globals / oinits / oiByNode /
     // recVis / mods / at，降级时换进换出（unitIn / unitOut）；共享的是 records /
     // recInits / arrGen / used / wraps / gdecls —— 它们按已经全局唯一的名字存，
@@ -1712,7 +1761,7 @@ class AsyLower {
     if (vis.length === 0 && ASY_STRFN.has(nm)) return this.strCall(n, nm);
     if (vis.length === 0 && ASY_STR_NOPE.has(nm)) return this.nope(n, ASY_STR_NOPE.get(nm));
     if (vis.length === 0 && ASY_PAIRFN.has(nm)) return this.pairCall(n, nm);
-    if (vis.length === 0 && ASY_MATH.has(nm)) return this.mathCall(n, nm);
+    if (vis.length === 0 && this.math.has(nm)) return this.mathCall(n, nm);
     if (vis.length === 0) {
       if (this.funcs.has(nm)) {
         return this.err(n, `'${nm}' 在这里还看不见 —— 它声明在后面，而 asy 的名字解析是顺序的（那边报 "no matching variable"）`);
@@ -2104,7 +2153,11 @@ class AsyLower {
    * 截断是精确的。
    */
   mathCall(n, nm) {
-    const spec = ASY_MATH.get(nm);
+    const spec = this.math.get(nm);
+    if (spec.kind === 'nope') {
+      return this.nope(n, `内建函数 '${nm}'（绑定表 builtins.tab 里有它，`
+        + `但实现还没进运行库 stage0/lib/math.sx）`);
+    }
     const args = this.args(n.items[2]);
     if (args === null) return null;
     if (args.length !== spec.arity) {
@@ -2130,6 +2183,11 @@ class AsyLower {
       const v = this.coerce(vs[i], 'real', args[i], `'${nm}' 的第 ${i + 1} 个实参`);
       if (v === null) return null;
       parts.push(v.code);
+    }
+    // 自己算的那一族（exp…）：走 helper，不走 (rmath …)
+    if (spec.help !== undefined) {
+      this.used.add(spec.help);
+      return { code: `(call ${spec.help} ${parts.join(' ')})`, type: 'real' };
     }
     const code = `(rmath "${spec.fn}" ${parts.join(' ')})`;
     if (spec.ret === 'int') return { code: `(toint ${code})`, type: 'int' };
@@ -3516,6 +3574,25 @@ class AsyLower {
     for (const g of this.gdecls) out.push(`  (global ${g.sym} ${asyCore(g.type)})`);
     for (const [hnm, text] of HELPERS) {
       if (this.used.has(hnm)) out.push(text);
+    }
+    // 运行库里被用到的那些（stage0/lib/*.sx）：先把**库内部的相互调用**闭包一遍
+    // （omni_exp 会调 omni_pow2），再按库文件里的顺序发 —— 于是同一份输入两次降出来
+    // 的文本逐字节相同。
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const [lnm, text] of this.lib) {
+        if (!this.used.has(lnm)) continue;
+        for (const dep of this.lib.keys()) {
+          if (this.used.has(dep)) continue;
+          if (text.indexOf(`(call ${dep} `) < 0 && text.indexOf(`(call ${dep})`) < 0) continue;
+          this.used.add(dep);
+          grew = true;
+        }
+      }
+    }
+    for (const [lnm, text] of this.lib) {
+      if (this.used.has(lnm)) out.push(text);
     }
     // 元素是记录的数组 helper：正文是降级过程中按同一个工厂生成的，顺序按第一次用到
     for (const text of this.arrGen.values()) out.push(text);

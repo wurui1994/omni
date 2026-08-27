@@ -1,0 +1,68 @@
+# asy 的内建实数函数 —— **绑定表**，不是代码。这个文件是**生成的**：
+#   node stage0/src/frontend-asy/gen-builtins.js [asymptote 源码目录] > builtins.tab
+# 来源是 asy 自己的两份数据：runmath.in 里带签名的声明，与 builtin.cc 里
+# `addRealFunc(sin,SYM(sin))` 那一族（直通 libm 的那些）。asy 也是一张表，不是语法。
+#
+# 列：名字  实参个数  返回类型  实现在哪  实现的符号
+#   rmath = 核心方言的 (rmath "…" …) 白名单（IEEE 强制正确舍入的 sqrt、精确运算的
+#           fabs/floor/ceil/round/fmod、量过逐位相同的 pow）
+#   lib   = Omni 运行库 stage0/lib/math.sx 里我们自己算的那份（跨腿位一致，与真 asy
+#           允许最后一位十进制差 1 —— 用例走 tests/asy/tol/ 那一节）
+#   nope  = 还没做（见到就报错，报错里说清是哪一个）
+#
+# 返回类型是 asy 声明里写的：floor/ceil/round 回 int，其余回 real；
+# `abs` 按实参分 int/real/pair（那三条分支在降级器里，它要看实参类型）。
+# asy 还会把每个 `real f(real)` 自动抬成 `real[] f(real[])`（addRealFunc 一次注册
+# 两条）。那是绑定层的**通用规则**，将来是这张表上加一列，不是逐个函数的活儿。
+AND        2 int  nope  -
+CLZ        1 int  nope  -
+CTZ        1 int  nope  -
+Ceil       1 int  nope  -
+Floor      1 int  nope  -
+Jn         2 real nope  -
+NOT        1 int  nope  -
+OR         2 int  nope  -
+Round      1 int  nope  -
+XOR        2 int  nope  -
+Yn         2 real nope  -
+abs        1 real rmath fabs
+acos       1 real nope  -
+acosh      1 real nope  -
+asin       1 real nope  -
+asinh      1 real nope  -
+atan       1 real nope  -
+atan2      2 real nope  -
+atanh      1 real nope  -
+bitreverse 2 int  nope  -
+cbrt       1 real nope  -
+ceil       1 int  rmath ceil
+cos        1 real nope  -
+cosh       1 real nope  -
+erf        1 real nope  -
+erfc       1 real nope  -
+exp        1 real lib   omni_exp
+expm1      1 real nope  -
+fabs       1 real rmath fabs
+factorial  1 int  nope  -
+floor      1 int  rmath floor
+fmod       2 real rmath fmod
+gamma      1 real nope  -
+hypot      2 real nope  -
+identity   1 real nope  -
+ldexp      2 real nope  -
+log        1 real nope  -
+log10      1 real nope  -
+log1p      1 real nope  -
+popcount   1 int  nope  -
+pow10      1 real nope  -
+quotient   2 int  nope  -
+rand       2 int  nope  -
+remainder  2 real nope  -
+round      1 int  rmath round
+sgn        1 int  nope  -
+sin        1 real nope  -
+sinh       1 real nope  -
+sqrt       1 real rmath sqrt
+tan        1 real nope  -
+tanh       1 real nope  -
+unitrand   0 real nope  -

@@ -1,0 +1,58 @@
+;; Omni 运行库：实数上的超越函数（核心方言写的，语言中立）
+;;
+;; 为什么这一族不转手宿主的 libm / Math：量过（ADR-0014 里那一节）——
+;;   - 同一批 20 万个输入上算 sin/cos/tan/atan/exp/log，libm(macOS) 与 V8 的 120 万个结果里
+;;     51.1 万个位不同，按 `%.15g` 印出来还有 31.7 万个字符串不同；
+;;   - 用 bc -l（scale=45）当高精度参考，400 个输入里 macOS libm 的 sin 有 28 个差 1 ULP，
+;;     V8 有 22 个，且不是同一批 —— **判分的那一方自己就不是正确舍入的**。
+;; 所以这里自己算：只用 + - * / 与 floor（都是精确定义的运算），六条腿算出的位一模一样。
+;; 代价写在明处：与真 asy 相比允许 1 ULP 的差，用它的用例走带容差的那一节测试。
+;;
+;; 这个文件是**运行库**，不是某个前端的一部分 —— asy 的 `exp`、jancy 的 `exp`、
+;; Omni 自己的 `exp` 都绑到这里的同一个符号上。绑定关系是各语言的一张数据表
+;; （asy 那张在 frontend-asy/builtins.tab），不是写在降级器里的代码。
+;;
+;; 命名：`omni_` 前缀 + 小写。模块级名字全局唯一（ADR-0011/0014 的封闭 ABI）。
+
+  (fn omni_pow2 ((n int)) real
+    ;; 2^n（n 是整数）。写成**循环**而不是 pow：乘 2 与乘 0.5 在正规数范围里是精确的，
+    ;; pow 不是（各家实现不同）。只保证 n >= -1000：更小的由调用方拆成两步（见 omni_exp），
+    ;; 不然连续减半会一路掉进次正规、每一步都再舍入一次。
+    (let m real (real 1.0))
+    (let i int (int 0))
+    (if (bin ">" (var n) (int 0))
+      (do (while (bin "<" (var i) (var n))
+        (do (set m (bin "*" (var m) (real 2.0))) (set i (bin "+" (var i) (int 1))))))
+      (do (while (bin "<" (var i) (un "-" (var n)))
+        (do (set m (bin "*" (var m) (real 0.5))) (set i (bin "+" (var i) (int 1)))))))
+    (ret (var m)))
+
+  (fn omni_exp ((x real)) real
+    ;; e^x。k = floor(x/ln2 + 0.5)，r = x - k*ln2（ln2 拆 hi/lo 两段，Cody-Waite），
+    ;; e^x = 2^k * e^r，e^r 用到 1/13! 的泰勒 Horner（|r| <= ln2/2 上截断误差 ~2^-70）。
+    ;; 量过：与 V8 的 Math.exp 在 20 万个随机输入上最大差 1 ULP（没有更差的）。
+    (if (bin "!=" (var x) (var x)) (do (ret (var x))))
+    (if (bin ">" (var x) (real 709.78271289338400)) (do (ret (bin "*" (real 1e308) (real 10.0)))))
+    (if (bin "<" (var x) (real -745.13321910194110)) (do (ret (real 0.0))))
+    (let k real (rmath "floor" (bin "+" (bin "*" (var x) (real 1.4426950408889634)) (real 0.5))))
+    (let r real (bin "-" (bin "-" (var x) (bin "*" (var k) (real 0.69314718036912382)))
+      (bin "*" (var k) (real 1.9082149292705877e-10))))
+    (let s real (real 1.6059043836821613e-10))
+    (set s (bin "+" (real 2.0876756987868100e-9) (bin "*" (var r) (var s))))
+    (set s (bin "+" (real 2.5052108385441720e-8) (bin "*" (var r) (var s))))
+    (set s (bin "+" (real 2.7557319223985888e-7) (bin "*" (var r) (var s))))
+    (set s (bin "+" (real 0.0000027557319223985893) (bin "*" (var r) (var s))))
+    (set s (bin "+" (real 0.000024801587301587302) (bin "*" (var r) (var s))))
+    (set s (bin "+" (real 0.00019841269841269841) (bin "*" (var r) (var s))))
+    (set s (bin "+" (real 0.0013888888888888889) (bin "*" (var r) (var s))))
+    (set s (bin "+" (real 0.0083333333333333332) (bin "*" (var r) (var s))))
+    (set s (bin "+" (real 0.041666666666666664) (bin "*" (var r) (var s))))
+    (set s (bin "+" (real 0.16666666666666666) (bin "*" (var r) (var s))))
+    (set s (bin "+" (real 0.50000000000000000) (bin "*" (var r) (var s))))
+    (set s (bin "+" (real 1.0000000000000000) (bin "*" (var r) (var s))))
+    (let e real (bin "+" (real 1.0) (bin "*" (var r) (var s))))
+    (let n int (toint (var k)))
+    (if (bin "<" (var n) (int -1000))
+      (do (ret (bin "*" (bin "*" (var e) (call omni_pow2 (bin "+" (var n) (int 1000))))
+        (call omni_pow2 (int -1000))))))
+    (ret (bin "*" (var e) (call omni_pow2 (var n)))))
