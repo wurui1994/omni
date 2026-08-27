@@ -639,11 +639,25 @@ export function asyGlobalNames(L, n, at) {
     let ty = el;
     let k = 0;
     while (ty !== null && k < arr + dims) { ty = `${ty}[]`; k++; }
-    // `real f(real) = twice;`：形参表跟在名字后面，那是**函数值**类型 —— 不是 `real`。
-    // 这一刀的 `(global …)` 只收标量/聚合，函数值走 `(let …)` 那条（与 typedef 拼的
-    // 那一份同一条路），所以这里明确记成"这一刀的全局量收不下"。
-    // 不记的话拿到的是 base（`real`），后面那句赋值就报"要 real，这里是 real(real)"。
-    if (isList(start) && head(start) === 'fundecidstart') ty = null;
+    // 函数值类型的模块级变量（第三十七刀）。两种写法，都要在这一遍就定出类型 ——
+    // 函数体里要看得见它，而这一遍是唯一在函数体之前跑的一遍：
+    //   `real f(real) = twice;`   形参表跟在**名字**后面（fundecidstart）
+    //   `typedef real F(real); F f;`  类型是个**别名**（上面那几行只认标量与记录，所以
+    //                                 base 是 'F' 时 el 是 null）
+    // 别名用 aliasAt 解（它不报诊断 —— 这一遍只收表，真正的检查在 vardec 里），
+    // 位置临时设成这一项的位置：别名的可见性也是顺序的。
+    if (isList(start) && head(start) === 'fundecidstart') {
+      const keep = L.at;
+      L.at = at;
+      ty = L.fnTypeOf(base === null ? null : base, start.items[2], start);
+      L.at = keep;
+    } else if (ty === null && base !== null && arr + dims === 0) {
+      const keep = L.at;
+      L.at = at;
+      const al = L.aliasAt(base);
+      L.at = keep;
+      if (al !== null && asyIsFn(al.t)) ty = al.t;
+    }
     const ok = ty !== null;
     const g = { sym: `asy__g${L.gdecls.length}_${nm}`, type: ty, at, ok };
     const list = L.globals.has(nm) ? L.globals.get(nm) : [];

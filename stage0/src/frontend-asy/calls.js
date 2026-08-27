@@ -89,6 +89,18 @@ export function asyCall(L, n) {
   // 而 findroot 那种形参正是要遮住同名的文件级函数。
   const lv = L.lookup(nm);
   if (lv !== null && asyIsFn(lv)) return asyFnValCall(L, n, nm, lv, `(var ${nm})`);
+  // 函数值的**文件级**变量（第三十七刀）：`typedef int F(int); F h; … h(5)`。
+  // 位置照 nameOf 那一档的顺序 —— 局部、成员之后，候选表之前（那一档里有就不是函数名）。
+  //
+  // `gvarAt` 那一份要**排除**掉：正在声明的那个变量在自己的初值里还不可见。量出来的理由是
+  // graph.asy 里三处 `ticklabel LogFormat=LogFormat(10);`（:267/:268 与 :1124 的
+  // `axis Bottom=Bottom()`）—— 右边那个 `LogFormat` 是**函数**，不是刚声明的这个变量。
+  // 不排除就会把它当成间接调用，然后报"要 string(real)，这里是 string"（真的量到了，
+  // graph 一度从 183 涨到 186）。
+  const gv = L.gvarHere(nm);
+  if (gv !== null && gv !== L.gvarAt(nm) && gv.ok && asyIsFn(gv.type)) {
+    return asyFnValCall(L, n, nm, gv.type, `(var ${gv.sym})`);
+  }
   const vis = asyVisible(L, nm);
   // 同名的用户/模块函数与内建那一族在这里**一起打分**：asy 那边内建与库里的定义是
   // 同一个重载集（builtin.cc 把内建也塞进那张表），而我们的内建面写死在这个前端里，

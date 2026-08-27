@@ -2974,6 +2974,42 @@ struct 字段当对照）。
 跑的轴：`tests/asy`（125 passed，45.7s）、`tests/bootstrap`（60 passed）。只动
 `frontend-asy/stmts.js`，sexpr 与 run.js 跳掉。
 
+### 模块级的函数值变量：三处小改，一处**量出来的回退**
+
+上一刀把边界写清楚了：函数体里也看得见的那种函数值变量还在门外。这一刀补它。
+`graph.asy` 里 `ticklabel`、`axis` 这一族全是这个形状。
+
+三处改动：
+
+1. `asyGlobalNames`（唯一在函数体之前跑的那一遍）原先只按节点形状认标量与聚合，
+   两种函数值写法都落成 `ok:false`。现在都定出类型：`fundecidstart` 走
+   `L.fnTypeOf`，typedef 别名走 `L.aliasAt`（它不报诊断 —— 这一遍只收表）。
+2. 调用路径上补一档：裸名字调用时，局部与成员之后、候选表之前，问一下"文件级有没有
+   一个同名的函数值变量"。位置照 `nameOf` 那一档的顺序。
+3. `asyCond`（`? :`）的临时量零值：函数类型原先落到 `ZERO.get(t)` 上，那是
+   `undefined` —— 直接拼进方言文本。改成 `(null …)`；记录也顺手从 `(cnew T)` 换成
+   `(null …)`（那行注释写的"方言里写不出 null"在第三十三刀之后就不成立了，
+   换过来还省掉一次白分配）。
+
+**回退是量出来的**：第 2 条第一版没有排除"正在声明的那个变量"，于是
+`ticklabel LogFormat=LogFormat(10);`（graph.asy:267/268 与 :1124 的
+`axis Bottom=Bottom()`）右边那个名字被当成了刚声明的这个变量的**间接调用**，
+报"要 string(real)，这里是 string"—— `import graph;` 从 183 **涨到 186**。
+asy 的规则是那个变量在自己的初值里还不可见，所以判据加了一条 `gv !== L.gvarAt(nm)`。
+加上之后 graph 回到 183，与这一刀之前 diff 为空。
+
+新增 `cases/63-fnvalue-global.asy`：两种写法、函数里赋值另一个函数里读、
+以及"初值里那个名字是函数不是这个变量"那一段（就是上面那条回退的形状）。
+
+**`import graph;` 与 `import plain;` 都是净 0（183 与 1）**。这一刀是把一条能力补齐，
+不是拆墙 —— graph 里那些 fn 类型的全局本来就在别的墙后面。plain 的墙还在
+`iter.asy:42`：那一行是 `autounravel` 的**函数类型字段**（名字还是 `operator cast`），
+`asyStaticDec` 现在只认 `decidstart`。
+
+跑的轴：`tests/asy`（126 passed，69.0s）、`tests/bootstrap`（60 passed）。只动
+`frontend-asy/`（decls.js、calls.js、exprs.js），sexpr 与 run.js 跳掉。
+
+
 
 
 

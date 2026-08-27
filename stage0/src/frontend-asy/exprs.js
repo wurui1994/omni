@@ -1144,11 +1144,14 @@ export function asyCond(L, n) {
   const nm = `asy__c${L.tmp++}`;
   const yes = aPre.concat([`(set ${nm} ${av.code})`]).join(' ');
   const no = bPre.concat([`(set ${nm} ${bv.code})`]).join(' ');
-  // 临时量要先有个初值（核心方言的 `(let …)` 要一个表达式）。记录类型给 `(cnew T)`：
-  // 它**不跑**字段默认值，所以这个马上被覆盖的对象在语义上看不见（代价是一次白分配）；
-  // 而写 null 是不行的 —— 方言里写不出 null。
-  const init = L.isRec(t) ? `(cnew ${t})`
+  // 临时量要先有个初值（核心方言的 `(let …)` 要一个表达式），而它马上就被两支之一覆盖。
+  // 引用类型给**空引用**：第三十三刀补上 `(null TYPE)` 之前这里写不出 null，记录只能发
+  // `(cnew T)`（一次白分配），函数类型更是连零值都没有 —— 那时 `? :` 出函数值会把
+  // JS 的 undefined 拼进方言文本里（量到过：graph.asy 的 `k == 0 ? thrice : quad` 那种形状）。
+  // 数组照旧给空数组：那是数组真正的零值（`alen`/`apush` 在它上面都能用）。
+  const init = L.isRec(t) || asyIsFn(t) ? `(null ${asyCore(t)})`
     : (asyIsArr(t) ? `(anew ${asyCore(t)} (int 0))` : ZERO.get(t));
+  if (init === undefined) return L.nope(n, `\`? :\` 出 ${t}（这一刀给不出它的零值）`);
   L.pre.push(`(let ${nm} ${asyCore(t)} ${init})`);
   L.pre.push(`(if ${c.code} (do ${yes}) (do ${no}))`);
   return { code: `(var ${nm})`, type: t };
