@@ -99,6 +99,90 @@ int[] sequence(int a, int b) {
   return r;
 }
 
+// ---------------------------------------------------------------- transform
+// 仿射变换。asy 的 transform 是 6 个 real：平移 (x,y) 加 2x2 的 (xx,xy;yx,yy)，
+// 作用在点上是 `(x + xx*px + xy*py, y + yx*px + yy*py)`（量过 shift(3,4)*(1,1) = (4,5)）。
+// **字段默认值就是恒等**：base 的 plain_constants.asy 里写的是 `restricted transform
+// identity;` —— 不带初值，靠的就是"transform 的零值是恒等"这条（量过 identity*(7,8)
+// 还是 (7,8)）。所以 identity 那个**变量**由 base 给，这里只给类型与那几个构造函数。
+struct transform {
+  real x = 0;
+  real y = 0;
+  real xx = 1;
+  real xy = 0;
+  real yx = 0;
+  real yy = 1;
+}
+
+transform xform(real x, real y, real xx, real xy, real yx, real yy) {
+  transform t;
+  t.x = x; t.y = y; t.xx = xx; t.xy = xy; t.yx = yx; t.yy = yy;
+  return t;
+}
+
+transform identity() { return xform(0, 0, 1, 0, 0, 1); }
+
+transform shift(real x, real y) { return xform(x, y, 1, 0, 0, 1); }
+transform shift(pair z) { return xform(z.x, z.y, 1, 0, 0, 1); }
+
+// 量过：scale(2) 是 xx=yy=2，xscale/yscale 只动一个方向
+transform scale(real s) { return xform(0, 0, s, 0, 0, s); }
+transform scale(real sx, real sy) { return xform(0, 0, sx, 0, 0, sy); }
+transform xscale(real s) { return xform(0, 0, s, 0, 0, 1); }
+transform yscale(real s) { return xform(0, 0, 1, 0, 0, s); }
+
+// 量过 rotate(90)：xx=6.12323399573677e-17（cos 90° 的双精度值，不是 0）、xy=-1、yx=1
+transform rotate(real angle) {
+  real c = cos(radians(angle));
+  real s = sin(radians(angle));
+  return xform(0, 0, c, -s, s, c);
+}
+
+// 作用在点上；先摆出来是因为绕点旋转要用它
+pair operator *(transform t, pair p) {
+  return (t.x + t.xx * p.x + t.xy * p.y, t.y + t.yx * p.x + t.yy * p.y);
+}
+
+// 复合：`(s*sc)*p == s*(sc*p)`（量过 shift(3,4)*scale(2) 作用在 (1,1) 上是 (5,6)）
+transform operator *(transform a, transform b) {
+  return xform(
+    a.x + a.xx * b.x + a.xy * b.y,
+    a.y + a.yx * b.x + a.yy * b.y,
+    a.xx * b.xx + a.xy * b.yx,
+    a.xx * b.xy + a.xy * b.yy,
+    a.yx * b.xx + a.yy * b.yx,
+    a.yx * b.xy + a.yy * b.yy);
+}
+
+// 绕一点转：先挪到原点、转、再挪回去（量过 rotate(90,(1,1))*(2,1) = (1,2)）
+transform rotate(real angle, pair z) {
+  return shift(z) * rotate(angle) * shift(-z);
+}
+
+// 关于一条直线镜像。量过 reflect((0,0),(1,1)) 是 (xx,xy;yx,yy) = (0,1;1,0)
+transform reflect(pair a, pair b) {
+  pair d = b - a;
+  real n = d.x * d.x + d.y * d.y;
+  real xx = (d.x * d.x - d.y * d.y) / n;
+  real xy = 2 * d.x * d.y / n;
+  transform m = xform(0, 0, xx, xy, xy, -xx);
+  return shift(a) * m * shift(-a);
+}
+
+// 去掉平移那一半（量过 shiftless(shift(1,2)*scale(3)) 的 x/y 是 0、xx/yy 还是 3）
+transform shiftless(transform t) {
+  return xform(0, 0, t.xx, t.xy, t.yx, t.yy);
+}
+
+transform inverse(transform t) {
+  real det = t.xx * t.yy - t.xy * t.yx;
+  real ixx = t.yy / det;
+  real ixy = -t.xy / det;
+  real iyx = -t.yx / det;
+  real iyy = t.xx / det;
+  return xform(-(ixx * t.x + ixy * t.y), -(iyx * t.x + iyy * t.y), ixx, ixy, iyx, iyy);
+}
+
 // ---------------------------------------------------------------- pen
 // asy 的 pen 是值类型，我们的 struct 是引用类型 —— 所以凡是"改一支笔"的地方都
 // 先 pencopy。setwidth/setcolor 是 `p + q` 要的：q 显式设过的属性盖住 p 的那一份。
