@@ -1,0 +1,1 @@
+'operator &&' 不是合法的 asy 声明 —— asy 的语法里就没有这个算符名，那边直接报 "syntax error"（不带 ASY_NOPE：不是还没做）

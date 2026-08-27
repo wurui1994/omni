@@ -245,11 +245,14 @@ bison **隐式**的选择写成**显式**的优先级声明 —— 悬垂 else�
    默认实参、递归与普通函数同一条路）、
    **构造函数**（第二十一刀：struct 体里的 `void operator init(…)` 给出 `A(…)`）、
    **文件级的 `T operator init()`**（第二十二刀：换掉 `T t;` 的隐式构造，内嵌记录字段
-   一并管），
-   二十四份用例在五个执行器上与 `asy -noV` 逐字节相同。
-   **还没做**的是给切片赋值、多维数组、复数幂、triple、算符重载、
+   一并管）、
+   **算符重载**（第二十三刀：`V operator +(V,V)` 降成叫 `asy__op_add` 的普通函数，
+   于是重载解析那一套白捡；用户算符与内建的在同一张候选表里，同签名是替换），
+   二十六份用例在五个执行器上与 `asy -noV` 逐字节相同。
+   **还没做**的是给切片赋值、多维数组、复数幂、triple、`operator cast`、
    字符串的 `reverse`/`insert`/`split`、
-   自引用字段、把方法当值取出来，与 `operator init` 剩下的两种形态 —— 每一条都在
+   自引用字段、把方法当值取出来、struct 体里的算符，与 `operator init` 剩下的两种形态
+   —— 每一条都在
    `tests/asy/bad/` 里有一份带 `ASY_NOPE` 的用例钉着，不是含糊的"待办"。
    超越函数（exp/log/trig）是**另一回事**：不是没做，是量过 libm 与 V8 在最后一位就分叉，
    收进来这条轴必然有一天变红，所以按边界拒掉（`tests/asy/bad/sin.asy`；pair 上的
@@ -424,11 +427,11 @@ static inline C + 另写一份 IR 助手"，是两份实现；这次不重复那
 `1/3` 是实数除法而 `1#3` 是整数商、`3 == 3.0` 要提左边、`write` 的分隔符取决于第一个
 实参是不是字符串。类型是符号表的事，动作模板里没有符号表。
 
-**判分的人不是我**：`tests/asy` 的二十四份用例（算术 / 字符串 / 两种引号 / 控制流 / 函数 /
+**判分的人不是我**：`tests/asy` 的二十六份用例（算术 / 字符串 / 两种引号 / 控制流 / 函数 /
 real 的 %.15g / `? :` / 数学函数 / 数组 / pair / 切片与整数组输出 / for-each /
 字符串函数 / `pair[]` / 默认实参与命名实参 / 重载解析 / struct / struct 的 pair 字段 /
 struct 的数组字段 / struct 的记录字段 / `A[]` / struct 的方法 / 构造函数 /
-文件级 operator init）每份都是
+文件级 operator init / 算符重载 / 用户算符与内建算符的关系）每份都是
 「五条腿逐字节相同 == `.expected` == `asy -noV` 当场重跑」。`.expected` 本身就是真 asy 的
 输出生成的；机器上没装 asymptote 时那一节打印 skip，但 `.expected` 仍然把答案钉住。
 
@@ -448,8 +451,8 @@ struct 的数组字段 / struct 的记录字段 / `A[]` / struct 的方法 / 构
 （只算中选那支）跟着编码保住。代价写在明处：**循环条件里的 `? :` 直接报错**，因为那些
 赋值只能落在循环外面，条件就只算一次了。这条边界在 `tests/asy/bad/cond-in-loop.asy` 里。
 
-第一刀的边界都在 `tests/asy/bad/`（17 条，每条的期望值都必须以 `ASY_NOPE` 开头 ——
-"还没做"和"做错了"必须能一眼分开）：triple、复数幂、算符重载、
+第一刀的边界都在 `tests/asy/bad/`（18 条，每条的期望值都必须以 `ASY_NOPE` 开头 ——
+"还没做"和"做错了"必须能一眼分开）：triple、复数幂、`operator cast`、
 模块（import/access）、隐式缩放（`105cm`）、超越函数（`sin`、pair 上的 `angle` ——
 理由是上面那条 ULP 测量）、函数里读文件级变量（核心方言没有全局量）、
 循环条件里的 `? :`、给切片赋值（`a[0:2] = b`）、多维数组、
@@ -483,18 +486,26 @@ struct 的数组字段 / struct 的记录字段 / `A[]` / struct 的方法 / 构
 **第四节 `strict/`：asy 自己就不收的，我们也不能收。** 这一节是数组这一刀顺手加的，起因是
 一次测量：`int b=1; b++;` 在真 asy 上直接编不过（"postfix expressions are not allowed"），
 而我们的降级器照收。这类漏洞**不会让任何用例输出不同** —— 它只让"等价"这两个字变虚。
-所以 `strict/` 里的用例要求：我们拒，且装了 asy 的话**真 asy 也拒**。现在有九条：后缀
+所以 `strict/` 里的用例要求：我们拒，且装了 asy 的话**真 asy 也拒**。现在有十三条：后缀
 `++`、pair 上的 `<`、pair 上的 `%`（这两条 asy 报的是 "no matching function
 'operator <(pair, pair)'"）、`length(int[])`（`length` 只有 string 和 pair 两个重载）、
 按不存在的形参名给命名实参（asy 报 "cannot call 'void f(int a)' with parameter 'int b'"）、
 **歧义的重载**（`p(real)` 与 `p(pair)` 遇上 `p(1)`：asy 报 "call of function 'p(int)' is
 ambiguous"）、**引用后面才声明的函数**（asy 报 "no matching variable 'b'"）、
 **`write` 一个 struct**（asy 报 "no matching function 'write(A)'"）、
-**给 pair 的分量赋值**（`z.x = 5` 与 `a.p.x = 5`：asy 报 "virtual field is read-only"）——
+**给 pair 的分量赋值**（`z.x = 5` 与 `a.p.x = 5`：asy 报 "virtual field is read-only"）、
+没有 `void operator init` 时写 `A(…)`、在 struct 声明之前拿它当类型、
+**记录上的大小比较**（只定义了 `operator <` 不白得 `<=`）、
+**声明 `operator &&`**（asy 那边是 syntax error）——
 中间那两条是重载这一刀加的，第二条尤其要紧：我们是两遍降级，不专门裁一刀就会比 asy
-多接受一门语言。最后两条是 struct 与 pair 字段那两刀加的，它们守的不只是"拒"：
+多接受一门语言。`write(struct)` 与 `z.x = 5` 是 struct 与 pair 字段那两刀加的，
+它们守的不只是"拒"：
 `write(struct)` 不在 asy 这层拦，漏出去的是核心方言那句
 `(tostr E) 只接受 int / real / bool`——拒对了但理由指着错的一层。
+最后两条是算符重载那一刀加的，都是我们先前**真的多收了**：`<=` 在记录上会 promote 回
+记录名然后直接发 `(bin "<=" …)`（跑起来撞 JS 那条腿的 `< on class`），
+而 `operator &&` 我们原来把它当"还没做"记在 `bad/` 里 —— 直到量了一次才知道 asy 的语法
+本身就没有这个 token，于是那份用例整个搬到 `strict/`，诊断也去掉了 `ASY_NOPE`。
 
 **默认实参是"每次调用求一次、只在没给时求"**，而且**能引用前面的形参** —— 两条都是量出来的
 （`void d(int x = bump())`：`d(); d(); d(99);` 之后计数器是 2；`void q(int a, int b = a + 10)`：
@@ -1091,6 +1102,38 @@ asy 那一侧落地的是 `A[]`（`cases/21-structarr.asy`，与 `asy -noV` 逐�
 转换（量过 `A a = 7;` 报 "cannot cast 'int' to 'A'"），既然量不出它到底能拿来干什么，
 就不猜 —— `tests/asy/bad/oinit-args.asy` 钉着。`bad/ctor-toplevel.asy` 因为这一刀**通过**
 了，所以删掉换成它。
+
+### 已落地（支持面第十二阶段：算符重载，门槛 2 第二十三刀）
+
+第四刀零后端改动，而且是四刀里最便宜的一刀：**`operator +` 只是个名字奇怪的函数**。
+`V operator +(V a, V b)` 登记成候选名 `operator +`、降级符号名 `asy__op_add`
+（`ASY_OPSYM` 那张表把算符映到标识符片段，因为核心方言的函数名得是标识符），
+于是第十刀的默认/命名实参、第十一刀的重载解析与顺序裁候选**一行新逻辑都不用写**。
+表达式那一侧只在 `binary`/`compare`/`unary`/三条复合赋值路径上各加一句 `opUser(…)`。
+
+量出来的四条，钉在 `cases/25-opover.asy` 与 `26-opbuiltin.asy` 里：
+
+- 用户算符与**内建算符在同一张候选表里**，而且签名与内建那一档**逐个相同**时是**替换**
+  （重载规则 6）：`int operator *(int,int) { return a + b; }` 之后 `3 * 4` 印 **7**。
+  同型优先仍然管着 —— 只写了 `real operator +(real,real)` 时 `2 + 3` 还是内建的 int 加法
+  （用户那份要两次转换），但 `2 + 1.5` 走用户那份，因为 real+real 那一档已经被它换掉了。
+  第一版实现猜的是"用户只在**精确匹配**时才赢"，`2 + 1.5` 一量就露了：那样出来是 3.5
+  （内建的 real 加法），而 asy 印 **0.5**。
+- asy **不派生**任何算符：定义 `==` 不白得 `!=`，定义 `<` 不白得 `<=`。
+- 复合赋值摊成 `a = a + b`，所以 `a += mk(4)` 自动落到用户那份 —— 没有这一条时它漏到
+  后端，撞的是 JS 那条腿的 `+ on class`。
+- `--` 是 guide 的**连接产生式**（`a -- b`），内建的那份要等绘图层；但自己定义一份
+  `operator --` 是通的，走的就是这张表。
+
+两条边界：`operator cast`（asy 的隐式转换）在门外，理由不是形态难认，是它会改**重载解析
+的打分** —— 一旦用户能加转换，"要几次转换"就不再只由内建提升表决定，而那张表是第十一刀
+量出来钉死的（`bad/op-cast.asy`）；struct **体里**的算符也在门外，量过 asy 收这个声明但
+它**不参与** `a + b`（那边照旧报 "no matching function 'operator +(V, V)'"），
+量不出它能被什么调到就不猜。
+
+`operator &&`/`operator ||` 是另一类：量过 asy 那边是 **syntax error**（camp.y 的 operator
+产生式里没这两个 token），所以它是 `strict/op-logic` 而不是 `bad/` —— 这一条最初就放错了
+地方，是"每条规则都得量一遍"这句话的又一个例子。
 
 ## 决策 4：调用 LLVM 需要 extern-C FFI —— 这是新要求，也是 dogfood
 

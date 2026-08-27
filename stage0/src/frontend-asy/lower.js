@@ -83,9 +83,21 @@
 // recNew。分界是量出来的 —— `A a;` 与**内嵌记录字段**走 operator init，而 `new A` 与
 // 构造调用 `A(…)` 走原来那份字段默认值（所以 operator init 的体里写 `new A` 不递归）；
 // 内嵌字段那一格按**那个 struct 声明处**的可见性定，不是按用它的地方）。
+// **算符重载**（第二十三刀：`V operator +(V a, V b)`、`bool operator <(V,V)`。降级就是
+// 改个名 —— `operator +` 出一个叫 `asy__op_add` 的普通函数，于是重载解析、默认实参、
+// 命名实参、顺序裁候选全是第十、十一刀的东西，一行新逻辑都不用。量出来的三条钉在
+// cases/25-opover.asy 与 26-opbuiltin.asy 里：① 用户算符跟**内建的在同一张候选表里**，
+// 签名与内建那份**逐个相同**时是**替换**（写了 `int operator +(int,int){return a*b;}`
+// 之后 `2 + 3` 印 6，而 `2 + 1.5` 还是走内建的 real 那份印 3.5）；② asy **不派生** ——
+// 定义 `==` 不白得 `!=`，定义 `<` 不白得 `<=`；③ 一元 `- !`、复合赋值 `+= -= *= /=`
+// （摊成 `a = a + b`，所以自动落到用户那份）、以及 `--`（那是 guide 的连接产生式，
+// 内建的要等绘图层，但自己定义一份是通的）都走同一张表）。
 //
 // 不支持（见到就报错，报错里说清是哪一条）：triple、import/access、
-// typedef、算符重载、给切片赋值（`a[0:2] = b`）、
+// typedef、`operator cast`（asy 的隐式转换 —— 形态好认，但它会改**重载解析的打分**：
+// 一旦用户能加转换，"要几次转换"就不再只由内建提升表决定，而那张表是第十一刀量出来钉死的；
+// 收它得先量清"用户转换算几分、能不能连着用两次、跟内建提升谁优先"）、
+// 给切片赋值（`a[0:2] = b`）、
 // 多维数组（`int[][]` —— 核心方言的 `(arr T)` 不收数组元素：MIR 那一层元素类型只有
 // 一个 8 位类型码，`(arr (arr int))` 与 `(arr (arr string))` 在那里是同一个码，
 // 类型身份丢了。向量元素能收是因为道数就在那个码的高位上）、复数幂、
@@ -106,7 +118,10 @@
 // 我们的方法是"多一个 this 形参的普通函数"，而核心方言里函数不是值）、
 // `operator init` 的另两种形态（**带形参**的文件级那份 —— asy 收这个声明，但它不是隐式
 // 转换，量不出能拿它干什么就不猜；以及 struct 体里**非 void** 的那份 —— asy 自己也不给
-// 它构造调用）。
+// 它构造调用）、
+// struct **体里**的算符（`struct V { int operator +(V o) {…} }` —— asy 收这个声明，
+// 但量过它**不参与** `a + b`（那边照旧报 "no matching function 'operator +(V, V)'"），
+// 所以收它得先量清"那份成员算符到底能被什么调到"，不猜。文件级的那份是通的）。
 //
 // ## 与真 asy 的差别，写在这里而不是等着被发现
 //
@@ -122,6 +137,11 @@
 // - 反过来的一条**已经对齐**了：后缀 `x++` asy 自己不收（"postfix expressions are not
 //   allowed"），所以这一层也拒 —— 比 asy 多接受一门语言不会让任何用例变红，只会让
 //   "等价"这两个字变虚。`tests/asy/strict/` 那一节专门盯这种漏洞。
+// - 同一类的两条是第二十三刀补的（都在 strict/，都不带 ASY_NOPE）：记录上的**大小比较**
+//   （只定义了 `operator <` 不白得 `<=` —— asy 报 "no matching function
+//   'operator <=(V, V)'"，而我们先前 promote 回记录名就直接发 `(bin "<=" …)` 了）；
+//   以及 `operator &&`/`operator ||` 的声明本身（量过 asy 那边是 **syntax error** ——
+//   camp.y 的 operator 产生式里没有这两个 token）。
 // - **除以零**：asy 是运行期报错，而且**实数除法也报**（量过：`1.0/0.0`、`(1,2)/0`、
 //   `(1,2)/(0,0)` 全是 "Divide by zero"）；我们按 IEEE 出 inf/nan。这一条不是 pair
 //   才有的，`/` 从第一刀起就这样，量到了就记在这里。
@@ -222,6 +242,29 @@ function asyConvCost(from, to) {
  *  `(self $2 $1 $3)` 直接把 SELFOP **词法 token**（原子）搬过来。两种都要认。
  *  名字带 asy 前缀是封闭 ABI 的要求：模块级的名字全局唯一（mir/print.js 已有一个 opText）。 */
 const asyOpText = (n) => (isStr(n) || isAtom(n) ? n.value : null);
+
+/**
+ * 能重载的算符 -> 生成的函数名片段（第二十三刀）。`V operator +(V,V)` 降成一个普通函数
+ * `asy__op_add`，重载解析那一套（第十一刀）因此白捡 —— asy 里算符本来就是"名字叫
+ * `operator +` 的函数"，量过它跟普通重载在同一张候选表里：用户写了
+ * `int operator +(int,int) { return a*b; }` 之后 `2 + 3` 印的是 **6**。
+ *
+ * 表外分两类，诊断也分两类：
+ *  - `ASY_OPBAD` 里的 **asy 自己就不收**（量过 `bool operator &&(V,V)` 那行 asy 报
+ *    `2.16: syntax error:` 并 exit 1 —— camp.y 的 operator 产生式里没有这两个 token）。
+ *    这种是普通错误，不带 ASY_NOPE：不是我们还没做。
+ *  - 其余（`cast`、`::`、`..`、`[]`、`&`、`|`、`**` …，量过 asy 全都**收**）是我们还没做，
+ *    报 ASY_NOPE。`cast` 尤其不是形态问题，它会改重载解析的打分，见 bad/op-cast.asy。
+ */
+const ASY_OPSYM = new Map([
+  ['+', 'add'], ['-', 'sub'], ['*', 'mul'], ['/', 'div'], ['#', 'quot'], ['%', 'mod'],
+  ['^', 'pow'], ['==', 'eq'], ['!=', 'ne'], ['<', 'lt'], ['<=', 'le'], ['>', 'gt'],
+  ['>=', 'ge'], ['!', 'not'], ['--', 'seg'], ['^^', 'cat'],
+]);
+
+/** asy 的语法本身就拒的算符名（量过）。见 strict/op-logic.asy。 */
+const ASY_OPBAD = new Set(['&&', '||']);
+
 
 /** 数组类型在这一层就是「元素名 + []」的字符串（`'real[]'`），核心方言那边是 `(arr real)`。
  *  用字符串是因为这个文件里所有类型都是字符串，Map 查表与 `===` 比较都现成 ——
@@ -984,7 +1027,8 @@ class AsyLower {
       return this.nope(n, '花括号数组初值出现在推不出元素类型的位置（只支持 `T[] a = {…}` 与 `new T[] {…}`）');
     }
     if (h === 'scale') return this.nope(n, '隐式缩放（`105cm` 这种）');
-    if (h === 'join-exp' || h === 'join-dir' || h === 'spec' || h === 'spec-curl') return this.nope(n, '路径连接');
+    if (h === 'join-exp') return this.joinExp(n);
+    if (h === 'join-dir' || h === 'spec' || h === 'spec-curl') return this.nope(n, '路径连接');
     return this.nope(n, `表达式 '${h}'`);
   }
 
@@ -1237,6 +1281,9 @@ class AsyLower {
     const a = this.expr(n.items[2]);
     const b = this.expr(n.items[3]);
     if (a === null || b === null) return null;
+    // 用户定义的算符先问一遍（第二十三刀）：它跟内建在同一张候选表里，见 opUser
+    const u = this.opUser(n, op, [a, b], this.opBuiltinSig([a, b]));
+    if (u !== null) return u;
     if (op === '<' || op === '<=' || op === '>' || op === '>=') return this.cmpCode(n, op, a, b);
     if (op === '#') {
       if (a.type !== 'int' || b.type !== 'int') return this.err(n, `'#' 两边要是 int，这里是 ${a.type} 和 ${b.type}`);
@@ -1299,6 +1346,15 @@ class AsyLower {
     if (t === null) return this.err(n, `'${op}' 两边要同型：左是 ${a.type}，右是 ${b.type}`);
     // pair 上没有大小 —— asy 那边也没有（没有 `operator <(pair,pair)`）
     if (t === 'pair') return this.err(n, `pair 上没有 '${op}'（asy 那边也没有这个算符）`);
+    // 记录与数组上也没有：量过 `mk(2) <= mk(2)` 在 asy 那边报
+    // "no matching function 'operator <=(V, V)'"，`==`/`!=` 才是内建的（比身份）。
+    // 自己定义一个 `operator <=` 是通的 —— 那一条在 opUser 里先问过了。
+    if (this.isRec(t) || asyIsArr(t)) {
+      if (op !== '==' && op !== '!=') {
+        return this.err(n, `${t} 上没有 '${op}'（asy 那边报 "no matching function `
+          + `'operator ${op}(${t}, ${t})'" —— 自己定义一个 \`operator ${op}\` 就有了）`);
+      }
+    }
     return { code: `(bin "${op}" ${a.code} ${b.code})`, type: 'bool' };
   }
 
@@ -1306,6 +1362,10 @@ class AsyLower {
     const a = this.expr(n.items[2]);
     const b = this.expr(n.items[3]);
     if (a === null || b === null) return null;
+    // 用户的 `operator ==`（第二十三刀）。量过 `!=` **不会**借用它 ——
+    // 只定义了 `==` 时 `a != b` 走的还是内建的身份比较，所以这里是逐个算符问的。
+    const u = this.opUser(n, op, [a, b], this.opBuiltinSig([a, b]));
+    if (u !== null) return u;
     const t = this.promote(a, b);
     if (t === 'pair') {
       this.used.add('asy__peq');
@@ -1363,6 +1423,10 @@ class AsyLower {
     const op = asyOpText(n.items[1]) ?? '?';
     const v = this.expr(n.items[2]);
     if (v === null) return null;
+    // 一元的用户算符（第二十三刀）：一元与二元同名（`operator -`）也没关系 ——
+    // 候选表里两份的元数不同，fit 按元数就分开了
+    const u = this.opUser(n, op, [v], this.opBuiltinSig([v]));
+    if (u !== null) return u;
     if (op === '!') {
       if (v.type !== 'bool') return this.err(n, `'!' 要 bool，这里是 ${v.type}`);
       return { code: `(un "!" ${v.code})`, type: 'bool' };
@@ -1546,6 +1610,15 @@ class AsyLower {
   userCall(n, nm, list, recv) {
     const raw = this.callArgs(n);
     if (raw === null) return null;
+    return this.applyCall(n, nm, list, raw, recv);
+  }
+
+  /**
+   * userCall 的后半段：实参已经求好（`raw`），剩下的是挑候选、转换、发调用。
+   * 分出来是给算符重载用的（第二十三刀）—— 那边的"实参"是已经降好的两个操作数，
+   * 没有 callArgs 那一步，别的规则一条不差。
+   */
+  applyCall(n, nm, list, raw, recv) {
     const fits = [];
     for (const c of list) {
       const f = this.fit(c, raw);
@@ -1594,6 +1667,73 @@ class AsyLower {
     if (target === null) return null;
     const sp = parts.length === 0 ? '' : ' ';
     return { code: `(call ${target}${sp}${parts.join(' ')})`, type: d.ret };
+  }
+
+  /**
+   * `a -- b`：语法上它不是 `binary` 而是 `(join-exp L (join "--") R)`（camp.y 里 join 是
+   * 单独一档，`..`、`::`、方向标记都挂在这一档上）。内建的 `--` 不存在 —— 那是 guide 的
+   * 东西，属于绘图层 —— 所以这里**只有**用户定义的 `operator --`（第二十三刀）。
+   */
+  joinExp(n) {
+    const op = asyOpText(n.items[2].items[1]);
+    if (op !== '--') return this.nope(n, `路径连接 '${op ?? '?'}'`);
+    const a = this.expr(n.items[1]);
+    const b = this.expr(n.items[3]);
+    if (a === null || b === null) return null;
+    // 内建的 `--` 不存在，所以"内建这一档的签名"是 null（不是 `opBuiltinSig` 的结果）
+    const u = this.opUser(n, op, [a, b], null);
+    if (u !== null) return u;
+    return this.nope(n, `'${a.type} -- ${b.type}'（内建的 '--' 是 guide 的，那是绘图层那一刀；`
+      + '自己定义一个 `operator --` 是通的）');
+  }
+
+  /**
+   * 用户定义的算符（第二十三刀）：`op` 是 '+'、'=='、'--'… `vals` 是**已经降好**的操作数。
+   * 回 null 表示"没有用户算符管这一档"，调用方接着走内建那条路。
+   *
+   * asy 把内建算符与用户算符放在**同一张候选表**里打分，所以判"谁赢"要照那张表的规则，
+   * 这三条都量过（`asy -noV`）：
+   *   1. 用户那份**同型**（一次转换都不用）就赢：`int operator *(int,int)` 之后 `3 * 4`
+   *      印 7，不是 12。这一条最要紧 —— 漏了它算出来的是**不同的答案**，不是"多接受"。
+   *   2. 用户那份的签名正好**就是内建那一档**时，它替换掉内建（重载规则 6：同签名是替换）：
+   *      只写了 `real operator +(real,real)` 时 `2 + 3` 还是内建的 int 加法（印 5），
+   *      而 `2 + 1.5` 走用户那份（印 0.5，左边先提成 real）。
+   *   3. 内建管不了的档（记录、数组做操作数）：任何能匹配的用户算符都赢。
+   * `btys` 就是"内建这一档的签名"（`opBuiltinSig`），null 表示内建管不了。
+   */
+  opUser(n, op, vals, btys) {
+    const list = this.visible(`operator ${op}`);
+    if (list.length === 0) return null;
+    const raw = [];
+    for (const v of vals) raw.push({ key: null, v, node: n, lines: null });
+    let any = false;
+    let exact = false;
+    for (const c of list) {
+      const f = this.fit(c, raw);
+      if (f === null) continue;
+      any = true;
+      if (f.cost === 0) exact = true;
+    }
+    if (!any) return null;
+    if (!exact && btys !== null) {
+      const key = btys.join(',');
+      let replaces = false;
+      for (const c of list) if (c.params.join(',') === key) replaces = true;
+      if (!replaces) return null;
+    }
+    return this.applyCall(n, `operator ${op}`, list, raw);
+  }
+
+  /**
+   * 内建算符在这些操作数上是哪一档签名（回 null = 内建管不了这些类型）。
+   * 一元就是操作数自己那一档，二元是提升之后的同型那一档（`1 + 2.0` 是 real 那档）。
+   * 记录与数组内建一概不认 —— 那些只有用户算符。
+   */
+  opBuiltinSig(vals) {
+    for (const v of vals) if (this.isRec(v.type) || asyIsArr(v.type)) return null;
+    if (vals.length === 1) return [vals[0].type];
+    const t = this.promote(vals[0], vals[1]);
+    return t === null ? null : [t, t];
   }
 
   /**
@@ -2208,6 +2348,14 @@ class AsyLower {
     const one = rhs === null ? { code: t === 'real' ? '(real 1.0)' : '(int 1)', type: t } : this.expr(rhs);
     if (one === null) return null;
     if (rhs === null && t !== 'int' && t !== 'real') return this.err(node, `'${nm}' 是 ${t}，不能自增自减`);
+    // 复合赋值走的是同一个二元算符（第二十三刀）：`x op= y` 就是 `x = x op y`，
+    // 量过只定义了 `V operator +(V,V)` 时 `a += b` 是通的
+    const cv = { code: `(var ${nm})`, type: t };
+    const uv = this.opUser(node, op, [cv, one], this.opBuiltinSig([cv, one]));
+    if (uv !== null) {
+      const v = this.coerce(uv, t, node, `'${nm} ${op}=' 的结果`);
+      return v === null ? null : [`(set ${nm} ${v.code})`];
+    }
     if (t === 'pair') {
       // `z += w` 是逐分量，`z *= 2` 与 `z /= (0,1)` 走复数乘除（量过：(4,6)*=2 是
       // (8,12)、(8,12)/=(0,1) 是 (12,-8)）。`#= %= ^=` pair 上没有。
@@ -2256,6 +2404,14 @@ class AsyLower {
     const one = rhs === null ? { code: t === 'real' ? '(real 1.0)' : '(int 1)', type: t } : this.expr(rhs);
     if (one === null) return null;
     if (rhs === null && t !== 'int' && t !== 'real') return this.err(node, `'${q.field}' 是 ${t}，不能自增自减`);
+    // 复合赋值走的是同一个二元算符（第二十三刀）：量过只定义了 `V operator +(V,V)` 时
+    // `a.f += b` 也通 —— asy 把 `x op= y` 当 `x = x op y`
+    const cf = { code: cur, type: t };
+    const uf = this.opUser(node, op, [cf, one], this.opBuiltinSig([cf, one]));
+    if (uf !== null) {
+      const v = this.coerce(uf, t, node, `'${q.field} ${op}=' 的结果`);
+      return v === null ? null : put(v.code);
+    }
     if (t === 'pair') {
       // pair 字段上的复合赋值与 pair 变量上那份是同一条规则（同一批测量）：`+= -=`
       // 逐分量，`*= /=` 走**复数**乘除 —— 量过 `p *= 2` 是 (4,5)->(8,10)，走
@@ -2320,6 +2476,14 @@ class AsyLower {
     const one = rhs === null ? { code: el === 'real' ? '(real 1.0)' : '(int 1)', type: el } : this.expr(rhs);
     if (one === null) return null;
     if (rhs === null && el !== 'int' && el !== 'real') return this.err(node, `${el} 的数组元素不能自增自减`);
+    // 复合赋值走同一个二元算符（第二十三刀）。`cur` 会出现两次，但下标与数组都已经绑成
+    // 临时量了，所以求值次数不变
+    const ce = { code: cur, type: el };
+    const ue = this.opUser(node, op, [ce, one], this.opBuiltinSig([ce, one]));
+    if (ue !== null) {
+      const v = this.coerce(ue, el, node, `数组元素 '${op}=' 的结果`);
+      return v === null ? null : put(v.code);
+    }
     if (op === '#' || op === '%') {
       if (el !== 'int' || one.type !== 'int') return this.err(node, `'${op}=' 两边要是 int`);
       const helper = op === '#' ? 'asy__quot' : 'asy__mod';
@@ -2448,16 +2612,33 @@ class AsyLower {
     const nm = isAtom(n.items[2]) ? n.items[2].value : null;
     if (nm === null) return;
     if (nm === 'operator init') { this.oinitSig(n, at); return; }
-    if (nm.startsWith('operator ')) { this.nope(n, '算符重载的定义'); return; }
+    // 算符重载（第二十三刀）：`V operator +(V,V)` 就是个名字叫 `operator +` 的函数，
+    // 所以候选表按这个名字存 —— asy 里它跟普通重载在同一张表里（量过：用户的
+    // `int operator +(int,int)` 会**盖掉内建的** `2 + 3`）。降级出的符号名要是个标识符。
+    let sym = nm;
+    if (nm.startsWith('operator ')) {
+      const op = nm.slice('operator '.length);
+      if (ASY_OPBAD.has(op)) {
+        this.err(n, `'operator ${op}' 不是合法的 asy 声明 —— asy 的语法里就没有这个算符名，`
+          + `那边直接报 "syntax error"（不带 ASY_NOPE：不是还没做）`);
+        return;
+      }
+      if (!ASY_OPSYM.has(op)) { this.nope(n, `算符 '${op}' 的重载`); return; }
+      sym = `asy__op_${ASY_OPSYM.get(op)}`;
+    }
     if (nm === 'write') { this.nope(n, "重新定义 'write'"); return; }
     const ret = this.type(n.items[1], `函数 ${nm} 的返回类型`);
     const ps = this.formals(n.items[3]);
     if (ret === null || ps === null) return;
+    if (nm.startsWith('operator ') && ps.length !== 1 && ps.length !== 2) {
+      this.nope(n, `${ps.length} 元的 '${nm}'（算符只有一元与二元）`);
+      return;
+    }
     const types = [];
     for (const p of ps) types.push(p.type);
     // `ps` 带名字与默认值节点（命名实参与默认实参要它）；`params` 只是类型，
     // 保留是因为别处的实参检查一直按下标读它。
-    const cand = { ret, params: types, ps, node: n, sym: nm, at };
+    const cand = { ret, params: types, ps, node: n, sym, at };
     const list = this.funcs.has(nm) ? this.funcs.get(nm) : [];
     const key = types.join(',');
     for (let i = 0; i < list.length; i++) {
