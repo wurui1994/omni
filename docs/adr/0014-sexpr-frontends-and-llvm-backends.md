@@ -2608,6 +2608,32 @@ lower.js（入口 + 27 个转接方法）
 五刀下来每一刀都是 `tests/asy` 107/107 + `tests/bootstrap` 60/60，
 且 `import graph;` 一直是 187 条、`import plain;` 一直是 2 条 —— 一个数都没动过。
 
+### 可变形参的另一半：函数类型里那一格（plain 的墙 2 -> 1）
+
+`plain_paths.asy:3` 的 `using interpolate=guide(... guide[]);` —— 可变形参在**函数类型**里。
+拼法定成"把 `... ` 留在形参的类型文本里"（`int(... int[])`），理由是这一层所有类型都是字符串，
+这样类型相等还是一次 `===`：可变的只等于可变的。这一条不是我编的，是量的 ——
+`using afn=int(int[]); afn g = total;` 那边报 `cannot cast 'int(... int[] xs)' to 'int(int[])'`
+并退 1，所以它进 `strict/varargs-fnty-cast`（真 asy 也拒）。
+
+核心方言那边**一个字没加**：`(fnty …)` 里那一格就降成一条普通的数组形参 —— 因为普通函数上的
+可变形参本来就是"在调用处打成一条数组"（第三十三刀），两边一致。通过这种函数值调也通了，
+四种形状与真 asy 逐字节相同（`f()` 是 0、`f(1,2,3)` 是 6、`f(9, ... a)` 是 18、
+前面带固定格且元素做 int->real 提升的 `g(1, 2, 3.5)` 是 6.5）。
+
+**顺手抓到一个真 bug**：函数值的类型文本原来有**两份**拼法 —— `asyCandFnType` 一份，
+`asyNameOf` 里手抄了一份。加上 `... ` 之后抄的那份落后了，于是 `vfn f = total;` 报
+"要 int(... int[])，这里是 int(int[])"。改成只有一份（`asyNameOf` 调 `asyCandFnType`）。
+那句"与 nameOf 里那份拼法必须一致"的注释本来就在，注释挡不住抄第二遍。
+
+数字要读对：`import plain;` 从 2 条降到 **1** 条（只剩 `plain_strings.asy:260` 的参数化模块），
+但这**不等于** plain_paths 通了 —— 单独 `import plain_paths;` 还有 39 条
+（`operator tension` / `operator controls` 的算符重载、重定义 `write` …）。
+plain.asy 是 `include plain_strings;` 在 `include plain_paths;` **之前**，include 是拼进同一个
+单元的，那个单元在 260 行就断了，所以 plain_paths 那 39 条现在根本走不到。
+`import graph;` 还是 **187** —— 一点没动，也应该没动：graph 那 187 条里 35 个 `Label`、
+12 个 `interpolate`、10 个 `ticks`、9 个 `scaleT` 全是 plain 没加载完的下游。
+
 ## 后果与代价
 
 

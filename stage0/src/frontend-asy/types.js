@@ -165,12 +165,27 @@ export const ASY_PAIR_TY = '(vec real 2)';
  * 所有 helper 都是逐道写死的，`==` 只比前三道，印的时候也只印前三道。
  */
 export const ASY_TRIPLE_TY = '(vec real 4)';
+/**
+ * 函数类型里那一格可变形参（`guide(... guide[])`，plain_paths.asy:3 的 interpolate 就是它）。
+ * 拼法照 asy 自己的：`... ` 留在**形参的类型文本里**。这样类型相等还是一次字符串比较 ——
+ * 可变的只等于可变的，`guide(guide[])` 与 `guide(... guide[])` 是两个类型（量过 asy 也这么认：
+ * 把后者赋给前者报 "cannot convert"）。
+ */
+export const ASY_RESTPFX = '... ';
+export const asyIsRestP = (p) => p.startsWith(ASY_RESTPFX);
+export const asyRestBase = (p) => p.slice(ASY_RESTPFX.length);
+
 export const asyCore = (t) => {
   if (asyIsArr(t)) return `(arr ${asyCore(asyElem(t))})`;
   if (asyIsFn(t)) {
     const s = asyFnSplit(t);
     let ps = '';
-    for (const p of s.params) ps = ps === '' ? asyCore(p) : `${ps} ${asyCore(p)}`;
+    for (const p of s.params) {
+      // 可变那一格在核心方言里就是**一条数组形参** —— 方言的 `(fnty …)` 没有可变这一档，
+      // 而普通函数那边的可变形参也是"在调用处打成一条数组"（见 applyCall），两边一致。
+      const b = asyIsRestP(p) ? asyRestBase(p) : p;
+      ps = ps === '' ? asyCore(b) : `${ps} ${asyCore(b)}`;
+    }
     return `(fnty (${ps}) ${asyCore(s.ret)})`;
   }
   if (t === 'pair') return ASY_PAIR_TY;

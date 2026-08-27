@@ -17,7 +17,7 @@
 
 import { isList, isAtom, head } from '../sexpr/read.js';
 import {
-  ASY_NOPE, DOT_BAD, asyConvCost, asyOpText,
+  ASY_NOPE, DOT_BAD, asyConvCost, asyOpText, asyIsRestP, asyRestBase,
   asyIsArr, asyElem, asyIsFn, asyFnSplit, asyCore,
 } from './types.js';
 import { ASY_PAIRFN, ASY_STRFN, ASY_STR_DEPS, ASY_STR_NOPE } from './runtime.js';
@@ -481,23 +481,50 @@ export function asyOpBuiltinSig(L, vals) {
 export function asyFnValCall(L, n, nm, ft, callee) {
   const s = asyFnSplit(ft);
   if (s === null) return L.nope(n, `认不出的函数类型 '${ft}'`);
+  // 类型里那一格可变形参（`guide(... guide[])`，plain_paths.asy:3 的 interpolate）：
+  // 最后一格收所有多出来的位置实参。量过 asy 允许通过函数值这么调 ——
+  // `using vfn=int(... int[]); vfn f=total; f(1,2,3)` 印 6。
+  const rAt = s.params.length - 1;
+  const isVar = s.params.length > 0 && asyIsRestP(s.params[rAt]);
+  const restTy = isVar ? asyRestBase(s.params[rAt]) : null;
   const args = asyCallArgs(L, n);
   if (args === null) return null;
-  if (args.length !== s.params.length) {
-    return L.err(n, `'${nm}' 是 ${ft}，要 ${s.params.length} 个实参，给了 ${args.length} 个`);
+  if (isVar ? args.length < rAt : args.length !== s.params.length) {
+    const want = isVar ? `至少 ${rAt}` : `${s.params.length}`;
+    return L.err(n, `'${nm}' 是 ${ft}，要 ${want} 个实参，给了 ${args.length} 个`);
   }
   let code = `(callfn ${callee}`;
+  const packed = [];
   let i = 0;
   while (i < args.length) {
     if (args[i].key !== null) {
       return L.err(n, `函数值没有形参名，这里不能写 '${args[i].key}='`);
     }
     if (args[i].lines !== null) for (const l of args[i].lines) L.pre.push(l);
-    // 函数类型里还没有可变形参那一格（plain_paths.asy:3 的 `guide(... guide[])` 就是它），
-    // 所以这里的 `... x` 一定接不住 —— 说清是这一条，别落到"实参个数不对"上
+    // 落到可变那一格（或更后面）：进包，不占槽
+    if (isVar && i >= rAt) {
+      if (args[i].v.over !== undefined) {
+        return L.nope(args[i].node, '重载集当可变实参（这一刀只按槽的类型挑固定那几格）');
+      }
+      if (args[i].spread === true) {
+        // `... a`：整份数组接到包后面。类型要一模一样 —— asy 不给这一格做元素级提升。
+        if (args[i].v.type !== restTy) {
+          return L.err(args[i].node, `'${nm}' 的展开实参：要 ${restTy}，这里是 ${args[i].v.type}`);
+        }
+        packed.push({ code: args[i].v.code, spread: true });
+      } else {
+        const ev = L.coerce(args[i].v, asyElem(restTy), args[i].node, `'${nm}' 的可变实参`);
+        if (ev === null) return null;
+        packed.push({ code: ev.code, spread: false });
+      }
+      i++;
+      continue;
+    }
     if (args[i].spread === true) {
-      return L.nope(args[i].node, `通过函数值调用时的展开实参（'${nm}' 是 ${ft}，`
-        + '函数类型里还没有可变形参那一格）');
+      return isVar
+        ? L.err(args[i].node, `'${nm}' 的展开实参只能落在可变那一格上（${ft}）`)
+        : L.nope(args[i].node, `通过函数值调用时的展开实参（'${nm}' 是 ${ft}，`
+          + '这个函数类型里没有可变形参那一格）');
     }
     // 重载集当实参（callArgs 先不定案的那种）：这里的期望类型是函数类型里那一格
     if (args[i].v.over !== undefined) {
@@ -514,6 +541,29 @@ export function asyFnValCall(L, n, nm, ft, callee) {
     if (v === null) return null;
     code = `${code} ${v.code}`;
     i++;
+  }
+  if (isVar) {
+    // 可变那一格：现造一条新数组，与 applyCall 里那一段同一份写法（那边有为什么"总是造"
+    // 的测量：`... a` 是拷进去的）。核心方言没有"接一条数组"的指令，所以展开靠一条循环。
+    const at = asyCore(restTy);
+    if (packed.length === 0) {
+      code = `${code} (anew ${at} (int 0))`;
+    } else {
+      if (L.pre === null) return L.nope(n, '这个位置的可变实参（要摊成语句，这里放不下）');
+      const tmp = `asy__va${L.tmp++}`;
+      L.pre.push(`(let ${tmp} ${at} (anew ${at} (int 0)))`);
+      for (const p of packed) {
+        if (!p.spread) { L.pre.push(`(apush (var ${tmp}) ${p.code})`); continue; }
+        const src = `asy__vs${L.tmp++}`;
+        const ix = `asy__vi${L.tmp++}`;
+        L.pre.push(`(let ${src} ${at} ${p.code})`);
+        L.pre.push(`(do (let ${ix} int (int 0))`
+          + ` (while (bin "<" (var ${ix}) (alen (var ${src})))`
+          + ` (do (apush (var ${tmp}) (aget (var ${src}) (var ${ix})))`
+          + ` (set ${ix} (bin "+" (var ${ix}) (int 1))))))`);
+      }
+      code = `${code} (var ${tmp})`;
+    }
   }
   return { code: `${code})`, type: s.ret };
 }

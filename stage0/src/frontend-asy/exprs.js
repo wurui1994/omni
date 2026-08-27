@@ -18,7 +18,7 @@
 
 import { isList, isAtom, isStr, head } from '../sexpr/read.js';
 import {
-  ASY_NOPE, DOT_BAD, CAP_BAD, ASY_ARRELEM_TEXT, ASY_CYCLE, asyOpText,
+  ASY_NOPE, DOT_BAD, CAP_BAD, ASY_ARRELEM_TEXT, ASY_CYCLE, ASY_RESTPFX, asyOpText,
   asyIsArr, asyElem, asyIsFn, ASY_PAIR_TY, ASY_TRIPLE_TY, asyCore,
 } from './types.js';
 import { ZERO, ASY_PAIRFN, ASY_STRFN, ASY_STR_DEPS, strLit } from './runtime.js';
@@ -98,9 +98,10 @@ export function asyNameOf(L, n, nm) {
         return L.nope(n, `把带默认值的函数 '${nm}' 当值用（函数值没有默认值）`);
       }
     }
-    let ps = '';
-    for (const p of c.params) ps = ps === '' ? p : `${ps},${p}`;
-    return { code: `(fnref ${c.sym})`, type: `${c.ret}(${ps})` };
+    // 拼法只有一份（asyCandFnType）：这里原来是抄的一遍，可变形参那一格加进来之后
+    // 抄的那份就落后了 —— `int total(... int[] xs)` 当值用时印成了 `int(int[])`，
+    // 于是 `using vfn=int(... int[]); vfn f=total;` 报"类型不对"。
+    return { code: `(fnref ${c.sym})`, type: asyCandFnType(L, c) };
   }
   if (cands.length > 1) {
     return L.nope(n, `把有 ${cands.length} 个重载的 '${nm}' 当值用`
@@ -118,7 +119,13 @@ export function asyOverPick(L, r, want) {
 /** 一个候选当**函数值**时的类型文本（与 nameOf 里那份拼法必须一致） */
 export function asyCandFnType(L, c) {
   let ps = '';
-  for (const p of c.params) ps = ps === '' ? p : `${ps},${p}`;
+  for (let i = 0; i < c.params.length; i++) {
+    // 可变那一格印成 `... T[]`，与函数类型那边的拼法对齐（见 types.js 的 ASY_RESTPFX）——
+    // 不然 `guide(... guide[])` 这种类型永远接不住一个真的可变函数。
+    const p = c.ps === undefined || c.ps[i] === undefined ? null : c.ps[i];
+    const t = p !== null && p.rest === true ? `${ASY_RESTPFX}${c.params[i]}` : c.params[i];
+    ps = ps === '' ? t : `${ps},${t}`;
+  }
   return `${c.ret}(${ps})`;
 }
 

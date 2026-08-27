@@ -12,7 +12,7 @@
 
 import { isList, isAtom, head } from '../sexpr/read.js';
 import {
-  ASY_NOPE, SCALARS, ASY_MODSTM, ASY_ARRELEM_TEXT, ASY_OPSYM, ASY_OPBAD,
+  ASY_NOPE, SCALARS, ASY_MODSTM, ASY_ARRELEM_TEXT, ASY_OPSYM, ASY_OPBAD, ASY_RESTPFX,
   asyIsArr, asyElem, asyIsFn, asyCore,
 } from './types.js';
 import { ZERO } from './runtime.js';
@@ -321,8 +321,19 @@ export function asyFnTypeOf(L, ret, formalsNode, at) {
     return L.nope(at, '返回类型自己是函数类型（`real(real)(int)` 那种拼法有歧义）');
   }
   const ps = [];
-  for (const f of L.flat(formalsNode, 'formals')) {
-    if (!isList(f) || head(f) !== 'formal') return L.nope(f, '函数类型里的关键字形参或可变形参');
+  // `guide(... guide[])`（plain_paths.asy:3 的 interpolate）：可变那一格在语法上与普通函数
+  // 那边同一个形状 —— `(formals-rest 形参)` 是"只有它"，`(formals-rest formals 形参)` 是
+  // "前面还有几个固定的"。见 asyFormals 那一段。
+  let fixed = formalsNode;
+  let restF = null;
+  if (isList(formalsNode) && head(formalsNode) === 'formals-rest') {
+    if (formalsNode.items.length === 2) { fixed = null; restF = formalsNode.items[1]; }
+    else { fixed = formalsNode.items[1]; restF = formalsNode.items[2]; }
+  }
+  const flist = fixed === null ? [] : L.flat(fixed, 'formals');
+  if (restF !== null) flist.push(restF);
+  for (const f of flist) {
+    if (!isList(f) || head(f) !== 'formal') return L.nope(f, '函数类型里的关键字形参');
     const t = L.type(f.items[2], '函数类型里的形参');
     if (t === null) return null;
     if (f.items.length > 3) {
@@ -344,6 +355,17 @@ export function asyFnTypeOf(L, ret, formalsNode, at) {
       }
     }
     ps.push(t);
+  }
+  // 最后那一格是 `... T[]`：与普通函数那边同一条规矩（一维数组、元素在白名单里），
+  // 记法是把 `... ` 留在类型文本里（见 types.js 的 ASY_RESTPFX）。
+  if (restF !== null) {
+    const last = ps[ps.length - 1];
+    if (last === undefined) return null;
+    if (!asyIsArr(last) || !L.arrElemOk(asyElem(last))) {
+      return L.nope(restF, `函数类型里的 \`... ${last}\`（可变形参只能是一维数组，`
+        + `元素是 ${ASY_ARRELEM_TEXT} 里那些）`);
+    }
+    ps[ps.length - 1] = `${ASY_RESTPFX}${last}`;
   }
   let inner = '';
   for (const p of ps) inner = inner === '' ? p : `${inner},${p}`;
