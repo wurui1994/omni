@@ -1624,9 +1624,10 @@ class AsyLower {
     }
     if (this.globals.has(nm)) return this.gvarLate(n, nm);
     // 裸的**函数名**当值用（`findroot(f, a, b)` 的那个 f）。只有一个候选时才收 ——
-    // 有多个重载时"是哪一个"要靠期望类型定案，而这一层是自底向上定型的，
-    // 没有期望类型可问，所以那种情况报"还没做"而不是猜一个（与 hir/check.js 的
-    // funcValue 同一条判据：拿不准就让用户写清楚）。
+    // 有多个重载时"是哪一个"要靠期望类型定案，而这一层是自底向上定型的，没有期望类型可问。
+    // **实参位置**上那一条已经补了（见 overArg / fit：callArgs 先不定案，等 fit 拿槽的类型
+    // 挑同型的一份）；到这里还落下来的是别的位置 —— 主要是变量的初值（`real g(real,real)
+    // = both;`，真 asy 收，见 bad/overload-value-init.asy）。那种情况报"还没做"而不是猜一个。
     const cands = this.visible(nm);
     if (cands.length === 1) {
       const c = cands[0];
@@ -1645,6 +1646,51 @@ class AsyLower {
     }
     return this.err(n, `未声明的变量 '${nm}'`);
   }
+
+  /** 重载集按期望类型落成 `(fnref …)`（挑不出来给 null）。fit 已经挑过一遍，这里是落地 */
+  overPick(r, want) {
+    for (const c of r.v.over) if (this.candFnType(c) === want) return `(fnref ${c.sym})`;
+    return null;
+  }
+
+  /** 一个候选当**函数值**时的类型文本（与 nameOf 里那份拼法必须一致） */
+  candFnType(c) {
+    let ps = '';
+    for (const p of c.params) ps = ps === '' ? p : `${ps},${p}`;
+    return `${c.ret}(${ps})`;
+  }
+
+  /**
+   * 实参位置上的一个**裸名字**，而它是个有多个重载的函数名 —— 这里**先不定案**，
+   * 回那一串候选，让 fit 按"这个槽要什么类型"挑（asy 就是这么定的：函数名当值用时
+   * 由期望类型选重载）。挑不出来就是没有能匹配的签名，与别的实参一视同仁。
+   *
+   * 量出来的理由：内建面一加 `add(frame,frame)`，用户自己的 `add(int,int)` 就与它同一个
+   * 重载集，`fold3(add,1,2,3)` 那句在真 asy 那边是通的，在我们这里报"当值用"。
+   *
+   * 顺序照 nameOf：局部量、`this` 的字段、文件级变量都遮住函数名（那三档里有就不是这条路）。
+   * 带默认值的候选一律不算 —— 函数值没有默认值（nameOf 里同一条）。
+   */
+  overArg(node) {
+    if (!isList(node) || head(node) !== 'name-exp') return null;
+    const nm = this.plainName(node.items[1]);
+    if (nm === null) return null;
+    if (this.lookup(nm) !== null) return null;
+    if (this.selfField(nm) !== null) return null;
+    if (this.gvarHere(nm) !== null || this.globals.has(nm)) return null;
+    const cands = this.visible(nm);
+    if (cands.length < 2) return null;
+    const out = [];
+    for (const c of cands) {
+      let ok = true;
+      if (c.ps !== undefined) {
+        for (const p of c.ps) if (p.def !== null && p.def !== undefined) ok = false;
+      }
+      if (ok) out.push(c);
+    }
+    return out.length < 2 ? null : { nm: nm, cands: out };
+  }
+
 
   /** 数值提升：asy 允许 `3 == 3.0`（量过），核心方言两边必须同型，于是这里显式插 toreal。
    *  pair 也在这条链上：`2+(1,2)` 是 (3,2)、`(1,2)==3` 是 false —— int/real 会被
@@ -2738,6 +2784,14 @@ class AsyLower {
       const r = raw[i];
       if (r.lines !== null) for (const s of r.lines) this.pre.push(s);
       const at = f.slot[i];
+      // 重载集：fit 已经按这个槽的类型挑过一份了，这里把它落成 `(fnref …)`（不走 coerce ——
+      // 那一份与槽同型，而 coerce 认不出"重载集"这个类型）
+      if (r.v.over !== undefined) {
+        const pick = this.overPick(r, d.ps[at].type);
+        if (pick === null) return this.err(r.node, `'${nm}' 的实参 ${d.ps[at].name}：挑不出重载`);
+        codes.set(at, pick);
+        continue;
+      }
       const v = this.coerce(r.v, d.ps[at].type, r.node, `'${nm}' 的实参 ${d.ps[at].name}`);
       if (v === null) return null;
       if (!reorder) { codes.set(at, v.code); continue; }
@@ -2846,6 +2900,17 @@ class AsyLower {
         return this.err(n, `函数值没有形参名，这里不能写 '${args[i].key}='`);
       }
       if (args[i].lines !== null) for (const l of args[i].lines) this.pre.push(l);
+      // 重载集当实参（callArgs 先不定案的那种）：这里的期望类型是函数类型里那一格
+      if (args[i].v.over !== undefined) {
+        const pick = this.overPick(args[i], s.params[i]);
+        if (pick === null) {
+          return this.err(args[i].node, `'${nm}' 的第 ${i + 1} 个实参：要 ${s.params[i]}，`
+            + '而这个名字的那几个重载里没有同型的一份');
+        }
+        code = `${code} ${pick}`;
+        i++;
+        continue;
+      }
       const v = this.coerce(args[i].v, s.params[i], args[i].node, `'${nm}' 的第 ${i + 1} 个实参`);
       if (v === null) return null;
       code = `${code} ${v.code}`;
@@ -2865,6 +2930,12 @@ class AsyLower {
         key = isAtom(a.items[1]) ? a.items[1].value : null;
         node = a.items[2];
       } else { this.nope(a, '展开实参'); return null; }
+      // 有多个重载的裸函数名：先不求，等 fit 按槽的类型挑（overArg 里写了理由）
+      const ov = this.overArg(node);
+      if (ov !== null) {
+        out.push({ key, node, v: { code: null, type: `<${ov.nm} 的重载集>`, over: ov.cands }, lines: null });
+        continue;
+      }
       const save = this.pre;
       const lines = save === null ? null : [];
       if (lines !== null) this.pre = lines;
@@ -2907,6 +2978,18 @@ class AsyLower {
         for (let k = 0; k < cand.ps.length; k++) if (cand.ps[k].name === r.key) at = k;
       }
       if (at < 0 || at >= cand.ps.length || filled.has(at)) return null;
+      // 重载集当值用（callArgs 先不定案的那种）：按**这个槽要的类型**挑一份。
+      // 挑到就是同型（cost 不加），挑不到这个候选就不合用 —— 与别的实参一视同仁。
+      if (r.v.over !== undefined) {
+        let hit = false;
+        for (const c of r.v.over) if (this.candFnType(c) === cand.ps[at].type) hit = true;
+        if (!hit) return null;
+        filled.set(at, true);
+        slot.push(at);
+        if (at < last) reordered = true;
+        last = at;
+        continue;
+      }
       // `explicit` 的槽只收类型一模一样的实参（第二十六刀，量过：连 int->real 都挡）
       if (cand.ps[at].exp === true && r.v.type !== cand.ps[at].type) return null;
       const c = asyConvCost(r.v.type, cand.ps[at].type);

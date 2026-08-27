@@ -631,12 +631,12 @@ void erase(frame f) {
   f.ops = none;
 }
 
-// `add(frame,frame)`（把 src 的元素并进 dest）**这一刀先不写**，理由是量出来的：
-// 一加上去，`cases/42-fntype` 里 `fold3(add, 1, 2, 3)` 就报"把有 2 个重载的 'add' 当值用" ——
-// 用户自己的 `add(int,int)` 与这一份 `add(frame,frame)` 成了同一个重载集，而"当值用的是
-// 哪一个"要靠**期望类型**定案，这个前端还是自底向上定型的（nameOf 那一段的注释）。
-// 真 asy 收（它按期望类型挑），所以这是我们缺的一刀，不是 asy 的行为。
-// 那一刀补完再把这个函数加回来 —— 它现在的用处只在 plain_filldraw，而那个文件还引不动。
+// 并进去：src 的元素追加到 dest 后面（量过 `add(g,f)` 之后 max(g) 与 max(f) 一样）。
+// 这个名字与用户自己的 `add` 组成同一个重载集 —— 前端按**期望类型**挑重载那一刀补上了，
+// 所以 `fold3(add,1,2,3)` 那种写法照样通（cases/42-fntype 钉着）。
+void add(frame dest, frame src) {
+  for (int i = 0; i < src.ops.length; ++i) dest.ops.push(src.ops[i]);
+}
 
 bool fits(picture pic, real s) {
   box bx = picbox(pic, s);

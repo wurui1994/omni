@@ -2202,6 +2202,28 @@ plain_filldraw，而那个文件还引不动 —— 所以先记下来，等「�
 把类型补齐让单元往后走，走到的地方又是新的错。**总数不动不等于没进展，也不等于有进展**，
 要看的是分桶。现在剩下的第一名是 `Label`（35 条），而 Label 要 TeX。
 
+### 按期望类型挑重载：实参位置这一半
+
+上一刀欠的账。asy 里函数名当值用时，"是哪一份"由**期望类型**定案（量过：两份 `both`，
+`useI(both)` 给 7、`useR(both)` 给 12）。我们的前端是自底向上定型的 —— `callArgs` 先把
+实参逐个求出来，再拿类型去挑候选 —— 所以一个裸名字轮不到问"这里想要什么类型"。
+
+落法是**推迟**，不是回头重写定型方向：`callArgs` 遇到"裸名字 + 多个可见重载"时不求，
+塞一个带 `over`（那一串候选）的占位；`fit` 在给这个槽打分时按 `cand.ps[at].type` 挑同型
+的一份，挑不到这个候选就不合用；`applyCall` / `fnValCall` 把挑中的那份落成 `(fnref …)`。
+一共四处，都在原来的打分路径上，没有第二遍求值。
+
+只认**同型**，不给任何转换余量 —— 量过 asy 也是这样：没有一份同型时它报
+`cannot call … with parameter '<overloaded>'` 加 `use of variable 'both' is ambiguous`。
+`tests/asy/strict/overload-value-nofit` 钉这一条。
+
+还差的一半是**变量的初值**（`real g(real,real) = both;`，真 asy 收）：那个位置期望类型明明
+写在左边，但走的不是 fit 那条路。现在报的是 nope 而不是错答案，`tests/asy/bad/
+overload-value-init` 钉着。
+
+尺子不动（`import graph;` 还是 187）—— 这一刀补的是能力，不是 base 里某个卡住的类型。
+它换回来的是内建面可以自由用 asy 的真名字了：`add(frame,frame)` 就是靠它加回去的。
+
 ## 后果与代价
 
 

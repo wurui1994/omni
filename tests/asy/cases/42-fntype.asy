@@ -48,3 +48,17 @@ real pick(bool up, real v) {
 }
 write(pick(true, 7));
 write(pick(false, 7));
+
+// 有多个重载的名字当**实参**用：是哪一份由"这个槽要什么类型"定案（asy 就是这么定的，
+// 量过 useI/useR 那两句在真 asy 那边是 7 与 12）。量出来的理由：内建面加了
+// `add(frame,frame)` 之后，上面 `fold3(add,1,2,3)` 的 add 就是一个两份的重载集了。
+int both(int a, int b) {return a + b;}
+real both(real a, real b) {return a * b;}
+int useI(int f(int,int)) {return f(3, 4);}
+real useR(real f(real,real)) {return f(3, 4);}
+write(useI(both));
+write(useR(both));
+
+// 传给函数值形参、再间接调用（期望类型是形参那一格的函数类型）
+real callit(real f(real,real), real a, real b) {return f(a, b);}
+write(callit(both, 2, 5));
