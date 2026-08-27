@@ -2345,6 +2345,53 @@ if (fields.length === 0) {
 补上占位字段之后 `import graph;` 回到 **189**，桶也回到原样（76 类型 / 28 内建函数 / 4 隐式
 缩放 / 3 无名形参 / 3 数组方法 / …）；`import plain;` 还是那**三**条挡路的，一条不多一条不少。
 
+### struct 体里的 `using`：类型名与变量名是两个名字空间
+
+plain 那三条挡路的第二条是 `plain_filldraw.asy:93`：
+
+```asy
+struct filltype
+{
+  using fill2=void(frame f, path[] g, pen fillpen);
+  fill2 fill2;          // ← 字段与别名同名
+  ...
+}
+```
+
+先量了三条（`asy -noV`）：体里的 `using` 出了 struct 就没了（外面 `fn2 g;` 报
+`no type of name 'fn2'`）；同名的字段与别名并存，`b.fn2` 取的是字段；可见性**严格按体里的
+书写顺序** —— 写在字段后面的别名，那个字段看不见；写在方法后面的，那个方法**体里**也看不见。
+
+所以别名不能进文件级那张 `tyAlias`，另开一张挂在记录上（`rec.tyAlias`），
+`this.recAlias = {map, bi}` 是"正在降哪个 struct 的体、走到第几项"。裁法与 selfField 那条
+同一把尺子，只是刻度不是成员槽而是**体里的项序号** —— `using`、`static`、`autounravel`
+都不占成员槽，共用 `mat` 会让 `using` 与紧跟着的字段撞在同一个刻度上。
+
+两个坑，都是"开关开得不够早"：
+
+* `type()` 里查别名的前置条件写的是 `this.tyAlias.has(nm)`，struct 体里的别名从不进那张表，
+  于是分支根本不进。抽出 `aliasKnown()`（两张表都问）才通。
+* `method()` 第二遍降正文时 `this.formals(...)` 在设 `recAlias` **之前**就调了 ——
+  `pt shift(pt d)` 的形参因此报"类型 'pt'"。开关要挪到 formals 前面。
+
+还有一条是诊断的成色：写在后面的别名 asy 自己也拒，所以要报 aliasLate 那条 err，
+不能报"这一刀还不支持"那条 nope（strict 的纪律：拒的理由不能带 `ASY_NOPE`）。但降到那个
+字段时别名还没登记，认不出"确实有这个名字、只是写在后面"。所以进体之前先扫一遍拿到
+**所有别名的名字**（`aliasNames`，只要名字不解析类型），`aliasKnown` 连这张也问。
+`tests/asy/strict/recusing-order.asy` 钉着。
+
+这一刀之后 `plain_filldraw.asy:93` 的诊断换成了**函数类型的字段**：
+
+```
+struct filltype 的 void(frame,path[],pen) 字段
+```
+
+方言那边明确拒着（`(class Holder (f (fnty (int) int)))` 报"字段只能是 int / real / bool /
+string、(vec T N)、(arr T) 或另一个结构体/类"），所以下一刀在方言与后端那一侧，不在前端。
+`import graph;` 还是 189，桶没动。
+
+## 后果与代价
+
 
 - **依赖 LLVM**：本机 `libLLVM.dylib` 157MB。产物变大，但仍然自带执行器、
   不依赖外部 cc。极小构建走 C 后端或第三档自写后端。

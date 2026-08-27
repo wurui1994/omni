@@ -954,6 +954,11 @@ class AsyLower {
     // 方法体里的裸名字要按 asy 的顺序解析找**前面**的字段与方法（量过：用后面声明的字段
     // 报 "no matching variable"），而字段名要降成 `(fld (var this) f)`。
     this.self = null;
+    // struct 体里的 `using` 起的别名：`{map, mat}`，null = 不在任何 struct 体里。
+    // 单开一张表是因为这种别名**不漏出去** —— 量过 struct 外面 `fn2 g;` 报
+    // "no type of name 'fn2'"；而且同名的字段可以并存（`fill2 fill2;`，
+    // plain_filldraw.asy:93 就是这么写的），asy 的类型名与变量名是两个名字空间。
+    this.recAlias = null;
     // 方法声明表：`{rec, cand, at}`，第二遍按这个顺序发方法正文。方法降成一个多带一个
     // `this` 形参的普通函数（`asy__m_<记录>_<方法>`）—— 核心方言没有方法，而 asy 的方法
     // 本质上就是这个：量过 `A b = a; b.bump(1);` 改的是同一个对象（struct 是引用类型），
@@ -1219,7 +1224,7 @@ class AsyLower {
       const el = this.plainName(en);
       if (el === null) return this.nope(node, '带点的类型名');
       let eel = el;
-      if (this.tyAlias.has(el)) {
+      if (this.aliasKnown(el)) {
         const ael = this.aliasAt(el);
         if (ael === null) return this.aliasLate(node, el);
         eel = ael.t;
@@ -1239,7 +1244,7 @@ class AsyLower {
     if (nm === 'triple') return 'triple';
     // typedef 的别名。放在内建名后面、记录名前面：asy 那边 `typedef int int;` 是错的，
     // 而 `typedef` 一个 struct 名的别名是对的，所以顺序只影响诊断说哪一句。
-    if (this.tyAlias.has(nm)) {
+    if (this.aliasKnown(nm)) {
       const al = this.aliasAt(nm);
       return al === null ? this.aliasLate(node, nm) : al.t;
     }
@@ -1275,8 +1280,55 @@ class AsyLower {
       + `而 asy 的类型名是顺序解析的（那边报 "no type of name '${nm}'"）`);
   }
 
+  /**
+   * struct 体里所有 `using` / `typedef` 起的**名字**（只要名字，不解析类型）。
+   *
+   * 先扫一遍是为了那句诊断分得清：写在后面的别名，asy 报 "no type of name"（它自己也拒），
+   * 所以我们要报 aliasLate 那条 err，而不是"这一刀还不支持类型 'X'"那条 nope ——
+   * 两者的差别就是 tests/asy/strict 那条纪律（拒的理由不能带 ASY_NOPE）。
+   */
+  aliasNames(n) {
+    const out = new Map();
+    for (const item of this.flat(n.items[2], 'block')) {
+      const r = this.unwrapMod(item);
+      if (!isList(r)) continue;
+      const h = head(r);
+      if (h === 'typedec-using') {
+        const s = r.items[1];
+        if (isList(s) && isAtom(s.items[1])) out.set(s.items[1].value, true);
+        continue;
+      }
+      if (h !== 'typedec') continue;
+      const v = r.items[1];
+      if (!isList(v) || head(v) !== 'vardec') continue;
+      for (const d of this.flat(v.items[2], 'decids')) {
+        if (!isList(d) || head(d) !== 'decid') continue;
+        const s = d.items[1];
+        if (isList(s) && isAtom(s.items[1])) out.set(s.items[1].value, true);
+      }
+    }
+    return out;
+  }
+
+  /** `nm` 是**某处**声明过的别名吗（不管这里可见不可见）—— 两张表都要问：文件级那张，
+   *  与正在降的这个 struct 体里那张。分开问是为了 aliasLate 那句诊断：只有"确实有这个别名、
+   *  但写在后面"才说那句话，别的名字该落到"类型 'X'"那条。 */
+  aliasKnown(nm) {
+    if (this.tyAlias.has(nm)) return true;
+    return this.recAlias !== null
+      && (this.recAlias.map.has(nm)
+        || (this.recAlias.late !== undefined && this.recAlias.late.has(nm)));
+  }
+
   /** 别名表里 `nm` 在**当前位置**可见的那一份（挑最后一份），此处一份都不可见给 null */
   aliasAt(nm) {
+    // struct 体里的 `using` 先问：它遮住同名的文件级别名（asy 的作用域就是这么套的），
+    // 并且严格按**体里的书写顺序**裁 —— 量过两条：写在方法后面的 using，那个方法体里
+    // 报 "no type of name"；写在字段后面的，那个字段也报。所以 bi 是体里的项序号。
+    if (this.recAlias !== null) {
+      const e = this.recAlias.map.get(nm);
+      if (e !== undefined && e.bi < this.recAlias.bi) return e;
+    }
     const list = this.tyAlias.get(nm);
     if (list === undefined) return null;
     let hit = null;
@@ -1344,6 +1396,12 @@ class AsyLower {
       return this.err(start, '认不出的 typedef 项');
     }
     if (base === 'void' && t === 'void') return this.err(start, 'typedef 一个 void');
+    // struct 体里的 `using`（见 recAlias）：记进这个记录自己那张表，**不进**文件级的那张。
+    // 体里的 typedef 与体外同名时遮住体外那份，出了体就没了 —— 量过。
+    if (this.recAlias !== null) {
+      this.recAlias.map.set(nm, { t: t, bi: this.recAlias.bi });
+      return true;
+    }
     // 同名再 typedef 一次：asy 收（后面那句起换成新的那一份），所以存的是一串。
     const list = this.tyAlias.has(nm) ? this.tyAlias.get(nm) : [];
     list.push({ t: t, at: at });
@@ -1408,14 +1466,19 @@ class AsyLower {
     // 记录先登记（字段还空着）：方法的签名可以提到这个记录自己（`A copy()`），
     // 而 type() 是查 recVis 认记录名的。自引用字段那一条拦在 type() 前面，
     // 所以"字段还空着"这件事在这里看不出问题。
-    const rec = { name: nm, fields: fields, at: at, unit: this.unit.id };
+    const rec = { name: nm, fields: fields, at: at, unit: this.unit.id, tyAlias: new Map() };
     this.records.set(nm, rec);
     this.recVis.set(nm, { rec, at });
     // 体里的类型名按**这个 struct 的位置**判可见（recHere）：字段与方法签名只能提到
     // 前面声明过的记录。第一遍走到这里时 this.at 还是 0，所以要现设现还。
     const keepAt = this.at;
     this.at = at;
+    // 体里的 `using` 也是现设现还（见 recAlias）—— recordBody 里到处是 return null，
+    // 所以开关放在这一层，与 this.at 那一对并排
+    const keepAl = this.recAlias;
+    this.recAlias = { map: rec.tyAlias, bi: 0, late: this.aliasNames(n) };
     const out = this.recordBody(n, rec, at);
+    this.recAlias = keepAl;
     this.at = keepAt;
     return out;
   }
@@ -1426,7 +1489,12 @@ class AsyLower {
     const fields = rec.fields;
     const seen = new Map();
     let mat = 0;
+    let bi = 0;
     for (const item of this.flat(n.items[2], 'block')) {
+      // 体里的项序号：`using` 的可见性按它裁（见 aliasAt）。每一项都占一个号，
+      // 不管它占不占成员槽 —— 那样 `using` 与紧跟着的字段就不会撞在同一个号上。
+      this.recAlias.bi = bi;
+      bi++;
       const r = this.unwrapMod(item);
       if (!isList(r)) continue;
       // `autounravel`（第二十八刀）：这个成员其实是**文件级**声明 —— 交给 sig，
@@ -1453,6 +1521,13 @@ class AsyLower {
       // 与 autounravel 同一个形状，所以也不占成员槽。
       if (head(r) === 'vardec' && this.stMod(item)) {
         if (this.staticDec(rec, r, at) === null) return null;
+        continue;
+      }
+      // `using X = void(frame,path[],pen);` / `typedef … X;` 写在 struct 体里：别名只在
+      // 体里可见（见 recAlias），也不占成员槽。plain_filldraw.asy:93 的 filltype 靠这条 ——
+      // 它紧接着还写了 `fill2 fill2;`，同名的字段与别名并存，因为那是两个名字空间。
+      if (head(r) === 'typedec' || head(r) === 'typedec-using') {
+        if (this.typeDec(r, at) === null) return null;
         continue;
       }
       if (head(r) !== 'vardec') {
@@ -3247,10 +3322,15 @@ class AsyLower {
     const rec = d.rec === undefined ? null : d.rec;
     const isCtor = d.ctor === true;
     const saveSelf = this.self;
+    const saveAl = this.recAlias;
     this.scopes = [new Map()];
     if (rec !== null) {
       this.at = rec.at === undefined ? this.at : rec.at;
       this.self = { rec, mat: d.mat };
+      // 默认值那段是在被调方的作用域里求的，struct 体里的 `using` 在那儿也认（见 recAlias）
+      if (rec.tyAlias !== undefined) {
+        this.recAlias = { map: rec.tyAlias, bi: d.abi === undefined ? 0 : d.abi };
+      }
       this.declare(n, 'this', rec.name);
     }
     this.updates = [];
@@ -3291,6 +3371,7 @@ class AsyLower {
     this.scopes = saveScopes;
     this.at = saveAt;
     this.self = saveSelf;
+    this.recAlias = saveAl;
     if (saveUnit !== null) this.unitOut(saveUnit);
     if (bad) return null;
     this.wraps.push(`${text.join('\n')})`);
@@ -4645,6 +4726,8 @@ class AsyLower {
     const cand = {
       ret: ctor ? rec.name : ret, params: types, ps, node: n, at: -1, dat: at, mat, rec, ctor,
       sym: msym, base: msym, pfx: '', unit: this.unit.id,
+      // 体里的项序号：正文是第二遍才降的，那时候要靠它裁 struct 体里的 `using`（见 aliasAt）
+      abi: this.recAlias === null ? 0 : this.recAlias.bi,
     };
     const list = this.funcs.has(key) ? this.funcs.get(key) : [];
     const sk = types.join(',');
@@ -4671,8 +4754,12 @@ class AsyLower {
    * `(ret)`，塞进一个"要回记录"的函数里就不合法了。
    */
   method(rec, cand, at) {
+    // 体里的 `using` 要在 formals 之前就开着：形参与返回类型里也可能写那个别名
+    // （量过 `pt shift(pt d)` —— pt 是体里 using 起的名字）。见 recAlias。
+    const keepAl = this.recAlias;
+    this.recAlias = { map: rec.tyAlias, bi: cand.abi };
     const ps = this.formals(cand.node.items[3]);
-    if (ps === null) return null;
+    if (ps === null) { this.recAlias = keepAl; return null; }
     const isCtor = cand.ctor === true;
     const bodyRet = isCtor ? 'void' : cand.ret;
     const bodySym = isCtor ? `${cand.sym}_body` : cand.sym;
@@ -4684,6 +4771,7 @@ class AsyLower {
     for (const p of ps) this.declare(cand.node, p.name, p.type);
     const body = this.body(cand.node.items[4], bodyRet);
     this.pop();
+    this.recAlias = keepAl;
     this.self = null;
     this.at = keepAt;
     if (body === null) return null;
