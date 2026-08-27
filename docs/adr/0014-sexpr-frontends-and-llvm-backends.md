@@ -3009,6 +3009,33 @@ asy 的规则是那个变量在自己的初值里还不可见，所以判据加�
 跑的轴：`tests/asy`（126 passed，69.0s）、`tests/bootstrap`（60 passed）。只动
 `frontend-asy/`（decls.js、calls.js、exprs.js），sexpr 与 run.js 跳掉。
 
+### 函数值的 static / autounravel 字段：`import plain;` 那面墙倒了
+
+`iter.asy:42` 那一行 —— `autounravel Iterable_T operator cast(T[] items) = Iterable_T;`
+—— 是一个**函数值的 autounravel 字段**。上一刀补了文件级那一档，这一刀补 struct 里那一档，
+两档共用同一个 `fnTypeOf`。
+
+三处小改：`asyStaticDec` 认 `fundecidstart`（并把类型白名单里加上函数类型）；
+调用路径上补两档 —— `Box.sf(3)` 走 `statQual`（位置在 dotQual 与模块别名之后），
+`q.af(5)` 走 `asyMethodCall` 里字段之后的 static 那一档。量过 asy 三条访问路径都收，
+而且是**同一格**（`Box.af = thrice` 之后裸的 `af` 与 `q.af` 都变）。
+
+新增 `cases/64-fnvalue-static.asy`。
+
+**`import plain;` 的那面墙倒了**：不再是 1 条，而是 **4 条** —— 数字涨了，但那是墙倒之后
+后面的东西露出来了，不是回退。分两个桶：
+
+- 3 条同一个根：`iter.asy:14/30/48` 都报 `'asy__m6_Pair_K_V' 在这里还不是一个类型`。
+  那是**模板实例化的顺序**问题：`Pair_K_V` 作为模板实参传进 iter 时，别名坐进了表里，
+  但那个 struct 的声明排在后面。
+- 1 条是 `map.asy:104` 的 `keyword` 形参（早就在待办里）。
+
+`import graph;` 还是 183（graph 不走 collections/）。
+
+跑的轴：`tests/asy`（127 passed，38.0s）、`tests/bootstrap`（60 passed）。只动
+`frontend-asy/`（decls.js、calls.js），sexpr 与 run.js 跳掉。
+
+
 
 
 

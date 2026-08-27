@@ -61,6 +61,13 @@ export function asyCall(L, n) {
     // `m.f(…)`：模块限定的函数调用（第二十五刀）
     const mq = L.modAlias(callee.items[1]);
     if (mq !== null) return L.modCall(n, mq);
+    // `Box.sf(3)`：**类型名**限定的 static，而它是个函数值（第三十八刀）。位置照 name-exp
+    // 那边的顺序 —— dotQual 之后（同名的变量在点号左边赢），模块别名之后。
+    const sq = L.statQual(callee.items[1]);
+    if (sq !== null && asyIsFn(sq.type)) {
+      const qn = isAtom(callee.items[1].items[2]) ? callee.items[1].items[2].value : '?';
+      return asyFnValCall(L, n, qn, sq.type, `(var ${sq.sym})`);
+    }
   }
   if (nm === null) return L.nope(n, '调用一个不是普通名字的东西（函数值、方法、算符名）');
   if (nm === 'write') return L.err(n, `${ASY_NOPE}：write 出现在表达式位置（它是语句）`);
@@ -255,6 +262,13 @@ export function asyMethodCall(L, n, recv, mname) {
     const names = [];
     for (const key of L.units[rec.unit].funcs.keys()) {
       if (key.startsWith(`${rec.name}.`)) names.push(key.slice(rec.name.length + 1));
+    }
+    // 名字是个 **static/autounravel 的函数值字段**（第三十八刀）：`q.af(5)` 与
+    // `Box.af(5)` 取的是同一格（量过 asy 两条都通）。放在字段与方法之后 ——
+    // static 那一档在 asy 的成员查找里就在字段后面。
+    const st = L.statOf(rec.name, mname);
+    if (st !== null && asyIsFn(st.type)) {
+      return asyFnValCall(L, n, `${recv.type}.${mname}`, st.type, `(var ${st.sym})`);
     }
     return L.err(n, `struct ${recv.type} 没有方法 '${mname}'`
       + `${names.length === 0 ? '（它一个方法都没有）' : ` —— 有的是 ${names.join(' / ')}`}`);

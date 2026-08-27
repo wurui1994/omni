@@ -63,19 +63,26 @@ export function asyAuMod(L, n) {
  */
 export function asyStaticDec(L, rec, r, at, au) {
   const what = au === true ? 'autounravel' : 'static';
-  const t = L.type(r.items[1], `struct ${rec.name} 的 ${what} 字段`);
-  if (t === null) return null;
-  if (!SCALARS.has(t) && t !== 'pair' && t !== 'triple' && !L.isRec(t)
-      && !(asyIsArr(t) && L.arrElemOk(asyElem(t)))) {
-    return L.nope(r, `struct ${rec.name} 的 ${what} ${t} 字段（这一刀的全局量只收 `
-      + 'int/real/bool/string/pair/triple、struct，与它们的一维数组）');
-  }
+  const base = L.type(r.items[1], `struct ${rec.name} 的 ${what} 字段`);
+  if (base === null) return null;
   if (rec.statics === undefined) rec.statics = new Map();
   for (const d of L.flat(r.items[2], 'decids')) {
     if (!isList(d) || head(d) !== 'decid') return L.err(d, `认不出的 ${what} 字段声明`);
     const start = d.items[1];
-    if (!isList(start) || head(start) !== 'decidstart' || start.items.length !== 2) {
-      return L.nope(start, `带维度或形参表的 ${what} 字段名`);
+    // `static int sf(int) = twice;`：形参表跟在**名字**后面 —— 那是一个**函数值**的
+    // 静态字段（第三十八刀）。量过 asy 收：`Box.sf(3)`、裸的 `af(4)`、`q.af(5)` 三条都通。
+    // 与文件级那一档同一条路（globalNames 里那半边），所以类型也走同一个 fnTypeOf。
+    let t = base;
+    if (isList(start) && head(start) === 'fundecidstart') {
+      t = L.fnTypeOf(base, start.items[2], start);
+      if (t === null) return null;
+    } else if (!isList(start) || head(start) !== 'decidstart' || start.items.length !== 2) {
+      return L.nope(start, `带维度的 ${what} 字段名`);
+    }
+    if (!asyIsFn(t) && !SCALARS.has(t) && t !== 'pair' && t !== 'triple' && !L.isRec(t)
+        && !(asyIsArr(t) && L.arrElemOk(asyElem(t)))) {
+      return L.nope(r, `struct ${rec.name} 的 ${what} ${t} 字段（这一刀的全局量只收 `
+        + 'int/real/bool/string/pair/triple、struct、函数类型，与它们的一维数组）');
     }
     const nm = isAtom(start.items[1]) ? start.items[1].value : null;
     if (nm === null) return L.err(start, `${what} 字段少了名字`);
