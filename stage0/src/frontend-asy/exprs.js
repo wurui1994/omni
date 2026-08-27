@@ -808,7 +808,49 @@ export function asyArrMethod(L, n, recv, nm) {
     if (args.length !== 0) return L.err(n, `'pop' 不要实参，给了 ${args.length} 个`);
     return { code: `(apop ${recv.code})`, type: el };
   }
-  if (nm !== 'push') return L.nope(n, `数组的 '.${nm}(…)'（这一刀只有 .push / .pop）`);
+  if (nm === 'delete') {
+    // `a.delete()` 清空、`a.delete(i)` 删一格、`a.delete(i, j)` 删**闭区间**（量过）。
+    // 三条都回 void，所以照原样当一个表达式发出去，语句层会套 `(expr …)`。
+    if (args.length === 0) {
+      return { code: `(call ${L.arrHelper('clear', el)} ${recv.code})`, type: 'void' };
+    }
+    if (args.length > 2) return L.err(n, `'delete' 要 0 到 2 个实参，给了 ${args.length} 个`);
+    const i = asyCoerce(L, asyExpr(L, args[0]), 'int', args[0], "'delete' 的下标");
+    if (i === null) return null;
+    if (args.length === 1) {
+      return { code: `(call ${L.arrHelper('del', el)} ${recv.code} ${i.code} ${i.code})`, type: 'void' };
+    }
+    const j = asyCoerce(L, asyExpr(L, args[1]), 'int', args[1], "'delete' 的右端");
+    if (j === null) return null;
+    return { code: `(call ${L.arrHelper('del', el)} ${recv.code} ${i.code} ${j.code})`, type: 'void' };
+  }
+  if (nm === 'insert') {
+    // `a.insert(i, x, y, …)`：asy 的 insert 是可变实参的，量过 `s.insert(1,'q','r')` 出来是
+    // x q r y —— 也就是连着的几次"在 i、i+1、… 处插一格"。一格时不必摊语句。
+    if (args.length < 2) return L.err(n, `'insert' 要至少 2 个实参，给了 ${args.length} 个`);
+    const i = asyCoerce(L, asyExpr(L, args[0]), 'int', args[0], "'insert' 的下标");
+    if (i === null) return null;
+    const ins = L.arrHelper('ins', el);
+    if (args.length === 2) {
+      const v = asyCoerce(L, asyExpr(L, args[1]), el, args[1], "'insert' 的实参");
+      if (v === null) return null;
+      return { code: `(call ${ins} ${recv.code} ${i.code} ${v.code})`, type: 'void' };
+    }
+    // 多个值：接收者与下标都只能求一次，所以先绑临时量
+    if (L.pre === null) return L.nope(n, '这个位置的多值 `.insert(…)`（它要摊成语句，这里放不下）');
+    const av = `asy__ia${L.tmp++}`;
+    const iv = `asy__ii${L.tmp++}`;
+    L.pre.push(`(let ${av} ${asyCore(recv.type)} ${recv.code})`);
+    L.pre.push(`(let ${iv} int ${i.code})`);
+    for (let k = 1; k < args.length; k++) {
+      const v = asyCoerce(L, asyExpr(L, args[k]), el, args[k], "'insert' 的实参");
+      if (v === null) return null;
+      const at = k === 1 ? `(var ${iv})` : `(bin "+" (var ${iv}) (int ${k - 1}))`;
+      L.pre.push(`(expr (call ${ins} (var ${av}) ${at} ${v.code}))`);
+    }
+    return { code: '(int 0)', type: 'void' };
+  }
+  if (nm !== 'push') return L.nope(n, `数组的 '.${nm}(…)'（这一刀只有 .push / .pop / .delete / .insert）`);
   if (args.length !== 1) return L.err(n, `'push' 要 1 个实参，给了 ${args.length} 个`);
   const v = asyCoerce(L, asyExpr(L, args[0]), el, args[0], "'push' 的实参");
   if (v === null) return null;

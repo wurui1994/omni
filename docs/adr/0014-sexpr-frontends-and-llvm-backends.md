@@ -2801,6 +2801,31 @@ plain 现在停在 `collections/iter.asy:42` 的 `autounravel` 一个 vardec。
 新增 `tests/asy/cases/57-anon-formal.asy`（文件级函数、匿名函数、混在有名形参中间、
 函数类型形参里的无名形参）。`import graph;` **186 -> 185**；`import plain;` 还是 1。
 
+### 数组的 `.delete` 与 `.insert`：三条新 helper，graph 的数一动不动
+
+`math.asy:145/158` 的 `.delete(0)`、`:187` 的 `.insert(i,x)`。量出来的四条
+（`asy -noV`，`int[] a={1,2,3,4,5}`）：
+
+- `a.delete(1)` -> `{1,3,4,5}`（就地左移再缩长）；
+- `b.delete(0, 1)` 在 `{1,2,3}` 上 -> `{3}` —— 是**闭区间**，不是半开；
+- `c.delete()` 清空（`c.length` 变 0）；
+- `s.insert(1, 'q', 'r')` 在 `{x,y}` 上 -> `{x,q,r,y}` —— insert 是**可变实参**的，
+  等于连着在 i、i+1、… 处各插一格。
+
+落在 `asyArrHelpers` 那个工厂里（`del` / `clear` / `ins` 三条），于是标量、pair、
+**记录元素**、**数组元素**四种都白捡（记录与数组那两种是 `arrHelper` 现生的）。
+三条都回 void，所以照原样当表达式发出去、语句层套 `(expr …)`；只有多值 insert 要摊语句
+（接收者与下标各只能求一次，先绑临时量）。范围超尾我们截到尾，asy 那边是运行时错 ——
+与"扩长填零值"是同一类差别。
+
+新增 `tests/asy/cases/58-arr-del-ins.asy`。
+
+**`import graph;` 一动不动，还是 185** —— 而且这次差得明白：那 3 条 nope 全没了，
+紧跟着冒出 3 条别的（`math.asy:147` 的 `real[] > real[]`、`:160` 的 `null` 字面量）。
+净 0。`import plain;` 还是 1。
+
+跑的轴：`tests/asy`（117 passed，31.3s）、`tests/bootstrap`（60 passed）。
+
 ## 后果与代价
 
 

@@ -421,6 +421,36 @@ export function asyArrHelpers(name, et, zero) {
     (ret (var r)))`],
     [`asy__slicefrom_${name}`, `  (fn asy__slicefrom_${name} ((a (arr ${et})) (i int)) (arr ${et})
     (ret (call asy__slice_${name} (var a) (var i) (alen (var a)))))`],
+    // `a.delete(i)` / `a.delete(i, j)`：**闭区间**，就地左移再缩长（量过
+    // `int[] b={1,2,3}; b.delete(0,1);` 之后 b 是 {3}）。范围超尾就截到尾 ——
+    // asy 那边超尾是运行时错，我们截，这条差别写在文件头。
+    [`asy__del_${name}`, `  (fn asy__del_${name} ((a (arr ${et})) (i int) (j int)) void
+    (let n int (bin "+" (bin "-" (var j) (var i)) (int 1)))
+    (if (bin ">" (bin "+" (var i) (var n)) (alen (var a)))
+      (do (set n (bin "-" (alen (var a)) (var i)))))
+    (if (bin "<" (var n) (int 1)) (do (ret)))
+    (let k int (var i))
+    (while (bin "<" (bin "+" (var k) (var n)) (alen (var a)))
+      (do
+        (aset (var a) (var k) (aget (var a) (bin "+" (var k) (var n))))
+        (set k (bin "+" (var k) (int 1)))))
+    (let c int (int 0))
+    (while (bin "<" (var c) (var n))
+      (do (expr (apop (var a))) (set c (bin "+" (var c) (int 1))))))`],
+    // `a.delete()`：清空（量过之后 `a.length` 是 0）
+    [`asy__clear_${name}`, `  (fn asy__clear_${name} ((a (arr ${et}))) void
+    (while (bin ">" (alen (var a)) (int 0)) (do (expr (apop (var a))))))`],
+    // `a.insert(i, x)`：在 i 处插一格。先在尾上占一格，再从尾往回移到 i+1，最后写 i。
+    // asy 的 insert 是可变实参的（`s.insert(1,'q','r')` 插两格），那一层在调用处摊成
+    // 连着的几次 ins（i、i+1、…）—— 量过出来的次序正是这样。
+    [`asy__ins_${name}`, `  (fn asy__ins_${name} ((a (arr ${et})) (i int) (v ${et})) void
+    (apush (var a) (var v))
+    (let k int (bin "-" (alen (var a)) (int 1)))
+    (while (bin ">" (var k) (var i))
+      (do
+        (aset (var a) (var k) (aget (var a) (bin "-" (var k) (int 1))))
+        (set k (bin "-" (var k) (int 1)))))
+    (aset (var a) (var i) (var v)))`],
   ];
 }
 
