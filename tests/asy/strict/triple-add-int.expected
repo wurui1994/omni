@@ -1,0 +1,1 @@
+'+' 两边要同型：左是 triple，右是 int（asy 那边没有 int/real 到 triple 的转换）

@@ -122,7 +122,7 @@
 // **`autounravel`**（第二十八刀：struct 体里带它的声明其实是**文件级**的声明 ——
 // 形参显式、没有 this，可见位置是那个 struct 的位置，见 auMod）。
 //
-// 不支持（见到就报错，报错里说清是哪一条）：triple、标准库模块（`import graph;`）、
+// 不支持（见到就报错，报错里说清是哪一条）：标准库模块（`import graph;`）、
 // typedef、
 // 给切片赋值（`a[0:2] = b`）、
 // 多维数组（`int[][]` —— 核心方言的 `(arr T)` 不收数组元素：MIR 那一层元素类型只有
@@ -168,7 +168,7 @@
 //   以及 `operator &&`/`operator ||` 的声明本身（量过 asy 那边是 **syntax error** ——
 //   camp.y 的 operator 产生式里没有这两个 token）。
 // - **除以零**：asy 是运行期报错，而且**实数除法也报**（量过：`1.0/0.0`、`(1,2)/0`、
-//   `(1,2)/(0,0)` 全是 "Divide by zero"）；我们按 IEEE 出 inf/nan。这一条不是 pair
+//   `(1,2)/(0,0)`、`(1,2,3)/0` 全是运行期错误）；我们按 IEEE 出 inf/nan。这一条不是 pair
 //   才有的，`/` 从第一刀起就这样，量到了就记在这里。
 // - **切片的两条边界检查**：`a[3:1]` asy 报 "slice ends before it begins"，我们给空数组；
 //   `a[-1:2]` asy 报 "invalid negative index in slice of non-cyclic array"，我们落到
@@ -248,10 +248,10 @@ const ASY_MODSTM = new Set(['import', 'access', 'from-access', 'unravel', 'inclu
 /** 能当数组元素的**内建**类型。pair 是第八刀加的（核心方言的 `(arr T)` 现在收向量元素）；
  *  记录（struct）是第十九刀加的，但它不在这个表里 —— 记录是逐文件声明的，问 isRec。
  *  数组本身仍然不在里面 —— 多维数组是另一刀。 */
-const ASY_ARRELEM = new Set(['int', 'real', 'bool', 'string', 'pair']);
+const ASY_ARRELEM = new Set(['int', 'real', 'bool', 'string', 'pair', 'triple']);
 
 /** 数组元素这一刀收的东西写成一句话，四处报错共用（免得四处各写一遍走样） */
-const ASY_ARRELEM_TEXT = '数组元素这一刀只有 int/real/bool/string/pair 与 struct';
+const ASY_ARRELEM_TEXT = '数组元素这一刀只有 int/real/bool/string/pair/triple 与 struct';
 
 /**
  * 实参类型 -> 形参类型要走几次隐式转换：0 = 同型，1 = 一次转换，-1 = 不行。
@@ -319,9 +319,19 @@ const asyElem = (t) => t.slice(0, -2);
  * 按字节的实现管长度与增长，元素的读写由每条腿自己发（见 omni_arr.c 尾部）。
  */
 const ASY_PAIR_TY = '(vec real 2)';
+/**
+ * triple 是 `(vec real 4)`，**第 3 道空着**。为什么不是 `(vec real 3)`：MIR 的类型码
+ * 把向量宽度存成**对数**（`mir/ir.js` 的高 3 位），3 在那里根本编不出来 —— 放开它是
+ * 重画类型码，牵动 MIR + 三个后端 + SPIR-V。而硬件本来就把 vec3 垫成 vec4
+ * （SIMD 寄存器、GPU 的 vec3 对齐都是 16 字节），所以垫一道不是将就，是常规做法。
+ * 代价写在明处：每个 triple 占 32 字节而不是 24；第 3 道**永远不参与语义** ——
+ * 所有 helper 都是逐道写死的，`==` 只比前三道，印的时候也只印前三道。
+ */
+const ASY_TRIPLE_TY = '(vec real 4)';
 const asyCore = (t) => {
   if (asyIsArr(t)) return `(arr ${asyCore(asyElem(t))})`;
-  return t === 'pair' ? ASY_PAIR_TY : t;
+  if (t === 'pair') return ASY_PAIR_TY;
+  return t === 'triple' ? ASY_TRIPLE_TY : t;
 };
 
 /**
@@ -356,6 +366,8 @@ const ZERO = new Map([
   ['bool', '(bool false)'],
   ['string', '(str "")'],
   ['pair', `(vlit ${ASY_PAIR_TY} (real 0.0) (real 0.0))`],
+  // 量过：`triple t;` 是 (0,0,0)
+  ['triple', `(vlit ${ASY_TRIPLE_TY} (real 0.0) (real 0.0) (real 0.0) (real 0.0))`],
 ]);
 
 /**
@@ -368,7 +380,8 @@ const ZERO = new Map([
  * `realpart`/`imagpart` **asy 自己就没有**（量过："no matching variable 'realpart'"），
  * 所以这里也没有 —— 补上就是比 asy 多接受一门语言。
  */
-const ASY_PAIRFN = new Set(['conj', 'xpart', 'ypart', 'angle', 'unit', 'dir', 'expi']);
+const ASY_PAIRFN = new Set(['conj', 'xpart', 'ypart', 'zpart', 'angle', 'unit', 'dir', 'expi',
+  'dot', 'cross', 'realmult']);
 
 /**
  * 字符串上的内建函数。`params` 是每个实参要的类型，`min` 是最少给几个 ——
@@ -481,6 +494,15 @@ const HELPERS = new Map([
     (ret (rmath "sqrt" (bin "+" (bin "*" (lane (var a) 0) (lane (var a) 0)) (bin "*" (lane (var a) 1) (lane (var a) 1))))))`],
   ['asy__pconj', `  (fn asy__pconj ((a ${ASY_PAIR_TY})) ${ASY_PAIR_TY}
     (ret (vlit ${ASY_PAIR_TY} (lane (var a) 0) (un "-" (lane (var a) 1)))))`],
+  // dot / cross / realmult 在 pair 上也有（量过：dot((1,2),(3,4))=11、cross 给**实数** -2、
+  // realmult 逐分量给 (3,8)）。triple 上是另外三条（asy__tdot / tcross / trealmult）。
+  ['asy__pdot', `  (fn asy__pdot ((a ${ASY_PAIR_TY}) (b ${ASY_PAIR_TY})) real
+    (ret (bin "+" (bin "*" (lane (var a) 0) (lane (var b) 0)) (bin "*" (lane (var a) 1) (lane (var b) 1)))))`],
+  ['asy__pcross', `  (fn asy__pcross ((a ${ASY_PAIR_TY}) (b ${ASY_PAIR_TY})) real
+    (ret (bin "-" (bin "*" (lane (var a) 0) (lane (var b) 1)) (bin "*" (lane (var a) 1) (lane (var b) 0)))))`],
+  ['asy__prealmult', `  (fn asy__prealmult ((a ${ASY_PAIR_TY}) (b ${ASY_PAIR_TY})) ${ASY_PAIR_TY}
+    (ret (vlit ${ASY_PAIR_TY} (bin "*" (lane (var a) 0) (lane (var b) 0))
+      (bin "*" (lane (var a) 1) (lane (var b) 1)))))`],
   // 下面这四个都要超越函数。它们能落地是因为 rmath 的白名单已经是"宿主数学库的交集"
   // （atan2/cos/sin 都在里面），所以这里没有自己写的实现，只有 asy 那几行的形状。
   ['asy__pangle', `  (fn asy__pangle ((a ${ASY_PAIR_TY}) (warn bool)) real
@@ -550,6 +572,61 @@ const HELPERS = new Map([
   ['asy__pneg', `  (fn asy__pneg ((a ${ASY_PAIR_TY})) ${ASY_PAIR_TY}
     ;; 逐分量取负。刻意不写成 (0,0) - a：那样 -0.0 会变成 0.0，而 asy 是 pair(-x,-y)。
     (ret (vlit ${ASY_PAIR_TY} (un "-" (lane (var a) 0)) (un "-" (lane (var a) 1)))))`],
+  // ---- triple。全部逐道写死，第 3 道恒为 0（见 ASY_TRIPLE_TY 上方那段）。
+  ['asy__tneg', `  (fn asy__tneg ((a ${ASY_TRIPLE_TY})) ${ASY_TRIPLE_TY}
+    (ret (vlit ${ASY_TRIPLE_TY} (un "-" (lane (var a) 0)) (un "-" (lane (var a) 1))
+      (un "-" (lane (var a) 2)) (real 0.0))))`],
+  ['asy__tsmul', `  (fn asy__tsmul ((a ${ASY_TRIPLE_TY}) (s real)) ${ASY_TRIPLE_TY}
+    ;; triple * real 是逐分量的（量过 (1,2,3)*2.5 与 2.5*(1,2,3) 都是 (2.5,5,7.5)）
+    (ret (vlit ${ASY_TRIPLE_TY} (bin "*" (lane (var a) 0) (var s)) (bin "*" (lane (var a) 1) (var s))
+      (bin "*" (lane (var a) 2) (var s)) (real 0.0))))`],
+  ['asy__tsdiv', `  (fn asy__tsdiv ((a ${ASY_TRIPLE_TY}) (s real)) ${ASY_TRIPLE_TY}
+    ;; triple / real，同样逐分量（量过 (1,2,3)/2 是 (0.5,1,1.5)）。除以零 asy 是运行期
+    ;; 错误 "division by 0"，我们照 pair 那条既有偏差出 IEEE 的 inf/nan。
+    (ret (vlit ${ASY_TRIPLE_TY} (bin "/" (lane (var a) 0) (var s)) (bin "/" (lane (var a) 1) (var s))
+      (bin "/" (lane (var a) 2) (var s)) (real 0.0))))`],
+  ['asy__teq', `  (fn asy__teq ((a ${ASY_TRIPLE_TY}) (b ${ASY_TRIPLE_TY})) bool
+    ;; 只比前三道：第 3 道是垫出来的，不参与语义
+    (ret (bin "&&" (bin "==" (lane (var a) 0) (lane (var b) 0))
+      (bin "&&" (bin "==" (lane (var a) 1) (lane (var b) 1))
+        (bin "==" (lane (var a) 2) (lane (var b) 2))))))`],
+  ['asy__tabs', `  (fn asy__tabs ((a ${ASY_TRIPLE_TY})) real
+    ;; abs = length = 三个分量的平方和开根，**朴素**那一份 ——
+    ;; 量过 abs((1e200,1e200,1e200)) 是 inf（所以不是 hypot），跟 pair 一致
+    (ret (rmath "sqrt" (bin "+" (bin "+" (bin "*" (lane (var a) 0) (lane (var a) 0))
+      (bin "*" (lane (var a) 1) (lane (var a) 1))) (bin "*" (lane (var a) 2) (lane (var a) 2))))))`],
+  ['asy__tunit', `  (fn asy__tunit ((a ${ASY_TRIPLE_TY})) ${ASY_TRIPLE_TY}
+    ;; a / abs(a)，逐分量。零点挡一刀（量过 unit((0,0,0)) 是 (0,0,0)）；abs 溢出成 inf 时
+    ;; 逐分量除给 (0,0,0) —— 量过 unit((1e200,1e200,1e200)) 正是 (0,0,0)。
+    (let r real (call asy__tabs (var a)))
+    (if (bin "==" (var r) (real 0.0)) (do (ret (var a))))
+    (ret (call asy__tsdiv (var a) (var r))))`],
+  ['asy__tdot', `  (fn asy__tdot ((a ${ASY_TRIPLE_TY}) (b ${ASY_TRIPLE_TY})) real
+    ;; 量过 dot((1,2,3),(4,5,6)) 是 32、dot((1,2,3),(1,2,3)) 是 14
+    (ret (bin "+" (bin "+" (bin "*" (lane (var a) 0) (lane (var b) 0))
+      (bin "*" (lane (var a) 1) (lane (var b) 1))) (bin "*" (lane (var a) 2) (lane (var b) 2)))))`],
+  ['asy__tcross', `  (fn asy__tcross ((a ${ASY_TRIPLE_TY}) (b ${ASY_TRIPLE_TY})) ${ASY_TRIPLE_TY}
+    ;; 右手系（量过 cross((1,2,3),(4,5,6)) 是 (-3,6,-3)）
+    (ret (vlit ${ASY_TRIPLE_TY}
+      (bin "-" (bin "*" (lane (var a) 1) (lane (var b) 2)) (bin "*" (lane (var a) 2) (lane (var b) 1)))
+      (bin "-" (bin "*" (lane (var a) 2) (lane (var b) 0)) (bin "*" (lane (var a) 0) (lane (var b) 2)))
+      (bin "-" (bin "*" (lane (var a) 0) (lane (var b) 1)) (bin "*" (lane (var a) 1) (lane (var b) 0)))
+      (real 0.0))))`],
+  ['asy__trealmult', `  (fn asy__trealmult ((a ${ASY_TRIPLE_TY}) (b ${ASY_TRIPLE_TY})) ${ASY_TRIPLE_TY}
+    ;; 逐分量乘。asy 没有 triple*triple，逐分量乘就叫 realmult（量过给 (4,10,18)）
+    (ret (vlit ${ASY_TRIPLE_TY} (bin "*" (lane (var a) 0) (lane (var b) 0))
+      (bin "*" (lane (var a) 1) (lane (var b) 1)) (bin "*" (lane (var a) 2) (lane (var b) 2)) (real 0.0))))`],
+  ['asy__texpi', `  (fn asy__texpi ((t real) (p real)) ${ASY_TRIPLE_TY}
+    ;; expi(θ,φ) = (sinθ cosφ, sinθ sinφ, cosθ)（弧度）。判据：expi(0.5,1.0) 印
+    ;; (0.259034723999926,0.403422680111335,0.877582561890373) —— 第三道正是 cos(0.5)，
+    ;; 前两道正是 sin(0.5) 乘 cos(1.0) / sin(1.0)，逐位对上。
+    (let s real (rmath "sin" (var t)))
+    (ret (vlit ${ASY_TRIPLE_TY} (bin "*" (var s) (rmath "cos" (var p)))
+      (bin "*" (var s) (rmath "sin" (var p))) (rmath "cos" (var t)) (real 0.0))))`],
+  ['asy__tdir', `  (fn asy__tdir ((t real) (p real)) ${ASY_TRIPLE_TY}
+    ;; dir(θ,φ) 收的是**度**（量过 dir(30,45) 的第三道是 cos(30°)=0.866025403784439）
+    (ret (call asy__texpi (bin "/" (bin "*" (var t) (real 3.14159265358979311600)) (real 180.0))
+      (bin "/" (bin "*" (var p) (real 3.14159265358979311600)) (real 180.0)))))`],
   ['asy__peq', `  (fn asy__peq ((a ${ASY_PAIR_TY}) (b ${ASY_PAIR_TY})) bool
     ;; 向量上没有比较（掩码类型这一刀没有），所以逐道比。写成函数而不是内联展开：
     ;; 内联要把两边的代码各印两遍，f() == g() 就会把 f 和 g 各调两次。
@@ -559,6 +636,12 @@ const HELPERS = new Map([
     ;; （量过：(0.333333333333333,0.666666666666667)、(1e+20,1e-05)、(-0,0)）
     (ret (bin "+" (str "(") (bin "+" (tostr (lane (var a) 0) (int 15))
       (bin "+" (str ",") (bin "+" (tostr (lane (var a) 1) (int 15)) (str ")")))))))`],
+  ['asy__triplestr', `  (fn asy__triplestr ((a ${ASY_TRIPLE_TY})) string
+    ;; write(triple) 与 pair 同一个形状，三个分量（量过：(1,2,3)、(0.5,1,1.5)、(-3,6,-3)）。
+    ;; 第 3 道是垫出来的，这里**不印** —— 那一道不参与语义（见 ASY_TRIPLE_TY）。
+    (ret (bin "+" (str "(") (bin "+" (tostr (lane (var a) 0) (int 15))
+      (bin "+" (str ",") (bin "+" (tostr (lane (var a) 1) (int 15))
+        (bin "+" (str ",") (bin "+" (tostr (lane (var a) 2) (int 15)) (str ")")))))))))`],
   // 字符串函数。核心方言给的是**严格**的三条（越界报错），asy 的这几个是**静静地失败**：
   // 量过 substr("abc",5,1) 与 substr("abc",-1,2) 都是空串（不是报错、也不是 clamp 到 0 ——
   // clamp 的话第二个会给 "ab"），substr("abc",1,100) 是 "bc"，erase("abc",-1,2) 原样返回，
@@ -649,7 +732,7 @@ function asyArrHelpers(name, et, zero) {
 }
 
 // 这里刻意不用解构（`for (const [a, b] of …)`）：封闭子集里那不是保证能降级的写法。
-for (const t of ['int', 'real', 'bool', 'string', 'pair']) {
+for (const t of ['int', 'real', 'bool', 'string', 'pair', 'triple']) {
   for (const pair of asyArrHelpers(t, asyCore(t), ZERO.get(t))) HELPERS.set(pair[0], pair[1]);
 }
 
@@ -921,12 +1004,13 @@ class AsyLower {
     if (nm === null) return this.nope(node, '带点的类型名');
     if (nm === 'void') return 'void';
     if (nm === 'pair') return 'pair';
+    if (nm === 'triple') return 'triple';
     // 记录名（第十四刀）。放在内建名单后面查，与核心方言那边同一条规矩。
     // 查的是**这个单元看得见的**那张表（recVis）：别的模块里的 struct 没 import 进来时
     // 不算类型（量过 asy 报 "no type of name"），所以 records 那张全局表只用来发文本。
     if (this.recVis.has(nm)) return this.recHere(nm) ? nm : this.recLate(node, nm);
     if (this.records.has(nm)) return this.recElsewhere(node, nm);
-    if (!SCALARS.has(nm)) return this.nope(node, `类型 '${nm}'（这一刀只有 int/real/bool/string/pair 与 struct）`);
+    if (!SCALARS.has(nm)) return this.nope(node, `类型 '${nm}'（这一刀只有 int/real/bool/string/pair/triple 与 struct）`);
     return nm;
   }
 
@@ -976,7 +1060,7 @@ class AsyLower {
   recordDec(n, at) {
     const nm = isAtom(n.items[1]) ? n.items[1].value : null;
     if (nm === null) return this.nope(n, '没有名字的 struct');
-    if (SCALARS.has(nm) || nm === 'pair' || nm === 'void') {
+    if (SCALARS.has(nm) || nm === 'pair' || nm === 'triple' || nm === 'void') {
       return this.err(n, `'${nm}' 是内建类型名，不能当 struct 名`);
     }
     if (this.recVis.has(nm)) return this.nope(n, `重复定义的 struct '${nm}'`);
@@ -1040,10 +1124,10 @@ class AsyLower {
       }
       const ft = this.type(r.items[1], `struct ${nm} 的字段`);
       if (ft === null) return null;
-      if (!SCALARS.has(ft) && ft !== 'pair' && !this.isRec(ft)
+      if (!SCALARS.has(ft) && ft !== 'pair' && ft !== 'triple' && !this.isRec(ft)
           && !(asyIsArr(ft) && this.arrElemOk(asyElem(ft)))) {
         return this.nope(r, `struct ${nm} 的 ${ft} 字段（这一刀的字段只有 `
-          + `int/real/bool/string/pair、它们的一维数组，与**前面已经声明过**的 struct）`);
+          + `int/real/bool/string/pair/triple、它们的一维数组，与**前面已经声明过**的 struct）`);
       }
       for (const d of this.flat(r.items[2], 'decids')) {
         if (!isList(d) || head(d) !== 'decid') return this.err(d, '认不出的字段声明');
@@ -1402,28 +1486,50 @@ class AsyLower {
       if (nm === 'y') return { code: `(lane ${recv.code} 1)`, type: 'real' };
       return this.nope(n, `pair 的 '.${nm}'（这一刀只有 .x / .y）`);
     }
+    if (recv.type === 'triple') {
+      if (nm === 'x') return { code: `(lane ${recv.code} 0)`, type: 'real' };
+      if (nm === 'y') return { code: `(lane ${recv.code} 1)`, type: 'real' };
+      if (nm === 'z') return { code: `(lane ${recv.code} 2)`, type: 'real' };
+      return this.nope(n, `triple 的 '.${nm}'（这一刀只有 .x / .y / .z）`);
+    }
     return this.nope(n, `取字段 '.${nm}'`);
   }
 
   /* -------------------------------------------------------------------- pair */
 
-  /** `(x,y)`。三个以上就是 triple，这一刀没有。分量按 int -> real 提升。 */
+  /** `(x,y)` 是 pair、`(x,y,z)` 是 triple。分量按 int -> real 提升。 */
   pairLit(n) {
     const parts = this.flat(n.items[1], 'args');
-    if (parts.length !== 2) return this.nope(n, `${parts.length} 个分量的字面量（triple 这一刀没有）`);
+    if (parts.length === 3) return this.tripleLit(n, parts);
+    if (parts.length !== 2) return this.nope(n, `${parts.length} 个分量的字面量`);
     const x = this.coerce(this.expr(parts[0]), 'real', parts[0], 'pair 的 x');
     const y = this.coerce(this.expr(parts[1]), 'real', parts[1], 'pair 的 y');
     if (x === null || y === null) return null;
     return { code: `(vlit ${ASY_PAIR_TY} ${x.code} ${y.code})`, type: 'pair' };
   }
 
-  /** pair 上的内建函数（名单见 ASY_PAIRFN）。实参是 int/real 时先隐式转成 pair。 */
+  /** `(x,y,z)`。第 3 道垫 0（见 ASY_TRIPLE_TY 上方那段：MIR 的宽度是对数编码）。 */
+  tripleLit(n, parts) {
+    const x = this.coerce(this.expr(parts[0]), 'real', parts[0], 'triple 的 x');
+    const y = this.coerce(this.expr(parts[1]), 'real', parts[1], 'triple 的 y');
+    const z = this.coerce(this.expr(parts[2]), 'real', parts[2], 'triple 的 z');
+    if (x === null || y === null || z === null) return null;
+    return { code: `(vlit ${ASY_TRIPLE_TY} ${x.code} ${y.code} ${z.code} (real 0.0))`, type: 'triple' };
+  }
+
+  /** pair / triple 上的内建函数（名单见 ASY_PAIRFN）。实参是 int/real 时先隐式转成 pair。 */
   pairCall(n, nm) {
     const args = this.args(n.items[2]);
     if (args === null) return null;
-    // dir/expi 收的是**实数**（度 / 弧度），不是 pair —— dir 另有一个 pair 重载（= unit）
+    // dot / cross / realmult：pair 与 triple 各一个重载，两组都量过
+    // （dot((1,2),(3,4))=11、cross(pair,pair) 给**实数** -2、realmult 逐分量；
+    //  triple 那三条给 32 / (-3,6,-3) / (4,10,18)）
+    if (nm === 'dot' || nm === 'cross' || nm === 'realmult') return this.vecPairFn(n, nm, args);
+    // dir/expi：一个实参是 pair 那一族（度 / 弧度），**两个**实参是 triple 那一族
+    // （量过 dir(30,45) 与 expi(0.5,1.0) 都给 triple）；dir(pair) 是 unit 的别名
     if (nm === 'dir' || nm === 'expi') {
-      if (args.length !== 1) return this.err(n, `'${nm}' 要 1 个实参，给了 ${args.length} 个`);
+      if (args.length === 2) return this.tripleDir(n, nm, args);
+      if (args.length !== 1) return this.err(n, `'${nm}' 要 1 或 2 个实参，给了 ${args.length} 个`);
       const v0 = this.expr(args[0]);
       if (v0 === null) return null;
       if (nm === 'dir' && v0.type === 'pair') return this.unitOf(v0);
@@ -1451,13 +1557,68 @@ class AsyLower {
       return { code: `(call asy__pangle ${z.code} ${warn})`, type: 'real' };
     }
     if (args.length !== 1) return this.err(n, `'${nm}' 要 1 个实参，给了 ${args.length} 个`);
-    const v = this.coerce(this.expr(args[0]), 'pair', args[0], `'${nm}' 的实参`);
+    const v0 = this.expr(args[0]);
+    if (v0 === null) return null;
+    // triple 那一族。conj/angle 在 triple 上 asy 自己就没有（量过 "no matching function
+    // 'conj(triple)'" / "'angle(triple)'"），所以是**错**而不是"还没做"。
+    if (v0.type === 'triple') {
+      if (nm === 'xpart') return { code: `(lane ${v0.code} 0)`, type: 'real' };
+      if (nm === 'ypart') return { code: `(lane ${v0.code} 1)`, type: 'real' };
+      if (nm === 'zpart') return { code: `(lane ${v0.code} 2)`, type: 'real' };
+      if (nm === 'unit') return this.tunitOf(v0);
+      return this.err(n, `'${nm}(triple)' asy 那边没有这个重载`);
+    }
+    // zpart 只有 triple 那一个重载（量过 zpart((1,2)) 是 "cannot call 'real zpart(triple v)'"）
+    if (nm === 'zpart') return this.err(n, `'zpart' 只收 triple，这里是 ${v0.type}`);
+    const v = this.coerce(v0, 'pair', args[0], `'${nm}' 的实参`);
     if (v === null) return null;
     if (nm === 'xpart') return { code: `(lane ${v.code} 0)`, type: 'real' };
     if (nm === 'ypart') return { code: `(lane ${v.code} 1)`, type: 'real' };
     if (nm === 'unit') return this.unitOf(v);
     this.used.add('asy__pconj');
     return { code: `(call asy__pconj ${v.code})`, type: 'pair' };
+  }
+
+  /** `dot` / `cross` / `realmult`：两个实参，pair 与 triple 各一个重载。 */
+  vecPairFn(n, nm, args) {
+    if (args.length !== 2) return this.err(n, `'${nm}' 要 2 个实参，给了 ${args.length} 个`);
+    const a = this.expr(args[0]);
+    const b = this.expr(args[1]);
+    if (a === null || b === null) return null;
+    if (a.type === 'triple' || b.type === 'triple') {
+      if (a.type !== 'triple' || b.type !== 'triple') {
+        return this.err(n, `'${nm}' 的两个实参要同型：左是 ${a.type}，右是 ${b.type}（asy 那边没有到 triple 的转换）`);
+      }
+      const h = nm === 'dot' ? 'asy__tdot' : (nm === 'cross' ? 'asy__tcross' : 'asy__trealmult');
+      this.used.add(h);
+      return { code: `(call ${h} ${a.code} ${b.code})`, type: nm === 'dot' ? 'real' : 'triple' };
+    }
+    const av = this.coerce(a, 'pair', args[0], `'${nm}' 的左实参`);
+    const bv = this.coerce(b, 'pair', args[1], `'${nm}' 的右实参`);
+    if (av === null || bv === null) return null;
+    const h = nm === 'dot' ? 'asy__pdot' : (nm === 'cross' ? 'asy__pcross' : 'asy__prealmult');
+    this.used.add(h);
+    // cross(pair,pair) 回的是**实数**（量过 -2），不是 pair
+    return { code: `(call ${h} ${av.code} ${bv.code})`, type: nm === 'realmult' ? 'pair' : 'real' };
+  }
+
+  /** `dir(θ,φ)` / `expi(θ,φ)`：两个实参那一族回 triple（dir 收度、expi 收弧度）。 */
+  tripleDir(n, nm, args) {
+    const t = this.coerce(this.expr(args[0]), 'real', args[0], `'${nm}' 的第一个实参`);
+    const p = this.coerce(this.expr(args[1]), 'real', args[1], `'${nm}' 的第二个实参`);
+    if (t === null || p === null) return null;
+    this.used.add('asy__texpi');
+    if (nm === 'expi') return { code: `(call asy__texpi ${t.code} ${p.code})`, type: 'triple' };
+    this.used.add('asy__tdir');
+    return { code: `(call asy__tdir ${t.code} ${p.code})`, type: 'triple' };
+  }
+
+  /** unit(triple) */
+  tunitOf(v) {
+    this.used.add('asy__tabs');
+    this.used.add('asy__tsdiv');
+    this.used.add('asy__tunit');
+    return { code: `(call asy__tunit ${v.code})`, type: 'triple' };
   }
 
   /** unit(z)：`dir(pair)` 也走它（量过两者同值） */
@@ -1486,6 +1647,10 @@ class AsyLower {
       if (p === null) return null;
       this.used.add('asy__pabs');
       return { code: `(call asy__pabs ${p.code})`, type: 'real' };
+    }
+    if (v.type === 'triple') {
+      this.used.add('asy__tabs');
+      return { code: `(call asy__tabs ${v.code})`, type: 'real' };
     }
     return this.err(args[0], `length(${v.type}) 在 asy 那边就是 no matching function（数组的长度写 a.length）`);
   }
@@ -1608,11 +1773,14 @@ class AsyLower {
       // pair 上 asy 自己就没有 `%`（量过："no matching function 'operator %(pair, int)'"），
       // 所以这条是**错**，不是"还没做"；real 上的 `%` 是真的还没做。
       if (a.type === 'pair' || b.type === 'pair') return this.err(n, `pair 上没有 '%'（asy 那边也没有这个算符）`);
+      if (a.type === 'triple' || b.type === 'triple') return this.err(n, `triple 上没有 '%'（asy 那边也没有这个算符）`);
       if (a.type !== 'int' || b.type !== 'int') return this.nope(n, "real 上的 '%'");
       this.used.add('asy__mod');
       return { code: `(call asy__mod ${a.code} ${b.code})`, type: 'int' };
     }
     if (op === '^') {
+      // triple 上 asy 自己就没有 `^`（量过："no matching function 'operator ^(triple, int)'"）
+      if (a.type === 'triple' || b.type === 'triple') return this.err(n, `triple 上没有 '^'（asy 那边也没有这个算符）`);
       // pair 上的 `^` 是**复数幂**，而且 asy 是**两个重载**，判据是指数的**静态类型**、
       // 不是值：`int k=30; (1,2)^k` 给精确的 (-6890111163,29729597084)，而 `real e=30;`
       // 与 `pair w=(30,0);` 都给 (-6890111162.99996,…)（三条都量过）。所以这里按 b 的
@@ -1645,6 +1813,7 @@ class AsyLower {
     if (op === '/') {
       // pair 上的 `/` 是复数除法（两边都先转成 pair —— 量过，见 asy__pdiv）
       if (a.type === 'pair' || b.type === 'pair') return this.pairArith(n, op, a, b);
+      if (a.type === 'triple' || b.type === 'triple') return this.tripleArith(n, op, a, b);
       // asy 的 `/` 永远是实数除法：`1/3` 是 0.333…，整数商要写 `#`（量过）
       const av = this.coerce(a, 'real', n, "'/' 的左边");
       const bv = this.coerce(b, 'real', n, "'/' 的右边");
@@ -1653,6 +1822,7 @@ class AsyLower {
     }
     if (op !== '+' && op !== '-' && op !== '*') return this.nope(n, `算符 '${op}'`);
     if (a.type === 'pair' || b.type === 'pair') return this.pairArith(n, op, a, b);
+    if (a.type === 'triple' || b.type === 'triple') return this.tripleArith(n, op, a, b);
     const t = this.promote(a, b);
     if (t === null) return this.err(n, `'${op}' 两边要同型：左是 ${a.type}，右是 ${b.type}`);
     if (t === 'string' && op !== '+') return this.err(n, `字符串上只有 '+'，这里是 '${op}'`);
@@ -1671,11 +1841,49 @@ class AsyLower {
     return { code: `(call ${helper} ${av.code} ${bv.code})`, type: 'pair' };
   }
 
+  /**
+   * triple 上的 `+ - * /`。跟 pair **不一样**，这一族没有复数那回事，量出来的是：
+   *   `+ -` 逐分量（triple 两边同型；`(1,2,3)+1` 在 asy 是
+   *         "no matching function 'operator +(triple, int)'" —— 没有 real->triple 这条转换）
+   *   `*`   triple 与 **real** 逐分量相乘，两个次序都有（`t*2.5` 与 `2.5*t` 都给 (2.5,5,7.5)）；
+   *         `triple*triple` asy 自己就没有（"no matching function 'operator *(triple, triple)'"），
+   *         逐分量乘要写 `realmult`
+   *   `/`   只有 triple/real（`2/t` 在 asy 也是 no matching function）
+   */
+  tripleArith(n, op, a, b) {
+    const num = (v) => v.type === 'int' || v.type === 'real';
+    if (op === '+' || op === '-') {
+      if (a.type !== 'triple' || b.type !== 'triple') {
+        return this.err(n, `'${op}' 两边要同型：左是 ${a.type}，右是 ${b.type}（asy 那边没有 int/real 到 triple 的转换）`);
+      }
+      return { code: `(bin "${op}" ${a.code} ${b.code})`, type: 'triple' };
+    }
+    if (op === '*') {
+      const t = a.type === 'triple' ? a : b;
+      const s = a.type === 'triple' ? b : a;
+      if (t.type === s.type) return this.err(n, `triple 上没有 'triple * triple'（asy 那边逐分量乘要写 realmult）`);
+      if (!num(s)) return this.err(n, `'*' 的另一边要是 int 或 real，这里是 ${s.type}`);
+      const sv = this.coerce(s, 'real', n, "'*' 的实数那边");
+      if (sv === null) return null;
+      this.used.add('asy__tsmul');
+      return { code: `(call asy__tsmul ${t.code} ${sv.code})`, type: 'triple' };
+    }
+    if (a.type !== 'triple' || !num(b)) {
+      return this.err(n, `'/' 只有 triple / real 这一个重载：左是 ${a.type}，右是 ${b.type}`);
+    }
+    const sv = this.coerce(b, 'real', n, "'/' 的右边");
+    if (sv === null) return null;
+    this.used.add('asy__tsdiv');
+    return { code: `(call asy__tsdiv ${a.code} ${sv.code})`, type: 'triple' };
+  }
+
   cmpCode(n, op, a, b) {
     const t = this.promote(a, b);
     if (t === null) return this.err(n, `'${op}' 两边要同型：左是 ${a.type}，右是 ${b.type}`);
     // pair 上没有大小 —— asy 那边也没有（没有 `operator <(pair,pair)`）
     if (t === 'pair') return this.err(n, `pair 上没有 '${op}'（asy 那边也没有这个算符）`);
+    // triple 同理（量过："no matching function 'operator <(triple, triple)'"）
+    if (t === 'triple') return this.err(n, `triple 上没有 '${op}'（asy 那边也没有这个算符）`);
     // 记录与数组上也没有：量过 `mk(2) <= mk(2)` 在 asy 那边报
     // "no matching function 'operator <=(V, V)'"，`==`/`!=` 才是内建的（比身份）。
     // 自己定义一个 `operator <=` 是通的 —— 那一条在 opUser 里先问过了。
@@ -1700,6 +1908,12 @@ class AsyLower {
     if (t === 'pair') {
       this.used.add('asy__peq');
       const eq = `(call asy__peq ${a.code} ${b.code})`;
+      return { code: op === '==' ? eq : `(un "!" ${eq})`, type: 'bool' };
+    }
+    if (t === 'triple') {
+      // 只比前三道 —— 第 4 道是垫出来的（见 ASY_TRIPLE_TY）
+      this.used.add('asy__teq');
+      const eq = `(call asy__teq ${a.code} ${b.code})`;
       return { code: op === '==' ? eq : `(un "!" ${eq})`, type: 'bool' };
     }
     return this.cmpCode(n, op, a, b);
@@ -1767,7 +1981,11 @@ class AsyLower {
         this.used.add('asy__pneg');
         return { code: `(call asy__pneg ${v.code})`, type: 'pair' };
       }
-      if (v.type !== 'int' && v.type !== 'real') return this.err(n, `一元 '-' 要 int/real/pair，这里是 ${v.type}`);
+      if (v.type === 'triple') {
+        this.used.add('asy__tneg');
+        return { code: `(call asy__tneg ${v.code})`, type: 'triple' };
+      }
+      if (v.type !== 'int' && v.type !== 'real') return this.err(n, `一元 '-' 要 int/real/pair/triple，这里是 ${v.type}`);
       return { code: `(un "-" ${v.code})`, type: v.type };
     }
     return this.nope(n, `一元算符 '${op}'`);
@@ -2271,6 +2489,11 @@ class AsyLower {
       this.used.add('asy__pabs');
       return { code: `(call asy__pabs ${vs[0].code})`, type: 'real' };
     }
+    if (nm === 'abs' && vs[0].type === 'triple') {
+      // abs(triple) 同样是模（量过 abs((1,2,3)) 与 length((1,2,3)) 都是 3.74165738677394）
+      this.used.add('asy__tabs');
+      return { code: `(call asy__tabs ${vs[0].code})`, type: 'real' };
+    }
     const parts = [];
     for (let i = 0; i < vs.length; i++) {
       const v = this.coerce(vs[i], 'real', args[i], `'${nm}' 的第 ${i + 1} 个实参`);
@@ -2349,6 +2572,10 @@ class AsyLower {
     if (t === 'pair') {
       this.used.add('asy__pairstr');
       return `(call asy__pairstr ${code})`;
+    }
+    if (t === 'triple') {
+      this.used.add('asy__triplestr');
+      return `(call asy__triplestr ${code})`;
     }
     if (t === 'bool') {
       this.used.add('asy__boolstr');
@@ -2676,8 +2903,8 @@ class AsyLower {
       // pair 的分量是**只读**的虚字段：量过 asy 对 `z.x = 5` 与 `a.p.x = 5` 都报
       // "virtual field is read-only"。这条不是"还没做"，所以不带 ASY_NOPE ——
       // `tests/asy/strict/pair-field-set` 钉着它。
-      if (q !== null && q.recv.type === 'pair') {
-        return this.err(node, `pair 的 '${q.field}' 是只读的虚字段 —— asy 那边就是 "virtual field is read-only"`);
+      if (q !== null && (q.recv.type === 'pair' || q.recv.type === 'triple')) {
+        return this.err(node, `${q.recv.type} 的 '${q.field}' 是只读的虚字段 —— asy 那边就是 "virtual field is read-only"`);
       }
     }
     // `f(x).字段 = v`：接收者不是名字而是一个表达式。asy 收这种（struct 是引用类型，
@@ -2741,6 +2968,13 @@ class AsyLower {
       const v = this.pairArith(node, op, { code: `(var ${sym})`, type: 'pair' }, one);
       return v === null ? null : [`(set ${sym} ${v.code})`];
     }
+    if (t === 'triple') {
+      // 量过：`t += (1,1,1)` 是 (2,3,4)、`t *= 2` 是 (2,4,6)、`t /= 2` 是 (0.5,1,1.5)；
+      // `t *= (1,2,3)` 在 asy 那边是 no matching function（tripleArith 里那一条挡着）
+      if (op !== '+' && op !== '-' && op !== '*' && op !== '/') return this.err(node, `triple 上没有 '${op}='`);
+      const v = this.tripleArith(node, op, { code: `(var ${sym})`, type: 'triple' }, one);
+      return v === null ? null : [`(set ${sym} ${v.code})`];
+    }
     if (op === '#' || op === '%') {
       if (t !== 'int' || one.type !== 'int') return this.err(node, `'${op}=' 两边要是 int`);
       const helper = op === '#' ? 'asy__quot' : 'asy__mod';
@@ -2796,6 +3030,12 @@ class AsyLower {
       // "coerce 成 (2,0) 再逐分量乘"会给出 (8,0)，所以这条不能少。
       if (op !== '+' && op !== '-' && op !== '*' && op !== '/') return this.err(node, `pair 上没有 '${op}='`);
       const v = this.pairArith(node, op, { code: cur, type: 'pair' }, one);
+      return v === null ? null : put(v.code);
+    }
+    if (t === 'triple') {
+      // triple 字段上的复合赋值与 triple 变量上那份同一条规则（同一批测量）
+      if (op !== '+' && op !== '-' && op !== '*' && op !== '/') return this.err(node, `triple 上没有 '${op}='`);
+      const v = this.tripleArith(node, op, { code: cur, type: 'triple' }, one);
       return v === null ? null : put(v.code);
     }
     if (op === '#' || op === '%') {

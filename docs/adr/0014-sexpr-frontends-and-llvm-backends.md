@@ -275,7 +275,7 @@ bison **隐式**的选择写成**显式**的优先级声明 —— 悬垂 else�
    `operator ecast` 只管 `(T) x`；代价与内建提升同价，不串）、
    **`autounravel`**（第二十八刀：struct 体里带它的声明其实是**文件级**的），
    三十四份用例在五个执行器上与 `asy -noV` 逐字节相同。
-   **还没做**的是给切片赋值、多维数组、triple、
+   **还没做**的是给切片赋值、多维数组、
    字符串的 `reverse`/`insert`/`split`、
    自引用字段、把方法当值取出来、struct 体里的算符、函数里用文件级的 pair/记录/数组变量、
    标准库那 84 个模块（`import graph;`）与 `unravel`/`include`/参数化模块，
@@ -560,8 +560,8 @@ struct 的数组字段 / struct 的记录字段 / `A[]` / struct 的方法 / 构
 （只算中选那支）跟着编码保住。代价写在明处：**循环条件里的 `? :` 直接报错**，因为那些
 赋值只能落在循环外面，条件就只算一次了。这条边界在 `tests/asy/bad/cond-in-loop.asy` 里。
 
-第一刀的边界都在 `tests/asy/bad/`（23 条，每条的期望值都必须以 `ASY_NOPE` 开头 ——
-"还没做"和"做错了"必须能一眼分开）：triple、
+第一刀的边界都在 `tests/asy/bad/`（22 条，每条的期望值都必须以 `ASY_NOPE` 开头 ——
+"还没做"和"做错了"必须能一眼分开）：
 标准库模块（`import graph;` —— 用户自己写的模块第二十五刀通了；
 `operator cast` 那条第二十七刀通了，那份用例搬成了 `cases/33-castback`）、隐式缩放（`105cm`）、宿主数学库里没有的那些内建函数（`gamma`/`erf`/`Jn` 那一族 ——
 C99 有 `tgamma`/`erf` 但 ECMA-262 的 `Math` 没有，要用就得自己写一份给六条腿共用；
@@ -599,7 +599,7 @@ C99 有 `tgamma`/`erf` 但 ECMA-262 的 `Math` 没有，要用就得自己写一
 **第四节 `strict/`：asy 自己就不收的，我们也不能收。** 这一节是数组这一刀顺手加的，起因是
 一次测量：`int b=1; b++;` 在真 asy 上直接编不过（"postfix expressions are not allowed"），
 而我们的降级器照收。这类漏洞**不会让任何用例输出不同** —— 它只让"等价"这两个字变虚。
-所以 `strict/` 里的用例要求：我们拒，且装了 asy 的话**真 asy 也拒**。现在有二十一条：后缀
+所以 `strict/` 里的用例要求：我们拒，且装了 asy 的话**真 asy 也拒**。现在有二十八条：后缀
 `++`、pair 上的 `<`、pair 上的 `%`（这两条 asy 报的是 "no matching function
 'operator <(pair, pair)'"）、`length(int[])`（`length` 只有 string 和 pair 两个重载）、
 按不存在的形参名给命名实参（asy 报 "cannot call 'void f(int a)' with parameter 'int b'"）、
@@ -781,6 +781,34 @@ with parameters 'int, int'"。我们是两遍降级（先收签名再降体）�
 
 顺带被自举链抓到一条封闭 ABI 规矩：模块级的名字**全局唯一**。新写的 `opText` 与
 `mir/print.js` 里同名的那个撞了，`C1 = C0 emit-js` 当场红，改成 `asyOpText`。
+
+### 已落地（triple，2026-08-27）：宽度 3 编不出来，所以垫成 4
+
+`triple` 是核心方言的 **`(vec real 4)`，第 3 道恒为 0**。这条选择本身值得记：
+
+- `(vec real 3)` **不合法**，而且不是"没做校验"：MIR 的类型码把向量宽度存成**对数**
+  （`mir/ir.js`，8 位类型码的高 3 位），3 在那个编码里根本不存在。放开它是重画类型码，
+  牵动 MIR + 三个后端 + SPIR-V —— 为一个"能用 vec4 表示"的类型付这个代价不值。
+- 硬件本来就把 vec3 垫成 vec4（SIMD 寄存器、GPU 的 vec3 都按 16 字节对齐），所以这不是
+  将就，是常规做法。代价写在明处：一个 triple 占 32 字节而不是 24。
+- 垫出来那一道**不参与语义**：所有 helper 都逐道写死，`==` 只比前三道（`asy__teq`），
+  `write` 也只印前三道（`asy__triplestr`）。
+
+语义与 pair **不是**一套，全部量过：`+ -` 逐分量且两边必须都是 triple
+（`(1,2,3)+1` 在 asy 是 "no matching function 'operator +(triple, int)'" —— 没有
+int/real→triple 的隐式转换，而 pair 那边**有**）；`* /` 只有 triple 与 real 那一个重载，
+逐分量乘要写 `realmult`；`abs` = `length` 是朴素平方和开根（`abs((1e200,1e200,1e200))`
+是 inf，跟 pair 一致）；`dot`/`cross`/`realmult` 在 pair 上**也各有一个重载**
+（`cross(pair,pair)` 回的是实数 -2）；`dir(θ,φ)`/`expi(θ,φ)` 两个实参那一族回 triple
+（`expi(θ,φ) = (sinθ cosφ, sinθ sinφ, cosθ)`，逐位对上）；`.x/.y/.z` 与
+`xpart/ypart/zpart` 是只读的虚字段。
+
+落地面：字面量、默认值 `(0,0,0)`、比较、复合赋值（变量与字段）、`triple[]`（裸数组那
+一整套，含切片与 for-each）、形参/返回值、struct 的 triple 字段。判据是
+`cases/35-triple`（45 行，五条腿一致且与 `asy -noV` **逐字节**相同）与 `tol/triple`
+（unit/dir/expi 那几条）；`strict/` 多了六条钉住 asy 自己就不收的：`triple*triple`、
+`triple+int`、`triple<triple`、`t.x=5`、`zpart(pair)`、`triple t=(1,2)`。
+`bad/triple` 因此退役。
 
 ### 已落地的形状：第二门真实语言（jancy），以及为什么 `%dprec` 非要不可
 
