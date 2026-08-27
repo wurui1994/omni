@@ -1,31 +1,40 @@
-// Omni stage0 — REPL
+// Omni stage0 — REPL（增量，前端无关）
 //
-// 策略：**重放整个会话**，而不是真正的增量编译。
-// ADR-0008 第 3 节写的是"每次输入是一个增量编译单元"，那是目标状态；stage0 的检查器是
-// 整程序的（所有 decl 并成一个 program），没有模块系统之前做不到只编译新增顶层项。
+// 两件事各占一层，别混：
 //
-// 重放在**当前**语言下是语义精确的，不是偷懒：stage0 的可观察副作用只有 `print`，
-// 没有文件 IO、没有时钟、没有随机数，所以"从头跑一遍"和"接着上次跑"结果必然相同。
-// 于是每次输入：
-//   1. 把新块接到已接受的块后面，整体编译；
-//   2. 整体执行，捕获 stdout，只把**比上次多出来的那一段**打给用户；
-//   3. 编译或运行失败 => 这一块不进会话，状态自动回到上一次成功的样子（无需回滚代码）。
-// 代价是 O(n²)：会话有 n 块就编译 n 次。stage0 编译一个几十行的程序是十几毫秒，够用。
-// 真·增量编译等模块系统落地（PLAN.md 下一步第 2 项）。
+//   1. **增量**。会话状态不再是"源码文本列表 + 每次重放"，而是三份常驻的东西：
+//        - 模块图（module/load.js 的 newLoadState）：`std/json.omni` 只加载一次；
+//        - 前端会话（hir/check.js 的 CheckSession 或 sexpr/lower.js 的 CoreSession）：
+//          类型表、重载表、顶层作用域都留着，`defsDone`/`bodyDone` 保证旧函数体不重检；
+//        - 运行期会话（interp/eval.js 的 InterpSession）：函数表、全局量、**顶层 Env**。
+//      每批输入编译出来的是一份 delta（几个新函数 + 一个入口 `omni_chunk_N`），
+//      装进运行期会话再跑那个入口。n 批输入的工作量是 O(n)，旧的重放是 O(n²)。
+//      旧注释里"重放在当前语言下是语义精确的"仍然成立，但那条路要求整个会话可重跑 ——
+//      一旦有文件 IO / 时钟 / 随机数就立刻塌，而且 n² 在几十行之后就已经能感觉到了。
+//
+//   2. **前端无关**。驱动（读行、续行、回显、命令、快照回滚）在这个文件里，与语言无关；
+//      一门语言只要给出下面这套口子就有 REPL：
+//        getMode/setMode、complete(text)、echo(text)、asStmt(text)、
+//        snapshot()/restore(s)、add(text, diags) -> OIR delta、full(chunks) -> 整程序 OIR
+//      Omni 走 CheckSession；核心 S 表达式方言走 CoreSession —— 后者才是关键：
+//      语法驱动的前端（asy/jancy）印出来的就是这份方言，所以它们的 REPL 落在同一层上，
+//      不用各写一遍增量与回滚。
+//
+// 编译失败 => 用 snapshot/restore 回到上一批成功的样子，这一块不进会话。
+// 运行期失败 => 副作用已经发生（打出来的就打出来了），但这一块同样不收进会话。
 //
 // 默认模式是 `dynamic`（ADR-0008 第 3 节）：REPL 里 `x = 1` 之后 `x = "s"` 必须能过，
 // 而混合模式下推断出来的变量是单态的。`--mode` 可覆盖。
-//
-// 这个默认值曾经被临时改成 mixed，因为那时 `dynamic` 上没有算术，`x = 10` 之后 `x * x`
-// 会报错，一个连乘法都做不了的 REPL 没有意义。`dynamic` 的算术与 `print(容器)` 落地后
-// （2026-08-26）已改回 ADR 写的 dynamic：同一份 tests/repl/session.in 在两个模式下
-// 除 `:mode` 那行外输出逐字节相同，而 dynamic 额外拿到了重新赋不同类型的能力。
 
-import { stdout, stderr, stdinIsTty, readLine, evalCaptured } from './host/native.js';
+import { stdout, stderr, stdinIsTty, readLine } from './host/native.js';
 import { SourceFile, Diagnostics, OmniError } from './source/diag.js';
 import { lex } from './parse/lexer.js';
 import { emitJs } from './backend-js/emit.js';
 import { emitC } from './backend-c/emit.js';
+import { loadProgram, newLoadState } from './module/load.js';
+import { check, CheckSession } from './hir/check.js';
+import { lowerCoreSession, CoreSession } from './sexpr/lower.js';
+import { InterpSession } from './interp/eval.js';
 
 const PROMPT = 'omni> ';
 const CONT = '  ... ';
@@ -86,97 +95,247 @@ function looksLikeExpr(text) {
   return true;
 }
 
-/** 在进程内执行生成的 JS，把 stdout/stderr 收进字符串。
- *  截住 stdout / stderr / exit 这件事本身是宿主能力（决策 17 的 evalCaptured）：
- *  生成的 JS 里 `$rt_error` 走 process.exit(70)，REPL 不能真的退出。 */
-function runCaptured(code) {
-  const r = evalCaptured(code);
-  return { out: r[0], err: r[1], failed: r[2] };
-}
-
-/** 诊断里的行号是**整个会话**的，对 REPL 没意义；减掉前缀行数，让它指向本次输入 */
-function renumber(text, base) {
-  return text.replace(/^<repl>:(\d+):/gm, (m, l) => `<repl>:${Number(l) - base}:`);
-}
-
 /**
  * REPL 的隐式前言。
  *
  * 交互式会话里回显的值随时可能是 dynamic（json 字面量、parseJson 的结果、动态模式下的一切），
  * 而 `print(dynamic)` 要降级成 std/json 的 dynToText —— 每开一个会话先手打一行 import 没有意义。
  * 这是**唯一**一处隐式导入，而且只在 REPL 里：源文件不享受这个待遇，文件的依赖必须写在文件里
- * （ADR-0009）。`:list` 刻意不显示它，它不是用户输入的一部分。
+ * （ADR-0009）。它是**第 0 批**（自成一块），所以用户那一块的诊断行号就是它自己的行号，
+ * 不需要"减掉前缀行数"那种事后修正。`:list` 刻意不显示它，它不是用户输入的一部分。
  */
 const PRELUDE = 'import "std/json.omni";';
 
+/** Omni 那条腿：模块图 + CheckSession。 */
+class OmniLang {
+  constructor(mode) {
+    this.name = 'omni';
+    this.state = newLoadState();
+    this.ck = new CheckSession(mode);
+  }
+
+  getMode() { return this.ck.getMode(); }
+
+  setMode(m) { this.ck.setMode(m); }
+
+  prelude() { return PRELUDE; }
+
+  /** 空动作：Omni 的注释是词法层的事，交给词法器数 token */
+  blank(text) {
+    const toks = tokensOf(text);
+    return toks !== null && toks.length === 0;
+  }
+
+  complete(text) { return isComplete(text); }
+
+  /** 表达式回显：包成 `print(E);`。不像表达式就返回 null，由调用方当语句处理。 */
+  echo(text) { return looksLikeExpr(text) ? `print(${text});` : null; }
+
+  /** 回显失败后的退路：以 `)` 收尾的可能本来就是"要副作用不要值" */
+  echoOptional(text) { return text.trim().endsWith(')'); }
+
+  asStmt(text) { return /[;}]$/.test(text.trim()) ? text : `${text};`; }
+
+  snapshot() {
+    const done = new Map();
+    for (const kv of this.state.done) done.set(kv[0], kv[1]);
+    const imports = new Map();
+    for (const kv of this.state.imports) imports.set(kv[0], new Set(kv[1]));
+    return { ck: this.ck.snapshot(), done: done, imports: imports, nextId: this.state.nextId };
+  }
+
+  restore(s) {
+    this.ck.restore(s.ck);
+    this.state.done = s.done;
+    this.state.imports = s.imports;
+    this.state.nextId = s.nextId;
+  }
+
+  /** 一批 -> 这一批新增的 OIR。诊断有错就抛（驱动负责回滚）。 */
+  add(text, diags) {
+    const r = loadProgram({
+      path: '<repl>', text: `${text}\n`, mode: this.getMode(), diags: diags, state: this.state,
+    });
+    diags.throwIfErrors();
+    const delta = this.ck.add({ kind: 'Program', decls: r.decls, imports: r.imports }, diags);
+    diags.throwIfErrors();
+    return delta;
+  }
+
+  /** `:js` / `:c` 要的是"整个会话作为一个程序"，跟增量状态无关，所以另开一份干净的编译 */
+  full(chunks) {
+    const diags = new Diagnostics();
+    const text = `${[PRELUDE, ...chunks].join('\n')}\n`;
+    const r = loadProgram({ path: '<repl>', text: text, mode: this.getMode(), diags: diags });
+    diags.throwIfErrors();
+    const mod = check({ kind: 'Program', decls: r.decls, imports: r.imports }, diags, this.getMode());
+    diags.throwIfErrors();
+    return mod;
+  }
+}
+
+/**
+ * 核心 S 表达式方言那条腿：CoreSession。
+ *
+ * 语法驱动的前端（asy/jancy）印出来的就是这份方言，所以这一条**不是**为 .sx 文件加的功能，
+ * 而是"新语言从语法来"这条路上 REPL 的落点：那门语言只要能把一批输入印成方言，
+ * 增量、回滚、跨批可见性就都已经在这里了。
+ */
+class CoreLang {
+  constructor() {
+    this.name = 'sx';
+    this.cs = new CoreSession();
+  }
+
+  // 方言里类型都写明了，没有"缺省注解怎么办"这回事，所以模式是固定的
+  getMode() { return 'static'; }
+
+  setMode(m) { throw new OmniError(`omni: ${this.name} has no type modes to switch`); }
+
+  prelude() { return null; }
+
+  /** 空动作：`;` 到行尾是注释，去掉之后什么都不剩就不编译 */
+  blank(text) {
+    return text.replace(/;[^\n]*/g, '').trim() === '';
+  }
+
+  complete(text) {
+    let depth = 0;
+    let str = false;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (str) {
+        if (c === '\\') i++;
+        else if (c === '"') str = false;
+        continue;
+      }
+      if (c === '"') str = true;
+      else if (c === ';') { while (i < text.length && text[i] !== '\n') i++; }
+      else if (c === '(') depth++;
+      else if (c === ')') depth--;
+    }
+    return depth <= 0 && !str;
+  }
+
+  // 方言里"打印一个值"就是 `(print E)`，写法本身已经是语句，没有回显这一层
+  echo(text) { return null; }
+
+  echoOptional(text) { return true; }
+
+  asStmt(text) { return text; }
+
+  snapshot() { return this.cs.snapshot(); }
+
+  restore(s) { this.cs.restore(s); }
+
+  add(text, diags) {
+    const delta = this.cs.add(text, diags);
+    diags.throwIfErrors();
+    return delta;
+  }
+
+  full(chunks) {
+    const diags = new Diagnostics();
+    const mod = lowerCoreSession(`${chunks.join('\n')}\n`, diags);
+    diags.throwIfErrors();
+    return mod;
+  }
+}
+
+/** `--lang` -> 语言模块。加一门语言就是加一行（前提是它能印出核心方言）。 */
+function replLang(name, mode) {
+  if (name === 'omni') return new OmniLang(mode);
+  if (name === 'sx') return new CoreLang();
+  throw new OmniError(`omni: repl: unknown language '${name}' (have: omni, sx)`);
+}
+
+/**
+ * 会话驱动。与语言无关：它只知道"编译一批、装进运行期、跑这一批的入口"。
+ */
 class Session {
-  /** @param {(path: string, text: string, mode: string) => any} compileText */
-  constructor(compileText, mode) {
-    this.compileText = compileText;
+  constructor(langName, mode) {
+    this.langName = langName;
     this.mode = mode;
-    /** @type {string[]} 已接受的源码块，按输入顺序 */
+    this.lang = null;
+    this.rt = null;
+    /** @type {string[]} 已接受的源码块，按输入顺序（只为 `:list` 与 `:js`/`:c` 而留） */
     this.chunks = [];
-    /** 上一次成功重放产生的全部 stdout；用来算增量 */
-    this.lastOut = '';
+    this.boot();
   }
 
-  source(extra) {
-    const parts = extra === undefined ? this.chunks : [...this.chunks, extra];
-    return `${[PRELUDE, ...parts].join('\n')}\n`;
+  /** 开一份干净的会话状态。`:reset` 就是再开一份 —— 没有"要清哪些表"的清单要维护。 */
+  boot() {
+    this.lang = replLang(this.langName, this.mode);
+    this.rt = new InterpSession();
+    this.chunks = [];
+    const pre = this.lang.prelude();
+    // 隐式前言自成第 0 批：跑它是为了让被导入模块的顶层初始化真的发生
+    if (pre !== null) this.attempt(pre);
   }
 
-  /** 前缀（前言 + 已接受的块）占了多少行 —— 诊断行号要减掉它 */
-  priorLines() {
-    return this.source().split('\n').length - 1;
+  reset() {
+    // 模式是用户设过的，reset 不该把它一起忘掉
+    this.mode = this.lang.getMode();
+    this.boot();
   }
 
-  compile(extra) {
-    return this.compileText('<repl>', this.source(extra), this.mode);
-  }
-
-  /** 编译并执行一个候选块，不改会话状态 */
-  attempt(chunk) {
-    let mod;
+  /**
+   * 编译并执行一批。失败就回到上一批成功的样子。
+   * @returns {{ok: boolean, err: string}}
+   */
+  attempt(text) {
+    const snap = this.lang.snapshot();
+    const diags = new Diagnostics();
+    let delta = null;
     try {
-      mod = this.compile(chunk).mod;
+      delta = this.lang.add(text, diags);
     } catch (e) {
       if (!(e instanceof OmniError)) throw e;
-      return { compiled: false, err: e };
+      this.lang.restore(snap);
+      return { ok: false, err: `${e.message}\n` };
     }
-    return { compiled: true, chunk, ...runCaptured(emitJs(mod)) };
-  }
-
-  /** 把执行结果呈现出来；跑通了就把这块收进会话 */
-  commit(r) {
-    // 重放是确定性的，所以新输出必然以上次输出为前缀；万一不是，就整段打出来
-    const delta = r.out.startsWith(this.lastOut) ? r.out.slice(this.lastOut.length) : r.out;
-    if (delta) stdout(delta);
-    if (r.err) stderr(r.err);
-    if (r.failed) return false;  // 运行期错误：不收这一块，会话回到上次成功的状态
-    this.chunks.push(r.chunk);
-    this.lastOut = r.out;
-    return true;
+    if (delta === null) {
+      this.lang.restore(snap);
+      return { ok: false, err: 'omni: repl: front end produced nothing\n' };
+    }
+    this.rt.install(delta);
+    const r = this.rt.runEntry(delta.entry);
+    if (r.failed) {
+      // 副作用已经发生（打出来的就打出来了），但这一块不收进会话：
+      // 它的声明回滚掉，下一批看不见它 —— 和编译失败一样的语义。
+      this.lang.restore(snap);
+      return { ok: false, err: r.err };
+    }
+    return { ok: true, err: '' };
   }
 
   /** 处理一次输入。返回 false 表示这块没被接受。 */
   feed(text) {
     const t = text.trim();
-    const base = this.priorLines();
-    const fail = (e) => {
-      stderr(`${renumber(e.message, base)}\n`);
-      return false;
-    };
-
-    if (looksLikeExpr(t)) {
-      const echo = this.attempt(`print(${t});`);
-      if (echo.compiled) return this.commit(echo);
-      // 回显编译不过。以 `)` 收尾的（函数/方法调用）可能本来就是"要副作用不要值"，
-      // 悄悄退回语句；其余情况必须报错，否则 `ys`（print 还不支持 list）会静默什么都不做。
-      if (!t.endsWith(')')) return fail(echo.err);
+    // 只有注释（或什么都没有）就是个空动作：不编译，也不进会话
+    if (this.lang.blank(t)) return true;
+    const echo = this.lang.echo(t);
+    if (echo !== null) {
+      const r = this.attempt(echo);
+      if (r.ok) {
+        this.chunks.push(echo);
+        return true;
+      }
+      // 回显没成。以 `)` 收尾的（函数/方法调用）可能本来就是"要副作用不要值"，
+      // 悄悄退回语句；其余情况必须报错，否则一个不支持的回显会静默什么都不做。
+      if (!this.lang.echoOptional(t)) {
+        stderr(r.err);
+        return false;
+      }
     }
-
-    const r = this.attempt(/[;}]$/.test(t) ? t : `${t};`);
-    return r.compiled ? this.commit(r) : fail(r.err);
+    const src = this.lang.asStmt(t);
+    const r = this.attempt(src);
+    if (!r.ok) {
+      stderr(r.err);
+      return false;
+    }
+    this.chunks.push(src);
+    return true;
   }
 }
 
@@ -197,7 +356,9 @@ notes:
 
 /** @returns {boolean} true 表示要退出 */
 function command(s, line) {
-  const [cmd, arg] = line.trim().split(/\s+/, 2);
+  const parts = line.trim().split(/\s+/, 2);
+  const cmd = parts[0];
+  const arg = parts[1];
   switch (cmd) {
     case ':help':
     case ':h':
@@ -211,21 +372,25 @@ function command(s, line) {
       stdout(s.chunks.length ? `${s.chunks.join('\n')}\n` : '(empty session)\n');
       return false;
     case ':reset':
-      s.chunks = [];
-      s.lastOut = '';
+      s.reset();
       stdout('session reset\n');
       return false;
     case ':mode':
-      if (!arg) stdout(`${s.mode}\n`);
+      if (!arg) stdout(`${s.lang.getMode()}\n`);
       else if (['mixed', 'dynamic', 'static'].includes(arg)) {
-        s.mode = arg;
-        stdout(`mode = ${arg}\n`);
+        try {
+          s.lang.setMode(arg);
+          stdout(`mode = ${arg}\n`);
+        } catch (e) {
+          if (!(e instanceof OmniError)) throw e;
+          stderr(`${e.message}\n`);
+        }
       } else stderr(`omni: mode must be one of mixed, dynamic, static (got '${arg}')\n`);
       return false;
     case ':js':
     case ':c':
       try {
-        const { mod } = s.compile();
+        const mod = s.lang.full(s.chunks);
         stdout(cmd === ':js' ? emitJs(mod) : emitC(mod));
       } catch (e) {
         if (!(e instanceof OmniError)) throw e;
@@ -239,19 +404,18 @@ function command(s, line) {
 }
 
 /**
- * @param {(path: string, text: string, mode: string) => any} compileText 由 cli.js 注入，
- *   避免 repl.js 反过来 import cli.js（cli.js 顶层就跑 main，成环会很难看）
- * @param {string} mode
+ * @param {string} mode 缺省类型注解的处理方式（ADR-0008）
+ * @param {string} [lang] 语言（`--lang`）；默认 omni
  */
-export function startRepl(compileText, mode) {
-  const s = new Session(compileText, mode);
+export function startRepl(mode, lang = 'omni') {
+  const s = new Session(lang, mode);
   const tty = stdinIsTty();
   let buf = '';
 
   // 提示符只在交互式终端里写，管道输入时保持 stdout 干净（测试要逐字节比对）
   const prompt = () => { if (tty) stdout(buf ? CONT : PROMPT); };
 
-  if (tty) stdout(`omni stage0 repl — mode ${mode}, :help for commands\n`);
+  if (tty) stdout(`omni stage0 repl — ${lang}, mode ${s.lang.getMode()}, :help for commands\n`);
   prompt();
 
   // 阻塞地一行一行读（宿主的 readLine，决策 17）。不用 node 的 readline 事件：
@@ -274,7 +438,7 @@ export function startRepl(compileText, mode) {
     }
     buf = buf ? `${buf}\n${line}` : line;
     if (!buf.trim()) { buf = ''; prompt(); continue; }
-    if (!isComplete(buf)) { prompt(); continue; }
+    if (!s.lang.complete(buf)) { prompt(); continue; }
     const text = buf;
     buf = '';
     s.feed(text);

@@ -175,11 +175,6 @@ function compileSexpr(path) {
   return { ast: null, mod, diags };
 }
 
-/** 从内存里的源文本编译。REPL 走这条（它没有文件），`compile` 只是把 text 交给加载器去读盘。 */
-export function compileText(path, text, mode) {
-  return compileProgram(path, text, mode);
-}
-
 /**
  * 入口 -> 模块图 -> 检查 -> OIR。
  * 依赖不再靠"提到 json 就整体拼进来"的猜测（旧的 libsFor），而是靠源码里写下的 import（ADR-0009）。
@@ -463,8 +458,12 @@ function main(argv) {
     stdout(USAGE);
     return 0;
   }
-  // repl 没有源文件；默认模式是 ADR-0008 第 3 节的 dynamic（沿革见 repl.js 文件头）
-  if (cmd === 'repl') return startRepl(compileText, modeFor('', rest, 'dynamic'));
+  // repl 没有源文件；默认模式是 ADR-0008 第 3 节的 dynamic（沿革见 repl.js 文件头）。
+  // `--lang` 选前端：驱动是与语言无关的，omni 走检查器的增量会话，sx 走核心方言的增量会话。
+  if (cmd === 'repl') {
+    const li = rest.indexOf('--lang');
+    return startRepl(modeFor('', rest, 'dynamic'), li >= 0 ? rest[li + 1] : 'omni');
+  }
   // 自举也没有源文件参数（默认就是编译器自己）。整条链与四条门槛见 bootstrap.js
   if (cmd === 'bootstrap') {
     const oi = rest.indexOf('-o');
@@ -717,7 +716,7 @@ const USAGE = `omni — stage0 bootstrap compiler
 usage: omni <command> <file.omni>
 
 commands:
-  repl      interactive session (no file; defaults to --mode dynamic)
+  repl      interactive session (no file; defaults to --mode dynamic; --lang omni|sx)
   run       parse and execute (node host: in-process JS; native build: via the C path)
   run-c     compile to C, build with cc, execute
   build     compile to a native executable  (-o NAME; --work DIR keeps the generated C there)

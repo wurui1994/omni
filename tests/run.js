@@ -143,6 +143,9 @@ if (existsSync(errorsDir)) {
 }
 
 // ------------------------------------------------------------ REPL：脚本化会话 + 快照
+//
+// 文件名 `session-LANG.in` 里的 LANG 就是 `--lang`（没有后缀就是 omni）：REPL 的驱动是
+// 与语言无关的，所以这条轴要同时钉住至少两门语言，否则"前端无关"只是说说。
 
 const replDir = join(here, 'repl');
 if (existsSync(replDir)) {
@@ -150,8 +153,10 @@ if (existsSync(replDir)) {
   for (const f of readdirSync(replDir).filter((f) => f.endsWith('.in')).sort()) {
     if (filters.length && !filters.some((x) => f.includes(x))) continue;
     const path = join(replDir, f);
+    const m = /^session-([a-z]+)\.in$/.exec(f);
+    const args = m ? [CLI, 'repl', '--lang', m[1]] : [CLI, 'repl'];
     // 管道输入时 REPL 不打提示符，所以 stdout 可以逐字节比对
-    const r = spawnSync(process.execPath, [CLI, 'repl'], {
+    const r = spawnSync(process.execPath, args, {
       encoding: 'utf8', cwd: root, input: readFileSync(path, 'utf8'),
     });
     const got = { stdout: r.stdout ?? '', stderr: r.stderr ?? '', code: r.status ?? -1 };
@@ -161,6 +166,13 @@ if (existsSync(replDir)) {
     }
     const actual = `exit ${got.code}\n--- stdout ---\n${got.stdout}--- stderr ---\n${got.stderr}`;
     if (checkSnapshot(f, path.replace(/\.in$/, '.expected'), actual)) record(`${f} [repl]`, true, '');
+  }
+  // 增量性是**结构性**判据，钉不到快照里（快照只看输出，不看每批干了多少活），
+  // 所以单独一个脚本：见 tests/repl/incremental.js 的头注。
+  if (!filters.length || filters.some((x) => 'incremental'.includes(x))) {
+    const inc = spawnSync(process.execPath, [join(replDir, 'incremental.js')], { encoding: 'utf8', cwd: root });
+    const out = `${inc.stdout ?? ''}${inc.stderr ?? ''}`;
+    record('incremental.js [repl 增量]', inc.status === 0, inc.status === 0 ? '' : out);
   }
 }
 

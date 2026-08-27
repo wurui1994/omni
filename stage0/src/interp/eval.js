@@ -425,3 +425,62 @@ export function interpret(mod) {
   return 0;
 }
 
+/**
+ * 常驻解释器会话（REPL 用）。
+ *
+ * 解释器的状态本来就是**按名字**的几张表（funcs / structs / enums / classes / closures /
+ * globals），所以"增量"在这一层几乎是免费的：新一批的定义并进表里，全局量的格子留着不动，
+ * 然后只跑这一批的入口函数 —— 旧批次不重跑。REPL 因此不再需要"重放整个会话"。
+ *
+ * 为什么 REPL 走这个执行器而不是把 JS 后端的产物 eval 掉：这一份是我们自己的执行器
+ * （ADR-0013），而且它在五方逐字节比对里，语义与 JS/C 两条腿是同一套 builtin.js。
+ */
+export class InterpSession {
+  constructor() {
+    this.I = new Interp({
+      funcs: [], structs: [], enums: [], classes: [], closures: [], globals: [], entry: null,
+    });
+    // 常驻的顶层作用域：每批的入口函数**共用**它，所以第一批的 `x = 10` 第二批还在。
+    // 检查器那边对应的是 Checker.topScope —— 两边必须一起在，否则会一边过检查一边找不到变量。
+    this.env = new Env(undefined);
+  }
+
+  /** 把一批新增的 OIR 并进会话。同名重定义按后来者算（REPL 里重新定义一个函数是常事）。 */
+  install(mod) {
+    const I = this.I;
+    if (mod.js === true) I.mod.js = true;
+    for (const f of mod.funcs ?? []) I.funcs.set(f.mangled, f);
+    for (const s of mod.structs ?? []) I.structs.set(s.name, s);
+    for (const e of mod.enums ?? []) I.enums.set(e.name, e);
+    for (const c of mod.classes ?? []) I.classes.set(c.name, c);
+    for (const c of mod.closures ?? []) I.closures.set(c.make, c);
+    // 全局量的**值**要留住：只给没见过的名字开格子
+    for (const g of mod.jsGlobals ?? []) if (!I.globals.has(g.name)) I.globals.set(g.name, undefined);
+    for (const g of mod.globals ?? []) if (!I.globals.has(g.name)) I.globals.set(g.name, undefined);
+  }
+
+  /**
+   * 跑一批的入口函数。它的顶层作用域是会话那一个（`this.env`），不是新开的 ——
+   * 于是上一批声明的变量这一批还在。运行期错误收在这里：一批跑挂了不该掀翻会话。
+   * @returns {{failed: boolean, err: string}}
+   */
+  runEntry(name) {
+    const f = this.I.funcs.get(name);
+    if (f === undefined) throw new OmniError(`interp: no entry function '${name}'`);
+    try {
+      this.I.depth = 0;
+      this.I.ret = undefined;
+      this.I.block(f.body, this.env, { captures: undefined });
+      this.I.ret = undefined;
+    } catch (e) {
+      flushOut();
+      if (e instanceof InterpFail) return { failed: true, err: `omni: runtime error: ${e.message}\n` };
+      if (e instanceof InterpUncaught) return { failed: true, err: `omni: uncaught: ${e.message}\n` };
+      throw e;
+    }
+    flushOut();
+    return { failed: false, err: '' };
+  }
+}
+
+

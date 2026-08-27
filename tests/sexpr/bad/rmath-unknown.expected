@@ -1,1 +1,1 @@
-(rmath) 不认识 'sin'，能用的是 sqrt / fabs / floor / ceil / round / pow / fmod
+(rmath) 不认识 'tgamma'，能用的是 sqrt / fabs / floor / ceil / round / pow / fmod / sin / cos / tan / asin / acos / atan / atan2 / sinh / cosh / tanh / asinh / acosh / atanh / exp / expm1 / log / log10 / log1p / cbrt / hypot

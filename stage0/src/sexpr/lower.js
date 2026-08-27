@@ -55,6 +55,7 @@
 
 import { INT, REAL, BOOL, STRING, VOID, vecType, bufType, arrType, structType, classType, zeroValue } from '../hir/types.js';
 import { readSexpr, isList, isAtom, isStr, head } from './read.js';
+import { SourceFile } from '../source/diag.js';
 
 const TYPES = new Map([['int', INT], ['real', REAL], ['bool', BOOL], ['string', STRING], ['void', VOID]]);
 
@@ -84,6 +85,8 @@ class CoreLowerer {
     this.diags = diags;
     this.funcs = new Map();   // 名字 -> {name, mangled, ret, params}
     this.scopes = [];         // 名字 -> OIR 类型
+    /** @type {Map[]|null} REPL 的常驻顶层作用域（每批入口共用）；整程序降级时一直是 null */
+    this.topScope = null;
     // kernel 与函数分开登记：kernel 只能被 (dispatch ...) 启动，(call ...) 要报错说清这件事。
     // 它在 OIR 里就是一个普通函数，第一个形参是隐含的 gid —— 于是「同一份 MIR 在 CPU 上跑」
     // 不需要任何新机制（门槛 7 要比的就是这个 CPU 结果），dispatch 只是一个循环。
@@ -192,13 +195,20 @@ class CoreLowerer {
 
   /* -------------------------------------------------------------- 模块 */
 
-  run(nodes) {
+  /**
+   * 一批顶层项 -> 这一批**新增**的 OIR。整份文件就是"只有一批"的特例（run 调它）。
+   * REPL 里一个 CoreLowerer 活着，每批调一次：结构体表、函数表、模块级变量表都留着，
+   * 所以后一批看得见前一批的名字，而返回的 delta 只有这一批新出来的东西。
+   */
+  chunk(nodes, entryName = 'omni_main') {
+    const base = { structs: this.structs.size, classes: this.classes.size, globals: this.globals.size };
     const top = nodes.length === 1 && head(nodes[0]) === 'module' ? nodes[0] : null;
     if (top === null) {
       this.err(nodes[0], '一份核心方言的源文件是恰好一个 (module ...)');
       return null;
     }
     const forms = top.items.slice(1);
+
     // 三遍。第一遍收结构体：函数签名与字段类型都可能提到它，所以它必须最先成型。
     // 字段类型里**可以**提到别的结构体/类（第十七刀），但只能提**前面已经声明过**的 ——
     // 一遍就够，而且自引用（`(struct A (n A))`）天然挡在门外：它的零值会无限递归。
@@ -252,7 +262,7 @@ class CoreLowerer {
       if (ps === null || ret === null) continue;
       this.funcs.set(nm, { name: nm, mangled: `s_${nm}`, ret: ret, params: ps });
     }
-    return this.assemble(forms);
+    return this.assemble(forms, entryName, base);
   }
 
   /** `((p int) (q real))` -> OIR 形参表。 */
@@ -334,14 +344,17 @@ class CoreLowerer {
     return null;
   }
 
-  assemble(forms) {
+  assemble(forms, entryName, base) {
     const funcs = [];
     const mainStmts = [];
     let sawMain = false;
     // 模块级变量的零初始化就是 `(main …)` 最前面的几句赋值（第二十四刀）。放在这一层
     // 而不是让六个后端各写一份"这个类型的零长什么样"：零值节点 OIR 里现成（zeroValue），
     // 而后端只要会存取一个全局就够。顺序是声明序，所以两次降级出来的文本一样。
+    // 只初始化**这一批**新出来的（REPL：前面几批的全局已经在它们自己那个入口里初始化过了）。
+    let gi = 0;
     for (const [nm, t] of this.globals) {
+      if (gi++ < base.globals) continue;
       mainStmts.push({
         kind: 'ExprStmt',
         expr: {
@@ -383,7 +396,13 @@ class CoreLowerer {
       if (h === 'main') {
         if (sawMain) { this.err(f, '(main ...) 只能有一个'); continue; }
         sawMain = true;
-        this.scopes = [new Map()];
+        // REPL：入口的顶层作用域跨批留住（第一批 `(let t …)` 之后第二批还看得见 t）。
+        // 运行期那边对应 InterpSession 里那个常驻 Env —— 两边必须一起在。
+        if (entryName === 'omni_main') this.scopes = [new Map()];
+        else {
+          if (this.topScope === null) this.topScope = [new Map()];
+          this.scopes = this.topScope;
+        }
         for (const s of this.block(f.items.slice(1), VOID)) mainStmts.push(s);
         continue;
       }
@@ -391,24 +410,35 @@ class CoreLowerer {
       if (h === 'global') continue;                    // 第二遍已经收过了
       this.err(f, `(module ...) 里只能是 (struct ...) / (class ...) / (global ...) / (fn ...) / (kernel ...) / (main ...)，见到 '${h}'`);
     }
-    if (!sawMain) this.err(null, '缺入口：加一个 (main ...)');
+    // REPL 的一批里没有 `(main …)` 是正常的（只写了个函数定义）；整程序时必须有入口。
+    if (!sawMain && entryName === 'omni_main') this.err(null, '缺入口：加一个 (main ...)');
     mainStmts.push({ kind: 'Return', value: null });
-    funcs.push({ name: 'main', mangled: 'omni_main', ret: VOID, params: [], body: { kind: 'Block', stmts: mainStmts } });
+    funcs.push({
+      name: entryName === 'omni_main' ? 'main' : entryName,
+      mangled: entryName, ret: VOID, params: [], body: { kind: 'Block', stmts: mainStmts },
+    });
     // 结构体按**声明顺序**发出去：C 后端会按值嵌套关系拓扑排序，但字段里不许再有结构体，
     // 所以这里的顺序就是最终顺序 —— 同一份输入两次降出来的文本因此逐字节相同。
+    // `base` 之前的那些是前面几批发过的，不再重发（Map 记的就是插入序）。
     const structs = [];
-    for (const s of this.structs.values()) structs.push(s);
+    let si = 0;
+    for (const s of this.structs.values()) if (si++ >= base.structs) structs.push(s);
     const classes = [];
-    for (const c of this.classes.values()) classes.push(c);
+    let ci = 0;
+    for (const c of this.classes.values()) if (ci++ >= base.classes) classes.push(c);
     // 模块级变量按**声明顺序**发出去（Map 记的就是插入序）：MIR 的全局号按这个顺序分配，
     // 所以同一份输入两次编译出来的字节与哈希都一样。
     const globals = [];
-    for (const [nm, t] of this.globals) globals.push({ name: nm, mangled: `g_${nm}`, type: t });
+    let gj = 0;
+    for (const [nm, t] of this.globals) {
+      if (gj++ < base.globals) continue;
+      globals.push({ name: nm, mangled: `g_${nm}`, type: t });
+    }
     return {
       structs: structs, classes: classes, enums: [], containers: [], closures: [], fnTypes: [],
       funcs: funcs,
       globals: globals,
-      entry: 'omni_main',
+      entry: entryName,
     };
   }
 
@@ -1104,6 +1134,93 @@ function coreTypeText(t) {
 export function lowerCoreSexpr(file, diags) {
   const nodes = readSexpr(file, diags);
   if (diags.hasErrors()) return null;
-  return new CoreLowerer(diags).run(nodes);
+  return new CoreLowerer(diags).chunk(nodes, 'omni_main');
+}
+
+/**
+ * REPL 的 `:js` / `:c`：把整个会话当**一个程序**降一遍。
+ * 与 lowerCoreSexpr 的差别只有一条 —— 交互式输入是松散的形式，壳子（`(module …)` 与
+ * `(main …)`）由 coreWrap 补，所以这里不能要求源文本自己写全。
+ */
+export function lowerCoreSession(text, diags) {
+  const nodes = readSexpr(new SourceFile('<repl>', text), diags);
+  if (diags.hasErrors()) return null;
+  return new CoreLowerer(diags).chunk(coreWrap(nodes), 'omni_main');
+}
+
+/**
+ * 核心方言的**增量**会话（REPL）。
+ *
+ * 这一层是所有语法驱动前端共用的 REPL 后半段：一门语言只要能把一批输入印成核心方言，
+ * 它的 REPL 就有了 —— 增量、回滚、跨批可见性都在这里，不在那门语言里。
+ * `omni` 那条腿走的是 hir/check.js 的 CheckSession，形状一样（add -> delta）。
+ */
+export class CoreSession {
+  constructor() {
+    this.lw = new CoreLowerer(null);
+    this.no = 0;
+    this.lastChecked = 0;
+  }
+
+  /** 失败要能回到上一批成功的样子：这一层的改动都是"往表里加"，复原容器就够 */
+  snapshot() {
+    const l = this.lw;
+    return {
+      funcs: new Map(l.funcs), kernels: new Map(l.kernels), globals: new Map(l.globals),
+      structs: new Map(l.structs), classes: new Map(l.classes), tmpNo: l.tmpNo, no: this.no,
+      topScope: l.topScope,
+      vars: l.topScope === null ? null : new Map(l.topScope[0]),
+    };
+  }
+
+  restore(s) {
+    const l = this.lw;
+    l.funcs = s.funcs;
+    l.kernels = s.kernels;
+    l.globals = s.globals;
+    l.structs = s.structs;
+    l.classes = s.classes;
+    l.tmpNo = s.tmpNo;
+    l.topScope = s.topScope;
+    if (s.topScope !== null) s.topScope[0] = s.vars;
+    this.no = s.no;
+  }
+
+  /**
+   * 一批核心方言源文本 -> 这一批新增的 OIR（入口是 `omni_chunk_N`）。
+   * REPL 里不必写 `(module …)`：顶层项照写，其余的形式自动进这一批的入口。
+   */
+  add(text, diags) {
+    this.lw.diags = diags;
+    const nodes = readSexpr(new SourceFile('<repl>', text), diags);
+    if (diags.hasErrors()) return null;
+    this.no = this.no + 1;
+    const delta = this.lw.chunk(coreWrap(nodes), `omni_chunk_${this.no}`);
+    this.lastChecked = delta === null ? 0 : delta.funcs.length;
+    return delta;
+  }
+}
+
+/** `(module …)` 里能出现的顶层项。REPL 的包装靠它区分"声明"与"语句"。 */
+const CORE_DECLS = new Set(['struct', 'class', 'global', 'fn', 'kernel']);
+
+/**
+ * 松散的一批形式 -> 一个 `(module …)`：声明留在顶层，其余的收进 `(main …)`。
+ * 交互式输入里 `(print (lit int 1))` 就该能直接跑，而不是逼人每次手打两层壳子。
+ */
+function coreWrap(nodes) {
+  if (nodes.length === 1 && head(nodes[0]) === 'module') return nodes;
+  const span = nodes.length === 0 ? null : nodes[0].span;
+  const items = [{ kind: 'atom', value: 'module', span: span }];
+  const stmts = [{ kind: 'atom', value: 'main', span: span }];
+  for (const n of nodes) {
+    const h = head(n);
+    if (CORE_DECLS.has(h)) items.push(n);
+    // 用户自己写的 `(main …)`：把里面的语句摊进这一批的入口，而不是变成第二个 main
+    else if (h === 'main') for (const s of n.items.slice(1)) stmts.push(s);
+    else stmts.push(n);
+  }
+  items.push({ kind: 'list', items: stmts, span: span });
+  return [{ kind: 'list', items: items, span: span }];
 }
 

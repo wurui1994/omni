@@ -139,23 +139,24 @@ function resolveSpec(spec, from) {
  * 每个 decl 带上 `mod`（所属模块 id）和 `mode`（该文件的类型模式），
  * 检查器靠这两个字段做可见性与按文件的模式（ADR-0008 第 1 节的按文件模式就此落地）。
  *
- * @param {{path: string, text?: string, mode?: string, diags: any}} opts
+ * @param {{path: string, text?: string, mode?: string, diags: any, state?: any}} opts
  *   text 非空表示入口在内存里（REPL）；此时相对导入相对 cwd 解析。
+ *   state 非空表示这是一次**增量**加载（REPL 的一批输入）：见 newLoadState。
  * @returns {{decls: any[], imports: Map<number, Set<number>>, files: string[]}}
  */
-export function loadProgram({ path, text, mode, diags }) {
+export function loadProgram({ path, text, mode, diags, state }) {
   /** @type {Map<string, number>} realpath -> 模块 id（完成加载的） */
-  const done = new Map();
+  const done = state === undefined ? new Map() : state.done;
   /** @type {Map<number, Set<number>>} 模块 id -> 它直接导入的模块 id */
-  const imports = new Map();
+  const imports = state === undefined ? new Map() : state.imports;
   /** @type {{real: string, spec: string}[]} DFS 栈，用来报环 */
   const stack = [];
   const files = [];
   const decls = [];
-  let nextId = 0;
+  let nextId = state === undefined ? 0 : state.nextId;
 
-  /** @returns {number} 模块 id */
-  const visit = (real, root, spec, file, fileMode) => {
+  /** @param {number|undefined} forceId 指定 id 并且**不**记进 done（REPL 的会话根） */
+  const visit = (real, root, spec, file, fileMode, forceId) => {
     const cyc = stack.findIndex((s) => s.real === real);
     if (cyc >= 0) {
       const chain = [...stack.slice(cyc).map((s) => s.spec), spec].join('\n    imports ');
@@ -167,9 +168,18 @@ export function loadProgram({ path, text, mode, diags }) {
     stack.push({ real, spec });
     const src = file ?? new SourceFile(display(real), readText(real));
     const ast = parse(src, diags);
-    const id = nextId++;
-    const mine = new Set();
-    imports.set(id, mine);
+    // id 不写成三元里的 `nextId++`：自举那条腿要求"惰性求值位置里不许藏副作用"（ADR-0011）
+    let id = forceId;
+    if (id === undefined) {
+      id = nextId;
+      nextId = nextId + 1;
+    }
+    // 增量加载时同一个 id 会被多批复用（会话根），导入边要**累加**而不是覆盖
+    let mine = imports.get(id);
+    if (mine === undefined) {
+      mine = new Set();
+      imports.set(id, mine);
+    }
     const dir = dirname(real);
 
     for (const d of ast.decls) {
@@ -192,7 +202,7 @@ export function loadProgram({ path, text, mode, diags }) {
       decls.push(d);
     }
     files.push(real);
-    done.set(real, id);
+    if (forceId === undefined) done.set(real, id);
     stack.pop();
     return id;
   };
@@ -202,6 +212,19 @@ export function loadProgram({ path, text, mode, diags }) {
   const entryFile = onDisk ? null : new SourceFile(path, text ?? '');
   // 入口的包根 = 它自己所在的目录。相对导入不能爬到入口目录之外：入口在哪，包就在哪。
   const root = onDisk ? dirname(real) : process.cwd();
-  visit(real, root, path, entryFile, mode ?? modeOfPath(path));
+  // 增量加载时会话根固定是模块 0：后一批要看得见前一批的顶层名字，而可见性规则是按模块 id 判的
+  const sessionRoot = state !== undefined;
+  if (sessionRoot && nextId === 0) nextId = 1;
+  visit(real, root, path, entryFile, mode ?? modeOfPath(path), sessionRoot ? 0 : undefined);
+  if (state !== undefined) state.nextId = nextId;
   return { decls, imports, files };
+}
+
+/**
+ * 增量加载的会话状态（REPL）。同一个状态串起来的多批输入共享一张模块图：
+ * 已经加载过的模块不会重新解析（它的 decls 只在第一批里出现一次），
+ * 而会话根本身每批都重新解析并且固定是模块 0。
+ */
+export function newLoadState() {
+  return { done: new Map(), imports: new Map(), nextId: 0 };
 }

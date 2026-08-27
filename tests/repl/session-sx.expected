@@ -1,0 +1,26 @@
+exit 0
+--- stdout ---
+3
+49
+hi!
+18
+1.5
+hi!
+(print (bin "+" (int 1) (int 2)))
+(fn sq ((n int)) int (ret (bin "*" (var n) (var n))))
+(print (call sq (int 7)))
+(let t string (str "hi"))
+(set t (bin "+" (var t) (str "!")))
+(print (var t))
+(global g int)
+(set g (call sq (int 3)))
+(print (bin "*" (var g) (int 2)))
+(struct P (x real) (y real))
+(let p P (new P))
+(fldset (var p) x (real 1.5))
+(print (fld (var p) x))
+(print (var t))
+--- stderr ---
+<repl>:1:8: error: 未声明的变量 'zzz'
+  (print (var zzz))
+         ^^^^^^^^^

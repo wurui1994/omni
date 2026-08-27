@@ -59,6 +59,8 @@ class Checker {
     /** @type {any[]} tagged union（ADR-0012）；变体下标就是运行期标签 */
     this.enums = [];
     this.scope = new Scope(null);
+    /** @type {Scope | null} REPL 的常驻顶层作用域（每批入口共用它）；整程序编译时一直是 null */
+    this.topScope = null;
     this.loopDepth = 0;
     this.currentRet = VOID;
     /** @type {Set<string>} 已用的 mangled 名，防撞 */
@@ -543,9 +545,31 @@ class Checker {
 
   // ---------------------------------------------------------------- 顶层
 
-  /** @param {any} program */
-  run(program) {
+  /**
+   * 检查一批顶层项，产出一份 OIR 模块。
+   *
+   * 同一个 Checker 可以被**反复**调用（REPL 的每次输入就是一批）：类型表、重载表、
+   * 顶层作用域、mangled 名字池都在实例上，所以第二批能看见第一批的名字。
+   * 增量的关键是两个 `done` 标记 —— 默认实参与函数体**只检查一次**，
+   * 否则每来一批都把所有旧函数重检一遍，就是 O(n²)（旧 REPL 就是这样）。
+   * 返回的是**这一批新增的东西**（delta）：新的类型、新检查的函数、这一批的入口函数。
+   *
+   * @param {any} program
+   * @param {string} [entryName] 这一批顶层语句合成的入口函数名
+   */
+  chunk(program, entryName = 'omni_main') {
+    const base = {
+      structs: this.structs.length,
+      classes: this.classes.length,
+      enums: this.enums.length,
+      lifted: this.lifted.length,
+      closures: this.closures.length,
+    };
+    const seenC = new Set(this.containers.keys());
+    const seenB = new Set(this.boxDeeps.keys());
+    const seenF = new Set(this.fnTypes.keys());
     this.imports = program.imports ?? new Map();
+
     // 每个 decl 自带所属模块与所在文件的模式；`at` 在检查它之前把这两个"当前上下文"摆好
     const at = (d) => {
       this.curMod = d.mod ?? 0;
@@ -649,9 +673,12 @@ class Checker {
       this.funcs.set(decl.name, group);
     }
 
-    // pass 3：默认实参（在空作用域里求值，只允许常量表达式的简单形式）
+    // pass 3：默认实参（在空作用域里求值，只允许常量表达式的简单形式）。
+    // `defsDone` 让旧批次的符号不再进来 —— 增量的一半在这个标记上。
     for (const group of this.funcs.values()) {
       for (const sym of group) {
+        if (sym.defsDone === true) continue;
+        sym.defsDone = true;
         at(sym);
         for (const p of sym.params) {
           if (!p.defAst) continue;
@@ -660,10 +687,12 @@ class Checker {
       }
     }
 
-    // pass 4：函数体
+    // pass 4：函数体。同理只检查这一批新增的（`bodyDone`）。
     const funcs = [];
     for (const group of this.funcs.values()) {
       for (const sym of group) {
+        if (sym.bodyDone === true) continue;
+        sym.bodyDone = true;
         at(sym);
         this.enterFunction();
         this.currentRet = sym.ret;
@@ -681,8 +710,18 @@ class Checker {
     }
     this.thisType = null;
 
-    // pass 5：顶层语句 -> 合成 main
-    this.enterFunction();
+    // pass 5：顶层语句 -> 合成入口函数（整程序时就是 main；REPL 里每批一个）。
+    // REPL 的顶层作用域要**跨批留住**：`x = 10` 之后下一批还得看得见 x。运行期那边对应的是
+    // InterpSession 里那个常驻 Env —— 两边同一件事，缺一边就会一边过检查一边找不到变量。
+    if (entryName === 'omni_main' || this.topScope === null) {
+      this.enterFunction();
+      if (entryName !== 'omni_main') this.topScope = this.scope;
+    } else {
+      this.scope = this.topScope;
+      this.fnScope = this.topScope;
+      this.hoist = [];
+    }
+
     this.currentRet = VOID;
     const mainStmts = [];
     for (const d of program.decls) {
@@ -692,23 +731,29 @@ class Checker {
       if (s) mainStmts.push(s);
     }
     funcs.push({
-      name: 'main', mangled: 'omni_main', ret: VOID, params: [],
+      name: entryName === 'omni_main' ? 'main' : entryName, mangled: entryName, ret: VOID, params: [],
       body: this.exitFunction({ kind: 'Block', stmts: mainStmts }),
     });
 
+    const newKeys = (m, seen) => [...m.keys()].filter((k) => !seen.has(k)).sort();
     return {
-      structs: this.structs,
-      classes: this.classes,
-      enums: this.enums,
-      containers: sortedContainers(this.containers),
+      structs: this.structs.slice(base.structs),
+      classes: this.classes.slice(base.classes),
+      enums: this.enums.slice(base.enums),
+      containers: sortedContainers(pickNew(this.containers, seenC)),
       // 深装箱助手（print(list<int>) 之类）：C 侧要按类型生成转换函数，内层先出（ADR-0008）
-      boxDeeps: [...this.boxDeeps.keys()].sort().map((k) => this.boxDeeps.get(k)),
+      boxDeeps: newKeys(this.boxDeeps, seenB).map((k) => this.boxDeeps.get(k)),
       // lambda 提升出来的函数排在最后：它们是编译器合成的，放在用户函数之后便于阅读生成物
-      funcs: [...funcs, ...this.lifted],
-      closures: this.closures,
-      fnTypes: [...this.fnTypes.keys()].sort().map((k) => this.fnTypes.get(k)),
-      entry: 'omni_main',
+      funcs: [...funcs, ...this.lifted.slice(base.lifted)],
+      closures: this.closures.slice(base.closures),
+      fnTypes: newKeys(this.fnTypes, seenF).map((k) => this.fnTypes.get(k)),
+      entry: entryName,
     };
+  }
+
+  /** 整程序一次过：一个 Checker 只跑一批，delta 就是全量。 */
+  run(program) {
+    return this.chunk(program, 'omni_main');
   }
 
   mangle(name) {
@@ -1655,8 +1700,14 @@ const BUILTIN_METHODS = {
  * 容器按依赖拓扑排序：后端生成 `list<list<int>>` 的函数前必须先有 `list<int>`，
  * 生成 `dict<K,V>` 前必须先有 `list<K>`（keys() 用它）。
  */
-function sortedContainers(map) {
-  const deps = (t) => {
+/** 只挑这一批新出现的键（REPL 的 delta 用；旧的那些上一批已经发过了） */
+function pickNew(map, seen) {
+  const out = new Map();
+  for (const [k, v] of map) if (!seen.has(k)) out.set(k, v);
+  return out;
+}
+
+function sortedContainers(map) {  const deps = (t) => {
     switch (t.k) {
       case 'list': return [t.elem];
       case 'set': return [t.elem, listType(t.elem)];
@@ -1703,3 +1754,84 @@ function describeSym(sym) {
 export function check(program, diags, mode = 'mixed') {
   return new Checker(diags, mode).run(program);
 }
+
+/**
+ * 增量检查会话（REPL 用，ADR-0008 第 3 节说的"每次输入是一个增量编译单元"）。
+ *
+ * 一个 Checker 活着，每批输入调一次 `chunk`：类型表、重载表、顶层作用域、mangled 名字池
+ * 都留着，所以后一批看得见前一批的名字；`defsDone`/`bodyDone` 保证旧函数体不再重检。
+ * 于是 n 批输入的检查工作量是 O(n)，不是旧 REPL 那种"每批重放整个会话"的 O(n²)。
+ *
+ * 失败要能回到上一次成功的样子，所以每批之前拍一张**浅快照**：这一层的改动都是"往表里加"
+ * （加类型、加重载、加提升出来的 lambda、加顶层变量），把容器本身复原就够；已存在的符号
+ * 在失败批次里不会被改写（它们的 done 标记早就置上了）。
+ */
+export class CheckSession {
+  constructor(mode = 'mixed') {
+    this.ck = new Checker(null, mode);
+    this.no = 0;
+    /** 上一批检查了多少个函数体 —— 判分增量性的那条断言看它 */
+    this.lastChecked = 0;
+  }
+
+  getMode() { return this.ck.defaultMode; }
+
+  setMode(m) {
+    this.ck.defaultMode = m;
+    this.ck.mode = m;
+  }
+
+  snapshot() {
+    const c = this.ck;
+    const funcs = new Map();
+    for (const [k, g] of c.funcs) funcs.set(k, [...g]);
+    return {
+      types: new Map(c.types),
+      funcs,
+      structs: [...c.structs],
+      classes: [...c.classes],
+      enums: [...c.enums],
+      lifted: [...c.lifted],
+      closures: [...c.closures],
+      mangled: new Set(c.mangled),
+      containers: new Map(c.containers),
+      boxDeeps: new Map(c.boxDeeps),
+      fnTypes: new Map(c.fnTypes),
+      topScope: c.topScope,
+      vars: c.topScope === null ? null : new Map(c.topScope.vars),
+      no: this.no,
+    };
+  }
+
+  restore(s) {
+    const c = this.ck;
+    c.types = s.types;
+    c.funcs = s.funcs;
+    c.structs = s.structs;
+    c.classes = s.classes;
+    c.enums = s.enums;
+    c.lifted = s.lifted;
+    c.closures = s.closures;
+    c.mangled = s.mangled;
+    c.containers = s.containers;
+    c.boxDeeps = s.boxDeeps;
+    c.fnTypes = s.fnTypes;
+    c.topScope = s.topScope;
+    if (s.topScope !== null) s.topScope.vars = s.vars;
+    this.no = s.no;
+  }
+
+  /**
+   * 检查一批，返回这一批新增的 OIR（delta）。诊断按批传进来，调用方失败时用 `restore`。
+   * @param {any} program
+   * @param {import('../source/diag.js').Diagnostics} diags
+   */
+  add(program, diags) {
+    this.ck.diags = diags;
+    this.no = this.no + 1;
+    const delta = this.ck.chunk(program, `omni_chunk_${this.no}`);
+    this.lastChecked = delta.funcs.length;
+    return delta;
+  }
+}
+

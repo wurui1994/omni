@@ -1,0 +1,20 @@
+;; 核心 S 表达式方言的 REPL。这条用例的意义不是"方言也能交互"，而是**驱动与语言无关**：
+;; 增量、跨批可见性、失败回滚都在共用的那一层（repl.js 的驱动 + CoreSession），
+;; 所以语法驱动的前端（asy/jancy）印出方言就自动有 REPL，不用各写一遍。
+;; 交互式输入不必手打 `(module …)`：声明照写，其余的形式自动进这一批的入口。
+(print (bin "+" (int 1) (int 2)))
+(fn sq ((n int)) int (ret (bin "*" (var n) (var n))))
+(print (call sq (int 7)))
+(let t string (str "hi"))
+(set t (bin "+" (var t) (str "!")))
+(print (var t))
+(global g int)
+(set g (call sq (int 3)))
+(print (bin "*" (var g) (int 2)))
+(struct P (x real) (y real))
+(let p P (new P))
+(fldset (var p) x (real 1.5))
+(print (fld (var p) x))
+(print (var zzz))
+(print (var t))
+:list
