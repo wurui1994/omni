@@ -65,6 +65,13 @@
 // 裸数组那一整套 —— `push`/`pop`/`.length`/下标读写/写下标扩长/切片/for-each/当形参与
 // 返回值 —— 在 `A[]` 上一条不少；量过的三条都对上了：句柄进数组不拷、同一个对象进两格
 // 改一次两处都变、切片复制的是**数组**而不是对象（格子里还是同一批句柄））。
+// **方法**（第二十刀：`struct P { int x; int get() { return x + 10; } }`、`a.get()`。
+// 降级是**加糖**：每个方法出一个 `asy__m_<记录>_<名>` 的普通函数，头上多一个 `this`
+// 形参，`a.get()` 就是 `(call asy__m_P_get (var a))`。方法体里的裸名字先找局部量与
+// 形参，再找**前面声明的**字段（`x` -> `(fld (var this) x)`），`this.x` 与 `this`
+// 本身也认，返回 `this` 能接着点下去。重载、默认实参、递归在方法上与普通函数走的是
+// 同一条路（同一个 userCall / defWrapper，只是多塞一个接收者）。接收者可以是任意
+// 表达式：`mk(7).get()`、`ps[1].bump(30)`、`bx.inner.get()` 都通）。
 //
 // 不支持（见到就报错，报错里说清是哪一条）：triple、import/access、
 // typedef、算符重载、给切片赋值（`a[0:2] = b`）、
@@ -84,7 +91,8 @@
 // 算一次了 —— 语义会变，所以报错而不是悄悄换个意思）、
 // struct 的这两条边界（每条都有 bad/ 用例钉着）：**自引用**字段
 // （`struct A { A next; }` —— asy 收，我们不收，见下面的差别一节）、
-// struct 里的成员函数（这一刀只有字段声明）。
+// 把方法**当值**取出来（`int f() = a.get;` —— asy 收，那是绑住接收者的闭包；
+// 我们的方法是"多一个 this 形参的普通函数"，而核心方言里函数不是值）。
 //
 // ## 与真 asy 的差别，写在这里而不是等着被发现
 //
@@ -141,6 +149,14 @@
 // - **`f(x).字段 = v` 认**（第十七刀顺出来的）：量过 asy 收，因为 struct 是引用类型，
 //   函数返回的就是那个句柄。所以 assign 不再只认"普通变量的字段"，接收者可以是任意
 //   表达式；复合赋值（`f(x).n += 1`）要先把接收者绑成临时量，免得调两次。
+// - **struct 的成员遮住同名的文件级名字**（第二十刀量的，对齐的一条）：`int who()` 在
+//   文件级、`int who()` 又在 struct 里，方法体里那句 `who()` 走的是**成员**那个
+//   （量过：印 2 不是 1）。所以 call 里"裸名字"的查找顺序是局部量 -> 成员 -> 文件级/内建。
+// - **struct 体内部的可见性也是顺序的**（第二十刀量的，也是对齐的一条）：方法看不见
+//   它后面声明的字段与方法（量过：往前引用报 "no matching variable"）。文件级那一刀
+//   裁的是声明下标（visible），这里裁的是**成员下标**（selfField / visibleMethods 里的
+//   `mat`）—— 两处是同一个道理的两份实现，因为两张表本来就是分开的。
+//   连带的一条：字段与方法同名时不算重载，谁在前面谁生效。
 
 import { isList, isAtom, isStr, head } from '../sexpr/read.js';
 
@@ -495,6 +511,39 @@ class AsyLower {
     // 元素是记录的数组 helper（grow / slice / slicefrom）：五种标量那三份是模块级的静态
     // 文本（HELPERS），记录是**逐类型**的，所以按同一个模板在这里生成，名字 -> 正文。
     this.arrGen = new Map();
+    // 正在降的是哪个记录的方法（第二十刀）：`{rec, mat}`，mat = 那个方法在成员表里的下标。
+    // 方法体里的裸名字要按 asy 的顺序解析找**前面**的字段与方法（量过：用后面声明的字段
+    // 报 "no matching variable"），而字段名要降成 `(fld (var this) f)`。
+    this.self = null;
+    // 方法声明表：`{rec, cand, at}`，第二遍按这个顺序发方法正文。方法降成一个多带一个
+    // `this` 形参的普通函数（`asy__m_<记录>_<方法>`）—— 核心方言没有方法，而 asy 的方法
+    // 本质上就是这个：量过 `A b = a; b.bump(1);` 改的是同一个对象（struct 是引用类型），
+    // 所以传句柄就够。
+    this.methodDecls = [];
+  }
+
+  /**
+   * 方法体里的裸名字 `nm` 是不是**此处可见的字段**（局部量/形参优先，量过：形参 `x`
+   * 遮住字段 `x`，要拿字段得写 `this.x`）。回字段项或 null。
+   */
+  selfField(nm) {
+    if (this.self === null) return null;
+    if (this.lookup(nm) !== null) return null;
+    for (const f of this.self.rec.fields) if (f.name === nm && f.mat < this.self.mat) return f;
+    return null;
+  }
+
+  /** 记录 `rec` 上此处可见的方法候选（方法体里按成员顺序裁，外面看全部） */
+  visibleMethods(rec, nm) {
+    const key = `${rec.name}.${nm}`;
+    const out = [];
+    if (!this.funcs.has(key)) return out;
+    // 刻意不用 `Infinity` 当"不裁"的上界：它不在封闭 ABI 的数值词汇里（同 glr/driver.js）。
+    const inSelf = this.self !== null && this.self.rec === rec;
+    for (const c of this.funcs.get(key)) {
+      if (!inSelf || c.mat <= this.self.mat) out.push(c);
+    }
+    return out;
   }
 
   /**
@@ -591,15 +640,20 @@ class AsyLower {
   arrElemOk(el) { return ASY_ARRELEM.has(el) || this.isRec(el); }
 
   /**
-   * `struct A { int x; real y = 1.5; }` -> 一条记录声明。
+   * `struct A { int x; real y = 1.5; int get() { return x; } }` -> 一条记录声明。
    *
    * 字段**这一刀收 int / real / bool / string、pair、它们的一维数组，与前面已经声明过的
    * 记录**（pair 是第十五刀、数组是第十六刀、记录套记录是第十七刀）。
-   * 剩下两条边界各有一份 bad/ 钉着：自引用（`struct A { A next; }` —— asy 收，我们不收，
-   * 见文件头的差别一节）、`A[]`（数组元素还只有标量与 pair）。
-   * 方法（struct 里的函数定义）也在门外：那要 this 与闭包，是另一刀。
+   * 自引用还在门外（`struct A { A next; }` —— asy 收，我们不收，见文件头的差别一节）。
+   *
+   * **方法是第二十刀**：降成一个多带一个 `this` 形参的普通函数（`asy__m_<记录>_<方法>`），
+   * 因为 asy 的 struct 是引用类型 —— 传句柄就够，量过 `A b = a; b.bump(1);` 改的是同一个
+   * 对象。成员名的可见性按**成员顺序**裁（量过：用后面声明的字段/方法报 "no matching
+   * variable"），而 struct 的成员**遮住**同名的文件级名字（量过：文件里有 `int who()`、
+   * struct 里也有 `who()`，方法体里调到的是后者）。
+   * 门外的一条：把方法当值取出来（`int f() = a.late;` asy 收）—— 那要闭包（绑住接收者）。
    */
-  recordDec(n) {
+  recordDec(n, at) {
     const nm = isAtom(n.items[1]) ? n.items[1].value : null;
     if (nm === null) return this.nope(n, '没有名字的 struct');
     if (SCALARS.has(nm) || nm === 'pair' || nm === 'void') {
@@ -608,10 +662,23 @@ class AsyLower {
     if (this.records.has(nm)) return this.nope(n, `重复定义的 struct '${nm}'`);
     const fields = [];
     const seen = new Map();
+    // 记录先登记（字段还空着）：方法的签名可以提到这个记录自己（`A copy()`），
+    // 而 type() 是查 this.records 认记录名的。自引用字段那一条拦在 type() 前面，
+    // 所以"字段还空着"这件事在这里看不出问题。
+    const rec = { name: nm, fields: fields, at: at };
+    this.records.set(nm, rec);
+    let mat = 0;
     for (const item of this.flat(n.items[2], 'block')) {
       const r = this.unwrapMod(item);
       if (!isList(r)) continue;
-      if (head(r) !== 'vardec') return this.nope(r, `struct 里的 '${head(r)}'（这一刀只有字段声明）`);
+      if (head(r) === 'fundec') {
+        if (this.methodSig(rec, r, mat, at) === null) return null;
+        mat++;
+        continue;
+      }
+      if (head(r) !== 'vardec') {
+        return this.nope(r, `struct 里的 '${head(r)}'（这一刀只有字段声明与方法）`);
+      }
       // 字段类型是**这个 struct 自己**：asy 收（量过 `struct A { A next; int x; } A a; write(a.x);`
       // 印 0 退 0 —— 它的字段是懒的，next 就搁着不造）。我们不收：隐式 operator init 要把
       // 内嵌的对象造出来，自引用就是无限递归。这一条要拦在 type() 前面，不然 'A' 还没进
@@ -637,11 +704,15 @@ class AsyLower {
         if (fn === null) return this.err(start, '字段少了名字');
         if (seen.has(fn)) return this.err(d, `struct ${nm} 里有两个字段叫 '${fn}'`);
         seen.set(fn, true);
-        fields.push({ name: fn, type: ft, def: d.items[2] === undefined ? null : d.items[2] });
+        fields.push({ name: fn, type: ft, def: d.items[2] === undefined ? null : d.items[2], mat: mat });
       }
+      // 一条 vardec 可以声明好几个字段，它们在 asy 那边是**同一步**（互相看不见），
+      // 所以 mat 是按声明语句加一，不是按字段加一。
+      mat++;
     }
+    // 核心方言的 class 至少要一个字段，而"只有方法的 struct"在 asy 那边是合法的 ——
+    // 这条边界因此留着（要放开就得给 class 一个空字段表，那是方言那边的事）。
     if (fields.length === 0) return this.nope(n, `没有字段的 struct '${nm}'`);
-    this.records.set(nm, { name: nm, fields: fields });
     return null;
   }
 
@@ -781,12 +852,22 @@ class AsyLower {
       }
       const t = this.lookup(nm);
       if (t === null) {
+        // 方法体里的裸字段名（第二十刀）：量过 struct 的成员**遮住**同名的文件级名字，
+        // 所以这一问在"未声明的变量"之前、也在文件级变量那句话之前。
+        const f = this.selfField(nm);
+        if (f !== null) return { code: `(fld (var this) ${nm})`, type: f.type };
         if (this.globals.has(nm)) return this.nope(n, `函数里引用文件级变量 '${nm}'（核心方言没有全局量）`);
         return this.err(n, `未声明的变量 '${nm}'`);
       }
       return { code: `(var ${nm})`, type: t };
     }
     if (h === 'binary') return this.binary(n);
+    // `this`（第二十刀）：方法体里就是那个接收者形参。asy 那边 `this` 只在 struct 的
+    // 方法里有意义（量过：文件级写 `this` 报 "static use of dynamic variable"）。
+    if (h === 'this') {
+      if (this.self === null) return this.err(n, "'this' 只能在 struct 的方法里用");
+      return { code: '(var this)', type: this.self.rec.name };
+    }
     if (h === 'equality') return this.compare(n, n.items[1].value);
     if (h === 'and-exp' || h === 'or-exp') return this.logic(n, h === 'and-exp' ? '&&' : '||');
     if (h === 'unary') return this.unary(n);
@@ -877,8 +958,11 @@ class AsyLower {
     const base = this.plainName(node.items[1]);
     if (base !== null) {
       const t = this.lookup(base);
-      if (t === null) return null;
-      return { recv: { code: `(var ${base})`, type: t }, field: f };
+      if (t !== null) return { recv: { code: `(var ${base})`, type: t }, field: f };
+      // 方法体里的裸字段名当接收者（第二十刀）：`inner.get()` 里的 inner 是 this 的字段
+      const sf = this.selfField(base);
+      if (sf === null) return null;
+      return { recv: { code: `(fld (var this) ${base})`, type: sf.type }, field: f };
     }
     // `a.p.x`：接收者自己又是一个带点的名字（第十五刀的 pair 字段逼出来的 ——
     // struct 的 pair 字段一进来，`s.p.x` 就成了三层）。递归先把它降成一个值。
@@ -1242,21 +1326,33 @@ class AsyLower {
       const recv = this.expr(callee.items[1]);
       if (recv === null) return null;
       const mname = isAtom(callee.items[2]) ? callee.items[2].value : null;
+      // 记录上的方法调用（第二十刀）。数组的 push/pop 仍走 arrMethod。
+      if (mname !== null && this.isRec(recv.type)) return this.methodCall(n, recv, mname);
       if (!asyIsArr(recv.type)) return this.nope(n, `方法调用 '.${mname}(…)'`);
       return this.arrMethod(n, recv, mname);
     }
     const nm = isList(n.items[1]) && head(n.items[1]) === 'name-exp' ? this.plainName(n.items[1].items[1]) : null;
     if (nm === null && isList(callee) && head(callee) === 'name-exp') {
-      // `c.push(8)`：同上，点是名字的一部分，所以方法调用也是"调一个带点的名字"
+      // `c.push(8)` / `a.get()`：同上，点是名字的一部分，所以方法调用也是"调一个带点的名字"
       const q = this.dotQual(callee.items[1]);
       if (q === DOT_BAD) return null;
       if (q !== null) {
+        if (this.isRec(q.recv.type)) return this.methodCall(n, q.recv, q.field);
         if (!asyIsArr(q.recv.type)) return this.nope(n, `${q.recv.type} 上的方法调用 '.${q.field}(…)'`);
         return this.arrMethod(n, q.recv, q.field);
       }
     }
     if (nm === null) return this.nope(n, '调用一个不是普通名字的东西（函数值、方法、算符名）');
     if (nm === 'write') return this.err(n, `${ASY_NOPE}：write 出现在表达式位置（它是语句）`);
+    // 方法体里的裸方法名（第二十刀）：量过 struct 的成员**遮住**同名的文件级函数
+    // （文件里有 `int who()`、struct 里也有 `who()`，方法体里调到的是后者），
+    // 所以这一问放在文件级候选与内建名单**前面**。
+    if (this.self !== null) {
+      const ms = this.visibleMethods(this.self.rec, nm);
+      if (ms.length > 0) {
+        return this.userCall(n, nm, ms, { code: '(var this)', type: this.self.rec.name });
+      }
+    }
     // 内建数学函数先看：asy 里 sqrt/floor/… 是运行时自带的，不是 plain.asy 里的定义，
     // 所以这一层认它们不算"偷偷补模块系统"。用户自己定义了同名函数时以用户的为准
     // （asy 那边是重载，重载表里用户那份更同型时它赢）。
@@ -1291,6 +1387,28 @@ class AsyLower {
   }
 
   /**
+   * `接收者.方法(…)`（第二十刀）。接收者已经求好了，方法名去 `记录名.方法名` 那张候选表里
+   * 找；找不到就把话说清 —— 同名的**字段**意味着"调一个函数值"（那要闭包，门外），
+   * 什么都没有就把有哪些方法列出来。
+   */
+  methodCall(n, recv, mname) {
+    const rec = this.records.get(recv.type);
+    const ms = this.visibleMethods(rec, mname);
+    if (ms.length === 0) {
+      for (const f of rec.fields) {
+        if (f.name === mname) return this.nope(n, `调用一个字段（${recv.type}.${mname} 是 ${f.type}，不是方法）`);
+      }
+      const names = [];
+      for (const key of this.funcs.keys()) {
+        if (key.startsWith(`${rec.name}.`)) names.push(key.slice(rec.name.length + 1));
+      }
+      return this.err(n, `struct ${recv.type} 没有方法 '${mname}'`
+        + `${names.length === 0 ? '（它一个方法都没有）' : ` —— 有的是 ${names.join(' / ')}`}`);
+    }
+    return this.userCall(n, mname, ms, recv);
+  }
+
+  /**
    * 调用用户定义的函数：**重载解析**（第十一刀）+ 位置实参 + 命名实参 + 默认实参。
    *
    * 量出来的规则（`asy -noV`，不是照文档抄的）：
@@ -1311,8 +1429,11 @@ class AsyLower {
    * 落法：实参**先按源码顺序求一次**（连它摊出来的语句一起攒着），再拿类型去挑候选 ——
    * 求两次会把 `show(1)` 那种带输出的实参印两遍。缺实参时不在调用点补，而是按
    * "缺了哪几个"生成一个包装函数（见 defWrapper），默认值在包装里求，规则 1、2 因此自动成立。
+   *
+   * `recv` 不是 null 时这是一次**方法调用**（第二十刀）：接收者当第一个实参传进去，
+   * 重载解析只看写出来的那几个实参 —— `this` 不参与打分（它的类型是定死的）。
    */
-  userCall(n, nm, list) {
+  userCall(n, nm, list, recv) {
     const raw = this.callArgs(n);
     if (raw === null) return null;
     const fits = [];
@@ -1357,6 +1478,7 @@ class AsyLower {
       codes.set(at, `(var ${tmp})`);
     }
     const parts = [];
+    if (recv !== null && recv !== undefined) parts.push(recv.code);
     for (let i = 0; i < d.ps.length; i++) if (codes.has(i)) parts.push(codes.get(i));
     const target = f.missing.length === 0 ? d.sym : this.defWrapper(n, nm, d, f);
     if (target === null) return null;
@@ -1454,7 +1576,16 @@ class AsyLower {
     const saveScopes = this.scopes;
     const saveAt = this.at;
     this.at = d.at;
+    // 方法的包装（第二十刀）：多一个 `this` 形参，而默认值那一段要能看见字段 ——
+    // 它是在**被调方**的作用域里求的，那个作用域里字段是可见的。
+    const rec = d.rec === undefined ? null : d.rec;
+    const saveSelf = this.self;
     this.scopes = [new Map()];
+    if (rec !== null) {
+      this.at = rec.at === undefined ? this.at : rec.at;
+      this.self = { rec, mat: d.mat };
+      this.declare(n, 'this', rec.name);
+    }
     this.updates = [];
     const lines = [];
     this.pre = lines;
@@ -1468,11 +1599,13 @@ class AsyLower {
       this.declare(n, p.name, p.type);
     }
     const args = [];
+    if (rec !== null) args.push('(var this)');
     for (const p of d.ps) args.push(`(var ${p.name})`);
     lines.push(d.ret === 'void'
       ? `(expr (call ${d.sym} ${args.join(' ')}))`
       : `(ret (call ${d.sym} ${args.join(' ')}))`);
     const params = [];
+    if (rec !== null) params.push(`(this ${asyCore(rec.name)})`);
     for (const i of gave) params.push(`(${d.ps[i].name} ${asyCore(d.ps[i].type)})`);
     const text = [`  (fn ${wname} (${params.join(' ')}) ${asyCore(d.ret)}`];
     for (const s of lines) text.push(`    ${s}`);
@@ -1480,6 +1613,7 @@ class AsyLower {
     this.updates = saveUpd;
     this.scopes = saveScopes;
     this.at = saveAt;
+    this.self = saveSelf;
     if (bad) return null;
     this.wraps.push(`${text.join('\n')})`);
     return wname;
@@ -1819,6 +1953,13 @@ class AsyLower {
     for (const d of this.flat(n.items[2], 'decids')) {
       if (!isList(d) || head(d) !== 'decid') return this.err(d, '认不出的声明项');
       const start = d.items[1];
+      // `int f() = a.get;`：**函数值**类型的变量声明（把函数或方法取出来当值）。
+      // asy 收（量过：那句印 1 —— 方法取出来是绑住接收者的闭包），我们不收：核心方言里
+      // 函数不是值，绑接收者要闭包。`tests/asy/bad/fn-value.asy` 钉着这一条。
+      if (isList(start) && head(start) === 'fundecidstart') {
+        return this.nope(start, '函数值类型的变量声明（`int f() = …`，比如把方法取出来当值 ——'
+          + ' 那要闭包：核心方言里函数不是值）');
+      }
       if (!isList(start) || head(start) !== 'decidstart') return this.err(start, '认不出的声明项');
       // `real a[];`：维度写在名字后面。一层就是数组，两层以上不做
       let t = base;
@@ -1924,6 +2065,11 @@ class AsyLower {
     if (nm === null) return this.nope(node, '赋值给不是普通变量或数组下标的东西（字段、切片、算符名）');
     const t = this.lookup(nm);
     if (t === null) {
+      // 方法体里给裸字段名赋值（第二十刀）：`x += k` 就是 `this.x += k`
+      const sf = this.selfField(nm);
+      if (sf !== null) {
+        return this.assignFld(node, { recv: { code: '(var this)', type: this.self.rec.name }, field: nm }, rhs, op);
+      }
       if (this.globals.has(nm)) return this.nope(node, `函数里改文件级变量 '${nm}'（核心方言没有全局量）`);
       return this.err(node, `未声明的变量 '${nm}'`);
     }
@@ -2152,6 +2298,77 @@ class AsyLower {
     this.funcs.set(nm, list);
   }
 
+  /**
+   * 方法的签名（第二十刀）。存在 `funcs` 里的 key 是 `记录名.方法名` —— asy 的名字里不能
+   * 有点，所以这个 key 不可能撞上文件级的函数名，而重载那套（候选表、同签名替换、
+   * 第 2 个及以后改名）就白捡了。
+   * `at` 是**结构体在文件里的下标**：方法体里能看见的文件级函数，正好是声明在这个结构体
+   * 前面的那些（asy 的名字解析是顺序的，量过）。`mat` 是成员下标，管结构体内部的可见性。
+   */
+  methodSig(rec, n, mat, at) {
+    const nm = isAtom(n.items[2]) ? n.items[2].value : null;
+    if (nm === null) return null;
+    if (nm.startsWith('operator ')) return this.nope(n, `struct ${rec.name} 里的算符重载`);
+    const ret = this.type(n.items[1], `方法 ${rec.name}.${nm} 的返回类型`);
+    const ps = this.formals(n.items[3]);
+    if (ret === null || ps === null) return null;
+    const types = [];
+    for (const p of ps) types.push(p.type);
+    for (const p of ps) if (p.name === 'this') return this.nope(n, "叫 'this' 的形参");
+    const key = `${rec.name}.${nm}`;
+    const cand = {
+      ret, params: types, ps, node: n, at: -1, mat, rec,
+      sym: `asy__m_${rec.name}_${nm}`,
+    };
+    const list = this.funcs.has(key) ? this.funcs.get(key) : [];
+    const sk = types.join(',');
+    for (let i = 0; i < list.length; i++) {
+      if (list[i].params.join(',') !== sk) continue;
+      list[i] = cand;
+      this.funcs.set(key, list);
+      return cand;
+    }
+    list.push(cand);
+    this.funcs.set(key, list);
+    this.methodDecls.push({ rec, cand, at });
+    return cand;
+  }
+
+  /**
+   * 方法体。与 func() 的差别只有三处：多一个 `this` 形参（核心方言里 `this` 就是个普通
+   * 名字，量过它当形参名合法）、`this.self` 开着（裸字段名走 `(fld (var this) f)`、
+   * 裸方法名走同一个记录的方法）、`this.at` 设成**结构体**的文件下标。
+   */
+  method(rec, cand, at) {
+    const ps = this.formals(cand.node.items[3]);
+    if (ps === null) return null;
+    const keepAt = this.at;
+    this.at = at;
+    this.self = { rec, mat: cand.mat };
+    this.push();
+    this.declare(cand.node, 'this', rec.name);
+    for (const p of ps) this.declare(cand.node, p.name, p.type);
+    const body = this.body(cand.node.items[4], cand.ret);
+    this.pop();
+    this.self = null;
+    this.at = keepAt;
+    if (body === null) return null;
+    const last = body.length === 0 ? '' : body[body.length - 1];
+    if (cand.ret !== 'void' && !last.startsWith('(ret ')) {
+      let zero = null;
+      if (asyIsArr(cand.ret)) zero = `(anew ${asyCore(cand.ret)} (int 0))`;
+      else if (this.isRec(cand.ret)) zero = this.recNew(cand.node, cand.ret);
+      else zero = ZERO.get(cand.ret);
+      if (zero === null) return null;
+      body.push(`(ret ${zero})`);
+    }
+    const params = [`(this ${asyCore(rec.name)})`];
+    for (const p of ps) params.push(`(${p.name} ${asyCore(p.type)})`);
+    const lines = [`  (fn ${cand.sym} (${params.join(' ')}) ${asyCore(cand.ret)}`];
+    for (const s of body) lines.push(`    ${s}`);
+    return `${lines.join('\n')})`;
+  }
+
   /** 第一遍也收文件级变量的名字（只为了给函数里那句错话） */
   globalNames(n) {
     for (const d of this.flat(n.items[2], 'decids')) {
@@ -2200,10 +2417,11 @@ class AsyLower {
   /** 整个文件 -> 核心方言文本。函数提到模块层，其余全进 (main ...)。 */
   run(tree) {
     const rs = this.flat(tree, 'block');
-    // 记录先收：函数签名与字段类型都可能提到它，而字段里不许再有记录，所以一遍就够。
-    for (const r0 of rs) {
-      const r = this.unwrapMod(r0);
-      if (isList(r) && head(r) === 'recorddec') this.recordDec(r);
+    // 记录先收：函数签名与字段类型都可能提到它。方法的签名也在这一遍进 funcs
+    // （key 是 `记录名.方法名`），所以下面那个重载改名的循环把方法一起管了。
+    for (let i = 0; i < rs.length; i++) {
+      const r = this.unwrapMod(rs[i]);
+      if (isList(r) && head(r) === 'recorddec') this.recordDec(r, i);
     }
     for (let i = 0; i < rs.length; i++) {
       const r = this.unwrapMod(rs[i]);
@@ -2217,6 +2435,11 @@ class AsyLower {
       for (let i = 1; i < list.length; i++) list[i].sym = `asy__ov${i}_${list[i].sym}`;
     }
     const fns = [];
+    // 方法正文先发：它们只依赖记录声明，而下面那些文件级函数的正文可能调到方法
+    for (const m of this.methodDecls) {
+      const text = this.method(m.rec, m.cand, m.at);
+      if (text !== null) fns.push(text);
+    }
     for (let i = 0; i < rs.length; i++) {
       const r = this.unwrapMod(rs[i]);
       if (!isList(r) || head(r) !== 'fundec') continue;
