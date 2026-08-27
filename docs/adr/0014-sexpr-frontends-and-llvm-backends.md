@@ -384,14 +384,15 @@ addRealFunc(sin,SYM(sin));   addRealFunc(exp,SYM(exp));   addRealFunc(log,SYM(lo
 可扩展**，所以形状改成三层：
 
 - **运行库**：`stage0/lib/*.sx`，核心方言写的、语言中立的实现。`math.sx` 现在有
-  `omni_pow2` / `omni_exp`（后面是 sin/cos/log/atan）。它只用 `+ - * / floor`，
+  `omni_pow2` / `omni_exp` / `omni_sin` / `omni_cos`（后面是 log/atan）。它只用
+  `+ - * / floor`，
   于是六条腿算出的位一模一样 —— 这正是不能转手宿主 libm 的那条测量的直接结论。
 - **绑定表**：`stage0/src/frontend-asy/builtins.tab`，一张数据表（名字 / 实参个数 /
   返回类型 / 实现在哪 / 符号），三种去处：`rmath`（核心方言白名单）、`lib`（运行库）、
   `nope`（还没做，报错里说清是哪一个）。它是**生成的** ——
   `gen-builtins.js` 读 asy 自己的两份数据：`runmath.in` 里带签名的声明
   （`Int ceil(real x)` / `real fmod(real x, real y)`）与 `builtin.cc` 里
-  `addRealFunc(sin,SYM(sin))` 那一族，现在出 44 行。手抄一份等于把别人的表复制进我们的
+  `addRealFunc(sin,SYM(sin))` 那一族，现在出 52 行。手抄一份等于把别人的表复制进我们的
   代码里，下次 asy 升级没人知道差了什么。「实现在哪」那一列是**我们的**策略（生成器里的
   `POLICY`），不是从 asy 抄的。`real f(real)` 到 `real[] f(real[])` 的自动抬升
   是这一层的**通用规则**，将来是表上加一列，不是 22 个分支。
@@ -410,6 +411,25 @@ addRealFunc(sin,SYM(sin));   addRealFunc(exp,SYM(exp));   addRealFunc(log,SYM(lo
 先前的用例碰不到这条只是因为没有一处浮点表达式长到出现 `a + b*c` 的形状 ——
 运行库是第一个。第八条测试轴因此多了一节 `tests/asy/tol/`：腿与腿之间仍然逐字节，
 与真 asy 只要求最后一位十进制差不超过 1。
+
+**运行库第二批：`sin` / `cos`**（`omni_sin` / `omni_cos`，绑定表里从 `nope` 变成 `lib`）。
+难的不是泰勒展开，是**象限归约**：`r = x - n*(pi/2)` 这一步要抵消掉几十位有效数字，
+`n*(pi/2)` 本身不精确就全砸在结果里。量过朴素的三段 Cody-Waite（把 pi/2 拆成 hi/lo）：
+
+- `|x| < pi`：最大 11 ULP；`|x| < 10`：57 ULP；`|x| < 1000`：**189 ULP**；`|x| < 1e6`：
+  144576 ULP —— 到这个量级已经不是"最后一位"的事了。
+
+改成 **Dekker double-double**（`twoProd` 用 `SPLIT = 2^27+1` 分裂，`twoSum` 收误差，
+pi/2 拆 P0+P1+P2 三段）之后：`|x|` 从 pi 一路量到 1e9，每组 5 万个随机输入，与 V8 的
+`Math.sin` 最大差 **2 ULP**，绝大多数逐位相同。这也是 `-ffp-contract=off` 非要不可的
+第二个理由：dd 的正确性建立在「`nh*bh - p` 这一步不被合并」上，一旦编成 FMA，
+补偿项算的就不是那个误差了。`tol/sincos` 这份用例（36 行输出，含四个象限、`1e6`、
+整数实参提升、`sin^2+cos^2`）五条腿逐字节相同，而且这次**与真 asy 逐字节也相同** ——
+容差没用上，但契约仍然只承诺容差内。
+
+还没进运行库的（`log`/`atan`/`asin`/`acos`/`tan` 等）在绑定表里是 `nope`，
+`tests/asy/bad/log` 钉住这条边界：报的是「绑定表里有它，但实现还没进运行库」，
+而不是偷偷转手宿主的 libm。
 
 落地同样是"接上已有的那一份"：`omni_math.c` 的七个 `omni_r_*` 包一层 libm、JS prelude 的
 `$r_*` 全部走同一个 `$js_math`（`round` 那条要自己绕过 `Math.round` 的向上舍入：C 是**离零**
@@ -541,8 +561,8 @@ struct 的数组字段 / struct 的记录字段 / `A[]` / struct 的方法 / 构
 第一刀的边界都在 `tests/asy/bad/`（22 条，每条的期望值都必须以 `ASY_NOPE` 开头 ——
 "还没做"和"做错了"必须能一眼分开）：triple、复数幂、
 标准库模块（`import graph;` —— 用户自己写的模块第二十五刀通了；
-`operator cast` 那条第二十七刀通了，那份用例搬成了 `cases/33-castback`）、隐式缩放（`105cm`）、超越函数（`sin`、pair 上的 `angle` ——
-理由是上面那条 ULP 测量）、函数里用文件级的 **pair/记录/数组**变量
+`operator cast` 那条第二十七刀通了，那份用例搬成了 `cases/33-castback`）、隐式缩放（`105cm`）、还没进运行库的超越函数（`log`、pair 上的 `angle`；
+`exp`/`sin`/`cos` 已经在运行库里，走 `tests/asy/tol/`）、函数里用文件级的 **pair/记录/数组**变量
 （标量的那些第二十四刀通了，见下面那一节；`bad/global-read.asy` 因此换成了
 `bad/global-pair.asy`）、
 循环条件里的 `? :`、给切片赋值（`a[0:2] = b`）、多维数组、

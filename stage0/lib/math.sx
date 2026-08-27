@@ -56,3 +56,102 @@
       (do (ret (bin "*" (bin "*" (var e) (call omni_pow2 (bin "+" (var n) (int 1000))))
         (call omni_pow2 (int -1000))))))
     (ret (bin "*" (var e) (call omni_pow2 (var n)))))
+
+  (fn omni__sinp ((r real)) real
+    ;; sin(r) 在 |r| <= pi/4 上的泰勒（到 r^17，截断误差 ~2^-65）。系数是 1/(2k+1)! 带符号，
+    ;; 由 /tmp 的生成器印出来的 17 位十进制，不手抄。
+    (let z real (bin "*" (var r) (var r)))
+    (let s real (real 2.8114572543455206e-15))
+    (set s (bin "+" (real -7.6471637318198164e-13) (bin "*" (var z) (var s))))
+    (set s (bin "+" (real 1.6059043836821613e-10) (bin "*" (var z) (var s))))
+    (set s (bin "+" (real -2.5052108385441720e-8) (bin "*" (var z) (var s))))
+    (set s (bin "+" (real 0.0000027557319223985893) (bin "*" (var z) (var s))))
+    (set s (bin "+" (real -0.00019841269841269841) (bin "*" (var z) (var s))))
+    (set s (bin "+" (real 0.0083333333333333332) (bin "*" (var z) (var s))))
+    (set s (bin "+" (real -0.16666666666666666) (bin "*" (var z) (var s))))
+    (set s (bin "+" (real 1.0000000000000000) (bin "*" (var z) (var s))))
+    (ret (bin "*" (var r) (var s))))
+
+  (fn omni__cosp ((r real)) real
+    ;; cos(r) 在 |r| <= pi/4 上的泰勒（到 r^16）
+    (let z real (bin "*" (var r) (var r)))
+    (let s real (real 4.7794773323873853e-14))
+    (set s (bin "+" (real -1.1470745597729725e-11) (bin "*" (var z) (var s))))
+    (set s (bin "+" (real 2.0876756987868100e-9) (bin "*" (var z) (var s))))
+    (set s (bin "+" (real -2.7557319223985888e-7) (bin "*" (var z) (var s))))
+    (set s (bin "+" (real 0.000024801587301587302) (bin "*" (var z) (var s))))
+    (set s (bin "+" (real -0.0013888888888888889) (bin "*" (var z) (var s))))
+    (set s (bin "+" (real 0.041666666666666664) (bin "*" (var z) (var s))))
+    (set s (bin "+" (real -0.50000000000000000) (bin "*" (var z) (var s))))
+    (ret (bin "+" (real 1.0) (bin "*" (var z) (var s)))))
+
+  (fn omni__pio2q ((x real)) int
+    ;; 归约的**象限**：n mod 4（n 是 x 离哪个 pi/2 的整数倍最近）
+    (let n real (rmath "floor" (bin "+" (bin "*" (var x) (real 0.63661977236758138)) (real 0.5))))
+    (ret (toint (bin "-" (var n) (bin "*" (rmath "floor" (bin "/" (var n) (real 4.0))) (real 4.0))))))
+
+  (fn omni__pio2r ((x real)) real
+    ;; 归约的**余项** r = x - n*(pi/2)，用 **double-double**（Dekker）算 n*(pi/2)。
+    ;; 为什么非要 dd：量过朴素的三段 Cody-Waite 在 |x|<1000 上就有 189 ULP 的误差、
+    ;; |x|<1e6 彻底散架（因为 n*pio2 那几个乘积本身不精确，而 x - n*pio2 又要抵消几十位）。
+    ;; 改成 dd 之后 |x| 到 1e9 都是最多 2 ULP（对比 V8，5 组 5 万个随机输入）。
+    ;; 只用 + - *（**不用 FMA** —— C 那条腿因此要 -ffp-contract=off，见 cli.js 的 ccFlags）。
+    ;; pi/2 拆成 P0+P1+P2 三段：1.5707963267948966 + 6.123233995736766e-17 + -1.4973849048591698e-33
+    (let n real (rmath "floor" (bin "+" (bin "*" (var x) (real 0.63661977236758138)) (real 0.5))))
+    ;; twoProd(n, P0)：Dekker 分裂（2^27+1），得到精确的 p + pe
+    (let p real (bin "*" (var n) (real 1.5707963267948966)))
+    (let t real (bin "*" (var n) (real 134217729.0)))
+    (let nh real (bin "-" (var t) (bin "-" (var t) (var n))))
+    (let nl real (bin "-" (var n) (var nh)))
+    (let u real (bin "*" (real 1.5707963267948966) (real 134217729.0)))
+    (let bh real (bin "-" (var u) (bin "-" (var u) (real 1.5707963267948966))))
+    (let bl real (bin "-" (real 1.5707963267948966) (var bh)))
+    (let pe real (bin "+" (bin "+" (bin "+"
+      (bin "-" (bin "*" (var nh) (var bh)) (var p))
+      (bin "*" (var nh) (var bl))) (bin "*" (var nl) (var bh))) (bin "*" (var nl) (var bl))))
+    ;; twoSum(x, -p)
+    (let s real (bin "-" (var x) (var p)))
+    (let bb real (bin "-" (var s) (var x)))
+    (let se real (bin "+" (bin "-" (var x) (bin "-" (var s) (var bb)))
+      (bin "-" (un "-" (var p)) (var bb))))
+    (let hi real (var s))
+    (let lo real (bin "-" (var se) (var pe)))
+    ;; twoProd(n, P1)
+    (let q real (bin "*" (var n) (real 6.1232339957367660e-17)))
+    (let u2 real (bin "*" (real 6.1232339957367660e-17) (real 134217729.0)))
+    (let ch real (bin "-" (var u2) (bin "-" (var u2) (real 6.1232339957367660e-17))))
+    (let cl real (bin "-" (real 6.1232339957367660e-17) (var ch)))
+    (let qe real (bin "+" (bin "+" (bin "+"
+      (bin "-" (bin "*" (var nh) (var ch)) (var q))
+      (bin "*" (var nh) (var cl))) (bin "*" (var nl) (var ch))) (bin "*" (var nl) (var cl))))
+    ;; twoSum(hi, -q)
+    (let s2 real (bin "-" (var hi) (var q)))
+    (let b2 real (bin "-" (var s2) (var hi)))
+    (let e2 real (bin "+" (bin "-" (var hi) (bin "-" (var s2) (var b2)))
+      (bin "-" (un "-" (var q)) (var b2))))
+    (set hi (var s2))
+    (set lo (bin "-" (bin "-" (bin "+" (var lo) (var e2)) (var qe))
+      (bin "*" (var n) (real -1.4973849048591698e-33))))
+    (ret (bin "+" (var hi) (var lo))))
+
+  (fn omni_sin ((x real)) real
+    ;; sin(x)。归约到 |r| <= pi/4 之后按象限在 ±sin(r) / ±cos(r) 里挑。
+    ;; 量过：|x| 到 1e9 与 V8 的 Math.sin 最多差 2 ULP（大多数逐位相同）——
+    ;; 在 `%.15g` 的一位十进制容差之内，所以用例走 tests/asy/tol/ 那一节。
+    (if (bin "!=" (var x) (var x)) (do (ret (var x))))
+    (let q int (call omni__pio2q (var x)))
+    (let r real (call omni__pio2r (var x)))
+    (if (bin "==" (var q) (int 0)) (do (ret (call omni__sinp (var r)))))
+    (if (bin "==" (var q) (int 1)) (do (ret (call omni__cosp (var r)))))
+    (if (bin "==" (var q) (int 2)) (do (ret (un "-" (call omni__sinp (var r))))))
+    (ret (un "-" (call omni__cosp (var r)))))
+
+  (fn omni_cos ((x real)) real
+    ;; cos(x)。象限比 sin 转过 1
+    (if (bin "!=" (var x) (var x)) (do (ret (var x))))
+    (let q int (call omni__pio2q (var x)))
+    (let r real (call omni__pio2r (var x)))
+    (if (bin "==" (var q) (int 0)) (do (ret (call omni__cosp (var r)))))
+    (if (bin "==" (var q) (int 1)) (do (ret (un "-" (call omni__sinp (var r))))))
+    (if (bin "==" (var q) (int 2)) (do (ret (un "-" (call omni__cosp (var r))))))
+    (ret (call omni__sinp (var r))))

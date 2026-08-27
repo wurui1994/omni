@@ -36,7 +36,7 @@ atanh      1 real nope  -
 bitreverse 2 int  nope  -
 cbrt       1 real nope  -
 ceil       1 int  rmath ceil
-cos        1 real nope  -
+cos        1 real lib   omni_cos
 cosh       1 real nope  -
 erf        1 real nope  -
 erfc       1 real nope  -
@@ -60,7 +60,7 @@ rand       2 int  nope  -
 remainder  2 real nope  -
 round      1 int  rmath round
 sgn        1 int  nope  -
-sin        1 real nope  -
+sin        1 real lib   omni_sin
 sinh       1 real nope  -
 sqrt       1 real rmath sqrt
 tan        1 real nope  -

@@ -29,6 +29,8 @@ const POLICY = new Map([
   ['round', ['rmath', 'round']],
   ['fmod', ['rmath', 'fmod']],
   ['exp', ['lib', 'omni_exp']],
+  ['sin', ['lib', 'omni_sin']],
+  ['cos', ['lib', 'omni_cos']],
 ]);
 
 // asy 的类型名 -> 我们表里的写法。只收标量数学那一族；别的（pair/path/picture…）

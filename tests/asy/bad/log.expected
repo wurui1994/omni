@@ -1,0 +1,1 @@
+asy 前端第一刀还不支持：内建函数 'log'（绑定表 builtins.tab 里有它，但实现还没进运行库 stage0/lib/math.sx）
