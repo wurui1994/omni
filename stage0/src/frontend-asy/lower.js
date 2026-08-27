@@ -127,11 +127,7 @@
 // 给切片赋值（`a[0:2] = b`）、
 // 多维数组（`int[][]` —— 核心方言的 `(arr T)` 不收数组元素：MIR 那一层元素类型只有
 // 一个 8 位类型码，`(arr (arr int))` 与 `(arr (arr string))` 在那里是同一个码，
-// 类型身份丢了。向量元素能收是因为道数就在那个码的高位上）、复数幂、
-// 超越函数（exp/log/trig —— 量过 libm 与 V8 在 atan/tan/log/cos 的最后一位就分叉，
-// 收进来六条腿必然有一天对不上；`angle`/`dir`/`expi` 因此也在门外）、
-// `unit`（能用 sqrt 加除法写出来，但量不出 asy 用的是"乘倒数"还是"逐分量除" ——
-// 两种写法的差别在 %.15g 底下看不见，所以宁可不收也不猜）、
+// 类型身份丢了。向量元素能收是因为道数就在那个码的高位上）、
 // 字符串的 `reverse`（asy 是**按字节**倒的，而 Omni 的 string 是 UTF-8 字节序列
 // （ADR-0005）—— 非 ASCII 倒过来在 C 那条腿上是一串坏字节，在 JS 那条腿上要看
 // 宿主怎么处理，"六条腿逐字节相同"这句话就保不住了，所以门外）、
@@ -155,6 +151,8 @@
 // - 整数溢出：asy 是运行期报错（量过：`2^62 * 4` -> "Integer overflow"），我们回绕。
 // - `2^-1`：asy 报 "Only 1 and -1 can be raised to negative exponents as integers"，
 //   我们的 helper 对负指数返回 0（`^` 那条 helper 里写着）。
+// - `(0,0)^-1`：asy 走 pair 除法那条路，报运行期错误 "division by pair (0,0)"；我们照
+//   pair 除法既有的那条偏差（下面"除以零"那条）出 IEEE 的 inf/nan，不报错。
 // - **数组的未初始化格子**：asy 每个格子带一个"写过没有"的标记，`new int[2]` 之后读
 //   `a[0]` 是运行期错误（量过："read uninitialized value from array at index 0"）；
 //   我们填零值。写下标扩长时中间跳过的格子同理。这类程序本来就有 bug，但"我们给 0
@@ -508,6 +506,47 @@ const HELPERS = new Map([
     ;; 乘除的次序是浮点结果的一部分）。量过 dir(45) 的两个分量是 ...548 / ...547：
     ;; 不对称，正是 cos 与 sin 各自舍入的样子。
     (ret (call asy__pexpi (bin "/" (bin "*" (var d) (real 3.14159265358979311600)) (real 180.0)))))`],
+  ['asy__ppowi', `  (fn asy__ppowi ((z ${ASY_PAIR_TY}) (n int)) ${ASY_PAIR_TY}
+    ;; pair^**int**：反复平方（低位在前），负指数取倒数。asy 这条重载在整数上是**精确**的
+    ;; —— 量过 (1,2)^30 印的是 (-6890111163,29729597084) 一个小数点都没有，而下面那条
+    ;; exp/log 的路子给 (-6890111162.99996,…)。84 组 (底,指数) 的扫描里这个形状对上
+    ;; 75 组，剩下九组差最后一两位（asy 那边是 libstdc++ 的 __complex_pow_unsigned，
+    ;; 复数乘法带 NaN 修补，我们没有）—— 所以用例落在 tol/ 而不是逐字节那一节。
+    (let m int (var n))
+    (if (bin "<" (var m) (int 0)) (do (set m (un "-" (var m)))))
+    (let r ${ASY_PAIR_TY} (vlit ${ASY_PAIR_TY} (real 1.0) (real 0.0)))
+    (let x ${ASY_PAIR_TY} (var z))
+    (while (bin ">" (var m) (int 0))
+      (do
+        (if (bin "==" (bin "%" (var m) (int 2)) (int 1)) (do (set r (call asy__pmul (var r) (var x)))))
+        (set m (bin "/" (var m) (int 2)))
+        (if (bin ">" (var m) (int 0)) (do (set x (call asy__pmul (var x) (var x)))))))
+    (if (bin "<" (var n) (int 0))
+      (do (ret (call asy__pdiv (vlit ${ASY_PAIR_TY} (real 1.0) (real 0.0)) (var r)))))
+    (ret (var r)))`],
+  ['asy__ppowz', `  (fn asy__ppowz ((z ${ASY_PAIR_TY}) (w ${ASY_PAIR_TY})) ${ASY_PAIR_TY}
+    ;; pair^**pair**（real 指数先提成 (v,0)，asy 没有 pair^real 这个重载）= exp(w * log z)，
+    ;; log z = (log(abs z), angle z)。三处细节都是量出来的，而且**不是**宿主 cpow：
+    ;; - abs 是朴素那一份（asy__pabs），所以 (1e200,1e200)^0.5 是 (nan,nan)；真 cpow
+    ;;   走 hypot，给的是 1.09868411346781e+100 那个有限值。
+    ;; - w*log z 是**复数**乘法，即使 w 是实数也照乘：(1e-200,1e-200)^0.5 里 abs 下溢成 0、
+    ;;   log 给 -inf，虚部那一项是 0*(-inf) = nan —— 量过 asy 也是 (nan,nan)。
+    ;; - 零底数要挡在前面：量过 (0,0)^任何非零 是 (0,0)、(0,0)^(0,0) 是 (1,0)。
+    ;;   （(0,0)^-1 在 asy 是运行期错误 "division by pair (0,0)"，那条走 int 那个重载，
+    ;;   我们照 pair 除法的既有偏差出 IEEE 的 inf/nan，不报错 —— 见文件头那条。）
+    (if (bin "&&" (bin "==" (lane (var z) 0) (real 0.0)) (bin "==" (lane (var z) 1) (real 0.0)))
+      (do
+        (if (bin "&&" (bin "==" (lane (var w) 0) (real 0.0)) (bin "==" (lane (var w) 1) (real 0.0)))
+          (do (ret (vlit ${ASY_PAIR_TY} (real 1.0) (real 0.0)))))
+        (ret (vlit ${ASY_PAIR_TY} (real 0.0) (real 0.0)))))
+    (let l ${ASY_PAIR_TY} (vlit ${ASY_PAIR_TY}
+      (rmath "log" (call asy__pabs (var z)))
+      (rmath "atan2" (lane (var z) 1) (lane (var z) 0))))
+    (let u ${ASY_PAIR_TY} (call asy__pmul (var w) (var l)))
+    (let e real (rmath "exp" (lane (var u) 0)))
+    (ret (vlit ${ASY_PAIR_TY}
+      (bin "*" (var e) (rmath "cos" (lane (var u) 1)))
+      (bin "*" (var e) (rmath "sin" (lane (var u) 1))))))`],
   ['asy__pneg', `  (fn asy__pneg ((a ${ASY_PAIR_TY})) ${ASY_PAIR_TY}
     ;; 逐分量取负。刻意不写成 (0,0) - a：那样 -0.0 会变成 0.0，而 asy 是 pair(-x,-y)。
     (ret (vlit ${ASY_PAIR_TY} (un "-" (lane (var a) 0)) (un "-" (lane (var a) 1)))))`],
@@ -1553,6 +1592,9 @@ class AsyLower {
     const a = this.expr(n.items[2]);
     const b = this.expr(n.items[3]);
     if (a === null || b === null) return null;
+    // 提升前的右操作数留一份：`opBuiltinSig` 里的 `promote` 会**就地**把 int 提成 pair，
+    // 而 asy 的 `^` 在 pair 上是**两个重载**、按指数的静态类型分路（见下面 op === '^'）。
+    const b0 = { code: b.code, type: b.type };
     // 用户定义的算符先问一遍（第二十三刀）：它跟内建在同一张候选表里，见 opUser
     const u = this.opUser(n, op, [a, b], this.opBuiltinSig([a, b]));
     if (u !== null) return u;
@@ -1571,10 +1613,25 @@ class AsyLower {
       return { code: `(call asy__mod ${a.code} ${b.code})`, type: 'int' };
     }
     if (op === '^') {
-      // pair 上的 `^` asy **是有**的（量过：(1,2)^2 是 (-3,4)，复数幂），我们这一刀没做 ——
-      // 整数指数能靠 asy__pmul 迭代，实数指数要 exp/log/atan2 —— 那几个现在有了，
-      // 是这一刀没接，不是缺原语。
-      if (a.type === 'pair' || b.type === 'pair') return this.nope(n, "pair 上的 '^'（复数幂）");
+      // pair 上的 `^` 是**复数幂**，而且 asy 是**两个重载**，判据是指数的**静态类型**、
+      // 不是值：`int k=30; (1,2)^k` 给精确的 (-6890111163,29729597084)，而 `real e=30;`
+      // 与 `pair w=(30,0);` 都给 (-6890111162.99996,…)（三条都量过）。所以这里按 b 的
+      // 类型分路，不是"看看指数是不是整数"。
+      if (a.type === 'pair' || b.type === 'pair') {
+        const av = this.coerce(a, 'pair', n, "'^' 的左边");
+        if (av === null) return null;
+        this.used.add('asy__pmul');
+        if (b0.type === 'int') {
+          this.used.add('asy__pdiv');
+          this.used.add('asy__ppowi');
+          return { code: `(call asy__ppowi ${av.code} ${b0.code})`, type: 'pair' };
+        }
+        const bv = this.coerce(b, 'pair', n, "'^' 的右边");
+        if (bv === null) return null;
+        this.used.add('asy__pabs');
+        this.used.add('asy__ppowz');
+        return { code: `(call asy__ppowz ${av.code} ${bv.code})`, type: 'pair' };
+      }
       if (a.type === 'int' && b.type === 'int') {
         this.used.add('asy__ipow');
         return { code: `(call asy__ipow ${a.code} ${b.code})`, type: 'int' };
