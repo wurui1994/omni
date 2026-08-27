@@ -2139,6 +2139,35 @@ asy 收，而且方法取出来是绑住接收者的闭包，那要 `vardec` 走
 所以它得单独一刀给方言加 `(abort E)`；`sequence` 带函数实参的那两个重载写的是
 `new real(int){…}`，卡在匿名函数那一刀上。
 
+### 尺子还是错的：plain 一条错都没有，不是干净，是没走到
+
+上面那张 193 条的表按文件一分就露馅了：错全在 `graph.asy`（143）、`math.asy`（30）、
+`graph_splinetype.asy`（12）、`graph_settings.asy`（2），**`plain*.asy` 一条都没有**。
+而 `Label` 认不出 30 次 —— Label 就在 `plain_Label.asy` 里。两件事同时成立只有一个解释：
+**plain 根本没被加载**。单独量 `import plain;` 证实了：它只报**一条**错，而那不是"干净"，
+是模块加载在一个单元里撞到第一条错就停 —— 后面的东西根本没被看见。
+
+这与"数第一个坎"是同一个陷阱的两次发作：把**没量到**读成了没问题。所以每次拿到一份
+诊断计数，都要先问一句"这些文件真的都走到了吗"。
+
+那一条错是 `plain_constants.asy:73` 的 `using suffix=void(file);` —— `file` 是 asy 的
+C++ I/O 类型。它挡住的是**整个 plain 树**，也就是 Label / frame / filltype / align /
+marker 那一大片的来源。补一个**类型桩**（`struct file { int fd; }`，只让类型存在，
+不给任何 I/O —— 核心方言里还没有文件 IO；真去读写它的地方会明确报"没有方法"，
+不会悄悄给错答案），plain 就往下走了三个文件，各自停在自己的第一条：
+
+- `plain_strings.asy:260`：参数化模块（`from collections.map(K=string,V=string) access
+  Map_K_V as Map_string_string;`）—— 模板模块，最大的一件。
+- `plain_paths.asy:3`：`using interpolate=guide(... guide[]);` —— 函数类型里的**变长形参**。
+- `plain_filldraw.asy:93`：`using fill2=void(frame f, path[] g, pen fillpen);` ——
+  **struct 体里的 `using`**。这一条本身不难（`typeDec`/`aliasOne` 现成），但要做对得让别名
+  **只在这个 struct 里可见**（直接塞进单元级的 `tyAlias` 就比 asy 多接受一门语言了）；
+  而且同一个 struct 里紧接着还有 `fill2 fill2;`（类型名与字段名同名，asy 两个命名空间）
+  与 `static int Fill=1;`（静态字段），以及一个我们还没有的 `frame` —— 三件事叠在一起。
+
+所以 plain 这条路上剩的不是一行能解决的了。三个里 `frame` 与静态字段是内建面/前端各一小刀，
+变长形参与模板模块各是一刀。
+
 ## 后果与代价
 
 - **依赖 LLVM**：本机 `libLLVM.dylib` 157MB。产物变大，但仍然自带执行器、
