@@ -1,0 +1,1 @@
+write 的实参不能是结构体 —— asy 那边 write(A) 就是 no matching function

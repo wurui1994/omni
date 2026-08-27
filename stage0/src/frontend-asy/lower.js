@@ -39,9 +39,16 @@
 // 包装里求 —— 量过 asy 的默认值是每次调用求一次、只在没给时求、而且能引用前面的形参）、
 // **重载解析**（第十一刀：同名多份签名，按"同型优先、每次隐式转换算一分"挑最小的那个，
 // 并列就是歧义；核心方言没有重载，所以第 2 个及以后的候选降级时改名成 `asy__ov<i>_<名>`。
-// 候选表按**声明顺序**裁：asy 的名字解析是顺序的，见下面的差别一节）。
+// 候选表按**声明顺序**裁：asy 的名字解析是顺序的，见下面的差别一节）、
+// **struct**（第十四刀：`struct A { int x; real y = 1.5; }`、`A a;`、`a.x` 读写、
+// struct 当形参/返回值/`?:` 的两支、`== !=`。量过 asy 的 struct 是**引用类型** ——
+// 赋值只搬句柄、改形参的字段外面看得见、`==` 比的是身份 —— 所以降成核心方言的
+// `(class …)` 而不是 `(struct …)`：那一层的值语义只由 from_oir 里显式的 OP.COPY 给，
+// class 不发 COPY，五条腿都是引用。`A a;` 隐式跑一遍 `operator init`（= `new A` 加上
+// 字段默认值），默认值是**每次构造**求一次，所以有默认值的类型会生成一个
+// `asy__new_<T>` 包装，`A a;` 降成对它的调用）。
 //
-// 不支持（见到就报错，报错里说清是哪一条）：triple、struct、import/access、
+// 不支持（见到就报错，报错里说清是哪一条）：triple、import/access、
 // typedef、算符重载、给切片赋值（`a[0:2] = b`）、
 // 多维数组（`int[][]` —— 核心方言的 `(arr T)` 不收数组元素：MIR 那一层元素类型只有
 // 一个 8 位类型码，`(arr (arr int))` 与 `(arr (arr string))` 在那里是同一个码，
@@ -56,7 +63,12 @@
 // 字符串的 `insert`/`split`（`insert` 要的 `substr` 拼接现成，但 asy 的越界行为
 // 还没量全；`split` 要 `string[]` 的返回值，那条路还没走通）、
 // 循环条件里的 `?:`（摊出来的赋值只能落在循环外面，条件就只
-// 算一次了 —— 语义会变，所以报错而不是悄悄换个意思）。
+// 算一次了 —— 语义会变，所以报错而不是悄悄换个意思）、
+// struct 的这五条边界（第十四刀刻意留在门外，每条都有 bad/ 用例钉着）：
+// 字段是 pair / 数组 / 另一个 struct（核心方言的类字段只收 int/real/bool/string ——
+// 每条腿的"零值"各是一个只认标量的小函数，见 sexpr/lower.js 的 structDec）、
+// struct 里的成员函数（这一刀只有字段声明）、`A[]`（数组元素还只有
+// int/real/bool/string/pair）。
 //
 // ## 与真 asy 的差别，写在这里而不是等着被发现
 //
@@ -93,6 +105,13 @@
 //   语言"。等号是故意留的：一个函数看得见自己，单函数递归 asy 允许。
 //   连带的一条：用户把 `sqrt` 定义在后面时，前面那句 `sqrt(...)` 走的还是内建的那个
 //   （callExpr 里问的是"此处可见的候选"，不是"整个文件有没有同名函数"）。
+// - **struct 的这四条都是量出来的，也都对齐了**（第十四刀）：`A a; A b=a; b.x=1;` 之后
+//   `a.x` 也变了（引用语义）、`void f(A p){p.x=9;}` 改得到外面的对象、`==`/`!=` 比的是
+//   身份（量过 `a==b` false、`a==a` true、别名 true）、有默认值的字段每次构造都重求一遍
+//   （量过：默认值里调函数，构造两次就印两次）。`write(a)` asy 自己不收
+//   （"no matching function 'write(A)'"），所以 writeStmt 里有一条专门的拦截 ——
+//   不拦的话漏出去的是核心方言那句 `(tostr E) 只接受 int / real / bool`，
+//   拒得对但理由不对；`tests/asy/strict/write-struct` 钉着这一条。
 
 import { isList, isAtom, isStr, head } from '../sexpr/read.js';
 
@@ -419,6 +438,15 @@ class AsyLower {
     // 才声明的名字是 "no matching variable"），所以候选表要按这个下标裁一刀。
     // 自己那条也算可见（`c.at <= this.at`）—— 单函数递归 asy 是允许的。
     this.at = 0;
+    // 记录（asy 的 struct）：名字 -> {name, fields:[{name,type,def}]}。
+    // **asy 的 struct 是引用语义的**（量过：`A b = a; b.x = 7;` 之后 `a.x` 是 7，
+    // `void f(A q){q.x=99;} f(a);` 之后 `a.x` 是 99），所以它降成核心方言的 **class**，
+    // 不是 struct —— 降成值语义的那个会在"改了副本还是改了本体"上静静给错答案。
+    this.records = new Map();
+    // 有默认值的字段要一个构造函数（`new A` 每次都重新求那些默认值：量过
+    // `struct B { int n = bump(); }` 之后 `new B` 两次，计数器是 2）。
+    // 名字 -> 构造函数名；正文攒在 wraps 里，和默认实参的包装一起发。
+    this.recInits = new Map();
   }
 
   err(node, msg) {
@@ -485,8 +513,107 @@ class AsyLower {
     if (nm === null) return this.nope(node, '带点的类型名');
     if (nm === 'void') return 'void';
     if (nm === 'pair') return 'pair';
-    if (!SCALARS.has(nm)) return this.nope(node, `类型 '${nm}'（这一刀只有 int/real/bool/string/pair）`);
+    // 记录名（第十四刀）。放在内建名单后面查，与核心方言那边同一条规矩。
+    if (this.records.has(nm)) return nm;
+    if (!SCALARS.has(nm)) return this.nope(node, `类型 '${nm}'（这一刀只有 int/real/bool/string/pair 与 struct）`);
     return nm;
+  }
+
+  /** `t` 是这份文件里声明过的记录（asy 的 struct）吗 */
+  isRec(t) { return t !== null && t !== undefined && this.records.has(t); }
+
+  /**
+   * `struct A { int x; real y = 1.5; }` -> 一条记录声明。
+   *
+   * 字段**这一刀只收 int / real / bool / string**：核心方言的类字段就卡在这里
+   * （每条腿的"零值"是各自一个只认标量的小函数，见 sexpr/lower.js 的 structDec）。
+   * 所以 `pair` 字段、数组字段、记录套记录都在门外，各有一份 bad/ 钉着。
+   * 方法（struct 里的函数定义）也在门外：那要 this 与闭包，是另一刀。
+   */
+  recordDec(n) {
+    const nm = isAtom(n.items[1]) ? n.items[1].value : null;
+    if (nm === null) return this.nope(n, '没有名字的 struct');
+    if (SCALARS.has(nm) || nm === 'pair' || nm === 'void') {
+      return this.err(n, `'${nm}' 是内建类型名，不能当 struct 名`);
+    }
+    if (this.records.has(nm)) return this.nope(n, `重复定义的 struct '${nm}'`);
+    const fields = [];
+    const seen = new Map();
+    for (const item of this.flat(n.items[2], 'block')) {
+      const r = this.unwrapMod(item);
+      if (!isList(r)) continue;
+      if (head(r) !== 'vardec') return this.nope(r, `struct 里的 '${head(r)}'（这一刀只有字段声明）`);
+      const ft = this.type(r.items[1], `struct ${nm} 的字段`);
+      if (ft === null) return null;
+      if (!SCALARS.has(ft)) {
+        return this.nope(r, `struct ${nm} 的 ${ft} 字段（这一刀的字段只有 int/real/bool/string）`);
+      }
+      for (const d of this.flat(r.items[2], 'decids')) {
+        if (!isList(d) || head(d) !== 'decid') return this.err(d, '认不出的字段声明');
+        const start = d.items[1];
+        if (!isList(start) || head(start) !== 'decidstart' || start.items.length !== 2) {
+          return this.nope(start, '带维度或形参表的字段名');
+        }
+        const fn = isAtom(start.items[1]) ? start.items[1].value : null;
+        if (fn === null) return this.err(start, '字段少了名字');
+        if (seen.has(fn)) return this.err(d, `struct ${nm} 里有两个字段叫 '${fn}'`);
+        seen.set(fn, true);
+        fields.push({ name: fn, type: ft, def: d.items[2] === undefined ? null : d.items[2] });
+      }
+    }
+    if (fields.length === 0) return this.nope(n, `没有字段的 struct '${nm}'`);
+    this.records.set(nm, { name: nm, fields: fields });
+    return null;
+  }
+
+  /** 记录里的字段。找不到时把有哪些字段一起说出来。 */
+  recField(n, t, nm) {
+    const rec = this.records.get(t);
+    for (const f of rec.fields) if (f.name === nm) return f;
+    const names = [];
+    for (const f of rec.fields) names.push(f.name);
+    return this.err(n, `struct ${t} 没有字段 '${nm}' —— 有的是 ${names.join(' / ')}`);
+  }
+
+  /**
+   * `new A` 的代码。字段全无默认值时就是 `(cnew A)`；有默认值就走一个生成的构造函数，
+   * 因为默认值要**每次构造都重新求**（量过：`struct B { int n = bump(); }`，
+   * `new B` 两次之后计数器是 2）。同一个记录只生一份构造函数。
+   */
+  recNew(n, t) {
+    const rec = this.records.get(t);
+    let any = false;
+    for (const f of rec.fields) if (f.def !== null) any = true;
+    if (!any) return `(cnew ${t})`;
+    const had = this.recInits.get(t);
+    if (had !== undefined) return `(call ${had})`;
+    const fname = `asy__new_${t}`;
+    this.recInits.set(t, fname);
+    // 构造函数是另一个作用域、另一串语句（与 defWrapper 同一套保存/还原）
+    const savePre = this.pre;
+    const saveUpd = this.updates;
+    const saveScopes = this.scopes;
+    this.scopes = [new Map()];
+    this.updates = [];
+    const lines = [`(let o ${t} (cnew ${t}))`];
+    this.pre = lines;
+    this.declare(n, 'o', t);
+    let bad = false;
+    for (const f of rec.fields) {
+      if (f.def === null) continue;
+      const v = this.coerce(this.expr(f.def), f.type, f.def, `字段 '${t}.${f.name}' 的默认值`);
+      if (v === null) { bad = true; break; }
+      lines.push(`(fldset (var o) ${f.name} ${v.code})`);
+    }
+    lines.push('(ret (var o))');
+    this.pre = savePre;
+    this.updates = saveUpd;
+    this.scopes = saveScopes;
+    if (bad) return null;
+    const text = [`  (fn ${fname} () ${t}`];
+    for (const s of lines) text.push(`    ${s}`);
+    this.wraps.push(`${text.join('\n')})`);
+    return `(call ${fname})`;
   }
 
   /** `(name x)` -> 'x'；`(qualified ...)` 与算符名（`operator +`）都回 null */
@@ -587,7 +714,16 @@ class AsyLower {
     if (h === 'slice-exp') return this.slice(n);
     if (h === 'field') return this.field(n);
     if (h === 'new-array') return this.newArray(n);
-    if (h === 'new-record' || h === 'new-function') return this.nope(n, 'new');
+    // `new A`：asy 的 struct 是引用语义的，所以降到核心方言的 `(cnew A)`（或者带默认值时
+    // 走生成的构造函数，见 recNew）。`new-function` 要函数值，那是另一刀。
+    if (h === 'new-record') {
+      const t = this.type(n.items[1], 'new 的类型');
+      if (t === null) return null;
+      if (!this.isRec(t)) return this.nope(n, `new ${t}`);
+      const code = this.recNew(n, t);
+      return code === null ? null : { code: code, type: t };
+    }
+    if (h === 'new-function') return this.nope(n, 'new');
     if (h === 'arrayinit' || h === 'arrayinit-add' || h === 'arrayinit-rest') {
       // `{1,2,3}` 自己没有类型，类型来自左边的声明 —— 所以只在知道目标类型的地方处理
       return this.nope(n, '花括号数组初值出现在推不出元素类型的位置（只支持 `T[] a = {…}` 与 `new T[] {…}`）');
@@ -665,11 +801,15 @@ class AsyLower {
     return this.member(n, a, nm);
   }
 
-  /** 取字段。数组只有 `.length`，pair 只有 `.x`/`.y`；别的都还没做。 */
+  /** 取字段。数组只有 `.length`，pair 只有 `.x`/`.y`，记录按声明的字段来；别的都还没做。 */
   member(n, recv, nm) {
     if (asyIsArr(recv.type)) {
       if (nm === 'length') return { code: `(alen ${recv.code})`, type: 'int' };
       return this.nope(n, `数组的 '.${nm}'（这一刀只有 .length / .push / .pop）`);
+    }
+    if (this.isRec(recv.type)) {
+      const f = this.recField(n, recv.type, nm);
+      return f === null ? null : { code: `(fld ${recv.code} ${nm})`, type: f.type };
     }
     if (recv.type === 'pair') {
       if (nm === 'x') return { code: `(lane ${recv.code} 0)`, type: 'real' };
@@ -1301,6 +1441,11 @@ class AsyLower {
       const v = this.expr(a);
       if (v === null) return null;
       if (v.type === 'void') return this.err(a, 'write 的实参不能是 void');
+      // asy 自己也不给结构体印（量过：`no matching function 'write(A)'`）。拦在这一层，
+      // 不然漏出去的是核心方言那句 `(tostr E) 只接受 int / real / bool`。
+      if (this.isRec(v.type)) {
+        return this.err(a, `write 的实参不能是结构体 —— asy 那边 write(${v.type}) 就是 no matching function`);
+      }
       vals.push(v);
     }
     // 只有实参多于一个时第一个串才是前缀 —— 单个 write("a") 里 "a" 就是那个 T
@@ -1583,7 +1728,13 @@ class AsyLower {
       }
       const nm = isAtom(start.items[1]) ? start.items[1].value : null;
       if (nm === null) return this.err(start, '声明里少了名字');
-      let init = asyIsArr(t) ? `(anew ${asyCore(t)} (int 0))` : ZERO.get(t);
+      // `A a;`（不写 `= new A`）在 asy 那边**不是** null：它隐式跑一次 operator init，
+      // 而默认的那个就是 `new A`（量过：`A c;` 之后 `c == null` 是 false，
+      // 而且带默认值的字段也照求 —— `struct B { int n = bump(); } B c;` 之后计数器是 1）。
+      let init = null;
+      if (this.isRec(t)) init = this.recNew(start, t);
+      else init = asyIsArr(t) ? `(anew ${asyCore(t)} (int 0))` : ZERO.get(t);
+      if (init === null) return null;
       if (d.items[2] !== undefined) {
         // `T[] a = {1,2,3}`：花括号初值自己没有类型，元素类型从左边的声明来
         const raw = d.items[2];
@@ -1634,6 +1785,14 @@ class AsyLower {
   /** 赋值、复合赋值、自增自减都归到这里：目标是普通变量名，或者数组下标 */
   assign(node, lhs, rhs, op) {
     if (isList(lhs) && head(lhs) === 'subscript') return this.assignIndex(node, lhs, rhs, op);
+    // 字段赋值。asy 的 struct 是引用语义的，所以不必"读出整个记录、改完再写回去"——
+    // `(fldset 接收者 字段 值)` 直接改那个对象。接收者只认**普通变量**（dotQual 的限制）：
+    // 复合赋值要把它求两次，而变量读没有副作用。
+    if (isList(lhs) && head(lhs) === 'name-exp') {
+      const q = this.dotQual(lhs.items[1]);
+      if (q !== null && this.isRec(q.recv.type)) return this.assignFld(node, q, rhs, op);
+    }
+    if (isList(lhs) && head(lhs) === 'field') return this.nope(node, '给"不是普通变量的东西"的字段赋值');
     // 切片赋值 asy **有**（量过：`int[] a={1,2,3}; a[0:2]=b;` 之后 a 是 7,8,3），
     // 而且右边长度不同时整个数组的长度会跟着变 —— 那是另一条语义，这一刀没做。
     if (isList(lhs) && head(lhs) === 'slice-exp') return this.nope(node, '给切片赋值（`a[0:2] = b`）');
@@ -1680,6 +1839,47 @@ class AsyLower {
     if (t === 'string' && op !== '+') return this.err(node, `字符串上只有 '+='`);
     if (t === 'bool') return this.err(node, `bool 上没有 '${op}='`);
     return [`(set ${nm} (bin "${op}" (var ${nm}) ${v.code}))`];
+  }
+
+  /**
+   * `a.x = v` / `a.x += v` / `++a.x`。规则与变量赋值那份逐条相同（同一批测量），
+   * 只是左值从 `(set 名字 …)` 换成 `(fldset 接收者 字段 …)`。
+   * 接收者在复合赋值里被求两次 —— 它只可能是一个变量读（见 assign 的入口判断）。
+   */
+  assignFld(node, q, rhs, op) {
+    const f = this.recField(node, q.recv.type, q.field);
+    if (f === null) return null;
+    const t = f.type;
+    const put = (code) => [`(fldset ${q.recv.code} ${q.field} ${code})`];
+    const cur = `(fld ${q.recv.code} ${q.field})`;
+    if (op === null) {
+      const v = this.coerce(this.expr(rhs), t, node, `给 '${q.field}' 赋的值`);
+      return v === null ? null : put(v.code);
+    }
+    const one = rhs === null ? { code: t === 'real' ? '(real 1.0)' : '(int 1)', type: t } : this.expr(rhs);
+    if (one === null) return null;
+    if (rhs === null && t !== 'int' && t !== 'real') return this.err(node, `'${q.field}' 是 ${t}，不能自增自减`);
+    if (op === '#' || op === '%') {
+      if (t !== 'int' || one.type !== 'int') return this.err(node, `'${op}=' 两边要是 int`);
+      const helper = op === '#' ? 'asy__quot' : 'asy__mod';
+      this.used.add(helper);
+      return put(`(call ${helper} ${cur} ${one.code})`);
+    }
+    if (op === '^') {
+      if (t !== 'int' || one.type !== 'int') return this.nope(node, "real 字段上的 '^='");
+      this.used.add('asy__ipow');
+      return put(`(call asy__ipow ${cur} ${one.code})`);
+    }
+    if (op === '/') {
+      if (t !== 'real') return this.nope(node, `int 字段上的 '/='（asy 的 / 是实数除法，赋回 int 要写 #=）`);
+      const v = this.coerce(one, 'real', node, "'/=' 的右边");
+      return v === null ? null : put(`(bin "/" ${cur} ${v.code})`);
+    }
+    const v = this.coerce(one, t, node, `'${op}=' 的右边`);
+    if (v === null) return null;
+    if (t === 'string' && op !== '+') return this.err(node, `字符串上只有 '+='`);
+    if (t === 'bool') return this.err(node, `bool 上没有 '${op}='`);
+    return put(`(bin "${op}" ${cur} ${v.code})`);
   }
 
   /**
@@ -1852,7 +2052,12 @@ class AsyLower {
     // 这是**明写的**差别，不是漏的：核心方言的检查在编译期，而这条 ret 永远走不到才对。
     const last = body.length === 0 ? '' : body[body.length - 1];
     if (d.ret !== 'void' && !last.startsWith('(ret ')) {
-      body.push(`(ret ${asyIsArr(d.ret) ? `(anew ${asyCore(d.ret)} (int 0))` : ZERO.get(d.ret)})`);
+      let zero = null;
+      if (asyIsArr(d.ret)) zero = `(anew ${asyCore(d.ret)} (int 0))`;
+      else if (this.isRec(d.ret)) zero = this.recNew(n, d.ret);
+      else zero = ZERO.get(d.ret);
+      if (zero === null) return null;
+      body.push(`(ret ${zero})`);
     }
     const params = [];
     for (const p of ps) params.push(`(${p.name} ${asyCore(p.type)})`);
@@ -1864,6 +2069,11 @@ class AsyLower {
   /** 整个文件 -> 核心方言文本。函数提到模块层，其余全进 (main ...)。 */
   run(tree) {
     const rs = this.flat(tree, 'block');
+    // 记录先收：函数签名与字段类型都可能提到它，而字段里不许再有记录，所以一遍就够。
+    for (const r0 of rs) {
+      const r = this.unwrapMod(r0);
+      if (isList(r) && head(r) === 'recorddec') this.recordDec(r);
+    }
     for (let i = 0; i < rs.length; i++) {
       const r = this.unwrapMod(rs[i]);
       if (!isList(r)) continue;
@@ -1888,6 +2098,7 @@ class AsyLower {
     for (let i = 0; i < rs.length; i++) {
       const r = this.unwrapMod(rs[i]);
       if (isList(r) && head(r) === 'fundec') continue;
+      if (isList(r) && head(r) === 'recorddec') continue;   // 上面收过了
       this.at = i;
       const s = this.stmt(r, 'void');
       if (s === null) continue;
@@ -1895,6 +2106,12 @@ class AsyLower {
     }
     this.pop();
     const out = ['(module'];
+    // 记录按**声明顺序**发（字段里不许再有记录，所以这就是最终顺序）
+    for (const rec of this.records.values()) {
+      const fs = [];
+      for (const f of rec.fields) fs.push(`(${f.name} ${asyCore(f.type)})`);
+      out.push(`  (class ${rec.name} ${fs.join(' ')})`);
+    }
     for (const [hnm, text] of HELPERS) {
       if (this.used.has(hnm)) out.push(text);
     }

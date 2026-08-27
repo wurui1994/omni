@@ -235,10 +235,12 @@ bison **隐式**的选择写成**显式**的优先级声明 —— 悬垂 else�
    `.x`/`.y`/`xpart`/`ypart`、`abs`/`length`/`conj`、int/real 到 pair 的隐式转换、
    `(x,y)` 的印法）、**字符串函数**（`length`/`substr`/`find`/`rfind`/`replace`/`erase`）、
    **`pair[]`**（数组那一整套操作在 pair 上一条不少）、**默认实参与命名实参**、
-   **重载解析**（同型优先、转换算分、并列即歧义、候选按声明顺序可见），
-   十六份用例在五个执行器上与 `asy -noV` 逐字节相同。
+   **重载解析**（同型优先、转换算分、并列即歧义、候选按声明顺序可见）、
+   **struct**（引用语义、隐式 `operator init`、字段默认值每次构造重求、`== !=` 比身份），
+   十七份用例在五个执行器上与 `asy -noV` 逐字节相同。
    **还没做**的是给切片赋值、多维数组、复数幂、triple、
-   struct + `operator init`、算符重载、字符串的 `reverse`/`insert`/`split` —— 每一条都在
+   用户自定义的 `operator init`、算符重载、字符串的 `reverse`/`insert`/`split`、
+   struct 的非标量字段与成员函数 —— 每一条都在
    `tests/asy/bad/` 里有一份带 `ASY_NOPE` 的用例钉着，不是含糊的"待办"。
    超越函数（exp/log/trig）是**另一回事**：不是没做，是量过 libm 与 V8 在最后一位就分叉，
    收进来这条轴必然有一天变红，所以按边界拒掉（`tests/asy/bad/sin.asy`；pair 上的
@@ -412,9 +414,9 @@ static inline C + 另写一份 IR 助手"，是两份实现；这次不重复那
 `1/3` 是实数除法而 `1#3` 是整数商、`3 == 3.0` 要提左边、`write` 的分隔符取决于第一个
 实参是不是字符串。类型是符号表的事，动作模板里没有符号表。
 
-**判分的人不是我**：`tests/asy` 的十六份用例（算术 / 字符串 / 两种引号 / 控制流 / 函数 /
+**判分的人不是我**：`tests/asy` 的十七份用例（算术 / 字符串 / 两种引号 / 控制流 / 函数 /
 real 的 %.15g / `? :` / 数学函数 / 数组 / pair / 切片与整数组输出 / for-each /
-字符串函数 / `pair[]` / 默认实参与命名实参 / 重载解析）每份都是
+字符串函数 / `pair[]` / 默认实参与命名实参 / 重载解析 / struct）每份都是
 「五条腿逐字节相同 == `.expected` == `asy -noV` 当场重跑」。`.expected` 本身就是真 asy 的
 输出生成的；机器上没装 asymptote 时那一节打印 skip，但 `.expected` 仍然把答案钉住。
 
@@ -434,12 +436,13 @@ real 的 %.15g / `? :` / 数学函数 / 数组 / pair / 切片与整数组输出
 （只算中选那支）跟着编码保住。代价写在明处：**循环条件里的 `? :` 直接报错**，因为那些
 赋值只能落在循环外面，条件就只算一次了。这条边界在 `tests/asy/bad/cond-in-loop.asy` 里。
 
-第一刀的边界都在 `tests/asy/bad/`（14 条，每条的期望值都必须以 `ASY_NOPE` 开头 ——
-"还没做"和"做错了"必须能一眼分开）：struct、triple、复数幂、算符重载、
+第一刀的边界都在 `tests/asy/bad/`（18 条，每条的期望值都必须以 `ASY_NOPE` 开头 ——
+"还没做"和"做错了"必须能一眼分开）：triple、复数幂、算符重载、
 模块（import/access）、隐式缩放（`105cm`）、超越函数（`sin`、pair 上的 `angle` ——
 理由是上面那条 ULP 测量）、函数里读文件级变量（核心方言没有全局量）、
 循环条件里的 `? :`、给切片赋值（`a[0:2] = b`）、多维数组、
-字符串的 `reverse`/`insert`/`split`。
+字符串的 `reverse`/`insert`/`split`、struct 的五条（pair 字段 / 数组字段 / 嵌套
+struct 字段 / 成员函数 / `A[]`）。
 
 **for-each 的两条语义也是量出来的**：循环变量是**复制**（体里 `x = 99` 不动数组），
 而迭代是**活的** —— `int[] g={1,2}; int n=0; for(int x:g){++n; if(n<5) g.push(9);}`
@@ -468,13 +471,16 @@ real 的 %.15g / `? :` / 数学函数 / 数组 / pair / 切片与整数组输出
 **第四节 `strict/`：asy 自己就不收的，我们也不能收。** 这一节是数组这一刀顺手加的，起因是
 一次测量：`int b=1; b++;` 在真 asy 上直接编不过（"postfix expressions are not allowed"），
 而我们的降级器照收。这类漏洞**不会让任何用例输出不同** —— 它只让"等价"这两个字变虚。
-所以 `strict/` 里的用例要求：我们拒，且装了 asy 的话**真 asy 也拒**。现在有七条：后缀
+所以 `strict/` 里的用例要求：我们拒，且装了 asy 的话**真 asy 也拒**。现在有八条：后缀
 `++`、pair 上的 `<`、pair 上的 `%`（这两条 asy 报的是 "no matching function
 'operator <(pair, pair)'"）、`length(int[])`（`length` 只有 string 和 pair 两个重载）、
 按不存在的形参名给命名实参（asy 报 "cannot call 'void f(int a)' with parameter 'int b'"）、
 **歧义的重载**（`p(real)` 与 `p(pair)` 遇上 `p(1)`：asy 报 "call of function 'p(int)' is
-ambiguous"）、**引用后面才声明的函数**（asy 报 "no matching variable 'b'"）—— 后两条是
+ambiguous"）、**引用后面才声明的函数**（asy 报 "no matching variable 'b'"）、
+**`write` 一个 struct**（asy 报 "no matching function 'write(A)'"）—— 中间那两条是
 重载这一刀加的，第二条尤其要紧：我们是两遍降级，不专门裁一刀就会比 asy 多接受一门语言。
+最后一条是 struct 这一刀加的，它守的不只是"拒"：不在 asy 这层拦，漏出去的是核心方言那句
+`(tostr E) 只接受 int / real / bool`——拒对了但理由指着错的一层。
 
 **默认实参是"每次调用求一次、只在没给时求"**，而且**能引用前面的形参** —— 两条都是量出来的
 （`void d(int x = bump())`：`d(); d(); d(99);` 之后计数器是 2；`void q(int a, int b = a + 10)`：
@@ -509,6 +515,31 @@ with parameters 'int, int'"。我们是两遍降级（先收签名再降体）�
 好处是内建名字的遮蔽也对了 —— 用户把 `sqrt` 定义在后面时，前面那句 `sqrt(...)` 走的还是内建
 的那个，因为 callExpr 问的是"此处可见的候选"，不是"整个文件有没有同名函数"。
 两条边界在 `strict/forward-ref` 与 `strict/overload-ambiguous` 里。
+
+**struct（第十四刀）：asy 的 struct 是引用类型，所以降的是 `class` 而不是 `struct`。** 这一条
+不量就一定写错 —— C/C++ 的直觉是值语义。逐条量的证据（`asy -noV`）：
+
+- `A a; A b = a; b.x = 1;` 之后 `a.x` 也变了；`void f(A p){ p.x = 9; }` 改得到外面那个对象。
+- `==`/`!=` 比的是**身份**：`a == b` 是 false、`a == a` 是 true、别名之间是 true。
+- `write(a)` 编不过（"no matching function 'write(A)'"）——asy 自己也不给 struct 印。
+
+核心方言那一层刚好有两种聚合：`(struct …)` 的值语义只由 `from_oir` 里显式的 `OP.COPY` 给，
+而 `(class …)` 不发 COPY。所以 asy 的 struct 对应的是后者，五条腿的引用语义是白捡的，前端
+一行拷贝代码都没有。
+
+**`A a;` 隐式跑一遍 `operator init`**，等于 `new A` 加上字段默认值；而字段默认值是**每次构造**
+求一次 —— 量法是把默认值写成一个带输出的函数调用，构造两次就印两次。所以有默认值的类型会
+生成一个 `asy__new_<T>` 包装（每个类型只生一份，`recInits` 记着），`A a;` 降成对它的调用；
+没有默认值的类型直接降 `(cnew A)`，不多生一个函数。
+
+**字段这一刀只收 int/real/bool/string**，五条边界各有一份 `bad/`：pair 字段、数组字段、
+嵌套 struct 字段、成员函数、`A[]`。前三条卡在核心方言而不是 asy 前端 —— 每条腿的"类零值"
+各是一个只认标量的小函数（`backend-js` 的 `zero`、`backend-c` 的 `zeroExpr`、`interp` 的
+`zeroOf`），要放开就得同时改三处，那是下一刀的事。
+
+**复合赋值的接收者只求一次**：`a.x += f()` 里 `a` 不能求两遍，所以 `(field …)` 形式的左值在
+`assignFld` 里单独走一条路（先绑接收者再 `(fldset …)`），而 `(field …)` 出现在需要重复求值的
+位置时直接 `nope` —— 不猜。
 
 
 **数组这一刀的语义全是量出来的**（`asy -noV`，逐条问）：
