@@ -124,6 +124,9 @@
 // **函数类型**（`real f(real)` 这种形参、`f(v)` 的间接调用、裸函数名当值用、
 // 以及函数值类型的**变量**（`real f(real) = twice;` 与 typedef 拼的那一份走同一条路）——
 // 类型全是字符串，所以它就是 `R(P,…)` 那个拼法，见 asyIsFn / fnTypeOf / fnValCall）。
+// **匿名函数**（`new int(int x){…}` -> 顶层的 `(cfn …)` 加用处上的 `(mkclo …)`，捕获边降边
+// 收，见 anonFn / capOf。捕获**按值**抓，而 asy 是按引用的 —— 所以外层名字在那个函数里
+// 被赋值过时这一刀拒，理由与量法写在 anonFn 的注释里，bad/anon-capref 钉着）。
 // **typedef 与 `using`**（别名表 tyAlias：名字 -> 一串 {t, at}，`t` 是已经解析好的类型
 // 字符串，type() 一查就换掉 —— asy 的 typedef 不造新类型，所以"换掉"就是全部语义。
 // 存一串是因为同一个名字可以 typedef 多次，而名字解析是顺序的，见 aliasAt）。
@@ -245,6 +248,9 @@ const SCALARS = new Set(['int', 'real', 'bool', 'string']);
 
 /** dotQual 的第三种答案："是带点的名字，但接收者那一层已经报过错了" */
 const DOT_BAD = { bad: true };
+
+/** capOf 的第三种答案："这个名字确实是外层的局部量，但这一刀捕获不了它（诊断已经发了）" */
+const CAP_BAD = { bad: true };
 
 /** 模块相关的顶层声明（第二十五刀）。认得的是前三条，后面几条在 modStmt 里报"还没做" */
 const ASY_MODSTM = new Set(['import', 'access', 'from-access', 'unravel', 'include',
@@ -901,6 +907,12 @@ class AsyLower {
     // 同一份输入两次降出来的文本因此逐字节相同。
     this.wrapNames = new Map();
     this.wraps = [];
+    // 匿名函数（`new int(int x){…}`）：出来的 `(cfn …)` 也攒在 wraps 里。编号只为起名。
+    this.anonN = 0;
+    // 正在降级的那个匿名函数的捕获状态（null = 不在匿名函数里）。见 anonFn / capOf。
+    this.cap = null;
+    // 正在降级的那个**函数体**的 AST（匿名函数要拿它扫"这个外层名字会不会被改"）。
+    this.fnBody = null;
     // 文件级的 `T operator init()`（第二十二刀）：记录名 -> 候选表（按声明顺序），
     // 外加节点 -> 候选表，好让 func() 认出"这份 fundec 是哪张表里的"。
     this.oinits = new Map();
@@ -1195,7 +1207,12 @@ class AsyLower {
     if (h === 'array-ty') {
       const d = this.dimsDepth(node.items[2]);
       if (d === null) return this.err(node, `${what}：认不出的数组维数形状`);
-      const el = this.plainName(node.items[1]);
+      // 元素那一格有两种形状：声明那条路上是**裸的** name（`type -> name dims`），
+      // 而 `new int[](…)` 那两条产生式里是 celltype，也就是多包了一层 `(name-ty …)`。
+      // 两种都收 —— 不然 `new int[](int n){…}` 会报"带点的类型名"（量出来的）。
+      let en = node.items[1];
+      if (isList(en) && head(en) === 'name-ty') en = en.items[1];
+      const el = this.plainName(en);
       if (el === null) return this.nope(node, '带点的类型名');
       let eel = el;
       if (this.tyAlias.has(el)) {
@@ -1614,6 +1631,13 @@ class AsyLower {
   nameOf(n, nm) {
     const t = this.lookup(nm);
     if (t !== null) return { code: `(var ${nm})`, type: t };
+    // 匿名函数体里：外层函数的局部量要**捕获**进来。顺序照 asy —— 闭包自己的局部（上面
+    // 那一档）、外层函数的局部（这一档）、文件级（下面那几档）。
+    if (this.cap !== null) {
+      const c = this.capOf(n, nm);
+      if (c === CAP_BAD) return null;
+      if (c !== null) return c;
+    }
     const f = this.selfField(nm);
     if (f !== null) return { code: `(fld (var this) ${nm})`, type: f.type };
     const g = this.gvarHere(nm);
@@ -1689,6 +1713,122 @@ class AsyLower {
       if (ok) out.push(c);
     }
     return out.length < 2 ? null : { nm: nm, cands: out };
+  }
+
+  /**
+   * `new int(int x) { return x + k; }`：**匿名函数**（ADR-0010 那套闭包）。降成一个顶层的
+   * `(cfn 名 (捕获) (形参) 返回类型 语句…)`，用的地方是 `(mkclo 名 捕获值…)`。
+   *
+   * 捕获**边降边收**：作用域换成只有形参的一层，外层那几层留在 `this.cap.outer` 里；
+   * 体里引用到外层局部量时 nameOf 落到 capOf，回 `(cap 名)` 并记一条。头是体降完之后才拼的，
+   * 所以不必先扫一遍 AST 找自由变量。
+   *
+   * **与 asy 的差别在这里收窄**：asy 的捕获是按引用的（量过 `int k=1; int f()=new
+   * int(){return k;}; k=2; write(f());` 印 2），而 `(mkclo …)` 是按值抓一次。所以外层的
+   * 名字如果在那个函数里被赋值过，这一刀**不收**（capOf 里报）—— 收了就是悄悄给旧值。
+   * 文件级的名字不受这一条限制：它是 `(var 符号)`，本来就是活读的，与 asy 一样。
+   */
+  anonFn(n) {
+    const ret = this.type(n.items[1], 'new 的返回类型');
+    if (ret === null) return null;
+    const ps = this.formals(n.items[2]);
+    if (ps === null) return null;
+    for (const p of ps) {
+      if (p.def !== null && p.def !== undefined) {
+        return this.nope(n, '匿名函数的形参默认值（函数值没有默认值）');
+      }
+    }
+    // 套一层的匿名函数：里层要抓的可能是外层的**捕获**，而捕获不是局部量 —— 另一刀
+    if (this.cap !== null) return this.nope(n, '匿名函数里再套一个匿名函数');
+    const name = `asy__anon${this.anonN++}`;
+    const saveScopes = this.scopes;
+    const saveUpd = this.updates;
+    const saveSelf = this.self;
+    this.cap = { outer: saveScopes, body: this.fnBody, list: [], seen: new Map() };
+    this.scopes = [new Map()];
+    this.updates = [];
+    this.self = null;   // 匿名函数体里没有接收者（捕获 this 这一刀不收，见 capOf）
+    let bad = false;
+    for (const p of ps) if (this.declare(n, p.name, p.type) === null) bad = true;
+    const body = bad ? null : this.body(n.items[3], ret);
+    const caps = this.cap.list;
+    this.cap = null;
+    this.scopes = saveScopes;
+    this.updates = saveUpd;
+    this.self = saveSelf;
+    if (body === null) return null;
+    // 掉出尾巴补一条零值 ret（与 funBody 同一条：核心方言的检查在编译期）
+    const last = body.length === 0 ? '' : body[body.length - 1];
+    if (ret !== 'void' && !last.startsWith('(ret ')) {
+      let zero = null;
+      if (asyIsArr(ret)) zero = `(anew ${asyCore(ret)} (int 0))`;
+      else if (this.isRec(ret)) zero = this.recInit(n, ret);
+      else zero = ZERO.get(ret);
+      if (zero === null || zero === undefined) {
+        return this.nope(n, `返回 ${ret} 的匿名函数（这一刀给不出它的零值）`);
+      }
+      body.push(`(ret ${zero})`);
+    }
+    const cs = [];
+    const vals = [];
+    for (const c of caps) {
+      cs.push(`(${c.name} ${asyCore(c.type)})`);
+      vals.push(`(var ${c.name})`);
+    }
+    const params = [];
+    const pts = [];
+    for (const p of ps) {
+      params.push(`(${p.name} ${asyCore(p.type)})`);
+      pts.push(p.type);
+    }
+    const text = [`  (cfn ${name} (${cs.join(' ')}) (${params.join(' ')}) ${asyCore(ret)}`];
+    for (const s of body) text.push(`    ${s}`);
+    this.wraps.push(`${text.join('\n')})`);
+    const sp = vals.length === 0 ? '' : ' ';
+    return { code: `(mkclo ${name}${sp}${vals.join(' ')})`, type: `${ret}(${pts.join(',')})` };
+  }
+
+  /**
+   * 匿名函数体里的一个名字：它是不是**外层函数的局部量**？
+   * 是且抓得动就回 `(cap 名)`（并记一条捕获）；是但抓不动回 CAP_BAD（诊断已发）；
+   * 不是就回 null —— 那时 nameOf 接着往下问文件级那一档。
+   */
+  capOf(node, nm) {
+    let t = null;
+    for (const s of this.cap.outer) if (s.has(nm)) t = s.get(nm);
+    if (t === null) return null;
+    const had = this.cap.seen.get(nm);
+    if (had !== undefined) return { code: `(cap ${nm})`, type: had };
+    if (nm === 'this') {
+      this.nope(node, '匿名函数里用外层的 this（捕获接收者是另一刀）');
+      return CAP_BAD;
+    }
+    if (asyIsFn(t)) {
+      this.nope(node, `捕获一个函数值 '${nm}'（闭包里再套闭包是另一刀）`);
+      return CAP_BAD;
+    }
+    // 按值 vs asy 的按引用：那个名字在外层函数里被赋值过就不收（理由见 anonFn 的头注释）
+    if (this.cap.body === null || this.assignsTo(this.cap.body, nm)) {
+      this.nope(node, `捕获会被改的外层变量 '${nm}'（asy 的捕获是按引用的，`
+        + '而 (mkclo …) 是按值抓一次 —— 收了就会给旧值)');
+      return CAP_BAD;
+    }
+    this.cap.seen.set(nm, t);
+    this.cap.list.push({ name: nm, type: t });
+    return { code: `(cap ${nm})`, type: t };
+  }
+
+  /** `nm` 在这棵子树里有没有被**赋值**过（`=`、`+=` 那一族、`++`/`--`）。保守：认名字不认作用域 */
+  assignsTo(node, nm) {
+    if (!isList(node)) return false;
+    const h = head(node);
+    let lhs = null;
+    if (h === 'assign') lhs = node.items[1];
+    else if (h === 'self' || h === 'prefix' || h === 'postfix') lhs = node.items[2];
+    if (lhs !== null && isList(lhs) && head(lhs) === 'name-exp'
+        && this.plainName(lhs.items[1]) === nm) return true;
+    for (const it of node.items) if (this.assignsTo(it, nm)) return true;
+    return false;
   }
 
 
@@ -1780,7 +1920,7 @@ class AsyLower {
       const code = this.recNew(n, t);
       return code === null ? null : { code: code, type: t };
     }
-    if (h === 'new-function') return this.nope(n, 'new');
+    if (h === 'new-function') return this.anonFn(n);
     if (h === 'arrayinit' || h === 'arrayinit-add' || h === 'arrayinit-rest') {
       // `{1,2,3}` 自己没有类型，类型来自左边的声明 —— 所以只在知道目标类型的地方处理
       return this.nope(n, '花括号数组初值出现在推不出元素类型的位置（只支持 `T[] a = {…}` 与 `new T[] {…}`）');
@@ -4509,7 +4649,11 @@ class AsyLower {
     if (ps === null) return null;
     this.push();
     for (const p of ps) this.declare(n, p.name, p.type);
+    // 体的 AST 存一份：里面的匿名函数要拿它扫"这个外层名字会不会被改"（见 capOf）
+    const saveFnBody = this.fnBody;
+    this.fnBody = n.items[4];
     const body = this.body(n.items[4], d.ret);
+    this.fnBody = saveFnBody;
     this.pop();
     if (body === null) return null;
     // 掉出函数尾巴：asy 是运行期报 "function did not return a value"，我们补一条零值 ret。
