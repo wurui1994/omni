@@ -2540,6 +2540,39 @@ C++ 内建类型，都不在我们的内建面上。所以 plain_paths 真正的
 跑之前踩过一次坑：`tests/asy/run.js` 在设了 `ASYMPTOTE_DIR` 的 shell 里跑，`bad/import`
 会失败 —— 那条用例要的就是"找不到 graph 模块"。是环境不是回归，换个干净的 shell 就过。
 
+### 第四刀：表达式那一族，3357 -> 2322。这一刀撞上"加载器禁止环"
+
+`frontend-asy/exprs.js`（1070 行）是类里连续的 1043 行：分派与名字解析、匿名函数与捕获、
+隐式转换、下标与切片、点后面那一层，pair/triple/字符串/数组的内建面，以及算符那一整段
+（`binary`/`compare`/`cond`/`logic`/`unary`/`cast`）。
+
+前三刀的依赖都是单向的，这一刀不是：`expr` 要调 `asyCall`（函数调用就是表达式），
+而 calls.js 又到处调 `expr`/`coerce`。第一反应是"ESM 支持循环 import"—— 在 node 上确实支持，
+函数声明会提升，调用时机又都在模块初始化之后。但**自举那条路不支持**：
+`frontend-js/link.js:221` 就是一句 `import cycle through '…'`，`module/load.js` 的文件头也写着
+「禁止环：报出整条环路径，而不是给一个半初始化的模块」。也就是说这个环在 node 上跑得过，
+在 `tests/bootstrap` 上一定挂 —— 而这个文件正在自举路径上。
+
+所以反向那几条边不走 import，走 lower.js 上留的**一层薄转接方法**：
+
+```js
+  expr(n) { return asyExpr(this, n); }
+  coerce(v, want, node, what) { return asyCoerce(this, v, want, node, what); }
+```
+
+十七个，每个一行，全是转出去。判定"哪些要转接"不是猜的：`grep 'L\.名字('` 数 calls.js 与
+stmts.js 里实际调了哪些，就是这十七个。于是依赖变成一条链
+`exprs -> stmts -> calls -> types/runtime`，lower.js 在最上面 import 全部四摊 —— 是个 DAG。
+
+代价写在明处：跨家族的调用多一层函数跳转，而且 lower.js 上多了十七个方法 ——
+它不是纯粹的"薄入口"，是"薄入口 + 一张转接表"。换来的是**加载器不用改**：
+放开环要动 link.js 与 load.js 的拓扑排序，那是编译器骨架，不该为了排版去动。
+
+`tests/asy` 107/107、`tests/bootstrap` 60/60，`import graph;` 187 条、`import plain;` 2 条。
+
+lower.js 现在剩下的是"要看符号表的那一半"：单元与 include、作用域与类型名（含 typedef
+与 struct 体里的 using）、记录声明与构造、模块加载与合并，以及入口那几只。
+
 ## 后果与代价
 
 
