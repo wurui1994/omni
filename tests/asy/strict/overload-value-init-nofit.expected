@@ -1,0 +1,1 @@
+'s' 的初值：要 string(string,string)，而那个名字的重载里没有同型的一份（有 int(int,int)、real(real,real)）

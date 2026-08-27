@@ -1,0 +1,1 @@
+write 的实参不能是一个没定案的重载集（<both 的重载集>）—— asy 那边报 no matching function 'write(<overloaded>)'

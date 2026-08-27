@@ -2917,6 +2917,41 @@ variable 'S.a'"），一度以为**我们比 asy 收得多**、`statQual` 那条
 `frontend-asy/`（decls.js、lower.js），没碰核心方言，所以 `tests/sexpr` 与 `tests/run.js`
 跳掉。
 
+### 重载集当值用：把「期望类型定案」从实参位置铺到别的位置
+
+`bad/overload-value-init` 的注释里早写着差什么：「实参位置上这一条已经通了，差的是**声明**
+这个位置 —— 那条路上期望类型是有的（`real g(real,real)` 就写在左边），但走的不是 fit 那一段」。
+量过 asy 收（那个文件原样跑印 10）。
+
+做法与 `null` 那一刀是**同一条**：`asyNameOf` 在多重载时不再报 nope，而是回一个
+**不定案的记号**（`{code: null, type: '<nm 的重载集>', over: 候选}`，形状与 `asyOverArg`
+给实参用的那个一模一样），由 `asyCoerce` 拿目标类型落成 `(fnref …)`。于是初值、赋值、
+return 三个位置一起通了 —— 它们本来都走 coerce。带默认值的候选照旧一律不算
+（函数值没有默认值，与 overArg 里同一条）；筛完只剩一份就直接定案。
+
+挑不出同型的一份是**错**不是 nope（asy 报 "cannot cast expression to
+'string(string, string)'"，量过），诊断里把候选的类型列出来。`write(both)` 这种
+**没有**目标类型的位置也是错（asy 报 "no matching function 'write(<overloaded>)'" 加
+"use of variable 'both' is ambiguous"）—— 那处漏点与 `write(null)` 是同一个，
+补在同一个地方。
+
+`bad/overload-value-init` 提上来变成 `cases/61-overload-value.asy`（初值、typedef 拼的
+类型、return 位置、实参位置，以及"挑出来的那一份就是那一份"），新增两条 strict：
+`overload-value-write`、`overload-value-init-nofit`（后者与既有的 `overload-value-nofit`
+是一对 —— 那条是实参位置，这条是声明位置）。
+
+**`import graph;` 与 `import plain;` 都一动不动（184 与 1）**，而且这次的理由是清楚的：
+plain 的墙在 `iter.asy:42`，那一行是
+`autounravel Iterable_T operator cast(T[] items) = Iterable_T;` —— 卡住的**不是**初值
+那一半（这一刀刚补的就是它），而是左边：那是一个**函数类型的文件级变量**，而
+`(global …)` 这一档现在只收 int/real/bool/string/pair/triple、记录与它们的一维数组
+（量过我们自己报的两条：「没有初值的函数值变量」与「函数里改文件级变量」）。
+下一刀该是那个。
+
+跑的轴：`tests/asy`（124 passed，40.6s）、`tests/bootstrap`（60 passed）。只动
+`frontend-asy/`（exprs.js、stmts.js），所以 sexpr 与 run.js 跳掉。
+
+
 
 
 ## 后果与代价

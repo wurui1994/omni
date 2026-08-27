@@ -90,9 +90,12 @@ export function asyNameOf(L, n, nm) {
   if (L.globals.has(nm)) return L.gvarLate(n, nm);
   // 裸的**函数名**当值用（`findroot(f, a, b)` 的那个 f）。只有一个候选时才收 ——
   // 有多个重载时"是哪一个"要靠期望类型定案，而这一层是自底向上定型的，没有期望类型可问。
-  // **实参位置**上那一条已经补了（见 overArg / fit：callArgs 先不定案，等 fit 拿槽的类型
-  // 挑同型的一份）；到这里还落下来的是别的位置 —— 主要是变量的初值（`real g(real,real)
-  // = both;`，真 asy 收，见 bad/overload-value-init.asy）。那种情况报"还没做"而不是猜一个。
+  // **实参位置**上那一条早就补了（见 overArg / fit：callArgs 先不定案，等 fit 拿槽的类型
+  // 挑同型的一份）；第三十五刀把同一条路子铺到别的位置：这里也回一个**不定案的记号**
+  // （`over` 那几个候选），由 coerce 拿目标类型落地。目标类型有的地方就通了 ——
+  // 变量的初值（`real g(real,real) = both;`，真 asy 收，量过印 10）、赋值、return、
+  // 以及 `collections/iter.asy:42` 的 `autounravel Iterable_T operator cast(…) = Iterable_T;`。
+  // 记号的 `code` 留空：漏到没有目标类型的位置上是一处硬错，不会变成一个错答案。
   const cands = asyVisible(L, nm);
   if (cands.length === 1) {
     const c = cands[0];
@@ -107,8 +110,20 @@ export function asyNameOf(L, n, nm) {
     return { code: `(fnref ${c.sym})`, type: asyCandFnType(L, c) };
   }
   if (cands.length > 1) {
-    return L.nope(n, `把有 ${cands.length} 个重载的 '${nm}' 当值用`
-      + '（是哪一个要靠期望类型定案，这一层是自底向上定型的）');
+    // 带默认值的候选一律不算（函数值没有默认值，与 overArg 里同一条）
+    const usable = [];
+    for (const c of cands) {
+      let ok = true;
+      if (c.ps !== undefined) {
+        for (const p of c.ps) if (p.def !== null && p.def !== undefined) ok = false;
+      }
+      if (ok) usable.push(c);
+    }
+    if (usable.length === 0) {
+      return L.nope(n, `把带默认值的函数 '${nm}' 当值用（函数值没有默认值）`);
+    }
+    if (usable.length === 1) return { code: `(fnref ${usable[0].sym})`, type: asyCandFnType(L, usable[0]) };
+    return { code: null, type: `<${nm} 的重载集>`, over: usable };
   }
   return L.err(n, `未声明的变量 '${nm}'`);
 }
@@ -333,6 +348,20 @@ export function asyCoerce(L, v, want, node, what) {
     return { code: `(null ${asyCore(want)})`, type: want };
   }
   if (v.type === want) return v;
+  // 不定案的重载集（第三十五刀）：目标类型就是定案的依据。挑不出同型的一份是**错**，
+  // 不是"还没做" —— asy 那边报的也是 "no matching variable of name" 那一族。
+  if (v.over !== undefined) {
+    const pick = asyOverPick(L, { v: v }, want);
+    if (pick === null) {
+      let list = '';
+      for (const c of v.over) {
+        const t = asyCandFnType(L, c);
+        list = list === '' ? t : `${list}、${t}`;
+      }
+      return L.err(node, `${what}：要 ${want}，而那个名字的重载里没有同型的一份（有 ${list}）`);
+    }
+    return { code: pick, type: want };
+  }
   if (v.type === 'int' && want === 'real') return { code: `(toreal ${v.code})`, type: 'real' };
   if (want === 'pair' && (v.type === 'int' || v.type === 'real')) return asyToPair(L, v);
   // 用户定义的转换（第二十七刀）：内建那几条不成才轮到它，源类型要一模一样（不串）

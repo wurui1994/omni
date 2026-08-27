@@ -48,6 +48,13 @@ export function asyWriteStmt(L, n) {
       return L.err(a, "write 的实参不能是 null —— null 没有类型，asy 那边报 "
         + "call of function 'write(null)' is ambiguous");
     }
+    // 不定案的重载集同理（第三十五刀）：`write(both)` 在 asy 那边是
+    // "no matching function 'write(<overloaded>)'" 加 "use of variable 'both' is
+    // ambiguous"（量过）—— 没有目标类型可问，所以这里就是错。
+    if (v.over !== undefined) {
+      return L.err(a, `write 的实参不能是一个没定案的重载集（${v.type}）—— asy 那边报 `
+        + "no matching function 'write(<overloaded>)'");
+    }
     // asy 自己也不给结构体印（量过：`no matching function 'write(A)'`）。拦在这一层，
     // 不然漏出去的是核心方言那句 `(tostr E) 只接受 int / real / bool`。
     if (L.isRec(v.type)) {
