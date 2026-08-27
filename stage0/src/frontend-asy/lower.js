@@ -396,6 +396,8 @@ const ASY_STRFN = new Map([
   ['rfind', { params: ['string', 'string'], min: 2, fn: 'asy__srfind', ret: 'int' }],
   ['replace', { params: ['string', 'string', 'string'], min: 3, fn: 'asy__srepl', ret: 'string' }],
   ['erase', { params: ['string', 'int', 'int'], min: 3, fn: 'asy__serase', ret: 'string' }],
+  ['insert', { params: ['string', 'int', 'string'], min: 3, fn: 'asy__sins', ret: 'string' }],
+  ['split', { params: ['string', 'string'], min: 2, fn: 'asy__ssplit', ret: 'string[]' }],
 ]);
 
 /** helper 之间的依赖：发了外层那条，被它调用的也要发。 */
@@ -404,6 +406,8 @@ const ASY_STR_DEPS = new Map([
   ['asy__serase', ['asy__ssub', 'asy__ssubto']],
   ['asy__sfindp', ['asy__ssub', 'asy__ssubto']],
   ['asy__srepl', ['asy__ssub', 'asy__ssubto']],
+  ['asy__sins', ['asy__ssub', 'asy__ssubto']],
+  ['asy__ssplit', ['asy__ssub', 'asy__ssubto', 'asy__sfindp']],
 ]);
 
 /**
@@ -412,8 +416,6 @@ const ASY_STR_DEPS = new Map([
  */
 const ASY_STR_NOPE = new Map([
   ['reverse', "字符串的 reverse（asy 是按字节倒的，而 Omni 的 string 是 UTF-8 字节序列 —— 非 ASCII 倒出来在 C 与 JS 两条腿上不是同一件事）"],
-  ['insert', "字符串的 insert（substr 拼接就够，但 asy 的越界行为还没量全，不猜）"],
-  ['split', '字符串的 split（要 string[] 的返回值，函数返回数组那条路还没走通）'],
 ]);
 
 /** 核心方言的字符串字面量。刻意不用 JSON.stringify：它对控制字符发 \uXXXX，
@@ -694,6 +696,47 @@ const HELPERS = new Map([
             (set r (bin "+" (var r) (ssub (var s) (var i) (int 1))))
             (set i (bin "+" (var i) (int 1)))))))
     (ret (bin "+" (var r) (call asy__ssubto (var s) (var i)))))`],
+  ['asy__sins', `  (fn asy__sins ((s string) (i int) (t string)) string
+    ;; 量过：insert("abc",1,"XY") 是 "aXYbc"、insert("abc",2,"XY") 是 "abXYc"。
+    ;; 越界**什么都不做**（不是追加）：insert("abc",3,"X")、insert("abc",5,"X")、
+    ;; insert("abc",-1,"X") 与 insert("",0,"X") 全是原串。这条是这一刀补的测量 ——
+    ;; 之前 insert 在门外的理由就是"越界行为没量全"。
+    (if (bin "<" (var i) (int 0)) (do (ret (var s))))
+    (if (bin ">=" (var i) (slen (var s))) (do (ret (var s))))
+    (ret (bin "+" (call asy__ssub (var s) (int 0) (var i))
+      (bin "+" (var t) (call asy__ssubto (var s) (var i))))))`],
+  ['asy__ssplit', `  (fn asy__ssplit ((s string) (d string)) (arr string)
+    ;; 量出来的四条：
+    ;;   普通分隔符：不重叠，**保留空字段** —— split("a,,b",",") 是三个元素、
+    ;;     split(",a,",",") 也是三个（两头各一个空串）、split("abc","abc") 是两个空串
+    ;;   找不到 / 空串：整串一个元素（split("",",") 的长度是 1）
+    ;;   分隔符是**空串**：按空格切，并且丢掉空字段 —— split("  a  b  ","") 是 [a,b]，
+    ;;     而 split("a,b,c","") 是整串一个元素。只有**空格**算分隔：量过
+    ;;     split('a\\tb','') 的长度是 1，制表符与换行都不算。
+    (let r (arr string) (anew (arr string) (int 0)))
+    (if (bin "==" (var d) (str ""))
+      (do
+        (let cur string (str ""))
+        (let i int (int 0))
+        (while (bin "<" (var i) (slen (var s)))
+          (do
+            (if (bin "==" (ssub (var s) (var i) (int 1)) (str " "))
+              (do
+                (if (bin "!=" (var cur) (str ""))
+                  (do (apush (var r) (var cur)) (set cur (str "")))))
+              (do (set cur (bin "+" (var cur) (ssub (var s) (var i) (int 1))))))
+            (set i (bin "+" (var i) (int 1)))))
+        (if (bin "!=" (var cur) (str "")) (do (apush (var r) (var cur))))
+        (ret (var r))))
+    (let start int (int 0))
+    (let p int (call asy__sfindp (var s) (var d) (int 0)))
+    (while (bin ">=" (var p) (int 0))
+      (do
+        (apush (var r) (call asy__ssub (var s) (var start) (bin "-" (var p) (var start))))
+        (set start (bin "+" (var p) (slen (var d))))
+        (set p (call asy__sfindp (var s) (var d) (var start)))))
+    (apush (var r) (call asy__ssubto (var s) (var start)))
+    (ret (var r)))`],
 ]);
 
 /**
