@@ -1543,10 +1543,15 @@ class AsyLower {
       }
       const ft = this.type(r.items[1], `struct ${nm} 的字段`);
       if (ft === null) return null;
+      // 函数类型的字段（`fill2 fill2;`，plain_filldraw.asy:93）：方言那边现在收
+      // `(fnty …)` 当字段类型了，五条腿上都是"存一个句柄"。没写默认值就不发 fldset ——
+      // `(cnew …)` 已经把每一格铺成零值了（函数值那一格的零值是空引用，见 recNew）。
       if (!SCALARS.has(ft) && ft !== 'pair' && ft !== 'triple' && !this.isRec(ft)
+          && !asyIsFn(ft)
           && !(asyIsArr(ft) && this.arrElemOk(asyElem(ft)))) {
         return this.nope(r, `struct ${nm} 的 ${ft} 字段（这一刀的字段只有 `
-          + `int/real/bool/string/pair/triple、它们的一维数组，与**前面已经声明过**的 struct）`);
+          + `int/real/bool/string/pair/triple、函数类型、它们的一维数组，`
+          + '与**前面已经声明过**的 struct）');
       }
       for (const d of this.flat(r.items[2], 'decids')) {
         if (!isList(d) || head(d) !== 'decid') return this.err(d, '认不出的字段声明');
@@ -2817,7 +2822,7 @@ class AsyLower {
     // 不是查候选表。放在候选表前面问：asy 那边这个名字在这一层就是个变量，
     // 而 findroot 那种形参正是要遮住同名的文件级函数。
     const lv = this.lookup(nm);
-    if (lv !== null && asyIsFn(lv)) return this.fnValCall(n, nm, lv);
+    if (lv !== null && asyIsFn(lv)) return this.fnValCall(n, nm, lv, `(var ${nm})`);
     const vis = this.visible(nm);
     // 同名的用户/模块函数与内建那一族在这里**一起打分**：asy 那边内建与库里的定义是
     // 同一个重载集（builtin.cc 把内建也塞进那张表），而我们的内建面写死在这个前端里，
@@ -2954,7 +2959,15 @@ class AsyLower {
     const ms = this.visibleMethods(rec, mname);
     if (ms.length === 0) {
       for (const f of rec.fields) {
-        if (f.name === mname) return this.nope(n, `调用一个字段（${recv.type}.${mname} 是 ${f.type}，不是方法）`);
+        if (f.name !== mname) continue;
+        // 字段本身是**函数值**：`b.fn2(4)` 就是通过它间接调（plain_filldraw.asy 里
+        // `filltype.fill2(f,g,p)` 到处是）。方法找不到时才轮到这里 —— asy 那边方法与
+        // 字段同名时方法赢（量过）。
+        if (asyIsFn(f.type)) {
+          return this.fnValCall(n, `${recv.type}.${mname}`, f.type,
+            `(fld ${recv.code} ${mname})`);
+        }
+        return this.nope(n, `调用一个字段（${recv.type}.${mname} 是 ${f.type}，不是方法）`);
       }
       const names = [];
       for (const key of this.units[rec.unit].funcs.keys()) {
@@ -3157,8 +3170,12 @@ class AsyLower {
    * 通过一个函数类型的值调用（`real f(real)` 那个形参上的 `f(x)`）。
    * 函数值没有形参名，所以命名实参与默认值在这里都不存在 —— 与 hir/check.js 的
    * callFnValue 是同一条规矩。实参照签名逐个 coerce（int -> real 那条照旧要走）。
+   *
+   * `callee` 是被调那个**值**的方言文本。裸名字那条传 `(var nm)`，字段那条传
+   * `(fld … f)`（`filltype.fill2(f,g,p)` 那种，plain_filldraw.asy 里到处是）——
+   * `nm` 只用来说话。
    */
-  fnValCall(n, nm, ft) {
+  fnValCall(n, nm, ft, callee) {
     const s = asyFnSplit(ft);
     if (s === null) return this.nope(n, `认不出的函数类型 '${ft}'`);
     const args = this.callArgs(n);
@@ -3166,7 +3183,7 @@ class AsyLower {
     if (args.length !== s.params.length) {
       return this.err(n, `'${nm}' 是 ${ft}，要 ${s.params.length} 个实参，给了 ${args.length} 个`);
     }
-    let code = `(callfn (var ${nm})`;
+    let code = `(callfn ${callee}`;
     let i = 0;
     while (i < args.length) {
       if (args[i].key !== null) {

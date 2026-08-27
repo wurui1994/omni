@@ -895,6 +895,9 @@ class LlvmEmitter {
     if (t.k === 'struct') return `%s_${t.name}`;
     // 内嵌的类（引用语义）：只存一个指针，与裸的类变量同一个表示。
     if (t.k === 'class') return 'ptr';
+    // 函数值字段（闭包）：也只存一个指针 —— 指向那条 `%clo_<n>` 记录，第 0 格是函数指针
+    // （见 closureTypes）。与"类字段"同一条：引用语义，COPY 拷的是句柄。
+    if (t.k === 'fn') return 'ptr';
     throw new OmniError(`${NOPE}结构体字段的类型 ${t.k}：${what}`);
   }
 
@@ -942,6 +945,9 @@ class LlvmEmitter {
     if (t.k === 'vec') return 'zeroinitializer';
     // 内嵌的类：零值是空引用。结构体走不到这里 —— 它的零值是 aggZero 递归铺的。
     if (t.k === 'class') return 'null';
+    // 函数值字段：零值也是空引用（与 fieldTy 里那条对应）。调它是未定义行为，
+    // 与"调一个空的类引用取字段"同一级 —— 那条也没有运行时检查。
+    if (t.k === 'fn') return 'null';
     throw new OmniError(`${NOPE}结构体字段的零值 ${t.k}：${what}`);
   }
 

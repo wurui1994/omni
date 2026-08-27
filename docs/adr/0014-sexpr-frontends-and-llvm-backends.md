@@ -2390,6 +2390,43 @@ struct filltype 的 void(frame,path[],pen) 字段
 string、(vec T N)、(arr T) 或另一个结构体/类"），所以下一刀在方言与后端那一侧，不在前端。
 `import graph;` 还是 189，桶没动。
 
+### 函数类型的字段：三条腿本来就通，只差 LLVM 一行
+
+上一节留下的坎在方言那边。先只把 `(class Holder (f (fnty (int) int)) (n int))` 那条禁令放开，
+拿一份手写的 `.sx` 逐腿量：
+
+```
+run       42
+run-llvm  llvm 后端目前不支持结构体字段的类型 fn：Holder.f
+run-c     42
+interp    42
+```
+
+三条腿一个字没改就通了 —— 因为函数值在 MIR 那一层就是一个句柄，`fldset`/`fld` 搬的是它，
+C 后端与两个解释器都不看字段的"种类"。LLVM 那条腿要显式列出字段的 LLVM 类型，所以补两句：
+`fieldTy` 里 `t.k === 'fn'` 出 `ptr`（与"内嵌的类"同一条：引用语义，存句柄），
+`fieldZero` 出 `null`。
+
+前端这边三处：
+
+* 字段类型的白名单加上 `asyIsFn(ft)`。没写默认值**不发** `fldset` —— `(cnew …)` 已经把每一格
+  铺成零值了，所以"函数值变量说不出零值字面量"那条限制在字段上不构成障碍（那条还留着，
+  钉在 `real[](real[],real[]) g;` 上）。
+* `fnValCall` 原来把被调者写死成 `(var nm)`，多收一个 `callee` 参数：裸名字传 `(var nm)`，
+  字段传 `(fld … f)`。
+* `methodCall` 里"方法找不到"那一支，同名字段是函数值时不再报"调用一个字段"，转 `fnValCall`。
+  顺序是量出来的：方法与字段同名时方法赢。
+
+`tests/asy/cases/50-fnfield.asy` 钉着（含"struct 当实参传进去改字段"那条，验的是引用语义），
+`tests/sexpr/cases/15-fnvalues.sx` 加了字段那一段（含 `fnref` 存进字段、两个名字指同一格）。
+
+`import plain;` 从三条挡路的降到**两**条：
+
+* `plain_paths.asy:3` —— `using interpolate=guide(... guide[]);`，函数类型里的可变形参
+* `plain_strings.asy:260` —— `from collections.map(K=string,V=string) access …`，参数化模块
+
+`plain_filldraw.asy` 整份过了。`import graph;` 还是 189（它卡在 math.asy，与 plain 这条线无关）。
+
 ## 后果与代价
 
 

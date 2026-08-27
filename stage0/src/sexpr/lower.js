@@ -420,9 +420,10 @@ class CoreLowerer {
       const t = this.ty(fd.items[1], `字段 ${nm}.${fn}`);
       if (t === null) return null;
       if (t !== INT && t !== REAL && t !== BOOL && t !== STRING
-          && t.k !== 'vec' && t.k !== 'arr' && t.k !== 'struct' && t.k !== 'class') {
+          && t.k !== 'vec' && t.k !== 'arr' && t.k !== 'struct' && t.k !== 'class'
+          && t.k !== 'fn') {
         return this.err(fd, `字段 ${nm}.${fn}：这一刀的字段只能是 int / real / bool / string、`
-          + `(vec T N)、(arr T) 或另一个结构体/类，这里是 ${coreTypeText(t)}`);
+          + `(vec T N)、(arr T)、(fnty (T...) R) 或另一个结构体/类，这里是 ${coreTypeText(t)}`);
       }
       seen.set(fn, true);
       fields.push({ name: fn, type: t });

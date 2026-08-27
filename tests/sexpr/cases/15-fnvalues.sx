@@ -4,6 +4,10 @@
 ;; 量出来的理由：真 base 在场时 304 个 asy examples 里 203 个第一个撞的就是
 ;; math.asy:446 的 `real findroot(real f(real), …)` —— 函数类型的形参。
 (module
+  ;; 函数值也能当**字段**（asy 那边 plain_filldraw.asy:93 的 `fill2 fill2;` 就是这个形状）。
+  ;; 五条腿上都是"存一个句柄"：LLVM 那边一个 ptr、C 那边闭包结构的指针、两个解释器里就是
+  ;; 那个对象。`(cnew …)` 铺的零值是**空引用**，所以没赋值就调是未定义的 —— 与空类引用同级。
+  (class Holder (f (fnty (int) int)) (n int))
   (fn twice ((x int)) int
     (ret (bin "*" (var x) (int 2))))
   ;; 捕获是**按值**抓的：mkclo 那一刻求一次存进记录，所以循环里造的三个各拿自己那一份。
@@ -48,4 +52,16 @@
     (print (aget (var a) (int 2)))
     ;; 重新赋值：函数值就是一个普通的值
     (set g (mkclo addk (int 1)))
-    (print (callfn (var g) (int 41)))))
+    (print (callfn (var g) (int 41)))
+    ;; 函数值当字段：赋一个闭包进去，再从字段上间接调
+    (let hd Holder (cnew Holder))
+    (fldset (var hd) f (mkclo addk (int 2)))
+    (fldset (var hd) n (int 40))
+    (print (callfn (fld (var hd) f) (fld (var hd) n)))
+    ;; 换成一个普通函数的引用，同一格
+    (fldset (var hd) f (fnref twice))
+    (print (callfn (fld (var hd) f) (fld (var hd) n)))
+    ;; 类是引用语义，所以另一个名字看的是同一格
+    (let hd2 Holder (var hd))
+    (fldset (var hd2) f (mkclo addk (int 100)))
+    (print (callfn (fld (var hd) f) (int 1)))))
