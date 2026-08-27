@@ -578,6 +578,12 @@ class AsyLower {
   /** static 的地方用了实例的东西：asy 自己也拒（量过 "static use of dynamic variable"，退 1），
    *  所以是 err 不是 nope。这一句由调用处在"名字查不着"之后问一遍。 */
   selfStatBad(node, nm) {
+    // struct 体里**不带 static** 的算符重载（第四十刀）：asy 那边它读得着实例成员
+    // （量过印 16），也就是绑住了接收者 —— 那要闭包，还在门外。所以这一条是 nope 不是 err。
+    if (this.self.opNonStat === true) {
+      return this.nope(node, `struct ${this.self.rec.name} 体里不带 static 的算符重载里用`
+        + `实例成员 '${nm}'（asy 收 —— 那份算符绑住了接收者，我们的算符是没有接收者的函数）`);
+    }
     return this.err(node, `'${nm}' 是 struct ${this.self.rec.name} 的实例成员，`
       + `static 的方法里没有接收者，用不了它（asy 那边报 "static use of dynamic variable"）`);
   }

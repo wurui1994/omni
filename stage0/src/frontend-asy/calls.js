@@ -267,7 +267,17 @@ export function asyBuiltinCost(L, nm, raw) {
 export function asyVisible(L, nm) {
   const out = [];
   if (!L.funcs.has(nm)) return out;
-  for (const c of L.funcs.get(nm)) if (c.at <= L.at) out.push(c);
+  for (const c of L.funcs.get(nm)) {
+    if (c.at > L.at) continue;
+    // struct 体里声明的算符重载（第四十刀）：只在**那个 struct 的体里**看得见。
+    // 量过体外是 "no matching function 'operator *(int, V)'" 并退 1（strict/ 钉着）。
+    // 体内还按成员顺序裁 —— 与 visibleMethods 那条 `c.mat <= self.mat` 同一条。
+    if (c.inRec !== undefined) {
+      if (L.self === null || L.self.rec.name !== c.inRec) continue;
+      if (c.mat > L.self.mat) continue;
+    }
+    out.push(c);
+  }
   return out;
 }
 

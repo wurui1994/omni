@@ -3313,6 +3313,35 @@ struct 体里的算符重载、`:657` 的 `var`、`plain.asy:67` 返回函数类
 跑的轴：`tests/asy`（144 passed，47.4s）、`tests/run.js`、`tests/bootstrap`。
 只动 `frontend-asy/lower.js`，tests/sexpr 跳掉 —— 方言与后端没碰。
 
+### struct 体里的算符重载：一张候选表加一条"只在这个体里"
+
+`plain_bounds.asy:111` 的 `private static pathpen operator *(transform, pathpen)`。
+量过（真 asy）四条：
+
+- 体里认（`2 * a` 走到它），**体外不认** —— "no matching function 'operator *(int, V)'"
+  并退 1（进了 `strict/struct-op-outside`）；
+- `static` 与不带 `static` 的都认；
+- 不带 static 的那份体里**读得着实例字段**（印 16）—— 那是绑住了接收者；
+- 体里 `this + 6` 也通（算符的形参吃的是 `this`）。
+
+落地：候选**按算符那个名字**存（不是 `记录名.方法名`），于是一元/二元算符那条解析路
+一字不改；函数本身照 `static` 的方法那样降 —— 没有接收者，符号
+`asy__so_<记录>_<算符>`。可见性另加一条：候选带 `inRec`，`asyVisible` 里要求
+`L.self` 正是那个 struct、并且 `c.mat <= L.self.mat`（与 `visibleMethods` 同一条成员序）。
+
+不带 static 那一份只做到"体里不碰实例成员"为止：碰了就是 `ASY_NOPE`
+（`bad/struct-op-inst-field`），因为要收得对得给它造一个绑接收者的闭包 —— 与"把方法当值
+取出来"是同一件事。诊断走 `selfStatBad` 里新加的 `opNonStat` 一支：不能说
+"static 的方法里没有接收者"（asy 那边这一份根本不是 static），话得说对。
+
+`import plain;` 3 -> **2**（`plain_bounds.asy` 只剩 `:657` 的 `var`；另一条是
+`plain.asy:67` 返回函数类型）。`import graph;` 还是 182。
+
+跑的轴：`tests/asy`（147 passed，92.9s —— 机器上还并着一条 bootstrap）、`tests/run.js`、
+`tests/bootstrap`。只动 `frontend-asy/`（decls.js、calls.js、lower.js），tests/sexpr
+跳掉 —— 方言与后端没碰。
+
+
 
 
 

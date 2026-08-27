@@ -528,8 +528,24 @@ export function asyMethodSig(L, rec, n, mat, at, stat) {
   // 名字里带算符，但调用形态是下标（`v[i]` / `v[i] = x`，见 asyIndex 与赋值那一侧），
   // 重载解析、默认实参、`v.operator [](2)` 这种直呼全跟着白捡。
   const idxOp = nm === 'operator []' || nm === 'operator [=]';
-  if (nm.startsWith('operator ') && !ctor && !idxOp) {
-    return L.nope(n, `struct ${rec.name} 里的算符重载 '${nm}'`);
+  // struct 体里的**算符重载**（第四十刀）：`plain_bounds.asy:111` 的
+  // `private static pathpen operator *(transform, pathpen)`。量过（真 asy）：
+  //   - 体里认（`2 * a` 走到它），**体外不认**（"no matching function 'operator *(int, V)'"，
+  //     退 1 —— strict/ 里钉着）；
+  //   - static 与不带 static 的都认；不带 static 的那份体里还能读实例字段（印 16），
+  //     那是"绑住接收者"，门外（见 selfStatBad 里 opNonStat 那一支）。
+  // 所以它落成：候选表按**算符那个名字**存（于是二元算符那条解析路一字不改），
+  // 函数**没有接收者**，可见性另加一条"只在这个 struct 的体里"（asyVisible 里的 inRec）。
+  const opOv = nm.startsWith('operator ') && !ctor && !idxOp;
+  let opTail = null;
+  if (opOv) {
+    const op = nm.slice('operator '.length);
+    if (ASY_OPBAD.has(op)) {
+      return L.err(n, `'operator ${op}' 不是合法的 asy 声明 —— asy 的语法里就没有这个算符名，`
+        + `那边直接报 "syntax error"（不带 ASY_NOPE：不是还没做）`);
+    }
+    if (!ASY_OPSYM.has(op)) return L.nope(n, `算符 '${op}' 的重载`);
+    opTail = ASY_OPSYM.get(op);
   }
   const ret = L.type(n.items[1], `方法 ${rec.name}.${nm} 的返回类型`);
   const ps = asyFormals(L, n.items[3]);
@@ -541,7 +557,11 @@ export function asyMethodSig(L, rec, n, mat, at, stat) {
   const types = [];
   for (const p of ps) types.push(p.type);
   for (const p of ps) if (p.name === 'this') return L.nope(n, "叫 'this' 的形参");
-  const key = `${rec.name}.${nm}`;
+  // 算符重载按**算符那个名字**存（不是 `记录名.名字`）：一元/二元那条解析路问的就是这张表
+  if (opOv && ps.length !== 1 && ps.length !== 2) {
+    return L.nope(n, `${ps.length} 元的 '${nm}'（算符只有一元与二元）`);
+  }
+  const key = opOv ? nm : `${rec.name}.${nm}`;
   // 一个 struct 里 `operator []` 与 `operator [=]` 各只能有**一个**（asy 自己就拒：量过
   // 报 "multiple operator[] definitions in one struct" / "…operator[=]…"）。所以这两个
   // 名字不是普通的重载集 —— 不裁就是"比 asy 多接受一门语言"，strict/op-index-dup 钉着。
@@ -562,10 +582,15 @@ export function asyMethodSig(L, rec, n, mat, at, stat) {
   if (nm === 'operator []') mtail = 'idx';
   if (nm === 'operator [=]') mtail = 'idxset';
   const msym = ctor ? `asy__ctor_${rec.name}`
-    : `${stat === true ? 'asy__sm_' : 'asy__m_'}${rec.name}_${mtail}`;
+    : (opOv ? `asy__so_${rec.name}_${opTail}`
+      : `${stat === true ? 'asy__sm_' : 'asy__m_'}${rec.name}_${mtail}`);
   const cand = {
     ret: ctor ? rec.name : ret, params: types, ps, node: n, at: -1, dat: at, mat, rec, ctor,
-    sym: msym, base: msym, pfx: '', unit: L.unit.id, stat: stat === true,
+    sym: msym, base: msym, pfx: '', unit: L.unit.id, stat: stat === true || opOv,
+    // 算符重载（第四十刀）：候选在算符那张表里，可见性靠这一条裁 —— 只在这个 struct 的
+    // 体里（见 asyVisible）。不带 static 的那份也当"没有接收者"降，`opNonStat` 只用来
+    // 把"体里用了实例成员"那句诊断说对（asy 收，我们还不收）。
+    inRec: opOv ? rec.name : undefined, opNonStat: opOv && stat !== true,
     // 体里的项序号：正文是第二遍才降的，那时候要靠它裁 struct 体里的 `using`（见 aliasAt）
     abi: L.recAlias === null ? 0 : L.recAlias.bi,
   };
@@ -609,7 +634,7 @@ export function asyMethod(L, rec, cand, at) {
   // static 的方法体里**没有接收者**：`self` 照样开着（同一个 struct 的 static 成员要看得见），
   // 但带上 stat 标记 —— 实例字段与实例方法在这里不可见（量过 asy 报
   // "static use of dynamic variable"，见 strict/static-method-inst）。
-  L.self = { rec, mat: cand.mat, stat: isStat };
+  L.self = { rec, mat: cand.mat, stat: isStat, opNonStat: cand.opNonStat === true };
   L.push();
   if (!isStat) L.declare(cand.node, 'this', rec.name);
   for (const p of ps) L.declare(cand.node, p.name, p.type);
