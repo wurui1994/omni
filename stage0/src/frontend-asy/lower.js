@@ -121,9 +121,14 @@
 // **同价**（打平就是 ambiguous）、而且**不串**（源类型必须一模一样），见 castSig）。
 // **`autounravel`**（第二十八刀：struct 体里带它的声明其实是**文件级**的声明 ——
 // 形参显式、没有 this，可见位置是那个 struct 的位置，见 auMod）。
+// **函数类型**（`real f(real)` 这种形参、`f(v)` 的间接调用、裸函数名当值用 ——
+// 类型全是字符串，所以它就是 `R(P,…)` 那个拼法，见 asyIsFn / fnTypeOf / fnValCall）。
+// **typedef 与 `using`**（别名表 tyAlias：名字 -> 一串 {t, at}，`t` 是已经解析好的类型
+// 字符串，type() 一查就换掉 —— asy 的 typedef 不造新类型，所以"换掉"就是全部语义。
+// 存一串是因为同一个名字可以 typedef 多次，而名字解析是顺序的，见 aliasAt）。
 //
 // 不支持（见到就报错，报错里说清是哪一条）：标准库模块（`import graph;`）、
-// typedef、
+// 函数值类型的**变量声明**（`real g(real) = twice;` —— asy 收，那要 vardec 走 mkclo）、
 // 给切片赋值（`a[0:2] = b`）、
 // 字符串的 `reverse`（asy 是**按字节**倒的，而 Omni 的 string 是 UTF-8 字节序列
 // （ADR-0005）—— 非 ASCII 倒过来在 C 那条腿上是一串坏字节，在 JS 那条腿上要看
@@ -858,6 +863,13 @@ class AsyLower {
     this.mods = new Map();     // 模块别名 -> {unit, at}（import 与 access 都进这张表）
     this.loading = [];         // 正在加载的模块名（认出循环 import）
     this.recVis = new Map();   // 这个单元**看得见**的记录名 -> {rec, at}
+    // typedef 的别名（这个单元看得见的）：名字 -> 一串 {t, at}。`t` 是**已经解析好的**
+    // asy 类型字符串，所以下游一律不知道 typedef 存在过 —— 这也是 asy 自己的语义（别名不是
+    // 新类型，量过：`typedef int myint; int f(int){…} myint n=1; f(n)` 通得过）。
+    // **一串**而不是一个，理由与文件级变量那张表一样：同一个名字可以 typedef 多次，
+    // 而名字解析是顺序的（量过：`typedef int again; again a=1; typedef string again;`
+    // 两句各按自己那一份算），所以用到的地方挑"此处可见的最后一份"。
+    this.tyAlias = new Map();
     this.funcs = new Map();    // 名字 -> {ret, params: 类型名数组}
     this.scopes = [];          // 名字 -> 类型名
     this.used = new Set();     // 用到的 helper
@@ -993,6 +1005,7 @@ class AsyLower {
       funcs: new Map(), globals: new Map(), oinits: new Map(), oiByNode: new Map(),
       casts: new Map(), castByNode: new Map(),
       recVis: new Map(), mods: new Map(), methodDecls: [], callAt: new Map(), at: 0,
+      tyAlias: new Map(),
       auFns: [], bi: null,
     };
     this.units.push(u);
@@ -1007,6 +1020,7 @@ class AsyLower {
     u.casts = this.casts;
     u.castByNode = this.castByNode;
     u.recVis = this.recVis;
+    u.tyAlias = this.tyAlias;
     u.mods = this.mods;
     u.methodDecls = this.methodDecls;
     u.auFns = this.auFns;
@@ -1025,6 +1039,7 @@ class AsyLower {
     this.casts = u.casts;
     this.castByNode = u.castByNode;
     this.recVis = u.recVis;
+    this.tyAlias = u.tyAlias;
     this.mods = u.mods;
     this.methodDecls = u.methodDecls;
     this.auFns = u.auFns;
@@ -1179,9 +1194,15 @@ class AsyLower {
       if (d === null) return this.err(node, `${what}：认不出的数组维数形状`);
       const el = this.plainName(node.items[1]);
       if (el === null) return this.nope(node, '带点的类型名');
-      if (!this.arrElemOk(el)) return this.nope(node, `${el}[] （${ASY_ARRELEM_TEXT}）`);
-      if (this.isRec(el) && !this.recHere(el)) return this.recLate(node, el);
-      let t = el;
+      let eel = el;
+      if (this.tyAlias.has(el)) {
+        const ael = this.aliasAt(el);
+        if (ael === null) return this.aliasLate(node, el);
+        eel = ael.t;
+      }
+      if (!this.arrElemOk(eel)) return this.nope(node, `${eel}[] （${ASY_ARRELEM_TEXT}）`);
+      if (this.isRec(eel) && !this.recHere(eel)) return this.recLate(node, eel);
+      let t = eel;
       let k = 0;
       while (k < d) { t = `${t}[]`; k++; }
       return t;
@@ -1192,6 +1213,12 @@ class AsyLower {
     if (nm === 'void') return 'void';
     if (nm === 'pair') return 'pair';
     if (nm === 'triple') return 'triple';
+    // typedef 的别名。放在内建名后面、记录名前面：asy 那边 `typedef int int;` 是错的，
+    // 而 `typedef` 一个 struct 名的别名是对的，所以顺序只影响诊断说哪一句。
+    if (this.tyAlias.has(nm)) {
+      const al = this.aliasAt(nm);
+      return al === null ? this.aliasLate(node, nm) : al.t;
+    }
     // 记录名（第十四刀）。放在内建名单后面查，与核心方言那边同一条规矩。
     // 查的是**这个单元看得见的**那张表（recVis）：别的模块里的 struct 没 import 进来时
     // 不算类型（量过 asy 报 "no type of name"），所以 records 那张全局表只用来发文本。
@@ -1216,6 +1243,88 @@ class AsyLower {
   recLate(node, nm) {
     return this.err(node, `'${nm}' 在这里还不是一个类型 —— struct ${nm} 声明在后面，`
       + `而 asy 的类型名是顺序解析的（那边报 "no type of name '${nm}'"）`);
+  }
+
+  /** typedef 的名字也是顺序解析的（与 recLate 同一条规矩，只是话不一样） */
+  aliasLate(node, nm) {
+    return this.err(node, `'${nm}' 在这里还不是一个类型 —— typedef ${nm} 写在后面，`
+      + `而 asy 的类型名是顺序解析的（那边报 "no type of name '${nm}'"）`);
+  }
+
+  /** 别名表里 `nm` 在**当前位置**可见的那一份（挑最后一份），此处一份都不可见给 null */
+  aliasAt(nm) {
+    const list = this.tyAlias.get(nm);
+    if (list === undefined) return null;
+    let hit = null;
+    for (const e of list) if (e.at <= this.at) hit = e;
+    return hit;
+  }
+
+  /**
+   * `typedef real realfn(real);` / `typedef int myint;` / `using X = real(real);`
+   * -> 往别名表里记一条。
+   *
+   * asy 的 typedef **不造新类型**，只给一个已有类型起名（量过：`typedef int myint;`
+   * 之后 `int f(int)` 收 `myint` 的实参，`write(myint)` 那种事根本没有）。所以这里存的是
+   * **解析好的类型字符串**，type() 一查就换掉，下游（重载挑选、asyCore、零值表）
+   * 一个字都不用改 —— 这正是"类型全是字符串"那条设计付的第二次利息。
+   *
+   * 语法上 typedef 借的是 vardec 那条产生式（camp.y 就这么写的），所以名字藏在 decid 里：
+   * `decidstart` 是普通别名（后面可以跟 `[]`），`fundecidstart` 是函数类型的别名 ——
+   * `graph_splinetype.asy` 的 `typedef real[] splinetype(real[], real[]);` 就是后者，
+   * 量过它是真 base 在场时 examples 的第一名（143 份）。
+   */
+  typeDec(n, at) {
+    const h = head(n);
+    if (h === 'typedec-using') {
+      const start = n.items[1];
+      const base = this.type(n.items[2], 'using');
+      if (base === null) return null;
+      return this.aliasOne(start, base, at);
+    }
+    const v = n.items[1];
+    if (!isList(v) || head(v) !== 'vardec') return this.err(n, '认不出的 typedef 形状');
+    const base = this.type(v.items[1], 'typedef');
+    if (base === null) return null;
+    for (const d of this.flat(v.items[2], 'decids')) {
+      if (!isList(d) || head(d) !== 'decid') return this.err(d, '认不出的 typedef 项');
+      // `typedef int myint = 3;` 语法上过得去（借的是 vardec），asy 那边报错。
+      if (d.items.length > 2) return this.err(d, 'typedef 后面不能带初值');
+      if (this.aliasOne(d.items[1], base, at) === null) return null;
+    }
+    return true;
+  }
+
+  /** 一条别名项。`start` 是 decidstart（可带 `[]`）或 fundecidstart（函数类型） */
+  aliasOne(start, base, at) {
+    if (!isList(start)) return this.err(start, '认不出的 typedef 项');
+    const nm = isAtom(start.items[1]) ? start.items[1].value : null;
+    if (nm === null) return this.err(start, 'typedef 少了名字');
+    if (SCALARS.has(nm) || nm === 'pair' || nm === 'triple' || nm === 'void') {
+      return this.err(start, `'${nm}' 是内建类型名，不能当 typedef 的名字`);
+    }
+    if (this.recVis.has(nm)) return this.nope(start, `typedef 的名字与 struct '${nm}' 撞了`);
+    let t = base;
+    if (head(start) === 'fundecidstart') {
+      t = this.fnTypeOf(base, start.items[2], start);
+      if (t === null) return null;
+    } else if (head(start) === 'decidstart') {
+      if (start.items.length > 2) {
+        const d = this.dimsDepth(start.items[2]);
+        if (d === null) return this.nope(start, 'typedef 的名字后面那串东西');
+        if (!this.arrElemOk(t)) return this.nope(start, `${t}[] （${ASY_ARRELEM_TEXT}）`);
+        let k = 0;
+        while (k < d) { t = `${t}[]`; k++; }
+      }
+    } else {
+      return this.err(start, '认不出的 typedef 项');
+    }
+    if (base === 'void' && t === 'void') return this.err(start, 'typedef 一个 void');
+    // 同名再 typedef 一次：asy 收（后面那句起换成新的那一份），所以存的是一串。
+    const list = this.tyAlias.has(nm) ? this.tyAlias.get(nm) : [];
+    list.push({ t: t, at: at });
+    this.tyAlias.set(nm, list);
+    return true;
   }
 
   /** 别的模块里的 struct，但这个文件没把它 import 进来（asy 那边也是 "no type of name"） */
@@ -3204,12 +3313,14 @@ class AsyLower {
     for (const d of this.flat(n.items[2], 'decids')) {
       if (!isList(d) || head(d) !== 'decid') return this.err(d, '认不出的声明项');
       const start = d.items[1];
-      // `int f() = a.get;`：**函数值**类型的变量声明（把函数或方法取出来当值）。
-      // asy 收（量过：那句印 1 —— 方法取出来是绑住接收者的闭包），我们不收：核心方言里
-      // 函数不是值，绑接收者要闭包。`tests/asy/bad/fn-value.asy` 钉着这一条。
+      // `int f() = a.get;`：**函数值**类型的变量声明写成"形参表跟在名字后面"的那个拼法。
+      // 这一刀不收这个拼法（asy 收，量过：那句印 1 —— 方法取出来是绑住接收者的闭包，
+      // 而我们的方法是"多一个 this 形参的普通函数"）。`tests/asy/bad/fn-value.asy` 钉着。
+      // 注意：**经 typedef 的**同一件事是通的（`typedef real f(real); f g = twice;` ——
+      // 那时类型在 type() 里就成形了，vardec 见到的是 decidstart），拦的只是这个拼法。
       if (isList(start) && head(start) === 'fundecidstart') {
-        return this.nope(start, '函数值类型的变量声明（`int f() = …`，比如把方法取出来当值 ——'
-          + ' 那要闭包：核心方言里函数不是值）');
+        return this.nope(start, '函数值类型的变量声明写成 `int f() = …`（形参表跟在名字后面）'
+          + ' —— typedef 一个函数类型再声明是通的');
       }
       if (!isList(start) || head(start) !== 'decidstart') return this.err(start, '认不出的声明项');
       // `real a[];`：维度写在名字后面。`real a[][]` 也收（多维数组这一刀），
@@ -3231,9 +3342,23 @@ class AsyLower {
       // 构造调用 `A(…)`）量过不参与这一句，而换掉它的**文件级** `A operator init()`
       // 还在门外（funcSig 里拦着，`bad/ctor-toplevel` 钉着）。
       let init = null;
-      if (this.isRec(t)) init = this.recInit(start, t);
-      else init = asyIsArr(t) ? `(anew ${asyCore(t)} (int 0))` : ZERO.get(t);
-      if (init === null) return null;
+      if (this.isRec(t)) {
+        init = this.recInit(start, t);
+        if (init === null) return null;
+      } else if (asyIsFn(t)) {
+        // 函数值的零值是**空引用**，而核心方言的 `(let …)` 一定要一个初值表达式 ——
+        // 那个"空函数值"的字面量方言里还没有（`(global f (fnty …))` 不用写：零值是后端
+        // 给的，`tests/sexpr/bad/fn-null` 走的就是那条）。所以带初值的收（量过五条腿
+        // 都对），不带初值的先拦住 —— 不拦就把 JS 的 undefined 拼进方言文本里了。
+        if (d.items[2] === undefined) {
+          return this.nope(start, `没有初值的函数值变量（\`${t} g;\` —— 它的零值是空引用，`
+            + '核心方言的 let 还说不出那个字面量）');
+        }
+        init = '';
+      } else {
+        init = asyIsArr(t) ? `(anew ${asyCore(t)} (int 0))` : ZERO.get(t);
+        if (init === undefined) return this.nope(start, `${t} 的变量声明（这一刀给不出它的零值）`);
+      }
       if (d.items[2] !== undefined) {
         // `T[] a = {1,2,3}`：花括号初值自己没有类型，元素类型从左边的声明来
         const raw = d.items[2];
@@ -3640,6 +3765,16 @@ class AsyLower {
       if (key === undefined) continue;
       if (key !== nm) { this.nope(node, `给 import 进来的 struct '${nm}' 改名`); continue; }
       if (!this.recVis.has(key)) this.recVis.set(key, { rec: e.rec, at: at });
+    }
+    // typedef 的别名跟着 import 一起进来（asy 那边也是：`import graph;` 之后
+    // `splinetype` 就是个类型名了）。改名那种写法（`from m access X as Y;`）不收 ——
+    // 与上面 struct 那一条同一个理由：别名的名字在这一刀不参与重命名。
+    for (const [nm, e] of u.tyAlias) {
+      const key = only === null ? nm : only.get(nm);
+      if (key === undefined) continue;
+      if (key !== nm) { this.nope(node, `给 import 进来的 typedef '${nm}' 改名`); continue; }
+      // 位置一律按 import 那一行算（与 recVis 同一条），所以只带**模块里最后那一份**
+      if (!this.tyAlias.has(key)) this.tyAlias.set(key, [{ t: e[e.length - 1].t, at: at }]);
     }
     // 用户定义的转换（第二十七刀）：`import m;` 把它们一起带进来 —— 它们不挂在某个名字上，
     // 所以 `only`（`from m access f, g;` 的那张改名表）管不到它们，那种写法这边就不并。
@@ -4300,6 +4435,7 @@ class AsyLower {
       if (!isList(r)) continue;
       this.at = off + i;
       if (head(r) === 'recorddec') this.recordDec(r, off + i);
+      else if (head(r) === 'typedec' || head(r) === 'typedec-using') this.typeDec(r, off + i);
       else if (ASY_MODSTM.has(head(r))) this.modStmt(r, off + i);
     }
     for (let i = 0; i < rs.length; i++) {
@@ -4369,6 +4505,7 @@ class AsyLower {
       if (!isList(r)) continue;
       if (head(r) === 'fundec') continue;
       if (head(r) === 'recorddec') continue;      // 声明遍收过了
+      if (head(r) === 'typedec' || head(r) === 'typedec-using') continue;   // 同上（只往别名表里记一条）
       if (ASY_MODSTM.has(head(r))) continue;      // 同上（没做的那几种在那边报过了）
       const s = this.stmt(r, 'void');
       if (s === null) continue;
@@ -4522,6 +4659,7 @@ export class AsySession {
         funcs: copyAsyFuncs(u.funcs), globals: new Map(u.globals), recVis: new Map(u.recVis),
         mods: new Map(u.mods), oinits: new Map(u.oinits), oiByNode: new Map(u.oiByNode),
         casts: new Map(u.casts), castByNode: new Map(u.castByNode), at: u.at,
+        tyAlias: new Map(u.tyAlias),
       },
       records: new Map(l.records), recInits: new Map(l.recInits), byKey: new Map(l.byKey),
       gdecls: [...l.gdecls], wraps: [...l.wraps], wrapNames: new Map(l.wrapNames),
@@ -4552,6 +4690,7 @@ export class AsySession {
     u.funcs = s.u0.funcs;
     u.globals = s.u0.globals;
     u.recVis = s.u0.recVis;
+    u.tyAlias = s.u0.tyAlias;
     u.mods = s.u0.mods;
     u.oinits = s.u0.oinits;
     u.oiByNode = s.u0.oiByNode;
@@ -4563,6 +4702,7 @@ export class AsySession {
     l.funcs = u.funcs;
     l.globals = u.globals;
     l.recVis = u.recVis;
+    l.tyAlias = u.tyAlias;
     l.mods = u.mods;
     l.oinits = u.oinits;
     l.oiByNode = u.oiByNode;

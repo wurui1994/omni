@@ -2045,6 +2045,38 @@ asy 前端的类型系统全是**字符串**（`real[]`、`real(int,string)`）�
 还在门外的是**函数值类型的变量声明**（`real g(real) = twice;`，`bad/fn-value` 钉着）：
 asy 收，而且方法取出来是绑住接收者的闭包，那要 `vardec` 走 `(mkclo …)`。
 
+### typedef：别名表，一张表就够
+
+`graph_splinetype.asy` 的 `typedef real[] splinetype(real[], real[]);` 接着上面那一刀 ——
+语法早就在（camp.y 里 typedef 借的就是 vardec 那条产生式，所以名字藏在 `decid` 里：
+`decidstart` 是普通别名、`fundecidstart` 是函数类型的别名），缺的只是**语义上没有这张表**。
+
+加的是 `tyAlias`：逐单元的一张 `名字 -> 一串 {t, at}`，`t` 是**已经解析好的 asy 类型字符串**。
+于是 `type()` 一查就换掉，下游（重载挑选、`asyCore`、零值表、helper 名字）一个字都不用改 ——
+这是"类型全是字符串"那条设计付的第三次利息。asy 的 typedef 本来就不造新类型（量过：
+`typedef int myint;` 之后 `int f(int)` 收 `myint` 的实参），所以"换掉"就是全部语义。
+
+两处踩到的：**存一串而不是一个** —— 同一个名字可以 typedef 多次，而名字解析是顺序的
+（量过 `typedef int again; again a=1; typedef string again; again b="two";` 两句各按自己
+那一份算），这与文件级变量那张表是同一个形状；以及位置那一刀（`aliasAt` 挑"此处可见的
+最后一份"，一份都不可见时报 `aliasLate`）—— 不裁就比 asy 多接受一门语言，
+`strict/typedef-fwd` 钉着。`using X = T;` 那条产生式落在同一张表上，顺手也就通了。
+
+量出来的：`graph_splinetype.asy` 的第一个坎从 `splinetype`（那句 typedef 自己）挪到了
+同一个文件的第 244 行 `guide hermite(…)` —— 前进了 240 行，但**examples 的计数没动**
+（还是 143 份撞它），因为下一个坎是绘图层的 `guide`。真 base 那 304 个 examples 里
+能整份降下来的仍然只有 2 份。这一刀的价值在"路又通了一段"，不在计数。
+
+顺出来的一件与一个坑。顺出来的：**函数值类型的变量**经 typedef 就通了
+（`typedef real realfn(real); realfn h = twice; h = halve;` 五条腿都对）—— 因为那时
+类型在 `type()` 里就成形了，`vardec` 见到的是普通的 `decidstart`。裸的
+`real f(real) = twice;` 那个拼法还是 `nope`（`bad/fn-value` 钉着，真 base 里量过没人这么写）。
+坑：`vardec` 的零值原来是 `ZERO.get(t)`，而函数类型不在那张表里 —— 拿到 `undefined`
+之后那句 `if (init === null)` 拦不住，于是 `(let g (fnty (real) real) undefined)` 这行
+字面把 JS 的 `undefined` 拼进了方言文本。现在没初值的函数值变量明确拦住（它的零值是
+空引用，而 `(let …)` 一定要一个初值表达式，方言里还没有那个字面量），
+非函数类型的零值也补了一句 `undefined` 的守卫。
+
 ## 后果与代价
 
 - **依赖 LLVM**：本机 `libLLVM.dylib` 157MB。产物变大，但仍然自带执行器、
