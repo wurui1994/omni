@@ -54,31 +54,45 @@ export function asyAuMod(L, n) {
  * struct 体里的 `static T n = …`：登记一个**文件级变量**（符号名带上记录名），并记进
  * `rec.statics`。它不占成员槽 —— 语义见 stMod 的注释（量出来的）。
  * 初值不在这里发：由 bodyPass 走到那个 recorddec 时交给 staticInit，位置就是 struct 的位置。
+ *
+ * `au` 为真时这一句是 `autounravel T n = …`（第三十四刀）。量过它与 static **只差一条**：
+ * 那个名字在 struct 之后的**文件级**也裸着可见。`autounravel int k = 7;` 之后
+ * `write(k)` 印 7、`S s; write(s.k)` 也印 7、`k = 9;` 之后 `write(k)` 印 9 ——
+ * 同一格。所以实现就是 static 那一份再往 `L.globals` 里挂一个同一个 `g`。
+ * `collections/iter.asy:42/44` 靠这条。
  */
-export function asyStaticDec(L, rec, r, at) {
-  const t = L.type(r.items[1], `struct ${rec.name} 的 static 字段`);
+export function asyStaticDec(L, rec, r, at, au) {
+  const what = au === true ? 'autounravel' : 'static';
+  const t = L.type(r.items[1], `struct ${rec.name} 的 ${what} 字段`);
   if (t === null) return null;
   if (!SCALARS.has(t) && t !== 'pair' && t !== 'triple' && !L.isRec(t)
       && !(asyIsArr(t) && L.arrElemOk(asyElem(t)))) {
-    return L.nope(r, `struct ${rec.name} 的 static ${t} 字段（这一刀的全局量只收 `
+    return L.nope(r, `struct ${rec.name} 的 ${what} ${t} 字段（这一刀的全局量只收 `
       + 'int/real/bool/string/pair/triple、struct，与它们的一维数组）');
   }
   if (rec.statics === undefined) rec.statics = new Map();
   for (const d of L.flat(r.items[2], 'decids')) {
-    if (!isList(d) || head(d) !== 'decid') return L.err(d, '认不出的 static 字段声明');
+    if (!isList(d) || head(d) !== 'decid') return L.err(d, `认不出的 ${what} 字段声明`);
     const start = d.items[1];
     if (!isList(start) || head(start) !== 'decidstart' || start.items.length !== 2) {
-      return L.nope(start, '带维度或形参表的 static 字段名');
+      return L.nope(start, `带维度或形参表的 ${what} 字段名`);
     }
     const nm = isAtom(start.items[1]) ? start.items[1].value : null;
-    if (nm === null) return L.err(start, 'static 字段少了名字');
+    if (nm === null) return L.err(start, `${what} 字段少了名字`);
     for (const f of rec.fields) {
       if (f.name === nm) return L.err(start, `'${nm}' 在 struct ${rec.name} 里已经是字段了`);
     }
-    if (rec.statics.has(nm)) return L.err(start, `static 字段 '${nm}' 重复声明`);
+    if (rec.statics.has(nm)) return L.err(start, `${what} 字段 '${nm}' 重复声明`);
     const g = { sym: `asy__sf${L.gdecls.length}_${rec.name}_${nm}`, type: t, at, ok: true };
     L.gdecls.push(g);
     rec.statics.set(nm, g);
+    // autounravel：同一格再往文件级挂一个名字。位置是 struct 的位置，所以写在 struct
+    // 前面的地方看不见它（与 autounravel 的函数同一条规则，量过）。
+    if (au === true) {
+      const list = L.globals.has(nm) ? L.globals.get(nm) : [];
+      list.push(g);
+      L.globals.set(nm, list);
+    }
   }
   return true;
 }
@@ -97,7 +111,9 @@ export function asyStaticInit(L, n, at) {
   L.at = at;
   for (const item of L.flat(n.items[2], 'block')) {
     const r = asyUnwrapMod(L, item);
-    if (!isList(r) || head(r) !== 'vardec' || !asyStMod(L, item)) continue;
+    if (!isList(r) || head(r) !== 'vardec') continue;
+    // `static` 与 `autounravel` 的 vardec 都登记在 rec.statics 里，初值也都从这里发
+    if (!asyStMod(L, item) && !asyAuMod(L, item)) continue;
     for (const d of L.flat(r.items[2], 'decids')) {
       if (!isList(d) || head(d) !== 'decid') continue;
       const start = d.items[1];

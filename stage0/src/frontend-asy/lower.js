@@ -120,7 +120,8 @@
 // 只管 `(T) x`。它原来在门外，理由是会改**重载解析的打分**；量清了才收：跟内建提升
 // **同价**（打平就是 ambiguous）、而且**不串**（源类型必须一模一样），见 castSig）。
 // **`autounravel`**（第二十八刀：struct 体里带它的声明其实是**文件级**的声明 ——
-// 形参显式、没有 this，可见位置是那个 struct 的位置，见 auMod）。
+// 形参显式、没有 this，可见位置是那个 struct 的位置，见 auMod。第三十四刀补上**变量**：
+// `autounravel T n = …` 与 `static` 只差"名字在文件级也裸着可见"这一条，见 staticDec）。
 // **函数类型**（`real f(real)` 这种形参、`f(v)` 的间接调用、裸函数名当值用、
 // 以及函数值类型的**变量**（`real f(real) = twice;` 与 typedef 拼的那一份走同一条路）——
 // 类型全是字符串，所以它就是 `R(P,…)` 那个拼法，见 asyIsFn / fnTypeOf / fnValCall）。
@@ -982,8 +983,14 @@ class AsyLower {
       // `autounravel`（第二十八刀）：这个成员其实是**文件级**声明 —— 交给 sig，
       // 正文攒在 auFns 里跟文件级函数一起发。它不占成员槽（不是字段也不是方法）。
       if (asyAuMod(this, item)) {
+        // `autounravel T n = …`（第三十四刀）：与 static 的字段是同一格，只是名字在
+        // struct 之后的文件级也裸着可见。量过（见 staticDec 的注释）。
+        if (head(r) === 'vardec') {
+          if (asyStaticDec(this, rec, r, at, true) === null) return null;
+          continue;
+        }
         if (head(r) !== 'fundec') {
-          this.nope(r, `autounravel 的 '${head(r)}'（这一刀只有 autounravel 的函数与算符）`);
+          this.nope(r, `autounravel 的 '${head(r)}'（这一刀有 autounravel 的函数、算符与字段）`);
           return null;
         }
         asySig(this, r, at);

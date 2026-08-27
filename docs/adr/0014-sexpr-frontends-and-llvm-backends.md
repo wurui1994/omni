@@ -2877,6 +2877,47 @@ return、实参）、`asyPromote`（`x == null` 的类型从另一边来）、`f
 `tests/run.js`（91 passed，10.2s）、`tests/asy`（122 passed，32.4s）、
 `tests/bootstrap`（60 passed）。前六刀只动 `frontend-asy/`，跳掉 sexpr 与 run.js 是对的。
 
+### `autounravel` 的变量：与 `static` 只差一条，`bad/au-var` 那面墙拆掉
+
+`import plain;` 的那一条卡在 `collections/iter.asy:42`。量出来的语义很省事
+（`asy -noV`，struct 名故意不叫 `S`，见下）：
+
+```
+struct Box { static int a = 1; autounravel int b = 2; int id = 0; }
+Box.a  -> 1     Box.b -> 2     b -> 2
+Box q; q.a -> 1   q.b -> 2
+Box.b = 5; b -> 5     b = 6; Box.b -> 6
+```
+
+也就是说 `autounravel T n = …` 与 `static T n = …` 是**同一格**，只差"那个名字在 struct
+之后的文件级也裸着可见"。所以实现就是 `asyStaticDec` 多一个 `au` 形参：登记照旧
+（`rec.statics` + `L.gdecls`），`au` 为真时再把**同一个** `g` 挂进 `L.globals`，`at` 用
+struct 的位置 —— 于是"写在 struct 前面看不见"这条规则白捡（量过 asy 报
+"no matching variable 'k'"，我们报"声明在后面"）。初值那半边只改了一个过滤条件：
+`asyStaticInit` 原先只收 `asyStMod`，现在 `static` 与 `autounravel` 都收。
+
+`bad/au-var` 提上来变成 `cases/60-autounravel-var.asy` 的最后一段（变量与函数的
+autounravel 混在同一个 struct 里），`bad/` 里那两个文件删掉 —— 与 `bad/scale` 那次同一个
+做法。新的 case 覆盖三条访问路径（类型名限定 / 裸名字 / 实例限定是同一格）、
+四种类型（string/real/数组/记录）、零初始化，以及方法体里的读写。
+
+**一处自我更正**：量的过程里我先用 `struct S`，看到 `S.a` 被 asy 拒（"no matching
+variable 'S.a'"），一度以为**我们比 asy 收得多**、`statQual` 那条路是错的，正要去删。
+换成 `Box` 再量就通了 —— `S` 是 base 的 `plain_constants.asy` 里的**南**那个方向常量，
+`S.a` 解析到的是那个 pair 变量。48-static.asy 的注释里正写着这个坑，这次真踩了一次。
+没有旧洞，`statQual` 是对的。
+
+`import plain;` 还是 1，但墙在**同一行内**往前挪了：`iter.asy:42` 现在报的是
+"带维度或形参表的 autounravel 字段名" —— 那一行是
+`autounravel Iterable_T operator cast(T[] items) = Iterable_T;`，形状是"声明一个函数类型的
+名字、用一个重载集当初值"，也就是 `bad/overload-value-init` 钉着的那条。`import graph;`
+还是 184（graph 不走 collections/）。
+
+跑的轴：`tests/asy`（122 passed，40.8s）、`tests/bootstrap`（60 passed）。这一刀只动
+`frontend-asy/`（decls.js、lower.js），没碰核心方言，所以 `tests/sexpr` 与 `tests/run.js`
+跳掉。
+
+
 
 ## 后果与代价
 
