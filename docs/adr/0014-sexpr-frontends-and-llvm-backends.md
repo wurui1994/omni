@@ -3161,6 +3161,36 @@ asy 的 struct 体其实就是一个 **block**。量出来的四条：
 跑的轴：`tests/asy`（137 passed，45.5s）、`tests/bootstrap`（60 passed）。只动
 `frontend-asy/lower.js`，tests/sexpr 与 tests/run.js 跳掉。
 
+### 函数值的数组：方言里缺的只有一句 `(arr (fnty …))`
+
+这一刀在**方言**里，不在前端。`plain_picture.asy:95` 的 `boundRoutine[] bound;`
+（`boundRoutine` 是 `void(…)` 的 typedef）是 plain 里躲不开的一族。
+
+表示上它与**类元素**是同一档：格子里躺一个句柄（C 侧 `omni_fn` 就是一个指针，步长 8），
+所以走 `arrIsBlob` 那条按字节的路，零值是空引用（`NullFn`）。四处改动：
+
+- `sexpr/lower.js` 的 `ty`：`(arr 元素)` 认 `(fnty …)`；
+- `hir/types.js` 的 `arrIsBlob`：加 `fn`；
+- `backend-llvm` 的 `arrRep` 与字段 new 那两处 8 字节判断（另外三条腿一行没动 ——
+  JS 与两个解释器本来就是类型擦除的，run-c 走 `cArrOps`/`arrIsBlob` 那条通用路）。
+
+前端这边两处：`arrElemOk` 收函数类型，以及 `fs[0](5)` —— 被调的是**下标出来的那一格**。
+后者只认 `subscript` 这一种形状：求值有副作用（诊断、前置语句），所以不去"先试着求一遍
+看看是不是函数类型"。
+
+量出来的一条**差别**（写在 `cases/69-fn-array.asy` 里，不假装它不存在）：
+`F[] fs2 = new F[1]; fs2[0] == null` 在 asy 那边是**运行期**错误
+（"read uninitialized value from array at index 0"），我们铺的是零值（空引用）所以是
+`true`。与 `int[] r = null; r == null` 那条（`59-null.asy` 记着的）同一族 ——
+`new T[n]` 在 asy 那边铺的是"没初始化"，这一层的差别还在门外。
+
+`import plain;` 7 -> **6**，`import graph;` 183 -> **182**。
+
+跑的轴：`tests/sexpr`（52 passed，15.6s）、`tests/run.js`（91 passed，16.1s）、
+`tests/asy`（138 passed，52.9s）、`tests/bootstrap`（60 passed）——
+这一刀动了方言与 LLVM 后端，所以四条轴一条都不能跳。
+
+
 
 
 

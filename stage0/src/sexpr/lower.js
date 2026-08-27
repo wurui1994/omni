@@ -161,6 +161,14 @@ class CoreLowerer {
         const e = this.ty(en, what);
         return e === null ? null : arrType(e);
       }
+      // **函数值的数组**（第三十七刀）：格子里躺一个函数句柄（C 侧是 `omni_fn`，一个指针），
+      // 与类元素同一档 —— 走 arrIsBlob 那条按字节的路，零值是空引用（NullFn）。
+      // 量出来的理由：`plain_picture.asy:95` 的 `boundRoutine[] bound;`
+      // （boundRoutine 是 `void(…)` 的 typedef），plain 里这一族躲不开。
+      if (isList(en) && head(en) === 'fnty') {
+        const e = this.ty(en, what);
+        return e === null ? null : arrType(e);
+      }
       const nm = isAtom(en) ? en.value : null;
       if (nm !== null && this.classes.has(nm)) return arrType(this.classes.get(nm));
       if (nm !== null && this.structs.has(nm)) {

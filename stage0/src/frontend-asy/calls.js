@@ -69,6 +69,17 @@ export function asyCall(L, n) {
       return asyFnValCall(L, n, qn, sq.type, `(var ${sq.sym})`);
     }
   }
+  // `fs[0](5)`：被调的是**下标出来的那一格**（第三十七刀，函数值的数组那一族）。
+  // 只认下标这一种形状 —— 求值有副作用（诊断、前置语句），所以不去"先试着求一遍看看
+  // 是不是函数类型"，只在语法上就认得出的位置上问。
+  if (isList(callee) && head(callee) === 'subscript') {
+    const fv = L.expr(callee);
+    if (fv === null) return null;
+    if (!asyIsFn(fv.type)) {
+      return L.err(n, `这一格是 ${fv.type}，不是函数，调不了`);
+    }
+    return asyFnValCall(L, n, '下标出来的那一格', fv.type, fv.code);
+  }
   if (nm === null) return L.nope(n, '调用一个不是普通名字的东西（函数值、方法、算符名）');
   if (nm === 'write') return L.err(n, `${ASY_NOPE}：write 出现在表达式位置（它是语句）`);
   // 方法体里的裸方法名（第二十刀）：量过 struct 的成员**遮住**同名的文件级函数

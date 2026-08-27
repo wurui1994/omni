@@ -1,0 +1,31 @@
+;; 函数值的数组（第三十七刀）。方言这边缺的只有一句话：`(arr (fnty …))` 以前不收。
+;;
+;; 量出来的理由：`plain_picture.asy:95` 的 `boundRoutine[] bound;`（boundRoutine 是
+;; `void(…)` 的 typedef），plain 里这一族躲不开。asy 那边 `typedef int F(int); F[] fs;`
+;; 也直接就通（量过 `fs[0](5)` 是 10）。
+;;
+;; 表示上它与**类元素**是同一档：格子里躺一个句柄（C 侧 `omni_fn` 就是一个指针，
+;; 步长 8），所以走 arrIsBlob 那条按字节的路，零值是空引用（NullFn）——
+;; 三处改动就是 sexpr/lower.js 的 ty、hir/types.js 的 arrIsBlob、
+;; backend-llvm 的 arrRep/anew 那两处 8 字节判断。
+(module
+  (fn twice ((x int)) int (ret (bin "*" (var x) (int 2))))
+  (fn addc ((x int)) int (ret (bin "+" (var x) (int 100))))
+  ;; 函数值的数组能当形参传，格子里的那份能直接调
+  (fn apply2 ((fs (arr (fnty (int) int))) (v int)) int
+    (ret (bin "+" (callfn (aget (var fs) (int 0)) (var v))
+                  (callfn (aget (var fs) (int 1)) (var v)))))
+  (main
+    (let fs (arr (fnty (int) int)) (anew (arr (fnty (int) int)) (int 2)))
+    (aset (var fs) (int 0) (fnref twice))
+    (aset (var fs) (int 1) (fnref addc))
+    (print (callfn (aget (var fs) (int 0)) (int 5)))
+    (print (callfn (aget (var fs) (int 1)) (int 5)))
+    (print (call apply2 (var fs) (int 5)))
+    ;; apush 也走同一格（长度跟着涨）
+    (apush (var fs) (fnref twice))
+    (print (alen (var fs)))
+    (print (callfn (aget (var fs) (int 2)) (int 7)))
+    ;; 空引用：anew 铺出来的那一格就是它，写得出来也比得了
+    (let empty (arr (fnty (int) int)) (anew (arr (fnty (int) int)) (int 1)))
+    (print (bin "==" (aget (var empty) (int 0)) (null (fnty (int) int))))))

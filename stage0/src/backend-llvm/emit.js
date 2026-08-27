@@ -914,7 +914,7 @@ class LlvmEmitter {
     // 长度 0 时 blob_new **不会**碰零值那个指针（omni_arr.c 里那个 memcpy 循环跑 n 次），
     // 所以这里传 null，不为它开一块 alloca —— 开的话还要在入口块预扫一遍 NEW，
     // 而这条路上零值本来就没人读。
-    if (t.elem.k === 'vec' || t.elem.k === 'class' || t.elem.k === 'arr') {
+    if (t.elem.k === 'vec' || t.elem.k === 'class' || t.elem.k === 'arr' || t.elem.k === 'fn') {
       const esz = t.elem.k === 'vec' ? t.elem.lanes * 8 : 8;
       this.needArrBlob = true;
       this.line(`  ${dst} = call ptr @omni_arr_blob_new(i64 0, i64 ${esz}, ptr null)`);
@@ -1103,7 +1103,8 @@ class LlvmEmitter {
     // **结构体元素还不收** —— 那是值语义，格子里躺的是内容，于是 anew/aset/apush 三处都要
     // 按元素类型拷一份，而 JS 与解释器那两条腿的 `arrCopy` 是类型擦除的（只认
     // Array.isArray），拷不动一个普通对象。
-    if (el.k === 'class' || el.k === 'arr') return { el, blob: true, ety: 'ptr', esz: 8 };
+    // 函数值元素（第三十七刀）：C 侧是 `omni_fn`，同样是一个指针，所以与类元素同一档。
+    if (el.k === 'class' || el.k === 'arr' || el.k === 'fn') return { el, blob: true, ety: 'ptr', esz: 8 };
     return { el, blob: false };
   }
 

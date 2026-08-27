@@ -910,10 +910,12 @@ class AsyLower {
   }
 
   /** `el` 能当数组元素吗（第十九刀起记录也能：asy 的 struct 是引用类型，`A[]` 是一串句柄；
-   *  多维数组这一刀起数组自己也能 —— 格子里躺的同样是句柄） */
+   *  多维数组这一刀起数组自己也能 —— 格子里躺的同样是句柄；第三十七刀起**函数值**也能：
+   *  方言那边 `(arr (fnty …))` 通了，量出来的理由是 plain_picture.asy:95 的
+   *  `boundRoutine[] bound;`） */
   arrElemOk(el) {
     if (asyIsArr(el)) return this.arrElemOk(asyElem(el));
-    return ASY_ARRELEM.has(el) || this.isRec(el);
+    return ASY_ARRELEM.has(el) || this.isRec(el) || asyIsFn(el);
   }
 
   /** `(dims)` 是 1 层，`(dims+ X)` 是 X 再加一层。认不出来给 null。 */
