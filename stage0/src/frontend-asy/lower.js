@@ -1025,27 +1025,36 @@ class AsyLower {
       }
       const ft = this.type(r.items[1], `struct ${nm} 的字段`);
       if (ft === null) return null;
-      // 函数类型的字段（`fill2 fill2;`，plain_filldraw.asy:93）：方言那边现在收
-      // `(fnty …)` 当字段类型了，五条腿上都是"存一个句柄"。没写默认值就不发 fldset ——
-      // `(cnew …)` 已经把每一格铺成零值了（函数值那一格的零值是空引用，见 recNew）。
-      if (!SCALARS.has(ft) && ft !== 'pair' && ft !== 'triple' && !this.isRec(ft)
-          && !asyIsFn(ft)
-          && !(asyIsArr(ft) && this.arrElemOk(asyElem(ft)))) {
-        return this.nope(r, `struct ${nm} 的 ${ft} 字段（这一刀的字段只有 `
-          + `int/real/bool/string/pair/triple、函数类型、它们的一维数组，`
-          + '与**前面已经声明过**的 struct）');
-      }
       for (const d of this.flat(r.items[2], 'decids')) {
         if (!isList(d) || head(d) !== 'decid') return this.err(d, '认不出的字段声明');
         const start = d.items[1];
-        if (!isList(start) || head(start) !== 'decidstart' || start.items.length !== 2) {
+        // `int size();`（无体的方法声明，collections/iter.asy:5、genericpair.asy:24）在
+        // asy 那边**就是一个函数类型的字段、初值 null** —— 量过：`struct S { int size(); }`
+        // 之后 `s.size == null` 是 true，`s.size = new int(){…};` 之后 `s.size()` 就通了，
+        // 而 struct 里别的方法调 `size()` 读的是这一格。语法上它是 vardec 里的
+        // `(fundecidstart 名字 形参表)`，所以这里把类型换成 `(fnty …)` 就够了。
+        const isFnFld = isList(start) && head(start) === 'fundecidstart' && start.items.length === 3;
+        if (!isFnFld
+            && (!isList(start) || head(start) !== 'decidstart' || start.items.length !== 2)) {
           return this.nope(start, '带维度或形参表的字段名');
+        }
+        const fty = isFnFld ? this.fnTypeOf(ft, start.items[2], start) : ft;
+        if (fty === null) return null;
+        // 函数类型的字段（`fill2 fill2;`，plain_filldraw.asy:93）：方言那边现在收
+        // `(fnty …)` 当字段类型了，五条腿上都是"存一个句柄"。没写默认值就不发 fldset ——
+        // `(cnew …)` 已经把每一格铺成零值了（函数值那一格的零值是空引用，见 recNew）。
+        if (!SCALARS.has(fty) && fty !== 'pair' && fty !== 'triple' && !this.isRec(fty)
+            && !asyIsFn(fty)
+            && !(asyIsArr(fty) && this.arrElemOk(asyElem(fty)))) {
+          return this.nope(r, `struct ${nm} 的 ${fty} 字段（这一刀的字段只有 `
+            + `int/real/bool/string/pair/triple、函数类型、它们的一维数组，`
+            + '与**前面已经声明过**的 struct）');
         }
         const fn = isAtom(start.items[1]) ? start.items[1].value : null;
         if (fn === null) return this.err(start, '字段少了名字');
         if (seen.has(fn)) return this.err(d, `struct ${nm} 里有两个字段叫 '${fn}'`);
         seen.set(fn, true);
-        fields.push({ name: fn, type: ft, def: d.items[2] === undefined ? null : d.items[2], mat: mat });
+        fields.push({ name: fn, type: fty, def: d.items[2] === undefined ? null : d.items[2], mat: mat });
       }
       // 一条 vardec 可以声明好几个字段，它们在 asy 那边是**同一步**（互相看不见），
       // 所以 mat 是按声明语句加一，不是按字段加一。

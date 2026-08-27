@@ -72,6 +72,12 @@ export function asyCall(L, n) {
     if (ms.length > 0) {
       return asyUserCall(L, n, nm, ms, { code: '(var this)', type: L.self.rec.name });
     }
+    // 无体的方法声明（`int size();`）其实是**函数类型的字段**，所以方法体里的 `size()`
+    // 是"读这一格再间接调"。与上面那一档同一个道理放在文件级候选前面：它也是个成员。
+    const sf = L.selfField(nm);
+    if (sf !== null && asyIsFn(sf.type)) {
+      return asyFnValCall(L, n, nm, sf.type, `(fld (var this) ${nm})`);
+    }
   }
   // 内建数学函数先看：asy 里 sqrt/floor/… 是运行时自带的，不是 plain.asy 里的定义，
   // 所以这一层认它们不算"偷偷补模块系统"。用户自己定义了同名函数时以用户的为准

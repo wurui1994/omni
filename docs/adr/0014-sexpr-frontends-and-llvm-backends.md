@@ -2712,6 +2712,42 @@ struct/方法/文件级变量各一份，`.expected` 是 `asy -noV` 逐字节拷
 `tests/sexpr` 与 `tests/run.js` 没跑 —— 这一刀碰的是 `frontend-asy/`（modules/lower/calls）
 与 cli.js 的模块查找，方言、OIR、后端都没动。
 
+### 无体的方法声明 `int size();` —— 量完发现它是一个函数类型的字段
+
+`collections/iter.asy:5` 的 `T get();`、`genericpair.asy:24` 的 `int hash();`、
+`map.asy:21` 的 `int size();`：看着像 C++ 的纯虚函数，量出来不是。`asy -noV`：
+
+- `struct S { int size(); }` 之后 `s.size == null` 是 **true** —— 它是一格**存储**；
+- `s.size = new int() { return 21; };` 之后 `s.size()` 给 21；
+- struct 里别的方法写 `size()`，读的就是这一格（`int twice() { return 2*size(); }` 给 42）；
+- `S t;` 另造一个，`t.size` 又是 null —— 每个对象一格，不是 static。
+
+所以它就是「函数类型的字段、初值 null」，而函数类型的字段第三十刀就通了
+（`typedef int F(); struct S { F f; }` 这条路两边都是 5）。语法上它是 vardec 里的
+`(fundecidstart 名字 形参表)`（`decidstart` 的第三、四条产生式），所以改的是两处：
+
+- `recordBody` 的字段那一段：`fundecidstart` 时把字段类型换成 `fnTypeOf(返回类型, 形参表)`。
+  连带把「字段类型合不合法」那一问从循环**外**挪到循环**里** —— 一条 vardec 里
+  `int f(); int x;` 两个 decid 的类型现在不一样了，外面那个 `ft` 只是"返回类型"，
+  拿它去判合法性会把 `void advance();` 这种（`void` 不在 SCALARS 里）误拒。
+- `asyCall` 里方法体的裸名字那一档后面加一条：`selfField(nm)` 是函数类型时走
+  `asyFnValCall(…, '(fld (var this) nm)')`。位置在文件级候选**前面** —— 它也是个成员，
+  与「方法遮住同名的文件级函数」同一条规矩。
+
+新增 `tests/asy/cases/55-method-decl.asy`（`int size()` / `void grow(int)` /
+`Box make(int)` / `int sum(int[])` 四种拼法、两个对象各一格、方法体里的裸调用，
+`.expected` 逐字节拷 `asy -noV`）。
+
+**这一刀不动 plain 的数**（还是 1）：plain 停在 `collections/map.asy:26` 的
+`V operator [] (K key);` —— 那是**语法**上还没有的产生式，比这一刀早。
+单独实例化 `collections.iter` 量到的是墙确实往后挪了：原来 3 条（两条无体声明 + `unravel`），
+现在 5 条**别的**（`autounravel` 的 vardec、闭包捕获会被改的外层变量、for-each 走自定义
+Iterable、`unravel` 当语句、`Iterable_T` 当函数值）。`import graph;` 还是 186。
+
+跑的轴：`tests/asy`（112 passed，30.1s）、`tests/bootstrap`（60 passed）。
+`tests/sexpr` 与 `tests/run.js` 没跑 —— 只碰 `frontend-asy/`（lower 的字段那一段、calls 的
+一档），方言与后端没动。
+
 ## 后果与代价
 
 
