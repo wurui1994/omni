@@ -148,12 +148,21 @@ function asyFrontEnd() {
   }
   searchDirs.push(libDir);
   const loader = (diags) => (name) => {
-    let p = join(cwd(), `${name}.asy`);
-    if (!exists(p)) {
-      p = '';
+    // `collections.map` 这种带点的模块路径，文件是 `collections/map.asy`（量过 asy 也这样找）。
+    // 先按原样找一遍：真有个叫 `a.b.asy` 的文件时那份赢，与不带点的写法同一条规矩。
+    const cands = name.indexOf('.') < 0 ? [name] : [name, name.split('.').join('/')];
+    let p = '';
+    for (const nm of cands) {
+      const q = join(cwd(), `${nm}.asy`);
+      if (exists(q)) { p = q; break; }
+    }
+    if (p === '') {
       for (const d of searchDirs) {
-        const q = join(d, `${name}.asy`);
-        if (exists(q)) { p = q; break; }
+        for (const nm of cands) {
+          const q = join(d, `${nm}.asy`);
+          if (exists(q)) { p = q; break; }
+        }
+        if (p !== '') break;
       }
     }
     if (p === '' || !exists(p)) return null;

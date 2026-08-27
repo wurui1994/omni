@@ -1,0 +1,1 @@
+`typedef import(…)` 只能写在模板模块里 —— 这个文件不是被 `from m(T=…) access …` 实例化进来的（asy 那边报 "templated module access requires template parameters"）

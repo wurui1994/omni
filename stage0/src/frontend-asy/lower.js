@@ -487,6 +487,10 @@ class AsyLower {
       casts: new Map(), castByNode: new Map(),
       recVis: new Map(), mods: new Map(), methodDecls: [], callAt: new Map(), at: 0,
       tyAlias: new Map(),
+      // 模板模块的实参表（名字 -> 类型文本），普通单元是 null。它决定两件事：
+      // `typedef import(…)` 那一句认不认，以及这个单元里的 struct 名要不要按 pfx 打散
+      // （同一个模板两次实例化里的 `Box_T` 是**两个**类型 —— 量过，见 modules.js）。
+      tpl: null,
       auFns: [], bi: null,
     };
     this.units.push(u);
@@ -709,7 +713,12 @@ class AsyLower {
     // 记录名（第十四刀）。放在内建名单后面查，与核心方言那边同一条规矩。
     // 查的是**这个单元看得见的**那张表（recVis）：别的模块里的 struct 没 import 进来时
     // 不算类型（量过 asy 报 "no type of name"），所以 records 那张全局表只用来发文本。
-    if (this.recVis.has(nm)) return this.recHere(nm) ? nm : this.recLate(node, nm);
+    // 回的是 `rec.name` 不是查的那个键 —— 模板模块的实例里两者不一样（键是源码里写的
+    // `Box_T`，name 是打散过的 `asy__m3_Box_T`），别处也一样：`recVis` 的键是**这里**
+    // 叫什么，`rec.name` 是那个类型**是什么**。
+    if (this.recVis.has(nm)) {
+      return this.recHere(nm) ? this.recVis.get(nm).rec.name : this.recLate(node, nm);
+    }
     if (this.records.has(nm)) return this.recElsewhere(node, nm);
     if (!SCALARS.has(nm)) return this.nope(node, `类型 '${nm}'（这一刀只有 int/real/bool/string/pair/triple 与 struct）`);
     return nm;
@@ -876,6 +885,17 @@ class AsyLower {
   /** `t` 是声明过的记录（asy 的 struct）吗。`t` 已经是解析好的类型名，所以查全局那张表 */
   isRec(t) { return t !== null && t !== undefined && this.records.has(t); }
 
+  /**
+   * 源码里的一个名字 -> 它指的那个记录（没有就 null）。`A(…)` 这种构造调用要用它 ——
+   * 调用处写的是**这个单元里的名字**（模板模块的实例是 `Box_int`），而 records 那张全局表
+   * 的键是记录的真名（`asy__m3_Box_T`），两者在第三十一刀之后不再总是同一个。
+   * 先问 recVis（并且照顺序解析裁），再退回全局表（类型文本进来时就是这一档）。
+   */
+  recOf(nm) {
+    if (this.recVis.has(nm)) return this.recHere(nm) ? this.recVis.get(nm).rec : null;
+    return this.records.has(nm) ? this.records.get(nm) : null;
+  }
+
   /** `el` 能当数组元素吗（第十九刀起记录也能：asy 的 struct 是引用类型，`A[]` 是一串句柄；
    *  多维数组这一刀起数组自己也能 —— 格子里躺的同样是句柄） */
   arrElemOk(el) {
@@ -917,15 +937,19 @@ class AsyLower {
     // struct 名是**全局共享**的一个命名空间（第二十五刀）：核心方言的 class 名、方法名
     // （`asy__m_<记录>_<方法>`）、构造函数名都是按记录名拼的，所以两个模块里同名的 struct
     // 这一刀不收 —— 拒得明白，比悄悄让一个盖掉另一个好。
-    if (this.records.has(nm)) {
+    // 模板模块的实例是例外，而且必须是例外：同一个模板实例化两次，两边的 `Box_T` 是
+    // **两个**类型（量过），所以实例里的 struct 名一律按单元的 pfx 打散。源码里写的那个名字
+    // 只当 recVis 的键（在这个单元里叫什么），全局那张表与生成的符号都用打散过的。
+    const tname = this.unit.tpl === null ? nm : `${this.unit.pfx}${nm}`;
+    if (this.records.has(tname)) {
       return this.nope(n, `两个模块里都有 struct '${nm}'（这一刀的 struct 名是全局共享的）`);
     }
     const fields = [];
     // 记录先登记（字段还空着）：方法的签名可以提到这个记录自己（`A copy()`），
     // 而 type() 是查 recVis 认记录名的。自引用字段那一条拦在 type() 前面，
     // 所以"字段还空着"这件事在这里看不出问题。
-    const rec = { name: nm, fields: fields, at: at, unit: this.unit.id, tyAlias: new Map() };
-    this.records.set(nm, rec);
+    const rec = { name: tname, fields: fields, at: at, unit: this.unit.id, tyAlias: new Map() };
+    this.records.set(tname, rec);
     this.recVis.set(nm, { rec, at });
     // 体里的类型名按**这个 struct 的位置**判可见（recHere）：字段与方法签名只能提到
     // 前面声明过的记录。第一遍走到这里时 this.at 还是 0，所以要现设现还。

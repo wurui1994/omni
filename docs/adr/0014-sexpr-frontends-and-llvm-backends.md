@@ -2665,6 +2665,53 @@ asy 的 `105cm` 语法上是 `(-> (LIT exp) (scale $1 $2))` 一条独立产生�
 跑的轴：`tests/asy`（109 passed，28.7s）、`tests/bootstrap`（60 passed，77s）。
 `tests/sexpr` 与 `tests/run.js` 没跑 —— 这一刀只碰 `frontend-asy/exprs.js`，方言和后端没动。
 
+### 模板模块：`typedef import(K, V)` 与 `from m(K=…, V=…) access …`
+
+这是 plain 的那堵墙。语法早就收下了（`(receive-typedef …)` 与 `(from-access 模块 名字表 实参表)`
+那第三格），缺的是语义。先量语义（`asy -noV`，模板体里印一行、再数一个文件级计数器）：
+
+- `from m(T=int) access …` 写两遍，模块体只跑 **一遍**；`T=string` 那一份体**再跑一遍**。
+  缓存键是「模块 + 实参元组」，不是模块名。
+- 两个 `T=int` 的 access 拿到的是**同一个**实例：`hits_int()` 是 2（两次调用都记在同一个
+  `calls` 上），而 `hits_str()` 是 1。文件级变量是**每个实例一块**存储。
+- 两个实例里的 `Box_T` 是**两个类型**（`Box_int` 与 `Box_str` 不能互相赋值）。
+- 裸 `import` 一个模板模块，asy 报 "templated module access requires template parameters"。
+- 顺带量到的两条：`from m access A as B;`（给 struct 改名）与 `… myint as mi;`（给 typedef
+  改名）asy **都收** —— 原来这两条都被我们 nope 掉了。
+
+落法（类型在这一层就是字符串，所以「替换类型参数」不用替换语法树）：
+
+- **实参就是一条 typedef**。`asyModLoadAs` 在 declPass 之前把 `T -> int` 塞进那个单元的
+  `tyAlias`，位置 `-1`（比第 0 项还早，于是全文件可见）。模块体里的 `T` 从此走的是
+  已有的别名那条路，一行特殊逻辑都不用。
+- **缓存键带实参**：`mod_tbox(T=int)`。unitNew 的 key 换成它，`byKey` 与 `loading`（禁止
+  循环 import 那张表）都跟着用它，于是「同一份实参只跑一遍、不同实参是另一个实例」白捡。
+- **实例里的 struct 名按 pfx 打散**。原来 `records` 那张全局表的键就是 struct 名，两个模块
+  同名就 nope（记录名要全局唯一：class 名、`asy__m_<记录>_<方法>`、`asy__ctor_<记录>` 都按它拼）。
+  模板实例非得例外不可，于是把两件事分开：`recVis` 的键是「**这里**叫什么」，`rec.name` 是
+  「那个类型**是什么**」（实例里是 `asy__m3_Box_T`）。改了三处：`type()` 回 `rec.name` 而不是
+  查表用的那个键；`recordDec` 用 `tname` 登记全局表；新方法 `recOf(nm)`（源码里的名字 -> 记录），
+  `A(…)` 那条构造调用问它而不是 `isRec`。
+- **改名于是白捡**：`recVis`/`tyAlias` 那两条「改名不收」的 nope 删掉了 —— 名字与类型分开之后
+  它们没有理由拒。
+- **带点的模块路径**：`collections.map` 走的是 `name` 规则（`(qualified (name collections) map)`），
+  不是裸原子，所以加了 `asyModPath`；文件是 `collections/map.asy`，那一步在 cli.js 的 loader 里
+  （先按原样找一遍，再把点换成斜杠）。
+
+新增 `tests/asy/cases/54-template-mod.asy` + `mod_tbox.asy`（两次实例化、同一份实参再来一次、
+struct/方法/文件级变量各一份，`.expected` 是 `asy -noV` 逐字节拷的）与
+`tests/asy/strict/template-plain-import.asy`（裸 import 模板模块 —— asy 也拒，不带 `ASY_NOPE`）。
+
+**墙动了，但没倒**：`import plain;` 还是 **1** 条，位置从 `plain_strings.asy:260`（那句实例化）
+挪到了 `collections/map.asy:26` —— `V operator [] (K key);`，一条**语法**上还没有的产生式。
+把 iter 与 genericpair 单独实例化量了一遍，挡住它们的也不再是模板这件事，而是三个各自独立的
+坑：无体的方法声明（`int hash();` / `T get();`）、`unravel` 当语句、内建 `alias`。
+`import graph;` 还是 **186** —— 一点没动，也应该没动（它的大头在 plain 后面）。
+
+跑的轴：`tests/asy`（111 passed，29.7s）、`tests/bootstrap`（60 passed）。
+`tests/sexpr` 与 `tests/run.js` 没跑 —— 这一刀碰的是 `frontend-asy/`（modules/lower/calls）
+与 cli.js 的模块查找，方言、OIR、后端都没动。
+
 ## 后果与代价
 
 

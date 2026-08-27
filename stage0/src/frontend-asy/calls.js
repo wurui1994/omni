@@ -113,7 +113,10 @@ export function asyCall(L, n) {
   }
   // `A(3)`：**构造调用**（第二十一刀）。`A` 是记录名，不是变量也不是函数名，所以这一问
   // 放在内建名单前面 —— 记录名与内建那几个（sqrt/length/…）撞不上。
-  if (L.isRec(nm)) return asyCtorCall(L, n, nm);
+  // 问的是 recOf 不是 isRec：调用处写的是**这个单元里的名字**（模板实例是 `Box_int`），
+  // 而 records 那张全局表的键是记录的真名。
+  const crec = L.recOf(nm);
+  if (crec !== null) return asyCtorCall(L, n, crec, nm);
   if (nm === 'length') return L.lengthCall(n);
   if (nm === 'string') return L.strConvCall(n);
   if (ASY_STRFN.has(nm)) return L.strCall(n, nm);
@@ -250,8 +253,8 @@ export function asyMethodCall(L, n, recv, mname) {
  * "no matching variable 'A'"（非 void 的那份不算，它不给构造函数），而 `A a;` **不**走
  * 构造函数 —— 那条只认文件级的 `A operator init()`，还在门外。
  */
-export function asyCtorCall(L, n, nm) {
-  const cs = L.visibleMethods(L.records.get(nm), 'operator init');
+export function asyCtorCall(L, n, rec, nm) {
+  const cs = L.visibleMethods(rec, 'operator init');
   if (cs.length === 0) {
     // 这一条 asy 自己也拒（"no matching variable 'A'"），所以是 err 不是 nope ——
     // 不是"我们还没做"，是这个程序本来就不对。`tests/asy/strict/ctor-none` 钉着。

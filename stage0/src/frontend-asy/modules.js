@@ -33,15 +33,41 @@ export function asyIdPair(L, n) {
  * 加载 = 解析（`opts.load`，文件 IO 与语法表都在 cli.js）+ 立刻走一遍**声明遍** ——
  * 声明遍走完这个单元的导出表就是全的，import 它的人才有东西可并。
  */
+/**
+ * 模块路径的文本。`strid`（ID 或 STRING）是裸原子，而 `templatename` 走的是 `name`
+ * 那条规则，于是 `collections.map` 是 `(qualified (name collections) map)` —— 带点的
+ * 模块路径要在这里拼回去（文件是 `collections/map.asy`，那一步在 cli.js 的 loader 里）。
+ */
+export function asyModPath(L, node) {
+  if (isAtom(node)) return node.value;
+  if (!isList(node)) return null;
+  const h = head(node);
+  if (h === 'name') return isAtom(node.items[1]) ? node.items[1].value : null;
+  if (h !== 'qualified') return null;
+  const base = asyModPath(L, node.items[1]);
+  const last = isAtom(node.items[2]) ? node.items[2].value : null;
+  return base === null || last === null ? null : `${base}.${last}`;
+}
+
 export function asyModLoad(L, node, name) {
-  const had = L.byKey.get(name);
+  return asyModLoadAs(L, node, name, name, null);
+}
+
+/**
+ * 上面那条的一般形：`key` 是缓存键，`tpl` 是模板实参表（普通模块是 null）。
+ * 缓存键带上实参是量出来的：`from m(T=int) access …` 写两遍，模块体只跑**一遍**，
+ * 而 `T=string` 那一份是**另一个**实例（体再跑一遍、文件级变量是另一块存储）——
+ * 见 ADR 里那段 `hits_int()` 是 2、`hits_str()` 是 1 的量法。
+ */
+export function asyModLoadAs(L, node, name, key, tpl) {
+  const had = L.byKey.get(key);
   if (had !== undefined) return had;
   if (L.opts === null || L.opts.load === undefined || L.opts.load === null) {
     L.nope(node, `模块 '${name}'（这条路上没有模块加载器）`);
     return null;
   }
   for (const k of L.loading) {
-    if (k === name) { L.nope(node, `循环 import（'${name}' 正在加载）`); return null; }
+    if (k === key) { L.nope(node, `循环 import（'${name}' 正在加载）`); return null; }
   }
   const tree = L.opts.load(name);
   if (tree === null || tree === undefined) {
@@ -49,10 +75,14 @@ export function asyModLoad(L, node, name) {
       + '（asy 的模块是按 CWD 找的，量过；标准库那些 plain/graph/… 这一刀还没有）');
     return null;
   }
-  const u = L.unitNew(tree, name);
-  L.byKey.set(name, u);
-  L.loading.push(name);
+  const u = L.unitNew(tree, key);
+  u.tpl = tpl;
+  L.byKey.set(key, u);
+  L.loading.push(key);
   const prev = L.unitIn(u);
+  // 模板实参先坐进别名表：模块体里 `T` 就是一个 typedef，位置 -1 让它在第 0 项之前就可见。
+  // 类型在这一层就是字符串，所以"替换类型参数"这件事一条别名就够了。
+  if (tpl !== null) for (const [pn, pt] of tpl) L.tyAlias.set(pn, [{ t: pt, at: -1 }]);
   L.declPass(u);
   L.unitOut(prev);
   L.loading.pop();
@@ -108,16 +138,17 @@ export function asyModMerge(L, node, u, at, only) {
   for (const [nm, e] of u.recVis) {
     const key = only === null ? nm : only.get(nm);
     if (key === undefined) continue;
-    if (key !== nm) { L.nope(node, `给 import 进来的 struct '${nm}' 改名`); continue; }
+    // 改名是收的（量过：`from m access A as B; B b = new B;` asy 通）。能收是因为
+    // 「这里叫什么」（recVis 的键）与「那个类型是什么」（rec.name）在第三十一刀分开了 ——
+    // 模板模块的实例非得这么分不可，普通模块跟着白捡。
     if (!L.recVis.has(key)) L.recVis.set(key, { rec: e.rec, at: at });
   }
   // typedef 的别名跟着 import 一起进来（asy 那边也是：`import graph;` 之后
-  // `splinetype` 就是个类型名了）。改名那种写法（`from m access X as Y;`）不收 ——
-  // 与上面 struct 那一条同一个理由：别名的名字在这一刀不参与重命名。
+  // `splinetype` 就是个类型名了）。改名那种写法（`from m access X as Y;`）也收 ——
+  // 别名的右边是**类型文本**，跟它叫什么名字无关（量过 asy 通）。
   for (const [nm, e] of u.tyAlias) {
     const key = only === null ? nm : only.get(nm);
     if (key === undefined) continue;
-    if (key !== nm) { L.nope(node, `给 import 进来的 typedef '${nm}' 改名`); continue; }
     // 位置一律按 import 那一行算（与 recVis 同一条），所以只带**模块里最后那一份**
     if (!L.tyAlias.has(key)) L.tyAlias.set(key, [{ t: e[e.length - 1].t, at: at }]);
   }
@@ -165,24 +196,70 @@ export function asyModStmt(L, n, at) {
     return null;
   }
   if (h === 'from-access') {
-    if (n.items.length !== 3) return L.nope(n, '参数化的 `from … access`（模板模块）');
-    const src = isAtom(n.items[1]) ? n.items[1].value : null;
+    const src = asyModPath(L, n.items[1]);
     if (src === null) return L.nope(n, '`from … access` 的这种模块名');
     const names = n.items[2];
     if (isList(names) && head(names) === 'wildcard') return L.nope(n, '`from … access *`');
+    // 第三格是模板实参（`from m(T=int) access …`）；没有第三格就是普通的 from-access
+    let tpl = null;
+    let key = src;
+    if (n.items.length !== 3) {
+      tpl = asyTplArgs(L, n.items[3]);
+      if (tpl === null) return null;
+      let sig = '';
+      for (const [pn, pt] of tpl) sig = sig === '' ? `${pn}=${pt}` : `${sig},${pn}=${pt}`;
+      key = `${src}(${sig})`;
+    }
     const only = new Map();
     for (const p of L.flat(names, 'idpairs')) {
       const pr = asyIdPair(L, p);
       if (pr === null) { L.nope(p, '`from … access` 里的这种写法'); continue; }
       only.set(pr.src, pr.dst);
     }
-    const u = asyModLoad(L, n, src);
+    const u = asyModLoadAs(L, n, src, key, tpl);
     if (u === null) return null;
     asyModMerge(L, n, u, at, only);
     asyModCallAt(L, at, u);
     return null;
   }
+  // `typedef import(K, V);` —— 模板模块的头一句。它自己不产生任何东西：实参在
+  // asyModLoadAs 里已经坐进别名表了，这里只核对"写的那几个名字正是给了实参的那几个"。
+  if (h === 'receive-typedef') {
+    if (L.unit.tpl === null) {
+      return L.err(n, '`typedef import(…)` 只能写在模板模块里 —— 这个文件不是被 '
+        + '`from m(T=…) access …` 实例化进来的（asy 那边报 "templated module access '
+        + 'requires template parameters"）');
+    }
+    for (const p of L.flat(n.items[1], 'typeparams')) {
+      const nm = isList(p) && isAtom(p.items[1]) ? p.items[1].value : null;
+      if (nm === null) { L.nope(p, '`typedef import(…)` 里的这种写法'); continue; }
+      if (!L.unit.tpl.has(nm)) {
+        L.err(n, `模板参数 '${nm}' 没给实参 —— 实例化那一句里没有 \`${nm}=…\``);
+      }
+    }
+    return null;
+  }
   return L.nope(n, `模块声明 '${h}'`);
+}
+
+/** `(formals (formal 类型 (decidstart 名字)) …)` -> Map(名字 -> 类型文本)；有一格不成就回 null */
+export function asyTplArgs(L, node) {
+  const out = new Map();
+  for (const f of L.flat(node, 'formals')) {
+    if (!isList(f) || head(f) !== 'formal' || f.items.length !== 3) {
+      L.nope(f, '模板实参的这种写法（要 `名字=类型`）');
+      return null;
+    }
+    const d = f.items[2];
+    const nm = isList(d) && head(d) === 'decidstart' && isAtom(d.items[1]) ? d.items[1].value : null;
+    if (nm === null) { L.nope(f, '模板实参的这种写法（要 `名字=类型`）'); return null; }
+    const t = L.type(f.items[1], '模板实参');
+    if (t === null) return null;
+    if (out.has(nm)) { L.err(f, `模板参数 '${nm}' 给了两遍`); return null; }
+    out.set(nm, t);
+  }
+  if (out.size === 0) { L.nope(node, '空的模板实参表'); return null; }
+  return out;
 }
 
 /** 这条 import 语句要在**它自己的位置**上调一次模块的初始化函数（体在那一行跑） */
