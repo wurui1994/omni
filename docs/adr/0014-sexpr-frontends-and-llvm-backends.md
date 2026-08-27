@@ -3035,6 +3035,40 @@ asy 的规则是那个变量在自己的初值里还不可见，所以判据加�
 跑的轴：`tests/asy`（127 passed，38.0s）、`tests/bootstrap`（60 passed）。只动
 `frontend-asy/`（decls.js、calls.js），sexpr 与 run.js 跳掉。
 
+### 数组元素那条路：一行守卫写错在两头，`import plain;` 4 -> 1
+
+上一刀墙倒之后新冒出来的三条诊断，根在同一行 —— `lower.js` 的 `type()` 里 `array-ty`
+那一支自己解元素名，然后拿解出来的**类型文本**去问顺序解析：
+
+```js
+if (this.isRec(eel) && !this.recHere(eel)) return this.recLate(node, eel);
+```
+
+`recHere` 查的是 `recVis`（**这个单元里叫什么** -> {rec, at}），而 `eel` 已经被别名换成了
+**那个类型是什么**（模板实例里是打散过的真名 `asy__m6_Pair_K_V`）。那个名字压根不是
+`recVis` 的键，`e === undefined` 于是被当成"声明在后面"。`collections/iter.asy:14/30/48`
+三条报的都是 `T[]`，而那个 `T` 是另一个模板的实例（`map.asy:3` 先实例化 `genericpair` 拿到
+`Pair_K_V`，`map.asy:5` 再把它当实参传给 `iter`）。
+
+改法不是加守卫，是让这一支走与下面 `name-ty` **同一条**路：别名 -> `recVis`（先按 `recHere`
+裁，再换成 `rec.name`）-> 全局表（`recElsewhere`）。这么一改同时补上了另一头 —— 量出来的：
+
+- `from mod_tbox(T=int) access Box_T as Box_int; Box_int[] a;` asy 是收的，而我们报
+  "数组元素这一刀只有 int/real/…" 那条 nope。因为元素名没换成 `rec.name`，
+  `records` 那张全局表里查不着 `Box_int`。
+
+顺手量到的一个**反向漏洞**（差点被我这一刀放大）：只加守卫的那个版本会让
+`access mod_m; A[] a;` 通过 —— asy 报 "no type of name 'A'"。走全套三段之后它落在
+`recElsewhere`，理由也对了。`strict/access-arr-elem` 与 `strict/struct-fwd-array`
+两条钉着这两头。
+
+`import plain;` 4 -> **1**：只剩 `map.asy:104` 的 `keyword` 形参。`import graph;` 还是 183
+（graph 不走 collections/）。
+
+跑的轴：`tests/asy`（130 passed，38.2s）、`tests/bootstrap`（60 passed）。只动
+`frontend-asy/lower.js` 一处，sexpr 与 run.js 跳掉。
+
+
 
 
 

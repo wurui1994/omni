@@ -686,14 +686,26 @@ class AsyLower {
       if (isList(en) && head(en) === 'name-ty') en = en.items[1];
       const el = this.plainName(en);
       if (el === null) return this.nope(node, '带点的类型名');
+      // 元素那个名字走与下面 name-ty **同一条**路：别名 -> recVis（顺序解析 + 换成真名）
+      // -> 全局表（没 import 进来）。以前这里只解别名，然后拿解出来的**文本**去问 recHere，
+      // 那问法错在两头：
+      //   - 别名解出来的是类型文本（模板实例里是打散过的真名 `asy__m6_Pair_K_V`），压根不在
+      //     recVis 里，`e === undefined` 就被当成"声明在后面" —— 量出来的三条
+      //     collections/iter.asy:14/30/48 全是 `T[]`（T 是另一个模板的实例）；
+      //   - 而这个单元里的记录名没换成 `rec.name`，`Box_int[]`（模板实例改过名的）就报
+      //     "数组元素只有 int/real/…" 那条 nope，asy 那边是收的（量过）。
       let eel = el;
       if (this.aliasKnown(el)) {
         const ael = this.aliasAt(el);
         if (ael === null) return this.aliasLate(node, el);
         eel = ael.t;
+      } else if (this.recVis.has(el)) {
+        if (!this.recHere(el)) return this.recLate(node, el);
+        eel = this.recVis.get(el).rec.name;
+      } else if (this.records.has(el)) {
+        return this.recElsewhere(node, el);
       }
       if (!this.arrElemOk(eel)) return this.nope(node, `${eel}[] （${ASY_ARRELEM_TEXT}）`);
-      if (this.isRec(eel) && !this.recHere(eel)) return this.recLate(node, eel);
       let t = eel;
       let k = 0;
       while (k < d) { t = `${t}[]`; k++; }

@@ -1,0 +1,1 @@
+'A' 是另一个模块里的 struct，这个文件没有把它引进来 —— `access m;` 只给限定名，要裸用得写 `import m;`（那边报 "no type of name 'A'"）
