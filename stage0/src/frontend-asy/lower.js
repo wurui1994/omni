@@ -252,6 +252,9 @@ const DOT_BAD = { bad: true };
 /** capOf 的第三种答案："这个名字确实是外层的局部量，但这一刀捕获不了它（诊断已经发了）" */
 const CAP_BAD = { bad: true };
 
+/** 零字段 struct 的占位字段名（核心方言的 class 至少要一个字段，见 recordBody 那一段） */
+const ASY_FILLER = 'asy__filler';
+
 /** 模块相关的顶层声明（第二十五刀）。认得的是前三条，后面几条在 modStmt 里报"还没做" */
 const ASY_MODSTM = new Set(['import', 'access', 'from-access', 'unravel', 'include',
   'template-access', 'receive-typedef']);
@@ -1075,6 +1078,7 @@ class AsyLower {
   selfField(nm) {
     if (this.self === null) return null;
     if (this.lookup(nm) !== null) return null;
+    if (nm === ASY_FILLER) return null;   // 占位字段看不见，方法体里也一样（见 recField）
     for (const f of this.self.rec.fields) if (f.name === nm && f.mat < this.self.mat) return f;
     return null;
   }
@@ -1437,8 +1441,18 @@ class AsyLower {
         continue;
       }
       if (head(r) === 'fundec') {
+        if (this.stMod(item)) {
+          return this.nope(r, `static 的方法（这一刀只有 static 的字段 —— `
+            + `它是"名字挂在 struct 上的文件级变量"，函数还没接这条路）`);
+        }
         if (this.methodSig(rec, r, mat, at) === null) return null;
         mat++;
+        continue;
+      }
+      // `static T n = …`：**不是字段**，是一个名字挂在 struct 上的文件级变量（见 stMod）。
+      // 与 autounravel 同一个形状，所以也不占成员槽。
+      if (head(r) === 'vardec' && this.stMod(item)) {
+        if (this.staticDec(rec, r, at) === null) return null;
         continue;
       }
       if (head(r) !== 'vardec') {
@@ -1475,15 +1489,46 @@ class AsyLower {
       // 所以 mat 是按声明语句加一，不是按字段加一。
       mat++;
     }
-    // 核心方言的 class 至少要一个字段，而"只有方法的 struct"在 asy 那边是合法的 ——
-    // 这条边界因此留着（要放开就得给 class 一个空字段表，那是方言那边的事）。
-    if (fields.length === 0) return this.nope(n, `没有字段的 struct '${nm}'`);
+    // 核心方言的 class 至少要一个字段，而 asy 那边"只有方法的 struct"、"只有 static 成员的
+    // struct"都合法 —— math.asy:442 的 `struct rootfinder_settings` 就是后者（里面全是
+    // static）。所以这里补一个**看不见的**占位字段，而不是把这一族拒掉。
+    // 这一条是 static 那一刀逼出来的：static 成员不占成员槽，于是 base 里凭空多出一批
+    // 零字段的 struct，`import graph;` 从 189 条掉到 1 条 —— 掉下来的不是进展，是 math.asy
+    // 停在了更早的地方。
+    if (fields.length === 0) {
+      fields.push({ name: ASY_FILLER, type: 'int', def: null, mat: mat });
+      mat++;
+    }
     return null;
   }
 
   /** 记录里的字段。找不到时把有哪些字段一起说出来。 */
+  /** 记录 `t` 上的 static 字段 `nm`（没有给 null）。三条取值路径共用这一份 */
+  statOf(t, nm) {
+    const rec = this.records.get(t);
+    if (rec === undefined || rec.statics === undefined) return null;
+    const g = rec.statics.get(nm);
+    return g === undefined ? null : g;
+  }
+
+  /**
+   * `Box.n`：**类型名**限定的 static。放在 dotQual 后面问 —— 同名的变量在点号左边赢
+   * （与 dotQual 里那三档同一条规矩），所以只有它认不出时才轮到这里。
+   */
+  statQual(node) {
+    if (!isList(node) || head(node) !== 'qualified') return null;
+    const nm = isAtom(node.items[2]) ? node.items[2].value : null;
+    const base = this.plainName(node.items[1]);
+    if (nm === null || base === null) return null;
+    if (!this.recVis.has(base)) return null;
+    return this.statOf(base, nm);
+  }
+
   recField(n, t, nm) {
     const rec = this.records.get(t);
+    // 占位字段是**看不见的** —— 名字虽然合法，`x.asy__filler` 在真 asy 那边是没有这个成员，
+    // 所以这里也当没有（不然就是收得比 asy 多，strict 那条纪律不许）
+    if (nm === ASY_FILLER) return this.err(n, `struct ${t} 没有字段 '${nm}'`);
     for (const f of rec.fields) if (f.name === nm) return f;
     // 名字其实是个**方法**：那不是"没有这个成员"，是"把方法取出来当值"——
     // asy 收（量过 `int f() = a.get;` 那句印 1：方法取出来是绑住接收者的闭包），
@@ -1494,7 +1539,7 @@ class AsyLower {
         + '而我们的方法是多一个 this 形参的普通函数）');
     }
     const names = [];
-    for (const f of rec.fields) names.push(f.name);
+    for (const f of rec.fields) if (f.name !== ASY_FILLER) names.push(f.name);
     return this.err(n, `struct ${t} 没有字段 '${nm}' —— 有的是 ${names.join(' / ')}`);
   }
 
@@ -1640,6 +1685,12 @@ class AsyLower {
     }
     const f = this.selfField(nm);
     if (f !== null) return { code: `(fld (var this) ${nm})`, type: f.type };
+    // 方法体里裸的 static 名字（量过 `int get() {return x + n;}` 里的 n 就是那一格）。
+    // 位置照 selfField：成员那一档里，字段之后、文件级之前。
+    if (this.self !== null && this.self !== undefined) {
+      const s = this.statOf(this.self.rec.name, nm);
+      if (s !== null) return { code: `(var ${s.sym})`, type: s.type };
+    }
     const g = this.gvarHere(nm);
     if (g !== null && g.ok) return { code: `(var ${g.sym})`, type: g.type };
     if (g !== null) {
@@ -1879,6 +1930,9 @@ class AsyLower {
         const q = this.dotQual(n.items[1]);
         if (q === DOT_BAD) return null;
         if (q !== null) return this.member(n, q.recv, q.field);
+        // `Box.n`：类型名限定的 static（见 statQual —— 同名的变量在点号左边赢，所以放这里）
+        const sq = this.statQual(n.items[1]);
+        if (sq !== null) return { code: `(var ${sq.sym})`, type: sq.type };
         // `m.x`：模块限定的名字（第二十五刀）。变量先查（dotQual 在上面），
         // 所以同名的局部量遮住模块别名。
         const mq = this.modAlias(n.items[1]);
@@ -2023,6 +2077,10 @@ class AsyLower {
       return this.nope(n, `数组的 '.${nm}'（这一刀只有 .length / .push / .pop）`);
     }
     if (this.isRec(recv.type)) {
+      // `a.n`：`n` 可能是 **static**（那不是这个对象的槽，是一个文件级变量 —— 量过
+      // `a.n = 7` 之后 `b.n` 也是 7）。放在字段前面问：static 与字段同名在 staticDec 里拦掉了。
+      const s = this.statOf(recv.type, nm);
+      if (s !== null) return { code: `(var ${s.sym})`, type: s.type };
       const f = this.recField(n, recv.type, nm);
       return f === null ? null : { code: `(fld ${recv.code} ${nm})`, type: f.type };
     }
@@ -3688,6 +3746,17 @@ class AsyLower {
     return this.nope(e, `语句位置的表达式 '${h}'`);
   }
 
+  /**
+   * 给 static 字段赋值。它是一个**文件级变量**，所以落的就是 `(set 符号 值)`。
+   * 复合赋值与自增这一刀不收：那一整套（用户算符、pair/triple、`#=`/`%=`）都写在 assign 的
+   * 尾巴上，而尾巴是按"名字就是符号"写的 —— 挪过来得先把它抽成一个函数，那是另一刀。
+   */
+  assignStat(node, label, g, rhs, op) {
+    if (op !== null) return this.nope(node, `static 字段的复合赋值或自增（${label}）`);
+    const v = this.coerce(this.expr(rhs), g.type, node, `给 '${label}' 赋的值`);
+    return v === null ? null : [`(set ${g.sym} ${v.code})`];
+  }
+
   /** 赋值、复合赋值、自增自减都归到这里：目标是普通变量名，或者数组下标 */
   assign(node, lhs, rhs, op) {
     if (isList(lhs) && head(lhs) === 'subscript') return this.assignIndex(node, lhs, rhs, op);
@@ -3697,12 +3766,23 @@ class AsyLower {
     if (isList(lhs) && head(lhs) === 'name-exp') {
       const q = this.dotQual(lhs.items[1]);
       if (q === DOT_BAD) return null;
-      if (q !== null && this.isRec(q.recv.type)) return this.assignFld(node, q, rhs, op);
+      if (q !== null && this.isRec(q.recv.type)) {
+        // `a.n = …`：`n` 可能是 **static** —— 那不是这个对象的槽，是一个文件级变量
+        const s = this.statOf(q.recv.type, q.field);
+        if (s !== null) return this.assignStat(node, `${q.recv.type}.${q.field}`, s, rhs, op);
+        return this.assignFld(node, q, rhs, op);
+      }
       // pair 的分量是**只读**的虚字段：量过 asy 对 `z.x = 5` 与 `a.p.x = 5` 都报
       // "virtual field is read-only"。这条不是"还没做"，所以不带 ASY_NOPE ——
       // `tests/asy/strict/pair-field-set` 钉着它。
       if (q !== null && (q.recv.type === 'pair' || q.recv.type === 'triple')) {
         return this.err(node, `${q.recv.type} 的 '${q.field}' 是只读的虚字段 —— asy 那边就是 "virtual field is read-only"`);
+      }
+      // `Box.n = …`：类型名限定的 static（读那一路在 name-exp 里，见 statQual）
+      const sq = this.statQual(lhs.items[1]);
+      if (sq !== null) {
+        const bn = this.plainName(lhs.items[1].items[1]);
+        return this.assignStat(node, `${bn}.${lhs.items[1].items[2].value}`, sq, rhs, op);
       }
     }
     // `f(x).字段 = v`：接收者不是名字而是一个表达式。asy 收这种（struct 是引用类型，
@@ -3735,10 +3815,14 @@ class AsyLower {
       if (sf !== null) {
         return this.assignFld(node, { recv: { code: '(var this)', type: this.self.rec.name }, field: nm }, rhs, op);
       }
+      // 方法体里给裸的 static 名字赋值（读那一路在 nameOf 里）。位置照上面那一档：
+      // 字段之后、文件级之前。
+      const st = this.self === null || this.self === undefined
+        ? null : this.statOf(this.self.rec.name, nm);
+      if (st !== null) return this.assignStat(node, `${this.self.rec.name}.${nm}`, st, rhs, op);
       const g = this.gvarHere(nm);
       if (g !== null && g.ok) { sym = g.sym; t = g.type; }
-      else if (g !== null) {
-        return this.nope(node, `函数里改文件级变量 '${nm}'（这一刀的模块级变量`
+      else if (g !== null) {        return this.nope(node, `函数里改文件级变量 '${nm}'（这一刀的模块级变量`
           + '只收 int/real/bool/string —— pair/记录/数组的身份不在 MIR 的类型码里）');
       } else if (this.globals.has(nm)) return this.gvarLate(node, nm);
       else return this.err(node, `未声明的变量 '${nm}'`);
@@ -4181,6 +4265,96 @@ class AsyLower {
     while (isList(cur) && head(cur) === 'modified') {
       for (const m of this.flat(cur.items[1], 'mods')) {
         if (isAtom(m) && m.value === 'autounravel') return true;
+      }
+      cur = cur.items[2];
+    }
+    return false;
+  }
+
+  /**
+   * struct 体里的 `static T n = …`：登记一个**文件级变量**（符号名带上记录名），并记进
+   * `rec.statics`。它不占成员槽 —— 语义见 stMod 的注释（量出来的）。
+   * 初值不在这里发：由 bodyPass 走到那个 recorddec 时交给 staticInit，位置就是 struct 的位置。
+   */
+  staticDec(rec, r, at) {
+    const t = this.type(r.items[1], `struct ${rec.name} 的 static 字段`);
+    if (t === null) return null;
+    if (!SCALARS.has(t) && t !== 'pair' && t !== 'triple' && !this.isRec(t)
+        && !(asyIsArr(t) && this.arrElemOk(asyElem(t)))) {
+      return this.nope(r, `struct ${rec.name} 的 static ${t} 字段（这一刀的全局量只收 `
+        + 'int/real/bool/string/pair/triple、struct，与它们的一维数组）');
+    }
+    if (rec.statics === undefined) rec.statics = new Map();
+    for (const d of this.flat(r.items[2], 'decids')) {
+      if (!isList(d) || head(d) !== 'decid') return this.err(d, '认不出的 static 字段声明');
+      const start = d.items[1];
+      if (!isList(start) || head(start) !== 'decidstart' || start.items.length !== 2) {
+        return this.nope(start, '带维度或形参表的 static 字段名');
+      }
+      const nm = isAtom(start.items[1]) ? start.items[1].value : null;
+      if (nm === null) return this.err(start, 'static 字段少了名字');
+      for (const f of rec.fields) {
+        if (f.name === nm) return this.err(start, `'${nm}' 在 struct ${rec.name} 里已经是字段了`);
+      }
+      if (rec.statics.has(nm)) return this.err(start, `static 字段 '${nm}' 重复声明`);
+      const g = { sym: `asy__sf${this.gdecls.length}_${rec.name}_${nm}`, type: t, at, ok: true };
+      this.gdecls.push(g);
+      rec.statics.set(nm, g);
+    }
+    return true;
+  }
+
+  /**
+   * 一个 recorddec 里那些 static 声明的**初值**（bodyPass 用）。它们是文件级变量，
+   * 所以发的是 `(set 符号 值)` —— 与 vardec 里文件级那一档同一句。位置是 struct 的位置。
+   * 标量零初始化，所以没写初值的什么都不发；聚合不行（记录要 new、数组要 anew）。
+   */
+  staticInit(n, at) {
+    // `(recorddec ID block)` —— 名字是个**原子**，不是 `(name …)`
+    const rnm = isAtom(n.items[1]) ? n.items[1].value : null;
+    const rec = rnm === null ? undefined : this.records.get(rnm);
+    if (rec === undefined || rec.statics === undefined) return [];
+    const out = [];
+    this.at = at;
+    for (const item of this.flat(n.items[2], 'block')) {
+      const r = this.unwrapMod(item);
+      if (!isList(r) || head(r) !== 'vardec' || !this.stMod(item)) continue;
+      for (const d of this.flat(r.items[2], 'decids')) {
+        if (!isList(d) || head(d) !== 'decid') continue;
+        const start = d.items[1];
+        if (!isList(start) || !isAtom(start.items[1])) continue;
+        const g = rec.statics.get(start.items[1].value);
+        if (g === undefined) continue;
+        let init = null;
+        if (d.items[2] !== undefined) {
+          const v = this.coerce(this.expr(d.items[2]), g.type, d.items[2],
+            `static ${rec.name}.${start.items[1].value} 的初值`);
+          if (v === null) continue;
+          init = v.code;
+        } else if (this.isRec(g.type)) {
+          init = this.recInit(start, g.type);
+        } else if (asyIsArr(g.type)) {
+          init = `(anew ${asyCore(g.type)} (int 0))`;
+        }
+        if (init !== null) out.push(`(set ${g.sym} ${init})`);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * 这一句带 `static` 吗。struct 体里它的意思与 `autounravel` 是同一个形状：
+   * **这不是字段，是一个名字挂在 struct 上的文件级变量**。量过（`asy -noV`，
+   * struct 叫 Box —— 别用 `S`，base 里那是南那个方向常量）：
+   *   static int n = 1; ... 之后 `Box.n` 是 1；`a.n = 7` 之后 `Box.n` 与 `b.n` 都是 7
+   *   （同一格）；实例方法里裸的 `n` 就是它。
+   * 文件层的 `static` 无所谓（unwrapMod 照旧剥掉），所以这个只在 struct 体里问。
+   */
+  stMod(n) {
+    let cur = n;
+    while (isList(cur) && head(cur) === 'modified') {
+      for (const m of this.flat(cur.items[1], 'mods')) {
+        if (isAtom(m) && m.value === 'static') return true;
       }
       cur = cur.items[2];
     }
@@ -4786,7 +4960,11 @@ class AsyLower {
       }
       if (!isList(r)) continue;
       if (head(r) === 'fundec') continue;
-      if (head(r) === 'recorddec') continue;      // 声明遍收过了
+      if (head(r) === 'recorddec') {
+        // 声明遍收过了。只有 `static` 那几条要在这里发一句初值（见 staticInit）
+        for (const x of this.staticInit(r, off + i)) main.push(x);
+        continue;
+      }
       if (head(r) === 'typedec' || head(r) === 'typedec-using') continue;   // 同上（只往别名表里记一条）
       if (ASY_MODSTM.has(head(r))) continue;      // 同上（没做的那几种在那边报过了）
       const s = this.stmt(r, 'void');

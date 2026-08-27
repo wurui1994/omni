@@ -2307,7 +2307,43 @@ write(Box.n);        // 8
 方向常量（N/S/E/W）。拿 base 在场的环境量语义时，测试用的名字得先躲开 base 的名字空间，
 不然量到的是名字碰撞而不是语义。
 
-## 后果与代价
+### static 字段落地：第一次"数字掉下来"是真的退步
+
+按上一节量好的语义做完了三条取值路径（`Box.n` / `a.n` / 方法体里裸的 `n`）与对应的三条赋值
+路径，加上初值在单元 init 里发一句 `(set …)`。落法就是上一节说的那个：一个
+`asy__sf<i>_<记录名>_<字段名>` 的文件级全局，static 成员**不占成员槽**。
+`tests/asy/cases/48-static.asy` 钉着，期望文件是直接从 `asy -noV` 出来的。
+
+然后 `import graph;` 从 189 条掉到 **1** 条。这一次不是好消息：
+
+```
+math.asy:442:1: error: asy 前端第一刀还不支持：没有字段的 struct 'rootfinder_settings'
+```
+
+`struct rootfinder_settings` 里**全是** static 成员。static 不占成员槽之后它就成了零字段
+struct，撞上那条早就写在 recordBody 里的边界，`math.asy` 于是停在了比原来早得多的地方 ——
+后面 188 条根本没走到。这是这把尺子第五次误报，也是第一次**掉下来的数字对应真的退步**：
+前四次是"数字没动、能力涨了"，这次是"数字大降、能力降了"。两个方向都印证同一件事，
+总数这个读法没有信息量，只有分桶有。
+
+零字段这条边界原本的理由是"核心方言的 class 至少要一个字段"。放开的办法有两个：改方言让
+class 收空字段表，或者补一个看不见的占位字段。选了后者 —— 方言那边的空 class 会牵到五条
+后端的布局，而占位字段只是前端多塞一个 `int`：
+
+```js
+if (fields.length === 0) {
+  fields.push({ name: ASY_FILLER, type: 'int', def: null, mat: mat });
+  mat++;
+}
+```
+
+代价是这个字段的名字（`asy__filler`）在 asy 那边是合法标识符，所以得**把它藏起来**，
+不然就是收得比 asy 多。三处各加一句：`recField` 里直接当没有、错误信息里的字段清单里滤掉、
+`selfField` 里方法体的裸名字也不认。`tests/asy/strict/filler-field.asy` 钉着这一条
+（真 asy 报 `no matching variable 'b.asy__filler'`，我们报"没有字段"，两边都拒）。
+
+补上占位字段之后 `import graph;` 回到 **189**，桶也回到原样（76 类型 / 28 内建函数 / 4 隐式
+缩放 / 3 无名形参 / 3 数组方法 / …）；`import plain;` 还是那**三**条挡路的，一条不多一条不少。
 
 
 - **依赖 LLVM**：本机 `libLLVM.dylib` 157MB。产物变大，但仍然自带执行器、
