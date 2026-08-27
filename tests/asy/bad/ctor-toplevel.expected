@@ -1,1 +1,0 @@
-asy 前端第一刀还不支持：文件级的 `operator init`（换掉 `A a;` 的隐式构造 —— struct 体里的 `void operator init(…)`、也就是 `A(…)`，是通的）

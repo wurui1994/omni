@@ -1,0 +1,1 @@
+asy 前端第一刀还不支持：带形参的文件级 'operator init'（asy 那边它也不是隐式转换 —— `A a = 7;` 报 "cannot cast"）

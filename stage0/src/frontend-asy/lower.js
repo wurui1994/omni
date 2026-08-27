@@ -78,6 +78,11 @@
 // 因为候选长得就像"回记录、没有接收者的普通函数"。量过的三条都对上了：字段默认值在体
 // **之前**就铺好、默认实参能引用字段（所以它是在对象造好之后求的，defWrapper 为此有一条
 // 构造分支）、而 `A a;` **不**走构造函数）。
+// **文件级的 `T operator init()`**（第二十二刀：它换掉 `T t;` 的隐式构造。降级就是
+// "多问一句"：recInit 先问此处可见的那份（顺序解析，两份就各管后面那一段），没有才走
+// recNew。分界是量出来的 —— `A a;` 与**内嵌记录字段**走 operator init，而 `new A` 与
+// 构造调用 `A(…)` 走原来那份字段默认值（所以 operator init 的体里写 `new A` 不递归）；
+// 内嵌字段那一格按**那个 struct 声明处**的可见性定，不是按用它的地方）。
 //
 // 不支持（见到就报错，报错里说清是哪一条）：triple、import/access、
 // typedef、算符重载、给切片赋值（`a[0:2] = b`）、
@@ -99,9 +104,9 @@
 // （`struct A { A next; }` —— asy 收，我们不收，见下面的差别一节）、
 // 把方法**当值**取出来（`int f() = a.get;` —— asy 收，那是绑住接收者的闭包；
 // 我们的方法是"多一个 this 形参的普通函数"，而核心方言里函数不是值）、
-// **文件级**的 `T operator init()`（换掉 `T t;` 的隐式构造 —— struct 体里那份
-// `void operator init(…)`、也就是 `A(…)`，是通的；非 void 的 `operator init` 也在门外，
-// asy 自己也不给它构造调用）。
+// `operator init` 的另两种形态（**带形参**的文件级那份 —— asy 收这个声明，但它不是隐式
+// 转换，量不出能拿它干什么就不猜；以及 struct 体里**非 void** 的那份 —— asy 自己也不给
+// 它构造调用）。
 //
 // ## 与真 asy 的差别，写在这里而不是等着被发现
 //
@@ -175,7 +180,7 @@
 // - **`A a;` 与 `A(…)` 是两件不同的事**（第二十一刀量的，对齐的一条）：struct 体里的
 //   `void operator init(…)` 只给**构造调用** `A(…)`，`A a;` 一概不走它（量过：体里赋
 //   `x = 42` 之后 `A a; write(a.x)` 印的还是 0）。换掉 `A a;` 的是**文件级**的
-//   `A operator init()`，那一条还在门外（`bad/ctor-toplevel`）。
+//   `A operator init()`（第二十二刀收的，见 recInit）—— 同名的两个东西是两件事。
 // - **构造函数里字段默认值先铺、默认实参后求**（第二十一刀量的）：`int z = 8;` 加体里
 //   `z = z + 1` 出来是 9（默认值在体之前），而 `void operator init(int n = x)` 里的 `x`
 //   是**字段**、拿到的是字段默认值（默认实参在对象造好之后才求）。后一条逼出 defWrapper
@@ -518,6 +523,10 @@ class AsyLower {
     // 同一份输入两次降出来的文本因此逐字节相同。
     this.wrapNames = new Map();
     this.wraps = [];
+    // 文件级的 `T operator init()`（第二十二刀）：记录名 -> 候选表（按声明顺序），
+    // 外加节点 -> 候选表，好让 func() 认出"这份 fundec 是哪张表里的"。
+    this.oinits = new Map();
+    this.oiByNode = new Map();
     // 现在降的是**第几个**顶层项。asy 的名字解析是顺序的（量过：函数体里引用后面
     // 才声明的名字是 "no matching variable"），所以候选表要按这个下标裁一刀。
     // 自己那条也算可见（`c.at <= this.at`）—— 单函数递归 asy 是允许的。
@@ -795,10 +804,15 @@ class AsyLower {
     if (had !== undefined) return `(call ${had})`;
     const fname = `asy__new_${t}`;
     this.recInits.set(t, fname);
-    // 构造函数是另一个作用域、另一串语句（与 defWrapper 同一套保存/还原）
+    // 构造函数是另一个作用域、另一串语句（与 defWrapper 同一套保存/还原）。
+    // `at` 也挪到**这个 struct 的声明处**：字段默认值与内嵌记录该看见谁，是在那里定的
+    // （量过：`struct B { A a; }` 写在 `A operator init()` 前面时 `b.a.x` 是 0，
+    // 写在后面才是那份构造给的值 —— 所以这一份正文只生成一次是对的）。
     const savePre = this.pre;
     const saveUpd = this.updates;
     const saveScopes = this.scopes;
+    const saveAt = this.at;
+    if (rec.at !== undefined) this.at = rec.at;
     this.scopes = [new Map()];
     this.updates = [];
     const lines = [`(let o ${t} (cnew ${t}))`];
@@ -808,8 +822,12 @@ class AsyLower {
     for (const f of rec.fields) {
       if (f.def === null) {
         // 内嵌的记录：没写默认值也要给它一个**新对象**（字段类型只能是前面声明过的记录，
-        // 所以这里的递归一定会到底）
-        if (this.isRec(f.type)) lines.push(`(fldset (var o) ${f.name} ${this.recNew(n, f.type)})`);
+        // 所以这里的递归一定会到底）。走 recInit：文件级的 operator init 管得到这一格。
+        if (this.isRec(f.type)) {
+          const mk = this.recInit(n, f.type);
+          if (mk === null) { bad = true; break; }
+          lines.push(`(fldset (var o) ${f.name} ${mk})`);
+        }
         continue;
       }
       const v = this.coerce(this.expr(f.def), f.type, f.def, `字段 '${t}.${f.name}' 的默认值`);
@@ -820,11 +838,26 @@ class AsyLower {
     this.pre = savePre;
     this.updates = saveUpd;
     this.scopes = saveScopes;
+    this.at = saveAt;
     if (bad) return null;
     const text = [`  (fn ${fname} () ${t}`];
     for (const s of lines) text.push(`    ${s}`);
     this.wraps.push(`${text.join('\n')})`);
     return `(call ${fname})`;
+  }
+
+  /**
+   * "声明一个 T"该造什么（第二十二刀）：此处可见的文件级 `T operator init()` 顶替整个
+   * 隐式构造，没有就是 recNew 那份。两者的分界是量出来的：
+   *   - `A a;` 与**内嵌记录字段**走这一条；
+   *   - `new A`（显式）与构造调用 `A(…)` 走 recNew —— 量过 `A(3)` 拿到的是字段默认值
+   *     而不是文件级 operator init 的结果，`A r = new A;` 同理（所以那份 operator init
+   *     的体里写 `new A` 不会递归）。
+   */
+  recInit(n, t) {
+    const oi = this.oinitFor(t);
+    if (oi !== null) return `(call ${oi.sym})`;
+    return this.recNew(n, t);
   }
 
   /** `(name x)` -> 'x'；`(qualified ...)` 与算符名（`operator +`）都回 null */
@@ -2070,7 +2103,7 @@ class AsyLower {
       // 构造调用 `A(…)`）量过不参与这一句，而换掉它的**文件级** `A operator init()`
       // 还在门外（funcSig 里拦着，`bad/ctor-toplevel` 钉着）。
       let init = null;
-      if (this.isRec(t)) init = this.recNew(start, t);
+      if (this.isRec(t)) init = this.recInit(start, t);
       else init = asyIsArr(t) ? `(anew ${asyCore(t)} (int 0))` : ZERO.get(t);
       if (init === null) return null;
       if (d.items[2] !== undefined) {
@@ -2338,6 +2371,50 @@ class AsyLower {
   }
 
   /**
+   * 文件级的 `T operator init()`（第二十二刀）：asy 用它换掉 `T t;` 的隐式构造。
+   * 四条都量过（`asy -noV`）：
+   *   - `A operator init() { A r = new A; r.x = 5; return r; } A a;` 之后 `a.x` 是 5，
+   *     而 `A b = new A;` 绕开它（`b.x` 是 0）；
+   *   - 每次构造求一次（计数器加两次就是 2）；
+   *   - **顺序解析**：写在 `A a;` 后面的那份不算，两份都写就是"各管后面那一段"；
+   *   - **内嵌记录字段也走它**，但按**那个 struct 声明处**的可见性定：
+   *     `struct B { A a; }` 写在 oi 前面时 `b.a.x` 是 0，写在后面才是 5。
+   * 形参不为空的那种不收：量过 `A operator init(int)` 之后 `A a = 7;` 报
+   * "cannot cast 'int' to 'A'" —— 它不是隐式转换，能拿它干什么没量出来，所以不猜。
+   */
+  oinitSig(n, at) {
+    const ret = this.type(n.items[1], 'operator init 的返回类型');
+    if (ret === null) return;
+    if (!this.isRec(ret)) {
+      this.nope(n, `回 ${ret} 的文件级 'operator init'（这一刀只有 struct 的那份）`);
+      return;
+    }
+    const ps = this.formals(n.items[3]);
+    if (ps === null) return;
+    if (ps.length !== 0) {
+      this.nope(n, `带形参的文件级 'operator init'（asy 那边它也不是隐式转换 ——`
+        + ` \`${ret} a = 7;\` 报 "cannot cast"）`);
+      return;
+    }
+    const list = this.oinits.has(ret) ? this.oinits.get(ret) : [];
+    // 同名的第 2 份及以后要改个名字：核心方言里模块层的名字是全局唯一的
+    const sym = list.length === 0 ? `asy__oi_${ret}` : `asy__oi${list.length}_${ret}`;
+    const cand = { ret, params: [], ps: [], node: n, at, sym };
+    list.push(cand);
+    this.oinits.set(ret, list);
+    this.oiByNode.set(n, list);
+  }
+
+  /** 记录 `t` 在**当前位置**该用哪份文件级 operator init（没有就回 null） */
+  oinitFor(t) {
+    const list = this.oinits.get(t);
+    if (list === undefined) return null;
+    let cur = null;
+    for (const c of list) if (c.at <= this.at) cur = c;
+    return cur;
+  }
+
+  /**
    * 形参表：`(formal (implicit) TYPE (decidstart NAME))`，带默认值时多一个
    * `varinit`（`(formal EX TYPE DECIDSTART VARINIT)`，第十刀加的）。
    * 默认值这里**只存节点不降级**：它要在调用点按"缺哪几个"生成的包装函数里降，
@@ -2370,17 +2447,7 @@ class AsyLower {
   sig(n, at) {
     const nm = isAtom(n.items[2]) ? n.items[2].value : null;
     if (nm === null) return;
-    // 文件级的 `T operator init()`（第二十一刀量的，还在门外）：asy 用它换掉 `T t;` 的
-    // 隐式构造 —— 量过 `A operator init() { … }` 之后 `A a;` 拿到的是它回的对象，而且
-    // **内嵌记录字段**也走它（`struct B { A a; }` 之后 `b.a.x` 是那份构造给的值），
-    // 还是顺序解析的（写在 `A a;` 后面就不算）。收它要把 recNew 那一层整个改成"问一遍
-    // 此处可见的 operator init"，那是下一刀。struct 体里的 `void operator init(…)`
-    // （构造调用 `A(…)`）是**另一件事**，那个已经通了，见 methodSig。
-    if (nm === 'operator init') {
-      this.nope(n, '文件级的 `operator init`（换掉 `A a;` 的隐式构造 ——'
-        + ' struct 体里的 `void operator init(…)`、也就是 `A(…)`，是通的）');
-      return;
-    }
+    if (nm === 'operator init') { this.oinitSig(n, at); return; }
     if (nm.startsWith('operator ')) { this.nope(n, '算符重载的定义'); return; }
     if (nm === 'write') { this.nope(n, "重新定义 'write'"); return; }
     const ret = this.type(n.items[1], `函数 ${nm} 的返回类型`);
@@ -2484,7 +2551,7 @@ class AsyLower {
     if (bodyRet !== 'void' && !last.startsWith('(ret ')) {
       let zero = null;
       if (asyIsArr(bodyRet)) zero = `(anew ${asyCore(bodyRet)} (int 0))`;
-      else if (this.isRec(bodyRet)) zero = this.recNew(cand.node, bodyRet);
+      else if (this.isRec(bodyRet)) zero = this.recInit(cand.node, bodyRet);
       else zero = ZERO.get(bodyRet);
       if (zero === null) return null;
       body.push(`(ret ${zero})`);
@@ -2522,7 +2589,11 @@ class AsyLower {
   /** 第二遍：函数体。核心方言要求非 void 的函数每条路径都有 ret，asy 不要求 —— 差别见下。 */
   func(n) {
     const nm = isAtom(n.items[2]) ? n.items[2].value : null;
-    const list = nm === null || !this.funcs.has(nm) ? null : this.funcs.get(nm);
+    // 文件级的 `T operator init()`（第二十二刀）不在 funcs 里 —— 它的候选表按记录名存
+    // （见 oinitSig），所以这里按节点问一遍那张表。除此之外它就是个普通的 0 元函数。
+    const oiList = this.oiByNode.get(n);
+    const list = oiList !== undefined ? oiList
+      : (nm === null || !this.funcs.has(nm) ? null : this.funcs.get(nm));
     if (list === null) return null;
     // 这份声明对应哪个候选：按**节点**认，不按签名 —— 同签名被后面那份替换掉时，
     // 前面那份就没有候选了（asy 那边它也确实调不到），于是这里不发它。
@@ -2542,7 +2613,7 @@ class AsyLower {
     if (d.ret !== 'void' && !last.startsWith('(ret ')) {
       let zero = null;
       if (asyIsArr(d.ret)) zero = `(anew ${asyCore(d.ret)} (int 0))`;
-      else if (this.isRec(d.ret)) zero = this.recNew(n, d.ret);
+      else if (this.isRec(d.ret)) zero = this.recInit(n, d.ret);
       else zero = ZERO.get(d.ret);
       if (zero === null) return null;
       body.push(`(ret ${zero})`);

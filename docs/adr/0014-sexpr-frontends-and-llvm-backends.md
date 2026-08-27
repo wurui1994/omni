@@ -243,12 +243,13 @@ bison **隐式**的选择写成**显式**的优先级声明 —— 悬垂 else�
    在它上面一条不少）、
    **struct 的方法**（第二十刀：`a.get()`，降成"多一个 this 形参的普通函数"；重载、
    默认实参、递归与普通函数同一条路）、
-   **构造函数**（第二十一刀：struct 体里的 `void operator init(…)` 给出 `A(…)`），
-   二十三份用例在五个执行器上与 `asy -noV` 逐字节相同。
-   **还没做**的是给切片赋值、多维数组、复数幂、triple、
-   **文件级**的 `operator init`（换掉 `A a;` 的隐式构造）、算符重载、
+   **构造函数**（第二十一刀：struct 体里的 `void operator init(…)` 给出 `A(…)`）、
+   **文件级的 `T operator init()`**（第二十二刀：换掉 `T t;` 的隐式构造，内嵌记录字段
+   一并管），
+   二十四份用例在五个执行器上与 `asy -noV` 逐字节相同。
+   **还没做**的是给切片赋值、多维数组、复数幂、triple、算符重载、
    字符串的 `reverse`/`insert`/`split`、
-   自引用字段与把方法当值取出来 —— 每一条都在
+   自引用字段、把方法当值取出来，与 `operator init` 剩下的两种形态 —— 每一条都在
    `tests/asy/bad/` 里有一份带 `ASY_NOPE` 的用例钉着，不是含糊的"待办"。
    超越函数（exp/log/trig）是**另一回事**：不是没做，是量过 libm 与 V8 在最后一位就分叉，
    收进来这条轴必然有一天变红，所以按边界拒掉（`tests/asy/bad/sin.asy`；pair 上的
@@ -423,10 +424,11 @@ static inline C + 另写一份 IR 助手"，是两份实现；这次不重复那
 `1/3` 是实数除法而 `1#3` 是整数商、`3 == 3.0` 要提左边、`write` 的分隔符取决于第一个
 实参是不是字符串。类型是符号表的事，动作模板里没有符号表。
 
-**判分的人不是我**：`tests/asy` 的二十三份用例（算术 / 字符串 / 两种引号 / 控制流 / 函数 /
+**判分的人不是我**：`tests/asy` 的二十四份用例（算术 / 字符串 / 两种引号 / 控制流 / 函数 /
 real 的 %.15g / `? :` / 数学函数 / 数组 / pair / 切片与整数组输出 / for-each /
 字符串函数 / `pair[]` / 默认实参与命名实参 / 重载解析 / struct / struct 的 pair 字段 /
-struct 的数组字段 / struct 的记录字段 / `A[]` / struct 的方法 / 构造函数）每份都是
+struct 的数组字段 / struct 的记录字段 / `A[]` / struct 的方法 / 构造函数 /
+文件级 operator init）每份都是
 「五条腿逐字节相同 == `.expected` == `asy -noV` 当场重跑」。`.expected` 本身就是真 asy 的
 输出生成的；机器上没装 asymptote 时那一节打印 skip，但 `.expected` 仍然把答案钉住。
 
@@ -452,7 +454,7 @@ struct 的数组字段 / struct 的记录字段 / `A[]` / struct 的方法 / 构
 理由是上面那条 ULP 测量）、函数里读文件级变量（核心方言没有全局量）、
 循环条件里的 `? :`、给切片赋值（`a[0:2] = b`）、多维数组、
 字符串的 `reverse`/`insert`/`split`、struct 的三条（自引用字段 / 把方法当值取出来 /
-文件级与非 void 的 `operator init`）。
+`operator init` 剩下的两种形态：带形参的文件级那份、非 void 的那份）。
 
 **for-each 的两条语义也是量出来的**：循环变量是**复制**（体里 `x = 99` 不动数组），
 而迭代是**活的** —— `int[] g={1,2}; int n=0; for(int x:g){++n; if(n<5) g.push(9);}`
@@ -1047,7 +1049,7 @@ asy 那一侧落地的是 `A[]`（`cases/21-structarr.asy`，与 `asy -noV` 逐�
 
 - **`A a;` 不走构造函数**。体里赋 `x = 42` 之后 `A a; write(a.x)` 印的还是 0。换掉
   `A a;` 的是**文件级**的 `A operator init()`（量过：它连内嵌记录字段一起管），那一条
-  还在门外，`tests/asy/bad/ctor-toplevel.asy` 钉着。同名的两个东西是两件事。
+  是第二十二刀收的，见下一节。同名的两个东西是两件事。
 - **非 void 的 `operator init` 不给构造函数**。`int operator init(int)` 之后 `A(3)` 在
   asy 那边报 "no matching variable 'A'"。我们连声明一起拒（`bad/ctor-nonvoid.asy`）。
 - 字段默认值在体**之前**就铺好（`int z = 8;` 加体里 `z = z + 1` 出来是 9）。
@@ -1062,6 +1064,33 @@ asy 那一侧落地的是 `A[]`（`cases/21-structarr.asy`，与 `asy -noV` 逐�
 这个名字"。类型名跟函数候选一样是顺序解析的，现在按声明下标裁（`recHere`），struct 体里
 则按**这个 struct 的位置**裁。这类漏洞不会让任何用例变红，只有 `strict/struct-fwd` 盯得住 ——
 这一节存在的理由就是它。
+
+### 已落地（支持面第十一阶段：文件级 operator init，门槛 2 第二十二刀）
+
+第三刀零后端改动。上一节那句"`A a;` 与 `A(…)` 是两件事"里的另一件：**文件级**的
+`T operator init()` 换掉 `T t;` 的隐式构造（`plain_pens` 的 `scaleT operator init()`
+就是这个形态）。
+
+降级只是"多问一句"：`recInit(t)` 先问此处可见的那份 operator init，没有才走 `recNew(t)`
+（原来那份"字段默认值 + 内嵌记录"的构造）。分界是量出来的，而且反直觉的那半在这里：
+
+- `A a;` 与**内嵌记录字段**走 operator init；
+- `new A`（显式）与构造调用 `A(…)` 走 `recNew` —— 量过 `A(3)` 拿到的是**字段默认值**，
+  `A r = new A;` 同理。这条不是细节：正因为 `new A` 不走 operator init，那份 operator
+  init 的体里写 `A r = new A;`（最常见的写法）才不会无限递归。
+- 内嵌记录字段那一格按**那个 struct 声明处**的可见性定，不是按用它的地方：量过
+  `struct B { A a; }` 写在 operator init 前面时 `b.a.x` 是字段默认值，写在后面才是
+  operator init 的结果。所以 `asy__new_B` 那份正文只生成一次仍然是对的 —— 生成时把 `at`
+  挪到 B 的声明处就够了。
+- 顺序解析照旧：两份 operator init 就是各管后面那一段（量过印 1 再印 2）。
+
+数组元素仍然不走它（asy 那边 `new A[2]` 的格子是未初始化的，读就报错），这条差别本来
+就记在 `lower.js` 的文件头。
+
+留在门外的收窄成一条：**带形参**的文件级 `operator init`。asy 收这个声明，但它不是隐式
+转换（量过 `A a = 7;` 报 "cannot cast 'int' to 'A'"），既然量不出它到底能拿来干什么，
+就不猜 —— `tests/asy/bad/oinit-args.asy` 钉着。`bad/ctor-toplevel.asy` 因为这一刀**通过**
+了，所以删掉换成它。
 
 ## 决策 4：调用 LLVM 需要 extern-C FFI —— 这是新要求，也是 dogfood
 
