@@ -118,7 +118,9 @@ function auxDigest(mod, op, v) {
     return `field:${mod.types[acc.type].name}.${acc.field}`;
   }
   if (op === OP.NEW || op === OP.COPY || op === OP.ETAG || op === OP.IDXGET
-    || op === OP.IDXSET || op === OP.AGGLIT || op === OP.MKENUM) {
+    || op === OP.IDXSET || op === OP.AGGLIT || op === OP.MKENUM
+    // 数组那五条也是类型号（第十八刀）：aux 上是**数组类型**，元素身份挂在它的 oir 上。
+    || op === OP.ANEW || op === OP.AGET || op === OP.ASET || op === OP.APUSH || op === OP.APOP) {
     return `type:${mod.types[v].kind}:${mod.types[v].name}`;
   }
   if (op === OP.CVT) return `cvt:${CVT_NAMES[v]}`;

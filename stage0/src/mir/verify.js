@@ -129,7 +129,11 @@ function checkIndex(mod, f, i, op, v, bad) {
   if ((op === OP.GLOAD || op === OP.GSTORE) && mod.globals[v] === undefined) bad(i, `全局号 ${v} 越界`);
   if ((op === OP.FLD || op === OP.FLDSET) && mod.accs[v] === undefined) bad(i, `访问描述符 ${v} 越界`);
   if ((op === OP.NEW || op === OP.COPY || op === OP.ETAG || op === OP.IDXGET
-    || op === OP.IDXSET || op === OP.AGGLIT || op === OP.MKENUM) && mod.types[v] === undefined) {
+    || op === OP.IDXSET || op === OP.AGGLIT || op === OP.MKENUM
+    // 数组那五条的 aux 也是类型号（第十八刀）：越界的话后端拿不到元素类型，
+    // 发出来的会是"按 ptr 猜"的指令 —— 那种错在运行时才现形，所以在这里查。
+    || op === OP.ANEW || op === OP.AGET || op === OP.ASET || op === OP.APUSH
+    || op === OP.APOP) && mod.types[v] === undefined) {
     bad(i, `类型号 ${v} 越界`);
   }
 }

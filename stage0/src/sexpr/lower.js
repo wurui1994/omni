@@ -105,10 +105,15 @@ class CoreLowerer {
       }
       return bufType(e);
     }
-    // `(arr int|real|bool|string)` 或 `(arr (vec T N))`：可增长数组（门槛 2 第四刀）。
-    // 元素比 buf 宽 —— asy 的 `string[]` 到处都是，而数组不用上 GPU，没有"只能是数"的约束。
-    // 向量元素是第八刀加的（asy 的 `pair[]`）：运行时那一份按字节的实现管长度与增长，
-    // 元素的读写由各条腿自己 load/store，见 omni_arr.c 尾部。
+    // `(arr int|real|bool|string)`、`(arr (vec T N))` 或 `(arr 类名)`：可增长数组（门槛 2
+    // 第四刀）。元素比 buf 宽 —— asy 的 `string[]` 到处都是，而数组不用上 GPU，没有
+    // "只能是数"的约束。向量元素是第八刀加的（asy 的 `pair[]`）：运行时那一份按字节的
+    // 实现管长度与增长，元素的读写由各条腿自己 load/store，见 omni_arr.c 尾部。
+    // **类元素是第十八刀加的**（asy 的 `A[]`）：类是引用语义，格子里躺的就是一个句柄，
+    // 所以走的还是那份 blob（步长 8），"存进去要不要拷"这个问题在引用语义下不存在。
+    // **结构体元素还不收**：那是值语义，格子里躺的是内容，于是 `aset`/`apush`/`anew`
+    // 三处都要按元素类型拷一份 —— JS 与解释器那两条腿的 `arrCopy` 是**类型擦除**的
+    // （只认 Array.isArray），拷不动一个普通对象。`tests/sexpr/bad/arr-elem-struct.sx` 钉着。
     // **数组套数组仍然不收**：MIR 那一层元素类型只有一个 8 位类型码，`(arr (arr int))`
     // 与 `(arr (arr string))` 在那里是同一个码 —— 那不是"少写几行"，是类型身份丢了。
     if (isList(node) && head(node) === 'arr') {
@@ -117,9 +122,15 @@ class CoreLowerer {
         const e = this.ty(en, what);
         return e === null ? null : arrType(e);
       }
-      const e = isAtom(en) ? TYPES.get(en.value) : undefined;
+      const nm = isAtom(en) ? en.value : null;
+      if (nm !== null && this.classes.has(nm)) return arrType(this.classes.get(nm));
+      if (nm !== null && this.structs.has(nm)) {
+        return this.err(node, `${what}：数组的元素是结构体 '${nm}'（值语义）这一刀还不收 ——`
+          + ` 类（引用语义）可以，见 sexpr/lower.js 的 ty`);
+      }
+      const e = nm === null ? undefined : TYPES.get(nm);
       if (e === undefined || e === VOID) {
-        return this.err(node, `${what}：(arr 元素) 的元素只能是 int / real / bool / string / (vec T N)`);
+        return this.err(node, `${what}：(arr 元素) 的元素只能是 int / real / bool / string / (vec T N) / 类名`);
       }
       return arrType(e);
     }

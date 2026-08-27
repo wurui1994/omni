@@ -465,24 +465,29 @@ class ToMir {
       }
       // 数组六条。ANEW 的零值是一个普通操作数（b），不是 aux 上的常量 ——
       // string 的零值是一个字符串常量，塞不进 aux。
+      // **aux = 数组类型号**（第十八刀）：`t` 那 8 位只说得清元素的**种类**，而 T_AGG 里
+      // struct 与 class 是同一个码，值语义与引用语义在后端就分不开了。类型池上挂着 `oir`，
+      // 消费者于是拿得到完整的元素类型（`mod.types[aux].oir.elem`）。ALEN 不用身份。
       case 'ArrNew':
-        return f.emit(OP.ANEW, T_ARR, this.expr(e.count), this.expr(e.zero), this.ty(e.type.elem));
+        return f.emit(OP.ANEW, T_ARR, this.expr(e.count), this.expr(e.zero), this.aggNo(e.type));
       case 'ArrLen':
         return f.emit(OP.ALEN, T_I64, this.expr(e.arr), REF_NONE, 0);
       case 'ArrGet':
-        return f.emit(OP.AGET, this.ty(e.type), this.expr(e.arr), this.expr(e.index), 0);
+        return f.emit(OP.AGET, this.ty(e.type), this.expr(e.arr), this.expr(e.index),
+          this.aggNo(e.arr.type));
       case 'ArrSet': {
         const a = this.expr(e.arr);
         const i = this.expr(e.index);
         const v = this.expr(e.value);
-        return f.emit(OP.ASET, this.ty(e.type), a, f.pushArgs([i, v]), 0);
+        return f.emit(OP.ASET, this.ty(e.type), a, f.pushArgs([i, v]), this.aggNo(e.arr.type));
       }
       case 'ArrPush': {
         const a = this.expr(e.arr);
-        return f.emit(OP.APUSH, this.ty(e.type), a, this.expr(e.value), 0);
+        return f.emit(OP.APUSH, this.ty(e.type), a, this.expr(e.value), this.aggNo(e.arr.type));
       }
       case 'ArrPop':
-        return f.emit(OP.APOP, this.ty(e.type), this.expr(e.arr), REF_NONE, 0);
+        return f.emit(OP.APOP, this.ty(e.type), this.expr(e.arr), REF_NONE,
+          this.aggNo(e.arr.type));
       default:
         throw new OmniError(`mir: 还没有处理的表达式 ${e.kind}`);
     }

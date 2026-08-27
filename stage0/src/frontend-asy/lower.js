@@ -60,6 +60,11 @@
 // `b.a.y` 是 A 的字段默认值，不是空引用），所以有记录字段的类型一定走生成的构造函数，
 // 里面把内嵌对象一个个造出来。字段类型只收**前面已经声明过**的记录 —— 自引用在门外，
 // 见下面的差别一节）。
+// **`A[]`**（第十九刀：asy 的 struct 是引用类型，所以 `A[]` 就是"一串句柄" ——
+// 核心方言的 `(arr T)` 这一刀收下了类元素，格子里躺的是句柄，存进去一句拷都不用发。
+// 裸数组那一整套 —— `push`/`pop`/`.length`/下标读写/写下标扩长/切片/for-each/当形参与
+// 返回值 —— 在 `A[]` 上一条不少；量过的三条都对上了：句柄进数组不拷、同一个对象进两格
+// 改一次两处都变、切片复制的是**数组**而不是对象（格子里还是同一批句柄））。
 //
 // 不支持（见到就报错，报错里说清是哪一条）：triple、import/access、
 // typedef、算符重载、给切片赋值（`a[0:2] = b`）、
@@ -77,10 +82,9 @@
 // 还没量全；`split` 要 `string[]` 的返回值，那条路还没走通）、
 // 循环条件里的 `?:`（摊出来的赋值只能落在循环外面，条件就只
 // 算一次了 —— 语义会变，所以报错而不是悄悄换个意思）、
-// struct 的这三条边界（每条都有 bad/ 用例钉着）：**自引用**字段
+// struct 的这两条边界（每条都有 bad/ 用例钉着）：**自引用**字段
 // （`struct A { A next; }` —— asy 收，我们不收，见下面的差别一节）、
-// struct 里的成员函数（这一刀只有字段声明）、
-// `A[]`（数组元素还只有 int/real/bool/string/pair）。
+// struct 里的成员函数（这一刀只有字段声明）。
 //
 // ## 与真 asy 的差别，写在这里而不是等着被发现
 //
@@ -90,7 +94,9 @@
 // - **数组的未初始化格子**：asy 每个格子带一个"写过没有"的标记，`new int[2]` 之后读
 //   `a[0]` 是运行期错误（量过："read uninitialized value from array at index 0"）；
 //   我们填零值。写下标扩长时中间跳过的格子同理。这类程序本来就有 bug，但"我们给 0
-//   而 asy 报错"必须写在明处。
+//   而 asy 报错"必须写在明处。**记录元素**（第十九刀）上这一条稍好一点：`new A[2]` 的
+//   格子是**空引用**，读它的字段撞的是判空诊断 —— 两边都报错，只是话不一样；而写下标
+//   扩长跳过的格子我们填 `(cnew A)`（方言里写不出空引用），那才是"我们给值、asy 报错"。
 // - 反过来的一条**已经对齐**了：后缀 `x++` asy 自己不收（"postfix expressions are not
 //   allowed"），所以这一层也拒 —— 比 asy 多接受一门语言不会让任何用例变红，只会让
 //   "等价"这两个字变虚。`tests/asy/strict/` 那一节专门盯这种漏洞。
@@ -146,9 +152,13 @@ const SCALARS = new Set(['int', 'real', 'bool', 'string']);
 /** dotQual 的第三种答案："是带点的名字，但接收者那一层已经报过错了" */
 const DOT_BAD = { bad: true };
 
-/** 能当数组元素的类型。pair 是第八刀加的（核心方言的 `(arr T)` 现在收向量元素）；
+/** 能当数组元素的**内建**类型。pair 是第八刀加的（核心方言的 `(arr T)` 现在收向量元素）；
+ *  记录（struct）是第十九刀加的，但它不在这个表里 —— 记录是逐文件声明的，问 isRec。
  *  数组本身仍然不在里面 —— 多维数组是另一刀。 */
 const ASY_ARRELEM = new Set(['int', 'real', 'bool', 'string', 'pair']);
+
+/** 数组元素这一刀收的东西写成一句话，四处报错共用（免得四处各写一遍走样） */
+const ASY_ARRELEM_TEXT = '数组元素这一刀只有 int/real/bool/string/pair 与 struct';
 
 /**
  * 实参类型 -> 形参类型要走几次隐式转换：0 = 同型，1 = 一次转换，-1 = 不行。
@@ -407,22 +417,27 @@ const HELPERS = new Map([
     (ret (bin "+" (var r) (call asy__ssubto (var s) (var i)))))`],
 ]);
 
-/** 写下标时的自动扩长。asy 量过：`int[] e; e[2]=5;` 之后 `e.length` 是 **3**（= 下标+1），
- *  中间那些格子在 asy 那边是"未初始化"，读会报错；我们填零值，差别写在文件头。
- *  五种元素各一份，因为核心方言的 `(apush …)` 要具体的零值字面量。pair 那一份是第八刀
- *  加的，元素类型写的是 `(vec real 2)` —— 三条 helper 的**正文一个字都没改**。
- *  这里刻意不用解构（`for (const [a, b] of …)`）：封闭子集里那不是保证能降级的写法。 */
-for (const t of ['int', 'real', 'bool', 'string', 'pair']) {
-  const et = asyCore(t);
-  HELPERS.set(`asy__grow_${t}`, `  (fn asy__grow_${t} ((a (arr ${et})) (i int)) void
+/**
+ * 数组三条 helper 的正文（扩长 / 切片 / `a[i:]`），按元素类型生成。
+ * 标量与 pair 那五份在下面的循环里一次生好（模块级静态文本）；**记录元素**是逐类型的，
+ * 由 AsyLower.arrHelper 用同一个工厂生成 —— 正文只有元素类型与"扩长填什么"两处不同，
+ * 所以这里是一个函数而不是两份抄写。
+ *
+ * 扩长：asy 量过 `int[] e; e[2]=5;` 之后 `e.length` 是 **3**（= 下标+1），中间那些格子在
+ * asy 那边是"未初始化"、读会报错；我们填零值（记录元素填 `(cnew T)`，因为方言里写不出
+ * 空引用），这条差别写在文件头。
+ * 切片：量过的三条 —— 半开区间、**是复制不是视图**（`b=a[0:2]; b[0]=99;` 之后 a[0] 不变，
+ * 但元素是记录时"复制"复制的是句柄，所以格子里还是同一批对象，量过 asy 也是这样）、
+ * 右边界超长截到末尾。左边界不 clamp、`a[3:1]` 给空数组，两条差别都在文件头。
+ * `a[i:]` 单独一条而不是在调用处写 `(alen …)`：那样接收者的代码要印两遍，`f()[1:]` 会把
+ * f 调两次。
+ */
+function asyArrHelpers(name, et, zero) {
+  return [
+    [`asy__grow_${name}`, `  (fn asy__grow_${name} ((a (arr ${et})) (i int)) void
     (while (bin "<=" (alen (var a)) (var i))
-      (do (apush (var a) ${ZERO.get(t)}))))`);
-  // 切片。量过的三条：半开区间、**是复制不是视图**（`b=a[0:2]; b[0]=99;` 之后 a[0] 还是 10）、
-  // 右边界超长就截到末尾（`a[2:100]` 给到末尾）。左边界不 clamp：负数在 asy 是运行期错误
-  // （"invalid negative index in slice of non-cyclic array"），落到 (aget …) 上也是运行期
-  // 错误，只是话不一样。`a[3:1]` asy 报 "slice ends before it begins"，我们给空数组 ——
-  // 这条差别写在文件头。
-  HELPERS.set(`asy__slice_${t}`, `  (fn asy__slice_${t} ((a (arr ${et})) (i int) (j int)) (arr ${et})
+      (do (apush (var a) ${zero}))))`],
+    [`asy__slice_${name}`, `  (fn asy__slice_${name} ((a (arr ${et})) (i int) (j int)) (arr ${et})
     (let r (arr ${et}) (anew (arr ${et}) (int 0)))
     (let k int (var i))
     (let e int (var j))
@@ -431,11 +446,15 @@ for (const t of ['int', 'real', 'bool', 'string', 'pair']) {
       (do
         (apush (var r) (aget (var a) (var k)))
         (set k (bin "+" (var k) (int 1)))))
-    (ret (var r)))`);
-  // `a[i:]`：末端默认是长度。单独一条 helper 而不是在调用处写 `(alen …)` —— 那样接收者
-  // 的代码要印两遍，`f()[1:]` 就会把 f 调两次。
-  HELPERS.set(`asy__slicefrom_${t}`, `  (fn asy__slicefrom_${t} ((a (arr ${et})) (i int)) (arr ${et})
-    (ret (call asy__slice_${t} (var a) (var i) (alen (var a)))))`);
+    (ret (var r)))`],
+    [`asy__slicefrom_${name}`, `  (fn asy__slicefrom_${name} ((a (arr ${et})) (i int)) (arr ${et})
+    (ret (call asy__slice_${name} (var a) (var i) (alen (var a)))))`],
+  ];
+}
+
+// 这里刻意不用解构（`for (const [a, b] of …)`）：封闭子集里那不是保证能降级的写法。
+for (const t of ['int', 'real', 'bool', 'string', 'pair']) {
+  for (const pair of asyArrHelpers(t, asyCore(t), ZERO.get(t))) HELPERS.set(pair[0], pair[1]);
 }
 
 class AsyLower {
@@ -473,6 +492,26 @@ class AsyLower {
     // `struct B { int n = bump(); }` 之后 `new B` 两次，计数器是 2）。
     // 名字 -> 构造函数名；正文攒在 wraps 里，和默认实参的包装一起发。
     this.recInits = new Map();
+    // 元素是记录的数组 helper（grow / slice / slicefrom）：五种标量那三份是模块级的静态
+    // 文本（HELPERS），记录是**逐类型**的，所以按同一个模板在这里生成，名字 -> 正文。
+    this.arrGen = new Map();
+  }
+
+  /**
+   * 数组 helper 的名字：标量元素就是 HELPERS 里那份（标记用到），记录元素按同一个工厂
+   * （asyArrHelpers）生一份 —— 三条一起生，因为 slicefrom 要调 slice。
+   * 扩长填的是 `(cnew T)`：方言里写不出空引用，而 asy 那边那些格子是"未初始化"、读就报错，
+   * 这一条与其他元素类型的零值填充是同一条差别（见文件头）。
+   */
+  arrHelper(kind, el) {
+    const nm = `asy__${kind}_${el}`;
+    if (!this.isRec(el)) { this.used.add(nm); return nm; }
+    if (!this.arrGen.has(nm)) {
+      for (const pair of asyArrHelpers(el, asyCore(el), `(cnew ${asyCore(el)})`)) {
+        if (!this.arrGen.has(pair[0])) this.arrGen.set(pair[0], pair[1]);
+      }
+    }
+    return nm;
   }
 
   err(node, msg) {
@@ -531,7 +570,7 @@ class AsyLower {
       if (isList(dims) && head(dims) !== 'dims') return this.nope(node, '多维数组');
       const el = this.plainName(node.items[1]);
       if (el === null) return this.nope(node, '带点的类型名');
-      if (!ASY_ARRELEM.has(el)) return this.nope(node, `${el}[] （数组元素这一刀只有 int/real/bool/string/pair）`);
+      if (!this.arrElemOk(el)) return this.nope(node, `${el}[] （${ASY_ARRELEM_TEXT}）`);
       return `${el}[]`;
     }
     if (h !== 'name-ty') return this.err(node, `${what}：认不出的类型形状 '${h}'`);
@@ -547,6 +586,9 @@ class AsyLower {
 
   /** `t` 是这份文件里声明过的记录（asy 的 struct）吗 */
   isRec(t) { return t !== null && t !== undefined && this.records.has(t); }
+
+  /** `el` 能当数组元素吗（第十九刀起记录也能：asy 的 struct 是引用类型，`A[]` 是一串句柄） */
+  arrElemOk(el) { return ASY_ARRELEM.has(el) || this.isRec(el); }
 
   /**
    * `struct A { int x; real y = 1.5; }` -> 一条记录声明。
@@ -581,7 +623,7 @@ class AsyLower {
       const ft = this.type(r.items[1], `struct ${nm} 的字段`);
       if (ft === null) return null;
       if (!SCALARS.has(ft) && ft !== 'pair' && !this.isRec(ft)
-          && !(asyIsArr(ft) && ASY_ARRELEM.has(asyElem(ft)))) {
+          && !(asyIsArr(ft) && this.arrElemOk(asyElem(ft)))) {
         return this.nope(r, `struct ${nm} 的 ${ft} 字段（这一刀的字段只有 `
           + `int/real/bool/string/pair、它们的一维数组，与**前面已经声明过**的 struct）`);
       }
@@ -815,15 +857,14 @@ class AsyLower {
       ? { code: '(int 0)', type: 'int' }
       : this.coerce(this.expr(loNode), 'int', n, '切片的起点');
     if (lo === null) return null;
-    this.used.add(`asy__slice_${el}`);
+    const sliceFn = this.arrHelper('slice', el);
     if (hiNode !== null) {
       const hi = this.coerce(this.expr(hiNode), 'int', n, '切片的终点');
       if (hi === null) return null;
-      return { code: `(call asy__slice_${el} ${a.code} ${lo.code} ${hi.code})`, type: a.type };
+      return { code: `(call ${sliceFn} ${a.code} ${lo.code} ${hi.code})`, type: a.type };
     }
     // `a[i:]` 与 `a[:]`：末端是长度
-    this.used.add(`asy__slicefrom_${el}`);
-    return { code: `(call asy__slicefrom_${el} ${a.code} ${lo.code})`, type: a.type };
+    return { code: `(call ${this.arrHelper('slicefrom', el)} ${a.code} ${lo.code})`, type: a.type };
   }
 
   /** `(qualified (name a) F)` 且 a 是**变量**时回 `{recv, field}`，否则回 null；
@@ -959,7 +1000,7 @@ class AsyLower {
     const el = this.type(n.items[1], 'new 的元素类型');
     if (el === null) return null;
     if (asyIsArr(el) || el === 'void') return this.nope(n, '多维数组');
-    if (!ASY_ARRELEM.has(el)) return this.nope(n, `${el}[] （数组元素这一刀只有 int/real/bool/string/pair）`);
+    if (!this.arrElemOk(el)) return this.nope(n, `${el}[] （${ASY_ARRELEM_TEXT}）`);
     const dimexps = n.items[2];
     const hasCount = isList(dimexps) && head(dimexps) === 'dimexps';
     if (isList(dimexps) && head(dimexps) === 'dimexps-add') return this.nope(n, '多维数组');
@@ -1785,7 +1826,7 @@ class AsyLower {
         const dims = start.items[2];
         if (!isList(dims) || head(dims) !== 'dims') return this.nope(start, '声明里带多维数组或形参表');
         if (asyIsArr(t)) return this.nope(start, '多维数组');
-        if (!ASY_ARRELEM.has(t)) return this.nope(start, `${t}[] （数组元素这一刀只有 int/real/bool/string/pair）`);
+        if (!this.arrElemOk(t)) return this.nope(start, `${t}[] （${ASY_ARRELEM_TEXT}）`);
         t = `${t}[]`;
       }
       const nm = isAtom(start.items[1]) ? start.items[1].value : null;
@@ -1995,8 +2036,7 @@ class AsyLower {
     const iv = `asy__i${this.tmp++}`;
     this.pre.push(`(let ${av} ${asyCore(a.type)} ${a.code})`);
     this.pre.push(`(let ${iv} int ${idx.code})`);
-    const grow = `asy__grow_${el}`;
-    this.used.add(grow);
+    const grow = this.arrHelper('grow', el);
     const head2 = `(expr (call ${grow} (var ${av}) (var ${iv})))`;
     const cur = `(aget (var ${av}) (var ${iv}))`;
     const put = (code) => [head2, `(aset (var ${av}) (var ${iv}) ${code})`];
@@ -2206,6 +2246,8 @@ class AsyLower {
     for (const [hnm, text] of HELPERS) {
       if (this.used.has(hnm)) out.push(text);
     }
+    // 元素是记录的数组 helper：正文是降级过程中按同一个工厂生成的，顺序按第一次用到
+    for (const text of this.arrGen.values()) out.push(text);
     for (const f of fns) out.push(f);
     // 默认实参的包装：正文是降级过程中生成的，所以只能在这里发（顺序按第一次用到）
     for (const w of this.wraps) out.push(w);

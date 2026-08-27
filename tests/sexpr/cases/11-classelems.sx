@@ -1,0 +1,83 @@
+(module
+  ;; 数组的元素是**类** —— 门槛 2 第十八刀。asy 的 `A[]` 要它（asy 的 struct 是引用
+  ;; 类型，所以 `A[]` 是"一串句柄"），门槛 3 的 picture 那种"一串绘图命令"同理。
+  ;;
+  ;; 这一份盯的是引用语义：格子里躺的是句柄，所以
+  ;;   - 存进去不拷（`(aset a 0 o)` 之后改 o 的字段，`(aget a 0)` 看得见）；
+  ;;   - 零值是**空引用**，不是一个新对象 —— 读它的字段要撞见判空诊断（另一份用例钉）；
+  ;;   - 两条腿的实现是同一份 blob（步长 8）：C 那边元素的 C 类型是 `c_Node`
+  ;;     （它本身就是指针 typedef），LLVM 那边是一条 `load ptr`。
+  (class Node (v int) (tag string))
+
+  (fn mk ((n int)) Node
+    (let o Node (cnew Node))
+    (fldset (var o) v (var n))
+    (fldset (var o) tag (str "n"))
+    (ret (var o)))
+
+  (fn bump ((a (arr Node)) (k int)) void
+    (let i int (int 0))
+    (while (bin "<" (var i) (alen (var a)))
+      (do
+        (fldset (aget (var a) (var i)) v
+          (bin "+" (fld (aget (var a) (var i)) v) (var k)))
+        (set i (bin "+" (var i) (int 1))))))
+
+  (fn sum ((a (arr Node))) int
+    (let s int (int 0))
+    (let i int (int 0))
+    (while (bin "<" (var i) (alen (var a)))
+      (do
+        (set s (bin "+" (var s) (fld (aget (var a) (var i)) v)))
+        (set i (bin "+" (var i) (int 1)))))
+    (ret (var s)))
+
+  (main
+    ;; 空数组起手，push 进三个对象
+    (let a (arr Node) (anew (arr Node) (int 0)))
+    (print (alen (var a)))
+    (apush (var a) (call mk (int 1)))
+    (apush (var a) (call mk (int 2)))
+    (apush (var a) (call mk (int 3)))
+    (print (alen (var a)))
+    (print (fld (aget (var a) (int 0)) v))
+    (print (fld (aget (var a) (int 2)) tag))
+    (print (call sum (var a)))
+
+    ;; **引用语义**：手上的句柄与格子里的是同一个对象
+    (let o Node (aget (var a) (int 1)))
+    (fldset (var o) v (int 20))
+    (print (fld (aget (var a) (int 1)) v))
+    (print (call sum (var a)))
+
+    ;; 数组本身也是引用语义：传进函数改的是同一条
+    (expr (call bump (var a) (int 100)))
+    (print (call sum (var a)))
+    (print (fld (aget (var a) (int 0)) v))
+
+    ;; aset 换掉一个格子：换的是句柄，原来那个对象还活着
+    (aset (var a) (int 0) (call mk (int 7)))
+    (print (fld (aget (var a) (int 0)) v))
+    (print (call sum (var a)))
+
+    ;; apop 回来的是句柄本身
+    (let last Node (apop (var a)))
+    (print (fld (var last) v))
+    (print (alen (var a)))
+    (print (call sum (var a)))
+
+    ;; 定长 anew：格子的零值是**空引用**，`(is-null …)` 看得见（读字段会撞判空）
+    (let z (arr Node) (anew (arr Node) (int 2)))
+    (print (alen (var z)))
+    (aset (var z) (int 1) (call mk (int 5)))
+    (print (fld (aget (var z) (int 1)) v))
+
+    ;; 同一个对象进两个格子：改一次，两处都变（引用语义最后一问）
+    (let hub Node (call mk (int 9)))
+    (apush (var a) (var hub))
+    (apush (var a) (var hub))
+    (print (alen (var a)))
+    (fldset (var hub) v (int 40))
+    (print (fld (aget (var a) (int 2)) v))
+    (print (fld (aget (var a) (int 3)) v))
+    (print (call sum (var a)))))

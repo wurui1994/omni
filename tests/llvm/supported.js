@@ -43,6 +43,11 @@ export const SUPPORTED = [
   // 一条 getelementptr（没有 load），而 COPY 那条 `load %s_Point` 是一次首类聚合读 ——
   // 深拷贝不用手写。内嵌的类反过来只存一个指针。
   join('tests', 'sexpr', 'cases', '10-nested.sx'),
+  // 类元素的数组（门槛 2 第十八刀）：格子里躺**句柄**，所以还是那份 blob，只是步长 8、
+  // 元素的读写是一条 `load ptr` / `store ptr`。这一份同时是 MIR 那处改动的度量点 ——
+  // 数组指令的 aux 现在是数组类型号，元素身份从类型池的 oir 上取（`t` 那 8 位里
+  // struct 与 class 是同一个码，照它发指令就是在猜值语义还是引用语义）。
+  join('tests', 'sexpr', 'cases', '11-classelems.sx'),
   // 这一份是**边界那节推过来的**：结构体一支持，01_basics 就整份能降了（它原先被拒
   // 只是因为里面有 struct）。它的输出与 run / interp / omni-c 逐字节相同，所以留在门外
   // 就变成了"其实支持却假装不支持"—— 那正是这张表要防的另一半。

@@ -191,9 +191,11 @@ export function cTypeName(t) {
   }
 }
 
-/** 元素是聚合（现在只有向量）时数组走按字节那一份，see omni_arr.c 尾部 */
+/** 元素走按字节那一份（omni_arr.c 尾部）的判据：向量（值语义，格子里躺内容）与
+ *  类（引用语义，格子里躺一个句柄 —— 步长就是一个指针）。两者共用 blob 是因为
+ *  运行时那四份单态是按**元素的 C 类型**生成的，而这两种的 C 类型是逐形状的。 */
 export function arrIsBlob(elem) {
-  return elem.k === 'vec';
+  return elem.k === 'vec' || elem.k === 'class';
 }
 
 /**

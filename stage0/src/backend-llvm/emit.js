@@ -373,13 +373,18 @@ class LlvmEmitter {
     // 聚合元素的 `anew` 要把零值的**地址**交给运行时（blob 那份实现按字节拷）。
     // 承载它的 alloca 一律发在入口块、每种元素类型一个：发在 anew 那一行的话，
     // 循环里的 anew 每转一圈就多一块栈 —— alloca 不出循环，栈就一直长。
+    // 键是元素的 LLVM 拼写（`<2 x double>` / `ptr`）：第十八刀起元素类型从类型池上取，
+    // 那里的 key 是 OIR 类型对象，而同一种拼写共用一块栈就够了。
     this.blobZero = new Map();
     let z = 0;
     while (z < f.count()) {
-      if (f.op[z] === OP.ANEW && typeLanes(f.aux[z]) > 1 && !this.blobZero.has(f.aux[z])) {
-        const name = `%zb${this.blobZero.size}`;
-        this.blobZero.set(f.aux[z], name);
-        this.line(`  ${name} = alloca ${this.ty(f.aux[z], 'anew 的零值')}`);
+      if (f.op[z] === OP.ANEW) {
+        const rep = this.arrRep(f.aux[z], 'anew 的元素');
+        if (rep.blob && !this.blobZero.has(rep.ety)) {
+          const name = `%zb${this.blobZero.size}`;
+          this.blobZero.set(rep.ety, name);
+          this.line(`  ${name} = alloca ${rep.ety}`);
+        }
       }
       z++;
     }
@@ -822,9 +827,17 @@ class LlvmEmitter {
    * 越界检查、倍增、错误消息因此不存在"两条腿各写一份"的可能。
    */
   arrInsn(f, i, op, dst, t) {
-    // ANEW 的元素类型在 aux 上（结果类型是数组本身）；其余的元素类型就是 `t`
-    const el = op === OP.ANEW ? f.aux[i] : t;
-    if (typeLanes(el) > 1) { this.arrBlobInsn(f, i, op, dst, el); return; }
+    // ALEN 不看元素：长度存在 blob 与那四份单态**共用的同一个头**里（omni_arr.c），
+    // 所以它没有 aux，走哪一份 `_len` 都是同一段机器码。其余五条的 aux 是**数组类型号**
+    // （第十八刀）：元素的完整类型在池项的 `oir` 上，因为 `t` 那 8 位分不出
+    // struct（值语义）与 class（引用语义）—— 两者都是 T_AGG。
+    if (op !== OP.ALEN) {
+      const rep = this.arrRep(f.aux[i], '数组的元素');
+      if (rep.blob) { this.arrBlobInsn(f, i, op, dst, rep); return; }
+    }
+    const el = op === OP.ANEW
+      ? this.fieldElem(this.arrRep(f.aux[i], 'anew 的元素').el, 'anew 的元素')
+      : t;
     const e = this.noteArrElem(el);
     const s = e.suffix;
     const a = this.val(f.a[i]);
@@ -854,21 +867,22 @@ class LlvmEmitter {
   }
 
   /**
-   * 聚合元素（现在只有向量：asy 的 `pair[]`）的数组。运行时那一份按字节的 blob 实现
-   * 管长度/容量/增长/越界消息，`_at`/`_push`/`_pop` 回的是**格子的地址** ——
-   * 元素的读写在这里发一条 load / 一条 store，与这条腿发局部变量读写用的是同一份类型
-   * 映射（`this.ty`）。C 那条腿是同一个符号加一层 static inline，两边不可能分叉。
+   * 聚合元素的数组：运行时那一份按字节的 blob 实现管长度/容量/增长/越界消息，
+   * `_at`/`_push`/`_pop` 回的是**格子的地址** —— 元素的读写在这里发一条 load / 一条 store，
+   * 与这条腿发局部变量读写用的是同一份类型映射。C 那条腿是同一个符号加一层
+   * static inline，两边不可能分叉。
    *
-   * 元素大小按道数算：向量的元素只有 int/real 两种，两者都是 8 字节
-   * （`(vec T N)` 的检查在 sexpr 那一层，这里到不了别的）。
+   * 两种元素走这里，步长各来自一处（`arrRep`）：
+   *   - 向量（第八刀，asy 的 `pair[]`）：格子里躺**内容**，步长 = 道数 × 8。
+   *   - 类（第十八刀，asy 的 `A[]`）：格子里躺**句柄**，步长 = 一个指针 = 8。
    */
-  arrBlobInsn(f, i, op, dst, el) {
+  arrBlobInsn(f, i, op, dst, rep) {
     this.needArrBlob = true;
-    const ety = this.ty(el, '数组的元素');
-    const esz = typeLanes(el) * 8;
+    const ety = rep.ety;
+    const esz = rep.esz;
     const a = this.val(f.a[i]);
     if (op === OP.ANEW) {
-      const zp = this.blobZero.get(el);
+      const zp = this.blobZero.get(ety);
       this.line(`  store ${ety} ${this.val(f.b[i])}, ptr ${zp}`);
       this.line(`  ${dst} = call ptr @omni_arr_blob_new(i64 ${a}, i64 ${esz}, ptr ${zp})`);
       return;
@@ -902,6 +916,26 @@ class LlvmEmitter {
     this.line(`  ${p} = call ptr @omni_arr_blob_at(ptr ${a}, i64 ${this.val(args[0])})`);
     this.line(`  store ${ety} ${this.val(args[1])}, ptr ${p}`);
     this.line(`  ${dst} = load ${ety}, ptr ${p}`);
+  }
+
+  /**
+   * aux 上的**数组类型号** -> 这条腿要的元素表示（第十八刀）。
+   * `t` 那 8 位只说得清元素的种类，而 T_AGG 里 struct 与 class 是同一个码 ——
+   * 值语义与引用语义在这一层分不开就只能猜，所以身份走类型池的 `oir`。
+   */
+  arrRep(n, what) {
+    const ty = this.mir.types[n];
+    if (ty === undefined || ty.kind !== 'arr') {
+      throw new OmniError(`${NOPE}数组类型号 ${n}（函数 ${this.f === null ? '?' : this.f.name}）`);
+    }
+    const el = ty.oir.elem;
+    // 向量元素：格子里躺内容，步长 = 道数 × 8（向量的元素只有 int/real，都是 8 字节）
+    if (el.k === 'vec') return { el, blob: true, ety: this.fieldTy(el, what), esz: el.lanes * 8 };
+    // 类元素：格子里躺句柄。**结构体元素还不收** —— 那是值语义，格子里躺的是内容，
+    // 于是 anew/aset/apush 三处都要按元素类型拷一份，而 JS 与解释器那两条腿的
+    // `arrCopy` 是类型擦除的（只认 Array.isArray），拷不动一个普通对象。
+    if (el.k === 'class') return { el, blob: true, ety: 'ptr', esz: 8 };
+    return { el, blob: false };
   }
 
   /** 记下用到的数组元素类型。表外的报错（阶段边界）——  方言只许四种标量。 */
