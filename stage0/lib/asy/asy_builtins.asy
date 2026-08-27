@@ -149,6 +149,16 @@ struct path {
 path cyclepath;
 cyclepath.ismark = true;
 
+// `guide` 在 asy 那边是"还没解出来的路径规格"，`path` 是解好的，两者之间有隐式转换。
+// 这一刀先让 guide 就是 path 的别名。量出来的理由：真 base 里库代码写的 `..` 几乎都
+// **显式给了控制点**（graph_splinetype.asy 的 hermite 就是 `..controls A and B..`），
+// 那种不需要 Hobby 求解器；要解方程的是用户代码里裸写的 `a..b..c`，那一刀留到量出
+// 它真的是下一个坎再写。
+typedef path guide;
+
+// 空路径：`nullpath` 是 asy 的内建名，`g--nullpath` 与 `nullpath--g` 都是恒等
+path nullpath;
+
 knot knotat(pair z) {
   knot k;
   k.pre = z;

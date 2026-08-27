@@ -32,3 +32,19 @@ real sum(real f(real), int n) {
 }
 write(sum(twice, 4));
 write(sum(half, 4));
+
+// 函数值类型的**变量**：形参表跟在名字后面这个拼法（量过：`import graph;` 那 193 条错
+// 里有 4 条是它）。赋值换一个函数也通。
+real g(real) = twice;
+write(g(9));
+g = half;
+write(g(9));
+
+// 函数里的局部函数值变量
+real pick(bool up, real v) {
+  real k(real) = twice;
+  if (!up) k = half;
+  return k(v);
+}
+write(pick(true, 7));
+write(pick(false, 7));

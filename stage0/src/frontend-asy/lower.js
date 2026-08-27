@@ -121,14 +121,17 @@
 // **同价**（打平就是 ambiguous）、而且**不串**（源类型必须一模一样），见 castSig）。
 // **`autounravel`**（第二十八刀：struct 体里带它的声明其实是**文件级**的声明 ——
 // 形参显式、没有 this，可见位置是那个 struct 的位置，见 auMod）。
-// **函数类型**（`real f(real)` 这种形参、`f(v)` 的间接调用、裸函数名当值用 ——
+// **函数类型**（`real f(real)` 这种形参、`f(v)` 的间接调用、裸函数名当值用、
+// 以及函数值类型的**变量**（`real f(real) = twice;` 与 typedef 拼的那一份走同一条路）——
 // 类型全是字符串，所以它就是 `R(P,…)` 那个拼法，见 asyIsFn / fnTypeOf / fnValCall）。
 // **typedef 与 `using`**（别名表 tyAlias：名字 -> 一串 {t, at}，`t` 是已经解析好的类型
 // 字符串，type() 一查就换掉 —— asy 的 typedef 不造新类型，所以"换掉"就是全部语义。
 // 存一串是因为同一个名字可以 typedef 多次，而名字解析是顺序的，见 aliasAt）。
 //
 // 不支持（见到就报错，报错里说清是哪一条）：标准库模块（`import graph;`）、
-// 函数值类型的**变量声明**（`real g(real) = twice;` —— asy 收，那要 vardec 走 mkclo）、
+// 把**方法**取出来当值（`int f() = a.get;` —— asy 收，那是绑住接收者的闭包；
+// 我们的方法是"多一个 this 形参的普通函数"，绑接收者要现造闭包。recField 里那句 nope，
+// `bad/fn-value` 钉着）、
 // 给切片赋值（`a[0:2] = b`）、
 // 字符串的 `reverse`（asy 是**按字节**倒的，而 Omni 的 string 是 UTF-8 字节序列
 // （ADR-0005）—— 非 ASCII 倒过来在 C 那条腿上是一串坏字节，在 JS 那条腿上要看
@@ -1465,6 +1468,14 @@ class AsyLower {
   recField(n, t, nm) {
     const rec = this.records.get(t);
     for (const f of rec.fields) if (f.name === nm) return f;
+    // 名字其实是个**方法**：那不是"没有这个成员"，是"把方法取出来当值"——
+    // asy 收（量过 `int f() = a.get;` 那句印 1：方法取出来是绑住接收者的闭包），
+    // 我们不收，因为我们的方法是"多一个 this 形参的普通函数"，绑接收者要现造一个闭包。
+    // 说清是这一条而不是那句泛泛的"没有字段"，`tests/asy/bad/fn-value.asy` 钉着。
+    if (this.visibleMethods(rec, nm).length > 0) {
+      return this.nope(n, `把方法当值取出来（${t}.${nm} —— 那是绑住接收者的闭包，`
+        + '而我们的方法是多一个 this 形参的普通函数）');
+    }
     const names = [];
     for (const f of rec.fields) names.push(f.name);
     return this.err(n, `struct ${t} 没有字段 '${nm}' —— 有的是 ${names.join(' / ')}`);
@@ -3313,25 +3324,25 @@ class AsyLower {
     for (const d of this.flat(n.items[2], 'decids')) {
       if (!isList(d) || head(d) !== 'decid') return this.err(d, '认不出的声明项');
       const start = d.items[1];
-      // `int f() = a.get;`：**函数值**类型的变量声明写成"形参表跟在名字后面"的那个拼法。
-      // 这一刀不收这个拼法（asy 收，量过：那句印 1 —— 方法取出来是绑住接收者的闭包，
-      // 而我们的方法是"多一个 this 形参的普通函数"）。`tests/asy/bad/fn-value.asy` 钉着。
-      // 注意：**经 typedef 的**同一件事是通的（`typedef real f(real); f g = twice;` ——
-      // 那时类型在 type() 里就成形了，vardec 见到的是 decidstart），拦的只是这个拼法。
-      if (isList(start) && head(start) === 'fundecidstart') {
-        return this.nope(start, '函数值类型的变量声明写成 `int f() = …`（形参表跟在名字后面）'
-          + ' —— typedef 一个函数类型再声明是通的');
-      }
-      if (!isList(start) || head(start) !== 'decidstart') return this.err(start, '认不出的声明项');
-      // `real a[];`：维度写在名字后面。`real a[][]` 也收（多维数组这一刀），
-      // 形参表那一种（`fundecidstart`）在上面就分岔走了。
+      // `real f(real) = twice;`：函数值类型的变量声明，形参表跟在**名字**后面。
+      // 与 typedef 那个拼法（`typedef real F(real); F f = twice;`）是同一件事，只是类型
+      // 在这里才成形 —— 所以走同一个 fnTypeOf，往下跟别的类型没有区别。
+      // 量出来的理由：`import graph;` 那 193 条错里有 4 条是这个拼法。
+      // 门外的一条还在门外：把**方法**取出来当值（`int f() = a.get;`）—— 那要绑接收者的
+      // 闭包，右边那个 `a.get` 自己就会被拒，`tests/asy/bad/fn-value.asy` 钉着。
       let t = base;
-      if (start.items.length > 2) {
-        const d = this.dimsDepth(start.items[2]);
-        if (d === null) return this.nope(start, '声明里带形参表');
+      if (isList(start) && head(start) === 'fundecidstart') {
+        t = this.fnTypeOf(base, start.items[2], start);
+        if (t === null) return null;
+      } else if (!isList(start) || head(start) !== 'decidstart') {
+        return this.err(start, '认不出的声明项');
+      } else if (start.items.length > 2) {
+        // `real a[];`：维度写在名字后面。`real a[][]` 也收（多维数组这一刀）。
+        const dep = this.dimsDepth(start.items[2]);
+        if (dep === null) return this.nope(start, '声明里带形参表');
         if (!this.arrElemOk(t)) return this.nope(start, `${t}[] （${ASY_ARRELEM_TEXT}）`);
         let k = 0;
-        while (k < d) { t = `${t}[]`; k++; }
+        while (k < dep) { t = `${t}[]`; k++; }
       }
       const nm = isAtom(start.items[1]) ? start.items[1].value : null;
       if (nm === null) return this.err(start, '声明里少了名字');
@@ -4314,6 +4325,11 @@ class AsyLower {
       let ty = el;
       let k = 0;
       while (ty !== null && k < arr + dims) { ty = `${ty}[]`; k++; }
+      // `real f(real) = twice;`：形参表跟在名字后面，那是**函数值**类型 —— 不是 `real`。
+      // 这一刀的 `(global …)` 只收标量/聚合，函数值走 `(let …)` 那条（与 typedef 拼的
+      // 那一份同一条路），所以这里明确记成"这一刀的全局量收不下"。
+      // 不记的话拿到的是 base（`real`），后面那句赋值就报"要 real，这里是 real(real)"。
+      if (isList(start) && head(start) === 'fundecidstart') ty = null;
       const ok = ty !== null;
       const g = { sym: `asy__g${this.gdecls.length}_${nm}`, type: ty, at, ok };
       const list = this.globals.has(nm) ? this.globals.get(nm) : [];

@@ -2077,6 +2077,41 @@ asy 收，而且方法取出来是绑住接收者的闭包，那要 `vardec` 走
 空引用，而 `(let …)` 一定要一个初值表达式，方言里还没有那个字面量），
 非函数类型的零值也补了一句 `undefined` 的守卫。
 
+### 换一把尺子：不数"第一个坎"，数 `import graph;` 的全部诊断
+
+"304 个 examples 的第一个错"这把尺子到这里就钝了 —— 它只看得见第一条，而第一条落在
+哪个文件取决于 import 的次序，一刀下去它可能只是**往后挪一格**。换的尺子是
+`import graph;` 一句话下去的**全部**诊断，量出来 193 条，按种类分：
+
+- 认不出的类型 80：`Label` 30、`interpolate` 12、`ticks` 10、`scaleT` 9、`transform` 5、
+  `frame` 4、`bool3` 3、`autoscaleT` 3、`arrowbar` 2、`scalefcn`/`align` 各 1。
+  其中 `interpolate`/`ticks`/`scaleT`/`autoscaleT`/`Label`/`arrowbar` 是 base 自己声明的
+  struct —— 它们认不出是**连带的**（那些 struct 的声明里有别的东西先失败了）。真正的叶子
+  只有 `transform`/`frame`/`bool3`：asy 的 C++ 内建类型，按 ADR 的界该由我们用 asy 写。
+- 缺的内建函数 33：`abort` 6、`sgn`/`sequence`/`search` 各 3、`times`/`copy` 各 2，
+  以及 `solve`/`tridiagonal`/`interp`/`degrees`/`radians`/`norm`/`minbound`/`maxbound`/
+  `clip`/`cyclic`/`piecewisestraight`/`_findroot`/`labelmargin`/`OmitTick` 各 1。
+- 未声明的变量 15（`infinity` 等）、`new`（匿名函数）15、`picture` 缺字段 12 + 缺方法 4。
+
+这张表把下一步排明白了：**大头是内建面还没写够**（类型 3 个 + 函数 20 个 + 全局量若干，
+全是 `stage0/lib/asy/` 里用 asy 写的活，前端一行不用改），其次是**匿名函数带捕获**
+（15 处，方言的 `(cfn …)`/`(mkclo …)` 早就齐了），`Label` 那 30 处要 TeX、排最后。
+
+顺着这张表当场做掉两件小的：
+
+- `guide`：两行 —— `typedef path guide; path nullpath;`（typedef 那一刀刚落地就自己派上
+  用场了）。`graph_splinetype.asy` 的**签名**（`guide hermite(…)`）因此过了；它的**体**里
+  那句 `..controls A and B..` 还没过，`joinExp` 至今只认 `--`。所以这不是"guide 通了"，
+  只是签名那一层通了。
+- 函数值类型变量的**裸拼法**（`real f(real) = twice;`，4 处）：与 typedef 拼法走同一个
+  `fnTypeOf`，另外 `globalNames` 要把这种声明记成"全局量收不下"（不记就拿到 `real`，
+  后面那句赋值报"要 real，这里是 real(real)"）。连带修正一条诊断：`a.get` 那种"把方法
+  取出来当值"原先漏成了泛泛的"struct A 没有字段 'get'"（而 A 确实有 `get` 方法，
+  只是不是字段），现在是一句带 ASY_NOPE 的实话 —— `bad/` 里每条都必须是 nope。
+
+两件做完 193 条**没有变少**：那 4 处函数值声明过了之后，当场撞上后面的坎（`Label`/`new`/
+缺的内建函数）。这正是新尺子该有的读数 —— 它不奖励"把错往后挪"。
+
 ## 后果与代价
 
 - **依赖 LLVM**：本机 `libLLVM.dylib` 157MB。产物变大，但仍然自带执行器、
