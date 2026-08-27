@@ -113,6 +113,10 @@
 // 两个模块里同名的 struct、给别的模块的 struct 写文件级 `operator init`、
 // `m.x = …`（限定名当赋值目标））。
 //
+// **`explicit` 形参**（第二十六刀：`void p(explicit real r)` 这个槽只收类型一模一样的
+// 实参 —— 量过它连内建的 int->real 提升都挡，而且**不进签名身份**（同签名的第二份还是
+// 替换）。降级要做的只有两件：formals 记个标记、fit 多问一句）。
+//
 // 不支持（见到就报错，报错里说清是哪一条）：triple、标准库模块（`import graph;`）、
 // typedef、`operator cast`（asy 的隐式转换 —— 形态好认，但它会改**重载解析的打分**：
 // 一旦用户能加转换，"要几次转换"就不再只由内建提升表决定，而那张表是第十一刀量出来钉死的；
@@ -1782,7 +1786,7 @@ class AsyLower {
       const got = [];
       for (const r of raw) got.push(r.key === null ? r.v.type : `${r.key}=${r.v.type}`);
       const sigs = [];
-      for (const c of list) sigs.push(`${c.ret}(${c.params.join(', ')})`);
+      for (const c of list) sigs.push(this.sigText(c));
       return this.err(n, `没有能匹配 '${nm}(${got.join(', ')})' 的签名 —— 有的是 ${sigs.join(' / ')}`);
     }
     let best = fits[0];
@@ -1921,6 +1925,16 @@ class AsyLower {
    * 一个候选合不合用。回 `{cost, slot, missing, reordered}` 或 null（不合用）。
    * `cost` 是要走几次隐式转换 —— 0 就是逐个同型。挑最小的那个，并列就是歧义。
    */
+  /** 候选的签名文本（诊断用）。`explicit` 要印出来 —— 它决定这个候选收不收这个实参 */
+  sigText(c) {
+    const parts = [];
+    for (let i = 0; i < c.params.length; i++) {
+      const p = c.ps === undefined || c.ps[i] === undefined ? null : c.ps[i];
+      parts.push(p !== null && p.exp === true ? `explicit ${c.params[i]}` : c.params[i]);
+    }
+    return `${c.ret}(${parts.join(', ')})`;
+  }
+
   fit(cand, raw) {
     const filled = new Map();
     const slot = [];
@@ -1938,6 +1952,8 @@ class AsyLower {
         for (let k = 0; k < cand.ps.length; k++) if (cand.ps[k].name === r.key) at = k;
       }
       if (at < 0 || at >= cand.ps.length || filled.has(at)) return null;
+      // `explicit` 的槽只收类型一模一样的实参（第二十六刀，量过：连 int->real 都挡）
+      if (cand.ps[at].exp === true && r.v.type !== cand.ps[at].type) return null;
       const c = asyConvCost(r.v.type, cand.ps[at].type);
       if (c < 0) return null;
       cost += c;
@@ -2963,14 +2979,22 @@ class AsyLower {
       if (!isList(f) || head(f) !== 'formal') return this.nope(f, '关键字形参或可变形参');
       if (f.items.length !== 4 && f.items.length !== 5) return this.nope(f, '无名形参');
       const ex = f.items[1];
-      if (isList(ex) && head(ex) === 'explicit') return this.nope(f, 'explicit 形参');
+      // `explicit T x`（第二十六刀）：这个槽**只收类型一模一样的实参**。量过四条：
+      //   - `void p(explicit real r); p(3);` 在 asy 那边报 "cannot call ... with
+      //     parameter 'int'" —— 连内建的 int->real 提升都挡，不只挡用户的 operator cast；
+      //   - `p(3.0)` 通；
+      //   - 它**不进签名身份**：先 `void p(real)` 再 `void p(explicit real)` 是**替换**
+      //     （量过：之后 `p(3.0)` 走后者、`p(3)` 直接报错），反序则是前者被换掉；
+      //   - 算符与数组形参上一样管用。
+      // 于是降级要做的只有两件：这里记个标记，fit() 那边多问一句。
+      const exp = isList(ex) && head(ex) === 'explicit';
       const t = this.type(f.items[2], '形参');
       const start = f.items[3];
       if (t === null) return null;
       if (!isList(start) || head(start) !== 'decidstart' || start.items.length !== 2) return this.nope(start, '带维度或形参表的形参名');
       const nm = isAtom(start.items[1]) ? start.items[1].value : null;
       if (nm === null) return this.err(start, '形参少了名字');
-      out.push({ name: nm, type: t, def: f.items.length === 5 ? f.items[4] : null });
+      out.push({ name: nm, type: t, exp: exp, def: f.items.length === 5 ? f.items[4] : null });
     }
     return out;
   }

@@ -263,8 +263,9 @@ bison **隐式**的选择写成**显式**的优先级声明 —— 悬垂 else�
    于是重载解析那一套白捡；用户算符与内建的在同一张候选表里，同签名是替换）、
    **文件级变量**（第二十四刀：核心方言加了 `(global 名字 类型)`，函数里读得到、改得到）、
    **模块**（第二十五刀：`import` / `access` / `access … as` / `from … access` ——
-   一份文件一个单元，模块体成为 `asy__init<k>`，调用点就在 import 那一行），
-   二十八份用例在五个执行器上与 `asy -noV` 逐字节相同。
+   一份文件一个单元，模块体成为 `asy__init<k>`，调用点就在 import 那一行）、
+   **`explicit` 形参**（第二十六刀：那个槽只收类型一模一样的实参，连内建提升都挡），
+   三十份用例在五个执行器上与 `asy -noV` 逐字节相同。
    **还没做**的是给切片赋值、多维数组、复数幂、triple、`operator cast`、
    字符串的 `reverse`/`insert`/`split`、
    自引用字段、把方法当值取出来、struct 体里的算符、函数里用文件级的 pair/记录/数组变量、
@@ -445,11 +446,12 @@ static inline C + 另写一份 IR 助手"，是两份实现；这次不重复那
 `1/3` 是实数除法而 `1#3` 是整数商、`3 == 3.0` 要提左边、`write` 的分隔符取决于第一个
 实参是不是字符串。类型是符号表的事，动作模板里没有符号表。
 
-**判分的人不是我**：`tests/asy` 的二十八份用例（算术 / 字符串 / 两种引号 / 控制流 / 函数 /
+**判分的人不是我**：`tests/asy` 的三十份用例（算术 / 字符串 / 两种引号 / 控制流 / 函数 /
 real 的 %.15g / `? :` / 数学函数 / 数组 / pair / 切片与整数组输出 / for-each /
 字符串函数 / `pair[]` / 默认实参与命名实参 / 重载解析 / struct / struct 的 pair 字段 /
 struct 的数组字段 / struct 的记录字段 / `A[]` / struct 的方法 / 构造函数 /
-文件级 operator init / 算符重载 / 用户算符与内建算符的关系 / 文件级变量 / 模块）每份都是
+文件级 operator init / 算符重载 / 用户算符与内建算符的关系 / 文件级变量 / 模块 /
+模块里的 struct 与默认实参 / `explicit` 形参）每份都是
 「五条腿逐字节相同 == `.expected` == `asy -noV` 当场重跑」。`.expected` 本身就是真 asy 的
 输出生成的；机器上没装 asymptote 时那一节打印 skip，但 `.expected` 仍然把答案钉住。
 用例目录里 `mod_*.asy` 不是用例而是**被 import 的模块**，三节测试都在用例文件自己的目录里
@@ -508,7 +510,7 @@ struct 的数组字段 / struct 的记录字段 / `A[]` / struct 的方法 / 构
 **第四节 `strict/`：asy 自己就不收的，我们也不能收。** 这一节是数组这一刀顺手加的，起因是
 一次测量：`int b=1; b++;` 在真 asy 上直接编不过（"postfix expressions are not allowed"），
 而我们的降级器照收。这类漏洞**不会让任何用例输出不同** —— 它只让"等价"这两个字变虚。
-所以 `strict/` 里的用例要求：我们拒，且装了 asy 的话**真 asy 也拒**。现在有十五条：后缀
+所以 `strict/` 里的用例要求：我们拒，且装了 asy 的话**真 asy 也拒**。现在有十六条：后缀
 `++`、pair 上的 `<`、pair 上的 `%`（这两条 asy 报的是 "no matching function
 'operator <(pair, pair)'"）、`length(int[])`（`length` 只有 string 和 pair 两个重载）、
 按不存在的形参名给命名实参（asy 报 "cannot call 'void f(int a)' with parameter 'int b'"）、
@@ -523,7 +525,9 @@ ambiguous"）、**引用后面才声明的函数**（asy 报 "no matching variab
 第二十四刀加的，与"引用后面才声明的函数"、"在 struct 声明前拿它当类型"是同一条规矩的
 第三处）、
 **`access m;` 之后裸用模块里的名字**（asy 报 "no matching variable 'mv'" ——
-第二十五刀加的：`access` 只给限定名，只有 `import` 才把名字铺成裸的）——
+第二十五刀加的：`access` 只给限定名，只有 `import` 才把名字铺成裸的）、
+**给 `explicit real` 的槽喂一个 int**（asy 报 "cannot call 'void p(explicit real r)'
+with parameter 'int'" —— 第二十六刀加的：explicit 连**内建提升**都挡）——
 中间那两条是重载这一刀加的，第二条尤其要紧：我们是两遍降级，不专门裁一刀就会比 asy
 多接受一门语言。`write(struct)` 与 `z.x = 5` 是 struct 与 pair 字段那两刀加的，
 它们守的不只是"拒"：
@@ -1236,6 +1240,26 @@ asy 那边因此只收 int/real/bool/string 的文件级变量；pair/记录/数
 
 `strict/` 多了一条：`access m;` 之后**裸用**模块里的名字要拒（量过 asy 报
 "no matching variable 'mv'"）—— 只有 `import` 才把名字铺成裸的。
+
+### 已落地（支持面第十五阶段：`explicit` 形参，门槛 2 第二十六刀）
+
+**核心方言零改动，降级器加了两行半。** 起因是量出来的：`math.asy` / `graph.asy` /
+`three.asy` 这三份标准库模块的**第一个**拦路虎就是 `explicit` 形参。
+
+规则四条，全是 `asy -noV` 量的：
+
+- `void p(explicit real r)` 这个槽**只收类型一模一样的实参** —— `p(3.0)` 通，`p(3)` 报
+  "cannot call 'void p(explicit real r)' with parameter 'int'"。也就是说它连**内建提升**
+  都挡，不只是挡将来那个 `operator cast`；
+- 它**不进签名身份**：先 `void p(real)` 再 `void p(explicit real)` 是**替换**（之后
+  `p(3.0)` 走后者、`p(3)` 直接报错），反序则是那份 explicit 被换掉。所以降级器里
+  `params`（重载身份的 key）一个字都不用改，标记挂在 `ps[k].exp` 上；
+- 一支 explicit 一支不 explicit 时，explicit 那支**根本不匹配**，另一支赢，不算歧义；
+- 算符（`bool operator ==(explicit V a, V b)`）与数组形参上一样管用。
+
+于是实现就是：`formals` 记标记、`fit` 多问一句 `实参类型 !== 形参类型 就不匹配`、
+诊断里把 `explicit` 印出来（不印的话"没有能匹配的签名"会显得莫名其妙）。
+`cases/30-explicit` 钉住上面前三条与后一条，`strict/explicit-int` 钉住"连内建提升都挡"。
 
 ## 决策 4：调用 LLVM 需要 extern-C FFI —— 这是新要求，也是 dogfood
 
