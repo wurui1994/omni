@@ -1,10 +1,8 @@
-// `sin`/`cos` 走 Omni 运行库（stage0/lib/math.sx 里的 omni_sin/omni_cos）：象限归约用
-// double-double（Dekker），泰勒到 r^17/r^16。契约同这一节其余用例：五条腿逐字节相同，
-// 与真 asy 只要求容差内相等。
+// `sin`/`cos` 走绑定表的 rmath 那一列：C 那条腿转手 libm，JS 那条腿转手 Math.sin/cos。
+// 契约同这一节其余用例：腿之间、与真 asy 都只要求最后一位十进制差不超过 1。
 //
 // 刻意**不**取 sin/cos 的零点附近（sin(pi)、cos(pi/2) 那种）：那里结果本身是
-// 1e-16 量级的抵消值，相对误差没有意义，判分也无从谈起 —— 那是归约精度的题，
-// 上面 dd 的量化数据（|x| 到 1e9 最多 2 ULP）已经答过了。
+// 1e-16 量级的抵消值，相对误差没有意义，两份 libm 在那里差多少都不奇怪。
 write(sin(0.0));
 write(sin(0.5));
 write(sin(-0.5));

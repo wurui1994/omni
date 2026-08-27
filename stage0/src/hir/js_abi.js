@@ -144,6 +144,10 @@ export const JS_ABI = {
   // op: 'a' abs / 't' trunc / 'f' floor / 'c' ceil / 'M' max / 'm' min
   //     后加的四个只给核心方言的 (rmath …) 用：'s' sqrt / 'r' round（C 的离零舍入，
   //     不是 Math.round）/ 'p' pow / 'o' fmod
+  //     超越函数（同样只给 rmath 用，C 转手 libm、JS 转手 Math.*）：
+  //     'S' sin / 'C' cos / 'T' tan / 'I' asin / 'A' acos / 'N' atan / '2' atan2 /
+  //     'H' sinh / 'D' cosh / 'G' tanh / 'J' asinh / 'K' acosh / 'L' atanh /
+  //     'E' exp / 'X' expm1 / 'O' log / 'Q' log10 / 'P' log1p / 'B' cbrt / 'Y' hypot
   js_math: { js: '$js_math', c: 'omni_js_math', arity: 2, lit: ['op'] },
 
   // ---------------------------------------------------------------- JSON

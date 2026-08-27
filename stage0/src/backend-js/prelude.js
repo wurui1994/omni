@@ -810,11 +810,32 @@ function $js_math(op, a, b) {
   // C 的 round 是"离零舍入"（round(-2.5) = -3），JS 的 Math.round 是"向 +inf 舍入"
   // （-2.5 -> -2）。核心方言的 (rmath "round" …) 要的是 C 那一条。
   if (op === "r") return x < 0 ? -Math.round(-x) : Math.round(x);
+  // 超越函数：转手 Math.*（C 那边转手 libm）。op 码见 hir/js_abi.js 的注释。
+  if (op === "S") return Math.sin(x);
+  if (op === "C") return Math.cos(x);
+  if (op === "T") return Math.tan(x);
+  if (op === "I") return Math.asin(x);
+  if (op === "A") return Math.acos(x);
+  if (op === "N") return Math.atan(x);
+  if (op === "H") return Math.sinh(x);
+  if (op === "D") return Math.cosh(x);
+  if (op === "G") return Math.tanh(x);
+  if (op === "J") return Math.asinh(x);
+  if (op === "K") return Math.acosh(x);
+  if (op === "L") return Math.atanh(x);
+  if (op === "E") return Math.exp(x);
+  if (op === "X") return Math.expm1(x);
+  if (op === "O") return Math.log(x);
+  if (op === "Q") return Math.log10(x);
+  if (op === "P") return Math.log1p(x);
+  if (op === "B") return Math.cbrt(x);
   const y = $js_real(b, "Math");
   if (op === "M") return Math.max(x, y);
   if (op === "m") return Math.min(x, y);
   if (op === "p") return Math.pow(x, y);
   if (op === "o") return x % y;   // JS 的 % 在 number 上就是 C 的 fmod
+  if (op === "2") return Math.atan2(x, y);
+  if (op === "Y") return Math.hypot(x, y);
   $rt_error("unknown Math op '" + op + "'");
 }
 
@@ -827,6 +848,26 @@ const $r_floor = (x) => $js_math("f", x, 0);
 const $r_ceil = (x) => $js_math("c", x, 0);
 const $r_round = (x) => $js_math("r", x, 0);
 const $r_fmod = (x, y) => $js_math("o", x, y);
+const $r_sin = (x) => $js_math("S", x, 0);
+const $r_cos = (x) => $js_math("C", x, 0);
+const $r_tan = (x) => $js_math("T", x, 0);
+const $r_asin = (x) => $js_math("I", x, 0);
+const $r_acos = (x) => $js_math("A", x, 0);
+const $r_atan = (x) => $js_math("N", x, 0);
+const $r_atan2 = (y, x) => $js_math("2", y, x);
+const $r_sinh = (x) => $js_math("H", x, 0);
+const $r_cosh = (x) => $js_math("D", x, 0);
+const $r_tanh = (x) => $js_math("G", x, 0);
+const $r_asinh = (x) => $js_math("J", x, 0);
+const $r_acosh = (x) => $js_math("K", x, 0);
+const $r_atanh = (x) => $js_math("L", x, 0);
+const $r_exp = (x) => $js_math("E", x, 0);
+const $r_expm1 = (x) => $js_math("X", x, 0);
+const $r_log = (x) => $js_math("O", x, 0);
+const $r_log10 = (x) => $js_math("Q", x, 0);
+const $r_log1p = (x) => $js_math("P", x, 0);
+const $r_cbrt = (x) => $js_math("B", x, 0);
+const $r_hypot = (x, y) => $js_math("Y", x, y);
 
 // ------------------------------------------------- JSON.stringify（ADR-0011）
 // 不能直接用宿主的 JSON.stringify：这边的对象是 Map、int 是 BigInt，宿主会当成

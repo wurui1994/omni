@@ -163,6 +163,25 @@ omni_dyn omni_js_math(int op, omni_dyn a, omni_dyn b) {
     case 's': return omni_dyn_of_real(sqrt(x));
     /* C 的 round 就是"离零舍入"；prelude 那边为此没用 Math.round（它向 +inf 舍入） */
     case 'r': return omni_dyn_of_real(round(x));
+    /* 超越函数：转手 libm（JS 那边转手 Math.*）。op 码见 hir/js_abi.js 的注释 */
+    case 'S': return omni_dyn_of_real(sin(x));
+    case 'C': return omni_dyn_of_real(cos(x));
+    case 'T': return omni_dyn_of_real(tan(x));
+    case 'I': return omni_dyn_of_real(asin(x));
+    case 'A': return omni_dyn_of_real(acos(x));
+    case 'N': return omni_dyn_of_real(atan(x));
+    case 'H': return omni_dyn_of_real(sinh(x));
+    case 'D': return omni_dyn_of_real(cosh(x));
+    case 'G': return omni_dyn_of_real(tanh(x));
+    case 'J': return omni_dyn_of_real(asinh(x));
+    case 'K': return omni_dyn_of_real(acosh(x));
+    case 'L': return omni_dyn_of_real(atanh(x));
+    case 'E': return omni_dyn_of_real(exp(x));
+    case 'X': return omni_dyn_of_real(expm1(x));
+    case 'O': return omni_dyn_of_real(log(x));
+    case 'Q': return omni_dyn_of_real(log10(x));
+    case 'P': return omni_dyn_of_real(log1p(x));
+    case 'B': return omni_dyn_of_real(cbrt(x));
     default: break;
   }
   double y = want_real(b, "Math");
@@ -171,6 +190,8 @@ omni_dyn omni_js_math(int op, omni_dyn a, omni_dyn b) {
   if (op == 'm') return omni_dyn_of_real(isnan(x) || isnan(y) ? (double)NAN : fmin(x, y));
   if (op == 'p') return omni_dyn_of_real(pow(x, y));
   if (op == 'o') return omni_dyn_of_real(fmod(x, y));
+  if (op == '2') return omni_dyn_of_real(atan2(x, y));
+  if (op == 'Y') return omni_dyn_of_real(hypot(x, y));
   omni_errorf("unknown Math op '%c'", op);
   return omni_dyn_null();
 }

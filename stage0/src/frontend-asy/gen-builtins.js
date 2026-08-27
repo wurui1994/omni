@@ -11,8 +11,7 @@
 //
 // 默认源码目录：$ASY_SRC，或 /Users/wurui/Documents/Lang/reference/asymptote。
 // 「实现在哪」那一列是**我们的**策略（这个文件里的 POLICY），不是从 asy 抄的：
-//   rmath = 核心方言白名单（各家实现必然一致的那几个）
-//   lib   = Omni 运行库 stage0/lib/math.sx（我们自己算，跨腿位一致）
+//   rmath = 核心方言白名单（转手宿主的数学库：C 走 libm、JS 走 Math.*）
 //   nope  = 还没做（报错里说清是哪一个）
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -28,10 +27,28 @@ const POLICY = new Map([
   ['ceil', ['rmath', 'ceil']],
   ['round', ['rmath', 'round']],
   ['fmod', ['rmath', 'fmod']],
-  ['exp', ['lib', 'omni_exp']],
-  ['sin', ['lib', 'omni_sin']],
-  ['cos', ['lib', 'omni_cos']],
-  ['log', ['lib', 'omni_log']],
+  // 超越函数也是 rmath：C 那条腿转手 libm，JS 那条腿转手 Math.*。标准库有的东西
+  // 不自己写；代价是这一族只保证容差（见 stage0/runtime/omni_math.c 的头注）。
+  ['sin', ['rmath', 'sin']],
+  ['cos', ['rmath', 'cos']],
+  ['tan', ['rmath', 'tan']],
+  ['asin', ['rmath', 'asin']],
+  ['acos', ['rmath', 'acos']],
+  ['atan', ['rmath', 'atan']],
+  ['atan2', ['rmath', 'atan2']],
+  ['sinh', ['rmath', 'sinh']],
+  ['cosh', ['rmath', 'cosh']],
+  ['tanh', ['rmath', 'tanh']],
+  ['asinh', ['rmath', 'asinh']],
+  ['acosh', ['rmath', 'acosh']],
+  ['atanh', ['rmath', 'atanh']],
+  ['exp', ['rmath', 'exp']],
+  ['expm1', ['rmath', 'expm1']],
+  ['log', ['rmath', 'log']],
+  ['log10', ['rmath', 'log10']],
+  ['log1p', ['rmath', 'log1p']],
+  ['cbrt', ['rmath', 'cbrt']],
+  ['hypot', ['rmath', 'hypot']],
 ]);
 
 // asy 的类型名 -> 我们表里的写法。只收标量数学那一族；别的（pair/path/picture…）
@@ -98,10 +115,10 @@ out.push('# 来源是 asy 自己的两份数据：runmath.in 里带签名的声�
 out.push('# `addRealFunc(sin,SYM(sin))` 那一族（直通 libm 的那些）。asy 也是一张表，不是语法。');
 out.push('#');
 out.push('# 列：名字  实参个数  返回类型  实现在哪  实现的符号');
-out.push('#   rmath = 核心方言的 (rmath "…" …) 白名单（IEEE 强制正确舍入的 sqrt、精确运算的');
-out.push('#           fabs/floor/ceil/round/fmod、量过逐位相同的 pow）');
-out.push('#   lib   = Omni 运行库 stage0/lib/math.sx 里我们自己算的那份（跨腿位一致，与真 asy');
-out.push('#           允许最后一位十进制差 1 —— 用例走 tests/asy/tol/ 那一节）');
+out.push('#   rmath = 核心方言的 (rmath "…" …) 白名单 —— **转手宿主的数学库**：C 那条腿是 libm，');
+out.push('#           JS 那条腿是 Math.*。sqrt（IEEE 强制正确舍入）、fabs/floor/ceil/round/fmod');
+out.push('#           （精确运算）、pow（量过逐位相同）逐字节一致；超越函数只保证容差，');
+out.push('#           它们的用例走 tests/asy/tol/ 那一节（腿之间、与真 asy 都按最后一位十进制差 1）。');
 out.push('#   nope  = 还没做（见到就报错，报错里说清是哪一个）');
 out.push('#');
 out.push('# 返回类型是 asy 声明里写的：floor/ceil/round 回 int，其余回 real；');

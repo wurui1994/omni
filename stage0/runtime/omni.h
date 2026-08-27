@@ -134,7 +134,7 @@ omni_str omni_str_bool(bool v);
 omni_str omni_str_string(omni_str v);
 omni_str omni_repr_real(double v);
 
-/* omni_math.c —— 只收各家实现必然一致的那几个（那份文件的头注里写了量过什么） */
+/* omni_math.c —— 转手 libm（那份文件的头注里写了逐字节/容差的分界） */
 double omni_r_sqrt(double x);
 double omni_r_pow(double x, double y);
 double omni_r_fabs(double x);
@@ -142,6 +142,26 @@ double omni_r_floor(double x);
 double omni_r_ceil(double x);
 double omni_r_round(double x);
 double omni_r_fmod(double x, double y);
+double omni_r_sin(double x);
+double omni_r_cos(double x);
+double omni_r_tan(double x);
+double omni_r_asin(double x);
+double omni_r_acos(double x);
+double omni_r_atan(double x);
+double omni_r_atan2(double y, double x);
+double omni_r_sinh(double x);
+double omni_r_cosh(double x);
+double omni_r_tanh(double x);
+double omni_r_asinh(double x);
+double omni_r_acosh(double x);
+double omni_r_atanh(double x);
+double omni_r_exp(double x);
+double omni_r_expm1(double x);
+double omni_r_log(double x);
+double omni_r_log10(double x);
+double omni_r_log1p(double x);
+double omni_r_cbrt(double x);
+double omni_r_hypot(double x, double y);
 
 /* omni_arr.c —— 可增长数组（asy 的 `T[]`）。句柄是**指针**（buf 是按值的 {len, ptr}，
    push 改不了别名看到的那个长度），len/cap/items 都在被指向的头里。四种元素各一份单态，

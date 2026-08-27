@@ -17,7 +17,7 @@ import { join, basename } from './host/path.js';
 import { hash16 } from './host/hash.js';
 import { linkJs } from './frontend-js/link.js';
 import { lowerJs } from './frontend-js/lower.js';import { lowerWat } from './frontend-wat/lower.js';
-import { lowerAsy, parseAsyBuiltins, parseSxLib } from './frontend-asy/lower.js';
+import { lowerAsy, parseAsyBuiltins } from './frontend-asy/lower.js';
 import { readSexpr } from './sexpr/read.js';
 import { lowerCoreSexpr } from './sexpr/lower.js';
 import { printSexpr } from './sexpr/print.js';
@@ -143,16 +143,13 @@ function asyText(path) {
   vStep(`asy lexer      ${path} -> ${toks.length} tokens`);
   const tree = glrParse(tb, toks, diags);
   diags.throwIfErrors();
-  // 内建函数的绑定表与运行库都是**数据**，跟语法表一个路子：文件 IO 在这里，
-  // 降级器只拿解析好的表。数学不是 asy 的语法（asy 自己那边也是 builtin.cc 里一张表）。
+  // 内建函数的绑定表是**数据**，跟语法表一个路子：文件 IO 在这里，降级器只拿解析好的表。
+  // 数学不是 asy 的语法（asy 自己那边也是 builtin.cc 里一张表）。
   const btab = join(installDir(), '..', 'frontend-asy', 'builtins.tab');
   if (!exists(btab)) throw new OmniError(`找不到 asy 内建绑定表：${btab}`);
-  const mlib = join(installDir(), '..', '..', 'lib', 'math.sx');
-  if (!exists(mlib)) throw new OmniError(`找不到 Omni 运行库：${mlib}`);
   const builtins = parseAsyBuiltins(readText(btab));
-  const lib = parseSxLib(readText(mlib));
-  vStep(`asy builtins   ${builtins.size} 条绑定，运行库 ${lib.size} 个函数`);
-  const text = lowerAsy(tree, diags, { path, load, builtins, lib });
+  vStep(`asy builtins   ${builtins.size} 条绑定`);
+  const text = lowerAsy(tree, diags, { path, load, builtins });
   diags.throwIfErrors();
   vStep(`asy front end  ${path} -> 核心方言 ${text.length} bytes`);
   return text;
@@ -215,9 +212,10 @@ function findCC() {
  * tcc 要的是极速编译，clang/gcc 要 -O2；运行时和生成的代码用同一份 flags。
  * `-ffp-contract=off` 不是可选的：clang 默认允许在一条语句里把 `a + b*c` 合成 FMA，
  * 那条 FMA 少一次中间舍入，于是 C 那条腿与 JS 那条腿的浮点结果**会分叉**。
- * 这条是量出来的 —— 运行库里的 `omni_exp`（Horner 全是 `a + r*s`）在 `exp(-10.0)` 上
- * run 与 run-c 差 1 ULP，加上这个 flag 才一致。核心方言的 `(bin "*" …)`/`(bin "+" …)`
- * 是**逐个运算**的语义，编译器不许替我们改写。
+ * 这条是量出来的 —— 曾经在运行库里自己写过一版 `exp`（Horner 全是 `a + r*s`），
+ * 在 `exp(-10.0)` 上 run 与 run-c 差 1 ULP，加上这个 flag 才一致。那份实现后来撤了
+ * （超越函数改成转手宿主的数学库），但 flag 留着：核心方言的 `(bin "*" …)`/`(bin "+" …)`
+ * 是**逐个运算**的语义，编译器不许替我们改写 —— 这跟数学库怎么绑没关系。
  */
 function ccFlags(cc) {
   return cc === 'tcc' ? ['-I', RUNTIME_DIR]

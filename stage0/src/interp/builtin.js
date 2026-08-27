@@ -619,6 +619,12 @@ export function vecHsum(t, v) {
 const RMATH_OP = new Map([
   ['rmath_sqrt', 's'], ['rmath_fabs', 'a'], ['rmath_floor', 'f'], ['rmath_ceil', 'c'],
   ['rmath_round', 'r'], ['rmath_pow', 'p'], ['rmath_fmod', 'o'],
+  ['rmath_sin', 'S'], ['rmath_cos', 'C'], ['rmath_tan', 'T'], ['rmath_asin', 'I'],
+  ['rmath_acos', 'A'], ['rmath_atan', 'N'], ['rmath_atan2', '2'],
+  ['rmath_sinh', 'H'], ['rmath_cosh', 'D'], ['rmath_tanh', 'G'],
+  ['rmath_asinh', 'J'], ['rmath_acosh', 'K'], ['rmath_atanh', 'L'],
+  ['rmath_exp', 'E'], ['rmath_expm1', 'X'], ['rmath_log', 'O'],
+  ['rmath_log10', 'Q'], ['rmath_log1p', 'P'], ['rmath_cbrt', 'B'], ['rmath_hypot', 'Y'],
 ]);
 
 /** to_string / print 的四种标量。容器与 dynamic 不到这里 —— 检查器把它们改写成
@@ -651,18 +657,16 @@ export function applyBuiltin(I, e, a) {
   // 节点上，一个节点只解析一次。
   if (e.jsop === true) return jsOp(I, e, a);
   const recv = e.recvType;
+  // real 上的数学函数。刻意走 js_math 那条宿主 op（prelude 的 $js_math / runtime 的
+  // omni_js_math），而不是在这里再写一份：`round` 的舍入方向、`fmod` 的符号这些
+  // 差别只该在一处定下来。名单由核心方言把关（sexpr/lower.js 的 RMATH）。
+  if (RMATH_OP.has(e.name)) {
+    return callJsOp('js_math', [RMATH_OP.get(e.name), a[0], a.length > 1 ? a[1] : 0]);
+  }
   switch (e.name) {
     case 'print': printLine(strOf(e.argType.k, a[0])); return undefined;
     case 'to_string': return strOf(e.argType.k, a[0]);
     case 'to_string_g': return fmtRealG(a[0], a[1]);
-    // real 上的数学函数。刻意走 js_math 那条宿主 op（prelude 的 $js_math / runtime 的
-    // omni_js_math），而不是在这里再写一份：`round` 的舍入方向、`fmod` 的符号这些
-    // 差别只该在一处定下来。
-    case 'rmath_sqrt': case 'rmath_fabs': case 'rmath_floor': case 'rmath_ceil':
-    case 'rmath_round': case 'rmath_pow': case 'rmath_fmod': {
-      const op = RMATH_OP.get(e.name);
-      return callJsOp('js_math', [op, a[0], a.length > 1 ? a[1] : 0]);
-    }
     case 'trunc': return truncReal(a[0]);
     case 'chr': return chrOf(a[0]);
     case 'fail': rtError(a[0]); return undefined;

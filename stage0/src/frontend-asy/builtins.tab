@@ -4,10 +4,10 @@
 # `addRealFunc(sin,SYM(sin))` 那一族（直通 libm 的那些）。asy 也是一张表，不是语法。
 #
 # 列：名字  实参个数  返回类型  实现在哪  实现的符号
-#   rmath = 核心方言的 (rmath "…" …) 白名单（IEEE 强制正确舍入的 sqrt、精确运算的
-#           fabs/floor/ceil/round/fmod、量过逐位相同的 pow）
-#   lib   = Omni 运行库 stage0/lib/math.sx 里我们自己算的那份（跨腿位一致，与真 asy
-#           允许最后一位十进制差 1 —— 用例走 tests/asy/tol/ 那一节）
+#   rmath = 核心方言的 (rmath "…" …) 白名单 —— **转手宿主的数学库**：C 那条腿是 libm，
+#           JS 那条腿是 Math.*。sqrt（IEEE 强制正确舍入）、fabs/floor/ceil/round/fmod
+#           （精确运算）、pow（量过逐位相同）逐字节一致；超越函数只保证容差，
+#           它们的用例走 tests/asy/tol/ 那一节（腿之间、与真 asy 都按最后一位十进制差 1）。
 #   nope  = 还没做（见到就报错，报错里说清是哪一个）
 #
 # 返回类型是 asy 声明里写的：floor/ceil/round 回 int，其余回 real；
@@ -26,33 +26,33 @@ Round      1 int  nope  -
 XOR        2 int  nope  -
 Yn         2 real nope  -
 abs        1 real rmath fabs
-acos       1 real nope  -
-acosh      1 real nope  -
-asin       1 real nope  -
-asinh      1 real nope  -
-atan       1 real nope  -
-atan2      2 real nope  -
-atanh      1 real nope  -
+acos       1 real rmath acos
+acosh      1 real rmath acosh
+asin       1 real rmath asin
+asinh      1 real rmath asinh
+atan       1 real rmath atan
+atan2      2 real rmath atan2
+atanh      1 real rmath atanh
 bitreverse 2 int  nope  -
-cbrt       1 real nope  -
+cbrt       1 real rmath cbrt
 ceil       1 int  rmath ceil
-cos        1 real lib   omni_cos
-cosh       1 real nope  -
+cos        1 real rmath cos
+cosh       1 real rmath cosh
 erf        1 real nope  -
 erfc       1 real nope  -
-exp        1 real lib   omni_exp
-expm1      1 real nope  -
+exp        1 real rmath exp
+expm1      1 real rmath expm1
 fabs       1 real rmath fabs
 factorial  1 int  nope  -
 floor      1 int  rmath floor
 fmod       2 real rmath fmod
 gamma      1 real nope  -
-hypot      2 real nope  -
+hypot      2 real rmath hypot
 identity   1 real nope  -
 ldexp      2 real nope  -
-log        1 real lib   omni_log
-log10      1 real nope  -
-log1p      1 real nope  -
+log        1 real rmath log
+log10      1 real rmath log10
+log1p      1 real rmath log1p
 popcount   1 int  nope  -
 pow10      1 real nope  -
 quotient   2 int  nope  -
@@ -60,9 +60,9 @@ rand       2 int  nope  -
 remainder  2 real nope  -
 round      1 int  rmath round
 sgn        1 int  nope  -
-sin        1 real lib   omni_sin
-sinh       1 real nope  -
+sin        1 real rmath sin
+sinh       1 real rmath sinh
 sqrt       1 real rmath sqrt
-tan        1 real nope  -
-tanh       1 real nope  -
+tan        1 real rmath tan
+tanh       1 real rmath tanh
 unitrand   0 real nope  -

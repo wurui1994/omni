@@ -66,10 +66,17 @@ const ARITH = new Set(['+', '-', '*', '/', '%', '&', '|', '^', '<<', '>>']);
 const COMPARE = new Set(['==', '!=', '<', '<=', '>', '>=']);
 const LOGIC = new Set(['&&', '||']);
 
-/** `(rmath "NAME" …)` 的名单与参数个数。为什么只有这七个，见 runtime/omni_math.c 的头注。 */
+/** `(rmath "NAME" …)` 的名单与参数个数：C99 math.h 与 ECMA-262 Math 的**交集**。
+ *  这一层只是转手宿主的数学库（C 走 libm、JS 走 Math.*），没有自己写的实现 ——
+ *  标准库有的东西不重造。哪些逐字节、哪些只保证容差，见 runtime/omni_math.c 的头注。 */
 const RMATH = new Map([
   ['sqrt', 1], ['fabs', 1], ['floor', 1], ['ceil', 1], ['round', 1],
   ['pow', 2], ['fmod', 2],
+  ['sin', 1], ['cos', 1], ['tan', 1], ['asin', 1], ['acos', 1], ['atan', 1],
+  ['atan2', 2], ['sinh', 1], ['cosh', 1], ['tanh', 1],
+  ['asinh', 1], ['acosh', 1], ['atanh', 1],
+  ['exp', 1], ['expm1', 1], ['log', 1], ['log10', 1], ['log1p', 1],
+  ['cbrt', 1], ['hypot', 2],
 ]);
 
 class CoreLowerer {

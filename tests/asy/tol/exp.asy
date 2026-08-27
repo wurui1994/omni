@@ -1,5 +1,8 @@
-// 超越函数：`exp` 走 Omni 运行库（stage0/lib/math.sx 里的 omni_exp），不是宿主的 libm。
-// 这一节的契约：五条腿之间**逐字节**相同，与真 asy 只要求容差内相等（理由见 run.js 的注释）。
+// 超越函数：`exp` 走绑定表的 rmath 那一列 —— C 那条腿转手 libm，JS 那条腿转手 Math.exp。
+// 这一节的契约：腿与腿之间、以及与真 asy，都只要求最后一位十进制差不超过 1
+// （理由见 run.js 的注释：libm 与 V8 两边都不是正确舍入的）。
+// 这份用例里 `exp(-10.0)` 就是分叉的那一处：Math.exp 印 4.53999297624848e-05，
+// libm 印 …49e-05，真 asy 跟 libm 一边。
 write(exp(0.0));
 write(exp(1.0));
 write(exp(-1.0));

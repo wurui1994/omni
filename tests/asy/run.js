@@ -9,15 +9,15 @@
 //   2. **.expected 是真 asy 的输出**：装了 asymptote 就当场用 `asy -noV` 重新生成一遍
 //      比对 —— 期望值不是我写的，是量出来的。没装就跳过这一节并打印 skip（这条轴仍然
 //      靠 .expected 把答案钉住，不会因为环境缺工具就什么都不查）。
-//   2b. **tol/ 是带容差的那一节**：超越函数（现在是 `exp`/`sin`/`cos`/`log`）不能逐字节判分 —— 量过
-//      libm 与 V8 有 43% 的结果位不同、26% 连 `%.15g` 都不同，而且拿 bc -l 当参考时
-//      **两边都不是正确舍入的**。我们自己出一份实现（stage0/lib/math.sx），于是腿与腿
-//      之间仍然逐字节相同，与真 asy 只要求最后一位十进制差不超过 1。
+//   2b. **tol/ 是带容差的那一节**：超越函数转手宿主的数学库（C 走 libm、JS 走 Math.*），
+//      而量过 libm 与 V8 有 43% 的结果位不同、26% 连 `%.15g` 都不同，拿 bc -l 当参考时
+//      **两边都不是正确舍入的**。标准库有的东西不自己写，所以这一族的契约是：腿与腿之间、
+//      以及与真 asy 之间，都只要求最后一位十进制差不超过 1。
 //   3. **bad/ 里的必须被拒绝，且拒在正确的理由上**。这一刀故意没做的东西（
 //      triple、复数幂、**标准库**模块（`import graph;` —— 用户自己写的
 //      模块第二十五刀通了）、`unravel`/`include`/参数化模块、两个模块里同名的 struct、
-//      隐式缩放、还没进运行库的超越函数（`atan` 那一支；`exp`/`sin`/`cos`/`log` 已经在
-//      运行库里，走 tol/）、给切片赋值、
+//      隐式缩放、宿主数学库里没有的那些内建函数（`gamma`/`erf`/`Jn` 那一族 —— C99 有
+//      erf 但 JS 的 Math 没有，要用就得自己实现，这一刀不做）、给切片赋值、
 //      多维数组、循环条件里的 `? :`、字符串的 `reverse`/`insert`/`split`、
 //      函数里用文件级的 pair/记录/数组变量（标量的那些第二十四刀通了）、
 //      struct 的三条边界 —— 自引用字段、把方法当值取出来、`operator init` 的另两种
@@ -144,14 +144,14 @@ if (asyBin === null) {
   process.stdout.write('  skip asy 二进制不在（装 asymptote 或设 ASY_BIN 就会拿它逐字节判分）\n');
 }
 
-// --------------------------- 2b. tol/：五方逐字节一致，但与真 asy 只要求**带容差**相等
+// --------------------------- 2b. tol/：超越函数那一节 —— 腿之间与对 asy 都只要求**容差**
 //
-// 超越函数（exp/log/trig）不能进 cases/：量过 libm 与 V8 在这一族上 43% 的结果位不同、
-// 26% 连 `%.15g` 都不同，而且用 bc -l 当高精度参考时**两边都不是正确舍入的**——
-// 所以"与真 asy 逐字节相同"对这一族从根上不成立（ADR-0014 那一节）。
-// 我们的做法是自己出一份可移植实现（stage0/lib/math.sx），于是：
-//   - 五条腿之间仍然**逐字节**相同（这条一点不松）；
-//   - 与真 asy 的比较换成逐个数字的相对容差（4 eps，约 15 位有效数字内相符）。
+// 超越函数（exp/log/trig）不能进 cases/：它们转手宿主的数学库（C 那条腿是 libm，
+// JS 那条腿是 Math.*），而量过 libm 与 V8 在这一族上 43% 的结果位不同、26% 连 `%.15g`
+// 都不同，用 bc -l 当高精度参考时**两边都不是正确舍入的**（ADR-0014 那一节）。
+// 标准库有的东西不自己写，所以这条容差是明码标价买来的：
+//   - 腿与腿之间也只按容差比（run/interp 走 Math.*，run-c/run-llvm 走 libm）；
+//   - 与真 asy 同样按容差比（asy 自己也是转手平台的 libm）。
 // 非数字的片段仍然要求逐字节相同 —— 松的只有浮点数那一处。
 // 容差的单位是**印出来的最后一位**：`%.15g` 有 15 位有效数字，所以允许的差就是
 // 10^(exp-14) 的 1.5 倍（1 个十进制步长，留半格给两边各自的舍入）。写成相对误差会
@@ -183,12 +183,13 @@ for (const f of readdirSync(join(here, 'tol')).filter(isCase).sort()) {
 
   const first = cmd(LEGS[0].args(path), dir);
   if (first.code !== 0) bad.push(`    ${LEGS[0].tag} exit=${first.code}\n${first.err}`);
+  let exact = true;
   for (const leg of LEGS.slice(1)) {
     const r = cmd(leg.args(path), dir);
     if (r.code !== 0) { bad.push(`    ${leg.tag} exit=${r.code}\n${r.err}`); continue; }
-    // 腿与腿之间是**逐字节**：同一份 .sx 实现，位必须一样
-    if (r.out !== first.out) {
-      bad.push(`    ${leg.tag} 与 ${LEGS[0].tag} 不同（这一节对腿之间仍然要求逐字节）\n      ${LEGS[0].tag}: ${JSON.stringify(first.out)}\n      ${leg.tag}: ${JSON.stringify(r.out)}`);
+    if (r.out !== first.out) exact = false;
+    if (!tolSame(r.out, first.out)) {
+      bad.push(`    ${leg.tag} 与 ${LEGS[0].tag} 超出容差\n      ${LEGS[0].tag}: ${JSON.stringify(first.out)}\n      ${leg.tag}: ${JSON.stringify(r.out)}`);
     }
   }
   if (expected === null) bad.push('    缺 .expected');
@@ -202,9 +203,9 @@ for (const f of readdirSync(join(here, 'tol')).filter(isCase).sort()) {
     if ((r.status ?? 1) !== 0) bad.push(`    真 asy 自己就跑不过 exit=${r.status}\n${real}`);
     else if (!tolSame(real, first.out)) {
       bad.push(`    与真 asy 超出容差\n      asy:  ${JSON.stringify(real)}\n      omni: ${JSON.stringify(first.out)}`);
-    } else tjudged = real === first.out ? ' ~= asy -noV（这次恰好逐字节相同）' : ' ~= asy -noV（容差内）';
+    } else tjudged = real === first.out ? ' ~= asy -noV（逐字节）' : ' ~= asy -noV（容差内）';
   }
-  if (bad.length === 0) ok(`tol/${name} [五方逐字节一致${tjudged}]`);
+  if (bad.length === 0) ok(`tol/${name} [五方${exact ? '逐字节一致' : '容差内一致'}${tjudged}]`);
   else no(`tol/${name}`, bad.join('\n'));
 }
 
