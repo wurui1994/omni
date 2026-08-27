@@ -2495,6 +2495,33 @@ C++ 内建类型，都不在我们的内建面上。所以 plain_paths 真正的
 `函数(L, …)` 的普通函数（`L` 就是那个降级器），调用处写 `asyAssign(this, …)`。
 普通函数调用在封闭子集里是保证能降级的，这也是唯一不引入新语言特性的拆法。
 
+### 第二刀：调用与重载解析那一族搬走，4808 -> 4028
+
+`frontend-asy/calls.js`（804 行）：`args` / `call` / `callArgs` / `visible` / `fit` / `applyCall` /
+`sigText` / `methodCall` / `ctorCall` / `userCall` / `fnValCall` / `opUser` / `opBuiltinSig` /
+`joinExp` / `builtinOwns` / `builtinCost` / `builtinRaw` / `strRaw` / `mathCall` / `defWrapper` ——
+一个调用怎么落地，全在这一摊里。原来在类里是连着的 780 行，所以搬的是**一整段连续文本**，
+注释与它管的那段代码没有被拆开。
+
+拆法就是上一节说的那个：`fnValCall(n, nm, ft, callee)` 变成
+`export function asyFnValCall(L, n, nm, ft, callee)`，体里的 `this.` 全换成 `L.`，
+调用处 `this.applyCall(n, …)` 变成 `asyApplyCall(this, n, …)`。
+名字全加了 `asy` 前缀 —— `args`/`call`/`fit`/`visible` 这几个放到模块级太容易撞，
+而封闭 ABI 的纪律是模块级名字全仓唯一。
+
+搬之前先量了三件事，每一件都能让这种机械改写出错：
+- **有没有别的接收者**：`grep` 这 20 个名字，`this.` 之外的接收者是 **0** 个 ——
+  没有 `Function.prototype.call` 这种同名陷阱，也没有 `AsySession` 从外面调它们。
+- **有没有跨行的模板字面量**：写了个小状态机扫这 780 行，**0 个** ——
+  所以整段退两格是安全的。有的话退格会改到方言文本里的空白。
+- **有没有裸的 `this`**：有 7 处，全是方言文本里的 `(var this)` / `(let this …)` / `(this T)`，
+  那是 **asy 的 `this`**，跟 JS 的没关系。所以换的是 `this.`（带点）而不是 `\bthis\b` ——
+  后者会把 `(var this)` 改成 `(var L)`，那是能过语法检查、能过大部分测试、
+  但会在方法调用上错的一类改动。
+
+行为没动的证据不止测试：`import graph;` 还是 **187** 条诊断、`import plain;` 还是 **2** 条，
+与搬之前一个数都不差。`tests/asy` 107/107，`tests/bootstrap` 60/60。
+
 ## 后果与代价
 
 
