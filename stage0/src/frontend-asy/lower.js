@@ -116,11 +116,12 @@
 // **`explicit` 形参**（第二十六刀：`void p(explicit real r)` 这个槽只收类型一模一样的
 // 实参 —— 量过它连内建的 int->real 提升都挡，而且**不进签名身份**（同签名的第二份还是
 // 替换）。降级要做的只有两件：formals 记个标记、fit 多问一句）。
+// **用户定义的转换**（第二十七刀：`T operator cast(S)` 管所有隐式位置、`operator ecast`
+// 只管 `(T) x`。它原来在门外，理由是会改**重载解析的打分**；量清了才收：跟内建提升
+// **同价**（打平就是 ambiguous）、而且**不串**（源类型必须一模一样），见 castSig）。
 //
 // 不支持（见到就报错，报错里说清是哪一条）：triple、标准库模块（`import graph;`）、
-// typedef、`operator cast`（asy 的隐式转换 —— 形态好认，但它会改**重载解析的打分**：
-// 一旦用户能加转换，"要几次转换"就不再只由内建提升表决定，而那张表是第十一刀量出来钉死的；
-// 收它得先量清"用户转换算几分、能不能连着用两次、跟内建提升谁优先"）、
+// typedef、
 // 给切片赋值（`a[0:2] = b`）、
 // 多维数组（`int[][]` —— 核心方言的 `(arr T)` 不收数组元素：MIR 那一层元素类型只有
 // 一个 8 位类型码，`(arr (arr int))` 与 `(arr (arr string))` 在那里是同一个码，
@@ -626,6 +627,11 @@ class AsyLower {
     // 外加节点 -> 候选表，好让 func() 认出"这份 fundec 是哪张表里的"。
     this.oinits = new Map();
     this.oiByNode = new Map();
+    // 用户定义的转换（第二十七刀）：目标类型 -> 一串候选 {to, src, sym, at, ec}。
+    // `ec` 是 `operator ecast`（只给 `(T) x` 用），`cast` 那份连隐式位置一起管。
+    this.casts = new Map();
+    this.castByNode = new Map();
+    this.castNo = 0;
     // 现在降的是**第几个**顶层项。asy 的名字解析是顺序的（量过：函数体里引用后面
     // 才声明的名字是 "no matching variable"），所以候选表要按这个下标裁一刀。
     // 自己那条也算可见（`c.at <= this.at`）—— 单函数递归 asy 是允许的。
@@ -666,6 +672,7 @@ class AsyLower {
       id, key, rs: this.flat(tree, 'block'), pfx: id === 0 ? '' : `asy__m${id}_`,
       init: id === 0 ? null : `asy__init${id}`, ran: id === 0 ? null : `asy__ran${id}`,
       funcs: new Map(), globals: new Map(), oinits: new Map(), oiByNode: new Map(),
+      casts: new Map(), castByNode: new Map(),
       recVis: new Map(), mods: new Map(), methodDecls: [], callAt: new Map(), at: 0,
     };
     this.units.push(u);
@@ -678,6 +685,8 @@ class AsyLower {
     u.globals = this.globals;
     u.oinits = this.oinits;
     u.oiByNode = this.oiByNode;
+    u.casts = this.casts;
+    u.castByNode = this.castByNode;
     u.recVis = this.recVis;
     u.mods = this.mods;
     u.methodDecls = this.methodDecls;
@@ -693,6 +702,8 @@ class AsyLower {
     this.globals = u.globals;
     this.oinits = u.oinits;
     this.oiByNode = u.oiByNode;
+    this.casts = u.casts;
+    this.castByNode = u.castByNode;
     this.recVis = u.recVis;
     this.mods = u.mods;
     this.methodDecls = u.methodDecls;
@@ -1109,6 +1120,9 @@ class AsyLower {
     if (v.type === want) return v;
     if (v.type === 'int' && want === 'real') return { code: `(toreal ${v.code})`, type: 'real' };
     if (want === 'pair' && (v.type === 'int' || v.type === 'real')) return this.toPair(v);
+    // 用户定义的转换（第二十七刀）：内建那几条不成才轮到它，源类型要一模一样（不串）
+    const uc = this.castFor(want, v.type, false);
+    if (uc !== null) return { code: `(call ${uc.sym} ${v.code})`, type: want };
     return this.err(node, `${what}：要 ${want}，这里是 ${v.type}`);
   }
 
@@ -1608,6 +1622,10 @@ class AsyLower {
     if (t === 'real' && v.type === 'int') return { code: `(toreal ${v.code})`, type: 'real' };
     if (t === 'int' && v.type === 'real') return { code: `(toint ${v.code})`, type: 'int' };
     if (t === 'pair' && (v.type === 'int' || v.type === 'real')) return this.toPair(v);
+    // `(T) x` 是唯一收 `operator ecast` 的位置（第二十七刀）；内建那几条在上面 —— 量过
+    // `(real) 3` 还是提升，用户那份是兜底。
+    const uc = this.castFor(t, v.type, true);
+    if (uc !== null) return { code: `(call ${uc.sym} ${v.code})`, type: t };
     return this.nope(n, `把 ${v.type} 转成 ${t}`);
   }
 
@@ -1955,8 +1973,11 @@ class AsyLower {
       // `explicit` 的槽只收类型一模一样的实参（第二十六刀，量过：连 int->real 都挡）
       if (cand.ps[at].exp === true && r.v.type !== cand.ps[at].type) return null;
       const c = asyConvCost(r.v.type, cand.ps[at].type);
-      if (c < 0) return null;
-      cost += c;
+      // 用户的 `operator cast`（第二十七刀）：代价**跟内建提升一样**是 1 —— 量过打平时
+      // asy 报 "is ambiguous"，所以这里不能给它一个更贵的分数偷偷分出胜负。
+      const uc = c < 0 && this.castFor(cand.ps[at].type, r.v.type, false) !== null ? 1 : c;
+      if (uc < 0) return null;
+      cost += uc;
       filled.set(at, true);
       slot.push(at);
       if (at < last) reordered = true;
@@ -2815,6 +2836,22 @@ class AsyLower {
       if (key !== nm) { this.nope(node, `给 import 进来的 struct '${nm}' 改名`); continue; }
       if (!this.recVis.has(key)) this.recVis.set(key, { rec: e.rec, at: at });
     }
+    // 用户定义的转换（第二十七刀）：`import m;` 把它们一起带进来 —— 它们不挂在某个名字上，
+    // 所以 `only`（`from m access f, g;` 的那张改名表）管不到它们，那种写法这边就不并。
+    if (only !== null) return;
+    for (const [to, list] of u.casts) {
+      const dst = this.casts.has(to) ? this.casts.get(to) : [];
+      for (const c of list) {
+        let dup = false;
+        for (const d of dst) if (d.sym === c.sym) dup = true;
+        if (dup) continue;
+        dst.push({
+          ret: c.ret, params: c.params, ps: c.ps, node: c.node, sym: c.sym, pfx: c.pfx,
+          unit: c.unit, dat: c.dat, at: at, to: c.to, src: c.src, ec: c.ec,
+        });
+      }
+      this.casts.set(to, dst);
+    }
   }
 
   /**
@@ -2967,6 +3004,62 @@ class AsyLower {
   }
 
   /**
+   * `T operator cast(S)` / `T operator ecast(S)`（第二十七刀）：用户定义的转换。
+   * 六条都量过（`asy -noV`）：
+   *   - `cast` 在**隐式位置**都管用：实参、初始化、return、数组元素赋值、数组字面量、
+   *     字段默认值；`ecast` 只给 `(T) x` —— 只写 ecast 时 `V b = 5;` 报
+   *     "cannot cast 'int' to 'V'"，而 `(V) 5` 通；
+   *   - 代价**跟内建提升一样**：`void p(real); void p(V);` 加 `V operator cast(int)`
+   *     之后 `p(3)` 报 "call ... is ambiguous"；
+   *   - **不串**：`A operator cast(int)` 加 `B operator cast(A)` 之后 `q(5)`（要 B）不通，
+   *     `V operator cast(real)` 之后 `p(3)`（int）也不通 —— 所以源类型必须**一模一样**；
+   *   - **顺序解析**：写在调用点后面的那份不算；
+   *   - 一个源类型转到两个目标、两个重载各收一个 -> ambiguous（打平的直接后果，白捡）；
+   *   - `(T) x` 优先走内建（`(real) 3` 还是提升），用户那份是**兜底**。
+   */
+  castSig(n, at, ec) {
+    const nm = ec ? 'operator ecast' : 'operator cast';
+    const to = this.type(n.items[1], `${nm} 的目标类型`);
+    const ps = this.formals(n.items[3]);
+    if (to === null || ps === null) return;
+    if (to === 'void') {
+      this.err(n, `'void ${nm}(…)' 不是合法的转换 —— 转成 void 没有意义`);
+      return;
+    }
+    if (ps.length !== 1) {
+      this.nope(n, `${ps.length} 元的 '${nm}'（asy 的转换是一元的：一个源类型一个目标类型）`);
+      return;
+    }
+    const safe = to.replace(/[^A-Za-z0-9_]/g, '_');
+    const cand = {
+      ret: to, params: [ps[0].type], ps, node: n, sym: `${this.pfx}asy__cast${this.castNo}_${safe}`,
+      pfx: this.pfx, unit: this.unit.id, at, dat: at, to, src: ps[0].type, ec,
+    };
+    this.castNo++;
+    const list = this.casts.has(to) ? this.casts.get(to) : [];
+    list.push(cand);
+    this.casts.set(to, list);
+    this.castByNode.set(n, [cand]);
+  }
+
+  /**
+   * 从 `from` 转到 `to` 的用户转换，按**当前位置**挑（没有就回 null）。
+   * `allowEc` 只在 `(T) x` 那个位置是 true。源类型要一模一样 —— asy 不串转换（量过）。
+   */
+  castFor(to, from, allowEc) {
+    const list = this.casts.get(to);
+    if (list === undefined) return null;
+    let cur = null;
+    for (const c of list) {
+      if (c.src !== from) continue;
+      if (c.ec && !allowEc) continue;
+      if (c.at > this.at) continue;
+      cur = c;   // 同一对类型写两份：后面那份管后面（跟别的顺序解析一致）
+    }
+    return cur;
+  }
+
+  /**
    * 形参表：`(formal (implicit) TYPE (decidstart NAME))`，带默认值时多一个
    * `varinit`（`(formal EX TYPE DECIDSTART VARINIT)`，第十刀加的）。
    * 默认值这里**只存节点不降级**：它要在调用点按"缺哪几个"生成的包装函数里降，
@@ -3008,6 +3101,12 @@ class AsyLower {
     const nm = isAtom(n.items[2]) ? n.items[2].value : null;
     if (nm === null) return;
     if (nm === 'operator init') { this.oinitSig(n, at); return; }
+    // `operator cast` / `operator ecast`（第二十七刀）：它们不进 funcs —— 候选按**目标类型**
+    // 存（见 castSig），调用点只在"转换"这一步问它，名字本身在 asy 里也调不到。
+    if (nm === 'operator cast' || nm === 'operator ecast') {
+      this.castSig(n, at, nm === 'operator ecast');
+      return;
+    }
     // 算符重载（第二十三刀）：`V operator +(V,V)` 就是个名字叫 `operator +` 的函数，
     // 所以候选表按这个名字存 —— asy 里它跟普通重载在同一张表里（量过：用户的
     // `int operator +(int,int)` 会**盖掉内建的** `2 + 3`）。降级出的符号名要是个标识符。
@@ -3229,8 +3328,11 @@ class AsyLower {
     // 文件级的 `T operator init()`（第二十二刀）不在 funcs 里 —— 它的候选表按记录名存
     // （见 oinitSig），所以这里按节点问一遍那张表。除此之外它就是个普通的 0 元函数。
     const oiList = this.oiByNode.get(n);
+    // `operator cast` / `operator ecast`（第二十七刀）同理：候选按目标类型存，这里按节点问。
+    const csList = this.castByNode.get(n);
     const list = oiList !== undefined ? oiList
-      : (nm === null || !this.funcs.has(nm) ? null : this.funcs.get(nm));
+      : (csList !== undefined ? csList
+        : (nm === null || !this.funcs.has(nm) ? null : this.funcs.get(nm)));
     if (list === null) return null;
     // 这份声明对应哪个候选：按**节点**认，不按签名 —— 同签名被后面那份替换掉时，
     // 前面那份就没有候选了（asy 那边它也确实调不到），于是这里不发它。

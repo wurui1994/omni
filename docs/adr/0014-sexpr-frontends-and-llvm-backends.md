@@ -264,9 +264,11 @@ bison **隐式**的选择写成**显式**的优先级声明 —— 悬垂 else�
    **文件级变量**（第二十四刀：核心方言加了 `(global 名字 类型)`，函数里读得到、改得到）、
    **模块**（第二十五刀：`import` / `access` / `access … as` / `from … access` ——
    一份文件一个单元，模块体成为 `asy__init<k>`，调用点就在 import 那一行）、
-   **`explicit` 形参**（第二十六刀：那个槽只收类型一模一样的实参，连内建提升都挡），
-   三十份用例在五个执行器上与 `asy -noV` 逐字节相同。
-   **还没做**的是给切片赋值、多维数组、复数幂、triple、`operator cast`、
+   **`explicit` 形参**（第二十六刀：那个槽只收类型一模一样的实参，连内建提升都挡）、
+   **用户定义的转换**（第二十七刀：`T operator cast(S)` 管所有隐式位置、
+   `operator ecast` 只管 `(T) x`；代价与内建提升同价，不串），
+   三十三份用例在五个执行器上与 `asy -noV` 逐字节相同。
+   **还没做**的是给切片赋值、多维数组、复数幂、triple、
    字符串的 `reverse`/`insert`/`split`、
    自引用字段、把方法当值取出来、struct 体里的算符、函数里用文件级的 pair/记录/数组变量、
    标准库那 84 个模块（`import graph;`）与 `unravel`/`include`/参数化模块，
@@ -446,12 +448,13 @@ static inline C + 另写一份 IR 助手"，是两份实现；这次不重复那
 `1/3` 是实数除法而 `1#3` 是整数商、`3 == 3.0` 要提左边、`write` 的分隔符取决于第一个
 实参是不是字符串。类型是符号表的事，动作模板里没有符号表。
 
-**判分的人不是我**：`tests/asy` 的三十份用例（算术 / 字符串 / 两种引号 / 控制流 / 函数 /
+**判分的人不是我**：`tests/asy` 的三十三份用例（算术 / 字符串 / 两种引号 / 控制流 / 函数 /
 real 的 %.15g / `? :` / 数学函数 / 数组 / pair / 切片与整数组输出 / for-each /
 字符串函数 / `pair[]` / 默认实参与命名实参 / 重载解析 / struct / struct 的 pair 字段 /
 struct 的数组字段 / struct 的记录字段 / `A[]` / struct 的方法 / 构造函数 /
 文件级 operator init / 算符重载 / 用户算符与内建算符的关系 / 文件级变量 / 模块 /
-模块里的 struct 与默认实参 / `explicit` 形参）每份都是
+模块里的 struct 与默认实参 / `explicit` 形参 / 用户定义的转换 / 模块里的转换 /
+反方向的转换）每份都是
 「五条腿逐字节相同 == `.expected` == `asy -noV` 当场重跑」。`.expected` 本身就是真 asy 的
 输出生成的；机器上没装 asymptote 时那一节打印 skip，但 `.expected` 仍然把答案钉住。
 用例目录里 `mod_*.asy` 不是用例而是**被 import 的模块**，三节测试都在用例文件自己的目录里
@@ -473,9 +476,10 @@ struct 的数组字段 / struct 的记录字段 / `A[]` / struct 的方法 / 构
 （只算中选那支）跟着编码保住。代价写在明处：**循环条件里的 `? :` 直接报错**，因为那些
 赋值只能落在循环外面，条件就只算一次了。这条边界在 `tests/asy/bad/cond-in-loop.asy` 里。
 
-第一刀的边界都在 `tests/asy/bad/`（18 条，每条的期望值都必须以 `ASY_NOPE` 开头 ——
-"还没做"和"做错了"必须能一眼分开）：triple、复数幂、`operator cast`、
-模块（import/access）、隐式缩放（`105cm`）、超越函数（`sin`、pair 上的 `angle` ——
+第一刀的边界都在 `tests/asy/bad/`（21 条，每条的期望值都必须以 `ASY_NOPE` 开头 ——
+"还没做"和"做错了"必须能一眼分开）：triple、复数幂、
+标准库模块（`import graph;` —— 用户自己写的模块第二十五刀通了；
+`operator cast` 那条第二十七刀通了，那份用例搬成了 `cases/33-castback`）、隐式缩放（`105cm`）、超越函数（`sin`、pair 上的 `angle` ——
 理由是上面那条 ULP 测量）、函数里用文件级的 **pair/记录/数组**变量
 （标量的那些第二十四刀通了，见下面那一节；`bad/global-read.asy` 因此换成了
 `bad/global-pair.asy`）、
@@ -510,7 +514,7 @@ struct 的数组字段 / struct 的记录字段 / `A[]` / struct 的方法 / 构
 **第四节 `strict/`：asy 自己就不收的，我们也不能收。** 这一节是数组这一刀顺手加的，起因是
 一次测量：`int b=1; b++;` 在真 asy 上直接编不过（"postfix expressions are not allowed"），
 而我们的降级器照收。这类漏洞**不会让任何用例输出不同** —— 它只让"等价"这两个字变虚。
-所以 `strict/` 里的用例要求：我们拒，且装了 asy 的话**真 asy 也拒**。现在有十六条：后缀
+所以 `strict/` 里的用例要求：我们拒，且装了 asy 的话**真 asy 也拒**。现在有二十条：后缀
 `++`、pair 上的 `<`、pair 上的 `%`（这两条 asy 报的是 "no matching function
 'operator <(pair, pair)'"）、`length(int[])`（`length` 只有 string 和 pair 两个重载）、
 按不存在的形参名给命名实参（asy 报 "cannot call 'void f(int a)' with parameter 'int b'"）、
@@ -527,7 +531,12 @@ ambiguous"）、**引用后面才声明的函数**（asy 报 "no matching variab
 **`access m;` 之后裸用模块里的名字**（asy 报 "no matching variable 'mv'" ——
 第二十五刀加的：`access` 只给限定名，只有 `import` 才把名字铺成裸的）、
 **给 `explicit real` 的槽喂一个 int**（asy 报 "cannot call 'void p(explicit real r)'
-with parameter 'int'" —— 第二十六刀加的：explicit 连**内建提升**都挡）——
+with parameter 'int'" —— 第二十六刀加的：explicit 连**内建提升**都挡）、
+**用户转换串两次**（`A operator cast(int)` 接 `B operator cast(A)` 之后 int 到 B 不通；
+只有 `V operator cast(real)` 时 int 到 V 也不通 —— asy 报 "cannot call … with
+parameter 'int'"）、**隐式位置用 `operator ecast`**（asy 报 "cannot cast 'int' to 'U'"）、
+**用户转换与内建提升打平**（`p(real)` 与 `p(V)` 遇上 `p(3)`：asy 报 ambiguous ——
+这三条是第二十七刀加的，它们钉住的是转换的**代价与传递性**：同价、不串）——
 中间那两条是重载这一刀加的，第二条尤其要紧：我们是两遍降级，不专门裁一刀就会比 asy
 多接受一门语言。`write(struct)` 与 `z.x = 5` 是 struct 与 pair 字段那两刀加的，
 它们守的不只是"拒"：
@@ -1156,9 +1165,11 @@ asy 那一侧落地的是 `A[]`（`cases/21-structarr.asy`，与 `asy -noV` 逐�
 - `--` 是 guide 的**连接产生式**（`a -- b`），内建的那份要等绘图层；但自己定义一份
   `operator --` 是通的，走的就是这张表。
 
-两条边界：`operator cast`（asy 的隐式转换）在门外，理由不是形态难认，是它会改**重载解析
-的打分** —— 一旦用户能加转换，"要几次转换"就不再只由内建提升表决定，而那张表是第十一刀
-量出来钉死的（`bad/op-cast.asy`）；struct **体里**的算符也在门外，量过 asy 收这个声明但
+两条边界（**第一条已经在第二十七刀里落地了**，见下面那一节）：`operator cast`（asy 的隐式
+转换）当时在门外，理由不是形态难认，是它会改**重载解析的打分** —— 一旦用户能加转换，
+"要几次转换"就不再只由内建提升表决定，而那张表是第十一刀量出来钉死的；把打分量清
+（同价、不串）之后它才进来，`bad/op-cast.asy` 也因此搬成了 `cases/33-castback`。
+struct **体里**的算符还在门外，量过 asy 收这个声明但
 它**不参与** `a + b`（那边照旧报 "no matching function 'operator +(V, V)'"），
 量不出它能被什么调到就不猜。
 
@@ -1250,7 +1261,7 @@ asy 那边因此只收 int/real/bool/string 的文件级变量；pair/记录/数
 
 - `void p(explicit real r)` 这个槽**只收类型一模一样的实参** —— `p(3.0)` 通，`p(3)` 报
   "cannot call 'void p(explicit real r)' with parameter 'int'"。也就是说它连**内建提升**
-  都挡，不只是挡将来那个 `operator cast`；
+  都挡，不只是挡用户的 `operator cast`（第二十七刀）；
 - 它**不进签名身份**：先 `void p(real)` 再 `void p(explicit real)` 是**替换**（之后
   `p(3.0)` 走后者、`p(3)` 直接报错），反序则是那份 explicit 被换掉。所以降级器里
   `params`（重载身份的 key）一个字都不用改，标记挂在 `ps[k].exp` 上；
@@ -1260,6 +1271,36 @@ asy 那边因此只收 int/real/bool/string 的文件级变量；pair/记录/数
 于是实现就是：`formals` 记标记、`fit` 多问一句 `实参类型 !== 形参类型 就不匹配`、
 诊断里把 `explicit` 印出来（不印的话"没有能匹配的签名"会显得莫名其妙）。
 `cases/30-explicit` 钉住上面前三条与后一条，`strict/explicit-int` 钉住"连内建提升都挡"。
+
+### 已落地（支持面第十六阶段：用户定义的转换，门槛 2 第二十七刀）
+
+**核心方言零改动。** `operator cast` 原来记在 `bad/` 里，理由写得很清楚：它会改**重载解析的
+打分**，而那张打分表（`fit` 里的 `asyConvCost`）是第十一刀量出来钉死的。这一刀先把打分量清，
+再动手。六条都是 `asy -noV` 量的：
+
+- `T operator cast(S)` 在**所有隐式位置**都管用：实参、初始化、`return`、数组元素赋值、
+  数组字面量、struct 字段默认值；
+- `T operator ecast(S)` **只**给 `(T) x`：只写 ecast 时 `U b = 5;` 报
+  "cannot cast 'int' to 'U'"，而 `(U) 5` 通；
+- **代价与内建提升同价**：`void p(real)` 与 `void p(V)` 加上 `V operator cast(int)` 之后
+  `p(3)` 报 "call of function 'p(int)' is ambiguous"。所以降级器里补的分是 1，不是
+  "比提升贵一点" —— 给它一个更贵的分数就会偷偷分出胜负，那正是先前不敢收它的那个风险；
+- **不串**：用户接用户（`A operator cast(int)` 加 `B operator cast(A)` 之后 int 到 B）
+  与内建提升接用户（只有 `V operator cast(real)` 时 int 到 V）都不通。于是查表时源类型
+  必须**一模一样**，一句 `c.src === from` 就够，不需要做传递闭包；
+- **顺序解析**：写在调用点后面的那份不算，同一对类型写两份就是"各管后面那一段"
+  （跟文件级 `operator init`、文件级变量、模块别名是同一条规矩的第四处）；
+- `import` 把模块里的转换一起带进来（`from m access f;` 那种不带 —— 转换不挂在名字上，
+  那张改名表管不到它，这一条没量，所以不猜）;
+- **重载算符的操作数也走它**：`V operator +(V,V)` 加 `V operator cast(int)` 之后 `a + 1`
+  通（量过）。这一条是白捡的 —— 算符走的是同一个 `applyCall`。
+
+实现是四处：`castSig` 把候选按**目标类型**存（它们不进 `funcs` —— asy 里这个名字也调不到）、
+`castFor` 按当前位置挑一份、`coerce` 在内建那几条之后兜底、`cast()`（`(T) x`）多收 ecast。
+`cases/31-cast` 钉住八个位置与顺序解析，`cases/32-modcast` 钉住模块，
+`cases/33-castback` 是原来那份 `bad/op-cast` 搬过来的（struct -> int 的反方向），
+`strict/cast-chain-user`、`strict/cast-chain-promote`、`strict/cast-ecast-implicit`、
+`strict/cast-tie-real` 钉住四条拒绝。
 
 ## 决策 4：调用 LLVM 需要 extern-C FFI —— 这是新要求，也是 dogfood
 
