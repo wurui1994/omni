@@ -291,20 +291,42 @@ export function asyFormals(L, node) {
   if (restF !== null) list.push(restF);
   for (let fi = 0; fi < list.length; fi++) {
     const f = list[fi];
-    if (!isList(f) || head(f) !== 'formal') return L.nope(f, '关键字形参或可变形参');
+    if (!isList(f)) return L.nope(f, '认不出的形参');
+    // `T keyword x`（第三十四刀）：语法上是
+    // `(formal-kw explicitornot 类型 ID decidstart [varinit])` —— 中间那个 ID 就是
+    // `keyword` 那个词（词法里它不是保留字，所以在这儿验一句；asy 那边验不过报
+    // "expected 'keyword' here"）。验完把它抠掉，剩下的形状与普通形参一模一样，
+    // 下面那一大段照原样跑，只多带一个 kw 标记出去（fit 那边只多问一句）。
+    let kw = false;
+    let it = f.items;
+    if (head(f) === 'formal-kw') {
+      const w = isAtom(f.items[3]) ? f.items[3].value : null;
+      if (w !== 'keyword') {
+        // 这一条我们比 asy **严**：那边报 "expected 'keyword' here" 之后**退 0**
+        // （量过），也就是把这句吞了。吞掉的语义没法照抄，所以这里直接拒 ——
+        // 因此它进不了 strict（那条轴的判据是"真 asy 也退非 0"）。
+        return L.err(f.items[3], `形参上只能写 'keyword'，这里写的是 '${w}'`
+          + `（asy 那边报 "expected 'keyword' here"）`);
+      }
+      kw = true;
+      it = [f.items[0], f.items[1], f.items[2], f.items[4]];
+      if (f.items.length === 6) it.push(f.items[5]);
+    } else if (head(f) !== 'formal') {
+      return L.nope(f, '可变形参');
+    }
     // 无名形参（`pair zero(real) {return 0;}`，graph.asy:271；`new real(int){return 0;}`，
     // math.asy:211）：语法上是 `(formal explicit 类型)`，只有三格。这个槽在体里没法提，
     // 所以补一个**按位置定死**的名字就够了 —— 定死是要紧的：声明遍与正文遍各求一次形参表，
     // 两遍拼出来的名字必须一样（用递增计数器就会错开）。`asy__` 是保留前缀。
-    if (f.items.length === 3) {
-      const at = L.type(f.items[2], '形参');
+    if (it.length === 3) {
+      const at = L.type(it[2], '形参');
       if (at === null) return null;
-      const aex = isList(f.items[1]) && head(f.items[1]) === 'explicit';
-      out.push({ name: `asy__anon${fi}`, type: at, exp: aex, def: null });
+      const aex = isList(it[1]) && head(it[1]) === 'explicit';
+      out.push({ name: `asy__anon${fi}`, type: at, exp: aex, def: null, kw: kw });
       continue;
     }
-    if (f.items.length !== 4 && f.items.length !== 5) return L.nope(f, '无名形参');
-    const ex = f.items[1];
+    if (it.length !== 4 && it.length !== 5) return L.nope(f, '无名形参');
+    const ex = it[1];
     // `explicit T x`（第二十六刀）：这个槽**只收类型一模一样的实参**。量过四条：
     //   - `void p(explicit real r); p(3);` 在 asy 那边报 "cannot call ... with
     //     parameter 'int'" —— 连内建的 int->real 提升都挡，不只挡用户的 operator cast；
@@ -313,9 +335,11 @@ export function asyFormals(L, node) {
     //     （量过：之后 `p(3.0)` 走后者、`p(3)` 直接报错），反序则是前者被换掉；
     //   - 算符与数组形参上一样管用。
     // 于是降级要做的只有两件：这里记个标记，fit() 那边多问一句。
+    // `keyword` 那个标记走的是同一条路（量过它也不进签名身份：先 `void p(int keyword a)`
+    // 再 `void p(int a)` 是**替换** —— 之后 `p(a=5)` 与 `p(5)` 都走后者）。
     const exp = isList(ex) && head(ex) === 'explicit';
-    const t = L.type(f.items[2], '形参');
-    const start = f.items[3];
+    const t = L.type(it[2], '形参');
+    const start = it[3];
     if (t === null) return null;
     // `real f(real)`：形参名后面挂一个形参表 —— 这个槽的类型是**函数类型**
     // （量出来的第一拦路虎，见 asyIsFn 的注释）。
@@ -324,13 +348,24 @@ export function asyFormals(L, node) {
       if (ft === null) return null;
       const fnm = isAtom(start.items[1]) ? start.items[1].value : null;
       if (fnm === null) return L.err(start, '形参少了名字');
-      out.push({ name: fnm, type: ft, exp: exp, def: f.items.length === 5 ? f.items[4] : null });
+      out.push({ name: fnm, type: ft, exp: exp, def: it.length === 5 ? it[4] : null, kw: kw });
       continue;
     }
     if (!isList(start) || head(start) !== 'decidstart' || start.items.length !== 2) return L.nope(start, '带维度的形参名');
     const nm = isAtom(start.items[1]) ? start.items[1].value : null;
     if (nm === null) return L.err(start, '形参少了名字');
-    out.push({ name: nm, type: t, exp: exp, def: f.items.length === 5 ? f.items[4] : null });
+    out.push({ name: nm, type: t, exp: exp, def: it.length === 5 ? it[4] : null, kw: kw });
+  }
+  // `keyword` 的槽是**尾巴上一整段**：asy 那边普通形参排在它后面是语法错
+  // （量过报 "normal parameter after keyword-only parameter"）。这一条我们同样比它严 ——
+  // 那边报完**退 0**（量过），所以它也进不了 strict。
+  let sawKw = false;
+  for (const p of out) {
+    if (p.kw === true) { sawKw = true; continue; }
+    if (sawKw) {
+      return L.err(node, `普通形参 '${p.name}' 排在 keyword 形参后面 ——`
+        + ' asy 那边报 "normal parameter after keyword-only parameter"');
+    }
   }
   // 最后那一格是 `... T[]`：验三条，然后记上标记
   if (restF !== null) {

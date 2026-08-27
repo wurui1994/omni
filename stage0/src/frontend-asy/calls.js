@@ -683,6 +683,8 @@ export function asySigText(L, c) {
     const p = c.ps === undefined || c.ps[i] === undefined ? null : c.ps[i];
     // 可变那一格印成 `... T[]`：诊断里"有的是 int(... int[])"比 "int(int[])" 说得清
     if (p !== null && p.rest === true) { parts.push(`... ${c.params[i]}`); continue; }
+    // keyword 那一格也要印出来 —— 它同样决定这个候选收不收这个实参（只是按名字那一半）
+    if (p !== null && p.kw === true) { parts.push(`${c.params[i]} keyword`); continue; }
     parts.push(p !== null && p.exp === true ? `explicit ${c.params[i]}` : c.params[i]);
   }
   return `${c.ret}(${parts.join(', ')})`;
@@ -733,6 +735,10 @@ export function asyFit(L, cand, raw) {
     }
     if (r.spread === true) return null;   // `... x` 只能落在可变那一格上
     if (at < 0 || at >= cand.ps.length || filled.has(at)) return null;
+    // `T keyword x` 的槽**只能按名字给**（量过：`void f(int keyword a); f(3)` 那边报
+    // "cannot call 'void f(int keyword a)' with parameter 'int'"）。keyword 的槽在尾巴上
+    // 一整段（普通形参排在它后面是语法错），所以位置实参落到这儿就是"位置实参给多了"。
+    if (r.key === null && cand.ps[at].kw === true) return null;
     // 重载集当值用（callArgs 先不定案的那种）：按**这个槽要的类型**挑一份。
     // 挑到就是同型（cost 不加），挑不到这个候选就不合用 —— 与别的实参一视同仁。
     if (r.v.over !== undefined) {

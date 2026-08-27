@@ -3068,6 +3068,42 @@ if (this.isRec(eel) && !this.recHere(eel)) return this.recLate(node, eel);
 跑的轴：`tests/asy`（130 passed，38.2s）、`tests/bootstrap`（60 passed）。只动
 `frontend-asy/lower.js` 一处，sexpr 与 run.js 跳掉。
 
+### `keyword` 形参：语法早就读得进，缺的是「这一格只能按名字给」
+
+`map.asy:104` 的 `void operator init(V keyword nullValue, bool keyword isNullValue(V) = null)`
+是 `import plain;` 的最后一条。文法里那两条产生式（`formal-kw`）**一直都在**，
+`asyFormals` 只是把它一律 nope 掉了；缺的是语义。量出来的四条：
+
+- `void f(int keyword a); f(3);` -> `cannot call 'void f(int keyword a)' with parameter 'int'`
+  （**退 1**）—— 这一格只能按名字给；
+- 默认值与乱序给名照旧：`void q(int x, int keyword a = 7, int keyword b = 9)`，
+  `q(1)` / `q(1, b=2)` / `q(1, b=2, a=3)` 是 17 / 10 / 6；
+- **不进签名身份**（与 `explicit` 同一条）：先 `void p(int keyword a)` 再 `void p(int a)`
+  是**替换** —— 之后 `p(a=5)` 与 `p(5)` 都印后者；
+- `keyword` 的槽是**尾巴上一整段**：普通形参排在它后面那边报
+  "normal parameter after keyword-only parameter"。
+
+于是三处小改：`asyFormals` 里验一句 `keyword`（词法里它不是保留字）、把那个词抠掉之后
+形状与普通形参一模一样、带一个 `kw` 标记出去；`asyFit` 里位置实参落到 `kw` 的槽上就
+不合用；`asySigText` 里印成 `int keyword`（诊断得说清为什么不收）。
+
+**两条比 asy 严的**，都量过：`int foo a`（那边 "expected 'keyword' here"）与
+"普通形参排在 keyword 后面"，asy 报完之后**退 0**（把整句吞了）。吞掉的语义没法照抄，
+所以我们直接拒 —— 也因此这两条进不了 strict（那条轴的判据是"真 asy 也退非 0"），
+与 `f(... a, 9)` 那一条同一个处置。进 strict 的只有退 1 的那条：`strict/kw-positional`。
+
+还留在门外的：**函数类型里**的 `keyword`（`typedef void F(int keyword a);` asy 是收的）。
+类型文本 `void(int)` 不带形参名，按名字给就无从落地，得等类型表示这一层动。map.asy 不需要它。
+
+`import plain;` 还是 **1** 条 —— 但不是同一条了：`keyword` 那条没了，露出来的是
+`map.asy:115` 的 `map.size = new int() { return size; };`（struct 体里的表达式语句）。
+这是墙往里挪了一格，不是没动。`import graph;` 还是 183。
+
+跑的轴：`tests/asy`（132 passed，48.8s）、`tests/bootstrap`（60 passed）。只动
+`frontend-asy/`（decls.js、calls.js），tests/sexpr 与 tests/run.js 跳掉 —— 核心方言与
+后端这一刀没碰。
+
+
 
 
 
