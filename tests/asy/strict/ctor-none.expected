@@ -1,0 +1,1 @@
+struct A 里没有 'void operator init(…)'，所以 A(…) 不是构造调用（真 asy 报 "no matching variable 'A'"）

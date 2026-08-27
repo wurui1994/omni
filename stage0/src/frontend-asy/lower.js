@@ -72,6 +72,12 @@
 // 本身也认，返回 `this` 能接着点下去。重载、默认实参、递归在方法上与普通函数走的是
 // 同一条路（同一个 userCall / defWrapper，只是多塞一个接收者）。接收者可以是任意
 // 表达式：`mk(7).get()`、`ps[1].bump(30)`、`bx.inner.get()` 都通）。
+// **构造函数**（第二十一刀：`struct A { int x; void operator init(int n) { x = n; } }`、
+// `A(3)`。降成两层：正文还是那个多带一个 `this` 的 void 方法（`asy__ctor_A_body`），
+// 外面套一层 `asy__ctor_A` —— 造对象、调正文、回对象。重载、默认实参、命名实参照旧白捡，
+// 因为候选长得就像"回记录、没有接收者的普通函数"。量过的三条都对上了：字段默认值在体
+// **之前**就铺好、默认实参能引用字段（所以它是在对象造好之后求的，defWrapper 为此有一条
+// 构造分支）、而 `A a;` **不**走构造函数）。
 //
 // 不支持（见到就报错，报错里说清是哪一条）：triple、import/access、
 // typedef、算符重载、给切片赋值（`a[0:2] = b`）、
@@ -89,10 +95,13 @@
 // 还没量全；`split` 要 `string[]` 的返回值，那条路还没走通）、
 // 循环条件里的 `?:`（摊出来的赋值只能落在循环外面，条件就只
 // 算一次了 —— 语义会变，所以报错而不是悄悄换个意思）、
-// struct 的这两条边界（每条都有 bad/ 用例钉着）：**自引用**字段
+// struct 的这三条边界（每条都有 bad/ 用例钉着）：**自引用**字段
 // （`struct A { A next; }` —— asy 收，我们不收，见下面的差别一节）、
 // 把方法**当值**取出来（`int f() = a.get;` —— asy 收，那是绑住接收者的闭包；
-// 我们的方法是"多一个 this 形参的普通函数"，而核心方言里函数不是值）。
+// 我们的方法是"多一个 this 形参的普通函数"，而核心方言里函数不是值）、
+// **文件级**的 `T operator init()`（换掉 `T t;` 的隐式构造 —— struct 体里那份
+// `void operator init(…)`、也就是 `A(…)`，是通的；非 void 的 `operator init` 也在门外，
+// asy 自己也不给它构造调用）。
 //
 // ## 与真 asy 的差别，写在这里而不是等着被发现
 //
@@ -131,6 +140,12 @@
 //   语言"。等号是故意留的：一个函数看得见自己，单函数递归 asy 允许。
 //   连带的一条：用户把 `sqrt` 定义在后面时，前面那句 `sqrt(...)` 走的还是内建的那个
 //   （callExpr 里问的是"此处可见的候选"，不是"整个文件有没有同名函数"）。
+// - **类型名也是顺序解析的**（第二十一刀顺手补上的一个漏，也是对齐的一条）：量过
+//   `A a; write(a.x); struct A { int x = 3; }` 在 asy 那边报 "no type of name 'A'"，
+//   而我们先前收下了 —— 记录是第一遍全收的，`type()` 只问"有没有这个名字"。现在按声明
+//   下标裁（recHere），struct 体里则按**这个 struct 的位置**裁。这是"比 asy 多接受一门
+//   语言"那类漏洞的一个真实样本：它不会让任何用例变红，`tests/asy/strict/struct-fwd`
+//   才盯得住。
 // - **struct 的这四条都是量出来的，也都对齐了**（第十四刀）：`A a; A b=a; b.x=1;` 之后
 //   `a.x` 也变了（引用语义）、`void f(A p){p.x=9;}` 改得到外面的对象、`==`/`!=` 比的是
 //   身份（量过 `a==b` false、`a==a` true、别名 true）、有默认值的字段每次构造都重求一遍
@@ -157,6 +172,14 @@
 //   裁的是声明下标（visible），这里裁的是**成员下标**（selfField / visibleMethods 里的
 //   `mat`）—— 两处是同一个道理的两份实现，因为两张表本来就是分开的。
 //   连带的一条：字段与方法同名时不算重载，谁在前面谁生效。
+// - **`A a;` 与 `A(…)` 是两件不同的事**（第二十一刀量的，对齐的一条）：struct 体里的
+//   `void operator init(…)` 只给**构造调用** `A(…)`，`A a;` 一概不走它（量过：体里赋
+//   `x = 42` 之后 `A a; write(a.x)` 印的还是 0）。换掉 `A a;` 的是**文件级**的
+//   `A operator init()`，那一条还在门外（`bad/ctor-toplevel`）。
+// - **构造函数里字段默认值先铺、默认实参后求**（第二十一刀量的）：`int z = 8;` 加体里
+//   `z = z + 1` 出来是 9（默认值在体之前），而 `void operator init(int n = x)` 里的 `x`
+//   是**字段**、拿到的是字段默认值（默认实参在对象造好之后才求）。后一条逼出 defWrapper
+//   里那条构造分支：`this` 在包装里是本地量而不是形参，对象先造、默认值再求。
 
 import { isList, isAtom, isStr, head } from '../sexpr/read.js';
 
@@ -620,6 +643,7 @@ class AsyLower {
       const el = this.plainName(node.items[1]);
       if (el === null) return this.nope(node, '带点的类型名');
       if (!this.arrElemOk(el)) return this.nope(node, `${el}[] （${ASY_ARRELEM_TEXT}）`);
+      if (this.isRec(el) && !this.recHere(el)) return this.recLate(node, el);
       return `${el}[]`;
     }
     if (h !== 'name-ty') return this.err(node, `${what}：认不出的类型形状 '${h}'`);
@@ -628,9 +652,26 @@ class AsyLower {
     if (nm === 'void') return 'void';
     if (nm === 'pair') return 'pair';
     // 记录名（第十四刀）。放在内建名单后面查，与核心方言那边同一条规矩。
-    if (this.records.has(nm)) return nm;
+    if (this.records.has(nm)) return this.recHere(nm) ? nm : this.recLate(node, nm);
     if (!SCALARS.has(nm)) return this.nope(node, `类型 '${nm}'（这一刀只有 int/real/bool/string/pair 与 struct）`);
     return nm;
+  }
+
+  /**
+   * 记录名 `nm` 在**当前位置**已经声明过了吗。asy 的**类型名**也是顺序解析的 ——
+   * 量过：`A a; write(a.x); struct A { int x = 3; }` 报 "no type of name 'A'"。
+   * 这一问与 visible()（函数候选按声明下标裁）是同一条规矩的另一半；不问就是
+   * "比 asy 多接受一门语言"，`tests/asy/strict/struct-fwd` 钉着。
+   */
+  recHere(nm) {
+    const r = this.records.get(nm);
+    return r !== undefined && r.at <= this.at;
+  }
+
+  /** 上面那条的诊断。asy 自己也拒，所以是 err 不是 nope */
+  recLate(node, nm) {
+    return this.err(node, `'${nm}' 在这里还不是一个类型 —— struct ${nm} 声明在后面，`
+      + `而 asy 的类型名是顺序解析的（那边报 "no type of name '${nm}'"）`);
   }
 
   /** `t` 是这份文件里声明过的记录（asy 的 struct）吗 */
@@ -661,12 +702,25 @@ class AsyLower {
     }
     if (this.records.has(nm)) return this.nope(n, `重复定义的 struct '${nm}'`);
     const fields = [];
-    const seen = new Map();
     // 记录先登记（字段还空着）：方法的签名可以提到这个记录自己（`A copy()`），
     // 而 type() 是查 this.records 认记录名的。自引用字段那一条拦在 type() 前面，
     // 所以"字段还空着"这件事在这里看不出问题。
     const rec = { name: nm, fields: fields, at: at };
     this.records.set(nm, rec);
+    // 体里的类型名按**这个 struct 的位置**判可见（recHere）：字段与方法签名只能提到
+    // 前面声明过的记录。第一遍走到这里时 this.at 还是 0，所以要现设现还。
+    const keepAt = this.at;
+    this.at = at;
+    const out = this.recordBody(n, rec, at);
+    this.at = keepAt;
+    return out;
+  }
+
+  /** recordDec 的体（分出来只为了那句 this.at 现设现还） */
+  recordBody(n, rec, at) {
+    const nm = rec.name;
+    const fields = rec.fields;
+    const seen = new Map();
     let mat = 0;
     for (const item of this.flat(n.items[2], 'block')) {
       const r = this.unwrapMod(item);
@@ -1359,6 +1413,9 @@ class AsyLower {
     // 这里问的是 **此处可见的**候选（顺序解析，见 visible）—— 用户的 sqrt 写在后面时，
     // 前面那句 sqrt 在 asy 那边也还是内建的那个。
     const vis = this.visible(nm);
+    // `A(3)`：**构造调用**（第二十一刀）。`A` 是记录名，不是变量也不是函数名，所以这一问
+    // 放在内建名单前面 —— 记录名与内建那几个（sqrt/length/…）撞不上。
+    if (vis.length === 0 && this.isRec(nm)) return this.ctorCall(n, nm);
     if (vis.length === 0 && nm === 'length') return this.lengthCall(n);
     if (vis.length === 0 && ASY_STRFN.has(nm)) return this.strCall(n, nm);
     if (vis.length === 0 && ASY_STR_NOPE.has(nm)) return this.nope(n, ASY_STR_NOPE.get(nm));
@@ -1406,6 +1463,26 @@ class AsyLower {
         + `${names.length === 0 ? '（它一个方法都没有）' : ` —— 有的是 ${names.join(' / ')}`}`);
     }
     return this.userCall(n, mname, ms, recv);
+  }
+
+  /**
+   * `A(3)`：构造调用（第二十一刀）。候选就是 struct 里那些 `void operator init(…)`，
+   * 走的还是 userCall —— 重载解析、命名实参、默认实参一条不改，因为候选长得就像一个
+   * "回记录、没有接收者的普通函数"（见 methodSig）。
+   *
+   * 量过的两条边界都在这里：没有 `void operator init` 的 struct 上 `A(…)` 在 asy 那边报
+   * "no matching variable 'A'"（非 void 的那份不算，它不给构造函数），而 `A a;` **不**走
+   * 构造函数 —— 那条只认文件级的 `A operator init()`，还在门外。
+   */
+  ctorCall(n, nm) {
+    const cs = this.visibleMethods(this.records.get(nm), 'operator init');
+    if (cs.length === 0) {
+      // 这一条 asy 自己也拒（"no matching variable 'A'"），所以是 err 不是 nope ——
+      // 不是"我们还没做"，是这个程序本来就不对。`tests/asy/strict/ctor-none` 钉着。
+      return this.err(n, `struct ${nm} 里没有 'void operator init(…)'，所以 ${nm}(…) 不是`
+        + `构造调用（真 asy 报 "no matching variable '${nm}'"）`);
+    }
+    return this.userCall(n, nm, cs);
   }
 
   /**
@@ -1578,7 +1655,11 @@ class AsyLower {
     this.at = d.at;
     // 方法的包装（第二十刀）：多一个 `this` 形参，而默认值那一段要能看见字段 ——
     // 它是在**被调方**的作用域里求的，那个作用域里字段是可见的。
+    // 构造函数的包装（第二十一刀）不一样：`this` 不是形参而是**本地量** —— 对象在这里造，
+    // 造完默认值才求（量过 asy 收 `void operator init(int n = x)`，`x` 是字段，出来的是
+    // 字段的默认值），最后回那个对象。
     const rec = d.rec === undefined ? null : d.rec;
+    const isCtor = d.ctor === true;
     const saveSelf = this.self;
     this.scopes = [new Map()];
     if (rec !== null) {
@@ -1590,6 +1671,11 @@ class AsyLower {
     const lines = [];
     this.pre = lines;
     let bad = false;
+    if (isCtor) {
+      const mk = this.recNew(n, rec.name);
+      if (mk === null) bad = true;
+      else lines.push(`(let this ${asyCore(rec.name)} ${mk})`);
+    }
     for (const i of gave) this.declare(n, d.ps[i].name, d.ps[i].type);
     for (const i of f.missing) {
       const p = d.ps[i];
@@ -1601,11 +1687,16 @@ class AsyLower {
     const args = [];
     if (rec !== null) args.push('(var this)');
     for (const p of d.ps) args.push(`(var ${p.name})`);
-    lines.push(d.ret === 'void'
-      ? `(expr (call ${d.sym} ${args.join(' ')}))`
-      : `(ret (call ${d.sym} ${args.join(' ')}))`);
+    if (isCtor) {
+      lines.push(`(expr (call ${d.sym}_body ${args.join(' ')}))`);
+      lines.push('(ret (var this))');
+    } else {
+      lines.push(d.ret === 'void'
+        ? `(expr (call ${d.sym} ${args.join(' ')}))`
+        : `(ret (call ${d.sym} ${args.join(' ')}))`);
+    }
     const params = [];
-    if (rec !== null) params.push(`(this ${asyCore(rec.name)})`);
+    if (rec !== null && !isCtor) params.push(`(this ${asyCore(rec.name)})`);
     for (const i of gave) params.push(`(${d.ps[i].name} ${asyCore(d.ps[i].type)})`);
     const text = [`  (fn ${wname} (${params.join(' ')}) ${asyCore(d.ret)}`];
     for (const s of lines) text.push(`    ${s}`);
@@ -1975,6 +2066,9 @@ class AsyLower {
       // `A a;`（不写 `= new A`）在 asy 那边**不是** null：它隐式跑一次 operator init，
       // 而默认的那个就是 `new A`（量过：`A c;` 之后 `c == null` 是 false，
       // 而且带默认值的字段也照求 —— `struct B { int n = bump(); } B c;` 之后计数器是 1）。
+      // 这里走的**只有那个默认的**：struct 体里的 `void operator init(…)`（第二十一刀的
+      // 构造调用 `A(…)`）量过不参与这一句，而换掉它的**文件级** `A operator init()`
+      // 还在门外（funcSig 里拦着，`bad/ctor-toplevel` 钉着）。
       let init = null;
       if (this.isRec(t)) init = this.recNew(start, t);
       else init = asyIsArr(t) ? `(anew ${asyCore(t)} (int 0))` : ZERO.get(t);
@@ -2276,6 +2370,17 @@ class AsyLower {
   sig(n, at) {
     const nm = isAtom(n.items[2]) ? n.items[2].value : null;
     if (nm === null) return;
+    // 文件级的 `T operator init()`（第二十一刀量的，还在门外）：asy 用它换掉 `T t;` 的
+    // 隐式构造 —— 量过 `A operator init() { … }` 之后 `A a;` 拿到的是它回的对象，而且
+    // **内嵌记录字段**也走它（`struct B { A a; }` 之后 `b.a.x` 是那份构造给的值），
+    // 还是顺序解析的（写在 `A a;` 后面就不算）。收它要把 recNew 那一层整个改成"问一遍
+    // 此处可见的 operator init"，那是下一刀。struct 体里的 `void operator init(…)`
+    // （构造调用 `A(…)`）是**另一件事**，那个已经通了，见 methodSig。
+    if (nm === 'operator init') {
+      this.nope(n, '文件级的 `operator init`（换掉 `A a;` 的隐式构造 ——'
+        + ' struct 体里的 `void operator init(…)`、也就是 `A(…)`，是通的）');
+      return;
+    }
     if (nm.startsWith('operator ')) { this.nope(n, '算符重载的定义'); return; }
     if (nm === 'write') { this.nope(n, "重新定义 'write'"); return; }
     const ret = this.type(n.items[1], `函数 ${nm} 的返回类型`);
@@ -2308,17 +2413,31 @@ class AsyLower {
   methodSig(rec, n, mat, at) {
     const nm = isAtom(n.items[2]) ? n.items[2].value : null;
     if (nm === null) return null;
-    if (nm.startsWith('operator ')) return this.nope(n, `struct ${rec.name} 里的算符重载`);
+    // `void operator init(…)`（第二十一刀）：**构造函数**，调用形态是 `A(…)`。
+    // 三条都量过：返回类型必须是 void（写 `int operator init(int)` 之后 `A(3)` 在 asy 那边
+    // 报 "no matching variable 'A'" —— 那份根本没造出构造函数）、字段默认值在体之前就铺好
+    // （`int z = 8;` 加体里 `z = z + 1` 出来是 9）、而 `A a;` **不**走它（量过是 0，不是
+    // 体里赋的值 —— `A a;` 只认文件级的 `A operator init()`，那一条还在门外）。
+    const ctor = nm === 'operator init';
+    if (nm.startsWith('operator ') && !ctor) {
+      return this.nope(n, `struct ${rec.name} 里的算符重载 '${nm}'`);
+    }
     const ret = this.type(n.items[1], `方法 ${rec.name}.${nm} 的返回类型`);
     const ps = this.formals(n.items[3]);
     if (ret === null || ps === null) return null;
+    if (ctor && ret !== 'void') {
+      return this.nope(n, `返回 ${ret} 的 'operator init'（asy 只把 void 的那份当构造函数，`
+        + `别的形态它自己也不给 ${rec.name}(…)）`);
+    }
     const types = [];
     for (const p of ps) types.push(p.type);
     for (const p of ps) if (p.name === 'this') return this.nope(n, "叫 'this' 的形参");
     const key = `${rec.name}.${nm}`;
+    // 构造函数的候选**看起来像个回记录的普通函数**（`ret` 是记录名、没有接收者），
+    // 重载解析与默认实参那两套因此一字不改就能用；`ctor` 标记只在发正文时用。
     const cand = {
-      ret, params: types, ps, node: n, at: -1, mat, rec,
-      sym: `asy__m_${rec.name}_${nm}`,
+      ret: ctor ? rec.name : ret, params: types, ps, node: n, at: -1, mat, rec, ctor,
+      sym: ctor ? `asy__ctor_${rec.name}` : `asy__m_${rec.name}_${nm}`,
     };
     const list = this.funcs.has(key) ? this.funcs.get(key) : [];
     const sk = types.join(',');
@@ -2338,35 +2457,56 @@ class AsyLower {
    * 方法体。与 func() 的差别只有三处：多一个 `this` 形参（核心方言里 `this` 就是个普通
    * 名字，量过它当形参名合法）、`this.self` 开着（裸字段名走 `(fld (var this) f)`、
    * 裸方法名走同一个记录的方法）、`this.at` 设成**结构体**的文件下标。
+   *
+   * 构造函数（`void operator init(…)`，第二十一刀）出**两个**函数：正文还是那个多带一个
+   * `this` 的 void 方法（名字后缀 `_body`），外面套一层 `asy__ctor_<记录>` —— 造对象、
+   * 调正文、回对象。分两层不是为了好看：体里的 `return;` 在 void 那份里是合法的一条
+   * `(ret)`，塞进一个"要回记录"的函数里就不合法了。
    */
   method(rec, cand, at) {
     const ps = this.formals(cand.node.items[3]);
     if (ps === null) return null;
+    const isCtor = cand.ctor === true;
+    const bodyRet = isCtor ? 'void' : cand.ret;
+    const bodySym = isCtor ? `${cand.sym}_body` : cand.sym;
     const keepAt = this.at;
     this.at = at;
     this.self = { rec, mat: cand.mat };
     this.push();
     this.declare(cand.node, 'this', rec.name);
     for (const p of ps) this.declare(cand.node, p.name, p.type);
-    const body = this.body(cand.node.items[4], cand.ret);
+    const body = this.body(cand.node.items[4], bodyRet);
     this.pop();
     this.self = null;
     this.at = keepAt;
     if (body === null) return null;
     const last = body.length === 0 ? '' : body[body.length - 1];
-    if (cand.ret !== 'void' && !last.startsWith('(ret ')) {
+    if (bodyRet !== 'void' && !last.startsWith('(ret ')) {
       let zero = null;
-      if (asyIsArr(cand.ret)) zero = `(anew ${asyCore(cand.ret)} (int 0))`;
-      else if (this.isRec(cand.ret)) zero = this.recNew(cand.node, cand.ret);
-      else zero = ZERO.get(cand.ret);
+      if (asyIsArr(bodyRet)) zero = `(anew ${asyCore(bodyRet)} (int 0))`;
+      else if (this.isRec(bodyRet)) zero = this.recNew(cand.node, bodyRet);
+      else zero = ZERO.get(bodyRet);
       if (zero === null) return null;
       body.push(`(ret ${zero})`);
     }
     const params = [`(this ${asyCore(rec.name)})`];
     for (const p of ps) params.push(`(${p.name} ${asyCore(p.type)})`);
-    const lines = [`  (fn ${cand.sym} (${params.join(' ')}) ${asyCore(cand.ret)}`];
+    const lines = [`  (fn ${bodySym} (${params.join(' ')}) ${asyCore(bodyRet)}`];
     for (const s of body) lines.push(`    ${s}`);
-    return `${lines.join('\n')})`;
+    const text = `${lines.join('\n')})`;
+    if (!isCtor) return text;
+    // 全实参那份构造函数：造对象（字段默认值在这里铺，量过它在体之前）、调正文、回对象。
+    // 缺实参那份走 defWrapper 的 isCtor 分支 —— 那边默认值要看得见字段，所以不能复用这个。
+    const mk = this.recNew(cand.node, rec.name);
+    if (mk === null) return null;
+    const args = ['(var this)'];
+    const cps = [];
+    for (const p of ps) { args.push(`(var ${p.name})`); cps.push(`(${p.name} ${asyCore(p.type)})`); }
+    const outer = [`  (fn ${cand.sym} (${cps.join(' ')}) ${asyCore(rec.name)}`,
+      `    (let this ${asyCore(rec.name)} ${mk})`,
+      `    (expr (call ${bodySym} ${args.join(' ')}))`,
+      '    (ret (var this))'];
+    return `${text}\n${outer.join('\n')})`;
   }
 
   /** 第一遍也收文件级变量的名字（只为了给函数里那句错话） */
@@ -2426,6 +2566,8 @@ class AsyLower {
     for (let i = 0; i < rs.length; i++) {
       const r = this.unwrapMod(rs[i]);
       if (!isList(r)) continue;
+      // 这一遍也要摆好 at：签名里的记录名按**这一句的位置**判可见（recHere）。
+      this.at = i;
       if (head(r) === 'fundec') this.sig(r, i);
       else if (head(r) === 'vardec') this.globalNames(r);
     }

@@ -1,0 +1,1 @@
+asy 前端第一刀还不支持：返回 int 的 'operator init'（asy 只把 void 的那份当构造函数，别的形态它自己也不给 A(…)）

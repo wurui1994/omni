@@ -242,10 +242,12 @@ bison **隐式**的选择写成**显式**的优先级声明 —— 悬垂 else�
    **`A[]`**（第十九刀：asy 的 struct 是引用类型，所以这是"一串句柄"；裸数组那一整套
    在它上面一条不少）、
    **struct 的方法**（第二十刀：`a.get()`，降成"多一个 this 形参的普通函数"；重载、
-   默认实参、递归与普通函数同一条路），
-   二十二份用例在五个执行器上与 `asy -noV` 逐字节相同。
+   默认实参、递归与普通函数同一条路）、
+   **构造函数**（第二十一刀：struct 体里的 `void operator init(…)` 给出 `A(…)`），
+   二十三份用例在五个执行器上与 `asy -noV` 逐字节相同。
    **还没做**的是给切片赋值、多维数组、复数幂、triple、
-   用户自定义的 `operator init`、算符重载、字符串的 `reverse`/`insert`/`split`、
+   **文件级**的 `operator init`（换掉 `A a;` 的隐式构造）、算符重载、
+   字符串的 `reverse`/`insert`/`split`、
    自引用字段与把方法当值取出来 —— 每一条都在
    `tests/asy/bad/` 里有一份带 `ASY_NOPE` 的用例钉着，不是含糊的"待办"。
    超越函数（exp/log/trig）是**另一回事**：不是没做，是量过 libm 与 V8 在最后一位就分叉，
@@ -421,10 +423,10 @@ static inline C + 另写一份 IR 助手"，是两份实现；这次不重复那
 `1/3` 是实数除法而 `1#3` 是整数商、`3 == 3.0` 要提左边、`write` 的分隔符取决于第一个
 实参是不是字符串。类型是符号表的事，动作模板里没有符号表。
 
-**判分的人不是我**：`tests/asy` 的二十二份用例（算术 / 字符串 / 两种引号 / 控制流 / 函数 /
+**判分的人不是我**：`tests/asy` 的二十三份用例（算术 / 字符串 / 两种引号 / 控制流 / 函数 /
 real 的 %.15g / `? :` / 数学函数 / 数组 / pair / 切片与整数组输出 / for-each /
 字符串函数 / `pair[]` / 默认实参与命名实参 / 重载解析 / struct / struct 的 pair 字段 /
-struct 的数组字段 / struct 的记录字段 / `A[]` / struct 的方法）每份都是
+struct 的数组字段 / struct 的记录字段 / `A[]` / struct 的方法 / 构造函数）每份都是
 「五条腿逐字节相同 == `.expected` == `asy -noV` 当场重跑」。`.expected` 本身就是真 asy 的
 输出生成的；机器上没装 asymptote 时那一节打印 skip，但 `.expected` 仍然把答案钉住。
 
@@ -444,12 +446,13 @@ struct 的数组字段 / struct 的记录字段 / `A[]` / struct 的方法）每
 （只算中选那支）跟着编码保住。代价写在明处：**循环条件里的 `? :` 直接报错**，因为那些
 赋值只能落在循环外面，条件就只算一次了。这条边界在 `tests/asy/bad/cond-in-loop.asy` 里。
 
-第一刀的边界都在 `tests/asy/bad/`（15 条，每条的期望值都必须以 `ASY_NOPE` 开头 ——
+第一刀的边界都在 `tests/asy/bad/`（17 条，每条的期望值都必须以 `ASY_NOPE` 开头 ——
 "还没做"和"做错了"必须能一眼分开）：triple、复数幂、算符重载、
 模块（import/access）、隐式缩放（`105cm`）、超越函数（`sin`、pair 上的 `angle` ——
 理由是上面那条 ULP 测量）、函数里读文件级变量（核心方言没有全局量）、
 循环条件里的 `? :`、给切片赋值（`a[0:2] = b`）、多维数组、
-字符串的 `reverse`/`insert`/`split`、struct 的两条（自引用字段 / 把方法当值取出来）。
+字符串的 `reverse`/`insert`/`split`、struct 的三条（自引用字段 / 把方法当值取出来 /
+文件级与非 void 的 `operator init`）。
 
 **for-each 的两条语义也是量出来的**：循环变量是**复制**（体里 `x = 99` 不动数组），
 而迭代是**活的** —— `int[] g={1,2}; int n=0; for(int x:g){++n; if(n<5) g.push(9);}`
@@ -1021,6 +1024,44 @@ asy 那一侧落地的是 `A[]`（`cases/21-structarr.asy`，与 `asy -noV` 逐�
 这一条要等闭包，跟"成员函数"整件事无关。顺手补的诊断是"函数值类型的变量声明"
 （`fundecidstart`），先前它漏成一句不带 `ASY_NOPE` 的"认不出的声明项" ——
 那种报错当不了 bad/ 用例，因为分不出"还没做"和"做错了"。
+
+### 已落地（支持面第十阶段：构造函数，门槛 2 第二十一刀）
+
+又是**零后端改动**的一刀，而且是真实 asy 模块里最常见的那个形态：数了一遍
+`/opt/homebrew/share/asymptote/*.asy`，`operator init` 里压倒性多数是 struct 体里的
+`void operator init(…)`（`plain_picture`、`plain_bounds`、`plain_Label`、`plain_pens`
+每份都有），也就是构造调用 `A(…)`。
+
+降级分两层，分层不是为了好看：
+
+- `asy__ctor_A_body`：正文，就是第二十刀那个"多带一个 `this` 的 void 方法"。
+- `asy__ctor_A`：外层，造对象（字段默认值在这里铺）、调正文、`return this`。
+
+分开是因为体里的 `return;` 在 void 那份里是合法的一条 `(ret)`，塞进一个"要回记录"的
+函数里就不合法了。而候选表里那份 `cand` 刻意长得像**回记录、没有接收者的普通函数**
+（`ret` 是记录名，`rec` 只用来开 `this.self`），于是重载解析、命名实参、默认实参三套
+一字不改就能用 —— `A(x = 9)`、`A(3, bonus = 4)`、`A(2.7)` 与 `A(2.7, 10)` 分别落到四份
+不同的 `operator init` 上，全在 `cases/23-ctor.asy` 里。
+
+量出来的四条，头两条反直觉：
+
+- **`A a;` 不走构造函数**。体里赋 `x = 42` 之后 `A a; write(a.x)` 印的还是 0。换掉
+  `A a;` 的是**文件级**的 `A operator init()`（量过：它连内嵌记录字段一起管），那一条
+  还在门外，`tests/asy/bad/ctor-toplevel.asy` 钉着。同名的两个东西是两件事。
+- **非 void 的 `operator init` 不给构造函数**。`int operator init(int)` 之后 `A(3)` 在
+  asy 那边报 "no matching variable 'A'"。我们连声明一起拒（`bad/ctor-nonvoid.asy`）。
+- 字段默认值在体**之前**就铺好（`int z = 8;` 加体里 `z = z + 1` 出来是 9）。
+- **默认实参能引用字段**（`void operator init(int n = x)` 拿到的是字段 `x` 的默认值）——
+  所以默认值是在对象造好之后求的。这条逼出 `defWrapper` 里一条构造分支：那里的 `this`
+  不是形参而是**本地量**，对象先造、默认值再求、最后回它。
+
+反过来的两条落在 `strict/`：struct 里根本没有 `void operator init` 时 `A(…)` asy 自己
+就拒（"no matching variable 'A'"），所以我们的诊断**不带** `ASY_NOPE` —— 不是"还没做"，
+是这个程序不对。另一条是这一刀顺手补上的**漏**：`A a;` 写在 `struct A` 前面 asy 报
+"no type of name 'A'"，而我们先前收下了 —— 记录是第一遍全收的，`type()` 只问"有没有
+这个名字"。类型名跟函数候选一样是顺序解析的，现在按声明下标裁（`recHere`），struct 体里
+则按**这个 struct 的位置**裁。这类漏洞不会让任何用例变红，只有 `strict/struct-fwd` 盯得住 ——
+这一节存在的理由就是它。
 
 ## 决策 4：调用 LLVM 需要 extern-C FFI —— 这是新要求，也是 dogfood
 
