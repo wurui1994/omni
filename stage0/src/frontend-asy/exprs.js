@@ -373,7 +373,7 @@ export function asyExprList(L, n, h) {
     // `{1,2,3}` 自己没有类型，类型来自左边的声明 —— 所以只在知道目标类型的地方处理
     return L.nope(n, '花括号数组初值出现在推不出元素类型的位置（只支持 `T[] a = {…}` 与 `new T[] {…}`）');
   }
-  if (h === 'scale') return L.nope(n, '隐式缩放（`105cm` 这种）');
+  if (h === 'scale') return asyScale(L, n);
   if (h === 'join-exp') return asyJoinExp(L, n);
   if (h === 'join-dir' || h === 'spec' || h === 'spec-curl') return L.nope(n, '路径连接');
   return L.nope(n, `表达式 '${h}'`);
@@ -825,6 +825,26 @@ export function asyBinary(L, n) {
   const a = asyExpr(L, n.items[2]);
   const b = asyExpr(L, n.items[3]);
   if (a === null || b === null) return null;
+  return asyArith(L, n, op, a, b);
+}
+
+/**
+ * 隐式缩放 `3cm`。asy 那边这**就是** `operator *(3, cm)`，一点别的都没有 —— 量过：
+ *   `real cm=2.5; write(3cm)` -> 7.5、`int k=4; write(3k)` -> 12（还是 int）、
+ *   `write(2.5cm)` -> 6.25、`pair p=(1,2); write(2p)` -> (2,4)、`write(2(1,2))` -> (2,4)、
+ *   `write(-3cm)` -> -7.5、`write(3cm*2)` -> 15（缩放比 `*` 紧），
+ *   而 `string s="ab"; write(2s)` 报的是 "no matching function 'operator *(int, string)'"。
+ * 所以这里不另立类型规则，直接走 `*` 那一条（用户定义的 `operator *` 也就跟着能用）。
+ */
+export function asyScale(L, n) {
+  const a = asyExpr(L, n.items[1]);
+  const b = asyExpr(L, n.items[2]);
+  if (a === null || b === null) return null;
+  return asyArith(L, n, '*', a, b);
+}
+
+/** `a op b`：两边都已经降好了。缩放（`3cm`）也从这里进来。 */
+export function asyArith(L, n, op, a, b) {
   // 提升前的右操作数留一份：`opBuiltinSig` 里的 `promote` 会**就地**把 int 提成 pair，
   // 而 asy 的 `^` 在 pair 上是**两个重载**、按指数的静态类型分路（见下面 op === '^'）。
   const b0 = { code: b.code, type: b.type };

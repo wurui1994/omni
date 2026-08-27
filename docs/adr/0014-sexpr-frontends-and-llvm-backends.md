@@ -2634,6 +2634,37 @@ plain.asy 是 `include plain_strings;` 在 `include plain_paths;` **之前**，i
 `import graph;` 还是 **187** —— 一点没动，也应该没动：graph 那 187 条里 35 个 `Label`、
 12 个 `interpolate`、10 个 `ticks`、9 个 `scaleT` 全是 plain 没加载完的下游。
 
+### 隐式缩放 `3cm`：量完发现它就是一条乘法
+
+asy 的 `105cm` 语法上是 `(-> (LIT exp) (scale $1 $2))` 一条独立产生式，看着像要一套单位/量纲
+的规则。量了一圈（`asy -noV`）发现**没有**任何自己的规则，它就是 `operator *(105, cm)`：
+
+- `real cm=2.5; write(3cm)` -> `7.5`；`int k=4; write(3k)` -> `12`（int 乘 int 还是 int）
+- `write(2.5cm)` -> `6.25`（左边那个字面量自己可以是 real）
+- `pair p=(1,2); write(2p)` -> `(2,4)`（复数乘）；`triple t=(1,2,3); write(2t)` -> `(2,4,6)`（逐分量）
+- `write(2(1,2))` -> `(2,4)`；`write(2f(3))` -> `8`；`write(2arr[1])` -> `4`（右边是括号/调用/下标都行）
+- `write(-3cm)` -> `-7.5`（前缀负号在外面）；`write(3cm*2)` -> `15`（缩放比 `*` 紧）
+- `string s="ab"; write(2s)` 报的是 **"no matching function 'operator *(int, string)'"**
+- 自己写的 `A operator *(int, A)` 之后 `(3a).v` -> `21` —— 用户定义的算符也走同一张候选表
+
+所以这一刀不新立规则：把 `asyBinary` 的**尾巴**（用户算符 → pair/triple → 提升 → `(bin …)`）
+拆成 `asyArith(L, n, op, a, b)`，`asyScale` 降两边然后原样交给 `asyArith(…, '*', …)`。
+`exprs.js` 里那句 `if (h === 'scale') return L.nope(…)` 换成 `asyScale(L, n)`，就这两处。
+
+`tests/asy/bad/scale.asy` 跟着**删掉**：它钉的是「还没做」这件事，现在做了；剩下的
+`105cm` 里 `cm` 要 plain 才有，那是"未声明的变量"那一桶（不带 `ASY_NOPE`），不值得单独钉。
+新增 `tests/asy/cases/53-scale.asy`，上面那十一行全在里面，`.expected` 是 `asy -noV` 的
+输出**逐字节**拷过来的。
+
+`import graph;` **187 -> 186**：4 条 `隐式缩放` 的 nope 全没了，但其中 3 个单元往下走了一步
+就撞上下一堵墙（`graph.asy:2251` `polargraph`、`graph_settings.asy:8` 未声明的 `mm`、
+`graph_splinetype.asy:67` `tridiagonal`），只有 `math.asy` 是真的过了。净 -1，不是 -4 ——
+这一桶本来就只有 4 个点，而且跟 graph 那 186 条的大头一样，是 plain 没加载完的下游。
+`import plain;` 还是 **1** 条（模板模块，`plain_strings.asy:260`），没动，也不该动。
+
+跑的轴：`tests/asy`（109 passed，28.7s）、`tests/bootstrap`（60 passed，77s）。
+`tests/sexpr` 与 `tests/run.js` 没跑 —— 这一刀只碰 `frontend-asy/exprs.js`，方言和后端没动。
+
 ## 后果与代价
 
 
