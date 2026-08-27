@@ -2427,6 +2427,42 @@ C 后端与两个解释器都不看字段的"种类"。LLVM 那条腿要显式�
 
 `plain_filldraw.asy` 整份过了。`import graph;` 还是 189（它卡在 math.asy，与 plain 这条线无关）。
 
+### 可变形参：普通函数上的那一半，以及顺手补的两条产生式
+
+`... T[] xs`。语法那一层先补了两条：`arglist "," ELLIPSIS argument` 与
+`formals "," ELLIPSIS formal` —— 原来只有不带逗号的那一种，而 `f(9, ... a)` 与
+`f(int k, ... int[] x)` 真 asy 都收（量过，两种拼法结果一样）。
+
+语义按量出来的四条落：
+
+* 没给就是**空数组**（`total()` 印 0）。所以可变那一格永远算"给了"，不进 `missing`。
+* 散着写的与展开的能**拼**（`total(9, ... a)` 是 18）。
+* `... a` 是**拷**进去的：回调里改 `x[0]` 之后 `a[0]` 没变。于是不用为"只有一个展开"开
+  免拷特例 —— 一律现造一条新数组，散的 `apush` 一次，展开的发一条 while 循环逐个搬
+  （核心方言没有"接一条数组"的指令）。
+* 重载上，**任何非可变的候选都赢**：`f(real)` 与 `f(... int[])` 撞上 `f(3)` 走前者，尽管那边
+  还要一次 int->real 提升。所以贵不贵不能塞进 cost（那样会与提升的分数打架），
+  另开一档 `varargs` 在 applyCall 里先比。
+
+落法上刻意没有改 `formals()` 的返回形状：可变那一格就是 `ps` 的最后一项，多一个
+`rest: true`。体里它**本来就是**一个 `T[]` 局部量，7 个调用点一个字不用改，只有 `fit` 与
+`applyCall` 多看一眼。
+
+一条比 asy **严**的边界，单独记下来：`f(... a, 9)`（展开后面还有位置实参）asy 印
+"unnamed argument after rest argument" 之后**退 0** —— 真正的语法错才退 1，也就是它把这句
+吞了。吞掉的语义没法照抄，所以我们直接拒。因此这一条**进不了 strict**（那条轴的判据是
+"真 asy 也退非 0"）：先写了一个 strict 用例，跑出来"真 asy 居然收了"，删掉改成代码注释。
+
+`tests/asy/cases/51-varargs.asy` 钉着上面每一条，期望文件与 `asy -noV` 逐字节一致。
+`import graph;` 189 -> **187**（"关键字形参或可变形参"那 3 条没了，净减 2）。
+
+`import plain;` 还是**两**条，因为剩下那条可变是在**函数类型**里：
+`plain_paths.asy:3` 的 `using interpolate=guide(... guide[]);`。把它接上只买到一行 ——
+下一行就是 `tensionSpecifier operator tension(...)`，`guide` 与 `tensionSpecifier` 都是 asy 的
+C++ 内建类型，都不在我们的内建面上。所以 plain_paths 真正的墙是**内建面缺 guide**
+（连着 joinExp 那一族：`..` / `controls…and…` / `tension` / `::` / `{dir}` 现在全是 nope），
+不是函数类型里的那一格。这一条改了下一刀的顺序。
+
 ## 后果与代价
 
 

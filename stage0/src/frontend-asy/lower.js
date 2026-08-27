@@ -2902,6 +2902,8 @@ class AsyLower {
    */
   builtinOwns(nm, raw) {
     for (const a of raw) if (a.key !== null) return false;
+    // 展开实参只能落在可变形参那一格上，而内建这一族一个可变形参都没有
+    for (const a of raw) if (a.spread === true) return false;
     if (nm === 'length') return raw.length === 1;
     if (ASY_STRFN.has(nm)) {
       const s = ASY_STRFN.get(nm);
@@ -3051,6 +3053,12 @@ class AsyLower {
     let best = fits[0];
     let tie = false;
     for (let i = 1; i < fits.length; i++) {
+      // 先比"是不是走了可变形参"：量过任何非可变的候选都赢（见 fit 里那段注释），
+      // 所以这一档在 cost 之前，而且档不同时**不算**打平。
+      const bv = best.f.varargs === true ? 1 : 0;
+      const iv = fits[i].f.varargs === true ? 1 : 0;
+      if (iv < bv) { best = fits[i]; tie = false; continue; }
+      if (iv > bv) continue;
       if (fits[i].f.cost < best.f.cost) { best = fits[i]; tie = false; continue; }
       if (fits[i].f.cost === best.f.cost) tie = true;
     }
@@ -3066,10 +3074,20 @@ class AsyLower {
     const reorder = f.reordered && raw.length > 1;
     if (reorder && this.pre === null) return this.nope(n, '这个位置的乱序命名实参（要摊成语句，这里放不下）');
     const codes = new Map();
+    const packed = [];
     for (let i = 0; i < raw.length; i++) {
       const r = raw[i];
       if (r.lines !== null) for (const s of r.lines) this.pre.push(s);
       const at = f.slot[i];
+      // 进可变那一格的包（fit 把这些槽记成 -1）。`... a` 那一种整份接进去，别的降到元素型。
+      if (at < 0) {
+        if (r.spread === true) { packed.push({ code: r.v.code, spread: true }); continue; }
+        const ev = this.coerce(r.v, asyElem(d.ps[f.restAt].type), r.node,
+          `'${nm}' 的可变实参 ${d.ps[f.restAt].name}`);
+        if (ev === null) return null;
+        packed.push({ code: ev.code, spread: false });
+        continue;
+      }
       // 重载集：fit 已经按这个槽的类型挑过一份了，这里把它落成 `(fnref …)`（不走 coerce ——
       // 那一份与槽同型，而 coerce 认不出"重载集"这个类型）
       if (r.v.over !== undefined) {
@@ -3087,6 +3105,31 @@ class AsyLower {
     }
     const parts = [];
     if (recv !== null && recv !== undefined) parts.push(recv.code);
+    // 可变那一格：现造一条新数组。**总是**造 —— 量过 `... a` 是拷进去的（回调里改 x[0]
+    // 之后 a[0] 没变），所以散着写的与展开的能拼在一起，也不用为"只有一个展开"开特例。
+    // 造要摊成语句，所以要有地方放；没地方就拒得明白，与乱序命名实参那条同一个理由。
+    if (f.varargs === true) {
+      const at = asyCore(d.ps[f.restAt].type);
+      if (packed.length === 0) {
+        codes.set(f.restAt, `(anew ${at} (int 0))`);
+      } else {
+        if (this.pre === null) return this.nope(n, '这个位置的可变实参（要摊成语句，这里放不下）');
+        const tmp = `asy__va${this.tmp++}`;
+        this.pre.push(`(let ${tmp} ${at} (anew ${at} (int 0)))`);
+        for (const p of packed) {
+          if (!p.spread) { this.pre.push(`(apush (var ${tmp}) ${p.code})`); continue; }
+          // 展开：逐个搬。核心方言没有"接一条数组"的指令，而这一条循环就是它。
+          const src = `asy__vs${this.tmp++}`;
+          const ix = `asy__vi${this.tmp++}`;
+          this.pre.push(`(let ${src} ${at} ${p.code})`);
+          this.pre.push(`(do (let ${ix} int (int 0))`
+            + ` (while (bin "<" (var ${ix}) (alen (var ${src})))`
+            + ` (do (apush (var ${tmp}) (aget (var ${src}) (var ${ix})))`
+            + ` (set ${ix} (bin "+" (var ${ix}) (int 1))))))`);
+        }
+        codes.set(f.restAt, `(var ${tmp})`);
+      }
+    }
     for (let i = 0; i < d.ps.length; i++) if (codes.has(i)) parts.push(codes.get(i));
     const target = f.missing.length === 0 ? d.sym : this.defWrapper(n, nm, d, f);
     if (target === null) return null;
@@ -3190,6 +3233,12 @@ class AsyLower {
         return this.err(n, `函数值没有形参名，这里不能写 '${args[i].key}='`);
       }
       if (args[i].lines !== null) for (const l of args[i].lines) this.pre.push(l);
+      // 函数类型里还没有可变形参那一格（plain_paths.asy:3 的 `guide(... guide[])` 就是它），
+      // 所以这里的 `... x` 一定接不住 —— 说清是这一条，别落到"实参个数不对"上
+      if (args[i].spread === true) {
+        return this.nope(args[i].node, `通过函数值调用时的展开实参（'${nm}' 是 ${ft}，`
+          + '函数类型里还没有可变形参那一格）');
+      }
       // 重载集当实参（callArgs 先不定案的那种）：这里的期望类型是函数类型里那一格
       if (args[i].v.over !== undefined) {
         const pick = this.overPick(args[i], s.params[i]);
@@ -3211,7 +3260,18 @@ class AsyLower {
 
   callArgs(n) {
     const out = [];
-    for (const a of this.flat(n.items[2], 'args')) {
+    // `f(a, ... xs)`：`(args-rest 实参)` 是"只有它"，`(args-rest arglist 实参)` 是
+    // "前面还有几个"。摊平之后最后那一格记上 spread —— 它只能落在可变形参那一格上（见 fit）。
+    let alist = n.items[2];
+    let sp = null;
+    if (isList(alist) && head(alist) === 'args-rest') {
+      if (alist.items.length === 2) { sp = alist.items[1]; alist = null; }
+      else { sp = alist.items[2]; alist = alist.items[1]; }
+    }
+    const list = alist === null ? [] : this.flat(alist, 'args');
+    if (sp !== null) list.push(sp);
+    for (const a of list) {
+      const isSp = sp !== null && a === sp;
       if (!isList(a)) { this.nope(a, '认不出的实参'); return null; }
       let key = null;
       let node = null;
@@ -3219,11 +3279,20 @@ class AsyLower {
       else if (head(a) === 'arg-named') {
         key = isAtom(a.items[1]) ? a.items[1].value : null;
         node = a.items[2];
-      } else { this.nope(a, '展开实参'); return null; }
+      } else if (head(a) === 'args-rest') {
+        // 展开实参不在最末尾时它会从这里漏出来（`f(... a, 9)` 是
+        // `(args-add (args-rest …) (arg 9))`）。这一条我们比 asy **严**：那边印
+        // "unnamed argument after rest argument" 但**退 0**（量过；真正的语法错才退 1），
+        // 也就是它把这句吞了。吞掉的语义没法照抄，所以这里直接拒 ——
+        // 因此它进不了 strict（那条轴的判据是"真 asy 也退非 0"）。
+        return this.err(a, '展开实参后面不能再有位置实参 ——'
+          + ' asy 那边印 "unnamed argument after rest argument" 之后把这句吞了');
+      } else { this.nope(a, `认不出的实参 '${head(a)}'`); return null; }
+      if (isSp && key !== null) { this.nope(a, '带名字的展开实参'); return null; }
       // 有多个重载的裸函数名：先不求，等 fit 按槽的类型挑（overArg 里写了理由）
       const ov = this.overArg(node);
       if (ov !== null) {
-        out.push({ key, node, v: { code: null, type: `<${ov.nm} 的重载集>`, over: ov.cands }, lines: null });
+        out.push({ key, node, spread: isSp, v: { code: null, type: `<${ov.nm} 的重载集>`, over: ov.cands }, lines: null });
         continue;
       }
       const save = this.pre;
@@ -3232,7 +3301,7 @@ class AsyLower {
       const v = this.expr(node);
       this.pre = save;
       if (v === null) return null;
-      out.push({ key, node, v, lines });
+      out.push({ key, node, spread: isSp, v, lines });
     }
     return out;
   }
@@ -3246,6 +3315,8 @@ class AsyLower {
     const parts = [];
     for (let i = 0; i < c.params.length; i++) {
       const p = c.ps === undefined || c.ps[i] === undefined ? null : c.ps[i];
+      // 可变那一格印成 `... T[]`：诊断里"有的是 int(... int[])"比 "int(int[])" 说得清
+      if (p !== null && p.rest === true) { parts.push(`... ${c.params[i]}`); continue; }
       parts.push(p !== null && p.exp === true ? `explicit ${c.params[i]}` : c.params[i]);
     }
     return `${c.ret}(${parts.join(', ')})`;
@@ -3258,6 +3329,14 @@ class AsyLower {
     let cost = 0;
     let reordered = false;
     let last = -1;
+    // 可变形参（`... T[] xs`）：最后那一格收所有多出来的位置实参。量过两条 ——
+    // 任何**非**可变的候选都比可变的合适（`f(real)` 与 `f(... int[])` 撞上 `f(3)` 走前者，
+    // 尽管那边还要一次 int->real 提升），所以贵不贵不能靠 cost，要另开一档在 applyCall
+    // 里先比（varargs）。
+    const rAt = cand.ps.length - 1;
+    const isVar = cand.ps.length > 0 && cand.ps[rAt].rest === true;
+    const elem = isVar ? asyElem(cand.ps[rAt].type) : null;
+    const pack = [];
     for (const r of raw) {
       let at = -1;
       if (r.key === null) {
@@ -3266,7 +3345,27 @@ class AsyLower {
         pos++;
       } else {
         for (let k = 0; k < cand.ps.length; k++) if (cand.ps[k].name === r.key) at = k;
+        // 可变那一格不能用名字给（asy 那边 `xs=` 也不认它，量过报 no matching function）
+        if (isVar && at === rAt) return null;
       }
+      // 位置实参落到可变那一格上（或更后面）：进那个包，不占槽
+      if (isVar && r.key === null && at >= rAt) {
+        if (r.v.over !== undefined) return null;   // 重载集当可变实参：另一刀
+        if (r.spread === true) {
+          // `... a`：整份数组接到包后面（可以与散着写的混，量过 `total(9, ... a)` 是 18）。
+          // 类型要一模一样 —— asy 不给这一格做元素级的提升。
+          if (r.v.type !== cand.ps[rAt].type) return null;
+        } else {
+          const ec = asyConvCost(r.v.type, elem);
+          const eu = ec < 0 && this.castFor(elem, r.v.type, false) !== null ? 1 : ec;
+          if (eu < 0) return null;
+          cost += eu;
+        }
+        pack.push(slot.length);
+        slot.push(-1);
+        continue;
+      }
+      if (r.spread === true) return null;   // `... x` 只能落在可变那一格上
       if (at < 0 || at >= cand.ps.length || filled.has(at)) return null;
       // 重载集当值用（callArgs 先不定案的那种）：按**这个槽要的类型**挑一份。
       // 挑到就是同型（cost 不加），挑不到这个候选就不合用 —— 与别的实参一视同仁。
@@ -3296,10 +3395,12 @@ class AsyLower {
     const missing = [];
     for (let k = 0; k < cand.ps.length; k++) {
       if (filled.has(k)) continue;
+      // 可变那一格永远算给了：没给就是一个空数组（量过 `total()` 印 0）
+      if (isVar && k === rAt) continue;
       if (cand.ps[k].def === null) return null;
       missing.push(k);
     }
-    return { cost, slot, missing, reordered };
+    return { cost, slot, missing, reordered, varargs: isVar, pack, restAt: isVar ? rAt : -1 };
   }
 
   /**
@@ -4574,7 +4675,18 @@ class AsyLower {
    */
   formals(node) {
     const out = [];
-    for (const f of this.flat(node, 'formals')) {
+    // `... T[] xs`：语法上是 `(formals-rest 形参)`（只有它）或 `(formals-rest formals 形参)`
+    // （前面还有几个固定的）。摊平之后给最后那一格记上 `rest`，别处一律当普通形参看 ——
+    // 体里它**就是**一个 T[] 局部量，只有 fit / applyCall 要多看一眼。
+    let fixed = node;
+    let restF = null;
+    if (isList(node) && head(node) === 'formals-rest') {
+      if (node.items.length === 2) { fixed = null; restF = node.items[1]; }
+      else { fixed = node.items[1]; restF = node.items[2]; }
+    }
+    const list = fixed === null ? [] : this.flat(fixed, 'formals');
+    if (restF !== null) list.push(restF);
+    for (const f of list) {
       if (!isList(f) || head(f) !== 'formal') return this.nope(f, '关键字形参或可变形参');
       if (f.items.length !== 4 && f.items.length !== 5) return this.nope(f, '无名形参');
       const ex = f.items[1];
@@ -4604,6 +4716,17 @@ class AsyLower {
       const nm = isAtom(start.items[1]) ? start.items[1].value : null;
       if (nm === null) return this.err(start, '形参少了名字');
       out.push({ name: nm, type: t, exp: exp, def: f.items.length === 5 ? f.items[4] : null });
+    }
+    // 最后那一格是 `... T[]`：验三条，然后记上标记
+    if (restF !== null) {
+      const p = out[out.length - 1];
+      if (p === undefined) return null;
+      if (!asyIsArr(p.type) || !this.arrElemOk(asyElem(p.type))) {
+        return this.nope(restF, `\`... ${p.type} ${p.name}\`（可变形参只能是一维数组，`
+          + `元素是 ${ASY_ARRELEM_TEXT} 里那些）`);
+      }
+      if (p.def !== null) return this.nope(restF, '带默认值的可变形参');
+      p.rest = true;
     }
     return out;
   }
