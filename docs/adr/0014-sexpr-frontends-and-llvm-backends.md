@@ -1375,6 +1375,8 @@ asy 那边因此只收 int/real/bool/string 的文件级变量；pair/记录/数
   编译逐字节相同」都不受这一刀影响。struct 名不挂前缀：class 名、方法名
   （`asy__m_<记录>_<方法>`）、构造函数名都按记录名拼，所以记录名是**全局共享**的一个
   命名空间，两个模块里同名的 struct 这一刀拒（`bad/mod-dup.asy`）。
+  —— **第三十八刀改了这一条**：撞上不拒了，真名打散（见下面「遮住外面来的那个类型名」），
+  那个用例升成 `cases/72-mod-dup`。
 - **模块体成为一个函数**。单元 k 的顶层语句降成 `(fn asy__init<k> () void …)`，
   调用点就在**导入那一行**的语句流里 —— 于是"体在那一行跑"是照搬的。开头两句是
   `(global asy__ran<k> bool)` 门闩：量过 `import m; import m;` 只跑一遍，而同一个模块
@@ -3219,6 +3221,55 @@ asy 的 struct 体其实就是一个 **block**。量出来的四条：
 跑的轴：`tests/asy`（141 passed，55.8s）、`tests/bootstrap`（60 passed）。只动
 `frontend-asy/`（lower.js、decls.js、calls.js、exprs.js），tests/sexpr 与 tests/run.js
 跳掉 —— 方言与后端这一刀没碰。
+
+### 遮住外面来的那个类型名：记录的**真名**撞上就打散
+
+`plain_picture.asy:203` 那句"重复定义的 struct 'picture'"，查下来根本不是 `include`
+把项摊了两遍 —— 源码里 `struct picture` 只有一处。撞的是**我们自己的 prelude**：
+`picture` 在真 asy 那边是 `base/plain_picture.asy` 里的 struct（不是 C++ 内建面），而
+`stage0/lib/asy/asy_builtins.asy` 里有一份替补，好让不写 `import plain;` 的画图程序能跑。
+两份同名，于是 `import plain;` 撞在第二十五刀那条"struct 名是全局共享的"上。
+
+量过的三条（真 asy 全收、全退 0）：
+
+- 用户文件里 `struct picture { int x=7; } picture p=new picture; write(p.x)` -> `7`；
+- **C++ 内建面**那些名字也遮得住：`struct frame { int x=1; }` -> `1`；
+- 两个模块里都有 `struct Dup`，两条 import 都写上时，这个名字指的是**后**一条那份 -> `5`。
+
+所以拒是错的，改成打散：`recUniq(nm)` —— 名字没被占就还用原名（**不带 import 的程序
+降出来的文本因此一字不变**），占了就按单元前缀走，前缀也撞（主文件的前缀是空串）
+再加一格计数。靠的还是第三十一刀那条分家：`recVis` 的键是「在这里叫什么」，`rec.name`
+是「那个类型是什么」；模板实例一直靠它活着，遮蔽跟着白捡。第二十五刀那条
+"两个模块里都有 struct" 的诊断因此整条删掉，`bad/mod-dup` 升成 `cases/72-mod-dup`。
+
+打散之后露出**两个**藏在那条诊断后面的洞：
+
+- `asyGlobalNames`（收表那一遍）拿源码里那个名字**直接当类型文本**（`records.has(base)
+  ? base : null`）。真名一变，模块级变量的类型就落在**被遮住的**那份上 ——
+  量出来的样子是 `struct picture 没有字段 'x'`。改成走 `recVis`（`asyDeclTyName`，
+  不报诊断、不查顺序 —— 顺序留给 vardec 那一遍）。
+- `asyModMerge` 是"有了就不覆盖"，于是两条 import 里这个名字指的是**前**一条那份，
+  与 asy 相反。改成 `had.at <= at` 才覆盖 —— 与 funcs/globals 那两张表同一条"后来的
+  盖住先来的"。
+- 覆盖这条规矩配上 REPL 就多要一句：`asyBuiltinsIn` 每一批都并一遍 prelude，第二批起
+  那次并会用 prelude 的 `picture` 盖掉上一批里遮住它的那个 struct。已经并过就不再并
+  （`u.bi !== null` 就回）—— 名字都还在这个单元的表里。量过：`struct picture { int x=7; }`
+  与 `write(p.x + y)` 分两批喂进 `repl --lang asy`，印 7 再印 9。
+
+门外的一条（写进 `cases/71-shadow-prelude.asy` 的注释里，不拿测试盖住）：**遮之前**
+用那个名字。`picture q=currentpicture;` 写在 `struct picture` 之前，asy 指的是旧那份
+（印 7），我们报 "'picture' 在这里还不是一个类型" —— `recVis` 一个名字只存一份，
+遮住之后前面几行也跟着看新的。要收得对，得让每个名字存一串按位置排的类型。
+
+`import plain;` 4 -> **4**：数没动，但墙往前挪了一格 —— `plain_picture.asy:203`
+换成了 `:221` 的 `node3[]`，而那是**struct 体里的嵌套 struct 声明**（`:210`
+`struct node3 {…}` 在 `struct picture` 里），跟 `plain_bounds.asy:88/92` 的
+`transformedBounds` 是同一个洞。`import graph;` 还是 182。
+
+跑的轴：`tests/asy`（142 passed，50.6s）、`tests/run.js`（asy 的 REPL 会话在那一轴）、
+`tests/bootstrap`。只动 `frontend-asy/`（lower.js、decls.js、modules.js），tests/sexpr
+跳掉 —— 方言与后端没碰。
+
 
 
 

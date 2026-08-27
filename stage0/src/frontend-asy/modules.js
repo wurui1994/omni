@@ -141,7 +141,12 @@ export function asyModMerge(L, node, u, at, only) {
     // 改名是收的（量过：`from m access A as B; B b = new B;` asy 通）。能收是因为
     // 「这里叫什么」（recVis 的键）与「那个类型是什么」（rec.name）在第三十一刀分开了 ——
     // 模板模块的实例非得这么分不可，普通模块跟着白捡。
-    if (!L.recVis.has(key)) L.recVis.set(key, { rec: e.rec, at: at });
+    // **后来的盖住先来的**（第三十八刀）：两个模块里都有 `struct Dup`，两条 import 都写上，
+    // asy 那边这个名字指的是**后**一条那份（量过 `d.y=5; write(d.y)` 印 5）。以前这里
+    // 「有了就不覆盖」，于是指的是前一条那份 —— 那时它撞在"两个模块里都有 struct"那条
+    // 诊断上，问题看不见；真名会打散之后就看得见了。
+    const had = L.recVis.get(key);
+    if (had === undefined || had.at <= at) L.recVis.set(key, { rec: e.rec, at: at });
   }
   // typedef 的别名跟着 import 一起进来（asy 那边也是：`import graph;` 之后
   // `splinetype` 就是个类型名了）。改名那种写法（`from m access X as Y;`）也收 ——

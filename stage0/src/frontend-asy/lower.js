@@ -954,6 +954,19 @@ class AsyLower {
   }
 
   /**
+   * 记录的**真名**：全局唯一。源码里那个名字（`nm`）能直接用就直接用 —— 不带 import 的
+   * 程序降出来的文本因此一字不变。撞上时（模板实例、遮蔽 prelude 或别的模块）按单元前缀
+   * 打散，前缀也撞（主文件的前缀是空串）就再加一格计数。
+   */
+  recUniq(nm) {
+    if (this.unit.tpl === null && !this.records.has(nm)) return nm;
+    let t = `${this.unit.pfx}${nm}`;
+    let k = 1;
+    while (t === nm || this.records.has(t)) { t = `asy__sh${k}_${nm}`; k++; }
+    return t;
+  }
+
+  /**
    * `struct A { int x; real y = 1.5; int get() { return x; } }` -> 一条记录声明。
    *
    * 字段**这一刀收 int / real / bool / string、pair、它们的一维数组，与前面已经声明过的
@@ -973,17 +986,21 @@ class AsyLower {
     if (SCALARS.has(nm) || nm === 'pair' || nm === 'triple' || nm === 'void') {
       return this.err(n, `'${nm}' 是内建类型名，不能当 struct 名`);
     }
-    if (this.recVis.has(nm)) return this.nope(n, `重复定义的 struct '${nm}'`);
-    // struct 名是**全局共享**的一个命名空间（第二十五刀）：核心方言的 class 名、方法名
-    // （`asy__m_<记录>_<方法>`）、构造函数名都是按记录名拼的，所以两个模块里同名的 struct
-    // 这一刀不收 —— 拒得明白，比悄悄让一个盖掉另一个好。
-    // 模板模块的实例是例外，而且必须是例外：同一个模板实例化两次，两边的 `Box_T` 是
-    // **两个**类型（量过），所以实例里的 struct 名一律按单元的 pfx 打散。源码里写的那个名字
-    // 只当 recVis 的键（在这个单元里叫什么），全局那张表与生成的符号都用打散过的。
-    const tname = this.unit.tpl === null ? nm : `${this.unit.pfx}${nm}`;
-    if (this.records.has(tname)) {
-      return this.nope(n, `两个模块里都有 struct '${nm}'（这一刀的 struct 名是全局共享的）`);
+    // 同一个单元里同名的 struct 声明两遍：还是拒（asy 那边后一份遮住前一份，量过，
+    // 但那要求"这个名字在这一格之前指的是另一个类型"这件事整条路都记得住 —— 门外）。
+    // **别处**来的那个名字（prelude 或 import 进来的）不算重复：这一句遮住它。
+    const prev = this.recVis.get(nm);
+    if (prev !== undefined && prev.rec.unit === this.unit.id) {
+      return this.nope(n, `重复定义的 struct '${nm}'`);
     }
+    // struct 名是**全局共享**的一个命名空间（第二十五刀）：核心方言的 class 名、方法名
+    // （`asy__m_<记录>_<方法>`）、构造函数名都是按记录名拼的，所以真名必须全局唯一。
+    // 撞上时打散（第三十八刀）——「这里叫什么」（recVis 的键）与「那个类型是什么」
+    // （rec.name）第三十一刀就分开了，模板实例一直靠这一条活着，遮蔽跟着白捡：
+    //   - 用户文件里 `struct picture {…}` 遮住 prelude 那份（量过 asy 收，写 7）；
+    //   - `base/plain.asy` 里真的那个 `picture` 遮住我们 prelude 的替补 —— 这条是
+    //     `import plain;` 那面墙上的第三块砖。
+    const tname = this.recUniq(nm);
     const fields = [];
     // 记录先登记（字段还空着）：方法的签名可以提到这个记录自己（`A copy()`），
     // 而 type() 是查 recVis 认记录名的。自引用字段那一条拦在 type() 前面，
@@ -1173,7 +1190,8 @@ class AsyLower {
     return out;
   }
 
-  recField(n, t, nm) {    const rec = this.records.get(t);
+  recField(n, t, nm) {
+    const rec = this.records.get(t);
     // 占位字段是**看不见的** —— 名字虽然合法，`x.asy__filler` 在真 asy 那边是没有这个成员，
     // 所以这里也当没有（不然就是收得比 asy 多，strict 那条纪律不许）
     if (nm === ASY_FILLER) return this.err(n, `struct ${t} 没有字段 '${nm}'`);

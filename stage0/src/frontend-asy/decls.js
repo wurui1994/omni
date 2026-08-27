@@ -650,6 +650,16 @@ export function asyMethod(L, rec, cand, at) {
 }
 
 /**
+ * 类型名 `base` 在这个单元里指的那个**真名**（不是标量也不是记录名就回 null）。
+ * 这一遍（收表）与 `L.type()` 的区别只有两条：不报诊断、不查顺序 —— 顺序留给 vardec。
+ */
+function asyDeclTyName(L, base) {
+  if (SCALARS.has(base) || base === 'pair' || base === 'triple') return base;
+  if (L.recVis.has(base)) return L.recVis.get(base).rec.name;
+  return L.records.has(base) ? base : null;
+}
+
+/**
  * 第一遍收文件级变量（第二十四刀）：名字、类型、**位置**。位置要记，因为 asy 的名字
  * 解析是顺序的 —— 量过函数体里引用后面才声明的文件级变量，asy 报
  * "no matching variable of name 'g'"。
@@ -689,8 +699,12 @@ export function asyGlobalNames(L, n, at) {
       const dd = L.dimsDepth(start.items[2]);
       dims = dd === null ? 0 : dd;
     }
-    const el = base === null ? null
-      : (SCALARS.has(base) || base === 'pair' || base === 'triple' || L.records.has(base) ? base : null);
+    // 记录名要换成**真名**（第三十八刀）：`recVis` 的键是"这里叫什么"，`rec.name` 是
+    // "那个类型是什么"，遮住 prelude 那份 `picture` 时两者不一样。以前这里直接拿源码里
+    // 那个名字当类型文本，于是模块级变量的类型落在**被遮住的**那份上（量出来的样子是
+    // `struct picture 没有字段 'x'`）。顺序在这一遍不查 —— 这一遍只收表，真正的
+    // 检查在 vardec 那一遍（recHere）。
+    const el = base === null ? null : asyDeclTyName(L, base);
     let ty = el;
     let k = 0;
     while (ty !== null && k < arr + dims) { ty = `${ty}[]`; k++; }
@@ -816,6 +830,10 @@ export function asyFunc(L, n) {
 export function asyBuiltinsIn(L, u, off) {
   const nm = L.opts === null || L.opts.prelude === undefined ? null : L.opts.prelude;
   if (nm === null || nm === '' || u.key === nm) return;
+  // 已经并过了就不再并（REPL 的第二批起）：名字都还在这个单元的表里，而"再并一遍"现在
+  // 有害 —— 第三十八刀让 recVis 变成"后来的盖住先来的"，重并会用 prelude 那份盖掉
+  // 用户上一批里遮住它的那个 struct。
+  if (u.bi !== null) return;
   const keep = L.at;
   L.at = off;
   const b = asyModLoad(L, null, nm);
