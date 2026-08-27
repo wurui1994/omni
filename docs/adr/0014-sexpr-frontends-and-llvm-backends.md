@@ -2522,6 +2522,24 @@ C++ 内建类型，都不在我们的内建面上。所以 plain_paths 真正的
 行为没动的证据不止测试：`import graph;` 还是 **187** 条诊断、`import plain;` 还是 **2** 条，
 与搬之前一个数都不差。`tests/asy` 107/107，`tests/bootstrap` 60/60。
 
+### 第三刀：语句那一族，4028 -> 3357
+
+`frontend-asy/stmts.js`（702 行）：`write`（`writeStmt`/`fmtStr`/`writeArrays` —— 它在 asy 里是
+语句不是表达式）、分派（`stmt`/`stmtOne`/`body`）、三种循环（`doWhile`/`forEach`/`forStmt`/
+`forPart`/`loopCond`）、变量声明（`vardec`）、表达式语句（`exprStmt`），以及赋值那一整套
+（`assign`/`assignFld`/`assignIndex`/`assignStat`）。同样是类里连续的 680 行。
+
+这一刀多了一件上一刀没有的事：块里已经有**上一刀留下的**调用点（`asyArgs(this, …)`），
+所以"把第一个实参从 `this` 换成 `L`"这一步要连着 calls.js 那 20 个名字一起做，
+不能只做本刀新搬的 17 个。漏了就是 `asyOpUser(this, …)` 出现在一个没有 `this` 的函数里 ——
+在 JS 里那是 `undefined`，而且**不报错**，只会在运行时表现成"用户算符全都不匹配"。
+
+依赖是单向的：stmts.js 用 calls.js 的四个（`asyArgs`/`asyCall`/`asyOpUser`/`asyOpBuiltinSig`），
+反过来 calls.js 一个语句函数都不调（`grep L.stmt(`/`L.body(` 是 0）—— 所以没有环。
+
+跑之前踩过一次坑：`tests/asy/run.js` 在设了 `ASYMPTOTE_DIR` 的 shell 里跑，`bad/import`
+会失败 —— 那条用例要的就是"找不到 graph 模块"。是环境不是回归，换个干净的 shell 就过。
+
 ## 后果与代价
 
 
