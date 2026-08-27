@@ -2547,17 +2547,43 @@ class AsyLower {
    * 前提是 `builtinOwns` 为真；实参类型这一族接不住时它自己发诊断并回 null。
    */
   builtinRaw(n, nm, raw) {
-    const r = raw[0];
-    if (r.lines !== null) for (const s of r.lines) this.pre.push(s);
-    return this.lengthOf(r.v, r.node);
+    // 实参的前置语句按**给的顺序**发出去（callArgs 把它们攒在各自的 lines 里）
+    for (const a of raw) if (a.lines !== null) for (const s of a.lines) this.pre.push(s);
+    if (nm === 'length') return this.lengthOf(raw[0].v, raw[0].node);
+    return this.strRaw(n, nm, raw);
+  }
+
+  /** 字符串那一族的按值入口：与 strCall 同一份拼法，只是实参已经降好了（不再求一次） */
+  strRaw(n, nm, raw) {
+    const spec = ASY_STRFN.get(nm);
+    const parts = [];
+    for (let i = 0; i < raw.length; ++i) {
+      const v = this.coerce(raw[i].v, spec.params[i], raw[i].node, `'${nm}' 的第 ${i + 1} 个实参`);
+      if (v === null) return null;
+      parts.push(v.code);
+    }
+    let fn = spec.fn;
+    if (nm === 'substr' && raw.length === 2) fn = spec.short;
+    else if (nm === 'find' && raw.length === 2) parts.push('(int 0)');
+    this.used.add(fn);
+    for (const d of ASY_STR_DEPS.get(fn) ?? []) this.used.add(d);
+    return { code: `(call ${fn} ${parts.join(' ')})`, type: spec.ret };
   }
 
   /**
-   * 这个名字加这个实参形状**是不是内建那一族的**（不看实参类型）。现在只有 `length` ——
-   * 那是唯一与 asy_builtins.asy 撞名的内建（`length(path)`）。
+   * 这个名字加这个实参形状**是不是内建那一族的**（不看实参类型，只看名字与给了几个）。
+   * 两族：`length`（与 asy_builtins.asy 的 `length(path)` 撞名）与字符串那一族
+   * （`erase` 与 `asy_builtins.asy` 的 `erase(frame)` 撞名 —— 元数不同，所以按
+   * "给了几个"就分得开）。带名字的实参一律不算内建那一族的：内建这一层没有形参名。
    */
   builtinOwns(nm, raw) {
-    return nm === 'length' && raw.length === 1 && raw[0].key === null;
+    for (const a of raw) if (a.key !== null) return false;
+    if (nm === 'length') return raw.length === 1;
+    if (ASY_STRFN.has(nm)) {
+      const s = ASY_STRFN.get(nm);
+      return raw.length >= s.min && raw.length <= s.params.length;
+    }
+    return false;
   }
 
   /**
@@ -2567,10 +2593,23 @@ class AsyLower {
    */
   builtinCost(nm, raw) {
     if (!this.builtinOwns(nm, raw)) return null;
-    const t = raw[0].v.type;
-    if (t === 'string' || t === 'pair' || t === 'triple') return 0;
-    if (t === 'int' || t === 'real') return 1;
-    return null;
+    if (nm === 'length') {
+      const t = raw[0].v.type;
+      if (t === 'string' || t === 'pair' || t === 'triple') return 0;
+      if (t === 'int' || t === 'real') return 1;
+      return null;
+    }
+    // 字符串那一族：逐个比 `params`。int -> real 是一次提升，别的不合就是接不住
+    const s = ASY_STRFN.get(nm);
+    let cost = 0;
+    for (let i = 0; i < raw.length; ++i) {
+      const want = s.params[i];
+      const got = raw[i].v.type;
+      if (got === want) continue;
+      if (want === 'real' && got === 'int') { cost += 1; continue; }
+      return null;
+    }
+    return cost;
   }
 
   /**

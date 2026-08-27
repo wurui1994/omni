@@ -559,6 +559,85 @@ box picbox(picture pic, real s) {
   return bx;
 }
 
+// ---------------------------------------------------------------- frame
+// asy 的 frame 是「已经定好尺寸的一叠元素」（坐标就是最终坐标，不再跟着 size(…) 缩放），
+// picture 是「还没定尺寸的」。所以这里存的是同一种 drawop，只是量 bbox 时缩放固定为 1。
+//
+// 量出来的（asy -noV）：
+//   * 空 frame：min/max/size 都是 (0,0)，empty(f) 是 true
+//   * `_draw(f,(0,0)--(10,20),currentpen)` 之后 min=(-0.25,-0.25)、max=(10.25,20.25)、
+//     size=(10.5,20.5) —— 与 picture 那边同一条规矩：描边按**笔宽的一半**外扩
+//     （默认笔宽 0.5，一半 0.25）；size 就是 max - min
+//   * `add(g,f)` 把 f 的元素并到 g 上（之后 max(g) 与 max(f) 一样）
+//   * frame **没有字段**：`f.min` 那边报 "no matching variable 'f.min'"，是 min(f) 这种写法
+//
+// 量出来的理由：`import plain;` 现在停在 plain_filldraw.asy:93 的 struct 体里的 `using`，
+// 那一行的类型里就有 frame（`void(frame f, path[] g, pen fillpen)`）—— 前端那一刀修好之后
+// 紧接着要的就是这个类型。
+//
+// 这里只有「把元素攒起来」与「量 bbox」两件事：begingroup / endgroup / clip / label 都
+// 还没有，用到它们的地方会明确报"没有这个函数"，不会悄悄给错答案。
+struct frame {
+  drawop[] ops;
+}
+
+void addop(frame f, int kind, path g, pen p) {
+  drawop o;
+  o.kind = kind;
+  o.g = pathcopy(g);
+  o.p = pencopy(p);
+  f.ops.push(o);
+}
+
+// `_draw` 是 asy 的**底层**描边：不走 nib 那一套（plain_filldraw.asy:48 就是这么分岔的）
+void _draw(frame f, path g, pen p) { addop(f, 0, g, p); }
+void _draw(frame f, path g) { addop(f, 0, g, currentpen); }
+void fill(frame f, path g, pen p) { addop(f, 1, g, p); }
+void fill(frame f, path g) { addop(f, 1, g, currentpen); }
+
+// 缩放固定为 1 —— frame 的坐标已经是最终坐标了
+box framebox(frame f) {
+  box bx;
+  for (int i = 0; i < f.ops.length; ++i) {
+    box eb = opbox(f.ops[i], 1);
+    if (!eb.empty) {
+      addpt(bx, (eb.l, eb.b));
+      addpt(bx, (eb.r, eb.t));
+    }
+  }
+  return bx;
+}
+
+bool empty(frame f) { return f.ops.length == 0; }
+
+// 空 frame 的 box 四个数都是 0，所以下面三个不用特判空
+pair min(frame f) {
+  box bx = framebox(f);
+  return (bx.l, bx.b);
+}
+
+pair max(frame f) {
+  box bx = framebox(f);
+  return (bx.r, bx.t);
+}
+
+pair size(frame f) {
+  box bx = framebox(f);
+  return (bx.r - bx.l, bx.t - bx.b);
+}
+
+void erase(frame f) {
+  drawop[] none;
+  f.ops = none;
+}
+
+// `add(frame,frame)`（把 src 的元素并进 dest）**这一刀先不写**，理由是量出来的：
+// 一加上去，`cases/42-fntype` 里 `fold3(add, 1, 2, 3)` 就报"把有 2 个重载的 'add' 当值用" ——
+// 用户自己的 `add(int,int)` 与这一份 `add(frame,frame)` 成了同一个重载集，而"当值用的是
+// 哪一个"要靠**期望类型**定案，这个前端还是自底向上定型的（nameOf 那一段的注释）。
+// 真 asy 收（它按期望类型挑），所以这是我们缺的一刀，不是 asy 的行为。
+// 那一刀补完再把这个函数加回来 —— 它现在的用处只在 plain_filldraw，而那个文件还引不动。
+
 bool fits(picture pic, real s) {
   box bx = picbox(pic, s);
   if (pic.xsize > 0 && bx.r - bx.l > pic.xsize) return false;
