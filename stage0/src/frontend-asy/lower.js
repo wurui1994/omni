@@ -100,7 +100,20 @@
 // `asy__g<序号>_<名字>`。只收 int/real/bool/string —— pair/记录/数组照旧当
 // `(main …)` 的局部量，函数里看不见，bad/global-pair 钉着那条边界）。
 //
-// 不支持（见到就报错，报错里说清是哪一条）：triple、import/access、
+// **模块**（第二十五刀：`import m;`、`access m;`、`access m as mm;`、`from m access f;`。
+// 一份 .asy 文件是一个**单元**，符号名带单元前缀（主文件那份不带 —— 于是不含 import 的
+// 程序降出来的文本一字不变）；模块的顶层语句成为一个 `asy__init<k>`，调用点就在 import
+// 那一行，外加一个 `asy__ran<k>` 门闩管"只跑一遍"。名字是**并表**并进来的（可见位置 =
+// 那条 import 的下标），于是顺序解析、本地声明遮蔽、以及 import 的传递性都是白捡的。
+// 量过的五条钉在 cases/28-import.asy 里：体在那一行跑、两次 import 只跑一遍、裸名字与
+// `m.x` 是同一块存储、传递性、`access` 只给限定名（strict/mod-access-bare 钉着裸用要拒）。
+// 找模块是按**当前目录**找的，也是量出来的（`asy -noV sub/user.asy` 里的 `import mm;`
+// 找不到 sub/mm.asy）。门外：标准库那 84 个模块、`unravel`、`include`、参数化模块、
+// `from m access *`、带点的模块名（我们的语法表里 stridpair 只有单个 ID 或字符串）、
+// 两个模块里同名的 struct、给别的模块的 struct 写文件级 `operator init`、
+// `m.x = …`（限定名当赋值目标））。
+//
+// 不支持（见到就报错，报错里说清是哪一条）：triple、标准库模块（`import graph;`）、
 // typedef、`operator cast`（asy 的隐式转换 —— 形态好认，但它会改**重载解析的打分**：
 // 一旦用户能加转换，"要几次转换"就不再只由内建提升表决定，而那张表是第十一刀量出来钉死的；
 // 收它得先量清"用户转换算几分、能不能连着用两次、跟内建提升谁优先"）、
@@ -222,6 +235,10 @@ const SCALARS = new Set(['int', 'real', 'bool', 'string']);
 
 /** dotQual 的第三种答案："是带点的名字，但接收者那一层已经报过错了" */
 const DOT_BAD = { bad: true };
+
+/** 模块相关的顶层声明（第二十五刀）。认得的是前三条，后面几条在 modStmt 里报"还没做" */
+const ASY_MODSTM = new Set(['import', 'access', 'from-access', 'unravel', 'include',
+  'template-access', 'receive-typedef']);
 
 /** 能当数组元素的**内建**类型。pair 是第八刀加的（核心方言的 `(arr T)` 现在收向量元素）；
  *  记录（struct）是第十九刀加的，但它不在这个表里 —— 记录是逐文件声明的，问 isRec。
@@ -557,8 +574,22 @@ for (const t of ['int', 'real', 'bool', 'string', 'pair']) {
 }
 
 class AsyLower {
-  constructor(diags) {
+  constructor(diags, opts) {
     this.diags = diags;
+    // 模块（第二十五刀）。`opts` = `{path, load(名字) -> 树|null}` —— 文件 IO 与语法表
+    // 都留在 cli.js，这里只管"给我这个模块的树"。null = 没人给加载器（那时 import 就报错）。
+    this.opts = opts === undefined ? null : opts;
+    // 一份 .asy 文件是一个**单元**。逐单元的表有 funcs / globals / oinits / oiByNode /
+    // recVis / mods / at，降级时换进换出（unitIn / unitOut）；共享的是 records /
+    // recInits / arrGen / used / wraps / gdecls —— 它们按已经全局唯一的名字存，
+    // 发到模块层的文本只有一份。
+    this.units = [];           // 单元（按加载顺序，0 号是主文件）
+    this.byKey = new Map();    // 模块名 -> 单元（同一个模块只加载一次）
+    this.unit = null;          // 当前单元
+    this.pfx = '';             // 当前单元的符号前缀（主文件是空串，于是老输出一字不变）
+    this.mods = new Map();     // 模块别名 -> {unit, at}（import 与 access 都进这张表）
+    this.loading = [];         // 正在加载的模块名（认出循环 import）
+    this.recVis = new Map();   // 这个单元**看得见**的记录名 -> {rec, at}
     this.funcs = new Map();    // 名字 -> {ret, params: 类型名数组}
     this.scopes = [];          // 名字 -> 类型名
     this.used = new Set();     // 用到的 helper
@@ -618,6 +649,59 @@ class AsyLower {
     this.methodDecls = [];
   }
 
+  /* ------------------------------------------------------------------ 单元 */
+
+  /**
+   * 新开一个单元（第二十五刀）。`key` 是模块名（主文件是它的路径，只用来报错）。
+   * 前缀：主文件是空串 —— 于是**不带 import 的程序降出来的文本一字不变**，
+   * 老用例的 .expected 与逐字节重编译都不受这一刀影响。
+   */
+  unitNew(tree, key) {
+    const id = this.units.length;
+    const u = {
+      id, key, rs: this.flat(tree, 'block'), pfx: id === 0 ? '' : `asy__m${id}_`,
+      init: id === 0 ? null : `asy__init${id}`, ran: id === 0 ? null : `asy__ran${id}`,
+      funcs: new Map(), globals: new Map(), oinits: new Map(), oiByNode: new Map(),
+      recVis: new Map(), mods: new Map(), methodDecls: [], callAt: new Map(), at: 0,
+    };
+    this.units.push(u);
+    return u;
+  }
+
+  /** 当前那几张表存回单元 `u`（表本身是同一个对象，真要存的只有 at） */
+  unitSave(u) {
+    u.funcs = this.funcs;
+    u.globals = this.globals;
+    u.oinits = this.oinits;
+    u.oiByNode = this.oiByNode;
+    u.recVis = this.recVis;
+    u.mods = this.mods;
+    u.methodDecls = this.methodDecls;
+    u.at = this.at;
+  }
+
+  /** 换到单元 `u`，回"原来那个"（配 unitOut 用，与 defWrapper 那套保存/还原同一个路子） */
+  unitIn(u) {
+    const prev = this.unit;
+    if (prev !== null) this.unitSave(prev);
+    this.unit = u;
+    this.funcs = u.funcs;
+    this.globals = u.globals;
+    this.oinits = u.oinits;
+    this.oiByNode = u.oiByNode;
+    this.recVis = u.recVis;
+    this.mods = u.mods;
+    this.methodDecls = u.methodDecls;
+    this.pfx = u.pfx;
+    this.at = u.at;
+    return prev;
+  }
+
+  unitOut(prev) {
+    this.unitSave(this.unit);
+    if (prev !== null) this.unitIn(prev);
+  }
+
   /**
    * 方法体里的裸名字 `nm` 是不是**此处可见的字段**（局部量/形参优先，量过：形参 `x`
    * 遮住字段 `x`，要拿字段得写 `this.x`）。回字段项或 null。
@@ -629,14 +713,18 @@ class AsyLower {
     return null;
   }
 
-  /** 记录 `rec` 上此处可见的方法候选（方法体里按成员顺序裁，外面看全部） */
+  /** 记录 `rec` 上此处可见的方法候选（方法体里按成员顺序裁，外面看全部）。
+   *  候选表按**声明这个记录的那个单元**查：asy 的 struct 与它的方法是一起导出的
+   *  （量过：`import m;` 之后 m 里的 struct 连方法带构造函数都能用），
+   *  所以 import 的时候不用把 `记录名.方法名` 那些 key 搬一遍。 */
   visibleMethods(rec, nm) {
     const key = `${rec.name}.${nm}`;
+    const funcs = this.units[rec.unit].funcs;
     const out = [];
-    if (!this.funcs.has(key)) return out;
+    if (!funcs.has(key)) return out;
     // 刻意不用 `Infinity` 当"不裁"的上界：它不在封闭 ABI 的数值词汇里（同 glr/driver.js）。
     const inSelf = this.self !== null && this.self.rec === rec;
-    for (const c of this.funcs.get(key)) {
+    for (const c of funcs.get(key)) {
       if (!inSelf || c.mat <= this.self.mat) out.push(c);
     }
     return out;
@@ -725,7 +813,10 @@ class AsyLower {
     if (nm === 'void') return 'void';
     if (nm === 'pair') return 'pair';
     // 记录名（第十四刀）。放在内建名单后面查，与核心方言那边同一条规矩。
-    if (this.records.has(nm)) return this.recHere(nm) ? nm : this.recLate(node, nm);
+    // 查的是**这个单元看得见的**那张表（recVis）：别的模块里的 struct 没 import 进来时
+    // 不算类型（量过 asy 报 "no type of name"），所以 records 那张全局表只用来发文本。
+    if (this.recVis.has(nm)) return this.recHere(nm) ? nm : this.recLate(node, nm);
+    if (this.records.has(nm)) return this.recElsewhere(node, nm);
     if (!SCALARS.has(nm)) return this.nope(node, `类型 '${nm}'（这一刀只有 int/real/bool/string/pair 与 struct）`);
     return nm;
   }
@@ -737,8 +828,8 @@ class AsyLower {
    * "比 asy 多接受一门语言"，`tests/asy/strict/struct-fwd` 钉着。
    */
   recHere(nm) {
-    const r = this.records.get(nm);
-    return r !== undefined && r.at <= this.at;
+    const e = this.recVis.get(nm);
+    return e !== undefined && e.at <= this.at;
   }
 
   /** 上面那条的诊断。asy 自己也拒，所以是 err 不是 nope */
@@ -747,7 +838,13 @@ class AsyLower {
       + `而 asy 的类型名是顺序解析的（那边报 "no type of name '${nm}'"）`);
   }
 
-  /** `t` 是这份文件里声明过的记录（asy 的 struct）吗 */
+  /** 别的模块里的 struct，但这个文件没把它 import 进来（asy 那边也是 "no type of name"） */
+  recElsewhere(node, nm) {
+    return this.err(node, `'${nm}' 是另一个模块里的 struct，这个文件没有把它引进来 ——`
+      + ` \`access m;\` 只给限定名，要裸用得写 \`import m;\`（那边报 "no type of name '${nm}'"）`);
+  }
+
+  /** `t` 是声明过的记录（asy 的 struct）吗。`t` 已经是解析好的类型名，所以查全局那张表 */
   isRec(t) { return t !== null && t !== undefined && this.records.has(t); }
 
   /** `el` 能当数组元素吗（第十九刀起记录也能：asy 的 struct 是引用类型，`A[]` 是一串句柄） */
@@ -773,13 +870,20 @@ class AsyLower {
     if (SCALARS.has(nm) || nm === 'pair' || nm === 'void') {
       return this.err(n, `'${nm}' 是内建类型名，不能当 struct 名`);
     }
-    if (this.records.has(nm)) return this.nope(n, `重复定义的 struct '${nm}'`);
+    if (this.recVis.has(nm)) return this.nope(n, `重复定义的 struct '${nm}'`);
+    // struct 名是**全局共享**的一个命名空间（第二十五刀）：核心方言的 class 名、方法名
+    // （`asy__m_<记录>_<方法>`）、构造函数名都是按记录名拼的，所以两个模块里同名的 struct
+    // 这一刀不收 —— 拒得明白，比悄悄让一个盖掉另一个好。
+    if (this.records.has(nm)) {
+      return this.nope(n, `两个模块里都有 struct '${nm}'（这一刀的 struct 名是全局共享的）`);
+    }
     const fields = [];
     // 记录先登记（字段还空着）：方法的签名可以提到这个记录自己（`A copy()`），
-    // 而 type() 是查 this.records 认记录名的。自引用字段那一条拦在 type() 前面，
+    // 而 type() 是查 recVis 认记录名的。自引用字段那一条拦在 type() 前面，
     // 所以"字段还空着"这件事在这里看不出问题。
-    const rec = { name: nm, fields: fields, at: at };
+    const rec = { name: nm, fields: fields, at: at, unit: this.unit.id };
     this.records.set(nm, rec);
+    this.recVis.set(nm, { rec, at });
     // 体里的类型名按**这个 struct 的位置**判可见（recHere）：字段与方法签名只能提到
     // 前面声明过的记录。第一遍走到这里时 this.at 还是 0，所以要现设现还。
     const keepAt = this.at;
@@ -919,6 +1023,20 @@ class AsyLower {
    *     的体里写 `new A` 不会递归）。
    */
   recInit(n, t) {
+    const rec = this.records.get(t);
+    // 别的模块里声明的 struct（第二十五刀）：`T t;` 该造什么是在**那个模块**里定的 ——
+    // 字段默认值、内嵌记录、文件级 operator init 都是那边的名字，所以换到那个单元里问。
+    if (rec !== undefined && rec.unit !== this.unit.id) {
+      const prev = this.unitIn(this.units[rec.unit]);
+      this.at = rec.at;
+      const out = this.recInitHere(n, t);
+      this.unitOut(prev);
+      return out;
+    }
+    return this.recInitHere(n, t);
+  }
+
+  recInitHere(n, t) {
     const oi = this.oinitFor(t);
     if (oi !== null) return `(call ${oi.sym})`;
     return this.recNew(n, t);
@@ -999,6 +1117,10 @@ class AsyLower {
         const q = this.dotQual(n.items[1]);
         if (q === DOT_BAD) return null;
         if (q !== null) return this.member(n, q.recv, q.field);
+        // `m.x`：模块限定的名字（第二十五刀）。变量先查（dotQual 在上面），
+        // 所以同名的局部量遮住模块别名。
+        const mq = this.modAlias(n.items[1]);
+        if (mq !== null) return this.modVar(n, mq);
         return this.nope(n, '带点的名字或算符名');
       }
       const t = this.lookup(nm);
@@ -1521,6 +1643,9 @@ class AsyLower {
         if (!asyIsArr(q.recv.type)) return this.nope(n, `${q.recv.type} 上的方法调用 '.${q.field}(…)'`);
         return this.arrMethod(n, q.recv, q.field);
       }
+      // `m.f(…)`：模块限定的函数调用（第二十五刀）
+      const mq = this.modAlias(callee.items[1]);
+      if (mq !== null) return this.modCall(n, mq);
     }
     if (nm === null) return this.nope(n, '调用一个不是普通名字的东西（函数值、方法、算符名）');
     if (nm === 'write') return this.err(n, `${ASY_NOPE}：write 出现在表达式位置（它是语句）`);
@@ -1582,7 +1707,7 @@ class AsyLower {
         if (f.name === mname) return this.nope(n, `调用一个字段（${recv.type}.${mname} 是 ${f.type}，不是方法）`);
       }
       const names = [];
-      for (const key of this.funcs.keys()) {
+      for (const key of this.units[rec.unit].funcs.keys()) {
         if (key.startsWith(`${rec.name}.`)) names.push(key.slice(rec.name.length + 1));
       }
       return this.err(n, `struct ${recv.type} 没有方法 '${mname}'`
@@ -1850,11 +1975,15 @@ class AsyLower {
     }
     // 换掉正在降级的那份状态：包装函数是另一个作用域、另一串语句。用完还回去。
     // `at` 也要换：默认值是在**被调方的声明处**求的，能看见的候选也是那时候的那些。
+    // 被调方在别的模块里时（第二十五刀）连**单元**一起换：默认值那个表达式里的名字
+    // 是那个文件里的名字。
     const savePre = this.pre;
     const saveUpd = this.updates;
     const saveScopes = this.scopes;
     const saveAt = this.at;
-    this.at = d.at;
+    const saveUnit = d.unit === undefined || d.unit === this.unit.id
+      ? null : this.unitIn(this.units[d.unit]);
+    this.at = d.dat === undefined ? d.at : d.dat;
     // 方法的包装（第二十刀）：多一个 `this` 形参，而默认值那一段要能看见字段 ——
     // 它是在**被调方**的作用域里求的，那个作用域里字段是可见的。
     // 构造函数的包装（第二十一刀）不一样：`this` 不是形参而是**本地量** —— 对象在这里造，
@@ -1907,6 +2036,7 @@ class AsyLower {
     this.scopes = saveScopes;
     this.at = saveAt;
     this.self = saveSelf;
+    if (saveUnit !== null) this.unitOut(saveUnit);
     if (bad) return null;
     this.wraps.push(`${text.join('\n')})`);
     return wname;
@@ -2571,6 +2701,196 @@ class AsyLower {
     return out;
   }
 
+  /* -------------------------------------------------------------- 模块 */
+
+  /** `(idpair NAME)` -> {src, dst}；`(idpair SRC as DST)` -> 改了名的那份；别的回 null */
+  idPair(n) {
+    if (!isList(n) || head(n) !== 'idpair') return null;
+    const a = isAtom(n.items[1]) ? n.items[1].value : null;
+    if (a === null) return null;
+    if (n.items.length === 2) return { src: a, dst: a };
+    if (n.items.length !== 4) return null;
+    const as = isAtom(n.items[2]) ? n.items[2].value : null;
+    const b = isAtom(n.items[3]) ? n.items[3].value : null;
+    if (as !== 'as' || b === null) return null;
+    return { src: a, dst: b };
+  }
+
+  /**
+   * 模块 `name` 的单元。同一个模块只加载一次（量过：`import m; import m;` 体只跑一遍），
+   * 加载 = 解析（`opts.load`，文件 IO 与语法表都在 cli.js）+ 立刻走一遍**声明遍** ——
+   * 声明遍走完这个单元的导出表就是全的，import 它的人才有东西可并。
+   */
+  modLoad(node, name) {
+    const had = this.byKey.get(name);
+    if (had !== undefined) return had;
+    if (this.opts === null || this.opts.load === undefined || this.opts.load === null) {
+      this.nope(node, `模块 '${name}'（这条路上没有模块加载器）`);
+      return null;
+    }
+    for (const k of this.loading) {
+      if (k === name) { this.nope(node, `循环 import（'${name}' 正在加载）`); return null; }
+    }
+    const tree = this.opts.load(name);
+    if (tree === null || tree === undefined) {
+      this.nope(node, `模块 '${name}' 找不到 —— 当前目录下没有 ${name}.asy`
+        + '（asy 的模块是按 CWD 找的，量过；标准库那些 plain/graph/… 这一刀还没有）');
+      return null;
+    }
+    const u = this.unitNew(tree, name);
+    this.byKey.set(name, u);
+    this.loading.push(name);
+    const prev = this.unitIn(u);
+    this.declPass(u);
+    this.unitOut(prev);
+    this.loading.pop();
+    return u;
+  }
+
+  /** 候选换一个"可见位置"：import 进来的名字，可见位置是那条 import 语句的下标 */
+  candAt(c, at) {
+    return {
+      ret: c.ret, params: c.params, ps: c.ps, node: c.node, sym: c.sym, base: c.base,
+      pfx: c.pfx, unit: c.unit, dat: c.dat === undefined ? c.at : c.dat, at: at,
+      mat: c.mat, rec: c.rec, ctor: c.ctor,
+    };
+  }
+
+  /**
+   * 把模块 `u` 的导出并进当前单元，可见位置是 `at`（那条 import 语句的下标）。
+   * 三条量过的语义因此都是白捡的：
+   *   - **顺序解析**：import 写在后面时前面那几行看不见那些名字；
+   *   - **本地的声明遮住 import 进来的**（同名的候选表里本地那份在后面，at 更大）；
+   *   - **传递性**：并的是模块**自己的**表，而那张表里已经含着它 import 进来的东西
+   *     （量过 `import mid;` 之后 mid import 的名字也裸着可见）。
+   * `only` 不是 null 时只并那几个名字（`from m access f, g;`）。
+   */
+  modMerge(node, u, at, only) {
+    for (const [nm, list] of u.funcs) {
+      // `记录名.方法名` 不并：方法跟着 struct 走（见 visibleMethods）
+      if (nm.indexOf('.') >= 0) continue;
+      const key = only === null ? nm : only.get(nm);
+      if (key === undefined) continue;
+      const dst = this.funcs.has(key) ? this.funcs.get(key) : [];
+      for (const c of list) {
+        let dup = false;
+        for (const d of dst) if (d.sym === c.sym) dup = true;
+        if (dup) continue;   // 同一个模块引两遍：名字还是那一份
+        dst.push(this.candAt(c, at));
+      }
+      this.funcs.set(key, dst);
+    }
+    for (const [nm, list] of u.globals) {
+      const key = only === null ? nm : only.get(nm);
+      if (key === undefined) continue;
+      const dst = this.globals.has(key) ? this.globals.get(key) : [];
+      for (const g of list) {
+        let dup = false;
+        for (const d of dst) if (d.sym === g.sym) dup = true;
+        if (dup) continue;
+        // 同一块存储：模块里改它、这边也改它（量过两边都看得见对方的改动）
+        dst.push({ sym: g.sym, type: g.type, at: at, ok: g.ok });
+      }
+      this.globals.set(key, dst);
+    }
+    for (const [nm, e] of u.recVis) {
+      const key = only === null ? nm : only.get(nm);
+      if (key === undefined) continue;
+      if (key !== nm) { this.nope(node, `给 import 进来的 struct '${nm}' 改名`); continue; }
+      if (!this.recVis.has(key)) this.recVis.set(key, { rec: e.rec, at: at });
+    }
+  }
+
+  /**
+   * `import m;` / `access m;` / `access m as mm;` / `from m access f, g;`（第二十五刀）。
+   * 量过的四条（`asy -noV`）：
+   *   - **模块体在那一行跑**，而且只跑一次（`import m; import m;` 只印一遍）；
+   *   - `access` 也跑体，但只给限定名（`access m; write(mv);` 报 "no matching variable"）；
+   *   - `import` 之后裸名字与 `m.x` 是**同一块存储**，两边都能改；
+   *   - 别名（`access m as mm;`）与 `from m access f;` 都通。
+   * 门外的：`unravel`、`include`、参数化模块（`from c.map(K=int) access …`）、通配的
+   * `from m access *`。
+   */
+  modStmt(n, at) {
+    const h = head(n);
+    if (h === 'import' || h === 'access') {
+      const list = h === 'import' ? [n.items[1]] : this.flat(n.items[1], 'idpairs');
+      for (const p of list) {
+        const pr = this.idPair(p);
+        if (pr === null) { this.nope(p, `${h} 的这种写法`); continue; }
+        const u = this.modLoad(p, pr.src);
+        if (u === null) continue;
+        this.mods.set(pr.dst, { unit: u.id, at: at });
+        if (h === 'import') this.modMerge(p, u, at, null);
+        this.modCallAt(at, u);
+      }
+      return null;
+    }
+    if (h === 'from-access') {
+      if (n.items.length !== 3) return this.nope(n, '参数化的 `from … access`（模板模块）');
+      const src = isAtom(n.items[1]) ? n.items[1].value : null;
+      if (src === null) return this.nope(n, '`from … access` 的这种模块名');
+      const names = n.items[2];
+      if (isList(names) && head(names) === 'wildcard') return this.nope(n, '`from … access *`');
+      const only = new Map();
+      for (const p of this.flat(names, 'idpairs')) {
+        const pr = this.idPair(p);
+        if (pr === null) { this.nope(p, '`from … access` 里的这种写法'); continue; }
+        only.set(pr.src, pr.dst);
+      }
+      const u = this.modLoad(n, src);
+      if (u === null) return null;
+      this.modMerge(n, u, at, only);
+      this.modCallAt(at, u);
+      return null;
+    }
+    return this.nope(n, `模块声明 '${h}'`);
+  }
+
+  /** 这条 import 语句要在**它自己的位置**上调一次模块的初始化函数（体在那一行跑） */
+  modCallAt(at, u) {
+    const list = this.unit.callAt.has(at) ? this.unit.callAt.get(at) : [];
+    list.push(u.init);
+    this.unit.callAt.set(at, list);
+  }
+
+  /** `(qualified (name M) NAME)` 且 M 是此处可见的模块别名时回 {unit, name}，否则 null */
+  modAlias(node) {
+    if (!isList(node) || head(node) !== 'qualified') return null;
+    const nm = isAtom(node.items[2]) ? node.items[2].value : null;
+    if (nm === null) return null;
+    const base = this.plainName(node.items[1]);
+    if (base === null || !this.mods.has(base)) return null;
+    const m = this.mods.get(base);
+    // 顺序解析：那条 import/access 写在后面时，这里还没有这个模块
+    if (m.at > this.at) return null;
+    return { unit: m.unit, name: nm, mod: base };
+  }
+
+  /** `m.x`：模块里的文件级变量。存储是同一块（量过两边都能改） */
+  modVar(n, mq) {
+    const list = this.units[mq.unit].globals.get(mq.name);
+    if (list === undefined) {
+      return this.nope(n, `模块限定的名字 '${mq.mod}.${mq.name}'（这一刀的 \`m.名字\` 只有`
+        + '模块里的文件级变量与函数）');
+    }
+    const g = list[list.length - 1];
+    if (!g.ok) {
+      return this.nope(n, `模块限定的文件级变量 '${mq.mod}.${mq.name}'（这一刀的模块级变量`
+        + '只收 int/real/bool/string）');
+    }
+    return { code: `(var ${g.sym})`, type: g.type };
+  }
+
+  /** `m.f(…)`：模块里的函数。候选表是那个模块的（限定名不受这边顺序解析的影响） */
+  modCall(n, mq) {
+    const list = this.units[mq.unit].funcs.get(mq.name);
+    if (list === undefined || list.length === 0) {
+      return this.err(n, `模块 '${mq.mod}' 里没有函数 '${mq.name}'`);
+    }
+    return this.userCall(n, mq.name, list);
+  }
+
   /* ------------------------------------------------------------ 文件与函数 */
 
   /** `static real f(...)` 这类修饰在文件层是无所谓的，剥掉 */
@@ -2597,6 +2917,12 @@ class AsyLower {
     if (ret === null) return;
     if (!this.isRec(ret)) {
       this.nope(n, `回 ${ret} 的文件级 'operator init'（这一刀只有 struct 的那份）`);
+      return;
+    }
+    // 别的模块里的 struct（第二十五刀）：`T t;` 造什么是在**声明它的那个模块**里定的
+    // （见 recInit），所以这边再写一份的话我们会静静地不用它 —— 那不如拒得明白。
+    if (this.records.get(ret).unit !== this.unit.id) {
+      this.nope(n, `给另一个模块的 struct '${ret}' 定义文件级 'operator init'`);
       return;
     }
     const ps = this.formals(n.items[3]);
@@ -2684,7 +3010,12 @@ class AsyLower {
     for (const p of ps) types.push(p.type);
     // `ps` 带名字与默认值节点（命名实参与默认实参要它）；`params` 只是类型，
     // 保留是因为别处的实参检查一直按下标读它。
-    const cand = { ret, params: types, ps, node: n, sym, at };
+    // `base` 是**没加单元前缀**的符号名（重载改名时要它），`unit` 是"这份声明在哪个单元里"
+    // —— import 进来的候选是别的单元的，改名与默认值都归那边管（第二十五刀）。
+    const cand = {
+      ret, params: types, ps, node: n, sym: `${this.pfx}${sym}`, base: sym,
+      pfx: this.pfx, unit: this.unit.id, at, dat: at,
+    };
     const list = this.funcs.has(nm) ? this.funcs.get(nm) : [];
     const key = types.join(',');
     for (let i = 0; i < list.length; i++) {
@@ -2729,9 +3060,11 @@ class AsyLower {
     const key = `${rec.name}.${nm}`;
     // 构造函数的候选**看起来像个回记录的普通函数**（`ret` 是记录名、没有接收者），
     // 重载解析与默认实参那两套因此一字不改就能用；`ctor` 标记只在发正文时用。
+    // 符号名不带单元前缀（第二十五刀）：记录名本身就是全局唯一的（见 recordDec）。
+    const msym = ctor ? `asy__ctor_${rec.name}` : `asy__m_${rec.name}_${nm}`;
     const cand = {
-      ret: ctor ? rec.name : ret, params: types, ps, node: n, at: -1, mat, rec, ctor,
-      sym: ctor ? `asy__ctor_${rec.name}` : `asy__m_${rec.name}_${nm}`,
+      ret: ctor ? rec.name : ret, params: types, ps, node: n, at: -1, dat: at, mat, rec, ctor,
+      sym: msym, base: msym, pfx: '', unit: this.unit.id,
     };
     const list = this.funcs.has(key) ? this.funcs.get(key) : [];
     const sk = types.join(',');
@@ -2905,14 +3238,20 @@ class AsyLower {
     return `${lines.join('\n')})`;
   }
 
-  /** 整个文件 -> 核心方言文本。函数提到模块层，其余全进 (main ...)。 */
-  run(tree) {
-    const rs = this.flat(tree, 'block');
-    // 记录先收：函数签名与字段类型都可能提到它。方法的签名也在这一遍进 funcs
-    // （key 是 `记录名.方法名`），所以下面那个重载改名的循环把方法一起管了。
+  /**
+   * 声明遍：一个单元里的记录、模块声明、函数签名、文件级变量名（第二十五刀把它从 run()
+   * 里分出来 —— 每个单元都要走一遍这个）。
+   * 记录与模块声明在**同一遍**里按下标走：`import` 进来的 struct 要能当后面那些
+   * struct 的字段类型，而 asy 的类型名是顺序解析的。
+   */
+  declPass(u) {
+    const rs = u.rs;
     for (let i = 0; i < rs.length; i++) {
       const r = this.unwrapMod(rs[i]);
-      if (isList(r) && head(r) === 'recorddec') this.recordDec(r, i);
+      if (!isList(r)) continue;
+      this.at = i;
+      if (head(r) === 'recorddec') this.recordDec(r, i);
+      else if (ASY_MODSTM.has(head(r))) this.modStmt(r, i);
     }
     for (let i = 0; i < rs.length; i++) {
       const r = this.unwrapMod(rs[i]);
@@ -2924,17 +3263,25 @@ class AsyLower {
     }
     // 重载的名字在这里定：核心方言没有重载，所以第 2 个及以后的候选要改名。
     // 第一个保留原名 —— 绝大多数函数不重载，输出的文本因此跟以前一样好读。
+    // 数的只有**这个单元自己的**候选：import 进来的那些名字在它们自己的单元里早定好了。
     for (const list of this.funcs.values()) {
-      for (let i = 1; i < list.length; i++) list[i].sym = `asy__ov${i}_${list[i].sym}`;
+      let k = 0;
+      for (const c of list) {
+        if (c.unit !== u.id) continue;
+        if (k > 0) c.sym = `${c.pfx}asy__ov${k}_${c.base}`;
+        k++;
+      }
     }
-    const fns = [];
-    // 方法正文先发：它们只依赖记录声明，而下面那些文件级函数的正文可能调到方法
-    for (const m of this.methodDecls) {
+  }
+
+  /** 一个单元的正文：方法体、文件级函数体，与"剩下那些语句"（模块是初始化函数，主文件是 main） */
+  bodyPass(u, fns) {
+    for (const m of u.methodDecls) {
       const text = this.method(m.rec, m.cand, m.at);
       if (text !== null) fns.push(text);
     }
-    for (let i = 0; i < rs.length; i++) {
-      const r = this.unwrapMod(rs[i]);
+    for (let i = 0; i < u.rs.length; i++) {
+      const r = this.unwrapMod(u.rs[i]);
       if (!isList(r) || head(r) !== 'fundec') continue;
       this.at = i;
       const f = this.func(r);
@@ -2943,17 +3290,45 @@ class AsyLower {
     this.push();
     this.fileLevel = true;
     const main = [];
-    for (let i = 0; i < rs.length; i++) {
-      const r = this.unwrapMod(rs[i]);
-      if (isList(r) && head(r) === 'fundec') continue;
-      if (isList(r) && head(r) === 'recorddec') continue;   // 上面收过了
+    for (let i = 0; i < u.rs.length; i++) {
+      const r = this.unwrapMod(u.rs[i]);
       this.at = i;
+      // 模块声明（第二十五刀）：声明遍已经把名字并进来了，这里发的是**体在那一行跑**
+      // 的那一下 —— 初始化函数的调用，位置就是源码里 import 的位置。
+      const calls = u.callAt.get(i);
+      if (calls !== undefined) {
+        for (const c of calls) main.push(`(expr (call ${c}))`);
+        continue;
+      }
+      if (!isList(r)) continue;
+      if (head(r) === 'fundec') continue;
+      if (head(r) === 'recorddec') continue;      // 声明遍收过了
+      if (ASY_MODSTM.has(head(r))) continue;      // 同上（没做的那几种在那边报过了）
       const s = this.stmt(r, 'void');
       if (s === null) continue;
       for (const x of s) main.push(x);
     }
     this.fileLevel = false;
     this.pop();
+    return main;
+  }
+
+  /** 整个程序 -> 核心方言文本。函数提到模块层，主文件剩下的语句进 (main ...)。 */
+  run(tree) {
+    const root = this.unitNew(tree, this.opts === null ? '' : this.opts.path);
+    this.unitIn(root);
+    this.declPass(root);
+    // 正文：按加载顺序一个单元一遍（declPass 里的递归加载已经把 units 填全了）。
+    // 方法体在每个单元里先发：它们只依赖记录声明，而文件级函数的正文可能调到方法。
+    const fns = [];
+    let main = [];
+    for (const u of this.units) {
+      const prev = this.unitIn(u);
+      const stmts = this.bodyPass(u, fns);
+      if (u.id === 0) main = stmts;
+      else fns.push(this.initFn(u, stmts));
+      this.unitOut(prev);
+    }
     const out = ['(module'];
     // 记录按**声明顺序**发（字段里不许再有记录，所以这就是最终顺序）
     for (const rec of this.records.values()) {
@@ -2961,6 +3336,8 @@ class AsyLower {
       for (const f of rec.fields) fs.push(`(${f.name} ${asyCore(f.type)})`);
       out.push(`  (class ${rec.name} ${fs.join(' ')})`);
     }
+    // 模块跑过了没有（第二十五刀）：`import m; import m;` 只跑一遍体，量过
+    for (const u of this.units) if (u.ran !== null) out.push(`  (global ${u.ran} bool)`);
     // 文件级变量（第二十四刀）：按声明顺序的一批 `(global …)`。零初始化，
     // 真正的初值是 `(main …)` 里那一句 `(set …)` —— 位置就是源码里的位置，
     // 所以「初值在那一行求」这条 asy 语义是照搬的，不是模拟的。
@@ -2978,14 +3355,28 @@ class AsyLower {
     out.push(`  (main${body.length === 0 ? '' : `\n${body.join('\n')}`}))`);
     return out.join('\n') + '\n';
   }
+
+  /**
+   * 模块的初始化函数：那份文件的顶层语句。开头那两句是"只跑一次"的门闩 ——
+   * 量过 `import m; import m;` 只印一遍，而同一个模块被两个模块 import 时
+   * 调用点有两处，所以这道门闩得在运行期。
+   */
+  initFn(u, stmts) {
+    const lines = [`  (fn ${u.init} () void`];
+    lines.push(`    (if (var ${u.ran}) (do (ret)))`);
+    lines.push(`    (set ${u.ran} (bool true))`);
+    for (const s of stmts) lines.push(`    ${s}`);
+    return `${lines.join('\n')})`;
+  }
 }
 
 /**
  * asy 语法树 -> 核心方言文本。
  * @param {any} tree glrParse 出来的那棵树（asy.grammar 的 file 规则）
  * @param {import('../source/diag.js').Diagnostics} diags
+ * @param {{path: string, load: (name: string) => any}} [opts] 模块加载器（第二十五刀）
  * @returns {string} 核心方言源文本（诊断有错时内容不可用）
  */
-export function lowerAsy(tree, diags) {
-  return new AsyLower(diags).run(tree);
+export function lowerAsy(tree, diags, opts) {
+  return new AsyLower(diags, opts).run(tree);
 }

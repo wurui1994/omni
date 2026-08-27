@@ -110,22 +110,11 @@ function closure(g, kernel) {
  *   Action = {kind:'shift', to} | {kind:'reduce', rule} | {kind:'accept'}
  */
 export function buildTable(g) {
-  // 增广：`$accept -> start`。归约它就是接受，所以它不进 rules，单独认。
-  const acceptRule = g.rules.length;
-  const rules = [...g.rules, { lhs: ACCEPT, rhs: [g.start], action: null, prec: null, prefer: 0, span: null }];
-  // Map 的拷贝手写一遍。刻意不写 `new Map(g.nonterms)`：封闭 ABI 里 `new Map(x)` 落到
-  // `js_map_of_pairs`，它要的是"成对的列表"而不是 Map —— node 上照跑，原生构建里当场
-  // 报 "dynamic value is Map, expected list"。量出来的（自举链阶段 9）。
-  const nonterms = new Map();
-  for (const [k, v] of g.nonterms) nonterms.set(k, v);
-  // 字段手写，不用 `{...g, ...}`：dict 的展开在原生构建里要走一条动态路径，而这里
-  // 需要的字段就这几个。多写一行换掉一处不必要的动态性。
-  const gg = { name: g.name, terms: g.terms, nonterms, rules, start: g.start, prec: g.prec };
-  gg.nonterms.set(ACCEPT, { name: ACCEPT, rules: [acceptRule] });
-
-  const ns = firstSets(gg);
-  const follow = followSets(gg, ns);
-  follow.set(ACCEPT, new Set([END]));
+  const a = augment(g);
+  const gg = a.gg;
+  const rules = a.rules;
+  const acceptRule = a.acceptRule;
+  const follow = a.follow;
 
   const states = [];
   const byKey = new Map();
@@ -173,7 +162,35 @@ export function buildTable(g) {
   }
 
   const conflicts = resolveConflicts(gg, states, rules);
-  return { grammar: g, states, rules, acceptRule, conflicts, first: ns.first, follow, nullable: ns.nullable };
+  return {
+    grammar: g, states, rules, acceptRule, conflicts,
+    first: a.ns.first, follow, nullable: a.ns.nullable,
+  };
+}
+
+/**
+ * 构表**之外**的那一半：增广文法、产生式表、FIRST/FOLLOW。
+ * 分出来是因为缓存要它 —— 从磁盘读回状态表时这一半是现算的（量过一共 5ms，而
+ * 项集族那一半是 780ms），于是「缓存里存什么」这个问题只剩状态表与冲突清单。
+ */
+function augment(g) {
+  // 增广：`$accept -> start`。归约它就是接受，所以它不进 rules，单独认。
+  const acceptRule = g.rules.length;
+  const rules = [...g.rules, { lhs: ACCEPT, rhs: [g.start], action: null, prec: null, prefer: 0, span: null }];
+  // Map 的拷贝手写一遍。刻意不写 `new Map(g.nonterms)`：封闭 ABI 里 `new Map(x)` 落到
+  // `js_map_of_pairs`，它要的是"成对的列表"而不是 Map —— node 上照跑，原生构建里当场
+  // 报 "dynamic value is Map, expected list"。量出来的（自举链阶段 9）。
+  const nonterms = new Map();
+  for (const [k, v] of g.nonterms) nonterms.set(k, v);
+  // 字段手写，不用 `{...g, ...}`：dict 的展开在原生构建里要走一条动态路径，而这里
+  // 需要的字段就这几个。多写一行换掉一处不必要的动态性。
+  const gg = { name: g.name, terms: g.terms, nonterms, rules, start: g.start, prec: g.prec };
+  gg.nonterms.set(ACCEPT, { name: ACCEPT, rules: [acceptRule] });
+
+  const ns = firstSets(gg);
+  const follow = followSets(gg, ns);
+  follow.set(ACCEPT, new Set([END]));
+  return { acceptRule, rules, gg, ns, follow };
 }
 
 function addAction(st, t, a) {
@@ -270,4 +287,131 @@ export function dumpTable(tb, brief = false) {
     lines.push('conflicts left to the GLR driver: none (this grammar is SLR(1))');
   }
   return lines.join('\n') + '\n';
+}
+
+/* ------------------------------------------------------------------ 表的缓存
+ *
+ * 构表是这条路上唯一的慢步：asy 那份语法 433 个状态，量过 **780ms 全在项集族那一遍**
+ * （FIRST/FOLLOW 4ms、归约 6ms、冲突 5ms、读语法 20ms）。而测试轴一条 case 一次进程，
+ * 一条轴上百次 —— 不缓存就是白烧几分钟。
+ *
+ * 存的只有**状态表与剩下的冲突清单**：产生式表、FIRST/FOLLOW、增广文法都是从语法现算的
+ * （augment，5ms），于是缓存文件里没有一处引用语法树的节点 —— 不用序列化 span、动作模板
+ * 那些东西，格式因此小而稳。
+ *
+ * 格式是**按行的整数**，不是 JSON：`JSON.parse` 不在封闭 ABI 里（ADR-0011 决策 2 ——
+ * 只有 stringify），而 `split` 在。符号名各占一行（字面量终结符的名字是 JSON.stringify
+ * 出来的，里面不会有真的换行），别处一律是它们的下标。
+ *
+ *   glr-table <版本> <状态数> <符号数>
+ *   <符号 0> … <符号 n-1>          每个一行
+ *   i <item> <item> …              项集（`规则号.点位` 原样，读回去就是它）
+ *   a <符号号>:<动作>,<动作> …      动作：s<到>/r<规则>/a
+ *   g <符号号>:<到> …              goto
+ *   C <冲突数>
+ *   <状态> <符号号> <种类> <动作数>
+ */
+
+/** 缓存格式的版本。序列化的形状改了就加一 —— 缓存键里带着它，老文件自动失效。 */
+export const TABLE_FORMAT = 1;
+
+/** 表 -> 缓存文本 */
+export function tableText(tb) {
+  const syms = [];
+  const idx = new Map();
+  const sym = (s) => {
+    const had = idx.get(s);
+    if (had !== undefined) return had;
+    const i = syms.length;
+    syms.push(s);
+    idx.set(s, i);
+    return i;
+  };
+  const body = [];
+  for (const st of tb.states) {
+    body.push(`i ${st.items.join(' ')}`);
+    const acts = [];
+    for (const [t, list] of st.actions) {
+      const codes = [];
+      for (const a of list) {
+        codes.push(a.kind === 'shift' ? `s${a.to}` : a.kind === 'accept' ? 'a' : `r${a.rule}`);
+      }
+      // 空的动作表要**留住**：nonassoc 同级不结合时两边都删，那一格就是"这么写非法"
+      // （见 resolveConflicts）。写成 `-`，因为 `符号号:` 后面什么都没有读回来分不清。
+      acts.push(`${sym(t)}:${codes.length === 0 ? '-' : codes.join(',')}`);
+    }
+    body.push(`a ${acts.join(' ')}`);
+    const gos = [];
+    for (const [nt, to] of st.gotos) gos.push(`${sym(nt)}:${to}`);
+    body.push(`g ${gos.join(' ')}`);
+  }
+  const conf = [`C ${tb.conflicts.length}`];
+  for (const c of tb.conflicts) conf.push(`${c.state} ${sym(c.token)} ${c.kind} ${c.actions}`);
+  // 符号表是边写边攒的，所以头与符号表最后拼
+  const out = [`glr-table ${TABLE_FORMAT} ${tb.states.length} ${syms.length}`];
+  for (const s of syms) out.push(s);
+  for (const l of body) out.push(l);
+  for (const l of conf) out.push(l);
+  return out.join('\n') + '\n';
+}
+
+/**
+ * 缓存文本 + 语法 -> 表。版本对不上（或者文本坏了）就回 null，调用方重新构表。
+ * 回出来的对象与 buildTable 的**逐字段相同**（tests/glr 那条轴拿 dumpTable 逐字节比过）。
+ */
+export function tableFromText(text, g) {
+  const lines = text.split('\n');
+  const head = lines[0].split(' ');
+  if (head[0] !== 'glr-table' || Number(head[1]) !== TABLE_FORMAT) return null;
+  const nStates = Number(head[2]);
+  const nSyms = Number(head[3]);
+  if (lines.length < 1 + nSyms + nStates * 3 + 1) return null;
+  const syms = [];
+  for (let i = 0; i < nSyms; i++) syms.push(lines[1 + i]);
+  const a = augment(g);
+  const states = [];
+  let p = 1 + nSyms;
+  for (let i = 0; i < nStates; i++) {
+    const items = [];
+    const itl = lines[p].split(' ');
+    for (let k = 1; k < itl.length; k++) if (itl[k] !== '') items.push(itl[k]);
+    const actions = new Map();
+    const al = lines[p + 1].split(' ');
+    for (let k = 1; k < al.length; k++) {
+      if (al[k] === '') continue;
+      const parts = al[k].split(':');
+      const list = [];
+      if (parts[1] !== '-') {
+        for (const code of parts[1].split(',')) {
+          if (code === 'a') list.push({ kind: 'accept' });
+          else if (code.startsWith('s')) list.push({ kind: 'shift', to: Number(code.slice(1)) });
+          else list.push({ kind: 'reduce', rule: Number(code.slice(1)) });
+        }
+      }
+      actions.set(syms[Number(parts[0])], list);
+    }
+    const gotos = new Map();
+    const gl = lines[p + 2].split(' ');
+    for (let k = 1; k < gl.length; k++) {
+      if (gl[k] === '') continue;
+      const parts = gl[k].split(':');
+      gotos.set(syms[Number(parts[0])], Number(parts[1]));
+    }
+    states.push({ items, actions, gotos });
+    p += 3;
+  }
+  const cl = lines[p].split(' ');
+  if (cl[0] !== 'C') return null;
+  const nc = Number(cl[1]);
+  const conflicts = [];
+  for (let i = 0; i < nc; i++) {
+    const c = lines[p + 1 + i].split(' ');
+    conflicts.push({
+      state: Number(c[0]), token: syms[Number(c[1])], kind: c[2], actions: Number(c[3]),
+    });
+  }
+  return {
+    grammar: g, states, rules: a.rules, acceptRule: a.acceptRule, conflicts,
+    first: a.ns.first, follow: a.follow, nullable: a.ns.nullable,
+  };
 }

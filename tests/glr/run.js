@@ -12,6 +12,8 @@
 //      `if a then if b then x else y` 必须撞上 bison 的那条硬边界。
 //   4. **真实语料一份不落**：asymptote 自带的 84 个 .asy 模块全都要出且只出一棵树。
 //      前三条测的是机制，这一条测的是覆盖 —— 自己挑的片段挑不到的地方就是漏的地方。
+//   5. **缓存与构表等价**：构表是这条路上唯一的慢步（asy 那份 780ms），结果按语法文本
+//      内容寻址缓存在 tmp 里。跑两遍，第二遍必须命中缓存，且两遍的表逐字节相同。
 //
 // 每条都走 CLI（`omni glr-table` / `omni glr`），不是直接调库函数：这样同一条命令
 // 自举链里能让原生编译器再跑一遍，封闭 ABI 违规才有地方被抓住。
@@ -106,6 +108,34 @@ function firstDiff(want, got) {
     return `    line ${i + 1}\n    want: ${JSON.stringify(a[i] ?? '<eof>')}\n    got:  ${JSON.stringify(b[i] ?? '<eof>')}`;
   }
   return '    (the files differ only in trailing bytes)';
+}
+
+// -------------------------------------------------- 1b. 构表结果的缓存要等价
+//
+// 构表是这条路上唯一的慢步（asy 那份 780ms），所以结果按语法文本内容寻址缓存在
+// tmp 里（cli.js loadGrammar）。这一节盯的是**缓存路径与构表路径给同一张表**：
+// 跑两遍 `glr-table`，第二遍必须报 cache hit，而且两遍的表逐字节相同。
+// 上面那一节其实已经间接管着这件事（快照是构表出来的，缓存错了就对不上），
+// 这一节把它变成"当场、明确"的一条 —— 缓存的坑（例如 nonassoc 留下的**空**动作格
+// 被读成一条 reduce）不该等到某个用例的分析结果变了才被发现。
+for (const file of grammars) {
+  const name = basename(file, '.grammar');
+  const gpath = gpathOf(file);
+  const a = run(['glr-table', gpath, '--brief', '--verbose']);
+  const b = run(['glr-table', gpath, '--brief', '--verbose']);
+  if (a.code !== 0 || b.code !== 0) {
+    no(`cache/${name}`, `    glr-table exit=${a.code}/${b.code}\n${a.err}${b.err}`);
+    continue;
+  }
+  if (!b.err.includes('cache hit')) {
+    no(`cache/${name}`, `    第二遍没有命中缓存 —— 那条路就没被测到\n${b.err}`);
+    continue;
+  }
+  if (a.out !== b.out) {
+    no(`cache/${name}`, `    缓存读回来的表与构出来的不同\n${firstDiff(a.out, b.out)}`);
+    continue;
+  }
+  ok(`cache/${name} [缓存命中，与构表逐字节相同]`);
 }
 
 // ------------------------------------------------------------ 2. 分析：每行一条 case

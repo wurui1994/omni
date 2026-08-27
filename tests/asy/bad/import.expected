@@ -1,1 +1,1 @@
-asy 前端第一刀还不支持：语句 'import'
+asy 前端第一刀还不支持：模块 'graph' 找不到 —— 当前目录下没有 graph.asy（asy 的模块是按 CWD 找的，量过；标准库那些 plain/graph/… 这一刀还没有）

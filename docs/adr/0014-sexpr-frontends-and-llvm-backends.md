@@ -178,8 +178,21 @@ WAT 前端证的是「s-expr 能当前端汇聚点」，但它降的是**别人�
 
 CLI 两条命令：`omni glr-table F.grammar [--brief]`、`omni glr F.grammar F`。
 
-**第八条测试轴** `tests/glr/`：表的快照、每条输入的树、以及两道方向相反的门槛 ——
-`lookahead.grammar`（SLR 不够但语言不歧义）**必须**留下冲突且两支输入都要过，
+**构表结果按内容寻址缓存**（`cli.js loadGrammar` + `table.js tableText/tableFromText`）。
+起因是量出来的：`emit-asy` 一次 1.2s，其中 **780ms 全在项集族那一遍**（asy 那份语法 433 个
+状态；FIRST/FOLLOW 4ms、归约 6ms、冲突 5ms、读语法 20ms）。而这条路是「一条用例一个进程」，
+`tests/asy` 一轴上百次进程 —— 不缓存就是白烧几分钟。键 = 语法文本 + 格式版本，改语法或改
+序列化形状都自动失效；缓存里只有**状态表与剩下的冲突清单**，产生式表与 FIRST/FOLLOW 每次
+现算（5ms），所以文件里没有一处引用语法树节点 —— 不必序列化 span 与动作模板。格式是按行的
+整数（符号名各占一行，别处一律是下标）而不是 JSON：`JSON.parse` 不在封闭 ABI 里，`split` 在。
+写法是"先写临时文件再 rename"，几条腿并行跑时读不到半截文件。
+实测 1.195s -> 0.229s，`tests/asy` 整轴 33s。
+这里有一处**真的差点错**：nonassoc 同级不结合时那一格是**空的动作表**（"这么写非法"），
+第一版编码把空表写成了"没有内容"，读回来变成一条 reduce —— `tests/glr` 新加的那一节
+（跑两遍，第二遍必须命中缓存且两遍表逐字节相同）当场把它抓住了。
+
+**第八条测试轴** `tests/glr/`：表的快照、每条输入的树、缓存与构表等价、以及两道方向相反的
+门槛 —— `lookahead.grammar`（SLR 不够但语言不歧义）**必须**留下冲突且两支输入都要过，
 `dangling.grammar`（真歧义）**必须**撞上硬边界。
 
 **自举链阶段 9** 让原生编译器自己跑一遍 `glr-table` / `glr` / 真歧义报错，三者与 C0 逐字节
@@ -248,11 +261,14 @@ bison **隐式**的选择写成**显式**的优先级声明 —— 悬垂 else�
    一并管）、
    **算符重载**（第二十三刀：`V operator +(V,V)` 降成叫 `asy__op_add` 的普通函数，
    于是重载解析那一套白捡；用户算符与内建的在同一张候选表里，同签名是替换）、
-   **文件级变量**（第二十四刀：核心方言加了 `(global 名字 类型)`，函数里读得到、改得到），
-   二十七份用例在五个执行器上与 `asy -noV` 逐字节相同。
+   **文件级变量**（第二十四刀：核心方言加了 `(global 名字 类型)`，函数里读得到、改得到）、
+   **模块**（第二十五刀：`import` / `access` / `access … as` / `from … access` ——
+   一份文件一个单元，模块体成为 `asy__init<k>`，调用点就在 import 那一行），
+   二十八份用例在五个执行器上与 `asy -noV` 逐字节相同。
    **还没做**的是给切片赋值、多维数组、复数幂、triple、`operator cast`、
    字符串的 `reverse`/`insert`/`split`、
-   自引用字段、把方法当值取出来、struct 体里的算符、函数里用文件级的 pair/记录/数组变量，
+   自引用字段、把方法当值取出来、struct 体里的算符、函数里用文件级的 pair/记录/数组变量、
+   标准库那 84 个模块（`import graph;`）与 `unravel`/`include`/参数化模块，
    与 `operator init` 剩下的两种形态
    —— 每一条都在
    `tests/asy/bad/` 里有一份带 `ASY_NOPE` 的用例钉着，不是含糊的"待办"。
@@ -429,13 +445,15 @@ static inline C + 另写一份 IR 助手"，是两份实现；这次不重复那
 `1/3` 是实数除法而 `1#3` 是整数商、`3 == 3.0` 要提左边、`write` 的分隔符取决于第一个
 实参是不是字符串。类型是符号表的事，动作模板里没有符号表。
 
-**判分的人不是我**：`tests/asy` 的二十七份用例（算术 / 字符串 / 两种引号 / 控制流 / 函数 /
+**判分的人不是我**：`tests/asy` 的二十八份用例（算术 / 字符串 / 两种引号 / 控制流 / 函数 /
 real 的 %.15g / `? :` / 数学函数 / 数组 / pair / 切片与整数组输出 / for-each /
 字符串函数 / `pair[]` / 默认实参与命名实参 / 重载解析 / struct / struct 的 pair 字段 /
 struct 的数组字段 / struct 的记录字段 / `A[]` / struct 的方法 / 构造函数 /
-文件级 operator init / 算符重载 / 用户算符与内建算符的关系 / 文件级变量）每份都是
+文件级 operator init / 算符重载 / 用户算符与内建算符的关系 / 文件级变量 / 模块）每份都是
 「五条腿逐字节相同 == `.expected` == `asy -noV` 当场重跑」。`.expected` 本身就是真 asy 的
 输出生成的；机器上没装 asymptote 时那一节打印 skip，但 `.expected` 仍然把答案钉住。
+用例目录里 `mod_*.asy` 不是用例而是**被 import 的模块**，三节测试都在用例文件自己的目录里
+跑（cwd）—— asy 是按当前目录找模块的，量过。
 
 这一刀顺手改对了三处**先前记错或没做对的东西**，每处都是量出来才发现的：
 
@@ -490,7 +508,7 @@ struct 的数组字段 / struct 的记录字段 / `A[]` / struct 的方法 / 构
 **第四节 `strict/`：asy 自己就不收的，我们也不能收。** 这一节是数组这一刀顺手加的，起因是
 一次测量：`int b=1; b++;` 在真 asy 上直接编不过（"postfix expressions are not allowed"），
 而我们的降级器照收。这类漏洞**不会让任何用例输出不同** —— 它只让"等价"这两个字变虚。
-所以 `strict/` 里的用例要求：我们拒，且装了 asy 的话**真 asy 也拒**。现在有十四条：后缀
+所以 `strict/` 里的用例要求：我们拒，且装了 asy 的话**真 asy 也拒**。现在有十五条：后缀
 `++`、pair 上的 `<`、pair 上的 `%`（这两条 asy 报的是 "no matching function
 'operator <(pair, pair)'"）、`length(int[])`（`length` 只有 string 和 pair 两个重载）、
 按不存在的形参名给命名实参（asy 报 "cannot call 'void f(int a)' with parameter 'int b'"）、
@@ -503,7 +521,9 @@ ambiguous"）、**引用后面才声明的函数**（asy 报 "no matching variab
 **声明 `operator &&`**（asy 那边是 syntax error）、
 **函数里引用后面才声明的文件级变量**（asy 报 "no matching variable of name 'g'" ——
 第二十四刀加的，与"引用后面才声明的函数"、"在 struct 声明前拿它当类型"是同一条规矩的
-第三处）——
+第三处）、
+**`access m;` 之后裸用模块里的名字**（asy 报 "no matching variable 'mv'" ——
+第二十五刀加的：`access` 只给限定名，只有 `import` 才把名字铺成裸的）——
 中间那两条是重载这一刀加的，第二条尤其要紧：我们是两遍降级，不专门裁一刀就会比 asy
 多接受一门语言。`write(struct)` 与 `z.x = 5` 是 struct 与 pair 字段那两刀加的，
 它们守的不只是"拒"：
@@ -1181,6 +1201,41 @@ asy 那边因此只收 int/real/bool/string 的文件级变量；pair/记录/数
 （量过 asy 报 "no matching variable of name 'g'"，`strict/global-fwd` 钉着）；
 同一个名字声明两次是**两个变量**（量过），所以每份声明各出一个符号
 `asy__g<序号>_<名字>`。
+
+### 已落地（支持面第十四阶段：模块，门槛 2 第二十五刀）
+
+**核心方言零改动。** 模块整个是前端的事：一份 `.asy` 文件是一个**单元**，出来的还是
+一份 `(module …)`，六条腿一条都不知道有过 import。
+
+形状四件：
+
+- **符号前缀**。单元 k 的函数名前面挂 `asy__m<k>_`，主文件那份前缀是**空串** ——
+  于是不含 import 的程序降出来的文本一字不变，老用例的 `.expected` 与「同一份输入两次
+  编译逐字节相同」都不受这一刀影响。struct 名不挂前缀：class 名、方法名
+  （`asy__m_<记录>_<方法>`）、构造函数名都按记录名拼，所以记录名是**全局共享**的一个
+  命名空间，两个模块里同名的 struct 这一刀拒（`bad/mod-dup.asy`）。
+- **模块体成为一个函数**。单元 k 的顶层语句降成 `(fn asy__init<k> () void …)`，
+  调用点就在**导入那一行**的语句流里 —— 于是"体在那一行跑"是照搬的。开头两句是
+  `(global asy__ran<k> bool)` 门闩：量过 `import m; import m;` 只跑一遍，而同一个模块
+  被两个模块导入时调用点有两处，所以这道闩得在运行期。
+- **导入 = 并表**。模块的候选表/全局表/记录表并进导入方，可见位置记成**那条 import 的
+  下标**。于是三条量过的语义全是白捡的：顺序解析（import 写在后面时前面看不见）、
+  本地声明遮蔽、以及**传递性**（并的是模块自己的表，那张表里已经含着它导入的东西）。
+  `access` 不并表只记别名（限定名走 `m.x` / `m.f(…)`），`from m access f;` 只并指名的
+  那几个。方法不并：它们跟着 struct 走（按声明那个单元的表查），`import` 一个 struct
+  就连方法带构造函数一起有。
+- **找模块按 CWD**。量出来的：`asy -noV sub/user.asy` 里的 `import mm;` 找**不到**
+  `sub/mm.asy`。所以 `tests/asy` 三节都改在用例文件自己的目录里跑，判分的真 asy 与我们
+  站在同一个目录里；用例目录里 `mod_*.asy` 不是用例，是被导入的模块。
+
+门外的（各有一份 `bad/`）：标准库那 84 个模块（`import graph;` —— 那一摞的底是绘图层）、
+`unravel`、`include`、参数化模块（`from collections.map(K=int) access …`）、
+`from m access *`、限定名当赋值目标（`m.x = 3`；裸名字那条通的）。
+还有一条是我们语法表的窄处：`import sub.mm;`（带点的模块名）—— camp.y 的 `stridpair`
+只有单个 ID 或字符串，asy 靠词法阶段的特殊处理接住带点的路径，我们的表还没有。
+
+`strict/` 多了一条：`access m;` 之后**裸用**模块里的名字要拒（量过 asy 报
+"no matching variable 'mv'"）—— 只有 `import` 才把名字铺成裸的。
 
 ## 决策 4：调用 LLVM 需要 extern-C FFI —— 这是新要求，也是 dogfood
 

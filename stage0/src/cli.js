@@ -22,7 +22,7 @@ import { readSexpr } from './sexpr/read.js';
 import { lowerCoreSexpr } from './sexpr/lower.js';
 import { printSexpr } from './sexpr/print.js';
 import { readGrammar } from './glr/grammar.js';
-import { buildTable, dumpTable } from './glr/table.js';
+import { buildTable, dumpTable, tableText, tableFromText, TABLE_FORMAT } from './glr/table.js';
 import { lexText } from './glr/lex.js';
 import { glrParse } from './glr/driver.js';
 import { lowerToMir } from './mir/from_oir.js';
@@ -115,18 +115,35 @@ function compile(path, argv = []) {
  * asymptote -> 核心方言 -> OIR（ADR-0014 第 2 道门槛）。
  * 语法那一半是数据（`frontend-asy/asy.grammar`，从 camp.y 照原样转写）；这里只做
  * 类型定向的那一半，出来的仍然是核心方言文本 —— 于是六条腿一条都不知道 asy 存在。
+ *
+ * 模块（第二十五刀）：文件 IO 与语法表留在这里，降级器只拿一个 `load(名字)`。
+ * 找法是量出来的 —— asy 是按**当前目录**找的，不是按引它的那个文件所在的目录
+ * （量过：`asy -noV sub/user.asy` 里的 `import mm;` 找不到 sub/mm.asy）。
  */
 function asyText(path) {
   const gpath = join(installDir(), '..', 'frontend-asy', 'asy.grammar');
   if (!exists(gpath)) throw new OmniError(`找不到 asy 语法文件：${gpath}`);
   const tb = loadGrammar(gpath);
   const diags = new Diagnostics();
+  const parse = (p) => {
+    const toks = lexText(tb.grammar.lex, new SourceFile(p, readText(p)), diags);
+    diags.throwIfErrors();
+    const t = glrParse(tb, toks, diags);
+    diags.throwIfErrors();
+    return t;
+  };
+  const load = (name) => {
+    const p = join(cwd(), `${name}.asy`);
+    if (!exists(p)) return null;
+    vStep(`asy module    ${name} -> ${p}`);
+    return parse(p);
+  };
   const toks = lexText(tb.grammar.lex, new SourceFile(path, readText(path)), diags);
   diags.throwIfErrors();
   vStep(`asy lexer      ${path} -> ${toks.length} tokens`);
   const tree = glrParse(tb, toks, diags);
   diags.throwIfErrors();
-  const text = lowerAsy(tree, diags);
+  const text = lowerAsy(tree, diags, { path, load });
   diags.throwIfErrors();
   vStep(`asy front end  ${path} -> 核心方言 ${text.length} bytes`);
   return text;
@@ -638,13 +655,36 @@ function countNodes(n) {
   return sum;
 }
 
-/** 读一份语法文件并构表。诊断在这里就抛掉 —— 语法写错了不该拖到分析期 */
+/**
+ * 读一份语法文件并构表。诊断在这里就抛掉 —— 语法写错了不该拖到分析期。
+ *
+ * **构表结果按内容寻址缓存**：量过 asy 那份语法的构表要 780ms（433 个状态，全在项集族
+ * 那一遍），而这条路是「一条 case 一个进程」——tests/asy 一轴上百次进程，不缓存就是白烧
+ * 几分钟。键 = 语法文本 + 格式版本，所以改语法、改序列化形状都自动失效；缓存里只有状态表
+ * 与冲突清单，产生式表与 FIRST/FOLLOW 每次现算（5ms，见 table.js 的 augment）。
+ * 写法是"先写临时文件再 rename"：几条腿并行跑时不会读到半截文件。
+ */
 function loadGrammar(path) {
   const diags = new Diagnostics();
-  const g = readGrammar(readSexpr(new SourceFile(path, readText(path)), diags), diags);
+  const text = readText(path);
+  const g = readGrammar(readSexpr(new SourceFile(path, text), diags), diags);
   diags.throwIfErrors();
+  const dir = join(tmpDir(), `omni-glr-${hash16(`${TABLE_FORMAT}|${text}`)}`);
+  const cpath = join(dir, 'table.txt');
+  if (exists(cpath)) {
+    const hit = tableFromText(readText(cpath), g);
+    if (hit !== null) {
+      vStep(`grammar ${g.name}  ${hit.states.length} states, cache hit ${cpath}`);
+      return hit;
+    }
+  }
   const tb = buildTable(g);
   vStep(`grammar ${g.name}  ${tb.states.length} states, ${tb.conflicts.length} conflicts left to GLR`);
+  mkdirAll(dir);
+  const tmp = join(mkdTemp(join(tmpDir(), 'omni-glr-w-')), 'table.txt');
+  writeText(tmp, tableText(tb));
+  rename(tmp, cpath);
+  vStep(`grammar ${g.name}  table cached at ${cpath}`);
   return tb;
 }
 

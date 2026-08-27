@@ -10,7 +10,9 @@
 //      比对 —— 期望值不是我写的，是量出来的。没装就跳过这一节并打印 skip（这条轴仍然
 //      靠 .expected 把答案钉住，不会因为环境缺工具就什么都不查）。
 //   3. **bad/ 里的必须被拒绝，且拒在正确的理由上**。这一刀故意没做的东西（
-//      triple、复数幂、`operator cast`、模块、隐式缩放、超越函数、给切片赋值、
+//      triple、复数幂、`operator cast`、**标准库**模块（`import graph;` —— 用户自己写的
+//      模块第二十五刀通了）、`unravel`/`include`/参数化模块、两个模块里同名的 struct、
+//      隐式缩放、超越函数、给切片赋值、
 //      多维数组、循环条件里的 `? :`、字符串的 `reverse`/`insert`/`split`、
 //      函数里用文件级的 pair/记录/数组变量（标量的那些第二十四刀通了）、
 //      struct 的三条边界 —— 自引用字段、把方法当值取出来、`operator init` 的另两种
@@ -21,8 +23,8 @@
 //      引用后面才声明的函数、`write` 一个 struct、给 pair 的分量赋值、
 //      没有 `void operator init` 的 struct 上写 `A(…)`、在 struct 声明之前拿它当类型、
 //      只定义了 `operator <` 就写 `<=`、声明 `operator &&`（asy 那边是 syntax error）、
-//      函数里引用后面才声明的文件级变量 ——
-//      后七条是第十四、十五、二十一、二十三、二十四刀加的）：
+//      函数里引用后面才声明的文件级变量、`access m;` 之后裸用模块里的名字 ——
+//      后八条是第十四、十五、二十一、二十三、二十四、二十五刀加的）：
 //      我们要拒，而且装了 asy 的话真 asy 也要拒。这一节盯的是"比 asy 多接受一门语言"
 //      ——那种漏洞不会让任何用例输出不同，只会让"等价"两个字变虚。
 //
@@ -42,8 +44,8 @@ const root = join(here, '../..');
 const cli = join(root, 'stage0', 'src', 'cli.js');
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 
-const cmd = (args) => {
-  const r = spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8' });
+const cmd = (args, cwd) => {
+  const r = spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8', cwd });
   return { out: r.stdout ?? '', err: r.stderr ?? '', code: r.status ?? 1 };
 };
 const read = (p) => {
@@ -60,6 +62,14 @@ const failures = [];
 const ok = (msg) => { pass++; process.stdout.write(`  ok   ${msg}\n`); };
 const no = (name, why) => { fail++; failures.push(`${name}\n${why}`); process.stdout.write(`  FAIL ${name}\n`); };
 const want = (f) => (!filters.length || filters.some((x) => f.includes(x)));
+
+/**
+ * 用例目录里那些 `mod_*.asy` 不是用例，是**被 import 的模块**（第二十五刀）。
+ * 而三节测试都在**用例文件自己的目录里**跑（cwd = 那个目录）：asy 的模块是按 CWD 找的
+ * （量过：`asy -noV sub/user.asy` 里的 `import mm;` 找不到 sub/mm.asy），所以判分的那个
+ * asy 与我们必须站在同一个目录里，不然这一条根本没法比。
+ */
+const isCase = (f) => f.endsWith('.asy') && !f.startsWith('mod_');
 
 /** 五条腿，跟 tests/sexpr 那条轴同一份名单 —— 那边喂 .sx，这边喂 .asy */
 const LEGS = [
@@ -84,17 +94,18 @@ const asyBin = findAsy();
 
 // ------------------------------------------------- 1+2. cases/：五方一致 + 真 asy 判分
 
-for (const f of readdirSync(join(here, 'cases')).filter((x) => x.endsWith('.asy')).sort()) {
+for (const f of readdirSync(join(here, 'cases')).filter(isCase).sort()) {
   if (!want(f)) continue;
   const name = basename(f, '.asy');
-  const path = join(here, 'cases', f);
+  const dir = join(here, 'cases');
+  const path = join(dir, f);
   const expected = read(join(here, 'cases', `${name}.expected`));
   const bad = [];
 
-  const first = cmd(LEGS[0].args(path));
+  const first = cmd(LEGS[0].args(path), dir);
   if (first.code !== 0) bad.push(`    ${LEGS[0].tag} exit=${first.code}\n${first.err}`);
   for (const leg of LEGS.slice(1)) {
-    const r = cmd(leg.args(path));
+    const r = cmd(leg.args(path), dir);
     if (r.code !== 0) { bad.push(`    ${leg.tag} exit=${r.code}\n${r.err}`); continue; }
     if (r.out !== first.out) {
       bad.push(`    ${leg.tag} 与 ${LEGS[0].tag} 不同\n      ${LEGS[0].tag}: ${JSON.stringify(first.out)}\n      ${leg.tag}: ${JSON.stringify(r.out)}`);
@@ -107,7 +118,7 @@ for (const f of readdirSync(join(here, 'cases')).filter((x) => x.endsWith('.asy'
 
   let judged = '';
   if (asyBin !== null) {
-    const r = spawnSync(asyBin, ['-noV', path], { encoding: 'utf8' });
+    const r = spawnSync(asyBin, ['-noV', path], { encoding: 'utf8', cwd: dir });
     const real = (r.stdout ?? '') + (r.stderr ?? '');
     if ((r.status ?? 1) !== 0) bad.push(`    真 asy 自己就跑不过 exit=${r.status}\n${real}`);
     else if (real !== first.out) {
@@ -125,7 +136,7 @@ if (asyBin === null) {
 
 // ------------------------------------------------- 3. bad/：拒绝，理由正确，且带 ASY_NOPE
 
-for (const f of readdirSync(join(here, 'bad')).filter((x) => x.endsWith('.asy')).sort()) {
+for (const f of readdirSync(join(here, 'bad')).filter(isCase).sort()) {
   if (!want(f)) continue;
   const name = basename(f, '.asy');
   const exp = read(join(here, 'bad', `${name}.expected`));
@@ -135,7 +146,7 @@ for (const f of readdirSync(join(here, 'bad')).filter((x) => x.endsWith('.asy'))
     no(`bad/${name}`, `    期望值没带 "${ASY_NOPE}" —— 这一节收的是"刻意还没做"，不是"写错了"`);
     continue;
   }
-  const r = cmd(['run', join(here, 'bad', f)]);
+  const r = cmd(['run', join(here, 'bad', f)], join(here, 'bad'));
   if (r.code === 0) { no(`bad/${name}`, '    居然通过了 —— 这条边界是刻意划的'); continue; }
   if (!r.err.includes(msg)) {
     no(`bad/${name}`, `    拒的理由不对\n      want: ${JSON.stringify(msg)}\n      got:  ${JSON.stringify(r.err.split('\n')[0])}`);
@@ -151,14 +162,15 @@ for (const f of readdirSync(join(here, 'bad')).filter((x) => x.endsWith('.asy'))
 // 判分的人还是真 asy：装了就要求它**也**失败。这一节盯的是"我们比 asy 多接受了一门语言"
 // 这类漏洞 —— 那种漏洞不会让任何用例输出不同，只会让人以为等价。
 
-for (const f of readdirSync(join(here, 'strict')).filter((x) => x.endsWith('.asy')).sort()) {
+for (const f of readdirSync(join(here, 'strict')).filter(isCase).sort()) {
   if (!want(f)) continue;
   const name = basename(f, '.asy');
-  const p = join(here, 'strict', f);
+  const dir = join(here, 'strict');
+  const p = join(dir, f);
   const exp = read(join(here, 'strict', `${name}.expected`));
   if (exp === null) { no(`strict/${name}`, `    缺 ${name}.expected`); continue; }
   const msg = exp.trim();
-  const r = cmd(['run', p]);
+  const r = cmd(['run', p], dir);
   if (r.code === 0) { no(`strict/${name}`, '    我们收下了，而 asy 不收 —— 那就是多接受了一门语言'); continue; }
   if (!r.err.includes(msg)) {
     no(`strict/${name}`, `    拒的理由不对\n      want: ${JSON.stringify(msg)}\n      got:  ${JSON.stringify(r.err.split('\n')[0])}`);
@@ -166,7 +178,7 @@ for (const f of readdirSync(join(here, 'strict')).filter((x) => x.endsWith('.asy
   }
   let judged = '';
   if (asyBin !== null) {
-    const a = spawnSync(asyBin, ['-noV', p], { encoding: 'utf8' });
+    const a = spawnSync(asyBin, ['-noV', p], { encoding: 'utf8', cwd: dir });
     if ((a.status ?? 1) === 0) { no(`strict/${name}`, '    真 asy 居然收了 —— 这条边界划错了'); continue; }
     judged = '；真 asy 也拒';
   }
