@@ -2788,6 +2788,19 @@ plain 现在停在 `collections/iter.asy:42` 的 `autounravel` 一个 vardec。
 `tests/sexpr` 与 `tests/run.js` 没跑 —— 改的是 asy 的词法表与 `frontend-asy/`，
 核心方言的语法、OIR、后端都没动。
 
+### 无名形参：补一个**按位置定死**的名字
+
+`graph.asy:271` 的 `pair zero(real) {return 0;}`、`math.asy:211` 的
+`sequence(new real(int) {return 0;}, n)`：形参只有类型没有名字（语法上是
+`(formal explicit 类型)`，三格；带名字那两条是四格五格）。这个槽在体里没法提，
+所以降级时补个名字就完了。
+
+要紧的是名字**按位置定死**（`asy__anon${i}`）而不是用递增计数器：形参表在声明遍与
+正文遍各求一次，两遍拼出来的名字必须一样，用 `L.tmp++` 就会错开一格。
+
+新增 `tests/asy/cases/57-anon-formal.asy`（文件级函数、匿名函数、混在有名形参中间、
+函数类型形参里的无名形参）。`import graph;` **186 -> 185**；`import plain;` 还是 1。
+
 ## 后果与代价
 
 

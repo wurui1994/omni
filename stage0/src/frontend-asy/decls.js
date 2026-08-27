@@ -266,8 +266,20 @@ export function asyFormals(L, node) {
   }
   const list = fixed === null ? [] : L.flat(fixed, 'formals');
   if (restF !== null) list.push(restF);
-  for (const f of list) {
+  for (let fi = 0; fi < list.length; fi++) {
+    const f = list[fi];
     if (!isList(f) || head(f) !== 'formal') return L.nope(f, '关键字形参或可变形参');
+    // 无名形参（`pair zero(real) {return 0;}`，graph.asy:271；`new real(int){return 0;}`，
+    // math.asy:211）：语法上是 `(formal explicit 类型)`，只有三格。这个槽在体里没法提，
+    // 所以补一个**按位置定死**的名字就够了 —— 定死是要紧的：声明遍与正文遍各求一次形参表，
+    // 两遍拼出来的名字必须一样（用递增计数器就会错开）。`asy__` 是保留前缀。
+    if (f.items.length === 3) {
+      const at = L.type(f.items[2], '形参');
+      if (at === null) return null;
+      const aex = isList(f.items[1]) && head(f.items[1]) === 'explicit';
+      out.push({ name: `asy__anon${fi}`, type: at, exp: aex, def: null });
+      continue;
+    }
     if (f.items.length !== 4 && f.items.length !== 5) return L.nope(f, '无名形参');
     const ex = f.items[1];
     // `explicit T x`（第二十六刀）：这个槽**只收类型一模一样的实参**。量过四条：
