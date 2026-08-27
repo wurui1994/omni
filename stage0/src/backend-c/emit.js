@@ -662,6 +662,9 @@ class CEmitter {
       // VecSplat 表达式同一个函数，"字段的零"不另开一条路。noteVec 是必需的：
       // 一个形状只作为字段类型出现过时，vecLines 那边没别的地方会记下它。
       case 'vec': return `${cTypeName(this.noteVec(t))}_splat(${this.zeroExpr(t.elem)})`;
+      // 数组（第十六刀：结构体的数组字段）。长度 0 的空数组，不是 NULL —— 与
+      // ArrNew 走同一组符号（标量元素是运行时那四份，向量元素多一层 static inline）。
+      case 'arr': return `${cArrOps(this.noteVec(t))}_new(INT64_C(0), ${this.zeroExpr(t.elem)})`;
       default: throw new Error(`c.zero: ${t.k}`);
     }
   }

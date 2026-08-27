@@ -1,1 +1,1 @@
-字段 Seg.a：这一刀的字段只能是 int / real / bool / string 或 (vec T N)，这里是 Point
+字段 Seg.a：这一刀的字段只能是 int / real / bool / string、(vec T N) 或 (arr T)，这里是 Point

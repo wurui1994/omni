@@ -647,7 +647,7 @@ class LlvmEmitter {
       this.line(`  ${g} = getelementptr ${ty.name}, ptr ${dst}, i32 0, i32 ${k}`);
       const lt = this.fieldTy(fd.type, `${ty.plain}.${fd.name}`);
       if (op === OP.NEW) {
-        this.line(`  store ${lt} ${this.fieldZero(fd.type, `${ty.plain}.${fd.name}`)}, ptr ${g}`);
+        this.line(`  store ${lt} ${this.fieldInit(fd.type, `${ty.plain}.${fd.name}`)}, ptr ${g}`);
       } else {
         const s = this.fresh();
         const v = this.fresh();
@@ -683,7 +683,8 @@ class LlvmEmitter {
     throw new OmniError(`llvm: ${ty.plain} 没有字段 ${acc.field}`);
   }
 
-  /** 字段的 LLVM 类型。四种标量加向量（第十五刀），表外的报错（阶段边界，与 ty() 同一条规矩）。 */
+  /** 字段的 LLVM 类型。四种标量、向量（第十五刀）、数组（第十六刀，就是个不透明指针），
+   *  表外的报错（阶段边界，与 ty() 同一条规矩）。 */
   fieldTy(t, what) {
     if (t.k === 'int') return 'i64';
     if (t.k === 'real') return 'double';
@@ -692,7 +693,40 @@ class LlvmEmitter {
     // 向量字段就是原生的 `<N x T>` —— 与这条腿别处的向量表示同一个（见 ty()）。
     // 对齐不用操心：`omni_ll_alloc` 后面就是 malloc，而 malloc 保证的对齐够 16 字节。
     if (t.k === 'vec') return `<${t.lanes} x ${this.fieldTy(t.elem, what)}>`;
+    // 数组字段存的是**句柄**（一个指针）。所以 COPY 那条逐字段 load/store 拷出来的
+    // 两个结构体共用同一条数组 —— 引用语义，与"数组当形参"是同一条规则。
+    if (t.k === 'arr') return 'ptr';
     throw new OmniError(`${NOPE}结构体字段的类型 ${t.k}：${what}`);
+  }
+
+  /**
+   * 字段的**初始值**。标量与向量是常量（fieldZero），数组不是：它的零值是一次运行时
+   * 调用 `omni_arr_*_new(0, 元素零值)`，所以这个函数可以往当前基本块里发指令，
+   * 回来的是那个值的名字。NEW 之外没人用它 —— COPY 走的是 load/store。
+   */
+  fieldInit(t, what) {
+    if (t.k !== 'arr') return this.fieldZero(t, what);
+    const dst = this.fresh();
+    if (t.elem.k === 'vec') {
+      // 向量元素走运行时那份按字节的 blob 实现。长度 0 时它**不会**碰零值那个指针
+      // （omni_arr.c 里那个 memcpy 循环跑 n 次），所以这里传 null，不为它开一块 alloca ——
+      // 开的话还要在入口块预扫一遍 NEW，而这条路上零值本来就没人读。
+      this.needArrBlob = true;
+      this.line(`  ${dst} = call ptr @omni_arr_blob_new(i64 0, i64 ${t.elem.lanes * 8}, ptr null)`);
+      return dst;
+    }
+    const e = this.noteArrElem(this.fieldElem(t.elem, what));
+    this.line(`  ${dst} = call ptr @omni_arr_${e.suffix}_new(i64 0, ${e.p} ${this.fieldZero(t.elem, what)})`);
+    return dst;
+  }
+
+  /** 数组字段的元素类型：OIR 的类型 -> MIR 的 8 位类型码（ARR_ELEMS 认的就是这个码） */
+  fieldElem(t, what) {
+    if (t.k === 'int') return T_I64;
+    if (t.k === 'real') return T_F64;
+    if (t.k === 'bool') return T_BOOL;
+    if (t.k === 'string') return T_STR;
+    throw new OmniError(`${NOPE}数组字段的元素类型 ${t.k}：${what}`);
   }
 
   /** 字段的零值。字符串走 strConst('')，与常量池里那份空串**同一条路** —— 不另造一个

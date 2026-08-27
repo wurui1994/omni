@@ -182,6 +182,9 @@ class JsEmitter {
       // 向量（第十五刀：结构体的向量字段）。`$vsplat` 就是 VecSplat 那条路发的东西，
       // 所以"字段的零"与"裸的零向量"在这条腿上是同一个表示。
       case 'vec': return `$vsplat(${this.zero(t.elem)}, ${t.lanes})`;
+      // 数组（第十六刀：结构体的数组字段）。空数组，不是 null —— `$anew` 就是
+      // ArrNew 那条路发的东西，元素零值当实参传进去。
+      case 'arr': return `$anew(0n, ${this.zero(t.elem)})`;
       default: throw new Error(`zero: ${t.k}`);
     }
   }

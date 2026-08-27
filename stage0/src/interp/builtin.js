@@ -455,6 +455,9 @@ export function zeroOf(t, I) {
       for (let i = 0; i < t.lanes; i++) out.push(zeroOf(t.elem, I));
       return out;
     }
+    // 数组：**空数组**，不是空引用（与 hir/types.js 的 ArrNew 零值同一条规矩：
+    // alen/apush 在任何数组上都得能用）。第十六刀的结构体数组字段走这里。
+    case 'arr': return [];
     case 'dict': return new Map();
     case 'set': return new Set();
     case 'struct': {

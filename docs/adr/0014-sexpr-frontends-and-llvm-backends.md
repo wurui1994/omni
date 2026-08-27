@@ -237,11 +237,11 @@ bison **隐式**的选择写成**显式**的优先级声明 —— 悬垂 else�
    **`pair[]`**（数组那一整套操作在 pair 上一条不少）、**默认实参与命名实参**、
    **重载解析**（同型优先、转换算分、并列即歧义、候选按声明顺序可见）、
    **struct**（引用语义、隐式 `operator init`、字段默认值每次构造重求、`== !=` 比身份）、
-   **pair 字段**（第十五刀：核心方言的类字段收 `(vec T N)`，pair 就是 `(vec real 2)`），
-   十八份用例在五个执行器上与 `asy -noV` 逐字节相同。
+   **pair 字段与数组字段**（第十五、十六刀：核心方言的类字段收 `(vec T N)` 与 `(arr T)`），
+   十九份用例在五个执行器上与 `asy -noV` 逐字节相同。
    **还没做**的是给切片赋值、多维数组、复数幂、triple、
    用户自定义的 `operator init`、算符重载、字符串的 `reverse`/`insert`/`split`、
-   struct 的数组字段与成员函数 —— 每一条都在
+   struct 套 struct 与成员函数 —— 每一条都在
    `tests/asy/bad/` 里有一份带 `ASY_NOPE` 的用例钉着，不是含糊的"待办"。
    超越函数（exp/log/trig）是**另一回事**：不是没做，是量过 libm 与 V8 在最后一位就分叉，
    收进来这条轴必然有一天变红，所以按边界拒掉（`tests/asy/bad/sin.asy`；pair 上的
@@ -415,9 +415,10 @@ static inline C + 另写一份 IR 助手"，是两份实现；这次不重复那
 `1/3` 是实数除法而 `1#3` 是整数商、`3 == 3.0` 要提左边、`write` 的分隔符取决于第一个
 实参是不是字符串。类型是符号表的事，动作模板里没有符号表。
 
-**判分的人不是我**：`tests/asy` 的十八份用例（算术 / 字符串 / 两种引号 / 控制流 / 函数 /
+**判分的人不是我**：`tests/asy` 的十九份用例（算术 / 字符串 / 两种引号 / 控制流 / 函数 /
 real 的 %.15g / `? :` / 数学函数 / 数组 / pair / 切片与整数组输出 / for-each /
-字符串函数 / `pair[]` / 默认实参与命名实参 / 重载解析 / struct / struct 的 pair 字段）每份都是
+字符串函数 / `pair[]` / 默认实参与命名实参 / 重载解析 / struct / struct 的 pair 字段 /
+struct 的数组字段）每份都是
 「五条腿逐字节相同 == `.expected` == `asy -noV` 当场重跑」。`.expected` 本身就是真 asy 的
 输出生成的；机器上没装 asymptote 时那一节打印 skip，但 `.expected` 仍然把答案钉住。
 
@@ -437,12 +438,12 @@ real 的 %.15g / `? :` / 数学函数 / 数组 / pair / 切片与整数组输出
 （只算中选那支）跟着编码保住。代价写在明处：**循环条件里的 `? :` 直接报错**，因为那些
 赋值只能落在循环外面，条件就只算一次了。这条边界在 `tests/asy/bad/cond-in-loop.asy` 里。
 
-第一刀的边界都在 `tests/asy/bad/`（17 条，每条的期望值都必须以 `ASY_NOPE` 开头 ——
+第一刀的边界都在 `tests/asy/bad/`（16 条，每条的期望值都必须以 `ASY_NOPE` 开头 ——
 "还没做"和"做错了"必须能一眼分开）：triple、复数幂、算符重载、
 模块（import/access）、隐式缩放（`105cm`）、超越函数（`sin`、pair 上的 `angle` ——
 理由是上面那条 ULP 测量）、函数里读文件级变量（核心方言没有全局量）、
 循环条件里的 `? :`、给切片赋值（`a[0:2] = b`）、多维数组、
-字符串的 `reverse`/`insert`/`split`、struct 的四条（数组字段 / 嵌套 struct 字段 /
+字符串的 `reverse`/`insert`/`split`、struct 的三条（嵌套 struct 字段 /
 成员函数 / `A[]`）。
 
 **for-each 的两条语义也是量出来的**：循环变量是**复制**（体里 `x = 99` 不动数组），
@@ -864,6 +865,32 @@ asy 那一侧同一刀落地的是 **pair 字段**（`cases/18-structpair.asy`�
 反过来一条是**对齐**：pair 的分量是只读的虚字段（asy 报 "virtual field is read-only"），
 所以 `a.p.x = 5` 要拒，且理由不能带 `ASY_NOPE`（那是"还没做"的意思）——
 `tests/asy/strict/pair-field-set` 钉着它。
+
+### 已落地（支持面第六阶段：数组字段，门槛 2 第十六刀）
+
+字段再放宽一格：`(arr T)`。与向量字段正好相反，数组字段是**引用语义** —— 复制结构体
+搬的是句柄，两个副本共用同一条数组。这一条五条腿是**白捡**的，因为每条腿的"拷一个
+结构体"本来就是按字段类型分派的：解释器/JS 的 `copyOf` 对 `arr` 原样返回、C 是结构体
+赋值拷指针、MIR 的 `OP.COPY` 走同一个 `copyOf`、LLVM 是逐字段 load/store 一个 `ptr`。
+
+LLVM 那条腿多的是**一件真正不同的事**：数组的零值不是常量。所以 `fieldZero` 之外多了
+一个 `fieldInit` —— 它可以往当前基本块里发指令，数组字段那一路发的是
+`call ptr @omni_arr_<后缀>_new(i64 0, <元素零值>)`（向量元素走 blob 那份：
+`omni_arr_blob_new(i64 0, i64 元素字节数, ptr null)`）。传 `null` 不是偷懒：
+`omni_arr.c` 里那个 memcpy 循环跑 n 次，长度 0 时一次也不跑，所以零值那个指针没人读 ——
+这句契约现在明写在 `omni_arr_blob_new` 的定义上方。不这样做的话，这条路要为一个
+没人读的零值在入口块预扫一遍 `NEW` 再开 alloca。
+
+asy 那一侧落地的是 `struct S { int[] xs; pair[] pts; }`（`cases/19-structarr.asy`，与
+`asy -noV` 逐字节相同）。字段上那一整套数组操作 —— `push`/`pop`/`.length`/下标读写/
+复合赋值/切片/for-each/`write` 整条数组 —— 与裸数组走同一条路，因为 `(fld …)` 出来的
+就是那个句柄；第十五刀的 `dotQual` 递归正好把 `a.xs.push(…)`、`a.xs.length` 这些
+"三层的点"也一并接上了。量到的两层共用（对象一层、句柄一层）写在用例里：
+`S b = a; b.xs.push(1000);` 之后 `a.xs.length` 也变了。
+
+**只剩两条边界**：struct 套 struct（复制要递归下去，而 LLVM 的 COPY 是逐字段
+load/store）与成员函数（要 this 与闭包）。`tests/sexpr/bad/struct-in-struct.sx` 与
+`tests/asy/bad/struct-nested.asy` / `struct-method.asy` 钉着。
 
 ## 决策 4：调用 LLVM 需要 extern-C FFI —— 这是新要求，也是 dogfood
 

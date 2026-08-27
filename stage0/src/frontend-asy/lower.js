@@ -50,7 +50,11 @@
 // **pair 字段**（第十五刀：核心方言的类字段现在收 `(vec T N)`，而 pair 就是
 // `(vec real 2)`。pair 上那一整套 —— 复数乘除、`+= *=`、`abs`/`conj`、`z.x`/`xpart`、
 // `== !=`、当形参/返回值 —— 在字段上一条不少；`s.p.x` 这条三层的点也认了，
-// 但**写**不认：pair 的分量在 asy 那边是只读的虚字段）。
+// 但**写**不认：pair 的分量在 asy 那边是只读的虚字段）、
+// **数组字段**（第十六刀：`struct S { int[] xs; pair[] pts; }`。数组是引用语义，
+// 所以复制 struct 搬的是句柄 —— 量过 `S b = a; b.xs.push(1000);` 之后 `a.xs.length`
+// 也变了。字段上那一整套数组操作 —— `push`/`pop`/`.length`/下标读写/复合赋值/切片/
+// for-each/`write` 整条数组 —— 与裸数组同一条路，因为 `(fld …)` 出来的就是那个句柄）。
 //
 // 不支持（见到就报错，报错里说清是哪一条）：triple、import/access、
 // typedef、算符重载、给切片赋值（`a[0:2] = b`）、
@@ -68,9 +72,9 @@
 // 还没量全；`split` 要 `string[]` 的返回值，那条路还没走通）、
 // 循环条件里的 `?:`（摊出来的赋值只能落在循环外面，条件就只
 // 算一次了 —— 语义会变，所以报错而不是悄悄换个意思）、
-// struct 的这四条边界（每条都有 bad/ 用例钉着）：字段是数组或另一个 struct
-// （核心方言的类字段现在收标量与 `(vec T N)`，但数组字段的零值不是常量而是一次运行时
-// 调用，见 sexpr/lower.js 的 structDec）、struct 里的成员函数（这一刀只有字段声明）、
+// struct 的这三条边界（每条都有 bad/ 用例钉着）：字段是另一个 struct
+// （复制要递归下去，而 LLVM 那条腿的 COPY 是逐字段 load/store，见 sexpr/lower.js 的
+// structDec）、struct 里的成员函数（这一刀只有字段声明）、
 // `A[]`（数组元素还只有 int/real/bool/string/pair）。
 //
 // ## 与真 asy 的差别，写在这里而不是等着被发现
@@ -555,8 +559,9 @@ class AsyLower {
       if (head(r) !== 'vardec') return this.nope(r, `struct 里的 '${head(r)}'（这一刀只有字段声明）`);
       const ft = this.type(r.items[1], `struct ${nm} 的字段`);
       if (ft === null) return null;
-      if (!SCALARS.has(ft) && ft !== 'pair') {
-        return this.nope(r, `struct ${nm} 的 ${ft} 字段（这一刀的字段只有 int/real/bool/string/pair）`);
+      if (!SCALARS.has(ft) && ft !== 'pair' && !(asyIsArr(ft) && ASY_ARRELEM.has(asyElem(ft)))) {
+        return this.nope(r, `struct ${nm} 的 ${ft} 字段（这一刀的字段只有 `
+          + `int/real/bool/string/pair 与它们的一维数组）`);
       }
       for (const d of this.flat(r.items[2], 'decids')) {
         if (!isList(d) || head(d) !== 'decid') return this.err(d, '认不出的字段声明');

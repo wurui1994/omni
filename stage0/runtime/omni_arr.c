@@ -92,6 +92,9 @@ static void omni_arr_blob_reserve(omni_arr_blob a, int64_t n) {
   a->cap = c;
 }
 
+/* `zero` 在 n == 0 时允许是 NULL：下面那个 memcpy 循环跑 n 次，一次也不跑就没人读它。
+   这是明写的契约，run-llvm 那条腿的结构体数组字段（零长度）就靠它 —— 不然那条路要为
+   一个没人读的零值在入口块开一块 alloca。 */
 omni_arr_blob omni_arr_blob_new(int64_t n, int64_t esz, const void *zero) {
   if (n < 0) omni_errorf("array length cannot be negative: %lld", (long long)n);
   omni_arr_blob a = (omni_arr_blob)omni_alloc(sizeof(struct omni_arr_blob_s));

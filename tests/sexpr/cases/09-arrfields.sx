@@ -1,0 +1,83 @@
+(module
+  ;; 结构体/类的**数组字段** —— 门槛 2 第十六刀。`path` 那种"一串控制点"要它。
+  ;;
+  ;; 这一份盯的语义与向量字段正好相反：数组字段是**引用语义** —— 复制结构体搬的是
+  ;; 句柄，两个副本共用同一条数组。五条腿这一条必须一致：JS/解释器那边 copyOf 对
+  ;; arr 原样不动，C 那边是结构体赋值拷指针，LLVM 那边是逐字段 load/store 一个 ptr。
+  ;;
+  ;; 另一件事在 LLVM 那条腿上是特例：数组的零值不是常量，而是一次
+  ;; `omni_arr_*_new(0, 元素零值)`，所以 NEW 那条路会往基本块里发一条 call。
+  (struct Bag (xs (arr int)) (tag string))
+  (class Poly (pts (arr (vec real 2))) (n int))
+
+  (fn fill ((b Bag) (k int)) void
+    (let i int (int 0))
+    (while (bin "<" (var i) (var k))
+      (do
+        (apush (fld (var b) xs) (bin "*" (var i) (int 10)))
+        (set i (bin "+" (var i) (int 1))))))
+
+  (fn total ((b Bag)) int
+    (let s int (int 0))
+    (let i int (int 0))
+    (while (bin "<" (var i) (alen (fld (var b) xs)))
+      (do
+        (set s (bin "+" (var s) (aget (fld (var b) xs) (var i))))
+        (set i (bin "+" (var i) (int 1)))))
+    (ret (var s)))
+
+  (main
+    ;; 零值：空数组，不是空引用 —— alen 在它上面就得能答
+    (let b Bag (new Bag))
+    (print (alen (fld (var b) xs)))
+    (print (fld (var b) tag))
+
+    ;; 往字段里的数组压值、读回来
+    (expr (call fill (var b) (int 4)))
+    (print (alen (fld (var b) xs)))
+    (print (aget (fld (var b) xs) (int 0)))
+    (print (aget (fld (var b) xs) (int 3)))
+    (print (call total (var b)))
+    (aset (fld (var b) xs) (int 1) (int 99))
+    (print (aget (fld (var b) xs) (int 1)))
+    (print (apop (fld (var b) xs)))
+    (print (alen (fld (var b) xs)))
+
+    ;; 结构体是值语义、数组字段是引用语义：c 的 tag 独立，xs 是同一条
+    (let c Bag (var b))
+    (fldset (var c) tag (str "copy"))
+    (apush (fld (var c) xs) (int 7))
+    (print (fld (var b) tag))
+    (print (fld (var c) tag))
+    (print (alen (fld (var b) xs)))
+    (print (aget (fld (var b) xs) (int 3)))
+
+    ;; 整条数组换成另一条：换的是句柄，b 那条不受影响
+    (let fresh (arr int) (anew (arr int) (int 2)))
+    (aset (var fresh) (int 0) (int 5))
+    (fldset (var c) xs (var fresh))
+    (print (alen (fld (var c) xs)))
+    (print (aget (fld (var c) xs) (int 0)))
+    (print (alen (fld (var b) xs)))
+
+    ;; 类 + 向量元素的数组字段（blob 那份实现）
+    (let p Poly (cnew Poly))
+    (print (alen (fld (var p) pts)))
+    (apush (fld (var p) pts) (vlit (vec real 2) (real 1.5) (real 2.5)))
+    (apush (fld (var p) pts) (splat (vec real 2) (real 3.0)))
+    (print (alen (fld (var p) pts)))
+    (print (lane (aget (fld (var p) pts) (int 0)) 1))
+    (print (hsum (aget (fld (var p) pts) (int 1))))
+    (fldset (var p) n (alen (fld (var p) pts)))
+    (print (fld (var p) n))
+
+    ;; 循环里反复新建：每次都是**新的空数组**，不是上一轮那条
+    (let i int (int 0))
+    (let last int (int 0))
+    (while (bin "<" (var i) (int 3))
+      (do
+        (let e Bag (new Bag))
+        (apush (fld (var e) xs) (var i))
+        (set last (alen (fld (var e) xs)))
+        (set i (bin "+" (var i) (int 1)))))
+    (print (var last))))
