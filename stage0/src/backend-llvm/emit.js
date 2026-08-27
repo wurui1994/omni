@@ -171,6 +171,7 @@ class LlvmEmitter {
     // 结构体用到了没有：用到就要发 arena 的那个私有分配器（缓冲那一节本来就要它）
     this.aggUsed = false;
     this.needNullck = false;   // 类的字段访问要判空，用到才 declare
+    this.needFnck = false;     // 函数值的调用要判空（消息与 omni_fn_ck 逐字相同）
   }
 
   line(s) { this.out.push(s); }
@@ -290,6 +291,7 @@ class LlvmEmitter {
       sawStruct = true;
     }
     if (sawStruct) this.line('');
+    if (this.mir.closures.length > 0) this.closureTypes();
     // 模块级变量（第二十四刀）：一个 internal global，零初始化。真正的初值是
     // omni_main 最前面那几句 store —— 字符串的零是池子里的空串，不是常量表达式。
     let sawGlobal = false;
@@ -302,11 +304,25 @@ class LlvmEmitter {
 
     for (const f of this.mir.funcs) this.func(f);
 
+    // 闭包（ADR-0010）。记录的第 0 格是函数指针，与 `struct omni_closure_s` 同一个布局，
+    // 后面是**按值**抓的捕获 —— C 那条腿发的是一个 struct 加一个 make 函数，这里发的是
+    // 一个命名类型加一个 make 函数，同一份布局的两种拼写。放在函数之后发：
+    // 记录类型在 IR 里是模块级的，前后无所谓，而 make 要引用被提升出来的那个函数名。
+    if (this.mir.closures.length > 0) this.closureMakes();
+
     if (this.needDiv) this.line(DIV_HELPER);
     if (this.needMod) this.line(MOD_HELPER);
-    if (this.needDiv || this.needMod) {
+    if (this.needFnck) this.line(FNCK_HELPER);
+    // `omni_error` 有三个用户（除零、取模、函数值判空），declare 只能有一句。
+    if (this.needDiv || this.needMod || this.needFnck) {
       this.line('declare void @omni_error(ptr)');
-      this.line('@.omni_divzero = private unnamed_addr constant [17 x i8] c"division by zero\\00"');
+      if (this.needDiv || this.needMod) {
+        this.line('@.omni_divzero = private unnamed_addr constant [17 x i8] c"division by zero\\00"');
+      }
+      if (this.needFnck) {
+        this.line('@.omni_nullfn = private unnamed_addr constant [30 x i8] '
+          + 'c"call of a null function value\\00"');
+      }
       this.line('');
     }
     if (this.needStrCmp) {
@@ -380,6 +396,67 @@ class LlvmEmitter {
     return this.out.join('\n') + '\n';
   }
 
+  /* ------------------------------------------------------------------ 闭包 */
+
+  /**
+   * 每个闭包模板发两样东西：记录的命名类型，与造它的 make 函数。
+   * 类型必须发在**函数之前** —— .ll 的解析器对 getelementptr 的基类型是当场校验的，
+   * 命名类型还没定义时它是不透明的，于是报 "base element of getelementptr must be sized"。
+   * `sizeof` 在 IR 里没有关键字，用的是 `getelementptr T, ptr null, i64 1` 再 ptrtoint
+   * 这个标准写法 —— 它是常量表达式，LLVM 当场折成一个字面量。
+   */
+  closureTypes() {
+    let i = 0;
+    while (i < this.mir.closures.length) {
+      const ts = this.capTys(i);
+      this.line(`%clo_${i} = type { ptr${ts.length > 0 ? `, ${ts.join(', ')}` : ''} }`);
+      i++;
+    }
+    this.line('');
+  }
+
+  /** 捕获的 LLVM 拼写。记录布局与 make 的形参表都从这一份来，所以只有一处。 */
+  capTys(no) {
+    const c = this.mir.closures[no];
+    const ts = [];
+    let k = 0;
+    while (k < c.capTypes.length) {
+      ts.push(this.ty(c.capTypes[k], `捕获 ${c.captures[k]}`));
+      k++;
+    }
+    return ts;
+  }
+
+  closureMakes() {
+    this.aggUsed = true;   // make 要从 arena 拿内存（ALLOC_HELPER）
+    let i = 0;
+    while (i < this.mir.closures.length) {
+      const c = this.mir.closures[i];
+      const ts = this.capTys(i);
+      const ps = [];
+      let k = 0;
+      while (k < ts.length) { ps.push(`${ts[k]} %c${k}`); k++; }
+      const rec = `%clo_${i}`;
+      this.line(`define private ptr @${c.make}(${ps.join(', ')}) {`);
+      this.line('entry:');
+      this.line(`  %szp = getelementptr ${rec}, ptr null, i64 1`);
+      this.line('  %sz = ptrtoint ptr %szp to i64');
+      this.line('  %e = call ptr @omni_ll_alloc(i64 %sz)');
+      this.line(`  %fpp = getelementptr ${rec}, ptr %e, i64 0, i32 0`);
+      this.line(`  store ptr @${c.funcName}, ptr %fpp`);
+      k = 0;
+      while (k < ts.length) {
+        this.line(`  %p${k} = getelementptr ${rec}, ptr %e, i64 0, i32 ${k + 1}`);
+        this.line(`  store ${ts[k]} %c${k}, ptr %p${k}`);
+        k++;
+      }
+      this.line('  ret ptr %e');
+      this.line('}');
+      this.line('');
+      i++;
+    }
+  }
+
   /* ------------------------------------------------------------------ 函数 */
 
   func(f) {
@@ -387,10 +464,15 @@ class LlvmEmitter {
     this.tmp = 0;
     this.labels = 0;
     this.regions = [];
-    if (f.closureId !== undefined) {
-      throw new OmniError(`${NOPE} 闭包（函数 ${f.name}）`);
+    // 闭包体的第一个形参是闭包记录自己（ADR-0010），与 C 那条腿的 `omni_fn self_` 同一个
+    // 约定。它**不占槽**：MIR 里捕获是 OP.CAPTURE（按下标从记录里读），不是形参。
+    const ps = [];
+    if (f.closureId !== undefined) ps.push('ptr %self');
+    let pi = 0;
+    while (pi < f.params.length) {
+      ps.push(`${this.ty(f.params[pi].t, `参数 ${f.params[pi].name}`)} %a${pi}`);
+      pi++;
     }
-    const ps = f.params.map((p, i) => `${this.ty(p.t, `参数 ${p.name}`)} %a${i}`);
     this.line(`define ${this.ty(f.ret, '返回值')} @${f.name}(${ps.join(', ')}) {`);
     this.startBlock('entry');
     // 槽位一律 alloca：MIR 不做 mem2reg，那是 LLVM 的活（ADR-0014 决策 6 的三处偏离之一）
@@ -622,6 +704,35 @@ class LlvmEmitter {
       const args = refs.map((r, k) => `${d.params[k]} ${this.val(r)}`);
       const call = `call ${d.ret} @${d.sym}(${args.join(', ')})`;
       this.line(d.ret === 'void' ? `  ${call}` : `  ${dst} = ${call}`);
+      return;
+    }
+    if (op === OP.CAPTURE) {
+      const p = this.fresh();
+      this.line(`  ${p} = getelementptr %clo_${this.f.closureId}, ptr %self, i64 0, i32 ${f.aux[i] + 1}`);
+      this.line(`  ${dst} = load ${this.ty(t, 'capture')}, ptr ${p}`);
+      return;
+    }
+    if (op === OP.CLOSURE) {
+      const c = this.mir.closures[f.a[i]];
+      const args = f.argsOf(f.b[i]).map((r) => this.typed(r));
+      this.line(`  ${dst} = call ptr @${c.make}(${args.join(', ')})`);
+      return;
+    }
+    // 间接调用。被调者在**记录的第 0 格**（与 struct omni_closure_s 同一个布局），
+    // 记录自己当第一个实参传回去。取 fp 与传 self 用的是同一个寄存器 ——
+    // 不这么写的话 `f` 会被求值两次（C 那条腿的 fnCallHelper 是同一条理由）。
+    if (op === OP.CALLFN) {
+      if (f.aux[i] !== 0) throw new OmniError(`${NOPE} JS 域的动态调用（函数 ${f.name}）`);
+      this.needFnck = true;
+      const ck = this.fresh();
+      const fp = this.fresh();
+      this.line(`  ${ck} = call ptr @omni_ll_fnck(ptr ${this.val(f.a[i])})`);
+      this.line(`  ${fp} = load ptr, ptr ${ck}`);
+      const args = [`ptr ${ck}`];
+      for (const r of f.argsOf(f.b[i])) args.push(this.typed(r));
+      const rt = this.ty(t, 'callfn 的返回值');
+      const call = `call ${rt} ${fp}(${args.join(', ')})`;
+      this.line(rt === 'void' ? `  ${call}` : `  ${dst} = ${call}`);
       return;
     }
     throw new OmniError(`${NOPE} ${OP_NAMES[op]}（函数 ${f.name}）`);
@@ -1160,6 +1271,20 @@ sat:
 ok:
   %r = srem i64 %a, %b
   ret i64 %r
+}
+`;
+
+/* 函数值调用前的判空（omni.h:467..470 的 omni_fn_ck，又一条 static inline）。
+ * 消息与 C 那条腿逐字相同 —— 空函数值在两条腿上必须是同一句话，不是一边报错一边段错误。 */
+const FNCK_HELPER = `define private ptr @omni_ll_fnck(ptr %f) {
+entry:
+  %z = icmp eq ptr %f, null
+  br i1 %z, label %err, label %ok
+err:
+  call void @omni_error(ptr @.omni_nullfn)
+  unreachable
+ok:
+  ret ptr %f
 }
 `;
 

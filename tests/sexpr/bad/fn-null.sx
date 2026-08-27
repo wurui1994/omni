@@ -1,0 +1,8 @@
+;; 函数值的零值是**空引用**（hir/types.js 的 zeroValue 给 NullFn），调它是运行期错误。
+;; 这一条钉的是五条腿那句话逐字相同：C 与两个解释器走 omni_fn_ck，LLVM 那条腿走
+;; 重建出来的 @omni_ll_fnck（omni.h 里那个是 static inline，call 不到）。
+;; 不钉的话 LLVM 那条腿最省事的写法是直接 load 空指针 —— 那是段错误，不是一句话。
+(module
+  (global gf (fnty (int) int))
+  (main
+    (print (callfn (var gf) (int 1)))))

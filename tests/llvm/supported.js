@@ -60,4 +60,8 @@ export const SUPPORTED = [
   // 因为里面有 struct 套 struct）。四条腿（run / run-c / interp / run-llvm）的 stdout、
   // stderr、退出码逐字节相同才留在这里。
   join('tests', 'cases', '03_structs.omni'),
+  // 函数值（ADR-0010）：闭包记录是 `%clo_N = type { ptr, 捕获... }`，间接调用先过
+  // @omni_ll_fnck 判空再从第 0 格取 fp。这一份盯的正是那句判空 —— 不判就是"跳到地址 0"，
+  // 与 C 那条腿的 omni_fn_ck 分叉。lambda 与具名函数当值用都在里面。
+  join('tests', 'cases', '21_null_fn_call.omni'),
 ];

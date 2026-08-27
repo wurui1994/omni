@@ -14,13 +14,14 @@
  *
  *   (module FORM...)
  *   FORM  = (fn NAME ((p TYPE)...) TYPE STMT...)   函数
+ *         | (cfn NAME ((c TYPE)...) ((p TYPE)...) TYPE STMT...)  闭包（捕获按值抓）
  *         | (kernel NAME ((p TYPE)...) STMT...)     GPU 核（隐含第一个形参是 gid）
  *         | (struct NAME (字段 TYPE)...)            结构体（值语义，ADR-0005）
  *         | (class NAME (字段 TYPE)...)             类（引用语义）
  *         | (global NAME TYPE)                      模块级变量（零初始化，跨函数共享）
  *         | (main STMT...)                          入口体
  *   TYPE  = int | real | bool | string | void | (vec int|real 2|4|8) | (buf int|real)
- *         | (arr int|real|bool|string) | (arr (vec T N)) | 结构体名 | 类名
+ *         | (arr T) | (fnty (TYPE...) TYPE) | 结构体名 | 类名
  *   STMT  = (let NAME TYPE E) | (set NAME E) | (do STMT...)
  *         | (if E (do ...) [(do ...)]) | (while E (do ...))
  *         | (brk) | (cont)
@@ -36,6 +37,7 @@
  *         | (bnew TYPE E) | (bget E E) | (blen E) | (gid)
  *         | (anew TYPE E) | (aget E E) | (alen E) | (apop E)
  *         | (new NAME) | (fld E 字段) | (cnew NAME)
+ *         | (fnref NAME) | (mkclo NAME E...) | (cap NAME) | (callfn E E...)
  *
  * 向量那四条是 ADR-0014 门槛 6 的第一阶段，见 vecExpr 的注释；
  * 缓冲与 kernel/dispatch 是门槛 7 的第一阶段，见 bufExpr 与 dispatch 的注释；
@@ -53,7 +55,7 @@
  * 而"什么能悄悄转成什么"是语言设计决定，不该由汇聚层替某门语言定。
  */
 
-import { INT, REAL, BOOL, STRING, VOID, vecType, bufType, arrType, structType, classType, zeroValue } from '../hir/types.js';
+import { INT, REAL, BOOL, STRING, VOID, vecType, bufType, arrType, structType, classType, fnType, typeKey, zeroValue } from '../hir/types.js';
 import { readSexpr, isList, isAtom, isStr, head } from './read.js';
 import { SourceFile } from '../source/diag.js';
 
@@ -107,6 +109,17 @@ class CoreLowerer {
     // 这一份源文件里所有结构体/类的名字（run 的第 0 遍扫出来）。只为诊断服务：
     // 字段类型提到自己或后面那个时，能说"声明在后面"而不是"认不出的类型"。
     this.aggLater = new Set();
+    // 函数值（`(fnty …)` / `(cfn …)` / `(mkclo …)` / `(callfn …)`）。OIR 那边这一套早就有
+    // （ADR-0010：闭包记录是 `{fp, c_*}`，第一个实参是记录自己），方言这边只是说得出来。
+    // closures 是**闭包记录**表（名字 -> {id, mangled, make, captures}），lifted 是它们的
+    // 函数体（发到 funcs 的末尾，跟 hir/check.js 一样）；fnUsed 收用到的签名 ——
+    // C 后端要为每个签名发一个类型化的调用助手，少一个就编不过。
+    this.closures = new Map();
+    this.lifted = [];
+    this.fnUsed = new Map();
+    // 正在降 (cfn …) 的那一份的捕获表（名字 -> 类型）。`(cap c)` 只在这里面查 ——
+    // 不许它退回去查外层的局部量：那个帧早就返回了，读它就是读失效的栈。
+    this.caps = null;
   }
 
   err(node, msg) {
@@ -133,8 +146,6 @@ class CoreLowerer {
     // **结构体元素还不收**：那是值语义，格子里躺的是内容，于是 `aset`/`apush`/`anew`
     // 三处都要按元素类型拷一份 —— JS 与解释器那两条腿的 `arrCopy` 是**类型擦除**的
     // （只认 Array.isArray），拷不动一个普通对象。`tests/sexpr/bad/arr-elem-struct.sx` 钉着。
-    // **数组套数组仍然不收**：MIR 那一层元素类型只有一个 8 位类型码，`(arr (arr int))`
-    // 与 `(arr (arr string))` 在那里是同一个码 —— 那不是"少写几行"，是类型身份丢了。
     if (isList(node) && head(node) === 'arr') {
       const en = node.items[1];
       if (isList(en) && head(en) === 'vec') {
@@ -172,12 +183,34 @@ class CoreLowerer {
       if (!VEC_LANES.has(n)) return this.err(node, `${what}：向量宽度只能是 2 / 4 / 8`);
       return vecType(e, n);
     }
+    // `(fnty (int real) bool)`：函数值的类型（asy 的 `real f(real)` 形参要它 ——
+    // 量过：真 base 在场时 304 个 examples 里 203 个第一个撞的就是 math.asy:446 的
+    // `real findroot(real f(real), …)`）。OIR 那边这一条早就有（ADR-0010 的 `{fp, c_*}`，
+    // Omni 语法的 lambda 走的就是它），所以方言这边只是把它**说得出来**：
+    // 类型一条、`(cfn …)` 声明一条、`(mkclo …)` 造一条、`(callfn …)` 调一条。
+    if (isList(node) && head(node) === 'fnty') {
+      const pn = node.items[1];
+      if (!isList(pn)) return this.err(node, `${what}：(fnty (形参类型...) 返回类型)`);
+      const ps = [];
+      for (const p of pn.items) {
+        const t = this.ty(p, `${what} 的形参类型`);
+        if (t === null) return null;
+        if (t === VOID) return this.err(p, `${what}：形参类型不能是 void`);
+        ps.push(t);
+      }
+      const r = this.ty(node.items[2], `${what} 的返回类型`);
+      if (r === null) return null;
+      // 过一遍 useFnType：C 后端要按签名发一个类型化的调用助手，而"用到"的第一处
+      // 往往就是某个形参的类型（`(fn f ((g (fnty (real) real))) real …)`）—— 只在
+      // callfn 那里登记就会漏掉"只是传来传去、没在这一份里调"的那些签名。
+      return this.useFnType(fnType(ps, r));
+    }
     if (!isAtom(node) || !TYPES.has(node.value)) {
       // 结构体名（第十二刀）与类名（第十三刀）：方言里用户能起的类型名只有这两种，
       // 所以放在内建名单后面查 —— 内建名字不可能被遮蔽（那两遍会拒掉重名）。
       if (isAtom(node) && this.structs.has(node.value)) return this.structs.get(node.value);
       if (isAtom(node) && this.classes.has(node.value)) return this.classes.get(node.value);
-      return this.err(node, `${what} 的类型只能是 int / real / bool / string / void / (vec T N) / (buf T) / (arr T) / 结构体名 / 类名`);
+      return this.err(node, `${what} 的类型只能是 int / real / bool / string / void / (vec T N) / (buf T) / (arr T) / (fnty (T...) R) / 结构体名 / 类名`);
     }
     return TYPES.get(node.value);
   }
@@ -210,7 +243,10 @@ class CoreLowerer {
    * 所以后一批看得见前一批的名字，而返回的 delta 只有这一批新出来的东西。
    */
   chunk(nodes, entryName = 'omni_main') {
-    const base = { structs: this.structs.size, classes: this.classes.size, globals: this.globals.size };
+    const base = {
+      structs: this.structs.size, classes: this.classes.size, globals: this.globals.size,
+      closures: this.closures.size, lifted: this.lifted.length, fnUsed: this.fnUsed.size,
+    };
     const top = nodes.length === 1 && head(nodes[0]) === 'module' ? nodes[0] : null;
     if (top === null) {
       this.err(nodes[0], '一份核心方言的源文件是恰好一个 (module ...)');
@@ -255,6 +291,7 @@ class CoreLowerer {
     // 第三遍收函数签名，函数才能互相调用（也才能递归）
     for (const f of forms) {
       const h = head(f);
+      if (h === 'cfn') { this.cfnSig(f); continue; }
       if (h !== 'fn' && h !== 'kernel') continue;
       const nm = isAtom(f.items[1]) ? f.items[1].value : null;
       if (nm === null) { this.err(f, `(${h} NAME ...) 缺名字`); continue; }
@@ -275,6 +312,46 @@ class CoreLowerer {
       this.funcs.set(nm, { name: nm, mangled: `s_${nm}`, ret: ret, params: ps });
     }
     return this.assemble(forms, entryName, base);
+  }
+
+  /**
+   * `(cfn NAME ((c T)...) ((p T)...) R 语句...)` 的签名那一半：登记闭包记录。
+   *
+   * 为什么闭包函数与普通 `(fn …)` 分成两个头而不是一个：捕获表是**记录的字段**，
+   * 不是形参 —— 调用约定上第一个实参是记录自己，捕获从记录里读（`(cap c)`），
+   * 这与"多几个形参"在 ABI 上是两件事（ADR-0010）。写成两个头，方言里就看得出
+   * "这一份是要当值传的"，而不是靠某个标注去猜。
+   *
+   * 捕获是**按值**抓的（`(mkclo …)` 那一刻求值一次存进记录）。所以循环里造的闭包各自
+   * 拿到自己那一份 —— 这条与 hir/check.js 的 lambda 是同一套语义，不是新规矩。
+   */
+  cfnSig(f) {
+    const nm = isAtom(f.items[1]) ? f.items[1].value : null;
+    if (nm === null) return this.err(f, '(cfn NAME (捕获...) (形参...) 返回类型 语句...) 缺名字');
+    if (this.funcs.has(nm) || this.kernels.has(nm) || this.closures.has(nm)) {
+      return this.err(f, `'${nm}' 重复定义`);
+    }
+    const caps = this.params(f.items[2]);
+    const ps = this.params(f.items[3]);
+    const ret = this.ty(f.items[4], `闭包 ${nm} 的返回值`);
+    if (caps === null || ps === null || ret === null) return null;
+    for (const c of caps) if (c.type === VOID) return this.err(f, `闭包 ${nm} 的捕获不能是 void`);
+    const id = this.closures.size;
+    const pts = [];
+    for (const p of ps) pts.push(p.type);
+    const t = this.useFnType(fnType(pts, ret));
+    this.closures.set(nm, {
+      id, mangled: `omni_clo_${id}`, make: `omni_mk_${id}`,
+      captures: caps, params: ps, ret: ret, type: t, node: f,
+    });
+    return null;
+  }
+
+  /** 登记一个用到的函数签名（C 后端要按签名发调用助手），返回那个类型本身 */
+  useFnType(t) {
+    const k = typeKey(t);
+    if (!this.fnUsed.has(k)) this.fnUsed.set(k, t);
+    return this.fnUsed.get(k);
   }
 
   /** `((p int) (q real))` -> OIR 形参表。 */
@@ -405,6 +482,25 @@ class CoreLowerer {
         funcs.push({ name: d.name, mangled: d.mangled, ret: VOID, params: d.params, kernel: true, body: { kind: 'Block', stmts: body } });
         continue;
       }
+      if (h === 'cfn') {
+        const nm = isAtom(f.items[1]) ? f.items[1].value : null;
+        const d = nm === null ? undefined : this.closures.get(nm);
+        if (d === undefined) continue;
+        this.scopes = [new Map()];
+        for (const p of d.params) this.scopes[0].set(p.name, p.type);
+        this.caps = new Map();
+        for (const c of d.captures) this.caps.set(c.name, c.type);
+        const body = this.block(f.items.slice(5), d.ret);
+        this.caps = null;
+        if (d.ret !== VOID) body.push({ kind: 'Return', value: zeroValue(d.ret) });
+        else body.push({ kind: 'Return', value: null });
+        // 提升出来的函数体挂 closureId：后端按它知道"第一个实参是闭包记录"（ADR-0010）。
+        this.lifted.push({
+          name: nm, mangled: d.mangled, ret: d.ret, params: d.params,
+          body: { kind: 'Block', stmts: body }, closureId: d.id,
+        });
+        continue;
+      }
       if (h === 'main') {
         if (sawMain) { this.err(f, '(main ...) 只能有一个'); continue; }
         sawMain = true;
@@ -420,7 +516,7 @@ class CoreLowerer {
       }
       if (h === 'struct' || h === 'class') continue;   // 第一遍已经收过了
       if (h === 'global') continue;                    // 第二遍已经收过了
-      this.err(f, `(module ...) 里只能是 (struct ...) / (class ...) / (global ...) / (fn ...) / (kernel ...) / (main ...)，见到 '${h}'`);
+      this.err(f, `(module ...) 里只能是 (struct ...) / (class ...) / (global ...) / (fn ...) / (cfn ...) / (kernel ...) / (main ...)，见到 '${h}'`);
     }
     // REPL 的一批里没有 `(main …)` 是正常的（只写了个函数定义）；整程序时必须有入口。
     if (!sawMain && entryName === 'omni_main') this.err(null, '缺入口：加一个 (main ...)');
@@ -446,9 +542,23 @@ class CoreLowerer {
       if (gj++ < base.globals) continue;
       globals.push({ name: nm, mangled: `g_${nm}`, type: t });
     }
+    // 闭包提升出来的函数体排在最后（跟 hir/check.js 一样：合成的东西放在用户函数之后）。
+    const lifted = [];
+    let li = base.lifted;
+    while (li < this.lifted.length) { lifted.push(this.lifted[li]); li++; }
+    const clos = [];
+    let qi = 0;
+    for (const c of this.closures.values()) {
+      if (qi++ < base.closures) continue;
+      clos.push({ id: c.id, mangled: c.mangled, make: c.make, captures: c.captures });
+    }
+    const fnTys = [];
+    let fi = 0;
+    for (const t of this.fnUsed.values()) if (fi++ >= base.fnUsed) fnTys.push(t);
     return {
-      structs: structs, classes: classes, enums: [], containers: [], closures: [], fnTypes: [],
-      funcs: funcs,
+      structs: structs, classes: classes, enums: [], containers: [],
+      closures: clos, fnTypes: fnTys,
+      funcs: funcs.concat(lifted),
       globals: globals,
       entry: entryName,
     };
@@ -738,6 +848,124 @@ class CoreLowerer {
     return c;
   }
 
+  /* --------------------------------------------------- 函数值（ADR-0010） */
+
+  /** `(cap c)`：读当前 `(cfn …)` 的一个捕获。只在捕获表里查 —— 见构造函数里的 caps。 */
+  capRef(n) {
+    const nm = isAtom(n.items[1]) ? n.items[1].value : null;
+    if (nm === null) return this.err(n, '(cap 名字)');
+    if (this.caps === null) return this.err(n, `(cap ${nm}) 只能出现在 (cfn ...) 的体里`);
+    if (!this.caps.has(nm)) return this.err(n, `这个闭包没有叫 '${nm}' 的捕获`);
+    return { kind: 'CaptureRef', name: nm, type: this.caps.get(nm) };
+  }
+
+  /** `(mkclo NAME v...)`：造一个闭包值。捕获**按值**求一次存进记录。 */
+  mkClo(n) {
+    const nm = isAtom(n.items[1]) ? n.items[1].value : null;
+    if (nm === null) return this.err(n, '(mkclo NAME 捕获值...)');
+    const d = this.closures.get(nm);
+    if (d === undefined) {
+      return this.err(n, this.funcs.has(nm)
+        ? `'${nm}' 是普通函数，当值用写 (fnref ${nm})`
+        : `没有叫 '${nm}' 的 (cfn ...)`);
+    }
+    const args = [];
+    let i = 0;
+    while (i < d.captures.length) {
+      const a = this.expr(n.items[i + 2]);
+      if (a === null) return null;
+      if (!sameCoreType(a.type, d.captures[i].type)) {
+        return this.err(n.items[i + 2], `捕获 '${d.captures[i].name}' 要 `
+          + `${coreTypeText(d.captures[i].type)}，这里是 ${coreTypeText(a.type)}`);
+      }
+      args.push(a);
+      i++;
+    }
+    if (n.items.length - 2 !== d.captures.length) {
+      return this.err(n, `(mkclo ${nm} ...) 要 ${d.captures.length} 个捕获值，`
+        + `给了 ${n.items.length - 2} 个`);
+    }
+    return { kind: 'MakeClosure', closure: d.id, make: d.make, args: args, type: d.type };
+  }
+
+  /**
+   * `(fnref NAME)`：把一个普通 `(fn …)` 当值用。生成一个**薄适配器**闭包（形参照抄、
+   * 转手调用），于是所有函数值共用同一套调用约定（第一个实参是记录自己）。
+   * 代价是一次多余的调用，换来的是调用处不需要区分"这是闭包还是具名函数" ——
+   * 与 hir/check.js 的 funcRef 是同一条决定，不是这里另立的规矩。
+   */
+  fnRef(n) {
+    const nm = isAtom(n.items[1]) ? n.items[1].value : null;
+    if (nm === null) return this.err(n, '(fnref NAME)');
+    const d = this.funcs.get(nm);
+    if (d === undefined) {
+      return this.err(n, this.closures.has(nm)
+        ? `'${nm}' 是 (cfn ...)，当值用写 (mkclo ${nm} ...)`
+        : `没有叫 '${nm}' 的函数`);
+    }
+    const key = `&${nm}`;
+    if (!this.closures.has(key)) {
+      const pts = [];
+      const ps = [];
+      let i = 0;
+      while (i < d.params.length) {
+        ps.push({ name: `a${i}`, type: d.params[i].type });
+        pts.push(d.params[i].type);
+        i++;
+      }
+      const t = this.useFnType(fnType(pts, d.ret));
+      const id = this.closures.size;
+      const args = [];
+      for (const p of ps) args.push({ kind: 'VarRef', name: p.name, type: p.type });
+      const call = { kind: 'Call', func: d.mangled, name: d.name, args: args, type: d.ret };
+      const stmt = d.ret === VOID
+        ? { kind: 'ExprStmt', expr: call }
+        : { kind: 'Return', value: call };
+      const tail = { kind: 'Return', value: d.ret === VOID ? null : zeroValue(d.ret) };
+      this.closures.set(key, {
+        id, mangled: `omni_clo_${id}`, make: `omni_mk_${id}`,
+        captures: [], params: ps, ret: d.ret, type: t, node: n,
+      });
+      this.lifted.push({
+        name: key, mangled: `omni_clo_${id}`, ret: d.ret, params: ps,
+        body: { kind: 'Block', stmts: [stmt, tail] }, closureId: id,
+      });
+    }
+    const c = this.closures.get(key);
+    return { kind: 'MakeClosure', closure: c.id, make: c.make, args: [], type: c.type };
+  }
+
+  /** `(callfn E a...)`：调一个函数值。函数值没有形参名，所以这里只有位置实参。 */
+  callFn(n) {
+    const f = this.expr(n.items[1]);
+    if (f === null) return null;
+    if (f.type.k !== 'fn') {
+      return this.err(n, `(callfn E ...) 的 E 要是一个函数值，这里是 ${coreTypeText(f.type)}`);
+    }
+    const t = f.type;
+    const args = [];
+    let i = 2;
+    while (i < n.items.length) {
+      const a = this.expr(n.items[i]);
+      if (a === null) return null;
+      args.push(a);
+      i++;
+    }
+    if (args.length !== t.params.length) {
+      return this.err(n, `这个函数值要 ${t.params.length} 个实参，给了 ${args.length} 个`);
+    }
+    i = 0;
+    while (i < args.length) {
+      if (!sameCoreType(args[i].type, t.params[i])) {
+        return this.err(n.items[i + 2], `第 ${i + 1} 个实参要 ${coreTypeText(t.params[i])}，`
+          + `这里是 ${coreTypeText(args[i].type)}`);
+      }
+      i++;
+    }
+    this.useFnType(t);
+    return { kind: 'CallFn', callee: f, fnType: t, args: args, type: t.ret };
+  }
+
   /* ------------------------------------------------------------ 表达式 */
 
   expr(n) {
@@ -755,6 +983,12 @@ class CoreLowerer {
       if (!isStr(n.items[1])) return this.err(n, '(str "…") 要一个字符串字面量');
       return { kind: 'Const', type: STRING, value: n.items[1].value };
     }
+    // 函数值四条。`(cap c)` 读捕获、`(mkclo NAME v...)` 造一个闭包值、
+    // `(fnref NAME)` 把一个普通 `(fn …)` 当值用、`(callfn E a...)` 调一个函数值。
+    if (h === 'cap') return this.capRef(n);
+    if (h === 'mkclo') return this.mkClo(n);
+    if (h === 'fnref') return this.fnRef(n);
+    if (h === 'callfn') return this.callFn(n);
     // `(tostr E)`：数值/布尔 -> 字符串。OIR 的 `to_string` 早就在（四个消费方都认它），
     // 方言这边一直没开口，于是"把数拼进一句话里"在这一层根本写不出来 —— 而那是任何
     // 语言的 `write("x = ", x)` 都要的。刻意**不**做隐式转换：`+` 两边照旧必须同型，
@@ -1140,6 +1374,16 @@ function sameCoreType(a, b) {
   if (a.k === 'struct' || a.k === 'class') return a.name === b.name;
   // 递归而不是比 `elem.k`：`(arr (vec real 2))` 与 `(arr (vec int 4))` 的 elem.k 都是 'vec'
   if (a.k === 'arr') return sameCoreType(a.elem, b.elem);
+  // 函数值按**签名**认（结构类型）：形参逐个同型、返回同型才算一个类型。
+  if (a.k === 'fn') {
+    if (a.params.length !== b.params.length) return false;
+    let i = 0;
+    while (i < a.params.length) {
+      if (!sameCoreType(a.params[i], b.params[i])) return false;
+      i++;
+    }
+    return sameCoreType(a.ret, b.ret);
+  }
   return true;
 }
 
@@ -1153,6 +1397,11 @@ function coreTypeText(t) {
   if (t.k === 'buf') return `buf<${coreTypeText(t.elem)}>`;
   if (t.k === 'arr') return `arr<${coreTypeText(t.elem)}>`;
   if (t.k === 'struct' || t.k === 'class') return t.name;
+  if (t.k === 'fn') {
+    let ps = '';
+    for (const p of t.params) ps = ps === '' ? coreTypeText(p) : `${ps},${coreTypeText(p)}`;
+    return `fn<(${ps})->${coreTypeText(t.ret)}>`;
+  }
   return t.k;
 }
 

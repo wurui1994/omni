@@ -1998,6 +1998,37 @@ helper 名字过 `asyMangle`（`asy__grow_real[]` 不是标识符，`asy__grow_a
 `bad/arr-2d` 退役。收益：`import graph` 的第一个拦路虎从多维数组前进到
 **函数类型的形参**（`math.asy:446` 的 `real findroot(real f(real), …)`）—— 那要闭包，是另一刀。
 
+### 函数值：方言四条 + LLVM 那条腿的闭包
+
+量出来的理由：真 `base/` 在场时，asymptote 那 **304** 个 examples 里 **203 个第一个撞的
+是同一行** —— `math.asy:446` 那个函数类型的形参。（其余的头几名量级小一个数量级：
+`frame`/`filltype`/`marker`/`align` 这些类型 4+3+2+2 份、`guide[]` 4 份，都是绘图层的。）
+
+OIR 那一侧闭包早就齐了（ADR-0010 的 `{fp, c_*}`，Omni 语法的 lambda 走的就是它），
+缺的是两处：**方言说不出来**，**LLVM 后端不认**。
+
+方言加了四条，形状与 OIR 一一对应，没有新语义：`(fnty (T...) R)` 是类型，
+`(cfn NAME (捕获) (形参) R …)` 声明一份闭包体（体里 `(cap c)` 读捕获），
+`(mkclo NAME v...)` 造一个值（捕获**按值**求一次存进记录），`(callfn E a...)` 间接调用；
+另有 `(fnref NAME)` 把普通 `(fn …)` 当值用 —— 它生成一个薄适配器闭包，于是调用处不必
+区分"这是闭包还是具名函数"（与 `hir/check.js` 的 funcRef 同一条决定）。闭包体与普通函数
+分成两个头而不是加个标注：捕获是**记录的字段**、不是形参，这在 ABI 上是两件事。
+
+LLVM 后端原先见到 `closureId` 就抛"不支持"。现在：记录是命名类型
+`%clo_N = type { ptr, 捕获... }`（第 0 格与 `struct omni_closure_s` 同一个布局），
+`make` 是一个 private 函数（`sizeof` 用 `getelementptr T, ptr null, i64 1` + ptrtoint
+那个标准常量写法），`CAPTURE` 是 getelementptr + load，`CALLFN` 先过 `@omni_ll_fnck`
+判空、再从第 0 格取 fp 并把记录自己当第一个实参传回去（取 fp 与传 self 共用同一个
+寄存器 —— 否则被调者会被求值两次，与 C 那边 fnCallHelper 同一条理由）。
+踩到的一处：记录类型必须发在**函数之前** —— .ll 的解析器对 getelementptr 的基类型是
+当场校验的，命名类型还没定义时它不透明，报 "base element of getelementptr must be sized"。
+MIR 的闭包表因此多带一列 `capTypes`（类型码）：C 那条腿从 OIR 取类型，LLVM 只看 MIR。
+
+收益（量的）：`tests/cases/21_null_fn_call.omni` 进了 `tests/llvm/supported.js` ——
+**Omni 语法的 lambda 现在能走 AOT 与 JIT 两条 LLVM 路**，四方（jit/aot/interp/omni-c）
+逐字节相同。`tests/sexpr/cases/15-fnvalues` 五条腿一致，`bad/fn-null` 钉住那句判空
+（不判就是"跳到地址 0"，那是段错误而不是一句话）。
+
 ## 后果与代价
 
 - **依赖 LLVM**：本机 `libLLVM.dylib` 157MB。产物变大，但仍然自带执行器、

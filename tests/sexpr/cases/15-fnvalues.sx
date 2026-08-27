@@ -1,0 +1,51 @@
+;; 函数值（ADR-0010 的 `{fp, c_*}`）在方言里第一次说得出来：类型 `(fnty (T...) R)`、
+;; 声明 `(cfn NAME (捕获) (形参) R …)`、造 `(mkclo NAME v…)`、调 `(callfn E a…)`，
+;; 加上把普通函数当值用的 `(fnref NAME)`。
+;; 量出来的理由：真 base 在场时 304 个 asy examples 里 203 个第一个撞的就是
+;; math.asy:446 的 `real findroot(real f(real), …)` —— 函数类型的形参。
+(module
+  (fn twice ((x int)) int
+    (ret (bin "*" (var x) (int 2))))
+  ;; 捕获是**按值**抓的：mkclo 那一刻求一次存进记录，所以循环里造的三个各拿自己那一份。
+  (cfn addk ((k int)) ((x int)) int
+    (ret (bin "+" (var x) (cap k))))
+  (cfn scale ((f real)) ((x real)) real
+    (ret (bin "*" (var x) (cap f))))
+  ;; 函数值当形参：这一条就是 asy 那 203 个 examples 撞的形状。
+  (fn apply ((f (fnty (int) int)) (v int)) int
+    (ret (callfn (var f) (var v))))
+  ;; 也能当返回值。
+  (fn adder ((k int)) (fnty (int) int)
+    (ret (mkclo addk (var k))))
+  (fn sum3 ((f (fnty (int) int))) int
+    (ret (bin "+" (bin "+" (callfn (var f) (int 1)) (callfn (var f) (int 2)))
+                  (callfn (var f) (int 3)))))
+  (main
+    (let g (fnty (int) int) (fnref twice))
+    (print (callfn (var g) (int 21)))
+    (let h (fnty (int) int) (mkclo addk (int 10)))
+    (print (callfn (var h) (int 5)))
+    (print (call apply (var g) (int 4)))
+    (print (call apply (var h) (int 4)))
+    (print (call sum3 (var g)))
+    (print (call sum3 (var h)))
+    ;; 返回出来的闭包
+    (let p (fnty (int) int) (call adder (int 100)))
+    (print (callfn (var p) (int 7)))
+    ;; real 的那一份，证明签名不是只有 int 一种
+    (let q (fnty (real) real) (mkclo scale (real 2.5)))
+    (print (callfn (var q) (real 4.0)))
+    ;; 循环里造的三个闭包各自一份捕获
+    (let a (arr int) (anew (arr int) (int 0)))
+    (let i int (int 0))
+    (while (bin "<" (var i) (int 3))
+      (do
+        (let c (fnty (int) int) (mkclo addk (var i)))
+        (apush (var a) (callfn (var c) (int 100)))
+        (set i (bin "+" (var i) (int 1)))))
+    (print (aget (var a) (int 0)))
+    (print (aget (var a) (int 1)))
+    (print (aget (var a) (int 2)))
+    ;; 重新赋值：函数值就是一个普通的值
+    (set g (mkclo addk (int 1)))
+    (print (callfn (var g) (int 41)))))

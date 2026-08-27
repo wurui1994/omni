@@ -55,9 +55,15 @@ class ToMir {
     // 核心方言的模块级变量（第二十四刀）：同一个全局池，先按声明顺序登记，
     // 全局号因此是稳定的（bytes.js 的哈希要它稳定）。
     for (const g of this.oir.globals ?? []) m.setGlobalTy(m.globalNo(g.name), this.ty(g.type));
-    // 闭包模板先登记：MakeClosure 要按 make 名字查号，而它可能出现在模板之前
+    // 闭包模板先登记：MakeClosure 要按 make 名字查号，而它可能出现在模板之前。
+    // capTypes 是捕获的**类型码**：C 那条腿从 OIR 上取类型，但 LLVM 那条腿只看 MIR，
+    // 而它要按这份布局发闭包记录的命名类型（`%clo_0 = type { ptr, i64 }`）。
     for (const c of this.oir.closures ?? []) {
-      m.closures.push({ make: c.make, funcName: c.mangled, captures: c.captures.map((x) => x.name) });
+      m.closures.push({
+        make: c.make, funcName: c.mangled,
+        captures: c.captures.map((x) => x.name),
+        capTypes: c.captures.map((x) => this.ty(x.type)),
+      });
     }
     this.closureNo = new Map();
     for (let i = 0; i < m.closures.length; i++) this.closureNo.set(m.closures[i].make, i);
