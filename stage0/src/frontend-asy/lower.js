@@ -798,6 +798,12 @@ class AsyLower {
       const r = asyUnwrapMod(this, item);
       if (!isList(r)) continue;
       const h = head(r);
+      // 体里的**嵌套 struct**（第三十九刀）也算这一族：它起的那个名字同样只在体里可见，
+      // 同样是顺序的。放进 late 是为了"写在后面"那句诊断说得对（asy 报 "no type of name"）。
+      if (h === 'recorddec') {
+        if (isAtom(r.items[1])) out.set(r.items[1].value, true);
+        continue;
+      }
       if (h === 'typedec-using') {
         const s = r.items[1];
         if (isList(s) && isAtom(s.items[1])) out.set(s.items[1].value, true);
@@ -916,6 +922,13 @@ class AsyLower {
 
   /** 别的模块里的 struct，但这个文件没把它 import 进来（asy 那边也是 "no type of name"） */
   recElsewhere(node, nm) {
+    // 嵌套 struct（第三十九刀）：名字在全局那张表里，但它是**某个 struct 体里**声明的，
+    // 体外看不见。asy 那边同样报 "no type of name"，所以这也是 err；只是理由要说对。
+    const r = this.records.get(nm);
+    if (r !== undefined && r.inRec !== undefined) {
+      return this.err(node, `'${nm}' 是 struct ${r.inRec} 体里声明的类型，体外看不见`
+        + `（那边报 "no type of name '${nm}'"）`);
+    }
     return this.err(node, `'${nm}' 是另一个模块里的 struct，这个文件没有把它引进来 ——`
       + ` \`access m;\` 只给限定名，要裸用得写 \`import m;\`（那边报 "no type of name '${nm}'"）`);
   }
@@ -980,7 +993,7 @@ class AsyLower {
    * struct 里也有 `who()`，方法体里调到的是后者）。
    * 门外的一条：把方法当值取出来（`int f() = a.late;` asy 收）—— 那要闭包（绑住接收者）。
    */
-  recordDec(n, at) {
+  recordDec(n, at, outerAl) {
     const nm = isAtom(n.items[1]) ? n.items[1].value : null;
     if (nm === null) return this.nope(n, '没有名字的 struct');
     if (SCALARS.has(nm) || nm === 'pair' || nm === 'triple' || nm === 'void') {
@@ -1017,10 +1030,52 @@ class AsyLower {
     // 所以开关放在这一层，与 this.at 那一对并排
     const keepAl = this.recAlias;
     this.recAlias = { map: rec.tyAlias, bi: 0, late: this.aliasNames(n) };
+    // 嵌套 struct（第三十九刀）：**外层体里那些名字**在里面也认。量出来的样子是
+    // plain_picture.asy:207 那条 `using drawerBound3=…`，紧接着的 `struct node3` 拿它
+    // 当字段类型（`:211`）。抄进这份自己的表、位置记 -1（体里第 0 项之前就可见），
+    // 于是方法体那条路（decls.js 里按 cand.abi 摆 recAlias）跟着白捡。
+    if (outerAl !== undefined && outerAl !== null) {
+      for (const kv of outerAl.map) {
+        if (kv[1].bi < outerAl.bi) rec.tyAlias.set(kv[0], { t: kv[1].t, bi: -1 });
+      }
+    }
     const out = this.recordBody(n, rec, at);
     this.recAlias = keepAl;
     this.at = keepAt;
     return out;
+  }
+
+  /**
+   * struct 体里的嵌套 struct（第三十九刀）。降法：**当一条普通的记录声明**（真名走
+   * recUniq，所以撞了就打散），只是那个名字**不留在这个单元的表里** —— 它进外层那张
+   * 体内别名表（`rec.tyAlias`，与 `using` 同一张、同一条 bi 规矩），于是体里从这一项
+   * 之后认得它，体外一样是"没有这个类型"。
+   *
+   * recVis 那一份是 recordDec 塞的（嵌套的体里要认自己的名字，比如 `B copy()`），
+   * 所以是**先让它塞、回来再撤**，撤成原来那份（外面可能本来就有一个同名的类型）。
+   *
+   * 最后把**外层那条记录挪到后面**：方言要求字段的类那一条先声明，而 records 是按插入
+   * 顺序发的，外层先进去、嵌套的后进去，不挪就是 `(class A (b B))` 排在 `(class B …)`
+   * 前面。Map 没有"重排"，删掉再塞一遍就到末尾了。
+   */
+  recNested(n, outer, at) {
+    const bn = isAtom(n.items[1]) ? n.items[1].value : null;
+    if (bn === null) return this.nope(n, '没有名字的 struct');
+    const al = this.recAlias;
+    const had = this.recVis.get(bn);
+    // recordDec 成功也回 null（那个返回值只有"体走完了"的意思），所以失败要看诊断有没有多
+    const mark = this.diags.errorCount();
+    this.recordDec(n, at, al);
+    const e = this.recVis.get(bn);
+    if (had === undefined) this.recVis.delete(bn);
+    else this.recVis.set(bn, had);
+    if (e === undefined || this.diags.errorCount() > mark) return null;
+    al.map.set(bn, { t: e.rec.name, bi: al.bi });
+    // 体外那句诊断要说得对（见 recElsewhere）：这个类型是**某个 struct 体里**声明的
+    e.rec.inRec = outer.name;
+    this.records.delete(outer.name);
+    this.records.set(outer.name, outer);
+    return true;
   }
 
   /** recordDec 的体（分出来只为了那句 this.at 现设现还） */
@@ -1075,6 +1130,16 @@ class AsyLower {
         if (this.typeDec(r, at) === null) return null;
         continue;
       }
+      // struct 体里的 **struct 声明**（第三十九刀）：那是一个只在这个体里可见的类型名。
+      // 量过 asy 那边：体里当字段、当数组元素、方法里 `new B` 全通；体外裸写 `B` 报
+      // "no type of name 'B'"；`private` 的写 `A.B` 报 "accessing private field outside
+      // of structure"，不 private 的 `new A.B` 报 "allocation of struct 'B' is not in a
+      // valid scope"（三条都退 1）。plain_bounds.asy:88 的 transformedBounds 与
+      // plain_picture.asy:210 的 node3 都是这一条。它不占成员槽（不是字段也不是方法）。
+      if (head(r) === 'recorddec') {
+        if (this.recNested(r, rec, at) === null) return null;
+        continue;
+      }
       if (head(r) !== 'vardec') {
         // struct 体里的**语句**（第三十六刀）：asy 的 struct 体其实就是一个 block ——
         // 量过它是**每个实例**构造时按体内顺序跑一遍，而且能裸读写前面的成员
@@ -1083,7 +1148,7 @@ class AsyLower {
         // 名字的可见性与字段默认值同一条（量过后面的字段/方法都报 "no matching variable"），
         // 所以这里只记下位置，正文在 recNew 里与字段默认值**同一串**里发。
         // collections/map.asy:115 的 `map.size = new int() { return size; };` 靠这一条。
-        this.records.get(nm).stmts.push({ node: r, mat: mat });
+        this.records.get(nm).stmts.push({ node: r, mat: mat, bi: bi - 1 });
         mat++;
         continue;
       }
@@ -1126,7 +1191,8 @@ class AsyLower {
         if (fn === null) return this.err(start, '字段少了名字');
         if (seen.has(fn)) return this.err(d, `struct ${nm} 里有两个字段叫 '${fn}'`);
         seen.set(fn, true);
-        fields.push({ name: fn, type: fty, def: d.items[2] === undefined ? null : d.items[2], mat: mat });
+        fields.push({ name: fn, type: fty, def: d.items[2] === undefined ? null : d.items[2], mat: mat,
+          bi: bi - 1 });
       }
       // 一条 vardec 可以声明好几个字段，它们在 asy 那边是**同一步**（互相看不见），
       // 所以 mat 是按声明语句加一，不是按字段加一。
@@ -1219,9 +1285,12 @@ class AsyLower {
    * **同一串**，可见位置也按同一条规矩（这一条的成员号）。回 false 表示这一条没降下来。
    */
   recStmt(s, rec, lines, saveSelf) {
+    const saveAl = this.recAlias;
     this.self = { rec: rec, mat: s.mat };
+    this.recAlias = { map: rec.tyAlias, bi: s.bi === undefined ? 0 : s.bi };
     const out = asyStmt(this, s.node, 'void');
     this.self = saveSelf;
+    this.recAlias = saveAl;
     if (out === null) return false;
     for (const l of out) lines.push(l);
     return true;
@@ -1250,6 +1319,7 @@ class AsyLower {
     const saveScopes = this.scopes;
     const saveAt = this.at;
     const saveSelf = this.self;
+    const saveAl = this.recAlias;
     if (rec.at !== undefined) this.at = rec.at;
     this.scopes = [new Map()];
     this.updates = [];
@@ -1285,10 +1355,14 @@ class AsyLower {
         }
         continue;
       }
-      // 这一格的可见位置就是它自己的成员号（mat）
+      // 这一格的可见位置就是它自己的成员号（mat）；体里 `using` 与嵌套 struct 起的名字
+      // 按体里的**项**号裁（第三十九刀：`B b = new B;` 里那个 `new B` 走的是 type()，
+      // 而 type() 认体内别名要靠 recAlias —— 以前这一串没摆它，于是默认值里用不上）
       this.self = { rec: rec, mat: f.mat };
+      this.recAlias = { map: rec.tyAlias, bi: f.bi === undefined ? 0 : f.bi };
       const v = asyCoerce(this, asyExpr(this, f.def), f.type, f.def, `字段 '${t}.${f.name}' 的默认值`);
       this.self = saveSelf;
+      this.recAlias = saveAl;
       if (v === null) { bad = true; break; }
       lines.push(`(fldset (var this) ${f.name} ${v.code})`);
     }

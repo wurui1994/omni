@@ -1,0 +1,1 @@
+'Inner' 是 struct Outer 体里声明的类型，体外看不见（那边报 "no type of name 'Inner'"）

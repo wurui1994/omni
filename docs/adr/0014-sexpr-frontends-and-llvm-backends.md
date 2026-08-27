@@ -3270,6 +3270,50 @@ asy 的 struct 体其实就是一个 **block**。量出来的四条：
 `tests/bootstrap`。只动 `frontend-asy/`（lower.js、decls.js、modules.js），tests/sexpr
 跳掉 —— 方言与后端没碰。
 
+### struct 体里的 struct：只在这个体里可见的类型名
+
+上一刀之后 `import plain;` 剩的两块砖是同一个洞：`plain_bounds.asy:88` 的
+`private static struct transformedBounds`、`plain_picture.asy:210` 的 `struct node3` ——
+**struct 体里再声明一个 struct**。第三十六刀那条"体里的语句"把它们悄悄收进了 `rec.stmts`，
+所以直到有人拿那个名字当类型（`transformedBounds[]` / `node3[]`）才炸。
+
+量过的四条（真 asy）：
+
+- 体里当字段、当**数组元素**、方法里 `new Inner` 全通；
+- 体外裸写 `Inner` -> "no type of name 'Inner'"；
+- `private` 的写 `Outer.Inner` -> "accessing private field outside of structure"；
+- 不 private 的写 `new Outer.Inner` -> "allocation of struct 'Inner' is not in a valid
+  scope"（后三条都退 1 —— 体外那一族仍然全拒，第一条进了 `strict/`）。
+
+落地只有一句话：**当一条普通的记录声明降**（真名走上一刀的 `recUniq`，撞了就打散），
+只是那个名字不留在单元的 `recVis` 里，而是进**外层那张体内别名表**（`rec.tyAlias`，
+与 `using` 同一张、同一条"按体里项号排"的规矩）。`recVis` 那一份是 `recordDec` 塞的
+（嵌套的体里要认自己的名字），所以是先让它塞、回来再撤成原来那份。
+
+顺着这条路又拽出三件必须一起做的事，每一件都是量出来的：
+
+- **发的顺序**。方言要求字段的类先声明，而记录是按插入顺序发的 —— 外层先进表、嵌套的
+  后进，于是 `(class Outer (a Inner))` 排在 `(class Inner …)` 前面。Map 没有"重排"，
+  把外层删掉再塞一遍就到末尾了。
+- **字段默认值里的体内别名**。`Inner a = new Inner;` 那个 `new Inner` 走 `type()`，而
+  `type()` 认体内别名要靠 `recAlias` —— 生成构造函数那一串（`recNew`）以前没摆它。
+  摆上之后要按位置裁，所以字段与体里的语句都多记一个 `bi`（体里的项号）。
+- **外层体里先起的名字，在嵌套的体里也认**。`plain_picture.asy:207` 那条
+  `using drawerBound3=…` 紧接着就被 `struct node3` 当字段类型（`:211`）。做法是把外层
+  此处可见的那几条抄进嵌套那份表、位置记 -1，于是方法体那条路（按 `cand.abi` 摆
+  `recAlias`）跟着白捡。
+
+诊断也跟着改了一句：名字在全局记录表里、但它是某个 struct 体里声明的，那句话要说
+"'Inner' 是 struct Outer 体里声明的类型，体外看不见"，不能再说"另一个模块里的 struct"。
+
+`import plain;` 4 -> **3**（`plain_picture.asy` 整个文件过了，剩 `plain_bounds.asy:111`
+struct 体里的算符重载、`:657` 的 `var`、`plain.asy:67` 返回函数类型）。`import graph;`
+还是 182。
+
+跑的轴：`tests/asy`（144 passed，47.4s）、`tests/run.js`、`tests/bootstrap`。
+只动 `frontend-asy/lower.js`，tests/sexpr 跳掉 —— 方言与后端没碰。
+
+
 
 
 
