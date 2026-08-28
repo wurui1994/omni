@@ -223,13 +223,20 @@ export function asyStmtOne(L, n, ret) {
     return [`(if ${c.code} (do ${t.join(' ')}) (do ${e.join(' ')}))`];
   }
   if (h === 'while') {
+    // 条件里摊出来的语句要单独收着：循环条件**每轮都得重算**，摊在循环外面就只算一次。
+    const savePre = L.pre;
+    L.pre = [];
     const c = L.coerce(L.expr(n.items[1]), 'bool', n, 'while 的条件');
-    if (asyLoopCond(L, n, 'while', 0) === null) return null;
+    const cpre = L.pre;
+    L.pre = savePre;
     L.updates.push([]);
     const b = asyStmt(L, n.items[2], ret);
     L.updates.pop();
     if (c === null || b === null) return null;
-    return [`(while ${c.code} (do ${b.join(' ')}))`];
+    if (cpre.length === 0) return [`(while ${c.code} (do ${b.join(' ')}))`];
+    // 有摊出来的语句（`while ((i = find(s,d,last)) >= 0)`、条件里的 `?:`）：搬到循环体的
+    // **开头**，判假就 break。`continue` 跳到循环顶、也会重新算一遍 —— 与 asy 一致。
+    return [`(while (bool true) (do ${cpre.join(' ')} (if (un "!" ${c.code}) (do (brk))) ${b.join(' ')}))`];
   }
   if (h === 'do') return asyDoWhile(L, n, ret);
   if (h === 'for') return asyForStmt(L, n, ret);
@@ -527,6 +534,23 @@ export function asyAssign(L, node, lhs, rhs, op) {
     if (sq !== null) {
       const bn = L.plainName(lhs.items[1].items[1]);
       return asyAssignStat(L, node, `${bn}.${lhs.items[1].items[2].value}`, sq, rhs, op);
+    }
+    // `settings.outformat = "pdf"`：模块限定的文件级变量当赋值目标（读那一路在
+    // name-exp 里，见 modVar）。base 里 plain.asy:13/265/367 与 plain_picture.asy:1694
+    // 都是这么改 settings 的。
+    const mq = L.modAlias(lhs.items[1]);
+    if (mq !== null) {
+      const list = L.units[mq.unit].globals.get(mq.name);
+      if (list === undefined) {
+        return L.nope(node, `模块限定的名字 '${mq.mod}.${mq.name}' 当赋值目标`
+          + '（这一刀的 `m.名字` 只有模块里的文件级变量与函数）');
+      }
+      const mg = list[list.length - 1];
+      if (!mg.ok) {
+        return L.nope(node, `模块限定的文件级变量 '${mq.mod}.${mq.name}' 当赋值目标`
+          + '（这一刀的模块级变量只收 int/real/bool/string）');
+      }
+      return asyAssignStat(L, node, `${mq.mod}.${mq.name}`, mg, rhs, op);
     }
   }
   // `f(x).字段 = v`：接收者不是名字而是一个表达式。asy 收这种（struct 是引用类型，

@@ -23,7 +23,7 @@ import {
 } from './types.js';
 import { ZERO, ASY_PAIRFN, ASY_STRFN, ASY_STR_DEPS, strLit } from './runtime.js';
 import { asyArgs, asyCall, asyVisible, asyJoinExp, asyOpUser, asyOpBuiltinSig, asyIdxOpCall } from './calls.js';
-import { asyFmtStr, asyBody } from './stmts.js';
+import { asyFmtStr, asyBody, asyExprStmt } from './stmts.js';
 
 /* ---------------------------------------------------------------- 表达式 */
 
@@ -420,9 +420,23 @@ export function asyExprList(L, n, h) {
   if (h === 'cast') return asyCast(L, n);
   if (h === 'call') return asyCall(L, n);
   if (h === 'cond') return asyCond(L, n);
-  if (h === 'assign' || h === 'self' || h === 'prefix' || h === 'postfix') {
-    return L.nope(n, `赋值/自增出现在表达式位置（'${h}'）—— 这一刀只认它们当语句`);
+  if (h === 'assign' || h === 'self' || h === 'prefix') {
+    // asy 那边赋值**是表达式**，值就是赋进去的那一个：`x=y=z=0`（plain_picture.asy:185）、
+    // `while((i=find(s,d,last)) >= 0)`（plain_strings.asy:102）都靠这条。
+    // 这一层的做法：把它当**语句**摊进 this.pre，再把左边读一遍当值 ——
+    // 所以只在"左边重读一遍没有副作用"时收（名字、名字的字段、名字下标的常量格）。
+    if (!Array.isArray(L.pre)) return L.nope(n, `这个位置的赋值当表达式（'${h}' 要摊成语句，这里放不下）`);
+    const tgt = h === 'assign' ? n.items[1] : n.items[2];
+    if (!asyRereadable(tgt)) return L.nope(n, `赋值当表达式：左边不是能再读一遍的东西（'${h}'）`);
+    const lines = asyExprStmt(L, n);
+    if (lines === null) return null;
+    for (const s of lines) L.pre.push(s);
+    return asyExpr(L, tgt);
   }
+  if (h === 'postfix') {
+    return L.err(n, 'asy 自己就不收后缀 ++/--（postfix expressions are not allowed）：写成 ++x');
+  }
+
   if (h === 'tuple-exp') return asyPairLit(L, n);
   if (h === 'subscript') return asyIndex(L, n);
   if (h === 'slice-exp') return asySlice(L, n);
@@ -1188,6 +1202,22 @@ export function asyCond(L, n) {
   L.pre.push(`(let ${nm} ${asyCore(t)} ${init})`);
   L.pre.push(`(if ${c.code} (do ${yes}) (do ${no}))`);
   return { code: `(var ${nm})`, type: t };
+}
+
+/**
+ * 这个赋值目标能不能**再读一遍**（读第二遍不会有副作用、也不会多求一次调用）。
+ * 赋值当表达式那一档靠它：语句摊出去之后要把左边读回来当值。
+ * 收：名字、`this`、名字/this 的字段、名字下标（下标本身也要能重读）。
+ */
+export function asyRereadable(t) {
+  if (isAtom(t)) return true;              // 字面量与词法给的名字：读第二遍不花代价
+  if (!isList(t)) return false;
+  const h = head(t);
+  if (h === 'name-exp' || h === 'this') return true;
+  if (h === 'field') return asyRereadable(t.items[1]);
+  if (h === 'subscript') return asyRereadable(t.items[1]) && asyRereadable(t.items[2]);
+  if (h === 'int-lit' || h === 'real-lit' || h === 'string-lit' || h === 'bool-lit') return true;
+  return false;
 }
 
 export function asyLogic(L, n, op) {

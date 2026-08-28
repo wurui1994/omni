@@ -3574,6 +3574,35 @@ base 里 `reverse(a)` 就是 `a[reverse(a.length)]`）、`a.append(b)`、`(strin
 数字：`import plain;` 380 → 309，`import graph;` 181 → 153。tests/asy 151 条、
 tests/run.js 91 条都是绿的。
 
+### 赋值是表达式：摊成语句再把左边读回来；循环条件跟着换了个编码
+
+asy 那边赋值**是表达式**，值就是赋进去的那一个。base 里两种写法都靠这条：
+`x=y=z=0`（plain_picture.asy:185）与 `while((i=find(s,d,last)) >= 0)`
+（plain_strings.asy:102）。
+
+做法是"摊成语句再读回来"：把这个赋值当语句降一遍（复用 `asyExprStmt`），
+把出来的行摊进 `this.pre`，然后把**左边**当表达式读一遍作为这个表达式的值。
+能这么做的前提是左边**重读一遍没有副作用**，所以加了一条 `asyRereadable`：
+名字、`this`、名字的字段、名字下标（下标本身也要能重读）收，含调用的一律不收 ——
+不收比"把 `f(i).n = v` 里的 f 调两次"强，那种错静悄悄。
+
+`while` 的条件因此换了编码。原来条件里摊出语句就报错（`asyLoopCond`），理由写的是
+"摊出来的只能落在循环外面，那样条件只算一次"。现在条件的 `pre` 单独收着，非空时发的是：
+
+```
+(while (bool true) (do <条件摊出来的语句…> (if (un "!" 条件) (do (brk))) <循环体…>))
+```
+
+条件的计算落在循环体的**开头**，所以每轮都重算；`continue` 跳到循环顶，也会重新算 ——
+与 asy 一致（`cases/80-loop-cond-stmts` 里第三段就钉这一条：`while((j=j+1) < 5)`
+里 `continue` 之后 j 照样往前走，印 8）。原来那个 `bad/cond-in-loop` 因此升成用例。
+
+同一批还补了**限定名当赋值目标**（`settings.outformat = "pdf"`）：读那一路一直有
+（`modVar`），写这一侧照 static 字段那条走 `asyAssignStat` —— 模块里的文件级变量就是一个
+全局，落的是 `(set 符号 值)`。`bad/mod-qassign` 也升成用例。
+
+数字：`import plain;` 309 → 300。tests/asy 153 条全绿。
+
 ## 后果与代价
 
 
