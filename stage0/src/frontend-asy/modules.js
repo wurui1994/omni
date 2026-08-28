@@ -251,6 +251,10 @@ export function asyModStmt(L, n, at) {
     }
     return null;
   }
+  // `unravel x;`：x 也可以是**一格文件级记录变量**（不是模块）。这一遍判不了 ——
+  // 文件级变量是下一个循环（asyGlobalNames）才登记的 —— 所以整条往后放，交给正文
+  // 那一遍的 asyStmt（见 asyBodyPass 里 ASY_MODSTM 那一句），报错也在那边报一次。
+  if (h === 'unravel') return null;
   return L.nope(n, `模块声明 '${h}'`);
 }
 

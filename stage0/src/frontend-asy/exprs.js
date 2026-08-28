@@ -76,6 +76,9 @@ export function asyLit(L, n) {
 export function asyNameOf(L, n, nm) {
   const t = L.lookup(nm);
   if (t !== null) {
+    // `unravel x;` 摊出来的名字：它是 x 的一个字段的**别名**（见 declareAlias）
+    const al = L.aliasOf(nm);
+    if (al !== null) return { code: `(fld ${al.recv} ${al.field})`, type: al.type };
     // 同名的**函数**也要带上（第六十二刀）：asy 的名字是按签名查的 —— 一个 `real min`
     // 与几个 `real min(real,real)` 在同一个作用域里共存，是哪一个由**目标类型**定案。
     // 原型是 plain_picture.asy:428 的

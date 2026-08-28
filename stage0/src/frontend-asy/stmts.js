@@ -15,7 +15,7 @@
 
 import { isList, isAtom, head } from '../sexpr/read.js';
 import {
-  ASY_NOPE, DOT_BAD, ASY_ARRELEM_TEXT, asyOpText, asyIsArr, asyElem, asyIsFn, asyCore, ASY_NULL,
+  ASY_NOPE, DOT_BAD, ASY_ARRELEM_TEXT, ASY_FILLER, asyOpText, asyIsArr, asyElem, asyIsFn, asyCore, ASY_NULL,
 } from './types.js';
 import { ZERO } from './runtime.js';
 import { asyArgs, asyCall, asyOpUser, asyOpBuiltinSig, asyIdxOpCall, asyVisible, asyUserCall } from './calls.js';
@@ -289,7 +289,46 @@ export function asyStmtOne(L, n, ret) {
     const v = L.coerce(L.expr(n.items[1]), ret, n, 'return 的值');
     return v === null ? null : [`(ret ${v.code})`];
   }
+  if (h === 'unravel') {
+    const uv = asyUnravelVar(L, n);
+    if (uv !== undefined) return uv;
+    return L.nope(n, '`unravel` 这一句（这一刀只摊一格记录变量的字段，摊模块还没做）');
+  }
   return L.nope(n, `语句 '${h}'`);
+}
+
+/**
+ * `unravel x;`：把**一格记录**的成员摊进当前作用域（collections/iter.asy:17 的
+ * `unravel retv;`、plain.asy:172 同样）。asy 那边摊出来的名字是**别名** —— 读、调用、
+ * 赋值都作用在 x 的那个字段上，所以 `advance = new void() {…};` 装的是 `retv.advance`。
+ *
+ * 落法：名字进作用域（类型查得到），另记一条"它其实是 x 的哪个字段"（declareAlias），
+ * nameOf / call / assign 三处各问一句 aliasOf。发出去的语句是**空的** —— 这一句只改作用域。
+ *
+ * 这一刀只摊**字段**（含"没有体的方法声明"那种函数类型的字段 —— iter.asy 要的正是它）。
+ * 摊有体的方法要一格绑好接收者的闭包，那是另一刀。名字不是一格记录时回 undefined，
+ * 让上面那句去报"语句 'unravel'"（`unravel 模块名;` 就落在那儿）。
+ */
+function asyUnravelVar(L, n) {
+  const nm = L.plainName(n.items[1]);
+  const wild = isList(n.items[2]) && head(n.items[2]) === 'wildcard';
+  if (nm === null || !wild) return undefined;
+  let code = null;
+  let ty = L.lookup(nm);
+  if (ty !== null) code = `(var ${nm})`;
+  else {
+    const g = L.gvarHere(nm);
+    if (g === null || !g.ok) return undefined;
+    ty = g.type;
+    code = `(var ${g.sym})`;
+  }
+  const rec = L.recOf(ty);
+  if (rec === null) return undefined;
+  for (const f of rec.fields) {
+    if (f.name === ASY_FILLER) continue;
+    if (L.declareAlias(n, f.name, f.type, code, ty, f.name) === null) return null;
+  }
+  return [];
 }
 
 /**
@@ -637,6 +676,14 @@ export function asyAssign(L, node, lhs, rhs, op) {
   // 文件级变量的两者不同：它降成了一个全局，符号名带前缀（第二十四刀）。
   let sym = nm;
   let t = L.lookup(nm);
+  // `unravel x;` 摊出来的名字：赋值落在 x 的那个字段上（见 declareAlias）
+  if (t !== null) {
+    const al = L.aliasOf(nm);
+    if (al !== null) {
+      return asyAssignFld(L, node,
+        { recv: { code: al.recv, type: al.rty }, field: al.field }, rhs, op);
+    }
+  }
   if (t === null) {
     // 方法体里给裸字段名赋值（第二十刀）：`x += k` 就是 `L.x += k`
     const sf = L.selfField(nm);

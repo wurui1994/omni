@@ -4506,6 +4506,36 @@ save/restore 那一套就是这么搭的 —— 每次 save 把当前的 restore
 collections 那一族剩下的两格是 `unravel`（把一格记录的成员摊进当前作用域）与
 `for (T x : iterable)`（走 `operator iter` 那套协议）—— 各是一刀。
 
+### `unravel x;`：摊出来的名字是**别名**，不是副本
+
+`unravel x;` 把一格记录的成员摊进当前作用域（`collections/iter.asy:17` 的 `unravel retv;`、
+`plain.asy:172` 同样）。要紧的是它**不是复制**：量过 asy 那边写 `a = 7;` 改的正是 `x.a`，
+调 `f(2)` 调的正是 `x.f`。所以落法不是"新开几格再抄回去"，而是在作用域里记一条**别名**：
+`declareAlias(名字, 类型, 接收者代码, 字段)` 让 `lookup` 查得到类型，另存一张
+`\0al:名字 -> {recv, rty, field}`；名字解析（`asyNameOf`）、调用（`asyCall` 的函数值那支）、
+赋值（`asyAssign`）三处各问一句 `aliasOf`，问着了就换成 `(fld 接收者 字段)` / 走 `asyAssignFld`。
+这一句本身**发不出任何语句**（回 `[]`）—— 它只改作用域。
+
+文件级那一份要绕一下：`unravel` 的头在 `ASY_MODSTM` 里，文件级它先落到 `asyModStmt`，
+而**那一遍还没登记文件级变量**（`asyGlobalNames` 在下一个循环里），判不出 x 是不是一格记录。
+于是 `asyModStmt` 见到 `unravel` 一律放过（回 `null`），改由正文那一遍的 `asyStmt` 收 ——
+摊出来的别名也正好进正文那一层作用域，报错也只报这一处（`bad/mod-unravel` 的话术随之改成
+"这一刀只摊一格记录变量的字段，摊模块还没做"）。
+
+这一刀只摊**字段**，包括"没有体的方法声明"那种函数类型的字段 —— `iter.asy` 要的正是它。
+摊**有体的方法**要一格绑好接收者的闭包（我们的方法是多一个 this 形参的普通函数，没有那一格），
+与"给方法赋值"是同一笔账，留着。
+
+顺带量出来一条：`unravel` 单独**并没有**解开 `collections/iter.asy`。那边 `unravel retv;` 之后
+是 `advance = new void() { ++index; };` —— 闭包里改外层的 `index`。asy 的捕获是**按引用**的，
+而 `(mkclo …)` 按值抓一次，所以这里照旧报"捕获会被改的外层变量"。那一刀要给被捕获且被改的
+局部量装箱，是 for-each 那一族的真正前提。
+
+数字：`import plain;` 60 → 60（`语句 'unravel'` 那 4 条换成了它后面那几条 —— `'index'` 的
+按引用捕获与几处字段赋值，深了一层但没少）。`import graph;` 148 没动。tests/asy 192 条、
+tests/run.js 91 条全绿。新用例 `cases/114-unravel-var`（字段别名、函数类型字段、写穿回去、
+文件级那一份），`bad/mod-unravel` 的期望跟着改了话术。
+
 ## 后果与代价
 
 

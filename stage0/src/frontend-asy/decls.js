@@ -1063,7 +1063,12 @@ export function asyBodyPass(L, u, fns) {
       continue;
     }
     if (head(r) === 'typedec' || head(r) === 'typedec-using') continue;   // 同上（只往别名表里记一条）
-    if (ASY_MODSTM.has(head(r))) continue;      // 同上（没做的那几种在那边报过了）
+    if (ASY_MODSTM.has(head(r))) {
+      // 同上（没做的那几种在那边报过了）。只有 `unravel x;` 例外：它要在**这里**才判得出
+      // x 是不是一格文件级记录变量，摊出来的别名也正好进这一层作用域（发不出语句）。
+      if (head(r) === 'unravel') asyStmt(L, r, 'void');
+      continue;
+    }
     const s = asyStmt(L, r, 'void');
     if (s === null) continue;
     for (const x of s) main.push(x);

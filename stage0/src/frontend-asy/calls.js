@@ -183,6 +183,9 @@ export function asyCall(L, n) {
   // 而 findroot 那种形参正是要遮住同名的文件级函数。
   const lv = L.lookup(nm);
   if (lv !== null && asyIsFn(lv)) {
+    // `unravel x;` 摊出来的名字：调的是 x 那个字段里的函数值
+    const al = L.aliasOf(nm);
+    if (al !== null) return asyFnValCall(L, n, nm, lv, `(fld ${al.recv} ${al.field})`);
     // 但这一格并**不整片遮住**同名的函数：asy 的 venv 是按**签名**逐层找的，一个
     // `real opacity(real[])` 的形参与文件级的 `pen opacity(real, string)` 是两条不同的
     // 签名，能共存。原型是 plain_pens.asy:354 的

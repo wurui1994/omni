@@ -761,6 +761,31 @@ class AsyLower {
     return t;
   }
 
+  /**
+   * `unravel x;` 摊出来的名字：类型照旧进 scopes（查得到），另存一条"它其实是谁的哪个
+   * 字段"。那一条的键上加了一个源码里不可能出现的前缀，所以作用域一 pop 两条一起没。
+   */
+  declareAlias(node, nm, t, recv, rty, field) {
+    if (this.declare(node, nm, t) === null) return null;
+    this.scopes[this.scopes.length - 1].set(`\u0000al:${nm}`, {
+      recv, rty, field, type: t,
+    });
+    return t;
+  }
+
+  /** `nm` 是不是一个摊出来的名字（是就回 `{recv, field, type}`）。只看**找到它的那一层** */
+  aliasOf(nm) {
+    let i = this.scopes.length - 1;
+    while (i >= 0) {
+      if (this.scopes[i].has(nm)) {
+        const a = this.scopes[i].get(`\u0000al:${nm}`);
+        return a === undefined ? null : a;
+      }
+      i--;
+    }
+    return null;
+  }
+
   /* ------------------------------------------------------------------ 类型 */
 
   /** `(name-ty (name int))` -> 'int'；`(array-ty (name int) (dims))` -> 'int[]'；
