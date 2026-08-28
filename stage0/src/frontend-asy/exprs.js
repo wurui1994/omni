@@ -54,7 +54,13 @@ export function asyLit(L, n) {
     if (!L.globals.has(ASY_CYCLE) && L.lookup(ASY_CYCLE) === null) {
       return L.nope(n, "'cycle'（它是绘图层的闭合记号，要 `import plain;`）");
     }
-    return asyNameOf(L, n, ASY_CYCLE);
+    const v = asyNameOf(L, n, ASY_CYCLE);
+    // 记一笔"这个值是写 `cycle` 写出来的"（第五十刀）：三维那一层的 `--` / `..` 收的是
+    // `guide3`（`void(flatguide3)`），而 asy 那边 `cycle` 的类型是 `cycleToken`，靠
+    // `guide3 operator cast(cycleToken)` 接上（three.asy:713）。这一层的 `cycle` 是
+    // 绘图层的一格 path，接不上那条 cast —— 所以在连接那一步留一条退路，见 asyJoinFold。
+    if (v !== null) return { code: v.code, type: v.type, cyc: true };
+    return v;
   }
   // `newframe`（camp.l:407 的 newPictureExp）：与 `cycle` 同一条路子 —— 词法上是 LIT，
   // 语义上是绘图层的一个值。差别在于它每次都得是**新的**一个空 frame，所以约定的名字是
@@ -117,7 +123,7 @@ export function asyNameOf(L, n, nm) {
     if (c !== null) return c;
   }
   const f = L.selfField(nm);
-  if (f !== null) return { code: `(fld (var this) ${asyFldSym(nm)})`, type: f.type };
+  if (f !== null) return { code: `(fld (var this) ${asyFldSym(f.name)})`, type: f.type };
   // struct 体里把**自己的方法**取出来当值（第四十三刀）：`addPath=addPathToEmptyArray;`
   // （plain_bounds.asy:247）。接收者是隐含的 this。位置照 selfField：成员那一档里，
   // 字段之后、文件级之前。static 的体里没有接收者，所以那边不问这一条。
@@ -995,7 +1001,11 @@ function asyJoinFold(L, n, op, lnode, dOut, mid, dIn, rnode) {
   if (op !== '--' && op !== '..') return asyJoinVar(L, n, op, vals, nodes);
   let acc = vals[0];
   for (let i = 1; i < vals.length; i++) {
-    const u = asyOpUser(L, n, op, [acc, vals[i]], null);
+    let u = asyOpUser(L, n, op, [acc, vals[i]], null);
+    // `cycle` 的第二条身份（第五十刀）：接不上时，把写成 `cycle` 的那一格换成
+    // `cycleToken` 再问一遍 —— 三维那一层的 `A--B--cycle` 就是这一条
+    // （three_surface.asy:29 一族）。换过之后还接不上才报。
+    if (u === null) u = asyJoinCyc(L, n, op, acc, vals[i]);
     if (u === null) {
       return L.nope(n, `'${acc.type} ${op} ${vals[i].type}'（内建的 '${op}' 是 guide 的，`
         + `那是绘图层那一刀；自己定义一个 \`operator ${op}\` 是通的）`);
@@ -1003,6 +1013,17 @@ function asyJoinFold(L, n, op, lnode, dOut, mid, dIn, rnode) {
     acc = u;
   }
   return acc;
+}
+
+/** 连接的两边里凡是写成 `cycle` 的，换成一格 `cycleToken` 再试一次（见 asyJoinFold）。 */
+function asyJoinCyc(L, n, op, a, b) {
+  if (a.cyc !== true && b.cyc !== true) return null;
+  if (!L.isRec('cycleToken')) return null;
+  const tok = () => ({ code: L.recInit(n, 'cycleToken'), type: 'cycleToken' });
+  const mark = L.diags.mark();
+  const out = asyOpUser(L, n, op, [a.cyc === true ? tok() : a, b.cyc === true ? tok() : b], null);
+  if (out === null) L.diags.rollback(mark);
+  return out;
 }
 
 /** 已经降好的几个值 -> 对算符名 `nm` 的一次调用（重载解析、隐式转换全跟着白捡）。 */
@@ -1080,10 +1101,29 @@ function asyMidSpec(L, node) {
   const vals = [];
   const nodes = [];
   for (let i = 1; i < node.items.length; i++) {
-    const v = asyCoerce(L, asyExpr(L, node.items[i]), 'pair', node.items[i], "'controls' 的实参");
+    const v = asyExpr(L, node.items[i]);
     if (v === null) return null;
     vals.push(v);
     nodes.push(node.items[i]);
+  }
+  // 实参**先不定型**（第五十刀）：`operator controls` 是重载的 —— 绘图层那份收 pair
+  // （plain_paths.asy），三维那一层另有一份收 triple（three.asy:719）。哪一份由重载解析
+  // 定案。接不上时再按 pair 那份报一句 —— 绝大多数写错的情形就是它。
+  const mark = L.diags.mark();
+  const savePre = L.pre;
+  L.pre = [];
+  const out = asyOpNameCall(L, node, 'operator controls', vals, nodes);
+  const pre = L.pre;
+  L.pre = savePre;
+  if (out !== null) {
+    for (const p of pre) L.pre.push(p);
+    return out;
+  }
+  L.diags.rollback(mark);
+  for (let i = 0; i < vals.length; i++) {
+    const v = asyCoerce(L, vals[i], 'pair', nodes[i], "'controls' 的实参");
+    if (v === null) return null;
+    vals[i] = v;
   }
   return asyOpNameCall(L, node, 'operator controls', vals, nodes);
 }
@@ -1211,7 +1251,7 @@ export function asyDotQual(L, node) {
     }
     // 方法体里的裸字段名当接收者（第二十刀）：`inner.get()` 里的 inner 是 this 的字段
     const sf = L.selfField(base);
-    if (sf !== null) return { recv: { code: `(fld (var this) ${asyFldSym(base)})`, type: sf.type }, field: f };
+    if (sf !== null) return { recv: { code: `(fld (var this) ${asyFldSym(sf.name)})`, type: sf.type }, field: f };
     // 文件级变量当接收者（第三十刀）：`currentpicture.nodes` 这一族。次序与 name-exp
     // 那边一致 —— 局部、this 的字段、文件级，三档。
     const g = L.gvarHere(base);
@@ -1315,7 +1355,7 @@ export function asyMember(L, n, recv, nm) {
     const mv = L.methodValAt(n, recv, nm);
     if (mv !== undefined) return mv;
     const f = L.recField(n, recv.type, nm);
-    return f === null ? null : { code: `(fld ${recv.code} ${asyFldSym(nm)})`, type: f.type };
+    return f === null ? null : { code: `(fld ${recv.code} ${asyFldSym(f.name)})`, type: f.type };
   }
   if (recv.type === 'pair') {
     if (nm === 'x') return { code: `(lane ${recv.code} 0)`, type: 'real' };
@@ -1830,6 +1870,10 @@ export function asyArith(L, n, op, a, b) {
   // 两边各绑一个临时量，再用短路的 `&&` 去看它们 —— 求值就都发生过了。
   if (op === '&' || op === '|') {
     if (a.type !== 'bool' || b.type !== 'bool') {
+      // `cycle` 的第二条身份（第五十刀）：`p & cycle` 在三维那一层接的是
+      // `path3 operator &(path3, cycleToken)`（three.asy:1806）。见 asyJoinCyc。
+      const cy = asyJoinCyc(L, n, op, a, b);
+      if (cy !== null) return cy;
       return L.nope(n, `'${a.type} ${op} ${b.type}'（bool 上的 `
         + `\`${op}\` 是不短路的${op === '&' ? '与' : '或'}，别的类型要自己定义一个 \`operator ${op}\`）`);
     }

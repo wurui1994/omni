@@ -4251,9 +4251,344 @@ int ascii(string s) {
   return -1;
 }
 
+// ---- 度数三角（runpair.in:125+）：三维那一层与 labelpath3 要它 ----
+// 90 度的整数倍上给**精确**值（C++ 那边就是这么分档的），别的照弧度算。
+real Sin(real deg) {
+  int n = (int) (deg / 90.0);
+  if (deg == n * 90.0) {
+    int m = n % 4;
+    if (m < 0) m += 4;
+    if (m == 1) return 1;
+    if (m == 3) return -1;
+    return 0.0;
+  }
+  return sin(radians(deg));
+}
+real Cos(real deg) {
+  int n = (int) (deg / 90.0);
+  if (deg == n * 90.0) {
+    int m = n % 4;
+    if (m < 0) m += 4;
+    if (m == 0) return 1;
+    if (m == 2) return -1;
+    return 0.0;
+  }
+  return cos(radians(deg));
+}
+real Tan(real deg) {
+  int n = (int) (deg / 90.0);
+  if (deg == n * 90.0) {
+    int m = n % 4;
+    if (m < 0) m += 4;
+    if (m == 1) return inf;
+    if (m == 3) return -inf;
+    return 0.0;
+  }
+  return tan(radians(deg));
+}
+real aSin(real x) { return degrees(asin(x)); }
+real aCos(real x) { return degrees(acos(x)); }
+real aTan(real x) { return degrees(atan(x)); }
+// ---- 三次 Bézier 的求值与前三阶导（runpair.in:245+ / runtriple.in:146+）----
+// three_surface.asy 拿它们算面上的点与法向；式子照 C++ 那边逐项抄，不重排。
+pair bezier(pair a, pair b, pair c, pair d, real t) {
+  real onemt = 1 - t;
+  real onemt2 = onemt * onemt;
+  return onemt2 * onemt * a + t * (3.0 * (onemt2 * b + t * onemt * c) + t * t * d);
+}
+pair bezierP(pair a, pair b, pair c, pair d, real t) {
+  return 3.0 * (t * t * (d - a + 3.0 * (b - c)) + t * (2.0 * (a + c) - 4.0 * b) + b - a);
+}
+pair bezierPP(pair a, pair b, pair c, pair d, real t) {
+  return 6.0 * (t * (d - a + 3.0 * (b - c)) + a + c) - 12.0 * b;
+}
+pair bezierPPP(pair a, pair b, pair c, pair d) {
+  return 6.0 * (d - a) + 18.0 * (b - c);
+}
+triple bezier(triple a, triple b, triple c, triple d, real t) {
+  real onemt = 1 - t;
+  real onemt2 = onemt * onemt;
+  return onemt2 * onemt * a + t * (3.0 * (onemt2 * b + t * onemt * c) + t * t * d);
+}
+triple bezierP(triple a, triple b, triple c, triple d, real t) {
+  return 3.0 * (t * t * (d - a + 3.0 * (b - c)) + t * (2.0 * (a + c) - 4.0 * b) + b - a);
+}
+triple bezierPP(triple a, triple b, triple c, triple d, real t) {
+  return 6.0 * (t * (d - a + 3.0 * (b - c)) + a + c) - 12.0 * b;
+}
+triple bezierPPP(triple a, triple b, triple c, triple d) {
+  return 6.0 * (d - a) + 18.0 * (b - c);
+}
+// v 里垂直于**单位向量** u 的那一份（triple.h:364）
+triple perp(triple v, triple u) { return v - dot(v, u) * u; }
+// 四阶齐次变换矩阵把一个三维点投到平面上（runarray.in:1472）：第四行是透视那一行
+pair project(triple v, real[][] t) {
+  if (t.length != 4) abort("project: 要 4x4 的变换");
+  real f = t[3][0] * v.x + t[3][1] * v.y + t[3][2] * v.z + t[3][3];
+  if (f == 0.0) abort("project: 除以零");
+  f = 1.0 / f;
+  return ((t[0][0] * v.x + t[0][1] * v.y + t[0][2] * v.z + t[0][3]) * f,
+          (t[1][0] * v.x + t[1][1] * v.y + t[1][2] * v.z + t[1][3]) * f);
+}
+triple interp(triple a, triple b, real t) { return (1 - t) * a + t * b; }
+// 整条路径每一段都是直的？（path3.h:133）
+bool piecewisestraight(path3 p) {
+  int L = length(p);
+  for (int i = 0; i < L; ++i) if (!straight(p, i)) return false;
+  return true;
+}
+// ---- 线性代数那两格（runarray.in:1253 / 1383）：三维的投影矩阵要它们 ----
+// C++ 那边是 LU 分解（部分选主元）之后连乘对角线；这里同一套，行交换记在符号上。
+real determinant(real[][] a) {
+  int n = a.length;
+  real[][] A = new real[n][];
+  for (int i = 0; i < n; ++i) {
+    real[] row = new real[n];
+    for (int j = 0; j < n; ++j) row[j] = a[i][j];
+    A[i] = row;
+  }
+  real det = 1;
+  for (int i = 0; i < n; ++i) {
+    int p = i;
+    real m = abs(A[i][i]);
+    for (int j = i + 1; j < n; ++j) {
+      real v = abs(A[j][i]);
+      if (v > m) { m = v; p = j; }
+    }
+    if (m == 0) return 0.0;
+    if (p != i) {
+      real[] t = A[i]; A[i] = A[p]; A[p] = t;
+      det = -det;
+    }
+    det = det * A[i][i];
+    for (int j = i + 1; j < n; ++j) {
+      real f = A[j][i] / A[i][i];
+      for (int k = i; k < n; ++k) A[j][k] = A[j][k] - f * A[i][k];
+    }
+  }
+  return det;
+}
+// n x n 的逆（Gauss-Jordan，与 C++ 那边同一套；奇异矩阵在 asy 那边是运行时错）
+real[][] inverse(real[][] a) {
+  int n = a.length;
+  real[][] A = new real[n][];
+  for (int i = 0; i < n; ++i) {
+    real[] row = new real[2 * n];
+    for (int j = 0; j < n; ++j) row[j] = a[i][j];
+    for (int j = 0; j < n; ++j) row[n + j] = i == j ? 1 : 0;
+    A[i] = row;
+  }
+  for (int i = 0; i < n; ++i) {
+    int p = i;
+    real m = abs(A[i][i]);
+    for (int j = i + 1; j < n; ++j) {
+      real v = abs(A[j][i]);
+      if (v > m) { m = v; p = j; }
+    }
+    if (m == 0) abort("inverse: 奇异矩阵");
+    if (p != i) { real[] t = A[i]; A[i] = A[p]; A[p] = t; }
+    real d = A[i][i];
+    for (int k = i; k < 2 * n; ++k) A[i][k] = A[i][k] / d;
+    for (int j = 0; j < n; ++j) {
+      if (j == i) continue;
+      real f = A[j][i];
+      if (f == 0) continue;
+      for (int k = i; k < 2 * n; ++k) A[j][k] = A[j][k] - f * A[i][k];
+    }
+  }
+  real[][] r = new real[n][];
+  for (int i = 0; i < n; ++i) {
+    real[] row = new real[n];
+    for (int j = 0; j < n; ++j) row[j] = A[i][n + j];
+    r[i] = row;
+  }
+  return r;
+}
+// ---- Bézier 面片的界（runarray.in:2178+）：three_surface.asy 量包围盒要它们 ----
+// C++ 那边是"先拿控制点当界、再细分收紧到 Fuzz"；这一刀只到**控制点凸包**那一步 ——
+// 凸包界是真界（曲面一定在里面），只是弯得厉害的面片上包围盒会比 asy 的松一点。
+// 记在 ADR 里：这是这一层与 asy 量得出的差别之一，不是错。
+real change2(triple[][] a) {
+  int n = a.length;
+  if (n == 0) return 0.0;
+  if (a[0].length == 0) return 0.0;
+  triple a00 = a[0][0];
+  real M = 0.0;
+  for (int i = 0; i < n; ++i) {
+    for (int j = 0; j < a[i].length; ++j) {
+      triple d = a[i][j] - a00;
+      real v = dot(d, d);
+      if (v > M) M = v;
+    }
+  }
+  return M;
+}
+triple minbezier(triple[][] P, triple b) {
+  for (int i = 0; i < P.length; ++i) {
+    for (int j = 0; j < P[i].length; ++j) {
+      triple v = P[i][j];
+      b = (min(b.x, v.x), min(b.y, v.y), min(b.z, v.z));
+    }
+  }
+  return b;
+}
+triple maxbezier(triple[][] P, triple b) {
+  for (int i = 0; i < P.length; ++i) {
+    for (int j = 0; j < P[i].length; ++j) {
+      triple v = P[i][j];
+      b = (max(b.x, v.x), max(b.y, v.y), max(b.z, v.z));
+    }
+  }
+  return b;
+}
+// 透视投影下的 x/y 比（picture.cc:135 的 xratio / yratio）
+pair minratio(triple[][] P, pair b) {
+  for (int i = 0; i < P.length; ++i) {
+    for (int j = 0; j < P[i].length; ++j) {
+      triple v = P[i][j];
+      b = (min(b.x, v.x / v.z), min(b.y, v.y / v.z));
+    }
+  }
+  return b;
+}
+pair maxratio(triple[][] P, pair b) {
+  for (int i = 0; i < P.length; ++i) {
+    for (int j = 0; j < P[i].length; ++j) {
+      triple v = P[i][j];
+      b = (max(b.x, v.x / v.z), max(b.y, v.y / v.z));
+    }
+  }
+  return b;
+}
+// ---- 数组那几格（runarray.in 里按元素类型注册的一族）：三维那一层要 triple 那一版 ----
+triple[][] transpose(triple[][] a) {
+  int n = a.length;
+  if (n == 0) return new triple[][];
+  int m = a[0].length;
+  triple[][] r = new triple[m][];
+  for (int i = 0; i < m; ++i) {
+    triple[] row = new triple[n];
+    for (int j = 0; j < n; ++j) row[j] = a[j][i];
+    r[i] = row;
+  }
+  return r;
+}
+triple minbound(triple[] a) {
+  if (a.length == 0) abort("minbound: 空数组");
+  triple b = a[0];
+  for (int i = 1; i < a.length; ++i) b = minbound(b, a[i]);
+  return b;
+}
+triple maxbound(triple[] a) {
+  if (a.length == 0) abort("maxbound: 空数组");
+  triple b = a[0];
+  for (int i = 1; i < a.length; ++i) b = maxbound(b, a[i]);
+  return b;
+}
+triple minbound(triple[][] a) {
+  if (a.length == 0) abort("minbound: 空数组");
+  triple b = minbound(a[0]);
+  for (int i = 1; i < a.length; ++i) b = minbound(b, minbound(a[i]));
+  return b;
+}
+triple maxbound(triple[][] a) {
+  if (a.length == 0) abort("maxbound: 空数组");
+  triple b = maxbound(a[0]);
+  for (int i = 1; i < a.length; ++i) b = maxbound(b, maxbound(a[i]));
+  return b;
+}
+// 带比较函数的排序（runarray.in 的 sort(T[], bool less(T,T))）：稳定，插入排
+triple[] sort(triple[] a, bool less(triple, triple)) {
+  triple[] r = new triple[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = a[i];
+  for (int i = 1; i < r.length; ++i) {
+    triple v = r[i];
+    int j = i - 1;
+    while (j >= 0 && less(v, r[j])) { r[j + 1] = r[j]; --j; }
+    r[j + 1] = v;
+  }
+  return r;
+}
+// 二维那一版：按**字典序**比行（runarray.in 的 sort(T[][])）
+private bool asy__lexless(real[] a, real[] b) {
+  int n = a.length < b.length ? a.length : b.length;
+  for (int i = 0; i < n; ++i) {
+    if (a[i] < b[i]) return true;
+    if (b[i] < a[i]) return false;
+  }
+  return a.length < b.length;
+}
+real[][] sort(real[][] a) {
+  real[][] r = new real[a.length][];
+  for (int i = 0; i < a.length; ++i) r[i] = a[i];
+  for (int i = 1; i < r.length; ++i) {
+    real[] v = r[i];
+    int j = i - 1;
+    while (j >= 0 && asy__lexless(v, r[j])) { r[j + 1] = r[j]; --j; }
+    r[j + 1] = v;
+  }
+  return r;
+}
+// 控制点相对两个结点的距离（runpath.in:404 -> knot.cc:61 的 velocity）：
+// 名字有点误导 —— 它是控制点相对结点间距的**倍数**（还是三倍）。式子照 MetaPost
+// 第 131 节那一套，tension atleast 那一档的收紧也照抄。形参名不能叫 `atleast` ——
+// 那是词法上的关键字（`..tension atleast 2..`），asy 那边的 C++ 签名不受这一条管。
+real relativedistance(real theta, real phi, real t, bool atLeast) {
+  real VELOCITY_BOUND = 4.0;
+  real a = sqrt(2.0);
+  real b = 1.0 / 16.0;
+  real c = 1.5 * (sqrt(5.0) - 1.0);
+  real d = 1.5 * (3.0 - sqrt(5.0));
+  real st = sin(theta);
+  real ct = cos(theta);
+  real sf = sin(phi);
+  real cf = cos(phi);
+  real denom = t * (3.0 + c * ct + d * cf);
+  real r = denom != 0.0
+    ? (2.0 + a * (st - b * sf) * (sf - b * st) * (ct - cf)) / denom
+    : VELOCITY_BOUND;
+  if (r > VELOCITY_BOUND) r = VELOCITY_BOUND;
+  if (atLeast) {
+    real sine = sin(theta + phi);
+    if ((st >= 0.0 && sf >= 0.0 && sine > 0.0)
+        || (st <= 0.0 && sf <= 0.0 && sine < 0.0)) {
+      real rmax = sf / sine;
+      if (r > rmax) r = rmax;
+    }
+  }
+  return r;
+}
 
-
-
-
-
-
+// 两条三维路径接起来（path3.cc:698 的 concat，`&` 在 C++ 面注册）：接缝那一格取
+// 后一条的起点，直/曲的标记跟着各自那一段走。asy 那边不查两端是否重合，这里也不查。
+path3 operator &(path3 p, path3 q) {
+  int n1 = length(p);
+  int n2 = length(q);
+  if (n1 == -1) return q;
+  if (n2 == -1) return p;
+  int n = n1 + n2 + 1;
+  triple[] pre = new triple[n];
+  triple[] pnt = new triple[n];
+  triple[] post = new triple[n];
+  bool[] str = new bool[n];
+  int i = 0;
+  pre[0] = point(p, 0);
+  for (int j = 0; j < n1; ++j) {
+    pnt[i] = point(p, j);
+    str[i] = straight(p, j);
+    post[i] = postcontrol(p, j);
+    pre[i + 1] = precontrol(p, j + 1);
+    ++i;
+  }
+  for (int j = 0; j < n2; ++j) {
+    pnt[i] = point(q, j);
+    str[i] = straight(q, j);
+    post[i] = postcontrol(q, j);
+    pre[i + 1] = precontrol(q, j + 1);
+    ++i;
+  }
+  pnt[i] = point(q, n2);
+  post[i] = pnt[i];
+  str[i] = false;
+  return path3(pre, pnt, post, str, false);
+}

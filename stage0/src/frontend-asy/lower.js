@@ -580,15 +580,22 @@ class AsyLower {
    * 方法体里的裸名字 `nm` 是不是**此处可见的字段**（局部量/形参优先，量过：形参 `x`
    * 遮住字段 `x`，要拿字段得写 `this.x`）。回字段项或 null。
    */
-  selfField(nm) {
+  selfField(nm, wantFn) {
     if (this.self === null) return null;
     // static 的方法体里实例字段**不可见**（量过 asy 报 "static use of dynamic variable"）。
     // 这里回 null，那句诊断由调用处发（说清是"静态的地方用了实例的东西"，见 selfStatBad）。
     if (this.self.stat === true) return null;
     if (this.lookup(nm) !== null) return null;
     if (nm === ASY_FILLER) return null;   // 占位字段看不见，方法体里也一样（见 recField）
-    for (const f of this.self.rec.fields) if (f.name === nm && f.mat < this.self.mat) return f;
-    return null;
+    // 同名两格字段（第四十九刀）：这里也照 recField 的规矩 —— 取值挑**不是函数类型**那份，
+    // `wantFn` 为真（调用形态，见 calls.js 里那一档）时反过来挑函数那份。
+    let alt = null;
+    for (const f of this.self.rec.fields) {
+      if (!this.fldIs(f, nm) || f.mat >= this.self.mat) continue;
+      if (asyIsFn(f.type) === (wantFn === true)) return f;
+      if (alt === null) alt = f;
+    }
+    return alt;
   }
 
   /** 记录 `rec` 上此处可见的方法候选（方法体里按成员顺序裁，外面看全部）。
@@ -628,7 +635,7 @@ class AsyLower {
   /** 这个名字是当前 struct 的**实例**成员吗（static 方法体里那句诊断要问它） */
   selfInstMember(nm) {
     if (this.self === null || this.self.stat !== true) return false;
-    for (const f of this.self.rec.fields) if (f.name === nm) return true;
+    for (const f of this.self.rec.fields) if (this.fldIs(f, nm)) return true;
     const funcs = this.units[this.self.rec.unit].funcs;
     const list = funcs.get(`${this.self.rec.name}.${nm}`);
     if (list === undefined) return false;
@@ -1542,7 +1549,7 @@ class AsyLower {
         if (fnf !== null) {
           fields.push({ name: fnf.name, type: fnf.type, def: null, mat: mat, bi: bi - 1,
             fnbody: r });
-          seen.set(fnf.name, true);
+          seen.set(fnf.name, [fnf.type]);
           mat++;
           continue;
         }
@@ -1679,10 +1686,22 @@ class AsyLower {
         }
         const fn = isAtom(start.items[1]) ? start.items[1].value : null;
         if (fn === null) return this.err(start, '字段少了名字');
-        if (seen.has(fn)) return this.err(d, `struct ${nm} 里有两个字段叫 '${fn}'`);
-        seen.set(fn, true);
-        fields.push({ name: fn, type: fty, def: d.items[2] === undefined ? null : d.items[2], mat: mat,
-          bi: bi - 1 });
+        // 同名的字段（第四十九刀）：asy 的 struct 体是个**作用域**，同名按签名分得开 ——
+        // three_arrows.asy:70/73 的 `real size(pen p)=arrowsize;` 与 `real size;` 是
+        // 两格。核心方言的 class 一个名字一格，所以后来那份**换个槽名**（`asy__fd<K>_名字`），
+        // 源码里那个名字记在 `src` 上，认名字那几处（fldOf / hasFld / 方法调用）按 src 找。
+        // 类型一模一样的两份仍然是错（asy 那边报 "already declared in this scope"）。
+        const had = seen.get(fn);
+        if (had !== undefined) {
+          for (const t of had) {
+            if (t === fty) return this.err(d, `struct ${nm} 里有两个字段叫 '${fn}'，类型也一样`);
+          }
+        }
+        const dup = had !== undefined;
+        if (dup) had.push(fty); else seen.set(fn, [fty]);
+        const slot = dup ? `asy__fd${fields.length}_${asyFldSym(fn)}` : fn;
+        fields.push({ name: slot, src: fn, type: fty,
+          def: d.items[2] === undefined ? null : d.items[2], mat: mat, bi: bi - 1 });
       }
       // 一条 vardec 可以声明好几个字段，它们在 asy 那边是**同一步**（互相看不见），
       // 所以 mat 是按声明语句加一，不是按字段加一。
@@ -1931,7 +1950,7 @@ class AsyLower {
   /** 这个名字是不是当前方法所在记录的一格**实例**成员（字段或非 static 方法）。localFunOuter 用它 */
   selfMember(nm) {
     const rec = this.self.rec;
-    for (const f of rec.fields) if (f.name === nm) return true;
+    for (const f of rec.fields) if (this.fldIs(f, nm)) return true;
     // static 的方法不带接收者，裸写它不算抓外层
     for (const c of this.visibleMethods(rec, nm)) if (c.stat !== true) return true;
     return false;
@@ -1984,7 +2003,7 @@ class AsyLower {
   methodValAt(node, recv, nm) {
     const rec = this.records.get(recv.type);
     if (rec === undefined) return undefined;
-    for (const f of rec.fields) if (f.name === nm) return undefined;
+    for (const f of rec.fields) if (this.fldIs(f, nm)) return undefined;
     const ms = this.visibleMethods(rec, nm);
     if (ms.length === 0) return undefined;
     if (ms.length > 1) {
@@ -1995,12 +2014,44 @@ class AsyLower {
     return this.methodVal(node, rec, ms[0], recv.code);
   }
 
-  recField(n, t, nm) {
+  /**
+   * 这一格字段在**源码里写的名字**是 nm 吗（第四十九刀）。同名的两格字段里后来那份
+   * 换了槽名（`asy__fd<K>_名字`），源码里那个名字记在 `src` 上 —— 认名字的地方问这一句。
+   */
+  fldIs(f, nm) { return f.name === nm || f.src === nm; }
+
+  /**
+   * 源码里叫 nm 的**全部**字段格，不是函数类型那些排前面（第四十九刀）。赋值那一路
+   * （stmts.js 的 asyAssignFld）拿这一串逐个试 —— three_arrows.asy 里
+   * `a.size=min(…)` 要 `real size` 那格，`TeXHead3.size=TeXHead.size` 要函数那格。
+   */
+  fldCands(t, nm) {
     const rec = this.records.get(t);
+    if (rec === undefined || nm === ASY_FILLER) return [];
+    const plain = [];
+    const fns = [];
+    for (const f of rec.fields) {
+      if (!this.fldIs(f, nm)) continue;
+      if (asyIsFn(f.type)) fns.push(f); else plain.push(f);
+    }
+    for (const f of fns) plain.push(f);
+    return plain;
+  }
+
+  recField(n, t, nm) {    const rec = this.records.get(t);
     // 占位字段是**看不见的** —— 名字虽然合法，`x.asy__filler` 在真 asy 那边是没有这个成员，
     // 所以这里也当没有（不然就是收得比 asy 多，strict 那条纪律不许）
     if (nm === ASY_FILLER) return this.err(n, `struct ${t} 没有字段 '${nm}'`);
-    for (const f of rec.fields) if (f.name === nm) return f;
+    // 同名的字段有两格时（第四十九刀，见 recordDec）：取值这一路挑**不是函数类型**那份 ——
+    // three_arrows.asy 里 `arrowhead.size > 0` / `a.size=min(…)` 要的都是 `real size`，
+    // 而 `a.size(p)` 那种**调用**形态在 calls.js 里另挑函数类型那份。
+    let alt = null;
+    for (const f of rec.fields) {
+      if (!this.fldIs(f, nm)) continue;
+      if (!asyIsFn(f.type)) return f;
+      if (alt === null) alt = f;
+    }
+    if (alt !== null) return alt;
     // 名字其实是个**方法**：取值那一边（`a.get`）第四十三刀通了 —— 走 methodValAt，
     // 在这个函数之前问。落到这里的只剩**赋值**那一边（`a.get = h;`）：量过 asy 收它
     // （那边的方法就是一格函数值字段，赋完 `a.get()` 印的是新那份），我们不收 ——

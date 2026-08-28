@@ -5439,6 +5439,55 @@ three_arrows.asy:73 —— `struct arrowhead3` 里有 `real size(pen p)=arrowsiz
 `tests/js-exec` 11、`tests/cabi` 4、`tests/wat` 12 —— 全绿。`tests/mir` / `tests/glr` /
 `tests/incr` 照旧红（先于这几刀），`tests/bootstrap` 跳过。
 
+### 一批：同名两格字段、`cycle` 的第二条身份，与三维那批内建（`import three;` 134 -> 66）
+
+先更正上一节的数字。上一节写「`import three;` 的诊断 147 -> 1」，那个 **1 是假的** ——
+`three_arrows.asy:73` 那一条是 struct 声明期的错，它让那个单元当场停下，后面几个文件
+根本没走到。把它修掉之后真实数字是 **134**。教训记在这里：一条声明期的错会把它后面
+整片诊断压住，"只剩一条"这种话得先确认后面的确走到过。
+
+**同名两格字段。** `struct arrowhead3` 里有 `real size(pen p)=arrowsize;`（three_arrows.asy:70）
+与 `real size;`（:73）—— asy 的 struct 体是个作用域，同名按签名分得开，是**两个**成员槽；
+这一层的 `class` 一个名字一格。做法是给后来那一份**另起槽名** `asy__fd<K>_<名字>`，源码里
+那个名字记在 `src` 上，只让"认名字"的那几处知道这件事（`fldIs` / `fldCands`），按上下文挑：
+取值挑**不是函数类型**那份（`arrowhead.size > 0`）、调用挑**函数类型**那份（`a.size(p)`）、
+赋值把候选逐个试（three_arrows.asy:218 赋的是函数、:265 赋的是 real）。量过 asy 的挑法与
+这一套一致（cases/139-dupfield 逐字节对得上）。**收得比 asy 多的一处**：两边都是两格时
+`g.size=h.size` 在 asy 那边是 "assignment is ambiguous"，这一层挑 real 那格收下了 ——
+记在这里，没往 strict 里钉。
+
+**`cycle` 的第二条身份。** 三维那一层的 `A--B--C--cycle`（three_surface.asy:29 一族）里，
+`--` 收的是 `guide3`（`void(flatguide3)`），而 `cycle` 在 asy 那边的类型是 `cycleToken`，
+靠 `guide3 operator cast(cycleToken)`（three.asy:713）接上。这一层的 `cycle` 是绘图层的
+一格 path，接不上那条 cast。做法是给 `cycle` 出来的值记一笔 `cyc`，在连接（`asyJoinFold`）
+与 `&`／`|` 那两处接不上时**换成一格 `cycleToken` 再问一遍**。同一条路上还把
+`operator controls` 的实参改成**先不定型**：绘图层那份收 pair、三维那份收 triple
+（three.asy:719），哪一份由重载解析定案，接不上时才按 pair 那份报。
+
+**那批内建。** 都是 C++ 面注册、base 里找不到定义的，照 `.in` / `.cc` 抄进内建面：
+`Sin`/`Cos`/`Tan`/`aSin`/`aCos`/`aTan`（runpair.in:125+，90 度整数倍上给精确值）、
+`bezier`/`bezierP`/`bezierPP`/`bezierPPP` 的 pair 与 triple 两族（runtriple.in:146+）、
+`perp(triple,triple)`、`project(triple,real[][])`（runarray.in:1472）、`interp(triple,triple,real)`、
+`piecewisestraight(path3)`、`determinant`/`inverse`（LU 与 Gauss-Jordan，部分选主元）、
+`change2`/`minbezier`/`maxbezier`/`minratio`/`maxratio`、`transpose(triple[][])`、
+`minbound`/`maxbound` 的 triple 一二维四格、`sort(triple[],bool(triple,triple))`、
+`sort(real[][])`、`relativedistance`（knot.cc:61 的 velocity，MetaPost 第 131 节那一套）、
+`path3 operator &(path3,path3)`（path3.cc:698 的 concat）。
+
+**与 asy 量得出的差别一处**：`minbezier`/`maxbezier`/`minratio`/`maxratio` 在 C++ 那边是
+"先拿控制点当界、再细分收紧到 Fuzz"，这一刀只到**控制点凸包**那一步。凸包界是真界（曲面
+一定在里面），只是弯得厉害的面片上包围盒会比 asy 的松一点。
+
+数字：`import three;` 的诊断 **134 -> 66**（两相都算）；`import plain;` / `import graph;` /
+`import math;` 都还是 0；examples **62 -> 66** 跑完（三维那 100 多个还卡在 `import three;`
+上，剩下的 66 条诊断是 surface/patch 那一层的内建与 3D 输出面 —— 那是下几刀）。
+
+跑过的轴：`tests/asy` 217（新增 cases/139-dupfield，`.expected` 是真 asy `-noV` 的逐字节
+输出）、`tests/run.js` 91、`tests/sexpr` 53、`tests/oir` 451、`tests/llvm` 22、
+`tests/jit` 22、`tests/gpu` 15+1 skip、`tests/js-roundtrip` 92、`tests/oracle` 7、
+`tests/js-exec` 11、`tests/cabi` 4、`tests/wat` 12 —— 全绿。`tests/mir` / `tests/glr` /
+`tests/incr` 照旧红（先于这几刀），`tests/bootstrap` 跳过。
+
 ## 后果与代价
 
 

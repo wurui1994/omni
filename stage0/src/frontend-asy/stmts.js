@@ -930,10 +930,36 @@ export function asyAssign(L, node, lhs, rhs, op) {
  * 接收者在复合赋值里被求两次 —— 它只可能是一个变量读（见 assign 的入口判断）。
  */
 export function asyAssignFld(L, node, q, rhs, op) {
+  // 同名的字段有两格时（第四十九刀）：赋值挑哪一格要看**右边的类型** —— three_arrows.asy
+  // 里 `a.size=min(size,arclength(h))` 要 `real size`，而 :218 的
+  // `TeXHead3.size=TeXHead.size` 赋进去的是个函数值，要 `real size(pen)` 那格。
+  // 右边的类型这一层要降过才知道，所以按"不是函数类型的在前"逐个试，接不住就回滚重试。
+  const cands = L.fldCands(q.recv.type, q.field);
+  if (cands.length > 1) {
+    for (let i = 0; i < cands.length; i++) {
+      const mark = L.diags.mark();
+      const savePre = L.pre;
+      L.pre = [];
+      const out = asyAssignFldTo(L, node, q, rhs, op, cands[i]);
+      const pre = L.pre;
+      L.pre = savePre;
+      if (out !== null) {
+        for (const p of pre) L.pre.push(p);
+        return out;
+      }
+      if (i !== cands.length - 1) L.diags.rollback(mark);
+    }
+    return null;
+  }
   const f = L.recField(node, q.recv.type, q.field);
   if (f === null) return null;
-  const put = (code) => [`(fldset ${q.recv.code} ${asyFldSym(q.field)} ${code})`];
-  const cur = `(fld ${q.recv.code} ${asyFldSym(q.field)})`;
+  return asyAssignFldTo(L, node, q, rhs, op, f);
+}
+
+/** 上面那份定好了是哪一格字段之后的落地（`f.name` 是槽名，同名的第二格换过） */
+function asyAssignFldTo(L, node, q, rhs, op, f) {
+  const put = (code) => [`(fldset ${q.recv.code} ${asyFldSym(f.name)} ${code})`];
+  const cur = `(fld ${q.recv.code} ${asyFldSym(f.name)})`;
   return asySlotAssign(L, node, q.field, '字段', f.type, cur, put, rhs, op);
 }
 

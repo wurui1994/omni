@@ -215,9 +215,9 @@ export function asyCall(L, n) {
     }
     // 无体的方法声明（`int size();`）其实是**函数类型的字段**，所以方法体里的 `size()`
     // 是"读这一格再间接调"。与上面那一档同一个道理放在文件级候选前面：它也是个成员。
-    const sf = L.selfField(nm);
+    const sf = L.selfField(nm, true);
     if (sf !== null && asyIsFn(sf.type)) {
-      return asyFnValCall(L, n, nm, sf.type, `(fld (var this) ${asyFldSym(nm)})`);
+      return asyFnValCall(L, n, nm, sf.type, `(fld (var this) ${asyFldSym(sf.name)})`);
     }
     // 同一件事，只是那一格是 **static** 的：`static frame fitter(string,picture,…);`
     // （plain_picture.asy:876 —— 无体的 static 方法声明就是一格 static 的函数类型字段，
@@ -241,7 +241,7 @@ export function asyCall(L, n) {
     // 走到最后**什么都没接住**时才拿它当诊断。
     const all = L.units[L.self.rec.unit].funcs.get(`${L.self.rec.name}.${nm}`);
     let lateFld = false;
-    for (const f of L.self.rec.fields) if (f.name === nm) lateFld = true;
+    for (const f of L.self.rec.fields) if (L.fldIs(f, nm)) lateFld = true;
     if (ms.length === 0 && ((all !== undefined && all.length > 0) || lateFld)) {
       lateMem = `'${nm}' 在这里还看不见 —— struct ${L.self.rec.name} 里它声明在后面，`
         + `而成员也是顺序解析的（asy 那边报 "no matching variable '${nm}'"）`;
@@ -742,7 +742,7 @@ export function asyMethodCall(L, n, recv, mname) {
   const alt = asyMethodAlt(L, n, recv, rec, mname);
   if (alt !== undefined) return alt;
   for (const f of rec.fields) {
-    if (f.name === mname) {
+    if (L.fldIs(f, mname)) {
       return L.nope(n, `调用一个字段（${recv.type}.${mname} 是 ${f.type}，不是方法）`);
     }
   }
@@ -760,12 +760,21 @@ export function asyMethodCall(L, n, recv, mname) {
  * 一档都不适用时回 `undefined`（一句诊断都不发 —— 上面那层要靠这个分"要不要回滚"）。
  */
 function asyMethodAlt(L, n, recv, rec, mname) {
+  // 同名的字段有两格时（第四十九刀，见 recordDec）：**调用**形态挑函数类型那份 ——
+  // three_arrows.asy 里 `a.size(p)` 要的是 `real size(pen)`，而 `a.size` 取值那一路
+  // 在 recField 里另挑不是函数类型那份。发正文用 `f.name`（换过的槽名），不是源码那个名字。
+  let fld = null;
   for (const f of rec.fields) {
-    if (f.name !== mname) continue;
+    if (!L.fldIs(f, mname)) continue;
+    if (asyIsFn(f.type)) { fld = f; break; }
+    if (fld === null) fld = f;
+  }
+  if (fld !== null) {
     // 字段本身是**函数值**：`b.fn2(4)` 就是通过它间接调（plain_filldraw.asy 里
     // `filltype.fill2(f,g,p)` 到处是）。
-    if (!asyIsFn(f.type)) return undefined;
-    return asyFnValCall(L, n, `${recv.type}.${mname}`, f.type, `(fld ${recv.code} ${asyFldSym(mname)})`);
+    if (!asyIsFn(fld.type)) return undefined;
+    return asyFnValCall(L, n, `${recv.type}.${mname}`, fld.type,
+      `(fld ${recv.code} ${asyFldSym(fld.name)})`);
   }
   // `q.af(5)` 与 `Box.af(5)` 取的是同一格（第三十八刀，量过 asy 两条都通）
   const st = L.statOf(rec.name, mname);
@@ -850,10 +859,13 @@ export function asyIdxOpCall(L, n, recv, mname, argNodes) {
     // `struct S { int operator [] (int k); } S s; s.operator [] = new int(int k){return k*2;};`
     // 之后 `s[3]` 印 6。所以方法找不着时再问一遍字段。
     let ft = null;
+    let fslot = mname;
     if (rec !== undefined) {
-      for (const f of rec.fields) if (f.name === mname && asyIsFn(f.type)) ft = f.type;
+      for (const f of rec.fields) {
+        if (L.fldIs(f, mname) && asyIsFn(f.type)) { ft = f.type; fslot = f.name; }
+      }
     }
-    if (ft !== null) return asyIdxFldCall(L, n, recv, mname, ft, argNodes);
+    if (ft !== null) return asyIdxFldCall(L, n, recv, fslot, ft, argNodes);
     return L.err(n, `${recv.type} 上没有 '${mname}' —— 下标要 struct 里定义了它才能用`);
   }
   const raw = [];
