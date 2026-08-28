@@ -18,7 +18,7 @@
 import { isList, isAtom, head } from '../sexpr/read.js';
 import {
   ASY_NOPE, DOT_BAD, asyConvCost, asyOpText, asyIsRestP, asyRestBase,
-  asyIsArr, asyElem, asyIsFn, asyFnSplit, asyCore, ASY_NULL, asyRefTy,
+  asyIsArr, asyElem, asyIsFn, asyFnSplit, asyFldSym, asyCore, ASY_NULL, asyRefTy,
 } from './types.js';
 import { ASY_PAIRFN, ASY_STRFN, ASY_STR_DEPS, ASY_STR_NOPE } from './runtime.js';
 
@@ -151,7 +151,7 @@ export function asyCall(L, n) {
     // 是"读这一格再间接调"。与上面那一档同一个道理放在文件级候选前面：它也是个成员。
     const sf = L.selfField(nm);
     if (sf !== null && asyIsFn(sf.type)) {
-      return asyFnValCall(L, n, nm, sf.type, `(fld (var this) ${nm})`);
+      return asyFnValCall(L, n, nm, sf.type, `(fld (var this) ${asyFldSym(nm)})`);
     }
     // static 的方法体里调了实例方法：asy 自己也拒（"static use of dynamic variable"）。
     // 这一句要排在"声明在后面"那条**前面** —— 实例方法明明写在前面，只是这儿够不着它。
@@ -185,7 +185,7 @@ export function asyCall(L, n) {
   if (lv !== null && asyIsFn(lv)) {
     // `unravel x;` 摊出来的名字：调的是 x 那个字段里的函数值
     const al = L.aliasOf(nm);
-    if (al !== null) return asyFnValCall(L, n, nm, lv, `(fld ${al.recv} ${al.field})`);
+    if (al !== null) return asyFnValCall(L, n, nm, lv, `(fld ${al.recv} ${asyFldSym(al.field)})`);
     // 但这一格并**不整片遮住**同名的函数：asy 的 venv 是按**签名**逐层找的，一个
     // `real opacity(real[])` 的形参与文件级的 `pen opacity(real, string)` 是两条不同的
     // 签名，能共存。原型是 plain_pens.asy:354 的
@@ -578,7 +578,7 @@ function asyMethodAlt(L, n, recv, rec, mname) {
     // 字段本身是**函数值**：`b.fn2(4)` 就是通过它间接调（plain_filldraw.asy 里
     // `filltype.fill2(f,g,p)` 到处是）。
     if (!asyIsFn(f.type)) return undefined;
-    return asyFnValCall(L, n, `${recv.type}.${mname}`, f.type, `(fld ${recv.code} ${mname})`);
+    return asyFnValCall(L, n, `${recv.type}.${mname}`, f.type, `(fld ${recv.code} ${asyFldSym(mname)})`);
   }
   // `q.af(5)` 与 `Box.af(5)` 取的是同一格（第三十八刀，量过 asy 两条都通）
   const st = L.statOf(rec.name, mname);
@@ -594,7 +594,7 @@ function asyMethodAlt(L, n, recv, rec, mname) {
   const al = rec.memAlias !== undefined && rec.memAlias.has(mname)
     ? rec.memAlias.get(mname) : rec.memAliasAll;
   if (al === undefined) return undefined;
-  return asyMethodCall(L, n, { code: `(fld ${recv.code} ${al.field})`, type: al.type }, mname);
+  return asyMethodCall(L, n, { code: `(fld ${recv.code} ${asyFldSym(al.field)})`, type: al.type }, mname);
 }
 
 /**

@@ -260,7 +260,7 @@ import { isList, isAtom, isStr, head } from '../sexpr/read.js';
 import {
   ASY_NOPE, SCALARS, DOT_BAD, CAP_BAD, ASY_FILLER, ASY_MODSTM, ASY_ARRELEM, ASY_ARRELEM_TEXT,
   asyConvCost, asyOpText, ASY_OPSYM, ASY_OPBAD, ASY_CYCLE,
-  asyIsArr, asyElem, asyMangle, asyIsFn, asyFnSplit,
+  asyIsArr, asyElem, asyMangle, asyIsFn, asyFnSplit, asyFldSym,
   ASY_PAIR_TY, ASY_TRIPLE_TY, asyCore,
 } from './types.js';
 
@@ -1753,7 +1753,7 @@ class AsyLower {
         if (this.isRec(f.type)) {
           const mk = this.recInit(n, f.type);
           if (mk === null) { bad = true; break; }
-          lines.push(`(fldset (var this) ${f.name} ${mk})`);
+          lines.push(`(fldset (var this) ${asyFldSym(f.name)} ${mk})`);
         }
         continue;
       }
@@ -1766,7 +1766,7 @@ class AsyLower {
       this.self = saveSelf;
       this.recAlias = saveAl;
       if (v === null) { bad = true; break; }
-      lines.push(`(fldset (var this) ${f.name} ${v.code})`);
+      lines.push(`(fldset (var this) ${asyFldSym(f.name)} ${v.code})`);
     }
     while (!bad && si < sts.length) {
       if (!this.recStmt(sts[si], rec, lines, saveSelf)) bad = true;
@@ -1921,7 +1921,7 @@ class AsyLower {
     for (const rec of this.records.values()) {
       if (ri++ < baseRecords) continue;
       const fs = [];
-      for (const f of rec.fields) fs.push(`(${f.name} ${asyCore(f.type)})`);
+      for (const f of rec.fields) fs.push(`(${asyFldSym(f.name)} ${asyCore(f.type)})`);
       out.push(`  (class ${rec.name} ${fs.join(' ')})`);
     }
     // 模块跑过了没有（第二十五刀）：`import m; import m;` 只跑一遍体，量过

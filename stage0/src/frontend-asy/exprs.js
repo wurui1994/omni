@@ -19,7 +19,7 @@
 import { isList, isAtom, isStr, head } from '../sexpr/read.js';
 import {
   ASY_NOPE, DOT_BAD, CAP_BAD, ASY_ARRELEM_TEXT, ASY_CYCLE, ASY_NEWFRAME, ASY_RESTPFX, asyOpText,
-  asyIsArr, asyElem, asyIsFn, ASY_PAIR_TY, ASY_TRIPLE_TY, asyCore, ASY_NULL, asyRefTy,
+  asyIsArr, asyElem, asyIsFn, asyFldSym, ASY_PAIR_TY, ASY_TRIPLE_TY, asyCore, ASY_NULL, asyRefTy,
 } from './types.js';
 import { ZERO, ASY_PAIRFN, ASY_STRFN, ASY_STR_DEPS, strLit } from './runtime.js';
 import { asyArgs, asyCall, asyVisible, asyJoinExp, asyOpUser, asyOpBuiltinSig, asyIdxOpCall, asyApplyCall, asyDefWrapper } from './calls.js';
@@ -78,7 +78,7 @@ export function asyNameOf(L, n, nm) {
   if (t !== null) {
     // `unravel x;` 摊出来的名字：它是 x 的一个字段的**别名**（见 declareAlias）
     const al = L.aliasOf(nm);
-    if (al !== null) return { code: `(fld ${al.recv} ${al.field})`, type: al.type };
+    if (al !== null) return { code: `(fld ${al.recv} ${asyFldSym(al.field)})`, type: al.type };
     // 装了箱的局部量（见 declareBox）：读要穿到箱子里去
     const bx = L.boxOf(nm);
     if (bx !== null) return { code: `(aget (var ${bx.sym}) (int 0))`, type: t };
@@ -104,7 +104,7 @@ export function asyNameOf(L, n, nm) {
     if (c !== null) return c;
   }
   const f = L.selfField(nm);
-  if (f !== null) return { code: `(fld (var this) ${nm})`, type: f.type };
+  if (f !== null) return { code: `(fld (var this) ${asyFldSym(nm)})`, type: f.type };
   // struct 体里把**自己的方法**取出来当值（第四十三刀）：`addPath=addPathToEmptyArray;`
   // （plain_bounds.asy:247）。接收者是隐含的 this。位置照 selfField：成员那一档里，
   // 字段之后、文件级之前。static 的体里没有接收者，所以那边不问这一条。
@@ -715,7 +715,7 @@ export function asyDotQual(L, node) {
     }
     // 方法体里的裸字段名当接收者（第二十刀）：`inner.get()` 里的 inner 是 this 的字段
     const sf = L.selfField(base);
-    if (sf !== null) return { recv: { code: `(fld (var this) ${base})`, type: sf.type }, field: f };
+    if (sf !== null) return { recv: { code: `(fld (var this) ${asyFldSym(base)})`, type: sf.type }, field: f };
     // 文件级变量当接收者（第三十刀）：`currentpicture.nodes` 这一族。次序与 name-exp
     // 那边一致 —— 局部、this 的字段、文件级，三档。
     const g = L.gvarHere(base);
@@ -756,7 +756,7 @@ export function asyMember(L, n, recv, nm) {
     const mv = L.methodValAt(n, recv, nm);
     if (mv !== undefined) return mv;
     const f = L.recField(n, recv.type, nm);
-    return f === null ? null : { code: `(fld ${recv.code} ${nm})`, type: f.type };
+    return f === null ? null : { code: `(fld ${recv.code} ${asyFldSym(nm)})`, type: f.type };
   }
   if (recv.type === 'pair') {
     if (nm === 'x') return { code: `(lane ${recv.code} 0)`, type: 'real' };

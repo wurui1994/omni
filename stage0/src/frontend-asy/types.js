@@ -130,6 +130,22 @@ export const ASY_NULL = '<null>';
  *  与核心方言 `(null TYPE)` 的边界一模一样（sexpr/lower.js）。 */
 export const asyRefTy = (L, t) => asyIsArr(t) || asyIsFn(t) || L.isRec(t);
 
+/**
+ * 字段名落到核心方言里叫什么。绝大多数字段照抄，只有**算符名的字段**要换 ——
+ * `Iter_T operator iter();`（collections/iter.asy:26、map.asy:34）那种"没有体的方法声明"
+ * 就是一格函数类型的字段，而 `operator iter` 带空格，核心方言的字段名不收。
+ * 这一层只在**发代码**的时候换（`(class …)` 的字段表、`(fld …)`、`(fldset …)`），
+ * 前端自己那张表照旧按源码里的名字记 —— 查名字的都是源码里那个名字。
+ */
+export function asyFldSym(nm) {
+  if (!nm.startsWith('operator ')) return nm;
+  let out = 'asy__opf';
+  for (const c of nm.slice(9)) {
+    out += /[A-Za-z0-9_]/.test(c) ? c : `x${c.charCodeAt(0)}`;
+  }
+  return out;
+}
+
 
 /** `real(int,string)` -> `{ ret: 'real', params: ['int','string'] }`；认不出给 null。
  *  形参表是**最后**那一对括号（第四十二刀）：返回类型写在前面，所以

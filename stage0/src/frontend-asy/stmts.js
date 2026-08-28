@@ -15,7 +15,7 @@
 
 import { isList, isAtom, head } from '../sexpr/read.js';
 import {
-  ASY_NOPE, DOT_BAD, CAP_BAD, ASY_ARRELEM_TEXT, ASY_FILLER, asyOpText, asyIsArr, asyElem, asyIsFn, asyCore, ASY_NULL,
+  ASY_NOPE, DOT_BAD, CAP_BAD, ASY_ARRELEM_TEXT, ASY_FILLER, asyOpText, asyIsArr, asyElem, asyIsFn, asyFnSplit, asyFldSym, asyCore, ASY_NULL,
 } from './types.js';
 import { ZERO } from './runtime.js';
 import { asyArgs, asyCall, asyOpUser, asyOpBuiltinSig, asyIdxOpCall, asyVisible, asyUserCall } from './calls.js';
@@ -372,7 +372,12 @@ export function asyForEach(L, n, ret) {
   if (nm === null) return L.err(n, 'for-each 少了循环变量名');
   const a = L.expr(n.items[3]);
   if (a === null) return null;
-  if (!asyIsArr(a.type)) return L.err(n, `for-each 要一个数组，这里是 ${a.type}`);
+  if (!asyIsArr(a.type)) {
+    // 非数组：asy 那边看 `set.operator iter()` 查不查得通（stm.cc:473），通就走那套协议
+    const fe = asyForIter(L, n, ret, a, isVar, el0, nm);
+    if (fe !== undefined) return fe;
+    return L.err(n, `for-each 要一个数组，这里是 ${a.type}`);
+  }
   const el = isVar ? asyElem(a.type) : el0;
   if (!isVar && asyElem(a.type) !== el) {
     return L.err(n, `for-each 的元素写的是 ${el}，数组是 ${a.type}`);
@@ -394,8 +399,66 @@ export function asyForEach(L, n, ret) {
   return [`(do ${head3} (while (bin "<" (var ${iv}) (alen (var ${av}))) (do ${inner.join(' ')})))`];
 }
 
-/** `for (init; test; upd) body` -> `init; while (test) { body; upd }`（continue 见上） */
-export function asyForStmt(L, n, ret) {
+/**
+ * `recv.名字()`：那个名字可能是一格**函数类型的字段**（"没有体的方法声明"，
+ * collections/iter.asy 的 `Iter_T operator iter();` 与 Iter_T 的 get/advance/valid
+ * 都是这一种），也可能是有体的方法。这一刀只收前一种 —— 后一种要 applyCall，
+ * 而那条路会往 `L.pre` 里绑临时量，摆在循环外面就错了（btreegeneral.asy 那几处是它，
+ * 不在 plain/graph 的路上）。认不出就回 null，不发诊断。
+ */
+function asyZeroCall(L, recv, mname) {
+  const rec = L.records.get(recv.type);
+  if (rec === undefined) return null;
+  for (const f of rec.fields) {
+    if (f.name !== mname) continue;
+    if (!asyIsFn(f.type)) return null;
+    const s = asyFnSplit(f.type);
+    if (s === null || s.params.length !== 0) return null;
+    return { code: `(callfn (fld ${recv.code} ${asyFldSym(mname)}))`, type: s.ret };
+  }
+  return null;
+}
+
+/**
+ * `for (T x : 一个可迭代的东西)`（这一刀）。asy 那边的判据是"`set.operator iter()`
+ * 查得通吗"（stm.cc:473），通就摊成（stm.cc:512）：
+ *
+ *     for (var i = set.operator iter(); i.valid(); i.advance()) { T x = i.get(); body }
+ *
+ * `operator iter` 只求**一次**（在 init 里），`continue` 也要先走 advance —— 所以那一句
+ * 进 `L.updates`，与数组那一路的 `++i` 同一个位置。四个名字（iter/get/valid/advance）
+ * 缺一个就回 undefined，让调用方报原来那句"for-each 要一个数组"。
+ */
+function asyForIter(L, n, ret, a, isVar, el0, nm) {
+  if (!L.isRec(a.type)) return undefined;
+  const itv = asyZeroCall(L, a, 'operator iter');
+  if (itv === null || !L.isRec(itv.type)) return undefined;
+  const iv = `asy__it${L.tmp++}`;
+  const rv = { code: `(var ${iv})`, type: itv.type };
+  const get = asyZeroCall(L, rv, 'get');
+  const valid = asyZeroCall(L, rv, 'valid');
+  const adv = asyZeroCall(L, rv, 'advance');
+  if (get === null || valid === null || adv === null) return undefined;
+  if (valid.type !== 'bool' || adv.type !== 'void') return undefined;
+  const el = isVar ? get.type : el0;
+  const gv = L.coerce(get, el, n, 'for-each 的元素');
+  if (gv === null) return null;
+  L.push();
+  if (L.declare(n, nm, el) === null) { L.pop(); return null; }
+  const upd = [`(expr ${adv.code})`];
+  L.updates.push(upd);
+  const body = asyStmt(L, n.items[4], ret);
+  L.updates.pop();
+  L.pop();
+  if (body === null) return null;
+  const inner = [`(let ${nm} ${asyCore(el)} ${gv.code})`];
+  for (const s of body) inner.push(s);
+  for (const s of upd) inner.push(s);
+  return [`(do (let ${iv} ${asyCore(itv.type)} ${itv.code})`
+    + ` (while ${valid.code} (do ${inner.join(' ')})))`];
+}
+
+/** `for (init; test; upd) body` -> `init; while (test) { body; upd }`（continue 见上） */export function asyForStmt(L, n, ret) {
   L.push();
   const init = asyForPart(L, n.items[1], ret);
   const mark = L.pre === null ? 0 : L.pre.length;
@@ -797,8 +860,8 @@ export function asyAssign(L, node, lhs, rhs, op) {
 export function asyAssignFld(L, node, q, rhs, op) {
   const f = L.recField(node, q.recv.type, q.field);
   if (f === null) return null;
-  const put = (code) => [`(fldset ${q.recv.code} ${q.field} ${code})`];
-  const cur = `(fld ${q.recv.code} ${q.field})`;
+  const put = (code) => [`(fldset ${q.recv.code} ${asyFldSym(q.field)} ${code})`];
+  const cur = `(fld ${q.recv.code} ${asyFldSym(q.field)})`;
   return asySlotAssign(L, node, q.field, '字段', f.type, cur, put, rhs, op);
 }
 

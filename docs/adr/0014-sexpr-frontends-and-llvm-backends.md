@@ -4567,6 +4567,36 @@ asy 的捕获是按引用的（量过 `int m=n; int h(int)=new int(int x){return
 改成 `cases/115-capture-byref`（改在闭包后、闭包自己改、具名嵌套函数、复合赋值、形参两种、
 `iter.asy` 那个三闭包共用一格 index 的形状），输出与 `asy -noV` 逐字节一致。
 
+### `for (T x : 可迭代的东西)`：`operator iter` 那套协议
+
+asy 的 for-each 不只吃数组。判据在 `stm.cc:473`：**`set.operator iter()` 查得通吗**；通就摊成
+（`stm.cc:512`）
+
+    for (var i = set.operator iter(); i.valid(); i.advance()) { T x = i.get(); body }
+
+照抄这一条：`operator iter` 只在 init 里求**一次**，`advance()` 那一句进 `L.updates`
+（与数组那一路的 `++i` 同一个位置，于是 `continue` 也先走 advance），`get()` 的返回类型就是
+`var` 那一档推出来的元素类型。四个名字缺一个就退回原来那句"for-each 要一个数组"
+（新增 `strict/foreach-noiter` 钉着：asy 那边也拒，报 "cannot cast 'Q' to 'int[]'" 退 1）。
+
+这一刀只认**函数类型的字段**那种 iter/get/valid/advance —— 也就是"没有体的方法声明"
+（`collections/iter.asy:26` 的 `Iter_T operator iter();`、`map.asy:34` 同样，Iter_T 的
+get/advance/valid 也都是），发出来是 `(callfn (fld 接收者 字段))`。有体的方法要走 `applyCall`，
+而那条路会往 `L.pre` 里绑临时量，摆在循环外面就错了（`btreegeneral.asy:167` 是那一种，
+不在 plain/graph 的路上）。
+
+带出来一件必须一起做的事：`operator iter` 这个**字段名带空格**，核心方言的字段名不收
+（`(class Iterable_T (operator iter …))` 当场报"一个字段是 (名字 类型)"）。于是加了一层
+`asyFldSym`：算符名的字段发代码时换成 `asy__opf…`，前端自己那张表照旧按源码里的名字记 ——
+查名字的都是源码里那个名字。要换的地方一共九处：`(class …)` 的字段表、字段默认值那两句
+`fldset`、`nameOf`/`dotQual`/`selfField` 的读、字段赋值的 `slotAssign`、方法值与别名那三处
+`fnValCall`。
+
+数字：`import plain;` 55 → 50（`Iterable_T`/`Map_K_V` 上的 6 条 for-each 清了）。
+`import graph;` 148 没动。tests/asy 194 条、tests/run.js 91 条全绿。新用例
+`cases/116-foreach-iter`（写死类型、`var`、`continue`、`break` 四种，输出与 `asy -noV`
+逐字节一致）与 `strict/foreach-noiter`。
+
 ## 后果与代价
 
 
