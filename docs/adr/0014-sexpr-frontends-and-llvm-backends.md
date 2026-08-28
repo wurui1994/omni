@@ -3811,6 +3811,38 @@ typedef 别名。二维数组这一格我们本来是收的，坏的是**声明�
 数字：`import plain;` 203 → 196。tests/asy 160 条、tests/run.js 91 条全绿。
 新用例 `cases/88-alias-global`（与真 asy 逐字节一致）。
 
+### frame 上那一批画图内建：签名抄准，做不到的体是 abort
+
+到这一刀，`import plain;` 剩下的最大一族是"没有能匹配的签名"（45 条），里面大半是
+frame 上那批画图内建：渐变的五个（lattice/axial/radial/gouraud/tensor/function shade）、
+裁剪的三个（clip/beginclip/endclip）、`tex`/`postscript`/`javascript`/`deconstruct`、
+`layer`/`newpage`、`min3`/`max3`。这些的语义都在 EPS/TeX 那一层，这一刀做不动。
+
+做法是**照 runpicture.in 把签名抄准，体写 abort**（prelude 里已有的
+「声明在这里、体是 abort」那一档）。这不是把错误藏起来：抄准签名之后"没做"落在
+运行期那一句话上（`abort("radialshade 还没做")`），而不是编译期一堆"没有能匹配的签名"——
+后者会把它后面**所有**代码挡在门外，看不见真正的下一个问题。
+
+真做了的是 `fill(frame, path[], pen, bool)`：每条路径进一笔填充。**明写的差别**：
+asy 那边一组路径连着 fillrule 是**一个**填充区域（挖洞靠它），我们是一笔一笔填，
+所以带洞的图形会与真 asy 不一样。
+
+顺带几个零碎的：`shift(transform)`（runtime.in:1169，只留平移、线性部分清零 ——
+量过是 `(3,4,0,0,0,0)`）、`interp(pair,pair,real)`、`minbound/maxbound(pair[])`、
+字号那一格（runtime.in:590/596 —— pen 上多一格，默认值是 **12pt 换成 bp** 的那个数，
+量过 `fontsize(currentpen)` 就是 11.9551681195517 = 12*72/72.27）。
+
+**一处自己的错话被量出来了**：`write(transform)` 我们报的是"asy 那边 write(transform)
+就是 no matching function"，而真 asy 印 `(3,4,2,0,0,2)`（builtin.cc:861 的
+`addWrite<transform>`）。补上之后又量到另一半：**数组那一支 asy 不收** ——
+`write(new transform[]{...})` 那边报 "no matching function 'write(transform[])'"，
+所以 `asyWriteArrays` 里元素是记录的一律拒（新 strict 用例
+`strict/write-transform-array` 钉着这一条）。`write(pen)` / `write(guide)`
+（builtin.cc:862/863）还没做，那条诊断现在说的是"还没做"，不再说"asy 也不收"。
+
+数字：`import plain;` 196 → 173。`import graph;` 153 不动。tests/asy 162 条、
+tests/run.js 91 条全绿。新用例 `cases/89-frame-builtins` 与 `strict/write-transform-array`。
+
 ## 后果与代价
 
 

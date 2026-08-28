@@ -55,9 +55,25 @@ export function asyWriteStmt(L, n) {
       return L.err(a, `write 的实参不能是一个没定案的重载集（${v.type}）—— asy 那边报 `
         + "no matching function 'write(<overloaded>)'");
     }
-    // asy 自己也不给结构体印（量过：`no matching function 'write(A)'`）。拦在这一层，
+    // asy 给 **transform** 印字（builtin.cc:861 的 addWrite<transform>，量过
+    // `write(shift(3,4)*scale(2))` 印 `(3,4,2,0,0,2)`）。它在这一层是 prelude 的一个
+    // struct，所以要在下面那条"结构体不印"前面接住。先落一个临时量：格式是六个字段
+    // 拼起来的，不落就把那个表达式求了六遍。
+    if (v.type === 'transform' && Array.isArray(L.pre)) {
+      const tv = `asy__wt${L.tmp++}`;
+      L.pre.push(`(let ${tv} ${asyCore(v.type)} ${v.code})`);
+      vals.push({ code: `(var ${tv})`, type: 'transform' });
+      continue;
+    }
+    // 别的结构体 asy 自己也不印（量过：`no matching function 'write(A)'`）。拦在这一层，
     // 不然漏出去的是核心方言那句 `(tostr E) 只接受 int / real / bool`。
+    // asy 那边还给 pen 与 guide 印（builtin.cc:862/863）—— 那两个我们还没做，
+    // 落在这条话里时说的是"还没做"，不是"asy 也不收"。
     if (L.isRec(v.type)) {
+      if (v.type === 'pen' || v.type === 'guide') {
+        return L.nope(a, `write(${v.type})（asy 那边有 builtin.cc:862/863 的 addWrite，`
+          + '那是一串 rgb(…)+linewidth(…) 的文字形式，这一刀还没做）');
+      }
       return L.err(a, `write 的实参不能是结构体 —— asy 那边 write(${v.type}) 就是 no matching function`);
     }
     vals.push(v);
@@ -106,6 +122,16 @@ export function asyFmtStr(L, t, code) {
     L.used.add('asy__triplestr');
     return `(call asy__triplestr ${code})`;
   }
+  // transform：六个字段照 real 的格式，夹在圆括号里、逗号分隔（量过 `(3,4,2,0,0,2)`）。
+  // `code` 在这儿一定是个临时量（asyWriteStmt 先落了一格），所以重复读它没有副作用。
+  if (t === 'transform') {
+    const f = (fld) => `(tostr (fld ${code} ${fld}) (int 15))`;
+    let out = f('x');
+    for (const fld of ['y', 'xx', 'xy', 'yx', 'yy']) {
+      out = `(bin "+" ${out} (bin "+" (str ",") ${f(fld)}))`;
+    }
+    return `(bin "+" (str "(") (bin "+" ${out} (str ")")))`;
+  }
   if (t === 'bool') {
     L.used.add('asy__boolstr');
     return `(call asy__boolstr ${code})`;
@@ -129,6 +155,14 @@ export function asyFmtStr(L, t, code) {
 export function asyWriteArrays(L, n, vals, first) {
   if (L.pre === null) return L.nope(n, '这个位置的 write（它要摊成语句，这里放不下）');
   const el = asyElem(vals[first].type);
+  // 元素是结构体的数组一律拒。**transform 也拒** —— 量过真 asy：`write(t)` 印
+  // `(3,4,2,0,0,2)`，而 `write(new transform[]{...})` 报
+  // "no matching function 'write(transform[])'"。builtin.cc:861 那一行虽然把
+  // transformArray() 递进去了，可数组那一支并没有落到 write 上。
+  if (L.isRec(el)) {
+    return L.err(n, `write 的实参不能是 ${el}[] —— asy 那边就是 `
+      + `no matching function 'write(${el}[])'`);
+  }
   const out = [];
   if (first === 1) out.push(`(print ${vals[0].code})`);
   const names = [];

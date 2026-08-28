@@ -329,6 +329,9 @@ struct pen {
   // 笔尖（nib，pen.h 的 `pen::P`）还没有 —— makepen 造的笔仍与真 asy 不一样。
   transform pentrans;
   bool hastrans = false;
+  // 字号（pen.h 的 `pen::size`）。默认是 12pt 换成 bp 的那个数 —— 量过
+  // `fontsize(currentpen)` 就是 11.9551681195517（= 12*72/72.27）。
+  real fontsizeval = 11.9551681195517;
 }
 
 pen pencopy(pen p) {
@@ -351,6 +354,7 @@ pen pencopy(pen p) {
   q.dashadjust = p.dashadjust;
   q.pentrans = p.pentrans;
   q.hastrans = p.hastrans;
+  q.fontsizeval = p.fontsizeval;
   return q;
 }
 
@@ -1026,8 +1030,16 @@ real[][] transpose(real[][] a) { abort("transpose 还没做"); return new real[]
 // (1) 笔的查询那一侧与字号（runpen.in）。base 里 `linewidth(currentpen)`、
 // `fontsize(10)` 到处都是。
 real linewidth(pen p) { return p.width; }
-pen fontsize(real size, real lineskip) { pen q; q.font = "fontsize"; return q; }
+// (1) 字号（runtime.in:590/596）：pen 上存一格。默认那一格是 **12pt 换成 bp**
+// 的那个数（量过 `fontsize(currentpen)` 是 11.9551681195517 = 12*72/72.27）。
+pen fontsize(real size, real lineskip) {
+  pen q = pencopy(asy__defpen);
+  q.font = "fontsize";
+  q.fontsizeval = size > 0 ? size : 0;
+  return q;
+}
 pen fontsize(real size) { return fontsize(size, 1.2 * size); }
+real fontsize(pen p) { return p.fontsizeval; }
 
 // (1) 还差的几个非泛型内建：base 里点名要，语义在参考实现里是一句话。
 // unit：runpair.in:178 —— 零向量回零（C++ 那边 length==0 时原样返回）。
@@ -1424,6 +1436,88 @@ bool adjust(pen p) { return p.dashadjust; }
 void begingroup(frame f) { }
 void endgroup(frame f) { }
 bool is3D(frame f) { return false; }
+
+// (1) frame 上的那一批画图内建（runpicture.in）。`fill(frame, path[], …)` 是真做的：
+// 每条路径进一笔填充。**明写的差别**：asy 那边一组路径连着 fillrule 是**一个**填充区域
+// （挖洞靠它），我们是一笔一笔填，所以带洞的图形会与真 asy 不一样。
+void fill(frame f, path[] g, pen p = currentpen, bool copy = true) {
+  for (path q : g) addop(f, 1, q, p);
+}
+// 下面这些是**声明在这里、体是 abort**：签名照参考实现抄准，语义（渐变、裁剪、TeX、
+// 分层、翻页、3D 盒子）都还没做。抄准签名是为了让"没做"落在运行期那一句话上，
+// 而不是编译期一堆"没有能匹配的签名"。
+void latticeshade(frame f, path[] g, bool stroke=false, pen fillrule=currentpen,
+                  pen[][] p, transform t=identity(), bool copy=true) {
+  abort("latticeshade 还没做");
+}
+void axialshade(frame f, path[] g, bool stroke=false, pen pena, pair a,
+                bool extenda=true, pen penb, pair b, bool extendb=true,
+                bool copy=true) {
+  abort("axialshade 还没做");
+}
+void radialshade(frame f, path[] g, bool stroke=false, pen pena, pair a, real ra,
+                 bool extenda=true, pen penb, pair b, real rb, bool extendb=true,
+                 bool copy=true) {
+  abort("radialshade 还没做");
+}
+void gouraudshade(frame f, path[] g, bool stroke=false, pen fillrule=currentpen,
+                  pen[] p, pair[] z, int[] edges, bool copy=true) {
+  abort("gouraudshade 还没做");
+}
+void gouraudshade(frame f, path[] g, bool stroke=false, pen fillrule=currentpen,
+                  pen[] p, int[] edges, bool copy=true) {
+  abort("gouraudshade 还没做");
+}
+void tensorshade(frame f, path[] g, bool stroke=false, pen fillrule=currentpen,
+                 pen[][] p, path[] b, pair[][] z, bool copy=true) {
+  abort("tensorshade 还没做");
+}
+void functionshade(frame f, path[] g, bool stroke=false, pen fillrule=currentpen,
+                   string shader="", bool copy=true) {
+  abort("functionshade 还没做");
+}
+void clip(frame f, path[] g, bool stroke=false, pen fillrule=currentpen,
+          bool copy=true) {
+  abort("clip(frame) 还没做");
+}
+void beginclip(frame f, path[] g, bool stroke=false, pen fillrule=currentpen,
+               bool copy=true) {
+  abort("beginclip 还没做");
+}
+void endclip(frame f) { abort("endclip 还没做"); }
+void layer(frame f) { abort("layer 还没做"); }
+void newpage(frame f) { abort("newpage 还没做"); }
+void postscript(frame f, string s) { abort("postscript 还没做"); }
+void postscript(frame f, string s, pair min, pair max) { abort("postscript 还没做"); }
+void tex(frame f, string s) { abort("tex 还没做"); }
+void tex(frame f, string s, pair min, pair max) { abort("tex 还没做"); }
+void javascript(frame f, string s) { abort("javascript 还没做"); }
+void deconstruct(frame f, frame preamble, transform T=identity()) {
+  abort("deconstruct 还没做");
+}
+triple min3(frame f) { abort("min3(frame) 还没做"); return (0, 0, 0); }
+triple max3(frame f) { abort("max3(frame) 还没做"); return (0, 0, 0); }
+
+// (1) 几个零碎的（runtime.in / builtin.cc 的模板那一批）
+// shift(transform)：只留平移，线性部分清零（runtime.in:1169 —— 量过是 (3,4,0,0,0,0)）。
+transform shift(transform t) { return xform(t.x, t.y, 0, 0, 0, 0); }
+pair interp(pair a, pair b, real t) { return a + (b - a) * t; }
+pair minbound(pair[] a) {
+  if (a.length == 0) { abort("minbound(pair[])：空数组"); return (0, 0); }
+  pair m = a[0];
+  for (int i = 1; i < a.length; ++i) m = minbound(m, a[i]);
+  return m;
+}
+pair maxbound(pair[] a) {
+  if (a.length == 0) { abort("maxbound(pair[])：空数组"); return (0, 0); }
+  pair m = a[0];
+  for (int i = 1; i < a.length; ++i) m = maxbound(m, a[i]);
+  return m;
+}
+real[] intersections(path p, pair a, pair b, real fuzz=-1) {
+  abort("intersections(path,pair,pair) 还没做"); return new real[];
+}
+
 
 // (1) `transform * pen`（runtime.in:1107 → pen.h 的 `transformed`）：搬的是笔自己那个
 // 变换（`ret.t = p.t.isNull() ? t : t*p.t`）。笔尖（nib）还没有，所以 makepen 造的笔
