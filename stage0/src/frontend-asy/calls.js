@@ -153,6 +153,14 @@ export function asyCall(L, n) {
     if (sf !== null && asyIsFn(sf.type)) {
       return asyFnValCall(L, n, nm, sf.type, `(fld (var this) ${asyFldSym(nm)})`);
     }
+    // 同一件事，只是那一格是 **static** 的：`static frame fitter(string,picture,…);`
+    // （plain_picture.asy:876 —— 无体的 static 方法声明就是一格 static 的函数类型字段，
+    // 量过 `fitter == null` 是 true、`P.fitter = new …` 之后 `fitter(…)` 就通了）。
+    // 位置照上面那一档：字段之后、文件级候选之前。static 的体里也看得见它。
+    const ss = L.statOf(L.self.rec.name, nm);
+    if (ss !== null && asyIsFn(ss.type)) {
+      return asyFnValCall(L, n, nm, ss.type, `(var ${ss.sym})`);
+    }
     // static 的方法体里调了实例方法：asy 自己也拒（"static use of dynamic variable"）。
     // 这一句要排在"声明在后面"那条**前面** —— 实例方法明明写在前面，只是这儿够不着它。
     if (L.selfInstMember(nm)) return L.selfStatBad(n, nm);

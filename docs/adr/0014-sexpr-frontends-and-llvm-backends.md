@@ -4681,6 +4681,39 @@ get/advance/valid 也都是），发出来是 `(callfn (fld 接收者 字段))`�
 tests/run.js 91 条全绿。新用例 `cases/119-dims-xform-nested`（十二行输出，与
 `asy -noV` 逐字节一致）。带点的嵌套类型名（`Outer.Inner`）还是不收 —— 那是另一刀。
 
+### 三个内建的缺口，与 stdout 那份行缓冲
+
+- `minAfterTransform` / `maxAfterTransform`（runpath.in:338/362）：每条路径先搬一遍再取
+  盒子，逐分量取最小 / 最大；空数组时 asy 报的是 `nullpath has no points`
+  （path.cc:28）。这一格的诊断原先**指错了地方** —— plain_bounds.asy:316 报的是
+  "内建函数 'addMinToExtremes'"，而 `addMinToExtremes` 明明在同一个 struct 里、第 312
+  行刚调过；真正缺的是里层那个 `minAfterTransform`，它把实参那一格弄成了未知类型，
+  于是外层那次调用连候选都数不出来。
+- **static 那一格里躺着函数值**：`static frame fitter(string,picture,…);`
+  （plain_picture.asy:876）是无体的 static 方法声明 —— 也就是一格 static 的函数类型字段
+  （量过 `fitter == null` 是 true、`P.fitter = new …` 之后 `fitter(…)` 就通了）。
+  裸名字调它是"读这一格再间接调"，跟实例那一档（`selfField`）同一个办法，只是取值
+  换成 `(var 那个 static 符号)`。
+- `write(x, suffix)`：asy 的内建签名是
+  `void write(file file=stdout, string s="", T x, void suffix(file)=endl)` ——
+  file 有默认值，**被调方**填。我们的 `write` 是前端内建的一族，那一族不收 suffix，
+  所以 int/real/bool/string/pair/triple 六支得在 prelude 里显式给。
+  plain_constants.asy:107 的 `write(b.value, suffix)`（bool3 那一族）是原型。
+
+补第三条时炸出一个真 bug：stdout 那份**行缓冲**原先挂在 `file` 那一格上，而
+`output()` 每次回来的是新的一格（asy 那边 `restricted file stdout=output();` 只有一个，
+包的是同一个 stdout）。于是 `write(output(), "false ", none)` 那半行跟着那一格一起扔了 ——
+量出来是整段没了。缓冲现在是一份模块级的 `asy__obuf`，`fd == 1` 的都往那儿攒。
+
+留着的坎：不带 suffix 的 `write(x)` 走的是**另一条**路（前端内建降成核心方言的
+`(print …)`，自带换行、不过缓冲）。同一个程序里把两条混着用，没凑满一行的那半行会
+跟后面直接 print 的那句**串行**。根子是核心方言里没有"不带换行地印"这一句 ——
+补它要动方言与六条腿，跟数组的 `.cyclic` 同一档，一起留着。
+
+数字：`import plain;` 40 → 37。`import graph;` 148 没动。tests/asy 198 条、
+tests/run.js 91 条全绿。新用例 `cases/120-builtin-gaps`（十三行输出，与 `asy -noV`
+逐字节一致；整个文件都走带 suffix 那一路，正是为了绕开上面那道坎）。
+
 ## 后果与代价
 
 

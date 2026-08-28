@@ -2010,15 +2010,20 @@ void warning(string s, string t, bool position=false) {
 // 一行没写完就退出时那一截会丢，这条差别记在这儿（asy 那边会 flush 出去）。
 typedef void asy__suffix(file);
 void flush(file f) { }
+// stdout 那一路的行缓冲是**一份**，不挂在 file 那一格上：asy 的 stdout 只有一个
+// （plain_constants.asy:64 的 `restricted file stdout=output();`，而 `output()` 每次
+// 回来的是新的一格 file，包的却是同一个 stdout）。挂在格子上的时候，
+// `write(output(), "false ", none)` 那半行就跟着那一格一起扔了 —— 量出来是整段没了。
+private string asy__obuf = "";
 void asy__fput(file f, string s) {
-  f.buf = f.buf + s;
-  if (f.fd != 1) return;
+  if (f.fd != 1) { f.buf = f.buf + s; return; }
+  asy__obuf = asy__obuf + s;
   // 注意：asy 的双引号串**不处理转义**（"\n" 是两个字节 \ 和 n），要真换行得用单引号串。
-  int k = find(f.buf, '\n');
+  int k = find(asy__obuf, '\n');
   while (k >= 0) {
-    write(substr(f.buf, 0, k));
-    f.buf = substr(f.buf, k + 1, length(f.buf) - k - 1);
-    k = find(f.buf, '\n');
+    write(substr(asy__obuf, 0, k));
+    asy__obuf = substr(asy__obuf, k + 1, length(asy__obuf) - k - 1);
+    k = find(asy__obuf, '\n');
   }
 }
 void none(file f) { }
@@ -2060,6 +2065,7 @@ void write(file f, string s, bool x, asy__suffix suffix=none) {
 void write(file f, string s, triple x, asy__suffix suffix=none) {
   asy__fput(f, s); write(f, x, suffix);
 }
+
 
 // 笔的**文字**形（pen.h:869 的 operator<<，逐条照抄）。数是裸 ostream 出来的，
 // 所以是 6 位有效数字 —— 与 EPS 那一路的 ps() 同一档。量过的几条：
@@ -2177,6 +2183,19 @@ file output(string name="", bool update=false, string comment="#", string mode="
 file nullFile() { file f; f.fd = -1; return f; }
 int precision(file f, int digits=0) { return digits; }
 
+// 不给 file 的那一族：asy 的内建签名是 `void write(file file=stdout, string s="", T x,
+// void suffix(file)=endl)`，也就是 `write(x, suffix)` 这个写法**被调方**把 file 填成
+// stdout。我们的 write 是前端内建的一族，那一族不收 suffix，所以这几支得显式给。
+// plain_constants.asy:107 的 `write(b.value, suffix)`（bool3 那一族）就是这一格。
+// 只写 `write(x)` 时仍然走前端那一族（少一个实参、更同型），所以尾巴还是换行。
+// 位置在 output() **之后** —— 这个文件里名字是顺序解析的。
+void write(string x, asy__suffix suffix) { write(output(), x, suffix); }
+void write(int x, asy__suffix suffix) { write(output(), x, suffix); }
+void write(real x, asy__suffix suffix) { write(output(), x, suffix); }
+void write(bool x, asy__suffix suffix) { write(output(), x, suffix); }
+void write(pair x, asy__suffix suffix) { write(output(), x, suffix); }
+void write(triple x, asy__suffix suffix) { write(output(), x, suffix); }
+
 // 从 file **隐式**读一个词（builtin.cc:494 `addCast(ve,t1,primFile(),read<T>)`）——
 // addUnorderedOps 里每个 T 一条，一维到三维的数组也各一条（:495-497）。
 // asy 那边 `string s=stdin;` 就是这么读的（plain_strings.asy:13 的 `return stdin;`、
@@ -2283,6 +2302,35 @@ path operator *(transform t, path g) {
     out.nodes.push(n);
   }
   return out;
+}
+
+// (1a) `minAfterTransform` / `maxAfterTransform`（runpath.in:338/362）：把每条路径先搬
+// 一遍再取盒子，逐分量取最小 / 最大。空数组时 asy 报的是 "nullpath has no points"
+// （path.cc:28 的 nopoints）。plain_bounds.asy:316/317/322/323 要的是它们。
+pair minAfterTransform(transform t, path[] p) {
+  if (p.length == 0) { abort("nullpath has no points"); return (0, 0); }
+  pair z = min(t * p[0]);
+  real mx = z.x;
+  real my = z.y;
+  for (int i = 1; i < p.length; ++i) {
+    pair w = min(t * p[i]);
+    if (w.x < mx) mx = w.x;
+    if (w.y < my) my = w.y;
+  }
+  return (mx, my);
+}
+
+pair maxAfterTransform(transform t, path[] p) {
+  if (p.length == 0) { abort("nullpath has no points"); return (0, 0); }
+  pair z = max(t * p[0]);
+  real mx = z.x;
+  real my = z.y;
+  for (int i = 1; i < p.length; ++i) {
+    pair w = max(t * p[i]);
+    if (w.x > mx) mx = w.x;
+    if (w.y > my) my = w.y;
+  }
+  return (mx, my);
 }
 
 // (1) 笔的盒子（runtime.in:339/344，体是 pen.h:931 的 `pen::bounds()`）：没有笔尖时，
