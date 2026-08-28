@@ -142,6 +142,31 @@ export function asyCall(L, n) {
       return L.err(n, `'${on}' 在这里还看不见 —— 没有这个名字的函数`);
     }
   }
+  // 调用一个**任意表达式**：`(above ? add : prepend)(dest,src)`（plain_filldraw.asy:247）、
+  // `((F) map.operator init)()`（collections/map.asy:102）、`pic.add(…)` 里存下来的那一格。
+  // 先把被调那一侧当普通表达式降下来，是函数类型就走间接调用那一条（与函数值同一条路）。
+  // 降不出来（或不是函数类型）就回滚，照旧报"还没做"—— 那句话对别的形状还是对的。
+  if (nm === null && Array.isArray(L.pre)) {
+    const mark = L.diags.mark();
+    const savePre = L.pre;
+    L.pre = [];
+    const cv = L.expr(callee);
+    const mine = L.pre;
+    L.pre = savePre;
+    if (cv !== null && cv.type !== undefined && asyIsFn(cv.type)) {
+      for (const s of mine) L.pre.push(s);
+      // 被调的那一侧可能是一串语句攒出来的临时量，`(callfn …)` 要的是个值 ——
+      // 不是单个变量时先绑一格，免得它在实参之后才求（次序是照 asy 的：被调先求）。
+      let code = cv.code;
+      if (!/^\(var [A-Za-z0-9_]+\)$/.test(code)) {
+        const tv = `asy__cal${L.tmp++}`;
+        L.pre.push(`(let ${tv} ${asyCore(cv.type)} ${code})`);
+        code = `(var ${tv})`;
+      }
+      return asyFnValCall(L, n, '那一次调用', cv.type, code);
+    }
+    L.diags.rollback(mark);
+  }
   if (nm === null) return L.nope(n, '调用一个不是普通名字的东西（函数值、方法、算符名）');
   if (nm === 'write') return L.err(n, `${ASY_NOPE}：write 出现在表达式位置（它是语句）`);
   let lateMem = null;   // 成员那一层"声明在后面"—— 外层也接不住时才拿它当诊断
@@ -1238,6 +1263,8 @@ export function asyFit(L, cand, raw) {
     if (r.v.shadowFns !== undefined && asyIsFn(cand.ps[at].type)) {
       for (const c of r.v.shadowFns) if (L.candFnType(c) === cand.ps[at].type) return 0;
     }
+    // 同名的**模块级那一格**（shadowVar，见 nameOf）：同型就算精确匹配
+    if (r.v.shadowVar !== undefined && r.v.shadowVar.type === cand.ps[at].type) return 0;
     // `null` 当实参：类型来自**这个槽**（asy 就是这么定的）。槽不是引用类型就接不住。
     if (r.v.type === ASY_NULL) return asyRefTy(L, cand.ps[at].type) ? 0 : null;
     // `explicit` 的槽只收类型一模一样的实参（第二十六刀，量过：连 int->real 都挡）

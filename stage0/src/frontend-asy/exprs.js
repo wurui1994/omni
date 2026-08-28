@@ -94,6 +94,14 @@ export function asyNameOf(L, n, nm) {
       const fns = asyVisible(L, nm);
       if (fns.length > 0) v.shadowFns = fns;
     }
+    // 同名的**模块级那一格**也带上（shadowVar，落地与 shadowFns 同一条）：asy 的名字
+    // 是按签名查的，两格同名不同型能共存。原型是 graph.asy:1007 的 `axisT axis;` 与
+    // xaxisAt 的形参 `axis axis`（`void(picture,axisT)`）—— `axis(pic,axis)` 里被调的
+    // 是形参、实参是模块级那一格。
+    const sg = L.gvarHere(nm);
+    if (sg !== null && sg.ok && sg.type !== t) {
+      v.shadowVar = { code: `(var ${sg.sym})`, type: sg.type };
+    }
     return v;
   }
   // 匿名函数体里：外层函数的局部量要**捕获**进来。顺序照 asy —— 闭包自己的局部（上面
@@ -197,6 +205,36 @@ export function asyNameOf(L, n, nm) {
 export function asyOverPick(L, r, want) {
   for (const c of r.v.over) if (asyCandFnType(L, c) === want) return `(fnref ${c.sym})`;
   return null;
+}
+
+/** 一支是重载集、另一支已经是函数类型：按对面那个类型定案（原地改） */
+function asyOverSide(L, v, other) {
+  if (v.code !== null || v.over === undefined || !asyIsFn(other.type)) return;
+  const p = asyOverPick(L, { v }, other.type);
+  if (p !== null) { v.code = p; v.type = other.type; }
+}
+
+/**
+ * 两支**都是**重载集：取两边签名的交集。只有一个共同签名时定案 —— asy 那边
+ * `above ? add : prepend`（plain_filldraw.asy:247）挑的正是两边都有的 `void(frame,frame)`。
+ * 交集里有多个时不猜（照旧报两支不同型），交集为空时也不动。
+ */
+function asyOverBoth(L, a, b) {
+  if (a.code !== null || a.over === undefined) return;
+  if (b.code !== null || b.over === undefined) return;
+  const bt = new Set();
+  for (const c of b.over) bt.add(asyCandFnType(L, c));
+  const hit = [];
+  for (const c of a.over) {
+    const t = asyCandFnType(L, c);
+    if (bt.has(t) && !hit.includes(t)) hit.push(t);
+  }
+  if (hit.length !== 1) return;
+  const pa = asyOverPick(L, { v: a }, hit[0]);
+  const pb = asyOverPick(L, { v: b }, hit[0]);
+  if (pa === null || pb === null) return;
+  a.code = pa; a.type = hit[0];
+  b.code = pb; b.type = hit[0];
 }
 
 /** 一个候选当**函数值**时的类型文本（与 nameOf 里那份拼法必须一致） */
@@ -628,6 +666,8 @@ export function asyCoerce(L, v, want, node, what) {
       if (asyCandFnType(L, c) === want) return { code: `(fnref ${c.sym})`, type: want };
     }
   }
+  // 同名的**模块级那一格**（shadowVar，见 nameOf）：类型一模一样时改判成它
+  if (v.shadowVar !== undefined && v.shadowVar.type === want) return v.shadowVar;
   // 用户定义的转换（第二十七刀）：内建那几条不成才轮到它，源类型要一模一样（不串）
   const uc = L.castFor(want, v.type, false);
   if (uc !== null) return { code: `(call ${uc.sym} ${v.code})`, type: want };
@@ -642,7 +682,22 @@ export function asyExprList(L, n, h) {
       // 数组和 pair 的字段都不是 `(field …)` 而是一个**带点的名字**。
       const q = asyDotQual(L, n.items[1]);
       if (q === DOT_BAD) return null;
-      if (q !== null) return asyMember(L, n, q.recv, q.field);
+      if (q !== null) {
+        // 里面那一格接不住 `.f` 时，同名的**模块级**那一格再试一次（见 memberOuter）
+        const mark = L.diags.mark();
+        const savePre = Array.isArray(L.pre) ? L.pre : null;
+        if (savePre !== null) L.pre = [];
+        const mv = asyMember(L, n, q.recv, q.field);
+        const mine = savePre === null ? null : L.pre;
+        if (savePre !== null) L.pre = savePre;
+        if (mv !== null) {
+          if (mine !== null) for (const s of mine) L.pre.push(s);
+          return mv;
+        }
+        const alt = q.base === undefined ? undefined : asyMemberOuter(L, n, q.base, q.field);
+        if (alt !== undefined) { L.diags.rollback(mark); return alt; }
+        return null;
+      }
       // `Box.n`：类型名限定的 static（见 statQual —— 同名的变量在点号左边赢，所以放这里）
       const sq = L.statQual(n.items[1]);
       if (sq !== null) return { code: `(var ${sq.sym})`, type: sq.type };
@@ -1013,8 +1068,8 @@ export function asyDotQual(L, node) {
     const t = L.lookup(base);
     if (t !== null) {
       const bx = L.boxOf(base);
-      const code = bx === null ? `(var ${base})` : `(aget (var ${bx.sym}) (int 0))`;
-      return { recv: { code, type: t }, field: f };
+      const code = bx === null ? `(var ${L.symOf(base)})` : `(aget (var ${bx.sym}) (int 0))`;
+      return { recv: { code, type: t }, field: f, base };
     }
     // 匿名函数体里：点号左边那个名字也可能是**外层函数的局部量**，那就得捕获进来。
     // 位置照 nameOf 那一档的次序：闭包自己的局部（上面那一句）、外层的局部（这一句）、
@@ -1043,8 +1098,23 @@ export function asyDotQual(L, node) {
   const inner = asyDotQual(L, node.items[1]);
   if (inner === null) return null;
   if (inner === DOT_BAD) return DOT_BAD;
+  // 里面那一层取不着字段时，点号左边那个名字也要往外找一格（与 asyField 同一条：
+  // `axis.div.push(3)` 里 axis 是形参、字段在**模块级**那一格上，见 asyMemberOuter）。
+  const mark = L.diags.mark();
+  const savePre = Array.isArray(L.pre) ? L.pre : null;
+  if (savePre !== null) L.pre = [];
   const recv = asyMember(L, node.items[1], inner.recv, inner.field);
-  return recv === null ? DOT_BAD : { recv, field: f };
+  const mine = savePre === null ? null : L.pre;
+  if (savePre !== null) L.pre = savePre;
+  if (recv !== null) {
+    if (mine !== null) for (const s of mine) L.pre.push(s);
+    return { recv, field: f };
+  }
+  const alt = inner.base === undefined ? undefined
+    : asyMemberOuter(L, node.items[1], inner.base, inner.field);
+  if (alt === undefined) return DOT_BAD;
+  L.diags.rollback(mark);
+  return { recv: alt, field: f };
 }
 
 /** `(field 值 ID)`：`a[0].x` 这种（点后面跟的不是名字而是别的表达式时走这条） */
@@ -1052,7 +1122,51 @@ export function asyField(L, n) {
   const nm = isAtom(n.items[2]) ? n.items[2].value : null;
   const a = asyExpr(L, n.items[1]);
   if (a === null) return null;
-  return asyMember(L, n, a, nm);
+  const mark = L.diags.mark();
+  const savePre = Array.isArray(L.pre) ? L.pre : null;
+  if (savePre !== null) L.pre = [];
+  const v = asyMember(L, n, a, nm);
+  const mine = savePre === null ? null : L.pre;
+  if (savePre !== null) L.pre = savePre;
+  if (v !== null) {
+    if (mine !== null) for (const s of mine) L.pre.push(s);
+    return v;
+  }
+  // 里面那一格接不住 `.nm`：同名的**模块级**那一格再试一次。asy 的名字解析是按整个
+  // 重载集找的 —— graph.asy:1007 有 `axisT axis;`，而 xaxisAt 的形参也叫 `axis`
+  // （类型是 `void(picture,axisT)`）。体里的 `axis.value` 指的是模块级那一格。
+  const alt = asyFieldOuter(L, n, nm);
+  if (alt !== undefined) { L.diags.rollback(mark); return alt; }
+  return null;
+}
+
+/** 上面那条的第二次机会：接收者是个**裸名字**、而它遮住了模块级同名的一格时才有 */
+function asyFieldOuter(L, n, nm) {
+  const rn = n.items[1];
+  if (!isList(rn) || head(rn) !== 'name-exp') return undefined;
+  const vn = L.plainName(rn.items[1]);
+  return vn === null ? undefined : asyMemberOuter(L, n, vn, nm);
+}
+
+/**
+ * 裸名字 `vn` 的**模块级**那一格上再问一次 `.nm`。asy 的名字解析是按整个重载集找的 ——
+ * graph.asy:1007 有 `axisT axis;`，而 xaxisAt 的形参也叫 `axis`（类型是
+ * `void(picture,axisT)`）。体里的 `axis.value` 指的是模块级那一格：里面那一格的类型上
+ * 压根没有这个字段，asy 就往外找。回 `undefined` 表示"这条路也不成"（诊断已回滚）。
+ */
+function asyMemberOuter(L, n, vn, nm) {
+  if (L.lookup(vn) === null) return undefined;      // 没遮住谁，就没有第二次机会
+  const g = L.gvarHere(vn);
+  if (g === null || !g.ok) return undefined;
+  const mark = L.diags.mark();
+  const savePre = Array.isArray(L.pre) ? L.pre : null;
+  if (savePre !== null) L.pre = [];
+  const v = asyMember(L, n, { code: `(var ${g.sym})`, type: g.type }, nm);
+  const mine = savePre === null ? null : L.pre;
+  if (savePre !== null) L.pre = savePre;
+  if (v === null) { L.diags.rollback(mark); return undefined; }
+  if (mine !== null) for (const s of mine) L.pre.push(s);
+  return v;
 }
 
 /** 取字段。数组只有 `.length`，pair 只有 `.x`/`.y`，记录按声明的字段来；别的都还没做。 */
@@ -1759,6 +1873,11 @@ export function asyCond(L, n) {
   // 同名的变量遮住了函数名：按对面那一支的类型挑一挑（与 compare 那边同一条，见 shadowMatch）
   asyShadowMatch(L, a, b);
   asyShadowMatch(L, b, a);
+  // 两支是**重载集**时按对面定案（`above ? add : prepend`，plain_filldraw.asy:247）：
+  // 两边都是集合就取交集，只有一个共同签名时才定 —— 多个就不猜，照旧报两支不同型。
+  asyOverBoth(L, a, b);
+  asyOverSide(L, a, b);
+  asyOverSide(L, b, a);
   const t = asyPromote(L, a, b);
   if (t === null) return L.err(n, `\`? :\` 两支要同型：真支是 ${a.type}，假支是 ${b.type}`);
   if (t === 'void') return L.err(n, '`? :` 的两支不能是 void');

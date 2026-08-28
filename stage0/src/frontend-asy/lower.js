@@ -278,7 +278,7 @@ import {
 
 // 语句那一族（第四摊）：write / 分派 / 三种循环 / 变量声明 / 赋值那一整套。同一条拆法。
 import {
-  asyWriteStmt, asyFmtStr, asyWriteArrays, asyStmt, asyLoopCond, asyStmtOne, asyDoWhile,
+  asyWriteStmt, asyFmtStr, asyWriteArrays, asyStmt, asyStmtOne, asyDoWhile,
   asyForEach, asyForStmt, asyForPart, asyVardec, asyExprStmt,
   asyAssignStat, asyAssign, asyAssignFld, asyAssignIndex, asyBody,
 } from './stmts.js';

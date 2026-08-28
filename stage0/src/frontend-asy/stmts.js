@@ -5,7 +5,7 @@
 //
 // 这一摊管"一条语句怎么落地"：`write`（asyWriteStmt / asyFmtStr / asyWriteArrays —— 它在 asy
 // 里是语句而不是表达式，所以归这儿）、分派（asyStmt / asyStmtOne / asyBody）、
-// 三种循环（asyDoWhile / asyForEach / asyForStmt / asyForPart / asyLoopCond）、
+// 三种循环（asyDoWhile / asyForEach / asyForStmt / asyForPart）、
 // 变量声明（asyVardec）、表达式语句（asyExprStmt），以及赋值那一整套
 // （asyAssign / asyAssignFld / asyAssignIndex / asyAssignStat —— 复合赋值与自增在这里
 // 走的是同一个二元算符，见 asyAssign 尾巴上那一段）。
@@ -211,16 +211,6 @@ export function asyStmt(L, n, ret) {
   return pre.concat(lines);
 }
 
-/**
- * 循环条件里不许有前置语句。`? :` 摊出来的临时量赋值只能放在**循环外面**，那样条件就
- * 只算一次，语义就错了 —— 所以见到就报错，而不是悄悄换个意思。
- * @param {number} mark 算条件之前 L.pre 的长度
- */
-export function asyLoopCond(L, node, what, mark) {
-  if (L.pre === null || L.pre.length === mark) return true;
-  return L.nope(node, `${what} 的条件里的 \`? :\`（它要摊成语句，而循环条件每轮都得重算）`);
-}
-
 export function asyStmtOne(L, n, ret) {
   if (!isList(n)) return L.err(n, '认不出的语句');
   const h = head(n);
@@ -343,14 +333,18 @@ export function asyDoWhile(L, n, ret) {
   L.updates.push([]);
   const b = asyStmt(L, n.items[1], ret);
   L.updates.pop();
-  const mark = L.pre === null ? 0 : L.pre.length;
+  // 条件里摊出来的语句跟着条件走（它就在体的末尾，每轮都重算）—— 与 while / for 同一条
+  const savePre = L.pre;
+  L.pre = [];
   const c = L.coerce(L.expr(n.items[2]), 'bool', n, 'do-while 的条件');
-  if (asyLoopCond(L, n, 'do-while', mark) === null) return null;
+  const cpre = L.pre;
+  L.pre = savePre;
   if (b === null || c === null) return null;
   for (const s of b) {
     if (s === '(cont)' || s.includes(' (cont)')) return L.nope(n, 'do-while 里的 continue');
   }
-  return [`(while (bool true) (do ${b.join(' ')} (if (un "!" ${c.code}) (do (brk)))))`];
+  const tail = cpre.length === 0 ? '' : `${cpre.join(' ')} `;
+  return [`(while (bool true) (do ${b.join(' ')} ${tail}(if (un "!" ${c.code}) (do (brk)))))`];
 }
 
 /**
@@ -461,11 +455,14 @@ function asyForIter(L, n, ret, a, isVar, el0, nm) {
 /** `for (init; test; upd) body` -> `init; while (test) { body; upd }`（continue 见上） */export function asyForStmt(L, n, ret) {
   L.push();
   const init = asyForPart(L, n.items[1], ret);
-  const mark = L.pre === null ? 0 : L.pre.length;
+  // 条件里摊出来的语句要单独收着：循环条件**每轮都得重算**（与 while 那一档同一条）
+  const savePre = L.pre;
+  L.pre = [];
   const test = isList(n.items[2]) && head(n.items[2]) === 'none'
     ? { code: '(bool true)', type: 'bool' }
     : L.coerce(L.expr(n.items[2]), 'bool', n, 'for 的条件');
-  if (asyLoopCond(L, n, 'for', mark) === null) { L.pop(); return null; }
+  const cpre = L.pre;
+  L.pre = savePre;
   const upd = asyForPart(L, n.items[3], ret);
   if (init === null || test === null || upd === null) { L.pop(); return null; }
   L.updates.push(upd);
@@ -476,7 +473,13 @@ function asyForIter(L, n, ret, a, isVar, el0, nm) {
   const inner = [];
   for (const s of body) inner.push(s);
   for (const s of upd) inner.push(s);
-  return [`(do ${init.join(' ')} (while ${test.code} (do ${inner.join(' ')})))`];
+  if (cpre.length === 0) {
+    return [`(do ${init.join(' ')} (while ${test.code} (do ${inner.join(' ')})))`];
+  }
+  // 有摊出来的语句（条件里的 `? :`，graph.asy:801）：搬到循环体的**开头**，判假就 break。
+  // `continue` 先跑更新再跳到循环顶，于是条件也重算一遍 —— 与 asy 一致。
+  return [`(do ${init.join(' ')} (while (bool true) (do ${cpre.join(' ')}`
+    + ` (if (un "!" ${test.code}) (do (brk))) ${inner.join(' ')})))`];
 }
 
 /** for 的 init / update 段：`(none)` / `(stmexps ...)` / 一条 barevardec */
@@ -722,6 +725,23 @@ export function asyAssign(L, node, lhs, rhs, op) {
       const s = L.statOf(q.recv.type, q.field);
       if (s !== null) return asyAssignStat(L, node, `${q.recv.type}.${q.field}`, s, rhs, op);
       return asyAssignFld(L, node, q, rhs, op);
+    }
+    // 里面那一格没有这个字段：同名的**模块级**那一格再试一次（读那一路见 memberOuter）。
+    // graph.asy:1478 的 `axis.xdivisor=mx.divisor;` 就是这一格 —— 形参 `axis` 是函数
+    // 类型（`void(picture,axisT)`），有 `xdivisor` 的是模块级那个 `axisT axis;`。
+    if (q !== null && !L.isRec(q.recv.type) && q.base !== undefined && L.lookup(q.base) !== null) {
+      const g = L.gvarHere(q.base);
+      if (g !== null && g.ok && L.isRec(g.type)) {
+        const rd = L.records.get(g.type);
+        let has = false;
+        if (rd !== undefined) for (const fd of rd.fields) if (fd.name === q.field) has = true;
+        if (has) {
+          const s2 = L.statOf(g.type, q.field);
+          if (s2 !== null) return asyAssignStat(L, node, `${g.type}.${q.field}`, s2, rhs, op);
+          return asyAssignFld(L, node,
+            { recv: { code: `(var ${g.sym})`, type: g.type }, field: q.field }, rhs, op);
+        }
+      }
     }
     // 数组的 `.cyclic = …`（第六十五刀，见 cycHelper）：不是记录的字段，是数组对象上
     // 那一格标记。plain_pens.asy:148 的 `colorPen.cyclic=true` 就是这一句。

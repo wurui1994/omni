@@ -5094,6 +5094,36 @@ asy 那边报 "no matching variable 'any'"（量过）。`|` 这个算符名进�
 数字：`import plain;` 16 → 14，`import graph;` 47 → 25，`import math;` 71 → 15。
 tests/asy 208 条（新增 cases/130-array-compare）、tests/run.js 91 条全绿。
 
+### 一批：名字往外找那一格、任意表达式当被调，与循环条件里的 `? :`
+
+这一批的四条都是**同一个毛病的四个面**：asy 把一个名字放到"函数 + 各层变量"的整个候选
+面上，用**用处**（实参类型、字段名、目标类型）挑；我们这边是从里往外找、找着第一格就
+定案。补法一律是那套探针：`L.diags.mark()` 加换掉 `L.pre`，成了就把攒下的语句补回去，
+不成就回滚换下一档。
+
+- **任意表达式当被调**（calls.js 的 `asyCall`）。`(above ? add : prepend)(dest,src)`
+  （plain_filldraw.asy:247）、`((F) map.operator init)()`（collections/map.asy:102）：
+  被调那一侧先当普通表达式降，是函数类型就走间接调用那条（与函数值同一条路）。降不出来
+  就回滚、照旧报"还没做"。不是单个变量时先绑一格临时量 —— `(callfn …)` 要个值，而
+  **被调先求**（asy 的次序）。
+- **`? :` 两支都是重载集**（exprs.js 的 `asyOverBoth` / `asyOverSide`）：取两边签名的
+  交集，只有**一个**共同签名时定案。交集里多于一个就不猜（照旧报两支不同型）—— 那要
+  把调用那一侧的实参类型倒灌回来，是另一刀。
+- **名字往外找那一格**（`asyMemberOuter`，读、写、当实参三处都接上）：里面那一格上没有
+  这个字段时，同名的**模块级**那一格还有第二次机会。graph.asy:1134 的 `void axis(picture,
+  Label, path, …)` 形参叫 `axis`，而 graph.asy:1007 的 `axisT axis;` 才是带 `.value`
+  的那一格。三处落地：`asyField`、`asyDotQual` 里递归那一层（`axis.div.push(3)` 这种
+  三层的点）、`asyAssign` 的字段赋值。另外给局部/形参的值挂上 `shadowVar`（与
+  `shadowFns` 同一条路，`asyCoerce` 与 `asyFit.tryAt` 两个落点）：同名不同型时，实参
+  位置按**目标类型**在两格之间挑。
+- **`for` 与 `do-while` 的条件里能有 `? :`**（stmts.js）：`while` 本来就把条件摊出来的
+  语句搬进循环体开头、判假就 `(brk)`，这两种照抄同一条。于是 `asyLoopCond` 那道门整个
+  删掉 —— graph.asy:801 那句不必再报"还没做"。`continue` 先跑更新再跳到循环顶，条件也
+  跟着重算，与 asy 一致。
+
+数字：`import plain;` 14 → 13，`import graph;` 25 → 17，`import math;` 15 → 14。
+tests/asy 209 条（新增 cases/131-name-sets）、tests/run.js 91 条全绿。
+
 ## 后果与代价
 
 
