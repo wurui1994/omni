@@ -1035,6 +1035,14 @@ export function asyAssignIndex(L, node, lhs, rhs, op) {
     const v = L.coerce(ue, el, node, `数组元素 '${op}=' 的结果`);
     return v === null ? null : put(v.code);
   }
+  // pair 的数组元素（`A[0][0] /= D`，plain_Label.asy:70 —— A 是 pair[][]）：
+  // 复合赋值照 pair 那一族的算符走，与标量那几条同一个摊法
+  if (el === 'pair') {
+    const pv = L.pairArith(node, op, ce, one);
+    if (pv === null) return null;
+    const v = L.coerce(pv, 'pair', node, `数组元素 '${op}=' 的结果`);
+    return v === null ? null : put(v.code);
+  }
   if (op === '#' || op === '%') {
     if (el !== 'int' || one.type !== 'int') return L.err(node, `'${op}=' 两边要是 int`);
     const helper = op === '#' ? 'asy__quot' : 'asy__mod';

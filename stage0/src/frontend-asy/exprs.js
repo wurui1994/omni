@@ -102,6 +102,11 @@ export function asyNameOf(L, n, nm) {
     if (sg !== null && sg.ok && sg.type !== t) {
       v.shadowVar = { code: `(var ${sg.sym})`, type: sg.type };
     }
+    // 同一层里被**重新声明**遮住的那一格（declareShadow 记的那一条）也算：
+    // `marginT margin=margin(b--b,p);` 之后 `draw(…,margin)` 要的是形参那一格
+    // （plain_arrows.asy:593/595）。它比模块级那一格近，所以盖在上面。
+    const so = L.outerOf(nm);
+    if (so !== null && so.type !== t) v.shadowVar = so;
     return v;
   }
   // 匿名函数体里：外层函数的局部量要**捕获**进来。顺序照 asy —— 闭包自己的局部（上面
@@ -120,8 +125,10 @@ export function asyNameOf(L, n, nm) {
     const ms = L.visibleMethods(L.self.rec, nm);
     if (ms.length === 1) return L.methodVal(n, L.self.rec, ms[0], '(var this)');
     if (ms.length > 1) {
-      return L.nope(n, `把**重载**的方法 '${L.self.rec.name}.${nm}' 当值取出来`
-        + `（有 ${ms.length} 个候选，是哪一个要靠目标类型定案）`);
+      // 重载的方法当值取出来：**先不定案**（与重载集同一条），由目标类型挑 ——
+      // plain_picture.asy:101 的 `scalefcn T() { return … ? postscale.T : T; }`
+      return { code: null, type: `<${L.self.rec.name}.${nm} 的重载集>`,
+        mover: { rec: L.self.rec, cands: ms, recv: '(var this)', node: n } };
     }
   }
   // 方法体里裸的 static 名字（量过 `int get() {return x + n;}` 里的 n 就是那一格）。
@@ -209,32 +216,98 @@ export function asyOverPick(L, r, want) {
 
 /** 一支是重载集、另一支已经是函数类型：按对面那个类型定案（原地改） */
 function asyOverSide(L, v, other) {
-  if (v.code !== null || v.over === undefined || !asyIsFn(other.type)) return;
-  const p = asyOverPick(L, { v }, other.type);
-  if (p !== null) { v.code = p; v.type = other.type; }
+  if (v.code !== null || !asyIsFn(other.type)) return;
+  if (v.over !== undefined) {
+    const p = asyOverPick(L, { v }, other.type);
+    if (p !== null) { v.code = p; v.type = other.type; }
+    return;
+  }
+  if (v.mover !== undefined) {
+    const mv = asyMoverPick(L, v.mover.node, v, other.type);
+    if (mv !== null) { v.code = mv.code; v.type = mv.type; }
+  }
+}
+
+/** 一格"待定"的值（重载集 / 重载的方法）能出的那几个签名 */
+function asyValTypes(L, v) {
+  if (v.code !== null) return null;
+  const cs = v.over !== undefined ? v.over : (v.mover !== undefined ? v.mover.cands : null);
+  if (cs === null) return null;
+  const out = [];
+  for (const c of cs) {
+    const t = asyCandFnType(L, c);
+    if (!out.includes(t)) out.push(t);
+  }
+  return out;
+}
+
+/** 按目标类型把一格待定的值定下来（重载集与重载的方法两种，回 null 是挑不着） */
+function asyPickAs(L, node, v, want) {
+  if (v.over !== undefined) {
+    const p = asyOverPick(L, { v }, want);
+    return p === null ? null : { code: p, type: want };
+  }
+  if (v.mover !== undefined) return asyMoverPick(L, node, v, want);
+  return null;
+}
+
+/** 重载的方法按目标类型挑一份，回绑好接收者的闭包（见 lower.js 的 methodVal） */
+export function asyMoverPick(L, node, v, want) {
+  for (const c of v.mover.cands) {
+    if (asyCandFnType(L, c) !== want) continue;
+    return L.methodVal(node === undefined || node === null ? v.mover.node : node,
+      v.mover.rec, c, v.mover.recv);
+  }
+  return null;
+}
+
+/** 拿一个目标类型把那一句 `? :` 重降一遍（condWant 让两支的交集定得下来） */
+export function asyCondAt(L, cond, want) {
+  const keep = L.condWant;
+  L.condWant = want;
+  const mark = L.diags.mark();
+  const savePre = Array.isArray(L.pre) ? L.pre : null;
+  if (savePre !== null) L.pre = [];
+  const v = asyCond(L, cond.node);
+  const mine = savePre === null ? null : L.pre;
+  if (savePre !== null) L.pre = savePre;
+  L.condWant = keep;
+  if (v === null || v.code === null || v.type !== want) { L.diags.rollback(mark); return null; }
+  if (mine !== null) for (const s of mine) L.pre.push(s);
+  return v;
 }
 
 /**
- * 两支**都是**重载集：取两边签名的交集。只有一个共同签名时定案 —— asy 那边
- * `above ? add : prepend`（plain_filldraw.asy:247）挑的正是两边都有的 `void(frame,frame)`。
- * 交集里有多个时不猜（照旧报两支不同型），交集为空时也不动。
+ * 两支**都**还没定案（重载集或重载的方法）：取两边签名的交集。只有一个共同签名时
+ * 就地定案 —— asy 那边 `above ? add : prepend`（plain_filldraw.asy:247）挑的正是两边
+ * 都有的 `void(frame,frame)`。交集里多于一个时看用处那一侧给的目标类型（condWant，
+ * 见 asyCondAt）；它也没给就不动，由 asyCond 回一格待定的值。
  */
 function asyOverBoth(L, a, b) {
-  if (a.code !== null || a.over === undefined) return;
-  if (b.code !== null || b.over === undefined) return;
-  const bt = new Set();
-  for (const c of b.over) bt.add(asyCandFnType(L, c));
+  const at = asyValTypes(L, a);
+  const bt = asyValTypes(L, b);
+  if (at === null || bt === null) return;
   const hit = [];
-  for (const c of a.over) {
-    const t = asyCandFnType(L, c);
-    if (bt.has(t) && !hit.includes(t)) hit.push(t);
-  }
-  if (hit.length !== 1) return;
-  const pa = asyOverPick(L, { v: a }, hit[0]);
-  const pb = asyOverPick(L, { v: b }, hit[0]);
+  for (const t of at) if (bt.includes(t)) hit.push(t);
+  let want = null;
+  if (hit.length === 1) want = hit[0];
+  else if (L.condWant !== null && hit.includes(L.condWant)) want = L.condWant;
+  if (want === null) return;
+  const pa = asyPickAs(L, a.mover === undefined ? null : a.mover.node, a, want);
+  const pb = asyPickAs(L, b.mover === undefined ? null : b.mover.node, b, want);
   if (pa === null || pb === null) return;
-  a.code = pa; a.type = hit[0];
-  b.code = pb; b.type = hit[0];
+  a.code = pa.code; a.type = want;
+  b.code = pb.code; b.type = want;
+}
+
+/** 两支的公共签名（asyCond 定不下来时挂在待定值上，给用处那一侧挑） */
+function asyCondHit(L, a, b) {
+  const at = asyValTypes(L, a);
+  const bt = asyValTypes(L, b);
+  if (at === null || bt === null) return [];
+  const hit = [];
+  for (const t of at) if (bt.includes(t)) hit.push(t);
+  return hit;
 }
 
 /** 一个候选当**函数值**时的类型文本（与 nameOf 里那份拼法必须一致） */
@@ -655,6 +728,25 @@ export function asyCoerce(L, v, want, node, what) {
       return L.err(node, `${what}：要 ${want}，而那个名字的重载里没有同型的一份（有 ${list}）`);
     }
     return { code: pick, type: want };
+  }
+  // **重载的方法**当值取出来（mover，见 methodValAt 与 nameOf 里 self 那一档）：同上，
+  // 目标类型就是定案的依据。`scalefcn T() { return … ? postscale.T : T; }`
+  // （plain_picture.asy:101）两支都是这种。
+  if (v.mover !== undefined) {
+    const mv = asyMoverPick(L, node, v, want);
+    if (mv !== null) return mv;
+    let list = '';
+    for (const c of v.mover.cands) {
+      const t = asyCandFnType(L, c);
+      list = list === '' ? t : `${list}、${t}`;
+    }
+    return L.err(node, `${what}：要 ${want}，而那个方法的重载里没有同型的一份（有 ${list}）`);
+  }
+  // 还没定案的 `? :`（两支的交集里多于一个签名）：拿目标类型再降一遍那一句
+  if (v.cond !== undefined) {
+    const cv = asyCondAt(L, v.cond, want);
+    if (cv !== null) return cv;
+    return L.err(node, `${what}：要 ${want}，而 \`? :\` 两支的公共签名里没有同型的一份`);
   }
   if (v.type === 'int' && want === 'real') return { code: `(toreal ${v.code})`, type: 'real' };
   if (want === 'pair' && (v.type === 'int' || v.type === 'real')) return asyToPair(L, v);
@@ -1860,6 +1952,7 @@ export function asyCompare(L, n, op) {
  */
 export function asyCond(L, n) {
   if (L.pre === null) return L.nope(n, '这个位置的 `? :`（它要摊成语句，这里放不下）');
+  const mark = L.diags.mark();
   const c = asyCoerce(L, asyExpr(L, n.items[1]), 'bool', n, '`? :` 的条件');
   const outer = L.pre;
   L.pre = [];
@@ -1878,6 +1971,16 @@ export function asyCond(L, n) {
   asyOverBoth(L, a, b);
   asyOverSide(L, a, b);
   asyOverSide(L, b, a);
+  // 两支都还定不下来（公共签名多于一个、用处那一侧也还没给目标类型）：**先不定案**，
+  // 回一格待定的值，两支摊出来的语句一并丢掉（重降那一遍会再摊一次）。
+  // 落地在 asyCoerce（赋值/返回/实参的目标类型）与 asyCall（被调那一侧，按实参挑）。
+  if (a.code === null && b.code === null) {
+    const hit = asyCondHit(L, a, b);
+    if (hit.length > 1) {
+      L.diags.rollback(mark);
+      return { code: null, type: '<`? :` 的重载集>', cond: { node: n, hit } };
+    }
+  }
   const t = asyPromote(L, a, b);
   if (t === null) return L.err(n, `\`? :\` 两支要同型：真支是 ${a.type}，假支是 ${b.type}`);
   if (t === 'void') return L.err(n, '`? :` 的两支不能是 void');

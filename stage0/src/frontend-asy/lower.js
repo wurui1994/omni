@@ -287,7 +287,7 @@ import {
 // calls.js / stmts.js 要调这一族，而 exprs.js 要调它们两个 —— 加载器禁止环，所以反向走转接。
 import {
   asyExpr, asyLit, asyNameOf, asyOverPick, asyCandFnType, asyOverArg, asyAnonFn, asyCapOf,
-  asyAssignsAfter, asyPromote, asyToPair, asyCoerce, asyExprList, asyIndex, asySlice, asyDotQual,
+  asyAssignsAfter, asyPromote, asyToPair, asyCoerce, asyCondAt, asyExprList, asyIndex, asySlice, asyDotQual,
   asyField, asyMember, asyPairLit, asyTripleLit, asyPairCall, asyVecPairFn, asyTripleDir,
   asyTunitOf, asyUnitOf, asyLengthCall, asyLengthOf, asyStrCall, asyStrConvCall, asyNewArray,
   asyArrLit, asyArrMethod, asyBinary, asyPairArith, asyTripleArith, asyCmpCode, asyCompare,
@@ -346,6 +346,12 @@ class AsyLower {
     // 那两条 if/else 就攒在这里，由 stmt() 的外壳补在这条语句前面。
     // null = 不在语句上下文里（那时见到 `? :` 只能报错，不能悄悄丢）。
     this.pre = null;
+    // 重降一句 `? :` 时用处那一侧给的**目标类型**（见 asyCondAt）：两支的公共签名多于
+    // 一个时靠它定案。null = 没人给。
+    this.condWant = null;
+    // 函数**类型**上带的默认值：类型文本 -> {ps, types, at, unit}（见 asyFnTypeOf）。
+    // 通过一格这种类型的函数值调用时少给的实参由它补（asyFnValDefWrap）。
+    this.fnDefs = new Map();
     // 文件级变量（第二十四刀）：名字 -> 一串声明 {sym, type, at, ok}。
     // **一串**而不是一个，因为 asy 的名字解析是顺序的，而同一个名字可以在文件里声明
     // 多次（量过：`int a = 1; write(a); int a = 7; write(a);` 印 1 再印 7）——
@@ -921,11 +927,26 @@ class AsyLower {
    */
   declareShadow(nm, t, boxed) {
     const top = this.scopes[this.scopes.length - 1];
+    // 被遮住的那一格**记一条**：同名不同型时，用处那一侧（目标类型）还挑得到它 ——
+    // `marginT margin=margin(b--b,p);` 之后 `draw(…,margin)` 里那个 margin 是**形参**
+    // 那一格（plain_arrows.asy:593/595，形参是 `margin margin=EndMargin`）。
+    // 落地与模块级那一格同一条（见 nameOf 的 shadowVar 与 coerce/fit 里那两个落点）。
+    const oldT = this.lookup(nm);
+    const oldBx = oldT === null ? null : this.boxOf(nm);
+    const oldSym = oldT === null ? null : this.symOf(nm);
     top.set(nm, t);
     // 新那一格是**全新的一格**：旧那一格的别名/箱子/改名三条记号都不能留下来
     top.delete(`\u0000al:${nm}`);
     top.delete(`\u0000bx:${nm}`);
     top.delete(`\u0000sy:${nm}`);
+    if (oldT !== null && oldT !== t) {
+      top.set(`\u0000ov:${nm}`, {
+        code: oldBx === null ? `(var ${oldSym})` : `(aget (var ${oldBx.sym}) (int 0))`,
+        type: oldT,
+      });
+    } else {
+      top.delete(`\u0000ov:${nm}`);
+    }
     if (boxed === true) {
       const bs = `asy__bx${this.tmp++}_${nm}`;
       top.set(`\u0000bx:${nm}`, { sym: bs, type: t });
@@ -947,6 +968,19 @@ class AsyLower {
       i--;
     }
     return nm;
+  }
+
+  /** 被 declareShadow 遮住的那一格（同名不同型）。只看**找到它的那一层**，照 boxOf */
+  outerOf(nm) {
+    let i = this.scopes.length - 1;
+    while (i >= 0) {
+      if (this.scopes[i].has(nm)) {
+        const o = this.scopes[i].get(`\u0000ov:${nm}`);
+        return o === undefined ? null : o;
+      }
+      i--;
+    }
+    return null;
   }
 
   /* ------------------------------------------------------------------ 类型 */
@@ -1803,8 +1837,9 @@ class AsyLower {
     const ms = this.visibleMethods(rec, nm);
     if (ms.length === 0) return undefined;
     if (ms.length > 1) {
-      return this.nope(node, `把**重载**的方法 '${recv.type}.${nm}' 当值取出来`
-        + `（有 ${ms.length} 个候选，是哪一个要靠目标类型定案）`);
+      // 重载的方法当值取出来：**先不定案**（与重载集同一条，见 asyCoerce 里 mover 那一档）
+      return { code: null, type: `<${recv.type}.${nm} 的重载集>`,
+        mover: { rec: rec, cands: ms, recv: recv.code, node: node } };
     }
     return this.methodVal(node, rec, ms[0], recv.code);
   }
@@ -1988,6 +2023,7 @@ class AsyLower {
   promote(a, b) { return asyPromote(this, a, b); }
   toPair(v) { return asyToPair(this, v); }
   coerce(v, want, node, what) { return asyCoerce(this, v, want, node, what); }
+  condAt(cond, want) { return asyCondAt(this, cond, want); }
   dotQual(node) { return asyDotQual(this, node); }
   pairCall(n, nm) { return asyPairCall(this, n, nm); }
   pairArith(n, op, a, b) { return asyPairArith(this, n, op, a, b); }

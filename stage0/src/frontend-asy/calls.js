@@ -165,6 +165,25 @@ export function asyCall(L, n) {
       }
       return asyFnValCall(L, n, '那一次调用', cv.type, code);
     }
+    // 被调那一侧是**还没定案的 `? :`**（两支的公共签名多于一个）：拿实参个数先筛一遍，
+    // 再一个一个试着重降 —— 第一个成的算。asy 那边也是用这次调用去定那一句的类型。
+    if (cv !== null && cv.code === null && cv.cond !== undefined) {
+      L.diags.rollback(mark);
+      for (const t of cv.cond.hit) {
+        if (asyArityBad(L, n, t, '那一次调用')) continue;
+        const m2 = L.diags.mark();
+        const sp = L.pre;
+        L.pre = [];
+        const r = L.condAt(cv.cond, t);
+        let out = null;
+        if (r !== null) out = asyFnValCall(L, n, '那一次调用', t, r.code);
+        const mine2 = L.pre;
+        L.pre = sp;
+        if (out !== null) { for (const s of mine2) L.pre.push(s); return out; }
+        L.diags.rollback(m2);
+      }
+      return L.err(n, `\`? :\` 出来的那一格调不动：两支的公共签名是 ${cv.cond.hit.join(' / ')}`);
+    }
     L.diags.rollback(mark);
   }
   if (nm === null) return L.nope(n, '调用一个不是普通名字的东西（函数值、方法、算符名）');
@@ -820,6 +839,15 @@ export function asyIdxOpCall(L, n, recv, mname, argNodes) {
   const rec = L.records.get(recv.type);
   const ms = rec === undefined ? [] : L.visibleMethods(rec, mname);
   if (ms.length === 0) {
+    // struct 里**没有体**的那种成员声明（`V operator [] (K key);`，collections/map.asy:43/85）：
+    // asy 那边它不是方法，是一格**函数类型的字段**。量过：
+    // `struct S { int operator [] (int k); } S s; s.operator [] = new int(int k){return k*2;};`
+    // 之后 `s[3]` 印 6。所以方法找不着时再问一遍字段。
+    let ft = null;
+    if (rec !== undefined) {
+      for (const f of rec.fields) if (f.name === mname && asyIsFn(f.type)) ft = f.type;
+    }
+    if (ft !== null) return asyIdxFldCall(L, n, recv, mname, ft, argNodes);
     return L.err(n, `${recv.type} 上没有 '${mname}' —— 下标要 struct 里定义了它才能用`);
   }
   const raw = [];
@@ -829,6 +857,23 @@ export function asyIdxOpCall(L, n, recv, mname, argNodes) {
     raw.push({ key: null, node: a, spread: false, v: v, lines: null });
   }
   return asyApplyCall(L, n, mname, ms, raw, recv);
+}
+
+/** 下标算符落在一格**函数类型的字段**上（见 asyIdxOpCall 里那一档）：直接间接调 */
+function asyIdxFldCall(L, n, recv, mname, ft, argNodes) {
+  const s = asyFnSplit(ft);
+  if (s === null) return L.nope(n, `认不出的函数类型 '${ft}'`);
+  if (s.params.length !== argNodes.length) {
+    return L.err(n, `'${mname}' 是 ${ft}，要 ${s.params.length} 个实参，给了 ${argNodes.length} 个`);
+  }
+  let code = `(callfn (fld ${recv.code} ${asyFldSym(mname)})`;
+  for (let i = 0; i < argNodes.length; i++) {
+    const v = L.coerce(L.expr(argNodes[i]), s.params[i], argNodes[i],
+      `'${mname}' 的第 ${i + 1} 个实参`);
+    if (v === null) return null;
+    code = `${code} ${v.code}`;
+  }
+  return { code: `${code})`, type: s.ret };
 }
 
 /**
@@ -1075,6 +1120,14 @@ export function asyFnValCall(L, n, nm, ft, callee) {
     // （asyDefWrapper），通过一个值调的时候拿不到那份包装。所以这一格是"还没做"，
     // 不是"程序不对"。给多了才是真错。
     if (!isVar && args.length < s.params.length) {
+      // 类型上带默认值那一档（`using envelope=path(frame dest, frame src=dest, …)`，
+      // plain_boxes.asy:75；`path[] texpath(string s, pen p, bool tex=…, bool bbox=false);`，
+      // plain_Label.asy:215）：现造一个包装 —— 形参是"给了的那几格"，体里在**声明处**
+      // 求默认值，然后拿全套实参间接调。asy 那边默认值是被调方填的，落到这一层就是
+      // "多一层包装"，求值次序（先被调、再实参、最后默认值）与那边一致。
+      const use = asyFnValFit(L, ft, s, args);
+      const w = use === null ? null : asyFnValDefWrap(L, n, nm, ft, s, use);
+      if (w !== null) return asyWrapValCall(L, n, nm, w, s, args, callee, use);
       return L.nope(n, `通过函数值调 '${nm}' 时省了实参（它是 ${ft}，要 ${s.params.length} 个，`
         + `给了 ${args.length} 个 —— asy 的默认值是被调方填的，这一刀的默认值是调用处填的）`);
     }
@@ -1450,6 +1503,130 @@ export function asyDefWrapper(L, n, nm, d, f, reinit) {
   if (bad) return null;
   L.wraps.push(`${text.join('\n')})`);
   return wname;
+}
+
+/**
+ * 函数**类型**上带默认值时的那份包装（见 asyFnTypeOf 的 fnDefs）。回包装的名字，
+ * 造不出来（没有记默认值、后面那几格里有一格没有默认值、默认值降不下来）就回 null。
+ *
+ * 包装的形参是「那个函数值」加「给了的那几格」；体里按**声明处**的位置与单元求默认值，
+ * 名字用声明里那几个 —— `frame src=dest` 这种"默认值引用前面那一格"于是照样通。
+ *
+ * **与 asy 的差别写在明处**：asy 补的是**被调那个函数自己**那一份默认值（调用处压一个
+ * "用默认值"的记号，被调方 pushDefault 换成真值），我们补的是**类型**上那一份。量过：
+ *   `using env=int(int a, int b=a+1, int c=10); int use(env e){return e(3);}`
+ *   `int f(int a, int b=0, int c=0){return a*100+b*10+c;}` -> asy 印 300，我们印 350。
+ * base 里这两份是一致的（`using envelope=path(frame dest, frame src=dest, …)` 与
+ * plain_boxes 里那几个 `path box(frame dest, frame src=dest, …)` 抄的是同一串），
+ * 所以这一刀先按类型那一份补；要一样得给带默认值的函数另开一个"认记号"的入口。
+ */
+function asyFnValDefWrap(L, n, nm, ft, s, use) {
+  const info = L.fnDefs.get(ft);
+  if (info === undefined) return null;
+  const key = `fv|${ft}|${use.join(',')}`;
+  const had = L.wrapNames.get(key);
+  if (had !== undefined) return had;
+  const wname = `asy__fvd${L.wrapNames.size}`;
+  L.wrapNames.set(key, wname);
+  const names = [];
+  for (let i = 0; i < s.params.length; i++) {
+    const p = info.ps[i];
+    names.push(p !== undefined && p.name !== null ? p.name : `asy__fp${i}`);
+  }
+  const savePre = L.pre;
+  const saveUpd = L.updates;
+  const saveScopes = L.scopes;
+  const saveAt = L.at;
+  const saveSelf = L.self;
+  const saveAl = L.recAlias;
+  const saveUnit = info.unit === L.unit.id ? null : L.unitIn(L.units[info.unit]);
+  L.at = info.at;
+  L.scopes = [new Map()];
+  L.self = null;
+  L.recAlias = null;
+  L.updates = [];
+  const lines = [];
+  L.pre = lines;
+  let bad = false;
+  // 给了的那几格是包装的形参（默认值里引用得到它们）；省了的那几格按**槽的顺序**求，
+  // 于是 `frame src=dest` 这种"引用前面那一格"照样通。
+  for (let i = 0; i < s.params.length; i++) {
+    if (use[i] >= 0) L.declare(n, names[i], s.params[i]);
+  }
+  for (let i = 0; i < s.params.length; i++) {
+    if (use[i] >= 0) continue;
+    const d = info.ps[i].def;
+    const v = L.coerce(L.expr(d), s.params[i], d, `'${nm}' 的第 ${i + 1} 格的默认值`);
+    if (v === null) { bad = true; break; }
+    lines.push(`(let ${names[i]} ${asyCore(s.params[i])} ${v.code})`);
+    L.declare(n, names[i], s.params[i]);
+  }
+  const call = ['(callfn (var asy__fvf)'];
+  for (const x of names) call.push(`(var ${x})`);
+  const inner = `${call.join(' ')})`;
+  lines.push(s.ret === 'void' ? `(expr ${inner})` : `(ret ${inner})`);
+  const params = [`(asy__fvf ${asyCore(ft)})`];
+  for (let i = 0; i < s.params.length; i++) {
+    if (use[i] >= 0) params.push(`(${names[i]} ${asyCore(s.params[i])})`);
+  }
+  const text = [`  (fn ${wname} (${params.join(' ')}) ${asyCore(s.ret)}`];
+  for (const x of lines) text.push(`    ${x}`);
+  L.pre = savePre;
+  L.updates = saveUpd;
+  L.scopes = saveScopes;
+  L.at = saveAt;
+  L.self = saveSelf;
+  L.recAlias = saveAl;
+  if (saveUnit !== null) L.unitOut(saveUnit);
+  if (bad) { L.wrapNames.delete(key); return null; }
+  L.wraps.push(`${text.join('\n')})`);
+  return wname;
+}
+
+/**
+ * 少给了实参时**哪几格用默认值**：从左往右走，实参的类型接得住这一格就占它，接不住
+ * 而这一格有默认值就跳过（`e(F.f,xmargin,…)`，plain_boxes.asy:88 —— 中间那格
+ * `frame src=dest` 是这么跳掉的）。实参没用完就是接不上，回 null。
+ */
+function asyFnValFit(L, ft, s, args) {
+  const info = L.fnDefs.get(ft);
+  if (info === undefined) return null;
+  const use = [];
+  let ai = 0;
+  for (let i = 0; i < s.params.length; i++) {
+    const p = info.ps[i];
+    const hasDef = p !== undefined && p.def !== null && p.name !== null;
+    if (ai >= args.length) {
+      if (!hasDef) return null;
+      use.push(-1);
+      continue;
+    }
+    const av = args[ai].v;
+    let ok = false;
+    if (av !== undefined && av.type !== undefined) {
+      if (av.over !== undefined || av.mover !== undefined) ok = asyIsFn(s.params[i]);
+      else ok = asyConvCost(av.type, s.params[i]) >= 0;
+    }
+    if (ok || !hasDef) { use.push(ai); ai++; continue; }
+    use.push(-1);
+  }
+  return ai === args.length ? use : null;
+}
+
+/** 上面那份包装的调用：被调那个值当第一个实参，给了的那几格照签名 coerce */
+function asyWrapValCall(L, n, nm, wname, s, args, callee, use) {
+  let code = `(call ${wname} ${callee}`;
+  for (let i = 0; i < s.params.length; i++) {
+    if (use[i] < 0) continue;
+    const a = args[use[i]];
+    if (a.key !== null) return L.err(n, `函数值没有形参名，这里不能写 '${a.key}='`);
+    if (a.spread === true) return L.nope(a.node, '带默认值的函数值上的展开实参');
+    if (a.lines !== null) for (const l of a.lines) L.pre.push(l);
+    const v = L.coerce(a.v, s.params[i], a.node, `'${nm}' 的第 ${i + 1} 个实参`);
+    if (v === null) return null;
+    code = `${code} ${v.code}`;
+  }
+  return { code: `${code})`, type: s.ret };
 }
 
 /**

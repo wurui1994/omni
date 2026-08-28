@@ -1592,10 +1592,13 @@ box picbox(picture pic, real s) {
 // 那一行的类型里就有 frame（`void(frame f, path[] g, pen fillpen)`）—— 前端那一刀修好之后
 // 紧接着要的就是这个类型。
 //
-// 这里只有「把元素攒起来」与「量 bbox」两件事：begingroup / endgroup / clip / label 都
-// 还没有，用到它们的地方会明确报"没有这个函数"，不会悄悄给错答案。
+// 这里只有「把元素攒起来」「量 bbox」与「记一下有没有标签」三件事：begingroup /
+// endgroup / clip 都还没有，用到它们的地方会明确报"没有这个函数"，不会悄悄给错答案。
 struct frame {
   drawop[] ops;
+  // 攒过标签没有（runlabel.in:220 的 `labels(frame)`）。这一层没有 TeX，标签的**内容**
+  // 落不下来，但"有没有"这一位是真的。
+  bool haslabel = false;
 }
 
 // `newframe` 那个字面量（camp.l:407 的 newPictureExp）落在这里：一个**新的**空 frame。
@@ -1618,6 +1621,16 @@ void _draw(frame f, path g, pen p) { addop(f, 0, g, p); }
 void _draw(frame f, path g) { addop(f, 0, g, currentpen); }
 void fill(frame f, path g, pen p) { addop(f, 1, g, p); }
 void fill(frame f, path g) { addop(f, 1, g, currentpen); }
+
+// runlabel.in:214 的那一条：`label(frame, string s, string size, transform, pair position,
+// pair align, pen)`。注意 size 是**字符串**（TeX 的尺寸文本），不是 real —— 照抄的。
+// 这一层没有 TeX，所以内容落不下来，只把"有标签"这一位记上。
+// plain_Label.asy:297 的 `label(f,s,size,embed(t)*shiftless(T),S,align,p0)` 要的正是它。
+void label(frame f, string s, string size, transform t, pair position, pair align, pen p) {
+  f.haslabel = true;
+}
+
+bool labels(frame f) { return f.haslabel; }
 
 // 缩放固定为 1 —— frame 的坐标已经是最终坐标了
 box framebox(frame f) {

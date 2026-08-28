@@ -5124,6 +5124,46 @@ tests/asy 208 条（新增 cases/130-array-compare）、tests/run.js 91 条全�
 数字：`import plain;` 14 → 13，`import graph;` 25 → 17，`import math;` 15 → 14。
 tests/asy 209 条（新增 cases/131-name-sets）、tests/run.js 91 条全绿。
 
+### 一批：函数类型上的默认值、别名当返回类型，与"没有体的成员就是一格字段"
+
+`import plain;` 13 -> 4 的这一批。除了第一条，其余都是**照着 asy 的模型改**，不是补特例。
+
+- **函数类型上的默认值**（decls.js 的 `asyFnTypeOf` 记 `fnDefs`，calls.js 的
+  `asyFnValFit` / `asyFnValDefWrap` / `asyWrapValCall`）。`using envelope=path(frame
+  dest, frame src=dest, real xmargin=0, …)`（plain_boxes.asy:75）—— asy 把默认值记在
+  **类型**上。少给实参时现造一个包装：形参是"给了的那几格"，体里按**声明处**的位置与
+  单元求默认值（名字用声明里那几个，`src=dest` 于是照样通），然后拿全套实参间接调。
+  少给的那几格**不一定在尾巴上**：从左往右走，类型接不住这一格而它有默认值就跳过去
+  （plain_boxes.asy:88 的 `e(F.f,xmargin,…)` 跳掉的正是中间那个 `frame src`）。
+  **差别写在明处**：asy 补的是**被调那个函数自己**那一份（调用处压一个"用默认值"的
+  记号，被调方 pushDefault 换成真值），我们补的是类型上那一份。量过
+  `using env=int(int a,int b=a+1,int c=10); int f(int a,int b=0,int c=0){…}` 之后
+  `e(3)`：asy 印 300，我们印 350；被调方**没有**默认值时 asy 直接报
+  "Trying to use uninitialized value"。base 里这两份是一致的，所以先这么走。
+- **别名当返回类型**（decls.js 的 `asyGlobalNames`）：`arrowbar EndBar(real size=0)=Bar;`
+  （plain_arrows.asy:429）是一格函数类型的**变量**，返回类型那一格以前照抄源码里的名字，
+  于是类型成了 `arrowbar(real)`，`asyIsFn` 认不出 —— 下一句 `EndBar(size)(pic,g,p,margin)`
+  报"回来的不是函数"。改成用**上面那几步解出来的** ty（别名展开、维度接好）。
+- **struct 里没有体的成员声明就是一格函数类型的字段**（calls.js 的 `asyIdxFldCall`）：
+  `V operator [] (K key);` / `void operator [=] (K key, V value);`
+  （collections/map.asy:43/85）。量过 `s.operator [] = new int(int k){…}` 之后 `s[3]`
+  走那一格。下标算符找不着方法时再问一遍字段。
+- **重载的方法当值取出来**（exprs.js 的 `mover` 一族）：以前是"还没做"，现在**先不定案**，
+  与重载集同一条 —— 由目标类型挑（`scalefcn T() {return … ? postscale.T : T;}`，
+  plain_picture.asy:101 两支都是这种）。`? :` 两支的公共签名多于一个时也不再直接报错：
+  回一格待定的值，赋值/返回/实参的目标类型（`asyCondAt` 拿 `condWant` 重降一遍）或者
+  调用处的实参来定案。
+- **同一层里被遮住的那一格**（lower.js 的 `declareShadow` 记 `\u0000ov:`、`outerOf`）：
+  `marginT margin=margin(b--b,p);` 之后 `draw(…,margin)` 要的是**形参**那一格
+  （plain_arrows.asy:593/595）。落地与模块级那一格同一条（`shadowVar`）。
+- **pair 的数组元素上的复合赋值**（stmts.js）：`A[0][0] /= D;`（plain_Label.asy:70，
+  A 是 `pair[][]`）走 pair 那一族的算符。内建面另外补上 runlabel.in:214 的
+  `label(frame, string, string size, transform, pair, pair, pen)`（size 是**字符串**）
+  与 `labels(frame)` —— frame 上多一位 `haslabel`，这一层没有 TeX，只记"有没有"。
+
+数字：`import plain;` 13 → 4，`import graph;` 17 → 8，`import math;` 14 → 5。
+tests/asy 210 条（新增 cases/132-fnty-defaults）、tests/run.js 91 条全绿。
+
 ## 后果与代价
 
 

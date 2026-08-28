@@ -403,6 +403,8 @@ export function asyFormals(L, node) {
  */
 export function asyFnTypeOf(L, ret, formalsNode, at) {
   const ps = [];
+  // 每一格的**名字与默认值**（类型上带默认值那一档要用，见文件末尾那一段）
+  const info = [];
   // `guide(... guide[])`（plain_paths.asy:3 的 interpolate）：可变那一格在语法上与普通函数
   // 那边同一个形状 —— `(formals-rest 形参)` 是"只有它"，`(formals-rest formals 形参)` 是
   // "前面还有几个固定的"。见 asyFormals 那一段。
@@ -418,6 +420,10 @@ export function asyFnTypeOf(L, ret, formalsNode, at) {
     if (!isList(f) || head(f) !== 'formal') return L.nope(f, '函数类型里的关键字形参');
     const t = L.type(f.items[2], '函数类型里的形参');
     if (t === null) return null;
+    // 这一格的名字与默认值：`(formal explicitornot 类型 名字那一格 [varinit])`
+    const st0 = f.items.length > 3 ? f.items[3] : null;
+    const pnm = isList(st0) && isAtom(st0.items[1]) ? asyFldSym(st0.items[1].value) : null;
+    info.push({ name: pnm, def: f.items.length === 5 ? f.items[4] : null });
     if (f.items.length > 3) {
       const st = f.items[3];
       if (isList(st) && head(st) === 'fundecidstart') {
@@ -451,7 +457,19 @@ export function asyFnTypeOf(L, ret, formalsNode, at) {
   }
   let inner = '';
   for (const p of ps) inner = inner === '' ? p : `${inner},${p}`;
-  return `${ret}(${inner})`;
+  const text = `${ret}(${inner})`;
+  // 函数类型里带默认值的那几格：`using envelope=path(frame dest, frame src=dest, real
+  // xmargin=0, …)`（plain_boxes.asy:75）、`path[] texpath(string s, pen p, bool
+  // tex=settings.tex != "none", bool bbox=false);`（plain_Label.asy:215，那是一格函数
+  // 类型的**变量**）。asy 把默认值记在**类型**上，通过这种类型的函数值调用时少给的实参
+  // 由它补 —— 按类型文本记一份（**第一份为准**，同型的两处默认值 base 里没有分歧），
+  // 补的那一下见 calls.js 的 asyFnValDefWrap。
+  let hasDef = false;
+  for (const d of info) if (d.def !== null) hasDef = true;
+  if (hasDef && !L.fnDefs.has(text)) {
+    L.fnDefs.set(text, { ps: info, types: ps, at: L.at, unit: L.unit.id });
+  }
+  return text;
 }
 
 /**
@@ -797,7 +815,11 @@ export function asyGlobalNames(L, n, at) {
     if (isList(start) && head(start) === 'fundecidstart') {
       const keep = L.at;
       L.at = at;
-      ty = L.fnTypeOf(base === null ? null : base, start.items[2], start);
+      // 返回类型用**上面那几步解出来的** ty（别名已经展开、维度已经接上），不是源码里
+      // 那个名字：`arrowbar EndBar(real size=0)=Bar;`（plain_arrows.asy:429）里
+      // arrowbar 是 `bool(picture,path,pen,margin)` 的别名，照原样记就成了 `arrowbar(real)`，
+      // asyIsFn 认不出它，`EndBar(size)(…)` 那一句于是报"回来的不是函数"。
+      ty = L.fnTypeOf(ty === null ? base : ty, start.items[2], start);
       L.at = keep;
     }
     // `var`（第四十一刀）：类型要从初值推，而这一遍就是唯一能推的地方 —— 函数体比
