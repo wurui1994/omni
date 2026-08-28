@@ -4414,6 +4414,49 @@ prelude 里软实现 fma，代价与收益不成比例，先记下不做；用�
 数字：`import plain;` 77 → 73。`import graph;` 149 → 148。tests/asy 186 条、
 tests/run.js 91 条全绿。新用例 `cases/110-amp-cycle`。
 
+### 点在不在里面：绕数、`orient`，加上三处名字解析的账
+
+`inside(path, pair, pen)` 这一格原来是空的，于是 plain_paths.asy:303 那句
+`cyclic(p) && inside(p,point(q,0),fillrule)` 接到了**外面那个** `int inside(path,path,pen)`
+上（pair 靠一次 cast 变成 path），`&&` 的右边就成了 int。补法是照 path.cc 把这一族真做出来：
+
+- `orient`（runpath.in:436 → path.cc:1150）：`detleft - detright` 那两行照抄，连 `-0` 都
+  跟着（`orient((0,0),(1,0),(1,0))` 就是 `-0`；换成 `(b-a)×(c-a)` 那种等价写法会印成 `0`）。
+  **明写的差别**：asy 的 det 落在误差界内时还会转去 `orient2dadapt`（Shewchuk 的自适应精确
+  谓词），这一层只有第一步 —— 几乎共线的位置上符号可能差一个 ulp。
+- `windingnumber(path, pair)`（path.cc:1257）：包围盒先挡一道，然后逐段走 —— 直线段进
+  `checkstraight`，曲线段进 `checkcurve`（包围盒装得下就 de Casteljau 对半劈，装不下按弦算，
+  深度上限是 bound.cc:15 的 `maxdepth = DBL_MANT_DIG = 53`）。点落在路径上时回**最大的奇
+  整数**。`count` 那边是引用形参，这一层用一格 `int[]` 顶。
+- `windingnumber(path[], pair)`（runtime.in:32）是逐条相加；`inside` 两份都照 pen.h:492 的
+  `fillrule.inside` 走（evenodd 看奇偶，否则看非零）。
+
+顺着这一刀量出 `intMax` 一直是错的：它**不是** INT64_MAX。common.h:106 在 COMPACT 下把最高
+两个值留给 DefaultValue 与 Undefined，所以 `Int_MAX = INT64_MAX - 2 = 9223372036854775805`
+（而 `intMin` 照旧是 INT64_MIN，不是 `-intMax-1`）。绕数那个"落在路径上"的返回值正是它。
+
+同一刀里另外三处：
+
+- **`? :` 两支不同型**时按用户的 `operator cast` 定案。asy 的 `? :` 是按 `T(bool,T,T)` 做
+  重载解析的，允许把**一边**转过去；定案只在两支之间做，不看外面要什么 —— 量过
+  `true ? (0,0) : (1,1)--(2,2)` 的类型是 guide，而 `pair z = false ? … ;` 报
+  "cannot cast 'guide' to 'pair'"（新增 strict/cond-cast-branch 守这一条）。两边都能转过去
+  就是歧义，照旧报"两支要同型"。
+- **函数类型的局部量不整片遮住同名的函数**。asy 的 venv 是按**签名**逐层找的：
+  plain_pens.asy:354 那个 `pen mean(pen[] p, real opacity(real[])=min)`，体里
+  `opacity(opacity(t))` 里面那个是形参、外面那个是文件级的 `pen opacity(real,string)`。
+  办法与成员那一档一样 —— 先试这一格，接不住就回滚（诊断与前置语句一起）再往下走。
+- **泛型的 `array(int n, T value)`**（builtin.cc:624 → runarray.in:675 的 copyArrayValue）：
+  照 copy/sequence 那个办法按元素类型现生一份 helper（`arrFillHelper`）。value 是数组时逐层
+  深拷（那边默认的 depth 就是这个类型的真实深度）。第三个形参 depth 这一刀不认。
+  另外补了数组上的 `abs`：`real[] abs(real[]/pair[]/triple[])`。
+  **一处收多了**：`abs(int[])` 在 asy 那边是歧义（`real[](real[])` 与 `real[](pair[])` 各差
+  一次 cast），我们只有 int[] → real[] 那一条，所以选中了前者。要对上得把元素上的 cast
+  **抬到数组上**，那是另一刀。
+
+数字：`import plain;` 73 → 67。`import graph;` 148 全程没动。tests/asy 188 条、
+tests/run.js 91 条全绿。新用例 `cases/111-inside-array` 与 `strict/cond-cast-branch`。
+
 ## 后果与代价
 
 

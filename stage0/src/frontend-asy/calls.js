@@ -182,7 +182,27 @@ export function asyCall(L, n) {
   // 不是查候选表。放在候选表前面问：asy 那边这个名字在这一层就是个变量，
   // 而 findroot 那种形参正是要遮住同名的文件级函数。
   const lv = L.lookup(nm);
-  if (lv !== null && asyIsFn(lv)) return asyFnValCall(L, n, nm, lv, `(var ${nm})`);
+  if (lv !== null && asyIsFn(lv)) {
+    // 但这一格并**不整片遮住**同名的函数：asy 的 venv 是按**签名**逐层找的，一个
+    // `real opacity(real[])` 的形参与文件级的 `pen opacity(real, string)` 是两条不同的
+    // 签名，能共存。原型是 plain_pens.asy:354 的
+    // `pen mean(pen[] p, real opacity(real[])=min)`，体里那句
+    // `opacity(opacity(t))` —— 里面那个是形参、外面那个是文件级的函数。
+    // 所以跟上面成员那一档同一个办法：先试这一格，接不住就回滚再往下走。
+    const probe = Array.isArray(L.pre) && asyVisible(L, nm).length > 0;
+    if (!probe) return asyFnValCall(L, n, nm, lv, `(var ${nm})`);
+    const mark = L.diags.mark();
+    const savePre = L.pre;
+    L.pre = [];
+    const fv = asyFnValCall(L, n, nm, lv, `(var ${nm})`);
+    const fpre = L.pre;
+    L.pre = savePre;
+    if (fv !== null) {
+      for (const s of fpre) L.pre.push(s);
+      return fv;
+    }
+    L.diags.rollback(mark);
+  }
   // 匿名函数体里调**外层的**函数值形参/局部量（第四十七刀）：base 里 plain_picture.asy:488
   // 的 `add(new void(frame f, transform t, …) { d(f,t*T); })` —— `d` 是外层方法的形参，
   // 类型是 drawer（一个函数类型）。位置在本层局部量之后、文件级候选之前：asy 的名字解析
@@ -273,6 +293,16 @@ export function asyCall(L, n) {
     return L.err(n, `alias(${ts})：asy 只给**记录与数组**现生 alias，而且两边要同型`
       + '（那边报 "no matching function"）');
   }
+  // 泛型的那三个数组内建（copy / sequence / array）：模块里没有同名的候选时也要能调到 ——
+  // 上面那一档只在 `vis.length > 0` 时才问 builtinOwns。
+  if (nm === 'copy' || nm === 'sequence' || nm === 'array') {
+    const raw = asyCallArgs(L, n);
+    if (raw === null) return null;
+    if (asyBuiltinOwns(L, nm, raw)) return asyBuiltinRaw(L, n, nm, raw);
+    const ts = raw.map((a) => (a.v.type === ASY_NULL ? 'null' : a.v.type)).join(', ');
+    return L.nope(n, `内建函数 '${nm}(${ts})'（这一刀的 copy 要一个数组、`
+      + 'sequence 要 `T(int)` 加 int、array 要 int 加一个值）');
+  }
   if (lateMem !== null) return L.err(n, lateMem);
   if (L.funcs.has(nm)) {
     return L.err(n, `'${nm}' 在这里还看不见 —— 它声明在后面，而 asy 的名字解析是顺序的（那边报 "no matching variable"）`);
@@ -324,6 +354,11 @@ export function asyBuiltinRaw(L, n, nm, raw) {
     const s = asyFnSplit(raw[0].v.type);
     const h = L.seqHelper(s.ret);
     return { code: `(call ${h} ${raw[0].v.code} ${raw[1].v.code})`, type: `${s.ret}[]` };
+  }
+  if (nm === 'array') {
+    const el = raw[1].v.type;
+    const h = L.arrFillHelper(el);
+    return { code: `(call ${h} ${raw[0].v.code} ${raw[1].v.code})`, type: `${el}[]` };
   }
   if (nm === 'alias') return asyAliasRaw(L, raw);
   return asyStrRaw(L, n, nm, raw);
@@ -386,6 +421,13 @@ export function asyBuiltinOwns(L, nm, raw) {
     const s = asyFnSplit(raw[0].v.type);
     return s !== null && s.params.length === 1 && s.params[0] === 'int' && s.ret !== 'void';
   }
+  // `array(int n, T value)`（builtin.cc:624）：元素类型照第二个实参现生。第三个形参
+  // （depth）这一刀不认 —— 给了三个就走"内建函数 'array'"那句 nope。
+  if (nm === 'array') {
+    if (raw.length !== 2 || raw[0].v.type !== 'int') return false;
+    const el = raw[1].v.type;
+    return el !== 'void' && el !== ASY_NULL;
+  }
   // alias：两边都要是记录或数组（或 null），而且**同型** —— 两边都是 null 时 asy 报歧义
   // （量过 `operator ==(null, null)` 那条），所以不认。
   if (nm === 'alias') {
@@ -411,6 +453,7 @@ export function asyBuiltinOwns(L, nm, raw) {
 export function asyBuiltinCost(L, nm, raw) {
   if (!asyBuiltinOwns(L, nm, raw)) return null;
   if (nm === 'copy' || nm === 'sequence') return 0;   // 元素类型是照实参现生的，逐个同型
+  if (nm === 'array') return 0;                       // 同上：第二个实参那个类型就是元素类型
   if (nm === 'alias') return 0;                       // 形参就是实参那个类型，逐个同型
   if (nm === 'length') {
     const t = raw[0].v.type;

@@ -389,6 +389,14 @@ export function asyPromote(L, a, b) {
   }
   if (a.type === 'int' && b.type === 'real') { a.code = `(toreal ${a.code})`; a.type = 'real'; return 'real'; }
   if (a.type === 'real' && b.type === 'int') { b.code = `(toreal ${b.code})`; b.type = 'real'; return 'real'; }
+  // 内建那几条都不成，才轮到**用户定义的转换**：asy 的 `? :` 是按 `T(bool,T,T)` 做重载解析
+  // 的，允许把**一边**转到另一边去（量过：`true ? (0,0) : (1,1)--(2,2)` 的类型是 guide，
+  // 而 `pair z = false ? (0,0) : (1,1)--(2,2);` 报 "cannot cast 'guide' to 'pair'" ——
+  // 可见定案是在两支之间做的，不看外面要什么）。两边都能转过去就是歧义，回 null 让调用方报。
+  const ab = L.castFor(b.type, a.type, false);
+  const ba = L.castFor(a.type, b.type, false);
+  if (ab !== null && ba === null) { a.code = `(call ${ab.sym} ${a.code})`; a.type = b.type; return b.type; }
+  if (ba !== null && ab === null) { b.code = `(call ${ba.sym} ${b.code})`; b.type = a.type; return a.type; }
   return null;
 }
 

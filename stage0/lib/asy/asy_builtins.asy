@@ -53,8 +53,11 @@ real pi = acos(-1);
 //   realDigits=DBL_DIG  randMax=Int_MAX  VERSION=REVISION
 // plain_constants.asy 一上来就用 infinity（finite() 那三个），所以这一批不给，
 // 整个 plain 树的正文都走不动。
-int intMax = 9223372036854775807;
-int intMin = -intMax - 1;
+// intMax **不是** INT64_MAX：common.h:106 在 COMPACT 下留了最高两个值给 DefaultValue
+// 与 Undefined，于是 `Int_MAX = INT64_MAX - 2`（量过：asy 的 intMax 是
+// 9223372036854775805）。intMin 照旧是 INT64_MIN，不是 -intMax-1。
+int intMax = 9223372036854775805;
+int intMin = -9223372036854775808;
 real realMax = 1.7976931348623157e308;
 real realMin = 2.2250738585072014e-308;
 real realEpsilon = 2.220446049250313e-16;
@@ -506,6 +509,18 @@ pair point(path g, int i) { return g.nodes[asy__nwrap(g, i)].point; }
 // path.h 的 precontrol/postcontrol：结点两侧那两个控制点
 pair precontrol(path g, int i) { return g.nodes[asy__nwrap(g, i)].pre; }
 pair postcontrol(path g, int i) { return g.nodes[asy__nwrap(g, i)].post; }
+
+// runpath.in:152 → path.h:167 `path::straight(t)`：第 t 段是不是直线段。
+// 非闭合路径**越界回 false**（那边就是 `t >= 0 && t < n ? … : false`，n 是结点数），
+// 闭合的走 imod（我们的 `%` 符号跟着除数，n 是正的，与 imod 同）。
+// 位置靠前是给 windingnumber 用的 —— 这一层的名字解析是顺序的。
+bool straight(path p, int t) {
+  int n = p.nodes.length;
+  if (n == 0) return false;
+  if (p.cyclic) return p.nodes[t % n].straight;
+  if (t < 0 || t >= n) return false;
+  return p.nodes[t].straight;
+}
 
 knot knotcopy(knot k) {
   knot j;
@@ -1801,6 +1816,116 @@ pair max(path[] g) {
   return m;
 }
 
+// ------------------------------------------------------------ 数组上的 abs
+// builtin.cc 给 real/pair/triple 的数组各现生一份 `real[] abs(T[])`（量过：`abs(int[])`
+// **没有**，那句报 no matching variable）。
+real[] abs(real[] a) {
+  real[] r = new real[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = abs(a[i]);
+  return r;
+}
+real[] abs(pair[] a) {
+  real[] r = new real[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = abs(a[i]);
+  return r;
+}
+real[] abs(triple[] a) {
+  real[] r = new real[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = abs(a[i]);
+  return r;
+}
+
+// ------------------------------------------------------------ 绕数与 inside
+// runpath.in:436 的 orient → path.cc:1150 的 orient2d：那个行列式
+//   |a.x a.y 1; b.x b.y 1; c.x c.y 1|
+// 逆时针为正。式子照 path.cc:1158 那两行摆（detleft - detright），连 `-0` 都跟着 ——
+// `orient((0,0),(1,0),(1,0))` 是 `-0`，换成 (b-a)×(c-a) 那种写法就成 `0` 了。
+// **明写的差别**：asy 那边 det 落在误差界内时还会转去 orient2dadapt（Shewchuk 的自适应
+// 精确谓词，predicates.h），这一层只有这一步。几乎共线的位置上符号可能差一个 ulp ——
+// 那会把"点正好落在路径上"判成不在（asy 那种情形回 intMax，见下面的 windingnumber）。
+real orient(pair a, pair b, pair c) {
+  real detleft = (a.x - c.x) * (b.y - c.y);
+  real detright = (a.y - c.y) * (b.x - c.x);
+  return detleft - detright;
+}
+
+private bool asy__inrange(real x0, real x1, real x) {
+  return (x0 <= x && x <= x1) || (x1 <= x && x <= x0);
+}
+
+// path.cc:1216 checkstraight：点落在 z0--z1 上就回 true，否则把这一段对绕数的贡献
+// 累进 count 里（那边是引用形参，这一层用一格数组顶）。
+private bool asy__ckstraight(pair z0, pair z1, pair z, int[] count) {
+  if (z0.y <= z.y && z.y <= z1.y) {
+    real side = orient(z0, z1, z);
+    if (side == 0 && asy__inrange(z0.x, z1.x, z.x)) return true;
+    if (z.y < z1.y && side > 0) count[0] = count[0] + 1;
+  } else if (z1.y <= z.y && z.y <= z0.y) {
+    real side = orient(z0, z1, z);
+    if (side == 0 && asy__inrange(z0.x, z1.x, z.x)) return true;
+    if (z.y < z0.y && side < 0) count[0] = count[0] - 1;
+  }
+  return false;
+}
+
+// path.cc:1196 insidebbox：四个控制点的包围盒装不装得下 z
+private bool asy__inbbox(pair a, pair b, pair c, pair d, pair z) {
+  real l = min(min(a.x, b.x), min(c.x, d.x));
+  real r = max(max(a.x, b.x), max(c.x, d.x));
+  real bo = min(min(a.y, b.y), min(c.y, d.y));
+  real t = max(max(a.y, b.y), max(c.y, d.y));
+  return l <= z.x && z.x <= r && bo <= z.y && z.y <= t;
+}
+
+// path.cc:1232 checkcurve：包围盒装得下就 de Casteljau 对半劈，装不下就按弦算
+private bool asy__ckcurve(pair z0, pair c0, pair c1, pair z1, pair z,
+                          int[] count, int depth) {
+  if (depth == 0) return true;
+  int d = depth - 1;
+  if (asy__inbbox(z0, c0, c1, z1, z)) {
+    pair m0 = 0.5 * (z0 + c0);
+    pair m1 = 0.5 * (c0 + c1);
+    pair m2 = 0.5 * (c1 + z1);
+    pair m3 = 0.5 * (m0 + m1);
+    pair m4 = 0.5 * (m1 + m2);
+    pair m5 = 0.5 * (m3 + m4);
+    if (asy__ckcurve(z0, m0, m3, m5, z, count, d)) return true;
+    if (asy__ckcurve(m5, m4, m2, z1, z, count, d)) return true;
+  } else {
+    if (asy__ckstraight(z0, z1, z, count)) return true;
+  }
+  return false;
+}
+
+// path.cc:1257 path::windingnumber：点落在路径上时回**最大的奇整数**，也就是 intMax
+// （common.h:106 的 Int_MAX 本身是奇数，量过：9223372036854775805）。
+// 递归的深度上限是 bound.cc:15 的 maxdepth = DBL_MANT_DIG = 53。
+int windingnumber(path g, pair z) {
+  if (!g.cyclic) { abort("path is not cyclic"); return 0; }
+  pair lo = min(g);
+  pair hi = max(g);
+  if (z.x < lo.x || z.x > hi.x || z.y < lo.y || z.y > hi.y) return 0;
+  int[] count;
+  count.push(0);
+  int n = length(g);
+  for (int i = 0; i < n; ++i) {
+    if (straight(g, i)) {
+      if (asy__ckstraight(point(g, i), point(g, i + 1), z, count)) return intMax;
+    } else {
+      if (asy__ckcurve(point(g, i), postcontrol(g, i), precontrol(g, i + 1),
+                       point(g, i + 1), z, count, 53)) return intMax;
+    }
+  }
+  return count[0];
+}
+
+// pen.h:492 的 fillrule.inside：evenodd 看奇偶，否则看非零
+bool inside(path g, pair z, pen fillrule=currentpen) {
+  int c = windingnumber(g, z);
+  if (fillrule.evenodd) return c % 2 != 0;
+  return c != 0;
+}
+
 // (2) warning / nowarn（runsystem.in:174/182）。C++ 那边过 settings::warn 那张开关表再
 // 走 em.warning（带文件位置）。这一层没有那张表也没有位置，就照 "warning: <正文>" 印出来。
 void nowarn(string s) { }
@@ -2232,19 +2357,7 @@ void prepend(frame dest, frame src) {
   dest.ops = out;
 }
 
-// runpath.in:152 → path.h:167 `path::straight(t)`：第 t 段是不是直线段。
-// 非闭合路径**越界回 false**（那边就是 `t >= 0 && t < n ? … : false`，n 是结点数），
-// 闭合的走 imod（我们的 `%` 符号跟着除数，n 是正的，与 imod 同）。
-bool straight(path p, int t) {
-  int n = p.nodes.length;
-  if (n == 0) return false;
-  if (p.cyclic) return p.nodes[t % n].straight;
-  if (t < 0 || t >= n) return false;
-  return p.nodes[t].straight;
-}
-
-string readline(string prompt="", string name="", bool tabcompletion=false) {
-  abort("readline 还没做（这一层不读 stdin 的交互行）"); return "";
+string readline(string prompt="", string name="", bool tabcompletion=false) {  abort("readline 还没做（这一层不读 stdin 的交互行）"); return "";
 }
 // C++ 那边 rename 的形参叫 `from`/`to`，而 `from` 在 asy 的**语法**里是关键字 ——
 // 量过真 asy 自己也写不出这个名字（`int from=3;` 与 `rename(from="a",…)` 都是 syntax error），
@@ -2296,7 +2409,17 @@ int seconds(string t="", string format="") { abort("seconds 还没做（这一�
 real[] _cputime() { abort("_cputime 还没做（这一层没有时钟）"); return new real[]; }
 int delete(string s) { abort("delete(string) 还没做（这一层不动文件系统）"); return 0; }
 real dirtime(path p, pair z) { abort("dirtime 还没做（要解三次方程找切向）"); return 0; }
-int windingnumber(path[] p, pair z) { abort("windingnumber 还没做"); return 0; }
+// runtime.in:32 的 windingnumber(array*, pair)：逐条路径的绕数**相加**
+int windingnumber(path[] p, pair z) {
+  int count = 0;
+  for (int i = 0; i < p.length; ++i) count += windingnumber(p[i], z);
+  return count;
+}
+bool inside(path[] g, pair z, pen fillrule=currentpen) {
+  int c = windingnumber(g, z);
+  if (fillrule.evenodd) return c % 2 != 0;
+  return c != 0;
+}
 path[] _strokepath(path g, pen p=currentpen) {
   abort("_strokepath 还没做（真 asy 是绕 gs 走一趟）"); return new path[];
 }

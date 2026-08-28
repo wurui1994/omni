@@ -677,6 +677,31 @@ class AsyLower {
     return nm;
   }
 
+  /**
+   * 泛型的 `array(int n, T value)`（builtin.cc:624 → runarray.in:675 的 copyArrayValue）：
+   * n 格，每格是 value。value 本身是数组时**逐层深拷**（那边的 depth 默认就是这个类型的
+   * 真实深度，见注册时压进去的 `depth-1`），所以这里套 arrCopyHelper。
+   */
+  arrFillHelper(el) {
+    const nm = `asy__afill_${asyMangle(el)}`;
+    if (this.arrGen.has(nm)) return nm;
+    this.arrGen.set(nm, '');   // 先占位：递归时不再进来
+    const et = asyCore(el);
+    const at = asyCore(`${el}[]`);
+    const val = asyIsArr(el)
+      ? `(call ${this.arrCopyHelper(asyElem(el))} (var v))`
+      : '(var v)';
+    this.arrGen.set(nm, `  (fn ${nm} ((n int) (v ${et})) ${at}
+    (let r ${at} (anew ${at} (var n)))
+    (let i int (int 0))
+    (while (bin "<" (var i) (var n))
+      (do
+        (aset (var r) (var i) ${val})
+        (set i (bin "+" (var i) (int 1)))))
+    (ret (var r)))`);
+    return nm;
+  }
+
   /** 泛型的 `sequence(T f(int), int n)`（runarray.in:954）：{f(0),…,f(n-1)}。 */
   seqHelper(el) {
     const nm = `asy__seq_${asyMangle(el)}`;
