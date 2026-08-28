@@ -1094,7 +1094,7 @@ class AsyLower {
     // 而 type() 是查 recVis 认记录名的。自引用字段那一条拦在 type() 前面，
     // 所以"字段还空着"这件事在这里看不出问题。
     const rec = { name: tname, fields: fields, at: at, unit: this.unit.id, tyAlias: new Map(),
-      stmts: [] };
+      memAlias: new Map(), stmts: [] };
     this.records.set(tname, rec);
     this.recVis.set(nm, { rec, at });
     // 体里的类型名按**这个 struct 的位置**判可见（recHere）：字段与方法签名只能提到
@@ -1213,6 +1213,39 @@ class AsyLower {
       // plain_picture.asy:210 的 node3 都是这一条。它不占成员槽（不是字段也不是方法）。
       if (head(r) === 'recorddec') {
         if (this.recNested(r, rec, at) === null) return null;
+        continue;
+      }
+      // `from 字段 unravel 名字;`（第五十八刀）：把那个字段上的同名成员**借**到这个
+      // struct 上。plain_picture.asy:556 的 `from bounds unravel addPath;` 就是它，
+      // 那边的注释写着理由是"省一次函数调用"。asy 那边这是名字空间那一层的事；
+      // 我们这一层只借到**方法调用**那一档上 —— `pic.addPath(g,p)` 转成
+      // `pic.bounds.addPath(g,p)`（见 methodCall 里那一句）。借的名字**不**占成员槽。
+      // 只认"从这个 struct 前面的一个 struct 字段借"这一种形状；从模块或类型名 unravel、
+      // 带 `as` 改名、以及体里裸写这个名字都还没做（漏出去的是各自那句 nope）。
+      if (head(r) === 'unravel') {
+        const qn = this.plainName(r.items[1]);
+        let fty = null;
+        if (qn !== null) for (const f of fields) if (f.name === qn) fty = f.type;
+        if (fty === null || !this.isRec(fty)) {
+          // 这一条**不**把整个 struct 判死（nope 之后接着走）：一句借不动的 unravel
+          // 不该把后面几十个成员一起拖下水 —— 从前它落到"体里的语句"那一档也是这样。
+          this.nope(r, `from ${qn === null ? '?' : qn} unravel …`
+            + '（这一刀只有"从这个 struct 前面的一个 struct 字段借名字"这一种）');
+          continue;
+        }
+        // `from 字段 unravel *;`（collections/map.asy:198）：借**全部**。不在这里把那个
+        // 记录的成员列出来 —— 记一个通配的记号，methodCall 里当兜底那一档问。
+        if (isList(r.items[2]) && head(r.items[2]) === 'wildcard') {
+          rec.memAliasAll = { field: qn, type: fty };
+          continue;
+        }
+        for (const p of this.flat(r.items[2], 'idpairs')) {
+          if (!isList(p) || head(p) !== 'idpair' || p.items.length !== 2 || !isAtom(p.items[1])) {
+            this.nope(p, 'unravel 里带 `as` 的名字对');
+            continue;
+          }
+          rec.memAlias.set(p.items[1].value, { field: qn, type: fty });
+        }
         continue;
       }
       if (head(r) !== 'vardec') {

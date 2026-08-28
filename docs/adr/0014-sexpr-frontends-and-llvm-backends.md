@@ -3927,6 +3927,38 @@ tests/run.js 91 条全绿。新用例 `cases/90-more-builtins` 与 `strict/alias
 数字：`import plain;` 153 → 145。`import graph;` 153 → 152。tests/asy 165 条、
 tests/run.js 91 条全绿。新用例 `cases/91-cap-recv`。
 
+### `from 字段 unravel 名字;`：把一个字段上的成员借到外层 struct 上
+
+145 里 8 条是「struct picture 没有方法 'addPath'」。addPath 在 plain 里其实不是
+picture 的成员 —— plain_picture.asy:556 写的是 `from bounds unravel addPath;`
+（`bounds bounds;` 是 picture 的一个字段，那边的注释说理由是"省一次函数调用"）。
+从前这一句落到"struct 体里的语句"那一档，正文遍再报一句 nope；而 struct picture 的体
+在更前面就已经出过错，那句 nope 于是**一次都没印出来** —— 名字悄悄地少了一个。
+这一刀先把它变成有下文的东西。
+
+落地是一张**借名字**的表：`recordBody` 见到 `(unravel (name 字段) (idpairs …))` 就往
+`rec.memAlias` 里记一条"这个名字要往那个字段上走一层"，`(wildcard)` 那一种
+（collections/map.asy:198 的 `from map unravel *;`）记成 `rec.memAliasAll`。
+`asyMethodCall` 在自己的成员都接不住时按这张表把接收者换成 `(fld recv 字段)` 再走一遍
+自己 —— 方法、函数字段、static 三档都还是那三档，所以借来的重载集不必在这里重算。
+
+顺手补上一处**先前就有的**偏差：方法那一档从前是"有同名方法就只在方法里挑"，接不住
+就直接报"没有能匹配的签名"。但 asy 的成员查找是按签名逐档找的 —— 量过 struct 里
+`void note(int)` / `void note(string)` 与**无体声明**的 `void note(int,string)`
+（那其实是一个函数类型的字段）并存时，`note(2,"b")` 接的是字段那一格。
+plain 的 addPath 正是这个形状（struct bounds 里两条方法加一条无体声明），所以这一条
+不补，借过来也只借到一半。现在方法那一档走的是**试了再回滚**（与 `asyCall` 里
+"成员遮住文件级函数"那一处同一副零件），回滚之后再问字段、static、借来的名字，
+三档都不适用才让方法那句诊断说话。
+
+两处与 asy 的差别写在明处：asy 是把借来的名字**并进同一个重载集**，所以"自己的一条与
+借来的一条都能接"时那边报歧义，我们是自己的先赢（plain 树里没有这种撞名）；
+借来的名字在 struct 体里**裸写**还不通（只走 `recv.名字(…)` 这一档）。
+从模块或类型名 unravel、带 `as` 改名、以及函数体里的 `unravel x;` 都还是各自那句 nope。
+
+数字：`import plain;` 145 → 136。`import graph;` 152 不动。tests/asy 166 条、
+tests/run.js 91 条全绿。新用例 `cases/92-unravel-field`。
+
 ## 后果与代价
 
 

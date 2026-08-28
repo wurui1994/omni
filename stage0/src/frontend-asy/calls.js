@@ -436,33 +436,73 @@ export function asyVisible(L, nm) {
 export function asyMethodCall(L, n, recv, mname) {
   const rec = L.records.get(recv.type);
   const ms = L.visibleMethods(rec, mname);
-  if (ms.length === 0) {
-    for (const f of rec.fields) {
-      if (f.name !== mname) continue;
-      // 字段本身是**函数值**：`b.fn2(4)` 就是通过它间接调（plain_filldraw.asy 里
-      // `filltype.fill2(f,g,p)` 到处是）。方法找不到时才轮到这里 —— asy 那边方法与
-      // 字段同名时方法赢（量过）。
-      if (asyIsFn(f.type)) {
-        return asyFnValCall(L, n, `${recv.type}.${mname}`, f.type,
-          `(fld ${recv.code} ${mname})`);
-      }
+  if (ms.length > 0) {
+    // 方法那一档接得住就用它；接不住时**回滚**再看后面那几档 —— asy 的成员查找是按签名
+    // 逐档找的。量过：struct 里 `void note(int)` / `void note(string)` 与**无体声明**的
+    // `void note(int,string)`（那其实是函数类型的字段）并存时，`note(2,"b")` 接的是字段
+    // 那一格。plain_picture.asy 的 `pic.addPath(g,p)` 正是这个形状 —— 借来的 addPath 在
+    // struct bounds 里就是"两条方法加一条无体声明"。
+    const probe = Array.isArray(L.pre);
+    if (!probe) return asyUserCall(L, n, mname, ms, recv);
+    const mark = L.diags.mark();
+    const savePre = L.pre;
+    L.pre = [];
+    const mv = asyUserCall(L, n, mname, ms, recv);
+    const mpre = L.pre;
+    L.pre = savePre;
+    if (mv !== null) {
+      for (const s of mpre) L.pre.push(s);
+      return mv;
+    }
+    L.diags.rollback(mark);
+    const alt = asyMethodAlt(L, n, recv, rec, mname);
+    if (alt !== undefined) return alt;
+    // 后面那几档一个都不适用：让方法那一档把诊断再发一遍（它那句话最贴题）
+    return asyUserCall(L, n, mname, ms, recv);
+  }
+  const alt = asyMethodAlt(L, n, recv, rec, mname);
+  if (alt !== undefined) return alt;
+  for (const f of rec.fields) {
+    if (f.name === mname) {
       return L.nope(n, `调用一个字段（${recv.type}.${mname} 是 ${f.type}，不是方法）`);
     }
-    const names = [];
-    for (const key of L.units[rec.unit].funcs.keys()) {
-      if (key.startsWith(`${rec.name}.`)) names.push(key.slice(rec.name.length + 1));
-    }
-    // 名字是个 **static/autounravel 的函数值字段**（第三十八刀）：`q.af(5)` 与
-    // `Box.af(5)` 取的是同一格（量过 asy 两条都通）。放在字段与方法之后 ——
-    // static 那一档在 asy 的成员查找里就在字段后面。
-    const st = L.statOf(rec.name, mname);
-    if (st !== null && asyIsFn(st.type)) {
-      return asyFnValCall(L, n, `${recv.type}.${mname}`, st.type, `(var ${st.sym})`);
-    }
-    return L.err(n, `struct ${recv.type} 没有方法 '${mname}'`
-      + `${names.length === 0 ? '（它一个方法都没有）' : ` —— 有的是 ${names.join(' / ')}`}`);
   }
-  return asyUserCall(L, n, mname, ms, recv);
+  const names = [];
+  for (const key of L.units[rec.unit].funcs.keys()) {
+    if (key.startsWith(`${rec.name}.`)) names.push(key.slice(rec.name.length + 1));
+  }
+  return L.err(n, `struct ${recv.type} 没有方法 '${mname}'`
+    + `${names.length === 0 ? '（它一个方法都没有）' : ` —— 有的是 ${names.join(' / ')}`}`);
+}
+
+/**
+ * 方法之外那几档：同名的**函数字段**、**static/autounravel 的函数值字段**、
+ * 以及 `from 字段 unravel …` **借来**的名字。次序是"自己的成员在前、借来的在后"。
+ * 一档都不适用时回 `undefined`（一句诊断都不发 —— 上面那层要靠这个分"要不要回滚"）。
+ */
+function asyMethodAlt(L, n, recv, rec, mname) {
+  for (const f of rec.fields) {
+    if (f.name !== mname) continue;
+    // 字段本身是**函数值**：`b.fn2(4)` 就是通过它间接调（plain_filldraw.asy 里
+    // `filltype.fill2(f,g,p)` 到处是）。
+    if (!asyIsFn(f.type)) return undefined;
+    return asyFnValCall(L, n, `${recv.type}.${mname}`, f.type, `(fld ${recv.code} ${mname})`);
+  }
+  // `q.af(5)` 与 `Box.af(5)` 取的是同一格（第三十八刀，量过 asy 两条都通）
+  const st = L.statOf(rec.name, mname);
+  if (st !== null && asyIsFn(st.type)) {
+    return asyFnValCall(L, n, `${recv.type}.${mname}`, st.type, `(var ${st.sym})`);
+  }
+  // `from 字段 unravel 名字;` / `from 字段 unravel *;` 借来的成员（第五十八刀）：
+  // 接收者往那个字段上走一层再问一遍 —— 方法、函数字段、static 三档都还是那三档，
+  // 所以这里不自己挑重载。具名的那一档在通配前面。
+  // 与 asy 的差别写在明处：asy 是把借来的名字**并进同一个重载集**，所以"本 struct 的
+  // 一条与借来的一条都能接"时那边报歧义，而我们是本 struct 的先赢。plain 树里没有
+  // 这种撞名，所以这一刀先按"自己的在前"落地。
+  const al = rec.memAlias !== undefined && rec.memAlias.has(mname)
+    ? rec.memAlias.get(mname) : rec.memAliasAll;
+  if (al === undefined) return undefined;
+  return asyMethodCall(L, n, { code: `(fld ${recv.code} ${al.field})`, type: al.type }, mname);
 }
 
 /**
