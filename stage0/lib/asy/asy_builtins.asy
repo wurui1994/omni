@@ -502,6 +502,18 @@ struct knot {
   pair point;
   pair post;
   bool straight = false;
+  // 这个结点两侧的**连接规格**（第四十六刀）—— asy 那边是 knot::in / knot::out 两个
+  // spec 指针（knot.h:212）。0 = open（留给求解器）、1 = `{curl c}`（c 在 …val 里）、
+  // 2 = `{z}` 给定方向（角度在 …val 里）。编号与下面那个 private struct spec 的 kind 同。
+  int inkind = 0;
+  real inval = 1;
+  int outkind = 0;
+  real outval = 1;
+  // 两侧的张力（knot.h:212 的 tin/tout）：alpha = 1/tout、beta = 1/tin（knot.h:219）。
+  real tout = 1;
+  real tin = 1;
+  bool tatout = false;
+  bool tatin = false;
 }
 
 struct path {
@@ -530,16 +542,27 @@ struct path {
   real spb = 1;
   bool spat = false;
   int spside = 0;
+  // **等着挂给下一个结**的那几格（第四十六刀）。折叠成二元连接之后，`a{d1}..tension t..{d2}b`
+  // 是 `((a .. d1) .. t) .. d2) .. b` 四步，前三步收到的规格要留到最后那一步 —— 因为它们
+  // 说的是"下一段"与"下一个结的进侧"。asy 那边这份状态在 flatguide 里。
+  int pinkind = 0;   // 下一个结的进侧规格（1 = curl、2 = 方向）
+  real pinval = 1;
+  real ptout = 1;    // 下一段两端的张力
+  real ptin = 1;
+  bool ptat = false;
+  int pctl = 0;      // 下一段的控制点定死了（`controls c0 and c1`）
+  pair pc0;
+  pair pc1;
 }
 
 path cyclepath;
 cyclepath.ismark = true;
 
-// `guide` 在 asy 那边是"还没解出来的路径规格"，`path` 是解好的，两者之间有隐式转换。
-// 这一刀先让 guide 就是 path 的别名。量出来的理由：真 base 里库代码写的 `..` 几乎都
-// **显式给了控制点**（graph_splinetype.asy 的 hermite 就是 `..controls A and B..`），
-// 那种不需要 Hobby 求解器；要解方程的是用户代码里裸写的 `a..b..c`，那一刀留到量出
-// 它真的是下一个坎再写。
+// `guide` 在 asy 那边是"还没解出来的路径规格"（一棵树），`path` 是解好的，两者之间有隐式
+// 转换。这一层让 guide 就是 path 的别名：规格不是攒在一棵树上，而是**边连边记**（结上的
+// inkind/outkind/tout/tin 加上 path 上那几格 pending），每接上一个结整条链重解一遍。
+// 量出来的理由：asy 那边"摊平成 flatguide 再一次解完"与"每步重解"落在同一个地方 ——
+// tests/asy/cases/124-join-specs 的十条与 `asy -noV` 逐字节一致。
 typedef path guide;
 
 // 空路径：`nullpath` 是 asy 的内建名，`g--nullpath` 与 `nullpath--g` 都是恒等
@@ -607,6 +630,14 @@ knot knotcopy(knot k) {
   j.point = k.point;
   j.post = k.post;
   j.straight = k.straight;
+  j.inkind = k.inkind;
+  j.inval = k.inval;
+  j.outkind = k.outkind;
+  j.outval = k.outval;
+  j.tout = k.tout;
+  j.tin = k.tin;
+  j.tatout = k.tatout;
+  j.tatin = k.tatin;
   return j;
 }
 
@@ -624,6 +655,14 @@ path pathcopy(path g) {
   h.spb = g.spb;
   h.spat = g.spat;
   h.spside = g.spside;
+  h.pinkind = g.pinkind;
+  h.pinval = g.pinval;
+  h.ptout = g.ptout;
+  h.ptin = g.ptin;
+  h.ptat = g.ptat;
+  h.pctl = g.pctl;
+  h.pc0 = g.pc0;
+  h.pc1 = g.pc1;
   return h;
 }
 
@@ -681,9 +720,10 @@ path operator cast(pair z) {
 
 // ------------------------------------------------------------ Hobby 求解器
 // `a..b..c` 的控制点是解一组线性方程得出来的（MetaFont 的那套，asy 在 knot.h/knot.cc
-// 里照搬）。这一段是那份代码的 asy 译本，只做**没有方向标记、没有张力、没有显式控制点**
-// 的那一档：每个结两侧的规格只有 open（`..`）、curl 1（开路径的两头）、dir（挨着一段
-// 已定控制点的那一侧，由 partnerUp 推出来）、control（`--` 或已解好的段）四种。
+// 里照搬）。这一段是那份代码的 asy 译本。每个结两侧的规格有 open（`..`）、curl（开路径的
+// 两头，或者源码里写的 `{curl c}`）、dir（`{z}`，或者挨着一段已定控制点的那一侧由
+// partnerUp 推出来）、control（`--`、`controls … and …`、已解好的段）四种；张力从
+// 结上的 tout/tin 进方程（alpha = 1/tout、beta = 1/tin），见第四十六刀。
 //
 // 结的两侧规格。kind：0 open、1 curl（val 是 gamma）、2 dir（val 是角度）、3 control。
 private struct spec {
@@ -706,8 +746,9 @@ private real asy__reduceangle(real a) {
   return a;
 }
 
-// knot.cc:63 的 velocity（MetaPost §131），张力恒为 1、不带 atleast 的那一档
-private real asy__velocity(real theta, real phi) {
+// knot.cc:61 的 velocity（MetaPost §131）。张力 `t` 进分母，`atLeast` 那一档再加一道
+// 上界（knot.cc:82 的 boundedness condition）。
+private real asy__velocityt(real theta, real phi, real t, bool atLeast) {
   real a = sqrt(2);
   real b = 1 / 16;
   real c = 1.5 * (sqrt(5) - 1);
@@ -716,9 +757,22 @@ private real asy__velocity(real theta, real phi) {
   real ct = cos(theta);
   real sf = sin(phi);
   real cf = cos(phi);
-  real denom = 3 + c * ct + d * cf;
+  real denom = t * (3 + c * ct + d * cf);
   real r = denom != 0 ? (2 + a * (st - b * sf) * (sf - b * st) * (ct - cf)) / denom : 4;
-  return r > 4 ? 4 : r;
+  if (r > 4) r = 4;
+  if (atLeast) {
+    real sine = sin(theta + phi);
+    if ((st >= 0 && sf >= 0 && sine > 0) || (st <= 0 && sf <= 0 && sine < 0)) {
+      real rmax = sf / sine;
+      if (r > rmax) r = rmax;
+    }
+  }
+  return r;
+}
+
+// 张力恒为 1、不带 atleast 的那一档（这一层大多数连接就是它）
+private real asy__velocity(real theta, real phi) {
+  return asy__velocityt(theta, phi, 1, false);
 }
 
 // knot.cc:402/433 的 ref + backsub：非闭合的一段，先消元成 theta[j] + post*theta[j+1] = aug，
@@ -818,12 +872,20 @@ private spec asy__inpartner(spec s, pair z) {
 }
 
 // knot.cc:619 的 solveSection：非闭合的一段（结点 a..b），解出 theta 再摆控制点。
-// 张力恒为 1，所以 alpha = beta = 1，mid 那一格的系数化简成 1/d 与 2/d。
+// 张力进来了（第四十六刀）：alpha = 1/tout、beta = 1/tin（knot.h:219），系数照 knot.cc
+// 的 eqnprop::mid / curlSpec::eqnOut / eqnIn 原样写。
 private void asy__solvesection(path g, spec[] si, spec[] so, int a, int b) {
   int m = b - a;
   if (m <= 0) return;
   pair[] z = new pair[m + 1];
-  for (int i = 0; i <= m; ++i) z[i] = g.nodes[asy__nwrap(g, a + i)].point;
+  real[] alpha = new real[m + 1];
+  real[] beta = new real[m + 1];
+  for (int i = 0; i <= m; ++i) {
+    knot k = g.nodes[asy__nwrap(g, a + i)];
+    z[i] = k.point;
+    alpha[i] = 1 / k.tout;
+    beta[i] = 1 / k.tin;
+  }
   pair[] dz = new pair[m + 1];
   real[] d = new real[m + 1];
   for (int i = 0; i < m; ++i) {
@@ -841,25 +903,33 @@ private void asy__solvesection(path g, spec[] si, spec[] so, int a, int b) {
     epiv[0] = 1;
     eaug[0] = asy__reduceangle(s0.val - asy__niceangle(dz[0]));
   } else {
-    real chi = s0.val;
-    epiv[0] = chi + 2;
-    epost[0] = 2 * chi + 1;
-    eaug[0] = -(2 * chi + 1) * psi[1];
+    real al = alpha[0];
+    real be = beta[1];
+    real chi = al * al * s0.val / (be * be);
+    real C = al * chi + 3 - be;
+    real D = (3 - al) * chi + be;
+    epiv[0] = C;
+    epost[0] = D;
+    eaug[0] = -D * psi[1];
   }
   spec sm = si[asy__nwrap(g, b)];
   if (sm.kind == 2) {
     epiv[m] = 1;
     eaug[m] = asy__reduceangle(sm.val - asy__niceangle(dz[m - 1]));
   } else {
-    real chi = sm.val;
-    epre[m] = 2 * chi + 1;
-    epiv[m] = chi + 2;
+    real al = alpha[m - 1];
+    real be = beta[m];
+    real chi = be * be * sm.val / (al * al);
+    epre[m] = (3 - be) * chi + al;
+    epiv[m] = be * chi + 3 - al;
   }
   for (int j = 1; j < m; ++j) {
-    real A = 1 / d[j - 1];
-    real B = 2 / d[j - 1];
-    real C = 2 / d[j];
-    real D = 1 / d[j];
+    real infac = 1 / (beta[j] * beta[j] * d[j - 1]);
+    real A = alpha[j - 1] * infac;
+    real B = (3 - alpha[j - 1]) * infac;
+    real outfac = 1 / (alpha[j] * alpha[j] * d[j]);
+    real C = (3 - beta[j + 1]) * outfac;
+    real D = beta[j + 1] * outfac;
     epre[j] = A;
     epiv[j] = B + C;
     epost[j] = D;
@@ -867,14 +937,23 @@ private void asy__solvesection(path g, spec[] si, spec[] so, int a, int b) {
   }
   bool homog = true;
   for (int j = 0; j <= m; ++j) if (eaug[j] != 0) homog = false;
-  // knot.cc:596 的 encodeStraight：两个方程、两边都是 0 —— 那就是直着过去
+  // knot.cc:597 的 encodeStraight：两个方程、两边都是 0 —— 那就是直着过去。
+  // 张力不是 1 时**不算直线段**（那两个控制点各自往里收 1/tension，knot.cc:606 的 else 支）。
   if (m == 1 && homog) {
     pair step = (z[1] - z[0]) / 3;
     int ia = asy__nwrap(g, a);
     int ib = asy__nwrap(g, b);
-    g.nodes[ia].straight = true;
-    g.nodes[ia].post = z[0] + step;
-    g.nodes[ib].pre = z[1] - step;
+    real at = g.nodes[ia].tout;
+    real bt = g.nodes[ib].tin;
+    if (at == 1 && bt == 1) {
+      g.nodes[ia].straight = true;
+      g.nodes[ia].post = z[0] + step;
+      g.nodes[ib].pre = z[1] - step;
+      return;
+    }
+    g.nodes[ia].straight = false;
+    g.nodes[ia].post = z[0] + step / at;
+    g.nodes[ib].pre = z[1] - step / bt;
     return;
   }
   real[] th = new real[m + 1];
@@ -883,12 +962,18 @@ private void asy__solvesection(path g, spec[] si, spec[] so, int a, int b) {
   for (int j = 0; j <= m; ++j) phi[j] = -psi[j] - th[j];
   for (int i = 0; i < m; ++i) {
     int ii = asy__nwrap(g, a + i);
+    knot k = g.nodes[ii];
     g.nodes[ii].straight = false;
-    g.nodes[ii].post = z[i] + asy__velocity(th[i], phi[i + 1]) * expi(th[i]) * dz[i];
+    // knot.cc:505：出侧那个控制点用**这个结的 tout**
+    g.nodes[ii].post = z[i]
+      + asy__velocityt(th[i], phi[i + 1], k.tout, k.tatout) * expi(th[i]) * dz[i];
   }
   for (int i = 1; i <= m; ++i) {
     int ii = asy__nwrap(g, a + i);
-    g.nodes[ii].pre = z[i] - asy__velocity(phi[i], th[i - 1]) * expi(-phi[i]) * dz[i - 1];
+    knot k = g.nodes[ii];
+    // knot.cc:537：进侧那个控制点用**这个结的 tin**
+    g.nodes[ii].pre = z[i]
+      - asy__velocityt(phi[i], th[i - 1], k.tin, k.tatin) * expi(-phi[i]) * dz[i - 1];
   }
 }
 
@@ -905,20 +990,29 @@ private void asy__solvecyclic(path g) {
   }
   real[] psi = new real[n];
   for (int j = 0; j < n; ++j) psi[j] = asy__niceangle(dz[j] / dz[(j + n - 1) % n]);
+  real[] alpha = new real[n];
+  real[] beta = new real[n];
+  for (int j = 0; j < n; ++j) {
+    alpha[j] = 1 / g.nodes[j].tout;
+    beta[j] = 1 / g.nodes[j].tin;
+  }
   real[] epre = new real[n];
   real[] epiv = new real[n];
   real[] epost = new real[n];
   real[] eaug = new real[n];
   for (int j = 0; j < n; ++j) {
-    real dp = d[(j + n - 1) % n];
-    real A = 1 / dp;
-    real B = 2 / dp;
-    real C = 2 / d[j];
-    real D = 1 / d[j];
+    int p = (j + n - 1) % n;
+    int k = (j + 1) % n;
+    real infac = 1 / (beta[j] * beta[j] * d[p]);
+    real A = alpha[p] * infac;
+    real B = (3 - alpha[p]) * infac;
+    real outfac = 1 / (alpha[j] * alpha[j] * d[j]);
+    real C = (3 - beta[k]) * outfac;
+    real D = beta[k] * outfac;
     epre[j] = A;
     epiv[j] = B + C;
     epost[j] = D;
-    eaug[j] = -B * psi[j] - D * psi[(j + 1) % n];
+    eaug[j] = -B * psi[j] - D * psi[k];
   }
   bool homog = true;
   for (int j = 0; j < n; ++j) if (eaug[j] != 0) homog = false;
@@ -929,9 +1023,12 @@ private void asy__solvecyclic(path g) {
   for (int j = 0; j < n; ++j) {
     int k = (j + 1) % n;
     int p = (j + n - 1) % n;
+    knot kn = g.nodes[j];
     g.nodes[j].straight = false;
-    g.nodes[j].post = z[j] + asy__velocity(th[j], phi[k]) * expi(th[j]) * dz[j];
-    g.nodes[j].pre = z[j] - asy__velocity(phi[j], th[p]) * expi(-phi[j]) * dz[p];
+    g.nodes[j].post = z[j]
+      + asy__velocityt(th[j], phi[k], kn.tout, kn.tatout) * expi(th[j]) * dz[j];
+    g.nodes[j].pre = z[j]
+      - asy__velocityt(phi[j], th[p], kn.tin, kn.tatin) * expi(-phi[j]) * dz[p];
   }
 }
 
@@ -948,9 +1045,15 @@ private void asy__resolve(path g) {
   spec[] si;
   spec[] so;
   for (int i = 0; i < n; ++i) {
+    // 结上挂着的规格（`{z}` / `{curl c}`）就是这一侧的起点 —— 编号与 spec.kind 一样，
+    // 所以照抄（第四十六刀）。没挂的还是 0（open），后面那几步照旧。
     spec p;
+    p.kind = g.nodes[i].inkind;
+    p.val = g.nodes[i].inval;
     si.push(p);
     spec q;
+    q.kind = g.nodes[i].outkind;
+    q.val = g.nodes[i].outval;
     so.push(q);
   }
   bool known = g.joins.length == len;
@@ -1036,25 +1139,70 @@ private void asy__normjoins(path g) {
   g.joins = js;
 }
 
+// 收到一个**规格结点**（第四十六刀）：把它记到累加中的那条路径上。前端把
+// `a{d1}..tension t..{d2}b` 折叠成四步二元连接（见 asyJoinExp），前三步走这里 ——
+// asy 那边这份"还没落到结上的规格"存在 flatguide 里。
+private path asy__spjoin(path a, path b) {
+  path h = pathcopy(a);
+  int n = h.nodes.length;
+  if (b.spkind == 1 || b.spkind == 2) {
+    // spkind 1 = `{z}` 方向（spec.kind 2）、2 = `{curl c}`（spec.kind 1）
+    int kd = b.spkind == 1 ? 2 : 1;
+    real vl = b.spkind == 1 ? asy__niceangle(b.spz0) : b.spa;
+    if (b.spside == 0) {            // JOIN_OUT：挂在**最后那个结**的出侧
+      if (n > 0) {
+        h.nodes[n - 1].outkind = kd;
+        h.nodes[n - 1].outval = vl;
+      }
+    } else {                        // JOIN_IN：挂给**下一个**结
+      h.pinkind = kd;
+      h.pinval = vl;
+    }
+    return h;
+  }
+  if (b.spkind == 3) {              // tension：下一段两端的张力
+    h.ptout = b.spa;
+    h.ptin = b.spb;
+    h.ptat = b.spat;
+    return h;
+  }
+  h.pctl = 1;                       // 4：controls —— 下一段的控制点定死了
+  h.pc0 = b.spz0;
+  h.pc1 = b.spz1;
+  return h;
+}
+
+// 攒着的规格只管**下一段**，用掉就清
+private void asy__clearpend(path h) {
+  h.pinkind = 0;
+  h.pinval = 1;
+  h.ptout = 1;
+  h.ptin = 1;
+  h.ptat = false;
+  h.pctl = 0;
+}
+
 // 连接：kind 0 是 `--`，1 是 `..`。两边接上之后**整条链重解一遍** —— asy 的 guide 是
 // 没解的规格，解是在转成 path 时一次做完的，逐段解出来的控制点与那个不一样。
 private path asy__join(path a, path b, int kind) {
-  // 规格结点（`{z}` / `{curl c}` / `tension` / `controls`）还没接到求解器上：那一刀要给
-  // 每个结点加"进/出两侧的规格"两格，并让 asy__resolve 从那里起头（现在它只从 joins
-  // 这张表起头）。类型与算符先立着 —— plain 里那几处声明（plain_paths.asy:14/19/118/129）
-  // 要它们才成型，而连接本身在 base 里没有一处走到。
-  if (a.spkind != 0 || b.spkind != 0) {
-    abort("连接里的方向/张力/控制点规格还没接上求解器（这一刀只立了那几个类型与算符）");
+  if (b.spkind != 0) return asy__spjoin(a, b);
+  if (a.spkind != 0) {
+    // camp.y 的 `exp join exp` 左边一定是条真路径，所以这只有直呼
+    // `operator ..(operator spec(…), g)` 才到得了
+    abort("连接的左边是个规格结点");
     return nullpath;
   }
   path h = pathcopy(a);
   asy__normjoins(h);
+  int n = h.nodes.length;
+  // `controls c0 and c1` 那一段是"控制点已定"（joins 里的 2），别的照传进来的 kind
+  int jk = h.pctl != 0 ? 2 : kind;
   // `a--cycle` / `a..cycle`：右边是那个记号，于是闭合
   if (b.ismark) {
-    if (h.nodes.length == 0) return h;
+    if (n == 0) return h;
     // 只有一个结：`(5,5)--cycle` 是**长度 1** 的闭合路径，两个控制点都落在这个点上，
     // 那一段还算直线段（`..cycle` 也一样）—— 解方程那套在这儿没得解，直接摆好。
-    if (h.nodes.length == 1) {
+    if (n == 1) {
       h.cyclic = true;
       h.nodes[0].pre = h.nodes[0].point;
       h.nodes[0].post = h.nodes[0].point;
@@ -1062,22 +1210,52 @@ private path asy__join(path a, path b, int kind) {
       int[] js;
       js.push(2);
       h.joins = js;
+      asy__clearpend(h);
       return h;
     }
     h.cyclic = true;
-    h.joins.push(kind);
+    // 收口那一段的规格：进侧落在第 0 个结上
+    if (h.pinkind != 0) {
+      h.nodes[0].inkind = h.pinkind;
+      h.nodes[0].inval = h.pinval;
+    }
+    if (h.pctl != 0) {
+      h.nodes[n - 1].post = h.pc0;
+      h.nodes[0].pre = h.pc1;
+    }
+    h.nodes[n - 1].tout = h.ptout;
+    h.nodes[n - 1].tatout = h.ptat;
+    h.nodes[0].tin = h.ptin;
+    h.nodes[0].tatin = h.ptat;
+    h.joins.push(jk);
+    asy__clearpend(h);
     asy__resolve(h);
     return h;
   }
-  if (a.nodes.length == 0) return pathcopy(b);
+  if (n == 0) return pathcopy(b);
   if (b.nodes.length == 0) return h;
   path t = pathcopy(b);
   asy__normjoins(t);
-  h.joins.push(kind);
+  // 这一段两端：出侧在 h 的末结上（`{d}` 那一档在 spjoin 里已经挂好了），
+  // 进侧与张力落在接缝右边那个结上
+  if (h.pinkind != 0) {
+    t.nodes[0].inkind = h.pinkind;
+    t.nodes[0].inval = h.pinval;
+  }
+  if (h.pctl != 0) {
+    h.nodes[n - 1].post = h.pc0;
+    t.nodes[0].pre = h.pc1;
+  }
+  h.nodes[n - 1].tout = h.ptout;
+  h.nodes[n - 1].tatout = h.ptat;
+  t.nodes[0].tin = h.ptin;
+  t.nodes[0].tatin = h.ptat;
+  h.joins.push(jk);
   for (int i = 0; i < t.nodes.length; ++i) {
     h.nodes.push(knotcopy(t.nodes[i]));
     if (i > 0) h.joins.push(t.joins[i - 1]);
   }
+  asy__clearpend(h);
   asy__resolve(h);
   return h;
 }

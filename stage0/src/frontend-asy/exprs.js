@@ -22,7 +22,7 @@ import {
   asyIsArr, asyElem, asyIsFn, asyFldSym, ASY_PAIR_TY, ASY_TRIPLE_TY, asyCore, ASY_NULL, asyRefTy,
 } from './types.js';
 import { ZERO, ASY_PAIRFN, ASY_STRFN, ASY_STR_DEPS, strLit } from './runtime.js';
-import { asyArgs, asyCall, asyVisible, asyJoinExp, asyOpUser, asyOpBuiltinSig, asyIdxOpCall, asyApplyCall, asyDefWrapper } from './calls.js';
+import { asyArgs, asyCall, asyVisible, asyOpUser, asyOpBuiltinSig, asyIdxOpCall, asyApplyCall, asyDefWrapper, asyRestValCall } from './calls.js';
 import { asyFmtStr, asyBody, asyExprStmt } from './stmts.js';
 
 /* ---------------------------------------------------------------- 表达式 */
@@ -695,11 +695,204 @@ export function asyExprList(L, n, h) {
   }
   if (h === 'scale') return asyScale(L, n);
   if (h === 'join-exp') return asyJoinExp(L, n);
-  if (h === 'join-dir' || h === 'spec' || h === 'spec-curl') return L.nope(n, '路径连接');
+  if (h === 'join-dir') return asyJoinDir(L, n);
+  if (h === 'spec' || h === 'spec-curl') {
+    // 单独一个方向标记不是表达式（camp.y 里 dir 只出现在 join 那一档上）
+    return L.err(n, '方向标记只能出现在路径连接里');
+  }
   return L.nope(n, `表达式 '${h}'`);
 }
 
-/* ------------------------------------------------------------------ 数组 */
+/* --------------------------------------------------------- 路径连接（第四十六刀） */
+
+/**
+ * `a J b`：语法上不是 `binary` 而是 `(join-exp L J R)` —— camp.y 里 join 是单独一档，
+ * `--`、`..`、`::`、`---`、方向标记 `{…}`、`tension …`、`controls … and …` 都挂在它上面。
+ *
+ * asy 的落法（camp.y:609 加 exp.h:1021 的 joinExp）是**一次调用**，规格夹在中间：
+ *   `a{d1}..tension t..{d2}b`
+ *     -> `operator ..(a, operator spec(d1,0), operator tension(t,false), operator spec(d2,1), b)`
+ * 内建的 `operator ..` 是 `guide(... guide[])`（builtin.cc:421），所有实参一起进去。
+ *
+ * 这一层绘图层里的 `operator --` / `operator ..` 是**二元**的，所以这里把那串实参
+ * **从左往右折叠**成一串二元连接。等价的理由：asy__join 见到规格结点只是把它记在累加的
+ * 那条路径上（asy__spjoin），真接上一个结点时整条链再重解一遍 —— 与 asy 那边"先摊平成
+ * flatguide 再一次解完"落在同一处。
+ *
+ * `::` 与 `---` 例外：它们在 base 里是**一格变量**（plain_paths.asy:129/130，类型
+ * `guide(... guide[])`），所以照 asy 那样一次全传进去。
+ */
+export function asyJoinExp(L, n) {
+  const j = n.items[2];
+  const jh = head(j);
+  let basic = j;
+  let dOut = null;
+  let dIn = null;
+  if (jh === 'join-out') { dOut = j.items[1]; basic = j.items[2]; }
+  else if (jh === 'join-in') { basic = j.items[1]; dIn = j.items[2]; }
+  else if (jh === 'join-both') { dOut = j.items[1]; basic = j.items[2]; dIn = j.items[3]; }
+  else if (jh !== 'join') return L.nope(n, `路径连接 '${jh}'`);
+  if (!isList(basic) || head(basic) !== 'join') return L.nope(n, '认不出的路径连接');
+  const op = asyOpText(basic.items[1]);
+  if (op === null) return L.nope(n, '认不出的路径连接');
+  const mid = basic.items.length > 2 ? basic.items[2] : null;
+  return asyJoinFold(L, n, op, n.items[1], dOut, mid, dIn, n.items[3]);
+}
+
+/** `a{d}`（camp.y:613 的 `exp dir`）：那是 `operator ..(a, operator spec(d,0))` —— 右边
+ *  没有 b，方向挂在 a 的**末结**上，等着下一个连接。 */
+export function asyJoinDir(L, n) {
+  return asyJoinFold(L, n, '..', n.items[1], n.items[2], null, null, null);
+}
+
+/** 攒出 `[左, 出侧方向, tension/controls, 进侧方向, 右]` 那一串，再落地。 */
+function asyJoinFold(L, n, op, lnode, dOut, mid, dIn, rnode) {
+  const vals = [];
+  const nodes = [];
+  const lv = asyExpr(L, lnode);
+  if (lv === null) return null;
+  vals.push(lv);
+  nodes.push(lnode);
+  if (dOut !== null) {
+    const v = asyDirSpec(L, dOut, 0);
+    if (v === null) return null;
+    vals.push(v);
+    nodes.push(dOut);
+  }
+  if (mid !== null) {
+    const v = asyMidSpec(L, mid);
+    if (v === null) return null;
+    vals.push(v);
+    nodes.push(mid);
+  }
+  if (dIn !== null) {
+    const v = asyDirSpec(L, dIn, 1);
+    if (v === null) return null;
+    vals.push(v);
+    nodes.push(dIn);
+  }
+  if (rnode !== null) {
+    const rv = asyExpr(L, rnode);
+    if (rv === null) return null;
+    vals.push(rv);
+    nodes.push(rnode);
+  }
+  if (op !== '--' && op !== '..') return asyJoinVar(L, n, op, vals, nodes);
+  let acc = vals[0];
+  for (let i = 1; i < vals.length; i++) {
+    const u = asyOpUser(L, n, op, [acc, vals[i]], null);
+    if (u === null) {
+      return L.nope(n, `'${acc.type} ${op} ${vals[i].type}'（内建的 '${op}' 是 guide 的，`
+        + `那是绘图层那一刀；自己定义一个 \`operator ${op}\` 是通的）`);
+    }
+    acc = u;
+  }
+  return acc;
+}
+
+/** 已经降好的几个值 -> 对算符名 `nm` 的一次调用（重载解析、隐式转换全跟着白捡）。 */
+function asyOpNameCall(L, n, nm, vals, nodes) {
+  const cs = asyVisible(L, nm);
+  if (cs.length === 0) {
+    return L.nope(n, `'${nm}'（它在绘图层里，要 \`import plain;\`）`);
+  }
+  const raw = [];
+  for (let i = 0; i < vals.length; i++) {
+    raw.push({ key: null, node: nodes[i], spread: false, v: vals[i], lines: null });
+  }
+  return asyApplyCall(L, n, nm, cs, raw, null);
+}
+
+/** `{z}` / `{curl c}` / `{x,y}`：side 是 camp.y 的 JOIN_OUT(0) / JOIN_IN(1) ——
+ *  specExp::trans（exp.cc:1476）就是把它当**第二个实参**交给那个算符的。 */
+function asyDirSpec(L, node, side) {
+  const h = head(node);
+  const sv = { code: `(int ${side})`, type: 'int' };
+  if (h === 'spec-curl') {
+    const v = asyCoerce(L, asyExpr(L, node.items[1]), 'real', node.items[1], "'curl' 的实参");
+    if (v === null) return null;
+    return asyOpNameCall(L, node, 'operator curl', [v, sv], [node.items[1], node]);
+  }
+  if (h !== 'spec') return L.nope(node, `连接里的规格 '${h}'`);
+  const inner = node.items[1];
+  // `{x,y}` 与 `{x,y,z}`：语法自己合成了 `(pair …)` / `(triple …)`（camp.y:650/653），
+  // 它们不是普通表达式节点，所以在这儿就地拼出来。
+  if (isList(inner) && head(inner) === 'triple') {
+    return L.nope(node, '三维的方向标记 `{x,y,z}`（那是 guide3，另一刀）');
+  }
+  let v = null;
+  if (isList(inner) && head(inner) === 'pair') {
+    v = asyTupleOf(L, inner, inner.items[1], inner.items[2]);
+  } else {
+    v = asyCoerce(L, asyExpr(L, inner), 'pair', inner, '方向标记');
+  }
+  if (v === null) return null;
+  return asyOpNameCall(L, node, 'operator spec', [v, sv], [inner, node]);
+}
+
+/** `(x,y)` 两个**节点** -> 一个 pair 值（`{x,y}` 那一档要它，那里没有 tuple-exp 包着）。 */
+function asyTupleOf(L, at, xn, yn) {
+  const x = asyCoerce(L, asyExpr(L, xn), 'real', xn, 'pair 的 x');
+  const y = asyCoerce(L, asyExpr(L, yn), 'real', yn, 'pair 的 y');
+  if (x === null || y === null) return null;
+  return { code: `(vlit ${ASY_PAIR_TY} ${x.code} ${y.code})`, type: 'pair' };
+}
+
+/** `tension …` 与 `controls …`：camp.y:667/681 把它们变成 `operator tension` /
+ *  `operator controls` 的一元/二元/三元调用 —— 元数就是源码里写了几个，少写的那一格由
+ *  base 里的转发那份补上（plain_paths.asy:14/19）。 */
+function asyMidSpec(L, node) {
+  const h = head(node);
+  if (h === 'tension') {
+    const last = node.items[node.items.length - 1];
+    const raw = isList(last) && head(last) === 'atleast' && isAtom(last.items[1])
+      ? last.items[1].value : null;
+    if (raw === null) return L.nope(node, "认不出的 'tension'");
+    const at = { code: `(bool ${String(raw) === 'true' ? 'true' : 'false'})`, type: 'bool' };
+    const vals = [];
+    const nodes = [];
+    for (let i = 1; i < node.items.length - 1; i++) {
+      const v = asyCoerce(L, asyExpr(L, node.items[i]), 'real', node.items[i], "'tension' 的实参");
+      if (v === null) return null;
+      vals.push(v);
+      nodes.push(node.items[i]);
+    }
+    vals.push(at);
+    nodes.push(node);
+    return asyOpNameCall(L, node, 'operator tension', vals, nodes);
+  }
+  if (h !== 'controls') return L.nope(node, `连接里的 '${h}'`);
+  const vals = [];
+  const nodes = [];
+  for (let i = 1; i < node.items.length; i++) {
+    const v = asyCoerce(L, asyExpr(L, node.items[i]), 'pair', node.items[i], "'controls' 的实参");
+    if (v === null) return null;
+    vals.push(v);
+    nodes.push(node.items[i]);
+  }
+  return asyOpNameCall(L, node, 'operator controls', vals, nodes);
+}
+
+/** `::` 与 `---`：base 里它们是一格 `guide(... guide[])` 变量（plain_paths.asy:129/130），
+ *  所以照 asy 那样**一次全传进去**。先问函数候选（用户自己定义 `operator ::` 也通），
+ *  再问那一格模块级变量。 */
+function asyJoinVar(L, n, op, vals, nodes) {
+  const nm = `operator ${op}`;
+  const cs = asyVisible(L, nm);
+  if (cs.length > 0) {
+    const raw = [];
+    for (let i = 0; i < vals.length; i++) {
+      raw.push({ key: null, node: nodes[i], spread: false, v: vals[i], lines: null });
+    }
+    return asyApplyCall(L, n, nm, cs, raw, null);
+  }
+  const gv = L.gvarHere(nm);
+  if (gv !== null && gv.ok && asyIsFn(gv.type)) {
+    return asyRestValCall(L, n, nm, gv.type, `(var ${gv.sym})`, vals, nodes);
+  }
+  return L.nope(n, `路径连接 '${op}'（它在绘图层里，要 \`import plain;\`）`);
+}
+
 
 /** `a[i]` 的**读**侧。写侧在 assign 里，因为写要先扩长（asy 的下标写会长）。 */
 export function asyIndex(L, n) {

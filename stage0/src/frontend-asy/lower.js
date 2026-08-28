@@ -272,7 +272,7 @@ import {
 // 跨文件 extends 与 prototype mixin 在自举路径上都没有先例，普通函数调用有。
 import {
   asyArgs, asyCall, asyBuiltinRaw, asyStrRaw, asyBuiltinOwns, asyBuiltinCost, asyVisible,
-  asyMethodCall, asyCtorCall, asyUserCall, asyApplyCall, asyJoinExp, asyOpUser, asyOpBuiltinSig,
+  asyMethodCall, asyCtorCall, asyUserCall, asyApplyCall, asyOpUser, asyOpBuiltinSig,
   asyFnValCall, asyCallArgs, asySigText, asyFit, asyDefWrapper, asyMathCall,
 } from './calls.js';
 

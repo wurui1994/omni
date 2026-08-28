@@ -810,22 +810,38 @@ export function asyApplyCall(L, n, nm, list, raw, recv, reinit) {
 }
 
 /**
- * `a -- b`：语法上它不是 `binary` 而是 `(join-exp L (join "--") R)`（camp.y 里 join 是
- * 单独一档，`..`、`::`、方向标记都挂在这一档上）。内建的 `--` 不存在 —— 那是 guide 的
- * 东西，属于绘图层 —— 所以这里**只有**用户定义的 `operator --`（第二十三刀）。
+ * 通过一格 `T(… , ... E[])` 的**函数值**调用，实参是**已经降好**的那几个值。
+ * 路径连接那一族用它（第四十六刀）：`::` 与 `---` 在 base 里是一格变量
+ * （plain_paths.asy:129/130，类型 `guide(... guide[])`），而那一串实参是攒出来的
+ * ——`asyFnValCall` 是从语法树上读实参的，接不上。
  */
-export function asyJoinExp(L, n) {
-  const op = asyOpText(n.items[2].items[1]);
-  if (op !== '--' && op !== '..') return L.nope(n, `路径连接 '${op ?? '?'}'`);
-  const a = L.expr(n.items[1]);
-  const b = L.expr(n.items[3]);
-  if (a === null || b === null) return null;
-  // 内建的 `--` / `..` 不存在 —— 那是 guide 的东西，属于绘图层 —— 所以"内建这一档的
-  // 签名"是 null（不是 `opBuiltinSig` 的结果）
-  const u = asyOpUser(L, n, op, [a, b], null);
-  if (u !== null) return u;
-  return L.nope(n, `'${a.type} ${op} ${b.type}'（内建的 '${op}' 是 guide 的，那是绘图层那一刀；`
-    + `自己定义一个 \`operator ${op}\` 是通的）`);
+export function asyRestValCall(L, n, nm, ft, callee, vals, nodes) {
+  const s = asyFnSplit(ft);
+  if (s === null) return L.nope(n, `认不出的函数类型 '${ft}'`);
+  const rAt = s.params.length - 1;
+  if (rAt < 0 || !asyIsRestP(s.params[rAt])) {
+    return L.nope(n, `'${nm}' 不是带可变形参的函数类型（${ft}）`);
+  }
+  const restTy = asyRestBase(s.params[rAt]);
+  const el = asyElem(restTy);
+  if (vals.length < rAt) {
+    return L.err(n, `'${nm}' 是 ${ft}，要至少 ${rAt} 个实参，给了 ${vals.length} 个`);
+  }
+  const codes = [];
+  for (let i = 0; i < rAt; i++) {
+    const cv = L.coerce(vals[i], s.params[i], nodes[i], `'${nm}' 的第 ${i + 1} 个实参`);
+    if (cv === null) return null;
+    codes.push(cv.code);
+  }
+  const tmp = `asy__jv${L.tmp++}`;
+  L.pre.push(`(let ${tmp} ${asyCore(restTy)} (anew ${asyCore(restTy)} (int 0)))`);
+  for (let i = rAt; i < vals.length; i++) {
+    const ev = L.coerce(vals[i], el, nodes[i], `'${nm}' 的可变实参`);
+    if (ev === null) return null;
+    L.pre.push(`(apush (var ${tmp}) ${ev.code})`);
+  }
+  codes.push(`(var ${tmp})`);
+  return { code: `(callfn ${callee} ${codes.join(' ')})`, type: s.ret };
 }
 
 /**

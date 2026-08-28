@@ -4821,6 +4821,57 @@ base 里没有一处走到它（那几处只是声明），所以这一句现在
 `operator ---` 当模块级变量、算符名当形参传进去再直呼、以及可变形参的匿名函数
 接上 typedef 之后按四个实参调）。
 
+### 连接里的方向、张力与控制点：接到求解器上
+
+上一刀立了 `operator spec` / `operator curl` / `operator tension` / `operator controls`
+四个算符与两个 specifier 类型，但没接线 —— 语法上的 `{dir}`、`tension …`、
+`controls … and …` 还是一句 nope，asy__join 见到规格结点就 abort。这一刀接上。
+
+**前端这半边**。camp.y:609 加 exp.h:1021 的 joinExp 说得很清楚：`a J b` 是**一次调用**，
+规格夹在中间 ——
+
+```
+a{d1}..tension t..{d2}b
+  -> operator ..(a, operator spec(d1,0), operator tension(t,false), operator spec(d2,1), b)
+```
+
+`0`/`1` 是 JOIN_OUT/JOIN_IN，specExp::trans（exp.cc:1476）把它当**第二个实参**传进去。
+元数也照 camp.y 原样：`tension t` 是二元（binaryExp）、`tension t and u` 是三元
+（ternaryExp）、`controls z` 是一元、`controls z and w` 是二元 —— 少写的那一格由 base 里
+那两份转发补上（plain_paths.asy:14/19）。所以这一层一个特例都不用开。
+
+内建的 `operator ..` 在 asy 那边是 `guide(... guide[])`（builtin.cc:421），而绘图层这边
+那两份是**二元**的，于是 asyJoinFold 把那一串**从左往右折叠**成一串二元连接。等价的理由在
+下一段。`::` 与 `---` 例外：base 里它们是**一格变量**（plain_paths.asy:129/130），所以照
+asy 那样一次全传进去 —— 那要"用已经降好的值调一格可变形参的函数值"，asyFnValCall 是从
+语法树读实参的，接不上，另写了 asyRestValCall。
+
+**绘图层这半边**。规格不攒成一棵树，而是**边连边记**：knot 上多四组（inkind/inval、
+outkind/outval、tout/tatout、tin/tatin，对应 knot.h:212 的 in/out/tin/tout），path 上多
+几格 pending（下一个结的进侧规格、下一段的张力、下一段定死的控制点）—— asy 那边这份
+"还没落到结上的规格"存在 flatguide 里。`asy__spjoin` 收规格，`asy__join` 在真接上一个结时
+把 pending 落到接缝两侧，然后整条链重解一遍。
+
+求解器本来就认方向（spec.kind 2）、curl（kind 1）与定死的控制点（kind 3），这一刀只把
+**张力**补齐：alpha = 1/tout、beta = 1/tin（knot.h:219），三处系数（eqnprop::mid、
+curlSpec::eqnOut / eqnIn）从化简回原式，velocity 的分母乘上张力、`atLeast` 那一档加上
+knot.cc:82 那道上界，`encodeStraight` 在张力不是 1 时**不算直线段**（两个控制点各自往里
+收 1/tension，knot.cc:606 的 else 支 —— 漏了这一条 `..tension 4 ..` 会印成 `--`）。
+
+一个量出来的差：`(0,0){curl 3}..(1,1)..{curl 0.5}(2,0)` 那一条，三个结里有**一个控制点的
+一个分量**与 asy 差 1 ulp（`0.467163152209019` 对 `…018`，第 16 位有效数字）。系数与消元
+的算式逐项对过、与 knot.cc 一致，差的是三元线性系统里几步乘除的舍入落点；curl 两端同值、
+单侧 curl、四结带 curl 那三种都逐字节一致。所以那一条没进 `.expected`（那个文件的判据是
+**逐字节**等于真 asy），差异记在这里。
+
+数字：`import plain;` 29 → 26（plain_paths.asy:382、plain_boxes.asy:32、
+plain_arrows.asy:122 三条路径连接一起没了）。`import graph;` 148 没动。顺带修掉一个**真错**：
+`..controls A and B..` 原来被**悄悄降成普通 `..`**（asyJoinExp 只看 join 那个词、把后面挂着的
+规格丢了），几何是错的而且不报错。tests/asy 202 条、tests/run.js 91 条全绿。新用例
+`cases/124-join-specs`（一百五十行输出，与 `asy -noV` 逐字节一致：`{dir}` 三种位置、
+`{x,y}`、`{curl c}`、`tension a and b`、`tension atleast`、`controls` 的一参与二参、
+`::` 折成变量调用、以及带方向标记的闭合路径）。
+
 ## 后果与代价
 
 
