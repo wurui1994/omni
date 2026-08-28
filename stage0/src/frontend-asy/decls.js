@@ -757,26 +757,28 @@ export function asyGlobalNames(L, n, at) {
     // 检查在 vardec 那一遍（recHere）。
     const el = base === null ? null : asyDeclTyName(L, base);
     let ty = el;
+    // 类型名是个 **typedef 别名**：上面那一步只认标量与记录名，看不出它。
+    // `transform3 identity4 = ...`（plain_prethree.asy）就是这一种 —— transform3 是
+    // `real[][]` 的别名，而二维数组这一格本来是收的，只是名字没解开。
+    // 位置临时设成这一项的位置：别名的可见性也是顺序的。aliasAt 不报诊断（这一遍只收表）。
+    if (ty === null && base !== null) {
+      const keep = L.at;
+      L.at = at;
+      const al = L.aliasAt(base);
+      L.at = keep;
+      if (al !== null) ty = al.t;
+    }
     let k = 0;
     while (ty !== null && k < arr + dims) { ty = `${ty}[]`; k++; }
-    // 函数值类型的模块级变量（第三十七刀）。两种写法，都要在这一遍就定出类型 ——
-    // 函数体里要看得见它，而这一遍是唯一在函数体之前跑的一遍：
-    //   `real f(real) = twice;`   形参表跟在**名字**后面（fundecidstart）
-    //   `typedef real F(real); F f;`  类型是个**别名**（上面那几行只认标量与记录，所以
-    //                                 base 是 'F' 时 el 是 null）
-    // 别名用 aliasAt 解（它不报诊断 —— 这一遍只收表，真正的检查在 vardec 里），
-    // 位置临时设成这一项的位置：别名的可见性也是顺序的。
+    // 函数值类型的模块级变量（第三十七刀）。形参表跟在**名字**后面的那一种写法
+    // （`real f(real) = twice;`）在这一遍就要定出类型 —— 函数体里要看得见它，
+    // 而这一遍是唯一在函数体之前跑的一遍。（`typedef real F(real); F f;` 那一种
+    // 走上面的别名分支。）
     if (isList(start) && head(start) === 'fundecidstart') {
       const keep = L.at;
       L.at = at;
       ty = L.fnTypeOf(base === null ? null : base, start.items[2], start);
       L.at = keep;
-    } else if (ty === null && base !== null && arr + dims === 0) {
-      const keep = L.at;
-      L.at = at;
-      const al = L.aliasAt(base);
-      L.at = keep;
-      if (al !== null && asyIsFn(al.t)) ty = al.t;
     }
     // `var`（第四十一刀）：类型要从初值推，而这一遍就是唯一能推的地方 —— 函数体比
     // 文件级语句先降级（bodyPass 的顺序），所以等到 vardec 那一遍再定类型，函数体里

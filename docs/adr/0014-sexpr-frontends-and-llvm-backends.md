@@ -3796,6 +3796,21 @@ tests/run.js 91 条全绿。新用例 `cases/86-matrix-frame`（与真 asy 逐�
 数字：`import plain;` 209 → 203。tests/asy 159 条、tests/run.js 91 条全绿。
 新用例 `cases/87-foreach-var`（与真 asy 逐字节一致）。
 
+### 类型名是 typedef 别名的模块级变量
+
+`identity4`（plain_prethree.asy）是个 `transform3` —— 而 `transform3` 是 `real[][]` 的
+typedef 别名。二维数组这一格我们本来是收的，坏的是**声明遍**：`asyGlobalNames` 那一步
+"照着节点看类型"只认标量与记录名，别名解不开就 `ok:false`，于是函数体里五处引用它都报
+"模块级变量收 int/real/bool/…"—— 一句把"名字没解开"说成"类型不收"的错话。
+
+改法是把那一遍里原来只给**函数类型**别名开的口子（`typedef real F(real); F f;`）放成
+一般的：`ty === null` 且类型名是个别名时就解开它，再照 `arr + dims` 加维度。位置照旧
+临时设成这一项的位置 —— 别名的可见性也是顺序的，`aliasAt` 不报诊断（这一遍只收表，
+真正的检查在 vardec 那一遍）。
+
+数字：`import plain;` 203 → 196。tests/asy 160 条、tests/run.js 91 条全绿。
+新用例 `cases/88-alias-global`（与真 asy 逐字节一致）。
+
 ## 后果与代价
 
 
