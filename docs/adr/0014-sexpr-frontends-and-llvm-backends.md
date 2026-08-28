@@ -3776,6 +3776,26 @@ write(t*(1,1,1));   // (3,4,5)，不是 (6,8,10) —— 除了第四行算出来
 数字：`import plain;` 226 → 209。`import graph;` 153 不动。tests/asy 158 条、
 tests/run.js 91 条全绿。新用例 `cases/86-matrix-frame`（与真 asy 逐字节一致）。
 
+### `for (var x : a)`：元素类型从数组推
+
+`var` 那一档（第四十一刀）当时只做了普通声明，`for-each` 的位置漏了 —— 而 base 里 `var`
+的**全部**七处用法都在 for-each 上（plain_bounds.asy 的 `for (var link : links)` 那一族）。
+补法与普通声明同一条：`var` 不是类型，是"从初值推"，这儿的初值就是 `a[i]`，所以类型
+就是数组的元素类型。落地上只有一处别扭：推之前得先把数组求出来，所以 `asyForEach`
+里求值顺序与写死类型那一路反过来了。
+
+顺手记两条这一刀量到、但**没做**的东西，免得下次再查一遍：
+
+- `T.cyclic = true`（plain_paths.asy:165、plain_pens.asy:148/152、plain_strings.asy:238）
+  不是"给字段赋值"，是 asy **数组自己的属性** —— 循环数组的下标按长度取模。我们的核心
+  方言里数组没有这一格，所以这四条还立着。
+- `write(file, ..., pen)`（plain_Label.asy:358 那一族）要的是 pen 的文字形式
+  （builtin.cc:863 的 `addWrite<pen>`），那是一串 `rgb(...)+linewidth(...)` 的拼法，
+  不是随手能对齐的。
+
+数字：`import plain;` 209 → 203。tests/asy 159 条、tests/run.js 91 条全绿。
+新用例 `cases/87-foreach-var`（与真 asy 逐字节一致）。
+
 ## 后果与代价
 
 

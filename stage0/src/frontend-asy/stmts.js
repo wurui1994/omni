@@ -286,14 +286,21 @@ export function asyDoWhile(L, n, ret) {
  * 而不是先拷一份快照 —— 快照会让那个程序只走 2 轮。
  */
 export function asyForEach(L, n, ret) {
-  const el = L.type(n.items[1], 'for-each 的元素类型');
-  if (el === null) return null;
+  // `for (var x : a)`：元素类型**从数组推**。asy 的 `var` 不是类型，是"从初值推"，
+  // 这儿的"初值"就是 `a[i]`。base 里 plain_bounds.asy 那七处 `for (var link : links)`
+  // 全是这一种。推之前得先求数组，所以顺序与写死类型那一路反过来。
+  const isVar = L.isVarTy(n.items[1]);
+  const el0 = isVar ? null : L.type(n.items[1], 'for-each 的元素类型');
+  if (!isVar && el0 === null) return null;
   const nm = isAtom(n.items[2]) ? n.items[2].value : null;
   if (nm === null) return L.err(n, 'for-each 少了循环变量名');
   const a = L.expr(n.items[3]);
   if (a === null) return null;
   if (!asyIsArr(a.type)) return L.err(n, `for-each 要一个数组，这里是 ${a.type}`);
-  if (asyElem(a.type) !== el) return L.err(n, `for-each 的元素写的是 ${el}，数组是 ${a.type}`);
+  const el = isVar ? asyElem(a.type) : el0;
+  if (!isVar && asyElem(a.type) !== el) {
+    return L.err(n, `for-each 的元素写的是 ${el}，数组是 ${a.type}`);
+  }
   const av = `asy__f${L.tmp++}`;
   const iv = `asy__fi${L.tmp++}`;
   const upd = [`(set ${iv} (bin "+" (var ${iv}) (int 1)))`];
