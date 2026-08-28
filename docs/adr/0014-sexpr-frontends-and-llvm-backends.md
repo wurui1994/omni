@@ -4108,6 +4108,25 @@ asy 收）这一刀不收，一次只按一种切。
 数字：`import plain;` 111 → 103。`import graph;` 152 不动。tests/asy 172 条、
 tests/run.js 91 条全绿。新用例 `cases/97-str-cast`。
 
+### `string s = stdin;`：从 file 读一个词是一条**隐式**转换
+
+`builtin.cc:494-497` 在 `addUnorderedOps<T>` 里给每个 T 挂了四条
+`addCast(ve, t, primFile(), read<T>)` —— T、T[]、T[][]、T[][][]。所以 asy 里
+`string s=stdin;` 不是什么特殊语法，就是 file → string 的隐式转换，读一个词；
+`plain_debugger.asy:6` 的 `string[] source=input(name)` 是同一条的数组版。
+
+这一层的 file 只有 stdin/stdout 两个句柄、没有真的读，所以在 prelude 里按签名补上
+`T operator cast(file)`（int/real/string/bool/pair/triple 与它们的一维数组），体是
+abort。少了这几条签名，`return stdin;` / `w=stdin;` / `s += f+'\n'` 那几句根本降不下来 ——
+补上之后它们各自落回自己真正的那一格（读了才响）。
+
+顺带清掉的是同一条造成的连带错：`plain_strings.asy:13`（return）、`:154`（`file+string`
+里的左操作数）、`:223`（赋值）、`plain_debugger.asy:6`（数组初值）。
+
+数字：`import plain;` 103 → 99。`import graph;` 152 不动。tests/asy 173 条、
+tests/run.js 91 条全绿。新用例 `cases/98-file-read-cast`（只声明不调用 —— 调了就该
+abort，那不是这一条要钉的东西）。
+
 ## 后果与代价
 
 

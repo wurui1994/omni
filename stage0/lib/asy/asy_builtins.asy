@@ -1368,6 +1368,24 @@ file output(string name="", bool update=false, string comment="#", string mode="
 file nullFile() { file f; f.fd = -1; return f; }
 int precision(file f, int digits=0) { return digits; }
 
+// 从 file **隐式**读一个词（builtin.cc:494 `addCast(ve,t1,primFile(),read<T>)`）——
+// addUnorderedOps 里每个 T 一条，一维到三维的数组也各一条（:495-497）。
+// asy 那边 `string s=stdin;` 就是这么读的（plain_strings.asy:13 的 `return stdin;`、
+// :223 的 `w=stdin;`、plain_debugger.asy:6 的 `string[] source=input(…)`）。
+// 这一层的 file 只有 stdin/stdout 两个句柄、没有真的读，所以体是 abort ——
+// 签名在，那几句才降得下来；真读了才响。
+int operator cast(file f) { abort("从 file 读 int 还没做（这一层没有真的读）"); return 0; }
+real operator cast(file f) { abort("从 file 读 real 还没做（这一层没有真的读）"); return 0; }
+string operator cast(file f) { abort("从 file 读 string 还没做（这一层没有真的读）"); return ""; }
+pair operator cast(file f) { abort("从 file 读 pair 还没做（这一层没有真的读）"); return (0, 0); }
+triple operator cast(file f) { abort("从 file 读 triple 还没做（这一层没有真的读）"); return (0, 0, 0); }
+bool operator cast(file f) { abort("从 file 读 bool 还没做（这一层没有真的读）"); return false; }
+int[] operator cast(file f) { abort("从 file 读 int[] 还没做（这一层没有真的读）"); return new int[]; }
+real[] operator cast(file f) { abort("从 file 读 real[] 还没做（这一层没有真的读）"); return new real[]; }
+string[] operator cast(file f) { abort("从 file 读 string[] 还没做（这一层没有真的读）"); return new string[]; }
+pair[] operator cast(file f) { abort("从 file 读 pair[] 还没做（这一层没有真的读）"); return new pair[]; }
+triple[] operator cast(file f) { abort("从 file 读 triple[] 还没做（这一层没有真的读）"); return new triple[]; }
+
 // (1) `transform * path`：逐个结点搬（transform 是仿射，pre/point/post 都搬）。
 // runpath.in 的 `path operator *(transform t, path p)` 就是这件事。
 path operator *(transform t, path g) {
