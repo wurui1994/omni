@@ -325,6 +325,10 @@ struct pen {
   real dashoffset = 0;
   bool dashscale = true;
   bool dashadjust = true;
+  // 笔自己的那个变换（pen.h 的 `pen::t`）：`transform * pen` 攒在这儿，min/max(pen) 用它。
+  // 笔尖（nib，pen.h 的 `pen::P`）还没有 —— makepen 造的笔仍与真 asy 不一样。
+  transform pentrans;
+  bool hastrans = false;
 }
 
 pen pencopy(pen p) {
@@ -345,6 +349,8 @@ pen pencopy(pen p) {
   q.dashoffset = p.dashoffset;
   q.dashscale = p.dashscale;
   q.dashadjust = p.dashadjust;
+  q.pentrans = p.pentrans;
+  q.hastrans = p.hastrans;
   return q;
 }
 
@@ -668,11 +674,24 @@ box opbox(drawop o, real s) {
     }
   }
   if (o.kind == 0 && !eb.empty) {
+    // 描边那一笔的盒子要加上**笔的盒子**（pen.h:931 的 pen::bounds）：没有笔尖时是
+    // ±0.5*linewidth*(maxx,maxy) 加上笔那个变换的平移，maxx/maxy 是线性部分两行的模长
+    // （恒等时就是 1）。min/max(pen) 用的是同一份算法，但它们声明在后面，所以这里现写。
     real hw = 0.5 * o.p.width;
-    eb.l -= hw;
-    eb.b -= hw;
-    eb.r += hw;
-    eb.t += hw;
+    real mx = 1;
+    real my = 1;
+    real sx = 0;
+    real sy = 0;
+    if (o.p.hastrans) {
+      mx = length((o.p.pentrans.xx, o.p.pentrans.xy));
+      my = length((o.p.pentrans.yx, o.p.pentrans.yy));
+      sx = o.p.pentrans.x;
+      sy = o.p.pentrans.y;
+    }
+    eb.l -= hw * mx - sx;
+    eb.b -= hw * my - sy;
+    eb.r += hw * mx + sx;
+    eb.t += hw * my + sy;
   }
   return eb;
 }
@@ -1350,11 +1369,34 @@ path operator *(transform t, path g) {
   return out;
 }
 
-// (1) 笔的盒子（runtime.in:339/344，体是 pen.h:931 的 `pen::bounds()`）：没有 nib、
-// 变换是恒等时走的是 maxx=maxy=1、shift=(0,0) 那一支，盒子就是 ±0.5*linewidth 的正方形。
-// base 里 plain_boxes.asy:16 的 `0.5*sign*(max(p)-min(p))` 用的正是这一条。
-pair max(pen p) { real w = 0.5 * linewidth(p); return (w, w); }
-pair min(pen p) { real w = 0.5 * linewidth(p); return (-w, -w); }
+// (1) 笔的盒子（runtime.in:339/344，体是 pen.h:931 的 `pen::bounds()`）：没有笔尖时，
+// 盒子是 ±0.5*linewidth*(maxx,maxy) 再加上笔那个变换的平移。恒等变换下 maxx=maxy=1、
+// shift=(0,0)，也就是 ±0.5*linewidth 的正方形（plain_boxes.asy:16 用的正是这一条）；
+// 带变换时那两个数是"单位圆被线性部分映出去的最大 x/y"，即两行各自的模长。
+pair max(pen p) {
+  real mx = 1;
+  real my = 1;
+  pair sh = (0, 0);
+  if (p.hastrans) {
+    mx = length((p.pentrans.xx, p.pentrans.xy));
+    my = length((p.pentrans.yx, p.pentrans.yy));
+    sh = p.pentrans * (0, 0);
+  }
+  real w = 0.5 * linewidth(p);
+  return (w * mx + sh.x, w * my + sh.y);
+}
+pair min(pen p) {
+  real mx = 1;
+  real my = 1;
+  pair sh = (0, 0);
+  if (p.hastrans) {
+    mx = length((p.pentrans.xx, p.pentrans.xy));
+    my = length((p.pentrans.yx, p.pentrans.yy));
+    sh = p.pentrans * (0, 0);
+  }
+  real w = 0.5 * linewidth(p);
+  return (-w * mx + sh.x, -w * my + sh.y);
+}
 
 // (1) defaultpen 那一族（runtime.in:355/360）：读/写上面那一格。
 pen defaultpen() { return pencopy(asy__defpen); }
@@ -1382,6 +1424,70 @@ bool adjust(pen p) { return p.dashadjust; }
 void begingroup(frame f) { }
 void endgroup(frame f) { }
 bool is3D(frame f) { return false; }
+
+// (1) `transform * pen`（runtime.in:1107 → pen.h 的 `transformed`）：搬的是笔自己那个
+// 变换（`ret.t = p.t.isNull() ? t : t*p.t`）。笔尖（nib）还没有，所以 makepen 造的笔
+// 在变换下仍与真 asy 不一样 —— 这条差别写在明处。
+// 排在 `transform * frame` 前面：frame 那一支的体里要调它（prelude 内部是顺序解析的）。
+pen operator *(transform t, pen p) {
+  pen q = pencopy(p);
+  q.pentrans = p.hastrans ? t * p.pentrans : t;
+  q.hastrans = true;
+  return q;
+}
+
+// (1) `transform * frame`（runtime.in:1112）：frame 里每一笔都搬。
+frame operator *(transform t, frame f) {
+  frame out;
+  for (drawop o : f.ops) {
+    drawop q;
+    q.kind = o.kind;
+    q.g = t * o.g;
+    // 笔只吃**去掉平移**的那一半（drawelement.h:302 `transformed(shiftless(t),pentype)`）——
+    // 量过：`min(shift(3,4)*f)` 是路径搬过去再 ±0.25，笔那一格没有跟着平移。
+    q.p = shiftless(t) * o.p;
+    out.ops.push(q);
+  }
+  return out;
+}
+
+// (1) 矩阵那三个乘法（runarray.in:1399/1452/1462）。asy 的 transform3 就是 real[][]，
+// 所以 `t*(0,0,0)` 走的是最后那一个 —— 量过它**除以第四行**（齐次坐标）：
+//   {{1,0,0,5},{0,2,0,6},{0,0,3,7},{0,0,0,2}} * (1,1,1) 是 (3,4,5)，不是 (6,8,10)。
+real[] operator *(real[][] a, real[] b) {
+  real[] c;
+  for (real[] ai : a) {
+    if (ai.length != b.length) abort("real[][]*real[]: 维数不匹配");
+    real sum = 0;
+    for (int j = 0; j < b.length; ++j) sum += ai[j] * b[j];
+    c.push(sum);
+  }
+  return c;
+}
+real[][] operator *(real[][] a, real[][] b) {
+  real[][] c;
+  int m = b.length == 0 ? 0 : b[0].length;
+  for (real[] ai : a) {
+    if (ai.length != b.length) abort("real[][]*real[][]: 维数不匹配");
+    real[] row;
+    for (int j = 0; j < m; ++j) {
+      real sum = 0;
+      for (int k = 0; k < b.length; ++k) sum += ai[k] * b[k][j];
+      row.push(sum);
+    }
+    c.push(row);
+  }
+  return c;
+}
+triple operator *(real[][] t, triple v) {
+  if (t.length != 4) abort("real[][]*triple: 要 4x4");
+  real[] b = {v.x, v.y, v.z, 1};
+  real[] r = t * b;
+  if (r[3] == 0) abort("real[][]*triple: 第四行算出来是 0");
+  return (r[0] / r[3], r[1] / r[3], r[2] / r[3]);
+}
+
+
 
 
 

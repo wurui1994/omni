@@ -3746,6 +3746,36 @@ asy 那边 `signature` 是带 rest 的，两者不是一份。改法就是把 ke
 不动。tests/asy 157 条、tests/run.js 91 条全绿。新用例 `cases/85-sig-and-pen`
 （与真 asy 逐字节一致）。
 
+### 矩阵那三个乘法、`transform * frame`，与"笔只吃去掉平移的那一半"
+
+`transform3` 在 asy 里就是 `real[][]`，所以 plain_picture.asy 里到处的 `t*(0,0,0)`
+落在 `triple operator *(real[][], triple)`（runarray.in:1462）上。它是**齐次**的 ——
+量出来的：
+
+```asy
+real[][] t = {{1,0,0,5},{0,2,0,6},{0,0,3,7},{0,0,0,2}};
+write(t*(1,1,1));   // (3,4,5)，不是 (6,8,10) —— 除了第四行算出来的 2
+```
+
+连带补上 `real[][] * real[]`（:1399，纯矩阵乘向量，**不**除）与 `real[][] * real[][]`
+（:1452）。
+
+`transform * frame`（runtime.in:1112）是"frame 里每一笔都搬"。这一刀真正的收获是笔那一侧：
+
+- `transform * pen`（runtime.in:1107 → pen.h 的 `transformed`）搬的是**笔自己那个变换**
+  （`ret.t = p.t.isNull() ? t : t*p.t`），所以 pen 上多了一格 `pentrans`。
+- 笔的盒子（pen.h:931）因此不再是"±0.5*linewidth 的正方形"：maxx/maxy 是线性部分
+  **两行各自的模长**（单位圆被映出去的最大 x/y），再加上那个变换的平移。
+- 而 frame 里那一笔被搬时，笔吃的是 **`shiftless(t)`**（drawelement.h:302）。这条是量出来
+  才知道的：`min(shift(3,4)*f)` 是路径搬过去再 ±0.25，笔那一格**没有**跟着平移；
+  一开始我照 `t*o.p` 写，盒子就被平移算了两遍（量到 (5.75,7.75) 而不是 (2.75,3.75)）。
+  `xscale(2)*f` 那一头则要真吃：max 是 (2.5,2.25) 而不是 (2.25,2.25)。
+
+还差的是笔尖本身（pen.h 的 `pen::P`，`makepen(path)` 造出来的那种）—— 它还是 abort。
+
+数字：`import plain;` 226 → 209。`import graph;` 153 不动。tests/asy 158 条、
+tests/run.js 91 条全绿。新用例 `cases/86-matrix-frame`（与真 asy 逐字节一致）。
+
 ## 后果与代价
 
 
