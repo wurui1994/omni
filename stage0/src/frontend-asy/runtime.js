@@ -421,6 +421,23 @@ export function asyArrHelpers(name, et, zero) {
     (ret (var r)))`],
     [`asy__slicefrom_${name}`, `  (fn asy__slicefrom_${name} ((a (arr ${et})) (i int)) (arr ${et})
     (ret (call asy__slice_${name} (var a) (var i) (alen (var a)))))`],
+    // `a.append(b)`：b 的元素**逐个**接到 a 后面（runarray.in 的 appendArray），回 void。
+    [`asy__append_${name}`, `  (fn asy__append_${name} ((a (arr ${et})) (b (arr ${et}))) void
+    (let i int (int 0))
+    (while (bin "<" (var i) (alen (var b)))
+      (do
+        (apush (var a) (aget (var b) (var i)))
+        (set i (bin "+" (var i) (int 1))))))`],
+    // `a[ix]`（ix 是 int[]）：按那一串下标挑出来的**新**数组（runarray.in 的
+    // arrayIntArray）。base 里 `reverse(a)` 就是 `a[reverse(a.length)]`（plain.asy:192）。
+    [`asy__pick_${name}`, `  (fn asy__pick_${name} ((a (arr ${et})) (ix (arr int))) (arr ${et})
+    (let r (arr ${et}) (anew (arr ${et}) (int 0)))
+    (let i int (int 0))
+    (while (bin "<" (var i) (alen (var ix)))
+      (do
+        (apush (var r) (aget (var a) (aget (var ix) (var i))))
+        (set i (bin "+" (var i) (int 1)))))
+    (ret (var r)))`],
     // `a.delete(i)` / `a.delete(i, j)`：**闭区间**，就地左移再缩长（量过
     // `int[] b={1,2,3}; b.delete(0,1);` 之后 b 是 {3}）。范围超尾就截到尾 ——
     // asy 那边超尾是运行时错，我们截，这条差别写在文件头。

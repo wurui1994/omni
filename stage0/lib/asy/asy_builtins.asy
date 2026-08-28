@@ -997,6 +997,267 @@ real linewidth(pen p) { return p.width; }
 pen fontsize(real size, real lineskip) { pen q; q.font = "fontsize"; return q; }
 pen fontsize(real size) { return fontsize(size, 1.2 * size); }
 
+// (1) 还差的几个非泛型内建：base 里点名要，语义在参考实现里是一句话。
+// unit：runpair.in:178 —— 零向量回零（C++ 那边 length==0 时原样返回）。
+pair unit(pair z) { real r = length(z); return r == 0 ? z : z / r; }
+triple unit(triple v) { real r = length(v); return r == 0 ? v : v / r; }
+
+// identity(n)：runarray.in:1247，n x n 单位阵。
+real[][] identity(int n) {
+  real[][] m;
+  for (int i = 0; i < n; ++i) {
+    real[] row;
+    for (int j = 0; j < n; ++j) row.push(i == j ? 1.0 : 0.0);
+    m.push(row);
+  }
+  return m;
+}
+
+// replace(S, {{from,to},…})：runstring.in:215。一趟扫：在当前位置试每一条规则，
+// 命中就抄 to、位置前移 len、并**从第一条规则重试**（那个 `i=0`）；都不命中抄一个字符。
+string replace(string S, string[][] translate) {
+  string buf = "";
+  int pos = 0;
+  int Len = length(S);
+  int n = translate.length;
+  while (pos < Len) {
+    int i = 0;
+    while (i < n) {
+      if (translate[i].length != 2) abort("translation table entry must be an array of length 2");
+      string pat = translate[i][0];
+      int len = length(pat);
+      if (len == 0 || substr(S, pos, len) != pat) { ++i; continue; }
+      buf = buf + translate[i][1];
+      pos = pos + len;
+      if (pos == Len) return buf;
+      i = 0;
+    }
+    buf = buf + substr(S, pos, 1);
+    ++pos;
+  }
+  return buf;
+}
+// 三参那个 replace 是运行时自带的（runtime.js 的 asy__srepl），这里不再声明一份。
+
+// point(path,real)：runpath.in:64 —— 段内按那一段的三次 Bezier 取点。
+pair point(path g, real t) {
+  int n = g.nodes.length;
+  if (n == 0) { abort("point: 空路径"); return (0, 0); }
+  int segs = g.cyclic ? n : n - 1;
+  if (segs <= 0) return g.nodes[0].point;
+  real u = t;
+  if (g.cyclic) {
+    while (u < 0) u = u + segs;
+    while (u >= segs) u = u - segs;
+  } else {
+    if (u <= 0) return g.nodes[0].point;
+    if (u >= segs) return g.nodes[n - 1].point;
+  }
+  int i = floor(u);
+  real s = u - i;
+  knot a = g.nodes[i];
+  knot b = g.nodes[i + 1 == n ? 0 : i + 1];
+  real r = 1 - s;
+  return r*r*r*a.point + 3*r*r*s*a.post + 3*r*s*s*b.pre + s*s*s*b.point;
+}
+
+// dir：runpath.in:89/94。切向 = 三次 Bezier 的导数（常因子 3 归一化时无所谓）。
+// 结点上 sign<0 取入向、sign>0 取出向、sign==0 取两向的单位向量之和（C++ 那边是同一条）。
+pair dir(path g, real t, bool normalize=true) {
+  int n = g.nodes.length;
+  if (n == 0) { abort("dir: 空路径"); return (0, 0); }
+  int segs = g.cyclic ? n : n - 1;
+  if (segs <= 0) return (0, 0);
+  real u = t;
+  if (g.cyclic) {
+    while (u < 0) u = u + segs;
+    while (u >= segs) u = u - segs;
+  } else {
+    if (u < 0) u = 0;
+    if (u > segs) u = segs;
+  }
+  int i = floor(u);
+  if (i >= segs) i = segs - 1;
+  real s = u - i;
+  knot a = g.nodes[i];
+  knot b = g.nodes[i + 1 == n ? 0 : i + 1];
+  real r = 1 - s;
+  pair d = 3*r*r*(a.post - a.point) + 6*r*s*(b.pre - a.post) + 3*s*s*(b.point - b.pre);
+  if (d == (0, 0)) d = b.point - a.point;
+  return normalize ? unit(d) : d;
+}
+pair dir(path g, int i, int sign=0, bool normalize=true) {
+  int n = g.nodes.length;
+  if (n == 0) { abort("dir: 空路径"); return (0, 0); }
+  if (sign < 0) {
+    if (i == 0 && !g.cyclic) return dir(g, 0.0, normalize);
+    real ti = i == 0 ? n : i;
+    return dir(g, ti, normalize);
+  }
+  if (sign > 0) { real ti = i; return dir(g, ti, normalize); }
+  pair din = dir(g, i, -1, true);
+  pair dout = dir(g, i, 1, true);
+  pair d = din + dout;
+  if (d == (0, 0)) d = dout;
+  return normalize ? unit(d) : d;
+}
+
+// (2) format：runstring.in:246/301 的两个内建。C++ 那边是走 printf 的格式串（还带
+// TeX 数学模式与千分位 separator）。这里只做"把 % 那一格换成这个数的默认写法"这一层：
+// 精度、指数写法、separator 都还没有，记在这儿。base 里 defaultformat 的那条链要它。
+string asy__fmt1(string fmt, string sx) {
+  int n = length(fmt);
+  string out = "";
+  int i = 0;
+  bool done = false;
+  while (i < n) {
+    string c = substr(fmt, i, 1);
+    if (c != "%" || done) { out = out + c; ++i; continue; }
+    if (i + 1 < n && substr(fmt, i + 1, 1) == "%") { out = out + "%"; i = i + 2; continue; }
+    // 跳过这一条 % 规格：标志/宽度/精度/长度，直到那个转换字母
+    int j = i + 1;
+    while (j < n) {
+      string d = substr(fmt, j, 1);
+      ++j;
+      if (d != "-" && d != "+" && d != " " && d != "#" && d != "." && d != "*"
+          && d != "0" && d != "1" && d != "2" && d != "3" && d != "4"
+          && d != "5" && d != "6" && d != "7" && d != "8" && d != "9"
+          && d != "l" && d != "h" && d != "L") break;
+    }
+    out = out + sx;
+    i = j;
+    done = true;
+  }
+  return out;
+}
+string format(string fmt, int x, string locale="") { return asy__fmt1(fmt, string(x)); }
+string format(string fmt, bool forcemath=false, string separator, real x,
+              string locale="") {
+  return asy__fmt1(fmt, string(x));
+}
+
+// (1) min/max：builtin.cc:543 的 addOrderedOps —— 对每个**有序**的基本类型（int/real/
+// string）都摆四份：两元、数组、二维、三维。这里摆前两份（base 用到的就是这两份）。
+int min(int a, int b) { return a < b ? a : b; }
+int max(int a, int b) { return a > b ? a : b; }
+real min(real a, real b) { return a < b ? a : b; }
+real max(real a, real b) { return a > b ? a : b; }
+string min(string a, string b) { return a < b ? a : b; }
+string max(string a, string b) { return a > b ? a : b; }
+int min(int[] a) {
+  if (a.length == 0) { abort("min: 空数组"); return 0; }
+  int m = a[0];
+  for (int i = 1; i < a.length; ++i) if (a[i] < m) m = a[i];
+  return m;
+}
+int max(int[] a) {
+  if (a.length == 0) { abort("max: 空数组"); return 0; }
+  int m = a[0];
+  for (int i = 1; i < a.length; ++i) if (a[i] > m) m = a[i];
+  return m;
+}
+real min(real[] a) {
+  if (a.length == 0) { abort("min: 空数组"); return 0; }
+  real m = a[0];
+  for (int i = 1; i < a.length; ++i) if (a[i] < m) m = a[i];
+  return m;
+}
+real max(real[] a) {
+  if (a.length == 0) { abort("max: 空数组"); return 0; }
+  real m = a[0];
+  for (int i = 1; i < a.length; ++i) if (a[i] > m) m = a[i];
+  return m;
+}
+string min(string[] a) {
+  if (a.length == 0) { abort("min: 空数组"); return ""; }
+  string m = a[0];
+  for (int i = 1; i < a.length; ++i) if (a[i] < m) m = a[i];
+  return m;
+}
+string max(string[] a) {
+  if (a.length == 0) { abort("max: 空数组"); return ""; }
+  string m = a[0];
+  for (int i = 1; i < a.length; ++i) if (a[i] > m) m = a[i];
+  return m;
+}
+
+// (1) path / path[] 的包围盒（runpath.in:271/276/290/314）。每段是三次 Bezier，
+// 某个分量的极值只能出在两端或**导数为零**处；导数是二次的，所以解那条二次就是精确解
+// （C++ 那边 bounds() 走的是同一条路，不是采样）。
+real asy__bez(real a, real b, real c, real d, real t) {
+  real r = 1 - t;
+  return r*r*r*a + 3*r*r*t*b + 3*r*t*t*c + t*t*t*d;
+}
+real[] asy__bezcrit(real a, real b, real c, real d) {
+  // B'(t)/3 = A t^2 + B t + C
+  real A = -a + 3*b - 3*c + d;
+  real B = 2*(a - 2*b + c);
+  real C = b - a;
+  real[] out;
+  if (A == 0) {
+    if (B != 0) { real t = -C / B; if (t > 0 && t < 1) out.push(t); }
+    return out;
+  }
+  real disc = B*B - 4*A*C;
+  if (disc < 0) return out;
+  real s = sqrt(disc);
+  real t1 = (-B + s) / (2*A);
+  real t2 = (-B - s) / (2*A);
+  if (t1 > 0 && t1 < 1) out.push(t1);
+  if (t2 > 0 && t2 < 1) out.push(t2);
+  return out;
+}
+// lo=true 取小、false 取大
+real asy__pathbound(path g, bool xaxis, bool lo) {
+  int n = g.nodes.length;
+  real m = xaxis ? g.nodes[0].point.x : g.nodes[0].point.y;
+  int segs = g.cyclic ? n : n - 1;
+  for (int i = 0; i < n; ++i) {
+    real v = xaxis ? g.nodes[i].point.x : g.nodes[i].point.y;
+    if (lo ? v < m : v > m) m = v;
+  }
+  for (int i = 0; i < segs; ++i) {
+    knot p = g.nodes[i];
+    knot q = g.nodes[i + 1 == n ? 0 : i + 1];
+    real a = xaxis ? p.point.x : p.point.y;
+    real b = xaxis ? p.post.x : p.post.y;
+    real c = xaxis ? q.pre.x : q.pre.y;
+    real d = xaxis ? q.point.x : q.point.y;
+    for (real t : asy__bezcrit(a, b, c, d)) {
+      real v = asy__bez(a, b, c, d, t);
+      if (lo ? v < m : v > m) m = v;
+    }
+  }
+  return m;
+}
+pair min(path g) {
+  if (g.nodes.length == 0) { abort("min(path): 空路径"); return (0, 0); }
+  return (asy__pathbound(g, true, true), asy__pathbound(g, false, true));
+}
+pair max(path g) {
+  if (g.nodes.length == 0) { abort("max(path): 空路径"); return (0, 0); }
+  return (asy__pathbound(g, true, false), asy__pathbound(g, false, false));
+}
+pair min(path[] g) {
+  if (g.length == 0) { abort("min(path[]): 空数组"); return (0, 0); }
+  pair m = min(g[0]);
+  for (int i = 1; i < g.length; ++i) m = minbound(m, min(g[i]));
+  return m;
+}
+pair max(path[] g) {
+  if (g.length == 0) { abort("max(path[]): 空数组"); return (0, 0); }
+  pair m = max(g[0]);
+  for (int i = 1; i < g.length; ++i) m = maxbound(m, max(g[i]));
+  return m;
+}
+
+// (2) warning / nowarn（runsystem.in:174/182）。C++ 那边过 settings::warn 那张开关表再
+// 走 em.warning（带文件位置）。这一层没有那张表也没有位置，就照 "warning: <正文>" 印出来。
+void nowarn(string s) { }
+void warning(string s, string t, bool position=false) {
+  write("warning: " + t);
+}
+
 // (1) `transform * path`：逐个结点搬（transform 是仿射，pre/point/post 都搬）。
 // runpath.in 的 `path operator *(transform t, path p)` 就是这件事。
 path operator *(transform t, path g) {

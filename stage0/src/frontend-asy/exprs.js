@@ -457,7 +457,14 @@ export function asyIndex(L, n) {
   // 记录上的下标：那是 `operator []` 那个方法（第三十二刀，collections/map.asy:26）
   if (L.isRec(a.type)) return asyIdxOpCall(L, n, a, 'operator []', [n.items[2]]);
   if (!asyIsArr(a.type)) return L.err(n, `下标只能用在数组上，这里是 ${a.type}`);
-  const i = asyCoerce(L, asyExpr(L, n.items[2]), 'int', n, '下标');
+  // `a[ix]`（ix 是 int[]）：挑出来的一份新数组（runarray.in 的 arrayIntArray）。
+  // 放在 coerce 之前：int[] -> int 没有这条转换，先问过它才不会把这一种当成错。
+  const ixv = asyExpr(L, n.items[2]);
+  if (ixv === null) return null;
+  if (ixv.type === 'int[]') {
+    return { code: `(call ${L.arrHelper('pick', asyElem(a.type))} ${a.code} ${ixv.code})`, type: a.type };
+  }
+  const i = asyCoerce(L, ixv, 'int', n, '下标');
   if (i === null) return null;
   return { code: `(aget ${a.code} ${i.code})`, type: asyElem(a.type) };
 }
@@ -923,7 +930,15 @@ export function asyArrMethod(L, n, recv, nm) {
     }
     return { code: '(int 0)', type: 'void' };
   }
-  if (nm !== 'push') return L.nope(n, `数组的 '.${nm}(…)'（这一刀只有 .push / .pop / .delete / .insert）`);
+  if (nm === 'append') {
+    // `a.append(b)`：把 b 的元素接到 a 后面（runarray.in 的 appendArray），回 void。
+    if (args.length !== 1) return L.err(n, `'append' 要 1 个实参，给了 ${args.length} 个`);
+    const b = asyCoerce(L, asyExpr(L, args[0]), recv.type, args[0], "'append' 的实参");
+    if (b === null) return null;
+    return { code: `(call ${L.arrHelper('append', el)} ${recv.code} ${b.code})`, type: 'void' };
+  }
+  if (nm !== 'push') return L.nope(n, `数组的 '.${nm}(…)'（这一刀只有 .push / .pop / .delete / .insert / .append）`);
+
   if (args.length !== 1) return L.err(n, `'push' 要 1 个实参，给了 ${args.length} 个`);
   const v = asyCoerce(L, asyExpr(L, args[0]), el, args[0], "'push' 的实参");
   if (v === null) return null;
@@ -1220,6 +1235,11 @@ export function asyCast(L, n) {
   if (t === 'real' && v.type === 'int') return { code: `(toreal ${v.code})`, type: 'real' };
   if (t === 'int' && v.type === 'real') return { code: `(toint ${v.code})`, type: 'int' };
   if (t === 'pair' && (v.type === 'int' || v.type === 'real')) return asyToPair(L, v);
+  // `(string) x`：asy 那边 int/real -> string 是**显式**的那一条（`string(x)` 同一份格式）。
+  // base 里 `(string) default` / `(string) (width/pt)` 就是这么写的（plain_strings.asy:36）。
+  if (t === 'string' && (v.type === 'int' || v.type === 'real')) {
+    return { code: asyFmtStr(L, v.type, v.code), type: 'string' };
+  }
   // `(T) x` 是唯一收 `operator ecast` 的位置（第二十七刀）；内建那几条在上面 —— 量过
   // `(real) 3` 还是提升，用户那份是兜底。
   const uc = L.castFor(t, v.type, true);

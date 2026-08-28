@@ -3503,6 +3503,77 @@ plain_pens 146 / plain_picture 85 / plain_paths 55 / plain.asy 41 / …；按理
 
 
 
+### 不再一条一条量：内建面照参考实现整批补
+
+前面每一刀都是"量一句 `asy -noV`、改一处、跑全量测试"。到了 `import plain;` 这一档
+这个节奏走不动了：那边缺的不是某一条语义，是**几百个 C++ 内建**加四五处顺序规则。
+换的做法是照着参考实现读（`builtin.cc` / `run*.in` / `base/*.asy`），一批一批地补，
+补完再测。
+
+这一批里真正是"规则"的只有四条：
+
+- **同一份类型再从别的模块进来一次，位置不后移**。`asyModMerge` 的 recVis 循环原来
+  无条件按 `at` 覆盖，于是 plain 里被两条 include 路径带进来的同一个 struct 会把自己
+  的可见位置推到后面，后面所有用它的地方全成了"声明在后面"。一句 `had.rec === e.rec`
+  就地跳过 —— 231 条诊断是这一行换来的。
+- **用户可以重载 `write`**。原来 `write` 这个名字在签名遍就被拒了（它是语句），
+  改成注册成另一个符号 `asy__uwrite`，语句层先按用户候选试一遍、接不住再走内建那条。
+- **声明可以出现在语句位置**：`fundec` / `recorddec` / `typedec`。函数那一种要看清楚
+  它是不是闭包 —— 用到外层局部量就还是拒（`localFun` 扫一遍体里的名字）。
+- **`var` 在声明遍就要推**：模块级的 `var` 在函数体之后才轮到，所以类型必须在
+  `asyGlobalNames` 里用 `probeTy` 先探出来。
+
+余下的是内建面：常量（`intMax`/`realEpsilon`/`infinity` 照 `builtin.cc:876-921`）、
+`abort`/`assert`、`concat`/`minbound`/`maxbound`、笔的那一排属性槽、`rand`/`srand`、
+`transform * path`。真几何与 TeX/文件/进程那两类没有机制可依，就分成三档写在 prelude
+的尾巴上：**能算的算**、**没机制的给固定值或空操作**、**真几何的 `abort` 占位**。
+每一条都带一句"这是哪一档、为什么"。
+
+数字上这一批是 615 → 380（`import plain;`），graph 182 → 181。615 那个数才是第一次
+**诚实**的：在这之前那 1 条是声明遍早退的假象 —— 一个记录在声明遍失败，它和所有提到
+它的东西一起消失，而且多数**不发诊断**（同样量到：`struct S { int n = <坏初值>; }`
+只要 `S` 没被用过就一句话都不印，因为字段默认值是用到时才降的）。
+
+### 泛型的那几个内建：按元素类型现生；顺带把"成员遮住外层"这条改对
+
+`import plain;` 剩下的 380 条里最大的一族是 C++ 那边**对 T 泛型**的内建：`copy` 18、
+`sequence` 13、`min`/`max` 24。这个前端没有泛型，两条路：写死几个元素类型，或者按
+**实参的类型现生一份 helper**。选后者 —— 与 `arrGen` 那张表同一条路子（一个类型只生
+一份，名字过 `asyMangle`）：
+
+- `copy(T[])`（`runarray.in:687` 的 copyArray，depth 默认 Int_MAX）：元素本身是数组时
+  **递归**深拷。生成前先往表里塞占位，递归才不会绕回来。
+- `sequence(T f(int), int n)`（`runarray.in:954`）：`{f(0),…,f(n-1)}`，元素类型就是 f
+  的返回类型，体里是一句 `(callfn (var f) (var i))`。
+- 挂进调度是 `asyBuiltinOwns`/`asyBuiltinCost`/`asyBuiltinRaw` 各加一条，代价记 0
+  （元素类型是照实参现生的，逐个同型）。
+
+`min`/`max` 不必现生：`builtin.cc:543` 的 `addOrderedOps` 说明它们只在**有序**的基本
+类型上有（int/real/string 的两元与整份数组），照着摆在 prelude 里就是十二个短函数。
+`min(path[])`/`max(path[])` 是另一回事（`runpath.in:290/314`，回 pair 的包围盒）：
+每段是三次 Bezier，某个分量的极值只能出在两端或**导数为零**处，导数是二次的 ——
+解那条二次就是精确解，不是采样。
+
+顺带改对了一条规则：**struct 里的同名成员并不整片遮住外层的同名函数**。asy 的 venv 是
+逐层按签名找的，成员那一层接不住这次实参就往外走。原来那一档见到有同名成员就直接
+`asyUserCall` 回去了，于是 `plain_picture.asy:686` 的 `min(real,real)`（struct picture
+里有 `pair min(transform)`）报"没有能匹配"。改成先试成员、试不上回滚（诊断与前置语句
+一起回滚）再往下走；`cases/79-member-outer-overload` 把七种组合钉住，与真 asy 逐字节
+一致。同一处还带出一个坑：内建里有**自己求实参**的那几族（pair/triple 的
+`dir`/`expi`/`dot`、`string(…)`、字符串那一族、数学那一族）不走按值入口，所以
+prelude 里一加 `dir(path,real)`，`dir(30,45)` 就找不到 triple 那一份了 ——
+补了 `asyNamedBuiltin` 这条按名字重试的回滚路（tol/triple 那个用例当场变红，是它逼出来的）。
+
+这一批里还顺手补齐的小件：`a[ix]`（ix 是 int[]，`runarray.in` 的 arrayIntArray，
+base 里 `reverse(a)` 就是 `a[reverse(a.length)]`）、`a.append(b)`、`(string) x`
+（asy 那边 int/real → string 是显式那一条）、`unit`、`identity(n)`、
+`replace(string, string[][])`（`runstring.in:215` 那个"命中就从第一条规则重试"的一趟扫）、
+`point(path,real)`/`dir(path,…)`、`format` 的两个内建（只做"把 % 那一格换成这个数的
+默认写法"，精度/指数/千分位还没有，记在 prelude 里）、`warning`/`nowarn`。
+
+数字：`import plain;` 380 → 309，`import graph;` 181 → 153。tests/asy 151 条、
+tests/run.js 91 条都是绿的。
+
 ## 后果与代价
 
 

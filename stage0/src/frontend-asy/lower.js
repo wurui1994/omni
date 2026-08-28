@@ -654,8 +654,47 @@ class AsyLower {
     return nm;
   }
 
-  err(node, msg) {
-    this.diags.error(node === null || node === undefined ? null : node.span, msg);
+  /**
+   * 泛型的 `copy(T[])`（runarray.in:687 的 copyArray，默认深拷到底）。这个前端没有泛型，
+   * 所以按**实参的元素类型**现生一份 —— 与 arrGen 那张表同一条路子（一个类型只生一份）。
+   * 元素本身是数组时递归深拷：asy 那边 `copy` 的 depth 默认是 Int_MAX。
+   */
+  arrCopyHelper(el) {
+    const nm = `asy__acopy_${asyMangle(el)}`;
+    if (this.arrGen.has(nm)) return nm;
+    this.arrGen.set(nm, '');   // 先占位：递归时不再进来
+    const at = asyCore(`${el}[]`);
+    const inner = asyIsArr(el)
+      ? `(call ${this.arrCopyHelper(asyElem(el))} (aget (var a) (var i)))`
+      : `(aget (var a) (var i))`;
+    this.arrGen.set(nm, `  (fn ${nm} ((a ${at})) ${at}
+    (let r ${at} (anew ${at} (alen (var a))))
+    (let i int (int 0))
+    (while (bin "<" (var i) (alen (var a)))
+      (do
+        (aset (var r) (var i) ${inner})
+        (set i (bin "+" (var i) (int 1)))))
+    (ret (var r)))`);
+    return nm;
+  }
+
+  /** 泛型的 `sequence(T f(int), int n)`（runarray.in:954）：{f(0),…,f(n-1)}。 */
+  seqHelper(el) {
+    const nm = `asy__seq_${asyMangle(el)}`;
+    if (this.arrGen.has(nm)) return nm;
+    const at = asyCore(`${el}[]`);
+    this.arrGen.set(nm, `  (fn ${nm} ((f ${asyCore(`${el}(int)`)}) (n int)) ${at}
+    (let r ${at} (anew ${at} (var n)))
+    (let i int (int 0))
+    (while (bin "<" (var i) (var n))
+      (do
+        (aset (var r) (var i) (callfn (var f) (var i)))
+        (set i (bin "+" (var i) (int 1)))))
+    (ret (var r)))`);
+    return nm;
+  }
+
+  err(node, msg) {    this.diags.error(node === null || node === undefined ? null : node.span, msg);
     return null;
   }
 

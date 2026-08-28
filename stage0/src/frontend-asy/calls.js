@@ -107,7 +107,23 @@ export function asyCall(L, n) {
   if (L.self !== null) {
     const ms = L.visibleMethods(L.self.rec, nm);
     if (ms.length > 0) {
-      return asyUserCall(L, n, nm, ms, { code: '(var this)', type: L.self.rec.name });
+      // 成员并**不整片遮住**外层的同名函数：asy 的 venv 是按签名逐层找的，
+      // 成员那一层没有能接住这次实参的签名时还往外走。量过 plain_picture.asy:686 ——
+      // struct picture 里有 `pair min(transform)`，体里照样调得到文件级的 `min(real,real)`。
+      // 所以这里先试成员那一层，试不上就回滚（诊断与前置语句都回滚）再往下走。
+      const probe = Array.isArray(L.pre);
+      if (!probe) return asyUserCall(L, n, nm, ms, { code: '(var this)', type: L.self.rec.name });
+      const mark = L.diags.mark();
+      const savePre = L.pre;
+      L.pre = [];
+      const mv = asyUserCall(L, n, nm, ms, { code: '(var this)', type: L.self.rec.name });
+      const mpre = L.pre;
+      L.pre = savePre;
+      if (mv !== null) {
+        for (const s of mpre) L.pre.push(s);
+        return mv;
+      }
+      L.diags.rollback(mark);
     }
     // 无体的方法声明（`int size();`）其实是**函数类型的字段**，所以方法体里的 `size()`
     // 是"读这一格再间接调"。与上面那一档同一个道理放在文件级候选前面：它也是个成员。
@@ -125,7 +141,7 @@ export function asyCall(L, n) {
     const all = L.units[L.self.rec.unit].funcs.get(`${L.self.rec.name}.${nm}`);
     let lateFld = false;
     for (const f of L.self.rec.fields) if (f.name === nm) lateFld = true;
-    if ((all !== undefined && all.length > 0) || lateFld) {
+    if (ms.length === 0 && ((all !== undefined && all.length > 0) || lateFld)) {
       return L.err(n, `'${nm}' 在这里还看不见 —— struct ${L.self.rec.name} 里它声明在后面，`
         + `而成员也是顺序解析的（asy 那边报 "no matching variable '${nm}'"）`);
     }
@@ -177,6 +193,15 @@ export function asyCall(L, n) {
     // 后一种要让内建那份去报诊断（`length(int[])` 那条话说得清楚得多，
     // 比"有的是 int(path)"有用）。两条都走 builtinRaw：它回 null 时诊断已经发过了。
     if (bc !== null || (best === null && asyBuiltinOwns(L, nm, raw))) return asyBuiltinRaw(L, n, nm, raw);
+    // 两边都没有能匹配的：内建里还有**自己求实参**的那几族（pair/triple 的
+    // dir/expi/dot/…、string(…)、字符串那一族、数学那一族）。它们不走 builtinRaw，
+    // 所以在这里回滚了再试一次。量过的理由：prelude 里加了 `dir(path,real)` 之后
+    // `dir(30,45)`（triple 那一族）一度报"没有能匹配 dir(int, int)"。
+    if (best === null) {
+      const alt = asyNamedBuiltin(L, n, nm);
+      if (alt !== undefined) return alt;
+    }
+
     // 两边都没有能匹配的：让 applyCall 照原样报那条诊断
     return asyApplyCall(L, n, nm, vis, raw, null);
   }
@@ -199,6 +224,33 @@ export function asyCall(L, n) {
 }
 
 /**
+ * 内建里**自己求实参**的那几族，按名字再试一次（诊断与前置语句都能回滚）。
+ * 不是这几族的名字回 `undefined`（与"试了但接不住"分得开）。
+ */
+function asyNamedBuiltin(L, n, nm) {
+  const fam = nm === 'length' || nm === 'string' || ASY_STRFN.has(nm)
+    || ASY_PAIRFN.has(nm) || L.math.has(nm);
+  if (!fam || !Array.isArray(L.pre)) return undefined;
+  const mark = L.diags.mark();
+  const savePre = L.pre;
+  L.pre = [];
+  let v = null;
+  if (nm === 'length') v = L.lengthCall(n);
+  else if (nm === 'string') v = L.strConvCall(n);
+  else if (ASY_STRFN.has(nm)) v = L.strCall(n, nm);
+  else if (ASY_PAIRFN.has(nm)) v = L.pairCall(n, nm);
+  else v = asyMathCall(L, n, nm);
+  const mine = L.pre;
+  L.pre = savePre;
+  if (v !== null) {
+    for (const s of mine) L.pre.push(s);
+    return v;
+  }
+  L.diags.rollback(mark);
+  return undefined;
+}
+
+/**
  * 内建那一族的**按值**入口：实参已经降好（`raw`），谁都没求两次。
  * 前提是 `builtinOwns` 为真；实参类型这一族接不住时它自己发诊断并回 null。
  */
@@ -206,6 +258,16 @@ export function asyBuiltinRaw(L, n, nm, raw) {
   // 实参的前置语句按**给的顺序**发出去（callArgs 把它们攒在各自的 lines 里）
   for (const a of raw) if (a.lines !== null) for (const s of a.lines) L.pre.push(s);
   if (nm === 'length') return L.lengthOf(raw[0].v, raw[0].node);
+  if (nm === 'copy') {
+    const at = raw[0].v.type;
+    const h = L.arrCopyHelper(asyElem(at));
+    return { code: `(call ${h} ${raw[0].v.code})`, type: at };
+  }
+  if (nm === 'sequence') {
+    const s = asyFnSplit(raw[0].v.type);
+    const h = L.seqHelper(s.ret);
+    return { code: `(call ${h} ${raw[0].v.code} ${raw[1].v.code})`, type: `${s.ret}[]` };
+  }
   return asyStrRaw(L, n, nm, raw);
 }
 
@@ -237,6 +299,14 @@ export function asyBuiltinOwns(L, nm, raw) {
   // 展开实参只能落在可变形参那一格上，而内建这一族一个可变形参都没有
   for (const a of raw) if (a.spread === true) return false;
   if (nm === 'length') return raw.length === 1;
+  // 泛型的那两个数组内建：C++ 那边 copy/sequence 是对 T 泛型的（runarray.in:687/954），
+  // 这个前端没有泛型，所以按实参的元素类型现生一份 helper（arrCopyHelper / seqHelper）。
+  if (nm === 'copy') return raw.length === 1 && asyIsArr(raw[0].v.type);
+  if (nm === 'sequence') {
+    if (raw.length !== 2 || raw[1].v.type !== 'int') return false;
+    const s = asyFnSplit(raw[0].v.type);
+    return s !== null && s.params.length === 1 && s.params[0] === 'int' && s.ret !== 'void';
+  }
   if (ASY_STRFN.has(nm)) {
     const s = ASY_STRFN.get(nm);
     return raw.length >= s.min && raw.length <= s.params.length;
@@ -251,6 +321,7 @@ export function asyBuiltinOwns(L, nm, raw) {
  */
 export function asyBuiltinCost(L, nm, raw) {
   if (!asyBuiltinOwns(L, nm, raw)) return null;
+  if (nm === 'copy' || nm === 'sequence') return 0;   // 元素类型是照实参现生的，逐个同型
   if (nm === 'length') {
     const t = raw[0].v.type;
     if (t === 'string' || t === 'pair' || t === 'triple') return 0;
