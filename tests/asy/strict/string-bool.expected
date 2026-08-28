@@ -1,1 +1,1 @@
-string(bool) 在 asy 那边就是 no matching function（string 只有 string(int) 与 string(real, int)）
+没有能匹配 'string(bool)' 的签名 —— 有的是 string(pen) / string(path) / string(transform)

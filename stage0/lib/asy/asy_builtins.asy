@@ -335,6 +335,10 @@ struct pen {
   // 字号（pen.h 的 `pen::size`）。默认是 12pt 换成 bp 的那个数 —— 量过
   // `fontsize(currentpen)` 就是 11.9551681195517（= 12*72/72.27）。
   real fontsizeval = 11.9551681195517;
+  // pen.h:167/168 那两格**原样**：没设过就是 0（文字输出只在非零时印它们，见 pen.h:893）。
+  // fontsizeval 存的是"实际按哪个字号排"，与它不是一回事。
+  real fontsizeset = 0;
+  real lineskipval = 0;
 }
 
 pen pencopy(pen p) {
@@ -358,6 +362,19 @@ pen pencopy(pen p) {
   q.pentrans = p.pentrans;
   q.hastrans = p.hastrans;
   q.fontsizeval = p.fontsizeval;
+  q.fontsizeset = p.fontsizeset;
+  q.lineskipval = p.lineskipval;
+  q.font = p.font;
+  q.fillruleval = p.fillruleval;
+  q.basealignval = p.basealignval;
+  q.opacityval = p.opacityval;
+  q.blend = p.blend;
+  q.iscmyk = p.iscmyk;
+  q.cyan = p.cyan;
+  q.magenta = p.magenta;
+  q.yellow = p.yellow;
+  q.black = p.black;
+  q.isinvisible = p.isinvisible;
   return q;
 }
 
@@ -397,7 +414,11 @@ pen evenodd() {
   return q;
 }
 
-// `p + q`：q 显式设过的属性盖住 p 的那一份（asy 的 pen 加法就是这个意思）
+// `p + q`：q 显式设过的属性盖住 p 的那一份（asy 的 pen 加法就是这个意思）。
+// "设过没有"的判据照 pen.h:790 那一串 —— 各字段自己的默认值就是哨兵
+// （linewidth 0.5、linecap 1、linejoin 1、miterlimit 10、fontsize/lineskip 0、
+// fillrule 0、baseline 0、font 空、虚线表空）。颜色这一格仍是"盖住"而不是 asy 的
+// **相加再夹**（pen.h:749 那个 switch），两支都带颜色时结果会不一样，写在明处。
 pen operator +(pen a, pen b) {
   pen q = pencopy(a);
   if (b.setwidth) {
@@ -413,6 +434,28 @@ pen operator +(pen a, pen b) {
     q.setcolor = true;
   }
   if (b.evenodd) q.evenodd = true;
+  if (b.cap != 1) q.cap = b.cap;
+  if (b.join != 1) q.join = b.join;
+  if (b.miter != 10) q.miter = b.miter;
+  if (b.dashpat.length > 0) {
+    q.dashpat = copy(b.dashpat);
+    q.dashoffset = b.dashoffset;
+    q.dashscale = b.dashscale;
+    q.dashadjust = b.dashadjust;
+  }
+  if (b.font != "") q.font = b.font;
+  if (b.fontsizeset != 0) {
+    q.fontsizeset = b.fontsizeset;
+    q.fontsizeval = b.fontsizeval;
+  }
+  if (b.lineskipval != 0) q.lineskipval = b.lineskipval;
+  if (b.fillruleval != 0) q.fillruleval = b.fillruleval;
+  if (b.basealignval != 0) q.basealignval = b.basealignval;
+  if (b.isinvisible) q.isinvisible = true;
+  if (b.hastrans) {
+    q.pentrans = b.pentrans;
+    q.hastrans = true;
+  }
   return q;
 }
 
@@ -1555,7 +1598,8 @@ real linewidth(pen p) { return p.width; }
 // 的那个数（量过 `fontsize(currentpen)` 是 11.9551681195517 = 12*72/72.27）。
 pen fontsize(real size, real lineskip) {
   pen q = pencopy(asy__defpen);
-  q.font = "fontsize";
+  q.fontsizeset = size > 0 ? size : 0;
+  q.lineskipval = lineskip;
   q.fontsizeval = size > 0 ? size : 0;
   return q;
 }
@@ -1982,6 +2026,118 @@ void write(file f, string s, pair x, asy__suffix suffix=none) {
   asy__fput(f, s); write(f, x, suffix);
 }
 void write(file f, string s, string x, asy__suffix suffix=none) {
+  asy__fput(f, s); write(f, x, suffix);
+}
+void write(file f, string s, bool x, asy__suffix suffix=none) {
+  asy__fput(f, s); write(f, x, suffix);
+}
+void write(file f, string s, triple x, asy__suffix suffix=none) {
+  asy__fput(f, s); write(f, x, suffix);
+}
+
+// 笔的**文字**形（pen.h:869 的 operator<<，逐条照抄）。数是裸 ostream 出来的，
+// 所以是 6 位有效数字 —— 与 EPS 那一路的 ps() 同一档。量过的几条：
+//   currentpen           -> (default)
+//   nullpen              -> (default, linewidth=0, invisible)
+//   black                -> (default, gray=0)
+//   red+linewidth(2)     -> (default, linewidth=2, red=1, green=0, blue=0)
+//   fontsize(9)+black    -> (default, fontsize=9, lineskip=10.8, gray=0)
+//   evenodd              -> (default, fillrule=EvenOdd)
+//   dotted               -> ([0 4])
+// 还没有的那几格印不出来，写在明处：笔尖 `path=`（我们没有 nib）、`pattern=`、
+// `overwrite=`、`transform=`。
+string string(pen p) {
+  string s = "(";
+  if (p.dashpat.length == 0) s = s + "default";
+  else {
+    s = s + "[";
+    for (int i = 0; i < p.dashpat.length; ++i) {
+      if (i > 0) s = s + " ";
+      s = s + ps(p.dashpat[i]);
+    }
+    s = s + "]";
+  }
+  if (p.dashoffset != 0) s = s + ps(p.dashoffset);
+  if (!p.dashscale) s = s + " bp";
+  if (!p.dashadjust) s = s + " fixed";
+  if (p.width != 0.5) s = s + ", linewidth=" + ps(p.width);
+  if (p.cap != 1) s = s + ", linecap=" + (p.cap == 0 ? "square" : "extended");
+  if (p.join != 1) s = s + ", linejoin=" + (p.join == 0 ? "miter" : "bevel");
+  if (p.miter != 10) s = s + ", miterlimit=" + ps(p.miter);
+  if (p.font != "") s = s + ', font="' + p.font + '"';
+  if (p.fontsizeset != 0) s = s + ", fontsize=" + ps(p.fontsizeset);
+  if (p.lineskipval != 0) s = s + ", lineskip=" + ps(p.lineskipval);
+  if (p.isinvisible) s = s + ", invisible";
+  else if (p.iscmyk) {
+    s = s + ", cyan=" + ps(p.cyan) + ", magenta=" + ps(p.magenta)
+      + ", yellow=" + ps(p.yellow) + ", black=" + ps(p.black);
+  } else if (p.isrgb) {
+    s = s + ", red=" + ps(p.red) + ", green=" + ps(p.green) + ", blue=" + ps(p.blue);
+  } else if (p.setcolor) s = s + ", gray=" + ps(p.gray);
+  if (p.fillruleval != 0) s = s + ", fillrule=EvenOdd";
+  if (p.basealignval != 0) s = s + ", baseline=Align";
+  if (p.opacityval != 1) s = s + ", opacity=" + ps(p.opacityval) + ", blend=" + p.blend;
+  return s + ")";
+}
+
+// 路径的文字形（path.cc:1098 的 operator<<）：直段是 `--`，曲段是
+// `.. controls c0 and c1` 加**换行与一个空格**再 `..`；空路径是 `<nullpath>`。
+// 坐标与 write(pair) 那一档一样（string(real) 的 15 位有效数字）。
+private string asy__pairstr(pair z) { return "(" + string(z.x) + "," + string(z.y) + ")"; }
+
+string string(path g) {
+  int n = length(g);
+  if (n < 0) return "<nullpath>";
+  string s = "";
+  for (int i = 0; i < n; ++i) {
+    s = s + asy__pairstr(point(g, i));
+    if (straight(g, i)) s = s + "--";
+    else {
+      s = s + ".. controls " + asy__pairstr(postcontrol(g, i)) + " and "
+        + asy__pairstr(precontrol(g, i + 1)) + '\n' + " ..";
+    }
+  }
+  if (g.cyclic) return s + "cycle";
+  return s + asy__pairstr(point(g, n));
+}
+
+// 二维数组的文字形（runarray.in 的 write）：行与行之间是换行、行内是制表符，
+// **每行末尾都有换行**（量过 `write(stdout,new real[][]{{1,2},{3,4}})` 是 "1\t2\n3\t4\n"）。
+// plain_Label.asy:363 的 `write(file,T3)`（transform3 就是 real[][]）要的是它。
+void write(file f, real[][] m, asy__suffix suffix=none) {
+  for (int i = 0; i < m.length; ++i) {
+    for (int j = 0; j < m[i].length; ++j) {
+      if (j > 0) asy__fput(f, '\t');
+      asy__fput(f, string(m[i][j]));
+    }
+    asy__fput(f, '\n');
+  }
+  suffix(f);
+}
+
+// 变换的文字形（transform.h 的 operator<<）：六个分量 `(x,y,xx,xy,yx,yy)`。
+// 量过：identity() 是 (0,0,1,0,0,1)、shift(1,2) 是 (1,2,1,0,0,1)。
+string string(transform t) {
+  return "(" + string(t.x) + "," + string(t.y) + "," + string(t.xx) + ","
+    + string(t.xy) + "," + string(t.yx) + "," + string(t.yy) + ")";
+}
+
+void write(file f, transform x, asy__suffix suffix=none) {
+  asy__fput(f, string(x)); suffix(f);
+}
+void write(file f, string s, transform x, asy__suffix suffix=none) {
+  asy__fput(f, s); write(f, x, suffix);
+}
+
+void write(file f, pen x, asy__suffix suffix=none) {  asy__fput(f, string(x)); suffix(f);
+}
+void write(file f, string s, pen x, asy__suffix suffix=none) {
+  asy__fput(f, s); write(f, x, suffix);
+}
+void write(file f, path x, asy__suffix suffix=none) {
+  asy__fput(f, string(x)); suffix(f);
+}
+void write(file f, string s, path x, asy__suffix suffix=none) {
   asy__fput(f, s); write(f, x, suffix);
 }
 // input()/output()（runfile.in:45/80）：这一层只给 stdin/stdout 两个句柄，

@@ -4597,6 +4597,33 @@ get/advance/valid 也都是），发出来是 `(callfn (fld 接收者 字段))`�
 `cases/116-foreach-iter`（写死类型、`var`、`continue`、`break` 四种，输出与 `asy -noV`
 逐字节一致）与 `strict/foreach-noiter`。
 
+### 笔、路径、变换、二维数组的**文字**形
+
+`write(file, …)` 那一族缺了四种类型，而 base 里 `Label.write`、`write(pen[])`、
+`write(guide[])`、`transform3` 都点名要它们。四份格式都是从参考实现里抄的、再用
+`asy -noV` 逐字节量过：
+
+- 笔（`pen.h:869`）：`(` + 虚线表或 `default` + 各项 `, 名=值` + `)`。项只在**不等于
+  默认值**时印，判据就是各字段自己的默认值（linewidth 0.5、linecap/linejoin 1、
+  miterlimit 10、fontsize/lineskip 0、fillrule/baseline 0）。数是裸 ostream 出来的，
+  所以是 6 位有效数字（`ps()`，与 EPS 那一路同一档），不是 `write(real)` 的 15 位。
+- 路径（`path.cc:1098`）：直段 `--`、曲段 `.. controls c0 and c1` 后面跟**换行加一个空格**
+  再 `..`；空路径是 `<nullpath>`；坐标是 15 位。
+- 变换：六个分量 `(x,y,xx,xy,yx,yy)`。
+- `real[][]`：行内制表符、**每行末尾**一个换行。
+
+为此给 pen 补了 `fontsizeset` / `lineskipval` 两格（`pen.h:167/168` 那两格**原样**：
+没设过就是 0，印的时候才分得出"设过 9 号字"与"默认"）——原来 `fontsize()` 是拿 `font`
+那一格当标记用的，现在还回去了。`pencopy` 与 `operator +` 跟着补齐：加法里"q 设过就盖住 p"
+的判据照 `pen.h:790` 那一串，dash/font/fontsize/lineskip/cap/join/miter/fillrule/baseline
+都算上了。颜色这一格仍是"盖住"而不是 asy 的**相加再夹**（`pen.h:749`），两支都带颜色时
+结果不一样，写在明处。笔尖 `path=`、`pattern=`、`overwrite=`、`transform=` 这四项还印不出来。
+
+数字：`import plain;` 50 → 47。`import graph;` 148 没动。tests/asy 195 条、tests/run.js
+91 条全绿。新用例 `cases/117-write-text`（四种类型共 18 行，与 `asy -noV` 逐字节一致）；
+`strict/string-bool` 的话术跟着改了（现在有 `string(pen)`/`string(path)`/`string(transform)`
+三份用户重载，报的是"没有能匹配 string(bool) 的签名"—— 拒还是拒）。
+
 ## 后果与代价
 
 
