@@ -242,6 +242,11 @@ export function asyCall(L, n) {
     if (best === null) {
       const alt = asyNamedBuiltin(L, n, nm);
       if (alt !== undefined) return alt;
+      // 刻意没做的那几个（`reverse`）：实参真是 string 时报那条专门的话 —— 落到
+      // "没有能匹配 'reverse(string)'"上看不出是"这一刀没做"还是"asy 也没有"。
+      if (ASY_STR_NOPE.has(nm)) {
+        for (const r of raw) if (r.v.type === 'string') return L.nope(n, ASY_STR_NOPE.get(nm));
+      }
     }
 
     // 两边都没有能匹配的：让 applyCall 照原样报那条诊断

@@ -507,6 +507,38 @@ path pathcopy(path g) {
   return h;
 }
 
+// 结点下标：闭合路径上它是绕圈的（asy 的 path::point 对 cycles 取模），开路径上原样。
+private int asy__nwrap(path g, int i) {
+  int n = g.nodes.length;
+  if (!g.cyclic || n == 0) return i;
+  int k = i % n;
+  return k < 0 ? k + n : k;
+}
+
+// path.cc:321 的 path::reverse：结点倒着排（第 i 个取原来的 j = len - i），pre 与 post
+// 互换，而 straight 是挂在**左端**那个结上的，所以倒过来第 i 个结的 straight 取原来
+// 第 j-1 段的那一格。plain_arrows.asy:192/218/260/283、plain_filldraw.asy:41、
+// plain_picture.asy:1435 都在用它。
+path reverse(path g) {
+  path h;
+  h.cyclic = g.cyclic;
+  int n = g.nodes.length;
+  if (n == 0) return h;
+  int len = length(g);
+  for (int i = 0; i < n; ++i) {
+    int j = len - i;
+    knot a = g.nodes[asy__nwrap(g, j)];
+    knot k;
+    k.pre = a.post;
+    k.point = a.point;
+    k.post = a.pre;
+    // 开路径的最后一个结左边没有段（j-1 == -1），那一格照 asy 是 false
+    k.straight = g.cyclic || j > 0 ? g.nodes[asy__nwrap(g, j - 1)].straight : false;
+    h.nodes.push(k);
+  }
+  return h;
+}
+
 // 直线段：控制点按 asy 的存法摆在三等分点上，straight 挂在**左**端那个结上
 // （psfile 见到它发 lineto，见 psfile.h:303 那一段）。
 void pushstraight(path g, pair z) {

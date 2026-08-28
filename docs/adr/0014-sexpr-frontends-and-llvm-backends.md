@@ -4303,6 +4303,26 @@ tests/run.js 91 条全绿。新用例 `cases/104-byte-hex`。
 数字：`import plain;` 90 → 89。`import graph;` 150 不动。tests/asy 182 条、
 tests/run.js 91 条全绿。新用例 `cases/106-vararg-fill`（上面量的十一行）。
 
+### `reverse` 的五处其实是 `reverse(path)`，不是字符串的那个
+
+`plain_arrows.asy:192/218/260/283`、`plain_filldraw.asy:41`、`plain_picture.asy:1435` 一直
+报「字符串的 reverse」这条刻意的拒绝 —— 看错了：那六处的实参都是 **path**。`reverse` 这个
+名字在前端的内建名单里，而 prelude 里没有 `path reverse(path)`，于是候选表是空的，一路
+落到那条按名字挂的 nope 上。
+
+补的是 prelude 里那一份，照 `path.cc:321`：结点倒着排（第 i 个取原来的 `j = len - i`）、
+`pre` 与 `post` 互换、`straight` 因为挂在**左端**那个结上所以取原来第 `j-1` 段的那一格
+（开路径最后一个结左边没有段，那格是 false）。闭合路径的下标是绕圈的，单独一个
+`asy__nwrap`。量过：`(0,0)--(1,0)--(1,1)` 倒过来是 (1,1) (1,0) (0,0) 两段都 straight，
+`(0,0)--(2,0)--(2,2)--cycle` 倒过来是 (0,0) (2,2) (2,0) 且还是 cyclic。
+
+字符串那条拒绝**留着**（asy 按字节倒，我们的 string 是 UTF-8 字节序列），只是挪到了
+"候选表里没有能接住的、而实参真是 string"这一档上 —— 不然 `reverse("abc")` 会落到
+"没有能匹配 'reverse(string)'"，那句看不出是"这一刀没做"还是"asy 也没有"。
+
+数字：`import plain;` 89 → 84（那六处里五处在 plain 的计数里）。`import graph;` 150 不动。
+tests/asy 183 条、tests/run.js 91 条全绿。新用例 `cases/107-reverse-path`。
+
 ## 后果与代价
 
 
