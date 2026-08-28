@@ -79,6 +79,9 @@ export function asyNameOf(L, n, nm) {
     // `unravel x;` 摊出来的名字：它是 x 的一个字段的**别名**（见 declareAlias）
     const al = L.aliasOf(nm);
     if (al !== null) return { code: `(fld ${al.recv} ${al.field})`, type: al.type };
+    // 装了箱的局部量（见 declareBox）：读要穿到箱子里去
+    const bx = L.boxOf(nm);
+    if (bx !== null) return { code: `(aget (var ${bx.sym}) (int 0))`, type: t };
     // 同名的**函数**也要带上（第六十二刀）：asy 的名字是按签名查的 —— 一个 `real min`
     // 与几个 `real min(real,real)` 在同一个作用域里共存，是哪一个由**目标类型**定案。
     // 原型是 plain_picture.asy:428 的
@@ -279,6 +282,7 @@ export function asyCloFrom(L, n, ret, ps, bodyNode) {
     pos: n.span === undefined || n.span === null ? null : n.span.start,
     list: [],
     seen: new Map(),
+    bx: new Map(),
   };
 
   L.scopes = [new Map()];
@@ -331,10 +335,28 @@ export function asyCloFrom(L, n, ret, ps, bodyNode) {
  */
 export function asyCapOf(L, node, nm) {
   let t = null;
-  for (const s of L.cap.outer) if (s.has(nm)) t = s.get(nm);
+  let bx = null;
+  for (const s of L.cap.outer) {
+    if (s.has(nm)) {
+      t = s.get(nm);
+      const b = s.get(`\u0000bx:${nm}`);
+      bx = b === undefined ? null : b;
+    }
+  }
   if (t === null) return null;
+  // 装了箱的（见 declareBox / needsBox）：抓走的是**那一格数组**，读写都穿到箱子里去，
+  // 于是闭包里外看见的是同一格 —— 这一档就是 asy 的按引用捕获。
+  if (bx !== null) {
+    if (!L.cap.seen.has(nm)) {
+      L.cap.seen.set(nm, t);
+      L.cap.bx.set(nm, bx.sym);
+      L.cap.list.push({ name: bx.sym, type: `${t}[]` });
+    }
+    return { code: `(aget (cap ${bx.sym}) (int 0))`, type: t };
+  }
   const had = L.cap.seen.get(nm);
   if (had !== undefined) return { code: `(cap ${nm})`, type: had };
+
   if (nm === 'this') {
     L.nope(node, '匿名函数里用外层的 this（捕获接收者是另一刀）');
     return CAP_BAD;
@@ -379,6 +401,62 @@ export function asyAssignsAfter(L, node, nm, pos, inLoop) {
     if (node.span === undefined || node.span === null || node.span.start >= pos) return true;
   }
   for (const it of node.items) if (asyAssignsAfter(L, it, nm, pos, within)) return true;
+  return false;
+}
+
+/**
+ * 形参也会被闭包抓走、也会被改（plain_arrows.asy:245 的 `position position=EndPoint`
+ * 就是这一格：闭包抓了它，函数后面又给它赋值）。形参没有"声明那一句"可以改，所以
+ * 装箱发在**体的最前面**：先照旧收下那个形参，再把它抄进箱子里，之后读写都走箱子。
+ * 回的是要插在体最前面的那几句语句。
+ */
+export function asyBoxParams(L, ps) {
+  const out = [];
+  for (const p of ps) {
+    if (p.name === undefined || p.name === null) continue;
+    if (!asyNeedsBox(L, p.name)) continue;
+    const sym = L.boxParam(p.name, p.type);
+    if (sym === null) continue;
+    const at = asyCore(`${p.type}[]`);
+    out.push(`(let ${sym} ${at} (anew ${at} (int 1)))`);
+    out.push(`(aset (var ${sym}) (int 0) (var ${p.name}))`);
+  }
+  return out;
+}
+
+/** 这棵子树里出现过 `nm` 这个名字吗（认名字不认作用域，保守） */
+function asyUsesName(node, nm) {
+  if (!isList(node)) return false;
+  if (head(node) === 'name' && isAtom(node.items[1]) && node.items[1].value === nm) return true;
+  for (const it of node.items) if (asyUsesName(it, nm)) return true;
+  return false;
+}
+
+/**
+ * 这个局部量要不要**装箱**（这一刀）：它被这个函数体里某个匿名函数抓走，而那个闭包
+ * 自己会改它、或它在闭包之后还会被改 —— 这两种正是"按值抓一次"给出旧值的那两种。
+ * 判据与 capOf 里那句拒绝**同一条**，所以装了箱的名字在 capOf 里就不会再报了。
+ *
+ * 改在闭包**之前**的那种不装箱：抓的时候已经是最新的那一份，两种语义同一个结果
+ * （plain_picture.asy:1294 就是这一格）—— 不装箱是为了让绝大多数闭包的代码不变。
+ */
+export function asyNeedsBox(L, nm) {
+  if (L.cap !== null) return false;                       // 已经在闭包里了（套一层是另一刀）
+  if (L.fnBody === null || L.fnBody === undefined) return false;
+  return asyBoxScan(L, L.fnBody, nm);
+}
+
+function asyBoxScan(L, node, nm) {
+  if (!isList(node)) return false;
+  // 两种"闭包"：匿名函数字面量，与**函数体里的具名函数**（那一支也降成 cfn+mkclo，
+  // 见 lower.js 的 localFunClo）—— 抓外层局部量这件事两者一样。
+  const h = head(node);
+  if ((h === 'new-function' || h === 'fundec') && asyUsesName(node, nm)) {
+    if (asyAssignsAfter(L, node, nm, null, false)) return true;      // 闭包体里就改
+    const pos = node.span === undefined || node.span === null ? null : node.span.start;
+    if (asyAssignsAfter(L, L.fnBody, nm, pos, false)) return true;   // 闭包之后再改
+  }
+  for (const it of node.items) if (asyBoxScan(L, it, nm)) return true;
   return false;
 }
 
@@ -618,7 +696,11 @@ export function asyDotQual(L, node) {
   const base = L.plainName(node.items[1]);
   if (base !== null) {
     const t = L.lookup(base);
-    if (t !== null) return { recv: { code: `(var ${base})`, type: t }, field: f };
+    if (t !== null) {
+      const bx = L.boxOf(base);
+      const code = bx === null ? `(var ${base})` : `(aget (var ${bx.sym}) (int 0))`;
+      return { recv: { code, type: t }, field: f };
+    }
     // 匿名函数体里：点号左边那个名字也可能是**外层函数的局部量**，那就得捕获进来。
     // 位置照 nameOf 那一档的次序：闭包自己的局部（上面那一句）、外层的局部（这一句）、
     // this 的字段、文件级。少了这一句，`s.f(x)` 这种形状会漏到最后报"调用一个不是普通

@@ -15,10 +15,11 @@
 
 import { isList, isAtom, head } from '../sexpr/read.js';
 import {
-  ASY_NOPE, DOT_BAD, ASY_ARRELEM_TEXT, ASY_FILLER, asyOpText, asyIsArr, asyElem, asyIsFn, asyCore, ASY_NULL,
+  ASY_NOPE, DOT_BAD, CAP_BAD, ASY_ARRELEM_TEXT, ASY_FILLER, asyOpText, asyIsArr, asyElem, asyIsFn, asyCore, ASY_NULL,
 } from './types.js';
 import { ZERO } from './runtime.js';
 import { asyArgs, asyCall, asyOpUser, asyOpBuiltinSig, asyIdxOpCall, asyVisible, asyUserCall } from './calls.js';
+import { asyNeedsBox } from './exprs.js';
 
 /**
  * `write` 的重载是量出来的，形状是 `write(string s="", T x, T[] more..., suffix=endl)`：
@@ -315,8 +316,10 @@ function asyUnravelVar(L, n) {
   if (nm === null || !wild) return undefined;
   let code = null;
   let ty = L.lookup(nm);
-  if (ty !== null) code = `(var ${nm})`;
-  else {
+  if (ty !== null) {
+    const bx = L.boxOf(nm);
+    code = bx === null ? `(var ${nm})` : `(aget (var ${bx.sym}) (int 0))`;
+  } else {
     const g = L.gvarHere(nm);
     if (g === null || !g.ok) return undefined;
     ty = g.type;
@@ -538,7 +541,19 @@ export function asyVardec(L, n) {
           + `（原来是 ${had}，这次是 ${t} —— asy 那边是新开一格把旧的遮住，`
           + '这一层是复用同一格，类型不同就复用不了）');
       }
-      out.push(`(set ${nm} ${init})`);
+      const hb = L.boxOf(nm);
+      if (hb !== null) out.push(`(aset (var ${hb.sym}) (int 0) ${init})`);
+      else out.push(`(set ${nm} ${init})`);
+      continue;
+    }
+    // 会被闭包抓走、而且还会被改的那一格要**装箱**（这一刀）：一格长度 1 的数组，
+    // 读写都穿过去，闭包抓走的是那个数组本身 —— 于是里外是同一格（asy 的按引用捕获）。
+    if (asyNeedsBox(L, nm)) {
+      const bx = L.declareBox(start, nm, t);
+      if (bx === null) return null;
+      const at = asyCore(`${t}[]`);
+      out.push(`(let ${bx} ${at} (anew ${at} (int 1)))`);
+      out.push(`(aset (var ${bx}) (int 0) ${init})`);
       continue;
     }
     if (L.declare(start, nm, t) === null) return null;
@@ -683,6 +698,25 @@ export function asyAssign(L, node, lhs, rhs, op) {
       return asyAssignFld(L, node,
         { recv: { code: al.recv, type: al.rty }, field: al.field }, rhs, op);
     }
+    // 装了箱的局部量（见 declareBox）：写要穿到箱子里去
+    const bx = L.boxOf(nm);
+    if (bx !== null) {
+      return asySlotAssign(L, node, nm, '变量', t, `(aget (var ${bx.sym}) (int 0))`,
+        (code) => [`(aset (var ${bx.sym}) (int 0) ${code})`], rhs, op);
+    }
+  }
+  // 闭包体里改**外层**的局部量：那一格装了箱才改得动（capOf 里那句拒绝管没装箱的）
+  if (t === null && L.cap !== null) {
+    const c = L.capOf(node, nm);
+    if (c === CAP_BAD) return null;
+    if (c !== null) {
+      const bs = L.cap.bx.get(nm);
+      if (bs !== undefined) {
+        return asySlotAssign(L, node, nm, '变量', c.type, `(aget (cap ${bs}) (int 0))`,
+          (code) => [`(aset (cap ${bs}) (int 0) ${code})`], rhs, op);
+      }
+      return L.nope(node, `在闭包里改外层的局部量 '${nm}'（它没装箱 —— 装箱的判据见 needsBox）`);
+    }
   }
   if (t === null) {
     // 方法体里给裸字段名赋值（第二十刀）：`x += k` 就是 `L.x += k`
@@ -763,22 +797,30 @@ export function asyAssign(L, node, lhs, rhs, op) {
 export function asyAssignFld(L, node, q, rhs, op) {
   const f = L.recField(node, q.recv.type, q.field);
   if (f === null) return null;
-  const t = f.type;
   const put = (code) => [`(fldset ${q.recv.code} ${q.field} ${code})`];
   const cur = `(fld ${q.recv.code} ${q.field})`;
+  return asySlotAssign(L, node, q.field, '字段', f.type, cur, put, rhs, op);
+}
+
+/**
+ * "读一格、算一下、写回去"这一套（简单赋值、复合赋值、自增自减），左值抽成了
+ * `cur`（读出来的代码）与 `put(值)`（写回去的语句）两件事。字段赋值与**装了箱的局部量**
+ * 共用这一份 —— 两者的规矩逐条相同（同一批测量），只是左值的形状不一样。
+ */
+export function asySlotAssign(L, node, label, kind, t, cur, put, rhs, op) {
   if (op === null) {
-    const v = L.coerce(L.expr(rhs), t, node, `给 '${q.field}' 赋的值`);
+    const v = L.coerce(L.expr(rhs), t, node, `给 '${label}' 赋的值`);
     return v === null ? null : put(v.code);
   }
   const one = rhs === null ? { code: t === 'real' ? '(real 1.0)' : '(int 1)', type: t } : L.expr(rhs);
   if (one === null) return null;
-  if (rhs === null && t !== 'int' && t !== 'real') return L.err(node, `'${q.field}' 是 ${t}，不能自增自减`);
+  if (rhs === null && t !== 'int' && t !== 'real') return L.err(node, `'${label}' 是 ${t}，不能自增自减`);
   // 复合赋值走的是同一个二元算符（第二十三刀）：量过只定义了 `V operator +(V,V)` 时
   // `a.f += b` 也通 —— asy 把 `x op= y` 当 `x = x op y`
   const cf = { code: cur, type: t };
   const uf = asyOpUser(L, node, op, [cf, one], asyOpBuiltinSig(L, [cf, one]));
   if (uf !== null) {
-    const v = L.coerce(uf, t, node, `'${q.field} ${op}=' 的结果`);
+    const v = L.coerce(uf, t, node, `'${label} ${op}=' 的结果`);
     return v === null ? null : put(v.code);
   }
   if (t === 'pair') {
@@ -802,12 +844,12 @@ export function asyAssignFld(L, node, q, rhs, op) {
     return put(`(call ${helper} ${cur} ${one.code})`);
   }
   if (op === '^') {
-    if (t !== 'int' || one.type !== 'int') return L.nope(node, "real 字段上的 '^='");
+    if (t !== 'int' || one.type !== 'int') return L.nope(node, `real ${kind}上的 '^='`);
     L.used.add('asy__ipow');
     return put(`(call asy__ipow ${cur} ${one.code})`);
   }
   if (op === '/') {
-    if (t !== 'real') return L.nope(node, `int 字段上的 '/='（asy 的 / 是实数除法，赋回 int 要写 #=）`);
+    if (t !== 'real') return L.nope(node, `int ${kind}上的 '/='（asy 的 / 是实数除法，赋回 int 要写 #=）`);
     const v = L.coerce(one, 'real', node, "'/=' 的右边");
     return v === null ? null : put(`(bin "/" ${cur} ${v.code})`);
   }

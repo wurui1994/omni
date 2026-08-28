@@ -786,6 +786,40 @@ class AsyLower {
     return null;
   }
 
+  /**
+   * 装箱的局部量（这一刀）：`nm` 在作用域里照旧记类型 `t`，另记一条"它其实住在一格
+   * 长度 1 的数组里"。读是 `(aget (var 箱) (int 0))`、写是 `(aset (var 箱) (int 0) …)`，
+   * 闭包抓走的是**那个数组**（引用语义），于是里外看见的是同一格 —— asy 的按引用捕获。
+   * 箱子的名字与源码里那个名字**不同**：漏改的路径会去引用一个没声明的名字，
+   * 核心方言那边当场报，而不是悄悄读到旧值。
+   */
+  declareBox(node, nm, t) {
+    if (this.declare(node, nm, t) === null) return null;
+    const sym = `asy__bx${this.tmp++}_${nm}`;
+    this.scopes[this.scopes.length - 1].set(`\u0000bx:${nm}`, { sym, type: t });
+    return sym;
+  }
+
+  /** 形参那一格装箱：名字已经在作用域里了（declare 过），这里只记"它住在箱子里" */
+  boxParam(nm, t) {
+    const sym = `asy__bx${this.tmp++}_${nm}`;
+    this.scopes[this.scopes.length - 1].set(`\u0000bx:${nm}`, { sym, type: t });
+    return sym;
+  }
+
+  /** `nm` 是不是一格装了箱的局部量（是就回 `{sym, type}`）。只看**找到它的那一层** */
+  boxOf(nm) {
+    let i = this.scopes.length - 1;
+    while (i >= 0) {
+      if (this.scopes[i].has(nm)) {
+        const b = this.scopes[i].get(`\u0000bx:${nm}`);
+        return b === undefined ? null : b;
+      }
+      i--;
+    }
+    return null;
+  }
+
   /* ------------------------------------------------------------------ 类型 */
 
   /** `(name-ty (name int))` -> 'int'；`(array-ty (name int) (dims))` -> 'int[]'；

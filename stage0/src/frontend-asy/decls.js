@@ -17,7 +17,7 @@ import {
 } from './types.js';
 import { ZERO } from './runtime.js';
 import { asyStmt, asyBody } from './stmts.js';
-import { asyExpr, asyCoerce, asyCandFnType } from './exprs.js';
+import { asyExpr, asyCoerce, asyCandFnType, asyBoxParams } from './exprs.js';
 import { asyModLoad, asyModMerge, asyModStmt } from './modules.js';
 
 /* ------------------------------------------------------------ 文件与函数 */
@@ -663,6 +663,7 @@ export function asyMethod(L, rec, cand, at) {
   // body 是 null 就一律拒，plain_picture.asy:488 的 `d(f,t*T)` 就是这么掉出去的。
   const saveFnBody = L.fnBody;
   L.fnBody = cand.node.items[4];
+  const pbx = asyBoxParams(L, ps);
   const body = asyBody(L, cand.node.items[4], bodyRet);
   L.fnBody = saveFnBody;
   L.pop();
@@ -670,6 +671,7 @@ export function asyMethod(L, rec, cand, at) {
   L.self = null;
   L.at = keepAt;
   if (body === null) return null;
+  for (let i = pbx.length - 1; i >= 0; i--) body.unshift(pbx[i]);
   const last = body.length === 0 ? '' : body[body.length - 1];
   if (bodyRet !== 'void' && !last.startsWith('(ret ')) {
     let zero = null;
@@ -851,10 +853,12 @@ export function asyFunc(L, n) {
   // 体的 AST 存一份：里面的匿名函数要拿它扫"这个外层名字会不会被改"（见 capOf）
   const saveFnBody = L.fnBody;
   L.fnBody = n.items[4];
+  const pbx = asyBoxParams(L, ps);
   const body = asyBody(L, n.items[4], d.ret);
   L.fnBody = saveFnBody;
   L.pop();
   if (body === null) return null;
+  for (let i = pbx.length - 1; i >= 0; i--) body.unshift(pbx[i]);
   // 掉出函数尾巴：asy 是运行期报 "function did not return a value"，我们补一条零值 ret。
   // 这是**明写的**差别，不是漏的：核心方言的检查在编译期，而这条 ret 永远走不到才对。
   const last = body.length === 0 ? '' : body[body.length - 1];
