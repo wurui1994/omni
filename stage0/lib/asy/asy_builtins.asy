@@ -1427,8 +1427,7 @@ real[] operator /(real a, real[] b) { real[] c; for (real x : b) c.push(a / x); 
 real[] operator /(real[] a, real b) { real[] c; for (real x : a) c.push(x / b); return c; }
 real[] operator /(real[] a, real[] b) { asy__samelen(a.length, b.length); real[] c; for (int i = 0; i < a.length; ++i) c.push(a[i] / b[i]); return c; }
 real[] operator ^(real[] a, real b) { real[] c; for (real x : a) c.push(x ^ b); return c; }
-// `real[] % real` 这一格缺着：这一层的 real 上还没有 `%`（asy 那边是 mathop.h 的
-// portableMod，plain_pens.asy:291 也在等它）。缺一条只会少接，不会多接。
+real[] operator %(real[] a, real b) { real[] c; for (real x : a) c.push(x % b); return c; }
 
 pair[] operator +(pair a, pair[] b) { pair[] c; for (pair x : b) c.push(a + x); return c; }
 pair[] operator +(pair[] a, pair b) { pair[] c; for (pair x : a) c.push(x + b); return c; }

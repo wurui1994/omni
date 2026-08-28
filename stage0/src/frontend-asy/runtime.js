@@ -108,6 +108,13 @@ export const HELPERS = new Map([
     (if (bin "&&" (bin "!=" (var m) (int 0)) (bin "!=" (bin "<" (var m) (int 0)) (bin "<" (var b) (int 0))))
       (do (set m (bin "+" (var m) (var b)))))
     (ret (var m)))`],
+  ['asy__rmod', `  (fn asy__rmod ((a real) (b real)) real
+    ;; real 上的 %（mathop.h:244 的 mod<T> -> mod.h:21 portableMod）：先 fmod，
+    ;; 符号不跟着除数就加一个除数。量过 asy：7.5%2=1.5、-7.5%2=0.5、7.5%-2=-0.5。
+    (let m real (rmath "fmod" (var a) (var b)))
+    (if (bin "&&" (bin "!=" (var m) (real 0.0)) (bin "!=" (bin "<" (var m) (real 0.0)) (bin "<" (var b) (real 0.0))))
+      (do (set m (bin "+" (var m) (var b)))))
+    (ret (var m)))`],
   ['asy__ipow', `  (fn asy__ipow ((a int) (b int)) int
     ;; asy 的 ^ 是幂，核心方言的 ^ 是异或，所以只能写成循环。
     ;; 负指数：asy 报 "Only 1 and -1 can be raised to negative exponents as integers"，

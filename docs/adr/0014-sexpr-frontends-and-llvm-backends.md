@@ -4213,6 +4213,24 @@ int 另有 `% #`（`:749-751`），一元的 `-` 也有数组那一份。plain �
 数字：`import plain;` 95 → 92。`import graph;` 152 不动。tests/asy 178 条、
 tests/run.js 91 条全绿。新用例 `cases/102-array-scalar-ops`（20 行逐条与真 asy 逐字节比）。
 
+### real 上的 `%`：portableMod，符号跟着除数
+
+`mathop.h:244` 的 `mod<T>` 走 `mod.h:21` 的 `portableMod`：先 `fmod`，"符号不跟着除数"时
+再加一个除数。量过 asy：`7.5%2=1.5`、`-7.5%2=0.5`、`7.5%-2=-0.5`。int 那一份
+（`asy__mod`，第几刀那会儿就有了）本来就是同一条规则，所以这一刀只是照它再写一份 real 的
+helper `asy__rmod`，`%` 那个分支从"real 上还没做"改成分派到它。
+
+`plain_pens.asy:291` 的 `real H=(h % 360)/60;` 在等它；补上之后 `real[] % real`
+（上一刀留着的那格）也一并落地。
+
+顺带纠正一处错的诊断：`plain_pens.asy:365` 的 `a /= p.length` 原先报「int 上的 `/=`」——
+其实那是 `real[] /= int`，上一刀的数组算术通了之后它自己就好了。asy 那边**真的**拒
+`int x=5; x/=2;`（量过：cannot convert 'real' to 'int' in assignment），那句诊断本身没错，
+只是当时贴在了不该贴的地方。
+
+数字：`import plain;` 92 → 91。`import graph;` 152 不动。tests/asy 179 条、
+tests/run.js 91 条全绿。新用例 `cases/103-real-mod`。
+
 ## 后果与代价
 
 

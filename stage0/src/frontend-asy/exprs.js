@@ -1065,12 +1065,20 @@ export function asyArith(L, n, op, a, b) {
   }
   if (op === '%') {
     // pair 上 asy 自己就没有 `%`（量过："no matching function 'operator %(pair, int)'"），
-    // 所以这条是**错**，不是"还没做"；real 上的 `%` 是真的还没做。
+    // 所以这条是**错**，不是"还没做"。
     if (a.type === 'pair' || b.type === 'pair') return L.err(n, `pair 上没有 '%'（asy 那边也没有这个算符）`);
     if (a.type === 'triple' || b.type === 'triple') return L.err(n, `triple 上没有 '%'（asy 那边也没有这个算符）`);
-    if (a.type !== 'int' || b.type !== 'int') return L.nope(n, "real 上的 '%'");
-    L.used.add('asy__mod');
-    return { code: `(call asy__mod ${a.code} ${b.code})`, type: 'int' };
+    if (a.type === 'int' && b.type === 'int') {
+      L.used.add('asy__mod');
+      return { code: `(call asy__mod ${a.code} ${b.code})`, type: 'int' };
+    }
+    // real 上那一格（第六十九刀）：mathop.h:244 的 mod<T> 走 mod.h:21 的 portableMod ——
+    // fmod 之后"符号不跟着除数就加一个除数"。plain_pens.asy:291 的 `(h % 360)/60` 在等它。
+    if (a.type !== 'real' || b.type !== 'real') {
+      return L.err(n, `'%' 两边要是 int 或 real，这里是 ${a.type} 和 ${b.type}`);
+    }
+    L.used.add('asy__rmod');
+    return { code: `(call asy__rmod ${a.code} ${b.code})`, type: 'real' };
   }
   if (op === '^') {
     // triple 上 asy 自己就没有 `^`（量过："no matching function 'operator ^(triple, int)'"）
