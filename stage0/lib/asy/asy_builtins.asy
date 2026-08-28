@@ -3250,6 +3250,370 @@ void deconstruct(frame f, frame preamble, transform T=identity()) {
 triple min3(frame f) { abort("min3(frame) 还没做"); return (0, 0, 0); }
 triple max3(frame f) { abort("max3(frame) 还没做"); return (0, 0, 0); }
 
+// ------------------------------------------------- 三维路径（第四十八刀）
+// `path3` 在真 asy 那边是 C++ 的内建类型（path3.h），与 `path` 是同一套结构、坐标换成
+// triple。**求解**那一头不在这儿：three.asy 自己写了 `struct flatguide3` 与
+// `path3 solve(flatguide3)`（:601/:1247），`guide3` 的 `--` / `..` 也是它自己的
+// （:758/:772）。所以这一层要补的只是 path3 这个**原始类型**与 runpath3d.in 那一批
+// 取值函数 —— 其中 `path3(pre,point,post,straight,cyclic)`（three.asy:1359 用的那份）
+// 是 solve 的落点，最要紧。
+struct knot3 {
+  triple pre;
+  triple point;
+  triple post;
+  bool straight = false;
+}
+
+struct path3 {
+  knot3[] nodes;
+  bool cyclic = false;
+}
+
+path3 nullpath3;
+
+knot3 knot3copy(knot3 k) {
+  knot3 j;
+  j.pre = k.pre;
+  j.point = k.point;
+  j.post = k.post;
+  j.straight = k.straight;
+  return j;
+}
+
+// path3 在 asy 那边是值类型；我们的 struct 是引用类型，所以每次都先复制一份
+path3 path3copy(path3 g) {
+  path3 h;
+  h.cyclic = g.cyclic;
+  for (int i = 0; i < g.nodes.length; ++i) h.nodes.push(knot3copy(g.nodes[i]));
+  return h;
+}
+
+// runpath3d.in 的 `path3(triple[] pre, triple[] point, triple[] post, bool[] straight,
+// bool cyclic)` —— three.asy:1359 的 solve 就是拿它把解好的结点装成 path3 的
+path3 path3(triple[] pre, triple[] point, triple[] post, bool[] straight, bool cyclic) {
+  path3 g;
+  g.cyclic = cyclic;
+  for (int i = 0; i < point.length; ++i) {
+    knot3 k;
+    k.pre = i < pre.length ? pre[i] : point[i];
+    k.point = point[i];
+    k.post = i < post.length ? post[i] : point[i];
+    k.straight = i < straight.length ? straight[i] : false;
+    g.nodes.push(k);
+  }
+  return g;
+}
+
+int length(path3 g) {
+  if (g.cyclic) return g.nodes.length;
+  return g.nodes.length - 1;
+}
+
+int size(path3 g) { return g.nodes.length; }
+bool cyclic(path3 g) { return g.cyclic; }
+
+private int asy__nwrap3(path3 g, int i) {
+  int n = g.nodes.length;
+  if (!g.cyclic || n == 0) return i;
+  int k = i % n;
+  return k < 0 ? k + n : k;
+}
+
+triple point(path3 g, int i) { return g.nodes[asy__nwrap3(g, i)].point; }
+triple precontrol(path3 g, int i) { return g.nodes[asy__nwrap3(g, i)].pre; }
+triple postcontrol(path3 g, int i) { return g.nodes[asy__nwrap3(g, i)].post; }
+
+bool straight(path3 p, int t) {
+  int n = p.nodes.length;
+  if (n == 0) return false;
+  if (p.cyclic) return p.nodes[t % n].straight;
+  if (t < 0 || t >= n) return false;
+  return p.nodes[t].straight;
+}
+
+// 段内按那一段的三次 Bezier 取点 —— 与 point(path,real) 逐行同，坐标换成 triple
+triple point(path3 g, real t) {
+  int n = g.nodes.length;
+  if (n == 0) { abort("point: 空的 path3"); return (0, 0, 0); }
+  int segs = g.cyclic ? n : n - 1;
+  if (segs <= 0) return g.nodes[0].point;
+  real u = t;
+  if (g.cyclic) {
+    while (u < 0) u = u + segs;
+    while (u >= segs) u = u - segs;
+  } else {
+    if (u <= 0) return g.nodes[0].point;
+    if (u >= segs) return g.nodes[n - 1].point;
+  }
+  int i = floor(u);
+  real s = u - i;
+  knot3 a = g.nodes[i];
+  knot3 b = g.nodes[i + 1 == n ? 0 : i + 1];
+  real r = 1 - s;
+  return r*r*r*a.point + 3*r*r*s*a.post + 3*r*s*s*b.pre + s*s*s*b.point;
+}
+
+triple dir(path3 g, real t, bool normalize=true) {
+  int n = g.nodes.length;
+  if (n == 0) { abort("dir: 空的 path3"); return (0, 0, 0); }
+  int segs = g.cyclic ? n : n - 1;
+  if (segs <= 0) return (0, 0, 0);
+  real u = t;
+  if (g.cyclic) {
+    while (u < 0) u = u + segs;
+    while (u >= segs) u = u - segs;
+  } else {
+    if (u < 0) u = 0;
+    if (u > segs) u = segs;
+  }
+  int i = floor(u);
+  if (i >= segs) i = segs - 1;
+  real s = u - i;
+  knot3 a = g.nodes[i];
+  knot3 b = g.nodes[i + 1 == n ? 0 : i + 1];
+  real r = 1 - s;
+  triple d = 3*r*r*(a.post - a.point) + 6*r*s*(b.pre - a.post) + 3*s*s*(b.point - b.pre);
+  if (d == (0, 0, 0)) d = b.point - a.point;
+  return normalize ? unit(d) : d;
+}
+
+triple dir(path3 g, int i, int sign=0, bool normalize=true) {
+  int n = g.nodes.length;
+  if (n == 0) { abort("dir: 空的 path3"); return (0, 0, 0); }
+  if (sign < 0) return dir(g, i - 1e-9 + (i == 0 && !g.cyclic ? 1e-9 : 0), normalize);
+  if (sign > 0) return dir(g, i + (i == length(g) && !g.cyclic ? -1e-9 : 1e-9), normalize);
+  triple a = dir(g, i, -1, normalize);
+  triple b = dir(g, i, 1, normalize);
+  triple s = a + b;
+  return normalize ? unit(s) : s;
+}
+
+// path3.cc 的 reverse：结点倒排、pre 与 post 互换，straight 挂在左端那个结上
+path3 reverse(path3 g) {
+  path3 h;
+  h.cyclic = g.cyclic;
+  int n = g.nodes.length;
+  if (n == 0) return h;
+  int len = length(g);
+  for (int i = 0; i < n; ++i) {
+    int j = len - i;
+    knot3 a = g.nodes[asy__nwrap3(g, j)];
+    knot3 k;
+    k.pre = a.post;
+    k.point = a.point;
+    k.post = a.pre;
+    k.straight = g.cyclic || j > 0 ? g.nodes[asy__nwrap3(g, j - 1)].straight : false;
+    h.nodes.push(k);
+  }
+  return h;
+}
+
+// de Casteljau：三维那一份（与 asy__subbez 逐行同）
+private triple[] asy__subbez3(triple z0, triple c0, triple c1, triple z1,
+                              real t0, real t1) {
+  triple p01 = z0 + (c0 - z0) * t1;
+  triple p12 = c0 + (c1 - c0) * t1;
+  triple p23 = c1 + (z1 - c1) * t1;
+  triple q0 = p01 + (p12 - p01) * t1;
+  triple q1 = p12 + (p23 - p12) * t1;
+  triple r = q0 + (q1 - q0) * t1;
+  real s = t1 == 0 ? 0 : t0 / t1;
+  triple u01 = z0 + (p01 - z0) * s;
+  triple u12 = p01 + (q0 - p01) * s;
+  triple u23 = q0 + (r - q0) * s;
+  triple v0 = u01 + (u12 - u01) * s;
+  triple v1 = u12 + (u23 - u12) * s;
+  triple w = v0 + (v1 - v0) * s;
+  triple[] out;
+  out.push(w);
+  out.push(v1);
+  out.push(u23);
+  out.push(r);
+  return out;
+}
+
+path3 subpath(path3 p, int a, int b) {
+  int n = p.nodes.length;
+  if (n == 0) return path3copy(p);
+  if (a > b) return reverse(subpath(p, b, a));
+  int ia = a;
+  int ib = b;
+  if (!p.cyclic) {
+    int len = length(p);
+    if (ia < 0) ia = 0;
+    if (ib > len) ib = len;
+    if (ia > len) ia = len;
+    if (ib < 0) ib = 0;
+  }
+  path3 h;
+  for (int i = ia; i <= ib; ++i) {
+    knot3 k = knot3copy(p.nodes[asy__nwrap3(p, i)]);
+    if (i == ia) k.pre = k.point;
+    if (i == ib) { k.post = k.point; k.straight = false; }
+    h.nodes.push(k);
+  }
+  return h;
+}
+
+path3 subpath(path3 p, real a, real b) {
+  int segs = length(p);
+  if (segs <= 0) return path3copy(p);
+  if (a > b) return reverse(subpath(p, b, a));
+  real ta = a;
+  real tb = b;
+  if (!p.cyclic) {
+    if (ta < 0) ta = 0;
+    if (tb < 0) tb = 0;
+    if (ta > segs) ta = segs;
+    if (tb > segs) tb = segs;
+  }
+  if (ta == tb) {
+    path3 one;
+    knot3 k;
+    k.pre = point(p, ta);
+    k.point = k.pre;
+    k.post = k.pre;
+    one.nodes.push(k);
+    return one;
+  }
+  int ia = floor(ta);
+  real fa = ta - ia;
+  int ib = floor(tb);
+  real fb = tb - ib;
+  if (fb == 0) { ib = ib - 1; fb = 1; }
+  path3 h;
+  for (int i = ia; i <= ib; ++i) {
+    real t0 = i == ia ? fa : 0;
+    real t1 = i == ib ? fb : 1;
+    triple[] q = asy__subbez3(point(p, i), postcontrol(p, i),
+                              precontrol(p, i + 1), point(p, i + 1), t0, t1);
+    if (i == ia) {
+      knot3 k;
+      k.pre = q[0];
+      k.point = q[0];
+      k.post = q[1];
+      k.straight = straight(p, i);
+      h.nodes.push(k);
+    } else {
+      h.nodes[h.nodes.length - 1].post = q[1];
+      h.nodes[h.nodes.length - 1].straight = straight(p, i);
+    }
+    knot3 e;
+    e.pre = q[2];
+    e.point = q[3];
+    e.post = q[3];
+    h.nodes.push(e);
+  }
+  return h;
+}
+
+// 弧长与 arctime：与二维那两份同一条路（5 点 Gauss-Legendre + 二分细化）
+private real asy__bspeed3(triple z0, triple c0, triple c1, triple z1, real t) {
+  real r = 1 - t;
+  triple d = 3*r*r*(c0 - z0) + 6*r*t*(c1 - c0) + 3*t*t*(z1 - c1);
+  return length(d);
+}
+
+private real asy__gl53(triple z0, triple c0, triple c1, triple z1, real a, real b) {
+  real h = (b - a) / 2;
+  real m = (a + b) / 2;
+  real x1 = 0.906179845938664;
+  real x2 = 0.538469310105683;
+  real w0 = 0.568888888888889;
+  real w1 = 0.236926885056189;
+  real w2 = 0.478628670499366;
+  return h * (w0 * asy__bspeed3(z0, c0, c1, z1, m)
+    + w1 * (asy__bspeed3(z0, c0, c1, z1, m - h*x1) + asy__bspeed3(z0, c0, c1, z1, m + h*x1))
+    + w2 * (asy__bspeed3(z0, c0, c1, z1, m - h*x2) + asy__bspeed3(z0, c0, c1, z1, m + h*x2)));
+}
+
+private real asy__arcpart3(triple z0, triple c0, triple c1, triple z1,
+                           real a, real b, int depth) {
+  real whole = asy__gl53(z0, c0, c1, z1, a, b);
+  real m = (a + b) / 2;
+  real half = asy__gl53(z0, c0, c1, z1, a, m) + asy__gl53(z0, c0, c1, z1, m, b);
+  if (depth <= 0) return half;
+  if (abs(whole - half) <= 1e-15 * (abs(half) + 1e-15)) return half;
+  return asy__arcpart3(z0, c0, c1, z1, a, m, depth - 1)
+    + asy__arcpart3(z0, c0, c1, z1, m, b, depth - 1);
+}
+
+real arclength(triple z0, triple c0, triple c1, triple z1) {
+  return asy__arcpart3(z0, c0, c1, z1, 0, 1, 24);
+}
+
+private real asy__seglen3(path3 p, int i) {
+  if (straight(p, i)) return length(point(p, i + 1) - point(p, i));
+  return arclength(point(p, i), postcontrol(p, i), precontrol(p, i + 1), point(p, i + 1));
+}
+
+real arclength(path3 p) {
+  real s = 0;
+  int segs = length(p);
+  for (int i = 0; i < segs; ++i) s = s + asy__seglen3(p, i);
+  return s;
+}
+
+real arctime(path3 p, real L) {
+  int segs = length(p);
+  if (segs <= 0) return 0;
+  if (L <= 0) return 0;
+  real rem = L;
+  for (int i = 0; i < segs; ++i) {
+    real seg = asy__seglen3(p, i);
+    if (rem > seg) { rem = rem - seg; continue; }
+    if (seg <= 0) return i;
+    triple z0 = point(p, i);
+    triple c0 = postcontrol(p, i);
+    triple c1 = precontrol(p, i + 1);
+    triple z1 = point(p, i + 1);
+    real lo = 0;
+    real hi = 1;
+    for (int k = 0; k < 52; ++k) {
+      real mid = (lo + hi) / 2;
+      if (asy__arcpart3(z0, c0, c1, z1, 0, mid, 16) < rem) lo = mid; else hi = mid;
+    }
+    return i + (lo + hi) / 2;
+  }
+  return segs;
+}
+
+// 包围盒：控制点的逐分量下/上界（真 asy 是解导数的零点，这一层用控制点的凸包界 ——
+// 那是个**外界**，够画图用，与 asy 的数不一定同）
+triple min(path3 g) {
+  int n = g.nodes.length;
+  if (n == 0) { abort("min: 空的 path3"); return (0, 0, 0); }
+  triple m = g.nodes[0].point;
+  for (int i = 0; i < n; ++i) {
+    m = minbound(m, g.nodes[i].point);
+    m = minbound(m, g.nodes[i].pre);
+    m = minbound(m, g.nodes[i].post);
+  }
+  return m;
+}
+
+triple max(path3 g) {
+  int n = g.nodes.length;
+  if (n == 0) { abort("max: 空的 path3"); return (0, 0, 0); }
+  triple m = g.nodes[0].point;
+  for (int i = 0; i < n; ++i) {
+    m = maxbound(m, g.nodes[i].point);
+    m = maxbound(m, g.nodes[i].pre);
+    m = maxbound(m, g.nodes[i].post);
+  }
+  return m;
+}
+
+path3[] concat(path3[] a, path3[] b) {
+  path3[] out;
+  for (path3 x : a) out.push(x);
+  for (path3 x : b) out.push(x);
+  return out;
+}
+
+// 4x4 齐次变换作用在整条路上（three.asy:1951 的 `t*p[i]`）落在下面 ——
+// 它要用 `real[][]*triple`，而那一份声明在这一段**后面**（名字解析是顺序的）。
+
 // (1) 几个零碎的（runtime.in / builtin.cc 的模板那一批）
 // shift(transform)：只留平移，线性部分清零（runtime.in:1169 —— 量过是 (3,4,0,0,0,0)）。
 transform shift(transform t) { return xform(t.x, t.y, 0, 0, 0, 0); }
@@ -3334,6 +3698,22 @@ triple operator *(real[][] t, triple v) {
   real[] r = t * b;
   if (r[3] == 0) abort("real[][]*triple: 第四行算出来是 0");
   return (r[0] / r[3], r[1] / r[3], r[2] / r[3]);
+}
+
+// 4x4 齐次变换作用在**整条 path3** 上（three.asy:1951 的 `t*p[i]`）。位置在这儿是
+// 因为它要上面那份 `real[][]*triple` —— 名字解析是顺序的。
+path3 operator *(real[][] t, path3 p) {
+  path3 h;
+  h.cyclic = p.cyclic;
+  for (int i = 0; i < p.nodes.length; ++i) {
+    knot3 k;
+    k.pre = t * p.nodes[i].pre;
+    k.point = t * p.nodes[i].point;
+    k.post = t * p.nodes[i].post;
+    k.straight = p.nodes[i].straight;
+    h.nodes.push(k);
+  }
+  return h;
 }
 
 // ------------------------------------------------------------ 剩下那一批 C++ 内建

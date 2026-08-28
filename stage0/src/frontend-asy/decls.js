@@ -13,7 +13,7 @@
 import { isList, isAtom, head } from '../sexpr/read.js';
 import {
   ASY_NOPE, SCALARS, ASY_MODSTM, ASY_ARRELEM_TEXT, ASY_OPSYM, ASY_OPBAD, ASY_RESTPFX,
-  asyIsArr, asyElem, asyIsFn, asyCore, asyFldSym, asyFnSplit,
+  asyIsArr, asyElem, asyIsFn, asyCore, asyFldSym, asyFnSplit, asyMangle,
 } from './types.js';
 import { ZERO } from './runtime.js';
 import { asyStmt, asyBody } from './stmts.js';
@@ -235,13 +235,18 @@ export function asyStMod(L, n) {
 export function asyOinitSig(L, n, at) {
   const ret = L.type(n.items[1], 'operator init 的返回类型');
   if (ret === null) return;
-  if (!L.isRec(ret)) {
-    L.nope(n, `回 ${ret} 的文件级 'operator init'（这一刀只有 struct 的那份）`);
+  // 函数类型上的那一份（第四十八刀）：three.asy:704 的
+  // `guide3 operator init() {return nullpath3;}` —— `guide3` 是 `void(flatguide3)`。
+  // asy 那边 `operator init` 不挑类型，落点是"这个类型的变量不带初值时拿什么"。
+  // 记法与 struct 那份同一张表（L.oinits 按类型文本存），下面那条"别的模块的 struct"
+  // 只对记录问。
+  if (!L.isRec(ret) && !asyIsFn(ret)) {
+    L.nope(n, `回 ${ret} 的文件级 'operator init'（这一刀只有 struct 与函数类型那两份）`);
     return;
   }
   // 别的模块里的 struct（第二十五刀）：`T t;` 造什么是在**声明它的那个模块**里定的
   // （见 recInit），所以这边再写一份的话我们会静静地不用它 —— 那不如拒得明白。
-  if (L.records.get(ret).unit !== L.unit.id) {
+  if (L.isRec(ret) && L.records.get(ret).unit !== L.unit.id) {
     L.nope(n, `给另一个模块的 struct '${ret}' 定义文件级 'operator init'`);
     return;
   }
@@ -253,8 +258,11 @@ export function asyOinitSig(L, n, at) {
     return;
   }
   const list = L.oinits.has(ret) ? L.oinits.get(ret) : [];
+  // 符号名要是个标识符：记录名本身就是（照旧不动），函数类型的类型文本里有括号和逗号，
+  // 过一遍 asyMangle（第四十八刀）。
+  const tag = L.isRec(ret) ? ret : asyMangle(ret);
   // 同名的第 2 份及以后要改个名字：核心方言里模块层的名字是全局唯一的
-  const sym = list.length === 0 ? `asy__oi_${ret}` : `asy__oi${list.length}_${ret}`;
+  const sym = list.length === 0 ? `asy__oi_${tag}` : `asy__oi${list.length}_${tag}`;
   const cand = { ret, params: [], ps: [], node: n, at, sym };
   list.push(cand);
   L.oinits.set(ret, list);

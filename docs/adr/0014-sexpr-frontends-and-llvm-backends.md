@@ -5399,6 +5399,46 @@ Newton 收到机器精度 —— 全靠细分要 30 多层，examples/coag 那�
 `tests/wat` 12 —— 全绿。`tests/mir` / `tests/glr` / `tests/incr` 照旧红（先于这几刀），
 `tests/bootstrap` 跳过。
 
+### 一批：三维路径进内建面（`import three;` 147 -> 1）
+
+上一刀量出来剩下 158 个失败例子里 **109 个压在同一堵墙上**：`path3`。这一刀翻它。
+
+**好消息是求解那一头不用做**：asy 的 `guide3` 是**在 asy 里**解的 —— three.asy 自己写了
+`struct flatguide3`（:601）与 `path3 solve(flatguide3)`（:1247），`--` / `..` 也是它自己的
+（:758/:772）。所以内建面要补的只是 `path3` 这个**原始类型**与 runpath3d.in 那一批取值
+函数，落点是 `path3(pre,point,post,straight,cyclic)`（three.asy:1359 里 solve 装结点用的
+那份）。量过一条要紧的事：真 asy 里 `path3` **不用 `import three` 就在**（builtin.cc 注册
+的 C++ 类型），所以 cases/138 能直接与 `asy -noV` 逐字节对。
+
+补的这些（`asy_builtins.asy`，与二维那套逐行对着写、坐标换成 triple）：`struct knot3` /
+`struct path3` / `nullpath3`、五数组构造、`length` / `size` / `cyclic` / `point` /
+`precontrol` / `postcontrol` / `straight`、`point(path3,real)` 与两份 `dir`、`reverse`、
+两份 `subpath`（de Casteljau）、`arclength` 的两份与 `arctime`、`min` / `max`（控制点凸包
+的**外界** —— 真 asy 解导数零点，这两个数不一定同）、`concat`，以及
+`real[][] * path3`（4x4 齐次变换作用在整条路上，three.asy:1951 的 `t*p[i]`）。
+
+前端另加一条：**文件级 `operator init` 也能落在函数类型上**。three.asy:704 的
+`guide3 operator init() {return nullpath3;}` —— `guide3` 是 `void(flatguide3)`，从前只有
+struct 那份。符号名要过一遍 `asyMangle`（类型文本里有括号和逗号）。这一刀只接了**局部**
+那一格（stmts.js 里函数类型那一支）；文件级变量的零值是方言那边铺的，还没走这条路 ——
+cases/138 里那一段写的就是局部形态，注释里记着这个缺口。
+
+顺手踩到的一个坑记在这儿：`path3 operator *(real[][], path3)` 的体里要
+`real[][] * triple`，而那一份声明在文件更后面 —— 名字解析是顺序的，于是它落到了"数组
+乘标量"那条内建路上报 `'*' 的另一边要是 int 或 real`。挪到后面就好了。
+
+数字：`import three;` 的诊断 **147 -> 1**（两相都算）。剩下那一条是
+three_arrows.asy:73 —— `struct arrowhead3` 里有 `real size(pen p)=arrowsize;` 与
+`real size;` **两个同名字段**。asy 的 struct 体是个作用域，同名按签名分得开；这一层的
+`class` 一个名字一格，要分开得给后一份另起槽名、再让 `.size` 按上下文（是取值还是调用）
+挑一份。那是下一刀。
+
+跑过的轴：`tests/asy` 216（新增 cases/138-path3，`.expected` 是真 asy `-noV` 的逐字节
+输出）、`tests/run.js` 91、`tests/sexpr` 53、`tests/oir` 451、`tests/llvm` 22、
+`tests/jit` 22、`tests/gpu` 15+1 skip、`tests/js-roundtrip` 92、`tests/oracle` 7、
+`tests/js-exec` 11、`tests/cabi` 4、`tests/wat` 12 —— 全绿。`tests/mir` / `tests/glr` /
+`tests/incr` 照旧红（先于这几刀），`tests/bootstrap` 跳过。
+
 ## 后果与代价
 
 

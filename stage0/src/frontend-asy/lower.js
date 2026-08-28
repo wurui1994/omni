@@ -2172,6 +2172,9 @@ class AsyLower {
     return this.recNew(n, t);
   }
 
+  /** 这个类型在**当前位置**有文件级 `operator init` 吗（stmts.js 的函数类型那一支用） */
+  oinitFor(t) { return asyOinitFor(this, t); }
+
   /** `(name x)` -> 'x'；`(qualified ...)` 与算符名（`operator +`）都回 null */
   plainName(node) {
     if (!isList(node) || head(node) !== 'name') return null;

@@ -569,7 +569,10 @@ export function asyVardec(L, n) {
       // 函数值的零值是**空引用**。这一句原先拦着不带初值的声明，理由是"那个空函数值的
       // 字面量方言里还没有" —— 第三十三刀补上了 `(null TYPE)`，所以现在直接发它。
       // 量过 asy：`F f; write(f == null)` 是 true，赋一个闭包之后是 false。
-      init = `(null ${asyCore(t)})`;
+      // 除非这个函数类型上有文件级的 `operator init`（第四十八刀，three.asy:704 的
+      // `guide3 operator init() {return nullpath3;}`）—— 那时零值是它算出来的那一格。
+      const oi = L.oinitFor(t);
+      init = oi !== null ? `(call ${oi.sym})` : `(null ${asyCore(t)})`;
     } else {
       init = asyIsArr(t) ? `(anew ${asyCore(t)} (int 0))` : ZERO.get(t);
       if (init === undefined) return L.nope(start, `${t} 的变量声明（这一刀给不出它的零值）`);
