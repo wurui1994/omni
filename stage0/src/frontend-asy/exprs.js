@@ -110,31 +110,15 @@ export function asyNameOf(L, n, nm) {
   const cands = asyVisible(L, nm);
   if (cands.length === 1) {
     const c = cands[0];
-    if (c.ps !== undefined) {
-      for (const p of c.ps) if (p.def !== null && p.def !== undefined) {
-        return L.nope(n, `把带默认值的函数 '${nm}' 当值用（函数值没有默认值）`);
-      }
-    }
     // 拼法只有一份（asyCandFnType）：这里原来是抄的一遍，可变形参那一格加进来之后
     // 抄的那份就落后了 —— `int total(... int[] xs)` 当值用时印成了 `int(int[])`，
     // 于是 `using vfn=int(... int[]); vfn f=total;` 报"类型不对"。
+    // 带默认值的候选**也**能当值用（第六十刀）：类型是"全部形参"那一份，默认值那一格
+    // 在类型里忽略（见 asyAnonFn 的注释）。省了实参的调用在 fnValCall 里报 nope。
     return { code: `(fnref ${c.sym})`, type: asyCandFnType(L, c) };
   }
   if (cands.length > 1) {
-    // 带默认值的候选一律不算（函数值没有默认值，与 overArg 里同一条）
-    const usable = [];
-    for (const c of cands) {
-      let ok = true;
-      if (c.ps !== undefined) {
-        for (const p of c.ps) if (p.def !== null && p.def !== undefined) ok = false;
-      }
-      if (ok) usable.push(c);
-    }
-    if (usable.length === 0) {
-      return L.nope(n, `把带默认值的函数 '${nm}' 当值用（函数值没有默认值）`);
-    }
-    if (usable.length === 1) return { code: `(fnref ${usable[0].sym})`, type: asyCandFnType(L, usable[0]) };
-    return { code: null, type: `<${nm} 的重载集>`, over: usable };
+    return { code: null, type: `<${nm} 的重载集>`, over: cands };
   }
   // static 的方法体里提到了实例成员：asy 自己也拒（"static use of dynamic variable"），
   // 所以这一句要在那句泛泛的"未声明的变量"之前问 —— 拒的理由不能说错（第三十八刀）。
@@ -190,15 +174,8 @@ export function asyOverArg(L, node) {
   if (L.gvarHere(nm) !== null || L.globals.has(nm)) return null;
   const cands = asyVisible(L, nm);
   if (cands.length < 2) return null;
-  const out = [];
-  for (const c of cands) {
-    let ok = true;
-    if (c.ps !== undefined) {
-      for (const p of c.ps) if (p.def !== null && p.def !== undefined) ok = false;
-    }
-    if (ok) out.push(c);
-  }
-  return out.length < 2 ? null : { nm: nm, cands: out };
+  // 带默认值的候选也算（第六十刀）：当值用时它的类型就是"全部形参"那一份
+  return { nm: nm, cands: cands };
 }
 
 /**
@@ -219,11 +196,14 @@ export function asyAnonFn(L, n) {
   if (ret === null) return null;
   const ps = L.formals(n.items[2]);
   if (ps === null) return null;
-  for (const p of ps) {
-    if (p.def !== null && p.def !== undefined) {
-      return L.nope(n, '匿名函数的形参默认值（函数值没有默认值）');
-    }
-  }
+  // 形参默认值（第六十刀）：类型文本里**不带**它 —— asy 的函数类型里带（那边印
+  // `void(picture pic=<default>, frame f, path g)`），但两个方向的赋值 asy 都收（量过：
+  // 没有默认值的函数赋给带默认值的类型、带默认值的函数赋给不带的类型，都通），
+  // 所以在"接得住谁"这件事上那一格是可以忽略的。这一层于是照 `void(picture,frame,path)`
+  // 记，plain_markers.asy:62 的匿名函数与 markroutine 那个 typedef 就对上了。
+  // 差别写在明处：默认值的**表达式**在这里被丢掉了（asy 那边它留在被调方，由
+  // push_default 触发），所以通过这个值调的时候一个实参都省不了 —— 那一格在
+  // fnValCall 里是一句 nope，不是悄悄给零值。默认值表达式本身也就没有被查过型。
   // 套一层的匿名函数：里层要抓的可能是外层的**捕获**，而捕获不是局部量 —— 另一刀
   if (L.cap !== null) return L.nope(n, '匿名函数里再套一个匿名函数');
   const name = `asy__anon${L.anonN++}`;

@@ -3980,6 +3980,37 @@ plain_picture.asy:1319 的 `fillrule` 是 latticeshade 的**形参**（一个 pe
 数字：`import plain;` 136 → 126。`import graph;` 152 不动。tests/asy 167 条、
 tests/run.js 91 条全绿。新用例 `cases/93-cap-over-arg`。
 
+### 形参默认值不再拦住"当函数值用"——差别缩到"通过值调时省实参"这一格
+
+126 里 12 条是同一族：7 条「匿名函数的形参默认值」加 5 条「把带默认值的函数当值用」。
+从前这两处都是一刀切地拒，理由写的是"函数值没有默认值"。回去读了一遍参考实现之后
+发现这个理由**过宽**：asy 的默认值确实跟着函数值走（`application.h:76` 的 `defaultArg`
+在调用处发一个 `inst::push_default`，`runtime.in:276` 的 `pushDefault` 在**被调方**把它
+换成真值），但那只影响"省了实参的调用"这一件事；把这样的函数**赋给**一个函数类型的变量、
+或者拿它去接一个函数类型的槽，与默认值没有关系。
+
+而且量过 asy：默认值那一格在**赋值**上是可以忽略的 —— 两个方向都收。
+`typedef real fn(real, real); fn h = f;`（f 带默认值）通；
+`void p(int x=5); p = new void(int x){…};`（不带默认值的赋给带默认值的类型）也通，
+只是后来 `p()` 会在被调方拿到一个没人填的 `push_default`，那时才报
+"Trying to use uninitialized value"。所以我们这一层把函数类型照**全部形参**那一份记，
+默认值那一格根本不进类型文本 —— `markroutine`（`void(picture pic=currentpicture, frame f,
+path g)`）与 plain_markers.asy:62 那个带默认值的匿名函数于是自然对上。
+
+改了三处，都是把拦路的那句删掉：`asyAnonFn` 里"匿名函数的形参默认值"、`asyNameOf` 与
+`asyOverArg` 里"带默认值的候选不算"。差别搬到了唯一真的做不了的那一格：`asyFnValCall`
+见到"给少了"时报的不再是"要 N 个给了 M 个"那句**硬错**（asy 收这种写法，说它是错的
+就是说谎），而是一句 nope，把"asy 的默认值是被调方填的、我们的是调用处用
+`asyDefWrapper` 填的、通过一个值调拿不到那份包装"写在明处。新 bad 用例
+`bad/fnval-default` 钉着这一格（`var g=f; g(3)` —— asy 印 5）。
+
+还有一处要写在明处：默认值的**表达式**在匿名函数这一边被丢掉了，所以它没有被查过型。
+asy 那边它留在被调方的代码里，是要编译的。等"被调方自己填默认值"那一刀做了，
+这两件事一起补。
+
+数字：`import plain;` 126 → 119。`import graph;` 152 不动。tests/asy 169 条、
+tests/run.js 91 条全绿。新用例 `cases/94-fnval-default` 与 `bad/fnval-default`。
+
 ## 后果与代价
 
 

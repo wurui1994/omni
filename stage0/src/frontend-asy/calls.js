@@ -777,6 +777,15 @@ export function asyFnValCall(L, n, nm, ft, callee) {
   const args = asyCallArgs(L, n);
   if (args === null) return null;
   if (isVar ? args.length < rAt : args.length !== s.params.length) {
+    // 给**少**了：asy 那边这不一定是错 —— 函数值上的默认值是**被调方**填的
+    // （application.h:76 的 defaultArg 发一个 inst::push_default，runtime.in:276 的
+    // pushDefault 在被调方把它换成真值），而我们的默认值是**调用处**用包装填的
+    // （asyDefWrapper），通过一个值调的时候拿不到那份包装。所以这一格是"还没做"，
+    // 不是"程序不对"。给多了才是真错。
+    if (!isVar && args.length < s.params.length) {
+      return L.nope(n, `通过函数值调 '${nm}' 时省了实参（它是 ${ft}，要 ${s.params.length} 个，`
+        + `给了 ${args.length} 个 —— asy 的默认值是被调方填的，这一刀的默认值是调用处填的）`);
+    }
     const want = isVar ? `至少 ${rAt}` : `${s.params.length}`;
     return L.err(n, `'${nm}' 是 ${ft}，要 ${want} 个实参，给了 ${args.length} 个`);
   }
