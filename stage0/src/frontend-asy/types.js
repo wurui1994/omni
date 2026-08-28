@@ -70,7 +70,7 @@ export const asyOpText = (n) => (isStr(n) || isAtom(n) ? n.value : null);
 export const ASY_OPSYM = new Map([
   ['+', 'add'], ['-', 'sub'], ['*', 'mul'], ['/', 'div'], ['#', 'quot'], ['%', 'mod'],
   ['^', 'pow'], ['==', 'eq'], ['!=', 'ne'], ['<', 'lt'], ['<=', 'le'], ['>', 'gt'],
-  ['>=', 'ge'], ['!', 'not'], ['--', 'seg'], ['^^', 'cat'],
+  ['>=', 'ge'], ['!', 'not'], ['--', 'seg'], ['..', 'dots'], ['^^', 'cat'],
 ]);
 
 /** asy 的语法本身就拒的算符名（量过）。见 strict/op-logic.asy。 */

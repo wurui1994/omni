@@ -438,6 +438,12 @@ struct knot {
 struct path {
   knot[] nodes;
   bool cyclic = false;
+  // 每一段是怎么连上的（`joins.length` == 段数）：0 = `--`（直线）、1 = `..`（要解）、
+  // 2 = 控制点已经定了（照 nodes 里存的那两个走）。asy 的 guide 是**没解**的规格、path 是
+  // 解好的，而这一层 `guide` 就是 `path`，所以解好的控制点与"怎么连的"两份都得留着：
+  // `a..b..c` 每加一段都把整条链重解一遍（knot.cc:solve 也是整条一起解，逐段解出来的
+  // 控制点不一样）。段数与这张表不齐时（subpath / nib 这种自己摆控制点的），一律按 2 走。
+  int[] joins;
   // `cycle` 那个字面量：它不是路径，是**连接时的记号**。前端把 `cycle` 解析成下面那个
   // `cyclepath`（`cycle` 自己是 LIT，asy 源码里声明不出这个名字），`a--cycle` 于是就是
   // `operator --(path, path)` 见到一个带记号的右操作数。这是前端与绘图层之间唯一的约定名。
@@ -504,6 +510,7 @@ path pathcopy(path g) {
   path h;
   h.cyclic = g.cyclic;
   for (int i = 0; i < g.nodes.length; ++i) h.nodes.push(knotcopy(g.nodes[i]));
+  for (int i = 0; i < g.joins.length; ++i) h.joins.push(g.joins[i]);
   return h;
 }
 
@@ -514,6 +521,10 @@ private int asy__nwrap(path g, int i) {
   int k = i % n;
   return k < 0 ? k + n : k;
 }
+
+// path.h 的 precontrol/postcontrol：结点两侧那两个控制点（下标在闭合路径上绕圈）
+pair precontrol(path g, int i) { return g.nodes[asy__nwrap(g, i)].pre; }
+pair postcontrol(path g, int i) { return g.nodes[asy__nwrap(g, i)].post; }
 
 // path.cc:321 的 path::reverse：结点倒着排（第 i 个取原来的 j = len - i），pre 与 post
 // 互换，而 straight 是挂在**左端**那个结上的，所以倒过来第 i 个结的 straight 取原来
@@ -535,6 +546,10 @@ path reverse(path g) {
     // 开路径的最后一个结左边没有段（j-1 == -1），那一格照 asy 是 false
     k.straight = g.cyclic || j > 0 ? g.nodes[asy__nwrap(g, j - 1)].straight : false;
     h.nodes.push(k);
+  }
+  // "怎么连的"那张表也倒过来：倒过来第 i 段是原来第 len-1-i 段
+  if (g.joins.length == len) {
+    for (int i = 0; i < len; ++i) h.joins.push(g.joins[len - 1 - i]);
   }
   return h;
 }
@@ -562,25 +577,395 @@ path operator cast(pair z) {
   return pathof(z);
 }
 
-path operator --(path a, path b) {
-  // `a--cycle`：右边是那个记号，于是闭合 —— 首尾两个结之间的那一段也是直线
-  if (b.ismark) {
-    path g = pathcopy(a);
-    int n = g.nodes.length;
-    pair z0 = g.nodes[0].point;
-    pair zn = g.nodes[n - 1].point;
-    g.nodes[n - 1].straight = true;
-    g.nodes[n - 1].post = zn + (z0 - zn) / 3;
-    g.nodes[0].pre = z0 - (z0 - zn) / 3;
-    g.cyclic = true;
-    return g;
+// ------------------------------------------------------------ Hobby 求解器
+// `a..b..c` 的控制点是解一组线性方程得出来的（MetaFont 的那套，asy 在 knot.h/knot.cc
+// 里照搬）。这一段是那份代码的 asy 译本，只做**没有方向标记、没有张力、没有显式控制点**
+// 的那一档：每个结两侧的规格只有 open（`..`）、curl 1（开路径的两头）、dir（挨着一段
+// 已定控制点的那一侧，由 partnerUp 推出来）、control（`--` 或已解好的段）四种。
+//
+// 结的两侧规格。kind：0 open、1 curl（val 是 gamma）、2 dir（val 是角度）、3 control。
+private struct spec {
+  int kind = 0;
+  real val = 1;
+  pair cz;
+  bool straight = false;
+}
+
+// knot.cc:98 的 niceAngle：y 正好是 0 时不看零的符号，免得 a..b..cycle 解出怪路径
+private real asy__niceangle(pair z) {
+  if (z.y == 0) return z.x >= 0 ? 0 : pi;
+  return angle(z);
+}
+
+// knot.cc:104 的 reduceAngle
+private real asy__reduceangle(real a) {
+  if (a > pi) return a - 2 * pi;
+  if (a < -pi) return a + 2 * pi;
+  return a;
+}
+
+// knot.cc:63 的 velocity（MetaPost §131），张力恒为 1、不带 atleast 的那一档
+private real asy__velocity(real theta, real phi) {
+  real a = sqrt(2);
+  real b = 1 / 16;
+  real c = 1.5 * (sqrt(5) - 1);
+  real d = 1.5 * (3 - sqrt(5));
+  real st = sin(theta);
+  real ct = cos(theta);
+  real sf = sin(phi);
+  real cf = cos(phi);
+  real denom = 3 + c * ct + d * cf;
+  real r = denom != 0 ? (2 + a * (st - b * sf) * (sf - b * st) * (ct - cf)) / denom : 4;
+  return r > 4 ? 4 : r;
+}
+
+// knot.cc:402/433 的 ref + backsub：非闭合的一段，先消元成 theta[j] + post*theta[j+1] = aug，
+// 再从后往前回代。方程个数 = 这一段的结点数。
+private real[] asy__thetalinear(real[] epre, real[] epiv, real[] epost, real[] eaug) {
+  int m = epiv.length;
+  real[] rpost;
+  real[] raug;
+  real lastpost = 0;
+  real lastaug = 0;
+  for (int j = 0; j < m; ++j) {
+    real piv = epiv[j];
+    real ag = eaug[j];
+    if (j > 0) {
+      piv = piv - epre[j] * lastpost;
+      ag = ag - epre[j] * lastaug;
+    }
+    lastpost = epost[j] / piv;
+    lastaug = ag / piv;
+    rpost.push(lastpost);
+    raug.push(lastaug);
   }
+  real[] th = new real[m];
+  real lasttheta = 0;
+  for (int j = m - 1; j >= 0; --j) {
+    real t = j == m - 1 ? raug[j] : raug[j] - rpost[j] * lasttheta;
+    th[j] = t;
+    lasttheta = t;
+  }
+  return th;
+}
+
+// knot.cc:301/344/385 的 recalc + solveForTheta0 + backsubCyclic：闭合的那一档。
+// 方程写成 theta[j] + post*theta[j+1] = aug + w*theta[0]，先把 theta[0] 解出来再回代。
+private real[] asy__thetacyclic(real[] epre, real[] epiv, real[] epost, real[] eaug) {
+  int n = epiv.length;
+  real[] wpost = new real[n];
+  real[] waug = new real[n];
+  real[] ww = new real[n];
+  // we[0] 先放个占位的 (post=0, aug=0, w=1)，最后再补上真的那一份
+  real lp = 0;
+  real la = 0;
+  real lw = 1;
+  for (int j = 1; j < n; ++j) {
+    real piv = epiv[j] - epre[j] * lp;
+    real ag = eaug[j] - epre[j] * la;
+    real w = -epre[j] * lw;
+    lp = epost[j] / piv;
+    la = ag / piv;
+    lw = w / piv;
+    wpost[j] = lp;
+    waug[j] = la;
+    ww[j] = lw;
+  }
+  // 再走一步 j = n（n 就是 0）：把占位的那一份换成真的
+  real piv0 = epiv[0] - epre[0] * lp;
+  wpost[0] = epost[0] / piv0;
+  waug[0] = (eaug[0] - epre[0] * la) / piv0;
+  ww[0] = -epre[0] * lw / piv0;
+  real a = 0;
+  real b = 0;
+  real c = 1;
+  for (int j = 0; j < n; ++j) {
+    a += c * waug[j];
+    b += c * ww[j];
+    c = -c * wpost[j];
+  }
+  real theta0 = a / (1 - (b + c));
+  real[] th = new real[n];
+  real lasttheta = theta0;
+  for (int j = 1; j <= n; ++j) {
+    int k = n - j;
+    real t = -wpost[k] * lasttheta + waug[k] + ww[k] * theta0;
+    th[k] = t;
+    lasttheta = t;
+  }
+  return th;
+}
+
+// knot.cc:180/186 的 controlSpec::outPartner / inPartner：一侧的控制点定了，另一侧 open 时
+// 那一侧就是"沿着这个方向"（控制点与结点重合时退成 curl）。别的规格自己就是自己的搭子。
+private spec asy__outpartner(spec s, pair z) {
+  if (s.kind != 3) return s;
+  spec r;
+  if (s.cz == z) { r.kind = 1; r.val = 1; return r; }
+  r.kind = 2;
+  r.val = asy__niceangle(z - s.cz);
+  return r;
+}
+private spec asy__inpartner(spec s, pair z) {
+  if (s.kind != 3) return s;
+  spec r;
+  if (s.cz == z) { r.kind = 1; r.val = 1; return r; }
+  r.kind = 2;
+  r.val = asy__niceangle(s.cz - z);
+  return r;
+}
+
+// knot.cc:619 的 solveSection：非闭合的一段（结点 a..b），解出 theta 再摆控制点。
+// 张力恒为 1，所以 alpha = beta = 1，mid 那一格的系数化简成 1/d 与 2/d。
+private void asy__solvesection(path g, spec[] si, spec[] so, int a, int b) {
+  int m = b - a;
+  if (m <= 0) return;
+  pair[] z = new pair[m + 1];
+  for (int i = 0; i <= m; ++i) z[i] = g.nodes[asy__nwrap(g, a + i)].point;
+  pair[] dz = new pair[m + 1];
+  real[] d = new real[m + 1];
+  for (int i = 0; i < m; ++i) {
+    dz[i] = z[i + 1] - z[i];
+    d[i] = length(dz[i]);
+  }
+  real[] psi = new real[m + 1];
+  for (int i = 1; i < m; ++i) psi[i] = asy__niceangle(dz[i] / dz[i - 1]);
+  real[] epre = new real[m + 1];
+  real[] epiv = new real[m + 1];
+  real[] epost = new real[m + 1];
+  real[] eaug = new real[m + 1];
+  spec s0 = so[asy__nwrap(g, a)];
+  if (s0.kind == 2) {
+    epiv[0] = 1;
+    eaug[0] = asy__reduceangle(s0.val - asy__niceangle(dz[0]));
+  } else {
+    real chi = s0.val;
+    epiv[0] = chi + 2;
+    epost[0] = 2 * chi + 1;
+    eaug[0] = -(2 * chi + 1) * psi[1];
+  }
+  spec sm = si[asy__nwrap(g, b)];
+  if (sm.kind == 2) {
+    epiv[m] = 1;
+    eaug[m] = asy__reduceangle(sm.val - asy__niceangle(dz[m - 1]));
+  } else {
+    real chi = sm.val;
+    epre[m] = 2 * chi + 1;
+    epiv[m] = chi + 2;
+  }
+  for (int j = 1; j < m; ++j) {
+    real A = 1 / d[j - 1];
+    real B = 2 / d[j - 1];
+    real C = 2 / d[j];
+    real D = 1 / d[j];
+    epre[j] = A;
+    epiv[j] = B + C;
+    epost[j] = D;
+    eaug[j] = -B * psi[j] - D * psi[j + 1];
+  }
+  bool homog = true;
+  for (int j = 0; j <= m; ++j) if (eaug[j] != 0) homog = false;
+  // knot.cc:596 的 encodeStraight：两个方程、两边都是 0 —— 那就是直着过去
+  if (m == 1 && homog) {
+    pair step = (z[1] - z[0]) / 3;
+    int ia = asy__nwrap(g, a);
+    int ib = asy__nwrap(g, b);
+    g.nodes[ia].straight = true;
+    g.nodes[ia].post = z[0] + step;
+    g.nodes[ib].pre = z[1] - step;
+    return;
+  }
+  real[] th = new real[m + 1];
+  if (!homog) th = asy__thetalinear(epre, epiv, epost, eaug);
+  real[] phi = new real[m + 1];
+  for (int j = 0; j <= m; ++j) phi[j] = -psi[j] - th[j];
+  for (int i = 0; i < m; ++i) {
+    int ii = asy__nwrap(g, a + i);
+    g.nodes[ii].straight = false;
+    g.nodes[ii].post = z[i] + asy__velocity(th[i], phi[i + 1]) * expi(th[i]) * dz[i];
+  }
+  for (int i = 1; i <= m; ++i) {
+    int ii = asy__nwrap(g, a + i);
+    g.nodes[ii].pre = z[i] - asy__velocity(phi[i], th[i - 1]) * expi(-phi[i]) * dz[i - 1];
+  }
+}
+
+// 整条闭合链一起解（一个断点都没有：全是 `..`）。knot.cc 那边是 cyclicCompute 那一支。
+private void asy__solvecyclic(path g) {
+  int n = g.nodes.length;
+  pair[] z = new pair[n];
+  for (int j = 0; j < n; ++j) z[j] = g.nodes[j].point;
+  pair[] dz = new pair[n];
+  real[] d = new real[n];
+  for (int j = 0; j < n; ++j) {
+    dz[j] = z[(j + 1) % n] - z[j];
+    d[j] = length(dz[j]);
+  }
+  real[] psi = new real[n];
+  for (int j = 0; j < n; ++j) psi[j] = asy__niceangle(dz[j] / dz[(j + n - 1) % n]);
+  real[] epre = new real[n];
+  real[] epiv = new real[n];
+  real[] epost = new real[n];
+  real[] eaug = new real[n];
+  for (int j = 0; j < n; ++j) {
+    real dp = d[(j + n - 1) % n];
+    real A = 1 / dp;
+    real B = 2 / dp;
+    real C = 2 / d[j];
+    real D = 1 / d[j];
+    epre[j] = A;
+    epiv[j] = B + C;
+    epost[j] = D;
+    eaug[j] = -B * psi[j] - D * psi[(j + 1) % n];
+  }
+  bool homog = true;
+  for (int j = 0; j < n; ++j) if (eaug[j] != 0) homog = false;
+  real[] th = new real[n];
+  if (!homog) th = asy__thetacyclic(epre, epiv, epost, eaug);
+  real[] phi = new real[n];
+  for (int j = 0; j < n; ++j) phi[j] = -psi[j] - th[j];
+  for (int j = 0; j < n; ++j) {
+    int k = (j + 1) % n;
+    int p = (j + n - 1) % n;
+    g.nodes[j].straight = false;
+    g.nodes[j].post = z[j] + asy__velocity(th[j], phi[k]) * expi(th[j]) * dz[j];
+    g.nodes[j].pre = z[j] - asy__velocity(phi[j], th[p]) * expi(-phi[j]) * dz[p];
+  }
+}
+
+// knot.cc:826 的 solve：把"每段怎么连的"变成控制点，整条链一起解。
+private void asy__resolve(path g) {
+  int n = g.nodes.length;
+  if (n == 0) return;
+  if (n == 1) {
+    g.nodes[0].pre = g.nodes[0].point;
+    g.nodes[0].post = g.nodes[0].point;
+    return;
+  }
+  int len = length(g);
+  spec[] si;
+  spec[] so;
+  for (int i = 0; i < n; ++i) {
+    spec p;
+    si.push(p);
+    spec q;
+    so.push(q);
+  }
+  bool known = g.joins.length == len;
+  for (int j = 0; j < len; ++j) {
+    int k = asy__nwrap(g, j + 1);
+    int kind = known ? g.joins[j] : 2;
+    if (kind == 1) continue;               // `..`：两侧都 open，留给求解器
+    if (kind == 0) {
+      // `--`：runtime.in:817 的 dashesGuide 一句话写着 —— `a--b` 就是
+      // `a{curl 1}..{curl 1}b`。所以它不是"钉住控制点"，是两侧各一个 curl 断点：
+      // 这一段自己成一节（两个方程都是齐次的），解出来正好是直线。
+      so[j].kind = 1;
+      si[k].kind = 1;
+    } else {                               // 2：照 nodes 里已经存着的那两个走
+      pair zj = g.nodes[j].point;
+      pair zk = g.nodes[k].point;
+      so[j].kind = 3;
+      so[j].cz = g.nodes[j].post;
+      so[j].straight = g.nodes[j].straight;
+      si[k].kind = 3;
+      si[k].cz = g.nodes[k].pre;
+    }
+  }
+  // curlEnds（knot.cc:748）：非闭合路径的两头没规格就补 curl 1
+  if (!g.cyclic) {
+    if (si[0].kind == 0) si[0].kind = 1;
+    if (so[n - 1].kind == 0) so[n - 1].kind = 1;
+  }
+  // controlDuplicates（knot.cc:763）：连着两个点重合就把那一段钉死
+  for (int j = 0; j < len; ++j) {
+    int k = asy__nwrap(g, j + 1);
+    if (so[j].kind != 3 && g.nodes[j].point == g.nodes[k].point) {
+      so[j].kind = 3;
+      so[j].cz = g.nodes[j].point;
+      so[j].straight = true;
+      si[k].kind = 3;
+      si[k].cz = g.nodes[j].point;
+    }
+  }
+  // partnerUp（knot.cc:735）：一侧有规格、另一侧 open 时，另一侧由这一侧推出来
+  for (int j = 0; j < n; ++j) {
+    if (si[j].kind == 0 && so[j].kind != 0) si[j] = asy__inpartner(so[j], g.nodes[j].point);
+    else if (so[j].kind == 0 && si[j].kind != 0) so[j] = asy__outpartner(si[j], g.nodes[j].point);
+  }
+  // solveSpecified（knot.cc:692）：找第一个断点，一段一段来
+  int first = -1;
+  for (int j = 0; j < n; ++j) if (so[j].kind != 0) { first = j; break; }
+  if (first < 0) {
+    asy__solvecyclic(g);
+    return;
+  }
+  int last = g.cyclic ? first + len : len;
+  int a = first;
+  while (a != last) {
+    int ia = asy__nwrap(g, a);
+    if (so[ia].kind == 3) {
+      int k = asy__nwrap(g, a + 1);
+      g.nodes[ia].post = so[ia].cz;
+      g.nodes[ia].straight = so[ia].straight;
+      g.nodes[k].pre = si[k].cz;
+      a = a + 1;
+    } else {
+      int b = a + 1;
+      while (si[asy__nwrap(g, b)].kind == 0) b = b + 1;
+      asy__solvesection(g, si, so, a, b);
+      a = b;
+    }
+  }
+  // controlEnds（knot.h:307）：非闭合路径两头的那两个控制点就是端点自己
+  if (!g.cyclic) {
+    g.nodes[0].pre = g.nodes[0].point;
+    g.nodes[n - 1].post = g.nodes[n - 1].point;
+  }
+}
+
+// ------------------------------------------------------------ path 的连接
+// "每段怎么连的"那张表对不上段数时（subpath / nib 这种自己摆控制点的），一律按 2 补齐
+private void asy__normjoins(path g) {
+  int len = length(g);
+  if (g.joins.length == len) return;
+  int[] js;
+  for (int i = 0; i < len; ++i) js.push(2);
+  g.joins = js;
+}
+
+// 连接：kind 0 是 `--`，1 是 `..`。两边接上之后**整条链重解一遍** —— asy 的 guide 是
+// 没解的规格，解是在转成 path 时一次做完的，逐段解出来的控制点与那个不一样。
+private path asy__join(path a, path b, int kind) {
   path h = pathcopy(a);
-  for (int i = 0; i < b.nodes.length; ++i) {
-    if (i == 0) pushstraight(h, b.nodes[0].point);
-    else h.nodes.push(knotcopy(b.nodes[i]));
+  asy__normjoins(h);
+  // `a--cycle` / `a..cycle`：右边是那个记号，于是闭合
+  if (b.ismark) {
+    if (h.nodes.length < 2) return h;
+    h.cyclic = true;
+    h.joins.push(kind);
+    asy__resolve(h);
+    return h;
   }
+  if (a.nodes.length == 0) return pathcopy(b);
+  if (b.nodes.length == 0) return h;
+  path t = pathcopy(b);
+  asy__normjoins(t);
+  h.joins.push(kind);
+  for (int i = 0; i < t.nodes.length; ++i) {
+    h.nodes.push(knotcopy(t.nodes[i]));
+    if (i > 0) h.joins.push(t.joins[i - 1]);
+  }
+  asy__resolve(h);
   return h;
+}
+
+path operator --(path a, path b) {
+  return asy__join(a, b, 0);
+}
+
+path operator ..(path a, path b) {
+  return asy__join(a, b, 1);
 }
 
 // ---------------------------------------------------------------- bbox

@@ -720,15 +720,16 @@ export function asyApplyCall(L, n, nm, list, raw, recv, reinit) {
  */
 export function asyJoinExp(L, n) {
   const op = asyOpText(n.items[2].items[1]);
-  if (op !== '--') return L.nope(n, `路径连接 '${op ?? '?'}'`);
+  if (op !== '--' && op !== '..') return L.nope(n, `路径连接 '${op ?? '?'}'`);
   const a = L.expr(n.items[1]);
   const b = L.expr(n.items[3]);
   if (a === null || b === null) return null;
-  // 内建的 `--` 不存在，所以"内建这一档的签名"是 null（不是 `opBuiltinSig` 的结果）
+  // 内建的 `--` / `..` 不存在 —— 那是 guide 的东西，属于绘图层 —— 所以"内建这一档的
+  // 签名"是 null（不是 `opBuiltinSig` 的结果）
   const u = asyOpUser(L, n, op, [a, b], null);
   if (u !== null) return u;
-  return L.nope(n, `'${a.type} -- ${b.type}'（内建的 '--' 是 guide 的，那是绘图层那一刀；`
-    + '自己定义一个 `operator --` 是通的）');
+  return L.nope(n, `'${a.type} ${op} ${b.type}'（内建的 '${op}' 是 guide 的，那是绘图层那一刀；`
+    + `自己定义一个 \`operator ${op}\` 是通的）`);
 }
 
 /**

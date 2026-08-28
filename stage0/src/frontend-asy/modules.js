@@ -109,8 +109,9 @@ export function asyCandAt(L, c, at) {
  */
 export function asyModMerge(L, node, u, at, only) {
   for (const [nm, list] of u.funcs) {
-    // `记录名.方法名` 不并：方法跟着 struct 走（见 visibleMethods）
-    if (nm.indexOf('.') >= 0) continue;
+    // `记录名.方法名` 不并：方法跟着 struct 走（见 visibleMethods）。
+    // `operator ..` 名字里也有点，它可不是方法 —— 所以这一条只看**不是算符**的名字。
+    if (nm.indexOf('.') >= 0 && !nm.startsWith('operator ')) continue;
     const key = only === null ? nm : only.get(nm);
     if (key === undefined) continue;
     const dst = L.funcs.has(key) ? L.funcs.get(key) : [];

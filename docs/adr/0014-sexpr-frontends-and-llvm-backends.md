@@ -4341,6 +4341,40 @@ tests/asy 183 条、tests/run.js 91 条全绿。新用例 `cases/107-reverse-pat
 数字：`import plain;` 84 → 80（v3d 两处、newframe 两处）。`import graph;` 150 不动。
 tests/asy 184 条、tests/run.js 91 条全绿。新用例 `cases/108-newframe-v3d`。
 
+### `..`：Hobby 求解器落在 asy 这一侧，`--` 原来理解错了
+
+`a..b..c` 的控制点是解一组线性方程来的（MetaFont 那一套，asy 在 `knot.h`/`knot.cc` 里）。
+这一刀把那份代码译成 prelude 里的 asy 代码：`asy__velocity`（`knot.cc:63`，MetaPost §131）、
+`asy__niceangle`/`asy__reduceangle`、`asy__thetalinear`（`ref` + `backsub`）、
+`asy__thetacyclic`（`recalc` + `solveForTheta0` + `backsubCyclic`）、`asy__solvesection`、
+`asy__solvecyclic`、`asy__resolve`（`curlEnds` + `controlDuplicates` + `partnerUp` +
+`solveSpecified`）。张力恒为 1，所以 `alpha = beta = 1`，中间那一格的系数化简成 `1/d` 与 `2/d`。
+
+要紧的是**表示**。asy 的 guide 是没解的规格、path 是解好的，而这一层 `guide` 就是 `path`，
+所以 `struct path` 多一张 `int[] joins`：每段是 0（`--`）、1（`..`）还是 2（控制点已经定了，
+照 `nodes` 里存的走）。每加一段就**把整条链重解一遍** —— 逐段解出来的控制点与整条一起解
+的不一样，而 asy 是在转成 path 时一次解完的。段数与这张表对不上时（subpath / nib 那种自己
+摆控制点的）一律按 2 走，所以 `transform*path` 之类不受影响。
+
+`--` 原来理解错了：我们把它当成"钉住三等分点上的控制点"。`runtime.in:817` 的 `dashesGuide`
+里写着一句 —— `a--b` 就是 `a{curl 1}..{curl 1}b`。差别在混着写的时候露出来：
+`(0,0)--(1,0)..(2,1)..(3,0)--(4,0)` 里 `(1,0)` 的出向，按"钉控制点"推出来是**沿着那条直线**
+（partnerUp 给一个 dir），按 curl 断点则是那一节自己解 —— asy 给的是后者（量过
+`postcontrol(g,1)` 是 `(1,0.552284749830793)`，不是 `(1.55228474983079,0)`）。改成两侧各一个
+curl 断点之后，`--` 那一节自己成一节、方程齐次、解出来正好是直线，与原来的形状一致。
+
+顺带两处前端：`ASY_OPSYM` 收下 `..`（原来声明 `operator ..` 就被拒），`asyJoinExp` 把 `..`
+也交给用户算符。还有一个藏了很久的洞：`asyModMerge` 里「名字带点的不并（那是记录的方法）」
+把 `operator ..` 也滤掉了 —— 名字里确实有点。现在那一条只管**不是算符**的名字。
+
+八种形状与真 asy 逐字节相同（开路径 3/4 个点、全 `..` 闭合、`--` 与 `..` 混着、
+`..cycle`、重合点、单点、`--cycle`），连 `1.11022302462516e-16` 这种舍入都一样。
+`precontrol`/`postcontrol` 也补进 prelude 了（钉这一刀非得有它们）。
+
+数字：`import plain;` 80 → 77。`import graph;` 150 → 149。tests/asy 185 条、
+tests/run.js 91 条全绿。新用例 `cases/109-hobby-dots`（85 行输出）。
+还没做的：方向标记 `{dir}`、`controls`、`tension`、`&`、`?`——都还是明写的 nope。
+
 ## 后果与代价
 
 
