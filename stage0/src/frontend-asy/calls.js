@@ -821,6 +821,24 @@ export function asyJoinExp(L, n) {
  * `btys` 就是"内建这一档的签名"（`opBuiltinSig`），null 表示内建管不了。
  */
 export function asyOpUser(L, n, op, vals, btys) {
+  // 算符名也可以是**一格局部量/形参**：`bool operator <= (coord,coord)` 那种形参
+  // （plain_scaling.asy:41 的 maxcoords）。它遮住文件级同名的算符 —— 少了这一句，
+  // `maxcoords(coords, operator >=)` 编得过，体里的 `a <= b` 却还是去调文件级那份
+  // `operator <=`，于是 m 与 M 都算成同一个（一个不报错的错答案）。
+  const lsym = asyFldSym(`operator ${op}`);
+  const lv = L.lookup(lsym);
+  if (lv !== null && asyIsFn(lv)) {
+    const s = asyFnSplit(lv);
+    if (s !== null && s.params.length === vals.length) {
+      const cs = [];
+      for (let i = 0; i < vals.length; i++) {
+        const cv = L.coerce(vals[i], s.params[i], n, `'operator ${op}' 的第 ${i + 1} 个操作数`);
+        if (cv === null) return null;
+        cs.push(cv.code);
+      }
+      return { code: `(callfn (var ${lsym}) ${cs.join(' ')})`, type: s.ret };
+    }
+  }
   const list = asyVisible(L, `operator ${op}`);
   if (list.length === 0) return null;
   const raw = [];

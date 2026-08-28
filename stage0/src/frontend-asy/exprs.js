@@ -568,7 +568,20 @@ export function asyExprList(L, n, h) {
       // 所以同名的局部量遮住模块别名。
       const mq = L.modAlias(n.items[1]);
       if (mq !== null) return L.modVar(n, mq);
+      // 算符名当**值**用：`maxcoords(coords, operator >=)`（plain_scaling.asy:248）。
+      // asy 里算符就是"名字叫 operator X 的函数"，所以这里跟裸函数名当值用完全同一条路
+      // （单个候选出 `(fnref …)`、多个候选出不定案的记号，由 coerce 拿目标类型落地）。
+      // 先问局部/形参那一格：形参名也可以是算符名（见 asyFormals 里 asyFldSym 那一段）。
+      const on = isList(n.items[1]) && isAtom(n.items[1].items[1])
+        ? n.items[1].items[1].value : null;
+      if (on !== null && on.startsWith('operator ')) {
+        const osym = asyFldSym(on);
+        const olv = L.lookup(osym);
+        if (olv !== null) return { code: `(var ${osym})`, type: olv };
+        return asyNameOf(L, n, on);
+      }
       return L.nope(n, '带点的名字或算符名');
+
     }
     // 局部 -> this 的字段 -> 文件级，三档都在 nameOf 里（`cycle` 那个字面量共用它）。
     // 顺序解析：后面才声明的那份文件级变量在这里不算（量过 asy 报

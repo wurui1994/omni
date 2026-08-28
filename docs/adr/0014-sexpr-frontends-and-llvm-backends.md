@@ -4714,6 +4714,30 @@ tests/run.js 91 条全绿。新用例 `cases/119-dims-xform-nested`（十二行�
 tests/run.js 91 条全绿。新用例 `cases/120-builtin-gaps`（十三行输出，与 `asy -noV`
 逐字节一致；整个文件都走带 suffix 那一路，正是为了绕开上面那道坎）。
 
+### 算符名就是**普通名字**：当值传，也能当形参名
+
+asy 里算符是"名字叫 `operator X` 的函数"（这条从第二十三刀起就是这一层的底子），
+所以它也能出现在两个原先没铺到的位置：
+
+- **当值传**：`maxcoords(coords, operator >=)`（plain_scaling.asy:248）。走的是裸函数名
+  当值用那一条**同一条**路 —— 单个候选出 `(fnref …)`、多个候选出不定案的记号，
+  由 coerce 拿目标类型落地。原先 `plainName` 见到 `operator ` 开头就回 null，于是这一格
+  掉进"带点的名字或算符名"那句 nope。
+- **当形参名**：`coord[] maxcoords(coord[] in, bool operator <= (coord,coord))`
+  （plain_scaling.asy:41，那边源码 :43 有注释专门说这件事）。核心方言的符号得是个
+  标识符，所以形参名过一遍 `asyFldSym`（`operator <=` -> `asy__opfx60x61`）——
+  原先它**原样**漏进方言，`(fn pick ((in …) (operator <= …)) …)` 那一句在方言那边就散了。
+
+第二条不补的话第一条会变成一个**不报错的错答案**：`maxcoords(coords, operator >=)`
+编得过，而体里的 `a <= b` 还是去调文件级那份 `operator <=`，于是 m 与 M 算成同一个。
+所以 `asyOpUser` 现在先问一句局部/形参那一格（按 `asyFldSym` 的拼法查），
+有就走间接调用 —— 它遮住文件级同名的算符，与别的局部量遮住同名函数是同一条规矩。
+
+数字：`import plain;` 37 → 36。`import graph;` 148 没动。tests/asy 199 条、
+tests/run.js 91 条全绿。新用例 `cases/121-operator-name-value`（六行输出，与 `asy -noV`
+逐字节一致；里头那两句 `cmp le = operator <=;` 与 `int f(int,int) = operator ^;`
+量的正是"重载集靠目标类型定案"）。
+
 ## 后果与代价
 
 

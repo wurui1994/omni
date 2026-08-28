@@ -13,7 +13,7 @@
 import { isList, isAtom, head } from '../sexpr/read.js';
 import {
   ASY_NOPE, SCALARS, ASY_MODSTM, ASY_ARRELEM_TEXT, ASY_OPSYM, ASY_OPBAD, ASY_RESTPFX,
-  asyIsArr, asyElem, asyIsFn, asyCore,
+  asyIsArr, asyElem, asyIsFn, asyCore, asyFldSym,
 } from './types.js';
 import { ZERO } from './runtime.js';
 import { asyStmt, asyBody } from './stmts.js';
@@ -348,7 +348,12 @@ export function asyFormals(L, node) {
       if (ft === null) return null;
       const fnm = isAtom(start.items[1]) ? start.items[1].value : null;
       if (fnm === null) return L.err(start, '形参少了名字');
-      out.push({ name: fnm, type: ft, exp: exp, def: it.length === 5 ? it[4] : null, kw: kw });
+      // 形参名可以是**算符名**：`coord[] maxcoords(coord[] in, bool operator <= (coord,coord))`
+      // （plain_scaling.asy:41）—— 体里的 `a <= b` 调的就是这一格（那边源码里 :43 有注释
+      // 专门说这件事）。核心方言的符号得是个标识符，所以名字过一遍 asyFldSym；
+      // 查它的两处（asyOpUser 与算符名当值用那一档）也按同一个拼法查。
+      out.push({ name: asyFldSym(fnm), type: ft, exp: exp, def: it.length === 5 ? it[4] : null, kw: kw });
+
       continue;
     }
     if (!isList(start) || head(start) !== 'decidstart') return L.nope(start, '认不出的形参名');
@@ -364,7 +369,7 @@ export function asyFormals(L, node) {
 
     const nm = isAtom(start.items[1]) ? start.items[1].value : null;
     if (nm === null) return L.err(start, '形参少了名字');
-    out.push({ name: nm, type: t, exp: exp, def: it.length === 5 ? it[4] : null, kw: kw });
+    out.push({ name: asyFldSym(nm), type: t, exp: exp, def: it.length === 5 ? it[4] : null, kw: kw });
   }
   // `keyword` 的槽是**尾巴上一整段**：asy 那边普通形参排在它后面是语法错
   // （量过报 "normal parameter after keyword-only parameter"）。这一条我们同样比它严 ——
