@@ -156,6 +156,21 @@ export function asyCall(L, n) {
   // 而 findroot 那种形参正是要遮住同名的文件级函数。
   const lv = L.lookup(nm);
   if (lv !== null && asyIsFn(lv)) return asyFnValCall(L, n, nm, lv, `(var ${nm})`);
+  // 匿名函数体里调**外层的**函数值形参/局部量（第四十七刀）：base 里 plain_picture.asy:488
+  // 的 `add(new void(frame f, transform t, …) { d(f,t*T); })` —— `d` 是外层方法的形参，
+  // 类型是 drawer（一个函数类型）。位置在本层局部量之后、文件级候选之前：asy 的名字解析
+  // 是由内向外的，外层的局部量遮住同名的文件级函数。
+  if (L.cap !== null && L.cap !== undefined) {
+    let ot = null;
+    for (const s of L.cap.outer) if (s.has(nm)) ot = s.get(nm);
+    if (ot !== null && asyIsFn(ot)) {
+      const cv = L.capOf(n, nm);
+      if (cv === null) return null;
+      if (cv.code === undefined) return null;   // CAP_BAD：诊断已发
+      return asyFnValCall(L, n, nm, cv.type, cv.code);
+    }
+  }
+
   // 函数值的**文件级**变量（第三十七刀）：`typedef int F(int); F h; … h(5)`。
   // 位置照 nameOf 那一档的顺序 —— 局部、成员之后，候选表之前（那一档里有就不是函数名）。
   //

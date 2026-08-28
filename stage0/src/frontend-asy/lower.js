@@ -126,8 +126,9 @@
 // 以及函数值类型的**变量**（`real f(real) = twice;` 与 typedef 拼的那一份走同一条路）——
 // 类型全是字符串，所以它就是 `R(P,…)` 那个拼法，见 asyIsFn / fnTypeOf / fnValCall）。
 // **匿名函数**（`new int(int x){…}` -> 顶层的 `(cfn …)` 加用处上的 `(mkclo …)`，捕获边降边
-// 收，见 anonFn / capOf。捕获**按值**抓，而 asy 是按引用的 —— 所以外层名字在那个函数里
-// 被赋值过时这一刀拒，理由与量法写在 anonFn 的注释里，bad/anon-capref 钉着）。
+// 收，见 anonFn / capOf。捕获按**值**抓，而 asy 是按引用的 —— 所以那个外层名字在这个闭包
+// **之后**还被赋值时这一刀拒（改在闭包之前的两种语义同一个结果，见 assignsAfter）；
+// 抓函数值可以（`(cap d)` 就是一格 `(fnty …)`），抓 `this` 与裸字段名还在门外。
 // **typedef 与 `using`**（别名表 tyAlias：名字 -> 一串 {t, at}，`t` 是已经解析好的类型
 // 字符串，type() 一查就换掉 —— asy 的 typedef 不造新类型，所以"换掉"就是全部语义。
 // 存一串是因为同一个名字可以 typedef 多次，而名字解析是顺序的，见 aliasAt）。
@@ -286,7 +287,7 @@ import {
 // calls.js / stmts.js 要调这一族，而 exprs.js 要调它们两个 —— 加载器禁止环，所以反向走转接。
 import {
   asyExpr, asyLit, asyNameOf, asyOverPick, asyCandFnType, asyOverArg, asyAnonFn, asyCapOf,
-  asyAssignsTo, asyPromote, asyToPair, asyCoerce, asyExprList, asyIndex, asySlice, asyDotQual,
+  asyAssignsAfter, asyPromote, asyToPair, asyCoerce, asyExprList, asyIndex, asySlice, asyDotQual,
   asyField, asyMember, asyPairLit, asyTripleLit, asyPairCall, asyVecPairFn, asyTripleDir,
   asyTunitOf, asyUnitOf, asyLengthCall, asyLengthOf, asyStrCall, asyStrConvCall, asyNewArray,
   asyArrLit, asyArrMethod, asyBinary, asyPairArith, asyTripleArith, asyCmpCode, asyCompare,
@@ -1676,7 +1677,8 @@ class AsyLower {
    * 而 decls.js 自己又要 import modules.js 的三个 —— 所以这一条只能走转接。
    */
   modAlias(node) { return asyModAlias(this, node); }
-  modVar(n, mq) { return asyModVar(this, n, mq); }
+  /** 匿名函数体里问一个外层局部量（回 `(cap 名)` / CAP_BAD / null），见 capOf 的头注释 */
+  capOf(n, nm) { return asyCapOf(this, n, nm); }  modVar(n, mq) { return asyModVar(this, n, mq); }
   modCall(n, mq) { return asyModCall(this, n, mq); }
   declPass(u) { return asyDeclPass(this, u); }
   castFor(to, from, allowEc) { return asyCastFor(this, to, from, allowEc); }

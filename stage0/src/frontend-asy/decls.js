@@ -640,7 +640,13 @@ export function asyMethod(L, rec, cand, at) {
   L.push();
   if (!isStat) L.declare(cand.node, 'this', rec.name);
   for (const p of ps) L.declare(cand.node, p.name, p.type);
+  // 体的 AST 存一份：与文件级函数同一条（见 funBody）—— 里面的匿名函数要拿它问
+  // "这个外层名字在闭包之后还会不会被改"。方法这一路原来漏了这一句，于是 capOf 看到
+  // body 是 null 就一律拒，plain_picture.asy:488 的 `d(f,t*T)` 就是这么掉出去的。
+  const saveFnBody = L.fnBody;
+  L.fnBody = cand.node.items[4];
   const body = asyBody(L, cand.node.items[4], bodyRet);
+  L.fnBody = saveFnBody;
   L.pop();
   L.recAlias = keepAl;
   L.self = null;

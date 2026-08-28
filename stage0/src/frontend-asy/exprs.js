@@ -5,7 +5,7 @@
 //
 // 这一摊管"一个表达式怎么落地"，三段：
 //  1. 通用那一段：分派（asyExpr）、字面量、名字解析（asyNameOf，含重载集与 static）、
-//     匿名函数与捕获（asyAnonFn / asyCapOf / asyAssignsTo）、隐式转换（asyPromote /
+//     匿名函数与捕获（asyAnonFn / asyCapOf / asyAssignsAfter）、隐式转换（asyPromote /
 //     asyToPair / asyCoerce）、下标与切片、点后面那一层（asyDotQual / asyField / asyMember）。
 //  2. 内建面那一段：pair / triple 的字面量与函数、字符串函数、数组（new / 字面量 / 方法）。
 //  3. 算符那一段：asyBinary（asy 与核心方言不一致的 `/` `#` `%` `^` 全在这里换掉）、
@@ -221,7 +221,15 @@ export function asyAnonFn(L, n) {
   const saveScopes = L.scopes;
   const saveUpd = L.updates;
   const saveSelf = L.self;
-  L.cap = { outer: saveScopes, body: L.fnBody, list: [], seen: new Map() };
+  L.cap = {
+    outer: saveScopes,
+    body: L.fnBody,
+    // 这个匿名函数字面量在源文件里的起点：capOf 用它分"改在闭包之前"与"改在之后"
+    pos: n.span === undefined || n.span === null ? null : n.span.start,
+    list: [],
+    seen: new Map(),
+  };
+
   L.scopes = [new Map()];
   L.updates = [];
   L.self = null;   // 匿名函数体里没有接收者（捕获 this 这一刀不收，见 capOf）
@@ -280,12 +288,11 @@ export function asyCapOf(L, node, nm) {
     L.nope(node, '匿名函数里用外层的 this（捕获接收者是另一刀）');
     return CAP_BAD;
   }
-  if (asyIsFn(t)) {
-    L.nope(node, `捕获一个函数值 '${nm}'（闭包里再套闭包是另一刀）`);
-    return CAP_BAD;
-  }
-  // 按值 vs asy 的按引用：那个名字在外层函数里被赋值过就不收（理由见 anonFn 的头注释）
-  if (L.cap.body === null || asyAssignsTo(L, L.cap.body, nm)) {
+  // 按值 vs asy 的按引用：只有那个名字在**这个闭包之后**还会被改时才是两种语义
+  // （闭包之前赋的值，按值抓的时候已经是最新的那一份了）。base 里
+  // plain_picture.asy:1294 的 `if(copy) g=copy(g); pic.add(new void(…){ … g … });`
+  // 就是"改在前、抓在后"，两种语义同一个结果。
+  if (L.cap.body === null || asyAssignsAfter(L, L.cap.body, nm, L.cap.pos, false)) {
     L.nope(node, `捕获会被改的外层变量 '${nm}'（asy 的捕获是按引用的，`
       + '而 (mkclo …) 是按值抓一次 —— 收了就会给旧值)');
     return CAP_BAD;
@@ -295,16 +302,32 @@ export function asyCapOf(L, node, nm) {
   return { code: `(cap ${nm})`, type: t };
 }
 
-/** `nm` 在这棵子树里有没有被**赋值**过（`=`、`+=` 那一族、`++`/`--`）。保守：认名字不认作用域 */
-export function asyAssignsTo(L, node, nm) {
+/** 这棵子树的位置区间包不包住 pos */
+function asySpanHas(node, pos) {
+  if (node === null || node === undefined || node.span === undefined || node.span === null) return false;
+  return node.span.start <= pos && pos <= node.span.end;
+}
+
+/**
+ * `nm` 在 `pos`（那个匿名函数字面量的起点）**之后**还被赋值过吗？
+ * 保守：认名字不认作用域；`pos` 是 null（拿不到体的 AST）时一律算"会被改"。
+ * 循环里那一条要小心：赋值**写在**闭包前面，但循环会让它在闭包之后再跑一遍 ——
+ * 所以只要那个循环把 pos 包在里面，循环里对这个名字的赋值都算"之后"。
+ */
+export function asyAssignsAfter(L, node, nm, pos, inLoop) {
   if (!isList(node)) return false;
   const h = head(node);
+  const loop = h === 'while' || h === 'do' || h === 'for' || h === 'for-each';
+  const within = inLoop || (loop && asySpanHas(node, pos));
   let lhs = null;
   if (h === 'assign') lhs = node.items[1];
   else if (h === 'self' || h === 'prefix' || h === 'postfix') lhs = node.items[2];
   if (lhs !== null && isList(lhs) && head(lhs) === 'name-exp'
-      && L.plainName(lhs.items[1]) === nm) return true;
-  for (const it of node.items) if (asyAssignsTo(L, it, nm)) return true;
+      && L.plainName(lhs.items[1]) === nm) {
+    if (pos === null || within) return true;
+    if (node.span === undefined || node.span === null || node.span.start >= pos) return true;
+  }
+  for (const it of node.items) if (asyAssignsAfter(L, it, nm, pos, within)) return true;
   return false;
 }
 
