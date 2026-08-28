@@ -387,9 +387,6 @@ export function asyFormals(L, node) {
  * 有也不进类型身份 —— 所以不能走 formals()（它要求有名字，也要收默认值）。
  */
 export function asyFnTypeOf(L, ret, formalsNode, at) {
-  if (asyIsFn(ret)) {
-    return L.nope(at, '返回类型自己是函数类型（`real(real)(int)` 那种拼法有歧义）');
-  }
   const ps = [];
   // `guide(... guide[])`（plain_paths.asy:3 的 interpolate）：可变那一格在语法上与普通函数
   // 那边同一个形状 —— `(formals-rest 形参)` 是"只有它"，`(formals-rest formals 形参)` 是

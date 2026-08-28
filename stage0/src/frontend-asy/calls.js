@@ -87,6 +87,18 @@ export function asyCall(L, n) {
     }
     return asyFnValCall(L, n, '下标出来的那一格', fv.type, fv.code);
   }
+  // `h(3)(4)`：被调的是**上一次调用回来的那个值**（第四十二刀，返回类型自己是函数类型
+  // 那一族）。与下标那一条同一条路子 —— 只在语法上就认得出的位置上问，认出来就当
+  // 函数值调。量过 asy：`typedef real realfn(real); using G=realfn(real); G h=adder;`
+  // 之后 `h(3)(4)` 印 7。
+  if (isList(callee) && head(callee) === 'call') {
+    const fv = L.expr(callee);
+    if (fv === null) return null;
+    if (!asyIsFn(fv.type)) {
+      return L.err(n, `那一次调用回来的是 ${fv.type}，不是函数，调不了`);
+    }
+    return asyFnValCall(L, n, '上一次调用回来的那个值', fv.type, fv.code);
+  }
   if (nm === null) return L.nope(n, '调用一个不是普通名字的东西（函数值、方法、算符名）');
   if (nm === 'write') return L.err(n, `${ASY_NOPE}：write 出现在表达式位置（它是语句）`);
   // 方法体里的裸方法名（第二十刀）：量过 struct 的成员**遮住**同名的文件级函数

@@ -104,9 +104,10 @@ export const asyMangle = (t) => (asyIsArr(t) ? `arr_${asyMangle(asyElem(t))}` : 
  * `math.asy:446` 的 `real findroot(real f(real), …)` —— 函数类型的形参。
  *
  * 用 asy 的拼法而不是另造一个（`fn<real|real>` 之类）是为了诊断：报错里印的类型
- * 就是用户写的那几个字。代价是**返回类型自己是函数类型**时这个拼法有歧义
- * （`real(real)(int)` 的第一对括号分不清是谁的），所以那一种在 asyFnSplit 里认不出来、
- * 由调用方报"还没做" —— 认不出比猜错好。
+ * 就是用户写的那几个字。**返回类型自己是函数类型**也是这个拼法（第四十二刀）：
+ * `real(real)(real)` —— 形参表是最后那一对括号，见 asyFnSplit。量过 asy：
+ * 这种类型只能经 typedef 拼出来（`typedef real realfn(real); realfn adder(real a)…`），
+ * 直接写 `real(real) adder(real a)` 那边是 syntax error。
  */
 export const asyIsFn = (t) => t !== null && t !== undefined && t.length > 2 && t.endsWith(')');
 
@@ -125,21 +126,23 @@ export const ASY_NULL = '<null>';
 export const asyRefTy = (L, t) => asyIsArr(t) || asyIsFn(t) || L.isRec(t);
 
 
-/** `real(int,string)` -> `{ ret: 'real', params: ['int','string'] }`；认不出给 null。 */
+/** `real(int,string)` -> `{ ret: 'real', params: ['int','string'] }`；认不出给 null。
+ *  形参表是**最后**那一对括号（第四十二刀）：返回类型写在前面，所以
+ *  `real(real)(int)` 是"吃一个 int、回一个 real(real)"，而"吃一个 real(int)、回 real"
+ *  拼出来是 `real(real(int))` —— 那一对括号嵌在里面，两者分得开。 */
 export function asyFnSplit(t) {
-  let i = 0;
-  while (i < t.length && t.charAt(i) !== '(') i++;
-  if (i === 0 || i >= t.length) return null;
-  // 那个 '(' 必须与**最后一个字符**配对，否则就是 `real(real)(int)` 那种歧义拼法
+  if (!t.endsWith(')')) return null;
+  // 末尾那个 ')' 配到的 '(' 就是形参表的开头（从后往前数括号）
+  let i = -1;
   let d = 0;
-  let k = i;
-  while (k < t.length) {
+  let k = t.length - 1;
+  while (k >= 0) {
     const c = t.charAt(k);
-    if (c === '(') d++;
-    else if (c === ')') { d--; if (d === 0) break; }
-    k++;
+    if (c === ')') d++;
+    else if (c === '(') { d--; if (d === 0) { i = k; break; } }
+    k--;
   }
-  if (k !== t.length - 1) return null;
+  if (i <= 0) return null;
   const inner = t.slice(i + 1, t.length - 1);
   const params = [];
   if (inner !== '') {

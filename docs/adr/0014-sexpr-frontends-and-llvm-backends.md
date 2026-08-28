@@ -3391,6 +3391,48 @@ struct 字段走的是 `recordBody` 里的同一个 `probeTy`。**推不动的�
 只动 `frontend-asy/`（lower.js、decls.js、stmts.js），tests/sexpr 跳掉 —— 方言与后端
 没碰。
 
+### 返回类型自己是函数类型：那个"歧义"是自己想出来的
+
+`plain.asy:66-68` 是这三句：
+
+```asy
+using restoreThunk=void();
+using saveFunction=restoreThunk();
+saveFunction[] saveFunctions={};
+```
+
+`saveFunction` 的类型文本是 `void()()` —— 一个函数，回来的还是一个函数。以前
+`asyFnTypeOf` 里有一条 nope 拦着它，理由写的是「`real(real)(int)` 那种拼法有歧义」。
+**这一刀把那条理由推翻了**：不是歧义，是 `asyFnSplit` 从**前面**数括号。
+
+拼法照 asy 自己的，而 asy 的声明是**返回类型写在前面**：`realfn adder(real a)` 的
+类型文本就是 `real(real)(real)`。所以形参表永远是**最后**那一对括号，改成从后往前数
+就行了：
+
+- `real(real)(int)` -> ret `real(real)`、params `[int]`（吃一个 int、回一个 real(real)）；
+- `real(real(int))` -> ret `real`、params `[real(int)]`（吃一个函数、回一个 real）。
+
+两者分得开 —— 参数自己的括号**嵌在**最后那一对里面。所以没有歧义，只有一个数错方向的
+循环。`asyCore` 本来就是递归的（`(fnty (real) (fnty (real) real))`），一个字没改。
+
+量出来的两条边界：
+
+- 这种类型**只能经 typedef 拼出来**。直接写 `real(real) adder(real a) {…}` 真 asy 报
+  `syntax error` 并退 1 —— camp.y 里没有那条产生式，我们的语法表照它转写，所以也是
+  语法错。钉在 `tests/asy/strict/fnty-ret-inline.*`。
+- 回来的那个值要能**再调一次**（`h(3)(4)`，量过 asy 印 7）。被调的东西是个 `call`
+  节点，这与第三十七刀的 `fs[0](5)`（被调的是 `subscript`）是同一条路子：只在语法上
+  就认得出的位置上问一次，认出来就走 `asyFnValCall`。所以那一条 nope（"调用一个不是
+  普通名字的东西"）前面多了一个 `call` 分支，剩下的（方法当值、算符名）还在门外。
+
+外面的数：`import plain;` 2 条 → **1 条**，`import graph;` 182 → **181**。剩下那一条
+是 `plain_bounds.asy:657` —— 门槛在「把方法取出来当值」上（见上一刀）。
+
+跑的轴：`tests/asy`（151 passed，73.5s —— 多的两条是 `cases/76-fn-ret-fn` 与
+`strict/fnty-ret-inline`）、`tests/run.js`（91 passed，21.3s）、`tests/bootstrap`。
+只动 `frontend-asy/`（types.js、decls.js、calls.js），tests/sexpr 跳掉 —— 方言与后端
+没碰（`(fnty …)` 那一档方言里早就有）。
+
 
 
 
