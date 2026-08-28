@@ -4011,6 +4011,32 @@ asy 那边它留在被调方的代码里，是要编译的。等"被调方自己
 数字：`import plain;` 126 → 119。`import graph;` 152 不动。tests/asy 169 条、
 tests/run.js 91 条全绿。新用例 `cases/94-fnval-default` 与 `bad/fnval-default`。
 
+### 签名对不上的那一批：rgb(pen) / size(path[]) / rand(a,b) / tensorshade 的可选那一格
+
+119 里 10 条「没有能匹配的签名」逐条查过去，有 6 条是 prelude 那一边的签名与参考实现
+不一样，不是解析出了问题：
+
+- `pen rgb(pen)`（runtime.in:381 → pen.h:639 `torgb()`）我们只有 `rgb(real,real,real)`。
+  cmyk 那一支照 pen.h:620 抄（`sat=1-k; r=(1-c)*sat` …），GRAYSCALE 与 DEFCOLOR 两档
+  都走 :591 的 `greytorgb`（`r=g=b=grey`）—— 量过 `colors(rgb(currentpen)).length` 是 3，
+  DEFCOLOR 也算在那一档里。
+- `int size(path[])`（runpath.in:281）是各条路径的段数之和（量过是 5）。
+- `int rand(int a=0, int b=intMax)`（runmath.in:206）：asy **只有这一条**，`rand()` 走的是
+  两个默认值。我们原来是零实参的 `rand()`，两条并存会让 `rand()` 变歧义，所以是**换**
+  而不是加。伪随机数发生器本来就与 asy 不同（数列不同，这条差别一直在），所以用例只钉
+  范围，`rand()` 那一格的返回值一个字节都没动。
+- `tensorshade`（runpicture.in:230）的 `path[] b=NULL` 与 `pairarray2 *z=emptyarray`
+  我们写成了必填，于是 plain_picture.asy:1398 那个 7 实参的调用接不住。
+- `int system(string[])`（runtime.in:663）与 `void clear(string,int,bool=false)`
+  （runsystem.in:43，调试器那一族）：签名抄准，体是 abort。
+
+剩下 4 条各是另一回事，这一刀不动：`scaleT(transform,transform)`（plain_scaling.asy 的
+那个 struct）、`search(T[],T,bool(T,T))`（对 T 泛型的内建，得像 copy/sequence 那样现生
+一份 helper）、`draw(…)` 那一长串，以及 `clear(string,int)` 之外的 debugger 那一族。
+
+数字：`import plain;` 119 → 113。`import graph;` 152 不动。tests/asy 170 条、
+tests/run.js 91 条全绿。新用例 `cases/95-sig-batch`。
+
 ## 后果与代价
 
 

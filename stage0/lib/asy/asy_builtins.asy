@@ -959,10 +959,14 @@ void atbreakpoint(asy__thunk f) { }
 // (2) 伪随机（runmath.in:206/217）。asy 用的是 C 库的 random()；这一层自带一个
 // 线性同余（Numerical Recipes 那组常数），所以**同一个种子出来的数与真 asy 不一样**。
 int asy__seed = 1;
-int rand() {
+// runmath.in:206：asy 只有**这一条** rand（没有零实参那一份，`rand()` 走的是两个默认值），
+// 回的是 [a,b] 里的一个数。我们的伪随机数发生器与 asy 的不是同一个（那边是 C++ 的），
+// 所以**数列不同** —— 这条差别本来就在，这里只是把签名对上，`rand()` 那一格的返回值不变。
+int rand(int a = 0, int b = intMax) {
   asy__seed = (asy__seed * 1664525 + 1013904223) % 2147483647;
   if (asy__seed < 0) asy__seed = -asy__seed;
-  return asy__seed;
+  if (a == 0 && b == intMax) return asy__seed;
+  return a + asy__seed % (b - a + 1);
 }
 void srand(int s) { asy__seed = s; }
 real unitrand() { return rand() / 2147483647.0; }
@@ -1469,7 +1473,7 @@ void gouraudshade(frame f, path[] g, bool stroke=false, pen fillrule=currentpen,
   abort("gouraudshade 还没做");
 }
 void tensorshade(frame f, path[] g, bool stroke=false, pen fillrule=currentpen,
-                 pen[][] p, path[] b, pair[][] z, bool copy=true) {
+                 pen[][] p, path[] b=null, pair[][] z=new pair[][], bool copy=true) {
   abort("tensorshade 还没做");
 }
 void functionshade(frame f, path[] g, bool stroke=false, pen fillrule=currentpen,
@@ -1656,6 +1660,41 @@ int rename(string src, string dst) { abort("rename 还没做（这一层不动�
 // asy 的 exit() 是**正常**退出（状态 0）；这一层只有 abort 那条越界路径（非零退出），
 // 所以这条也是 abort —— 差别写在明处。
 void exit() { abort("exit 还没做（这一层没有'正常退出'这条原语）"); }
+
+// runtime.in:381 `rgb(pen)` → pen.h:639 `torgb()`：cmyk 走 cmyktorgb（:620
+//   `sat=1-k; r=(1-c)*sat` …），别的（GRAYSCALE 与 DEFCOLOR 两档，量过
+//   `colors(rgb(currentpen)).length` 是 3）走 greytorgb（:591 `r=g=b=grey`）。
+pen rgb(pen p) {
+  pen q = pencopy(p);
+  if (q.iscmyk) {
+    real sat = 1 - q.black;
+    q.red = (1 - q.cyan) * sat;
+    q.green = (1 - q.magenta) * sat;
+    q.blue = (1 - q.yellow) * sat;
+    q.cyan = 0; q.magenta = 0; q.yellow = 0; q.black = 0;
+    q.iscmyk = false;
+  } else if (!q.isrgb) {
+    q.red = q.gray; q.green = q.gray; q.blue = q.gray;
+  }
+  q.gray = 0;
+  q.isrgb = true;
+  return q;
+}
+
+// runpath.in:281：一族路径的段数之和（量过 `{(0,0)--(1,1)--(2,0), (0,0)--(1,0)}` 是 5）。
+// 注意与 `size(path)` 一样，这里数的是**结点数**（我们的 path 上 size 就是那个，见 :479）。
+int size(path[] p) {
+  int count = 0;
+  for (path g : p) count += size(g);
+  return count;
+}
+
+// runtime.in:663 system(string[])：起一个进程。这一层不起进程。
+int system(string[] s) { abort("system 还没做（这一层不起进程）"); return 0; }
+// runsystem.in:43 clear(file,line,warn)：调试器那一族的"清一个断点"。
+void clear(string file, int line, bool warn=false) {
+  abort("clear(string,int) 还没做（调试器那一族）");
+}
 
 // 下面这些的签名照量到的抄，体做不动 —— 各自缺的东西写在自己那一行。
 bool eof(file f) { abort("eof(file) 还没做（这一层只有 stdin/stdout，没有真的读文件）"); return true; }
