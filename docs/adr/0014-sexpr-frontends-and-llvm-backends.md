@@ -4171,6 +4171,25 @@ nope。可 base 里就有四处这么写：`plain_picture.asy:979` 的 `drawAll`
 `import graph;` 152 不动。tests/asy 176 条、tests/run.js 91 条全绿。
 新用例 `cases/100-local-fn-capture`（含"不抓外层"那条老路的回归）。
 
+### 同名的变量声明在后面时，同名的**函数**还是看得见的
+
+`plain_arrows.asy:337` 的 `arrowbar EndArrow(…)=Arrow;` 报的是「'Arrow' 在这里还不是一个
+变量 —— 文件级的 Arrow 声明在后面」。理由指错了地方：那个 `Arrow` 要的是 `:325` 的**函数**
+Arrow，而同名的**变量**（`:443` 的 `Arrow=Arrow()`）确实在后面。asy 里变量与函数在同一档里
+按签名分，顺序解析只挡住那个变量，挡不住早就声明了的函数。
+
+改一行：`nameOf` 里那句 `if (L.globals.has(nm)) return L.gvarLate(…)` 加一个条件 ——
+同名的可见函数候选为空时才报"还不是一个变量"，有就往下走到"裸函数名当值用"那一档
+（单候选直接 `(fnref …)`，多候选交给 coerce 按目标类型定案）。顺序解析这条纪律没松：
+`gvarLate` 那句对**变量**照旧。
+
+顺带说清 asy 自己的边界（量过）：默认值里引用后面才声明的**变量**，asy 那边照样报
+"no matching variable of name" —— 所以这一刀补的不是"放宽顺序"，只是"别把函数也一起挡了"。
+
+数字：`import plain;` 98 → 95（Arrow / ArcArrow / Bar 三处）。`import graph;` 152 不动。
+tests/asy 177 条、tests/run.js 91 条全绿。新用例
+`cases/101-fn-before-samename-var`（含重载集那一支）。
+
 ## 后果与代价
 
 

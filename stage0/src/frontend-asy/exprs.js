@@ -112,7 +112,12 @@ export function asyNameOf(L, n, nm) {
     return L.nope(n, `函数里引用文件级变量 '${nm}'（模块级变量收 int/real/bool/string、`
       + 'pair/triple、struct，与它们的一维数组 —— 这一条不在里面）');
   }
-  if (L.globals.has(nm)) return L.gvarLate(n, nm);
+  // 文件级的同名变量声明在**后面**（顺序解析挡住它）时，还要问一句"同名的**函数**呢"：
+  // asy 里变量与函数在同一档里按签名分，顺序只挡住那个变量，挡不住早就声明了的函数。
+  // plain_arrows.asy:337 的 `arrowbar EndArrow(…)=Arrow;` 就是这一格 —— 那个 `Arrow`
+  // 是 :325 的**函数** Arrow，而同名的变量在 :443 才出现（`Arrow=Arrow()`）。
+  // 少了这一句，报的是"'Arrow' 在这里还不是一个变量"，理由指错了地方。
+  if (L.globals.has(nm) && asyVisible(L, nm).length === 0) return L.gvarLate(n, nm);
   // 裸的**函数名**当值用（`findroot(f, a, b)` 的那个 f）。只有一个候选时才收 ——
   // 有多个重载时"是哪一个"要靠期望类型定案，而这一层是自底向上定型的，没有期望类型可问。
   // **实参位置**上那一条早就补了（见 overArg / fit：callArgs 先不定案，等 fit 拿槽的类型
