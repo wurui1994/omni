@@ -3903,6 +3903,30 @@ syntax error），所以 prelude 里换成 `src`/`dst` —— 形参名换掉不
 数字：`import plain;` 173 → 153。`import graph;` 153 不动。tests/asy 164 条、
 tests/run.js 91 条全绿。新用例 `cases/90-more-builtins` 与 `strict/alias-fnty`。
 
+### 点号左边那个名字也要能捕获
+
+153 那一堆里 12 条是「调用一个不是普通名字的东西」。挨个看过去，这 12 条是**六件**
+不同的事（显式调 `operator init`、`(above ? add : prepend)(…)`、部分应用的
+`operator ..`、`this[k]`、`((F)map.operator init)()`，以及最大的一族 5 条），
+而那 5 条根本不是"调了个奇怪的东西"—— 是 `arrowhead.arcsize(p)`
+（plain_arrows.asy:364/376/392/404）与 `srcCopy.fit(…)`（plain_picture.asy:1022），
+两者都在**匿名函数体里**，点号左边那个名字是**外层函数的局部量**。
+
+`asyNameOf` 早就有那一档（局部 → 外层局部（`capOf`）→ this 的字段 → 文件级），
+但 `asyDotQual` 只问了前一档：`L.lookup(base)` 落空就直接往模块别名、static 那边走，
+一路走空之后由 `asyCall` 兜底报"调用一个不是普通名字的东西"。话说得偏 —— 缺的是捕获，
+不是"调用形状不认识"。补的就是 `asyDotQual` 里对应位置的一句 `capOf`，次序照 `asyNameOf`。
+
+量过 asy：`struct S { real k=3; real f(real x){return k*x;} }` 加
+`fn mk(S s){ return new real(real x){ return s.f(x); }; }`，`mk(s)(4)` 印 12；
+字段读（`s.k + x`）走的是同一条 `dotQual`，一并通了。新用例 `cases/91-cap-recv` 里还
+钉了第三格：接收者是外层的**局部**，而且闭包之后又改了它的字段 —— struct 是引用语义，
+所以"按引用捕获"与"按值抓那个引用"在这一格是同一个结果（印 14），`capOf` 那条
+"会被改的外层变量不收"因此不该拦它，也确实没拦。
+
+数字：`import plain;` 153 → 145。`import graph;` 153 → 152。tests/asy 165 条、
+tests/run.js 91 条全绿。新用例 `cases/91-cap-recv`。
+
 ## 后果与代价
 
 

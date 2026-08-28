@@ -552,6 +552,18 @@ export function asyDotQual(L, node) {
   if (base !== null) {
     const t = L.lookup(base);
     if (t !== null) return { recv: { code: `(var ${base})`, type: t }, field: f };
+    // 匿名函数体里：点号左边那个名字也可能是**外层函数的局部量**，那就得捕获进来。
+    // 位置照 nameOf 那一档的次序：闭包自己的局部（上面那一句）、外层的局部（这一句）、
+    // this 的字段、文件级。少了这一句，`s.f(x)` 这种形状会漏到最后报"调用一个不是普通
+    // 名字的东西"—— 话说得偏，真正缺的是捕获。量过 asy：
+    // `fn mk(S s){ return new real(real x){ return s.f(x); }; }` 之后 `mk(s)(3)` 印 6；
+    // base 里 plain_arrows.asy:364 的 `arrowhead.arcsize(p)` 与 plain_picture.asy:1022 的
+    // `srcCopy.fit(…)` 都是这一格。
+    if (L.cap !== null) {
+      const c = asyCapOf(L, node, base);
+      if (c === CAP_BAD) return DOT_BAD;
+      if (c !== null) return { recv: c, field: f };
+    }
     // 方法体里的裸字段名当接收者（第二十刀）：`inner.get()` 里的 inner 是 this 的字段
     const sf = L.selfField(base);
     if (sf !== null) return { recv: { code: `(fld (var this) ${base})`, type: sf.type }, field: f };
