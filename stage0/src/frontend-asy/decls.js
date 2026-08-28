@@ -338,20 +338,30 @@ export function asyFormals(L, node) {
     // `keyword` 那个标记走的是同一条路（量过它也不进签名身份：先 `void p(int keyword a)`
     // 再 `void p(int a)` 是**替换** —— 之后 `p(a=5)` 与 `p(5)` 都走后者）。
     const exp = isList(ex) && head(ex) === 'explicit';
-    const t = L.type(it[2], '形参');
+    const t0 = L.type(it[2], '形参');
     const start = it[3];
-    if (t === null) return null;
+    if (t0 === null) return null;
     // `real f(real)`：形参名后面挂一个形参表 —— 这个槽的类型是**函数类型**
     // （量出来的第一拦路虎，见 asyIsFn 的注释）。
     if (isList(start) && head(start) === 'fundecidstart') {
-      const ft = asyFnTypeOf(L, t, start.items[2], start);
+      const ft = asyFnTypeOf(L, t0, start.items[2], start);
       if (ft === null) return null;
       const fnm = isAtom(start.items[1]) ? start.items[1].value : null;
       if (fnm === null) return L.err(start, '形参少了名字');
       out.push({ name: fnm, type: ft, exp: exp, def: it.length === 5 ? it[4] : null, kw: kw });
       continue;
     }
-    if (!isList(start) || head(start) !== 'decidstart' || start.items.length !== 2) return L.nope(start, '带维度的形参名');
+    if (!isList(start) || head(start) !== 'decidstart') return L.nope(start, '认不出的形参名');
+    // 维度挂在**名字**后面（`void f(real x[])` 就是 `real[] x`，量过一模一样）——
+    // 与 `real a[];` 那条同一件事，只是这里在形参表里。`... real inset[]` 也走这里
+    // （plain_Label.asy:577 的 `frame pack(pair align=2S ... object inset[])`）。
+    let t = t0;
+    if (start.items.length > 2) {
+      const dd = L.dimsDepth(start.items[2]);
+      if (dd === null) return L.nope(start, '认不出的形参名维度');
+      for (let k = 0; k < dd; k++) t = `${t}[]`;
+    }
+
     const nm = isAtom(start.items[1]) ? start.items[1].value : null;
     if (nm === null) return L.err(start, '形参少了名字');
     out.push({ name: nm, type: t, exp: exp, def: it.length === 5 ? it[4] : null, kw: kw });

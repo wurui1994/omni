@@ -18,7 +18,7 @@
 
 import { isList, isAtom, isStr, head } from '../sexpr/read.js';
 import {
-  ASY_NOPE, DOT_BAD, CAP_BAD, ASY_ARRELEM_TEXT, ASY_CYCLE, ASY_NEWFRAME, ASY_RESTPFX, asyOpText,
+  ASY_NOPE, DOT_BAD, CAP_BAD, ASY_ARRELEM_TEXT, ASY_CYCLE, ASY_NEWFRAME, ASY_XFORM, ASY_RESTPFX, asyOpText,
   asyIsArr, asyElem, asyIsFn, asyFldSym, ASY_PAIR_TY, ASY_TRIPLE_TY, asyCore, ASY_NULL, asyRefTy,
 } from './types.js';
 import { ZERO, ASY_PAIRFN, ASY_STRFN, ASY_STR_DEPS, strLit } from './runtime.js';
@@ -786,7 +786,9 @@ export function asyMember(L, n, recv, nm) {
 export function asyPairLit(L, n) {
   const parts = L.flat(n.items[1], 'args');
   if (parts.length === 3) return asyTripleLit(L, n, parts);
+  if (parts.length === 6) return asyXformLit(L, n, parts);
   if (parts.length !== 2) return L.nope(n, `${parts.length} 个分量的字面量`);
+
   const x = asyCoerce(L, asyExpr(L, parts[0]), 'real', parts[0], 'pair 的 x');
   const y = asyCoerce(L, asyExpr(L, parts[1]), 'real', parts[1], 'pair 的 y');
   if (x === null || y === null) return null;
@@ -800,6 +802,23 @@ export function asyTripleLit(L, n, parts) {
   const z = asyCoerce(L, asyExpr(L, parts[2]), 'real', parts[2], 'triple 的 z');
   if (x === null || y === null || z === null) return null;
   return { code: `(vlit ${ASY_TRIPLE_TY} ${x.code} ${y.code} ${z.code} (real 0.0))`, type: 'triple' };
+}
+
+/** `(x,y,xx,xy,yx,yy)`（camp.y 的六分量产生式）是一个 **transform**。绘图层里
+ *  transform 是个 struct，所以这里降成对那个六参构造函数的一次调用（见 ASY_XFORM）——
+ *  跟 `cycle` / `newframe` 同一条路子：前端只认这一个约定的名字。 */
+function asyXformLit(L, n, parts) {
+  const cs = asyVisible(L, ASY_XFORM);
+  if (cs.length === 0) {
+    return L.nope(n, '6 个分量的字面量（它是绘图层的 transform，要 `import plain;`）');
+  }
+  const raw = [];
+  for (const p of parts) {
+    const v = asyExpr(L, p);
+    if (v === null) return null;
+    raw.push({ key: null, node: p, spread: false, v: v, lines: null });
+  }
+  return asyApplyCall(L, n, 'transform', cs, raw, null);
 }
 
 /** pair / triple 上的内建函数（名单见 ASY_PAIRFN）。实参是 int/real 时先隐式转成 pair。 */
@@ -1361,7 +1380,15 @@ export function asyCompare(L, n, op) {
   const a = asyExpr(L, n.items[2]);
   const b = asyExpr(L, n.items[3]);
   if (a === null || b === null) return null;
-  // 用户的 `operator ==`（第二十三刀）。量过 `!=` **不会**借用它 ——
+  // 两边**都是** `null` 时先拦掉，拦在用户重载之前。asy 那边报的是歧义（每个 struct 都
+  // 有一份 `operator ==`，全都能匹配 —— 量过那张候选表几十行）。我们的 struct 没有
+  // 自动生成的那一份，于是"用户写过的那一份"会变成**唯一**候选、被挑中，`<null>`
+  // 那个空记号就漏进核心方言了（自从 prelude 有了 `operator ==(transform,transform)`
+  // 这就是真会发生的事）。见 strict/null-both。
+  if (a.type === ASY_NULL && b.type === ASY_NULL) {
+    return L.err(n, `'${op}' 两边要同型：左是 ${a.type}，右是 ${b.type}`);
+  }
+
   // 只定义了 `==` 时 `a != b` 走的还是内建的身份比较，所以这里是逐个算符问的。
   const u = asyOpUser(L, n, op, [a, b], asyOpBuiltinSig(L, [a, b]));
   if (u !== null) return u;

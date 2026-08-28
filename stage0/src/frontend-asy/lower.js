@@ -1230,6 +1230,15 @@ class AsyLower {
     else this.recVis.set(bn, had);
     if (e === undefined || this.diags.errorCount() > mark) return null;
     al.map.set(bn, { t: e.rec.name, bi: al.bi });
+    // 嵌套那个 struct **自己的**体里也要认得自己的名字：方法体是后一遍才降的，那时候
+    // recVis 上面已经撤了、recAlias 换成了它自己那张（decls.js 里 asyMethod 那一句），
+    // 于是 `Inner copy() { Inner b = new Inner; … }`（plain_picture.asy:236 的 bounds3）
+    // 就找不着类型了。所以把外层这一刻**已经声明过**的体内类型连同它自己的名字，
+    // 抄进它自己那张表（bi 记 0 —— 在它自己的体里从第一项起就看得见）。
+    for (const [k, v] of al.map) {
+      if (v.bi <= al.bi && !e.rec.tyAlias.has(k)) e.rec.tyAlias.set(k, { t: v.t, bi: 0 });
+    }
+
     // 体外那句诊断要说得对（见 recElsewhere）：这个类型是**某个 struct 体里**声明的
     e.rec.inRec = outer.name;
     this.records.delete(outer.name);
@@ -1367,11 +1376,18 @@ class AsyLower {
         // 而 struct 里别的方法调 `size()` 读的是这一格。语法上它是 vardec 里的
         // `(fundecidstart 名字 形参表)`，所以这里把类型换成 `(fnty …)` 就够了。
         const isFnFld = isList(start) && head(start) === 'fundecidstart' && start.items.length === 3;
-        if (!isFnFld
-            && (!isList(start) || head(start) !== 'decidstart' || start.items.length !== 2)) {
-          return this.nope(start, '带维度或形参表的字段名');
+        if (!isFnFld && (!isList(start) || head(start) !== 'decidstart')) {
+          return this.nope(start, '认不出的字段名');
         }
         let fty = isFnFld ? this.fnTypeOf(ft, start.items[2], start) : ft;
+        // 维度挂在**名字**后面（`struct S { real x[]; }` 就是 `real[] x`，量过一样）——
+        // 与形参表里那一条、文件级 `real a[];` 那一条同一件事。
+        if (!isFnFld && start.items.length > 2 && fty !== null) {
+          const dd = this.dimsDepth(start.items[2]);
+          if (dd === null) return this.nope(start, '认不出的字段名维度');
+          for (let k = 0; k < dd; k++) fty = `${fty}[]`;
+        }
+
         if (fty === null) return null;
         if (isVarFld) {
           if (isFnFld) return this.nope(start, '`var` 后面跟形参表的字段');

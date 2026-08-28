@@ -85,6 +85,12 @@ export const ASY_CYCLE = 'cyclepath';
  *  求一次就是新的一个（当成变量的话两处 `return newframe;` 会共用同一格）。 */
 export const ASY_NEWFRAME = 'asy__newframe';
 
+/** 六分量字面量 `(x,y,xx,xy,yx,yy)` 落到哪个名字上（见 asyXformLit）：camp.y 那条产生式
+ *  出来的是一个 **transform**，而 transform 在绘图层是个 struct，所以约定的是绘图层里
+ *  那个六参构造函数 `transform xform(real,real,real,real,real,real)`。 */
+export const ASY_XFORM = 'xform';
+
+
 /** 文件级变量收得下的类型（第三十刀放开）：int/real/bool/string、pair/triple、
  *  记录，以及它们的一维数组。核心方言的 `(global …)` 原先只收标量，理由写的是
  *  「聚合的身份不在 MIR 的 8 位类型码里」—— 量下来那个身份**根本不需要**：class 与

@@ -300,6 +300,22 @@ transform inverse(transform t) {
   return xform(-(ixx * t.x + ixy * t.y), -(iyx * t.x + iyy * t.y), ixx, ixy, iyx, iyy);
 }
 
+// 变换相等是**逐分量**比（runtime.in 的 transformEquals）。我们的 struct 是引用类型，
+// 默认的 `==` 比的是身份 —— 于是 base 里 `T == identity()`、`s == identity()`
+// （plain_picture.asy:650/872/907）全会判错，所以这两支要显式给。
+bool operator ==(transform a, transform b) {
+  return a.x == b.x && a.y == b.y && a.xx == b.xx
+      && a.xy == b.xy && a.yx == b.yx && a.yy == b.yy;
+}
+
+bool operator !=(transform a, transform b) { return !(a == b); }
+
+// `real identity(real)` 是内建函数（builtin.cc:767/848 的 addRealFunc）——
+// 跟 `transform identity()`、`real[][] identity(int)` 同名不同签名。
+// plain_picture.asy:85 的 `scaleT(identity,identity)` 要的是这一支（scalefcn=real(real)）。
+real identity(real x) { return x; }
+
+
 // ---------------------------------------------------------------- pen
 // asy 的 pen 是值类型，我们的 struct 是引用类型 —— 所以凡是"改一支笔"的地方都
 // 先 pencopy。setwidth/setcolor 是 `p + q` 要的：q 显式设过的属性盖住 p 的那一份。

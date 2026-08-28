@@ -4648,6 +4648,39 @@ get/advance/valid 也都是），发出来是 `(callfn (fld 接收者 字段))`�
 没动。tests/asy 196 条、tests/run.js 91 条全绿。新用例 `cases/118-code-quote`
 （六行输出，与 `asy -noV` 逐字节一致）。
 
+### 名字后面的维度、六分量的变换，以及嵌套 struct 认得自己
+
+四个各自独立的小口子，凑成一刀是因为它们各只值一两行：
+
+- **维度挂在名字后面**。`void f(real x[])` 与 `real[] x` 是同一件事（量过一模一样），
+  `struct S { real x[]; }`、`... object inset[]`（plain_Label.asy:577 的 `pack`）
+  也一样。文件级 `real a[];` 这一条本来就有，缺的只是形参表与字段那两处：两边都
+  按 `dimsDepth` 往类型上叠 `[]`。顺手把两处那句"带维度的形参名 / 带维度或形参表的
+  字段名"改成"认不出的形参名 / 认不出的字段名"—— 剩下的形状才是真没做。
+- **六分量字面量**。`(x,y,xx,xy,yx,yy)` 在 camp.y 里出的是一个 **transform**
+  （plain_constants.asy:40 的 `zeroTransform=(0,0,0,0,0,0)`）。transform 在绘图层是
+  个 struct，所以这里跟 `cycle` / `newframe` 同一条路子：约定一个名字
+  （`ASY_XFORM` = `xform`，绘图层那个六参构造函数），降成对它的一次调用。
+- **transform 的 `==`**。runtime.in 里它是**逐分量**比，而我们的 struct 是引用类型、
+  默认的 `==` 比身份 —— 于是 base 里 `T == identity()`（plain_picture.asy:650/872/907）
+  全会判错。prelude 补上 `==` / `!=` 两支。顺带补 `real identity(real)`：
+  它是内建函数（builtin.cc:767/848 的 `addRealFunc`），跟 `transform identity()`
+  同名不同签名，plain_picture.asy:85 的 `scaleT(identity,identity)` 要的是它。
+- **嵌套 struct 的方法体里认得自己**。`bounds3 copy() { bounds3 b=new bounds3; … }`
+  （plain_picture.asy:236）：嵌套那个名字原先只进**外层**记录的体内别名表，而方法体是
+  后一遍才降的，那时 recAlias 已经换成了它**自己**那张。所以 recNested 现在把外层
+  这一刻已声明过的体内类型连同它自己的名字一并抄进它自己那张表（bi 记 0）。
+
+多出来的那一支 `operator ==(transform,transform)` 顺带炸出一个真 bug：`null == null`
+原先靠"两边同型"那句挡住，而现在**用户写过的那一份**成了唯一候选、被挑中，`<null>`
+那个空记号就漏进核心方言（跑起来是一句 "null reference"）。asy 那边报的是歧义 ——
+每个 struct 都自带一份 `operator ==`，几十行候选全都能匹配；我们的 struct 没有自动
+生成的那一份，所以这条得**显式**拦在用户重载之前。见 strict/null-both。
+
+数字：`import plain;` 43 → 40。`import graph;` 148 没动。tests/asy 197 条、
+tests/run.js 91 条全绿。新用例 `cases/119-dims-xform-nested`（十二行输出，与
+`asy -noV` 逐字节一致）。带点的嵌套类型名（`Outer.Inner`）还是不收 —— 那是另一刀。
+
 ## 后果与代价
 
 
