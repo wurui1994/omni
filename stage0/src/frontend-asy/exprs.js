@@ -260,8 +260,8 @@ export function asyAnonFn(L, n) {
   // 差别写在明处：默认值的**表达式**在这里被丢掉了（asy 那边它留在被调方，由
   // push_default 触发），所以通过这个值调的时候一个实参都省不了 —— 那一格在
   // fnValCall 里是一句 nope，不是悄悄给零值。默认值表达式本身也就没有被查过型。
-  // 套一层的匿名函数：里层要抓的可能是外层的**捕获**，而捕获不是局部量 —— 另一刀
-  if (L.cap !== null) return L.nope(n, '匿名函数里再套一个匿名函数');
+  // 套一层的匿名函数（这一刀）：里层要抓的可能是外层的**捕获**而不是局部量 ——
+  // 那时候 capOf 顺着 cap.prev 往上问一层，外层于是也跟着抓一格（见 asyCapOf 末尾）。
   return asyCloFrom(L, n, ret, ps, n.items[3]);
 }
 
@@ -275,6 +275,8 @@ export function asyCloFrom(L, n, ret, ps, bodyNode) {
   const saveScopes = L.scopes;
   const saveUpd = L.updates;
   const saveSelf = L.self;
+  const saveCap = L.cap;
+  const saveBody = L.fnBody;
   L.cap = {
     outer: saveScopes,
     body: L.fnBody,
@@ -283,19 +285,23 @@ export function asyCloFrom(L, n, ret, ps, bodyNode) {
     list: [],
     seen: new Map(),
     bx: new Map(),
+    // 外面那一层闭包（没有就是 null）：里层抓不到的名字顺着它往上问
+    prev: saveCap === undefined ? null : saveCap,
   };
 
   L.scopes = [new Map()];
   L.updates = [];
   L.self = null;   // 闭包体里没有接收者（捕获 this 这一刀不收，见 capOf）
+  L.fnBody = bodyNode;   // 再套一层时，里层那个 cap 的"外层体"就是这一段
   let bad = false;
   for (const p of ps) if (L.declare(n, p.name, p.type) === null) bad = true;
   const body = bad ? null : asyBody(L, bodyNode, ret);
   const caps = L.cap.list;
-  L.cap = null;
+  L.cap = saveCap;
   L.scopes = saveScopes;
   L.updates = saveUpd;
   L.self = saveSelf;
+  L.fnBody = saveBody;
   if (body === null) return null;
   // 掉出尾巴补一条零值 ret（与 funBody 同一条：核心方言的检查在编译期）
   const last = body.length === 0 ? '' : body[body.length - 1];
@@ -313,8 +319,11 @@ export function asyCloFrom(L, n, ret, ps, bodyNode) {
   const vals = [];
   for (const c of caps) {
     cs.push(`(${c.name} ${asyCore(c.type)})`);
-    vals.push(`(var ${c.name})`);
+    // 抓这一格的**读法**是在外面那一层里算的：外层是普通函数体时就是 `(var 名)`，
+    // 外层自己也是个闭包时可能是 `(cap 名)`（见 asyCapOf 末尾那一段）。
+    vals.push(c.val === undefined ? `(var ${c.name})` : c.val);
   }
+
   const params = [];
   const pts = [];
   for (const p of ps) {
@@ -343,14 +352,14 @@ export function asyCapOf(L, node, nm) {
       bx = b === undefined ? null : b;
     }
   }
-  if (t === null) return null;
+  if (t === null) return asyCapUp(L, node, nm);
   // 装了箱的（见 declareBox / needsBox）：抓走的是**那一格数组**，读写都穿到箱子里去，
   // 于是闭包里外看见的是同一格 —— 这一档就是 asy 的按引用捕获。
   if (bx !== null) {
     if (!L.cap.seen.has(nm)) {
       L.cap.seen.set(nm, t);
       L.cap.bx.set(nm, bx.sym);
-      L.cap.list.push({ name: bx.sym, type: `${t}[]` });
+      L.cap.list.push({ name: bx.sym, type: `${t}[]`, val: `(var ${bx.sym})` });
     }
     return { code: `(aget (cap ${bx.sym}) (int 0))`, type: t };
   }
@@ -371,8 +380,42 @@ export function asyCapOf(L, node, nm) {
     return CAP_BAD;
   }
   L.cap.seen.set(nm, t);
-  L.cap.list.push({ name: nm, type: t });
+  L.cap.list.push({ name: nm, type: t, val: `(var ${nm})` });
   return { code: `(cap ${nm})`, type: t };
+}
+
+/**
+ * 里层闭包抓的那个名字在**外层闭包的捕获**里（不是它的局部量）。办法是顺着 `cap.prev`
+ * 往上问一层：外层于是也跟着抓一格，回来的 `code` 就是"在外层那一帧里怎么读它"，
+ * 正好当里层这一格的 `val`（mkclo 是在外层体里发的）。
+ *
+ * 装了箱的那一格要**整个箱子**往下传，不是箱子里的值 —— 不然穿两层之后就变回按值了。
+ */
+function asyCapUp(L, node, nm) {
+  const prev = L.cap.prev === undefined ? null : L.cap.prev;
+  if (prev === null) return null;
+  const had = L.cap.seen.get(nm);
+  if (had !== undefined) {
+    const bs = L.cap.bx.get(nm);
+    if (bs !== undefined) return { code: `(aget (cap ${bs}) (int 0))`, type: had };
+    return { code: `(cap ${nm})`, type: had };
+  }
+  const save = L.cap;
+  L.cap = prev;
+  const up = asyCapOf(L, node, nm);
+  L.cap = save;
+  if (up === null) return null;
+  if (up === CAP_BAD) return CAP_BAD;
+  const pbx = prev.bx.get(nm);
+  if (pbx !== undefined) {
+    L.cap.seen.set(nm, up.type);
+    L.cap.bx.set(nm, pbx);
+    L.cap.list.push({ name: pbx, type: `${up.type}[]`, val: `(cap ${pbx})` });
+    return { code: `(aget (cap ${pbx}) (int 0))`, type: up.type };
+  }
+  L.cap.seen.set(nm, up.type);
+  L.cap.list.push({ name: nm, type: up.type, val: up.code });
+  return { code: `(cap ${nm})`, type: up.type };
 }
 
 /** 这棵子树的位置区间包不包住 pos */
@@ -441,7 +484,9 @@ function asyUsesName(node, nm) {
  * （plain_picture.asy:1294 就是这一格）—— 不装箱是为了让绝大多数闭包的代码不变。
  */
 export function asyNeedsBox(L, nm) {
-  if (L.cap !== null) return false;                       // 已经在闭包里了（套一层是另一刀）
+  // 闭包体里也算（这一刀）：`L.fnBody` 在 asyCloFrom 里换成了这个闭包自己的体，
+  // 所以"里层还有函数会改它"这一问在闭包里问的是对的一段。原型是 plain.asy:173 的
+  // `Iter_int` —— `int index = n;` 就在一个匿名函数体里，而里层三个匿名函数改它。
   if (L.fnBody === null || L.fnBody === undefined) return false;
   return asyBoxScan(L, L.fnBody, nm);
 }

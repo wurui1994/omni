@@ -1550,10 +1550,6 @@ class AsyLower {
    *    先扫一遍把它拦在这里，理由说准。
    */
   localFunClo(n, nm, hit) {
-    if (this.cap !== null) {
-      return this.nope(n, `函数体里的函数 '${nm}' 用了外层的局部量 '${hit}'，`
-        + '而这里已经在一个闭包里了（套一层的捕获是另一刀）');
-    }
     if (this.pre === null) {
       return this.nope(n, `函数体里的函数 '${nm}' 要抓外层的 '${hit}'`
         + '（那要在这里绑一个局部量，可这个位置放不下语句）');
