@@ -177,6 +177,15 @@ export function asyOverArg(L, node) {
   const nm = L.plainName(node.items[1]);
   if (nm === null) return null;
   if (L.lookup(nm) !== null) return null;
+  // 匿名函数体里：外层函数的局部量也遮住函数名（与 nameOf 那一档同一条次序）。
+  // 这里只**问**在不在，不走 capOf —— capOf 会记一条捕获、还可能发诊断，而这一层只是
+  // 在判"这条路走不走"。少了这一句，`fillrule` 这种"外层形参与文件级函数同名"的写法
+  // 在闭包里会被当成重载集：plain_picture.asy:1319 的
+  // `latticeshade(f,t*g,stroke,fillrule,p,t,false)` 报的就是
+  // "没有能匹配 latticeshade(…, <fillrule 的重载集>, …)"。
+  if (L.cap !== null) {
+    for (const s of L.cap.outer) if (s.has(nm)) return null;
+  }
   if (L.selfField(nm) !== null) return null;
   if (L.gvarHere(nm) !== null || L.globals.has(nm)) return null;
   const cands = asyVisible(L, nm);

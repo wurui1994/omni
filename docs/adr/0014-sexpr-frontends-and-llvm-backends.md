@@ -3959,6 +3959,27 @@ plain 的 addPath 正是这个形状（struct bounds 里两条方法加一条无
 数字：`import plain;` 145 → 136。`import graph;` 152 不动。tests/asy 166 条、
 tests/run.js 91 条全绿。新用例 `cases/92-unravel-field`。
 
+### 实参位置上那个裸名字，也要先问"它是不是外层的局部量"
+
+136 里 21 条「没有能匹配的签名」有 10 条长着同一个样子：
+`latticeshade(frame, path[], bool, <fillrule 的重载集>, pen[][], transform, bool)`、
+`arrow(arrowhead, path, pen, <size 的重载集>, …)`。`<X 的重载集>` 是"这个名字有多个
+函数重载，等槽的类型来定案"那个记号（第三十五刀），可它出现在这里是错的：
+plain_picture.asy:1319 的 `fillrule` 是 latticeshade 的**形参**（一个 pen），
+只是恰好与 plain_pens.asy 里的函数 `fillrule` 同名；`size` 同理。
+
+根因与上一刀是同一处漏：`asyOverArg` 判"这条路走不走"时问了局部量、`this` 的字段、
+文件级变量，**没问外层函数的局部量**。那些调用都在 `pic.add(new void(frame f, transform t){…})`
+的匿名函数体里，于是名字漏到了文件级的函数一族上。补的是一句纯粹的"在不在"——
+不走 `capOf`（那会记一条捕获、还可能发诊断，而这一层只是在判路），只扫 `L.cap.outer`。
+
+量过 asy：`int fillrule(int)` / `int fillrule(string)` 与 `vv mk(int fillrule)` 并存时，
+`mk(7)()` 印 7 —— 形参赢，而且遮住之后闭包里就取不到那一族了。
+新用例 `cases/93-cap-over-arg` 把这两半都钉住。
+
+数字：`import plain;` 136 → 126。`import graph;` 152 不动。tests/asy 167 条、
+tests/run.js 91 条全绿。新用例 `cases/93-cap-over-arg`。
+
 ## 后果与代价
 
 
