@@ -766,6 +766,13 @@ struct frame {
   drawop[] ops;
 }
 
+// `newframe` 那个字面量（camp.l:407 的 newPictureExp）落在这里：一个**新的**空 frame。
+// 前端与绘图层之间约定的名字（见 types.js 的 ASY_NEWFRAME）。
+frame asy__newframe() {
+  frame f;
+  return f;
+}
+
 void addop(frame f, int kind, path g, pen p) {
   drawop o;
   o.kind = kind;

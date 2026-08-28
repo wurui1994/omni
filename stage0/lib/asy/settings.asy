@@ -11,8 +11,9 @@
 //   stringSetting: outformat(1657) autoimport(1880)   userSetting: command(1882) user(1884)
 //   engineSetting: tex(1762)                          realSetting: render(1675)
 //   pairSetting:   viewportmargin(1714)               incrementSetting: verbose(1753)
-//   boolSetting:   prc(1662) thin(1727) twice(1766) inlinetex(1768) inlineimage(1778)
-//                  batchView(1649) multipleView(1651) interactiveView(1654)
+//   boolSetting:   prc(1662) v3d(1664) thin(1727) twice(1766) inlinetex(1768)
+//                  inlineimage(1778) batchView(1649) multipleView(1651)
+//                  interactiveView(1654)
 //   boolrefSetting: bw(1804) gray(1806) xasy(1839)
 
 string outformat = "";
@@ -31,6 +32,8 @@ pair viewportmargin = (0, 0);
 int verbose = 0;
 
 bool prc = false;
+// v3d 是那个新的三维格式（settings.cc:1664，默认关）。plain_shipout.asy:36/130 读它。
+bool v3d = false;
 bool thin = true;
 bool twice = false;
 bool inlinetex = false;

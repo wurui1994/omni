@@ -1,0 +1,10 @@
+access settings;
+write(settings.v3d);
+frame a = newframe;
+frame b = newframe;
+write(empty(a));
+_draw(a, (0,0)--(1,1), currentpen);
+write(empty(a));
+write(empty(b));
+frame c;
+write(empty(c));

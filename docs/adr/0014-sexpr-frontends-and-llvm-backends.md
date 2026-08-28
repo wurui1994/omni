@@ -4323,6 +4323,24 @@ tests/run.js 91 条全绿。新用例 `cases/106-vararg-fill`（上面量的十�
 数字：`import plain;` 89 → 84（那六处里五处在 plain 的计数里）。`import graph;` 150 不动。
 tests/asy 183 条、tests/run.js 91 条全绿。新用例 `cases/107-reverse-path`。
 
+### 两个从 base 掉出来的名字：`settings.v3d` 与 `newframe`
+
+`plain_shipout.asy:36/130` 读 `settings.v3d`，我们那份 `stage0/lib/asy/settings.asy` 里没有
+它。补一行（`settings.cc:1664` 的 boolSetting，默认关）—— 那个文件的规矩是「只放
+`base/plain*.asy` 真的读到的那些」，这就是又读到了一个。
+
+`plain_picture.asy:867/892` 的 `return newframe;` 原来报「字面量 'newframe'」。它在
+`camp.l:407` 是一个 **LIT**（`newPictureExp`），语义上是"一个新的空 frame"——与 `cycle`
+同一条路子：词法上是字面量，语义上是绘图层的值。所以照 `ASY_CYCLE` 的办法再约定一个名字
+`ASY_NEWFRAME = 'asy__newframe'`，prelude 里给出 `frame asy__newframe() { frame f; return f; }`。
+
+差别是**它得是个函数**，不能是变量：`newframe` 每次求都要是另一个空 frame，钉成一格
+全局变量的话两处 `return newframe;` 会把同一个 frame 递出去。量过 asy：两个
+`frame a=newframe, b=newframe;` 里往 a 上画一笔，`empty(b)` 还是 true。
+
+数字：`import plain;` 84 → 80（v3d 两处、newframe 两处）。`import graph;` 150 不动。
+tests/asy 184 条、tests/run.js 91 条全绿。新用例 `cases/108-newframe-v3d`。
+
 ## 后果与代价
 
 

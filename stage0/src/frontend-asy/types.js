@@ -80,6 +80,11 @@ export const ASY_OPBAD = new Set(['&&', '||']);
  *  的 `path cyclepath;`。前端与绘图层之间**只有这一个**约定的名字。 */
 export const ASY_CYCLE = 'cyclepath';
 
+/** `newframe` 那个字面量落到哪个名字上（见 lit）：camp.l:407 的 newPictureExp ——
+ *  它是**一个新的空 frame**，所以约定的是绘图层里那个**函数** `frame asy__newframe()`，
+ *  求一次就是新的一个（当成变量的话两处 `return newframe;` 会共用同一格）。 */
+export const ASY_NEWFRAME = 'asy__newframe';
+
 /** 文件级变量收得下的类型（第三十刀放开）：int/real/bool/string、pair/triple、
  *  记录，以及它们的一维数组。核心方言的 `(global …)` 原先只收标量，理由写的是
  *  「聚合的身份不在 MIR 的 8 位类型码里」—— 量下来那个身份**根本不需要**：class 与

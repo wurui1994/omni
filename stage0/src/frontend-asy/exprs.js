@@ -18,11 +18,11 @@
 
 import { isList, isAtom, isStr, head } from '../sexpr/read.js';
 import {
-  ASY_NOPE, DOT_BAD, CAP_BAD, ASY_ARRELEM_TEXT, ASY_CYCLE, ASY_RESTPFX, asyOpText,
+  ASY_NOPE, DOT_BAD, CAP_BAD, ASY_ARRELEM_TEXT, ASY_CYCLE, ASY_NEWFRAME, ASY_RESTPFX, asyOpText,
   asyIsArr, asyElem, asyIsFn, ASY_PAIR_TY, ASY_TRIPLE_TY, asyCore, ASY_NULL, asyRefTy,
 } from './types.js';
 import { ZERO, ASY_PAIRFN, ASY_STRFN, ASY_STR_DEPS, strLit } from './runtime.js';
-import { asyArgs, asyCall, asyVisible, asyJoinExp, asyOpUser, asyOpBuiltinSig, asyIdxOpCall } from './calls.js';
+import { asyArgs, asyCall, asyVisible, asyJoinExp, asyOpUser, asyOpBuiltinSig, asyIdxOpCall, asyApplyCall } from './calls.js';
 import { asyFmtStr, asyBody, asyExprStmt } from './stmts.js';
 
 /* ---------------------------------------------------------------- 表达式 */
@@ -55,6 +55,16 @@ export function asyLit(L, n) {
       return L.nope(n, "'cycle'（它是绘图层的闭合记号，要 `import plain;`）");
     }
     return asyNameOf(L, n, ASY_CYCLE);
+  }
+  // `newframe`（camp.l:407 的 newPictureExp）：与 `cycle` 同一条路子 —— 词法上是 LIT，
+  // 语义上是绘图层的一个值。差别在于它每次都得是**新的**一个空 frame，所以约定的名字是
+  // 一个函数（见 ASY_NEWFRAME），这里发的是一次调用。
+  if (t === 'newframe') {
+    const cs = asyVisible(L, ASY_NEWFRAME);
+    if (cs.length === 0) {
+      return L.nope(n, "'newframe'（它是绘图层的空 frame，要 `import plain;`）");
+    }
+    return asyApplyCall(L, n, 'newframe', cs, [], null);
   }
   // `null`（第三十三刀）：词法上它跟 `true` 一样是 LIT，语义上是**空引用**。
   // 它自己没有类型，所以这里只出一个记号（见 ASY_NULL），落地在 coerce / promote / fit。
