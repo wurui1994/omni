@@ -5164,6 +5164,157 @@ tests/asy 209 条（新增 cases/131-name-sets）、tests/run.js 91 条全绿。
 数字：`import plain;` 13 → 4，`import graph;` 17 → 8，`import math;` 14 → 5。
 tests/asy 210 条（新增 cases/132-fnty-defaults）、tests/run.js 91 条全绿。
 
+### 一批：asy 前端那面墙翻过去了 —— 类可以互相引用，与 access 带上 autounravel
+
+`import plain;` / `import math;` / `import graph;` 的**前端**诊断从 4 / 5 / 8 到 **0**：
+这三条 import 现在整份降得出来，剩下的错全在核心方言那一层（`.sx` 上），是另一面墙。
+前端这七条一条也不是特例，都是照 asy 的模型改的。
+
+- **`from m access X;` 带上 X 体里那些 `autounravel` 成员**（decls.js 的 `asyAuNames`
+  记 `rec.au`，modules.js 的 `asyModMerge` 把 `only` 那张改名表**摊开**）。量过：
+  `struct Box { autounravel Box mkBox(int)=Box; autounravel int twice(Box b){…} }`，
+  另一个文件里 `from mm access Box as B;` 之后 `mkBox(5)` 与 `twice(b)` 都通（印 10）。
+  名字**不跟着改** —— 改的是类型那个名字，摊出来的成员各是各的名字。
+  `operator cast` / `operator ecast` 不挂在名字上（进的是 `L.casts`），按"提到了这个
+  类型"认就够了。`collections/map.asy:48` 的 `Iterable(iter)` 是这一格：它是
+  `collections/iter.asy:45` 那条 autounravel，而 map.asy 只 access 了 `Iterable_T`。
+- **`operator init` 当方法值取出来**（lower.js 的 `methodVal`、exprs.js 的 `asyMValType`）。
+  `((F)map.operator init)()`（collections/map.asy:102）。那份候选的 `ret` 记的是**记录名**、
+  `sym` 是 `asy__ctor_<记录>` —— 它在重载解析里扮演的是构造函数 `M(…)`；而 asy 里
+  `m.operator init` 是**绑在 m 上的那个 void 方法**（量过：调完 `m.x` 是 3，改的是 m
+  自己、不是一个新对象）。所以这一档换成 `asy__ctor_<记录>_body`、返回类型算 void。
+- **`(T) x` 里面那一格还没定案时，括号里那个类型就是定案的依据**（exprs.js 的 `asyCast`
+  开头交给 `coerce`）。少了这一句，`castFor` 拿着 `<M.operator init 的重载集>` 那个假
+  类型去问，报的是"转不了"。
+- **方法体里写的 `using` 是体内一句语句**（lower.js 的 `aliasOne` 多问一句 `self`）。
+  `using F = void();`（collections/map.asy:101）以前记进 `rec.tyAlias`，它的 bi 正好等于
+  当前那一项的 bi，于是 `aliasAt` 里 `e.bi < bi` 不成立 —— 紧接着那一句报"typedef 写在
+  后面"。语句位置的别名走文件级那张表，与语句位置的 struct / typedef 同一条。
+- **`var` 也可以被 typedef 掉**（lower.js 的 `isVarTy` 先问别名表）。`simplex2.asy:16`
+  是 `typedef int var;`（写在 `struct problem` 体里），之后 `var[] v = {VAR_A, VAR_B};`
+  与 `var argmin;` 都是**普通声明**，不是类型推断 —— 后者按推断讲连 asy 自己都拒。
+- **有体的方法被当成员赋过值，就整条摊成"一格函数类型的字段 + 一个初值是那个匿名函数
+  的默认值"**（lower.js 的 `memAssigned` / `fnFldOk`，`recNew` 里那一格走 `mkClo`）。
+  `filltype defaultfilltype(pen) {return FillDraw;}`（plain_arrows.asy:36）加 `:162` 的
+  `TeXHead.defaultfilltype=…`。asy 那边方法**就是**一格函数值字段，所以摊完调用、取值、
+  赋值三处全落在"没有体的成员就是一格字段"那条老路上。**判据只有"名字被赋过值"**
+  （扫这个单元里 `X.name = …` 的 name）—— 全摊的话每个实例都要为每个方法装一个闭包，
+  picture 那种几十个成员的 struct 代价看得见。跨单元赋值还接不住（那个 struct 已经降
+  完了），漏出去的还是 `recField` 那句 nope，base 里没有那种写法。
+- **字段默认值里的花括号数组初值要把元素类型带下去**（lower.js 的 `recNew`）：
+  `var[] v = {VAR_A, VAR_B};` 是一格字段的默认值，走 `asyExpr` 那一层看不见"我该是
+  int[]"。与 vardec 那一侧同一条。另外 `autounravel Iterable_T operator cast(…) = …`
+  这种**函数值字段**的符号名要过一遍 `asyFldSym`：名字里带空格，不过的话发出去是
+  `(global asy__sf61_..._operator cast …)`，方言那边读不出来。
+
+**同一批里的另一半：类的字段可以互相引用、前向引用、自引用。** 上面那些把
+`import plain;` 推到核心方言这一层之后，第一眼是 **526 条**，其中 281 条是同一个根因的
+回声（`形参 this/pic 的类型认不出`）。方言原来的规矩是"字段类型只能是**前面已经声明
+过**的结构体/类"，理由是自引用与前向引用的**零值会无限递归**。这条对**结构体**是对的
+—— 它是值语义、内嵌是真的内嵌。对**类**是过严的：类在四条腿上都是**一个指针**
+（LLVM 的 `t.k === 'class'` -> `ptr`、零值 -> `null`；两个解释器按名字存 JS 对象），
+零值是空引用，没有递归可言。
+
+落法是"名字先坐下、字段后填"（sexpr/lower.js 的 `chunk` 与 `structDec`）：先给每个
+`(class …)` 建一格空的类型对象，再逐条**原地填**字段数组，于是提到后面那个类的字段拿到
+的就是那一格。`aggLater` 那张只为诊断服务的表从此只收**结构体**名字。
+
+逼出这一刀的三处都在 plain 里，而且怎么排都排不开：plain_bounds.asy 的
+`freezableBounds` 与 `transformedBounds` 是**互相**引用的（`(link freezableBounds)` 与
+`(tlinks (arr transformedBounds))`），plain_picture.asy 的 `node3` 拿 `picture` 当形参
+类型而 `picture` 声明在它后面。那一格塌了之后 `picture` 整个类就没建起来，三百多条诊断
+跟着刷。
+
+数字：`import plain;` 526 → **24**，`import math;` 528 → **24**，
+`import graph;` 701 → **28**（都是核心方言那一层的了，前端 0 条）。
+新增 `tests/sexpr/cases/18-classcycle.sx`（前向 / 互相 / 自引用各一格，五条腿同结果）；
+`bad/struct-self` 与 `bad/struct-fwd` 照旧拒，只是话说得更准（结构体那一半没动）。
+
+跑过的轴：`tests/asy` 210、`tests/run.js` 91、`tests/sexpr` 53、`tests/oir` 451、
+`tests/llvm` 22、`tests/jit` 22、`tests/gpu` 15+1 skip、`tests/js-roundtrip` 92、
+`tests/oracle` 7、`tests/js-exec` 11、`tests/cabi` 4、`tests/wat` 12 —— 全绿。
+`tests/mir` / `tests/glr` / `tests/incr` 在**这一刀之前就红**（量过：`git stash` 之后
+同样三条红，mir 是 exprs.js↔stmts.js 那个 import 环），不算这一批的账。
+`tests/bootstrap` 照旧跳过。
+
+### 一批：plain / math / graph 三条从「编不过」到「跑完、逐字节对上」
+
+上一刀把墙推到了核心方言那一层（前端 0 条、方言 24/24/28 条）。这一批把那 24 条读完、
+改完，然后往下走到**运行期**，一直走到 `import plain;` / `import math;` / `import graph;`
+三条都与 `asy -noV` 一样：**什么都不印、退 0**。
+
+先加了一件工具：`omni sx <文件.asy>` 印 asy -> 核心方言那一步的文本。方言的诊断报的是
+`<文件>.asy.sx:L:C`，而那份 `.sx` 是**虚拟的**（`SourceFile` 现造、从不落盘），以前只能
+拿着行号猜。印出来的内容与 `lowerCoreSexpr` 拿到的逐字节相同，行号可以直接对 ——
+这一批后面每一条都是这么找出来的。
+
+方言那 24 条，六个根因：
+
+- **`asyMangle` 出来的名字不一定是标识符**。函数类型在这一层是 `void()` 这样的字符串，
+  于是 `void()[]` 的 copy helper 叫 `asy__acopy_void()`，方言把它读成"名字 + 一个空表"，
+  报的是"返回值的类型不对"。cycHelper 与 searchHelper 早各自洗了一遍，这次把洗放进
+  `asyMangle` 自己，五个 helper 一起好。函数类型的元素还要能**现生**一份（`arrHelper`
+  原来只给记录与数组生，标量走 HELPERS 那张表），零值是 `(null …)`。
+- **`(int 0-1)`**：searchHelper 的模板里手写错了一个 -1。
+- **局部量的名字也可能是算符名**：plain_Label.asy:46 的 `pair[][] operator *(…)` 写在
+  `SVD` 的函数体里，直接当符号用就是 `(let operator * …)`。过一遍 `asyFldSym`，并记一条
+  `\u0000sy:` 让 `symOf` 认得；`declareShadow` 造的 `asy__sh…` / `asy__bx…` 同样洗一遍。
+- **struct 可以写在函数体里**：plain_Label.asy:591 的 `struct stringfont` 就在 `texpath`
+  的体内。类发出来了，`asy__ctor_stringfont` 与 `asy__m_stringfont_pen` 一个都没有 ——
+  `methodDecls`/`auFns` 那两张队是在 `asyBodyPass` **开头**排一遍的，而函数体是后面才降的。
+  改成记两个游标、正文降完再排一遍（`drain`）。连带露出一格内建面的空：
+  `string font(pen)`（runtime.in:585）没有，补上（没设过 fontcommand 时回那串默认的
+  LaTeX 字体命令，量过真 asy）。
+- **写在函数体里的函数，抓的可能是接收者或外层闭包的捕获**。`localFunOuter` 原来只扫
+  `this.scopes`：
+  - 方法体里 `this` 是 `(this)` 这个**语法头**、不是一个名字原子，而裸字段名根本不出现在
+    scopes 里 —— collections/map.asy:38 的 `this.operator iter()`、simplex2.asy 里
+    `problem` 的 `validConstants`/`validVar`（裸写 `rows`/`v`/`n`）都是这一档；
+  - 闭包体里 `scopes` 已经换成空的一层，外层那几层挂在 `cap.outer` 上 —— graph.asy:837 的
+    `void omit(real[] A)` 写在 `new tickvalues(tickvalues v){…}` 里、用外层形参 `a`/`b`。
+  两条都补上（成员那一档只算**实例**成员，而且要求真有 `this` 那一格 —— plain_bounds.asy:372
+  那个写在 `static void write(extremes)` 体里的 `static void write(coord[])` 靠这一条留在顶层）。
+- **`x.operator init(…)`**：collections/map.asy:110/112 的 `map.operator init(nullValue)`。
+  构造函数那份候选长得像"回记录、没接收者的函数"，所以接收者一带就多一个实参。
+  `asyApplyCall`/`asyDefWrapper` 里那条 `reinit`（目标换成 `…_body`、回 void）**早就写好了、
+  一处都没接线**，这次接上。
+
+还有两条是**缓存与默认值**上的：`asyDefWrapper` 造不出来时要把 `wrapNames` 里那个名字
+**撤回** —— 名字是造之前登记的，留着的话后面同一份 key 命中缓存、拿到一个从没发出去的
+函数（量到的是 graph 里 `未声明的函数 'asy__def37_errorbars'`，第一次失败发生在一次会
+回滚的试降里）。形参的默认值也能是花括号数组初值（graph.asy:2146 的 `real[] dmx={}`），
+按形参那一格的类型降，与 `T[] a = {…}` 同一条。
+
+编过去之后是运行期，四格：
+
+- **`makepen(path)` / `nib(pen)`**。笔尖这一格在 `struct pen` 里放不下 —— 那个 struct 排在
+  `struct path` **前面**，而字段的类型只能是前面声明过的记录。所以路径存在旁边一张
+  `path[] asy__nibtab` 里，笔上只带一个下标（-1 是没有，`nib` 那时回 `nullpath` ——
+  量过真 asy `length(nib(currentpen))` 是 -1）。plain_pens.asy:257 的 `squarepen` 点名要它。
+- **`_cputime()` 是五格**（plain.asy 读 a[0]/a[2]/a[3]/a[4]），这一层没有时钟，回五个 0。
+- **`(real) "3.14git"` 不该在转的时候报错**。量过真 asy：那一句是通的，拿到的是一格
+  Default，**读它**才报 "Trying to use uninitialized value"。plain.asy:42 的
+  `real RELEASE=(real) split(VERSION,"-")[0];` 正好只存不读，在转的时候 abort 就把
+  `import plain;` 掐断了。改成回 0，差别写在明处。
+- **`asyGvarAt` 要认单元**。内建面是每个单元隐式引一次的，位置记在 `off` 上，与这个单元
+  第 0 项**同一格**；于是 `lib/asy/version.asy` 里那句 `string VERSION = "3.14git";` 赋进了
+  内建面那一格，`version.VERSION` 一直是空的，plain.asy:22 那句版本检查每次都发警告。
+  文件级变量那张表上补一格 `unit`，`gvarAt` 先要"这个单元自己声明的"那一份。
+  `lib/asy/version.asy` 的值也改成与内建面同一个（`3.14git` —— 参考树就是这一代）。
+
+数字：`import plain;` 24 → **0**，`import math;` 24 → **0**，`import graph;` 28 → **0**，
+而且三条都**跑完退 0、一个字都不印**，与 `asy -noV` 逐字节相同。
+新增 `tests/asy/cases/135-fnbody-struct.asy`：上面九格各一条（函数体里的 struct、方法体里
+抓接收者的两种写法、闭包体里抓外层形参、`x.operator init(…)` 带默认值的两种调法、函数体里
+的算符重载、花括号默认值、函数类型元素的数组、`font`/`nib`、转不动的 `(real) s`），
+`.expected` 是 `asy -noV` 的输出**原样**。
+
+跑过的轴：`tests/asy` 213、`tests/run.js` 91、`tests/sexpr` 53、`tests/oir` 451、
+`tests/llvm` 22、`tests/jit` 22、`tests/gpu` 15+1 skip、`tests/js-roundtrip` 92、
+`tests/oracle` 7、`tests/js-exec` 11、`tests/cabi` 4、`tests/wat` 12 —— 全绿。
+`tests/mir` / `tests/glr` / `tests/incr` 照旧红（上一刀量过：这一批之前就红，
+mir 是 exprs.js↔stmts.js 那个 import 环），不算这一批的账。`tests/bootstrap` 跳过。
+
 ## 后果与代价
 
 

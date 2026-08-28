@@ -126,6 +126,19 @@ export function asyCandAt(L, c, at) {
  * `only` 不是 null 时只并那几个名字（`from m access f, g;`）。
  */
 export function asyModMerge(L, node, u, at, only) {
+  // `from m access X;` 里 X 是个 **struct** 时，它体里那些 `autounravel` 的成员也一起来
+  // （第六十二刀，见 asyAuNames 的注释与那条量法）。名字**不跟着改**：改的是类型那个名字，
+  // 摊出来的成员各是各的名字。
+  const auRec = [];
+  if (only !== null) {
+    for (const [src] of only) {
+      const e = u.recVis.get(src);
+      if (e === undefined) continue;
+      auRec.push(e.rec);
+      if (e.rec.au === undefined) continue;
+      for (const nm of e.rec.au) if (!only.has(nm)) only.set(nm, nm);
+    }
+  }
   for (const [nm, list] of u.funcs) {
     // `记录名.方法名` 不并：方法跟着 struct 走（见 visibleMethods）。
     // `operator ..` 名字里也有点，它可不是方法 —— 所以这一条只看**不是算符**的名字。
@@ -149,8 +162,10 @@ export function asyModMerge(L, node, u, at, only) {
       let dup = false;
       for (const d of dst) if (d.sym === g.sym) dup = true;
       if (dup) continue;
-      // 同一块存储：模块里改它、这边也改它（量过两边都看得见对方的改动）
-      dst.push({ sym: g.sym, type: g.type, at: at, ok: g.ok });
+      // 同一块存储：模块里改它、这边也改它（量过两边都看得见对方的改动）。
+      // `unit` 是**声明它的那个单元**，照原样带过来 —— gvarAt 靠它分"这一句声明的那一格"
+      // 与"引进来的同名那一格"（内建面每个单元都隐式引一次，位置也落在同一格上）。
+      dst.push({ sym: g.sym, type: g.type, at: at, ok: g.ok, unit: g.unit });
     }
     L.globals.set(key, dst);
   }
@@ -183,21 +198,39 @@ export function asyModMerge(L, node, u, at, only) {
     if (!L.tyAlias.has(key)) L.tyAlias.set(key, [{ t: e[e.length - 1].t, at: at }]);
   }
   // 用户定义的转换（第二十七刀）：`import m;` 把它们一起带进来 —— 它们不挂在某个名字上，
-  // 所以 `only`（`from m access f, g;` 的那张改名表）管不到它们，那种写法这边就不并。
-  if (only !== null) return;
+  // 所以 `only`（`from m access f, g;` 的那张改名表）管不到它们。
+  // **但 access 一个 struct 要带上它体里那些 `autounravel operator cast`**（第六十二刀）：
+  // struct 体里的 `operator cast` 只有带 autounravel 才进得了 u.casts（不带的那种是方法，
+  // 见 asySig 的调用处），而它必然**提到**那个 struct（源或目标之一）—— 所以按类型认就够了，
+  // 不用另记一张表。`collections/iter.asy:35/42` 的那一对靠这条：map.asy 只 access 了
+  // `Iterable_T`，而 `for (T item : iterable)` 要 ecast、`Iterable_T x = arr;` 要 cast。
+  const auOk = (c) => {
+    for (const rec of auRec) {
+      if (asyCoreOf(c.to) === rec.name || asyCoreOf(c.src) === rec.name) return true;
+    }
+    return false;
+  };
   for (const [to, list] of u.casts) {
     const dst = L.casts.has(to) ? L.casts.get(to) : [];
     for (const c of list) {
+      if (only !== null && !auOk(c)) continue;
       let dup = false;
       for (const d of dst) if (d.sym === c.sym) dup = true;
       if (dup) continue;
       dst.push({
         ret: c.ret, params: c.params, ps: c.ps, node: c.node, sym: c.sym, pfx: c.pfx,
-        unit: c.unit, dat: c.dat, at: at, to: c.to, src: c.src, ec: c.ec,
+        unit: c.unit, dat: c.dat, at: at, to: c.to, src: c.src, ec: c.ec, viaVar: c.viaVar,
       });
     }
     L.casts.set(to, dst);
   }
+}
+
+/** 类型文本剥到底层那个名字（`T[]`/`T[][]` -> `T`）—— 转换那条按类型认时要它 */
+function asyCoreOf(t) {
+  let s = typeof t === 'string' ? t : '';
+  while (s.endsWith('[]')) s = s.slice(0, -2);
+  return s;
 }
 
 /**

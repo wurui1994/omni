@@ -709,6 +709,12 @@ function asyBiWeak(L, out) {
 export function asyMethodCall(L, n, recv, mname) {
   const rec = L.records.get(recv.type);
   const ms = L.visibleMethods(rec, mname);
+  // **接收者已经在手的 `operator init`**（第六十九刀）：collections/map.asy:110/112 的
+  // `map.operator init(nullValue)`。构造函数那份候选长得像"回记录、没接收者的函数"，
+  // 所以这里要换成"对象已经有了、只跑一遍正文"那一档 —— 目标是 `…_body`、回 void，
+  // 带默认值时那份包装也另生一份（见 asyDefWrapper 里的 ri）。不换的样子是
+  // `asy__ctor_… 要 2 个实参，给了 3 个`。
+  const ri = mname === 'operator init';
   if (ms.length > 0) {
     // 方法那一档接得住就用它；接不住时**回滚**再看后面那几档 —— asy 的成员查找是按签名
     // 逐档找的。量过：struct 里 `void note(int)` / `void note(string)` 与**无体声明**的
@@ -716,11 +722,11 @@ export function asyMethodCall(L, n, recv, mname) {
     // 那一格。plain_picture.asy 的 `pic.addPath(g,p)` 正是这个形状 —— 借来的 addPath 在
     // struct bounds 里就是"两条方法加一条无体声明"。
     const probe = Array.isArray(L.pre);
-    if (!probe) return asyUserCall(L, n, mname, ms, recv);
+    if (!probe) return asyUserCall(L, n, mname, ms, recv, ri);
     const mark = L.diags.mark();
     const savePre = L.pre;
     L.pre = [];
-    const mv = asyUserCall(L, n, mname, ms, recv);
+    const mv = asyUserCall(L, n, mname, ms, recv, ri);
     const mpre = L.pre;
     L.pre = savePre;
     if (mv !== null) {
@@ -731,7 +737,7 @@ export function asyMethodCall(L, n, recv, mname) {
     const alt = asyMethodAlt(L, n, recv, rec, mname);
     if (alt !== undefined) return alt;
     // 后面那几档一个都不适用：让方法那一档把诊断再发一遍（它那句话最贴题）
-    return asyUserCall(L, n, mname, ms, recv);
+    return asyUserCall(L, n, mname, ms, recv, ri);
   }
   const alt = asyMethodAlt(L, n, recv, rec, mname);
   if (alt !== undefined) return alt;
@@ -823,10 +829,10 @@ export function asyCtorCall(L, n, rec, nm) {
  * `recv` 不是 null 时这是一次**方法调用**（第二十刀）：接收者当第一个实参传进去，
  * 重载解析只看写出来的那几个实参 —— `this` 不参与打分（它的类型是定死的）。
  */
-export function asyUserCall(L, n, nm, list, recv) {
+export function asyUserCall(L, n, nm, list, recv, reinit) {
   const raw = asyCallArgs(L, n);
   if (raw === null) return null;
-  return asyApplyCall(L, n, nm, list, raw, recv);
+  return asyApplyCall(L, n, nm, list, raw, recv, reinit);
 }
 
 /**
@@ -1148,11 +1154,13 @@ export function asyFnValCall(L, n, nm, ft, callee) {
         return L.nope(args[i].node, '重载集当可变实参（这一刀只按槽的类型挑固定那几格）');
       }
       if (args[i].spread === true) {
-        // `... a`：整份数组接到包后面。类型要一模一样 —— asy 不给这一格做元素级提升。
-        if (args[i].v.type !== restTy) {
-          return L.err(args[i].node, `'${nm}' 的展开实参：要 ${restTy}，这里是 ${args[i].v.type}`);
-        }
-        packed.push({ code: args[i].v.code, spread: true });
+        // `... a`：整份数组接到包后面。类型不一样时走一遍 coerce —— **数组级**的
+        // `operator cast` 就在那条路上（`join(...z[segment[i]])`，graph.asy:2063 里
+        // z 是 pair[]，而 interpolate 那一格要的是 path[]）。元素级的提升不在这里做：
+        // asy 那边也是靠 arrayToArray 那一族的 cast，没有那一份就是不匹配。
+        const sv = L.coerce(args[i].v, restTy, args[i].node, `'${nm}' 的展开实参`);
+        if (sv === null) return null;
+        packed.push({ code: sv.code, spread: true });
       } else {
         const ev = L.coerce(args[i].v, asyElem(restTy), args[i].node, `'${nm}' 的可变实参`);
         if (ev === null) return null;
@@ -1318,6 +1326,9 @@ export function asyFit(L, cand, raw) {
     }
     // 同名的**模块级那一格**（shadowVar，见 nameOf）：同型就算精确匹配
     if (r.v.shadowVar !== undefined && r.v.shadowVar.type === cand.ps[at].type) return 0;
+    // 同一个名字的文件级变量有**好几格**（shadowName，见 nameOf）：按这个槽的类型
+    // 问一句 gvarFor，挑到就算精确匹配（`Hermite(Spline)`，graph.asy:1917）
+    if (r.v.shadowName !== undefined && L.gvarFor(r.v.shadowName, cand.ps[at].type) !== null) return 0;
     // `null` 当实参：类型来自**这个槽**（asy 就是这么定的）。槽不是引用类型就接不住。
     if (r.v.type === ASY_NULL) return asyRefTy(L, cand.ps[at].type) ? 0 : null;
     // `explicit` 的槽只收类型一模一样的实参（第二十六刀，量过：连 int->real 都挡）
@@ -1469,7 +1480,13 @@ export function asyDefWrapper(L, n, nm, d, f, reinit) {
   for (const i of gave) L.declare(n, d.ps[i].name, d.ps[i].type);
   for (const i of f.missing) {
     const p = d.ps[i];
-    const v = L.coerce(L.expr(p.def), p.type, p.def, `'${nm}' 的形参 '${p.name}' 的默认值`);
+    // 形参的默认值也能是**花括号数组初值**（graph.asy:2146 的 `real[] dmx={}`、
+    // `bool[] cond={}`）。`{…}` 自己没有类型，所以跟 `T[] a = {…}` 一样按形参那一格的
+    // 类型降 —— 不走这一条时 asyExpr 只会说"推不出元素类型"。
+    const lit = asyIsArr(p.type) && isList(p.def) && head(p.def).startsWith('arrayinit')
+      ? L.arrLit(p.def, p.type) : null;
+    const v = lit !== null ? lit
+      : L.coerce(L.expr(p.def), p.type, p.def, `'${nm}' 的形参 '${p.name}' 的默认值`);
     if (v === null) { bad = true; break; }
     lines.push(`(let ${p.name} ${asyCore(p.type)} ${v.code})`);
     L.declare(n, p.name, p.type);
@@ -1500,7 +1517,10 @@ export function asyDefWrapper(L, n, nm, d, f, reinit) {
   L.self = saveSelf;
   L.recAlias = saveAl;
   if (saveUnit !== null) L.unitOut(saveUnit);
-  if (bad) return null;
+  // 造不出来时**把名字撤回**：wrapNames 是在造之前就登记的，留着的话后面同一份 key 会
+  // 命中缓存、拿到一个从没发出去的名字。量到的样子是 graph 里
+  // `未声明的函数 'asy__def37_errorbars'` —— 第一次是在一次会回滚的试降里失败的。
+  if (bad) { L.wrapNames.delete(key); return null; }
   L.wraps.push(`${text.join('\n')})`);
   return wname;
 }

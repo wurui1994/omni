@@ -106,9 +106,12 @@ class CoreLowerer {
     // （from_oir 的 rvalue 只给 struct 与 enum 发 OP.COPY）。asy 的 struct 就是这种
     // （量过：`A b = a; b.x = 7;` 之后 `a.x` 是 7），所以这两种都要有，不是重复。
     this.classes = new Map();
-    // 这一份源文件里所有结构体/类的名字（run 的第 0 遍扫出来）。只为诊断服务：
-    // 字段类型提到自己或后面那个时，能说"声明在后面"而不是"认不出的类型"。
+    // 这一份源文件里所有**结构体**的名字（chunk 的第 0 遍扫出来）。只为诊断服务：
+    // 字段类型提到自己或后面那个结构体时，能说"声明在后面"而不是"认不出的类型"。
+    // 类不进这张表 —— 类是指针、零值是空引用，前向与互相引用都收（见 chunk 里那一段）。
     this.aggLater = new Set();
+    // 名字先坐下、字段还空着的那些类（同一遍里用来分开"重复定义"与"这条声明的后半截"）
+    this.preClass = new Set();
     // 函数值（`(fnty …)` / `(cfn …)` / `(mkclo …)` / `(callfn …)`）。OIR 那边这一套早就有
     // （ADR-0010：闭包记录是 `{fp, c_*}`，第一个实参是记录自己），方言这边只是说得出来。
     // closures 是**闭包记录**表（名字 -> {id, mangled, make, captures}），lifted 是它们的
@@ -263,19 +266,44 @@ class CoreLowerer {
     const forms = top.items.slice(1);
 
     // 三遍。第一遍收结构体：函数签名与字段类型都可能提到它，所以它必须最先成型。
-    // 字段类型里**可以**提到别的结构体/类（第十七刀），但只能提**前面已经声明过**的 ——
-    // 一遍就够，而且自引用（`(struct A (n A))`）天然挡在门外：它的零值会无限递归。
-    // 先把所有名字扫出来，好让"提到的是后面那个"给出准的诊断而不是"认不出的类型"。
+    // 字段类型里**可以**提到别的结构体/类（第十七刀）。
+    //
+    // **结构体**只能提**前面已经声明过**的那个：它是值语义、内嵌是真的内嵌，自引用
+    // （`(struct A (n A))`）与前向引用的零值会无限递归。先把所有结构体名扫出来，
+    // 好让"提到的是后面那个"给出准的诊断而不是"认不出的类型"。
+    //
+    // **类不受这一条约束**（第六十二刀）：类在四条腿上都是**一个指针**
+    // （LLVM 的 `t.k === 'class'` -> `ptr`、零值 -> `null`；两个解释器按名字存 JS 对象），
+    // 所以互相引用与自引用都摊得开 —— 零值是空引用，没有递归。落法是"名字先坐下、
+    // 字段后填"：先给每个 `(class …)` 建一格空的类型对象（同一个对象，字段数组是
+    // 原地填的），再逐条填字段，于是提到后面那个类的字段拿到的就是那一格。
+    // 逼出这一刀的是 `import plain;`：plain_bounds.asy 的 freezableBounds 与
+    // transformedBounds 是**互相**引用的（`(link freezableBounds)` 与
+    // `(tlinks (arr transformedBounds))`），plain_picture.asy 的 node3 拿 picture 当形参
+    // 类型而 picture 声明在它后面 —— 一遍收记录时这三条无论怎么排都有一条落在后面。
+    // 那一格塌了之后 picture 整个类就没建起来，`形参 this/pic 的类型认不出` 跟着刷了
+    // 三百多条（量过：526 条里 281 条是这一串）。
     const later = new Set();
     for (const f of forms) {
-      if (head(f) !== 'struct' && head(f) !== 'class') continue;
+      if (head(f) !== 'struct') continue;
       if (isAtom(f.items[1])) later.add(f.items[1].value);
     }
     this.aggLater = later;
+    // 类的名字先坐下（字段还空着）
+    for (const f of forms) {
+      if (head(f) !== 'class') continue;
+      const cn = isAtom(f.items[1]) ? f.items[1].value : null;
+      if (cn === null) continue;                       // 缺名字：下面那一遍报
+      if (TYPES.has(cn)) continue;                     // 内建类型名：下面那一遍报
+      if (this.structs.has(cn) || this.classes.has(cn)) continue;   // 重名：下面那一遍报
+      this.classes.set(cn, classType(cn, []));
+      this.preClass.add(cn);
+    }
     for (const f of forms) {
       if (head(f) === 'struct') this.structDec(f, 'struct');
       else if (head(f) === 'class') this.structDec(f, 'class');
     }
+    this.preClass.clear();
     // 第二遍收模块级变量（第二十四刀）：函数体与 (main …) 都可能提到它，所以要在
     // 那些体降级之前成型。**聚合也收**（第三十刀，绘图层要 currentpicture/defaultpen
     // 这种模块级的单件）：MIR 那边全局的类型是一个 8 位类型码，装不下聚合的身份 ——
@@ -408,7 +436,11 @@ class CoreLowerer {
     const nm = isAtom(n.items[1]) ? n.items[1].value : null;
     if (nm === null) return this.err(n, `(${kind} NAME (字段 类型)...) 缺名字`);
     if (TYPES.has(nm)) return this.err(n, `'${nm}' 是内建类型名，不能当${what}名`);
-    if (this.structs.has(nm) || this.classes.has(nm)) return this.err(n, `'${nm}' 重复定义`);
+    // 上面那一遍替这个类先占了一格（preClass）：那不是"重复定义"，是同一条声明的前半截。
+    const pre = kind === 'class' && this.preClass.has(nm) ? this.classes.get(nm) : null;
+    if (pre === null && (this.structs.has(nm) || this.classes.has(nm))) {
+      return this.err(n, `'${nm}' 重复定义`);
+    }
     const fields = [];
     const seen = new Map();
     for (const fd of n.items.slice(2)) {
@@ -417,13 +449,13 @@ class CoreLowerer {
       }
       const fn = fd.items[0].value;
       if (seen.has(fn)) return this.err(fd, `${what} '${nm}' 里有两个字段叫 '${fn}'`);
-      // 字段类型提到的是**自己**或**后面才声明**的那个：单独报，别落到"认不出的类型"上。
-      // 自引用是真的不行（零值会无限递归）；提到后面那个也不收 —— 一遍收记录，
-      // 而"两遍收记录"要先答"互相嵌套的零值怎么铺"，那不是这一刀的事。
+      // 字段类型提到的是**自己**或**后面才声明**的那个**结构体**：单独报，别落到
+      // "认不出的类型"上。结构体是值语义、内嵌是真的内嵌，所以这两种的零值会无限递归。
+      // 类不在这一条里（见 chunk 里那一段）：它是指针，零值是空引用。
       const tn = isAtom(fd.items[1]) ? fd.items[1].value : null;
       if (tn !== null && !this.structs.has(tn) && !this.classes.has(tn) && this.aggLater.has(tn)) {
-        return this.err(fd, `字段 ${nm}.${fn}：${tn === nm ? '字段的类型就是它自己' : `'${tn}' 声明在后面`}`
-          + ` —— 字段类型只能是**前面已经声明过**的结构体/类（自引用的零值会无限递归）`);
+        return this.err(fd, `字段 ${nm}.${fn}：${tn === nm ? '字段的类型就是它自己' : `结构体 '${tn}' 声明在后面`}`
+          + ` —— 结构体字段的类型只能是**前面已经声明过**的结构体（自引用的零值会无限递归）`);
       }
       const t = this.ty(fd.items[1], `字段 ${nm}.${fn}`);
       if (t === null) return null;
@@ -438,6 +470,7 @@ class CoreLowerer {
     }
     if (fields.length === 0) return this.err(n, `${what} '${nm}' 至少要有一个字段`);
     if (kind === 'struct') this.structs.set(nm, structType(nm, fields));
+    else if (pre !== null) for (const f of fields) pre.fields.push(f);   // 原地填那一格
     else this.classes.set(nm, classType(nm, fields));
     return null;
   }

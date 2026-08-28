@@ -119,8 +119,13 @@ export const asyIsArr = (t) => t !== null && t !== undefined && t.endsWith('[]')
 export const asyElem = (t) => t.slice(0, -2);
 
 /** 类型名 -> 能当标识符片段的名字（`real[]` -> `arr_real`）。数组 helper 的名字要用它 ——
- *  `asy__grow_real[]` 不是一个标识符。递归，所以 `real[][]` 是 `arr_arr_real`。 */
-export const asyMangle = (t) => (asyIsArr(t) ? `arr_${asyMangle(asyElem(t))}` : t);
+ *  `asy__grow_real[]` 不是一个标识符。递归，所以 `real[][]` 是 `arr_arr_real`。
+ *  叶子也要洗一遍：函数类型在这一层是 `void()` 这样的字符串（`void()[]` 的元素类型），
+ *  括号与逗号进了符号名，核心方言那边会把 `asy__acopy_void()` 读成"名字 + 一个空表"，
+ *  报的是"返回值的类型不对"（量到过，plain 里 `void()[]` 的 copy 就撞在这儿）。 */
+export const asyMangle = (t) => (asyIsArr(t)
+  ? `arr_${asyMangle(asyElem(t))}`
+  : t.replace(/[^A-Za-z0-9_]/g, '_'));
 
 /**
  * 函数类型在这一层也是字符串，拼法照 asy 自己的：`real(real)`、`void(int,string)`。

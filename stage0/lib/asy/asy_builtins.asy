@@ -352,9 +352,11 @@ struct pen {
   bool dashscale = true;
   bool dashadjust = true;
   // 笔自己的那个变换（pen.h 的 `pen::t`）：`transform * pen` 攒在这儿，min/max(pen) 用它。
-  // 笔尖（nib，pen.h 的 `pen::P`）还没有 —— makepen 造的笔仍与真 asy 不一样。
   transform pentrans;
   bool hastrans = false;
+  // 笔尖（pen.h 的 `pen::P`）在 asy__nibtab 里的下标，-1 是没有（见那张表旁边的注）。
+  // 这里放不下一格 `path`：`struct path` 声明在这个 struct **后面**。
+  int nibid = -1;
   // 字号（pen.h 的 `pen::size`）。默认是 12pt 换成 bp 的那个数 —— 量过
   // `fontsize(currentpen)` 就是 11.9551681195517（= 12*72/72.27）。
   real fontsizeval = 11.9551681195517;
@@ -384,6 +386,7 @@ pen pencopy(pen p) {
   q.dashadjust = p.dashadjust;
   q.pentrans = p.pentrans;
   q.hastrans = p.hastrans;
+  q.nibid = p.nibid;
   q.fontsizeval = p.fontsizeval;
   q.fontsizeset = p.fontsizeset;
   q.lineskipval = p.lineskipval;
@@ -1917,8 +1920,19 @@ real[] intersect(path p, path q, real fuzz=-1) {
 real[][] intersections(path p, path q, real fuzz=-1) {
   abort("intersections(path,path) 还没做"); return new real[][];
 }
-path nib(pen p) { abort("nib(pen) 还没做"); return new path; }
-pen makepen(path p) { abort("makepen(path) 还没做"); return new pen; }
+// 笔尖（pen.h 的 `pen::P`）。笔这一格在 `struct pen` 里只能是个 int —— `struct pen`
+// 排在 `struct path` **前面**（字段的类型只能是前面声明过的记录），所以真正的路径存在
+// 旁边这张表里，笔上只带一个下标。没有笔尖就是 -1，`nib` 那时回 nullpath（量过真 asy：
+// `length(nib(currentpen))` 是 -1）。plain_pens.asy:257 的
+// `pen squarepen=makepen(shift(-0.5,-0.5)*unitsquare)` 点名要它。
+path[] asy__nibtab;
+path nib(pen p) { return p.nibid < 0 ? nullpath : asy__nibtab[p.nibid]; }
+pen makepen(path p) {
+  pen q = pencopy(asy__defpen);
+  asy__nibtab.push(p);
+  q.nibid = asy__nibtab.length - 1;
+  return q;
+}
 real[][] transpose(real[][] a) { abort("transpose 还没做"); return new real[][]; }
 // pair 的那一份（runarray.in 里 transpose 是按元素类型注册的一族）：math.asy:418
 // 的二维 fft 要它。体是真的 —— 转置不看元素怎么算。
@@ -2002,6 +2016,13 @@ pen fontsize(real size, real lineskip) {
 }
 pen fontsize(real size) { return fontsize(size, 1.2 * size); }
 real fontsize(pen p) { return p.fontsizeval; }
+// runtime.in:585 的 `string font(pen)`（pen::Font()）。没设过 fontcommand 时回的是那串
+// 默认的 LaTeX 字体命令 —— 量过真 asy：`font(currentpen)` 与 `font(fontsize(9))` 都是
+// `\usefont{\ASYencoding}{\ASYfamily}{\ASYseries}{\ASYshape}`，设过的回设的那一串。
+// plain_Label.asy:601 的 `font=font(L.p)`（stringfont 的构造函数里）点名要它。
+string font(pen p) {
+  return p.font == "" ? "\\usefont{\\ASYencoding}{\\ASYfamily}{\\ASYseries}{\\ASYshape}" : p.font;
+}
 
 // (1) 还差的几个非泛型内建：base 里点名要，语义在参考实现里是一句话。
 // unit：runpair.in:178 —— 零向量回零（C++ 那边 length==0 时原样返回）。
@@ -2604,6 +2625,10 @@ real[][] operator cast(int[][] a) { real[][] c; for (int[] x : a) c.push(x); ret
 // math.asy:380 的 `return cubicroots(b,c,d,e);`（回 pair[] 的函数里）靠的就是它。
 pair[] operator cast(real[] a) { pair[] c; for (real x : a) c.push((x, 0)); return c; }
 pair[][] operator cast(real[][] a) { pair[][] c; for (real[] x : a) c.push(x); return c; }
+// pair[] -> path[]（asy 那边是 guide[]，见上面那条 `path operator cast(pair)`）：
+// graph.asy:2063 的 `join(...z[segment[i]])` 里 z 是 pair[]，而 interpolate 那一格
+// 要的是 path[] —— arrayToArray 那一族把元素级的那条提上来。
+path[] operator cast(pair[] a) { path[] c; for (pair z : a) c.push(z); return c; }
 
 int[] operator +(int a, int[] b) { int[] c; for (int x : b) c.push(a + x); return c; }
 int[] operator +(int[] a, int b) { int[] c; for (int x : a) c.push(x + b); return c; }
@@ -2909,6 +2934,9 @@ triple max3(frame f) { abort("max3(frame) 还没做"); return (0, 0, 0); }
 // shift(transform)：只留平移，线性部分清零（runtime.in:1169 —— 量过是 (3,4,0,0,0,0)）。
 transform shift(transform t) { return xform(t.x, t.y, 0, 0, 0, 0); }
 pair interp(pair a, pair b, real t) { return a + (b - a) * t; }
+// real 上那一份（builtin.cc:571 的 `interp<real>`）：graph.asy:2103 的
+// `real t = interp(a, b, i/n);` 要的正是它 —— 少了它那一句挑到 pair 那份上去了
+real interp(real a, real b, real t) { return a + (b - a) * t; }
 pair minbound(pair[] a) {
   if (a.length == 0) { abort("minbound(pair[])：空数组"); return (0, 0); }
   pair m = a[0];
@@ -3100,7 +3128,11 @@ void clear() { abort("clear() 还没做（调试器那一族）"); }
 bool eof(file f) { abort("eof(file) 还没做（这一层只有 stdin/stdout，没有真的读文件）"); return true; }
 bool error(file f) { abort("error(file) 还没做（同上）"); return true; }
 int seconds(string t="", string format="") { abort("seconds 还没做（这一层没有时钟）"); return 0; }
-real[] _cputime() { abort("_cputime 还没做（这一层没有时钟）"); return new real[]; }
+// `_cputime()`（plain.asy:299 的 `cputime()` 就靠它，而 `import plain;` 那一路会走到）：
+// **五格** —— parent user / parent system / child user / child system / 挂钟（plain.asy
+// 读的是 a[0]、a[2]、a[3] 与 a[4]）。这一层没有时钟，所以全是 0：回一份长度对的零比
+// abort 好 —— 那边只是把它减一减报个耗时。这条差别写在明处：cputime() 出来的都是 0。
+real[] _cputime() { return new real[] {0, 0, 0, 0, 0}; }
 int delete(string s) { abort("delete(string) 还没做（这一层不动文件系统）"); return 0; }
 real dirtime(path p, pair z) { abort("dirtime 还没做（要解三次方程找切向）"); return 0; }
 // runtime.in:32 的 windingnumber(array*, pair)：逐条路径的绕数**相加**
@@ -3167,6 +3199,75 @@ bool piecewisestraight(path p) {
 }
 real[] cubicroots(real a, real b, real c, real d) {
   abort("cubicroots 还没做（runmath.in:333 那一段解析解）"); return new real[];
+}
+
+// runmath.in:315/324 的 quadraticroots：正文照抄 path.cc:46（实根那份）与 path.cc:103
+// （复根那份）。Fuzz2/Fuzz4 是 bound.cc:13 与 path.cc:22 那两个常数。
+// math.asy:397 的 `quadraticroots((1,0),(b,0),(t0,0))` 要的是复根那一份。
+private real asy__Fuzz2 = 1000.0 * realEpsilon;
+private real asy__Fuzz4 = asy__Fuzz2 * asy__Fuzz2;
+// sqrt(1+x)-1，小 x 上不掉精度（path.h 的 sqrt1pxm1）
+private real asy__sqrt1pxm1(real x) { return x / (sqrt(1 + x) + 1); }
+// 复数开方（pair.h:190 的 Sqrt）：asy 语言里没有 sqrt(pair)，这是给下面那份用的
+private pair asy__csqrt(pair z) {
+  real mag = length(z);
+  if (mag == 0) return (0, 0);
+  if (z.x > 0) {
+    real re = sqrt(0.5 * (mag + z.x));
+    return (re, 0.5 * z.y / re);
+  }
+  real im = sqrt(0.5 * (mag - z.x));
+  if (z.y < 0) im = -im;
+  return (0.5 * z.y / im, im);
+}
+
+real[] quadraticroots(real a, real b, real c) {
+  real[] roots;
+  // 数值无穷远处的根去掉
+  if (abs(a) <= asy__Fuzz2 * abs(b) + asy__Fuzz4 * abs(c)) {
+    if (abs(b) > asy__Fuzz2 * abs(c)) { roots.push(-c / b); return roots; }
+    if (c == 0) { roots.push(0.0); return roots; }
+    return roots;
+  }
+  real factor = 0.5 * b / a;
+  real denom = b * factor;
+  if (abs(denom) <= asy__Fuzz2 * abs(c)) {
+    real x = -c / a;
+    if (x >= 0) { real t2 = sqrt(x); roots.push(-t2); roots.push(t2); }
+    return roots;
+  }
+  real x = -2.0 * c / denom;
+  if (x > -1.0) {
+    real r2 = factor * asy__sqrt1pxm1(x);
+    real r1 = -r2 - 2.0 * factor;
+    if (r1 <= r2) { roots.push(r1); roots.push(r2); } else { roots.push(r2); roots.push(r1); }
+    return roots;
+  }
+  if (x == -1.0) { roots.push(-factor); }
+  return roots;
+}
+
+pair[] quadraticroots(explicit pair a, explicit pair b, explicit pair c) {
+  pair[] roots;
+  if (a == (0, 0)) {
+    if (b != (0, 0)) { roots.push(-c / b); return roots; }
+    if (c == (0, 0)) { roots.push((0, 0)); }
+    return roots;
+  }
+  pair factor = 0.5 * b / a;
+  pair denom = b * factor;
+  if (denom == (0, 0)) {
+    pair z1 = asy__csqrt(-c / a);
+    roots.push(z1);
+    roots.push(-z1);
+    return roots;
+  }
+  // 复数上的 sqrt(1+x)-1：与实数那份同一个写法
+  pair x = -2.0 * c / denom;
+  pair z1 = factor * (x / (asy__csqrt(1 + x) + 1));
+  roots.push(z1);
+  roots.push(-z1 - 2.0 * factor);
+  return roots;
 }
 real[] solve(real[][] a, real[] b, bool warn=true) {
   abort("solve 还没做（runarray.in:1267 的 LU 分解）"); return new real[];
@@ -3269,7 +3370,12 @@ real operator ecast(string s) {
       ++i;
     }
   }
-  if (!any) abort("把 '" + s + "' 当 real：这里没有数字（asy 那边这一格是 Default，用起来才报错）");
+  // 认不出的串**不在这里报错**（量过真 asy）：`real r=(real) "3.14git";` 那一句是通的，
+  // 拿到的是一格 Default（未初始化），**读它**才报 "Trying to use uninitialized value"。
+  // plain.asy:42 的 `real RELEASE=(real) split(VERSION,"-")[0];` 正好只存不读，所以在
+  // 这里 abort 就把 `import plain;` 整条路掐断了。这一层没有"未初始化"这个状态，所以
+  // 回 0 —— 差别写在明处：asy 是"用起来才报错"，我们是"用起来是 0"。
+  if (!any) return 0;
   int ex = 0;
   if (i < n && (substr(s, i, 1) == "e" || substr(s, i, 1) == "E")) {
     ++i;
@@ -3283,8 +3389,9 @@ real operator ecast(string s) {
     if (eneg) ex = -ex;
   }
   i = asy__skipws(s, i);
-  if (i != n) abort("把 '" + s + "' 当 real：'" + substr(s, i, n - i)
-                    + "' 这一段剩下了（asy 要整串都是一个数）");
+  // 尾巴上还剩东西：与上面那条 `!any` 同一条 —— asy 那一格是 Default，这里回 0。
+  // `(real) "3.14git"`（plain.asy:42 那一句）走的正是这一支。
+  if (i != n) return 0;
   int net = ex - frac;
   if (big) abort("把 '" + s + "' 当 real：有效数字超过 2^53 —— 要正确舍入得做长除法，这一刀还没做");
   if (net > 22 || net < -22) abort("把 '" + s + "' 当 real：10^" + (string) net

@@ -285,6 +285,17 @@ export function asyStmtOne(L, n, ret) {
     if (uv !== undefined) return uv;
     return L.nope(n, '`unravel` 这一句（这一刀只摊一格记录变量的字段，摊模块还没做）');
   }
+  // 函数体里的 `from m access x;`（plain_scaling.asy:204 的
+  // `from simplex2 access problem;`）与 `access m;`：走声明遍那一条同一个入口，位置就是
+  // 当前这一句。**代价写在明处**：摊进来的名字进的是这个**单元**的表（不是这个块的
+  // 作用域），出了函数还看得见 —— 与语句位置的 struct / typedef 那一档同一条（多认一点）。
+  // 模块体那一下也照旧记在这个位置上（asyModCallAt），于是它在**函数声明那一行**跑，
+  // 比 asy 早一点（那边是第一次进这个函数体时）—— 模块体没有可观察的副作用时看不出来。
+  if (h === 'from-access' || h === 'access') {
+    const mark = L.diags.errorCount();
+    L.modStmt(n, L.at);
+    return L.diags.errorCount() > mark ? null : [];
+  }
   return L.nope(n, `语句 '${h}'`);
 }
 

@@ -148,6 +148,12 @@ export function asyNameOf(L, n, nm) {
       const fns = asyVisible(L, nm);
       if (fns.length > 0) v.shadowFns = fns;
     }
+    // 同一个名字的文件级变量可能有**好几格**（asy 按签名分得开）：把名字带上，
+    // 用处那一侧按目标类型再挑一次（asyGvarFor，落地在 coerce）。原型是
+    // `restricted real[] Spline(real[], real[]);` 与 `guide Spline(... guide[])=operator ..;`
+    // （graph_splinetype.asy:5 与 graph.asy:1890）—— graph.asy:1917 的 `Hermite(Spline)`
+    // 要的是前者，而顺序解析给的是后者。
+    v.shadowName = nm;
     return v;
   }
   if (g !== null) {
@@ -235,7 +241,9 @@ function asyValTypes(L, v) {
   if (cs === null) return null;
   const out = [];
   for (const c of cs) {
-    const t = asyCandFnType(L, c);
+    // 重载集那一档是**文件级函数**（asyCandFnType 就是它的类型）；方法那一档要走
+    // asyMValType —— `operator init` 的候选在那两处不同型（见那个函数的注释）。
+    const t = v.over !== undefined ? asyCandFnType(L, c) : asyMValType(L, c);
     if (!out.includes(t)) out.push(t);
   }
   return out;
@@ -254,7 +262,7 @@ function asyPickAs(L, node, v, want) {
 /** 重载的方法按目标类型挑一份，回绑好接收者的闭包（见 lower.js 的 methodVal） */
 export function asyMoverPick(L, node, v, want) {
   for (const c of v.mover.cands) {
-    if (asyCandFnType(L, c) !== want) continue;
+    if (asyMValType(L, c) !== want) continue;
     return L.methodVal(node === undefined || node === null ? v.mover.node : node,
       v.mover.rec, c, v.mover.recv);
   }
@@ -321,6 +329,25 @@ export function asyCandFnType(L, c) {
     ps = ps === '' ? t : `${ps},${t}`;
   }
   return `${c.ret}(${ps})`;
+}
+
+/**
+ * 一次用户转换的调用代码（第六十二刀）。绝大多数候选是**一个函数**（`(call sym x)`），
+ * 而 `autounravel Iterable_T operator cast(T[] items) = Iterable_T;`
+ * （collections/iter.asy:42）那种是**一格函数值字段** —— 那要间接调。
+ */
+export function asyCastCall(uc, code) {
+  return uc.viaVar === true ? `(callfn (var ${uc.sym}) ${code})` : `(call ${uc.sym} ${code})`;
+}
+
+/**
+ * 一个候选**当方法值取出来**时的类型（第六十二刀）。与 asyCandFnType 只差 `operator init`
+ * 那一格：那份候选的 `ret` 记的是**记录名**（它在重载解析里扮演的是构造函数 `M(…)`），
+ * 而绑在实例上取出来的是那个 void 的正文方法 —— 理由与量法见 methodVal 里那一段。
+ */
+export function asyMValType(L, c) {
+  if (c.ctor !== true) return asyCandFnType(L, c);
+  return asyCandFnType(L, { ret: 'void', params: c.params, ps: c.ps });
 }
 
 /**
@@ -690,8 +717,8 @@ export function asyPromote(L, a, b) {
   // 可见定案是在两支之间做的，不看外面要什么）。两边都能转过去就是歧义，回 null 让调用方报。
   const ab = L.castFor(b.type, a.type, false);
   const ba = L.castFor(a.type, b.type, false);
-  if (ab !== null && ba === null) { a.code = `(call ${ab.sym} ${a.code})`; a.type = b.type; return b.type; }
-  if (ba !== null && ab === null) { b.code = `(call ${ba.sym} ${b.code})`; b.type = a.type; return a.type; }
+  if (ab !== null && ba === null) { a.code = asyCastCall(ab, a.code); a.type = b.type; return b.type; }
+  if (ba !== null && ab === null) { b.code = asyCastCall(ba, b.code); b.type = a.type; return a.type; }
   return null;
 }
 
@@ -737,7 +764,7 @@ export function asyCoerce(L, v, want, node, what) {
     if (mv !== null) return mv;
     let list = '';
     for (const c of v.mover.cands) {
-      const t = asyCandFnType(L, c);
+      const t = asyMValType(L, c);
       list = list === '' ? t : `${list}、${t}`;
     }
     return L.err(node, `${what}：要 ${want}，而那个方法的重载里没有同型的一份（有 ${list}）`);
@@ -760,9 +787,16 @@ export function asyCoerce(L, v, want, node, what) {
   }
   // 同名的**模块级那一格**（shadowVar，见 nameOf）：类型一模一样时改判成它
   if (v.shadowVar !== undefined && v.shadowVar.type === want) return v.shadowVar;
+  // 同一个名字的文件级变量有**好几格**（shadowName，见 nameOf）：按目标类型挑那一格。
+  // 顺序解析给的是最后一格，而用处这边要的可能是前面某一格（`Hermite(Spline)`，
+  // graph.asy:1917）。只在类型**一模一样**时改判，与上面两条同一个位置。
+  if (v.shadowName !== undefined) {
+    const g = L.gvarFor(v.shadowName, want);
+    if (g !== null) return { code: `(var ${g.sym})`, type: want };
+  }
   // 用户定义的转换（第二十七刀）：内建那几条不成才轮到它，源类型要一模一样（不串）
   const uc = L.castFor(want, v.type, false);
-  if (uc !== null) return { code: `(call ${uc.sym} ${v.code})`, type: want };
+  if (uc !== null) return { code: asyCastCall(uc, v.code), type: want };
   return L.err(node, `${what}：要 ${want}，这里是 ${v.type}`);
 }
 
@@ -2060,6 +2094,11 @@ export function asyCast(L, n) {
   if (t === null) return null;
   const v = asyExpr(L, n.items[2]);
   if (v === null) return null;
+  // 里面那一格**还没定案**（重载集、重载的方法、`? :` 的交集 —— `code` 是空的）：
+  // 括号里那个类型就是定案的依据，所以整条交给 coerce（第六十二刀）。
+  // `((F)map.operator init)()`（collections/map.asy:102）落在这儿 —— 少了这一句，
+  // 下面 `castFor` 拿着 `<M.operator init 的重载集>` 那个假类型去问，报的是"转不了"。
+  if (v.code === null) return L.coerce(v, t, n, `转成 ${t}`);
   if (t === v.type) return v;
   if (t === 'real' && v.type === 'int') return { code: `(toreal ${v.code})`, type: 'real' };
   if (t === 'int' && v.type === 'real') return { code: `(toint ${v.code})`, type: 'int' };
@@ -2076,6 +2115,6 @@ export function asyCast(L, n) {
   // `(T) x` 是唯一收 `operator ecast` 的位置（第二十七刀）；内建那几条在上面 —— 量过
   // `(real) 3` 还是提升，用户那份是兜底。
   const uc = L.castFor(t, v.type, true);
-  if (uc !== null) return { code: `(call ${uc.sym} ${v.code})`, type: t };
+  if (uc !== null) return { code: asyCastCall(uc, v.code), type: t };
   return L.nope(n, `把 ${v.type} 转成 ${t}`);
 }

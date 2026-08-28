@@ -1,0 +1,60 @@
+(module
+  ;; 类的**互相引用**与**自引用** —— 第六十二刀。
+  ;;
+  ;; 结构体是值语义、内嵌是真的内嵌，所以它的字段类型只能是前面已经声明过的结构体
+  ;; （`bad/struct-self.sx` 与 `bad/struct-fwd.sx` 钉着那两半）。类不一样：它在四条腿上
+  ;; 都是**一个指针**（LLVM 的 `t.k === 'class'` -> `ptr`、零值 -> `null`），所以
+  ;; 前向引用、互相引用、自引用都摊得开 —— 零值是空引用，没有递归。
+  ;;
+  ;; 逼出这一刀的是 `import plain;`：plain_bounds.asy 的 freezableBounds 与
+  ;; transformedBounds 互相引用，plain_picture.asy 的 node3 拿 picture 当形参类型而
+  ;; picture 声明在它后面 —— 一遍收记录时这几条无论怎么排都有一条落在后面。
+
+  ;; 前向：A 的字段提到后面才声明的 B
+  (class A (n int) (b B) (bs (arr B)))
+  ;; 互相：B 又提回 A
+  (class B (n int) (a A))
+  ;; 自引用：链表那一格
+  (class Link (v int) (next Link))
+
+  (fn depth ((l Link)) int
+    (let d int (int 0))
+    (let cur Link (var l))
+    (while (bin "!=" (var cur) (null Link))
+      (do
+        (set d (bin "+" (var d) (int 1)))
+        (set cur (fld (var cur) next))))
+    (ret (var d)))
+
+  (main
+    ;; 零值是空引用（不是"再造一个"—— 那会无限递归）
+    (let a A (cnew A))
+    (print (fld (var a) n))
+    (print (bin "==" (fld (var a) b) (null B)))
+
+    ;; 互相指回去：a.b.a 就是 a 自己
+    (let b B (cnew B))
+    (fldset (var b) n (int 7))
+    (fldset (var a) b (var b))
+    (fldset (var b) a (var a))
+    (fldset (var a) n (int 3))
+    (print (fld (fld (var a) b) n))
+    (print (fld (fld (fld (var a) b) a) n))
+
+    ;; (arr 后面那个类) 也收
+    (fldset (var a) bs (anew (arr B) (int 0)))
+    (apush (fld (var a) bs) (var b))
+    (print (alen (fld (var a) bs)))
+    (print (fld (aget (fld (var a) bs) (int 0)) n))
+
+    ;; 自引用的那一格：串三个
+    (let l1 Link (cnew Link))
+    (let l2 Link (cnew Link))
+    (let l3 Link (cnew Link))
+    (fldset (var l1) v (int 1))
+    (fldset (var l2) v (int 2))
+    (fldset (var l3) v (int 3))
+    (fldset (var l1) next (var l2))
+    (fldset (var l2) next (var l3))
+    (print (call depth (var l1)))
+    (print (fld (fld (fld (var l1) next) next) v))))

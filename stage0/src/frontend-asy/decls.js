@@ -13,7 +13,7 @@
 import { isList, isAtom, head } from '../sexpr/read.js';
 import {
   ASY_NOPE, SCALARS, ASY_MODSTM, ASY_ARRELEM_TEXT, ASY_OPSYM, ASY_OPBAD, ASY_RESTPFX,
-  asyIsArr, asyElem, asyIsFn, asyCore, asyFldSym,
+  asyIsArr, asyElem, asyIsFn, asyCore, asyFldSym, asyFnSplit,
 } from './types.js';
 import { ZERO } from './runtime.js';
 import { asyStmt, asyBody } from './stmts.js';
@@ -90,7 +90,11 @@ export function asyStaticDec(L, rec, r, at, au) {
       if (f.name === nm) return L.err(start, `'${nm}' 在 struct ${rec.name} 里已经是字段了`);
     }
     if (rec.statics.has(nm)) return L.err(start, `${what} 字段 '${nm}' 重复声明`);
-    const g = { sym: `asy__sf${L.gdecls.length}_${rec.name}_${nm}`, type: t, at, ok: true };
+    // 名字里可能带空格与算符（`autounravel Iterable_T operator cast(T[] items) = Iterable_T;`
+    // —— collections/iter.asy:42，那是一格**函数值字段**，名字就叫 `operator cast`）。
+    // 表里的键照旧是那个名字，只有**符号名**要过一遍 asyFldSym：核心方言的名字得是标识符
+    // （不过的话发出去是 `(global asy__sf61_..._operator cast (fnty …))`，那边读不出来）。
+    const g = { sym: `asy__sf${L.gdecls.length}_${rec.name}_${asyFldSym(nm)}`, type: t, at, ok: true };
     L.gdecls.push(g);
     rec.statics.set(nm, g);
     // autounravel：同一格再往文件级挂一个名字。位置是 struct 的位置，所以写在 struct
@@ -99,9 +103,62 @@ export function asyStaticDec(L, rec, r, at, au) {
       const list = L.globals.has(nm) ? L.globals.get(nm) : [];
       list.push(g);
       L.globals.set(nm, list);
+      // 名字叫 `operator cast` / `operator ecast` 的那一格：它是一条**用户转换**
+      // （collections/iter.asy:42 的 `autounravel Iterable_T operator cast(T[] items)
+      // = Iterable_T;`）。转换的候选表按目标类型存，与 asyCastSig 那一份并排；
+      // 只是这一格是个**函数值**，调用要间接来（viaVar，见 exprs.js 的 asyCastCall）。
+      asyCastVar(L, start, nm, t, g, at);
     }
   }
   return true;
+}
+
+/** 一格名字叫 `operator cast` / `operator ecast` 的**函数值字段**：登记成一条用户转换 */
+function asyCastVar(L, node, nm, t, g, at) {
+  if (nm !== 'operator cast' && nm !== 'operator ecast') return;
+  const sp = asyFnSplit(t);
+  if (sp === null) return;
+  if (sp.params.length !== 1 || sp.ret === 'void') {
+    L.nope(node, `这种形状的 '${nm}' 函数值字段（asy 的转换是一元的、目标不是 void）`);
+    return;
+  }
+  const cand = {
+    ret: sp.ret, params: [sp.params[0]], ps: [{ name: 'x', type: sp.params[0], def: null }],
+    node, sym: g.sym, pfx: L.pfx, unit: L.unit.id, at, dat: at,
+    to: sp.ret, src: sp.params[0], ec: nm === 'operator ecast', viaVar: true,
+  };
+  const list = L.casts.has(sp.ret) ? L.casts.get(sp.ret) : [];
+  list.push(cand);
+  L.casts.set(sp.ret, list);
+}
+
+/**
+ * 这条 `autounravel` 声明摊出去的**名字**，记在 `rec.au` 上（第六十二刀）。
+ *
+ * 为什么要记：`from m access X as Y;` 在 asy 那边把 X 连同**它体里那些 autounravel 的
+ * 成员**一起带过来（量过 —— `struct Box { autounravel Box mkBox(int)=Box;
+ * autounravel int twice(Box b){…} }`，另一个文件里 `from mm access Box as B;` 之后
+ * `mkBox(5)` 与 `twice(b)` 都通，印 10）。而 `only` 那张改名表里只有 `Box`，
+ * 那两个名字就被滤掉了。`collections/map.asy:48` 的 `Iterable(iter)` 正是这一格：
+ * 它是 `collections/iter.asy:45` 那条 `autounravel Iterable_T Iterable(Iter_T iter())`，
+ * 而 map.asy 只 access 了 `Iterable_T as Iterable_K`。
+ *
+ * `operator cast` / `operator ecast` 不在这里记 —— 它们不挂在名字上（进的是 L.casts），
+ * 由 asyModMerge 按"提到了这个类型"认（见那边的注释）。
+ */
+export function asyAuNames(L, rec, r) {
+  if (rec.au === undefined) return;
+  if (head(r) === 'fundec') {
+    const nm = isAtom(r.items[2]) ? r.items[2].value : null;
+    if (nm !== null && !nm.startsWith('operator ')) rec.au.add(nm);
+    return;
+  }
+  for (const d of L.flat(r.items[2], 'decids')) {
+    if (!isList(d) || head(d) !== 'decid') continue;
+    const start = d.items[1];
+    if (!isList(start) || !isAtom(start.items[1])) continue;
+    rec.au.add(start.items[1].value);
+  }
 }
 
 /**
@@ -837,7 +894,8 @@ export function asyGlobalNames(L, n, at) {
     // 名字可以是**算符名**：`interpolate operator ::=operator ..(…)`（plain_paths.asy:129）
     // 就是一格叫 `operator ::` 的模块级变量。核心方言的符号得是个标识符，所以过一遍
     // asyFldSym —— 表里的键还是源码里那个名字（调用点按它查）。
-    const g = { sym: `asy__g${L.gdecls.length}_${asyFldSym(nm)}`, type: ty, at, ok };
+    const g = { sym: `asy__g${L.gdecls.length}_${asyFldSym(nm)}`, type: ty, at, ok,
+      unit: L.unit.id };
     const list = L.globals.has(nm) ? L.globals.get(nm) : [];
     list.push(g);
     L.globals.set(nm, list);
@@ -876,6 +934,11 @@ export function asyGvarFor(L, nm, want) {
 export function asyGvarAt(L, nm) {
   const list = L.globals.get(nm);
   if (list === undefined) return null;
+  // **这个单元自己声明的**那一格优先：内建面是每个单元隐式引一次的，位置记在
+  // `off` 上，与这个单元第 0 项**同一格**。不分开的样子是 `lib/asy/version.asy` 里
+  // 那句 `string VERSION = "3.14git";` 赋给了内建面那一格（于是 version.VERSION
+  // 一直是空的，plain.asy:22 那句版本检查永远发警告）。
+  for (const g of list) if (g.at === L.at && g.unit === L.unit.id) return g;
   for (const g of list) if (g.at === L.at) return g;
   return null;
 }
@@ -1100,16 +1163,32 @@ export function asyDeclPass(L, u) {  const rs = u.rs;
 /** 一个单元的正文：方法体、文件级函数体，与"剩下那些语句"（模块是初始化函数，主文件是 main） */
 export function asyBodyPass(L, u, fns) {
   const off = L.atOff;
-  for (const m of u.methodDecls) {
-    const text = asyMethod(L, m.rec, m.cand, m.at);
-    if (text !== null) fns.push(text);
-  }
-  // struct 体里 `autounravel` 的那些（第二十八刀）：它们就是文件级函数，只是写在体里
-  for (const m of u.auFns) {
-    L.at = m.at;
-    const f = asyFunc(L, m.node);
-    if (f !== null) fns.push(f);
-  }
+  // 方法体（methodDecls）与 struct 体里 `autounravel` 的那些（auFns，第二十八刀：它们就是
+  // 文件级函数，只是写在体里）。两张队**都会在这一遍里继续长** —— struct 也能写在
+  // 函数体里（plain_Label.asy:591 的 `struct stringfont` 写在 `texpath` 的体内），
+  // 那时候 recordDec 是在降那个函数体的时候才跑的。所以这里不是一趟走完，而是记两个
+  // 游标；正文降完再回来把新进来的那些发掉（末尾那一句 drain）。不补这一下的样子是
+  // 类发出来了、`asy__ctor_stringfont` 与 `asy__m_stringfont_pen` 一个都没有。
+  let mi = 0;
+  let ai = 0;
+  const drain = () => {
+    while (mi < u.methodDecls.length || ai < u.auFns.length) {
+      while (mi < u.methodDecls.length) {
+        const m = u.methodDecls[mi];
+        mi++;
+        const text = asyMethod(L, m.rec, m.cand, m.at);
+        if (text !== null) fns.push(text);
+      }
+      while (ai < u.auFns.length) {
+        const m = u.auFns[ai];
+        ai++;
+        L.at = m.at;
+        const f = asyFunc(L, m.node);
+        if (f !== null) fns.push(f);
+      }
+    }
+  };
+  drain();
   for (let i = 0; i < u.rs.length; i++) {
     const r = asyUnwrapMod(L, u.rs[i]);
     if (!isList(r) || head(r) !== 'fundec') continue;
@@ -1168,5 +1247,8 @@ export function asyBodyPass(L, u, fns) {
   }
   L.fileLevel = false;
   L.pop();
+  // 正文里新长出来的那些（函数体里的 struct）。放在 pop 之后是为了与开头那一趟
+  // 环境一致 —— 方法体本来就看不见文件级作用域里那一层局部量。
+  drain();
   return main;
 }

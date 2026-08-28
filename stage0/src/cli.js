@@ -630,6 +630,13 @@ function main(argv) {
       stdout(JSON.stringify(ast, replacer, 2) + '\n');
       return 0;
     }
+    // asy -> 核心方言 那一步的**文本**。核心方言的诊断报的是 `<文件>.asy.sx:L:C`，
+    // 而那份 .sx 是虚拟的（从不落盘），所以没有这一条就只能拿着行号猜。印出来的
+    // 内容与 lowerCoreSexpr 拿到的**逐字节相同** —— 行号可以直接对。
+    case 'sx': {
+      stdout(asyText(path));
+      return 0;
+    }
     case 'oir': {
       const { mod } = compile(path, rest);
       stdout(JSON.stringify(mod, replacer, 2) + '\n');
@@ -780,6 +787,8 @@ commands:
   run-jit   compile through LLVM IR and execute it with the ORC JIT (no cc at run time)
   emit-spirv print SPIR-V assembly for one kernel (ADR-0014 gate 7; --kernel NAME)
   ast       print the AST as JSON
+  sx        print the core-dialect text an .asy file lowers to (the *.asy.sx that
+            core-dialect diagnostics cite; line numbers line up exactly)
   oir       print the OIR as JSON
   mir       print the MIR (ADR-0014 decision 6): SSA values + slots + structured
             control flow, one 8-byte record per instruction (--bytes: sizes and
