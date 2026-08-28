@@ -1588,17 +1588,17 @@ export function asyArith(L, n, op, a, b) {
   // 那一档 asy 自己没有 —— "no matching function 'operator &(int, int)'"）。
   // plain_arrows.asy:497 那句 `arrow(…) & bar(…)` 靠的正是"两边都要跑"，所以这里先把
   // 两边各绑一个临时量，再用短路的 `&&` 去看它们 —— 求值就都发生过了。
-  if (op === '&') {
+  if (op === '&' || op === '|') {
     if (a.type !== 'bool' || b.type !== 'bool') {
-      return L.nope(n, `'${a.type} & ${b.type}'（bool 上的 `
-        + '`&` 是不短路的与，别的类型要自己定义一个 `operator &`）');
+      return L.nope(n, `'${a.type} ${op} ${b.type}'（bool 上的 `
+        + `\`${op}\` 是不短路的${op === '&' ? '与' : '或'}，别的类型要自己定义一个 \`operator ${op}\`）`);
     }
-    if (!Array.isArray(L.pre)) return L.nope(n, "这个位置的 bool '&'（要摊成语句，这里放不下）");
+    if (!Array.isArray(L.pre)) return L.nope(n, `这个位置的 bool '${op}'（要摊成语句，这里放不下）`);
     const ta = `asy__and${L.tmp++}`;
     const tb = `asy__and${L.tmp++}`;
     L.pre.push(`(let ${ta} bool ${a.code})`);
     L.pre.push(`(let ${tb} bool ${b.code})`);
-    return { code: `(bin "&&" (var ${ta}) (var ${tb}))`, type: 'bool' };
+    return { code: `(bin "${op === '&' ? '&&' : '||'}" (var ${ta}) (var ${tb}))`, type: 'bool' };
   }
   if (op !== '+' && op !== '-' && op !== '*') return L.nope(n, `算符 '${op}'`);
   if (a.type === 'pair' || b.type === 'pair') return asyPairArith(L, n, op, a, b);

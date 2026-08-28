@@ -5052,6 +5052,48 @@ tests/run.js 91 条全绿。graph 剩下那 47 条里成堆的是：可变形参
 （`interpolate` = `path(... path[])`，`Spline` / `Straight` / `Hermite` / `join` 那一族）、
 `axis(picture, void(picture,axisT))`、`.value` 字段，以及 plain 那 16 条漏下来的连带。
 
+### 一批：方法形参的可见位置、内建面是弱的、数组的比较，与两处按签名定案
+
+这一刀是一批。起点是 `import math;` 量出来 71 条 —— 比 `import plain;` 的 16 条多得多，
+而 math.asy 自己只有四百来行。差的那五十几条全在 plain 里，形状是"`struct align` 声明在
+后面"，可 `struct align` 明明在用它的那一行**上面**。
+
+`asyMethod` 里 `L.at`（可见位置）原来是在 `asyFormals` **之后**才摆好的。形参与返回类型
+里的记录名于是拿"上一次降级留下的 at"去问 recHere。`import plain;` 那条路上留下的碰巧是个
+很大的数，一问全通，看不出来；`import math;`（plain 走 autoplain 并进来）那条路上留下的是
+33，plain 里一半的 struct 就都被判成"声明在后面"。把那一对 `keepAt` / `L.at = at` 提到
+formals 前面就完了 —— 71 → 24。
+
+第二条是**内建面那一份是弱的**。asy 的内建表（builtin.cc）与 `base/plain.asy` 是两拨东西，
+而我们把"内建"写成了一份 asy 源码（`stage0/lib/asy/asy_builtins.asy`），里面难免混进本该由
+plain 提供的那几个 —— `int[] sequence(int,int)` 就是（asy 那边只有 plain.asy:151 一份）。
+两份同签名的都可见时我们判"有多个同样合适的重载"，而 asy 压根只有一份。`asyVisible` 末尾
+加一档 `asyBiWeak`：真库里出现**同签名**的一份时，内建面那一份退场。
+
+第三条是数组上的**比较**。asy 的 runarray.in 里 `>` `>=` `<` `<=` 与 bool[] 的 `&` `|`
+都是逐元素的算符函数、回 bool[]；二维数组上的 `*` 是**矩阵乘**，不是逐元素。前端的 opUser
+在内建那一档之前就问，所以这些直接写进内建面就行 —— 顺带补了 `all` / `sort` / `pow10` /
+`AtA` / `transpose(pair[][])` 与 `real[] -> pair[]` 那条 arrayToArray。`any` 刻意**不给**：
+asy 那边报 "no matching variable 'any'"（量过）。`|` 这个算符名进了 ASY_OPSYM，bool 上那一
+档与 `&` 并排（不短路）。
+
+第四条是两处**按签名定案**。同名的一格函数值与一族函数并存时，原来一律先走那一格：
+  - plain_Label.asy:1 的 `real angle(transform)` 本来不该有"那一格"—— 是
+    plain_arrows.asy:98 的 `angle=min(angle*…,45)`（改的是**形参**）让 fnSlots 误判了。
+    `angle(z)`（z 是 pair）于是被当成间接调用。现在那一格**接不住就回滚**，同名的函数与
+    内建那一族再试一次。
+  - graph.asy:268 的 `ticklabel DefaultLogFormat=DefaultLogFormat(10);` 之后
+    `DefaultLogFormat(base)`（base 是 int）有两个候选：函数那份同型，刚声明的这格变量要
+    `int -> real`。挑错了就回 `string`，graph.asy:695/794 的 `? :` 两支于是不同型。新的
+    `asyGvarLoses`：同名函数里有**完全同型**的一份而这一格要转换时，让函数那一档上。
+
+`_texpath` / `textpath` 的元数照 runlabel.in:243/349 改成 `path[][](string[], pen[])`
+（plain_Label.asy:664 之后 `g[i][0]` / `g[i].delete(0)` 钉着二维）；`probeType` 去掉了
+"pre 不是数组就不探"那道门 —— 文件级的 `texpath=new path[](…)` 要靠它挑那一格。
+
+数字：`import plain;` 16 → 14，`import graph;` 47 → 25，`import math;` 71 → 15。
+tests/asy 208 条（新增 cases/130-array-compare）、tests/run.js 91 条全绿。
+
 ## 后果与代价
 
 

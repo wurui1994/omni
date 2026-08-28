@@ -1260,12 +1260,22 @@ private path asy__join(path a, path b, int kind) {
   return h;
 }
 
-path operator --(path a, path b) {
-  return asy__join(a, b, 0);
+// 连接符的元数是**不限**的（builtin.cc:421 那两条注册的是 `guide(... guide[])`）：
+// camp.y 把 `a -- b -- c` 降成**一次**调用，而 `interpolate join=operator --;`
+// （graph.asy:1920 那一族）要的正是 `path(... path[])` 这个类型。两个实参那一档照旧 ——
+// 前端折连接时就是一次两个（见 asyJoinFold）。
+path operator --(... path[] g) {
+  if (g.length == 0) return nullpath;
+  path h = g[0];
+  for (int i = 1; i < g.length; ++i) h = asy__join(h, g[i], 0);
+  return h;
 }
 
-path operator ..(path a, path b) {
-  return asy__join(a, b, 1);
+path operator ..(... path[] g) {
+  if (g.length == 0) return nullpath;
+  path h = g[0];
+  for (int i = 1; i < g.length; ++i) h = asy__join(h, g[i], 1);
+  return h;
 }
 
 // ------------------------------------------------- 连接里的那几个规格（第四十五刀）
@@ -1897,10 +1907,77 @@ real[][] intersections(path p, path q, real fuzz=-1) {
 path nib(pen p) { abort("nib(pen) 还没做"); return new path; }
 pen makepen(path p) { abort("makepen(path) 还没做"); return new pen; }
 real[][] transpose(real[][] a) { abort("transpose 还没做"); return new real[][]; }
+// pair 的那一份（runarray.in 里 transpose 是按元素类型注册的一族）：math.asy:418
+// 的二维 fft 要它。体是真的 —— 转置不看元素怎么算。
+pair[][] transpose(pair[][] a) {
+  int n = a.length;
+  if (n == 0) return new pair[][];
+  int m = a[0].length;
+  pair[][] r = new pair[m][];
+  for (int i = 0; i < m; ++i) {
+    pair[] row = new pair[n];
+    for (int j = 0; j < n; ++j) row[j] = a[j][i];
+    r[i] = row;
+  }
+  return r;
+}
+// A^T A（runarray.in 的 AtA）：math.asy:434 的 leastsquares 要它。体是真的。
+real[][] AtA(real[][] a) {
+  int n = a.length;
+  if (n == 0) return new real[][];
+  int m = a[0].length;
+  real[][] r = new real[m][];
+  for (int i = 0; i < m; ++i) {
+    real[] row = new real[m];
+    for (int j = 0; j < m; ++j) {
+      real s = 0;
+      for (int k = 0; k < n; ++k) s += a[k][i] * a[k][j];
+      row[j] = s;
+    }
+    r[i] = row;
+  }
+  return r;
+}
+// 10^x（runmath.in 的 pow10）：graph.asy:7 的 `scaleT(log10,pow10,…)` 要它**当值**取，
+// 所以得是一份真函数（内建那一族的名字取不出函数值来）。
+real pow10(real x) { return 10.0 ^ x; }
+// 排序（runarray.in 的 sort 那一族）：这一层只收"元素能比大小"的那几个。
+// 体是插入排序 —— 稳定，与 asy 的 mergesort 在有重复元素时给的顺序一致。
+real[] sort(real[] a) {
+  real[] r = copy(a);
+  for (int i = 1; i < r.length; ++i) {
+    real v = r[i];
+    int j = i - 1;
+    while (j >= 0 && r[j] > v) { r[j + 1] = r[j]; --j; }
+    r[j + 1] = v;
+  }
+  return r;
+}
+int[] sort(int[] a) {
+  int[] r = copy(a);
+  for (int i = 1; i < r.length; ++i) {
+    int v = r[i];
+    int j = i - 1;
+    while (j >= 0 && r[j] > v) { r[j + 1] = r[j]; --j; }
+    r[j + 1] = v;
+  }
+  return r;
+}
+string[] sort(string[] a) {
+  string[] r = copy(a);
+  for (int i = 1; i < r.length; ++i) {
+    string v = r[i];
+    int j = i - 1;
+    while (j >= 0 && r[j] > v) { r[j + 1] = r[j]; --j; }
+    r[j + 1] = v;
+  }
+  return r;
+}
 
 // (1) 笔的查询那一侧与字号（runpen.in）。base 里 `linewidth(currentpen)`、
 // `fontsize(10)` 到处都是。
 real linewidth(pen p) { return p.width; }
+
 // (1) 字号（runtime.in:590/596）：pen 上存一格。默认那一格是 **12pt 换成 bp**
 // 的那个数（量过 `fontsize(currentpen)` 是 11.9551681195517 = 12*72/72.27）。
 pen fontsize(real size, real lineskip) {
@@ -2510,6 +2587,10 @@ private void asy__samelen(int n, int m) {
 }
 real[] operator cast(int[] a) { real[] c; for (int x : a) c.push(x); return c; }
 real[][] operator cast(int[][] a) { real[][] c; for (int[] x : a) c.push(x); return c; }
+// real[] -> pair[] 也在 arrayToArray 那一族里（real -> pair 是内建提升）：
+// math.asy:380 的 `return cubicroots(b,c,d,e);`（回 pair[] 的函数里）靠的就是它。
+pair[] operator cast(real[] a) { pair[] c; for (real x : a) c.push((x, 0)); return c; }
+pair[][] operator cast(real[][] a) { pair[][] c; for (real[] x : a) c.push(x); return c; }
 
 int[] operator +(int a, int[] b) { int[] c; for (int x : b) c.push(a + x); return c; }
 int[] operator +(int[] a, int b) { int[] c; for (int x : a) c.push(x + b); return c; }
@@ -2560,6 +2641,86 @@ triple[] operator -(triple[] a, triple[] b) { asy__samelen(a.length, b.length); 
 triple[] operator *(real a, triple[] b) { triple[] c; for (triple x : b) c.push(a * x); return c; }
 triple[] operator *(triple[] a, real b) { triple[] c; for (triple x : a) c.push(x * b); return c; }
 triple[] operator /(triple[] a, real b) { triple[] c; for (triple x : a) c.push(x / b); return c; }
+
+// 比较那一族（runarray.in 的 Compare）：逐元素，回 bool[]。asy 那边 `A > x`（数组与
+// 标量）与 `ap >= a`（两个数组）都在这一族里 —— math.asy:147 与 graph.asy:842 靠的
+// 就是它，配上 bool[] 的 `&` 与 find(bool[])。
+bool[] operator >(real[] a, real[] b) { asy__samelen(a.length, b.length); bool[] c; for (int i = 0; i < a.length; ++i) c.push(a[i] > b[i]); return c; }
+bool[] operator >=(real[] a, real[] b) { asy__samelen(a.length, b.length); bool[] c; for (int i = 0; i < a.length; ++i) c.push(a[i] >= b[i]); return c; }
+bool[] operator <(real[] a, real[] b) { asy__samelen(a.length, b.length); bool[] c; for (int i = 0; i < a.length; ++i) c.push(a[i] < b[i]); return c; }
+bool[] operator <=(real[] a, real[] b) { asy__samelen(a.length, b.length); bool[] c; for (int i = 0; i < a.length; ++i) c.push(a[i] <= b[i]); return c; }
+bool[] operator >(real[] a, real b) { bool[] c; for (real x : a) c.push(x > b); return c; }
+bool[] operator >=(real[] a, real b) { bool[] c; for (real x : a) c.push(x >= b); return c; }
+bool[] operator <(real[] a, real b) { bool[] c; for (real x : a) c.push(x < b); return c; }
+bool[] operator <=(real[] a, real b) { bool[] c; for (real x : a) c.push(x <= b); return c; }
+bool[] operator >(real a, real[] b) { bool[] c; for (real x : b) c.push(a > x); return c; }
+bool[] operator >=(real a, real[] b) { bool[] c; for (real x : b) c.push(a >= x); return c; }
+bool[] operator <(real a, real[] b) { bool[] c; for (real x : b) c.push(a < x); return c; }
+bool[] operator <=(real a, real[] b) { bool[] c; for (real x : b) c.push(a <= x); return c; }
+// bool[] 上的"与"：也是逐元素的（graph.asy:842 的 `A > … & A < …`）
+bool[] operator &(bool[] a, bool[] b) { asy__samelen(a.length, b.length); bool[] c; for (int i = 0; i < a.length; ++i) c.push(a[i] && b[i]); return c; }
+bool[] operator |(bool[] a, bool[] b) { asy__samelen(a.length, b.length); bool[] c; for (int i = 0; i < a.length; ++i) c.push(a[i] || b[i]); return c; }
+
+// 二维数组上的 `*` 是**矩阵乘**，不是逐元素（runarray.in 的 mulArray 那一族）。
+// plain_Label.asy:66 的 `conj(U)*A*U` 与 math.asy:434 的 `b*A` 就是这两条。
+pair[][] operator *(pair[][] a, pair[][] b) {
+  int n = a.length;
+  if (n == 0) return new pair[][];
+  int m = b.length;
+  asy__samelen(a[0].length, m);
+  int p = m == 0 ? 0 : b[0].length;
+  pair[][] r = new pair[n][];
+  for (int i = 0; i < n; ++i) {
+    pair[] row = new pair[p];
+    for (int j = 0; j < p; ++j) {
+      pair s = (0, 0);
+      for (int k = 0; k < m; ++k) s += a[i][k] * b[k][j];
+      row[j] = s;
+    }
+    r[i] = row;
+  }
+  return r;
+}
+real[][] operator *(real[][] a, real[][] b) {
+  int n = a.length;
+  if (n == 0) return new real[][];
+  int m = b.length;
+  asy__samelen(a[0].length, m);
+  int p = m == 0 ? 0 : b[0].length;
+  real[][] r = new real[n][];
+  for (int i = 0; i < n; ++i) {
+    real[] row = new real[p];
+    for (int j = 0; j < p; ++j) {
+      real s = 0;
+      for (int k = 0; k < m; ++k) s += a[i][k] * b[k][j];
+      row[j] = s;
+    }
+    r[i] = row;
+  }
+  return r;
+}
+real[] operator *(real[] a, real[][] b) {
+  int m = b.length;
+  asy__samelen(a.length, m);
+  int p = m == 0 ? 0 : b[0].length;
+  real[] r = new real[p];
+  for (int j = 0; j < p; ++j) {
+    real s = 0;
+    for (int k = 0; k < m; ++k) s += a[k] * b[k][j];
+    r[j] = s;
+  }
+  return r;
+}
+real[] operator *(real[][] a, real[] b) {
+  real[] r = new real[a.length];
+  for (int i = 0; i < a.length; ++i) {
+    asy__samelen(a[i].length, b.length);
+    real s = 0;
+    for (int k = 0; k < b.length; ++k) s += a[i][k] * b[k];
+    r[i] = s;
+  }
+  return r;
+}
 
 // 一元的 `-` 也有数组那一份（asy 里 `write(-a)` 逐元素取负，量过）
 int[] operator -(int[] a) { int[] c; for (int x : a) c.push(-x); return c; }
@@ -2979,6 +3140,12 @@ int find(bool[] a, int n=1) {
   }
   return -1;
 }
+// all（runarray.in）：math.asy:149 的 `all(b)` 就是这一条。空数组是 true（与 asy 一致）。
+// asy 那边**没有** `any`（量过 "no matching variable 'any'"），所以这里也不给。
+bool all(bool[] a) {
+  for (bool x : a) if (!x) return false;
+  return true;
+}
 // piecewisestraight（runpath.in:162）：每一段都是直线
 bool piecewisestraight(path p) {
   int n = length(p);
@@ -3005,11 +3172,13 @@ pair[] fft(pair[] a, int sign=1) {
 }
 // 字形轮廓那两条（runlabel.in:243/349）：真 asy 一条走 TeX、一条读字体文件。
 // 这一层没有那两路，所以体是 abort —— 签名在，plain_Label.asy:664 那一句才降得下来。
-path[] _texpath(string s, pen p) {
-  abort("_texpath 还没做（TeX 那一路不在这一层）"); return new path[];
+// 元数与返回类型都是照 runlabel.in 抄的：吃**一串**字符串与一串笔，回**每串一组**轮廓
+// （plain_Label.asy:664 之后 `g[i][0]` / `g[i].delete(0)` 那几句钉着 path[][]）。
+path[][] _texpath(string[] s, pen[] p) {
+  abort("_texpath 还没做（TeX 那一路不在这一层）"); return new path[][];
 }
-path[] textpath(string s, pen p) {
-  abort("textpath 还没做（读字体文件那一路不在这一层）"); return new path[];
+path[][] textpath(string[] s, pen[] p) {
+  abort("textpath 还没做（读字体文件那一路不在这一层）"); return new path[][];
 }
 void _shipout(string prefix="", frame f, frame preamble=null, string format="",
               bool wait=false, bool view=true, transform t=identity()) {

@@ -2038,7 +2038,9 @@ class AsyLower {
    * 用在"同名好几格、要靠右边的类型定案"那一档（见 assign 里的 gvarFor）。
    */
   probeType(node) {
-    if (!Array.isArray(this.pre)) return null;
+    // `pre` 不是数组时（文件级那一层）也照样探：现给一个空的当垫子，探完丢掉 ——
+    // 与 namedBuiltin 那边同一个路子。plain_Label.asy:688 的 `texpath=new path[](…)`
+    // 就在文件级，不给垫子就探不出类型来，同名的两格挑不动。
     const mark = this.diags.mark();
     const savePre = this.pre;
     this.pre = [];

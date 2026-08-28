@@ -75,6 +75,9 @@ export const ASY_OPSYM = new Map([
   // `tension` / `controls` / `spec` / `curl` 是连接里那几个规格 —— asy 那边它们也就是
   // 名字叫 `operator tension` 的普通函数（runtime.in:864/885/903/908 是内建那几份）。
   ['::', 'colons'], ['---', 'longdash'],
+  // `|`：asy 那边 bool 上的"或"（不短路）与数组那一族的逐元素"或"都叫这个名字
+  // （graph.asy:527 的 `a >= x | (a > 0 & a <= y)`）。`||` 是另一回事，见 ASY_OPBAD。
+  ['|', 'pipe'],
   ['tension', 'tension'], ['controls', 'controls'], ['spec', 'spec'], ['curl', 'curl'],
 ]);
 

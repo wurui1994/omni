@@ -265,8 +265,23 @@ export function asyCall(L, n) {
   // graph 一度从 183 涨到 186）。
   const gv = L.gvarHere(nm);
   if (gv !== null && gv !== L.gvarAt(nm) && gv.ok && asyIsFn(gv.type)
-      && !asyArityBad(L, n, gv.type, nm)) {
-    return asyFnValCall(L, n, nm, gv.type, `(var ${gv.sym})`);
+      && !asyArityBad(L, n, gv.type, nm) && !asyGvarLoses(L, n, nm, gv.type)) {
+    // 这一格**真的接得住**才算：元数对得上但实参类型接不住时，同名的函数候选还得再试
+    // 一次。量出来的形状是 plain_Label.asy:1 的 `real angle(transform)` —— 它本来不该
+    // 有"那一格"，是 plain_arrows.asy:98 的 `angle=min(angle*…,45)`（改的是**形参**）
+    // 让 fnSlots 误判了；`angle(z)`（z 是 pair）于是被当成间接调用，报"要 transform"。
+    const mark = L.diags.mark();
+    const savePre = Array.isArray(L.pre) ? L.pre : null;
+    if (savePre !== null) L.pre = [];
+    const fv = asyFnValCall(L, n, nm, gv.type, `(var ${gv.sym})`);
+    const mine = L.pre;
+    if (savePre !== null) L.pre = savePre;
+    if (fv !== null) {
+      if (savePre !== null) for (const s of mine) L.pre.push(s);
+      return fv;
+    }
+    L.diags.rollback(mark);
+    if (!L.funcs.has(nm)) return asyFnValCall(L, n, nm, gv.type, `(var ${gv.sym})`);
   }
   const vis = asyVisible(L, nm);
   // 同名的用户/模块函数与内建那一族在这里**一起打分**：asy 那边内建与库里的定义是
@@ -288,7 +303,26 @@ export function asyCall(L, n) {
       if (f !== null && (best === null || f.cost < best)) best = f.cost;
     }
     const bc = asyBuiltinCost(L, nm, raw);
-    if (best !== null && (bc === null || best <= bc)) return asyApplyCall(L, n, nm, vis, raw, null);
+    if (best !== null && (bc === null || best <= bc)) {
+      // 挑中的那份**真降下去**可能还是接不住：asyFit 的打分与 coerce 不是同一条尺 ——
+      // 量过 math.asy:25 的 `angle(z)`（z 是 pair）：fit 给 plain_Label 的
+      // `real angle(transform)` 打了分，coerce 那边 pair -> transform 没有这一条。
+      // 这时回滚，让"自己求实参"的内建那一族（angle/dir/… 见 namedBuiltin）再试一次。
+      const mark = L.diags.mark();
+      const savePre = Array.isArray(L.pre) ? L.pre : null;
+      if (savePre !== null) L.pre = [];
+      const v = asyApplyCall(L, n, nm, vis, raw, null);
+      const mine = L.pre;
+      if (savePre !== null) L.pre = savePre;
+      if (v !== null) {
+        if (savePre !== null) for (const s of mine) L.pre.push(s);
+        return v;
+      }
+      L.diags.rollback(mark);
+      const alt = asyNamedBuiltin(L, n, nm);
+      if (alt !== undefined) return alt;
+      return asyApplyCall(L, n, nm, vis, raw, null);
+    }
     // 内建赢；或者两边都没有能匹配的、而这个名字**本来就是内建那一族的** ——
     // 后一种要让内建那份去报诊断（`length(int[])` 那条话说得清楚得多，
     // 比"有的是 int(path)"有用）。两条都走 builtinRaw：它回 null 时诊断已经发过了。
@@ -362,6 +396,43 @@ function asyArityBad(L, n, ty, nm) {
   const list = alist === undefined || alist === null ? [] : L.flat(alist, 'args');
   for (const a of list) if (!isList(a) || head(a) !== 'arg') return false;
   return list.length !== s.params.length;
+}
+
+/**
+ * 同名的**函数**里有一份与实参**完全同型**，而这一格变量（函数类型）要转换才接得住 ——
+ * 那就该走函数那一档。asy 的重载解析里内建提升也是要记代价的，两边一起打分时同型的赢。
+ *
+ * 量出来的形状是 graph.asy:268 的 `ticklabel DefaultLogFormat=DefaultLogFormat(10);` ——
+ * 这一句之后 `DefaultLogFormat(base)`（base 是 int）有两个候选：函数 `ticklabel
+ * DefaultLogFormat(int)`（同型）与刚声明的那格变量 `string(real)`（int -> real）。
+ * 挑错了就回 `string`，graph.asy:695/794 的 `? :` 两支于是不同型。
+ */
+function asyGvarLoses(L, n, nm, ty) {
+  if (!L.funcs.has(nm) || !Array.isArray(L.pre)) return false;
+  const s = asyFnSplit(ty);
+  if (s === null) return false;
+  let alist = n.items[2];
+  if (isList(alist) && head(alist) === 'args-rest') return false;
+  const list = alist === undefined || alist === null ? [] : L.flat(alist, 'args');
+  for (const a of list) if (!isList(a) || head(a) !== 'arg' || a.items.length > 2) return false;
+  const mark = L.diags.mark();
+  const savePre = L.pre;
+  L.pre = [];
+  const ats = [];
+  for (const a of list) {
+    const v = L.expr(a.items[1]);
+    ats.push(v === null || v.type === undefined ? null : v.type);
+  }
+  L.pre = savePre;
+  L.diags.rollback(mark);
+  for (const t of ats) if (t === null) return false;
+  const same = (ps) => ps.length === ats.length && ps.every((p, i) => p === ats[i]);
+  if (same(s.params)) return false;
+  for (const c of asyVisible(L, nm)) {
+    const cs = asyFnSplit(L.candFnType(c));
+    if (cs !== null && same(cs.params)) return true;
+  }
+  return false;
 }
 
 /**
@@ -560,7 +631,30 @@ export function asyVisible(L, nm) {
     }
     out.push(c);
   }
-  return out;
+  return asyBiWeak(L, out);
+}
+
+/**
+ * 内建面（asy_builtins.asy）里的候选是**弱**的：真库里出现同签名的一份时它退场。
+ *
+ * 理由是这一层的分工。asy 的内建表（builtin.cc）与 `base/plain.asy` 是两拨东西，
+ * 而我们把"内建"写成了一份 asy 源码，里面难免混进了本该由 plain 提供的那几个 ——
+ * `int[] sequence(int,int)` 就是（asy 那边只有 plain.asy:151 一份）。两份同签名的
+ * 都可见时我们判"有多个同样合适的重载"，而 asy 那边压根只有一份。
+ * 量过：math.asy:160/177 的 `sequence(1,b.length)` 就是这么报 ambiguous 的。
+ */
+function asyBiWeak(L, out) {
+  if (L.biId === undefined || out.length < 2) return out;
+  let hasBi = false;
+  let hasReal = false;
+  for (const c of out) {
+    if (c.unit === L.biId) hasBi = true;
+    else hasReal = true;
+  }
+  if (!hasBi || !hasReal) return out;
+  const real = new Set();
+  for (const c of out) if (c.unit !== L.biId) real.add(L.candFnType(c));
+  return out.filter((c) => c.unit !== L.biId || !real.has(L.candFnType(c)));
 }
 
 /**

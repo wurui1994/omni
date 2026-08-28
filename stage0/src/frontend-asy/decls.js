@@ -656,14 +656,19 @@ export function asyMethod(L, rec, cand, at) {
   // （量过 `pt shift(pt d)` —— pt 是体里 using 起的名字）。见 recAlias。
   const keepAl = L.recAlias;
   L.recAlias = { map: rec.tyAlias, bi: cand.abi };
+  // `L.at` 也要在 formals **之前**摆好：形参与返回类型里的记录名按**结构体那一句**的
+  // 位置判可见（recHere）。原来这一句在 formals 之后，形参的类型于是拿"上一次
+  // 降级留下的 at"去问 —— `import plain;` 那条路上碰巧是个很大的数，看不出来；
+  // `import math;`（plain 走 autoplain 并进来）那条路上留下的是 33，plain 里
+  // 一半的 struct 都被判成"声明在后面"（量过 71 -> 16）。
+  const keepAt = L.at;
+  L.at = at;
   const ps = asyFormals(L, cand.node.items[3]);
-  if (ps === null) { L.recAlias = keepAl; return null; }
+  if (ps === null) { L.recAlias = keepAl; L.at = keepAt; return null; }
   const isCtor = cand.ctor === true;
   const isStat = cand.stat === true;
   const bodyRet = isCtor ? 'void' : cand.ret;
   const bodySym = isCtor ? `${cand.sym}_body` : cand.sym;
-  const keepAt = L.at;
-  L.at = at;
   // static 的方法体里**没有接收者**：`self` 照样开着（同一个 struct 的 static 成员要看得见），
   // 但带上 stat 标记 —— 实例字段与实例方法在这里不可见（量过 asy 报
   // "static use of dynamic variable"，见 strict/static-method-inst）。
@@ -998,6 +1003,8 @@ export function asyBuiltinsIn(L, u, off) {
   const b = asyModLoad(L, null, nm);
   if (b !== null) {
     asyModMerge(L, null, b, off, null);
+    // 内建面那个单元的编号记一份：同签名的**真定义**要盖掉这一份（见 asyVisible 那一档）
+    L.biId = b.id;
     // 体在**这个单元的正文最前面**跑（bodyPass 开头那一句）。不能挂 callAt[off] ——
     // 那张表是"源码里 import 那一行"的位置，而 off 就是第一条顶层项的位置，
     // 挂上去会把用户的第一句吃掉。init 自己有 `ran` 那道闸，多调一次不会重跑。
