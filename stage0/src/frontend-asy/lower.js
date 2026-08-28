@@ -1324,6 +1324,70 @@ class AsyLower {
    * 门外的两条：带默认值的方法（函数值没有默认值）、可变形参的方法（包装那一层要
    * 把打好的数组原样转手，还没量过）。
    */
+  /**
+   * 函数体里的**函数声明**（第四十六刀）：`void f() { int g(int k) {…} write(g(1)); }`。
+   * base 里 7 处（plain_picture 的 add/addBox 那一族里最多）。asy 那边它是嵌套作用域里的
+   * 一个函数，能看见外层的局部量；这一层降成一个**顶层函数** —— 名字另起
+   * （`asy__lf<N>_<名字>`，核心方言的模块级名字要全局唯一），签名进 funcs 表，
+   * 位置就是外层这一句的位置（`L.at`），所以同一句之后的调用看得见它。
+   *
+   * 抓外层局部量那一档**不收**：那要闭包（与 anonFn 的捕获是同一件事）。先按名字扫一遍
+   * 体，撞上外层作用域里的名字就 nope —— 不扫的话那句诊断会变成"未声明的变量"，
+   * 指错地方。形参与它自己的局部量不算，所以扫的时候把它们摘掉。
+   */
+  localFun(n) {
+    const nm = isAtom(n.items[2]) ? n.items[2].value : null;
+    if (nm === null) return this.err(n, '没有名字的函数声明');
+    const hit = this.localFunOuter(n);
+    if (hit !== null) {
+      return this.nope(n, `函数体里的函数 '${nm}' 用了外层的局部量 '${hit}'`
+        + '（那要闭包 —— 与匿名函数的捕获是同一件事）');
+    }
+    const mark = this.diags.errorCount();
+    asySig(this, n, this.at);
+    if (this.diags.errorCount() > mark) return null;
+    // 这一份的候选：按节点认（asySig 刚push进去的那个）
+    const list = this.funcs.get(nm);
+    let d = null;
+    if (list !== undefined) for (const c of list) if (c.node === n) d = c;
+    if (d === null) return null;
+    d.sym = `${this.pfx}asy__lf${this.wraps.length}_${d.base === undefined ? nm : d.base}`;
+    // 体里看得见的局部只有它自己的：作用域栈换成空的一层，降完换回来
+    const saveScopes = this.scopes;
+    const saveUpd = this.updates;
+    this.scopes = [];
+    this.updates = [];
+    const text = asyFunc(this, n);
+    this.scopes = saveScopes;
+    this.updates = saveUpd;
+    if (text === null) return null;
+    this.wraps.push(text);
+    return [];
+  }
+
+  /** 上面那条的扫描：体里第一个撞上外层作用域的名字（没有就 null） */
+  localFunOuter(n) {
+    const own = new Set();
+    const ps = asyFormals(this, n.items[3]);
+    if (ps !== null) for (const p of ps) own.add(p.name);
+    const stack = [n.items[4]];
+    while (stack.length > 0) {
+      const cur = stack.pop();
+      if (cur === undefined || cur === null) continue;
+      if (isAtom(cur)) {
+        const v = cur.value;
+        if (typeof v !== 'string' || own.has(v)) continue;
+        for (const s of this.scopes) if (s.has(v)) return v;
+        continue;
+      }
+      if (!isList(cur)) continue;
+      // 里层自己声明的名字也不算：`decidstart` 的名字进 own
+      if (head(cur) === 'decidstart' && isAtom(cur.items[1])) own.add(cur.items[1].value);
+      for (let i = 1; i < cur.items.length; i++) stack.push(cur.items[i]);
+    }
+    return null;
+  }
+
   methodVal(node, rec, cand, recvCode) {
     const mn = cand.base === undefined ? cand.sym : cand.base;
     for (const p of cand.ps) {

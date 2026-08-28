@@ -18,7 +18,7 @@ import {
   ASY_NOPE, DOT_BAD, ASY_ARRELEM_TEXT, asyOpText, asyIsArr, asyElem, asyIsFn, asyCore, ASY_NULL,
 } from './types.js';
 import { ZERO } from './runtime.js';
-import { asyArgs, asyCall, asyOpUser, asyOpBuiltinSig, asyIdxOpCall } from './calls.js';
+import { asyArgs, asyCall, asyOpUser, asyOpBuiltinSig, asyIdxOpCall, asyVisible, asyUserCall } from './calls.js';
 
 /**
  * `write` 的重载是量出来的，形状是 `write(string s="", T x, T[] more..., suffix=endl)`：
@@ -192,6 +192,22 @@ export function asyStmtOne(L, n, ret) {
   if (h === 'empty-stm') return [];
   if (h === 'modified') return asyStmt(L, n.items[2], ret);
   if (h === 'vardec') return asyVardec(L, n);
+  // 语句位置的**声明**（第四十六刀）：asy 的块就是一层作用域，函数/struct/typedef 都能
+  // 写在里面。这一层把它们当成"就地登记的顶层声明"：函数走 localFun（换个名字发成顶层
+  // 函数），struct 与 typedef 直接进那两张表 —— 位置都是外层这一句的位置。
+  // 代价写在明处：出了这个块它们**还看得见**（asy 那边看不见了）。要收窄得给那几张表
+  // 加一层作用域，那是另一刀；base 里没有靠这条遮挡的写法，所以先按"多认一点"走。
+  if (h === 'fundec') return L.localFun(n);
+  if (h === 'recorddec') {
+    const mark = L.diags.errorCount();
+    L.recordDec(n, L.at);
+    return L.diags.errorCount() > mark ? null : [];
+  }
+  if (h === 'typedec' || h === 'typedec-using') {
+    const mark = L.diags.errorCount();
+    L.typeDec(n, L.at);
+    return L.diags.errorCount() > mark ? null : [];
+  }
   if (h === 'exp-stm') return asyExprStmt(L, n.items[1]);
   if (h === 'block-stm') {
     const body = asyBody(L, n.items[1], ret);
@@ -447,7 +463,26 @@ export function asyExprStmt(L, e) {
   }
   if (h === 'call') {
     const nm = isList(e.items[1]) && head(e.items[1]) === 'name-exp' ? L.plainName(e.items[1].items[1]) : null;
-    if (nm === 'write') return asyWriteStmt(L, e);
+    if (nm === 'write') {
+      // 用户自己的 `write` 先问（第四十五刀）：base 里 `void write(file, T)` 那一族就是
+      // 普通重载（plain_constants.asy:82 起）。都不匹配才落回内建那份 —— 所以这里是
+      // "试一遍、不行就把诊断与前置语句都丢掉"（与 probeTy 同一条路子）。
+      const wc = asyVisible(L, 'write');
+      if (wc.length > 0) {
+        const mark = L.diags.mark();
+        const savePre = L.pre;
+        L.pre = [];
+        const uv = asyUserCall(L, e, 'write', wc, null);
+        const upre = L.pre;
+        L.pre = savePre;
+        if (uv !== null) {
+          for (const s of upre) L.pre.push(s);
+          return [`(expr ${uv.code})`];
+        }
+        L.diags.rollback(mark);
+      }
+      return asyWriteStmt(L, e);
+    }
     const v = asyCall(L, e);
     if (v === null) return null;
     return [`(expr ${v.code})`];

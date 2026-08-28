@@ -146,6 +146,12 @@ export function asyModMerge(L, node, u, at, only) {
     // 「有了就不覆盖」，于是指的是前一条那份 —— 那时它撞在"两个模块里都有 struct"那条
     // 诊断上，问题看不见；真名会打散之后就看得见了。
     const had = L.recVis.get(key);
+    // **同一份类型再进来一次，位置不后移**（第四十四刀）：`import plain;` 里一个
+    // `access`/`import` 会把内建面那些 struct（pen/path/frame/file/transform）
+    // 顺着模块的表再带一遍，按上面那条"后来的盖住先来的"就会把它们的可见位置推到
+    // 那条 import 那一行 —— 于是前面几百行里用 pen 的地方全报"声明在后面"（量到 231 条，
+    // 一处毛病）。同一个 rec 对象就是同一个类型，遮不遮的问题根本不存在。
+    if (had !== undefined && had.rec === e.rec) continue;
     if (had === undefined || had.at <= at) L.recVis.set(key, { rec: e.rec, at: at });
   }
   // typedef 的别名跟着 import 一起进来（asy 那边也是：`import graph;` 之后

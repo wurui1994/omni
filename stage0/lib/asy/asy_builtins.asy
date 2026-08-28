@@ -46,6 +46,101 @@ struct file {
 // pi 在真 asy 里是 C++ 的常量（`pi=acos(-1)`），不是 base 里声明的
 real pi = acos(-1);
 
+// C++ 那一批**常量**（builtin.cc:876-887 那一段，照那里的定义写）：
+//   intMax=Int_MAX  intMin=Int_MIN  inf=HUGE_VAL  infinity=cbrt(DBL_MAX)
+//   nan=nan("")  realMax=DBL_MAX  realMin=DBL_MIN  realEpsilon=DBL_EPSILON
+//   realDigits=DBL_DIG  randMax=Int_MAX  VERSION=REVISION
+// plain_constants.asy 一上来就用 infinity（finite() 那三个），所以这一批不给，
+// 整个 plain 树的正文都走不动。
+int intMax = 9223372036854775807;
+int intMin = -intMax - 1;
+real realMax = 1.7976931348623157e308;
+real realMin = 2.2250738585072014e-308;
+real realEpsilon = 2.220446049250313e-16;
+int realDigits = 15;
+int randMax = intMax;
+// HUGE_VAL：IEEE 双精度溢出就是 +inf，所以乘出来
+real inf = 1.0e308 * 10.0;
+real nan = inf - inf;
+// cbrt(DBL_MAX)。这一层没有 cbrt，用 `^` —— 末位可能与 cbrt 差一两个 ulp，而它的用处是
+// `abs(x) < infinity` 那种判断，差一个 ulp 不改答案。
+real infinity = realMax ^ (1.0 / 3.0);
+// 版本串：参照的那份源码是 3.14git（configure.ac 的 AC_INIT）。这是**我们的**串，
+// 与机器上装的那个 asy 不一定一样 —— 拿它做判断的地方可能走不同分支，写在明处。
+string VERSION = "3.14git";
+
+// 中止（runtime.in:690 的 abort、:701 的 assert）。真 asy 的 `error(s)` 印到 **stderr**
+// 并非零退出；这一层没有"中止"这条原语，所以用**越界读**触发方言的运行期错误 ——
+// 消息文本不一样（那边形如 `f.asy: 3.5: user-specified error`），但"印出来 + 非零退出"
+// 这两件事对上了。只走错误路径，正常路径上一个字都不印。
+void abort(string s="") {
+  if (s == "") write("abort");
+  else write("abort: " + s);
+  int[] die;
+  int dead = die[0];   // 越界：方言在这里报运行期错误并非零退出
+  write(dead);
+}
+
+void assert(bool b, string s="") {
+  if (b) return;
+  if (s == "") abort("assert FAILED");
+  else abort("assert FAILED: " + s);
+}
+
+// path 的那几个纯查询搬到 struct path 之后（类型名顺序解析，这里还看不见 path）
+
+// minbound / maxbound：逐分量取小/取大（pair.h 与 triple.h 的 minbound/maxbound）。
+// 逐分量写开而不调 min/max —— 那两个声明在这一份的后面，而名字解析是顺序的。
+pair minbound(pair a, pair b) {
+  real x = a.x; if (b.x < x) x = b.x;
+  real y = a.y; if (b.y < y) y = b.y;
+  return (x, y);
+}
+pair maxbound(pair a, pair b) {
+  real x = a.x; if (b.x > x) x = b.x;
+  real y = a.y; if (b.y > y) y = b.y;
+  return (x, y);
+}
+triple minbound(triple a, triple b) {
+  real x = a.x; if (b.x < x) x = b.x;
+  real y = a.y; if (b.y < y) y = b.y;
+  real z = a.z; if (b.z < z) z = b.z;
+  return (x, y, z);
+}
+triple maxbound(triple a, triple b) {
+  real x = a.x; if (b.x > x) x = b.x;
+  real y = a.y; if (b.y > y) y = b.y;
+  real z = a.z; if (b.z > z) z = b.z;
+  return (x, y, z);
+}
+
+// concat：把几条数组接起来（array.cc 的 arrayConcat 收任意多条、任意元素类型；
+// 这一层没有泛型，所以按用到的元素类型各写一份，两条实参那一档）
+real[] concat(real[] a, real[] b) {
+  real[] out;
+  for (real x : a) out.push(x);
+  for (real x : b) out.push(x);
+  return out;
+}
+int[] concat(int[] a, int[] b) {
+  int[] out;
+  for (int x : a) out.push(x);
+  for (int x : b) out.push(x);
+  return out;
+}
+pair[] concat(pair[] a, pair[] b) {
+  pair[] out;
+  for (pair x : a) out.push(x);
+  for (pair x : b) out.push(x);
+  return out;
+}
+string[] concat(string[] a, string[] b) {
+  string[] out;
+  for (string x : a) out.push(x);
+  for (string x : b) out.push(x);
+  return out;
+}
+
 // sgn：量过 sgn(-3.5)=-1、sgn(0.0)=0、sgn(2.1)=1，回的是 int
 int sgn(real x) {
   if (x > 0) return 1;
@@ -210,6 +305,19 @@ struct pen {
   real miter = 10;
   bool setwidth = false;
   bool setcolor = false;
+  // 第四十五刀加的那几格（pen.h 里都有）：现在只**存着**，EPS 那一路还没发它们 ——
+  // 用到它们的图会与真 asy 不一样，写在明处（cases/40-draweps 那条量的是宽度与颜色）。
+  int fillruleval = 0;
+  int basealignval = 0;
+  real opacityval = 1;
+  string blend = "Compatible";
+  bool iscmyk = false;
+  real cyan = 0;
+  real magenta = 0;
+  real yellow = 0;
+  real black = 0;
+  bool isinvisible = false;
+  string font = "";
 }
 
 pen pencopy(pen p) {
@@ -346,6 +454,15 @@ int length(path g) {
 }
 
 int size(path g) { return g.nodes.length; }
+
+// path.h 里是成员函数，asy 那边是自由函数
+bool cyclic(path g) { return g.cyclic; }
+path[] concat(path[] a, path[] b) {
+  path[] out;
+  for (path x : a) out.push(x);
+  for (path x : b) out.push(x);
+  return out;
+}
 
 pair point(path g, int i) { return g.nodes[i].point; }
 
@@ -762,6 +879,140 @@ void shipout(picture pic) {
 
 void shipout() { shipout(currentpicture); }
 void shipout(string prefix) { shipout(currentpicture); }
+
+// ------------------------------------------------ C++ 内建面的余量（第四十五刀）
+// 下面这一批是 run*.in 里的函数，base 那一堆到处在用。分三档，各自写清是哪一档：
+//   (1) 这一层答得出的：照 run*.in 的定义写出来；
+//   (2) 这一层**没有那个机制**的（TeX、文件 IO、进程）：空动作或定值，写明代价；
+//   (3) 真几何/数值（求交、弧长、笔形）：声明有、体是 abort —— 调到就**大声**失败，
+//       不会悄悄给错答案。plain 的**导入**不走这一档，所以它不挡 import。
+
+// (2) TeX 与输出格式（runlabel.in / runsystem.in）。这一层没有 TeX，也只写标准输出。
+bool latex() { return true; }          // 默认引擎是 latex 一族
+bool pdf() { return false; }           // 这一路出的是 EPS
+string nativeformat() { return "eps"; }
+bool uptodate() { return false; }
+string outname() { return "out"; }
+void texpreamble(string s) { }         // 空动作：没有 TeX 那一路
+void texpreamble() { }
+string xasyKEY() { return ""; }
+void xasyKEY(string s) { }
+string locatefile(string name, bool full=true) { return name; }
+string stripdirectory(string s) {
+  int k = -1;
+  for (int i = 0; i < length(s); ++i) if (substr(s, i, 1) == "/") k = i;
+  return k < 0 ? s : substr(s, k + 1, length(s) - k - 1);
+}
+string stripfile(string s) {
+  int k = -1;
+  for (int i = 0; i < length(s); ++i) if (substr(s, i, 1) == "/") k = i;
+  return k < 0 ? "" : substr(s, 0, k + 1);
+}
+
+// (2) 退出/更新钩子（runtime.in:112/122）。asy 那边存起来，shipout / 退出时调；
+// 这一层存着但**还没有人调**它们 —— 那一路（shipout 的更新、退出时的清理）没做。
+typedef void asy__thunk();
+asy__thunk asy__updatefn = null;
+asy__thunk asy__exitfn = null;
+void atupdate(asy__thunk f) { asy__updatefn = f; }
+asy__thunk atupdate() { return asy__updatefn; }
+void atexit(asy__thunk f) { asy__exitfn = f; }
+asy__thunk atexit() { return asy__exitfn; }
+void atbreakpoint(asy__thunk f) { }
+
+// (2) 伪随机（runmath.in:206/217）。asy 用的是 C 库的 random()；这一层自带一个
+// 线性同余（Numerical Recipes 那组常数），所以**同一个种子出来的数与真 asy 不一样**。
+int asy__seed = 1;
+int rand() {
+  asy__seed = (asy__seed * 1664525 + 1013904223) % 2147483647;
+  if (asy__seed < 0) asy__seed = -asy__seed;
+  return asy__seed;
+}
+void srand(int s) { asy__seed = s; }
+real unitrand() { return rand() / 2147483647.0; }
+
+// (1) 笔的那几格（runpen.in）。asy 那边每个都是"回一支只设了这一项的笔"，
+// 与 currentpen 合成时后设的赢 —— 这一层照着摆那一格。
+pen linecap(int n) { pen p; p.cap = n; return p; }
+int linecap(pen p) { return p.cap; }
+pen linejoin(int n) { pen p; p.join = n; return p; }
+int linejoin(pen p) { return p.join; }
+pen fillrule(int n) { pen p; p.fillruleval = n; p.evenodd = n == 1; return p; }
+int fillrule(pen p) { return p.fillruleval; }
+pen basealign(int n) { pen p; p.basealignval = n; return p; }
+int basealign(pen p) { return p.basealignval; }
+pen opacity(real opacity=1.0, string blend="Compatible") {
+  pen p; p.opacityval = opacity; p.blend = blend; return p;
+}
+real opacity(pen p) { return p.opacityval; }
+pen invisible() { pen p; p.isinvisible = true; return p; }
+bool invisible(pen p) { return p.isinvisible; }
+pen fontcommand(string s) { pen p; p.font = s; return p; }
+pen cmyk(real c, real m, real y, real k) {
+  pen p;
+  p.iscmyk = true; p.setcolor = true;
+  p.cyan = c; p.magenta = m; p.yellow = y; p.black = k;
+  // EPS 那一路只发 rgb/gray，所以这里同时算一份 rgb（cmyk -> rgb 的那条直白换算）
+  p.isrgb = true;
+  p.red = (1 - c) * (1 - k);
+  p.green = (1 - m) * (1 - k);
+  p.blue = (1 - y) * (1 - k);
+  return p;
+}
+pen cmyk(pen p) { pen q = p; q.iscmyk = true; return q; }
+pen interp(pen a, pen b, real t) {
+  pen p = a;
+  p.red = a.red + (b.red - a.red) * t;
+  p.green = a.green + (b.green - a.green) * t;
+  p.blue = a.blue + (b.blue - a.blue) * t;
+  p.gray = a.gray + (b.gray - a.gray) * t;
+  p.width = a.width + (b.width - a.width) * t;
+  p.isrgb = a.isrgb || b.isrgb;
+  p.setcolor = a.setcolor || b.setcolor;
+  return p;
+}
+void resetdefaultpen() { }
+
+// (3) 真几何与数值：声明在这里，体是 abort。
+real arclength(path p) { abort("arclength(path) 还没做"); return 0; }
+real arclength(pair z0, pair c0, pair c1, pair z1) {
+  abort("arclength(pair,pair,pair,pair) 还没做"); return 0;
+}
+real arctime(path p, real L) { abort("arctime 还没做"); return 0; }
+path subpath(path p, int a, int b) { abort("subpath(path,int,int) 还没做"); return p; }
+path subpath(path p, real a, real b) { abort("subpath(path,real,real) 还没做"); return p; }
+real[] intersect(path p, path q, real fuzz=-1) {
+  abort("intersect(path,path) 还没做"); return new real[];
+}
+real[][] intersections(path p, path q, real fuzz=-1) {
+  abort("intersections(path,path) 还没做"); return new real[][];
+}
+path nib(pen p) { abort("nib(pen) 还没做"); return new path; }
+pen makepen(path p) { abort("makepen(path) 还没做"); return new pen; }
+real[][] transpose(real[][] a) { abort("transpose 还没做"); return new real[][]; }
+
+// (1) 笔的查询那一侧与字号（runpen.in）。base 里 `linewidth(currentpen)`、
+// `fontsize(10)` 到处都是。
+real linewidth(pen p) { return p.width; }
+pen fontsize(real size, real lineskip) { pen q; q.font = "fontsize"; return q; }
+pen fontsize(real size) { return fontsize(size, 1.2 * size); }
+
+// (1) `transform * path`：逐个结点搬（transform 是仿射，pre/point/post 都搬）。
+// runpath.in 的 `path operator *(transform t, path p)` 就是这件事。
+path operator *(transform t, path g) {
+  path out;
+  out.cyclic = g.cyclic;
+  out.ismark = g.ismark;
+  for (knot k : g.nodes) {
+    knot n;
+    n.pre = t * k.pre;
+    n.point = t * k.point;
+    n.post = t * k.post;
+    n.straight = k.straight;
+    out.nodes.push(n);
+  }
+  return out;
+}
 
 
 

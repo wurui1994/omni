@@ -468,7 +468,12 @@ export function asySig(L, n, at) {
     if (!ASY_OPSYM.has(op)) { L.nope(n, `算符 '${op}' 的重载`); return; }
     sym = `asy__op_${ASY_OPSYM.get(op)}`;
   }
-  if (nm === 'write') { L.nope(n, "重新定义 'write'"); return; }
+  // 用户自己的 `write`（第四十五刀）：base 里到处都是（`void write(file, T)` 那一族，
+  // plain_constants.asy:82 起、plain_strings、plain_pens、plain_paths…）。它就是个普通
+  // 重载，只是这一层的 `write` 是**语句**，所以符号名要另起一个（`write` 这个名字在
+  // 核心方言那边归 print 那条路），调用点先问用户的候选、都不匹配才落回内建那份
+  // （见 stmts.js 的 asyWriteStmt 调用处）。
+  if (nm === 'write') sym = 'asy__uwrite';
   const ret = L.type(n.items[1], `函数 ${nm} 的返回类型`);
   const ps = asyFormals(L, n.items[3]);
   if (ret === null || ps === null) return;
