@@ -483,6 +483,25 @@ export function asyVardec(L, n) {
       if (need) out.push(`(set ${g.sym} ${init})`);
       continue;
     }
+    // 同一层里**重新声明**同名的变量：asy 收（量过 `int x=1; int x=2; write(x);` 印 2 ——
+    // 它是新开一格，把旧的那格遮住）。plain 里有三处这么写：plain_arrows.asy:70/112 的
+    // `path left=rotate(-angle*factor,x)*r;` 与 plain_filldraw.asy:28 的 `real t=…`。
+    // 这一层没有"同名两格"的表示（`(var 名字)` 就是那个名字），所以类型相同时**复用同一格**，
+    // 把这一句降成赋值：旧那一格从这一句起再也用名字取不到，而捕获是按值抓的
+    // （`(cap …)` 在 mkclo 那一刻就抄了一份），所以看不出差别。没写初值也照发 ——
+    // 上面那几支已经把"新声明该有的值"算在 init 里了（零值 / `new` / `(null T)`）。
+    // 类型**不同**的那一格得真的改名，而名字的用处遍布 nameOf/dotQual/赋值/捕获，
+    // 那是另一刀。
+    const had = L.scopes[L.scopes.length - 1].get(nm);
+    if (had !== undefined) {
+      if (had !== t) {
+        return L.nope(start, `同一层里用**另一个类型**重新声明 '${nm}'`
+          + `（原来是 ${had}，这次是 ${t} —— asy 那边是新开一格把旧的遮住，`
+          + '这一层是复用同一格，类型不同就复用不了）');
+      }
+      out.push(`(set ${nm} ${init})`);
+      continue;
+    }
     if (L.declare(start, nm, t) === null) return null;
     out.push(`(let ${nm} ${asyCore(t)} ${init})`);    }
   return out;

@@ -4127,6 +4127,28 @@ abort。少了这几条签名，`return stdin;` / `w=stdin;` / `s += f+'\n'` 那
 tests/run.js 91 条全绿。新用例 `cases/98-file-read-cast`（只声明不调用 —— 调了就该
 abort，那不是这一条要钉的东西）。
 
+### 同一层里重新声明同名的变量：asy 收，我们原来拒
+
+量过 `int x=1; int x=2; write(x);` 在真 asy 那边印 2 —— 它是**新开一格**、把旧的那格
+遮住，不是"已经声明过了"。我们原来在 `declare` 那里一律报错，于是 plain 里三处这么写的
+地方（`plain_arrows.asy:70/112` 的 `path left=rotate(-angle*factor,x)*r;`、
+`plain_filldraw.asy:28` 的 `real t=dirtime(g,dir);`）整段函数掉在地上。这是"比 asy 少
+接受一门语言"的那种错，得改。
+
+这一层没有"同名两格"的表示（`(var 名字)` 就是那个名字），所以类型相同时**复用同一格**，
+把后一句降成 `(set 名字 初值)`：旧那一格从这一句起再也用名字取不到，而捕获是按值抓的
+（`(cap …)` 在 mkclo 那一刻就抄了一份），所以看不出差别。没写初值也照发 —— 上游那几支
+已经把"新声明该有的值"算好了（标量的零值 / 记录的 `new` / 函数值的 `(null T)`），
+用例里 `S s; s.n=5; S s;` 之后 `s.n` 是 0 就是钉这一条。
+
+类型**不同**的那一格（`int x=1; string x="a";`，asy 收）要真的改名，而名字的用处遍布
+nameOf / dotQual / 赋值 / 捕获 —— 那是另一刀，`bad/redeclare-othertype` 钉着。
+
+数字：`import plain;` 99 不动 —— 这三处原先是"整段函数掉在地上"，通了之后露出它们里面
+本来就有的三条（`plain_filldraw.asy:41` 的字符串 reverse、`plain_arrows.asy:122` 的 `..`、
+`:73` 的 `&`）。这一刀换掉的是**错的那三条理由**。tests/asy 175 条、tests/run.js 91 条
+全绿。新用例 `cases/99-redeclare`、`bad/redeclare-othertype`。
+
 ## 后果与代价
 
 
