@@ -4484,6 +4484,28 @@ save/restore 那一套就是这么搭的 —— 每次 save 把当前的 restore
 `plain_debugger.asy:86` 那个 `debugger` 还是报"未声明的变量" —— 它的声明用了类型 `code`，
 那一格先被 nope 掉了，所以根本没有候选可以挂。
 
+### struct 名字当值用：那一族**构造函数**
+
+`Pair_K_V makePair(K k, V v) = Pair_K_V;`（collections/genericpair.asy:27）里右边那个
+`Pair_K_V` 不是类型名，是**值** —— asy 里 struct 名字当值用就是那一族构造函数，类型是
+`记录名(那份 operator init 的形参)`，是哪一份由**目标类型**定案。collections/iter.asy 的
+`:42`（`autounravel Iterable_T operator cast(T[] items) = Iterable_T;`）与 `:48`
+（`Iterable_T range(T[] items) = Iterable_T;`）是同一格。
+
+落地要一个真的函数（`operator init` 的符号第一个形参是 `this`，不能直接 `(fnref …)`）。
+现成的就有：`asyDefWrapper` 在 `d.ctor` 为真时生成的正是"造一个、调 init、回它"，
+以前只在**缺实参**时用得上，这里拿 `missing: []` 叫它一次就是构造函数本身。
+候选多于一份时回那个"不定案的重载集"记号（`over`），由 coerce 拿目标类型落地 —— 与函数名
+当值用那一档同一条路。带默认值的候选不算（函数值没有默认值，同上）。
+
+没写 `operator init` 的 struct **拿不出值**：asy 报 "no matching variable of name 'Q'"
+并退 1（新增 strict/ctor-value-none 守着）—— 这一条与 `Q(…)` 那句构造调用的规矩是同一条。
+
+数字：`import plain;` 64 → 60。`import graph;` 148 没动。tests/asy 191 条、tests/run.js
+91 条全绿。新用例 `cases/113-struct-ctor-value` 与 `strict/ctor-value-none`。
+collections 那一族剩下的两格是 `unravel`（把一格记录的成员摊进当前作用域）与
+`for (T x : iterable)`（走 `operator iter` 那套协议）—— 各是一刀。
+
 ## 后果与代价
 
 

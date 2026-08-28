@@ -22,7 +22,7 @@ import {
   asyIsArr, asyElem, asyIsFn, ASY_PAIR_TY, ASY_TRIPLE_TY, asyCore, ASY_NULL, asyRefTy,
 } from './types.js';
 import { ZERO, ASY_PAIRFN, ASY_STRFN, ASY_STR_DEPS, strLit } from './runtime.js';
-import { asyArgs, asyCall, asyVisible, asyJoinExp, asyOpUser, asyOpBuiltinSig, asyIdxOpCall, asyApplyCall } from './calls.js';
+import { asyArgs, asyCall, asyVisible, asyJoinExp, asyOpUser, asyOpBuiltinSig, asyIdxOpCall, asyApplyCall, asyDefWrapper } from './calls.js';
 import { asyFmtStr, asyBody, asyExprStmt } from './stmts.js';
 
 /* ---------------------------------------------------------------- 表达式 */
@@ -148,6 +148,27 @@ export function asyNameOf(L, n, nm) {
   }
   if (cands.length > 1) {
     return { code: null, type: `<${nm} 的重载集>`, over: cands };
+  }
+  // struct 名字当**值**用：`Pair_K_V makePair(K k, V v) = Pair_K_V;`
+  // （collections/genericpair.asy:27，iter.asy:42 与 :48 也一样）。asy 里这就是**构造函数**
+  // 那一族的函数值 —— 类型是 `记录名(那份 operator init 的形参)`，是哪一份由目标类型定案。
+  // 落地要一个真的函数，借 defWrapper 生成：`d.ctor` 为真时它正好是"造一个、调 init、回它"。
+  // 带默认值的候选不算（函数值没有默认值 —— 与上面函数名那一档同一条）。
+  const nrec = L.recOf(nm);
+  if (nrec !== null) {
+    const over = [];
+    for (const c of L.visibleMethods(nrec, 'operator init')) {
+      let hasDef = false;
+      for (const p of c.ps) if (p.def !== undefined && p.def !== null) hasDef = true;
+      if (hasDef) continue;
+      const w = asyDefWrapper(L, n, 'operator init', c, { missing: [] }, false);
+      if (w === null) continue;
+      over.push({ sym: w, params: c.params, ps: c.ps, ret: nrec.name });
+    }
+    if (over.length === 1) {
+      return { code: `(fnref ${over[0].sym})`, type: asyCandFnType(L, over[0]) };
+    }
+    if (over.length > 1) return { code: null, type: `<${nm} 的构造集>`, over };
   }
   // static 的方法体里提到了实例成员：asy 自己也拒（"static use of dynamic variable"），
   // 所以这一句要在那句泛泛的"未声明的变量"之前问 —— 拒的理由不能说错（第三十八刀）。
