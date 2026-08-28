@@ -4257,6 +4257,30 @@ C 那套转义，改成 `"…Z[" + '\\' + "]^_`…"` 之后 21 行探针与 asy 
 数字：`import plain;` 91 → 90。`import graph;` 152 → 150。tests/asy 180 条、
 tests/run.js 91 条全绿。新用例 `cases/104-byte-hex`。
 
+### struct 体里那句 `operator init(…)`：换一份构造，跑在**同一个**对象上
+
+`plain_prethree.asy:195/201` 的 `light` 是这么写的：一份构造的体里直接调另一份
+`operator init(…)`。原来这一句掉进「调用一个不是普通名字的东西」——`plainName` 见到
+`operator ` 开头就回 null。
+
+要紧的是它的语义。量过：`void operator init(int a)` 的体里调 `operator init(a, a+1)`，
+之后那个对象的两个字段是 3 与 4 —— 改的是**同一格**，不是"再造一个对象扔掉"。我们的
+构造函数降出来是两层（`asy__ctor_X` 造对象、调正文、回对象；`<sym>_body` 带 `this`、
+回 void，见 asyMethod），所以这一句要调的是**里层**那个 `_body`，`this` 就是当前对象。
+
+落法：`asyApplyCall` 多一个 `reinit` 旗子 —— 挑候选、隐式转换、命名实参、可变形参一条
+不改，只有最后发调用那一句换成 `<sym>_body` 且结果类型是 void。缺实参那一档
+（`asyDefWrapper`）也多这一个旗子：这时候对象**已经在手**，包装长得跟普通方法的包装
+一样（`this` 是形参，不是本地量），只是调进去的是 `_body`。包装名顺手过一遍
+"只留标识符字符"—— `operator init` 带空格，原样拼出来不是个名字。
+
+这一句在**普通方法**体里也通（量过 `v.twice()` 里调 `operator init(a*2, …)` 把 v 改成
+2/202/q!），所以这一档挂在 `L.self !== null` 上，不是"只有构造函数里"。
+
+数字：`import plain;` 90 不动，`import graph;` 150 不动 —— 那两处的诊断换成了下一层的
+问题（`array(int,pen)` 这个内建还没有；`:201` 要的是"跳过带默认值的形参、落进可变那一
+格"，那是下一刀）。tests/asy 181 条、tests/run.js 91 条全绿。新用例 `cases/105-reinit`。
+
 ## 后果与代价
 
 

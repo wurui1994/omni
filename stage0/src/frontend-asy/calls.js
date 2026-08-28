@@ -99,6 +99,27 @@ export function asyCall(L, n) {
     }
     return asyFnValCall(L, n, '上一次调用回来的那个值', fv.type, fv.code);
   }
+  // `operator init(a, b);`：struct 体里**换一份构造再跑一遍**（plain_prethree.asy:195/201
+  // 的 light 就是这么写的）。asy 那边它不是"再造一个对象"—— 量过 `void operator init(int a)`
+  // 里调 `operator init(a, a+1)` 之后那个对象的两个字段是 3 与 4，改的是**同一格**。
+  // 所以落法是调那份构造的正文 `<sym>_body`（带 `this`、回 void），不是外面那层 `<sym>`。
+  if (isList(callee) && head(callee) === 'name-exp' && L.self !== null) {
+    const nd = callee.items[1];
+    const rawnm = isList(nd) && head(nd) === 'name' && isAtom(nd.items[1]) ? nd.items[1].value : null;
+    if (rawnm === 'operator init') {
+      if (L.self.stat === true) {
+        return L.err(n, "static 的方法体里没有接收者，'operator init(…)' 调不了");
+      }
+      const cs = L.visibleMethods(L.self.rec, 'operator init');
+      if (cs.length === 0) {
+        return L.err(n, `struct ${L.self.rec.name} 里没有 'void operator init(…)'`);
+      }
+      const ras = asyCallArgs(L, n);
+      if (ras === null) return null;
+      return asyApplyCall(L, n, 'operator init', cs, ras,
+        { code: '(var this)', type: L.self.rec.name }, true);
+    }
+  }
   if (nm === null) return L.nope(n, '调用一个不是普通名字的东西（函数值、方法、算符名）');
   if (nm === 'write') return L.err(n, `${ASY_NOPE}：write 出现在表达式位置（它是语句）`);
   let lateMem = null;   // 成员那一层"声明在后面"—— 外层也接不住时才拿它当诊断
@@ -582,7 +603,7 @@ export function asyIdxOpCall(L, n, recv, mname, argNodes) {
  * 分出来是给算符重载用的（第二十三刀）—— 那边的"实参"是已经降好的两个操作数，
  * 没有 callArgs 那一步，别的规则一条不差。
  */
-export function asyApplyCall(L, n, nm, list, raw, recv) {
+export function asyApplyCall(L, n, nm, list, raw, recv, reinit) {
   const fits = [];
   for (const c of list) {
     const f = asyFit(L, c, raw);
@@ -678,10 +699,13 @@ export function asyApplyCall(L, n, nm, list, raw, recv) {
     }
   }
   for (let i = 0; i < d.ps.length; i++) if (codes.has(i)) parts.push(codes.get(i));
-  const target = f.missing.length === 0 ? d.sym : asyDefWrapper(L, n, nm, d, f);
+  const ri = reinit === true;
+  const target = f.missing.length === 0
+    ? (ri ? `${d.sym}_body` : d.sym)
+    : asyDefWrapper(L, n, nm, d, f, ri);
   if (target === null) return null;
   const sp = parts.length === 0 ? '' : ' ';
-  return { code: `(call ${target}${sp}${parts.join(' ')})`, type: d.ret };
+  return { code: `(call ${target}${sp}${parts.join(' ')})`, type: ri ? 'void' : d.ret };
 }
 
 /**
@@ -1037,11 +1061,19 @@ export function asyFit(L, cand, raw) {
  * 包装的形参就是给了的那几个（按形参顺序），体里逐个 `(let 缺的 T 默认值)` ——
  * 默认值因此在**被调方的作用域**里求：能看见前面的形参，也只在没给时才求。
  */
-export function asyDefWrapper(L, n, nm, d, f) {
-  const key = `${d.sym}|${f.missing.join(',')}`;
+export function asyDefWrapper(L, n, nm, d, f, reinit) {
+  const ri = reinit === true;
+  const key = `${d.sym}|${f.missing.join(',')}${ri ? '|re' : ''}`;
   const had = L.wrapNames.get(key);
   if (had !== undefined) return had;
-  const wname = `asy__def${L.wrapNames.size}_${nm}`;
+  // 名字里只留标识符能用的那几个字符：`operator init` 这种带空格的名字也从这里过
+  let safe = '';
+  for (let i = 0; i < nm.length; i++) {
+    const c = nm.charAt(i);
+    safe += (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+      || (c >= '0' && c <= '9') || c === '_' ? c : '_';
+  }
+  const wname = `asy__def${L.wrapNames.size}_${safe}`;
   L.wrapNames.set(key, wname);
   // 给了的那几个槽（按形参顺序）：包装的形参表就是它
   const gave = [];
@@ -1067,7 +1099,7 @@ export function asyDefWrapper(L, n, nm, d, f) {
   // 造完默认值才求（量过 asy 收 `void operator init(int n = x)`，`x` 是字段，出来的是
   // 字段的默认值），最后回那个对象。
   const rec = d.rec === undefined ? null : d.rec;
-  const isCtor = d.ctor === true;
+  const isCtor = d.ctor === true && !ri;
   const saveSelf = L.self;
   const saveAl = L.recAlias;
   L.scopes = [new Map()];
@@ -1103,6 +1135,9 @@ export function asyDefWrapper(L, n, nm, d, f) {
   if (isCtor) {
     lines.push(`(expr (call ${d.sym}_body ${args.join(' ')}))`);
     lines.push('(ret (var this))');
+  } else if (ri) {
+    // struct 体里那句 `operator init(…)`：对象已经在手，`this` 是形参，调正文、回 void
+    lines.push(`(expr (call ${d.sym}_body ${args.join(' ')}))`);
   } else {
     lines.push(d.ret === 'void'
       ? `(expr (call ${d.sym} ${args.join(' ')}))`
@@ -1111,7 +1146,7 @@ export function asyDefWrapper(L, n, nm, d, f) {
   const params = [];
   if (rec !== null && !isCtor) params.push(`(this ${asyCore(rec.name)})`);
   for (const i of gave) params.push(`(${d.ps[i].name} ${asyCore(d.ps[i].type)})`);
-  const text = [`  (fn ${wname} (${params.join(' ')}) ${asyCore(d.ret)}`];
+  const text = [`  (fn ${wname} (${params.join(' ')}) ${asyCore(ri ? 'void' : d.ret)}`];
   for (const s of lines) text.push(`    ${s}`);
   L.pre = savePre;
   L.updates = saveUpd;
