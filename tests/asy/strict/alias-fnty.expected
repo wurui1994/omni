@@ -1,0 +1,1 @@
+alias(int(int), int(int))：asy 只给**记录与数组**现生 alias，而且两边要同型（那边报 "no matching function"）

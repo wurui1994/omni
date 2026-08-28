@@ -1581,6 +1581,106 @@ triple operator *(real[][] t, triple v) {
   return (r[0] / r[3], r[1] / r[3], r[2] / r[3]);
 }
 
+// ------------------------------------------------------------ 剩下那一批 C++ 内建
+// 签名逐条照 `asy -noV` 量的（`int x = 名字;` 让它把函数类型印在诊断里），
+// 体分两档：能写的写准，做不动的是 abort —— 与 frame 那一刀同一个规矩。
+
+// runtime.in:413 colors(pen)：按颜色空间给 0/1/3/4 道。量过 ColorComponents 的四档：
+//   默认笔（DEFCOLOR）1 道、nullpen/invisible 0 道、rgb 3 道、cmyk 4 道。
+real[] colors(pen p) {
+  real[] a;
+  if (p.isinvisible) return a;
+  if (p.iscmyk) {
+    a.push(p.cyan); a.push(p.magenta); a.push(p.yellow); a.push(p.black);
+    return a;
+  }
+  if (p.isrgb) {
+    a.push(p.red); a.push(p.green); a.push(p.blue);
+    return a;
+  }
+  a.push(p.gray);
+  return a;
+}
+
+// runhistory.in:158/191：没有 readline 的那一路（`#else`）就是回空数组 —— 我们这一层
+// 一直是那一路，所以这两条**不是** abort，是照那个分支写准的。
+string[] history(string name, int n=1) { return new string[]; }
+string[] history(int n=0) { return new string[]; }
+// runhistory.in:254 saveline：同一条 `#else` —— 没有 readline 就是**什么都不做**。
+void saveline(string name, string value, bool store=true) { }
+
+// runmath.in:191 → mathop.h:260：整除**往下取整**（量过 quotient(-7,2) 是 -4）。
+// 我们的 `#` 就是这条语义（asy__quot 那份 helper 已经把"除不尽且异号时减一"补上了），
+// 所以这里直接借它，不再抄一遍。
+int quotient(int x, int y) { return x # y; }
+
+// runsystem.in:204 → util.cc:265 stripExt(name, "")：suffix 是 "."、n 是 1，
+// 所以走的是 `return name.substr(0,p)` 那一支，p 是**最后**一个点。没有点就原样回。
+// 量过：`a.b/c` 是 `a`（它不认目录），`abc` 是 `abc`，`x.` 是 `x`。
+string stripextension(string s) {
+  int n = length(s);
+  int i = n - 1;
+  while (i >= 0) {
+    if (substr(s, i, 1) == ".") return substr(s, 0, i);
+    --i;
+  }
+  return s;
+}
+
+// runpicture.in:326（asy 的 `frame` 就是 C++ 的 picture）：src 的元素插到 dest **前面**。
+void prepend(frame dest, frame src) {
+  drawop[] out;
+  for (int i = 0; i < src.ops.length; ++i) out.push(src.ops[i]);
+  for (int i = 0; i < dest.ops.length; ++i) out.push(dest.ops[i]);
+  dest.ops = out;
+}
+
+// runpath.in:152 → path.h:167 `path::straight(t)`：第 t 段是不是直线段。
+// 非闭合路径**越界回 false**（那边就是 `t >= 0 && t < n ? … : false`，n 是结点数），
+// 闭合的走 imod（我们的 `%` 符号跟着除数，n 是正的，与 imod 同）。
+bool straight(path p, int t) {
+  int n = p.nodes.length;
+  if (n == 0) return false;
+  if (p.cyclic) return p.nodes[t % n].straight;
+  if (t < 0 || t >= n) return false;
+  return p.nodes[t].straight;
+}
+
+string readline(string prompt="", string name="", bool tabcompletion=false) {
+  abort("readline 还没做（这一层不读 stdin 的交互行）"); return "";
+}
+// C++ 那边 rename 的形参叫 `from`/`to`，而 `from` 在 asy 的**语法**里是关键字 ——
+// 量过真 asy 自己也写不出这个名字（`int from=3;` 与 `rename(from="a",…)` 都是 syntax error），
+// 所以这里换成 src/dst：形参名换掉不改变任何写得出来的调用。
+int rename(string src, string dst) { abort("rename 还没做（这一层不动文件系统）"); return 0; }
+// asy 的 exit() 是**正常**退出（状态 0）；这一层只有 abort 那条越界路径（非零退出），
+// 所以这条也是 abort —— 差别写在明处。
+void exit() { abort("exit 还没做（这一层没有'正常退出'这条原语）"); }
+
+// 下面这些的签名照量到的抄，体做不动 —— 各自缺的东西写在自己那一行。
+bool eof(file f) { abort("eof(file) 还没做（这一层只有 stdin/stdout，没有真的读文件）"); return true; }
+bool error(file f) { abort("error(file) 还没做（同上）"); return true; }
+int seconds(string t="", string format="") { abort("seconds 还没做（这一层没有时钟）"); return 0; }
+real[] _cputime() { abort("_cputime 还没做（这一层没有时钟）"); return new real[]; }
+int delete(string s) { abort("delete(string) 还没做（这一层不动文件系统）"); return 0; }
+real dirtime(path p, pair z) { abort("dirtime 还没做（要解三次方程找切向）"); return 0; }
+int windingnumber(path[] p, pair z) { abort("windingnumber 还没做"); return 0; }
+path[] _strokepath(path g, pen p=currentpen) {
+  abort("_strokepath 还没做（真 asy 是绕 gs 走一趟）"); return new path[];
+}
+void _shipout(string prefix="", frame f, frame preamble=null, string format="",
+              bool wait=false, bool view=true, transform t=identity()) {
+  abort("_shipout 还没做（EPS 那一路走的是自己那份 shipout）");
+}
+// _eval 还有一条 `void _eval(code, bool)` —— 类型 'code' 这一刀还没有，所以只给 string 那条
+// （少给一个重载只会少接，不会多接）。
+void _eval(string s, bool embedded, bool interactiveWrite=false) {
+  abort("_eval 还没做（要把一段源码在当前环境里再编一遍）");
+}
+// runarray.in:2003/2051：Schur 分解，S[0] 是 U、S[1] 是 T。要 Eigen，这一层没有。
+real[][][] _schur(real[][] a) { abort("_schur 还没做（真 asy 用的是 Eigen）"); return new real[][][]; }
+pair[][][] _schur(pair[][] a) { abort("_schur 还没做（真 asy 用的是 Eigen）"); return new pair[][][]; }
+
 
 
 

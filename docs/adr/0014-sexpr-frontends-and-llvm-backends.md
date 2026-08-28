@@ -3843,6 +3843,66 @@ asy 那边一组路径连着 fillrule 是**一个**填充区域（挖洞靠它�
 数字：`import plain;` 196 → 173。`import graph;` 153 不动。tests/asy 162 条、
 tests/run.js 91 条全绿。新用例 `cases/89-frame-builtins` 与 `strict/write-transform-array`。
 
+### 剩下那一批 C++ 内建，与 `alias` 这个"每个类型现生一条"的算符
+
+`import plain;` 停在 173 时最大的一族是 27 条「内建函数 'X'」。挨个查过
+`/Users/wurui/Documents/Lang/reference/asymptote` 之后，这一族其实是**两件事**：
+
+- 真的是 C++ 内建、我们一条都没给的 —— `colors` / `history` / `saveline` / `eof` /
+  `error(file)` / `seconds` / `windingnumber` / `_strokepath` / `dirtime` / `prepend` /
+  `_shipout` / `quotient` / `_eval` / `stripextension` / `delete` / `_cputime` /
+  `_schur` / `readline` / `rename` / `straight` / `exit`；
+- 根本不是内建 —— `userBoxX3`（plain_picture.asy:428 的成员）、`fitter`（:876 的静态
+  函数字段）、`out`（plain_Label.asy:302 的成员）、`addMinToExtremes`
+  （plain_bounds.asy:143 的 private static）。这四个是**别的**原因让名字没进表，
+  与"缺内建"是两刀，这一刀不动它们。
+
+签名一条一条量的，办法是让 asy 自己把函数类型印在诊断里：
+`void g(){ int x = colors; }` → `cannot cast 'real[](pen p)' to 'int'`。重载的那几个
+（`history`、`_eval`、`_schur`）回的是 `cannot cast expression`，那就回去读 `.in`：
+`runhistory.in:158/191`、`runtime.in:724/737`、`runarray.in:2003/2051`。`_eval` 还有一条
+`void _eval(code, bool)` —— 类型 `code` 这一刀没有，只给了 `string` 那条（少给一个重载
+只会少接，不会多接）。
+
+体分四档，写在 `asy_builtins.asy` 尾巴上：
+
+- **照参考实现写准**：`colors`（runtime.in:413 那个 switch，按颜色空间给 0/1/3/4 道；
+  量过默认笔 DEFCOLOR 是 1 道、`invisible()` 是 0 道）、`stripextension`
+  （runsystem.in:204 → util.cc:265 `stripExt(name,"")`：suffix 是 `"."`、n 是 1，
+  砍的是**最后一个点**，它不认目录 —— 量过 `a.b/c` 是 `a`）、`prepend(frame,frame)`
+  （runpicture.in:326；asy 的 `frame` 就是 C++ 的 `picture`，与 `add` 同一族）、
+  `straight(path,int)`（path.h:167：非闭合越界回 false，闭合走 imod）。
+- **借已有的那条语义**：`quotient` 就是我们的 `#`（asy__quot 那份 helper 早把
+  "除不尽且异号时减一"补上了，量过 `quotient(-7,2)` 是 -4），不再抄一遍。
+- **照 `#else` 那一支写准**：`history` 与 `saveline` 在没有 readline 的构造里就是
+  "回空表"与"什么都不做"（runhistory.in:184/195/277 那三处 `#else`）—— 我们一直是那一路，
+  所以这两条**不是** abort。
+- **签名抄准、体是 abort**：`eof` / `error(file)` / `seconds` / `_cputime` / `delete` /
+  `dirtime` / `windingnumber` / `_strokepath` / `_shipout` / `_eval` / `_schur` /
+  `readline` / `rename` / `exit`。缺的东西各自写在自己那一行（没有时钟、不动文件系统、
+  要解三次方程、要 Eigen、要绕 gs 走一趟）。`exit` 那条差别值得点出来：asy 的 `exit()`
+  是**状态 0 的正常退出**，而这一层只有 abort 那条越界路径（非零退出）。
+
+一个副产品：C++ 那边 `rename` 的形参叫 `from`/`to`，而 `from` 在 asy 的**语法**里是
+关键字。量过真 asy 自己也写不出这个名字（`int from=3;` 与 `rename(from="a",…)` 都是
+syntax error），所以 prelude 里换成 `src`/`dst` —— 形参名换掉不改变任何**写得出来**的调用。
+
+`alias` 是这一族里唯一进不了 prelude 的：asy 那边它不是一个函数，而是 builtin.cc 给
+**每个记录类型**（:673 `addOp(run::boolMemEq, …, SYM(alias), formal(r,…), formal(r,…))`）
+与**每个数组类型**（:604-614 那一段）现生的一条 `bool(T,T)`。这个前端没有泛型，于是照
+那个办法在 `calls.js` 里现生：`asyBuiltinOwns` 认"两边都是记录或数组（或 `null`）而且
+同型"，落地就是记录/数组上的 `==`（`(bin "==" …)`，与 `asyCmpCode` 同一条 —— 都是比身份）。
+两边都是 `null` 不认：asy 那边报 `operator ==(null, null)` 歧义。函数类型上**没有**
+`alias` —— 量过 `alias(g,g)` 是 "no matching function 'alias(int(int), int(int))'"，
+新 strict 用例 `strict/alias-fnty` 钉着这一条，守的是"补了 alias 之后没顺手把它做成
+对一切类型都通的东西"。
+
+补完之后又冒出五条**新**的缺名（`readline` / `straight` / `rename` / `exit` / `saveline`）——
+那是原来卡在前面的行终于走到了，是往前走而不是退步，所以一并补上了。
+
+数字：`import plain;` 173 → 153。`import graph;` 153 不动。tests/asy 164 条、
+tests/run.js 91 条全绿。新用例 `cases/90-more-builtins` 与 `strict/alias-fnty`。
+
 ## 后果与代价
 
 

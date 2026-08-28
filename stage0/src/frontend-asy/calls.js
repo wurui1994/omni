@@ -238,6 +238,15 @@ export function asyCall(L, n) {
   if (ASY_STR_NOPE.has(nm)) return L.nope(n, ASY_STR_NOPE.get(nm));
   if (ASY_PAIRFN.has(nm)) return L.pairCall(n, nm);
   if (L.math.has(nm)) return asyMathCall(L, n, nm);
+  // alias 也在"自己求实参"这一档（它不像 length 那样与模块里的名字撞过，所以只在这里问一次）
+  if (nm === 'alias') {
+    const raw = asyCallArgs(L, n);
+    if (raw === null) return null;
+    if (asyBuiltinOwns(L, nm, raw)) return asyBuiltinRaw(L, n, nm, raw);
+    const ts = raw.map((a) => (a.v.type === ASY_NULL ? 'null' : a.v.type)).join(', ');
+    return L.err(n, `alias(${ts})：asy 只给**记录与数组**现生 alias，而且两边要同型`
+      + '（那边报 "no matching function"）');
+  }
   if (lateMem !== null) return L.err(n, lateMem);
   if (L.funcs.has(nm)) {
     return L.err(n, `'${nm}' 在这里还看不见 —— 它声明在后面，而 asy 的名字解析是顺序的（那边报 "no matching variable"）`);
@@ -290,7 +299,29 @@ export function asyBuiltinRaw(L, n, nm, raw) {
     const h = L.seqHelper(s.ret);
     return { code: `(call ${h} ${raw[0].v.code} ${raw[1].v.code})`, type: `${s.ret}[]` };
   }
+  if (nm === 'alias') return asyAliasRaw(L, raw);
   return asyStrRaw(L, n, nm, raw);
+}
+
+/**
+ * `alias(a, b)`：比**身份**。asy 那边它不是一个函数，而是 builtin.cc 给每个记录类型
+ * （:673 `addOp(run::boolMemEq, …, SYM(alias), formal(r,…), formal(r,…))`）与每个数组类型
+ * （:604-614 那一段）现生的一条 `bool(T,T)`；这个前端没有泛型，所以照那个办法在这里现生。
+ * 落地就是记录/数组上的 `==` —— 与 asyCmpCode 同一条 `(bin "==" …)`（都是身份比较）。
+ * 量过：`A a; A b=a; alias(a,b)` 是 true、`alias(a,new A)` 与 `alias(a,null)` 是 false，
+ * 而函数类型上**没有** alias（`alias(g,f)` 报 no matching function），所以下面只认记录与数组。
+ */
+function asyAliasRaw(L, raw) {
+  const fix = (v, other) => (v.type === ASY_NULL ? `(null ${asyCore(other)})` : v.code);
+  const a = raw[0].v;
+  const b = raw[1].v;
+  const t = a.type === ASY_NULL ? b.type : a.type;
+  return { code: `(bin "==" ${fix(a, t)} ${fix(b, t)})`, type: 'bool' };
+}
+
+/** alias 认的类型：记录与数组（函数类型不认 —— 量过 asy 那边也没有） */
+function asyAliasTy(L, t) {
+  return t === ASY_NULL || L.isRec(t) || asyIsArr(t);
 }
 
 /** 字符串那一族的按值入口：与 strCall 同一份拼法，只是实参已经降好了（不再求一次） */
@@ -329,6 +360,16 @@ export function asyBuiltinOwns(L, nm, raw) {
     const s = asyFnSplit(raw[0].v.type);
     return s !== null && s.params.length === 1 && s.params[0] === 'int' && s.ret !== 'void';
   }
+  // alias：两边都要是记录或数组（或 null），而且**同型** —— 两边都是 null 时 asy 报歧义
+  // （量过 `operator ==(null, null)` 那条），所以不认。
+  if (nm === 'alias') {
+    if (raw.length !== 2) return false;
+    const a = raw[0].v.type;
+    const b = raw[1].v.type;
+    if (!asyAliasTy(L, a) || !asyAliasTy(L, b)) return false;
+    if (a === ASY_NULL && b === ASY_NULL) return false;
+    return a === b || a === ASY_NULL || b === ASY_NULL;
+  }
   if (ASY_STRFN.has(nm)) {
     const s = ASY_STRFN.get(nm);
     return raw.length >= s.min && raw.length <= s.params.length;
@@ -344,6 +385,7 @@ export function asyBuiltinOwns(L, nm, raw) {
 export function asyBuiltinCost(L, nm, raw) {
   if (!asyBuiltinOwns(L, nm, raw)) return null;
   if (nm === 'copy' || nm === 'sequence') return 0;   // 元素类型是照实参现生的，逐个同型
+  if (nm === 'alias') return 0;                       // 形参就是实参那个类型，逐个同型
   if (nm === 'length') {
     const t = raw[0].v.type;
     if (t === 'string' || t === 'pair' || t === 'triple') return 0;
