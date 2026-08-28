@@ -101,6 +101,7 @@ export function asyCall(L, n) {
   }
   if (nm === null) return L.nope(n, '调用一个不是普通名字的东西（函数值、方法、算符名）');
   if (nm === 'write') return L.err(n, `${ASY_NOPE}：write 出现在表达式位置（它是语句）`);
+  let lateMem = null;   // 成员那一层"声明在后面"—— 外层也接不住时才拿它当诊断
   // 方法体里的裸方法名（第二十刀）：量过 struct 的成员**遮住**同名的文件级函数
   // （文件里有 `int who()`、struct 里也有 `who()`，方法体里调到的是后者），
   // 所以这一问放在文件级候选与内建名单**前面**。
@@ -138,12 +139,17 @@ export function asyCall(L, n) {
     // `struct S { int y = f(); int f() {…} }` asy 报 "no matching variable 'f'" 并退 1 ——
     // 它自己也拒。不专门问一句就会漏到下面的内建名单，报出带 ASY_NOPE 的"内建函数 'f'"，
     // 那是把"程序本来就不对"说成"我们还没做"。
+    //
+    // 但这条**不能当场报**：成员那一层看不见它，外层还看得见同名的东西。量过
+    // plain_bounds.asy:226 —— struct freezableBounds 里 `pair min()` 声明在后面，
+    // 那一行的 `min(a,b)` 在 asy 那边接的是外层（内建）的 min。所以这里只记下来，
+    // 走到最后**什么都没接住**时才拿它当诊断。
     const all = L.units[L.self.rec.unit].funcs.get(`${L.self.rec.name}.${nm}`);
     let lateFld = false;
     for (const f of L.self.rec.fields) if (f.name === nm) lateFld = true;
     if (ms.length === 0 && ((all !== undefined && all.length > 0) || lateFld)) {
-      return L.err(n, `'${nm}' 在这里还看不见 —— struct ${L.self.rec.name} 里它声明在后面，`
-        + `而成员也是顺序解析的（asy 那边报 "no matching variable '${nm}'"）`);
+      lateMem = `'${nm}' 在这里还看不见 —— struct ${L.self.rec.name} 里它声明在后面，`
+        + `而成员也是顺序解析的（asy 那边报 "no matching variable '${nm}'"）`;
     }
   }
   // 内建数学函数先看：asy 里 sqrt/floor/… 是运行时自带的，不是 plain.asy 里的定义，
@@ -232,6 +238,7 @@ export function asyCall(L, n) {
   if (ASY_STR_NOPE.has(nm)) return L.nope(n, ASY_STR_NOPE.get(nm));
   if (ASY_PAIRFN.has(nm)) return L.pairCall(n, nm);
   if (L.math.has(nm)) return asyMathCall(L, n, nm);
+  if (lateMem !== null) return L.err(n, lateMem);
   if (L.funcs.has(nm)) {
     return L.err(n, `'${nm}' 在这里还看不见 —— 它声明在后面，而 asy 的名字解析是顺序的（那边报 "no matching variable"）`);
   }
@@ -847,12 +854,33 @@ export function asyFit(L, cand, raw) {
   const isVar = cand.ps.length > 0 && cand.ps[rAt].rest === true;
   const elem = isVar ? asyElem(cand.ps[rAt].type) : null;
   const pack = [];
+  // 一格一格试：接得住回代价（0 或 1），接不住回 null。
+  // "接不住能不能跳过这一格"由外面那个循环定（asy 的 matchArgument）。
+  const tryAt = (r, at) => {
+    // `T keyword x` 的槽**只能按名字给**（量过：`void f(int keyword a); f(3)` 那边报
+    // "cannot call 'void f(int keyword a)' with parameter 'int'"）。
+    if (r.key === null && cand.ps[at].kw === true) return null;
+    // 重载集当值用（callArgs 先不定案的那种）：按**这个槽要的类型**挑一份。
+    // 挑到就是同型（cost 不加），挑不到这个槽就接不住。
+    if (r.v.over !== undefined) {
+      for (const c of r.v.over) if (L.candFnType(c) === cand.ps[at].type) return 0;
+      return null;
+    }
+    // `null` 当实参：类型来自**这个槽**（asy 就是这么定的）。槽不是引用类型就接不住。
+    if (r.v.type === ASY_NULL) return asyRefTy(L, cand.ps[at].type) ? 0 : null;
+    // `explicit` 的槽只收类型一模一样的实参（第二十六刀，量过：连 int->real 都挡）
+    if (cand.ps[at].exp === true && r.v.type !== cand.ps[at].type) return null;
+    const c = asyConvCost(r.v.type, cand.ps[at].type);
+    // 用户的 `operator cast`（第二十七刀）：代价**跟内建提升一样**是 1 —— 量过打平时
+    // asy 报 "is ambiguous"，所以这里不能给它一个更贵的分数偷偷分出胜负。
+    const uc = c < 0 && L.castFor(cand.ps[at].type, r.v.type, false) !== null ? 1 : c;
+    return uc < 0 ? null : uc;
+  };
   for (const r of raw) {
     let at = -1;
     if (r.key === null) {
       while (filled.has(pos)) pos++;
       at = pos;
-      pos++;
     } else {
       for (let k = 0; k < cand.ps.length; k++) if (cand.ps[k].name === r.key) at = k;
       // 可变那一格不能用名字给（asy 那边 `xs=` 也不认它，量过报 no matching function）
@@ -873,43 +901,29 @@ export function asyFit(L, cand, raw) {
       }
       pack.push(slot.length);
       slot.push(-1);
+      pos = at + 1;
       continue;
     }
     if (r.spread === true) return null;   // `... x` 只能落在可变那一格上
     if (at < 0 || at >= cand.ps.length || filled.has(at)) return null;
-    // `T keyword x` 的槽**只能按名字给**（量过：`void f(int keyword a); f(3)` 那边报
-    // "cannot call 'void f(int keyword a)' with parameter 'int'"）。keyword 的槽在尾巴上
-    // 一整段（普通形参排在它后面是语法错），所以位置实参落到这儿就是"位置实参给多了"。
-    if (r.key === null && cand.ps[at].kw === true) return null;
-    // 重载集当值用（callArgs 先不定案的那种）：按**这个槽要的类型**挑一份。
-    // 挑到就是同型（cost 不加），挑不到这个候选就不合用 —— 与别的实参一视同仁。
-    if (r.v.over !== undefined) {
-      let hit = false;
-      for (const c of r.v.over) if (L.candFnType(c) === cand.ps[at].type) hit = true;
-      if (!hit) return null;
-      filled.set(at, true);
-      slot.push(at);
-      if (at < last) reordered = true;
-      last = at;
-      continue;
+    let uc = tryAt(r, at);
+    // asy 的 matchArgument（application.cc:205 + matchDefault :154）：这一格接不住、
+    // 而它**有默认值**时，就把默认值填上、换下一格再试 —— 所以中间那些带默认值的形参
+    // 可以整格跳过去。量过 `int f(int a, int b=7, string c, string d)` 收得下
+    // `f(1,"xy","z")`（印 11）；base 里 plain_picture.asy:725 的
+    // `fit(t,min(t),max(t))` 走的正是这一条（`transform T0=T` 那一格被跳过）。
+    if (r.key === null) {
+      while (uc === null && cand.ps[at].def !== null) {
+        filled.set(at, 'def');
+        at++;
+        while (filled.has(at)) at++;
+        if (at >= cand.ps.length) break;
+        if (isVar && at >= rAt) break;   // 跳到可变那一格上：这一刀先不掺
+        uc = tryAt(r, at);
+      }
+      pos = at + 1;
     }
-    // `null` 当实参：类型来自**这个槽**（asy 就是这么定的，与重载集那一格同一条路子）。
-    // 槽不是引用类型这个候选就不合用；是的话算同型，cost 不加 —— 落地在 coerce 里。
-    if (r.v.type === ASY_NULL) {
-      if (!asyRefTy(L, cand.ps[at].type)) return null;
-      filled.set(at, true);
-      slot.push(at);
-      if (at < last) reordered = true;
-      last = at;
-      continue;
-    }
-    // `explicit` 的槽只收类型一模一样的实参（第二十六刀，量过：连 int->real 都挡）
-    if (cand.ps[at].exp === true && r.v.type !== cand.ps[at].type) return null;
-    const c = asyConvCost(r.v.type, cand.ps[at].type);
-    // 用户的 `operator cast`（第二十七刀）：代价**跟内建提升一样**是 1 —— 量过打平时
-    // asy 报 "is ambiguous"，所以这里不能给它一个更贵的分数偷偷分出胜负。
-    const uc = c < 0 && L.castFor(cand.ps[at].type, r.v.type, false) !== null ? 1 : c;
-    if (uc < 0) return null;
+    if (uc === null) return null;
     cost += uc;
     filled.set(at, true);
     slot.push(at);
@@ -918,7 +932,7 @@ export function asyFit(L, cand, raw) {
   }
   const missing = [];
   for (let k = 0; k < cand.ps.length; k++) {
-    if (filled.has(k)) continue;
+    if (filled.get(k) === true) continue;
     // 可变那一格永远算给了：没给就是一个空数组（量过 `total()` 印 0）
     if (isVar && k === rAt) continue;
     if (cand.ps[k].def === null) return null;

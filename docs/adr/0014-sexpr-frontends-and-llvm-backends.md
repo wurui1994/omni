@@ -3667,6 +3667,51 @@ asy 自己**没有** `string(bool)`，所以这儿只能自己拼。
 数字：`import plain;` 292 → 281，`import graph;` 153 → 151。tests/asy 155 条、
 tests/run.js 91 条全绿。新用例 `cases/83-write-file`（与真 asy 逐字节一致）。
 
+### 实参往形参上落：这一格接不住而它有默认值，就跳过去
+
+两条都是"名字/签名怎么找"的规矩，都是照参考实现改的，不是猜的。
+
+**一、中间那些带默认值的形参可以跳过去。** 我一直以为位置实参是一格一格顺着填的，
+量出来不是：
+
+```asy
+int f(int a, int b=7, string c, string d) { return a + b + length(c) + length(d); }
+write(f(1, "xy", "z"));   // 真 asy 印 11 —— b 用了默认值 7，"xy" 落到 c 上
+```
+
+参考实现在 `application.cc:205` 的 `matchArgument`：
+
+```cpp
+return matchAtSpot(index, e, source, a, evalIndex) ||
+  (matchDefault() && matchArgument(e, source, a, evalIndex));
+```
+
+—— 这一格接不住就（`matchDefault`，`:154`）把默认值填上、`index` 往后挪一格再试同一个
+实参。所以我们的 `asyFit` 里那一大串"接不住就 `return null`"要分成两层：一层是**这一格**
+接不住（能不能跳过由外面定），一层是**这个候选**不合用。落地是把逐格的判断抽成一个
+`tryAt(r, at)`，回代价或 `null`，外面照 asy 那条规矩循环。跳过去的槽记成 `'def'`，
+最后算"缺了哪几个"时它算没给（走 `asyDefWrapper` 那一档）。带名字的实参不参与跳格 ——
+`matchNamedArgument`（`:220`）用的是那个名字自己的槽。
+
+**二、成员那一层"声明在后面"不能整片挡住外层。** 上一刀留下的那条"成员声明在后面就当场
+报错"太急了：base 里 plain_bounds.asy:226 是
+
+```asy
+struct freezableBounds {
+  … min(a, b) …          // 这里的 min 是外层（内建）的那个
+  pair min();            // 成员的 min 声明在后面
+}
+```
+
+asy 那边成员那一层看不见它、于是接着往外找。所以这条诊断改成**先记下来**，一路走到
+最后什么都没接住时才发。原来那条 strict/ 用例（`struct S { int y = f(); int f(){} }`，
+外层没有同名的 `f`）照旧被这一条接住。
+
+数字：`import plain;` 281 → 254（成员那一条 -9，跳格那一条 -18）。`import graph;`
+151 → 153：涨的这两条是真进展 —— `xlimits(picture, bool)` 原来接不住，现在接住了，
+后面那段代码才第一次被看到（露出 `clip` 内建与 picture 的两个 userSet 方法）。
+tests/asy 156 条、tests/run.js 91 条全绿。新用例 `cases/84-arg-slots`（与真 asy 逐字节一致）。
+
 ## 后果与代价
 
 
