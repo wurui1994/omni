@@ -302,7 +302,7 @@ import {
 import {
   asyUnwrapMod, asyAuMod, asyStaticDec, asyStaticInit, asyStMod, asyOinitSig, asyOinitFor,
   asyCastSig, asyCastFor, asyFormals, asyFnTypeOf, asySig, asyMethodSig, asyMethod,
-  asyGlobalNames, asyGvarHere, asyGvarAt, asyGvarLate, asyFunc, asyBuiltinsIn,
+  asyGlobalNames, asyGvarHere, asyGvarAt, asyGvarFor, asyGvarLate, asyFunc, asyBuiltinsIn,
   asyDeclPass, asyBodyPass,
 } from './decls.js';
 
@@ -699,6 +699,91 @@ class AsyLower {
         (aset (var r) (var i) ${val})
         (set i (bin "+" (var i) (int 1)))))
     (ret (var r)))`);
+    return nm;
+  }
+
+  /**
+   * 数组的 `.cyclic`（第六十五刀）。asy 那边这是数组**对象**上的一格标记（array.h:21 的
+   * `cycle`），置上之后下标按长度取模、负数也绕回来（runarray.in:104
+   * `if(cyclic && len > 0) n=imod(n,len);`）。plain 里四处：plain_paths.asy:165 的
+   * `T.cyclic=true`、plain_strings.asy:238 的 `spinner`、plain_pens.asy:148/152 的
+   * `colorPen`/`monoPen`（`Pen(int n)` 正是靠它绕圈取笔）。
+   *
+   * 这一层的数组是核心方言的裸数组，头上没有那一格。加一格要动 anew/aget/aset 在
+   * 解释器、JS/C/LLVM/SPIR-V 五个后端与 MIR 那一路，所以这一刀把标记放在**旁边**：
+   * 每个数组类型一格模块级登记册（`(arr (arr T))`），按**身份**查（`(bin "==" …)`，
+   * 就是 asy 的 alias 那一条）。身份查过的语义与"标记在对象上"完全一样 —— 别名、
+   * 传参、装进结构体都跟着走，不像"按符号静态近似"那样会悄悄给错答案。
+   *
+   * 代价是每次下标多一次调用：登记册空着时（绝大多数类型）那一句就是一次长度比较。
+   */
+  cycHelper(at) {
+    // asyMangle 对函数类型留着括号与逗号（`real(real)`），那不是标识符 —— 登记册与三个
+    // helper 的名字都得是，所以再洗一遍。
+    const key = asyMangle(at).replace(/[^A-Za-z0-9_]/g, '_');
+    const nm = {
+      reg: `asy__cycreg_${key}`,
+      is: `asy__cycis_${key}`,
+      set: `asy__cycset_${key}`,
+      idx: `asy__cycidx_${key}`,
+    };
+    if (this.arrGen.has(nm.is)) return nm;
+    const ct = asyCore(at);
+    this.used.add('asy__mod');
+    // 登记册本身也是一个顶层项（`(global …)`），跟 helper 一起发
+    this.arrGen.set(nm.reg, `  (global ${nm.reg} (arr ${ct}))`);
+    this.arrGen.set(nm.is, `  (fn ${nm.is} ((a ${ct})) bool
+    (let i int (int 0))
+    (while (bin "<" (var i) (alen (var ${nm.reg})))
+      (do
+        (if (bin "==" (aget (var ${nm.reg}) (var i)) (var a)) (do (ret (bool true))))
+        (set i (bin "+" (var i) (int 1)))))
+    (ret (bool false)))`);
+    // 取消标记就把那一格换成空引用：它跟任何真数组都不相等，所以 is 那边照旧对
+    this.arrGen.set(nm.set, `  (fn ${nm.set} ((a ${ct}) (on bool)) void
+    (let i int (int 0))
+    (while (bin "<" (var i) (alen (var ${nm.reg})))
+      (do
+        (if (bin "==" (aget (var ${nm.reg}) (var i)) (var a))
+          (do
+            (if (un "!" (var on)) (do (aset (var ${nm.reg}) (var i) (null ${ct}))))
+            (ret)))
+        (set i (bin "+" (var i) (int 1)))))
+    (if (var on) (do (apush (var ${nm.reg}) (var a))))
+    (ret))`);
+    this.arrGen.set(nm.idx, `  (fn ${nm.idx} ((a ${ct}) (i int)) int
+    (if (bin "==" (alen (var ${nm.reg})) (int 0)) (do (ret (var i))))
+    (let n int (alen (var a)))
+    (if (bin ">" (var n) (int 0))
+      (do (if (call ${nm.is} (var a)) (do (ret (call asy__mod (var i) (var n)))))))
+    (ret (var i)))`);
+    return nm;
+  }
+
+  /**
+   * 泛型的 `search(T[] a, T key, bool less(T,T))`（runarray.in 的 searchArray）：
+   * 有序数组里**最后一个"不比 key 大"的下标**，key 比首元素还小给 -1。
+   * 判据从 `a[mid] <= key` 换成 `!less(key, a[mid])` —— 只用 less 一个算符，与那边一致。
+   * 原型是 plain_Label.asy:624 的 `search(stringcache, s, lexorder)`。
+   * 二元的那份在 prelude 里（`int search(real[], real)`，同一套二分）。
+   */
+  searchHelper(el) {
+    const nm = `asy__search_${asyMangle(el).replace(/[^A-Za-z0-9_]/g, '_')}`;
+    if (this.arrGen.has(nm)) return nm;
+    const et = asyCore(el);
+    const at = asyCore(`${el}[]`);
+    const ft = asyCore(`bool(${el},${el})`);
+    this.arrGen.set(nm, `  (fn ${nm} ((a ${at}) (key ${et}) (less ${ft})) int
+    (let lo int (int 0-1))
+    (let hi int (alen (var a)))
+    (while (bin ">" (bin "-" (var hi) (var lo)) (int 1))
+      (do
+        (let mid int (call asy__quot (bin "+" (var lo) (var hi)) (int 2)))
+        (if (un "!" (callfn (var less) (var key) (aget (var a) (var mid))))
+          (do (set lo (var mid)))
+          (do (set hi (var mid))))))
+    (ret (var lo)))`);
+    this.used.add('asy__quot');
     return nm;
   }
 
@@ -1611,11 +1696,20 @@ class AsyLower {
         return this.nope(n, `函数体里的函数 '${nm}' 既抓外层的 '${hit}'、又有可变形参`);
       }
     }
-    if (this.mentions(n.items[4], nm)) {
+    // 体里提到自己**不一定**是递归：asy 的名字按签名查，同名而签名不同的那一份照旧接得住。
+    // plain_Label.asy:56 的 `pair[][] conj(pair[][] a)` 体里那句 `conj(a[j][i])` 调的是
+    // 内建的 `pair conj(pair)`；plain_markers.asy:64 的 `void add(real x)` 体里那句
+    // `add(pic, …, point(g,t))` 调的是 plain 的 `add(picture,frame,pair)`。两处都不是递归。
+    // 所以不拿"提到过"当判据：先降一遍，降通了就是这种情形；降不通、而且体里确实提到了
+    // 自己，才报"递归"—— 理由说准，而且连带的那几句诊断都回滚掉。
+    const rec = this.mentions(n.items[4], nm);
+    const mark = rec ? this.diags.mark() : null;
+    const clo = this.mkClo(n, ret, ps, n.items[4]);
+    if (clo === null && rec) {
+      this.diags.rollback(mark);
       return this.nope(n, `函数体里的函数 '${nm}' 抓外层的 '${hit}'，而它自己是递归的`
         + '（这一层的名字是体降完才绑上的，递归得先有那一格 —— 另一刀）');
     }
-    const clo = this.mkClo(n, ret, ps, n.items[4]);
     if (clo === null) return null;
     const had = this.scopes[this.scopes.length - 1].get(nm);
     if (had !== undefined) {
@@ -1928,6 +2022,32 @@ class AsyLower {
   fnTypeOf(ret, formalsNode, at) { return asyFnTypeOf(this, ret, formalsNode, at); }
   gvarHere(nm) { return asyGvarHere(this, nm); }
   gvarAt(nm) { return asyGvarAt(this, nm); }
+  gvarFor(nm, want) { return asyGvarFor(this, nm, want); }
+
+  /** 同名的文件级变量在这里看得见不止一格（asy 里它们按签名分得开） */
+  gvarMany(nm) {
+    const list = this.globals.get(nm);
+    if (list === undefined) return false;
+    let k = 0;
+    for (const g of list) if (g.at <= this.at && g.ok) k++;
+    return k > 1;
+  }
+
+  /**
+   * 试着求一下这个表达式的**类型**（诊断与前置语句都回滚，不留痕）。求不出回 null。
+   * 用在"同名好几格、要靠右边的类型定案"那一档（见 assign 里的 gvarFor）。
+   */
+  probeType(node) {
+    if (!Array.isArray(this.pre)) return null;
+    const mark = this.diags.mark();
+    const savePre = this.pre;
+    this.pre = [];
+    const v = this.expr(node);
+    this.pre = savePre;
+    this.diags.rollback(mark);
+    return v === null || v.type === undefined ? null : v.type;
+  }
+
   gvarLate(node, nm) { return asyGvarLate(this, node, nm); }
 
 

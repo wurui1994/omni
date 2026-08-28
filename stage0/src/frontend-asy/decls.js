@@ -831,6 +831,20 @@ export function asyGvarHere(L, nm) {
   return cur;
 }
 
+/**
+ * 同一个名字的文件级变量有**好几格**（asy 里它们按签名分得开），这里按类型挑一格。
+ * 原型是 plain_Label.asy:688 的 `texpath=new path[](string s, pen p, …){…}` ——
+ * `texpath` 在 :215 与 :589 各声明过一份（`(string,pen,bool,bool)` 与 `(Label,bool,bool)`），
+ * 那一句赋的是前者。挑不到回 null，调用方照旧按 gvarHere 那一格报原来那句错。
+ */
+export function asyGvarFor(L, nm, want) {
+  const list = L.globals.get(nm);
+  if (list === undefined) return null;
+  let cur = null;
+  for (const g of list) if (g.at <= L.at && g.ok && g.type === want) cur = g;
+  return cur;
+}
+
 /** 正在降级的这一句（`L.at`）声明的那份文件级变量。vardec 用它拿符号名。 */
 export function asyGvarAt(L, nm) {
   const list = L.globals.get(nm);

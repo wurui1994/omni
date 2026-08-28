@@ -723,6 +723,14 @@ export function asyAssign(L, node, lhs, rhs, op) {
       if (s !== null) return asyAssignStat(L, node, `${q.recv.type}.${q.field}`, s, rhs, op);
       return asyAssignFld(L, node, q, rhs, op);
     }
+    // 数组的 `.cyclic = …`（第六十五刀，见 cycHelper）：不是记录的字段，是数组对象上
+    // 那一格标记。plain_pens.asy:148 的 `colorPen.cyclic=true` 就是这一句。
+    if (q !== null && asyIsArr(q.recv.type) && q.field === 'cyclic') {
+      if (op !== null) return L.nope(node, "数组 '.cyclic' 上的复合赋值");
+      const bv = L.coerce(L.expr(rhs), 'bool', node, "给 '.cyclic' 赋的值");
+      if (bv === null) return null;
+      return [`(expr (call ${L.cycHelper(q.recv.type).set} ${q.recv.code} ${bv.code}))`];
+    }
     // pair 的分量是**只读**的虚字段：量过 asy 对 `z.x = 5` 与 `a.p.x = 5` 都报
     // "virtual field is read-only"。这条不是"还没做"，所以不带 ASY_NOPE ——
     // `tests/asy/strict/pair-field-set` 钉着它。
@@ -815,9 +823,16 @@ export function asyAssign(L, node, lhs, rhs, op) {
     const st = L.self === null || L.self === undefined
       ? null : L.statOf(L.self.rec.name, nm);
     if (st !== null) return asyAssignStat(L, node, `${L.self.rec.name}.${nm}`, st, rhs, op);
-    const g = L.gvarHere(nm);
-    if (g !== null && g.ok) { sym = g.sym; t = g.type; }
-    else if (g !== null) {        return L.nope(node, `函数里改文件级变量 '${nm}'（这一刀的模块级变量`
+    let g = L.gvarHere(nm);
+    // 同名的文件级变量有好几格时按**右边的类型**挑一格（第六十六刀，见 gvarFor）：
+    // plain_Label.asy:688 的 `texpath=new path[](string s, pen p, …){…}` 赋的是 :215
+    // 那一格，不是 :589 那一格。probeType 求一遍类型再回滚，右边只真求一次。
+    if (g !== null && g.ok && op === null && rhs !== null && L.gvarMany(nm)) {
+      const rt = L.probeType(rhs);
+      const pick = rt === null ? null : L.gvarFor(nm, rt);
+      if (pick !== null) g = pick;
+    }
+    if (g !== null && g.ok) { sym = g.sym; t = g.type; }    else if (g !== null) {        return L.nope(node, `函数里改文件级变量 '${nm}'（这一刀的模块级变量`
         + '只收 int/real/bool/string —— pair/记录/数组的身份不在 MIR 的类型码里）');
     } else if (L.globals.has(nm)) return L.gvarLate(node, nm);
     else return L.err(node, `未声明的变量 '${nm}'`);
@@ -978,6 +993,9 @@ export function asyAssignIndex(L, node, lhs, rhs, op) {
   const iv = `asy__i${L.tmp++}`;
   L.pre.push(`(let ${av} ${asyCore(a.type)} ${a.code})`);
   L.pre.push(`(let ${iv} int ${idx.code})`);
+  // 绕圈下标（第六十五刀，见 cycHelper）：`.cyclic` 置上时按长度取模。写侧与读侧同一条
+  // （runarray.in:803 那一段），取模之后落在范围内，下面那句 grow 自然就是空转。
+  L.pre.push(`(set ${iv} (call ${L.cycHelper(a.type).idx} (var ${av}) (var ${iv})))`);
   const grow = L.arrHelper('grow', el);
   const head2 = `(expr (call ${grow} (var ${av}) (var ${iv})))`;
   const cur = `(aget (var ${av}) (var ${iv}))`;

@@ -1,0 +1,17 @@
+pen[] colorPen={red,green,blue};
+colorPen.cyclic=true;
+write(colorPen.cyclic);
+string[] s={"a","b","c"};
+write(s.cyclic);
+s.cyclic=true;
+write(s[0]); write(s[3]); write(s[4]); write(s[-1]); write(s[-3]);
+s.cyclic=false;
+write(s.cyclic);
+real[][] T={{1,2},{3,4}};
+T.cyclic=true;
+write(T[2][0]);
+write(T[-1][1]);
+int[] q={1,2,3};
+q.cyclic=true;
+q[3]=9;
+write(q[0]);

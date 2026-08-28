@@ -17,4 +17,4 @@
 size(100);
 fill((0, 0)--(100, 0)--(50, 80)--cycle, red);
 draw((0, 0)--(100, 0), blue + linewidth(2));
-shipout();
+shipout(currentpicture);

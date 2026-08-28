@@ -1774,8 +1774,11 @@ void shipout(picture pic) {
   write("%%EOF");
 }
 
-void shipout() { shipout(currentpicture); }
-void shipout(string prefix) { shipout(currentpicture); }
+// 刻意**不给** `void shipout()` 与 `void shipout(string)`：plain_shipout.asy:120 那份
+// `void shipout(string prefix=…, picture pic=currentpicture, …)` 全是默认值，0 个实参也
+// 接得住 —— 再多一份 0 元的，`shipout()` 就真的 ambiguous 了（量过 asy：
+// `void f(); void f(int a=2); f();` 报的正是 "call of function 'f()' is ambiguous"）。
+// 不 import plain 时写 `shipout(currentpicture)`。
 
 // ------------------------------------------------ C++ 内建面的余量（第四十五刀）
 // 下面这一批是 run*.in 里的函数，base 那一堆到处在用。分三档，各自写清是哪一档：
@@ -2939,6 +2942,14 @@ bool inside(path[] g, pair z, pen fillrule=currentpen) {
 }
 path[] _strokepath(path g, pen p=currentpen) {
   abort("_strokepath 还没做（真 asy 是绕 gs 走一趟）"); return new path[];
+}
+// 字形轮廓那两条（runlabel.in:243/349）：真 asy 一条走 TeX、一条读字体文件。
+// 这一层没有那两路，所以体是 abort —— 签名在，plain_Label.asy:664 那一句才降得下来。
+path[] _texpath(string s, pen p) {
+  abort("_texpath 还没做（TeX 那一路不在这一层）"); return new path[];
+}
+path[] textpath(string s, pen p) {
+  abort("textpath 还没做（读字体文件那一路不在这一层）"); return new path[];
 }
 void _shipout(string prefix="", frame f, frame preamble=null, string format="",
               bool wait=false, bool view=true, transform t=identity()) {

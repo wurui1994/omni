@@ -54,6 +54,20 @@ export function asyModLoad(L, node, name) {
 }
 
 /**
+ * 这个模块要不要隐式 `import plain;`（asy 的 autoplain）。
+ * plain 自己那一串（plain.asy 与它 import 的 plain_*）不做 —— 那会循环。
+ * 主文件也不做：这一层的主文件只带 prelude（tests/asy/cases 全靠这一条）。
+ */
+export function asyAutoPlain(L, name) {
+  // 内建面那一份（这一层的 prelude）自己就在 plain 下面：给它 autoplain 会让 plain 在
+  // `struct file` 还不存在的时候就开始降，plain_constants.asy:73 的 `void(file)` 当场炸。
+  if (name === 'asy_builtins') return false;
+  if (name === 'plain' || name.startsWith('plain_')) return false;
+  for (const k of L.loading) if (k === 'plain' || k.startsWith('plain_')) return false;
+  return L.opts !== null && L.opts.load !== undefined && L.opts.load !== null;
+}
+
+/**
  * 上面那条的一般形：`key` 是缓存键，`tpl` 是模板实参表（普通模块是 null）。
  * 缓存键带上实参是量出来的：`from m(T=int) access …` 写两遍，模块体只跑**一遍**，
  * 而 `T=string` 那一份是**另一个**实例（体再跑一遍、文件级变量是另一块存储）——
@@ -83,6 +97,20 @@ export function asyModLoadAs(L, node, name, key, tpl) {
   // 模板实参先坐进别名表：模块体里 `T` 就是一个 typedef，位置 -1 让它在第 0 项之前就可见。
   // 类型在这一层就是字符串，所以"替换类型参数"这件事一条别名就够了。
   if (tpl !== null) for (const [pn, pt] of tpl) L.tyAlias.set(pn, [{ t: pt, at: -1 }]);
+  // asy 的 **autoplain**（settings.cc 的 autoplain）：每个文件开头都隐式 `import plain;`。
+  // graph.asy 裸用 `Label` / `ticks` / `scaleT` / `arrowbar` 就靠这一条 —— 它自己一句
+  // `import plain;` 都没有。位置 -1：整份文件从第 0 项起就看得见。
+  // 正在加载 plain 自己（plain.asy 与它 import 的那一串 plain_*）时不做，不然就循环了。
+  if (asyAutoPlain(L, name)) {
+    // 找不到 plain 时**不出声**：这一层的模块是按 CWD 找的，tests/asy/cases 里那些
+    // 自己写的小模块旁边没有 plain.asy，隐式的这一句不该把它们判死。
+    const mark = L.diags.mark();
+    const pu = asyModLoadAs(L, node, 'plain', 'plain', null);
+    // 位置 0：整份文件从第 0 项起就看得见，而且 plain 的 `struct picture` 要**盖住**
+    // 内建面那个同名的垫子（recVis 那边的判据是 `had.at <= at`，所以不能用 -1）。
+    if (pu !== null) asyModMerge(L, node, pu, 0, null);
+    else L.diags.rollback(mark);
+  }
   L.declPass(u);
   L.unitOut(prev);
   L.loading.pop();

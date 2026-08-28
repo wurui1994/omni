@@ -4973,6 +4973,54 @@ real d=...; pair d=dot(u,u);             // plain_Label.asy:39
 `cases/127-shadow-redeclare`（九行输出，与 `asy -noV` 逐字节一致：形参被遮住、体里连遮三次
 还接着改、遮住的那一格进闭包、块里遮住出块还原、以及遮回原来那个类型）。
 
+### 一批：数组的 `.cyclic`、autoplain、递归的误判与几处按签名定案
+
+这一刀是**成批推**的一刀（用户要的是先快后收敛），一次落了六件事。
+
+**数组的 `.cyclic`（4 处）。** asy 那边它是数组对象上的一格标记（array.h:21），置上之后下标
+按长度取模、负数也绕回来（runarray.in:104 `if(cyclic && len > 0) n=imod(n,len);`）。我们的
+数组是核心方言的裸数组，头上没有那一格 —— 加一格要动 anew/aget/aset 在解释器、
+JS/C/LLVM/SPIR-V 五个后端与 MIR 那一路，十来个文件。所以标记放在**旁边**：每个数组类型
+一格模块级登记册（`(arr (arr T))`，见 `cycHelper`），按**身份**查（`(bin "==" …)`，就是
+asy 的 alias）。身份查过的语义与"标记在对象上"完全一样 —— 别名、传参、装进结构体都跟着走，
+不像"按符号静态近似"那样会悄悄给错答案。代价是每次下标多一次调用；登记册空着时（绝大多数
+类型）那一句就是一次长度比较。落点四处：`asyMember` 的读、`asyAssign` 的写、`asyIndex`
+的读侧、`asyAssignIndex` 的写侧。
+
+**autoplain（graph 148 → 99）。** graph.asy 裸用 `Label` / `ticks` / `scaleT` / `arrowbar`，
+自己一句 `import plain;` 都没有 —— asy 那边每个文件开头都隐式有那一句（settings 的
+autoplain）。`asyModLoadAs` 里补上，位置 0（不是 -1：recVis 的判据是 `had.at <= at`，
+plain 的 `struct picture` 要盖住内建面那个同名的垫子）。三条边界：prelude 自己
+（`asy_builtins`）不做 —— 那会让 plain 在 `struct file` 还不存在时就开始降；plain 自己
+那一串（`plain` 与 `plain_*`）不做 —— 那会循环；**找不到 plain 时不出声**（诊断回滚）——
+tests/asy/cases 里那些自己写的小模块旁边没有 plain.asy。
+
+**"体里提到自己"不等于递归（2 处）。** `localFunClo` 原先扫一遍名字就报"递归"。可 asy 的
+名字按签名查：plain_Label.asy:56 的 `pair[][] conj(pair[][] a)` 体里那句 `conj(a[j][i])`
+调的是内建的 `pair conj(pair)`，plain_markers.asy:64 的 `void add(real x)` 体里那句
+`add(pic,…)` 调的是 plain 的 `add(picture,frame,pair)`。改成**先降一遍**：降通了就是这种
+情形，降不通且体里确实提到自己才报，连带的诊断一并回滚。真递归那一格还是 nope，
+`tests/asy/bad/localfn-recursive` 钉着它。
+
+**`shipout()` 的歧义（2 处）。** plain_shipout.asy:120 那份全是默认值，0 个实参也接得住；
+prelude 里再垫一份 `void shipout()`，`shipout()` 就真的 ambiguous 了（量过 asy：
+`void f(); void f(int a=2); f();` 报的正是 "call of function 'f()' is ambiguous"）。
+我们的诊断是对的，垫的那两份是错的 —— 删掉，`tests/asy/draw/tri.asy` 改写成
+`shipout(currentpicture)`。
+
+**泛型 `search(T[], T, bool(T,T))`** 按元素类型现生（`searchHelper`，判据从 `a[mid] <= key`
+换成 `!less(key, a[mid])`，只用 less 一个算符），以及 `_texpath` / `textpath` 两条签名
+（runlabel.in:243/349，体是 abort）。
+
+**同名的文件级变量按右边的类型挑一格**（`gvarFor` + `probeType`）：plain_Label.asy:688 的
+`texpath=new path[](string s, pen p, …){…}` 赋的是 :215 那一格，不是 :589 那一格。
+`probeType` 求一遍类型再回滚，右边只真求一次。
+
+数字：`import plain;` 24 → 16，`import graph;` 148 → 99。tests/asy 206 条、tests/run.js
+91 条全绿。plain 剩下那 16 条里最贵的三件是：被调方填默认值（函数值带默认值那一格）、
+给方法赋值（asy 的方法就是一格函数值字段）、以及"调一个任意表达式"
+（`(above ? add : prepend)(dest,src)` 要拿调用处的实参类型去定一整个条件表达式的重载）。
+
 ## 后果与代价
 
 

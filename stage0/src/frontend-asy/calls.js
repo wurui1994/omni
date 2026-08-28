@@ -414,6 +414,10 @@ export function asyBuiltinRaw(L, n, nm, raw) {
     return { code: `(call ${h} ${raw[0].v.code} ${raw[1].v.code})`, type: `${el}[]` };
   }
   if (nm === 'alias') return asyAliasRaw(L, raw);
+  if (nm === 'search') {
+    const h = L.searchHelper(asyElem(raw[0].v.type));
+    return { code: `(call ${h} ${raw[0].v.code} ${raw[1].v.code} ${raw[2].v.code})`, type: 'int' };
+  }
   return asyStrRaw(L, n, nm, raw);
 }
 
@@ -481,6 +485,14 @@ export function asyBuiltinOwns(L, nm, raw) {
     const el = raw[1].v.type;
     return el !== 'void' && el !== ASY_NULL;
   }
+  // `search(T[] a, T key, bool less(T,T))`（runarray.in 的 searchArray）：同样是泛型的，
+  // 按元素类型现生一份（searchHelper）。二元的那份在 prelude 里（`int search(real[], real)`）。
+  if (nm === 'search') {
+    if (raw.length !== 3 || !asyIsArr(raw[0].v.type)) return false;
+    const el = asyElem(raw[0].v.type);
+    if (raw[1].v.type !== el) return false;
+    return raw[2].v.type === `bool(${el},${el})`;
+  }
   // alias：两边都要是记录或数组（或 null），而且**同型** —— 两边都是 null 时 asy 报歧义
   // （量过 `operator ==(null, null)` 那条），所以不认。
   if (nm === 'alias') {
@@ -508,6 +520,7 @@ export function asyBuiltinCost(L, nm, raw) {
   if (nm === 'copy' || nm === 'sequence') return 0;   // 元素类型是照实参现生的，逐个同型
   if (nm === 'array') return 0;                       // 同上：第二个实参那个类型就是元素类型
   if (nm === 'alias') return 0;                       // 形参就是实参那个类型，逐个同型
+  if (nm === 'search') return 0;                      // 同上：形参就是实参那几个类型
   if (nm === 'length') {
     const t = raw[0].v.type;
     if (t === 'string' || t === 'pair' || t === 'triple') return 0;

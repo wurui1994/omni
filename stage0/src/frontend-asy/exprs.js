@@ -944,7 +944,26 @@ export function asyIndex(L, n) {
   }
   const i = asyCoerce(L, ixv, 'int', n, '下标');
   if (i === null) return null;
-  return { code: `(aget ${a.code} ${i.code})`, type: asyElem(a.type) };
+  // 先算绕圈下标（它可能给接收者绑一个临时量、改写 a.code），再拼 aget
+  const ic = asyCycIdx(L, a, i.code);
+  return { code: `(aget ${a.code} ${ic})`, type: asyElem(a.type) };
+}
+
+/**
+ * 下标绕圈（第六十五刀）：`a.cyclic` 置上之后按长度取模。接收者要求**两次**（一次算
+ * 下标、一次真取），所以不是一个裸变量读时先绑个临时量。绑不下（这个位置没有 pre）时
+ * 只好照旧不绕 —— 那种位置的接收者本来也只能是变量读。
+ */
+export function asyCycIdx(L, a, icode) {
+  const h = L.cycHelper(a.type);
+  if (/^\(var [A-Za-z0-9_]+\)$/.test(a.code)) {
+    return `(call ${h.idx} ${a.code} ${icode})`;
+  }
+  if (!Array.isArray(L.pre)) return icode;
+  const tv = `asy__cy${L.tmp++}`;
+  L.pre.push(`(let ${tv} ${asyCore(a.type)} ${a.code})`);
+  a.code = `(var ${tv})`;
+  return `(call ${h.idx} (var ${tv}) ${icode})`;
 }
 
 /**
@@ -1040,7 +1059,11 @@ export function asyField(L, n) {
 export function asyMember(L, n, recv, nm) {
   if (asyIsArr(recv.type)) {
     if (nm === 'length') return { code: `(alen ${recv.code})`, type: 'int' };
-    return L.nope(n, `数组的 '.${nm}'（这一刀只有 .length / .push / .pop）`);
+    // `.cyclic` 的读（第六十五刀，见 cycHelper）：按身份问登记册
+    if (nm === 'cyclic') {
+      return { code: `(call ${L.cycHelper(recv.type).is} ${recv.code})`, type: 'bool' };
+    }
+    return L.nope(n, `数组的 '.${nm}'（这一刀只有 .length / .cyclic / .push / .pop）`);
   }
   if (L.isRec(recv.type)) {
     // `a.n`：`n` 可能是 **static**（那不是这个对象的槽，是一个文件级变量 —— 量过
