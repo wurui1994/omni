@@ -1458,7 +1458,7 @@ real[] operator -(real[] a) { real[] c; for (real x : a) c.push(-x); return c; }
 pair[] operator -(pair[] a) { pair[] c; for (pair x : a) c.push(-x); return c; }
 triple[] operator -(triple[] a) { triple[] c; for (triple x : a) c.push(-x); return c; }
 
-
+// ---------------------------------------------------- 字节与十六进制那四个
 // (1) `transform * path`：逐个结点搬（transform 是仿射，pre/point/post 都搬）。
 // runpath.in 的 `path operator *(transform t, path p)` 就是这件事。
 path operator *(transform t, path g) {
@@ -1961,6 +1961,89 @@ triple operator ecast(string s) {
   if (a.length == 3) return ((real) a[0], (real) a[1], (real) a[2]);
   abort("把 '" + s + "' 当 triple：切出来 " + (string) a.length + " 个分量，要 3 个");
   return (0, 0, 0);
+}
+
+// downcase/upcase 是 runstring.in:201/207 的 std::transform(tolower/toupper)。
+// 这一层没有"一个字节"这一格，按 ASCII 那 26 对换；别的字符原样过（C locale 的
+// tolower 对非字母也是原样）。
+private string asy__LOWER = "abcdefghijklmnopqrstuvwxyz";
+private string asy__UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+string downcase(string s) {
+  string r = "";
+  for (int i = 0; i < length(s); ++i) {
+    string c = substr(s, i, 1);
+    int k = find(asy__UPPER, c);
+    r += k >= 0 ? substr(asy__LOWER, k, 1) : c;
+  }
+  return r;
+}
+string upcase(string s) {
+  string r = "";
+  for (int i = 0; i < length(s); ++i) {
+    string c = substr(s, i, 1);
+    int k = find(asy__LOWER, c);
+    r += k >= 0 ? substr(asy__UPPER, k, 1) : c;
+  }
+  return r;
+}
+
+// byte/byteinv 是 runtime.in:446/451 转手 pen.h:143/150；hex/ascii 是
+// runstring.in:430/441。plain_pens.asy:333 的 `byteinv(hex(substr(s,2i+offset,2)))`
+// （`rgb("#ff8000")` 那条路）要 byteinv 与 hex 两个。
+// 量过（asy -noV）：byte(0.5)=128 byte(1)=255 byte(-0.2)=0 byte(0.999)=255
+//   byteinv(128)=0.5 byteinv(255)=1 byteinv(300)=0.171875（(unsigned char)300=44）
+//   byteinv(-3)=0 hex("ff")=255 hex("1A")=26 ascii("A")=65 ascii("abc")=97 ascii("")=-1
+int byte(real x) {
+  if (x < 0) return 0;
+  int c = (int) (x * 256);
+  return c < 255 ? c : 255;
+}
+real byteinv(int x) {
+  if (x < 0) return 0;
+  int i = x % 256;
+  return i == 255 ? 1 : i / 256;
+}
+private string asy__HEXDIG = "0123456789abcdef";
+int hex(string s) {
+  int n = length(s);
+  int i = asy__skipws(s, 0);
+  bool neg = false;
+  if (i < n && (substr(s, i, 1) == "+" || substr(s, i, 1) == "-")) {
+    neg = substr(s, i, 1) == "-";
+    ++i;
+  }
+  // `0x` / `0X` 前缀：C++ 的 hex basefield 收它
+  if (i + 1 < n && substr(s, i, 1) == "0"
+      && (substr(s, i + 1, 1) == "x" || substr(s, i + 1, 1) == "X")) i += 2;
+  int v = 0;
+  int digits = 0;
+  while (i < n) {
+    int d = find(asy__HEXDIG, downcase(substr(s, i, 1)));
+    if (d < 0) break;
+    v = v * 16 + d;
+    ++digits;
+    ++i;
+  }
+  i = asy__skipws(s, i);
+  if (digits == 0 || i != n) abort("invalid hexadecimal cast from string \"" + s + "\"");
+  return neg ? -v : v;
+}
+// 表里那个反斜杠要用**单引号**串写：asy 的双引号串只认 `\"`，`"\\"` 是**两个**
+// 反斜杠（量过：length("a\\b")=4，两边都是 4），单引号串才按 C 那套转义。
+private string asy__PRINT = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ["
+  + '\\' + "]^_`abcdefghijklmnopqrstuvwxyz{|}~";
+int ascii(string s) {
+  if (length(s) == 0) return -1;
+  string c = substr(s, 0, 1);
+  if (c == '\t') return 9;
+  if (c == '\n') return 10;
+  if (c == '\r') return 13;
+  int i = find(asy__PRINT, c);
+  if (i >= 0) return i + 32;
+  // asy 那边回的是**第一个字节**；这一层没有“取一个字节”这一格（substr 从多字节字符
+  // 中间切一刀是要报错的），所以非 ASCII 这一格是 abort，不是给个错答案。
+  abort("ascii 这一刀只做 ASCII（可见字符与 \t \n \r）—— asy 回的是第一个字节");
+  return -1;
 }
 
 

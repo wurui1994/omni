@@ -4231,6 +4231,32 @@ helper `asy__rmod`，`%` 那个分支从"real 上还没做"改成分派到它。
 数字：`import plain;` 92 → 91。`import graph;` 152 不动。tests/asy 179 条、
 tests/run.js 91 条全绿。新用例 `cases/103-real-mod`。
 
+### 字节与十六进制那四个，以及双引号串里的反斜杠
+
+`plain_pens.asy:333` 的 `rgb("#ff8000")` 走的是 `byteinv(hex(substr(s,2i+offset,2)))`，
+一句话要 `byteinv` 与 `hex` 两个。四个一起补了：`byte`/`byteinv` 是 `runtime.in:446/451`
+转手 `pen.h:143/150`，`hex`/`ascii` 是 `runstring.in:430/441`。全写在 asy 这一侧的 prelude
+里，前端一行没动。
+
+`byte` 是 `x<0 ? 0 : min((int)(x*256), 255)`；`byteinv` 是 `(unsigned char)x` 之后
+`i==255 ? 1 : i/256`——所以 `byteinv(300)` 不是 1 而是 `44/256 = 0.171875`（300 截成
+一个字节是 44），`byteinv(-3)` 是 0。这两格量过才写对。
+
+顺手补上 `downcase`/`upcase`（`runstring.in:201/207`）：`hex` 要它来收 `"1A"`。这一层
+没有“一个字节”这一格，按 ASCII 那 26 对换，别的字符原样过（C locale 的 `tolower` 也是
+这样）。
+
+真正卡了一下的是 `ascii` 的查表串。asy 的**双引号**串**不**处理 `\\`：量过
+`length("a\\b")` 两边都是 4，那串里是**两个**反斜杠。所以第一版的可见字符表长 96 而
+不是 95，`ascii("a")` 给出 98（asy 是 97）——反斜杠之后整段都错了一位。单引号串才按
+C 那套转义，改成 `"…Z[" + '\\' + "]^_`…"` 之后 21 行探针与 asy 逐字节相同。
+
+还有一处顺序：prelude 是按行可见的，`hex` 用的 `asy__skipws` 声明在文件后半段，所以
+这四个函数得挪到那一段之后。
+
+数字：`import plain;` 91 → 90。`import graph;` 152 → 150。tests/asy 180 条、
+tests/run.js 91 条全绿。新用例 `cases/104-byte-hex`。
+
 ## 后果与代价
 
 
