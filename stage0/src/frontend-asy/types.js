@@ -95,6 +95,11 @@ export const ASY_NEWFRAME = 'asy__newframe';
  *  那个六参构造函数 `transform xform(real,real,real,real,real,real)`。 */
 export const ASY_XFORM = 'xform';
 
+/** 闭包抓外层接收者时那一格捕获叫什么（见 asyCloFrom）。名字带 asy 前缀是保留区，
+ *  不叫 `this` 是为了跟闭包体里那个同名**局部量**分开 —— 体里第一句
+ *  `(let this T (cap asy__self))` 把它绑回去。 */
+export const ASY_SELFCAP = 'asy__self';
+
 
 /** 文件级变量收得下的类型（第三十刀放开）：int/real/bool/string、pair/triple、
  *  记录，以及它们的一维数组。核心方言的 `(global …)` 原先只收标量，理由写的是

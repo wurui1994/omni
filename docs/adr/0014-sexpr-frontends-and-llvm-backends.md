@@ -4872,6 +4872,34 @@ plain_arrows.asy:122 三条路径连接一起没了）。`import graph;` 148 没
 `{x,y}`、`{curl c}`、`tension a and b`、`tension atleast`、`controls` 的一参与二参、
 `::` 折成变量调用、以及带方向标记的闭合路径）。
 
+### 闭包抓外层的 `this`：捕获一格，进门再绑回来
+
+`pic.add(new void(frame f, transform t) { out(f,t,position,align); })`
+（plain_Label.asy:316/342）—— 那个 `out` 是外层 struct 的成员，而闭包体里
+`L.self` 原来一进门就设成 null，于是它落到"内建函数 'out'"那句 nope 上。
+
+麻烦不在"要不要抓"，在于**抓来的东西怎么读**。核心方言里捕获是 `(cap 名)`、局部量是
+`(var 名)`，而前端有十来处直接发 `(var this)` / `(fld (var this) f)`（裸字段名、裸方法名、
+显式 `this`、`operator init(…)` 转调、赋值给字段…）。把它们都改成"看情况发 cap 还是 var"
+是十来处各改一遍，而且以后每加一处都得记得。
+
+落法是让那十来处**一字不改**：捕获一格叫 `asy__self`（不叫 `this`，免得跟局部量撞名），
+进闭包后第一句 `(let this T (cap asy__self))` 把它绑回一个同名局部量。于是闭包体里
+`this` 就是个普通局部量，`L.self` 照样开着，名字解析、字段读写、方法调用全走原路。
+
+嵌套也白捡：外层自己是闭包时它也已经把接收者绑成了同名局部量，所以"在定义处怎么读它"
+永远是 `(var this)` —— 捕获项的 `val` 是个常量，不用顺着 cap.prev 往上问。
+
+static 的方法体里没有接收者，那时 `selfRec` 是 null，与从前一字不差。
+
+一条**语义**上要留意的：`L.self` 开着意味着闭包体里的裸名字会先问外层 struct 的成员。
+这正是 asy 的规矩（那边闭包就在方法的作用域里），所以不是"多接受"，是"从前少接受"。
+
+数字：`import plain;` 26 → 24。`import graph;` 148 没动。tests/asy 203 条、
+tests/run.js 91 条全绿。新用例 `cases/125-closure-this`（八行输出，与 `asy -noV` 逐字节
+一致：裸方法名、裸字段名、改字段、显式 `this.n`、同时抓一格外层局部量、两层闭包穿过去
+拿接收者、以及 static 方法里那一格**不抓**）。
+
 ## 后果与代价
 
 

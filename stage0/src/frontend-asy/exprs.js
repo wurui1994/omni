@@ -18,7 +18,7 @@
 
 import { isList, isAtom, isStr, head } from '../sexpr/read.js';
 import {
-  ASY_NOPE, DOT_BAD, CAP_BAD, ASY_ARRELEM_TEXT, ASY_CYCLE, ASY_NEWFRAME, ASY_XFORM, ASY_RESTPFX, asyOpText,
+  ASY_NOPE, DOT_BAD, CAP_BAD, ASY_ARRELEM_TEXT, ASY_CYCLE, ASY_NEWFRAME, ASY_XFORM, ASY_RESTPFX, ASY_SELFCAP, asyOpText,
   asyIsArr, asyElem, asyIsFn, asyFldSym, ASY_PAIR_TY, ASY_TRIPLE_TY, asyCore, ASY_NULL, asyRefTy,
 } from './types.js';
 import { ZERO, ASY_PAIRFN, ASY_STRFN, ASY_STR_DEPS, strLit } from './runtime.js';
@@ -291,9 +291,24 @@ export function asyCloFrom(L, n, ret, ps, bodyNode) {
 
   L.scopes = [new Map()];
   L.updates = [];
-  L.self = null;   // 闭包体里没有接收者（捕获 this 这一刀不收，见 capOf）
+  // 闭包体里的 `this`（第四十七刀）：方法体里的匿名函数照样看得见接收者 ——
+  // plain_Label.asy:316 的 `pic.add(new void(frame f, transform t) { out(f,t,…); })`
+  // 里那个 `out` 就是外层 struct 的成员。落法是把接收者当**一格捕获**（名字 asy__self），
+  // 进闭包后第一句 `(let this T (cap asy__self))` 把它绑回一个同名局部量 —— 于是体里
+  // 所有 `(var this)` / `(fld (var this) f)` 一字不改。static 的方法体里没有接收者，
+  // 那时 selfRec 是 null，与从前一样。
+  const selfRec = saveSelf !== null && saveSelf !== undefined && saveSelf.stat !== true
+    ? saveSelf.rec : null;
+  L.self = selfRec === null ? null : saveSelf;
   L.fnBody = bodyNode;   // 再套一层时，里层那个 cap 的"外层体"就是这一段
   let bad = false;
+  if (selfRec !== null) {
+    L.cap.seen.set(ASY_SELFCAP, selfRec.name);
+    // 在**定义处**怎么读它：方法体里就是 `(var this)`；外层自己也是闭包时那边也已经
+    // 把它绑成了同名局部量，所以还是 `(var this)`。
+    L.cap.list.push({ name: ASY_SELFCAP, type: selfRec.name, val: '(var this)' });
+    if (L.declare(n, 'this', selfRec.name) === null) bad = true;
+  }
   for (const p of ps) if (L.declare(n, p.name, p.type) === null) bad = true;
   const body = bad ? null : asyBody(L, bodyNode, ret);
   const caps = L.cap.list;
@@ -303,6 +318,9 @@ export function asyCloFrom(L, n, ret, ps, bodyNode) {
   L.self = saveSelf;
   L.fnBody = saveBody;
   if (body === null) return null;
+  if (selfRec !== null) {
+    body.unshift(`(let this ${asyCore(selfRec.name)} (cap ${ASY_SELFCAP}))`);
+  }
   // 掉出尾巴补一条零值 ret（与 funBody 同一条：核心方言的检查在编译期）
   const last = body.length === 0 ? '' : body[body.length - 1];
   if (ret !== 'void' && !last.startsWith('(ret ')) {
