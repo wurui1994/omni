@@ -3712,6 +3712,40 @@ asy 那边成员那一层看不见它、于是接着往外找。所以这条诊�
 后面那段代码才第一次被看到（露出 `clip` 内建与 picture 的两个 userSet 方法）。
 tests/asy 156 条、tests/run.js 91 条全绿。新用例 `cases/84-arg-slots`（与真 asy 逐字节一致）。
 
+### 可变形参进签名身份；笔的盒子与虚线那一族
+
+上一刀把"实参怎么落格"改对之后，剩下最大的一族是"没有能匹配的签名"（65 条），头两个是
+`min(int[])` 与 `min(real[])` —— prelude 里明明有 `int min(int[] a)`，候选表里却只剩
+`int(... int[])`。原因是"同签名是替换"那条比的 key 是形参类型逐个拼起来，
+**可变那一格没进去**：base 里 plain_constants.asy:42 的
+
+```asy
+int min(... int[] a) {return min(a);}
+```
+
+于是"替换"掉了 prelude 那份数组 min，而它体里那个 `min(a)` 要的正是被替换掉的那一份。
+asy 那边 `signature` 是带 rest 的，两者不是一份。改法就是把 key 换成带 `...` 标记的
+`asySigKey(cand)`（`explicit` 与形参名照旧不进签名身份，那两条是量过的）。
+
+顺带按参考实现补了笔那一侧的几族：
+
+- `min(pen)` / `max(pen)`（runtime.in:339/344 → pen.h:931 的 `pen::bounds()`）：没有 nib、
+  变换是恒等时走 `maxx=maxy=1、shift=(0,0)` 那一支，盒子就是 ±0.5*linewidth 的正方形。
+  plain_boxes.asy:16 的 `0.5*sign*(max(p)-min(p))` 用的正是这一条。
+- `defaultpen()` / `defaultpen(pen)` / `resetdefaultpen()`（runtime.in:350/355/360）。
+  这里踩到一件事：asy 的 `defaultpen` 是**函数**，而我们 prelude 里一直有个同名的
+  全局变量 —— 变量在名字解析里排在函数前面，所以那一格改叫 `asy__defpen`。
+- `linetype(real[], real offset=0, bool scale=true, bool adjust=true)`（runtime.in:503，
+  负数截成 0）与 `linetype(pen)` / `offset` / `scale` / `adjust`。pen 上多了四格存虚线，
+  **EPS 那一路还没发 setdash**，所以虚线现在画出来是实线 —— 与 pen 上另外几格同一种
+  "存着但没画"的差别，写在明处。
+- `begingroup(frame)` / `endgroup(frame)` / `is3D(frame)`（runpicture.in:286/291/778）：
+  分组是 EPS 的 gsave/grestore 那一层的事，我们的 frame 只攒 drawop，所以这两个是空的。
+
+数字：`import plain;` 254 → 226（签名身份那一条 -5，笔那一批 -23）。`import graph;` 153
+不动。tests/asy 157 条、tests/run.js 91 条全绿。新用例 `cases/85-sig-and-pen`
+（与真 asy 逐字节一致）。
+
 ## 后果与代价
 
 

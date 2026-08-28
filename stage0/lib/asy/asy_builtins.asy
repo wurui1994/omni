@@ -319,6 +319,12 @@ struct pen {
   real black = 0;
   bool isinvisible = false;
   string font = "";
+  // 虚线那一族（pen.h 的 LineType：pattern/offset/scale/adjust）。这一层只**存着** ——
+  // EPS 那一路还没发 setdash，所以虚线画出来还是实线，这条差别写在明处。
+  real[] dashpat;
+  real dashoffset = 0;
+  bool dashscale = true;
+  bool dashadjust = true;
 }
 
 pen pencopy(pen p) {
@@ -335,21 +341,27 @@ pen pencopy(pen p) {
   q.miter = p.miter;
   q.setwidth = p.setwidth;
   q.setcolor = p.setcolor;
+  q.dashpat = copy(p.dashpat);
+  q.dashoffset = p.dashoffset;
+  q.dashscale = p.dashscale;
+  q.dashadjust = p.dashadjust;
   return q;
 }
 
-pen defaultpen;
+// defaultpen 那一格（processData().defaultpen）。asy 那边 `defaultpen` 是**函数**不是变量，
+// 所以这一格叫别的名字，读写走下面 defaultpen() / defaultpen(pen)。
+pen asy__defpen;
 pen currentpen;
 
 pen linewidth(real w) {
-  pen q = pencopy(defaultpen);
+  pen q = pencopy(asy__defpen);
   q.width = w;
   q.setwidth = true;
   return q;
 }
 
 pen gray(real g) {
-  pen q = pencopy(defaultpen);
+  pen q = pencopy(asy__defpen);
   q.gray = g;
   q.isrgb = false;
   q.setcolor = true;
@@ -357,7 +369,7 @@ pen gray(real g) {
 }
 
 pen rgb(real r, real g, real b) {
-  pen q = pencopy(defaultpen);
+  pen q = pencopy(asy__defpen);
   q.red = r;
   q.green = g;
   q.blue = b;
@@ -367,7 +379,7 @@ pen rgb(real r, real g, real b) {
 }
 
 pen evenodd() {
-  pen q = pencopy(defaultpen);
+  pen q = pencopy(asy__defpen);
   q.evenodd = true;
   return q;
 }
@@ -972,7 +984,7 @@ pen interp(pen a, pen b, real t) {
   p.setcolor = a.setcolor || b.setcolor;
   return p;
 }
-void resetdefaultpen() { }
+void resetdefaultpen() { pen q; asy__defpen = q; }   // runtime.in:350
 
 // (3) 真几何与数值：声明在这里，体是 abort。
 real arclength(path p) { abort("arclength(path) 还没做"); return 0; }
@@ -1337,6 +1349,40 @@ path operator *(transform t, path g) {
   }
   return out;
 }
+
+// (1) 笔的盒子（runtime.in:339/344，体是 pen.h:931 的 `pen::bounds()`）：没有 nib、
+// 变换是恒等时走的是 maxx=maxy=1、shift=(0,0) 那一支，盒子就是 ±0.5*linewidth 的正方形。
+// base 里 plain_boxes.asy:16 的 `0.5*sign*(max(p)-min(p))` 用的正是这一条。
+pair max(pen p) { real w = 0.5 * linewidth(p); return (w, w); }
+pair min(pen p) { real w = 0.5 * linewidth(p); return (-w, -w); }
+
+// (1) defaultpen 那一族（runtime.in:355/360）：读/写上面那一格。
+pen defaultpen() { return pencopy(asy__defpen); }
+void defaultpen(pen p) { asy__defpen = pencopy(p); }
+
+// (1) 虚线（runtime.in:503）：负数截成 0（参考实现里那句 `::max(...,0.0)`），
+// 别的三个属性照原样存着。`linetype(pen)` 回那份 pattern。
+pen linetype(real[] pattern, real offset=0, bool scale=true, bool adjust=true) {
+  pen q = pencopy(asy__defpen);
+  real[] a;
+  for (real x : pattern) a.push(x < 0 ? 0 : x);
+  q.dashpat = a;
+  q.dashoffset = offset;
+  q.dashscale = scale;
+  q.dashadjust = adjust;
+  return q;
+}
+real[] linetype(pen p) { return copy(p.dashpat); }
+real offset(pen p) { return p.dashoffset; }
+bool scale(pen p) { return p.dashscale; }
+bool adjust(pen p) { return p.dashadjust; }
+
+// (1) frame 上的分组与 3D 问询（runpicture.in:286/291/778）。分组在 EPS 那一路是
+// `gsave/grestore` 那一层的事，我们的 frame 只攒 drawop，所以这两个是空的 —— 画出来一样。
+void begingroup(frame f) { }
+void endgroup(frame f) { }
+bool is3D(frame f) { return false; }
+
 
 
 

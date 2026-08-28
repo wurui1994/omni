@@ -492,15 +492,33 @@ export function asySig(L, n, at) {
     pfx: L.pfx, unit: L.unit.id, at, dat: at,
   };
   const list = L.funcs.has(nm) ? L.funcs.get(nm) : [];
-  const key = types.join(',');
+  const key = asySigKey({ params: types, ps });
   for (let i = 0; i < list.length; i++) {
-    if (list[i].params.join(',') !== key) continue;
+    if (asySigKey(list[i]) !== key) continue;
     list[i] = cand;
     L.funcs.set(nm, list);
     return;
   }
   list.push(cand);
   L.funcs.set(nm, list);
+}
+
+/**
+ * 签名身份（"同签名是替换"那条比的就是它）。**可变形参那一格算在里面** ——
+ * `int min(... int[] a)` 与 `int min(int[] a)` 是两份，不是一份。
+ * 量出来的理由：base 里 plain_constants.asy:42 就是 `int min(... int[] a) {return min(a);}`,
+ * 体里那个 `min(a)` 调的正是被它"替换"掉的那份（内建的 `min(int[])`）—— 不分开的话
+ * 候选表里只剩可变那一份，`min(a)`（a 是 int[]）就报没有能匹配的签名。
+ * `explicit` 不进签名身份（第二十六刀量过：先 `void p(real)` 再 `void p(explicit real)`
+ * 是替换），形参名与默认值也不进（第二十四刀量过）。
+ */
+export function asySigKey(c) {
+  const out = [];
+  for (let i = 0; i < c.params.length; i++) {
+    const p = c.ps === undefined ? undefined : c.ps[i];
+    out.push(p !== undefined && p.rest === true ? `... ${c.params[i]}` : c.params[i]);
+  }
+  return out.join(',');
 }
 
 /**
@@ -597,9 +615,9 @@ export function asyMethodSig(L, rec, n, mat, at, stat) {
     abi: L.recAlias === null ? 0 : L.recAlias.bi,
   };
   const list = L.funcs.has(key) ? L.funcs.get(key) : [];
-  const sk = types.join(',');
+  const sk = asySigKey({ params: types, ps });
   for (let i = 0; i < list.length; i++) {
-    if (list[i].params.join(',') !== sk) continue;
+    if (asySigKey(list[i]) !== sk) continue;
     list[i] = cand;
     L.funcs.set(key, list);
     return cand;
