@@ -4373,7 +4373,46 @@ curl 断点之后，`--` 那一节自己成一节、方程齐次、解出来正�
 
 数字：`import plain;` 80 → 77。`import graph;` 150 → 149。tests/asy 185 条、
 tests/run.js 91 条全绿。新用例 `cases/109-hobby-dots`（85 行输出）。
-还没做的：方向标记 `{dir}`、`controls`、`tension`、`&`、`?`——都还是明写的 nope。
+还没做的：方向标记 `{dir}`、`controls`、`tension`、`?`——都还是明写的 nope。
+
+### `&` 那两副面孔：路径拼接与**不短路**的 bool 与
+
+`&` 在 asy 里是两件事。一件是 `path & path`（path.cc:1119 的 concat）：接缝那个结的
+`pre` 来自左边、`point`/`post`/`straight` 来自右边，拼出来的是**已经解好**的路径 ——
+`joins` 空着，每段照 nodes 里存的控制点走，不再进 Hobby 求解器。另一件是 `bool & bool`：
+`&&` 短路，`&` 不短路，两边**都要算**（`f() & g()` 会把 `f`、`g` 都跑一遍）。整数没有
+`&`，`5 & 3` 在真 asy 里就是 "no matching function" —— 我们照着也不给。
+
+`p & cycle` 不是走拼接那条，它在 base 里（plain_paths.asy:240）：
+
+```asy
+return straight(p,n-1) ? subpath(p,0,n-1)--cycle :
+  subpath(p,0,n-1)..controls postcontrol(p,n-1) and precontrol(p,n)..cycle;
+```
+
+也就是**末结去掉**，收口那一段接回第 0 个结。原来末段是直线，收口也是直线，控制点要按
+**新的**两端重摆到三等分点；原来是曲线，末段那两个控制点原样搬过来（于是收口那一段的控制点
+可能指着老远的地方 —— 真 asy 也这样，`(0,0)..(1,1)..(2,0)&cycle` 的 `precontrol(·,0)`
+就是 `(2,0.552284749830793)`）。已经闭合的原样回，`n == 0`（单点）走 `p--cycle`，
+`n < 0`（nullpath）回 nullpath。
+
+顺手钉掉一个老毛病：`(5,5)--cycle` 我们原来当**没闭合**回去（`asy__join` 里那句
+`nodes.length < 2` 就退）。真 asy 给的是长度 **1** 的闭合路径，两个控制点都落在这个点上，
+那一段还算直线段 —— `..cycle` 也一样。解方程那套在一个结上没得解，直接摆好。
+
+`cycleToken` 这个空 struct 只为一件事存在：让 base 里 `path operator &(path, cycleToken)`
+那条声明能过。这一层的 `cycle` 是带记号的 path（见 `cyclepath`），所以那条声明永远匹配不上，
+`p & cycle` 落到我们自己那份 `operator &(path, path)` 上，靠 `b.ismark` 分岔。
+
+顺带量到一件事，记在这儿免得下次又去找：我们的 Hobby 解出来的控制点，**有些形状**跟真 asy
+差 1 ulp（末位那个数字），比如 `(1,0)..(2,2)..(3,-1)` 的 `precontrol(·,2)` 我们是
+`-0.131143247666052`、真 asy 是 `...053`。两条腿（`run` 与 `run-llvm`）彼此一致，所以不是
+JS 的 `Math.sin` 与 libm 的差别 —— 更像是 clang 把 knot.cc 里 `-q.post*lastTheta+q.aug`
+这类 `a*b+c` 收成了 FMA（默认 `-ffp-contract=fast`），一次舍入对我们的两次。要对上得在
+prelude 里软实现 fma，代价与收益不成比例，先记下不做；用例挑的是不踩这一格的形状。
+
+数字：`import plain;` 77 → 73。`import graph;` 149 → 148。tests/asy 186 条、
+tests/run.js 91 条全绿。新用例 `cases/110-amp-cycle`。
 
 ## 后果与代价
 

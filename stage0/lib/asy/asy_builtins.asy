@@ -484,6 +484,14 @@ int length(path g) {
 
 int size(path g) { return g.nodes.length; }
 
+// 结点下标：闭合路径上它是绕圈的（asy 的 path::point 对 cycles 取模），开路径上原样
+private int asy__nwrap(path g, int i) {
+  int n = g.nodes.length;
+  if (!g.cyclic || n == 0) return i;
+  int k = i % n;
+  return k < 0 ? k + n : k;
+}
+
 // path.h 里是成员函数，asy 那边是自由函数
 bool cyclic(path g) { return g.cyclic; }
 path[] concat(path[] a, path[] b) {
@@ -493,7 +501,11 @@ path[] concat(path[] a, path[] b) {
   return out;
 }
 
-pair point(path g, int i) { return g.nodes[i].point; }
+pair point(path g, int i) { return g.nodes[asy__nwrap(g, i)].point; }
+
+// path.h 的 precontrol/postcontrol：结点两侧那两个控制点
+pair precontrol(path g, int i) { return g.nodes[asy__nwrap(g, i)].pre; }
+pair postcontrol(path g, int i) { return g.nodes[asy__nwrap(g, i)].post; }
 
 knot knotcopy(knot k) {
   knot j;
@@ -515,17 +527,6 @@ path pathcopy(path g) {
 }
 
 // 结点下标：闭合路径上它是绕圈的（asy 的 path::point 对 cycles 取模），开路径上原样。
-private int asy__nwrap(path g, int i) {
-  int n = g.nodes.length;
-  if (!g.cyclic || n == 0) return i;
-  int k = i % n;
-  return k < 0 ? k + n : k;
-}
-
-// path.h 的 precontrol/postcontrol：结点两侧那两个控制点（下标在闭合路径上绕圈）
-pair precontrol(path g, int i) { return g.nodes[asy__nwrap(g, i)].pre; }
-pair postcontrol(path g, int i) { return g.nodes[asy__nwrap(g, i)].post; }
-
 // path.cc:321 的 path::reverse：结点倒着排（第 i 个取原来的 j = len - i），pre 与 post
 // 互换，而 straight 是挂在**左端**那个结上的，所以倒过来第 i 个结的 straight 取原来
 // 第 j-1 段的那一格。plain_arrows.asy:192/218/260/283、plain_filldraw.asy:41、
@@ -941,7 +942,19 @@ private path asy__join(path a, path b, int kind) {
   asy__normjoins(h);
   // `a--cycle` / `a..cycle`：右边是那个记号，于是闭合
   if (b.ismark) {
-    if (h.nodes.length < 2) return h;
+    if (h.nodes.length == 0) return h;
+    // 只有一个结：`(5,5)--cycle` 是**长度 1** 的闭合路径，两个控制点都落在这个点上，
+    // 那一段还算直线段（`..cycle` 也一样）—— 解方程那套在这儿没得解，直接摆好。
+    if (h.nodes.length == 1) {
+      h.cyclic = true;
+      h.nodes[0].pre = h.nodes[0].point;
+      h.nodes[0].post = h.nodes[0].point;
+      h.nodes[0].straight = true;
+      int[] js;
+      js.push(2);
+      h.joins = js;
+      return h;
+    }
     h.cyclic = true;
     h.joins.push(kind);
     asy__resolve(h);
@@ -966,6 +979,71 @@ path operator --(path a, path b) {
 
 path operator ..(path a, path b) {
   return asy__join(a, b, 1);
+}
+
+// `cycleToken` 是 asy 那边 `cycle` 的类型（C++ 面的一个空类型）。这一层的 `cycle` 是
+// 带记号的 path（见 cyclepath），所以这个名字只是给 base 里
+// `path operator &(path, cycleToken)` 那条声明用的 —— 它永远匹配不上，`p&cycle` 走下面
+// 这份 `operator &(path, path)`。
+struct cycleToken { }
+
+// `p & cycle`：照 plain_paths.asy:240 那份 ——
+//   straight(p,n-1) ? subpath(p,0,n-1)--cycle
+//                   : subpath(p,0,n-1)..controls postcontrol(p,n-1) and precontrol(p,n)..cycle
+// 也就是：末结去掉，收口那一段接到第 0 个结上。原来那段是直线的话，收口也是直线（控制点得按
+// **新的**两端重摆到三等分点）；是曲线的话，末段那两个控制点原样搬过来。已经闭合的原样回。
+private path asy__closepath(path a) {
+  int n = length(a);
+  if (a.nodes.length == 0) return nullpath;
+  if (n == 0) return asy__join(a, cyclepath, 0);   // 一个点：`p--cycle`
+  if (a.cyclic) return pathcopy(a);
+  path h;
+  for (int i = 0; i < n; ++i) h.nodes.push(knotcopy(a.nodes[i]));
+  h.cyclic = true;
+  if (a.nodes[n - 1].straight) {
+    pair z0 = h.nodes[n - 1].point;
+    pair z1 = h.nodes[0].point;
+    pair d = (z1 - z0) / 3;
+    h.nodes[n - 1].post = z0 + d;
+    h.nodes[0].pre = z1 - d;
+  } else {
+    h.nodes[0].pre = a.nodes[n].pre;
+  }
+  return h;                                        // joins 空着：全按"控制点已定"走
+}
+
+// path.cc:1119 的 concat：接缝那个结的 pre 来自左边、point/post/straight 来自右边。
+// 拼出来的是**解好的**路径（joins 空着 = 每段照 nodes 里的控制点走）。
+path operator &(path a, path b) {
+  if (b.ismark) return asy__closepath(a);
+  if (a.nodes.length == 0) return pathcopy(b);
+  if (b.nodes.length == 0) return pathcopy(a);
+  int n1 = length(a);
+  int n2 = length(b);
+  path h;
+  for (int i = 0; i < n1 + n2 + 1; ++i) {
+    knot k;
+    h.nodes.push(k);
+  }
+  h.nodes[0].pre = point(a, 0);
+  int i = 0;
+  for (int j = 0; j < n1; ++j) {
+    h.nodes[i].point = point(a, j);
+    h.nodes[i].straight = a.nodes[asy__nwrap(a, j)].straight;
+    h.nodes[i].post = postcontrol(a, j);
+    h.nodes[i + 1].pre = precontrol(a, j + 1);
+    ++i;
+  }
+  for (int j = 0; j < n2; ++j) {
+    h.nodes[i].point = point(b, j);
+    h.nodes[i].straight = b.nodes[asy__nwrap(b, j)].straight;
+    h.nodes[i].post = postcontrol(b, j);
+    h.nodes[i + 1].pre = precontrol(b, j + 1);
+    ++i;
+  }
+  h.nodes[i].point = point(b, n2);
+  h.nodes[i].post = point(b, n2);
+  return h;
 }
 
 // ---------------------------------------------------------------- bbox
