@@ -1386,6 +1386,80 @@ string[] operator cast(file f) { abort("从 file 读 string[] 还没做（这一
 pair[] operator cast(file f) { abort("从 file 读 pair[] 还没做（这一层没有真的读）"); return new pair[]; }
 triple[] operator cast(file f) { abort("从 file 读 triple[] 还没做（这一层没有真的读）"); return new triple[]; }
 
+// ------------------------------------------------ 数组与标量的算术（逐元素）
+// asy 那边是 builtin.cc:454 的 addOps<T,op>：每个 op 挂四份 —— (标量,标量)、
+// (标量,数组)、(数组,标量)、(数组,数组)。addBasicOps 给 + -，times 给 *，
+// 非整数的还有 /，int 另有 % #（:749-751）。这一层照着补，逐元素。
+// 长度不等时 asy 报 "operation attempted on arrays of different lengths: 2 != 1"
+// 并退 1（量过），所以这里 abort 的话照抄那一句。
+// int[] -> real[] 那条**隐式**转换也在这一族里（builtin.cc 的 arrayToArray）：
+// `sequence(n+1)/n`（plain.asy:203）要靠它才能落到 real[] / real 上。
+private void asy__samelen(int n, int m) {
+  if (n != m) {
+    abort("operation attempted on arrays of different lengths: " + (string) n + " != " + (string) m);
+  }
+}
+real[] operator cast(int[] a) { real[] c; for (int x : a) c.push(x); return c; }
+real[][] operator cast(int[][] a) { real[][] c; for (int[] x : a) c.push(x); return c; }
+
+int[] operator +(int a, int[] b) { int[] c; for (int x : b) c.push(a + x); return c; }
+int[] operator +(int[] a, int b) { int[] c; for (int x : a) c.push(x + b); return c; }
+int[] operator +(int[] a, int[] b) { asy__samelen(a.length, b.length); int[] c; for (int i = 0; i < a.length; ++i) c.push(a[i] + b[i]); return c; }
+int[] operator -(int a, int[] b) { int[] c; for (int x : b) c.push(a - x); return c; }
+int[] operator -(int[] a, int b) { int[] c; for (int x : a) c.push(x - b); return c; }
+int[] operator -(int[] a, int[] b) { asy__samelen(a.length, b.length); int[] c; for (int i = 0; i < a.length; ++i) c.push(a[i] - b[i]); return c; }
+int[] operator *(int a, int[] b) { int[] c; for (int x : b) c.push(a * x); return c; }
+int[] operator *(int[] a, int b) { int[] c; for (int x : a) c.push(x * b); return c; }
+int[] operator *(int[] a, int[] b) { asy__samelen(a.length, b.length); int[] c; for (int i = 0; i < a.length; ++i) c.push(a[i] * b[i]); return c; }
+int[] operator %(int[] a, int b) { int[] c; for (int x : a) c.push(x % b); return c; }
+int[] operator #(int[] a, int b) { int[] c; for (int x : a) c.push(x # b); return c; }
+
+real[] operator +(real a, real[] b) { real[] c; for (real x : b) c.push(a + x); return c; }
+real[] operator +(real[] a, real b) { real[] c; for (real x : a) c.push(x + b); return c; }
+real[] operator +(real[] a, real[] b) { asy__samelen(a.length, b.length); real[] c; for (int i = 0; i < a.length; ++i) c.push(a[i] + b[i]); return c; }
+real[] operator -(real a, real[] b) { real[] c; for (real x : b) c.push(a - x); return c; }
+real[] operator -(real[] a, real b) { real[] c; for (real x : a) c.push(x - b); return c; }
+real[] operator -(real[] a, real[] b) { asy__samelen(a.length, b.length); real[] c; for (int i = 0; i < a.length; ++i) c.push(a[i] - b[i]); return c; }
+real[] operator *(real a, real[] b) { real[] c; for (real x : b) c.push(a * x); return c; }
+real[] operator *(real[] a, real b) { real[] c; for (real x : a) c.push(x * b); return c; }
+real[] operator *(real[] a, real[] b) { asy__samelen(a.length, b.length); real[] c; for (int i = 0; i < a.length; ++i) c.push(a[i] * b[i]); return c; }
+real[] operator /(real a, real[] b) { real[] c; for (real x : b) c.push(a / x); return c; }
+real[] operator /(real[] a, real b) { real[] c; for (real x : a) c.push(x / b); return c; }
+real[] operator /(real[] a, real[] b) { asy__samelen(a.length, b.length); real[] c; for (int i = 0; i < a.length; ++i) c.push(a[i] / b[i]); return c; }
+real[] operator ^(real[] a, real b) { real[] c; for (real x : a) c.push(x ^ b); return c; }
+// `real[] % real` 这一格缺着：这一层的 real 上还没有 `%`（asy 那边是 mathop.h 的
+// portableMod，plain_pens.asy:291 也在等它）。缺一条只会少接，不会多接。
+
+pair[] operator +(pair a, pair[] b) { pair[] c; for (pair x : b) c.push(a + x); return c; }
+pair[] operator +(pair[] a, pair b) { pair[] c; for (pair x : a) c.push(x + b); return c; }
+pair[] operator +(pair[] a, pair[] b) { asy__samelen(a.length, b.length); pair[] c; for (int i = 0; i < a.length; ++i) c.push(a[i] + b[i]); return c; }
+pair[] operator -(pair a, pair[] b) { pair[] c; for (pair x : b) c.push(a - x); return c; }
+pair[] operator -(pair[] a, pair b) { pair[] c; for (pair x : a) c.push(x - b); return c; }
+pair[] operator -(pair[] a, pair[] b) { asy__samelen(a.length, b.length); pair[] c; for (int i = 0; i < a.length; ++i) c.push(a[i] - b[i]); return c; }
+pair[] operator *(pair a, pair[] b) { pair[] c; for (pair x : b) c.push(a * x); return c; }
+pair[] operator *(pair[] a, pair b) { pair[] c; for (pair x : a) c.push(x * b); return c; }
+pair[] operator *(pair[] a, pair[] b) { asy__samelen(a.length, b.length); pair[] c; for (int i = 0; i < a.length; ++i) c.push(a[i] * b[i]); return c; }
+pair[] operator /(pair[] a, pair b) { pair[] c; for (pair x : a) c.push(x / b); return c; }
+pair[] operator /(pair a, pair[] b) { pair[] c; for (pair x : b) c.push(a / x); return c; }
+pair[] operator /(pair[] a, pair[] b) { asy__samelen(a.length, b.length); pair[] c; for (int i = 0; i < a.length; ++i) c.push(a[i] / b[i]); return c; }
+
+triple[] operator +(triple a, triple[] b) { triple[] c; for (triple x : b) c.push(a + x); return c; }
+triple[] operator +(triple[] a, triple b) { triple[] c; for (triple x : a) c.push(x + b); return c; }
+triple[] operator +(triple[] a, triple[] b) { asy__samelen(a.length, b.length); triple[] c; for (int i = 0; i < a.length; ++i) c.push(a[i] + b[i]); return c; }
+triple[] operator -(triple a, triple[] b) { triple[] c; for (triple x : b) c.push(a - x); return c; }
+triple[] operator -(triple[] a, triple b) { triple[] c; for (triple x : a) c.push(x - b); return c; }
+triple[] operator -(triple[] a, triple[] b) { asy__samelen(a.length, b.length); triple[] c; for (int i = 0; i < a.length; ++i) c.push(a[i] - b[i]); return c; }
+triple[] operator *(real a, triple[] b) { triple[] c; for (triple x : b) c.push(a * x); return c; }
+triple[] operator *(triple[] a, real b) { triple[] c; for (triple x : a) c.push(x * b); return c; }
+triple[] operator /(triple[] a, real b) { triple[] c; for (triple x : a) c.push(x / b); return c; }
+
+// 一元的 `-` 也有数组那一份（asy 里 `write(-a)` 逐元素取负，量过）
+int[] operator -(int[] a) { int[] c; for (int x : a) c.push(-x); return c; }
+real[] operator -(real[] a) { real[] c; for (real x : a) c.push(-x); return c; }
+pair[] operator -(pair[] a) { pair[] c; for (pair x : a) c.push(-x); return c; }
+triple[] operator -(triple[] a) { triple[] c; for (triple x : a) c.push(-x); return c; }
+
+
 // (1) `transform * path`：逐个结点搬（transform 是仿射，pre/point/post 都搬）。
 // runpath.in 的 `path operator *(transform t, path p)` 就是这件事。
 path operator *(transform t, path g) {

@@ -4190,6 +4190,29 @@ Arrow，而同名的**变量**（`:443` 的 `Arrow=Arrow()`）确实在后面。
 tests/asy 177 条、tests/run.js 91 条全绿。新用例
 `cases/101-fn-before-samename-var`（含重载集那一支）。
 
+### 数组与标量的算术：逐元素那一族，以及 `int[] → real[]`
+
+`builtin.cc:454` 的 `addOps<T,op>` 每个算符挂**四份**：(标量,标量)、(标量,数组)、
+(数组,标量)、(数组,数组)。`addBasicOps` 给 `+ -`、`times` 给 `*`、非整数的还有 `/`，
+int 另有 `% #`（`:749-751`），一元的 `-` 也有数组那一份。plain 里五处在等它：
+`plain.asy:153` 的 `n+sequence(m-n+1)`、`:159` 的 `n+skip*sequence(…)`、`:203` 的
+`a+sequence(n+1)/n*(b-a)`、`plain_Label.asy:33` 的 `u/sqrt(norm2)`、
+`plain_prethree.asy:138` 的 `abs(c-target)`。
+
+写在 prelude 里（int/real/pair/triple 各一套，一行一条），因为它们就是普通的
+`operator` 重载 —— 这一层的算符重载（第四十刀）本来就能声明数组类型的形参，前端一行没改。
+长度不等时照抄 asy 那句 `operation attempted on arrays of different lengths: 2 != 1`。
+
+同一族里还有一条**隐式**转换 `int[] → real[]`（`arrayToArray`）：`sequence(n+1)/n` 得先
+变成 `real[] / real` 才落得下去（整数那一套里没有 `/`）。`int[][] → real[][]` 一并补上。
+
+两处缺着，都是"少接不多接"：`real[] % real`（这一层的 real 上还没有 `%`，asy 那边是
+`mathop.h` 的 portableMod，`plain_pens.asy:291` 也在等它）、以及二维数组那几条
+（`addOpArray2` / `addArray2Op`）。
+
+数字：`import plain;` 95 → 92。`import graph;` 152 不动。tests/asy 178 条、
+tests/run.js 91 条全绿。新用例 `cases/102-array-scalar-ops`（20 行逐条与真 asy 逐字节比）。
+
 ## 后果与代价
 
 
