@@ -17,7 +17,7 @@ import {
 } from './types.js';
 import { ZERO } from './runtime.js';
 import { asyStmt, asyBody } from './stmts.js';
-import { asyExpr, asyCoerce } from './exprs.js';
+import { asyExpr, asyCoerce, asyCandFnType } from './exprs.js';
 import { asyModLoad, asyModMerge, asyModStmt } from './modules.js';
 
 /* ------------------------------------------------------------ 文件与函数 */
@@ -874,6 +874,67 @@ export function asyFunc(L, n) {
 }
 
 /**
+ * 这个单元里被**赋值**过的裸名字（任意深度，闭包体里也算）。
+ * 用处见 asyFnSlots：asy 的函数声明其实就是"一格函数类型的变量"。
+ */
+function asyAssignedNames(node, out) {
+  if (!isList(node)) return out;
+  if (head(node) === 'assign') {
+    const lhs = node.items[1];
+    if (isList(lhs) && head(lhs) === 'name-exp') {
+      const nd = lhs.items[1];
+      if (isList(nd) && head(nd) === 'name' && isAtom(nd.items[1])) out.add(nd.items[1].value);
+    }
+  }
+  for (const it of node.items) asyAssignedNames(it, out);
+  return out;
+}
+
+/**
+ * 被赋值过的**函数名**：另开一格文件级变量。
+ *
+ * asy 里 `void restore() {…}` 声明的是一格 `void()` 类型的**变量**，初值是那个函数，
+ * 所以 `restore=r;` 是合法的（plain.asy:71 声明、:106 与 :113 赋值；restoredefaults
+ * 同样）。我们的函数是一个没有槽的 `(fn …)`，名字上没处可写。
+ *
+ * 办法：给这种名字在**函数声明那一行**registers 一格文件级变量（类型就是这个函数的类型），
+ * 函数体照旧发。读、调用、赋值都会落到 gvar 那一档上 —— 那一档在 nameOf 与 call 里都排在
+ * 候选表**前面**，所以不用再动别处。填这一格的 `(set …)` 由 bodyPass 在那一行发（见那边）。
+ *
+ * 只认**独一份**的候选：重载了的话"赋的是哪一格"要靠类型定案，那是另一刀。
+ */
+function asyFnSlots(L, u, rs) {
+  const assigned = new Set();
+  for (const r of rs) asyAssignedNames(r, assigned);
+  for (const nm of assigned) {
+    if (!L.funcs.has(nm)) continue;
+    const list = L.funcs.get(nm);
+    if (list.length !== 1) continue;
+    const c = list[0];
+    if (c.unit !== u.id || c.slot !== undefined || c.inRec !== undefined) continue;
+    const ty = asyCandFnType(L, c);
+    if (ty === null) continue;
+    const g = { sym: `asy__fs${L.gdecls.length}_${nm}`, type: ty, at: c.at, ok: true };
+    const gl = L.globals.has(nm) ? L.globals.get(nm) : [];
+    gl.push(g);
+    gl.sort((a, b) => a.at - b.at);
+    L.globals.set(nm, gl);
+    L.gdecls.push(g);
+    c.slot = g;
+  }
+}
+
+/** 这一份 fundec 声明的名字有没有那一格（bodyPass 用它发 `(set …)`） */
+export function asyFnSlotOf(L, n) {
+  const nm = isAtom(n.items[2]) ? n.items[2].value : null;
+  if (nm === null || !L.funcs.has(nm)) return null;
+  for (const c of L.funcs.get(nm)) {
+    if (c.node === n && c.slot !== undefined) return c;
+  }
+  return null;
+}
+
+/**
  * 声明遍：一个单元里的记录、模块声明、函数签名、文件级变量名（第二十五刀把它从 run()
  * 里分出来 —— 每个单元都要走一遍这个）。
  * 记录与模块声明在**同一遍**里按下标走：`import` 进来的 struct 要能当后面那些
@@ -931,6 +992,7 @@ export function asyDeclPass(L, u) {
     if (head(r) === 'fundec') asySig(L, r, off + i);
     else if (head(r) === 'vardec') asyGlobalNames(L, r, off + i);
   }
+  asyFnSlots(L, u, rs);
   // 重载的名字在这里定：核心方言没有重载，所以第 2 个及以后的候选要改名。
   // 第一个保留原名 —— 绝大多数函数不重载，输出的文本因此跟以前一样好读。
   // 数的只有**这个单元自己的**候选：import 进来的那些名字在它们自己的单元里早定好了。
@@ -988,7 +1050,13 @@ export function asyBodyPass(L, u, fns) {
       continue;
     }
     if (!isList(r)) continue;
-    if (head(r) === 'fundec') continue;
+    if (head(r) === 'fundec') {
+      // 被赋值过的函数名那一格（见 asyFnSlots）：在**函数声明那一行**把它填上。
+      // 位置是照抄 asy 的 —— 那边这一行本来就是"一格变量的声明加初值"。
+      const c = asyFnSlotOf(L, r);
+      if (c !== null) main.push(`(set ${c.slot.sym} (fnref ${c.sym}))`);
+      continue;
+    }
     if (head(r) === 'recorddec') {
       // 声明遍收过了。只有 `static` 那几条要在这里发一句初值（见 staticInit）
       for (const x of asyStaticInit(L, r, off + i)) main.push(x);

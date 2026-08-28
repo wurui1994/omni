@@ -4457,6 +4457,33 @@ tests/run.js 91 条全绿。新用例 `cases/110-amp-cycle`。
 数字：`import plain;` 73 → 67。`import graph;` 148 全程没动。tests/asy 188 条、
 tests/run.js 91 条全绿。新用例 `cases/111-inside-array` 与 `strict/cond-cast-branch`。
 
+### 函数名其实是一格变量：`restore = r`
+
+asy 里 `void restore() {…}` 声明的**是一格 `void()` 类型的变量**，初值是那个函数体。所以
+plain.asy 里这几句都合法：`:100` 的 `restoreThunk r=restore;`、`:106` 的 `restore=r;`、
+`:113` 的 `return restore=buildRestoreThunk();`（restoredefaults 同样，`:132`/`:139`）。
+save/restore 那一套就是这么搭的 —— 每次 save 把当前的 restore 存进闭包、再把 restore 换成
+"还原并把旧的装回去"的那一份。我们的函数是一个没有槽的 `(fn …)`，名字上没处可写，于是这三处
+一直报"未声明的变量"。
+
+补法是照 asy 的模型来：声明遍先扫一遍这个单元里**被赋值过的裸名字**（任意深度，闭包体里也
+算），凡是这样的名字又恰好只有**独一份**函数候选的，就在**那一行**另开一格文件级变量
+（`asy__fs<N>_<名字>`，类型就是这个函数的类型）。函数体照旧发；填这一格的 `(set … (fnref …))`
+由正文遍在函数声明那一行发出去 —— 位置是照抄的，那边这一行本来就是"声明加初值"。
+
+不用改别处：读（nameOf）与调用（call）里 gvar 那一档都排在候选表**前面**，赋值那一档本来就
+认文件级变量。重载了的名字**不给**这一格：赋的是哪一格要靠类型定案，那是另一刀。
+
+同一刀里把"函数值那一格不整片遮住同名函数"补到另外两档上 —— 捕获进闭包的与文件级的。这两档
+都有副作用或先后次序，不好"试了再回滚"，所以先按**给了几个实参**筛一遍（`asyArityBad`）。
+原型是 plain.asy:125 那个 `exitfcn atupdate=atupdate();`，:130 的 `atupdate(atupdate)`
+里外面那个是内建的 `void atupdate(exitfcn)`。
+
+数字：`import plain;` 67 → 64。`import graph;` 148 没动。tests/asy 189 条、tests/run.js
+91 条全绿。新用例 `cases/112-fn-name-slot`（连"一层套一层再依次还原"那个形状也钉上了）。
+`plain_debugger.asy:86` 那个 `debugger` 还是报"未声明的变量" —— 它的声明用了类型 `code`，
+那一格先被 nope 掉了，所以根本没有候选可以挂。
+
 ## 后果与代价
 
 

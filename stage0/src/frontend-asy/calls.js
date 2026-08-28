@@ -210,7 +210,11 @@ export function asyCall(L, n) {
   if (L.cap !== null && L.cap !== undefined) {
     let ot = null;
     for (const s of L.cap.outer) if (s.has(nm)) ot = s.get(nm);
-    if (ot !== null && asyIsFn(ot)) {
+    // 这一格也不整片遮住同名的函数（同 lookup 那一档的道理）。捕获是有副作用的
+    // （capOf 会往闭包上添一格），所以这里不"试了再回滚"，而是先按**给了几个**筛一遍：
+    // 原型是 plain.asy:125 那个 `exitfcn atupdate=atupdate();`，130 行的
+    // `atupdate(atupdate)` 里外面那个是内建的 `void atupdate(exitfcn)`。
+    if (ot !== null && asyIsFn(ot) && !asyArityBad(L, n, ot, nm)) {
       const cv = L.capOf(n, nm);
       if (cv === null) return null;
       if (cv.code === undefined) return null;   // CAP_BAD：诊断已发
@@ -227,7 +231,8 @@ export function asyCall(L, n) {
   // 不排除就会把它当成间接调用，然后报"要 string(real)，这里是 string"（真的量到了，
   // graph 一度从 183 涨到 186）。
   const gv = L.gvarHere(nm);
-  if (gv !== null && gv !== L.gvarAt(nm) && gv.ok && asyIsFn(gv.type)) {
+  if (gv !== null && gv !== L.gvarAt(nm) && gv.ok && asyIsFn(gv.type)
+      && !asyArityBad(L, n, gv.type, nm)) {
     return asyFnValCall(L, n, nm, gv.type, `(var ${gv.sym})`);
   }
   const vis = asyVisible(L, nm);
@@ -311,10 +316,25 @@ export function asyCall(L, n) {
 }
 
 /**
+ * 这一格函数值**明显接不住**这次调用（只数个数，不求实参），而且外面还有同名的函数
+ * 可以接。用在捕获与文件级那两档 —— 它们都有副作用或先后次序，不好"试了再回滚"。
+ * 形状里带名字实参或带展开时回 false：那种情形照旧交给 fnValCall 自己去报。
+ */
+function asyArityBad(L, n, ty, nm) {
+  if (asyVisible(L, nm).length === 0) return false;
+  const s = asyFnSplit(ty);
+  if (s === null) return false;
+  let alist = n.items[2];
+  if (isList(alist) && head(alist) === 'args-rest') return false;
+  const list = alist === undefined || alist === null ? [] : L.flat(alist, 'args');
+  for (const a of list) if (!isList(a) || head(a) !== 'arg') return false;
+  return list.length !== s.params.length;
+}
+
+/**
  * 内建里**自己求实参**的那几族，按名字再试一次（诊断与前置语句都能回滚）。
  * 不是这几族的名字回 `undefined`（与"试了但接不住"分得开）。
- */
-function asyNamedBuiltin(L, n, nm) {
+ */function asyNamedBuiltin(L, n, nm) {
   const fam = nm === 'length' || nm === 'string' || ASY_STRFN.has(nm)
     || ASY_PAIRFN.has(nm) || L.math.has(nm);
   if (!fam || !Array.isArray(L.pre)) return undefined;
