@@ -1687,10 +1687,30 @@ export function asyCmpCode(L, n, op, a, b) {
   return { code: `(bin "${op}" ${a.code} ${b.code})`, type: 'bool' };
 }
 
+/**
+ * `v` 上挂着同名函数的候选（`shadowFns`，见 nameOf）而**对面**是个函数类型：
+ * 按对面的类型挑同型的一份，原地换掉。graph.asy 里 `scale.T == identity` 就是这一格 ——
+ * 右边那个 `identity` 是 plain_constants.asy:39 那格 `transform` 变量，而左边是
+ * `real(real)`；asy 按签名查，拿的是函数 `real identity(real)` 那一份。
+ * 挑不到就什么都不做，让调用方按原来的类型报错。
+ */
+function asyShadowMatch(L, v, other) {
+  if (v.shadowFns === undefined || v.type === other.type || !asyIsFn(other.type)) return;
+  for (const c of v.shadowFns) {
+    if (asyCandFnType(L, c) === other.type) {
+      v.code = `(fnref ${c.sym})`;
+      v.type = other.type;
+      return;
+    }
+  }
+}
+
 export function asyCompare(L, n, op) {
   const a = asyExpr(L, n.items[2]);
   const b = asyExpr(L, n.items[3]);
   if (a === null || b === null) return null;
+  asyShadowMatch(L, a, b);
+  asyShadowMatch(L, b, a);
   // 两边**都是** `null` 时先拦掉，拦在用户重载之前。asy 那边报的是歧义（每个 struct 都
   // 有一份 `operator ==`，全都能匹配 —— 量过那张候选表几十行）。我们的 struct 没有
   // 自动生成的那一份，于是"用户写过的那一份"会变成**唯一**候选、被挑中，`<null>`
@@ -1736,6 +1756,9 @@ export function asyCond(L, n) {
   const bPre = L.pre;
   L.pre = outer;
   if (c === null || a === null || b === null) return null;
+  // 同名的变量遮住了函数名：按对面那一支的类型挑一挑（与 compare 那边同一条，见 shadowMatch）
+  asyShadowMatch(L, a, b);
+  asyShadowMatch(L, b, a);
   const t = asyPromote(L, a, b);
   if (t === null) return L.err(n, `\`? :\` 两支要同型：真支是 ${a.type}，假支是 ${b.type}`);
   if (t === 'void') return L.err(n, '`? :` 的两支不能是 void');

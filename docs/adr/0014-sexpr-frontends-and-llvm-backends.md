@@ -5021,6 +5021,37 @@ prelude 里再垫一份 `void shipout()`，`shipout()` 就真的 ambiguous 了�
 给方法赋值（asy 的方法就是一格函数值字段）、以及"调一个任意表达式"
 （`(above ? add : prepend)(dest,src)` 要拿调用处的实参类型去定一整个条件表达式的重载）。
 
+### autoplain 排在内建面之后，与 graph 那一批余量
+
+上一节的 autoplain 只到 99 —— 并表的位置错了。`asyBuiltinsIn` 是在 `asyDeclPass` **开头**
+跑的，而那时候 autoplain 已经并完了：内建面那份 `struct picture`（垫子）位置更靠后，
+按 recVis 的 `had.at <= at` 又把 plain 的真 `picture` 盖回去了 —— graph 里
+`pic.scale` / `pic.add(…)` / `pic.userMin()` 那三十来条就是这么来的。
+
+改法是把并表挪进 `asyDeclPass`，紧跟在 `asyBuiltinsIn` **后面**、用**同一个** `off`：
+```js
+  asyBuiltinsIn(L, u, off);
+  asyAutoPlainIn(L, u, off);
+```
+`asyModLoadAs` 那边只留一个记号（`u.aplain`）。plain 的初始化函数记在 `u.pi`，正文最前面
+紧跟内建面那一句发出去（`u.bi` 之后）。graph 148 → 99 → 60。
+
+余下那一批是 graph/math 裸用的 run*.in 函数，照老规矩分两档写进 prelude：答得出的写正文
+（`log10`、`search(string[],string)`、`norm(real[])` / `norm(real[][])`、`find(bool[],int)`、
+`piecewisestraight`），算法重而 import 时用不到的体是 abort（`cubicroots`、`solve` 两支、
+`tridiagonal`、`_findroot`、`fft`）。60 → 53。
+
+再有六条是"同名的变量遮住函数名"在 `==` 上的那一格：`scale.T == identity` 左边是
+`real(real)`、右边是 plain_constants.asy:39 那格 `transform` 变量。第六十三刀的
+`shadowFns` 机关只挂在 coerce 与 fit 上，比较与 `? :` 这两处是**两边互相定型**，没有
+"目标类型"可问 —— 加一条 `asyShadowMatch(L, a, b)`：一边挂着候选、另一边是函数类型时，
+按对面的类型挑同型的一份，原地换掉；挑不到就什么都不做，照旧报原来那句。53 → 47。
+
+数字：`import plain;` 16（没动），`import graph;` 148 → 47。tests/asy 207 条、
+tests/run.js 91 条全绿。graph 剩下那 47 条里成堆的是：可变形参的函数值
+（`interpolate` = `path(... path[])`，`Spline` / `Straight` / `Hermite` / `join` 那一族）、
+`axis(picture, void(picture,axisT))`、`.value` 字段，以及 plain 那 16 条漏下来的连带。
+
 ## 后果与代价
 
 

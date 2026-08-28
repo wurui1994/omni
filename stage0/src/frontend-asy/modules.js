@@ -98,19 +98,9 @@ export function asyModLoadAs(L, node, name, key, tpl) {
   // 类型在这一层就是字符串，所以"替换类型参数"这件事一条别名就够了。
   if (tpl !== null) for (const [pn, pt] of tpl) L.tyAlias.set(pn, [{ t: pt, at: -1 }]);
   // asy 的 **autoplain**（settings.cc 的 autoplain）：每个文件开头都隐式 `import plain;`。
-  // graph.asy 裸用 `Label` / `ticks` / `scaleT` / `arrowbar` 就靠这一条 —— 它自己一句
-  // `import plain;` 都没有。位置 -1：整份文件从第 0 项起就看得见。
-  // 正在加载 plain 自己（plain.asy 与它 import 的那一串 plain_*）时不做，不然就循环了。
-  if (asyAutoPlain(L, name)) {
-    // 找不到 plain 时**不出声**：这一层的模块是按 CWD 找的，tests/asy/cases 里那些
-    // 自己写的小模块旁边没有 plain.asy，隐式的这一句不该把它们判死。
-    const mark = L.diags.mark();
-    const pu = asyModLoadAs(L, node, 'plain', 'plain', null);
-    // 位置 0：整份文件从第 0 项起就看得见，而且 plain 的 `struct picture` 要**盖住**
-    // 内建面那个同名的垫子（recVis 那边的判据是 `had.at <= at`，所以不能用 -1）。
-    if (pu !== null) asyModMerge(L, node, pu, 0, null);
-    else L.diags.rollback(mark);
-  }
+  // 真正的并表在 declPass 里（asyAutoPlainIn）—— 得排在内建面那一并**之后**，
+  // 不然 plain 的 `struct picture` 又被内建面那个同名的垫子盖回去。
+  u.aplain = asyAutoPlain(L, name);
   L.declPass(u);
   L.unitOut(prev);
   L.loading.pop();

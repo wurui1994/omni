@@ -1006,10 +1006,38 @@ export function asyBuiltinsIn(L, u, off) {
   L.at = keep;
 }
 
-export function asyDeclPass(L, u) {
-  const rs = u.rs;
+/**
+ * asy 的 **autoplain**（settings.cc 的 autoplain）：每个文件开头都隐式 `import plain;`。
+ * graph.asy 裸用 `Label` / `ticks` / `scaleT` / `arrowbar` 就靠这一条 —— 它自己一句
+ * `import plain;` 都没有。
+ *
+ * 位置与内建面那一并**同一个** `off`，而且排在它后面：recVis 的判据是 `had.at <= at`，
+ * 所以 plain 的 `struct picture` 正好盖住内建面那个同名的垫子（反过来就盖不住 ——
+ * graph 里 `pic.scale` / `pic.add(…)` 那三十来条就是这么来的）。
+ *
+ * 找不到 plain 时**不出声**（诊断回滚）：这一层的模块是按 CWD 找的，tests/asy/cases 里
+ * 那些自己写的小模块旁边没有 plain.asy，隐式的这一句不该把它们判死。
+ */
+export function asyAutoPlainIn(L, u, off) {
+  if (u.aplain !== true || u.pi !== undefined) return;
+  u.pi = null;
+  const keep = L.at;
+  L.at = off;
+  const mark = L.diags.mark();
+  const p = asyModLoad(L, null, 'plain');
+  if (p !== null) {
+    asyModMerge(L, null, p, off, null);
+    u.pi = p.init;
+  } else {
+    L.diags.rollback(mark);
+  }
+  L.at = keep;
+}
+
+export function asyDeclPass(L, u) {  const rs = u.rs;
   const off = L.atOff;
   asyBuiltinsIn(L, u, off);
+  asyAutoPlainIn(L, u, off);
   for (let i = 0; i < rs.length; i++) {
     const r = asyUnwrapMod(L, rs[i]);
     if (!isList(r)) continue;
@@ -1073,6 +1101,8 @@ export function asyBodyPass(L, u, fns) {
   const main = [];
   // 隐式引进来的内建面（builtinsIn）：体在这个单元的最前面跑
   if (u.bi !== undefined && u.bi !== null) main.push(`(expr (call ${u.bi}))`);
+  // 隐式的 `import plain;`（autoPlainIn）：体也在最前面跑，排在内建面之后
+  if (u.pi !== undefined && u.pi !== null) main.push(`(expr (call ${u.pi}))`);
   for (let i = 0; i < u.rs.length; i++) {
     const r = asyUnwrapMod(L, u.rs[i]);
     L.at = off + i;

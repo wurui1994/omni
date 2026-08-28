@@ -2943,6 +2943,66 @@ bool inside(path[] g, pair z, pen fillrule=currentpen) {
 path[] _strokepath(path g, pen p=currentpen) {
   abort("_strokepath 还没做（真 asy 是绕 gs 走一趟）"); return new path[];
 }
+// ---------------- graph/math 那一批余量（第六十七刀）
+// 答得出的照 run*.in 的定义写出来，算法重而 import 时又用不到的体是 abort（签名在，
+// graph.asy / math.asy 那几句才降得下来）。
+real log10(real x) { return log(x) / log(10); }
+// search 的字符串那一份（二元的实数那份在上面）：同一套二分
+int search(string[] a, string key) {
+  int lo = -1;
+  int hi = a.length;
+  while (hi - lo > 1) {
+    int mid = (lo + hi) # 2;
+    if (a[mid] <= key) lo = mid; else hi = mid;
+  }
+  return lo;
+}
+// norm（runarray.in:2137/2148）：各元素绝对值的最大者
+real norm(real[] a) {
+  real m = 0;
+  for (int i = 0; i < a.length; ++i) { real v = fabs(a[i]); if (v > m) m = v; }
+  return m;
+}
+real norm(real[][] a) {
+  real m = 0;
+  for (int i = 0; i < a.length; ++i) { real v = norm(a[i]); if (v > m) m = v; }
+  return m;
+}
+// find（runarray.in:1190）：第 n 个为真的下标（n 为负从后往前数），没有给 -1
+int find(bool[] a, int n=1) {
+  if (n > 0) {
+    for (int i = 0; i < a.length; ++i) { if (a[i]) { --n; if (n == 0) return i; } }
+    return -1;
+  }
+  if (n < 0) {
+    for (int i = a.length - 1; i >= 0; --i) { if (a[i]) { ++n; if (n == 0) return i; } }
+  }
+  return -1;
+}
+// piecewisestraight（runpath.in:162）：每一段都是直线
+bool piecewisestraight(path p) {
+  int n = length(p);
+  for (int i = 0; i < n; ++i) if (!straight(p, i)) return false;
+  return true;
+}
+real[] cubicroots(real a, real b, real c, real d) {
+  abort("cubicroots 还没做（runmath.in:333 那一段解析解）"); return new real[];
+}
+real[] solve(real[][] a, real[] b, bool warn=true) {
+  abort("solve 还没做（runarray.in:1267 的 LU 分解）"); return new real[];
+}
+real[][] solve(real[][] a, real[][] b, bool warn=true) {
+  abort("solve 还没做（runarray.in:1320 的 LU 分解）"); return new real[][];
+}
+real[] tridiagonal(real[] a, real[] b, real[] c, real[] f) {
+  abort("tridiagonal 还没做（runarray.in:1524 的循环三对角解法）"); return new real[];
+}
+real _findroot(real f(real), real a, real b, real tolerance, real fa, real fb) {
+  abort("_findroot 还没做（runarray.in:1758 的 Brent 法）"); return 0;
+}
+pair[] fft(pair[] a, int sign=1) {
+  abort("fft 还没做（runarray.in:1867 走的是 FFTW）"); return new pair[];
+}
 // 字形轮廓那两条（runlabel.in:243/349）：真 asy 一条走 TeX、一条读字体文件。
 // 这一层没有那两路，所以体是 abort —— 签名在，plain_Label.asy:664 那一句才降得下来。
 path[] _texpath(string s, pen p) {
