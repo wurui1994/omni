@@ -75,6 +75,17 @@ export function asyNameOf(L, n, nm) {
   }
   const f = L.selfField(nm);
   if (f !== null) return { code: `(fld (var this) ${nm})`, type: f.type };
+  // struct 体里把**自己的方法**取出来当值（第四十三刀）：`addPath=addPathToEmptyArray;`
+  // （plain_bounds.asy:247）。接收者是隐含的 this。位置照 selfField：成员那一档里，
+  // 字段之后、文件级之前。static 的体里没有接收者，所以那边不问这一条。
+  if (L.self !== null && L.self !== undefined && L.self.stat !== true) {
+    const ms = L.visibleMethods(L.self.rec, nm);
+    if (ms.length === 1) return L.methodVal(n, L.self.rec, ms[0], '(var this)');
+    if (ms.length > 1) {
+      return L.nope(n, `把**重载**的方法 '${L.self.rec.name}.${nm}' 当值取出来`
+        + `（有 ${ms.length} 个候选，是哪一个要靠目标类型定案）`);
+    }
+  }
   // 方法体里裸的 static 名字（量过 `int get() {return x + n;}` 里的 n 就是那一格）。
   // 位置照 selfField：成员那一档里，字段之后、文件级之前。
   if (L.self !== null && L.self !== undefined) {
@@ -535,6 +546,10 @@ export function asyMember(L, n, recv, nm) {
     // `a.n = 7` 之后 `b.n` 也是 7）。放在字段前面问：static 与字段同名在 staticDec 里拦掉了。
     const s = L.statOf(recv.type, nm);
     if (s !== null) return { code: `(var ${s.sym})`, type: s.type };
+    // `a.get`（不是 `a.get()`）：名字是个**方法**，取出来是绑住接收者的闭包（第四十三刀）。
+    // 字段之后问 —— 取值这一边一直是字段先赢。回 undefined 就是"不是方法"。
+    const mv = L.methodValAt(n, recv, nm);
+    if (mv !== undefined) return mv;
     const f = L.recField(n, recv.type, nm);
     return f === null ? null : { code: `(fld ${recv.code} ${nm})`, type: f.type };
   }

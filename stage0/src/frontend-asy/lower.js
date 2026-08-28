@@ -133,9 +133,6 @@
 // 存一串是因为同一个名字可以 typedef 多次，而名字解析是顺序的，见 aliasAt）。
 //
 // 不支持（见到就报错，报错里说清是哪一条）：标准库模块（`import graph;`）、
-// 把**方法**取出来当值（`int f() = a.get;` —— asy 收，那是绑住接收者的闭包；
-// 我们的方法是"多一个 this 形参的普通函数"，绑接收者要现造闭包。recField 里那句 nope，
-// `bad/fn-value` 钉着）、
 // 给切片赋值（`a[0:2] = b`）、
 // 字符串的 `reverse`（asy 是**按字节**倒的，而 Omni 的 string 是 UTF-8 字节序列
 // （ADR-0005）—— 非 ASCII 倒过来在 C 那条腿上是一串坏字节，在 JS 那条腿上要看
@@ -144,10 +141,8 @@
 // 还没量全；`split` 要 `string[]` 的返回值，那条路还没走通）、
 // 循环条件里的 `?:`（摊出来的赋值只能落在循环外面，条件就只
 // 算一次了 —— 语义会变，所以报错而不是悄悄换个意思）、
-// struct 的这三条边界（每条都有 bad/ 用例钉着）：**自引用**字段
+// struct 的这两条边界（每条都有 bad/ 用例钉着）：**自引用**字段
 // （`struct A { A next; }` —— asy 收，我们不收，见下面的差别一节）、
-// 把方法**当值**取出来（`int f() = a.get;` —— asy 收，那是绑住接收者的闭包；
-// 我们的方法是"多一个 this 形参的普通函数"，而核心方言里函数不是值）、
 // `operator init` 的另两种形态（**带形参**的文件级那份 —— asy 收这个声明，但它不是隐式
 // 转换，量不出能拿它干什么就不猜；以及 struct 体里**非 void** 的那份 —— asy 自己也不给
 // 它构造调用）、
@@ -362,6 +357,8 @@ class AsyLower {
     // 按声明顺序攒起来的 `(global sym 类型)`，最后发到模块层
     this.gdecls = [];
     this.probeMsg = null;
+    // 方法当值那一族的包装（第四十三刀）：方法符号 -> `(cfn …)` 的名字。一个方法一份。
+    this.mvals = new Map();
     // 正在降级**文件级**的语句（`(main …)` 那一层）。vardec 要靠它分清
     // "这是个全局"还是"这是 main 里某个块的局部量"。
     this.fileLevel = false;
@@ -998,7 +995,8 @@ class AsyLower {
    * 对象。成员名的可见性按**成员顺序**裁（量过：用后面声明的字段/方法报 "no matching
    * variable"），而 struct 的成员**遮住**同名的文件级名字（量过：文件里有 `int who()`、
    * struct 里也有 `who()`，方法体里调到的是后者）。
-   * 门外的一条：把方法当值取出来（`int f() = a.late;` asy 收）—— 那要闭包（绑住接收者）。
+   * 把方法当值取出来（`int f() = a.late;`）是第四十三刀：现造一个只抓接收者的闭包，
+   * 见 methodVal。
    */
   /**
    * 这个类型节点是不是**光一个 `var`**（第四十一刀）。asy 的 `var` 是"从初值推"，
@@ -1312,19 +1310,80 @@ class AsyLower {
     return out;
   }
 
+  /**
+   * 把**方法**取出来当值（第四十三刀）：`int f() = a.get;`、struct 体里的
+   * `addPath=addPathToEmptyArray;`（plain_bounds.asy:247 就是这一句）。
+   *
+   * asy 那边它是**绑住接收者的闭包**。量过：`int f() = a.get;` 之后改 `a.n`，再调
+   * `f()` 回的是新值 —— 绑的是那个对象，不是取出来那一刻的字段值。而我们的方法是
+   * "多一个 this 形参的普通函数"，所以这里现造一个只抓接收者的闭包：ADR-0010 那套
+   * `(cfn …)` + `(mkclo …)`，与匿名函数同一副零件。struct 是引用语义，`(mkclo …)`
+   * 按值抓的是那个引用，于是"改字段看得见"这条自然对上了（不是模拟的）。
+   *
+   * 一个方法只生一份包装（`mvals` 那张表，与数组工厂 `arrGen` 同一条路子）。
+   * 门外的两条：带默认值的方法（函数值没有默认值）、可变形参的方法（包装那一层要
+   * 把打好的数组原样转手，还没量过）。
+   */
+  methodVal(node, rec, cand, recvCode) {
+    const mn = cand.base === undefined ? cand.sym : cand.base;
+    for (const p of cand.ps) {
+      if (p.def !== null && p.def !== undefined) {
+        return this.nope(node, `把带默认值的方法 '${rec.name}.${mn}' 当值取出来（函数值没有默认值）`);
+      }
+      if (p.rest === true) {
+        return this.nope(node, `把可变形参的方法 '${rec.name}.${mn}' 当值取出来`);
+      }
+    }
+    let w = this.mvals.get(cand.sym);
+    if (w === undefined) {
+      w = `asy__mv${this.mvals.size}_${cand.sym}`;
+      const params = [];
+      const args = ['(cap asy__recv)'];
+      for (const p of cand.ps) {
+        params.push(`(${p.name} ${asyCore(p.type)})`);
+        args.push(`(var ${p.name})`);
+      }
+      const call = `(call ${cand.sym} ${args.join(' ')})`;
+      const body = cand.ret === 'void' ? `(expr ${call})` : `(ret ${call})`;
+      this.wraps.push(`  (cfn ${w} ((asy__recv ${asyCore(rec.name)})) (${params.join(' ')})`
+        + ` ${asyCore(cand.ret)}\n    ${body})`);
+      this.mvals.set(cand.sym, w);
+    }
+    return { code: `(mkclo ${w} ${recvCode})`, type: asyCandFnType(this, cand) };
+  }
+
+  /**
+   * `a.get`（不是 `a.get()`）里那个 `get` 是个方法吗？是就回绑好接收者的闭包。
+   * 回 undefined 是"这个名字不是方法"（调用处接着往下问字段）；回 null 是诊断已发。
+   * **字段先赢**：同名的字段与方法在一个 struct 里是两个成员槽，取值那一边这一层
+   * 一直是先看字段的，这一刀不改那个顺序。
+   */
+  methodValAt(node, recv, nm) {
+    const rec = this.records.get(recv.type);
+    if (rec === undefined) return undefined;
+    for (const f of rec.fields) if (f.name === nm) return undefined;
+    const ms = this.visibleMethods(rec, nm);
+    if (ms.length === 0) return undefined;
+    if (ms.length > 1) {
+      return this.nope(node, `把**重载**的方法 '${recv.type}.${nm}' 当值取出来`
+        + `（有 ${ms.length} 个候选，是哪一个要靠目标类型定案）`);
+    }
+    return this.methodVal(node, rec, ms[0], recv.code);
+  }
+
   recField(n, t, nm) {
     const rec = this.records.get(t);
     // 占位字段是**看不见的** —— 名字虽然合法，`x.asy__filler` 在真 asy 那边是没有这个成员，
     // 所以这里也当没有（不然就是收得比 asy 多，strict 那条纪律不许）
     if (nm === ASY_FILLER) return this.err(n, `struct ${t} 没有字段 '${nm}'`);
     for (const f of rec.fields) if (f.name === nm) return f;
-    // 名字其实是个**方法**：那不是"没有这个成员"，是"把方法取出来当值"——
-    // asy 收（量过 `int f() = a.get;` 那句印 1：方法取出来是绑住接收者的闭包），
-    // 我们不收，因为我们的方法是"多一个 this 形参的普通函数"，绑接收者要现造一个闭包。
-    // 说清是这一条而不是那句泛泛的"没有字段"，`tests/asy/bad/fn-value.asy` 钉着。
+    // 名字其实是个**方法**：取值那一边（`a.get`）第四十三刀通了 —— 走 methodValAt，
+    // 在这个函数之前问。落到这里的只剩**赋值**那一边（`a.get = h;`）：量过 asy 收它
+    // （那边的方法就是一格函数值字段，赋完 `a.get()` 印的是新那份），我们不收 ——
+    // 方法在这一层是"多一个 this 形参的普通函数"，没有那一格可以写。所以是 nope。
     if (this.visibleMethods(rec, nm).length > 0) {
-      return this.nope(n, `把方法当值取出来（${t}.${nm} —— 那是绑住接收者的闭包，`
-        + '而我们的方法是多一个 this 形参的普通函数）');
+      return this.nope(n, `给方法赋值（${t}.${nm} —— asy 那边方法就是一格函数值字段，`
+        + '而我们的方法是多一个 this 形参的普通函数，没有那一格）');
     }
     const names = [];
     for (const f of rec.fields) if (f.name !== ASY_FILLER) names.push(f.name);

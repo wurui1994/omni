@@ -342,8 +342,8 @@ export function asyVardec(L, n) {
     // 与 typedef 那个拼法（`typedef real F(real); F f = twice;`）是同一件事，只是类型
     // 在这里才成形 —— 所以走同一个 fnTypeOf，往下跟别的类型没有区别。
     // 量出来的理由：`import graph;` 那 193 条错里有 4 条是这个拼法。
-    // 门外的一条还在门外：把**方法**取出来当值（`int f() = a.get;`）—— 那要绑接收者的
-    // 闭包，右边那个 `a.get` 自己就会被拒，`tests/asy/bad/fn-value.asy` 钉着。
+    // 右边是**方法**的那一条（`int f() = a.get;`）第四十三刀通了 —— 那是绑住接收者的
+    // 闭包，见 lower.js 的 methodVal，`cases/77-method-value.asy` 钉着。
     let t = base;
     if (isList(start) && head(start) === 'fundecidstart') {
       t = L.fnTypeOf(base, start.items[2], start);

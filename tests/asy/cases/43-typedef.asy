@@ -64,7 +64,7 @@ again a2 = "two";
 write(a2);
 
 // 函数值类型的**变量**：经 typedef 的这个拼法是通的（裸的 `real f(real) = twice;`
-// 那个拼法还在门外，bad/fn-value 钉着）。赋值换一个函数也通。
+// 第三十七刀也通了）。赋值换一个函数也通。
 realfn h = twice;
 write(h(6));
 h = halve;

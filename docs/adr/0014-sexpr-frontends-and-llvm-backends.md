@@ -3433,6 +3433,61 @@ saveFunction[] saveFunctions={};
 只动 `frontend-asy/`（types.js、decls.js、calls.js），tests/sexpr 跳掉 —— 方言与后端
 没碰（`(fnty …)` 那一档方言里早就有）。
 
+### 把方法取出来当值：一个只抓接收者的闭包；顺带发现"外面那个数"一直是虚的
+
+`plain_bounds.asy:247` 是这一句：
+
+```asy
+void addPath(path g, pen p);        // 无体的声明 = 一格函数值字段
+private void addPathToEmptyArray(path g, pen p) { … }
+addPath=addPathToEmptyArray;        // 把**方法**放进那一格
+```
+
+量过 asy（`asy -noV`）：
+
+- `int f() = a.get;` 之后 `write(f())` 印 7；接着 `a.n = 9`，再 `write(f())` 印 **9**。
+  绑的是**那个对象**，不是取出来那一刻的字段值。
+- `int g(int) = a.add;` 通（带形参的方法也一样）。
+- struct 体里 `step = one;` 通，方法里 `step = two;` 换掉它也通（印 3 再印 4）。
+- 附带量到、也纠了一条我原先写错的话：`a.get = h;` **asy 收**（那边方法就是一格
+  函数值字段，赋完 `a.get()` 印新那份）。我们不收 —— 所以那条 nope 的理由改成了
+  「我们的方法是多一个 this 形参的普通函数，没有那一格」，而不是原来那句"asy 也不收"。
+
+实现是现成零件的组合：方法在这一层是 `asy__m_<记录>_<方法>(this, …)`，所以生成一个
+只抓接收者的闭包 —— ADR-0010 那套 `(cfn 名 ((asy__recv 记录)) (形参…) 返回 (ret (call
+方法 (cap asy__recv) 形参…)))`，用处上是 `(mkclo 名 接收者)`。一个方法只生一份包装
+（`mvals` 那张表，与数组工厂 `arrGen` 同一条路子）。**"改字段看得见"这条不是模拟的**：
+struct 是引用语义，`(mkclo …)` 按值抓的就是那个引用。
+
+两个入口：`a.get`（`asyMember` 里，**字段之后**问）与 struct 体里的裸名字
+（`asyNameOf` 里，`selfField` 之后问，接收者是 `(var this)`）。门外还剩三条：带默认值
+的方法、可变形参的方法、**重载**的方法（那要靠目标类型定案，与裸函数名当值那一条
+是同一件事，只是还没铺过来）。`tests/asy/bad/fn-value.*` 搬成
+`tests/asy/cases/77-method-value.*`（asy 的输出逐字节抄）。
+
+**这一刀最重要的产出不是这个功能，是一条要纠的账。**「`import plain;` 还剩几条」这个数
+从 4 一路报到 1，读起来像"快通了"。这一刀把 657 那条拆掉之后，数字变成 **615**。
+A/B 量过（`git stash` 掉这一刀的两个文件，同一份 `/tmp/p.asy`）：committed 状态 1 条，
+带这一刀 615 条。也就是说**之前那个 1 不是"只差一条"，是"在第一条上就停住了"** ——
+一个 struct 体在声明遍失败之后，那个记录不进表，凡是签名里提到它的东西跟着被丢掉，
+而绝大多数"丢掉"是**不报诊断**的（顺手量到的一条：`struct S { int n = 一句降不动的初值; }`
+如果 `S` 从没被用过，那句错根本不会印 —— 字段默认值是在**用到**时才降的）。
+所以从今天起这个数的含义写清楚：**615 是正文遍第一次量到的真实面**，而 4/3/2/1 那一串
+量的是"声明遍在哪一条上停下"。`import graph;` 那边 182 → 181，它自己的数还卡在更早的
+位置上，同一条毛病。
+
+顺带记一件正面的：`import plain;` 的**声明遍现在整份走通了**（plain.asy 那十几个
+`include` 摊成一个单元，几千条顶层项）—— 615 条全在正文遍里，按文件分是
+plain_pens 146 / plain_picture 85 / plain_paths 55 / plain.asy 41 / …；按理由分头三条是
+「类型名顺序解析」（**231** 条，绝大多数是 pen/path/frame/file/transform 那几个内建面的
+名字在 `recVis` 里的位置不对，看着像同一处毛病）、「内建函数还没做」（79 条）、
+「未声明的变量」（26 条）。下一刀该从那 231 条查起 —— 那大概是**一处**，不是 231 处。
+
+跑的轴：`tests/asy`（151 passed，90.1s —— `cases/77-method-value` 进来、
+`bad/fn-value` 出去，条数不变）、`tests/run.js`（91 passed，16.9s）、`tests/bootstrap`。
+只动 `frontend-asy/`（lower.js、exprs.js、stmts.js 的注释），tests/sexpr 跳掉 ——
+`(cfn …)`/`(mkclo …)` 是方言里早有的那一档，后端一个字没碰。
+
 
 
 
