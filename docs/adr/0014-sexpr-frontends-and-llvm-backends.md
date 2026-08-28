@@ -4624,6 +4624,30 @@ get/advance/valid 也都是），发出来是 `(callfn (fld 接收者 字段))`�
 `strict/string-bool` 的话术跟着改了（现在有 `string(pen)`/`string(path)`/`string(transform)`
 三份用户重载，报的是"没有能匹配 string(bool) 的签名"—— 拒还是拒）。
 
+### `code` 与 `quote{ … }`：先立一格**空壳**
+
+`plain_debugger.asy` 一进来就要 `code`：`typedef string bpfunction(string, int, int, code)`
+（:13）、`stop(...)` 的 `code s=quote{}`（:16）、`atbreakpoint(...)`（:86）。参考实现里
+`code` 是内建类型（`runsystem.in:10` 的 `runnable* => primCode()`），`quote{ … }` 把花括号里
+那段**语法**原样拎出来，`_eval(code)` 再拿去跑。这一层做不到"拎出来"—— 前端到 OIR 的
+那一步已经把块降成核心方言了，留不下 AST。
+
+所以这一刀只做**类型层**：prelude 里 `struct code { }` 一格空壳，`quote-exp` 直接降成
+`(recinit code)` —— 花括号里那段**扔掉**；`_eval(code, bool, bool)` 里 `abort`。这样
+`code` 能当变量、参数、返回值、数组元素、默认实参传来传去，唯独跑不动。
+`atbreakpoint` 的签名照 `runsystem.in:132` + `:37` 那个 `breakpointFunction()` 修正成
+`string(string, int, int, code)`（之前错写成 `void()`）；`breakpoint(code s=quote{})`、
+`stop(string, int, code s=quote{})`、`breakpoints()`、`clear()`（`runsystem.in:137/147/155`）
+四支照原型补齐，体内 `abort`。
+
+把"编译得过、跑起来才炸"当成一档：base 里这一族只在真开调试器时才走到，挡在类型检查
+这一关上反而把整个 `plain` 卡住。代价是 `quote{}` 现在是**静默**丢块 —— 谁真去
+`_eval` 才看得见，看见的是一句 abort 而不是"没实现"的编译期拒绝。
+
+数字：`import plain;` 47 → 43（`plain_debugger.asy` 那一族清空）。`import graph;` 148
+没动。tests/asy 196 条、tests/run.js 91 条全绿。新用例 `cases/118-code-quote`
+（六行输出，与 `asy -noV` 逐字节一致）。
+
 ## 后果与代价
 
 

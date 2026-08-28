@@ -39,6 +39,13 @@ struct file {
   string buf;     // 还没成整行的那一截
 }
 
+// asy 的 `code`：`quote{ … }` 攒起来的一段**没编译的源码**，交给 `_eval` 在当时的环境里
+// 再编一遍（builtin.cc 的 primCode）。这一层也只给**类型**：`quote{}` 造一格空的 code
+// （块本身丢掉了），真去 eval 它才报。量出来的理由与 file 那一格同一条 ——
+// plain.asy:213 的 `void eval(code s, …)` 与 plain_debugger.asy:13/34 的
+// `code s=quote{}` 挡着 plain 的这两支。
+struct code { }
+
 // ---------------------------------------------------------------- 数与数组
 // asy 在 C++ 里带的一批非绘图内建。量出来的理由：`import graph;` 一句话下去 193 条诊断，
 // 「缺的内建函数」占 33 条，而这几个是里面**现在就写得起**的（不需要方言加东西）。
@@ -1514,7 +1521,10 @@ void atupdate(asy__thunk f) { asy__updatefn = f; }
 asy__thunk atupdate() { return asy__updatefn; }
 void atexit(asy__thunk f) { asy__exitfn = f; }
 asy__thunk atexit() { return asy__exitfn; }
-void atbreakpoint(asy__thunk f) { }
+// 断点函数不是 `void()`：它是 `string(string file, int line, int column, code s)`
+// （runsystem.in:132 的 callableBp，plain_debugger.asy:86 把 debugger 装进去）。
+typedef string asy__bpfn(string, int, int, code);
+void atbreakpoint(asy__bpfn f) { }
 
 // (2) 伪随机（runmath.in:206/217）。asy 用的是 C 库的 random()；这一层自带一个
 // 线性同余（Numerical Recipes 那组常数），所以**同一个种子出来的数与真 asy 不一样**。
@@ -2557,6 +2567,15 @@ int system(string[] s) { abort("system 还没做（这一层不起进程）"); r
 void clear(string file, int line, bool warn=false) {
   abort("clear(string,int) 还没做（调试器那一族）");
 }
+// 调试器那一族剩下的几条（runsystem.in:132/137/147/155）。签名照抄 —— `code` 那一格
+// 现在有类型了（quote{} 造一格空的），所以 plain_debugger.asy 整支降得下来；
+// 体都做不动，真调到才报。
+void breakpoint(code s=quote{}) { abort("breakpoint 还没做（调试器那一族）"); }
+void stop(string file, int line, code s=quote{}) {
+  abort("stop(string,int) 还没做（调试器那一族）");
+}
+void breakpoints() { abort("breakpoints 还没做（调试器那一族）"); }
+void clear() { abort("clear() 还没做（调试器那一族）"); }
 
 // 下面这些的签名照量到的抄，体做不动 —— 各自缺的东西写在自己那一行。
 bool eof(file f) { abort("eof(file) 还没做（这一层只有 stdin/stdout，没有真的读文件）"); return true; }
@@ -2583,10 +2602,13 @@ void _shipout(string prefix="", frame f, frame preamble=null, string format="",
               bool wait=false, bool view=true, transform t=identity()) {
   abort("_shipout 还没做（EPS 那一路走的是自己那份 shipout）");
 }
-// _eval 还有一条 `void _eval(code, bool)` —— 类型 'code' 这一刀还没有，所以只给 string 那条
-// （少给一个重载只会少接，不会多接）。
+// _eval 两条（builtin.cc）：一条吃源码串，一条吃 `quote{}` 攒的 code。两条都要真去
+// 再编一遍源码，这一层没有，所以体是 abort —— 签名在，plain 的 eval 那两支才降得下来。
 void _eval(string s, bool embedded, bool interactiveWrite=false) {
   abort("_eval 还没做（要把一段源码在当前环境里再编一遍）");
+}
+void _eval(code s, bool embedded, bool interactiveWrite=false) {
+  abort("_eval(code) 还没做（quote{} 里那段块这一层没留下来）");
 }
 // runarray.in:2003/2051：Schur 分解，S[0] 是 U、S[1] 是 T。要 Eigen，这一层没有。
 real[][][] _schur(real[][] a) { abort("_schur 还没做（真 asy 用的是 Eigen）"); return new real[][][]; }

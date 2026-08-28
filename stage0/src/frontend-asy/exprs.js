@@ -583,6 +583,14 @@ export function asyExprList(L, n, h) {
     return { code: '(var this)', type: L.self.rec.name };
   }
   if (h === 'equality') return asyCompare(L, n, n.items[1].value);
+  // `quote{ … }`：攒一段没编译的源码（类型是 code）。这一层只造一格**空**的 code ——
+  // 块本身丢掉了，真去 `_eval` 它才报（见 prelude 里 struct code 那一段）。
+  // 量出来的理由：plain_debugger.asy:13/34 的 `code s=quote{}` 是默认实参，绕不开。
+  if (h === 'quote-exp') {
+    if (L.recOf('code') === null) return L.nope(n, '`quote{ … }`（这一层还没有 code 这个类型）');
+    const mk = L.recInit(n, 'code');
+    return mk === null ? null : { code: mk, type: 'code' };
+  }
   if (h === 'and-exp' || h === 'or-exp') return asyLogic(L, n, h === 'and-exp' ? '&&' : '||');
   if (h === 'unary') return asyUnary(L, n);
   if (h === 'cast') return asyCast(L, n);
