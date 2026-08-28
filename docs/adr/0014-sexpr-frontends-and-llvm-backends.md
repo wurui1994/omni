@@ -4037,6 +4037,41 @@ tests/run.js 91 条全绿。新用例 `cases/94-fnval-default` 与 `bad/fnval-de
 数字：`import plain;` 119 → 113。`import graph;` 152 不动。tests/asy 170 条、
 tests/run.js 91 条全绿。新用例 `cases/95-sig-batch`。
 
+### 同名的变量遮住函数名：要函数类型的位置上，名字是按签名查的
+
+`plain_picture.asy:465` 的 `userBoxX3(min.x,max.x)` 报的是「内建函数 'userBoxX3'」——
+一个明明在 struct picture 体里的方法，却漏到了"这是个我们没做的内建"那一格。原因不在
+调用处，在**声明**处：
+
+```asy
+private using binop=real(real, real);
+void userBoxX3(real min, real max, binop m=min, binop M=max) { … }   // :428
+```
+
+默认值 `m=min` 那个 `min`，作用域里已经有一个形参 `real min` 了。asy 的名字是按**签名**
+查的（`varEntry` 一个名字挂多条，各带自己的类型，由目标类型定案），所以 `real min` 与文件
+级的几个 `real min(real,real)` 在同一档里共存，目标是 `binop` 时查到的是**函数** min。
+我们这边一个名字只有一个类型，局部量赢了，`real` 接不上 `binop` → 默认值降不下来 →
+整个方法没登上 → 裸调用一路漏到最后那句泛泛的 nope。错的话说了两次：既不是内建，
+也不是"这一刀没做"。
+
+这一刀把那条查法补上，位置在 nameOf 与 coerce 之间：nameOf 命中局部量时，如果同名还有
+可见的函数候选，就把它们挂在值上（`shadowFns`）；coerce 拿到**目标类型**，是函数类型
+且有同型的一份时改判成 `(fnref …)`。挂在值上而不是在 coerce 里看 AST，是因为几个调用处
+传给 coerce 的 `node` 是声明子句、不是那个表达式（`stmts.js:464` 传的是 `d`），看不到
+名字；挂在值上则四处共用一条：形参默认值、变量初值、赋值、return。
+
+三条边界照 asy 定：只在类型**一模一样**时改判（不串 int→real 那种）；排在用户自定义
+`operator cast` **之前**（那边精确匹配得分更高）；挑不出同型的一份就当这一条不存在，
+报原来那句「要 X，这里是 Y」——它是真错误，不是"还没做"。
+
+`userBoxY3` / `userBoxZ3` 是同一格，一并通了。剩下 3 条「内建函数」不是这一格：
+`fitter`（函数类型的 **static 字段**裸调用，plain_picture.asy:884）、`out` ×2
+（匿名函数体里调外层 struct 的方法，要捕获 `this`）。
+
+数字：`import plain;` 113 → 111。`import graph;` 152 不动。tests/asy 171 条、
+tests/run.js 91 条全绿。新用例 `cases/96-shadow-fnty`。
+
 ## 后果与代价
 
 

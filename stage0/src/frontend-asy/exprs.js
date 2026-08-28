@@ -65,7 +65,21 @@ export function asyLit(L, n) {
 /** 一个裸名字当表达式：局部 -> this 的字段 -> 文件级。name-exp 与 `cycle` 共用这一份。 */
 export function asyNameOf(L, n, nm) {
   const t = L.lookup(nm);
-  if (t !== null) return { code: `(var ${nm})`, type: t };
+  if (t !== null) {
+    // 同名的**函数**也要带上（第六十二刀）：asy 的名字是按签名查的 —— 一个 `real min`
+    // 与几个 `real min(real,real)` 在同一个作用域里共存，是哪一个由**目标类型**定案。
+    // 原型是 plain_picture.asy:428 的
+    // `void userBoxX3(real min, real max, binop m=min, binop M=max)`：形参 `real min`
+    // 在默认值那段里可见，可它不是 `real(real,real)`，asy 查到的是函数 min。
+    // 这一层自底向上定型，所以先把候选挂在值上（shadowFns），落地在 coerce ——
+    // 目标类型不是函数类型、或挑不出同型的一份时，这个值还是这个变量，报原来那句。
+    const v = { code: `(var ${nm})`, type: t };
+    if (L.funcs.has(nm)) {
+      const fns = asyVisible(L, nm);
+      if (fns.length > 0) v.shadowFns = fns;
+    }
+    return v;
+  }
   // 匿名函数体里：外层函数的局部量要**捕获**进来。顺序照 asy —— 闭包自己的局部（上面
   // 那一档）、外层函数的局部（这一档）、文件级（下面那几档）。
   if (L.cap !== null) {
@@ -390,6 +404,14 @@ export function asyCoerce(L, v, want, node, what) {
   }
   if (v.type === 'int' && want === 'real') return { code: `(toreal ${v.code})`, type: 'real' };
   if (want === 'pair' && (v.type === 'int' || v.type === 'real')) return asyToPair(L, v);
+  // 同名的**变量遮住了函数名**，而这个位置要的是一个函数类型（第六十二刀）。
+  // 候选是 nameOf 挂上来的（见那边的 shadowFns）：这里按目标类型挑同型的一份。
+  // 只在类型**一模一样**时改判，且排在用户自定义转换之前（asy 那边精确匹配得分更高）。
+  if (asyIsFn(want) && v.shadowFns !== undefined) {
+    for (const c of v.shadowFns) {
+      if (asyCandFnType(L, c) === want) return { code: `(fnref ${c.sym})`, type: want };
+    }
+  }
   // 用户定义的转换（第二十七刀）：内建那几条不成才轮到它，源类型要一模一样（不串）
   const uc = L.castFor(want, v.type, false);
   if (uc !== null) return { code: `(call ${uc.sym} ${v.code})`, type: want };
