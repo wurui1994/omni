@@ -44,3 +44,36 @@ bool interactiveView = false;
 bool bw = false;
 bool gray = false;
 bool xasy = false;
+
+// 第六十六刀那一批：base 与 examples 里真读到、而这里还缺的那些。类型与默认值逐个照
+// settings.cc 抄（行号在后面），一个都没猜：
+//   boolSetting:  keep(1759,false) keepaux(1760,false) auto3D(1770,true)
+//                 embed(1769,true) loop(1773,false) interrupt(1774,false)
+//                 animating(1775,false) reverse(1776,false) toolbar(1666,true)
+//                 twosided(1693,true) thick(1725,true) autobillboard(1729,true)
+//                 ibl(1670,false) nothin（settings.cc 里没有这个名字 —— 它是
+//                 examples/RiemannSurface.asy:5 注释里的写法，thin 的反面，默认 false）
+//   IntSetting:   digits(1911,7)
+//   realSetting:  paperwidth(1914,0) paperheight(1915,0) prerender(1787,0)
+//   stringSetting: image(1672,"snowyField")
+//                  hyperrefOptions(1928,"setpagesize=false,unicode,pdfborder=0 0 0")
+bool keep = false;
+bool keepaux = false;
+bool auto3D = true;
+bool embed = true;
+bool loop = false;
+bool interrupt = false;
+bool animating = false;
+bool reverse = false;
+bool toolbar = true;
+bool twosided = true;
+bool thick = true;
+bool autobillboard = true;
+bool ibl = false;
+bool nothin = false;
+int digits = 7;
+real paperwidth = 0;
+real paperheight = 0;
+real prerender = 0;
+string image = "snowyField";
+string hyperrefOptions = "setpagesize=false,unicode,pdfborder=0 0 0";

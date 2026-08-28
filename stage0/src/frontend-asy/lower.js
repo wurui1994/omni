@@ -516,21 +516,35 @@ class AsyLower {
    */
   memAssigned(rs) {
     const out = new Set();
-    const stack = Array.isArray(rs) ? rs.slice() : [rs];
+    const stack = [];
+    const push = (n, inRec) => stack.push([n, inRec]);
+    if (Array.isArray(rs)) for (const r of rs) push(r, false);
+    else push(rs, false);
     while (stack.length > 0) {
-      const cur = stack.pop();
+      const [cur, inRec] = stack.pop();
       if (cur === undefined || cur === null || !isList(cur)) continue;
       const h = head(cur);
+      // `recorddec` 的子树里再往下都算"在 struct 体里"（下面那一档要用）
+      const nowRec = inRec || h === 'recorddec';
       if (h === 'assign') {
         const lhs = cur.items[1];
         if (isList(lhs) && head(lhs) === 'name-exp') {
           const q = lhs.items[1];
           if (isList(q) && head(q) === 'qualified' && isAtom(q.items[2])) {
             out.add(q.items[2].value);
+          } else if (nowRec) {
+            // struct 体里给**裸名字**赋值（第六十六刀）：那也可能是"给自己的成员赋值" ——
+            // three_surface.asy:261 的 `external=externaltriangular;` 就在 patch 的
+            // `void init()` 里，而 `external` 是同一个体里**有体的方法**（:28）。
+            // 只在 struct 体里认这一种：整个单元都认的话，随便一个同名的局部量赋值
+            // 都会把一个方法摊成字段（每个实例多一个闭包）。
+            const nm = isAtom(q) ? q.value
+              : (isList(q) && head(q) === 'name' && isAtom(q.items[1]) ? q.items[1].value : null);
+            if (nm !== null) out.add(nm);
           }
         }
       }
-      for (let i = 1; i < cur.items.length; i++) stack.push(cur.items[i]);
+      for (let i = 1; i < cur.items.length; i++) push(cur.items[i], nowRec);
     }
     return out;
   }
@@ -1110,6 +1124,17 @@ class AsyLower {
   recLate(node, nm) {
     return this.err(node, `'${nm}' 在这里还不是一个类型 —— struct ${nm} 声明在后面，`
       + `而 asy 的类型名是顺序解析的（那边报 "no type of name '${nm}'"）`);
+  }
+
+  /**
+   * `from T unravel N;`（第六十五刀）：把一个类型按 `nm` 这个名字带进这一层，落法与
+   * typedef 同一格（见 typeDec 尾巴上那一段）。分出来是给 stmts.js 用的 —— 那边不能
+   * 直接碰 tyAlias（跨文件只走包装方法这一条，见文件头）。
+   */
+  bringTy(nm, t, at) {
+    const list = this.tyAlias.has(nm) ? this.tyAlias.get(nm) : [];
+    list.push({ t: t, at: at });
+    this.tyAlias.set(nm, list);
   }
 
   /** typedef 的名字也是顺序解析的（与 recLate 同一条规矩，只是话不一样） */

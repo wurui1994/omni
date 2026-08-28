@@ -5488,6 +5488,97 @@ three_arrows.asy:73 —— `struct arrowhead3` 里有 `real size(pen p)=arrowsiz
 `tests/js-exec` 11、`tests/cabi` 4、`tests/wat` 12 —— 全绿。`tests/mir` / `tests/glr` /
 `tests/incr` 照旧红（先于这几刀），`tests/bootstrap` 跳过。
 
+### 一批：遮挡那一档、`from T unravel <类型>`、构造与同名函数同一个重载集，与三维输出面（`import three;` 63 -> 25）
+
+这一批是六刀合一批推的，都是从 examples 那道坡上量出来的（每条后面都记着量它的那一行）。
+
+**遮挡那一档（第六十四刀）。** `asyFit` 现在多记一格 `shadow`：这次匹配里有几个实参是靠
+**被遮住的那一格**接上的（`shadowVar` / `shadowFns` / `shadowName`，而且接的**不是**这个值
+自己的类型）。`asyApplyCall` 的分档次序也跟着变成"可变形参 -> 遮挡 -> 代价 -> 内建弱"——
+asy 的名字解析先看最里那一层，被遮住的那一格只是退路。量出来的形状是 bezulate.asy:64：
+
+```asy
+int bez(path[] p) { path p2=(0,0)--(1,1); path p=p2; return size(p); }
+```
+
+局部的 `path p` 遮住了形参 `path[] p`，`int size(path)` 与 `int size(path[])` 两边代价都是 0，
+不分档就报"有多个同样合适的重载"。
+
+**"接的不是自己的类型"这半句是量出来的**：`shadowName` 是 nameOf 给**每一个**文件级变量
+都挂上的（同名的可能有好几格），同型时它指的就是这个值自己。少了这半句，`dot(a,b)`
+（两个文件级 triple）里内建那份 shadow=2、`void dot(…, triple v, light light, …)` shadow=1，
+于是代价 1 的那份反而赢了 —— graph3.asy:84 的 `dot(align,sign*locate1.dir) >= 0` 就是这么
+变成 void 的。
+
+**`from T unravel N;` 里 N 是 T 体里的类型（第六十五刀）。** geometry.asy:5616/5617 的
+`side` 与 `vertex`。落法是"记一条 typedef"（`bringTy`）—— 嵌套 struct 的真名本来就记在外层
+那张 `rec.tyAlias` 里（见 recNested）。要紧的是**在声明遍就落**（modules.js 的 asyModStmt
+里那一句）：后面那些函数的**签名**里就要用这个名字（5658 的 `point operator cast(vertex V)`），
+而签名是声明遍读的。
+
+这一条还揭出一件事：`import geometry;` 从前印 14 条诊断，是因为 5658 那条声明遍的错**盖住了
+后面所有的**。真的尾巴是 31 条 —— 上一批 ADR 里写的"masked artifact"那一课又来了一次。
+
+**构造与同名函数在同一个重载集里（第六十六刀）。** geometry.asy:5713 的
+`triangle triangle(line,line,line)` 与 struct triangle 的 `void operator init(point,point,point)`
+在 asy 那边是同一个重载集；这个前端从前是"名字是函数就不看构造"，于是 `triangle(P1,P2,P3)`
+报"没有能匹配的签名 —— 有的是 triangle(line, line, line)"（15 处）。现在函数那族都接不住时
+再让 `asyCtorCall` 试一次（probe + 回滚）。同一条修好了 `material(pen, emissivepen=pen)`
+（linearregression / genustwo / genusthree / label3zoom 四个例子）。
+
+**struct 体里给裸名字赋值也算"当成员赋值"（第六十六刀）。** `memAssigned` 从前只认
+`X.name = …`；three_surface.asy:261 的 `external=externaltriangular;` 在 patch 自己的
+`void init()` 里，赋的是同一个体里**有体的方法**（:28）。只在 recorddec 的子树里认这一种 ——
+整个单元都认的话，随便一个同名局部量的赋值都会把一个方法摊成字段（每个实例多一个闭包）。
+配套的一条是：方法体里"读一格函数类型的字段再间接调"这一档接不住时要**回滚**再往下走，
+不然 three_surface.asy:347 的 `point(external,0)` 会撞在同名的那格字段
+（`triple point(real,real)`）上，而它要的是文件级的 `triple point(path3,real)`。
+
+**没有内建形态的算符不受"内建赢"那道闸管（第六十七刀）。** `asyOpUser` 里有一条
+"用户那份不同型、而内建那份接得住时让内建赢"的闸（防的是库里的重载把内建的加减乘除偷走）。
+`^^` 与 `@` 根本没有内建形态，那道闸于是变成"要转换就一律拒"：
+`(0,0,0)--(1,0,0) ^^ (0,1,0)--(1,1,0)` 两边是 guide3，要走一次
+`path3 operator cast(guide3)` 才落到 `path3[] operator ^^(path3,path3)` 上（three.asy:2003）。
+现在这两个名字进 `ASY_OPNOBI`，不给 btys。
+
+**三维输出面（第六十七刀）。** runpicture.in:296-780 那一段：`_draw(frame,path3,…)`、
+Bezier 面片与三角面片的 `draw`、NURBS 曲线与曲面、`drawSphere`/`drawCylinder`/`drawDisk`/
+`drawTube`/`drawpixel`、三角网的 `draw`、`_begingroup3`/`endgroup3`/`beginTransform`/
+`endTransform`，加 runpath3d.in 的 `minratio`/`maxratio`/`unstraighten` 与
+`frame operator *(real[][], frame)`。asy 那边它们是往 picture 的节点表里塞一个三维绘图对象；
+这一层**只记界** —— frame 上多了 `has3` / `min3v` / `max3v` / `minr` / `maxr` 五格，
+后两格是 x/z、y/z 的比（picture.cc:339 的 ratio，投影层的 fit 要它）。
+
+**代价写在明处**：三维图的**内容**这一层落不下来（EPS 写出来是空的），但整棵
+three / graph3 / solids 树的正文能跑到底，界与投影算得出真数。真出图是另一刀。
+
+**那批内建。** `map`（runarray.in:979 的 arrayFunction，asy 那边是一格泛型内建，这里按真用到
+的七组类型各写一份）、`gamma`（Lanczos g=7 那组系数，负半轴走反射公式）、`abs2`、
+`bool operator ^`（异或）、`newton` 的两格（runarray.in:1622/1670 逐句照抄）、`sum` 五格、
+`concat` 的 pen/triple/bool 三格、`mintimes`/`maxtimes`（path 与 path3），
+以及 `dot(pair,pair)` / `dot(triple,triple)` —— 后两个从**写死在前端里**挪进了内建面，
+理由见上面遮挡那一段。`_image` 与 `_labelpath` 只给声明、体是 abort（图像与沿路径排字要真的
+输出层）：有了声明，palette / labelpath 这两个模块才装得上。
+
+`settings` 补了 20 格（`keep` / `paperwidth` / `paperheight` / `digits` / `prerender` /
+`toolbar` / `twosided` / `thick` / `autobillboard` / `ibl` / `image` / `hyperrefOptions` …），
+类型与默认值逐个照 settings.cc 的行号抄。
+
+**`gamma` 那条边界挪了。** `tests/asy/bad/gamma` 从前钉的是"宿主数学库里没有的内建就报错"；
+这一批用 asy 自己写了一份 Lanczos，六条腿共用，所以那个 case 撤了，值改由
+`cases/142-unravelty` 与真 asy 对齐（`gamma(5)` / `gamma(2.5)` / `gamma(0.5)` / `gamma(-1.5)`
+四个点）。
+
+**量出来的一件事要记下来**：examples 那道坡从前是按"有没有 `文件:行:列` 那样的诊断"数的，
+而 `abort` 与运行期错误**不长这个样子**（退出码 70，输出是 `abort: …`）。这一批起改成
+"诊断 / 非零退出码 / 干净跑完"三分，数字因此比从前保守。
+
+按这把新尺子重量一遍 220 个例子：**干净跑完 74、还在报诊断 136、跑起来但非零退出 10**
+（8 个是 `abort:`，多半是三维那几格只给声明的输出内建；2 个退 1）。模块那一层，
+`import plain / graph / math` 三条 0 诊断，`import three;` 63 -> 25、`import geometry;`
+31 -> 4、`import graph3;` 71 -> 42、`import solids;` 77 -> 47、`import palette;` 4、
+`import bezulate;` 0。
+
 ## 后果与代价
 
 

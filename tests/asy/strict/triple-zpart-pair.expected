@@ -1,1 +1,1 @@
-'zpart' 只收 triple，这里是 pair
+没有能匹配 'zpart(pair)' 的签名 —— 有的是 real(triple)

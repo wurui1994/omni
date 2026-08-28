@@ -88,6 +88,20 @@ export const ASY_OPSYM = new Map([
 /** asy 的语法本身就拒的算符名（量过）。见 strict/op-logic.asy。 */
 export const ASY_OPBAD = new Set(['&&', '||']);
 
+/**
+ * 这个前端**没有内建形态**的二元算符（第六十七刀）：`^^` 与 `@` 只在 base 里定义
+ * （plain_paths.asy:54 的 `path[] operator ^^(path,path)`、geometry.asy:1721 的
+ * `bool operator @(point,line)`）。
+ *
+ * 为什么要单列一张表：asyOpUser 里有一条"用户那份不同型、而内建那份接得住时让内建赢"
+ * 的闸（见那边 `!exact && btys !== null`），它防的是"库里的重载把内建的加减乘除偷走"。
+ * 可这两个算符根本没有内建形态，那道闸于是变成了"要转换就一律拒" ——
+ * `(0,0,0)--(1,0,0) ^^ (0,1,0)--(1,1,0)` 两边是 guide3，要走一次
+ * `path3 operator cast(guide3)` 才落到 `path3[] operator ^^(path3,path3)` 上，
+ * 少了这张表就报"还不支持算符 '^^'"（three.asy:2003 量出来的）。
+ */
+export const ASY_OPNOBI = new Set(['^^', '@']);
+
 /** `cycle` 那个字面量落到哪个名字上（见 lit）：绘图层 stage0/lib/asy/plain.asy 里
  *  的 `path cyclepath;`。前端与绘图层之间**只有这一个**约定的名字。 */
 export const ASY_CYCLE = 'cyclepath';

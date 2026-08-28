@@ -305,8 +305,56 @@ export function asyModStmt(L, n, at) {
   // `unravel x;`：x 也可以是**一格文件级记录变量**（不是模块）。这一遍判不了 ——
   // 文件级变量是下一个循环（asyGlobalNames）才登记的 —— 所以整条往后放，交给正文
   // 那一遍的 asyStmt（见 asyBodyPass 里 ASY_MODSTM 那一句），报错也在那边报一次。
-  if (h === 'unravel') return null;
+  //
+  // 例外是 `from T unravel N;` 那一种（N 是 T 体里的类型）：它必须在**这一遍**就落，
+  // 后面那些函数的**签名**里就要用这个名字（geometry.asy:5617 摊出来的 `vertex`
+  // 在 5658 的 `point operator cast(vertex V)` 上用），签名是声明遍读的。
+  if (h === 'unravel') { asyUnravelTy(L, n); return null; }
   return L.nope(n, `模块声明 '${h}'`);
+}
+
+/**
+ * `from T unravel N;`：T 是一个 **struct**，N 是它体里声明的**类型**，这一句把 N 带到
+ * 当前这一层（geometry.asy:5616 的 `from triangle unravel side;` 与下一行的 `vertex`）。
+ *
+ * 落法就是"记一条 typedef"：嵌套 struct 的真名记在外层那张 `rec.tyAlias` 里
+ * （见 lower.js 的 recNested），所以这里把它按**这里叫什么**塞进文件级别名表
+ * （bringTy）—— 类型名、成员访问、`operator cast` 那几路都照旧走别名那一条。
+ *
+ * 只认"体里的类型名"这一种。名字不是 struct、或者要摊的名字一个都不是它体里的类型时
+ * 回 undefined，让上面那两档（摊一格记录变量、报 nope）接着判。
+ */
+export function asyUnravelTy(L, n) {
+  const nm = L.plainName(n.items[1]);
+  if (nm === null) return undefined;
+  const rec = L.recOf(nm);
+  if (rec === null || rec.tyAlias === undefined) return undefined;
+  const lst = n.items[2];
+  const wild = isList(lst) && head(lst) === 'wildcard';
+  const want = [];
+  if (wild) {
+    for (const k of rec.tyAlias.keys()) want.push({ src: k, dst: k });
+  } else {
+    for (const p of L.flat(lst, 'idpairs')) {
+      const pr = asyIdPair(L, p);
+      if (pr === null) return undefined;
+      want.push(pr);
+    }
+  }
+  let any = false;
+  for (const w of want) if (rec.tyAlias.has(w.src)) any = true;
+  if (!any) return undefined;
+  for (const w of want) {
+    const e = rec.tyAlias.get(w.src);
+    if (e === undefined) {
+      // 这一条摊不动**不**把整句判死：`from T unravel x;` 里 x 也可以是体里一个 static
+      // 成员，那是另一刀（说清楚、接着走）。
+      L.nope(n, `from ${nm} unravel ${w.src}（它不是 ${nm} 体里的类型名）`);
+      continue;
+    }
+    L.bringTy(w.dst, e.t, L.at);
+  }
+  return [];
 }
 
 /** `(formals (formal 类型 (decidstart 名字)) …)` -> Map(名字 -> 类型文本)；有一格不成就回 null */

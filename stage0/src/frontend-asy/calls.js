@@ -217,7 +217,24 @@ export function asyCall(L, n) {
     // 是"读这一格再间接调"。与上面那一档同一个道理放在文件级候选前面：它也是个成员。
     const sf = L.selfField(nm, true);
     if (sf !== null && asyIsFn(sf.type)) {
-      return asyFnValCall(L, n, nm, sf.type, `(fld (var this) ${asyFldSym(sf.name)})`);
+      // 与上面那一档同一条：这一格接不住时**回滚**再往下走（第六十六刀）。量出来的形状是
+      // three_surface.asy:347 的 `point(external,0)` —— patch 里 `point` 是一格
+      // `triple(real,real)` 的字段（:262 被赋过值，所以摊成了字段），而这一句要的是文件级
+      // 的 `triple point(path3, real)`。
+      const fcode = `(fld (var this) ${asyFldSym(sf.name)})`;
+      const fprobe = Array.isArray(L.pre);
+      if (!fprobe) return asyFnValCall(L, n, nm, sf.type, fcode);
+      const fmark = L.diags.mark();
+      const fsave = L.pre;
+      L.pre = [];
+      const fv = asyFnValCall(L, n, nm, sf.type, fcode);
+      const fpre = L.pre;
+      L.pre = fsave;
+      if (fv !== null) {
+        for (const s of fpre) L.pre.push(s);
+        return fv;
+      }
+      L.diags.rollback(fmark);
     }
     // 同一件事，只是那一格是 **static** 的：`static frame fitter(string,picture,…);`
     // （plain_picture.asy:876 —— 无体的 static 方法声明就是一格 static 的函数类型字段，
@@ -376,8 +393,33 @@ export function asyCall(L, n) {
     // 所以在这里回滚了再试一次。量过的理由：prelude 里加了 `dir(path,real)` 之后
     // `dir(30,45)`（triple 那一族）一度报"没有能匹配 dir(int, int)"。
     if (best === null) {
+      // 这个名字既是**记录名**又是文件级函数名（第六十六刀）：asy 那边"struct 的
+      // `operator init`"与同名函数在**同一个重载集**里，而上面那一档只量了函数那一族。
+      // 量出来的样子是 geometry.asy:5720 —— 文件级有 `triangle triangle(line,line,line)`，
+      // struct triangle 里有 `void operator init(point,point,point)`，`triangle(P1,P2,P3)`
+      // 于是报"没有能匹配的签名 —— 有的是 triangle(line, line, line)"。
+      // 次序是"函数那一族先、构造后"：函数那族接得住时不走这里（上面已经返回了）。
+      const crec0 = L.recOf(nm);
+      if (crec0 !== null && L.visibleMethods(crec0, 'operator init').length > 0) {
+        const cmark = L.diags.mark();
+        const cSave = Array.isArray(L.pre) ? L.pre : null;
+        if (cSave !== null) L.pre = [];
+        const cv = asyCtorCall(L, n, crec0, nm);
+        const cMine = L.pre;
+        if (cSave !== null) L.pre = cSave;
+        if (cv !== null) {
+          if (cSave !== null) for (const s of cMine) L.pre.push(s);
+          return cv;
+        }
+        L.diags.rollback(cmark);
+      }
       const alt = asyNamedBuiltin(L, n, nm);
       if (alt !== undefined) return alt;
+      // 数学那一族（sqrt/log/sin/…）也在这里回一次（第五十一刀）：内建面里加了
+      // `real[] sqrt(real[])`（builtin.cc:225 一次注册标量与数组两格）之后，
+      // `sqrt(realEpsilon)` 那句的候选表里只剩数组那份、接不住 —— 标量那份是写死在
+      // 这个前端里的，得在这里让它再试一次（plain_prethree.asy:143 量出来的）。
+      if (L.math.has(nm)) return asyMathCall(L, n, nm);
       // 刻意没做的那几个（`reverse`）：实参真是 string 时报那条专门的话 —— 落到
       // "没有能匹配 'reverse(string)'"上看不出是"这一刀没做"还是"asy 也没有"。
       if (ASY_STR_NOPE.has(nm)) {
@@ -921,6 +963,12 @@ export function asyApplyCall(L, n, nm, list, raw, recv, reinit) {
     const iv = fits[i].f.varargs === true ? 1 : 0;
     if (iv < bv) { best = fits[i]; tie = false; continue; }
     if (iv > bv) continue;
+    // 再比"有几个实参是靠被遮住的那一格接上的"（见 fit 里的 shadow）：里层那一层
+    // 先赢，所以这一档也在 cost 之前，档不同时**不算**打平。
+    const bs = best.f.shadow;
+    const is = fits[i].f.shadow;
+    if (is < bs) { best = fits[i]; tie = false; continue; }
+    if (is > bs) continue;
     if (fits[i].f.cost < best.f.cost) { best = fits[i]; tie = false; continue; }
     if (fits[i].f.cost === best.f.cost) {
       // 内建面那份是**弱**的（理由见 asyBiWeak）：与真库那份打平时让真库赢。
@@ -1318,6 +1366,14 @@ export function asyFit(L, cand, raw) {
   let cost = 0;
   let reordered = false;
   let last = -1;
+  // 有几个实参是**靠被遮住的那一格**接上的（shadowVar / shadowFns / shadowName）。
+  // asy 的名字解析先看最里那一层，被遮住的那一格只是退路，所以这一档要在 cost
+  // **之前**比（第六十四刀）：`path[] p` 形参被局部 `path p` 遮住时，`size(p)` 的
+  // `int size(path)`（自己的类型，shadow 0）要赢 `int size(path[])`（走 shadowVar，
+  // shadow 1）—— 两边 cost 都是 0，不分档就报歧义（bezulate.asy:64 量出来的）。
+  let shadow = 0;
+  // tryAt 最后那一次是不是走了遮挡那条路（下面接受 uc 时读它）
+  let shAt = false;
   // 可变形参（`... T[] xs`）：最后那一格收所有多出来的位置实参。量过两条 ——
   // 任何**非**可变的候选都比可变的合适（`f(real)` 与 `f(... int[])` 撞上 `f(3)` 走前者，
   // 尽管那边还要一次 int->real 提升），所以贵不贵不能靠 cost，要另开一档在 applyCall
@@ -1337,6 +1393,13 @@ export function asyFit(L, cand, raw) {
   // 一格一格试：接得住回代价（0 或 1），接不住回 null。
   // "接不住能不能跳过这一格"由外面那个循环定（asy 的 matchArgument）。
   const tryAt = (r, at) => {
+    shAt = false;
+    // 走了遮挡那条路、**而且**接的不是这个值自己的类型 —— 只有这一种才算"用了被遮住的
+    // 那一格"。shadowName 是 nameOf 给**每一个**文件级变量都挂的（同名的可能有好几格），
+    // 同型时它指的就是这个值自己，不能算。量过：`dot(a,b)` 两个 triple 都是文件级变量，
+    // 少了这一条时内建那份 shadow=2、`void dot(…, triple, light, …)` shadow=1，
+    // 代价 1 的那份反而赢了（graph3.asy:84）。
+    const shHit = () => { if (cand.ps[at].type !== r.v.type) shAt = true; return 0; };
     // `T keyword x` 的槽**只能按名字给**（量过：`void f(int keyword a); f(3)` 那边报
     // "cannot call 'void f(int keyword a)' with parameter 'int'"）。
     if (r.key === null && cand.ps[at].kw === true) return null;
@@ -1350,13 +1413,13 @@ export function asyFit(L, cand, raw) {
     // 挂上来的（shadowFns），落地是 coerce 那边同一条。挑到就算精确匹配（不加代价）；
     // 挑不到不算接不住 —— 这个实参还是那个变量，往下按它的类型算。
     if (r.v.shadowFns !== undefined && asyIsFn(cand.ps[at].type)) {
-      for (const c of r.v.shadowFns) if (L.candFnType(c) === cand.ps[at].type) return 0;
+      for (const c of r.v.shadowFns) if (L.candFnType(c) === cand.ps[at].type) return shHit();
     }
     // 同名的**模块级那一格**（shadowVar，见 nameOf）：同型就算精确匹配
-    if (r.v.shadowVar !== undefined && r.v.shadowVar.type === cand.ps[at].type) return 0;
+    if (r.v.shadowVar !== undefined && r.v.shadowVar.type === cand.ps[at].type) return shHit();
     // 同一个名字的文件级变量有**好几格**（shadowName，见 nameOf）：按这个槽的类型
     // 问一句 gvarFor，挑到就算精确匹配（`Hermite(Spline)`，graph.asy:1917）
-    if (r.v.shadowName !== undefined && L.gvarFor(r.v.shadowName, cand.ps[at].type) !== null) return 0;
+    if (r.v.shadowName !== undefined && L.gvarFor(r.v.shadowName, cand.ps[at].type) !== null) return shHit();
     // `null` 当实参：类型来自**这个槽**（asy 就是这么定的）。槽不是引用类型就接不住。
     if (r.v.type === ASY_NULL) return asyRefTy(L, cand.ps[at].type) ? 0 : null;
     // `explicit` 的槽只收类型一模一样的实参（第二十六刀，量过：连 int->real 都挡）
@@ -1424,6 +1487,7 @@ export function asyFit(L, cand, raw) {
     }
     if (uc === null) return null;
     cost += uc;
+    if (shAt) shadow++;
     filled.set(at, true);
     slot.push(at);
     if (at < last) reordered = true;
@@ -1437,7 +1501,7 @@ export function asyFit(L, cand, raw) {
     if (cand.ps[k].def === null) return null;
     missing.push(k);
   }
-  return { cost, slot, missing, reordered, varargs: isVar, pack, restAt: isVar ? rAt : -1 };
+  return { cost, shadow, slot, missing, reordered, varargs: isVar, pack, restAt: isVar ? rAt : -1 };
 }
 
 /**

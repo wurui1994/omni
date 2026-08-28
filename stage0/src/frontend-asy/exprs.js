@@ -19,7 +19,7 @@
 import { isList, isAtom, isStr, head } from '../sexpr/read.js';
 import {
   ASY_NOPE, DOT_BAD, CAP_BAD, ASY_ARRELEM_TEXT, ASY_CYCLE, ASY_NEWFRAME, ASY_XFORM, ASY_RESTPFX, ASY_SELFCAP, asyOpText,
-  asyIsArr, asyElem, asyIsFn, asyFldSym, ASY_PAIR_TY, ASY_TRIPLE_TY, asyCore, ASY_NULL, asyRefTy,
+  asyIsArr, asyElem, asyIsFn, asyFldSym, ASY_PAIR_TY, ASY_TRIPLE_TY, asyCore, ASY_NULL, asyRefTy, ASY_OPNOBI,
 } from './types.js';
 import { ZERO, ASY_PAIRFN, ASY_STRFN, ASY_STR_DEPS, strLit } from './runtime.js';
 import { asyArgs, asyCall, asyVisible, asyOpUser, asyOpBuiltinSig, asyIdxOpCall, asyApplyCall, asyDefWrapper, asyRestValCall } from './calls.js';
@@ -315,6 +315,34 @@ function asyOverBoth(L, a, b) {
 }
 
 /** 两支的公共签名（asyCond 定不下来时挂在待定值上，给用处那一侧挑） */
+/**
+ * `bool[] ? T[] : T[]`（runarray.in:1222 的 arrayConditional，第五十一刀）：逐格选。
+ * 两支都在时长度要一致、回一格一样长的数组；有一支是 `null` 时那一格**不要** ——
+ * 回的是筛出来的那些（math.asy:160 的 `(b != n) ? sequence(1,b.length) : null`
+ * 正是拿它当"取下标"用）。落地在内建面的 asy__acond3 / asy__acondT / asy__acondF
+ * 那三族（按元素类型重载），这里只挑名字、攒实参。
+ * 与标量那一条的差别：两支**都要算** —— 它们在 asy 那边就是实参。
+ */
+function asyArrCond(L, n, c) {
+  const a = asyExpr(L, n.items[2]);
+  const b = asyExpr(L, n.items[3]);
+  if (a === null || b === null) return null;
+  const aN = a.type === ASY_NULL;
+  const bN = b.type === ASY_NULL;
+  if (aN && bN) return L.err(n, 'bool[] 当条件的 `? :`：两支不能都是 null');
+  const nm = aN ? 'asy__acondF' : (bN ? 'asy__acondT' : 'asy__acond3');
+  const cs = asyVisible(L, nm);
+  if (cs.length === 0) {
+    return L.nope(n, 'bool[] 当条件的 `? :`（它是逐格选，要 `import plain;`）');
+  }
+  const raw = [];
+  const push = (v, node) => raw.push({ key: null, node: node, spread: false, v: v, lines: null });
+  push(c, n.items[1]);
+  if (!aN) push(a, n.items[2]);
+  if (!bN) push(b, n.items[3]);
+  return asyApplyCall(L, n, nm, cs, raw, null);
+}
+
 function asyCondHit(L, a, b) {
   const at = asyValTypes(L, a);
   const bt = asyValTypes(L, b);
@@ -1796,8 +1824,11 @@ export function asyArith(L, n, op, a, b) {
   // 提升前的右操作数留一份：`opBuiltinSig` 里的 `promote` 会**就地**把 int 提成 pair，
   // 而 asy 的 `^` 在 pair 上是**两个重载**、按指数的静态类型分路（见下面 op === '^'）。
   const b0 = { code: b.code, type: b.type };
-  // 用户定义的算符先问一遍（第二十三刀）：它跟内建在同一张候选表里，见 opUser
-  const u = asyOpUser(L, n, op, [a, b], asyOpBuiltinSig(L, [a, b]));
+  // 用户定义的算符先问一遍（第二十三刀）：它跟内建在同一张候选表里，见 opUser。
+  // 没有内建形态的那两个（`^^` / `@`，见 ASY_OPNOBI）不给 btys —— 那道"内建赢"的闸
+  // 对它们没有意义，只会把"要转换才落得下"的候选一律拒掉（第六十七刀）。
+  const bsig = ASY_OPNOBI.has(op) ? null : asyOpBuiltinSig(L, [a, b]);
+  const u = asyOpUser(L, n, op, [a, b], bsig);
   if (u !== null) return u;
   if (op === '<' || op === '<=' || op === '>' || op === '>=') return asyCmpCode(L, n, op, a, b);
   if (op === '#') {
@@ -2031,7 +2062,13 @@ export function asyCompare(L, n, op) {
 export function asyCond(L, n) {
   if (L.pre === null) return L.nope(n, '这个位置的 `? :`（它要摊成语句，这里放不下）');
   const mark = L.diags.mark();
-  const c = asyCoerce(L, asyExpr(L, n.items[1]), 'bool', n, '`? :` 的条件');
+  const cRaw = asyExpr(L, n.items[1]);
+  if (cRaw === null) return null;
+  // 条件是 **bool[]** 时这不是"选一支"，是**逐格选**（runarray.in:1222 的
+  // arrayConditional）：`(b != n) ? sequence(1,b.length) : null`（math.asy:160）里
+  // 那个 null 是"这一格不要"。见 asyArrCond。
+  if (cRaw.type === 'bool[]') return asyArrCond(L, n, cRaw);
+  const c = asyCoerce(L, cRaw, 'bool', n, '`? :` 的条件');
   const outer = L.pre;
   L.pre = [];
   const a = asyExpr(L, n.items[2]);

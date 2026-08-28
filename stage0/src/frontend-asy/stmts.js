@@ -20,6 +20,7 @@ import {
 import { ZERO } from './runtime.js';
 import { asyArgs, asyCall, asyOpUser, asyOpBuiltinSig, asyIdxOpCall, asyVisible, asyUserCall } from './calls.js';
 import { asyNeedsBox } from './exprs.js';
+import { asyUnravelTy } from './modules.js';
 
 /**
  * `write` 的重载是量出来的，形状是 `write(string s="", T x, T[] more..., suffix=endl)`：
@@ -281,6 +282,8 @@ export function asyStmtOne(L, n, ret) {
     return v === null ? null : [`(ret ${v.code})`];
   }
   if (h === 'unravel') {
+    const ut = asyUnravelTy(L, n);
+    if (ut !== undefined) return ut;
     const uv = asyUnravelVar(L, n);
     if (uv !== undefined) return uv;
     return L.nope(n, '`unravel` 这一句（这一刀只摊一格记录变量的字段，摊模块还没做）');

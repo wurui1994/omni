@@ -1599,6 +1599,12 @@ box picbox(picture pic, real s) {
 // endgroup / clip 都还没有，用到它们的地方会明确报"没有这个函数"，不会悄悄给错答案。
 struct frame {
   drawop[] ops;
+  // 三维那一层记下来的界（第六十七刀）：几何本身这一刀落不下来，界与 x/z、y/z 的比是真的
+  bool has3 = false;
+  triple min3v = (0, 0, 0);
+  triple max3v = (0, 0, 0);
+  pair minr = (0, 0);
+  pair maxr = (0, 0);
   // 攒过标签没有（runlabel.in:220 的 `labels(frame)`）。这一层没有 TeX，标签的**内容**
   // 落不下来，但"有没有"这一位是真的。
   bool haslabel = false;
@@ -3247,8 +3253,15 @@ void javascript(frame f, string s) { abort("javascript 还没做"); }
 void deconstruct(frame f, frame preamble, transform T=identity()) {
   abort("deconstruct 还没做");
 }
-triple min3(frame f) { abort("min3(frame) 还没做"); return (0, 0, 0); }
-triple max3(frame f) { abort("max3(frame) 还没做"); return (0, 0, 0); }
+// 三维的界（runpicture.in:757/762）：记在 frame 上，见 asy__add3
+triple min3(frame f) {
+  if (!f.has3) { abort("min3: 这一格 frame 里没有三维的东西"); return (0, 0, 0); }
+  return f.min3v;
+}
+triple max3(frame f) {
+  if (!f.has3) { abort("max3: 这一格 frame 里没有三维的东西"); return (0, 0, 0); }
+  return f.max3v;
+}
 
 // ------------------------------------------------- 三维路径（第四十八刀）
 // `path3` 在真 asy 那边是 C++ 的内建类型（path3.h），与 `path` 是同一套结构、坐标换成
@@ -4591,4 +4604,903 @@ path3 operator &(path3 p, path3 q) {
   post[i] = pnt[i];
   str[i] = false;
   return path3(pre, pnt, post, str, false);
+}
+
+// ---- 数组上的 \`==\` / \`!=\` 是**逐格**的（builtin.cc:485 的 addBooleanOps）：回一个
+// bool[]，不是一个 bool。量过 \`new real[]{1,2,3} == new real[]{1,5,3}\` 印的是
+// true false true；长度不同是**运行期错**（array.h:87 的 checkArrays），这里照那句话报。
+// pen 那一格里比的是这一层的 \`==\`（比身份，不比内容）—— 那是先于这一刀的偏差。
+bool[] operator ==(int[] a, int[] b) {
+  asy__samelen(a.length, b.length);
+  bool[] r = new bool[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = (a[i] == b[i]);
+  return r;
+}
+bool[] operator !=(int[] a, int[] b) {
+  asy__samelen(a.length, b.length);
+  bool[] r = new bool[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = !(a[i] == b[i]);
+  return r;
+}
+bool[] operator ==(real[] a, real[] b) {
+  asy__samelen(a.length, b.length);
+  bool[] r = new bool[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = (a[i] == b[i]);
+  return r;
+}
+bool[] operator !=(real[] a, real[] b) {
+  asy__samelen(a.length, b.length);
+  bool[] r = new bool[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = !(a[i] == b[i]);
+  return r;
+}
+bool[] operator ==(bool[] a, bool[] b) {
+  asy__samelen(a.length, b.length);
+  bool[] r = new bool[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = (a[i] == b[i]);
+  return r;
+}
+bool[] operator !=(bool[] a, bool[] b) {
+  asy__samelen(a.length, b.length);
+  bool[] r = new bool[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = !(a[i] == b[i]);
+  return r;
+}
+bool[] operator ==(string[] a, string[] b) {
+  asy__samelen(a.length, b.length);
+  bool[] r = new bool[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = (a[i] == b[i]);
+  return r;
+}
+bool[] operator !=(string[] a, string[] b) {
+  asy__samelen(a.length, b.length);
+  bool[] r = new bool[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = !(a[i] == b[i]);
+  return r;
+}
+bool[] operator ==(pair[] a, pair[] b) {
+  asy__samelen(a.length, b.length);
+  bool[] r = new bool[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = (a[i] == b[i]);
+  return r;
+}
+bool[] operator !=(pair[] a, pair[] b) {
+  asy__samelen(a.length, b.length);
+  bool[] r = new bool[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = !(a[i] == b[i]);
+  return r;
+}
+bool[] operator ==(triple[] a, triple[] b) {
+  asy__samelen(a.length, b.length);
+  bool[] r = new bool[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = (a[i] == b[i]);
+  return r;
+}
+bool[] operator !=(triple[] a, triple[] b) {
+  asy__samelen(a.length, b.length);
+  bool[] r = new bool[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = !(a[i] == b[i]);
+  return r;
+}
+bool[] operator ==(pen[] a, pen[] b) {
+  asy__samelen(a.length, b.length);
+  bool[] r = new bool[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = (a[i] == b[i]);
+  return r;
+}
+bool[] operator !=(pen[] a, pen[] b) {
+  asy__samelen(a.length, b.length);
+  bool[] r = new bool[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = !(a[i] == b[i]);
+  return r;
+}
+
+// ---- bool[] 当条件的 \`? :\`（runarray.in:1222 的 arrayConditional）----
+// 两支都在：逐格选，回一格一样长的。有一支是 null：那一格不要，回筛出来的那些
+// （math.asy:160 拿它当"取下标"用）。挑哪一份、null 在哪一支由前端定（见 asyArrCond）。
+int[] asy__acond3(bool[] c, int[] a, int[] b) {
+  asy__samelen(c.length, a.length);
+  asy__samelen(a.length, b.length);
+  int[] r = new int[c.length];
+  for (int i = 0; i < c.length; ++i) r[i] = c[i] ? a[i] : b[i];
+  return r;
+}
+int[] asy__acondT(bool[] c, int[] a) {
+  asy__samelen(c.length, a.length);
+  int[] r;
+  for (int i = 0; i < c.length; ++i) if (c[i]) r.push(a[i]);
+  return r;
+}
+int[] asy__acondF(bool[] c, int[] b) {
+  asy__samelen(c.length, b.length);
+  int[] r;
+  for (int i = 0; i < c.length; ++i) if (!c[i]) r.push(b[i]);
+  return r;
+}
+real[] asy__acond3(bool[] c, real[] a, real[] b) {
+  asy__samelen(c.length, a.length);
+  asy__samelen(a.length, b.length);
+  real[] r = new real[c.length];
+  for (int i = 0; i < c.length; ++i) r[i] = c[i] ? a[i] : b[i];
+  return r;
+}
+real[] asy__acondT(bool[] c, real[] a) {
+  asy__samelen(c.length, a.length);
+  real[] r;
+  for (int i = 0; i < c.length; ++i) if (c[i]) r.push(a[i]);
+  return r;
+}
+real[] asy__acondF(bool[] c, real[] b) {
+  asy__samelen(c.length, b.length);
+  real[] r;
+  for (int i = 0; i < c.length; ++i) if (!c[i]) r.push(b[i]);
+  return r;
+}
+bool[] asy__acond3(bool[] c, bool[] a, bool[] b) {
+  asy__samelen(c.length, a.length);
+  asy__samelen(a.length, b.length);
+  bool[] r = new bool[c.length];
+  for (int i = 0; i < c.length; ++i) r[i] = c[i] ? a[i] : b[i];
+  return r;
+}
+bool[] asy__acondT(bool[] c, bool[] a) {
+  asy__samelen(c.length, a.length);
+  bool[] r;
+  for (int i = 0; i < c.length; ++i) if (c[i]) r.push(a[i]);
+  return r;
+}
+bool[] asy__acondF(bool[] c, bool[] b) {
+  asy__samelen(c.length, b.length);
+  bool[] r;
+  for (int i = 0; i < c.length; ++i) if (!c[i]) r.push(b[i]);
+  return r;
+}
+string[] asy__acond3(bool[] c, string[] a, string[] b) {
+  asy__samelen(c.length, a.length);
+  asy__samelen(a.length, b.length);
+  string[] r = new string[c.length];
+  for (int i = 0; i < c.length; ++i) r[i] = c[i] ? a[i] : b[i];
+  return r;
+}
+string[] asy__acondT(bool[] c, string[] a) {
+  asy__samelen(c.length, a.length);
+  string[] r;
+  for (int i = 0; i < c.length; ++i) if (c[i]) r.push(a[i]);
+  return r;
+}
+string[] asy__acondF(bool[] c, string[] b) {
+  asy__samelen(c.length, b.length);
+  string[] r;
+  for (int i = 0; i < c.length; ++i) if (!c[i]) r.push(b[i]);
+  return r;
+}
+pair[] asy__acond3(bool[] c, pair[] a, pair[] b) {
+  asy__samelen(c.length, a.length);
+  asy__samelen(a.length, b.length);
+  pair[] r = new pair[c.length];
+  for (int i = 0; i < c.length; ++i) r[i] = c[i] ? a[i] : b[i];
+  return r;
+}
+pair[] asy__acondT(bool[] c, pair[] a) {
+  asy__samelen(c.length, a.length);
+  pair[] r;
+  for (int i = 0; i < c.length; ++i) if (c[i]) r.push(a[i]);
+  return r;
+}
+pair[] asy__acondF(bool[] c, pair[] b) {
+  asy__samelen(c.length, b.length);
+  pair[] r;
+  for (int i = 0; i < c.length; ++i) if (!c[i]) r.push(b[i]);
+  return r;
+}
+triple[] asy__acond3(bool[] c, triple[] a, triple[] b) {
+  asy__samelen(c.length, a.length);
+  asy__samelen(a.length, b.length);
+  triple[] r = new triple[c.length];
+  for (int i = 0; i < c.length; ++i) r[i] = c[i] ? a[i] : b[i];
+  return r;
+}
+triple[] asy__acondT(bool[] c, triple[] a) {
+  asy__samelen(c.length, a.length);
+  triple[] r;
+  for (int i = 0; i < c.length; ++i) if (c[i]) r.push(a[i]);
+  return r;
+}
+triple[] asy__acondF(bool[] c, triple[] b) {
+  asy__samelen(c.length, b.length);
+  triple[] r;
+  for (int i = 0; i < c.length; ++i) if (!c[i]) r.push(b[i]);
+  return r;
+}
+pen[] asy__acond3(bool[] c, pen[] a, pen[] b) {
+  asy__samelen(c.length, a.length);
+  asy__samelen(a.length, b.length);
+  pen[] r = new pen[c.length];
+  for (int i = 0; i < c.length; ++i) r[i] = c[i] ? a[i] : b[i];
+  return r;
+}
+pen[] asy__acondT(bool[] c, pen[] a) {
+  asy__samelen(c.length, a.length);
+  pen[] r;
+  for (int i = 0; i < c.length; ++i) if (c[i]) r.push(a[i]);
+  return r;
+}
+pen[] asy__acondF(bool[] c, pen[] b) {
+  asy__samelen(c.length, b.length);
+  pen[] r;
+  for (int i = 0; i < c.length; ++i) if (!c[i]) r.push(b[i]);
+  return r;
+}
+
+// ---- 这一批：pen 的数乘、extension、zpart、数组上的一元数学函数与 gamma ----
+// `0.8white` 就是 `0.8 * white`（pen.h:704）：负数当 0，按颜色空间逐道乘再夹回 [0,1]。
+// DEFCOLOR（没设过颜色）、invisible、pattern 那几档不动。
+private real asy__clamp01(real x) { return x < 0 ? 0 : (x > 1 ? 1 : x); }
+pen operator *(real x, pen q) {
+  pen p = pencopy(q);
+  if (x < 0.0) x = 0.0;
+  if (!p.setcolor || p.isinvisible) return p;
+  if (p.iscmyk) {
+    p.cyan = asy__clamp01(p.cyan * x);
+    p.magenta = asy__clamp01(p.magenta * x);
+    p.yellow = asy__clamp01(p.yellow * x);
+    p.black = asy__clamp01(p.black * x);
+    return p;
+  }
+  if (p.isrgb) {
+    p.red = asy__clamp01(p.red * x);
+    p.green = asy__clamp01(p.green * x);
+    p.blue = asy__clamp01(p.blue * x);
+    return p;
+  }
+  p.gray = asy__clamp01(p.gray * x);
+  return p;
+}
+// 两条直线（各给两点）的交点（runpath.in:252）。平行时回 (infinity,infinity)。
+pair extension(pair P, pair Q, pair p, pair q) {
+  pair ac = P - Q;
+  pair bd = q - p;
+  real det = ac.x * bd.y - ac.y * bd.x;
+  if (det == 0) return (infinity, infinity);
+  return P + ((p.x - P.x) * bd.y - (p.y - P.y) * bd.x) * ac / det;
+}
+// triple 的第三道（runtriple.in:40）。xpart/ypart 那两格早就有了，这一格是漏的。
+real zpart(triple v) { return v.z; }
+
+// 一元实函数在 asy 那边都**连带一份数组版**（builtin.cc:225 的 addRealFunc 一次注册两格）：
+// `log(real[])` 逐格算，回一格一样长的。slope.asy:75 那句就是它。
+real[] sin(real[] a) {
+  real[] r = new real[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = sin(a[i]);
+  return r;
+}
+real[] cos(real[] a) {
+  real[] r = new real[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = cos(a[i]);
+  return r;
+}
+real[] tan(real[] a) {
+  real[] r = new real[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = tan(a[i]);
+  return r;
+}
+real[] asin(real[] a) {
+  real[] r = new real[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = asin(a[i]);
+  return r;
+}
+real[] acos(real[] a) {
+  real[] r = new real[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = acos(a[i]);
+  return r;
+}
+real[] atan(real[] a) {
+  real[] r = new real[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = atan(a[i]);
+  return r;
+}
+real[] exp(real[] a) {
+  real[] r = new real[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = exp(a[i]);
+  return r;
+}
+real[] log(real[] a) {
+  real[] r = new real[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = log(a[i]);
+  return r;
+}
+real[] log10(real[] a) {
+  real[] r = new real[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = log10(a[i]);
+  return r;
+}
+real[] sinh(real[] a) {
+  real[] r = new real[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = sinh(a[i]);
+  return r;
+}
+real[] cosh(real[] a) {
+  real[] r = new real[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = cosh(a[i]);
+  return r;
+}
+real[] tanh(real[] a) {
+  real[] r = new real[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = tanh(a[i]);
+  return r;
+}
+real[] asinh(real[] a) {
+  real[] r = new real[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = asinh(a[i]);
+  return r;
+}
+real[] acosh(real[] a) {
+  real[] r = new real[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = acosh(a[i]);
+  return r;
+}
+real[] atanh(real[] a) {
+  real[] r = new real[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = atanh(a[i]);
+  return r;
+}
+real[] sqrt(real[] a) {
+  real[] r = new real[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = sqrt(a[i]);
+  return r;
+}
+real[] cbrt(real[] a) {
+  real[] r = new real[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = cbrt(a[i]);
+  return r;
+}
+real[] fabs(real[] a) {
+  real[] r = new real[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = fabs(a[i]);
+  return r;
+}
+real[] abs(real[] a) {
+  real[] r = new real[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = abs(a[i]);
+  return r;
+}
+real[] expm1(real[] a) {
+  real[] r = new real[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = expm1(a[i]);
+  return r;
+}
+real[] log1p(real[] a) {
+  real[] r = new real[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = log1p(a[i]);
+  return r;
+}
+real[] pow10(real[] a) {
+  real[] r = new real[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = pow10(a[i]);
+  return r;
+}
+real[] identity(real[] a) {
+  real[] r = new real[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = identity(a[i]);
+  return r;
+}
+
+/* ---------------------------------------------------------------- 第六十六刀
+ * geometry.asy 那道坡上量出来的几条内建（`import geometry;` 31 -> …）。
+ * 都在这一批：map（runarray.in:979 的 arrayFunction）、gamma、abs2、bool 的 `^`、
+ * newton（runarray.in:1622/1670 两格）。
+ */
+
+/*
+ * map：asy 那边是**一格泛型**内建（`Tp[] map(Tp f(T), T[] a)`），我们的内建面是单态的，
+ * 所以按 base/examples 里真用到的那几组类型各写一份（colormap.asy:128 的 `int(real)`、
+ * graph3.asy:1922 的 `real(real)`、palette.asy:227 的 `pair(pair)`、
+ * geometry.asy:79 的 `real(real)` —— 那一句给的还是一个**重载集**的名字）。
+ */
+real[] map(real f(real), real[] a)
+{
+  real[] r = new real[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = f(a[i]);
+  return r;
+}
+
+int[] map(int f(int), int[] a)
+{
+  int[] r = new int[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = f(a[i]);
+  return r;
+}
+
+int[] map(int f(real), real[] a)
+{
+  int[] r = new int[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = f(a[i]);
+  return r;
+}
+
+pair[] map(pair f(pair), pair[] a)
+{
+  pair[] r = new pair[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = f(a[i]);
+  return r;
+}
+
+triple[] map(triple f(triple), triple[] a)
+{
+  triple[] r = new triple[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = f(a[i]);
+  return r;
+}
+
+string[] map(string f(string), string[] a)
+{
+  string[] r = new string[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = f(a[i]);
+  return r;
+}
+
+real[] map(real f(pair), pair[] a)
+{
+  real[] r = new real[a.length];
+  for (int i = 0; i < a.length; ++i) r[i] = f(a[i]);
+  return r;
+}
+
+/* abs2：pen.h 那一族的"模长的平方"（三维那边 three_arrows.asy 也用它） */
+real abs2(pair z) { return z.x * z.x + z.y * z.y; }
+real abs2(triple v) { return v.x * v.x + v.y * v.y + v.z * v.z; }
+
+/*
+ * bool 的 `^` 就是异或（量过 `true ^ false` 印 true）。写在这里而不是前端里：
+ * `^` 在 real 上是幂，两条规则不同型，交给重载集分。
+ */
+bool operator ^(bool a, bool b) { return a != b; }
+
+/*
+ * gamma：Lanczos（g=7、n=9 那组系数），负半轴走反射公式。刻意分成两个函数而不是
+ * 递归 —— 这个文件里名字是**顺序**可见的，一个函数看不见自己。
+ */
+private real asy__lgam(real z)
+{
+  real[] p = {
+    0.99999999999980993, 676.5203681218851, -1259.1392167224028,
+    771.32342877765313, -176.61502916214059, 12.507343278686905,
+    -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7
+  };
+  real x = z - 1.0;
+  real s = p[0];
+  for (int i = 1; i < 9; ++i) s += p[i] / (x + i);
+  real t = x + 7.5;
+  return sqrt(2.0 * pi) * (t ^ (x + 0.5)) * exp(-t) * s;
+}
+
+real gamma(real x)
+{
+  if (x >= 0.5) return asy__lgam(x);
+  return pi / (sin(pi * x) * asy__lgam(1.0 - x));
+}
+
+/*
+ * newton 的两格（runarray.in:1622 与 :1670，逐句照抄）。第一格是纯 Newton-Raphson，
+ * 第二格是"括住了根"的那一种（Newton 与二分交替，Numerical Recipes 的 rtsafe）。
+ * `verbose` 那几句打印刻意没抄 —— 它印的是 C++ 那边的精度格式，抄不像。
+ * 收敛不了时回 realMax（asy 那边是 DBL_MAX），调用处就是这么判的
+ * （geometry.asy:2476 的 `if(tx < realMax)`）。
+ */
+real newton(int iterations = 100, real f(real), real fprime(real), real x,
+            bool verbose = false)
+{
+  real fuzz = 1000.0 * realEpsilon;
+  int i = 0;
+  real diff = realMax;
+  real lastdiff = realMax;
+  bool go = true;
+  while (go) {
+    real x0 = x;
+    real dfdx = fprime(x);
+    if (dfdx == 0.0) { x = realMax; break; }
+    x -= f(x) / dfdx;
+    lastdiff = diff;
+    diff = fabs(x - x0);
+    ++i;
+    if (i == iterations) { x = realMax; break; }
+    go = diff != 0.0 && (diff < lastdiff || diff > fuzz * fabs(x));
+  }
+  return x;
+}
+
+real newton(int iterations = 100, real f(real), real fprime(real), real x1,
+            real x2, bool verbose = false)
+{
+  real fuzz = 1000.0 * realEpsilon;
+  real f1 = f(x1);
+  if (f1 == 0.0) return x1;
+  real f2 = f(x2);
+  if (f2 == 0.0) return x2;
+  if ((f1 > 0.0 && f2 > 0.0) || (f1 < 0.0 && f2 < 0.0)) {
+    abort("root not bracketed, f(x1)=" + string(f1) + ", f(x2)=" + string(f2));
+  }
+  real x = 0.5 * (x1 + x2);
+  real dxold = fabs(x2 - x1);
+  if (f1 > 0.0) { real temp = x1; x1 = x2; x2 = temp; }
+  real dx = dxold;
+  real y = f(x);
+  real dy = fprime(x);
+  int j = 0;
+  while (j < iterations) {
+    if (((x - x2) * dy - y) * ((x - x1) * dy - y) >= 0.0
+        || fabs(2.0 * y) > fabs(dxold * dy)) {
+      dxold = dx;
+      dx = 0.5 * (x2 - x1);
+      x = x1 + dx;
+      if (x1 == x) return x;
+    } else {
+      dxold = dx;
+      dx = y / dy;
+      real temp = x;
+      x -= dx;
+      if (temp == x) return x;
+    }
+    if (fabs(dx) < fuzz * fabs(x)) return x;
+    y = f(x);
+    dy = fprime(x);
+    if (y < 0.0) x1 = x; else x2 = x;
+    ++j;
+  }
+  return realMax;
+}
+
+/*
+ * dot：asy 那边 `real dot(pair,pair)` / `real dot(triple,triple)` 与 plain_markers 的
+ * `void dot(picture, …)`、three_surface 的 `void dot(picture, triple, material, …)`
+ * 在**同一个重载集**里。这两格原来写死在前端里、不参与打分，于是
+ * `dot(align, sign*dir)`（两个 triple）被 `void dot(…, triple v, material p, light …)`
+ * 接走了 —— 第二个 triple 走 `light operator cast(triple)` 落进 light 那一格，代价 1，
+ * 而写死在前端里的那格代价根本没进比较（graph3.asy:84 与 solids.asy:93 量出来的）。
+ * 挪进这个文件就跟别的候选一起打分了。
+ */
+real dot(pair a, pair b) { return a.x * b.x + a.y * b.y; }
+real dot(triple a, triple b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+
+/* ---------------------------------------------------------------- 第六十六刀（续）
+ * 三维那一层的坡上量出来的几条：sum、concat 的另外几种元素、mintimes/maxtimes，
+ * 以及 `_image` / `_labelpath` 两个**声明**（体是 abort —— 图像与沿路径排字要真的
+ * 输出层，那是另一刀；有了声明，palette / labelpath 这两个模块才装得上，别的模块
+ * 不碰这两个名字的照样能跑）。
+ */
+
+/* sum（runarray.in:1038 那一族）：bool 的那格数 true 的个数 */
+int sum(bool[] a) { int s = 0; for (int i = 0; i < a.length; ++i) if (a[i]) ++s; return s; }
+int sum(int[] a) { int s = 0; for (int i = 0; i < a.length; ++i) s += a[i]; return s; }
+real sum(real[] a) { real s = 0; for (int i = 0; i < a.length; ++i) s += a[i]; return s; }
+pair sum(pair[] a) { pair s = (0, 0); for (int i = 0; i < a.length; ++i) s += a[i]; return s; }
+triple sum(triple[] a)
+{
+  triple s = (0, 0, 0);
+  for (int i = 0; i < a.length; ++i) s += a[i];
+  return s;
+}
+
+/* concat 的另外几种元素（three_surface.asy:940 要 pen[] 那一格） */
+pen[] concat(pen[] a, pen[] b)
+{
+  pen[] r;
+  for (int i = 0; i < a.length; ++i) r.push(a[i]);
+  for (int i = 0; i < b.length; ++i) r.push(b[i]);
+  return r;
+}
+
+triple[] concat(triple[] a, triple[] b)
+{
+  triple[] r;
+  for (int i = 0; i < a.length; ++i) r.push(a[i]);
+  for (int i = 0; i < b.length; ++i) r.push(b[i]);
+  return r;
+}
+
+bool[] concat(bool[] a, bool[] b)
+{
+  bool[] r;
+  for (int i = 0; i < a.length; ++i) r.push(a[i]);
+  for (int i = 0; i < b.length; ++i) r.push(b[i]);
+  return r;
+}
+
+/*
+ * mintimes / maxtimes（runpath.in:386/395 与 runpath3d.in:337）：逐分量取到极值的
+ * **时刻**。真 asy 是在算包围盒时顺手记下来的（path.h 的 times.leftBound 那几格，解的是
+ * 导数的零点）；这一层与 min/max(path3) 同一条路子 —— 采样取极值，所以时刻是近似的
+ * （每段 32 个样点）。代价写在明处：强弯的段上时刻可能偏一点。
+ */
+private real[] asy__times(path g, bool wantMax)
+{
+  int n = length(g);
+  real[] t = {0, 0};
+  pair best = point(g, 0.0);
+  int m = n * 32;
+  for (int i = 1; i <= m; ++i) {
+    real ti = n * (i / m);
+    pair z = point(g, ti);
+    if (wantMax ? z.x > best.x : z.x < best.x) { best = (z.x, best.y); t[0] = ti; }
+    if (wantMax ? z.y > best.y : z.y < best.y) { best = (best.x, z.y); t[1] = ti; }
+  }
+  return t;
+}
+
+real[] mintimes(path g) { return asy__times(g, false); }
+real[] maxtimes(path g) { return asy__times(g, true); }
+
+private real[] asy__times3(path3 g, bool wantMax)
+{
+  int n = length(g);
+  real[] t = {0, 0, 0};
+  triple best = point(g, 0.0);
+  int m = n * 32;
+  for (int i = 1; i <= m; ++i) {
+    real ti = n * (i / m);
+    triple v = point(g, ti);
+    if (wantMax ? v.x > best.x : v.x < best.x) { best = (v.x, best.y, best.z); t[0] = ti; }
+    if (wantMax ? v.y > best.y : v.y < best.y) { best = (best.x, v.y, best.z); t[1] = ti; }
+    if (wantMax ? v.z > best.z : v.z < best.z) { best = (best.x, best.y, v.z); t[2] = ti; }
+  }
+  return t;
+}
+
+real[] mintimes(path3 g) { return asy__times3(g, false); }
+real[] maxtimes(path3 g) { return asy__times3(g, true); }
+
+/* 只有声明这一层的两个（理由见这一批开头那段注释） */
+void _labelpath(frame f, string s, string size, path g, string justify,
+                pair offset, pen p)
+{
+  abort("_labelpath 还没做（沿路径排字要真的 TeX 输出层）");
+}
+
+void _image(frame f, real[][] data, pair initial, pair final,
+            pen[] palette = new pen[], transform t = identity(), bool copy = true,
+            bool antialias = false)
+{
+  abort("_image 还没做（图像要真的输出层）");
+}
+
+void _image(frame f, pen[][] data, pair initial, pair final,
+            transform t = identity(), bool copy = true, bool antialias = false)
+{
+  abort("_image 还没做（图像要真的输出层）");
+}
+
+void _image(frame f, pen F(int, int), int width, int height,
+            pair initial, pair final, transform t = identity(),
+            bool antialias = false)
+{
+  abort("_image 还没做（图像要真的输出层）");
+}
+
+/* ---------------------------------------------------------------- 第六十七刀
+ * 三维那一层的**输出原语**（runpicture.in:296-780 那一段与 runpath3d.in:176/352）。
+ *
+ * asy 那边它们是 `f->append(new draw…3(…))`：往 picture 的节点表里塞一个三维绘图对象，
+ * 真出图是 OpenGL / PRC / v3d 那三条路干的。这一层**只记界**：三维对象的坐标进 frame
+ * 的 min3v/max3v 与 minr/maxr（后两个是 x/z、y/z 的比，投影层的 `fit` 要它 ——
+ * picture.cc:339 的 ratio），几何本身丢掉。
+ *
+ * 代价写在明处：三维图的**内容**这一层落不下来（EPS 写出来是空的），但整棵 three /
+ * graph3 / solids 树的正文能跑到底，界与投影算得出真数。真出图是另一刀。
+ */
+
+void asy__add3(frame f, triple v)
+{
+  real rx = v.z == 0 ? 0 : v.x / v.z;
+  real ry = v.z == 0 ? 0 : v.y / v.z;
+  if (!f.has3) {
+    f.has3 = true;
+    f.min3v = v; f.max3v = v;
+    f.minr = (rx, ry); f.maxr = (rx, ry);
+    return;
+  }
+  f.min3v = minbound(f.min3v, v);
+  f.max3v = maxbound(f.max3v, v);
+  f.minr = (min(f.minr.x, rx), min(f.minr.y, ry));
+  f.maxr = (max(f.maxr.x, rx), max(f.maxr.y, ry));
+}
+
+private void asy__add3(frame f, triple[] v)
+{
+  for (int i = 0; i < v.length; ++i) asy__add3(f, v[i]);
+}
+
+private void asy__add3(frame f, triple[][] v)
+{
+  for (int i = 0; i < v.length; ++i) asy__add3(f, v[i]);
+}
+
+private void asy__add3(frame f, path3 g)
+{
+  for (int i = 0; i < g.nodes.length; ++i) {
+    asy__add3(f, g.nodes[i].point);
+    asy__add3(f, g.nodes[i].pre);
+    asy__add3(f, g.nodes[i].post);
+  }
+}
+
+// 变换阵作用在单位立方体的八个角上（球/柱/盘那几个原语的界就是这么估的）
+private void asy__addbox3(frame f, real[][] t)
+{
+  for (int i = -1; i <= 1; i += 2)
+    for (int j = -1; j <= 1; j += 2)
+      for (int k = -1; k <= 1; k += 2)
+        asy__add3(f, t * ((i, j, k)));
+}
+
+/* Bezier 曲线（runpicture.in:648） */
+void _draw(frame f, path3 g, triple center = (0, 0, 0), pen[] p,
+           real opacity, real shininess, real metallic, real fresnel0,
+           int interaction = 0)
+{
+  asy__add3(f, g);
+}
+
+/* Bezier 面片与三角面片（runpicture.in:660/674） */
+void draw(frame f, triple[][] P, triple center, bool straight, pen[] p,
+          real opacity, real shininess, real metallic, real fresnel0,
+          bool lightOn, pen[] colors, int interaction, int digits,
+          bool primitive = false)
+{
+  asy__add3(f, P);
+}
+
+void drawbeziertriangle(frame f, triple[][] P, triple center, bool straight,
+                        pen[] p, real opacity, real shininess, real metallic,
+                        real fresnel0, bool lightOn, pen[] colors,
+                        int interaction, int digits, bool primitive = false)
+{
+  asy__add3(f, P);
+}
+
+/* NURBS 曲线与曲面（runpicture.in:687/697） */
+void draw(frame f, triple[] P, real[] knot, real[] weights = new real[], pen p)
+{
+  asy__add3(f, P);
+}
+
+void draw(frame f, triple[][] P, real[] uknot, real[] vknot,
+          real[][] weights = new real[][], pen[] p, real opacity,
+          real shininess, real metallic, real fresnel0, bool lightOn,
+          pen[] colors)
+{
+  asy__add3(f, P);
+}
+
+/* 球 / 柱 / 盘 / 管（runpicture.in:703-730） */
+void drawSphere(frame f, real[][] t, bool half = false, pen[] p, real opacity,
+                real shininess, real metallic, real fresnel0, bool lightOn,
+                int type)
+{
+  asy__addbox3(f, t);
+}
+
+void drawCylinder(frame f, real[][] t, pen[] p, real opacity, real shininess,
+                  real metallic, real fresnel0, bool lightOn, bool core = false)
+{
+  asy__addbox3(f, t);
+}
+
+void drawDisk(frame f, real[][] t, pen[] p, real opacity, real shininess,
+              real metallic, real fresnel0, bool lightOn)
+{
+  asy__addbox3(f, t);
+}
+
+void drawTube(frame f, triple[] g, real width, pen[] p, real opacity,
+              real shininess, real metallic, real fresnel0, bool lightOn,
+              triple min, triple max, bool core = false)
+{
+  asy__add3(f, min);
+  asy__add3(f, max);
+}
+
+/* 一个像素与三角网（runpicture.in:735/741） */
+void drawpixel(frame f, triple v, pen p, real width = 1.0)
+{
+  asy__add3(f, v);
+}
+
+void draw(frame f, triple[] v, int[][] vi, triple center = (0, 0, 0),
+          triple[] n, int[][] ni, pen[] p, real opacity, real shininess,
+          real metallic, real fresnel0, bool lightOn, pen[] c = new pen[],
+          int[][] ci = new int[][], int interaction)
+{
+  asy__add3(f, v);
+}
+
+/* 分组与变换的记号（runpicture.in:296-317）：这一层不分组，所以是空的 */
+void _begingroup3(frame f, string name, real compression, real granularity,
+                  bool closed, bool tessellate, bool dobreak, bool nobreak,
+                  triple center, int interaction) { }
+void endgroup3(frame f) { }
+void beginTransform(frame f, string geometry = "", string color = "",
+                    real duration) { }
+void endTransform(frame f) { }
+
+/* x/z 与 y/z 的比（picture.cc:339 的 ratio；投影层的 fit 要它） */
+pair minratio(frame f) { return f.minr; }
+pair maxratio(frame f) { return f.maxr; }
+
+/* path3 上的同一对（runpath3d.in:352/357，path3.cc:326）：这一层按节点与控制点取界 */
+pair minratio(path3 g)
+{
+  if (g.nodes.length == 0) { abort("minratio: 空的 path3"); return (0, 0); }
+  pair b = (0, 0);
+  bool first = true;
+  for (int i = 0; i < g.nodes.length; ++i) {
+    triple[] vs = {g.nodes[i].point, g.nodes[i].pre, g.nodes[i].post};
+    for (int k = 0; k < 3; ++k) {
+      triple v = vs[k];
+      real rx = v.z == 0 ? 0 : v.x / v.z;
+      real ry = v.z == 0 ? 0 : v.y / v.z;
+      b = first ? (rx, ry) : (min(b.x, rx), min(b.y, ry));
+      first = false;
+    }
+  }
+  return b;
+}
+
+pair maxratio(path3 g)
+{
+  if (g.nodes.length == 0) { abort("maxratio: 空的 path3"); return (0, 0); }
+  pair b = (0, 0);
+  bool first = true;
+  for (int i = 0; i < g.nodes.length; ++i) {
+    triple[] vs = {g.nodes[i].point, g.nodes[i].pre, g.nodes[i].post};
+    for (int k = 0; k < 3; ++k) {
+      triple v = vs[k];
+      real rx = v.z == 0 ? 0 : v.x / v.z;
+      real ry = v.z == 0 ? 0 : v.y / v.z;
+      b = first ? (rx, ry) : (max(b.x, rx), max(b.y, ry));
+      first = false;
+    }
+  }
+  return b;
+}
+
+/*
+ * unstraighten（runpath3d.in:176，path3.cc 的同名成员）：把直段的控制点摆回 1/3、2/3,
+ * 并把 straight 那一位清掉 —— 直段在三维那边不能进 Bezier 面片。
+ */
+path3 unstraighten(path3 p)
+{
+  path3 q;
+  q.cyclic = p.cyclic;
+  int n = p.nodes.length;
+  for (int i = 0; i < n; ++i) q.nodes.push(knot3copy(p.nodes[i]));
+  for (int i = 0; i < n; ++i) {
+    if (!q.nodes[i].straight) continue;
+    int j = (i + 1 == n) ? (p.cyclic ? 0 : i) : i + 1;
+    triple a = q.nodes[i].point;
+    triple b = q.nodes[j].point;
+    q.nodes[i].post = a + (b - a) / 3;
+    q.nodes[j].pre = a + 2 * (b - a) / 3;
+    q.nodes[i].straight = false;
+  }
+  return q;
+}
+
+/* 三维的变换作用在一整格 frame 上（three.asy:3255 的 `shift(t*position)*src`） */
+frame operator *(real[][] t, frame f)
+{
+  frame g;
+  for (int i = 0; i < f.ops.length; ++i) g.ops.push(f.ops[i]);
+  g.haslabel = f.haslabel;
+  if (f.has3) {
+    // 界要按变换过的八个角重算（轴对齐盒子变换之后不再是原来那个盒子）
+    for (int i = 0; i <= 1; ++i)
+      for (int j = 0; j <= 1; ++j)
+        for (int k = 0; k <= 1; ++k) {
+          triple c = (i == 0 ? f.min3v.x : f.max3v.x,
+                      j == 0 ? f.min3v.y : f.max3v.y,
+                      k == 0 ? f.min3v.z : f.max3v.z);
+          asy__add3(g, t * c);
+        }
+  }
+  return g;
 }
