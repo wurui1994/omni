@@ -1313,7 +1313,11 @@ export function asyCast(L, n) {
   if (t === 'pair' && (v.type === 'int' || v.type === 'real')) return asyToPair(L, v);
   // `(string) x`：asy 那边 int/real -> string 是**显式**的那一条（`string(x)` 同一份格式）。
   // base 里 `(string) default` / `(string) (width/pt)` 就是这么写的（plain_strings.asy:36）。
-  if (t === 'string' && (v.type === 'int' || v.type === 'real')) {
+  // pair / triple 也在这一条里（builtin.cc:367-372 四条 stringCast 都在）：量过
+  // `(string)((1/3,2/7))` 是 `(0.333333333333333,0.285714285714286)` —— 与 write 那份
+  // 格式一模一样（castop.h:41 的 precision(DBL_DIG) 就是 write 用的那份），所以共用 fmtStr。
+  if (t === 'string' && (v.type === 'int' || v.type === 'real'
+      || v.type === 'pair' || v.type === 'triple')) {
     return { code: asyFmtStr(L, v.type, v.code), type: 'string' };
   }
   // `(T) x` 是唯一收 `operator ecast` 的位置（第二十七刀）；内建那几条在上面 —— 量过

@@ -4072,6 +4072,42 @@ void userBoxX3(real min, real max, binop m=min, binop M=max) { … }   // :428
 数字：`import plain;` 113 → 111。`import graph;` 152 不动。tests/asy 171 条、
 tests/run.js 91 条全绿。新用例 `cases/96-shadow-fnty`。
 
+### 字符串与数之间那四对显式转换：解析器写在 asy 这一侧
+
+`builtin.cc:365-372` 一共八条：`(string) int/real/pair/triple` 与
+`(int)/(real)/(pair)/(triple) string`。前四条是 `castop.h:39` 的 `stringCast<T>` ——
+`precision(DBL_DIG)` 之后 `<<`，也就是 15 位有效数字，与 `write` 用的是同一份格式，
+所以这一层直接复用 `asyFmtStr`（`(string) pair` 只是把 `asyCast` 里那张白名单从
+int/real 扩到 int/real/pair/triple）。量过 `(string)((1/3,2/7))` 与 `write((1/3,2/7))`
+逐字节相同。
+
+后四条是 `castop.h:48` 的 `castString<T>`，走 `lexical.h:14` 的 `lexical::cast`：
+`istringstream >> value`，之后要 `(is >> ws).eof()` —— 前后的空白可以有，别的字符一个
+都不许剩。这一格**没有**做成核心方言的新算符，而是把解析器用 asy 写在
+`stage0/lib/asy/asy_builtins.asy` 里（`real operator ecast(string)` 那一族）。理由：
+加一条 `(sreal E)` 要动 OIR 加四个消费方（interp / js / c / llvm 各一份宿主符号），
+而 `strtod` 这件事**能在这一层做到位**——
+
+- 尾数按整数精确累加（超过 2^53 就 abort），10 的幂只用 0..22 这一段（`10^22 = 2^22·5^22`，
+  `5^22 < 2^53`，在 double 里精确）。于是"精确的尾数 × 一次精确的 10^k"是**一次** IEEE
+  运算，与 strtod 的正确舍入是同一个答案。用例里 `(real)((string) (1/3)) == 1/3` 钉着这条。
+- 出了那一段（有效数字超 2^53、或 `|净指数| > 22`）要正确舍入就得做长除法：这一刀
+  **不做**，当场 abort 并把边界写在消息里。`(real) "0x10"`（C++11 的 `>>` 收十六进制
+  浮点，asy 给 16）同样不收。
+
+pair / triple 那两条照 `pair.h:208` / `triple.h:310` 的 `operator >>`：括号可选，分量之间
+是逗号**或**空白，无括号的 pair 可以只给 x（`(pair) "1"` 是 `(1,0)`）。逐条量过 20 种写法
+（含 `(pair) "1 2"`、`(pair) "(1)"`、`(triple) "1"` 这三种**转不动**的 —— `triple` 那条是
+它 peek 到 eof 就置了 failbit）。边界：逗号与空白**混着**写的那种（`(triple) "(1,2 3)"`，
+asy 收）这一刀不收，一次只按一种切。
+
+还有一处差别写在明处：asy 转不动时 push 的是 `Default`，那一格**用起来**才报
+"Trying to use uninitialized value" 并退 1；这一层没有 Default，所以是**当场** abort ——
+"转坏了但没用到"在 asy 那边不响，在这里响。
+
+数字：`import plain;` 111 → 103。`import graph;` 152 不动。tests/asy 172 条、
+tests/run.js 91 条全绿。新用例 `cases/97-str-cast`。
+
 ## 后果与代价
 
 

@@ -1720,6 +1720,158 @@ void _eval(string s, bool embedded, bool interactiveWrite=false) {
 real[][][] _schur(real[][] a) { abort("_schur 还没做（真 asy 用的是 Eigen）"); return new real[][][]; }
 pair[][][] _schur(pair[][] a) { abort("_schur 还没做（真 asy 用的是 Eigen）"); return new pair[][][]; }
 
+// ---------------------------------------------------------------- 字符串 -> 数
+// asy 那边是 castop.h:48 的 castString<T>，走 lexical.h:14 的 lexical::cast：
+// `istringstream >> value`，之后要 `(is >> ws).eof()` —— 前后的空白可以有，别的字符一个
+// 都不许剩。转不动时它 push 的是 Default，那一格**用起来**才报 "Trying to use
+// uninitialized value" 并退 1。这一层没有 Default 这一格，所以是当场 abort：差别是
+// "转坏了但没用到"在 asy 那边不响，在这里响。
+// 量出来的（asy -noV，逐条）：
+//   (real)"  3.5  "=3.5  (real)"+3.5"=3.5  (real)".5"=0.5  (real)"5."=5
+//   (int)"007"=7  (int)"+7"=7  (real)"1e10"=10000000000
+//   转不动：(int)"42abc" (int)"1.5" (real)"abc" (real)"1e400" (real)"inf" (real)"nan"
+//   (real)"0x10"=16 —— C++11 的 `>> double` 收十六进制浮点。这一刀**不收**（下面写了）。
+private bool asy__isws(string c) {
+  return c == " " || c == "\t" || c == "\n" || c == "\r";
+}
+private int asy__dig(string s, int i) {
+  if (i < 0 || i >= length(s)) return -1;
+  return find("0123456789", substr(s, i, 1));
+}
+private int asy__skipws(string s, int i) {
+  while (i < length(s) && asy__isws(substr(s, i, 1))) ++i;
+  return i;
+}
+// 10^k，k 在 0..22。这一段里 10^k 在 double 里是**精确**的（10^22 = 2^22·5^22，
+// 5^22 < 2^53），所以"精确的尾数 × 一次精确的 10^k"就是一次 IEEE 运算 —— 与 strtod 的
+// 正确舍入是同一个答案。出了这一段（尾数超 2^53 或 |指数| > 22）要正确舍入就得做长除法，
+// 那一格这一刀不做：abort，把边界说在明处。
+private real asy__pow10(int k) {
+  real p = 1;
+  for (int i = 0; i < k; ++i) p = p * 10;
+  return p;
+}
+// `(real) s`。按上面那条文法扫一遍：[空白] [+-] (数字[.数字] | .数字) [eE[+-]数字] [空白]。
+real operator ecast(string s) {
+  int n = length(s);
+  int i = asy__skipws(s, 0);
+  bool neg = false;
+  if (i < n && (substr(s, i, 1) == "+" || substr(s, i, 1) == "-")) {
+    neg = substr(s, i, 1) == "-";
+    ++i;
+  }
+  real mant = 0;
+  int frac = 0;
+  bool any = false;
+  bool big = false;
+  while (asy__dig(s, i) >= 0) {
+    if (mant > 900719925474099) big = true;
+    mant = mant * 10 + asy__dig(s, i);
+    any = true;
+    ++i;
+  }
+  if (i < n && substr(s, i, 1) == ".") {
+    ++i;
+    while (asy__dig(s, i) >= 0) {
+      if (mant > 900719925474099) big = true;
+      mant = mant * 10 + asy__dig(s, i);
+      ++frac;
+      any = true;
+      ++i;
+    }
+  }
+  if (!any) abort("把 '" + s + "' 当 real：这里没有数字（asy 那边这一格是 Default，用起来才报错）");
+  int ex = 0;
+  if (i < n && (substr(s, i, 1) == "e" || substr(s, i, 1) == "E")) {
+    ++i;
+    bool eneg = false;
+    if (i < n && (substr(s, i, 1) == "+" || substr(s, i, 1) == "-")) {
+      eneg = substr(s, i, 1) == "-";
+      ++i;
+    }
+    if (asy__dig(s, i) < 0) abort("把 '" + s + "' 当 real：指数那一段没有数字");
+    while (asy__dig(s, i) >= 0) { ex = ex * 10 + asy__dig(s, i); ++i; }
+    if (eneg) ex = -ex;
+  }
+  i = asy__skipws(s, i);
+  if (i != n) abort("把 '" + s + "' 当 real：'" + substr(s, i, n - i)
+                    + "' 这一段剩下了（asy 要整串都是一个数）");
+  int net = ex - frac;
+  if (big) abort("把 '" + s + "' 当 real：有效数字超过 2^53 —— 要正确舍入得做长除法，这一刀还没做");
+  if (net > 22 || net < -22) abort("把 '" + s + "' 当 real：10^" + (string) net
+                                   + " 在 double 里不精确 —— 要正确舍入得做长除法，这一刀还没做");
+  real v = net >= 0 ? mant * asy__pow10(net) : mant / asy__pow10(-net);
+  return neg ? -v : v;
+}
+// `(int) s`。C++ 的 `>> Int` 只收十进制整数：[空白] [+-] 数字 [空白]。小数点、指数、
+// 十六进制都不收（量过 (int)"1.5" 转不动）。溢出那一格 asy 也是转不动，这里 abort。
+int operator ecast(string s) {
+  int n = length(s);
+  int i = asy__skipws(s, 0);
+  bool neg = false;
+  if (i < n && (substr(s, i, 1) == "+" || substr(s, i, 1) == "-")) {
+    neg = substr(s, i, 1) == "-";
+    ++i;
+  }
+  int v = 0;
+  int digits = 0;
+  while (asy__dig(s, i) >= 0) {
+    v = v * 10 + asy__dig(s, i);
+    ++digits;
+    ++i;
+  }
+  if (digits == 0) abort("把 '" + s + "' 当 int：这里没有数字（asy 那边这一格是 Default，用起来才报错）");
+  if (digits > 18) abort("把 '" + s + "' 当 int：位数超过 18 —— 溢出那一格这一刀不做");
+  i = asy__skipws(s, i);
+  if (i != n) abort("把 '" + s + "' 当 int：'" + substr(s, i, n - i)
+                    + "' 这一段剩下了（asy 要整串都是一个整数）");
+  return neg ? -v : v;
+}
+// `(pair) s` / `(triple) s`：asy 那边是 pair.h:208 / triple.h:310 的 `operator >>`，
+// 括号可选、分量之间是逗号**或**空白，最后还要 lexical::cast 那条"整串都吃掉"。
+// 量出来的（逐条）：(pair)"1"=(1,0) (pair)"1,2"=(1,2) (pair)"1 "=(1,0) (pair)"(1 2)"=(1,2)
+//   (pair)"( 1 , 2 )"=(1,2)；转不动：(pair)"1 2" (pair)"(1)" (pair)"(1,2" (pair)"1,"
+//   (triple)"1,2,3"=(1,2,3) (triple)"(1 2 3)"=(1,2,3) (triple)"(1,2 3)"=(1,2,3)；
+//   转不动：(triple)"1"（无括号时它 peek 到 eof 就置了 failbit）(triple)"(1,2)"
+// **这一刀的边界**：逗号与空白**混着**用的那种（"(1,2 3)"）不收 —— 一次只按一种切。
+private string[] asy__parts(string s, bool paren) {
+  string[] a = split(s, ",");
+  if (a.length > 1 || !paren) return a;
+  return split(s, "");
+}
+private string asy__trim(string s) {
+  int b = asy__skipws(s, 0);
+  int e = length(s);
+  while (e > b && asy__isws(substr(s, e - 1, 1))) --e;
+  return substr(s, b, e - b);
+}
+pair operator ecast(string s) {
+  string t = asy__trim(s);
+  bool paren = length(t) > 0 && substr(t, 0, 1) == "(";
+  if (paren) {
+    if (substr(t, length(t) - 1, 1) != ")") abort("把 '" + s + "' 当 pair：左括号没有配对的右括号");
+    t = substr(t, 1, length(t) - 2);
+  }
+  string[] a = asy__parts(t, paren);
+  if (a.length == 2) return ((real) a[0], (real) a[1]);
+  if (a.length == 1 && !paren) return ((real) a[0], 0);
+  abort("把 '" + s + "' 当 pair：切出来 " + (string) a.length + " 个分量，要 2 个"
+        + "（无括号时也可以只写 x，那时 y=0）");
+  return (0, 0);
+}
+triple operator ecast(string s) {
+  string t = asy__trim(s);
+  bool paren = length(t) > 0 && substr(t, 0, 1) == "(";
+  if (paren) {
+    if (substr(t, length(t) - 1, 1) != ")") abort("把 '" + s + "' 当 triple：左括号没有配对的右括号");
+    t = substr(t, 1, length(t) - 2);
+  }
+  string[] a = asy__parts(t, paren);
+  if (a.length == 3) return ((real) a[0], (real) a[1], (real) a[2]);
+  abort("把 '" + s + "' 当 triple：切出来 " + (string) a.length + " 个分量，要 3 个");
+  return (0, 0, 0);
+}
+
 
 
 
