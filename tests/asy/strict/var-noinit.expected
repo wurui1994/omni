@@ -1,0 +1,1 @@
+`var` 的声明没有初值 —— 那推不出类型（asy 那边报 "inferred variable declaration without initializer"）

@@ -361,6 +361,7 @@ class AsyLower {
     this.globals = new Map();
     // 按声明顺序攒起来的 `(global sym 类型)`，最后发到模块层
     this.gdecls = [];
+    this.probeMsg = null;
     // 正在降级**文件级**的语句（`(main …)` 那一层）。vardec 要靠它分清
     // "这是个全局"还是"这是 main 里某个块的局部量"。
     this.fileLevel = false;
@@ -999,6 +1000,38 @@ class AsyLower {
    * struct 里也有 `who()`，方法体里调到的是后者）。
    * 门外的一条：把方法当值取出来（`int f() = a.late;` asy 收）—— 那要闭包（绑住接收者）。
    */
+  /**
+   * 这个类型节点是不是**光一个 `var`**（第四十一刀）。asy 的 `var` 是"从初值推"，
+   * 不是一个类型：量过 `var a=1, b=2.5;` 两个名字各推各的（int 与 real），
+   * `var z;` 那边直接报 "inferred variable declaration without initializer"。
+   */
+  isVarTy(node) {
+    if (!isList(node) || head(node) !== 'name-ty') return false;
+    return this.plainName(node.items[1]) === 'var';
+  }
+
+  /**
+   * 试着降一遍这个表达式、只为了拿它的类型（`var` 用）。诊断全部回滚，`pre` 换成一个
+   * 扔掉的数组（表达式里可能要落临时量），所以这一趟对外面**只多不少**：生成的构造函数与
+   * 数组工厂都是按名字记住的，真降那一遍会用同一份。推不出来（那一句本来就有错）回 null。
+   */
+  probeTy(node) {
+    if (node === undefined || node === null) return null;
+    const mark = this.diags.mark();
+    const savePre = this.pre;
+    this.pre = [];
+    const v = this.expr(node);
+    this.pre = savePre;
+    // 推不动的时候那一遍里报的是什么：留一句给上面那条 nope 用 —— 不留的话
+    // 「`var` 的初值推不动」会盖住真正的原因（量过一条：plain_bounds.asy:657 的
+    // `new freezableBounds` 推不动，真正的门槛是体里 `addPath=addPathToEmptyArray;`
+    // 那句「把方法取出来当值」，跟 `var` 没关系）。
+    this.probeMsg = this.diags.items.length > mark ? this.diags.items[mark].msg : null;
+    this.diags.rollback(mark);
+    if (v === null || v.code === null || v.type === undefined) return null;
+    return v.type;
+  }
+
   recordDec(n, at, outerAl) {
     const nm = isAtom(n.items[1]) ? n.items[1].value : null;
     if (nm === null) return this.nope(n, '没有名字的 struct');
@@ -1166,7 +1199,11 @@ class AsyLower {
           && this.plainName(r.items[1].items[1]) === nm) {
         return this.nope(r, `struct ${nm} 里放一个 ${nm} 字段（自引用）`);
       }
-      const ft = this.type(r.items[1], `struct ${nm} 的字段`);
+      // `var` 的字段（第四十一刀）：类型从初值推，而字段类型要在**声明遍**就定下来，
+      // 所以这里是"试着降一遍初值、只要它的类型"（probeTy）。plain_bounds.asy:657 的
+      // `private var base=new freezableBounds;` 就是这一条。
+      const isVarFld = this.isVarTy(r.items[1]);
+      const ft = isVarFld ? 'var' : this.type(r.items[1], `struct ${nm} 的字段`);
       if (ft === null) return null;
       for (const d of this.flat(r.items[2], 'decids')) {
         if (!isList(d) || head(d) !== 'decid') return this.err(d, '认不出的字段声明');
@@ -1181,8 +1218,21 @@ class AsyLower {
             && (!isList(start) || head(start) !== 'decidstart' || start.items.length !== 2)) {
           return this.nope(start, '带维度或形参表的字段名');
         }
-        const fty = isFnFld ? this.fnTypeOf(ft, start.items[2], start) : ft;
+        let fty = isFnFld ? this.fnTypeOf(ft, start.items[2], start) : ft;
         if (fty === null) return null;
+        if (isVarFld) {
+          if (isFnFld) return this.nope(start, '`var` 后面跟形参表的字段');
+          if (d.items[2] === undefined) {
+            return this.err(d, '`var` 的字段没有初值 —— 那推不出类型（asy 那边报'
+              + ' "inferred variable declaration without initializer"）');
+          }
+          fty = this.probeTy(d.items[2]);
+          if (fty === null || fty === 'void') {
+            const why = this.probeMsg === null ? '' : `，那一遍里报的是「${this.probeMsg}」`;
+            return this.nope(d, '这一句 `var` 字段的初值推不动（声明遍里推得动的只有不依赖'
+              + `别的成员的写法 —— 那时候这个 struct 的成员还没铺好${why}）`);
+          }
+        }
         // 函数类型的字段（`fill2 fill2;`，plain_filldraw.asy:93）：方言那边现在收
         // `(fnty …)` 当字段类型了，五条腿上都是"存一个句柄"。没写默认值就不发 fldset ——
         // `(cnew …)` 已经把每一格铺成零值了（函数值那一格的零值是空引用，见 recNew）。

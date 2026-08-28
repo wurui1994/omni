@@ -3341,6 +3341,56 @@ struct 体里的算符重载、`:657` 的 `var`、`plain.asy:67` 返回函数类
 `tests/bootstrap`。只动 `frontend-asy/`（decls.js、calls.js、lower.js），tests/sexpr
 跳掉 —— 方言与后端没碰。
 
+### `var`：类型从初值来，**推的地方**是声明遍
+
+`var` 不是一个类型，是"从初值推"。量过真 asy（`asy -noV`）：
+
+- `var a=1, b=2.5;` 印 `1` 与 `2.5` —— **每个名字各推各的**，不是一句一个类型；
+- `struct S { var n = 5; } S s; write(s.n);` 印 `5`（字段也收）；
+- `void f() { var q = 7; write(q); }` 印 `7`（局部量也收）；
+- `var z;` 报 `inferred variable declaration without initializer` 并退 1。
+
+三处（文件级、struct 字段、函数体）在这一层落到两个地方。局部量最简单：`asyVardec`
+里那条 `isVar` 分支把初值降一遍，`lit.type` 就是这一格的类型，`lit.code` 就是初值 ——
+零值那一串 `else if` 一条都不走（`var` 一定有初值）。
+
+**文件级那份的类型不能等到降那一句才定。** 这是这一刀里唯一一处结构性的话：一个单元的
+正文里，**函数体比文件级语句先降**（`asyBodyPass` 的顺序 —— 方法体、文件级函数体，最后
+才是剩下那些语句）。所以
+
+```asy
+var a=4;
+int h() { return a+1; }   // h 的体先降 —— 那时候 a 必须已经有类型
+write(h());
+```
+
+要通，`a` 的类型必须在**声明遍**（`asyGlobalNames`）里就定好。于是那一遍里加了一句
+`probeTy(初值)`：试着把初值降一遍、只要类型、代码与诊断都丢掉。位置临时摆成这一项的
+位置（`L.at = at`），所以"初值里只看得见前面声明的东西"这条顺序规矩照旧 —— 与
+`recVis` / `gvarHere` / `visible()` 是同一条。降到那一句时（`asyVardec` 的
+`g.ok` 分支）再把初值往 `g.type` 上收一次：两遍推出来的应该是同一个类型，收一次是为了
+万一不是时报错话，而不是发一句类型不对的 `(set …)`。
+
+struct 字段走的是 `recordBody` 里的同一个 `probeTy`。**推不动的时候要把原因说出来**：
+`plain_bounds.asy:657` 的 `private var base=new freezableBounds;` 到今天还在门外，而
+真正的门槛不是 `var` —— 是 `freezableBounds` 体里那句 `addPath=addPathToEmptyArray;`
+（把**方法取出来当值**，还没做）。所以 `probeTy` 留了一格 `probeMsg`（丢掉的那一批诊断
+里的第一条），nope 的话里带上「那一遍里报的是「未声明的变量 'addPathToEmptyArray'」」。
+不带这一句的话，那条 nope 会把原因指到 `var` 上 —— 那是在自己的账上记假账。
+
+`var z;`（没有初值）是 **err，不是 nope**：asy 自己就不收它，收下来就是比 asy 多接受
+一门语言。钉在 `tests/asy/strict/var-noinit.*`（真 asy 也拒）。
+
+外面的数：`import plain;` 4 条 → **还是 2 条**（这一刀没让它掉 —— 657 那条的门槛在
+「方法当值」上，见上），`import graph;` 182 条不变。剩下那两条是
+`plain_bounds.asy:657`（方法当值）与 `plain.asy:67`（返回类型自己是函数类型）。
+
+跑的轴：`tests/asy`（149 passed，115.6s —— 多的两条是 `cases/75-var` 与
+`strict/var-noinit`）、`tests/run.js`（91 passed，36.5s —— 文件级那张表动了，REPL 跨批
+也量了一遍：`var a=1;` 一批、`var b=a+2.5;` 下一批，印 3.5）、`tests/bootstrap`。
+只动 `frontend-asy/`（lower.js、decls.js、stmts.js），tests/sexpr 跳掉 —— 方言与后端
+没碰。
+
 
 
 

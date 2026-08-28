@@ -752,6 +752,17 @@ export function asyGlobalNames(L, n, at) {
       L.at = keep;
       if (al !== null && asyIsFn(al.t)) ty = al.t;
     }
+    // `var`（第四十一刀）：类型要从初值推，而这一遍就是唯一能推的地方 —— 函数体比
+    // 文件级语句先降级（bodyPass 的顺序），所以等到 vardec 那一遍再定类型，函数体里
+    // 引用它的那一句已经找不到类型了。推的时候位置就是这一项的位置，于是"初值里只看得见
+    // 前面声明的东西"这条顺序规矩照旧（probeTy 拿完类型把代码和诊断都丢掉）。
+    if (base === 'var' && arr + dims === 0 && head(start) === 'decidstart') {
+      const keep = L.at;
+      L.at = at;
+      const pt = L.probeTy(d.items[2]);
+      L.at = keep;
+      if (pt !== null && pt !== 'void') ty = pt;
+    }
     const ok = ty !== null;
     const g = { sym: `asy__g${L.gdecls.length}_${nm}`, type: ty, at, ok };
     const list = L.globals.has(nm) ? L.globals.get(nm) : [];

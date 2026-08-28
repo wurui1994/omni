@@ -327,7 +327,11 @@ export function asyForPart(L, n, ret) {
 
 /** `int a = 1, b;`：没有初值的按类型给零值 —— asy 也是这么定的 */
 export function asyVardec(L, n) {
-  const base = L.type(n.items[1], '变量声明');
+  // `var`（第四十一刀）：不是一个类型，是"从初值推"。每个名字**各推各的** ——
+  // 量过 `var a=1, b=2.5;` 出来是 int 与 real；`var z;` 那边报
+  // "inferred variable declaration without initializer" 并退 1。
+  const isVar = L.isVarTy(n.items[1]);
+  const base = isVar ? 'var' : L.type(n.items[1], '变量声明');
   if (base === null) return null;
   if (base === 'void') return L.err(n, 'void 变量');
   const out = [];
@@ -363,7 +367,19 @@ export function asyVardec(L, n) {
     // 构造调用 `A(…)`）量过不参与这一句，而换掉它的**文件级** `A operator init()`
     // 还在门外（funcSig 里拦着，`bad/ctor-toplevel` 钉着）。
     let init = null;
-    if (L.isRec(t)) {
+    if (isVar) {
+      if (d.items[2] === undefined) {
+        return L.err(start, '`var` 的声明没有初值 —— 那推不出类型（asy 那边报'
+          + ' "inferred variable declaration without initializer"）');
+      }
+      const lit = L.expr(d.items[2]);
+      if (lit === null) return null;
+      if (lit.code === null || lit.type === 'void' || lit.type === undefined) {
+        return L.nope(d, `\`var ${nm}\` 的初值（这一句推不出类型）`);
+      }
+      t = lit.type;
+      init = lit.code;
+    } else if (L.isRec(t)) {
       init = L.recInit(start, t);
       if (init === null) return null;
     } else if (asyIsFn(t)) {
@@ -375,7 +391,7 @@ export function asyVardec(L, n) {
       init = asyIsArr(t) ? `(anew ${asyCore(t)} (int 0))` : ZERO.get(t);
       if (init === undefined) return L.nope(start, `${t} 的变量声明（这一刀给不出它的零值）`);
     }
-    if (d.items[2] !== undefined) {
+    if (!isVar && d.items[2] !== undefined) {
       // `T[] a = {1,2,3}`：花括号初值自己没有类型，元素类型从左边的声明来
       const raw = d.items[2];
       const lit = asyIsArr(t) && isList(raw) && head(raw).startsWith('arrayinit')
@@ -391,6 +407,14 @@ export function asyVardec(L, n) {
     // 记录要 `new`、数组要 `anew`，零就是 null，一读就是 null reference。
     const g = L.fileLevel && L.scopes.length === 1 ? L.gvarAt(nm) : null;
     if (g !== null && g.ok) {
+      // `var` 的文件级那份：类型是声明遍推出来的（globalNames 里那一段），这里把初值
+      // 往那个类型上收一次 —— 两遍推出来的应该是同一个，收一次是为了万一不是时报错话
+      // 而不是发一句类型不对的 `(set …)`。
+      if (isVar && g.type !== t) {
+        const v = L.coerce({ code: init, type: t }, g.type, d, `'${nm}' 的初值`);
+        if (v === null) return null;
+        init = v.code;
+      }
       const need = d.items[2] !== undefined || L.isRec(t) || asyIsArr(t);
       if (need) out.push(`(set ${g.sym} ${init})`);
       continue;
