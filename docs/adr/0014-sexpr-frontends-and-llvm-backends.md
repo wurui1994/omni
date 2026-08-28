@@ -3631,6 +3631,42 @@ asy 那边赋值**是表达式**，值就是赋进去的那一个。base 里两�
 数字：`import plain;` 300 → 292。tests/asy 154 条、tests/run.js 91 条全绿。
 新用例 `cases/82-capture`（与真 asy 逐字节一致）。
 
+### 写到 file 上：攒成整行才交给 print；顺带撞上"双引号不认转义"
+
+`write` 那一族在参考实现里是 `builtin.cc:474` 的 `addWrite`，形参是
+`void write(file file=stdout, string s="", T x, void suffix(file)=endl, ...)`。
+核心方言这一层只有 `(print …)`，而 `print` **自己补换行** —— 所以 `write(f, "a")`
+这种"不换行地写一截"没法直接映上去。这一刀的做法是把 `file` 变成一个带缓冲的结构体：
+
+```asy
+struct file { int fd; string buf; }
+```
+
+写进去的东西先接到 `f.buf` 上，攒出 `\n` 才把那一整行交给 `print`。面向行的输出因此
+与 asy 逐字节一样；代价是**一行没写完就退出时那一截会丢**（asy 那边退出前会 flush），
+这条差别记在这儿。`input()`/`output()`/`nullFile()`（`runfile.in:45/80/149`）这一层只给
+stdin/stdout/丢弃三个句柄，带名字的真文件要等方言里有 IO；`flush`/`precision` 是空壳。
+
+suffix 那一族（`none`/`endl`/`newl`/`tab`/`comma`）就是 `void(file)` 的普通函数值，
+`asy__suffix` 是它的 typedef。两个坑：
+
+- **默认的 suffix 是 `none`，不是 `endl`。** 我按签名想当然写了 `endl`，量出来
+  `write(f,"abc")` 不补换行 —— 带 `file` 的这一支与不带 `file` 的 `write(x)` 不是一条。
+- `void none(file)` 必须定义在用它当默认值的那些重载**之前**：默认值的可见性是按位置来的。
+
+`write(f, endl)` 是单独一支（只给 suffix，不给值），得有 `void write(file, asy__suffix)`
+这个重载，否则重载集里最近的是 `write(file, T x)`，报出来的是"实参不能是结构体"。
+bool 那一支照 asy 补尾空格（`"true "` / `"false "`，与 `string(bool)` 同一条）；
+asy 自己**没有** `string(bool)`，所以这儿只能自己拼。
+
+真正花时间的是最后那个 bug：输出成了 `one\nntwo-3\n`，每行头上多一个 `n`。原因不在缓冲
+逻辑，在字面量 —— **asy 的双引号串不处理转义**，`"\n"` 是两个字节 `\` 和 `n`
+（`length("one\n")` 在真 asy 是 5，`find(b,"\n")` 找到的是那个反斜杠），要真换行得用
+单引号串 `'\n'`。我们的词法器这一条与 asy 一致，是我写 prelude 时按 C 的习惯写错了。
+
+数字：`import plain;` 292 → 281，`import graph;` 153 → 151。tests/asy 155 条、
+tests/run.js 91 条全绿。新用例 `cases/83-write-file`（与真 asy 逐字节一致）。
+
 ## 后果与代价
 
 

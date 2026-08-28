@@ -35,7 +35,8 @@
 // 那一大片都在 plain 里。类型桩让声明过得去；真去读写它的地方会明确报"没有方法"，
 // 不会悄悄给错答案。
 struct file {
-  int fd;
+  int fd;         // 0 = stdin、1 = stdout（这一层只认这两个）
+  string buf;     // 还没成整行的那一截
 }
 
 // ---------------------------------------------------------------- 数与数组
@@ -1257,6 +1258,68 @@ void nowarn(string s) { }
 void warning(string s, string t, bool position=false) {
   write("warning: " + t);
 }
+
+// (1) `write(file, …)` 那一族（builtin.cc:474 的 addWrite：
+// `void write(file file=stdout, string s="", T x, void suffix(file)=endl, ... T[])`）。
+// 核心方言只有 `(print …)`，而 print 自己补换行 —— 所以这里把写进去的东西**攒在
+// file.buf 里**，攒出整行才交给 print。这样面向行的输出与 asy 逐字节一样；
+// 一行没写完就退出时那一截会丢，这条差别记在这儿（asy 那边会 flush 出去）。
+typedef void asy__suffix(file);
+void flush(file f) { }
+void asy__fput(file f, string s) {
+  f.buf = f.buf + s;
+  if (f.fd != 1) return;
+  // 注意：asy 的双引号串**不处理转义**（"\n" 是两个字节 \ 和 n），要真换行得用单引号串。
+  int k = find(f.buf, '\n');
+  while (k >= 0) {
+    write(substr(f.buf, 0, k));
+    f.buf = substr(f.buf, k + 1, length(f.buf) - k - 1);
+    k = find(f.buf, '\n');
+  }
+}
+void none(file f) { }
+void endl(file f) { asy__fput(f, '\n'); }
+void newl(file f) { asy__fput(f, '\n'); }
+void tab(file f) { asy__fput(f, '\t'); }
+void comma(file f) { asy__fput(f, ","); }
+// 只给一个 suffix：`write(f, endl)` —— asy 那边是 `write(file, suffix=endl)` 这一支。
+void write(file f, asy__suffix suffix) { suffix(f); }
+void write(file f, string x, asy__suffix suffix=none) { asy__fput(f, x); suffix(f); }
+void write(file f, int x, asy__suffix suffix=none) { asy__fput(f, string(x)); suffix(f); }
+void write(file f, real x, asy__suffix suffix=none) { asy__fput(f, string(x)); suffix(f); }
+void write(file f, bool x, asy__suffix suffix=none) {
+  // asy 的 bool 输出**自带一个尾空格**（量过：`write(f,true,endl)` 是 "true \n"）；
+  // 注意 asy 里并没有 string(bool)，所以这儿只能自己拼。
+  asy__fput(f, x ? "true " : "false "); suffix(f);
+}
+void write(file f, pair x, asy__suffix suffix=none) {
+  asy__fput(f, "(" + string(x.x) + "," + string(x.y) + ")"); suffix(f);
+}
+void write(file f, triple x, asy__suffix suffix=none) {
+  asy__fput(f, "(" + string(x.x) + "," + string(x.y) + "," + string(x.z) + ")"); suffix(f);
+}
+void write(file f, string s, int x, asy__suffix suffix=none) {
+  asy__fput(f, s); write(f, x, suffix);
+}
+void write(file f, string s, real x, asy__suffix suffix=none) {
+  asy__fput(f, s); write(f, x, suffix);
+}
+void write(file f, string s, pair x, asy__suffix suffix=none) {
+  asy__fput(f, s); write(f, x, suffix);
+}
+void write(file f, string s, string x, asy__suffix suffix=none) {
+  asy__fput(f, s); write(f, x, suffix);
+}
+// input()/output()（runfile.in:45/80）：这一层只给 stdin/stdout 两个句柄，
+// 带名字的真文件还没有（读写文件要方言里的 IO）。
+file input(string name="", bool check=true, string comment="#", string mode="") {
+  file f; f.fd = 0; return f;
+}
+file output(string name="", bool update=false, string comment="#", string mode="") {
+  file f; f.fd = 1; return f;
+}
+file nullFile() { file f; f.fd = -1; return f; }
+int precision(file f, int digits=0) { return digits; }
 
 // (1) `transform * path`：逐个结点搬（transform 是仿射，pre/point/post 都搬）。
 // runpath.in 的 `path operator *(transform t, path p)` 就是这件事。
