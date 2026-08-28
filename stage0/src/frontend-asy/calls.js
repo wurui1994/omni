@@ -969,6 +969,14 @@ export function asyFit(L, cand, raw) {
   const isVar = cand.ps.length > 0 && cand.ps[rAt].rest === true;
   const elem = isVar ? asyElem(cand.ps[rAt].type) : null;
   const pack = [];
+  // 进可变那一格的包要花多少（回 -1 = 这个候选接不住）。`... a` 是整份接进去，类型得
+  // 一模一样 —— asy 不给这一格做元素级的提升；散着写的降到元素型，一次转换算 1。
+  const packCost = (r) => {
+    if (r.v.over !== undefined) return -1;   // 重载集当可变实参：另一刀
+    if (r.spread === true) return r.v.type === cand.ps[rAt].type ? 0 : -1;
+    const ec = asyConvCost(r.v.type, elem);
+    return ec < 0 && L.castFor(elem, r.v.type, false) !== null ? 1 : ec;
+  };
   // 一格一格试：接得住回代价（0 或 1），接不住回 null。
   // "接不住能不能跳过这一格"由外面那个循环定（asy 的 matchArgument）。
   const tryAt = (r, at) => {
@@ -1001,22 +1009,17 @@ export function asyFit(L, cand, raw) {
       // 可变那一格不能用名字给（asy 那边 `xs=` 也不认它，量过报 no matching function）
       if (isVar && at === rAt) return null;
     }
-    // 位置实参落到可变那一格上（或更后面）：进那个包，不占槽
-    if (isVar && r.key === null && at >= rAt) {
-      if (r.v.over !== undefined) return null;   // 重载集当可变实参：另一刀
-      if (r.spread === true) {
-        // `... a`：整份数组接到包后面（可以与散着写的混，量过 `total(9, ... a)` 是 18）。
-        // 类型要一模一样 —— asy 不给这一格做元素级的提升。
-        if (r.v.type !== cand.ps[rAt].type) return null;
-      } else {
-        const ec = asyConvCost(r.v.type, elem);
-        const eu = ec < 0 && L.castFor(elem, r.v.type, false) !== null ? 1 : ec;
-        if (eu < 0) return null;
-        cost += eu;
-      }
+    // 位置实参落到可变那一格上（或更后面）：进那个包，不占槽。
+    // `... a` 无论写在第几个都是给可变那一格的（量过 `int f(int a=1, int b=2 ... int[] xs)`
+    // 上 `f(... new int[]{5,6})` 印 131 —— a、b 走默认值；`f(... a, 7)` 那边是**语法错**
+    // "unnamed argument after rest argument"，所以 spread 之后不会再有位置实参）。
+    if (isVar && r.key === null && (at >= rAt || r.spread === true)) {
+      const pc = packCost(r);
+      if (pc < 0) return null;
+      cost += pc;
       pack.push(slot.length);
       slot.push(-1);
-      pos = at + 1;
+      pos = at >= rAt ? at + 1 : rAt;
       continue;
     }
     if (r.spread === true) return null;   // `... x` 只能落在可变那一格上
@@ -1028,15 +1031,28 @@ export function asyFit(L, cand, raw) {
     // `f(1,"xy","z")`（印 11）；base 里 plain_picture.asy:725 的
     // `fit(t,min(t),max(t))` 走的正是这一条（`transform T0=T` 那一格被跳过）。
     if (r.key === null) {
+      let intoPack = false;
       while (uc === null && cand.ps[at].def !== null) {
         filled.set(at, 'def');
         at++;
         while (filled.has(at)) at++;
         if (at >= cand.ps.length) break;
-        if (isVar && at >= rAt) break;   // 跳到可变那一格上：这一刀先不掺
+        // 跳过来正好落在可变那一格上：进包。量过 `int g(int a=1, string s="z" ... int[] xs)`
+        // 上 `g(9,8)` 印 17（a=9、s 走默认值、8 进包）；plain_prethree.asy:201 的
+        // `operator init(diffuse,specular,background,(x,y,z))` 走的正是这一条。
+        if (isVar && at >= rAt) {
+          const pc = packCost(r);
+          if (pc < 0) return null;
+          cost += pc;
+          pack.push(slot.length);
+          slot.push(-1);
+          intoPack = true;
+          break;
+        }
         uc = tryAt(r, at);
       }
       pos = at + 1;
+      if (intoPack) continue;
     }
     if (uc === null) return null;
     cost += uc;

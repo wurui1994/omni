@@ -4281,6 +4281,28 @@ tests/run.js 91 条全绿。新用例 `cases/104-byte-hex`。
 问题（`array(int,pen)` 这个内建还没有；`:201` 要的是"跳过带默认值的形参、落进可变那一
 格"，那是下一刀）。tests/asy 181 条、tests/run.js 91 条全绿。新用例 `cases/105-reinit`。
 
+### 可变形参那一格：`... a` 不必写在最后，跳过默认值的实参也能落进包里
+
+`plain_prethree.asy:201` 的 `operator init(diffuse,specular,background,(x,y,z))` 要匹配
+`light(pen,pen,pen,real specularfactor=1, ... triple[] position)`：那个 triple 接不住
+`real specularfactor`，得**跳过**它（它有默认值）落进可变那一格的包里。原来 `asyFit` 在
+这一步写着「跳到可变那一格上：这一刀先不掺」，直接判这个候选接不住。
+
+顺着量了一遍 asy 的填法（`int f(int a=1, int b=2 ... int[] xs)`）：
+- `f(... new int[]{5,6})` 印 131 —— `... a` 写在第一格上照样是给可变那一格的，a、b 走默认值。
+- `f(7, ... new int[]{5,6})` 印 731、`f(b=3, ... new int[]{5,6})` 印 141。
+- `f(... a, 7)` 那边是**语法错**（"unnamed argument after rest argument"），所以 spread
+  之后不会再有位置实参 —— 这一条省掉了"包里的顺序"那种麻烦。
+- `int g(int a=1, string s="z" ... int[] xs)`：`g(9,8)` 印 17（a=9、s 走默认值、8 进包），
+  `g("q",8)` 印 9（"q" 填 s、a 走默认值、8 进包）。
+
+两处改动都在 `asyFit`：进包那一段抽成 `packCost`，然后 (1) 位置实参那一档的条件加上
+`|| r.spread === true`（`... a` 不看落在第几格），(2) 跳默认值那个循环走到可变那一格上时
+进包，不再 break 掉。
+
+数字：`import plain;` 90 → 89。`import graph;` 150 不动。tests/asy 182 条、
+tests/run.js 91 条全绿。新用例 `cases/106-vararg-fill`（上面量的十一行）。
+
 ## 后果与代价
 
 
