@@ -4766,6 +4766,61 @@ tests/run.js 91 条全绿。新用例 `cases/122-nested-closures`（七行输出
 逐字节一致：两层与三层的 `int(int)(int)`、穿层抓形参、闭包里装箱穿两层、
 以及闭包里的具名函数抓外层）。
 
+### 算符名的元数不限，与连接里那几个规格的类型
+
+上一刀把算符名当值传通了，这一刀量出来它还差三处，全是同一件事的不同侧面：
+**`operator X` 在 asy 里只是个名字**，跟 `foo` 没有区别。
+
+第一处是**元数**。这一层原来钉着"算符只有一元与二元"，量下来 asy 根本不管：
+
+```asy
+int operator +(int a, int b, int c) { return a+b+c; }
+write(operator +(1,2,3));          // 印 6
+int operator ..(int a) { return a*2; }
+write(operator ..(5));             // 印 10
+```
+
+两行都通。一元/二元那条限制是**表达式形态**上的 —— `a + b` 只会去找两个槽的那份候选，
+`operator +(1,2,3)` 直呼时按三个槽找。所以那两句 nope（decls.js 的 asySig 与 asyMethod）
+是我们比 asy 多拒了一门语言，删掉。内建的 `operator tension(real,real,bool)`
+（runtime.in:885）本身就是三元，不删这一句 plain 连第 14 行都过不去。
+
+第二处是**直呼**。`plainName` 对 `operator …` 回 null（它不是标识符），调用那一档于是
+落到"调一个不是普通名字的东西"。补一档自己认：先问一格同名的局部/形参（形参名也能是
+算符名，上一刀那条），再问文件级的重载表，再问一格模块级变量。
+
+第三处是**当模块级变量的名字**。`interpolate operator ::=operator ..(operator tension(1,true));`
+（plain_paths.asy:129）声明的是一格叫 `operator ::` 的变量，符号名原来直接拼成
+`asy__g7_operator ::` —— 那不是标识符。过一遍 asyFldSym（第四十三刀给字段用的那个）
+就行，表里的键还是源码里那个名字。`::` 与 `---` 也顺手进了 ASY_OPSYM：camp.y 的
+basicjoin 里它们是**另外两个连接符**，跟 `..` 平级。
+
+顺带修掉一个真错：匿名函数的类型里**丢了可变形参那一格**。`new guide(... guide[] a)`
+原来记成 `guide(guide[])`，于是接不上 `typedef guide interpolate(... guide[])`
+（plain_paths.asy:3/120）。asyCloFrom 里 `pts.push(p.type)` 改成看 `p.rest`。
+
+绘图层这边立起 `tensionSpecifier` / `curlSpecifier` 两个 struct（primitives.h:36/37 是
+内建类型，字段名 out/in/atLeast 与 value/side 是从 three.asy:733/739 读出来的），
+加上 `operator tension` / `operator curl` / `operator spec` / `operator controls`
+四份内建与两份 `guide operator cast`。asy 的 guide 是一棵树，`{z}`、`{curl c}`、
+`tension`、`controls` 都是树上的结点；这一层 guide 就是 path，所以它们落成**带
+spkind 记号的 path**（path 上多七格：spkind/spz0/spz1/spa/spb/spat/spside）。
+
+**没做的那一半写在明处**：这些规格结点还没接到求解器上。asy__resolve 现在只从 joins
+那张表起头，要接得给每个结点加"进/出两侧的规格"两格，并让 `a{dir}..b` 这类语法降到
+上面那几个算符上（`join-out`/`join-in`/`join-both`/`join-dir` 与 `(join ".." (tension …))`
+四种形状，exprs.js 现在还是一句 nope）。求解器本身其实**已经认**方向（spec.kind 2 是给定
+角度）、curl（kind 1）与定死的控制点（kind 3），缺的只是张力那一档（现在恒为 1）。
+所以那一刀是"接线 + 张力"，不是重写。在接上之前，asy__join 见到规格结点就 abort ——
+base 里没有一处走到它（那几处只是声明），所以这一句现在谁也碰不着。
+
+数字：`import plain;` 34 → 29（plain_paths.asy 的 14/19/118/129/130 五条一起没了）。
+`import graph;` 148 没动。tests/asy 201 条、tests/run.js 91 条全绿。新用例
+`cases/123-operator-name-arity`（十二行输出，与 `asy -noV` 逐字节一致：三元算符直呼、
+三元不影响 `1 + 2` 走内建、两份 `operator tension` 之间的转调、`operator ::` 与
+`operator ---` 当模块级变量、算符名当形参传进去再直呼、以及可变形参的匿名函数
+接上 typedef 之后按四个实参调）。
+
 ## 后果与代价
 
 

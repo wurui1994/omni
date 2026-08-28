@@ -492,10 +492,10 @@ export function asySig(L, n, at) {
   const ret = L.type(n.items[1], `函数 ${nm} 的返回类型`);
   const ps = asyFormals(L, n.items[3]);
   if (ret === null || ps === null) return;
-  if (nm.startsWith('operator ') && ps.length !== 1 && ps.length !== 2) {
-    L.nope(n, `${ps.length} 元的 '${nm}'（算符只有一元与二元）`);
-    return;
-  }
+  // 元数不限（第四十五刀量过）：`int operator +(int,int,int)` 之后 `operator +(1,2,3)` 印 6，
+  // `int operator ..(int)` 之后 `operator ..(5)` 印 10 —— 算符名在 asy 那边**只是个名字**，
+  // 一元/二元那条限制是**表达式形态**上的（`a + b` 只会去找两个槽的那份），不是声明上的。
+  // 内建的 `operator tension(real,real,bool)`（runtime.in:885）本身就是三元。
   const types = [];
   for (const p of ps) types.push(p.type);
   // `ps` 带名字与默认值节点（命名实参与默认实参要它）；`params` 只是类型，
@@ -592,10 +592,8 @@ export function asyMethodSig(L, rec, n, mat, at, stat) {
   const types = [];
   for (const p of ps) types.push(p.type);
   for (const p of ps) if (p.name === 'this') return L.nope(n, "叫 'this' 的形参");
-  // 算符重载按**算符那个名字**存（不是 `记录名.名字`）：一元/二元那条解析路问的就是这张表
-  if (opOv && ps.length !== 1 && ps.length !== 2) {
-    return L.nope(n, `${ps.length} 元的 '${nm}'（算符只有一元与二元）`);
-  }
+  // 算符重载按**算符那个名字**存（不是 `记录名.名字`）：一元/二元那条解析路问的就是这张表。
+  // 元数不限，理由与 asySig 里那一段同（算符名只是个名字）。
   const key = opOv ? nm : `${rec.name}.${nm}`;
   // 一个 struct 里 `operator []` 与 `operator [=]` 各只能有**一个**（asy 自己就拒：量过
   // 报 "multiple operator[] definitions in one struct" / "…operator[=]…"）。所以这两个
@@ -809,7 +807,10 @@ export function asyGlobalNames(L, n, at) {
       if (pt !== null && pt !== 'void') ty = pt;
     }
     const ok = ty !== null;
-    const g = { sym: `asy__g${L.gdecls.length}_${nm}`, type: ty, at, ok };
+    // 名字可以是**算符名**：`interpolate operator ::=operator ..(…)`（plain_paths.asy:129）
+    // 就是一格叫 `operator ::` 的模块级变量。核心方言的符号得是个标识符，所以过一遍
+    // asyFldSym —— 表里的键还是源码里那个名字（调用点按它查）。
+    const g = { sym: `asy__g${L.gdecls.length}_${asyFldSym(nm)}`, type: ty, at, ok };
     const list = L.globals.has(nm) ? L.globals.get(nm) : [];
     list.push(g);
     L.globals.set(nm, list);

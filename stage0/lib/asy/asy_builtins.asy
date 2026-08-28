@@ -517,6 +517,19 @@ struct path {
   // `cyclepath`（`cycle` 自己是 LIT，asy 源码里声明不出这个名字），`a--cycle` 于是就是
   // `operator --(path, path)` 见到一个带记号的右操作数。这是前端与绘图层之间唯一的约定名。
   bool ismark = false;
+  // 这一格 path 其实是个**连接规格**（第四十五刀）。asy 的 guide 是一棵树，`{z}`、
+  // `{curl c}`、`tension`、`controls` 都是树上的结点，`guide operator cast(…)`
+  // （runtime.in:880/905）把它们变成 guide；这一层 guide 就是 path，所以那些结点也得
+  // 是 path。0 = 不是规格、1 = `{z}` 方向、2 = `{curl c}`、3 = `tension`、4 = `controls`。
+  //   1 用 spz0；2 用 spa（gamma）与 spside；3 用 spa/spb（两端张力）与 spat；4 用 spz0/spz1。
+  // spside 是 camp.y 那两个 JOIN_OUT/JOIN_IN（0/1）。
+  int spkind = 0;
+  pair spz0;
+  pair spz1;
+  real spa = 1;
+  real spb = 1;
+  bool spat = false;
+  int spside = 0;
 }
 
 path cyclepath;
@@ -604,6 +617,13 @@ path pathcopy(path g) {
   h.cyclic = g.cyclic;
   for (int i = 0; i < g.nodes.length; ++i) h.nodes.push(knotcopy(g.nodes[i]));
   for (int i = 0; i < g.joins.length; ++i) h.joins.push(g.joins[i]);
+  h.spkind = g.spkind;
+  h.spz0 = g.spz0;
+  h.spz1 = g.spz1;
+  h.spa = g.spa;
+  h.spb = g.spb;
+  h.spat = g.spat;
+  h.spside = g.spside;
   return h;
 }
 
@@ -1019,6 +1039,14 @@ private void asy__normjoins(path g) {
 // 连接：kind 0 是 `--`，1 是 `..`。两边接上之后**整条链重解一遍** —— asy 的 guide 是
 // 没解的规格，解是在转成 path 时一次做完的，逐段解出来的控制点与那个不一样。
 private path asy__join(path a, path b, int kind) {
+  // 规格结点（`{z}` / `{curl c}` / `tension` / `controls`）还没接到求解器上：那一刀要给
+  // 每个结点加"进/出两侧的规格"两格，并让 asy__resolve 从那里起头（现在它只从 joins
+  // 这张表起头）。类型与算符先立着 —— plain 里那几处声明（plain_paths.asy:14/19/118/129）
+  // 要它们才成型，而连接本身在 base 里没有一处走到。
+  if (a.spkind != 0 || b.spkind != 0) {
+    abort("连接里的方向/张力/控制点规格还没接上求解器（这一刀只立了那几个类型与算符）");
+    return nullpath;
+  }
   path h = pathcopy(a);
   asy__normjoins(h);
   // `a--cycle` / `a..cycle`：右边是那个记号，于是闭合
@@ -1060,6 +1088,78 @@ path operator --(path a, path b) {
 
 path operator ..(path a, path b) {
   return asy__join(a, b, 1);
+}
+
+// ------------------------------------------------- 连接里的那几个规格（第四十五刀）
+// asy 的 guide 是一棵树，`{z}`、`{curl c}`、`tension …`、`controls … and …` 都是树上的
+// 结点，各有一个 `guide operator cast(…)` 把自己变成 guide（runtime.in:880/905、
+// camp.y 的 specExp 把 `{z}` 变成 `operator spec(z, side)`）。这一层 guide 就是 path，
+// 所以它们落成**带 spkind 记号的 path**（见 struct path 上那一段）。
+//
+// `tensionSpecifier` 与 `curlSpecifier` 是 asy 的**内建类型**（primitives.h:36/37），
+// 字段名照 three.asy:733/739 读出来的那几个：out/in/atLeast 与 value/side。
+struct tensionSpecifier {
+  real out = 1;
+  real in = 1;
+  bool atLeast = false;
+}
+
+struct curlSpecifier {
+  real value = 1;
+  int side = 0;
+}
+
+// runtime.in:885
+tensionSpecifier operator tension(real tout, real tin, bool atLeast) {
+  tensionSpecifier t;
+  t.out = tout;
+  t.in = tin;
+  t.atLeast = atLeast;
+  return t;
+}
+
+// runtime.in:864
+curlSpecifier operator curl(real gamma, int p) {
+  curlSpecifier c;
+  c.value = gamma;
+  c.side = p;
+  return c;
+}
+
+// runtime.in:856：`{z}` 那一档。side 是 camp.y 的 JOIN_OUT(0) / JOIN_IN(1)。
+guide operator spec(pair z, int p) {
+  path g;
+  g.spkind = 1;
+  g.spz0 = z;
+  g.spside = p;
+  return g;
+}
+
+// runtime.in:908
+guide operator controls(pair zout, pair zin) {
+  path g;
+  g.spkind = 4;
+  g.spz0 = zout;
+  g.spz1 = zin;
+  return g;
+}
+
+// runtime.in:905 / 880 的那两个 cast
+guide operator cast(tensionSpecifier t) {
+  path g;
+  g.spkind = 3;
+  g.spa = t.out;
+  g.spb = t.in;
+  g.spat = t.atLeast;
+  return g;
+}
+
+guide operator cast(curlSpecifier c) {
+  path g;
+  g.spkind = 2;
+  g.spa = c.value;
+  g.spside = c.side;
+  return g;
 }
 
 // `cycleToken` 是 asy 那边 `cycle` 的类型（C++ 面的一个空类型）。这一层的 `cycle` 是

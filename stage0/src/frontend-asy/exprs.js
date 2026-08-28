@@ -328,7 +328,10 @@ export function asyCloFrom(L, n, ret, ps, bodyNode) {
   const pts = [];
   for (const p of ps) {
     params.push(`(${p.name} ${asyCore(p.type)})`);
-    pts.push(p.type);
+    // 可变形参那一格要留在**类型文本**里（第四十五刀）：`new guide(... guide[] a)` 的类型是
+    // `guide(... guide[])`，不是 `guide(guide[])`。漏了它就接不上
+    // `typedef guide interpolate(... guide[])`（plain_paths.asy:3/120）那个 typedef。
+    pts.push(p.rest === true ? `${ASY_RESTPFX}${p.type}` : p.type);
   }
   const text = [`  (cfn ${name} (${cs.join(' ')}) (${params.join(' ')}) ${asyCore(ret)}`];
   for (const s of body) text.push(`    ${s}`);

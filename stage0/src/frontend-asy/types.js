@@ -71,6 +71,11 @@ export const ASY_OPSYM = new Map([
   ['+', 'add'], ['-', 'sub'], ['*', 'mul'], ['/', 'div'], ['#', 'quot'], ['%', 'mod'],
   ['^', 'pow'], ['==', 'eq'], ['!=', 'ne'], ['<', 'lt'], ['<=', 'le'], ['>', 'gt'],
   ['>=', 'ge'], ['!', 'not'], ['--', 'seg'], ['..', 'dots'], ['&', 'amp'], ['^^', 'cat'],
+  // 路径连接那一族（第四十五刀）：`::` 与 `---` 是**另外两个连接符**（camp.y 的 basicjoin），
+  // `tension` / `controls` / `spec` / `curl` 是连接里那几个规格 —— asy 那边它们也就是
+  // 名字叫 `operator tension` 的普通函数（runtime.in:864/885/903/908 是内建那几份）。
+  ['::', 'colons'], ['---', 'longdash'],
+  ['tension', 'tension'], ['controls', 'controls'], ['spec', 'spec'], ['curl', 'curl'],
 ]);
 
 /** asy 的语法本身就拒的算符名（量过）。见 strict/op-logic.asy。 */

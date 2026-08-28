@@ -120,6 +120,28 @@ export function asyCall(L, n) {
         { code: '(var this)', type: L.self.rec.name }, true);
     }
   }
+  // `operator tension(1,true)` / `operator ..(t)`：算符名就是**普通名字**（第四十四刀那一条
+  // 的另一半），所以直呼也通。plainName 对 `operator …` 回 null（它不是标识符），于是这一档
+  // 自己认：先问一格同名的局部/形参（`bool operator <= (coord,coord)` 那种形参），再问文件级
+  // 的重载表。量过 asy：`TS operator tension(real,bool)` 之后 `operator tension(2,false)`
+  // 就是那次调用（plain_paths.asy:16/129/130 全靠这个）。
+  if (nm === null && isList(callee) && head(callee) === 'name-exp') {
+    const nd = callee.items[1];
+    const on = isList(nd) && head(nd) === 'name' && isAtom(nd.items[1]) ? nd.items[1].value : null;
+    if (on !== null && on.startsWith('operator ')) {
+      const osym = asyFldSym(on);
+      const olv = L.lookup(osym);
+      if (olv !== null && asyIsFn(olv)) return asyFnValCall(L, n, on, olv, `(var ${osym})`);
+      const cs = asyVisible(L, on);
+      if (cs.length > 0) return asyUserCall(L, n, on, cs, null);
+      // 一格模块级变量（`interpolate operator ::=…` 之后 `operator ::(a,b)` 就是间接调）
+      const ogv = L.gvarHere(on);
+      if (ogv !== null && ogv !== L.gvarAt(on) && ogv.ok && asyIsFn(ogv.type)) {
+        return asyFnValCall(L, n, on, ogv.type, `(var ${ogv.sym})`);
+      }
+      return L.err(n, `'${on}' 在这里还看不见 —— 没有这个名字的函数`);
+    }
+  }
   if (nm === null) return L.nope(n, '调用一个不是普通名字的东西（函数值、方法、算符名）');
   if (nm === 'write') return L.err(n, `${ASY_NOPE}：write 出现在表达式位置（它是语句）`);
   let lateMem = null;   // 成员那一层"声明在后面"—— 外层也接不住时才拿它当诊断
