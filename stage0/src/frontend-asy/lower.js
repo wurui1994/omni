@@ -291,7 +291,7 @@ import {
   asyField, asyMember, asyPairLit, asyTripleLit, asyPairCall, asyVecPairFn, asyTripleDir,
   asyTunitOf, asyUnitOf, asyLengthCall, asyLengthOf, asyStrCall, asyStrConvCall, asyNewArray,
   asyArrLit, asyArrMethod, asyBinary, asyPairArith, asyTripleArith, asyCmpCode, asyCompare,
-  asyCond, asyLogic, asyUnary, asyCast,
+  asyCond, asyLogic, asyUnary, asyCast, asyCloFrom,
 } from './exprs.js';
 
 // 模块那一族（第六摊）与顶层声明那一族（第七摊）。同样在类体里留了一层转接方法。
@@ -1410,10 +1410,7 @@ class AsyLower {
     const nm = isAtom(n.items[2]) ? n.items[2].value : null;
     if (nm === null) return this.err(n, '没有名字的函数声明');
     const hit = this.localFunOuter(n);
-    if (hit !== null) {
-      return this.nope(n, `函数体里的函数 '${nm}' 用了外层的局部量 '${hit}'`
-        + '（那要闭包 —— 与匿名函数的捕获是同一件事）');
-    }
+    if (hit !== null) return this.localFunClo(n, nm, hit);
     const mark = this.diags.errorCount();
     asySig(this, n, this.at);
     if (this.diags.errorCount() > mark) return null;
@@ -1435,6 +1432,77 @@ class AsyLower {
     this.wraps.push(text);
     return [];
   }
+
+  /**
+   * 上面那条的**闭包版**（第六十六刀）：体里用到了外层的局部量，所以不能降成顶层函数。
+   * 降法与匿名函数一模一样（ADR-0010 的 `(cfn …)` + `(mkclo …)`），只是造好的那个闭包
+   * 绑在一个**局部量**上，名字就是它自己的名字 —— 之后 `g(1)` 那句走的是
+   * "局部量是函数类型就 callfn"那一条（calls.js 里 nameCall 的第一档），不必另开一路。
+   *
+   * base 里四处：plain_markers.asy:64 的 `add` 抓 `g`、plain_pens.asy:333 的 `value`
+   * 抓 `offset`、plain_picture.asy:979 的 `drawAll` 抓 `oldnodes`、plain_scaling.asy:61 的
+   * `dominator` 抓 `NONE`。
+   *
+   * 三条边界，都照"函数值没有那一格"来：
+   *  - 形参**默认值**：函数值不带默认值（与 anonFn 同一条），有就 nope。
+   *  - **重载**：一个名字只有一格，同名再声明一次走的是"重新声明"那条（类型相同才行）。
+   *  - **递归**：`nm` 是体降完之后才声明的，体里提到自己会落到"未声明的变量"。
+   *    先扫一遍把它拦在这里，理由说准。
+   */
+  localFunClo(n, nm, hit) {
+    if (this.cap !== null) {
+      return this.nope(n, `函数体里的函数 '${nm}' 用了外层的局部量 '${hit}'，`
+        + '而这里已经在一个闭包里了（套一层的捕获是另一刀）');
+    }
+    if (this.pre === null) {
+      return this.nope(n, `函数体里的函数 '${nm}' 要抓外层的 '${hit}'`
+        + '（那要在这里绑一个局部量，可这个位置放不下语句）');
+    }
+    const ret = this.type(n.items[1], '函数的返回类型');
+    if (ret === null) return null;
+    const ps = asyFormals(this, n.items[3]);
+    if (ps === null) return null;
+    for (const p of ps) {
+      if (p.def !== null && p.def !== undefined) {
+        return this.nope(n, `函数体里的函数 '${nm}' 既抓外层的 '${hit}'、又给形参`
+          + `'${p.name}' 带默认值（抓外层要降成函数值，而函数值没有默认值那一格）`);
+      }
+      if (p.rest === true) {
+        return this.nope(n, `函数体里的函数 '${nm}' 既抓外层的 '${hit}'、又有可变形参`);
+      }
+    }
+    if (this.mentions(n.items[4], nm)) {
+      return this.nope(n, `函数体里的函数 '${nm}' 抓外层的 '${hit}'，而它自己是递归的`
+        + '（这一层的名字是体降完才绑上的，递归得先有那一格 —— 另一刀）');
+    }
+    const clo = this.mkClo(n, ret, ps, n.items[4]);
+    if (clo === null) return null;
+    const had = this.scopes[this.scopes.length - 1].get(nm);
+    if (had !== undefined) {
+      if (had !== clo.type) {
+        return this.nope(n, `同一层里用**另一个类型**重新声明 '${nm}'（原来是 ${had}，`
+          + `这次是 ${clo.type}）`);
+      }
+      return [`(set ${nm} ${clo.code})`];
+    }
+    if (this.declare(n, nm, clo.type) === null) return null;
+    return [`(let ${nm} ${asyCore(clo.type)} ${clo.code})`];
+  }
+
+  /** 一个子树里提到过这个名字没有（localFunClo 用它拦递归） */
+  mentions(node, nm) {
+    const stack = [node];
+    while (stack.length > 0) {
+      const cur = stack.pop();
+      if (cur === undefined || cur === null) continue;
+      if (isAtom(cur)) { if (cur.value === nm) return true; continue; }
+      if (!isList(cur)) continue;
+      for (let i = 1; i < cur.items.length; i++) stack.push(cur.items[i]);
+    }
+    return false;
+  }
+
+  mkClo(n, ret, ps, bodyNode) { return asyCloFrom(this, n, ret, ps, bodyNode); }
 
   /** 上面那条的扫描：体里第一个撞上外层作用域的名字（没有就 null） */
   localFunOuter(n) {

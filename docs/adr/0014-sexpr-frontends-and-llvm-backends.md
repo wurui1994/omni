@@ -4149,6 +4149,28 @@ nameOf / dotQual / 赋值 / 捕获 —— 那是另一刀，`bad/redeclare-other
 `:73` 的 `&`）。这一刀换掉的是**错的那三条理由**。tests/asy 175 条、tests/run.js 91 条
 全绿。新用例 `cases/99-redeclare`、`bad/redeclare-othertype`。
 
+### 函数体里的**具名**函数抓外层的局部量：与匿名函数共用一副零件
+
+`localFun`（第四十六刀）把函数体里的函数声明降成一个顶层函数，抓外层局部量那一档是一句
+nope。可 base 里就有四处这么写：`plain_picture.asy:979` 的 `drawAll` 抓 `oldnodes`、
+`plain_pens.asy:333` 的 `value` 抓 `offset`、`plain_scaling.asy:61` 的 `dominator` 抓
+`NONE`、`plain_markers.asy:64` 的 `add` 抓 `g`。
+
+这一刀不新造机器：`asyAnonFn` 里造闭包那一段抽成 `asyCloFrom(L, n, ret, ps, 体)`，
+匿名函数与具名的这一条共用 —— 两者的差别只在"造好的那个闭包绑在哪儿"。具名的这条绑在一个
+**同名的局部量**上（`(let 名字 <fnty> (mkclo …))`），于是后面 `add(1)` 那句走的是
+"局部量是函数类型就 callfn"那一条现成的路，调用侧一行没改。
+
+四条边界，都是"函数值没有那一格"的直接后果：形参**默认值**（与 anonFn 同一条）、
+**可变形参**、**重载**（一个名字只有一格；同名再声明走"重新声明"那条）、以及**递归**
+（名字是体降完才绑上的，体里提到自己会落到"未声明的变量"，所以先扫一遍把理由说准）。
+第五条是"已经在闭包里了"——`plain_markers.asy:64` 正在这一格上，套一层的捕获是另一刀。
+
+数字：`import plain;` 99 → 98（`plain_picture.asy:979` 那处通了；另外三处各自露出下一条
+真正的理由 —— `byteinv` 没有、`..` 没有、抓的是"闭包之后还会被改"的名字）。
+`import graph;` 152 不动。tests/asy 176 条、tests/run.js 91 条全绿。
+新用例 `cases/100-local-fn-capture`（含"不抓外层"那条老路的回归）。
+
 ## 后果与代价
 
 

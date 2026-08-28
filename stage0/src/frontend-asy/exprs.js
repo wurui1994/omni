@@ -220,6 +220,15 @@ export function asyAnonFn(L, n) {
   // fnValCall 里是一句 nope，不是悄悄给零值。默认值表达式本身也就没有被查过型。
   // 套一层的匿名函数：里层要抓的可能是外层的**捕获**，而捕获不是局部量 —— 另一刀
   if (L.cap !== null) return L.nope(n, '匿名函数里再套一个匿名函数');
+  return asyCloFrom(L, n, ret, ps, n.items[3]);
+}
+
+/**
+ * 造一个闭包：`(cfn 名 (捕获) (形参) 返回类型 语句…)` 进 wraps，回 `(mkclo 名 捕获值…)`。
+ * 匿名函数（asyAnonFn）与"函数体里抓了外层局部量的**具名**函数"（lower.js 的 localFunClo，
+ * 第六十六刀）共用这一份 —— 两者的区别只在"名字绑在哪儿"，捕获这件事一模一样。
+ */
+export function asyCloFrom(L, n, ret, ps, bodyNode) {
   const name = `asy__anon${L.anonN++}`;
   const saveScopes = L.scopes;
   const saveUpd = L.updates;
@@ -227,7 +236,7 @@ export function asyAnonFn(L, n) {
   L.cap = {
     outer: saveScopes,
     body: L.fnBody,
-    // 这个匿名函数字面量在源文件里的起点：capOf 用它分"改在闭包之前"与"改在之后"
+    // 这个闭包在源文件里的起点：capOf 用它分"改在闭包之前"与"改在之后"
     pos: n.span === undefined || n.span === null ? null : n.span.start,
     list: [],
     seen: new Map(),
@@ -235,10 +244,10 @@ export function asyAnonFn(L, n) {
 
   L.scopes = [new Map()];
   L.updates = [];
-  L.self = null;   // 匿名函数体里没有接收者（捕获 this 这一刀不收，见 capOf）
+  L.self = null;   // 闭包体里没有接收者（捕获 this 这一刀不收，见 capOf）
   let bad = false;
   for (const p of ps) if (L.declare(n, p.name, p.type) === null) bad = true;
-  const body = bad ? null : asyBody(L, n.items[3], ret);
+  const body = bad ? null : asyBody(L, bodyNode, ret);
   const caps = L.cap.list;
   L.cap = null;
   L.scopes = saveScopes;
@@ -253,7 +262,7 @@ export function asyAnonFn(L, n) {
     else if (L.isRec(ret)) zero = L.recInit(n, ret);
     else zero = ZERO.get(ret);
     if (zero === null || zero === undefined) {
-      return L.nope(n, `返回 ${ret} 的匿名函数（这一刀给不出它的零值）`);
+      return L.nope(n, `返回 ${ret} 的闭包（这一刀给不出它的零值）`);
     }
     body.push(`(ret ${zero})`);
   }
