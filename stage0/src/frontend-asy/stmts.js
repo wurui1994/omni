@@ -318,7 +318,7 @@ function asyUnravelVar(L, n) {
   let ty = L.lookup(nm);
   if (ty !== null) {
     const bx = L.boxOf(nm);
-    code = bx === null ? `(var ${nm})` : `(aget (var ${bx.sym}) (int 0))`;
+    code = bx === null ? `(var ${L.symOf(nm)})` : `(aget (var ${bx.sym}) (int 0))`;
   } else {
     const g = L.gvarHere(nm);
     if (g === null || !g.ok) return undefined;
@@ -595,18 +595,41 @@ export function asyVardec(L, n) {
     // 把这一句降成赋值：旧那一格从这一句起再也用名字取不到，而捕获是按值抓的
     // （`(cap …)` 在 mkclo 那一刻就抄了一份），所以看不出差别。没写初值也照发 ——
     // 上面那几支已经把"新声明该有的值"算在 init 里了（零值 / `new` / `(null T)`）。
-    // 类型**不同**的那一格得真的改名，而名字的用处遍布 nameOf/dotQual/赋值/捕获，
-    // 那是另一刀。
+    // 类型**不同**的那一格得真的改名（第六十四刀，见 declareShadow）—— asy 那边是新开
+    // 一格把旧的遮住，这一层给新那一格换个核心方言里的符号，名字照旧查得到。
     const had = L.scopes[L.scopes.length - 1].get(nm);
     if (had !== undefined) {
       if (had !== t) {
-        return L.nope(start, `同一层里用**另一个类型**重新声明 '${nm}'`
-          + `（原来是 ${had}，这次是 ${t} —— asy 那边是新开一格把旧的遮住，`
-          + '这一层是复用同一格，类型不同就复用不了）');
+        const boxed = asyNeedsBox(L, nm);
+        const sh = L.declareShadow(nm, t, boxed);
+        if (boxed) {
+          const bt = asyCore(`${t}[]`);
+          out.push(`(let ${sh} ${bt} (anew ${bt} (int 1)))`);
+          out.push(`(aset (var ${sh}) (int 0) ${init})`);
+        } else {
+          out.push(`(let ${sh} ${asyCore(t)} ${init})`);
+        }
+        continue;
       }
       const hb = L.boxOf(nm);
       if (hb !== null) out.push(`(aset (var ${hb.sym}) (int 0) ${init})`);
-      else out.push(`(set ${nm} ${init})`);
+      else out.push(`(set ${L.symOf(nm)} ${init})`);
+      continue;
+    }
+    // 遮住**外层**作用域里同名的那一格（第六十四刀）：形参与体在 asy 里是两层，可核心方言
+    // 的函数体只有一层，同名的 `(let …)` 那边当场报"已经声明过了"。原型是
+    // plain_Label.asy:349 的 `pair position=point(g,position);`（形参是 `real position`）。
+    // 一律改名：块作用域那一档改了也没坏处（出块名字就查不到了，symOf 回的是外层那个符号）。
+    if (L.lookup(nm) !== null) {
+      const boxed = asyNeedsBox(L, nm);
+      const sh = L.declareShadow(nm, t, boxed);
+      if (boxed) {
+        const bt = asyCore(`${t}[]`);
+        out.push(`(let ${sh} ${bt} (anew ${bt} (int 1)))`);
+        out.push(`(aset (var ${sh}) (int 0) ${init})`);
+      } else {
+        out.push(`(let ${sh} ${asyCore(t)} ${init})`);
+      }
       continue;
     }
     // 会被闭包抓走、而且还会被改的那一格要**装箱**（这一刀）：一格长度 1 的数组，
@@ -752,7 +775,7 @@ export function asyAssign(L, node, lhs, rhs, op) {
   if (nm === null) return L.nope(node, '赋值给不是普通变量或数组下标的东西（字段、切片、算符名）');
   // 下面发出去的代码用 `sym`（核心方言里那个名字），错话里用 `nm`（源码里那个名字）——
   // 文件级变量的两者不同：它降成了一个全局，符号名带前缀（第二十四刀）。
-  let sym = nm;
+  let sym = L.symOf(nm);
   let t = L.lookup(nm);
   // `unravel x;` 摊出来的名字：赋值落在 x 的那个字段上（见 declareAlias）
   if (t !== null) {

@@ -89,7 +89,7 @@ export function asyNameOf(L, n, nm) {
     // 在默认值那段里可见，可它不是 `real(real,real)`，asy 查到的是函数 min。
     // 这一层自底向上定型，所以先把候选挂在值上（shadowFns），落地在 coerce ——
     // 目标类型不是函数类型、或挑不出同型的一份时，这个值还是这个变量，报原来那句。
-    const v = { code: `(var ${nm})`, type: t };
+    const v = { code: `(var ${L.symOf(nm)})`, type: t };
     if (L.funcs.has(nm)) {
       const fns = asyVisible(L, nm);
       if (fns.length > 0) v.shadowFns = fns;
@@ -377,11 +377,16 @@ export function asyCloFrom(L, n, ret, ps, bodyNode) {
 export function asyCapOf(L, node, nm) {
   let t = null;
   let bx = null;
+  // 外层那一格在核心方言里叫什么（第六十四刀的改名）：与类型取自**同一层**，
+  // 所以不能问 symOf —— 那边走的是 L.scopes，这里走的是 L.cap.outer。
+  let sy = nm;
   for (const s of L.cap.outer) {
     if (s.has(nm)) {
       t = s.get(nm);
       const b = s.get(`\u0000bx:${nm}`);
       bx = b === undefined ? null : b;
+      const y = s.get(`\u0000sy:${nm}`);
+      sy = y === undefined ? nm : y;
     }
   }
   if (t === null) return asyCapUp(L, node, nm);
@@ -412,7 +417,7 @@ export function asyCapOf(L, node, nm) {
     return CAP_BAD;
   }
   L.cap.seen.set(nm, t);
-  L.cap.list.push({ name: nm, type: t, val: `(var ${nm})` });
+  L.cap.list.push({ name: nm, type: t, val: `(var ${sy})` });
   return { code: `(cap ${nm})`, type: t };
 }
 

@@ -820,6 +820,50 @@ class AsyLower {
     return null;
   }
 
+  /**
+   * 同一层里用**另一个类型**重新声明同名的变量（第六十四刀）。asy 那边是**新开一格**把
+   * 旧的遮住 —— `real d=…; pair d=dot(u,u);`（plain_Label.asy:39）与
+   * `pair position=point(g,position);`（:349，形参 `real position` 被遮住）都是这一格。
+   *
+   * 这一层没有"同名两格"的表示（`(var 名字)` 就是那个名字），所以给**新那一格改个名**：
+   * 作用域里的类型换成新的，另记一条 `\u0000sy:名字 -> 核心方言里的符号`。读（nameOf）、
+   * 写（assign 的 `sym`）、调（call 里那两处）、捕获（capOf 的 `val`）四处各问一句 symOf。
+   * 旧那一格从这一句起再也用名字取不到，与"类型相同就复用同一格"那一支看不出差别；
+   * 已经抓走的捕获抓的是**旧那个符号**，也不受影响。
+   *
+   * 名字带 `asy__sh` 前缀是保留区：漏改的读写路径会去引用一个没声明的名字，核心方言那边
+   * 当场报，而不是悄悄读到被遮住的旧值。
+   */
+  declareShadow(nm, t, boxed) {
+    const top = this.scopes[this.scopes.length - 1];
+    top.set(nm, t);
+    // 新那一格是**全新的一格**：旧那一格的别名/箱子/改名三条记号都不能留下来
+    top.delete(`\u0000al:${nm}`);
+    top.delete(`\u0000bx:${nm}`);
+    top.delete(`\u0000sy:${nm}`);
+    if (boxed === true) {
+      const bs = `asy__bx${this.tmp++}_${nm}`;
+      top.set(`\u0000bx:${nm}`, { sym: bs, type: t });
+      return bs;
+    }
+    const sym = `asy__sh${this.tmp++}_${nm}`;
+    top.set(`\u0000sy:${nm}`, sym);
+    return sym;
+  }
+
+  /** `nm` 在核心方言里叫什么（改过名的回新名字）。只看**找到它的那一层**，照 boxOf */
+  symOf(nm) {
+    let i = this.scopes.length - 1;
+    while (i >= 0) {
+      if (this.scopes[i].has(nm)) {
+        const s = this.scopes[i].get(`\u0000sy:${nm}`);
+        return s === undefined ? nm : s;
+      }
+      i--;
+    }
+    return nm;
+  }
+
   /* ------------------------------------------------------------------ 类型 */
 
   /** `(name-ty (name int))` -> 'int'；`(array-ty (name int) (dims))` -> 'int[]'；
@@ -1576,10 +1620,11 @@ class AsyLower {
     const had = this.scopes[this.scopes.length - 1].get(nm);
     if (had !== undefined) {
       if (had !== clo.type) {
-        return this.nope(n, `同一层里用**另一个类型**重新声明 '${nm}'（原来是 ${had}，`
-          + `这次是 ${clo.type}）`);
+        // 类型不同：新开一格，换个符号（第六十四刀，见 declareShadow）
+        const sh = this.declareShadow(nm, clo.type, false);
+        return [`(let ${sh} ${asyCore(clo.type)} ${clo.code})`];
       }
-      return [`(set ${nm} ${clo.code})`];
+      return [`(set ${this.symOf(nm)} ${clo.code})`];
     }
     if (this.declare(n, nm, clo.type) === null) return null;
     return [`(let ${nm} ${asyCore(clo.type)} ${clo.code})`];

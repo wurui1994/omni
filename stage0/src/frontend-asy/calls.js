@@ -223,11 +223,11 @@ export function asyCall(L, n) {
     // `opacity(opacity(t))` —— 里面那个是形参、外面那个是文件级的函数。
     // 所以跟上面成员那一档同一个办法：先试这一格，接不住就回滚再往下走。
     const probe = Array.isArray(L.pre) && asyVisible(L, nm).length > 0;
-    if (!probe) return asyFnValCall(L, n, nm, lv, `(var ${nm})`);
+    if (!probe) return asyFnValCall(L, n, nm, lv, `(var ${L.symOf(nm)})`);
     const mark = L.diags.mark();
     const savePre = L.pre;
     L.pre = [];
-    const fv = asyFnValCall(L, n, nm, lv, `(var ${nm})`);
+    const fv = asyFnValCall(L, n, nm, lv, `(var ${L.symOf(nm)})`);
     const fpre = L.pre;
     L.pre = savePre;
     if (fv !== null) {
