@@ -1125,6 +1125,12 @@ export function asyFit(L, cand, raw) {
       for (const c of r.v.over) if (L.candFnType(c) === cand.ps[at].type) return 0;
       return null;
     }
+    // 同名的**变量遮住了函数名**，而这个槽要的是函数类型（第六十三刀）：候选是 nameOf
+    // 挂上来的（shadowFns），落地是 coerce 那边同一条。挑到就算精确匹配（不加代价）；
+    // 挑不到不算接不住 —— 这个实参还是那个变量，往下按它的类型算。
+    if (r.v.shadowFns !== undefined && asyIsFn(cand.ps[at].type)) {
+      for (const c of r.v.shadowFns) if (L.candFnType(c) === cand.ps[at].type) return 0;
+    }
     // `null` 当实参：类型来自**这个槽**（asy 就是这么定的）。槽不是引用类型就接不住。
     if (r.v.type === ASY_NULL) return asyRefTy(L, cand.ps[at].type) ? 0 : null;
     // `explicit` 的槽只收类型一模一样的实参（第二十六刀，量过：连 int->real 都挡）

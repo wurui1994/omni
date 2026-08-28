@@ -4900,6 +4900,36 @@ tests/run.js 91 条全绿。新用例 `cases/125-closure-this`（八行输出，
 一致：裸方法名、裸字段名、改字段、显式 `this.n`、同时抓一格外层局部量、两层闭包穿过去
 拿接收者、以及 static 方法里那一格**不抓**）。
 
+### 模块级变量遮住同名函数：谁上场由目标类型定
+
+`plain_picture.asy:85` 的 `scaleT(identity, identity)` 报"没有能匹配的签名"。根子在
+`plain_constants.asy:39`：
+
+```asy
+restricted transform identity;
+```
+
+一格**模块级变量**，名字叫 `identity`，与 `real identity(real)`、`real[][] identity(int)`、
+`transform identity()` 同名共存。asy 的名字是**按签名**查的（venv 里一个名字挂一串
+签名），所以 `transform t=identity` 拿那格变量，而要 `real(real)` 的槽上拿的是**函数**。
+我们这一层是变量优先：`asyNameOf` 查到 gvar 就回，函数那几份看都不看。
+
+改法与第六十二刀（局部量遮住函数名）是同一条 —— 那一刀已经把机关铺好了，这次只是把
+gvar 那一档接上去：查到模块级变量时，若同名还有可见的函数，就把候选挂在值上
+（`shadowFns`），**类型仍是那格变量的类型**，由目标类型定案：
+
+- `asyCoerce`（exprs.js:610）：目标是函数类型且挑得出**一模一样**的一份时改判成
+  `(fnref …)`。初值、赋值、return 都走这里。
+- `asyFit` 的 `tryAt`（calls.js:1124 之后）：槽要函数类型时先按 `shadowFns` 挑，挑到算
+  精确匹配（不加代价）。挑不到**不算接不住** —— 这个实参还是那个变量，往下按它的类型算。
+
+两处都要"类型完全相等"才改判，不做提升、不串用户的 `operator cast`：asy 那边精确匹配
+得分最高，加宽会把本该 ambiguous 的情形偷偷分出胜负。
+
+数字：`import plain;` 24 → 23。`import graph;` 148 没动。tests/asy 204 条、
+tests/run.js 91 条全绿。新用例 `cases/126-shadowed-fn-name`（八行输出，与 `asy -noV`
+逐字节一致：实参位置、初值、赋值、目标类型是那格变量本身、以及直接调用那两份函数）。
+
 ## 后果与代价
 
 

@@ -123,7 +123,18 @@ export function asyNameOf(L, n, nm) {
     if (s !== null) return { code: `(var ${s.sym})`, type: s.type };
   }
   const g = L.gvarHere(nm);
-  if (g !== null && g.ok) return { code: `(var ${g.sym})`, type: g.type };
+  if (g !== null && g.ok) {
+    // 同名的**函数**也要带上，与上面局部量那一档同一条（shadowFns，落地在 coerce）。
+    // 原型是 plain_constants.asy:39 的 `restricted transform identity;` —— 那格模块级变量
+    // 与 `real identity(real)` / `real[][] identity(int)` / `transform identity()` 共存，
+    // 于是 plain_picture.asy:85 的 `scaleT(identity, identity)` 要的是两个 `real(real)`。
+    const v = { code: `(var ${g.sym})`, type: g.type };
+    if (L.funcs.has(nm)) {
+      const fns = asyVisible(L, nm);
+      if (fns.length > 0) v.shadowFns = fns;
+    }
+    return v;
+  }
   if (g !== null) {
     return L.nope(n, `函数里引用文件级变量 '${nm}'（模块级变量收 int/real/bool/string、`
       + 'pair/triple、struct，与它们的一维数组 —— 这一条不在里面）');
