@@ -5315,6 +5315,36 @@ tests/asy 210 条（新增 cases/132-fnty-defaults）、tests/run.js 91 条全�
 `tests/mir` / `tests/glr` / `tests/incr` 照旧红（上一刀量过：这一批之前就红，
 mir 是 exprs.js↔stmts.js 那个 import 环），不算这一批的账。`tests/bootstrap` 跳过。
 
+### 一批：主文件也隐式 import plain，与内建面在打平时让位
+
+三条 `import` 编过去之后，拿 `reference/asymptote/examples` 那 220 个例子量了一遍：
+**3 个跑完**。两个根因，都不在语言本身上：
+
+- **主文件没有 autoplain**。真 asy 那边 plain 是自动引进来的（`write(cm);` 不用引任何
+  东西就能跑，`-noplain` 才关掉）。我们只给**被加载的模块**走了这一条（asyModLoadAs 里
+  那一句），主文件没有 —— 于是 `size(0,22cm)` 报"未声明的变量 'cm'"（cm 在
+  plain_constants.asy 里）。补在 `chunk()` 里，名字用文件名去掉目录与 `.asy`，
+  于是直接编 `plain.asy` 自己时按名字排除那一条还管用。找不到 plain.asy 时照旧回滚，
+  所以不带 `ASYMPTOTE_DIR` 跑测试时行为一字不变。
+- **内建面与真 plain 打平**。`asyBiWeak` 早就让内建面那份"退场"，但它只筛**签名完全
+  相同**的那一种；`draw` 这一族两边的默认实参串不一样，两份都留下来，于是
+  `'draw(path, pen)' 有多个同样合适的重载`。改成在 `asyApplyCall` 的 cost 打平那一档
+  再判一次"谁是内建面的"：内建面那份让位，真库那份赢。asy 那边 `draw` 只有 plain 一份，
+  所以这不是"多认一门语言"，是把我们自己多出来的那一份藏好。
+
+数字：examples **3 → 29** 跑完（220 个）。剩下 191 个的下一堵墙已经量清了，按条数排：
+`path3` / `object` / `guide` 这三个类型（three*.asy 与 plain_boxes 那一路），
+以及 **`guide` 是 `path` 的别名**带出来的一处死循环 —— plain_arrows.asy:552 的
+`draw(…, explicit path[] g, …)` 与 :561 的 `draw(…, guide[] g, …)` 在这一层签名相同，
+按"同签名是替换"后一份盖掉前一份，而后一份的体正是 `draw(pic,(path[]) g,p,legend,marker)`，
+于是自己调自己。要解开得让 `guide` 成为自己的类型（一层包着 path 的壳 + 两向隐式转换），
+那是下一刀。
+
+跑过的轴：`tests/asy` 213、`tests/run.js` 91、`tests/sexpr` 53、`tests/oir` 451、
+`tests/llvm` 22、`tests/jit` 22、`tests/gpu` 15+1 skip、`tests/js-roundtrip` 92、
+`tests/oracle` 7、`tests/js-exec` 11、`tests/cabi` 4、`tests/wat` 12 —— 全绿。
+`tests/mir` / `tests/glr` / `tests/incr` 照旧红（先于这几刀），`tests/bootstrap` 跳过。
+
 ## 后果与代价
 
 

@@ -910,7 +910,17 @@ export function asyApplyCall(L, n, nm, list, raw, recv, reinit) {
     if (iv < bv) { best = fits[i]; tie = false; continue; }
     if (iv > bv) continue;
     if (fits[i].f.cost < best.f.cost) { best = fits[i]; tie = false; continue; }
-    if (fits[i].f.cost === best.f.cost) tie = true;
+    if (fits[i].f.cost === best.f.cost) {
+      // 内建面那份是**弱**的（理由见 asyBiWeak）：与真库那份打平时让真库赢。
+      // asyBiWeak 只筛掉**签名完全相同**的那一种；默认实参那一串不一样时两份都留下来，
+      // 落到这里。量到的样子是引了真 base 之后 `'draw(path, pen)' 有多个同样合适的重载`
+      // —— 而 asy 那边 `draw` 只有 plain 那一份。
+      const bBi = best.c.unit === L.biId;
+      const iBi = fits[i].c.unit === L.biId;
+      if (bBi && !iBi) { best = fits[i]; tie = false; continue; }
+      if (!bBi && iBi) continue;
+      tie = true;
+    }
   }
   if (tie) {
     const got = [];

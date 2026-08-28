@@ -297,7 +297,7 @@ import {
 // 模块那一族（第六摊）与顶层声明那一族（第七摊）。同样在类体里留了一层转接方法。
 import {
   asyIdPair, asyModLoad, asyCandAt, asyModMerge, asyModStmt, asyModCallAt,
-  asyModAlias, asyModVar, asyModCall,
+  asyModAlias, asyModVar, asyModCall, asyAutoPlain,
 } from './modules.js';
 import {
   asyUnwrapMod, asyAuMod, asyAuNames, asyStaticDec, asyStaticInit, asyStMod, asyOinitSig, asyOinitFor,
@@ -2265,6 +2265,18 @@ class AsyLower {
 
   gvarLate(node, nm) { return asyGvarLate(this, node, nm); }
 
+  /**
+   * 主文件当模块看时的名字（去掉目录与 `.asy`）。只有 autoplain 那一条判据用它 ——
+   * 直接编 `plain.asy` / `plain_pens.asy` 自己时不能再给它自动引一次 plain。
+   */
+  rootModName() {
+    const p = this.opts === null || this.opts.path === undefined ? '' : this.opts.path;
+    let i = p.length - 1;
+    while (i >= 0 && p.charAt(i) !== '/' && p.charAt(i) !== '\\') i--;
+    const base = p.slice(i + 1);
+    return base.endsWith('.asy') ? base.slice(0, base.length - 4) : base;
+  }
+
 
   /**
    * 一批顶层项 -> 只含**这一批新增内容**的核心方言文本。
@@ -2284,6 +2296,14 @@ class AsyLower {
     let root;
     if (baseUnits === 0) {
       root = this.unitNew(tree, this.opts === null ? '' : this.opts.path);
+      // **主文件也隐式 `import plain;`**（第七十刀）：真 asy 那边 `write(cm);` 不用引任何
+      // 东西就能跑 —— plain 是自动引进来的，`-noplain` 才关掉。以前只有**被加载的模块**
+      // 走 autoplain（asyModLoadAs 里那一句），主文件没有，于是引真 base 时
+      // `size(0,22cm)` 报"未声明的变量 'cm'"。名字用文件名去掉目录与后缀：直接编
+      // `plain.asy` 自己时 asyAutoPlain 那条按名字的排除就还管用。
+      // 找不到 plain.asy 时 asyAutoPlainIn 会回滚，与从前一样（我们自己的 lib/asy 里没有
+      // plain.asy，所以不带 ASYMPTOTE_DIR 跑测试时行为一字不变）。
+      root.aplain = asyAutoPlain(this, this.rootModName());
     } else {
       // 会话根是同一个单元 0（前缀是空串、名字表一直活着），换掉的只有"这一批的顶层项"。
       // 方法体与 autounravel 那两张表也清空：上一批的已经发过了，重发就是重复定义。
