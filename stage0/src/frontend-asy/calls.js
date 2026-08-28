@@ -1080,7 +1080,13 @@ export function asyOpUser(L, n, op, vals, btys) {
     const f = asyFit(L, c, raw);
     if (f === null) continue;
     any = true;
-    if (f.cost === 0) exact = true;
+    // 走**可变那一格**接下来的候选不算"同型"（第四十七刀）。asyFit 里那条注释说过：
+    // 任何非可变的候选都比可变的合适 —— 内建那一档也是非可变的，所以它也压得住可变那份。
+    // 量出来的理由：plain_strings.asy:125 是 `string operator +(...string[] a)`，体里
+    // 那句 `S += s` 在 asy 那边走的是**内建的**字符串接（asy 自己不会栈溢出）；漏了这一条，
+    // `S + s` 会把两格打包再调回自己 —— 10 个例子（log / spiral / advection …）就是这么
+    // 崩在 `Maximum call stack size exceeded` 上的。
+    if (f.cost === 0 && f.varargs !== true) exact = true;
   }
   if (!any) return null;
   if (!exact && btys !== null) {

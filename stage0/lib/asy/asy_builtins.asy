@@ -1906,20 +1906,326 @@ pen interp(pen a, pen b, real t) {
 }
 void resetdefaultpen() { pen q; asy__defpen = q; }   // runtime.in:350
 
-// (3) 真几何与数值：声明在这里，体是 abort。
-real arclength(path p) { abort("arclength(path) 还没做"); return 0; }
+// (3) 真几何与数值（第四十七刀）。asy 那边这几个在 path.cc / bezier.h 里，算法是
+// 自适应求积 + Bezier 细分；这一层照同样的路子写在 asy 里，所以**末位可能与真 asy 差一点**
+// （那边是 C++ 的自适应 Simpson，这里是 5 点 Gauss-Legendre + 二分细化）。
+// 量出来要它们的地方：examples 里 19 个（arclength 4、arctime 2、subpath 6、
+// intersect/intersections 6、tridiagonal 1）。
+
+// 三次 Bezier 在 t 处的速率 |B'(t)|
+private real asy__bspeed(pair z0, pair c0, pair c1, pair z1, real t) {
+  real r = 1 - t;
+  pair d = 3*r*r*(c0 - z0) + 6*r*t*(c1 - c0) + 3*t*t*(z1 - c1);
+  return length(d);
+}
+
+// 5 点 Gauss-Legendre（区间 [a,b]）
+private real asy__gl5(pair z0, pair c0, pair c1, pair z1, real a, real b) {
+  real h = (b - a) / 2;
+  real m = (a + b) / 2;
+  real x1 = 0.906179845938664;
+  real x2 = 0.538469310105683;
+  real w0 = 0.568888888888889;
+  real w1 = 0.236926885056189;
+  real w2 = 0.478628670499366;
+  return h * (w0 * asy__bspeed(z0, c0, c1, z1, m)
+    + w1 * (asy__bspeed(z0, c0, c1, z1, m - h*x1) + asy__bspeed(z0, c0, c1, z1, m + h*x1))
+    + w2 * (asy__bspeed(z0, c0, c1, z1, m - h*x2) + asy__bspeed(z0, c0, c1, z1, m + h*x2)));
+}
+
+// 二分细化到两次求积一致
+private real asy__arcpart(pair z0, pair c0, pair c1, pair z1,
+                          real a, real b, int depth) {
+  real whole = asy__gl5(z0, c0, c1, z1, a, b);
+  real m = (a + b) / 2;
+  real half = asy__gl5(z0, c0, c1, z1, a, m) + asy__gl5(z0, c0, c1, z1, m, b);
+  if (depth <= 0) return half;
+  if (abs(whole - half) <= 1e-15 * (abs(half) + 1e-15)) return half;
+  return asy__arcpart(z0, c0, c1, z1, a, m, depth - 1)
+    + asy__arcpart(z0, c0, c1, z1, m, b, depth - 1);
+}
+
 real arclength(pair z0, pair c0, pair c1, pair z1) {
-  abort("arclength(pair,pair,pair,pair) 还没做"); return 0;
+  return asy__arcpart(z0, c0, c1, z1, 0, 1, 24);
 }
-real arctime(path p, real L) { abort("arctime 还没做"); return 0; }
-path subpath(path p, int a, int b) { abort("subpath(path,int,int) 还没做"); return p; }
-path subpath(path p, real a, real b) { abort("subpath(path,real,real) 还没做"); return p; }
-real[] intersect(path p, path q, real fuzz=-1) {
-  abort("intersect(path,path) 还没做"); return new real[];
+
+// 第 i 段的弧长（直线段直接取弦长 —— 与 asy 同）
+private real asy__seglen(path p, int i) {
+  if (straight(p, i)) return length(point(p, i + 1) - point(p, i));
+  return arclength(point(p, i), postcontrol(p, i), precontrol(p, i + 1), point(p, i + 1));
 }
+
+real arclength(path p) {
+  real s = 0;
+  int segs = length(p);
+  for (int i = 0; i < segs; ++i) s = s + asy__seglen(p, i);
+  return s;
+}
+
+real arctime(path p, real L) {
+  int segs = length(p);
+  if (segs <= 0) return 0;
+  if (L <= 0) return 0;
+  real rem = L;
+  for (int i = 0; i < segs; ++i) {
+    real seg = asy__seglen(p, i);
+    if (rem > seg) { rem = rem - seg; continue; }
+    if (seg <= 0) return i;
+    pair z0 = point(p, i);
+    pair c0 = postcontrol(p, i);
+    pair c1 = precontrol(p, i + 1);
+    pair z1 = point(p, i + 1);
+    real lo = 0;
+    real hi = 1;
+    for (int k = 0; k < 52; ++k) {
+      real mid = (lo + hi) / 2;
+      if (asy__arcpart(z0, c0, c1, z1, 0, mid, 16) < rem) lo = mid; else hi = mid;
+    }
+    return i + (lo + hi) / 2;
+  }
+  return segs;
+}
+// de Casteljau：三次 Bezier 上 [t0,t1] 那一段的四个控制点（先切 t1 留左半，再切 t0/t1 留右半）
+private pair[] asy__subbez(pair z0, pair c0, pair c1, pair z1, real t0, real t1) {
+  pair p01 = z0 + (c0 - z0) * t1;
+  pair p12 = c0 + (c1 - c0) * t1;
+  pair p23 = c1 + (z1 - c1) * t1;
+  pair q0 = p01 + (p12 - p01) * t1;
+  pair q1 = p12 + (p23 - p12) * t1;
+  pair r = q0 + (q1 - q0) * t1;
+  real s = t1 == 0 ? 0 : t0 / t1;
+  pair u01 = z0 + (p01 - z0) * s;
+  pair u12 = p01 + (q0 - p01) * s;
+  pair u23 = q0 + (r - q0) * s;
+  pair v0 = u01 + (u12 - u01) * s;
+  pair v1 = u12 + (u23 - u12) * s;
+  pair w = v0 + (v1 - v0) * s;
+  pair[] out;
+  out.push(w);
+  out.push(v1);
+  out.push(u23);
+  out.push(r);
+  return out;
+}
+
+path subpath(path p, int a, int b) {
+  int n = p.nodes.length;
+  if (n == 0) return pathcopy(p);
+  if (a > b) return reverse(subpath(p, b, a));
+  int ia = a;
+  int ib = b;
+  if (!p.cyclic) {
+    int len = length(p);
+    if (ia < 0) ia = 0;
+    if (ib > len) ib = len;
+    if (ia > len) ia = len;
+    if (ib < 0) ib = 0;
+  }
+  path h;
+  for (int i = ia; i <= ib; ++i) {
+    knot k = knotcopy(p.nodes[asy__nwrap(p, i)]);
+    if (i == ia) k.pre = k.point;
+    if (i == ib) { k.post = k.point; k.straight = false; }
+    h.nodes.push(k);
+  }
+  return h;
+}
+
+path subpath(path p, real a, real b) {
+  int segs = length(p);
+  if (segs <= 0) return pathcopy(p);
+  if (a > b) return reverse(subpath(p, b, a));
+  real ta = a;
+  real tb = b;
+  if (!p.cyclic) {
+    if (ta < 0) ta = 0;
+    if (tb < 0) tb = 0;
+    if (ta > segs) ta = segs;
+    if (tb > segs) tb = segs;
+  }
+  // `point(path,real)` 声明在这一段**后面**（名字解析是顺序的），所以这里直接用
+  // de Casteljau 取那一点
+  if (ta == tb) {
+    int i0 = floor(ta);
+    if (i0 >= segs) i0 = segs - 1;
+    real s0 = ta - i0;
+    pair[] q0 = asy__subbez(point(p, i0), postcontrol(p, i0),
+                            precontrol(p, i0 + 1), point(p, i0 + 1), s0, s0);
+    return pathof(q0[0]);
+  }
+  int ia = floor(ta);
+  real fa = ta - ia;
+  int ib = floor(tb);
+  real fb = tb - ib;
+  if (fb == 0) { ib = ib - 1; fb = 1; }
+  path h;
+  for (int i = ia; i <= ib; ++i) {
+    real t0 = i == ia ? fa : 0;
+    real t1 = i == ib ? fb : 1;
+    pair[] q = asy__subbez(point(p, i), postcontrol(p, i),
+                           precontrol(p, i + 1), point(p, i + 1), t0, t1);
+    if (i == ia) {
+      knot k = knotat(q[0]);
+      k.post = q[1];
+      k.straight = straight(p, i);
+      h.nodes.push(k);
+    } else {
+      h.nodes[h.nodes.length - 1].post = q[1];
+      h.nodes[h.nodes.length - 1].straight = straight(p, i);
+    }
+    knot e = knotat(q[3]);
+    e.pre = q[2];
+    h.nodes.push(e);
+  }
+  return h;
+}
+
+// Bezier 段的包围盒（四个控制点的凸包界）相交判定 —— 细分求交的剪枝就靠它
+private bool asy__bbhit(pair[] a, pair[] b, real fuzz) {
+  real ax0 = a[0].x; real ax1 = a[0].x; real ay0 = a[0].y; real ay1 = a[0].y;
+  for (int i = 1; i < 4; ++i) {
+    if (a[i].x < ax0) ax0 = a[i].x;
+    if (a[i].x > ax1) ax1 = a[i].x;
+    if (a[i].y < ay0) ay0 = a[i].y;
+    if (a[i].y > ay1) ay1 = a[i].y;
+  }
+  real bx0 = b[0].x; real bx1 = b[0].x; real by0 = b[0].y; real by1 = b[0].y;
+  for (int i = 1; i < 4; ++i) {
+    if (b[i].x < bx0) bx0 = b[i].x;
+    if (b[i].x > bx1) bx1 = b[i].x;
+    if (b[i].y < by0) by0 = b[i].y;
+    if (b[i].y > by1) by1 = b[i].y;
+  }
+  return ax0 - fuzz <= bx1 && bx0 - fuzz <= ax1
+    && ay0 - fuzz <= by1 && by0 - fuzz <= ay1;
+}
+
+private void asy__ixrec(real[][] out, pair[] a, real ta0, real ta1,
+                        pair[] b, real tb0, real tb1, real fuzz, int depth) {
+  if (!asy__bbhit(a, b, fuzz)) return;
+  if (depth <= 0) {
+    real[] r;
+    r.push((ta0 + ta1) / 2);
+    r.push((tb0 + tb1) / 2);
+    out.push(r);
+    return;
+  }
+  real tam = (ta0 + ta1) / 2;
+  real tbm = (tb0 + tb1) / 2;
+  pair[] a0 = asy__subbez(a[0], a[1], a[2], a[3], 0, 0.5);
+  pair[] a1 = asy__subbez(a[0], a[1], a[2], a[3], 0.5, 1);
+  pair[] b0 = asy__subbez(b[0], b[1], b[2], b[3], 0, 0.5);
+  pair[] b1 = asy__subbez(b[0], b[1], b[2], b[3], 0.5, 1);
+  asy__ixrec(out, a0, ta0, tam, b0, tb0, tbm, fuzz, depth - 1);
+  asy__ixrec(out, a0, ta0, tam, b1, tbm, tb1, fuzz, depth - 1);
+  asy__ixrec(out, a1, tam, ta1, b0, tb0, tbm, fuzz, depth - 1);
+  asy__ixrec(out, a1, tam, ta1, b1, tbm, tb1, fuzz, depth - 1);
+}
+
+private pair[] asy__segctl(path p, int i) {
+  pair[] q;
+  q.push(point(p, i));
+  q.push(postcontrol(p, i));
+  q.push(precontrol(p, i + 1));
+  q.push(point(p, i + 1));
+  return q;
+}
+
+private pair asy__bezat(pair[] a, real t) {
+  real r = 1 - t;
+  return r*r*r*a[0] + 3*r*r*t*a[1] + 3*r*t*t*a[2] + t*t*t*a[3];
+}
+
+private pair asy__bezdt(pair[] a, real t) {
+  real r = 1 - t;
+  return 3*r*r*(a[1] - a[0]) + 6*r*t*(a[2] - a[1]) + 3*t*t*(a[3] - a[2]);
+}
+
+// 两段之间的 Newton 收尾：解 P(t) - Q(s) = 0。细分只用来**把交点圈出来**（浅一点就够），
+// 收到机器精度靠这一步 —— 全靠细分要 30 多层，段对多的图（examples/coag）就跑不完了。
+private real[] asy__ixnewton(pair[] a, pair[] b, real t0, real s0, real tol) {
+  real t = t0;
+  real s = s0;
+  for (int k = 0; k < 40; ++k) {
+    pair F = asy__bezat(a, t) - asy__bezat(b, s);
+    if (length(F) <= tol) break;
+    pair dp = asy__bezdt(a, t);
+    pair dq = asy__bezdt(b, s);
+    real det = -dp.x * dq.y + dq.x * dp.y;
+    if (abs(det) < 1e-300) break;
+    // Δ = -J^{-1} F 已经把负号算进 dt/ds 里了（下面是加）
+    real dt = (dq.y * F.x - dq.x * F.y) / det;
+    real ds = (dp.y * F.x - dp.x * F.y) / det;
+    t = t + dt;
+    s = s + ds;
+    if (t < 0) t = 0;
+    if (t > 1) t = 1;
+    if (s < 0) s = 0;
+    if (s > 1) s = 1;
+  }
+  real[] r;
+  if (length(asy__bezat(a, t) - asy__bezat(b, s)) > tol) return r;
+  r.push(t);
+  r.push(s);
+  return r;
+}
+
+// 全部交点（按 p 上的时间排好、去重）。asy 那边是 path.cc 的 intersections。
+// 两步：包围盒细分**圈出**每个交点（12 层，段内约 2e-4），再 Newton 收到机器精度。
 real[][] intersections(path p, path q, real fuzz=-1) {
-  abort("intersections(path,path) 还没做"); return new real[][];
+  int np = length(p);
+  int nq = length(q);
+  real sc = 1;
+  for (int i = 0; i <= np; ++i) { real m = length(point(p, i)); if (m > sc) sc = m; }
+  for (int j = 0; j <= nq; ++j) { real m = length(point(q, j)); if (m > sc) sc = m; }
+  real f = fuzz < 0 ? 1e-9 * sc : fuzz;
+  real tol = 1e-12 * sc;
+  real[][] raw;
+  for (int i = 0; i < np; ++i) {
+    pair[] a = asy__segctl(p, i);
+    for (int j = 0; j < nq; ++j) {
+      pair[] b = asy__segctl(q, j);
+      real[][] cand;
+      asy__ixrec(cand, a, 0, 1, b, 0, 1, f, 12);
+      real[][] seed;
+      for (int k = 0; k < cand.length; ++k) {
+        bool near = false;
+        for (int m = 0; m < seed.length; ++m) {
+          if (abs(seed[m][0] - cand[k][0]) < 1e-3 && abs(seed[m][1] - cand[k][1]) < 1e-3) near = true;
+        }
+        if (!near) seed.push(cand[k]);
+      }
+      for (int k = 0; k < seed.length; ++k) {
+        real[] r = asy__ixnewton(a, b, seed[k][0], seed[k][1], tol);
+        if (r.length == 0) continue;
+        real[] g;
+        g.push(i + r[0]);
+        g.push(j + r[1]);
+        raw.push(g);
+      }
+    }
+  }
+  real[][] out;
+  for (int k = 0; k < raw.length; ++k) {
+    bool dup = false;
+    for (int m = 0; m < out.length; ++m) {
+      if (abs(out[m][0] - raw[k][0]) < 1e-7 && abs(out[m][1] - raw[k][1]) < 1e-7) dup = true;
+    }
+    if (dup) continue;
+    int at = out.length;
+    for (int m = 0; m < out.length; ++m) if (out[m][0] > raw[k][0]) { at = m; break; }
+    out.insert(at, raw[k]);
+  }
+  return out;
 }
+
+// 第一个交点的两个时间（没有就是空数组）—— runpath.in:245 的 intersect
+real[] intersect(path p, path q, real fuzz=-1) {
+  real[][] all = intersections(p, q, fuzz);
+  if (all.length == 0) return new real[];
+  return all[0];
+}
+
 // 笔尖（pen.h 的 `pen::P`）。笔这一格在 `struct pen` 里只能是个 int —— `struct pen`
 // 排在 `struct path` **前面**（字段的类型只能是前面声明过的记录），所以真正的路径存在
 // 旁边这张表里，笔上只带一个下标。没有笔尖就是 -1，`nib` 那时回 nullpath（量过真 asy：
@@ -1933,7 +2239,21 @@ pen makepen(path p) {
   q.nibid = asy__nibtab.length - 1;
   return q;
 }
-real[][] transpose(real[][] a) { abort("transpose 还没做"); return new real[][]; }
+// 转置（runarray.in 里它是按元素类型注册的一族）。体不看元素怎么算 —— 逐格搬。
+// 量出来要它的地方：plain_picture.asy 的 `pic.nodes` 那一路，examples 里 5 个
+// （integraltest / coag / centroidfg / mosquito / layers）。
+real[][] transpose(real[][] a) {
+  int n = a.length;
+  if (n == 0) return new real[][];
+  int m = a[0].length;
+  real[][] r = new real[m][];
+  for (int i = 0; i < m; ++i) {
+    real[] row = new real[n];
+    for (int j = 0; j < n; ++j) row[j] = a[j][i];
+    r[i] = row;
+  }
+  return r;
+}
 // pair 的那一份（runarray.in 里 transpose 是按元素类型注册的一族）：math.asy:418
 // 的二维 fft 要它。体是真的 —— 转置不看元素怎么算。
 pair[][] transpose(pair[][] a) {

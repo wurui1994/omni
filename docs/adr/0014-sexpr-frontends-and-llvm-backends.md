@@ -5345,6 +5345,60 @@ mir 是 exprs.js↔stmts.js 那个 import 环），不算这一批的账。`test
 `tests/oracle` 7、`tests/js-exec` 11、`tests/cabi` 4、`tests/wat` 12 —— 全绿。
 `tests/mir` / `tests/glr` / `tests/incr` 照旧红（先于这几刀），`tests/bootstrap` 跳过。
 
+### 一批：examples 那道坡上量出来的五条（29 -> 62）
+
+上一刀留的话是"让 `guide` 成为自己的类型是下一刀"。**先量再动**：把 220 个例子按
+"第一条错误"分了个桶，`guide` 那处死循环只压着 **1** 个例子（29 -> 30），真正压着人的
+是另外几条。所以这一刀不动类型系统，按条数从大到小收了五条。
+
+**1. 可变形参那一格接下来的候选不算"同型"**（`asyOpUser`）。plain_strings.asy:125 是
+`string operator +(...string[] a)`，体里 `S += s` 在 asy 那边走的是**内建的**字符串接 ——
+asyFit 的头注释早写着"任何非可变的候选都比可变的合适"，只是 `exact` 那一格没跟上，
+于是 `S + s` 把两格打包再调回自己。10 个例子（log / spiral / advection / cos2theta …）
+就是这么崩在 `Maximum call stack size exceeded` 上的。
+
+**2. `settings` 是内建模块**（新的 `asySettingsIn`）。真 asy 那边它是 settings.cc 那一串
+addOption，任何文件里 `settings.outformat="pdf";` 直接就能写。这一层从前只有 base 里
+`access settings;` 过的文件看得见 stage0/lib/asy/settings.asy。补在 `asyAutoPlainIn`
+**后面** —— settings.asy 自己也会拿到 autoplain，先加载会让 plain 里那句 `access settings;`
+撞上"循环 import"；内建面正在加载时整条跳过（不然 plain_constants.asy:73 的 `void(file)`
+在 `struct file` 并进来之前就炸，量过）。7 个例子等它。
+
+**3. 真几何那五个**（`asy_builtins.asy`，从 abort 变成体）：`arclength`（5 点
+Gauss-Legendre + 二分细化）、`arctime`（逐段扣掉再段内二分）、`subpath` 的两份
+（de Casteljau）、`intersect` / `intersections`（包围盒细分 12 层把交点圈出来，再
+Newton 收到机器精度 —— 全靠细分要 30 多层，examples/coag 那种段对多的图就跑不完），
+以及 `transpose(real[][])`。19 个例子等它们。算法与 asy 的不是同一个，所以**末位会差**：
+量过 `arclength` 差 2 ulp、`intersect` 的时间差 ~1e-15。cases/136 只钉算得准的那几位
+（直线段的弧长是闭式的、subpath 端点落在结上、两条直线的交点时间是有理数）。
+
+**4. `operator @`**（`ASY_OPSYM` 里一格）。camp.l 的 EXTRAOPS，geometry.asy:1721 起那四份
+`bool operator @(point, line)`。语法层早就收了，缺的只是这张表。
+
+**5. 同签名相撞时留住带 `explicit` 那份**（`asyExpKeep`），**但只在两格写下来的类型名
+不一样时**。这一条是 `guide` 是 `path` 的别名带出来的：plain_arrows.asy:552 的
+`draw(…, explicit path[] g, …)`（真的体）与 :561 的 `draw(…, guide[] g, …)`（体就是
+`draw(pic,(path[]) g,…)` 一句转发）在这一层塌成同一份，按"后来的替换"留下的是转发那份
+—— 自己调自己。"写下来的名字不一样"这个条件是**必须**的：`explicit` 本身不进签名身份
+（第二十六刀量过），cases/30-explicit 里的 `three` 正钉着反方向那一档（先 explicit 再
+不带的是替换），第一版没这个条件当场把它踩红了。为此形参多记一格 `src`（写下来的
+类型名，新的 `asyTypeSrc`）。让 `guide` 成为自己的类型仍然是正经解法，但量过不值当：
+那要动 base 里 219 处，收益是 1 个例子。
+
+数字：examples **29 -> 62** 跑完（220 个）。剩下 158 个里 **109 个是同一堵墙**：
+`path3`（`import three;` 那一路，three_surface.asy:28 就报）。其余是长尾，最多一档 5 个：
+`vertex`（geometry.asy:5616 的 `from triangle unravel vertex` —— struct 体里声明的类型
+往外 unravel）、`real * pen`、`extension` / `_image` / `pattern` 那几个内建、
+`tridiagonal`、以及 `_texpath` / `_strokepath` / `_shipout`（TeX 与 EPS 那两路本来就不在
+这一层）。
+
+跑过的轴：`tests/asy` 215（新增 cases/136-geometry 与 cases/137-varargs-op-settings，
+两份 `.expected` 都是真 asy `-noV` 的逐字节输出）、`tests/run.js` 91、`tests/sexpr` 53、
+`tests/oir` 451、`tests/llvm` 22、`tests/jit` 22、`tests/gpu` 15+1 skip、
+`tests/js-roundtrip` 92、`tests/oracle` 7、`tests/js-exec` 11、`tests/cabi` 4、
+`tests/wat` 12 —— 全绿。`tests/mir` / `tests/glr` / `tests/incr` 照旧红（先于这几刀），
+`tests/bootstrap` 跳过。
+
 ## 后果与代价
 
 

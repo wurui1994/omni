@@ -327,6 +327,27 @@ export function asyCastFor(L, to, from, allowEc) {
 }
 
 /**
+ * 形参那一格**写下来**的类型名（不是解析完的类型文本）。只认 `(name-ty …)` 与
+ * `(array-ty …)` 两种形状，别的形状（函数类型那一格）返回 null。
+ * 用处只有一个：asyExpKeep 要分开"两份声明在 asy 那边本来就是同一个类型"与
+ * "在 asy 那边是两个类型、只是在这一层塌成了同一个"（`guide` 与 `path`）。
+ */
+function asyTypeSrc(L, n) {
+  if (!isList(n)) return null;
+  const h = head(n);
+  if (h === 'name-ty') return L.plainName(n.items[1]);
+  if (h !== 'array-ty') return null;
+  let en = n.items[1];
+  if (isList(en) && head(en) === 'name-ty') en = en.items[1];
+  const el = L.plainName(en);
+  const d = L.dimsDepth(n.items[2]);
+  if (el === null || d === null) return null;
+  let t = el;
+  for (let k = 0; k < d; k++) t = `${t}[]`;
+  return t;
+}
+
+/**
  * 形参表：`(formal (implicit) TYPE (decidstart NAME))`，带默认值时多一个
  * `varinit`（`(formal EX TYPE DECIDSTART VARINIT)`，第十刀加的）。
  * 默认值这里**只存节点不降级**：它要在调用点按"缺哪几个"生成的包装函数里降，
@@ -379,7 +400,8 @@ export function asyFormals(L, node) {
       const at = L.type(it[2], '形参');
       if (at === null) return null;
       const aex = isList(it[1]) && head(it[1]) === 'explicit';
-      out.push({ name: `asy__anon${fi}`, type: at, exp: aex, def: null, kw: kw });
+      out.push({ name: `asy__anon${fi}`, type: at, exp: aex, def: null, kw: kw,
+        src: asyTypeSrc(L, it[2]) });
       continue;
     }
     if (it.length !== 4 && it.length !== 5) return L.nope(f, '无名形参');
@@ -426,7 +448,13 @@ export function asyFormals(L, node) {
 
     const nm = isAtom(start.items[1]) ? start.items[1].value : null;
     if (nm === null) return L.err(start, '形参少了名字');
-    out.push({ name: asyFldSym(nm), type: t, exp: exp, def: it.length === 5 ? it[4] : null, kw: kw });
+    // `src` 只在 asyExpKeep 那一条上用：名字后面挂的维度也要算进去（`real x[]` 是 `real[]`）。
+    let tsrc = asyTypeSrc(L, it[2]);
+    if (tsrc !== null && start.items.length > 2) {
+      const dd = L.dimsDepth(start.items[2]);
+      for (let k = 0; k < (dd === null ? 0 : dd); k++) tsrc = `${tsrc}[]`;
+    }
+    out.push({ name: asyFldSym(nm), type: t, exp: exp, def: it.length === 5 ? it[4] : null, kw: kw, src: tsrc });
   }
   // `keyword` 的槽是**尾巴上一整段**：asy 那边普通形参排在它后面是语法错
   // （量过报 "normal parameter after keyword-only parameter"）。这一条我们同样比它严 ——
@@ -585,12 +613,47 @@ export function asySig(L, n, at) {
   const key = asySigKey({ params: types, ps });
   for (let i = 0; i < list.length; i++) {
     if (asySigKey(list[i]) !== key) continue;
+    if (asyExpKeep(list[i], cand)) return;
     list[i] = cand;
     L.funcs.set(nm, list);
     return;
   }
   list.push(cand);
   L.funcs.set(nm, list);
+}
+
+/**
+ * 同签名相撞时**留住旧那份**吗（第四十七刀）。两条同时成立才留：
+ *   - 旧那份的某一格是 `explicit`、新那份的同一格不是；
+ *   - 而且这两格**写下来的类型名不一样**。
+ *
+ * 第二条是要紧的：`explicit` 本身**不进签名身份**（第二十六刀量过，cases/30-explicit 里
+ * 的 `three` 钉着 —— 先 `void three(explicit real)` 再 `void three(real)` 是替换，之后
+ * `three(3)` 印的是后写那份的 `plain3`）。所以只有"写下来的名字不一样"那种才是这一条要管的：
+ * 那说明两份在 asy 那边**本来是两个类型**，只是在这一层塌成了同一个。
+ *
+ * 目前只有 `guide`（这一层是 `path` 的别名）会塌。base 里成对出现的
+ *   `void draw(picture pic, explicit path[] g, …)`（plain_arrows.asy:552，真的体）
+ *   `void draw(picture pic, guide[] g, …)`（:561，体就是 `draw(pic,(path[]) g,…)` 一句转发）
+ * 塌成同一份之后，按"后来的替换"留下的是**转发那份**，而它转发的目标就是自己 —— 于是
+ * `draw(pic, path[])` 一调就栈溢出（1overx.asy 量到的）。同样的对子还有
+ * plain_filldraw.asy:56/61（两个体逐字一样）与 plain_Label.asy:498/505。转发那份的体与被
+ * 转发那份等价，所以留旧的既解开死循环、又不改语义。
+ *
+ * 正经的解法是让 `guide` 成为自己的类型（一层壳 + 两向隐式转换）。量过了不值当：那一刀
+ * 要动 base 里 219 处，而它在 220 个例子上只多跑过 1 个（29 -> 30）。
+ */
+export function asyExpKeep(old, neu) {
+  const a = old.ps;
+  const b = neu.ps;
+  if (a === undefined || b === undefined || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].exp !== true || b[i].exp === true) continue;
+    if (a[i].src === null || a[i].src === undefined) continue;
+    if (b[i].src === null || b[i].src === undefined) continue;
+    if (a[i].src !== b[i].src) return true;
+  }
+  return false;
 }
 
 /**
@@ -1126,10 +1189,39 @@ export function asyAutoPlainIn(L, u, off) {
   L.at = keep;
 }
 
+/**
+ * 隐式的 `access settings;`（第四十七刀）。真 asy 那边 `settings` 是**内建模块**
+ * （settings.cc 那一串 addOption），任何文件里 `settings.outformat="pdf";` 直接就能写 ——
+ * 不用 import。这一层的 settings 是 stage0/lib/asy/settings.asy，从前只有 base 里那些
+ * `access settings;` 的文件看得见它，于是 examples 里 7 个（annotation / layers / spectrum /
+ * worksheet / functionshading / contextfonts / floatingdisk）第一句就报"赋值给不是普通变量"。
+ *
+ * 排在 asyAutoPlainIn **后面**是要紧的：settings.asy 自己也会拿到 autoplain，要是它先加载，
+ * plain 里那句 `access settings;` 就撞上"循环 import"。plain 先加载完之后这里是缓存命中。
+ * `at` 记 -1：从文件第一句起就看得见（asyModAlias 拿 `m.at > L.at` 判可见）。
+ */
+export function asySettingsIn(L, u, off) {
+  if (u.setIn === true) return;
+  u.setIn = true;
+  if (L.mods.has('settings')) return;
+  // 内建面正在加载时**不碰**：settings.asy 自己也会拿到 autoplain（asyAutoPlain 只挡
+  // plain 自己那一族），于是它会把 plain 拽进来 —— 而那时候内建面的 `struct file` 还没并进去，
+  // plain_constants.asy:73 的 `void(file)` 当场报"类型 'file' 还不支持"。量过的。
+  for (const k of L.loading) if (k === 'asy_builtins') return;
+  const keep = L.at;
+  L.at = off;
+  const mark = L.diags.mark();
+  const s = asyModLoad(L, null, 'settings');
+  if (s !== null) L.mods.set('settings', { unit: s.id, at: -1 });
+  else L.diags.rollback(mark);
+  L.at = keep;
+}
+
 export function asyDeclPass(L, u) {  const rs = u.rs;
   const off = L.atOff;
   asyBuiltinsIn(L, u, off);
   asyAutoPlainIn(L, u, off);
+  asySettingsIn(L, u, off);
   for (let i = 0; i < rs.length; i++) {
     const r = asyUnwrapMod(L, rs[i]);
     if (!isList(r)) continue;

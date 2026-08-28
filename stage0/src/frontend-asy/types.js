@@ -75,6 +75,10 @@ export const ASY_OPSYM = new Map([
   // `tension` / `controls` / `spec` / `curl` 是连接里那几个规格 —— asy 那边它们也就是
   // 名字叫 `operator tension` 的普通函数（runtime.in:864/885/903/908 是内建那几份）。
   ['::', 'colons'], ['---', 'longdash'],
+  // `@`（camp.l 的 EXTRAOPS）：geometry.asy 拿它写"在上面"（:1721 起那四份
+  // `bool operator @(point, line)`）。语法层早就收了（asy.grammar 里 OPERATOR 那一档），
+  // 缺的只是这张表里的一格 —— 5 个例子（orthocenter / triangle / Pythagoras …）等它。
+  ['@', 'at'],
   // `|`：asy 那边 bool 上的"或"（不短路）与数组那一族的逐元素"或"都叫这个名字
   // （graph.asy:527 的 `a >= x | (a > 0 & a <= y)`）。`||` 是另一回事，见 ASY_OPBAD。
   ['|', 'pipe'],
