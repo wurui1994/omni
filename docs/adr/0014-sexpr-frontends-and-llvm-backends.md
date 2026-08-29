@@ -6669,6 +6669,53 @@ tol/tridiagonal 与 `asy -noV` 在容差内一致（那一格差 1 ulp，理由�
 没跑的轴：`OMNI_LEGS=all` 那四条腿（run-c / interp / interp --mir / run-llvm）、
 `tests/sexpr`、`tests/run.js`、`tests/bootstrap`、深快扫（`OMNI_SWEEP_SX=1`）、EPS/SVG 逐字节。
 
+### 一批：复数 gamma（连复数 exp / log 与复数幂）
+
+`gamma3.asy:12` 的 `gamma(z)`（z 是 pair）。asy 那边它不是 GSL，是 runpair.in:28 里
+**自己写的一份** Lanczos（g=7、九个系数），照抄过来：
+
+```asy
+pair gamma(explicit pair z) {
+  if (z.x < 0.5) return pi / (sin(pi * z) * gamma(1.0 - z));
+  pair w = z - 1.0;
+  pair x = (asy__lanczos[0], 0);
+  for (int i = 1; i < n; ++i) x += asy__lanczos[i] / (w + i);
+  pair t = n - 1.5 + w;
+  return sqrt(2 * pi) * asy__cpow(t, w + 0.5) * exp(-t) * x;
+}
+```
+
+要的三格也一起补：`pair exp(explicit pair)`（runpair.in:22）、`pair log(explicit pair)`
+（:203），以及复数幂 —— `std::pow(complex,complex)` 就是 `exp(w*log(t))`（libc++ 与
+libstdc++ 都是这一句），所以写成一个 private 的 `asy__cpow`。
+
+**`explicit` 这一格必须写**（与已有的 `sin(explicit pair)` 同一条，理由更硬）：内建面的
+`real exp(real)` 是写死在调用那一层的（calls.js 的 mathCall），**根本不在候选表里** ——
+不加 `explicit` 的话 `exp(1.0)` 会落到复数这一格上、回一个 pair。asy 那边 runpair.in 的
+`pair exp(pair)` 没写 explicit，因为它那边标量那份是真候选、逐个同型时赢得过。
+
+**量出来两格超出容差**，记在明处：`gamma((1.5,0.5))` 的虚部 asy 是 0.0274250854138825、
+这一层 0.0274250854138827；`gamma((5,2))` 的虚部 asy 是 1.0575920372152、这一层
+1.05759203721522（差 2e-14，也就是印出来最后一位差 2，而这一节的容差是 1.5 个步长）。
+差不在这份转写上 —— 这一族是**超越函数的复合**（exp / log / atan2 各转手一次宿主的
+数学库），误差会攒。所以 `tests/asy/tol/cgamma.asy` 只钉容差之内的那几格，超出的那两个
+点写在用例头上。
+
+顺手修了容差比较自己的一处**盲点**：`tolSame` 按空白切词，而 pair 印出来是
+`(0.79…,0.027…)` 一整块 —— `Number()` 得到 NaN，两边只差最后一位也会判成"不同"。
+切词改成把 `(` `,` `)` 也当分隔符**并且留在词里**（照旧逐字节比），所以
+`tolSame("(1,2)", "1 2")` 还是 false。
+
+于是例子面 **217 → 218 干净**（gamma3 的诊断清零）。剩下两个：AiryDisk（`gsl` 模块）、
+splitpatch（`.initialized`）。
+
+跑过的轴：新用例 tol/cgamma 与 `asy -noV` 逐字节一致（那两个超容差的点没进用例，
+理由写在用例头上）；`tests/asy/cases` 全量按 `run` 那条腿逐个比对，无差异；
+快扫 **218 干净 / 2 有诊断**（220 个共 2.6s、最慢 genusthree.asy 145ms，无并行）、
+模块那一份 **0 条**。
+没跑的轴：`OMNI_LEGS=all` 那四条腿（run-c / interp / interp --mir / run-llvm）、
+`tests/sexpr`、`tests/run.js`、`tests/bootstrap`、深快扫（`OMNI_SWEEP_SX=1`）、EPS/SVG 逐字节。
+
 ## 后果与代价
 
 

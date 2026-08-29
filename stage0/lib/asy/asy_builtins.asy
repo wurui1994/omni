@@ -6380,6 +6380,33 @@ real angle(pair z, bool warn = true) { return atan2(z.y, z.x); }
  */
 pair sin(explicit pair z) { return (sin(z.x) * cosh(z.y), cos(z.x) * sinh(z.y)); }
 pair cos(explicit pair z) { return (cos(z.x) * cosh(z.y), -sin(z.x) * sinh(z.y)); }
+/*
+ * 复数上的 exp / log 与 gamma（runpair.in:22、:203 与 :28，逐句照抄）。
+ *
+ * 这三格都写成 `explicit pair`，与上面 sin/cos 同一条 —— 而且这里**必须**写：
+ * 内建面的 `real exp(real)` 是写死在调用那一层的（calls.js 的 mathCall），根本不在
+ * 候选表里，不加 explicit 的话 `exp(1.0)` 会落到复数这一格上、回一个 pair。
+ * asy 那边 runpair.in 的 `pair exp(pair)` 没写 explicit，因为它那边标量那份是**真候选**，
+ * 逐个同型时赢得过。
+ */
+pair exp(explicit pair z) { return exp(z.x) * expi(z.y); }
+pair log(explicit pair z) { return (log(length(z)), angle(z)); }
+// std::pow(complex,complex) 就是 exp(w*log(t))（libc++ 与 libstdc++ 都是这一句）
+private pair asy__cpow(pair t, pair w) { return exp(w * log(t)); }
+// Lanczos 的九个系数（g=7），照 runpair.in:29 那一串
+private real[] asy__lanczos = {0.99999999999980993, 676.5203681218851,
+  -1259.1392167224028, 771.32342877765313, -176.61502916214059,
+  12.507343278686905, -0.13857109526572012, 9.9843695780195716e-6,
+  1.5056327351493116e-7};
+pair gamma(explicit pair z) {
+  int n = asy__lanczos.length;
+  if (z.x < 0.5) return pi / (sin(pi * z) * gamma(1.0 - z));
+  pair w = z - 1.0;
+  pair x = (asy__lanczos[0], 0);
+  for (int i = 1; i < n; ++i) x += asy__lanczos[i] / (w + i);
+  pair t = n - 1.5 + w;
+  return sqrt(2 * pi) * asy__cpow(t, w + 0.5) * exp(-t) * x;
+}
 real colatitude(triple v, bool warn = true) {
   real r = sqrt(abs2(v));
   if (r == 0) return 0;

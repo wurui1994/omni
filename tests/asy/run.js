@@ -184,9 +184,14 @@ if (asyBin === null) {
 // 容差的单位是**印出来的最后一位**：`%.15g` 有 15 位有效数字，所以允许的差就是
 // 10^(exp-14) 的 1.5 倍（1 个十进制步长，留半格给两边各自的舍入）。写成相对误差会
 // 在 mantissa 靠近 1 还是 9 时松紧不一，那是含糊的；这里按十进制步长算，说得清。
+//
+// 切词把 `(` `,` `)` 也当分隔符（而且**留在词里**照旧逐字节比）：pair 印出来是
+// `(0.79…,0.027…)` 一整块，按空白切的话 Number() 得到 NaN，两边只差最后一位也会判成不同。
+// tol/cgamma.asy（复数 gamma）就是这么撞上的。
+const tolToks = (s) => s.trim().split(/([(),])|\s+/).filter((t) => t !== undefined && t !== '');
 const tolSame = (a, b) => {
-  const xs = a.trim().split(/\s+/);
-  const ys = b.trim().split(/\s+/);
+  const xs = tolToks(a);
+  const ys = tolToks(b);
   if (xs.length !== ys.length) return false;
   for (let i = 0; i < xs.length; i++) {
     if (xs[i] === ys[i]) continue;
