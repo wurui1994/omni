@@ -5684,6 +5684,32 @@ genustwo 与 genusthree 两个例子到齐。`cases/136` 连"改了摊出来那�
 `import plain / graph / math` 各 0、three 7、geometry 2、contour 2、palette 4、stats 3、
 patterns 1（three_arrows 归零）。没跑的轴：输出层的逐字节比对（EPS/SVG）还没做。
 
+### 一批：记录里放自己那一格（自引用字段，例子面 188 -> 189）
+
+**`struct N { N next; }` 收了（第七十七刀）。** 从前拦在字段类型那一关，理由写在
+`bad/struct-self` 里：隐式 `operator init` 要把内嵌的记录**造出来**，自引用就是无限递归。
+量过 `asy -noV`：asy 的字段是懒的，`N a;` 之后 `a.next` 就是 null，`a.next.next == null`
+也是 `true`。所以这一刀不是去做懒构造，而是**在生成构造函数的过程里记一笔**：`recNew` 往
+`recBusy` 里放当前这个记录名，字段那一档改成 `if (this.isRec(f.type) && !this.recBusy.has(f.type))`
+—— 正在造的那个类型的字段不预造，留 null；`(ret (var this))` 之后把它从 `recBusy` 摘掉。
+`recBusy` 记的是**这一条生成路径**（一个栈，不是单个名字），所以嵌套着造也不会漏。
+两个记录互相指是量不出来的：asy 没有 `struct A;` 这种前向声明（`asy -noV` 报 syntax error，
+我们这边同样拒），所以自引用只有"自己指自己"这一种形状。核心方言那边本来就接得住
+（`{ v: 0n, next: null }`），不用动。
+
+拦那一关时是"字段类型不合法"，现在这条边界挪成了"字段的**值**默认是 null"，语义与 asy 对上：
+bsp.asy:151（`node[] out`，里面又指回 `node`）和 drawtree.asy:9 都是这个写法。treetest 到齐，
+colorplanes 往前走到 bsp.asy:138 的 `operator --(pair[])`；模块面 three / graph3 / solids
+各少一条（都是 three.asy 里那个自引用的结构）。`bad/struct-self` 这条负例连同它自己写的
+"等哪一刀把空引用做进来，这条边界才该挪"一起退役，正例挪进 `cases/137`（自引用那一格排在
+前头、排在后头、以及通过 `T[] kids` 绕一圈的三种都钉住）。
+
+跑过的轴：`node tests/asy/run.js` 225/225（run + run-llvm 两条腿；新增 cases/137 与真 asy
+逐字节一致，退役 `bad/struct-self`，所以总数不变）；`tests/asy/sweep.js` 例子面
+**干净 189 / 有诊断 31**（2.2s，最慢 159ms —— 两条速度线都还在）；模块面
+`import plain / graph / math` 各 0、three 4、graph3 4、solids 4、geometry 2、contour 2、
+palette 4、stats 3、patterns 1。没跑的轴：输出层的逐字节比对（EPS/SVG）还没做。
+
 ## 后果与代价
 
 

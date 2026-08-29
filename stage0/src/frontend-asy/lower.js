@@ -1791,14 +1791,12 @@ class AsyLower {
         mat++;
         continue;
       }
-      // 字段类型是**这个 struct 自己**：asy 收（量过 `struct A { A next; int x; } A a; write(a.x);`
-      // 印 0 退 0 —— 它的字段是懒的，next 就搁着不造）。我们不收：隐式 operator init 要把
-      // 内嵌的对象造出来，自引用就是无限递归。这一条要拦在 type() 前面，不然 'A' 还没进
-      // this.records，漏出去的是那句泛泛的「类型 'A'」。
-      if (isList(r.items[1]) && head(r.items[1]) === 'name-ty'
-          && this.plainName(r.items[1].items[1]) === nm) {
-        return this.nope(r, `struct ${nm} 里放一个 ${nm} 字段（自引用）`);
-      }
+      // 字段类型是**这个 struct 自己**：asy 收，而且那一格是**空引用** —— 量过
+      //   `struct N { int v; N next; } N a; a.v=1; N b; b.v=2; a.next=b;`
+      //   -> `a.next.v` 是 2、`a.next.next == null` 是 true。
+      // 也就是"自引用那一格不给它造对象"（造就是无限递归）。第七十七刀收下这一种：
+      // 声明这里放行，不造那一格在 recNew 里（见那边的 recBusy）。
+      // bsp.asy:151（examples/colorplanes.asy）与 drawtree.asy:9（treetest.asy）靠它。
       // `var` 的字段（第四十一刀）：类型从初值推，而字段类型要在**声明遍**就定下来，
       // 所以这里是"试着降一遍初值、只要它的类型"（probeTy）。plain_bounds.asy:657 的
       // `private var base=new freezableBounds;` 就是这一条。
@@ -2286,6 +2284,9 @@ class AsyLower {
     if (had !== undefined) return `(call ${had})`;
     const fname = `asy__new_${t}`;
     this.recInits.set(t, fname);
+    // 正在生成构造函数的那些记录（自引用/成环的字段不造，见下面那一段）
+    if (this.recBusy === undefined) this.recBusy = new Set();
+    this.recBusy.add(t);
     // 构造函数是另一个作用域、另一串语句（与 defWrapper 同一套保存/还原）。
     // `at` 也挪到**这个 struct 的声明处**：字段默认值与内嵌记录该看见谁，是在那里定的
     // （量过：`struct B { A a; }` 写在 `A operator init()` 前面时 `b.a.x` 是 0，
@@ -2336,9 +2337,12 @@ class AsyLower {
           lines.push(`(fldset (var this) ${asyFldSym(f.name)} ${clo.code})`);
           continue;
         }
-        // 内嵌的记录：没写默认值也要给它一个**新对象**（字段类型只能是前面声明过的记录，
-        // 所以这里的递归一定会到底）。走 recInit：文件级的 operator init 管得到这一格。
-        if (this.isRec(f.type)) {
+        // 内嵌的记录：没写默认值也要给它一个**新对象**。走 recInit：文件级的
+        // operator init 管得到这一格。
+        // 正在造的那个记录**自己**（自引用，见 recordBody 那一条）不造 —— 那一格留空引用，
+        // 与 asy 量出来的一样（`a.next.next == null` 是 true）。间接成环（A 里有 B、
+        // B 里有 A）也照这一条：recBusy 里有的都不造，不然运行时会一直造下去。
+        if (this.isRec(f.type) && !this.recBusy.has(f.type)) {
           const mk = this.recInit(n, f.type);
           if (mk === null) { bad = true; break; }
           lines.push(`(fldset (var this) ${asyFldSym(f.name)} ${mk})`);
@@ -2367,6 +2371,7 @@ class AsyLower {
       si++;
     }
     lines.push('(ret (var this))');
+    this.recBusy.delete(t);
     this.pre = savePre;
     this.updates = saveUpd;
     this.scopes = saveScopes;
