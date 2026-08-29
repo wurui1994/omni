@@ -1741,7 +1741,8 @@ export function asySigText(L, c) {
 
 export function asyFit(L, cand, raw) {
   const filled = new Map();
-  const slot = [];
+  // 每个**写下来的实参**落到哪一个槽上（按 raw 的下标记，-1 = 进了可变那一格的包）
+  const slot = new Array(raw.length).fill(-1);
   let pos = 0;
   let cost = 0;
   let reordered = false;
@@ -1832,66 +1833,85 @@ export function asyFit(L, cand, raw) {
     const cy = cycCost(r, cand.ps[at].type);
     return cy < 0 ? null : cy;
   };
-  for (const r of raw) {
+  // asy 先把**按名字给**的那几个实参配到槽上（application.cc 的 matchSignature 就是这个
+  // 次序），再按位置配剩下的。次序要紧的地方在下面那个"跳过带默认值的槽"：混着写的时候，
+  // 位置那一路不能把**后面按名字给**的槽也当成"填了默认值"。量出来的形状：
+  //   `void g(string fmt="", string lab="", bool b1=true, bool b2=true, int N=0,
+  //           real Step=0, mod m=keep, real Size=0)`
+  // 上 `g("f", keep, b1=false, Step=1, Size=2)` —— keep 跳过 lab/b1/b2/N/Step 落到 m
+  // （markregular.asy:19 的 `Ticks(scale(.7)*Label(align=E),NoZero,begin=false,…)` 同一形：
+  // NoZero 是 tickmodifier，要跳到 graph.asy:931 那份的 `modify` 上）。
+  for (let i = 0; i < raw.length; i++) {
+    const r = raw[i];
+    if (r.key === null) continue;
     let at = -1;
-    if (r.key === null) {
-      while (filled.has(pos)) pos++;
-      at = pos;
-    } else {
-      for (let k = 0; k < cand.ps.length; k++) if (cand.ps[k].name === r.key) at = k;
-      // 可变那一格不能用名字给（asy 那边 `xs=` 也不认它，量过报 no matching function）
-      if (isVar && at === rAt) return null;
-    }
+    for (let k = 0; k < cand.ps.length; k++) if (cand.ps[k].name === r.key) at = k;
+    // 可变那一格不能用名字给（asy 那边 `xs=` 也不认它，量过报 no matching function）
+    if (isVar && at === rAt) return null;
+    if (r.spread === true) return null;   // `... x` 只能落在可变那一格上
+    if (at < 0 || at >= cand.ps.length || filled.has(at)) return null;
+    const uc = tryAt(r, at);
+    if (uc === null) return null;
+    cost += uc;
+    if (shAt) shadow++;
+    filled.set(at, true);
+    slot[i] = at;
+  }
+  for (let i = 0; i < raw.length; i++) {
+    const r = raw[i];
+    if (r.key !== null) continue;
+    while (filled.has(pos)) pos++;
+    let at = pos;
     // 位置实参落到可变那一格上（或更后面）：进那个包，不占槽。
     // `... a` 无论写在第几个都是给可变那一格的（量过 `int f(int a=1, int b=2 ... int[] xs)`
     // 上 `f(... new int[]{5,6})` 印 131 —— a、b 走默认值；`f(... a, 7)` 那边是**语法错**
     // "unnamed argument after rest argument"，所以 spread 之后不会再有位置实参）。
-    if (isVar && r.key === null && (at >= rAt || r.spread === true)) {
+    if (isVar && (at >= rAt || r.spread === true)) {
       const pc = packCost(r);
       if (pc < 0) return null;
       cost += pc;
-      pack.push(slot.length);
-      slot.push(-1);
+      pack.push(i);
       pos = at >= rAt ? at + 1 : rAt;
       continue;
     }
     if (r.spread === true) return null;   // `... x` 只能落在可变那一格上
-    if (at < 0 || at >= cand.ps.length || filled.has(at)) return null;
+    if (at >= cand.ps.length) return null;
     let uc = tryAt(r, at);
     // asy 的 matchArgument（application.cc:205 + matchDefault :154）：这一格接不住、
     // 而它**有默认值**时，就把默认值填上、换下一格再试 —— 所以中间那些带默认值的形参
     // 可以整格跳过去。量过 `int f(int a, int b=7, string c, string d)` 收得下
     // `f(1,"xy","z")`（印 11）；base 里 plain_picture.asy:725 的
     // `fit(t,min(t),max(t))` 走的正是这一条（`transform T0=T` 那一格被跳过）。
-    if (r.key === null) {
-      let intoPack = false;
-      while (uc === null && cand.ps[at].def !== null) {
-        filled.set(at, 'def');
-        at++;
-        while (filled.has(at)) at++;
-        if (at >= cand.ps.length) break;
-        // 跳过来正好落在可变那一格上：进包。量过 `int g(int a=1, string s="z" ... int[] xs)`
-        // 上 `g(9,8)` 印 17（a=9、s 走默认值、8 进包）；plain_prethree.asy:201 的
-        // `operator init(diffuse,specular,background,(x,y,z))` 走的正是这一条。
-        if (isVar && at >= rAt) {
-          const pc = packCost(r);
-          if (pc < 0) return null;
-          cost += pc;
-          pack.push(slot.length);
-          slot.push(-1);
-          intoPack = true;
-          break;
-        }
-        uc = tryAt(r, at);
+    let intoPack = false;
+    while (uc === null && cand.ps[at].def !== null) {
+      filled.set(at, 'def');
+      at++;
+      while (filled.has(at)) at++;
+      if (at >= cand.ps.length) break;
+      // 跳过来正好落在可变那一格上：进包。量过 `int g(int a=1, string s="z" ... int[] xs)`
+      // 上 `g(9,8)` 印 17（a=9、s 走默认值、8 进包）；plain_prethree.asy:201 的
+      // `operator init(diffuse,specular,background,(x,y,z))` 走的正是这一条。
+      if (isVar && at >= rAt) {
+        const pc = packCost(r);
+        if (pc < 0) return null;
+        cost += pc;
+        pack.push(i);
+        intoPack = true;
+        break;
       }
-      pos = at + 1;
-      if (intoPack) continue;
+      uc = tryAt(r, at);
     }
+    pos = at + 1;
+    if (intoPack) continue;
     if (uc === null) return null;
     cost += uc;
     if (shAt) shadow++;
     filled.set(at, true);
-    slot.push(at);
+    slot[i] = at;
+  }
+  // 求值次序：`slot` 是按**写下来的次序**记的，槽号出现回退就要先摊成临时量（见 applyCall）
+  for (const at of slot) {
+    if (at < 0) continue;
     if (at < last) reordered = true;
     last = at;
   }

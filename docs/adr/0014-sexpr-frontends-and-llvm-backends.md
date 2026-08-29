@@ -6526,6 +6526,46 @@ plain.asy:237 与 slide.asy:176 各一份 `void usersetting()`，这一层报"�
 没跑的轴：与上一批同（`run-llvm`、`OMNI_LEGS=all` 那三条腿、`tests/sexpr`、
 `tests/run.js`、`tests/bootstrap`、深快扫、EPS/SVG）。
 
+### 一批：按名字给的实参先配槽
+
+`markregular.asy:19` 的
+
+```asy
+Ticks(scale(.7)*Label(align=E),NoZero,begin=false,beginlabel=false,
+      end=false,endlabel=false,Step=1,step=.25,Size=1mm,size=.5mm,pTick=black,ptick=gray)
+```
+
+接不住 graph.asy:931 那份 `ticks Ticks(Label format="", ticklabel ticklabel=null,
+bool beginlabel=true, bool endlabel=true, int N=0, int n=0, real Step=0, real step=0,
+bool begin=true, bool end=true, tickmodifier modify=None, …)`。
+
+`NoZero` 是 `tickmodifier`（也就是 `tickvalues(tickvalues)`），要**跳过**中间那一串带
+默认值的槽落到 `modify` 上 —— 跳过这件事早就有（asy 的 matchArgument / matchDefault），
+坏在**次序**：这一层按写下来的次序一个个配，位置那一路一边跳一边把跳过的槽记成"填了
+默认值"，于是把后面 `begin=`/`beginlabel=`/… 要用的那几格也占掉了，那几个名字再来时
+撞在"这格已经填过"上。asy 是**先配按名字给的**那几个（application.cc 的 matchSignature），
+剩下的槽再按位置配。改成两趟就对上了。
+
+九行的探针（量过 `asy -noV`）：
+
+```asy
+void g(string fmt="", string lab="", bool b1=true, bool b2=true,
+       int N=0, real Step=0, mod m=keep, real Size=0) { … }
+g("f", keep, b1=false, Step=1, Size=2);
+```
+
+出来是 `f` / 空 / false / true / 0 / 1 / 3 / 2 —— `keep` 跳过 lab/b1/b2/N/Step 落到 `m`。
+`slot`（哪个实参落在哪个槽上）改成按 raw 下标记的定长数组，"求值次序要不要摊成临时量"
+（reordered）配完两趟之后按**写下来的次序**扫一遍算。
+
+于是例子面 **214 → 215 干净**（markregular 清零）。
+
+跑过的轴：新用例 159-named-first 与 `asy -noV` 逐字节一致；`tests/asy/cases` 全量按 `run`
+那条腿逐个比对，无差异；快扫 **215 干净 / 5 有诊断**（220 个共 1.8s、最慢 genusthree.asy
+161ms，无并行）、模块那一份 **0 条**。
+没跑的轴：与上一批同（`run-llvm`、`OMNI_LEGS=all` 那三条腿、`tests/sexpr`、
+`tests/run.js`、`tests/bootstrap`、深快扫、EPS/SVG）。
+
 ## 后果与代价
 
 
