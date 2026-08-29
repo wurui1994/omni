@@ -3887,6 +3887,20 @@ void saveline(string name, string value, bool store=true) { }
 // 所以这里直接借它，不再抄一遍。
 int quotient(int x, int y) { return x # y; }
 
+// runmath.in:243 的 Floor → path.h:31 `(Int) floor(Intcap(t))`：与 floor 的差别只在
+// **超出 int 范围时不报错**，先把值夹到两端再取整（Intcap，path.h:21）。stats.asy:78/114/132
+// 的分桶用它 —— 那里的下标算出来一定在范围里。
+// 夹过头那一档不逐字节跟：asy 那边 `(double)intMax` 舍成 2^63，转回 Int 是 UB，落到
+// common.h:106 留给 Undefined 的那一格上，于是**用**那个值时报 "Trying to use uninitialized
+// value"（量过 `write(Floor(1e30))` 就是这一句；`floor(1e30)` 报的是 "Integer overflow"）。
+// 这一层照 Intcap 的原意回 intMax / intMin。
+// Ceil 与 Round 没人用（base 里一处都没有），照旧留在 builtins.tab 的 nope 那一档。
+int Floor(real x) {
+  if (x >= intMax) return intMax;
+  if (x <= intMin) return intMin;
+  return floor(x);
+}
+
 // runsystem.in:204 → util.cc:265 stripExt(name, "")：suffix 是 "."、n 是 1，
 // 所以走的是 `return name.substr(0,p)` 那一支，p 是**最后**一个点。没有点就原样回。
 // 量过：`a.b/c` 是 `a`（它不认目录），`abc` 是 `abc`，`x.` 是 `x`。

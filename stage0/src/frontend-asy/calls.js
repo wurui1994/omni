@@ -278,9 +278,30 @@ export function asyCall(L, n) {
   // 而 findroot 那种形参正是要遮住同名的文件级函数。
   const lv = L.lookup(nm);
   if (lv !== null && asyIsFn(lv)) {
-    // `unravel x;` 摊出来的名字：调的是 x 那个字段里的函数值
+    // `unravel x;` 摊出来的名字：调的是 x 那个字段里的函数值。
+    // 这一条也**不整片遮住**同名的文件级函数（与下面那一档同一个道理，asy 的 venv 按签名
+    // 分层）：geometry.asy:347 的 `unravel R;` 把 coordsys 的字段 `real dot(pair,pair)`
+    // 摊了进来，:355 那句 `dot(pic, O, dotpen)` 要的却是 plain_markers.asy:329 的
+    // `void dot(picture, pair, pen, filltype)`。所以照下面那一档：先试这一格，接不住就
+    // 回滚往下走（从前是直接 return，报的是"'dot' 是 real(pair,pair)，要 2 个实参，给了 3 个"）。
     const al = L.aliasOf(nm);
-    if (al !== null) return asyFnValCall(L, n, nm, lv, `(fld ${al.recv} ${asyFldSym(al.field)})`);
+    if (al !== null) {
+      const acode = `(fld ${al.recv} ${asyFldSym(al.field)})`;
+      if (!Array.isArray(L.pre) || asyVisible(L, nm).length === 0) {
+        return asyFnValCall(L, n, nm, lv, acode);
+      }
+      const amark = L.diags.mark();
+      const asave = L.pre;
+      L.pre = [];
+      const av = asyFnValCall(L, n, nm, lv, acode);
+      const apre = L.pre;
+      L.pre = asave;
+      if (av !== null) {
+        for (const s of apre) L.pre.push(s);
+        return av;
+      }
+      L.diags.rollback(amark);
+    }
     // 装了箱的那一格（见 declareBox / localFunClo 的递归那一支）：读要穿到箱子里去
     const bx = L.boxOf(nm);
     const readCode = bx === null ? `(var ${L.symOf(nm)})` : `(aget (var ${bx.sym}) (int 0))`;

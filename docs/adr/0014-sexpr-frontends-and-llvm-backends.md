@@ -5894,6 +5894,46 @@ genusthree.asy 155ms）；`OMNI_SWEEP_SX=1` 那一档 **干净 196 / 有诊断 2
 模块面方言那一层 18 -> 17 条；模块面前端诊断 three 6、geometry 2、contour 2、
 **palette 4 -> 1**、stats 3、patterns 1。没跑的轴：输出层的逐字节比对（EPS/SVG）还没做。
 
+### 一批：内建 `Floor` 与"`unravel` 摊进来的那一条也是按签名遮的"（stats 3 -> 0、geometry 2 -> 1）
+
+**`Floor`**（runmath.in:243 → path.h:31 `(Int) floor(Intcap(t))`）：与 `floor` 的差别只在
+**超出 int 范围时不报错** —— 先按 Intcap（path.h:21）夹到两端再取整。stats.asy:78/114/132
+的分桶用它，少了它 `histogram` 那三个函数的体一份都降不出来。
+夹过头那一档**不逐字节跟**，写在代码注释里：asy 那边 `(double)intMax` 舍成 2^63、转回 Int 是
+UB，落到 common.h:106 留给 Undefined 的那一格上，于是**用**那个值时报 "Trying to use
+uninitialized value"（量过 `write(Floor(1e30))` 就是这一句，而 `floor(1e30)` 报的是
+"Integer overflow"）。这一层照 Intcap 的原意回 intMax / intMin。`Ceil` 与 `Round` base 里
+一处都没用，照旧留在 builtins.tab 的 nope 那一档。
+
+**`unravel` 摊进来的那一条也是按签名遮的。** geometry.asy:347 的 `unravel R;` 把 coordsys
+的字段 `real dot(pair,pair)` 摊了进来，:355 那句 `dot(pic, O, dotpen)` 要的却是
+plain_markers.asy:329 的 `void dot(picture, pair, pen, filltype)`。calls.js 里 alias 那一支
+从前是**直接 return**（"调的是 x 那个字段里的函数值"），于是报
+"'dot' 是 real(pair,pair)，要 2 个实参，给了 3 个"。改成与它下面那两支同一个办法：先试这一格，
+接不住就回滚往下走文件级候选。
+
+顺带量清了两条边界：
+
+- `explicit` 形参**不收 cast**（application.cc:30 `castable`：`target.Explicit ?
+  equivalent(...) : e.castable(...)`）—— 这一层的模型与它一致，逐字节量过一个最小例子
+  （`int f(explicit A a)` 收不下 `B`，两边都报错）。
+- `unravel` 摊**方法**（不是函数类型的字段）这一层还不支持：`struct S { int f(int a){…} } S s;
+  unravel s; f(3)` asy 回 4，这一层报"内建函数 'f'"。geometry 那一处是**字段**，所以这一批不
+  碰它；记在这里当已知的洞（诊断也指错了地方，将来一起修）。
+
+geometry.asy:1588 的 `unit(M) * l.A`（`vector * point`）还剩一条：asy 收下了，而
+geometry 里 37 条 `operator *` 里没有 `(vector, point)` 那一条，能沾上的 `point
+operator *(explicit point, explicit point)`（:630）两边都是 `explicit`、按上面那条规则不收
+`vector`。asy 到底落在哪一条还没量出来，先不猜 —— 它眼下不挡任何例子（深一格那一档里
+geometry 一个例子都没炸）。
+
+跑过的轴：`node tests/asy/run.js` **232/232**（run + run-llvm 两条腿；新增 cases/143、144
+与真 asy 逐字节一致）；默认档快扫例子面 **干净 198 / 有诊断 22**（3.1s，最慢
+genusthree.asy 202ms —— 这台机器当时 load 17，同一份代码空载时是 1.7s/155ms）；
+`OMNI_SWEEP_SX=1` 那一档 **干净 196 / 有诊断 24**，模块面方言那一层 **17 -> 12 条**；
+模块面前端诊断 three 6、**geometry 2 -> 1**、contour 2、palette 1、**stats 3 -> 0**、patterns 1。
+没跑的轴：输出层的逐字节比对（EPS/SVG）还没做。
+
 ## 后果与代价
 
 
