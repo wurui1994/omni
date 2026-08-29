@@ -426,8 +426,23 @@ export function asyCall(L, n) {
   // 不排除就会把它当成间接调用，然后报"要 string(real)，这里是 string"（真的量到了，
   // graph 一度从 183 涨到 186）。
   const gv = L.gvarHere(nm);
-  if (gv !== null && gv !== L.gvarAt(nm) && gv.ok && asyIsFn(gv.type)
-      && !asyArityBad(L, n, gv.type, nm) && !asyGvarLoses(L, n, nm, gv.type)) {
+  // 同名的文件级变量在这里可能有**好几格**（asy 按签名分得开），所以从**最近**那一格
+  // 往前一格一格试。原型是 plain_arrows.asy 的 `EndArrow`：:335 是一格
+  // `arrowbar(arrowhead,real,real,filltype,position)`（带默认值的函数类型变量），
+  // :444 那张声明表里又有一格光是 `arrowbar` 的。只看最近那一格时
+  // `EndArrow(2.0)` 会去间接调 :444 那格（`bool(picture,path,pen,margin)`），报"省了实参"；
+  // asy 那边按签名挑，走的是 :335 那格、少给的几格由类型上记着的默认值填
+  // （量过 feynman.asy:579 的 `currentmomarrow = EndArrow(momarrowsize());` 编得过）。
+  const gAt = L.gvarAt(nm);
+  const glist = [];
+  let gbad = null;
+  if (gv !== null) {
+    for (const g of L.globals.get(nm)) if (g.at <= L.at) glist.push(g);
+    glist.reverse();
+  }
+  for (const g of glist) {
+    if (g === gAt || !g.ok || !asyIsFn(g.type)) continue;
+    if (asyArityBad(L, n, g.type, nm) || asyGvarLoses(L, n, nm, g.type)) continue;
     // 这一格**真的接得住**才算：元数对得上但实参类型接不住时，同名的函数候选还得再试
     // 一次。量出来的形状是 plain_Label.asy:1 的 `real angle(transform)` —— 它本来不该
     // 有"那一格"，是 plain_arrows.asy:98 的 `angle=min(angle*…,45)`（改的是**形参**）
@@ -435,7 +450,7 @@ export function asyCall(L, n) {
     const mark = L.diags.mark();
     const savePre = Array.isArray(L.pre) ? L.pre : null;
     if (savePre !== null) L.pre = [];
-    const fv = asyFnValCall(L, n, nm, gv.type, `(var ${gv.sym})`);
+    const fv = asyFnValCall(L, n, nm, g.type, `(var ${g.sym})`);
     const mine = L.pre;
     if (savePre !== null) L.pre = savePre;
     if (fv !== null) {
@@ -443,7 +458,12 @@ export function asyCall(L, n) {
       return fv;
     }
     L.diags.rollback(mark);
-    if (!L.funcs.has(nm)) return asyFnValCall(L, n, nm, gv.type, `(var ${gv.sym})`);
+    if (gbad === null) gbad = g;
+  }
+  // 一格都没接住、又没有同名的函数候选可退：让**最近**那一格去报诊断
+  // （话比"没有能匹配的签名"准）
+  if (gbad !== null && !L.funcs.has(nm)) {
+    return asyFnValCall(L, n, nm, gbad.type, `(var ${gbad.sym})`);
   }
   const vis = asyVisible(L, nm);
   // 同名的用户/模块函数与内建那一族在这里**一起打分**：asy 那边内建与库里的定义是

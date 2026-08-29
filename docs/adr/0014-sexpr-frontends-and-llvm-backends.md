@@ -6324,6 +6324,36 @@ tvgen.asy:912 的 `write(y*1000, round(R*1000), round(G*1000), round(B*1000))` �
 （`min(real[])` / `max(real[])` 那一族被误伤 —— 按形参那串分组挡不住同名不同元素类型的
 那几份），所以撤掉了。这条要做得先把"并进来的候选按类型排序遮盖"那套补全。
 
+### 一批：同名的文件级变量有好几格时，调用按签名挑
+
+`fermi.asy` 停在 feynman.asy:579 的 `currentmomarrow = EndArrow(momarrowsize());` ——
+报"通过函数值调 'EndArrow' 时省了实参（它是 `bool(picture,path,pen,margin)`，要 4 个，
+给了 1 个）"。这句诊断指错了人：`EndArrow` 在 plain_arrows.asy 里有**两格**同名的文件级变量，
+:335 那格是 `arrowbar EndArrow(arrowhead arrowhead=DefaultHead, real size=0, real
+angle=arrowangle, filltype filltype=null, position position=EndPoint)=Arrow;`
+（函数类型的变量，形参名与默认值记在**类型**上，也就是这一层的 `L.fnDefs`），
+:444 那张声明表里又有一格 `EndArrow=Arrow()`，类型光是 `arrowbar`。降出来的两格是
+`(global asy__g341_EndArrow (fnty (arrowhead real real filltype position) …))` 与
+`(global asy__g347_EndArrow (fnty (picture path pen (fnty (path pen))) …))`，都在。
+
+原来这一层只问 `gvarHere`（**最近**那一格），拿到的是 :444 那格，于是把
+`EndArrow(2.0)` 当成对 `bool(picture,path,pen,margin)` 的间接调用。asy 是按签名挑的 ——
+`(real)` 只有 :335 那格接得住，少给的四格由类型上那几个默认值填（那套包装
+`asyFnValDefWrap` 早就有了，只是从来没轮到它）。改法：把可见的同名文件级变量按
+**从近到远**排一串，逐格试（原来那两条守卫 `asyArityBad` / `asyGvarLoses` 与"真降下去
+接不住就回滚"一格不动），一格接住就用它；一格都没接住而且没有同名的函数候选可退时，
+让**最近**那一格去报诊断（那句话比"没有能匹配的签名"准）。
+
+于是例子面 **206 → 207 干净**（fermi 清零）。
+
+跑过的轴：新用例 154-gvar-many-call（`ab EA(real size=0)=mk;` 与 `ab EA=mk(3.0);`
+两格同名，`EA(2.0)` / `EA()` 走前一格、`EA(5)` / `EA(1)` 走后一格）与 `asy -noV`
+逐字节一致；`tests/asy/cases` 全量按 `run` 那条腿逐个比对，无差异；
+快扫 **207 干净 / 13 有诊断**（220 个共 1.7s、最慢 genusthree.asy 117ms，无并行）、
+模块那一份 **0 条**。
+没跑的轴：与上一批同（`run-llvm`、`OMNI_LEGS=all` 那三条腿、`tests/sexpr`、
+`tests/run.js`、`tests/bootstrap`、深快扫、EPS/SVG）。
+
 ## 后果与代价
 
 
