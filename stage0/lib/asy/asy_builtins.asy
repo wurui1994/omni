@@ -5007,6 +5007,189 @@ triple maxbound(triple[][] a) {
   for (int i = 1; i < a.length; ++i) b = maxbound(b, maxbound(a[i]));
   return b;
 }
+// ---- Delaunay 三角化（runarray.in:2102 的 triangulate -> Delaunay.cc:44 的 Triangulate）----
+// 真 asy 那边的判据走 predicates.cc（Shewchuk 的**精确**几何谓词：先用浮点算一遍，误差
+// 界之内再用展开式的精确算术重算）。这一层只有前一半 —— 那个"算不准就重算"的自适应级
+// 没有照抄（两千八百行的展开式算术）。差别是**退化输入**上的：四点共圆、三点共线这些
+// 落在误差界之内的形状，符号可能与真 asy 相反，于是那一块的三角化连法不一样。
+// 非退化的输入两边一样（下面那个 tests/asy/cases/148-triangulate 钉着几组）。
+private real asy__orient2d(real ax, real ay, real bx, real by, real cx, real cy) {
+  return (ax-cx)*(by-cy)-(ay-cy)*(bx-cx);
+}
+private real asy__incircle(real ax, real ay, real bx, real by, real cx, real cy,
+                           real dx, real dy) {
+  real adx = ax-dx; real bdx = bx-dx; real cdx = cx-dx;
+  real ady = ay-dy; real bdy = by-dy; real cdy = cy-dy;
+  real bdxcdy = bdx*cdy; real cdxbdy = cdx*bdy;
+  real alift = adx*adx+ady*ady;
+  real cdxady = cdx*ady; real adxcdy = adx*cdy;
+  real blift = bdx*bdx+bdy*bdy;
+  real adxbdy = adx*bdy; real bdxady = bdx*ady;
+  real clift = cdx*cdx+cdy*cdy;
+  return alift*(bdxcdy-cdxbdy)+blift*(cdxady-adxcdy)+clift*(adxbdy-bdxady);
+}
+// presort 那一趟（Delaunay.cc:49 的 `qsort(pxyz,nv,sizeof(XYZ),XYZCompare)`）：比较只看 x，
+// **等 x 时回 0**，于是次序全看 qsort 怎么走 —— 而输入里等 x 的点很多（规则网格就是一列
+// 好几个）。所以这里照抄的是 BSD/Apple libc 那份 qsort（三点取中的快排，等元素往两头拨，
+// 一趟没换过就转插入排，n<7 直接插入排），不是随便一个稳定排：换一份排法连出来的三角化
+// 就与真 asy 不一样了（量过：3x3 网格上稳定插入排给的 8 个三角形连法全不同）。
+// 元素是"px/py/pi 三个平行数组的同一格"，下面的下标都以**格**为单位（C 那边的 es=1）。
+private void asy__vswap(real[] px, real[] py, int[] pi, int i, int j) {
+  real tx = px[i]; px[i] = px[j]; px[j] = tx;
+  real ty = py[i]; py[i] = py[j]; py[j] = ty;
+  int ti = pi[i]; pi[i] = pi[j]; pi[j] = ti;
+}
+private void asy__vecswap(real[] px, real[] py, int[] pi, int i, int j, int n) {
+  for (int k = 0; k < n; ++k) asy__vswap(px, py, pi, i+k, j+k);
+}
+private int asy__med3(real[] px, int a, int b, int c) {
+  return px[a] < px[b]
+    ? (px[b] < px[c] ? b : (px[a] < px[c] ? c : a))
+    : (px[b] > px[c] ? b : (px[a] < px[c] ? a : c));
+}
+private void asy__qsortx(real[] px, real[] py, int[] pi, int a0, int n0) {
+  int a = a0;
+  int n = n0;
+  while (true) {
+    bool swapped = false;
+    if (n < 7) {
+      for (int pm = a+1; pm < a+n; ++pm)
+        for (int pl = pm; pl > a && px[pl-1] > px[pl]; --pl) asy__vswap(px, py, pi, pl, pl-1);
+      return;
+    }
+    int pm = a + quotient(n, 2);
+    int pl = a;
+    int pn = a + n - 1;
+    if (n > 7) {                          // n == 7 那一格**不取中**（C 那边就是 `if(n > 7)`）
+      if (n > 40) {
+        int d = quotient(n, 8);
+        pl = asy__med3(px, pl, pl+d, pl+2*d);
+        pm = asy__med3(px, pm-d, pm, pm+d);
+        pn = asy__med3(px, pn-2*d, pn-d, pn);
+      }
+      pm = asy__med3(px, pl, pm, pn);
+    }
+    asy__vswap(px, py, pi, a, pm);
+    int pa = a+1; int pb = a+1;
+    int pc = a+n-1; int pd = a+n-1;
+    while (true) {
+      while (pb <= pc && px[pb] <= px[a]) {
+        if (px[pb] == px[a]) { swapped = true; asy__vswap(px, py, pi, pa, pb); ++pa; }
+        ++pb;
+      }
+      while (pb <= pc && px[pc] >= px[a]) {
+        if (px[pc] == px[a]) { swapped = true; asy__vswap(px, py, pi, pc, pd); --pd; }
+        --pc;
+      }
+      if (pb > pc) break;
+      asy__vswap(px, py, pi, pb, pc);
+      swapped = true;
+      ++pb; --pc;
+    }
+    if (!swapped) {                       // 一趟没换过：转插入排
+      for (int pm2 = a+1; pm2 < a+n; ++pm2)
+        for (int pl2 = pm2; pl2 > a && px[pl2-1] > px[pl2]; --pl2) asy__vswap(px, py, pi, pl2, pl2-1);
+      return;
+    }
+    pn = a + n;
+    int r = pa-a < pb-pa ? pa-a : pb-pa;
+    asy__vecswap(px, py, pi, a, pb-r, r);
+    r = pd-pc < pn-pd-1 ? pd-pc : pn-pd-1;
+    asy__vecswap(px, py, pi, pb, pn-r, r);
+    r = pb-pa;
+    if (r > 1) asy__qsortx(px, py, pi, a, r);
+    r = pd-pc;
+    if (r > 1) { a = pn-r; n = r; continue; }   // C 那边是 `goto loop`（省栈）
+    return;
+  }
+}
+int[][] triangulate(pair[] z) {
+  int nv = z.length;
+  int[][] out;
+  if (nv < 3) return out;      // 量过：真 asy 那边 nv<3 时回的也是空表
+  // 顶点表比 nv 多 3 格（超三角形挂在末尾）。presort 是按 x 升序，用的是照抄的那份
+  // BSD qsort（见 asy__qsortx 上面那段注：等 x 的次序必须与真 asy 一样，不然连法不同）。
+  real[] px; real[] py; int[] pi;
+  for (int i = 0; i < nv; ++i) { px.push(z[i].x); py.push(z[i].y); pi.push(i); }
+  asy__qsortx(px, py, pi, 0, nv);
+  real xmin = px[0]; real ymin = py[0]; real xmax = xmin; real ymax = ymin;
+  for (int i = 1; i < nv; ++i) {
+    real x = px[i]; real y = py[i];
+    if (x < xmin) xmin = x;
+    if (x > xmax) xmax = x;
+    if (y < ymin) ymin = y;
+    if (y > ymax) ymax = y;
+  }
+  real dx = xmax-xmin;
+  real dy = ymax-ymin;
+  real xmargin = 0.01*dx;                 // Delaunay.cc:83 的 margin
+  real ymargin = 0.01*dy;
+  px.push(xmin-xmargin); py.push(ymin-ymargin); pi.push(nv);
+  px.push(xmin-xmargin); py.push(ymax+ymargin+dx); pi.push(nv+1);
+  px.push(xmax+xmargin+dy); py.push(ymin-ymargin); pi.push(nv+2);
+  // 三角形表（三个顶点各一列）与"这一格算完了"的旗子；边表在下面按 nedge 记长度。
+  int[] t1; int[] t2; int[] t3; bool[] tdone;
+  t1.push(nv); t2.push(nv+1); t3.push(nv+2); tdone.push(false);
+  int ntri = 1;
+  int[] e1; int[] e2;
+  for (int i = 0; i < nv; ++i) {
+    int nedge = 0;
+    real ddx = px[i]; real ddy = py[i];
+    for (int j = 0; j < ntri; ++j) {
+      if (tdone[j]) continue;
+      real ax = px[t1[j]]; real ay = py[t1[j]];
+      real bx = px[t2[j]]; real by = py[t2[j]];
+      real cx = px[t3[j]]; real cy = py[t3[j]];
+      if (asy__incircle(ax,ay,bx,by,cx,cy,ddx,ddy) <= 0) {
+        // 点落在外接圆里（或圆上）：这个三角形的三条边进边表，它自己删掉
+        while (e1.length < nedge+3) { e1.push(0); e2.push(0); }
+        e1[nedge] = t1[j];   e2[nedge] = t2[j];
+        e1[nedge+1] = t2[j]; e2[nedge+1] = t3[j];
+        e1[nedge+2] = t3[j]; e2[nedge+2] = t1[j];
+        nedge += 3;
+        --ntri;
+        t1[j] = t1[ntri]; t2[j] = t2[ntri]; t3[j] = t3[ntri]; tdone[j] = tdone[ntri];
+        --j;
+      } else {
+        // d[0] 已经在外接圆右边了：这一格以后都不用再看（Delaunay.cc:145 那一段）
+        real A = ax*ax+ay*ay;
+        real B = bx*bx+by*by;
+        real C = cx*cx+cy*cy;
+        real a0 = asy__orient2d(ax,ay,bx,by,cx,cy);
+        if (ddx*a0 < 0.5*asy__orient2d(A,ay,B,by,C,cy)) {
+          tdone[j] = asy__incircle(ax*a0,ay*a0,bx*a0,by*a0,cx*a0,cy*a0,
+                                   ddx*a0, 0.5*asy__orient2d(ax,A,bx,B,cx,C)) > 0;
+        }
+      }
+    }
+    // 成对的边（内部边）打上记号：两条方向相反的同一条边都不要
+    for (int j = 0; j+1 < nedge; ++j) {
+      for (int k = j+1; k < nedge; ++k) {
+        if (e1[j] == e2[k] && e2[j] == e1[k]) {
+          e1[j] = -1; e2[j] = -1; e1[k] = -1; e2[k] = -1;
+        }
+      }
+    }
+    // 剩下的边各与这个点连成一个新三角形
+    for (int j = 0; j < nedge; ++j) {
+      if (e1[j] < 0 || e2[j] < 0) continue;
+      while (t1.length < ntri+1) { t1.push(0); t2.push(0); t3.push(0); tdone.push(false); }
+      t1[ntri] = e1[j]; t2[ntri] = e2[j]; t3[ntri] = i; tdone[ntri] = false;
+      ++ntri;
+    }
+  }
+  // 带超三角形顶点的那些删掉（顶点号 >= nv）
+  for (int i = 0; i < ntri; ++i) {
+    if (t1[i] >= nv || t2[i] >= nv || t3[i] >= nv) {
+      --ntri;
+      t1[i] = t1[ntri]; t2[i] = t2[ntri]; t3[i] = t3[ntri];
+      --i;
+    }
+  }
+  // 顶点号换回**排序前**那一份（runarray.in:2124 的 pxyz[Vi->p1].i）
+  for (int i = 0; i < ntri; ++i) out.push(new int[] {pi[t1[i]], pi[t2[i]], pi[t3[i]]});
+  return out;
+}
 // 带比较函数的排序（runarray.in 的 sort(T[], bool less(T,T))）：稳定，插入排
 triple[] sort(triple[] a, bool less(triple, triple)) {
   triple[] r = new triple[a.length];

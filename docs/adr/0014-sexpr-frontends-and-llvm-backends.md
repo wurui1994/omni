@@ -6128,6 +6128,46 @@ base 里 `void write(file, T)` 那一族（plain_constants.asy:82 起）管的�
 深快扫（`OMNI_SWEEP_SX=1`）**201 干净 / 19 有诊断**，模块那一层 3 条 —— 都与上一批持平。
 没跑的轴：输出层的逐字节比对（EPS/SVG，`shipout3` 这一批只补了签名）。
 
+### 一批：`triangulate`（Delaunay 那一格，palette 清零、深快扫 201 -> 203）
+
+`import palette;` 与 `import contour;` 各卡在一句 `triangulate(z)` 上（runarray.in:2102，
+体是 Delaunay.cc:44 的 `Triangulate`：Paul Bourke 那份逐点插入的 Delaunay，John Bowman
+改过健壮性）。两百来行，逐句照抄进 `lib/asy/asy_builtins.asy`：顶点表用 px/py/pi 三个
+平行数组（C 那边是 `XYZ[]`），三角形表用 t1/t2/t3 加一格"算完了"的旗子，边表按 nedge
+记长度、按 push 长。
+
+两处**不是**照抄就够的地方，都量过：
+
+1. **presort 那一趟**。C 那边是 `qsort(pxyz,nv,sizeof(XYZ),XYZCompare)`，而那个比较函数
+   只看 x、**等 x 回 0** —— 于是等 x 的点排成什么次序全看 libc 的 qsort 怎么走，而输入里
+   等 x 的点很多（规则网格就是一列好几个）。先写了个稳定插入排，量出来 3x3 网格上 8 个
+   三角形的连法全不一样。所以这里照抄的是 BSD/Apple libc 那份 qsort（三点取中的快排、
+   `n > 40` 再取九点的中、等元素往两头拨、一趟没换过就转插入排、`n < 7` 直接插入排、
+   右半用循环代替递归）。拿一段 C（`clang` + 真的 `qsort`）把网格 4/9/16/25/36/49/64/81
+   个点的置换打出来对：**除了 49 那一格**全部一致。
+2. **几何谓词**。真 asy 走 predicates.cc（Shewchuk 的自适应精确谓词：浮点先算一遍，
+   落在误差界内再用展开式算术重算）。这一层只照抄了前一半 —— 那两千八百行展开式算术
+   没做。整数坐标的小网格上浮点这一半本来就是精确的，所以这一条影响的是"误差界内定不了案"
+   的形状。
+
+量出来的一致性（`asy -noV` 逐字节）：不规则点集、伪随机点集（8/21/34/47/60 个点，
+`n<7`、`n>7`、`n>40` 三条路都走到）、共线、重点、一整列同 x、三点、四点共圆的正方形，
+以及规则网格的 2x2/5x5/6x6 —— 全部一致（新用例 `tests/asy/cases/148-triangulate` 钉着）。
+对不上的三格：3x3 与 4x4 是**三角形集合相同、输出次序不同**（那两格的 qsort 置换与真
+asy 一样，所以差在谓词那一侧），7x7 是连法不同（三角形个数一样；那一格 qsort 的置换
+本身也不一样）。用例里没收这三格，差别写在用例头上与这里。
+
+结果：模块那一份 `palette.asy 1 -> 0`、`contour.asy 2 -> 1`（剩下那条是 :478 的
+"捕获会被改的外层变量"）。深快扫里 Gouraudcontour 与 imagehistogram 两个例子转干净 ——
+它们是"前端认下来、核心方言那边才炸"的那两个，于是**深快扫与快扫的干净数第一次一样**
+（都是 203），核心方言那一层的模块诊断 3 -> 2。
+
+跑过的轴：`node tests/asy/run.js` **237/237**（新用例与 `asy -noV` 逐字节一致，419 行；
+`OMNI_LEGS=all` 五条腿 312.9s）；`node tests/sexpr/run.js` 54/54；`node tests/run.js` 91/91；
+`node tests/bootstrap/run.js` **60/60**；快扫 **203 干净 / 17 有诊断**（220 个共 2.4s、
+最慢 genusthree.asy 212ms，无并行）；深快扫 **203 干净 / 17 有诊断**（模块那一层 2 条）。
+没跑的轴：输出层的逐字节比对（EPS/SVG —— Gouraudcontour 那一路画出来长什么样还没对过）。
+
 ## 后果与代价
 
 
