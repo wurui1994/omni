@@ -1878,6 +1878,15 @@ export function asyArrMethod(L, n, recv, nm) {
     if (b === null) return null;
     return { code: `(call ${L.arrHelper('append', el)} ${recv.code} ${b.code})`, type: 'void' };
   }
+  if (nm === 'initialized') {
+    // `a.initialized(i)`（runarray.in:799）**这一刀还不能给**，理由要说准：asy 的那一格
+    // 判据是"这一格空不空"，而这一层长数组时把空档填成了**造好的零值**（arrHelper 的
+    // zero：记录 `(cnew …)`、数组 `(anew … 0)`），不是空引用 —— 也就是空档与真放过值的
+    // 那一格在运行期分不开。真给了只会**静悄悄答错**（量过 splitpatch.asy:29 要的正是
+    // 空档那一档）。等哪一刀把"空槽"做进方言（asy 那边读空档是运行期错），这条才能开。
+    return L.nope(n, `数组的 '.initialized(…)'（这一层长数组时空档填的是造好的零值，`
+      + '不是空记号 —— 空档与放过值的那一格分不开，答不准就先不答）');
+  }
   if (nm !== 'push') return L.nope(n, `数组的 '.${nm}(…)'（这一刀只有 .push / .pop / .delete / .insert / .append）`);
 
   if (args.length !== 1) return L.err(n, `'push' 要 1 个实参，给了 ${args.length} 个`);
@@ -2136,6 +2145,19 @@ export function asyCompare(L, n, op) {
   // 这就是真会发生的事）。见 strict/null-both。
   if (a.type === ASY_NULL && b.type === ASY_NULL) {
     return L.err(n, `'${op}' 两边要同型：左是 ${a.type}，右是 ${b.type}`);
+  }
+
+  // 一支是 `null`、另一支是**引用**类型（记录/数组/函数）：这就是**身份比较**那一条，
+  // 用户重载不参与。不拦的话会被"先 cast 再匹配"的重载抢走：smoothcontour3.asy:529 有
+  // `string operator cast(positionedvector)`，于是 :1096 的 `xdirzeros[i][j][k] != null`
+  // 会去匹配 `bool[] operator !=(string, string[])`（左边 cast 成 string、右边 null 当
+  // string[]），结果成了 bool[] —— asy 那边这一句就是身份比较。
+  const oneNull = (a.type === ASY_NULL) !== (b.type === ASY_NULL);
+  if (oneNull) {
+    const other = a.type === ASY_NULL ? b.type : a.type;
+    if (L.isRec(other) || asyIsArr(other) || asyIsFn(other)) {
+      return asyCmpCode(L, n, op, a, b);
+    }
   }
 
   // 只定义了 `==` 时 `a != b` 走的还是内建的身份比较，所以这里是逐个算符问的。

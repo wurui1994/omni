@@ -5739,6 +5739,42 @@ palette 4、stats 3、patterns 1。速度这一趟本机负载高（load average
 满一核），所以拿 HEAD 与改后交错各跑两趟对照：HEAD 4.7s/7.8s、改后 2.9s/4.5s —— 慢的是
 机器不是这一刀。没跑的轴：输出层的逐字节比对（EPS/SVG）还没做。
 
+### 一批：`slant` / 变换的幂 / 内建的形参名 / 数组对标量比（例子面 191 -> 195）
+
+四刀都小，都是量出来照抄：
+
+- **`slant(real)`**（runtime.in:1219）：`(0,0,1,s,0,1)`。triangle 到齐。
+- **变换的幂 `t^n`**：n 次复合，负数先求逆。要紧的是**从 identity 起乘**而不是从 t 起 ——
+  量出来 `shift((1,2))^-1` 是 `(-1,-2,1,0,0,1)`，而 `inverse(shift((1,2)))` 是
+  `(-1,-2,1,-0,-0,1)`，差在那个 `-0` 上（identity 乘一遍时 `-0 + 0` 就成了 `+0`）。
+  fjortoft 到齐。
+- **内建也有形参名**：C++ 那边的内建是带 `formal(…, "n")` 的，所以 `array(n=6,value=1)`
+  （SierpinskiSponge.asy:42）在 asy 那边照样落格。这一层的内建没有形参名那份表，于是只把
+  量出来要的那一个记进 `ASY_BLT_NAMES`（`array` 的 `n` / `value`），名字都对得上时
+  `asyBuiltinKeyed` **就地**把 raw 排成位置序，往后的路与不带名字那一档一模一样。
+- **数组对一个标量的 `==` / `!=`**：`>` / `<` 那一族早就有标量档了，`==` / `!=` 漏了。
+  pdb.asy:34 的 `find(Element == e)` 就是这一格。
+
+**顺带修一条真错：`记录 != null` 被重载抢走。** 加完上面那一族之后 genustwo / genusthree
+反而炸了：smoothcontour3.asy:529 有 `string operator cast(positionedvector)`，于是 :1096 的
+`xdirzeros[i][j][k] != null` 去匹配了 `bool[] operator !=(string, string[])`（左边 cast 成
+string、右边 null 当 string[]），答成了 `bool[]`。asy 那边这一句是**身份比较**，所以在
+`asyCompare` 里把这一档拦在用户重载之前：一支是 null、另一支是引用类型（记录/数组/函数）时
+直接走 `asyCmpCode`。`cases/139` 把这条也钉住（带一格到 string 的 cast 的记录）。
+
+**没做的那一刀（说清为什么）：`a.initialized(i)`。** splitpatch.asy:29 要它，写起来也就十几行
+（runarray.in:799 的规则：cyclic 且非空时先 imod、越界 false、界内问这一格空不空）。但这一层
+长数组时把空档填成了**造好的零值**（`arrHelper` 的 zero：记录 `(cnew …)`、数组 `(anew … 0)`），
+不是空引用 —— 空档与真放过值的那一格在运行期分不开，而 splitpatch 要的恰好是空档那一档。
+量过：写出来 `a.initialized(0)` 会答 true 而 asy 答 false。所以这一刀**收回**了，只把诊断
+换成说得准的那一句；等哪一刀把"空槽"做进方言（asy 那边读空档是运行期错），这条才该开。
+
+跑过的轴：`node tests/asy/run.js` 227/227（run + run-llvm 两条腿；新增 cases/139 与真 asy
+逐字节一致）；`tests/asy/sweep.js` 例子面 **干净 195 / 有诊断 25**（2.5s，最慢 291ms ——
+两条速度线都在）；模块面 `import plain / graph / math` 各 0、three 3、graph3 3、solids 3、
+geometry 2、contour 2、palette 4、stats 3、patterns 1（这一批模块面没动）。
+没跑的轴：输出层的逐字节比对（EPS/SVG）还没做。
+
 ## 后果与代价
 
 

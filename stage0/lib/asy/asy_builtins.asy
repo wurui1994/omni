@@ -248,6 +248,9 @@ transform scale(real sx, real sy) { return xform(0, 0, sx, 0, 0, sy); }
 transform xscale(real s) { return xform(0, 0, s, 0, 0, 1); }
 transform yscale(real s) { return xform(0, 0, 1, 0, 0, s); }
 
+// slant（runtime.in:1219 -> transform.h 的 slant）：量过 slant(2) 是 (0,0,1,2,0,1)
+transform slant(real s) { return xform(0, 0, 1, s, 0, 1); }
+
 // 量过 rotate(90)：xx=6.12323399573677e-17（cos 90° 的双精度值，不是 0）、xy=-1、yx=1
 transform rotate(real angle) {
   real c = cos(radians(angle));
@@ -298,6 +301,18 @@ transform inverse(transform t) {
   real iyx = -t.yx / det;
   real iyy = t.xx / det;
   return xform(-(ixx * t.x + ixy * t.y), -(iyx * t.x + iyy * t.y), ixx, ixy, iyx, iyy);
+}
+
+// 变换的幂：n 次复合，0 是 identity、负数先求逆。**从 identity 起乘**（不是从 t 起），
+// 这一点量得出来：`shift((1,2))^-1` 是 (-1,-2,1,0,0,1)，而 `inverse(shift((1,2)))` 是
+// (-1,-2,1,-0,-0,1) —— 差在那个 -0 上（identity 乘一遍时 `-0 + 0` 就成了 +0）。
+// fjortoft.asy:15 的 `shift(s)^2*box(…)` 就是这一格。
+transform operator ^(transform t, int n) {
+  transform b = n < 0 ? inverse(t) : t;
+  int k = n < 0 ? -n : n;
+  transform r = xform(0, 0, 1, 0, 0, 1);
+  for (int i = 0; i < k; ++i) r = r * b;
+  return r;
 }
 
 // 变换相等是**逐分量**比（runtime.in 的 transformEquals）。我们的 struct 是引用类型，
@@ -4686,6 +4701,25 @@ bool[] operator !=(string[] a, string[] b) {
   for (int i = 0; i < a.length; ++i) r[i] = !(a[i] == b[i]);
   return r;
 }
+
+// 数组对**一个标量**的 `==` / `!=`（builtin.cc 的 addOps 给每个基本类型都现生了这两支，
+// 与上面 `>` / `<` 那一族的标量档同一形）。pdb.asy:34 的 `find(Element == e)` 就是这一格。
+bool[] operator ==(int[] a, int b) { bool[] c; for (int x : a) c.push(x == b); return c; }
+bool[] operator !=(int[] a, int b) { bool[] c; for (int x : a) c.push(x != b); return c; }
+bool[] operator ==(int a, int[] b) { bool[] c; for (int x : b) c.push(a == x); return c; }
+bool[] operator !=(int a, int[] b) { bool[] c; for (int x : b) c.push(a != x); return c; }
+bool[] operator ==(real[] a, real b) { bool[] c; for (real x : a) c.push(x == b); return c; }
+bool[] operator !=(real[] a, real b) { bool[] c; for (real x : a) c.push(x != b); return c; }
+bool[] operator ==(real a, real[] b) { bool[] c; for (real x : b) c.push(a == x); return c; }
+bool[] operator !=(real a, real[] b) { bool[] c; for (real x : b) c.push(a != x); return c; }
+bool[] operator ==(string[] a, string b) { bool[] c; for (string x : a) c.push(x == b); return c; }
+bool[] operator !=(string[] a, string b) { bool[] c; for (string x : a) c.push(x != b); return c; }
+bool[] operator ==(string a, string[] b) { bool[] c; for (string x : b) c.push(a == x); return c; }
+bool[] operator !=(string a, string[] b) { bool[] c; for (string x : b) c.push(a != x); return c; }
+bool[] operator ==(bool[] a, bool b) { bool[] c; for (bool x : a) c.push(x == b); return c; }
+bool[] operator !=(bool[] a, bool b) { bool[] c; for (bool x : a) c.push(x != b); return c; }
+bool[] operator ==(bool a, bool[] b) { bool[] c; for (bool x : b) c.push(a == x); return c; }
+bool[] operator !=(bool a, bool[] b) { bool[] c; for (bool x : b) c.push(a != x); return c; }
 bool[] operator ==(pair[] a, pair[] b) {
   asy__samelen(a.length, b.length);
   bool[] r = new bool[a.length];

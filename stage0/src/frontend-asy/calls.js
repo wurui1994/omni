@@ -722,12 +722,45 @@ export function asyStrRaw(L, n, nm, raw) {
 }
 
 /**
+ * 内建里**有形参名**的那一格（第七十九刀）。C++ 那边的内建是带 `formal(…, "n")` 的，所以
+ * `array(n=6,value=1)`（SierpinskiSponge.asy:42）在 asy 那边照样落格。这一层的内建没有
+ * 形参名那一份表，所以只把量出来要的那一个记在这里：`array(Int n, T value)`（builtin.cc:624）。
+ * 名字都对得上、位置也不冲突时**就地**把 raw 排成位置序，剩下的路与不带名字那一档一模一样。
+ */
+const ASY_BLT_NAMES = new Map([['array', ['n', 'value']]]);
+function asyBuiltinKeyed(nm, raw) {
+  const ps = ASY_BLT_NAMES.get(nm);
+  if (ps === undefined) return;
+  let keyed = false;
+  for (const a of raw) if (a.key !== null) keyed = true;
+  if (!keyed || raw.length > ps.length) return;
+  const use = new Array(ps.length).fill(null);
+  let next = 0;
+  for (const a of raw) {
+    if (a.key === null) {
+      while (next < ps.length && use[next] !== null) next++;
+      if (next >= ps.length) return;
+      use[next++] = a;
+      continue;
+    }
+    const k = ps.indexOf(a.key);
+    if (k < 0 || use[k] !== null) return;
+    use[k] = a;
+  }
+  for (let i = 0; i < raw.length; i++) if (use[i] === null) return;
+  for (let i = 0; i < raw.length; i++) {
+    raw[i] = { key: null, node: use[i].node, spread: use[i].spread, v: use[i].v, lines: use[i].lines };
+  }
+}
+
+/**
  * 这个名字加这个实参形状**是不是内建那一族的**（不看实参类型，只看名字与给了几个）。
  * 两族：`length`（与 asy_builtins.asy 的 `length(path)` 撞名）与字符串那一族
  * （`erase` 与 `asy_builtins.asy` 的 `erase(frame)` 撞名 —— 元数不同，所以按
- * "给了几个"就分得开）。带名字的实参一律不算内建那一族的：内建这一层没有形参名。
+ * "给了几个"就分得开）。带名字的实参一律不算内建那一族的 —— 只有 `array` 例外，见下。
  */
 export function asyBuiltinOwns(L, nm, raw) {
+  asyBuiltinKeyed(nm, raw);
   for (const a of raw) if (a.key !== null) return false;
   // 展开实参只能落在可变形参那一格上，而内建这一族一个可变形参都没有
   for (const a of raw) if (a.spread === true) return false;
