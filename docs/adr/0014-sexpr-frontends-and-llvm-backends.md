@@ -5652,6 +5652,38 @@ asy 的 venv 是按签名逐层找的，同名两格能共存；这个前端的�
 各 0、three 5、graph3 5、solids 5、geometry 3 -> **2**、contour 2、palette 4、stats 3、patterns 1。
 没跑的轴：输出层的逐字节比对（EPS/SVG）还没做。
 
+### 一批：函数值上的命名实参、两格局部函数按类型挑，与 `from T unravel <static>`（例子面 183 -> 188）
+
+**命名实参也能通过函数值传（第七十六刀）。** asy 的函数**类型**是带形参名的
+（`typedef void ticks3(…, bool opposite=false, bool primary=true, projection P);`，
+graph3.asy:69），所以 `ticks(d,t,"",…,opposite=true,primary=false,P)`（grid3.asy:205）
+调的是一个值也照样按名字落格。这个前端从前在那一档直接报"函数值没有形参名"。现在先拿
+`asyFnValFit`（它读的正是 `L.fnDefs` 里那份形参名）排一遍，一格不缺时按排好的顺序发调用；
+排不出来才照旧报那句。三个例子（elevation / projectelevation / smoothelevation）到齐，
+顺手把 three_arrows.asy 的 `forwards=` 那一条也带出去了 —— 模块面的 three_arrows 归零。
+
+**同一层里两格局部函数按**类型**挑（第七十六刀）。** 上一批那一刀只会数形参个数，而
+smoothcontour3.asy:95 与 :109 的两个 `addtocoeff` 形参个数一样（都是 4 个），只有最后那一格
+分得开（triple / real）。现在给两格各打一次分（`asyValFitCost`：同型 0、内建提升 1+、
+用户 cast 3，接不住 -1），分低的赢；实参类型是 `probeType` 探出来的（诊断与前置语句都回滚）。
+
+**`from T unravel x;` 里 x 也可以是体里的一格 static（第七十六刀）。** static 那一格本来
+就是一个全局（asyStaticDec 的 `g`），所以摊出来就是往文件级挂**同一格** —— 与 `autounravel`
+那一条落在同一个地方，位置换成这一句的位置。smoothcontour3.asy:35-38 那个"拿 struct 当
+命名空间"的写法靠它（`private from pathwithnormals_settings unravel wildnessweight;`），
+genustwo 与 genusthree 两个例子到齐。`cases/136` 连"改了摊出来那一格，`T.x` 那边看见的是
+同一个值"一起钉住。
+
+顺带一条**诊断指向**：局部那一格函数接不住、而文件级同名候选一个都没有时，把这一格的诊断
+照原样发出来。不然会一路落到"内建函数 '…'（这一刀只有 write 和你自己定义的函数）"上 ——
+量出来的样子是 smoothcontour3.asy:193 报"内建函数 'addtocoeff'"，而真正接不住的是第 4 个实参
+（那时 `wildnessweight` 还没摊进来）。
+
+跑过的轴：`node tests/asy/run.js` 225/225（run + run-llvm 两条腿；新增 cases/135、136，
+两条都与真 asy 逐字节一致）；`tests/asy/sweep.js` 例子面 **干净 188 / 有诊断 32**；模块面
+`import plain / graph / math` 各 0、three 7、geometry 2、contour 2、palette 4、stats 3、
+patterns 1（three_arrows 归零）。没跑的轴：输出层的逐字节比对（EPS/SVG）还没做。
+
 ## 后果与代价
 
 

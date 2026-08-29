@@ -321,6 +321,10 @@ export function asyCall(L, n) {
       }
       L.diags.rollback(m2);
     }
+    // 文件级同名候选一个都没有：把这一格的诊断照原样发出来 —— 再往下走的话最后落在
+    // "内建函数 '…'（这一刀只有 write 和你自己定义的函数）"上，那句指错了地方
+    // （量出来的样子是 smoothcontour3.asy:193，真正接不住的是第 4 个实参）。
+    if (asyVisible(L, nm).length === 0) return asyFnValCall(L, n, nm, lv, readCode);
   }
   // 匿名函数体里调**外层的**函数值形参/局部量（第四十七刀）：base 里 plain_picture.asy:488
   // 的 `add(new void(frame f, transform t, …) { d(f,t*T); })` —— `d` 是外层方法的形参，
@@ -337,19 +341,23 @@ export function asyCall(L, n) {
       }
     }
     // 外层同一层里被**重新声明**遮住的那一格（第七十五刀）：同名的局部函数在 asy 那边
-    // 按签名分得开。挑法是硬数形参个数 —— 这一格对不上、而 ov 那一格正好对上时抓 ov。
-    // （asyArityBad 在"没有同名的文件级候选"时直接放行，它防的是另一件事，这里数不了它。）
-    // contour3.asy:229 那个六形参的 `setupweighted` 就是这么找回来的（:245 遮住了它），
-    // 调用在里层 checkpyr 的体里（examples/cheese.asy 与 magnetic.asy 停在这里）。
-    const argc = asyPlainArgc(L, n);
-    const npar = (t) => {
-      const sp = asyFnSplit(t);
-      return sp === null ? -1 : sp.params.length;
-    };
-    if (oov !== null && asyIsFn(oov.type) && argc !== null
-        && npar(oov.type) === argc && (ot === null || npar(ot) !== argc)) {
-      const ov2 = L.capSlot(nm, oov);
-      if (ov2 !== null) return asyFnValCall(L, n, nm, ov2.type, ov2.code);
+    // 按签名分得开。挑法是拿实参类型给两格各打一次分（asyValFitCost）—— 形参个数一样、
+    // 只有类型分得开的也在里面（smoothcontour3.asy:95/:109 的两个 `addtocoeff`）。
+    // （asyArityBad 在"没有同名的文件级候选"时直接放行，它防的是另一件事，这里指望不上它。）
+    // contour3.asy:229 那个六形参的 `setupweighted` 也是这么找回来的（:245 遮住了它），
+    // 调用在里层 checkpyr 的体里（examples/cheese、magnetic、genustwo、genusthree）。
+    if (oov !== null && asyIsFn(oov.type)) {
+      const nodes = asyPlainArgNodes(L, n);
+      if (nodes !== null) {
+        const ats = [];
+        for (const a of nodes) ats.push(L.probeType(a));
+        const co = asyValFitCost(L, oov.type, ats);
+        const ct = ot === null || !asyIsFn(ot) ? -1 : asyValFitCost(L, ot, ats);
+        if (co >= 0 && (ct < 0 || co < ct)) {
+          const ov2 = L.capSlot(nm, oov);
+          if (ov2 !== null) return asyFnValCall(L, n, nm, ov2.type, ov2.code);
+        }
+      }
     }
     // 这一格也不整片遮住同名的函数（同 lookup 那一档的道理）。捕获是有副作用的
     // （capOf 会往闭包上添一格），所以这里不"试了再回滚"，而是先按**给了几个**筛一遍：
@@ -521,16 +529,40 @@ export function asyCall(L, n) {
  * 形状里带名字实参或带展开时回 false：那种情形照旧交给 fnValCall 自己去报。
  */
 /**
- * 这次调用给了几个**普通**实参（没有 `...` 展开、没有名字的那种）。数不出来回 null。
- * asyArityBad 里也有这几句 —— 那一份前面有一道"没有同名的文件级候选就放行"的闸
- * （它防的是另一件事），而"同名的两格局部函数里挑一格"这一档要的正是硬数一遍。
+ * 这次调用的**普通**实参节点（没有 `...` 展开、也没有名字的那些）。认不出回 null。
  */
-function asyPlainArgc(L, n) {
+function asyPlainArgNodes(L, n) {
   const alist = n.items[2];
   if (isList(alist) && head(alist) === 'args-rest') return null;
   const list = alist === undefined || alist === null ? [] : L.flat(alist, 'args');
-  for (const a of list) if (!isList(a) || head(a) !== 'arg') return null;
-  return list.length;
+  const out = [];
+  for (const a of list) {
+    if (!isList(a) || head(a) !== 'arg') return null;
+    out.push(a.items[1]);
+  }
+  return out;
+}
+
+/**
+ * 这个函数类型接这次调用的**代价**（-1 是接不住）：形参个数要对上，每一格按
+ * 「同型 0、内建提升 1+、用户 cast 3」记。用在"同名的两格局部函数里挑一格"这一档 ——
+ * smoothcontour3.asy:95 与 :109 的两个 `addtocoeff` 形参个数一样（都是 4 个），
+ * 只有类型分得开（一格收 triple、一格收 real）。
+ */
+function asyValFitCost(L, ty, ats) {
+  const sp = asyFnSplit(ty);
+  if (sp === null || sp.params.length !== ats.length) return -1;
+  let cost = 0;
+  for (let i = 0; i < ats.length; i++) {
+    const at = ats[i];
+    if (at === null) return -1;
+    if (at === sp.params[i]) continue;
+    const c = asyConvCost(at, sp.params[i]);
+    if (c >= 0) { cost += 1 + c; continue; }
+    if (L.castFor(sp.params[i], at, false) !== null) { cost += 3; continue; }
+    return -1;
+  }
+  return cost;
 }
 
 function asyArityBad(L, n, ty, nm) {
@@ -1323,6 +1355,27 @@ export function asyFnValCall(L, n, nm, ft, callee) {
     }
     const want = isVar ? `至少 ${rAt}` : `${s.params.length}`;
     return L.err(n, `'${nm}' 是 ${ft}，要 ${want} 个实参，给了 ${args.length} 个`);
+  }
+  // 命名实参走**函数类型上的形参名**（第七十六刀）：asy 的函数类型是带形参名的
+  // （`typedef void ticks3(…, bool opposite=false, bool primary=true, projection P);`，
+  // graph3.asy:69），所以通过一个值调也能写 `opposite=true` —— grid3.asy:205 那一句
+  // （elevation / projectelevation / smoothelevation 三个例子停在这里）。落法是先按名字
+  // 排一遍（asyFnValFit 那一份，一格都不缺时才算），排不出来照旧报"函数值没有形参名"。
+  let hasKey = false;
+  for (const a of args) if (a.key !== null && a.key !== undefined) hasKey = true;
+  if (hasKey && !isVar) {
+    const use = asyFnValFit(L, ft, s, args);
+    let full = use !== null;
+    if (use !== null) for (let k = 0; k < s.params.length; k++) if (use[k] < 0) full = false;
+    if (full) {
+      const sorted = [];
+      for (let k = 0; k < s.params.length; k++) {
+        const a = args[use[k]];
+        sorted.push({ key: null, node: a.node, spread: a.spread, v: a.v, lines: a.lines });
+      }
+      // 就地换（`args` 是个 const 绑定，而这一档里给了几个正好等于形参个数）
+      for (let k = 0; k < sorted.length; k++) args[k] = sorted[k];
+    }
   }
   let code = `(callfn ${callee}`;
   const packed = [];

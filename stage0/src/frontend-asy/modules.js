@@ -350,12 +350,16 @@ export function asyUnravelTy(L, n) {
   const nm = L.plainName(n.items[1]);
   if (nm === null) return undefined;
   const rec = L.recOf(nm);
-  if (rec === null || rec.tyAlias === undefined) return undefined;
+  if (rec === null) return undefined;
+  const tys = rec.tyAlias === undefined ? new Map() : rec.tyAlias;
+  const sts = rec.statics === undefined ? new Map() : rec.statics;
+  if (tys.size === 0 && sts.size === 0) return undefined;
   const lst = n.items[2];
   const wild = isList(lst) && head(lst) === 'wildcard';
   const want = [];
   if (wild) {
-    for (const k of rec.tyAlias.keys()) want.push({ src: k, dst: k });
+    for (const k of tys.keys()) want.push({ src: k, dst: k });
+    for (const k of sts.keys()) want.push({ src: k, dst: k });
   } else {
     for (const p of L.flat(lst, 'idpairs')) {
       const pr = asyIdPair(L, p);
@@ -364,17 +368,25 @@ export function asyUnravelTy(L, n) {
     }
   }
   let any = false;
-  for (const w of want) if (rec.tyAlias.has(w.src)) any = true;
+  for (const w of want) if (tys.has(w.src) || sts.has(w.src)) any = true;
   if (!any) return undefined;
   for (const w of want) {
-    const e = rec.tyAlias.get(w.src);
-    if (e === undefined) {
-      // 这一条摊不动**不**把整句判死：`from T unravel x;` 里 x 也可以是体里一个 static
-      // 成员，那是另一刀（说清楚、接着走）。
-      L.nope(n, `from ${nm} unravel ${w.src}（它不是 ${nm} 体里的类型名）`);
+    const e = tys.get(w.src);
+    if (e !== undefined) { L.bringTy(w.dst, e.t, L.at); continue; }
+    // 体里的 **static 成员**也能摊出来（第七十六刀）：static 那一格本来就是一个全局
+    // （asyStaticDec 的 `g`），所以这里往文件级的候选表里挂**同一格** —— 与
+    // `autounravel` 那一条落在同一个地方，只是位置换成这一句的位置（写在前面的看不见它）。
+    // smoothcontour3.asy:38 的 `private from pathwithnormals_settings unravel
+    // wildnessweight;` 就是这一格（examples/genustwo.asy 与 genusthree.asy 靠它）。
+    const g = sts.get(w.src);
+    if (g !== undefined) {
+      const list = L.globals.has(w.dst) ? L.globals.get(w.dst) : [];
+      list.push({ sym: g.sym, type: g.type, at: L.at, ok: g.ok, unit: L.unit.id });
+      L.globals.set(w.dst, list);
       continue;
     }
-    L.bringTy(w.dst, e.t, L.at);
+    // 这一条摊不动**不**把整句判死（说清楚、接着走）
+    L.nope(n, `from ${nm} unravel ${w.src}（它不是 ${nm} 体里的类型名，也不是它的 static 成员）`);
   }
   return [];
 }
