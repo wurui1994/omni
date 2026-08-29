@@ -6421,6 +6421,44 @@ angle=arrowangle, filltype filltype=null, position position=EndPoint)=Arrow;`
 没跑的轴：与上一批同（`run-llvm`、`OMNI_LEGS=all` 那三条腿、`tests/sexpr`、
 `tests/run.js`、`tests/bootstrap`、深快扫、EPS/SVG）。
 
+### 一批：语句位置的任意表达式、名字叫 `operator --` 的那一格变量
+
+`controlsystem.asy:20` 那个闭包里写的是
+
+```asy
+blockconnector operator --=blockconnector(pic,t);
+block(0,0)--Label("$u$",align=N)--Arrow--sum1--Arrow--delay--Arrow--…;
+```
+
+三格都在这一句上：
+
+**一、语句位置的表达式。** 原来只认赋值/自增/调用/`? :` 那几种，别的报"语句位置的表达式
+'join-exp'"。asy 收**任何**表达式当语句、值丢掉（量过 `1+2;`、`f()+f();`、`s+"b";`、`n;`
+都编得过，副作用照发）。所以最后补一步"按表达式降、包一层 `(expr …)`" —— 前置语句
+`L.expr` 自己就推进 `L.pre` 了，而核心方言的 `(expr …)` 收任何表达式。
+
+**二、名字叫 `operator --` 的一格局部量。** 那一句原样降出来是
+`(let operator -- (fnty (int int) int) …)` —— 两个词，方言里不成一个符号（一直是这样，
+只是从来没有例子走到过）。局部那几支的名字过一遍 `asyFldSym`（`asy__opfx45x45`），
+那也正是 opUser 查"局部那一格算符"用的键。文件级那一支不动：那边表里的键是源码里的名字。
+
+**三、局部那一格与文件级那几份算符是同一个重载集。** 原来局部那一格一旦元数对得上就
+"接不住就报错"，于是同一句里的 `block -- Label`（走 flowchart.asy:508 的
+`block operator --(block, Label)`）被那格 `block(block,block)` 挡住了。改成试不成就
+回滚诊断、往下走候选表。
+
+于是例子面 **210 → 211 干净**（controlsystem 清零）。
+
+还差一格没做：**文件级**那一格名字叫 `operator --` 的变量（`conn operator -- = mk(1);`
+之后 `5 -- 6`）—— asy 收（量过印 507），这一层还是报"内建的 '--' 是 guide 的"。
+例子里没有走到它的，所以留着。
+
+跑过的轴：新用例 157-stm-exp-opvar 与 `asy -noV` 逐字节一致；`tests/asy/cases` 全量按
+`run` 那条腿逐个比对，无差异；快扫 **211 干净 / 9 有诊断**（220 个共 1.9s、最慢
+cheese.asy 119ms，无并行）、模块那一份 **0 条**。
+没跑的轴：与上一批同（`run-llvm`、`OMNI_LEGS=all` 那三条腿、`tests/sexpr`、
+`tests/run.js`、`tests/bootstrap`、深快扫、EPS/SVG）。
+
 ## 后果与代价
 
 

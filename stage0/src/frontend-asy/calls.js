@@ -1432,13 +1432,20 @@ export function asyOpUser(L, n, op, vals, btys) {
   if (lv !== null && asyIsFn(lv)) {
     const s = asyFnSplit(lv);
     if (s !== null && s.params.length === vals.length) {
+      // 接不住时**不**在这儿报：这一格与文件级同名的那几份算符是同一个重载集，asy 按签名挑。
+      // controlsystem.asy:20 那个闭包里有一格 `blockconnector operator --`（也就是
+      // `block(block,block)`），而同一句里的 `block -- Label` 走的是 flowchart.asy:508
+      // 那份 `block operator --(block, Label)` —— 试不成就回滚诊断，往下走候选表。
+      const mark = L.diags.mark();
       const cs = [];
+      let ok = true;
       for (let i = 0; i < vals.length; i++) {
         const cv = L.coerce(vals[i], s.params[i], n, `'operator ${op}' 的第 ${i + 1} 个操作数`);
-        if (cv === null) return null;
+        if (cv === null) { ok = false; break; }
         cs.push(cv.code);
       }
-      return { code: `(callfn (var ${lsym}) ${cs.join(' ')})`, type: s.ret };
+      if (ok) return { code: `(callfn (var ${lsym}) ${cs.join(' ')})`, type: s.ret };
+      L.diags.rollback(mark);
     }
   }
   const list = asyVisible(L, `operator ${op}`);

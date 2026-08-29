@@ -621,6 +621,12 @@ export function asyVardec(L, n) {
     }
     const nm = isAtom(start.items[1]) ? start.items[1].value : null;
     if (nm === null) return L.err(start, '声明里少了名字');
+    // 局部那几支用的是**核心方言里的符号名**：`conn operator --= mk(7);`
+    // （controlsystem.asy:20 那个闭包里）声明的是一格名字叫 `operator --` 的变量，
+    // 原样发出来就是 `(let operator -- …)`（两个词，方言里不成一个符号）。
+    // 过一遍 asyFldSym 之后既是合法符号，也正是 opUser 查"局部那一格算符"用的那个键。
+    // 文件级那一支不动 —— 那边表里的键是源码里的名字（符号名在 globalNames 里已经过了）。
+    const lnm = asyFldSym(nm);
     // `A a;`（不写 `= new A`）在 asy 那边**不是** null：它隐式跑一次 operator init，
     // 而默认的那个就是 `new A`（量过：`A c;` 之后 `c == null` 是 false，
     // 而且带默认值的字段也照求 —— `struct B { int n = bump(); } B c;` 之后计数器是 1）。
@@ -701,11 +707,11 @@ export function asyVardec(L, n) {
     // 上面那几支已经把"新声明该有的值"算在 init 里了（零值 / `new` / `(null T)`）。
     // 类型**不同**的那一格得真的改名（第六十四刀，见 declareShadow）—— asy 那边是新开
     // 一格把旧的遮住，这一层给新那一格换个核心方言里的符号，名字照旧查得到。
-    const had = L.scopes[L.scopes.length - 1].get(nm);
+    const had = L.scopes[L.scopes.length - 1].get(lnm);
     if (had !== undefined) {
       if (had !== t) {
-        const boxed = L.needsBox(nm);
-        const sh = L.declareShadow(nm, t, boxed);
+        const boxed = L.needsBox(lnm);
+        const sh = L.declareShadow(lnm, t, boxed);
         if (boxed) {
           const bt = asyCore(`${t}[]`);
           out.push(`(let ${sh} ${bt} (anew ${bt} (int 1)))`);
@@ -715,18 +721,18 @@ export function asyVardec(L, n) {
         }
         continue;
       }
-      const hb = L.boxOf(nm);
+      const hb = L.boxOf(lnm);
       if (hb !== null) out.push(`(aset (var ${hb.sym}) (int 0) ${init})`);
-      else out.push(`(set ${L.symOf(nm)} ${init})`);
+      else out.push(`(set ${L.symOf(lnm)} ${init})`);
       continue;
     }
     // 遮住**外层**作用域里同名的那一格（第六十四刀）：形参与体在 asy 里是两层，可核心方言
     // 的函数体只有一层，同名的 `(let …)` 那边当场报"已经声明过了"。原型是
     // plain_Label.asy:349 的 `pair position=point(g,position);`（形参是 `real position`）。
     // 一律改名：块作用域那一档改了也没坏处（出块名字就查不到了，symOf 回的是外层那个符号）。
-    if (L.lookup(nm) !== null) {
-      const boxed = L.needsBox(nm);
-      const sh = L.declareShadow(nm, t, boxed);
+    if (L.lookup(lnm) !== null) {
+      const boxed = L.needsBox(lnm);
+      const sh = L.declareShadow(lnm, t, boxed);
       if (boxed) {
         const bt = asyCore(`${t}[]`);
         out.push(`(let ${sh} ${bt} (anew ${bt} (int 1)))`);
@@ -738,16 +744,16 @@ export function asyVardec(L, n) {
     }
     // 会被闭包抓走、而且还会被改的那一格要**装箱**（这一刀）：一格长度 1 的数组，
     // 读写都穿过去，闭包抓走的是那个数组本身 —— 于是里外是同一格（asy 的按引用捕获）。
-    if (L.needsBox(nm)) {
-      const bx = L.declareBox(start, nm, t);
+    if (L.needsBox(lnm)) {
+      const bx = L.declareBox(start, lnm, t);
       if (bx === null) return null;
       const at = asyCore(`${t}[]`);
       out.push(`(let ${bx} ${at} (anew ${at} (int 1)))`);
       out.push(`(aset (var ${bx}) (int 0) ${init})`);
       continue;
     }
-    if (L.declare(start, nm, t) === null) return null;
-    out.push(`(let ${nm} ${asyCore(t)} ${init})`);    }
+    if (L.declare(start, lnm, t) === null) return null;
+    out.push(`(let ${lnm} ${asyCore(t)} ${init})`);    }
   return out;
 }
 
@@ -832,7 +838,13 @@ export function asyExprStmt(L, e) {
     if (t === null || f === null) return null;
     return [`(if ${c.code} (do ${t.join(' ')}) (do ${f.join(' ')}))`];
   }
-  return L.nope(e, `语句位置的表达式 '${h}'`);
+  // 别的形状：asy 收**任何**表达式当语句，值丢掉（量过 `1+2;`、`f()+f();`、`s+"b";`、
+  // `n;` 都编得过、副作用照发）。所以最后这一步就是"按表达式降，再包一层 `(expr …)`"——
+  // 前置语句 L.expr 自己已经推进 L.pre 了。`(expr …)` 在核心方言里收任何表达式。
+  const v = L.expr(e);
+  if (v === null) return null;
+  if (v.code === null) return L.nope(e, `语句位置的表达式 '${h}'`);
+  return [`(expr ${v.code})`];
 }
 
 /**
