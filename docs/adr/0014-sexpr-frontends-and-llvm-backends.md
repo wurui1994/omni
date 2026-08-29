@@ -5799,6 +5799,37 @@ truncatedIcosahedron 往前走过了这一关，停在 `operator --(...triple[])
 solids 3、geometry 2、contour 2、palette 4、stats 3、patterns 1（这一批模块面没动）。
 没跑的轴：输出层的逐字节比对（EPS/SVG）还没做。
 
+### 一批：`... a` 整份接进可变形参时也走数组级的 cast（例子面 196 -> 198）
+
+asy 给每一对 `operator cast(A)->B` 顺带生一份 `B[] operator cast(A[])`（arrayToArray 那一族），
+所以 `operator --(... pair[])`（bsp.asy:138）在那边接得住 —— 元素是 pair、形参那一格要
+`guide[]`。这一层从前在 `packCost` 里写的是"`... a` 的类型得与那一格**一模一样**"，把这一句
+拦了。改成拿那一格的**数组类型**去问 `castFor`：`path[] operator cast(pair[])` 就在这一层的
+内建面里（asy_builtins.asy:2982），于是接得住。colorplanes 与 truncatedIcosahedron 到齐。
+
+**只问 cast、不问内建提升**，这一条是量出来的边界：`total(... int[])` 落在
+`real total(... real[])` 上 asy 收（元素级提升），但这一层的 coerce 还不会逐格提升一个数组 ——
+认下来只会在核心方言那边炸。所以那一档照旧不接（asy 收我们拒，写在这里）。反过来
+`sum(... real[])` 落在 `int sum(... int[])` 上两边都拒。用户自己写的 `operator cast` 也**不**
+顺带生数组那一份（量过：`int total(... W[])` 收不下 `... int[]`，asy 报
+"cannot call … with parameter '... int[]'"），与这一层一致。
+
+**顺带一处真错。** 打开这条路之后立刻炸了：`asyUserCall` 那个包实参的分支里，`... a`
+是**原样**塞进包的（`packed.push({ code: r.v.code, spread: true })`），只把类型改了名、
+码没转 —— 于是核心方言那边报 `arr<path> 的初值是 arr<vec<real,2>>`。补上一遍 coerce
+（另一处 `asyFnValCall` 的包分支本来就有）。
+
+顺带记一条**尺子的盲点**：`tests/asy/sweep.js` 数的是**前端**那一层的诊断，核心方言那一层
+的错（`xxx.asy.sx:行:列`）它不数 —— 所以上面那处真错在例子面上看不见（那两个例子照旧
+"干净"）。这一批是靠单文件手跑撞见的。要补的话得让 sweep 也把 `.sx` 那一层的错算进去。
+
+跑过的轴：`node tests/asy/run.js` 229/229（run + run-llvm 两条腿；新增 cases/141 与真 asy
+逐字节一致）；`tests/asy/sweep.js` 例子面 **干净 198 / 有诊断 22**（1.5s，最慢 132ms）；
+模块面 `import plain / graph / math` 各 0、three 3、graph3 3、solids 3、geometry 2、
+contour 2、palette 4、stats 3、patterns 1。这两个例子端到端跑还停在 three.asy:2755
+（模块面那 3 条里的一条），也就是说"例子面干净"目前只等于"例子自己那一份没诊断"。
+没跑的轴：输出层的逐字节比对（EPS/SVG）还没做。
+
 ## 后果与代价
 
 

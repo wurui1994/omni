@@ -1169,7 +1169,17 @@ export function asyApplyCall(L, n, nm, list, raw, recv, reinit) {
     const at = f.slot[i];
     // 进可变那一格的包（fit 把这些槽记成 -1）。`... a` 那一种整份接进去，别的降到元素型。
     if (at < 0) {
-      if (r.spread === true) { packed.push({ code: r.v.code, spread: true }); continue; }
+      if (r.spread === true) {
+        // `... a`：整份接进去，类型不一样时走一遍 coerce —— **数组级**的 `operator cast`
+        // 就在那条路上（`path[] operator cast(pair[])`，于是 `operator --(... pair[])`
+        // 接得住，bsp.asy:138）。少了这一句就只把类型改了名、码原样发出去，核心方言那边
+        // 才炸（`arr<path> 的初值是 arr<vec<real,2>>`）—— 量出来就是这样。
+        const sv = L.coerce(r.v, d.ps[f.restAt].type, r.node,
+          `'${nm}' 的展开实参 ${d.ps[f.restAt].name}`);
+        if (sv === null) return null;
+        packed.push({ code: sv.code, spread: true });
+        continue;
+      }
       const ev = L.coerce(r.v, asyElem(d.ps[f.restAt].type), r.node,
         `'${nm}' 的可变实参 ${d.ps[f.restAt].name}`);
       if (ev === null) return null;
@@ -1582,11 +1592,23 @@ export function asyFit(L, cand, raw) {
   const cycCost = (r, want) => (
     r.v.cyc === true && L.castFor(want, 'cycleToken', false) !== null ? 1 : -1
   );
-  // 进可变那一格的包要花多少（回 -1 = 这个候选接不住）。`... a` 是整份接进去，类型得
-  // 一模一样 —— asy 不给这一格做元素级的提升；散着写的降到元素型，一次转换算 1。
+  // 进可变那一格的包要花多少（回 -1 = 这个候选接不住）。`... a` 是**整份**接进去，所以拿
+  // 那一格的**数组类型**去问用户的 `operator cast`（asy 那边是 arrayToArray 那一族：
+  // `operator cast(A)->B` 有，`B[] operator cast(A[])` 就跟着有）。量过：
+  // `operator --(... pair[])` 接得住（pair->guide 有 cast，bsp.asy:138）。
+  // 从前这里写的是"类型得一模一样"，那一句把 bsp.asy:138 拦了。
+  // **只问 cast、不问内建提升**：`int[] -> real[]` 那种元素级提升 asy 收（量过
+  // `total(... int[])` 落在 `real total(... real[])` 上是 6），但这一层的 coerce 还不会
+  // 逐格提升一个数组 —— 认下来只会在核心方言那边炸（`arr<real> 的初值是 arr<int>`）。
+  // 所以那一档照旧不接，等哪一刀把数组的元素级提升做进 coerce。
+  // 散着写的降到元素型，一次转换算 1。
   const packCost = (r) => {
     if (r.v.over !== undefined) return -1;   // 重载集当可变实参：另一刀
-    if (r.spread === true) return r.v.type === cand.ps[rAt].type ? 0 : -1;
+    if (r.spread === true) {
+      const at = cand.ps[rAt].type;
+      if (r.v.type === at) return 0;
+      return L.castFor(at, r.v.type, false) !== null ? 1 : -1;
+    }
     const ec = asyConvCost(r.v.type, elem);
     if (ec >= 0) return ec;
     if (L.castFor(elem, r.v.type, false) !== null) return 1;
