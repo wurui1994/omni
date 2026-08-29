@@ -16,6 +16,7 @@ package-lock.json
 
 # js 往返测试重新生成出来的编译器树（留在磁盘上是为了能直接 diff / 直接跑）
 /.omni-build/
+/.omni-cache/
 
 # `omni bootstrap` 的产物树（C1 + N1 + lib + runtime）。是生成物，不进版本库。
 /dist/

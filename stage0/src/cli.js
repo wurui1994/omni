@@ -117,6 +117,29 @@ function compile(path, argv = []) {
  * 降级器只拿解析好的东西 —— 整份文件的编译（asyText）与 REPL（repl.js 的 AsyLang）
  * 共用这一份，所以"从哪里找模块"这类规则不会有两份实现。
  */
+/**
+ * 解析缓存的两个小工具（第七十二刀）。
+ *
+ * 存的时候把 `span.file` 摘掉（那是个带全文与行表的对象，每个节点都指着它，
+ * 进 JSON 就是几十份全文）；读回来按这一份 SourceFile 重新挂上。
+ * 走法是**通用**的：树上任何一层只要有 `span` 就挂，别的字段照原样走 —— 这样
+ * glrParse 以后往节点上加字段时这两个函数不用跟着改。
+ */
+function astNoFile(k, v) { return k === 'file' ? undefined : v; }
+
+function astReattach(x, file) {
+  if (x === null || typeof x !== 'object') return;
+  if (Array.isArray(x)) {
+    for (const y of x) astReattach(y, file);
+    return;
+  }
+  const sp = x.span;
+  if (sp !== undefined && sp !== null && typeof sp === 'object') sp.file = file;
+  for (const k of Object.keys(x)) {
+    if (k !== 'span') astReattach(x[k], file);
+  }
+}
+
 function asyFrontEnd() {
   const gpath = join(installDir(), '..', 'frontend-asy', 'asy.grammar');
   if (!exists(gpath)) throw new OmniError(`找不到 asy 语法文件：${gpath}`);
@@ -127,12 +150,39 @@ function asyFrontEnd() {
   if (!exists(btab)) throw new OmniError(`找不到 asy 内建绑定表：${btab}`);
   const builtins = parseAsyBuiltins(readText(btab));
   vStep(`asy builtins   ${builtins.size} 条绑定`);
+  // ---- 解析缓存（第七十二刀）----
+  // 量出来的：一个只带 prelude 的文件跑 836ms，里面 glrParse 120ms + lexText 59ms +
+  // 建树 55ms 是最大的一块（node --cpu-prof），而 prelude 与 base/ 那几十个文件每次跑
+  // 都**一模一样**。所以按「语法表 + 源文本」的哈希把树存到盘上，命中就 JSON.parse 回来。
+  // 键里带语法表的哈希：语法一改，缓存整片失效。`OMNI_NO_ASTCACHE=1` 关掉它（对照用）。
+  // span 里的 `file` 是个带全文与行表的对象，不进 JSON —— 读回来再挂上（astReattach）。
+  const gkey = hash16(readText(gpath));
+  const astDir = env('OMNI_NO_ASTCACHE') === '1' ? null
+    : join(installDir(), '..', '..', '..', '.omni-cache', 'asy-ast');
+  if (astDir !== null) mkdirAll(astDir);
   const parseText = (p, text, diags) => {
-    const toks = lexText(tb.grammar.lex, new SourceFile(p, text), diags);
+    const file = new SourceFile(p, text);
+    // 键不哈希全文（量过：哈希 base 那几十个文件要 56ms）——用「路径 + 改动时间 + 字节数」，
+    // 那三样一致就是同一份源码，而 stat 是常数时间。文本不是从盘上来的（REPL、内联）时
+    // 退回哈希那条路。
+    let key = '';
+    if (astDir !== null) {
+      if (exists(p)) key = `p${hash16(p)}-${Math.round(mtimeMs(p))}-${text.length}`;
+      else key = `t${hash16(text)}-${text.length}`;
+    }
+    const cpath = key === '' ? '' : join(astDir, `a-${gkey}-${key}.json`);
+    if (cpath !== '' && exists(cpath)) {
+      const t = JSON.parse(readText(cpath));
+      astReattach(t, file);
+      vStep(`asy ast cache  ${p}`);
+      return t;
+    }
+    const toks = lexText(tb.grammar.lex, file, diags);
     diags.throwIfErrors();
     vStep(`asy lexer      ${p} -> ${toks.length} tokens`);
     const t = glrParse(tb, toks, diags);
     diags.throwIfErrors();
+    if (cpath !== '') writeText(cpath, JSON.stringify(t, astNoFile));
     return t;
   };
   // 模块的找法是量出来的 —— asy 按**当前目录**找，不是按引它的那个文件所在的目录

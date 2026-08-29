@@ -125,7 +125,17 @@ export function asyCandAt(L, c, at) {
  *     （量过 `import mid;` 之后 mid import 的名字也裸着可见）。
  * `only` 不是 null 时只并那几个名字（`from m access f, g;`）。
  */
-export function asyModMerge(L, node, u, at, only) {
+export function asyModMerge(L, node, u, at, only, priv) {
+  // `priv` 是"这一并是私有的"（autoplain 那一并）：并进来的每一格打上 ap 记号，
+  // 这个单元**再被别人 import** 时那些格子不往外导。量出来的形状是 graph3.asy:567 的
+  // `bounds mx=autoscale(…)`：graph3 先 `import graph;`（graph 里有自己的 struct bounds）、
+  // 紧接着 `import three;`，而 three 顺着它自己的 autoplain 把 plain_bounds 那个同名的
+  // `bounds` 又带了一遍 —— 按"后来的盖住先来的"，567 那一行的 `bounds` 就变成 plain 那份，
+  // 于是 40 个例子全停在"要 bounds，这里是 asy__m13_bounds"。真 asy 那边这一句是
+  // `private import plain;`（dec.cc:1473），私有的东西 unravel 不出去，所以问题根本不存在。
+  // （量过：`import t_h; import t_g;` 印 2、`import t_g; import t_h;` 报
+  // "cannot cast 'bnd' to 'bnd'" —— "后来的盖住先来的"这条本身没错，错在 plain 那一份
+  // 压根不该跟着 three 出来。）
   // `from m access X;` 里 X 是个 **struct** 时，它体里那些 `autounravel` 的成员也一起来
   // （第六十二刀，见 asyAuNames 的注释与那条量法）。名字**不跟着改**：改的是类型那个名字，
   // 摊出来的成员各是各的名字。
@@ -147,10 +157,13 @@ export function asyModMerge(L, node, u, at, only) {
     if (key === undefined) continue;
     const dst = L.funcs.has(key) ? L.funcs.get(key) : [];
     for (const c of list) {
+      if (c.ap === true) continue;   // 私有（autoplain）进来的：不往外导
       let dup = false;
       for (const d of dst) if (d.sym === c.sym) dup = true;
       if (dup) continue;   // 同一个模块引两遍：名字还是那一份
-      dst.push(asyCandAt(L, c, at));
+      const cc = asyCandAt(L, c, at);
+      if (priv === true) cc.ap = true;
+      dst.push(cc);
     }
     L.funcs.set(key, dst);
   }
@@ -159,13 +172,15 @@ export function asyModMerge(L, node, u, at, only) {
     if (key === undefined) continue;
     const dst = L.globals.has(key) ? L.globals.get(key) : [];
     for (const g of list) {
+      if (g.ap === true) continue;   // 私有（autoplain）进来的：不往外导
       let dup = false;
       for (const d of dst) if (d.sym === g.sym) dup = true;
       if (dup) continue;
       // 同一块存储：模块里改它、这边也改它（量过两边都看得见对方的改动）。
       // `unit` 是**声明它的那个单元**，照原样带过来 —— gvarAt 靠它分"这一句声明的那一格"
       // 与"引进来的同名那一格"（内建面每个单元都隐式引一次，位置也落在同一格上）。
-      dst.push({ sym: g.sym, type: g.type, at: at, ok: g.ok, unit: g.unit });
+      dst.push({ sym: g.sym, type: g.type, at: at, ok: g.ok, unit: g.unit,
+        ap: priv === true ? true : undefined });
     }
     L.globals.set(key, dst);
   }
@@ -186,7 +201,10 @@ export function asyModMerge(L, node, u, at, only) {
     // 那条 import 那一行 —— 于是前面几百行里用 pen 的地方全报"声明在后面"（量到 231 条，
     // 一处毛病）。同一个 rec 对象就是同一个类型，遮不遮的问题根本不存在。
     if (had !== undefined && had.rec === e.rec) continue;
-    if (had === undefined || had.at <= at) L.recVis.set(key, { rec: e.rec, at: at });
+    if (e.ap === true) continue;   // 私有（autoplain）进来的：不往外导
+    if (had === undefined || had.at <= at) {
+      L.recVis.set(key, { rec: e.rec, at: at, ap: priv === true ? true : undefined });
+    }
   }
   // typedef 的别名跟着 import 一起进来（asy 那边也是：`import graph;` 之后
   // `splinetype` 就是个类型名了）。改名那种写法（`from m access X as Y;`）也收 ——
@@ -195,7 +213,11 @@ export function asyModMerge(L, node, u, at, only) {
     const key = only === null ? nm : only.get(nm);
     if (key === undefined) continue;
     // 位置一律按 import 那一行算（与 recVis 同一条），所以只带**模块里最后那一份**
-    if (!L.tyAlias.has(key)) L.tyAlias.set(key, [{ t: e[e.length - 1].t, at: at }]);
+    const last = e[e.length - 1];
+    if (last.ap === true) continue;   // 私有（autoplain）进来的：不往外导
+    if (!L.tyAlias.has(key)) {
+      L.tyAlias.set(key, [{ t: last.t, at: at, ap: priv === true ? true : undefined }]);
+    }
   }
   // 用户定义的转换（第二十七刀）：`import m;` 把它们一起带进来 —— 它们不挂在某个名字上，
   // 所以 `only`（`from m access f, g;` 的那张改名表）管不到它们。

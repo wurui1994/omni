@@ -5579,6 +5579,50 @@ three / graph3 / solids 树的正文能跑到底，界与投影算得出真数�
 31 -> 4、`import graph3;` 71 -> 42、`import solids;` 77 -> 47、`import palette;` 4、
 `import bezulate;` 0。
 
+### 一批：量得快的那把尺（9 分钟 -> 3.7 秒）、快照漏回去的那一格，与 `? :` 按目标类型定案
+
+这一批的主角是**工具**：`tests/asy/sweep.js`。220 个例子从前是一个进程一个 —— prelude 与
+plain/graph/three 那一摞每次重降一遍，跑完 9 分钟，"改一刀量一遍"的循环没法用。现在
+语法表、AST、以及热身那一摞模块的降级结果都只做一次，每个例子从同一张镜像的一份拷贝起降：
+**220 个 3.7s，最慢一个 241ms**（不用并发）。
+
+**热身要用 `access` 而不是 `import`。** 这一条是量出来的：`import stats;` 会把 stats 的名字
+摊进 0 号单元，它的 `N`、`E` 遮住 plain 的同名量，例子里于是冒出三十来条
+`label(string,pair,real[])` 匹配不上的**假**诊断。`access` 只把模块降出来（缓存住）、不摊名字，
+这才与"一个例子一个进程"那一趟对得上。
+
+**快照漏回去的那一格（真 bug，REPL 也吃它）。** `AsySession.snapshot()` 里
+`globals: new Map(u.globals)` 是**浅**的 —— 那张表的值是数组，而声明是
+`list = m.get(k) ?? []; list.push(g); m.set(k, list)` 这么攒的，push 进去的那一格于是从快照的
+背面漏了回去。量出来的样子：`NURBSsphere.asy` 里的 `real[] W` 到 `equilateral.asy` 还看得见，
+`label("$B$",b,W)` 报"没有能匹配 `label(string, pair, real[])`"。它还有一层障眼法 —— 位置解析
+（`g.at <= L.at`）让漏进来的那一格只在**后面几句**才可见，所以同样的代码短了一句就复现不了。
+现在 funcs / globals / casts / oinits / tyAlias 五张都按数组拷（`copyAsyLists`），
+另外补了一个 `cloneSnap(s)`：同一张快照要回滚多次时先拷一份（快扫正是这么用的）。
+这一刀单独把例子那一面从 **干净 145 抬到 174** —— 之前那 29 条是量错了，不是真诊断。
+
+**`? :` 按用处那一侧给的目标类型定案（第七十四刀）。** asy 那边这是两条路：有目标类型时走
+`conditionalExp::transToType`（exp.cc:1280）—— 两支**各自**转到目标去，根本不求公共类型；
+没有目标才求 `promote`（:1357）。这个前端从前只有后一条，于是
+`bool3 branch(...) { return b ? true : default; }`（examples/oneoverx.asy:13）报"两支要同型"：
+bool 与 bool3 **两个方向**的 cast 都在（plain_constants.asy:118 与 :123），求公共类型就是歧义。
+现在 `asyCondPick` 先问 `condWant`（探一遍两支能不能都转过去，诊断与前置语句都丢掉），
+定不下来又没有目标类型时**回一格待定的值**，等 `asyCoerce` / `asyCall` 那一侧拿目标类型
+重降一遍（`asyCondAt`）。量过真 asy：两个方向都能转的一对记录，`A f(…){return c?x:y;}` 与
+`B g(…){return c?x:y;}` 都收，回的类型跟着**返回类型**走 —— `cases/131-cond-target-type`
+就是这一条（floor / gamma / oneoverx 三个例子）。
+
+**复数上的 sin / cos（runpair.in:208 与 :213）。** `pair sin(explicit pair)` /
+`pair cos(explicit pair)` 两格，逐句照抄。`explicit` 那一格是要紧的：不带它就把 `sin(2.0)`
+抢过去了（asy 那边同名注册两格正是为这个）。`cases/132-pair-sincos` 与真 asy 逐字节一致
+（sin3 / cos3 两个例子）。
+
+跑齐的轴：`node tests/asy/run.js` 221/221（run 与 run-llvm 两条腿，新增 131/132 两条 case）；
+`tests/asy/sweep.js` 例子面 **干净 179 / 有诊断 41**（3.7s，最慢 241ms）；模块面
+`import plain / graph / math` 各 0、`import three;` 5、`graph3` 5、`solids` 5、geometry 3、
+contour 2、palette 4、stats 3、patterns 1。没跑的轴：输出层的逐字节比对（EPS/SVG）还没做，
+`shipout3` 那两条仍在名单上。
+
 ## 后果与代价
 
 

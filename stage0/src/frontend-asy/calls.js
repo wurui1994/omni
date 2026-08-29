@@ -215,15 +215,19 @@ export function asyCall(L, n) {
     }
     // 无体的方法声明（`int size();`）其实是**函数类型的字段**，所以方法体里的 `size()`
     // 是"读这一格再间接调"。与上面那一档同一个道理放在文件级候选前面：它也是个成员。
-    const sf = L.selfField(nm, true);
-    if (sf !== null && asyIsFn(sf.type)) {
-      // 与上面那一档同一条：这一格接不住时**回滚**再往下走（第六十六刀）。量出来的形状是
-      // three_surface.asy:347 的 `point(external,0)` —— patch 里 `point` 是一格
-      // `triple(real,real)` 的字段（:262 被赋过值，所以摊成了字段），而这一句要的是文件级
-      // 的 `triple point(path3, real)`。
+    //
+    // 同名的可能有**好几格**（第七十一刀：重载的方法各摊一格）——逐格试，
+    // 接不住的那格回滚（第六十六刀）。量出来的形状是 three_surface.asy:347 的
+    // `point(external,0)` —— patch 里 `point` 是一格 `triple(real,real)` 的字段
+    // （:262 被赋过值，所以摊成了字段），而这一句要的是文件级的 `triple point(path3, real)`。
+    for (const sf of L.selfFieldsFn(nm)) {
       const fcode = `(fld (var this) ${asyFldSym(sf.name)})`;
       const fprobe = Array.isArray(L.pre);
-      if (!fprobe) return asyFnValCall(L, n, nm, sf.type, fcode);
+      if (!fprobe) {
+        const fv0 = asyFnValCall(L, n, nm, sf.type, fcode);
+        if (fv0 !== null) return fv0;
+        continue;
+      }
       const fmark = L.diags.mark();
       const fsave = L.pre;
       L.pre = [];
@@ -277,6 +281,9 @@ export function asyCall(L, n) {
     // `unravel x;` 摊出来的名字：调的是 x 那个字段里的函数值
     const al = L.aliasOf(nm);
     if (al !== null) return asyFnValCall(L, n, nm, lv, `(fld ${al.recv} ${asyFldSym(al.field)})`);
+    // 装了箱的那一格（见 declareBox / localFunClo 的递归那一支）：读要穿到箱子里去
+    const bx = L.boxOf(nm);
+    const readCode = bx === null ? `(var ${L.symOf(nm)})` : `(aget (var ${bx.sym}) (int 0))`;
     // 但这一格并**不整片遮住**同名的函数：asy 的 venv 是按**签名**逐层找的，一个
     // `real opacity(real[])` 的形参与文件级的 `pen opacity(real, string)` 是两条不同的
     // 签名，能共存。原型是 plain_pens.asy:354 的
@@ -284,11 +291,11 @@ export function asyCall(L, n) {
     // `opacity(opacity(t))` —— 里面那个是形参、外面那个是文件级的函数。
     // 所以跟上面成员那一档同一个办法：先试这一格，接不住就回滚再往下走。
     const probe = Array.isArray(L.pre) && asyVisible(L, nm).length > 0;
-    if (!probe) return asyFnValCall(L, n, nm, lv, `(var ${L.symOf(nm)})`);
+    if (!probe) return asyFnValCall(L, n, nm, lv, readCode);
     const mark = L.diags.mark();
     const savePre = L.pre;
     L.pre = [];
-    const fv = asyFnValCall(L, n, nm, lv, `(var ${L.symOf(nm)})`);
+    const fv = asyFnValCall(L, n, nm, lv, readCode);
     const fpre = L.pre;
     L.pre = savePre;
     if (fv !== null) {
@@ -481,6 +488,19 @@ function asyArityBad(L, n, ty, nm) {
   if (isList(alist) && head(alist) === 'args-rest') return false;
   const list = alist === undefined || alist === null ? [] : L.flat(alist, 'args');
   for (const a of list) if (!isList(a) || head(a) !== 'arg') return false;
+  // 这个函数**类型**上记了默认值（asyFnTypeOf 的 fnDefs）：少给几格不算元数不对 ——
+  // 前置声明那一族就是这样写的（`void draw(frame f, path3 g, material p=currentpen,
+  // light light=nolight, string name="", render render=defaultrender,
+  // projection P=currentprojection);`，three.asy:2112，真正的那份在 :2234 赋进去）。
+  const info = L.fnDefs === undefined ? undefined : L.fnDefs.get(ty);
+  if (info !== undefined && list.length <= s.params.length) {
+    let need = 0;
+    for (let i = 0; i < s.params.length; i++) {
+      const p = info.ps[i];
+      if (p === undefined || p.def === null || p.def === undefined) need++;
+    }
+    if (list.length >= need) return false;
+  }
   return list.length !== s.params.length;
 }
 
@@ -805,18 +825,48 @@ function asyMethodAlt(L, n, recv, rec, mname) {
   // 同名的字段有两格时（第四十九刀，见 recordDec）：**调用**形态挑函数类型那份 ——
   // three_arrows.asy 里 `a.size(p)` 要的是 `real size(pen)`，而 `a.size` 取值那一路
   // 在 recField 里另挑不是函数类型那份。发正文用 `f.name`（换过的槽名），不是源码那个名字。
+  //
+  // **函数类型那份可能有好几格**（第七十一刀：重载的方法各摊一格）——逐格试，
+  // 谁接得住算谁。量出来的形状是 plain_picture.asy:1266 的 `b.addPath(g,p)`：
+  // struct bounds 里 `addPath` 有 `void addPath(path)`（有体、被赋过值 -> 摊成一格字段）
+  // 与无体声明的 `void addPath(path,pen)`（本来就是一格字段），只认第一格时前者赢，
+  // 于是那一行报"要 1 个实参，给了 2 个"。都接不住时回 undefined，让上一层去发
+  // 方法那一档的诊断（那句话更贴题）。
+  const flds = [];
   let fld = null;
   for (const f of rec.fields) {
     if (!L.fldIs(f, mname)) continue;
-    if (asyIsFn(f.type)) { fld = f; break; }
-    if (fld === null) fld = f;
+    if (asyIsFn(f.type)) flds.push(f);
+    else if (fld === null) fld = f;
+  }
+  if (flds.length === 1) {
+    // 只有一格：照旧直呼，那句诊断（要几个实参、哪一格类型不对）留着
+    return asyFnValCall(L, n, `${recv.type}.${mname}`, flds[0].type,
+      `(fld ${recv.code} ${asyFldSym(flds[0].name)})`);
+  }
+  if (flds.length > 1) {
+    const probe = Array.isArray(L.pre);
+    for (const f of flds) {
+      const code = `(fld ${recv.code} ${asyFldSym(f.name)})`;
+      if (!probe) {
+        const v = asyFnValCall(L, n, `${recv.type}.${mname}`, f.type, code);
+        if (v !== null) return v;
+        continue;
+      }
+      const mark = L.diags.mark();
+      const save = L.pre;
+      L.pre = [];
+      const v = asyFnValCall(L, n, `${recv.type}.${mname}`, f.type, code);
+      const mine = L.pre;
+      L.pre = save;
+      if (v !== null) { for (const s of mine) L.pre.push(s); return v; }
+      L.diags.rollback(mark);
+    }
+    return undefined;
   }
   if (fld !== null) {
-    // 字段本身是**函数值**：`b.fn2(4)` 就是通过它间接调（plain_filldraw.asy 里
-    // `filltype.fill2(f,g,p)` 到处是）。
-    if (!asyIsFn(fld.type)) return undefined;
-    return asyFnValCall(L, n, `${recv.type}.${mname}`, fld.type,
-      `(fld ${recv.code} ${asyFldSym(fld.name)})`);
+    // 同名的只有不是函数类型那一格：这不是"能调的东西"，让上一层去说
+    return undefined;
   }
   // `q.af(5)` 与 `Box.af(5)` 取的是同一格（第三十八刀，量过 asy 两条都通）
   const st = L.statOf(rec.name, mname);
@@ -1146,7 +1196,12 @@ export function asyOpUser(L, n, op, vals, btys) {
     // 那句 `S += s` 在 asy 那边走的是**内建的**字符串接（asy 自己不会栈溢出）；漏了这一条，
     // `S + s` 会把两格打包再调回自己 —— 10 个例子（log / spiral / advection …）就是这么
     // 崩在 `Maximum call stack size exceeded` 上的。
-    if (f.cost === 0 && f.varargs !== true) exact = true;
+    // 靠**被遮住的那一格**才接上的候选也不算"同型"（第七十三刀）：`real[] t1=…;`
+    // 之后又 `real t1=t1[0];`（three.asy:2067）时，`t1 >= t2` 两边都是 real，而
+    // `bool[] operator >=(real[], real)` 与 `bool[] operator >=(real, real[])` 各靠
+    // 一格被遮住的 real[] 接上、代价都是 0 —— 少了这一条就在这两份之间报 ambiguous，
+    // 而 asy 那边走的是内建的 `real >= real`（量过：印 lt）。
+    if (f.cost === 0 && f.varargs !== true && f.shadow === 0) exact = true;
   }
   if (!any) return null;
   if (!exact && btys !== null) {
@@ -1382,13 +1437,21 @@ export function asyFit(L, cand, raw) {
   const isVar = cand.ps.length > 0 && cand.ps[rAt].rest === true;
   const elem = isVar ? asyElem(cand.ps[rAt].type) : null;
   const pack = [];
+  // `cycle` 的第二条身份（第五十刀；coerce 那边有同名的一段）：这一层的 `cycle` 就是一格
+  // path，而 asy 那边它的类型是 `cycleToken`。槽按 path 接不住时，按 cycleToken 再问一次
+  // 用户转换 —— 代价跟别的转换一样是 1。
+  const cycCost = (r, want) => (
+    r.v.cyc === true && L.castFor(want, 'cycleToken', false) !== null ? 1 : -1
+  );
   // 进可变那一格的包要花多少（回 -1 = 这个候选接不住）。`... a` 是整份接进去，类型得
   // 一模一样 —— asy 不给这一格做元素级的提升；散着写的降到元素型，一次转换算 1。
   const packCost = (r) => {
     if (r.v.over !== undefined) return -1;   // 重载集当可变实参：另一刀
     if (r.spread === true) return r.v.type === cand.ps[rAt].type ? 0 : -1;
     const ec = asyConvCost(r.v.type, elem);
-    return ec < 0 && L.castFor(elem, r.v.type, false) !== null ? 1 : ec;
+    if (ec >= 0) return ec;
+    if (L.castFor(elem, r.v.type, false) !== null) return 1;
+    return cycCost(r, elem);
   };
   // 一格一格试：接得住回代价（0 或 1），接不住回 null。
   // "接不住能不能跳过这一格"由外面那个循环定（asy 的 matchArgument）。
@@ -1428,7 +1491,9 @@ export function asyFit(L, cand, raw) {
     // 用户的 `operator cast`（第二十七刀）：代价**跟内建提升一样**是 1 —— 量过打平时
     // asy 报 "is ambiguous"，所以这里不能给它一个更贵的分数偷偷分出胜负。
     const uc = c < 0 && L.castFor(cand.ps[at].type, r.v.type, false) !== null ? 1 : c;
-    return uc < 0 ? null : uc;
+    if (uc >= 0) return uc;
+    const cy = cycCost(r, cand.ps[at].type);
+    return cy < 0 ? null : cy;
   };
   for (const r of raw) {
     let at = -1;
@@ -1704,25 +1769,55 @@ function asyFnValFit(L, ft, s, args) {
   const info = L.fnDefs.get(ft);
   if (info === undefined) return null;
   const use = [];
+  for (let i = 0; i < s.params.length; i++) use.push(-1);
+  // 命名实参（第七十三刀）：函数**类型**上记了形参名（fnDefs 的 ps[i].name），所以
+  // `arrowhead.head(g,L,q,size,angle,filltype,forwards=true,P)`（three_arrows.asy:397）
+  // 这种写法照 asy 那样按名字落格。名字过一遍 asyFldSym（表里存的就是这一形）。
+  const keyed = [];
+  for (let ai = 0; ai < args.length; ai++) {
+    const k = args[ai].key;
+    if (k === null || k === undefined) continue;
+    const want = asyFldSym(k);
+    let at = -1;
+    for (let i = 0; i < s.params.length; i++) {
+      const p = info.ps[i];
+      if (p !== undefined && p.name === want) at = i;
+    }
+    if (at < 0 || use[at] >= 0) return null;
+    use[at] = ai;
+    keyed.push(ai);
+  }
   let ai = 0;
+  const nextPos = () => {
+    while (ai < args.length && (args[ai].key !== null && args[ai].key !== undefined)) ai++;
+    return ai;
+  };
+  let filled = keyed.length;
   for (let i = 0; i < s.params.length; i++) {
+    if (use[i] >= 0) continue;
     const p = info.ps[i];
     const hasDef = p !== undefined && p.def !== null && p.name !== null;
-    if (ai >= args.length) {
+    if (nextPos() >= args.length) {
       if (!hasDef) return null;
-      use.push(-1);
       continue;
     }
     const av = args[ai].v;
     let ok = false;
     if (av !== undefined && av.type !== undefined) {
       if (av.over !== undefined || av.mover !== undefined) ok = asyIsFn(s.params[i]);
-      else ok = asyConvCost(av.type, s.params[i]) >= 0;
+      // 用户的 `operator cast` 也算接得住（第七十三刀）：少了这一条，`draw(f,g,currentpen)`
+      // 里的 `pen -> material` 不算，那一格于是被当成"省了、用默认值"，后面的实参
+      // 顺着往下挪一格（量出来的样子是最后一格拿到了第二个实参）。
+      else {
+        ok = asyConvCost(av.type, s.params[i]) >= 0
+          || L.castFor(s.params[i], av.type, false) !== null
+          || (av.cyc === true && L.castFor(s.params[i], 'cycleToken', false) !== null);
+      }
     }
-    if (ok || !hasDef) { use.push(ai); ai++; continue; }
-    use.push(-1);
+    if (ok || !hasDef) { use[i] = ai; ai++; filled++; continue; }
   }
-  return ai === args.length ? use : null;
+  nextPos();
+  return filled === args.length && ai >= args.length ? use : null;
 }
 
 /** 上面那份包装的调用：被调那个值当第一个实参，给了的那几格照签名 coerce */
@@ -1731,7 +1826,6 @@ function asyWrapValCall(L, n, nm, wname, s, args, callee, use) {
   for (let i = 0; i < s.params.length; i++) {
     if (use[i] < 0) continue;
     const a = args[use[i]];
-    if (a.key !== null) return L.err(n, `函数值没有形参名，这里不能写 '${a.key}='`);
     if (a.spread === true) return L.nope(a.node, '带默认值的函数值上的展开实参');
     if (a.lines !== null) for (const l of a.lines) L.pre.push(l);
     const v = L.coerce(a.v, s.params[i], a.node, `'${nm}' 的第 ${i + 1} 个实参`);

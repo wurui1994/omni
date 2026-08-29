@@ -352,6 +352,33 @@ function asyCondHit(L, a, b) {
   return hit;
 }
 
+/**
+ * 这一句 `? :` 出什么类型。
+ *
+ * 用处那一侧给了目标类型（condWant，见 asyCondAt）时**先按它**：asy 在有目标类型时走的是
+ * `conditionalExp::transToType`（exp.cc:1280），两支各自转到目标去，根本不求公共类型 ——
+ * `bool3 branch(...) { return b ? true : default; }`（examples/oneoverx.asy:13）靠这条：
+ * bool 与 bool3 两个方向的 cast 都在（plain_constants.asy:118 与 :123），求公共类型是歧义，
+ * 而有了目标（bool3）就没有歧义。量过真 asy：两个方向都能转的一对记录，`A f(...)
+ * { return c ? x : y; }` 与 `B g(...) { return c ? x : y; }` 都收（见 cases/131）。
+ * 没给目标才照旧求 promote。
+ */
+function asyCondPick(L, n, a, b) {
+  const want = L.condWant;
+  if (want !== null && want !== undefined && want !== 'void') {
+    const mark = L.diags.mark();
+    const save = Array.isArray(L.pre) ? L.pre : null;
+    if (save !== null) L.pre = [];
+    const av = asyCoerce(L, { ...a }, want, n, '`? :` 的真支');
+    const bv = av === null ? null : asyCoerce(L, { ...b }, want, n, '`? :` 的假支');
+    if (save !== null) L.pre = save;
+    L.diags.rollback(mark);
+    if (av !== null && bv !== null) return want;
+  }
+  return asyPromote(L, a, b);
+}
+
+
 /** 一个候选当**函数值**时的类型文本（与 nameOf 里那份拼法必须一致） */
 export function asyCandFnType(L, c) {
   let ps = '';
@@ -697,7 +724,18 @@ export function asyNeedsBox(L, nm) {
   // 所以"里层还有函数会改它"这一问在闭包里问的是对的一段。原型是 plain.asy:173 的
   // `Iter_int` —— `int index = n;` 就在一个匿名函数体里，而里层三个匿名函数改它。
   if (L.fnBody === null || L.fnBody === undefined) return false;
-  return asyBoxScan(L, L.fnBody, nm);
+  // **记一次就够**（第七十二刀，这一刀是速度）：这一问只取决于「哪个函数体」与
+  // 「哪个名字」，而每声明一格局部量都要问一遍、每问一遍扫整个函数体 —— 量出来
+  // 它是 `import three;` 里最大的一块（asyBoxScan 106ms + asyAssignsAfter 33ms，
+  // node --cpu-prof）。键是函数体那个节点（WeakMap，树扔了跟着扔）。
+  if (L.boxMemo === undefined) L.boxMemo = new WeakMap();
+  let m = L.boxMemo.get(L.fnBody);
+  if (m === undefined) { m = new Map(); L.boxMemo.set(L.fnBody, m); }
+  const had = m.get(nm);
+  if (had !== undefined) return had;
+  const v = asyBoxScan(L, L.fnBody, nm);
+  m.set(nm, v);
+  return v;
 }
 
 function asyBoxScan(L, node, nm) {
@@ -831,6 +869,16 @@ export function asyCoerce(L, v, want, node, what) {
   // 用户定义的转换（第二十七刀）：内建那几条不成才轮到它，源类型要一模一样（不串）
   const uc = L.castFor(want, v.type, false);
   if (uc !== null) return { code: asyCastCall(uc, v.code), type: want };
+  // `cycle` 的第二条身份（第五十刀在连接那一格上做的，这里补到**实参**这一格）：
+  // 这一层的 `cycle` 就是一格 path，而 asy 那边它的类型是 `cycleToken`，
+  // 靠 `guide3 operator cast(cycleToken)`（three.asy:713）接到 `void(flatguide3)`。
+  // `join(g, cycle)`（graph3.asy:1571 一族）走的是这一条。
+  if (v.cyc === true && L.isRec('cycleToken')) {
+    const tc = L.castFor(want, 'cycleToken', false);
+    if (tc !== null) {
+      return { code: asyCastCall(tc, L.recInit(node, 'cycleToken')), type: want };
+    }
+  }
   return L.err(node, `${what}：要 ${want}，这里是 ${v.type}`);
 }
 
@@ -1081,13 +1129,25 @@ function asyDirSpec(L, node, side) {
   const inner = node.items[1];
   // `{x,y}` 与 `{x,y,z}`：语法自己合成了 `(pair …)` / `(triple …)`（camp.y:650/653），
   // 它们不是普通表达式节点，所以在这儿就地拼出来。
+  // 三维那一档（第七十三刀）：`{x,y,z}` 与 `{v}`（v 是 triple）走
+  // `guide3 operator spec(triple v, int side)`（three.asy:748）—— 重载解析自己会挑，
+  // 所以这里只管把值按 triple 拼出来。32 个例子（三维那一族）停在这一行上。
   if (isList(inner) && head(inner) === 'triple') {
-    return L.nope(node, '三维的方向标记 `{x,y,z}`（那是 guide3，另一刀）');
+    const v3 = asyTripleLit(L, inner, [inner.items[1], inner.items[2], inner.items[3]]);
+    if (v3 === null) return null;
+    return asyOpNameCall(L, node, 'operator spec', [v3, sv], [inner, node]);
   }
   let v = null;
   if (isList(inner) && head(inner) === 'pair') {
     v = asyTupleOf(L, inner, inner.items[1], inner.items[2]);
   } else {
+    // `{v}`：v 本来就是 triple 时照 triple 交上去（探一遍类型，探不出来照旧按 pair 报）
+    const it = L.probeTy(inner);
+    if (it === 'triple') {
+      const tv = asyExpr(L, inner);
+      if (tv === null) return null;
+      return asyOpNameCall(L, node, 'operator spec', [tv, sv], [inner, node]);
+    }
     v = asyCoerce(L, asyExpr(L, inner), 'pair', inner, '方向标记');
   }
   if (v === null) return null;
@@ -2026,6 +2086,12 @@ export function asyCompare(L, n, op) {
   if (a === null || b === null) return null;
   asyShadowMatch(L, a, b);
   asyShadowMatch(L, b, a);
+  // 一支是**重载集**、另一支已经是函数值：按对面定案（与 `? :` 那边同一条，第七十三刀）。
+  // `scale.x.scale == linear`（graph.asy 一族，53 个例子停在这里）就是这一条：左边是
+  // `real[](real[],real[])` 的一格函数值，右边 `linear` 这个名字有好几个重载 ——
+  // asy 按左边那个类型去查那张表。
+  asyOverSide(L, a, b);
+  asyOverSide(L, b, a);
   // 两边**都是** `null` 时先拦掉，拦在用户重载之前。asy 那边报的是歧义（每个 struct 都
   // 有一份 `operator ==`，全都能匹配 —— 量过那张候选表几十行）。我们的 struct 没有
   // 自动生成的那一份，于是"用户写过的那一份"会变成**唯一**候选、被挑中，`<null>`
@@ -2096,8 +2162,18 @@ export function asyCond(L, n) {
       return { code: null, type: '<`? :` 的重载集>', cond: { node: n, hit } };
     }
   }
-  const t = asyPromote(L, a, b);
-  if (t === null) return L.err(n, `\`? :\` 两支要同型：真支是 ${a.type}，假支是 ${b.type}`);
+  const t = asyCondPick(L, n, a, b);
+  if (t === null) {
+    // 两支之间定不下来（谁也转不到对面，或者两个方向都能转 = 求公共类型是歧义），
+    // 而用处那一侧还没给目标类型：**先不定案**，回一格待定的值 —— 等 asyCoerce / asyCall
+    // 那一侧拿目标类型重降一遍（asyCondAt）。asy 那边这是两条路：有目标类型时走
+    // transToType（exp.cc:1280，两支各自转到目标去），没有才求 promote（:1357）。
+    if (L.condWant === null) {
+      L.diags.rollback(mark);
+      return { code: null, type: '<`? :` 的两支>', cond: { node: n, hit: [a.type, b.type] } };
+    }
+    return L.err(n, `\`? :\` 两支要同型：真支是 ${a.type}，假支是 ${b.type}`);
+  }
   if (t === 'void') return L.err(n, '`? :` 的两支不能是 void');
   const av = asyCoerce(L, a, t, n, '`? :` 的真支');
   const bv = asyCoerce(L, b, t, n, '`? :` 的假支');

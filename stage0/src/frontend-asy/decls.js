@@ -1189,8 +1189,12 @@ export function asyAutoPlainIn(L, u, off) {
   const mark = L.diags.mark();
   const p = asyModLoad(L, null, 'plain');
   if (p !== null) {
-    asyModMerge(L, null, p, off, null);
+    asyModMerge(L, null, p, off, null, true);
     u.pi = p.init;
+    // 名字 `plain` 也要能当**限定名**用（第七十三刀）：asy 的 `import plain;` 是
+    // `access plain; unravel plain;`，所以 `plain.add(…)`（three.asy:2490）直接就通。
+    // `at` 记 -1：从文件第一句起就看得见（与 asySettingsIn 那一格同一条）。
+    if (!L.mods.has('plain')) L.mods.set('plain', { unit: p.id, at: -1 });
   } else {
     L.diags.rollback(mark);
   }

@@ -519,7 +519,9 @@ export function asyVardec(L, n) {
   const isVar = L.isVarTy(n.items[1]);
   const base = isVar ? 'var' : L.type(n.items[1], '变量声明');
   if (base === null) return null;
-  if (base === 'void') return L.err(n, 'void 变量');
+  // `void` 只挡**真的变量**那一档：`void f(int);` 是一格函数值（返回类型是 void），
+  // asy 那边这就是"前置声明"的写法 —— base 里 `void draw(frame f, path3 g, …);`
+  // （three.asy:2112，真正那份在 :2234 赋进去）是这一种。所以这一条挪到循环里按项判。
   const out = [];
   for (const d of L.flat(n.items[2], 'decids')) {
     if (!isList(d) || head(d) !== 'decid') return L.err(d, '认不出的声明项');
@@ -534,6 +536,8 @@ export function asyVardec(L, n) {
     if (isList(start) && head(start) === 'fundecidstart') {
       t = L.fnTypeOf(base, start.items[2], start);
       if (t === null) return null;
+    } else if (base === 'void') {
+      return L.err(d, 'void 变量');
     } else if (!isList(start) || head(start) !== 'decidstart') {
       return L.err(start, '认不出的声明项');
     } else if (start.items.length > 2) {
@@ -714,6 +718,17 @@ export function asyExprStmt(L, e) {
     if (v === null) return null;
     return [`(expr ${v.code})`];
   }
+  // 语句位置的 `? :`（第七十三刀）：asy 收它 —— `settings.reverse ? --i : ++i`
+  // （three.asy:3219 的 for 更新格）就是这一种。核心方言里 `? :` 是表达式而两支在这里
+  // 是**语句**，所以摊成一条 if/else，两支各按语句降（两边都能是赋值/自增）。
+  if (h === 'cond') {
+    const c = L.coerce(L.expr(e.items[1]), 'bool', e, '`? :` 的条件');
+    if (c === null) return null;
+    const t = asyExprStmt(L, e.items[2]);
+    const f = asyExprStmt(L, e.items[3]);
+    if (t === null || f === null) return null;
+    return [`(if ${c.code} (do ${t.join(' ')}) (do ${f.join(' ')}))`];
+  }
   return L.nope(e, `语句位置的表达式 '${h}'`);
 }
 
@@ -834,6 +849,41 @@ export function asyAssign(L, node, lhs, rhs, op) {
     if (bx !== null) {
       return asySlotAssign(L, node, nm, '变量', t, `(aget (var ${bx.sym}) (int 0))`,
         (code) => [`(aset (var ${bx.sym}) (int 0) ${code})`], rhs, op);
+    }
+    // 同名不同型的**被遮住那一格**（declareShadow 记的 ov）：右边接不住这一格、
+    // 而那一格接得住时，赋的是那一格 —— asy 的作用域里同名按签名分得开。
+    // `frame f;` + `real f(pair,pair){…}` 之后 `f=pic.fit3(…)`（three.asy:2755）就是这一条。
+    // 同名不同型的**另一格**：右边接不住当前这一格时再试它 —— asy 的作用域里同名按签名
+    // 分得开。两处来源：declareShadow 记的 ov（同一层里换类型重新声明），以及**记录的字段**
+    // （`frame f;` 是 struct scene 的字段，而方法体里又写了 `real f(pair,pair){…}`，
+    // 之后那句 `f=pic.fit3(…)` 赋的还是字段 —— three.asy:2755，85 个例子停在这里）。
+    const ov = op === null && rhs !== null ? L.outerOf(nm) : null;
+    const sfld = op === null && rhs !== null && ov === null && L.selfField !== undefined
+      ? L.selfField(nm) : null;
+    if ((ov !== null && ov.type !== t && ov.sym !== null) || sfld !== null) {
+      // 先试**当前这一格**，接不住（诊断与前置语句一并回滚）再试另一格
+      const mark = L.diags.mark();
+      const savePre = Array.isArray(L.pre) ? L.pre : null;
+      if (savePre !== null) L.pre = [];
+      const mineOut = asySlotAssign(L, node, nm, '变量', t, `(var ${sym})`,
+        (code) => [`(set ${sym} ${code})`], rhs, op);
+      const minePre = L.pre;
+      if (savePre !== null) L.pre = savePre;
+      if (mineOut !== null) {
+        if (savePre !== null) for (const s of minePre) L.pre.push(s);
+        return mineOut;
+      }
+      L.diags.rollback(mark);
+      if (sfld !== null) {
+        return asyAssignFld(L, node,
+          { recv: { code: '(var this)', type: L.self.rec.name }, field: nm }, rhs, op);
+      }
+      if (ov.bx === null) {
+        return asySlotAssign(L, node, nm, '变量', ov.type, `(var ${ov.sym})`,
+          (code) => [`(set ${ov.sym} ${code})`], rhs, op);
+      }
+      return asySlotAssign(L, node, nm, '变量', ov.type, `(aget (var ${ov.bx}) (int 0))`,
+        (code) => [`(aset (var ${ov.bx}) (int 0) ${code})`], rhs, op);
     }
   }
   // 闭包体里改**外层**的局部量：那一格装了箱才改得动（capOf 里那句拒绝管没装箱的）

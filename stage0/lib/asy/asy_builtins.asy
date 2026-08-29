@@ -5504,3 +5504,190 @@ frame operator *(real[][] t, frame f)
   }
   return g;
 }
+
+// ---- 极角那一族（runtriple.in:86/92/99 与 runpair.in:95）与 norm(triple[][])（:2163）----
+// principalBranch：归一到 [0,360)（runpair.in 里那个同名的静态函数）。
+real principalBranch(real d) {
+  real m = d;
+  while (m < 0) m = m + 360;
+  while (m >= 360) m = m - 360;
+  return m;
+}
+// `warn` 这一格只为把签名对上：这一刀不出警告（与上面 degrees(pair,bool) 同一条）。
+// solids.asy:21 的 `angle(z, warn=false)` 要的就是这一份。
+real angle(pair z, bool warn = true) { return atan2(z.y, z.x); }
+/*
+ * 复数上的 sin / cos（runpair.in:208 与 :213，逐句照抄）。
+ *
+ * asy 那边这一族各注册两格：`sin(pair)`（收 int/real —— 它们能隐式转 pair）与
+ * `sin(explicit pair)`。真正"复数版"是后一格，`explicit` 就是为了不把 `sin(2)` 抢过去。
+ * examples/sin3.asy:7 的 `real f(pair z) {return abs(sin(z));}` 要的正是这一格。
+ */
+pair sin(explicit pair z) { return (sin(z.x) * cosh(z.y), cos(z.x) * sinh(z.y)); }
+pair cos(explicit pair z) { return (cos(z.x) * cosh(z.y), -sin(z.x) * sinh(z.y)); }
+real colatitude(triple v, bool warn = true) {
+  real r = sqrt(abs2(v));
+  if (r == 0) return 0;
+  return degrees(acos(v.z / r));
+}
+real latitude(triple v, bool warn = true) { return 90 - colatitude(v, warn); }
+real longitude(triple v, bool warn = true) {
+  if (v.x == 0 && v.y == 0) return 0;
+  return principalBranch(degrees(atan2(v.y, v.x)));
+}
+// norm(triple[][])：各元素 abs2 的最大者开方（runarray.in:2163）
+real norm(triple[][] a) {
+  real m = 0;
+  for (int i = 0; i < a.length; ++i) {
+    for (int j = 0; j < a[i].length; ++j) {
+      real v = abs2(a[i][j]);
+      if (v > m) m = v;
+    }
+  }
+  return sqrt(m);
+}
+// concat 的三段形（asy 那边 concat 是 `T[] concat(... T[][] a)` 一格泛型内建，
+// 这一刀按真用到的写死：three_surface.asy:944 的 `concat(pen[],pen[],pen[])`）
+pen[] concat(pen[] a, pen[] b, pen[] c) { return concat(concat(a, b), c); }
+triple[] concat(triple[] a, triple[] b, triple[] c) { return concat(concat(a, b), c); }
+path3[] concat(path3[] a, path3[] b, path3[] c) { return concat(concat(a, b), c); }
+
+// ---- path3 的 intersect / intersections（三维那一路）----
+// 真 asy 那边是 Bezier 的递归细分（bezierintersect，beziercurve.h）；这一刀按**采样 +
+// 邻域二分**做：每段取 16 个样点找最近的一对时刻，再在它周围逐次减半细化 30 轮。
+// **代价写在明处**：数值比真 asy 粗，多交点只报最近那一个（三维那几处调用要的都是
+// "有没有交、在哪个时刻"：three.asy:1784/1792/2060、three_surface.asy:1295/1312）。
+private real[] asy__near3(path3 p, path3 q) {
+  int np = length(p);
+  int nq = length(q);
+  int n = 16;
+  real rn = n;
+  real bt = 0;
+  real bs = 0;
+  real bd = -1;
+  for (int i = 0; i <= np * n; ++i) {
+    real t = i / rn;
+    triple a = point(p, t);
+    for (int j = 0; j <= nq * n; ++j) {
+      real s = j / rn;
+      real d = abs2(a - point(q, s));
+      if (bd < 0 || d < bd) { bd = d; bt = t; bs = s; }
+    }
+  }
+  real h = 1 / rn;
+  for (int k = 0; k < 30; ++k) {
+    real best = bd;
+    real nt = bt;
+    real ns = bs;
+    for (int di = -1; di <= 1; ++di) {
+      for (int dj = -1; dj <= 1; ++dj) {
+        real t = bt + di * h;
+        real s = bs + dj * h;
+        if (t < 0 || t > np) continue;
+        if (s < 0 || s > nq) continue;
+        real d = abs2(point(p, t) - point(q, s));
+        if (d < best) { best = d; nt = t; ns = s; }
+      }
+    }
+    bt = nt;
+    bs = ns;
+    bd = best;
+    h = h / 2;
+  }
+  real[] out;
+  out.push(bt);
+  out.push(bs);
+  out.push(bd);
+  return out;
+}
+
+real[] intersect(path3 p, path3 q, real fuzz = -1) {
+  real tol = fuzz > 0 ? fuzz : 1e-5;
+  real[] r = asy__near3(p, q);
+  real[] none;
+  if (sqrt(r[2]) > tol + 1e-6) return none;
+  real[] out;
+  out.push(r[0]);
+  out.push(r[1]);
+  return out;
+}
+
+real[][] intersections(path3 p, path3 q, real fuzz = -1) {
+  real[][] out;
+  real[] t = intersect(p, q, fuzz);
+  if (t.length == 2) out.push(t);
+  return out;
+}
+
+// 4x4 控制网上的 Bezier 面（Bernstein 基，三维那一路的 patch 就是这个形状）
+private triple asy__bezpt(triple[][] P, real u, real v) {
+  real[] bu;
+  real[] bv;
+  real u1 = 1 - u;
+  real v1 = 1 - v;
+  bu.push(u1 * u1 * u1);
+  bu.push(3 * u * u1 * u1);
+  bu.push(3 * u * u * u1);
+  bu.push(u * u * u);
+  bv.push(v1 * v1 * v1);
+  bv.push(3 * v * v1 * v1);
+  bv.push(3 * v * v * v1);
+  bv.push(v * v * v);
+  triple s = (0, 0, 0);
+  for (int i = 0; i < 4; ++i) {
+    for (int j = 0; j < 4; ++j) s = s + bu[i] * bv[j] * P[i][j];
+  }
+  return s;
+}
+
+real[] intersect(path3 p, triple[][] P, real fuzz = -1) {
+  real tol = fuzz > 0 ? fuzz : 1e-5;
+  int np = length(p);
+  int n = 12;
+  real rn = n;
+  real bt = 0;
+  real bu = 0;
+  real bv = 0;
+  real bd = -1;
+  for (int i = 0; i <= np * n; ++i) {
+    real t = i / rn;
+    triple a = point(p, t);
+    for (int j = 0; j <= n; ++j) {
+      real u = j / rn;
+      for (int k = 0; k <= n; ++k) {
+        real v = k / rn;
+        real d = abs2(a - asy__bezpt(P, u, v));
+        if (bd < 0 || d < bd) { bd = d; bt = t; bu = u; bv = v; }
+      }
+    }
+  }
+  real[] none;
+  if (sqrt(bd) > tol + 0.05) return none;
+  real[] out;
+  out.push(bt);
+  out.push(bu);
+  out.push(bv);
+  return out;
+}
+
+real[][] intersections(path3 p, triple[][] P, real fuzz = -1) {
+  real[][] out;
+  real[] t = intersect(p, P, fuzz);
+  if (t.length == 3) out.push(t);
+  return out;
+}
+
+// diagonal（runarray.in 那格泛型内建的 real 一档）
+real[][] diagonal(... real[] a) {
+  real[][] m;
+  for (int i = 0; i < a.length; ++i) {
+    real[] row;
+    for (int j = 0; j < a.length; ++j) row.push(i == j ? a[i] : 0);
+    m.push(row);
+  }
+  return m;
+}
+
+// unstraighten（path 那一格）：asy 那边把"直段"的标记去掉，控制点不动 ——
+// 这一刀的 path 没有那个标记，所以就是原样回去。
+path unstraighten(path p) { return p; }

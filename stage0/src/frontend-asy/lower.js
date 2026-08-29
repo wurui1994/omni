@@ -612,6 +612,29 @@ class AsyLower {
     return alt;
   }
 
+  /**
+   * 上面那条的**多格**形（第七十一刀）：源码里叫 nm、此处可见、而且是函数类型的**全部**
+   * 字段格。重载的方法各摊一格之后一个名字能有好几格 —— plain_picture.asy 里 `min`
+   * 就有 `pair(transform)` 与 `triple(real[][])` 两格，调用形态得逐格试
+   * （只认第一格时 :852 的 `min(calculateTransform3(…))` 报"没有能匹配 min(real[][])"）。
+   */
+  selfFieldsFn(nm) {
+    const out = [];
+    if (this.self === null || this.self.stat === true) return out;
+    // 局部量遮住字段这件事只在**它自己也能被调**的时候算：asy 的作用域是按签名分层的，
+    // 一格不是函数类型的同名局部量遮不住那格函数字段。量出来的形状是 plain_Label.asy:119
+    // 的 `void align(align align, align default) { align(align); … }`——形参 `align` 是
+    // 一格 `align` 类型的值，而这一句要的是同名那格 `void(align)` 的字段。
+    const lv = this.lookup(nm);
+    if (lv !== null && asyIsFn(lv)) return out;
+    if (nm === ASY_FILLER) return out;
+    for (const f of this.self.rec.fields) {
+      if (!this.fldIs(f, nm) || f.mat >= this.self.mat) continue;
+      if (asyIsFn(f.type)) out.push(f);
+    }
+    return out;
+  }
+
   /** 记录 `rec` 上此处可见的方法候选（方法体里按成员顺序裁，外面看全部）。
    *  候选表按**声明这个记录的那个单元**查：asy 的 struct 与它的方法是一起导出的
    *  （量过：`import m;` 之后 m 里的 struct 连方法带构造函数都能用），
@@ -1001,6 +1024,10 @@ class AsyLower {
       top.set(`\u0000ov:${nm}`, {
         code: oldBx === null ? `(var ${oldSym})` : `(aget (var ${oldBx.sym}) (int 0))`,
         type: oldT,
+        // 写回去也要够（第七十三刀）：`frame f;` 之后同一层里又写了 `real f(pair,pair){…}`，
+        // 再一句 `f=pic.fit3(…)` 赋的还是**那格 frame**（three.asy:2755，85 个例子停在这里）。
+        sym: oldSym,
+        bx: oldBx === null ? null : oldBx.sym,
       });
     } else {
       top.delete(`\u0000ov:${nm}`);
@@ -1057,7 +1084,13 @@ class AsyLower {
       let en = node.items[1];
       if (isList(en) && head(en) === 'name-ty') en = en.items[1];
       const el = this.plainName(en);
-      if (el === null) return this.nope(node, '带点的类型名');
+      if (el === null) {
+        const qd = this.dotTy(en);
+        if (qd === null) return this.nope(node, '带点的类型名');
+        let qt = qd;
+        for (let k = 0; k < d; k++) qt = `${qt}[]`;
+        return qt;
+      }
       // 元素那个名字走与下面 name-ty **同一条**路：别名 -> recVis（顺序解析 + 换成真名）
       // -> 全局表（没 import 进来）。以前这里只解别名，然后拿解出来的**文本**去问 recHere，
       // 那问法错在两头：
@@ -1085,7 +1118,11 @@ class AsyLower {
     }
     if (h !== 'name-ty') return this.err(node, `${what}：认不出的类型形状 '${h}'`);
     const nm = this.plainName(node.items[1]);
-    if (nm === null) return this.nope(node, '带点的类型名');
+    if (nm === null) {
+      const qd = this.dotTy(node.items[1]);
+      if (qd !== null) return qd;
+      return this.nope(node, '带点的类型名');
+    }
     if (nm === 'void') return 'void';
     if (nm === 'pair') return 'pair';
     if (nm === 'triple') return 'triple';
@@ -1107,6 +1144,36 @@ class AsyLower {
     if (this.records.has(nm)) return this.recElsewhere(node, nm);
     if (!SCALARS.has(nm)) return this.nope(node, `类型 '${nm}'（这一刀只有 int/real/bool/string/pair/triple 与 struct）`);
     return nm;
+  }
+
+  /**
+   * `A.B` 那样的类型名（第七十一刀）。两种来路，都是量出来的：
+   *   - A 是个 struct、B 是它体里声明的类型 —— solids.asy:120 的
+   *     `skeleton.curve s=s.transverse;`（`struct skeleton` 体里有 `struct curve`）。
+   *     体里那些类型名记在 `rec.tyAlias` 上（第三十九刀），所以这里查它。
+   *   - A 是个模块名（`access m;` 之后 `m.T x;`）—— 查那个单元自己的 recVis 与 tyAlias。
+   * 认不出回 null（上一层照旧发"带点的类型名"那句 nope）。
+   */
+  dotTy(n) {
+    if (!isList(n) || head(n) !== 'qualified') return null;
+    const base = this.plainName(n.items[1]);
+    const last = isAtom(n.items[2]) ? n.items[2].value : null;
+    if (base === null || last === null) return null;
+    const e = this.recVis.get(base);
+    if (e !== undefined && e.rec.tyAlias !== undefined && e.rec.tyAlias.has(last)) {
+      return e.rec.tyAlias.get(last).t;
+    }
+    const m = this.mods !== undefined && this.mods.has(base) ? this.mods.get(base) : undefined;
+    if (m !== undefined) {
+      const mu = this.units[m.unit];
+      const me = mu.recVis.get(last);
+      if (me !== undefined) return me.rec.name;
+      if (mu.tyAlias !== undefined && mu.tyAlias.has(last)) {
+        const l = mu.tyAlias.get(last);
+        return l[l.length - 1].t;
+      }
+    }
+    return null;
   }
 
   /**
@@ -1378,6 +1445,25 @@ class AsyLower {
    * 扔掉的数组（表达式里可能要落临时量），所以这一趟对外面**只多不少**：生成的构造函数与
    * 数组工厂都是按名字记住的，真降那一遍会用同一份。推不出来（那一句本来就有错）回 null。
    */
+  /**
+   * `var` 字段的类型（第七十一刀）。`var f = new T;` 这一种**不真降**：类型就写在那儿。
+   *
+   * 为什么要这一格：真降一遍会顺手把 T 的构造函数**在声明遍里**生成出来（recNew），
+   * 而声明遍是先走一圈 recorddec、**再**登记文件级函数的签名（见 asyDeclPass 的两个循环），
+   * 于是 T 里那些摊出来的函数值字段（fnFldOk）的体一降就找不着文件级的函数。
+   * 量出来的形状是 plain_bounds.asy:657 的 `private var base=new freezableBounds;`——
+   * freezableBounds 体里 `pair min(transform t)` 要 plain_scaling.asy:180 的
+   * `min(real, scaling, coord[])`，那时候一格签名都还没登记，于是整条推不动。
+   */
+  varFldTy(d) {
+    const iv = d.items[2];
+    if (isList(iv) && head(iv) === 'new-record') {
+      const nt = this.type(iv.items[1], '`var` 字段的 `new` 的类型');
+      if (nt !== null) return nt;
+    }
+    return this.probeTy(iv);
+  }
+
   probeTy(node) {
     if (node === undefined || node === null) return null;
     const mark = this.diags.mark();
@@ -1496,27 +1582,84 @@ class AsyLower {
    *   - 名字在这个单元里**真被当成员赋过值**（memAssigned）；
    *   - 是个普通名字（`operator …` 与 `operator init` 的调用形态不是"读一格字段再调"）；
    *   - 不带 static（那一档没有接收者，本来就不在实例上）；
-   *   - 体里**只有这一个**同名方法（重载的话一个名字要好几格字段，那是另一刀）；
-   *   - 没有同名的字段（那就是两个成员槽，asy 自己也拒）；
    *   - 形参不带默认值、不带可变形参（函数值没有那两格 —— 与 methodVal 同一条）。
+   *
+   * **同名的重载各占一格**（第七十一刀）：asy 的 struct 体是个作用域，同名按签名分得开，
+   * 而"同名两格字段"那条路（第四十九刀的 `asy__fd<K>_名字` + `src`）早就铺好了 ——
+   * 所以重载不再是拦路的理由，只有"类型一模一样的两份"才照旧当方法（那两格分不开）。
+   * 量出来的形状是 three_surface.asy:267 的 `normal=normaltriangular;`：`patch` 体里
+   * `normal` 有两个签名（:100 的七个 triple 与 :168 的 `(real,real)`），从前 mcount != 1
+   * 一律不摊，于是那一句报"未声明的变量 'normal'"—— 220 个例子里 31 个停在这一行。
    */
-  fnFldOk(r, st, seen, mcount) {
+  fnFldOk(r, st, seen, memNames) {
     if (st === true) return null;
     if (r.items[4] === undefined || r.items[4] === null) return null;
     const mn = isAtom(r.items[2]) ? r.items[2].value : null;
     if (mn === null || mn.startsWith('operator ')) return null;
-    if (seen.has(mn) || mcount.get(mn) !== 1) return null;
     if (this.unit === null || this.unit.mset === undefined || !this.unit.mset.has(mn)) return null;
     const ps = asyFormals(this, r.items[3]);
     if (ps === null) return null;
     for (const p of ps) {
-      if (p.def !== null && p.def !== undefined) return null;
+      // 带默认值的形参**不再**一律挡这一格（第七十三刀）：类型那一份的默认值由
+      // asyFnTypeOf 记进 fnDefs，通过这格函数值少给实参时 asyFnValDefWrap 会补上 ——
+      // `pen[] colors(material m, light light=currentlight)`（three_surface.asy:226，
+      // 同名的 `pen[] colors;` 在 :23）就是这一条，:271 的 `colors=colorstriangular`
+      // 要的正是这格函数值。
+      //
+      // 只有一种默认值不行：**引用这个记录自己的成员**（`bool keepAspect=this.keepAspect`，
+      // plain_picture.asy:559）—— fnDefs 那份包装是在文件级降的，没有接收者。那种照旧当方法。
       if (p.rest === true) return null;
+      if (p.def !== null && p.def !== undefined && !this.defSelfFree(p.def, memNames)) return null;
     }
     const ret = this.type(r.items[1], `方法 ${mn} 的返回类型`);
     if (ret === null) return null;
     const t = asyFnTypeOf(this, ret, r.items[3], r);
-    return t === null ? null : { name: mn, type: t };
+    if (t === null) return null;
+    // 同名同型的两格分不开（asy 那边也是 "already declared in this scope"）：照旧当方法
+    const had = seen.get(mn);
+    if (had !== undefined) for (const x of had) if (x === t) return null;
+    return { name: mn, type: t };
+  }
+
+  /**
+   * 这个默认值表达式**不碰记录自己的成员**吗（fnFldOk 用它）。
+   * 判据只有两条：没有 `this`，也没有一个裸名字落在 `memNames` 里
+   * （记录体里声明的字段名与方法名，recMemNames 收的）。宁可保守 —— 判错了只是
+   * 这一格照旧当方法，不会错降。
+   */
+  defSelfFree(d, memNames) {
+    const stack = [d];
+    while (stack.length > 0) {
+      const cur = stack.pop();
+      if (isAtom(cur)) {
+        if (memNames !== undefined && memNames.has(cur.value)) return false;
+        continue;
+      }
+      if (!isList(cur)) continue;
+      if (head(cur) === 'this') return false;
+      for (let i = 1; i < cur.items.length; i++) stack.push(cur.items[i]);
+    }
+    return true;
+  }
+
+  /** 记录体里声明的成员名（字段名与方法名）。只给 defSelfFree 用，收得宽一点没坏处。 */
+  recMemNames(n) {
+    const out = new Set();
+    for (const item of this.flat(n.items[2], 'block')) {
+      const r = asyUnwrapMod(this, item);
+      if (!isList(r)) continue;
+      const h = head(r);
+      if (h === 'fundec' && isAtom(r.items[2])) out.add(r.items[2].value);
+      if (h !== 'vardec') continue;
+      const stack = [r.items[2]];
+      while (stack.length > 0) {
+        const cur = stack.pop();
+        if (!isList(cur)) continue;
+        if (head(cur) === 'decidstart' && isAtom(cur.items[1])) { out.add(cur.items[1].value); continue; }
+        for (let i = 1; i < cur.items.length; i++) stack.push(cur.items[i]);
+      }
+    }
+    return out;
   }
 
   /** recordDec 的体（分出来只为了那句 this.at 现设现还） */
@@ -1524,16 +1667,9 @@ class AsyLower {
     const nm = rec.name;
     const fields = rec.fields;
     const seen = new Map();
+    const memNames = this.recMemNames(n);
     let mat = 0;
     let bi = 0;
-    // 体里每个**方法名**出现了几次（重载的不摊成字段，见下面 fnFldOk）
-    const mcount = new Map();
-    for (const item of this.flat(n.items[2], 'block')) {
-      const r0 = asyUnwrapMod(this, item);
-      if (!isList(r0) || head(r0) !== 'fundec' || !isAtom(r0.items[2])) continue;
-      const k = r0.items[2].value;
-      mcount.set(k, (mcount.get(k) === undefined ? 0 : mcount.get(k)) + 1);
-    }
     for (const item of this.flat(n.items[2], 'block')) {
       // 体里的项序号：`using` 的可见性按它裁（见 aliasAt）。每一项都占一个号，
       // 不管它占不占成员槽 —— 那样 `using` 与紧跟着的字段就不会撞在同一个号上。
@@ -1570,11 +1706,15 @@ class AsyLower {
         // plain_arrows.asy:36 的 `filltype defaultfilltype(pen) {return FillDraw;}` 加
         // `:162` 的 `TeXHead.defaultfilltype=…` 就是它。摊的判据只有"名字被赋过值"
         // （见 memAssigned）—— 全摊的话每个实例都要为每个方法装一个闭包。
-        const fnf = this.fnFldOk(r, st, seen, mcount);
+        const fnf = this.fnFldOk(r, st, seen, memNames);
         if (fnf !== null) {
-          fields.push({ name: fnf.name, type: fnf.type, def: null, mat: mat, bi: bi - 1,
-            fnbody: r });
-          seen.set(fnf.name, [fnf.type]);
+          // 同名的第二格起换槽名（与上面 vardec 那一路同一条，第四十九刀）
+          const fhad = seen.get(fnf.name);
+          const fdup = fhad !== undefined;
+          const fslot = fdup ? `asy__fd${fields.length}_${asyFldSym(fnf.name)}` : fnf.name;
+          fields.push({ name: fslot, src: fnf.name, type: fnf.type, def: null, mat: mat,
+            bi: bi - 1, fnbody: r });
+          if (fdup) fhad.push(fnf.type); else seen.set(fnf.name, [fnf.type]);
           mat++;
           continue;
         }
@@ -1692,7 +1832,7 @@ class AsyLower {
             return this.err(d, '`var` 的字段没有初值 —— 那推不出类型（asy 那边报'
               + ' "inferred variable declaration without initializer"）');
           }
-          fty = this.probeTy(d.items[2]);
+          fty = this.varFldTy(d);
           if (fty === null || fty === 'void') {
             const why = this.probeMsg === null ? '' : `，那一遍里报的是「${this.probeMsg}」`;
             return this.nope(d, '这一句 `var` 字段的初值推不动（声明遍里推得动的只有不依赖'
@@ -1868,14 +2008,16 @@ class AsyLower {
     const ps = asyFormals(this, n.items[3]);
     if (ps === null) return null;
     for (const p of ps) {
-      if (p.def !== null && p.def !== undefined) {
-        return this.nope(n, `函数体里的函数 '${nm}' 既抓外层的 '${hit}'、又给形参`
-          + `'${p.name}' 带默认值（抓外层要降成函数值，而函数值没有默认值那一格）`);
-      }
+      // 形参**默认值**不再挡这一档（第七十三刀）：类型那一份的默认值由 asyFnTypeOf 记进
+      // fnDefs，少给实参时 asyFnValDefWrap 会补 —— three_tube.asy:172 的 `Split`
+      // （`int depth=mantissaBits`）就是这一格，220 个例子里 86 个停在这一行。
       if (p.rest === true) {
         return this.nope(n, `函数体里的函数 '${nm}' 既抓外层的 '${hit}'、又有可变形参`);
       }
     }
+    // 类型先定出来：默认值顺手记进 fnDefs，而且**递归**那一支要在降体之前就有这一格
+    const declTy = asyFnTypeOf(this, ret, n.items[3], n);
+    if (declTy === null) return null;
     // 体里提到自己**不一定**是递归：asy 的名字按签名查，同名而签名不同的那一份照旧接得住。
     // plain_Label.asy:56 的 `pair[][] conj(pair[][] a)` 体里那句 `conj(a[j][i])` 调的是
     // 内建的 `pair conj(pair)`；plain_markers.asy:64 的 `void add(real x)` 体里那句
@@ -1886,9 +2028,24 @@ class AsyLower {
     const mark = rec ? this.diags.mark() : null;
     const clo = this.mkClo(n, ret, ps, n.items[4]);
     if (clo === null && rec) {
+      // **递归**的那一档（第七十三刀）：先绑一格**装了箱**的局部量（长度 1 的数组，初值就是
+      // 那格数组的零值），再降体 —— 体里那句递归读的就是这一格（闭包抓走的是箱子，
+      // 引用语义），降完再把闭包写进箱子里。asy 那边这一格本来就是"先有名字再有值"。
+      // three_tube.asy:172 的 `Split`、three.asy:1368 的 `nurb`、contour.asy 的 `process`
+      // 都是这一形。
       this.diags.rollback(mark);
-      return this.nope(n, `函数体里的函数 '${nm}' 抓外层的 '${hit}'，而它自己是递归的`
-        + '（这一层的名字是体降完才绑上的，递归得先有那一格 —— 另一刀）');
+      const bx = this.declareBox(n, nm, declTy);
+      if (bx === null) return null;
+      const at = asyCore(`${declTy}[]`);
+      const m2 = this.diags.mark();
+      const clo2 = this.mkClo(n, ret, ps, n.items[4]);
+      if (clo2 === null) {
+        this.diags.rollback(m2);
+        return this.nope(n, `函数体里的函数 '${nm}' 抓外层的 '${hit}'，而它自己是递归的`
+          + '（这一层的名字是体降完才绑上的，递归得先有那一格 —— 另一刀）');
+      }
+      return [`(let ${bx} ${at} (anew ${at} (int 1)))`,
+        `(aset (var ${bx}) (int 0) ${clo2.code})`];
     }
     if (clo === null) return null;
     const had = this.scopes[this.scopes.length - 1].get(nm);
@@ -1984,9 +2141,10 @@ class AsyLower {
   methodVal(node, rec, cand, recvCode) {
     const mn = cand.base === undefined ? cand.sym : cand.base;
     for (const p of cand.ps) {
-      if (p.def !== null && p.def !== undefined) {
-        return this.nope(node, `把带默认值的方法 '${rec.name}.${mn}' 当值取出来（函数值没有默认值）`);
-      }
+      // 带默认值的方法**也**能当值取出来（与裸函数名那一档同一条，见 nameOf 里第六十刀
+      // 那一段）：值的类型是"全部形参"那一份，默认值那几格在值这边就没了 ——
+      // `colors=colorstriangular`（three_surface.asy:271）两边都是全形参那一份，通。
+      // 通过这个值少给实参才是另一刀（asyFnValCall 那边有它自己的诊断）。
       if (p.rest === true) {
         return this.nope(node, `把可变形参的方法 '${rec.name}.${mn}' 当值取出来`);
       }
@@ -2213,7 +2371,14 @@ class AsyLower {
     this.scopes = saveScopes;
     this.at = saveAt;
     this.self = saveSelf;
-    if (bad) return null;
+    if (bad) {
+      // 生成失败时**把缓存那一格撤掉**：不撤的话后面同一个类型再要一次会命中缓存、
+      // 拿到 `(call asy__new_T)`，而那份正文压根没发出去 —— 方言那一层报"未声明的函数
+      // 'asy__new_autoscaleT'"（量出来的：examples/dimension.asy，探路那一趟里
+      // autoscaleT 的构造生成失败、回滚之后真降那一趟就命中了这个空壳）。
+      this.recInits.delete(t);
+      return null;
+    }
     const text = [`  (fn ${fname} () ${t}`];
     for (const s of lines) text.push(`    ${s}`);
     this.wraps.push(`${text.join('\n')})`);
@@ -2475,8 +2640,15 @@ export function lowerAsy(tree, diags, opts) {
   return new AsyLower(diags, opts).run(tree);
 }
 
-/** 重载候选表的浅拷贝：值是数组，所以每一组也要拷一份 */
-function copyAsyFuncs(m) {
+/**
+ * 值是**数组**的那几张表拷一份：容器各自新的，里面的记录共用。
+ *
+ * funcs / globals / casts / oinits / tyAlias 都是 `list = m.get(k) ?? []; list.push(g);
+ * m.set(k, list)` 这么攒的 —— 只 `new Map(m)` 的话数组还是**同一个**，后来 push 进去的那一格
+ * 会从快照的背面漏回去。量出来的样子：上一段代码里的 `real[] W` 到下一段还看得见，
+ * 于是 `label("$B$",b,W)` 报「没有能匹配 label(string, pair, real[])」。
+ */
+function copyAsyLists(m) {
   const out = new Map();
   for (const [k, list] of m) out.set(k, [...list]);
   return out;
@@ -2505,15 +2677,47 @@ export class AsySession {
       units: [...l.units],
       u0: u === null ? null : {
         u: u,
-        funcs: copyAsyFuncs(u.funcs), globals: new Map(u.globals), recVis: new Map(u.recVis),
-        mods: new Map(u.mods), oinits: new Map(u.oinits), oiByNode: new Map(u.oiByNode),
-        casts: new Map(u.casts), castByNode: new Map(u.castByNode), at: u.at,
-        tyAlias: new Map(u.tyAlias),
+        funcs: copyAsyLists(u.funcs), globals: copyAsyLists(u.globals), recVis: new Map(u.recVis),
+        mods: new Map(u.mods), oinits: copyAsyLists(u.oinits), oiByNode: new Map(u.oiByNode),
+        casts: copyAsyLists(u.casts), castByNode: new Map(u.castByNode), at: u.at,
+        tyAlias: copyAsyLists(u.tyAlias),
       },
       records: new Map(l.records), recInits: new Map(l.recInits), byKey: new Map(l.byKey),
       gdecls: [...l.gdecls], wraps: [...l.wraps], wrapNames: new Map(l.wrapNames),
       used: new Set(l.used), arrGen: new Map(l.arrGen),
+      // 这几张也是**跨单元攒着**的（第七十三刀补齐）：fnDefs 里存的是默认值**节点**，
+      // 漏了它，快照回滚之后还会拿着上一段代码的节点去降默认值 —— 诊断于是落在
+      // 另一个文件的位置上（量出来的样子是一个例子报出另一个例子里的错）。
+      fnDefs: new Map(l.fnDefs), mvals: new Map(l.mvals),
+      methodDecls: [...l.methodDecls], auFns: [...l.auFns], anonN: l.anonN,
       castNo: l.castNo, tmp: l.tmp, atOff: l.atOff,
+    };
+  }
+
+  /**
+   * 一份快照的拷贝。
+   *
+   * 同一张快照要**回滚多次**时必须先拷（快扫里 220 个例子都从同一张镜像起降）：restore 之后
+   * 各表是直接拿去改的，不拷就等于把上一个例子的声明记进了镜像。拷的粒度与 snapshot 一样 ——
+   * 容器新的，里面的单元/记录/候选对象共用。
+   */
+  cloneSnap(s) {
+    const u = s.u0;
+    return {
+      units: [...s.units],
+      u0: u === null ? null : {
+        u: u.u,
+        funcs: copyAsyLists(u.funcs), globals: copyAsyLists(u.globals), recVis: new Map(u.recVis),
+        mods: new Map(u.mods), oinits: copyAsyLists(u.oinits), oiByNode: new Map(u.oiByNode),
+        casts: copyAsyLists(u.casts), castByNode: new Map(u.castByNode), at: u.at,
+        tyAlias: copyAsyLists(u.tyAlias),
+      },
+      records: new Map(s.records), recInits: new Map(s.recInits), byKey: new Map(s.byKey),
+      gdecls: [...s.gdecls], wraps: [...s.wraps], wrapNames: new Map(s.wrapNames),
+      used: new Set(s.used), arrGen: new Map(s.arrGen),
+      fnDefs: new Map(s.fnDefs), mvals: new Map(s.mvals),
+      methodDecls: [...s.methodDecls], auFns: [...s.auFns], anonN: s.anonN,
+      castNo: s.castNo, tmp: s.tmp, atOff: s.atOff,
     };
   }
 
@@ -2528,6 +2732,12 @@ export class AsySession {
     l.wrapNames = s.wrapNames;
     l.used = s.used;
     l.arrGen = s.arrGen;
+    if (s.fnDefs !== undefined) l.fnDefs = s.fnDefs;
+    if (s.mvals !== undefined) l.mvals = s.mvals;
+    if (s.methodDecls !== undefined) l.methodDecls = s.methodDecls;
+    if (s.auFns !== undefined) l.auFns = s.auFns;
+    if (s.anonN !== undefined) l.anonN = s.anonN;
+    l.boxMemo = undefined;   // 装箱判据的备忘（按 fnBody 索引，回滚之后重算）
     l.castNo = s.castNo;
     l.tmp = s.tmp;
     l.atOff = s.atOff;
