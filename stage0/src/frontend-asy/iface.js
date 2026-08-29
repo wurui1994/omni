@@ -238,7 +238,10 @@ export function asyIfaceDump(L, u, pack) {
  * 而那个库这一趟没人直接 import"。
  */
 export function asyIfaceLoad(L, obj, file, unpack) {
-  if (obj === null || obj === undefined || obj.v !== 1) return null;
+  // 版本号只有一处真值：dump 那边写的 `v: 2`。**这里从前写死成 1**，于是 dump 升到 2
+  // 之后这条路整片死掉 —— `OMNI_ASY_IFACE=1` 打开也一条 `asy 接口索引` 都不打，
+  // 而我拿"开 617 / 关 635，一点不省"当结论记进了注释。那次测量测的是**同一条路**。
+  if (obj === null || obj === undefined || obj.v !== 2) return null;
   const trees = [];
   for (const s of obj.frags) trees.push(s === null ? null : unpack(s, file));
   const tr = (i) => (i === undefined || i === null || i < 0 ? null : trees[i]);

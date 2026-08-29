@@ -252,10 +252,11 @@ function asyFrontEnd() {
     // 编进文件名的话每改一次源码就多出一条，asy_builtins 那一条 12MB，量过 .omni-cache/asy-ast
     // 就是这么攒到 1.3GB 的。现在一份源码在盘上**只占一条**，改了就原地盖掉。
     //
-    // 文件名就是**源文件自己的名字**，只换后缀（第七十五刀）：`plain.asy` -> `plain.ast`。
-    // 哈希名字看不出在复用谁。**一层平铺、不分子目录** —— 这份缓存是公用的：谁引到
-    // `plain.asy` 都用同一格。同名不同目录会撞到同一格，所以**全路径进 .stamp**：
-    // 撞了就是印记不一致，那一趟老老实实重新解析（退化成不命中，不会错用别人的树）。
+    // 文件名是**源文件的基名 + 一段路径哈希**，只换后缀：`plain.asy` -> `plain__<8 位>.ast`。
+    // 全哈希的名字看不出在复用谁，所以基名留着。**一层平铺、不分子目录** —— 这份缓存是
+    // 公用的：谁引到 `plain.asy` 都用同一格。
+    // 路径那一段是必须的：只取基名时同名不同目录撞在一格上，两个入口轮流跑就互相盖
+    // （从前的注释说"撞了就是印记不一致，退化成不命中"，那是**错的** —— 见下面 same 那一行）。
     // 不是从盘上来的文本（REPL、内联）没有名字，按全文哈希起名。
     let base = '';
     let inline = false;
@@ -264,7 +265,7 @@ function asyFrontEnd() {
         const cut = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
         const nm = cut < 0 ? p : p.slice(cut + 1);
         const dot = nm.lastIndexOf('.');
-        base = dot <= 0 ? nm : nm.slice(0, dot);
+        base = `${dot <= 0 ? nm : nm.slice(0, dot)}__${hash16(p).slice(0, 8)}`;
       } else {
         inline = true;
         base = `_inline-${hash16(text)}`;
@@ -286,8 +287,14 @@ function asyFrontEnd() {
       // 印记的身份是**内容哈希**（inline 那种没有文件，名字里已经带着哈希）：touch 一下、
       // 重新 checkout 一遍都不该让这份树作废。改动时间与字节数只是省一次读的预检 ——
       // 两样对得上就直接命中，对不上才真去哈希一遍（inpOk）。
+      //
+      // **先核路径**：这一格的文件名只是基名，同名不同目录会撞到一起，而 `inpOk` stat 的是
+      // **印记里记着的**那个路径，不是这一趟要的这个 —— 于是撞了反而"命中"。
+      // 量到的样子：`omni run /tmp/tri2.asy` 解析出来的是 `/tmp/asyfp/tri2.asy` 的树，
+      // 整趟前端都在编另一个程序，输出是一份画图的 EPS（tri2.asy 里一句画图都没有）。
+      const same = inline || inpPath(fs[1]) === p;
       const r = inline ? { ok: fs[1] === '-', cur: '-' } : inpOk(fs[1] === undefined ? '' : fs[1]);
-      if (fs[0] === gkey && r.ok) {
+      if (fs[0] === gkey && same && r.ok) {
         const t = astUnpack(readText(cpath), file);
         if (r.cur !== fs[1]) writeText(spath, `${gkey}|${r.cur}`);   // 刷新预检那两格
         vStep(`asy ast cache  ${p}`);
@@ -325,37 +332,42 @@ function asyFrontEnd() {
   // 这一趟真的加载了哪些模块文件（按加载顺序）。产物缓存的依赖清单靠它。
   const seen = [];
   const paths = new Map();
-  const loader = (diags) => (name) => {
+  /**
+   * 模块名 -> 它解析到的**真文件**，只 stat、不读不解析。
+   *
+   * 单独摘出来是必须的：产物名里带着这个路径的哈希（见 unitName），而问"这个库的产物
+   * 还能用吗"（skipBody / 接口索引）发生在**加载之前** —— 那时候 `paths` 里还没有这一格，
+   * 名字就会算成 `asy_builtins__<key 的哈希>`，与盘上那份 `asy_builtins__<路径的哈希>`
+   * 对不上，于是每一格都报"没有 .aif"。量到的样子：13 份里只有 2 份走上索引。
+   */
+  const resolve = (name) => {
+    const had = paths.get(name);
+    if (had !== undefined) return had;
     // `collections.map` 这种带点的模块路径，文件是 `collections/map.asy`（量过 asy 也这样找）。
     // 先按原样找一遍：真有个叫 `a.b.asy` 的文件时那份赢，与不带点的写法同一条规矩。
     const cands = name.indexOf('.') < 0 ? [name] : [name, name.split('.').join('/')];
-    let p = '';
     for (const nm of cands) {
       const q = join(cwd(), `${nm}.asy`);
-      if (exists(q)) { p = q; break; }
+      if (exists(q)) { paths.set(name, q); return q; }
     }
-    if (p === '') {
-      for (const d of searchDirs) {
-        for (const nm of cands) {
-          const q = join(d, `${nm}.asy`);
-          if (exists(q)) { p = q; break; }
-        }
-        if (p !== '') break;
+    for (const d of searchDirs) {
+      for (const nm of cands) {
+        const q = join(d, `${nm}.asy`);
+        if (exists(q)) { paths.set(name, q); return q; }
       }
     }
+    return '';
+  };
+  const loader = (diags) => (name) => {
+    const p = resolve(name);
     if (p === '' || !exists(p)) return null;
     vStep(`asy module    ${name} -> ${p}`);
     seen.push(p);
-    // 模块名 -> 解析到的**真文件**。产物的增量靠它：一个库改了没有，看的是这个路径的
-    // 改动时间与字节数。从前单元上只记模块名（`plain`、`collections.iter(T=int)`），
-    // 于是"库改了要重编"这条根本判不出来 —— 量到的样子是 touch 了 settings.asy
-    // 清单照样命中。
-    paths.set(name, p);
     return parseText(p, readText(p), diags);
   };
   return {
     parseText: parseText, loader: loader, builtins: builtins, libDir: libDir, seen: seen,
-    paths: paths,
+    paths: paths, resolve: resolve,
   };
 }
 
@@ -456,7 +468,9 @@ function asyText(path, out, skipBody, ifaceFn) {
     // 与 ASYMPTOTE_DIR 一起用就是"引真的 base/*.asy"。OMNI_ASY_BUILTINS=0 关掉（
     // 调这一面自己的时候用：它自己是 asy 源码，不能隐式引进自己）。
     prelude: env('OMNI_ASY_BUILTINS') === '0' ? '' : 'asy_builtins',
-    pathOf: (n) => fe.paths.get(n),
+    // 模块名 -> 它解析到的真文件。**只 stat 不加载** —— 产物名里带这个路径的哈希，
+    // 而"这个库的产物还能用吗"要在加载之前就问得出来（见 asyFrontEnd 的 resolve）。
+    pathOf: (n) => fe.resolve(n),
     // 产物还在、源文件没动的库：正文一步都不降（第七十六刀，见 lower.js 的 skipBody）
     skipBody: skipBody === undefined ? null : skipBody,
     // 库的接口索引要把默认实参那些表达式打包进去（第七十八刀，见 iface.js）
@@ -483,9 +497,15 @@ function compileAsy(path) {
 /**
  * 一个单元 -> 它那份产物的名字（盘上就叫这个，只换后缀）。
  *
- * 名字取**源文件的基名**，不是模块身份：模块身份是 `collections.iter(T=int)` 那样的东西，
- * 按点号切会切出 `collections`，于是同一个模板的两次实例化撞成同一份产物（量到过：
- * `import graph` 底下 iter 被实例化了两次）。模板实例化后面缀一段身份哈希把它们分开。
+ * 名字取**源文件的基名 + 一段身份哈希**。基名是给人看的；哈希那一段是必须的 ——
+ * 只取基名时两个不同目录下同名的源文件共用一份产物与一份清单，而清单里记的是**它**
+ * 那个源文件的路径，那个文件没动就算"命中"。量到的样子：`omni run /tmp/tri2.asy`
+ * 一步前端都不走，跑出来的是 `/tmp/asyfp/tri2.asy` 那一份的输出（一份画图的 EPS，
+ * 而 /tmp/tri2.asy 里一句画图都没有）。这不是慢，是**跑错程序**。
+ * 与 rustc 的 `-C metadata`、Cargo 的 fingerprint 同一个做法：身份进名字。
+ *
+ * 身份是「解析到的真文件 + 模块身份」两样一起哈：模块身份是 `collections.iter(T=int)`
+ * 那样的东西（同一个文件的两次模板实例化是两份产物），真文件把同名不同目录分开。
  */
 function unitName(info) {
   const k = info === undefined || info === null ? null : info;
@@ -495,7 +515,7 @@ function unitName(info) {
   const nm = cut < 0 ? src : src.slice(cut + 1);
   const dot = nm.lastIndexOf('.');
   const base = dot <= 0 ? nm : nm.slice(0, dot);
-  return k !== null && k.tpl === true ? `${base}__${hash16(k.key).slice(0, 8)}` : base;
+  return `${base}__${hash16(`${src}|${k === null ? '' : k.key}`).slice(0, 8)}`;
 }
 
 /** 一个源文件路径 -> 产物名（清单那一路只有路径，没有单元信息）。 */
@@ -580,6 +600,16 @@ function inpField(p) {
   if (p === '') return '-';
   const id = srcId(p);
   return id === null ? `${p}:-` : `${p}:${id.mtime}:${id.len}:h${id.hash}`;
+}
+
+/** 印记里那一格记的是**哪个文件**（`路径:改动时间:字节数:h内容哈希` 的头一段） */
+function inpPath(field) {
+  if (field === undefined || field === '' || field === '-') return '';
+  if (field.endsWith(':-')) return field.slice(0, -2);
+  const c3 = field.lastIndexOf(':');
+  const c2 = field.lastIndexOf(':', c3 - 1);
+  const c1 = field.lastIndexOf(':', c2 - 1);
+  return c1 < 0 ? '' : field.slice(0, c1);
 }
 
 /** 印记里的一格现在还成立吗。回 `{ok, cur}` —— `cur` 与原来那格不同就该把印记刷新。 */
@@ -689,17 +719,21 @@ function asyModsSkip(dir, cs) {
     // span 上那个 `file` 给一格轻壳：不读源码就没有全文与行表，而这条路上库的声明本来
     // 不该再报诊断（真报了也还有路径与偏移可看）。
     iface: (info) => {
-      // **仍然默认关着**（`OMNI_ASY_IFACE=1` 打开）。安静环境下量过三趟三趟（tri.asy 改一个
-      // 字符、强制走前端）：开 617/674/690ms、关 635/642/640ms —— **在噪声里，一点不省**。
-      // 从前记的"932 vs 787"是后台还在跑 oracle 时量的，不算。
-      // 原因量出来了：13 份里只有 7 份走索引，而 plain 并进来的那十几份（plain_constants /
-      // plain_pens / plain_picture …）压根不是单元、不可能有自己的 `.aif`，照旧读源码解析。
-      // 所以这一格要值钱，得等 ADR-0015 第 5 步（接口按条存）。
-      if (env('OMNI_ASY_IFACE') !== '1') return null;
+      // **默认开着**（`OMNI_ASY_IFACE=0` 关掉，对照用）。
+      //
+      // 从前这里记过一条"开 617/674/690ms、关 635/642/640ms —— 一点不省"的结论，
+      // 那条结论是**假的**：iface.js 的 asyIfaceLoad 把版本号写死成 `v !== 1` 就 return null，
+      // 而 dump 那边早就写 `v: 2` 了 —— 两趟量的其实是同一条路（一条 `asy 接口索引` 都没打）。
+      // 另一处更隐蔽：产物名里带源文件路径的哈希，而这一格在**加载之前**就要算名字，
+      // 那时 `pathOf` 还回不出路径（它从前只认加载过的），于是 13 份里只有 2 份找得到 `.aif`。
+      // 两处都修好之后，10 个库全走索引、一份库源码都不解析。
+      //
+      // 静下来量（tri2.asy 改一个字符、三趟三趟）：关 885/738/623ms，开 551/502/477ms。
+      if (env('OMNI_ASY_IFACE') === '0') return null;
       const nm = unitName(info);
       const p = join(dir, `${nm}.aif`);
-      if (!exists(p)) return null;
-      if (skipFn(info) === null) return null;
+      if (!exists(p)) { vStep(`asy 接口索引不命中 ${nm} 没有 .aif`); return null; }
+      if (skipFn(info) === null) { vStep(`asy 接口索引不命中 ${nm} 产物那一套没齐`); return null; }
       const obj = JSON.parse(readText(p));
       if (obj === null || obj === undefined) return null;
       // 版本对不上就当没有这一格（盘上那份是旧格式：struct 体里的语句从前只存了树与 mat，
