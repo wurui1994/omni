@@ -594,13 +594,18 @@ class AsyLower {
   /**
    * 方法体里的裸名字 `nm` 是不是**此处可见的字段**（局部量/形参优先，量过：形参 `x`
    * 遮住字段 `x`，要拿字段得写 `this.x`）。回字段项或 null。
+   *
+   * `shadowed` 为真时**不看**局部量那一格：同名的局部量是**函数类型**时它遮不住字段 ——
+   * 量过 `struct S { int x; void go() { real x(int a){…} x=5; } }` 里那句 `x=5` 赋的是
+   * 字段（写 `string x="a";` 就报 "cannot convert 'int' to 'string' in assignment"，
+   * 不是函数的那一格真的遮住了）。只有赋值那一侧按签名挑格时才该传它。
    */
-  selfField(nm, wantFn) {
+  selfField(nm, wantFn, shadowed) {
     if (this.self === null) return null;
     // static 的方法体里实例字段**不可见**（量过 asy 报 "static use of dynamic variable"）。
     // 这里回 null，那句诊断由调用处发（说清是"静态的地方用了实例的东西"，见 selfStatBad）。
     if (this.self.stat === true) return null;
-    if (this.lookup(nm) !== null) return null;
+    if (shadowed !== true && this.lookup(nm) !== null) return null;
     if (nm === ASY_FILLER) return null;   // 占位字段看不见，方法体里也一样（见 recField）
     // 同名两格字段（第四十九刀）：这里也照 recField 的规矩 —— 取值挑**不是函数类型**那份，
     // `wantFn` 为真（调用形态，见 calls.js 里那一档）时反过来挑函数那份。

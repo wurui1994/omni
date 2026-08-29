@@ -6080,6 +6080,54 @@ base 里 `void write(file, T)` 那一族（plain_constants.asy:82 起）管的�
 没跑的轴：深快扫（`OMNI_SWEEP_SX=1`，这一批没碰降级出来的形状，只改了挑哪一条）、
 输出层的逐字节比对（EPS/SVG）。
 
+### 一批：`three.asy` 那 6 条清零（三处"同名按签名分得开"，加虚线的 `adjust`）
+
+`import three;` 上剩的 6 条诊断这一批全清了（模块那一份的 `three.asy 6` 整行消失）。
+四件事，前三件是同一个根：**asy 里同名的东西按签名分得开，遮不遮得住要看是不是函数类型**。
+
+1. `three.asy:2755` 的 `f=pic.fit3(…)`（85 个例子停在这条上）。`frame f` 是 struct scene
+   的字段，而那个块里又声明了 `real f(pair a, pair b){…}`。挑格那一路（stmts.js 的
+   `asyAssign`）本来就写了"当前这一格接不住就试字段那一格"，但它问的是 `L.selfField(nm)` ——
+   而那个函数**开头就有一句** `if (this.lookup(nm) !== null) return null;`（局部量优先），
+   于是在"有局部量"这一档里它恒为 null，那一支是死码。给 `selfField` 加了第三个参数
+   `shadowed`：为真时不看局部量那一格。**只在局部量是函数类型时传它** —— 量过
+   `struct S { int x; void go() { string x="a"; x=5; } }` 那边报的是
+   "cannot convert 'int' to 'string' in assignment"，不是函数的那一格是真的遮住。
+   两边各一条用例：`cases/147-fnslot-shadow` 的 (1) 与 `strict/field-shadow-var`。
+2. `three.asy:3235` 的 `fit=new frame[](…)`：赋的是 **plain_arrows.asy:618** 那一格
+   （`import` 进来的函数名）。`asyFnSlots`（decls.js）本来有 `c.unit !== u.id` 一句挡着 ——
+   那一格的初值是"在函数声明那一行发 `(set 槽 (fnref 函数))`"，而别的单元早降完了。
+   放开的办法是初值改由**这个单元**在体的最前面填（`u.fsInit`，排在内建面与 autoplain
+   之后）：`(fn …)` 是全局的，`(fnref …)` 那时就取得到。差别记一笔：asy 那边两边是同一块
+   存储，改完**那个模块自己**的调用也走新的一格；这里那个模块已经编成直呼原函数了，
+   只有这个单元（以及之后 `import` 它的）看得见这一改。
+3. `three.asy:12` 的 `Embed=embed.embedplayer`：模块限定的**函数**当值用。`asyModVar`
+   原来只翻那个单元的 `globals`，翻不到就是 nope；现在翻不到再翻 `funcs`，落地与裸函数名
+   当值用完全同一条（一份出 `(fnref …)`、好几份出不定案的重载集记号）。
+4. `three.asy:2302` 的 `adjust(q,arclength(g),cyclic(g))`：`pen adjust(pen,real,bool)`
+   （runtime.in:535 -> drawpath.cc:52 的 `adjustdash`，`PatternLength` 在同一文件 :21）
+   逐句照抄进 `lib/asy/asy_builtins.asy`。10 个形状（缩放/不缩放、adjust=false、奇数项、
+   cyclic、arclength=0、花样比弧长长）与 `asy -noV` 逐字节一致。一处对不上要说清：那边
+   `q.linetype()` 在 `line.isdefault` 时回的是 defaultpen 的那一份，这一层的笔没有
+   isdefault 这一格，读的一律是笔自己那一格。
+
+另外补上了 `shipout3` 的两条签名（runpicture.in:486/512）与 `defaultformat3`，体是
+`abort` —— 与 `_shipout` / `_texpath` / `_eval` 同一档：签名在，那三句才降得下来。
+
+第 2 件差点漏掉的一个坑，值得记：`u.fsInit` 挂在**单元对象**上，而 `snapshot`/`restore`
+里单元对象是同一份（快照只拷它那几张表）。不每遍换一格空的，上一趟的 `(set …)` 会跟着
+下一趟一起发，而那一格 `(global …)` 已经随 `gdecls` 回滚掉了 —— 深快扫里几十个例子一起报
+`未声明的变量 'asy__fs649_viewportmargin'`，干净数从 201 掉到 103。现在 `asyFnSlots` 每遍
+开头 `u.fsInit = []`。
+
+跑过的轴：`node tests/asy/run.js` **236/236**（新用例 147-fnslot-shadow 与 `asy -noV`
+逐字节一致，新 strict 用例 field-shadow-var 两边都拒；`OMNI_LEGS=all` 五条腿 300.4s）；
+`node tests/sexpr/run.js` 54/54；`node tests/run.js` 91/91；`node tests/bootstrap/run.js`
+**60/60**；快扫 **203 干净 / 17 有诊断**（220 个共 1.6s、最慢 tvgen.asy 99ms，无并行），
+模块那一份 **three.asy 6 -> 0**（剩 geometry 1、contour 2、palette 1、patterns 1）；
+深快扫（`OMNI_SWEEP_SX=1`）**201 干净 / 19 有诊断**，模块那一层 3 条 —— 都与上一批持平。
+没跑的轴：输出层的逐字节比对（EPS/SVG，`shipout3` 这一批只补了签名）。
+
 ## 后果与代价
 
 

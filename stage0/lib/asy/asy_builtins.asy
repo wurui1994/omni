@@ -3593,6 +3593,44 @@ real offset(pen p) { return p.dashoffset; }
 bool scale(pen p) { return p.dashscale; }
 bool adjust(pen p) { return p.dashadjust; }
 
+// (1) 把虚线的节拍缩到正好铺满弧长（runtime.in:535 -> drawpath.cc:52 的 adjustdash，
+// PatternLength 是同一个文件 :21）。逐句照抄，只有一处对不上要说清：那边 `q.linetype()`
+// 在 `line.isdefault` 时回的是 **defaultpen 的**那一份，而这一层的笔没有 isdefault 这一格
+// （linetype(real[],…) 一造出来就是实的），所以这里读的一律是笔自己那一格。
+// `q.adjust(factor)` 就是 pen.h:471 -> LineType::Scale：pattern 每一项与 offset 同乘。
+private real asy__patlen(real arclength, real[] pat, bool cyclic, real penwidth) {
+  real sum = 0;
+  int n = pat.length;
+  for (int i = 0; i < n; ++i) sum += pat[i]*penwidth;
+  if (sum == 0) return 0;
+  if (n % 2 == 1) sum *= 2;              // 奇数项的通断花样两轮才重复
+  real pat0 = pat[0];
+  if (!cyclic && pat0 == 0) sum += 1e-3*penwidth;
+  real terminator = (cyclic && arclength >= 0.5*sum) ? 0 : pat0*penwidth;
+  int ncycle = (int) ((arclength-terminator)/sum+0.5);
+  return (ncycle >= 1 || terminator >= 0.75*arclength) ? ncycle*sum+terminator : 0;
+}
+pen adjust(pen p, real arclength, bool cyclic) {
+  pen q = pencopy(p);
+  int n = q.dashpat.length;
+  if (n > 0) {
+    real penwidth = q.dashscale ? linewidth(q) : 1;
+    real factor = penwidth;
+    if (q.dashadjust && arclength != 0) {
+      real denom = asy__patlen(arclength, q.dashpat, cyclic, penwidth);
+      if (denom != 0) factor *= arclength/denom;
+    }
+    if (factor != 1) {
+      real f = max(factor, 0.1);
+      real[] a;
+      for (real x : q.dashpat) a.push(x*f);
+      q.dashpat = a;
+      q.dashoffset = q.dashoffset*f;
+    }
+  }
+  return q;
+}
+
 // (1) frame 上的分组与 3D 问询（runpicture.in:286/291/778）。分组在 EPS 那一路是
 // `gsave/grestore` 那一层的事，我们的 frame 只攒 drawop，所以这两个是空的 —— 画出来一样。
 void begingroup(frame f) { }
@@ -4450,6 +4488,21 @@ path[][] textpath(string[] s, pen[] p) {
 void _shipout(string prefix="", frame f, frame preamble=null, string format="",
               bool wait=false, bool view=true, transform t=identity()) {
   abort("_shipout 还没做（EPS 那一路走的是自己那份 shipout）");
+}
+// 三维那两条出口（runpicture.in:486/512）。真 asy 一条走 PRC/v3d 的写盘与 GPU 渲染，
+// 一条是 `f->shipout3(prefix,format)` 的短形。这一层两条都没有，所以体是 abort ——
+// 签名在，three.asy:2624/2911 那三句才降得下来（`picture *f` 在 asy 那边就是 frame，
+// realarray2 就是 real[][]：transform3 是 three.asy 里的 typedef，这一层看不见它）。
+string defaultformat3="prc";                     // runpicture.in:121
+void shipout3(string prefix, frame f, string format="",
+              real width, real height, real angle, real zoom,
+              triple m, triple M, pair shift, pair margin, real[][] t,
+              real[][] tup, real[] background, triple[] lights, real[][] diffuse,
+              bool view=true) {
+  abort("shipout3 还没做（PRC/v3d 那一路不在这一层）");
+}
+void shipout3(string prefix, frame f, string format=defaultformat3) {
+  abort("shipout3 还没做（PRC/v3d 那一路不在这一层）");
 }
 // _eval 两条（builtin.cc）：一条吃源码串，一条吃 `quote{}` 攒的 code。两条都要真去
 // 再编一遍源码，这一层没有，所以体是 abort —— 签名在，plain 的 eval 那两支才降得下来。

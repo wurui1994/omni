@@ -1097,8 +1097,19 @@ function asyAssignedNames(node, out) {
  * 候选表**前面**，所以不用再动别处。填这一格的 `(set …)` 由 bodyPass 在那一行发（见那边）。
  *
  * 只认**独一份**的候选：重载了的话"赋的是哪一格"要靠类型定案，那是另一刀。
+ *
+ * `import` 进来的函数名也算（第七十四刀）：three.asy:3235 的 `fit=new frame[](…)` 赋的是
+ * plain_arrows.asy:618 那一格。那个单元早降完了（它那一行没有发过 `(set …)`），所以这一格的
+ * 初值改由**这个单元**在体的最前面填（见 bodyPass 里 `u.fsInit` 那一段）。差别记一笔：
+ * asy 那边两边是同一块存储，改了之后**那个模块自己**的调用也走新的一格；这里那个模块已经
+ * 编成直呼原函数了，只有这个单元（以及之后 import 它的）看得见这一改。
  */
 function asyFnSlots(L, u, rs) {
+  // **每一遍声明都换一格空的**：这个数组挂在单元对象上，而单元对象在 snapshot/restore
+  // 里是同一份（快照只拷它那几张表）—— 不换的话上一趟留下的 `(set …)` 会跟着下一趟一起发，
+  // 而那一格 `(global …)` 已经随 gdecls 回滚掉了。症状是深一格那一趟里几十个例子一起报
+  // `未声明的变量 'asy__fs…'`（量过：sweep 的 220 个里干净数从 201 掉到 103）。
+  u.fsInit = [];
   const assigned = new Set();
   for (const r of rs) asyAssignedNames(r, assigned);
   for (const nm of assigned) {
@@ -1106,7 +1117,7 @@ function asyFnSlots(L, u, rs) {
     const list = L.funcs.get(nm);
     if (list.length !== 1) continue;
     const c = list[0];
-    if (c.unit !== u.id || c.slot !== undefined || c.inRec !== undefined) continue;
+    if (c.slot !== undefined || c.inRec !== undefined) continue;
     const ty = asyCandFnType(L, c);
     if (ty === null) continue;
     const g = { sym: `asy__fs${L.gdecls.length}_${nm}`, type: ty, at: c.at, ok: true };
@@ -1116,6 +1127,7 @@ function asyFnSlots(L, u, rs) {
     L.globals.set(nm, gl);
     L.gdecls.push(g);
     c.slot = g;
+    if (c.unit !== u.id) u.fsInit.push(`(set ${g.sym} (fnref ${c.sym}))`);
   }
 }
 
@@ -1315,6 +1327,9 @@ export function asyBodyPass(L, u, fns) {
   if (u.bi !== undefined && u.bi !== null) main.push(`(expr (call ${u.bi}))`);
   // 隐式的 `import plain;`（autoPlainIn）：体也在最前面跑，排在内建面之后
   if (u.pi !== undefined && u.pi !== null) main.push(`(expr (call ${u.pi}))`);
+  // import 进来的函数名要被赋值时那一格（见 asyFnSlots）：初值填在**这个单元**的最前面。
+  // 那个函数是哪个单元的都无所谓 —— `(fn …)` 是全局的，`(fnref …)` 现在就取得到。
+  if (u.fsInit !== undefined) for (const s of u.fsInit) main.push(s);
   for (let i = 0; i < u.rs.length; i++) {
     const r = asyUnwrapMod(L, u.rs[i]);
     L.at = off + i;

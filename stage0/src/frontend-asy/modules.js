@@ -435,6 +435,15 @@ export function asyModAlias(L, node) {
 export function asyModVar(L, n, mq) {
   const list = L.units[mq.unit].globals.get(mq.name);
   if (list === undefined) {
+    // 不是变量：那个模块里的**函数**当值用（第七十四刀）。three.asy:12 的
+    // `Embed=embed.embedplayer;` 就是这一格 —— 限定名不受这边顺序解析的影响，
+    // 与 asyModCall 同一条。落地与裸函数名当值用完全一样：一份出 `(fnref …)`，
+    // 好几份出"不定案的重载集"记号，由 coerce 拿目标类型挑（见 nameOf 那一档）。
+    const fl = L.units[mq.unit].funcs.get(mq.name);
+    if (fl !== undefined && fl.length > 0) {
+      if (fl.length === 1) return { code: `(fnref ${fl[0].sym})`, type: L.candFnType(fl[0]) };
+      return { code: null, type: `<${mq.mod}.${mq.name} 的重载集>`, over: fl };
+    }
     return L.nope(n, `模块限定的名字 '${mq.mod}.${mq.name}'（这一刀的 \`m.名字\` 只有`
       + '模块里的文件级变量与函数）');
   }

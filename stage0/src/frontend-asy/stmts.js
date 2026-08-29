@@ -919,8 +919,11 @@ export function asyAssign(L, node, lhs, rhs, op) {
     // （`frame f;` 是 struct scene 的字段，而方法体里又写了 `real f(pair,pair){…}`，
     // 之后那句 `f=pic.fit3(…)` 赋的还是字段 —— three.asy:2755，85 个例子停在这里）。
     const ov = op === null && rhs !== null ? L.outerOf(nm) : null;
-    const sfld = op === null && rhs !== null && ov === null && L.selfField !== undefined
-      ? L.selfField(nm) : null;
+    // 局部量那一格是**函数类型**时它遮不住同名的字段（量过，见 selfField 的 `shadowed`）：
+    // `frame f;` 是 struct scene 的字段，方法体里又写了 `real f(pair a, pair b){…}`，
+    // 之后那句 `f=pic.fit3(…)` 赋的还是字段 —— three.asy:2755，85 个例子停在这里。
+    const sfld = op === null && rhs !== null && ov === null && asyIsFn(t)
+      ? L.selfField(nm, false, true) : null;
     if ((ov !== null && ov.type !== t && ov.sym !== null) || sfld !== null) {
       // 先试**当前这一格**，接不住（诊断与前置语句一并回滚）再试另一格
       const mark = L.diags.mark();
