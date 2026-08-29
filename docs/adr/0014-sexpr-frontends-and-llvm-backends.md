@@ -6611,6 +6611,64 @@ g("f", keep, b1=false, Step=1, Size=2);
 `tests/sexpr`、`tests/run.js`、`tests/bootstrap`、深快扫（`OMNI_SWEEP_SX=1`）、EPS/SVG 逐字节
 —— 这一份与下一批一起跑。
 
+### 一批：同名的文件级算符变量按签名挑、笔查询的默认实参、循环三对角解法
+
+`logo3.asy:18` 的 `path A=(a,0){dir(10)}::{dir(89.5)}(0,y2);`。一条链上三处：
+
+**一、`operator ::` 是一格变量，而同名的有好几格。** base 里它不是函数：
+`plain_paths.asy:129` 是 `interpolate operator ::=operator ..(operator tension(1,true));`，
+`three.asy:793` 又来一格 `interpolate3 operator ::=join3(…)`。`asyJoinVar` 问的是
+`gvarHere`，那只回**最后一格** —— `import three;` 之后 2D 那两句于是报
+"'operator ::' 的可变实参：要 void(flatguide3)，这里是 path"。asy 按**签名**分得开，
+量过（`asy -noV`，从 `$R/base` 跑）：
+
+```asy
+typedef int conn(int,int);
+conn operator ::=new int(int a,int b){return a*100+b;};
+import three;
+path A=(0,0){dir(10)}::{dir(80)}(1,2);
+path3 B=(0,0,0)::(1,1,1);
+guide h=(0,0)---(1,1)---(2,0);
+```
+
+出来是 304 / 1 / 1 / 2 —— 用户那一格写在 `import three;` **前面**，`3 :: 4` 照样走它，
+所以判据只有签名、与"哪一格更近"无关。改成逐格试：新的先试（后 import 的压住前一份），
+接不住就回滚诊断试下一格；一格都接不住时让**最后一格**照原样报（说的是最近那一份）。
+带可变形参那一格走 `restValCall`，定长的按签名逐个 coerce 出 `(callfn (var 符号) …)`。
+
+**二、笔的查询那一族不带实参时是 `currentpen`。** `logo3.asy:29` 的 `0.25*linewidth()`。
+runtime.in 里这十份都写成 `T f(pen p=CURRENTPEN)`（:514 linetype、:545 linecap、
+:555 linejoin、:565 miterlimit、:575 linewidth、:585 font、:596 fontsize、:601 lineskip、
+:612 overwrite、:622 basealign），内建面里少了那一格默认值。量过不带实参的八个：
+0.5 / 1 / 1 / 0 / 11.9551681195517 / 14.346201743462 / 那串默认字体命令 / 0，
+`currentpen=linewidth(2)+fontsize(20)` 之后是 2 / 20 / 24。
+
+顺手改掉一处**内建面自己的错**：`font()` 回的那串写成了 `"\\usefont{…}"`。asy 的
+`"…"` 里**反斜杠不是转义**（量过：`write("a\\b")` 印 `a\\b`、`length("a\\b")` 是 4），
+所以那样写出来是两个反斜杠，与真 asy 差一半。改成写一个。
+
+**三、`tridiagonal` 从"还没做"改成真做。** 清掉 `::` 之后 logo3 落到运行时的
+`abort: tridiagonal 还没做` 上 —— three.asy:932 的 `aim`（3D 的 Hobby 求解）要它。
+照抄 runarray.in:1524 那份（四条分支：零 Dirichlet 边界、n==1、n==2、一般的循环情形），
+次序与括号都跟着。
+
+**这一处的差别写在明处**：n==4 的循环情形上真 asy 印 `-0.0833333333333333`，
+这一层印 `-0.0833333333333334`。拿 node 按**同一次序**单独算一遍是后者 —— 也就是说
+差不在这份转写上，而在真 asy 那个二进制：arm64 上 `a - b*c` 会融合成一条 `fnmsub`
+（中间不舍入）。差一个 ulp，所以这份用例摆在 `tests/asy/tol/tridiagonal.asy`
+（那一节的契约是最后一位十进制差不超过 1），不摆 `cases/`。
+
+于是例子面 **216 → 217 干净**：logo3 的诊断清零（它还跑不完 —— `texpath` 那一头要
+真 TeX，现在停在 "null reference"，与 asy 那边画出来的东西不是一回事，这条留着）。
+剩下三个：AiryDisk（`gsl` 模块）、gamma3（复数 gamma）、splitpatch（`.initialized`）。
+
+跑过的轴：新用例 161-opvar-pick-penq 与 `asy -noV` 逐字节一致、
+tol/tridiagonal 与 `asy -noV` 在容差内一致（那一格差 1 ulp，理由在用例头上）；
+`tests/asy/cases` 全量按 `run` 那条腿逐个比对，无差异；快扫 **217 干净 / 3 有诊断**
+（220 个共 2.1s、最慢 genusthree.asy 132ms，无并行）、模块那一份 **0 条**。
+没跑的轴：`OMNI_LEGS=all` 那四条腿（run-c / interp / interp --mir / run-llvm）、
+`tests/sexpr`、`tests/run.js`、`tests/bootstrap`、深快扫（`OMNI_SWEEP_SX=1`）、EPS/SVG 逐字节。
+
 ## 后果与代价
 
 

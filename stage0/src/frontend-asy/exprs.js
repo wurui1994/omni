@@ -20,6 +20,7 @@ import { isList, isAtom, isStr, head } from '../sexpr/read.js';
 import {
   ASY_NOPE, DOT_BAD, CAP_BAD, ASY_ARRELEM_TEXT, ASY_CYCLE, ASY_NEWFRAME, ASY_XFORM, ASY_RESTPFX, ASY_SELFCAP, asyOpText,
   asyIsArr, asyElem, asyIsFn, asyFldSym, ASY_PAIR_TY, ASY_TRIPLE_TY, asyCore, ASY_NULL, asyRefTy, ASY_OPNOBI,
+  asyFnSplit, asyIsRestP,
 } from './types.js';
 import { ZERO, ASY_PAIRFN, ASY_STRFN, ASY_STR_DEPS, strLit } from './runtime.js';
 import { asyArgs, asyCall, asyVisible, asyOpUser, asyOpBuiltinSig, asyIdxOpCall, asyApplyCall, asyDefWrapper, asyRestValCall, asyMathVal } from './calls.js';
@@ -1333,11 +1334,66 @@ function asyJoinVar(L, n, op, vals, nodes) {
   }
   const gv = L.gvarHere(nm);
   if (gv !== null && gv.ok && asyIsFn(gv.type)) {
-    return asyRestValCall(L, n, nm, gv.type, `(var ${gv.sym})`, vals, nodes);
+    // 同名的文件级变量可以有**好几格**（第八十刀）：plain_paths.asy:129 的
+    // `interpolate operator ::` 与 three.asy:793 的 `interpolate3 operator ::`，
+    // 加上用户自己写的一格。asy 按**签名**分得开 —— 量过（`asy -noV`）：
+    // `typedef int conn(int,int); conn operator ::=…; 3 :: 4` 印 304，同一份文件里
+    // `path A=(0,0){dir(10)}::{dir(80)}(1,2)` 与 `path3 B=(0,0,0)::(1,1,1)` 也各走各的
+    // （长度都是 1）。gvarHere 只回**最后一格**，于是 `import three;` 之后 2D 那两句报
+    // "要 void(flatguide3)，这里是 path"（logo3.asy:18）。所以这里逐格试：新的先试
+    // （后 import 的那份压住前一份），成不了就回滚诊断接着试下一格。
+    const cands = asyJoinCands(L, nm);
+    for (let i = cands.length - 1; i >= 0; i--) {
+      const mark = L.diags.mark();
+      const save = Array.isArray(L.pre) ? L.pre : null;
+      if (save !== null) L.pre = [];
+      const v = asyJoinTry(L, n, nm, cands[i], vals, nodes);
+      const mine = L.pre;
+      if (save !== null) L.pre = save;
+      if (v !== null) {
+        if (save !== null) for (const s of mine) L.pre.push(s);
+        return v;
+      }
+      L.diags.rollback(mark);
+    }
+    // 一格都接不住：让**最后一格**照原样报那条诊断（说的是最靠近这里的那一份）
+    return asyJoinTry(L, n, nm, gv, vals, nodes);
   }
   return L.nope(n, `路径连接 '${op}'（它在绘图层里，要 \`import plain;\`）`);
 }
 
+/** 此处可见的、类型是函数的那几格同名文件级变量（按声明次序） */
+function asyJoinCands(L, nm) {
+  const list = L.globals.get(nm);
+  const out = [];
+  if (list === undefined) return out;
+  for (const g of list) {
+    if (g.at > L.at || !g.ok || !asyIsFn(g.type)) continue;
+    out.push(g);
+  }
+  return out;
+}
+
+/** 拿一格函数值把连接调下去：带可变形参那一格走 restValCall，别的按定长签名逐个 coerce */
+function asyJoinTry(L, n, nm, g, vals, nodes) {
+  const s = asyFnSplit(g.type);
+  if (s === null) return L.nope(n, `认不出的函数类型 '${g.type}'`);
+  const rAt = s.params.length - 1;
+  if (rAt >= 0 && asyIsRestP(s.params[rAt])) {
+    return asyRestValCall(L, n, nm, g.type, `(var ${g.sym})`, vals, nodes);
+  }
+  if (s.params.length !== vals.length) {
+    return L.err(n, `'${nm}' 是 ${g.type}，要 ${s.params.length} 个实参，`
+      + `给了 ${vals.length} 个`);
+  }
+  const cs = [];
+  for (let i = 0; i < vals.length; i++) {
+    const cv = L.coerce(vals[i], s.params[i], nodes[i], `'${nm}' 的第 ${i + 1} 个实参`);
+    if (cv === null) return null;
+    cs.push(cv.code);
+  }
+  return { code: `(callfn (var ${g.sym}) ${cs.join(' ')})`, type: s.ret };
+}
 
 /** `a[i]` 的**读**侧。写侧在 assign 里，因为写要先扩长（asy 的下标写会长）。 */
 export function asyIndex(L, n) {

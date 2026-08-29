@@ -1918,13 +1918,13 @@ real unitrand() { return rand() / 2147483647.0; }
 // (1) 笔的那几格（runpen.in）。asy 那边每个都是"回一支只设了这一项的笔"，
 // 与 currentpen 合成时后设的赢 —— 这一层照着摆那一格。
 pen linecap(int n) { pen p; p.cap = n; return p; }
-int linecap(pen p) { return p.cap; }
+int linecap(pen p = currentpen) { return p.cap; }
 pen linejoin(int n) { pen p; p.join = n; return p; }
-int linejoin(pen p) { return p.join; }
+int linejoin(pen p = currentpen) { return p.join; }
 pen fillrule(int n) { pen p; p.fillruleval = n; p.evenodd = n == 1; return p; }
 int fillrule(pen p) { return p.fillruleval; }
 pen basealign(int n) { pen p; p.basealignval = n; return p; }
-int basealign(pen p) { return p.basealignval; }
+int basealign(pen p = currentpen) { return p.basealignval; }
 pen opacity(real opacity=1.0, string blend="Compatible") {
   pen p; p.opacityval = opacity; p.blend = blend; return p;
 }
@@ -2374,7 +2374,15 @@ string[] sort(string[] a) {
 
 // (1) 笔的查询那一侧与字号（runpen.in）。base 里 `linewidth(currentpen)`、
 // `fontsize(10)` 到处都是。
-real linewidth(pen p) { return p.width; }
+// 形参那一格默认是 **currentpen**：runtime.in 里这一族都写成 `T f(pen p=CURRENTPEN)`
+// （:514 linetype、:545 linecap、:555 linejoin、:565 miterlimit、:575 linewidth、
+// :585 font、:596 fontsize、:601 lineskip、:612 overwrite、:622 basealign）。
+// logo3.asy:29 的 `0.25*linewidth()` 点名要它。量过 `asy -noV`：不带实参时
+// linewidth() 0.5、linecap() 1、linejoin() 1、basealign() 0、fontsize()
+// 11.9551681195517、lineskip() 14.346201743462、font() 那串默认字体命令、
+// linetype().length 0；`currentpen=linewidth(2)+squarecap+fontsize(20)` 之后
+// 是 2 / 0 / 20 / 24。
+real linewidth(pen p = currentpen) { return p.width; }
 
 // (1) 字号（runtime.in:590/596）：pen 上存一格。默认那一格是 **12pt 换成 bp**
 // 的那个数（量过 `fontsize(currentpen)` 是 11.9551681195517 = 12*72/72.27）。
@@ -2386,17 +2394,19 @@ pen fontsize(real size, real lineskip) {
   return q;
 }
 pen fontsize(real size) { return fontsize(size, 1.2 * size); }
-real fontsize(pen p) { return p.fontsizeval; }
+real fontsize(pen p = currentpen) { return p.fontsizeval; }
 // runtime.in 的 `real lineskip(pen)`（pen::Lineskip()）：设过就是设的那一格，没设过是
 // 字号的 1.2 倍。量过 `lineskip(currentpen)` 是 14.346201743462（= 1.2*11.9551681195517）、
 // `lineskip(fontsize(20))` 是 24、`lineskip(fontsize(10,15))` 是 15。slide.asy:258 要它。
-real lineskip(pen p) { return p.lineskipval != 0 ? p.lineskipval : 1.2 * p.fontsizeval; }
+real lineskip(pen p = currentpen) { return p.lineskipval != 0 ? p.lineskipval : 1.2 * p.fontsizeval; }
 // runtime.in:585 的 `string font(pen)`（pen::Font()）。没设过 fontcommand 时回的是那串
 // 默认的 LaTeX 字体命令 —— 量过真 asy：`font(currentpen)` 与 `font(fontsize(9))` 都是
 // `\usefont{\ASYencoding}{\ASYfamily}{\ASYseries}{\ASYshape}`，设过的回设的那一串。
 // plain_Label.asy:601 的 `font=font(L.p)`（stringfont 的构造函数里）点名要它。
-string font(pen p) {
-  return p.font == "" ? "\\usefont{\\ASYencoding}{\\ASYfamily}{\\ASYseries}{\\ASYshape}" : p.font;
+// asy 的 `"…"` 里**反斜杠不是转义**（量过：`write("a\\b")` 印 `a\\b`、`length("a\\b")`
+// 是 4），所以这里写一个反斜杠就是一个。
+string font(pen p = currentpen) {
+  return p.font == "" ? "\usefont{\ASYencoding}{\ASYfamily}{\ASYseries}{\ASYshape}" : p.font;
 }
 
 // (1) 还差的几个非泛型内建：base 里点名要，语义在参考实现里是一句话。
@@ -3599,7 +3609,7 @@ pen linetype(real[] pattern, real offset=0, bool scale=true, bool adjust=true) {
   q.dashadjust = adjust;
   return q;
 }
-real[] linetype(pen p) { return copy(p.dashpat); }
+real[] linetype(pen p = currentpen) { return copy(p.dashpat); }
 real offset(pen p) { return p.dashoffset; }
 bool scale(pen p) { return p.dashscale; }
 bool adjust(pen p) { return p.dashadjust; }
@@ -4528,8 +4538,84 @@ real[] solve(real[][] a, real[] b, bool warn=true) {
 real[][] solve(real[][] a, real[][] b, bool warn=true) {
   abort("solve 还没做（runarray.in:1320 的 LU 分解）"); return new real[][];
 }
+// runarray.in:1524 的循环三对角解法：解 L u = f，L 是
+//   [ b0 c0          a0    ]
+//   [ a1 b1 c1             ]
+//   [    a2 b2 c2          ]
+//   [          …           ]
+//   [ c_{n-1}   a_{n-1} b_{n-1} ]
+// 三条分支照抄那份 C++（零 Dirichlet 边界那一支、n<=2、以及一般的循环情形）——
+// 次序与括号都跟着，浮点结果才逐位一样。three.asy:932 的 aim（3D 的 Hobby 求解）
+// 与 graph_splinetype.asy 的四份样条点名要它。
 real[] tridiagonal(real[] a, real[] b, real[] c, real[] f) {
-  abort("tridiagonal 还没做（runarray.in:1524 的循环三对角解法）"); return new real[];
+  int n = a.length;
+  real[] u = new real[n];
+  if (n == 0) return u;
+  // 特例：零 Dirichlet 边界（a[0] 与 c[n-1] 都是 0）
+  if (a[0] == 0.0 && c[n - 1] == 0.0) {
+    real temp = b[0];
+    if (temp == 0.0) abort("tridiagonal: 除以零");
+    temp = 1.0 / temp;
+    real[] work = new real[n];
+    u[0] = f[0] * temp;
+    work[0] = -c[0] * temp;
+    for (int i = 1; i < n; ++i) {
+      real t = b[i] + a[i] * work[i - 1];
+      if (t == 0.0) abort("tridiagonal: 除以零");
+      t = 1.0 / t;
+      u[i] = (f[i] - a[i] * u[i - 1]) * t;
+      work[i] = -c[i] * t;
+    }
+    for (int i = n - 1; i >= 1; --i) u[i - 1] = u[i - 1] + work[i - 1] * u[i];
+    return u;
+  }
+  real binv = b[0];
+  if (binv == 0.0) abort("tridiagonal: 除以零");
+  binv = 1.0 / binv;
+  if (n == 1) { u[0] = f[0] * binv; return u; }
+  if (n == 2) {
+    real factor = b[0] * b[1] - a[0] * c[1];
+    if (factor == 0.0) abort("tridiagonal: 除以零");
+    factor = 1.0 / factor;
+    real temp = (b[0] * f[1] - c[1] * f[0]) * factor;
+    u[0] = (b[1] * f[0] - a[0] * f[1]) * factor;
+    u[1] = temp;
+    return u;
+  }
+  real[] gam = new real[n - 2];
+  real[] del = new real[n - 2];
+  gam[0] = c[0] * binv;
+  del[0] = a[0] * binv;
+  u[0] = f[0] * binv;
+  real beta = c[n - 1];
+  real fn = f[n - 1] - beta * u[0];
+  real alpha = b[n - 1] - beta * del[0];
+  for (int i = 1; i <= n - 3; ++i) {
+    real ainv = b[i] - a[i] * gam[i - 1];
+    if (ainv == 0.0) abort("tridiagonal: 除以零");
+    ainv = 1.0 / ainv;
+    beta *= -gam[i - 1];
+    gam[i] = c[i] * ainv;
+    u[i] = (f[i] - a[i] * u[i - 1]) * ainv;
+    fn -= beta * u[i];
+    del[i] = -a[i] * del[i - 1] * ainv;
+    alpha -= beta * del[i];
+  }
+  real ainv = b[n - 2] - a[n - 2] * gam[n - 3];
+  if (ainv == 0.0) abort("tridiagonal: 除以零");
+  ainv = 1.0 / ainv;
+  u[n - 2] = (f[n - 2] - a[n - 2] * u[n - 3]) * ainv;
+  beta = a[n - 1] - beta * gam[n - 3];
+  real dnm1 = (c[n - 2] - a[n - 2] * del[n - 3]) * ainv;
+  real temp = alpha - beta * dnm1;
+  if (temp == 0.0) abort("tridiagonal: 除以零");
+  temp = (fn - beta * u[n - 2]) / temp;
+  u[n - 1] = temp;
+  u[n - 2] = u[n - 2] - dnm1 * temp;
+  for (int i = n - 2; i >= 1; --i) {
+    u[i - 1] = u[i - 1] - gam[i - 1] * u[i] - del[i - 1] * temp;
+  }
+  return u;
 }
 real _findroot(real f(real), real a, real b, real tolerance, real fa, real fb) {
   abort("_findroot 还没做（runarray.in:1758 的 Brent 法）"); return 0;
