@@ -831,6 +831,43 @@ export function asyPromote(L, a, b) {
   return null;
 }
 
+/**
+ * 两边**各自**转到同一个内建型（`+ - *` 那一路在 asyPromote 之后的最后一步）。
+ *
+ * asy 的重载解析是在 `operator *` 的**候选**上做的，不是"把一边转到另一边"：
+ * geometry.asy:1588 的 `unit(M) * l.A` 左是 vector、右是 point，接住它的是**内建**的
+ * `pair operator *(pair, pair)` —— `pair operator cast(explicit vector)`（geometry.asy:901）
+ * 与 `pair operator cast(point)`（:505）各转一边。量过 asy 那边算的就是复数乘法：
+ * `unit((3,4)) * (1,2)` 是 (-1,2)。同文件 :630 的 `point operator *(explicit point,
+ * explicit point)` 接不住 —— 两个形参都是 explicit，vector 转不进去。
+ *
+ * 只在**有一边是记录**时问（内建型之间那几条 asyPromote 已经管完了），而且按下面这个
+ * 顺序取第一个两边都转得动的。差别记一笔：一个记录同时能转到两个内建型时 asy 报的是
+ * 歧义，这里挑的是顺序里靠前的那一个。
+ */
+const ASY_BIN_COMMON = ['pair', 'triple', 'real', 'int', 'string'];
+function asyCommonBuiltin(L, n, a, b) {
+  if (!L.isRec(a.type) && !L.isRec(b.type)) return null;
+  for (const t of ASY_BIN_COMMON) {
+    if (a.type === t && b.type === t) continue;
+    const mark = L.diags.mark();
+    const save = Array.isArray(L.pre) ? L.pre : null;
+    if (save !== null) L.pre = [];
+    const av = L.coerce({ code: a.code, type: a.type }, t, n, `'${t}' 那一格`);
+    const bv = av === null ? null : L.coerce({ code: b.code, type: b.type }, t, n, `'${t}' 那一格`);
+    const pre = L.pre;
+    if (save !== null) L.pre = save;
+    if (av !== null && bv !== null) {
+      if (save !== null) for (const s of pre) L.pre.push(s);
+      a.code = av.code; a.type = t;
+      b.code = bv.code; b.type = t;
+      return t;
+    }
+    L.diags.rollback(mark);
+  }
+  return null;
+}
+
 /** int/real -> pair，就是 `(v, 0)`。asy 那边这是一条隐式转换，不是重载。 */
 export function asyToPair(L, v) {
   const x = v.type === 'int' ? `(toreal ${v.code})` : v.code;
@@ -2024,7 +2061,14 @@ export function asyArith(L, n, op, a, b) {
   if (op !== '+' && op !== '-' && op !== '*') return L.nope(n, `算符 '${op}'`);
   if (a.type === 'pair' || b.type === 'pair') return asyPairArith(L, n, op, a, b);
   if (a.type === 'triple' || b.type === 'triple') return asyTripleArith(L, n, op, a, b);
-  const t = asyPromote(L, a, b);
+  let t = asyPromote(L, a, b);
+  if (t === null) {
+    // 两边不同型、又不能"把一边转到另一边"（或者两条都通、算歧义）时还有一条：asy 的重载
+    // 解析是在 `operator *` 的**候选**上做的，"两边各自转到同一个内建型"照样算匹配。
+    t = asyCommonBuiltin(L, n, a, b);
+    if (t === 'pair') return asyPairArith(L, n, op, a, b);
+    if (t === 'triple') return asyTripleArith(L, n, op, a, b);
+  }
   if (t === null) return L.err(n, `'${op}' 两边要同型：左是 ${a.type}，右是 ${b.type}`);
   if (t === 'string' && op !== '+') return L.err(n, `字符串上只有 '+'，这里是 '${op}'`);
   if (t === 'bool') return L.err(n, `'${op}' 不接受 bool`);

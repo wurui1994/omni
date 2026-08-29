@@ -3636,6 +3636,13 @@ pen adjust(pen p, real arclength, bool cyclic) {
 void begingroup(frame f) { }
 void endgroup(frame f) { }
 bool is3D(frame f) { return false; }
+// (1) `gsave`/`grestore`（runpicture.in:276/281）：往 frame 里塞一条 EPS 的图形状态
+// 存/取。这一层的 frame 只攒 drawop、没有"往里塞一段 PostScript 正文"这一层
+// （postscript(frame,…) 是 abort 的那一档），所以这两个也是空的 —— 与 begingroup/endgroup
+// 同一条。用它的只有 patterns.asy:16 的 tiling，而那一句下面紧跟着 postscript()，
+// 真跑到那儿会在 postscript 上 abort，不会悄悄画错。
+void gsave(frame f) { }
+void grestore(frame f) { }
 
 // (1) frame 上的那一批画图内建（runpicture.in）。`fill(frame, path[], …)` 是真做的：
 // 每条路径进一笔填充。**明写的差别**：asy 那边一组路径连着 fillrule 是**一个**填充区域

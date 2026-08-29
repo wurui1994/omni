@@ -6168,6 +6168,43 @@ asy 一样，所以差在谓词那一侧），7x7 是连法不同（三角形个
 最慢 genusthree.asy 212ms，无并行）；深快扫 **203 干净 / 17 有诊断**（模块那一层 2 条）。
 没跑的轴：输出层的逐字节比对（EPS/SVG —— Gouraudcontour 那一路画出来长什么样还没对过）。
 
+### 一批：`gsave` 与"两边各自转到同一个内建型"（模块那一份只剩 contour 那一条）
+
+两条小的，一条一句话、一条要说清规则。
+
+**`gsave`/`grestore`（runpicture.in:276/281）**：往 frame 里塞一条 EPS 的图形状态存/取。
+这一层的 frame 只攒 drawop、没有"往里塞一段 PostScript 正文"这一层（`postscript(frame,…)`
+是 abort 的那一档），所以这两个是空的 —— 与 `begingroup`/`endgroup` 同一条。用它的只有
+patterns.asy:16 的 `tiling`，那一句下面紧跟着 `postscript()`，真跑到那儿会在 postscript
+上 abort，不会悄悄画错。`patterns.asy 1 -> 0`。
+
+**geometry.asy:1588 的 `unit(M) * l.A`**（左是 `vector`、右是 `point`）。上一轮记的是
+"asy 收它，而参考实现里找不到匹配的算符，别猜"。这一批量清楚了：接住它的是**内建**的
+`pair operator *(pair, pair)` —— `pair operator cast(explicit vector)`（geometry.asy:901）
+与 `pair operator cast(point)`（:505）各转**一边**。同文件 :630 的
+`point operator *(explicit point, explicit point)` 接不住：两个形参都是 explicit，
+vector 转不进去。量过 asy 那边算的就是复数乘法（`unit((3,4)) * (1,2)` 是 `(-1,2)`），
+我们现在一字不差。
+
+我们原来判它"歧义"，根子在 `asyPromote` 的最后一步是**把一边转到另一边**：
+`vector -> point`（:877）与 `point -> vector`（:892）两条都在，于是两条都通、回 null。
+asy 的重载解析不是这么做的 —— 它在 `operator *` 的**候选**上做，"两边各自转到同一个内建型"
+照样算匹配。所以在 `+ - *` 那一路的最后加了一步 `asyCommonBuiltin`：只在**有一边是记录**
+时问（内建型之间那几条 asyPromote 已经管完了），按 `pair / triple / real / int / string`
+的顺序取第一个两边都转得动的（试一遍、不行就把诊断与前置语句都丢掉）。位置是"原来就要报错"
+的那一格之前，所以先前量过的形状一条都没动。差别记一笔：一个记录同时能转到两个内建型时
+asy 报的是歧义，这里挑的是顺序里靠前的那一个。
+
+模块那一份于是只剩 `contour.asy 1`（:478 的"捕获会被改的外层变量 `edge`" —— asy 的捕获
+按引用，而 `(mkclo …)` 是按值抓一次）。核心方言那一层的模块诊断 2 -> 1。
+
+跑过的轴：`node tests/asy/run.js` **238/238**（新用例 149-common-builtin 与 `asy -noV`
+逐字节一致：两边各转一边的 `* + -`、explicit 真的挡得住那一格、`gsave`/`grestore` 降得下来；
+`OMNI_LEGS=all` 五条腿 284.3s）；`node tests/sexpr/run.js` 54/54；`node tests/run.js` 91/91；
+`node tests/bootstrap/run.js` **60/60**；快扫 **203 干净 / 17 有诊断**（220 个共 3.5s、
+最慢 cheese.asy 449ms，无并行）；深快扫 **203 干净 / 17 有诊断**（模块那一层 1 条）。
+没跑的轴：输出层的逐字节比对（EPS/SVG）。
+
 ## 后果与代价
 
 
