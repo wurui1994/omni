@@ -287,6 +287,7 @@ import {
 // calls.js / stmts.js 要调这一族，而 exprs.js 要调它们两个 —— 加载器禁止环，所以反向走转接。
 import {
   asyExpr, asyLit, asyNameOf, asyOverPick, asyCandFnType, asyMValType, asyOverArg, asyAnonFn, asyCapOf,
+  asyCapSlot,
   asyAssignsAfter, asyPromote, asyToPair, asyCoerce, asyCondAt, asyExprList, asyIndex, asySlice, asyDotQual,
   asyField, asyMember, asyPairLit, asyTripleLit, asyPairCall, asyVecPairFn, asyTripleDir,
   asyTunitOf, asyUnitOf, asyLengthCall, asyLengthOf, asyStrCall, asyStrConvCall, asyNewArray,
@@ -2467,7 +2468,8 @@ class AsyLower {
    */
   modAlias(node) { return asyModAlias(this, node); }
   /** 匿名函数体里问一个外层局部量（回 `(cap 名)` / CAP_BAD / null），见 capOf 的头注释 */
-  capOf(n, nm) { return asyCapOf(this, n, nm); }  modVar(n, mq) { return asyModVar(this, n, mq); }
+  capOf(n, nm) { return asyCapOf(this, n, nm); }  capSlot(nm, ov) { return asyCapSlot(this, nm, ov); }
+  modVar(n, mq) { return asyModVar(this, n, mq); }
   modCall(n, mq) { return asyModCall(this, n, mq); }
   // 语句位置的 `access m;` / `from m access x;`（stmts.js 用）。走转接是因为 modules.js
   // 要 import calls.js，而 stmts.js 直接 import modules.js 会让 exprs -> stmts -> modules

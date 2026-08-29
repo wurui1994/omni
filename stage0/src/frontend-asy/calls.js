@@ -290,7 +290,12 @@ export function asyCall(L, n) {
     // `pen mean(pen[] p, real opacity(real[])=min)`，体里那句
     // `opacity(opacity(t))` —— 里面那个是形参、外面那个是文件级的函数。
     // 所以跟上面成员那一档同一个办法：先试这一格，接不住就回滚再往下走。
-    const probe = Array.isArray(L.pre) && asyVisible(L, nm).length > 0;
+    // 同一层里被**重新声明**遮住的那一格（declareShadow 记的 ov）也要试（第七十五刀）：
+    // asy 的局部函数也是按**签名**分的 —— contour3.asy:229 与 :245 的两个 `setupweighted`
+    // 就在同一层里，一个 6 个形参、一个 2 个（examples/cheese.asy 与 magnetic.asy 停在这里）。
+    const ovs = L.outerOf(nm);
+    const ovFn = ovs !== null && asyIsFn(ovs.type) ? ovs : null;
+    const probe = Array.isArray(L.pre) && (asyVisible(L, nm).length > 0 || ovFn !== null);
     if (!probe) return asyFnValCall(L, n, nm, lv, readCode);
     const mark = L.diags.mark();
     const savePre = L.pre;
@@ -303,6 +308,19 @@ export function asyCall(L, n) {
       return fv;
     }
     L.diags.rollback(mark);
+    if (ovFn !== null) {
+      const m2 = L.diags.mark();
+      const sp2 = L.pre;
+      L.pre = [];
+      const ovv = asyFnValCall(L, n, nm, ovFn.type, ovFn.code);
+      const opre = L.pre;
+      L.pre = sp2;
+      if (ovv !== null) {
+        for (const s of opre) L.pre.push(s);
+        return ovv;
+      }
+      L.diags.rollback(m2);
+    }
   }
   // 匿名函数体里调**外层的**函数值形参/局部量（第四十七刀）：base 里 plain_picture.asy:488
   // 的 `add(new void(frame f, transform t, …) { d(f,t*T); })` —— `d` 是外层方法的形参，
@@ -310,7 +328,29 @@ export function asyCall(L, n) {
   // 是由内向外的，外层的局部量遮住同名的文件级函数。
   if (L.cap !== null && L.cap !== undefined) {
     let ot = null;
-    for (const s of L.cap.outer) if (s.has(nm)) ot = s.get(nm);
+    let oov = null;
+    for (const s of L.cap.outer) {
+      if (s.has(nm)) {
+        ot = s.get(nm);
+        const o = s.get(`\u0000ov:${nm}`);
+        oov = o === undefined ? null : o;
+      }
+    }
+    // 外层同一层里被**重新声明**遮住的那一格（第七十五刀）：同名的局部函数在 asy 那边
+    // 按签名分得开。挑法是硬数形参个数 —— 这一格对不上、而 ov 那一格正好对上时抓 ov。
+    // （asyArityBad 在"没有同名的文件级候选"时直接放行，它防的是另一件事，这里数不了它。）
+    // contour3.asy:229 那个六形参的 `setupweighted` 就是这么找回来的（:245 遮住了它），
+    // 调用在里层 checkpyr 的体里（examples/cheese.asy 与 magnetic.asy 停在这里）。
+    const argc = asyPlainArgc(L, n);
+    const npar = (t) => {
+      const sp = asyFnSplit(t);
+      return sp === null ? -1 : sp.params.length;
+    };
+    if (oov !== null && asyIsFn(oov.type) && argc !== null
+        && npar(oov.type) === argc && (ot === null || npar(ot) !== argc)) {
+      const ov2 = L.capSlot(nm, oov);
+      if (ov2 !== null) return asyFnValCall(L, n, nm, ov2.type, ov2.code);
+    }
     // 这一格也不整片遮住同名的函数（同 lookup 那一档的道理）。捕获是有副作用的
     // （capOf 会往闭包上添一格），所以这里不"试了再回滚"，而是先按**给了几个**筛一遍：
     // 原型是 plain.asy:125 那个 `exitfcn atupdate=atupdate();`，130 行的
@@ -480,6 +520,19 @@ export function asyCall(L, n) {
  * 可以接。用在捕获与文件级那两档 —— 它们都有副作用或先后次序，不好"试了再回滚"。
  * 形状里带名字实参或带展开时回 false：那种情形照旧交给 fnValCall 自己去报。
  */
+/**
+ * 这次调用给了几个**普通**实参（没有 `...` 展开、没有名字的那种）。数不出来回 null。
+ * asyArityBad 里也有这几句 —— 那一份前面有一道"没有同名的文件级候选就放行"的闸
+ * （它防的是另一件事），而"同名的两格局部函数里挑一格"这一档要的正是硬数一遍。
+ */
+function asyPlainArgc(L, n) {
+  const alist = n.items[2];
+  if (isList(alist) && head(alist) === 'args-rest') return null;
+  const list = alist === undefined || alist === null ? [] : L.flat(alist, 'args');
+  for (const a of list) if (!isList(a) || head(a) !== 'arg') return null;
+  return list.length;
+}
+
 function asyArityBad(L, n, ty, nm) {
   if (asyVisible(L, nm).length === 0) return false;
   const s = asyFnSplit(ty);

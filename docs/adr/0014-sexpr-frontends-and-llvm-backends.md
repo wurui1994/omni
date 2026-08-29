@@ -5623,6 +5623,35 @@ bool 与 bool3 **两个方向**的 cast 都在（plain_constants.asy:118 与 :12
 contour 2、palette 4、stats 3、patterns 1。没跑的轴：输出层的逐字节比对（EPS/SVG）还没做，
 `shipout3` 那两条仍在名单上。
 
+### 一批：内建的名字当函数值、同一层里同名的局部函数（例子面 179 -> 183）
+
+**`abs` 摆进内建面（第七十五刀）。** 这个前端本来把 `abs` 写死在调用那一层（calls.js 的
+mathCall 里三条 `if`），于是它**没有符号**、当不了函数值：`s.map(abs)`
+（examples/cheese.asy:11、pOrbital.asy:25、sphericalharmonic.asy:13）报"要 real(triple)，
+而这个名字的那几个重载里没有同型的一份"。现在内建面里摆四格真函数（int/real/pair/triple，
+`abs(pair)`/`abs(triple)` 就是模，量过与 `length` 同值），名字于是有候选、`(fnref …)` 拿得到。
+直接调那一层照旧先挑这里的精确匹配 —— `abs(-3)` 还是 int（`cases/134` 连这一条一起钉住）。
+
+**同一层里同名的局部函数按签名分（第七十五刀）。** contour3.asy:229 与 :245 是两个
+`setupweighted`（六个形参与两个形参），:279 那些调用在**里层** `checkpyr` 的体里。
+asy 的 venv 是按签名逐层找的，同名两格能共存；这个前端的局部量是一格一个名字，
+第二份声明把第一份遮住了（declareShadow 记下了被遮的那一格），于是六个实参那句报
+"'setupweighted' 是 weighted(triple,int[])，要 2 个实参，给了 6 个"。两处都补上了：
+
+- 同一层里直接调：先试当前那一格，接不住**回滚**再试 ov 那一格（与"形参遮住同名函数"
+  那一档同一个路子）。
+- 里层闭包里调：`asyCapSlot` —— 被遮的那一格也能抓，捕获那一栏给它一个**新名字**
+  （`asy__ovN_…`），不然两格撞在同一个键上、抓到的是遮住它的那一份。挑哪一格是**硬数
+  形参个数**：`asyArityBad` 在"没有同名的文件级候选"时是直接放行的（它防的是另一件事），
+  这一档数不了它，所以自己数一遍（`asyPlainArgc`）。
+
+`cases/133-localfn-overload` 把两处一起钉住（同层直接调 + 里层抓进来调），与真 asy 逐字节一致。
+
+跑过的轴：`node tests/asy/run.js` 223/223（run + run-llvm 两条腿；新增 cases/133、134）；
+`tests/asy/sweep.js` 例子面 **干净 183 / 有诊断 37**；模块面 `import plain / graph / math`
+各 0、three 5、graph3 5、solids 5、geometry 3 -> **2**、contour 2、palette 4、stats 3、patterns 1。
+没跑的轴：输出层的逐字节比对（EPS/SVG）还没做。
+
 ## 后果与代价
 
 

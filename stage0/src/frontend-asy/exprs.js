@@ -621,6 +621,43 @@ export function asyCapOf(L, node, nm) {
 }
 
 /**
+ * 外层**被遮住**的那一格也能抓（declareShadow 记的 ov，第七十五刀）。
+ *
+ * 捕获表是按名字记的，而这一格与遮住它的那一格**同名** —— 所以拿它的旧符号名
+ * （`asy__sh12_setupweighted` 这种，唯一）当捕获的键。用处只有一个：同一层里同名的
+ * 局部**函数**（asy 那边它们按签名分得开），contour3.asy:229 与 :245 的两个
+ * `setupweighted` 就是这一对，:279 那些调用在里层的 checkpyr 体里。
+ *
+ * 只在 ov 那一格就在**紧邻的外层**（L.cap.outer）时用：更深一层要 capUp 那条路，
+ * 而 capUp 是按名字往上问的，同名的两格在那条路上分不开。
+ */
+export function asyCapSlot(L, nm, ov) {
+  const bx = ov.bx === undefined ? null : ov.bx;
+  if (bx !== null) {
+    // 装了箱的那一格：箱子的符号本来就是唯一的，按它抓（与 capOf 那一支同一条）
+    if (!L.cap.seen.has(bx)) {
+      L.cap.seen.set(bx, ov.type);
+      L.cap.bx.set(bx, bx);
+      L.cap.list.push({ name: bx, type: `${ov.type}[]`, val: `(var ${bx})` });
+    }
+    return { code: `(aget (cap ${bx}) (int 0))`, type: ov.type };
+  }
+  if (ov.sym === null || ov.sym === undefined) return null;
+  // 没装箱：这一格与遮住它的那一格**同名**，所以捕获那一栏要一个新名字（不然两格撞在
+  // 同一个键上，抓到的会是遮住它的那一份）。键留在 cap.seen 里，同一个闭包里只抓一次。
+  const key = `\u0000ov:${nm}`;
+  if (L.cap.ovn === undefined) L.cap.ovn = new Map();
+  let cn = L.cap.ovn.get(key);
+  if (cn === undefined) {
+    cn = `asy__ov${L.tmp++}_${asyFldSym(nm)}`;
+    L.cap.ovn.set(key, cn);
+    L.cap.seen.set(key, ov.type);
+    L.cap.list.push({ name: cn, type: ov.type, val: `(var ${ov.sym})` });
+  }
+  return { code: `(cap ${cn})`, type: ov.type };
+}
+
+/**
  * 里层闭包抓的那个名字在**外层闭包的捕获**里（不是它的局部量）。办法是顺着 `cap.prev`
  * 往上问一层：外层于是也跟着抓一格，回来的 `code` 就是"在外层那一帧里怎么读它"，
  * 正好当里层这一格的 `val`（mkclo 是在外层体里发的）。

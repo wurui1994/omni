@@ -2607,6 +2607,16 @@ pair max(path[] g) {
 // ------------------------------------------------------------ 数组上的 abs
 // builtin.cc 给 real/pair/triple 的数组各现生一份 `real[] abs(T[])`（量过：`abs(int[])`
 // **没有**，那句报 no matching variable）。
+//
+// 标量那四格也在这里摆一份（第七十五刀）：这个前端本来把 abs 写死在调用那一层
+// （calls.js 的 mathCall），于是它**没有符号**、当不了函数值 —— `s.map(abs)`
+// （examples/cheese.asy:11、pOrbital.asy:25、sphericalharmonic.asy:13）报
+// "要 real(triple)，而这个名字的那几个重载里没有同型的一份"。摆成真函数之后
+// 名字有候选了，`(fnref …)` 就拿得到；直接调那一层照旧先挑这里的精确匹配。
+int abs(int x) { return x < 0 ? -x : x; }
+real abs(real x) { return x < 0 ? -x : x; }
+real abs(pair z) { return length(z); }
+real abs(triple v) { return length(v); }
 real[] abs(real[] a) {
   real[] r = new real[a.length];
   for (int i = 0; i < a.length; ++i) r[i] = abs(a[i]);
