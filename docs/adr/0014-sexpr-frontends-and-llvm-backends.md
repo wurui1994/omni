@@ -5960,6 +5960,42 @@ run / run-c / interp / interp --mir / run-llvm **五条腿**上逐字节一致�
 自举那条腿不收 import 环）。这一条下一批修，不含在这批的改动里。
 没跑的轴：输出层的逐字节比对（EPS/SVG）还没做。
 
+### 一批：自举那条腿重新变绿（六处越界，五处在编译器自己的源码上）
+
+上一批留的红：`node tests/bootstrap/run.js` 0/1。修完是 **60/60**（含 N1/N2 那 9 条内层）。
+六处互不相干，都是**编译器自己的源码越出了它自己能编的子集**（ADR-0011 决策 2 的封闭 ABI
+与语言子集）—— 值得记的是这六处里只有一处是"编不出来"，另一处是**编得出来、跑起来才炸**：
+
+- `frontend-asy/exprs.js` 与 `stmts.js` 互相 import（7e63733 拆文件带进来的环，加载器不收环）。
+  修法不是搬代码，是在 `lower.js` 上开一格 `needsBox(nm)` 转发到 `asyNeedsBox` ——
+  环上少一条边，两份文件各自的内容不动。
+- `cli.js` 的 AST 磁盘缓存用了 `JSON.parse`（不在封闭 ABI 里，C 侧的 omni_js_json.h 只有
+  stringify）。读那一半现在写在 `host/json_read.js` 里（`parseJson`，只收我们自己
+  stringify 出来的那一份）。对着盘上现有的 **769** 份缓存与 JSON.parse 逐份比过：
+  `JSON.stringify` 出来的文本全等，转义/`\uXXXX`/数/空容器/末尾垃圾的边角也对齐。
+- `cli.js` 的缓存键用了 `Math.round`（同样不在 ABI 里）。改成直接把 `mtimeMs(p)` 插进键 ——
+  同一次 stat 的浮点值逐位一样，取整这一步本来就不需要（333 行那一处一直是这么写的）。
+- `frontend-asy/calls.js` 的 `new Array(n).fill(null)`（子集里没有）→ 一句 push 的循环。
+- `frontend-asy/exprs.js` 的 `new WeakMap()`（子集里只有 Map/Set）→ Map。这张备忘表挂在 L 上，
+  一次降解完跟着 L 一起扔，多留住的是这一次本来就活着的那棵树。
+- `frontend-asy/calls.js` 里一个 for 变量与被闭包抓住的 `ai` 同名 → 改叫 `qi`。
+
+**编得出来、跑起来才炸的那一处**：`sexpr/lower.js` 的 `this.preClass.clear()`。`clear` 不在
+`hir/js_abi.js` 的成员表（JS_PROPS）里，而查不到的成员会退成"通用取属性" —— 于是自举出来的
+两代都在这一句上报 `dynamic value is Set, expected dict`（C1 那一代的说法是
+`Set is not an object`），一口气带倒 8 条 N1 的用例（sexpr 的 llvm/c、两个 spirv、run mini.sx）。
+改成换一格新的 `new Set()`。**没有**顺手把 `clear` 加进 ABI：全仓库就这一处用它，而加一个成员
+要在 js_abi/prelude/运行时 C/LLVM 的符号表四处同时落地。留下的教训写在那一句上方：
+成员表外的方法，静态检查不拦，尺子只在自举那条腿上看得见。
+
+跑过的轴：`node tests/bootstrap/run.js` **60/60**（C1/C2 定点、N1 = clang(emit-c)、N2 = N1
+自编，以及 N1 与 C0 在 llvm/c/spirv/jit/incr 上的逐字节比对）；`node tests/asy/run.js`
+**232/232**（`OMNI_LEGS=all` 五条腿，310.1s —— 这一条同时是 AST 缓存**读**那条路的尺子：
+232 份用例每份都命中 `parseJson`）；`node tests/sexpr/run.js` 54/54；`node tests/run.js` 91/91；
+快扫 `tests/asy/sweep.js` 例子面仍是 **198 干净 / 22 有诊断**，220 个共 **1.8s**、最慢
+genusthree.asy **110ms**（没有并行；口径与前几批同）。
+没跑的轴：`OMNI_SWEEP_SX=1` 那一趟（这一批没碰降级那一层）、输出层的逐字节比对（EPS/SVG）。
+
 ## 后果与代价
 
 

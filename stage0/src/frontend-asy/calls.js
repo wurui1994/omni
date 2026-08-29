@@ -780,7 +780,8 @@ function asyBuiltinKeyed(nm, raw) {
   let keyed = false;
   for (const a of raw) if (a.key !== null) keyed = true;
   if (!keyed || raw.length > ps.length) return;
-  const use = new Array(ps.length).fill(null);
+  const use = [];                                  // `new Array(n).fill()` 不在语言子集里
+  for (let i = 0; i < ps.length; i++) use.push(null);
   let next = 0;
   for (const a of raw) {
     if (a.key === null) {
@@ -1981,8 +1982,10 @@ function asyFnValFit(L, ft, s, args) {
   // `arrowhead.head(g,L,q,size,angle,filltype,forwards=true,P)`（three_arrows.asy:397）
   // 这种写法照 asy 那样按名字落格。名字过一遍 asyFldSym（表里存的就是这一形）。
   const keyed = [];
-  for (let ai = 0; ai < args.length; ai++) {
-    const k = args[ai].key;
+  // 这一轮的下标叫 qi 不叫 ai：底下 `nextPos` 那个闭包抓的是函数级的 `ai`，同名的
+  // for 变量会被自举那条腿判成"被闭包抓住的循环变量"（也确实容易看错）。
+  for (let qi = 0; qi < args.length; qi++) {
+    const k = args[qi].key;
     if (k === null || k === undefined) continue;
     const want = asyFldSym(k);
     let at = -1;
@@ -1991,8 +1994,8 @@ function asyFnValFit(L, ft, s, args) {
       if (p !== undefined && p.name === want) at = i;
     }
     if (at < 0 || use[at] >= 0) return null;
-    use[at] = ai;
-    keyed.push(ai);
+    use[at] = qi;
+    keyed.push(qi);
   }
   let ai = 0;
   const nextPos = () => {

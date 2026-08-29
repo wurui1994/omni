@@ -15,6 +15,7 @@ import {
 } from './host/native.js';
 import { join, basename } from './host/path.js';
 import { hash16 } from './host/hash.js';
+import { parseJson } from './host/json_read.js';
 import { linkJs } from './frontend-js/link.js';
 import { lowerJs } from './frontend-js/lower.js';import { lowerWat } from './frontend-wat/lower.js';
 import { lowerAsy } from './frontend-asy/lower.js';
@@ -167,12 +168,14 @@ function asyFrontEnd() {
     // 退回哈希那条路。
     let key = '';
     if (astDir !== null) {
-      if (exists(p)) key = `p${hash16(p)}-${Math.round(mtimeMs(p))}-${text.length}`;
+      // 改动时间直接进键（不 Math.round —— 它不在封闭 ABI 里，而这里也不需要取整：
+      // 同一次 stat 的浮点值逐位一样，`${}` 出来就是同一段文本，333 行那一处同理）。
+      if (exists(p)) key = `p${hash16(p)}-${mtimeMs(p)}-${text.length}`;
       else key = `t${hash16(text)}-${text.length}`;
     }
     const cpath = key === '' ? '' : join(astDir, `a-${gkey}-${key}.json`);
     if (cpath !== '' && exists(cpath)) {
-      const t = JSON.parse(readText(cpath));
+      const t = parseJson(readText(cpath));
       astReattach(t, file);
       vStep(`asy ast cache  ${p}`);
       return t;

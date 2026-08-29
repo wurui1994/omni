@@ -303,7 +303,10 @@ class CoreLowerer {
       if (head(f) === 'struct') this.structDec(f, 'struct');
       else if (head(f) === 'class') this.structDec(f, 'class');
     }
-    this.preClass.clear();
+    // 换一格空的，不用 `.clear()`：Set/Map 的 clear 不在封闭 ABI 的成员表里
+    // （js_abi.js 的 JS_PROPS 没有 clear），自举出来的那两代到这一句才炸 ——
+    // 症状是 `dynamic value is Set, expected dict`（成员查不到就退成通用取属性）。
+    this.preClass = new Set();
     // 第二遍收模块级变量（第二十四刀）：函数体与 (main …) 都可能提到它，所以要在
     // 那些体降级之前成型。**聚合也收**（第三十刀，绘图层要 currentpicture/defaultpen
     // 这种模块级的单件）：MIR 那边全局的类型是一个 8 位类型码，装不下聚合的身份 ——

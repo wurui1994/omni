@@ -19,7 +19,8 @@ import {
 } from './types.js';
 import { ZERO } from './runtime.js';
 import { asyArgs, asyCall, asyOpUser, asyOpBuiltinSig, asyIdxOpCall, asyVisible, asyUserCall } from './calls.js';
-import { asyNeedsBox } from './exprs.js';
+// 装不装箱那一问走 `L.needsBox`（实现在 exprs.js）：直接 import 回去就是
+// exprs <-> stmts 的环，自举那条腿的加载器不收（见 lower.js 的 needsBox 与 modStmt）。
 import { asyUnravelTy } from './modules.js';
 
 /**
@@ -639,7 +640,7 @@ export function asyVardec(L, n) {
     const had = L.scopes[L.scopes.length - 1].get(nm);
     if (had !== undefined) {
       if (had !== t) {
-        const boxed = asyNeedsBox(L, nm);
+        const boxed = L.needsBox(nm);
         const sh = L.declareShadow(nm, t, boxed);
         if (boxed) {
           const bt = asyCore(`${t}[]`);
@@ -660,7 +661,7 @@ export function asyVardec(L, n) {
     // plain_Label.asy:349 的 `pair position=point(g,position);`（形参是 `real position`）。
     // 一律改名：块作用域那一档改了也没坏处（出块名字就查不到了，symOf 回的是外层那个符号）。
     if (L.lookup(nm) !== null) {
-      const boxed = asyNeedsBox(L, nm);
+      const boxed = L.needsBox(nm);
       const sh = L.declareShadow(nm, t, boxed);
       if (boxed) {
         const bt = asyCore(`${t}[]`);
@@ -673,7 +674,7 @@ export function asyVardec(L, n) {
     }
     // 会被闭包抓走、而且还会被改的那一格要**装箱**（这一刀）：一格长度 1 的数组，
     // 读写都穿过去，闭包抓走的是那个数组本身 —— 于是里外是同一格（asy 的按引用捕获）。
-    if (asyNeedsBox(L, nm)) {
+    if (L.needsBox(nm)) {
       const bx = L.declareBox(start, nm, t);
       if (bx === null) return null;
       const at = asyCore(`${t}[]`);

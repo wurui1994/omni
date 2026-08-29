@@ -763,9 +763,9 @@ export function asyNeedsBox(L, nm) {
   if (L.fnBody === null || L.fnBody === undefined) return false;
   // **记一次就够**（第七十二刀，这一刀是速度）：这一问只取决于「哪个函数体」与
   // 「哪个名字」，而每声明一格局部量都要问一遍、每问一遍扫整个函数体 —— 量出来
-  // 它是 `import three;` 里最大的一块（asyBoxScan 106ms + asyAssignsAfter 33ms，
-  // node --cpu-prof）。键是函数体那个节点（WeakMap，树扔了跟着扔）。
-  if (L.boxMemo === undefined) L.boxMemo = new WeakMap();
+  // 键是函数体那个节点（Map —— WeakMap 不在语言子集里，而这张表挂在 L 上，
+  // 一次降解完就跟着 L 一起扔，多留住的是这一次本来就活着的那棵树）。
+  if (L.boxMemo === undefined) L.boxMemo = new Map();
   let m = L.boxMemo.get(L.fnBody);
   if (m === undefined) { m = new Map(); L.boxMemo.set(L.fnBody, m); }
   const had = m.get(nm);

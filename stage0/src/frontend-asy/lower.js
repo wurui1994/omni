@@ -292,7 +292,7 @@ import {
   asyField, asyMember, asyPairLit, asyTripleLit, asyPairCall, asyVecPairFn, asyTripleDir,
   asyTunitOf, asyUnitOf, asyLengthCall, asyLengthOf, asyStrCall, asyStrConvCall, asyNewArray,
   asyArrLit, asyArrMethod, asyBinary, asyPairArith, asyTripleArith, asyCmpCode, asyCompare,
-  asyCond, asyLogic, asyUnary, asyCast, asyCloFrom,
+  asyCond, asyLogic, asyUnary, asyCast, asyCloFrom, asyNeedsBox,
 } from './exprs.js';
 
 // 模块那一族（第六摊）与顶层声明那一族（第七摊）。同样在类体里留了一层转接方法。
@@ -2480,6 +2480,10 @@ class AsyLower {
   // 要 import calls.js，而 stmts.js 直接 import modules.js 会让 exprs -> stmts -> modules
   // 这一串成环（自举那条路的加载器禁止环，量到的是 exprs.js 上那句 "import cycle through"）。
   modStmt(n, at) { return asyModStmt(this, n, at); }
+  // 同一条理由（stmts.js 用）：装不装箱这一问的实现在 exprs.js 里，而 exprs.js 本来就
+  // import stmts.js —— stmts.js 再直接 import 回去就是 exprs <-> stmts 那个环
+  // （自举那条腿的加载器禁止环，报的是 exprs.js 上那句 "import cycle through"）。
+  needsBox(nm) { return asyNeedsBox(this, nm); }
   declPass(u) { return asyDeclPass(this, u); }
   castFor(to, from, allowEc) { return asyCastFor(this, to, from, allowEc); }
   formals(node) { return asyFormals(this, node); }
