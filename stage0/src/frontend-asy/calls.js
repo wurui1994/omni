@@ -1922,6 +1922,13 @@ export function asyDefWrapper(L, n, nm, d, f, reinit) {
   L.updates = [];
   const lines = [];
   L.pre = lines;
+  // 默认值那一段里的匿名函数要抓外层名字时，capOf 得有一段"外层体"可看 —— 不给它就一律拒
+  // （`L.cap.body === null`）。这里该给的就是**被调方自己的体**：ode.asy:25 的
+  // `real[] steps=sequence(new real(int i){return sum(weights[i]);}, weights.length)`
+  // 抓的是同一张形参表里的 `weights`，而"它在闭包之后还会不会被改"看的正是那个体里
+  // 有没有 `weights = …`（那儿只有 `a.weights=weights;`，改的是字段）。
+  const saveFnBody = L.fnBody;
+  L.fnBody = isList(d.node) && d.node.items.length > 4 ? d.node.items[4] : null;
   let bad = false;
   if (isCtor) {
     const mk = L.recNew(n, rec.name);
@@ -1967,6 +1974,7 @@ export function asyDefWrapper(L, n, nm, d, f, reinit) {
   L.at = saveAt;
   L.self = saveSelf;
   L.recAlias = saveAl;
+  L.fnBody = saveFnBody;
   if (saveUnit !== null) L.unitOut(saveUnit);
   // 造不出来时**把名字撤回**：wrapNames 是在造之前就登记的，留着的话后面同一份 key 会
   // 命中缓存、拿到一个从没发出去的名字。量到的样子是 graph 里

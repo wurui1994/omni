@@ -5867,6 +5867,14 @@ real newton(int iterations = 100, real f(real), real fprime(real), real x1,
  */
 real dot(pair a, pair b) { return a.x * b.x + a.y * b.y; }
 real dot(triple a, triple b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+/* 数组那一格（runarray.in 的 `real dot(real[], real[])`）：ode.asy:317 的
+ * `h*dot(tableau.a.weights[i], predictions)` 要它。长度不同时与别的逐元素运算同一句错。 */
+real dot(real[] a, real[] b) {
+  asy__samelen(a.length, b.length);
+  real s = 0;
+  for (int i = 0; i < a.length; ++i) s += a[i] * b[i];
+  return s;
+}
 
 /* ---------------------------------------------------------------- 第六十六刀（续）
  * 三维那一层的坡上量出来的几条：sum、concat 的另外几种元素、mintimes/maxtimes，

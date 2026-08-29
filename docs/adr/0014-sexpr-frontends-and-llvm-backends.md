@@ -6354,6 +6354,43 @@ angle=arrowangle, filltype filltype=null, position position=EndPoint)=Arrow;`
 没跑的轴：与上一批同（`run-llvm`、`OMNI_LEGS=all` 那三条腿、`tests/sexpr`、
 `tests/run.js`、`tests/bootstrap`、深快扫、EPS/SVG）。
 
+### 一批：默认值那一段里的闭包（`ode.asy` 那条链上的三格）
+
+`odetest.asy` / `slope.asy` 卡在 ode.asy 上，一条链上三格，逐格量出来的：
+
+**一、`this.f = f` 也算"这个名字被赋过值"。** ode.asy:34 在 `RKTableau` 的
+`operator init` 体里写 `this.stepDependence=stepDependence;`。带体的方法只有在"这个名字
+在别处被赋过值"时才降成**函数类型的字段**（`fnFldOk` / `memAssigned`），否则留在顶层
+当多一个 `this` 形参的函数。原来 `memAssigned` 只认 `(name-exp …)` 那种左边，
+`(field X name)` 这种一格没算，于是 `stepDependence` 还是顶层函数、`this.…=…` 落不下去。
+补上 `(field X name)` 这一支（取字段名那一格）。
+
+**二、`real dot(real[], real[])`。** ode.asy:317 的
+`h*dot(tableau.a.weights[i], predictions)` 要 runarray.in 里那格数组版的 `dot`
+（这一层的内建只有 pair / triple 那两格）。补在 `asy_builtins.asy` 里，长度不同时
+与别的逐元素运算同一句错（`asy__samelen`）。
+
+**三、默认值那一段里的匿名函数要有"外层体"可看。** ode.asy:25 的
+`real[] steps=sequence(new real(int i){return sum(weights[i]);}, weights.length)`
+抓的是同一张形参表里的 `weights`。捕获这一层要判"这个名字在闭包之后还会不会被改"
+（asy 是按引用捕获，`(mkclo …)` 是按值抓一次），判据要一段体去扫；`L.cap.body` 就是
+`L.fnBody`，而它只在降**函数体 / 方法体**时才有值。默认值是在 `asyDefWrapper` 里降的，
+那儿 `L.fnBody` 是 null —— 于是 `L.cap.body === null` 那一条把它一律拒了。
+改法：`asyDefWrapper` 降默认值时把 `L.fnBody` 换成**被调方自己的体**（`d.node.items[4]`，
+用完还回去）。这一格是对的：默认值在调用处先求、体随后才跑，所以"体里有没有
+`weights = …`"正是两种语义会不会分岔的那个判据（ode.asy 那儿只有 `a.weights=weights;`，
+改的是字段，不是形参）。
+
+于是例子面 **207 → 209 干净**（odetest、slope 一起清零）。
+
+跑过的轴：新用例 155-defarg-clo（默认值里的闭包抓前一格形参、`operator init` 那一路、
+`this.f = f` 之后 `t.f(3)` 与 `real g(real) = t.f;`、`dot` 两格）与 `asy -noV`
+逐字节一致；`tests/asy/cases` 全量按 `run` 那条腿逐个比对，无差异；
+快扫 **209 干净 / 11 有诊断**（220 个共 2.4s、最慢 genusthree.asy 173ms，无并行）、
+模块那一份 **0 条**。
+没跑的轴：与上一批同（`run-llvm`、`OMNI_LEGS=all` 那三条腿、`tests/sexpr`、
+`tests/run.js`、`tests/bootstrap`、深快扫、EPS/SVG）。
+
 ## 后果与代价
 
 

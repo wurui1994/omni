@@ -529,6 +529,13 @@ class AsyLower {
       const nowRec = inRec || h === 'recorddec';
       if (h === 'assign') {
         const lhs = cur.items[1];
+        // `X.name = …`（`(field X name)`）：`this.stepDependence=stepDependence;`
+        // （ode.asy:34，在 RKTableau 的 `operator init` 体里）就是这一种。原来只认下面
+        // `name-exp` + `qualified` 那一种（模块限定名 `m.x`），于是这一句漏掉了，
+        // `stepDependence` 照旧是方法、那一句报"给方法赋值"（odetest 与 slope 停在这儿）。
+        if (isList(lhs) && head(lhs) === 'field' && isAtom(lhs.items[2])) {
+          out.add(lhs.items[2].value);
+        }
         if (isList(lhs) && head(lhs) === 'name-exp') {
           const q = lhs.items[1];
           if (isList(q) && head(q) === 'qualified' && isAtom(q.items[2])) {
