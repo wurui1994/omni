@@ -6205,6 +6205,36 @@ asy 报的是歧义，这里挑的是顺序里靠前的那一个。
 最慢 cheese.asy 449ms，无并行）；深快扫 **203 干净 / 17 有诊断**（模块那一层 1 条）。
 没跑的轴：输出层的逐字节比对（EPS/SVG）。
 
+### 一批：闭包体里的形参也要装箱（模块那一份归零）
+
+最后那一条模块诊断：contour.asy:478 的 `edge=f(I+i,J+j,false)` —— "捕获会被改的外层变量
+'edge'"。形状是 contour.asy:444 的 `void follow(int f(int,int,bool), int edge)`：它是**函数
+体里的具名函数**（这一层也降成 `cfn` + `mkclo`），而它里面的 `void search()` 会改 `edge`
+与 `I`、`J`。asy 的捕获按引用，里层改完外层看得见。
+
+装箱这一套本来就有（长度 1 的数组，读写都穿过去，闭包抓走的是那个数组本身），**形参**那一格
+也有（`asyBoxParams`，plain_arrows.asy:245 的 `position position=EndPoint` 是原型）——
+漏的是**调用它的地方**：只有顶层函数（`asyFunc`）与方法那两处调了，闭包体那一条路
+（`asyCloFrom`）没调。`edge` 是 `follow` 的形参，而 `follow` 走的正是闭包那条路。
+补上一行就通了：形参声明完、体降之前问一遍 `asyBoxParams`，回来的那两句
+（`(let 箱 …)` 与 `(aset 箱 0 (var 形参))`）插在体的最前面，排在 `(let this …)` 之后。
+
+**于是 `模块那一份：0 条`** —— `plain`/`graph`/`three`/`graph3`/`solids`/`geometry`/
+`contour`/`palette`/`math`/`stats`/`patterns` 这一摞在前端与核心方言两层都不再报一条诊断。
+从"三个 6、geometry 2、contour 2、palette 1、patterns 1"数下来，这条线走完了。
+
+跑过的轴：`node tests/asy/run.js` **239/239**（新用例 150-box-clo-param 与 `asy -noV`
+逐字节一致：具名内层函数改形参、匿名闭包改形参、套两层改同一格；`OMNI_LEGS=all` 五条腿
+288.5s）；`node tests/sexpr/run.js` 54/54；`node tests/run.js` 91/91；
+`node tests/bootstrap/run.js` **60/60**；快扫 **203 干净 / 17 有诊断**（220 个共 2.1s、
+最慢 tvgen.asy 153ms，无并行）、模块那一份 **0 条**；深快扫 **203 干净 / 17 有诊断**、
+模块那一层也 **0 条**。
+没跑的轴：输出层的逐字节比对（EPS/SVG）—— 例子面剩下的 17 条都是单件的语言特性
+（gsl、`join-exp`、函数值省实参、赋值当表达式、`gamma`、裸 `map(f,x)`、do-while 的
+`continue`、`graph(<重载集>,int,int)`、`operator ::` 的可变实参、`Ticks(…)`、
+`void().fit(…)`、`usersetting()` 歧义、`.initialized`、`pattern`、`write(real,int,int,int)`、
+RKTableau 的方法赋值），不再有模块那一侧的阻塞。
+
 ## 后果与代价
 
 
