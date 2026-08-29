@@ -6566,6 +6566,51 @@ g("f", keep, b1=false, Step=1, Size=2);
 没跑的轴：与上一批同（`run-llvm`、`OMNI_LEGS=all` 那三条腿、`tests/sexpr`、
 `tests/run.js`、`tests/bootstrap`、深快扫、EPS/SVG）。
 
+### 一批：数学那一族当函数值、跨单元的文件级 `operator init`
+
+`logdown.asy:10` 的 `draw(graph(exp,-5,5))`。两处，前一处挡住后一处：
+
+**一、`exp` 当函数值取不到。** 数学那一族（sin/exp/floor/…）写死在调用那一步
+（calls.js 的 `mathCall` 直接发 `(rmath "exp" …)`），于是这个名字**没有符号** ——
+候选表里只剩内建面 asy_builtins.asy 里那份数组版 `real[] exp(real[])`，
+`g(exp,1.0)` 报"要 real(real)，有的是 real[](real[])"。asy 那边 builtin.cc 的
+`addRealFunc(exp,…)` 一次注册标量与数组两格，两格与同名的别的重载在**同一个集**里。
+
+补法是按需现生一份包装进 `wraps`：
+
+```
+(fn asy__mv_exp ((asy__x0 real)) real
+  (ret (rmath "exp" (var asy__x0))))
+```
+
+回一个候选记号（`{sym, params, ps, ret}`，与 nameOf 里构造函数那一族同型），
+`nameOf` 与 `overArg` 两处都补 —— 后者是实参位置那条路（`sin` 有两格候选
+`real[](real[])` 与 `pair(pair)`，走的是 overArg 不是 nameOf）。已经有**同型**的一份时
+不补：`abs` 的标量四格摆在 asy_builtins.asy 里（第七十五刀）。九行的探针量过 `asy -noV`：
+`g(exp,1.0)` 2.71828182845905、`h(floor,2.5)` 2、`k(atan2,1.0,2.0)` 0.463647609000806、
+`real f2(real)=log; f2(1.0)` 0 —— arity 1 与 2、回 int 的那几个都能当值用。
+
+**二、`Linear.T` 是 null。** `graph.asy:5` 的 `scaleT Linear;` 靠的是
+`plain_picture.asy:83` 的 `scaleT operator init()`（它给 `T=Tinv=identity`）。
+跨单元那一支（`recInit` 里换到声明 struct 的那个单元）把位置**拨到了 struct 声明处**
+（`rec.at` = plain_picture.asy:65），而那份 operator init 在 :83 —— 按声明处问就看不见它，
+于是拿到 T/Tinv 都是 null 的一份，`Linear.T(x)` 在运行时报
+"call of a null function value"。量过 asy：`import graph; scaleT s; s.T(3.0)` 印 3。
+`import` 把整份模块的名字都带过来、位置不参与，所以文件级 `operator init` 改成按
+**那个单元整份**问（`unitIn` 给的 `u.at` 就是单元末尾）；字段默认值那一份照旧按 struct
+声明处（问完 oinit 再把 `at` 拨回 `rec.at`）。
+
+于是例子面 **215 → 216 干净**（logdown 清零）。
+
+跑过的轴：新用例 160-mathval-oinit（带 mod_oi.asy）与 `asy -noV` 逐字节一致；
+`tests/asy/cases` 全量按 `run` 那条腿逐个比对，无差异（130.4s）；快扫 **216 干净 / 4 有诊断**
+（220 个共 2.3s、最慢 genusthree.asy 128ms，无并行）、模块那一份 **0 条**；
+另外量过：例子面只多发一份 `asy__mv_exp`（`abs` 那一格照旧走内建面里那份真函数），
+新用例里八个名字各一份、没有多出来的。
+没跑的轴：`OMNI_LEGS=all` 那四条腿（run-c / interp / interp --mir / run-llvm）、
+`tests/sexpr`、`tests/run.js`、`tests/bootstrap`、深快扫（`OMNI_SWEEP_SX=1`）、EPS/SVG 逐字节
+—— 这一份与下一批一起跑。
+
 ## 后果与代价
 
 

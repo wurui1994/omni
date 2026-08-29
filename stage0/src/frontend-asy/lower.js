@@ -2424,8 +2424,16 @@ class AsyLower {
     // 字段默认值、内嵌记录、文件级 operator init 都是那边的名字，所以换到那个单元里问。
     if (rec !== undefined && rec.unit !== this.unit.id) {
       const prev = this.unitIn(this.units[rec.unit]);
+      // 文件级 `operator init` 按**那个单元整份**问，不是按 struct 声明处（第七十九刀）：
+      // plain_picture.asy:65 的 `struct scaleT` 与 :83 的 `scaleT operator init()` 一前一后，
+      // 按声明处问就看不见 :83 那份 —— graph.asy:5 的 `scaleT Linear;` 于是拿到 T/Tinv
+      // 都是 null 的一份，logdown.asy 那句 `Linear.T(x)` 在运行时报
+      // "call of a null function value"（量过 asy：`import graph; scaleT s; s.T(3.0)` 印 3）。
+      // import 把整份模块的名字都带过来，位置不参与，所以这里用单元末尾那个位置（unitIn
+      // 给的就是它）。字段默认值那一份照旧按 struct 声明处（下面把 at 拨回 rec.at）。
+      const oi = asyOinitFor(this, t);
       this.at = rec.at;
-      const out = this.recInitHere(n, t);
+      const out = oi !== null ? `(call ${oi.sym})` : this.recNew(n, t);
       this.unitOut(prev);
       return out;
     }

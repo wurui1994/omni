@@ -22,7 +22,7 @@ import {
   asyIsArr, asyElem, asyIsFn, asyFldSym, ASY_PAIR_TY, ASY_TRIPLE_TY, asyCore, ASY_NULL, asyRefTy, ASY_OPNOBI,
 } from './types.js';
 import { ZERO, ASY_PAIRFN, ASY_STRFN, ASY_STR_DEPS, strLit } from './runtime.js';
-import { asyArgs, asyCall, asyVisible, asyOpUser, asyOpBuiltinSig, asyIdxOpCall, asyApplyCall, asyDefWrapper, asyRestValCall } from './calls.js';
+import { asyArgs, asyCall, asyVisible, asyOpUser, asyOpBuiltinSig, asyIdxOpCall, asyApplyCall, asyDefWrapper, asyRestValCall, asyMathVal } from './calls.js';
 import { asyFmtStr, asyBody, asyExprStmt } from './stmts.js';
 
 /* ---------------------------------------------------------------- 表达式 */
@@ -181,6 +181,12 @@ export function asyNameOf(L, n, nm) {
   // 以及 `collections/iter.asy:42` 的 `autounravel Iterable_T operator cast(…) = Iterable_T;`。
   // 记号的 `code` 留空：漏到没有目标类型的位置上是一处硬错，不会变成一个错答案。
   const cands = asyVisible(L, nm);
+  // 数学那一族（sin/exp/floor/…）的**标量**那一份在这一层没有符号（写死在 mathCall 里），
+  // 当函数值用时按需现生一份包装补上（见 calls.js 的 mathVal）。
+  if (L.math.has(nm)) {
+    const mvc = asyMathVal(L, cands, nm);
+    if (mvc !== null) cands.push(mvc);
+  }
   if (cands.length === 1) {
     const c = cands[0];
     // 拼法只有一份（asyCandFnType）：这里原来是抄的一遍，可变形参那一格加进来之后
@@ -439,6 +445,12 @@ export function asyOverArg(L, node) {
   if (L.selfField(nm) !== null) return null;
   if (L.gvarHere(nm) !== null || L.globals.has(nm)) return null;
   const cands = asyVisible(L, nm);
+  // 数学那一族的标量那一份（见 nameOf 里同一条）：实参位置也要补，不然
+  // `g(sin, 0.0)` 只看得见内建面那份 `real[] sin(real[])`。
+  if (L.math.has(nm)) {
+    const mvc = asyMathVal(L, cands, nm);
+    if (mvc !== null) cands.push(mvc);
+  }
   if (cands.length < 2) return null;
   // 带默认值的候选也算（第六十刀）：当值用时它的类型就是"全部形参"那一份
   return { nm: nm, cands: cands };

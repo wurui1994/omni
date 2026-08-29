@@ -2248,3 +2248,46 @@ export function asyMathCall(L, n, nm) {
   if (spec.ret === 'int') return { code: `(toint ${code})`, type: 'int' };
   return { code, type: 'real' };
 }
+
+/**
+ * 数学那一族当**函数值**用（第七十九刀）。asy 那边 builtin.cc 的 `addRealFunc(exp,…)`
+ * 注册的是一份**真函数**，与同名的别的重载在同一个集里，所以名字拿得到函数值；这一层
+ * 把它写死在调用那一步（mathCall 直接发 `(rmath …)`），于是这个名字**没有符号** ——
+ * `graph(exp,-5,5)`（logdown.asy:10）报"要 real(real)，有的是 real[](real[])"，
+ * 因为候选表里只剩内建面 asy_builtins.asy 里那份数组版。
+ *
+ * 这里按需现生一份包装进 wraps：
+ *   `(fn asy__mv_exp ((asy__x0 real)) real (ret (rmath "exp" (var asy__x0))))`
+ * 回一个候选记号（`{sym, params, ps, ret}` —— 与 nameOf 里构造函数那一族同型）。
+ * 名字与方法值那一族（`asy__mv0_…`、见 lower.js 的 methodVal）分得开：那一族 `mv`
+ * 后面紧跟编号，这里紧跟下划线加内建名。
+ * 已经有**同型**的一份时不补：`abs` 的标量四格摆在 asy_builtins.asy 里（第七十五刀），
+ * 再补一份 `real(real)` 就成了两份一样合适的。
+ *
+ * 量过 asy（/tmp/mv.asy 那九行）：arity 1 与 2、回 int 的 floor/round 都能当值用 ——
+ * `g(exp,1.0)` 2.71828182845905、`h(floor,2.5)` 2、`k(atan2,1.0,2.0)` 0.463647609000806、
+ * `real f2(real)=log; f2(1.0)` 0。
+ */
+export function asyMathVal(L, cands, nm) {
+  const spec = L.math.get(nm);
+  if (spec === undefined || spec.kind !== 'rmath') return null;
+  const params = [];
+  const ps = [];
+  for (let i = 0; i < spec.arity; i++) {
+    params.push('real');
+    ps.push({ name: `asy__x${i}`, type: 'real', def: null });
+  }
+  const cand = { sym: `asy__mv_${nm}`, params, ps, ret: spec.ret };
+  const want = L.candFnType(cand);
+  for (const o of cands) if (L.candFnType(o) === want) return null;
+  const key = `内建数学|${nm}`;
+  if (!L.wrapNames.has(key)) {
+    L.wrapNames.set(key, cand.sym);
+    const as = ps.map((p) => `(var ${p.name})`).join(' ');
+    const raw = `(rmath "${spec.fn}" ${as})`;
+    const body = spec.ret === 'int' ? `(toint ${raw})` : raw;
+    const fps = ps.map((p) => `(${p.name} ${asyCore('real')})`).join(' ');
+    L.wraps.push(`  (fn ${cand.sym} (${fps}) ${asyCore(spec.ret)}\n    (ret ${body}))`);
+  }
+  return cand;
+}
