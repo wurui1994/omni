@@ -394,11 +394,18 @@ export function asyForEach(L, n, ret) {
   const iv = `asy__fi${L.tmp++}`;
   const upd = [`(set ${iv} (bin "+" (var ${iv}) (int 1)))`];
   L.push();
-  if (L.declare(n, nm, el) === null) { L.pop(); return null; }
+  // 文件级那一档也给一段"体"（与 asyForStmt 同一条，这一刀）：没有它 capOf 里
+  // `L.cap.body === null` 就一律拒，而 for-each 的循环变量是**每轮新绑一格**的
+  // （`(let nm … (aget …))` 在体里面），压根没有"抓完再改"那件事 —— 有了这一段，
+  // asyAssignsAfter 扫下来一处赋值都没有，按值抓就是对的。
+  const saveFnBody = L.fnBody;
+  if (L.fnBody === null || L.fnBody === undefined) L.fnBody = n;
+  if (L.declare(n, nm, el) === null) { L.pop(); L.fnBody = saveFnBody; return null; }
   L.updates.push(upd);
   const body = asyStmt(L, n.items[4], ret);
   L.updates.pop();
   L.pop();
+  L.fnBody = saveFnBody;
   if (body === null) return null;
   const inner = [`(let ${nm} ${asyCore(el)} (aget (var ${av}) (var ${iv})))`];
   for (const s of body) inner.push(s);
@@ -468,6 +475,13 @@ function asyForIter(L, n, ret, a, isVar, el0, nm) {
 
 /** `for (init; test; upd) body` -> `init; while (test) { body; upd }`（continue 见上） */export function asyForStmt(L, n, ret) {
   L.push();
+  // **文件级**的循环也要有一段"给装箱判据看的体"（这一刀）：装箱只在 `L.fnBody` 非空时
+  // 才发生，而文件级那一档它是 null —— 于是 `for(int i=…;…;++i) { … new int(int k){ … i … } … }`
+  // 里的 `i` 抓不动（capOf 报"捕获会被改的外层变量"）。这里把循环节点本身当那一段：
+  // init / test / upd / body 都在里面，正好覆盖"闭包改它"与"闭包之后再改它"两问。
+  // soccerball.asy:57 与 truncatedIcosahedron.asy:47 就是这一格。
+  const saveFnBody = L.fnBody;
+  if (L.fnBody === null || L.fnBody === undefined) L.fnBody = n;
   const init = asyForPart(L, n.items[1], ret);
   // 条件里摊出来的语句要单独收着：循环条件**每轮都得重算**（与 while 那一档同一条）
   const savePre = L.pre;
@@ -478,11 +492,12 @@ function asyForIter(L, n, ret, a, isVar, el0, nm) {
   const cpre = L.pre;
   L.pre = savePre;
   const upd = asyForPart(L, n.items[3], ret);
-  if (init === null || test === null || upd === null) { L.pop(); return null; }
+  if (init === null || test === null || upd === null) { L.pop(); L.fnBody = saveFnBody; return null; }
   L.updates.push(upd);
   const body = asyStmt(L, n.items[4], ret);
   L.updates.pop();
   L.pop();
+  L.fnBody = saveFnBody;
   if (body === null) return null;
   const inner = [];
   for (const s of body) inner.push(s);

@@ -5775,6 +5775,30 @@ string、右边 null 当 string[]），答成了 `bool[]`。asy 那边这一句�
 geometry 2、contour 2、palette 4、stats 3、patterns 1（这一批模块面没动）。
 没跑的轴：输出层的逐字节比对（EPS/SVG）还没做。
 
+### 一批：文件级循环里的闭包也能抓循环变量（例子面 195 -> 196）
+
+装箱（长度 1 的数组、读写都穿过去 —— 那是 asy 的按引用捕获）从第七十二刀起就有了，但只在
+**函数体里**发生：判据 `asyNeedsBox` 一上来就问 `L.fnBody`，而文件级那一档它是 null，于是
+`capOf` 里 `L.cap.body === null` 一律拒。这一刀只补那一段"给判据看的体"：`asyForStmt` 与
+`asyForEach` 在 `L.fnBody` 为空时把**循环节点本身**当那一段（init / test / upd / body 都在
+里面，正好覆盖"闭包自己改它"与"闭包之后再改它"两问），出去时还原。
+
+两种循环落到的档不一样，都对：
+
+- C 式 `for(int i=0;…;++i)`：`++i` 在循环节点里，`asyNeedsBox` 答"要装箱" —— 于是
+  `i` 成了一格箱子，闭包抓走箱子，里外同一格。soccerball.asy:57 靠它。
+- `for(T x : a)`：循环变量是**每轮新绑一格**的（`(let nm … (aget …))` 在体里面），
+  扫下来一处赋值都没有，于是照旧按值抓 —— 一样对，而且不多一层间接。
+
+truncatedIcosahedron 往前走过了这一关，停在 `operator --(...triple[])`（与 colorplanes 的
+`operator --(pair[])` 同一族，另一刀）。
+
+跑过的轴：`node tests/asy/run.js` 228/228（run + run-llvm 两条腿；新增 cases/140 与真 asy
+逐字节一致，把两种循环各钉一格）；`tests/asy/sweep.js` 例子面 **干净 196 / 有诊断 24**
+（2.1s，最慢 132ms）；模块面 `import plain / graph / math` 各 0、three 3、graph3 3、
+solids 3、geometry 2、contour 2、palette 4、stats 3、patterns 1（这一批模块面没动）。
+没跑的轴：输出层的逐字节比对（EPS/SVG）还没做。
+
 ## 后果与代价
 
 
