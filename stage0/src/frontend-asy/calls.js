@@ -326,6 +326,31 @@ export function asyCall(L, n) {
     // （量出来的样子是 smoothcontour3.asy:193，真正接不住的是第 4 个实参）。
     if (asyVisible(L, nm).length === 0) return asyFnValCall(L, n, nm, lv, readCode);
   }
+  // 这一格**不是**函数、被它遮住的那一格才是（declareShadow 记的 ov）。
+  // palette.asy:300 的 `void palette(…, axis axis=Right, pen[] palette, …)` 体里第 309 行
+  // 又写了一句 `axisT axis;`，紧接着 :310 是 `axis(pic,axis)` —— 被调的是**形参**那一格
+  // （函数类型 `axis`），实参那个 `axis` 才是刚声明的 `axisT`。asy 的 venv 是按签名逐层
+  // 找的：一个有签名、一个没有，两格共存，取哪一格看用处。上面那一档只在"这一格自己是
+  // 函数"时才试 ov，于是这一句从前落到文件级的 `void axis(picture, Label, path, …)` 上，
+  // 报"没有能匹配 axis(picture, axisT) 的签名"，palette 的这一份体降不出来
+  // （电磁那个例子在核心方言那一层找不到 asy__ov2_palette）。
+  if (lv !== null && !asyIsFn(lv)) {
+    const ovs = L.outerOf(nm);
+    if (ovs !== null && asyIsFn(ovs.type)) {
+      const mark = L.diags.mark();
+      const savePre = L.pre;
+      const canProbe = Array.isArray(L.pre);
+      if (canProbe) L.pre = [];
+      const ovv = asyFnValCall(L, n, nm, ovs.type, ovs.code);
+      const opre = L.pre;
+      if (canProbe) {
+        L.pre = savePre;
+        if (ovv !== null) for (const s of opre) L.pre.push(s);
+      }
+      if (ovv !== null) return ovv;
+      L.diags.rollback(mark);
+    }
+  }
   // 匿名函数体里调**外层的**函数值形参/局部量（第四十七刀）：base 里 plain_picture.asy:488
   // 的 `add(new void(frame f, transform t, …) { d(f,t*T); })` —— `d` 是外层方法的形参，
   // 类型是 drawer（一个函数类型）。位置在本层局部量之后、文件级候选之前：asy 的名字解析

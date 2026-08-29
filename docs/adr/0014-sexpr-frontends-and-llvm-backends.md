@@ -5863,6 +5863,37 @@ three 6、geometry 2、contour 2、palette 4、stats 3、patterns 1（热身那�
 没跑的轴：这一批只改尺子、没动前端，所以没有新的 `tests/asy/cases`；输出层的逐字节比对
 （EPS/SVG）还没做。
 
+### 一批：二维的 `min`/`max` 与"被遮住的那一格才是函数"（方言那一层 170 -> 196）
+
+上一批那把新尺子指的地方：palette.asy 那 4 条模块诊断挡着 25 个例子。这一批把它砍到 1 条。
+
+**二维的 `min`/`max`。** builtin.cc:543 的 `addOrderedOps` 对每个有序基本类型摆的是**四份**
+（两元、一维、二维、三维），这一层从前只摆了前两份。palette.asy:75 与 :270 的 `min(f)`、
+`max(f)` 要的是二维那一份（`real[][]`）。补 int/real/string 三对，语义照 arrayop.h:90 的
+`binopArray2`：**空的那一行跳过**，一行值都没有才算空数组 —— 所以
+`min(new real[][] {new real[], new real[] {1}})` 是 1，不是报错。三维那一份 base 里没人用，
+照旧不摆。
+
+**被遮住的那一格才是函数。** palette.asy:300 的
+`void palette(…, axis axis=Right, pen[] palette, …)` 体里第 309 行又写了一句 `axisT axis;`，
+紧接着 :310 是 `axis(pic,axis)` —— 被**调**的是形参那一格（函数类型 `axis`），当**实参**的
+才是刚声明的 `axisT` 那一格。asy 的 venv 是按签名逐层找的：一个有签名、一个没有，两格共存，
+取哪一格看用处。这一层的 `declareShadow` 早就把被遮住那一格记在 `\u0000ov:` 里了，但
+calls.js 里只在"**这一格自己**是函数类型"时才去试 ov，于是这一句落到文件级的
+`void axis(picture, Label, path, …)` 上，报"没有能匹配 `axis(picture, axisT)` 的签名"。
+补一档对称的：这一格不是函数、ov 那一格是函数时，拿 ov 那一格试一遍（照旧是探一次、
+接不住就回滚）。
+
+量出来的差：方言那一层 **170 -> 196**，只剩 Gouraudcontour 与 imagehistogram 两个 ——
+它们与 palette/contour 剩下的那两条诊断同一个根：内建 `triangulate`（Delaunay.cc 那一份）
+还没有。contour.asy:478 的"捕获会被改的外层变量 `edge`"是另一件事。
+
+跑过的轴：`node tests/asy/run.js` **230/230**（run + run-llvm 两条腿；新增 cases/142 与真
+asy 逐字节一致）；`tests/asy/sweep.js` 默认档例子面 **干净 198 / 有诊断 22**（1.7s，最慢
+genusthree.asy 155ms）；`OMNI_SWEEP_SX=1` 那一档 **干净 196 / 有诊断 24**（58.8s），
+模块面方言那一层 18 -> 17 条；模块面前端诊断 three 6、geometry 2、contour 2、
+**palette 4 -> 1**、stats 3、patterns 1。没跑的轴：输出层的逐字节比对（EPS/SVG）还没做。
+
 ## 后果与代价
 
 

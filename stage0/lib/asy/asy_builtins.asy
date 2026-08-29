@@ -2548,6 +2548,88 @@ string max(string[] a) {
   for (int i = 1; i < a.length; ++i) if (a[i] > m) m = a[i];
   return m;
 }
+// 二维那一份（arrayop.h:90 的 binopArray2）：**空的那一行跳过**，一行都没有值才算空数组
+// （所以 `min(new real[][] {new real[], new real[] {1}})` 是 1，不是报错）。
+// palette.asy:75/:270 的 `min(f)`、`max(f)` 就是这一份 —— 少了它 palette 里那两个
+// 函数的体降不出来，25 个例子在核心方言那一层找不到 asy__ov1_palette。
+int min(int[][] a) {
+  bool empty = true;
+  int m = 0;
+  for (int i = 0; i < a.length; ++i) {
+    int[] r = a[i];
+    for (int j = 0; j < r.length; ++j) {
+      if (empty) { m = r[j]; empty = false; }
+      else if (r[j] < m) m = r[j];
+    }
+  }
+  if (empty) { abort("min: 空数组"); return 0; }
+  return m;
+}
+int max(int[][] a) {
+  bool empty = true;
+  int m = 0;
+  for (int i = 0; i < a.length; ++i) {
+    int[] r = a[i];
+    for (int j = 0; j < r.length; ++j) {
+      if (empty) { m = r[j]; empty = false; }
+      else if (r[j] > m) m = r[j];
+    }
+  }
+  if (empty) { abort("max: 空数组"); return 0; }
+  return m;
+}
+real min(real[][] a) {
+  bool empty = true;
+  real m = 0;
+  for (int i = 0; i < a.length; ++i) {
+    real[] r = a[i];
+    for (int j = 0; j < r.length; ++j) {
+      if (empty) { m = r[j]; empty = false; }
+      else if (r[j] < m) m = r[j];
+    }
+  }
+  if (empty) { abort("min: 空数组"); return 0; }
+  return m;
+}
+real max(real[][] a) {
+  bool empty = true;
+  real m = 0;
+  for (int i = 0; i < a.length; ++i) {
+    real[] r = a[i];
+    for (int j = 0; j < r.length; ++j) {
+      if (empty) { m = r[j]; empty = false; }
+      else if (r[j] > m) m = r[j];
+    }
+  }
+  if (empty) { abort("max: 空数组"); return 0; }
+  return m;
+}
+string min(string[][] a) {
+  bool empty = true;
+  string m = "";
+  for (int i = 0; i < a.length; ++i) {
+    string[] r = a[i];
+    for (int j = 0; j < r.length; ++j) {
+      if (empty) { m = r[j]; empty = false; }
+      else if (r[j] < m) m = r[j];
+    }
+  }
+  if (empty) { abort("min: 空数组"); return ""; }
+  return m;
+}
+string max(string[][] a) {
+  bool empty = true;
+  string m = "";
+  for (int i = 0; i < a.length; ++i) {
+    string[] r = a[i];
+    for (int j = 0; j < r.length; ++j) {
+      if (empty) { m = r[j]; empty = false; }
+      else if (r[j] > m) m = r[j];
+    }
+  }
+  if (empty) { abort("max: 空数组"); return ""; }
+  return m;
+}
 
 // (1) path / path[] 的包围盒（runpath.in:271/276/290/314）。每段是三次 Bezier，
 // 某个分量的极值只能出在两端或**导数为零**处；导数是二次的，所以解那条二次就是精确解
