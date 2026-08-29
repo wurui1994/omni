@@ -118,6 +118,17 @@ export function asyModLoadAs(L, node, name, key, tpl) {
           im.only === null || im.only === undefined ? null : new Map(im.only),
           im.priv === true);
       }
+      // `access m;` 建的那些**别名**（第七十九刀）：access 只建别名、不并名字，所以
+      // asyModMerge 一笔都不记，上面那个循环重放不到它。少了这一格，接口里存的默认值
+      // 表达式里那些 `settings.x` 就落到 exprs.js 的"带点的名字或算符名"上 ——
+      // 量到的样子是 220 例里 101 个只要打开接口索引就编不过。
+      for (const m of io.obj.mods === undefined ? [] : io.obj.mods) {
+        if (m.key === null || m.key === undefined) continue;
+        const dep = asyModLoadAs(L, node, m.mname === null ? m.key : m.mname, m.key,
+          m.tpl === null || m.tpl === undefined ? null : new Map(m.tpl));
+        if (dep === null) continue;
+        L.mods.set(m.dst, { unit: dep.id, at: m.at });
+      }
       L.unitOut(prev0);
       L.loading.pop();
       return u;

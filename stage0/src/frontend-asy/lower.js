@@ -2822,7 +2822,8 @@ class AsyLower {
     for (const u of this.units) {
       if (!secs.has(u.id) && !skipped.has(u.id)) continue;
       let iface = null;
-      if (pack !== null && u.id !== 0 && u.key !== '' && !skipped.has(u.id)) {
+      if (pack !== null && u.id !== 0 && u.key !== '' && !skipped.has(u.id)
+        && u.fromIface !== true) {
         const d = asyIfaceDump(this, u, pack);
         if (!d.bad) iface = d.obj;
       }

@@ -719,26 +719,34 @@ function asyModsSkip(dir, cs) {
     // span 上那个 `file` 给一格轻壳：不读源码就没有全文与行表，而这条路上库的声明本来
     // 不该再报诊断（真报了也还有路径与偏移可看）。
     iface: (info) => {
-      // **默认开着**（`OMNI_ASY_IFACE=0` 关掉，对照用）。
+      // **默认关着**（`OMNI_ASY_IFACE=1` 打开）。这一格是"快但还不对"，判据是出图数：
+      // 220 例里有 oracle 参考的 192 份，关索引出图 **55** 份、开索引 **44** 份。
+      // 开着还剩两族只在这条路上才有的错（量过、都在 ADR-0014 第七十九刀那一节）：
+      //   34 份 `'X' 在这里还看不见`、19 份 `字段 'X' 的默认值：不能把 null 当成 T`。
+      // 所以正确性优先：默认关，等接口按条存（ADR-0015 第 5 步）把这两族清了再打开。
       //
-      // 从前这里记过一条"开 617/674/690ms、关 635/642/640ms —— 一点不省"的结论，
-      // 那条结论是**假的**：iface.js 的 asyIfaceLoad 把版本号写死成 `v !== 1` 就 return null，
-      // 而 dump 那边早就写 `v: 2` 了 —— 两趟量的其实是同一条路（一条 `asy 接口索引` 都没打）。
-      // 另一处更隐蔽：产物名里带源文件路径的哈希，而这一格在**加载之前**就要算名字，
-      // 那时 `pathOf` 还回不出路径（它从前只认加载过的），于是 13 份里只有 2 份找得到 `.aif`。
-      // 两处都修好之后，10 个库全走索引、一份库源码都不解析。
+      // 这一路已经修好的三处（都留着，开起来是真省）：
+      //   - `asyIfaceLoad` 从前写死 `obj.v !== 1` 而 dump 写 `v: 2`，整条路是死的 ——
+      //     从前"开索引一点不省"那次测量测的是同一条路。
+      //   - 产物名里带源文件路径的哈希，而这一格在**加载之前**算名字，`pathOf` 那时回不出
+      //     路径，13 份里只有 2 份找得到 `.aif`（已改成只 stat 的 resolve）。
+      //   - `access m;` 只建别名不并名字，asyModMerge 一笔不记，读回来 `L.mods` 是空的 ——
+      //     默认值里的 `settings.x` 于是报"带点的名字"（101 份→0 份）。
+      //   - 读回来的单元不再重新 dump：那个来回是有损的，几代之后名字就找不着了（72→34）。
       //
-      // 静下来量（tri2.asy 改一个字符、三趟三趟）：关 885/738/623ms，开 551/502/477ms。
-      if (env('OMNI_ASY_IFACE') === '0') return null;
+      // 打开之后改一个字符的墙上时间（安静环境，三趟三趟）：
+      //   asy-units（只编译） 关 537/517/508ms   开 406/333/273ms
+      //   run（编译 + 跑）    关 885/738/623ms   开 551/502/477ms
+      if (env('OMNI_ASY_IFACE') !== '1') return null;
       const nm = unitName(info);
       const p = join(dir, `${nm}.aif`);
       if (!exists(p)) { vStep(`asy 接口索引不命中 ${nm} 没有 .aif`); return null; }
       if (skipFn(info) === null) { vStep(`asy 接口索引不命中 ${nm} 产物那一套没齐`); return null; }
       const obj = JSON.parse(readText(p));
       if (obj === null || obj === undefined) return null;
-      // 版本对不上就当没有这一格（盘上那份是旧格式：struct 体里的语句从前只存了树与 mat，
-      // 少了 `bi`，而那一格的形状打包器根本认不出来 —— 见 iface.js 的 `sts`）
-      if (obj.v !== 2) return null;
+      // 版本对不上就当没有这一格（盘上那份是旧格式）。这一格与 iface.js 的 asyIfaceLoad
+      // **必须同一个数** —— 从前这里认 2、那边写死认 1，接口索引于是整片是死的。
+      if (obj.v !== 3) return null;
       vStep(`asy 接口索引   ${nm}`);
       return {
         obj,

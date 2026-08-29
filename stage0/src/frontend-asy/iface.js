@@ -217,11 +217,26 @@ export function asyIfaceDump(L, u, pack) {
   return {
     bad,
     obj: {
-      v: 2, key: u.key, pfx: u.pfx, init: u.init, ran: u.ran, aplain: u.aplain === true,
+      v: 3, key: u.key, pfx: u.pfx, init: u.init, ran: u.ran, aplain: u.aplain === true,
       nsym: u.nsym, ntmp: u.ntmp,
       funcs, globals, recs, recVis, tyAlias, frags, casts, oinits,
       // 它自己那几并 import（读回来要按这张表原样重放，见 asyModMerge 里那一笔）
       imps: u.imps === undefined || u.imps === null ? [] : u.imps,
+      // `access m;` 那半边（第七十九刀）：它只建**别名**、不并名字，所以 asyModMerge
+      // 一笔都不记 —— `.aif` 读回来 `L.mods` 是空的，默认值里那些 `settings.x` 于是落到
+      // exprs.js 的"带点的名字或算符名"上。量到的样子：220 例里 101 个只要打开接口索引
+      // 就编不过（报在 plain.asy:1:1，那是接口重建出来的那格空 span），关掉就好。
+      mods: [...(u.mods === undefined || u.mods === null ? [] : u.mods)].map(([dst, m]) => {
+        const w = L.units[m.unit];
+        const nul = w === undefined || w === null;
+        return {
+          dst: dst,
+          at: m.at,
+          key: nul ? null : w.key,
+          mname: nul || w.mname === undefined ? null : w.mname,
+          tpl: nul || w.tpl === null || w.tpl === undefined ? null : [...w.tpl],
+        };
+      }),
       mset: u.mset === undefined || u.mset === null ? [] : [...u.mset],
     },
   };
@@ -241,7 +256,7 @@ export function asyIfaceLoad(L, obj, file, unpack) {
   // 版本号只有一处真值：dump 那边写的 `v: 2`。**这里从前写死成 1**，于是 dump 升到 2
   // 之后这条路整片死掉 —— `OMNI_ASY_IFACE=1` 打开也一条 `asy 接口索引` 都不打，
   // 而我拿"开 617 / 关 635，一点不省"当结论记进了注释。那次测量测的是**同一条路**。
-  if (obj === null || obj === undefined || obj.v !== 2) return null;
+  if (obj === null || obj === undefined || obj.v !== 3) return null;
   const trees = [];
   for (const s of obj.frags) trees.push(s === null ? null : unpack(s, file));
   const tr = (i) => (i === undefined || i === null || i < 0 ? null : trees[i]);
@@ -260,6 +275,12 @@ export function asyIfaceLoad(L, obj, file, unpack) {
   u.nsym = obj.nsym;
   u.ntmp = obj.ntmp;
   u.frozen = true;
+  // 这一份是**从接口读回来的**（第七十九刀）。chunk() 靠这一格不再把它重新 dump 一遍：
+  // 「读回来再存一遍」是**有损**的（存的时候只留 `unit === u.id` 那些候选，而读回来之后
+  // 有些格子的来源单元变成了替身单元），存一代掉一点，几代之后名字就找不着了。
+  // 量到的样子：AiryDisk 单独反复跑一直好，中间夹一个别的例子再跑就报
+  // `'texpath' 在这里还看不见`（220 例里 72 个都是这一条）。盘上那份 `.aif` 原样留着就对了。
+  u.fromIface = true;
   u.mset = new Set(obj.mset);
   // struct 先立起来：候选里的 `rec` 按名字指回这里
   const recs = [];
