@@ -6499,6 +6499,33 @@ plain.asy:237 与 slide.asy:176 各一份 `void usersetting()`，这一层报"�
 没跑的轴：与上一批同（`run-llvm`、`OMNI_LEGS=all` 那三条腿、`tests/sexpr`、
 `tests/run.js`、`tests/bootstrap`、深快扫、EPS/SVG）。
 
+### 一批：pen 上的图案（`pattern`）
+
+`tiling.asy:6` 的 `filldraw(unitcircle,pattern("checker"))` 要 runtime.in 那两条
+`pattern`。图案在 pen.h 里**就是一种颜色空间**，所以 `struct pen` 上多一格
+`string patternval`（空串是没设过），别的三处跟着：`pencopy` 抄它、`+` 那边"右边设过就
+盖住左边"、`colors` / `colorspace` 在它非空时给 0 道 / 空串。
+
+逐条量的（`asy -noV`）：`pattern(red+pattern("chk"))` 与 `pattern(pattern("chk")+red)`
+都是 `chk`（两个方向都盖得住），`pattern(pattern("x")+pattern("y"))` 是 `y`（右边赢），
+`colors(pattern("chk")).length` 与 `colors(red+pattern("chk")).length` 都是 0、
+`colorspace(red+pattern("chk"))` 是空串，`pattern(colorless(pattern("chk")))` 还是 `chk`
+（colorless 清颜色、不清图案），`pattern(gray(0.2))` 是空串。
+
+于是例子面 **213 → 214 干净**（tiling 清零）。
+
+顺手量出来的一格差别（**没动**，记在这儿）：`new T[2]`（T 是 struct）在 asy 那边是
+**没初始化**的两格，读它报运行期错 "read uninitialized value from array at index 0" ——
+这一层填的是造好的零值。`splitpatch.asy:29` 的 `pt.tree.initialized(i)` 问的正是那一格
+标记，所以那一条还得先把"数组每格有没有初始化过"这件事表示出来才能做。
+
+跑过的轴：pattern 那两条按 `import plain;` 的探针与 `asy -noV` 逐字节一致；
+`tests/asy/cases` 全量按 `run` 那条腿逐个比对，无差异；
+快扫 **214 干净 / 6 有诊断**（220 个共 2.0s、最慢 genusthree.asy 148ms，无并行）、
+模块那一份 **0 条**。
+没跑的轴：与上一批同（`run-llvm`、`OMNI_LEGS=all` 那三条腿、`tests/sexpr`、
+`tests/run.js`、`tests/bootstrap`、深快扫、EPS/SVG）。
+
 ## 后果与代价
 
 

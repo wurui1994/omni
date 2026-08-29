@@ -395,6 +395,10 @@ struct pen {
   // 笔尖（pen.h 的 `pen::P`）在 asy__nibtab 里的下标，-1 是没有（见那张表旁边的注）。
   // 这里放不下一格 `path`：`struct path` 声明在这个 struct **后面**。
   int nibid = -1;
+  // 图案的名字（pen.h 的 `pen::pattern`，patterns.asy 那一族用）：空串是没设过。
+  // 设了它就没有颜色道了（量过 `colors(pattern("chk")).length` 是 0、
+  // `colors(red+pattern("chk")).length` 也是 0），见 colors / colorspace 那两条。
+  string patternval = "";
   // 字号（pen.h 的 `pen::size`）。默认是 12pt 换成 bp 的那个数 —— 量过
   // `fontsize(currentpen)` 就是 11.9551681195517（= 12*72/72.27）。
   real fontsizeval = 11.9551681195517;
@@ -428,6 +432,7 @@ pen pencopy(pen p) {
   q.fontsizeval = p.fontsizeval;
   q.fontsizeset = p.fontsizeset;
   q.lineskipval = p.lineskipval;
+  q.patternval = p.patternval;
   q.font = p.font;
   q.fillruleval = p.fillruleval;
   q.basealignval = p.basealignval;
@@ -513,6 +518,8 @@ pen operator +(pen a, pen b) {
     q.fontsizeval = b.fontsizeval;
   }
   if (b.lineskipval != 0) q.lineskipval = b.lineskipval;
+  // 图案（pen.h 里图案就是一种颜色空间，见 pattern 那两条）：右边设过就盖住左边
+  if (b.patternval != "") q.patternval = b.patternval;
   if (b.fillruleval != 0) q.fillruleval = b.fillruleval;
   if (b.basealignval != 0) q.basealignval = b.basealignval;
   if (b.isinvisible) q.isinvisible = true;
@@ -4208,7 +4215,7 @@ path3 operator *(real[][] t, path3 p) {
 //   默认笔（DEFCOLOR）1 道、nullpen/invisible 0 道、rgb 3 道、cmyk 4 道。
 real[] colors(pen p) {
   real[] a;
-  if (p.isinvisible) return a;
+  if (p.isinvisible || p.patternval != "") return a;
   if (p.iscmyk) {
     a.push(p.cyan); a.push(p.magenta); a.push(p.yellow); a.push(p.black);
     return a;
@@ -4225,11 +4232,24 @@ real[] colors(pen p) {
 // 量过四档：默认笔与 gray(0.5) 是 "gray"、red 是 "rgb"、cmyk(red) 是 "cmyk"、
 // invisible 与 nullpen 是空串（那两格一道都没有）。slide.asy:115 的 texcolor 要它。
 string colorspace(pen p) {
-  if (p.isinvisible) return "";
+  if (p.isinvisible || p.patternval != "") return "";
   if (p.iscmyk) return "cmyk";
   if (p.isrgb) return "rgb";
   return "gray";
 }
+
+// runtime.in 的那两条 pattern：`pen pattern(string)` 挂一个图案名上去（图案在 pen.h 里
+// 就是一种颜色空间，所以那支笔一道颜色都没有），`string pattern(pen)` 取回来、没设过是
+// 空串。量过 `pattern(red+pattern("chk"))` 与 `pattern(pattern("chk")+red)` 都是 chk、
+// `pattern(pattern("x")+pattern("y"))` 是 y、`colorless(pattern("chk"))` 那格还留着。
+// tiling.asy:6 的 `filldraw(unitcircle,pattern("checker"))` 要它。
+pen pattern(string s) {
+  pen q;
+  q.patternval = s;
+  return q;
+}
+
+string pattern(pen p) { return p.patternval; }
 
 // runtime.in 的 colorless(pen)：把颜色那几格清回"没设过"（pen.h 的 DEFCOLOR），
 // 别的属性（宽度、线帽、虚线…）照旧。量过 `colorless(red+2bp)` 之后 colorspace 是 gray、
