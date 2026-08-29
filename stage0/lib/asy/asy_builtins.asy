@@ -28,15 +28,38 @@
 // clip、3D。
 
 // ---------------------------------------------------------------- file
-// asy 的 I/O 句柄类型。这里只给**类型**，不给任何 I/O —— 核心方言里还没有文件 IO
-// （`(print …)` 是唯一的出口，见文件头）。
-// 量出来的理由：`import plain;` 卡在 plain_constants.asy:73 的 `using suffix=void(file);`，
-// 而那一条挡住的是**整个 plain 树** —— Label / frame / filltype / align / marker
-// 那一大片都在 plain 里。类型桩让声明过得去；真去读写它的地方会明确报"没有方法"，
-// 不会悄悄给错答案。
+// asy 的 I/O 句柄。**写**那一路只有 stdout（`(print …)` 是核心方言唯一的出口）；
+// **读**那一路是真的：`(readtext E)` 把整份文本拿到手，剩下的分行/分词/注释/eof
+// 全在这一层用字符串算（实现与量出来的语义见下面 asy__f… 那一族与 input()）。
+// 一份内容按 '\n' 切开存着，而不是留一个"读到第几个字节"的下标：这一层的
+// `find(s,t,p)` 是 `sfind(substr(s,p))`（frontend-asy/runtime.js 的 asy__sfindp），
+// 每次都要把尾巴整份拷一遍 —— 1.2MB 的 worldmap.dat 上那是 6 万次 × 半兆的拷贝。
+// 按行切开是一次 O(n)，之后每一步都只在**一行**上算。
 struct file {
-  int fd;         // 0 = stdin、1 = stdout（这一层只认这两个）
-  string buf;     // 还没成整行的那一截
+  int fd;            // 0 = stdin、1 = stdout、2 = 真的输入文件
+  string buf;        // 出那一路还没成整行的一截
+  string name;
+  string[] lines;    // 入那一路：整份内容按 '\n' 切开（元素里不含 '\n'）
+  int nl;            // 有效行数（末尾那个 '\n' 切出来的空元素不算一行）
+  int li;            // 读到第几行
+  int ci;            // 那一行里读到第几个字节（== 行长表示"停在行尾那个 '\n' 上"）
+  bool linemode;     // 数组读到行尾就停（fileio.h:65）
+  bool csvmode;
+  bool wordmode;     // 字符串按空白分词，不是按行
+  string comment;    // 一个字节的注释字符；"" = 没有
+  bool nullfield;    // 上一次 nexteol 撞到空行（fileio.h:76，读出来是**零值**）
+  bool opened;       // isOpen()
+  bool eofbit;       // 流的 eof（peek 撞底就置上）
+  bool errbit;       // 流的 fail（数组读靠它收尾）
+  string white;      // asy 的 whitespace：Read(string) 把它拼在前面
+
+  // `f.line()` / `f.word()` / `f.csv()`：asy 那边这三个是 file 这个内建类型上的
+  // **虚字段**（runfile.in:209/227/244 的 lineSet/csvSet/wordSet 各回一个 callable，
+  // 于是 `f.line()` 是"取字段再调"）。这一层的 file 是记录，所以写成方法 ——
+  // 回的是 this，`input(…).word().line()`（obj.asy:24）才串得起来。
+  file line(bool b=true) { linemode = b; return this; }
+  file csv(bool b=true) { csvmode = b; if (b) wordmode = false; return this; }
+  file word(bool b=true) { wordmode = b; if (b) csvmode = false; return this; }
 }
 
 // asy 的 `code`：`quote{ … }` 攒起来的一段**没编译的源码**，交给 `_eval` 在当时的环境里
@@ -2997,10 +3020,63 @@ void write(file f, path x, asy__suffix suffix=none) {
 void write(file f, string s, path x, asy__suffix suffix=none) {
   asy__fput(f, s); write(f, x, suffix);
 }
-// input()/output()（runfile.in:45/80）：这一层只给 stdin/stdout 两个句柄，
-// 带名字的真文件还没有（读写文件要方言里的 IO）。
+// ------------------------------------------------------------ 读文件那一族
+// 语义全是从 asy 的 C++ 那三处量/抄来的：ifile::Read/eol/nexteol/ignoreComment
+// （fileio.cc:153-327）、file::read 那个模板（fileio.h:188）与 castop.h 的
+// read<T> / readArray（:91、:116）。三条关键的、不看源码想不到的：
+//   1. **标量读完，line 模式下还要 nexteol 一次**（castop.h:95）—— 于是"读一行"会把
+//      紧跟着的**空行**一起吃掉（量过：s2 是 `7\t8`，中间那个空行没了）。
+//   2. nexteol 撞到连着的第二个换行时置 nullfield（fileio.cc:253），而下一次读**不解析**、
+//      直接给零值（fileio.h:196 的 `if(!nullfield) Read(val)`）—— 空行读出来是一格 0，
+//      不是"没有值"（量过：`real[] r3=a;` 是 `[0]`，`string[] w2=d;` 是 `[""]`）。
+//   3. 字符串那一支**不跳注释**（fileio.h:174 的 `ignoreComment(string&) {}` 是空的）：
+//      注释是在 Read(string) 里从行内**截掉**的（`##` 是一个字面的 `#`）。
+// 刻意没照抄的（都在真数据上到不了）：csv 模式的引号与空字段、`>>` 只吃"数字前缀"
+// 那一手（我们要求整个词是一个数）、二进制/XDR 模式、\v 与 \f 不算空白。
+private bool asy__fspace(string c) {
+  return c == " " || c == '\t' || c == '\r';
+}
+private bool asy__fdigit(string c) {
+  return find("0123456789", c) >= 0 && c != "";
+}
+/** 停在末尾了？（li 越界就是整份读完） */
+private bool asy__fend(file f) { return f.li >= f.nl; }
+/** 当前行从 ci 起还剩的那一截 */
+private string asy__frest(file f) {
+  if (asy__fend(f)) return "";
+  return substr(f.lines[f.li], f.ci);
+}
+/** 一整截都是空白（空串也算） */
+private bool asy__fblank(string s) {
+  for (int i = 0; i < length(s); ++i) if (!asy__fspace(substr(s, i, 1))) return false;
+  return true;
+}
+/** 停在行尾那个 '\n' 上（行内剩下的都是空白） */
+private bool asy__fateol(file f) {
+  return !asy__fend(f) && asy__fblank(asy__frest(f));
+}
+/** 跨过行界：把 '\n' 吃掉 */
+private void asy__fnextline(file f) { f.li = f.li + 1; f.ci = 0; }
+
+// input()/output()（runfile.in:45/80）。**写**那一路仍然只有 stdout；**读**那一路是真的：
+// `_readtext` 把整份拿到手（前端里唯一的 IO 口子），按 '\n' 切开存在 f.lines 里。
+// `check=false`（plain.asy:261 的 `error(input(…,check=false))`）在这一层**不去读**：
+// 那句问的是"这个文件在不在"，而这一层没有"文件在不在"这个原语（readtext 读不到就是
+// 运行期错误）。于是 check=false 一律当"打不开" —— 文件不在时与 asy 一样，文件在时不一样
+// （那句的用法是问输出文件在不在，通常不在）。
 file input(string name="", bool check=true, string comment="#", string mode="") {
-  file f; f.fd = 0; return f;
+  file f;
+  f.comment = substr(comment, 0, 1);
+  if (name == "") { f.fd = 0; return f; }        // stdin：这一层读不了（读到才报）
+  f.fd = 2;
+  f.name = name;
+  if (mode != "") return f;                      // 二进制/XDR：打不开（v3d.asy:135 那一格）
+  if (!check) return f;
+  f.lines = _readlines(name);
+  f.nl = f.lines.length;
+  if (f.nl > 0 && f.lines[f.nl - 1] == "") f.nl = f.nl - 1;   // 末尾那个 '\n' 不是一行
+  f.opened = true;
+  return f;
 }
 file output(string name="", bool update=false, string comment="#", string mode="") {
   file f; f.fd = 1; return f;
@@ -3021,23 +3097,244 @@ void write(bool x, asy__suffix suffix) { write(output(), x, suffix); }
 void write(pair x, asy__suffix suffix) { write(output(), x, suffix); }
 void write(triple x, asy__suffix suffix) { write(output(), x, suffix); }
 
-// 从 file **隐式**读一个词（builtin.cc:494 `addCast(ve,t1,primFile(),read<T>)`）——
-// addUnorderedOps 里每个 T 一条，一维到三维的数组也各一条（:495-497）。
-// asy 那边 `string s=stdin;` 就是这么读的（plain_strings.asy:13 的 `return stdin;`、
-// :223 的 `w=stdin;`、plain_debugger.asy:6 的 `string[] source=input(…)`）。
-// 这一层的 file 只有 stdin/stdout 两个句柄、没有真的读，所以体是 abort ——
-// 签名在，那几句才降得下来；真读了才响。
-int operator cast(file f) { abort("从 file 读 int 还没做（这一层没有真的读）"); return 0; }
-real operator cast(file f) { abort("从 file 读 real 还没做（这一层没有真的读）"); return 0; }
-string operator cast(file f) { abort("从 file 读 string 还没做（这一层没有真的读）"); return ""; }
-pair operator cast(file f) { abort("从 file 读 pair 还没做（这一层没有真的读）"); return (0, 0); }
-triple operator cast(file f) { abort("从 file 读 triple 还没做（这一层没有真的读）"); return (0, 0, 0); }
-bool operator cast(file f) { abort("从 file 读 bool 还没做（这一层没有真的读）"); return false; }
-int[] operator cast(file f) { abort("从 file 读 int[] 还没做（这一层没有真的读）"); return new int[]; }
-real[] operator cast(file f) { abort("从 file 读 real[] 还没做（这一层没有真的读）"); return new real[]; }
-string[] operator cast(file f) { abort("从 file 读 string[] 还没做（这一层没有真的读）"); return new string[]; }
-pair[] operator cast(file f) { abort("从 file 读 pair[] 还没做（这一层没有真的读）"); return new pair[]; }
-triple[] operator cast(file f) { abort("从 file 读 triple[] 还没做（这一层没有真的读）"); return new triple[]; }
+// ---- 读那一族的三个原语：整行、跳空白与注释、nexteol ----
+/** getline：整行（不含 '\n'），撞底时置 eof+fail 并回空串 */
+private string asy__fgetline(file f) {
+  if (asy__fend(f)) { f.eofbit = true; f.errbit = true; return ""; }
+  string s = asy__frest(f);
+  asy__fnextline(f);
+  if (asy__fend(f)) f.eofbit = true;         // 最后一行读完了：下一次 peek 就撞底
+  return s;
+}
+/** Read(string) 尾巴上那一段：行内的注释截掉（`##` 是一个字面的 `#`）、去掉行尾的 '\r' */
+private string asy__fcut(file f, string s) {
+  if (f.comment != "") {
+    int p = 0;
+    while (true) {
+      int k = find(s, f.comment, p);
+      if (k < 0) break;
+      if (k + 1 < length(s) && substr(s, k + 1, 1) == f.comment) { s = erase(s, k, 1); p = k + 1; }
+      else { s = substr(s, 0, k); break; }
+    }
+  }
+  int n = length(s);
+  if (n > 0 && substr(s, n - 1, 1) == '\r') s = substr(s, 0, n - 1);
+  return s;
+}
+/**
+ * ignoreComment（fileio.cc:153）：吃空白（跨行）、整行的注释跳掉。最后那一手是
+ * **unget**：本来就停在行尾时，把跨过的那个 '\n' 退回去 —— 于是紧跟着的 nexteol 还能
+ * 看见这个行界（空行读出零值那条路就是这么来的）。
+ */
+private void asy__fskipws(file f) {
+  if (f.comment == "") return;               // asy：comment==0 时这个函数直接回
+  bool eol = asy__fateol(f);
+  while (true) {
+    while (!asy__fend(f)) {
+      string r = asy__frest(f);
+      if (asy__fblank(r)) { asy__fnextline(f); continue; }
+      int i = 0;
+      while (asy__fspace(substr(r, i, 1))) i = i + 1;
+      f.ci = f.ci + i;
+      break;
+    }
+    if (asy__fend(f)) { f.eofbit = true; return; }
+    if (substr(f.lines[f.li], f.ci, 1) == f.comment) { f.white = ""; asy__fnextline(f); continue; }
+    if (eol && f.ci == 0 && f.li > 0) { f.li = f.li - 1; f.ci = length(f.lines[f.li]); }
+    return;
+  }
+}
+/**
+ * nexteol（fileio.cc:228）：吃掉紧跟着的那个行界。回 true = "这一行到头了"。
+ * 撞到连着的第二个换行（空行）时置 nullfield —— 下一次读**不解析**，直接给零值。
+ */
+private bool asy__fnexteol(file f) {
+  if (f.nullfield) { f.nullfield = false; return true; }
+  if (asy__fend(f)) { f.eofbit = true; return false; }
+  string r = asy__frest(f);
+  int i = 0;
+  while (i < length(r) && asy__fspace(substr(r, i, 1))) i = i + 1;
+  if (i < length(r)) { f.ci = f.ci + i; return false; }     // 行内还有非空白：不是行尾
+  asy__fnextline(f);                                        // 吃掉行界那个 '\n'
+  if (asy__fend(f)) { f.eofbit = true; return true; }
+  if (asy__fblank(asy__frest(f))) { f.nullfield = true; return true; }
+  string r2 = asy__frest(f);
+  int j = 0;
+  while (asy__fspace(substr(r2, j, 1))) j = j + 1;
+  f.ci = f.ci + j;
+  return true;
+}
+/**
+ * 一个"词"：跳空白（跨行）、跳整行的注释，取到下一个空白（或注释字符）为止。
+ * 取不到（撞底）时置 errbit —— 数组读就是靠它收尾的。
+ */
+private string asy__ftok(file f) {
+  f.errbit = false;
+  while (true) {
+    if (asy__fend(f)) { f.eofbit = true; f.errbit = true; return ""; }
+    string r = asy__frest(f);
+    int i = 0;
+    while (i < length(r) && asy__fspace(substr(r, i, 1))) i = i + 1;
+    if (i >= length(r)) { asy__fnextline(f); continue; }
+    f.ci = f.ci + i;
+    if (f.comment != "" && substr(f.lines[f.li], f.ci, 1) == f.comment) { asy__fnextline(f); continue; }
+    string rest = asy__frest(f);
+    int j = 0;
+    while (j < length(rest)) {
+      string c = substr(rest, j, 1);
+      if (asy__fspace(c)) break;
+      if (f.comment != "" && c == f.comment) break;
+      j = j + 1;
+    }
+    f.ci = f.ci + j;
+    return substr(rest, 0, j);
+  }
+}
+/** inf / nan 那几个写法（Read(double) 在 fileio.cc:175 里专门认它们，大小写不论） */
+private bool asy__finf(string t) {
+  return t == "inf" || t == "Inf" || t == "INF" || t == "-inf" || t == "-Inf" || t == "-INF"
+    || t == "+inf" || t == "+Inf" || t == "+INF";
+}
+private bool asy__fnan(string t) {
+  return t == "nan" || t == "NaN" || t == "NAN" || t == "-nan" || t == "-NaN" || t == "-NAN"
+    || t == "+nan" || t == "+NaN" || t == "+NAN";
+}
+/** 这个词整个是一个数？（`>>` 只吃数字前缀，我们要求整词 —— 差别记在上面那段说明里） */
+private bool asy__fnum(string t) {
+  int n = length(t);
+  if (n == 0) return false;
+  if (asy__finf(t) || asy__fnan(t)) return true;
+  int i = 0;
+  string c0 = substr(t, 0, 1);
+  if (c0 == "+" || c0 == "-") i = 1;
+  int d = 0;
+  while (i < n && asy__fdigit(substr(t, i, 1))) { i = i + 1; d = d + 1; }
+  if (i < n && substr(t, i, 1) == ".") {
+    i = i + 1;
+    while (i < n && asy__fdigit(substr(t, i, 1))) { i = i + 1; d = d + 1; }
+  }
+  if (d == 0) return false;
+  if (i < n && (substr(t, i, 1) == "e" || substr(t, i, 1) == "E")) {
+    i = i + 1;
+    if (i < n && (substr(t, i, 1) == "+" || substr(t, i, 1) == "-")) i = i + 1;
+    int e = 0;
+    while (i < n && asy__fdigit(substr(t, i, 1))) { i = i + 1; e = e + 1; }
+    if (e == 0) return false;
+  }
+  return i == n;
+}
+// ---- 一次读一格 ----
+// 分成两层是照 asy 的分法：`file::read`（fileio.h:188）**不**碰 nexteol，而**标量的 cast**
+// （castop.h:91 的 read<T>）读完之后 line 模式下要 nexteol 一次；数组那一族
+// （castop.h:116 的 readArray）自己在循环里 nexteol。少分这一层就会多吃一个行界
+// （症状：`real[] x=in; real[] y=in;` 里 y 少一行）。
+/** file::read(string&)：wordmode/csvmode 取一个词，否则取一整行（注释在行内截掉） */
+private string asy__fr1s(file f) {
+  if (f.fd == 0) abort("这一层读不了 stdin（只读真的文件：input(\"名字\")）");
+  if (!f.opened) { f.eofbit = true; f.errbit = true; return ""; }
+  string v = "";
+  if (f.nullfield) { f.nullfield = false; f.errbit = false; }   // 空行：零值（空串），不解析
+  else if (f.wordmode || f.csvmode) v = asy__ftok(f);
+  else { v = f.white + asy__fcut(f, asy__fgetline(f)); }
+  f.white = "";
+  return v;
+}
+// 字符串 -> real 的那一格：实现是这个文件**后面**那条 `real operator ecast(string)`
+// （量出来的文法与"认不出就是 0"那条都在它那儿），而名字是顺序解析的 —— 所以这里留一格
+// 函数值，等那条声明之后再填上（见 ecast 那一段末尾的 `asy__num = …`）。
+// 不把整段读文件的代码搬到 ecast 后面：input()/write() 那一族在这里，搬过去就散了。
+private real asy__num(string);
+/** file::read(double&)：跳空白与注释，取一个词，整词得是一个数（不是就置 errbit） */
+private real asy__fr1r(file f) {
+  if (f.fd == 0) abort("这一层读不了 stdin（只读真的文件：input(\"名字\")）");
+  if (!f.opened) { f.eofbit = true; f.errbit = true; return 0; }
+  real v = 0;
+  if (f.nullfield) { f.nullfield = false; f.errbit = false; }
+  else {
+    asy__fskipws(f);
+    string t = asy__ftok(f);
+    if (!f.errbit) {
+      if (asy__finf(t)) v = (substr(t, 0, 1) == "-" ? -inf : inf);
+      else if (asy__fnan(t)) v = nan;
+      else if (asy__fnum(t)) v = asy__num(t);
+      else f.errbit = true;
+    }
+  }
+  f.white = "";
+  return v;
+}
+/** 标量的 cast：读一格，line 模式下再 nexteol 一次（castop.h:95） */
+private string asy__fread1s(file f) {
+  string v = asy__fr1s(f);
+  if (f.linemode) asy__fnexteol(f);
+  return v;
+}
+private real asy__fread1r(file f) {
+  real v = asy__fr1r(f);
+  if (f.linemode) asy__fnexteol(f);
+  return v;
+}
+// ---- readArray1 / readArray2（castop.h:116）：line 模式下一行一份，否则读到底 ----
+private real[] asy__freadr1(file f) {
+  real[] out;
+  if (!f.opened) { f.eofbit = true; return out; }
+  while (true) {
+    real v = asy__fr1r(f);
+    if (f.errbit) return out;
+    out.push(v);
+    if (f.linemode && asy__fnexteol(f)) return out;
+  }
+  return out;
+}
+private string[] asy__freads1(file f) {
+  string[] out;
+  if (!f.opened) { f.eofbit = true; return out; }
+  while (true) {
+    string v = asy__fr1s(f);
+    if (f.errbit) return out;
+    out.push(v);
+    if (f.linemode && asy__fnexteol(f)) return out;
+  }
+  return out;
+}
+private real[][] asy__freadr2(file f) {
+  real[][] out;
+  if (!f.opened) { f.eofbit = true; return out; }
+  while (true) {
+    real[] row;
+    bool put = false;
+    while (true) {
+      real v = asy__fr1r(f);
+      if (f.errbit) return out;
+      if (!put) { out.push(row); put = true; }   // asy 也是先挂进去再填（数组是引用）
+      row.push(v);
+      if (f.linemode && asy__fnexteol(f)) break;
+    }
+  }
+  return out;
+}
+// 从 file **隐式**读（builtin.cc:494-497 `addCast(ve,t,primFile(),read<T>/readArrayN<T>)`）：
+// 标量、一维、二维、三维各一条。这一层给到二维（三维没有真数据用得到，留着报"还没做"）。
+int operator cast(file f) { return (int) asy__fread1r(f); }
+real operator cast(file f) { return asy__fread1r(f); }
+string operator cast(file f) { return asy__fread1s(f); }
+pair operator cast(file f) { real x = asy__fread1r(f); real y = asy__fread1r(f); return (x, y); }
+triple operator cast(file f) {
+  real x = asy__fread1r(f); real y = asy__fread1r(f); real z = asy__fread1r(f);
+  return (x, y, z);
+}
+bool operator cast(file f) { return asy__fread1s(f) == "true"; }
+int[] operator cast(file f) {
+  real[] r = asy__freadr1(f);
+  int[] out;
+  for (int i = 0; i < r.length; ++i) out.push((int) r[i]);
+  return out;
+}
+real[] operator cast(file f) { return asy__freadr1(f); }
+string[] operator cast(file f) { return asy__freads1(f); }
+real[][] operator cast(file f) { return asy__freadr2(f); }
+pair[] operator cast(file f) { abort("从 file 读 pair[] 还没做（真数据里还没有用到）"); return new pair[]; }
+triple[] operator cast(file f) { abort("从 file 读 triple[] 还没做（真数据里还没有用到）"); return new triple[]; }
 
 // ------------------------------------------------ 数组与标量的算术（逐元素）
 // asy 那边是 builtin.cc:454 的 addOps<T,op>：每个 op 挂四份 —— (标量,标量)、
@@ -3977,8 +4274,12 @@ void breakpoints() { abort("breakpoints 还没做（调试器那一族）"); }
 void clear() { abort("clear() 还没做（调试器那一族）"); }
 
 // 下面这些的签名照量到的抄，体做不动 —— 各自缺的东西写在自己那一行。
-bool eof(file f) { abort("eof(file) 还没做（这一层只有 stdin/stdout，没有真的读文件）"); return true; }
-bool error(file f) { abort("error(file) 还没做（同上）"); return true; }
+// eof / error / eol / close（fileio.h:126-131）。eof 是**流的** eof：peek 撞底才置上，
+// 所以"读完最后一行"之后它就是 true（量过：line 模式下读最后一行，eof 当场变 true）。
+bool eof(file f) { return f.fd == 2 ? f.eofbit : true; }
+bool error(file f) { return f.fd == 2 ? (!f.opened || f.errbit) : false; }
+bool eol(file f) { return f.fd == 2 ? (!f.opened || asy__fateol(f)) : false; }
+void close(file f) { f.opened = false; f.eofbit = true; }
 int seconds(string t="", string format="") { abort("seconds 还没做（这一层没有时钟）"); return 0; }
 // `_cputime()`（plain.asy:299 的 `cputime()` 就靠它，而 `import plain;` 那一路会走到）：
 // **五格** —— parent user / parent system / child user / child system / 挂钟（plain.asy
@@ -4319,6 +4620,10 @@ triple operator ecast(string s) {
   abort("把 '" + s + "' 当 triple：切出来 " + (string) a.length + " 个分量，要 3 个");
   return (0, 0, 0);
 }
+
+// 把上面那条 `(real) s` 填进读文件那一族留的那格函数值（声明在 asy__fr1r 前面，
+// 理由写在那里：名字顺序解析，读文件那一段在这条 ecast 之前）。
+asy__num = new real(string s) { return (real) s; };
 
 // downcase/upcase 是 runstring.in:201/207 的 std::transform(tolower/toupper)。
 // 这一层没有"一个字节"这一格，按 ASCII 那 26 对换；别的字符原样过（C locale 的

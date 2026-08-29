@@ -305,6 +305,26 @@ export const HELPERS = new Map([
   // 量过 substr("abc",5,1) 与 substr("abc",-1,2) 都是空串（不是报错、也不是 clamp 到 0 ——
   // clamp 的话第二个会给 "ab"），substr("abc",1,100) 是 "bc"，erase("abc",-1,2) 原样返回，
   // find("abc","b",-5) 是 -1（clamp 的话会是 1）。所以"负数当无效"这条要照着写。
+  // 把整份文本按 '\n' 切成行（lib/asy 的 `input()` 用；语义与 `split(s,'\\n')` 一样，
+  // 末尾那个 '\n' 也切出一个空元素）。**不能**用 asy 的 split：那一条走 asy__sfindp，
+  // 而 asy__sfindp 是 `sfind(substr(s,p))` —— 每找一次都把尾巴整份拷一遍。
+  // 量过：1.2MB 的 worldmap.dat（6 万行）那样是 37s（6 万次 × 半兆的拷贝），这一条是
+  // 一遍扫描、每行一次 ssub。真正的修法是给核心方言的 `(sfind E T)` 加个起点
+  // （indexOf 在四条腿上都只收两个参数），那是另一批。
+  ['asy__lines', `  (fn asy__lines ((s string)) (arr string)
+    (let r (arr string) (anew (arr string) (int 0)))
+    (let n int (slen (var s)))
+    (let start int (int 0))
+    (let i int (int 0))
+    (while (bin "<" (var i) (var n))
+      (do
+        (if (bin "==" (ssub (var s) (var i) (int 1)) (str "\\n"))
+          (do
+            (apush (var r) (ssub (var s) (var start) (bin "-" (var i) (var start))))
+            (set start (bin "+" (var i) (int 1)))))
+        (set i (bin "+" (var i) (int 1)))))
+    (apush (var r) (ssub (var s) (var start) (bin "-" (var n) (var start))))
+    (ret (var r)))`],
   ['asy__ssub', `  (fn asy__ssub ((s string) (i int) (n int)) string
     (if (bin "<" (var i) (int 0)) (do (ret (str ""))))
     (if (bin ">" (var i) (slen (var s))) (do (ret (str ""))))

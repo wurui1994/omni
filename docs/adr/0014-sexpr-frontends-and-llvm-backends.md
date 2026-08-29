@@ -5996,6 +5996,59 @@ run / run-c / interp / interp --mir / run-llvm **五条腿**上逐字节一致�
 genusthree.asy **110ms**（没有并行；口径与前几批同）。
 没跑的轴：`OMNI_SWEEP_SX=1` 那一趟（这一批没碰降级那一层）、输出层的逐字节比对（EPS/SVG）。
 
+### 一批：asy 那一侧的 `struct file`（真的读文件，例子面 198 -> 203）
+
+上一批只加了原语 `(readtext E)`；这一批把 asy 的读文件那一族搭在它上面，全在
+`stage0/lib/asy/asy_builtins.asy` 里（前端只多一个口子）。这样例子面从 **198 干净 / 22 有诊断**
+到 **203 / 17**，降级那一层（`OMNI_SWEEP_SX=1`）从 196 到 **201**。
+
+搭法：`struct file` 里存**整份内容按 '\n' 切开的行**加一个 `(li, ci)` 位置，`input()` 用新的
+前端口子 `_readlines(name)` 一次读完，`.line()` / `.word()` / `.csv()` 是记录上的方法
+（asy 那边它们是内建类型上的**虚字段** —— runfile.in:209 的 lineSet 回一个 callable，
+所以 `input(…).word().line()` 是"取字段再调"，方法回 `this` 就串得起来）。
+读一格与读一片分成两层，照 asy 的分法：`file::read`（fileio.h:188）不碰 nexteol，
+**标量的 cast**（castop.h:95 的 read<T>）读完在 line 模式下 nexteol 一次，数组那一族
+（castop.h:116 的 readArray）自己在循环里 nexteol。
+
+三条量出来、不看源码想不到的（都进了用例 `tests/asy/cases/145-file-input`）：
+- 标量读完那一次 nexteol 会把紧跟着的**空行一起吃掉**：`.line()` 模式下连着读，
+  `1 2 3` / `4 5 6` / 空行 / `7\t8` 出来的第三份是 `7\t8`，空行没了。
+- nexteol 撞到连着的第二个换行时置 nullfield，而下一次读**不解析**、直接给零值 ——
+  空行读成 `real[]` 是 **一格 0**、读成 `string[]` 是 **一格空串**，不是"没有值"。
+- 字符串那一支**不跳注释**（fileio.h:174 的 `ignoreComment(string&) {}` 是空的）：
+  注释是在 Read(string) 里从行内截掉的，`##` 是一个字面的 `#`。
+
+**切行不能用 asy 的 `split`**：那一条走 asy__sfindp，而它是 `sfind(substr(s,p))` ——
+每找一次把尾巴整份拷一遍。量过：1.2MB / 6 万行的 worldmap.dat 那样跑 **37s**。
+所以切行是新 helper `asy__lines`（一遍扫描、每行一次 ssub），`worldmap.asy` 整份从
+**43s 到 10.9s**。真正的修法是给核心方言的 `(sfind E T)` 加个起点（indexOf 在四条腿上
+都只收两个参数），那是另一批 —— 快扫本身只降级不执行，所以这条不在速度那道门槛上。
+
+刻意没做/记下来的分歧：csv 模式的引号与空字段、`>>` 只吃"数字前缀"那一手（我们要求整个词
+是一个数）、二进制/XDR 模式（`input(…,mode="xdrgz")` 当"打不开"）、`\v` 与 `\f` 不算空白、
+`check=false` 一律当"打不开"（这一层没有"文件在不在"这个原语；plain.asy:261 那句问的正是
+输出文件在不在，通常不在，所以两边一样）。另外量到真 asy 的一个洞：`close(f); eof(f);`
+是 **Segmentation fault**（流已经 delete 了），我们回 eof=true，用例里因此不测那一格。
+
+`(real) s` 用的是这个文件里本来就有的 `real operator ecast(string)`（那份文法与"认不出就是 0"
+都是量过的）。它声明在读文件那一段**后面**，而名字是顺序解析的，所以读那一族里留了一格函数值
+`asy__num`，在 ecast 之后填上 —— 比把两百行搬来搬去稳。
+
+顺带量到、**没在这一批修**的一条：`ASYMPTOTE_DIR` 指到真 base/ 时，`write("hi")` 落到
+plain_Label.asy:459 的 `write(file=stdout, Label, suffix)`（走 string -> Label 那条用户转换），
+印出来带引号；asy 那边内建的 `write<string>` 是**同型**的一条，它赢。也就是"内建那一族要和
+用户重载一起参与挑选、同型优先"这一条还没做 —— 例子的**输出**受影响（诊断不受影响，
+所以快扫看不见），下一批。
+
+跑过的轴：`node tests/asy/run.js` **233/233**（新用例 145-file-input 与 `asy -noV` 逐字节
+一致：33 行里 line/word/real/real[][]/eof/eol/error/close 与字符串转数都在里面；`OMNI_LEGS=all`
+五条腿 247.3s）；`node tests/sexpr/run.js` 54/54；`node tests/run.js` 91/91；
+`node tests/bootstrap/run.js` **60/60**；快扫 `tests/asy/sweep.js` **203 干净 / 17 有诊断**
+（220 个共 1.7s、最慢 genusthree.asy 162ms，无并行），深快扫 `OMNI_SWEEP_SX=1`
+**201 干净**（48.2s、最慢 genustwo.asy 423ms），模块那一份不变（three 6、geometry 1、
+contour 2、palette 1、patterns 1；核心方言那一层 12 条）。
+没跑的轴：输出层的逐字节比对（EPS/SVG）还没做。
+
 ## 后果与代价
 
 

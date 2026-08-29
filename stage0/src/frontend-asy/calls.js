@@ -562,6 +562,23 @@ export function asyCall(L, n) {
     return L.nope(n, `内建函数 '${nm}(${ts})'（这一刀的 copy 要一个数组、`
       + 'sequence 要 `T(int)` 加 int、array 要 int 加一个值）');
   }
+  // `_readlines(name)`：整份读一份文本文件、按 '\n' 切成行 —— 核心方言的 `(readtext E)`
+  // （b662eb6 加的那一个）加上 asy__lines 那个 helper。名字带下划线是照 asy 自己的规矩
+  // （`_draw` / `_eval` / `_shipout` 那一族都是"C++ 那一侧的口子"，base/ 里没有这个名字），
+  // 所以只有 lib/asy 里那个 `input()` 用得到它。这个前端里**只有这一个** IO 口子：
+  // 分行之后的分词/注释/eof 全在 asy 那一侧（见 asy_builtins.asy 的 struct file）——
+  // 那些是字符串处理，不必在四条腿上各写一份。
+  // 切行放在 helper 里而不是 asy 那边写 `split(text,'\n')`：那一条是二次的（见 asy__lines）。
+  if (nm === '_readlines') {
+    const raw = asyCallArgs(L, n);
+    if (raw === null) return null;
+    if (raw.length !== 1) return L.err(n, `'_readlines' 要 1 个实参，给了 ${raw.length} 个`);
+    if (raw[0].lines !== null) for (const s of raw[0].lines) L.pre.push(s);
+    const p = L.coerce(raw[0].v, 'string', raw[0].node, "'_readlines' 的实参");
+    if (p === null) return null;
+    L.used.add('asy__lines');
+    return { code: `(call asy__lines (readtext ${p.code}))`, type: 'string[]' };
+  }
   if (lateMem !== null) return L.err(n, lateMem);
   if (L.funcs.has(nm)) {
     return L.err(n, `'${nm}' 在这里还看不见 —— 它声明在后面，而 asy 的名字解析是顺序的（那边报 "no matching variable"）`);
