@@ -111,6 +111,28 @@ export function asyWriteStmt(L, n) {
   return [`(print ${code})`];
 }
 
+/** 内建 write 那一族印的类型（builtin.cc:499 的 addWrite 那几个 T）。 */
+const ASY_WRITE_PRINT = new Set(['int', 'real', 'string', 'bool', 'pair', 'triple']);
+/**
+ * 这次 `write(...)` 落在内建那条**不带可变形参**的签名上？（只问类型，诊断与前置语句都回滚）
+ * 那一条是 `write(file file=stdout, string s="", T x, void suffix(file)=endl)`
+ * （builtin.cc:499 的 addWrite）—— 只有**一个** T，所以形状只有两种：一个实参，
+ * 或者「string 前缀 + 一个 T」。多于两个实参时走的是可变形参那一条
+ * （builtin.cc:501 的 addRestFunc(writeArray)），而 asy 的重载解析里可变形参那条**输给**
+ * 同型的普通重载 —— 量过：自己定义 `void write(string,int,int)` 之后 `write("s",1,2)`
+ * 印的是用户那条。所以这里只在"不带可变形参"的两种形状上让内建先说话。
+ */
+function asyWriteBuiltinFirst(L, n) {
+  const mark = L.diags.mark();
+  const args = asyArgs(L, n.items[2]);
+  if (args === null || args.length === 0 || args.length > 2) { L.diags.rollback(mark); return false; }
+  const ts = [];
+  for (const a of args) ts.push(L.probeType(a));
+  L.diags.rollback(mark);
+  for (const t of ts) if (t === null || !ASY_WRITE_PRINT.has(t)) return false;
+  return args.length === 1 || ts[0] === 'string';
+}
+
 /** 一个值印成字符串时的形状。write 的两条路（标量与数组）共用这一份。 */
 export function asyFmtStr(L, t, code) {
   if (t === 'string') return code;
@@ -711,6 +733,29 @@ export function asyExprStmt(L, e) {
   if (h === 'call') {
     const nm = isList(e.items[1]) && head(e.items[1]) === 'name-exp' ? L.plainName(e.items[1].items[1]) : null;
     if (nm === 'write') {
+      // 顺序（这一刀）：**实参正好都是内建那一族印的那几个类型**时先问内建。
+      // asy 的 write 是 C++ 里的 `write(file file=stdout, string s="", T x,
+      // void suffix(file)=endl)`，T 就是 int/real/string/bool/pair/triple（builtin.cc:499
+      // 的 addWrite）—— 这些类型上它是**一次转换都不用**的那一条，重载解析里赢过要转换的
+      // 用户重载。量出来的那一格：`ASYMPTOTE_DIR` 指到真 base/ 时 `write("hi")` 在 asy 那边
+      // 印 hi，而先问用户重载会落到 plain_Label.asy:459 的 `write(file=stdout, Label, suffix)`
+      // （走 string -> Label 那条用户转换），印出来是带引号的 "hi"。
+      // 别的形状（数组、结构体、带 file、带 suffix）仍旧**先问用户重载** —— 那些正是
+      // base 里 `void write(file, T)` 那一族在管的，内建这边接不住。
+      // 两条路都是"试一遍、不行就把诊断与前置语句都丢掉"（与 probeTy 同一条路子）。
+      if (asyWriteBuiltinFirst(L, e)) {
+        const bmark = L.diags.mark();
+        const bsave = L.pre;
+        L.pre = [];
+        const bv = asyWriteStmt(L, e);
+        const bpre = L.pre;
+        L.pre = bsave;
+        if (bv !== null) {
+          if (Array.isArray(L.pre)) for (const s of bpre) L.pre.push(s);
+          return bv;
+        }
+        L.diags.rollback(bmark);
+      }
       // 用户自己的 `write` 先问（第四十五刀）：base 里 `void write(file, T)` 那一族就是
       // 普通重载（plain_constants.asy:82 起）。都不匹配才落回内建那份 —— 所以这里是
       // "试一遍、不行就把诊断与前置语句都丢掉"（与 probeTy 同一条路子）。

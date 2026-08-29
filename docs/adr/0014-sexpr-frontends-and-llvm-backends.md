@@ -6049,6 +6049,37 @@ plain_Label.asy:459 的 `write(file=stdout, Label, suffix)`（走 string -> Labe
 contour 2、palette 1、patterns 1；核心方言那一层 12 条）。
 没跑的轴：输出层的逐字节比对（EPS/SVG）还没做。
 
+### 一批：内建的 `write` 与用户重载谁赢（同型的那一条先说话）
+
+上一批末尾记下的那一条：`ASYMPTOTE_DIR` 指到真 base/ 时 `write("hi")` 印出来带引号。
+查出来是**顺序**问题 —— `frontend-asy/stmts.js` 的 write 分支一律先问用户重载，于是
+`write("hi")` 落到 plain_Label.asy:459 的 `write(file=stdout, Label, suffix)`
+（走 `string -> Label` 那条用户转换），而 asy 那边内建的那一条一次转换都不用、它赢。
+
+改法是把顺序变成"看形状"：实参落在内建那条**不带可变形参**的签名上时先问内建，
+别的形状照旧先问用户重载（两条路都是"试一遍，不行就把诊断与前置语句都丢掉"）。
+"不带可变形参的签名"是量出来的两种形状 —— 内建那条是
+`write(file file=stdout, string s="", T x, void suffix(file)=endl)`（builtin.cc:499 的
+addWrite，T = int/real/string/bool/pair/triple），**只有一个 T**：
+- 一个实参，类型是那六个之一；
+- 两个实参，第一个是 string（前缀）、第二个是那六个之一。
+
+多于两个实参走的是可变形参那一条（builtin.cc:501 的 `addRestFunc(writeArray)`），
+而**可变形参那条输给同型的普通重载** —— 量过：自己定义 `void write(string,int,int)`
+之后 `write("s",1,2)` 印的是用户那条（`three:s12`），不是内建的 `s1\t2`。这条tie-break
+就是新用例 `tests/asy/cases/146-write-overload` 的最后一行。
+
+数组、结构体、带 file、带 suffix 的形状都不在这两种里，所以那些仍旧先问用户重载 ——
+base 里 `void write(file, T)` 那一族（plain_constants.asy:82 起）管的正是它们。
+
+跑过的轴：`node tests/asy/run.js` **234/234**（新用例 146-write-overload 与 `asy -noV`
+逐字节一致：内建赢的两种形状、用户的 `operator cast` 那两格、可变形参输给同型重载那一格；
+`OMNI_LEGS=all` 五条腿 281.9s）；`node tests/sexpr/run.js` 54/54；`node tests/run.js` 91/91；
+`node tests/bootstrap/run.js` **60/60**；快扫 **203 干净 / 17 有诊断**（220 个共 2.7s、
+最慢 cheese.asy 159ms，无并行），模块那一份不变。
+没跑的轴：深快扫（`OMNI_SWEEP_SX=1`，这一批没碰降级出来的形状，只改了挑哪一条）、
+输出层的逐字节比对（EPS/SVG）。
+
 ## 后果与代价
 
 
