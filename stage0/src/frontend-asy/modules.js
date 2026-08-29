@@ -279,7 +279,15 @@ export function asyModStmt(L, n, at) {
       if (pr === null) { L.nope(p, `${h} 的这种写法`); continue; }
       const u = asyModLoad(L, p, pr.src);
       if (u === null) continue;
-      L.mods.set(pr.dst, { unit: u.id, at: at });
+      // 同一个名字又 import/access 了**同一个单元**一遍：可见位置取**早**的那一次。
+      // 声明遍是整个单元先走一趟，所以晚的那一句会把早的那一格盖掉，于是前面几行反倒
+      // 看不见它了。量出来的形状是 tvgen.asy:1047 的 `access settings;` —— `settings`
+      // 那格别名在 asySettingsIn 里已经以 at -1 记好（从第一句起可见），被这一句盖成 1047
+      // 之后第 27 行的 `settings.verbose` 就落到"带点的名字"上去了（真 asy 编得过）。
+      const had = L.mods.has(pr.dst) ? L.mods.get(pr.dst) : undefined;
+      if (had === undefined || had.unit !== u.id || had.at > at) {
+        L.mods.set(pr.dst, { unit: u.id, at: at });
+      }
       if (h === 'import') asyModMerge(L, p, u, at, null);
       asyModCallAt(L, at, u);
     }

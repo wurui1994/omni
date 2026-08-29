@@ -90,13 +90,29 @@ export function asyWriteStmt(L, n) {
   for (let i = first; i < vals.length; i++) {
     if (vals[i].type === 'pair') t = 'pair';
   }
+  // int 与 real 混着时 T 是 real（int -> real 那一次提升）。原来这一格判"要同型"是**错的**：
+  // 量过 `write(1.5,2,3,4)` 印 `1.5 TAB 2 TAB 3 TAB 4`、`write(2,1.5)` 印 `2 TAB 1.5`
+  // （tvgen.asy:912 的 `write(y*1000, round(R*1000), …)` 就是这一种，真 asy 编得过）。
+  // 只有 int/real 这一对这样：`write(real,triple)`、`write(pair,triple)`、`write(bool,int)`
+  // 在 asy 那边都是 no matching function（量过），所以别的类型仍旧要同型。
+  if (t === 'int') {
+    for (let i = first; i < vals.length; i++) {
+      if (vals[i].type === 'real') t = 'real';
+    }
+  }
+  // 报诊断时说的是**写下来那几个类型**（下面提升过的那几格已经不是原样了）
+  const shape = vals.map((v) => v.type).join(', ');
   for (let i = first; i < vals.length; i++) {
     if (t === 'pair' && (vals[i].type === 'int' || vals[i].type === 'real')) {
       vals[i] = L.toPair(vals[i]);
       continue;
     }
+    if (t === 'real' && vals[i].type === 'int') {
+      vals[i] = L.coerce(vals[i], 'real', args[i], 'write 的实参');
+      if (vals[i] === null) return null;
+      continue;
+    }
     if (vals[i].type === t) continue;
-    const shape = vals.map((v) => v.type).join(', ');
     return L.err(args[i], `write 的实参要同型 —— asy 那边 write(${shape}) 就是 no matching function`);
   }
   // T 是数组：那是另一条格式（每行「下标 : TAB 值」），见 writeArrays

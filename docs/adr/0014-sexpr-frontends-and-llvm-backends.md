@@ -6285,6 +6285,45 @@ cases/86 钉着）；分组**不看返回类型**（签名身份里就没有它 
 `usersetting()` 歧义、`.initialized`、`pattern`、`write(real,int,int,int)`、
 RKTableau 的方法赋值（odetest 与 slope 是同一条）。
 
+### 一批：write 的实参不必同型、模块别名的可见位置取早的那一次
+
+两条都是 tvgen.asy 一个文件里的（它是这一摞例子里最长的那个）。
+
+**`write` 的实参不必同型**。原来这一层判"要同型"，只给 pair 开了个口子（`write(3,(1,2))` 印
+`(3,0) TAB (1,2)`）。这是**错的**：量过 `write(1.5,2,3,4)` 印 `1.5 TAB 2 TAB 3 TAB 4`、
+`write(2,1.5)` 印 `2 TAB 1.5` —— int 与 real 混着时那个 T 是 real，int 那几格走一次提升。
+tvgen.asy:912 的 `write(y*1000, round(R*1000), round(G*1000), round(B*1000))` 正是这一种，
+真 asy 编得过，而我们报"asy 那边 write(real, int, int, int) 就是 no matching function"——
+**那句话本身是假的**（这一层的诊断里凡是说"asy 那边也这样"的，都该有量过的依据）。
+只有 int/real 这一对如此：`write(real,triple)`、`write(pair,triple)`、`write(bool,int)`、
+`write(int,string)`、`write(string,string,int)` 在 asy 那边都真的是 no matching function
+（一条条量过，钉在 cases/153 的注释里）。报诊断时说的类型是**写下来那几个**，
+不是提升之后的（`write(1.5,2,"a")` 要说 `write(real, int, string)`）。
+
+**模块别名的可见位置取早的那一次**。声明遍是整个单元先走一趟，所以晚的那一句
+`access m;` 会把早先记的那格别名盖掉，前面几行反倒看不见它了。tvgen.asy 的形状：
+`settings` 那格别名由 `asySettingsIn` 以 `at -1` 记好（从第一句起可见），而第 1047 行
+有一句 `access settings;` —— 盖成 1047 之后，第 27 行的 `int verbose=settings.verbose;`
+就落到"带点的名字或算符名"上去了。改法是 `L.mods.set` 之前问一句：同一个名字指着
+**同一个单元**、而且已经记着一个更早的位置时，不动它。指着别的单元那一种（真的遮盖）
+要一串按位置排的别名，这一刀没做。
+
+于是例子面 **205 → 206 干净**（tvgen 清零）。
+
+跑过的轴：新用例 153-write-mixed（int/real 混、前缀串、pair 那一档、`import` 之后再
+`access` 同一个模块）与 `asy -noV` 逐字节一致；`tests/asy/cases` 与 `tests/asy/strict`
+全量按 `run` 那条腿逐个比对，无差异；快扫 **206 干净 / 14 有诊断**（220 个共 2.2s、
+最慢 genusthree.asy 154ms，无并行）、模块那一份 **0 条**。
+没跑的轴：与上一批同（`run-llvm`、`OMNI_LEGS=all` 那三条腿、`tests/sexpr`、
+`tests/run.js`、`tests/bootstrap`、深快扫、EPS/SVG）。
+
+**试了又撤掉的一条**（记下来免得再走一遍）：`usersetting()`（slidedemo.asy:14）报
+"有多个同样合适的重载"，因为 plain.asy:237 与 slide.asy:176 各有一份 `void usersetting()`，
+两条 import 都把它并进来了 —— asy 那边是"后 import 的盖住先来的"。照上一批那套
+`dup` 记号往 `asyModMerge` 里加"同形参就打记号"之后，模块那一份从 0 条涨到 7 条
+（`min(real[])` / `max(real[])` 那一族被误伤 —— 按形参那串分组挡不住同名不同元素类型的
+那几份），所以撤掉了。这条要做得先把"并进来的候选按类型排序遮盖"那套补全。
+
 ## 后果与代价
 
 
