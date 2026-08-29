@@ -6235,6 +6235,56 @@ asy 报的是歧义，这里挑的是顺序里靠前的那一个。
 `void().fit(…)`、`usersetting()` 歧义、`.initialized`、`pattern`、`write(real,int,int,int)`、
 RKTableau 的方法赋值），不再有模块那一侧的阻塞。
 
+### 一批：do-while 的 continue、同签名再声明一遍、被遮住那格压不住数学那族
+
+三条都是"顺序"这件事的不同侧面，落在例子面的 lmfit1 与 interpolate1 上。
+
+**do-while 里的 `continue`**（lmfit.asy:574）。这一层把 `do S while(c)` 降成
+`while(true){ S; if(!c) break; }`，条件检查在**体的末尾**，所以体里的 `continue` 直接
+`(cont)` 会把它跳过去 —— 原来见到就报 nope。改法是让 `continue` 那一句**就地把条件再算一遍**：
+假就 `(brk)`、真才 `(cont)`。量过 asy 就是这个意思：
+`int n=0,calls=0; bool cond(){++calls; return n<4;}` 配
+`do {++n; if(n%2==0) continue; write("odd",n);} while(cond());` 印 odd1 / odd3 / **calls4**
+—— continue 那两轮条件照样被调了一次。条件因此要**先降**（`continue` 那一格要用它的代码），
+顺序反过来不改可见性：asy 里条件看不见体里声明的名字（`do { int j=1; } while (j==1);` 报
+`no matching variable 'j'`）。`(cont)` 归谁靠 `L.updates` 那个栈分清：内层循环自己压一层，
+函数体那条路把它清空。
+
+**同一个单元里同签名再声明一遍**。asy 那边这是**又一格新变量**，不是覆盖：先写的那份在
+"它之后、后一份之前"那一段照样看得见。量法是 `real f(real x){return x+1;} … map(f,a)` 印 2 3，
+再写一份 `+10` 之后 `map(f,a)` 印 11 12。interpolate1.asy 正是这个形状 —— 七个
+`real f(real x)` 挨在一个文件里，每个 `y=map(f,x);` 用的都是它上面最近那一份。原来
+`asyDeclFn` 撞上同签名是**原地替换**，于是第 18 行那句 `map(f,x)` 看到的是第 41 行那份的
+位置、被 `c.at > L.at` 裁掉，报"未声明的变量 'f'"。改成两份都留、各打一个 `dup` 记号，
+由 `asyVisible` 在当前位置只留最近那一份（`asyDupLast`）。两处要紧的细节：
+`asyCandAt` 得把 `dup` 带过去（import 并进来那几份 `at` 全是那条 import 的位置、分不出先后，
+只能按表里的次序 —— `asy_builtins.asy` 里成对出现的
+`real[][] operator *(real[][],real[][])`（3452 与 4160）就是这么在 `m*n` 上报 ambiguous 的，
+cases/86 钉着）；分组**不看返回类型**（签名身份里就没有它 —— `int s(int)` 之后
+`real s(int)` 是替换、`s(5)` 印 2.5，cases/16 钉着）。
+
+**被遮住的那一格压不住数学那一族**。`real[] x,y;` 之后 `real f(real x){return sin(x);}`：
+候选表里只有内建面那份 `real[] sin(real[])`，它靠文件级那格 `real[] x` 接上（`fit` 记的
+`shadow` 1），而标量 `sin` 是写死在这个前端里的（`L.math`）、不在候选表里 —— 于是那一句报
+"return 的值：要 real，这里是 real[]"。asy 那边形参把文件级那格遮住了，走的是标量 sin
+（印 0.479425538604203）。补的是一条次序：挑出来最好那份的 `shadow > 0` 而这个名字又在
+数学那一族里时，先让数学那份试一次（带回滚），不成再照原样走下去。这一条是第五十一刀
+（"内建面注册了数组那份之后标量那份要再试一次"）的另一面。
+
+跑过的轴：新用例 151-dowhile-continue（continue 跳条件、break 仍跳出、内外层各归各、
+条件里要摊语句的那一路、嵌在 for 里、套两层 do-while）与 152-dup-decl（三份同签名、
+返回类型不同那一对、真重载不受影响、形参遮住文件级数组那一格）都与 `asy -noV` 逐字节一致；
+回归的 16-overload 与 86-matrix-frame 也一致；`tests/asy/cases` 与 `tests/asy/strict`
+全量按 `run` 那一条腿逐个比对，无差异；快扫 **205 干净 / 15 有诊断**
+（220 个共 2.2s、最慢 genusthree.asy 219ms，无并行）、模块那一份 **0 条**。
+没跑的轴：`run-llvm` 与 `OMNI_LEGS=all` 那三条腿、`tests/sexpr`、`tests/run.js`、
+`tests/bootstrap`、深快扫（`OMNI_SWEEP_SX=1`）、输出层的 EPS/SVG —— 全量那一遍攒几批跑一次，
+每批都跑的话一步要等四分钟。
+例子面剩下的 15 条：gsl、`join-exp`、函数值省实参、赋值当表达式、`gamma`、
+`graph(<重载集>,int,int)`、`operator ::` 的可变实参、`Ticks(…)`、`void().fit(…)`、
+`usersetting()` 歧义、`.initialized`、`pattern`、`write(real,int,int,int)`、
+RKTableau 的方法赋值（odetest 与 slope 是同一条）。
+
 ## 后果与代价
 
 

@@ -622,6 +622,17 @@ export function asySig(L, n, at) {
   for (let i = 0; i < list.length; i++) {
     if (asySigKey(list[i]) !== key) continue;
     if (asyExpKeep(list[i], cand)) return;
+    // **同一个单元里再声明一遍同签名**：asy 那边这是又一个变量，不是把先那份覆盖掉 ——
+    // 先写的那份在"它之后、后一份之前"那一段照样看得见。量过 interpolate1.asy：七个
+    // `real f(real x)` 挨在一个文件里，每个 `y=map(f,x);` 用的都是它上面最近那一份
+    // （`real f(real x){return x+1;}` … `map(f,a)` 印 2 3，再声明一份 `+10` 之后印 11 12）。
+    // 所以两份都留着、各打上 `dup`，由 asyVisible 在当前位置只留最近那一份。
+    // 别的单元来的那份仍旧是覆盖：import 就是"后进来的那份说话"。
+    if (list[i].unit === cand.unit) {
+      list[i].dup = true;
+      cand.dup = true;
+      break;
+    }
     list[i] = cand;
     L.funcs.set(nm, list);
     return;

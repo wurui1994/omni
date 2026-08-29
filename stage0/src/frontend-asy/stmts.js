@@ -296,6 +296,12 @@ export function asyStmtOne(L, n, ret) {
     const upd = L.updates.length === 0 ? [] : L.updates[L.updates.length - 1];
     const out = [];
     for (const u of upd) out.push(u);
+    // do-while 那一格不能直接 `(cont)`：条件检查在**体的末尾**，跳到循环顶会把它跳过去。
+    // 就地把条件再算一遍（asy 的 continue 正是跳到条件那一步，见 asyDoWhile 的量法）。
+    if (upd.dw !== undefined) {
+      for (const s of upd.dw) out.push(s);
+      return out;
+    }
     out.push('(cont)');
     return out;
   }
@@ -363,23 +369,34 @@ function asyUnravelVar(L, n) {
 
 /**
  * `do S while (c)` -> `while (true) { S; if (!c) break; }`。
- * 刻意不复制 S（复制会让 S 里的 break 落在循环外面），代价是 `continue` 在这个编码里
- * 会跳过条件检查，语义就错了 —— 所以见到就报错，而不是悄悄换个意思。
+ * 刻意不复制 S（复制会让 S 里的 break 落在循环外面）。
+ *
+ * 这个编码里 `continue` 直接跳循环顶会把体末尾的条件检查跳过去，所以 `continue` 那一句
+ * 得**就地把条件再算一遍**：假就 break，真才 `(cont)`。量过 asy 就是这个意思 ——
+ * `int n=0,calls=0; bool cond(){++calls; return n<4;}`
+ * `do {++n; if(n%2==0) continue; write("odd",n);} while(cond());` 打 odd1 / odd3 / calls4，
+ * 也就是 continue 那两轮条件照样被调了一次。
+ *
+ * 条件因此得**先降**（continue 那一格要用它的代码）。顺序反过来不改可见性：asy 里条件看不见
+ * 体里声明的名字，`do { int j=1; } while (j==1);` 报 `no matching variable 'j'`（量过）。
  */
 export function asyDoWhile(L, n, ret) {
-  L.updates.push([]);
-  const b = asyStmt(L, n.items[1], ret);
-  L.updates.pop();
   // 条件里摊出来的语句跟着条件走（它就在体的末尾，每轮都重算）—— 与 while / for 同一条
   const savePre = L.pre;
   L.pre = [];
   const c = L.coerce(L.expr(n.items[2]), 'bool', n, 'do-while 的条件');
   const cpre = L.pre;
   L.pre = savePre;
-  if (b === null || c === null) return null;
-  for (const s of b) {
-    if (s === '(cont)' || s.includes(' (cont)')) return L.nope(n, 'do-while 里的 continue');
+  const ctx = [];
+  if (c !== null) {
+    ctx.dw = [];
+    for (const s of cpre) ctx.dw.push(s);
+    ctx.dw.push(`(if (un "!" ${c.code}) (do (brk)) (do (cont)))`);
   }
+  L.updates.push(ctx);
+  const b = asyStmt(L, n.items[1], ret);
+  L.updates.pop();
+  if (b === null || c === null) return null;
   const tail = cpre.length === 0 ? '' : `${cpre.join(' ')} `;
   return [`(while (bool true) (do ${b.join(' ')} ${tail}(if (un "!" ${c.code}) (do (brk)))))`];
 }

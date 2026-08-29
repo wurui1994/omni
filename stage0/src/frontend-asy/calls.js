@@ -460,9 +460,30 @@ export function asyCall(L, n) {
     const raw = asyCallArgs(L, n);
     if (raw === null) return null;
     let best = null;
+    let bsh = 0;
     for (const c of vis) {
       const f = asyFit(L, c, raw);
-      if (f !== null && (best === null || f.cost < best)) best = f.cost;
+      if (f === null) continue;
+      if (best === null || f.cost < best) { best = f.cost; bsh = f.shadow; continue; }
+      if (f.cost === best && f.shadow < bsh) bsh = f.shadow;
+    }
+    // 只**靠被遮住的那一格**才接上的候选压不住写死在这一层的数学那一族（第五十一刀
+    // 那条的另一面）：`real[] x,y;` 之后 `real f(real x) {return sin(x);}` 里候选表里
+    // 只有内建面那份 `real[] sin(real[])`，它是靠文件级那格 `real[] x` 接上的（shadow 1）；
+    // asy 那边形参把它遮住了，走的是标量 sin（量过 interpolate1.asy:75 那一族印
+    // 0.479425538604203）。少了这一条那一句报"return 的值：要 real，这里是 real[]"。
+    if (best !== null && bsh > 0 && L.math.has(nm)) {
+      const mmark = L.diags.mark();
+      const mSave = Array.isArray(L.pre) ? L.pre : null;
+      if (mSave !== null) L.pre = [];
+      const mv = asyMathCall(L, n, nm);
+      const mMine = L.pre;
+      if (mSave !== null) L.pre = mSave;
+      if (mv !== null) {
+        if (mSave !== null) for (const s of mMine) L.pre.push(s);
+        return mv;
+      }
+      L.diags.rollback(mmark);
     }
     const bc = asyBuiltinCost(L, nm, raw);
     if (best !== null && (bc === null || best <= bc)) {
@@ -907,6 +928,7 @@ export function asyBuiltinCost(L, nm, raw) {
  */
 export function asyVisible(L, nm) {
   const out = [];
+  let dup = false;
   if (!L.funcs.has(nm)) return out;
   for (const c of L.funcs.get(nm)) {
     if (c.at > L.at) continue;
@@ -917,9 +939,36 @@ export function asyVisible(L, nm) {
       if (L.self === null || L.self.rec.name !== c.inRec) continue;
       if (c.mat > L.self.mat) continue;
     }
+    if (c.dup === true) dup = true;
     out.push(c);
   }
-  return asyBiWeak(L, out);
+  return asyBiWeak(L, dup ? asyDupLast(out) : out);
+}
+
+/**
+ * 同一个单元里同签名声明了好几遍（decls.js 里打的 `dup`）：**这个位置**上只算最后那一份。
+ * 打了记号的那几个本来就是同签名的，所以按形参那串分组够了；不裁的话每处调用都会
+ * 判"有多个同样合适的重载"。同 `at` 的（import 并进来那几份 at 全是 import 那一句的位置）
+ * 留表里后面那份 —— 表的次序就是声明次序。
+ *
+ * 分组**不看返回类型**：签名身份（asySigKey）里就没有它。`int s(int)` 之后再
+ * `real s(int)` 是替换，`s(5)` 印 2.5（量过，cases/16 钉着）—— 带上返回类型分组的话
+ * 这两份会分到两组里、谁也不裁，那一句就变成 ambiguous 了。
+ */
+function asyDupLast(out) {
+  const best = new Map();
+  for (const c of out) {
+    if (c.dup !== true) continue;
+    const k = c.params.join(',');
+    const b = best.get(k);
+    if (b === undefined || c.at >= b.at) best.set(k, c);
+  }
+  const res = [];
+  for (const c of out) {
+    if (c.dup !== true) { res.push(c); continue; }
+    if (best.get(c.params.join(',')) === c) res.push(c);
+  }
+  return res;
 }
 
 /**

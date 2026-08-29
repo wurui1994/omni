@@ -113,6 +113,11 @@ export function asyCandAt(L, c, at) {
     ret: c.ret, params: c.params, ps: c.ps, node: c.node, sym: c.sym, base: c.base,
     pfx: c.pfx, unit: c.unit, dat: c.dat === undefined ? c.at : c.dat, at: at,
     mat: c.mat, rec: c.rec, ctor: c.ctor,
+    // 同签名声明了好几遍那个记号（decls.js 的 `dup`）也要跟过来：并进来的那几份 `at`
+    // 全是这条 import 的位置，分不出先后，只能靠表里的次序 —— asyDupLast 按次序留最后那份。
+    // 漏了这一格的样子是 asy_builtins.asy 里成对出现的 `real[][] operator *(real[][],real[][])`
+    // （3452 与 4160）两份都留在表里，`m*n` 报"有多个同样合适的重载"（cases/86 钉着）。
+    dup: c.dup,
   };
 }
 
