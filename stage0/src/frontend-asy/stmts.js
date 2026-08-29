@@ -628,12 +628,18 @@ export function asyVardec(L, n) {
     // 构造调用 `A(…)`）量过不参与这一句，而换掉它的**文件级** `A operator init()`
     // 还在门外（funcSig 里拦着，`bad/ctor-toplevel` 钉着）。
     let init = null;
+    // 这一格在自己的初值里还不可见（见 L.selfHide）：`real[] T=…; real[][] T={T[0:13],…};`
+    // （fin.asy:84）里初值那几项说的是**前面**那个 `real[] T`。只圈**求初值**那两处 ——
+    // 别的支上还有几条早回的路，圈大了容易漏还回去。
+    const saveHide = L.selfHide;
     if (isVar) {
       if (d.items[2] === undefined) {
         return L.err(start, '`var` 的声明没有初值 —— 那推不出类型（asy 那边报'
           + ' "inferred variable declaration without initializer"）');
       }
+      L.selfHide = nm;
       const lit = L.expr(d.items[2]);
+      L.selfHide = saveHide;
       if (lit === null) return null;
       if (lit.code === null || lit.type === 'void' || lit.type === undefined) {
         return L.nope(d, `\`var ${nm}\` 的初值（这一句推不出类型）`);
@@ -658,13 +664,16 @@ export function asyVardec(L, n) {
     if (!isVar && d.items[2] !== undefined) {
       // `T[] a = {1,2,3}`：花括号初值自己没有类型，元素类型从左边的声明来
       const raw = d.items[2];
+      L.selfHide = nm;
       const lit = asyIsArr(t) && isList(raw) && head(raw).startsWith('arrayinit')
         ? L.arrLit(raw, t)
         : L.expr(raw);
       const v = L.coerce(lit, t, d, `'${nm}' 的初值`);
+      L.selfHide = saveHide;
       if (v === null) return null;
       init = v.code;
     }
+    L.selfHide = saveHide;
     // 文件级的那一层（第二十四刀）：这里不是局部量，是个全局。声明本身已经在
     // globalNames 里收过了（函数体要先看得见它），这里只发那句赋值。
     // 标量的全局是零初始化的，所以没有初值的声明什么都不发；**聚合不行**（第三十刀）——
@@ -1209,7 +1218,12 @@ export function asyAssignIndex(L, node, lhs, rhs, op) {
   const grow = L.arrHelper('grow', el);
   const head2 = `(expr (call ${grow} (var ${av}) (var ${iv})))`;
   const cur = `(aget (var ${av}) (var ${iv}))`;
-  const put = (code) => [head2, `(aset (var ${av}) (var ${iv}) ${code})`];
+  // 数组与下标都已经绑成临时量了，所以"写进去的那个值"能原地读回来（求值次数不变）——
+  // 赋值当表达式那一档（`A[i][f(m)] = A[i][g(m)] = 1`，fin.asy:51）靠这一格
+  const put = (code) => {
+    L.avout = { node, code: cur, type: el };
+    return [head2, `(aset (var ${av}) (var ${iv}) ${code})`];
+  };
   if (op === null) {
     const v = L.coerce(L.expr(rhs), el, node, '赋给数组元素的值');
     return v === null ? null : put(v.code);

@@ -6391,6 +6391,36 @@ angle=arrowangle, filltype filltype=null, position position=EndPoint)=Arrow;`
 没跑的轴：与上一批同（`run-llvm`、`OMNI_LEGS=all` 那三条腿、`tests/sexpr`、
 `tests/run.js`、`tests/bootstrap`、深快扫、EPS/SVG）。
 
+### 一批：赋值当表达式时左边重读不了那一格、那一格在自己的初值里还不可见
+
+`fin.asy` 两格，都是 asy 的名字/求值规则里那种"顺序"的东西：
+
+**一、`A[i][f(m)] = A[i][g(m)] = 1`（fin.asy:51）。** 赋值在 asy 那边是表达式，值就是
+赋进去的那一个。这一层的做法是"把它摊成语句，再把左边读一遍当值"，所以原来只收
+"左边重读一遍没有副作用"的那几种形状（`asyRereadable`）—— 下标里带调用的这一格被拒了。
+其实数组下标那一路早就把数组与下标都绑成了临时量（`asy__d…` / `asy__i…`），
+写完原地读回来一次都不多求。改法：那一路把"怎么读回来"记在 `L.avout`
+（连着那句赋值的节点一起记，里外套几层时认得出人），表达式那一档在左边重读不了时用它。
+量过一致：`A[idx(1)] = A[idx(2)] = 1;` 之后 idx 只被叫了 2 次，`++C[idx(0)]` 当表达式
+出的是加过之后那一格。
+
+**二、`real[] T=…; real[][] T={T[0:13],T[13:26],T[0:13]};`（fin.asy:84）。**
+初值里那三项说的是**前面**那个 `real[] T`：asy 的名字解析是顺序的，正在声明的那一格
+在自己的初值里还不可见（量过 `int x = x + 1;` 报 "no matching variable 'x'"，
+`int fact(int) = new int(int n){… fact(n-1) …};` 也报同一句）。而**同一句里前面那几个
+声明子**是可见的（`real a=1, b=a+1;` 印 2）—— 所以挡法按**名字**（`L.selfHide`），
+不按位置：`gvarHere` / `gvarFor` 在挑格子时，名字正是这一格、位置正好是这一句、
+单元也是这一个时跳过去。只圈"求初值"那两处，别的支上还有几条早回的路。
+
+于是例子面 **209 → 210 干净**（fin 清零）。
+
+跑过的轴：新用例 156-assign-exp-selfhide 与 `asy -noV` 逐字节一致；
+`tests/asy/cases` 全量按 `run` 那条腿逐个比对，无差异；
+快扫 **210 干净 / 10 有诊断**（220 个共 1.6s、最慢 tvgen.asy 105ms，无并行）、
+模块那一份 **0 条**。
+没跑的轴：与上一批同（`run-llvm`、`OMNI_LEGS=all` 那三条腿、`tests/sexpr`、
+`tests/run.js`、`tests/bootstrap`、深快扫、EPS/SVG）。
+
 ## 后果与代价
 
 

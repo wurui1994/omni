@@ -994,7 +994,13 @@ export function asyGvarHere(L, nm) {
   const list = L.globals.get(nm);
   if (list === undefined) return null;
   let cur = null;
-  for (const g of list) if (g.at <= L.at) cur = g;
+  for (const g of list) {
+    if (g.at > L.at) continue;
+    // 正在求初值的那一格自己挡掉（见 L.selfHide）：`real[][] T = {T[0:13],…}`
+    // （fin.asy:84）里那个 T 指的是前面那格 `real[] T`
+    if (nm === L.selfHide && g.at === L.at && g.unit === L.unit.id) continue;
+    cur = g;
+  }
   return cur;
 }
 
@@ -1008,7 +1014,11 @@ export function asyGvarFor(L, nm, want) {
   const list = L.globals.get(nm);
   if (list === undefined) return null;
   let cur = null;
-  for (const g of list) if (g.at <= L.at && g.ok && g.type === want) cur = g;
+  for (const g of list) {
+    if (g.at > L.at || !g.ok || g.type !== want) continue;
+    if (nm === L.selfHide && g.at === L.at && g.unit === L.unit.id) continue;
+    cur = g;
+  }
   return cur;
 }
 

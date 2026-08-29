@@ -379,6 +379,13 @@ class AsyLower {
     this.cap = null;
     // 正在降级的那个**函数体**的 AST（匿名函数要拿它扫"这个外层名字会不会被改"）。
     this.fnBody = null;
+    // 正在求初值的那个**文件级变量的名字**（null = 不在初值里）：那一格在自己的初值里
+    // 还不可见（量过 asy 对 `int x = x + 1;` 报 "no matching variable 'x'"），而同一句里
+    // 前面那几个声明子照样可见（`real a=1, b=a+1;` 印 2）—— 所以按名字挡，不按位置挡。
+    this.selfHide = null;
+    // 刚摊出去的那句赋值"怎么把写进去的那个值读回来"（见 assignIndex / 赋值当表达式那一档）：
+    // `{ node, code, type }`，node 是那句赋值的节点 —— 里外套着好几层赋值时用它认人。
+    this.avout = null;
     // 文件级的 `T operator init()`（第二十二刀）：记录名 -> 候选表（按声明顺序），
     // 外加节点 -> 候选表，好让 func() 认出"这份 fundec 是哪张表里的"。
     this.oinits = new Map();

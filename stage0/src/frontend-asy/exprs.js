@@ -1041,10 +1041,20 @@ export function asyExprList(L, n, h) {
     // 所以只在"左边重读一遍没有副作用"时收（名字、名字的字段、名字下标的常量格）。
     if (!Array.isArray(L.pre)) return L.nope(n, `这个位置的赋值当表达式（'${h}' 要摊成语句，这里放不下）`);
     const tgt = h === 'assign' ? n.items[1] : n.items[2];
-    if (!asyRereadable(tgt)) return L.nope(n, `赋值当表达式：左边不是能再读一遍的东西（'${h}'）`);
+    // 左边重读不了时还有一条路：摊出去的那句自己留了"写进去的值怎么读回来"（L.avout）——
+    // 数组下标那一路把数组与下标都绑成了临时量，读回来不会再求一遍下标里那个调用。
+    // fin.asy:51 的 `A[i][indexof(m-1,2)] = A[i][indexof(m+1,2)] = 1;` 就是这一格。
+    const rr = asyRereadable(tgt);
+    L.avout = null;
     const lines = asyExprStmt(L, n);
     if (lines === null) return null;
+    const av = L.avout !== null && L.avout.node === n ? L.avout : null;
+    L.avout = null;
+    if (!rr && av === null) {
+      return L.nope(n, `赋值当表达式：左边不是能再读一遍的东西（'${h}'）`);
+    }
     for (const s of lines) L.pre.push(s);
+    if (!rr) return { code: av.code, type: av.type };
     return asyExpr(L, tgt);
   }
   if (h === 'postfix') {
