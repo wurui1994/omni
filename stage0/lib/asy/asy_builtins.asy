@@ -3577,6 +3577,24 @@ real arclength(path3 p) {
   return s;
 }
 
+// straightness（runpath3d.in:183/189，公式在 triple.h:398 的 Straightness）：
+// c0、c1 离 z0--z1 的 1/3、2/3 两点的距离**平方**里大的那个。tube.asy:19 的 Split 用它。
+real straightness(triple z0, triple c0, triple c1, triple z1) {
+  triple v = (z1 - z0) / 3;
+  triple a = c0 - v - z0;
+  triple b = z1 - v - c1;
+  real la = dot(a, a);
+  real lb = dot(b, b);
+  return la > lb ? la : lb;
+}
+
+// 段 t 那一份（直段直接 0，与 p.straight(t) 那一支对上）
+real straightness(path3 p, int t) {
+  if (straight(p, t)) return 0;
+  return straightness(point(p, t), postcontrol(p, t), precontrol(p, t + 1),
+                      point(p, t + 1));
+}
+
 real arctime(path3 p, real L) {
   int segs = length(p);
   if (segs <= 0) return 0;
@@ -5701,3 +5719,44 @@ real[][] diagonal(... real[] a) {
 // unstraighten（path 那一格）：asy 那边把"直段"的标记去掉，控制点不动 ——
 // 这一刀的 path 没有那个标记，所以就是原样回去。
 path unstraighten(path p) { return p; }
+
+// nurb（runpath.in:136，实现在 path.cc:1310）：把一段有理三次 Bézier 按 m 等份采样成
+// m+1 个结，再给中间那些结摆一对"共线"的控制点。three.asy:1368 的透视投影靠它。
+path nurb(pair z0, pair z1, pair z2, pair z3,
+          real w0, real w1, real w2, real w3, int m) {
+  pair[] pt;
+  real step = 1.0 / m;
+  for (int i = 0; i <= m; ++i) {
+    real t = i * step;
+    real t2 = t * t;
+    real onemt = 1.0 - t;
+    real onemt2 = onemt * onemt;
+    real W0 = w0 * onemt2 * onemt;
+    real W1 = w1 * 3.0 * t * onemt2;
+    real W2 = w2 * 3.0 * t2 * onemt;
+    real W3 = w3 * t2 * t;
+    pt.push((W0 * z0 + W1 * z1 + W2 * z2 + W3 * z3) / (W0 + W1 + W2 + W3));
+  }
+  real twothirds = 2.0 / 3.0;
+  real third = 1.0 / 3.0;
+  path h;
+  for (int i = 0; i <= m; ++i) {
+    knot k;
+    k.point = pt[i];
+    if (i == 0) {
+      k.pre = pt[0];
+      k.post = twothirds * pt[0] + third * pt[1];
+    } else if (i == m) {
+      k.pre = twothirds * pt[m] + third * pt[m - 1];
+      k.post = pt[m];
+    } else {
+      pair pre = twothirds * pt[i] + third * pt[i - 1];
+      pair pos = twothirds * pt[i] + third * pt[i + 1];
+      pair dir = unit(pos - pre);
+      k.pre = pt[i] - length(pt[i] - pre) * dir;
+      k.post = pt[i] + length(pos - pt[i]) * dir;
+    }
+    h.nodes.push(k);
+  }
+  return h;
+}

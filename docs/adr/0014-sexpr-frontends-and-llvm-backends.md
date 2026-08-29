@@ -5710,6 +5710,35 @@ colorplanes 往前走到 bsp.asy:138 的 `operator --(pair[])`；模块面 three
 `import plain / graph / math` 各 0、three 4、graph3 4、solids 4、geometry 2、contour 2、
 palette 4、stats 3、patterns 1。没跑的轴：输出层的逐字节比对（EPS/SVG）还没做。
 
+### 一批：两个漏了的内建 `straightness` 与 `nurb`（例子面 189 -> 191）
+
+**"递归"那句诊断指错了地方。** tube.asy:16 的 `Split` 报的是"抓外层的 `f`，而它自己是
+递归的"，可把 `localFunClo` 里那次回滚临时关掉一量，真正接不住的是体里第一句
+`straightness(z0,c0,c1,z1)` —— 这个内建在这一份内建面里根本没有。同理 three.asy:1368 的
+`nurb`：那个局部 `nurb(triple×4)` 压根不是递归的，它体里调的是**内建的**
+`nurb(pair×4, real×4, int)`，而内建那一格也没有，于是落到"没有能匹配"上、再被外面那层
+当成递归失败。教训是一样的：探测式回滚把真因藏起来了，所以这两刀都是先把回滚掀开看一眼。
+
+**straightness（第七十八刀）。** 两格，照 runpath3d.in:183/189 与 triple.h:398 的
+`Straightness`：`v=(z1-z0)/3`，取 `|c0-v-z0|²` 与 `|z1-v-c1|²` 里大的那个（是**平方**，
+不开根）；`straightness(path3,int)` 那一格直段直接 0。
+
+**nurb（第七十八刀）。** path.cc:1310 那一份原样搬：有理三次 Bézier 按 m 等份采样出
+m+1 个点，两头的控制点是 `2/3·z + 1/3·邻点`，中间那些结把 pre/post 摆成过该点的**同一条
+方向**上（`dir=unit(pos-pre)`，两侧各留原来的长度）。结点直接 push 进 `path.nodes`、
+`joins` 空着 —— 按 struct path 那条约定（joins 与段数不齐时一律按"控制点已定"走），
+正合适。逐字节量过 4 段那一例的 point / precontrol / postcontrol。
+
+pipes 与 trefoilknot 两个例子到齐（都停在 tube.asy:16），模块面 three / graph3 / solids
+又各少一条。`cases/138` 把两个内建的数都钉住。
+
+跑过的轴：`node tests/asy/run.js` 226/226（run + run-llvm 两条腿；新增 cases/138 与真 asy
+逐字节一致）；`tests/asy/sweep.js` 例子面 **干净 191 / 有诊断 29**；模块面
+`import plain / graph / math` 各 0、three 3、graph3 3、solids 3、geometry 2、contour 2、
+palette 4、stats 3、patterns 1。速度这一趟本机负载高（load average 8~9，另有两个进程各占
+满一核），所以拿 HEAD 与改后交错各跑两趟对照：HEAD 4.7s/7.8s、改后 2.9s/4.5s —— 慢的是
+机器不是这一刀。没跑的轴：输出层的逐字节比对（EPS/SVG）还没做。
+
 ## 后果与代价
 
 
