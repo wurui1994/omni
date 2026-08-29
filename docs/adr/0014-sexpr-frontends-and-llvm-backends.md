@@ -6716,6 +6716,29 @@ splitpatch（`.initialized`）。
 没跑的轴：`OMNI_LEGS=all` 那四条腿（run-c / interp / interp --mir / run-llvm）、
 `tests/sexpr`、`tests/run.js`、`tests/bootstrap`、深快扫（`OMNI_SWEEP_SX=1`）、EPS/SVG 逐字节。
 
+### 量过之后决定不做：AiryDisk 的 `gsl` 模块（Bessel J）
+
+`AiryDisk.asy:2` 的 `import gsl;`，要的只有一个 `J(1,r)`。asy 那边 `gsl` 不是 .asy 文件，
+是 gsl.cc 注册的一个内建模块：`J` 是 `addGSLRealRealFunc<gsl_sf_bessel_Jnu>`，也就是
+**实数阶** Bessel Jν。模块这一头这边现成 —— 模块搜索路径里已经有 `stage0/lib/asy`
+（cli.js:196），摆一份 `gsl.asy` 就能 import 上。卡的是**精度**：
+
+- 宿主数学库的**交集**里没有 Bessel。libm 有 `j0/j1/jn`（POSIX 扩展），V8 没有 ——
+  所以它进不了 `(rmath …)` 那张白名单（那张表的判据就是"两边都有"），只能用 asy 自己写。
+- 自己写的两条常规路子都量过了（拿 `asy -noV` 的 `J(0,x)`/`J(1,x)` 当参考，
+  x 取 0.5…21.3 十一个点，相对差）：
+  - 升幂级数：x ≤ 7.5 上 2e-16…6e-15（够），x=10 是 3e-13、x=15 是 2e-11、
+    x=21.3 是 8e-9 —— 交替求和的抵消，补偿求和（Kahan）救不回来（量过，几乎不变：
+    误差在**逐项相乘**里，不在求和里）。
+  - Hankel 渐近展开：x ≥ 12.5 上 1e-13…2e-15（够），x=7.5 是 4e-8、x=5 是 1e-5 —— 不够。
+  - 两条拼起来（在 x≈11 换手）最坏还是 **1e-12 量级**，落在 x∈(7.5,12.5) 那一段。
+
+这一节的容差契约是"印出来最后一位差不超过 1"（≈1e-15），1e-12 比它松三个数量级。
+GSL 那边够是因为它用的是**Chebyshev 拟合表**加分段渐近，那是一整套数据。
+所以这一格**先不做**，理由记在这儿：不是漏了，是"照这个精度门槛，得先搬 GSL 的拟合表"。
+AiryDisk 只画一张面、不印数，真要放行的话代价是"画出来的东西与 asy 差 1e-12 量级"——
+那要单独决定，不在这一刀里顺手做。
+
 ## 后果与代价
 
 
