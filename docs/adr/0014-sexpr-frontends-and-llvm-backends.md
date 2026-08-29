@@ -6781,6 +6781,57 @@ mpmath 40 位交叉验证。
 上一趟五条腿全量刚过：**252 过 0 败**，857.5s；`node tests/run.js` 也刚过 **91 过 0 败**）、
 `tests/sexpr`、`tests/bootstrap`、深快扫（`OMNI_SWEEP_SX=1`）、EPS/SVG 逐字节。
 
+### 一批：`new T[n][]` 外层每格是一条空数组（`import three;` 跑起来死在这儿）
+
+先前这一格记反了，而且反得很贵：`asyNewArray` 的注释写着"`new real[2][]` 外层铺 2 格、
+每格是**空引用**（`a[0][0]` 报 dereference of null array）"。重新量了一遍 asy，
+四个数都不支持那个说法：
+
+- `real[][] a=new real[2][]; write(a[0].length);` → **0**（读得出来，不是空引用）；
+- `a.initialized(0)` → **true**；
+- `a[0][0]` 报的是 `reading array of length 0 with out-of-bounds index 0`，
+  **不是** null 那一句；
+- `a[0].push(3.5)` 照样能用，而且 `a[1].length` 还是 0 —— 每格是**各自独立**的一条。
+
+也就是 asy 的 `new T[n][]` 是"外层 n 格、每格一条新的空数组"。`new real[2][3][]` 也一样
+（量过 `c[1][2].length` 是 0），元素类型是数组 typedef 的 `new rarr[3]` 也一样（量过是 0）。
+
+这条不是纸面上的差别 —— **`import three;` 跑起来就死在它上面**：
+three_surface.asy:460 `S.P=new triple[s.P.length][]`，紧接着 :463 `triple[] Si=S.P[i];`。
+铺空引用时那一读就是 `null reference`，于是 three / graph3 那一族**一个都跑不起来**
+（`import three; write(1);` 都死）。降级那一头一直是干净的，所以快扫看不见它。
+
+改法（`stage0/src/frontend-asy/exprs.js` 的 `asyNewArray`）：把判据从"给了几个长度"
+换成"**这个数组的元素自己是不是数组**"——
+
+    let cell = t; let dims = 0;
+    while (asyIsArr(cell)) { cell = asyElem(cell); dims++; }
+    if (dims === 1) return { code: `(anew ${asyCore(t)} ${vals[0]})`, type: t };
+    // 缺的那几维按长度 0 补进去
+    let z = counts.length; while (z < dims) { as = `${as} (int 0)`; z++; }
+    return { code: `(call ${L.arrNewHelper(cell, dims)}${as})`, type: t };
+
+`arrNewHelper` 本来就是"逐行 aset 一条新的"，把缺的维数按 0 传进去，长度 0 的那一层
+再往里也没有格子 —— 与 asy 的"每格一条空数组"逐格对上。顺带把 typedef 出来的数组元素
+（`rarr[] e=new rarr[3]`）也一起接住了：判据看的是 `t` 的真实维数，不是写法。
+
+`import three;` 于是往前走到了下一道墙：`abort: intersections(path,pair,pair) 还没做`
+（模块初始化里就会调）。那是另一刀。
+
+还有两样**没动**，写在 `asyNewArray` 的注释与新例子的头上：`new real[2][3]` 两层都铺满
+之后读 `d[1][2]`，asy 报未初始化、这一层给 0；`new S[2]`（S 是记录）读 `f[0].x`，
+asy 报未初始化、这一层是空引用报 null reference。那两条要等"空槽"进方言。
+
+新增 `tests/asy/cases/162-new-outerdim.asy`（逐字节一样）：两维/三维/typedef、
+push 进某一行之后另一行不受影响、两层都给时的长度。
+
+跑过的轴：快扫（219/220 干净、模块 0 条、2.3s、最慢 genusthree.asy 143ms）、
+oracle 逐字节对照（新例子与 6 个 /tmp 探针）、全量 `node tests/asy/run.js`（两条腿，
+结果见下一段）。
+没跑的轴：`OMNI_LEGS=all` 那三条额外的腿（run-c / interp / interp --mir）、
+`tests/run.js`、`tests/sexpr`、`tests/bootstrap`、深快扫（`OMNI_SWEEP_SX=1`）、
+EPS/SVG 逐字节。
+
 ## 后果与代价
 
 

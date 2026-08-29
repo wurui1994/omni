@@ -1898,9 +1898,18 @@ export function asyStrConvCall(L, n) {
  *
  * 多维的三种写法量过 asy 的行为，我们逐条对上：
  *   `new real[2][3]` 两层都铺满（我们生一个构造器函数，逐行 aset 一条新的）；
- *   `new real[2][]`  外层铺 2 格、**每格是空引用**（`a[0][0]` 报 dereference of null array，
- *                    我们的 `anew` 铺的正是空引用，读它是同一句运行期错误）；
+ *   `new real[2][]`  外层铺 2 格、**每格是一条新的空数组**（不是空引用 —— 量过：
+ *                    `a[0].length` 是 0、`a.initialized(0)` 是 true、`a[0][0]` 报的是
+ *                    "reading array of length 0 with out-of-bounds index 0"，
+ *                    而**不是** null 那一句；`a[0].push(3.5)` 也照样能用）。
+ *                    这一条先前记反了，`(anew …)` 铺的空引用一读就是 null reference ——
+ *                    `import three;` 就死在这儿（three_surface.asy:460 的
+ *                    `S.P=new triple[s.P.length][]` 紧跟着 :463 读 `S.P[i]`）。
  *   `new real[][]`   长度 0。
+ *
+ * 所以：只要**元素类型自己还是数组**（尾巴上有空 `[]`，或者 el 本身是个数组 typedef），
+ * 就一律走 arrNewHelper，缺的那几维按长度 0 传 —— 长度 0 的那一层再往里也没有格子，
+ * 与 asy 的"每格一条空数组"逐格对上（`new real[2][3][]` 量过：`c[1][2].length` 是 0）。
  */
 export function asyNewArray(L, n) {
   const el = L.type(n.items[1], 'new 的元素类型');
@@ -1940,12 +1949,17 @@ export function asyNewArray(L, n) {
     if (v === null) return null;
     vals.push(v.code);
   }
-  if (counts.length === 1) return { code: `(anew ${asyCore(t)} ${vals[0]})`, type: t };
+  // t 的最内层 cell 与总维数（typedef 出来的数组类型也算进去，见上面那段话）。
+  let cell = t;
+  let dims = 0;
+  while (asyIsArr(cell)) { cell = asyElem(cell); dims++; }
+  if (dims === 1) return { code: `(anew ${asyCore(t)} ${vals[0]})`, type: t };
   let as = '';
   for (const v of vals) as = `${as} ${v}`;
-  return { code: `(call ${L.arrNewHelper(base, counts.length)}${as})`, type: t };
+  let z = counts.length;
+  while (z < dims) { as = `${as} (int 0)`; z++; }
+  return { code: `(call ${L.arrNewHelper(cell, dims)}${as})`, type: t };
 }
-
 /**
  * 花括号数组初值。核心方言里没有"数组字面量"这一条，所以摊成一串语句：
  * 先 anew 一个空的，再逐个 apush，最后把临时量当值用。这跟 `? :` 用的是同一套
