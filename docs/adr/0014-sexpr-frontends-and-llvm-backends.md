@@ -6878,6 +6878,191 @@ surface 三个 /tmp 冒烟、全量 `node tests/asy/run.js`（两条腿，结果
 `tests/run.js`、`tests/sexpr`、`tests/bootstrap`、深快扫（`OMNI_SWEEP_SX=1`）、
 EPS/SVG 逐字节。
 
+### 一批：一个源文件一份 ESM 产物（分离编译、增量、库的正文不重降）
+
+`import three;` 跑通之后，挡在"220 个例子全跑起来"前面的不是语义，是**时间**：一趟
+`run 例子.asy` 要 1.8–2.2s，而其中真正属于这个例子的活儿不到 5%。这一批把它拆开。
+
+**一、核心方言能分离编译了。** 加了一个只声明不定义的形式：
+
+```
+(sig "出处" (fn 名 (形参) 返回类型))
+(sig "出处" (global 名 类型))   (sig "出处" (class 名 (字段 类型)…))   (sig "出处" (cfn …))
+```
+
+`sexpr/lower.js` 把 `(sig …)` 收进一张"只有签名"的表（`sigOnly`），装配时跳过它们的
+定义与零初始化；带出处的那些同时记进 `imports`，后端据此发**真的 `import`**。
+于是一份核心方言模块只要知道别人的签名就能单独编成 JS。
+
+**二、名字不能再依赖加载顺序。** 这是"一个库一份产物"的前提，也是这一批里最烦的一半：
+
+- 单元前缀从 `asy__m<第几个被加载的>_` 改成 `asy__m<身份哈希>_`（`unitNew` 按 `key`
+  取哈希）。以前同一个 `plain_pens.asy` 在 `import graph` 的例子里与在 `import three`
+  的例子里编出来的符号名不一样，那份产物就没法给另一个例子用。
+- 每个单元自己一套编号计数器（`nsym`/`ntmp`），不再用全程序那一个。
+- 闭包改成 `omni_clo_<名>` / `omni_mk_<名>`，fnRef 适配器 `omni_clo_ref_<名>`，
+  方法值 `asy__mvw_<候选符号>` —— 都是**内容决定名字**。
+- 默认实参的包装名从计数器改成「被调方的符号 + 缺的那几格槽号」
+  （`…_shipout__d0_2_3`）。
+
+**三、`omni_weak`：名字由内容定、成员由程序定的那一档。** HELPERS、元素是记录的数组
+工厂、cyclic 登记处、内建数学包装、隐式构造、默认实参包装、函数类型上的默认值包装 ——
+这些**生不生取决于有没有人这么调**，放进库里那个库的产物就跟着调用方变。量出来的：
+`import graph` 与 curve.asy 两个入口底下，plain 那一份只差一条 `shipout__d0_2_3…`，
+别的 6 份逐字节一样。把它们挪进 `omni_weak` 之后，库那几份**跨入口逐字节相同**。
+
+**四、链接（`frontend-asy/link.js`）。** 输入是 `lower.js` 按单元分好的段，输出是
+一份份独立的核心方言模块：自己的定义照原样发，用到的别人家的名字发成
+`(sig "出处" …)`。「谁定义了这个名字」是从**发出去的文本自己**读出来的（每条顶层项的
+第一行就是它的签名），所以签名不可能与定义不一致。两处是量出来才补上的：
+
+- **两个名字空间**（类型 / 值）。asy 里一个 struct 的构造函数就叫 struct 自己的名字，
+  合一张表后者盖前者，那一格类就没有字段，接着刷几百条"类 X 没有字段 Y"。
+- **签名要闭包到不动点**。`(class autoscaleT (scale scaleT) …)` 里的 `scaleT` 又是一个类。
+
+**五、产物与增量。** `.omne-cache/asy-mods` 一层平铺、**按源文件名只换后缀**
+（`plain.asy` -> `plain.sx`/`plain.js`/`plain.stamp`），模板实例化后缀一段身份哈希
+（`iter__8a0a8a29`）。印记不哈希那一大坨文本，只记「编译器 + 它自己那个源文件 +
+它引到的那几个源文件」的 `路径:改动时间:字节数`（stat 是常数时间；哈希 1.3MB 要 172ms）。
+每份产物是**真 ESM**：`export` 定义、`import` 别人的名字；asy 有跨文件赋值，所以 esm
+模式下每个全局装箱（`export const g_X = { v: undefined }`）。`omni_rt.js` 把前奏与
+分派器 `Object.assign` 到 globalThis，生成的模块里 `$print`/`$W` 就还能裸着用。
+
+**六、清单快路。** 产物缓存只砍掉"核心方言 -> JS"那一段，而大头在前端 —— 判断"能不能
+用"这件事本身必须便宜。`main-<入口>.dep` 记下这个入口用到哪几份产物、每份对应的源文件
+及其改动时间/字节数；下一趟只 stat 那几十个文件，成立就**整个前端一步都不走**。
+量出来的：同一入口重跑 2.045s -> 0.374s。
+
+**七、库的产物还在就不降它的正文。** 上面那些让"换个入口"少编了几份 JS，但一个**新**
+入口（220 个例子每个都是新入口）还是 1.0–1.3s。CPU profile 说清了钱花在哪
+（unitcircle.asy，AST 缓存与产物都热）：
+
+```
+asyText（整个 asy 前端）    645ms
+  ├ asyDeclPass(root)      221ms   递归加载 13 个库 + 声明遍（AST 读回 47ms 在内）
+  └ asyBodyPass ×13        368ms   库的**正文降级**
+asyLink                   ~110ms
+lowerCoreSexpr             40ms   只编新的那 2 份
+spawnSync（跑出来的程序）  273ms
+glrParse                    3.8ms  语法分析早就不在账上了
+```
+
+`--verbose` 那些行会骗人：`vStep` 的 delta 记在**打印这一行之前**那段活儿上，所以
+`omni: asy module simplex2 [352ms]` 说的不是 simplex2（它 1356 个 token，AST 读回 3ms），
+而是"走到 plain_scaling.asy:204 那句 `from simplex2 access problem;` 之前"的那一段。
+
+白付的是 **asyBodyPass 那 368ms**：它降出来的东西逐字节等于盘上已经躺着的
+`plain.sx`/`plain_bounds.sx`/…。所以：**一个库的 `.stamp` 还对得上，就不跑它的
+asyBodyPass**（`lower.js` 的 `skipBody` / `cli.js` 的 `asyModsSkip`）。声明遍那 221ms
+省不掉 —— 入口要那些表才编得动，而表只能由 declPass 现算。
+
+一份产物旁边因此多了三格（都是"原文件名，只换后缀"）：
+
+- `<名>.sec`：它定义的名字与签名（每条顶层项的第一行）。别人引它时要发的 `(sig …)`
+  就从这儿来 —— 不降正文也知道它有什么。
+- `<名>.wk`：它引到的那些 **weak 项的正文**。那一档按程序生成，跳过它的正文就没人生了，
+  而它的 `.js` 里 import 着。要**闭包**：weak 项自己也会引别的 weak 项。
+- `<名>.dep`：复用它时**还得把哪几份也带上**。这一格是被 `class problem` 逼出来的 ——
+  `plain_scaling.asy:204` 那句 import 在**函数体里**，跳过 plain_bounds 的正文之后
+  simplex2 这个单元压根不存在，而 plain_bounds 的 `.js` 引着它。
+
+三处顺带修掉的坑，都是量出来的：
+
+1. **`omni_weak` 是按程序生成的，名字却必须固定**（库的 `.js` 里写死 `'./omni_weak.js'`，
+   不然一个库的产物就跟着入口变）。于是换个入口跑就把它盖掉，而清单快路只看源文件没动
+   —— `run tri`、`run curve`、再 `run tri`，第三趟命中清单却拿着 curve 那份 weak，报
+   `s_…_shipout__d0_2_3_4_5_6_7_8_9` 不是它的导出。现在清单里多一行
+   `w|<omni_weak 的印记>`，对不上就老实重来。
+2. **正文被跳过的单元不能再用它的编号计数器**（`asy__anon<n>`）。那个编号只有"整份正文
+   都降一遍"时才确定；跳过之后替它生的那几段（默认实参里的匿名函数 —— 降它时
+   `L.unit` 换成被调方）会占到盘上那份已经用过的号，两段不同的代码撞成一个名字。
+   量出来的样子是 filesurface（graph3 那一路）报
+   `捕获 'asy__self' 要 …_picture，这里是 Label`。frozen 的单元改按**位置**取名
+   （`genSym`）：同一个源文件里位置唯一，与降级顺序无关。
+3. **入口那一份不出 `.sec`/`.wk`/`.dep`**。入口单元的前缀是空串，顶层名字是裸的
+   （`cardioid.asy` 里那个 `real f(real t)` 就叫 `f`），而 `refsOf` 是往多了算的 ——
+   别的程序算"还要带哪几份"时把某个库 weak 项里出现的 `f` 认成"cardioid 定义的"，
+   于是 `main-label3.js` 里多出一句 `omni_init_cardioid()`，label3 与 gamma3 双双死在
+   `$alen`（跑的是另一个例子的初始化）。同一条的另一半在链接那层：**入口的名字只有
+   入口自己与 weak 能引**，库那一份引到就报"未声明"（看得见），不再悄悄把入口
+   import 进库的产物里。
+
+量出来的账（缓存全热）：
+
+- 新入口：2.0s -> **0.61–0.75s**；核心方言这一趟只拼 169KB（从前 1.28MB）。
+- 同一入口重跑：**0.27s**（清单快路，前端一步不走）。
+- 一个库改了：只重编它自己那一份与 weak，别的原样留着（`touch settings.asy` -> 新编 2、复用 11）。
+
+同一批里还有三件小的：`tests/asy/draw/` 补了 colors / curve / implicit / xform 四个
+用例（隐式 shipout 那条钉在 implicit.asy 上）、`run.js` 每个例子加了 ≤30s 的超时、
+cyclic 那一路的拷贝。
+
+跑过的轴：快扫（220 个例子、219 干净、模块 0 条、2.5s、最慢 genusthree.asy 188ms）、
+tests/asy/draw 五个用例的**两条路逐字节对照**（单体路 vs 模块路）并**交错跑三轮**
+（换入口、再换回来 —— 上面第 1 条就是这么量出来的）、examples 前 60 个两条路逐字节对照、
+`OMNI_ASY_MODS=1` 与不开时的产物复用统计。
+没跑的轴：全量 `node tests/asy/run.js`、`OMNI_LEGS=all`、`tests/run.js`、
+`tests/sexpr`、`tests/bootstrap`、深快扫（`OMNI_SWEEP_SX=1`）、EPS/SVG 逐字节。
+
+`OMNI_ASY_MODS=1` 仍然是开关，还没变成 `run` 的默认。
+
+### 一批：库的**接口索引**（换个入口不再重走声明遍）
+
+上一节把库的**正文**省了，声明遍那 221ms 还在。换个入口跑 tri.asy（20 行，16 行是注释，
+真代码 4 行）量出来是：声明遍 367ms、这个例子自己的正文 16ms。**23 倍的白付**。
+
+第一版想歪了：给 AST 做裁剪（`astPrune` / `.dast`）。被一句话点醒 ——「巨大的 C 语言库，
+导入时需要巨大的头吗？不是。需要的只是变量名或函数名，匹配」。裁剪还是要读、要解析；
+真正该问的是**声明表里到底哪几格被用到**。
+
+于是把库的候选表用 Proxy 毒一遍，数谁真被摸：
+
+```
+候选项 c.node（整棵函数体 AST）  14234 棵 = 61MB   全程只摸 2–8 次，都在 calls.js:1993
+默认实参表达式 p.d               6913 条  = 441KB  重载定型时必须现算
+record 正文语句 rec.stmts        44 条            recNew 要按 mat 与字段交错
+```
+
+61MB 里被用到的是 **8 次**。所以一份库不再存 AST，改存一格 `<名>.aif` ——
+**接口索引**：函数 / 全局量 / record 可见性 / 类型别名 / 转换 / 运算初值全是**标量表**
+（名字、签名、符号、槽位），只有四处存打包过的 AST 片段：默认实参、record 字段的
+`def`/`fnbody`、struct 正文语句、以及默认实参里出现 `new-function` 时那个被调方的正文。
+`stage0/src/frontend-asy/iface.js` 是这一格的全部（`asyIfaceDump` / `asyIfaceLoad`），
+读回时由 `lower.js` 的新 `unitStub` 造一个**没有正文**的单元。
+
+两个把索引撑爆的坑，都是量出来才知道：
+
+1. **只能导出"自己这份定义的"**。第一版把合并后的整张表倒出来 —— 17MB，比它要替掉的
+   7.7MB AST 还大。改成按 `c.unit !== u.id` 滤掉借来的，再存一条 **import 重放表**
+   （`u.imps`，五个合并点全部收口到 `asyModMerge`）：读回时照原样重放一遍 import，
+   借来的名字自然又长回去。3.0MB。
+2. **闭包型默认实参**要连被调方的正文一起带（`new-function` 在里面）。只对含
+   `new-function` 的片段存那一份 → **1.0MB**（20 份库合起来 1.1M）。
+
+读回路上五个坑，全是"少存了一格"或"存回来的形状不对"，都由报错钉到位：
+
+1. 少了 `rec.statics` → picture / filltype / projection 报「取字段 `.keepAspect`」。
+2. 少了 `casts` / `oinits` → `bool3` 三目「两支的公共签名里没有同型的一份」、
+   `transform * string`。
+3. `fnbody` 存回来是 `null` 而不是 `undefined` → `recNew` 的守卫
+   （lower.js:2436 那句 `f.fnbody !== undefined`）放过去，cos2theta / integraltest 死在
+   `null.items`。
+4. `rec.stmts` 只存了长度、内容是 null → alignedaxis 死在 lower.js:2428 的 `sts[si].mat`。
+   得把打包过的语句连 `mat` 一起存（`recNew` 拿 `mat` 跟字段默认值交错）。
+5. 造出来的 SourceFile 存根得像个真文件：`lineText` 缺了 `diag.js:91` 崩、`lineCol`
+   返回 0 行 0 列 `diag.js:94` 报 `Invalid count value: -1`。
+
+量出来的账（coag.asy，删掉清单强制走前端，同一个例子连跑三趟）：
+
+```
+             源码路              接口索引路
+总时长       706 / 620 / 516ms   404 / 403 / 471ms
+编译那半     ~465ms              ~130ms
+跑出来的程序 ~275ms              ~275ms      （这一半跟前端无关）
+```
+
+oracle（`/opt/homebrew/bin/asy -noV`）同一个例子 370ms。
+
 ## 后果与代价
 
 

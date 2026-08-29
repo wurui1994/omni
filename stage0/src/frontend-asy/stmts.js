@@ -63,7 +63,7 @@ export function asyWriteStmt(L, n) {
     // struct，所以要在下面那条"结构体不印"前面接住。先落一个临时量：格式是六个字段
     // 拼起来的，不落就把那个表达式求了六遍。
     if (v.type === 'transform' && Array.isArray(L.pre)) {
-      const tv = `asy__wt${L.tmp++}`;
+      const tv = `asy__wt${L.unit.ntmp++}`;
       L.pre.push(`(let ${tv} ${asyCore(v.type)} ${v.code})`);
       vals.push({ code: `(var ${tv})`, type: 'transform' });
       continue;
@@ -208,17 +208,17 @@ export function asyWriteArrays(L, n, vals, first) {
   if (first === 1) out.push(`(print ${vals[0].code})`);
   const names = [];
   for (let i = first; i < vals.length; i++) {
-    const nm = `asy__wa${L.tmp++}`;
+    const nm = `asy__wa${L.unit.ntmp++}`;
     names.push(nm);
     out.push(`(let ${nm} ${asyCore(vals[first].type)} ${vals[i].code})`);
   }
-  const nmax = `asy__wn${L.tmp++}`;
+  const nmax = `asy__wn${L.unit.ntmp++}`;
   out.push(`(let ${nmax} int (int 0))`);
   for (const nm of names) {
     out.push(`(if (bin "<" (var ${nmax}) (alen (var ${nm}))) (do (set ${nmax} (alen (var ${nm})))))`);
   }
-  const iv = `asy__wi${L.tmp++}`;
-  const sv = `asy__ws${L.tmp++}`;
+  const iv = `asy__wi${L.unit.ntmp++}`;
+  const sv = `asy__ws${L.unit.ntmp++}`;
   const body = [`(let ${sv} string (bin "+" (tostr (var ${iv})) (str ":")))`];
   for (const nm of names) {
     const cell = asyFmtStr(L, el, `(aget (var ${nm}) (var ${iv}))`);
@@ -446,8 +446,8 @@ export function asyForEach(L, n, ret) {
   if (!isVar && asyElem(a.type) !== el) {
     return L.err(n, `for-each 的元素写的是 ${el}，数组是 ${a.type}`);
   }
-  const av = `asy__f${L.tmp++}`;
-  const iv = `asy__fi${L.tmp++}`;
+  const av = `asy__f${L.unit.ntmp++}`;
+  const iv = `asy__fi${L.unit.ntmp++}`;
   const upd = [`(set ${iv} (bin "+" (var ${iv}) (int 1)))`];
   L.push();
   // 文件级那一档也给一段"体"（与 asyForStmt 同一条，这一刀）：没有它 capOf 里
@@ -504,7 +504,7 @@ function asyForIter(L, n, ret, a, isVar, el0, nm) {
   if (!L.isRec(a.type)) return undefined;
   const itv = asyZeroCall(L, a, 'operator iter');
   if (itv === null || !L.isRec(itv.type)) return undefined;
-  const iv = `asy__it${L.tmp++}`;
+  const iv = `asy__it${L.unit.ntmp++}`;
   const rv = { code: `(var ${iv})`, type: itv.type };
   const get = asyZeroCall(L, rv, 'get');
   const valid = asyZeroCall(L, rv, 'valid');
@@ -939,7 +939,7 @@ export function asyAssign(L, node, lhs, rhs, op) {
     if (!L.isRec(recv.type)) return L.nope(node, `给 ${recv.type} 的字段赋值`);
     if (op === null) return asyAssignFld(L, node, { recv, field: fname }, rhs, op);
     if (L.pre === null) return L.nope(node, '这个位置的复合字段赋值（它要绑一个临时量）');
-    const tv = `asy__r${L.tmp++}`;
+    const tv = `asy__r${L.unit.ntmp++}`;
     L.pre.push(`(let ${tv} ${asyCore(recv.type)} ${recv.code})`);
     return asyAssignFld(L, node, { recv: { code: `(var ${tv})`, type: recv.type }, field: fname }, rhs, op);
   }
@@ -1220,8 +1220,8 @@ export function asyAssignIndex(L, node, lhs, rhs, op) {
   if (idx === null) return null;
   if (L.pre === null) return L.nope(node, '这个位置的下标赋值（它要摊成语句，这里放不下）');
   const el = asyElem(a.type);
-  const av = `asy__d${L.tmp++}`;
-  const iv = `asy__i${L.tmp++}`;
+  const av = `asy__d${L.unit.ntmp++}`;
+  const iv = `asy__i${L.unit.ntmp++}`;
   L.pre.push(`(let ${av} ${asyCore(a.type)} ${a.code})`);
   L.pre.push(`(let ${iv} int ${idx.code})`);
   // 绕圈下标（第六十五刀，见 cycHelper）：`.cyclic` 置上时按长度取模。写侧与读侧同一条

@@ -494,7 +494,10 @@ export function asyAnonFn(L, n) {
  * 第六十六刀）共用这一份 —— 两者的区别只在"名字绑在哪儿"，捕获这件事一模一样。
  */
 export function asyCloFrom(L, n, ret, ps, bodyNode) {
-  const name = `asy__anon${L.anonN++}`;
+  // 名字里的编号是**这个单元自己**的（第七十五刀）：以前是全程序一个计数器，
+  // 于是同一个库文件在不同入口底下 `asy__anon241` / `asy__anon360` 两个名字，产物没法复用。
+  // 正文被跳过的那个单元按位置取名（见 genSym）。
+  const name = L.genSym('anon', n);
   const saveScopes = L.scopes;
   const saveUpd = L.updates;
   const saveSelf = L.self;
@@ -582,7 +585,7 @@ export function asyCloFrom(L, n, ret, ps, bodyNode) {
   }
   const text = [`  (cfn ${name} (${cs.join(' ')}) (${params.join(' ')}) ${asyCore(ret)}`];
   for (const s of body) text.push(`    ${s}`);
-  L.wraps.push(`${text.join('\n')})`);
+  L.pushWrap(`${text.join('\n')})`);
   const sp = vals.length === 0 ? '' : ' ';
   return { code: `(mkclo ${name}${sp}${vals.join(' ')})`, type: `${ret}(${pts.join(',')})` };
 }
@@ -668,7 +671,7 @@ export function asyCapSlot(L, nm, ov) {
   if (L.cap.ovn === undefined) L.cap.ovn = new Map();
   let cn = L.cap.ovn.get(key);
   if (cn === undefined) {
-    cn = `asy__ov${L.tmp++}_${asyFldSym(nm)}`;
+    cn = `asy__ov${L.unit.ntmp++}_${asyFldSym(nm)}`;
     L.cap.ovn.set(key, cn);
     L.cap.seen.set(key, ov.type);
     L.cap.list.push({ name: cn, type: ov.type, val: `(var ${ov.sym})` });
@@ -1427,7 +1430,7 @@ export function asyCycIdx(L, a, icode) {
     return `(call ${h.idx} ${a.code} ${icode})`;
   }
   if (!Array.isArray(L.pre)) return icode;
-  const tv = `asy__cy${L.tmp++}`;
+  const tv = `asy__cy${L.unit.ntmp++}`;
   L.pre.push(`(let ${tv} ${asyCore(a.type)} ${a.code})`);
   a.code = `(var ${tv})`;
   return `(call ${h.idx} (var ${tv}) ${icode})`;
@@ -1975,7 +1978,7 @@ export function asyArrLit(L, n, t) {
   const items = [];
   if (head(n) === 'arrayinit-rest') return L.nope(n, '`{…, ...rest}` 这种初值');
   for (const x of L.flat(n, 'arrayinit')) items.push(x);
-  const nm = `asy__a${L.tmp++}`;
+  const nm = `asy__a${L.unit.ntmp++}`;
   L.pre.push(`(let ${nm} ${asyCore(t)} (anew ${asyCore(t)} (int 0)))`);
   for (const x of items) {
     const nested = asyIsArr(el) && isList(x) && head(x).startsWith('arrayinit');
@@ -2026,8 +2029,8 @@ export function asyArrMethod(L, n, recv, nm) {
     }
     // 多个值：接收者与下标都只能求一次，所以先绑临时量
     if (L.pre === null) return L.nope(n, '这个位置的多值 `.insert(…)`（它要摊成语句，这里放不下）');
-    const av = `asy__ia${L.tmp++}`;
-    const iv = `asy__ii${L.tmp++}`;
+    const av = `asy__ia${L.unit.ntmp++}`;
+    const iv = `asy__ii${L.unit.ntmp++}`;
     L.pre.push(`(let ${av} ${asyCore(recv.type)} ${recv.code})`);
     L.pre.push(`(let ${iv} int ${i.code})`);
     for (let k = 1; k < args.length; k++) {
@@ -2062,7 +2065,7 @@ export function asyArrMethod(L, n, recv, nm) {
   // apush 在核心方言里是**语句**（它的"值"没人用），而 asy 的 push 是表达式且返回那个值。
   // 摊成 pre：先把值绑到临时量（只算一次），push 它，再把临时量当结果。
   if (L.pre === null) return L.nope(n, '这个位置的 `.push(…)`（它要摊成语句，这里放不下）');
-  const tmp = `asy__p${L.tmp++}`;
+  const tmp = `asy__p${L.unit.ntmp++}`;
   L.pre.push(`(let ${tmp} ${asyCore(el)} ${v.code})`);
   L.pre.push(`(apush ${recv.code} (var ${tmp}))`);
   return { code: `(var ${tmp})`, type: el };
@@ -2182,8 +2185,8 @@ export function asyArith(L, n, op, a, b) {
         + `\`${op}\` 是不短路的${op === '&' ? '与' : '或'}，别的类型要自己定义一个 \`operator ${op}\`）`);
     }
     if (!Array.isArray(L.pre)) return L.nope(n, `这个位置的 bool '${op}'（要摊成语句，这里放不下）`);
-    const ta = `asy__and${L.tmp++}`;
-    const tb = `asy__and${L.tmp++}`;
+    const ta = `asy__and${L.unit.ntmp++}`;
+    const tb = `asy__and${L.unit.ntmp++}`;
     L.pre.push(`(let ${ta} bool ${a.code})`);
     L.pre.push(`(let ${tb} bool ${b.code})`);
     return { code: `(bin "${op === '&' ? '&&' : '||'}" (var ${ta}) (var ${tb}))`, type: 'bool' };
@@ -2411,7 +2414,7 @@ export function asyCond(L, n) {
   const av = asyCoerce(L, a, t, n, '`? :` 的真支');
   const bv = asyCoerce(L, b, t, n, '`? :` 的假支');
   if (av === null || bv === null) return null;
-  const nm = `asy__c${L.tmp++}`;
+  const nm = `asy__c${L.unit.ntmp++}`;
   const yes = aPre.concat([`(set ${nm} ${av.code})`]).join(' ');
   const no = bPre.concat([`(set ${nm} ${bv.code})`]).join(' ');
   // 临时量要先有个初值（核心方言的 `(let …)` 要一个表达式），而它马上就被两支之一覆盖。

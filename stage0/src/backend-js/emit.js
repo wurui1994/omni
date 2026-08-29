@@ -31,10 +31,57 @@ class JsEmitter {
     this.out.push('  '.repeat(this.indent) + s);
   }
 
+  /**
+   * ESM 模式下每个定义前面的 `export `（第七十五刀）。一个库文件一份 `.js`，
+   * 它定义的东西全部导出、它用到的别人家的东西靠 `import` 进来 —— 于是"复用"这件事
+   * 是**宿主的模块图**在做，不是我们把一堆文本拼成一份大 JS。
+   */
+  ex() {
+    return this.esm === true ? 'export ' : '';
+  }
+
+  /**
+   * ESM 模式下**全局要装箱**：`export const g_x = {v: …}`，读写都走 `.v`。
+   * 原因是 ESM 的 import 绑定在引用方是只读的，而 asy 里跨文件赋值是真事
+   * （`currentpicture = …`、`defaultpen = …`）—— 不装箱那一句在 JS 里直接抛
+   * "Assignment to constant variable"。装箱之后写的是**同一个对象的字段**，
+   * 六条腿上"全局是一格存储"这条语义没变。
+   */
+  globalRef(name) {
+    return this.esm === true ? `g_${name}.v` : `g_${name}`;
+  }
+
+  /** 别人家的符号 -> 一条 `import`。名字按种类拼，与各自的发射处一一对应。 */
+  importLines() {
+    // 运行时那一份只为**副作用**引一次（它把 $print / $W 那些挂到 globalThis 上）。
+    // 顺序上也靠它：ESM 是深度优先求值依赖，写在最前面就一定先跑。
+    this.line("import './omni_rt.js';");
+    const byFrom = new Map();
+    for (const im of this.mod.imports ?? []) {
+      let names = byFrom.get(im.from);
+      if (names === undefined) { names = []; byFrom.set(im.from, names); }
+      if (im.kind === 'fn') names.push(`s_${im.name}`);
+      else if (im.kind === 'global') names.push(`g_${im.name}`);
+      else if (im.kind === 'class') names.push(`$new_C${im.name}`);
+      else if (im.kind === 'struct') { names.push(`$new_S${im.name}`); names.push(`$cp_S${im.name}`); }
+      else if (im.kind === 'cfn') names.push(`omni_mk_${im.name}`);
+    }
+    for (const [from, names] of byFrom) {
+      this.line(`import { ${names.join(', ')} } from './${from}.js';`);
+    }
+  }
+
   emit() {
-    this.out.push(JS_PRELUDE.trim());
-    this.memberDispatch();
-    this.callOpDispatch();
+    // 一份**产物片段**（chunk）：不带 prelude、不带派发器、末尾不调入口（第七十五刀）。
+    // 一个库文件编出一份自己的 JS 就是这个形态 —— 几份拼到一份 prelude 后面就是整个程序。
+    // 这条路在 JS 后端成立的原因见 emitJsFunc 的注释：函数体引用外部世界只靠**名字**。
+    const chunk = this.chunk === true;
+    if (!chunk) {
+      this.out.push(JS_PRELUDE.trim());
+      this.memberDispatch();
+      this.callOpDispatch();
+    }
+    if (this.esm === true) this.importLines();
     for (const s of this.mod.structs) this.struct(s);
     for (const e of this.mod.enums ?? []) this.enumDecl(e);
     for (const c of this.mod.classes ?? []) this.classDecl(c);
@@ -43,9 +90,14 @@ class JsEmitter {
     // 不是 omni_main 的局部量。C 侧对应一批 static omni_dyn。
     for (const g of this.mod.jsGlobals ?? []) this.line(`let g_${g.name} = undefined;`);
     // 核心方言的模块级变量（第二十四刀）：有类型，初值由 omni_main 最前面那几句赋 ——
-    // 所以这里只要把存储声明出来。
-    for (const g of this.mod.globals ?? []) this.line(`let g_${g.name} = undefined;`);
+    // 所以这里只要把存储声明出来。ESM 模式下那一格是装箱的（见 globalRef）。
+    for (const g of this.mod.globals ?? []) {
+      this.line(this.esm === true
+        ? `export const g_${g.name} = { v: undefined };`
+        : `let g_${g.name} = undefined;`);
+    }
     for (const f of this.mod.funcs) this.func(f);
+    if (chunk) return this.out.join('\n') + '\n';
     this.line(`${this.mod.entry}();`);
     // 没人接的错误：和 C 侧的 main 一样，在入口返回之后查一次（ADR-0007 决定 1）
     this.line('$js_check_uncaught();');
@@ -123,16 +175,16 @@ class JsEmitter {
   closureMake(c) {
     const ps = c.captures.map((f) => `c_${f.name}`);
     const fields = c.captures.map((f) => `c_${f.name}: c_${f.name}`);
-    this.line(`function ${c.make}(${ps.join(', ')}) { return { fp: ${c.mangled}${fields.length ? `, ${fields.join(', ')}` : ''} }; }`);
+    this.line(`${this.ex()}function ${c.make}(${ps.join(', ')}) { return { fp: ${c.mangled}${fields.length ? `, ${fields.join(', ')}` : ''} }; }`);
   }
 
   struct(s) {
     const init = s.fields.map((f) => `${f.name}: ${this.zero(f.type)}`).join(', ');
-    this.line(`function $new_S${s.name}() { return { ${init} }; }`);
+    this.line(`${this.ex()}function $new_S${s.name}() { return { ${init} }; }`);
     const copy = s.fields
       .map((f) => `${f.name}: ${this.copyOf(f.type, `v.${f.name}`)}`)
       .join(', ');
-    this.line(`function $cp_S${s.name}(v) { return { ${copy} }; }`);
+    this.line(`${this.ex()}function $cp_S${s.name}(v) { return { ${copy} }; }`);
   }
 
   /**
@@ -143,9 +195,9 @@ class JsEmitter {
   enumDecl(e) {
     const v0 = e.variants[0];
     const init = ['$t: 0n', ...v0.fields.map((f) => `${f.name}: ${this.zero(f.type)}`)].join(', ');
-    this.line(`function $new_E${e.name}() { return { ${init} }; }`);
+    this.line(`${this.ex()}function $new_E${e.name}() { return { ${init} }; }`);
     // 值语义的拷贝：先看标签才知道有哪些载荷字段要拷
-    this.line(`function $cp_E${e.name}(v) {`);
+    this.line(`${this.ex()}function $cp_E${e.name}(v) {`);
     this.indent++;
     this.line('switch (v.$t) {');
     this.indent++;
@@ -172,7 +224,7 @@ class JsEmitter {
 
   classDecl(c) {
     const init = c.fields.map((f) => `${f.name}: ${this.zero(f.type)}`).join(', ');
-    this.line(`function $new_C${c.name}() { return { ${init} }; }`);
+    this.line(`${this.ex()}function $new_C${c.name}() { return { ${init} }; }`);
   }
 
   zero(t) {
@@ -200,7 +252,7 @@ class JsEmitter {
   func(f) {
     // 闭包体的第一个形参是闭包记录本身：捕获从它上面读（C 侧同一套约定）
     const params = [...(f.closureId === undefined ? [] : ['self']), ...f.params.map((p) => `v_${p.name}`)];
-    this.line(`function ${f.mangled}(${params.join(', ')}) {`);
+    this.line(`${this.ex()}function ${f.mangled}(${params.join(', ')}) {`);
     this.indent++;
     // 结构体 / enum 形参按值传递：入口处深拷贝，等价于 C 的值语义
     for (const p of f.params) {
@@ -373,7 +425,7 @@ class JsEmitter {
       // JS 前端的模块级变量（ADR-0011）：一个真全局，可读可写
       case 'JsGlobal': return `g_${e.name}`;
       // 核心方言的模块级变量（第二十四刀）：同一个形状，只是有类型
-      case 'GlobalRef': return `g_${e.name}`;
+      case 'GlobalRef': return this.globalRef(e.name);
       case 'Ternary': return `(${this.expr(e.cond)} ? ${this.expr(e.then)} : ${this.expr(e.otherwise)})`;
       case 'Assign': return `(${this.expr(e.target)} = ${this.rvalue(e.value, e.type)})`;
       case 'IndexGet': {
@@ -513,9 +565,39 @@ function fmtRealLit(v) {
   return v > 0 ? 'Infinity' : Number.isNaN(v) ? 'NaN' : '-Infinity';
 }
 
-/** @param {any} mod OIR 模块 */
-export function emitJs(mod) {
-  return new JsEmitter(mod).emit();
+/** @param {any} mod OIR 模块 @param {{chunk?: boolean, esm?: boolean}} [opts] */
+export function emitJs(mod, opts) {
+  const e = new JsEmitter(mod);
+  if (opts !== undefined && opts.chunk === true) e.chunk = true;
+  // ESM 模式一定是片段：它自己就是一个模块文件，入口由**引它的那一份**去调
+  if (opts !== undefined && opts.esm === true) { e.esm = true; e.chunk = true; }
+  return e.emit();
+}
+
+/**
+ * 运行时那一份模块（`omni_rt.js`）：prelude 加两张派发表，一整份程序里只有它一个。
+ *
+ * 末尾把自己的顶层名字全挂到 `globalThis` 上，**不导出**：各个库产物里
+ * `$print(…)`、`$W(…)` 是**裸名字**，要让它们在自己那个模块作用域里查得到，
+ * 只有两条路 —— 每份产物都写一长串 `import { $print, … }`，或者运行时自己挂上去。
+ * 挂上去这条不用维护那张名单（名单一改就是几百个文件全部重发），所以走这条。
+ */
+export function emitJsRuntimeModule() {
+  const e = new JsEmitter({ structs: [], funcs: [], globals: [], entry: '' });
+  e.out.push(JS_PRELUDE.trim());
+  e.memberDispatch();
+  e.callOpDispatch();
+  const text = e.out.join('\n');
+  const names = [];
+  const seen = new Set();
+  for (const ln of text.split('\n')) {
+    const m = /^(?:function|const|let|var)\s+([A-Za-z_$][\w$]*)/.exec(ln);
+    if (m === null || seen.has(m[1])) continue;
+    seen.add(m[1]);
+    names.push(m[1]);
+  }
+  const asg = names.map((n) => `${JSON.stringify(n)}: ${n}`).join(', ');
+  return `${text}\nObject.assign(globalThis, { ${asg} });\n`;
 }
 
 /**

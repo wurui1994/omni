@@ -255,6 +255,9 @@
 // （frontend-js/link.js 报 "import cycle through"）。
 
 import { isList, isAtom, isStr, head } from '../sexpr/read.js';
+// 单元前缀按模块身份的哈希取（unitNew），所以这一层要这个哈希
+import { hash16 } from '../host/hash.js';
+import { asyIfaceDump } from './iface.js';
 // 类型层（类型在这一层就是字符串）与运行时 helper 那两摊搬到隔壁去了 —— 这个文件只留
 // 「要看符号表才能决定」的那一半。名字一个都没改：模块级名字全仓唯一是封闭 ABI 的要求。
 import {
@@ -337,12 +340,14 @@ class AsyLower {
     // 两句各按自己那一份算），所以用到的地方挑"此处可见的最后一份"。
     this.tyAlias = new Map();
     this.funcs = new Map();    // 名字 -> {ret, params: 类型名数组}
+    // main 末尾要不要插"跑退出钩子"那一句。整份文件（run）插，REPL 的每一批不插 ——
+    // 一批一批地跑时那一句会在**每批**末尾放一次隐式 shipout，与"程序跑完一次"不是一回事。
+    this.tailExit = false;
     this.scopes = [];          // 名字 -> 类型名
     this.used = new Set();     // 用到的 helper
     // for 的更新片段栈。C 式 for 降成 while 之后，`continue` 必须**先跑更新**再跳 ——
     // 不这么做 `for(i=0;i<5;++i){if(i==2)continue;}` 就死循环。量过 asy 的行为：更新会跑。
     this.updates = [];
-    this.tmp = 0;
     // 当前语句的**前置语句**。核心方言里 `? :` 不是表达式，只能摊成临时量 + if/else，
     // 那两条 if/else 就攒在这里，由 stmt() 的外壳补在这条语句前面。
     // null = 不在语句上下文里（那时见到 `? :` 只能报错，不能悄悄丢）。
@@ -372,9 +377,12 @@ class AsyLower {
     // 最后跟别的函数一起发到模块层。同一形状只生一份，顺序按第一次用到的顺序 ——
     // 同一份输入两次降出来的文本因此逐字节相同。
     this.wrapNames = new Map();
+    // 每一项是 `{u, t}`：`u` 是这份包装**归哪个单元**（一个库文件一份产物，所以发出去的
+    // 每一项都得能归到某个单元），`t` 是正文。`u === ASY_WEAK` 是"谁都可能生、名字只由
+    // 内容决定"的那一档（内建数学包装、方法值包装、隐式构造），链接时按顶层名字去重。
     this.wraps = [];
-    // 匿名函数（`new int(int x){…}`）：出来的 `(cfn …)` 也攒在 wraps 里。编号只为起名。
-    this.anonN = 0;
+    // 匿名函数（`new int(int x){…}`）：出来的 `(cfn …)` 也攒在 wraps 里。
+    // 起名用的编号在**单元**上（unitNew 的 nsym），不在这里 —— 见 asyCloFrom。
     // 正在降级的那个匿名函数的捕获状态（null = 不在匿名函数里）。见 anonFn / capOf。
     this.cap = null;
     // 正在降级的那个**函数体**的 AST（匿名函数要拿它扫"这个外层名字会不会被改"）。
@@ -490,11 +498,32 @@ class AsyLower {
     return out;
   }
 
+  /**
+   * 一个新单元。`key` 是**模块身份**（模块名，模板实例还带实参），与加载顺序无关。
+   *
+   * 前缀按 key 的哈希取（第七十五刀）：以前是 `asy__m<第几个被加载的>_`，于是同一个
+   * plain_pens.asy 在 `import graph` 的例子里与在 `import three` 的例子里编出来的符号名
+   * **不一样** —— 那份编译结果就没法给另一个例子用。按身份取之后，一个库文件在哪个入口
+   * 底下都是同一批名字，这是"一个库一份产物、按文件名增量"的前提。
+   * `nsym` 是这个单元自己的编号计数器（文件级变量、局部函数、cast、包装那些用它）：
+   * 以前用的是全程序的计数器，也是顺序依赖的一处。
+   */
   unitNew(tree, key) {
     const id = this.units.length;
+    const pfx = id === 0 ? '' : `asy__m${hash16(key).slice(0, 8)}_`;
     const u = {
-      id, key, rs: this.expandIncludes(this.flat(tree, 'block'), 0), pfx: id === 0 ? '' : `asy__m${id}_`,
-      init: id === 0 ? null : `asy__init${id}`, ran: id === 0 ? null : `asy__ran${id}`,
+      id,
+      key,
+      // 这个单元来自哪个真文件（模块那一路由 modules.js 从加载器那里填；主文件是 opts.path）。
+      // 产物的增量按它判 —— key 只是模块身份，不是路径。
+      file: '',
+      rs: this.expandIncludes(this.flat(tree, 'block'), 0),
+      pfx,
+      nsym: 0,
+      // 局部临时量的编号（`asy__va…`/`asy__c…`/`asy__bx…` 那些）。也是**每个单元自己**的：
+      // 以前是全程序一个计数器，于是同一个库文件在不同入口底下编出来的临时量名字不一样。
+      ntmp: 0,
+      init: id === 0 ? null : `${pfx}init`, ran: id === 0 ? null : `${pfx}ran`,
       funcs: new Map(), globals: new Map(), oinits: new Map(), oiByNode: new Map(),
       casts: new Map(), castByNode: new Map(),
       recVis: new Map(), mods: new Map(), methodDecls: [], callAt: new Map(), at: 0,
@@ -509,6 +538,39 @@ class AsyLower {
     // struct 体里"有体的方法"要不要摊成一格函数值字段，就看这一条（见 recordBody）。
     u.mset = this.memAssigned(u.rs);
     this.units.push(u);
+    return u;
+  }
+
+  /**
+   * 一格**没有正文**的单元（第七十八刀）：库的接口索引读回来时用它，或者某个库的名字
+   * 经由别人传递过来、而它这一趟没人直接 import 时补的占位。
+   *
+   * 与 unitNew 的差别只有两处：`rs` 是空的（于是不走 expandIncludes、也不算 mset），
+   * 以及 `frozen` 一开始就是 true —— 它的产物已经在盘上，正文永远不降。
+   */
+  unitStub(key) {
+    const id = this.units.length;
+    const pfx = id === 0 ? '' : `asy__m${hash16(key).slice(0, 8)}_`;
+    const u = {
+      id,
+      key,
+      file: '',
+      rs: [],
+      pfx,
+      nsym: 0,
+      ntmp: 0,
+      init: id === 0 ? null : `${pfx}init`, ran: id === 0 ? null : `${pfx}ran`,
+      funcs: new Map(), globals: new Map(), oinits: new Map(), oiByNode: new Map(),
+      casts: new Map(), castByNode: new Map(),
+      recVis: new Map(), mods: new Map(), methodDecls: [], callAt: new Map(), at: 0,
+      tyAlias: new Map(),
+      tpl: null,
+      auFns: [], bi: null,
+      mset: new Set(),
+      frozen: true,
+    };
+    this.units.push(u);
+    this.byKey.set(key, u);
     return u;
   }
 
@@ -562,6 +624,23 @@ class AsyLower {
       for (let i = 1; i < cur.items.length; i++) push(cur.items[i], nowRec);
     }
     return out;
+  }
+
+  /**
+   * 模块级的生成名（匿名函数 `asy__anon…`、局部函数 `asy__lf…`）。
+   *
+   * 正文被跳过的那个单元（`frozen`，见 chunk 里的 skipBody）**不能再用它的计数器**：
+   * 那个编号只有"整份正文都降一遍"时才是确定的。跳过之后，替它生的那几段
+   * （默认实参那一段里的匿名函数 —— 降它时 L.unit 换成了被调方）会占到盘上那份产物里
+   * 已经用过的号，于是两段不同的代码撞成同一个名字。量出来的样子是 filesurface（graph3
+   * 那一路）报 `捕获 'asy__self' 要 …_picture，这里是 Label`。
+   * 所以 frozen 的单元按**位置**取名：同一个源文件里位置唯一，与降级顺序无关。
+   */
+  genSym(tag, n) {
+    if (this.unit.frozen !== true) return `${this.pfx}asy__${tag}${this.unit.nsym++}`;
+    const at = n === undefined || n === null || n.span === undefined || n.span === null
+      ? '?' : n.span.start;
+    return `${this.pfx}asy__${tag}_${hash16(`${this.unit.key}|${tag}|${at}`).slice(0, 8)}`;
   }
 
   /** 当前那几张表存回单元 `u`（表本身是同一个对象，真要存的只有 at） */  unitSave(u) {
@@ -764,6 +843,12 @@ class AsyLower {
    * 泛型的 `copy(T[])`（runarray.in:687 的 copyArray，默认深拷到底）。这个前端没有泛型，
    * 所以按**实参的元素类型**现生一份 —— 与 arrGen 那张表同一条路子（一个类型只生一份）。
    * 元素本身是数组时递归深拷：asy 那边 `copy` 的 depth 默认是 Int_MAX。
+   *
+   * `cyclic` 跟着走（量过真 asy：`a.cyclic=true; b=copy(a); b.cyclic` 是 true，
+   * `real[][]` 的**内层行**也跟着，`b[4]` 与 `a[4]` 都回 2）。每一层各自照 is/set 抄一次 ——
+   * 内层那一层是递归进去的那份 helper 自己抄的，所以两层都对上。
+   * 少了这一条的样子：three_surface.asy:1633 `array index out of range: 1 (length 1)`
+   * （`copy` 出来的那份丢了 cyclic，下标绕不回去），sphere.asy 就死在那儿。
    */
   arrCopyHelper(el) {
     const nm = `asy__acopy_${asyMangle(el)}`;
@@ -773,6 +858,7 @@ class AsyLower {
     const inner = asyIsArr(el)
       ? `(call ${this.arrCopyHelper(asyElem(el))} (aget (var a) (var i)))`
       : `(aget (var a) (var i))`;
+    const cyc = this.cycHelper(`${el}[]`);
     this.arrGen.set(nm, `  (fn ${nm} ((a ${at})) ${at}
     (let r ${at} (anew ${at} (alen (var a))))
     (let i int (int 0))
@@ -780,6 +866,7 @@ class AsyLower {
       (do
         (aset (var r) (var i) ${inner})
         (set i (bin "+" (var i) (int 1)))))
+    (if (call ${cyc.is} (var a)) (do (expr (call ${cyc.set} (var r) (bool true)))))
     (ret (var r)))`);
     return nm;
   }
@@ -987,14 +1074,14 @@ class AsyLower {
    */
   declareBox(node, nm, t) {
     if (this.declare(node, nm, t) === null) return null;
-    const sym = `asy__bx${this.tmp++}_${nm}`;
+    const sym = `asy__bx${this.unit.ntmp++}_${nm}`;
     this.scopes[this.scopes.length - 1].set(`\u0000bx:${nm}`, { sym, type: t });
     return sym;
   }
 
   /** 形参那一格装箱：名字已经在作用域里了（declare 过），这里只记"它住在箱子里" */
   boxParam(nm, t) {
-    const sym = `asy__bx${this.tmp++}_${nm}`;
+    const sym = `asy__bx${this.unit.ntmp++}_${nm}`;
     this.scopes[this.scopes.length - 1].set(`\u0000bx:${nm}`, { sym, type: t });
     return sym;
   }
@@ -1053,11 +1140,11 @@ class AsyLower {
       top.delete(`\u0000ov:${nm}`);
     }
     if (boxed === true) {
-      const bs = `asy__bx${this.tmp++}_${asyFldSym(nm)}`;
+      const bs = `asy__bx${this.unit.ntmp++}_${asyFldSym(nm)}`;
       top.set(`\u0000bx:${nm}`, { sym: bs, type: t });
       return bs;
     }
-    const sym = `asy__sh${this.tmp++}_${asyFldSym(nm)}`;
+    const sym = `asy__sh${this.unit.ntmp++}_${asyFldSym(nm)}`;
     top.set(`\u0000sy:${nm}`, sym);
     return sym;
   }
@@ -1220,7 +1307,7 @@ class AsyLower {
    */
   bringTy(nm, t, at) {
     const list = this.tyAlias.has(nm) ? this.tyAlias.get(nm) : [];
-    list.push({ t: t, at: at });
+    list.push({ t: t, at: at, u: this.unit.id });
     this.tyAlias.set(nm, list);
   }
 
@@ -1365,7 +1452,7 @@ class AsyLower {
     }
     // 同名再 typedef 一次：asy 收（后面那句起换成新的那一份），所以存的是一串。
     const list = this.tyAlias.has(nm) ? this.tyAlias.get(nm) : [];
-    list.push({ t: t, at: at });
+    list.push({ t: t, at: at, u: this.unit.id });
     this.tyAlias.set(nm, list);
     return true;
   }
@@ -1986,7 +2073,7 @@ class AsyLower {
     let d = null;
     if (list !== undefined) for (const c of list) if (c.node === n) d = c;
     if (d === null) return null;
-    d.sym = `${this.pfx}asy__lf${this.wraps.length}_${d.base === undefined ? nm : d.base}`;
+    d.sym = `${this.genSym('lf', n)}_${d.base === undefined ? nm : d.base}`;
     // 体里看得见的局部只有它自己的：作用域栈换成空的一层，降完换回来
     const saveScopes = this.scopes;
     const saveUpd = this.updates;
@@ -1996,7 +2083,7 @@ class AsyLower {
     this.scopes = saveScopes;
     this.updates = saveUpd;
     if (text === null) return null;
-    this.wraps.push(text);
+    this.pushWrap(text);
     return [];
   }
 
@@ -2179,7 +2266,9 @@ class AsyLower {
     const tgt = isCtor ? `${cand.sym}_body` : cand.sym;
     const vret = isCtor ? 'void' : cand.ret;
     if (w === undefined) {
-      w = `asy__mv${this.mvals.size}_${cand.sym}`;
+      // 名字只由**被包的那个方法**决定（cand.sym 已经全局唯一，mvals 也是按它存的），
+      // 不再用 mvals.size 那个"第几个用到"的编号 —— 那样同一个库在不同入口里名字会不同。
+      w = `asy__mvw_${cand.sym}`;
       const params = [];
       const args = ['(cap asy__recv)'];
       for (const p of cand.ps) {
@@ -2188,7 +2277,7 @@ class AsyLower {
       }
       const call = `(call ${tgt} ${args.join(' ')})`;
       const body = vret === 'void' ? `(expr ${call})` : `(ret ${call})`;
-      this.wraps.push(`  (cfn ${w} ((asy__recv ${asyCore(rec.name)})) (${params.join(' ')})`
+      this.pushWeak(`  (cfn ${w} ((asy__recv ${asyCore(rec.name)})) (${params.join(' ')})`
         + ` ${asyCore(vret)}\n    ${body})`);
       this.mvals.set(cand.sym, w);
     }
@@ -2406,7 +2495,7 @@ class AsyLower {
     }
     const text = [`  (fn ${fname} () ${t}`];
     for (const s of lines) text.push(`    ${s}`);
-    this.wraps.push(`${text.join('\n')})`);
+    this.pushWeak(`${text.join('\n')})`);
     return `(call ${fname})`;
   }
 
@@ -2578,6 +2667,7 @@ class AsyLower {
     let root;
     if (baseUnits === 0) {
       root = this.unitNew(tree, this.opts === null ? '' : this.opts.path);
+      root.file = this.opts === null ? '' : this.opts.path;
       // **主文件也隐式 `import plain;`**（第七十刀）：真 asy 那边 `write(cm);` 不用引任何
       // 东西就能跑 —— plain 是自动引进来的，`-noplain` 才关掉。以前只有**被加载的模块**
       // 走 autoplain（asyModLoadAs 里那一句），主文件没有，于是引真 base 时
@@ -2597,51 +2687,165 @@ class AsyLower {
     }
     this.unitIn(root);
     asyDeclPass(this, root);
+    // **产物还在、源文件没动的那几个库，正文一步都不降**（第七十六刀）。
+    //
+    // 量出来的账（unitcircle.asy，缓存全热）：整个前端 645ms 里 declPass 占 221ms、
+    // 13 个库的 asyBodyPass 占 368ms —— 而后者降出来的东西**逐字节等于**盘上已经躺着的
+    // `plain.sx`/`plain_bounds.sx`/…（前面量过：一个库在哪个入口底下都是同一份）。
+    // 声明遍那一半省不掉（入口要那些表才编得动），正文这一半是纯白付。
+    //
+    // 跳过一个单元意味着这一趟**不为它发任何顶层项**：它的类、全局、函数、包装都在
+    // 盘上那份产物里。链接那一层要的只是"它定义了哪些名字、签名长什么样"，那份签名清单
+    // 由 cli.js 从旁边的 `.sec` 读回来（见 asyUnitModules 的 sections.skipped）。
+    const skipFn = this.opts === null || this.opts === undefined
+      || this.opts.skipBody === undefined || this.opts.skipBody === null ? null : this.opts.skipBody;
+    const skipped = new Map();
+    if (skipFn !== null) {
+      for (const u of this.units) {
+        if (u.id === 0 || u.id < baseUnits) continue;
+        const c = skipFn({
+          key: u.key, file: u.file, tpl: u.tpl !== null, init: u.init, ran: u.ran,
+        });
+        if (c !== null && c !== undefined) { skipped.set(u.id, c); u.frozen = true; }
+      }
+    }
     // 正文：按加载顺序一个单元一遍（declPass 里的递归加载已经把 units 填全了）。
     // 方法体在每个单元里先发：它们只依赖记录声明，而文件级函数的正文可能调到方法。
     const fns = [];
+    const fnUnit = [];            // 与 fns 同长：每一项归哪个单元
     let main = [];
     for (const u of this.units) {
       if (u.id !== 0 && u.id < baseUnits) continue;   // 前面几批加载过的模块不重发
+      if (skipped.has(u.id)) continue;                // 产物还在的库：正文不降
       const prev = this.unitIn(u);
+      const at0 = fns.length;
       const stmts = asyBodyPass(this, u, fns);
       if (u.id === 0) main = stmts;
       else fns.push(this.initFn(u, stmts));
+      for (let i = at0; i < fns.length; i++) fnUnit[i] = u.id;
       this.unitOut(prev);
     }
-    const out = ['(module'];
+    // 分段（第八十几刀）：发出去的每一项先归到它的单元，一个库文件一段。
+    // 这一步只是把从前那一坨按单元分好并按单元号拼回去 —— 下一步 cli.js 就能把每一段
+    // 单独存成"这个库的产物"（按文件名），跨入口复用。weak 那一档不归任何单元。
+    const secs = new Map();
+    const sec = (id) => {
+      let s = secs.get(id);
+      if (s === undefined) { s = { cls: [], glb: [], fns: [], wraps: [] }; secs.set(id, s); }
+      return s;
+    };
+    for (const u of this.units) {
+      if (u.id === 0 || (u.id >= baseUnits && !skipped.has(u.id))) sec(u.id);
+    }
+    // 这一趟每个单元**有没有自己那份产物**，没有的话是哪一条挡的（cli.js 按
+    // `OMNI_ASY_UNITS=1` 打印）。量出来的账：probe.asy 那一趟只有 **11 个单元**
+    // （10 份库 + 入口），而日志里 `asy ast cache` 出现了 20 多次 ——
+    // plain_constants / plain_pens / plain_picture / plain_Label / plain_shipout /
+    // plain_scaling 那十几份**压根不是单元**（并进 plain 那一份里了），所以它们不可能有
+    // 自己的 `.aif`：从 plain 的接口索引重放 import 时，这几份还是要**重新读源码**。
+    // 这是"改一个字符还要 787ms"里剩下那一段的去处（ADR-0015 背景第 2 条）。
+    const unitWhy = [];
+    for (const u of this.units) {
+      unitWhy.push({
+        id: u.id,
+        key: u.key,
+        why: secs.has(u.id) ? '有产物'
+          : (u.id !== 0 && u.id < baseUnits ? `前一批加载的（id ${u.id} < ${baseUnits}）`
+            : (skipped.has(u.id) ? '正文跳过（盘上那份还算）' : '不发')),
+      });
+    }
+    const weak = [];
+    // 盘上那几份产物**已经引着**的 weak 项：这一档不能跟着入口走（见 link.js 那一节
+    // "只有入口才引的那些 weak 项"）—— 它们的 `.js` 是上一趟编的，import 写死了
+    // `from './omni_weak.js'`。
+    const weakLib = [];
+    // 跳过正文的那几份：它们的产物里引到的 weak 项从盘上拿回来（`.wk`）。
+    // 不拿的话那几份 `.js` 一 import 就是"未声明"—— 它们的 `(sig "omni_weak" …)`
+    // 是上一趟编出来的，指着的东西这一趟没人生。按名字去重在链接那一层（asyUnitModules）。
+    for (const id of [...skipped.keys()].sort((a, b) => a - b)) {
+      for (const t of skipped.get(id).weak) { weak.push(t); weakLib.push(t); }
+    }
     // 记录按**声明顺序**发（字段里不许再有记录，所以这就是最终顺序）
     let ri = 0;
     for (const rec of this.records.values()) {
       if (ri++ < baseRecords) continue;
+      if (skipped.has(rec.unit)) continue;   // 它那份产物里已经有了
       const fs = [];
       for (const f of rec.fields) fs.push(`(${asyFldSym(f.name)} ${asyCore(f.type)})`);
-      out.push(`  (class ${rec.name} ${fs.join(' ')})`);
+      sec(rec.unit).cls.push(`  (class ${rec.name} ${fs.join(' ')})`);
     }
     // 模块跑过了没有（第二十五刀）：`import m; import m;` 只跑一遍体，量过
     for (const u of this.units) {
-      if (u.id < baseUnits || u.ran === null) continue;
-      out.push(`  (global ${u.ran} bool)`);
+      if (u.id < baseUnits || u.ran === null || skipped.has(u.id)) continue;
+      sec(u.id).glb.push(`  (global ${u.ran} bool)`);
     }
     // 文件级变量（第二十四刀）：按声明顺序的一批 `(global …)`。零初始化，
     // 真正的初值是 `(main …)` 里那一句 `(set …)` —— 位置就是源码里的位置，
     // 所以「初值在那一行求」这条 asy 语义是照搬的，不是模拟的。
     for (let i = baseGdecls; i < this.gdecls.length; i++) {
       const g = this.gdecls[i];
-      out.push(`  (global ${g.sym} ${asyCore(g.type)})`);
+      const gu = g.unit === undefined ? 0 : g.unit;
+      if (skipped.has(gu)) continue;   // 它那份产物里已经有了
+      sec(gu).glb.push(`  (global ${g.sym} ${asyCore(g.type)})`);
     }
     for (const [hnm, text] of HELPERS) {
-      if (this.used.has(hnm) && !baseUsed.has(hnm)) out.push(text);
+      if (this.used.has(hnm) && !baseUsed.has(hnm)) weak.push(text);
     }
     // 元素是记录的数组 helper：正文是降级过程中按同一个工厂生成的，顺序按第一次用到
     for (const [akey, text] of this.arrGen) {
-      if (!baseArr.has(akey)) out.push(text);
+      if (!baseArr.has(akey)) weak.push(text);
     }
-    for (const f of fns) out.push(f);
+    for (let i = 0; i < fns.length; i++) sec(fnUnit[i]).fns.push(fns[i]);
     // 默认实参的包装：正文是降级过程中生成的，所以只能在这里发（顺序按第一次用到）
-    for (let i = baseWraps; i < this.wraps.length; i++) out.push(this.wraps[i]);
+    for (let i = baseWraps; i < this.wraps.length; i++) {
+      const w = this.wraps[i];
+      // 归属那个单元被跳过了的（默认实参那一段里的匿名函数：降它的时候 L.unit 换成了
+      // **被调方**，见 asyDefWrapper 的 unitIn）—— 归共用那一份。名字只由内容决定，
+      // 所以与盘上那份产物里的同名项是同一段代码，链接那一层按名字去重。
+      if (w.u < 0 || skipped.has(w.u)) weak.push(w.t);
+      else sec(w.u).wraps.push(w.t);
+    }
+    const ids = [...secs.keys()].sort((a, b) => a - b);
+    const out = ['(module'];
+    for (const id of ids) for (const x of secs.get(id).cls) out.push(x);
+    for (const id of ids) for (const x of secs.get(id).glb) out.push(x);
+    for (const x of weak) out.push(x);
+    for (const id of ids) for (const x of secs.get(id).fns) out.push(x);
+    for (const id of ids) for (const x of secs.get(id).wraps) out.push(x);
+    // 下一步（按文件名存产物）要的就是这张表：单元 -> 它自己那几段 + 共用的 weak
+    const keys = new Map();
+    // 库的**接口索引**（第七十八刀）：这一趟真降过的库单元各出一份，落到盘上叫 `.aif`。
+    // 下一个例子引到同一个库时靠它，源码与树都不再碰（见 iface.js 那段账）。
+    const pack = this.opts === null || this.opts === undefined
+      || this.opts.astPack === undefined || this.opts.astPack === null
+      ? null : this.opts.astPack;
+    for (const u of this.units) {
+      if (!secs.has(u.id) && !skipped.has(u.id)) continue;
+      let iface = null;
+      if (pack !== null && u.id !== 0 && u.key !== '' && !skipped.has(u.id)) {
+        const d = asyIfaceDump(this, u, pack);
+        if (!d.bad) iface = d.obj;
+      }
+      keys.set(u.id, {
+        key: u.key, file: u.file, tpl: u.tpl !== null, init: u.init, ran: u.ran, iface,
+        // 指纹要的是**源侧**的依赖图（ADR-0015 决策 1）：这一份 import 了哪几个源文件。
+        // 与"这一趟的入口是谁""这一趟哪几份被跳过"都无关 —— 这正是旧那套 `.stamp`
+        // 做不到的一点（它记的是链接算出来的 deps，跟着跳过与否变）。
+        imps: u.imps === undefined || u.imps === null ? [] : u.imps.map((im) => im.key),
+      });
+    }
+    this.sections = { ids, secs, weak, weakLib, keys, main, tail: '', skipped, unitWhy };
     const body = [];
     for (const s of main) body.push(`    ${s}`);
+    // 退出钩子（`atexit(f)` 存下来的那一个）在这里放：main 的最后一句。
+    // asy 那边的隐式 shipout 全靠它 —— plain.asy:53-62 的 exitfunction 里
+    // `if(!currentpicture.empty()) shipout();`，而 plain_shipout.asy:104 那道
+    // `!implicitshipout && defaultprefix` 的门闩意味着**只有**退出时那一次
+    // 才真的走到 `_shipout`（显式写 `shipout(currentpicture)` 会在那儿 return）。
+    // 所以没有这一句，例子跑完一张 EPS 都不出。
+    const ex = this.tailExit === true ? this.exitCall() : null;
+    if (ex !== null) body.push(`    ${ex}`);
+    this.sections.tail = ex === null ? '' : ex;
     out.push(`  (main${body.length === 0 ? '' : `\n${body.join('\n')}`}))`);
     // 下一批的顶层项从这一批之后接着数
     this.atOff = this.atOff + root.rs.length;
@@ -2650,7 +2854,33 @@ class AsyLower {
 
   /** 整个程序 -> 核心方言文本。函数提到模块层，主文件剩下的语句进 (main ...)。 */
   run(tree) {
+    this.tailExit = true;
     return this.chunk(tree);
+  }
+
+  /**
+   * main 末尾那一句"跑退出钩子"。名字按 asy_builtins.asy 里的 `asy__atexitrun` 查，
+   * 查不到（比如单独测某个不引 builtins 的片段）就回 null —— 那时一句也不发，输出与从前一样。
+   */
+  exitCall() {
+    const list = this.funcs.get('asy__atexitrun');
+    if (list === undefined) return null;
+    for (const c of list) if (c.params.length === 0) return `(expr (call ${c.sym}))`;
+    return null;
+  }
+
+  /**
+   * 攒一份包装/提上来的函数，并记下它**归哪个单元**。不给 `u` 就是当前单元。
+   * 归属决定了它进哪一份产物：默认实参的包装归**被调方**的单元（名字也只由被调方与缺的
+   * 那几格决定），所以同一个库不论被谁引，那份产物都一样 —— 这是"一个库一个 js"的前提。
+   */
+  pushWrap(text, u) {
+    this.wraps.push({ u: u === undefined ? this.unit.id : u, t: text });
+  }
+
+  /** 名字只由内容决定的那一档（内建数学包装、方法值包装、隐式构造）：链接时按名字去重。 */
+  pushWeak(text) {
+    this.wraps.push({ u: -1, t: text });
   }
 
   /**
@@ -2674,8 +2904,12 @@ class AsyLower {
  * @param {{path: string, load: (name: string) => any}} [opts] 模块加载器（第二十五刀）
  * @returns {string} 核心方言源文本（诊断有错时内容不可用）
  */
-export function lowerAsy(tree, diags, opts) {
-  return new AsyLower(diags, opts).run(tree);
+export function lowerAsy(tree, diags, opts, out) {
+  const L = new AsyLower(diags, opts);
+  const text = L.run(tree);
+  // 分段（一个源文件一份产物）：要的人自己传一格进来接，不传就与从前一字不差
+  if (out !== undefined && out !== null) out.sections = L.sections;
+  return text;
 }
 
 /**
@@ -2727,8 +2961,8 @@ export class AsySession {
       // 漏了它，快照回滚之后还会拿着上一段代码的节点去降默认值 —— 诊断于是落在
       // 另一个文件的位置上（量出来的样子是一个例子报出另一个例子里的错）。
       fnDefs: new Map(l.fnDefs), mvals: new Map(l.mvals),
-      methodDecls: [...l.methodDecls], auFns: [...l.auFns], anonN: l.anonN,
-      castNo: l.castNo, tmp: l.tmp, atOff: l.atOff,
+      methodDecls: [...l.methodDecls], auFns: [...l.auFns],
+      castNo: l.castNo, atOff: l.atOff,
     };
   }
 
@@ -2754,8 +2988,8 @@ export class AsySession {
       gdecls: [...s.gdecls], wraps: [...s.wraps], wrapNames: new Map(s.wrapNames),
       used: new Set(s.used), arrGen: new Map(s.arrGen),
       fnDefs: new Map(s.fnDefs), mvals: new Map(s.mvals),
-      methodDecls: [...s.methodDecls], auFns: [...s.auFns], anonN: s.anonN,
-      castNo: s.castNo, tmp: s.tmp, atOff: s.atOff,
+      methodDecls: [...s.methodDecls], auFns: [...s.auFns],
+      castNo: s.castNo, atOff: s.atOff,
     };
   }
 
@@ -2774,10 +3008,8 @@ export class AsySession {
     if (s.mvals !== undefined) l.mvals = s.mvals;
     if (s.methodDecls !== undefined) l.methodDecls = s.methodDecls;
     if (s.auFns !== undefined) l.auFns = s.auFns;
-    if (s.anonN !== undefined) l.anonN = s.anonN;
     l.boxMemo = undefined;   // 装箱判据的备忘（按 fnBody 索引，回滚之后重算）
     l.castNo = s.castNo;
-    l.tmp = s.tmp;
     l.atOff = s.atOff;
     if (s.u0 === null) {
       l.unit = null;

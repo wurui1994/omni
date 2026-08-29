@@ -55,11 +55,29 @@ const root = join(here, '../..');
 const cli = join(root, 'stage0', 'src', 'cli.js');
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 
+// 每一次外部调用都有**上限 30s**：卡住的用例要报成失败，不能把整轴拖死。
+// 两边都套：我们这边（cmd）与判分的真 asy（asyRun）。量过真 asy 自己也会卡 ——
+// examples 里 pdb / stereoscopic / threeviews 在这台机器上 120s 都跑不完。
+const TIMEOUT = 30000;
+
 const cmd = (args, cwd, extraEnv) => {
-  const opts = { encoding: 'utf8', cwd };
+  const opts = { encoding: 'utf8', cwd, timeout: TIMEOUT, killSignal: 'SIGKILL' };
   if (extraEnv !== undefined) opts.env = { ...process.env, ...extraEnv };
   const r = spawnSync(process.execPath, [cli, ...args], opts);
+  if (r.error !== undefined && r.error !== null && r.error.code === 'ETIMEDOUT') {
+    return { out: r.stdout ?? '', err: `超时（${TIMEOUT / 1000}s 没跑完）`, code: 124 };
+  }
   return { out: r.stdout ?? '', err: r.stderr ?? '', code: r.status ?? 1 };
+};
+/** 判分用的真 asy。同一条 30s 上限；超时按"没跑成"回（status 124）。 */
+const asyRun = (args, cwd) => {
+  const r = spawnSync(asyBin, args, {
+    encoding: 'utf8', cwd, timeout: TIMEOUT, killSignal: 'SIGKILL',
+  });
+  if (r.error !== undefined && r.error !== null && r.error.code === 'ETIMEDOUT') {
+    return { stdout: r.stdout ?? '', stderr: `真 asy 超时（${TIMEOUT / 1000}s）`, status: 124 };
+  }
+  return { stdout: r.stdout ?? '', stderr: r.stderr ?? '', status: r.status ?? 1 };
 };
 const read = (p) => {
   try {
@@ -155,7 +173,7 @@ for (const f of readdirSync(join(here, 'cases')).filter(isCase).sort()) {
 
   let judged = '';
   if (asyBin !== null) {
-    const r = spawnSync(asyBin, ['-noV', path], { encoding: 'utf8', cwd: dir });
+    const r = asyRun(['-noV', path], dir);
     const real = (r.stdout ?? '') + (r.stderr ?? '');
     if ((r.status ?? 1) !== 0) bad.push(`    真 asy 自己就跑不过 exit=${r.status}\n${real}`);
     else if (real !== first.out) {
@@ -231,7 +249,7 @@ for (const f of readdirSync(join(here, 'tol')).filter(isCase).sort()) {
   }
   let tjudged = '';
   if (asyBin !== null) {
-    const r = spawnSync(asyBin, ['-noV', path], { encoding: 'utf8', cwd: dir });
+    const r = asyRun(['-noV', path], dir);
     const real = (r.stdout ?? '') + (r.stderr ?? '');
     if ((r.status ?? 1) !== 0) bad.push(`    真 asy 自己就跑不过 exit=${r.status}\n${real}`);
     else if (!tolSame(real, first.out)) {
@@ -287,7 +305,7 @@ for (const f of readdirSync(join(here, 'strict')).filter(isCase).sort()) {
   }
   let judged = '';
   if (asyBin !== null) {
-    const a = spawnSync(asyBin, ['-noV', p], { encoding: 'utf8', cwd: dir });
+    const a = asyRun(['-noV', p], dir);
     if ((a.status ?? 1) === 0) { no(`strict/${name}`, '    真 asy 居然收了 —— 这条边界划错了'); continue; }
     judged = '；真 asy 也拒';
   }
@@ -331,7 +349,7 @@ for (const f of readdirSync(join(here, 'draw')).filter(isCase).sort()) {
   let judged = '';
   if (asyBin !== null) {
     const out = join(mkdtempSync(join(tmpdir(), 'omni-asy-')), name);
-    const r = spawnSync(asyBin, ['-noV', '-f', 'eps', '-o', out, path], { encoding: 'utf8', cwd: dir });
+    const r = asyRun(['-noV', '-f', 'eps', '-o', out, path], dir);
     const real = read(`${out}.eps`);
     if ((r.status ?? 1) !== 0 || real === null) {
       bad.push(`    真 asy 自己就没出 EPS exit=${r.status}\n${(r.stdout ?? '') + (r.stderr ?? '')}`);

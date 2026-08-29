@@ -15,10 +15,10 @@ import {
 } from './host/native.js';
 import { join, basename } from './host/path.js';
 import { hash16 } from './host/hash.js';
-import { parseJson } from './host/json_read.js';
 import { linkJs } from './frontend-js/link.js';
 import { lowerJs } from './frontend-js/lower.js';import { lowerWat } from './frontend-wat/lower.js';
 import { lowerAsy } from './frontend-asy/lower.js';
+import { asyUnitModules } from './frontend-asy/link.js';
 import { parseAsyBuiltins } from './frontend-asy/types.js';
 import { readSexpr } from './sexpr/read.js';
 import { lowerCoreSexpr } from './sexpr/lower.js';
@@ -35,7 +35,7 @@ import { IncrCache, compileIncremental, incrReport } from './incr/cache.js';
 import { Diagnostics, OmniError, SourceFile } from './source/diag.js';
 import { check } from './hir/check.js';
 import { cAbiLibs } from './hir/c_abi.js';
-import { emitJs, emitJsFunc } from './backend-js/emit.js';
+import { emitJs, emitJsFunc, emitJsRuntimeModule } from './backend-js/emit.js';
 import { emitC } from './backend-c/emit.js';
 import { emitLlvm } from './backend-llvm/emit.js';
 import { emitSpirv } from './backend-spirv/emit.js';
@@ -119,26 +119,107 @@ function compile(path, argv = []) {
  * 共用这一份，所以"从哪里找模块"这类规则不会有两份实现。
  */
 /**
- * 解析缓存的两个小工具（第七十二刀）。
+ * 解析树的**紧凑格式**（第七十四刀）。量出来的：asy_builtins 那份树存成 JSON 是 12.0MB，
+ * 用我们自己的 JSON 读器读回来 415ms，外加 184ms GC 与 109ms 读文件 —— 一趟 1.9s 里
+ * 最大的一块，而且每个例子都得付一遍（树是**库**的，例子只是引它）。
  *
- * 存的时候把 `span.file` 摘掉（那是个带全文与行表的对象，每个节点都指着它，
- * 进 JSON 就是几十份全文）；读回来按这一份 SourceFile 重新挂上。
- * 走法是**通用**的：树上任何一层只要有 `span` 就挂，别的字段照原样走 —— 这样
- * glrParse 以后往节点上加字段时这两个函数不用跟着改。
+ * 树的形状只有三种（glrParse 出来的就是 S 表达式，见 glr/driver.js:114-130）：
+ *   atom:   `{kind:'atom',   value, span:{start,end}}`
+ *   string: `{kind:'string', value, raw, span:{start,end}}`
+ *   list:   `{kind:'list',   items:[…], span:{start,end}}`
+ * 所以不必走通用 JSON —— 前序一遍，长度显式写在前面，读的时候一遍扫过去，不用转义：
+ *   `a` start `,` end `,` 值长 `:` 值
+ *   `s` start `,` end `,` 值长 `,` 原文长 `:` 值 原文
+ *   `l` start `,` end `,` 个数 `;` 子节点…
+ * 形状认不出来（以后往节点上加了字段）就回 null，那一份**不进缓存**，行为一字不变。
  */
-function astNoFile(k, v) { return k === 'file' ? undefined : v; }
+function astPack(t) {
+  const out = [];
+  // 存不下来时说清是**哪一种形状**存不下来（`OMNI_ASY_PACKDBG=1`）：这一格一 null，
+  // 整个单元的接口索引就不写，而从外面看只是"这个库还是从源码走"，量不出原因。
+  const nope = (why, x) => {
+    if (env('OMNI_ASY_PACKDBG') === '1') {
+      vStep(`asy 打包不了 ${why} kind=${x === null || typeof x !== 'object' ? String(x) : x.kind} keys=${x === null || typeof x !== 'object' ? '' : Object.keys(x).join(',')}`);
+    }
+    return false;
+  };
+  const walk = (x) => {
+    if (x === null || typeof x !== 'object' || Array.isArray(x)) return nope('不是节点', x);
+    const sp = x.span;
+    if (sp === null || sp === undefined || typeof sp !== 'object') return nope('没有 span', x);
+    for (const k of Object.keys(sp)) {
+      if (k !== 'start' && k !== 'end' && k !== 'file') return nope(`span 多一格 ${k}`, x);
+    }
+    if (!Number.isInteger(sp.start) || !Number.isInteger(sp.end)) return nope('span 不是整数', x);
+    const ks = Object.keys(x);
+    if (x.kind === 'atom') {
+      if (ks.length !== 3 || typeof x.value !== 'string') return nope('atom 形状不对', x);
+      out.push(`a${sp.start},${sp.end},${x.value.length}:${x.value}`);
+      return true;
+    }
+    if (x.kind === 'string') {
+      if (ks.length !== 4 || typeof x.value !== 'string' || typeof x.raw !== 'string') return nope('string 形状不对', x);
+      out.push(`s${sp.start},${sp.end},${x.value.length},${x.raw.length}:${x.value}${x.raw}`);
+      return true;
+    }
+    if (x.kind === 'list') {
+      if (ks.length !== 3 || !Array.isArray(x.items)) return nope('list 形状不对', x);
+      out.push(`l${sp.start},${sp.end},${x.items.length};`);
+      for (const y of x.items) {
+        if (!walk(y)) return false;
+      }
+      return true;
+    }
+    return nope('认不出的 kind', x);
+  };
+  return walk(t) ? out.join('') : null;
+}
 
-function astReattach(x, file) {
-  if (x === null || typeof x !== 'object') return;
-  if (Array.isArray(x)) {
-    for (const y of x) astReattach(y, file);
-    return;
-  }
-  const sp = x.span;
-  if (sp !== undefined && sp !== null && typeof sp === 'object') sp.file = file;
-  for (const k of Object.keys(x)) {
-    if (k !== 'span') astReattach(x[k], file);
-  }
+/** 上面那一份读回来。`file` 直接挂在 span 上，所以不用再走一遍"重新挂 file"。 */
+function astUnpack(s, file) {
+  let i = 0;
+  const num = (stop) => {
+    let n = 0;
+    while (i < s.length) {
+      const c = s.charCodeAt(i);
+      if (c === stop) { i++; return n; }
+      if (c < 48 || c > 57) throw new OmniError(`ast 缓存坏了：第 ${i} 个字符不是数字`);
+      n = n * 10 + (c - 48);
+      i++;
+    }
+    throw new OmniError('ast 缓存坏了：数没读完就到末尾了');
+  };
+  const node = () => {
+    const t = s.charCodeAt(i);
+    i++;
+    const start = num(44);          // ','
+    const end = num(44);
+    if (t === 97) {                 // 'a'
+      const len = num(58);          // ':'
+      const value = s.slice(i, i + len);
+      i += len;
+      return { kind: 'atom', value: value, span: { start: start, end: end, file: file } };
+    }
+    if (t === 115) {                // 's'
+      const vlen = num(44);
+      const rlen = num(58);
+      const value = s.slice(i, i + vlen);
+      i += vlen;
+      const raw = s.slice(i, i + rlen);
+      i += rlen;
+      return {
+        kind: 'string', value: value, raw: raw, span: { start: start, end: end, file: file },
+      };
+    }
+    if (t !== 108) throw new OmniError(`ast 缓存坏了：第 ${i - 1} 个字符不是 a/s/l`);
+    const n = num(59);              // ';'
+    const items = [];
+    for (let k = 0; k < n; k++) items.push(node());
+    return { kind: 'list', items: items, span: { start: start, end: end, file: file } };
+  };
+  const t = node();
+  if (i !== s.length) throw new OmniError('ast 缓存坏了：末尾还有多余的东西');
+  return t;
 }
 
 function asyFrontEnd() {
@@ -166,26 +247,67 @@ function asyFrontEnd() {
     // 键不哈希全文（量过：哈希 base 那几十个文件要 56ms）——用「路径 + 改动时间 + 字节数」，
     // 那三样一致就是同一份源码，而 stat 是常数时间。文本不是从盘上来的（REPL、内联）时
     // 退回哈希那条路。
-    let key = '';
+    //
+    // 改动时间与语法表的哈希**不在文件名里，在旁边那份 .stamp 里**（第七十四刀）：
+    // 编进文件名的话每改一次源码就多出一条，asy_builtins 那一条 12MB，量过 .omni-cache/asy-ast
+    // 就是这么攒到 1.3GB 的。现在一份源码在盘上**只占一条**，改了就原地盖掉。
+    //
+    // 文件名就是**源文件自己的名字**，只换后缀（第七十五刀）：`plain.asy` -> `plain.ast`。
+    // 哈希名字看不出在复用谁。**一层平铺、不分子目录** —— 这份缓存是公用的：谁引到
+    // `plain.asy` 都用同一格。同名不同目录会撞到同一格，所以**全路径进 .stamp**：
+    // 撞了就是印记不一致，那一趟老老实实重新解析（退化成不命中，不会错用别人的树）。
+    // 不是从盘上来的文本（REPL、内联）没有名字，按全文哈希起名。
+    let base = '';
+    let inline = false;
     if (astDir !== null) {
-      // 改动时间直接进键（不 Math.round —— 它不在封闭 ABI 里，而这里也不需要取整：
-      // 同一次 stat 的浮点值逐位一样，`${}` 出来就是同一段文本，333 行那一处同理）。
-      if (exists(p)) key = `p${hash16(p)}-${mtimeMs(p)}-${text.length}`;
-      else key = `t${hash16(text)}-${text.length}`;
+      if (exists(p)) {
+        const cut = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+        const nm = cut < 0 ? p : p.slice(cut + 1);
+        const dot = nm.lastIndexOf('.');
+        base = dot <= 0 ? nm : nm.slice(0, dot);
+      } else {
+        inline = true;
+        base = `_inline-${hash16(text)}`;
+      }
     }
-    const cpath = key === '' ? '' : join(astDir, `a-${gkey}-${key}.json`);
-    if (cpath !== '' && exists(cpath)) {
-      const t = parseJson(readText(cpath));
-      astReattach(t, file);
-      vStep(`asy ast cache  ${p}`);
-      return t;
+    const cpath = base === '' ? '' : join(astDir, `${base}.ast`);
+    const spath = base === '' ? '' : join(astDir, `${base}.stamp`);
+    // 这一趟的文本已经在手上，把这份内容的身份记进备忘（下面真要哈希时不用再读一遍文件）
+    const seed = () => {
+      const m = mtimeMs(p);
+      const n = fileSize(p);
+      const had = srcIdMemo.get(p);
+      if (had === undefined || had.mtime !== m || had.len !== n) {
+        srcIdMemo.set(p, { mtime: m, len: n, hash: hash16(text) });
+      }
+    };
+    if (cpath !== '' && exists(spath) && exists(cpath)) {
+      const fs = readText(spath).split('|');
+      // 印记的身份是**内容哈希**（inline 那种没有文件，名字里已经带着哈希）：touch 一下、
+      // 重新 checkout 一遍都不该让这份树作废。改动时间与字节数只是省一次读的预检 ——
+      // 两样对得上就直接命中，对不上才真去哈希一遍（inpOk）。
+      const r = inline ? { ok: fs[1] === '-', cur: '-' } : inpOk(fs[1] === undefined ? '' : fs[1]);
+      if (fs[0] === gkey && r.ok) {
+        const t = astUnpack(readText(cpath), file);
+        if (r.cur !== fs[1]) writeText(spath, `${gkey}|${r.cur}`);   // 刷新预检那两格
+        vStep(`asy ast cache  ${p}`);
+        return t;
+      }
     }
     const toks = lexText(tb.grammar.lex, file, diags);
     diags.throwIfErrors();
     vStep(`asy lexer      ${p} -> ${toks.length} tokens`);
     const t = glrParse(tb, toks, diags);
     diags.throwIfErrors();
-    if (cpath !== '') writeText(cpath, JSON.stringify(t, astNoFile));
+    if (cpath !== '') {
+      const packed = astPack(t);
+      // 形状认不出来就不缓存（见 astPack 的注释）。先写树再写印记：印记是"这一条成了"的凭据。
+      if (packed !== null) {
+        if (!inline) seed();
+        writeText(cpath, packed);
+        writeText(spath, `${gkey}|${inline ? '-' : inpField(p)}`);
+      }
+    }
     return t;
   };
   // 模块的找法是量出来的 —— asy 按**当前目录**找，不是按引它的那个文件所在的目录
@@ -200,6 +322,9 @@ function asyFrontEnd() {
     for (const d of envDir.split(':')) if (d !== '') searchDirs.push(d);
   }
   searchDirs.push(libDir);
+  // 这一趟真的加载了哪些模块文件（按加载顺序）。产物缓存的依赖清单靠它。
+  const seen = [];
+  const paths = new Map();
   const loader = (diags) => (name) => {
     // `collections.map` 这种带点的模块路径，文件是 `collections/map.asy`（量过 asy 也这样找）。
     // 先按原样找一遍：真有个叫 `a.b.asy` 的文件时那份赢，与不带点的写法同一条规矩。
@@ -220,9 +345,98 @@ function asyFrontEnd() {
     }
     if (p === '' || !exists(p)) return null;
     vStep(`asy module    ${name} -> ${p}`);
+    seen.push(p);
+    // 模块名 -> 解析到的**真文件**。产物的增量靠它：一个库改了没有，看的是这个路径的
+    // 改动时间与字节数。从前单元上只记模块名（`plain`、`collections.iter(T=int)`），
+    // 于是"库改了要重编"这条根本判不出来 —— 量到的样子是 touch 了 settings.asy
+    // 清单照样命中。
+    paths.set(name, p);
     return parseText(p, readText(p), diags);
   };
-  return { parseText: parseText, loader: loader, builtins: builtins, libDir: libDir };
+  return {
+    parseText: parseText, loader: loader, builtins: builtins, libDir: libDir, seen: seen,
+    paths: paths,
+  };
+}
+
+/**
+ * 上一趟 asyText 读过的文件（主文件在第一格）。产物缓存的依赖清单用它 ——
+ * 模块是**加载期**才知道的（`import` 在源码里），所以只能事后取。
+ */
+let lastAsyDeps = [];
+
+/**
+ * 编译器自己那一份的印记：stage0/src 底下每个文件的「名字 + 改动时间 + 字节数」。
+ * 产物缓存的键里带它 —— 改了降级器或后端，缓存整片失效。
+ * 目录与文件按"名字里有没有点"分（stage0/src 底下目录都没有后缀，文件都有），
+ * 因为 host/native.js 那张封闭表里没有 isDir。
+ */
+let srcStampMemo = '';
+function srcStamp() {
+  if (srcStampMemo !== '') return srcStampMemo;
+  const parts = [];
+  const walk = (d) => {
+    for (const f of readDir(d).sort()) {
+      const p = join(d, f);
+      if (f.indexOf('.') < 0) walk(p);
+      else parts.push(`${f}:${mtimeMs(p)}:${fileSize(p)}`);
+    }
+  };
+  walk(installDir());
+  srcStampMemo = hash16(parts.join('|'));
+  return srcStampMemo;
+}
+
+/**
+ * 编译产物（JS）的缓存（第七十四刀）。量出来的：`tests/asy/draw/tri.asy` 引真 base 时
+ * 一趟 1.22s，里面 AST 缓存读回来约 0.5s、把 base 那三十个模块**重新降级**约 0.7s、
+ * 生成 1.16MB 的 JS 约 0.3s —— 而这三样在同一份源码上每次都一模一样。
+ *
+ * 缓存的是最后那一份 JS，键是「编译器印记 + 语法表 + 这一趟读过的每个文件的
+ * 改动时间与字节数」。**一个主文件只占一条**（文件名里只有路径的哈希，印记在内容里），
+ * 所以改一次源码不会多出一条 —— asy-ast 那个目录就是因为把改动时间编进文件名，
+ * 攒到了 625MB。
+ *
+ * 这一条只在 `run` 那一路上用：它的输入输出都是"这一份源码跑出来的 JS"，
+ * 与后端/解释器那几条腿无关。`OMNI_NO_JSCACHE=1` 关掉（对照用）。
+ */
+function jsCacheDir() {
+  return join(installDir(), '..', '..', '..', '.omni-cache', 'asy-js');
+}
+function jsCacheStamp() {
+  // 印记里必须带**找模块的那几样**：同一个主文件在 `ASYMPTOTE_DIR` 指着真 base 时
+  // 与不指时编出来的是两份 JS，而依赖清单里的文件两边都还在、都没动 —— 只看清单会误命中。
+  // 当前目录同理（asy 先按 cwd 找模块，量过）。
+  const ad = env('ASYMPTOTE_DIR');
+  const ab = env('OMNI_ASY_BUILTINS');
+  return `v1|${srcStamp()}|${ad === undefined ? '' : ad}|${ab === undefined ? '' : ab}|${cwd()}`;
+}
+function jsCacheGet(path) {
+  if (env('OMNI_NO_JSCACHE') === '1') return null;
+  const key = `j-${hash16(path)}`;
+  const dep = join(jsCacheDir(), `${key}.dep`);
+  const jsp = join(jsCacheDir(), `${key}.js`);
+  if (!exists(dep) || !exists(jsp)) return null;
+  const lines = readText(dep).split('\n');
+  if (lines[0] !== jsCacheStamp()) return null;
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i] === '') continue;
+    const f = lines[i].split('\t');
+    if (!exists(f[0]) || `${mtimeMs(f[0])}` !== f[1] || `${fileSize(f[0])}` !== f[2]) return null;
+  }
+  return readText(jsp);
+}
+function jsCachePut(path, js, deps) {
+  if (env('OMNI_NO_JSCACHE') === '1' || deps.length === 0) return;
+  const key = `j-${hash16(path)}`;
+  const lines = [jsCacheStamp()];
+  for (const p of deps) {
+    if (exists(p)) lines.push(`${p}\t${mtimeMs(p)}\t${fileSize(p)}`);
+  }
+  mkdirAll(jsCacheDir());
+  // 先写产物再写清单：清单是"这一条成了"的凭据，反过来会留下半条。
+  writeText(join(jsCacheDir(), `${key}.js`), js);
+  writeText(join(jsCacheDir(), `${key}.dep`), lines.join('\n'));
 }
 
 /**
@@ -230,7 +444,7 @@ function asyFrontEnd() {
  * 语法那一半是数据（`frontend-asy/asy.grammar`，从 camp.y 照原样转写）；这里只做
  * 类型定向的那一半，出来的仍然是核心方言文本 —— 于是六条腿一条都不知道 asy 存在。
  */
-function asyText(path) {
+function asyText(path, out, skipBody, ifaceFn) {
   const fe = asyFrontEnd();
   const diags = new Diagnostics();
   const tree = fe.parseText(path, readText(path), diags);
@@ -242,8 +456,19 @@ function asyText(path) {
     // 与 ASYMPTOTE_DIR 一起用就是"引真的 base/*.asy"。OMNI_ASY_BUILTINS=0 关掉（
     // 调这一面自己的时候用：它自己是 asy 源码，不能隐式引进自己）。
     prelude: env('OMNI_ASY_BUILTINS') === '0' ? '' : 'asy_builtins',
-  });
+    pathOf: (n) => fe.paths.get(n),
+    // 产物还在、源文件没动的库：正文一步都不降（第七十六刀，见 lower.js 的 skipBody）
+    skipBody: skipBody === undefined ? null : skipBody,
+    // 库的接口索引要把默认实参那些表达式打包进去（第七十八刀，见 iface.js）
+    astPack,
+    // 产物齐了的库：连源码都不读，声明从 `.aif` 认（第七十八刀）
+    iface: ifaceFn === undefined ? null : ifaceFn,
+  }, out);
   diags.throwIfErrors();
+  // 这一趟读过的文件（主文件 + 真的加载了的模块）。产物缓存的依赖清单就是它，
+  // 所以必须是**加载完之后**取 —— fe.seen 是 loader 一路 push 进去的。
+  lastAsyDeps = [path];
+  for (const p of fe.seen) if (!lastAsyDeps.includes(p)) lastAsyDeps.push(p);
   vStep(`asy front end  ${path} -> 核心方言 ${text.length} bytes`);
   return text;
 }
@@ -253,6 +478,480 @@ function compileAsy(path) {
   const mod = lowerCoreSexpr(new SourceFile(`${path}.sx`, asyText(path)), diags);
   diags.throwIfErrors();
   return { ast: null, mod, diags };
+}
+
+/**
+ * 一个单元 -> 它那份产物的名字（盘上就叫这个，只换后缀）。
+ *
+ * 名字取**源文件的基名**，不是模块身份：模块身份是 `collections.iter(T=int)` 那样的东西，
+ * 按点号切会切出 `collections`，于是同一个模板的两次实例化撞成同一份产物（量到过：
+ * `import graph` 底下 iter 被实例化了两次）。模板实例化后面缀一段身份哈希把它们分开。
+ */
+function unitName(info) {
+  const k = info === undefined || info === null ? null : info;
+  const src = k === null ? '' : (k.file !== '' ? k.file : k.key);
+  if (src === '') return 'omni_entry';
+  const cut = Math.max(src.lastIndexOf('/'), src.lastIndexOf('\\'));
+  const nm = cut < 0 ? src : src.slice(cut + 1);
+  const dot = nm.lastIndexOf('.');
+  const base = dot <= 0 ? nm : nm.slice(0, dot);
+  return k !== null && k.tpl === true ? `${base}__${hash16(k.key).slice(0, 8)}` : base;
+}
+
+/** 一个源文件路径 -> 产物名（清单那一路只有路径，没有单元信息）。 */
+function fileUnitName(p) {
+  return unitName({ key: p, file: p, tpl: false });
+}
+
+/**
+ * asy -> **每个源文件一份**核心方言模块（第七十五刀）。
+ * 每一份里用到的别人家的名字是 `(sig "出处" (…))`，所以每一份都能单独编 ——
+ * 一个库改了只重编它自己那一份，别的照旧从盘上拿。
+ */
+function asyUnitTexts(path, skip) {
+  const out = {};
+  asyText(path, out, skip === undefined || skip === null ? null : skip.fn,
+    skip === undefined || skip === null ? null : skip.iface);
+  if (out.sections === undefined) throw new OmniError('asy: 这一趟没有分段信息');
+  // 复用那几份带进来的"只剩产物"的模块（见 asyModsSkip）
+  out.sections.extra = skip === undefined || skip === null ? [] : [...skip.extras.values()];
+  // 哪些单元这一趟**一格产物都不留**（`OMNI_ASY_UNITS=1`，见 lower.js 的 unitWhy）
+  if (env('OMNI_ASY_UNITS') === '1') {
+    for (const w of out.sections.unitWhy === undefined ? [] : out.sections.unitWhy) {
+      vStep(`asy 单元 ${w.why}  ${w.key === '' ? '<无源文件>' : w.key}`);
+    }
+  }
+  const r = asyUnitModules(out.sections, unitName, out.sections.tail);
+  vStep(`asy units      ${r.units.length} 份新拼、${r.reused.length} 份原样留着`);
+  return r;
+}
+
+/** 印记里的两格说的是同一份输入吗（**只比路径与内容哈希**，改动时间与字节数不算） */
+function inpSame(x, y) {
+  if (x === y) return true;
+  const i = x.lastIndexOf(':h');
+  const j = y.lastIndexOf(':h');
+  if (i < 0 || j < 0) return false;
+  return x.slice(0, i) === y.slice(0, j) && x.slice(i + 2) === y.slice(j + 2);
+}
+
+/** 两份印记说的是同一批输入吗（一格一格核，见 inpSame） */
+function stampSame(a, b) {
+  const xs = a.split('|');
+  const ys = b.split('|');
+  if (xs.length !== ys.length) return false;
+  for (let i = 0; i < xs.length; i++) if (!inpSame(xs[i], ys[i])) return false;
+  return true;
+}
+
+/** 产物的默认去处。**一个共用目录** —— 复用的就是这里面按文件名躺着的那些 `.js`。 */
+function asyModsDir() {
+  return join(installDir(), '..', '..', '..', '.omni-cache', 'asy-mods');
+}
+
+/**
+ * 一个源文件的**身份是它的内容哈希**，不是改动时间（第七十七刀）。
+ *
+ * 从前印记记的是 `路径:改动时间:字节数`，于是 `touch settings.asy` 就重编 —— 内容一个
+ * 字节没变。换台机器、重新 checkout 一遍同样全体失效。tsc 那份 `.tsbuildinfo` 里每个
+ * 文件记的是内容的 version（哈希），道理一样：**同一份输入必须映到同一格产物**。
+ *
+ * 代价是每趟要哈希那十几个源文件（量过 base 那批 56ms）。所以改动时间与字节数留着当
+ * **快速预检**：两样都对得上就直接信旁边记着的那格哈希，一个字节都不用读；对不上才真去
+ * 读文件重算，而重算出来哈希一样的话产物照旧有效（只把预检那两格刷新）。
+ * 常态下还是只 stat，语义却是内容哈希。
+ */
+const srcIdMemo = new Map();
+
+/** `{mtime, len, hash}`；文件不在就回 null。同一趟里一个文件只哈希一次。 */
+function srcId(p) {
+  if (p === '' || !exists(p)) return null;
+  const m = mtimeMs(p);
+  const n = fileSize(p);
+  const had = srcIdMemo.get(p);
+  if (had !== undefined && had.mtime === m && had.len === n) return had;
+  const info = { mtime: m, len: n, hash: hash16(readText(p)) };
+  srcIdMemo.set(p, info);
+  return info;
+}
+
+/** 记进印记的那一格：`路径:改动时间:字节数:h内容哈希`（没有源文件记 `-`，文件没了记 `路径:-`） */
+function inpField(p) {
+  if (p === '') return '-';
+  const id = srcId(p);
+  return id === null ? `${p}:-` : `${p}:${id.mtime}:${id.len}:h${id.hash}`;
+}
+
+/** 印记里的一格现在还成立吗。回 `{ok, cur}` —— `cur` 与原来那格不同就该把印记刷新。 */
+function inpOk(field) {
+  if (field === '-') return { ok: true, cur: '-' };
+  if (field.endsWith(':-')) {
+    const p0 = field.slice(0, -2);
+    return { ok: !exists(p0), cur: inpField(p0) };
+  }
+  const c3 = field.lastIndexOf(':');
+  const c2 = field.lastIndexOf(':', c3 - 1);
+  const c1 = field.lastIndexOf(':', c2 - 1);
+  if (c1 < 0 || c2 < 0 || c3 < 0 || field[c3 + 1] !== 'h') return { ok: false, cur: '' };
+  const p = field.slice(0, c1);
+  if (!exists(p)) return { ok: false, cur: inpField(p) };
+  // 预检：改动时间与字节数都没动就不读文件。顺手把那格哈希记进 srcIdMemo ——
+  // 同一趟里稍后写新印记时（stampOf 里那些 inpField）就不必再读一遍、再哈一遍这个文件了。
+  // 量过：不记这一格的话，换个入口跑一趟要在 hash16 上白花 38ms（库源文件都被重哈一遍）。
+  const m = mtimeMs(p);
+  const n = fileSize(p);
+  if (`${m}` === field.slice(c1 + 1, c2) && `${n}` === field.slice(c2 + 1, c3)) {
+    if (srcIdMemo.get(p) === undefined) {
+      srcIdMemo.set(p, { mtime: m, len: n, hash: field.slice(c3 + 2) });
+    }
+    return { ok: true, cur: field };
+  }
+  const cur = inpField(p);
+  return { ok: cur.slice(cur.lastIndexOf(':') + 1) === field.slice(c3 + 1), cur: cur };
+}
+
+/** `.wk` 里一条与一条之间的分界线（项本身缩进两格起，所以顶头这一行不会撞上）。 */
+const ASY_WK_SEP = ';;--';
+
+/**
+ * 「这一份产物还是最新的吗」——是的话前端**连它的正文都不降**（第七十六刀）。
+ *
+ * 判据与写产物那一刻用的是**同一格印记**：`.stamp` 里记着「编译器 + 它自己那个源文件 +
+ * 它引到的那几个源文件」的 `路径:改动时间:字节数`，这里把每一格反过来 stat 一遍。
+ * 全对上、并且 `.js`/`.sec`/`.wk` 三样都在，就把签名清单与它引到的 weak 项读回来给前端。
+ *
+ * 量出来的账：13 个库的 asyBodyPass 是 368ms（整个前端 645ms 的一半多），而它降出来的
+ * 东西逐字节等于盘上那份 —— 这一刀省的就是它。声明遍那 221ms 省不掉：入口要那些表。
+ */
+function asyModsSkip(dir, cs) {
+  const extras = new Map();          // 产物名 -> {name, key, sigs, weak}
+  // 一份产物旁边那格 `.dep`：`key|源文件`、`need|要跟着进来的产物名`
+  const readDep = (nm) => {
+    const p = join(dir, `${nm}.dep`);
+    if (!exists(p)) return null;
+    const need = [];
+    let key = '';
+    for (const ln of readText(p).split('\n')) {
+      if (ln.startsWith('key|')) key = ln.slice(4);
+      else if (ln.startsWith('need|')) need.push(ln.slice(5));
+    }
+    return { key, need };
+  };
+  // 一份产物的四格（`.stamp` 对上、`.js`/`.sec`/`.wk`/`.dep` 都在）都齐了才回它的内容
+  const load = (nm) => {
+    const st = join(dir, `${nm}.stamp`);
+    const secP = join(dir, `${nm}.sec`);
+    const wkP = join(dir, `${nm}.wk`);
+    if (!exists(st) || !exists(join(dir, `${nm}.js`)) || !exists(secP) || !exists(wkP)) return null;
+    const fs = readText(st).split('|');
+    if (fs[0] !== cs) return null;
+    for (let i = 1; i < fs.length; i++) {
+      const f = fs[i];
+      if (f === '-') continue;                 // 没有源文件的那种依赖（omni_weak）
+      if (f.startsWith('t')) return null;      // 按文本哈希记的那种（omni_weak 自己）：不复用
+      if (!inpOk(f).ok) return null;
+    }
+    const dep = readDep(nm);
+    if (dep === null) return null;
+    const sigs = [];
+    for (const ln of readText(secP).split('\n')) if (ln.trim() !== '') sigs.push(ln);
+    const weak = [];
+    for (const t of readText(wkP).split(`\n${ASY_WK_SEP}\n`)) if (t.trim() !== '') weak.push(t);
+    return { name: nm, key: dep.key, need: dep.need, sigs, weak };
+  };
+  const skipFn = (info) => {
+    const nm = unitName(info);
+    const me = load(nm);
+    if (me === null) return null;
+    // 它要带的那几份也得全齐（一份缺了就整个不跳过 —— 宁可老老实实降一遍）
+    const pull = [];
+    const seen = new Set([nm]);
+    const wave = [...me.need];
+    while (wave.length > 0) {
+      const n2 = wave.pop();
+      if (seen.has(n2)) continue;
+      seen.add(n2);
+      const had = extras.get(n2);
+      const x = had === undefined ? load(n2) : had;
+      if (x === null) return null;
+      if (had === undefined) pull.push(x);
+      for (const d of x.need) if (!seen.has(d)) wave.push(d);
+    }
+    for (const x of pull) extras.set(x.name, x);
+    return { sigs: me.sigs, weak: me.weak };
+  };
+  return {
+    extras,
+    fn: skipFn,
+    // **接口索引**（第七十八刀）：产物这一套都齐了、旁边又躺着 `.aif` 的话，前端连这个库的
+    // 源码都不读。先过一遍上面那关（印记 + `need` 闭包），过了才认这份索引 —— 判据是同一格。
+    //
+    // span 上那个 `file` 给一格轻壳：不读源码就没有全文与行表，而这条路上库的声明本来
+    // 不该再报诊断（真报了也还有路径与偏移可看）。
+    iface: (info) => {
+      // **仍然默认关着**（`OMNI_ASY_IFACE=1` 打开）。安静环境下量过三趟三趟（tri.asy 改一个
+      // 字符、强制走前端）：开 617/674/690ms、关 635/642/640ms —— **在噪声里，一点不省**。
+      // 从前记的"932 vs 787"是后台还在跑 oracle 时量的，不算。
+      // 原因量出来了：13 份里只有 7 份走索引，而 plain 并进来的那十几份（plain_constants /
+      // plain_pens / plain_picture …）压根不是单元、不可能有自己的 `.aif`，照旧读源码解析。
+      // 所以这一格要值钱，得等 ADR-0015 第 5 步（接口按条存）。
+      if (env('OMNI_ASY_IFACE') !== '1') return null;
+      const nm = unitName(info);
+      const p = join(dir, `${nm}.aif`);
+      if (!exists(p)) return null;
+      if (skipFn(info) === null) return null;
+      const obj = JSON.parse(readText(p));
+      if (obj === null || obj === undefined) return null;
+      // 版本对不上就当没有这一格（盘上那份是旧格式：struct 体里的语句从前只存了树与 mat，
+      // 少了 `bi`，而那一格的形状打包器根本认不出来 —— 见 iface.js 的 `sts`）
+      if (obj.v !== 2) return null;
+      vStep(`asy 接口索引   ${nm}`);
+      return {
+        obj,
+        file: {
+          path: info.file === '' ? nm : info.file,
+          lineCol: () => ({ line: 1, col: 1 }),
+          lineText: () => '',
+          text: '',
+        },
+        unpack: astUnpack,
+      };
+    },
+  };
+}
+
+/**
+ * 每一份产物的**指纹**（ADR-0015 决策 1）。只由**源侧**的东西算出来：
+ * 编译器印记、环境、它自己那个源文件的内容哈希、它 import 的那几份的指纹。
+ *
+ * 与"这一趟的入口是谁""这一趟哪几份被跳过"都无关 —— 这正是旧那套 `.stamp` 做不到的：
+ * 那一格记的是链接算出来的 deps，跟着跳过与否变，于是"换个入口跑"就能让别人作废。
+ *
+ * `import` 图允许有环（asy 里互相 import 是常事），所以按**不动点**迭代而不是递归：
+ * 初值只含自己，每一轮把依赖的指纹掺进来，不再变就停。环里的成员因此共用同一层信息，
+ * 等价于按 SCC 整块算一个指纹。
+ */
+function asyFps(all, cs) {
+  const ev = asyModsEnv();
+  const nameOfKey = new Map();
+  for (const u of all) if (u.key !== '') nameOfKey.set(u.key, u.name);
+  const self = new Map();
+  const deps = new Map();
+  for (const u of all) {
+    const id = u.key === '' ? null : srcId(u.key);
+    self.set(u.name, hash16(`${cs}|${ev}|${u.name}|${id === null ? '' : id.hash}`));
+    const ds = new Set();
+    for (const k of u.imps === undefined || u.imps === null ? [] : u.imps) {
+      const n = nameOfKey.get(k);
+      if (n !== undefined && n !== u.name) ds.add(n);
+    }
+    deps.set(u.name, [...ds].sort());
+  }
+  let fp = new Map(self);
+  for (let round = 0; round < 64; round++) {
+    const next = new Map();
+    let same = true;
+    for (const [n, s] of self) {
+      const parts = [s];
+      for (const d of deps.get(n)) parts.push(`${d}:${fp.get(d) === undefined ? '' : fp.get(d)}`);
+      const v = hash16(parts.join('|'));
+      next.set(n, v);
+      if (v !== fp.get(n)) same = false;
+    }
+    fp = next;
+    if (same) break;
+  }
+  return fp;
+}
+
+/**
+ * 把一份 asy 程序落成一目录 ESM 模块（每个源文件一份），回那份入口 `.js` 的路径。
+ *
+ * 增量就在每一份旁边那格印记上：一份产物的**输入**只有两样 —— 它自己那份 `.sx`
+ * （里面已经含了它看见的全部签名）与编译器自己。两样都没动就不重编，盘上那份留着。
+ * 量出来的：换个入口跑，9 份里复用 7 份（只有 omni_weak 与入口自己要重编）。
+ */
+function asyModsBuild(path, dir) {
+  mkdirAll(dir);
+  const cs = srcStamp();
+  const r = asyUnitTexts(path, asyModsSkip(dir, cs));
+  // ADR-0015 第一步与第二步：指纹与归属先只打印不接线，好验两样都与"入口是谁"无关。
+  if (env('OMNI_ASY_FP') === '1') {
+    const fps = asyFps([...r.units, ...r.reused], cs);
+    for (const n of [...fps.keys()].sort()) vStep(`asy 指纹  ${fps.get(n)}  ${n}`);
+    for (const [nm, own] of r.owners === undefined ? [] : r.owners) {
+      vStep(`asy 归属  ${own === '' ? '<运行时>' : own}  ${nm}`);
+    }
+  }
+  writeText(join(dir, 'omni_rt.js'), emitJsRuntimeModule());
+  // 一份产物的印记（这一格决定重不重编）：`编译器 | 它自己那个源文件 | 它引到的那几个源文件`，
+  // 每一格是 `路径:改动时间:字节数:h内容哈希`（见 inpField）。**身份是内容哈希** ——
+  // touch 一下、重新 checkout 一遍都不该重编；改动时间与字节数只是省一次读的预检。
+  // 没有源文件的那份（omni_weak：内容由整个程序决定）只能哈希它自己的文本 —— 它小。
+  const fstamp = inpField;
+  const keyOfName = new Map();
+  for (const u of r.units) keyOfName.set(u.name, u.key);
+  for (const u of r.reused) keyOfName.set(u.name, u.key);
+  const stampOf = (u) => {
+    if (u.key === '') return `${cs}|t${hash16(u.text)}|${u.text.length}`;
+    const ds = [];
+    for (const d of u.deps) ds.push(fstamp(keyOfName.get(d) === undefined ? '' : keyOfName.get(d)));
+    return `${cs}|${fstamp(u.key)}|${ds.join('|')}`;
+  };
+  let made = 0;
+  let kept = r.reused.length;
+  for (const u of r.units) {
+    const jsPath = join(dir, `${u.name}.js`);
+    const stPath = join(dir, `${u.name}.stamp`);
+    const stamp = stampOf(u);
+    if (exists(stPath) && exists(jsPath)) {
+      const old = readText(stPath);
+      if (stampSame(old, stamp)) {
+        kept++;
+        // 内容一样、只是改动时间变了（touch / 重新 checkout）：把预检那两格刷新，下一趟连读都不用读
+        if (old !== stamp) writeText(stPath, stamp);
+        continue;
+      }
+    }
+    writeText(join(dir, `${u.name}.sx`), u.text);
+    // ADR-0015 第三步：把核心方言**逐条**落进声明存储（`d/<内容哈希>.sx`），
+    // 单元旁边一格 `.idx` 记它有哪几条、什么次序。这一步只写不读，判据是"拼回去
+    // 逐字节等于 `.sx`" —— 对上了才说明"条"这个粒度切得干净，后面 emit 与接口才能按条走。
+    if (env('OMNI_ASY_DECLS') === '1' && u.parts !== undefined && u.parts !== null) {
+      const dd = join(dir, 'd');
+      mkdirAll(dd);
+      const hs = [];
+      for (const p of u.parts) {
+        const h = hash16(p);
+        hs.push(h);
+        const pp = join(dd, `${h}.sx`);
+        if (!exists(pp)) writeText(pp, p);   // 名字由内容决定：写一次就够，谁也盖不了谁
+      }
+      writeText(join(dd, `${u.name}.idx`), `${hs.join('\n')}\n`);
+      const back = `(module\n${u.parts.join('\n')})\n`;
+      vStep(back === u.text ? `asy 逐条切开   ${u.name} ${hs.length} 条`
+        : `asy 逐条切开对不上 ${u.name}`);
+    }
+    const d = new Diagnostics();
+    const mod = lowerCoreSexpr(new SourceFile(`${u.name}.sx`, u.text), d, `omni_init_${u.name}`);
+    d.throwIfErrors();
+    writeText(jsPath, emitJs(mod, { esm: true }));
+    // 下一趟要复用这一份时，前端连它的正文都不降 —— 那时靠的就是这三格：
+    // `.sec` 是它定义的名字与签名（别人引它要发的 `(sig …)`），
+    // `.wk` 是它引到的那些 weak 项的正文（那一档按程序生成，不生就成了未声明），
+    // `.dep` 是复用它时还得跟着进来的那几份。
+    //
+    // **入口那一份不出这三格**：入口单元的前缀是空串（id 0），它的顶层名字于是是**裸的**
+    // （`cardioid.asy` 里那个 `real f(real t)` 就叫 `f`）。出了 `.sec` 之后，别的程序在算
+    // "还要带哪几份"时会把某个库 weak 项里出现的 `f` 认成"cardioid 定义的"，于是
+    // `main-label3.js` 里多出一句 `omni_init_cardioid()` —— 量出来的样子就是 label3 与
+    // gamma3 在 `$alen` 上炸（跑的是另一个例子的初始化）。入口本来也不该被谁复用。
+    if (u.key !== '' && u.name !== r.entry) {
+      writeText(join(dir, `${u.name}.sec`), `${u.sec.join('\n')}\n`);
+      writeText(join(dir, `${u.name}.wk`), u.weak.join(`\n${ASY_WK_SEP}\n`));
+      const dl = [`key|${u.key}`];
+      for (const n of u.need) dl.push(`need|${n}`);
+      writeText(join(dir, `${u.name}.dep`), `${dl.join('\n')}\n`);
+      // 这一份的**接口索引**（第七十八刀）：下一个例子引到这个库时，靠它认名字与签名，
+      // 源码与树都不再碰。存不下来的那种（碎片打包认不出形状）这一格是 null —— 不写，
+      // 下一趟照旧从源码走。
+      if (u.iface !== undefined && u.iface !== null) {
+        writeText(join(dir, `${u.name}.aif`), JSON.stringify(u.iface));
+      }
+    }
+    writeText(stPath, stamp);
+    made++;
+  }
+  vStep(`asy units      新编 ${made} 份、复用 ${kept} 份`);
+  // 每一份自己的 `(main …)` 只做一件事：把**这一份**的全局清零（第二十四刀那条
+  // "零初始化在入口最前面"，现在分到了各家）。所以入口那份 main 先把各家的清零跑一遍，
+  // 最后才是入口自己 —— 入口的 `(main …)` 里才是真正的程序（含调各模块的 init）。
+  // 少了这一步，别人家的全局是 undefined：量出来的样子是 cyclic 登记处那一格
+  // `Cannot read properties of undefined (reading 'length')`。
+  const names = [];
+  for (const u of r.units) if (u.name !== r.entry) names.push(u.name);
+  for (const u of r.reused) if (u.name !== r.entry) names.push(u.name);
+  names.sort();
+  const lines = ["import './omni_rt.js';"];
+  for (const n of names) lines.push(`import { omni_init_${n} } from './${n}.js';`);
+  lines.push(`import { omni_init_${r.entry} } from './${r.entry}.js';`);
+  for (const n of names) lines.push(`omni_init_${n}();`);
+  lines.push(`omni_init_${r.entry}();`);
+  lines.push('$js_check_uncaught();');
+  lines.push('$flush();');
+  lines.push('');
+  // 入口那一份的启动器**按入口起名**：这个目录是共用的，叫 main.js 的话两个入口互相盖
+  const mainPath = join(dir, `main-${r.entry}.js`);
+  writeText(mainPath, lines.join('\n'));
+  // 清单：这个入口用到哪几份产物、每份对应的源文件与它的改动时间/字节数。
+  // 下一趟只要这张清单还成立，**整个前端一步都不走**（见 asyModsFast）。
+  const man = [asyModsEnv(), cs, r.entry];
+  for (const u of r.units) man.push(`u|${u.name}|${u.key}|${fstamp(u.key)}`);
+  for (const u of r.reused) man.push(`u|${u.name}|${u.key}|${fstamp(u.key)}`);
+  // **omni_weak 那一份也要记一格**：它的内容由整个程序决定（名字却必须固定 ——
+  // 库那几份 `.js` 里写死的是 `from './omni_weak.js'`），所以换个入口跑一趟就会把它盖掉。
+  // 记下这一趟那份的印记，下一趟对不上就老老实实重来。
+  // 量出来的样子（没有这一格时）：`run tri`、`run curve`、再 `run tri` —— 第三趟命中清单，
+  // 拿的却是 curve 那份 weak，报 `s_…_shipout__d0_2_3_4_5_6_7_8_9` 不是它的导出。
+  const wst = join(dir, `${r.weak}.stamp`);
+  if (exists(wst)) man.push(`w|${readText(wst)}`);
+  writeText(join(dir, `main-${r.entry}.dep`), `${man.join('\n')}\n`);
+  vStep(`asy units      -> ${dir}`);
+  return mainPath;
+}
+
+/**
+ * 影响"同一个名字解析到哪个文件"的环境。清单里带上它 —— 换了 ASYMPTOTE_DIR
+ * 或者换了当前目录（模块是**按当前目录**找的，量过），同一份清单就不再作数。
+ */
+function asyModsEnv() {
+  const d = env('ASYMPTOTE_DIR');
+  const b = env('OMNI_ASY_BUILTINS');
+  return `env|${cwd()}|${d === undefined ? '' : d}|${b === undefined ? '' : b}`;
+}
+
+/**
+ * 上一趟的清单还成立吗？成立就直接回那份启动器的路径 —— 这一趟**不解析、不降级、
+ * 不生成**，只剩 node 自己跑。
+ *
+ * 为什么这一格是必须的：产物缓存只砍掉"核心方言 -> JS"那一段，而量出来的大头在前端 ——
+ * 一趟 1.8s 里 AST 读回来约 250ms、把库重新降级约 800ms，两样都发生在"知道产物还能用"
+ * **之前**。所以判断"能不能用"这件事本身必须便宜：只 stat 清单里那几十个文件。
+ */
+function asyModsFast(path, dir) {
+  const nm = fileUnitName(path);
+  const mainPath = join(dir, `main-${nm}.js`);
+  const depPath = join(dir, `main-${nm}.dep`);
+  // 不成立时**说清是哪一格不成立**：这条快路一旦悄悄失效，整个前端就白跑一趟
+  // （量出来的样子是「换个入口跑一趟，再跑回来又是满编 0.9s」），而从日志上看不出来。
+  const miss = (why) => { vStep(`asy mods 不命中 ${why}`); return null; };
+  if (!exists(depPath) || !exists(mainPath)) return miss('还没有这个入口的清单');
+  const lines = readText(depPath).split('\n');
+  if (lines.length < 3) return miss('清单不全');
+  if (lines[0] !== asyModsEnv()) return miss('环境变了（当前目录 / ASYMPTOTE_DIR）');
+  if (lines[1] !== srcStamp()) return miss('编译器自己变了');
+  if (lines[2] !== nm) return miss('入口名字对不上');
+  for (let i = 3; i < lines.length; i++) {
+    const ln = lines[i];
+    if (ln === '') continue;
+    // omni_weak 那一格：它是按程序生成的，换个入口跑就会被盖掉（见 asyModsBuild）
+    if (ln.startsWith('w|')) {
+      const wst = join(dir, 'omni_weak.stamp');
+      if (!exists(wst)) return miss('weak 那一份没了');
+      if (readText(wst) !== ln.slice(2)) return miss('weak 那一份被别的入口盖掉了');
+      continue;
+    }
+    const parts = ln.split('|');
+    if (parts[0] !== 'u') return miss('清单里有认不出的行');
+    if (!exists(join(dir, `${parts[1]}.js`))) return miss(`产物 ${parts[1]}.js 没了`);
+    // 这一格记的是 `路径:改动时间:字节数:h内容哈希`（inpField 那一份），没有源文件的记 `-`。
+    // 改动时间变了但内容哈希一样也算成立（touch / 重新 checkout 不该让整张清单作废）。
+    const want = parts.slice(3).join('|');
+    if (!inpOk(want).ok) return miss(`源文件 ${parts[1]} 变了`);
+  }
+  if (!exists(join(dir, 'omni_rt.js'))) return miss('运行时那一份没了');
+  vStep(`asy mods 命中   ${lines.length - 3} 份产物一份没动`);
+  return mainPath;
 }
 
 /**
@@ -594,6 +1293,31 @@ function main(argv) {
 
   switch (cmd) {
     case 'run': {
+      // 一个源文件一份产物那条路（第七十五刀）：产物按源文件名躺在一个**共用目录**里，
+      // 跑的是 node 自己的 ESM 模块图 —— 复用与增量都在那个目录上，不在这一趟里。
+      // `OMNI_ASY_MODS=0` 回到"整份程序一份大 JS"那条（对照用）。
+      if (path.endsWith('.asy') && hasJsEngine() && !rest.includes('--interp')
+        && env('OMNI_ASY_MODS') === '1') {
+        const dir = asyModsDir();
+        // 先问一句"上一趟的清单还成立吗"。成立就一步前端都不走 —— 判断本身只是几十个 stat。
+        const hit = asyModsFast(path, dir);
+        const mainPath = hit === null ? asyModsBuild(path, dir) : hit;
+        const st = spawn('node', [mainPath], 'i')[0];
+        vStep('exec node（每个源文件一份 ESM）');
+        return st;
+      }
+      // 产物缓存（第七十四刀）：同一份源码（连它引的每个模块）没动过就直接跑上一趟的 JS。
+      // 只对 asy 那一路开 —— 别的前端还没有依赖清单。`--interp` 那条腿要 OIR，绕开。
+      const cacheable = path.endsWith('.asy') && hasJsEngine() && !rest.includes('--interp');
+      if (cacheable) {
+        const hit = jsCacheGet(path);
+        if (hit !== null) {
+          vStep(`asy js cache  ${hit.length} bytes`);
+          evalJs(hit);
+          vStep('exec in-process (node host, new Function)');
+          return 0;
+        }
+      }
       const { mod } = compile(path, rest);
       // 自己的解释器（ADR-0013）。阶段 1 还没覆盖全部 op，所以要显式要它
       if (rest.includes('--interp')) return runInterp(mod);
@@ -603,6 +1327,7 @@ function main(argv) {
       if (hasJsEngine()) {
         const js = emitJs(mod);
         vStep(`backend js  ${js.length} bytes`);
+        if (cacheable) jsCachePut(path, js, lastAsyDeps);
         evalJs(js);
         vStep('exec in-process (node host, new Function)');
         return 0;
@@ -688,6 +1413,15 @@ function main(argv) {
     // 内容与 lowerCoreSexpr 拿到的**逐字节相同** —— 行号可以直接对。
     case 'sx': {
       stdout(asyText(path));
+      return 0;
+    }
+    // 一个源文件一份产物（第七十五刀）：`<名字>.sx` 与 `<名字>.js` 摊在一个目录里，
+    // 名字就是源文件自己的名字。`-o 目录` 指定去处，默认 .omni-cache/asy-mods。
+    // 加 `--run` 就直接跑（node 自己按 ESM 的模块图把它们串起来）。
+    case 'asy-units': {
+      const oi = rest.indexOf('-o');
+      const dir = oi >= 0 ? rest[oi + 1] : asyModsDir();
+      stdout(`${asyModsBuild(path, dir)}\n`);
       return 0;
     }
     case 'oir': {

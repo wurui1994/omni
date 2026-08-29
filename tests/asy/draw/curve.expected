@@ -1,0 +1,37 @@
+%!PS-Adobe-3.0 EPSF-3.0
+%%BoundingBox: 255 345 356 446
+%%HiResBoundingBox: 255.814895 345.5 355.185105 445.5
+%%Creator: Omni asy
+%%Pages: 1
+%%Page: 1 1
+/Setlinewidth {0 exch dtransform dup abs 1 lt {pop 0}{round} ifelse
+idtransform setlinewidth pop} bind def
+gsave
+ 268.313201 361.8623 translate
+newpath 0 0 moveto
+ -4.78166003 26.081782 15.247789 50.1171209 41.7642674 50.1171209 curveto
+ 68.2807457 50.1171209 88.3101948 26.081782 83.5285348 0 curveto
+0 0 1 setrgbcolor
+0.5 Setlinewidth
+1 setlinecap
+1 setlinejoin
+10 setmiterlimit
+stroke
+newpath 0 0 moveto
+ 24.3501063 -27.8377974 70.0019416 -18.7692197 83.5285348 16.705707 curveto
+ 95.362781 47.742274 74.4491447 81.4808439 41.7642674 83.5285348 curveto
+ -3.34443196 86.3545718 -29.4510856 33.6693953 0 0 curveto
+closepath
+1 0.5 0 setrgbcolor
+fill
+newpath 8.35285348 8.35285348 moveto
+ 28.6833321 -14.022696 66.0654545 -4.8241929 75.1756813 25.0585604 curveto
+ 82.4296518 48.8525469 66.2708082 73.375526 41.7642674 75.1756813 curveto
+ 5.2163821 77.860347 -15.8679075 35.0100141 8.35285348 8.35285348 curveto
+closepath
+0.5 0 1 setrgbcolor
+1.5 Setlinewidth
+stroke
+grestore
+showpage
+%%EOF

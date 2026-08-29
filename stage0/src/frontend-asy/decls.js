@@ -94,7 +94,12 @@ export function asyStaticDec(L, rec, r, at, au) {
     // —— collections/iter.asy:42，那是一格**函数值字段**，名字就叫 `operator cast`）。
     // 表里的键照旧是那个名字，只有**符号名**要过一遍 asyFldSym：核心方言的名字得是标识符
     // （不过的话发出去是 `(global asy__sf61_..._operator cast (fnty …))`，那边读不出来）。
-    const g = { sym: `asy__sf${L.gdecls.length}_${rec.name}_${asyFldSym(nm)}`, type: t, at, ok: true };
+    // 编号用**这个单元自己**的计数器（第七十五刀）：以前是 `L.gdecls.length`，那是全程序的，
+    // 于是同一个库文件在不同入口底下编出来的名字不一样，产物没法按文件缓存。
+    const g = {
+      sym: `${L.pfx}asy__sf${L.unit.nsym++}_${rec.name}_${asyFldSym(nm)}`, type: t, at, ok: true,
+      unit: L.unit.id,
+    };
     L.gdecls.push(g);
     rec.statics.set(nm, g);
     // autounravel：同一格再往文件级挂一个名字。位置是 struct 的位置，所以写在 struct
@@ -261,8 +266,10 @@ export function asyOinitSig(L, n, at) {
   // 符号名要是个标识符：记录名本身就是（照旧不动），函数类型的类型文本里有括号和逗号，
   // 过一遍 asyMangle（第四十八刀）。
   const tag = L.isRec(ret) ? ret : asyMangle(ret);
-  // 同名的第 2 份及以后要改个名字：核心方言里模块层的名字是全局唯一的
-  const sym = list.length === 0 ? `asy__oi_${tag}` : `asy__oi${list.length}_${tag}`;
+  // 同名的第 2 份及以后要改个名字：核心方言里模块层的名字是全局唯一的。
+  // 编号用**这个单元自己**的计数器（第七十五刀）：`list` 是跨模块攒的，拿它的长度做名字
+  // 就是顺序依赖 —— plain 先注册还是 graph 先注册会换出两个名字来。
+  const sym = `${L.pfx}asy__oi${L.unit.nsym++}_${tag}`;
   const cand = { ret, params: [], ps: [], node: n, at, sym };
   list.push(cand);
   L.oinits.set(ret, list);
@@ -307,7 +314,7 @@ export function asyCastSig(L, n, at, ec) {
   }
   const safe = to.replace(/[^A-Za-z0-9_]/g, '_');
   const cand = {
-    ret: to, params: [ps[0].type], ps, node: n, sym: `${L.pfx}asy__cast${L.castNo}_${safe}`,
+    ret: to, params: [ps[0].type], ps, node: n, sym: `${L.pfx}asy__cast${L.unit.nsym++}_${safe}`,
     pfx: L.pfx, unit: L.unit.id, at, dat: at, to, src: ps[0].type, ec,
   };
   L.castNo++;
@@ -976,7 +983,7 @@ export function asyGlobalNames(L, n, at) {
     // 名字可以是**算符名**：`interpolate operator ::=operator ..(…)`（plain_paths.asy:129）
     // 就是一格叫 `operator ::` 的模块级变量。核心方言的符号得是个标识符，所以过一遍
     // asyFldSym —— 表里的键还是源码里那个名字（调用点按它查）。
-    const g = { sym: `asy__g${L.gdecls.length}_${asyFldSym(nm)}`, type: ty, at, ok,
+    const g = { sym: `${L.pfx}asy__g${L.unit.nsym++}_${asyFldSym(nm)}`, type: ty, at, ok,
       unit: L.unit.id };
     const list = L.globals.has(nm) ? L.globals.get(nm) : [];
     list.push(g);
@@ -1141,7 +1148,8 @@ function asyFnSlots(L, u, rs) {
     if (c.slot !== undefined || c.inRec !== undefined) continue;
     const ty = asyCandFnType(L, c);
     if (ty === null) continue;
-    const g = { sym: `asy__fs${L.gdecls.length}_${nm}`, type: ty, at: c.at, ok: true };
+    const g = { sym: `${L.pfx}asy__fs${L.unit.nsym++}_${nm}`, type: ty, at: c.at, ok: true,
+      unit: L.unit.id };
     const gl = L.globals.has(nm) ? L.globals.get(nm) : [];
     gl.push(g);
     gl.sort((a, b) => a.at - b.at);

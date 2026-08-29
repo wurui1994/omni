@@ -123,6 +123,14 @@ class CoreLowerer {
     // 正在降 (cfn …) 的那一份的捕获表（名字 -> 类型）。`(cap c)` 只在这里面查 ——
     // 不许它退回去查外层的局部量：那个帧早就返回了，读它就是读失效的栈。
     this.caps = null;
+    // 只**声明**、不定义的那些名字（`(sig …)`，第七十五刀）。一个库文件编成一份自己的 JS，
+    // 靠的就是这个：它引到的别人家的类/全局/函数/闭包在这里只报个签名，正文由**那一份**
+    // 产物发。这几张表记着"谁是只声明的"，assemble 于是不把它们发第二遍。
+    this.sigOnly = {
+      fns: new Set(), globals: new Set(), aggs: new Set(), clos: new Set(),
+    };
+    // 带出处的那些 `(sig "谁" …)`：`{from, kind, name}`。后端按它发真的 import。
+    this.sigImports = [];
   }
 
   err(node, msg) {
@@ -263,7 +271,36 @@ class CoreLowerer {
       this.err(nodes[0], '一份核心方言的源文件是恰好一个 (module ...)');
       return null;
     }
-    const forms = top.items.slice(1);
+    const rawForms = top.items.slice(1);
+    // `(sig 一条声明)` = **只声明、不定义**（第七十五刀）。摊成里面那一条走原来的三遍，
+    // 只是把名字记进 sigOnly：签名照收（函数体里调它、拿它的字段都照常查得到），
+    // assemble 不再为它发一份正文/一格全局/一份类 —— 那些由**定义它的那份产物**发。
+    // 一个库文件编成一份自己的 JS、几份拼起来是整个程序，靠的就是这一条。
+    //
+    // 前面可以带出处：`(sig "plain_pens" (fn …))`。带了出处，OIR 上就多一条
+    // `imports` 记录，后端于是能发真的 `import { … } from './plain_pens.js'` ——
+    // 不带就只是"这个名字在别处"，靠拼接解决。
+    const forms = [];
+    for (const f of rawForms) {
+      if (head(f) !== 'sig') { forms.push(f); continue; }
+      const hasFrom = f.items.length > 2 && f.items[1] !== undefined
+        && f.items[1].kind === 'string';
+      const from = hasFrom ? f.items[1].value : null;
+      const inner = hasFrom ? f.items[2] : f.items[1];
+      if (!isList(inner) || !isAtom(inner.items[1])) {
+        this.err(f, '(sig [出处] (fn …) / (global …) / (class …) / (cfn …))');
+        continue;
+      }
+      const ih = head(inner);
+      const inm = inner.items[1].value;
+      if (ih === 'fn') this.sigOnly.fns.add(inm);
+      else if (ih === 'global') this.sigOnly.globals.add(inm);
+      else if (ih === 'class' || ih === 'struct') this.sigOnly.aggs.add(inm);
+      else if (ih === 'cfn') this.sigOnly.clos.add(inm);
+      else { this.err(f, `(sig …) 里只能是 fn / cfn / global / class / struct，见到 '${ih}'`); continue; }
+      if (from !== null) this.sigImports.push({ from: from, kind: ih, name: inm });
+      forms.push(inner);
+    }
 
     // 三遍。第一遍收结构体：函数签名与字段类型都可能提到它，所以它必须最先成型。
     // 字段类型里**可以**提到别的结构体/类（第十七刀）。
@@ -380,7 +417,10 @@ class CoreLowerer {
     for (const p of ps) pts.push(p.type);
     const t = this.useFnType(fnType(pts, ret));
     this.closures.set(nm, {
-      id, mangled: `omni_clo_${id}`, make: `omni_mk_${id}`,
+      // 发出去的名字**只由 `(cfn NAME …)` 的名字决定**，不是"第几个收到的"（从前是
+      // `omni_clo_${id}`）。一份源码一份产物、几份产物拼起来是整个程序，就要求同一个
+      // 闭包在哪一趟编译里都叫同一个名字 —— 按顺序编号做不到（换个入口顺序就变）。
+      id, mangled: `omni_clo_${nm}`, make: `omni_mk_${nm}`,
       captures: caps, params: ps, ret: ret, type: t, node: f,
     });
     return null;
@@ -489,6 +529,7 @@ class CoreLowerer {
     let gi = 0;
     for (const [nm, t] of this.globals) {
       if (gi++ < base.globals) continue;
+      if (this.sigOnly.globals.has(nm)) continue;   // 只声明的：那一格由别人家的产物发
       mainStmts.push({
         kind: 'ExprStmt',
         expr: {
@@ -503,6 +544,7 @@ class CoreLowerer {
         const nm = isAtom(f.items[1]) ? f.items[1].value : null;
         const d = nm === null ? undefined : this.funcs.get(nm);
         if (d === undefined) continue;
+        if (this.sigOnly.fns.has(nm)) continue;   // 只声明的：正文由定义它的那份产物发
         this.scopes = [new Map()];
         for (const p of d.params) this.scopes[0].set(p.name, p.type);
         const body = this.block(f.items.slice(4), d.ret);
@@ -531,6 +573,7 @@ class CoreLowerer {
         const nm = isAtom(f.items[1]) ? f.items[1].value : null;
         const d = nm === null ? undefined : this.closures.get(nm);
         if (d === undefined) continue;
+        if (this.sigOnly.clos.has(nm)) continue;   // 同上
         this.scopes = [new Map()];
         for (const p of d.params) this.scopes[0].set(p.name, p.type);
         this.caps = new Map();
@@ -575,16 +618,21 @@ class CoreLowerer {
     // `base` 之前的那些是前面几批发过的，不再重发（Map 记的就是插入序）。
     const structs = [];
     let si = 0;
-    for (const s of this.structs.values()) if (si++ >= base.structs) structs.push(s);
+    for (const s of this.structs.values()) {
+      if (si++ >= base.structs && !this.sigOnly.aggs.has(s.name)) structs.push(s);
+    }
     const classes = [];
     let ci = 0;
-    for (const c of this.classes.values()) if (ci++ >= base.classes) classes.push(c);
+    for (const c of this.classes.values()) {
+      if (ci++ >= base.classes && !this.sigOnly.aggs.has(c.name)) classes.push(c);
+    }
     // 模块级变量按**声明顺序**发出去（Map 记的就是插入序）：MIR 的全局号按这个顺序分配，
     // 所以同一份输入两次编译出来的字节与哈希都一样。
     const globals = [];
     let gj = 0;
     for (const [nm, t] of this.globals) {
       if (gj++ < base.globals) continue;
+      if (this.sigOnly.globals.has(nm)) continue;
       globals.push({ name: nm, mangled: `g_${nm}`, type: t });
     }
     // 闭包提升出来的函数体排在最后（跟 hir/check.js 一样：合成的东西放在用户函数之后）。
@@ -593,8 +641,9 @@ class CoreLowerer {
     while (li < this.lifted.length) { lifted.push(this.lifted[li]); li++; }
     const clos = [];
     let qi = 0;
-    for (const c of this.closures.values()) {
+    for (const [nm, c] of this.closures) {
       if (qi++ < base.closures) continue;
+      if (this.sigOnly.clos.has(nm)) continue;   // 造它的那个小函数由定义它的那份产物发
       clos.push({ id: c.id, mangled: c.mangled, make: c.make, captures: c.captures });
     }
     const fnTys = [];
@@ -605,6 +654,7 @@ class CoreLowerer {
       closures: clos, fnTypes: fnTys,
       funcs: funcs.concat(lifted),
       globals: globals,
+      imports: this.sigImports,
       entry: entryName,
     };
   }
@@ -968,11 +1018,12 @@ class CoreLowerer {
         : { kind: 'Return', value: call };
       const tail = { kind: 'Return', value: d.ret === VOID ? null : zeroValue(d.ret) };
       this.closures.set(key, {
-        id, mangled: `omni_clo_${id}`, make: `omni_mk_${id}`,
+        // 名字按**被取地址的那个函数**起（同上：不能用"第几个"编号）
+        id, mangled: `omni_clo_ref_${nm}`, make: `omni_mk_ref_${nm}`,
         captures: [], params: ps, ret: d.ret, type: t, node: n,
       });
       this.lifted.push({
-        name: key, mangled: `omni_clo_${id}`, ret: d.ret, params: ps,
+        name: key, mangled: `omni_clo_ref_${nm}`, ret: d.ret, params: ps,
         body: { kind: 'Block', stmts: [stmt, tail] }, closureId: id,
       });
     }
@@ -1490,10 +1541,12 @@ function coreTypeText(t) {
  * 核心方言的源文本 -> OIR。`.sx` 文件走这条，`omni glr` 的输出也走这条 ——
  * 后者才是重点：语法文件的映射模板拼出这份方言，中间没有为那门语言写的一行代码。
  */
-export function lowerCoreSexpr(file, diags) {
+export function lowerCoreSexpr(file, diags, entry) {
   const nodes = readSexpr(file, diags);
   if (diags.hasErrors()) return null;
-  return new CoreLowerer(diags).chunk(nodes, 'omni_main');
+  // 入口名默认是 `omni_main`（整个程序）。一个库文件编成一份自己的产物时给它自己的名字
+  // （`omni_init_plain` 之类）：那一份的 `(main …)` 就是这个库的初始化函数。
+  return new CoreLowerer(diags).chunk(nodes, entry === undefined ? 'omni_main' : entry);
 }
 
 /**

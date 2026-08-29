@@ -196,22 +196,11 @@ real degrees(pair z, bool warn = true) {
 }
 
 // copy：深拷一份（量过 `int[] b=copy(a); b[0]=99;` 之后 a[0] 还是原值）。
-// 没有泛型，所以按 base 用到的元素类型各写一份（math.asy 用的是 real[] 与 bool[]）。
-real[] copy(real[] a) {
-  real[] b;
-  for (int i = 0; i < a.length; ++i) b.push(a[i]);
-  return b;
-}
-int[] copy(int[] a) {
-  int[] b;
-  for (int i = 0; i < a.length; ++i) b.push(a[i]);
-  return b;
-}
-bool[] copy(bool[] a) {
-  bool[] b;
-  for (int i = 0; i < a.length; ++i) b.push(a[i]);
-  return b;
-}
+// 这里**不写** real[] / int[] / bool[] 那三份手抄的了 —— 降级那一层的 arrCopyHelper
+// 是照元素类型现生的通用版，还捎带 `cyclic`（量过真 asy：`b=copy(a)` 之后 b.cyclic 也是
+// true，`real[][]` 的内层行同样）。手抄的那三份会把通用版**盖掉**，于是
+// `copy` 出来的那份丢了 cyclic —— sphere.asy 就死在 three_surface.asy:1633 的
+// `array index out of range: 1 (length 1)` 上。
 
 // search：**最后一个 <= key 的下标**，key 比首元素还小给 -1
 // （量过 {1,3,5,7,9}：key=5 -> 2、key=6 -> 2、key=0 -> -1、key=100 -> 4）
@@ -539,7 +528,7 @@ pen cyan = rgb(0, 1, 1);
 pen magenta = rgb(1, 0, 1);
 pen yellow = rgb(1, 1, 0);
 pen orange = rgb(1, 0.5, 0);
-pen purple = rgb(0.5, 0, 0.5);
+pen purple = rgb(0.5, 0, 1);
 
 // ---------------------------------------------------------------- path
 // asy 的 path 是 solvedKnot 的数组 + cycles 标志（path.h）。这里照搬：
@@ -1754,9 +1743,15 @@ real fitscale(picture pic) {
 }
 
 // ---------------------------------------------------------------- EPS
-// 坐标是 %.6g（psfile.h:160 `*out << " " << x`，ostream 的默认精度就是 6），
-// HiResBoundingBox 是 %.9g（psfile.h:30 的 setprecision(9)）。
-string ps(real x) { return string(x, 6); }
+// 坐标是 **%.9g**，这一条量反过一次，要说准：psfile.h:160 是裸的
+// `*out << " " << x`，看着像"ostream 默认 6 位"，但同一个流在 psfile.h:30 写
+// `%%HiResBoundingBox` 时做过 `std::setprecision(9)` —— **precision 是粘的**，
+// 那一行之后再没有复位（psfile.cc 里没有第二处 precision），所以正文里每个坐标、
+// 笔宽、颜色都是 9 位有效数字。先前记成 6 位是因为第一个例子（tri）的数
+// 98 / 78.4 / 49 在两档下印出来一样，看不出差别；量一条三次曲线就露了：
+// asy 印 `-5.60094532 30.5506108 …`，6 位那一档只有 `-5.60095 30.5506 …`。
+// `%%BoundingBox` 那一行是另一路（psfile.h:27 的 setprecision(0)+fixed）。
+string ps(real x) { return string(x, 9); }
 string ps9(real x) { return string(x, 9); }
 
 // psfile 里 lastpen 一开始是 initialpen —— 与默认笔的每一项都不同，所以第一个元素
@@ -1764,13 +1759,21 @@ string ps9(real x) { return string(x, 9); }
 pen lastpen;
 bool lastvalid = false;
 
+// 颜色分三档，顺序照 psfile.cc:184 的 setcolor：先 cmyk、再 rgb、最后灰。
+// 量过 `cmyk(1,0,0.5,0.2)`：asy 发的是 `1 0 0.5 0.2 setcmykcolor`，**不转成 rgb**。
 string colorof(pen p) {
+  if (p.iscmyk)
+    return ps(p.cyan) + " " + ps(p.magenta) + " " + ps(p.yellow) + " "
+      + ps(p.black) + " setcmykcolor";
   if (p.isrgb) return ps(p.red) + " " + ps(p.green) + " " + ps(p.blue) + " setrgbcolor";
   return ps(p.gray) + " setgray";
 }
 
 bool samecolor(pen a, pen b) {
-  if (a.isrgb != b.isrgb) return false;
+  if (a.iscmyk != b.iscmyk || a.isrgb != b.isrgb) return false;
+  if (a.iscmyk)
+    return a.cyan == b.cyan && a.magenta == b.magenta
+      && a.yellow == b.yellow && a.black == b.black;
   if (a.isrgb) return a.red == b.red && a.green == b.green && a.blue == b.blue;
   return a.gray == b.gray;
 }
@@ -1818,7 +1821,10 @@ void emitpath(path g, real s) {
 // 摆放是量出来的：图的整体尺寸 = 缩放后的 bbox（描边已经算进笔宽了），
 // 信纸 612x792 居中再各减 0.5（那 0.5 与笔宽无关，三个尺寸两种笔宽都对上了），
 // translate 把 bbox 的左下角搬到那里。
+// `asy__shipped`：印过一张没有。退出时那一次隐式 shipout 靠它挡重复，见下面 atexit 那一段。
+bool asy__shipped = false;
 void shipout(picture pic) {
+  asy__shipped = true;
   real s = fitscale(pic);
   box bx = picbox(pic, s);
   real w = bx.r - bx.l;
@@ -1895,6 +1901,28 @@ void atupdate(asy__thunk f) { asy__updatefn = f; }
 asy__thunk atupdate() { return asy__updatefn; }
 void atexit(asy__thunk f) { asy__exitfn = f; }
 asy__thunk atexit() { return asy__exitfn; }
+// 退出钩子真的会跑：降级那一层在 `(main …)` 的**最后一句**插一条 `(call asy__atexitrun)`
+// （lower.js 的 chunk 尾巴）。asy 那边这一条是 C++ 的 `run::cleanup`/exitFunction 调的，
+// 与"程序正常跑完"是同一个点，所以插在 main 末尾是同一处语义。
+// 先清成 null 再调：plain.asy:53 的 exitfunction 里再 `shipout()` 一次也不会绕回来。
+void asy__atexitrun() {
+  if (asy__exitfn == null) return;
+  asy__thunk f = asy__exitfn;
+  asy__exitfn = null;
+  f();
+}
+// 隐式 shipout：与 plain.asy:53-62 的 exitfunction 同一条 —— 跑完了还没印过、
+// currentpicture 又不空，就补一张。真 asy 那边显式 `shipout(currentpicture)` 会在
+// plain_shipout.asy:104 那道 `!implicitshipout && defaultprefix` 的门闩上 return，
+// 真正印出来的**总是**退出时这一次（量过：显式 shipout 的文件里只有一份 EPS）。
+// 我们这边显式 shipout 是当场印的，所以用 asy__shipped 挡住第二份 —— 份数一样。
+// 引了真 base 时这一条会被 plain.asy 的 `atexit(exitfunction)` 顶掉（atexit 只存一个），
+// 那时走的是 plain 的那条路，到 `_shipout` 落地。
+void asy__implicitshipout() {
+  if (asy__shipped || currentpicture.ops.length == 0) return;
+  shipout(currentpicture);
+}
+atexit(asy__implicitshipout);
 // 断点函数不是 `void()`：它是 `string(string file, int line, int column, code s)`
 // （runsystem.in:132 的 callableBp，plain_debugger.asy:86 把 debugger 装进去）。
 typedef string asy__bpfn(string, int, int, code);
@@ -4793,9 +4821,45 @@ path[][] _texpath(string[] s, pen[] p) {
 path[][] textpath(string[] s, pen[] p) {
   abort("textpath 还没做（读字体文件那一路不在这一层）"); return new path[][];
 }
+// runpicture.in 的 `_shipout`：**真 plain 那条出口**。plain_shipout.asy:117 走到这儿，
+// 手上的 frame 坐标已经是最终的（`pic.fit()` 已经按 size(…) 缩过），所以这里的缩放固定为 1。
+// 上面那份 `shipout(picture)` 是这一层自己的短路（不引 plain 时用），两份共用 emitpath /
+// setpen / framebox。
+//
+// prefix / format / wait / view / preamble 这一层都用不上（没有写盘、没有 TeX、没有看图
+// 程序）：EPS 正文印到标准输出。`t` 忽略 —— plain 传下来的是 `identity()` 之外只在
+// xasy 那一路才不是恒等（量过：`-f eps` 走的是恒等）。
 void _shipout(string prefix="", frame f, frame preamble=null, string format="",
               bool wait=false, bool view=true, transform t=identity()) {
-  abort("_shipout 还没做（EPS 那一路走的是自己那份 shipout）");
+  box bx = framebox(f);
+  real w = bx.r - bx.l;
+  real h = bx.t - bx.b;
+  real ox = (612 - w) / 2 - 0.5;
+  real oy = (792 - h) / 2 - 0.5;
+  write("%!PS-Adobe-3.0 EPSF-3.0");
+  write("%%BoundingBox: " + string(floor(ox)) + " " + string(floor(oy)) + " "
+        + string(ceil(ox + w)) + " " + string(ceil(oy + h)));
+  write("%%HiResBoundingBox: " + ps9(ox) + " " + ps9(oy) + " "
+        + ps9(ox + w) + " " + ps9(oy + h));
+  write("%%Creator: Omni asy");
+  write("%%Pages: 1");
+  write("%%Page: 1 1");
+  write("/Setlinewidth {0 exch dtransform dup abs 1 lt {pop 0}{round} ifelse");
+  write("idtransform setlinewidth pop} bind def");
+  write("gsave");
+  write(" " + ps(ox - bx.l) + " " + ps(oy - bx.b) + " translate");
+  lastvalid = false;
+  for (int i = 0; i < f.ops.length; ++i) {
+    drawop o = f.ops[i];
+    emitpath(o.g, 1);
+    setpen(o.p);
+    if (o.kind == 0) write("stroke");
+    else if (o.p.evenodd) write("eofill");
+    else write("fill");
+  }
+  write("grestore");
+  write("showpage");
+  write("%%EOF");
 }
 // 三维那两条出口（runpicture.in:486/512）。真 asy 一条走 PRC/v3d 的写盘与 GPU 渲染，
 // 一条是 `f->shipout3(prefix,format)` 的短形。这一层两条都没有，所以体是 abort ——

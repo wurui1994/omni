@@ -12,6 +12,7 @@
 
 import { isList, isAtom, head } from '../sexpr/read.js';
 import { asyUserCall } from './calls.js';
+import { asyIfaceLoad } from './iface.js';
 
 /* -------------------------------------------------------------- 模块 */
 
@@ -83,6 +84,45 @@ export function asyModLoadAs(L, node, name, key, tpl) {
   for (const k of L.loading) {
     if (k === key) { L.nope(node, `循环 import（'${name}' 正在加载）`); return null; }
   }
+  // **接口索引那条路**（第七十八刀）：这个库的产物还是最新的，那就连它的源码都不读 ——
+  // 读一份平的 `.aif`（名字 + 签名 + 默认值表达式），把它自己那几并 import 原样重放一遍。
+  // 量出来的账：声明遍 367ms 里绝大部分是"把十几个库的树整份读回来再走一遍"，而
+  // tri.asy 一共 4 行代码。
+  const io = L.opts.iface === undefined || L.opts.iface === null ? null
+    : L.opts.iface({
+      key,
+      file: L.opts.pathOf === undefined || L.opts.pathOf === null
+        ? '' : (L.opts.pathOf(name) ?? ''),
+      tpl: tpl !== null,
+    });
+  if (io !== null && io !== undefined) {
+    const u = asyIfaceLoad(L, io.obj, io.file, io.unpack);
+    if (u !== null) {
+      u.tpl = tpl;
+      u.mname = name;
+      // 单元上记的是**路径字符串**（产物名按它取，见 cli.js 的 unitName）——
+      // io.file 是给 span 用的那格轻壳，别把壳记上去
+      u.file = io.file === null || io.file === undefined || io.file.path === undefined
+        ? '' : io.file.path;
+      L.loading.push(key);
+      const prev0 = L.unitIn(u);
+      // 它自己那几并：按记下来的次序重放。每一并要的那个库照这条路再走一遍（它也可能
+      // 命中自己的 `.aif`），拿不到就退回源码那条。
+      const imps = io.obj.imps === undefined ? [] : io.obj.imps;
+      u.imps = [];
+      for (const im of imps) {
+        const dep = asyModLoadAs(L, node, im.mname, im.key,
+          im.tpl === null || im.tpl === undefined ? null : new Map(im.tpl));
+        if (dep === null) continue;
+        asyModMerge(L, node, dep, im.at,
+          im.only === null || im.only === undefined ? null : new Map(im.only),
+          im.priv === true);
+      }
+      L.unitOut(prev0);
+      L.loading.pop();
+      return u;
+    }
+  }
   const tree = L.opts.load(name);
   if (tree === null || tree === undefined) {
     L.nope(node, `模块 '${name}' 找不到 —— 当前目录下没有 ${name}.asy`
@@ -91,6 +131,11 @@ export function asyModLoadAs(L, node, name, key, tpl) {
   }
   const u = L.unitNew(tree, key);
   u.tpl = tpl;
+  u.mname = name;
+  // 这个单元是从哪个**真文件**来的（产物的增量按它的改动时间/字节数判）。
+  // key 只是模块身份（`collections.iter(T=int)`），不是路径。
+  u.file = L.opts.pathOf === undefined || L.opts.pathOf === null
+    ? '' : (L.opts.pathOf(name) ?? '');
   L.byKey.set(key, u);
   L.loading.push(key);
   const prev = L.unitIn(u);
@@ -131,6 +176,22 @@ export function asyCandAt(L, c, at) {
  * `only` 不是 null 时只并那几个名字（`from m access f, g;`）。
  */
 export function asyModMerge(L, node, u, at, only, priv) {
+  // 这一并记一笔（第七十八刀）：库的接口索引里只存**它自己声明的**那些名字，它 import
+  // 进来的那些等读回来时按这张表把每一并**原样重放**一遍 —— 次序、`private` 不外导、
+  // `from … access` 挑名字那三条语义因此还是原来那一套（见 iface.js）。
+  // 记在这一层是因为五个调用点（import / access / from access / 内建面 / autoplain）
+  // 全从这里过。
+  if (L.unit !== undefined && L.unit !== null && u !== undefined && u !== null) {
+    if (L.unit.imps === undefined) L.unit.imps = [];
+    L.unit.imps.push({
+      key: u.key, at: at, priv: priv === true,
+      // 重放要按**模块名**再走一遍加载（key 对模板来说是 `collections.iter(T=int)`，
+      // 不是文件名），所以名字与模板实参也记一笔
+      mname: u.mname === undefined ? u.key : u.mname,
+      tpl: u.tpl === null || u.tpl === undefined ? null : [...u.tpl],
+      only: only === null || only === undefined ? null : [...only],
+    });
+  }
   // `priv` 是"这一并是私有的"（autoplain 那一并）：并进来的每一格打上 ap 记号，
   // 这个单元**再被别人 import** 时那些格子不往外导。量出来的形状是 graph3.asy:567 的
   // `bounds mx=autoscale(…)`：graph3 先 `import graph;`（graph 里有自己的 struct bounds）、

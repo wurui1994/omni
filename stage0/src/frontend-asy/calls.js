@@ -16,6 +16,8 @@
 // 这几个原来的方法名放到模块级就太容易撞了。
 
 import { isList, isAtom, head } from '../sexpr/read.js';
+// 包装函数的名字里带 key 的哈希（asyFnValDefWrap），所以这一层要它
+import { hash16 } from '../host/hash.js';
 import {
   ASY_NOPE, DOT_BAD, asyConvCost, asyOpText, asyIsRestP, asyRestBase,
   asyIsArr, asyElem, asyIsFn, asyFnSplit, asyFldSym, asyCore, ASY_NULL, asyRefTy,
@@ -159,7 +161,7 @@ export function asyCall(L, n) {
       // 不是单个变量时先绑一格，免得它在实参之后才求（次序是照 asy 的：被调先求）。
       let code = cv.code;
       if (!/^\(var [A-Za-z0-9_]+\)$/.test(code)) {
-        const tv = `asy__cal${L.tmp++}`;
+        const tv = `asy__cal${L.unit.ntmp++}`;
         L.pre.push(`(let ${tv} ${asyCore(cv.type)} ${code})`);
         code = `(var ${tv})`;
       }
@@ -1366,7 +1368,7 @@ export function asyApplyCall(L, n, nm, list, raw, recv, reinit) {
     const v = L.coerce(r.v, d.ps[at].type, r.node, `'${nm}' 的实参 ${d.ps[at].name}`);
     if (v === null) return null;
     if (!reorder) { codes.set(at, v.code); continue; }
-    const tmp = `asy__na${L.tmp++}`;
+    const tmp = `asy__na${L.unit.ntmp++}`;
     L.pre.push(`(let ${tmp} ${asyCore(d.ps[at].type)} ${v.code})`);
     codes.set(at, `(var ${tmp})`);
   }
@@ -1383,13 +1385,13 @@ export function asyApplyCall(L, n, nm, list, raw, recv, reinit) {
       codes.set(f.restAt, `(anew ${at} (int 0))`);
     } else {
       if (L.pre === null) return L.nope(n, '这个位置的可变实参（要摊成语句，这里放不下）');
-      const tmp = `asy__va${L.tmp++}`;
+      const tmp = `asy__va${L.unit.ntmp++}`;
       L.pre.push(`(let ${tmp} ${at} (anew ${at} (int 0)))`);
       for (const p of packed) {
         if (!p.spread) { L.pre.push(`(apush (var ${tmp}) ${p.code})`); continue; }
         // 展开：逐个搬。核心方言没有"接一条数组"的指令，而这一条循环就是它。
-        const src = `asy__vs${L.tmp++}`;
-        const ix = `asy__vi${L.tmp++}`;
+        const src = `asy__vs${L.unit.ntmp++}`;
+        const ix = `asy__vi${L.unit.ntmp++}`;
         L.pre.push(`(let ${src} ${at} ${p.code})`);
         L.pre.push(`(do (let ${ix} int (int 0))`
           + ` (while (bin "<" (var ${ix}) (alen (var ${src})))`
@@ -1433,7 +1435,7 @@ export function asyRestValCall(L, n, nm, ft, callee, vals, nodes) {
     if (cv === null) return null;
     codes.push(cv.code);
   }
-  const tmp = `asy__jv${L.tmp++}`;
+  const tmp = `asy__jv${L.unit.ntmp++}`;
   L.pre.push(`(let ${tmp} ${asyCore(restTy)} (anew ${asyCore(restTy)} (int 0)))`);
   for (let i = rAt; i < vals.length; i++) {
     const ev = L.coerce(vals[i], el, nodes[i], `'${nm}' 的可变实参`);
@@ -1655,12 +1657,12 @@ export function asyFnValCall(L, n, nm, ft, callee) {
       code = `${code} (anew ${at} (int 0))`;
     } else {
       if (L.pre === null) return L.nope(n, '这个位置的可变实参（要摊成语句，这里放不下）');
-      const tmp = `asy__va${L.tmp++}`;
+      const tmp = `asy__va${L.unit.ntmp++}`;
       L.pre.push(`(let ${tmp} ${at} (anew ${at} (int 0)))`);
       for (const p of packed) {
         if (!p.spread) { L.pre.push(`(apush (var ${tmp}) ${p.code})`); continue; }
-        const src = `asy__vs${L.tmp++}`;
-        const ix = `asy__vi${L.tmp++}`;
+        const src = `asy__vs${L.unit.ntmp++}`;
+        const ix = `asy__vi${L.unit.ntmp++}`;
         L.pre.push(`(let ${src} ${at} ${p.code})`);
         L.pre.push(`(do (let ${ix} int (int 0))`
           + ` (while (bin "<" (var ${ix}) (alen (var ${src})))`
@@ -1936,14 +1938,11 @@ export function asyDefWrapper(L, n, nm, d, f, reinit) {
   const key = `${d.sym}|${f.missing.join(',')}${ri ? '|re' : ''}`;
   const had = L.wrapNames.get(key);
   if (had !== undefined) return had;
-  // 名字里只留标识符能用的那几个字符：`operator init` 这种带空格的名字也从这里过
-  let safe = '';
-  for (let i = 0; i < nm.length; i++) {
-    const c = nm.charAt(i);
-    safe += (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-      || (c >= '0' && c <= '9') || c === '_' ? c : '_';
-  }
-  const wname = `asy__def${L.wrapNames.size}_${safe}`;
+  // 名字**只由被调方与缺的那几格决定**（第七十五刀）：以前是个计数器，谁先要到这一形
+  // 就占小号，于是同一个库文件在不同入口底下 `asy__def65_checklengths` / `asy__def0_checklengths`
+  // 两个名字，产物没法按文件复用。`d.sym` 里已经带了被调方的单元前缀与重载号，所以
+  // 「被调方的符号 + 缺的槽号」就是这一份包装的身份 —— 与上面 wrapNames 的键一一对应。
+  const wname = `${d.sym}__d${f.missing.join('_')}${ri ? '_re' : ''}`;
   L.wrapNames.set(key, wname);
   // 给了的那几个槽（按形参顺序）：包装的形参表就是它
   const gave = [];
@@ -2043,7 +2042,11 @@ export function asyDefWrapper(L, n, nm, d, f, reinit) {
   // 命中缓存、拿到一个从没发出去的名字。量到的样子是 graph 里
   // `未声明的函数 'asy__def37_errorbars'` —— 第一次是在一次会回滚的试降里失败的。
   if (bad) { L.wrapNames.delete(key); return null; }
-  L.wraps.push(`${text.join('\n')})`);
+  // 默认实参的包装归**共用那一份**（omni_weak），不归被调方所在的库：名字只由被调方与
+  // 缺的那几格决定（所以不论谁引都是同一个名字），但**生不生**取决于有没有人这么调 ——
+  // 放进库里，那个库的产物就跟着调用方变。量出来的：`import graph` 与 curve.asy 两个入口
+  // 底下 plain 那一份只差一条 `shipout__d0_2_3…`，别的 6 份逐字节一样。
+  L.pushWeak(`${text.join('\n')})`);
   return wname;
 }
 
@@ -2068,7 +2071,8 @@ function asyFnValDefWrap(L, n, nm, ft, s, use) {
   const key = `fv|${ft}|${use.join(',')}`;
   const had = L.wrapNames.get(key);
   if (had !== undefined) return had;
-  const wname = `asy__fvd${L.wrapNames.size}`;
+  // 名字由「函数类型 + 给了哪几格」决定（第七十五刀）：以前是个全程序计数器，顺序依赖。
+  const wname = `asy__fvd${hash16(key).slice(0, 8)}`;
   L.wrapNames.set(key, wname);
   const names = [];
   for (let i = 0; i < s.params.length; i++) {
@@ -2121,7 +2125,7 @@ function asyFnValDefWrap(L, n, nm, ft, s, use) {
   L.recAlias = saveAl;
   if (saveUnit !== null) L.unitOut(saveUnit);
   if (bad) { L.wrapNames.delete(key); return null; }
-  L.wraps.push(`${text.join('\n')})`);
+  L.pushWeak(`${text.join('\n')})`);   // 同上：生不生取决于调用方，所以归共用那一份
   return wname;
 }
 
@@ -2287,7 +2291,7 @@ export function asyMathVal(L, cands, nm) {
     const raw = `(rmath "${spec.fn}" ${as})`;
     const body = spec.ret === 'int' ? `(toint ${raw})` : raw;
     const fps = ps.map((p) => `(${p.name} ${asyCore('real')})`).join(' ');
-    L.wraps.push(`  (fn ${cand.sym} (${fps}) ${asyCore(spec.ret)}\n    (ret ${body}))`);
+    L.pushWeak(`  (fn ${cand.sym} (${fps}) ${asyCore(spec.ret)}\n    (ret ${body}))`);
   }
   return cand;
 }
