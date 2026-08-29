@@ -6832,6 +6832,52 @@ oracle 逐字节对照（新例子与 6 个 /tmp 探针）、全量 `node tests/
 `tests/run.js`、`tests/sexpr`、`tests/bootstrap`、深快扫（`OMNI_SWEEP_SX=1`）、
 EPS/SVG 逐字节。
 
+### 一批：`intersections(path,pair,pair)` 与 `cubicroots`（`import three;` 跑通了）
+
+上一刀把 `new T[n][]` 修好之后，`import three;` 往前走到了这一格：
+`abort: intersections(path,pair,pair) 还没做`。它不在例子里，在**模块初始化**里 ——
+`three_surface` 的 `regularize` → plain_paths.asy:318 的 `pair inside(path, pen)`
+→ `intersections(p, z, z+I*dir)`。也就是说这一格不给，three / graph3 那一族
+一个都跑不起来。
+
+两个正文都是照抄 path.cc，不是另想一套：
+
+- `cubicroots`（原来是 abort 桩）= path.cc:154 的解析解。三个分支：系数 a 在数值无穷远
+  那一档时退成二次、d 在数值零那一档时挑出 t=0 再解二次、剩下走 Q/R/D 那套判别式
+  （D>0 一个实根、否则三个，用 `cbrtsqrt1pxm` 与 `costhetapi3` 那两个防掉精度的展开）。
+  连同 path.cc:46 的二次求根一起抄了一份**按重数**报的私有版（`asy__qroots`）——
+  公开的 `quadraticroots` 报的是 distinct 那一套，cubicroots 看的是 roots，
+  x == -1 那一格是重根（roots=2、t1=t2），两份不能共用一个正文。
+- `intersections(path,pair,pair)` = runpath.in:235 + path.cc:815 的 `lineintersections`
+  （endpoints=false 那一路）+ path.cc:897 的 `add`。每一段把三次贝塞尔投到"到直线的
+  有向距离"上得一个三次多项式，解实根，落在 [0,1] 内且 `online` 认的才收，
+  再**按点**去重、升序。默认 fuzz 也照抄（`BigFuzz * max(…)`）。
+
+这一层没有 `cbrt`（宿主交集里没有，`(rmath …)` 那张白名单进不去），用 `^` 带符号顶上；
+末位可能差一两个 ulp，但下面这些点上没露头。
+
+量法是**两个方向都对**：
+1. 先把这份 asy 代码拿到**真 asy** 上跑，与内建的 `intersections(p,a,b)` 对 ——
+   8 个探针（三次样条闭路 / 圆 / 折线；水平、竖直、斜线、不相交、与一条边重合、
+   切过顶点）**逐字节一样**，说明抄对了；
+2. 再把同一份放进这一层跑，与 asy 跑同一份对 —— 也**逐字节一样**，说明
+   `point(p,t)`/`postcontrol`/`precontrol`/`sort`/`^` 这几样在两边一致。
+`cubicroots` 另有 10 个探针（一根 / 三根 / 重根 / 退化到二次 / 系数在数值零那一档），
+与 asy 逐字节一样。
+
+结果：**`import three; write(1);` 跑出 1**，`import graph3;` 也跑得通，
+`surface(f,(-1,-1),(1,1),2)` 的 `s.s.length` 与 asy 一样是 4。
+
+新增 `tests/asy/cases/163-lineix-cubicroots.asy`（逐字节一样，18 组）。
+`import three` 那一路进不了 cases/ —— run.js 不给 ASYMPTOTE_DIR，模块要真 base。
+
+跑过的轴：快扫（219/220 干净、模块 0 条、2.4s、最慢 genusthree.asy 135ms）、
+oracle 双向逐字节对照（8 + 10 个探针，见上）、`import three` / `import graph3` /
+surface 三个 /tmp 冒烟、全量 `node tests/asy/run.js`（两条腿，结果见下一段）。
+没跑的轴：`OMNI_LEGS=all` 那三条额外的腿（run-c / interp / interp --mir）、
+`tests/run.js`、`tests/sexpr`、`tests/bootstrap`、深快扫（`OMNI_SWEEP_SX=1`）、
+EPS/SVG 逐字节。
+
 ## 后果与代价
 
 

@@ -4134,8 +4134,171 @@ pair maxbound(pair[] a) {
   for (int i = 1; i < a.length; ++i) m = maxbound(m, a[i]);
   return m;
 }
+// ---- 三次/二次实根与"路径与直线求交"（path.cc 那一段照抄） ----
+// 摆在这儿而不是与 quadraticroots 一起：名字是**按位置**解析的，下面
+// intersections(path,pair,pair) 要用它们。公开的 quadraticroots / cubicroots
+// 在后面，正文就是调这几个私有的。
+private real asy__Fuzz2 = 1000.0 * realEpsilon;   // bound.cc:13
+private real asy__Fuzz4 = asy__Fuzz2 * asy__Fuzz2;  // path.cc:22
+private real asy__BigFuzz = 10.0 * asy__Fuzz2;      // path.cc:23
+private real asy__fuzzFactor = 100.0;               // path.cc:24
+private real asy__third = 1.0 / 3.0;
+// 公开的 abs2 声明在后面（名字按位置解析），这一段自己带一份
+private real asy__abs2(pair z) { return z.x * z.x + z.y * z.y; }
+// 这一层没有 cbrt（宿主交集里没有），用 `^` 带上符号 —— 末位可能与 cbrt 差一两个 ulp。
+// 量过：下面那 8 个探针与内建的 intersections 逐字节一样，所以这个差在这一路上没露头。
+private real asy__cbrt(real x) { return x < 0 ? -((-x) ^ asy__third) : x ^ asy__third; }
+// sqrt(1+x)-1，小 x 上不掉精度（path.cc:36）
+private real asy__sqrt1pxm1(real x) { return x / (sqrt(1 + x) + 1); }
+// cbrt(sqrt(1+x)+1) - cbrt(sqrt(1+x)-1)（path.cc:134）
+private real asy__cbrtsqrt1pxm(real x) {
+  real s = asy__sqrt1pxm1(x);
+  return 2.0 / (asy__cbrt(x + 2.0 * (sqrt(1.0 + x) + 1.0)) + asy__cbrt(x) + asy__cbrt(s * s));
+}
+// cos((atan(1/w)+pi)/3) 的泰勒展开（path.cc:141）
+private real asy__costhetapi3(real w) {
+  real c1 = 1.0 / 3.0, c3 = -19.0 / 162.0, c5 = 425.0 / 5832.0, c7 = -16829.0 / 314928.0;
+  real w2 = w * w, w3 = w2 * w, w5 = w3 * w2;
+  return c1 * w + c3 * w3 + c5 * w5 + c7 * w5 * w2;
+}
+// path.cc:46 的 quadraticroots，**按重数**报：C++ 那边 roots 与 distinct 是两个数，
+// cubicroots 看的是 roots（x == -1 那一格是重根，roots=2、t1=t2）。公开的
+// quadraticroots 报的是 distinct 那一套，所以两份不能共用一个正文。
+private real[] asy__qroots(real a, real b, real c) {
+  real[] r;
+  if (abs(a) <= asy__Fuzz2 * abs(b) + asy__Fuzz4 * abs(c)) {
+    if (abs(b) > asy__Fuzz2 * abs(c)) { r.push(-c / b); return r; }
+    if (c == 0.0) { r.push(0.0); return r; }
+    return r;
+  }
+  real factor = 0.5 * b / a;
+  real denom = b * factor;
+  if (abs(denom) <= asy__Fuzz2 * abs(c)) {
+    real x = -c / a;
+    if (x >= 0.0) { real t2 = sqrt(x); r.push(-t2); r.push(t2); }
+    return r;
+  }
+  real x = -2.0 * c / denom;
+  if (x > -1.0) {
+    real r2 = factor * asy__sqrt1pxm1(x);
+    real r1 = -r2 - 2.0 * factor;
+    if (r1 <= r2) { r.push(r1); r.push(r2); } else { r.push(r2); r.push(r1); }
+    return r;
+  }
+  if (x == -1.0) { r.push(-factor); r.push(-factor); }
+  return r;
+}
+// path.cc:154 的 cubicroots
+private real[] asy__croots(real a, real b, real c, real d) {
+  real[] r;
+  real ninth = 1.0 / 9.0, fiftyfourth = 1.0 / 54.0;
+  // 数值无穷远处的根去掉
+  if (abs(a) <= asy__Fuzz2 * (abs(b) + abs(c) * asy__Fuzz2 + abs(d) * asy__Fuzz4))
+    return asy__qroots(b, c, d);
+  // 数值零那一格的根挑出来
+  if (abs(d) <= asy__Fuzz2 * (abs(c) + abs(b) * asy__Fuzz2 + abs(a) * asy__Fuzz4)) {
+    r.push(0.0);
+    real[] q = asy__qroots(a, b, c);
+    for (int i = 0; i < q.length; ++i) r.push(q[i]);
+    return r;
+  }
+  b /= a; c /= a; d /= a;
+  real b2 = b * b;
+  real Q = 3.0 * c - b2;
+  if (abs(Q) < asy__Fuzz2 * (3.0 * abs(c) + abs(b2))) Q = 0.0;
+  real R = (3.0 * Q + b2) * b - 27.0 * d;
+  if (abs(R) < asy__Fuzz2 * ((3.0 * abs(Q) + abs(b2)) * abs(b) + 27.0 * abs(d))) R = 0.0;
+  Q *= ninth; R *= fiftyfourth;
+  real Q3 = Q * Q * Q, R2 = R * R, D = Q3 + R2, mthirdb = -b * asy__third;
+  if (D > 0.0) {
+    real t1 = mthirdb;
+    if (R2 != 0.0) t1 += asy__cbrt(R) * asy__cbrtsqrt1pxm(Q3 / R2);
+    r.push(t1);
+    return r;
+  }
+  real v = 0.0, theta;
+  if (R2 > 0.0) { v = sqrt(-D / R2); theta = atan(v); } else theta = 0.5 * pi;
+  real factor = 2.0 * sqrt(-Q) * (R >= 0 ? 1 : -1);
+  real t1 = mthirdb + factor * cos(asy__third * theta);
+  real t2 = mthirdb - factor * cos(asy__third * (theta - pi));
+  real t3 = mthirdb;
+  if (R2 > 0.0)
+    t3 -= factor * ((v < 100.0) ? cos(asy__third * (theta + pi))
+                                : asy__costhetapi3(1.0 / v));
+  r.push(t1); r.push(t2); r.push(t3);
+  return r;
+}
+// path.cc:802 的 online：z 在过 p、q 的那条**无穷长**直线上（按范数缩过的容差）
+private bool asy__online(pair p, pair q, pair z, real fuzz) {
+  real norm = max(max(asy__abs2(p), asy__abs2(q)), asy__abs2(z));
+  if (p == q) return asy__abs2(z - p) <= fuzz * fuzz * norm;
+  pair v = q - p;
+  real cross = (z.x - p.x) * v.y - v.x * (z.y - p.y);
+  return cross * cross <= fuzz * fuzz * asy__abs2(v) * norm;
+}
+// path.cc:815 的 lineintersections（只要 endpoints=false 那一路 —— 交点无穷多时
+// 那一路只保证给出**某些**时间，asy 自己的 intersections(path,pair,pair) 走的也是它）。
+// 每一段把三次贝塞尔投到"到直线的有向距离"上，得到一个三次多项式，解它的实根。
+private void asy__lineix(real[] T, path g, pair p, pair q, real fuzz) {
+  int n = length(g);
+  if (n == 0) {
+    if (asy__online(p, q, point(g, 0), fuzz)) T.push(0.0);
+    return;
+  }
+  bool cycles = cyclic(g);
+  real dx = q.x - p.x, dy = q.y - p.y;
+  real det = p.y * q.x - p.x * q.y;
+  real norm = max(asy__abs2(p), asy__abs2(q));
+  for (int i = 0; i < n; ++i) {
+    pair z0 = point(g, i);
+    pair c0 = postcontrol(g, i);
+    pair c1 = precontrol(g, i + 1);
+    pair z1 = point(g, i + 1);
+    pair t3 = z1 - z0 + 3.0 * (c0 - c1);
+    pair t2 = 3.0 * (z0 + c1) - 6.0 * c0;
+    pair t1 = 3.0 * (c0 - z0);
+    real a = dy * t3.x - dx * t3.y;
+    real b = dy * t2.x - dx * t2.y;
+    real c = dy * t1.x - dx * t1.y;
+    real d = dy * z0.x - dx * z0.y + det;
+    real[] r;
+    // 四个系数都在数值零那一档时整段都算"在线上"，报 t=0（照抄那边的 else 分支）
+    if (max(max(max(a * a, b * b), c * c), d * d)
+        > asy__Fuzz4 * max(norm, max(asy__abs2(z0), max(asy__abs2(z1),
+                                     max(asy__abs2(c0), asy__abs2(c1))))))
+      r = asy__croots(a, b, c, d);
+    else r.push(0.0);
+    for (int j = 0; j < r.length; ++j) {
+      real t = r[j];
+      if (t >= -asy__Fuzz2 && t <= 1.0 + asy__Fuzz2) {
+        real s = i + t;
+        if (cycles && s >= n - asy__Fuzz2) s = 0;
+        if (asy__online(p, q, point(g, s), fuzz)) T.push(s);
+      }
+    }
+  }
+}
+// path.cc:897 的 add：**按点**去重（时间不同但落在同一点的只留一个）
+private void asy__addix(real[] S, real s, path p, real fuzz2) {
+  pair z = point(p, s);
+  for (int i = 0; i < S.length; ++i) if (asy__abs2(point(p, S[i]) - z) <= fuzz2) return;
+  S.push(s);
+}
+// runpath.in:235：路径 p 与过 a、b 的那条**无穷长**直线的所有交点时间，升序。
+// 量过 8 个探针（三次样条闭路、圆、折线；水平/竖直/斜线/不相交/切过顶点），
+// 与内建的 intersections **逐字节一样**，而且这一层跑出来与 asy 跑同一份也逐字节一样。
+// plain_paths.asy:318 的 `pair inside(path, pen)` 点名要它 —— three_surface 的
+// regularize 一路调下来，`import three;` 就卡在这一格上。
 real[] intersections(path p, pair a, pair b, real fuzz=-1) {
-  abort("intersections(path,pair,pair) 还没做"); return new real[];
+  if (fuzz < 0)
+    fuzz = asy__BigFuzz * max(max(length(max(p)), length(min(p))),
+                              max(length(a), length(b)));
+  real fuzz2 = max(asy__fuzzFactor * fuzz * fuzz, asy__Fuzz2);
+  real[] S1;
+  asy__lineix(S1, p, a, b, fuzz);
+  real[] S;
+  for (int i = 0; i < S1.length; ++i) asy__addix(S, S1[i], p, fuzz2);
+  return sort(S);
 }
 
 
@@ -4460,17 +4623,14 @@ bool piecewisestraight(path p) {
   for (int i = 0; i < n; ++i) if (!straight(p, i)) return false;
   return true;
 }
-real[] cubicroots(real a, real b, real c, real d) {
-  abort("cubicroots 还没做（runmath.in:333 那一段解析解）"); return new real[];
-}
+// runmath.in:333 的 cubicroots：正文就是上面那份 asy__croots（path.cc:154），
+// 这里只是把公开名字接上去。math.asy:380 的 `return cubicroots(b,c,d,e);` 要它。
+real[] cubicroots(real a, real b, real c, real d) { return asy__croots(a, b, c, d); }
 
 // runmath.in:315/324 的 quadraticroots：正文照抄 path.cc:46（实根那份）与 path.cc:103
-// （复根那份）。Fuzz2/Fuzz4 是 bound.cc:13 与 path.cc:22 那两个常数。
+// （复根那份）。Fuzz2/Fuzz4/sqrt1pxm1 摆在上面 intersections(path,pair,pair) 那一段里
+// （名字按位置解析，那一段要先见到它们）。
 // math.asy:397 的 `quadraticroots((1,0),(b,0),(t0,0))` 要的是复根那一份。
-private real asy__Fuzz2 = 1000.0 * realEpsilon;
-private real asy__Fuzz4 = asy__Fuzz2 * asy__Fuzz2;
-// sqrt(1+x)-1，小 x 上不掉精度（path.h 的 sqrt1pxm1）
-private real asy__sqrt1pxm1(real x) { return x / (sqrt(1 + x) + 1); }
 // 复数开方（pair.h:190 的 Sqrt）：asy 语言里没有 sqrt(pair)，这是给下面那份用的
 private pair asy__csqrt(pair z) {
   real mag = length(z);
