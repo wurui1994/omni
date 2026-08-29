@@ -2380,6 +2380,10 @@ pen fontsize(real size, real lineskip) {
 }
 pen fontsize(real size) { return fontsize(size, 1.2 * size); }
 real fontsize(pen p) { return p.fontsizeval; }
+// runtime.in 的 `real lineskip(pen)`（pen::Lineskip()）：设过就是设的那一格，没设过是
+// 字号的 1.2 倍。量过 `lineskip(currentpen)` 是 14.346201743462（= 1.2*11.9551681195517）、
+// `lineskip(fontsize(20))` 是 24、`lineskip(fontsize(10,15))` 是 15。slide.asy:258 要它。
+real lineskip(pen p) { return p.lineskipval != 0 ? p.lineskipval : 1.2 * p.fontsizeval; }
 // runtime.in:585 的 `string font(pen)`（pen::Font()）。没设过 fontcommand 时回的是那串
 // 默认的 LaTeX 字体命令 —— 量过真 asy：`font(currentpen)` 与 `font(fontsize(9))` 都是
 // `\usefont{\ASYencoding}{\ASYfamily}{\ASYseries}{\ASYshape}`，设过的回设的那一串。
@@ -4215,6 +4219,37 @@ real[] colors(pen p) {
   }
   a.push(p.gray);
   return a;
+}
+
+// runtime.in 的 colorspace(pen)：与 colors(pen) 同一套分档，给的是那个空间的名字。
+// 量过四档：默认笔与 gray(0.5) 是 "gray"、red 是 "rgb"、cmyk(red) 是 "cmyk"、
+// invisible 与 nullpen 是空串（那两格一道都没有）。slide.asy:115 的 texcolor 要它。
+string colorspace(pen p) {
+  if (p.isinvisible) return "";
+  if (p.iscmyk) return "cmyk";
+  if (p.isrgb) return "rgb";
+  return "gray";
+}
+
+// runtime.in 的 colorless(pen)：把颜色那几格清回"没设过"（pen.h 的 DEFCOLOR），
+// 别的属性（宽度、线帽、虚线…）照旧。量过 `colorless(red+2bp)` 之后 colorspace 是 gray、
+// 一道、值 0，宽度还是 2；`colorless(invisible)` 也回到 gray 那一档（不可见那格也清掉）。
+// slide.asy:125 要它。
+pen colorless(pen p) {
+  pen q = pencopy(p);
+  q.isrgb = false;
+  q.iscmyk = false;
+  q.isinvisible = false;
+  q.gray = 0;
+  q.red = 0;
+  q.green = 0;
+  q.blue = 0;
+  q.cyan = 0;
+  q.magenta = 0;
+  q.yellow = 0;
+  q.black = 0;
+  q.setcolor = false;
+  return q;
 }
 
 // runhistory.in:158/191：没有 readline 的那一路（`#else`）就是回空数组 —— 我们这一层

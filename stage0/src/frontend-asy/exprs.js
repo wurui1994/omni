@@ -1432,7 +1432,7 @@ export function asyDotQual(L, node) {
     if (sf !== null) return { recv: { code: `(fld (var this) ${asyFldSym(sf.name)})`, type: sf.type }, field: f };
     // 文件级变量当接收者（第三十刀）：`currentpicture.nodes` 这一族。次序与 name-exp
     // 那边一致 —— 局部、this 的字段、文件级，三档。
-    const g = L.gvarHere(base);
+    const g = asyGvarDot(L, base, f);
     if (g !== null && g.ok) return { recv: { code: `(var ${g.sym})`, type: g.type }, field: f };
     return null;
   }
@@ -1459,6 +1459,38 @@ export function asyDotQual(L, node) {
   if (alt === undefined) return DOT_BAD;
   L.diags.rollback(mark);
   return { recv: alt, field: f };
+}
+
+/**
+ * 点号左边那个名字有好几格文件级的同名量时，挑**能有这个成员的**那一格。
+ *
+ * 原型是 slide.asy:32 的 `picture background;` 与 :96 的 `void background()` —— 同一个
+ * 名字两格，:98 的 `background.empty()` 说的是那张 picture（poster.asy:16 的
+ * `background.fit()` 同一形）。最近那一格是函数，函数身上没有成员，所以往回找一格。
+ *
+ * 只在**最近那一格自己不可能有成员**（不是记录、不是数组）时才往回找：反过来会把
+ * `a.length` 这种从数组身上抢到"某个记录也有 length 字段"那一格上去。
+ */
+function asyGvarDot(L, base, f) {
+  const g = L.gvarHere(base);
+  if (g === null || L.isRec(g.type) || asyIsArr(g.type)) return g;
+  const list = L.globals.get(base);
+  if (list === undefined) return g;
+  let alt = null;
+  for (const c of list) {
+    if (c.at > L.at || !c.ok || c === g) continue;
+    if (asyDotHas(L, c.type, f)) alt = c;
+  }
+  return alt === null ? g : alt;
+}
+
+/** 这个类型身上有没有叫 `f` 的成员（字段或方法）。 */
+function asyDotHas(L, t, f) {
+  if (!L.isRec(t)) return false;
+  const rec = L.recOf(t);
+  if (rec === null || rec === undefined) return false;
+  for (const fd of rec.fields) if (fd.name === f) return true;
+  return L.visibleMethods(rec, f).length > 0;
 }
 
 /** `(field 值 ID)`：`a[0].x` 这种（点后面跟的不是名字而是别的表达式时走这条） */

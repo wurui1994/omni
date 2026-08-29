@@ -1,0 +1,1 @@
+void h() { write("C"); }

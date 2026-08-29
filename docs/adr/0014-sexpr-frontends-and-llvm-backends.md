@@ -6459,6 +6459,46 @@ cheese.asy 119ms，无并行）、模块那一份 **0 条**。
 没跑的轴：与上一批同（`run-llvm`、`OMNI_LEGS=all` 那三条腿、`tests/sexpr`、
 `tests/run.js`、`tests/bootstrap`、深快扫、EPS/SVG）。
 
+### 一批：跨单元同签名按位置压、点号左边挑得出人、pen 那三个内建
+
+`slidedemo.asy` 与 `poster.asy` 这一串（四格，一格接一格量出来的）：
+
+**一、跨单元同签名从来不是 ambiguous。** slidedemo.asy:14 的 `usersetting()` ——
+plain.asy:237 与 slide.asy:176 各一份 `void usersetting()`，这一层报"有多个同样合适的
+重载"。在 /tmp 里搭了三个小模块量：`import ua; import ub;`（ub 里 `import ua;` 之后又
+定义了同签名的 h）印 B；`import ua; import uc;`（两个模块互不相干、各一份 `void h()`）
+印 C。也就是**一律按位置压**，后并进来的遮住先并进来的。落在 `asyVisible` 里
+（`asyUnitLast`）：按形参那串分组，一组里出现了不同单元时只留 `at` 最大的那一份。
+上一批那句"这条要先把类型排序的遮盖补全"于是不必了 —— 关键是这一步要在**用的地方**做
+（那时 `at` 已经把不该看见的裁掉了），不是在 import 合并的时候做（那会连别处该看见的
+一起删掉，就是上一次撤掉的那个改法）。
+
+**二、点号左边那个名字有好几格时，挑能有这个成员的那一格。** slide.asy:32 是
+`picture background;`、:96 是 `void background()`，而 :98 写的是 `background.empty()`
+（poster.asy:16 的 `background.fit()` 同一形）。原来 `dotQual` 只问 `gvarHere`（最近那
+一格），拿到的是那个函数、于是报"void() 上的方法调用"。改法：最近那一格**自己不可能有
+成员**（不是记录、不是数组）时，往回找一格身上真有这个字段/方法的。反过来不找 ——
+那会把 `a.length` 从数组身上抢到"某个记录也有 length 字段"那一格上去。
+
+**三、pen 上那三个内建。** 逐个照 `asy -noV` 量了再写：
+- `string colorspace(pen)`：默认笔与 `gray(0.3)` 是 `gray`、`red` 是 `rgb`、
+  `cmyk(red)` 是 `cmyk`、`invisible` 与 `nullpen` 是空串（与 `colors(pen)` 同一套分档）。
+- `pen colorless(pen)`：颜色那几格清回"没设过"，别的属性照旧 —— 量过
+  `colorless(red+2bp)` 之后 colorspace 是 gray、一道、值 0，宽度还是 2；
+  `colorless(invisible)` 也回到 gray 那一档。
+- `real lineskip(pen)`：设过就是设的那格，没设过是字号的 1.2 倍（`lineskip(currentpen)`
+  是 14.346201743462、`lineskip(fontsize(20))` 是 24、`lineskip(fontsize(10,15))` 是 15）。
+
+于是例子面 **211 → 213 干净**（poster、slidedemo 一起清零）。
+
+跑过的轴：新用例 158-unit-last-dotpick（连 mod_sha / mod_shb / mod_shc 三个小模块）与
+`asy -noV` 逐字节一致；pen 那三个按 `import plain;` 的探针逐字节一致（那一支要
+`ASYMPTOTE_DIR` 指到真 base/，所以没进 cases）；`tests/asy/cases` 全量按 `run` 那条腿
+逐个比对，无差异；快扫 **213 干净 / 7 有诊断**（220 个共 2.1s、最慢 genusthree.asy
+136ms，无并行）、模块那一份 **0 条**。
+没跑的轴：与上一批同（`run-llvm`、`OMNI_LEGS=all` 那三条腿、`tests/sexpr`、
+`tests/run.js`、`tests/bootstrap`、深快扫、EPS/SVG）。
+
 ## 后果与代价
 
 

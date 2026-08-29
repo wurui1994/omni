@@ -962,7 +962,43 @@ export function asyVisible(L, nm) {
     if (c.dup === true) dup = true;
     out.push(c);
   }
-  return asyBiWeak(L, dup ? asyDupLast(out) : out);
+  return asyBiWeak(L, asyUnitLast(L, dup ? asyDupLast(out) : out));
+}
+
+/**
+ * 同签名、来自**不同单元**的好几份：后并进来的那一份遮住先并进来的（asy 的名字解析是
+ * 顺序的，import 也算一步）。量出来的两格（都在 /tmp 里现搭的小模块上）：
+ *   `import ua; import ub;`（ub 里 `import ua;` 之后又定义了同签名的 h）-> 印 B
+ *   `import ua; import uc;`（两个模块互不相干、各有一份 `void h()`）  -> 印 C
+ * 也就是说**跨单元同签名从来不是 ambiguous**，一律按位置压。原型是 slidedemo.asy:14 的
+ * `usersetting()` —— plain.asy:237 与 slide.asy:176 各一份 `void usersetting()`，
+ * 走的是后 import 的 slide 那份（它体里再叫一次 `plain.usersetting()`）。
+ *
+ * 只管**跨单元**那几组：同单元同签名走 asyDupLast（decls.js 那边打了 dup 记号）。
+ * 可变实参那几份不参与 —— 形参那串一样也不是同一个签名（asyFit 里可变与固定本来就分档）。
+ */
+function asyUnitLast(L, out) {
+  if (out.length < 2) return out;
+  const grp = new Map();
+  for (const c of out) {
+    if (c.ps !== undefined && c.ps.length > 0 && c.ps[c.ps.length - 1].rest === true) continue;
+    const k = c.params.join(',');
+    const g = grp.get(k);
+    if (g === undefined) grp.set(k, [c]);
+    else g.push(c);
+  }
+  const drop = new Set();
+  for (const g of grp.values()) {
+    if (g.length < 2) continue;
+    let cross = false;
+    for (const c of g) if (c.unit !== g[0].unit) cross = true;
+    if (!cross) continue;
+    let win = g[0];
+    for (const c of g) if (c.at >= win.at) win = c;
+    for (const c of g) if (c !== win) drop.add(c);
+  }
+  if (drop.size === 0) return out;
+  return out.filter((c) => !drop.has(c));
 }
 
 /**
