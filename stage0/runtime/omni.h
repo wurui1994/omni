@@ -133,6 +133,8 @@ omni_str omni_str_realg(double v, int64_t p);
 omni_str omni_str_bool(bool v);
 omni_str omni_str_string(omni_str v);
 omni_str omni_repr_real(double v);
+/* `(readtext E)`：整份读一份文本文件（读不到是运行期错误） */
+omni_str omni_read_text(omni_str path);
 
 /* omni_math.c —— 转手 libm（那份文件的头注里写了逐字节/容差的分界） */
 double omni_r_sqrt(double x);

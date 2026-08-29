@@ -11,7 +11,7 @@
 // 语言子集里的东西：不用 TextEncoder（自己按 UTF-8 编）、不用 new Function、不用正则字面量
 // 以外的正则。
 
-import { stdout, typeTag, fmtReal, fmtRealG, reprReal, callJsOp } from '../host/native.js';
+import { stdout, typeTag, fmtReal, fmtRealG, reprReal, callJsOp, readText } from '../host/native.js';
 import { JS_ABI, JS_MEMBERS } from '../hir/js_abi.js';
 import { OmniError } from '../source/diag.js';
 
@@ -690,6 +690,9 @@ export function applyBuiltin(I, e, a) {
     case 'repr': return reprOf(a[0]);
     case 'int_of_string': return intOfString(a[0]);
     case 'real_of_string': return realOfString(a[0]);
+    // `(readtext E)`：整份读一份文本文件。三条腿一份语义（JS 那边 $read_text、
+    // C 那边 omni_read_text）—— 读不到就是运行期错误，不回空串。
+    case 'read_text': return readTextOrFail(a[0]);
     case 'len':
       if (recv.k === 'string') return slen(a[0]);
       return recv.k === 'list' ? BigInt(a[0].length) : BigInt(a[0].size);
@@ -771,6 +774,16 @@ function realOfString(s) {
   const v = Number(s);
   if (s.trim() === '' || Number.isNaN(v)) rtError(`cannot parse real from '${s}'`);
   return v;
+}
+
+/** `(readtext E)`：读不到就是运行期错误（与 $read_text / omni_read_text 同一条语义） */
+function readTextOrFail(p) {
+  try {
+    return readText(p);
+  } catch (e) {
+    rtError(`cannot read '${p}': ${e && e.code !== undefined ? e.code : String(e)}`);
+    return '';
+  }
 }
 
 /* ------------------------------------------------------ JS 域的 op（ADR-0013 决策 5）

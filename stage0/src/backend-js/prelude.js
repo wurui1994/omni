@@ -220,6 +220,15 @@ function $real_of_string(s) {
   if (!/^[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?$/.test(s)) $rt_error('invalid real: "' + s + '"');
   return Number(s);
 }
+// (readtext E)：整份读一份文本文件。与 C 那边的 omni_read_text 一一对应 ——
+// 读不到就是运行期错误（不回空串：分不清"空文件"与"没这个文件"）。
+function $read_text(p) {
+  try {
+    return $node("node:fs").readFileSync(p, "utf8");
+  } catch (e) {
+    $rt_error("cannot read '" + p + "': " + (e && e.code ? e.code : String(e)));
+  }
+}
 // ---------------------------------------------------------------- 容器
 // list -> Array，dict -> Map（插入序，ADR-0006 的硬约束），set -> Set
 function $keyStr(k) {

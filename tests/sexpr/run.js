@@ -33,7 +33,9 @@ const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 const dir = mkdtempSync(join(tmpdir(), 'omni-sexpr-'));
 
 const cmd = (args) => {
-  const r = spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8' });
+  // cwd 钉在仓库根上：cases 里有一份要**读文件**的（19-readtext），它的路径是相对仓库根
+  // 写的，而这份 run.js 可能从任何目录被叫起来（tests/run.js 就是从根叫的）。
+  const r = spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8', cwd: root });
   return { out: r.stdout ?? '', err: r.stderr ?? '', code: r.status ?? 1 };
 };
 const read = (p) => {

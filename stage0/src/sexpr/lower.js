@@ -1112,6 +1112,19 @@ class CoreLowerer {
       if (len.type.k !== 'int') return this.err(n.items[3], `(ssub E I N) 的长度要是 int，这里是 ${coreTypeText(len.type)}`);
       return { kind: 'Builtin', name: 'substr', args: [s, at, len], recvType: STRING, type: STRING };
     }
+    // `(readtext E)`：把一份文本文件**整份**读成 string。方言里读文件只有这一个口子 ——
+    // 被降级的语言那边的文件对象（asy 的 `input(name).line().word()`：分词、注释、eof）
+    // 都在它上面搭，方言不认识"文件"这个概念，只认识"名字 -> 文本"。
+    // 读不到是运行期错误（三条腿一份语义：$read_text / omni_read_text / readTextOrFail）。
+    if (h === 'readtext') {
+      if (n.items.length !== 2) return this.err(n, '(readtext E)');
+      const p = this.expr(n.items[1]);
+      if (p === null) return null;
+      if (p.type.k !== 'string') {
+        return this.err(n.items[1], `(readtext E) 的参数要是 string，这里是 ${coreTypeText(p.type)}`);
+      }
+      return { kind: 'Builtin', name: 'read_text', args: [p], argType: STRING, type: STRING };
+    }
     // `(toreal E)` / `(toint E)`：int <-> real 的**显式**转换。同一条纪律：类型不推导、
     // 不插隐式转换，所以两个方向都得写出来。OIR 侧两个都是现成的（Cast int->real、
     // trunc real->int），方言这边原先没开口 —— 而 asy 的 `1/3` 是实数除法、`(int) 3.7`

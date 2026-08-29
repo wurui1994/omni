@@ -5934,6 +5934,32 @@ genusthree.asy 202ms —— 这台机器当时 load 17，同一份代码空载�
 模块面前端诊断 three 6、**geometry 2 -> 1**、contour 2、palette 1、**stats 3 -> 0**、patterns 1。
 没跑的轴：输出层的逐字节比对（EPS/SVG）还没做。
 
+### 一批：核心方言加一个 `(readtext E)`（读文件的唯一一个口子）
+
+asy 那 5 个停在文件输入上的例子（worldmap、filesurface、fequlogo、galleon、triceratops）
+要的是 `file in=input("worldmap.dat").line();` 那一族。里面**只有一件事**方言办不到 ——
+把字节拿到手；分词、注释字符、eof 都是字符串处理，在 asy 那一侧搭得起来。所以这一批只加
+一个原语，asy 那一侧留到下一批。
+
+`(readtext E)`：string -> string，整份读一份文本文件。语义在三处写成一份：
+`$read_text`（backend-js/prelude.js）、`omni_read_text`（runtime/omni_fmt.c，omni.h 里的
+真符号，LLVM 那条腿按 `[2 x i64]` 收发）、`readTextOrFail`（interp/builtin.js，MIR 解释器
+也走它）。读不到就是**运行期错误**，不回空串 —— 那样"空文件"与"没这个文件"分不开。
+
+刻意没有的：流式读、写文件、stat。路径相对**进程的工作目录**（方言里没有 argv、没有
+"这份源文件在哪"的概念）。
+
+顺带改了尺子一处：`tests/sexpr/run.js` 把子进程的 cwd 钉在仓库根上 —— 新用例
+（cases/19-readtext）要读一份相对仓库根的数据文件，而那份 run.js 可能从任何目录被叫起来。
+
+跑过的轴：`node tests/sexpr/run.js` **54/54**（新用例 cases/19-readtext 在
+run / run-c / interp / interp --mir / run-llvm **五条腿**上逐字节一致）；
+`node tests/run.js` 91/91（JS 与 C 后端差分）；`node tests/asy/run.js` 232/232。
+**红着的一条**：`node tests/bootstrap/run.js` 0/1 —— 理由与这一批无关，是
+`frontend-asy/exprs.js` 与 `stmts.js` 互相 import（拆文件那一刀 7e63733 带进来的环，
+自举那条腿不收 import 环）。这一条下一批修，不含在这批的改动里。
+没跑的轴：输出层的逐字节比对（EPS/SVG）还没做。
+
 ## 后果与代价
 
 

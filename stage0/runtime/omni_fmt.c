@@ -22,6 +22,26 @@ void omni_print_real(double v) { printf("%.6g\n", v); }
 void omni_print_bool(bool v) { printf("%s\n", v ? "true" : "false"); }
 void omni_print_string(omni_str v) { printf("%.*s\n", (int)v.len, v.p); }
 
+/* `(readtext E)`：把一份文本文件**整份**读进来。核心方言里读文件只有这一个口子 ——
+   asy 的 `input(name)` 那一族（line/word 的分词、注释、eof）都在被降级的语言那一侧搭，
+   这里只管把字节拿到手。一次读完（不流式），与 omni_js_fs_read_text 同一条理由：
+   读的是数据文件，尺寸已知。读不到就是运行期错误（asy 那边 `input(name)` 默认
+   check=true，也是当场退出）。 */
+omni_str omni_read_text(omni_str path) {
+  char *p = omni_cstr(path);
+  FILE *f = fopen(p, "rb");
+  if (!f) omni_errorf("cannot read '%s': %s", p, strerror(errno));
+  if (fseek(f, 0, SEEK_END) != 0) { fclose(f); omni_errorf("cannot seek '%s'", p); }
+  long n = ftell(f);
+  if (n < 0) { fclose(f); omni_errorf("cannot size '%s'", p); }
+  rewind(f);
+  char *buf = omni_alloc_bytes(n + 1);
+  size_t got = n > 0 ? fread(buf, 1, (size_t)n, f) : 0;
+  fclose(f);
+  buf[got] = 0;
+  return omni_str_new(buf, (int64_t)got);
+}
+
 /* 末尾补 ".0"：否则整数值的 real 序列化成 "1000"，再解析回来就变成 int 了 ——
    往返要保类型，不只是保数值。 */
 static omni_str omni_repr_tail(const char *s) {

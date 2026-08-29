@@ -1,0 +1,15 @@
+;; `(readtext E)`：把一份文本文件整份读成 string。方言里读文件只有这一个口子。
+;;
+;; 量出来的理由：asy 的 `file in=input("worldmap.dat").line();` 那一族 —— 分词、注释字符、
+;; eof 全在 asy 那一侧搭得起来（它们只是字符串处理），缺的只是"把字节拿到手"。
+;; 5 个例子（worldmap、filesurface、fequlogo、galleon、triceratops）停在这里。
+;;
+;; 边界：方言不认识"文件"这个概念，只认识"名字 -> 文本"。没有流式读、没有写、没有 stat；
+;; 读不到就是**运行期错误**（不回空串 —— 那样"空文件"与"没这个文件"分不开）。
+;; 路径是相对**进程的工作目录**的：这份用例的路径相对仓库根写，run.js 把 cwd 钉在那儿。
+(module
+  (main
+    (let t string (readtext (str "tests/sexpr/cases/19-readtext.dat")))
+    (print (slen (var t)))
+    (print (var t))
+    (print (sfind (var t) (str "beta")))))

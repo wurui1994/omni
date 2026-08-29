@@ -448,6 +448,7 @@ class JsEmitter {
       case 'repr': return `$repr_real(${a[0]})`;
       case 'int_of_string': return `$int_of_string(${a[0]})`;
       case 'real_of_string': return `$real_of_string(${a[0]})`;
+      case 'read_text': return `$read_text(${a[0]})`;
       case 'len':
         if (recv.k === 'string') return `$slen(${a[0]})`;
         return recv.k === 'list' ? `BigInt(${a[0]}.length)` : `BigInt(${a[0]}.size)`;

@@ -97,6 +97,9 @@ const RT_OPS = new Map([
   // `(tostr E N)`：按 N 位有效数字。位数是普通 i64 实参，不是常量折进符号名 ——
   // 那样每多一个位数就多一个符号，而 ABI 里多一个 i64 什么都不用改。
   ['to_string_g.real', { sym: 'omni_str_realg', ret: '[2 x i64]', params: ['double', 'i64'] }],
+  // `(readtext E)`：整份读一份文本文件。omni_read_text 是 omni.h 里的真符号，
+  // 收发都是 omni_str = [2 x i64]（与 to_string.* 那三条同一个拼法）。
+  ['read_text.string', { sym: 'omni_read_text', ret: '[2 x i64]', params: ['[2 x i64]'] }],
   // real 上的数学函数。刻意 call 运行时的包装而不是发 LLVM 的 intrinsic：`llvm.sqrt.f64`
   // 有 intrinsic，`fmod` / `round` 没有对得上的，统一走一层符号，五条腿就是同一份 libm。
   ['rmath_sqrt.real', { sym: 'omni_r_sqrt', ret: 'double', params: ['double'] }],
