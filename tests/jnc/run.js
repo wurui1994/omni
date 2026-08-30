@@ -15,8 +15,9 @@
 //      （arena 模拟 vs 真指针，ADR-0016），逐字节相同不是巧合。
 //   2. rt/*.jnc 在五条腿上报**同一句**运行期错误。
 //   3. bad/*.jnc 必须被拒绝，且拒在正确的理由上。这一组是那些边界的本体：真数组、
-//      `&x`、`unsafe` 之外的 thin 转换、`unsigned`。（`? :`、不换行的 printf、条件
-//      真值化曾经在这一组里，第三到第五刀把它们做掉之后转到了 cases/。）
+//      整数上的精度、`unsafe` 之外的 thin 转换、`unsigned`。（`? :`、不换行的 printf、
+//      条件真值化曾经在这一组里，第三到第五刀把它们做掉之后转到了 cases/；`&x` 是第九
+//      刀做掉的，现在在 cases/09-addr.jnc。）
 //
 //   node tests/jnc/run.js
 //   node tests/jnc/run.js pointers

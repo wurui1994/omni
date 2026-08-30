@@ -1,0 +1,109 @@
+// `&x`（ADR-0016 第九刀）。**方言一个字没改** —— 做法照抄 jancy：被 fat 取过地址的局部量
+// 提到 GC 堆上（type_ptr_data.rst 的 "any local taken fat address of, is being lifted to
+// GC heap"）。方言的局部量是 SSA 里的一个值、没有地址，而 `(pnew (ptr T) (int 1))` 那一格有。
+//
+// 于是别名是**真的**：`*p = 5` 之后读 `x` 就是 5，两边是同一个字。这一条在五条腿上尤其值得
+// 量 —— 那五条腿里指针是两套实现（arena 模拟 vs 真指针）。
+//
+// `&` 后面四种形状都收，而且它们落在**同一条规则**上（`lvalue()` 算出来的"一个指针"的
+// code 本来就是那个地址）：`&x`、`&*p`、`&p[i]`、`&p->f`。
+//
+// 期望输出的**出处**：C。逐条对照下面这份，`cc -O0` 编出来跑（`malloc` 那一行在 jancy 里
+// 是 `new P`，`bool` 那两行 C 要 `<stdbool.h>`）：
+//
+//   struct P { int a; int b; };
+//   int bump(int* p) { *p = *p + 1; return *p; }
+//   void setTo(int* p, int v) { *p = v; }
+//   int byval(int n) { int* p = &n; *p = *p * 2; return n; }
+//   int main(void) {
+//     int x = 1;  int* p = &x;              printf("a=%d %d\n", x, *p);
+//     *p = 5;                               printf("b=%d\n", x);
+//     x = 7;                                printf("c=%d\n", *p);
+//                                           printf("d=%d\n", bump(&x));
+//                                           printf("e=%d\n", x);
+//     setTo(&x, 42);                        printf("f=%d\n", x);
+//     int* q = &*p;                         printf("g=%d\n", *q);
+//                                           printf("h=%d\n", p == &x);
+//                                           printf("k=%d\n", byval(3));
+//     double d = 1.5;  double* dp = &d;  *dp = 2.5;   printf("i=%f\n", d);
+//     bool b = false;  bool* bp = &b;    *bp = true;  printf("j=%d\n", b);
+//     struct P* s = malloc(sizeof(struct P));  s->a = 3;
+//     int* fp = &s->a;  *fp = 9;            printf("l=%d\n", s->a);
+//     int n = 0;
+//     for (int i = 0; i < 3; i++) { int* ip = &n; *ip = *ip + i; }
+//                                           printf("m=%d\n", n);
+//     return 0;
+//   }
+struct P {
+    int a;
+    int b;
+}
+
+int bump(int* p) {
+    *p = *p + 1;
+    return *p;
+}
+
+void setTo(int* p, int v) {
+    *p = v;
+}
+
+// 形参取地址：提上去的是**它的一份拷贝**，所以调用方看不见改动（C 的语义）
+int byval(int n) {
+    int* p = &n;
+    *p = *p * 2;
+    return n;
+}
+
+int main() {
+    // 一、别名是真的：两边是同一个字
+    int x = 1;
+    int* p = &x;
+    printf("a=%d %d\n", x, *p);
+    *p = 5;
+    printf("b=%d\n", x);
+    x = 7;
+    printf("c=%d\n", *p);
+
+    // 二、`&x` 递给函数
+    printf("d=%d\n", bump(&x));
+    printf("e=%d\n", x);
+    setTo(&x, 42);
+    printf("f=%d\n", x);
+
+    // 三、`&*p` 就是 p（一个字都不用发）
+    int* q = &*p;
+    printf("g=%d\n", *q);
+
+    // 四、`&x` 与 p 指的是同一格，所以 peq 说相等
+    printf("h=%d\n", p == &x);
+
+    // 五、形参那一格
+    printf("k=%d\n", byval(3));
+
+    // 六、double 与 bool 也提得上去
+    double d = 1.5;
+    double* dp = &d;
+    *dp = 2.5;
+    printf("i=%f\n", d);
+    bool b = false;
+    bool* bp = &b;
+    *bp = true;
+    printf("j=%d\n", b);
+
+    // 七、`&s->a`（结构体字段本来就有地址，走 pfield）
+    P* s = new P;
+    s->a = 3;
+    int* fp = &s->a;
+    *fp = 9;
+    printf("l=%d\n", s->a);
+
+    // 八、循环体里反复取同一格的地址
+    int n = 0;
+    for (int i = 0; i < 3; i++) {
+        int* ip = &n;
+        *ip = *ip + i;
+    }
+    printf("m=%d\n", n);
+    return 0;
+}

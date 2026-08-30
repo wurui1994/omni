@@ -28,7 +28,8 @@
 // `new T[n]` -> `(pnew …)`、`*p` 读写、`p[i]` 读写（= `*(p + i)`，jancy 的下标
 // 本来就是这个语义）、`p + i` / `p - i` / `p++`、`p - q`（指针差，按元素）、
 // `p == q` 与 `p == null`、`p->f` 与 `(*p).f` 读写、`unsafe { … }`、
-// `(int thin*)p`（fat 转 thin，-> `(pthin p)`）。
+// `(int thin*)p`（fat 转 thin，-> `(pthin p)`）、`&x` / `&*p` / `&p[i]` / `&p->f`
+// （取地址；局部量按 jancy 自己的办法提到堆上，见 addrOf 那一段）。
 //
 // ## 纪律：**jancy 不向方言妥协**
 //
@@ -45,7 +46,8 @@
 //   - `unsigned` —— 要无符号那一半的位宽规则：回卷变成 `x & M`（不摊符号位），
 //     `/` `%` `>>` `<` 都得换成无符号那一版。以前是静默忽略的，现在明着拒
 //     （见 tests/jnc/bad/unsigned.jnc）。
-//   - `&x`（取局部量地址）—— 要局部量可寻址（jancy 那边是"提到 GC 堆上"）。
+//   - `&p`（指针的地址，`int**`）与整个结构体的 `pload` / `pstore` —— 同一格：要方言先能
+//     把 fat 指针（三个字）当内存里的值搬，`ptrTargetOk` 现在就是照这一条挡的。
 //   - 真数组 `int a[3]`（jancy 的数组是**值**类型，方言这一层的 `(arr T)` 是引用语义）——
 //     要方言有值语义的定长数组。
 //   - `printf` 之外的标准库（`std.*`、`io.*`、`gc.*`）
@@ -202,6 +204,7 @@ class JncLower {
     this.retTy = T_VOID;       // 当前函数的返回类型
     this.forStep = null;       // 当前所在 for 的步进（非 null 时 continue 要拦，见 stmt）
     this.tmp = 0;              // 生成名字的计数（do-while 的那格标志）
+    this.lifted = new Set();   // 这个函数里被取过地址的局部量名（ADR-0016 第九刀）
   }
 
   err(node, msg) {
@@ -234,6 +237,45 @@ class JncLower {
     }
     return null;
   }
+
+  /* ---------------------------------------------------------- 取地址（第九刀）
+   *
+   * jancy 的做法照抄：**被 fat 取过地址的局部量提到 GC 堆上**（type_ptr_data.rst 里那句
+   * "any local taken fat address of, is being lifted to GC heap"）。方言的局部量是 SSA 里
+   * 的一个值、没有地址，而 `(pnew (ptr T) (int 1))` 出来的那一格**有**。所以：
+   *
+   *   int x = 1;  int* p = &x;      ->    (let x$c (ptr int) (pnew (ptr int) (int 1)))
+   *                                      (pstore (var x$c) (int 1))
+   *                                      (let p (ptr int) (var x$c))
+   *
+   * 之后对 x 的读写全走那一格（`(pload (var x$c))` / `(pstore (var x$c) …)`），于是
+   * `*p = 5` 与 `x` 看到的是同一个字 —— 别名是真的，不是模拟出来的。方言一个字没改。
+   *
+   * 判定是**函数级、按名字**的保守判定：一个名字在这个函数里任何地方被 `&` 过，这个函数里
+   * 所有同名局部量都提。多提一格堆上的空间，换掉"要先做作用域分析才知道提哪个"——
+   * 语义上不会错（提与不提对不取地址的用法**没有可观测差别**）。
+   */
+  collectAddrTaken(node, out) {
+    if (!isList(node)) return;
+    if (head(node) === 'addr') {
+      const t = node.items[1];
+      if (isList(t) && head(t) === 'name' && isAtom(t.items[1])) out.add(t.items[1].value);
+    }
+    for (const it of node.items) this.collectAddrTaken(it, out);
+  }
+
+  /** 提上去的那一格在方言里的名字。`$` 不在 jancy 的标识符里，所以撞不上用户的名字。 */
+  cellName(name) { return `${name}$c`; }
+
+  /**
+   * 能提上去吗。方言的 `(ptr T)` 的 T 只能是 int / real / bool / 结构体
+   * （hir/types.js 的 ptrTargetOk），而这一刀的结构体还不能当局部量，所以剩三种标量。
+   *
+   * **指针的地址（`int** `）要方言先能把 fat 指针当内存里的值**：fat 是三个字，
+   * `pload` / `pstore` 现在只搬一个字。那一条与"整个结构体的 pload/pstore"是同一格，
+   * 一起记在 ADR-0016 的名单上。
+   */
+  liftable(t) { return isInt(t) || t === T_REAL || t === T_BOOL; }
 
   run(tree) {
     for (const item of this.flat(tree)) this.topItem(item);
@@ -427,13 +469,35 @@ class JncLower {
       this.fns.set(info.name, { params: ps.map((p) => p.type), ret: info.type });
     }
     this.scopes = [new Map()];
-    for (const p of ps) this.push(p.name, p.type);
+    // 取地址那一遍（第九刀）：先扫一遍函数体，知道哪些名字要提到堆上，再降。
+    const taken = new Set();
+    this.collectAddrTaken(n.items[3], taken);
+    const saveLifted = this.lifted;
+    this.lifted = taken;
+    // 形参被取地址时提**它的一份拷贝**（C 的语义：形参就是个局部量，改它不影响调用方）
+    const pre = [];
+    for (const p of ps) {
+      this.push(p.name, p.type);
+      if (!taken.has(p.name)) continue;
+      if (!this.liftable(p.type)) {
+        this.nope(n, `对 ${tyName(p.type)} 的形参取地址（要方言能把它当内存里的值，见 liftable 那处）`);
+        this.lifted = saveLifted;
+        this.scopes = [];
+        return null;
+      }
+      const c = this.cellName(p.name);
+      const pt = tyText(tPtr(p.type));
+      pre.push(`    (let ${c} ${pt} (pnew ${pt} (int 1)))`);
+      pre.push(`    (pstore (var ${c}) (var ${p.name}))`);
+    }
     const save = this.retTy;
     this.retTy = isMain ? T_VOID : info.type;
-    const body = this.block(n.items[3], 4);
+    let body = this.block(n.items[3], 4);
     this.retTy = save;
     this.scopes = [];
+    this.lifted = saveLifted;
     if (body === null) return null;
+    if (pre.length !== 0) body = `${pre.join('\n')}\n${body}`;
     if (isMain) { this.mainBody = body; return null; }
     const sig = ps.map((p) => `(${p.name} ${tyText(p.type)})`).join(' ');
     this.decls.push(`  (fn ${info.name} (${sig}) ${tyText(info.type)}\n${body})`);
@@ -530,6 +594,19 @@ class JncLower {
       }
       // 先降初值再进作用域：`int x = x;` 里右边那个 x 指的是外层那个（C 的规矩，jancy 同）
       this.push(info.name, info.type);
+      // 被取过地址的名字提到堆上（第九刀）：那一格是 `(pnew (ptr T) (int 1))`，初值
+      // 用 `pstore` 写进去。之后对它的读写全走那一格，于是 `*p` 与它是同一个字。
+      if (this.lifted.has(info.name)) {
+        if (!this.liftable(info.type)) {
+          this.nope(dcl, `对 ${tyName(info.type)} 取地址（要方言能把它当内存里的值，见 liftable 那处）`);
+          return null;
+        }
+        const c = this.cellName(info.name);
+        const pt = tyText(tPtr(info.type));
+        out.push(`${pad}(let ${c} ${pt} (pnew ${pt} (int 1)))`);
+        out.push(`${pad}(pstore (var ${c}) ${code})`);
+        continue;
+      }
       out.push(`${pad}(let ${info.name} ${tyText(info.type)} ${code})`);
     }
     return out;
@@ -543,6 +620,9 @@ class JncLower {
       const nm = n.items[1].value;
       const t = this.lookup(nm);
       if (t === null) return this.err(n, `未声明的变量 '${nm}'`);
+      // 提到堆上的那些名字本身就是一格内存，所以它是 `ptr` 而不是 `var` ——
+      // 于是读写自动走 pload / pstore，而 `&x` 就是它的 code（见 expr0 的 addr）。
+      if (this.lifted.has(nm)) return { kind: 'ptr', code: `(var ${this.cellName(nm)})`, type: t };
       return { kind: 'var', name: nm, type: t };
     }
     // `*p = v`
@@ -1078,6 +1158,8 @@ class JncLower {
           if (this.fns.has(nm)) return this.nope(n, `把函数 '${nm}' 当值用`);
           return this.err(n, `未声明的变量 '${nm}'`);
         }
+        // 提到堆上的那些名字要 pload 一次（第九刀）。
+        if (this.lifted.has(nm)) return { code: `(pload (var ${this.cellName(nm)}))`, type: t };
         return { code: `(var ${nm})`, type: t };
       }
       case 'binary': return this.binary(n);
@@ -1098,7 +1180,7 @@ class JncLower {
       case 'cast': return this.cast(n, n.items[1], n.items[2]);
       case 'cond': return this.ternary(n, want);
       case 'addr':
-        return this.nope(n, '`&x`（要局部量可寻址，ADR-0016 里单独记着）');
+        return this.addrOf(n);
       case 'pre-inc': case 'post-inc': case 'pre-dec': case 'post-dec':
         return this.nope(n, `表达式里的 ${h}（方言里它是语句；单独写成一行就行）`);
       default:
@@ -1108,6 +1190,27 @@ class JncLower {
 
   /** `(indirect p)` / `(index p i)` 复用 lvalue 那一份 —— 读写两侧算的是同一个地址。 */
   derefLv(n) { return this.lvalue(n); }
+
+  /**
+   * `&E`（第九刀）。**一条规则管全部**：`lvalue(E)` 已经把每种可写位置算成"名字"或
+   * "一个指针"两类，而后者的 `code` **本来就是那个地址**。于是
+   *
+   *   &x        提到堆上的局部量  -> `(var x$c)`
+   *   &*p                        -> `p`（一个字都不用发）
+   *   &p[i]                      -> `(padd p i)`
+   *   &p->f / &(*p).f            -> `(pfield p f)`
+   *
+   * 全都落在同一句上。走到 `var` 那一类说明取地址的那一遍没认出这个形状（见
+   * collectAddrTaken：它只认直接写在 `&` 后面的名字），当场说清而不是发出错代码。
+   */
+  addrOf(n) {
+    const lv = this.lvalue(n.items[1]);
+    if (lv === null) return null;
+    if (lv.kind !== 'ptr') {
+      return this.nope(n, `对这种形状取地址（'&' 后面只认名字、'*p'、'p[i]'、'p->f'）`);
+    }
+    return { code: lv.code, type: tPtr(lv.type) };
+  }
 
   /**
    * 二元。这一层要分三件事，都得先知道两边的类型：

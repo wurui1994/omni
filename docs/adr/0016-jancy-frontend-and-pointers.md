@@ -216,7 +216,8 @@ jancy 的完整语法与形式，不是"jancy 里能塞进现有方言的那个�
 1. `printf` 的完整格式（宽度、精度、`%x`、`%c`，以及不以 `\n` 收尾的那种）——
    要方言里有一条"不换行的输出"加一份格式化。`%c` 尤其：这一层没有"整数 -> 一个字符
    的串"，`tostr` 会印出数字。
-2. `&x` —— 要局部量可寻址（jancy 那边是"提到 GC 堆上"）。
+2. `&x` —— 要局部量可寻址（jancy 那边是"提到 GC 堆上"）。**第九刀做掉了**，照抄 jancy 的
+   办法，方言没动；剩下的是 `&p`（`int**`），与"整个结构体的 pload/pstore"同一格。
 3. 真数组 `int a[3]` —— jancy 的数组是**值**类型，方言的 `(arr T)` 是引用语义；
    要方言有值语义的定长数组。
 4. 定宽整数——jancy 的 `int` 是 32 位、`char` 8 位，这一层全按 64 位。溢出会不一样，
@@ -458,6 +459,57 @@ double 就是 `m * 2^e`（m、e 都是整数），所以 `|x| * 10^N` 是一个�
 `tests/sexpr`（63/0，新增 `cases/29-sfix`）、`tests/glr`（20/0）、`tests/asy`。asy 那条这次
 **要跑** —— 负零那一处改的是四个后端共用的 real 常量，不是 jancy 独有的那一格。
 **没跑的**：`sweep.js`、`svg.js`、自举、`tests/jit`、`tests/mir`、`tests/llvm`。
+
+### 第九刀：`&x` —— 局部量提到堆上，方言一个字没改
+
+`&x` 一直是 `bad/` 里的一条：方言的局部量是 SSA 里的一个值，没有地址。第一刀的头注里写的是
+"要它就得先给方言加一格栈上的槽"。这一刀没加那一格 —— **jancy 自己就不是那么做的**。
+`type_ptr_data.rst` 里那句 "any local taken fat address of, is being lifted to GC heap"
+就是它的办法：被取过 fat 地址的局部量不留在栈上，提到堆上去。照抄它，于是
+
+```
+int x = 1;  int* p = &x;
+```
+
+降成
+
+```
+(let x$c (ptr int) (pnew (ptr int) (int 1)))
+(pstore (var x$c) (int 1))
+(let p (ptr int) (var x$c))
+```
+
+`x` 这个名字在方言里**根本不出现**，出现的是一格长度 1 的堆内存 `x$c`。之后对 `x` 的读写全走
+`(pload (var x$c))` / `(pstore (var x$c) …)`，`&x` 就是 `(var x$c)` 本身。方言的 `pnew` /
+`pload` / `pstore` 是第一刀就有的，所以**这一刀方言一个字没改**，后端、MIR、运行时也都没动。
+
+**要哪些名字提上去，是进函数前先扫一遍决定的**（`collectAddrTaken`）：函数体里所有
+`(addr (name X))` 的 X 收进一个集合，然后 `localDecl` 与 `lvalue` / `expr0` 的名字分支
+按这个集合分岔。形参也要提 —— 形参在方言里同样是个值，所以被取地址的形参在函数开头
+多两句：开一格、把传进来的值存进去。
+
+**四种取地址落到同一条规则上。** `lvalue()` 返回 `ptr` 种类时，它的 `code` **已经就是地址**：
+`*p` 的 lvalue 是 `p`、`p[i]` 的是 `(padd p i)`、`p->f` 的是 `(pfield p f)`。所以 `addrOf`
+只有一句"取 lvalue，是 `ptr` 种就把 code 当值返回、类型套一层 `ptr`"，`&*p` -> `p`、
+`&p[i]` -> `(padd p i)`、`&p->f` -> `(pfield p f)` 全是它的推论，一条特例都不用写。
+不是 `ptr` 种的（比如 `&42`、`&f()`）报错。
+
+**新的边界：`&p`（`int**`）。** `ptrTargetOk` 只放行 int / real / bool / struct，所以
+对指针取地址当场被挡住。这不是漏的 —— fat 指针是三个字，而 `pload` / `pstore` 现在只搬一个
+字。它与"整个结构体的 `pload` / `pstore`"是**同一格**：方言要能把多字的值当内存里的东西搬。
+两条一起记在债务表里。同理，被取地址的形参/局部量只收可提的三类（int / real / bool），
+struct 的那一条并进上面同一格。
+
+**期望输出的出处**：C。`tests/jnc/cases/09-addr.jnc` 对照一份 `cc -O0` 编出来的 C（抄在头
+注里），13 行逐字节相同，覆盖 `&x` 读写、`&` 形参、`&*p`、`&p[i]`、`&p->f`、取地址的量同时
+参与 `++` 与复合赋值、以及 double / bool 的那两格。`bad/addr-of.jnc` 跟着删掉 —— 那条边界
+不存在了，本体转到 `cases/09-addr.jnc`（第三到第五刀也是这么搬的）。
+
+**跑过的轴**：`tests/jnc`（15/0，新增 `cases/09-addr`、删掉 `bad/addr-of`）、
+`tests/sexpr`（63/0）、`tests/glr`（20/0）。
+**没跑的**：`tests/asy` 全部（这一刀只碰 `frontend-jnc/lower.js`，四个后端与运行时一行没动）、
+`sweep.js`、`svg.js`、自举、`tests/jit`、`tests/mir`、`tests/llvm`。`npm run lint` 这台机器上
+没有 typescript，跑不了。
 
 ## 后果与代价
 
