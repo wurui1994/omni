@@ -339,6 +339,8 @@ class Interp {
         return (e.ptr.type.k === 'tptr' ? p : p[0]) === 0;
       }
       case 'PtrThin': return this.eval(e.ptr, env, frame)[0];
+      // `(pelem p)`（第十八刀）：类型上的一步，运行期是恒等的。
+      case 'PtrElem': return this.eval(e.ptr, env, frame);
       case 'PtrLoad': return ptrLoad(e.type.k, this.ptrChk(e.ptr, e.size, env, frame));
       case 'PtrStore': {
         const a = this.ptrChk(e.ptr, e.size, env, frame);

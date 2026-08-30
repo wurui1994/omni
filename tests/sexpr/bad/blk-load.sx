@@ -1,0 +1,6 @@
+;; `(blk T N)` 不是一个值：没有能装它的槽，所以整块读不成立（第十八刀）。
+;; 要的是先 `(pelem p)` 退成 `(ptr int)`，再读一格。
+(module
+  (main
+    (let a (ptr (blk int 4)) (pnew (ptr (blk int 4)) (int 2)))
+    (print (pload (var a)))))

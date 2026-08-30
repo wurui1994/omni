@@ -97,8 +97,19 @@ export function tptrType(target) { return { k: 'tptr', target }; }
  */
 export function ptrTargetOk(t) {
   return t.k === 'int' || t.k === 'real' || t.k === 'bool' || t.k === 'struct'
-    || t.k === 'ptr' || t.k === 'tptr';
+    || t.k === 'ptr' || t.k === 'tptr' || t.k === 'blk';
 }
+
+/**
+ * **一段 N 格的定长内存**（ADR-0016 第十八刀）。只在**指针的目标**位置合法 —— 它不是一个
+ * 值：没有"整块的 load/store"，能对它做的只有"要它第 i 格的地址"（方言里那一句 `(pelem p)`
+ * 把 `(ptr (blk T N))` 退回 `(ptr T)`，地址与范围都不变，纯是类型上的一步）。
+ *
+ * 逼出它的是 jancy 的多维数组 `int a[10][20]`：那是"10 格，每格是 `int[20]`"，
+ * 而 `&a`（`T(*)[N]`）与结构体里的数组字段要的也是同一格。与第十六刀那一格是两回事：
+ * 那一刀开的是"T 能是指针"，这一刀开的是"T 能是一段定长内存"。
+ */
+export const blkType = (el, n) => ({ k: 'blk', el, n });
 
 /**
  * 内存布局（ADR-0016 决策二）：**一套语义，两套实现**——所以尺寸与对齐必须由这一层定死，
@@ -118,6 +129,8 @@ export function alignOf(t) {
   if (t.k === 'int' || t.k === 'real') return 8;
   // 指针自己落进内存时（第十六刀）：两种指针都按字对齐，fat 是三个字、thin 是一个字。
   if (t.k === 'ptr' || t.k === 'tptr') return 8;
+  // 定长内存（第十八刀）：对齐就是元素的对齐 —— 与 C 的数组同一条。
+  if (t.k === 'blk') return alignOf(t.el);
   if (t.k === 'struct') {
     let a = 1;
     for (const f of t.fields) a = Math.max(a, alignOf(f.type));
@@ -131,6 +144,12 @@ export function sizeOf(t) {
   if (t.k === 'int' || t.k === 'real') return 8;
   if (t.k === 'ptr') return 24;
   if (t.k === 'tptr') return 8;
+  // 定长内存（第十八刀）：N 格，每格按元素的**步长**（尺寸补齐到自己的对齐）—— 现有的
+  // 四种目标里 sizeOf 本来就已经是 alignOf 的整数倍（bool 是 1/1），所以这一句是乘法。
+  if (t.k === 'blk') {
+    const s = sizeOf(t.el);
+    return s === 0 ? 0 : Math.ceil(s / alignOf(t.el)) * alignOf(t.el) * t.n;
+  }
 
   if (t.k === 'struct') {
     const l = structLayout(t);

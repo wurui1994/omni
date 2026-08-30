@@ -75,11 +75,14 @@
 //     `struct Point` 之前会被方言拒）—— jancy 那边名字不看顺序，所以这是一条真差别。
 //     要补的是方言那一侧"内嵌的零值按拓扑序铺"，与第十七刀开的指针字段是两回事：
 //     指针是三个字、与目标布局无关，内嵌是真的内嵌。
-//   - 数组那一族里剩下的四条，要的是**另一格**方言：`(ptr T)` 的 T 能是"一段 N 格的定长
-//     内存"（第十六刀开的是"T 能是指针"，两回事）。多维数组 `int a[10][20]`（元素是
-//     `int[20]`）、数组之间的赋值（**jancy 自己也只在常量折叠那条路上有** ——
-//     `Cast_Array::llvmCast` 里写着未实现）、数组形参与返回（要写成 `T*`）、数组字段
-//     （要嵌在结构体里）、`&a`（`T(*)[N]`）。
+//   - 数组那一族里剩下的四条。它们要的那格**方言已经有了**（第十八刀：`(ptr T)` 的 T 能是
+//     `(blk T N)` —— 一段 N 格的定长内存，配一句 `(pelem p)` 退成元素指针），**这一层还没
+//     接上**：接上要把"数组变量就是一段 pnew 出来的内存 + 一条 `(ptr 元素)`"整个换成
+//     "一块 `(ptr (blk 元素 N))`"，declarator（后缀得从右往左套：`int a[10][20]` 的元素是
+//     `int[20]`）、decay、下标、花括号初值、`&a[i]` 六处一起动。剩下的四条是：多维数组
+//     `int a[10][20]`、数组形参与返回（要写成 `T*`）、数组字段（要嵌在结构体里）、
+//     `&a`（`T(*)[N]`）。数组**之间的赋值**不在这一族里 —— **jancy 自己也只在常量折叠那条
+//     路上有**（`Cast_Array::llvmCast` 里写着未实现），所以那一条不是我们欠的。
 //   - 模块级变量那一族里剩下的三条：`static` 的**局部量**（要"初值只跑一次"，jancy 那边是
 //     `once` 的机制）、`threadlocal`（要线程本地存储）、`&g`（**方言**这一侧的边界 —— 全局
 //     不在一段可寻址的内存里，jancy 的 `&g` 本身是合法的）。
@@ -886,7 +889,10 @@ class JncLower {
       // 它是编译期常量表达式，我们没有常量折叠，所以先收最直的这一格。`[]` 的长度从花括号
       // 初值数出来，那要 localDeclCurly 才知道，所以这里先记成 n === null。
       if (sh === 'array-suffix') {
-        if (isArr(t)) return this.nope(s, '多维数组（`int a[10][20]`）—— 要方言的指针能指向数组');
+        if (isArr(t)) {
+          return this.nope(s, '多维数组（`int a[10][20]`）—— 方言那一格有了（(blk T N)，第十八刀），'
+            + '这一层还没换过去');
+        }
         if (t.k !== 'int' && t !== T_REAL && t !== T_BOOL && !isStruct(t)) {
           return this.nope(s, `${tyName(t)} 的数组 —— 要方言能把多个字的值当元素搬（与 &p 同一格）`);
         }
@@ -1098,7 +1104,8 @@ class JncLower {
           return null;
         }
         if (this.lifted.has(info.name)) {
-          this.nope(dcl, `对数组取地址（'&a' 是 ${tyName(info.type.el)}(*)[${info.type.n}]，要方言的指针能指向数组）`);
+          this.nope(dcl, `对数组取地址（'&a' 是 ${tyName(info.type.el)}(*)[${info.type.n}]，`
+            + '方言那一格有了（(blk T N)，第十八刀），这一层还没换过去）');
           return null;
         }
         this.push(info.name, info.type);
@@ -1193,7 +1200,8 @@ class JncLower {
     const t = this.curlyType(n, info, curly);
     if (t === null) return null;
     if (isArr(t) && this.lifted.has(info.name)) {
-      this.nope(dcl, `对数组取地址（'&a' 是 ${tyName(t.el)}(*)[${t.n}]，要方言的指针能指向数组）`);
+      this.nope(dcl, `对数组取地址（'&a' 是 ${tyName(t.el)}(*)[${t.n}]，方言那一格有了`
+        + '（(blk T N)，第十八刀），这一层还没换过去）');
       return null;
     }
     const out = [];

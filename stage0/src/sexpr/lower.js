@@ -56,7 +56,7 @@
  */
 
 import { INT, REAL, BOOL, STRING, VOID, vecType, bufType, arrType, structType, classType, fnType, typeKey, zeroValue,
-  ptrType, tptrType, ptrTargetOk, structLayout, sizeOf } from '../hir/types.js';
+  ptrType, tptrType, ptrTargetOk, blkType, structLayout, sizeOf } from '../hir/types.js';
 import { readSexpr, isList, isAtom, isStr, head } from './read.js';
 import { SourceFile } from '../source/diag.js';
 
@@ -198,11 +198,14 @@ class CoreLowerer {
     // 目标类型那张名单在 hir/types.js 的 ptrTargetOk 上，理由也写在那儿。
     if (isList(node) && (head(node) === 'ptr' || head(node) === 'tptr')) {
       const thin = head(node) === 'tptr';
-      const t = this.ty(node.items[1], `${what} 的 (${head(node)} T) 的 T`);
+      const tn = node.items[1];
+      const what2 = `${what} 的 (${head(node)} T) 的 T`;
+      // `(blk T N)` 只在**这里**认（第十八刀）：它不是一个值，只能当指针的目标。
+      const t = isList(tn) && head(tn) === 'blk' ? this.blkTy(tn, what2) : this.ty(tn, what2);
       if (t === null) return null;
       if (!ptrTargetOk(t)) {
         return this.err(node, `${what}：(${head(node)} T) 的 T 只能是 int / real / bool /`
-          + ` 结构体名 / 另一个指针，这里是 ${coreTypeText(t)}`);
+          + ` 结构体名 / 另一个指针 / (blk T N)，这里是 ${coreTypeText(t)}`);
       }
       if (t.k === 'struct' && structLayout(t) === null) {
         return this.err(node, `${what}：结构体 '${t.name}' 里有落不进内存的字段，`
@@ -250,6 +253,35 @@ class CoreLowerer {
       return this.err(node, `${what} 的类型只能是 int / real / bool / string / void / (vec T N) / (buf T) / (arr T) / (fnty (T...) R) / 结构体名 / 类名`);
     }
     return TYPES.get(node.value);
+  }
+
+  /**
+   * `(blk T N)`：**一段 N 格的定长内存**（ADR-0016 第十八刀）。只在 `(ptr …)` / `(tptr …)`
+   * 的目标位置认，所以它不从 `ty()` 里走 —— 它不是一个值，没有"整块的 load/store"。
+   *
+   * 元素本身可以再是 `(blk …)`：`int a[10][20]` 是 `(ptr (blk int 20))` 上有 10 格
+   * （`padd` 一步跨一整行），而三维 `int a[2][3][4]` 的元素是 `int[3][4]`，
+   * 也就是 `(ptr (blk (blk int 4) 3))` —— 所以这里要能递归下去。
+   */
+  blkTy(node, what) {
+    if (node.items.length !== 3) return this.err(node, `${what}：(blk T N) 要两个参数`);
+    const el = isList(node.items[1]) && head(node.items[1]) === 'blk'
+      ? this.blkTy(node.items[1], `${what} 的 (blk T N) 的 T`)
+      : this.ty(node.items[1], `${what} 的 (blk T N) 的 T`);
+    if (el === null) return null;
+    if (!ptrTargetOk(el)) {
+      return this.err(node, `${what}：(blk T N) 的 T 只能是能落进内存的那些，`
+        + `这里是 ${coreTypeText(el)}`);
+    }
+    if (el.k === 'struct' && structLayout(el) === null) {
+      return this.err(node, `${what}：结构体 '${el.name}' 里有落不进内存的字段，`
+        + '排不成一段定长内存');
+    }
+    const cnt = isAtom(node.items[2]) ? Number(node.items[2].value) : NaN;
+    if (!Number.isInteger(cnt) || cnt <= 0) {
+      return this.err(node, `${what}：(blk T N) 的 N 要是一个正整数字面量`);
+    }
+    return blkType(el, cnt);
   }
 
   lookup(name) {
@@ -917,6 +949,12 @@ class CoreLowerer {
     if (p.type.k === 'tptr' && !this.unsafe) {
       return this.err(n, 'thin 指针上的 pstore 要写在 (unsafe …) 里 —— 它没有范围，查不了');
     }
+    // 定长内存那一条先说（第十八刀）：不然下面 sameCoreType 会报成"指向 int[3]、写进去的是
+    // int"，那句话把人往"换个值"的方向带，而真正要换的是**指针**。
+    if (p.type.target.k === 'blk') {
+      return this.err(n, `(pstore p v) 的 p 指向 ${coreTypeText(p.type.target)}：一段定长内存不是`
+        + '一个值 —— 用 (pelem p) 退成元素指针再写');
+    }
     if (!sameCoreType(v.type, p.type.target)) {
       return this.err(n, `这个指针指向 ${coreTypeText(p.type.target)}，`
         + `写进去的是 ${coreTypeText(v.type)}`);
@@ -1492,7 +1530,8 @@ class CoreLowerer {
       return { kind: 'Ternary', cond: c, then: a, otherwise: b, type: a.type };
     }
     if (h === 'pnew' || h === 'pnull' || h === 'pload' || h === 'padd' || h === 'psub'
-      || h === 'pisnull' || h === 'pfield' || h === 'pthin' || h === 'peq') return this.ptrExpr(n, h);
+      || h === 'pisnull' || h === 'pfield' || h === 'pthin' || h === 'pelem'
+      || h === 'peq') return this.ptrExpr(n, h);
     if (h === 'anew' || h === 'aget' || h === 'alen' || h === 'apop') return this.arrExpr(n, h);
     // 结构体的两条读侧（写侧是语句 fldset）：`(new Point)` 零值，`(fld p x)` 读字段。
     // 没有"结构体字面量"：字段一多，字面量就要么按顺序（改字段顺序会静默改语义）、
@@ -1598,6 +1637,7 @@ class CoreLowerer {
    *   (pisnull p)        是不是空指针
    *   (pfield p 字段名)  结构体指针 -> 那个字段的指针（"把协议头盖在缓冲上"靠这一条）
    *   (pthin p)          fat 降成 thin；**只在 `(unsafe …)` 里**
+   *   (pelem p)          `(ptr (blk T N))` -> `(ptr T)`（第十八刀）；地址与范围都不动
    *   (peq p q)          两个指针指的是不是同一格
    *
    * `peq` 单开一条而不是走 `(bin "==" …)`：`==` 那一条要求"两边同型、按值比"，而 fat
@@ -1637,6 +1677,16 @@ class CoreLowerer {
       return this.err(n, `thin 指针上的 '${h}' 要写在 (unsafe …) 里 —— 它没有范围，查不了`);
     }
     if (h === 'pisnull') return { kind: 'PtrIsNull', ptr: p, type: BOOL };
+    // `(pelem p)`：`(ptr (blk T N))` -> `(ptr T)`（第十八刀）。地址与范围一个字都不动，
+    // 变的只有类型 —— 于是接下来的 `padd` 一步跨一格元素而不是一整块。运行期它是恒等的
+    // （四个 OIR 消费者都直接把操作数交出去），所以 MIR 上连一条新指令都没有。
+    if (h === 'pelem') {
+      if (p.type.target.k !== 'blk') {
+        return this.err(n, `(pelem p) 的 p 要指向 (blk T N)，这里是 ${coreTypeText(p.type)}`);
+      }
+      const et = p.type.target.el;
+      return { kind: 'PtrElem', ptr: p, type: thin ? tptrType(et) : ptrType(et) };
+    }
     if (h === 'pload') {
       // 结构体整块读出来这一刀不给：那要按类型逐字段从内存里拼一个值出来，四条腿各一份
       // marshalling。而这门语言真正的用法是"把头结构体盖在缓冲上、然后**逐字段**访问"
@@ -1644,6 +1694,12 @@ class CoreLowerer {
       if (p.type.target.k === 'struct') {
         return this.err(n, `(pload p) 的 p 指向结构体 ${p.type.target.name}：整块读还没做 ——`
           + ' 用 (pfield p 字段名) 逐字段读');
+      }
+      // 定长内存同理，而且更彻底：`(blk T N)` **不是一个值**，没有能装它的槽 ——
+      // 先用 `(pelem p)` 退到 `(ptr T)` 再读一格（第十八刀）。
+      if (p.type.target.k === 'blk') {
+        return this.err(n, `(pload p) 的 p 指向 ${coreTypeText(p.type.target)}：一段定长内存不是`
+          + '一个值 —— 用 (pelem p) 退成元素指针再读');
       }
       return { kind: 'PtrLoad', ptr: p, type: p.type.target, size: sizeOf(p.type.target) };
     }
@@ -1862,6 +1918,9 @@ function sameCoreType(a, b) {
   if (a.k === 'arr') return sameCoreType(a.elem, b.elem);
   // 指针同理，而且 fat 与 thin 是**两个类型**（`a.k !== b.k` 上面已经挡了）
   if (a.k === 'ptr' || a.k === 'tptr') return sameCoreType(a.target, b.target);
+  // 定长内存（第十八刀）：元素同型、格数相同才算一个类型 —— `int(*)[3]` 与 `int(*)[4]`
+  // 是两个类型（`padd` 一步跨的字节数不同）。
+  if (a.k === 'blk') return a.n === b.n && sameCoreType(a.el, b.el);
   // 函数值按**签名**认（结构类型）：形参逐个同型、返回同型才算一个类型。
   if (a.k === 'fn') {
     if (a.params.length !== b.params.length) return false;
@@ -1886,6 +1945,7 @@ function coreTypeText(t) {
   if (t.k === 'arr') return `arr<${coreTypeText(t.elem)}>`;
   if (t.k === 'ptr') return `${coreTypeText(t.target)}*`;
   if (t.k === 'tptr') return `${coreTypeText(t.target)} thin*`;
+  if (t.k === 'blk') return `${coreTypeText(t.el)}[${t.n}]`;
   if (t.k === 'struct' || t.k === 'class') return t.name;
   if (t.k === 'fn') {
     let ps = '';

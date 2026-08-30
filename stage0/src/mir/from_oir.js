@@ -520,6 +520,9 @@ class ToMir {
       case 'PtrIsNull':
         return f.emit(OP.PISNULL, T_BOOL, this.expr(e.ptr), REF_NONE, 0);
       case 'PtrThin': return f.emit(OP.PTHIN, T_TPTR, this.expr(e.ptr), REF_NONE, 0);
+      // `(pelem p)`（第十八刀）：两边的 MIR 类型都是 T_PTR，跨的字节数在**下一条** padd 的
+      // aux 上，所以这里连一条指令都不用发 —— 直接把操作数的 ref 交出去。
+      case 'PtrElem': return this.expr(e.ptr);
       case 'PtrLoad':
         return f.emit(OP.PLOAD, this.ty(e.type), this.expr(e.ptr), REF_NONE, e.size);
       case 'PtrStore': {

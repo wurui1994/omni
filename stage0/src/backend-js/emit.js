@@ -411,6 +411,9 @@ class JsEmitter {
       case 'PtrNew': return `$pnew(${this.expr(e.count)}, ${e.size})`;
       case 'PtrIsNull': return `(${jsPtrAddr(this.expr(e.ptr), e.ptr.type)} === 0)`;
       case 'PtrThin': return `${this.expr(e.ptr)}[0]`;
+      // `(pelem p)`（第十八刀）：只换类型，值一个字不动 —— 三元组照原样交出去。
+      // 共用同一个数组没问题：fat 指针在这条腿上从不原地改（$padd 等都回新数组）。
+      case 'PtrElem': return this.expr(e.ptr);
       case 'PtrLoad': return `${jsPtrLoad(e.type)}(${jsPtrChk(this, e.ptr, e.size)})`;
       case 'PtrStore':
         return `${jsPtrStore(e.type)}(${jsPtrChk(this, e.ptr, e.size)}, ${this.expr(e.value)})`;

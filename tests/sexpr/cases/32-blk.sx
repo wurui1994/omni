@@ -1,0 +1,54 @@
+;; 一段 N 格的定长内存（ADR-0016 第十八刀）—— 方言这一层新长出来的那一格：`(ptr T)` 的 T
+;; 能是 `(blk T N)`。它与第十六刀那一格是两回事：那一刀开的是"T 能是指针"。
+;;
+;; `(blk T N)` **不是一个值**：没有整块的 load/store（`bad/blk-load.sx` 与 `bad/blk-store.sx`
+;; 钉着），能对它做的只有 `(pelem p)` —— 把 `(ptr (blk T N))` 退成 `(ptr T)`，地址与范围一个字
+;; 都不动，变的只有"接下来的 padd 一步跨多少"。
+;;
+;; 期望输出的出处（这一路没有 oracle，逐条注明）：
+;;   - 行主序：`a[i][j]` 落在第 `i*N + j` 格上 —— C 的多维数组布局，jancy 没改这一条
+;;     （它的 `int a[10][20]` 元素类型就是 `int[20]`）
+;;   - `padd` 按**元素**：所以在 `(ptr (blk int 4))` 上一步跨一整行，`psub` 数的也是行
+;;   - `pnew` 出来的那块是零初始化的（type_ptr_data.rst）
+;;
+;; 刻意不印任何裸地址：JS 那条腿是 arena 偏移、C 那条腿是真指针。
+(module
+  ;; 二维数组当形参：一行 4 格，行数由调用方的那块内存决定
+  (fn at ((a (ptr (blk int 4))) (i int) (j int)) int
+    (ret (pload (padd (pelem (padd (var a) (var i))) (var j)))))
+
+  (main
+    ;; `int a[3][4]`：3 格，每格是 `int[4]`
+    (let a (ptr (blk int 4)) (pnew (ptr (blk int 4)) (int 3)))
+    ;; 刚出来是零
+    (print (pload (pelem (var a))))
+    (let i int (int 0))
+    (while (bin "<" (var i) (int 3))
+      (do
+        (let j int (int 0))
+        (while (bin "<" (var j) (int 4))
+          (do
+            (pstore (padd (pelem (padd (var a) (var i))) (var j))
+              (bin "+" (bin "*" (var i) (int 10)) (var j)))
+            (set j (bin "+" (var j) (int 1)))))
+        (set i (bin "+" (var i) (int 1)))))
+    (print (call at (var a) (int 0) (int 0)))
+    (print (call at (var a) (int 2) (int 3)))
+    (print (call at (var a) (int 1) (int 2)))
+
+    ;; 一整行跨 4 格：行指针上的 psub 数的是行，退成元素指针之后数的是格
+    (print (psub (padd (var a) (int 2)) (var a)))
+    (print (psub (padd (pelem (var a)) (int 5)) (pelem (var a))))
+    ;; 行主序：第 1 行第 2 格 = 从头数第 6 格
+    (print (pload (padd (pelem (var a)) (int 6))))
+
+    ;; 退成元素指针之后它就是一条普通的 `int*`：`peq` 认得它与第 0 行的地址是同一格
+    (print (peq (pelem (var a)) (pelem (padd (var a) (int 0)))))
+
+    ;; 三维 `int b[2][2][4]`：元素是 `int[2][4]`，所以是 `(blk (blk int 4) 2)`
+    (let b (ptr (blk (blk int 4) 2)) (pnew (ptr (blk (blk int 4) 2)) (int 2)))
+    (pstore (padd (pelem (pelem (padd (var b) (int 1)))) (int 3)) (int 77))
+    (print (pload (padd (pelem (pelem (padd (var b) (int 1)))) (int 3))))
+    ;; b 的一格跨 2*4 = 8 个 int，也就是退到最里层之后的第 8 格
+    (print (psub (pelem (pelem (padd (var b) (int 1)))) (pelem (pelem (var b)))))
+    (print (pload (padd (pelem (pelem (var b))) (int 11))))))
