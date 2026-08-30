@@ -155,6 +155,11 @@
 // 数印出来"—— 第八刀之前这一格降成 `tostr`（`%.6g`），于是 `printf("%f", 1.5)` 印 `1.5`
 // 而 C 印 `1.500000`。舍入定的是 C 那一边（就近取偶），理由写在 sexpr/lower.js 的 `sfix` 处。
 //
+// `%e` / `%E` 是同一族的另一格（第三十刀），走方言新长的 `(ssci E N)`（C 的 `%.Ne`）。
+// 大写照 `%X` 那条分工走 `(supper …)`。这一格独有的难处有两处：**进位能把指数顶上去**
+//（`%.2e` 的 `9.999` 是 `1.00e+01`）在方言那一层解决；`#` 要把小数点插在 `e` **前面**
+//（`%#.0e` 的 1.5 是 `2.e+00`），在这一层解决。
+//
 // `%x` / `%X` / `%o` 靠方言第七刀长出来的 `(sbase E 进制)` 与 `(supper S)`。这一格真正的
 // 难处不是"印十六进制"，是**多少位**：C 把实参当 unsigned 读，位数是**默认实参提升之后**
 // 那一格，所以 `char d = -56; printf("%x", d)` 是 `ffffffc8` 而不是 `c8`。定宽整数
@@ -1817,7 +1822,7 @@ class JncLower {
       i = j;
       if (spec === '%') { lit += '%'; continue; }
       if (spec !== 'd' && spec !== 'i' && spec !== 'f' && spec !== 's' && spec !== 'c'
-        && spec !== 'x' && spec !== 'X' && spec !== 'o') {
+        && spec !== 'x' && spec !== 'X' && spec !== 'o' && spec !== 'e' && spec !== 'E') {
         this.nope(n, `printf 的转换 '%${spec === undefined ? '' : spec}'`);
         return null;
       }
@@ -1891,6 +1896,29 @@ class JncLower {
         const nf = pCode === null ? '(int 6)'
           : (pStar ? `(sel (bin "<" ${pCode} (int 0)) (int 6) ${pCode})` : pCode);
         piece = `(sfix ${v.code} ${nf})`;
+      } else if (spec === 'e' || spec === 'E') {
+        // `%e` / `%E` 是 C 的 `%.6e`（第三十刀）—— 方言新长的 `(ssci E N)`。默认精度、
+        // `.*` 是负数回到 6 这两条与 `%f` 一字不差（同一段 C 的规则）。
+        if (v.type !== T_REAL) {
+          this.err(argNode, `'%${spec}' 要 double，这里是 ${tyName(v.type)}（整数先写 (double)x）`);
+          return null;
+        }
+        const nf = pCode === null ? '(int 6)'
+          : (pStar ? `(sel (bin "<" ${pCode} (int 0)) (int 6) ${pCode})` : pCode);
+        piece = `(ssci ${v.code} ${nf})`;
+        // `#` 在这一格是"小数点一定印出来"，而点要插在 `e` **前面**（`%#.0e` 的 1.5 是
+        // `2.e+00`）—— 与 `%f` 的"补在末尾"不是同一件事，所以在这儿做、不在下面那一处。
+        // nan / inf 那两支没有 `e`，先挡掉：`ssub` 越界是运行期错误。
+        if (alt) {
+          const t = this.spill(piece, pad, out);
+          const ix = this.spill(`(sfind ${t} (str "e"))`, pad, out, 'int');
+          const ins = `(bin "+" (ssub ${t} (int 0) ${ix})`
+            + ` (bin "+" (str ".") (ssub ${t} ${ix} (bin "-" (slen ${t}) ${ix}))))`;
+          piece = `(sel (bin "<" ${ix} (int 0)) ${t}`
+            + ` (sel (bin "<" (sfind ${t} (str ".")) (int 0)) ${ins} ${t}))`;
+        }
+        // 大写走 `(supper …)`：与 `%X` 同一条分工（`ssci` 只给小写的 `e`）
+        if (spec === 'E') piece = `(supper ${piece})`;
       } else {
         // 到这儿只剩 `%s`（`%d` / `%i` 在整数与 bool 上都在上面接完了，剩下的是类型不对）
         const want = spec === 's' ? T_STR : T_I32;
@@ -1903,7 +1931,8 @@ class JncLower {
       flushLit();
       const intConv = spec === 'd' || spec === 'i' || spec === 'x' || spec === 'X' || spec === 'o';
       const hexConv = spec === 'x' || spec === 'X';
-      const signed = spec === 'd' || spec === 'i' || spec === 'f';
+      // 带符号的转换（`+` / 空格 / 摘符号那一路认的就是这一族）：`%e` / `%E` 也在里面
+      const signed = spec === 'd' || spec === 'i' || spec === 'f' || spec === 'e' || spec === 'E';
       // 三处 C 的**未定义行为**，各有 clang 的一句话，没有可对的答案，所以拒：
       // `%c` 上的精度、不是有符号转换上的 `+` / 空格、`%d` / `%s` / `%c` 上的 `#`。
       if (pCode !== null && spec === 'c') {
@@ -1914,7 +1943,7 @@ class JncLower {
         this.nope(n, `'%${spec}' 上的 '${plus ? '+' : ' '}' 标志（C 里它是未定义行为）`);
         return null;
       }
-      if (alt && !hexConv && spec !== 'o' && spec !== 'f') {
+      if (alt && !hexConv && spec !== 'o' && spec !== 'f' && spec !== 'e' && spec !== 'E') {
         this.nope(n, `'%${spec}' 上的 '#' 标志（C 里它是未定义行为）`);
         return null;
       }

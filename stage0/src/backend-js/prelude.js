@@ -253,6 +253,48 @@ function $str_fixed(x, p) {
   return neg ? "-" + s : s;
 }
 
+// (ssci E N)：C 的 %.Ne（ADR-0016 第三十刀）。与 $str_fixed 同一条纪律（精确值 + 就近
+// 取偶），只是整数部分正好一位：先精确地数出十进制那一位在哪（不走 Math.log10，10 的
+// 整数次幂附近它会差一格），再对 |x| / 10^(k-N) 取整。进位能把 N+1 位顶成 N+2 位
+//（%.2e 的 9.999 是 1.00e+01），那时指数加一。
+function $str_sci(x, p) {
+  if (p < 0n || p > 30n) $rt_error("ssci precision out of range: " + p + " (0..30)");
+  var f = Number(p);
+  if (Number.isNaN(x)) return "nan";
+  if (x === Infinity) return "inf";
+  if (x === -Infinity) return "-inf";
+  var neg = x < 0 || Object.is(x, -0);
+  var a = Math.abs(x);
+  var ds;
+  var k = 0;
+  if (a === 0) { ds = "0".repeat(f + 1); } else {
+    var dv = new DataView(new ArrayBuffer(8));
+    dv.setFloat64(0, a);
+    var hi = dv.getUint32(0);
+    var m = (BigInt(hi & 0xfffff) << 32n) | BigInt(dv.getUint32(4));
+    var be = (hi >>> 20) & 0x7ff;
+    var e;
+    if (be === 0) { e = -1074; } else { m |= 1n << 52n; e = be - 1075; }
+    if (e >= 0) { k = (m << BigInt(e)).toString().length - 1; } else {
+      k = (m * 5n ** BigInt(-e)).toString().length - 1 + e;
+    }
+    var s2 = k - f;
+    var num = m;
+    var den = 1n;
+    if (e >= 0) { num *= 1n << BigInt(e); } else { den = 1n << BigInt(-e); }
+    if (s2 >= 0) { den *= 10n ** BigInt(s2); } else { num *= 10n ** BigInt(-s2); }
+    var q = num / den;
+    var r2 = (num % den) * 2n;
+    if (r2 > den || (r2 === den && (q & 1n) === 1n)) q += 1n;
+    if (q >= 10n ** BigInt(f + 1)) { q /= 10n; k += 1; }
+    ds = q.toString();
+  }
+  var s = f > 0 ? ds.slice(0, 1) + "." + ds.slice(1) : ds;
+  var ae = k < 0 ? -k : k;
+  s += "e" + (k < 0 ? "-" : "+") + (ae < 10 ? "0" + ae : "" + ae);
+  return neg ? "-" + s : s;
+}
+
 // (tostr E N)：按 N 位有效数字。位数在 Omni 里是 int，也就是 BigInt，$fmt_g 要的是
 // 普通数，所以这里转一下 —— 别的地方谁都别再自己转。
 const $str_real_g = (x, p) => $fmt_g(x, Number(p));

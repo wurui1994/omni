@@ -283,6 +283,59 @@ export function fmtFixed(x, p) {
   return neg ? `-${s}` : s;
 }
 
+/**
+ * `(ssci E N)` 上的 real：C 的 `%.Ne`（ADR-0016 第三十刀）。
+ *
+ * 与 `fmtFixed` 同一条纪律（按精确值算、就近取偶），只是"小数点在哪"换了：`%e` 要的是
+ * `d.dddde±dd` —— 整数部分**正好一位**，所以先把十进制的那一位数出来（`k`），再对
+ * `|x| / 10^(k-N)` 取整，收到 N+1 位数字。
+ *
+ * 数 `k` 不走 `Math.log10`（10 的整数次幂附近它会差一格），走精确值：`e >= 0` 时
+ * `m * 2^e` 本身就是整数，位数一数就有；`e < 0` 时 `m / 2^f = m * 5^f / 10^f`，于是
+ * `m * 5^f` 的位数减去 `f` 就是答案。
+ *
+ * 进位能把 N+1 位顶成 N+2 位（`%.2e` 的 `9.999` 是 `1.00e+01`），那时指数加一。
+ */
+export function fmtSci(x, p) {
+  const f = Number(p);
+  if (Number.isNaN(x)) return 'nan';
+  if (x === Infinity) return 'inf';
+  if (x === -Infinity) return '-inf';
+  const neg = x < 0 || Object.is(x, -0);
+  const a = Math.abs(x);
+  let ds;
+  let k = 0;
+  if (a === 0) ds = '0'.repeat(f + 1);
+  else {
+    const dv = new DataView(new ArrayBuffer(8));
+    dv.setFloat64(0, a);
+    const hi = dv.getUint32(0);
+    let m = (BigInt(hi & 0xfffff) << 32n) | BigInt(dv.getUint32(4));
+    const be = (hi >>> 20) & 0x7ff;
+    let e;
+    if (be === 0) e = -1074;                      // 次正规数：没有那个隐含的 1
+    else { m |= 1n << 52n; e = be - 1075; }
+    if (e >= 0) k = (m << BigInt(e)).toString().length - 1;
+    else k = (m * 5n ** BigInt(-e)).toString().length - 1 + e;
+    const s = k - f;
+    let num = m;
+    let den = 1n;
+    if (e >= 0) num *= 1n << BigInt(e); else den = 1n << BigInt(-e);
+    if (s >= 0) den *= 10n ** BigInt(s); else num *= 10n ** BigInt(-s);
+    let q = num / den;
+    const r2 = (num % den) * 2n;
+    // 就近取偶：正好一半时只在 q 是奇数的时候进位
+    if (r2 > den || (r2 === den && (q & 1n) === 1n)) q += 1n;
+    if (q >= 10n ** BigInt(f + 1)) { q /= 10n; k += 1; }
+    ds = q.toString();
+  }
+  let s = f > 0 ? `${ds.slice(0, 1)}.${ds.slice(1)}` : ds;
+  const ae = k < 0 ? -k : k;
+  // 指数**至少两位**、符号一定印（C99 7.19.6.1）
+  s += `e${k < 0 ? '-' : '+'}${ae < 10 ? `0${ae}` : `${ae}`}`;
+  return neg ? `-${s}` : s;
+}
+
 /** `(tostr E N)` 上的 real：N 位有效数字。位数是 int，也就是 BigInt，这里转一次 */
 export function fmtRealG(x, p) {
   return fmtG(x, Number(p));

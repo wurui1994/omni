@@ -1475,22 +1475,27 @@ class CoreLowerer {
     // 那一行在它那边是通的 —— 所以这一格照收一段表达式。是字面量时照旧当场判范围
     //（诊断更早、也更准），不是字面量时那一条落到运行期：四份实现各自查，越界是运行期错误
     //（同一句话："sfix precision out of range: N (0..30)"）。
-    if (h === 'sfix') {
+    //
+    // `(ssci E N)` 是同一条的科学计数那一格（第三十刀，C 的 `%.Ne`）：`d.dddde±dd`，
+    // 整数部分正好一位、指数至少两位且一定带符号。舍入、位数范围、"不必是字面量"三条
+    // 与 `sfix` 一字不差 —— 所以这两条走同一段代码，只差一个内建名字。
+    if (h === 'sfix' || h === 'ssci') {
+      const bn = h === 'sfix' ? 'str_fixed' : 'str_sci';
       const v = this.expr(n.items[1]);
       if (v === null) return null;
-      if (v.type !== REAL) return this.err(n, `(sfix E N) 的 E 要是 real，这里是 ${coreTypeText(v.type)}`);
+      if (v.type !== REAL) return this.err(n, `(${h} E N) 的 E 要是 real，这里是 ${coreTypeText(v.type)}`);
       if (isList(n.items[2]) && head(n.items[2]) === 'int') {
         const p = this.intLit(n.items[2]);
         if (p === null) return null;
         if (p.value < 0n || p.value > 30n) {
-          return this.err(n, `(sfix E N) 的位数要在 0..30 之间，这里是 ${p.value}`);
+          return this.err(n, `(${h} E N) 的位数要在 0..30 之间，这里是 ${p.value}`);
         }
-        return { kind: 'Builtin', name: 'str_fixed', args: [v, p], argType: REAL, type: STRING };
+        return { kind: 'Builtin', name: bn, args: [v, p], argType: REAL, type: STRING };
       }
       const p = this.expr(n.items[2]);
       if (p === null) return null;
-      if (p.type !== INT) return this.err(n, `(sfix E N) 的位数要是 int，这里是 ${coreTypeText(p.type)}`);
-      return { kind: 'Builtin', name: 'str_fixed', args: [v, p], argType: REAL, type: STRING };
+      if (p.type !== INT) return this.err(n, `(${h} E N) 的位数要是 int，这里是 ${coreTypeText(p.type)}`);
+      return { kind: 'Builtin', name: bn, args: [v, p], argType: REAL, type: STRING };
     }
     // `(readtext E)`：把一份文本文件**整份**读成 string。方言里读文件只有这一个口子 ——
     // 被降级的语言那边的文件对象（asy 的 `input(name).line().word()`：分词、注释、eof）

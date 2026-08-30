@@ -15,7 +15,7 @@
 //      （arena 模拟 vs 真指针，ADR-0016），逐字节相同不是巧合。
 //   2. rt/*.jnc 在五条腿上报**同一句**运行期错误。
 //   3. bad/*.jnc 必须被拒绝，且拒在正确的理由上。这一组是那些边界的本体：多维数组、
-//      数组之间的赋值、`threadlocal`、对 string 的模块级变量取地址、`%e`、
+//      数组之间的赋值、`threadlocal`、对 string 的模块级变量取地址、`%g`、
 //      `unsafe` 之外的 thin 转换、`unsigned`，加一条 jancy 自己的规矩
 //      （命名项之后不能再写位置项）。（`? :`、不换行的 printf、条件真值化曾经在
 //      这一组里，第三到第五刀把它们做掉之后转到了 cases/；`&x` 是第九刀、定长数组是第十刀、
@@ -25,10 +25,11 @@
 //      cases/13-struct-args.jnc、cases/14-curly.jnc、cases/15-forward.jnc、
 //      cases/16-ptrptr.jnc；`new T { … }` 是第二十五刀、`static` 的局部量是第二十六刀、
 //      整数与 `%s` 上的精度加 `%*d` 是第二十七刀、`%.*f` 是第二十八刀、`+` / 空格 / `#`
-//      三个标志是第二十九刀，在 cases/24-new-curly.jnc、cases/25-static-local.jnc、
-//      cases/26-printf-prec.jnc、cases/27-printf-star-prec.jnc、cases/28-printf-flags.jnc。）
+//      三个标志是第二十九刀、`%e` / `%E` 是第三十刀，在 cases/24-new-curly.jnc、
+//      cases/25-static-local.jnc、cases/26-printf-prec.jnc、cases/27-printf-star-prec.jnc、
+//      cases/28-printf-flags.jnc、cases/29-printf-sci.jnc。）
 //
-//      bad/ 里有**两种**拒，别混：一种是"还没长出来"（printf-conv-e：`%e` 要方言里一条
+//      bad/ 里有**两种**拒，别混：一种是"还没长出来"（printf-conv-g：`%g` 要方言里一条
 //      新算子），一种是**C 自己的未定义行为**（printf-plus-hex：`%+x` 没有可对的答案）。
 //
 //   node tests/jnc/run.js

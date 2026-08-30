@@ -154,8 +154,9 @@ const RT_OPS = new Map([
   // 这两条是 ADR-0016 第七刀补的（jancy 的 %x / %X / %o）。
   ['str_base.int', { sym: 'omni_str_base', ret: '[2 x i64]', params: ['i64', 'i64'] }],
   ['str_upper.string', { sym: 'omni_str_upper', ret: '[2 x i64]', params: ['[2 x i64]'] }],
-  // 第八刀：C 的 %.Nf（就近取偶）。
+  // 第八刀：C 的 %.Nf（就近取偶）。第三十刀：C 的 %.Ne。
   ['str_fixed.real', { sym: 'omni_str_fixed', ret: '[2 x i64]', params: ['double', 'i64'] }],
+  ['str_sci.real', { sym: 'omni_str_sci', ret: '[2 x i64]', params: ['double', 'i64'] }],
 ]);
 
 /** i64 比较 -> icmp 谓词；f64 -> fcmp 谓词。顺序与 OP.EQ..OP.GT 一致。 */

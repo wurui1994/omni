@@ -553,6 +553,8 @@ class JsEmitter {
       case 'str_upper': return `$str_upper(${a[0]})`;
       // `(sfix E N)`（ADR-0016 第八刀）—— C 的 %.Nf，就近取偶
       case 'str_fixed': return `$str_fixed(${a[0]}, ${a[1]})`;
+      // `(ssci E N)`（第三十刀）—— C 的 %.Ne，同一条舍入
+      case 'str_sci': return `$str_sci(${a[0]}, ${a[1]})`;
       case 'to_string': return `$str_${e.argType.k}(${a[0]})`;
       case 'to_string_g': return `$str_real_g(${a[0]}, ${a[1]})`;
       case 'trunc': return `$trunc(${a[0]})`;

@@ -1,0 +1,60 @@
+;; `(ssci E N)`（ADR-0016 第三十刀）—— C 的 `%.Ne`：`d.dddde±dd`。
+;;
+;; 与 `(sfix E N)`（`%.Nf`）是同一族的另一格：整数部分**正好一位**，指数**至少两位**、
+;; 符号一定印。舍入是同一条 —— C 的 printf，也就是就近取偶；所以下面前八行还是那八个
+;; 平局。出处是 C（`printf '%.1e' 0.125` 量过 -> `1.2e-01`）。
+(module
+  (main
+    ;; 平局：就近取偶。1.25 到一位 -> 1.2（2 是偶数，不进）；3.75 -> 3.8（7 是奇数，进）
+    (print (ssci (real 0.125) (int 1)))
+    (print (ssci (real 0.375) (int 1)))
+    (print (ssci (real 0.5) (int 0)))
+    (print (ssci (real 1.5) (int 0)))
+    (print (ssci (real 2.5) (int 0)))
+    (print (ssci (real 3.5) (int 0)))
+    (print (ssci (real 0.25) (int 1)))
+    (print (ssci (real 0.75) (int 1)))
+
+    ;; 看着像平局其实不是 —— 二进制里 2.675 是 2.674999…、1.005 是 1.00499…
+    (print (ssci (real 2.675) (int 2)))
+    (print (ssci (real 1.005) (int 2)))
+
+    ;; 零、负零、负数
+    (print (ssci (real 0.0) (int 2)))
+    (print (ssci (real -0.0) (int 2)))
+    (print (ssci (real -1.5) (int 0)))
+    (print (ssci (real -0.125) (int 2)))
+
+    ;; **进位顶到下一格**：9.999 到两位是 1.00e+01，指数跟着加一。这一条是 `%e` 独有的
+    ;; 难处（`%f` 那边只是多一位整数），四份实现都得处理。
+    (print (ssci (real 9.999) (int 2)))
+    (print (ssci (real 9.5) (int 0)))
+
+    ;; N = 0 不留小数点
+    (print (ssci (real 1.0) (int 0)))
+
+    ;; 很大与很小：印的是那个 double 的**精确值**，不是它的短表示。
+    ;; 三位数的指数（`e+21` / `e-300` / `e+100`）与次正规数的最小值都在这儿。
+    (print (ssci (real 1e21) (int 2)))
+    (print (ssci (real 0.1) (int 20)))
+    (print (ssci (real 1e-300) (int 2)))
+    (print (ssci (real 5e-324) (int 6)))
+    (print (ssci (real 12345.6789) (int 3)))
+    (print (ssci (real 1e100) (int 2)))
+
+    ;; 默认精度那一格（printf 的 `%e` 就是 `%.6e`）
+    (print (ssci (real 1.5) (int 6)))
+
+    ;; 运行期算出来的值，与上界 30 位
+    (let x real (bin "/" (real 1.0) (real 3.0)))
+    (print (ssci (var x) (int 30)))
+
+    ;; 位数不必是字面量（与 `sfix` 同一段代码，见 sexpr/lower.js）
+    (let p int (int 2))
+    (print (ssci (real 1.5) (var p)))
+    (print (ssci (real 0.125) (var p)))          ;; 就近取偶与位数是不是字面量无关
+    (print (ssci (real 1.5) (bin "+" (var p) (int 1))))
+    (print (ssci (real 1.5) (bin "*" (var p) (int 3))))
+    (print (ssci (var x) (bin "-" (var p) (int 2))))
+
+    (print (str "end"))))

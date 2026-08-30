@@ -1079,6 +1079,8 @@ class CEmitter {
       case 'str_upper': return `omni_str_upper(${a[0]})`;
       // `(sfix E N)`（ADR-0016 第八刀）—— C 的 %.Nf 本身就是那个出处
       case 'str_fixed': return `omni_str_fixed(${a[0]}, ${a[1]})`;
+      // `(ssci E N)`（第三十刀）—— C 的 %.Ne，同上：这一条就是出处
+      case 'str_sci': return `omni_str_sci(${a[0]}, ${a[1]})`;
       case 'to_string': return `omni_str_${e.argType.k}(${a[0]})`;
       case 'to_string_g': return `omni_str_realg(${a[0]}, ${a[1]})`;
       case 'trunc': return `omni_trunc(${a[0]})`;

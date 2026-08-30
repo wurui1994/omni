@@ -1,0 +1,11 @@
+// `(ssci E N)` 的位数越界（第三十刀）。与 `sfix` 同一条：范围 0..30，字面量当场判、
+// 一段表达式落到运行期，四份实现（$str_sci、omni_str_sci、两个解释器共用的 fmtSci
+// 那一处调用点）**同一句话**。
+//
+// 这一份量的就是那句话：五条腿都得报 `ssci precision out of range: 40 (0..30)`。
+// 与 rt/sfix-range 是一对 —— 两条边界各自有自己的名字，不共用一句（诊断要指得准）。
+int main() {
+    int n = 40;
+    printf("%.*e\n", n, 1.5);
+    return 0;
+}

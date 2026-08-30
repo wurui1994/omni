@@ -25,6 +25,13 @@ omni_str omni_str_fixed(double v, int64_t p) {
   return omni_str_fmt("%.*f", (int)p, v);
 }
 
+/* `(ssci E N)`：C 的 `%.Ne`（第三十刀）。与上面同一条 —— 这一行就是那四条腿照着写的出处
+   （指数至少两位、一定带符号、进位顶到下一格时指数加一，全是 C 库自己给的）。 */
+omni_str omni_str_sci(double v, int64_t p) {
+  if (p < 0 || p > 30) omni_errorf("ssci precision out of range: %lld (0..30)", (long long)p);
+  return omni_str_fmt("%.*e", (int)p, v);
+}
+
 omni_str omni_str_bool(bool v) { return omni_str_new(v ? "true" : "false", v ? 4 : 5); }
 omni_str omni_str_string(omni_str v) { return v; }
 

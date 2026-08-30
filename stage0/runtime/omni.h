@@ -132,6 +132,8 @@ omni_str omni_str_real(double v);
 omni_str omni_str_realg(double v, int64_t p);
 /* `(sfix E N)`：C 的 %.Nf（ADR-0016 第八刀）。位数在方言那一层限死 0..30。 */
 omni_str omni_str_fixed(double v, int64_t p);
+/* `(ssci E N)`：C 的 %.Ne（第三十刀）。位数同上 0..30。 */
+omni_str omni_str_sci(double v, int64_t p);
 omni_str omni_str_bool(bool v);
 omni_str omni_str_string(omni_str v);
 omni_str omni_repr_real(double v);
