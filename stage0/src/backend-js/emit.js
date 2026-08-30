@@ -24,8 +24,13 @@ const jsElemCopy = (t) => (t.elem.k === 'vec' ? 'true' : 'false');
 const jsPtrAddr = (code, t) => (t.k === 'tptr' ? code : `${code}[0]`);
 const jsPtrChk = (self, p, size) => (p.type.k === 'tptr'
   ? `$tchk(${self.expr(p)})` : `$pchk(${self.expr(p)}, ${size})`);
-const jsPtrLoad = (t) => (t.k === 'int' ? '$pload_i' : (t.k === 'real' ? '$pload_r' : '$pload_b'));
-const jsPtrStore = (t) => (t.k === 'int' ? '$pstore_i' : (t.k === 'real' ? '$pstore_r' : '$pstore_b'));
+// 目标类型是**指针自己**时，读写的是三个字（fat）或一个字（thin）——
+// 见 prelude 的 $pload_p / $pload_t（ADR-0016 第十六刀）。
+const jsPtrLoad = (t) => (t.k === 'int' ? '$pload_i' : (t.k === 'real' ? '$pload_r'
+  : (t.k === 'ptr' ? '$pload_p' : (t.k === 'tptr' ? '$pload_t' : '$pload_b'))));
+const jsPtrStore = (t) => (t.k === 'int' ? '$pstore_i' : (t.k === 'real' ? '$pstore_r'
+  : (t.k === 'ptr' ? '$pstore_p' : (t.k === 'tptr' ? '$pstore_t' : '$pstore_b'))));
+
 
 class JsEmitter {
   constructor(mod) {

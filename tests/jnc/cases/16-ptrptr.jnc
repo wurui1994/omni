@@ -1,0 +1,108 @@
+// 指针的地址（ADR-0016 第十六刀）：`int**`、`&p`、`new int*[n]`、写回调用方那一格。
+//
+// 这一刀是**方言长出来的一格**：以前 `ptrTargetOk` 不放行"指针指向指针"，理由是 fat 指针
+// 自己（三个字 {addr, base, end}）落不进内存。现在它落得进：24 字节、对齐 8，三个字的次序
+// 五条腿一致（JS 那条腿写 arena 偏移、C 那条腿写真地址，值不同但格子数与次序相同）。
+// 于是这一层只改了一个字：`liftable` 也收指针 —— `&p` 与第九刀的 `&x` 走同一条路，
+// 把 p 提到一格 `(pnew (ptr (ptr int)) (int 1))` 上。
+//
+// 期望输出的出处：**C**，下面这一份 `cc -O0` 编出来的程序，逐字节相同。C 那份用 calloc 是
+// 为了对上 jancy 的零初始化（`new int[3]` 是零，"Jancy compiler zeros every variable before
+// any user code can touch it"）。
+//
+//   #include <stdio.h>
+//   #include <stdlib.h>
+//   void reset(int** pp) { *pp = 0; }
+//   void bind(int** pp, int* q) { *pp = q; }
+//   void swapp(int** a, int** b) {
+//       int* t = *a;
+//       *a = *b;
+//       *b = t;
+//   }
+//   int main() {
+//       int* p = calloc(3, sizeof(int));
+//       p[0] = 10; p[1] = 20; p[2] = 30;
+//       int** pp = &p;
+//       printf("via=%d %d\n", **pp, (*pp)[2]);
+//       *pp = p + 1;
+//       printf("moved=%d\n", *p);
+//       p = p - 1;
+//       int* q = calloc(1, sizeof(int));
+//       *q = 7;
+//       bind(&p, q);
+//       printf("bound=%d %d\n", *p, p == q);
+//       int* r = calloc(2, sizeof(int));
+//       r[0] = 100; r[1] = 200;
+//       swapp(&p, &r);
+//       printf("swapped=%d %d\n", *p, *r);
+//       int*** ppp = &pp;
+//       printf("three=%d\n", ***ppp);
+//       int** table = calloc(2, sizeof(int*));
+//       printf("zero=%d\n", table[0] == 0);
+//       table[0] = q;
+//       table[1] = r;
+//       printf("table=%d %d\n", *table[0], *table[1]);
+//       *table[1] = 55;
+//       printf("through=%d\n", r[0]);
+//       reset(&p);
+//       printf("null=%d\n", p == 0);
+//       return 0;
+//   }
+void reset(int** pp) {
+    *pp = null;
+}
+
+void bind(int** pp, int* q) {
+    *pp = q;
+}
+
+void swapp(int** a, int** b) {
+    int* t = *a;
+    *a = *b;
+    *b = t;
+}
+
+int main() {
+    int* p = new int[3];
+    p[0] = 10;
+    p[1] = 20;
+    p[2] = 30;
+
+    // 取一个指针的地址
+    int** pp = &p;
+    printf("via=%d %d\n", **pp, (*pp)[2]);
+
+    // 经它改 p 自己（不是改 p 指的那一格）
+    *pp = p + 1;
+    printf("moved=%d\n", *p);
+    p = p - 1;
+
+    // 出参：被调把新指针写回调用方那一格
+    int* q = new int[1];
+    *q = 7;
+    bind(&p, q);
+    printf("bound=%d %d\n", *p, p == q);
+
+    int* r = new int[2];
+    r[0] = 100;
+    r[1] = 200;
+    swapp(&p, &r);
+    printf("swapped=%d %d\n", *p, *r);
+
+    // 三层
+    int*** ppp = &pp;
+    printf("three=%d\n", ***ppp);
+
+    // 一排指针：`new int*[2]`，刚出来那两格都是空指针
+    int** table = new int*[2];
+    printf("zero=%d\n", table[0] == null);
+    table[0] = q;
+    table[1] = r;
+    printf("table=%d %d\n", *table[0], *table[1]);
+    *table[1] = 55;
+    printf("through=%d\n", r[0]);
+
+    reset(&p);
+    printf("null=%d\n", p == null);
+    return 0;
+}

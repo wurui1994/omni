@@ -34,7 +34,7 @@ import { lowerToMir } from './from_oir.js';
 import { verifyMir } from './verify.js';
 import {
   OP, OP_NAMES, REF_NONE, REF_BIAS, isConstRef, typeKind, typeLanes,
-  T_I64, T_F64, T_STR, T_DYN, T_TPTR, CVT_I2F, CVT_BOX,
+  T_I64, T_F64, T_STR, T_DYN, T_PTR, T_TPTR, CVT_I2F, CVT_BOX,
 } from './ir.js';
 
 /** 常量池条目 -> 宿主值。int 是 BigInt（ADR-0005 的 i64），real 是 number。 */
@@ -88,6 +88,20 @@ function kindOf(t) {
   if (t === T_STR) return 'string';
   if (t === T_DYN) return 'dynamic';
   return 'other';
+}
+
+/**
+ * PLOAD / PSTORE 的**目标**类型码 -> ptrLoad/ptrStore 收的 kind（ADR-0016）。
+ * 与 kindOf 分开一份：这里的"其余"是 bool（内存里只有那四种加两种指针），
+ * 而 kindOf 的"其余"是"不是那四种标量"，两处的默认值不是一回事。
+ * 指针自己也能当目标（第十六刀）：T_PTR 是三个字、T_TPTR 是一个字。
+ */
+function memKind(t) {
+  if (t === T_I64) return 'int';
+  if (t === T_F64) return 'real';
+  if (t === T_PTR) return 'ptr';
+  if (t === T_TPTR) return 'tptr';
+  return 'bool';
 }
 
 /** 缺席实参的零值。这里只有类型码，所以按码给 —— 真正带类型的零值走 zeroOf。 */
@@ -444,7 +458,7 @@ class MirInterp {
       }
       case OP.PLOAD: {
         const p = rd(f.a[i]);
-        const kind = kindOf(t) === 'other' ? 'bool' : kindOf(t);
+        const kind = memKind(t);
         const thin = this.ptrIsThin(f, f.a[i]);
         return (F) => {
           const v = p(F);
@@ -455,7 +469,7 @@ class MirInterp {
       case OP.PSTORE: {
         const p = rd(f.a[i]);
         const v = rd(f.b[i]);
-        const kind = kindOf(t) === 'other' ? 'bool' : kindOf(t);
+        const kind = memKind(t);
         const thin = this.ptrIsThin(f, f.a[i]);
         return (F) => {
           const q = p(F);

@@ -79,10 +79,15 @@ export function arrType(elem) { return { k: 'arr', elem }; }
  * **值语义**（所以 isRef 里没有它）：指针本身是一串数，赋值就是把那三个字（或一个字）
  * 抄一份；被指向的那块内存才是共享的。这与 vec 同一档。
  *
- * `target` 这一刀收的：int / real / bool 与结构体。不收的与理由：
+ * `target` 收的：int / real / bool、结构体，与**指针自己**（`(ptr (ptr T))` / `(ptr (tptr T))`，
+ * ADR-0016 第十六刀）。不收的与理由：
  *   - string / arr / buf / class / fn 在这一层是**宿主句柄**（JS 侧是对象，C 侧是指针），
- *     它们没有"一段可寻址的字节"这回事，指到它们身上没有意义；
- *   - `(ptr (ptr T))` 要等 fat 指针自己能落进内存（三字的布局），第一刀先不开。
+ *     它们没有"一段可寻址的字节"这回事，指到它们身上没有意义。
+ *
+ * 指针自己的**存储**布局（第十六刀长出来的那一格）：fat 是三个字 24 字节、对齐 8，
+ * thin 是一个字 8 字节。三个字的次序就是 `{addr, base, end}`，五条腿里都一样 ——
+ * JS 那条腿写的是 arena 里的偏移、C 那条腿写的是真地址，值不同但**格子数与次序相同**，
+ * 所以 `(psub p q)`、结构体字段偏移这些按字节算的东西在两套实现里对得上。
  */
 export function ptrType(target) { return { k: 'ptr', target }; }
 export function tptrType(target) { return { k: 'tptr', target }; }
@@ -91,7 +96,8 @@ export function tptrType(target) { return { k: 'tptr', target }; }
  * 指针能指向的类型吗（上面那段注释里的那张名单）。
  */
 export function ptrTargetOk(t) {
-  return t.k === 'int' || t.k === 'real' || t.k === 'bool' || t.k === 'struct';
+  return t.k === 'int' || t.k === 'real' || t.k === 'bool' || t.k === 'struct'
+    || t.k === 'ptr' || t.k === 'tptr';
 }
 
 /**
@@ -110,6 +116,8 @@ export function ptrTargetOk(t) {
 export function alignOf(t) {
   if (t.k === 'bool') return 1;
   if (t.k === 'int' || t.k === 'real') return 8;
+  // 指针自己落进内存时（第十六刀）：两种指针都按字对齐，fat 是三个字、thin 是一个字。
+  if (t.k === 'ptr' || t.k === 'tptr') return 8;
   if (t.k === 'struct') {
     let a = 1;
     for (const f of t.fields) a = Math.max(a, alignOf(f.type));
@@ -121,6 +129,9 @@ export function alignOf(t) {
 export function sizeOf(t) {
   if (t.k === 'bool') return 1;
   if (t.k === 'int' || t.k === 'real') return 8;
+  if (t.k === 'ptr') return 24;
+  if (t.k === 'tptr') return 8;
+
   if (t.k === 'struct') {
     const l = structLayout(t);
     return l === null ? 0 : l.size;

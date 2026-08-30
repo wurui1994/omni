@@ -815,6 +815,44 @@ jancy 的命名空间成员**不看顺序**：解析那一遍只把名字登记�
 **没跑的**：`tests/asy` 全部（这一刀只碰 `frontend-jnc/lower.js`）、`sweep.js`、`svg.js`、自举、
 `tests/jit`、`tests/mir`、`tests/llvm`。`npm run lint` 这台机器上没有 typescript，跑不了。
 
+### 第十六刀：指针的地址 —— 这一次是**方言**长出来的一格
+
+前十五刀方言一个字没改。这一刀改了：`(ptr T)` 的 T 以前不收指针，理由记在 `ptrTargetOk` 上 ——
+"fat 指针自己（三个字）落不进内存"。现在它落得进。
+
+**长出来的东西只有布局那一句。** `hir/types.js`：`ptrTargetOk` 放行 `ptr` / `tptr`，
+`sizeOf(ptr) = 24`、`sizeOf(tptr) = 8`、两者 `alignOf = 8`。三个字的次序就是 `{addr, base, end}`，
+五条腿一致 —— JS 与两个解释器写的是 arena 里的偏移、C 与 LLVM 写的是真地址，**值不同但格子数
+与次序相同**，所以按字节算的东西（`psub`、结构体字段偏移）在两套实现里对得上。
+
+**五条腿各加一格读写**：
+- `backend-js`：`$pload_p` / `$pstore_p`（三个 `getBigInt64` / `setBigInt64`，读回来转 Number ——
+  这条腿的三元组里放的是 Number）、`$pload_t` / `$pstore_t`（一个字）。
+- 两个解释器：`interp/builtin.js` 的 `ptrLoad` / `ptrStore` 各加 `ptr` / `tptr` 两个 kind；
+  `mir/interp.js` 里 PLOAD/PSTORE 的 kind 从 `kindOf`（那一份的"其余"是"不是四种标量"）换成
+  新的 `memKind`（这一份的"其余"是 bool）——**两处的默认值本来就不是一回事**，混用是个坑。
+- C 与 LLVM：**一个字没改**。`cTypeName(ptr)` 早就是 `omni_ptr`，C 里结构体之间有赋值；
+  LLVM 那边 `T_PTR` 是 `{ ptr, ptr, ptr }` 的一等聚合值，`load` / `store` 直接吃它。
+
+**jnc 那一侧也只改了一个字**：`liftable` 也收指针。于是 `&p` 与第九刀的 `&x` 走同一条路
+（把 p 提到一格 `(pnew (ptr (ptr int)) (int 1))` 上），`int**` / `int***` / `**pp` / `*pp = q` /
+`new int*[n]` / 把 `&p` 当出参传，全都跟着落地 —— 一条新规则都没写。
+
+**顺带落地的一格：结构体的指针字段** 还**没有**开——`(struct S (p (ptr int)))` 撞的是
+`sexpr/lower.js` 里字段类型那张白名单，与 `ptrTargetOk` 是两处闸门。链表那一族（`Node* m_next`）
+要的是它，单列一刀。
+
+**期望输出的出处**：两处。方言那一层是 `tests/sexpr/cases/30-ptrptr.sx`（17 行，五条腿逐字节
+相同）—— 其中最硬的一条是 `psub`：它跨块是**运行期错误**，指针从内存里读回来之后 psub 不报错，
+说明三个字（不只是地址那一个）都回来了。jancy 那一层是 `cases/16-ptrptr.jnc`，9 行，出处是
+一份 `cc -O0` 的 C 程序（用 `calloc` 对上 jancy 的零初始化）。
+
+**跑过的轴**：`tests/sexpr`（64/0，新增 `cases/30-ptrptr`）、`tests/jnc`（28/0，新增
+`cases/16-ptrptr`）、`tests/glr`（20/0）、`tests/asy/run.js`（这一刀动了**共享**的类型层与两个
+解释器，所以那条轴这次必须跑，不能像前七刀那样以"只碰 frontend-jnc"为由跳过）。
+**没跑的**：`tests/asy` 的 `sweep.js` 与 `svg.js`、自举、`tests/jit`、`tests/mir`、`tests/llvm`。
+`npm run lint` 这台机器上没有 typescript，跑不了。
+
 ## 后果与代价
 
 - 方言从"没有可算术的引用"变成"有"。这一格会渗到 MIR 与四个后端，改不回去。

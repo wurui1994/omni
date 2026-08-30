@@ -1,0 +1,69 @@
+;; 指针指向指针（ADR-0016 第十六刀）—— 方言这一层新长出来的那一格：**fat 指针自己能落进
+;; 内存**。三个字 {addr, base, end} 24 字节、对齐 8；thin 是一个字 8 字节。
+;;
+;; 期望输出的出处（这一路**没有 oracle**，每一条都注明来源）：
+;;   - `pnew` 出来的那块是零初始化的：type_ptr_data.rst"Jancy compiler zeros every variable
+;;     before any user code can touch it" —— 于是一格全零的 fat 指针**就是**空指针（pisnull 真）
+;;   - 范围跟着**块**走、不跟着指针走（同一份文档里 validator 那一段）：所以指针从内存里
+;;     读回来之后 `psub` 还认它 —— psub 跨块是运行期错误，它不报错本身就是"三个字都回来了"
+;;   - `psub` 按元素而不是字节：C 的指针差语义，jancy 没改这一条
+;;
+;; 刻意**不印任何裸地址**：地址在 JS（arena 偏移）与 C（真指针）两套实现里不一样。
+(module
+  ;; 指针穿过函数：形参是 `(ptr (ptr int))`，改的是被指向的那一格
+  (fn point ((pp (ptr (ptr int))) (q (ptr int))) void
+    (pstore (var pp) (var q)))
+
+  (main
+    (let a (ptr int) (pnew (ptr int) (int 3)))
+    (pstore (var a) (int 10))
+    (pstore (padd (var a) (int 1)) (int 20))
+    (pstore (padd (var a) (int 2)) (int 30))
+
+    ;; 一格能放指针的内存：刚出来是零，也就是空指针
+    (let pp (ptr (ptr int)) (pnew (ptr (ptr int)) (int 2)))
+    (print (pisnull (pload (var pp))))
+    (print (pisnull (pload (padd (var pp) (int 1)))))
+
+    ;; 存进去、读回来、解两次
+    (pstore (var pp) (var a))
+    (print (pload (pload (var pp))))
+    (print (pload (padd (pload (var pp)) (int 2))))
+
+    ;; 读回来的是**同一个**指针：地址相等，而 psub 不报"跨块"说明 base/end 也回来了
+    (print (peq (pload (var pp)) (var a)))
+    (print (psub (pload (var pp)) (var a)))
+    (print (psub (padd (pload (var pp)) (int 2)) (var a)))
+
+    ;; 经它写回去：动的是 a 那一块
+    (pstore (pload (var pp)) (int 99))
+    (print (pload (var a)))
+
+    ;; 一排指针：第二格指到 a 的第二个元素上
+    (pstore (padd (var pp) (int 1)) (padd (var a) (int 1)))
+    (print (pload (pload (padd (var pp) (int 1)))))
+    (print (peq (pload (var pp)) (pload (padd (var pp) (int 1)))))
+
+    ;; 穿过函数：被调把自己那格指针写进调用方给的那一格
+    (let b (ptr int) (pnew (ptr int) (int 1)))
+    (pstore (var b) (int 7))
+    (expr (call point (var pp) (var b)))
+    (print (pload (pload (var pp))))
+    (print (peq (pload (var pp)) (var b)))
+
+    ;; 三层：指向"指向指针的指针"
+    (let ppp (ptr (ptr (ptr int))) (pnew (ptr (ptr (ptr int))) (int 1)))
+    (pstore (var ppp) (var pp))
+    (print (pload (pload (pload (var ppp)))))
+
+    ;; 空指针写进去再读回来，还是空的
+    (pstore (var pp) (pnull (ptr int)))
+    (print (pisnull (pload (var pp))))
+
+    ;; 一格能放 thin 指针的内存：一个字（thin 只在 unsafe 里可达）
+    (unsafe
+      (let tp (ptr (tptr int)) (pnew (ptr (tptr int)) (int 1)))
+      (print (pisnull (pload (var tp))))
+      (pstore (var tp) (pthin (var a)))
+      (print (pload (pload (var tp))))
+      (print (pload (padd (pload (var tp)) (int 2)))))))

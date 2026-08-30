@@ -383,15 +383,27 @@ export function ptrTChk(a) {
   return a;
 }
 
+// kind 是**目标类型**的 k。指针自己也能当目标（ADR-0016 第十六刀）：fat 是三个字
+// {addr, base, end}、thin 是一个字，次序与 hir/types.js 那段注释里定的一样。
 export function ptrLoad(kind, a) {
   if (kind === 'int') return ptrDv.getBigInt64(a, true);
   if (kind === 'real') return ptrDv.getFloat64(a, true);
+  if (kind === 'ptr') {
+    return [Number(ptrDv.getBigInt64(a, true)), Number(ptrDv.getBigInt64(a + 8, true)),
+      Number(ptrDv.getBigInt64(a + 16, true))];
+  }
+  if (kind === 'tptr') return Number(ptrDv.getBigInt64(a, true));
   return ptrDv.getUint8(a) !== 0;
 }
 
 export function ptrStore(kind, a, v) {
   if (kind === 'int') ptrDv.setBigInt64(a, W(v), true);
   else if (kind === 'real') ptrDv.setFloat64(a, v, true);
+  else if (kind === 'ptr') {
+    ptrDv.setBigInt64(a, BigInt(v[0]), true);
+    ptrDv.setBigInt64(a + 8, BigInt(v[1]), true);
+    ptrDv.setBigInt64(a + 16, BigInt(v[2]), true);
+  } else if (kind === 'tptr') ptrDv.setBigInt64(a, BigInt(v), true);
   else ptrDv.setUint8(a, v ? 1 : 0);
   return v;
 }

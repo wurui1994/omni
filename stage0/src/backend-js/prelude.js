@@ -90,9 +90,25 @@ function $tchk(a) {
 function $pload_i(a) { return $mdv.getBigInt64(a, true); }
 function $pload_r(a) { return $mdv.getFloat64(a, true); }
 function $pload_b(a) { return $mdv.getUint8(a) !== 0; }
+// 指针自己落进内存（ADR-0016 第十六刀）：fat 是三个字 {addr, base, end}，次序与
+// hir/types.js 那段注释里定的一样；thin 是一个字。存的是 arena 里的偏移，所以读回来
+// 要转成 Number —— 这条腿的三元组里放的就是 Number。
+function $pload_p(a) {
+  return [Number($mdv.getBigInt64(a, true)), Number($mdv.getBigInt64(a + 8, true)),
+    Number($mdv.getBigInt64(a + 16, true))];
+}
+function $pload_t(a) { return Number($mdv.getBigInt64(a, true)); }
 function $pstore_i(a, v) { $mdv.setBigInt64(a, $W(v), true); }
 function $pstore_r(a, v) { $mdv.setFloat64(a, v, true); }
 function $pstore_b(a, v) { $mdv.setUint8(a, v ? 1 : 0); }
+function $pstore_p(a, p) {
+  $mdv.setBigInt64(a, BigInt(p[0]), true);
+  $mdv.setBigInt64(a + 8, BigInt(p[1]), true);
+  $mdv.setBigInt64(a + 16, BigInt(p[2]), true);
+  return p;
+}
+function $pstore_t(a, v) { $mdv.setBigInt64(a, BigInt(v), true); return v; }
+
 function $psub(p, q, size) {
   if (p[1] !== q[1] || p[2] !== q[2]) $rt_error("pointer difference across different blocks");
   return BigInt((p[0] - q[0]) / size);

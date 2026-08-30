@@ -203,7 +203,7 @@ class CoreLowerer {
       if (t === null) return null;
       if (!ptrTargetOk(t)) {
         return this.err(node, `${what}：(${head(node)} T) 的 T 只能是 int / real / bool /`
-          + ` 结构体名，这里是 ${coreTypeText(t)}`);
+          + ` 结构体名 / 另一个指针，这里是 ${coreTypeText(t)}`);
       }
       if (t.k === 'struct' && structLayout(t) === null) {
         return this.err(node, `${what}：结构体 '${t.name}' 里有落不进内存的字段，`
