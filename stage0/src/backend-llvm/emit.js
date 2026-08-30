@@ -943,6 +943,11 @@ class LlvmEmitter {
     // 函数值字段（闭包）：也只存一个指针 —— 指向那条 `%clo_<n>` 记录，第 0 格是函数指针
     // （见 closureTypes）。与"类字段"同一条：引用语义，COPY 拷的是句柄。
     if (t.k === 'fn') return 'ptr';
+    // 指针字段（第十七刀之后）：与这条腿别处的指针表示同一个 —— fat 是那个一等聚合
+    // `{addr, base, end}`（LL 表里 T_PTR 那一条），thin 是一个不透明指针。都是**值**，
+    // 所以 COPY 那条 `load %s_S` / `store %s_S` 把三个字一起搬走，不用另写一条。
+    if (t.k === 'ptr') return '{ ptr, ptr, ptr }';
+    if (t.k === 'tptr') return 'ptr';
     throw new OmniError(`${NOPE}结构体字段的类型 ${t.k}：${what}`);
   }
 
@@ -993,6 +998,10 @@ class LlvmEmitter {
     // 函数值字段：零值也是空引用（与 fieldTy 里那条对应）。调它是未定义行为，
     // 与"调一个空的类引用取字段"同一级 —— 那条也没有运行时检查。
     if (t.k === 'fn') return 'null';
+    // 指针字段的零 = 空指针。fat 的三个字全零就是它（PNULL 那条发的 insertvalue 折出来
+    // 也是这个常量），thin 就是 null —— 这里在常量位置，不必借 SSA 那两条指令。
+    if (t.k === 'ptr') return 'zeroinitializer';
+    if (t.k === 'tptr') return 'null';
     throw new OmniError(`${NOPE}结构体字段的零值 ${t.k}：${what}`);
   }
 

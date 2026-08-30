@@ -660,6 +660,10 @@ class CEmitter {
       case 'struct': return `omni_new_S_${t.name}()`;
       case 'enum': return `omni_new_E_${t.name}()`;
       case 'class': case 'fn': return 'NULL';
+      // 指针字段的零（第十七刀）：与裸的 PtrNull 同一条 —— fat 是 omni_pnull()（三个字都零），
+      // thin 是一个空的 char*。链表那一族要它：`(struct Node (next (ptr Node)))`。
+      case 'ptr': return 'omni_pnull()';
+      case 'tptr': return '((char *)0)';
       case 'dynamic': return 'omni_dyn_null()';
       case 'list': case 'dict': case 'set': return `${cTypeName(t)}_new()`;
       // 向量（第十五刀：结构体的向量字段）。走逐形状生成的 `_splat` —— 与裸的

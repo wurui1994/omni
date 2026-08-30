@@ -44,7 +44,10 @@
 // 签名在 run 里先过一遍，见 fnSig）、
 // **指针的地址**（`int**` / `int***` / `&p` / `**pp` / `*pp = q` / `new int*[n]` /
 // 把 `&p` 当出参传 —— 这一格是**方言**长出来的：fat 指针自己现在落得进内存，见
-// hir/types.js 的 ptrTargetOk 与 sizeOf；这一层只有 liftable 多收了两种）。
+// hir/types.js 的 ptrTargetOk 与 sizeOf；这一层只有 liftable 多收了两种）、
+// **结构体的指针字段**（`Node* m_next` / `n->next->val` / `&c[i]` / 链表 ——
+// 又是方言长出来的一格：字段类型那张白名单收了指针，而 `Node*` 要在 Node 自己的体里
+// 查得着，所以这一层的结构体名字也"先坐下、字段后填"，见 typeName）。
 //
 // ## 纪律：**jancy 不向方言妥协**
 //
@@ -56,9 +59,10 @@
 // 前者照 jancy 自己的办法把局部量提到堆上，后者就是一段 `pnew` 出来的内存，两刀方言都没动。
 // 结构体那两刀（值语义、按值传与按值回）也在同一条上：一格结构体就是一段 `pnew` 的内存，
 // 「抄一份」是逐字段的 pload/pstore，而按值传把那一下挪到被调那一侧就不用动调用约定。
-// **第十六刀是真的动了方言**：`int**` 要 fat 指针自己能落进内存，那是布局那一层的事，
-// 这一层拆不开 —— 于是 `ptrTargetOk` 放行了指针、`sizeOf` 上多了 24 与 8 两格，
-// 五条腿各加一格读写（C 与 LLVM 一个字没改）。这一条正是这份纪律说的"动方言"。
+// **第十六刀与第十七刀是真的动了方言**：`int**` 要 fat 指针自己能落进内存、`Node* m_next`
+// 要指针能躺在结构体的字段里，那都是布局那一层的事，这一层拆不开 —— 于是 `ptrTargetOk`
+// 放行了指针、`sizeOf` 上多了 24 与 8 两格、字段类型那张白名单收了两种指针，五条腿各加
+// 一格读写与一格零值。这两条正是这份纪律说的"动方言"。
 //
 // 还没长出来、因此**当场报错**的（每一条都记着该怎么长，不是"不收"）：
 //   - `%*d`（宽度从实参来）—— 那要在运行期才知道宽度，与"格式串必须是字面量"同一处边界。
@@ -67,8 +71,10 @@
 //   - `unsigned` —— 要无符号那一半的位宽规则：回卷变成 `x & M`（不摊符号位），
 //     `/` `%` `>>` `<` 都得换成无符号那一版。以前是静默忽略的，现在明着拒
 //     （见 tests/jnc/bad/unsigned.jnc）。
-//   - 结构体的**指针字段**（`Node* m_next`）—— 撞的是 `sexpr/lower.js` 里字段类型那张白名单，
-//     与 `ptrTargetOk` 是两处闸门；自引用（链表）还要一格"先占名字后填字段"的机制。
+//   - **直接内嵌**的结构体字段仍旧只收前面声明过的那个（`struct Seg { Point a; }` 写在
+//     `struct Point` 之前会被方言拒）—— jancy 那边名字不看顺序，所以这是一条真差别。
+//     要补的是方言那一侧"内嵌的零值按拓扑序铺"，与第十七刀开的指针字段是两回事：
+//     指针是三个字、与目标布局无关，内嵌是真的内嵌。
 //   - 数组那一族里剩下的四条，要的是**另一格**方言：`(ptr T)` 的 T 能是"一段 N 格的定长
 //     内存"（第十六刀开的是"T 能是指针"，两回事）。多维数组 `int a[10][20]`（元素是
 //     `int[20]`）、数组之间的赋值（**jancy 自己也只在常量折叠那条路上有** ——
@@ -553,6 +559,10 @@ class JncLower {
    */
   run(tree) {
     const items = this.flat(tree);
+    // 结构体的名字先坐下（第十七刀）：`Node* m_next` 要在自己的体里查得着 Node。
+    for (const it of items) {
+      if (isList(it) && head(it) === 'type-decl') this.typeName(it.items[1]);
+    }
     for (const it of items) {
       if (isList(it) && head(it) === 'type-decl') this.typeDecl(it.items[1]);
     }
@@ -721,7 +731,21 @@ class JncLower {
   }
 
   /** `struct S { … }`。jancy 的 struct 是**值**类型（POD），所以降成方言的 `(struct …)`
-   *  而不是 `(class …)` —— 与 asy 那边恰好相反（asy 的 struct 是引用类型，量过）。 */
+   *  而不是 `(class …)` —— 与 asy 那边恰好相反（asy 的 struct 是引用类型，量过）。
+   *
+   *  名字与字段分成两遍（第十七刀）：`Node* m_next` 要在 Node 自己的体里就查得着
+   *  Node。所以先把每个名字连着一个**空的**字段数组坐下（typeName），再原地填 ——
+   *  memberOf 是在函数体降级的时候才查这张表的，那时候早填完了。 */
+  typeName(n) {
+    if (!isList(n) || head(n) !== 'agg') return null;      // 下面那一遍报
+    if ((isAtom(n.items[1]) ? n.items[1].value : null) !== 'struct') return null;
+    const name = this.qname(n.items[2]);
+    if (name === null) return null;
+    if (this.structs.has(name)) return this.err(n, `结构体 '${name}' 声明了两次`);
+    this.structs.set(name, []);
+    return null;
+  }
+
   typeDecl(n) {
     if (!isList(n) || head(n) !== 'agg') return this.nope(n, '带体的命名类型（只收 struct）');
     const key = isAtom(n.items[1]) ? n.items[1].value : null;
@@ -730,7 +754,8 @@ class JncLower {
     if (name === null) return this.err(n, '认不出的结构体名字');
     const bases = this.flat(n.items[3]);
     if (bases.length > 0) return this.nope(n, '结构体的基类');
-    const fields = [];
+    const fields = this.structs.get(name);
+    if (fields === undefined || fields.length > 0) return null;   // 上一遍已经报过重复了
     for (const m of this.flat(n.items[4])) {
       if (isList(m) && head(m) === 'empty-stmt') continue;
       if (!isList(m) || head(m) !== 'var-decl') { this.nope(m, '结构体里除字段以外的成员'); continue; }
@@ -747,8 +772,6 @@ class JncLower {
         fields.push({ name: info.name, type: info.type });
       }
     }
-    if (this.structs.has(name)) return this.err(n, `结构体 '${name}' 声明了两次`);
-    this.structs.set(name, fields);
     const fs = fields.map((f) => `(${f.name} ${tyText(f.type)})`).join(' ');
     this.decls.push(`  (struct ${name} ${fs})`);
     return null;

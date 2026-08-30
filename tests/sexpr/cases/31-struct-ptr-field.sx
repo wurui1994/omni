@@ -1,0 +1,54 @@
+;; 结构体的**指针字段**（ADR-0016 第十七刀）—— 方言这一层新长出来的那一格：字段类型那张
+;; 白名单收 `(ptr T)` / `(tptr T)`。它与第十六刀的 ptrTargetOk 是**两处**闸门：那一刀开的是
+;; "指针能指向指针"，这一刀开的是"指针能躺在结构体里"。
+;;
+;; 顺带落地的是"名字先坐下、字段后填"：`(struct Node (next (ptr Node)))` 里的 Node 得在自己
+;; 的体里查得着。**直接内嵌**仍旧只收前面声明过的那个（tests/sexpr/bad/struct-self.sx 与
+;; struct-fwd.sx 钉着）—— 指针不受这一条：它是三个字，与目标的布局无关，零值是空指针。
+;;
+;; 期望输出的出处（这一路没有 oracle，逐条注明）：
+;;   - `pnew` 出来的那块是零初始化的（type_ptr_data.rst），所以刚出来的 next 是空指针
+;;   - 结构体是**值语义**（ADR-0005）：复制把指针那三个字一起抄走，于是两份的 next 指同一格
+;;   - 两条腿的字段偏移都从 hir/types.js 的 structLayout 来（int 8 字节、fat 指针 24 字节）
+;;
+;; 刻意不印任何裸地址：JS 那条腿是 arena 偏移、C 那条腿是真指针。
+(module
+  (struct Node (val int) (next (ptr Node)))
+
+  ;; 顺着链子走一遍。形参是 `(ptr Node)`，`(pisnull …)` 判到头没到头
+  (fn total ((n (ptr Node))) int
+    (let s int (int 0))
+    (let p (ptr Node) (var n))
+    (while (un "!" (pisnull (var p)))
+      (do
+        (set s (bin "+" (var s) (pload (pfield (var p) val))))
+        (set p (pload (pfield (var p) next)))))
+    (ret (var s)))
+
+  (main
+    ;; 一排三格：`(padd …)` 走到第 i 格，`(pfield … next)` 是那一格里的指针
+    (let c (ptr Node) (pnew (ptr Node) (int 3)))
+    (print (pisnull (pload (pfield (var c) next))))
+    (pstore (pfield (var c) val) (int 10))
+    (pstore (pfield (padd (var c) (int 1)) val) (int 20))
+    (pstore (pfield (padd (var c) (int 2)) val) (int 30))
+    (pstore (pfield (var c) next) (padd (var c) (int 1)))
+    (pstore (pfield (padd (var c) (int 1)) next) (padd (var c) (int 2)))
+    (print (call total (var c)))
+    ;; 隔两跳：next->next->val
+    (print (pload (pfield (pload (pfield (pload (pfield (var c) next)) next)) val)))
+
+    ;; 值语义那一侧：`(new Node)` 的零、`(fldset …)` 的写、`=` 的复制
+    (let t Node (new Node))
+    (print (pisnull (fld (var t) next)))
+    (fldset (var t) val (int 1))
+    (fldset (var t) next (var c))
+    (let u Node (var t))
+    (fldset (var u) val (int 2))
+    (print (fld (var t) val))
+    (print (fld (var u) val))
+    ;; 抄的是指针那三个字，所以两份指的是同一格 —— 经 u 写回去，t 那边也看得见
+    (print (peq (fld (var u) next) (fld (var t) next)))
+    (pstore (pfield (fld (var u) next) val) (int 99))
+    (print (pload (pfield (fld (var t) next) val)))
+    (print (call total (fld (var t) next)))))

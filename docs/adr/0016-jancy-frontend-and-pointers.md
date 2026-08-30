@@ -838,9 +838,9 @@ jancy 的命名空间成员**不看顺序**：解析那一遍只把名字登记�
 （把 p 提到一格 `(pnew (ptr (ptr int)) (int 1))` 上），`int**` / `int***` / `**pp` / `*pp = q` /
 `new int*[n]` / 把 `&p` 当出参传，全都跟着落地 —— 一条新规则都没写。
 
-**顺带落地的一格：结构体的指针字段** 还**没有**开——`(struct S (p (ptr int)))` 撞的是
-`sexpr/lower.js` 里字段类型那张白名单，与 `ptrTargetOk` 是两处闸门。链表那一族（`Node* m_next`）
-要的是它，单列一刀。
+**当时没顺带开的一格：结构体的指针字段。** `(struct S (p (ptr int)))` 撞的是 `sexpr/lower.js`
+里字段类型那张白名单，与 `ptrTargetOk` 是两处闸门。链表那一族（`Node* m_next`）要的是它 ——
+单列成了下面的第十七刀。
 
 **期望输出的出处**：两处。方言那一层是 `tests/sexpr/cases/30-ptrptr.sx`（17 行，五条腿逐字节
 相同）—— 其中最硬的一条是 `psub`：它跨块是**运行期错误**，指针从内存里读回来之后 psub 不报错，
@@ -850,6 +850,65 @@ jancy 的命名空间成员**不看顺序**：解析那一遍只把名字登记�
 **跑过的轴**：`tests/sexpr`（64/0，新增 `cases/30-ptrptr`）、`tests/jnc`（28/0，新增
 `cases/16-ptrptr`）、`tests/glr`（20/0）、`tests/asy/run.js`（这一刀动了**共享**的类型层与两个
 解释器，所以那条轴这次必须跑，不能像前七刀那样以"只碰 frontend-jnc"为由跳过）。
+**没跑的**：`tests/asy` 的 `sweep.js` 与 `svg.js`、自举、`tests/jit`、`tests/mir`、`tests/llvm`。
+`npm run lint` 这台机器上没有 typescript，跑不了。
+
+### 第十七刀：结构体的指针字段 —— 两处闸门里的第二处，与"名字先坐下"
+
+`Node* m_next`。这一刀方言又长了一格，但**不是**上一刀那一格：上一刀开的是"`(ptr T)` 的 T 能是
+指针"（`ptrTargetOk`），这一刀开的是"指针能躺在结构体的**字段**里"（`sexpr/lower.js` 的
+`structDec` 里那张白名单）。两处闸门是分开的，量过 —— 第十六刀落地之后
+`(struct Cell (link (ptr int)))` 仍旧被拒。
+
+**方言这一侧改了三处。** 一是字段白名单收 `ptr` / `tptr`。二是**结构体的名字也"先坐下、字段
+后填"**：`(struct Node (next (ptr Node)))` 里的 Node 要在自己的体里查得着，落法与类那一刀
+（第六十二刀的 `preClass`）同一套 —— 先给每个 `(struct …)` 建一格**空**的类型对象，再**原地**
+填字段数组，于是指针字段拿到的和后来填满的是同一个对象。三是那张"自己/后面"的诊断从
+`aggLater` 改问 `preStruct`（还没填字段的那些），因为名字先坐下之后 `this.structs.has(tn)`
+已经为真了。
+
+**为什么自引用在指针后面摊得开，直接内嵌却不行。** 指针是**三个字**，它的尺寸与目标的布局
+无关（`sizeOf(ptr) = 24`，`structLayout` 都不用问），零值是空指针 —— 没有递归。直接内嵌是真的
+内嵌，`(struct A (n A))` 的零值要铺一份 A 才能铺完 A。所以那一条约束**留着**，只是诊断多说了
+一句"隔一层指针可以"：`tests/sexpr/bad/struct-self.sx` 与 `struct-fwd.sx` 两条钉的还是这一半。
+
+**顺带补上的一个次序问题**：`(ptr S)` 收下来的那一刻 S 可能还空着（自引用），所以"S 里有落不
+进内存的字段（比如 `string`），指不到它身上"这一问在 `ty()` 里问不动了 —— 挪到所有结构体都填
+完之后补一遍。
+
+**五条腿各补一格零值**，读写一格都没加（`pfield` 回来的是 `(ptr (ptr T))`，`pload` 走的就是
+第十六刀那一格）：
+- C：`zeroExpr` 加 `ptr -> omni_pnull()` / `tptr -> ((char *)0)`。这条腿会为**每个**声明过的
+  结构体发一份 `omni_new_S_*`，所以哪怕源码里没写 `(new Node)` 也得有这一格 —— 那正是这一刀
+  第一次跑 `run-c` 时炸的地方（`c.zero: ptr`）。
+- LLVM：`fieldTy` 加 `ptr -> { ptr, ptr, ptr }` / `tptr -> ptr`，`fieldZero` 加
+  `zeroinitializer` / `null`。COPY 那条 `load %s_S` / `store %s_S` 把三个字一起搬走，
+  不用另写一条。
+- JS 与两个解释器：**一个字没改**。JS 那条腿有自己的 `zero`，两个解释器**共用** `interp/builtin.js`
+  的 `zeroOf`（`mir/interp.js` 是 import 过去的），而那两份里 `ptr -> [0,0,0]` / `tptr -> 0` 两条
+  **早就写着**了（注释上就写着"这一条是结构体的指针字段要的"）—— 上一刀铺路时顺手留下的，
+  这一刀才走到。顺带确认了一件事：JS 那条腿的 `$cp_S` 是**浅**拷（`{ f: v.f }`），指针字段因此
+  两份共用同一个三元组数组 —— 这没问题，因为 fat 指针在这条腿上**从不原地改**
+  （`$padd` / `$psub` / `$pstore_p` 都是回一个新数组），与 LLVM 那边"它是值类型"是同一条。
+
+**jnc 那一侧只多了一遍**：`typeName`（名字先坐下）。字段类型本来就走 `tyText`，`Node*` 写出来
+就是 `(ptr Node)`；`memberOf` 是在函数体降级时才查那张表的，那时候字段早填完了。于是
+`n->next->val`、`&c[i]`、循环里往头上插、`Node t = c[0]`（值语义的复制**连指针那三个字一起
+抄**，两份因此指同一格）全都跟着落地 —— 一条新规则都没写。
+
+**期望输出的出处**：两处。方言那一层是 `tests/sexpr/cases/31-struct-ptr-field.sx`（五条腿逐字节
+相同）；jancy 那一层是 `cases/17-linked.jnc`，出处是一份 `cc -O0` 的 C 程序（`calloc` 对上
+jancy 的零初始化），逐字节相同 —— 最有意思的一行是 `copy=10 77 1`：抄完之后两份的 `val` 各自
+一份、`next` 指同一格。
+
+**仍旧是一条真差别**：**直接内嵌**的结构体字段还要求"前面已经声明过"，而 jancy 的名字不看
+顺序（`struct Seg { Point a; }` 写在 `struct Point` 之前，我们拒、jancy 收）。要补的是方言那
+一侧"内嵌的零值按拓扑序铺"，与这一刀开的指针字段是两回事。量过了才写进边界表的：
+`/tmp/order.jnc` 上拒的那一句就是方言发出来的。
+
+**跑过的轴**：`tests/sexpr`（65/0，新增 `cases/31-struct-ptr-field`，两条 bad 的期望文字跟着
+诊断改了）、`tests/jnc`（29/0，新增 `cases/17-linked`）、`tests/glr`（20/0）、`tests/asy/run.js`
+（259/0，281.7s —— 这一刀动了**共享**的 `sexpr/lower.js` 与 C/LLVM 两个后端，所以那条轴必须跑）。
 **没跑的**：`tests/asy` 的 `sweep.js` 与 `svg.js`、自举、`tests/jit`、`tests/mir`、`tests/llvm`。
 `npm run lint` 这台机器上没有 typescript，跑不了。
 

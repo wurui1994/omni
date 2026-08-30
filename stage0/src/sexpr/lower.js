@@ -109,12 +109,11 @@ class CoreLowerer {
     // （from_oir 的 rvalue 只给 struct 与 enum 发 OP.COPY）。asy 的 struct 就是这种
     // （量过：`A b = a; b.x = 7;` 之后 `a.x` 是 7），所以这两种都要有，不是重复。
     this.classes = new Map();
-    // 这一份源文件里所有**结构体**的名字（chunk 的第 0 遍扫出来）。只为诊断服务：
-    // 字段类型提到自己或后面那个结构体时，能说"声明在后面"而不是"认不出的类型"。
-    // 类不进这张表 —— 类是指针、零值是空引用，前向与互相引用都收（见 chunk 里那一段）。
-    this.aggLater = new Set();
     // 名字先坐下、字段还空着的那些类（同一遍里用来分开"重复定义"与"这条声明的后半截"）
     this.preClass = new Set();
+    // 同上，结构体那一份（第十七刀）。它还兼着"这个名字是自己/后面那个"这一问 ——
+    // 直接内嵌看它（零值会无限递归），隔一层指针不看（指针是三个字，与目标布局无关）。
+    this.preStruct = new Set();
     // 函数值（`(fnty …)` / `(cfn …)` / `(mkclo …)` / `(callfn …)`）。OIR 那边这一套早就有
     // （ADR-0010：闭包记录是 `{fp, c_*}`，第一个实参是记录自己），方言这边只是说得出来。
     // closures 是**闭包记录**表（名字 -> {id, mangled, make, captures}），lifted 是它们的
@@ -339,12 +338,19 @@ class CoreLowerer {
     // 类型而 picture 声明在它后面 —— 一遍收记录时这三条无论怎么排都有一条落在后面。
     // 那一格塌了之后 picture 整个类就没建起来，`形参 this/pic 的类型认不出` 跟着刷了
     // 三百多条（量过：526 条里 281 条是这一串）。
-    const later = new Set();
+    // 结构体的名字先坐下（第十七刀）：**指针字段**隔了一层，`(ptr Node)` 是三个字、
+    // 与 Node 的布局无关，所以自引用与互相引用在指针后面是摊得开的（链表那一族要它）。
+    // 直接内嵌仍旧只收前面声明过的那个 —— 那一条问的是 preStruct（还空着字段的那些），
+    // 填完一个就从里面划掉，于是"自己"与"后面那个"都落在同一问上。
     for (const f of forms) {
       if (head(f) !== 'struct') continue;
-      if (isAtom(f.items[1])) later.add(f.items[1].value);
+      const sn = isAtom(f.items[1]) ? f.items[1].value : null;
+      if (sn === null) continue;                       // 缺名字：下面那一遍报
+      if (TYPES.has(sn)) continue;                     // 内建类型名：下面那一遍报
+      if (this.structs.has(sn) || this.classes.has(sn)) continue;   // 重名：下面那一遍报
+      this.structs.set(sn, structType(sn, []));
+      this.preStruct.add(sn);
     }
-    this.aggLater = later;
     // 类的名字先坐下（字段还空着）
     for (const f of forms) {
       if (head(f) !== 'class') continue;
@@ -358,6 +364,16 @@ class CoreLowerer {
     for (const f of forms) {
       if (head(f) === 'struct') this.structDec(f, 'struct');
       else if (head(f) === 'class') this.structDec(f, 'class');
+    }
+    // 字段都填完了才问得动"指得到它身上吗"：`(ptr S)` 收下来的那一刻 S 可能还空着
+    // （自引用），而 S 里躺一个 string 时它就落不进内存了 —— 那一问挪到这儿补。
+    for (const s of this.structs.values()) {
+      for (const f of s.fields) {
+        if (f.type.k !== 'ptr' && f.type.k !== 'tptr') continue;
+        if (f.type.target.k !== 'struct' || structLayout(f.type.target) !== null) continue;
+        this.err(forms[0], `字段 ${s.name}.${f.name}：结构体 '${f.type.target.name}' 里有`
+          + '落不进内存的字段，指不到它身上（见 hir/types.js 的 structLayout）');
+      }
     }
     // 换一格空的，不用 `.clear()`：Set/Map 的 clear 不在封闭 ABI 的成员表里
     // （js_abi.js 的 JS_PROPS 没有 clear），自举出来的那两代到这一句才炸 ——
@@ -475,8 +491,8 @@ class CoreLowerer {
    * OIR 的消费者早就各有一份（解释器的 copyOf、JS 后端的 `$cp_S`、C 后端的原生 `=`、
    * MIR 的 `OP.COPY`），方言这边只要把节点发对。
    *
-   * **字段类型这一刀收 int / real / bool / string、`(vec T N)`、`(arr T)`
-   * 与另一个结构体/类**
+   * **字段类型这一刀收 int / real / bool / string、`(vec T N)`、`(arr T)`、
+   * `(ptr T)` / `(tptr T)` 与另一个结构体/类**
    * （第十五刀放进向量：asy 的 `struct { pair p; }` 与门槛 3 的 transform 要它；
    * 第十六刀放进数组：`path` 那种"一串控制点"要它；第十七刀放进聚合本身）。
    * 向量字段是**值语义**（跟标量一样），数组字段是**引用语义** —— 复制结构体时搬的是
@@ -489,17 +505,27 @@ class CoreLowerer {
    * **结构体套结构体是第十七刀放进来的**：内嵌字段在 LLVM 那条腿上就是那个命名类型本身
    * （`%s_Point`），所以 `FLD` 是一条光秃秃的 `getelementptr`，而 COPY 的
    * `load %s_Point` / `store %s_Point` 是头等聚合的复制 —— 递归是 LLVM 展开的，
-   * 发射器里没有第二份"逐字段递归"。字段类型只收**前面已经声明过**的那个：自引用与
-   * 前向引用的零值会无限递归（`run()` 里先扫一遍聚合名，好让这两种给出不同的诊断）。
-   * `tests/sexpr/bad/struct-self.sx` 与 `struct-fwd.sx` 钉着这两半。
+   * 发射器里没有第二份"逐字段递归"。**直接内嵌**的字段类型只收前面已经声明过的那个：
+   * 自引用与前向引用的零值会无限递归（`run()` 里先扫一遍聚合名，好让这两种给出不同的
+   * 诊断）。`tests/sexpr/bad/struct-self.sx` 与 `struct-fwd.sx` 钉着这两半。
+   *
+   * **指针字段是这一刀（ADR-0016 第十七刀）放进来的**：`(ptr T)` / `(tptr T)`。它与上一刀的
+   * `ptrTargetOk` 是**两处**闸门 —— 那一刀开的是"指针能指向指针"，这一刀开的是"指针能躺在
+   * 结构体里"。零值是空指针，五条腿各补一格（C 的 `zeroExpr`、LLVM 的 `fieldTy`/`fieldZero`；
+   * JS 与两个解释器走的是通用的 `zeroValue`，本来就有 PtrNull）。**自引用不受"前面声明过"
+   * 那一条约束**：指针是三个字、与目标的布局无关，所以 `(struct Node (next (ptr Node)))`
+   * 摊得开 —— 落法与类同一套"名字先坐下、字段后填"（preStruct）。链表那一族要它。
    */
   structDec(n, kind) {
     const what = kind === 'struct' ? '结构体' : '类';
     const nm = isAtom(n.items[1]) ? n.items[1].value : null;
     if (nm === null) return this.err(n, `(${kind} NAME (字段 类型)...) 缺名字`);
     if (TYPES.has(nm)) return this.err(n, `'${nm}' 是内建类型名，不能当${what}名`);
-    // 上面那一遍替这个类先占了一格（preClass）：那不是"重复定义"，是同一条声明的前半截。
-    const pre = kind === 'class' && this.preClass.has(nm) ? this.classes.get(nm) : null;
+    // 上面那一遍替这个类/结构体先占了一格（preClass / preStruct）：那不是"重复定义"，
+    // 是同一条声明的前半截。
+    const pre = kind === 'class'
+      ? (this.preClass.has(nm) ? this.classes.get(nm) : null)
+      : (this.preStruct.has(nm) ? this.structs.get(nm) : null);
     if (pre === null && (this.structs.has(nm) || this.classes.has(nm))) {
       return this.err(n, `'${nm}' 重复定义`);
     }
@@ -514,25 +540,34 @@ class CoreLowerer {
       // 字段类型提到的是**自己**或**后面才声明**的那个**结构体**：单独报，别落到
       // "认不出的类型"上。结构体是值语义、内嵌是真的内嵌，所以这两种的零值会无限递归。
       // 类不在这一条里（见 chunk 里那一段）：它是指针，零值是空引用。
+      // 名字先坐下之后 this.structs 里已经有那一格了，所以"自己/后面"这一问改问 preStruct
+      // （还没填字段的那些）—— 直接内嵌才受这一条约束，隔一层指针不受（下一段）。
       const tn = isAtom(fd.items[1]) ? fd.items[1].value : null;
-      if (tn !== null && !this.structs.has(tn) && !this.classes.has(tn) && this.aggLater.has(tn)) {
+      if (tn !== null && this.preStruct.has(tn)) {
         return this.err(fd, `字段 ${nm}.${fn}：${tn === nm ? '字段的类型就是它自己' : `结构体 '${tn}' 声明在后面`}`
-          + ` —— 结构体字段的类型只能是**前面已经声明过**的结构体（自引用的零值会无限递归）`);
+          + ` —— 直接内嵌的字段只能是**前面已经声明过**的结构体（自引用的零值会无限递归）；`
+          + `隔一层指针（${tn}*，写成 (ptr ${tn})）可以`);
       }
       const t = this.ty(fd.items[1], `字段 ${nm}.${fn}`);
       if (t === null) return null;
       if (t !== INT && t !== REAL && t !== BOOL && t !== STRING
           && t.k !== 'vec' && t.k !== 'arr' && t.k !== 'struct' && t.k !== 'class'
-          && t.k !== 'fn') {
+          && t.k !== 'ptr' && t.k !== 'tptr' && t.k !== 'fn') {
         return this.err(fd, `字段 ${nm}.${fn}：这一刀的字段只能是 int / real / bool / string、`
-          + `(vec T N)、(arr T)、(fnty (T...) R) 或另一个结构体/类，这里是 ${coreTypeText(t)}`);
+          + `(vec T N)、(arr T)、(ptr T)、(tptr T)、(fnty (T...) R) 或另一个结构体/类，`
+          + `这里是 ${coreTypeText(t)}`);
       }
       seen.set(fn, true);
       fields.push({ name: fn, type: t });
     }
     if (fields.length === 0) return this.err(n, `${what} '${nm}' 至少要有一个字段`);
-    if (kind === 'struct') this.structs.set(nm, structType(nm, fields));
-    else if (pre !== null) for (const f of fields) pre.fields.push(f);   // 原地填那一格
+    // 结构体也是"名字先坐下、字段后填"了（第十七刀）：那一格得**原地**填 —— 指针字段
+    // 拿到的是同一个对象，换一格新的就有两份 Node 了（`(pfield p next)` 回来的
+    // `(ptr Node)` 与 `(struct Node …)` 那一格对不上，sameCoreType 按名字比才没露）。
+    if (kind === 'struct') {
+      if (pre !== null) { for (const f of fields) pre.fields.push(f); this.preStruct.delete(nm); }
+      else this.structs.set(nm, structType(nm, fields));
+    } else if (pre !== null) for (const f of fields) pre.fields.push(f);   // 原地填那一格
     else this.classes.set(nm, classType(nm, fields));
     return null;
   }

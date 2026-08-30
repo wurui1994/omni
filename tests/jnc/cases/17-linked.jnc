@@ -1,0 +1,109 @@
+// 结构体的指针字段（ADR-0016 第十七刀）：`Node* m_next`，链表那一族。
+//
+// 这一刀方言又长了一格 —— 上一刀开的是"`(ptr T)` 的 T 能是指针"，这一刀开的是"结构体的
+// **字段**能是指针"，撞的是 sexpr/lower.js 里字段类型那张白名单（与 ptrTargetOk 是两处闸门）。
+// 顺带要的是"名字先坐下、字段后填"：`Node* next` 在 Node 自己的体里就得查得着 Node。
+// **直接内嵌**仍旧只收前面声明过的那个（`(struct A (n A))` 的零值会无限递归），隔一层
+// 指针不受这一条 —— 指针是三个字、与目标的布局无关，零值是空指针。
+//
+// 期望输出的出处：**C**，下面这一份 `cc -O0` 编出来的程序，逐字节相同。C 那份用 calloc 对上
+// jancy 的零初始化（"Jancy compiler zeros every variable before any user code can touch it"，
+// type_ptr_data.rst），所以刚出来的 `next` 是空指针、`val` 是 0。
+//
+//   #include <stdio.h>
+//   #include <stdlib.h>
+//   typedef struct Node Node;
+//   struct Node { long long val; Node* next; };
+//   long long sum(Node* n) {
+//       long long s = 0;
+//       while (n != 0) { s = s + n->val; n = n->next; }
+//       return s;
+//   }
+//   void bump(Node* n) { n->val = n->val + 100; }
+//   int main() {
+//       Node* a = calloc(1, sizeof(Node));
+//       Node* b = calloc(1, sizeof(Node));
+//       printf("zero=%d %d\n", a->next == 0, a->val == 0);
+//       a->val = 1; b->val = 2; a->next = b;
+//       printf("chain=%lld %lld\n", a->val, a->next->val);
+//       printf("sum=%lld\n", sum(a));
+//       Node* c = calloc(3, sizeof(Node));
+//       c[0].val = 10; c[1].val = 20; c[2].val = 30;
+//       c[0].next = &c[1]; c[1].next = &c[2];
+//       printf("arr=%lld\n", sum(&c[0]));
+//       printf("deep=%lld\n", c[0].next->next->val);
+//       Node* head = 0;
+//       long long i = 0;
+//       while (i < 4) {
+//           Node* n = calloc(1, sizeof(Node));
+//           n->val = i * i; n->next = head; head = n; i = i + 1;
+//       }
+//       printf("built=%lld %lld\n", sum(head), head->val);
+//       Node t = c[0];
+//       t.val = 77;
+//       printf("copy=%lld %lld %d\n", c[0].val, t.val, t.next == &c[1]);
+//       bump(t.next);
+//       printf("shared=%lld\n", c[1].val);
+//       return 0;
+//   }
+struct Node {
+    int val;
+    Node* next;
+}
+
+int sum(Node* n) {
+    int s = 0;
+    while (n != null) {
+        s = s + n->val;
+        n = n->next;
+    }
+    return s;
+}
+
+void bump(Node* n) {
+    n->val = n->val + 100;
+}
+
+int main() {
+    // 刚分配出来的那一格是零：指针字段是空指针
+    Node* a = new Node[1];
+    Node* b = new Node[1];
+    printf("zero=%d %d\n", a->next == null, a->val == 0);
+
+    a->val = 1;
+    b->val = 2;
+    a->next = b;
+    printf("chain=%d %d\n", a->val, a->next->val);
+    printf("sum=%d\n", sum(a));
+
+    // 一排结构体：`&c[i]` 指到某一格上，`.` 与 `->` 混着写
+    Node* c = new Node[3];
+    c[0].val = 10;
+    c[1].val = 20;
+    c[2].val = 30;
+    c[0].next = &c[1];
+    c[1].next = &c[2];
+    printf("arr=%d\n", sum(&c[0]));
+    printf("deep=%d\n", c[0].next->next->val);
+
+    // 循环里往头上插：`head` 一开始是空指针
+    Node* head = null;
+    int i = 0;
+    while (i < 4) {
+        Node* n = new Node[1];
+        n->val = i * i;
+        n->next = head;
+        head = n;
+        i = i + 1;
+    }
+    printf("built=%d %d\n", sum(head), head->val);
+
+    // 值语义的复制**连指针字段一起抄**：t.val 与 c[0].val 各自一份，
+    // 而 t.next 与 c[0].next 指的是同一格 —— 抄的是那三个字，不是那一格内容
+    Node t = c[0];
+    t.val = 77;
+    printf("copy=%d %d %d\n", c[0].val, t.val, t.next == &c[1]);
+    bump(t.next);
+    printf("shared=%d\n", c[1].val);
+    return 0;
+}
