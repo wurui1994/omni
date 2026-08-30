@@ -533,6 +533,12 @@ err::setError("CCast_Array::LlvmCast is not yet implemented");
 都没有（前三处要那次未实现的转换，第四处要嵌进结构体布局）。剩下的操作里"值"与"一段内存"
 **观察不出差别**。
 
+> **这一段错了，第二十一刀改过来了。** `llvmCast` 不是那条路上的唯一关口：`castOperator`
+> 在它之前有一条 `opType->isEqual(type)` 的恒等捷径（`jnc_ct_OperatorMgr.cpp:527`），
+> 而 `Cast_Array` 的 `OpFlag_LoadArrayRef` 恰好在那之前把整块载成了一个值。所以**同型**
+> 数组的赋一份拷贝、当实参传、当返回值这三处 jancy 都是通的，`llvmCast` 只挡不同型的。
+> 上面那句"这几处 jancy 自己都没有"只有第四处（结构体字段）成立。
+
 于是这一刀的形状是：`T a[N]` 的存储就是 `(pnew (ptr T) (int N))`，一段长度 N 的堆内存。
 
 ```
@@ -1007,8 +1013,8 @@ type_ptr_data.rst。刻意不印任何裸地址。
 整条 `declarator` 是 `declarator_prefix* declarator_name declarator_suffix* declarator_constructor?`
 —— **没有 C 那种带括号的声明符分组**。所以 `T(*)[N]` 在 jancy 里是个**说不出名字**的类型，
 `&a` 只能就地用。按"jancy 不向方言妥协"的反面：jancy 没有的东西，我们也不替它长出来。
-这条与第十九刀量出的"数组之间的赋值 jancy 自己也只在常量折叠那条路上有
-（`Cast_Array::llvmCast` 写着未实现）"归在同一栏 —— **不是我们欠的**。
+这条与第十九刀量出的"数组之间的赋值不是我们欠的"归在同一栏 —— 不过那一条**只对了一半**，
+下一刀把它改过来了（同型数组的赋值 jancy 是通的，见第二十一刀）。
 
 **期望输出的出处**：`cases/19-addr-array.jnc`，出处是一份 `cc -O0` 的 C 程序，逐字节相同。
 量在里面的有：`(*&a)[i]` 读、经它写回去原数组跟着变、`*&a` 退化成 `int*` 传给函数、
@@ -1016,6 +1022,55 @@ type_ptr_data.rst。刻意不印任何裸地址。
 
 **跑过的轴**：`tests/jnc`（30/0，新增 `cases/19-addr-array`，五条腿逐字节相同）。
 **没跑的**：`tests/sexpr` / `tests/glr` / `tests/asy` —— 这一刀又只动了
+`stage0/src/frontend-jnc/lower.js` 一个文件，共享面一个字没碰。
+自举、`tests/jit`、`tests/mir`、`tests/llvm` 照旧没跑；`npm run lint` 这台机器上没有 typescript。
+
+### 第二十一刀：数组是**按值**的一整块 —— 并纠正前两刀记错的一条边界
+
+**先纠错。** 第十刀起我一直写着"数组之间的赋值 jancy 自己也只在常量折叠那条路上有
+（`Cast_Array::llvmCast` 里写着未实现）"，还照这条写了 `bad/array-copy`。这条**是错的**。
+`castOperator`（`jnc_ct_OperatorMgr.cpp:473`）在挑到 `Cast_Array` 之后先按它的
+`m_opFlags = OpFlag_LoadArrayRef`（`jnc_ct_CastOp_Array.h:26`）走 `prepareOperand`，那一步
+`loadDataRef` 把**整块**载成一个值（`jnc_ct_OperatorMgr_DataRef.cpp:72` 的 `createLoad`）；
+紧接着第 527 行的 `opType->isEqual(type)` 恒等捷径成立，载出来的值**直接交出去**，
+`llvmCast` 根本没被叫到。所以**同型**数组之间是通的，`llvmCast` 那句"未实现"只挡长度不一样、
+或元素是同宽的另一种整数那些。`bad/array-copy` 因此删掉，换成
+`bad/array-copy-len`（`int b[5] = a;`）。
+
+**于是这一刀要的是"按值"。** 而且方向与我原先记的**相反**：`Parser::createFormalArg`
+（`jnc_ct_Parser.cpp:2507`）算完声明符类型后，`TypeKind_Array` 那一支**只**在
+`ArrayTypeFlag_AutoSize` 时报错（2528 那句 "function cannot accept auto-size array"），
+别的数组原样存进 `FunctionArg` —— jancy **不做 C 那种"形参退化成 `T*`"**，
+`void f(int v[3])` 拿到的是**一整块的一份拷贝**。返回也是：`prepareReturnType`
+（`jnc_ct_DeclTypeCalc.cpp:425`）只拒 class / function / property 与长度省掉的那种，
+`int g() [3]` 是合法的。这一条上 jancy 与 C **给出不同答案**，所以这一份的期望输出
+**不能**拿 `cc -O0` 做孪生 —— 每一行的出处只能是它的源码。
+
+**落到这一层，就是"数组与结构体归成一档"。** 结构体那三刀（值语义、按值传、按值回）已经把
+路铺好了：一格聚合就是一段自己的 `pnew` 内存，「抄一份」在这一层展开成若干 pload/pstore，
+按值传把那一下挪到**被调**那一侧。数组只是把"逐字段"换成"逐格"：
+- `copyVal(dst, src, type)` 是新的分发口 —— 结构体走 `copyAgg`、数组走 `copyArr`、
+  别的就是一句 `pstore` + `pload`。`copyAgg` 的字段循环也改成调它，于是嵌套（结构体里的
+  结构体、数组的元素是结构体）自然递归下去。
+- 退化那一句从"总退"变成"**要的不是数组就退**"：jancy 的退化不在"取值"那一步，是在
+  "转成目标类型"那一步（`Cast_DataPtr_FromArray`，`jnc_ct_CastOp_DataPtr.cpp:24`）。
+  所以 `expr` 里只加了一个条件：`want` 是 `T[N]` 时不退。这一条改完，实参、返回、赋值
+  三处**同时**对了 —— 它们本来都往 `expr` 里传 `want`。
+- `fnSig` 的两条拒绝换成了 jancy 自己的那两条（长度省不掉），`fnDef` 的形参前奏多认一种，
+  lvalue 的名字分支里数组与结构体同为 `agg`，花括号初值的一项也可以是一整块
+  （plan 里的 `struct` 字段变成 `agg`，存类型而不是名字）。
+
+方言**一个字没改** —— `(ptr (blk T N))` 本来就能当形参、当返回、当全局的槽。
+
+**期望输出的出处**：`cases/20-array-value.jnc`，每一行都注着 jancy 的哪一处。量在里面的有：
+形参里改了不动调用方、按值传进去再读出来、`int b[3] = a` 与 `c = a` 抄一份、二维形参、
+结构体数组的形参（逐格再逐字段）、`int rows[2][3] = { a, b }`、模块级 `int h[3] = g`、
+`int g() [3]` 回一整块且两次调用互不相干。另外两条 bad：`array-copy-len`（长度不一样）、
+`array-param-autosize`（`int a[]` 当形参，jancy 自己就拒）。
+
+**跑过的轴**：`tests/jnc`（32/0 —— 新增 `cases/20-array-value` 与两条 bad，删掉
+`bad/array-copy`，五条腿逐字节相同）。
+**没跑的**：`tests/sexpr` / `tests/glr` / `tests/asy` —— 这一刀第三次只动了
 `stage0/src/frontend-jnc/lower.js` 一个文件，共享面一个字没碰。
 自举、`tests/jit`、`tests/mir`、`tests/llvm` 照旧没跑；`npm run lint` 这台机器上没有 typescript。
 

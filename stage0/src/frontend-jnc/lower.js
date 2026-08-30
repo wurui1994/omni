@@ -35,7 +35,10 @@
 // （一格里躺的是**一整块**的地址 `(ptr (blk T N))`，`a[i]` 是块里的第 i 格、它自己又是一块，
 // 退化成 `T*` 是方言的一句 `(pelem …)`；声明符的方括号从右往左套，见 tyText 与 declarator）、
 // **数组的地址** `&a` / `(*&a)[i]` / `*&a`（一个字都不用发 —— 那一格里放的就是块地址，
-// 见 addrOf 开头那一段；`int(*pa)[3]` 这种声明**jancy 自己的语法里就没有**，见边界表）、**模块级变量**（`int g = 5;` / `static int g;` /
+// 见 addrOf 开头那一段；`int(*pa)[3]` 这种声明**jancy 自己的语法里就没有**，见边界表）、
+// **数组是按值的一整块**（`int b[3] = a;` / `c = a` / `void f(int v[3])` / `int g() [3]` /
+// `int rows[2][3] = { a, b }` —— 这一条上 jancy **不是 C**：形参不退化成 `T*`，抄一份由
+// copyArr 逐格做，出处见 copyVal 那一段）、**模块级变量**（`int g = 5;` / `static int g;` /
 // `int t[3] = { … }`，降成方言的 `(global …)` 加 `(main …)` 开头的几句赋值，见 globalDecl）、
 // **值语义的结构体**（`S s;` / `S t = s;` / `t = s` / `s.f` / `s.in.y` / `&s` / `S a[3]` /
 // 结构体的模块级变量 —— 每格是一段自己的 `pnew` 内存，抄一份由 copyAgg 逐字段做）、
@@ -79,14 +82,15 @@
 //     `struct Point` 之前会被方言拒）—— jancy 那边名字不看顺序，所以这是一条真差别。
 //     要补的是方言那一侧"内嵌的零值按拓扑序铺"，与第十七刀开的指针字段是两回事：
 //     指针是三个字、与目标布局无关，内嵌是真的内嵌。
-//   - 数组那一族里剩下的两条：数组形参与返回（jancy 与 C 一样退化成 `T*`，要在形参那一侧发
-//     `(pelem …)`）、数组字段（要方言的字段类型也收 `(blk T N)`，撞的是与第十七刀同一张
-//     白名单，而且 C/LLVM 两条腿的结构体零值要多一格）。另外两条**不是我们欠的**：
-//     数组之间的赋值 —— **jancy 自己也只在常量折叠那条路上有**
-//     （`Cast_Array::llvmCast` 里写着未实现）；`int(*pa)[3]` 这种声明 ——
-//     **jancy 自己的语法里就没有**带括号的声明符分组（`jnc_ct_Declarator.llk:402` 的
-//     `declarator_prefix` 只有 `'*' type_modifier*`），所以 `T(*)[N]` 在 jancy 里是个说不出
-//     名字的类型，`&a` 只能就地用（见 `cases/19-addr-array.jnc`）。
+//   - 数组那一族里剩下的一条：数组**字段**（要方言的字段类型也收 `(blk T N)`，撞的是与第
+//     十七刀同一张白名单，而且 C/LLVM 两条腿的结构体零值要多一格）。另外两条**不是我们欠的**：
+//     **不同型**数组之间的赋值（长度不一样、或元素是同宽的另一种整数）——
+//     `Cast_Array::llvmCast` 里写着未实现，而同型的那些走的是 `castOperator` 里
+//     `opType->isEqual(type)` 那条恒等捷径，所以是通的（第二十一刀，见 copyVal）；
+//     `int(*pa)[3]` 这种声明 —— **jancy 自己的语法里就没有**带括号的声明符分组
+//     （`jnc_ct_Declarator.llk:402` 的 `declarator_prefix` 只有 `'*' type_modifier*`），
+//     所以 `T(*)[N]` 在 jancy 里是个说不出名字的类型，`&a` 只能就地用
+//     （见 `cases/19-addr-array.jnc`）。
 //   - 模块级变量那一族里剩下的三条：`static` 的**局部量**（要"初值只跑一次"，jancy 那边是
 //     `once` 的机制）、`threadlocal`（要线程本地存储）、`&g`（**方言**这一侧的边界 —— 全局
 //     不在一段可寻址的内存里，jancy 的 `&g` 本身是合法的）。
@@ -247,7 +251,7 @@ function tyName(t) {
   if (t.k === 'ptr' && t.target.k === 'arr') return `${tyName(t.target.el)}(*)[${t.target.n}]`;
   if (t.k === 'ptr') return `${tyName(t.target)}*`;
   if (t.k === 'tptr') return `${tyName(t.target)} thin*`;
-  if (t.k === 'arr') return `${tyName(t.el)}[${t.n}]`;
+  if (t.k === 'arr') return `${tyName(t.el)}[${t.n === null ? '' : t.n}]`;
   if (t.k === 'struct') return t.name;
   if (t.k === 'int') return INT_NAMES.get(t.w);
   return t.k;
@@ -402,11 +406,41 @@ class JncLower {
    * 只能是"求一次值就够"的东西。`(var x)` 本来就是；`(call f)` 不是 —— 直接塞进去会把
    * 那次调用发 N 遍。所以别的形状先落进一格临时量。
    */
-  aggSource(code, structName, pad, out) {
+  aggSource(code, slotTy, pad, out) {
     if (/^\(var [^ ()]+\)$/.test(code)) return code;
     const t = `$s${this.tmp++}`;
-    out.push(`${pad}(let ${t} (ptr ${structName}) ${code})`);
+    out.push(`${pad}(let ${t} ${slotTy} ${code})`);
     return `(var ${t})`;
+  }
+
+  /**
+   * 抄一格：结构体逐字段、数组逐格、别的就是一句 `pstore` + `pload`（第二十一刀）。
+   *
+   * 数组这一支也是**值语义**的，与结构体同一个道理 —— jancy 那边它不是 C：
+   * `createFormalArg`（jnc_ct_Parser.cpp:2507）不做 C 那种"形参退化成 `T*`"，形参的类型
+   * 就还是 `T[N]`；`t = s` 走 `storeDataRef` -> `castOperator`，那儿 `Cast_Array` 带着
+   * `OpFlag_LoadArrayRef`（CastOp_Array.h:26），于是先把**整块**载出来，接着
+   * `opType->isEqual(type)` 那条恒等捷径（OperatorMgr.cpp:527）直接把载出来的值交出去 ——
+   * 所以同型数组之间是抄一份。`Cast_Array::llvmCast` 那句"未实现"只挡**不同型**的那些
+   * （长度不一样、或元素是同宽的另一种整数）。
+   */
+  copyVal(dstCode, srcCode, type, pad, out) {
+    if (isStruct(type)) return this.copyAgg(dstCode, srcCode, type.name, pad, out);
+    if (isArr(type)) return this.copyArr(dstCode, srcCode, type, pad, out);
+    out.push(`${pad}(pstore ${dstCode} (pload ${srcCode}))`);
+    return out;
+  }
+
+  /** 逐格抄一整块。长度是编译期的字面量，所以这里就地展开（与 copyAgg 逐字段同一形状）。 */
+  copyArr(dstCode, srcCode, type, pad, out) {
+    const d0 = `(pelem ${dstCode})`;
+    const s0 = `(pelem ${srcCode})`;
+    for (let i = 0; i < type.n; i++) {
+      const d = i === 0 ? d0 : `(padd ${d0} (int ${i}))`;
+      const s = i === 0 ? s0 : `(padd ${s0} (int ${i}))`;
+      if (this.copyVal(d, s, type.el, pad, out) === null) return null;
+    }
+    return out;
   }
 
   copyAgg(dstCode, srcCode, name, pad, out) {
@@ -415,11 +449,7 @@ class JncLower {
     for (const f of fs) {
       const d = `(pfield ${dstCode} ${f.name})`;
       const s = `(pfield ${srcCode} ${f.name})`;
-      if (isStruct(f.type)) {
-        if (this.copyAgg(d, s, f.type.name, pad, out) === null) return null;
-        continue;
-      }
-      out.push(`${pad}(pstore ${d} (pload ${s}))`);
+      if (this.copyVal(d, s, f.type, pad, out) === null) return null;
     }
     return out;
   }
@@ -473,15 +503,15 @@ class JncLower {
         count++;
         continue;
       }
-      if (isArr(m.type)) { this.nope(val, '把一个数组当花括号初值的一项（要数组之间的赋值）'); return null; }
       const code = opts.val(val, m.type);
       if (code === null) return null;
       count++;
-      if (isStruct(m.type)) {
-        plan.push({ steps: sub, code: this.aggSource(code, m.type.name, pad, out), struct: m.type.name });
+      // 这一项本身是一整格聚合（结构体，或者一整块数组）时它是"抄一份"，所以源头先钉住。
+      if (isStruct(m.type) || isArr(m.type)) {
+        plan.push({ steps: sub, code: this.aggSource(code, slotText(m.type), pad, out), agg: m.type });
         continue;
       }
-      plan.push({ steps: sub, code: this.pin(code, m.type, opts.shadow, pad, out), struct: null });
+      plan.push({ steps: sub, code: this.pin(code, m.type, opts.shadow, pad, out), agg: null });
     }
     if (count === 0) { this.err(curly, '空的花括号初值（jancy 那句 "empty curly initializer"）'); return null; }
     return plan;
@@ -514,8 +544,8 @@ class JncLower {
         (acc, s) => (s.f === undefined ? `(padd (pelem ${acc}) (int ${s.i}))` : `(pfield ${acc} ${s.f})`),
         targetCode,
       );
-      if (w.struct !== null) {
-        if (this.copyAgg(addr, w.code, w.struct, pad, out) === null) return null;
+      if (w.agg !== null) {
+        if (this.copyVal(addr, w.code, w.agg, pad, out) === null) return null;
         continue;
       }
       out.push(`${pad}(pstore ${addr} ${w.code})`);
@@ -664,13 +694,16 @@ class JncLower {
       if (info.formals !== null) { this.nope(dcl, '顶层的函数原型（只收带体的定义）'); continue; }
       if (isArr(info.type)) {
         if (info.type.n === null) { this.err(dcl, `'${info.name}[]' 的长度得从花括号初值数出来`); continue; }
-        if (initNode !== null) {
-          this.nope(dcl, '把一个数组赋给另一个数组（jancy 自己也只在常量折叠那条路上有）');
-          continue;
-        }
         if (this.declareGlobal(dcl, info) === null) continue;
         const at = tyText(info.type);
         this.globalInit.push(`    (set ${info.name} (pnew ${at} (int 1)))`);
+        // `int t[3] = s;` 与结构体那一支一样是抄一份（第二十一刀）。
+        if (initNode !== null) {
+          const v = this.globalValue(initNode, info.type);
+          if (v === null) continue;
+          const src = this.aggSource(v, slotText(info.type), '    ', this.globalInit);
+          this.copyArr(`(var ${info.name})`, src, info.type, '    ', this.globalInit);
+        }
         continue;
       }
       if (this.declareGlobal(dcl, info) === null) continue;
@@ -681,7 +714,7 @@ class JncLower {
         if (initNode !== null) {
           const v = this.globalValue(initNode, info.type);
           if (v === null) continue;
-          const src = this.aggSource(v, info.type.name, '    ', this.globalInit);
+          const src = this.aggSource(v, st, '    ', this.globalInit);
           this.copyAgg(`(var ${info.name})`, src, info.type.name, '    ', this.globalInit);
         }
         continue;
@@ -969,12 +1002,22 @@ class JncLower {
       const fi = this.declarator(f.items[2], fsp);
       if (fi === null) return null;
       if (fi.formals !== null) return this.nope(f, '函数类型的形参');
-      // 数组形参（第十刀的边界）。C 里 `void f(int a[3])` 就是 `int*`，jancy 保留数组类型
-      // 并要一次数组转换 —— 那正是它自己未实现的那一格。要传数组就写 `int* a`。
-      if (isArr(fi.type)) return this.nope(f, `数组形参（'${tyName(fi.type)}'）—— 写成 ${tyName(fi.type.el)}* 传`);
+      // 数组形参（第二十一刀）。jancy **不是 C**：`createFormalArg`（jnc_ct_Parser.cpp:2507）
+      // 不做"形参退化成 `T*`"，形参的类型就还是 `T[N]`，传的是**一整块的一份拷贝**。
+      // 它自己只拒长度省掉的那一种（同一处 2528 那句 "function cannot accept auto-size
+      // array '%s' as an argument"，AutoSize 见 DeclTypeCalc.cpp:421）。
+      if (isArr(fi.type) && fi.type.n === null) {
+        return this.err(f, `形参 '${fi.name}' 的长度省不掉（jancy 那句 "function cannot accept `
+          + `auto-size array '${tyName(fi.type)}' as an argument"）`);
+      }
       ps.push(fi);
     }
-    if (isArr(info.type)) return this.nope(n, `返回数组（'${tyName(info.type)}'）`);
+    // 返回数组是合法的（prepareReturnType 只拒 class / function / property 与长度省掉的
+    // 那种，DeclTypeCalc.cpp:425）。写法是 `int f() [3]` —— 方括号在形参表**后面**。
+    if (isArr(info.type) && info.type.n === null) {
+      return this.err(n, `'${info.name}' 回的数组长度省不掉（jancy 那句 "function cannot return `
+        + `auto-size-array '${tyName(info.type)}'"）`);
+    }
     // `int main()` 是入口：降成方言的 `(main …)`。jancy 的 main 回 int，而方言的入口
     // 不回值 —— 那个返回值是给外面的退出码，这一层没有它，所以 `return 0` 就是 `(ret)`。
     const isMain = info.name === 'main' && ps.length === 0;
@@ -1008,11 +1051,12 @@ class JncLower {
       // 结构体形参是**按值**传的（第十三刀）：进来的是调用方那一段的地址，所以函数开头
       // 先开一格自己的、把它抄进来，之后这个名字一律指那一格。改形参因此不动调用方 ——
       // 与上面"被取地址的标量形参提一份拷贝"是同一个道理，只是抄的东西大一点。
-      if (isStruct(p.type)) {
+      // 数组形参走同一条路（第二十一刀）：jancy 那边它也是按值的一整块，不是 C 的 `T*`。
+      if (isStruct(p.type) || isArr(p.type)) {
         const v = `${p.name}$v`;
         const st = slotText(p.type);
         pre.push(`    (let ${v} ${st} (pnew ${st} (int 1)))`);
-        if (this.copyAgg(`(var ${v})`, `(var ${p.name})`, p.type.name, '    ', pre) === null) {
+        if (this.copyVal(`(var ${v})`, `(var ${p.name})`, p.type, '    ', pre) === null) {
           this.lifted = saveLifted;
           this.alias = saveAlias;
           this.scopes = [];
@@ -1124,20 +1168,29 @@ class JncLower {
       const info = this.declarator(dcl, sp);
       if (info === null) return null;
       if (info.formals !== null) { this.nope(dcl, '局部的函数原型'); return null; }
-      // 数组（第十刀）：`int a[3];` 就是一段长度 3 的零内存。`int a[] ;` 不合法（长度
-      // 只能从花括号初值数出来），`int b[3] = a;` 也不收 —— **jancy 自己就没实现**这一格
-      // （CastOp_Array.cpp 的 Cast_Array::llvmCast 里写着 "is not yet implemented"），
-      // 而它只在常量折叠那条路上能用。
+      // 数组（第十刀）：`int a[3];` 就是一段长度 3 的零内存。`int a[];` 不合法（长度只能从
+      // 花括号初值数出来）。`int b[3] = a;` 是**抄一份**（第二十一刀）—— 与结构体同一档，
+      // 理由与出处见 copyVal 那一段。
       if (isArr(info.type)) {
         if (info.type.n === null) { this.err(dcl, `'${info.name}[]' 的长度得从花括号初值数出来`); return null; }
+        let srcCode = null;
         if (initNode !== null) {
-          this.nope(dcl, '把一个数组赋给另一个数组（jancy 自己也只在常量折叠那条路上有，见 Cast_Array::llvmCast）');
-          return null;
+          const v = this.expr(initNode, info.type);
+          if (v === null) return null;
+          if (!sameTy(v.type, info.type)) {
+            this.err(initNode, `初值的类型是 ${tyName(v.type)}，声明的是 ${tyName(info.type)}`);
+            return null;
+          }
+          // 源头先钉住（要在目标那一格之前发：`int b[3] = b;` 里右边那个 b 指外层那个）
+          srcCode = this.aggSource(v.code, slotText(info.type), pad, out);
         }
         // `&a` 不用把它提到堆上（第二十刀）：那一格里放的**就是**一整块的地址。
         this.push(info.name, info.type);
         const at = tyText(info.type);
         out.push(`${pad}(let ${info.name} ${at} (pnew ${at} (int 1)))`);
+        if (srcCode !== null) {
+          if (this.copyArr(`(var ${info.name})`, srcCode, info.type, pad, out) === null) return null;
+        }
         continue;
       }
       // 结构体（第十二刀）：`S s;` 是一格自己的零内存，`S t = s;` 逐字段抄一份。
@@ -1156,7 +1209,7 @@ class JncLower {
         this.push(info.name, info.type);
         const st = slotText(info.type);
         // 源头先钉住（要在目标那一格之前发：`S t = t;` 里右边那个 t 指外层那个）
-        if (srcCode !== null) srcCode = this.aggSource(srcCode, info.type.name, pad, out);
+        if (srcCode !== null) srcCode = this.aggSource(srcCode, st, pad, out);
         out.push(`${pad}(let ${info.name} ${st} (pnew ${st} (int 1)))`);
         if (srcCode !== null) {
           if (this.copyAgg(`(var ${info.name})`, srcCode, info.type.name, pad, out) === null) return null;
@@ -1248,12 +1301,10 @@ class JncLower {
       const r = this.lookupRef(nm);
       if (r === null) return this.err(n, `未声明的变量 '${nm}'`);
       const t = r.type;
-      // 数组名字不是可写的位置 —— `a = …` 在 C 里就不合法，jancy 那边也只有常量折叠
-      // 那条路上有数组之间的转换（Cast_Array::llvmCast 里写着未实现）。
-      if (isArr(t)) return this.nope(n, `给整个数组赋值（jancy 自己也只在常量折叠那条路上有）`);
-      // 结构体那一格里放的是地址，所以它是 `agg`：读就是那个地址，写要逐字段抄（第十二刀）。
-      // 这一条要在 lifted 之前 —— 结构体本来就是一段内存，`&s` 不用再提一次。
-      if (isStruct(t)) return { kind: 'agg', code: `(var ${this.dialectName(nm)})`, type: t };
+      // 结构体与数组那一格里放的是地址，所以它们是 `agg`：读就是那个地址，写要抄一份
+      //（结构体逐字段、数组逐格 —— 第十二刀与第二十一刀，见 copyVal）。
+      // 这一条要在 lifted 之前 —— 它们本来就是一段内存，`&s` / `&a` 不用再提一次。
+      if (isStruct(t) || isArr(t)) return { kind: 'agg', code: `(var ${this.dialectName(nm)})`, type: t };
       // 提到堆上的那些名字本身就是一格内存，所以它是 `ptr` 而不是 `var` ——
       // 于是读写自动走 pload / pstore，而 `&x` 就是它的 code（见 expr0 的 addr）。
       // **只有局部量**有那一格：模块级变量在方言里是一个全局，取不到地址（见 addrOf）。
@@ -1380,11 +1431,11 @@ class JncLower {
           this.err(n, `赋值两边不同型：左是 ${tyName(lv.type)}，右是 ${tyName(v.type)}`);
           return null;
         }
-        // 结构体是**值**：`t = s` 抄一份，不是共享同一段（第十二刀）
+        // 结构体与数组都是**值**：`t = s` 抄一份，不是共享同一段（第十二刀、第二十一刀）
         if (lv.kind === 'agg') {
           const out = [];
-          const src = this.aggSource(v.code, lv.type.name, pad, out);
-          return this.copyAgg(lv.code, src, lv.type.name, pad, out);
+          const src = this.aggSource(v.code, slotText(lv.type), pad, out);
+          return this.copyVal(lv.code, src, lv.type, pad, out);
         }
         return [`${pad}${this.store(lv, v.code)}`];
       }
@@ -1799,10 +1850,15 @@ class JncLower {
    * 别的地方 want 只是个建议，不影响结果的类型。
    */
   expr(n, want) {
-    // 数组在这儿就退化成指针（jancy 的 `int* p = a;`）。放在这一处而不是散在每个用处，
+    // 数组在这儿退化成指针（jancy 的 `int* p = a;`）。放在这一处而不是散在每个用处，
     // 是因为 expr 是所有取值的唯一入口 —— 声明那两处要看**没退化**的类型，它们直接
     // 走 expr0 / 自己判（见 localDecl 与 localDeclCurly）。
-    const v = decay(this.expr0(n, want));
+    //
+    // **要的就是数组时一个字都不退**（第二十一刀）：jancy 的退化不在"取值"那一步，是在
+    // "转成目标类型"那一步（`Cast_DataPtr_FromArray`，CastOp_DataPtr.cpp:24），所以目标
+    // 本身是 `T[N]` 时（数组形参、数组返回、数组之间的赋值）走的是 `Cast_Array` 那条路。
+    const v0 = this.expr0(n, want);
+    const v = want !== undefined && want !== null && isArr(want) ? v0 : decay(v0);
     if (v === null) return null;
     // int -> real 的隐式加宽（jancy 与 C 同）。反过来**不**做：那是丢精度，
     // jancy 那边也要一次显式强制转换。

@@ -1,0 +1,15 @@
+// **不同型**数组之间的赋值。同型的那些是通的（见 cases/20-array-value：`castOperator`
+// 里 `opType->isEqual(type)` 那条恒等捷径），可长度不一样时那条捷径不成立，jancy 就落到
+// `Cast_Array::llvmCast` 上 —— CastOp_Array.cpp:91 的函数体只有一句
+//
+//   err::setError("CCast_Array::LlvmCast is not yet implemented");
+//
+// `getCastKind` 那边倒是给了脸（3 <= 5 算 `CastKind_Implicit`，同一份 44..52），所以这一条
+// 是**过了类型检查、到生成代码那一步才炸**。我们没有 oracle，能引的只有它的源码，
+// 所以照着拒 —— 拒的位置比它早一点（就在类型这一步），话说得也具体些。
+int main() {
+    int a[3] = { 1, 2, 3 };
+    int b[5] = a;
+    printf("%d\n", b[0]);
+    return 0;
+}

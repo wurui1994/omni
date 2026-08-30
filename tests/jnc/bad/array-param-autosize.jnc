@@ -1,0 +1,18 @@
+// `void f(int a[])` —— C 里这是**标准写法**（形参退化成 `int*`），jancy 里它是个错。
+// `Parser::createFormalArg`（jnc_ct_Parser.cpp:2527）：
+//
+//   case TypeKind_Array:
+//     if (type->getFlags() & ArrayTypeFlag_AutoSize) {
+//       err::setFormatStringError(
+//         "function cannot accept auto-size array '%s' as an argument", …);
+//
+// 长度省掉的数组在 jancy 里是"从初值数出来"的那一种（`ArrayTypeFlag_AutoSize`，
+// DeclTypeCalc.cpp:421），形参没有初值可数，所以它自己拒。带长度的
+// `void f(int a[3])` 是收的 —— 那是**按值**的一整块，见 cases/20-array-value。
+void f(int a[]) {
+    printf("%d\n", a[0]);
+}
+
+int main() {
+    return 0;
+}

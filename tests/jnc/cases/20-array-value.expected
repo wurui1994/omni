@@ -1,0 +1,10 @@
+in=101
+after=1 2 3
+sum=6
+copy=1 20 / src=2
+assign=1 30 / src=3
+corner=4 / kept=1
+rows=1 2 3 / 1 20 3
+ps=12 / kept=10
+global=7 8 9
+ret=40 6 / again=4

@@ -1,0 +1,88 @@
+// 数组是**按值**的一整块（第二十一刀）—— 这一条上 jancy **不是 C**，所以这一份
+// 期望输出**不能**拿 `cc -O0` 做孪生：C 的数组形参退化成 `int*`，改它就动调用方了。
+// 出处逐条（都在 reference/jancy/src/jnc_ct 里）：
+//
+//   - 形参不退化：`Parser::createFormalArg`（jnc_ct_Parser.cpp:2507）算完声明符的类型
+//     之后，`TypeKind_Array` 那一支**只**在 `ArrayTypeFlag_AutoSize` 时报错
+//     （"function cannot accept auto-size array '%s' as an argument"，2528）。别的数组
+//     原样存进 `FunctionArg` —— 形参的类型就还是 `T[N]`。
+//   - 传进去的是**一份拷贝**：`OperatorMgr::castOperator`（jnc_ct_OperatorMgr.cpp:473）
+//     取 `m_castOperatorTable[TypeKind_Array]` = `Cast_Array`，它带着
+//     `OpFlag_LoadArrayRef`（jnc_ct_CastOp_Array.h:26），于是 `prepareOperand` 先
+//     `loadDataRef` 把**整块**载成一个值（jnc_ct_OperatorMgr_DataRef.cpp:72 的
+//     `createLoad`），紧接着 `opType->isEqual(type)` 那条恒等捷径（同一处 527）把这个
+//     载出来的值直接交出去。所以形参拿到的是一份独立的值，改它不动调用方。
+//   - `t = s` 与 `int t[3] = s;` 走同一条路：`storeDataRef`
+//     （jnc_ct_OperatorMgr_DataRef.cpp:134）里那句 `castOperator(rawSrcValue, targetType)`。
+//   - `Cast_Array::llvmCast` 那句 "is not yet implemented" 只挡**不同型**的数组
+//     （长度不一样、或元素是同宽的另一种整数）—— 见 bad/array-copy-len。
+
+void bump(int v[3]) {
+    v[0] = v[0] + 100;
+    printf("in=%d\n", v[0]);
+}
+
+int sum3(int v[3]) {
+    return v[0] + v[1] + v[2];
+}
+
+// 多维也是一整块：`int m[2][2]` 的形参类型是 `int[2][2]`，抄的是两行四格。
+int corner(int m[2][2]) {
+    m[0][0] = 77;
+    return m[1][1];
+}
+
+struct P { int m_x; int m_y; }
+
+// 回一整块也是合法的：`prepareReturnType`（jnc_ct_Parser/jnc_ct_DeclTypeCalc.cpp:425）
+// 只拒 class / function / property 与长度省掉的那种。写法是方括号在形参表**后面**。
+int make() [3] {
+    int r[3] = { 4, 5, 6 };
+    return r;
+}
+
+// 结构体数组的形参：抄的时候每格再逐字段抄（copyVal 递归下去）。
+int firstx(P ps[2]) {
+    ps[0].m_x = 555;
+    return ps[1].m_x;
+}
+
+int g[3] = { 7, 8, 9 };
+int h[3] = g;
+
+int main() {
+    int a[3] = { 1, 2, 3 };
+    bump(a);
+    printf("after=%d %d %d\n", a[0], a[1], a[2]);
+    printf("sum=%d\n", sum3(a));
+
+    int b[3] = a;
+    b[1] = 20;
+    printf("copy=%d %d / src=%d\n", b[0], b[1], a[1]);
+
+    int c[3];
+    c = a;
+    c[2] = 30;
+    printf("assign=%d %d / src=%d\n", c[0], c[2], a[2]);
+
+    int m[2][2] = { { 1, 2 }, { 3, 4 } };
+    printf("corner=%d / kept=%d\n", corner(m), m[0][0]);
+
+    // 一整块当花括号初值的一项（jancy 那边 `assignCurlyInitializerItem` 也走 storeDataRef）
+    int rows[2][3] = { a, b };
+    printf("rows=%d %d %d / %d %d %d\n", rows[0][0], rows[0][1], rows[0][2],
+        rows[1][0], rows[1][1], rows[1][2]);
+
+    P ps[2] = { { 10, 11 }, { 12, 13 } };
+    printf("ps=%d / kept=%d\n", firstx(ps), ps[0].m_x);
+
+    printf("global=%d %d %d\n", h[0], h[1], h[2]);
+
+    int t[3] = make();
+    t[0] = 40;
+    int u[3] = make();
+    printf("ret=%d %d / again=%d\n", t[0], t[2], u[0]);
+
+    // 退化仍然是退化：形参写成 `int*` 时传的是**同一段**（Cast_DataPtr_FromArray）
+    return 0;
+}
