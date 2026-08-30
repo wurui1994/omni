@@ -8516,6 +8516,86 @@ EPS 那一轴按名字跑了 20 个 —— 一样 **12**（上一刀 11，新增
 **跳过的轴**：EPS 全量、`tests/asy/svg.js`（没碰 SVG 出口）、自举（改的是 asy 前端
 生成构造函数时的一格状态存还，`run.js` 的 run-c / run-llvm 两条腿已经覆盖后端）。
 
+### 第一百〇三刀：一个 struct 名把内建那一族顶掉了 —— 纸张那两格、空槽那一问，与文件名里的减号
+
+这一刀收的是 `splitpatch` 与 `clockarray` 两个"没出图"，路上顺手捡了 `xxsq01x-1`。
+五处改动各自独立，但都是同一类毛病：**某个判据的范围开得比它该管的宽（或窄）一格**。
+
+**一、纸张那两格不是 0。** `settings.paperwidth` / `paperheight` 这一层一直写着 0，
+而 clockarray.asy:7-9 拿它们算格子宽高、非正就 `abort("margin too big")`。
+reference 那边 settings.cc:2101-2118 的 `SetPageDimensions()` 在启动时就填好了：
+`papertype == "letter"` -> `8.5*inches` / `11.0*inches`，否则按 a4 算 `21.0*cm` / `29.7*cm`。
+量了一遍（只 `write` 那三格的例子跑 `asy -noV`）：**612 / 792 / letter**。照量出来的写死，
+顺手补上一直缺的 `string papertype`。
+
+**二、`a.initialized(n)` 这一问，引用类元素答得准。** runarray.in:800-808 的判据是
+"这一格空不空"（`!item.empty()`），cyclic 且长度大于 0 时先 imod、否则越界一律 false。
+这一层的 `(anew …)` 铺的正是**空引用** —— 与 asy 的未初始化格逐格对上，所以记录 / 数组 /
+函数元素上这一问是准的；标量元素铺的是 0，空档与真放过的 0 分不开，那一档照旧不给。
+从前整条都拒（第七十几刀那句注释把理由记在了"扩长填造好的零值"上，那说的是 `grow` 那条路，
+不是 `anew` 这条），splitpatch.asy:29 就卡在这里。
+
+量出来的八格（`struct node`，`new node[3]`，只给 `a[1]` 赋值）：
+
+```
+F T F F F T T T     ← initialized(0) (1) (2) (-1) (7)；cyclic 之后 (4) (-2)；再加 new real[2][] 的 (0)
+```
+
+两边逐格一样。**还差一格**（写在明处）：`a.length=n` / `a[n]=x` 扩长时填的是造好的零值，
+那些格子这边答 true 而 asy 答 false —— 要对齐得让扩长也填空引用，那会动到 plain 里一批
+依赖"扩长即可用"的地方，是另一刀。
+
+**三、嵌套 struct 在自己体里的第 0 项就该认得自己。** `recNested` 把"外层这一刻已经声明过的
+体内类型连同它自己的名字"抄进它自己那张别名表时，位置记的是 **0**；而 `aliasAt` 裁的是
+`e.bi < recAlias.bi`，于是体里**第 0 项**那一句看不见自己。量出来的形状就是
+splitpatch.asy:12：
+
+```asy
+struct tree {
+  tree[] tree=new tree[2];   // 字段就是第 0 项
+}
+```
+
+改成 -1（与上面抄外层别名那一句同一个记法：「体里第 0 项之前就可见」）。
+最小复现里 `o.get()` / `kids.length` / `initialized(0)` 三格与 asy 一样（`5 2 F`）。
+
+**四、struct 自己那个 `write` 方法也是候选。** asy 的名字查找是一层层往外攒重载的，
+struct 体这一层攒进来的赢过文件级那一族与内建那一条（可变形参那条本来就输给同型的普通重载）。
+这一层的语句分发只问了 `asyVisible`（文件级那张表），于是 splitpatch.asy:34/57 的
+`write(pt.tree[i], …)` 落到内建 write，报"实参不能是结构体"。补一档：`L.self` 上有同名方法
+就先按方法试一遍，参数对不上照旧往下走 —— 所以同一个方法体里的 `write(a+b+n)` 仍旧是内建那条。
+量过（`struct box` 里 `void write(int,int)`）：体内 `write(1,2)` 印 6、体外 `b.write(10,20)` 印 33，
+与 asy 一样；从前体内印的是 `1 TAB 2`。
+
+**五、`recOf` 那句兜底不能当"构造调用"的判据。** `recOf` 尾巴上查的是**程序全局**那张记录表
+（键是真名，为的是模板实例改过名的那些）。用户文件里 `struct split {…}` 之后，
+**prelude 那一层**里 asy_builtins.asy:7418 的 `split(s, ",")`（字符串 split）也被认成
+"造一个 split"，报"没有能匹配 'split(string, string)' 的签名 —— 有的是 split(int, int)"。
+分出 `recCtorOf`：按 recVis（这个单元真看得见的那张表）裁，再加一档"同单元里改过名的记录、
+位置照 recHere 比"。同时把"内建那一族来报诊断"那一问**挪到构造之后** —— 名字既是内建又是
+struct 名时，从前构造永远轮不到（splitpatch.asy:81 的 `split S=split(B,A);`）。
+
+**六、产物名进 JS 标识符之前要洗。** 单元产物名是照源文件名起的，而入口那一份**不带 hash 后缀**，
+于是 `xxsq01x-1.asy` 生出的启动器里是 `import { omni_init_xxsq01x-1 } …` ——
+`SyntaxError: Unexpected token '-'`，例子在**加载模块**这一步就炸，连一句诊断都发不出来
+（`eps.js` 那一栏里它只显示成一行 `main-xxsqNx-N…js:N`）。加 `jsUnitSym`：不合法字符换 `_`，
+**洗过的**再缀一段原名的 hash（不缀就把 `a-b` 与 `a_b` 洗成同一个名字，那是"跑了另一个例子的
+初始化"那一类的错）。文件名照旧用没洗过的那个 —— import 路径是字符串。
+
+这一刀的账：clockarray 从"没出图"变成**一样**；splitpatch 与 xxsq01x-1 从"没出图"变成
+**出图但结构不同** —— 这两个的参考 EPS 是**光栅位图**（`/ImageType 1`，800×1200 与 1200×…，
+ASCII85+Flate），逐记号对不上是天生的，与 linearregression 同一族，不再是修复候选。
+"没出图"那一栏重新量了一遍（`OMNI_EPS_FRESH=1`，18 个旧记录逐个重跑），现在是 **8** 个：
+Gouraud / sinxlex 仍旧是"guide 是 path 的别名"那条设计（第一百刀记过），
+其余六个是明写着没做的洞：`functionshade`、`_image`、`_strokepath`、`textpath`、
+`postscript`、`_eval`。旧记录里的 genusthree / Klein 是**超时**不是没出图（第三刀那批已经修好）。
+跑过的轴：`tests/asy/sweep.js` 220 个里干净 **220**（上一刀 219 —— 少的那一个正是 splitpatch，
+2.9s，最慢 mergeExample 196ms）、`tests/sexpr/run.js` 55/0、EPS 按名字跑了 21 个
+（新增 clockarray 为"一样"）、四个例子（venn / dimension / clockarray / cardioid）在
+**清空模块缓存之后**逐个重跑（洗名字那一改动到的正是这条路，所以要连库一起重编一遍）。
+**跳过的轴**：`tests/asy/run.js` 五条腿与 EPS 全量（这一趟被明确要求不跑全量）、
+`tests/asy/svg.js`（没碰 SVG 出口）、自举。
+
 ## 后果与代价
 
 

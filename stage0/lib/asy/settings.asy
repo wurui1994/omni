@@ -72,8 +72,14 @@ bool autobillboard = true;
 bool ibl = false;
 bool nothin = false;
 int digits = 7;
-real paperwidth = 0;
-real paperheight = 0;
+// 纸张那一格不是 0：settings.cc:2101-2118 的 SetPageDimensions() 在启动时就按
+// papertype 把它填好了 —— "letter" → 8.5*inches / 11.0*inches，否则按 a4 算
+// 21.0*cm / 29.7*cm。默认 papertype 是 "letter"，所以量出来是 612 / 792。
+// （量法：写个只 write(settings.paperwidth/paperheight/papertype) 的例子跑 asy -noV，
+//  输出 612 / 792 / letter。clockarray.asy:7-9 用这两格算格子宽高，为 0 就 abort。）
+string papertype = "letter";
+real paperwidth = 612;
+real paperheight = 792;
 real prerender = 0;
 string image = "snowyField";
 string hyperrefOptions = "setpagesize=false,unicode,pdfborder=0 0 0";

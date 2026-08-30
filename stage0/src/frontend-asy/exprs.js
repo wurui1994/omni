@@ -2086,13 +2086,21 @@ export function asyArrMethod(L, n, recv, nm) {
     return { code: `(call ${L.arrHelper('append', el)} ${recv.code} ${b.code})`, type: 'void' };
   }
   if (nm === 'initialized') {
-    // `a.initialized(i)`（runarray.in:799）**这一刀还不能给**，理由要说准：asy 的那一格
-    // 判据是"这一格空不空"，而这一层长数组时把空档填成了**造好的零值**（arrHelper 的
-    // zero：记录 `(cnew …)`、数组 `(anew … 0)`），不是空引用 —— 也就是空档与真放过值的
-    // 那一格在运行期分不开。真给了只会**静悄悄答错**（量过 splitpatch.asy:29 要的正是
-    // 空档那一档）。等哪一刀把"空槽"做进方言（asy 那边读空档是运行期错），这条才能开。
-    return L.nope(n, `数组的 '.initialized(…)'（这一层长数组时空档填的是造好的零值，`
-      + '不是空记号 —— 空档与放过值的那一格分不开，答不准就先不答）');
+    // `a.initialized(i)`（runarray.in:800-808）。判据是"这一格空不空"，所以只有**引用类**
+    // 元素答得准：记录 / 数组 / 函数在这一层写得出空引用，而 `new T[n]` 的 `(anew …)` 铺的
+    // 正是空引用 —— 与 asy 的未初始化格逐格对上（splitpatch.asy:29 要的正是这一档：
+    // `tree[] tree=new tree[2]` 两格都空，`!pt.tree.initialized(i)` 时才 `new tree`；
+    // 这也是它非得空着不可的原因 —— 真去造一格就无穷递归了）。
+    // 标量元素（int/real/…）铺的是 0，空档与真放过的 0 在运行期分不开，那一档仍然不给。
+    if (args.length !== 1) return L.err(n, `'initialized' 要 1 个实参，给了 ${args.length} 个`);
+    if (!(L.isRec(el) || asyIsArr(el) || asyIsFn(el))) {
+      return L.nope(n, `${el} 数组的 '.initialized(…)'（这一层标量格子铺的是 0，`
+        + '空档与真放过的 0 分不开 —— 答不准就先不答）');
+    }
+    const iv = asyCoerce(L, asyExpr(L, args[0]), 'int', args[0], "'initialized' 的下标");
+    if (iv === null) return null;
+    const h = L.cycHelper(recv.type);
+    return { code: `(call ${h.init} ${recv.code} ${iv.code})`, type: 'bool' };
   }
   if (nm !== 'push') return L.nope(n, `数组的 '.${nm}(…)'（这一刀只有 .push / .pop / .delete / .insert / .append）`);
 

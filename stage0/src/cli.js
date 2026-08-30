@@ -526,9 +526,26 @@ function unitName(info) {
   return `${base}__${hash16(`${src}|${k === null ? '' : k.key}`).slice(0, 8)}`;
 }
 
+/**
+ * 产物名 -> **JS 标识符**里能用的那一段（`omni_init_<这一段>`）。
+ *
+ * 产物名是照源文件名起的，而文件名里的字符不都能当标识符 —— 量出来的形状是
+ * examples/xxsq01x-1.asy：入口单元叫 `xxsq01x-1`（入口那份不带 hash 后缀），
+ * 于是 `main-xxsq01x-1.js` 里那句 `import { omni_init_xxsq01x-1 } …` 是
+ * `SyntaxError: Unexpected token '-'`，例子在**加载模块**这一步就炸了（连诊断都发不出）。
+ *
+ * 洗法：不合法的字符换成 `_`；**洗过的**再缀一段原名的 hash —— 不缀就把
+ * `a-b` 与 `a_b` 洗成同一个名字，那是"另一个例子的初始化"那一类的错。
+ * 文件名照旧用没洗过的那个（import 路径是字符串，什么字符都行）。
+ */
+function jsUnitSym(name) {
+  const clean = name.replace(/[^A-Za-z0-9_$]/g, '_');
+  if (clean === name) return name;
+  return `${clean}__n${hash16(name).slice(0, 8)}`;
+}
+
 /** 一个源文件路径 -> 产物名（清单那一路只有路径，没有单元信息）。 */
-function fileUnitName(p) {
-  return unitName({ key: p, file: p, tpl: false });
+function fileUnitName(p) {  return unitName({ key: p, file: p, tpl: false });
 }
 
 /**
@@ -894,7 +911,7 @@ function asyModsBuild(path, dir) {
         : `asy 逐条切开对不上 ${u.name}`);
     }
     const d = new Diagnostics();
-    const mod = lowerCoreSexpr(new SourceFile(`${u.name}.sx`, u.text), d, `omni_init_${u.name}`);
+    const mod = lowerCoreSexpr(new SourceFile(`${u.name}.sx`, u.text), d, `omni_init_${jsUnitSym(u.name)}`);
     d.throwIfErrors();
     writeText(jsPath, emitJs(mod, { esm: true }));
     // 下一趟要复用这一份时，前端连它的正文都不降 —— 那时靠的就是这三格：
@@ -934,10 +951,10 @@ function asyModsBuild(path, dir) {
   for (const u of r.reused) if (u.name !== r.entry) names.push(u.name);
   names.sort();
   const lines = ["import './omni_rt.js';"];
-  for (const n of names) lines.push(`import { omni_init_${n} } from './${n}.js';`);
-  lines.push(`import { omni_init_${r.entry} } from './${r.entry}.js';`);
-  for (const n of names) lines.push(`omni_init_${n}();`);
-  lines.push(`omni_init_${r.entry}();`);
+  for (const n of names) lines.push(`import { omni_init_${jsUnitSym(n)} } from './${n}.js';`);
+  lines.push(`import { omni_init_${jsUnitSym(r.entry)} } from './${r.entry}.js';`);
+  for (const n of names) lines.push(`omni_init_${jsUnitSym(n)}();`);
+  lines.push(`omni_init_${jsUnitSym(r.entry)}();`);
   lines.push('$js_check_uncaught();');
   lines.push('$flush();');
   lines.push('');

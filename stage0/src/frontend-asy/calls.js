@@ -550,10 +550,8 @@ export function asyCall(L, n) {
       if (alt !== undefined) return alt;
       return asyApplyCall(L, n, nm, vis, raw, null);
     }
-    // 内建赢；或者两边都没有能匹配的、而这个名字**本来就是内建那一族的** ——
-    // 后一种要让内建那份去报诊断（`length(int[])` 那条话说得清楚得多，
-    // 比"有的是 int(path)"有用）。两条都走 builtinRaw：它回 null 时诊断已经发过了。
-    if (bc !== null || (best === null && asyBuiltinOwns(L, nm, raw))) return asyBuiltinRaw(L, n, nm, raw);
+    // 内建赢：那一族真接住了这次调用。
+    if (bc !== null) return asyBuiltinRaw(L, n, nm, raw);
     // 两边都没有能匹配的：内建里还有**自己求实参**的那几族（pair/triple 的
     // dir/expi/dot/…、string(…)、字符串那一族、数学那一族）。它们不走 builtinRaw，
     // 所以在这里回滚了再试一次。量过的理由：prelude 里加了 `dir(path,real)` 之后
@@ -565,7 +563,7 @@ export function asyCall(L, n) {
       // struct triangle 里有 `void operator init(point,point,point)`，`triangle(P1,P2,P3)`
       // 于是报"没有能匹配的签名 —— 有的是 triangle(line, line, line)"。
       // 次序是"函数那一族先、构造后"：函数那族接得住时不走这里（上面已经返回了）。
-      const crec0 = L.recOf(nm);
+      const crec0 = L.recCtorOf(nm);
       if (crec0 !== null && L.visibleMethods(crec0, 'operator init').length > 0) {
         const cmark = L.diags.mark();
         const cSave = Array.isArray(L.pre) ? L.pre : null;
@@ -579,6 +577,14 @@ export function asyCall(L, n) {
         }
         L.diags.rollback(cmark);
       }
+      // 两边都没有能匹配的、而这个名字**本来就是内建那一族的**：让内建那份去报诊断
+      // （`length(int[])` 那条话说得清楚得多，比"有的是 int(path)"有用）。builtinRaw
+      // 回 null 时诊断已经发过了。
+      // 这一问从前排在**构造之前**，于是"名字既是内建又是 struct 名"的那一格永远轮不到
+      // 构造 —— 量出来的形状是 splitpatch.asy:81 的 `split S=split(B,A);`：`split` 在
+      // runtime.js:50 是内建的 `string[] split(string,string)`，而例子里 `struct split`
+      // 有 `void operator init(triple[][],triple[][],int)`。asy 那边这两份在同一个重载集里。
+      if (asyBuiltinOwns(L, nm, raw)) return asyBuiltinRaw(L, n, nm, raw);
       const alt = asyNamedBuiltin(L, n, nm);
       if (alt !== undefined) return alt;
       // 数学那一族（sqrt/log/sin/…）也在这里回一次（第五十一刀）：内建面里加了
@@ -598,9 +604,11 @@ export function asyCall(L, n) {
   }
   // `A(3)`：**构造调用**（第二十一刀）。`A` 是记录名，不是变量也不是函数名，所以这一问
   // 放在内建名单前面 —— 记录名与内建那几个（sqrt/length/…）撞不上。
-  // 问的是 recOf 不是 isRec：调用处写的是**这个单元里的名字**（模板实例是 `Box_int`），
-  // 而 records 那张全局表的键是记录的真名。
-  const crec = L.recOf(nm);
+  // 问的是 recCtorOf 不是 isRec：调用处写的是**这个单元里的名字**（模板实例是 `Box_int`）。
+  // 「不是 recOf」这一条要说准：recOf 尾巴上那句查的是程序全局那张表，于是**别的单元里**
+  // 一个同名 struct 会把这一层的内建名字顶掉（splitpatch 的 `struct split` 顶掉
+  // 字符串 split，见 recCtorOf）。
+  const crec = L.recCtorOf(nm);
   if (crec !== null) return asyCtorCall(L, n, crec, nm);
   if (nm === 'length') return L.lengthCall(n);
   if (nm === 'string') return L.strConvCall(n);

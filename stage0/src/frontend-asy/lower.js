@@ -940,6 +940,7 @@ class AsyLower {
       set: `asy__cycset_${key}`,
       idx: `asy__cycidx_${key}`,
       map: `asy__cycmap_${key}`,
+      init: `asy__cycini_${key}`,
     };
     if (this.arrGen.has(nm.is)) return nm;
     const ct = asyCore(at);
@@ -995,6 +996,27 @@ class AsyLower {
         (apush (var r) (call ${nm.idx} (var a) (aget (var ix) (var i))))
         (set i (bin "+" (var i) (int 1)))))
     (ret (var r)))`);
+    // `a.initialized(n)`（runarray.in:800-808 的 arrayInitializedHelper）：cyclic 且长度
+    // 大于 0 就先 imod，否则越界一律 false；在界内看**那一格空不空**。
+    // 「空」这一层只有引用类元素（记录 / 数组 / 函数）写得出来 —— `(anew …)` 铺的正是空引用，
+    // 与 asy 的未初始化格逐格对上。标量元素铺的是 0，空档与真放过的 0 分不开，所以调用方
+    // （exprs.js 的 initialized）只对引用类元素放行。
+    // 还差一格：`a.length=n` / `a[n]=x` 扩长时 arrHelper 的 zero 填的是**造好的**零值
+    // （`(cnew T)` / 空行），那些格子这边会答 true 而 asy 答 false。真要对齐得让扩长也填
+    // 空引用，那是另一刀（会改到 plain 里一批依赖"扩长即可用"的地方）。
+    // 标量元素连 `(null T)` 都写不出来（方言只给引用类型），所以那几种索性不生这一份 ——
+    // exprs.js 那边先挡在门口，谁也不会去调它。
+    const iel = asyElem(at);
+    if (this.isRec(iel) || asyIsArr(iel) || asyIsFn(iel)) {
+      this.arrGen.set(nm.init, `  (fn ${nm.init} ((a ${ct}) (n int)) bool
+    (let len int (alen (var a)))
+    (let k int (var n))
+    (if (bin ">" (var len) (int 0))
+      (do (if (call ${nm.is} (var a)) (do (set k (call asy__mod (var n) (var len)))))))
+    (if (bin "<" (var k) (int 0)) (do (ret (bool false))))
+    (if (un "!" (bin "<" (var k) (var len))) (do (ret (bool false))))
+    (ret (un "!" (bin "==" (aget (var a) (var k)) (null ${asyCore(iel)})))))`);
+    }
     return nm;
   }
 
@@ -1547,6 +1569,26 @@ class AsyLower {
     return this.records.has(nm) ? this.records.get(nm) : null;
   }
 
+  /**
+   * `A(…)` 那一问用的 recOf：**只认这里真看得见的**那个记录名。
+   *
+   * recOf 尾巴上那一句查的是 records（程序里所有记录的**全局**表，键是真名），
+   * 那对"模板实例改过名"是必要的，但当"构造调用"的判据就太松了 —— 用户文件里
+   * `struct split {…}` 之后，**prelude 那一层**里的 `split(s, ",")`（asy_builtins.asy:7418
+   * 的字符串 split）也会被认成"造一个 split"，于是报"没有能匹配 split(string, string)
+   * 的签名 —— 有的是 split(int, int)"。量出来的形状是 splitpatch.asy:81 的
+   * `split S=split(B,A);`。
+   *
+   * 所以这一问按 recVis（这个单元看得见的那张表，import 会往里塞）裁，再加一档：
+   * 同单元里那些改过名的记录照旧认，位置按 recHere 同一条规矩比。
+   */
+  recCtorOf(nm) {
+    if (this.recVis.has(nm)) return this.recHere(nm) ? this.recVis.get(nm).rec : null;
+    const r = this.records.get(nm);
+    if (r === undefined || r.unit !== this.unit.id) return null;
+    return r.at === undefined || r.at <= this.at ? r : null;
+  }
+
   /** `el` 能当数组元素吗（第十九刀起记录也能：asy 的 struct 是引用类型，`A[]` 是一串句柄；
    *  多维数组这一刀起数组自己也能 —— 格子里躺的同样是句柄；第三十七刀起**函数值**也能：
    *  方言那边 `(arr (fnty …))` 通了，量出来的理由是 plain_picture.asy:95 的
@@ -1733,9 +1775,14 @@ class AsyLower {
     // recVis 上面已经撤了、recAlias 换成了它自己那张（decls.js 里 asyMethod 那一句），
     // 于是 `Inner copy() { Inner b = new Inner; … }`（plain_picture.asy:236 的 bounds3）
     // 就找不着类型了。所以把外层这一刻**已经声明过**的体内类型连同它自己的名字，
-    // 抄进它自己那张表（bi 记 0 —— 在它自己的体里从第一项起就看得见）。
+    // 抄进它自己那张表。
+    // 位置记 **-1**（不是 0）：aliasAt 裁的是 `e.bi < recAlias.bi`，记 0 时体里**第 0 项**
+    // 那一句就看不见自己了 —— 量出来的形状是 splitpatch.asy:12 的
+    // `struct tree { tree[] tree=new tree[2]; }`，字段就是第 0 项，从前报 aliasLate
+    // （而 asy 收：那两格空着，正是 `initialized` 要问的那一档）。-1 与上面抄外层别名
+    // 那一句同一个记法 ——「体里第 0 项之前就可见」。
     for (const [k, v] of al.map) {
-      if (v.bi <= al.bi && !e.rec.tyAlias.has(k)) e.rec.tyAlias.set(k, { t: v.t, bi: 0 });
+      if (v.bi <= al.bi && !e.rec.tyAlias.has(k)) e.rec.tyAlias.set(k, { t: v.t, bi: -1 });
     }
 
     // 体外那句诊断要说得对（见 recElsewhere）：这个类型是**某个 struct 体里**声明的

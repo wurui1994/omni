@@ -879,6 +879,30 @@ export function asyExprStmt(L, e) {
         }
         L.diags.rollback(bmark);
       }
+      // 正在降的这个 struct **自己有一个叫 write 的方法**时，那一份也是候选 —— asy 的
+      // 名字查找是**一层层往外攒重载**的，struct 体这一层攒进来的赢过文件级那一族与内建
+      // 那一条（可变形参那条本来就输给同型的普通重载）。
+      // 量出来的形状是 splitpatch.asy:34/57：`struct split` 里有
+      // `void write(tree,tree,triple[][],triple[][],int)`，体里那两句 `write(…)` 调的正是它。
+      // 从前这一格只问 asyVisible（文件级那张表），于是落到内建 write，报"实参不能是结构体"。
+      // 参数对不上时照旧往下走（`write(a+b+n)` 在那个方法体里就该是内建那一条）。
+      if (L.self !== null) {
+        const ms = L.visibleMethods(L.self.rec, 'write');
+        if (ms.length > 0) {
+          const smark = L.diags.mark();
+          const sSave = L.pre;
+          L.pre = [];
+          const sv = asyUserCall(L, e, 'write', ms,
+            { code: '(var this)', type: L.self.rec.name });
+          const sPre = L.pre;
+          L.pre = sSave;
+          if (sv !== null) {
+            for (const s of sPre) L.pre.push(s);
+            return [`(expr ${sv.code})`];
+          }
+          L.diags.rollback(smark);
+        }
+      }
       // 用户自己的 `write` 先问（第四十五刀）：base 里 `void write(file, T)` 那一族就是
       // 普通重载（plain_constants.asy:82 起）。都不匹配才落回内建那份 —— 所以这里是
       // "试一遍、不行就把诊断与前置语句都丢掉"（与 probeTy 同一条路子）。
