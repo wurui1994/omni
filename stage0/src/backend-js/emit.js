@@ -19,6 +19,14 @@ import { C_ABI } from '../hir/c_abi.js';
  *  （多维数组那一刀量出来的：`a.push(row)` 拷一份之后，"两处是同一条"在五条腿上不一致）。 */
 const jsElemCopy = (t) => (t.elem.k === 'vec' ? 'true' : 'false');
 
+// 指针（ADR-0016）。fat 是三元组 [addr, base, end]，thin 是一个数 —— 所以"拿地址"
+// 与"查范围"这两件事在两种指针上各是一行，读写那一半共用。
+const jsPtrAddr = (code, t) => (t.k === 'tptr' ? code : `${code}[0]`);
+const jsPtrChk = (self, p, size) => (p.type.k === 'tptr'
+  ? `$tchk(${self.expr(p)})` : `$pchk(${self.expr(p)}, ${size})`);
+const jsPtrLoad = (t) => (t.k === 'int' ? '$pload_i' : (t.k === 'real' ? '$pload_r' : '$pload_b'));
+const jsPtrStore = (t) => (t.k === 'int' ? '$pstore_i' : (t.k === 'real' ? '$pstore_r' : '$pstore_b'));
+
 class JsEmitter {
   constructor(mod) {
     this.mod = mod;
@@ -245,6 +253,10 @@ class JsEmitter {
       // 数组（第十六刀：结构体的数组字段）。空数组，不是 null —— `$anew` 就是
       // ArrNew 那条路发的东西，元素零值当实参传进去。
       case 'arr': return `$anew(0n, ${this.zero(t.elem)}, ${jsElemCopy(t)})`;
+      // 指针（ADR-0016）：零值是空指针。fat 的空是 [0,0,0]（三个字都在，只是都为 0），
+      // thin 的空就是 0 —— 与 PtrNull 那条路发的东西一模一样。
+      case 'ptr': return '[0, 0, 0]';
+      case 'tptr': return '0';
       default: throw new Error(`zero: ${t.k}`);
     }
   }
@@ -387,6 +399,27 @@ class JsEmitter {
       case 'BufLen': return `BigInt(${this.expr(e.buf)}.length)`;
       case 'BufGet': return `$bget(${this.expr(e.buf)}, ${this.expr(e.index)})`;
       case 'BufSet': return `$bset(${this.expr(e.buf)}, ${this.expr(e.index)}, ${this.expr(e.value)})`;
+      // 指针（ADR-0016）：这条腿是 arena 模拟。fat 是三元组 [addr, base, end]，thin 是一个数。
+      // 检查与读写分开写（`$pload_i($pchk(p, 8))`）：thin 那一档只换掉检查那一半，
+      // 读写那一半两种指针共用同一份，于是"两种指针读到的是同一件事"不靠对齐两份代码。
+      case 'PtrNull': return e.type.k === 'tptr' ? '0' : '[0, 0, 0]';
+      case 'PtrNew': return `$pnew(${this.expr(e.count)}, ${e.size})`;
+      case 'PtrIsNull': return `(${jsPtrAddr(this.expr(e.ptr), e.ptr.type)} === 0)`;
+      case 'PtrThin': return `${this.expr(e.ptr)}[0]`;
+      case 'PtrLoad': return `${jsPtrLoad(e.type)}(${jsPtrChk(this, e.ptr, e.size)})`;
+      case 'PtrStore':
+        return `${jsPtrStore(e.type)}(${jsPtrChk(this, e.ptr, e.size)}, ${this.expr(e.value)})`;
+      // padd / pfield 造**新**的三元组，base/end 照抄：范围是"这块内存"的属性，
+      // 走到哪儿都不变（jancy 的 validator 也是跟着块走的，不跟着指针走）。
+      case 'PtrAdd': return e.ptr.type.k === 'tptr'
+        ? `(${this.expr(e.ptr)} + Number(${this.expr(e.delta)}) * ${e.size})`
+        : `$padd(${this.expr(e.ptr)}, ${this.expr(e.delta)}, ${e.size})`;
+      case 'PtrField': return e.ptr.type.k === 'tptr'
+        ? `(${this.expr(e.ptr)} + ${e.off})`
+        : `$padd(${this.expr(e.ptr)}, ${e.off}n, 1)`;
+      case 'PtrSub': return e.a.type.k === 'tptr'
+        ? `BigInt((${this.expr(e.a)} - ${this.expr(e.b)}) / ${e.size})`
+        : `$psub(${this.expr(e.a)}, ${this.expr(e.b)}, ${e.size})`;
       // 数组六条（门槛 2 第四刀）：也是 JS 数组，也是引用语义。零值当参数传 ——
       // BufNew 那条传的是"是不是 int"的布尔，那是只有两种元素时的省事写法，数组有四种。
       // 末尾那个布尔是"元素是值语义、存进去要拷一份"（只有向量），按**静态类型**给：

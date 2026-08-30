@@ -55,7 +55,8 @@
  * 而"什么能悄悄转成什么"是语言设计决定，不该由汇聚层替某门语言定。
  */
 
-import { INT, REAL, BOOL, STRING, VOID, vecType, bufType, arrType, structType, classType, fnType, typeKey, zeroValue } from '../hir/types.js';
+import { INT, REAL, BOOL, STRING, VOID, vecType, bufType, arrType, structType, classType, fnType, typeKey, zeroValue,
+  ptrType, tptrType, ptrTargetOk, structLayout, sizeOf } from '../hir/types.js';
 import { readSexpr, isList, isAtom, isStr, head } from './read.js';
 import { SourceFile } from '../source/diag.js';
 
@@ -87,6 +88,8 @@ class CoreLowerer {
     this.diags = diags;
     this.funcs = new Map();   // 名字 -> {name, mangled, ret, params}
     this.scopes = [];         // 名字 -> OIR 类型
+    // `(unsafe …)` 里面吗（ADR-0016 决策三）。thin 指针那一族只在这一格开着时过得去。
+    this.unsafe = false;
     /** @type {Map[]|null} REPL 的常驻顶层作用域（每批入口共用）；整程序降级时一直是 null */
     this.topScope = null;
     // kernel 与函数分开登记：kernel 只能被 (dispatch ...) 启动，(call ...) 要报错说清这件事。
@@ -191,6 +194,22 @@ class CoreLowerer {
         return this.err(node, `${what}：(arr 元素) 的元素只能是 int / real / bool / string / (vec T N) / 类名`);
       }
       return arrType(e);
+    }
+    // `(ptr T)` / `(tptr T)`：数据指针（ADR-0016 决策一）。fat 带范围、thin 只有地址。
+    // 目标类型那张名单在 hir/types.js 的 ptrTargetOk 上，理由也写在那儿。
+    if (isList(node) && (head(node) === 'ptr' || head(node) === 'tptr')) {
+      const thin = head(node) === 'tptr';
+      const t = this.ty(node.items[1], `${what} 的 (${head(node)} T) 的 T`);
+      if (t === null) return null;
+      if (!ptrTargetOk(t)) {
+        return this.err(node, `${what}：(${head(node)} T) 的 T 只能是 int / real / bool /`
+          + ` 结构体名，这里是 ${coreTypeText(t)}`);
+      }
+      if (t.k === 'struct' && structLayout(t) === null) {
+        return this.err(node, `${what}：结构体 '${t.name}' 里有落不进内存的字段，`
+          + '指不到它身上（见 hir/types.js 的 structLayout）');
+      }
+      return thin ? tptrType(t) : ptrType(t);
     }
     // `(vec int 4)`：元素只能是 int/real（bool/string 的向量没有意义，也没有硬件对应）
     if (isList(node) && head(node) === 'vec') {
@@ -778,6 +797,8 @@ class CoreLowerer {
       return { kind: 'ExprStmt', expr: v };
     }
     if (h === 'bset') return this.bufSet(n);
+    if (h === 'pstore') return this.ptrStore(n);
+    if (h === 'unsafe') return this.unsafeBlock(n, ret);
     if (h === 'aset' || h === 'apush') return this.arrWrite(n, h);
     if (h === 'fldset') return this.fldSet(n);
     if (h === 'dispatch') return this.dispatch(n);
@@ -830,6 +851,53 @@ class CoreLowerer {
       return this.err(n, `这个缓冲装 ${b.type.elem.k}，写进去的是 ${coreTypeText(v.type)}`);
     }
     return { kind: 'ExprStmt', expr: { kind: 'BufSet', buf: b, index: i, value: v, type: b.type.elem } };
+  }
+
+  /**
+   * `(pstore 指针 值)`。与 bset 同一条规矩：写回是语句，它的"值"没人用。
+   * fat 指针会查范围，空指针是运行期错误。
+   */
+  ptrStore(n) {
+    const p = this.expr(n.items[1]);
+    const v = this.expr(n.items[2]);
+    if (p === null || v === null) return null;
+    if (p.type.k !== 'ptr' && p.type.k !== 'tptr') {
+      return this.err(n, `pstore 的第一个实参要是指针，这里是 ${coreTypeText(p.type)}`);
+    }
+    if (p.type.k === 'tptr' && !this.unsafe) {
+      return this.err(n, 'thin 指针上的 pstore 要写在 (unsafe …) 里 —— 它没有范围，查不了');
+    }
+    if (!sameCoreType(v.type, p.type.target)) {
+      return this.err(n, `这个指针指向 ${coreTypeText(p.type.target)}，`
+        + `写进去的是 ${coreTypeText(v.type)}`);
+    }
+    if (p.type.target.k === 'struct') {
+      return this.err(n, `(pstore p v) 的 p 指向结构体 ${p.type.target.name}：整块写还没做 ——`
+        + ' 用 (pfield p 字段名) 逐字段写');
+    }
+    return { kind: 'ExprStmt', expr: {
+      kind: 'PtrStore', ptr: p, value: v, size: sizeOf(p.type.target), type: p.type.target,
+    } };
+  }
+
+  /**
+   * `(unsafe 语句...)`（ADR-0016 决策三）。**块级**，与 jancy 自己的 `unsafe { … }` 一样
+   * （语料里只有 test50.jnc 用到它）。
+   *
+   * 落地上它就是一个 `do`：这一层只是把 `this.unsafe` 这一格开着，让 thin 那一族
+   * 在检查时过得去。**没有**任何运行期代价 —— unsafe 的全部作用就是"少查一次"。
+   *
+   * 嵌套时是现设现还（不是"置成 true 再置回 false"）：`(unsafe (do (unsafe …)))` 之后
+   * 外层那一段还得是 unsafe 的。
+   */
+  unsafeBlock(n, ret) {
+    const keep = this.unsafe;
+    this.unsafe = true;
+    this.scopes.push(new Map());
+    const body = this.block(n.items.slice(1), ret);
+    this.scopes.pop();
+    this.unsafe = keep;
+    return body === null ? null : { kind: 'Block', stmts: body };
   }
 
   /**
@@ -1269,6 +1337,8 @@ class CoreLowerer {
     }
     if (h === 'splat' || h === 'vlit' || h === 'lane' || h === 'hsum') return this.vecExpr(n, h);
     if (h === 'bnew' || h === 'bget' || h === 'blen') return this.bufExpr(n, h);
+    if (h === 'pnew' || h === 'pnull' || h === 'pload' || h === 'padd' || h === 'psub'
+      || h === 'pisnull' || h === 'pfield' || h === 'pthin') return this.ptrExpr(n, h);
     if (h === 'anew' || h === 'aget' || h === 'alen' || h === 'apop') return this.arrExpr(n, h);
     // 结构体的两条读侧（写侧是语句 fldset）：`(new Point)` 零值，`(fld p x)` 读字段。
     // 没有"结构体字面量"：字段一多，字面量就要么按顺序（改字段顺序会静默改语义）、
@@ -1361,6 +1431,93 @@ class CoreLowerer {
     if (i === null) return null;
     if (i.type !== INT) return this.err(n, `bget 的下标要是 int，这里是 ${coreTypeText(i.type)}`);
     return { kind: 'BufGet', buf: b, index: i, type: b.type.elem };
+  }
+
+  /**
+   * 指针的读侧（写侧是语句 `pstore`）。ADR-0016 决策一。
+   *
+   *   (pnew (ptr T) N)   在堆上要 N 个 T，回一个盖住这 N 个的 fat 指针（零初始化）
+   *   (pload p)          解引用；fat 会查范围
+   *   (padd p n)         指针算术，**按元素**（不是字节）
+   *   (psub p q)         两个指针的差，按元素；不同块之间相减是运行期错误
+   *   (pnull (ptr T))    空指针
+   *   (pisnull p)        是不是空指针
+   *   (pfield p 字段名)  结构体指针 -> 那个字段的指针（"把协议头盖在缓冲上"靠这一条）
+   *   (pthin p)          fat 降成 thin；**只在 `(unsafe …)` 里**
+   *
+   * 为什么第一刀里没有 `(addr 局部量)`：那要求局部量可寻址，也就是 jancy 说的
+   * "any local taken fat address of, is being lifted to GC heap"（type_ptr_data.rst）。
+   * 那一格要动到每条腿的局部量表示，单独一刀。有 `pnew` 之后第一刀的门槛已经够了。
+   */
+  ptrExpr(n, h) {
+    if (h === 'pnew' || h === 'pnull') {
+      const t = this.ty(n.items[1], `${h} 的类型`);
+      if (t === null) return null;
+      if (t.k !== 'ptr' && t.k !== 'tptr') {
+        return this.err(n, `(${h} TYPE …) 的 TYPE 要是 (ptr T) 或 (tptr T)`);
+      }
+      if (h === 'pnull') return { kind: 'PtrNull', type: t };
+      if (t.k === 'tptr') {
+        return this.err(n, '(pnew (tptr T) N)：thin 指针没有范围，分配出来的那块就没人管了 ——'
+          + ' 用 (pnew (ptr T) N) 再 (pthin …)');
+      }
+      const c = this.expr(n.items[2]);
+      if (c === null) return null;
+      if (c.type !== INT) return this.err(n, `pnew 的个数要是 int，这里是 ${coreTypeText(c.type)}`);
+      return { kind: 'PtrNew', type: t, count: c, size: sizeOf(t.target) };
+    }
+    const p = this.expr(n.items[1]);
+    if (p === null) return null;
+    if (p.type.k !== 'ptr' && p.type.k !== 'tptr') {
+      return this.err(n, `${h} 的实参要是指针，这里是 ${coreTypeText(p.type)}`);
+    }
+    const thin = p.type.k === 'tptr';
+    if (thin && !this.unsafe) {
+      return this.err(n, `thin 指针上的 '${h}' 要写在 (unsafe …) 里 —— 它没有范围，查不了`);
+    }
+    if (h === 'pisnull') return { kind: 'PtrIsNull', ptr: p, type: BOOL };
+    if (h === 'pload') {
+      // 结构体整块读出来这一刀不给：那要按类型逐字段从内存里拼一个值出来，四条腿各一份
+      // marshalling。而这门语言真正的用法是"把头结构体盖在缓冲上、然后**逐字段**访问"
+      // （type_ptr_data.rst 开头那段 TCP/IP 包），也就是 `(pfield …)` 那一条。
+      if (p.type.target.k === 'struct') {
+        return this.err(n, `(pload p) 的 p 指向结构体 ${p.type.target.name}：整块读还没做 ——`
+          + ' 用 (pfield p 字段名) 逐字段读');
+      }
+      return { kind: 'PtrLoad', ptr: p, type: p.type.target, size: sizeOf(p.type.target) };
+    }
+    if (h === 'pthin') {
+      if (!this.unsafe) return this.err(n, '(pthin p) 要写在 (unsafe …) 里 —— 它把范围丢掉了');
+      if (thin) return p;
+      return { kind: 'PtrThin', ptr: p, type: tptrType(p.type.target) };
+    }
+    if (h === 'pfield') {
+      if (p.type.target.k !== 'struct') {
+        return this.err(n, `(pfield p 字段名) 的 p 要是结构体指针，这里是 ${coreTypeText(p.type)}`);
+      }
+      const fn = isAtom(n.items[2]) ? n.items[2].value : null;
+      const lay = structLayout(p.type.target);
+      const fld = fn === null || lay === null ? undefined : lay.fields.find((f) => f.name === fn);
+      if (fld === undefined) {
+        return this.err(n, `结构体 ${p.type.target.name} 没有字段 '${fn}'`);
+      }
+      const rt = thin ? tptrType(fld.type) : ptrType(fld.type);
+      return { kind: 'PtrField', ptr: p, off: fld.off, size: sizeOf(fld.type), type: rt };
+    }
+    if (h === 'padd') {
+      const k = this.expr(n.items[2]);
+      if (k === null) return null;
+      if (k.type !== INT) return this.err(n, `padd 的步数要是 int，这里是 ${coreTypeText(k.type)}`);
+      return { kind: 'PtrAdd', ptr: p, delta: k, size: sizeOf(p.type.target), type: p.type };
+    }
+    // psub
+    const q = this.expr(n.items[2]);
+    if (q === null) return null;
+    if (q.type.k !== p.type.k || typeKey(q.type) !== typeKey(p.type)) {
+      return this.err(n, `psub 的两个指针要同型：左是 ${coreTypeText(p.type)}，`
+        + `右是 ${coreTypeText(q.type)}`);
+    }
+    return { kind: 'PtrSub', a: p, b: q, size: sizeOf(p.type.target), type: INT };
   }
 
   /**
@@ -1539,6 +1696,8 @@ function sameCoreType(a, b) {
   if (a.k === 'struct' || a.k === 'class') return a.name === b.name;
   // 递归而不是比 `elem.k`：`(arr (vec real 2))` 与 `(arr (vec int 4))` 的 elem.k 都是 'vec'
   if (a.k === 'arr') return sameCoreType(a.elem, b.elem);
+  // 指针同理，而且 fat 与 thin 是**两个类型**（`a.k !== b.k` 上面已经挡了）
+  if (a.k === 'ptr' || a.k === 'tptr') return sameCoreType(a.target, b.target);
   // 函数值按**签名**认（结构类型）：形参逐个同型、返回同型才算一个类型。
   if (a.k === 'fn') {
     if (a.params.length !== b.params.length) return false;
@@ -1561,6 +1720,8 @@ function coreTypeText(t) {
   if (t.k === 'vec') return `vec<${coreTypeText(t.elem)},${t.lanes}>`;
   if (t.k === 'buf') return `buf<${coreTypeText(t.elem)}>`;
   if (t.k === 'arr') return `arr<${coreTypeText(t.elem)}>`;
+  if (t.k === 'ptr') return `${coreTypeText(t.target)}*`;
+  if (t.k === 'tptr') return `${coreTypeText(t.target)} thin*`;
   if (t.k === 'struct' || t.k === 'class') return t.name;
   if (t.k === 'fn') {
     let ps = '';

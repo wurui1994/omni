@@ -1,0 +1,8 @@
+;; thin 指针（jancy 的 `thin*`）只在 (unsafe …) 里可达 —— ADR-0016 决策三。
+;; 它没有范围，所以解引用查不了；这一层不给"默默不查"这条路。
+;; jancy 自己也是块级的：语料 test/jnc/test50.jnc 是唯一用到 unsafe 的那一份。
+(module
+  (main
+    (let p (ptr int) (pnew (ptr int) (int 1)))
+    (let t (tptr int) (pthin (var p)))
+    (print (pload (var t)))))

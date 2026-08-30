@@ -1,0 +1,73 @@
+;; 指针（ADR-0016 分步 1/2）—— 方言这一层的形状与 JS 那条腿的 arena。
+;;
+;; 期望输出的出处（这一路**没有 oracle**，每一条都注明来源）：
+;;   - 范围检查在解引用而不是算术上：type_ptr_data.rst 那段 `p += i; *p = 40;`
+;;   - `pnew` 出来的那块是零初始化的：同一份文档"Jancy compiler zeros every variable
+;;     before any user code can touch it"
+;;   - `psub` 按元素而不是字节：C 的指针差语义，jancy 没改这一条
+;;   - 结构体的字段偏移按自然对齐：见 hir/types.js 的 structLayout
+;;
+;; 刻意**不印任何裸地址**：地址在 JS（arena 偏移）与 C（真指针）两套实现里不一样。
+(module
+  ;; 自然对齐：a 在 0（int，8 字节）、b 在 8（real，8 字节）、c 在 16（bool，1 字节），
+  ;; 总长补齐到 8 的倍数 = 24。
+  (struct Hdr (a int) (b real) (c bool))
+
+  ;; 指针穿过普通函数：指针是值语义（三个字抄一份），指向的那块是共享的
+  (fn bump ((p (ptr int)) (d int)) void
+    (pstore (var p) (bin "+" (pload (var p)) (var d))))
+
+  (main
+    ;; 零初始化
+    (let p (ptr int) (pnew (ptr int) (int 3)))
+    (print (pload (var p)))
+    (print (pisnull (var p)))
+
+    ;; 写三格、按元素走
+    (pstore (var p) (int 10))
+    (pstore (padd (var p) (int 1)) (int 20))
+    (pstore (padd (var p) (int 2)) (int 30))
+    (print (pload (var p)))
+    (print (pload (padd (var p) (int 1))))
+    (print (pload (padd (var p) (int 2))))
+
+    ;; 指针差按元素
+    (print (psub (padd (var p) (int 2)) (var p)))
+
+    ;; 走出块外**不报错**（只有解引用才报），走回来照旧能读
+    (let q (ptr int) (padd (var p) (int 7)))
+    (print (pload (padd (var q) (int -6))))
+
+    ;; 别名：指针本身抄一份，指向的那块是同一段
+    (let r (ptr int) (var p))
+    (pstore (var r) (int 99))
+    (print (pload (var p)))
+
+    ;; 穿过函数
+    (expr (call bump (var p) (int 1)))
+    (print (pload (var p)))
+
+    ;; 空指针
+    (let z (ptr int) (pnull (ptr int)))
+    (print (pisnull (var z)))
+
+    ;; 结构体指针：逐字段
+    (let h (ptr Hdr) (pnew (ptr Hdr) (int 2)))
+    (pstore (pfield (var h) a) (int 7))
+    (pstore (pfield (var h) b) (real 1.5))
+    (pstore (pfield (var h) c) (bool true))
+    (print (pload (pfield (var h) a)))
+    (print (pload (pfield (var h) b)))
+    (print (pload (pfield (var h) c)))
+    ;; 第二个元素还是零 —— 说明 padd 的步长是 sizeof(Hdr) = 24 而不是别的
+    (print (pload (pfield (padd (var h) (int 1)) a)))
+    (print (pload (pfield (padd (var h) (int 1)) c)))
+
+    ;; thin 指针：只在 unsafe 里
+    (unsafe
+      (let t (tptr int) (pthin (var p)))
+      (print (pload (var t)))
+      (print (pload (padd (var t) (int 1))))
+      (pstore (var t) (int 5))
+      (print (psub (padd (var t) (int 2)) (var t))))
+    (print (pload (var p)))))

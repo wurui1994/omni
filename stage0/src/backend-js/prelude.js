@@ -43,6 +43,64 @@ function $vbin(a, b, f) { const o = []; for (let i = 0; i < a.length; i++) o.pus
 // （门槛 6 的「固定求值顺序」），六个执行器都得发这一棵树。
 function $vhsum(v, f) { let acc = v[0]; for (let i = 1; i < v.length; i++) acc = f(acc, v[i]); return acc; }
 
+// 指针（ADR-0016）。JS 这条腿是 **arena 模拟**：一整块 ArrayBuffer，地址是字节偏移，
+// 0 是 null（所以真正的分配从 8 开始，顺手保住 8 对齐）。字节序**固定小端** ——
+// 不跟宿主走，否则这条腿与 C 那条腿看到的不是同一件事。
+// fat 指针是三个字 [addr, base, end]（end 是右开界，字节）；thin 就是一个 addr。
+// 每个产出指针的操作都**新造一个三元组**（padd/pfield/pnew 都回新的），所以 let 那种别名
+// 无害：指针本身从来不被就地改写。这就是 ADR-0016 里"值语义"那一格的落地方式。
+let $mem = new ArrayBuffer(1 << 16);
+let $mdv = new DataView($mem);
+let $mtop = 8;
+function $mgrow(need) {
+  let cap = $mem.byteLength;
+  while (cap < need) cap = cap * 2;
+  if (cap === $mem.byteLength) return;
+  const nb = new ArrayBuffer(cap);
+  new Uint8Array(nb).set(new Uint8Array($mem));
+  $mem = nb;
+  $mdv = new DataView($mem);
+}
+function $pnew(count, size) {
+  const n = Number(count);
+  if (n < 0) $rt_error("pointer allocation count cannot be negative: " + n);
+  const bytes = n * size;
+  $mgrow($mtop + bytes);
+  const a = $mtop;
+  $mtop = $mtop + bytes;
+  if ($mtop % 8 !== 0) $mtop = $mtop + (8 - $mtop % 8);
+  new Uint8Array($mem, a, bytes).fill(0);
+  return [a, a, a + bytes];
+}
+// 范围检查回的是**地址**，于是 load/store 那几条是 $pload_i($pchk(p, 8)) 这种一行。
+// 越界的消息里印的是"块内偏移 + 块长"，不是裸地址 —— ADR-0016 的纪律：地址在两套实现里
+// 不一样，印出来的东西不许依赖它。
+function $pchk(p, size) {
+  if (p[0] === 0) $rt_error("null pointer dereference");
+  if (p[0] < p[1] || p[0] + size > p[2]) {
+    $rt_error("pointer out of bounds: " + Math.floor((p[0] - p[1]) / size)
+      + " (range " + Math.floor((p[2] - p[1]) / size) + ")");
+  }
+  return p[0];
+}
+function $tchk(a) {
+  if (a === 0) $rt_error("null pointer dereference");
+  return a;
+}
+function $pload_i(a) { return $mdv.getBigInt64(a, true); }
+function $pload_r(a) { return $mdv.getFloat64(a, true); }
+function $pload_b(a) { return $mdv.getUint8(a) !== 0; }
+function $pstore_i(a, v) { $mdv.setBigInt64(a, $W(v), true); }
+function $pstore_r(a, v) { $mdv.setFloat64(a, v, true); }
+function $pstore_b(a, v) { $mdv.setUint8(a, v ? 1 : 0); }
+function $psub(p, q, size) {
+  if (p[1] !== q[1] || p[2] !== q[2]) $rt_error("pointer difference across different blocks");
+  return BigInt((p[0] - q[0]) / size);
+}
+// 走到块外**不报错**（只有解引用才报）：jancy 的 p += i 是合法的，*p 才是那句
+// out-of-bounds（type_ptr_data.rst 里的例子就是先加再解引用）。
+function $padd(p, k, size) { return [p[0] + Number(k) * size, p[1], p[2]]; }
+
 // 缓冲（ADR-0014 门槛 7 第一阶段）：一段连续的 int/real + 一个长度，引用语义。
 // 越界的消息与 list 那句同一个形状 —— 那句已经在三份实现里对齐过，照它写就不必再对一次。
 function $bnew(n, isInt) {

@@ -68,6 +68,82 @@ export function bufType(elem) { return { k: 'buf', elem }; }
  * 引用语义：所以 isRef 里有它。
  */
 export function arrType(elem) { return { k: 'arr', elem }; }
+/**
+ * 数据指针（ADR-0016 决策一）。jancy 的两种指针一一对应：
+ *
+ *   `(ptr T)`  —— **fat**，jancy 的默认指针。表示是**三字内联** `{addr, base, size}`，
+ *                 解引用与算术都查范围（`type_ptr_data.rst`：range is checked on both
+ *                 array accesses and pointer dereferences）。
+ *   `(tptr T)` —— **thin**，jancy 的 `thin*`。只有地址，不查。只在 `(unsafe …)` 里可达。
+ *
+ * **值语义**（所以 isRef 里没有它）：指针本身是一串数，赋值就是把那三个字（或一个字）
+ * 抄一份；被指向的那块内存才是共享的。这与 vec 同一档。
+ *
+ * `target` 这一刀收的：int / real / bool 与结构体。不收的与理由：
+ *   - string / arr / buf / class / fn 在这一层是**宿主句柄**（JS 侧是对象，C 侧是指针），
+ *     它们没有"一段可寻址的字节"这回事，指到它们身上没有意义；
+ *   - `(ptr (ptr T))` 要等 fat 指针自己能落进内存（三字的布局），第一刀先不开。
+ */
+export function ptrType(target) { return { k: 'ptr', target }; }
+export function tptrType(target) { return { k: 'tptr', target }; }
+
+/**
+ * 指针能指向的类型吗（上面那段注释里的那张名单）。
+ */
+export function ptrTargetOk(t) {
+  return t.k === 'int' || t.k === 'real' || t.k === 'bool' || t.k === 'struct';
+}
+
+/**
+ * 内存布局（ADR-0016 决策二）：**一套语义，两套实现**——所以尺寸与对齐必须由这一层定死，
+ * 不能各条腿自己算。C 那条腿也照这一份摆结构体（不吃编译器的自然布局），
+ * 不然 `(psub p q)` 与结构体字段偏移在两套实现里会不一样。
+ *
+ * int / real 都是 8 字节：int 在 JS 侧本来就是 BigInt（prelude.js:7 的 `$W`），
+ * DataView 的 `getBigInt64` 正好对上；real 是 float64。字节序**固定小端**。
+ * bool 是 1 字节（0/1）。
+ *
+ * 结构体是"自然对齐、按声明顺序、尾部补齐到自身对齐"——与 C 的默认布局同一条规矩，
+ * 所以把协议头结构体盖在缓冲上时两边看到的是同一件事（那是这门语言的用处所在，
+ * 见 type_ptr_data.rst 开头那段 TCP/IP 包的例子）。
+ */
+export function alignOf(t) {
+  if (t.k === 'bool') return 1;
+  if (t.k === 'int' || t.k === 'real') return 8;
+  if (t.k === 'struct') {
+    let a = 1;
+    for (const f of t.fields) a = Math.max(a, alignOf(f.type));
+    return a;
+  }
+  return 0;   // 不可落地的类型：调用方要先问 ptrTargetOk / layoutOk
+}
+
+export function sizeOf(t) {
+  if (t.k === 'bool') return 1;
+  if (t.k === 'int' || t.k === 'real') return 8;
+  if (t.k === 'struct') {
+    const l = structLayout(t);
+    return l === null ? 0 : l.size;
+  }
+  return 0;
+}
+
+/** 结构体的逐字段偏移 + 总尺寸（null = 里面有落不了地的字段） */
+export function structLayout(t) {
+  const fields = [];
+  let off = 0;
+  let align = 1;
+  for (const f of t.fields) {
+    const a = alignOf(f.type);
+    const s = sizeOf(f.type);
+    if (a === 0 || s === 0) return null;
+    off = Math.ceil(off / a) * a;
+    fields.push({ name: f.name, type: f.type, off });
+    off += s;
+    align = Math.max(align, a);
+  }
+  return { fields, size: Math.ceil(off / align) * align, align };
+}
 
 /** 引用语义的类型（赋值传引用，不拷贝） */
 export function isRef(t) {
@@ -87,6 +163,8 @@ export function typeKey(t) {
     case 'vec': return `vec_${typeKey(t.elem)}_${t.lanes}`;
     case 'buf': return `buf_${typeKey(t.elem)}`;
     case 'arr': return `arr_${typeKey(t.elem)}`;
+    case 'ptr': return `ptr_${typeKey(t.target)}`;
+    case 'tptr': return `tptr_${typeKey(t.target)}`;
     // 参数与返回之间用 `__` 分隔：参数之间是 `_`，所以零参也不会和别的键撞
     case 'fn': return `fn_${t.params.map(typeKey).join('_')}__${typeKey(t.ret)}`;
     default: return t.k;
@@ -103,6 +181,8 @@ export function typeName(t) {
     case 'vec': return `vec<${typeName(t.elem)}, ${t.lanes}>`;
     case 'buf': return `buf<${typeName(t.elem)}>`;
     case 'arr': return `arr<${typeName(t.elem)}>`;
+    case 'ptr': return `${typeName(t.target)}*`;
+    case 'tptr': return `${typeName(t.target)} thin*`;
     case 'fn': return `fn(${t.params.map(typeName).join(', ')}) -> ${typeName(t.ret)}`;
     default: return t.k;
   }
@@ -251,6 +331,11 @@ export function zeroValue(t) {
       count: { kind: 'Const', type: INT, value: 0n },
       zero: zeroValue(t.elem),
     };
+    // 指针的零值是**空指针**（ADR-0016）。这一格与 buf/arr 的"零值是空容器"刻意不同：
+    // jancy 那边没有"空指针指向的那块"这回事，`p == null` 是它自己就有的判据；
+    // 而且 `type_ptr_data.rst` 说得很清楚——编译器保证每个变量在用户代码碰它之前都被清零，
+    // 所以"未初始化的指针"在这门语言里不存在，零值必须是一个**能判**的值。
+    case 'ptr': case 'tptr': return { kind: 'PtrNull', type: t };
     default: return null;
   }
 }
