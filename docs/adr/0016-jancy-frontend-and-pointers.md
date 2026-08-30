@@ -987,6 +987,38 @@ type_ptr_data.rst。刻意不印任何裸地址。
 `stage0/src/frontend-jnc/lower.js` 一个文件，共享面一个字没碰。
 自举、`tests/jit`、`tests/mir`、`tests/llvm` 照旧没跑；`npm run lint` 这台机器上没有 typescript。
 
+### 第二十刀：数组的地址 —— 一个字都不用发，与一个 jancy 自己说不出的名字
+
+上一刀把数组那一格换成了"**一整块**的地址"，这一刀的结论因此是**空的**：`&a` 要的正是那一格
+里已经躺着的东西。所以这一层**一个字都不用发** —— `&a` 就降成 `(var a)`。
+
+**为什么是空的。** C 里 `a` 与 `&a` 值相同、类型不同（`int*` 对 `int(*)[3]`）。到了方言，
+`int[3]` 与 `int(*)[3]` 是**同一个写法** `(ptr (blk int 3))` —— 那一格本来就是块地址，
+"退一层"是 `(pelem …)`，"不退"就是原样。差别整个落在这一层的类型账上，运行时零成本。
+
+**这一条要排在 lvalue 之前。** `addrOf` 开头先看"目标是不是一个局部数组名"，命中就直接回
+`(var a)`。绕开 lvalue 是必须的：数组名在那儿会被当赋值目标处理，而数组之间没有赋值
+（`a = b` 是拒的），`&a` 却合法。顺带把 `expr0` 的名字分支与 lvalue 的 `indirect` 里
+数组与结构体归成一档（`agg`：不发 `pload`），并删掉声明处两处"提到堆上"的旧拒绝
+—— 那两条是第九刀为"标量取地址要提堆"写的，数组本来就在堆上，不需要提。
+
+**量出来的边界：`int(*pa)[3]` 这种声明，jancy 自己的语法里就没有。**
+`jnc_ct_Declarator.llk:402` 的 `declarator_prefix` 只有 `'*' type_modifier*`，
+整条 `declarator` 是 `declarator_prefix* declarator_name declarator_suffix* declarator_constructor?`
+—— **没有 C 那种带括号的声明符分组**。所以 `T(*)[N]` 在 jancy 里是个**说不出名字**的类型，
+`&a` 只能就地用。按"jancy 不向方言妥协"的反面：jancy 没有的东西，我们也不替它长出来。
+这条与第十九刀量出的"数组之间的赋值 jancy 自己也只在常量折叠那条路上有
+（`Cast_Array::llvmCast` 写着未实现）"归在同一栏 —— **不是我们欠的**。
+
+**期望输出的出处**：`cases/19-addr-array.jnc`，出处是一份 `cc -O0` 的 C 程序，逐字节相同。
+量在里面的有：`(*&a)[i]` 读、经它写回去原数组跟着变、`*&a` 退化成 `int*` 传给函数、
+二维时 `&a` 与行指针的关系、`&a == &a`。
+
+**跑过的轴**：`tests/jnc`（30/0，新增 `cases/19-addr-array`，五条腿逐字节相同）。
+**没跑的**：`tests/sexpr` / `tests/glr` / `tests/asy` —— 这一刀又只动了
+`stage0/src/frontend-jnc/lower.js` 一个文件，共享面一个字没碰。
+自举、`tests/jit`、`tests/mir`、`tests/llvm` 照旧没跑；`npm run lint` 这台机器上没有 typescript。
+
 ## 后果与代价
 
 - 方言从"没有可算术的引用"变成"有"。这一格会渗到 MIR 与四个后端，改不回去。

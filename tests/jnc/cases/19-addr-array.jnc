@@ -1,0 +1,53 @@
+// `&a`（ADR-0016 第二十刀）：数组的地址。换了表示之后它**一个字都不用发** —— 那一格里放的
+// 就是一整块的地址，所以 `&a` 就是 `(var a)` 自己，类型从 `int[3]` 变成 `int(*)[3]`
+// （在方言里这两个是同一个写法 `(ptr (blk int 3))`，差别只在这一层：`padd` 一步跨一整块
+// 还是一格元素）。
+//
+// **量出来的一条边界**：`int(*pa)[3]` 这种声明在 **jancy 自己的语法里就没有** ——
+// jnc_ct_Declarator.llk:402 的 `declarator_prefix` 只有 `'*' type_modifier*`，
+// 没有 C 那种带括号的声明符分组。所以 `T(*)[N]` 在 jancy 里是个**说不出名字**的类型，
+// `&a` 只能就地用（`(*&a)[i]`、`*&a` 退化成 `T*`、两个 `&a` 相等）。这一条不是我们欠 jancy 的。
+//
+// 期望输出的出处：**C**，下面这一份 `cc -O0` 编出来的程序，逐字节相同。
+//
+//   #include <stdio.h>
+//   int main() {
+//       long long a[3];
+//       a[0] = 10; a[1] = 20; a[2] = 30;
+//       printf("deref=%lld %lld\n", (*&a)[0], (*&a)[2]);
+//       (*&a)[1] = 99;
+//       printf("through=%lld\n", a[1]);
+//       long long* p = *&a;
+//       printf("decay=%lld\n", p[2]);
+//       long long b[2][3];
+//       b[1][2] = 7;
+//       printf("row=%lld\n", (*&b)[1][2]);
+//       printf("same=%d\n", &a == &a);
+//       return 0;
+//   }
+int main() {
+    int a[3];
+    a[0] = 10;
+    a[1] = 20;
+    a[2] = 30;
+
+    // `*&a` 又是那一块，下标照常
+    printf("deref=%d %d\n", (*&a)[0], (*&a)[2]);
+
+    // 写进去动的是 a 自己（取地址不复制）
+    (*&a)[1] = 99;
+    printf("through=%d\n", a[1]);
+
+    // `*&a` 退化成 `int*`
+    int* p = *&a;
+    printf("decay=%d\n", p[2]);
+
+    // 多维：`&b` 是 `int(*)[2][3]`，`(*&b)[1]` 是第 1 行
+    int b[2][3];
+    b[1][2] = 7;
+    printf("row=%d\n", (*&b)[1][2]);
+
+    // 两次取同一个数组的地址是同一格
+    printf("same=%d\n", &a == &a);
+    return 0;
+}

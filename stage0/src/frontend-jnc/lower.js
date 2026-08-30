@@ -33,7 +33,9 @@
 // `int a[3]` / `int a[] = { … }` / `int c[2];`（下标读写、花括号初值、退化成指针，
 // 见 tArr 与 localDeclCurly 那两段）、**多维数组** `int a[3][4]` / `int d[2][2][2]`
 // （一格里躺的是**一整块**的地址 `(ptr (blk T N))`，`a[i]` 是块里的第 i 格、它自己又是一块，
-// 退化成 `T*` 是方言的一句 `(pelem …)`；声明符的方括号从右往左套，见 tyText 与 declarator）、**模块级变量**（`int g = 5;` / `static int g;` /
+// 退化成 `T*` 是方言的一句 `(pelem …)`；声明符的方括号从右往左套，见 tyText 与 declarator）、
+// **数组的地址** `&a` / `(*&a)[i]` / `*&a`（一个字都不用发 —— 那一格里放的就是块地址，
+// 见 addrOf 开头那一段；`int(*pa)[3]` 这种声明**jancy 自己的语法里就没有**，见边界表）、**模块级变量**（`int g = 5;` / `static int g;` /
 // `int t[3] = { … }`，降成方言的 `(global …)` 加 `(main …)` 开头的几句赋值，见 globalDecl）、
 // **值语义的结构体**（`S s;` / `S t = s;` / `t = s` / `s.f` / `s.in.y` / `&s` / `S a[3]` /
 // 结构体的模块级变量 —— 每格是一段自己的 `pnew` 内存，抄一份由 copyAgg 逐字段做）、
@@ -77,13 +79,14 @@
 //     `struct Point` 之前会被方言拒）—— jancy 那边名字不看顺序，所以这是一条真差别。
 //     要补的是方言那一侧"内嵌的零值按拓扑序铺"，与第十七刀开的指针字段是两回事：
 //     指针是三个字、与目标布局无关，内嵌是真的内嵌。
-//   - 数组那一族里剩下的三条。第十八刀开了方言那一格（`(ptr (blk T N))` 与 `(pelem p)`），
-//     第十九刀把这一层的数组换成了"一整块"，多维因此落地了；还欠的是：`&a`（`T(*)[N]` ——
-//     换表示之后它其实只差把 addrOf 那一遍**不要**把数组提到堆上，那一格本来就是块地址）、
-//     数组形参与返回（jancy 与 C 一样退化成 `T*`，要在形参那一侧发 `(pelem …)`）、
-//     数组字段（要方言的字段类型也收 `(blk T N)`，撞的是与第十七刀同一张白名单，
-//     而且 C/LLVM 两条腿的结构体零值要多一格）。数组**之间的赋值**不在这一族里 ——
-//     **jancy 自己也只在常量折叠那条路上有**（`Cast_Array::llvmCast` 里写着未实现）。
+//   - 数组那一族里剩下的两条：数组形参与返回（jancy 与 C 一样退化成 `T*`，要在形参那一侧发
+//     `(pelem …)`）、数组字段（要方言的字段类型也收 `(blk T N)`，撞的是与第十七刀同一张
+//     白名单，而且 C/LLVM 两条腿的结构体零值要多一格）。另外两条**不是我们欠的**：
+//     数组之间的赋值 —— **jancy 自己也只在常量折叠那条路上有**
+//     （`Cast_Array::llvmCast` 里写着未实现）；`int(*pa)[3]` 这种声明 ——
+//     **jancy 自己的语法里就没有**带括号的声明符分组（`jnc_ct_Declarator.llk:402` 的
+//     `declarator_prefix` 只有 `'*' type_modifier*`），所以 `T(*)[N]` 在 jancy 里是个说不出
+//     名字的类型，`&a` 只能就地用（见 `cases/19-addr-array.jnc`）。
 //   - 模块级变量那一族里剩下的三条：`static` 的**局部量**（要"初值只跑一次"，jancy 那边是
 //     `once` 的机制）、`threadlocal`（要线程本地存储）、`&g`（**方言**这一侧的边界 —— 全局
 //     不在一段可寻址的内存里，jancy 的 `&g` 本身是合法的）。
@@ -211,6 +214,9 @@ function wrapTo(code, w) {
  * `(pelem …)`（地址与范围都不动，只换类型）。
  */
 function tyText(t) {
+  // `T(*)[N]`（第二十刀）：指向一整块的指针，在方言里与那块自己是**同一个写法** ——
+  // 都是 `(ptr (blk T N))`。差别只在这一层的类型上（`padd` 一步跨一整块还是一格元素）。
+  if (t.k === 'ptr' && t.target.k === 'arr') return `(ptr ${blkText(t.target)})`;
   if (t.k === 'ptr') return `(ptr ${tyText(t.target)})`;
   if (t.k === 'tptr') return `(tptr ${tyText(t.target)})`;
   if (t.k === 'arr') return `(ptr ${blkText(t)})`;
@@ -238,6 +244,7 @@ function slotText(t) {
 /** 给人看的写法（诊断里用）。跟 jancy 自己的拼法一致：`int*` / `int thin*` / `char`。 */
 const INT_NAMES = new Map([[8, 'char'], [16, 'short'], [32, 'int'], [64, 'long']]);
 function tyName(t) {
+  if (t.k === 'ptr' && t.target.k === 'arr') return `${tyName(t.target.el)}(*)[${t.target.n}]`;
   if (t.k === 'ptr') return `${tyName(t.target)}*`;
   if (t.k === 'tptr') return `${tyName(t.target)} thin*`;
   if (t.k === 'arr') return `${tyName(t.el)}[${t.n}]`;
@@ -1127,11 +1134,7 @@ class JncLower {
           this.nope(dcl, '把一个数组赋给另一个数组（jancy 自己也只在常量折叠那条路上有，见 Cast_Array::llvmCast）');
           return null;
         }
-        if (this.lifted.has(info.name)) {
-          this.nope(dcl, `对数组取地址（'&a' 是 ${tyName(info.type.el)}(*)[${info.type.n}]，`
-            + '方言那一格有了（(blk T N)，第十八刀），这一层还没换过去）');
-          return null;
-        }
+        // `&a` 不用把它提到堆上（第二十刀）：那一格里放的**就是**一整块的地址。
         this.push(info.name, info.type);
         const at = tyText(info.type);
         out.push(`${pad}(let ${info.name} ${at} (pnew ${at} (int 1)))`);
@@ -1223,11 +1226,6 @@ class JncLower {
     if (!isList(curly) || head(curly) !== 'curly') { this.err(n, '认不出的花括号初始化'); return null; }
     const t = this.curlyType(n, info, curly);
     if (t === null) return null;
-    if (isArr(t) && this.lifted.has(info.name)) {
-      this.nope(dcl, `对数组取地址（'&a' 是 ${tyName(t.el)}(*)[${t.n}]，方言那一格有了`
-        + '（(blk T N)，第十八刀），这一层还没换过去）');
-      return null;
-    }
     const out = [];
     const plan = this.curlyPlan(curly, t, pad, out, {
       shadow: info.name,
@@ -1268,7 +1266,7 @@ class JncLower {
       if (p === null) return null;
       if (!isPtr(p.type)) return this.err(n, `'*' 要一个指针，这里是 ${tyName(p.type)}`);
       const tt = p.type.target;
-      return { kind: isStruct(tt) ? 'agg' : 'ptr', code: p.code, type: tt };
+      return { kind: isStruct(tt) || isArr(tt) ? 'agg' : 'ptr', code: p.code, type: tt };
     }
     // `p[i] = v`。jancy 的下标就是 `*(p + i)`，范围检查在解引用那一步
     // （type_ptr_data.rst：Range is checked on both array accesses and pointer dereferences）
@@ -1859,7 +1857,10 @@ class JncLower {
           return this.err(n, `未声明的变量 '${nm}'`);
         }
         // 结构体那一格里放的就是地址（第十二刀），所以它不走 lifted 那条路。
-        if (isStruct(r.type)) return { code: `(var ${this.dialectName(nm)})`, type: r.type };
+        // 数组同理（第二十刀）：那一格里放的是**一整块**的地址，`&a` 就是它自己。
+        if (isStruct(r.type) || isArr(r.type)) {
+          return { code: `(var ${this.dialectName(nm)})`, type: r.type };
+        }
         // 提到堆上的那些名字要 pload 一次（第九刀）。模块级变量没有那一格（第十一刀）。
         if (!r.global && this.lifted.has(nm)) {
           return { code: `(pload (var ${this.cellName(nm)}))`, type: r.type };
@@ -1924,6 +1925,17 @@ class JncLower {
    * collectAddrTaken：它只认直接写在 `&` 后面的名字），当场说清而不是发出错代码。
    */
   addrOf(n) {
+    // `&a`（第二十刀）：数组那一格里放的**就是**一整块的地址，所以一个字都不用发 ——
+    // 回来的类型是 `T(*)[N]`，在方言里与 `T[N]` 是同一个写法 `(ptr (blk T N))`。
+    // 这一条要在 lvalue 之前：`a = b` 在那儿是拒的（数组之间没有赋值），而 `&a` 合法。
+    const tgt = n.items[1];
+    if (isList(tgt) && head(tgt) === 'name' && isAtom(tgt.items[1])) {
+      const nm = tgt.items[1].value;
+      const r = this.lookupRef(nm);
+      if (r !== null && isArr(r.type) && !r.global) {
+        return { code: `(var ${nm})`, type: tPtr(r.type) };
+      }
+    }
     const lv = this.lvalue(n.items[1]);
     if (lv === null) return null;
     if (lv.kind !== 'ptr') {
