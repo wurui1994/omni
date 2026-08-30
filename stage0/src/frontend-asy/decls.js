@@ -840,6 +840,8 @@ export function asyMethod(L, rec, cand, at) {
   L.push();
   if (!isStat) L.declare(cand.node, 'this', rec.name);
   for (const p of ps) L.declare(cand.node, p.name, p.type);
+  // 写着 `guide` 的形参：往它里面存的时候不钉死（第八十四刀，见 L.markGuide）
+  for (const p of ps) if (p.src === 'guide') L.markGuide(p.name);
   // 体的 AST 存一份：与文件级函数同一条（见 funBody）—— 里面的匿名函数要拿它问
   // "这个外层名字在闭包之后还会不会被改"。方法这一路原来漏了这一句，于是 capOf 看到
   // body 是 null 就一律拒，plain_picture.asy:488 的 `d(f,t*T)` 就是这么掉出去的。
@@ -1069,6 +1071,8 @@ export function asyFunc(L, n) {
   if (ps === null) return null;
   L.push();
   for (const p of ps) L.declare(n, p.name, p.type);
+  // 写着 `guide` 的形参：往它里面存的时候不钉死（第八十四刀，见 L.markGuide）
+  for (const p of ps) if (p.src === 'guide') L.markGuide(p.name);
   // 体的 AST 存一份：里面的匿名函数要拿它扫"这个外层名字会不会被改"（见 capOf）
   const saveFnBody = L.fnBody;
   L.fnBody = n.items[4];

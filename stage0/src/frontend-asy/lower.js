@@ -1041,6 +1041,25 @@ class AsyLower {
   }
 
   /**
+   * 这一格变量**写下来的类型名是 `guide`** 吗（第八十四刀）。这一层 `guide` 是 `path` 的
+   * 别名（`typedef path guide;`），可 asy 那边它们是两个类型，而且**看得出差别**：
+   * guide 是还没解的规格，path 是解好、控制点定死的。所以往一个写着 path 的变量里存的
+   * 时候要过一次 `asy__solid`（见 asySlotAssign 与 asyVardec），写着 guide 的不过。
+   * 记号与别名/箱子/改名那三条同一个拼法：键上加一个源码里不可能出现的前缀，
+   * 作用域一 pop 一起没。查的时候在**第一个有这个名字的层**上停 —— 遮住的语义跟着 lookup。
+   */
+  markGuide(nm) { this.scopes[this.scopes.length - 1].set(`\u0000gd:${nm}`, true); }
+
+  guideVar(nm) {
+    let i = this.scopes.length - 1;
+    while (i >= 0) {
+      if (this.scopes[i].has(nm)) return this.scopes[i].get(`\u0000gd:${nm}`) === true;
+      i--;
+    }
+    return false;
+  }
+
+  /**
    * `unravel x;` 摊出来的名字：类型照旧进 scopes（查得到），另存一条"它其实是谁的哪个
    * 字段"。那一条的键上加了一个源码里不可能出现的前缀，所以作用域一 pop 两条一起没。
    */

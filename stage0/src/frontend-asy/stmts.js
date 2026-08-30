@@ -590,6 +590,11 @@ export function asyVardec(L, n) {
   const isVar = L.isVarTy(n.items[1]);
   const base = isVar ? 'var' : L.type(n.items[1], '变量声明');
   if (base === null) return null;
+  // **写下来的**类型名（不是解析完的那个）。只这一处用：`guide` 与 `path` 在这一层是
+  // 同一个类型，可 asy 那边看得出差别（见 asySolid）。只认 `(name-ty 名字)` ——
+  // 数组与函数类型那两种形状不参与这一条。
+  const tsrc = isList(n.items[1]) && head(n.items[1]) === 'name-ty'
+    ? L.plainName(n.items[1].items[1]) : null;
   // `void` 只挡**真的变量**那一档：`void f(int);` 是一格函数值（返回类型是 void），
   // asy 那边这就是"前置声明"的写法 —— base 里 `void draw(frame f, path3 g, …);`
   // （three.asy:2112，真正那份在 :2234 赋进去）是这一种。所以这一条挪到循环里按项判。
@@ -685,6 +690,17 @@ export function asyVardec(L, n) {
     // 标量的全局是零初始化的，所以没有初值的声明什么都不发；**聚合不行**（第三十刀）——
     // 记录要 `new`、数组要 `anew`，零就是 null，一读就是 null reference。
     const g = L.fileLevel && L.scopes.length === 1 ? L.gvarAt(nm) : null;
+    // 写着 `guide` 的那一格记一条：往它里面存的时候**不**钉死（第八十四刀）。
+    // 局部量记在作用域里（markGuide），文件级那一格记在它自己那条记录上 ——
+    // 文件级变量在 scopes 里查不到（见 asyAssign 里 `t === null` 那一支）。
+    // 写着 `path`（或者别的名字落到 path 上）的，初值过一次 asy__solid ——
+    // asy 那边 `path p = a..b;` 里那次 guide -> path 的 cast 就是"解"。
+    if (t === 'path') {
+      if (tsrc === 'guide') {
+        if (g !== null) g.gd = true;
+        else L.markGuide(lnm);
+      } else if (d.items[2] !== undefined) init = asySolid(L, init);
+    }
     if (g !== null && g.ok) {
       // `var` 的文件级那份：类型是声明遍推出来的（globalNames 里那一段），这里把初值
       // 往那个类型上收一次 —— 两遍推出来的应该是同一个，收一次是为了万一不是时报错话
@@ -952,6 +968,10 @@ export function asyAssign(L, node, lhs, rhs, op) {
   // 文件级变量的两者不同：它降成了一个全局，符号名带前缀（第二十四刀）。
   let sym = L.symOf(nm);
   let t = L.lookup(nm);
+  // 写着 `guide` 的那一格不钉死（第八十四刀）。局部量的记号在作用域里（guideVar），
+  // 文件级那一格的记在它自己那条记录上（asyVardec 里的 `g.gd`）—— 文件级变量查不到
+  // scopes 里去（lookup 回 null，见下面 `t === null` 那一支）。
+  let gd = t === null ? false : L.guideVar(nm);
   // `unravel x;` 摊出来的名字：赋值落在 x 的那个字段上（见 declareAlias）
   if (t !== null) {
     const al = L.aliasOf(nm);
@@ -1037,14 +1057,17 @@ export function asyAssign(L, node, lhs, rhs, op) {
       const pick = rt === null ? null : L.gvarFor(nm, rt);
       if (pick !== null) g = pick;
     }
-    if (g !== null && g.ok) { sym = g.sym; t = g.type; }    else if (g !== null) {        return L.nope(node, `函数里改文件级变量 '${nm}'（这一刀的模块级变量`
+    if (g !== null && g.ok) { sym = g.sym; t = g.type; gd = g.gd === true; }    else if (g !== null) {        return L.nope(node, `函数里改文件级变量 '${nm}'（这一刀的模块级变量`
         + '只收 int/real/bool/string —— pair/记录/数组的身份不在 MIR 的类型码里）');
     } else if (L.globals.has(nm)) return L.gvarLate(node, nm);
     else return L.err(node, `未声明的变量 '${nm}'`);
   }
   if (op === null) {
     const v = L.coerce(L.expr(rhs), t, node, `给 '${nm}' 赋的值`);
-    return v === null ? null : [`(set ${sym} ${v.code})`];
+    if (v === null) return null;
+    // 写着 path 的那一格：存进去之前钉死一次（第八十四刀，见 asySolid）
+    const code = t === 'path' && !gd ? asySolid(L, v.code) : v.code;
+    return [`(set ${sym} ${code})`];
   }
   // 自增自减：右边就是 1，类型跟着变量
   const one = rhs === null ? { code: t === 'real' ? '(real 1.0)' : '(int 1)', type: t } : L.expr(rhs);
@@ -1135,6 +1158,30 @@ function asyAssignFldTo(L, node, q, rhs, op, f) {
 }
 
 /**
+ * 往一格**写着 `path`** 的变量里存的时候，把值"钉死"一次（第八十四刀）：`guide` 在 asy
+ * 那边是还没解的规格、`path` 是解好的，两者之间那次 cast 就是"解"。这一层 guide 是 path
+ * 的别名（asy_builtins.asy 的 `typedef path guide;`），所以那次 cast 落在这里 ——
+ * 绘图层的 `asy__solid` 把"每段怎么连的"改成"照已经解出来的控制点走"。
+ *
+ * 量出来的（真 asy 三种写法出三种图，见 asy__solid 上面那段）：写 path 的变量每一句赋值
+ * 都解一次，接缝处的方向由已定的控制点推出来（roundedpath.asy:37/49 的圆角就是它）；
+ * 写 guide 的整条链一起解。差别看得见，所以这一格不是"多做一次拷贝"，是语义。
+ *
+ * 绘图层没进来（没 `import plain;`）时找不到这个名字，那时原样返回 —— 那一档里
+ * `..` 也还没有。
+ */
+function asySolid(L, code) {
+  // **内建面自己不过这一格**：asy_builtins.asy 演的是 asy 的 C++ 那一层，那边 guide 与
+  // path 本来就是两个类型，`path h = pathcopy(a);` 这种句子里的 h 是"正在攒的规格"。
+  // 不豁免的话 asy__solid 的体里那句 `path h = pathcopy(g);` 会自己调自己（量到过：
+  // Maximum call stack size exceeded），而 asy__spjoin 里同样的句子会把攒着的规格清掉。
+  if (L.unit.key === 'asy_builtins') return code;
+  const cs = asyVisible(L, 'asy__solid');
+  if (cs.length === 0) return code;
+  return `(call ${cs[cs.length - 1].sym} ${code})`;
+}
+
+/**
  * "读一格、算一下、写回去"这一套（简单赋值、复合赋值、自增自减），左值抽成了
  * `cur`（读出来的代码）与 `put(值)`（写回去的语句）两件事。字段赋值与**装了箱的局部量**
  * 共用这一份 —— 两者的规矩逐条相同（同一批测量），只是左值的形状不一样。
@@ -1142,7 +1189,11 @@ function asyAssignFldTo(L, node, q, rhs, op, f) {
 export function asySlotAssign(L, node, label, kind, t, cur, put, rhs, op) {
   if (op === null) {
     const v = L.coerce(L.expr(rhs), t, node, `给 '${label}' 赋的值`);
-    return v === null ? null : put(v.code);
+    if (v === null) return null;
+    // 写着 path 的变量：存进去之前钉死一次（见 asySolid）。字段那一档不管 ——
+    // 记录的字段上"写下来的类型名"这一层没往下传，而 base 里成规模的累加都是局部量。
+    if (t === 'path' && kind === '变量' && !L.guideVar(label)) return put(asySolid(L, v.code));
+    return put(v.code);
   }
   const one = rhs === null ? { code: t === 'real' ? '(real 1.0)' : '(int 1)', type: t } : L.expr(rhs);
   if (one === null) return null;

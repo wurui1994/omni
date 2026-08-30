@@ -7296,6 +7296,64 @@ PythagoreanTree.asy 这一下变成逐字一样。EPS 那一轴：**能出图的
 `tests/asy/run.js` 259 passed / 0 failed（draw/colors 那一份钉的数在两种精度下印出来一样，
 所以它没能挡住这个错 —— 这一条记在明处）。
 
+### 第八十四刀：`guide` 与 `path` 的差别是"解没解过"，以及一个又骗了我一次的缓存
+
+roundpath.asy 的圆角全是直线。roundedpath.asy:37/49 攒路径的写法是
+
+```asy
+path RoundPath;                       // 写的是 path
+RoundPath = RoundPath -- scale(S)*LocalPair;
+RoundPath = RoundPath .. scale(S)*LocalPair;
+```
+
+**量出来的三份图**（同一串 knot，三种写法，真 asy 出三种结果）：
+
+- `path r=(0,0); r=r--(10,0); r=r..(20,10); r=r--(20,30); r=r..(10,40);`
+  → 两个 `..` 是 `curveto`；
+- 同样五句但 `guide g` → 全是 `lineto`；
+- 一句写完的 `path p=(0,0)--(10,0)..(20,10)--(20,30)..(10,40);` → 也全是 `lineto`。
+
+道理是 asy 的 `guide` 是**还没解**的规格（一棵树）、`path` 是解好的（控制点定死）。写 path 的
+变量每一句赋值都做一次 guide→path 的 cast，也就是解一次；接缝那个结的进侧于是是"已定控制点"，
+下一段的出侧由它推出方向（partnerUp）。写 guide 的那份整条链一起解，`--` 是两侧 curl 断点，
+夹在中间的 `..` 解出来正好是直线。第四十五刀的注里写着「量过 asy 那边'摊平成 flatguide 再一次
+解完'与'每步重解'落在同一个地方」—— 那句话在这一格上是错的，现在改了。
+
+这一层 `guide` 是 `path` 的别名（`typedef path guide;`，把它拆成两个类型要动 base 里 219 处，
+第四十七刀量过不值当），所以那次 cast 落成一格函数：`asy__solid` 把 joins 全改成"照已经解出来的
+控制点走"、清掉结上挂着的规格。前端在**写着 path** 的变量存值时插它（asyVardec 的初值、
+asySlotAssign 与 asyAssign 的那三条落点），写着 `guide` 的记一条记号跳过（局部量记在作用域里的
+`\u0000gd:名字`、文件级记在那条全局记录的 `gd` 上、形参看 `p.src === 'guide'`）。
+**内建面 asy_builtins.asy 整片豁免** —— 它演的是 asy 的 C++ 层，那边两个类型本来分得开，
+不豁免的话 `asy__solid` 体里那句 `path h = pathcopy(g);` 会自己调自己（量到过栈溢出）。
+
+顺带两格：
+
+**颜色分量进来要削**（pen.h:188/192 的 pos0 与 rgbrange）。roundpath.asy:29 那一圈
+`rgb(i*0.024, 1-i*0.024, 0)`，i 过 41 之后绿分量是负的：真 asy 印一次 `1 0 0` 之后
+**七圈一句颜色都不印**（削完全都一样，psfile 省掉了），我们印 `1 -0.0310078 0` 一路下去。
+gray/rgb/cmyk 三个构造都补上"负的当 0、饱和度超 1 按 1/sat 整组缩"。
+
+**又一个跑错程序的缓存**（与第七十九刀同一类）。`cli.js` 的 `srcStamp()` 注释写着"stage0/src
+底下每个文件"，代码走的却是 `installDir()` —— 那是 `stage0/src/host`。于是改了 frontend-asy
+底下任何一处降级器，产物缓存的键都不动：同一份探针在改完前端之后**仍然出旧图**，
+`rm -rf .omni-cache/asy-js` 之后才对。往上走一级走全 `stage0/src`，键里存整条路径而不是基名。
+（`tests/asy/eps.js` 自己那份 `srcStamp` 一直是对的 —— 它走 `stage0/src` 与 `stage0/lib`。）
+
+**摇骰子的那七个不计分**：random.cc:10 用 `std::random_device` 播种 `std::mt19937_64`，
+真 asy 自己两趟都不一样（量过：polardatagraph 连跑两趟，`%%BoundingBox` 从
+`259 345 352 446` 变成 `256 345 355 446`）。delu / Gouraudcontour / imagehistogram /
+pathintersectsurface / polardatagraph / randompath3 / floatingdisk 逐个连跑两趟真 asy 对比，
+七个全不稳定 —— 这条对照本身不成立，所以 eps.js 里单列一档 `DICE`，不算失败也不算通过。
+
+**这一刀的账**：参考里既不带 TeX 也不走光栅那一路的 28 个例子（axialshade circumcircle
+colorplanes Coons dragon fermi fractaltree grid latticeshading lines PythagoreanTree quilt
+rainbow roundpath shade shadestroke Sierpinski star strokepath strokeshade tensor textpath
+tiling transparency triangle worldmap yingyang 与两个 silhouette），**22 份逐字一样、
+结构差 0、数值差 0**；剩下 5 个是没出图（fermi 数组越界、strokepath 要绕 gs、textpath 要 TeX、
+tiling 要 `postscript`、worldmap 缺数据文件），2 个超 3s。
+`tests/asy/run.js` 259 passed / 0 failed；sweep 220 个里干净 219、3.9s，最慢 tvgen 303ms。
+
 ## 后果与代价
 
 

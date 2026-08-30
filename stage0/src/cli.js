@@ -378,10 +378,18 @@ function asyFrontEnd() {
 let lastAsyDeps = [];
 
 /**
- * 编译器自己那一份的印记：stage0/src 底下每个文件的「名字 + 改动时间 + 字节数」。
+ * 编译器自己那一份的印记：stage0/src 底下每个文件的「路径 + 改动时间 + 字节数」。
  * 产物缓存的键里带它 —— 改了降级器或后端，缓存整片失效。
  * 目录与文件按"名字里有没有点"分（stage0/src 底下目录都没有后缀，文件都有），
  * 因为 host/native.js 那张封闭表里没有 isDir。
+ *
+ * **这里原先只走了 `installDir()`**（那是 `stage0/src/host`），于是改了
+ * frontend-asy/ 底下任何一处降级器，印记都不动、产物缓存整片误命中 —— 量到过：
+ * 同一份 `path r=(0,0); r=r--(10,0); r=r..(20,10);` 在改完前端之后仍然出旧图
+ * （直线而不是曲线），`rm -rf .omni-cache/asy-js` 之后才对。这与第七十九刀那次
+ * "产物名只取基名"是同一类错：一个会跑错程序的缓存。所以往上走一级，走全 stage0/src；
+ * 键里存**整条路径**而不是基名（两个目录里同名的文件不能互相冒充）。
+ * lib/ 底下的 .asy 不在这里：它们逐个进了产物缓存的依赖清单（见 jsCachePut）。
  */
 let srcStampMemo = '';
 function srcStamp() {
@@ -391,10 +399,10 @@ function srcStamp() {
     for (const f of readDir(d).sort()) {
       const p = join(d, f);
       if (f.indexOf('.') < 0) walk(p);
-      else parts.push(`${f}:${mtimeMs(p)}:${fileSize(p)}`);
+      else parts.push(`${p}:${mtimeMs(p)}:${fileSize(p)}`);
     }
   };
-  walk(installDir());
+  walk(join(installDir(), '..'));
   srcStampMemo = hash16(parts.join('|'));
   return srcStampMemo;
 }

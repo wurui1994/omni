@@ -39,6 +39,16 @@ const TOL = 1e-3;
 // 超时的归成"慢"排在最后，单独用 `OMNI_EPS_T=60000 node tests/asy/eps.js <目录> <名字…>` 追。
 const LIMIT = Number(process.env.OMNI_EPS_T === undefined ? 3000 : process.env.OMNI_EPS_T);
 
+// **摇骰子的那几个，永远比不出来**：真 asy 的随机数（random.cc:10）用
+// `std::random_device` 播种 `std::mt19937_64`，连它自己两趟都不一样 —— 量过：
+// 同一份 polardatagraph.asy 连跑两趟，%%BoundingBox 就从 259 345 352 446 变成
+// 256 345 355 446。这六个不是我们做错了，是这条对照本身不成立，所以不计分。
+// 判据是量出来的（每个都连跑两趟真 asy 对比），不是看源码猜的。
+const DICE = new Set([
+  'delu', 'Gouraudcontour', 'imagehistogram',
+  'pathintersectsurface', 'polardatagraph', 'randompath3', 'floatingdisk',
+]);
+
 const exDir = process.argv[2];
 if (exDir === undefined) {
   console.error('用法：node tests/asy/eps.js <examples 目录> [名字…]');
@@ -218,6 +228,7 @@ let numdiff = 0;
 let structdiff = 0;
 let nogo = 0;
 let noref = 0;
+let dice = 0;
 let fresh = 0;
 let slow = 0;
 const bad = [];
@@ -227,6 +238,7 @@ const who = new Map();
 for (const n of names) {
   const p = join(exDir, `${n}.asy`);
   if (!existsSync(p)) { console.log(`  ?    ${n}：没有这个例子`); continue; }
+  if (existsSync(p) && DICE.has(n)) { dice++; continue; } // 真 asy 自己都不重复，不计分
   const rp = oracle(n, p);
   if (rp === null) { noref++; continue; }            // 没有参考，不计分
   let o = cached(n, p);
@@ -261,7 +273,8 @@ for (const n of names) {
 rmSync(WORK, { recursive: true, force: true });
 console.log(`EPS 那一轴：一样 ${same}、只有数值差 ${numdiff}、结构不同 ${structdiff}、`
   + `没出图 ${nogo}、超过 ${LIMIT}ms 的 ${slow}`
-  + `（没有参考、不计分的 ${noref} 份；这一趟真跑了 ${fresh} 个，其余用的是缓存）`);
+  + `（没有参考、不计分的 ${noref} 份；摇骰子、比不出来的 ${dice} 份；`
+  + `这一趟真跑了 ${fresh} 个，其余用的是缓存）`);
 for (const b of bad) console.log(`  ${b}`);
 if (slows.length > 0) {
   console.log(`--- 超时排在最后的 ${slows.length} 个（单独追：`

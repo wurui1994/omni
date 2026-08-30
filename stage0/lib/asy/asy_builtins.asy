@@ -448,9 +448,17 @@ pen linewidth(real w) {
   return q;
 }
 
+// 颜色分量进来先**削一遍**（pen.h:188 的 pos0 与 :190/:192 的 greyrange/rgbrange）：
+// 负的当 0，饱和度超过 1 的整组按 1/sat 缩回去。量出来的（roundpath.asy:29 那一圈
+// `rgb(i*0.024, 1-i*0.024, 0)`，i 到 42 之后绿分量是负的）：真 asy 印的是 `1 0 0`，
+// 而且**之后 7 圈一句颜色都不印** —— 削完全都一样，psfile 那边就省掉了。
+private real asy__pos0(real x) { return x >= 0 ? x : 0; }
+
 pen gray(real g) {
   pen q = pencopy(asy__defpen);
-  q.gray = g;
+  real y = asy__pos0(g);
+  if (y > 1.0) y = 1.0;
+  q.gray = y;
   q.isrgb = false;
   q.setcolor = true;
   return q;
@@ -458,9 +466,16 @@ pen gray(real g) {
 
 pen rgb(real r, real g, real b) {
   pen q = pencopy(asy__defpen);
-  q.red = r;
-  q.green = g;
-  q.blue = b;
+  real x = asy__pos0(r);
+  real y = asy__pos0(g);
+  real z = asy__pos0(b);
+  real sat = x;
+  if (y > sat) sat = y;
+  if (z > sat) sat = z;
+  if (sat > 1.0) { real s = 1.0 / sat; x = x * s; y = y * s; z = z * s; }
+  q.red = x;
+  q.green = y;
+  q.blue = z;
   q.isrgb = true;
   q.setcolor = true;
   return q;
@@ -1267,6 +1282,38 @@ private void asy__normjoins(path g) {
   int[] js;
   for (int i = 0; i < len; ++i) js.push(2);
   g.joins = js;
+}
+
+// **把一条路"钉死"**（第八十四刀）：joins 全按 2（照已经解出来的控制点走）、结上挂着的
+// 规格清空。这一格是 asy 里 `guide` -> `path` 那次 cast 的全部内容 —— guide 是**还没解**
+// 的规格，path 是解好的、控制点定死的。这一层 guide 就是 path，所以"解没解过"这件事
+// 落在这一格上：往一个**写着 path** 的变量里存的时候钉死，写着 guide 的不钉。
+//
+// 量出来的（同一份源码，三种写法在真 asy 那边出三种图）：
+//   path r=(0,0); r=r--(10,0); r=r..(20,10); r=r--(20,30); r=r..(10,40);
+//     -> 那两个 `..` 是**曲线**（curveto），因为每一句赋值都把左边解好钉死了，
+//        接缝处的进侧是"已定控制点"，出侧由它推出方向。
+//   guide g=…（同样五句） 与 path p=(0,0)--(10,0)..(20,10)--(20,30)..(10,40);
+//     -> 全是直线（lineto）：整条链一起解，`--` 是两侧 curl，`..` 那一段夹在两个
+//        curl 断点之间，解出来正好是直线。
+// roundedpath.asy:37/49 的 `RoundPath=RoundPath--…` / `RoundPath=RoundPath..…`
+// （RoundPath 写的是 path）就靠这一格才有圆角。
+path asy__solid(path g) {
+  int len = length(g);
+  if (len == 0) return g;
+  path h = pathcopy(g);
+  int[] js;
+  for (int i = 0; i < len; ++i) js.push(2);
+  h.joins = js;
+  for (int i = 0; i < h.nodes.length; ++i) {
+    h.nodes[i].inkind = 0;
+    h.nodes[i].inval = 0;
+    h.nodes[i].outkind = 0;
+    h.nodes[i].outval = 0;
+  }
+  h.pinkind = 0;
+  h.pinval = 0;
+  return h;
 }
 
 // 收到一个**规格结点**（第四十六刀）：把它记到累加中的那条路径上。前端把
@@ -2421,13 +2468,27 @@ bool invisible(pen p) { return p.isinvisible; }
 pen fontcommand(string s) { pen p; p.font = s; return p; }
 pen cmyk(real c, real m, real y, real k) {
   pen p;
+  // 与 gray/rgb 同一条（pen.h:391 的四个 pos0 + :202 的 cmykrange）：负的当 0，
+  // 饱和度（rgb 三个与 black 里最大的那个）超过 1 时整组按 1/sat 缩回去。
+  real cc = asy__pos0(c);
+  real mm = asy__pos0(m);
+  real yy = asy__pos0(y);
+  real kk = asy__pos0(k);
+  real sat = cc;
+  if (mm > sat) sat = mm;
+  if (yy > sat) sat = yy;
+  if (kk > sat) sat = kk;
+  if (sat > 1.0) {
+    real s = 1.0 / sat;
+    cc = cc * s; mm = mm * s; yy = yy * s; kk = kk * s;
+  }
   p.iscmyk = true; p.setcolor = true;
-  p.cyan = c; p.magenta = m; p.yellow = y; p.black = k;
+  p.cyan = cc; p.magenta = mm; p.yellow = yy; p.black = kk;
   // EPS 那一路只发 rgb/gray，所以这里同时算一份 rgb（cmyk -> rgb 的那条直白换算）
   p.isrgb = true;
-  p.red = (1 - c) * (1 - k);
-  p.green = (1 - m) * (1 - k);
-  p.blue = (1 - y) * (1 - k);
+  p.red = (1 - cc) * (1 - kk);
+  p.green = (1 - mm) * (1 - kk);
+  p.blue = (1 - yy) * (1 - kk);
   return p;
 }
 pen cmyk(pen p) { pen q = p; q.iscmyk = true; return q; }

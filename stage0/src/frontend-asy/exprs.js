@@ -536,6 +536,8 @@ export function asyCloFrom(L, n, ret, ps, bodyNode) {
     if (L.declare(n, 'this', selfRec.name) === null) bad = true;
   }
   for (const p of ps) if (L.declare(n, p.name, p.type) === null) bad = true;
+  // 写着 `guide` 的形参：往它里面存的时候不钉死（第八十四刀，见 L.markGuide）
+  for (const p of ps) if (p.src === 'guide') L.markGuide(p.name);
   // 形参装箱这一步在**闭包体**里也要走一遍（原来只有顶层函数与方法那两处）：
   // contour.asy:444 的 `void follow(int f(int,int,bool), int edge)` 是**函数体里的**
   // 具名函数（也走这条路），而它里面的 `void search()` 会改 `edge` —— 不装箱的话
