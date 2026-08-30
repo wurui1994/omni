@@ -7780,6 +7780,108 @@ cardioid / fjortoft / log / polarcircle 四份的 `%%BoundingBox` 也不再差 1
 但它们本来还差别的（长度 4339 vs 4257 之类），仍是"结构不同" —— 那是 graph 那一摊的账。
 
 
+### 第九十三刀：SVG 那条出口（自己定形状），与"趟数才是成本"的性能一账
+
+这一刀有两件事：**多一条出口**（SVG），与**性能第一次量着做**。
+
+#### 一、SVG：没有 oracle，所以形状由我们定
+
+真 asy **没有原生 SVG 出口**。它的 `-f svg` 是先出 DVI/EPS 再交给 dvisvgm，字形被拆成
+`<path>`，dvisvgm 换个版本字节就变。拿它当参考没有意义 —— 所以这一条出口是我们自己
+定的形状，判据也只能是自洽，不是逐字节。
+
+落点在 `asy_builtins.asy` 的 `_shipout`：
+
+```asy
+  if ((format == "" ? asy__defaultformat : format) == "svg") {
+    asy__svgship(f, bx, w, h);
+    return;
+  }
+```
+
+两条触发路：源码里 `shipout(…, format="svg")`（与真 asy 的 API 同形），或者在最前头摆一句
+`asy__defaultformat = "svg";`（隐式出图那一趟 plain 递下来的 format 是空串 —— 真 asy 是
+C++ 那一层自己去看 `settings::outformat`，我们这一层没有那个通道）。
+
+`asy__svgship` 的几处是**想清楚才这么写**的，不是随手：
+
+- **坐标系**。SVG 的 y 向下，PS 向上。整张图套一层
+  `<g transform="translate(-bx.l bx.t) scale(1 -1)">`，于是路径的 `d` 里就是**原样的 asy 坐标**，
+  一个数都不用换算。画布不套信纸（612×792）—— SVG 的画布就是图本身。
+- **标签在那一层外面**。文字不能进翻转的组（会上下颠倒），所以自己换算
+  `sx = p.x - bx.l`、`sy = bx.t - (p.y + r.depth)`，摆位用的是与 EPS 那一路**同一份**
+  `asy__labelbox` 对齐算术（宽高深还是问过 latex 的那三个数）。
+- **一条超路径出一个 `<path>`**。第一版按 `sh.gs[j]` 一条子路径一个 `<path>`，被
+  Sierpinski 抓住了：那份 EPS 是 364 个 `eoclip` + 1 个 `fill`，我们出了 729 个 `<path>`。
+  拆开是**错的** —— 偶奇/非零环绕要所有子路径一起算，拆完挖的洞就填上了。
+- **渐变**。axial/radial 正好对上 `<linearGradient>`/`<radialGradient>`，两端的笔就是两个
+  stop（`asy__svggrad`）。lattice/gouraud/tensor 三种 SVG 没有原生对应，按那一格自己的笔
+  纯色填 —— 写在注释里，不装作画对了。`/Extend` 只能映到 `spreadMethod="pad"`：SVG 没有
+  "只延一头"。
+
+#### 二、第十七条轴：`tests/asy/svg.js`
+
+没有 oracle 的轴要能证伪，问的是两件事：
+
+- **读得进**：良构 XML（标签配平、属性带引号、正文没有裸 `&`）。Node 没有内建 XML 解析器，
+  自己扫一遍 —— 只到良构那一层。
+- **与 EPS 那一路对得上**：同一个例子两种格式各出一份，比画布尺寸（`viewBox` 宽高 ==
+  `%%HiResBoundingBox` 宽高）、图元条数（`<path>` == `stroke`/`fill`/`eofill`/`shfill` 的次数）、
+  裁剪层数（`<clipPath>` == `clip`/`eoclip` 的次数）。
+
+两处账要先算清才对得上，两处都是**量出来的**：
+
+- 渐变那一族在 PS 里发**两次** clip（`emitshade` 自己把超路径当裁剪，
+  `gradshade`/`latshade`/`gourshade` 开头再一次 —— psfile.cc:373 那段 `endclip(pena)`）。
+  RiemannSurface 是 256 个 clip 对 128 个 shfill，扣 `2 * shade` 才归零。
+- 画布尺寸不能按绝对 1e-6 比：SVG 那份是 `ps()` 直接印宽高的 9 位有效，EPS 那份是**两个
+  几百量级的 9 位数相减**，粒度到 2e-6。contextfonts 就是这么被误判的
+  （2.99103400 vs 2.99103362）。判据改成绝对 1e-5 + 相对 1e-8，两个数都是记法的上限。
+
+带标签的例子在 EPS 那一路转去 latex+dvips（字节是 dvips 写的），图元数天然不可比 ——
+那种只验良构与画布，这一格在报告里单独数出来，不混进"对得上"。
+
+#### 三、性能：趟数才是成本
+
+profile 是量的，不是猜的（`NODE_OPTIONS='--cpu-prof'`，interpolate1.asy）：
+
+- 上一刀装了标签尺寸的**进程内**记忆之后，interpolate1 从 60s+ 掉到 6.65s，其中
+  **3.70s（54.8%）还在 `spawnSync`** —— 26 趟 latex。
+- 于是试了**投机预量**：既然要跑一趟 latex，把"造出来但还没量过的"全捎上。
+  **量出来是退步**：6.65s → 8.07s。原因清楚 —— 标签是在同一趟界里**边造边量**的
+  （plain_Label.asy:313 每次新造一条 labelrec），第一次量的时候后面那些还不存在；
+  而这个例子有 16 张图，跨图投机量的全是这一张用不到的字。这一段没有留，只留了注释。
+- 真正管用的是**盘上那一格记忆**（`/tmp/omni-asytex/dims.txt`）：键是（导言 + 字号 + 文本），
+  latex 对同一份输入是确定的，所以这一格纯粹是速度。
+  - equilateral：1.93s → **0.32s**（6 倍），输出**逐字节一样**；
+  - interpolate1：9.21s → **4.23s**，输出只差 dvips 自己那行 `%%CreationDate`。
+  - 存的是 **pt 的文本**，不是那三个 double。`string(real)` 只印 6 位，存 double 会掉精度，
+    而这三个数直接回流进 `%%BoundingBox`。存文本再走同一句
+    `asy__ptnum(...) * asy__tex2ps`，与活着量的那一路逐位一样。
+  - 格式带一行头 `OMNIDIM1 <剩下的字节数>`：`_writetext` 是"截短再写"，两个进程同时写时
+    读的那个可能捞到半份 —— 半份要是还能"解析成功"，尺寸就错了。长度对不上就整片不认。
+
+剩下的账（interpolate1，缓存全命中的那一趟，profile 下 6.4s）：
+
+- `spawnSync` 27.7% —— 16 张图各一趟 latex + dvips。这是"带标签的 EPS"这条管子本身，
+  memo 不掉；砍它要一个**活着的 latex 进程**（真 asy 就是那么做的，drawlabel.cc 那条双向管子），
+  而那要给三条腿都加一个双向进程原语，是另一刀。
+- 数组/向量那一层加起来近 **24%**：`$aget` 9.2、`$anew` 3.8、`$aset` 3.7、`$alen` 2.7、
+  `$vbin` 2.4、`$acopy` 1.8、`$vcopy` 1.4、`$nullCheck` 1.1、`$W` 1.1。这一刀把 null 检查与
+  `$acopy` 在这四个函数里**手展开**了（少跳一层）。
+- `asy__solvesection` 10.0%（Hobby 那个解），`decodeUTF8` 5.7%（读 base/*.asy 与 .log），
+  GC 3.3%。
+
+**下一刀的靶子已经量好了**：JS 后端里 `int` 是 **BigInt**。微基准（同一台机器、同一个 node）：
+
+- `a[Number(bigint)]` 对 `a[number]`：**76ms vs 6ms**（2000 万次，慢 12 倍）；
+- int 的加法带 64 位回绕，BigInt 对 Number：**1537ms vs 484ms**（慢 3.2 倍）。
+
+也就是说上面那 24% 里的大半是表示法的税，不是这几个函数写得笨。换表示法（int 走
+Number、只在真会溢出的地方发回绕）是一整刀，要连 C/LLVM 两条腿的语义一起对，
+所以这一刀只记账，不动。
+
+
 ## 后果与代价
 
 

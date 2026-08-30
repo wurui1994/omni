@@ -859,6 +859,10 @@ class AsyLower {
       ? `(call ${this.arrCopyHelper(asyElem(el))} (aget (var a) (var i)))`
       : `(aget (var a) (var i))`;
     const cyc = this.cycHelper(`${el}[]`);
+    // 登记册空着时**连调用都不发**：`cycis` 是线性扫，而这条 acopy 是 asy 值语义的
+    // 每一次数组拷贝都要走的路。量过 sinc.asy 的 CPU profile：`asy__cycis_arr_real`
+    // 自己占 12.3%（650ms / 5.3s），而 real[] 那本登记册整趟是空的 —— 花掉的全是
+    // 调用与 alen 的开销。先看一眼长度，空的就跳过。
     this.arrGen.set(nm, `  (fn ${nm} ((a ${at})) ${at}
     (let r ${at} (anew ${at} (alen (var a))))
     (let i int (int 0))
@@ -866,7 +870,8 @@ class AsyLower {
       (do
         (aset (var r) (var i) ${inner})
         (set i (bin "+" (var i) (int 1)))))
-    (if (call ${cyc.is} (var a)) (do (expr (call ${cyc.set} (var r) (bool true)))))
+    (if (bin "!=" (alen (var ${cyc.reg})) (int 0))
+      (do (if (call ${cyc.is} (var a)) (do (expr (call ${cyc.set} (var r) (bool true)))))))
     (ret (var r)))`);
     return nm;
   }
@@ -926,15 +931,27 @@ class AsyLower {
     this.used.add('asy__mod');
     // 登记册本身也是一个顶层项（`(global …)`），跟 helper 一起发
     this.arrGen.set(nm.reg, `  (global ${nm.reg} (arr ${ct}))`);
+    // 上一次问过的那一个记一格。下标操作绝大多数是"在同一个数组上循环"，所以这一格
+    // 把线性扫变成一次身份比较。量过 sinc.asy：登记册非空时 `asy__cycis_arr_real`
+    // 自己占 12.1%（709ms / 5.9s），全花在这条扫描上。
+    // set 那边一改就把这一格清掉（置成空引用，与任何真数组都不相等），所以答案不会过期。
+    this.arrGen.set(`${nm.is}__memo_a`, `  (global ${nm.is}__la ${ct})`);
+    this.arrGen.set(`${nm.is}__memo_b`, `  (global ${nm.is}__lb bool)`);
     this.arrGen.set(nm.is, `  (fn ${nm.is} ((a ${ct})) bool
+    (if (bin "==" (var ${nm.is}__la) (var a)) (do (ret (var ${nm.is}__lb))))
+    (let f bool (bool false))
     (let i int (int 0))
     (while (bin "<" (var i) (alen (var ${nm.reg})))
       (do
-        (if (bin "==" (aget (var ${nm.reg}) (var i)) (var a)) (do (ret (bool true))))
+        (if (bin "==" (aget (var ${nm.reg}) (var i)) (var a)) (do (set f (bool true)) (set i (alen (var ${nm.reg})))))
         (set i (bin "+" (var i) (int 1)))))
-    (ret (bool false)))`);
+    (set ${nm.is}__la (var a))
+    (set ${nm.is}__lb (var f))
+    (ret (var f)))`);
     // 取消标记就把那一格换成空引用：它跟任何真数组都不相等，所以 is 那边照旧对
     this.arrGen.set(nm.set, `  (fn ${nm.set} ((a ${ct}) (on bool)) void
+    (set ${nm.is}__la (null ${ct}))
+    (set ${nm.is}__lb (bool false))
     (let i int (int 0))
     (while (bin "<" (var i) (alen (var ${nm.reg})))
       (do

@@ -2069,63 +2069,220 @@ private real asy__ptnum(string s) {
   return sign * (m / p);
 }
 
+// 量过的尺寸记在这儿，按（用户导言 + 字号 + 串）做键。
+//
+// 为什么非要这一格：plain_Label.asy:320 每标一次标签就现造一个 frame、把标签摆到原点、
+// 再拿 min/max(f) 当 truesize —— 也就是**每一条标签、每一趟界**都是一条新的 labelrec，
+// `havebounds` 那条短路拦不住。graph 那一摊的界要算好几趟（`pic.scale.x.bound` 那个队列），
+// 于是同一个 `$x$` 会被反复问。量过 sinc.asy：一趟跑下来 spawnSync 叫了 **376 次**，
+// CPU profile 里 66.4% 的时间花在 child_process 上（18.5s 里的 12.3s）。
+// 记住之后同一个键只问一次。
+private string[] asy__mkey;
+private real[] asy__mw;
+private real[] asy__mh;
+private real[] asy__md;
+// 每一格对应的**原始 pt 文本**（"宽 高 深"，就是 .log 里那三个数的字面）。
+// 存文本而不是存那三个 double：`string(real)` 只印 6 位，存 double 会掉精度，而这三个数
+// 直接回流进 %%BoundingBox —— 掉一位就是整条 EPS 轴变色。存 pt 文本再走同一句
+// `asy__ptnum(...) * asy__tex2ps`，与活着量的那一路逐位一样。
+private string[] asy__mpt;
+private int asy__mfind(string k) {
+  for (int i = 0; i < asy__mkey.length; ++i) if (asy__mkey[i] == k) return i;
+  return -1;
+}
+
+// ---------------------------------------------------------------- 盘上那一格记忆（纯速度）
+//
+// 成本在**latex 的启动趟数**，不在标签条数：量过 interpolate1.asy，6.65s 里 3.70s（54.8%）
+// 花在 spawnSync 上，26 趟 latex。趟数砍不动 —— 标签是在同一趟界里边造边量的
+// （plain_Label.asy:313 每次都新造一条 labelrec），后面那些在第一次量的时候还不存在。
+// 投机预量试过，反而从 6.65s 变成 8.07s（跨图量的全是这张图用不到的字）。
+//
+// 所以换个方向：把量到的记到盘上。同一个例子重跑、以及 220 个例子互相之间，
+// 字符串重复得厉害（刻度上的 `$1$`、轴名上的 `$x$`）。latex 对同一份输入是确定的，
+// 这一格只影响速度。
+//
+// 格式：一行头 + 记录流。头里带**剩下那一段的字节数**，对不上就整片不认 ——
+// 两个进程同时写的时候 `_writetext` 是"截短再写"，读的那个可能捞到半份；半份要是
+// 还能"解析成功"，量出来的尺寸就错了，而尺寸直接回流进 %%BoundingBox。宁可不认。
+//   OMNIDIM1 <剩下的字节数>'\n'
+//   K<键的字节数>:<键>V<值的字节数>:<宽pt> <高pt> <深pt>;
+//
+// 两处说清：
+//   - 换了 TeX 装置（字体度量变了）这一格就该清掉 —— 键里没有 latex 的版本，
+//     那要多跑一趟 `latex --version`。`rm -rf /tmp/omni-asytex` 就是清法。
+//   - 两个进程同时写就是后写的赢，丢的只是几条记忆，不会记错（靠上面那个长度）。
+private string asy__dimfile = "/tmp/omni-asytex/dims.txt";
+private bool asy__dimloaded = false;
+
+private void asy__dimload() {
+  if (asy__dimloaded) return;
+  asy__dimloaded = true;
+  // `_readtext` 读不到就是运行期错误，所以先保证那份在（这一趟本来也要 mkdir 才能写 .tex）
+  if (_runproc("mkdir -p /tmp/omni-asytex && touch " + asy__dimfile) != 0) return;
+  string all = _readtext(asy__dimfile);
+  string head = "OMNIDIM1 ";
+  if (length(all) < length(head) || substr(all, 0, length(head)) != head) return;
+  int nlpos = find(all, '\n', 0);
+  if (nlpos < 0) return;
+  int want = (int) asy__ptnum(substr(all, length(head), nlpos - length(head)));
+  string s = substr(all, nlpos + 1, length(all) - nlpos - 1);
+  if (length(s) != want) return;          // 半份，整片不认
+  // 先攒到一边，整片都认得下来才并进记忆
+  string[] ks;
+  string[] vs;
+  int at = 0;
+  while (at < length(s)) {
+    if (substr(s, at, 1) != "K") return;
+    int c = find(s, ":", at);
+    if (c < 0) return;
+    int kn = (int) asy__ptnum(substr(s, at + 1, c - at - 1));
+    if (kn <= 0 || c + 1 + kn >= length(s)) return;
+    string k = substr(s, c + 1, kn);
+    int v = c + 1 + kn;
+    if (substr(s, v, 1) != "V") return;
+    int c2 = find(s, ":", v);
+    if (c2 < 0) return;
+    int vn = (int) asy__ptnum(substr(s, v + 1, c2 - v - 1));
+    if (vn <= 0 || c2 + 1 + vn >= length(s)) return;
+    string val = substr(s, c2 + 1, vn);
+    if (substr(s, c2 + 1 + vn, 1) != ";") return;
+    ks.push(k);
+    vs.push(val);
+    at = c2 + 1 + vn + 1;
+  }
+  for (int i = 0; i < ks.length; ++i) {
+    string three = vs[i];
+    int s1 = find(three, " ", 0);
+    if (s1 < 0) continue;
+    int s2 = find(three, " ", s1 + 1);
+    if (s2 < 0) continue;
+    asy__mkey.push(ks[i]);
+    asy__mpt.push(three);
+    asy__mw.push(asy__ptnum(substr(three, 0, s1)) * asy__tex2ps);
+    asy__mh.push(asy__ptnum(substr(three, s1 + 1, s2 - s1 - 1)) * asy__tex2ps);
+    asy__md.push(asy__ptnum(substr(three, s2 + 1, length(three) - s2 - 1)) * asy__tex2ps);
+  }
+}
+
+// 记忆整片写回去。条数封了顶：这一格是缓存，涨到没边就自己变成成本了。
+private void asy__dimsave() {
+  if (asy__mkey.length > 4000) return;
+  string s = "";
+  for (int i = 0; i < asy__mkey.length; ++i) {
+    s = s + "K" + string(length(asy__mkey[i])) + ":" + asy__mkey[i]
+      + "V" + string(length(asy__mpt[i])) + ":" + asy__mpt[i] + ";";
+  }
+  _writetext(asy__dimfile, "OMNIDIM1 " + string(length(s)) + '\n' + s);
+}
+
 // 一整批标签量一趟。`havebounds` 的那些跳过（drawlabel.cc:95 的同一条短路）。
 private void asy__measure(labelrec[] ls) {
-  int[] todo;
-  for (int i = 0; i < ls.length; ++i) if (ls[i].kind == 0 && !ls[i].havebounds) todo.push(i);
-  if (todo.length == 0) return;
-  string dir = "/tmp/omni-asytex";
-  // asy 的双引号串是**照字面**的（只有 \" 特殊），单引号串才过转义 —— 与真 asy 一字不差
-  // （量过：`"x\\y"` 是 4 个字符、`'p\nq'` 是 3 个）。所以反斜杠写一个就是一个，
-  // 换行得用 '\n'。第一版写成 "\\documentclass" 加 "\n"，生出来的 .tex 整份是一行
-  // 字面量 —— latex 照样退出 0，三个数全量成了 0，界只差了一点点，很能骗人。
+  int[] want;
+  for (int i = 0; i < ls.length; ++i) if (ls[i].kind == 0 && !ls[i].havebounds) want.push(i);
+  if (want.length == 0) return;
   string nl = '\n';
   string u = "";
   for (int i = 0; i < asy__texpre_user.length; ++i) u = u + asy__texpre_user[i] + nl;
-  string t = "\documentclass[12pt]{article}" + nl + u
-    + "\newbox\ASYbox" + nl + "\newdimen\ASYdimen" + nl + "\pagestyle{empty}" + nl
-    + "\begin{document}" + nl;
-  for (int k = 0; k < todo.length; ++k) {
-    labelrec r = ls[todo[k]];
-    // 笔上存的字号是 bp（fontsizeval），TeX 那边要 pt —— 除回去。默认那一格
-    // 11.9551681195517 / (72/72.27) 正好是 12，与 asy 生的 `\fontsize{12.000000}` 对上。
+  // 键里带上导言：texpreamble 改了尺寸就可能变
+  string ukey = string(length(u)) + ":" + u + ":";
+  string[] wkey;       // want 里每条的键
+  string[] keys;       // 这一批真要问 latex 的键（去重）
+  real[] askfs;        // keys 对应的字号（pt）
+  string[] asks;       // keys 对应的文本
+  for (int q = 0; q < want.length; ++q) {
+    labelrec r = ls[want[q]];
     real fs = r.p.fontsizeval / asy__tex2ps;
-    t = t + "\fontsize{" + string(fs) + "}{" + string(1.2 * fs) + "}\selectfont" + nl;
-    t = t + "\setbox\ASYbox=\hbox{" + r.s + "}" + nl;
-    t = t + "\immediate\write16{>dim(\the\wd\ASYbox)dim}" + nl;
-    t = t + "\immediate\write16{>dim(\the\ht\ASYbox)dim}" + nl;
-    t = t + "\immediate\write16{>dim(\the\dp\ASYbox)dim}" + nl;
+    string k = ukey + string(fs) + ":" + string(length(r.s)) + ":" + r.s;
+    wkey.push(k);
+    if (asy__mfind(k) >= 0) continue;
+    bool dup = false;
+    for (int j = 0; j < keys.length; ++j) if (keys[j] == k) { dup = true; break; }
+    if (!dup) { keys.push(k); askfs.push(fs); asks.push(r.s); }
   }
-  t = t + "\end{document}" + nl;
-  _runproc("mkdir -p " + dir);
-  _writetext(dir + "/m.tex", t);
-  int rc = _runproc("cd " + dir + " && latex -interaction=nonstopmode m.tex");
-  // 跑不起来（没装 latex）就把三个数当 0 收 —— 与 `-tex none` 那一路一样（那时
-  // drawlabel.cc:124 直接 `b += position`），至少还能出图。
-  string log = "";
-  if (rc == 0) log = _readtext(dir + "/m.log");
-  int at = 0;
-  int k = 0;
-  while (k < todo.length) {
-    real[] three;
-    for (int j = 0; j < 3; ++j) {
-      int a = find(log, ">dim(", at);
-      if (a < 0) break;
-      int b = find(log, "pt)dim", a);
-      if (b < 0) break;
-      three.push(asy__ptnum(substr(log, a + 5, b - a - 5)) * asy__tex2ps);
-      at = b + 6;
+  // 投机那一段试过，**量出来是退步**，所以没有留：既然已经要跑一趟 latex，把"造出来
+  // 但还没量过的"全捎上 —— 听起来该赚，实际上 interpolate1 从 6.65s 变成 8.07s。
+  // 原因是标签是**在同一趟界里边造边量的**，第一次量的时候后面那些还不存在；而这个例子
+  // 有 16 张图，跨图投机量的全是这一张用不到的字，白跑。
+  // 真正的成本是「latex 的启动趟数」，砍趟数得换别的办法（见下面那格盘上的记忆）。
+  if (keys.length > 0) {
+    // 先问盘上那一格：把记忆读进来，再重算"还缺哪些"。命中的话这一趟 latex 整个省掉。
+    asy__dimload();
+    string[] k2;
+    real[] f2;
+    string[] s2;
+    for (int k = 0; k < keys.length; ++k) {
+      if (asy__mfind(keys[k]) >= 0) continue;
+      k2.push(keys[k]); f2.push(askfs[k]); s2.push(asks[k]);
     }
-    if (three.length < 3) break;
-    labelrec r = ls[todo[k]];
-    r.width = three[0];
-    r.height = three[1];
-    r.depth = three[2];
-    r.havebounds = true;
-    k = k + 1;
+    keys = k2; askfs = f2; asks = s2;
   }
-  // 没量到的（latex 不在、或者 .log 里少了几条）也标上，别每次界都再跑一趟 latex
-  for (int i = 0; i < todo.length; ++i) ls[todo[i]].havebounds = true;
+  if (keys.length > 0) {
+    string dir = "/tmp/omni-asytex";
+    // asy 的双引号串是**照字面**的（只有 \" 特殊），单引号串才过转义 —— 与真 asy 一字不差
+    // （量过：`"x\\y"` 是 4 个字符、`'p\nq'` 是 3 个）。所以反斜杠写一个就是一个，
+    // 换行得用 '\n'。第一版写成 "\\documentclass" 加 "\n"，生出来的 .tex 整份是一行
+    // 字面量 —— latex 照样退出 0，三个数全量成了 0，界只差了一点点，很能骗人。
+    string t = "\documentclass[12pt]{article}" + nl + u
+      + "\newbox\ASYbox" + nl + "\newdimen\ASYdimen" + nl + "\pagestyle{empty}" + nl
+      + "\begin{document}" + nl;
+    for (int k = 0; k < keys.length; ++k) {
+      // 笔上存的字号是 bp（fontsizeval），TeX 那边要 pt —— 除回去（askfs 里已经是 pt）。
+      // 默认那一格 11.9551681195517 / (72/72.27) 正好是 12，与 asy 生的
+      // `\fontsize{12.000000}` 对上。
+      real fs = askfs[k];
+      t = t + "\fontsize{" + string(fs) + "}{" + string(1.2 * fs) + "}\selectfont" + nl;
+      t = t + "\setbox\ASYbox=\hbox{" + asks[k] + "}" + nl;
+      t = t + "\immediate\write16{>dim(\the\wd\ASYbox)dim}" + nl;
+      t = t + "\immediate\write16{>dim(\the\ht\ASYbox)dim}" + nl;
+      t = t + "\immediate\write16{>dim(\the\dp\ASYbox)dim}" + nl;
+    }
+    t = t + "\end{document}" + nl;
+    _runproc("mkdir -p " + dir);
+    _writetext(dir + "/m.tex", t);
+    int rc = _runproc("cd " + dir + " && latex -interaction=nonstopmode m.tex");
+    // 跑不起来（没装 latex）就把三个数当 0 收 —— 与 `-tex none` 那一路一样（那时
+    // drawlabel.cc:124 直接 `b += position`），至少还能出图。
+    string log = "";
+    if (rc == 0) log = _readtext(dir + "/m.log");
+    int at = 0;
+    int k = 0;
+    while (k < keys.length) {
+      real[] three;
+      string[] ptt;
+      for (int j = 0; j < 3; ++j) {
+        int a = find(log, ">dim(", at);
+        if (a < 0) break;
+        int b = find(log, "pt)dim", a);
+        if (b < 0) break;
+        string pt = substr(log, a + 5, b - a - 5);
+        ptt.push(pt);
+        three.push(asy__ptnum(pt) * asy__tex2ps);
+        at = b + 6;
+      }
+      if (three.length < 3) break;
+      asy__mkey.push(keys[k]);
+      asy__mw.push(three[0]);
+      asy__mh.push(three[1]);
+      asy__md.push(three[2]);
+      asy__mpt.push(ptt[0] + " " + ptt[1] + " " + ptt[2]);
+      k = k + 1;
+    }
+    // 没量到的（latex 不在、或者 .log 里少了几条）也记成 0，别每次界都再跑一趟 latex。
+    // **这种不写盘**：latex 没装是这台机器这一趟的事，不该腌进缓存。
+    bool full = k == keys.length;
+    for (int j = k; j < keys.length; ++j) {
+      asy__mkey.push(keys[j]); asy__mw.push(0); asy__mh.push(0); asy__md.push(0);
+      asy__mpt.push("0 0 0");
+    }
+    if (full) asy__dimsave();
+  }
+  for (int q = 0; q < want.length; ++q) {
+    labelrec r = ls[want[q]];
+    int h = asy__mfind(wkey[q]);
+    if (h >= 0) { r.width = asy__mw[h]; r.height = asy__mh[h]; r.depth = asy__md[h]; }
+    r.havebounds = true;
+  }
 }
 
 // 一条标签占的那个框（drawlabel.cc:106-135 逐句照抄）。默认 baseline 是 NOBASEALIGN，
@@ -6335,11 +6492,222 @@ private bool asy__texship(string prefix, frame f, box bx, real ox, real oy, real
   return true;
 }
 
+// ---------------------------------------- SVG 出口
+// 真 asy **没有**原生 SVG：它的 `-f svg` 是先出 EPS/PDF 再交给 dvisvgm 转的。所以这一路
+// 没有 oracle 可比，规矩由我们自己定 —— 定的原则是"与 PS 那一路同一份 frame、同一串数"，
+// 这样两边的坐标能逐字对照，出了偏差一眼看得出来是谁的。
+//
+// 坐标系：SVG 的 y 朝下、PS 的 y 朝上。不去改每个点，而是把整张图套进一个
+// `translate(-bx.l, bx.t) scale(1,-1)` 的组里 —— 组里的路径坐标与 PS 那一路**一模一样**。
+// 文字不能进这个组（会镜像），所以标签单独摆在外面、自己换算一次。
+private string asy__xmlesc(string s) {
+  string r = "";
+  for (int i = 0; i < length(s); ++i) {
+    string c = substr(s, i, 1);
+    if (c == "&") r = r + "&amp;";
+    else if (c == "<") r = r + "&lt;";
+    else if (c == ">") r = r + "&gt;";
+    else if (c == '"') r = r + "&quot;";
+    else r = r + c;
+  }
+  return r;
+}
+// 数学模式的 $ 与最外层的 {} 去掉 —— SVG 里排不了 TeX，只能把字面文字放进 <text>。
+private string asy__svgtext(string s) {
+  string r = "";
+  for (int i = 0; i < length(s); ++i) {
+    string c = substr(s, i, 1);
+    if (c == "$") continue;
+    r = r + c;
+  }
+  return asy__xmlesc(r);
+}
+private string asy__svghex2(int v) {
+  string d = "0123456789abcdef";
+  int c = v < 0 ? 0 : (v > 255 ? 255 : v);
+  return substr(d, c # 16, 1) + substr(d, c % 16, 1);
+}
+// cmyk 按 (1-c)(1-k) 折成 rgb（PostScript 的 setcmykcolor 也是这条）
+private string asy__svgcolor(pen p) {
+  real r; real g; real b;
+  if (p.iscmyk) {
+    r = (1 - p.cyan) * (1 - p.black);
+    g = (1 - p.magenta) * (1 - p.black);
+    b = (1 - p.yellow) * (1 - p.black);
+  } else if (p.isrgb) { r = p.red; g = p.green; b = p.blue; }
+  else { r = p.gray; g = p.gray; b = p.gray; }
+  return "#" + asy__svghex2((int) floor(r * 255 + 0.5))
+             + asy__svghex2((int) floor(g * 255 + 0.5))
+             + asy__svghex2((int) floor(b * 255 + 0.5));
+}
+private string asy__svgd(path g, real s) {
+  int n = g.nodes.length;
+  pair z0 = s * g.nodes[0].point;
+  string d = "M " + ps(z0.x) + " " + ps(z0.y);
+  for (int i = 1; i < n; ++i) {
+    pair z = s * g.nodes[i].point;
+    if (g.nodes[i - 1].straight) d = d + " L " + ps(z.x) + " " + ps(z.y);
+    else {
+      pair c1 = s * g.nodes[i - 1].post;
+      pair c2 = s * g.nodes[i].pre;
+      d = d + " C " + ps(c1.x) + " " + ps(c1.y) + " " + ps(c2.x) + " " + ps(c2.y)
+            + " " + ps(z.x) + " " + ps(z.y);
+    }
+  }
+  if (g.cyclic) {
+    if (!g.nodes[n - 1].straight) {
+      pair c1 = s * g.nodes[n - 1].post;
+      pair c2 = s * g.nodes[0].pre;
+      d = d + " C " + ps(c1.x) + " " + ps(c1.y) + " " + ps(c2.x) + " " + ps(c2.y)
+            + " " + ps(z0.x) + " " + ps(z0.y);
+    }
+    d = d + " Z";
+  } else if (n == 1) {
+    d = d + " L " + ps(z0.x) + " " + ps(z0.y);
+  }
+  return d;
+}
+// cap/join 的编号与 PostScript 一致（0 butt/miter、1 round、2 square/bevel）
+private string asy__svgstrokeattrs(pen p) {
+  string a = ' stroke="' + asy__svgcolor(p) + '" fill="none"';
+  a = a + ' stroke-width="' + ps(p.width == 0 ? 0.5 : p.width) + '"';
+  a = a + ' stroke-linecap="' + (p.cap == 1 ? "round" : (p.cap == 2 ? "square" : "butt")) + '"';
+  a = a + ' stroke-linejoin="' + (p.join == 1 ? "round" : (p.join == 2 ? "bevel" : "miter")) + '"';
+  a = a + ' stroke-miterlimit="' + ps(p.miter == 0 ? 10 : p.miter) + '"';
+  if (p.dashpat.length > 0) {
+    string ds = "";
+    for (int i = 0; i < p.dashpat.length; ++i) {
+      if (i > 0) ds = ds + ",";
+      ds = ds + ps(p.dashpat[i]);
+    }
+    a = a + ' stroke-dasharray="' + ds + '"';
+    if (p.dashoffset != 0) a = a + ' stroke-dashoffset="' + ps(p.dashoffset) + '"';
+  }
+  return a;
+}
+private string asy__svgfillattrs(pen p) {
+  return ' fill="' + asy__svgcolor(p) + '" stroke="none"'
+    + (p.evenodd ? ' fill-rule="evenodd"' : ' fill-rule="nonzero"');
+}
+// 一条超路径（path[]）出成**一个** d。分成几个 <path> 是错的：偶奇/非零环绕要看
+// 所有子路径一起算（挖洞那一类全靠这个），拆开之后洞就填上了。
+private string asy__svgds(path[] gs) {
+  string d = "";
+  for (int j = 0; j < gs.length; ++j) {
+    if (j > 0) d = d + " ";
+    d = d + asy__svgd(gs[j], 1);
+  }
+  return d;
+}
+private int asy__svgclipid = 0;
+private int asy__svggradid = 0;
+
+// 渐变：st 2 = axial（PS 的 /ShadingType 2）、st 3 = radial（3）。SVG 这边正好有对应的
+// <linearGradient> / <radialGradient>，两端的笔就是两个 stop。
+// exta/extb（PS 的 /Extend）对上 SVG 的 spreadMethod="pad" —— SVG 只有"两端一起 pad"，
+// 没法只延一头；两头都不延时也只能 pad（差别在渐变盒子外头，形状内一般看不见）。
+// radial 的 fr 是 SVG 2 才有的（1.1 没有内圈半径），这儿照发 —— 现在的渲染器都认。
+// lattice(1)/gouraud(4)/tensor(7) 这三种 SVG 没有原生对应（要么切网格、要么写 mesh），
+// 这一版按那一格自己的笔纯色填，不装作画对了。
+private string asy__svggrad(shadeinfo h) {
+  if (h.st != 2 && h.st != 3) return "";
+  asy__svggradid = asy__svggradid + 1;
+  string id = "g" + string(asy__svggradid);
+  string stops = '<stop offset="0" stop-color="' + asy__svgcolor(h.pena) + '"/>'
+    + '<stop offset="1" stop-color="' + asy__svgcolor(h.penb) + '"/>';
+  if (h.st == 2)
+    asy__out('<linearGradient id="' + id + '" gradientUnits="userSpaceOnUse"'
+      + ' x1="' + ps(h.za.x) + '" y1="' + ps(h.za.y) + '"'
+      + ' x2="' + ps(h.zb.x) + '" y2="' + ps(h.zb.y) + '">' + stops + "</linearGradient>");
+  else
+    asy__out('<radialGradient id="' + id + '" gradientUnits="userSpaceOnUse"'
+      + ' cx="' + ps(h.zb.x) + '" cy="' + ps(h.zb.y) + '" r="' + ps(h.rb) + '"'
+      + ' fx="' + ps(h.za.x) + '" fy="' + ps(h.za.y) + '" fr="' + ps(h.ra) + '">'
+      + stops + "</radialGradient>");
+  return "url(#" + id + ")";
+}
+
+// 一张图出成 SVG。裁剪按 SVG 的办法做：进裁剪开一个 <clipPath> 加一层 <g clip-path>，
+// 出裁剪关掉那一层 —— 与 PS 那边 gsave/clip/grestore 的嵌套一一对应。
+// axial/radial 走 <linearGradient>/<radialGradient>（见 asy__svggrad），其余网格类纯色填。
+private void asy__svgship(frame f, box bx, real w, real h) {
+  asy__out('<?xml version="1.0" encoding="UTF-8"?>');
+  asy__out('<svg xmlns="http://www.w3.org/2000/svg" version="1.1"'
+    + ' width="' + ps(w) + 'pt" height="' + ps(h) + 'pt"'
+    + ' viewBox="0 0 ' + ps(w) + " " + ps(h) + '">');
+  asy__out('<g transform="translate(' + ps(-bx.l) + " " + ps(bx.t) + ') scale(1 -1)">');
+  int depth = 0;               // 开着的 <g clip-path> 层数
+  for (int i = 0; i < f.ops.length; ++i) {
+    drawop o = f.ops[i];
+    if (o.kind == 3) {
+      if (o.sh.gs.length == 0) { asy__out("<g>"); depth = depth + 1; continue; }
+      asy__svgclipid = asy__svgclipid + 1;
+      string id = "c" + string(asy__svgclipid);
+      asy__out('<clipPath id="' + id + '"'
+        + (o.p.evenodd ? ' clip-rule="evenodd"' : ' clip-rule="nonzero"') + ">");
+      asy__out('<path d="' + asy__svgds(o.sh.gs) + '"/>');
+      asy__out("</clipPath>");
+      asy__out('<g clip-path="url(#' + id + ')">');
+      depth = depth + 1;
+      continue;
+    }
+    if (o.kind == 4) { if (depth > 0) { asy__out("</g>"); depth = depth - 1; } continue; }
+    if (o.kind == 2) {
+      string paint = asy__svggrad(o.sh);
+      string at = paint == ""
+        ? asy__svgfillattrs(o.p)
+        : ' fill="' + paint + '" stroke="none"'
+          + (o.p.evenodd ? ' fill-rule="evenodd"' : ' fill-rule="nonzero"');
+      if (o.sh.gs.length > 0)
+        asy__out('<path d="' + asy__svgds(o.sh.gs) + '"' + at + "/>");
+      continue;
+    }
+    pen q = o.p;
+    if (o.kind == 0 && q.dashpat.length > 0)
+      q = asy__dashadjfn(q, asy__arclenfn(o.g), o.g.cyclic);
+    asy__out('<path d="' + asy__svgd(o.g, 1) + '"'
+      + (o.kind == 0 ? asy__svgstrokeattrs(q) : asy__svgfillattrs(o.p)) + "/>");
+  }
+  while (depth > 0) { asy__out("</g>"); depth = depth - 1; }
+  asy__out("</g>");
+  // 标签：文字不进翻转的那一组，自己换算。基线在盒子底往上 depth 那一条。
+  // 宽高深是问过 latex 的（与 EPS 那一路同一份数），但字形是 SVG 的字体排的，
+  // 所以数学符号会走形 —— 这一条写在这儿，不装作没有。
+  for (int i = 0; i < f.labs.length; ++i) {
+    labelrec r = f.labs[i];
+    if (r.kind != 0 || r.s == "") continue;
+    pair al = inverse(r.t) * r.align;
+    real s0 = abs(al.x) > abs(al.y) ? abs(al.x) : abs(al.y);
+    if (s0 != 0) { real qq = 0.5 / s0; al = (al.x * qq, al.y * qq); }
+    al = (al.x - 0.5, al.y - 0.5);
+    real vert = r.height + r.depth;
+    al = (al.x * r.width, al.y * vert);
+    al = r.t * al;
+    pair p = r.position + al;
+    real sx = p.x - bx.l;
+    real sy = bx.t - (p.y + r.depth);
+    asy__out('<text x="' + ps(sx) + '" y="' + ps(sy) + '"'
+      + ' font-family="serif" font-size="' + ps(r.p.fontsizeval) + '"'
+      + ' fill="' + asy__svgcolor(r.p) + '">' + asy__svgtext(r.s) + "</text>");
+  }
+  asy__out("</svg>");
+}
+// 隐式出图（例子结尾那一趟）走的 format 是空串 —— plain 那边不把 settings.outformat
+// 递下来（真 asy 是 C++ 那一层自己去看 settings::outformat）。这一格就是那个兜底：
+// 摆一句 `asy__defaultformat = "svg";` 在最前头，整份例子不动就出 SVG。
+string asy__defaultformat = "";
+
 void _shipout(string prefix="", frame f, frame preamble=null, string format="",
               bool wait=false, bool view=true, transform t=identity()) {
   box bx = framebox(f);
   real w = bx.r - bx.l;
   real h = bx.t - bx.b;
+  // SVG 那一路：framebox 已经把标签量过了，尺寸与 EPS 那一路是同一份数。
+  // 不套纸（612x792）—— SVG 的画布就是图本身，没有"摆在信纸中间"这回事。
+  if ((format == "" ? asy__defaultformat : format) == "svg") {
+    asy__svgship(f, bx, w, h);
+    return;
+  }
   real ox = 0.5 * asy__excess(612, w);
   real oy = 0.5 * asy__excess(792, h);
   // 只有**真有一条标签**才走 latex 那条路。裁剪在 labs 里也占格子（kind 1/2 的影子），

@@ -83,21 +83,32 @@ function $anew(n, zero, cp) {
 // 数组句柄可以是 null（多维数组的行：new real[3][] 之后每行都还没构造），所以
 // 长度/下标/push/pop 都要先查 —— C 侧那四份单态实现与 blob 实现开头是同一句 omni_nullck。
 // 不查的话 JS 这边冒的是 TypeError（Cannot read properties of null），C 那边直接段错误。
-function $alen(a) { $nullCheck(a); return BigInt(a.length); }
+//
+// 这四个是**最热的一格**：量过 interpolate1.asy（标签尺寸都命中缓存的那一趟），
+// $aget 9.2%、$anew 3.8%、$aset 3.7%、$alen 2.7%、$acopy 1.8%，加上 $nullCheck 1.1%
+// 一共占掉近四分之一。所以 null 检查与 $acopy 都在这儿**手展开**，不再多跳一层函数。
+// （真正的大头是 int 在 JS 侧是 BigInt：量过 a[Number(bigint)] 比 a[number] 慢 12 倍，
+//  BigInt 的加法带回绕比 Number 慢 3.2 倍。那是另一刀的事，见 ADR-0014。
+//  注意这一整份是 String.raw 里的正文 —— 反引号会把它截断，注释里也不能写。）
+function $alen(a) { if (a === null) $rt_error("null reference"); return BigInt(a.length); }
 function $aget(a, i) {
-  $nullCheck(a);
+  if (a === null) $rt_error("null reference");
   const n = Number(i);
   if (n < 0 || n >= a.length) $rt_error("array index out of range: " + n + " (length " + a.length + ")");
   return a[n];
 }
 function $aset(a, i, v, cp) {
-  $nullCheck(a);
+  if (a === null) $rt_error("null reference");
   const n = Number(i);
   if (n < 0 || n >= a.length) $rt_error("array index out of range: " + n + " (length " + a.length + ")");
-  a[n] = $acopy(v, cp);
+  a[n] = cp === true && Array.isArray(v) ? v.slice() : v;
   return v;
 }
-function $apush(a, v, cp) { $nullCheck(a); a.push($acopy(v, cp)); return v; }
+function $apush(a, v, cp) {
+  if (a === null) $rt_error("null reference");
+  a.push(cp === true && Array.isArray(v) ? v.slice() : v);
+  return v;
+}
 
 function $apop(a) {
   $nullCheck(a);
