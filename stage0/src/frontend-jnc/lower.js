@@ -31,7 +31,8 @@
 // `(int thin*)p`（fat 转 thin，-> `(pthin p)`）、`&x` / `&*p` / `&p[i]` / `&p->f`
 // （取地址；局部量按 jancy 自己的办法提到堆上，见 addrOf 那一段）、**定长数组**
 // `int a[3]` / `int a[] = { … }` / `int c[2];`（下标读写、花括号初值、退化成指针，
-// 见 tArr 与 localDeclCurly 那两段）。
+// 见 tArr 与 localDeclCurly 那两段）、**模块级变量**（`int g = 5;` / `static int g;` /
+// `int t[3] = { … }`，降成方言的 `(global …)` 加 `(main …)` 开头的几句赋值，见 globalDecl）。
 //
 // ## 纪律：**jancy 不向方言妥协**
 //
@@ -55,6 +56,12 @@
 //     多维数组 `int a[10][20]`（元素是 `int[20]`）、数组之间的赋值（**jancy 自己也只在
 //     常量折叠那条路上有** —— `Cast_Array::llvmCast` 里写着未实现）、数组形参与返回
 //     （要写成 `T*`）、数组字段（要嵌在结构体里）、`&a`（`T(*)[N]`）。
+//   - 模块级变量那一族里剩下的四条：`static` 的**局部量**（要"初值只跑一次"，jancy 那边是
+//     `once` 的机制）、`threadlocal`（要线程本地存储）、`&g`（**方言**这一侧的边界 —— 全局
+//     不在一段可寻址的内存里，jancy 的 `&g` 本身是合法的）、结构体的模块级变量（与结构体
+//     的局部量同一格）。还有一条不是存储类而是查名字：**调用后面定义的函数**。jancy 的
+//     命名空间成员不看顺序，而这一层的函数是按源码顺序降的（模块级变量与命名类型已经
+//     分两遍先成型了，见 run）。
 //   - `printf` 之外的标准库（`std.*`、`io.*`、`gc.*`）
 //   - 格式化字面量 `$"…"`、多行字面量、正则 switch
 //   - class / union / enum / property / reactor / 事件 / 多播 / 协程
@@ -233,6 +240,8 @@ class JncLower {
     this.forStep = null;       // 当前所在 for 的步进（非 null 时 continue 要拦，见 stmt）
     this.tmp = 0;              // 生成名字的计数（do-while 的那格标志）
     this.lifted = new Set();   // 这个函数里被取过地址的局部量名（ADR-0016 第九刀）
+    this.globals = new Map();  // 模块级变量：名字 -> 类型（第十一刀）
+    this.globalInit = [];      // 模块级变量的初值语句，按声明序，跑在 main 的体之前
   }
 
   err(node, msg) {
@@ -258,12 +267,20 @@ class JncLower {
     this.scopes[this.scopes.length - 1].set(name, type);
   }
 
-  lookup(name) {
+  /** 名字的类型 + "它是模块级的吗"。方言里两者的读写形式相同（`(var …)` / `(set …)`），
+   *  分开是因为**取地址**只对局部量成立（第九刀的那格 cell 是局部量才有的）。 */
+  lookupRef(name) {
     for (let i = this.scopes.length - 1; i >= 0; i--) {
       const t = this.scopes[i].get(name);
-      if (t !== undefined) return t;
+      if (t !== undefined) return { type: t, global: false };
     }
-    return null;
+    const g = this.globals.get(name);
+    return g === undefined ? null : { type: g, global: true };
+  }
+
+  lookup(name) {
+    const r = this.lookupRef(name);
+    return r === null ? null : r.type;
   }
 
   /* ---------------------------------------------------------- 取地址（第九刀）
@@ -305,15 +322,45 @@ class JncLower {
    */
   liftable(t) { return isInt(t) || t === T_REAL || t === T_BOOL; }
 
+  /**
+   * 三遍走顶层（第十一刀）。jancy 的命名空间成员**不看声明顺序** —— 所以命名类型与模块级
+   * 变量都得在函数体降级之前就成型，不然 `int f() { return g; }` 写在 `int g = 1;` 上面
+   * 就会报"未声明"，而 jancy 那边它是对的。
+   *
+   * 第三遍里函数仍然是**按源码顺序**降的，所以"调用后面定义的函数"照旧不收 —— 那一条
+   * 与这一刀无关，单独记在上面那份名单里。
+   */
   run(tree) {
-    for (const item of this.flat(tree)) this.topItem(item);
+    const items = this.flat(tree);
+    for (const it of items) {
+      if (isList(it) && head(it) === 'type-decl') this.typeDecl(it.items[1]);
+    }
+    for (const it of items) {
+      if (!isList(it)) continue;
+      const h = head(it);
+      if (h === 'var-decl') this.globalDecl(it);
+      else if (h === 'var-decl-curly') this.globalDeclCurly(it);
+    }
+    for (const it of items) {
+      if (isList(it)) {
+        const h = head(it);
+        if (h === 'type-decl' || h === 'var-decl' || h === 'var-decl-curly') continue;
+      }
+      this.topItem(it);
+    }
     if (this.mainBody === null) {
       this.diags.error(null, 'jancy 的入口是 `int main()`，这份源码里没有');
       return '';
     }
     const parts = ['(module'];
     for (const d of this.decls) parts.push(d);
-    parts.push(`  (main\n${this.mainBody})`);
+    // 模块级变量的初值跑在 main 的体**之前**：jancy 的 module.construct 就是这个顺序
+    // （先把所有 static 零初始化，再按声明序跑各自的 initializer，然后才是用户代码）。
+    // 零初始化那一半方言自己做（(global …) 出来就是零），这里只发初值那一半。
+    const body = this.globalInit.length === 0
+      ? this.mainBody
+      : `${this.globalInit.join('\n')}\n${this.mainBody}`;
+    parts.push(`  (main\n${body})`);
     parts.push(')');
     return `${parts.join('\n')}\n`;
   }
@@ -324,10 +371,126 @@ class JncLower {
     if (!isList(item)) return this.err(item, '认不出的顶层条目');
     const h = head(item);
     if (h === 'empty-stmt') return null;            // 光一个分号
-    if (h === 'type-decl') return this.typeDecl(item.items[1]);
     if (h === 'fn-def') return this.fnDef(item);
-    if (h === 'var-decl') return this.nope(item, '模块级变量（jancy 的全局量还没接）');
     return this.nope(item, `顶层的 '${h}'`);
+  }
+
+  /**
+   * 模块级变量（第十一刀）。降成方言的 `(global 名字 类型)` 加 `(main …)` 开头的一句赋值。
+   *
+   * 存储类照 decl_storage.rst：**不写就是 static**（"If storage specifier is omitted, then
+   * global variables get assigned static storage class"），所以写出来的 `static` 与不写是
+   * 同一件事，这里照收。
+   *
+   * 零初始化不用发：方言的 `(global …)` 出来就是零（sexpr/lower.js 第二十四刀），而 jancy
+   * 那边 module.construct 的第一件事正是把所有 static 零初始化。
+   */
+  globalDecl(n) {
+    const sp = this.specs(n.items[1]);
+    if (sp === null) return null;
+    for (const d of this.flat(n.items[2])) {
+      const dh = isList(d) ? head(d) : null;
+      let dcl = d;
+      let initNode = null;
+      if (dh === 'init') { dcl = d.items[1]; initNode = d.items[2]; }
+      else if (dh === 'ref-init') { this.nope(d, '引用初始化（`:=`）'); continue; }
+      const info = this.declarator(dcl, sp);
+      if (info === null) continue;
+      if (info.formals !== null) { this.nope(dcl, '顶层的函数原型（只收带体的定义）'); continue; }
+      if (isArr(info.type)) {
+        if (info.type.n === null) { this.err(dcl, `'${info.name}[]' 的长度得从花括号初值数出来`); continue; }
+        if (initNode !== null) {
+          this.nope(dcl, '把一个数组赋给另一个数组（jancy 自己也只在常量折叠那条路上有）');
+          continue;
+        }
+        if (this.declareGlobal(dcl, info) === null) continue;
+        const at = tyText(info.type);
+        this.globalInit.push(`    (set ${info.name} (pnew ${at} (int ${info.type.n})))`);
+        continue;
+      }
+      if (this.declareGlobal(dcl, info) === null) continue;
+      if (initNode === null) continue;              // 零初始化，方言已经做了
+      const v = this.globalValue(initNode, info.type);
+      if (v === null) continue;
+      this.globalInit.push(`    (set ${info.name} ${v})`);
+    }
+    return null;
+  }
+
+  /** `int g[3] = { 1, 2, 3 };` 在顶层。与 localDeclCurly 同一套规矩，只是落在全局上。 */
+  globalDeclCurly(n) {
+    const sp = this.specs(n.items[1]);
+    if (sp === null) return null;
+    const dcl = n.items[2];
+    const info = this.declarator(dcl, sp);
+    if (info === null) return null;
+    if (info.formals !== null) return this.nope(dcl, '函数上的花括号初始化');
+    if (!isArr(info.type)) return this.nope(n, `${tyName(info.type)} 的花括号初始化（这一刀只有数组这一格）`);
+    const curly = n.items[3];
+    if (!isList(curly) || head(curly) !== 'curly') return this.err(n, '认不出的花括号初始化');
+    const items = this.flat(curly.items[1]);
+    const len = info.type.n === null ? items.length : info.type.n;
+    if (len < 1) return this.err(n, `'${info.name}[]' 的花括号初值是空的，数不出长度`);
+    if (items.length > len) {
+      return this.err(n, `花括号初值有 ${items.length} 项，而 ${info.name} 只有 ${len} 格`);
+    }
+    const ty = tArr(info.type.el, len);
+    if (this.declareGlobal(dcl, { name: info.name, type: ty }) === null) return null;
+    const at = tyText(ty);
+    this.globalInit.push(`    (set ${info.name} (pnew ${at} (int ${len})))`);
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      if (isList(it) && head(it) === 'skip-item') continue;
+      if (isList(it) && (head(it) === 'named-item' || head(it) === 'indexed-item' || head(it) === 'curly')) {
+        this.nope(it, `花括号初值里的 '${head(it)}'`);
+        return null;
+      }
+      let v = this.globalValue(it, info.type.el, true);
+      if (v === null) return null;
+      this.globalInit.push(`    (pstore (padd (var ${info.name}) (int ${i})) ${v})`);
+    }
+    return null;
+  }
+
+  /** 一格全局的登记：查重、挡下方言落不了地的类型，再发 `(global …)`。 */
+  declareGlobal(dcl, info) {
+    if (this.globals.has(info.name)) return this.err(dcl, `模块级变量 '${info.name}' 声明了两次`);
+    if (info.type === T_VOID) return this.err(dcl, `'${info.name}' 的类型是 void`);
+    // 结构体的全局与结构体的局部同一格：这一刀的结构体只能经指针到达，一个 struct 值
+    // 拿在手里没有能读它的形式，所以不收（与 localDecl 那处同一条理由）。
+    if (info.type.k === 'struct') return this.nope(dcl, `${tyName(info.type)} 的模块级变量`);
+    this.globals.set(info.name, info.type);
+    this.decls.push(`  (global ${info.name} ${tyText(info.type)})`);
+    return info;
+  }
+
+  /**
+   * 模块级变量的初值。它在**模块作用域**里求：没有局部量、没有被取地址的名字、没有
+   * 返回类型，所以那三样先清空再降 —— 不然会读到上一个函数留下的状态。
+   */
+  globalValue(node, want, isElem) {
+    const saveScopes = this.scopes;
+    const saveLifted = this.lifted;
+    const saveRet = this.retTy;
+    const saveUnsafe = this.unsafe;
+    this.scopes = [];
+    this.lifted = new Set();
+    this.retTy = T_VOID;
+    this.unsafe = false;
+    let v = this.expr(node, want);
+    this.scopes = saveScopes;
+    this.lifted = saveLifted;
+    this.retTy = saveRet;
+    this.unsafe = saveUnsafe;
+    if (v === null) return null;
+    if (isInt(v.type) && isInt(want)) v = intConv(v, want);
+    if (!sameTy(v.type, want)) {
+      this.err(node, isElem === true
+        ? `这一项是 ${tyName(v.type)}，而元素是 ${tyName(want)}`
+        : `初值的类型是 ${tyName(v.type)}，声明的是 ${tyName(want)}`);
+      return null;
+    }
+    return v.code;
   }
 
   /** `struct S { … }`。jancy 的 struct 是**值**类型（POD），所以降成方言的 `(struct …)`
@@ -372,7 +535,7 @@ class JncLower {
     return null;   // 限定名（`a.b`）第一刀不收
   }
 
-  /** `(specs 类型说明符 前置修饰符 后置修饰符)` -> 类型 + `thin` 标记。
+  /** `(specs 类型说明符 前置修饰符 后置修饰符)` -> 类型 + `thin` 标记 + `stat` 标记。
    *  `thin` 在 jancy 里是**类型修饰符**（Lexer.rl:222），语法上落在说明符表里，
    *  所以它在这儿而不是在 `*` 那一侧。 */
   specs(n) {
@@ -380,9 +543,17 @@ class JncLower {
     const mods = [...this.flat(n.items[2]), ...this.flat(n.items[3])]
       .map((m) => (isAtom(m) ? m.value : '?'));
     let thin = false;
+    let stat = false;
     for (const m of mods) {
       if (m === 'thin') { thin = true; continue; }
       if (m === 'const') continue;                      // 这一层不区分（没有可变性检查）
+      // 存储类（decl_storage.rst）。模块级变量**默认**就是 static（"If storage specifier is
+      // omitted, then global variables get assigned static storage class"），所以写出来
+      // 也是同一件事；局部量上的 static 是另一回事，由 localDecl 拒。
+      if (m === 'static') { stat = true; continue; }
+      // threadlocal 要线程本地存储，而这一层没有线程。文档自己也说它有两条限制
+      // （不能有初值、不能是聚合），接它得连那两条一起接。
+      if (m === 'threadlocal') { this.nope(n, '`threadlocal`（要线程本地存储）'); return null; }
       // `unsigned` 以前是**静默忽略**的，那在有位宽之后会直接给错答案
       // （`unsigned char c = 200` 该印 200，忽略的话印 -56）。所以现在明着拒。
       if (m === 'unsigned') { this.nope(n, '`unsigned`（要无符号那一半的位宽规则）'); return null; }
@@ -411,7 +582,7 @@ class JncLower {
       else if (this.structs.has(nm)) base = { k: 'struct', name: nm };
       else { this.err(ts, `没有这个类型：'${nm}'`); return null; }
     }
-    return { type: base, thin };
+    return { type: base, thin, stat };
   }
 
   /** 说明符表 + 一串 `*` -> 类型。`int thin*` 的 thin 管的是**最外层**那个 `*`
@@ -616,6 +787,10 @@ class JncLower {
     const pad = ' '.repeat(ind);
     const sp = this.specs(n.items[1]);
     if (sp === null) return null;
+    // `static int x = 1;` 在函数里是另一回事：一格程序启动时就分配好、初值**只跑一次**的
+    // 存储（decl_storage.rst）。jancy 那边它落在 module.construct 里，而"只跑一次"是
+    // `once` 的机制。接它要那两样，所以这一刀明着拒。
+    if (sp.stat) { this.nope(n, '`static` 的局部量（要"程序启动时分配、初值只跑一次"）'); return null; }
     const out = [];
     for (const d of this.flat(n.items[2])) {
       const dh = isList(d) ? head(d) : null;
@@ -702,6 +877,7 @@ class JncLower {
     const pad = ' '.repeat(ind);
     const sp = this.specs(n.items[1]);
     if (sp === null) return null;
+    if (sp.stat) { this.nope(n, '`static` 的局部量（要"程序启动时分配、初值只跑一次"）'); return null; }
     const dcl = n.items[2];
     const info = this.declarator(dcl, sp);
     if (info === null) return null;
@@ -757,15 +933,17 @@ class JncLower {
     const h = head(n);
     if (h === 'name') {
       const nm = n.items[1].value;
-      const t = this.lookup(nm);
-      if (t === null) return this.err(n, `未声明的变量 '${nm}'`);
+      const r = this.lookupRef(nm);
+      if (r === null) return this.err(n, `未声明的变量 '${nm}'`);
+      const t = r.type;
       // 数组名字不是可写的位置 —— `a = …` 在 C 里就不合法，jancy 那边也只有常量折叠
       // 那条路上有数组之间的转换（Cast_Array::llvmCast 里写着未实现）。
       if (isArr(t)) return this.nope(n, `给整个数组赋值（jancy 自己也只在常量折叠那条路上有）`);
       // 提到堆上的那些名字本身就是一格内存，所以它是 `ptr` 而不是 `var` ——
       // 于是读写自动走 pload / pstore，而 `&x` 就是它的 code（见 expr0 的 addr）。
-      if (this.lifted.has(nm)) return { kind: 'ptr', code: `(var ${this.cellName(nm)})`, type: t };
-      return { kind: 'var', name: nm, type: t };
+      // **只有局部量**有那一格：模块级变量在方言里是一个全局，取不到地址（见 addrOf）。
+      if (!r.global && this.lifted.has(nm)) return { kind: 'ptr', code: `(var ${this.cellName(nm)})`, type: t };
+      return { kind: 'var', name: nm, type: t, global: r.global };
     }
     // `*p = v`
     if (h === 'indirect') {
@@ -1298,14 +1476,16 @@ class JncLower {
       }
       case 'name': {
         const nm = n.items[1].value;
-        const t = this.lookup(nm);
-        if (t === null) {
+        const r = this.lookupRef(nm);
+        if (r === null) {
           if (this.fns.has(nm)) return this.nope(n, `把函数 '${nm}' 当值用`);
           return this.err(n, `未声明的变量 '${nm}'`);
         }
-        // 提到堆上的那些名字要 pload 一次（第九刀）。
-        if (this.lifted.has(nm)) return { code: `(pload (var ${this.cellName(nm)}))`, type: t };
-        return { code: `(var ${nm})`, type: t };
+        // 提到堆上的那些名字要 pload 一次（第九刀）。模块级变量没有那一格（第十一刀）。
+        if (!r.global && this.lifted.has(nm)) {
+          return { code: `(pload (var ${this.cellName(nm)}))`, type: r.type };
+        }
+        return { code: `(var ${nm})`, type: r.type };
       }
       case 'binary': return this.binary(n);
       case 'unary': return this.unary(n, want);
@@ -1352,6 +1532,11 @@ class JncLower {
     const lv = this.lvalue(n.items[1]);
     if (lv === null) return null;
     if (lv.kind !== 'ptr') {
+      // 模块级变量在方言里是一格全局，没有地址（第九刀那格 cell 是局部量才有的）。
+      // 要接就得让方言的全局也能被指到 —— 那是"全局也放在一段内存里"的另一件事。
+      if (lv.kind === 'var' && lv.global) {
+        return this.nope(n, `对模块级变量 '${lv.name}' 取地址（要方言的全局也能被指到）`);
+      }
       return this.nope(n, `对这种形状取地址（'&' 后面只认名字、'*p'、'p[i]'、'p->f'）`);
     }
     return { code: lv.code, type: tPtr(lv.type) };

@@ -581,6 +581,57 @@ int / real / bool / struct）、数组之间的赋值、数组形参与返回、
 **没跑的**：`tests/asy` 全部（这一刀只碰 `frontend-jnc/lower.js`）、`sweep.js`、`svg.js`、自举、
 `tests/jit`、`tests/mir`、`tests/llvm`。`npm run lint` 这台机器上没有 typescript，跑不了。
 
+### 第十一刀：模块级变量 —— 顺序照 jancy 的 module.construct，方言现成
+
+`(global 名字 类型)` 是方言第二十四刀就有的东西，而且零初始化、读写用 `(var …)` / `(set …)`
+都是现成的。所以这一刀真正要定的只有一件事：**初值什么时候跑**。
+
+出处不是文档而是 jancy 的源码。`Module::createConstructor`（`jnc_ct_Module.cpp:869`）里
+`module.construct` 的顺序写得很直白：
+
+1. 把所有 static 变量 `zeroInitialize`；
+2. 跑 primer（class 的那一批）；
+3. 按声明序跑各自的 **initializer**；
+4. 跑构造函数。
+
+然后才轮到用户代码。方言这边正好对得上：第 1 步方言自己做（`(global …)` 出来就是零），
+第 3 步就是 `(main …)` 开头的几句 `(set …)`，按声明序发。第 2、4 步这一刀没有对应物
+（还没有 class）。
+
+存储类照 `decl_storage.rst`：**不写就是 static**（"If storage specifier is omitted, then
+global variables get assigned static storage class"），所以 `static int g = 7;` 与
+`int g = 7;` 在顶层是同一件事，照收。`threadlocal` 拒 —— 它要线程本地存储，而文档自己也说
+它带两条限制（不能有初值、不能是聚合），接它得连那两条一起接。
+
+**顺带修掉的一处顺序依赖**：`run()` 现在分三遍走顶层 —— 命名类型、模块级变量、函数体。
+jancy 的命名空间成员**不看声明顺序**，所以
+
+```
+int readLater() { return later; }
+int later = 42;
+```
+
+是合法的（C 里不是）。函数本身仍然按源码顺序降，所以"调用后面定义的函数"照旧不收 ——
+那一条与这一刀无关，单独记进了名单。
+
+**四条边界。** `static` 的**局部量**（那是另一回事：程序启动时分配 + 初值**只跑一次**，
+后一半在 jancy 那边是 `once` 的机制，cflow_once.rst 那一节就是它；悄悄当普通局部量会给错
+答案，所以明着拒，`bad/static-local.jnc` 是它的本体）、`threadlocal`、`&g`、结构体的模块级
+变量（与结构体的局部量同一格）。
+
+`&g` 这一条值得单说：它是**方言这一侧**的边界，不是 jancy 的。jancy 的全局本来就有地址，
+而第九刀给局部量装的那格 `pnew` 对全局不适用 —— 全局在方言里不在一段可寻址的内存里。
+要接就得让全局也落在一段内存上，那会动到 MIR 的全局号与四条腿上全局的发法，单独一刀。
+
+**期望输出的出处**：C，一份 `cc -O0` 编出来的程序抄在 `cases/11-globals.jnc` 的头注里，
+前 9 行逐字节相同；第 10 行（`later` 那条顺序依赖）的出处是 jancy 的命名空间规则，C 表达
+不出来。
+
+**跑过的轴**：`tests/jnc`（21/0，新增 `cases/11-globals`、`bad/static-local`、
+`bad/addr-global`）、`tests/sexpr`（63/0）、`tests/glr`（20/0）。
+**没跑的**：`tests/asy` 全部（这一刀只碰 `frontend-jnc/lower.js`）、`sweep.js`、`svg.js`、自举、
+`tests/jit`、`tests/mir`、`tests/llvm`。`npm run lint` 这台机器上没有 typescript，跑不了。
+
 ## 后果与代价
 
 - 方言从"没有可算术的引用"变成"有"。这一格会渗到 MIR 与四个后端，改不回去。

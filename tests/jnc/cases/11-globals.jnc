@@ -1,0 +1,84 @@
+// 模块级变量（ADR-0016 第十一刀）。存储类照 decl_storage.rst：**不写就是 static**
+// （"If storage specifier is omitted, then global variables get assigned static storage
+// class"），所以 `static int statg = 7;` 与不写 static 是同一件事。
+//
+// 初值什么时候跑，出处是 jancy 自己的 Module::createConstructor（jnc_ct_Module.cpp:869）——
+// `module.construct` 里的顺序是：先把所有 static **零初始化**、再按声明序跑各自的
+// initializer、然后才轮到用户代码。这一层照这个顺序发：零初始化那一半方言自己做
+// （`(global …)` 出来就是零），初值那一半是 `(main …)` 开头的几句 `(set …)`。
+//
+// 期望输出的出处：**C**，下面这一份 `cc -O0` 编出来的程序，逐字节相同。
+//
+//   #include <stdio.h>
+//   #include <stdbool.h>
+//   int counter = 5;
+//   double ratio = 1.5;
+//   bool flag = true;
+//   int table[3] = { 10, 20, 30 };
+//   int zero;
+//   static int statg = 7;
+//   int derived = 2 * 3 + 1;
+//   void bump() { counter++; }
+//   int readCounter() { return counter; }
+//   int main() {
+//       printf("counter=%d\n", counter);
+//       bump(); bump();
+//       printf("counter=%d readCounter=%d\n", counter, readCounter());
+//       printf("ratio=%f flag=%d\n", ratio, flag);
+//       printf("table=%d %d %d\n", table[0], table[1], table[2]);
+//       printf("zero=%d\n", zero);
+//       table[1] = 99;
+//       printf("table1=%d\n", table[1]);
+//       printf("statg=%d derived=%d\n", statg, derived);
+//       int counter2 = counter;
+//       { int counter = 100; printf("shadow=%d\n", counter); }
+//       printf("after=%d %d\n", counter, counter2);
+//       return 0;
+//   }
+//
+// 一处出处不是 C 而是 jancy：`later` 声明在**用它的函数下面**。C 里那是"未声明的标识符"，
+// jancy 的命名空间成员不看声明顺序，所以 run() 分三遍走顶层（命名类型 -> 模块级变量 ->
+// 函数体）。注意函数本身仍然按源码顺序降，所以"调用后面定义的函数"照旧不收。
+int counter = 5;
+double ratio = 1.5;
+bool flag = true;
+int table[3] = { 10, 20, 30 };
+int zero;
+static int statg = 7;
+int derived = 2 * 3 + 1;
+
+void bump() {
+    counter++;
+}
+
+int readCounter() {
+    return counter;
+}
+
+int readLater() {
+    return later;
+}
+
+int later = 42;
+
+int main() {
+    printf("counter=%d\n", counter);
+    bump();
+    bump();
+    printf("counter=%d readCounter=%d\n", counter, readCounter());
+    printf("ratio=%f flag=%d\n", ratio, flag);
+    printf("table=%d %d %d\n", table[0], table[1], table[2]);
+    printf("zero=%d\n", zero);
+    table[1] = 99;
+    printf("table1=%d\n", table[1]);
+    printf("statg=%d derived=%d\n", statg, derived);
+    int counter2 = counter;
+    {
+        // 局部量遮盖同名的模块级变量：里面这个 counter 是新的一格
+        int counter = 100;
+        printf("shadow=%d\n", counter);
+    }
+    printf("after=%d %d\n", counter, counter2);
+    printf("later=%d\n", readLater());
+    return 0;
+}
