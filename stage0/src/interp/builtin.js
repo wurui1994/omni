@@ -11,7 +11,7 @@
 // 语言子集里的东西：不用 TextEncoder（自己按 UTF-8 编）、不用 new Function、不用正则字面量
 // 以外的正则。
 
-import { stdout, typeTag, fmtReal, fmtRealG, reprReal, callJsOp, readText, writeText, spawn } from '../host/native.js';
+import { stdout, typeTag, fmtReal, fmtRealG, fmtFixed, reprReal, callJsOp, readText, writeText, spawn } from '../host/native.js';
 import { JS_ABI, JS_MEMBERS } from '../hir/js_abi.js';
 import { OmniError } from '../source/diag.js';
 
@@ -786,6 +786,8 @@ export function applyBuiltin(I, e, a) {
     // `(supper S)` —— **只动 ASCII 的 a-z**。不用 toUpperCase()：那是 Unicode 的
     // （"ß" 会变成两个字符），C 那侧的 toupper 还看 locale，两条路对不上。
     case 'str_upper': return asciiUpper(a[0]);
+    // `(sfix E N)` —— C 的 `%.Nf`，**就近取偶**（不是 JS 的 toFixed，那在恰好一半上进位）
+    case 'str_fixed': return fmtFixed(a[0], a[1]);
     case 'to_string': return strOf(e.argType.k, a[0]);
     case 'to_string_g': return fmtRealG(a[0], a[1]);
     case 'trunc': return truncReal(a[0]);

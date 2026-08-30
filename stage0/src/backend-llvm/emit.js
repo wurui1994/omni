@@ -154,6 +154,8 @@ const RT_OPS = new Map([
   // 这两条是 ADR-0016 第七刀补的（jancy 的 %x / %X / %o）。
   ['str_base.int', { sym: 'omni_str_base', ret: '[2 x i64]', params: ['i64', 'i64'] }],
   ['str_upper.string', { sym: 'omni_str_upper', ret: '[2 x i64]', params: ['[2 x i64]'] }],
+  // 第八刀：C 的 %.Nf（就近取偶）。
+  ['str_fixed.real', { sym: 'omni_str_fixed', ret: '[2 x i64]', params: ['double', 'i64'] }],
 ]);
 
 /** i64 比较 -> icmp 谓词；f64 -> fcmp 谓词。顺序与 OP.EQ..OP.GT 一致。 */
@@ -1406,6 +1408,9 @@ function llFloat(text) {
   if (Number.isNaN(v)) return '0x7FF8000000000000';
   if (v === Infinity) return '0x7FF0000000000000';
   if (v === -Infinity) return '0xFFF0000000000000';
+  // 负零：`toPrecision` 把符号丢了（JS 里 `(-0).toPrecision(17)` 是 `"0.0000…"`）。
+  // 它看得见（`(sfix … (int 2))` 印 `-0.00`），所以走位模式那一路，与 inf/nan 同。
+  if (v === 0 && 1 / v < 0) return '0x8000000000000000';
   const s = v.toPrecision(17);
   return s.includes('.') || s.includes('e') || s.includes('E') ? s : `${s}.0`;
 }

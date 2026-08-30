@@ -39,9 +39,9 @@
 // 这一层的账，回卷是三条已有算符的合成，方言一个字都不用改。
 //
 // 还没长出来、因此**当场报错**的（每一条都记着该怎么长，不是"不收"）：
-//   - printf 的精度（`%.2f`）—— 要先定死 C 的 `%.*f` 与 JS 的 toFixed 在恰好一半上
-//     怎么对齐（0.125 到两位，C 给 0.12、JS 给 0.13）。挑哪边都行，但要两侧都实现。
 //   - `%*d`（宽度从实参来）—— 那要在运行期才知道宽度，与"格式串必须是字面量"同一处边界。
+//   - 整数与 `%s` 上的精度（`%.3d` 是"至少三位数字"、`%.5s` 是"最多五个字符"）—— 与小数
+//     无关的两件事，各要自己的一段。
 //   - `unsigned` —— 要无符号那一半的位宽规则：回卷变成 `x & M`（不摊符号位），
 //     `/` `%` `>>` `<` 都得换成无符号那一版。以前是静默忽略的，现在明着拒
 //     （见 tests/jnc/bad/unsigned.jnc）。
@@ -63,9 +63,14 @@
 // jancy 的 `printf` 就是它的打印口（`test/jnc/*.jnc` 里到处是它），语义是 C 的那一套：
 // **不补换行**。这一层按 `\n` 把格式串切成若干段，带换行的段发 `(print …)`（它自带换行），
 // 末尾不带换行的那段发 `(write …)`。两者在每条腿上共用同一个输出缓冲区，所以交替调用
-// 顺序不会乱。收 `%d` / `%i` / `%f` / `%s` / `%c` / `%x` / `%X` / `%o` / `%%`，标志 `-` `0`
-// 与十进制宽度；`%d` 与 `%x` 也收 bool（jancy 的 bool 底下是 int8，印 1 / 0）。宽度那一格
-// 与 C 的 printf **逐字节相同**（含 `%05d` 印负数是 `-0042` 这一条 —— 零补在符号后面）。
+// 顺序不会乱。收 `%d` / `%i` / `%f` / `%s` / `%c` / `%x` / `%X` / `%o` / `%%`，标志 `-` `0`、
+// 十进制宽度与精度 `.N`；`%d` 与 `%x` 也收 bool（jancy 的 bool 底下是 int8，印 1 / 0）。
+// 宽度那一格与 C 的 printf **逐字节相同**（含 `%05d` 印负数是 `-0042` 这一条 —— 零补在
+// 符号后面）。
+//
+// `%f` 是 C 的 `%.6f`（**默认精度 6**），走方言第八刀长出来的 `(sfix E N)`。它不是"把这个
+// 数印出来"—— 第八刀之前这一格降成 `tostr`（`%.6g`），于是 `printf("%f", 1.5)` 印 `1.5`
+// 而 C 印 `1.500000`。舍入定的是 C 那一边（就近取偶），理由写在 sexpr/lower.js 的 `sfix` 处。
 //
 // `%x` / `%X` / `%o` 靠方言第七刀长出来的 `(sbase E 进制)` 与 `(supper S)`。这一格真正的
 // 难处不是"印十六进制"，是**多少位**：C 把实参当 unsigned 读，位数是**默认实参提升之后**
@@ -712,33 +717,48 @@ class JncLower {
       const c = fmt[i];
       if (c === '\n') { flush(true); continue; }
       if (c !== '%') { lit += c; continue; }
-      // 转换说明：`%` [标志] [宽度] 转换字符。标志只收 `-`（左对齐）与 `0`（补零），
-      // 宽度只收十进制常量 —— `%*d`（宽度从实参来）要在运行期才知道宽度，那是
-      // "格式串在运行期解释"那条路，与"格式串必须是字面量"这条边界同一处。
+      // 转换说明：`%` [标志] [宽度] [`.` 精度] 转换字符。标志只收 `-`（左对齐）与 `0`
+      // （补零），宽度与精度只收十进制常量 —— `%*d`（宽度从实参来）要在运行期才知道宽度，
+      // 那是"格式串在运行期解释"那条路，与"格式串必须是字面量"这条边界同一处。
       let j = i + 1;
       let left = false;
       let zero = false;
       while (fmt[j] === '-' || fmt[j] === '0') { if (fmt[j] === '-') left = true; else zero = true; j++; }
       let width = 0;
       while (fmt[j] >= '0' && fmt[j] <= '9') { width = width * 10 + (fmt[j].charCodeAt(0) - 48); j++; }
+      // 精度 `.N`（ADR-0016 第八刀）。`.` 后面不写数字在 C 里是 0（`%.f` = `%.0f`）。
+      let prec = -1;
+      if (fmt[j] === '.') {
+        j++;
+        prec = 0;
+        while (fmt[j] >= '0' && fmt[j] <= '9') { prec = prec * 10 + (fmt[j].charCodeAt(0) - 48); j++; }
+      }
       const spec = fmt[j];
       i = j;
       if (spec === '%') { lit += '%'; continue; }
-      // 精度（`%.2f`）还没有：要先定死 C 的 `%.*f` 与 JS 的 toFixed 在**恰好一半**上
-      // 怎么对齐（0.125 -> C 给 0.12、JS 给 0.13）。记在 ADR-0016 的名单里。
       if (spec !== 'd' && spec !== 'i' && spec !== 'f' && spec !== 's' && spec !== 'c'
         && spec !== 'x' && spec !== 'X' && spec !== 'o') {
         this.nope(n, `printf 的转换 '%${spec === undefined ? '' : spec}'`);
         return null;
       }
+      // C 里精度对整数是"至少几位数字"、对 `%s` 是"最多取几个字符"—— 两件与小数无关的
+      // 事，各要自己的一段。这一刀只做 `%f` 那一格，别的当场说清。
+      if (prec >= 0 && spec !== 'f') {
+        this.nope(n, `'%${spec}' 上的精度（C 里它不是小数位数：对整数是"至少几位"、对 %s 是"最多几个字符"）`);
+        return null;
+      }
+      if (prec > 30) { this.err(n, `printf 的精度最多 30 位，这里是 ${prec}`); return null; }
       if (ai >= vals.length) { this.err(n, 'printf 的实参比格式串里的转换少'); return null; }
       const v = vals[ai];
+      // 这条转换对应的**实参节点**（诊断要指着它）。`vals[k]` 是第 k 个转换的值，而
+      // `args[0]` 是格式串，所以是 `ai + 1`；先取再自增 —— 自增之后取会指到下一个实参上。
+      const argNode = args[ai + 1];
       ai++;
       let piece = null;
       // `%c`：一个码位 -> 一个字符。方言的 `(chr E)`（另外四条腿早就有它）。
       if (spec === 'c') {
         if (!isInt(v.type)) {
-          this.err(args[ai], `'%c' 要整数（jancy 的 char 就是 8 位整数），这里是 ${tyName(v.type)}`);
+          this.err(argNode, `'%c' 要整数（jancy 的 char 就是 8 位整数），这里是 ${tyName(v.type)}`);
           return null;
         }
         piece = `(chr ${v.code})`;
@@ -758,17 +778,27 @@ class JncLower {
         let w = 32;
         if (v.type === T_BOOL) code = `(sel ${v.code} (int 1) (int 0))`;
         else if (isInt(v.type)) { code = v.code; w = promo(v.type.w); } else {
-          this.err(args[ai], `'%${spec}' 要整数，这里是 ${tyName(v.type)}`);
+          this.err(argNode, `'%${spec}' 要整数，这里是 ${tyName(v.type)}`);
           return null;
         }
         if (w < 64) code = `(bin "&" ${code} (int ${(1n << BigInt(w)) - 1n}))`;
         piece = `(sbase ${code} (int ${spec === 'o' ? 8 : 16}))`;
         // 大写走 `(supper …)`：`sbase` 只给小写，这条是它们分工的那一刀。
         if (spec === 'X') piece = `(supper ${piece})`;
+      } else if (spec === 'f') {
+        // `%f` 是 C 的 `%.6f`（**默认精度 6**），不是"把这个数印出来" —— 原先这一格降成
+        // `(tostr …)`（也就是 `%.6g`），于是 `printf("%f", 1.5)` 印 `1.5` 而 C 印
+        // `1.500000`。那是一处静默的差别，第八刀把它补上：`(sfix E N)`，N 默认 6。
+        if (v.type !== T_REAL) {
+          this.err(argNode, `'%f' 要 double，这里是 ${tyName(v.type)}（整数先写 (double)x）`);
+          return null;
+        }
+        piece = `(sfix ${v.code} (int ${prec < 0 ? 6 : prec}))`;
       } else {
-        const want = spec === 'f' ? T_REAL : (spec === 's' ? T_STR : T_I32);
+        // 到这儿只剩 `%s`（`%d` / `%i` 在整数与 bool 上都在上面接完了，剩下的是类型不对）
+        const want = spec === 's' ? T_STR : T_I32;
         if (!sameTy(v.type, want)) {
-          this.err(args[ai], `'%${spec}' 要 ${tyName(want)}，这里是 ${tyName(v.type)}`);
+          this.err(argNode, `'%${spec}' 要 ${tyName(want)}，这里是 ${tyName(v.type)}`);
           return null;
         }
         piece = v.type === T_STR ? v.code : `(tostr ${v.code})`;

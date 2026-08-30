@@ -1,0 +1,52 @@
+;; `(sfix E N)`（ADR-0016 第八刀）—— C 的 `%.Nf`：小数点后**正好 N 位**。
+;;
+;; 与 `(tostr E N)` 是两件事：那一条是 `%.Ng`（N 位有效数字、去尾随零），这一条不去零。
+;;
+;; 这份 case 真正盯住的是**恰好一半怎么舍**。两条实现路子在那一处本来不一样：C 的 printf
+;; 就近取偶（IEEE-754 的默认舍入），JS 的 `toFixed` 取较大的那个（ECMA-262 规定的）。
+;; 方言定的是**C 那一边**，所以 JS 那侧不能用 toFixed，得按精确值用 BigInt 算。
+;; 下面前八行就是那八个平局；出处是 C（`printf '%.2f' 0.125` 量过 -> 0.12）。
+(module
+  (main
+    ;; 平局：就近取偶。12.5 -> 12（偶数，不进）；37.5 -> 38（37 是奇数，进）
+    (print (sfix (real 0.125) (int 2)))
+    (print (sfix (real 0.375) (int 2)))
+    (print (sfix (real 0.5) (int 0)))
+    (print (sfix (real 1.5) (int 0)))
+    (print (sfix (real 2.5) (int 0)))
+    (print (sfix (real 3.5) (int 0)))
+    (print (sfix (real 0.25) (int 1)))
+    (print (sfix (real 0.75) (int 1)))
+
+    ;; 看着像平局其实不是 —— 二进制里 2.675 是 2.674999…、1.005 是 1.00499…
+    (print (sfix (real 2.675) (int 2)))
+    (print (sfix (real 1.005) (int 2)))
+
+    ;; 零、负零、负数。**负零的符号是这份 case 顺手抓出来的一处旧错**：`String(-0)` 是
+    ;; `"0"`，所以从 OIR / MIR 出去的 real 常量在四条腿上把符号丢了（解释器直接拿 JS 的值，
+    ;; 是唯一对的那条）。修在四处：from_oir 的 realText、backend-js 的 fmtRealLit、
+    ;; backend-c 的 cReal、backend-llvm 的 llFloat。下面第一行就是它（`%.6g` 也看得见）。
+    (print (real -0.0))
+    (print (sfix (real 0.0) (int 2)))
+    (print (sfix (real -0.0) (int 2)))
+    (print (sfix (real -1.5) (int 0)))
+    (print (sfix (real -0.125) (int 2)))
+
+    ;; N = 0 不留小数点
+    (print (sfix (real 1.0) (int 0)))
+    (print (sfix (real 100.0) (int 0)))
+
+    ;; 很大与很小：印的是那个 double 的**精确值**，不是它的短表示
+    (print (sfix (real 1e21) (int 2)))
+    (print (sfix (real 0.1) (int 20)))
+    (print (sfix (real 1e-300) (int 2)))
+    (print (sfix (real 12345.6789) (int 3)))
+
+    ;; 默认精度那一格（printf 的 `%f` 就是 `%.6f`）
+    (print (sfix (real 1.5) (int 6)))
+
+    ;; 运行期算出来的值，与上界 30 位
+    (let x real (bin "/" (real 1.0) (real 3.0)))
+    (print (sfix (var x) (int 30)))
+
+    (print (str "end"))))

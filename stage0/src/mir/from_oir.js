@@ -32,6 +32,10 @@ function realText(v) {
   if (s === 'Infinity') return 'inf';
   if (s === '-Infinity') return '-inf';
   if (s === 'NaN') return 'nan';
+  // `String(-0)` 是 `"0"` —— **负零的符号在这一步会掉**。它看得见：`%.6g` 印 `-0`、
+  // `(sfix … (int 2))` 印 `-0.00`。而解释器那条腿直接拿 JS 的值、不经这一步，所以少了
+  // 这一句就是"五条腿里四条印 0、一条印 -0"。刻意不用 Object.is（同下一行的理由）。
+  if (v === 0 && 1 / v < 0) return '-0.0';
   // 刻意用正则而不是 Number.isInteger：后者不在封闭 ABI 里（ADR-0011 决策 2）
   return /^-?[0-9]+$/.test(s) ? `${s}.0` : s;
 }

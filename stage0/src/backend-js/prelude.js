@@ -201,6 +201,41 @@ function $fmt_g(x, P) {
 
 const $fmt_real = (x) => $fmt_g(x, 6);
 
+// (sfix E N)：C 的 %.Nf（ADR-0016 第八刀）。**不能用 toFixed** —— 两者只在恰好一半上
+// 不一样，而那不是罕见情形：0.125 到两位，C 给 0.12（就近取偶，IEEE-754 的默认舍入），
+// JS 给 0.13（ECMA-262 规定取较大的 n）。挑的是 C 那一边（jancy 的 printf 底下就是它）。
+// 所以按精确值算：double 是 m * 2^e，于是 |x| * 10^N 是精确的有理数，用 BigInt 取整。
+function $str_fixed(x, p) {
+  var f = Number(p);
+  if (Number.isNaN(x)) return "nan";
+  if (x === Infinity) return "inf";
+  if (x === -Infinity) return "-inf";
+  var neg = x < 0 || Object.is(x, -0);
+  var dv = new DataView(new ArrayBuffer(8));
+  dv.setFloat64(0, Math.abs(x));
+  var hi = dv.getUint32(0);
+  var m = (BigInt(hi & 0xfffff) << 32n) | BigInt(dv.getUint32(4));
+  var be = (hi >>> 20) & 0x7ff;
+  var e;
+  if (be === 0) { e = -1074; } else { m |= 1n << 52n; e = be - 1075; }
+  var k;
+  if (e >= 0) {
+    k = m * (1n << BigInt(e)) * 10n ** BigInt(f);
+  } else {
+    var den = 1n << BigInt(-e);
+    var num = m * 10n ** BigInt(f);
+    k = num / den;
+    var r2 = (num % den) * 2n;
+    if (r2 > den || (r2 === den && (k & 1n) === 1n)) k += 1n;
+  }
+  var s = k.toString();
+  if (f > 0) {
+    if (s.length <= f) s = s.padStart(f + 1, "0");
+    s = s.slice(0, s.length - f) + "." + s.slice(s.length - f);
+  }
+  return neg ? "-" + s : s;
+}
+
 // (tostr E N)：按 N 位有效数字。位数在 Omni 里是 int，也就是 BigInt，$fmt_g 要的是
 // 普通数，所以这里转一下 —— 别的地方谁都别再自己转。
 const $str_real_g = (x, p) => $fmt_g(x, Number(p));

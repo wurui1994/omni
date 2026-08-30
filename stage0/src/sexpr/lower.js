@@ -1305,6 +1305,32 @@ class CoreLowerer {
       if (s.type.k !== 'string') return this.err(n, `(supper S) 的 S 要是 string，这里是 ${coreTypeText(s.type)}`);
       return { kind: 'Builtin', name: 'str_upper', args: [s], recvType: STRING, type: STRING };
     }
+    // `(sfix E N)` —— real -> 小数点后**正好 N 位**（ADR-0016 第八刀，C 的 `%.Nf`）。
+    //
+    // 与 `(tostr E N)` 是两件事：那一条是 `%.Ng`（N 位**有效数字**、去尾随零），这一条是
+    // `%.Nf`（小数点后固定 N 位、不去零）。printf 的 `%f` 要的是后者。
+    //
+    // **舍入定的是"就近取偶"**（C 的 printf，也就是 IEEE-754 的默认舍入）。这一条必须
+    // 在这儿写死，因为两条实现路子在**恰好一半**上本来不一样：C 给 `0.12`，JS 的
+    // `toFixed` 给 `0.13`（ECMA-262 规定取较大的 n）。挑 C 那一边的理由是 jancy —— 它的
+    // printf 底下就是 C 的 printf，而纪律是"jancy 不向方言妥协"。JS 那侧因此**不能**用
+    // toFixed，得按精确值用 BigInt 算（native.js 的 fmtFixed 与 prelude 的 $str_fixed）。
+    //
+    // 位数要写成字面量、范围 0..30：printf 里它永远是字面量，而上界让 C 那侧的缓冲有个头。
+    if (h === 'sfix') {
+      const v = this.expr(n.items[1]);
+      if (v === null) return null;
+      if (v.type !== REAL) return this.err(n, `(sfix E N) 的 E 要是 real，这里是 ${coreTypeText(v.type)}`);
+      if (!isList(n.items[2]) || head(n.items[2]) !== 'int') {
+        return this.err(n, '(sfix E N) 的位数要写成字面量 (int N)');
+      }
+      const p = this.intLit(n.items[2]);
+      if (p === null) return null;
+      if (p.value < 0n || p.value > 30n) {
+        return this.err(n, `(sfix E N) 的位数要在 0..30 之间，这里是 ${p.value}`);
+      }
+      return { kind: 'Builtin', name: 'str_fixed', args: [v, p], argType: REAL, type: STRING };
+    }
     // `(readtext E)`：把一份文本文件**整份**读成 string。方言里读文件只有这一个口子 ——
     // 被降级的语言那边的文件对象（asy 的 `input(name).line().word()`：分词、注释、eof）
     // 都在它上面搭，方言不认识"文件"这个概念，只认识"名字 -> 文本"。

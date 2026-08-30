@@ -1037,6 +1037,8 @@ class CEmitter {
       // `(sbase E 进制)` / `(supper S)`（ADR-0016 第七刀）
       case 'str_base': return `omni_str_base(${a[0]}, ${a[1]})`;
       case 'str_upper': return `omni_str_upper(${a[0]})`;
+      // `(sfix E N)`（ADR-0016 第八刀）—— C 的 %.Nf 本身就是那个出处
+      case 'str_fixed': return `omni_str_fixed(${a[0]}, ${a[1]})`;
       case 'to_string': return `omni_str_${e.argType.k}(${a[0]})`;
       case 'to_string_g': return `omni_str_realg(${a[0]}, ${a[1]})`;
       case 'trunc': return `omni_trunc(${a[0]})`;
@@ -1139,6 +1141,9 @@ function cReal(v) {
   if (Number.isNaN(v)) return '(0.0/0.0)';
   if (v === Infinity) return '(1.0/0.0)';
   if (v === -Infinity) return '(-1.0/0.0)';
+  // 负零：`toPrecision` 把符号丢了（JS 里 `(-0).toPrecision(17)` 是 `"0.0000…"`）。
+  // 它看得见 —— `(sfix … (int 2))` 印 `-0.00`，五条腿要一致。
+  if (v === 0 && 1 / v < 0) return '-0.0';
   // 17 位有效数字保证 double 往返无损
   const s = v.toPrecision(17);
   return s.includes('.') || s.includes('e') ? s : `${s}.0`;

@@ -537,6 +537,8 @@ class JsEmitter {
       // `(sbase E 进制)` / `(supper S)`（ADR-0016 第七刀，jancy 的 `%x` / `%X` / `%o` 要）
       case 'str_base': return `$str_base(${a[0]}, ${a[1]})`;
       case 'str_upper': return `$str_upper(${a[0]})`;
+      // `(sfix E N)`（ADR-0016 第八刀）—— C 的 %.Nf，就近取偶
+      case 'str_fixed': return `$str_fixed(${a[0]}, ${a[1]})`;
       case 'to_string': return `$str_${e.argType.k}(${a[0]})`;
       case 'to_string_g': return `$str_real_g(${a[0]}, ${a[1]})`;
       case 'trunc': return `$trunc(${a[0]})`;
@@ -608,6 +610,9 @@ class JsEmitter {
 }
 
 function fmtRealLit(v) {
+  // 负零：`${-0}` 是 `"0"`，符号在这儿会掉。它看得见（`(sfix … (int 2))` 印 `-0.00`），
+  // 五条腿要一致，所以这一支单列（C 后端的 cReal 与 LLVM 的 llFloat 各有同一句）。
+  if (v === 0 && 1 / v < 0) return '-0.0';
   if (Number.isFinite(v)) return Number.isInteger(v) && Math.abs(v) < 1e21 ? `${v}.0` : String(v);
   return v > 0 ? 'Infinity' : Number.isNaN(v) ? 'NaN' : '-Infinity';
 }

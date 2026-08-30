@@ -240,6 +240,49 @@ export function fmtReal(x) {
   return fmtG(x, 6);
 }
 
+/**
+ * `(sfix E N)` 上的 real：C 的 `%.Nf`（ADR-0016 第八刀）。
+ *
+ * **不能用 `toFixed`**：那两者只在**恰好一半**上不一样，而那一处不是罕见情形 ——
+ * `0.125` 到两位，C 给 `0.12`（就近取偶，IEEE-754 的默认舍入），JS 给 `0.13`
+ * （ECMA-262 规定"两个都最近时取较大的 n"）。挑的是 **C 那一边**：jancy 的 printf
+ * 底下就是 C 的 printf，而"jancy 不向方言妥协"这条纪律要的是 jancy 的答案。
+ *
+ * 于是这里按**精确值**算：double 就是 `m * 2^e`（m、e 都是整数），所以 `|x| * 10^N`
+ * 是一个精确的有理数 `num / den`，取整与判"是否正好一半"都用 BigInt 做，没有浮点误差。
+ */
+export function fmtFixed(x, p) {
+  const f = Number(p);
+  if (Number.isNaN(x)) return 'nan';
+  if (x === Infinity) return 'inf';
+  if (x === -Infinity) return '-inf';
+  const neg = x < 0 || Object.is(x, -0);
+  const dv = new DataView(new ArrayBuffer(8));
+  dv.setFloat64(0, Math.abs(x));
+  const hi = dv.getUint32(0);
+  let m = (BigInt(hi & 0xfffff) << 32n) | BigInt(dv.getUint32(4));
+  const be = (hi >>> 20) & 0x7ff;
+  let e;
+  if (be === 0) e = -1074;                      // 次正规数：没有那个隐含的 1
+  else { m |= 1n << 52n; e = be - 1075; }
+  let k;
+  if (e >= 0) k = m * (1n << BigInt(e)) * 10n ** BigInt(f);
+  else {
+    const den = 1n << BigInt(-e);
+    const num = m * 10n ** BigInt(f);
+    k = num / den;
+    const r2 = (num % den) * 2n;
+    // 就近取偶：正好一半时只在 k 是奇数的时候进位
+    if (r2 > den || (r2 === den && (k & 1n) === 1n)) k += 1n;
+  }
+  let s = k.toString();
+  if (f > 0) {
+    if (s.length <= f) s = s.padStart(f + 1, '0');
+    s = `${s.slice(0, s.length - f)}.${s.slice(s.length - f)}`;
+  }
+  return neg ? `-${s}` : s;
+}
+
 /** `(tostr E N)` 上的 real：N 位有效数字。位数是 int，也就是 BigInt，这里转一次 */
 export function fmtRealG(x, p) {
   return fmtG(x, Number(p));
