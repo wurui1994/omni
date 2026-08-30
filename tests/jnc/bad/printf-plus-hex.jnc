@@ -1,0 +1,13 @@
+// `+` 标志用在 `%x` 上。这不是"我们还没接"—— C 里它是**未定义行为**：`+` 与空格是
+// "有符号转换的符号位"那件事，而 `%x` / `%X` / `%o` / `%u` 把实参当**无符号**读，没有符号
+// 可言。clang 直说 "flag '+' results in undefined behavior with 'x' conversion specifier"。
+//
+// 与它同一格的另外两条：`%c` 上的精度（bad 那一组里没单独一份，`cases/26-printf-prec.jnc`
+// 的头注释记着）、`#` 用在 `%d` / `%s` / `%c` 上。
+//
+// 没有可对的答案的东西不猜 —— 这一条与"还没长出来"的那些（`%e` / `%g` / `%u` / `%p`，
+// 见 bad/printf-conv-e.jnc）是两种不同的拒。
+int main() {
+    printf("%+x\n", 255);
+    return 0;
+}

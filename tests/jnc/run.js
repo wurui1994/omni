@@ -24,9 +24,12 @@
 //      cases/09-addr.jnc、cases/10-arrays.jnc、cases/11-globals.jnc、cases/12-structs.jnc、
 //      cases/13-struct-args.jnc、cases/14-curly.jnc、cases/15-forward.jnc、
 //      cases/16-ptrptr.jnc；`new T { … }` 是第二十五刀、`static` 的局部量是第二十六刀、
-//      整数与 `%s` 上的精度加 `%*d` 是第二十七刀、`%.*f` 是第二十八刀，在
-//      cases/24-new-curly.jnc、cases/25-static-local.jnc、cases/26-printf-prec.jnc、
-//      cases/27-printf-star-prec.jnc。）
+//      整数与 `%s` 上的精度加 `%*d` 是第二十七刀、`%.*f` 是第二十八刀、`+` / 空格 / `#`
+//      三个标志是第二十九刀，在 cases/24-new-curly.jnc、cases/25-static-local.jnc、
+//      cases/26-printf-prec.jnc、cases/27-printf-star-prec.jnc、cases/28-printf-flags.jnc。）
+//
+//      bad/ 里有**两种**拒，别混：一种是"还没长出来"（printf-conv-e：`%e` 要方言里一条
+//      新算子），一种是**C 自己的未定义行为**（printf-plus-hex：`%+x` 没有可对的答案）。
 //
 //   node tests/jnc/run.js
 //   node tests/jnc/run.js pointers
