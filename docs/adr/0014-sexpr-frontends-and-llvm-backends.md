@@ -7388,6 +7388,55 @@ fermi.asy 这一下逐字一样。
 `tests/asy/run.js` 259 passed / 0 failed；sweep 220 个里干净 219、2.1s，最慢
 genusthree 123ms。
 
+### 第八十六刀：`intersect` 只要**第一个**交点 —— 别把整棵细分树展开
+
+上一刀量出来的 8 个卡口里，两个 silhouette 是**我们自己的**性能问题：真 asy 0.33s，
+我们超 120s。位置在 `solids.asy:14` 的 tangent —— 它拿**相距 epsilon 的两片切片**去问
+`intersect(p, q, fuzz)`。这一对是两条几乎重合的 192 段投影圆。
+
+原来这一层写的是"把全部交点算出来，取头一个"：
+
+```asy
+real[] intersect(path p, path q, real fuzz=-1) {
+  real[][] all = intersections(p, q, fuzz);   // ← 这一句就回不来了
+  if (all.length == 0) return new real[];
+  return all[0];
+}
+```
+
+两条曲线几乎重合的时候，`asy__ixrec` 每一层的四个孩子**界盒全都相交**，谁也剪不掉：
+12 层就是 $4^{12} \approx 1.7\times10^7$ 次调用，再乘上段对数。
+
+真 asy 不卡，因为它这一路根本不求全部。`runpath.in:245` 的 `intersect` 传的是
+`single=true`，`path.cc:1053` 那句是
+
+```cpp
+if(single || depth <= mindepth) return true;
+```
+
+—— 第一个交点一出来，整个递归栈立刻回去；另有 `maxcount=9`（path.cc:1050）给单对段上的
+候选数封顶。照这个意思改：
+
+- `asy__ixrec` 多一个 `int cap` 参数。`0` = 不封顶（`intersections` 那一路要全部，
+  仍旧传 `0`），`>0` = 攒够 `cap` 个就层层返回（开头一句 `if (cap > 0 && out.length >= cap) return;`）；
+- `intersect` 不再借道 `intersections`，自己按 `(i, j)` 扫段对（也就是 p 上时间从小到大，
+  与"全求出来排序取头一个"是同一个答案），每对段上 `cap = 9`，头一个 Newton 收得住的就
+  返回。
+
+量出来的：hyperboloidsilhouette 从 >120s 到 **28.2s**，spheresilhouette 到 **20.9s**
+（真 asy 仍是 0.33s —— 差 60~80 倍，这是解释器那一层的账，留在明处）。EPS 那一轴上这两个
+从「超时」变成「结构不同」，头一处差别也随之能看见了：hyperboloidsilhouette 是
+`%%BoundingBox` 就差 2bp（212 vs 214），spheresilhouette 是第 826 个词起分叉。**这一刀
+只解开了死结，没有让它们变成一样** —— 剩下的界盒/描边差异是下一刀的事。
+
+改的是 `intersect` 的公共行为，所以把 23 份逐字一样的重跑了一遍确认没退
+（roundedpath.asy:31/43 的 roundpath 正是走这一句）：仍旧 23 份一样。
+
+跑了：EPS 那一轴的 25 个点名（23 same + 2 silhouette，`OMNI_EPS_FRESH=1`）、
+`tests/asy/run.js`（259 passed / 0 failed，两条腿）、sweep（220 里干净 219、1.6s，
+最慢 genusthree 128ms）。**跳过**：EPS 全量（照约定，先大批修不对的，不跑全量）、
+`OMNI_LEGS=all` 的另外三条腿。
+
 ## 后果与代价
 
 

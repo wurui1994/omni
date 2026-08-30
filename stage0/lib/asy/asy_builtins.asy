@@ -2708,8 +2708,17 @@ private bool asy__bbhit(pair[] a, pair[] b, real fuzz) {
     && ay0 - fuzz <= by1 && by0 - fuzz <= ay1;
 }
 
+// 细分找交点。`cap` 是**这一对段上最多圈几个**：0 = 不限（intersections 那一路要全部），
+// >0 = 攒够就收（intersect 那一路只要第一个，照 path.cc:1050 的 maxcount=9）。
+// 不设上限的话两条**几乎重合**的曲线会把这棵树全展开：每一层四个孩子的界盒都相交，
+// 12 层就是 4^12 ≈ 1.7e7 次调用 —— 量到过 hyperboloidsilhouette 卡在这里超过 120s
+// （solids.asy:14 的 `intersect(p,q,fuzz)` 比的正是两片相距 epsilon 的切片）。
+// asy 那边不会卡：runpath.in 的 intersect 传的是 `single=true`，第一个交点一出来
+// 整个栈就回去了（path.cc:1053 那四句 `if(single || depth <= mindepth) return true;`）。
 private void asy__ixrec(real[][] out, pair[] a, real ta0, real ta1,
-                        pair[] b, real tb0, real tb1, real fuzz, int depth) {
+                        pair[] b, real tb0, real tb1, real fuzz, int depth,
+                        int cap) {
+  if (cap > 0 && out.length >= cap) return;
   if (!asy__bbhit(a, b, fuzz)) return;
   if (depth <= 0) {
     real[] r;
@@ -2724,10 +2733,10 @@ private void asy__ixrec(real[][] out, pair[] a, real ta0, real ta1,
   pair[] a1 = asy__subbez(a[0], a[1], a[2], a[3], 0.5, 1);
   pair[] b0 = asy__subbez(b[0], b[1], b[2], b[3], 0, 0.5);
   pair[] b1 = asy__subbez(b[0], b[1], b[2], b[3], 0.5, 1);
-  asy__ixrec(out, a0, ta0, tam, b0, tb0, tbm, fuzz, depth - 1);
-  asy__ixrec(out, a0, ta0, tam, b1, tbm, tb1, fuzz, depth - 1);
-  asy__ixrec(out, a1, tam, ta1, b0, tb0, tbm, fuzz, depth - 1);
-  asy__ixrec(out, a1, tam, ta1, b1, tbm, tb1, fuzz, depth - 1);
+  asy__ixrec(out, a0, ta0, tam, b0, tb0, tbm, fuzz, depth - 1, cap);
+  asy__ixrec(out, a0, ta0, tam, b1, tbm, tb1, fuzz, depth - 1, cap);
+  asy__ixrec(out, a1, tam, ta1, b0, tb0, tbm, fuzz, depth - 1, cap);
+  asy__ixrec(out, a1, tam, ta1, b1, tbm, tb1, fuzz, depth - 1, cap);
 }
 
 private pair[] asy__segctl(path p, int i) {
@@ -2794,7 +2803,7 @@ real[][] intersections(path p, path q, real fuzz=-1) {
     for (int j = 0; j < nq; ++j) {
       pair[] b = asy__segctl(q, j);
       real[][] cand;
-      asy__ixrec(cand, a, 0, 1, b, 0, 1, f, 12);
+      asy__ixrec(cand, a, 0, 1, b, 0, 1, f, 12, 0);
       real[][] seed;
       for (int k = 0; k < cand.length; ++k) {
         bool near = false;
@@ -2827,11 +2836,39 @@ real[][] intersections(path p, path q, real fuzz=-1) {
   return out;
 }
 
-// 第一个交点的两个时间（没有就是空数组）—— runpath.in:245 的 intersect
+// 第一个交点的两个时间（没有就是空数组）—— runpath.in:245 的 intersect。
+// **不是**"把全部算出来再取第一个"：asy 那边这一路传的是 `single=true`，第一个交点一出来
+// 整个递归就回去了。这里照那个意思写 —— 段对按 (i, j) 的次序扫（也就是 p 上时间从小到大，
+// 与 intersections 排完序取头一个是同一个答案），每一对段上最多圈 9 个候选
+// （path.cc:1050 的 maxcount），头一个 Newton 收得住的就是答案。
+// 量出来的理由：solids.asy:14 的 tangent 拿两片相距 epsilon 的切片来问这一句，
+// 两条几乎重合的曲线会把细分树全展开 —— hyperboloidsilhouette 与 spheresilhouette
+// 从前双双超 120s，真 asy 是 0.33s。
 real[] intersect(path p, path q, real fuzz=-1) {
-  real[][] all = intersections(p, q, fuzz);
-  if (all.length == 0) return new real[];
-  return all[0];
+  int np = length(p);
+  int nq = length(q);
+  real sc = 1;
+  for (int i = 0; i <= np; ++i) { real m = length(point(p, i)); if (m > sc) sc = m; }
+  for (int j = 0; j <= nq; ++j) { real m = length(point(q, j)); if (m > sc) sc = m; }
+  real f = fuzz < 0 ? 1e-9 * sc : fuzz;
+  real tol = 1e-12 * sc;
+  for (int i = 0; i < np; ++i) {
+    pair[] a = asy__segctl(p, i);
+    for (int j = 0; j < nq; ++j) {
+      pair[] b = asy__segctl(q, j);
+      real[][] cand;
+      asy__ixrec(cand, a, 0, 1, b, 0, 1, f, 12, 9);
+      for (int k = 0; k < cand.length; ++k) {
+        real[] r = asy__ixnewton(a, b, cand[k][0], cand[k][1], tol);
+        if (r.length == 0) continue;
+        real[] g;
+        g.push(i + r[0]);
+        g.push(j + r[1]);
+        return g;
+      }
+    }
+  }
+  return new real[];
 }
 
 // 笔尖（pen.h 的 `pen::P`）。笔这一格在 `struct pen` 里只能是个 int —— `struct pen`
