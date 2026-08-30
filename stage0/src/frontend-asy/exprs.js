@@ -1435,7 +1435,19 @@ export function asyIndex(L, n) {
   const ixv = asyExpr(L, n.items[2]);
   if (ixv === null) return null;
   if (ixv.type === 'int[]') {
-    return { code: `(call ${L.arrHelper('pick', asyElem(a.type))} ${a.code} ${ixv.code})`, type: a.type };
+    // 那一串下标也要按 a 的 cyclic **逐个**绕（runarray.in:910 的 arrayIntArray）。
+    // 接收者在这一句里要印**两遍**（一遍映射下标、一遍真挑），所以不是裸变量读时先绑个
+    // 临时量 —— 与 asyCycIdx 同一条；绑不下（这个位置没有 pre）时只好照旧不绕。
+    const h = L.cycHelper(a.type);
+    let ac = a.code;
+    if (!/^\(var [A-Za-z0-9_]+\)$/.test(ac) && Array.isArray(L.pre)) {
+      const tv = `asy__pk${L.unit.ntmp++}`;
+      L.pre.push(`(let ${tv} ${asyCore(a.type)} ${ac})`);
+      ac = `(var ${tv})`;
+    }
+    const ix = /^\(var [A-Za-z0-9_]+\)$/.test(ac)
+      ? `(call ${h.map} ${ac} ${ixv.code})` : ixv.code;
+    return { code: `(call ${L.arrHelper('pick', asyElem(a.type))} ${ac} ${ix})`, type: a.type };
   }
   const i = asyCoerce(L, ixv, 'int', n, '下标');
   if (i === null) return null;

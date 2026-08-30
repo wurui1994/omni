@@ -507,6 +507,28 @@ export function asyCall(L, n) {
       }
       L.diags.rollback(mmark);
     }
+    // 写死在这一层的**标量**数学那一族要与用户那一份**同台打分**（第五十一刀那条的第三面）。
+    // 量出来的样子是 alignedaxis.asy:6：
+    //     pair exp(pair x) { return exp(x.x)*(cos(x.y)+I*sin(x.y)); }
+    // 体里那句 `exp(x.x)` 的实参是 real，asy 那边 `real exp(real)` 是**真候选**
+    // （builtin.cc 的 addRealFunc），逐个同型赢得过刚声明的 `pair exp(pair)`；
+    // 量过（`asy -noV`）：`exp(1.0)` 印 2.71828182845905、`exp((1,0))` 才走复数那一格。
+    // 这一层标量那份没有符号，于是 real 被转成 pair 接了过去 —— 函数调了自己，栈溢出。
+    // 所以这里比一比：标量那份接得住而且**更便宜**时让它来。
+    const mc = asyMathCost(L, nm, raw);
+    if (best !== null && mc !== null && mc < best) {
+      const mmark2 = L.diags.mark();
+      const mSave2 = Array.isArray(L.pre) ? L.pre : null;
+      if (mSave2 !== null) L.pre = [];
+      const mv2 = asyMathCall(L, n, nm);
+      const mMine2 = L.pre;
+      if (mSave2 !== null) L.pre = mSave2;
+      if (mv2 !== null) {
+        if (mSave2 !== null) for (const s of mMine2) L.pre.push(s);
+        return mv2;
+      }
+      L.diags.rollback(mmark2);
+    }
     const bc = asyBuiltinCost(L, nm, raw);
     if (best !== null && (bc === null || best <= bc)) {
       // 挑中的那份**真降下去**可能还是接不住：asyFit 的打分与 coerce 不是同一条尺 ——
@@ -999,6 +1021,25 @@ export function asyBuiltinCost(L, nm, raw) {
     return null;
   }
   return cost;
+}
+
+/**
+ * 写死在这一层的**标量**数学那一族（`real exp(real)`、`real atan2(real,real)`…）
+ * 接这一串实参要花多少（回 null = 这一族接不住）。与 asyFit 同一把尺：逐个同型是 0。
+ *
+ * 刻意只认**每一格都已经是 real** 的那一种，回 0。int 实参不在这里表态 ——
+ * `abs`/`floor`/`round` 那几个在 asy 那边整数上另有一份（回 int），这一层是 asyMathCall
+ * 自己分档的，掺进打分里会把那一档的语义带歪。名字带的实参、展开实参也一律不认。
+ */
+export function asyMathCost(L, nm, raw) {
+  const spec = L.math.get(nm);
+  if (spec === undefined || spec.kind !== 'rmath') return null;
+  if (raw.length !== spec.arity) return null;
+  for (const r of raw) {
+    if (r.key !== null || r.spread === true) return null;
+    if (r.v.type !== 'real') return null;
+  }
+  return 0;
 }
 
 /**

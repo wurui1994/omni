@@ -939,6 +939,7 @@ class AsyLower {
       is: `asy__cycis_${key}`,
       set: `asy__cycset_${key}`,
       idx: `asy__cycidx_${key}`,
+      map: `asy__cycmap_${key}`,
     };
     if (this.arrGen.has(nm.is)) return nm;
     const ct = asyCore(at);
@@ -982,6 +983,18 @@ class AsyLower {
     (if (bin ">" (var n) (int 0))
       (do (if (call ${nm.is} (var a)) (do (ret (call asy__mod (var i) (var n)))))))
     (ret (var i)))`);
+    // `a[ix]`（ix 是 int[]）里那一串下标也要过 idx —— runarray.in:910 的 arrayIntArray
+    // 里 `if(cyclic && asize > 0) index=imod(index,asize);` 是**逐个**做的。
+    // 量过（`asy -noV`）：`int[] a={10,20,30,40,50}; a.cyclic=true; a[-sequence(5)]`
+    // 是 {10,50,40,30,20} —— smoothcontour3.asy:1408 那句反转就靠它（genustwo/genusthree）。
+    this.arrGen.set(nm.map, `  (fn ${nm.map} ((a ${ct}) (ix (arr int))) (arr int)
+    (let r (arr int) (anew (arr int) (int 0)))
+    (let i int (int 0))
+    (while (bin "<" (var i) (alen (var ix)))
+      (do
+        (apush (var r) (call ${nm.idx} (var a) (aget (var ix) (var i))))
+        (set i (bin "+" (var i) (int 1)))))
+    (ret (var r)))`);
     return nm;
   }
 

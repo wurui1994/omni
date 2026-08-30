@@ -6058,7 +6058,16 @@ bool eof(file f) { return f.fd == 2 ? f.eofbit : true; }
 bool error(file f) { return f.fd == 2 ? (!f.opened || f.errbit) : false; }
 bool eol(file f) { return f.fd == 2 ? (!f.opened || asy__fateol(f)) : false; }
 void close(file f) { f.opened = false; f.eofbit = true; }
-int seconds(string t="", string format="") { abort("seconds 还没做（这一层没有时钟）"); return 0; }
+// `seconds()`（runtime.in 的 `seconds`）：这一层没有时钟。**不带参数那一路回 0**，
+// 别 abort —— 唯一用到它的是 plain_strings.asy:249 的 `progress()` 转圈，那边
+// `static int lastseconds` 被 `progress(true)` 置成 0，之后 `seconds > lastseconds`
+// 永远不成立，于是一个 `\b` 都不发（真 asy 会边算边转圈，往 stdout 吐一串）。
+// smoothcontour3 那一族（genustwo/genusthree）就卡在这一句上。
+// 给了日期串那一路还是 abort：那是真的要解析时间，答不准就不答。
+int seconds(string t="", string format="") {
+  if (t != "") abort("seconds(日期串) 还没做（这一层不解析时间）");
+  return 0;
+}
 // `_cputime()`（plain.asy:299 的 `cputime()` 就靠它，而 `import plain;` 那一路会走到）：
 // **五格** —— parent user / parent system / child user / child system / 挂钟（plain.asy
 // 读的是 a[0]、a[2]、a[3] 与 a[4]）。这一层没有时钟，所以全是 0：回一份长度对的零比

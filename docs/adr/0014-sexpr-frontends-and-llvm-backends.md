@@ -8357,6 +8357,67 @@ genusthree 108ms）。**跳过的轴**：EPS 全量（同上一刀的理由：�
 `tests/asy/svg.js`（没碰 SVG 出口）、自举（改的是 asy 前端的一处短路降级与 base 里
 一个函数，`run.js` 的 run-c / run-llvm 两条腿已经把后端覆盖了）。
 
+### 第一百刀：写死在这一层的函数没有资格上台打分 —— 一串下标也要跟着绕圈
+
+三处各自独立，都是"没出图"那一栏里的：
+
+**一、标量数学那一族要与用户那一份同台打分。** alignedaxis.asy:6：
+
+```asy
+pair exp(pair x) { return exp(x.x)*(cos(x.y)+I*sin(x.y)); }
+```
+
+体里那句 `exp(x.x)` 的实参是 real。asy 那边 `real exp(real)` 是 builtin.cc 的
+`addRealFunc` 注册的**真候选**，与刚声明的 `pair exp(pair)` 在同一个重载集里、逐个同型
+赢得过 —— 量过（`asy -noV`）：`exp(1.0)` 印 2.71828182845905、`exp((1,0))` 才走复数那格。
+这一层标量那份是**写死在调用那一步**的（`asyMathCall` 直接发 `(rmath …)`），根本不在候选表
+里，于是 real 被转成 pair 接了过去：函数调了自己，`Maximum call stack size exceeded`。
+
+补一格 `asyMathCost(L, nm, raw)` —— 与 `asyFit` 同一把尺，逐个同型是 0 —— 放在
+`asyBuiltinCost` 前面比一比：标量那份接得住而且**更便宜**（`mc < best`）时让它来。
+刻意只认**每一格都已经是 real** 的那一种：`abs`/`floor`/`round` 在整数上另有一份（回 int），
+那一档是 `asyMathCall` 自己分的，掺进打分里会把语义带歪。名字带的、展开的实参一律不认。
+
+**二、`a[ix]`（ix 是 int[]）里那一串下标也要按 a 的 `cyclic` 逐个绕。**
+runarray.in:910 的 arrayIntArray 里那一句 `if(cyclic && asize > 0) index=imod(index,asize);`
+是**逐个**做的，我们的 `asy__pick_*` 直接 `aget`。量过：
+`int[] a={10,20,30,40,50}; a.cyclic=true; a[-sequence(5)]` 是 `{10,50,40,30,20}`。
+smoothcontour3.asy:1408 的 `patchcorners = patchcorners[-sequence(patchcorners.length)];`
+正是拿它当反转用，于是报 `array index out of range: -1`。
+
+`cycHelper` 添第五格 `asy__cycmap_<键>(a, ix)`：把那一串下标逐个过 `asy__cycidx_<键>`。
+接收者在这一句里要印**两遍**（一遍映射、一遍真挑），所以不是裸变量读时先绑个临时量 ——
+与 `asyCycIdx` 同一条，绑不下时照旧不绕。
+
+**三、`seconds()` 不带参数那一路回 0，别 abort。** 唯一用到它的是
+plain_strings.asy:249 的 `progress()` 转圈，而 `static int lastseconds` 被
+`progress(true)` 置成 0 —— 回 0 之后 `seconds > lastseconds` 永远不成立，一个 `\b`
+都不发（真 asy 会边算边往 stdout 吐一串）。给了日期串那一路还是 abort：那是真要解析时间。
+genustwo 就卡在这一句上，过了它才露出上面第二条。
+
+**顺手校正一条记账口径**（上一刀记反了）：`abort()` 这一层是**故意越界**触发运行期错误的，
+所以 stderr 上七个不同的缺口都长一个样，真正那句 `abort: …` 走的是 stdout。
+
+**Gouraud / sinxlex 卡在一处设计决定上，写在明处。** 两个都是
+plain_Label.asy:505 的 `label(picture, Label, explicit guide g, …)` 体里那句
+`label(pic,L,(path) g,…)` 调了自己 —— 这一层 `guide` 是 `path` 的**别名**
+（asy_builtins.asy:734 那段写着为什么），于是它与 :498 那份 `explicit path` 签名一模一样，
+后声明的压住前一份。要治得让 `guide` 独立成型（一棵没解的规格树），那是 ADR 里
+"guide 就是 path"这条设计的反面，不在这一刀的范围里。
+
+这一刀的账：三个例子从"没出图"里出来 —— alignedaxis、genustwo、genusthree
+（后两个的参考是位图，出图了但比不出来）。EPS 那一轴按名字跑了 19 个 ——
+一样 11、只有数值差 0、结构不同 **6**、没出图 **0**。新加的那一格结构不同就是
+alignedaxis 自己：它出图了，可首处差在 `#3894 参考 newpath vs 我们 gsave` ——
+与 lmfit1 / cardioid / gamma 一模一样的形状，那份**近似单位**的笔变换
+（第九十七刀记下的 `t*T*inverse(t)`）。也就是说这一刀把它从"根本跑不起来"挪到了
+"和那四个同一族"，归 libm 与 plain_bounds 那条待决策。跑过的轴：
+`tests/asy/run.js` 五条腿 259/0（589.4s）、`tests/sexpr/run.js` 55/0、
+`tests/asy/sweep.js` 220 个里干净 219（2.2s，最慢 genusthree 128ms）。
+**跳过的轴**：EPS 全量、`tests/asy/svg.js`（没碰 SVG 出口）、自举（改的是 asy 前端的
+重载打分与下标降级、base 里一个函数，`run.js` 的 run-c / run-llvm 两条腿已经把后端
+覆盖了）。
+
 ## 后果与代价
 
 
