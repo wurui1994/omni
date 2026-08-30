@@ -16,14 +16,13 @@ omni_str omni_str_realg(double v, int64_t p) {
   return omni_str_fmt("%.*g", n, v);
 }
 
-/* `(sfix E N)`：C 的 `%.Nf`（ADR-0016 第八刀）。位数由方言限死在 0..30（那里检查，
-   这里只兜底）。这一条就是 C 的 printf 本身 —— 它才是那个"就近取偶"的出处，另外三条
-   腿是照它写的（JS 的 toFixed 在恰好一半上进位，所以那边不能用它，见 native.js）。 */
+/* `(sfix E N)`：C 的 `%.Nf`（ADR-0016 第八刀）。位数的范围是 0..30；它**不必**是字面量
+   （第二十八刀 —— `printf("%.*f", n, x)` 那一行），所以越界在这儿是**运行期错误**，四条腿
+   同一句话。这一条就是 C 的 printf 本身 —— 它才是那个"就近取偶"的出处，另外三条腿是照它
+   写的（JS 的 toFixed 在恰好一半上进位，所以那边不能用它，见 native.js）。 */
 omni_str omni_str_fixed(double v, int64_t p) {
-  int n = (int)p;
-  if (n < 0) n = 0;
-  if (n > 30) n = 30;
-  return omni_str_fmt("%.*f", n, v);
+  if (p < 0 || p > 30) omni_errorf("sfix precision out of range: %lld (0..30)", (long long)p);
+  return omni_str_fmt("%.*f", (int)p, v);
 }
 
 omni_str omni_str_bool(bool v) { return omni_str_new(v ? "true" : "false", v ? 4 : 5); }

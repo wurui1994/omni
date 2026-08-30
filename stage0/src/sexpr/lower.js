@@ -1470,19 +1470,26 @@ class CoreLowerer {
     // printf 底下就是 C 的 printf，而纪律是"jancy 不向方言妥协"。JS 那侧因此**不能**用
     // toFixed，得按精确值用 BigInt 算（native.js 的 fmtFixed 与 prelude 的 $str_fixed）。
     //
-    // 位数要写成字面量、范围 0..30：printf 里它永远是字面量，而上界让 C 那侧的缓冲有个头。
+    // 位数的范围是 0..30（上界让 C 那侧的缓冲有个头）。它**不必**是字面量（第二十八刀）：
+    // `printf("%.*f", n, x)` 的位数运行期才知道，而 jancy 的 printf 就是 C 库的 vsnprintf，
+    // 那一行在它那边是通的 —— 所以这一格照收一段表达式。是字面量时照旧当场判范围
+    //（诊断更早、也更准），不是字面量时那一条落到运行期：四份实现各自查，越界是运行期错误
+    //（同一句话："sfix precision out of range: N (0..30)"）。
     if (h === 'sfix') {
       const v = this.expr(n.items[1]);
       if (v === null) return null;
       if (v.type !== REAL) return this.err(n, `(sfix E N) 的 E 要是 real，这里是 ${coreTypeText(v.type)}`);
-      if (!isList(n.items[2]) || head(n.items[2]) !== 'int') {
-        return this.err(n, '(sfix E N) 的位数要写成字面量 (int N)');
+      if (isList(n.items[2]) && head(n.items[2]) === 'int') {
+        const p = this.intLit(n.items[2]);
+        if (p === null) return null;
+        if (p.value < 0n || p.value > 30n) {
+          return this.err(n, `(sfix E N) 的位数要在 0..30 之间，这里是 ${p.value}`);
+        }
+        return { kind: 'Builtin', name: 'str_fixed', args: [v, p], argType: REAL, type: STRING };
       }
-      const p = this.intLit(n.items[2]);
+      const p = this.expr(n.items[2]);
       if (p === null) return null;
-      if (p.value < 0n || p.value > 30n) {
-        return this.err(n, `(sfix E N) 的位数要在 0..30 之间，这里是 ${p.value}`);
-      }
+      if (p.type !== INT) return this.err(n, `(sfix E N) 的位数要是 int，这里是 ${coreTypeText(p.type)}`);
       return { kind: 'Builtin', name: 'str_fixed', args: [v, p], argType: REAL, type: STRING };
     }
     // `(readtext E)`：把一份文本文件**整份**读成 string。方言里读文件只有这一个口子 ——

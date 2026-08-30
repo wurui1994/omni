@@ -1403,6 +1403,10 @@ no characters."）；整数上**一写精度 `0` 标志就作废**（`%08.3d` �
 **未定义行为**（clang 直说 "precision used with 'c' conversion specifier, resulting in
 undefined behavior"）—— 没有可对的答案，所以拒；这一条不是"我们少做一件事"。
 
+> **第二十八刀更正**：`%.*f` 落了（方言真的长了一格），`bad/printf-star-prec-f.jnc` 删掉，
+> printf 的边界收窄到**转换字符**那一族（`%e` / `%g` / `%u` / `%p`，`bad/printf-conv-e.jnc`）。
+> 这一节说"要动五条腿上四份实现"—— 量下来那四份**本来就是按值收 N 的**，一个字都没改。
+
 **期望输出的出处**：`cases/26-printf-prec.jnc`，一份 `cc -O0` 的孪生程序，逐字节相同（五条腿
 也各自与它逐字节相同）。孪生里只删掉了 `%.3c` 那一行 —— clang 明说它是 UB，UB 不能当出处。
 
@@ -1411,6 +1415,43 @@ undefined behavior"）—— 没有可对的答案，所以拒；这一条不是
 **没跑的**：`tests/sexpr`、`tests/glr`、`tests/asy` —— 这一刀又只动了
 `frontend-jnc/lower.js`（加 `tests/jnc/run.js` 的头注释），方言一个字没改；自举、`tests/jit`、
 `tests/mir`、`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
+
+### 第二十八刀：`%.*f` —— 这一刀方言真的长了一格，而四条腿一个字都没改
+
+第二十七刀把 printf 的标志、宽度、精度收齐了，只剩 `%.*f`，记的理由是"方言的 `(sfix E N)`
+要求 N 写成字面量，要接得动方言与五条腿上四份实现"。这一刀先去量那四份 —— 结果是
+**它们本来就是按值收 N 的**：
+
+- JS 后端：`$str_fixed(x, p)`（prelude），p 是个 BigInt，`Number(p)` 之后照算
+- C 运行时：`omni_str_fixed(double v, int64_t p)` -> `omni_str_fmt("%.*f", n, v)`
+- LLVM 后端：同一个 `omni_str_fixed`（`params: ['double', 'i64']`）
+- 两个解释器：`fmtFixed(a[0], a[1])`
+
+"位数要写成字面量"这条限制**只在** `sexpr/lower.js` 的那一处检查里，理由写的是
+"printf 里它永远是字面量"—— 那句话在 `%.*f` 面前就是错的。所以这一刀方言长的是**那一处
+检查**：N 是字面量时照旧当场判范围（诊断更早、更准），不是字面量时收一段 int 表达式。
+
+**范围那一条落到运行期，四份实现同一句话。** 0..30 的上界要留着（它让 C 那侧 `%.*f` 的缓冲
+有个头），可位数是运行期值时只能运行期判。这儿有个真的选择：**夹一下**还是**报错**。C 运行时
+以前就是夹的（`if (n > 30) n = 30`，注释写着"这里只兜底"）—— 但夹会给一个**错的答案**：
+C 那边 `%.40f` 是真印 40 位的。所以四处都改成当场停，同一句
+`sfix precision out of range: 40 (0..30)`（`rt/sfix-range.jnc` 量的正是"同一句"）。
+这也把那条注释里"方言限死、这里只兜底"的分工写清了：字面量归降级期，表达式归运行期。
+
+**前端那一侧只多一个 `sel`。** C 里精度实参是负数等于"没写精度"，`%f` 没写精度就是 6 ——
+所以 `(sfix v (sel (bin "<" p (int 0)) (int 6) p))`。
+
+**期望输出的出处**：`cases/27-printf-star-prec.jnc`，一份 `cc -O0` 的孪生程序，逐字节相同
+（五条腿也各自与它相同）。量在里面的：三种位数、负数（回到 6）、**就近取偶还在**
+（`%.2f` 印 0.125 是 `0.12` —— JS 的 `toFixed` 会给 `0.13`，这条不变式不能因为位数变成运行期
+值就丢）、动态宽度配动态精度、以及位数是个变量。
+
+**跑过的轴**：`tests/jnc`（39/0，新增 `cases/27-printf-star-prec`、`rt/sfix-range`、
+`bad/printf-conv-e`，删掉 `bad/printf-star-prec-f`）、`tests/sexpr`（71/0，`cases/29-sfix`
+末尾多了运行期位数那一段）。sexpr 这次**要跑** —— 这一刀动了方言。
+**没跑的**：`tests/glr`（语法一个字没改）、`tests/asy`（asy 那一侧压根不发 `sfix`，
+grep 过）；自举、`tests/jit`、`tests/mir`、`tests/llvm`；`npm run lint` 这台机器上没有
+typescript。
 
 ## 后果与代价
 

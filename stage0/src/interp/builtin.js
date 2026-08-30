@@ -806,8 +806,11 @@ export function applyBuiltin(I, e, a) {
     // `(supper S)` —— **只动 ASCII 的 a-z**。不用 toUpperCase()：那是 Unicode 的
     // （"ß" 会变成两个字符），C 那侧的 toupper 还看 locale，两条路对不上。
     case 'str_upper': return asciiUpper(a[0]);
-    // `(sfix E N)` —— C 的 `%.Nf`，**就近取偶**（不是 JS 的 toFixed，那在恰好一半上进位）
-    case 'str_fixed': return fmtFixed(a[0], a[1]);
+    // `(sfix E N)` —— C 的 `%.Nf`，**就近取偶**（不是 JS 的 toFixed，那在恰好一半上进位）。
+    // 位数不必是字面量（第二十八刀），所以范围这一条落在这儿查：五条腿同一句话。
+    case 'str_fixed':
+      if (a[1] < 0n || a[1] > 30n) rtError(`sfix precision out of range: ${a[1]} (0..30)`);
+      return fmtFixed(a[0], a[1]);
     case 'to_string': return strOf(e.argType.k, a[0]);
     case 'to_string_g': return fmtRealG(a[0], a[1]);
     case 'trunc': return truncReal(a[0]);

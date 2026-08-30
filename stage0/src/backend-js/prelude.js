@@ -222,6 +222,7 @@ const $fmt_real = (x) => $fmt_g(x, 6);
 // JS 给 0.13（ECMA-262 规定取较大的 n）。挑的是 C 那一边（jancy 的 printf 底下就是它）。
 // 所以按精确值算：double 是 m * 2^e，于是 |x| * 10^N 是精确的有理数，用 BigInt 取整。
 function $str_fixed(x, p) {
+  if (p < 0n || p > 30n) $rt_error("sfix precision out of range: " + p + " (0..30)");
   var f = Number(p);
   if (Number.isNaN(x)) return "nan";
   if (x === Infinity) return "inf";

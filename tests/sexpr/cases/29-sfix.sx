@@ -49,4 +49,14 @@
     (let x real (bin "/" (real 1.0) (real 3.0)))
     (print (sfix (var x) (int 30)))
 
+    ;; **位数不必是字面量**（第二十八刀）：`printf("%.*f", n, x)` 要的就是这一格。
+    ;; 是字面量时范围 0..30 照旧当场判；不是字面量时那一条落到运行期，四份实现同一句话
+    ;;（见 tests/jnc/rt/sfix-range.jnc）。
+    (let p int (int 2))
+    (print (sfix (real 1.5) (var p)))
+    (print (sfix (real 0.125) (var p)))          ;; 就近取偶与位数是不是字面量无关
+    (print (sfix (real 1.5) (bin "+" (var p) (int 1))))
+    (print (sfix (real 1.5) (bin "*" (var p) (int 3))))
+    (print (sfix (var x) (bin "-" (var p) (int 2))))
+
     (print (str "end"))))
