@@ -2468,6 +2468,16 @@ class AsyLower {
     const saveAt = this.at;
     const saveSelf = this.self;
     const saveAl = this.recAlias;
+    // **捕获那一格也要清掉**：这份正文只生成一次，生成的时机却是"第一次造这个类型的地方"，
+    // 那地方可能正在某个闭包体里（`pic.add(new void(frame f, transform t) {…})`）。
+    // 不清的话 asyCapOf 会顺着 cap.outer 找到闭包捕获的**用户局部量**，把 struct 自己的
+    // 成员遮掉。量出来的形状是 examples/dimension.asy：`distance` 里有个局部
+    // `transform T`，闭包里调 `opic.fit()` 逼着造 autoscaleT，于是
+    // plain_picture.asy:101 的 `scale.logarithmic ? postscale.T : T` 里那个裸 `T`
+    // 认成了那格 transform，报"`? :` 两支的公共签名里没有同型的一份"。
+    // 把局部量改名（T -> Q）就好，这一条钉着那个诊断。
+    const saveCap = this.cap;
+    this.cap = null;
     if (rec.at !== undefined) this.at = rec.at;
     this.scopes = [new Map()];
     this.updates = [];
@@ -2548,6 +2558,7 @@ class AsyLower {
     this.scopes = saveScopes;
     this.at = saveAt;
     this.self = saveSelf;
+    this.cap = saveCap;
     if (bad) {
       // 生成失败时**把缓存那一格撤掉**：不撤的话后面同一个类型再要一次会命中缓存、
       // 拿到 `(call asy__new_T)`，而那份正文压根没发出去 —— 方言那一层报"未声明的函数

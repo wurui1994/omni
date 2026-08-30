@@ -8463,6 +8463,59 @@ logdown / lmfit1 / gamma / alignedaxis 的首处差都长同一个样，归同�
 220 个里干净 219。**跳过的轴**：EPS 全量、`tests/asy/svg.js`（没碰 SVG 出口）、
 自举（只动了 base 里的 stdout 收尾，`run.js` 的 run-c / run-llvm 两条腿已经覆盖后端）。
 
+### 第一百〇二刀：构造函数在"第一次造它的地方"生成 —— 那地方的捕获不该看得见
+
+`recNew` 生成一个记录的构造函数时，`pre`/`updates`/`scopes`/`at`/`self`/`recAlias`
+六格都存好换新了，**`cap` 那一格没有**。而这份正文只生成一次、生成的时机是"第一次造
+这个类型的地方"，那地方可能正在某个闭包体里。于是 `asyCapOf` 顺着 `cap.outer` 往上找，
+找到闭包捕获的**用户局部量**，把 struct 自己的成员遮掉了。
+
+量出来的形状是 examples/dimension.asy：`distance` 里有个局部 `transform T`，闭包
+（`pic.add(new void(frame f, transform t) {…})`）里调 `opic.fit()` 逼着造 `autoscaleT`，
+于是 plain_picture.asy:101 的
+
+```asy
+scalefcn T() {return scale.logarithmic ? postscale.T : T;}
+```
+
+里那个裸 `T` 认成了那格 `transform`，报"`? :` 两支的公共签名里没有同型的一份"。
+`scalefcn T()` 走的是 `fnFldOk` 那条路（摊成一格函数值字段），所以它的体确实是在
+`recNew` 里、由 `mkClo` 降的 —— 位置对得上。**把局部量改名（`T` → `Q`）就好**，
+这一条把根钉死：不是 `? :` 的定型有问题，是捕获那一格漏了存。
+
+改动只有三行（存、清成 null、还原）。这一格与前面那六格是同一套规矩，早就该在里面。
+`recNew` 末尾那段注释里"探路那一趟里 autoscaleT 的构造生成失败、回滚之后真降那一趟
+就命中了这个空壳"说的正是同一个例子 —— 那条兜底（失败时把 `recInits` 那格撤掉）留着，
+它挡的是别的失败路径。
+
+最小复现（不引 dimension 也能钉住）：
+
+```asy
+void distance(picture pic=currentpicture) {
+  transform T=shift(1,2);
+  pic.add(new void(frame f, transform t) {
+      picture opic;
+      draw(opic,T*t*((0,0)--(1,1)));
+      add(f,opic.fit());
+    });
+}
+```
+
+捕获的类型无关（换成 `real T=3` 报同一句），去掉闭包或把 `opic.fit()` 拿掉都不报 ——
+两个条件都要：**闭包里捕获了一个与 struct 成员同名的局部量**，而且**在闭包里第一次
+造那个 struct**。
+
+这一刀的账：dimension 从"没出图"变成**一样**（EPS 逐记号对得上）。剩下的"没出图"里
+Gouraud / sinxlex 仍旧是"guide 是 path 的别名"那条设计（第一百刀记过），其余八个是
+明写着没做的洞：`margin too big`（clockarray）、`functionshade`、`_image`、
+数组的 `.initialized(…)`、`_strokepath`、`textpath`、`postscript`、`_eval`。
+EPS 那一轴按名字跑了 20 个 —— 一样 **12**（上一刀 11，新增 dimension）、
+只有数值差 0、结构不同 6（那一族已经量到底，见上一刀）、没出图 0。跑过的轴：
+`tests/asy/run.js` 五条腿 259/0（495.4s）、`tests/sexpr/run.js` 55/0、
+`tests/asy/sweep.js` 220 个里干净 219（1.5s，最慢 cheese 113ms）。
+**跳过的轴**：EPS 全量、`tests/asy/svg.js`（没碰 SVG 出口）、自举（改的是 asy 前端
+生成构造函数时的一格状态存还，`run.js` 的 run-c / run-llvm 两条腿已经覆盖后端）。
+
 ## 后果与代价
 
 
