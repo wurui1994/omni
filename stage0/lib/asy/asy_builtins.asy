@@ -392,9 +392,13 @@ struct pen {
   // 设了它就没有颜色道了（量过 `colors(pattern("chk")).length` 是 0、
   // `colors(red+pattern("chk")).length` 也是 0），见 colors / colorspace 那两条。
   string patternval = "";
-  // 字号（pen.h 的 `pen::size`）。默认是 12pt 换成 bp 的那个数 —— 量过
-  // `fontsize(currentpen)` 就是 11.9551681195517（= 12*72/72.27）。
-  real fontsizeval = 11.9551681195517;
+  // 字号（pen.h 的 `pen::size`）。默认是 12pt 换成 bp 的那个数。
+  // **不能**写成抄下来的十进制字面量 `11.9551681195517` —— 那是 write() 印出来的
+  // 15 位，末位比真值大 1.7e-14（约 10 个 ulp）。这个数会经 drawlabel.cc:130 的
+  // `fuzz=pentype.size()*0.1+0.3` 进标签的界，再顺着 plain_scaling 的单纯形把
+  // 解出的 a 推歪，%%BoundingBox 整整差 1bp。写成算式，逐位就是那边的
+  // `fontsize*(72.0/72.27)`。asy__tex2ps 声明在后面（名字按位置解析），这里只能重写一遍。
+  real fontsizeval = 12.0 * (72 / 72.27);
   // pen.h:167/168 那两格**原样**：没设过就是 0（文字输出只在非零时印它们，见 pen.h:893）。
   // fontsizeval 存的是"实际按哪个字号排"，与它不是一回事。
   real fontsizeset = 0;
@@ -1640,31 +1644,74 @@ void addpt(box bx, pair z) {
   }
 }
 
-// 三次贝塞尔在一根轴上的极值：导数是二次式，解出 (0,1) 里的根代回去。
+// 三次贝塞尔在一根轴上的极值：导数是二次式，解出 [0,1] 里的根代回去。
 // 直线段用不到，`..` 那一刀的曲线要。
-void addcubic1(box bx, bool isx, real a, real b0, real c, real d) {
-  real qa = 3 * (-a + 3 * b0 - 3 * c + d);
-  real qb = 6 * (a - 2 * b0 + c);
-  real qc = 3 * (b0 - a);
-  real[] ts;
-  if (fabs(qa) < 1e-14) {
-    if (fabs(qb) > 1e-14) ts.push(-qc / qb);
-  } else {
-    real disc = qb * qb - 4 * qa * qc;
-    if (disc >= 0) {
-      real sq = sqrt(disc);
-      ts.push((-qb + sq) / (2 * qa));
-      ts.push((-qb - sq) / (2 * qa));
-    }
+//
+// 这一段原先是"数学上对、末位不对"的写法：根用 (-B±sqrt(B²-4AC))/(2A)、阈值是
+// 绝对量 1e-14、值用幂基 r³a+3r²tb+3rt²c+t³d。量出来的后果：`size(0,100)` 下
+// `fill(scale(2)*unitcircle)` 那张图的 frame 顶是 50 + 1ulp 而不是 50，
+// bbox.h:200 的 LowRes 一 ceil 就成了 51 —— %%BoundingBox 整整差 1bp。
+// 幂基那条式子**不是**凸组合，能冲出控制点的上界；de Casteljau 每一步都是凸组合，
+// 冲不出去。所以逐字照抄 path.cc：
+//   * 二次根用 path.cc:46 的 quadraticroots（sqrt1pxm1 那套，不是判别式那套），
+//     阈值是**相对**的 Fuzz2/Fuzz4，不是 1e-14
+//   * 曲线值用 path.cc:point(double) 的 de Casteljau
+//   * 导数系数照 path.cc:462 的括号摆法，一个括号都不能挪
+//   * 根的取舍是 path.h:449 的 goodroot，**闭**区间 0<=t<=1，不是开区间
+// 后面 min/max(path)（asy__pathbound）用的是同一对函数 —— 原先那儿另有一份，
+// 两份都错，而且错得不一样。
+private real asy__Fuzz2 = 1000.0 * realEpsilon;      // bound.cc:13
+private real asy__Fuzz4 = asy__Fuzz2 * asy__Fuzz2;   // path.cc:22
+// sqrt(1+x)-1，小 x 上不掉精度（path.cc:36）
+private real asy__sqrt1pxm1(real x) { return x / (sqrt(1 + x) + 1); }
+// path.cc:point(double t) 的 de Casteljau，取一个分量（pair 的加乘是逐分量的，
+// 所以拆开算与整对算逐位一样）
+real asy__bez(real a, real b, real c, real d, real t) {
+  real one_t = 1.0 - t;
+  real ab = one_t * a + t * b;
+  real bc = one_t * b + t * c;
+  real cd = one_t * c + t * d;
+  real abc = one_t * ab + t * bc;
+  real bcd = one_t * bc + t * cd;
+  return one_t * abc + t * bcd;
+}
+// path.cc:46 的 quadraticroots，只报 bounds() 用得到的那一面：返回要试的 t，
+// 顺序与 C++ 那边的 t1、t2 一致（MANY 与 ONE 只报 t1，NONE 报空）。
+real[] asy__bezcrit(real a, real b, real c, real d) {
+  // path.cc:462 的 derivative(a,b,c, z0,c0,c1,z1)
+  real A = d - a + 3.0 * (b - c);
+  real B = 2.0 * (a + c) - 4.0 * b;
+  real C = b - a;
+  real[] out;
+  if (fabs(A) <= asy__Fuzz2 * fabs(B) + asy__Fuzz4 * fabs(C)) {
+    if (fabs(B) > asy__Fuzz2 * fabs(C)) out.push(-C / B);
+    else if (C == 0.0) out.push(0.0);
+    return out;
   }
-  for (int i = 0; i < ts.length; ++i) {
-    real u = ts[i];
-    if (u > 0 && u < 1) {
-      real v = 1 - u;
-      real p = v * v * v * a + 3 * v * v * u * b0 + 3 * v * u * u * c + u * u * u * d;
-      if (isx) addx(bx, p);
-      else addy(bx, p);
-    }
+  real factor = 0.5 * B / A;
+  real denom = B * factor;
+  if (fabs(denom) <= asy__Fuzz2 * fabs(C)) {
+    real x = -C / A;
+    if (x >= 0.0) { real t2 = sqrt(x); out.push(-t2); out.push(t2); }
+    return out;
+  }
+  real x = -2.0 * C / denom;
+  if (x > -1.0) {
+    real r2 = factor * asy__sqrt1pxm1(x);
+    real r1 = -r2 - 2.0 * factor;
+    if (r1 <= r2) { out.push(r1); out.push(r2); }
+    else { out.push(r2); out.push(r1); }
+  } else if (x == -1.0) {
+    out.push(-factor);
+  }
+  return out;
+}
+void addcubic1(box bx, bool isx, real a, real b0, real c, real d) {
+  for (real u : asy__bezcrit(a, b0, c, d)) {
+    if (u < 0.0 || u > 1.0) continue;             // path.h:449 goodroot
+    real p = asy__bez(a, b0, c, d, u);
+    if (isx) addx(bx, p);
+    else addy(bx, p);
   }
 }
 
@@ -1986,30 +2033,40 @@ private real asy__tex2ps = 72 / 72.27;
 
 // 从 pt 文本里抠出那个数。自己写而不是用 `(real) s`：那个 cast 声明在这份文件很后面，
 // 而这一层的名字解析是顺序的。只需要认 `-?\d*\.?\d*`，TeX 印的就是这个样子。
+//
+// 尾数要**一口气**攒成整数再除一次 10^k，不能边走边 `v + f*d`（f 逐次 *0.1）：
+// 后者每一位都要round一次，攒到最后能差 1 个 ulp。C++ 那边是
+// `lexical::cast<double>` → strtod，strtod 是正确舍入的，所以只有"整尾数除一次"
+// 这种写法才对得上。量出来的后果：`label("$a \le r \le b$")` 的 height 差 1 ulp，
+// 顺着 drawlabel.cc:130 的 vertical 灌进 plain_scaling 的单纯形，解出的 a 差 1 ulp，
+// %%BoundingBox 就整整差 1bp。TeX 的 dim 最多 5 位小数、量级又小，尾数远在 2^53
+// 以内，10^k（k<=22）也是精确值，所以一次除法就是正确舍入。
 private real asy__ptnum(string s) {
   int n = length(s);
   int i = 0;
   real sign = 1;
   if (i < n && substr(s, i, 1) == "-") { sign = -1; i = i + 1; }
-  real v = 0;
+  real m = 0;      // 整尾数
+  int k = 0;       // 小数位数
   while (i < n) {
     string c = substr(s, i, 1);
     if (c < "0" || c > "9") break;
-    v = v * 10 + (find("0123456789", c) + 0);
+    m = m * 10 + (find("0123456789", c) + 0);
     i = i + 1;
   }
   if (i < n && substr(s, i, 1) == ".") {
     i = i + 1;
-    real f = 0.1;
     while (i < n) {
       string c = substr(s, i, 1);
       if (c < "0" || c > "9") break;
-      v = v + f * (find("0123456789", c) + 0);
-      f = f * 0.1;
+      m = m * 10 + (find("0123456789", c) + 0);
+      k = k + 1;
       i = i + 1;
     }
   }
-  return sign * v;
+  real p = 1;
+  for (int j = 0; j < k; ++j) p = p * 10;
+  return sign * (m / p);
 }
 
 // 一整批标签量一趟。`havebounds` 的那些跳过（drawlabel.cc:95 的同一条短路）。
@@ -2073,16 +2130,18 @@ private void asy__measure(labelrec[] ls) {
 
 // 一条标签占的那个框（drawlabel.cc:106-135 逐句照抄）。默认 baseline 是 NOBASEALIGN，
 // 于是 `Depth == depth`、`Align += (0, Depth-depth)` 是个零 —— 那两句留在这儿是为了
-// 与那边对得上眼。
+// 与那边对得上眼。括号也照那边摆：`Align += pair(0,Depth-depth)` 是先算 Depth-depth
+// 再加，写成 `al.y + dep - r.depth` 就多round一次，能差 1 个 ulp。
+// `Align *= 0.5/scale0` 同理 —— 先算那个商，不是 `al.x*0.5/s0`。
 private void asy__labelbox(box bx, labelrec r) {
   pair al = inverse(r.t) * r.align;
   real s0 = abs(al.x) > abs(al.y) ? abs(al.x) : abs(al.y);
-  if (s0 != 0) al = (al.x * 0.5 / s0, al.y * 0.5 / s0);
+  if (s0 != 0) { real q = 0.5 / s0; al = (al.x * q, al.y * q); }
   al = (al.x - 0.5, al.y - 0.5);
   real vert = r.height + r.depth;
   real dep = r.depth;                       // NOBASEALIGN
   al = (al.x * r.width, al.y * vert);
-  al = (al.x, al.y + dep - r.depth);
+  al = (al.x, al.y + (dep - r.depth));
   al = r.t * al;
   pair p = r.position + al;
   real fz = r.p.fontsizeval * 0.1 + 0.3;
@@ -3531,30 +3590,8 @@ string max(string[][] a) {
 
 // (1) path / path[] 的包围盒（runpath.in:271/276/290/314）。每段是三次 Bezier，
 // 某个分量的极值只能出在两端或**导数为零**处；导数是二次的，所以解那条二次就是精确解
-// （C++ 那边 bounds() 走的是同一条路，不是采样）。
-real asy__bez(real a, real b, real c, real d, real t) {
-  real r = 1 - t;
-  return r*r*r*a + 3*r*r*t*b + 3*r*t*t*c + t*t*t*d;
-}
-real[] asy__bezcrit(real a, real b, real c, real d) {
-  // B'(t)/3 = A t^2 + B t + C
-  real A = -a + 3*b - 3*c + d;
-  real B = 2*(a - 2*b + c);
-  real C = b - a;
-  real[] out;
-  if (A == 0) {
-    if (B != 0) { real t = -C / B; if (t > 0 && t < 1) out.push(t); }
-    return out;
-  }
-  real disc = B*B - 4*A*C;
-  if (disc < 0) return out;
-  real s = sqrt(disc);
-  real t1 = (-B + s) / (2*A);
-  real t2 = (-B - s) / (2*A);
-  if (t1 > 0 && t1 < 1) out.push(t1);
-  if (t2 > 0 && t2 < 1) out.push(t2);
-  return out;
-}
+// （C++ 那边 bounds() 走的是同一条路，不是采样）。求根与取值用的是前面那对
+// asy__bezcrit / asy__bez（path.cc 的逐字照抄，见它们旁边的注）。
 // lo=true 取小、false 取大
 real asy__pathbound(path g, bool xaxis, bool lo) {
   int n = g.nodes.length;
@@ -3565,6 +3602,7 @@ real asy__pathbound(path g, bool xaxis, bool lo) {
     if (lo ? v < m : v > m) m = v;
   }
   for (int i = 0; i < segs; ++i) {
+    if (g.nodes[i].straight) continue;   // path.cc:485
     knot p = g.nodes[i];
     knot q = g.nodes[i + 1 == n ? 0 : i + 1];
     real a = xaxis ? p.point.x : p.point.y;
@@ -3572,6 +3610,7 @@ real asy__pathbound(path g, bool xaxis, bool lo) {
     real c = xaxis ? q.pre.x : q.pre.y;
     real d = xaxis ? q.point.x : q.point.y;
     for (real t : asy__bezcrit(a, b, c, d)) {
+      if (t < 0.0 || t > 1.0) continue;  // path.h:449 goodroot，闭区间
       real v = asy__bez(a, b, c, d, t);
       if (lo ? v < m : v > m) m = v;
     }
@@ -5125,8 +5164,8 @@ pair maxbound(pair[] a) {
 // 摆在这儿而不是与 quadraticroots 一起：名字是**按位置**解析的，下面
 // intersections(path,pair,pair) 要用它们。公开的 quadraticroots / cubicroots
 // 在后面，正文就是调这几个私有的。
-private real asy__Fuzz2 = 1000.0 * realEpsilon;   // bound.cc:13
-private real asy__Fuzz4 = asy__Fuzz2 * asy__Fuzz2;  // path.cc:22
+// asy__Fuzz2 / asy__Fuzz4 / asy__sqrt1pxm1 已经在包围盒那一段（min/max(path)）
+// 声明过了 —— 那边也要用，而名字按位置解析，只能摆在更前面。
 private real asy__BigFuzz = 10.0 * asy__Fuzz2;      // path.cc:23
 private real asy__fuzzFactor = 100.0;               // path.cc:24
 private real asy__third = 1.0 / 3.0;
@@ -5135,8 +5174,6 @@ private real asy__abs2(pair z) { return z.x * z.x + z.y * z.y; }
 // 这一层没有 cbrt（宿主交集里没有），用 `^` 带上符号 —— 末位可能与 cbrt 差一两个 ulp。
 // 量过：下面那 8 个探针与内建的 intersections 逐字节一样，所以这个差在这一路上没露头。
 private real asy__cbrt(real x) { return x < 0 ? -((-x) ^ asy__third) : x ^ asy__third; }
-// sqrt(1+x)-1，小 x 上不掉精度（path.cc:36）
-private real asy__sqrt1pxm1(real x) { return x / (sqrt(1 + x) + 1); }
 // cbrt(sqrt(1+x)+1) - cbrt(sqrt(1+x)-1)（path.cc:134）
 private real asy__cbrtsqrt1pxm(real x) {
   real s = asy__sqrt1pxm1(x);

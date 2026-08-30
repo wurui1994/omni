@@ -7720,6 +7720,66 @@ plain_scaling.asy:202 加 simplex2.asy 解出来的 —— **两边跑的是同�
 `tests/sexpr/run.js` 55 passed / 0 failed。
 **跳过**：EPS 全量（220）、`OMNI_LEGS=all` 的另外三条腿。
 
+### 第九十二刀：末位那 1 个 ulp —— 算符形参进闭包、strtod、字号、两份贝塞尔求界
+
+这一刀全是"数学上对、末位不对"的东西。上一刀留下的那句「这一刀只量到这儿」在这儿结掉：
+`%%BoundingBox` 差 1bp 那一批不是一个原因，是**四个**，一层套一层。
+
+**（一）算符形参在闭包里不换影**（`frontend-asy/calls.js` 的 `asyOpUser`）。
+`plain_scaling.asy:41` 的 `maxcoords(coord[] c, bool operator <= (coord,coord))` 把算符当形参收，
+真正用它的是函数体里内嵌的 `dominator` / `addmaximal` —— 也就是**闭包**。
+`asyOpUser` 原先只查 `L.lookup(asyFldSym("operator <="))`，闭包里查不到，于是掉回全局那份，
+`maxcoords(cs, operator >=)` 与 `maxcoords(cs, operator <=)` 算出**同一个**集合。
+这是个不报错的错答案。修法是查不到时顺捕获那条路问一遍 `L.capOf(n, lsym)`。
+第一次修错了地方：先动的是 `lower.js:2099` 的嵌套 fundec 作用域，一点效果都没有 ——
+`node cli.js sx` 打出来是 `(mkclo asy__anon2 …)`，走的是 `exprs.js` 的 `asyCloFrom`，不是那儿。
+量过：`maxcoords` 最小样例的 m 与 M 从"完全一样"变成 `-2 0 / 0 -6.5` 与 `2 0 / 0 6.5`，与参考逐字一致。
+**但这一条没有改掉 1bp 那一批** —— 那时缩放还是 `25 + 3.55e-15`。
+
+**（二）`asy__ptnum` 不是正确舍入的**（`asy_builtins.asy:1989`）。从 TeX 的 `.log` 里抠
+`48.78506pt` 时原先是边走边攒：`v = v + f*d`，`f` 每位 `*0.1`。每一位都要round一次。
+C++ 那边是 `lexical::cast<double>(n)*tex2ps`，也就是 **strtod**，正确舍入。
+修法：整个尾数攒成一个整数、最后除一次 `10^k`。TeX 的 dim 最多 5 位小数、量级又小，
+尾数远在 2^53 以内、`10^k` 也是精确值，所以一次除法就等于 strtod。
+
+**（三）默认字号是抄下来的十进制**（`asy_builtins.asy:397`）。原先写
+`real fontsizeval = 11.9551681195517;` —— 那是 `write()` 印出来的 15 位，比真值大约 1.7e-14
+（十来个 ulp）。这个数经 `drawlabel.cc:130` 的 `fuzz=pentype.size()*0.1+0.3` 进标签的界。
+改成算式 `12.0 * (72 / 72.27)`，与那边的 `fontsize*(72.0/72.27)` 逐位一样。
+**教训**：凡是"量出来是 X"的常数，能写成算式就不许写成字面量 —— `write()` 只给 15 位。
+顺手把 `asy__labelbox` 的括号也照 `drawlabel.cc` 摆回去：`Align += pair(0,Depth-depth)` 是
+先算差再加，写成 `al.y + dep - r.depth` 多round一次；`Align *= 0.5/scale0` 也是先算那个商。
+到这儿 `min/max(frame)` 上一条 label 的四个数与参考**逐位相同**。
+
+**（四）贝塞尔求界有两份，两份都错，而且错得不一样。**
+`addcubic1`（frame/picture 的界走这儿）与 `asy__pathbound`（`min/max(path)` 走这儿）
+各写了一套"解 (-B±√(B²-4AC))/(2A) 再用幂基代回去"。两处都换成逐字照抄 `path.cc`：
+
+- 根用 `path.cc:46` 的 `quadraticroots`（`sqrt1pxm1` 那套），阈值是**相对**的 Fuzz2/Fuzz4，
+  不是原先那个绝对量 `1e-14`；
+- 值用 `path.cc:point(double)` 的 **de Casteljau**。这一条是要害：幂基那条式子不是凸组合，
+  **能冲出控制点的上界**；de Casteljau 每一步都是凸组合，冲不出去。
+  量出来的：`max(scale(2)*unitcircle).y` 原先是 `2 + 4.44e-16`，参考是正好 2；
+  `size(0,100)` 下 `fill(scale(2)*unitcircle)` 那张图的 frame 顶原先是 `50 + 1ulp`，
+  `bbox.h:200` 的 `LowRes` 一 `ceil` 就成了 51；
+- 导数系数照 `path.cc:462` 的括号摆法（`z1-z0+3.0*(c0-c1)`、`2.0*(z0+c1)-4.0*c0`），一个括号都不能挪；
+- 直线段整段跳过求根（`path.cc:485`）；根的取舍是 `path.h:449` 的 `goodroot`，**闭**区间 `0<=t<=1`。
+
+两份合成一对函数（`asy__bezcrit` / `asy__bez`），摆在 `addcubic1` 前面 —— 名字按位置解析，
+只能往前挪；`asy__Fuzz2` / `asy__Fuzz4` / `asy__sqrt1pxm1` 跟着从 5100 多行挪到 1660 行附近。
+
+**怎么量的**：把参考的 `base/` 整份拷到 `/tmp/base2`（参考目录只读），在
+`plain_scaling.asy` 的 `addMinCoord` / `addMaxCoord` 里插一句打印，然后**两边都指向这份**
+`ASYMPTOTE_DIR` 跑。既然两边跑的是同一份 asy 源码，逐行 diff 出来的就一定是原语的差。
+打印用的是位签名（把 double 拆成 `符号:指数:高27位:低26位`）而不是十进制 ——
+`write(real)` 只给 6 位，`format("%.17g")` 在这一层是自己手写的、印不出来。
+第一趟 diff 直接指到那条 label 的 `truesize` 差 1 ulp，顺着往下三步就摸到了字号那个字面量。
+
+结果：ring 与 cosaddition 从"只有数值差"变成**逐字一样**（34 → 36）。
+cardioid / fjortoft / log / polarcircle 四份的 `%%BoundingBox` 也不再差 1bp，
+但它们本来还差别的（长度 4339 vs 4257 之类），仍是"结构不同" —— 那是 graph 那一摊的账。
+
+
 ## 后果与代价
 
 

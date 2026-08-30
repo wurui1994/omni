@@ -1508,8 +1508,28 @@ export function asyOpUser(L, n, op, vals, btys) {
   // `operator <=`，于是 m 与 M 都算成同一个（一个不报错的错答案）。
   const lsym = asyFldSym(`operator ${op}`);
   const lv = L.lookup(lsym);
-  if (lv !== null && asyIsFn(lv)) {
-    const s = asyFnSplit(lv);
+  // 这一格算符可能在**外层**函数上，而用它的是里层的闭包（匿名函数或函数体里的具名函数）——
+  // 那时 lookup 查不到，得顺着捕获那条路问。原型是 plain_scaling.asy:41 的 maxcoords：
+  // 形参 `bool operator <= (coord,coord)`，真正用它的是体里内嵌的 dominator / addmaximal。
+  // 少了这一句，`x <= c[i]` 悄悄回去调文件级那份 `operator <=`，于是
+  // `maxcoords(cs, operator >=)` 与 `maxcoords(cs, operator <=)` 算出同一个集合 ——
+  // 一个不报错的错答案。量出来的后果：`size(0,100)` 的图里有一条 label 时解出的缩放
+  // 差**一个 ulp**（25+3.55e-15 对参考的正好 25），`floor(-50-ε)` 给 -51 不给 -50 ——
+  // cardioid / fjortoft / log / polarcircle / cosaddition / ring 六份的 %%BoundingBox
+  // 就差在这儿。
+  let lvv = lv === null ? null : { type: lv, code: `(var ${lsym})` };
+  if (lvv === null && L.cap !== null && L.cap !== undefined) {
+    let has = false;
+    for (let c = L.cap; c !== null && c !== undefined && !has; c = c.prev) {
+      for (const s of c.outer) if (s.has(lsym)) { has = true; break; }
+    }
+    if (has) {
+      const cv = L.capOf(n, lsym);
+      if (cv !== null && cv.code !== undefined) lvv = { type: cv.type, code: cv.code };
+    }
+  }
+  if (lvv !== null && asyIsFn(lvv.type)) {
+    const s = asyFnSplit(lvv.type);
     if (s !== null && s.params.length === vals.length) {
       // 接不住时**不**在这儿报：这一格与文件级同名的那几份算符是同一个重载集，asy 按签名挑。
       // controlsystem.asy:20 那个闭包里有一格 `blockconnector operator --`（也就是
@@ -1523,7 +1543,7 @@ export function asyOpUser(L, n, op, vals, btys) {
         if (cv === null) { ok = false; break; }
         cs.push(cv.code);
       }
-      if (ok) return { code: `(callfn (var ${lsym}) ${cs.join(' ')})`, type: s.ret };
+      if (ok) return { code: `(callfn ${lvv.code} ${cs.join(' ')})`, type: s.ret };
       L.diags.rollback(mark);
     }
   }
