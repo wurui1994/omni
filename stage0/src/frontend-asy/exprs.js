@@ -962,6 +962,25 @@ export function asyCoerce(L, v, want, node, what) {
       if (asyCandFnType(L, c) === want) return { code: `(fnref ${c.sym})`, type: want };
     }
   }
+  // 用户定义的转换（第二十七刀）：内建那几条不成才轮到它，源类型要一模一样（不串）
+  //
+  // 它**排在下面那两条同名改判之前**（这一刀）：asy 里内层的变量声明是实实在在把外层同名
+  // 那一格遮住的 —— 名字先解析成内层那一格，再往目标类型上转，哪怕外层那一格的类型与目标
+  // 一模一样。量过两组：
+  //   `void f(P position=Relative(0)) { real position = 5; show(position); }` 那边印
+  //   `rel=0 pos=5`（用的是内层那个 real，过 `P operator cast(real)`），我们原先印
+  //   `rel=1 pos=0`（挑了外层那个形参）；
+  //   有 `M operator cast(MT)` 时 `void h(M margin) { MT margin; g(margin); }` 那边
+  //   印 107（内层 + 转换），我们原先印 1。
+  // 这一条是 fjortoft 那个**空箭头**的根：plain_arrows.asy:186 的
+  // `real position=position(position,size,g,center);` 把形参 `position position` 遮住，
+  // 而后面 `arrowhead.head(g,position,…)` 要的正是 `position` 型 —— 我们把外层那个
+  // `BeginPoint`（Relative(0)）递了进去，于是 `subpath(g,0,0)` 是一格退化路径，
+  // 箭头三角形塌成一个点，truesize 少了 7.5pt，整张图的比例跟着错。
+  // 反过来那两条同名改判仍旧有用：没有转换可用时（graph.asy:1007 的 `axisT axis` 对
+  // 形参 `axis axis`、plain_arrows.asy:593 的 marginT 对 margin）才轮到它们。
+  const uc = L.castFor(want, v.type, false);
+  if (uc !== null) return { code: asyCastCall(uc, v.code), type: want };
   // 同名的**模块级那一格**（shadowVar，见 nameOf）：类型一模一样时改判成它
   if (v.shadowVar !== undefined && v.shadowVar.type === want) return v.shadowVar;
   // 同一个名字的文件级变量有**好几格**（shadowName，见 nameOf）：按目标类型挑那一格。
@@ -971,9 +990,6 @@ export function asyCoerce(L, v, want, node, what) {
     const g = L.gvarFor(v.shadowName, want);
     if (g !== null) return { code: `(var ${g.sym})`, type: want };
   }
-  // 用户定义的转换（第二十七刀）：内建那几条不成才轮到它，源类型要一模一样（不串）
-  const uc = L.castFor(want, v.type, false);
-  if (uc !== null) return { code: asyCastCall(uc, v.code), type: want };
   // `cycle` 的第二条身份（第五十刀在连接那一格上做的，这里补到**实参**这一格）：
   // 这一层的 `cycle` 就是一格 path，而 asy 那边它的类型是 `cycleToken`，
   // 靠 `guide3 operator cast(cycleToken)`（three.asy:713）接到 `void(flatguide3)`。

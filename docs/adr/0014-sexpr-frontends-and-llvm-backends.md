@@ -8200,7 +8200,71 @@ lmfit1、cardioid）、比不出来 2、超时 1（vectorfield3）。跑过的�
 （这一刀没碰 SVG 那条出口）、自举与 C/LLVM 后端那几轴（改的是 asy 前端与产物印记，
 与后端无关；`run.js` 的 run-c 与 run-llvm 两条腿已经把它们覆盖了）。
 
+### 第九十八刀：内层那一格是实实在在遮住外层的 —— 一个空箭头把整张图的比例带错
+
+fjortoft 的差不是几个 ulp：整张图的比例差 **1.8%**。内层那份 eps 参考横跨
+`-49.832123 .. 375.365906`（合 425.198，正好 15cm），我们是 `-43.233536 .. 382.126505`
+（合 425.36）。单位长度参考 50.0821，我们 50.9835 —— 用户坐标的宽度两边一样（7.5 个单位），
+差的是 **truesize 那一段少了 6.6pt**，于是同样的总宽里留给路径的多了、比例就大了。
+
+顺着 truesize 找到左端那个箭头。参考画的是一个三角形：
+
+```
+newpath -49.5821211 25.0410605 moveto
+ -42.0821211 23.0314416 lineto
+ -42.0821211 27.0506795 lineto
+ -49.5821211 25.0410605 lineto
+closepath fill
+```
+
+我们画的是**一个点**：`newpath -1.0658141e-14 25.491767 moveto / -1.0658141e-14
+25.491767 lineto closepath fill` —— 塌在路径的另一头，长度 0。而同一次调用里那条
+**杆**（`draw(f,subpath(r,arctime(r,size),length(r)),p)`）是对的（-42.98 到 0），
+说明 `drawarrow` 里那个 `r` 没问题，问题在 `arrowhead.head(g,position,…)` 自己那一趟。
+
+探针钉在 `DefaultHead.head` 的前四行上，两边一比就定了案：参考是 `rel=0 pos=1`，
+我们是 `rel=1 pos=0`。也就是说我们把**形参那一格** `position position`（BeginArrow 传的
+`BeginPoint`，即 `Relative(0)`）递了进去，而 asy 递的是 plain_arrows.asy:186 那一句
+`real position=position(position,size,g,center);` 算出来的那个 **real**（这里 = L = 1，
+经 `position operator cast(real)` 转成 position）。`subpath(g,0,0)` 是一格退化路径，
+三角形自然塌成一个点。
+
+根在 `asyCoerce` 里那三条同名改判的**顺序**：`shadowVar`（declareShadow 记下的、被遮住的
+外层那一格）原先排在用户自定义转换**前面**，于是目标类型正好等于外层那一格的类型时就直接
+挑了它。量了两组最小例子确认 asy 不是这么定的：
+
+- `void f(P position=Relative(0)) { real position = 5; show(position); }` —— 那边印
+  `rel=0 pos=5`（内层那个 real + `P operator cast(real)`），我们原先印 `rel=1 pos=0`；
+- 有 `M operator cast(MT)` 时 `void h(M margin) { MT margin; margin.k=7; g(margin); }`
+  —— 那边印 107（内层 + 转换），我们原先印 1（外层那个形参）。
+
+内层的变量声明是**实实在在**把外层同名那一格遮住的：名字先落到内层，再往目标类型上转。
+改法就是把 `shadowVar` 与 `shadowName` 两条挪到 `castFor` **后面** —— 没有转换可用时
+它们仍旧兜得住原来那两处（graph.asy:1007 的 `axisT axis` 对形参 `axis axis`、
+plain_arrows.asy:593 的 marginT 对 margin：那两对之间没有转换）。`shadowFns` 不动，
+那一条是"变量遮住函数名、而这里要一个函数类型"，asy 那边精确匹配得分更高。
+
+一条 20 行的顺序改动换来四个例子：fjortoft、mergeExample、partitionExample 从结构不同
+变成一样，advection 那 40 处数值差也一起没了 —— 后三个原先被记在"bezulate 里"，
+其实同一个根：箭头与 margin 少算的 truesize 顺着 `fit2` 把整张图的比例带偏了。
+
+**logdown 换了个位置卡住，写在明处。** 它现在 4420 对参考 5158，可 `fill` 9 次、
+`stroke` 21 次两边一模一样 —— 少的全是 `gsave` + `[…] concat` + 整套笔属性
+（30 个 concat 对我们 2 个），还是第九十七刀记下的那份**近似单位**笔变换。
+外框也差一点：参考 208.82 宽（比要的 200 还宽），我们 200.587。参考那边
+`bounds.exact` 为真、`scale(frame,…)` 直接回 identity 一趟就收，我们多校正了一趟。
+这一条与 gamma / cardioid / lmfit1 同一族，归 libm 与 plain_bounds 那条待决策。
+
+这一刀的账：EPS 那一轴按名字跑了 18 个 —— 一样 **13**（上一刀是 9：新增 fjortoft、
+mergeExample、partitionExample、advection）、只有数值差 0、结构不同 3（logdown、lmfit1、
+cardioid）、比不出来 2。跑过的轴：`tests/asy/run.js` 五条腿 259/0（490.9s）、
+`tests/sexpr/run.js` 55/0、`tests/asy/sweep.js` 220 个里干净 219（1.5s，最慢
+genusthree 115ms）。**跳过的轴**：EPS 全量（同上一刀的理由）、`tests/asy/svg.js`
+（没碰 SVG 出口）、自举（改的是 asy 前端的一处定型顺序，`run.js` 的 run-c / run-llvm
+两条腿已经把后端覆盖了）。
+
 ## 后果与代价
+
 
 - **依赖 LLVM**：本机 `libLLVM.dylib` 157MB。产物变大，但仍然自带执行器、
   不依赖外部 cc。极小构建走 C 后端或第三档自写后端。
