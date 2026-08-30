@@ -565,6 +565,8 @@ int a[3] = { 1, 2, 3 };
 一个字都不用发）；项数多于长度是错（同一处的 `srcElementCount <= dstElementCount`）；空项
 `{ 1, , 3 }` 算一项、跳过不写（84_CurlyInitializers.jnc:45 那行是七项，其中四项是空的）。
 
+（"`[]` 的长度 = 项数"这一句第十四刀查出来是错的：jancy 数的是**非空**项，见那一节。）
+
 **长度只认十进制整数字面量。** jancy 那边它是编译期常量表达式，我们没有常量折叠 —— 与其偷偷
 接受一个求值不出来的东西，不如明着拒。
 
@@ -666,7 +668,8 @@ jancy 的 struct 是 POD **值**类型，所以 `t = s` 抄一份、不共享同
 相反（那是**给错答案**，不是拒不了），所以明着拒，写 `S*` 传。第三条是结构体的花括号初值
 （`S s = { 1, 2 }` 与 `new S { m_y = 2000 }`，decl_curly.rst 那一节，位置项与命名项各要一段）。
 
-（前两条第十三刀做掉了 —— 「谁来开那一格」的答案是**被调自己开**，见下一节。剩花括号初值一条。）
+（前两条第十三刀做掉了 —— 「谁来开那一格」的答案是**被调自己开**，见下一节。花括号初值那一条
+第十四刀做掉了，只剩 `new S { … }`。）
 
 **期望输出的出处**：C，一份 `cc -O0` 编出来的程序抄在 `cases/12-structs.jnc` 的头注里，9 行
 逐字节相同。C 那份里两处补了 `= { 0, 0 }`：`Inner a;` 与 `Inner arr[3];` 的零在 C 里是未定值，
@@ -731,6 +734,57 @@ jancy 的 struct 是 POD **值**类型，所以 `t = s` 抄一份、不共享同
 不在了，本体升成 cases，与 `bad/addr-of` -> `cases/09-addr` 同一个先例）、`tests/sexpr`（63/0）、
 `tests/glr`（20/0）。
 **没跑的**：`tests/asy` 全部（这一刀只碰 `frontend-jnc/lower.js`）、`sweep.js`、`svg.js`、自举、
+`tests/jit`、`tests/mir`、`tests/llvm`。`npm run lint` 这台机器上没有 typescript，跑不了。
+
+### 第十四刀：花括号初值 —— 它不是一个聚合常量，是一个游标
+
+`{ … }` 在 jancy 里**不是**"造一个聚合值再赋过去"，而是**按格子写**：一个游标从 0 起，位置项写
+一格挪一格，命名项 `f = v` 直接点名那个字段。四条语义逐字照 `CurlyInitializer`
+（jnc_ct_Parser.cpp:3312..3395）：
+
+- 空项（`{ ,, 3 }` 里那些空的）**只挪游标、不写那一格** —— `skipCurlyInitializerItem` 里只有一句
+  `m_index++`。声明那一处那格刚 `pnew` 出来是零；**赋值那一处保留原值**，所以
+  `point = { , 200, 300 }` 之后 `m_x` 还是上一次那个数。
+- 命名项把游标设成 -1，之后**不能再写位置项** —— `prepareCurlyInitializerIndexedItem` 那句
+  "indexed-based initializer cannot be used after named-based initializer"。所以
+  `{ 10, m_z = 30 }` 合法、`{ m_x = 1, 2 }` 不合法（`bad/curly-after-named.jnc` 是它的本体）。
+- 一项本身可以再是一对花括号（嵌套的结构体字段、结构体数组的元素）。
+- 一项都没写是错（"empty curly initializer"）。
+
+**一份引擎，四个入口。** `curlyPlan` 走一遍项、出一张"往哪个格子写什么"的单子，`curlyEmit` 照单
+写下去。局部量、模块级变量、赋值语句都调它，数组与结构体也都走它 —— 目标是"一段能按格子写的
+内存"，而这一层的数组与结构体本来就都是那个（第十刀与第十二刀）。第十刀那段专给数组的循环因此
+整段没了。
+
+**为什么要分两步。** 声明那一处目标那格的 `(let …)` 必须发在**所有初值之后** ——
+`int a[2] = { a, 1 }` 里右边那个 `a` 指的是外层那个，可 `(let a …)` 一发出来就把它遮住了。所以
+初值先降（此时目标还没进作用域），提到目标名字的那几项钉成临时量（`pin`：只在初值里出现
+`(var 目标名)` 时才钉，别的项照原样），然后发 `(let …)`，最后照单子写。
+
+**债务表上"`[]` 的长度 = 项数"这一句是错的。** jancy 数的是**非空**项：
+`getAutoSizeArrayElementCount_curly`（jnc_ct_OperatorMgr_New.cpp:454）那个循环只在见过非空项之后
+才 `elementCount++`。于是 `int a[] = { 1, , 3 }` 在 jancy 那边是**两格**，而写值的游标会走到第三
+格 —— 它自己那两半在这一处对不上。这一层照它数长度，越界那一下当场报错（`curlyMember`），而不是
+挑一边圆过去。
+
+**语法长了一条。** `curly-item -> ID "=" curly`：命名项的值本身可以是一对花括号
+（Expr.llk:1028 那条 `ID '=' (curly_initializer | expression)`），而 `initializer` 里刻意不含裸
+花括号，所以它得单列一格。`jnc.table` 从 351 条规则 632 个状态变成 352 / 633，正好这一条。
+
+**两条边界。** `new T { … }`（decl_curly.rst 最后那一格）：花括号初值是**几条语句**，而这一层的
+表达式降级只交出一段文字，没有"顺带发几条语句"的通道 —— `while (new T { … })` 那种位置连"提到
+前面去"都不成立（条件每一圈都要重算）。声明与赋值是语句位置，所以那两处收。第二条是
+`char buffer[] = { 10, 20, "null-terminated", … }`：char 数组里混字面量要"一格一个字节"的存储
+宽度，与那处刻意留下的差别（四种位宽都占一个 64 位槽）是同一格。
+
+**期望输出的出处**：前 11 行是 C（`cc -O0 -std=c99`，抄在 `cases/14-curly.jnc` 的头注里，逐字节
+相同）—— jancy 的 `m_z = 30` 与 C99 的 `.m_z = 30` 是同一件事，jancy 的空项对应 C 的 `[i] =`。
+后 6 行 C **写不出来**（C 的 `p = (Point){ … }` 是整块盖过去、剩下的补零，jancy 不是），所以那
+几行的出处是 jancy 的源码：`skipCurlyInitializerItem` 只把游标 ++。
+
+**跑过的轴**：`tests/jnc`（26/0，新增 `cases/14-curly`、`bad/curly-after-named`、`bad/curly-new`）、
+`tests/sexpr`（63/0）、`tests/glr`（20/0，`snapshots/jnc.table` 照那一条新规则刷了一次）。
+**没跑的**：`tests/asy` 全部（这一刀只碰 `frontend-jnc/` 那两份）、`sweep.js`、`svg.js`、自举、
 `tests/jit`、`tests/mir`、`tests/llvm`。`npm run lint` 这台机器上没有 typescript，跑不了。
 
 ## 后果与代价

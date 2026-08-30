@@ -440,6 +440,10 @@
   (rule curly-item
     (-> () (skip-item))
     (-> (ID "=" initializer) (prefer 1) (named-item $1 $3))
+    ;; `m_in = { 1, 2 }`：命名项的值本身可以再是一对花括号（Expr.llk:1028 那条
+    ;; `curly_initializer_named_item : ID '=' (curly_initializer | expression)`）。
+    ;; initializer 里刻意不含裸花括号，所以这一条得单列一格。
+    (-> (ID "=" curly) (prefer 1) (named-item $1 $3))
     (-> ("[" expr "]" "=" initializer) (prefer 1) (indexed-item $2 $5))
     (-> (curly) $1)
     (-> (initializer) $1))

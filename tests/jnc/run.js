@@ -16,11 +16,13 @@
 //   2. rt/*.jnc 在五条腿上报**同一句**运行期错误。
 //   3. bad/*.jnc 必须被拒绝，且拒在正确的理由上。这一组是那些边界的本体：多维数组、
 //      数组之间的赋值、`static` 的局部量、对模块级变量取地址、整数上的精度、
-//      `unsafe` 之外的 thin 转换、`unsigned`。（`? :`、不换行的 printf、条件真值化曾经在
+//      `unsafe` 之外的 thin 转换、`unsigned`、`new T { … }`，加一条 jancy 自己的规矩
+//      （命名项之后不能再写位置项）。（`? :`、不换行的 printf、条件真值化曾经在
 //      这一组里，第三到第五刀把它们做掉之后转到了 cases/；`&x` 是第九刀、定长数组是第十刀、
-//      模块级变量是第十一刀、值语义的结构体是第十二刀、结构体按值传与按值回是第十三刀，
-//      现在各在 cases/09-addr.jnc、cases/10-arrays.jnc、cases/11-globals.jnc、
-//      cases/12-structs.jnc、cases/13-struct-args.jnc。）
+//      模块级变量是第十一刀、值语义的结构体是第十二刀、结构体按值传与按值回是第十三刀、
+//      花括号初值是第十四刀，现在各在 cases/09-addr.jnc、cases/10-arrays.jnc、
+//      cases/11-globals.jnc、cases/12-structs.jnc、cases/13-struct-args.jnc、
+//      cases/14-curly.jnc。）
 //
 //   node tests/jnc/run.js
 //   node tests/jnc/run.js pointers

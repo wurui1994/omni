@@ -36,7 +36,10 @@
 // **值语义的结构体**（`S s;` / `S t = s;` / `t = s` / `s.f` / `s.in.y` / `&s` / `S a[3]` /
 // 结构体的模块级变量 —— 每格是一段自己的 `pnew` 内存，抄一份由 copyAgg 逐字段做）、
 // **结构体按值传与按值回**（`void f(S v)` / `S g()` / `S t = g()` / `t = g()` / `g().f` ——
-// 抄的那一下在**被调**那一侧，见 fnDef 的形参前奏那一段）。
+// 抄的那一下在**被调**那一侧，见 fnDef 的形参前奏那一段）、
+// **花括号初值**（`int a[] = { 1, 2, 3 }` / `int b[10] = { ,, 3, 4,,, 7 }` /
+// `Point p = { 10, m_z = 30 }` / `Box b = { 7, { 1, 2 } }` / `p = { , 200, 300 }` ——
+// 位置项、命名项、空项、嵌套四种，声明与赋值两处，见 curlyPlan）。
 //
 // ## 纪律：**jancy 不向方言妥协**
 //
@@ -68,8 +71,14 @@
 //     的局部量同一格）。还有一条不是存储类而是查名字：**调用后面定义的函数**。jancy 的
 //     命名空间成员不看顺序，而这一层的函数是按源码顺序降的（模块级变量与命名类型已经
 //     分两遍先成型了，见 run）。
-//   - 结构体那一族里剩下的一条：结构体的花括号初值 `S s = { 1, 2 }` 与
-//     `new S { m_y = 2000 }`（decl_curly.rst 那一节，位置项与命名项各要一段）。
+//   - 结构体那一族里剩下的一条：`new T { … }`（decl_curly.rst 最后那一格）。花括号初值是
+//     **几条语句**，而这一层的表达式降级只交出一段文字 —— 没有"顺带发几条语句"的通道，
+//     而 `while (new T { … })` 那种位置连"提到前面去"都不成立（条件每一圈都要重算）。
+//     声明与赋值那两处是语句位置，所以那两处的花括号初值是收的（`bad/curly-new.jnc`）。
+//   - 花括号初值里剩下的两条：`[i] = v`（那一条在**我们的**语法里，jancy 的项只有位置与名字
+//     两种，所以它是当场报错的那类）、`char buffer[] = { 10, 20, "null-terminated", … }`
+//     （decl_curly.rst 最后那一段：char 数组里可以混字面量 —— 要"一格一个字节"的存储宽度，
+//     与下面那处刻意留下的差别是同一格）。
 //   - `printf` 之外的标准库（`std.*`、`io.*`、`gc.*`）
 //   - 格式化字面量 `$"…"`、多行字面量、正则 switch
 //   - class / union / enum / property / reactor / 事件 / 多播 / 协程
@@ -376,6 +385,148 @@ class JncLower {
     return out;
   }
 
+  /* ------------------------------------------------ 花括号初值（第十四刀） */
+
+  /**
+   * 一格里能写多少 —— 花括号初值的**一份引擎**。声明、赋值都走它，数组与结构体也都走它。
+   *
+   * 语义逐条照 jancy 的 `CurlyInitializer`（jnc_ct_Parser.cpp:3312..3395）：
+   *   - 一个游标 `idx`，从 0 起。位置项写 `idx` 那一格，然后 `idx++`
+   *     （prepareCurlyInitializerIndexedItem + assignCurlyInitializerItem）。
+   *   - 空项（`{ ,, 3 }` 里那些空的）**只挪游标、不写那一格**（skipCurlyInitializerItem
+   *     里只有一句 `m_index++`）。声明那一处那格刚 pnew 出来是零；赋值那一处**保留原值** ——
+   *     `point = { , 200, 300 }` 之后 `m_x` 还是上一次那个数（84_CurlyInitializers.jnc:61）。
+   *   - 命名项 `f = v` 把游标设成 -1，之后**不能再写位置项**（prepareCurlyInitializerIndexedItem
+   *     那句 "indexed-based initializer cannot be used after named-based initializer"）。
+   *   - 一项本身可以再是一对花括号（嵌套的结构体字段、结构体数组的元素）。
+   *   - 一项都没写是错（curly_initializer 那句 "empty curly initializer"）。
+   *
+   * 分两步（这一份出单子、curlyEmit 写）是因为声明那一处目标那格的 `(let …)` 必须发在**所有
+   * 初值之后**：`int a[2] = { a, 1 }` 里右边那个 a 指的是外层那个（见 opts.shadow）。
+   */
+  curlyPlan(curly, type, pad, out, opts, steps, plan) {
+    if (!isList(curly) || head(curly) !== 'curly') { this.err(curly, '认不出的花括号初值'); return null; }
+    let idx = 0;
+    let count = 0;
+    for (const it of this.flat(curly.items[1])) {
+      const ih = isList(it) ? head(it) : null;
+      if (ih === 'skip-item') { if (idx !== -1) idx++; continue; }
+      if (ih === 'indexed-item') { this.nope(it, '花括号初值里的 `[i] = …`（jancy 的项只有位置与名字两种）'); return null; }
+      const named = ih === 'named-item';
+      if (!named && idx === -1) {
+        this.err(it, '命名项之后不能再写位置项（jancy 那句 "indexed-based initializer '
+          + 'cannot be used after named-based initializer"）');
+        return null;
+      }
+      const m = named
+        ? this.curlyMember(it, type, -1, isAtom(it.items[1]) ? it.items[1].value : null)
+        : this.curlyMember(it, type, idx, null);
+      if (m === null) return null;
+      idx = named ? -1 : idx + 1;
+      const val = named ? it.items[2] : it;
+      const sub = steps.concat([m.step]);
+      if (isList(val) && head(val) === 'curly') {
+        if (!isStruct(m.type) && !isArr(m.type)) {
+          this.err(val, `这一项是一对花括号，而它对着的是 ${tyName(m.type)}`);
+          return null;
+        }
+        if (this.curlyPlan(val, m.type, pad, out, opts, sub, plan) === null) return null;
+        count++;
+        continue;
+      }
+      if (isArr(m.type)) { this.nope(val, '把一个数组当花括号初值的一项（要数组之间的赋值）'); return null; }
+      const code = opts.val(val, m.type);
+      if (code === null) return null;
+      count++;
+      if (isStruct(m.type)) {
+        plan.push({ steps: sub, code: this.aggSource(code, m.type.name, pad, out), struct: m.type.name });
+        continue;
+      }
+      plan.push({ steps: sub, code: this.pin(code, m.type, opts.shadow, pad, out), struct: null });
+    }
+    if (count === 0) { this.err(curly, '空的花括号初值（jancy 那句 "empty curly initializer"）'); return null; }
+    return plan;
+  }
+
+  /** 游标（或名字）落在哪一格：回一步"怎么走到它"与那一格的类型。 */
+  curlyMember(node, type, idx, name) {
+    if (isStruct(type)) {
+      const fs = this.structs.get(type.name);
+      if (fs === undefined) return this.err(node, `内部错误：没有结构体 '${type.name}'`);
+      const f = name === null ? fs[idx] : fs.find((x) => x.name === name);
+      if (f === undefined) {
+        return name === null
+          ? this.err(node, `第 ${idx + 1} 项越过了 ${type.name} 的 ${fs.length} 个字段`)
+          : this.err(node, `${type.name} 没有字段 '${name}'`);
+      }
+      return { step: { f: f.name }, type: f.type };
+    }
+    if (name !== null) return this.err(node, `数组上的命名项 '${name} = …'（名字是结构体字段才有的）`);
+    if (idx >= type.n) return this.err(node, `第 ${idx + 1} 项越过了数组的 ${type.n} 格`);
+    return { step: { i: idx }, type: type.el };
+  }
+
+  /** 单子上的一条条写下去。地址是"目标 + 几步"折出来的，所以同一张单子换个目标也成立。 */
+  curlyEmit(plan, targetCode, pad, out) {
+    for (const w of plan) {
+      const addr = w.steps.reduce(
+        (acc, s) => (s.f === undefined ? `(padd ${acc} (int ${s.i}))` : `(pfield ${acc} ${s.f})`),
+        targetCode,
+      );
+      if (w.struct !== null) {
+        if (this.copyAgg(addr, w.code, w.struct, pad, out) === null) return null;
+        continue;
+      }
+      out.push(`${pad}(pstore ${addr} ${w.code})`);
+    }
+    return out;
+  }
+
+  /**
+   * 只在初值里提到了**目标那个名字**时才钉一格临时。声明那一处目标的 `(let …)` 发在初值
+   * 之后，可它一旦发出来就把外层同名的那个遮住了 —— `int a[2] = { a, 1 }` 里的 a 要的是外层。
+   * 名字在这一层一律降成 `(var 名字)`，所以这一句判得准（字段名是 `(pfield … a)`，不会误判）。
+   */
+  pin(code, type, shadow, pad, out) {
+    if (shadow === null || !code.includes(`(var ${shadow})`)) return code;
+    const t = `$c${this.tmp++}`;
+    out.push(`${pad}(let ${t} ${tyText(type)} ${code})`);
+    return `(var ${t})`;
+  }
+
+  /**
+   * `[]` 的长度。**不是项数**：jancy 数的是**非空**项（getAutoSizeArrayElementCount_curly，
+   * jnc_ct_OperatorMgr_New.cpp:454 —— 那个循环只在见过非空项之后才 `elementCount++`）。
+   * 所以 `int a[] = { 1, , 3 }` 在 jancy 那边是**两格**，而写值的游标会走到第三格 ——
+   * 它自己那两半在这一处对不上。这一层照它数长度，越界那一下当场报错（curlyMember）。
+   */
+  curlyLen(curly) {
+    let n = 0;
+    for (const it of this.flat(curly.items[1])) if (!(isList(it) && head(it) === 'skip-item')) n++;
+    return n;
+  }
+
+  /** 花括号初值目标的类型：数组的 `[]` 在这儿数出长度，别的类型在这儿被拒。 */
+  curlyType(n, info, curly) {
+    if (isArr(info.type)) {
+      if (info.type.n !== null) return info.type;
+      const len = this.curlyLen(curly);
+      if (len < 1) return this.err(n, `'${info.name}[]' 的花括号初值里没有非空项，数不出长度`);
+      return tArr(info.type.el, len);
+    }
+    if (isStruct(info.type)) return info.type;
+    return this.nope(n, `${tyName(info.type)} 的花括号初始化（只有数组与结构体是一段能按格子写的内存）`);
+  }
+
+  /** 一个初值/一项的值：降、整数隐式转、比类型。回 code。 */
+  initValue(node, want) {
+    let v = this.expr(node, want);
+    if (v === null) return null;
+    if (isInt(v.type) && isInt(want)) v = intConv(v, want);
+    if (!sameTy(v.type, want)) return this.err(node, `这一项是 ${tyName(v.type)}，而它对着的是 ${tyName(want)}`);
+    return v.code;
+  }
+
   /**
    * 能提上去吗。方言的 `(ptr T)` 的 T 只能是 int / real / bool / 结构体
    * （hir/types.js 的 ptrTargetOk），而结构体自己**本来就是**一段内存了（第十二刀：那一格
@@ -494,7 +645,7 @@ class JncLower {
     return null;
   }
 
-  /** `int g[3] = { 1, 2, 3 };` 在顶层。与 localDeclCurly 同一套规矩，只是落在全局上。 */
+  /** `int g[3] = { 1, 2, 3 };` / `Point g = { 1, m_z = 3 };` 在顶层。与局部量同一份引擎。 */
   globalDeclCurly(n) {
     const sp = this.specs(n.items[1]);
     if (sp === null) return null;
@@ -502,30 +653,20 @@ class JncLower {
     const info = this.declarator(dcl, sp);
     if (info === null) return null;
     if (info.formals !== null) return this.nope(dcl, '函数上的花括号初始化');
-    if (!isArr(info.type)) return this.nope(n, `${tyName(info.type)} 的花括号初始化（这一刀只有数组这一格）`);
     const curly = n.items[3];
     if (!isList(curly) || head(curly) !== 'curly') return this.err(n, '认不出的花括号初始化');
-    const items = this.flat(curly.items[1]);
-    const len = info.type.n === null ? items.length : info.type.n;
-    if (len < 1) return this.err(n, `'${info.name}[]' 的花括号初值是空的，数不出长度`);
-    if (items.length > len) {
-      return this.err(n, `花括号初值有 ${items.length} 项，而 ${info.name} 只有 ${len} 格`);
-    }
-    const ty = tArr(info.type.el, len);
-    if (this.declareGlobal(dcl, { name: info.name, type: ty }) === null) return null;
-    const at = tyText(ty);
-    this.globalInit.push(`    (set ${info.name} (pnew ${at} (int ${len})))`);
-    for (let i = 0; i < items.length; i++) {
-      const it = items[i];
-      if (isList(it) && head(it) === 'skip-item') continue;
-      if (isList(it) && (head(it) === 'named-item' || head(it) === 'indexed-item' || head(it) === 'curly')) {
-        this.nope(it, `花括号初值里的 '${head(it)}'`);
-        return null;
-      }
-      let v = this.globalValue(it, info.type.el, true);
-      if (v === null) return null;
-      this.globalInit.push(`    (pstore (padd (var ${info.name}) (int ${i})) ${v})`);
-    }
+    const t = this.curlyType(n, info, curly);
+    if (t === null) return null;
+    if (this.declareGlobal(dcl, { name: info.name, type: t }) === null) return null;
+    const st = isArr(t) ? tyText(t) : slotText(t);
+    this.globalInit.push(`    (set ${info.name} (pnew ${st} (int ${isArr(t) ? t.n : 1})))`);
+    // 全局这一侧不用 shadow：那一格是 `(global …)`，没有"初值之后才发 let"这回事。
+    const plan = this.curlyPlan(curly, t, '    ', this.globalInit, {
+      shadow: null,
+      val: (node, want) => this.globalValue(node, want, true),
+    }, [], []);
+    if (plan === null) return null;
+    this.curlyEmit(plan, `(var ${info.name})`, '    ', this.globalInit);
     return null;
   }
 
@@ -977,19 +1118,15 @@ class JncLower {
   }
 
   /**
-   * 花括号初始化的局部量（第十刀）：`int a[3] = { 1, 2, 3 }` / `int b[] = { 7, 8 }`。
+   * 花括号初始化的局部量（第十刀，第十四刀改成走 curlyPlan）：
+   * `int a[3] = { 1, 2, 3 }` / `int b[] = { 7, 8 }` / `Point p = { 10, m_z = 30 }`。
    *
    * 语法上它是**另一条**产生式（`decl -> specs dcl "=" curly`，一次只声明一个名字）——
    * jancy 那边花括号初始化之后可以省掉分号，所以它不能挂在 init-dcl 上。
    *
-   * 三条语义，都是 jancy 的：
-   *   - `[]` 的长度 = 项数（decl_curly.rst 的 `char buffer[] = { … }`）。
-   *   - 项数少于长度时，剩下的是**零**（CastOp_Array.cpp:`if (dstSize > srcSize) memset(dst, 0, …)`），
-   *     而 pnew 出来的那一段本来就是零，所以少写的那几格一个字都不用发。
-   *   - 项数**多于**长度是错（同一处：`srcElementCount <= dstElementCount` 才是一次转换）。
-   *
-   * 空项 `{ 1, , 3 }` 照 jancy 算一项、跳过不写（84_CurlyInitializers.jnc:45 那行是七项，
-   * 其中四项是空的）。
+   * 项少于格子时剩下的是**零**（CastOp_Array.cpp:`if (dstSize > srcSize) memset(dst, 0, …)`），
+   * 而 pnew 出来的那一段本来就是零，所以少写的那几格一个字都不用发。项**多于**格子是错
+   * （同一处：`srcElementCount <= dstElementCount` 才是一次转换），那一条在 curlyMember 里判。
    */
   localDeclCurly(n, ind) {
     const pad = ' '.repeat(ind);
@@ -1000,49 +1137,25 @@ class JncLower {
     const info = this.declarator(dcl, sp);
     if (info === null) return null;
     if (info.formals !== null) { this.nope(dcl, '函数上的花括号初始化'); return null; }
-    if (!isArr(info.type)) {
-      this.nope(n, `${tyName(info.type)} 的花括号初始化（这一刀只有数组这一格）`);
-      return null;
-    }
     const curly = n.items[3];
     if (!isList(curly) || head(curly) !== 'curly') { this.err(n, '认不出的花括号初始化'); return null; }
-    const items = this.flat(curly.items[1]);
-    const len = info.type.n === null ? items.length : info.type.n;
-    if (len < 1) { this.err(n, `'${info.name}[]' 的花括号初值是空的，数不出长度`); return null; }
-    if (items.length > len) {
-      this.err(n, `花括号初值有 ${items.length} 项，而 ${info.name} 只有 ${len} 格`);
+    const t = this.curlyType(n, info, curly);
+    if (t === null) return null;
+    if (isArr(t) && this.lifted.has(info.name)) {
+      this.nope(dcl, `对数组取地址（'&a' 是 ${tyName(t.el)}(*)[${t.n}]，要方言的指针能指向数组）`);
       return null;
     }
-    if (this.lifted.has(info.name)) {
-      this.nope(dcl, `对数组取地址（'&a' 是 ${tyName(info.type.el)}(*)[${len}]，要方言的指针能指向数组）`);
-      return null;
-    }
-    const el = info.type.el;
-    const vals = [];
-    for (const it of items) {
-      if (isList(it) && head(it) === 'skip-item') { vals.push(null); continue; }
-      if (isList(it) && (head(it) === 'named-item' || head(it) === 'indexed-item' || head(it) === 'curly')) {
-        this.nope(it, `花括号初值里的 '${head(it)}'`);
-        return null;
-      }
-      let v = this.expr(it, el);
-      if (v === null) return null;
-      if (isInt(v.type) && isInt(el)) v = intConv(v, el);
-      if (!sameTy(v.type, el)) {
-        this.err(it, `这一项是 ${tyName(v.type)}，而 ${info.name} 的元素是 ${tyName(el)}`);
-        return null;
-      }
-      vals.push(v.code);
-    }
-    // 初值降完了才进作用域：`int a[2] = { a, 1 }` 里的 a 指外层那个（与 localDecl 同）
-    this.push(info.name, tArr(el, len));
-    const at = tyText(info.type);
-    const out = [`${pad}(let ${info.name} ${at} (pnew ${at} (int ${len})))`];
-    for (let i = 0; i < vals.length; i++) {
-      if (vals[i] === null) continue;
-      out.push(`${pad}(pstore (padd (var ${info.name}) (int ${i})) ${vals[i]})`);
-    }
-    return out;
+    const out = [];
+    const plan = this.curlyPlan(curly, t, pad, out, {
+      shadow: info.name,
+      val: (node, want) => this.initValue(node, want),
+    }, [], []);
+    if (plan === null) return null;
+    // 初值降完了才进作用域、也才发目标那一格：`int a[2] = { a, 1 }` 里的 a 指外层那个
+    this.push(info.name, t);
+    const st = isArr(t) ? tyText(t) : slotText(t);
+    out.push(`${pad}(let ${info.name} ${st} (pnew ${st} (int ${isArr(t) ? t.n : 1})))`);
+    return this.curlyEmit(plan, `(var ${info.name})`, pad, out);
   }
 
   /** 可写的位置。方言里只有两种写法：`(set 名字 值)` 与 `(pstore 指针 值)`。 */
@@ -1129,6 +1242,25 @@ class JncLower {
     return lv.kind === 'var' ? `(var ${lv.name})` : `(pload ${lv.code})`;
   }
 
+  /**
+   * 花括号初值的目标：一段**能按格子写**的内存（第十四刀）。结构体走 lvalue 的 `agg`（那一格
+   * 的 code 就是地址），数组的名字在 lvalue 里是拒的（`a = b` 不合法），可 `a = { … }` 合法 ——
+   * 那不是"给整个数组赋值"，是逐格写 —— 所以数组这一条在这儿自己取那一格。
+   */
+  aggTarget(n) {
+    if (isList(n) && head(n) === 'name') {
+      const nm = n.items[1].value;
+      const r = this.lookupRef(nm);
+      if (r !== null && isArr(r.type)) return { code: `(var ${nm})`, type: r.type };
+    }
+    const lv = this.lvalue(n);
+    if (lv === null) return null;
+    if (lv.kind !== 'agg') {
+      return this.err(n, `花括号初值的左边要一段结构体或数组，这里是 ${tyName(lv.type)}`);
+    }
+    return { code: lv.code, type: lv.type };
+  }
+
   /** 表达式语句。赋值与 ++/-- 只在这儿（与 for 的两格）成立 —— 方言里它们是语句不是表达式。 */
   exprStmt(n, ind) {
     const pad = ' '.repeat(ind);
@@ -1136,6 +1268,20 @@ class JncLower {
     const h = head(n);
     if (h === 'assign') {
       const op = isStr(n.items[1]) ? n.items[1].value : null;
+      // `point = { , 200, 300 }`（第十四刀）。右边是一对花括号时这**不是**一次赋值，而是
+      // 按格子写进去 —— 空项那几格保留原值（84_CurlyInitializers.jnc:61 那行之后 m_x 还是 10）。
+      if (isList(n.items[3]) && head(n.items[3]) === 'curly') {
+        if (op !== '=') { this.err(n, `'${op}' 的右边不能是一对花括号`); return null; }
+        const tgt = this.aggTarget(n.items[2]);
+        if (tgt === null) return null;
+        const out = [];
+        const plan = this.curlyPlan(n.items[3], tgt.type, pad, out, {
+          shadow: null,
+          val: (node, want) => this.initValue(node, want),
+        }, [], []);
+        if (plan === null) return null;
+        return this.curlyEmit(plan, tgt.code, pad, out);
+      }
       const lv = this.lvalue(n.items[2]);
       if (lv === null) return null;
       let v = this.expr(n.items[3], lv.type);
@@ -1655,6 +1801,13 @@ class JncLower {
       case 'call': return this.callExpr(n);
       case 'new-array': return this.newPtr(n, n.items[1], n.items[2]);
       case 'new': return this.newPtr(n, n.items[1], null);
+      // `new T { … }`（decl_curly.rst 最后那一格）。花括号初值是**几条语句**（先开那一格，
+      // 再逐格写），而这一层的表达式降级只交出一段文字 —— 没有"顺带发几条语句"的通道。
+      // 声明与赋值那两处有（语句位置），所以那两处的花括号初值是收的（第十四刀）。
+      case 'new-curly':
+        return this.nope(n, '`new T { … }`（要"表达式里能顺带发几条语句"；'
+          + '写成 `T v = { … }` 再取 `&v` 是同一个东西）');
+
       case 'cast': return this.cast(n, n.items[1], n.items[2]);
       case 'cond': return this.ternary(n, want);
       case 'addr':

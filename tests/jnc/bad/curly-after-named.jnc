@@ -1,0 +1,15 @@
+// 命名项之后再写位置项。jancy 那边命名项把游标设成 -1，而位置项一进门就检查它
+// （prepareCurlyInitializerIndexedItem：`if (m_index == -1) err "indexed-based initializer
+// cannot be used after named-based initializer"`）。所以 `{ 10, m_z = 30 }` 合法，
+// 反过来 `{ m_x = 1, 2 }` 不合法 —— 这不是这一层的边界，是 jancy 自己的规矩。
+struct Point {
+    int m_x;
+    int m_y;
+    int m_z;
+}
+
+int main() {
+    Point p = { m_x = 1, 2 };
+    printf("%d\n", p.m_y);
+    return 0;
+}

@@ -1,0 +1,129 @@
+// 花括号初值（ADR-0016 第十四刀）。jancy 的 `{ … }` 不是"一个聚合常量"，而是**按格子写** ——
+// 一个游标从 0 起，位置项写一格挪一格，命名项 `f = v` 直接点名那个字段（decl_curly.rst）。
+// 这一层照 CurlyInitializer 那四条办（jnc_ct_Parser.cpp:3312..3395）：
+//   - 空项**只挪游标、不写那一格**（skipCurlyInitializerItem 里只有一句 m_index++）；
+//   - 命名项把游标设成 -1，之后不能再写位置项
+//     （"indexed-based initializer cannot be used after named-based initializer"）；
+//   - 一项本身可以再是一对花括号（嵌套的结构体字段、结构体数组的元素）；
+//   - 一项都没写是错（"empty curly initializer"）。
+// `[]` 的长度数的是**非空**项（getAutoSizeArrayElementCount_curly，OperatorMgr_New.cpp:454）。
+//
+// 声明那一处的期望输出出处：**C**，下面这一份 `cc -O0 -std=c99` 编出来的程序，逐字节相同。
+// jancy 的 `m_z = 30` 与 C99 的 `.m_z = 30` 是同一件事（都是"点名那个字段"），所以 C 那份
+// 用指定初始化式写；jancy 的空项对应 C 的 `[i] =`（都是"跳过前面那几格"）。
+//
+//   #include <stdio.h>
+//   struct Point { int m_x; int m_y; int m_z; };
+//   struct Box { int m_tag; struct Point m_p; };
+//   struct Point g = { 1, .m_z = 3 };
+//   int gt[4] = { [1] = 20, [3] = 40 };
+//   int main() {
+//       struct Point a = { 10, 20, 30 };
+//       printf("a=%d %d %d\n", a.m_x, a.m_y, a.m_z);
+//       struct Point b = { 10 };
+//       printf("b=%d %d %d\n", b.m_x, b.m_y, b.m_z);
+//       struct Point c = { 10, .m_z = 30 };
+//       printf("c=%d %d %d\n", c.m_x, c.m_y, c.m_z);
+//       struct Point d = { .m_y = 2, .m_x = 1 };
+//       printf("d=%d %d %d\n", d.m_x, d.m_y, d.m_z);
+//       int e[10] = { [2] = 3, [3] = 4, [6] = 7 };
+//       printf("e=");
+//       for (int i = 0; i < 10; i++) printf("%d ", e[i]);
+//       printf("\n");
+//       struct Box f = { 7, { 1, 2, 3 } };
+//       printf("f=%d %d %d %d\n", f.m_tag, f.m_p.m_x, f.m_p.m_y, f.m_p.m_z);
+//       struct Box h = { .m_p = { 5, 6 } };
+//       printf("h=%d %d %d\n", h.m_tag, h.m_p.m_x, h.m_p.m_y);
+//       struct Point arr[2] = { { 1, 2, 3 }, { 4 } };
+//       printf("arr=%d %d %d / %d %d %d\n",
+//           arr[0].m_x, arr[0].m_y, arr[0].m_z, arr[1].m_x, arr[1].m_y, arr[1].m_z);
+//       int au[] = { 5, 6, 7 };
+//       printf("au=%d %d %d\n", au[0], au[1], au[2]);
+//       printf("g=%d %d %d\n", g.m_x, g.m_y, g.m_z);
+//       printf("gt=%d %d %d %d\n", gt[0], gt[1], gt[2], gt[3]);
+//       return 0;
+//   }
+//
+// **赋值那一处 C 里没有这个形式**（C 的 `p = (Point){ … }` 是整块盖过去、剩下的补零，
+// jancy 不是）。所以后半段那六行的出处是 jancy 的源码：skipCurlyInitializerItem 只把游标
+// ++，**不写**那一格 —— 于是 `a = { , 200, 300 }` 之后 `m_x` 还是上一次那个数
+// （84_CurlyInitializers.jnc:61 那行就是它）。
+struct Point {
+    int m_x;
+    int m_y;
+    int m_z;
+}
+
+struct Box {
+    int m_tag;
+    Point m_p;
+}
+
+Point g = { 1, m_z = 3 }
+int gt[4] = { , 20, , 40 }
+
+int main() {
+    Point a = { 10, 20, 30 };
+    printf("a=%d %d %d\n", a.m_x, a.m_y, a.m_z);
+
+    // 少写的那几格是零
+    Point b = { 10 };
+    printf("b=%d %d %d\n", b.m_x, b.m_y, b.m_z);
+
+    // 位置项后面接命名项（decl_curly.rst 那一行）
+    Point c = { 10, m_z = 30 };
+    printf("c=%d %d %d\n", c.m_x, c.m_y, c.m_z);
+
+    // 只用命名项，顺序可以与字段顺序不同
+    Point d = { m_y = 2, m_x = 1 };
+    printf("d=%d %d %d\n", d.m_x, d.m_y, d.m_z);
+
+    // 空项只挪游标
+    int e[10] = { ,, 3, 4,,, 7 }
+    printf("e=");
+    for (int i = 0; i < 10; i++)
+        printf("%d ", e[i]);
+    printf("\n");
+
+    // 嵌套：一项本身是一对花括号
+    Box f = { 7, { 1, 2, 3 } }
+    printf("f=%d %d %d %d\n", f.m_tag, f.m_p.m_x, f.m_p.m_y, f.m_p.m_z);
+
+    // 命名项的值也可以是一对花括号
+    Box h = { m_p = { 5, 6 } }
+    printf("h=%d %d %d\n", h.m_tag, h.m_p.m_x, h.m_p.m_y);
+
+    // 结构体数组的元素
+    Point arr[2] = { { 1, 2, 3 }, { 4 } }
+    printf("arr=%d %d %d / %d %d %d\n",
+        arr[0].m_x, arr[0].m_y, arr[0].m_z, arr[1].m_x, arr[1].m_y, arr[1].m_z);
+
+    // `[]` 的长度从非空项数出来
+    int au[] = { 5, 6, 7 }
+    printf("au=%d %d %d\n", au[0], au[1], au[2]);
+
+    printf("g=%d %d %d\n", g.m_x, g.m_y, g.m_z);
+    printf("gt=%d %d %d %d\n", gt[0], gt[1], gt[2], gt[3]);
+
+    // ---- 赋值那一处（出处是 jancy 的源码，见上面的头注）----
+    a = { , 200, 300 };
+    printf("assign a=%d %d %d\n", a.m_x, a.m_y, a.m_z);
+
+    f.m_p = { 8, 9 };
+    printf("field f=%d %d %d %d\n", f.m_tag, f.m_p.m_x, f.m_p.m_y, f.m_p.m_z);
+
+    arr[1] = { 9 };
+    printf("elem arr1=%d %d %d\n", arr[1].m_x, arr[1].m_y, arr[1].m_z);
+
+    int t[3] = { 1, 2, 3 }
+    t = { , 20 };
+    printf("t=%d %d %d\n", t[0], t[1], t[2]);
+
+    Point* pp = &a;
+    *pp = { m_y = 55 };
+    printf("via ptr a=%d %d %d\n", a.m_x, a.m_y, a.m_z);
+
+    g = { m_z = 33 };
+    printf("assign g=%d %d %d\n", g.m_x, g.m_y, g.m_z);
+    return 0;
+}
