@@ -720,12 +720,21 @@ int length(path g) {
 
 int size(path g) { return g.nodes.length; }
 
-// 结点下标：闭合路径上它是绕圈的（asy 的 path::point 对 cycles 取模），开路径上原样
+// 结点下标（path.h:44 的 adjustedIndex）：闭合路径上绕圈取模，开路径上**两头夹住** ——
+// 越界不是错，是"回最近那个端点"。量出来的：feynman.asy:165 的 `point(p, size(p))`
+// 里 size(p) 正好是结点数（开路径），那一句在真 asy 那边回的是最后一个点，
+// 我们从前直接下标越界（fermi.asy 报 "array index out of range: 4 (length 4)"）。
+// 空路径两边都是 `nullpath has no points`（path.h:42 的 checkEmpty，量过错话一致）。
 private int asy__nwrap(path g, int i) {
   int n = g.nodes.length;
-  if (!g.cyclic || n == 0) return i;
-  int k = i % n;
-  return k < 0 ? k + n : k;
+  if (n == 0) abort("nullpath has no points");
+  if (g.cyclic) {
+    int k = i % n;
+    return k < 0 ? k + n : k;
+  }
+  if (i < 0) return 0;
+  if (i >= n) return n - 1;
+  return i;
 }
 
 // path.h 里是成员函数，asy 那边是自由函数

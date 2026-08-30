@@ -7354,6 +7354,40 @@ tiling transparency triangle worldmap yingyang 与两个 silhouette），**22 �
 tiling 要 `postscript`、worldmap 缺数据文件），2 个超 3s。
 `tests/asy/run.js` 259 passed / 0 failed；sweep 220 个里干净 219、3.9s，最慢 tvgen 303ms。
 
+### 第八十五刀：结点下标越界要**夹住**；以及"剩下那 163 个"到底卡在哪，量清楚
+
+fermi.asy 报 `array index out of range: 4 (length 4)`。出处是 feynman.asy:165 的
+`point(p, size(p))` —— 开路径上 `size(p)` 正好是结点数，那个下标一定越界。asy 那边
+path.h:44 的 `adjustedIndex` 对开路径**两头夹住**（`i < 0` 回 0、`i >= n` 回 n-1），
+只有空路径才报错（`nullpath has no points`，量过错话一致）。这一层的 `asy__nwrap`
+从前只处理闭合那一支、开路径原样返回，于是直接撞到数组边界。改成照抄 adjustedIndex。
+fermi.asy 这一下逐字一样。
+
+**剩下那些卡在哪（194 份参考逐个数过的账）**：
+
+- 100 份参考里有 `/ImageType 1`（ASCII85 + Flate 的位图）—— 三维那一族默认走 asy 的
+  **光栅**那条路（glrender 出一张图再嵌进 EPS）。逐字复现一张 OpenGL 渲出来的位图
+  这一层做不到，这 100 个（其中 4 个同时带 TeX）先记在明处；
+- 63 份带 `/TeXDict` 而不带位图 —— 那些 EPS **不是 asy 自己写的**，是 dvips 写的。
+  用 `asy -k` 留下中间文件看清了整条链：asy 先把**不含标签的那张图**写成一份普通
+  EPS（`名字_0.eps`，就是这一层已经会写的那种），再写一份 `名字_.tex`（固定的前言 +
+  `\includegraphics{名字_0.eps}` + 每个标签一句
+  `\ASYalign(x,y)(alignx,aligny){正文}`），然后
+  `latex 名字_.tex` → `dvips -R -Pdownload35 -D600 -O<偏移> -T612bp,792bp -q` → 最后
+  那份 EPS。判据这一轴把 `%` 开头的行全去掉，所以 dvips 头里的日期不参与比较 ——
+  也就是说**这 63 个是能对上的**，前提是三样：一个"起进程"的原语（这一层还没有）、
+  texfile.cc 那份 tex 的逐字复现、以及标签尺寸的度量（`\kern -100.375pt` 与
+  `bb=… 10.240331` 那几个数是 TeX 量出来的，asy 另跑一趟 latex 问的）。这条是主线上
+  最大的一块，单独一刀做；
+- 31 份既没 TeX 也没位图 —— 这一批之后 **23 份逐字一样**。剩 8 个：tiling 要
+  `postscript()`（生 PS pattern 字典，只这一个例子用 patterns.asy）、strokepath 要
+  `_strokepath`（asy 自己是绕 gs 走一趟）、textpath 要 TeX、worldmap 的数据文件在
+  examples 目录里而这一层的 `_readlines` 只按 CWD 找（asy 还会找**主文件所在目录**）、
+  两个 silhouette 各自超 120s（真 asy 秒出，这是我们自己的性能问题，量在明处）。
+
+`tests/asy/run.js` 259 passed / 0 failed；sweep 220 个里干净 219、2.1s，最慢
+genusthree 123ms。
+
 ## 后果与代价
 
 
