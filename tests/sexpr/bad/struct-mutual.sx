@@ -1,0 +1,10 @@
+;; **按值内嵌绕成一圈**：A 里躺一个 B、B 里又躺一个 A。跟自引用是同一件事 ——
+;; 环上没有"第一处"，所以报在 DFS 撞回来的那条字段上，并把那条字段摘掉，好让后面的
+;; structLayout / sizeOf 与各后端的排序走在无环的图上（chunk() 从不在第一条诊断上停）。
+;; 隔一层指针可以：`(b (ptr B))` 与 `(a (ptr A))` 那一对是链表/树那一族的常规写法。
+(module
+  (struct A (b B) (x int))
+  (struct B (a A) (y int))
+  (main
+    (let a A (new A))
+    (print (fld (var a) x))))

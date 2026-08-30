@@ -1,0 +1,66 @@
+// **字段的类型不看声明顺序**（第二十三刀）：`Seg` 里躺两个 `Point`，而 `Point` 声明在它
+// 后面 —— jancy 里这是对的，C 里不是。
+//
+// 出处：jancy 的布局是**按需**算的 —— `Type::prepareLayout`
+// （jnc_ct_Type.cpp:221）在真要用到尺寸的那一刻才 `calcLayout()`，而名字解析走的是
+// 命名空间（不看顺序，decl.rst 那条"namespace members are not order-dependent"）。
+// 同一处也给出了这条边界的另一半：`TypeFlag_InCalcLayout` 已经置上时报
+// 「can't calculate layout of '%s' due to recursion」（jnc_ct_Type.cpp:225）——
+// 也就是"按值绕回自己"是拒的，"声明在后面"不是。方言那侧对着这两半写的是
+// cutValueCycles，钉在 tests/sexpr/bad/struct-self.sx 与 struct-mutual.sx 上。
+//
+// 这一份的期望输出**可以**拿 `cc -O0` 的孪生程序对，但孪生程序里两条 struct 声明得**换过来**
+// （C 要求被内嵌者先是完整类型）—— 换顺序不改任何一个值，所以对的是同一串数。
+
+struct Seg {
+    Point m_a;
+    Point m_b;
+}
+
+struct Point {
+    int m_x;
+    int m_y;
+}
+
+struct Grid {
+    Cell m_cs[2];
+    int m_k;
+}
+
+struct Cell {
+    int m_v;
+    int m_w;
+}
+
+int sumSeg(Seg* s) {
+    return s->m_a.m_x + s->m_a.m_y + s->m_b.m_x + s->m_b.m_y;
+}
+
+int main() {
+    Seg s;
+    printf("zero=%d %d\n", s.m_a.m_x, s.m_b.m_y);
+
+    s.m_a.m_x = 1;
+    s.m_a.m_y = 2;
+    s.m_b.m_x = 3;
+    s.m_b.m_y = 4;
+    printf("seg=%d %d %d / sum=%d\n", s.m_a.m_x, s.m_b.m_x, s.m_b.m_y, sumSeg(&s));
+
+    // 内嵌那一格跟着抄：改副本不动原件
+    Seg t = s;
+    t.m_b.m_y = 40;
+    printf("copy=%d / src=%d\n", t.m_b.m_y, s.m_b.m_y);
+
+    // 一段定长内存的元素也可以是后面才声明的那个
+    Grid g;
+    g.m_cs[1].m_w = 7;
+    g.m_k = 3;
+    printf("grid=%d %d %d\n", g.m_cs[0].m_v, g.m_cs[1].m_w, g.m_k);
+
+    // 那一块退化成 `Cell*`，经它写回去原对象跟着变
+    Cell* p = g.m_cs;
+    p[0].m_v = 5;
+    printf("through=%d\n", g.m_cs[0].m_v);
+
+    return 0;
+}

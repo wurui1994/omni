@@ -279,14 +279,9 @@ class CoreLowerer {
       return this.err(node, `${what}：结构体 '${el.name}' 里有落不进内存的字段，`
         + '排不成一段定长内存');
     }
-    // 元素是**自己或后面才声明**的那个结构体（第二十二刀）：与直接内嵌那一条同一条规矩 ——
-    // 那时候它的字段还空着，尺寸算出来是 0；而且 C 后端要求被嵌套者先是完整类型。
-    // 这一问要看 preStruct（"名字先坐下、字段还空着"的那些），不是看 structLayout：
-    // 空结构体的 layout 不是 null，是 `{fields: [], size: 0}`。
-    if (el.k === 'struct' && this.preStruct.has(el.name)) {
-      return this.err(node, `${what}：结构体 '${el.name}' 声明在后面（或者就是自己）——`
-        + ' 一段定长内存的元素只能是**前面已经声明过**的结构体');
-    }
+    // 元素是**自己或后面才声明**的那个结构体也收（第二十三刀，与直接内嵌同一条）：
+    // 那时候它的字段还空着、尺寸算出来是 0，所以"排不排得成一段内存"这一问挪到
+    // chunk 里字段都填完之后那一遍。绕回自己那一格由 cutValueCycles 报。
     const cnt = isAtom(node.items[2]) ? Number(node.items[2].value) : NaN;
     if (!Number.isInteger(cnt) || cnt <= 0) {
       return this.err(node, `${what}：(blk T N) 的 N 要是一个正整数字面量`);
@@ -407,14 +402,22 @@ class CoreLowerer {
       if (head(f) === 'struct') this.structDec(f, 'struct');
       else if (head(f) === 'class') this.structDec(f, 'class');
     }
+    // 闭环先剪掉（第二十三刀）：下面这一遍与 structLayout / sizeOf 都是顺着字段往下走的，
+    // 绕回自己那一格会一直走下去 —— 所以剪在问"落得进内存吗"之前。
+    this.cutValueCycles(forms);
     // 字段都填完了才问得动"指得到它身上吗"：`(ptr S)` 收下来的那一刻 S 可能还空着
     // （自引用），而 S 里躺一个 string 时它就落不进内存了 —— 那一问挪到这儿补。
+    // `(blk S N)` 的元素同一条（第二十三刀）：收下来的那一刻 S 也可能还空着。
     for (const s of this.structs.values()) {
       for (const f of s.fields) {
-        if (f.type.k !== 'ptr' && f.type.k !== 'tptr') continue;
-        if (f.type.target.k !== 'struct' || structLayout(f.type.target) !== null) continue;
-        this.err(forms[0], `字段 ${s.name}.${f.name}：结构体 '${f.type.target.name}' 里有`
-          + '落不进内存的字段，指不到它身上（见 hir/types.js 的 structLayout）');
+        let inner = null;
+        if (f.type.k === 'ptr' || f.type.k === 'tptr') inner = f.type.target;
+        else if (f.type.k === 'blk') { inner = f.type; while (inner.k === 'blk') inner = inner.el; }
+        else continue;
+        if (inner.k !== 'struct' || structLayout(inner) !== null) continue;
+        this.err(forms[0], `字段 ${s.name}.${f.name}：结构体 '${inner.name}' 里有`
+          + (f.type.k === 'blk' ? '落不进内存的字段，排不成一段定长内存'
+            : '落不进内存的字段，指不到它身上（见 hir/types.js 的 structLayout）'));
       }
     }
     // 换一格空的，不用 `.clear()`：Set/Map 的 clear 不在封闭 ABI 的成员表里
@@ -547,9 +550,10 @@ class CoreLowerer {
    * **结构体套结构体是第十七刀放进来的**：内嵌字段在 LLVM 那条腿上就是那个命名类型本身
    * （`%s_Point`），所以 `FLD` 是一条光秃秃的 `getelementptr`，而 COPY 的
    * `load %s_Point` / `store %s_Point` 是头等聚合的复制 —— 递归是 LLVM 展开的，
-   * 发射器里没有第二份"逐字段递归"。**直接内嵌**的字段类型只收前面已经声明过的那个：
-   * 自引用与前向引用的零值会无限递归（`run()` 里先扫一遍聚合名，好让这两种给出不同的
-   * 诊断）。`tests/sexpr/bad/struct-self.sx` 与 `struct-fwd.sx` 钉着这两半。
+   * 发射器里没有第二份"逐字段递归"。**直接内嵌不看顺序**（第二十三刀）：声明在后面的那个
+   * 也收，因为名字先坐下、字段就地填。剩下真的解不出来的只有"按值绕回自己"，那一问在
+   * cutValueCycles 那一遍上（`tests/sexpr/bad/struct-self.sx` 与 `struct-mutual.sx`
+   * 钉着两半，`tests/sexpr/cases/34-embed-order.sx` 钉着"在后面"那一半是过的）。
    *
    * **指针字段是这一刀（ADR-0016 第十七刀）放进来的**：`(ptr T)` / `(tptr T)`。它与上一刀的
    * `ptrTargetOk` 是**两处**闸门 —— 那一刀开的是"指针能指向指针"，这一刀开的是"指针能躺在
@@ -579,20 +583,13 @@ class CoreLowerer {
       }
       const fn = fd.items[0].value;
       if (seen.has(fn)) return this.err(fd, `${what} '${nm}' 里有两个字段叫 '${fn}'`);
-      // 字段类型提到的是**自己**或**后面才声明**的那个**结构体**：单独报，别落到
-      // "认不出的类型"上。结构体是值语义、内嵌是真的内嵌，所以这两种的零值会无限递归。
-      // 类不在这一条里（见 chunk 里那一段）：它是指针，零值是空引用。
-      // 名字先坐下之后 this.structs 里已经有那一格了，所以"自己/后面"这一问改问 preStruct
-      // （还没填字段的那些）—— 直接内嵌才受这一条约束，隔一层指针不受（下一段）。
-      const tn = isAtom(fd.items[1]) ? fd.items[1].value : null;
-      if (tn !== null && this.preStruct.has(tn)) {
-        return this.err(fd, `字段 ${nm}.${fn}：${tn === nm ? '字段的类型就是它自己' : `结构体 '${tn}' 声明在后面`}`
-          + ` —— 直接内嵌的字段只能是**前面已经声明过**的结构体（自引用的零值会无限递归）；`
-          + `隔一层指针（${tn}*，写成 (ptr ${tn})）可以`);
-      }
+      // 直接内嵌**不看顺序**（第二十三刀）：结构体的名字第十七刀起就"先坐下"了，所以
+      // 后面才声明的那个在这一遍里查得着，字段数组是**就地填**的、指的是同一个对象，
+      // 于是等这一遍走完布局自然就算得出来。绕回自己那一格由 cutValueCycles 那一遍报 ——
+      // 它报完还会把闭环那条字段摘掉，好让后面的 structLayout / sizeOf 走在无环的图上。
       // 定长内存的字段（第二十二刀）：`(blk T N)` 是**真的内嵌**那 N 格 —— 布局那边
       // alignOf/sizeOf/structLayout 从第十八刀起就已经会算它了，缺的只有这张白名单与
-      // 上面这一句分发（`(blk …)` 不在 ty 的表里，它只在指针目标那一处被认过）。
+      // 下面这一句分发（`(blk …)` 不在 ty 的表里，它只在指针目标那一处被认过）。
       const fty = fd.items[1];
       const t = isList(fty) && head(fty) === 'blk'
         ? this.blkTy(fty, `字段 ${nm}.${fn}`)
@@ -621,6 +618,59 @@ class CoreLowerer {
       else this.structs.set(nm, structType(nm, fields));
     } else if (pre !== null) for (const f of fields) pre.fields.push(f);   // 原地填那一格
     else this.classes.set(nm, classType(nm, fields));
+    return null;
+  }
+
+  /**
+   * 按值内嵌绕回自己那一格：报掉，并把闭环那条字段**摘掉**（第二十三刀）。
+   *
+   * 第二十三刀把"直接内嵌只收前面声明过的那个"这一条撤了 —— 名字第十七刀起就先坐下、
+   * 字段数组是就地填的，所以 `(struct A (b B) …)` 里的 B 声明在后面也查得着，等这一遍
+   * 走完布局自然算得出来。撤掉那一条之后剩下的**真**毛病只有一种：绕回自己。
+   * `(struct S (v S))` 与 `(struct A (b B)) (struct B (a A))` 的大小都是"自己加一点"，
+   * 解不出来；`(blk S 2)` 也算内嵌（那是真的排 N 格），所以要剥掉 blk 再看。
+   * 指针、类、`(arr T)` 都隔了一层（指针三个字、类与数组是一个引用），不是内嵌。
+   *
+   * 摘掉那条字段不是为了"修好"，是因为 `chunk()` 从来不在第一条诊断上停 ——
+   * 报完还要往下走 structLayout / sizeOf / 各后端的排序，那几处都顺着字段往下递归，
+   * 图上留着环就不是报错而是挂住。摘完这张图无环，后面那些照常走。
+   */
+  cutValueCycles(forms) {
+    // 报在**这个结构体自己那条声明**上（不是提到它的那一处）：环没有"第一处"，
+    // 而声明是用户改的那一行。REPL 前几批里的结构体在这一批的 forms 里没有声明，
+    // 那时候退回 forms[0] —— 它们早就过过这一遍，不会真的报出来。
+    const decl = new Map();
+    for (const f of forms) {
+      if (head(f) !== 'struct') continue;
+      const sn = isAtom(f.items[1]) ? f.items[1].value : null;
+      if (sn !== null && !decl.has(sn)) decl.set(sn, f);
+    }
+    const state = new Map();
+    const stack = [];
+    const visit = (st) => {
+      if (state.get(st.name) === 'done') return;
+      state.set(st.name, 'busy');
+      stack.push(st.name);
+      for (let i = 0; i < st.fields.length; i++) {
+        const fd = st.fields[i];
+        let ft = fd.type;
+        while (ft.k === 'blk') ft = ft.el;
+        if (ft.k !== 'struct') continue;
+        if (state.get(ft.name) === 'busy') {
+          const at = decl.has(st.name) ? decl.get(st.name) : forms[0];
+          this.err(at, `字段 ${st.name}.${fd.name}：按值内嵌绕回了 '${ft.name}'`
+            + `（${stack.join(' -> ')} -> ${ft.name}）—— 直接内嵌与一段定长内存都是真的内嵌，`
+            + `那一格的大小算不出来；隔一层指针（写成 (ptr ${ft.name})）可以`);
+          st.fields.splice(i, 1);
+          i--;
+          continue;
+        }
+        visit(ft);
+      }
+      stack.pop();
+      state.set(st.name, 'done');
+    };
+    for (const st of this.structs.values()) visit(st);
     return null;
   }
 

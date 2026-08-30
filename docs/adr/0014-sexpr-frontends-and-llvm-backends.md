@@ -1129,6 +1129,12 @@ LLVM 那条腿这一刀有**一个真正新的表示决定**：内嵌结构体�
 为此在 `run()` 里先扫一遍所有聚合名（`aggLater`），好让"声明在后面"和"根本没这个类型"
 给出不同的诊断 —— `tests/sexpr/bad/struct-self.sx` 与 `struct-fwd.sx` 是这两半。
 
+> **后半句 ADR-0016 第二十三刀撤了。** "声明在后面"其实是行的（第十七刀把结构体改成
+> "名字先坐下、字段就地填"之后就算得出布局了），`struct-fwd.sx` 因此删掉、换成好用例
+> `tests/sexpr/cases/34-embed-order.sx`。留下的那一半改成"按值绕回自己"，由
+> `sexpr/lower.js` 的 `cutValueCycles` 报，钉在 `bad/struct-self.sx` 与
+> `bad/struct-mutual.sx` 上。上面 1006 行那条"删掉重划"的后话同此。
+
 asy 那一侧落地的是 `struct B { A a; }`（`cases/20-structnest.asy`，与 `asy -noV` 逐字节
 相同）。三件事是量出来才对上的：
 

@@ -1,0 +1,5 @@
+zero=0 0
+seg=1 3 4 / sum=10
+copy=40 / src=4
+grid=0 7 3
+through=5

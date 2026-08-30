@@ -1,0 +1,48 @@
+;; **直接内嵌不看顺序**（ADR-0016 第二十三刀）：`(struct Seg (a Point) …)` 里的 Point
+;; 声明在后面也收。撤掉的是第十七刀立的那条"只收前面已经声明过的那个" —— 结构体的名字
+;; 从第十七刀起就已经"先坐下"了（run() 里先扫一遍聚合名，字段数组是**就地填**的），
+;; 所以后面那条声明填的就是同一格对象，等这一遍走完布局自然算得出来。
+;; `(blk T N)` 的元素同一条（第二十二刀那一处的顺序限制也一起撤了）。
+;;
+;; 真的解不出来的只剩"绕回自己"：bad/struct-self.sx（S 里躺一个 S）与
+;; bad/struct-mutual.sx（A 里躺 B、B 里躺 A）钉着那两半，报的是 cutValueCycles 那一遍。
+;;
+;; 期望输出的出处（这一路没有 oracle，逐条注明）：
+;;   - 字段偏移按 C 的默认布局：自然对齐、按声明顺序（hir/types.js 的 structLayout）。
+;;     `int` 在这一层占 8 字节，所以 Point 是 16 字节、Cell 也是 16 字节。
+;;   - `(new T)` 出来的那一格是逐字段铺零的；`pnew` 那块是零初始化的（type_ptr_data.rst）
+;;   - `psub` 在 `(ptr int)` 上是按格数回的，所以 16 字节 = 2 格、32 字节 = 4 格
+(module
+  ;; 内嵌的 Point 声明在后面
+  (struct Seg (a Point) (b Point))
+  (struct Point (x int) (y int))
+  ;; 一段定长内存的元素也可以是后面才声明的那个
+  (struct Box (cs (blk Cell 2)) (k int))
+  (struct Cell (v int) (w int))
+
+  (main
+    ;; 值那条路：五条腿各有一处"逐字段铺零"，内嵌那一格在那儿是递归下去的
+    (let s Seg (new Seg))
+    (print (fld (fld (var s) a) x))
+    (print (fld (fld (var s) b) y))
+
+    ;; 指针那条路：偏移得算得出来 —— b 在第 16 字节，所以 b.x 与 a.x 隔 2 格 int
+    (let p (ptr Seg) (pnew (ptr Seg) (int 1)))
+    (pstore (pfield (pfield (var p) b) x) (int 5))
+    (print (pload (pfield (pfield (var p) b) x)))
+    (print (pload (pfield (pfield (var p) a) x)))
+    (print (psub (pfield (pfield (var p) b) x) (pfield (pfield (var p) a) x)))
+
+    ;; 元素是后面才声明的那个结构体：`Cell cs[2]`，每格 16 字节
+    (let b (ptr Box) (pnew (ptr Box) (int 1)))
+    (pstore (pfield (padd (pelem (pfield (var b) cs)) (int 1)) w) (int 7))
+    (pstore (pfield (var b) k) (int 3))
+    (print (pload (pfield (pelem (pfield (var b) cs)) v)))
+    (print (pload (pfield (padd (pelem (pfield (var b) cs)) (int 1)) w)))
+    (print (pload (pfield (var b) k)))
+    ;; k 在第 32 字节：两格 Cell 一共 32 字节 = 4 格 int
+    (print (psub (pfield (var b) k) (pfield (pelem (pfield (var b) cs)) v)))
+
+    ;; 那一块的元素是聚合、而且声明在后面：`(new Box)` 的铺零也得走得动
+    (let bz Box (new Box))
+    (print (fld (var bz) k))))

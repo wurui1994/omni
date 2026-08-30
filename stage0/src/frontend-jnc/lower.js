@@ -57,7 +57,11 @@
 // hir/types.js 的 ptrTargetOk 与 sizeOf；这一层只有 liftable 多收了两种）、
 // **结构体的指针字段**（`Node* m_next` / `n->next->val` / `&c[i]` / 链表 ——
 // 又是方言长出来的一格：字段类型那张白名单收了指针，而 `Node*` 要在 Node 自己的体里
-// 查得着，所以这一层的结构体名字也"先坐下、字段后填"，见 typeName）。
+// 查得着，所以这一层的结构体名字也"先坐下、字段后填"，见 typeName）、
+// **字段的类型不看声明顺序**（`struct Seg { Point m_a; }` 写在 `struct Point` 之前 ——
+// 这一层一个字没改，是**方言**撤掉了一条自己立的规矩：内嵌只拒"按值绕回自己"，
+// 见 sexpr/lower.js 的 cutValueCycles；jancy 那侧的出处是 `Type::prepareLayout`
+// 按需算布局、撞回来才报 `can't calculate layout of '%s' due to recursion`）。
 //
 // ## 纪律：**jancy 不向方言妥协**
 //
@@ -82,10 +86,6 @@
 //   - `unsigned` —— 要无符号那一半的位宽规则：回卷变成 `x & M`（不摊符号位），
 //     `/` `%` `>>` `<` 都得换成无符号那一版。以前是静默忽略的，现在明着拒
 //     （见 tests/jnc/bad/unsigned.jnc）。
-//   - **直接内嵌**的结构体字段仍旧只收前面声明过的那个（`struct Seg { Point a; }` 写在
-//     `struct Point` 之前会被方言拒）—— jancy 那边名字不看顺序，所以这是一条真差别。
-//     要补的是方言那一侧"内嵌的零值按拓扑序铺"，与第十七刀开的指针字段是两回事：
-//     指针是三个字、与目标布局无关，内嵌是真的内嵌。
 //   - 数组那一族里**两条不是我们欠的**：**不同型**数组之间的赋值（长度不一样、或元素是同宽的
 //     另一种整数）—— `Cast_Array::llvmCast` 里写着未实现，而同型的那些走的是 `castOperator` 里
 //     `opType->isEqual(type)` 那条恒等捷径，所以是通的（第二十一刀，见 copyVal）；

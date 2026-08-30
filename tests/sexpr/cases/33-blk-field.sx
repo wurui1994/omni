@@ -18,8 +18,8 @@
   (struct S (n int) (v (blk int 4)) (m int))
   ;; 二维的字段：`int g[2][3]`
   (struct T (g (blk (blk int 3) 2)) (tag bool))
-  ;; 元素是**前面已经声明过**的结构体：`P ps[2]`。声明在后面的那个是拒的（blkTy 那一条），
-  ;; 理由与直接内嵌同一条 —— 那时候它的字段还空着，而且 C 后端要求被嵌套者先是完整类型。
+  ;; 元素是另一个结构体：`P ps[2]`。声明在前还是在后都收（第二十三刀撤了那条顺序限制，
+  ;; cases/34-embed-order.sx 钉着"在后面"那一半）。
   (struct P (x int) (y int))
   (struct Row (ps (blk P 2)) (k int))
 

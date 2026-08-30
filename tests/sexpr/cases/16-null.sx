@@ -10,7 +10,7 @@
 ;; `(null int)` 是错的（bad/null-scalar.sx）。结构体也不是引用，同样拒。
 ;; 自引用的字段（`(class Node … (next Node))`）第六十二刀收了 —— 类是指针、零值就是这里
 ;; 这个空引用，所以互相引用与自引用都摊得开（见 18-classcycle.sx）。结构体那一半没动：
-;; 它是值语义、内嵌是真的内嵌（bad/struct-self.sx 与 bad/struct-fwd.sx 钉着）。
+;; 它是值语义、内嵌是真的内嵌（bad/struct-self.sx 与 bad/struct-mutual.sx 钉着）。
 (module
   (class Leaf (v int))
   ;; 三种引用各当一次字段：`(cnew Box)` 铺的零值就是三个空引用，现在能把这句话写出来验

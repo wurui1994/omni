@@ -3,8 +3,9 @@
 ;; "指针能指向指针"，这一刀开的是"指针能躺在结构体里"。
 ;;
 ;; 顺带落地的是"名字先坐下、字段后填"：`(struct Node (next (ptr Node)))` 里的 Node 得在自己
-;; 的体里查得着。**直接内嵌**仍旧只收前面声明过的那个（tests/sexpr/bad/struct-self.sx 与
-;; struct-fwd.sx 钉着）—— 指针不受这一条：它是三个字，与目标的布局无关，零值是空指针。
+;; 的体里查得着。**直接内嵌**不能按值绕回自己（tests/sexpr/bad/struct-self.sx 与
+;; struct-mutual.sx 钉着）—— 指针不受这一条：它是三个字，与目标的布局无关，零值是空指针。
+;; （"内嵌声明在后面的那个"第二十三刀收了，见 cases/34-embed-order.sx。）
 ;;
 ;; 期望输出的出处（这一路没有 oracle，逐条注明）：
 ;;   - `pnew` 出来的那块是零初始化的（type_ptr_data.rst），所以刚出来的 next 是空指针
