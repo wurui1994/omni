@@ -7676,6 +7676,50 @@ cosaddition / ring）、缺 setdash 的一批（上面五份）、graph 那一�
 最慢 AiryDisk.asy 175ms）、`tests/sexpr/run.js` 55 passed / 0 failed。
 **跳过**：EPS 全量（220）、`OMNI_LEGS=all` 的另外三条腿。
 
+### 第九十一刀：虚线真的发出去了 —— setdash 与按弧长收节拍
+
+`asy_builtins.asy:376` 那条"存着但没发"的注在这儿结掉。
+
+- **发什么**：pattern 或 offset 变了就发一句 `[a b …] offset setdash`（psfile.cc:266-274）。
+  数是**定点 9 位** —— 那三行把流临时切成 `fixed`，而流的 precision 早先被
+  `%%HiResBoundingBox` 那一处按 9 粘住了（与 TeX 那一侧的定点 6 位不是一回事）。
+- **第一支笔那一格与别的几项不一样**。颜色/宽/cap/join/miter 第一次一定发，因为
+  psfile 的 initialpen 那几项是不可能的值（-2、-1、INVISIBLE）；而它的 LineType 是
+  `LineType(array(0), 0.0, …)`（pen.h:411）—— 空 pattern、offset 0，与实线一模一样，
+  所以**第一条实线不发 setdash**。量出来的：sacylinder 的参考里第一句 setdash 在第 1057 行，
+  前面那些实线的描边一句都没有。
+- 空 pattern 那一句 `[] 0.000000000 setdash` 反过来**不能省**：前一支笔留下的花样
+  会一直粘着后面所有的描边。
+- **描边前先按弧长收节拍**（drawpath.cc:198-201 的 adjustdash）。`adjust(pen,real,bool)`
+  与 `asy__patlen` 早就照抄好了，一直没人调用 —— 因为名字解析是顺着来的：`emitop` 在前，
+  `arclength(path)` 与 `adjust` 都在后。修法是留两个函数变量当桩（`asy__arclenfn` /
+  `asy__dashadjfn`），等真货定义好再接上（搜 `asy__dashhook`）。这一层的函数就是变量、
+  可以重新赋值，量过一份最小样例确认。
+- 弧长按**均匀缩放线性**处理：`arclength(scale(s)*g) == s*arclength(g)`，所以桩只量原坐标
+  那一份，emitop 再乘 `s`。与那边差一处：asy 量的是 `p.transformed(inverse(笔的变换))`，
+  这一层的笔基本没有自己的变换。
+
+最小对照（`draw(dashed)` + `draw()` + `draw(dotted)` 三条）出来的 EPS 与真 asy
+**逐字一样**，包括 `[3.980000000 3.980000000]`（8 × 0.5 再按弧长收）与 dotted 的
+`[0.000000000 1.989502624]`。
+
+结果：sacone、sacylinder、xstitch 三份从"结构不同"变成**逐字一样**（31 → 34）；
+limit 与 polararea 从结构不同降到只剩数值差。
+
+**顺手量清了"界差 1bp"那一批的根，但没修**：cardioid / fjortoft / log / polarcircle /
+cosaddition / ring 的 `%%HiResBoundingBox` 与参考一字不差，差的只有取整那一行。
+最小复现（ring 剥到只剩必要的）：`size(0,100)` 的图里放一条 label 之后，
+`currentpicture.calculateTransform().xx` 我们是 `25 + 3.55e-15`（正好一个 ulp），
+参考是**正好 25**，于是 `floor(-50-ε)` 给 -51 而不是 -50。那个缩放是
+plain_scaling.asy:202 加 simplex2.asy 解出来的 —— **两边跑的是同一份 asy 源码**，
+所以差别在下面某个原语（`real[]` 的 `*` / `+=`，或者 `maxcoords` 排完之后行的先后
+决定了主元序列）。这一刀只量到这儿。
+
+跑了：EPS 点名 34 份（**全部逐字一样**，无退化）+ setdash 与 1bp 那两组 14 份、
+`tests/asy/run.js` 259 passed / 0 failed（288.7s）、sweep（220 里干净 219、1.9s）、
+`tests/sexpr/run.js` 55 passed / 0 failed。
+**跳过**：EPS 全量（220）、`OMNI_LEGS=all` 的另外三条腿。
+
 ## 后果与代价
 
 

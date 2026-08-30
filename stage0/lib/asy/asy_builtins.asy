@@ -372,8 +372,12 @@ struct pen {
   real black = 0;
   bool isinvisible = false;
   string font = "";
-  // 虚线那一族（pen.h 的 LineType：pattern/offset/scale/adjust）。这一层只**存着** ——
-  // EPS 那一路还没发 setdash，所以虚线画出来还是实线，这条差别写在明处。
+  // 虚线那一族（pen.h 的 LineType：pattern/offset/scale/adjust）。EPS 那一路发的是
+  // `[a b …] offset setdash`（psfile.cc:266-274），描边前先按弧长收一收节拍
+  // （drawpath.cc:198 的 adjustdash）—— 见 setpen 与 emitop。
+  // 与那边差一处：asy 的 `pen::linetype()` 在 `line.isdefault` 时读的是 **defaultpen 的**
+  // 那一份，这一层没有 isdefault 这一格，一律读笔自己的（`defaultpen(dashed)` 之后
+  // 那些没显式设过虚线的笔，我们当实线）。
   real[] dashpat;
   real dashoffset = 0;
   bool dashscale = true;
@@ -2197,6 +2201,20 @@ string asy__f6(real x) {
   return (neg ? "-" : "") + string((int) ip) + "." + fs;
 }
 
+// 定点 9 位。虚线那一句是这个样子（`[3.980000000 3.980000000] 0.000000000 setdash`）——
+// psfile.cc:271 那三行把流临时切成 `fixed`，而流的 precision 早先被 `%%HiResBoundingBox`
+// 那一处按 9 粘住了，所以是「定点 9 位」，与 TeX 那一侧的定点 6 位不是一回事。
+string asy__f9(real x) {
+  bool neg = x < 0;
+  real a = neg ? -x : x;
+  real sc = floor(a * 1000000000 + 0.5);
+  real ip = floor(sc / 1000000000);
+  int fr = (int) (sc - ip * 1000000000);
+  string fs = string(fr);
+  while (length(fs) < 9) fs = "0" + fs;
+  return (neg ? "-" : "") + string((int) ip) + "." + fs;
+}
+
 // psfile 里 lastpen 一开始是 initialpen —— 与默认笔的每一项都不同，所以第一个元素
 // 那几行全印。这里用一个 valid 标志表示"还没有上一支笔"。
 pen lastpen;
@@ -2245,12 +2263,45 @@ bool samecolor(pen a, pen b) {
   return a.gray == b.gray;
 }
 
+// 虚线那一格（psfile.cc:266-274）：pattern 或 offset 变了就发一句
+// `[a b …] offset setdash`。空 pattern 发 `[] 0.000000000 setdash`（实线）——
+// 这一句不能省：前一支笔留下的虚线花样会一直粘着后面所有的描边。
+bool asy__samedash(pen a, pen b) {
+  if (a.dashpat.length != b.dashpat.length) return false;
+  for (int i = 0; i < a.dashpat.length; ++i) if (a.dashpat[i] != b.dashpat[i]) return false;
+  return a.dashoffset == b.dashoffset;
+}
+string asy__dashstr(pen p) {
+  string s = "[";
+  for (int i = 0; i < p.dashpat.length; ++i) {
+    if (i > 0) s = s + " ";
+    s = s + asy__f9(p.dashpat[i]);
+  }
+  return s + "] " + asy__f9(p.dashoffset) + " setdash";
+}
+
+// 虚线的节拍要按**弧长**收一收（drawpath.cc:198-201：描边前先 adjustdash），而
+// `arclength(path)` 与 `adjust(pen,real,bool)` 都定义在这个文件的后面 —— 名字解析是顺着来的，
+// 所以这里先摆两个桩，等它们定义好之后在下面接上（搜 asy__dashhook）。
+// 弧长按**均匀缩放线性**处理：这一层 emitop 收到的是一个实数缩放 s，
+// `arclength(scale(s)*g) == s*arclength(g)`，所以桩只要量原坐标那一份。
+real asy__arclenfn(path p) { return 0; }
+pen asy__dashadjfn(pen p, real arclen, bool cyclic) { return p; }
+
 void setpen(pen p) {
   if (!lastvalid || !samecolor(p, lastpen)) asy__out(colorof(p));
   if (!lastvalid || p.width != lastpen.width) asy__out(ps(p.width) + " Setlinewidth");
   if (!lastvalid || p.cap != lastpen.cap) asy__out(string(p.cap) + " setlinecap");
   if (!lastvalid || p.join != lastpen.join) asy__out(string(p.join) + " setlinejoin");
   if (!lastvalid || p.miter != lastpen.miter) asy__out(ps(p.miter) + " setmiterlimit");
+  // 第一支笔那一格与别的几项**不一样**：psfile 的 initialpen 里颜色/宽/cap/join/miter
+  // 都是不可能的值（-2、-1、INVISIBLE），所以第一次一定发；而它的 LineType 是
+  // `LineType(array(0), 0.0, …)` —— 空 pattern、offset 0（pen.h:411），与实线一模一样，
+  // 所以第一条实线**不发** setdash。量出来的：sacylinder 的参考里第一句 setdash 在第 1057 行，
+  // 前面那些实线的描边一句都没有。
+  bool dashchg = lastvalid ? !asy__samedash(p, lastpen)
+    : (p.dashpat.length > 0 || p.dashoffset != 0);
+  if (dashchg) asy__out(asy__dashstr(p));
   lastpen = pencopy(p);
   lastvalid = true;
 }
@@ -2530,7 +2581,14 @@ void emitop(drawop o, real s) {
   }
   if (o.kind == 4) { if (!o.nosave) { asy__out("grestore"); grestorepen(); } return; }
   emitpath(o.g, s);
-  setpen(o.p);
+  // 描边前先把虚线的节拍收一收（drawpath.cc:198-201）。填充那一支不看虚线。
+  // 与那边有一处对不上要说清：asy 量的是 `p.transformed(inverse(笔的变换))` 的弧长，
+  // 这一层的笔基本没有自己的变换（hastrans），所以直接量路径本身。
+  pen q = o.p;
+  if (o.kind == 0 && q.dashpat.length > 0) {
+    q = asy__dashadjfn(q, s * asy__arclenfn(o.g), o.g.cyclic);
+  }
+  setpen(q);
   if (o.kind == 0) asy__out("stroke");
   else if (o.p.evenodd) asy__out("eofill");
   else asy__out("fill");
@@ -4453,6 +4511,14 @@ pen adjust(pen p, real arclength, bool cyclic) {
   }
   return q;
 }
+
+// asy__dashhook：把上面 emitop 用的那两个桩接到真货上（声明在 setpen 之前，见那儿的注）。
+// 中间套一层同名包装是因为 `arclength` 是重载名（path / path3 / 四个 pair），
+// 直接赋给函数变量要靠签名去挑，这里不指望它。
+private real asy__arclen1(path p) { return arclength(p); }
+private pen asy__dashadj1(pen p, real a, bool c) { return adjust(p, a, c); }
+asy__arclenfn = asy__arclen1;
+asy__dashadjfn = asy__dashadj1;
 
 // (1) frame 上的分组与 3D 问询（runpicture.in:286/291/778）。分组在 EPS 那一路是
 // `gsave/grestore` 那一层的事，我们的 frame 只攒 drawop，所以这两个是空的 —— 画出来一样。
