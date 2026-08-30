@@ -7882,7 +7882,56 @@ Number、只在真会溢出的地方发回绕）是一整刀，要连 C/LLVM 两
 所以这一刀只记账，不动。
 
 
-## 后果与代价
+### 第九十四刀：字形的轮廓 —— 让 PostScript 自己交出来（`_texpath`，43 个例子里 36 个开始出图）
+
+"没出图"那 68 份里最大的一格是 `_texpath` 还没做，**43 份**（第二大的只有 3 份）。
+所以这一刀就做它一个。
+
+`_texpath(string[] s, pen[] p)` 要的是"这串字排出来之后每个字形的轮廓"。**不读字体文件** ——
+那份 C++（runlabel.in:243）的办法是让 PostScript 自己交出来，我们照抄：
+
+1. 一份 .tex，每条标签一页。页首用 `\special{ps: …}` 把 `show` 换掉：
+   `currentpoint newpath moveto false charpath` 之后 `pathforall`，每段 print 出
+   `M y x` / `L y x` / `C y x y x y x` / `c`。第一次 `show` 把当时的 currentpoint 记进
+   ASYX/ASYY，后面所有坐标都减掉它 —— 出来的是**以标签左下角为原点**的相对坐标。
+2. `latex` → dvi → `dvips -R -Pdownload35 -D600` → .ps。
+3. `gs -q -dBATCH -P -sDEVICE=ps2write -sOutputFile=/dev/null tp.ps > tp.out`：图丢掉，
+   只要它 print 出来的那些字。**一行就是一页**，一条标签一组轮廓。
+
+三处细节是照抄的、不是猜的：
+
+- **坐标是 600dpi 的设备单位**：hscale = 0.12 = 72/600，纵向再取负（PS 的 y 与设备的 y
+  反向）—— runlabel.in:346 那句 `readpath(psname,keep,0.12,-1.0)` 就是这两个数。
+- **两个数是 y 先 x 后**（runlabel.in:53 `readpair` 先读 y）。看着反，那是 PS 出栈的顺序。
+- **`L` 与闭合那一段要造控制点**：`delta=(point-node.point)/3`，`post=point+delta`、
+  下一格 `pre=point-delta`；`c` 时如果末点与首点重合就只把 `nodes[0].pre` 接上，
+  不重合才补一段直线。非闭合的那些丢掉（runlabel.in:192 那句 "Discard noncyclic paths"）。
+
+**卡了一趟的地方**：第一版 .tex 里只有 miniprologue，没有 texfile.h:50 那六句
+`\let\ASYencoding\f@encoding` …。`font(pen)` 回的是
+`\usefont{\ASYencoding}{\ASYfamily}{\ASYseries}{\ASYshape}`，少了那一段就是一片
+undefined control sequence —— 而 `latex -interaction=nonstopmode` **照样退出 0**，
+dvi 也照样生出来，只是一个字形都没有。症状是 `tp.out` 是空文件、轮廓数 0。
+这类"退出码骗人"的坑第二次遇到了（上一次是 .tex 整份写成一行字面量）。
+
+对过 oracle（`texpath("$\sigma \Theta$")`，两边都印 `p.length` / 每条子路径的
+`length` 与 `min` / `max`）：**五条子路径、每个数逐字一样**。
+
+结果（EPS 那一轴，43 份那一组）：`没出图 43` → **`结构不同 31`、`没出图 7`、`超时 5`**。
+也就是 36 份从"跑不出东西"变成"出图了、但还不一样"。
+
+剩下那些**不一样的原因已经清楚，不是这一刀的账**：三维那一族的参考 EPS 是
+`settings.render != 0` 那条路出的**位图**（长度 847 vs 我们 5318、1209 vs 37883，
+而且参考的 `%%HiResBoundingBox` 全是 `…​.5` 这种整数加半格），我们出的是矢量面片 ——
+要对上得先做那条渲染路。剩下 7 份"没出图"换成了新的墙：`assert FAILED`（Klein / logo3 /
+partitionExample，bezulate 那一摊）、`array index out of range`（label3solid / label3zoom）、
+`null reference`（threeviews）、以及 `textpath`（读字体文件那一路，还没做）。
+
+顺手修了 SVG 那一轴的裁剪账：`latshade`（`/ShadingType 1`）**不发**自己那一次 clip，
+只有 `gradshade`/`gourshade`/`tenshade` 发 —— 一刀切按 `2 * shfill` 扣就成了负数，
+latticeshading 与 strokeshade 于是报 "裁剪 -1 层"。改成扣 `2 * shfill - ShadingType1`。
+
+
 
 
 - **依赖 LLVM**：本机 `libLLVM.dylib` 157MB。产物变大，但仍然自带执行器、

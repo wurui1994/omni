@@ -6182,12 +6182,183 @@ real _findroot(real f(real), real a, real b, real tolerance, real fa, real fb) {
 pair[] fft(pair[] a, int sign=1) {
   abort("fft 还没做（runarray.in:1867 走的是 FFTW）"); return new pair[];
 }
-// 字形轮廓那两条（runlabel.in:243/349）：真 asy 一条走 TeX、一条读字体文件。
-// 这一层没有那两路，所以体是 abort —— 签名在，plain_Label.asy:664 那一句才降得下来。
-// 元数与返回类型都是照 runlabel.in 抄的：吃**一串**字符串与一串笔，回**每串一组**轮廓
+// ------------------------------------------------------ 字形的轮廓（runlabel.in:243 _texpath）
+//
+// 不读字体文件 —— 让 PostScript 自己把轮廓交出来（那份 C++ 也是这么做的）：
+//   1. 一份 .tex，每条标签一页；页首用 `\special{ps: …}` 把 `show` 换掉 ——
+//      换成 `currentpoint newpath moveto false charpath` 再 `pathforall`，
+//      每段 print 出 `M y x` / `L y x` / `C y x y x y x` / `c`。
+//      第一次 show 时把当时的 currentpoint 记进 ASYX/ASYY，后面所有坐标都减掉它
+//      （所以出来的是**以标签左下角为原点**的相对坐标）。
+//   2. latex → dvi → `dvips -R -Pdownload35 -D600` → .ps。
+//   3. 拿 gs 跑那份 .ps（`-sOutputFile=/dev/null`，只要它 print 出来的那些字）。
+//      **一行就是一页**，也就是一条标签一组轮廓。
+//
+// 坐标是 600dpi 的设备单位：hscale = 0.12 = 72/600，纵向再取负（vsign = -1，PS 的 y
+// 与设备的 y 反向）—— runlabel.in:346 那句 `readpath(psname,keep,0.12,-1.0)` 就是这两个数。
+//
+// 每一格的两个数是 **y 先 x 后**（runlabel.in:53 readpair 先读 y）—— PS 那边是靠出栈
+// 的顺序 print 的，看着反，照抄就对。
+//
+// 元数与返回类型照 runlabel.in 抄：吃一串字符串与一串笔，回**每串一组**轮廓
 // （plain_Label.asy:664 之后 `g[i][0]` / `g[i].delete(0)` 那几句钉着 path[][]）。
+private real asy__tpthird = 1.0 / 3.0;
+
+// 一页的那一串 token 变成一组闭合路径。`nodes` 攒一条，遇到 `c` 收一条。
+private path[] asy__tpparse(string ln, real hs, real vs) {
+  path[] out;
+  knot[] nodes;
+  pair npre = (0, 0);
+  pair npoint = (0, 0);
+  pair npost = (0, 0);
+  bool active = false;
+  int i = 0;
+  int n = length(ln);
+  while (i < n) {
+    string ch = substr(ln, i, 1);
+    if (ch == " " || ch == '\t' || ch == '\r') { i = i + 1; continue; }
+    if (ch != "M" && ch != "L" && ch != "C" && ch != "c") { i = i + 1; continue; }
+    string op = ch;
+    i = i + 1;
+    int need = op == "M" ? 2 : (op == "L" ? 2 : (op == "C" ? 6 : 0));
+    real[] v;
+    bool ok = true;
+    for (int q = 0; q < need; ++q) {
+      while (i < n) {
+        string c2 = substr(ln, i, 1);
+        if (c2 == " " || c2 == '\t') { i = i + 1; continue; }
+        break;
+      }
+      int a = i;
+      while (i < n) {
+        string c2 = substr(ln, i, 1);
+        if (c2 == "-" || c2 == "." || c2 == "+" || c2 == "e" || c2 == "E"
+            || (c2 >= "0" && c2 <= "9")) { i = i + 1; continue; }
+        break;
+      }
+      if (i == a) { ok = false; break; }
+      v.push(asy__ptnum(substr(ln, a, i - a)));
+    }
+    if (!ok) break;
+    if (op == "M") {
+      npoint = (hs * v[1], vs * v[0]);
+      npre = npoint;
+      continue;
+    }
+    if (op == "L") {
+      pair pt = (hs * v[1], vs * v[0]);
+      pair d = asy__tpthird * (pt - npoint);
+      npost = npoint + d;
+      knot k;
+      k.pre = npre; k.point = npoint; k.post = npost; k.straight = true;
+      nodes.push(k);
+      active = true;
+      npre = pt - d;
+      npoint = pt;
+      continue;
+    }
+    if (op == "C") {
+      pair pt = (hs * v[1], vs * v[0]);
+      pair pr = (hs * v[3], vs * v[2]);
+      npost = (hs * v[5], vs * v[4]);
+      knot k;
+      k.pre = npre; k.point = npoint; k.post = npost; k.straight = false;
+      nodes.push(k);
+      active = true;
+      npre = pr;
+      npoint = pt;
+      continue;
+    }
+    // op == "c"：closepath
+    if (active) {
+      if (npoint == nodes[0].point) nodes[0].pre = npre;
+      else {
+        pair d = asy__tpthird * (nodes[0].point - npoint);
+        npost = npoint + d;
+        nodes[0].pre = nodes[0].point - d;
+        knot k;
+        k.pre = npre; k.point = npoint; k.post = npost; k.straight = true;
+        nodes.push(k);
+      }
+      path g;
+      g.cyclic = true;
+      for (int q = 0; q < nodes.length; ++q) g.nodes.push(nodes[q]);
+      out.push(g);
+      knot[] fresh;
+      nodes = fresh;
+    }
+    active = false;
+  }
+  return out;
+}
+
 path[][] _texpath(string[] s, pen[] p) {
-  abort("_texpath 还没做（TeX 那一路不在这一层）"); return new path[][];
+  path[][] out;
+  int n = s.length < p.length ? s.length : p.length;
+  for (int i = 0; i < n; ++i) { path[] e; out.push(e); }
+  if (n == 0) return out;
+  string dir = "/tmp/omni-asytex";
+  string nl = '\n';
+  string u = "";
+  for (int i = 0; i < asy__texpre_user.length; ++i) u = u + asy__texpre_user[i] + nl;
+  // 这一段就是 runlabel.in:61-66 那几个字符串，一字不改地摆进 \special{ps: …}
+  string ASYx = "/ASYx {( ) print ASYX sub 12 string cvs print} bind def";
+  string ASYy = "/ASYy {( ) print ASYY sub 12 string cvs print} bind def";
+  string forall = "{(M) print ASYy ASYx} {(L) print ASYy ASYx}"
+    + " {(C) print ASYy ASYx ASYy ASYx ASYy ASYx} {(c) print} pathforall";
+  string ASY1 = "ASY1 {/ASYX currentpoint pop def /ASYY currentpoint exch pop def"
+    + " /ASY1 false def} if ";
+  // texfile.cc:48 miniprologue：2048pt 的版面（一页放得下任意宽的一行）。
+  // 后面那六句是 texfile.h:50 latexfontencoding —— `font(pen)` 回的那串
+  // `\usefont{\ASYencoding}{…}` 全靠它，少了这一段 latex 就是一片 undefined control sequence
+  // （量过：tp.out 是空的，一条轮廓也出不来，而 latex 在 nonstopmode 下照样退出 0）。
+  string t = "\documentclass[12pt]{article}" + nl + u
+    + "\pagestyle{empty}" + nl + "\textheight=2048pt" + nl + "\textwidth=2048pt" + nl
+    + "\begin{document}" + nl
+    + "\makeatletter%" + nl
+    + "\let\ASYencoding\f@encoding%" + nl
+    + "\let\ASYfamily\f@family%" + nl
+    + "\let\ASYseries\f@series%" + nl
+    + "\let\ASYshape\f@shape%" + nl
+    + "\makeatother%" + nl;
+  for (int i = 0; i < n; ++i) {
+    if (i != 0) t = t + "\newpage" + nl;
+    t = t + font(p[i]) + "%" + nl;
+    real fs = p[i].fontsizeval / asy__tex2ps;
+    t = t + "\fontsize{" + string(fs) + "}{" + string(1.2 * fs) + "}\selectfont" + nl;
+    t = t + "\special{ps:" + nl + ASYx + nl + ASYy + nl + "/ASY1 true def" + nl
+      + "/show {" + ASY1 + "currentpoint newpath moveto false charpath " + forall
+      + "} bind def" + nl
+      + "/V {" + ASY1 + "Ry neg Rx 4 copy 4 2 roll 2 copy 6 2 roll 2 copy (M) print"
+      + " ASYy ASYx (L) print ASYy add ASYx (L) print add ASYy add ASYx (L) print add"
+      + " ASYy ASYx (c) print} bind def}" + nl;
+    t = t + s[i] + "\ %" + nl;
+  }
+  t = t + "\end{document}" + nl;
+  if (_runproc("mkdir -p " + dir + " && rm -f " + dir + "/tp.*") != 0) return out;
+  _writetext(dir + "/tp.tex", t);
+  if (_runproc("cd " + dir
+      + " && latex -interaction=nonstopmode tp.tex > /dev/null 2>&1") != 0) return out;
+  if (_runproc("cd " + dir
+      + " && dvips -R -Pdownload35 -D600 -q -o tp.ps tp.dvi > /dev/null 2>&1") != 0) return out;
+  // gs 印出来的那些字走 stdout，图本身丢进 /dev/null
+  if (_runproc("cd " + dir + " && gs -q -dBATCH -P -sDEVICE=ps2write"
+      + " -sOutputFile=/dev/null tp.ps > tp.out 2>/dev/null") != 0) return out;
+  string o = _readtext(dir + "/tp.out");
+  // 一行一页。空行不占格子（gs 每页之间可能多一个换行）。
+  int i = 0;
+  int k = 0;
+  int len = length(o);
+  while (i < len && k < n) {
+    int e = find(o, nl, i);
+    if (e < 0) e = len;
+    string ln = substr(o, i, e - i);
+    i = e + 1;
+    if (length(ln) == 0) continue;
+    out[k] = asy__tpparse(ln, 0.12, -0.12);
+    k = k + 1;
+  }
+  return out;
 }
 path[][] textpath(string[] s, pen[] p) {
   abort("textpath 还没做（读字体文件那一路不在这一层）"); return new path[][];

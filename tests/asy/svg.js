@@ -145,6 +145,7 @@ function epsfacts(s) {
   let prims = 0;
   let clips = 0;
   let shade = 0;
+  let lat = 0;
   let wh = null;
   for (const raw of s.split('\n')) {
     const ln = raw.trim();
@@ -154,16 +155,25 @@ function epsfacts(s) {
       continue;
     }
     if (ln.startsWith('%')) continue;
+    if (ln.startsWith('<< /ShadingType 1')) lat++;
     for (const w of ln.split(/\s+/)) {
       if (w === 'stroke' || w === 'fill' || w === 'eofill' || w === 'shfill') prims++;
       if (w === 'shfill') shade++;
       if (w === 'clip' || w === 'eoclip') clips++;
     }
   }
-  // 渐变/网格那一族在 PS 里发**两次** clip：一次是 emitshade 自己把超路径当裁剪
-  // （drawfill.h:75），一次在 latshade/gradshade/gourshade 开头（psfile.cc:373 的
-  // `endclip(pena)`）。两次都不是 asy 层面的 clip(...)，SVG 这边没有对应物 —— 扣掉再比。
-  return { prims, clips: clips - 2 * shade, wh, dvips: s.indexOf('%%Creator: dvips') >= 0 };
+  // 渐变/网格那一族在 PS 里自己发 clip，那几次不是 asy 层面的 clip(...)，SVG 这边没有
+  // 对应物 —— 扣掉再比。**每一族扣几次是量出来的**：
+  //   emitshade 自己一次（drawfill.h:75 把超路径当裁剪）；
+  //   gradshade / gourshade / tenshade 开头再一次（psfile.cc:373 那段 endclip(pena)）；
+  //   latshade（/ShadingType 1）**没有**那一次 —— 少扣了就成了负数，
+  //   latticeshading 与 strokeshade 就是这么报出 "裁剪 -1 层" 的。
+  return {
+    prims,
+    clips: clips - (2 * shade - lat),
+    wh,
+    dvips: s.indexOf('%%Creator: dvips') >= 0,
+  };
 }
 
 const names = process.argv.length > 3 ? process.argv.slice(3)
