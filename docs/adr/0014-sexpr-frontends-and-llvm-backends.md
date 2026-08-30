@@ -7508,6 +7508,61 @@ CMD 末尾要是个 `#注释`，`)` 会被注掉。这条差异五条腿的对�
 
 下一刀才是真的把 `.tex` 生出来、跑 latex 问尺寸。
 
+### 第八十八刀：标签的尺寸真去问 latex —— equilateral 的界与 dvips 那一份逐字一样了
+
+上一刀把口子开好了，这一刀把标签接上。原来这一层是**整条丢掉**的：
+
+```asy
+void label(frame f, string s, string size, transform t, pair position, pair align, pen p) {
+  f.haslabel = true;      // 只留"有没有"这一位
+}
+```
+
+现在 frame 里多一格 `labelrec[] labs`，把 s / size / transform / position / align / pen
+都攒下来（`labelrec` 得声明在 `frame` 前面 —— 字段的类型只能是前面声明过的记录）。
+
+**量尺寸**：asy 是与一个活的 latex 进程对话 —— drawlabel.cc:62 `\setbox\ASYbox=\hbox{…}`，
+接着 :38 那句 `\immediate\write16{>dim(\the\wd\ASYbox)dim}` 一个标签问三次（wd/ht/dp），
+从管子里读回来。这一层没有双向管子，于是把**一整批**标签写成一份 .tex、跑一趟
+`latex -interaction=nonstopmode`、再从 `.log` 里按次序把那些 `>dim(…pt)dim` 捞回来。
+问的是同一个 TeX、同一个 `\hbox`、同一个 `\the\wd`，只是攒着一次问完。单位乘
+`72/72.27`（settings.h 的 tex2ps）。`havebounds` 那一位照 drawlabel.cc:95 短路。
+
+**折进界**：`framebox` 现在在 `opsbox` 之后再把每条标签的框加进去，那段算式是
+drawlabel.cc:106-135 逐句照抄的 —— `inverse(T)*align` 归一到 0.5、减 (0.5,0.5)、
+按 `(width, height+depth)` 缩、再 `T*` 回去，四个角各留
+`fuzz = fontsize*0.1+0.3` 的余量（`pen::size()` 是**字号**不是线宽，pen.h:433）。
+
+结果，equilateral：
+
+```
+dvips 那一份   %%HiResBoundingBox: 163.767717 275.855878 447.232283 515.144122
+我们           %%HiResBoundingBox: 163.767717 275.855878 447.232283 515.144122
+```
+
+**逐字一样**。之前是 `272.722748 .. 518.277252`（高了 3.97bp）—— 差的正好是四个 `$A$`
+占掉的地方。
+
+踩到一个很能骗人的坑，记下来：asy 的**双引号串是照字面的**（只有 `\"` 特殊），
+单引号串才过转义 —— 量过，真 asy 与我们都是 `"x\\y"` 4 个字符、`'p\nq'` 3 个。
+第一版按 C 的习惯写了 `"\\documentclass"` 加 `"\n"`，生出来的 .tex **整份是一行字面量**，
+`latex` 照样退出 0、`.log` 里也照样有 `>dim(` 这个记号，只是括号里是
+`\\the\\wd\\ASYbox` 而不是数 —— 三个数全解析成 0。而 0 尺寸的标签框仍带着 fuzz，
+界于是"往对的方向动了一点"（`272.72` -> `273.87`，目标 `275.86`）。差一点点比差很多难查。
+所以那一段现在用 `nl = '\n'` 拼，反斜杠写一个就是一个。
+
+`latex` 跑不起来（没装）就把三个数当 0 收，与 `-tex none` 那一路一个意思
+（drawlabel.cc:124 直接 `b += position`）—— 至少还能出图。
+
+代价量在明处：`tests/asy/run.js` 从 204s 到 **306s** —— 带标签的例子现在真的会
+spawn 一趟 latex。
+
+跑了：EPS 点名 24 个（23 份逐字一样的重跑**没退**，equilateral 界对上了但整份仍是
+"结构不同" —— 还没生 dvips 那一段字节）、`tests/asy/run.js` 259 passed / 0 failed、
+sweep（220 里干净 219、1.6s）。**跳过**：EPS 全量、`OMNI_LEGS=all` 的另外三条腿。
+
+下一刀：生 `<名>_0.eps` 与 `<名>_.tex`、跑 latex + dvips、把出来的字节印出来。
+
 ## 后果与代价
 
 

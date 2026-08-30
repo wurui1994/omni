@@ -1882,6 +1882,21 @@ box picbox(picture pic, real s) { return opsbox(pic.ops, s); }
 //
 // 这里只有「把元素攒起来」「量 bbox」与「记一下有没有标签」三件事：begingroup /
 // endgroup / clip 都还没有，用到它们的地方会明确报"没有这个函数"，不会悄悄给错答案。
+// 一条标签（drawlabel.h 的 `drawLabel`）。`sz` 是 TeX 的尺寸文本 —— 标签量出来三个数
+// 全是 0 时改量它（drawlabel.cc:101）。后三个数是 latex 量出来的（单位已换成 bp）。
+struct labelrec {
+  string s;
+  string sz;
+  transform t;
+  pair position;
+  pair align;
+  pen p;
+  bool havebounds = false;
+  real width = 0;
+  real height = 0;
+  real depth = 0;
+}
+
 struct frame {
   drawop[] ops;
   // 三维那一层记下来的界（第六十七刀）：几何本身这一刀落不下来，界与 x/z、y/z 的比是真的
@@ -1890,9 +1905,9 @@ struct frame {
   triple max3v = (0, 0, 0);
   pair minr = (0, 0);
   pair maxr = (0, 0);
-  // 攒过标签没有（runlabel.in:220 的 `labels(frame)`）。这一层没有 TeX，标签的**内容**
-  // 落不下来，但"有没有"这一位是真的。
+  // 攒过标签没有（runlabel.in:220 的 `labels(frame)`）
   bool haslabel = false;
+  labelrec[] labs;
 }
 
 // `newframe` 那个字面量（camp.l:407 的 newPictureExp）落在这里：一个**新的**空 frame。
@@ -1918,16 +1933,151 @@ void fill(frame f, path g) { addop(f, 1, g, currentpen); }
 
 // runlabel.in:214 的那一条：`label(frame, string s, string size, transform, pair position,
 // pair align, pen)`。注意 size 是**字符串**（TeX 的尺寸文本），不是 real —— 照抄的。
-// 这一层没有 TeX，所以内容落不下来，只把"有标签"这一位记上。
-// plain_Label.asy:297 的 `label(f,s,size,embed(t)*shiftless(T),S,align,p0)` 要的正是它。
+// 攒下来，界那一趟再拿 latex 去量（asy_tex.asy 那一段）。
 void label(frame f, string s, string size, transform t, pair position, pair align, pen p) {
   f.haslabel = true;
+  labelrec r;
+  r.s = s;
+  r.sz = size;
+  r.t = t;
+  r.position = position;
+  r.align = align;
+  r.p = pencopy(p);
+  f.labs.push(r);
 }
 
 bool labels(frame f) { return f.haslabel; }
 
+// ---------------------------------------------------------- 标签的尺寸要真去问一趟 latex
+//
+// asy 是与一个**活的** latex 进程对话：drawlabel.cc:62 `\setbox\ASYbox=\hbox{…}`，
+// 然后 :38 那句 `\immediate\write16{>dim(\the\wd\ASYbox)dim}` 一个标签问三次
+// （wd / ht / dp），从管子里读回来。这一层没有双向管子，所以把**一整批**标签写成一份
+// .tex、跑一趟 latex、再从 .log 里把那些 `>dim(…pt)dim` 按次序捞回来 —— 问的是同一个
+// TeX、同一个 `\hbox`、同一个 `\the\wd`，只是攒着一次问完。
+//
+// 为什么非问不可：标签的尺寸**回流进 size() 的定标**。量过 equilateral —— 我们让路径
+// 占满了整个 10cm，而 asy 那边路径只有 254.55bp 宽，剩下 28.9bp 是四个 `$A$` 占掉的。
+// 横向界（163.767717..447.232283）我们与 dvips 那一份逐字一样，差的正是这一段。
+//
+// 单位：TeX 说的是 pt，PostScript 要的是 bp，乘 72/72.27（settings.h 的 tex2ps）。
+private real asy__tex2ps = 72 / 72.27;
+
+// 从 pt 文本里抠出那个数。自己写而不是用 `(real) s`：那个 cast 声明在这份文件很后面，
+// 而这一层的名字解析是顺序的。只需要认 `-?\d*\.?\d*`，TeX 印的就是这个样子。
+private real asy__ptnum(string s) {
+  int n = length(s);
+  int i = 0;
+  real sign = 1;
+  if (i < n && substr(s, i, 1) == "-") { sign = -1; i = i + 1; }
+  real v = 0;
+  while (i < n) {
+    string c = substr(s, i, 1);
+    if (c < "0" || c > "9") break;
+    v = v * 10 + (find("0123456789", c) + 0);
+    i = i + 1;
+  }
+  if (i < n && substr(s, i, 1) == ".") {
+    i = i + 1;
+    real f = 0.1;
+    while (i < n) {
+      string c = substr(s, i, 1);
+      if (c < "0" || c > "9") break;
+      v = v + f * (find("0123456789", c) + 0);
+      f = f * 0.1;
+      i = i + 1;
+    }
+  }
+  return sign * v;
+}
+
+// 一整批标签量一趟。`havebounds` 的那些跳过（drawlabel.cc:95 的同一条短路）。
+private void asy__measure(labelrec[] ls) {
+  int[] todo;
+  for (int i = 0; i < ls.length; ++i) if (!ls[i].havebounds) todo.push(i);
+  if (todo.length == 0) return;
+  string dir = "/tmp/omni-asytex";
+  // asy 的双引号串是**照字面**的（只有 \" 特殊），单引号串才过转义 —— 与真 asy 一字不差
+  // （量过：`"x\\y"` 是 4 个字符、`'p\nq'` 是 3 个）。所以反斜杠写一个就是一个，
+  // 换行得用 '\n'。第一版写成 "\\documentclass" 加 "\n"，生出来的 .tex 整份是一行
+  // 字面量 —— latex 照样退出 0，三个数全量成了 0，界只差了一点点，很能骗人。
+  string nl = '\n';
+  string t = "\documentclass[12pt]{article}" + nl
+    + "\newbox\ASYbox" + nl + "\newdimen\ASYdimen" + nl + "\pagestyle{empty}" + nl
+    + "\begin{document}" + nl;
+  for (int k = 0; k < todo.length; ++k) {
+    labelrec r = ls[todo[k]];
+    // 笔上存的字号是 bp（fontsizeval），TeX 那边要 pt —— 除回去。默认那一格
+    // 11.9551681195517 / (72/72.27) 正好是 12，与 asy 生的 `\fontsize{12.000000}` 对上。
+    real fs = r.p.fontsizeval / asy__tex2ps;
+    t = t + "\fontsize{" + string(fs) + "}{" + string(1.2 * fs) + "}\selectfont" + nl;
+    t = t + "\setbox\ASYbox=\hbox{" + r.s + "}" + nl;
+    t = t + "\immediate\write16{>dim(\the\wd\ASYbox)dim}" + nl;
+    t = t + "\immediate\write16{>dim(\the\ht\ASYbox)dim}" + nl;
+    t = t + "\immediate\write16{>dim(\the\dp\ASYbox)dim}" + nl;
+  }
+  t = t + "\end{document}" + nl;
+  _runproc("mkdir -p " + dir);
+  _writetext(dir + "/m.tex", t);
+  int rc = _runproc("cd " + dir + " && latex -interaction=nonstopmode m.tex");
+  // 跑不起来（没装 latex）就把三个数当 0 收 —— 与 `-tex none` 那一路一样（那时
+  // drawlabel.cc:124 直接 `b += position`），至少还能出图。
+  string log = "";
+  if (rc == 0) log = _readtext(dir + "/m.log");
+  int at = 0;
+  int k = 0;
+  while (k < todo.length) {
+    real[] three;
+    for (int j = 0; j < 3; ++j) {
+      int a = find(log, ">dim(", at);
+      if (a < 0) break;
+      int b = find(log, "pt)dim", a);
+      if (b < 0) break;
+      three.push(asy__ptnum(substr(log, a + 5, b - a - 5)) * asy__tex2ps);
+      at = b + 6;
+    }
+    if (three.length < 3) break;
+    labelrec r = ls[todo[k]];
+    r.width = three[0];
+    r.height = three[1];
+    r.depth = three[2];
+    r.havebounds = true;
+    k = k + 1;
+  }
+  // 没量到的（latex 不在、或者 .log 里少了几条）也标上，别每次界都再跑一趟 latex
+  for (int i = 0; i < todo.length; ++i) ls[todo[i]].havebounds = true;
+}
+
+// 一条标签占的那个框（drawlabel.cc:106-135 逐句照抄）。默认 baseline 是 NOBASEALIGN，
+// 于是 `Depth == depth`、`Align += (0, Depth-depth)` 是个零 —— 那两句留在这儿是为了
+// 与那边对得上眼。
+private void asy__labelbox(box bx, labelrec r) {
+  pair al = inverse(r.t) * r.align;
+  real s0 = abs(al.x) > abs(al.y) ? abs(al.x) : abs(al.y);
+  if (s0 != 0) al = (al.x * 0.5 / s0, al.y * 0.5 / s0);
+  al = (al.x - 0.5, al.y - 0.5);
+  real vert = r.height + r.depth;
+  real dep = r.depth;                       // NOBASEALIGN
+  al = (al.x * r.width, al.y * vert);
+  al = (al.x, al.y + dep - r.depth);
+  al = r.t * al;
+  pair p = r.position + al;
+  real fz = r.p.fontsizeval * 0.1 + 0.3;
+  addpt(bx, p + r.t * (-fz, -fz));
+  addpt(bx, p + r.t * (-fz, vert + fz));
+  addpt(bx, p + r.t * (r.width + fz, vert + fz));
+  addpt(bx, p + r.t * (r.width + fz, -fz));
+}
+
 // 缩放固定为 1 —— frame 的坐标已经是最终坐标了
-box framebox(frame f) { return opsbox(f.ops, 1); }
+box framebox(frame f) {
+  box bx = opsbox(f.ops, 1);
+  if (f.labs.length > 0) {
+    asy__measure(f.labs);
+    for (int i = 0; i < f.labs.length; ++i) asy__labelbox(bx, f.labs[i]);
+  }
+  return bx;
+}
 
 bool empty(frame f) { return f.ops.length == 0; }
 

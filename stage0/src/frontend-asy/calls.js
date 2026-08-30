@@ -622,6 +622,38 @@ export function asyCall(L, n) {
     L.used.add('asy__lines');
     return { code: `(call asy__lines (readtext ${p.code}))`, type: 'string[]' };
   }
+  // `_readtext(name)`：不切行的那一份（`_readlines` 是它加一层 asy__lines）。TeX 那一段
+  // 要在一份 latex 的 .log 里按次序捞 `>dim(…pt)dim`，切行反而多一道。
+  if (nm === '_readtext') {
+    const raw = asyCallArgs(L, n);
+    if (raw === null) return null;
+    if (raw.length !== 1) return L.err(n, `'_readtext' 要 1 个实参，给了 ${raw.length} 个`);
+    if (raw[0].lines !== null) for (const s of raw[0].lines) L.pre.push(s);
+    const p = L.coerce(raw[0].v, 'string', raw[0].node, "'_readtext' 的实参");
+    if (p === null) return null;
+    return { code: `(readtext ${p.code})`, type: 'string' };
+  }
+  // `_writetext(name, text)` / `_runproc(cmd)`：方言的 `(writetext P E)` / `(runproc CMD)`。
+  // 名字带下划线是同一条规矩（base/ 里没有这两个名字）。**只有 lib/asy 里的 TeX 那一段
+  // 用得到**：asy 的标签是 latex 排的、EPS 的最后一段字节是 dvips 写的，那条路上要
+  // 「把 .tex 落到盘上 -> 叫外面的程序 -> 把结果读回来」，三样缺一不可。
+  if (nm === '_writetext' || nm === '_runproc') {
+    const raw = asyCallArgs(L, n);
+    if (raw === null) return null;
+    const want = nm === '_writetext' ? 2 : 1;
+    if (raw.length !== want) {
+      return L.err(n, `'${nm}' 要 ${want} 个实参，给了 ${raw.length} 个`);
+    }
+    const cs = [];
+    for (const a of raw) {
+      if (a.lines !== null) for (const s of a.lines) L.pre.push(s);
+      const v = L.coerce(a.v, 'string', a.node, `'${nm}' 的实参`);
+      if (v === null) return null;
+      cs.push(v.code);
+    }
+    const head = nm === '_writetext' ? 'writetext' : 'runproc';
+    return { code: `(${head} ${cs.join(' ')})`, type: 'int' };
+  }
   if (lateMem !== null) return L.err(n, lateMem);
   if (L.funcs.has(nm)) {
     return L.err(n, `'${nm}' 在这里还看不见 —— 它声明在后面，而 asy 的名字解析是顺序的（那边报 "no matching variable"）`);
