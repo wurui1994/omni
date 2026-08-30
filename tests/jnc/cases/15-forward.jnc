@@ -1,0 +1,103 @@
+// 调后面定义的函数（ADR-0016 第十五刀）。jancy 的命名空间成员**不看顺序**：解析那一遍只把
+// 名字登记进命名空间，函数体排进 `m_compileArray`，**解析完了**才由
+// `Module::processCompileArray`（jnc_ct_Module.cpp:809）一个个编 —— 编到某个体的时候整份
+// 模块的名字早就齐了。所以这一份里 `isEven` 调 `isOdd`、`use` 调 `later`、模块级变量 `g`
+// 的初值调 `later`，全都合法，源码顺序随便排。
+//
+// 这一层照它办：run 里先过一遍**签名**（fnSig），再降模块级变量的初值与所有函数体。
+// 方言那一侧本来就不看顺序（一份 `(module …)` 里 `(fn a … (call b))` 写在 `(fn b …)`
+// 前面，五条腿都认），所以又是一个字没改。
+//
+// 期望输出的出处：**C**，下面这一份 `cc -O0` 编出来的程序，逐字节相同。C 那份得多写三条
+// 原型（`int isOdd(int);` 之类）—— 那正是这一刀去掉的东西。
+//
+//   #include <stdio.h>
+//   int isOdd(int n);
+//   int later(int x);
+//   int helper(int x);
+//   int isEven(int n) {
+//       if (n == 0) return 1;
+//       return isOdd(n - 1);
+//   }
+//   int isOdd(int n) {
+//       if (n == 0) return 0;
+//       return isEven(n - 1);
+//   }
+//   int use() { return later(5) + helper(1); }
+//   int later(int x) { return x * 10; }
+//   int helper(int x) { return later(x) + 1; }
+//   struct P { int x; int y; };
+//   struct P makeLater(int a);
+//   struct P wrap(int a) {
+//       struct P p = makeLater(a);
+//       p.y = p.x + 1;
+//       return p;
+//   }
+//   struct P makeLater(int a) {
+//       struct P p = { 0, 0 };
+//       p.x = a * 3;
+//       return p;
+//   }
+//   int main() {
+//       printf("even=%d %d odd=%d %d\n", isEven(4), isEven(7), isOdd(4), isOdd(7));
+//       printf("use=%d\n", use());
+//       printf("later=%d helper=%d\n", later(3), helper(3));
+//       struct P w = wrap(4);
+//       printf("w=%d %d\n", w.x, w.y);
+//       return 0;
+//   }
+//
+// 最后那一行（`g=20`）C 里写不出来：`int g = later(2);` 在 C 里不是常量初值。它的出处是
+// 第十一刀那一条 —— 模块级变量的初值按声明序跑在用户代码之前（`Module::createConstructor`）。
+struct P {
+    int x;
+    int y;
+}
+
+int g = later(2);
+
+int isEven(int n) {
+    if (n == 0)
+        return 1;
+    return isOdd(n - 1);
+}
+
+int isOdd(int n) {
+    if (n == 0)
+        return 0;
+    return isEven(n - 1);
+}
+
+int use() {
+    return later(5) + helper(1);
+}
+
+int later(int x) {
+    return x * 10;
+}
+
+int helper(int x) {
+    return later(x) + 1;
+}
+
+P wrap(int a) {
+    P p = makeLater(a);
+    p.y = p.x + 1;
+    return p;
+}
+
+P makeLater(int a) {
+    P p;
+    p.x = a * 3;
+    return p;
+}
+
+int main() {
+    printf("even=%d %d odd=%d %d\n", isEven(4), isEven(7), isOdd(4), isOdd(7));
+    printf("use=%d\n", use());
+    printf("later=%d helper=%d\n", later(3), helper(3));
+    P w = wrap(4);
+    printf("w=%d %d\n", w.x, w.y);
+    printf("g=%d\n", g);
+    return 0;
+}

@@ -20,9 +20,9 @@
 //      （命名项之后不能再写位置项）。（`? :`、不换行的 printf、条件真值化曾经在
 //      这一组里，第三到第五刀把它们做掉之后转到了 cases/；`&x` 是第九刀、定长数组是第十刀、
 //      模块级变量是第十一刀、值语义的结构体是第十二刀、结构体按值传与按值回是第十三刀、
-//      花括号初值是第十四刀，现在各在 cases/09-addr.jnc、cases/10-arrays.jnc、
-//      cases/11-globals.jnc、cases/12-structs.jnc、cases/13-struct-args.jnc、
-//      cases/14-curly.jnc。）
+//      花括号初值是第十四刀、不看顺序的名字是第十五刀，现在各在 cases/09-addr.jnc、
+//      cases/10-arrays.jnc、cases/11-globals.jnc、cases/12-structs.jnc、
+//      cases/13-struct-args.jnc、cases/14-curly.jnc、cases/15-forward.jnc。）
 //
 //   node tests/jnc/run.js
 //   node tests/jnc/run.js pointers

@@ -787,6 +787,34 @@ jancy 的 struct 是 POD **值**类型，所以 `t = s` 抄一份、不共享同
 **没跑的**：`tests/asy` 全部（这一刀只碰 `frontend-jnc/` 那两份）、`sweep.js`、`svg.js`、自举、
 `tests/jit`、`tests/mir`、`tests/llvm`。`npm run lint` 这台机器上没有 typescript，跑不了。
 
+### 第十五刀：不看顺序的名字 —— 签名先过一遍
+
+jancy 的命名空间成员**不看顺序**：解析那一遍只把名字登记进命名空间，函数体排进
+`m_compileArray`，**解析完了**才由 `Module::processCompileArray`（jnc_ct_Module.cpp:809）一个个
+编 —— 编到某个体的时候整份模块的名字早就齐了。所以 `isEven` 调后面的 `isOdd`、模块级变量的初值
+调后面的 `later`，在 jancy 那边都合法，而这一层以前是按源码顺序降的，调后面的函数会撞在
+"没有这个函数"上。
+
+**改动只有一处**：`fnDef` 拆成 `fnSig` + `fnDef`。前者算说明符、声明符与形参表，登记
+`this.fns`，结果按节点存进 `this.sigs`；后者拿回去降函数体。`run` 于是是**四遍**：命名类型 ->
+**函数签名** -> 模块级变量 -> 函数体。签名那一遍排在模块级变量之前，所以 `int g = later(2);`
+也成立（第十一刀那条"初值按声明序跑在用户代码之前"不变）。
+
+**方言那一侧本来就不看顺序** ——`(module (fn a () int (ret (call b))) (fn b () int (ret (int 7))) …)`
+在五条腿上都给 7，先量过才动手。所以这一刀方言又是一个字没改。
+
+顺带把 `int main()` 的查重从"`mainBody` 还是 null 吗"改成一格 `mainSeen`：那一格现在要在签名
+那一遍就判（那时候还没有任何函数体）。
+
+**期望输出的出处**：C，一份 `cc -O0` 编出来的程序抄在 `cases/15-forward.jnc` 的头注里，前 4 行
+逐字节相同 —— C 那份得多写三条原型，那正是这一刀去掉的东西。第 5 行（`g=20`）C 里写不出来
+（`int g = later(2);` 在 C 里不是常量初值），它的出处是第十一刀那一条。
+
+**跑过的轴**：`tests/jnc`（27/0，新增 `cases/15-forward`）、`tests/sexpr`（63/0）、
+`tests/glr`（20/0）。
+**没跑的**：`tests/asy` 全部（这一刀只碰 `frontend-jnc/lower.js`）、`sweep.js`、`svg.js`、自举、
+`tests/jit`、`tests/mir`、`tests/llvm`。`npm run lint` 这台机器上没有 typescript，跑不了。
+
 ## 后果与代价
 
 - 方言从"没有可算术的引用"变成"有"。这一格会渗到 MIR 与四个后端，改不回去。

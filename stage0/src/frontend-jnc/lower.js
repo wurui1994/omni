@@ -39,7 +39,9 @@
 // 抄的那一下在**被调**那一侧，见 fnDef 的形参前奏那一段）、
 // **花括号初值**（`int a[] = { 1, 2, 3 }` / `int b[10] = { ,, 3, 4,,, 7 }` /
 // `Point p = { 10, m_z = 30 }` / `Box b = { 7, { 1, 2 } }` / `p = { , 200, 300 }` ——
-// 位置项、命名项、空项、嵌套四种，声明与赋值两处，见 curlyPlan）。
+// 位置项、命名项、空项、嵌套四种，声明与赋值两处，见 curlyPlan）、
+// **不看顺序的名字**（调后面定义的函数、互相递归、模块级变量的初值调后面的函数 ——
+// 签名在 run 里先过一遍，见 fnSig）。
 //
 // ## 纪律：**jancy 不向方言妥协**
 //
@@ -65,12 +67,9 @@
 //     多维数组 `int a[10][20]`（元素是 `int[20]`）、数组之间的赋值（**jancy 自己也只在
 //     常量折叠那条路上有** —— `Cast_Array::llvmCast` 里写着未实现）、数组形参与返回
 //     （要写成 `T*`）、数组字段（要嵌在结构体里）、`&a`（`T(*)[N]`）。
-//   - 模块级变量那一族里剩下的四条：`static` 的**局部量**（要"初值只跑一次"，jancy 那边是
+//   - 模块级变量那一族里剩下的三条：`static` 的**局部量**（要"初值只跑一次"，jancy 那边是
 //     `once` 的机制）、`threadlocal`（要线程本地存储）、`&g`（**方言**这一侧的边界 —— 全局
-//     不在一段可寻址的内存里，jancy 的 `&g` 本身是合法的）、结构体的模块级变量（与结构体
-//     的局部量同一格）。还有一条不是存储类而是查名字：**调用后面定义的函数**。jancy 的
-//     命名空间成员不看顺序，而这一层的函数是按源码顺序降的（模块级变量与命名类型已经
-//     分两遍先成型了，见 run）。
+//     不在一段可寻址的内存里，jancy 的 `&g` 本身是合法的）。
 //   - 结构体那一族里剩下的一条：`new T { … }`（decl_curly.rst 最后那一格）。花括号初值是
 //     **几条语句**，而这一层的表达式降级只交出一段文字 —— 没有"顺带发几条语句"的通道，
 //     而 `while (new T { … })` 那种位置连"提到前面去"都不成立（条件每一圈都要重算）。
@@ -271,6 +270,8 @@ class JncLower {
     this.globals = new Map();  // 模块级变量：名字 -> 类型（第十一刀）
     this.globalInit = [];      // 模块级变量的初值语句，按声明序，跑在 main 的体之前
     this.alias = new Map();    // 名字 -> 方言里的名字（结构体形参那一份拷贝，第十三刀）
+    this.sigs = new Map();     // 函数定义的节点 -> 它的签名（第十五刀，run 里先过一遍）
+    this.mainSeen = false;     // `int main()` 见过了（查重要在签名那一遍就做）
   }
 
   err(node, msg) {
@@ -550,6 +551,13 @@ class JncLower {
     const items = this.flat(tree);
     for (const it of items) {
       if (isList(it) && head(it) === 'type-decl') this.typeDecl(it.items[1]);
+    }
+    // 签名先过一遍（第十五刀）：jancy 的命名空间不看顺序，所以"后面定义的函数"要在
+    // 模块级变量的初值与所有函数体之前就查得着。
+    for (const it of items) {
+      if (!isList(it) || head(it) !== 'fn-def') continue;
+      const s = this.fnSig(it);
+      if (s !== null) this.sigs.set(it, s);
     }
     for (const it of items) {
       if (!isList(it)) continue;
@@ -873,7 +881,13 @@ class JncLower {
 
   /* -------------------------------------------------------------- 函数 */
 
-  fnDef(n) {
+  /**
+   * 签名那一半（第十五刀）。jancy 的命名空间成员**不看顺序** —— 后面定义的函数也调得着，
+   * 所以所有签名要在**任何函数体之前**登记好（run 里那一遍）。这一份只算说明符、声明符与
+   * 形参表，不碰函数体；结果按节点存进 `this.sigs`，`fnDef` 拿回去接着用（免得算两遍、
+   * 也免得同一条诊断发两遍）。
+   */
+  fnSig(n) {
     const sp = this.specs(n.items[1]);
     if (sp === null) return null;
     const info = this.declarator(n.items[2], sp);
@@ -882,30 +896,40 @@ class JncLower {
     const ps = [];
     for (const f of this.flat(info.formals)) {
       const fh = isList(f) ? head(f) : null;
-      if (fh === 'formals-varargs') { this.nope(f, '可变形参'); return null; }
-      if (fh === 'formal-anon') { this.nope(f, '无名形参'); return null; }
-      if (fh !== 'formal') { this.nope(f, `形参 '${fh}'`); return null; }
-      if (f.items[3] !== undefined) { this.nope(f, '形参的默认值'); return null; }
+      if (fh === 'formals-varargs') return this.nope(f, '可变形参');
+      if (fh === 'formal-anon') return this.nope(f, '无名形参');
+      if (fh !== 'formal') return this.nope(f, `形参 '${fh}'`);
+      if (f.items[3] !== undefined) return this.nope(f, '形参的默认值');
       const fsp = this.specs(f.items[1]);
       if (fsp === null) return null;
       const fi = this.declarator(f.items[2], fsp);
       if (fi === null) return null;
-      if (fi.formals !== null) { this.nope(f, '函数类型的形参'); return null; }
+      if (fi.formals !== null) return this.nope(f, '函数类型的形参');
       // 数组形参（第十刀的边界）。C 里 `void f(int a[3])` 就是 `int*`，jancy 保留数组类型
       // 并要一次数组转换 —— 那正是它自己未实现的那一格。要传数组就写 `int* a`。
-      if (isArr(fi.type)) { this.nope(f, `数组形参（'${tyName(fi.type)}'）—— 写成 ${tyName(fi.type.el)}* 传`); return null; }
+      if (isArr(fi.type)) return this.nope(f, `数组形参（'${tyName(fi.type)}'）—— 写成 ${tyName(fi.type.el)}* 传`);
       ps.push(fi);
     }
-    if (isArr(info.type)) { this.nope(n, `返回数组（'${tyName(info.type)}'）`); return null; }
+    if (isArr(info.type)) return this.nope(n, `返回数组（'${tyName(info.type)}'）`);
     // `int main()` 是入口：降成方言的 `(main …)`。jancy 的 main 回 int，而方言的入口
     // 不回值 —— 那个返回值是给外面的退出码，这一层没有它，所以 `return 0` 就是 `(ret)`。
     const isMain = info.name === 'main' && ps.length === 0;
-    if (isMain && this.mainBody !== null) return this.err(n, '`int main()` 定义了两次');
-    if (!isMain) {
+    if (isMain) {
+      if (this.mainSeen) return this.err(n, '`int main()` 定义了两次');
+      this.mainSeen = true;
+    } else {
       if (this.fns.has(info.name)) return this.err(n, `函数 '${info.name}' 定义了两次`);
       this.fns.set(info.name, { params: ps.map((p) => p.type), ret: info.type });
     }
+    return { info, ps, isMain };
+  }
+
+  fnDef(n) {
+    const sig = this.sigs.get(n);
+    if (sig === undefined) return null;        // 签名那一遍就报过错了
+    const { info, ps, isMain } = sig;
     this.scopes = [new Map()];
+
     // 取地址那一遍（第九刀）：先扫一遍函数体，知道哪些名字要提到堆上，再降。
     const taken = new Set();
     this.collectAddrTaken(n.items[3], taken);
@@ -956,8 +980,8 @@ class JncLower {
     if (body === null) return null;
     if (pre.length !== 0) body = `${pre.join('\n')}\n${body}`;
     if (isMain) { this.mainBody = body; return null; }
-    const sig = ps.map((p) => `(${p.name} ${slotText(p.type)})`).join(' ');
-    this.decls.push(`  (fn ${info.name} (${sig}) ${slotText(info.type)}\n${body})`);
+    const params = ps.map((p) => `(${p.name} ${slotText(p.type)})`).join(' ');
+    this.decls.push(`  (fn ${info.name} (${params}) ${slotText(info.type)}\n${body})`);
     return null;
   }
 
