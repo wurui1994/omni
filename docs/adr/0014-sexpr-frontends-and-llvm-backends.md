@@ -8418,6 +8418,51 @@ alignedaxis 自己：它出图了，可首处差在 `#3894 参考 newpath vs 我
 重载打分与下标降级、base 里一个函数，`run.js` 的 run-c / run-llvm 两条腿已经把后端
 覆盖了）。
 
+### 第一百〇一刀：探针一句话都印不出来 —— stdout 那一格尾巴，与 cardioid 的两个 ulp
+
+这一刀的起因是**量不出来**：往 `/tmp/baseN` 里插 `write(stdout, …)` 探针、两边对着跑，
+参考印得满满的，我们一行都没有。查下去是 `asy__fput` 的 stdout 那一路：核心方言唯一的
+输出口是 `print`，它**总补一个换行**，所以那一路按 `'\n'` 攒行 —— 攒到就发一行，
+**剩下那截没有换行结尾的尾巴留在 `asy__obuf` 里，退出时没人管，整段丢掉**。
+量过（`asy -noV`）：`write(stdout,"A"); write("B");` 参考印 `AB`，我们从前只印 `B`。
+
+补法是在 `asy__atexitrun` 的**末尾**（退出钩子跑完之后，钩子自己也会写 stdout）冲一次。
+`asy__obuf` 声明在 `asy__fput` 那儿、比 `asy__atexitrun` 晚，而这一层的名字是顺序解析的，
+所以中间搭一格 `asy__thunk asy__obufflushfn = null`，真正的闭包写在 `asy__fput` 后面装进去。
+
+**两条差别写在明处。** 一、尾巴那一行会多带一个换行（参考 `AB`，我们 `AB\n`）：
+要一字不差得给核心方言添一路"不补换行的输出"，那要动解释器与四个后端 ——
+JS 那边其实已经有 `$print_raw`，只是核心方言没有通到它的路子。
+二、`write(x)`（只一个实参）走的是前端内建那一族、不经过 `asy__obuf`，所以"没换行的
+`write(stdout,…)`"与"单参数 `write(…)`"混着用时**次序会反**（参考 `AB`，我们 `B\nA\n`）。
+往 base 里插探针因此要让每条探针自己带换行（`write(s)`），两边次序才一致。
+
+**探针一通，cardioid 那一族当场量到底了。** 在 graph.asy:1212 的 `t*T*tinv` 与
+plain_picture.asy:775 的 `scale(frame,…)` 两处各插一组，两边逐位对：
+
+- `pic.fit` 的**第一趟**：`t.xx` 两边**逐位一样**（36.380187647154194），
+  `t*T*tinv` 两边都是**精确单位**，都不发 gsave。
+- 第二趟：`t.xx` 参考 36.380187647154116、我们 36.380187647154102 —— 差 2 ulp。
+  于是参考那边 `t*T*tinv` 的 `xx` 是 `1 - 2^-53`（残差 -1.11e-16，正好半个 ulp），
+  `isIdentity()` 为假、**每条刻度线都套 gsave/concat/grestore**；我们的乘回去正好是 1，
+  一格 gsave 都不发。这就是 EPS 里"参考 gsave vs 我们 newpath"的全部由来。
+- 再往里一层：`m.x`/`M.x`/`width` 两边**逐位一样**，`height` 差 2 ulp ——
+  `m.y` 参考 -47.50925155666264、我们 …647（差 1 ulp），
+  `M.y` 参考 52.490748443337594、我们 …601（差 1 ulp），**两头各错 1 ulp、方向相反**。
+
+cardioid 的 y 极值来自 `polargraph(1+cos(t),0,2pi)` 那条曲线的 Bézier 界，一路上只有
+`cos`/`sin` 与三次求根。**结论是硬的：这一族不是逻辑差错，是 libm 差一位**
+（V8 的 `Math.cos` 与 macOS libm 差约 1 ulp，第九十七刀量过同一件事）。
+logdown / lmfit1 / gamma / alignedaxis 的首处差都长同一个样，归同一条待决策
+（要么自带一份可复现的 libm，要么承认这一族比不到逐位）。这一条**从"疑似 bug"
+变成"量到底的已知差"**，不再占修复队列。
+
+这一刀的账：EPS 那一轴按名字跑了 19 个 —— 一样 11、只有数值差 0、结构不同 6、
+没出图 0（与上一刀同；这一刀改的是 stdout 那一路，不动图）。跑过的轴：
+`tests/asy/run.js` 五条腿 259/0、`tests/sexpr/run.js` 55/0、`tests/asy/sweep.js`
+220 个里干净 219。**跳过的轴**：EPS 全量、`tests/asy/svg.js`（没碰 SVG 出口）、
+自举（只动了 base 里的 stdout 收尾，`run.js` 的 run-c / run-llvm 两条腿已经覆盖后端）。
+
 ## 后果与代价
 
 

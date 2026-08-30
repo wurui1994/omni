@@ -3021,15 +3021,24 @@ void atupdate(asy__thunk f) { asy__updatefn = f; }
 asy__thunk atupdate() { return asy__updatefn; }
 void atexit(asy__thunk f) { asy__exitfn = f; }
 asy__thunk atexit() { return asy__exitfn; }
+// stdout 那一格缓冲的尾巴（没有换行结尾的那一段）要在退出时冲出去 —— 见 asy__fput。
+// 这一格在这里只是**占位**：真正装进去的那个闭包写在 asy__fput 后面（那时 asy__obuf
+// 才声明过）。少了它，`write(stdout,"x")` 这种不带换行的输出会被整段吞掉 ——
+// 量过（`asy -noV`）：`write(stdout,"A"); write("B");` 参考印的是 `AB\n`，
+// 我们从前只印 `B\n`，差分探针（往 base 里插 write 再比两边）也因此一句都看不见。
+asy__thunk asy__obufflushfn = null;
 // 退出钩子真的会跑：降级那一层在 `(main …)` 的**最后一句**插一条 `(call asy__atexitrun)`
 // （lower.js 的 chunk 尾巴）。asy 那边这一条是 C++ 的 `run::cleanup`/exitFunction 调的，
 // 与"程序正常跑完"是同一个点，所以插在 main 末尾是同一处语义。
 // 先清成 null 再调：plain.asy:53 的 exitfunction 里再 `shipout()` 一次也不会绕回来。
 void asy__atexitrun() {
-  if (asy__exitfn == null) return;
-  asy__thunk f = asy__exitfn;
-  asy__exitfn = null;
-  f();
+  if (asy__exitfn != null) {
+    asy__thunk f = asy__exitfn;
+    asy__exitfn = null;
+    f();
+  }
+  // 退出钩子跑完**之后**再冲 stdout 那一格尾巴：钩子自己也可能往 stdout 写。
+  if (asy__obufflushfn != null) asy__obufflushfn();
 }
 // 隐式 shipout：与 plain.asy:53-62 的 exitfunction 同一条 —— 跑完了还没印过、
 // currentpicture 又不空，就补一张。真 asy 那边显式 `shipout(currentpicture)` 会在
@@ -4035,6 +4044,21 @@ void asy__fput(file f, string s) {
     k = find(asy__obuf, '\n');
   }
 }
+// 上面那格占位（asy__obufflushfn）真正装的东西。这一层唯一的 stdout 出口是核心方言的
+// `print`，它**总补一个换行**，所以按行攒：攒到 '\n' 就发一行。剩下那截没有换行结尾的
+// 尾巴从前就留在 asy__obuf 里烂掉了，现在退出时发出去。
+// **这一条差别写在明处**：尾巴那一行会多带一个换行（参考是 `AB`，我们是 `AB\n`）——
+// 要一字不差得给核心方言添一路"不补换行的输出"，那要动解释器与四个后端。
+// **还有一条**：`write(x)`（只一个实参）走的是前端内建那一族、不经过 asy__obuf
+// （见下面 output() 后面那一段的注释），所以"没换行的 write(stdout,…)"与"单参数
+// write(…)"混在一起时**次序会反**：参考 `write(stdout,"A"); write("B");` 印 `AB`，
+// 我们印 `B\nA\n`。往 base 里插差分探针时因此要让每条探针自己带换行（`write(s)` 或
+// `write(stdout, s, endl)`），这样两边次序一致。
+asy__obufflushfn = new void() {
+  if (asy__obuf == "") return;
+  write(asy__obuf);
+  asy__obuf = "";
+};
 void none(file f) { }
 void endl(file f) { asy__fput(f, '\n'); }
 void newl(file f) { asy__fput(f, '\n'); }
