@@ -175,7 +175,19 @@ function mine(p) {
     spawnSync('pkill', ['-f', `${join(ROOT, '.omni-cache', 'asy-mods')}/main-`],
       { encoding: 'utf8' });
   }
-  return { out: r.stdout ?? '', err: r.stderr ?? '', status: r.status, slow };
+  return { out: onlyEps(r.stdout ?? ''), err: r.stderr ?? '', status: r.status, slow };
+}
+
+/**
+ * 例子**自己**印的东西要从图里剥掉。真 asy 是 `-f eps -o <名>`：图写进文件，程序自己
+ * `write(...)` 印的那些走 stdout，两者天然分开；我们这一层图也从 stdout 出去，于是
+ * 例子印的行落在图**前面**。量出来的：xstitch 的 `histogram:`、lmfit1 的 `P_0 = …`
+ * 就是这么变成"首处结构差"的。规矩：第一行 `%!PS-Adobe` 之前的全扔掉，之后一个字不动
+ * （图里再有脏东西照旧算差 —— 这一格只补"两边的 stdout 不是同一个口子"这一处不对等）。
+ */
+function onlyEps(s) {
+  const i = s.indexOf('%!PS-Adobe');
+  return i <= 0 ? s : s.slice(i);
 }
 
 /**

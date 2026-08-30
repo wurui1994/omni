@@ -7606,6 +7606,76 @@ asy 那边是"字体变了就发"，setlatexfont 的条件还没照抄）。
 `tests/asy/run.js` 259 passed / 0 failed（252.4s）、sweep（220 里干净 219、1.3s）。
 **跳过**：EPS 全量、`OMNI_LEGS=all` 的另外三条腿。
 
+### 第九十刀：标签跟着 frame 走 —— UnFill 的白底、裁剪里的字、texpreamble
+
+上一刀把管子接通了，这一刀补的是**标签在 frame 之间怎么流动**。四处都是量出来的：
+
+- **`add` 与 `prepend` 都要搬 `labs`**。第一个现场是 buildcycle：参考的
+  `%%DocumentFonts` 有 CMR12，我们只有 CMMI12，长度 2547 对 2976。顺着看下去，
+  `buildcycle.asy:22` 的 `label("$f > 0$",…,UnFill)` 整条没了 —— 那个 `0` 是全篇唯一
+  要 CMR12 的字。先改了 `add`，还是没有；再往下才看清 plain_filldraw.asy:243-248：
+  `add(dest,src,filltype)` 的 `above` 默认是 `filltype.type != UnFill`，UnFill 那一支走的是
+  **prepend**，不是 add。两个都搬上才对。
+- **`transform*frame` 照 drawlabel.cc:200-204 的 transformed 搬**：`T` 与 `position` 整个
+  吃下变换，`align` 只吃去掉平移的那一半再归回原长（`length(align)*unit(shiftless(t)*align)`）。
+  量出来的三个尺寸原样带过去 —— 它们只由正文与笔的字号决定，asy 那边是新对象、会再问一趟
+  latex，问回来是同一组数，这一趟省掉。
+- **裁剪要在标签那一列里留一份影子**。真 asy 的 frame 只有**一列** drawElement，标签与
+  clipbegin/clipend 混在一起；写 .tex 时按原序走一遍，裁剪那两格发的是
+  `\special{ps:gsave}` + `\begin{picture}(w·ps2tex, h·ps2tex)` + 原始路径 + `eoclip`，
+  配对的尾巴发 `\end{picture}` + `\kern -w·ps2tex pt` + `\special{ps:grestore}`
+  （drawclipbegin.h:66-79、drawclipend.h:51-56、texfile.cc:215-241）。这一层把标签拆成了
+  第二列，所以 `clip(frame,…)` 往两列都记一格（`labelrec.kind` 1/2）。三处细节量出来才对：
+  - 路径坐标要按 `(-bx.l,-bx.b)` **平移**（writeshiftedpath，texfile.cc:190-193）：
+    参考的 `_0.eps` 里是 `-0.75`，`.tex` 里是 `-0.500000`，差的正好是 `(0.25,0.25)`。
+  - `\begin{picture}` 只在**最外一层**发（texfile.h:268 的 toplevel），嵌套的裁剪只加层数。
+  - `gsave`/`grestore` 省不省照 picture.cc:301-308：两个 endclip 挨着时前面那个与它配对的头
+    都不发。那个标记是 `opsbox` 走 ops 时打的，得**按序号**搬到 labs 那一列去（两列里裁剪的
+    先后完全同序）。不搬的话 venn3 的 intersection123（连着两个 clip）多出一对
+    gsave/grestore —— 首处结构差就停在那儿。
+- **`texpreamble(s)` 从空动作改成真的存下来**，而且要进**两趟** latex（量尺寸那一趟与出图
+  那一趟），插的位置是 `\let\paperwidth\paperwidthsave` 之后（texdefines）。hierarchy 的
+  `\def\Ham{…}`：没有它 latex 直接未定义控制序列，texship 退回不带标签那条路，出来 212 个词
+  对参考的 3095。补上之后 hierarchy **逐字节一样**。
+
+顺手修掉两处"印到了图里"：
+
+- `warning(...)` 从前走 `write()`，也就是 **stdout**，而 `-o -` 那一路 EPS 也从 stdout 出去 ——
+  于是 `warning: cannot fit picture to xsize 200...enlarging...` 成了 EPS 的第一行
+  （logdown、spline）。asy 的 `em.warning` 印到 cerr。这一层没有 stderr 的口子，
+  借 `_writetext("/dev/stderr", …)`（字符设备，truncate 是空动作）。
+- 例子**自己**印的东西同理。真 asy 是 `-f eps -o <名>`，图进文件、程序的 `write` 走 stdout，
+  两者天然分开；我们两样都在 stdout 上。这一处不对等在 eps.js 里补：第一行 `%!PS-Adobe`
+  之前的全扔掉，之后一个字不动（xstitch 的 `histogram:`、lmfit1 的 `P_0 = `）。
+
+**上一刀有一处写错了，这里改正**：`\textheight` 是 `h+18`，不是 `h+17`
+（texfile.cc:106 的 `height+18.0`，`height = box.top-box.bottom`）。当时它没被抓住是因为
+612×792 的纸上差 1bp 的页高不挪动任何东西 —— 一个不影响结果的错值最难发现。
+对着 equilateral 的参考 `.tex` 量：`bb` 的高 239.288243 + 18 = 257.288243，逐字对上。
+同一处还有一个格式的坑：`.tex` 里那句 `\special{ps:… setgray}` 的颜色是**定点 6 位**，
+不是 `%g` 的 6 位有效数字（texfile 那个流构造时就按 fixed/precision(6) 粘住了，坐标与
+对齐量同一个流）—— 黑笔参考写 `0.000000 setgray`，走 psfile 那条路写成 `0 setgray`。
+
+量到了、这一刀**没修**的：
+
+- `.tex` 里有一处末位差：`20.225563` 对参考 `20.225562`。我们算 `x / (72/72.27)`，
+  asy 算 `x * (72.27/72)`，末几位不同。差不到 1e-6 pt，在 dvips 的 1/600 in 之下。
+- **`setdash` 一直没发过**（asy_builtins.asy:376 早就写在明处）。limit、polararea、sacone、
+  sacylinder、xstitch 五份的首处差全是参考 `[…] 0 setdash` 对我们 `stroke`。下一刀就是它。
+- `\usefont` 仍然只在第一条标签发。asy 那边是 settexfont（texfile.h:216-224）：
+  **字体串变了就发**。只有笔上带显式 `font(...)` 的例子才会碰到。
+
+结果：**逐字节一样的从 25 份到 31 份**（新增 buildcycle、venn3、hierarchy，加上点名之外
+本来就对上的 Pythagoras、labelbox、lever）。dvips 写的那 67 份里现在 8 份逐字一样，
+剩下的差别按第一处归类：界差 1bp 的一批（cardioid / fjortoft / log / polarcircle /
+cosaddition / ring）、缺 setdash 的一批（上面五份）、graph 那一路还缺东西的一批
+（spline / lmfit1 / logdown 的界小一大截）。
+
+跑了：EPS 点名 31 份（**全部逐字一样**，无退化）+ dvips 写的那 67 份整组过了一遍、
+`tests/asy/run.js` 259 passed / 0 failed（300.7s）、sweep（220 里干净 219、2.7s，
+最慢 AiryDisk.asy 175ms）、`tests/sexpr/run.js` 55 passed / 0 failed。
+**跳过**：EPS 全量（220）、`OMNI_LEGS=all` 的另外三条腿。
+
 ## 后果与代价
 
 

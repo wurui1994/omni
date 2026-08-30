@@ -1882,9 +1882,24 @@ box picbox(picture pic, real s) { return opsbox(pic.ops, s); }
 //
 // 这里只有「把元素攒起来」「量 bbox」与「记一下有没有标签」三件事：begingroup /
 // endgroup / clip 都还没有，用到它们的地方会明确报"没有这个函数"，不会悄悄给错答案。
+// 用户自己加的 TeX 前言（`texpreamble("…")`）。asy 存在 processData().TeXpreamble 里，
+// 写 .tex 时由 texdefines 插在 `\let\paperwidth\paperwidthsave` 之后、`\newbox\ASYbox`
+// 之前（量出来的：hierarchy 的 `\def\Ham{…}` 就在那一行）。这一份**量标签那一趟也要用** ——
+// 不然 `$\Ham(r,2)$` 那一趟 latex 就是未定义控制序列，三个数量不出来。
+// 声明放在这里是因为名字解析是顺着来的：asy__measure 在下面，texpreamble 的定义在更后面。
+string[] asy__texpre_user;
+
 // 一条标签（drawlabel.h 的 `drawLabel`）。`sz` 是 TeX 的尺寸文本 —— 标签量出来三个数
 // 全是 0 时改量它（drawlabel.cc:101）。后三个数是 latex 量出来的（单位已换成 bp）。
 struct labelrec {
+  // kind：0 是一条真标签，1 是裁剪的头，2 是配对的尾。
+  // 为什么标签这一列也要记裁剪：真 asy 的 frame 只有**一列** drawElement，标签与
+  // clipbegin/clipend 混在一起，写 .tex 时按原序走一遍，裁剪那两格发的是
+  // `\special{ps:gsave}` + `\begin{picture}` + 原始路径 + eoclip（drawclipbegin.h:66-79）。
+  // 这一层把标签拆成了另一列，所以裁剪的位置得在这一列里补一份影子 ——
+  // 不补的话 UnFill 那种「白底压掉下面的线」在 .tex 里整段没有，
+  // 量出来的：buildcycle 与 venn3 的首处结构差就是参考 `gsave` 对我们的颜色那一句。
+  int kind = 0;
   string s;
   string sz;
   transform t;
@@ -1895,6 +1910,8 @@ struct labelrec {
   real width = 0;
   real height = 0;
   real depth = 0;
+  path[] gs;                                     // kind 1 才有：裁剪的超路径
+  bool stroke = false;                           // kind 1 才有
 }
 
 struct frame {
@@ -1994,7 +2011,7 @@ private real asy__ptnum(string s) {
 // 一整批标签量一趟。`havebounds` 的那些跳过（drawlabel.cc:95 的同一条短路）。
 private void asy__measure(labelrec[] ls) {
   int[] todo;
-  for (int i = 0; i < ls.length; ++i) if (!ls[i].havebounds) todo.push(i);
+  for (int i = 0; i < ls.length; ++i) if (ls[i].kind == 0 && !ls[i].havebounds) todo.push(i);
   if (todo.length == 0) return;
   string dir = "/tmp/omni-asytex";
   // asy 的双引号串是**照字面**的（只有 \" 特殊），单引号串才过转义 —— 与真 asy 一字不差
@@ -2002,7 +2019,9 @@ private void asy__measure(labelrec[] ls) {
   // 换行得用 '\n'。第一版写成 "\\documentclass" 加 "\n"，生出来的 .tex 整份是一行
   // 字面量 —— latex 照样退出 0，三个数全量成了 0，界只差了一点点，很能骗人。
   string nl = '\n';
-  string t = "\documentclass[12pt]{article}" + nl
+  string u = "";
+  for (int i = 0; i < asy__texpre_user.length; ++i) u = u + asy__texpre_user[i] + nl;
+  string t = "\documentclass[12pt]{article}" + nl + u
     + "\newbox\ASYbox" + nl + "\newdimen\ASYdimen" + nl + "\pagestyle{empty}" + nl
     + "\begin{document}" + nl;
   for (int k = 0; k < todo.length; ++k) {
@@ -2074,7 +2093,10 @@ box framebox(frame f) {
   box bx = opsbox(f.ops, 1);
   if (f.labs.length > 0) {
     asy__measure(f.labs);
-    for (int i = 0; i < f.labs.length; ++i) asy__labelbox(bx, f.labs[i]);
+    for (int i = 0; i < f.labs.length; ++i) {
+      if (f.labs[i].kind != 0) continue;         // 裁剪那两格的影子不占框
+      asy__labelbox(bx, f.labs[i]);
+    }
   }
   return bx;
 }
@@ -2107,6 +2129,12 @@ void erase(frame f) {
 // 所以 `fold3(add,1,2,3)` 那种写法照样通（cases/42-fntype 钉着）。
 void add(frame dest, frame src) {
   for (int i = 0; i < src.ops.length; ++i) dest.ops.push(src.ops[i]);
+  // 标签也要跟过来。量出来的：plain_Label.asy:304-310 的 filltype 那一支是
+  // 「先 label 到一个临时 frame d，再 add(f,d,filltype)」，不搬的话带 UnFill/Fill 的标签
+  // 整条丢掉 —— buildcycle.asy:22 的 `label("$f > 0$",…,UnFill)` 就是这么没的
+  // （参考的 %%DocumentFonts 有 CMR12，我们只有 CMMI12，因为那个 `0` 没人排）。
+  for (int i = 0; i < src.labs.length; ++i) dest.labs.push(src.labs[i]);
+  if (src.haslabel) dest.haslabel = true;
 }
 
 bool fits(picture pic, real s) {
@@ -2565,7 +2593,7 @@ bool pdf() { return false; }           // 这一路出的是 EPS
 string nativeformat() { return "eps"; }
 bool uptodate() { return false; }
 string outname() { return "out"; }
-void texpreamble(string s) { }         // 空动作：没有 TeX 那一路
+void texpreamble(string s) { asy__texpre_user.push(s); }
 void texpreamble() { }
 string xasyKEY() { return ""; }
 void xasyKEY(string s) { }
@@ -3635,9 +3663,15 @@ bool inside(path g, pair z, pen fillrule=currentpen) {
 
 // (2) warning / nowarn（runsystem.in:174/182）。C++ 那边过 settings::warn 那张开关表再
 // 走 em.warning（带文件位置）。这一层没有那张表也没有位置，就照 "warning: <正文>" 印出来。
+//
+// **必须走 stderr**：asy 的 em.warning 印到 cerr，而 `-o -` 那一路 EPS 是从 stdout 出去的。
+// 从前这里用 write()，于是 `warning: cannot fit picture to xsize 200...enlarging...`
+// 变成了 EPS 的第一行 —— 量出来的：logdown / spline / xstitch / lmfit1 四份的首处差
+// 就是这一行（参考 `%%BoundingBox:201`，我们 `warning:`）。这一层没有 stderr 的口子，
+// 借 _writetext 往 /dev/stderr 写（字符设备，truncate 是空动作）。
 void nowarn(string s) { }
 void warning(string s, string t, bool position=false) {
-  write("warning: " + t);
+  _writetext("/dev/stderr", "warning: " + t + '\n');
 }
 
 // (1) `write(file, …)` 那一族（builtin.cc:474 的 addWrite：
@@ -4578,6 +4612,21 @@ void clip(frame f, path[] g, bool stroke=false, pen fillrule=currentpen,
   for (int i = 0; i < f.ops.length; ++i) out.push(f.ops[i]);
   out.push(e);
   f.ops = out;
+  // 标签那一列里也补一对影子（见 labelrec.kind 那段注释）。裁剪把**已经在这个 frame 里**
+  // 的东西整个包住，所以头放在最前、尾放在最后；之后再 label 进来的自然落在尾巴后面，
+  // 与真 asy 的单列顺序一致。
+  labelrec cb;
+  cb.kind = 1;
+  cb.gs = asy__gcopy(g);
+  cb.stroke = stroke;
+  cb.p = pencopy(fillrule);
+  labelrec ce;
+  ce.kind = 2;
+  labelrec[] ol;
+  ol.push(cb);
+  for (int i = 0; i < f.labs.length; ++i) ol.push(f.labs[i]);
+  ol.push(ce);
+  f.labs = ol;
 }
 void beginclip(frame f, path[] g, bool stroke=false, pen fillrule=currentpen,
                bool copy=true) {
@@ -5197,6 +5246,37 @@ frame operator *(transform t, frame f) {
     q.p = shiftless(t) * o.p;
     out.ops.push(q);
   }
+  // 标签照 drawlabel.cc:200-204 的 transformed 搬：T 与 position 整个变换吃下去，
+  // align 只吃**去掉平移**的那一半再归一回原长（`length(align)*unit(shiftless(t)*align)`）。
+  // 量出来的三个尺寸原样带过去：它们只由正文与笔的字号决定，与变换无关 ——
+  // asy 那边是新对象、会再问一趟 latex，问回来是同一组数，这里省掉那一趟。
+  for (int i = 0; i < f.labs.length; ++i) {
+    labelrec r = f.labs[i];
+    labelrec q;
+    q.kind = r.kind;
+    // 裁剪那两格照 drawclipbegin.h:83 的 transformed 搬：只有路径与笔跟着变。
+    if (r.kind != 0) {
+      for (int j = 0; j < r.gs.length; ++j) q.gs.push(t * r.gs[j]);
+      q.stroke = r.stroke;
+      q.p = pencopy(r.p);
+      out.labs.push(q);
+      continue;
+    }
+    q.s = r.s;
+    q.sz = r.sz;
+    q.t = t * r.t;
+    q.position = t * r.position;
+    pair a = shiftless(t) * r.align;
+    real la = length(r.align);
+    q.align = la == 0 || length(a) == 0 ? (0, 0) : (la * a.x / length(a), la * a.y / length(a));
+    q.p = pencopy(r.p);
+    q.havebounds = r.havebounds;
+    q.width = r.width;
+    q.height = r.height;
+    q.depth = r.depth;
+    out.labs.push(q);
+  }
+  if (f.haslabel) out.haslabel = true;
   return out;
 }
 
@@ -5362,6 +5442,14 @@ void prepend(frame dest, frame src) {
   for (int i = 0; i < src.ops.length; ++i) out.push(src.ops[i]);
   for (int i = 0; i < dest.ops.length; ++i) out.push(dest.ops[i]);
   dest.ops = out;
+  // 标签也要跟过来，而且要跟到**前面**去 —— 量出来的：plain_filldraw.asy:243-248 的
+  // `add(dest,src,filltype)` 在 filltype 是 UnFill 时 above 为假，走的是 prepend 不是 add，
+  // 所以 buildcycle.asy:22 那个 `label("$f > 0$",…,UnFill)` 是从这条路掉的，不是从 add 那条。
+  labelrec[] ol;
+  for (int i = 0; i < src.labs.length; ++i) ol.push(src.labs[i]);
+  for (int i = 0; i < dest.labs.length; ++i) ol.push(dest.labs[i]);
+  dest.labs = ol;
+  if (src.haslabel) dest.haslabel = true;
 }
 
 string readline(string prompt="", string name="", bool tabcompletion=false) {  abort("readline 还没做（这一层不读 stdin 的交互行）"); return "";
@@ -5896,10 +5984,13 @@ private string asy__baseeps(frame f, box bx) {
 // `<前缀>_.tex`。前言照 texfile.h:63-120 的 texpreamble + dvipsfix 那一段写死 ——
 // 它不含任何随例子变的东西（`\ASYprefix` 空、纸张由 dvips 的 -T 定），所以这一份是常量。
 private string asy__texpre(string nl) {
+  string u = "";
+  for (int i = 0; i < asy__texpre_user.length; ++i) u = u + asy__texpre_user[i] + nl;
   return "\documentclass[12pt]{article}" + nl
     + "\let\paperwidthsave\paperwidth\let\paperwidth\undefined" + nl
     + "\usepackage{graphicx}" + nl
     + "\let\paperwidth\paperwidthsave" + nl
+    + u
     + "\newbox\ASYbox" + nl
     + "\newdimen\ASYdimen" + nl
     + "\def\ASYprefix{}" + nl
@@ -5945,6 +6036,45 @@ private string asy__texpre(string nl) {
     + "\makeatother" + nl;
 }
 
+// .tex 里那句 `\special{ps:… setgray}` 的颜色是**定点 6 位**，不是 %g 的 6 位有效数字：
+// texfile 的输出流在构造时就被按 fixed/precision(6) 粘住了（坐标与对齐量同一个流，
+// 所以它们也都是定点 6 位）。量出来的：黑笔那一句参考写 `0.000000 setgray`，
+// 走 psfile 那条 %g 的路会写成 `0 setgray`。
+private string asy__texcolor(pen p) {
+  if (p.iscmyk)
+    return asy__f6(p.cyan) + " " + asy__f6(p.magenta) + " " + asy__f6(p.yellow) + " "
+      + asy__f6(p.black) + " setcmykcolor";
+  if (p.isrgb)
+    return asy__f6(p.red) + " " + asy__f6(p.green) + " " + asy__f6(p.blue) + " setrgbcolor";
+  return asy__f6(p.gray) + " setgray";
+}
+
+// 裁剪路径写进 .tex 的那一份（drawclipbegin.h:73 的 writeshiftedpath）：形状与 emitpath
+// 一样，只有两处不同 —— 数是**定点 6 位**（texfile 那个流的格式），坐标要先按
+// bboxshift 平移（量出来的：参考的 `_0.eps` 里是 -0.75，.tex 里是 -0.500000，
+// 差的正好是 (-bx.l,-bx.b) = (0.25,0.25)）。
+private string asy__texpath(path g, pair sh, bool newPath, string nl) {
+  string f2(pair z) { return asy__f6(z.x + sh.x) + " " + asy__f6(z.y + sh.y); }
+  int n = g.nodes.length;
+  pair z0 = g.nodes[0].point;
+  string o = (newPath ? "newpath " : " ") + f2(z0) + " moveto" + nl;
+  for (int i = 1; i < n; ++i) {
+    pair z = g.nodes[i].point;
+    if (g.nodes[i - 1].straight) o = o + " " + f2(z) + " lineto" + nl;
+    else o = o + " " + f2(g.nodes[i - 1].post) + " " + f2(g.nodes[i].pre) + " "
+      + f2(z) + " curveto" + nl;
+  }
+  if (g.cyclic) {
+    if (g.nodes[n - 1].straight) o = o + " " + f2(z0) + " lineto" + nl;
+    else o = o + " " + f2(g.nodes[n - 1].post) + " " + f2(g.nodes[0].pre) + " "
+      + f2(z0) + " curveto" + nl;
+    o = o + "closepath" + nl;
+  } else if (n == 1) {
+    o = o + " " + f2(z0) + " lineto" + nl;
+  }
+  return o;
+}
+
 // 一条标签写进 .tex 的那个对齐量（drawlabel.cc:106-117 的 texAlign）。
 private pair asy__texalign(labelrec r) {
   pair al = inverse(r.t) * r.align;
@@ -5974,7 +6104,7 @@ private bool asy__texship(string prefix, frame f, box bx, real ox, real oy, real
   string t = asy__texpre(nl)
     + "\setlength{\unitlength}{1pt}%" + nl
     + "\pagestyle{empty}" + nl
-    + "\textheight=" + asy__f6(h + 17) + "bp" + nl
+    + "\textheight=" + asy__f6(h + 18) + "bp" + nl
     + "\textwidth=" + asy__f6(w + 18) + "bp" + nl
     + "\begin{document}" + nl
     + "\makeatletter%" + nl
@@ -5988,15 +6118,65 @@ private bool asy__texship(string prefix, frame f, box bx, real ox, real oy, real
       + asy__f6(bx.r) + " " + asy__f6(bx.t) + "]{" + pre + "_0.eps}%" + nl
     + "}%" + nl
     + "\kern " + asy__f6(-w / asy__tex2ps) + "pt%" + nl;
+  // 走一遍标签那一列。裁剪的头尾按 drawclipbegin.h:66-79 / drawclipend.h:51-56 发：
+  // `\begin{picture}` 只在**最外一层**发（texfile.h:268 的 toplevel，嵌套的裁剪只加层数）。
+  //
+  // `gsave`/`grestore` 省不省照 picture.cc:301-308 那一格：两个 endclip 挨着时，前面那个
+  // 与它配对的头都不发。那个标记是 opsbox 走 ops 时打上的（真 asy 是同一个对象两条路共用），
+  // 这一层 ops 与 labs 是两列，所以按**序号对齐**搬过来 —— 两列里裁剪的先后完全同一个顺序
+  // （clip 往两列都是头进尾出，add/prepend/变换也都保序）。不搬的话 venn3 的
+  // intersection123（连着两个 clip）会多出一对 gsave/grestore。
+  bool[] nsb;
+  bool[] nse;
+  for (int i = 0; i < f.ops.length; ++i) {
+    if (f.ops[i].kind == 3) nsb.push(f.ops[i].nosave);
+    else if (f.ops[i].kind == 4) nse.push(f.ops[i].nosave);
+  }
+  int ib = 0;
+  int ie = 0;
+  pair sh = (-bx.l, -bx.b);
+  int lvl = 0;
+  bool first = true;
   for (int i = 0; i < f.labs.length; ++i) {
     labelrec r = f.labs[i];
+    if (r.kind == 1) {
+      bool ns = ib < nsb.length ? nsb[ib] : false;
+      ++ib;
+      if (!ns) t = t + "\special{ps:gsave}%" + nl;
+      if (r.gs.length > 0) {
+        if (lvl == 0) {
+          t = t + "\begin{picture}( " + asy__f6(w / asy__tex2ps) + ", "
+            + asy__f6(h / asy__tex2ps) + ")%" + nl;
+        }
+        ++lvl;
+        t = t + "\special{ps:\ASYraw{" + nl;
+        for (int j = 0; j < r.gs.length; ++j) t = t + asy__texpath(r.gs[j], sh, j == 0, nl);
+        if (r.stroke) t = t + "strokepath" + nl;
+        t = t + (r.p.evenodd ? "eoclip" : "clip") + nl + "}%" + nl + "}%" + nl;
+      }
+      continue;
+    }
+    if (r.kind == 2) {
+      bool ns = ie < nse.length ? nse[ie] : false;
+      ++ie;
+      if (lvl > 0) {
+        --lvl;
+        if (lvl == 0) {
+          t = t + "\end{picture}%" + nl
+            + "\kern " + asy__f6(-w / asy__tex2ps) + "pt%" + nl;
+        }
+      }
+      if (!ns) t = t + "\special{ps:grestore}%" + nl;
+      continue;
+    }
     if (r.s == "") continue;
     real fs = r.p.fontsizeval / asy__tex2ps;
     pair al = asy__texalign(r);
-    t = t + "\special{ps:" + colorof(r.p) + "}%" + nl
+    t = t + "\special{ps:" + asy__texcolor(r.p) + "}%" + nl
       + "\fontsize{" + asy__f6(fs) + "}{" + asy__f6(1.2 * fs) + "}\selectfont%" + nl;
-    if (i == 0) {
+    if (first) {
       t = t + "\usefont{\ASYencoding}{\ASYfamily}{\ASYseries}{\ASYshape}%" + nl;
+      first = false;
     }
     t = t + "\ASYalign(" + asy__f6((r.position.x - bx.l) / asy__tex2ps) + ","
       + asy__f6((r.position.y - bx.b) / asy__tex2ps) + ")("
@@ -6059,7 +6239,14 @@ void _shipout(string prefix="", frame f, frame preamble=null, string format="",
   real h = bx.t - bx.b;
   real ox = 0.5 * asy__excess(612, w);
   real oy = 0.5 * asy__excess(792, h);
-  if (f.labs.length > 0 && asy__texship(prefix, f, bx, ox, oy, w, h)) return;
+  // 只有**真有一条标签**才走 latex 那条路。裁剪在 labs 里也占格子（kind 1/2 的影子），
+  // 光有裁剪没有标签时那一列不空，但 tex 那一趟没有任何字可排 —— 那种照旧走 psfile。
+  bool anylab = false;
+  for (int i = 0; i < f.labs.length; ++i) if (f.labs[i].kind == 0 && f.labs[i].s != "") {
+    anylab = true;
+    break;
+  }
+  if (anylab && asy__texship(prefix, f, bx, ox, oy, w, h)) return;
   asy__out("%!PS-Adobe-3.0 EPSF-3.0");
   asy__out("%%BoundingBox: " + string(floor(ox)) + " " + string(floor(oy)) + " "
         + string(ceil(ox + w)) + " " + string(ceil(oy + h)));
