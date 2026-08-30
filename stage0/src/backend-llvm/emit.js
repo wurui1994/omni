@@ -33,7 +33,7 @@ import { OmniError } from '../source/diag.js';
 import { utf8Bytes } from '../host/utf8.js';
 import {
   OP, OP_NAMES, REF_NONE, REF_BIAS, isConstRef, typeText, typeKind, typeLanes,
-  T_VOID, T_I64, T_F64, T_BOOL, T_STR, T_AGG, T_BUF, T_ARR, CVT_I2F, CVT_F2I,
+  T_VOID, T_I64, T_F64, T_BOOL, T_STR, T_AGG, T_BUF, T_ARR, T_PTR, T_TPTR, CVT_I2F, CVT_F2I,
 } from '../mir/ir.js';
 
 /**
@@ -56,6 +56,13 @@ const LL_TYPES = new Map([
   // 来的、再存回去"，一层脆弱的别名分析。值语义靠的是 from_oir 在右值位置发的 `OP.COPY`
   // （形参入口也发一条），所以"句柄可变 + 显式复制"这套在五条腿上是同一个模型。
   [T_AGG, 'ptr'],
+  // 指针（ADR-0016）。fat 是 `{addr, base, end}` 的**一等聚合值**：它是值类型，任何操作
+  // 都产生新值、从不原地改，所以 SSA 的 insertvalue/extractvalue 正好合身（结构体那条
+  // 走句柄的理由 —— FLDSET 要就地改 —— 在这里不成立）。thin 就是一个不透明指针。
+  // 这个拼法不是量出来的 ABI，是**我们自己定的**，和缓冲那一条同理：运行时里没有任何
+  // 函数按值收发 fat 指针（omni.h 里的真符号一律是平的），所以这条腿只要自洽就够。
+  [T_PTR, '{ ptr, ptr, ptr }'],
+  [T_TPTR, 'ptr'],
 ]);
 
 /**
@@ -179,6 +186,10 @@ class LlvmEmitter {
     this.aggUsed = false;
     this.needNullck = false;   // 类的字段访问要判空，用到才 declare
     this.needFnck = false;     // 函数值的调用要判空（消息与 omni_fn_ck 逐字相同）
+    // 指针用到了没有（ADR-0016）：用到就 declare omni.h 里那四个平签名的真符号。
+    // run-c 那条腿调的是同一个符号的同一份机器码，所以越界与空引用的消息不可能分叉。
+    this.needPtr = false;
+    this.needTPtr = false;
   }
 
   line(s) { this.out.push(s); }
@@ -380,6 +391,16 @@ class LlvmEmitter {
       this.line('declare ptr @omni_arr_blob_at(ptr, i64)');
       this.line('declare ptr @omni_arr_blob_push(ptr)');
       this.line('declare ptr @omni_arr_blob_pop(ptr)');
+    }
+    // 指针：也是只 declare，不生成 —— 分配、范围检查、指针差都在 omni_mem.c 里，
+    // 与 run-c 同一个符号。加法（PADD）没有检查，就地一条 getelementptr，所以没有符号。
+    if (this.needPtr) {
+      this.line('declare ptr @omni_pnew(i64, i64)');
+      this.line('declare ptr @omni_pchk(ptr, ptr, ptr, i64)');
+      this.line('declare i64 @omni_psub(ptr, ptr, ptr, ptr, ptr, ptr, i64)');
+    }
+    if (this.needTPtr) {
+      this.line('declare ptr @omni_tchk(ptr)');
     }
     // 字符串字面量的字节。放在最后是因为它们是函数体发到一半才登记的；
     // 顺序按登记顺序，所以同一份输入两次发出来逐字节相同（快照轴要这个）。
@@ -626,6 +647,12 @@ class LlvmEmitter {
     if (op === OP.ANEW || op === OP.ALEN || op === OP.AGET || op === OP.ASET
         || op === OP.APUSH || op === OP.APOP) {
       this.arrInsn(f, i, op, dst, t);
+      return;
+    }
+    // 指针八条（ADR-0016）
+    if (op === OP.PNEW || op === OP.PNULL || op === OP.PISNULL || op === OP.PTHIN
+        || op === OP.PLOAD || op === OP.PSTORE || op === OP.PADD || op === OP.PSUB) {
+      this.ptrInsn(f, i, op, dst, t);
       return;
     }
     // 向量三条 + 向量上的四则运算。分流要在标量表之前：`add <4 x i64>` 是合法的，
@@ -984,6 +1011,126 @@ class LlvmEmitter {
     const args = f.argsOf(f.b[i]);
     this.line(`  ${dst} = call ${et} @omni_ll_bset_${s}({ i64, ptr } ${this.val(f.a[i])}, `
       + `i64 ${this.val(args[0])}, ${et} ${this.val(args[1])})`);
+  }
+
+  /**
+   * 指针八条（ADR-0016）。带检查的三处（分配、解引用、指针差）全是 call 运行时符号 ——
+   * 与数组那六条同一条理由：run-c 调的是同一个符号的同一份机器码，所以越界与空引用的
+   * 消息不可能在两条原生腿之间分叉。不带检查的（PNULL/PISNULL/PTHIN/PADD）就地发 IR。
+   *
+   * fat 指针在这里是一等聚合值 `{addr, base, end}`，靠 insertvalue/extractvalue 拆装。
+   * 它不跨 C 边界（omni.h 里的真符号一律是平的），所以这个拼法只需自洽。
+   */
+  ptrInsn(f, i, op, dst, t) {
+    const P = '{ ptr, ptr, ptr }';
+    const x = f.aux[i];
+    if (op === OP.PNULL) {
+      // 空指针也得是**这条指令定义的名字**（SSA），所以不能直接写 null：
+      // thin 借一条零偏移的 gep，fat 借一条 insertvalue。两者都会被 opt 折成常量。
+      if (t === T_TPTR) this.line(`  ${dst} = getelementptr i8, ptr null, i64 0`);
+      else this.line(`  ${dst} = insertvalue ${P} zeroinitializer, ptr null, 0`);
+      return;
+    }
+    if (op === OP.PNEW) {
+      this.needPtr = true;
+      const n = this.val(f.a[i]);
+      const base = this.fresh();
+      const bytes = this.fresh();
+      const end = this.fresh();
+      const p0 = this.fresh();
+      const p1 = this.fresh();
+      // omni_pnew 只回块首（负数个数在那里报错），三个字在这里拼 —— 这样它就不必返回聚合
+      this.line(`  ${base} = call ptr @omni_pnew(i64 ${n}, i64 ${x})`);
+      this.line(`  ${bytes} = mul i64 ${n}, ${x}`);
+      this.line(`  ${end} = getelementptr i8, ptr ${base}, i64 ${bytes}`);
+      this.line(`  ${p0} = insertvalue ${P} zeroinitializer, ptr ${base}, 0`);
+      this.line(`  ${p1} = insertvalue ${P} ${p0}, ptr ${base}, 1`);
+      this.line(`  ${dst} = insertvalue ${P} ${p1}, ptr ${end}, 2`);
+      return;
+    }
+    if (op === OP.PISNULL) {
+      let a = this.val(f.a[i]);
+      if (!this.ptrIsThin(f, f.a[i])) a = this.ptrWord(a, 0);
+      this.line(`  ${dst} = icmp eq ptr ${a}, null`);
+      return;
+    }
+    if (op === OP.PTHIN) {
+      this.line(`  ${dst} = extractvalue ${P} ${this.val(f.a[i])}, 0`);
+      return;
+    }
+    if (op === OP.PLOAD || op === OP.PSTORE) {
+      const ad = this.ptrDeref(f, f.a[i], x);
+      const et = this.ty(t, '指针的目标');
+      if (op === OP.PLOAD) { this.line(`  ${dst} = load ${et}, ptr ${ad}`); return; }
+      this.line(`  store ${et} ${this.val(f.b[i])}, ptr ${ad}`);
+      // 这条指令的结果是"存进去的那个值"（另外三条腿也是）。回读一次而不是把操作数当结果：
+      // dst 必须由这条指令自己定义，SSA 里不能把别人的 %v 改名。
+      this.line(`  ${dst} = load ${et}, ptr ${ad}`);
+      return;
+    }
+    if (op === OP.PADD) {
+      const off = this.fresh();
+      this.line(`  ${off} = mul i64 ${this.val(f.b[i])}, ${x}`);
+      if (t === T_TPTR) {
+        this.line(`  ${dst} = getelementptr i8, ptr ${this.val(f.a[i])}, i64 ${off}`);
+        return;
+      }
+      // 走出块外不是错误（错误只在解引用处报），所以这里只动 addr 那一格，范围原样带着
+      const a = this.ptrWord(this.val(f.a[i]), 0);
+      const na = this.fresh();
+      this.line(`  ${na} = getelementptr i8, ptr ${a}, i64 ${off}`);
+      this.line(`  ${dst} = insertvalue ${P} ${this.val(f.a[i])}, ptr ${na}, 0`);
+      return;
+    }
+    // PSUB
+    if (this.ptrIsThin(f, f.a[i])) {
+      const ia = this.fresh();
+      const ib = this.fresh();
+      const d = this.fresh();
+      this.line(`  ${ia} = ptrtoint ptr ${this.val(f.a[i])} to i64`);
+      this.line(`  ${ib} = ptrtoint ptr ${this.val(f.b[i])} to i64`);
+      this.line(`  ${d} = sub i64 ${ia}, ${ib}`);
+      this.line(`  ${dst} = sdiv i64 ${d}, ${x}`);
+      return;
+    }
+    this.needPtr = true;
+    const p = this.val(f.a[i]);
+    const q = this.val(f.b[i]);
+    const w = [this.ptrWord(p, 0), this.ptrWord(p, 1), this.ptrWord(p, 2),
+      this.ptrWord(q, 0), this.ptrWord(q, 1), this.ptrWord(q, 2)];
+    this.line(`  ${dst} = call i64 @omni_psub(${w.map((s) => `ptr ${s}`).join(', ')}, i64 ${x})`);
+  }
+
+  /** 取 fat 指针的第 n 个字（0 = addr、1 = base、2 = end），回临时名。 */
+  ptrWord(p, n) {
+    const v = this.fresh();
+    this.line(`  ${v} = extractvalue { ptr, ptr, ptr } ${p}, ${n}`);
+    return v;
+  }
+
+  /** 解引用前的检查，回一个可以直接 load/store 的地址。fat 查空 + 查范围，thin 只查空。 */
+  ptrDeref(f, ref, size) {
+    const p = this.val(ref);
+    if (this.ptrIsThin(f, ref)) {
+      this.needTPtr = true;
+      const v = this.fresh();
+      this.line(`  ${v} = call ptr @omni_tchk(ptr ${p})`);
+      return v;
+    }
+    this.needPtr = true;
+    const a = this.ptrWord(p, 0);
+    const b = this.ptrWord(p, 1);
+    const e = this.ptrWord(p, 2);
+    const r = this.fresh();
+    this.line(`  ${r} = call ptr @omni_pchk(ptr ${a}, ptr ${b}, ptr ${e}, i64 ${size})`);
+    return r;
+  }
+
+  /** 一个指针操作数是 thin 还是 fat：看它那条指令的 `t`。指针不会从常量池来（空指针是
+   *  PNULL 一条指令），所以这里只认指令 ref —— 与 mir/interp.js 的同名助手同一条判据。 */
+  ptrIsThin(f, ref) {
+    if (ref === REF_NONE || isConstRef(ref)) return false;
+    return f.t[ref - REF_BIAS] === T_TPTR;
   }
 
   /** 记下用到的元素类型，返回助手名字的后缀。表外的报错 —— 缓冲只装 int/real。 */

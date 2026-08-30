@@ -22,7 +22,7 @@ import { typeKey } from '../hir/types.js';
 import { JS_ALL } from '../hir/js_abi.js';
 import {
   OP, REF_NONE, MirFunc, MirModule, mkType,
-  T_VOID, T_I64, T_F64, T_BOOL, T_STR, T_DYN, T_AGG, T_BUF, T_ARR,
+  T_VOID, T_I64, T_F64, T_BOOL, T_STR, T_DYN, T_AGG, T_BUF, T_ARR, T_PTR, T_TPTR,
   CVT_I2F, CVT_F2I, CVT_BOX,
 } from './ir.js';
 
@@ -94,6 +94,9 @@ class ToMir {
       case 'buf': return T_BUF;
       // 数组：同理，一个码。元素类型在 ANEW 的 aux 与 AGET/ASET/APOP 的 `t` 上
       case 'arr': return T_ARR;
+      // 指针：胖瘦是两个码（ir.js 的 T_PTR / T_TPTR），目标类型只在读写那两条的 `t` 上
+      case 'ptr': return T_PTR;
+      case 'tptr': return T_TPTR;
       // null 字面量：能赋给 class 引用、函数值与 dynamic，三者在 MIR 里都是「一个引用」
       case 'null': return T_AGG;
       default: return T_AGG;
@@ -507,6 +510,31 @@ class ToMir {
       case 'ArrPop':
         return f.emit(OP.APOP, this.ty(e.type), this.expr(e.arr), REF_NONE,
           this.aggNo(e.arr.type));
+      // 指针（ADR-0016）。步长一律在 aux 上；胖瘦看 `t`，所以这里不必再传一个标志。
+      case 'PtrNull': return f.emit(OP.PNULL, this.ty(e.type), REF_NONE, REF_NONE, 0);
+      case 'PtrNew': return f.emit(OP.PNEW, T_PTR, this.expr(e.count), REF_NONE, e.size);
+      case 'PtrIsNull':
+        return f.emit(OP.PISNULL, T_BOOL, this.expr(e.ptr), REF_NONE, 0);
+      case 'PtrThin': return f.emit(OP.PTHIN, T_TPTR, this.expr(e.ptr), REF_NONE, 0);
+      case 'PtrLoad':
+        return f.emit(OP.PLOAD, this.ty(e.type), this.expr(e.ptr), REF_NONE, e.size);
+      case 'PtrStore': {
+        const p = this.expr(e.ptr);
+        const v = this.expr(e.value);
+        return f.emit(OP.PSTORE, this.ty(e.type), p, v, e.size);
+      }
+      case 'PtrAdd': {
+        const p = this.expr(e.ptr);
+        return f.emit(OP.PADD, this.ty(e.ptr.type), p, this.expr(e.delta), e.size);
+      }
+      // 字段地址 = 步长 1 的 PADD（见 ir.js 里"刻意没有 PFIELD"那一段）
+      case 'PtrField':
+        return f.emit(OP.PADD, this.ty(e.ptr.type), this.expr(e.ptr),
+          this.mod.consts.int(e.off), 1);
+      case 'PtrSub': {
+        const a = this.expr(e.a);
+        return f.emit(OP.PSUB, T_I64, a, this.expr(e.b), e.size);
+      }
       default:
         throw new OmniError(`mir: 还没有处理的表达式 ${e.kind}`);
     }

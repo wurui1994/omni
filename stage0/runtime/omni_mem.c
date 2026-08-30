@@ -97,3 +97,50 @@ void *omni_grow(void *p, size_t oldBytes, size_t newBytes) {
 }
 
 #endif /* OMNI_NO_ARENA */
+
+/* 指针（ADR-0016）。声明与设计理由（含"真符号一律是平的"那一条）在 omni.h。
+ *
+ * 分配走 arena：这两条原生腿的指针是真地址，而 arena 的块是 malloc 出来的、到进程退出
+ * 才丢，所以"悬垂指针不可能"这条（jancy 的 type_ptr_data.rst）在批处理进程里自动成立 ——
+ * 不需要 GC 也不需要 free。
+ *
+ * 四条消息必须与另外三条腿逐字节相同（backend-js 的 prelude 与 interp/builtin.js 的
+ * $pnew/$pchk/$tchk/$psub），否则同一份 .sx 的诊断在腿之间分叉，tests/sexpr 的判据就废了。
+ */
+char *omni_pnew(int64_t count, int64_t size) {
+  if (count < 0) omni_errorf("pointer allocation count cannot be negative: %lld", (long long)count);
+  int64_t bytes = count * size;
+  char *a = omni_alloc_bytes(bytes);
+  memset(a, 0, (size_t)bytes);  /* 编译器在用户代码碰到之前把每一格清零 */
+  return a;
+}
+
+/* 向下取整的整除：另外三条腿的 $pchk 用 Math.floor，而 C 的 / 是向零截断。
+   两者只在"负数且除不尽"时不同（-4/8：floor 给 -1，截断给 0）—— 越界消息要逐字节相同，
+   所以这里补上 floor 的语义，而不是赌那种情形不出现。 */
+static int64_t omni_pfloordiv(int64_t a, int64_t b) {
+  int64_t q = a / b;
+  if ((a % b) != 0 && ((a < 0) != (b < 0))) q -= 1;
+  return q;
+}
+
+void *omni_pchk(char *a, char *b, char *e, int64_t size) {
+  if (a == 0) omni_error("null pointer dereference");
+  if (a < b || a + size > e) {
+    /* 按元素印，不印裸地址 */
+    omni_errorf("pointer out of bounds: %lld (range %lld)",
+                (long long)omni_pfloordiv(a - b, size),
+                (long long)omni_pfloordiv(e - b, size));
+  }
+  return a;
+}
+
+void *omni_tchk(char *a) {
+  if (a == 0) omni_error("null pointer dereference");
+  return a;
+}
+
+int64_t omni_psub(char *pa, char *pb, char *pe, char *qa, char *qb, char *qe, int64_t size) {
+  if (pb != qb || pe != qe) omni_error("pointer difference across different blocks");
+  return (pa - qa) / size;
+}

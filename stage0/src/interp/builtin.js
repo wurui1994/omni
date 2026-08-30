@@ -318,6 +318,83 @@ export function bufSet(a, i, v) {
   return v;
 }
 
+/* ---------------------------------------------------------------- 指针
+ * ADR-0016。这条腿是**模拟指针**：一个 ArrayBuffer 当 arena，"地址"就是里面的偏移。
+ * 与 backend-js 的 prelude 是**同一套算法**（同样从 8 起、同样按 8 对齐、同样倍增），
+ * 但那份是拼进产物里的字符串、这份是宿主函数，没法共用一份代码 —— 所以四条错误消息
+ * 逐字节抄过来，tests/sexpr 那一轴的判据（五条腿逐字节相同）就是在盯这件事。
+ *
+ * 地址从 8 而不是 0 起：0 留给空指针，这样 `p == null` 只是比一个数。
+ *
+ * fat 指针的宿主表示是三元数组 `[addr, base, end]`（end 右开）。它是值类型，
+ * 但 copyOf 不拷它 —— 因为这里任何操作（padd/pfield）都**产生新数组**、从不原地改，
+ * 共享同一个数组和拷一份不可区分。thin 指针就是一个数。
+ */
+let ptrMem = null;
+let ptrDv = null;
+let ptrTop = 8;
+
+function ptrGrow(need) {
+  let cap = ptrMem.byteLength;
+  while (cap < need) cap *= 2;
+  if (cap === ptrMem.byteLength) return;
+  const nb = new ArrayBuffer(cap);
+  new Uint8Array(nb).set(new Uint8Array(ptrMem));
+  ptrMem = nb;
+  ptrDv = new DataView(ptrMem);
+}
+
+export function ptrNew(count, size) {
+  const n = Number(count);
+  if (n < 0) rtError('pointer allocation count cannot be negative: ' + n);
+  if (ptrMem === null) { ptrMem = new ArrayBuffer(1 << 16); ptrDv = new DataView(ptrMem); }
+  const bytes = n * size;
+  ptrGrow(ptrTop + bytes);
+  const a = ptrTop;
+  ptrTop += bytes;
+  if (ptrTop % 8 !== 0) ptrTop += 8 - ptrTop % 8;
+  new Uint8Array(ptrMem, a, bytes).fill(0);  /* 用户代码碰到之前每一格都是零 */
+  return [a, a, a + bytes];
+}
+
+/** fat 的解引用检查：查空、查范围，回地址。越界按**元素**报（裸地址在两套实现里不同）。 */
+export function ptrChk(p, size) {
+  if (p[0] === 0) rtError('null pointer dereference');
+  if (p[0] < p[1] || p[0] + size > p[2]) {
+    rtError('pointer out of bounds: ' + Math.floor((p[0] - p[1]) / size)
+      + ' (range ' + Math.floor((p[2] - p[1]) / size) + ')');
+  }
+  return p[0];
+}
+
+/** thin 的解引用检查：只有查空 —— 范围已经丢了，这就是它要写在 (unsafe …) 里的理由。 */
+export function ptrTChk(a) {
+  if (a === 0) rtError('null pointer dereference');
+  return a;
+}
+
+export function ptrLoad(kind, a) {
+  if (kind === 'int') return ptrDv.getBigInt64(a, true);
+  if (kind === 'real') return ptrDv.getFloat64(a, true);
+  return ptrDv.getUint8(a) !== 0;
+}
+
+export function ptrStore(kind, a, v) {
+  if (kind === 'int') ptrDv.setBigInt64(a, W(v), true);
+  else if (kind === 'real') ptrDv.setFloat64(a, v, true);
+  else ptrDv.setUint8(a, v ? 1 : 0);
+  return v;
+}
+
+export function ptrAdd(p, k, size) {
+  return [p[0] + Number(k) * size, p[1], p[2]];
+}
+
+export function ptrSub(p, q, size) {
+  if (p[1] !== q[1] || p[2] !== q[2]) rtError('pointer difference across different blocks');
+  return BigInt((p[0] - q[0]) / size);
+}
+
 /* ---------------------------------------------------------------- 数组
  * 门槛 2 第四刀：可增长的引用语义数组（asy 的 `T[]`）。宿主表示同样是普通数组 ——
  * push/pop 都是现成的，别名天然共享。零值由**调用方**给（OIR 的 ArrNew 挂着一个零值
@@ -477,6 +554,10 @@ export function zeroOf(t, I) {
     case 'arr': return [];
     case 'dict': return new Map();
     case 'set': return new Set();
+    // 指针的零值是空指针（ADR-0016）。fat 是三个零，thin 是一个零 —— 这一条是
+    // 结构体的指针字段要的：`p == null` 在两条腿上都得是"比一个数"。
+    case 'ptr': return [0, 0, 0];
+    case 'tptr': return 0;
     case 'struct': {
       const def = I.structs.get(t.name);
       const out = {};

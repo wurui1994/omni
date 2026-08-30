@@ -800,6 +800,12 @@ class CEmitter {
       default: throw new Error(`c.box: ${from.k}`);
     }
   }
+  /** 解引用前的检查，回一个可以直接强转的地址。fat 查空 + 查范围，thin 只查空
+   *  —— thin 把范围丢掉了，这也是它必须写在 (unsafe …) 里的原因（ADR-0016）。 */
+  ptrChk(p, size) {
+    return p.type.k === 'tptr'
+      ? `omni_tchk(${this.expr(p)})` : `omni_pderef(${this.expr(p)}, ${size})`;
+  }
   expr(e) {
     switch (e.kind) {
       case 'Const': return this.constant(e);
@@ -867,6 +873,27 @@ class CEmitter {
         return `${cArrOps(this.noteVec(e.arr.type))}_push(${this.expr(e.arr)}, ${this.expr(e.value)})`;
       case 'ArrPop':
         return `${cArrOps(this.noteVec(e.arr.type))}_pop(${this.expr(e.arr)})`;
+      // 指针（ADR-0016）。真指针：fat 是 omni_ptr（三个字按值传），thin 是 char*。
+      // 读写只有这两处按目标类型强转 —— 这就是"运行时里只有一个 omni_ptr"的理由。
+      // 范围检查回地址，所以读是一行 `*(int64_t *)omni_pchk(p, 8)`。
+      case 'PtrNull': return e.type.k === 'tptr' ? '((char *)0)' : 'omni_pnull()';
+      case 'PtrNew': return `omni_pnew_fat(${this.expr(e.count)}, ${e.size})`;
+      case 'PtrIsNull': return e.ptr.type.k === 'tptr'
+        ? `(${this.expr(e.ptr)} == 0)` : `omni_pisnull(${this.expr(e.ptr)})`;
+      case 'PtrThin': return `(${this.expr(e.ptr)}).a`;
+      case 'PtrLoad':
+        return `(*(${cTypeName(e.type)} *)${this.ptrChk(e.ptr, e.size)})`;
+      case 'PtrStore':
+        return `(*(${cTypeName(e.type)} *)${this.ptrChk(e.ptr, e.size)} = ${this.expr(e.value)})`;
+      case 'PtrAdd': return e.ptr.type.k === 'tptr'
+        ? `(${this.expr(e.ptr)} + (${this.expr(e.delta)}) * ${e.size})`
+        : `omni_padd(${this.expr(e.ptr)}, ${this.expr(e.delta)}, ${e.size})`;
+      case 'PtrField': return e.ptr.type.k === 'tptr'
+        ? `(${this.expr(e.ptr)} + ${e.off})`
+        : `omni_padd(${this.expr(e.ptr)}, ${e.off}, 1)`;
+      case 'PtrSub': return e.a.type.k === 'tptr'
+        ? `((${this.expr(e.a)} - ${this.expr(e.b)}) / ${e.size})`
+        : `omni_pdiff(${this.expr(e.a)}, ${this.expr(e.b)}, ${e.size})`;
       case 'Field': {
         const obj = this.expr(e.object);
         // class 是引用，可能为 null：显式检查，避免"段错误 vs 异常"的跨后端分叉

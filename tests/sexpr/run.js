@@ -6,7 +6,7 @@
 // （栈机、位宽、br 层数）都在那份降级里；这里降的是**语言中立**的核心方言，
 // 而 mini 这门语言除了 tests/glr/grammars/mini.grammar 之外没有任何实现文件。
 //
-// 四件事：
+// 五件事：
 //   1. **方言本身能跑**：cases/*.sx 在 run / run-c / interp / interp --mir / run-llvm
 //      五个执行器上逐字节相同，且等于 .expected。五方一致比对上期望值更强 ——
 //      期望值只钉住答案，多方一致同时钉住"哪一条腿偏了"。
@@ -16,6 +16,8 @@
 //      哪天有人为了让 mini 跑通去 stage0/src 里加个特例，这条会红。
 //   4. **bad/ 里的必须被拒绝，且拒在正确的理由上**：类型不推导只检查、条件不真值化、
 //      缺入口 —— 这些是刻意划的边界，不是没做完。
+//   5. **rt/ 里的必须在五条腿上报同一句话**：运行期错误的消息在五条腿上各有一份实现，
+//      而它是"两套指针实现"之间唯一还能观测到的东西（ADR-0016）。
 //
 //   node tests/sexpr/run.js
 //   node tests/sexpr/run.js numeric
@@ -154,6 +156,30 @@ for (const f of readdirSync(join(here, 'bad')).filter((x) => x.endsWith('.sx')).
     continue;
   }
   ok(`bad/${name} [拒绝：${exp.trim()}]`);
+}
+
+// ------------------------------------------------- 5. rt/：运行期错误，五条腿同一句话
+//
+// 与 bad/ 的差别是"什么时候错"：bad/ 是编译期拒绝（一条腿就问得清），rt/ 是**跑起来**
+// 才报的错，而错误消息在五条腿上各有一份实现（prelude 的 $rt_error、interp/builtin.js
+// 的 rtError、omni_*.c 的 omni_error/omni_errorf）。指针那一刀（ADR-0016）之后这一组
+// 才立起来：那三条消息是"两套指针实现"之间唯一还能观测到的东西，逐字节相同不是巧合，
+// 是判据 —— 有人在某条腿上把消息改顺口了，这里立刻红。
+for (const f of readdirSync(join(here, 'rt')).filter((x) => x.endsWith('.sx')).sort()) {
+  if (!want(f)) continue;
+  const name = basename(f, '.sx');
+  const exp = read(join(here, 'rt', `${name}.expected`));
+  if (exp === null) { no(`rt/${name}`, `    缺 ${name}.expected`); continue; }
+  const bad = [];
+  for (const leg of LEGS) {
+    const r = cmd(leg.args(join(here, 'rt', f)));
+    if (r.code === 0) { bad.push(`    ${leg.tag} 居然跑完了 —— 这里该报运行期错误`); continue; }
+    if (!r.err.includes(exp.trim())) {
+      bad.push(`    ${leg.tag} 的消息不对\n      want: ${JSON.stringify(exp.trim())}\n      got:  ${JSON.stringify(r.err.trim())}`);
+    }
+  }
+  if (bad.length === 0) ok(`rt/${name} [五条腿同一句：${exp.trim()}]`);
+  else no(`rt/${name}`, bad.join('\n'));
 }
 
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);

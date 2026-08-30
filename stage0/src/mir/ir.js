@@ -52,7 +52,10 @@ export const T_F64 = 2;
 export const T_BOOL = 3;
 export const T_STR = 4;   // Omni string：UTF-8 字节序列（ADR-0005）
 export const T_DYN = 5;   // omni_dyn：16 字节聚合，MIR 里不是特例
-export const T_PTR = 6;   // ptr(T, addrspace)：addrspace 在 aux 的高 4 位
+export const T_PTR = 6;   // fat 指针（ADR-0016）：三个字 {addr, base, end}，一个码管所有目标类型 ——
+                          // 目标只在 PLOAD/PSTORE 的 `t` 上出现，与缓冲同一条理由。
+                          // （原来这一格写的是"ptr(T, addrspace)"，那时没有指针，是占位。
+                          //  addrspace 真要用的时候再另立一格：模拟指针这一路根本没有它。）
 export const T_AGG = 7;   // struct/class/enum/容器/函数值：身份在 aux
 export const T_BUF = 8;   // 缓冲：{长度, 指针}（ADR-0014 门槛 7）。元素类型**不在这个码里** ——
                           // 指针在 LLVM 里早就是不透明的，元素只在 BGET/BSET 的 `t` 上出现，
@@ -61,11 +64,15 @@ export const T_ARR = 9;   // 可增长数组：**一个指针**（长度会变�
                           // 元素类型同样不在这个码里：种类在 AGET/ASET/APOP 的 `t` 上，
                           // **完整的**元素类型（含 struct/class 的身份）在 aux 指的类型池项
                           // 的 `oir.elem` 上 —— 第十八刀加的，见 OPS 里数组那一段。
+export const T_TPTR = 10; // thin 指针（ADR-0016）：**一个字**。与 T_PTR 分成两个码而不是在 aux
+                          // 上加一位，因为它们在 LLVM 那条腿上是真正不同的类型（三字结构体
+                          // vs 一个 i8*），而 aux 已经被步长占了。指针的胖瘦于是从 `t` 就看得出，
+                          // 不必回头查操作数是怎么产生的。
 export const T_KIND_BITS = 5;
 export const T_KIND_MASK = 31;
 export const T_KIND_SPAN = 32;   // = 2^T_KIND_BITS。位运算不可用，见 mkType
 
-export const TYPE_NAMES = ['void', 'i64', 'f64', 'bool', 'str', 'dyn', 'ptr', 'agg', 'buf', 'arr'];
+export const TYPE_NAMES = ['void', 'i64', 'f64', 'bool', 'str', 'dyn', 'ptr', 'agg', 'buf', 'arr', 'tptr'];
 
 /**
  * `t` 字段：种类 + 向量宽度（1 = 标量）。宽度必须是 2 的幂。
@@ -215,6 +222,20 @@ const OPS = [
   ['ASET', 'r', 'p', 'n'],      // a = 数组，池 = [下标, 值]；t = 元素类型
   ['APUSH', 'r', 'r', 'n'],     // a = 数组，b = 值；t = 元素类型
   ['APOP', 'r', '-', 'n'],      // a = 数组；t = 元素类型
+
+  // ---- 指针（ADR-0016）。`t` 是 T_PTR（fat，三个字）或 T_TPTR（thin，一个字）；
+  // 读写那两条的 `t` 是**目标**类型（= 结果类型），与缓冲同一条路数。
+  // **aux 一律是字节步长**，不放胖瘦（胖瘦在 `t` 上）。
+  // 刻意没有 PFIELD：字段地址就是 `PADD(p, 常量偏移, 步长=1)` —— 多一条 op 就多一处
+  // 两个消费者可能各自解释的地方，而这条恒等式在两条腿上都是同一句加法。
+  ['PNEW', 'r', '-', 'n'],      // a = 个数，t = T_PTR，aux = 元素字节数（按它算总字节并清零）
+  ['PNULL', '-', '-', '-'],     // 空指针，t = T_PTR 或 T_TPTR
+  ['PISNULL', 'r', '-', '-'],   // a = 指针，t = T_BOOL（不解引用，所以不检查范围）
+  ['PTHIN', 'r', '-', '-'],     // a = fat 指针，t = T_TPTR（把范围丢掉：只许在 unsafe 里）
+  ['PLOAD', 'r', '-', 'n'],     // a = 指针，t = 目标类型，aux = 步长（= 检查用的字节数）
+  ['PSTORE', 'r', 'r', 'n'],    // a = 指针，b = 值，t = 目标类型，aux = 步长
+  ['PADD', 'r', 'r', 'n'],      // a = 指针，b = 元素个数（i64），aux = 步长；t 跟着 a
+  ['PSUB', 'r', 'r', 'n'],      // a、b = 同一块里的两个指针，aux = 步长，t = T_I64
 ];
 
 /** opcode 常量：`OP.ADD` 等。加 op 只改 OPS 一行。 */

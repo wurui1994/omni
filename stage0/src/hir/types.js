@@ -267,6 +267,10 @@ export function cTypeName(t) {
     // 聚合元素（向量）没法单态在运行时里（那个结构体是逐形状生成在 .c 里的），
     // 走按字节的 `omni_arr_blob`，元素的 load/store 由两条腿自己发。
     case 'arr': return arrIsBlob(t.elem) ? 'omni_arr_blob' : `omni_arr_${arrSuffix(t.elem)}`;
+    // 指针（ADR-0016）。这条腿是**真指针**：fat 是运行时那一个三字段结构体（不逐目标
+    // 类型生成 —— 读写那两处本来就要按类型强转），thin 就是 char*。
+    case 'ptr': return 'omni_ptr';
+    case 'tptr': return 'char *';
     default: throw new Error(`cTypeName: ${t.k}`);
   }
 }

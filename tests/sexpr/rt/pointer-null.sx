@@ -1,0 +1,6 @@
+;; 空指针的解引用。`pnull` 出来的那个在两套实现里都是"三个零"，所以 `p == null`
+;; 只是比一个数（ADR-0016）—— 这里要的是那句消息在五条腿上一模一样。
+(module
+  (main
+    (let p (ptr real) (pnull (ptr real)))
+    (print (pload (var p)))))

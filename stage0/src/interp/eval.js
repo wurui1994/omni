@@ -19,7 +19,7 @@
 
 import { OmniError } from '../source/diag.js';
 import { stderr, wrapFn, callFnValue } from '../host/native.js';
-import { callBuiltin, zeroOf, newInstance, flushOut, failRt, jsCallFn, vecHsum, bufNew, bufGet, bufSet, arrNew, arrLen, arrGet, arrSet, arrPush, arrPop, InterpFail, InterpUncaught } from './builtin.js';
+import { callBuiltin, zeroOf, newInstance, flushOut, failRt, jsCallFn, vecHsum, bufNew, bufGet, bufSet, arrNew, arrLen, arrGet, arrSet, arrPush, arrPop, ptrNew, ptrChk, ptrTChk, ptrLoad, ptrStore, ptrAdd, ptrSub, InterpFail, InterpUncaught } from './builtin.js';
 
 // 语句的结果：正常走完 / break / continue / return。刻意不用异常做控制流 —— C 侧的
 // throw 是"待决错误标志 + 普通跳转"（ADR-0007），用信号值两个宿主上形状一致。
@@ -219,6 +219,12 @@ class Interp {
     return v;
   }
 
+  /** 解引用前的检查，回一个偏移。fat 查空 + 查范围，thin 只查空（范围已经丢了）。 */
+  ptrChk(p, size, env, frame) {
+    const v = this.eval(p, env, frame);
+    return p.type.k === 'tptr' ? ptrTChk(v) : ptrChk(v, size);
+  }
+
   /** struct / enum / vec 是值类型，深拷贝；其余（含 class）是引用，原样 */
   copyOf(t, v) {
     if (t === undefined || v === null || v === undefined) return v;
@@ -323,6 +329,35 @@ class Interp {
         return arrPush(a, this.eval(e.value, env, frame), e.arr.type.elem.k === 'vec');
       }
       case 'ArrPop': return arrPop(this.eval(e.arr, env, frame));
+      // 指针（ADR-0016）。这条腿与 backend-js 共用同一套模拟：宿主表示 fat = [addr, base, end]、
+      // thin = 一个数。求值顺序在这里显式写出（先 ptr 后 value），因为 C 侧的
+      // `*(T*)omni_pchk(p, n) = v` 里那两个子表达式的顺序是未定义的 —— 靠这里钉死。
+      case 'PtrNull': return e.type.k === 'tptr' ? 0 : [0, 0, 0];
+      case 'PtrNew': return ptrNew(this.eval(e.count, env, frame), e.size);
+      case 'PtrIsNull': {
+        const p = this.eval(e.ptr, env, frame);
+        return (e.ptr.type.k === 'tptr' ? p : p[0]) === 0;
+      }
+      case 'PtrThin': return this.eval(e.ptr, env, frame)[0];
+      case 'PtrLoad': return ptrLoad(e.type.k, this.ptrChk(e.ptr, e.size, env, frame));
+      case 'PtrStore': {
+        const a = this.ptrChk(e.ptr, e.size, env, frame);
+        return ptrStore(e.type.k, a, this.eval(e.value, env, frame));
+      }
+      case 'PtrAdd': {
+        const p = this.eval(e.ptr, env, frame);
+        const k = this.eval(e.delta, env, frame);
+        return e.ptr.type.k === 'tptr' ? p + Number(k) * e.size : ptrAdd(p, k, e.size);
+      }
+      case 'PtrField': {
+        const p = this.eval(e.ptr, env, frame);
+        return e.ptr.type.k === 'tptr' ? p + e.off : ptrAdd(p, BigInt(e.off), 1);
+      }
+      case 'PtrSub': {
+        const a = this.eval(e.a, env, frame);
+        const b = this.eval(e.b, env, frame);
+        return e.a.type.k === 'tptr' ? BigInt((a - b) / e.size) : ptrSub(a, b, e.size);
+      }
       case 'JsGlobal': return this.globals.get(e.name);
       case 'GlobalRef': return this.globals.get(e.name);
       case 'Field': {

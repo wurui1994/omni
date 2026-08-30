@@ -206,6 +206,50 @@ void omni_print_real(double v);
 void omni_print_bool(bool v);
 void omni_print_string(omni_str v);
 
+/* 指针（ADR-0016）。这两条原生腿用**真指针** —— 与 JS/解释器那三条的 arena 模拟是
+   两套实现、一套语义。选真指针的理由是 FFI：arena 里的偏移递不出去给外面的 C 库。
+
+   fat 指针是三个字（addr / base / end，end 右开），**一个**类型管所有目标类型：
+   逐目标类型各生一个结构体在 C 里没有收益，读写那两处本来就要按类型强转。
+   thin 指针就是 char*。
+
+   **真符号一律是平的**（只收发 char* 与 int64_t，不按值收发 omni_ptr、也不返回它）。
+   理由：run-llvm 那条腿要调同一批符号，而"24 字节结构体怎么传"是平台 ABI 的事
+   （x86-64 与 aarch64 上都走内存，返回还要 sret）—— 让那条腿去猜就是在赌。
+   平签名之后，两条原生腿调的是同一个符号，不可能分叉；omni_ptr 只在 C 这一侧当
+   便利类型用，包在下面那几个 static inline 里。
+
+   omni_pnew 只回**块首**：刚分配出来的块 addr == base、end == base + count*size，
+   三个字调用方自己就能拼出来，于是它不必返回聚合。
+
+   范围检查回**地址**，于是读写是一行：`*(int64_t*)omni_pderef(p, 8)`。
+   越界消息按**元素**印（不印裸地址：地址在两套实现里不一样，ADR-0016 的纪律）。
+   走出块外不报错，只有解引用才报 —— 与 jancy 一致（type_ptr_data.rst）。 */
+char *omni_pnew(int64_t count, int64_t size);
+void *omni_pchk(char *a, char *b, char *e, int64_t size);
+void *omni_tchk(char *a);
+int64_t omni_psub(char *pa, char *pb, char *pe, char *qa, char *qb, char *qe, int64_t size);
+
+typedef struct { char *a, *b, *e; } omni_ptr;
+
+static inline omni_ptr omni_pnull(void) { omni_ptr p = { 0, 0, 0 }; return p; }
+static inline bool omni_pisnull(omni_ptr p) { return p.a == 0; }
+static inline omni_ptr omni_padd(omni_ptr p, int64_t k, int64_t size) {
+  omni_ptr r = { p.a + k * size, p.b, p.e };
+  return r;
+}
+static inline omni_ptr omni_pnew_fat(int64_t count, int64_t size) {
+  char *b = omni_pnew(count, size);
+  omni_ptr r = { b, b, b + count * size };
+  return r;
+}
+static inline void *omni_pderef(omni_ptr p, int64_t size) {
+  return omni_pchk(p.a, p.b, p.e, size);
+}
+static inline int64_t omni_pdiff(omni_ptr p, omni_ptr q, int64_t size) {
+  return omni_psub(p.a, p.b, p.e, q.a, q.b, q.e, size);
+}
+
 /* omni_conv.c */
 int64_t omni_int_of_string(omni_str s);
 double omni_real_of_string(omni_str s);

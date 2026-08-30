@@ -1,0 +1,7 @@
+;; 越界在**解引用**处报，不在算术处 —— jancy 的 type_ptr_data.rst 那段 `p += i; *p = 40;`。
+;; 消息按**元素**印（5 而不是 40 字节），因为裸地址在两套实现里不一样（ADR-0016 的纪律）。
+(module
+  (main
+    (let p (ptr int) (pnew (ptr int) (int 2)))
+    (let q (ptr int) (padd (var p) (int 5)))
+    (print (pload (var q)))))

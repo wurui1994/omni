@@ -106,11 +106,71 @@ JS 那条腿（arena）量过的：`tests/sexpr/pending/25-pointers.sx` 十九�
 - 运行期两条错：`pointer out of bounds: 5 (range 2)`（**按元素**印，不印裸地址）、
   `null pointer dereference`
 
-**这份 case 现在放在 `tests/sexpr/pending/` 而不是 `cases/`**：`cases/` 那一轴的判据是
-"五条腿逐字节相同"，而 C / LLVM / 两个解释器还没有指针。等那三步做完再挪进去——
-在此之前把它放进 `cases/` 会让那一轴红着，那是自欺。
+**这份 case 后来挪进了 `cases/`**（见下面第二刀）。第一刀写它的时候它在
+`tests/sexpr/pending/`，理由是 `cases/` 那一轴的判据是"五条腿逐字节相同"，而当时
+C / LLVM / 两个解释器还没有指针 —— 在那之前把它放进 `cases/` 会让那一轴红着，那是自欺。
 
 编译期那一条已经进轴了：`tests/sexpr/bad/thin-outside-unsafe.sx`（56/0）。
+
+### 第二刀：另外四条腿 —— 平签名的真符号，与"两套实现只剩三句话可比"
+
+分步 3、4、5、6 一次做完，因为它们其实是同一个问题的四个面。落地的顺序与量出来的东西：
+
+1. **C 那条腿（真指针）**：`omni.h` 里 `omni_ptr` 是三字段结构体 `{a, b, e}`，`omni_mem.c`
+   里四个真符号。分配走 arena —— 那些块是 malloc 出来的、到进程退出才丢，所以"悬垂指针
+   不可能"（`type_ptr_data.rst`）在批处理进程里自动成立，不需要 GC 也不需要 free。
+2. **两个解释器**：`interp/builtin.js` 里一份 arena（`ptrNew`/`ptrChk`/`ptrTChk`/`ptrLoad`/
+   `ptrStore`/`ptrAdd`/`ptrSub`），OIR 解释器与 MIR 解释器**共用这一份**。
+   MIR 那边加了两个类型码 `T_PTR` / `T_TPTR` 与八条 op（`PNEW`/`PNULL`/`PISNULL`/`PTHIN`/
+   `PLOAD`/`PSTORE`/`PADD`/`PSUB`）。
+3. **LLVM 那条腿**：fat 是**一等聚合值** `{ptr, ptr, ptr}`，靠 `insertvalue`/`extractvalue`
+   拆装。结构体那边走句柄的理由（`FLDSET` 要就地改）在这里不成立 —— 指针是值类型，
+   任何操作都产生新值。
+4. **`cases/25-pointers.sx` 挪进轴**（十九格，五条腿逐字节相同），另加一组新的 `rt/`。
+
+**这一刀真正的发现是第 3 步逼出来的一次返工**：`omni_pnew` 原先返回 `omni_ptr`、
+`omni_pchk`/`omni_psub` 原先按值收 `omni_ptr`。C 那条腿这样写没问题，但 LLVM 那条腿要调
+**同一批符号**，而"24 字节结构体怎么传"是平台 ABI 的事（x86-64 与 aarch64 上都走内存，
+返回还要 sret）—— 让那条腿去猜就是在赌。于是改成：
+
+> **真符号一律是平的**（只收发 `char *` 与 `int64_t`）。`omni_pnew` 只回**块首**：刚分配
+> 出来的块 `addr == base`、`end == base + count*size`，三个字调用方自己拼得出来，于是它
+> 不必返回聚合。`omni_ptr` 退回 C 这一侧当便利类型，包在 `omni_pnew_fat` / `omni_pderef` /
+> `omni_pdiff` 三个 `static inline` 里。
+
+这条纪律与数组那六条同源（"run-c 与 run-llvm 调同一个符号，所以越界消息不可能分叉"），
+只是数组那边的签名天生是平的，指针这边要专门捏平。
+
+另外两处量出来的细节：
+
+- **`Math.floor` 与 C 的 `/` 不一样**。越界消息里的元素下标是 `(addr - base) / size`，
+  JS 那三条腿用 `Math.floor`，而 C 的 `/` 向零截断 —— 只在"负数且除不尽"时分叉
+  （`-4/8`：floor 给 −1，截断给 0）。`omni_mem.c` 里补了一个 `omni_pfloordiv`，
+  而不是赌那种情形不出现。
+- **`PSTORE` 在 LLVM 里要回读一次**。这条指令的结果是"存进去的那个值"（另外四条腿都是），
+  但 SSA 里 `dst` 必须由这条指令自己定义，不能把操作数改个名字当结果。所以是
+  `store` 之后再 `load` 一次 —— 那块内存是我们自己的、非 volatile，opt 会把它折掉。
+- **`PFIELD` 在 MIR 里不存在**。字段地址就是"步长 1 的 `PADD` + 一个常量偏移"，
+  多一条 op 就多一处两个消费者可能各自解释的地方。
+
+**新立的一组轴：`tests/sexpr/rt/`**。与 `bad/` 的差别是"什么时候错"：`bad/` 是编译期
+拒绝（一条腿就问得清），`rt/` 是跑起来才报的错，而那句话在五条腿上**各有一份实现**
+（`prelude.js` 的 `$rt_error`、`interp/builtin.js` 的 `rtError`、`omni_error.c` 的
+`omni_error`/`omni_errorf`）。指针这一刀之后这一组才立得起来 —— 那三句消息是两套指针
+实现之间**唯一还能观测到的东西**，逐字节相同不是巧合，是判据。现在两条：
+`pointer out of bounds: 5 (range 2)`、`null pointer dereference`。
+
+跑过的轴：`tests/sexpr/run.js` **59 passed, 0 failed**（56 → 59：cases 多一份、rt 多两份）。
+另外单独对过三处：`25-pointers.sx` 在五条腿上都是同一行十九个值；两条运行期错误在五条腿上
+逐字节相同；`run-c` 在改成平签名前后输出没变。
+
+**跳过的轴**（照旧，「不要浪费时间在无意义的全量上面了」）：`tests/asy/run.js` 的五条腿、
+EPS 全量、`sweep.js`、`svg.js`、自举。这一刀一行 asy 的代码都没动，那几条轴问不出新东西。
+`tests/jit` 也没跑 —— `run-jit` 要 libLLVM，而这一刀的 LLVM 那条腿走的是 `clang` 那条路。
+
+**还差什么**：分步 7（`frontend-jnc/` 与 `jnc.grammar`）与 8（`tests/jnc/`）。
+第一刀的门槛那句话——"一个 `.jnc` 里 `struct` + `int*` + 指针算术 + 越界报错，在五条腿上
+给同一个答案"——现在方言这一侧已经全部就位，缺的只有前端。
 
 ## 后果与代价
 

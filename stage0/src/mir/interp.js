@@ -27,13 +27,14 @@ import {
   applyBuiltin, zeroOf, newInstance, flushOut, failRt, jsCallFn,
   InterpFail, InterpUncaught, binOp, cmpOp, vecBinOp, bufNew, bufGet, bufSet,
   arrNew, arrLen, arrGet, arrSet, arrPush, arrPop, listGet, listSet, dictGet, dynTag, W,
+  ptrNew, ptrChk, ptrTChk, ptrLoad, ptrStore, ptrAdd, ptrSub,
 } from '../interp/builtin.js';
 import { JS_ALL } from '../hir/js_abi.js';
 import { lowerToMir } from './from_oir.js';
 import { verifyMir } from './verify.js';
 import {
   OP, OP_NAMES, REF_NONE, REF_BIAS, isConstRef, typeKind, typeLanes,
-  T_I64, T_F64, T_STR, T_DYN, CVT_I2F, CVT_BOX,
+  T_I64, T_F64, T_STR, T_DYN, T_TPTR, CVT_I2F, CVT_BOX,
 } from './ir.js';
 
 /** 常量池条目 -> 宿主值。int 是 BigInt（ADR-0005 的 i64），real 是 number。 */
@@ -129,6 +130,14 @@ class MirInterp {
     const ty = this.mir.types[n];
     if (ty === undefined || ty.kind !== 'arr') return false;
     return ty.oir.elem.k === 'vec';
+  }
+
+  /** 一个指针操作数是 thin 还是 fat：看它那条指令的 `t`（ADR-0016 把胖瘦放在类型码上，
+   *  正是为了这一问能在**编译期**答完 —— 闭包里再问就是每次解引用都多一次查表）。
+   *  指针不会从常量池来（空指针是 PNULL 一条指令），所以这里只认指令 ref。 */
+  ptrIsThin(f, ref) {
+    if (ref === REF_NONE || isConstRef(ref)) return false;
+    return f.t[ref - REF_BIAS] === T_TPTR;
   }
 
   /** struct / enum 是值类型，深拷贝；其余（含 class）是引用。与 eval.js 的 copyOf 同一套。 */
@@ -412,6 +421,68 @@ class MirInterp {
       case OP.APOP: {
         const a = rd(f.a[i]);
         return (F) => { F.v[i] = arrPop(a(F)); return next; };
+      }
+      // 指针（ADR-0016）。同样走 interp/builtin.js 那一份 —— 两个解释器与 backend-js
+      // 的 prelude 是三处**同一套算法**，三条错误消息因此逐字节相同。
+      // 胖瘦看 `t`（T_TPTR 是 thin），步长在 aux 上。
+      case OP.PNEW: {
+        const c = rd(f.a[i]);
+        return (F) => { F.v[i] = ptrNew(c(F), x); return next; };
+      }
+      case OP.PNULL: {
+        const thin = t === T_TPTR;
+        return (F) => { F.v[i] = thin ? 0 : [0, 0, 0]; return next; };
+      }
+      case OP.PISNULL: {
+        const p = rd(f.a[i]);
+        const thin = this.ptrIsThin(f, f.a[i]);
+        return (F) => { const v = p(F); F.v[i] = (thin ? v : v[0]) === 0; return next; };
+      }
+      case OP.PTHIN: {
+        const p = rd(f.a[i]);
+        return (F) => { F.v[i] = p(F)[0]; return next; };
+      }
+      case OP.PLOAD: {
+        const p = rd(f.a[i]);
+        const kind = kindOf(t) === 'other' ? 'bool' : kindOf(t);
+        const thin = this.ptrIsThin(f, f.a[i]);
+        return (F) => {
+          const v = p(F);
+          F.v[i] = ptrLoad(kind, thin ? ptrTChk(v) : ptrChk(v, x));
+          return next;
+        };
+      }
+      case OP.PSTORE: {
+        const p = rd(f.a[i]);
+        const v = rd(f.b[i]);
+        const kind = kindOf(t) === 'other' ? 'bool' : kindOf(t);
+        const thin = this.ptrIsThin(f, f.a[i]);
+        return (F) => {
+          const q = p(F);
+          F.v[i] = ptrStore(kind, thin ? ptrTChk(q) : ptrChk(q, x), v(F));
+          return next;
+        };
+      }
+      case OP.PADD: {
+        const p = rd(f.a[i]);
+        const k = rd(f.b[i]);
+        const thin = t === T_TPTR;
+        return (F) => {
+          const q = p(F);
+          F.v[i] = thin ? q + Number(k(F)) * x : ptrAdd(q, k(F), x);
+          return next;
+        };
+      }
+      case OP.PSUB: {
+        const a = rd(f.a[i]);
+        const b = rd(f.b[i]);
+        const thin = this.ptrIsThin(f, f.a[i]);
+        return (F) => {
+          const p = a(F);
+          const q = b(F);
+          F.v[i] = thin ? BigInt((p - q) / x) : ptrSub(p, q, x);
+          return next;
+        };
       }
       default:
         return this.step3(f, i, rd, rdArgs, readAll, I);
