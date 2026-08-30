@@ -1,0 +1,98 @@
+// 多维数组（ADR-0016 第十九刀）：`int a[10][20]` 是 decl_simple.rst 里那个例子本身
+// （"This declares a two-dimensional array of integers (10 rows and 20 columns)"）。
+//
+// 落地靠的是第十八刀那格方言（`(ptr (blk T N))`）加上这一层换表示：一格数组里躺的不再是
+// "一条指向 N 格元素的指针"，而是**一整块的地址**。于是 `a[i]` 是块里的第 i 格（它自己又是
+// 一块 `int[20]`，不是一个值 —— 所以那一格的 code 就是地址，与结构体同一档），退化成
+// `int*` 是方言的一句 `(pelem …)`。声明符的方括号要**从右往左**套：`int a[10][20]` 的元素
+// 是 `int[20]`。
+//
+// 期望输出的出处：**C**，下面这一份 `cc -O0` 编出来的程序，逐字节相同。
+//
+//   #include <stdio.h>
+//   long long sum2(long long* p, long long n) {
+//       long long s = 0, i = 0;
+//       while (i < n) { s = s + p[i]; i = i + 1; }
+//       return s;
+//   }
+//   int main() {
+//       long long a[3][4];
+//       long long i = 0;
+//       while (i < 3) {
+//           long long j = 0;
+//           while (j < 4) { a[i][j] = i * 10 + j; j = j + 1; }
+//           i = i + 1;
+//       }
+//       printf("corners=%lld %lld %lld\n", a[0][0], a[0][3], a[2][3]);
+//       printf("mid=%lld\n", a[1][2]);
+//       long long* row = a[1];
+//       printf("row=%lld %lld\n", row[0], row[3]);
+//       printf("rowsum=%lld\n", sum2(a[2], 4));
+//       long long* flat = a[0];
+//       printf("flat=%lld %lld %lld\n", flat[0], flat[4], flat[11]);
+//       row[2] = 99;
+//       printf("through=%lld\n", a[1][2]);
+//       long long b[2][3] = { { 1, 2, 3 }, { 4, 5, 6 } };
+//       printf("curly=%lld %lld %lld\n", b[0][0], b[1][1], b[1][2]);
+//       long long c[2][2] = { { 7 } };
+//       printf("partial=%lld %lld %lld\n", c[0][0], c[0][1], c[1][1]);
+//       long long d[2][2][2];
+//       d[1][0][1] = 42;
+//       printf("three=%lld\n", d[1][0][1]);
+//       return 0;
+//   }
+//
+// C 那份用 `long long` 是为了对上这一层的存储宽度（四种位宽在方言里都占一个 64 位的槽，
+// 见头上「一处刻意留下的差别」那一段）。零初始化那几条的依据是 jancy 自己的
+// "Jancy compiler zeros every variable before any user code can touch it"。
+int sum2(int* p, int n) {
+    int s = 0;
+    int i = 0;
+    while (i < n) {
+        s = s + p[i];
+        i = i + 1;
+    }
+    return s;
+}
+
+int main() {
+    int a[3][4];
+    int i = 0;
+    while (i < 3) {
+        int j = 0;
+        while (j < 4) {
+            a[i][j] = i * 10 + j;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    printf("corners=%d %d %d\n", a[0][0], a[0][3], a[2][3]);
+    printf("mid=%d\n", a[1][2]);
+
+    // 一行退化成 int*：`a[1]` 的类型是 `int[4]`
+    int* row = a[1];
+    printf("row=%d %d\n", row[0], row[3]);
+    printf("rowsum=%d\n", sum2(a[2], 4));
+
+    // 行主序：整块当一条连起来的内存看
+    int* flat = a[0];
+    printf("flat=%d %d %d\n", flat[0], flat[4], flat[11]);
+
+    // 经行指针写回去，原数组跟着变（退化不复制，只换类型）
+    row[2] = 99;
+    printf("through=%d\n", a[1][2]);
+
+    // 嵌套的花括号初值：外层一项对着一行
+    int b[2][3] = { { 1, 2, 3 }, { 4, 5, 6 } };
+    printf("curly=%d %d %d\n", b[0][0], b[1][1], b[1][2]);
+
+    // 写不满的那些格子是零
+    int c[2][2] = { { 7 } };
+    printf("partial=%d %d %d\n", c[0][0], c[0][1], c[1][1]);
+
+    // 三维：元素是 `int[2][2]`
+    int d[2][2][2];
+    d[1][0][1] = 42;
+    printf("three=%d\n", d[1][0][1]);
+    return 0;
+}

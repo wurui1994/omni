@@ -31,7 +31,9 @@
 // `(int thin*)p`（fat 转 thin，-> `(pthin p)`）、`&x` / `&*p` / `&p[i]` / `&p->f`
 // （取地址；局部量按 jancy 自己的办法提到堆上，见 addrOf 那一段）、**定长数组**
 // `int a[3]` / `int a[] = { … }` / `int c[2];`（下标读写、花括号初值、退化成指针，
-// 见 tArr 与 localDeclCurly 那两段）、**模块级变量**（`int g = 5;` / `static int g;` /
+// 见 tArr 与 localDeclCurly 那两段）、**多维数组** `int a[3][4]` / `int d[2][2][2]`
+// （一格里躺的是**一整块**的地址 `(ptr (blk T N))`，`a[i]` 是块里的第 i 格、它自己又是一块，
+// 退化成 `T*` 是方言的一句 `(pelem …)`；声明符的方括号从右往左套，见 tyText 与 declarator）、**模块级变量**（`int g = 5;` / `static int g;` /
 // `int t[3] = { … }`，降成方言的 `(global …)` 加 `(main …)` 开头的几句赋值，见 globalDecl）、
 // **值语义的结构体**（`S s;` / `S t = s;` / `t = s` / `s.f` / `s.in.y` / `&s` / `S a[3]` /
 // 结构体的模块级变量 —— 每格是一段自己的 `pnew` 内存，抄一份由 copyAgg 逐字段做）、
@@ -75,14 +77,13 @@
 //     `struct Point` 之前会被方言拒）—— jancy 那边名字不看顺序，所以这是一条真差别。
 //     要补的是方言那一侧"内嵌的零值按拓扑序铺"，与第十七刀开的指针字段是两回事：
 //     指针是三个字、与目标布局无关，内嵌是真的内嵌。
-//   - 数组那一族里剩下的四条。它们要的那格**方言已经有了**（第十八刀：`(ptr T)` 的 T 能是
-//     `(blk T N)` —— 一段 N 格的定长内存，配一句 `(pelem p)` 退成元素指针），**这一层还没
-//     接上**：接上要把"数组变量就是一段 pnew 出来的内存 + 一条 `(ptr 元素)`"整个换成
-//     "一块 `(ptr (blk 元素 N))`"，declarator（后缀得从右往左套：`int a[10][20]` 的元素是
-//     `int[20]`）、decay、下标、花括号初值、`&a[i]` 六处一起动。剩下的四条是：多维数组
-//     `int a[10][20]`、数组形参与返回（要写成 `T*`）、数组字段（要嵌在结构体里）、
-//     `&a`（`T(*)[N]`）。数组**之间的赋值**不在这一族里 —— **jancy 自己也只在常量折叠那条
-//     路上有**（`Cast_Array::llvmCast` 里写着未实现），所以那一条不是我们欠的。
+//   - 数组那一族里剩下的三条。第十八刀开了方言那一格（`(ptr (blk T N))` 与 `(pelem p)`），
+//     第十九刀把这一层的数组换成了"一整块"，多维因此落地了；还欠的是：`&a`（`T(*)[N]` ——
+//     换表示之后它其实只差把 addrOf 那一遍**不要**把数组提到堆上，那一格本来就是块地址）、
+//     数组形参与返回（jancy 与 C 一样退化成 `T*`，要在形参那一侧发 `(pelem …)`）、
+//     数组字段（要方言的字段类型也收 `(blk T N)`，撞的是与第十七刀同一张白名单，
+//     而且 C/LLVM 两条腿的结构体零值要多一格）。数组**之间的赋值**不在这一族里 ——
+//     **jancy 自己也只在常量折叠那条路上有**（`Cast_Array::llvmCast` 里写着未实现）。
 //   - 模块级变量那一族里剩下的三条：`static` 的**局部量**（要"初值只跑一次"，jancy 那边是
 //     `once` 的机制）、`threadlocal`（要线程本地存储）、`&g`（**方言**这一侧的边界 —— 全局
 //     不在一段可寻址的内存里，jancy 的 `&g` 本身是合法的）。
@@ -175,12 +176,13 @@ const isArr = (t) => t.k === 'arr';
 const isStruct = (t) => t.k === 'struct';
 
 /**
- * 数组退化成指针。jancy 的 `int* p = a;`（type_ptr_data.rst:31）就是它 —— 而这一层的
- * 数组**本来就是**那个 fat 指针，所以退化只改类型、不发一个字的代码。
+ * 数组退化成指针。jancy 的 `int* p = a;`（type_ptr_data.rst:31）就是它 —— 数组这一格里躺的
+ * 是**一整块**的地址（`(ptr (blk T N))`，第十九刀），所以退化是方言的一句 `(pelem …)`：
+ * 地址与范围一个字都不动，变的只有"接下来 padd 一步跨多少"。多维数组退一层就是一行。
  */
 function decay(v) {
   if (v === null || !isArr(v.type)) return v;
-  return { code: v.code, type: tPtr(v.type.el) };
+  return { code: `(pelem ${v.code})`, type: tPtr(v.type.el) };
 }
 
 
@@ -200,14 +202,27 @@ function wrapTo(code, w) {
   return `(bin "-" (bin "^" (bin "&" ${code} (int ${s * 2n - 1n})) (int ${s})) (int ${s}))`;
 }
 
-/** 类型 -> 核心方言的写法。**四种位宽都写成 `int`** —— 存储就是方言那一个 int。 */
+/**
+ * 类型 -> 核心方言的写法。**四种位宽都写成 `int`** —— 存储就是方言那一个 int。
+ *
+ * 定长数组是**一整块**（第十九刀）：`int a[3]` -> `(ptr (blk int 3))`，而不是"一条指向 3 格
+ * int 的指针"。差别有两处要紧：`&a` 就是那一格本身（不用另开一格），而多维数组
+ * `int a[10][20]` 的元素是 `int[20]`，只有"块的块"说得出来。退化成 `T*` 由 decay 发一句
+ * `(pelem …)`（地址与范围都不动，只换类型）。
+ */
 function tyText(t) {
   if (t.k === 'ptr') return `(ptr ${tyText(t.target)})`;
   if (t.k === 'tptr') return `(tptr ${tyText(t.target)})`;
-  if (t.k === 'arr') return `(ptr ${tyText(t.el)})`;
+  if (t.k === 'arr') return `(ptr ${blkText(t)})`;
   if (t.k === 'struct') return t.name;
   if (t.k === 'int') return 'int';
   return t.k;
+}
+
+/** 数组类型的**块**写法（`(blk T N)`）：元素本身是数组时递归下去（多维）。 */
+function blkText(t) {
+  const el = t.el.k === 'arr' ? blkText(t.el) : tyText(t.el);
+  return `(blk ${el} ${t.n})`;
 }
 
 /**
@@ -486,8 +501,10 @@ class JncLower {
   /** 单子上的一条条写下去。地址是"目标 + 几步"折出来的，所以同一张单子换个目标也成立。 */
   curlyEmit(plan, targetCode, pad, out) {
     for (const w of plan) {
+      // 一格数组是**一整块**（第十九刀），所以下标那一步要先 `(pelem …)` 退成元素指针
+      // 再 `padd` —— 与 decay 那一句是同一件事，只是这里的地址是折出来的。
       const addr = w.steps.reduce(
-        (acc, s) => (s.f === undefined ? `(padd ${acc} (int ${s.i}))` : `(pfield ${acc} ${s.f})`),
+        (acc, s) => (s.f === undefined ? `(padd (pelem ${acc}) (int ${s.i}))` : `(pfield ${acc} ${s.f})`),
         targetCode,
       );
       if (w.struct !== null) {
@@ -646,7 +663,7 @@ class JncLower {
         }
         if (this.declareGlobal(dcl, info) === null) continue;
         const at = tyText(info.type);
-        this.globalInit.push(`    (set ${info.name} (pnew ${at} (int ${info.type.n})))`);
+        this.globalInit.push(`    (set ${info.name} (pnew ${at} (int 1)))`);
         continue;
       }
       if (this.declareGlobal(dcl, info) === null) continue;
@@ -683,8 +700,9 @@ class JncLower {
     const t = this.curlyType(n, info, curly);
     if (t === null) return null;
     if (this.declareGlobal(dcl, { name: info.name, type: t }) === null) return null;
-    const st = isArr(t) ? tyText(t) : slotText(t);
-    this.globalInit.push(`    (set ${info.name} (pnew ${st} (int ${isArr(t) ? t.n : 1})))`);
+    // 数组也是**一格**了（第十九刀）：那一格里躺的是一整块的地址，所以个数一律是 1。
+    const st = slotText(t);
+    this.globalInit.push(`    (set ${info.name} (pnew ${st} (int 1)))`);
     // 全局这一侧不用 shadow：那一格是 `(global …)`，没有"初值之后才发 let"这回事。
     const plan = this.curlyPlan(curly, t, '    ', this.globalInit, {
       shadow: null,
@@ -878,6 +896,10 @@ class JncLower {
     let t = this.ptrsTy(sp, d.items[1], d);
     if (t === null) return null;
     let formals = null;
+    // 数组后缀先攒着，出了循环再**从右往左**套（第十九刀）：`int a[10][20]` 的元素是
+    // `int[20]`，所以里层是最后那个 `[20]`。从左往右叠会得到 `int[20][10]` —— 一维时
+    // 看不出差别，多维就错了。
+    const dims = [];
     for (const s of this.flat(d.items[3])) {
       const sh = isList(s) ? head(s) : null;
       if (sh === 'fn-suffix') {
@@ -889,26 +911,28 @@ class JncLower {
       // 它是编译期常量表达式，我们没有常量折叠，所以先收最直的这一格。`[]` 的长度从花括号
       // 初值数出来，那要 localDeclCurly 才知道，所以这里先记成 n === null。
       if (sh === 'array-suffix') {
-        if (isArr(t)) {
-          return this.nope(s, '多维数组（`int a[10][20]`）—— 方言那一格有了（(blk T N)，第十八刀），'
-            + '这一层还没换过去');
-        }
         if (t.k !== 'int' && t !== T_REAL && t !== T_BOOL && !isStruct(t)) {
           return this.nope(s, `${tyName(t)} 的数组 —— 要方言能把多个字的值当元素搬（与 &p 同一格）`);
         }
         const cnt = s.items[1];
-        if (isList(cnt) && head(cnt) === 'none') { t = tArr(t, null); continue; }
+        if (isList(cnt) && head(cnt) === 'none') {
+          // 只有**最外**那一维能是 `[]`（C 与 jancy 同）：里层的长度是元素的尺寸，数不出来。
+          if (dims.length > 0) return this.err(s, '只有最外那一维能写成 `[]`，里层的长度省不掉');
+          dims.push(null);
+          continue;
+        }
         if (!isAtom(cnt) || !/^(0|[1-9][0-9]*)$/.test(cnt.value)) {
           return this.nope(s, '数组长度不是十进制整数字面量（没有常量折叠）');
         }
         const nn = Number(cnt.value);
         if (nn < 1) return this.err(s, `数组长度要至少 1，这里是 ${nn}`);
         if (nn > 1000000) return this.err(s, `数组长度最多 1000000，这里是 ${nn}`);
-        t = tArr(t, nn);
+        dims.push(nn);
         continue;
       }
       return this.nope(s, `声明符后缀 '${sh}'`);
     }
+    for (let i = dims.length - 1; i >= 0; i--) t = tArr(t, dims[i]);
     return { name, type: t, formals };
   }
 
@@ -1110,7 +1134,7 @@ class JncLower {
         }
         this.push(info.name, info.type);
         const at = tyText(info.type);
-        out.push(`${pad}(let ${info.name} ${at} (pnew ${at} (int ${info.type.n})))`);
+        out.push(`${pad}(let ${info.name} ${at} (pnew ${at} (int 1)))`);
         continue;
       }
       // 结构体（第十二刀）：`S s;` 是一格自己的零内存，`S t = s;` 逐字段抄一份。
@@ -1212,8 +1236,8 @@ class JncLower {
     if (plan === null) return null;
     // 初值降完了才进作用域、也才发目标那一格：`int a[2] = { a, 1 }` 里的 a 指外层那个
     this.push(info.name, t);
-    const st = isArr(t) ? tyText(t) : slotText(t);
-    out.push(`${pad}(let ${info.name} ${st} (pnew ${st} (int ${isArr(t) ? t.n : 1})))`);
+    const st = slotText(t);
+    out.push(`${pad}(let ${info.name} ${st} (pnew ${st} (int 1)))`);
     return this.curlyEmit(plan, `(var ${info.name})`, pad, out);
   }
 
@@ -1256,7 +1280,13 @@ class JncLower {
       if (i === null) return null;
       if (!isInt(i.type)) return this.err(n, `下标要整数，这里是 ${tyName(i.type)}`);
       const tt = a.type.target;
-      return { kind: isStruct(tt) ? 'agg' : 'ptr', code: `(padd ${a.code} ${i.code})`, type: tt };
+      // 一格里躺的是数组时（多维，第十九刀）那一格**就是地址** —— 与结构体同一档：
+      // 读它不发 pload（那一块不是一个值），退化那一步由 decay 的 `(pelem …)` 做。
+      return {
+        kind: isStruct(tt) || isArr(tt) ? 'agg' : 'ptr',
+        code: `(padd ${a.code} ${i.code})`,
+        type: tt,
+      };
     }
     // `p->f = v` 与 `(*p).f = v` 是同一件事
     if (h === 'ptr-field') return this.fieldLv(n, n.items[1], n.items[2]);
