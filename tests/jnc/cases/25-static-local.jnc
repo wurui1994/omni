@@ -1,0 +1,130 @@
+// 函数里的 `static`（第二十六刀）。两件事，各有出处：
+//
+// **存储**：decl_storage.rst —— static 是"the memory for variable is allocated at the program
+// start and it stays there until the program terminates"，而 local 是"every time intruction
+// pointer goes through a variable declaration, this will be a new copy"。所以那一格是模块级的。
+//
+// **初值只跑一次**：jancy 就地把它包在 `once` 里 —— `Parser::declare` 里
+// `onceStmt_Create` / `PreBody` / `initializeVariable` / `PostBody` 那四句
+// （jnc_ct_Parser.cpp:2452），包在**声明这一处**；不是挪到 module.construct，那一条
+// 只对 `parentNamespace` 是全局的那些（jnc_ct_VariableMgr.cpp:209）。初值空着就不包
+// （同一处 2454 行的 `m_initializer.isEmpty()`）。
+//
+// 量的位置：计数器（常量初值）、**非常量**初值（`mkinit()` 只能被调一次 —— 这一条正是
+// "初值只跑一次"与"每次进来重算"的分水岭）、`&` 取地址（那一格得是真的一段内存，与
+// 第二十四刀对模块级变量做的同一件事）、static 的数组与结构体（花括号初值也在闸门里）、
+// `a = { … }` 的左边是 static 的那一格、没写初值的（出来是零、一个字都不发）、以及
+// static 在**内层块**里（走不到就不初始化，但只初始化一次）。
+//
+// 期望输出的出处：一份 `cc -O0` 的孪生程序（C 的 static 局部量就是同一件事）。两处 C 说不出
+// 来的写法在孪生里显式手写：`lazy()` 的非常量初值（把 once 的闸门写出来）、`arrset()` 的
+// `b = { … }`（逐格写的那两句 store）—— 语义各是同一件事。逐字节相同。
+
+int calls = 0;
+
+int mkinit() {
+    calls++;
+    return 100;
+}
+
+int counter() {
+    static int n = 0;
+    n++;
+    return n;
+}
+
+int lazy() {
+    static int v = mkinit();
+    v++;
+    return v;
+}
+
+int* cell() {
+    static int c = 7;
+    return &c;
+}
+
+int arr() {
+    static int a[3] = { 1, 2 };
+    a[2]++;
+    return a[0] + a[1] + a[2];
+}
+
+int arrset() {
+    static int b[2] = { 1, 2 };
+    b = { b[0] + 10, b[1] + 20 };
+    return b[0] * 100 + b[1];
+}
+
+struct Point {
+    int m_x;
+    int m_y;
+}
+
+int str() {
+    static Point p = { 3, m_y = 4 };
+    p.m_y++;
+    return p.m_x * 100 + p.m_y;
+}
+
+int noinit() {
+    static int z;
+    z += 5;
+    return z;
+}
+
+int inblock(int k) {
+    int t = 0;
+    if (k > 0) {
+        static int w = 41;
+        w++;
+        t = w;
+    }
+    return t;
+}
+
+int main() {
+    // 每次调用同一格：1 2 3（分开写是因为一句 printf 里几个实参的求值顺序没规定）
+    int a1 = counter();
+    int a2 = counter();
+    int a3 = counter();
+    printf("cnt=%d %d %d\n", a1, a2, a3);
+
+    // 非常量初值：mkinit 只被调一次，所以 calls 停在 1
+    int b1 = lazy();
+    int b2 = lazy();
+    printf("lazy=%d %d calls=%d\n", b1, b2, calls);
+
+    // 取地址：拿到的是那一格自己，写进去下一次还看得见
+    int* pc = cell();
+    printf("cell=%d\n", *pc);
+    *pc = 12;
+    printf("cell2=%d\n", *cell());
+
+    // static 的数组与结构体：花括号初值在闸门里，改动跨调用留着
+    int c1 = arr();
+    int c2 = arr();
+    printf("arr=%d %d\n", c1, c2);
+
+    // `a = { … }` 的左边也是那一格（逐格写，第十四刀）
+    int g1 = arrset();
+    int g2 = arrset();
+    printf("arrset=%d %d\n", g1, g2);
+
+    int d1 = str();
+    int d2 = str();
+    printf("str=%d %d\n", d1, d2);
+
+    // 没写初值：出来是零
+    int e1 = noinit();
+    int e2 = noinit();
+    printf("noinit=%d %d\n", e1, e2);
+
+    // 内层块里的 static：k<=0 那一趟根本走不到它
+    int f1 = inblock(1);
+    int f2 = inblock(0);
+    int f3 = inblock(1);
+    printf("blk=%d %d %d\n", f1, f2, f3);
+
+    return 0;
+}

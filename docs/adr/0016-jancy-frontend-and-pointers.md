@@ -629,6 +629,11 @@ int later = 42;
 答案，所以明着拒，`bad/static-local.jnc` 是它的本体）、`threadlocal`、`&g`、结构体的模块级
 变量（与结构体的局部量同一格）。
 
+> **第二十六刀更正**：`static` 的局部量落了，`bad/static-local.jnc` 删掉，边界收窄到
+> `threadlocal`（`bad/threadlocal.jnc`）。这一条记的理由没错（当普通局部量会给错答案），
+> 但"要 `once` 的机制"这句话把它说重了 —— 量下来 jancy 的 `once` 在**局部**这一格上就是
+> 一道布尔闸门，就地包在声明这一处，见下面第二十六刀那一节。
+
 `&g` 这一条值得单说：它是**方言这一侧**的边界，不是 jancy 的。jancy 的全局本来就有地址，
 而第九刀给局部量装的那格 `pnew` 对全局不适用 —— 全局在方言里不在一段可寻址的内存里。
 要接就得让全局也落在一段内存上，那会动到 MIR 的全局号与四条腿上全局的发法，单独一刀。
@@ -1294,6 +1299,67 @@ jancy 的零初始化、写不满时余下的格子是零），逐字节相同�
 **没跑的**：`tests/sexpr`、`tests/glr`、`tests/asy` —— 这一刀又只动了
 `frontend-jnc/lower.js`；自举、`tests/jit`、`tests/mir`、`tests/llvm`；
 `npm run lint` 这台机器上没有 typescript。
+
+### 第二十六刀：`static` 的局部量 —— "初值只跑一次"量下来就是一道布尔闸门
+
+第十一刀把 `static` 的局部量拒了，理由记的是「要 `once` 的机制」。这一刀先去量 jancy 到底
+怎么落它 —— 结果是两处代码，加起来比那句话轻得多。
+
+**存储那一半。** `decl_storage.rst` 说 static 是"the memory for variable is allocated at the
+program start and it stays there until the program terminates"，而 local 是"every time
+intruction pointer goes through a variable declaration, this will be a **new** copy"。所以那
+一格就是**模块级的一格槽**，方言里早就有：`(global 名字 T)`。名字上带一个计数（`名字$sN`）躲
+开同名 —— `$` 不在 jancy 的标识符里，撞不上用户写的名字。作用域还是那个块：它进的是
+`this.scopes`，只是那一格上多记一条"我在方言里叫别的名字、而且是模块级的"。这一条落在
+`push` / `lookupRef` 上（条目从裸类型变成 `{t, d, s}`），三处解析名字的地方都过一遍它。
+
+**初值那一半。** 关键的一句在 `jnc_ct_VariableMgr.cpp:209` —— 一个变量的初值只有在
+`parentNamespace` 是**全局**的时候才进 `m_globalVariableInitializeArray`。也就是说 static
+**局部**量的初值**不在** `module.construct` 里跑。那它在哪儿跑？`jnc_ct_Parser.cpp:2452`：
+
+```
+onceStmt_Create / onceStmt_PreBody / initializeVariable / onceStmt_PostBody
+```
+
+四句，**就地**包在声明这一处。而且 2454 行还有一条：`variable->m_initializer.isEmpty()` 时这
+四句一句都不发。所以落法是一格布尔闸门加一句
+
+```
+(if (un "!" (var 名字$sN$1)) (do (set 名字$sN$1 (bool true)) …初值…))
+```
+
+第一次走到这儿才跑，之后每次都跳过；没写初值的一个字都不发（`(global …)` 出来就是零，与
+jancy 那边"初值空着就不包 once"是同一件事）。**方言一个字都没改** —— 与第二十四刀一样，
+债务表上"要某种机制"那句话，量完发现现成的零件就够。
+
+**取地址与聚合都是老零件。** `&c` 走第二十四刀那条：被 `&` 取过地址的标量提到一段自己的内存
+里（`(global c$sN (ptr int))` 加一句 `pnew`），跟着 `globalCells` 在程序开头分配好。static 的
+数组与结构体本来就是"一格里放地址"，同一条路。花括号初值那条产生式另有一条尾巴
+（`staticLocalCurly`）：`curlyPlan` / `curlyEmit` 一个字不改，只是发到闸门里面去。
+
+**顺手抓到一处名字漏改。** `aggTarget`（`a = { … }` 的左边）以前直接用源码里的名字发
+`(var a)`，既没过 `dialectName`（结构体形参那份拷贝的别名，第十三刀）也不知道 static 换了
+名字。这一刀把它改成与 `lvalue` 同一条 `dname` 计算 —— `cases/25-static-local.jnc` 的
+`arrset()` 就是它的本体。
+
+**`once` 里那半句刻意没接。** cflow_once.rst 说编译器生成的是"a thread-safe wrapper"。这一层
+没有线程（四条腿里没有一条能开线程），所以那道闸门是**裸的**布尔，不是原子的 —— 这不是偷懒，
+是"没有线程"这个前提下唯一说得清的落法。`threadlocal` 同理，边界收窄到它
+（`bad/threadlocal.jnc`）：一格线程一份存储这一层给不出来，而文档自己还给它记了"不能有初值、
+不能是聚合"两条限制，接它得连那两条一起接。
+
+**期望输出的出处**：`cases/25-static-local.jnc`，出处是一份 `cc -O0` 的孪生程序 —— C 的
+static 局部量就是同一件事。两处 C 说不出来的写法在孪生里显式手写：`lazy()` 的**非常量**初值
+（把 once 的闸门写出来）、`arrset()` 的 `b = { … }`（逐格写的那两句 store）。逐字节相同。量在
+里面的有：计数器、非常量初值（`mkinit()` 只被调一次 —— 这一条正是"只跑一次"与"每次重算"的
+分水岭）、`&` 取地址、static 的数组与结构体、`a = { … }` 的左边、没写初值的（出来是零）、
+以及 static 在**内层块**里（走不到就不初始化，但只初始化一次）。
+
+**跑过的轴**：`tests/jnc`（36/0，新增 `cases/25-static-local` 与 `bad/threadlocal`，
+删掉 `bad/static-local`）。
+**没跑的**：`tests/sexpr`、`tests/glr`、`tests/asy` —— 这一刀又只动了
+`frontend-jnc/lower.js`（加 `tests/jnc/run.js` 的头注释）；自举、`tests/jit`、`tests/mir`、
+`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
 
 ## 后果与代价
 

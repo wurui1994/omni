@@ -100,8 +100,9 @@
 //     （`jnc_ct_Declarator.llk:402` 的 `declarator_prefix` 只有 `'*' type_modifier*`），
 //     所以 `T(*)[N]` 在 jancy 里是个说不出名字的类型，`&a` 只能就地用
 //     （见 `cases/19-addr-array.jnc`）。
-//   - 模块级变量那一族里剩下的两条：`static` 的**局部量**（要"初值只跑一次"，jancy 那边是
-//     `once` 的机制）、`threadlocal`（要线程本地存储）。`&g` 第二十四刀收了；只有
+//   - 模块级变量那一族里剩下的一条：`threadlocal`（要线程本地存储 —— 这一层没有线程；
+//     文档自己还给它记了"不能有初值、不能是聚合"两条限制）。`&g` 第二十四刀收了、`static`
+//     的**局部量**第二十六刀收了（一格模块级的槽加一道 once 闸门，见 staticLocal）；只有
 //     **string** 的模块级变量还取不到地址（liftable 那条，见 `bad/addr-global.jnc`）。
 //   - `new T { … }` 里剩下的一条：`new T[n] { … }`。jancy 的语法把个数**折进类型名**里
 //     （`new_operator_type : type_name_impl<&type, &elementCount>`，jnc_ct_Expr.llk:726），
@@ -369,20 +370,28 @@ class JncLower {
     return node.items.slice(1);
   }
 
-  push(name, type) {
-    this.scopes[this.scopes.length - 1].set(name, type);
+  /** 一格局部量进作用域。`dname` 是它在方言里的名字 —— 只有 `static` 的局部量不一样
+   *  （第二十六刀：那一格是模块级的，名字带上函数名），所以默认就是它自己。 */
+  push(name, type, dname) {
+    this.scopes[this.scopes.length - 1].set(name, {
+      t: type,
+      d: dname === undefined ? name : dname,
+      s: dname !== undefined,
+    });
   }
 
-  /** 名字的类型 + "它是模块级的吗"。方言里两者的读写形式相同（`(var …)` / `(set …)`），
-   *  分开是因为"提到一格内存里"那件事两边的落法不一样：局部量提的是另一格 `x$c`
-   *  （第九刀），模块级的是**它自己**发成 `(ptr T)`（第二十四刀，见 declareGlobal）。 */
+  /** 名字的类型 + "它那一格是模块级的吗" + 它在方言里叫什么。方言里两者的读写形式相同
+   *  （`(var …)` / `(set …)`），分开是因为"提到一格内存里"那件事两边的落法不一样：
+   *  局部量提的是另一格 `x$c`（第九刀），模块级的是**它自己**发成 `(ptr T)`
+   *  （第二十四刀，见 declareGlobal）。`static` 的局部量走的是模块级那一条，
+   *  只是名字不同（第二十六刀）。 */
   lookupRef(name) {
     for (let i = this.scopes.length - 1; i >= 0; i--) {
-      const t = this.scopes[i].get(name);
-      if (t !== undefined) return { type: t, global: false };
+      const e = this.scopes[i].get(name);
+      if (e !== undefined) return { type: e.t, global: e.s, dname: e.d };
     }
     const g = this.globals.get(name);
-    return g === undefined ? null : { type: g, global: true };
+    return g === undefined ? null : { type: g, global: true, dname: name };
   }
 
   lookup(name) {
@@ -927,7 +936,8 @@ class JncLower {
       if (m === 'const') continue;                      // 这一层不区分（没有可变性检查）
       // 存储类（decl_storage.rst）。模块级变量**默认**就是 static（"If storage specifier is
       // omitted, then global variables get assigned static storage class"），所以写出来
-      // 也是同一件事；局部量上的 static 是另一回事，由 localDecl 拒。
+      // 也是同一件事；局部量上的 static 是另一回事，由 staticLocal / staticLocalCurly 落
+      //（第二十六刀：一格模块级的槽加一道 once 闸门）。
       if (m === 'static') { stat = true; continue; }
       // threadlocal 要线程本地存储，而这一层没有线程。文档自己也说它有两条限制
       // （不能有初值、不能是聚合），接它得连那两条一起接。
@@ -1221,10 +1231,6 @@ class JncLower {
     const pad = ' '.repeat(ind);
     const sp = this.specs(n.items[1]);
     if (sp === null) return null;
-    // `static int x = 1;` 在函数里是另一回事：一格程序启动时就分配好、初值**只跑一次**的
-    // 存储（decl_storage.rst）。jancy 那边它落在 module.construct 里，而"只跑一次"是
-    // `once` 的机制。接它要那两样，所以这一刀明着拒。
-    if (sp.stat) { this.nope(n, '`static` 的局部量（要"程序启动时分配、初值只跑一次"）'); return null; }
     const out = [];
     for (const d of this.flat(n.items[2])) {
       const dh = isList(d) ? head(d) : null;
@@ -1235,6 +1241,12 @@ class JncLower {
       const info = this.declarator(dcl, sp);
       if (info === null) return null;
       if (info.formals !== null) { this.nope(dcl, '局部的函数原型'); return null; }
+      // `static int x = 1;` 是另一回事：那一格程序启动时就分配好、初值**只跑一次**
+      // （第二十六刀，见 staticLocal）。
+      if (sp.stat) {
+        if (this.staticLocal(dcl, info, initNode, pad, out) === null) return null;
+        continue;
+      }
       // 数组（第十刀）：`int a[3];` 就是一段长度 3 的零内存。`int a[];` 不合法（长度只能从
       // 花括号初值数出来）。`int b[3] = a;` 是**抄一份**（第二十一刀）—— 与结构体同一档，
       // 理由与出处见 copyVal 那一段。
@@ -1323,6 +1335,85 @@ class JncLower {
   }
 
   /**
+   * `static` 的局部量（第二十六刀）。两件事，各有出处：
+   *
+   * **存储**：`static` 就是"程序启动时分配、一直待到程序结束"（decl_storage.rst），也就是
+   * 一格模块级的槽 —— 所以这一层把它发成 `(global 名字$sN T)`，名字带一个计数好躲开
+   * 同名（`$` 不在 jancy 的标识符里）。作用域还是那个块：它进的是 `this.scopes`，
+   * 只是那一格记着"我在方言里叫别的名字、而且是模块级的"（见 push / lookupRef）。
+   *
+   * **初值只跑一次**：jancy 把它包在 `once` 里 —— `Parser::declare` 里
+   * `onceStmt_Create` / `PreBody` / `initializeVariable` / `PostBody` 那四句
+   * （jnc_ct_Parser.cpp:2452），就地包在**声明这一处**，不是挪到 module.construct
+   * （那一条只对 `parentNamespace` 是全局的那些，jnc_ct_VariableMgr.cpp:209）。所以落法是
+   * 一格 bool 闸门加一句 `(if (un "!" 闸门) (do (set 闸门 true) …初值…))`：第一次走到这儿
+   * 才跑，之后每次都跳过。没写初值的一个字都不用发 —— `(global …)` 出来就是零，而 jancy
+   * 那边也正是"初值空着就不包 once"（同一处 2454 行）。
+   *
+   * 没接的是 `threadlocal once`（一格线程一次）—— 这一层没有线程。
+   */
+  staticLocal(dcl, info, initNode, pad, out) {
+    const t = info.type;
+    const dn = `${info.name}$s${this.tmp++}`;
+    // 被 `&` 取过地址的标量要提到一段自己的内存里（与第二十四刀对模块级变量做的一样）
+    const lift = this.gTaken.has(info.name) && this.liftable(t);
+    if (isArr(t) && t.n === null) {
+      return this.err(dcl, `'${info.name}[]' 的长度得从花括号初值数出来`);
+    }
+    if (isStruct(t) || isArr(t)) {
+      const st = slotText(t);
+      this.decls.push(`  (global ${dn} ${st})`);
+      this.globalCells.push(`    (set ${dn} (pnew ${st} (int 1)))`);
+    } else if (lift) {
+      const pt = tyText(tPtr(t));
+      this.gLifted.add(dn);
+      this.decls.push(`  (global ${dn} ${pt})`);
+      this.globalCells.push(`    (set ${dn} (pnew ${pt} (int 1)))`);
+    } else if (zeroOf(t) === null) {
+      return this.nope(dcl, `${tyName(t)} 的 static 局部量`);
+    } else {
+      this.decls.push(`  (global ${dn} ${slotText(t)})`);
+    }
+    // 初值降完了才进作用域：`static int x = x;` 里右边那个 x 指的是外层那个（与局部量同）
+    const body = [];
+    const bpad = `${pad}    `;
+    if (initNode !== null && this.staticInitTo(dcl, dn, t, lift, initNode, bpad, body) === null) {
+      return null;
+    }
+    this.push(info.name, t, dn);
+    if (initNode === null) return out;
+    const flag = `${dn}$1`;
+    this.decls.push(`  (global ${flag} bool)`);
+    out.push(`${pad}(if (un "!" (var ${flag}))`);
+    out.push(`${pad}  (do`);
+    out.push(`${bpad}(set ${flag} (bool true))`);
+    for (const l of body) out.push(l);
+    out.push(`${pad}  ))`);
+    return out;
+  }
+
+  /** `static` 那一格的初值写进去：标量一句，聚合逐字段/逐格抄（与局部量同一份 copyVal）。 */
+  staticInitTo(dcl, dn, t, lift, initNode, pad, out) {
+    if (isStruct(t) || isArr(t)) {
+      const v = this.expr(initNode, t);
+      if (v === null) return null;
+      if (!sameTy(v.type, t)) {
+        return this.err(initNode, `初值的类型是 ${tyName(v.type)}，声明的是 ${tyName(t)}`);
+      }
+      const src = this.aggSource(v.code, slotText(t), pad, out);
+      return this.copyVal(`(var ${dn})`, src, t, pad, out);
+    }
+    let v = this.expr(initNode, t);
+    if (v === null) return null;
+    if (isInt(v.type) && isInt(t)) v = intConv(v, t);
+    if (!sameTy(v.type, t)) {
+      return this.err(initNode, `初值的类型是 ${tyName(v.type)}，声明的是 ${tyName(t)}`);
+    }
+    out.push(lift ? `${pad}(pstore (var ${dn}) ${v.code})` : `${pad}(set ${dn} ${v.code})`);
+    return out;
+  }
+
+  /**
    * 花括号初始化的局部量（第十刀，第十四刀改成走 curlyPlan）：
    * `int a[3] = { 1, 2, 3 }` / `int b[] = { 7, 8 }` / `Point p = { 10, m_z = 30 }`。
    *
@@ -1332,12 +1423,13 @@ class JncLower {
    * 项少于格子时剩下的是**零**（CastOp_Array.cpp:`if (dstSize > srcSize) memset(dst, 0, …)`），
    * 而 pnew 出来的那一段本来就是零，所以少写的那几格一个字都不用发。项**多于**格子是错
    * （同一处：`srcElementCount <= dstElementCount` 才是一次转换），那一条在 curlyMember 里判。
+   *
+   * `static` 走另一条尾巴（第二十六刀）：那一格是模块级的，花括号里那几句包在 once 闸门里。
    */
   localDeclCurly(n, ind) {
     const pad = ' '.repeat(ind);
     const sp = this.specs(n.items[1]);
     if (sp === null) return null;
-    if (sp.stat) { this.nope(n, '`static` 的局部量（要"程序启动时分配、初值只跑一次"）'); return null; }
     const dcl = n.items[2];
     const info = this.declarator(dcl, sp);
     if (info === null) return null;
@@ -1346,6 +1438,7 @@ class JncLower {
     if (!isList(curly) || head(curly) !== 'curly') { this.err(n, '认不出的花括号初始化'); return null; }
     const t = this.curlyType(n, info, curly);
     if (t === null) return null;
+    if (sp.stat) return this.staticLocalCurly(n, info, t, curly, pad);
     const out = [];
     const plan = this.curlyPlan(curly, t, pad, out, {
       shadow: info.name,
@@ -1359,6 +1452,32 @@ class JncLower {
     return this.curlyEmit(plan, `(var ${info.name})`, pad, out);
   }
 
+  /**
+   * `static Point p = { … }`（第二十六刀）：那一格是模块级的（连它的一段内存一起，跟着
+   * globalCells 在程序开头分配好），花括号里那几句照样包在 once 闸门里 —— 与 staticLocal
+   * 同一份出处（jnc_ct_Parser.cpp:2452 的 onceStmt_*）。花括号初值只对聚合，所以这儿
+   * 不必管标量提不提。
+   */
+  staticLocalCurly(n, info, t, curly, pad) {
+    const dn = `${info.name}$s${this.tmp++}`;
+    const st = slotText(t);
+    this.decls.push(`  (global ${dn} ${st})`);
+    this.globalCells.push(`    (set ${dn} (pnew ${st} (int 1)))`);
+    const flag = `${dn}$1`;
+    this.decls.push(`  (global ${flag} bool)`);
+    const bpad = `${pad}    `;
+    const body = [`${bpad}(set ${flag} (bool true))`];
+    const plan = this.curlyPlan(curly, t, bpad, body, {
+      shadow: info.name,
+      val: (node, want) => this.initValue(node, want),
+    }, [], []);
+    if (plan === null) return null;
+    // 初值降完了才进作用域：`static int a[2] = { a, 1 }` 里的 a 指外层那个（与局部量同）
+    this.push(info.name, t, dn);
+    if (this.curlyEmit(plan, `(var ${dn})`, bpad, body) === null) return null;
+    return [`${pad}(if (un "!" (var ${flag}))`, `${pad}  (do`, ...body, `${pad}  ))`];
+  }
+
   /** 可写的位置。方言里只有两种写法：`(set 名字 值)` 与 `(pstore 指针 值)`。 */
   lvalue(n) {
     if (!isList(n)) return this.err(n, '这里要一个可以赋值的位置');
@@ -1368,19 +1487,22 @@ class JncLower {
       const r = this.lookupRef(nm);
       if (r === null) return this.err(n, `未声明的变量 '${nm}'`);
       const t = r.type;
+      // 它在方言里叫什么：`static` 的局部量那一格是模块级的、名字带函数名（第二十六刀），
+      // 别的名字要过一遍 alias（结构体形参的那份拷贝，第十三刀）。
+      const dn = r.dname === nm ? this.dialectName(nm) : r.dname;
       // 结构体与数组那一格里放的是地址，所以它们是 `agg`：读就是那个地址，写要抄一份
       //（结构体逐字段、数组逐格 —— 第十二刀与第二十一刀，见 copyVal）。
       // 这一条要在 lifted 之前 —— 它们本来就是一段内存，`&s` / `&a` 不用再提一次。
-      if (isStruct(t) || isArr(t)) return { kind: 'agg', code: `(var ${this.dialectName(nm)})`, type: t };
+      if (isStruct(t) || isArr(t)) return { kind: 'agg', code: `(var ${dn})`, type: t };
       // 提到堆上的那些名字本身就是一格内存，所以它是 `ptr` 而不是 `var` ——
       // 于是读写自动走 pload / pstore，而 `&x` 就是它的 code（见 expr0 的 addr）。
       // 模块级的那一半是第二十四刀：那一格就是全局自己（发成了 `(ptr T)`）。
       if (r.global) {
-        if (this.gLifted.has(nm)) return { kind: 'ptr', code: `(var ${nm})`, type: t };
-        return { kind: 'var', name: nm, type: t, global: true };
+        if (this.gLifted.has(dn)) return { kind: 'ptr', code: `(var ${dn})`, type: t };
+        return { kind: 'var', name: dn, type: t, global: true };
       }
       if (this.lifted.has(nm)) return { kind: 'ptr', code: `(var ${this.cellName(nm)})`, type: t };
-      return { kind: 'var', name: nm, type: t, global: false };
+      return { kind: 'var', name: dn, type: t, global: false };
     }
     // `*p = v`
     if (h === 'indirect') {
@@ -1481,7 +1603,11 @@ class JncLower {
     if (isList(n) && head(n) === 'name') {
       const nm = n.items[1].value;
       const r = this.lookupRef(nm);
-      if (r !== null && isArr(r.type)) return { code: `(var ${nm})`, type: r.type };
+      // 它在方言里叫什么：与 lvalue 那一处同一条（`static` 的局部量换了名字 —— 第二十六刀）
+      if (r !== null && isArr(r.type)) {
+        const dn = r.dname === nm ? this.dialectName(nm) : r.dname;
+        return { code: `(var ${dn})`, type: r.type };
+      }
     }
     const lv = this.lvalue(n);
     if (lv === null) return null;
@@ -2004,21 +2130,23 @@ class JncLower {
           if (this.fns.has(nm)) return this.nope(n, `把函数 '${nm}' 当值用`);
           return this.err(n, `未声明的变量 '${nm}'`);
         }
+        // 它在方言里叫什么：见 lvalue 那一处同一句
+        const dn = r.dname === nm ? this.dialectName(nm) : r.dname;
         // 结构体那一格里放的就是地址（第十二刀），所以它不走 lifted 那条路。
         // 数组同理（第二十刀）：那一格里放的是**一整块**的地址，`&a` 就是它自己。
         if (isStruct(r.type) || isArr(r.type)) {
-          return { code: `(var ${this.dialectName(nm)})`, type: r.type };
+          return { code: `(var ${dn})`, type: r.type };
         }
         // 提到堆上的那些名字要 pload 一次（第九刀）。模块级的那一半是第二十四刀，
         // 它的"那一格"就是全局自己（发成了 `(ptr T)`），所以不用 cellName。
         if (r.global) {
-          if (this.gLifted.has(nm)) return { code: `(pload (var ${nm}))`, type: r.type };
-          return { code: `(var ${nm})`, type: r.type };
+          if (this.gLifted.has(dn)) return { code: `(pload (var ${dn}))`, type: r.type };
+          return { code: `(var ${dn})`, type: r.type };
         }
         if (this.lifted.has(nm)) {
           return { code: `(pload (var ${this.cellName(nm)}))`, type: r.type };
         }
-        return { code: `(var ${nm})`, type: r.type };
+        return { code: `(var ${dn})`, type: r.type };
       }
       case 'binary': return this.binary(n);
       case 'unary': return this.unary(n, want);
@@ -2077,7 +2205,8 @@ class JncLower {
       const r = this.lookupRef(nm);
       // 模块级的数组也算（第二十四刀）：它那一格里放的同样是块地址（globalDecl 里的那句 pnew）
       if (r !== null && isArr(r.type)) {
-        return { code: `(var ${this.dialectName(nm)})`, type: tPtr(r.type) };
+        const dn = r.dname === nm ? this.dialectName(nm) : r.dname;
+        return { code: `(var ${dn})`, type: tPtr(r.type) };
       }
     }
     const lv = this.lvalue(n.items[1]);
