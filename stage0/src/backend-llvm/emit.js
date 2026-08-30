@@ -146,6 +146,10 @@ const RT_OPS = new Map([
   ['len.string', { sym: 'omni_str_length', ret: 'i64', params: ['[2 x i64]'] }],
   ['substr.string', { sym: 'omni_str_sub', ret: '[2 x i64]', params: ['[2 x i64]', 'i64', 'i64'] }],
   ['indexOf.string', { sym: 'omni_index_of', ret: 'i64', params: ['[2 x i64]', '[2 x i64]'] }],
+  // 这两条是 ADR-0016 第四刀补的（jancy 的 printf 要它们）：不换行的输出，与"码位 -> 串"。
+  // 另外四条腿早就有 chr（Omni 的 `chr(65)`），漏的一直只是这一行。
+  ['write.string', { sym: 'omni_write_string', ret: 'void', params: ['[2 x i64]'] }],
+  ['chr.int', { sym: 'omni_chr', ret: '[2 x i64]', params: ['i64'] }],
 ]);
 
 /** i64 比较 -> icmp 谓词；f64 -> fcmp 谓词。顺序与 OP.EQ..OP.GT 一致。 */

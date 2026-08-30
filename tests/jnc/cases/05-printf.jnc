@@ -1,0 +1,49 @@
+// printf 不以 `\n` 收尾的那种，与 `%c`（ADR-0016 第四刀）。
+//
+// 原先这两样都被拒了，理由是"方言里没有不换行的输出"与"方言里没有整数 -> 一个字符的串"。
+// 那是让语言向方言妥协，反了：方言这一刀因此长出了 `(write E)`，并把早就存在的
+// `(chr E)` 露到核心方言这一层（另外四条腿一直有它，漏的只是 LLVM 那一行 ABI）。
+//
+// 期望输出的出处：
+//   - jancy 的 `printf` 就是 C 的那一套（stdlib 里是 vararg 的 printf），不补换行 ——
+//     所以 `printf("a"); printf("b"); printf("c\n");` 是一行 `abc`
+//   - `%c` 印一个字符：72 105 33 是 'H' 'i' '!'（ASCII）
+//   - `%d` 收 bool：jancy 的 bool 底下是 int8，印 1 / 0
+//   - 缓冲不能把顺序打乱：`write` 与 `print` 在每条腿上共用同一个输出缓冲区
+//     （JS 的 $print_raw / 解释器的 printRaw / C 的 printf 都写同一个 stdout），
+//     所以 `x=7 y=` 后面接上的 `8 done` 必须在同一行
+
+int main() {
+    // 一行分三次印出来
+    printf("a");
+    printf("b");
+    printf("c\n");
+
+    // 一行里多个值，靠不换行的段拼起来
+    int i = 0;
+    for (i = 1; i <= 3; i++)
+        printf("%d ", i);
+    printf("\n");
+
+    // %c
+    printf("%c%c%c\n", 72, 105, 33);
+    // char 就是整数，所以能算
+    int ch = 65;
+    printf("%c%c\n", ch, ch + 25);
+
+    // 不换行的段与换行的段交替，顺序不能乱
+    printf("x=%d y=", 7);
+    printf("%d done", 8);
+    printf("\n");
+
+    // %d 收 bool
+    int n = 3;
+    printf("%d %d\n", n > 2, n > 9);
+
+    // %% 与空的一行
+    printf("100%%\n");
+    printf("\n");
+    printf("end\n");
+
+    return 0;
+}

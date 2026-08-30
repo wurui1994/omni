@@ -37,8 +37,9 @@
 // 这一层把它显式写出来（`n != 0` / `!pisnull p`）就对了。
 //
 // 还没长出来、因此**当场报错**的（每一条都记着该怎么长，不是"不收"）：
-//   - `printf` 的完整格式（宽度、精度、`%x`、`%c`，以及不以 `\n` 收尾的那种）——
-//     要方言里有一条"不换行的输出"加一份格式化。下一刀。
+//   - printf 的宽度与精度（`%5d` / `%.2f`）与 `%x` / `%o` —— 宽度要"重复一个串"、
+//     精度要定死 C 与 JS 的舍入怎么对齐、`%x` 要一个对 int64 精确的进制转换。
+//     三件都是"运行时里加一个符号"的事。下一刀。
 //   - `&x`（取局部量地址）—— 要局部量可寻址（jancy 那边是"提到 GC 堆上"）。下一刀。
 //   - 真数组 `int a[3]`（jancy 的数组是**值**类型，方言这一层的 `(arr T)` 是引用语义）——
 //     要方言有值语义的定长数组。下一刀。
@@ -48,12 +49,13 @@
 //   - class / union / enum / property / reactor / 事件 / 多播 / 协程
 //   - 异常（try/throw/catch）、`assert`、namespace / import
 //
-// ## printf 的边界
+// ## printf 怎么降
 //
-// jancy 的 `printf` 就是它的打印口（`test/jnc/*.jnc` 里到处是它）。核心方言只有 `print`，
-// 而 `print` **自带换行**。所以这一层把 printf 拆成"按 `\n` 切开、每段一条 print"，
-// 而**格式串必须以 `\n` 收尾**。收的转换只有 `%d` / `%f` / `%s` / `%%`。这一格是
-// 上面列的第一条待办 —— 边界在这儿，理由也在这儿。
+// jancy 的 `printf` 就是它的打印口（`test/jnc/*.jnc` 里到处是它），语义是 C 的那一套：
+// **不补换行**。这一层按 `\n` 把格式串切成若干段，带换行的段发 `(print …)`（它自带换行），
+// 末尾不带换行的那段发 `(write …)`。两者在每条腿上共用同一个输出缓冲区，所以交替调用
+// 顺序不会乱。收的转换是 `%d` / `%i` / `%f` / `%s` / `%c` / `%%`；`%d` 也收 bool
+// （jancy 的 bool 底下是 int8，印 1 / 0）。带宽度或精度的写法当场报错，见上面那份名单。
 import { isList, isAtom, isStr, head } from '../sexpr/read.js';
 import { OmniError } from '../source/diag.js';
 
@@ -595,54 +597,63 @@ class JncLower {
       return null;
     }
     const fmt = args[0].value;
-    if (!fmt.endsWith('\n')) {
-      this.nope(n, 'printf 的格式串不以 \\n 收尾（方言的 print 自带换行，还没有不换行的那一条）');
-      return null;
-    }
     const vals = [];
     for (let i = 1; i < args.length; i++) {
       const v = this.expr(args[i], null);
       if (v === null) return null;
       vals.push(v);
     }
-    // 一段一段攒：`pieces` 是当前这一行的若干块（字符串常量与 (tostr …)）
+    // 一段一段攒：`pieces` 是当前这一段的若干块（字符串常量与 (tostr …)）。
+    // 遇到 `\n` 就发一条 `print`（它自带换行）；末尾那段没有换行时发 `(write …)`
+    // ——方言这一刀刚长出 write，所以"不以 \n 收尾的格式串"不再是边界（ADR-0016 第四刀）。
     const out = [];
     let pieces = [];
     let ai = 0;
     let lit = '';
     const flushLit = () => { if (lit !== '') { pieces.push(`(str ${JSON.stringify(lit)})`); lit = ''; } };
-    const flushLine = () => {
+    const flush = (nl) => {
       flushLit();
-      if (pieces.length === 0) pieces.push('(str "")');
+      if (pieces.length === 0) { if (nl) out.push(`${pad}(print (str ""))`); pieces = []; return; }
       let code = pieces[0];
       for (let k = 1; k < pieces.length; k++) code = `(bin "+" ${code} ${pieces[k]})`;
-      out.push(`${pad}(print ${code})`);
+      out.push(`${pad}(${nl ? 'print' : 'write'} ${code})`);
       pieces = [];
     };
     for (let i = 0; i < fmt.length; i++) {
       const c = fmt[i];
-      if (c === '\n') { flushLine(); continue; }
+      if (c === '\n') { flush(true); continue; }
       if (c !== '%') { lit += c; continue; }
       const spec = fmt[i + 1];
       i++;
       if (spec === '%') { lit += '%'; continue; }
-      // `%c` 不收：jancy 的 char 在这一层是 int，而方言里没有"整数 -> 一个字符的串"
-      // 那一条（`tostr` 会印出数字）。硬接就是给错答案。
-      if (spec !== 'd' && spec !== 'f' && spec !== 's') {
+      // 宽度/精度/`%x`/`%o` 还没有：宽度要"重复一个串"、精度要定死 C 与 JS 的舍入怎么
+      // 对齐、`%x` 要一个对 int64 精确的进制转换。三件都是**运行时里加一个符号**的事，
+      // 记在 ADR-0016 的名单上，下一刀一起做。这里当场报错而不是悄悄忽略掉宽度。
+      if (spec !== 'd' && spec !== 'i' && spec !== 'f' && spec !== 's' && spec !== 'c') {
         this.nope(n, `printf 的转换 '%${spec === undefined ? '' : spec}'`);
         return null;
       }
       if (ai >= vals.length) { this.err(n, 'printf 的实参比格式串里的转换少'); return null; }
       const v = vals[ai];
       ai++;
-      const want = spec === 'f' ? T_REAL : (spec === 's' ? T_STR : T_INT);
+      // `%c`：一个码位 -> 一个字符。方言这一刀把 `(chr E)` 露出来了（另外四条腿早就有它）。
+      if (spec === 'c') {
+        if (v.type !== T_INT) {
+          this.err(args[ai], `'%c' 要 int（jancy 的 char 就是整数），这里是 ${tyName(v.type)}`);
+          return null;
+        }
+        flushLit();
+        pieces.push(`(chr ${v.code})`);
+        continue;
+      }
       // `%d` 收 bool：jancy 的 `bool` 底下是 int8，`printf("%d", b)` 印 1 / 0（C 的样子）。
-      // 这里用刚长出来的 `sel` 把它变成 1 / 0，而不是 `(tostr b)`（那会印 true / false）。
-      if (spec === 'd' && v.type === T_BOOL) {
+      // 这里用 `sel` 把它变成 1 / 0，而不是 `(tostr b)`（那会印 true / false）。
+      if ((spec === 'd' || spec === 'i') && v.type === T_BOOL) {
         flushLit();
         pieces.push(`(tostr (sel ${v.code} (int 1) (int 0)))`);
         continue;
       }
+      const want = spec === 'f' ? T_REAL : (spec === 's' ? T_STR : T_INT);
       if (!sameTy(v.type, want)) {
         this.err(args[ai], `'%${spec}' 要 ${tyName(want)}，这里是 ${tyName(v.type)}`);
         return null;
@@ -650,7 +661,7 @@ class JncLower {
       flushLit();
       pieces.push(v.type === T_STR ? v.code : `(tostr ${v.code})`);
     }
-    if (lit !== '') flushLine();   // 走不到（格式串以 \n 收尾），留着是防手滑
+    flush(false);   // 末尾没换行的那一段走 write
     if (ai !== vals.length) { this.err(n, 'printf 的实参比格式串里的转换多'); return null; }
     return out;
   }

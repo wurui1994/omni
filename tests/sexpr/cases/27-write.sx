@@ -1,0 +1,42 @@
+;; `(write E)` 与 `(chr E)`（ADR-0016 第四刀）。
+;;
+;; `print` 自带换行，而 jancy 的 `printf("%d ", x)` 到处都是 —— 原先"不换行的输出"
+;; 这一格只有 JS 后端有，于是 jancy 那一侧只能把"格式串必须以 \n 收尾"当边界。那是让
+;; 语言向方言妥协，反了。这一条补齐五条腿。
+;;
+;; 这份 case 真正盯住的是**缓冲顺序**：write 与 print 在每条腿上必须写同一个输出缓冲区。
+;; 分开缓冲的话，直写的那段会插到已经缓冲、还没落盘的输出前面去 —— 而那种错只有在
+;; 两种调用交替时才看得见，所以这里刻意交替。
+;;
+;; `(chr E)` 是**借现成的**：Omni 的 `chr(65)` 在另外四条腿上早就有，漏的一直只是
+;; LLVM 那一行 ABI。jancy 的 `%c` 要它。
+(module
+  (main
+    ;; 三次写，一次换行 -> 一行 abc
+    (write (str "a"))
+    (write (str "b"))
+    (print (str "c"))
+
+    ;; 数要先 tostr（write 只有 string 一个签名）
+    (let i int (int 1))
+    (while (bin "<=" (var i) (int 3))
+      (do
+        (write (bin "+" (tostr (var i)) (str " ")))
+        (set i (bin "+" (var i) (int 1)))))
+    (print (str ""))
+
+    ;; chr：72 105 33 是 'H' 'i' '!'
+    (print (bin "+" (bin "+" (chr (int 72)) (chr (int 105))) (chr (int 33))))
+    (let c int (int 65))
+    (print (bin "+" (chr (var c)) (chr (bin "+" (var c) (int 25)))))
+
+    ;; 交替：write / print / write / print，顺序不能乱
+    (write (str "x="))
+    (print (str "1"))
+    (write (str "y="))
+    (write (str "2"))
+    (print (str "!"))
+
+    ;; 空串写进去什么都不该多出来
+    (write (str ""))
+    (print (str "end"))))

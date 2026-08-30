@@ -791,6 +791,21 @@ class CoreLowerer {
       if (v.type.k === 'class') return this.err(n, 'print 不接受类：用 (fld o 字段) 逐个印');
       return { kind: 'ExprStmt', expr: { kind: 'Builtin', name: 'print', args: [v], type: VOID, argType: v.type } };
     }
+    // `(write E)` —— 印一个 string，**不加换行**。
+    //
+    // `print` 自带换行，而 jancy 的 `printf("%d ", x)` 到处都是（ADR-0016 第四刀）。
+    // 原先这一格只有 JS 后端有，于是 jancy 那一侧只能把"格式串必须以 \n 收尾"当边界 ——
+    // 那是让语言向方言妥协，反了。这一条补齐五条腿。
+    //
+    // 只收 string：要印数就先 `(tostr …)`。理由与 print 那条不同 —— print 收所有标量是
+    // 因为它早就那样（Omni 的 `print` 是个多态内建），而这一条是新的，没有历史包袱，
+    // 于是选"只有一种签名"：五条腿各一个符号，而不是各四个。
+    if (h === 'write') {
+      const v = this.expr(n.items[1]);
+      if (v === null) return null;
+      if (v.type !== STRING) return this.err(n, `(write E) 的实参要是 string，这里是 ${coreTypeText(v.type)}（要印数就先 (tostr …)）`);
+      return { kind: 'ExprStmt', expr: { kind: 'Builtin', name: 'write', args: [v], type: VOID, argType: STRING } };
+    }
     if (h === 'expr') {
       const v = this.expr(n.items[1]);
       if (v === null) return null;
@@ -1233,6 +1248,19 @@ class CoreLowerer {
       if (at.type.k !== 'int') return this.err(n.items[2], `(ssub E I N) 的起点要是 int，这里是 ${coreTypeText(at.type)}`);
       if (len.type.k !== 'int') return this.err(n.items[3], `(ssub E I N) 的长度要是 int，这里是 ${coreTypeText(len.type)}`);
       return { kind: 'Builtin', name: 'substr', args: [s, at, len], recvType: STRING, type: STRING };
+    }
+    // `(chr E)` —— 一个码位 -> 一个字符的串。**借现成的**（Omni 的 `chr(65)`，四条腿早就
+    // 在，LLVM 那条腿补一行 ABI）—— 与 slen/ssub/sfind 同一个路子。jancy 的 `%c` 要它。
+    //
+    // 刻意**没有** `(srep S N)`（重复，printf 的宽度要它）：封闭 ABI 里那个
+    // `js_str_repeat` 收发的是 omni_dyn，从这条按类型走的路上用它要装箱拆箱两次，
+    // 而在运行时里加一个 `omni_str_repeat(omni_str, int64_t)` 才是对的形状。
+    // 那是下一刀 —— 宽度与精度一起做。
+    if (h === 'chr') {
+      const v = this.expr(n.items[1]);
+      if (v === null) return null;
+      if (v.type !== INT) return this.err(n, `(chr E) 的实参要是 int，这里是 ${coreTypeText(v.type)}`);
+      return { kind: 'Builtin', name: 'chr', args: [v], argType: INT, type: STRING };
     }
     // `(readtext E)`：把一份文本文件**整份**读成 string。方言里读文件只有这一个口子 ——
     // 被降级的语言那边的文件对象（asy 的 `input(name).line().word()`：分词、注释、eof）

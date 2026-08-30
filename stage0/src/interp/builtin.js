@@ -763,6 +763,9 @@ export function applyBuiltin(I, e, a) {
   }
   switch (e.name) {
     case 'print': printLine(strOf(e.argType.k, a[0])); return undefined;
+    // `(write E)` —— 不补换行（ADR-0016 第四刀）。与 print 共用同一个缓冲区，
+    // 否则直写的那段会插到已经缓冲、还没落盘的输出前面去。
+    case 'write': printRaw(a[0]); return undefined;
     case 'to_string': return strOf(e.argType.k, a[0]);
     case 'to_string_g': return fmtRealG(a[0], a[1]);
     case 'trunc': return truncReal(a[0]);

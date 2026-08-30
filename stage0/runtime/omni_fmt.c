@@ -24,6 +24,12 @@ void omni_print_real(double v) { printf("%.6g\n", v); }
 void omni_print_bool(bool v) { printf("%s\n", v ? "true" : "false"); }
 void omni_print_string(omni_str v) { printf("%.*s\n", (int)v.len, v.p); }
 
+/* `(write E)` —— 印一个 string，**不加换行**（ADR-0016 第四刀）。
+   jancy 的 `printf("%d ", x)` 到处都是，而 print 自带换行 —— 原先这一格只有 JS 后端有，
+   于是那一侧只能把"格式串必须以 \n 收尾"当边界，那是让语言向方言妥协。
+   只有 string 一个签名：要印数就在方言那一层先 (tostr …)。 */
+void omni_write_string(omni_str v) { printf("%.*s", (int)v.len, v.p); }
+
 /* `(readtext E)`：把一份文本文件**整份**读进来。核心方言里读文件只有这一个口子 ——
    asy 的 `input(name)` 那一族（line/word 的分词、注释、eof）都在被降级的语言那一侧搭，
    这里只管把字节拿到手。一次读完（不流式），与 omni_js_fs_read_text 同一条理由：

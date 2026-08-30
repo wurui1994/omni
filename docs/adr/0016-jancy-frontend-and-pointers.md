@@ -234,6 +234,41 @@ jancy 的完整语法与形式，不是"jancy 里能塞进现有方言的那个�
 自举、`tests/jit`、`tests/mir`、`tests/llvm`——这一刀没动 asy，MIR 那一格加的是一条
 表驱动的 op（`PEQ`），`tests/sexpr` 的五方一致已经把它走过一遍。
 
+### 第四刀：printf 那一格 —— 方言长出"不换行的输出"
+
+第三刀留下的名单第一条：`printf` 不以 `\n` 收尾的写法，与 `%c`。两条原先都被拒了，
+理由分别是"方言里没有不换行的输出"与"方言里没有整数 -> 一个字符的串"。按第三刀立下的
+纪律，这是**方言的欠账**，不是 jancy 的边界。
+
+- **`(write E)`** —— 印一个 string，不加换行。新符号，五条腿各一份：JS 那边接现成的
+  `$print_raw`、解释器那边接现成的 `printRaw`（两者本来就与 print 共用缓冲区）、
+  C 那边新加 `omni_write_string`、LLVM 那边一行 `write.string` ABI。
+  **只有 string 一个签名**：要印数就先 `(tostr …)`。与 print 收所有标量不同 ——
+  那一条有历史（Omni 的 `print` 本来就是多态内建），这一条是新的，于是选"五条腿各一个
+  符号"而不是"各四个"。
+- **`(chr E)`** —— 码位 -> 一个字符的串。**没有新实现**：另外四条腿早就有它（Omni 的
+  `chr(65)`），漏的一直只是 LLVM 那一行 ABI。与 `slen`/`ssub`/`sfind` 同一个路子。
+
+jancy 侧的 printf 于是变成：按 `\n` 把格式串切段，带换行的段发 `print`，末尾不带换行的
+那段发 `write`。收 `%d` / `%i` / `%f` / `%s` / `%c` / `%%`。
+
+**这一刀真正要盯的是缓冲顺序**，不是"能不能印出来"。`write` 与 `print` 必须写同一个
+输出缓冲区——分开缓冲的话，直写的那段会插到已经缓冲、还没落盘的输出前面去，而那种错
+只在两种调用**交替**时才看得见。所以 `tests/sexpr/cases/27-write.sx` 与
+`tests/jnc/cases/05-printf.jnc` 都刻意交替调用。
+
+**刻意没做**：`(srep S N)`（重复一个串，printf 的宽度要它）。封闭 ABI 里确实有个
+`js_str_repeat`，但它收发的是 `omni_dyn`——从这条按类型走的路上用它要装箱拆箱两次。
+对的形状是在运行时里加 `omni_str_repeat(omni_str, int64_t)`。它与 `%.Nf`（精度：要先
+定死 C 的 `%.*f` 与 JS 的 `toFixed` 在舍入上怎么对齐）、`%x`/`%o`（要一个对 int64
+**精确**的进制转换——现有的 `toString(radix)` 只挂在 real 上，大整数会丢精度）是同一类
+问题：都要先做一个数值上的决定。那是下一刀，一起做。
+
+**跑过的轴**：`tests/jnc`（10/0，`bad/printf-tail` 转成了 `cases/05-printf`）、
+`tests/sexpr`（60 -> 61，新增 `27-write.sx`）。**没跑的**：`tests/asy` 全部、
+`sweep.js`、`svg.js`、自举、`tests/jit`、`tests/mir`、`tests/llvm`——这一刀加的是一条
+builtin 与一行 ABI，`tests/sexpr` 的五方一致把两者都走过了。
+
 ## 后果与代价
 
 - 方言从"没有可算术的引用"变成"有"。这一格会渗到 MIR 与四个后端，改不回去。
