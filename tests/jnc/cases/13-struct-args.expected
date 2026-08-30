@@ -1,0 +1,11 @@
+in show v=100 2
+after show a=1 2
+sum=3
+boxSum=61 bx=7 3 4
+t=5 6
+t=8 9
+field=12
+u=16 18 t=8 9
+through=10
+w=1 16 18
+selfish s=16 18 t=8 9

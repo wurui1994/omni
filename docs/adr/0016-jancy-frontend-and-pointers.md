@@ -666,12 +666,70 @@ jancy 的 struct 是 POD **值**类型，所以 `t = s` 抄一份、不共享同
 相反（那是**给错答案**，不是拒不了），所以明着拒，写 `S*` 传。第三条是结构体的花括号初值
 （`S s = { 1, 2 }` 与 `new S { m_y = 2000 }`，decl_curly.rst 那一节，位置项与命名项各要一段）。
 
+（前两条第十三刀做掉了 —— 「谁来开那一格」的答案是**被调自己开**，见下一节。剩花括号初值一条。）
+
 **期望输出的出处**：C，一份 `cc -O0` 编出来的程序抄在 `cases/12-structs.jnc` 的头注里，9 行
 逐字节相同。C 那份里两处补了 `= { 0, 0 }`：`Inner a;` 与 `Inner arr[3];` 的零在 C 里是未定值，
 在 jancy 那边是定义好的（"zeros every variable before any user code can touch it"）。
 
 **跑过的轴**：`tests/jnc`（23/0，新增 `cases/12-structs` 与 `bad/struct-param`）、
 `tests/sexpr`（63/0）、`tests/glr`（20/0）。
+**没跑的**：`tests/asy` 全部（这一刀只碰 `frontend-jnc/lower.js`）、`sweep.js`、`svg.js`、自举、
+`tests/jit`、`tests/mir`、`tests/llvm`。`npm run lint` 这台机器上没有 typescript，跑不了。
+
+### 第十三刀：结构体按值传与按值回 —— 抄一份挪到被调那一侧
+
+上一刀把两条按值的路记成"缺调用约定那一半"。真正缺的只有一句话：**谁来开被调那一格。**
+一旦答案定成"被调自己开"，方言又是一个字没改。
+
+**形参。** 签名里写 `(v (ptr P))` —— 传过去的是调用方那段内存的地址。函数一进门先开一格自己的、
+逐字段抄进来，然后 `alias` 把这个名字改指自己那格，之后函数体里所有 `v` 都落在 `v$v` 上：
+
+```
+(fn show ((v (ptr P))) void
+  (let v$v (ptr P) (pnew (ptr P) (int 1)))
+  (pstore (pfield (var v$v) x) (pload (pfield (var v) x)))
+  (pstore (pfield (var v$v) y) (pload (pfield (var v) y)))
+  (pstore (pfield (var v$v) x) (int 100))          ;; 改的是自己那份
+  …)
+```
+
+这与第九刀"被取地址的标量形参提一份拷贝"是同一个道理，只是抄的东西大一点 —— `pre` 那一段前奏本来
+就在，加一个分支而已。嵌套的结构体字段由 `copyAgg` 递归下去（`boxSum` 里能看到 `b.p.x` 那两层
+`pfield`）。
+
+**为什么是被调那一侧，不是调用方那一侧。** 调用方那一侧要"先开一格临时的、抄进去、再把地址当实参"
+——这是三条**语句**，而实参是在**表达式**里算的。这一层的表达式降级返回的是一个字符串（`{code, type}`），
+没有"顺带发几条语句"的通道。改成有那个通道是一次贯穿全文件的重构；挪到被调那一侧是一个分支。
+两者的可观察语义相同（改形参不影响调用方），所以选便宜的那个。
+
+**返回。** 返回类型写 `(ptr P)`，`return r;` 就是 `(ret (var r))` —— 回的是被调自己那格的地址。
+`retStmt` 与 `callExpr` 因此**一个字没改**：`expr()` 对结构体值给出的 `code` 本来就是地址，`sameTy`
+本来就比结构体名。抄一份由**接收**那一侧做（声明、赋值），而第十二刀留下的 `aggSource()` 保证一个
+`(call …)` 只算一次：
+
+```
+(let $s1 (ptr P) (call make (int 8) (int 9)))     ;; 先钉成一格
+(pstore (pfield (var t) x) (pload (pfield (var $s1) x)))
+(pstore (pfield (var t) y) (pload (pfield (var $s1) y)))
+```
+
+`s = twice(s)` 也因此对：右边先算完钉住，才逐字段抄回左边。
+
+**唯一新长出来的一格：右值上的 `.`。** `make(11, 12).y` 以前会撞在 `lvalue` 的"这里要一个可以赋值
+的位置"上 —— 那是个**误报**，jancy 那边它合法。结构体的值就是一段内存的地址，所以取字段与左值那一侧
+是同一句 pfield，只是这段内存没名字：`(pload (pfield (call make (int 11) (int 12)) y))`。
+
+**一处刻意不抄的**：`g(f())` 把 `f` 那格的地址直接当实参给 `g`，中间不抄 —— 因为 `g` 进门就会抄一份，
+再抄一次是白抄。可观察语义相同（那格临时内存没有别的人指它）。
+
+**期望输出的出处**：C，一份 `cc -O0` 编出来的程序抄在 `cases/13-struct-args.jnc` 的头注里，11 行
+逐字节相同。覆盖：改形参不动调用方、嵌套结构体形参、按值回进声明、按值回进赋值、右值上的 `.`、
+一串穿过去（`sum(twice(make(2, 3)))`）、自己喂自己（`s = twice(s)`）。
+
+**跑过的轴**：`tests/jnc`（23/0，新增 `cases/13-struct-args`，删掉 `bad/struct-param` —— 那条边界
+不在了，本体升成 cases，与 `bad/addr-of` -> `cases/09-addr` 同一个先例）、`tests/sexpr`（63/0）、
+`tests/glr`（20/0）。
 **没跑的**：`tests/asy` 全部（这一刀只碰 `frontend-jnc/lower.js`）、`sweep.js`、`svg.js`、自举、
 `tests/jit`、`tests/mir`、`tests/llvm`。`npm run lint` 这台机器上没有 typescript，跑不了。
 

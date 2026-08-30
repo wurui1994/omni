@@ -34,7 +34,9 @@
 // 见 tArr 与 localDeclCurly 那两段）、**模块级变量**（`int g = 5;` / `static int g;` /
 // `int t[3] = { … }`，降成方言的 `(global …)` 加 `(main …)` 开头的几句赋值，见 globalDecl）、
 // **值语义的结构体**（`S s;` / `S t = s;` / `t = s` / `s.f` / `s.in.y` / `&s` / `S a[3]` /
-// 结构体的模块级变量 —— 每格是一段自己的 `pnew` 内存，抄一份由 copyAgg 逐字段做）。
+// 结构体的模块级变量 —— 每格是一段自己的 `pnew` 内存，抄一份由 copyAgg 逐字段做）、
+// **结构体按值传与按值回**（`void f(S v)` / `S g()` / `S t = g()` / `t = g()` / `g().f` ——
+// 抄的那一下在**被调**那一侧，见 fnDef 的形参前奏那一段）。
 //
 // ## 纪律：**jancy 不向方言妥协**
 //
@@ -44,6 +46,8 @@
 // 这一层把它显式写出来（`n != 0` / `!pisnull p`）就对了。定宽整数也是这一类：位宽是
 // 这一层的账，回卷是三条已有算符的合成，方言一个字都不用改。取地址与定长数组也一样 ——
 // 前者照 jancy 自己的办法把局部量提到堆上，后者就是一段 `pnew` 出来的内存，两刀方言都没动。
+// 结构体那两刀（值语义、按值传与按值回）也在同一条上：一格结构体就是一段 `pnew` 的内存，
+// 「抄一份」是逐字段的 pload/pstore，而按值传把那一下挪到被调那一侧就不用动调用约定。
 //
 // 还没长出来、因此**当场报错**的（每一条都记着该怎么长，不是"不收"）：
 //   - `%*d`（宽度从实参来）—— 那要在运行期才知道宽度，与"格式串必须是字面量"同一处边界。
@@ -64,9 +68,7 @@
 //     的局部量同一格）。还有一条不是存储类而是查名字：**调用后面定义的函数**。jancy 的
 //     命名空间成员不看顺序，而这一层的函数是按源码顺序降的（模块级变量与命名类型已经
 //     分两遍先成型了，见 run）。
-//   - 结构体那一族里剩下的三条：按值传形参、按值回返回值（两条都要**调用约定**那一半 ——
-//     谁来开被调那一格、什么时候抄；直接把地址传过去就变成按引用，会给错答案，所以明着拒，
-//     `bad/struct-param.jnc` 是它的本体）、结构体的花括号初值 `S s = { 1, 2 }` 与
+//   - 结构体那一族里剩下的一条：结构体的花括号初值 `S s = { 1, 2 }` 与
 //     `new S { m_y = 2000 }`（decl_curly.rst 那一节，位置项与命名项各要一段）。
 //   - `printf` 之外的标准库（`std.*`、`io.*`、`gc.*`）
 //   - 格式化字面量 `$"…"`、多行字面量、正则 switch
@@ -259,6 +261,7 @@ class JncLower {
     this.lifted = new Set();   // 这个函数里被取过地址的局部量名（ADR-0016 第九刀）
     this.globals = new Map();  // 模块级变量：名字 -> 类型（第十一刀）
     this.globalInit = [];      // 模块级变量的初值语句，按声明序，跑在 main 的体之前
+    this.alias = new Map();    // 名字 -> 方言里的名字（结构体形参那一份拷贝，第十三刀）
   }
 
   err(node, msg) {
@@ -329,6 +332,13 @@ class JncLower {
   /** 提上去的那一格在方言里的名字。`$` 不在 jancy 的标识符里，所以撞不上用户的名字。 */
   cellName(name) { return `${name}$c`; }
 
+  /** 这个 jancy 名字在方言里叫什么。只有结构体形参不一样：它在函数开头被抄进了另一格
+   *  （第十三刀），从那以后所有对它的读写都走那一格。 */
+  dialectName(name) {
+    const a = this.alias.get(name);
+    return a === undefined ? name : a;
+  }
+
   /**
    * 结构体的**值语义**：逐字段抄一遍（第十二刀）。
    *
@@ -339,6 +349,18 @@ class JncLower {
    * 为什么不用一条"整块搬"的方言形式：那要 `pload` / `pstore` 能搬多个字，而这一层能自己
    * 把它拆开 —— 与回卷、真值化同一类，jancy 侧的一次隐式动作在这一层显式写出来。
    */
+  /**
+   * 抄之前先把源头钉住（第十三刀）。`copyAgg` 会把源头的地址写进每个字段一次，所以源头
+   * 只能是"求一次值就够"的东西。`(var x)` 本来就是；`(call f)` 不是 —— 直接塞进去会把
+   * 那次调用发 N 遍。所以别的形状先落进一格临时量。
+   */
+  aggSource(code, structName, pad, out) {
+    if (/^\(var [^ ()]+\)$/.test(code)) return code;
+    const t = `$s${this.tmp++}`;
+    out.push(`${pad}(let ${t} (ptr ${structName}) ${code})`);
+    return `(var ${t})`;
+  }
+
   copyAgg(dstCode, srcCode, name, pad, out) {
     const fs = this.structs.get(name);
     if (fs === undefined) return this.err(null, `内部错误：没有结构体 '${name}'`);
@@ -459,7 +481,8 @@ class JncLower {
         if (initNode !== null) {
           const v = this.globalValue(initNode, info.type);
           if (v === null) continue;
-          this.copyAgg(`(var ${info.name})`, v, info.type.name, '    ', this.globalInit);
+          const src = this.aggSource(v, info.type.name, '    ', this.globalInit);
+          this.copyAgg(`(var ${info.name})`, src, info.type.name, '    ', this.globalInit);
         }
         continue;
       }
@@ -730,13 +753,9 @@ class JncLower {
       // 数组形参（第十刀的边界）。C 里 `void f(int a[3])` 就是 `int*`，jancy 保留数组类型
       // 并要一次数组转换 —— 那正是它自己未实现的那一格。要传数组就写 `int* a`。
       if (isArr(fi.type)) { this.nope(f, `数组形参（'${tyName(fi.type)}'）—— 写成 ${tyName(fi.type.el)}* 传`); return null; }
-      // 结构体按值传/按值回（第十二刀的边界）。抄一份的机制这一层有（copyAgg），缺的是
-      // "调用处与被调处各自那一格谁来开" —— 那要动到调用约定，单独一刀。写 `S*` 传。
-      if (isStruct(fi.type)) { this.nope(f, `结构体形参（'${tyName(fi.type)}' 按值传）—— 写成 ${tyName(fi.type)}* 传`); return null; }
       ps.push(fi);
     }
     if (isArr(info.type)) { this.nope(n, `返回数组（'${tyName(info.type)}'）`); return null; }
-    if (isStruct(info.type)) { this.nope(n, `返回结构体（'${tyName(info.type)}' 按值回）—— 回 ${tyName(info.type)}*`); return null; }
     // `int main()` 是入口：降成方言的 `(main …)`。jancy 的 main 回 int，而方言的入口
     // 不回值 —— 那个返回值是给外面的退出码，这一层没有它，所以 `return 0` 就是 `(ret)`。
     const isMain = info.name === 'main' && ps.length === 0;
@@ -751,14 +770,33 @@ class JncLower {
     this.collectAddrTaken(n.items[3], taken);
     const saveLifted = this.lifted;
     this.lifted = taken;
+    const saveAlias = this.alias;
+    this.alias = new Map();
     // 形参被取地址时提**它的一份拷贝**（C 的语义：形参就是个局部量，改它不影响调用方）
     const pre = [];
     for (const p of ps) {
       this.push(p.name, p.type);
+      // 结构体形参是**按值**传的（第十三刀）：进来的是调用方那一段的地址，所以函数开头
+      // 先开一格自己的、把它抄进来，之后这个名字一律指那一格。改形参因此不动调用方 ——
+      // 与上面"被取地址的标量形参提一份拷贝"是同一个道理，只是抄的东西大一点。
+      if (isStruct(p.type)) {
+        const v = `${p.name}$v`;
+        const st = slotText(p.type);
+        pre.push(`    (let ${v} ${st} (pnew ${st} (int 1)))`);
+        if (this.copyAgg(`(var ${v})`, `(var ${p.name})`, p.type.name, '    ', pre) === null) {
+          this.lifted = saveLifted;
+          this.alias = saveAlias;
+          this.scopes = [];
+          return null;
+        }
+        this.alias.set(p.name, v);
+        continue;
+      }
       if (!taken.has(p.name)) continue;
       if (!this.liftable(p.type)) {
         this.nope(n, `对 ${tyName(p.type)} 的形参取地址（要方言能把它当内存里的值，见 liftable 那处）`);
         this.lifted = saveLifted;
+        this.alias = saveAlias;
         this.scopes = [];
         return null;
       }
@@ -773,11 +811,12 @@ class JncLower {
     this.retTy = save;
     this.scopes = [];
     this.lifted = saveLifted;
+    this.alias = saveAlias;
     if (body === null) return null;
     if (pre.length !== 0) body = `${pre.join('\n')}\n${body}`;
     if (isMain) { this.mainBody = body; return null; }
-    const sig = ps.map((p) => `(${p.name} ${tyText(p.type)})`).join(' ');
-    this.decls.push(`  (fn ${info.name} (${sig}) ${tyText(info.type)}\n${body})`);
+    const sig = ps.map((p) => `(${p.name} ${slotText(p.type)})`).join(' ');
+    this.decls.push(`  (fn ${info.name} (${sig}) ${slotText(info.type)}\n${body})`);
     return null;
   }
 
@@ -890,6 +929,8 @@ class JncLower {
         }
         this.push(info.name, info.type);
         const st = slotText(info.type);
+        // 源头先钉住（要在目标那一格之前发：`S t = t;` 里右边那个 t 指外层那个）
+        if (srcCode !== null) srcCode = this.aggSource(srcCode, info.type.name, pad, out);
         out.push(`${pad}(let ${info.name} ${st} (pnew ${st} (int 1)))`);
         if (srcCode !== null) {
           if (this.copyAgg(`(var ${info.name})`, srcCode, info.type.name, pad, out) === null) return null;
@@ -1018,7 +1059,7 @@ class JncLower {
       if (isArr(t)) return this.nope(n, `给整个数组赋值（jancy 自己也只在常量折叠那条路上有）`);
       // 结构体那一格里放的是地址，所以它是 `agg`：读就是那个地址，写要逐字段抄（第十二刀）。
       // 这一条要在 lifted 之前 —— 结构体本来就是一段内存，`&s` 不用再提一次。
-      if (isStruct(t)) return { kind: 'agg', code: `(var ${nm})`, type: t };
+      if (isStruct(t)) return { kind: 'agg', code: `(var ${this.dialectName(nm)})`, type: t };
       // 提到堆上的那些名字本身就是一格内存，所以它是 `ptr` 而不是 `var` ——
       // 于是读写自动走 pload / pstore，而 `&x` 就是它的 code（见 expr0 的 addr）。
       // **只有局部量**有那一格：模块级变量在方言里是一个全局，取不到地址（见 addrOf）。
@@ -1109,7 +1150,8 @@ class JncLower {
         // 结构体是**值**：`t = s` 抄一份，不是共享同一段（第十二刀）
         if (lv.kind === 'agg') {
           const out = [];
-          return this.copyAgg(lv.code, v.code, lv.type.name, pad, out);
+          const src = this.aggSource(v.code, lv.type.name, pad, out);
+          return this.copyAgg(lv.code, src, lv.type.name, pad, out);
         }
         return [`${pad}${this.store(lv, v.code)}`];
       }
@@ -1582,7 +1624,7 @@ class JncLower {
           return this.err(n, `未声明的变量 '${nm}'`);
         }
         // 结构体那一格里放的就是地址（第十二刀），所以它不走 lifted 那条路。
-        if (isStruct(r.type)) return { code: `(var ${nm})`, type: r.type };
+        if (isStruct(r.type)) return { code: `(var ${this.dialectName(nm)})`, type: r.type };
         // 提到堆上的那些名字要 pload 一次（第九刀）。模块级变量没有那一格（第十一刀）。
         if (!r.global && this.lifted.has(nm)) {
           return { code: `(pload (var ${this.cellName(nm)}))`, type: r.type };
@@ -1598,6 +1640,14 @@ class JncLower {
         const ob = n.items[1];
         if (isList(ob) && head(ob) === 'indirect') {
           return this.load(n, this.fieldLv(n, ob.items[1], n.items[2]));
+        }
+        // 右值上的 `.`（`f().x`，第十三刀）。回来的结构体也是一段内存的地址，所以取字段与
+        // 左值那一侧是同一句 pfield —— 只是这段内存没名字，读完就没人再指它。
+        if (isList(ob) && head(ob) === 'call') {
+          const o = this.expr(ob);
+          if (o === null) return null;
+          if (!isStruct(o.type)) return this.err(n, `'.' 的左边不是结构体：${tyName(o.type)}`);
+          return this.load(n, this.memberOf(n, o.code, o.type.name, n.items[2]));
         }
         // `s.f`：与 `p->f` 落在同一句 pfield 上（第十二刀，见 lvalue 的 field 分支）
         return this.load(n, this.lvalue(n));

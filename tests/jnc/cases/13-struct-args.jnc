@@ -1,0 +1,150 @@
+// 结构体按值传与按值回（ADR-0016 第十三刀）。jancy 的 struct 是 POD **值**类型
+// （type_struct.rst），所以形参是调用方那一份的**拷贝**，返回值也是一份拷贝。
+//
+// 这一层的做法：抄的那一下挪到**被调**那一侧。签名里形参写成 `(ptr S)`（传的是调用方
+// 那段内存的地址），函数一进门先开一格自己的、逐字段抄进来，之后这个名字一律指自己那格。
+// 于是改形参碰不到调用方。返回同理 —— 回的是被调自己那格的地址，抄由赋值/声明那一侧做，
+// 而 aggSource 保证一个 call 只算一次。方言又是一个字没改。
+//
+// 期望输出的出处：**C**，下面这一份 `cc -O0` 编出来的程序，逐字节相同。
+//
+//   #include <stdio.h>
+//   struct P { int x; int y; };
+//   struct Box { int tag; struct P p; };
+//   void show(struct P v) {
+//       v.x = 100;
+//       printf("in show v=%d %d\n", v.x, v.y);
+//   }
+//   int sum(struct P v) { return v.x + v.y; }
+//   int boxSum(struct Box b) {
+//       b.p.x = 50;
+//       return b.tag + b.p.x + b.p.y;
+//   }
+//   struct P make(int a, int b) {
+//       struct P r;
+//       r.x = a; r.y = b;
+//       return r;
+//   }
+//   struct P twice(struct P v) {
+//       v.x = v.x * 2; v.y = v.y * 2;
+//       return v;
+//   }
+//   struct Box wrap(int t, struct P v) {
+//       struct Box b;
+//       b.tag = t; b.p = v;
+//       return b;
+//   }
+//   int main() {
+//       struct P a;
+//       a.x = 1; a.y = 2;
+//       show(a);
+//       printf("after show a=%d %d\n", a.x, a.y);
+//       printf("sum=%d\n", sum(a));
+//       struct Box bx;
+//       bx.tag = 7; bx.p.x = 3; bx.p.y = 4;
+//       printf("boxSum=%d bx=%d %d %d\n", boxSum(bx), bx.tag, bx.p.x, bx.p.y);
+//       struct P t = make(5, 6);
+//       printf("t=%d %d\n", t.x, t.y);
+//       t = make(8, 9);
+//       printf("t=%d %d\n", t.x, t.y);
+//       printf("field=%d\n", make(11, 12).y);
+//       struct P u = twice(t);
+//       printf("u=%d %d t=%d %d\n", u.x, u.y, t.x, t.y);
+//       printf("through=%d\n", sum(twice(make(2, 3))));
+//       struct Box w = wrap(1, u);
+//       printf("w=%d %d %d\n", w.tag, w.p.x, w.p.y);
+//       struct P s = t;
+//       s = twice(s);
+//       printf("selfish s=%d %d t=%d %d\n", s.x, s.y, t.x, t.y);
+//       return 0;
+//   }
+//
+// C 那份里 `struct P r;` / `struct Box b;` / `struct P a;` 的未定值这边不用管：jancy
+// 那边它们是零（type_ptr_data.rst："Jancy compiler zeros every variable before any user
+// code can touch it"），而这几处每个字段都在读之前写过了，所以两边同值。
+struct P {
+    int x;
+    int y;
+}
+
+struct Box {
+    int tag;
+    P p;
+}
+
+void show(P v) {
+    // 改形参：调用方那份不动
+    v.x = 100;
+    printf("in show v=%d %d\n", v.x, v.y);
+}
+
+int sum(P v) {
+    return v.x + v.y;
+}
+
+int boxSum(Box b) {
+    // 嵌套的字段也是自己那份
+    b.p.x = 50;
+    return b.tag + b.p.x + b.p.y;
+}
+
+P make(int a, int b) {
+    P r;
+    r.x = a;
+    r.y = b;
+    return r;
+}
+
+P twice(P v) {
+    v.x = v.x * 2;
+    v.y = v.y * 2;
+    return v;
+}
+
+Box wrap(int t, P v) {
+    Box b;
+    b.tag = t;
+    b.p = v;
+    return b;
+}
+
+int main() {
+    P a;
+    a.x = 1;
+    a.y = 2;
+    show(a);
+    printf("after show a=%d %d\n", a.x, a.y);
+    printf("sum=%d\n", sum(a));
+
+    Box bx;
+    bx.tag = 7;
+    bx.p.x = 3;
+    bx.p.y = 4;
+    printf("boxSum=%d bx=%d %d %d\n", boxSum(bx), bx.tag, bx.p.x, bx.p.y);
+
+    // 按值回：声明处抄一份
+    P t = make(5, 6);
+    printf("t=%d %d\n", t.x, t.y);
+
+    // 按值回：赋值处抄一份
+    t = make(8, 9);
+    printf("t=%d %d\n", t.x, t.y);
+
+    // 右值上的 `.`
+    printf("field=%d\n", make(11, 12).y);
+
+    P u = twice(t);
+    printf("u=%d %d t=%d %d\n", u.x, u.y, t.x, t.y);
+
+    // 一串穿过去：make 的那份进 twice，twice 的那份进 sum
+    printf("through=%d\n", sum(twice(make(2, 3))));
+
+    Box w = wrap(1, u);
+    printf("w=%d %d %d\n", w.tag, w.p.x, w.p.y);
+
+    // 自己喂自己：右边算完才抄回左边
+    P s = t;
+    s = twice(s);
+    printf("selfish s=%d %d t=%d %d\n", s.x, s.y, t.x, t.y);
+    return 0;
+}
