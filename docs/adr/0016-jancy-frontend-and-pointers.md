@@ -458,6 +458,12 @@ double 就是 `m * 2^e`（m、e 都是整数），所以 `|x| * 10^N` 是一个�
 明着拒而不是忽略掉：忽略的话 `%.3d` 会印 `7` 而 C 印 `007`，那又是一处静默的差别
 （`bad/int-precision.jnc` 是它的本体）。
 
+> **第二十七刀更正**：两条都落了，`bad/int-precision.jnc` 删掉，边界收窄到 `%.*f`
+> （`bad/printf-star-prec-f.jnc`）。`%*d` 那条的**理由记错了** —— 补空格那一步本来就是运行期
+> 算的，`padTo` 的宽度从数字换成一段方言代码就够，一个零件都不用新加。另外这一节说的
+> "照 C 的 printf"当时没写出处；第二十七刀量到 jancy 的 printf **就是** C 库的 `vsnprintf`
+> （`jnc_std_StdLib.cpp:733` -> `axl_sl_StringDetails.h:390`），所以孪生程序是一等的出处。
+
 **跑过的轴**：`tests/jnc`（15/0，新增 `cases/08-fixed` 与 `bad/int-precision`）、
 `tests/sexpr`（63/0，新增 `cases/29-sfix`）、`tests/glr`（20/0）、`tests/asy`。asy 那条这次
 **要跑** —— 负零那一处改的是四个后端共用的 real 常量，不是 jancy 独有的那一格。
@@ -1360,6 +1366,51 @@ static 局部量就是同一件事。两处 C 说不出来的写法在孪生里�
 **没跑的**：`tests/sexpr`、`tests/glr`、`tests/asy` —— 这一刀又只动了
 `frontend-jnc/lower.js`（加 `tests/jnc/run.js` 的头注释）；自举、`tests/jit`、`tests/mir`、
 `tests/llvm`；`npm run lint` 这台机器上没有 typescript。
+
+### 第二十七刀：printf 的精度与 `*` —— 债务表上那两条，出处是 C 库自己
+
+第八刀做了 `%f` 的精度，同时把"整数与 `%s` 上的精度"记成边界（`bad/int-precision.jnc`），
+理由是"与小数无关的两件事，各要自己的一段"。`%*d` 也记着，理由是"宽度运行期才知道，
+与'格式串必须是字面量'同一处"。这一刀把两条都做掉，顺带把**出处**这件事说清。
+
+**出处升级成一等。** 以前 printf 这一族的期望输出写的是"照 C 的 printf"。这一刀去量了
+jancy 到底怎么印：`jnc_std_StdLib.cpp:733` 的 `std::printf` 只有一句
+`sl::formatString_va(formatString, va)`，而那一路（`axl_sl_StringDetails.h:390/401`）就是
+**C 库的 `vsnprintf`**。所以 jancy 的 printf 语义**逐字**是 C 的，`cc -O0` 的孪生程序不是
+"近似"而是同一份实现 —— 这一族的所有期望值都可以这么定，而且是可复核的。
+
+**`%*d` 那条记错了。** "宽度运行期才知道"确实对，但补空格那一步本来就是运行期算的
+（`(srep (str " ") (bin "-" w (slen s)))`）—— `w` 从一个字面量换成一段表达式，一个零件都不用
+新加。所以 `padTo` 的 `w` 参数从数字改成一段方言代码，`%*d` 就通了。C 的一条边角也照收：
+**宽度实参是负数等于写了 `-` 标志、宽度取绝对值**（C99 7.19.6.1），那是运行期一个 `sel`。
+
+**整数上的精度不是"零补到宽度"。** `%.3d` 是"**至少**三位**数字**"—— 零补在符号**后面**，
+而且它与宽度是两件事：`%8.3d` 先补到三位数字、再补到八个字符宽。所以它不能借 `padTo`
+（那一格算的是**总长**），得单独一段 `precInt`。两条边角：精度是 0 而值是 0 时**一个字符都
+不印**（C99 7.19.6.1 那句 "The result of converting a zero value with a precision of zero is
+no characters."）；整数上**一写精度 `0` 标志就作废**（`%08.3d` 补的是空格）。后一条还牵出一处
+连带的：宽度 1 平时不用补，可精度能把那段变成空串，所以 `%1.0d` 印 0 得是一格空格。
+
+**`.*` 的负数等于"没写精度"。** 整数那一路自己就成立（负的个数进 `srep` 回空串），`%s` 那一路
+要显式挡一下（`(ssub …)` 不夹范围，越界是运行期错误）。而 `%0*.*d` 是唯一要**运行期判 `0`
+标志**的一格：精度一写出来 `0` 就作废，而实参是负数等于精度没写、那时 `0` 又活着 ——
+`padTo` 的 `zero` 因此收三种值（`false` / `true` / 一段运行期的 bool）。`sel` 降成 Ternary
+（两支各一个基本块），所以嵌一层不会把两边都算一遍。
+
+**两条拒得起的。** `%.*f` 卡在**方言这一侧**：`(sfix E N)` 现在要求 N 写成字面量
+（`sexpr/lower.js` 那句"(sfix E N) 的位数要写成字面量 (int N)"），要接就得动方言的类型检查
+加五条腿上四份实现，单独一刀（`bad/printf-star-prec-f.jnc`）。`%c` 上的精度在 C 里是
+**未定义行为**（clang 直说 "precision used with 'c' conversion specifier, resulting in
+undefined behavior"）—— 没有可对的答案，所以拒；这一条不是"我们少做一件事"。
+
+**期望输出的出处**：`cases/26-printf-prec.jnc`，一份 `cc -O0` 的孪生程序，逐字节相同（五条腿
+也各自与它逐字节相同）。孪生里只删掉了 `%.3c` 那一行 —— clang 明说它是 UB，UB 不能当出处。
+
+**跑过的轴**：`tests/jnc`（37/0，新增 `cases/26-printf-prec` 与 `bad/printf-star-prec-f`，
+删掉 `bad/int-precision`）。
+**没跑的**：`tests/sexpr`、`tests/glr`、`tests/asy` —— 这一刀又只动了
+`frontend-jnc/lower.js`（加 `tests/jnc/run.js` 的头注释），方言一个字没改；自举、`tests/jit`、
+`tests/mir`、`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
 
 ## 后果与代价
 

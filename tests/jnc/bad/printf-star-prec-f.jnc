@@ -1,0 +1,16 @@
+// `%.*f`：小数位数从实参来。第二十七刀把整数与 `%s` 上的精度、以及 `%*d` / `%.*d` /
+// `%.*s` 都接了，剩下的就是这一条 —— 它卡在**方言这一侧**，不是 jancy 那一侧。
+//
+// jancy 那边是通的：它的 printf 就是 C 库的 vsnprintf（jnc_std_StdLib.cpp:733 一句
+// `sl::formatString_va`，落到 axl_sl_StringDetails.h:390/401 的 vsnprintf）。
+//
+// 我们这边 `%f` 降成方言第八刀长出来的 `(sfix E N)`，而 `(sfix E N)` 现在要求 N 写成
+// **字面量**（sexpr/lower.js 那句"(sfix E N) 的位数要写成字面量 (int N)"）。要接就得让
+// sfix 收一个运行期的 N —— 那要动方言的类型检查加五条腿上四份实现（JS 后端、C 后端、
+// LLVM 后端、两个解释器），单独一刀。
+//
+// 拒在这儿而不是悄悄按 6 位印：那会给错答案（`printf("%.*f", 2, 1.5)` 该印 `1.50`）。
+int main() {
+    printf("%.*f\n", 2, 1.5);
+    return 0;
+}

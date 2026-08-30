@@ -87,9 +87,9 @@
 // 五条腿各加一格读写与一格零值。这几条正是这份纪律说的"动方言"。
 //
 // 还没长出来、因此**当场报错**的（每一条都记着该怎么长，不是"不收"）：
-//   - `%*d`（宽度从实参来）—— 那要在运行期才知道宽度，与"格式串必须是字面量"同一处边界。
-//   - 整数与 `%s` 上的精度（`%.3d` 是"至少三位数字"、`%.5s` 是"最多五个字符"）—— 与小数
-//     无关的两件事，各要自己的一段。
+//   - `%.*f`（小数位数从实参来）—— 卡在**方言这一侧**：`(sfix E N)` 现在要求 N 写成字面量
+//     （见 sexpr/lower.js 那句话）。整数与 `%s` 上的精度、`%*d` / `%.*d` / `%.*s` 第二十七刀
+//     都收了；`%c` 上的精度**是** C 的未定义行为，那一条拒得起。
 //   - `unsigned` —— 要无符号那一半的位宽规则：回卷变成 `x & M`（不摊符号位），
 //     `/` `%` `>>` `<` 都得换成无符号那一版。以前是静默忽略的，现在明着拒
 //     （见 tests/jnc/bad/unsigned.jnc）。
@@ -130,9 +130,18 @@
 // **不补换行**。这一层按 `\n` 把格式串切成若干段，带换行的段发 `(print …)`（它自带换行），
 // 末尾不带换行的那段发 `(write …)`。两者在每条腿上共用同一个输出缓冲区，所以交替调用
 // 顺序不会乱。收 `%d` / `%i` / `%f` / `%s` / `%c` / `%x` / `%X` / `%o` / `%%`，标志 `-` `0`、
-// 十进制宽度与精度 `.N`；`%d` 与 `%x` 也收 bool（jancy 的 bool 底下是 int8，印 1 / 0）。
+// 宽度与精度（十进制常量或 `*` / `.*` —— 从实参来，第二十七刀）；`%d` 与 `%x` 也收 bool
+// （jancy 的 bool 底下是 int8，印 1 / 0）。
+//
+// **"语义是 C 的那一套"这句话有一等的出处**：jancy 的 printf 不是自己写的格式化器 ——
+// `jnc_std_StdLib.cpp:733` 一句 `sl::formatString_va(formatString, va)`，那一路
+// （axl_sl_StringDetails.h:390/401）就是 **C 库的 `vsnprintf`**。所以 `cc -O0` 的孪生程序
+// 不是"近似"，是同一份实现；printf 这一族的期望输出全是这么定的。
+//
 // 宽度那一格与 C 的 printf **逐字节相同**（含 `%05d` 印负数是 `-0042` 这一条 —— 零补在
-// 符号后面）。
+// 符号后面）。精度分三路：`%f` 是小数位数、整数是"**至少**几位数字"（零补在符号后面，
+// 而且一写精度 `0` 标志就作废）、`%s` 是"**最多**几个字符"（第二十七刀，见 precInt /
+// precStr）。`*` 那一格的实参排在值**前面**，只求一次（落成局部量，见 starArg）。
 //
 // `%f` 是 C 的 `%.6f`（**默认精度 6**），走方言第八刀长出来的 `(sfix E N)`。它不是"把这个
 // 数印出来"—— 第八刀之前这一格降成 `tostr`（`%.6g`），于是 `printf("%f", 1.5)` 印 `1.5`
@@ -1722,9 +1731,9 @@ class JncLower {
   /**
    * `printf(格式串, 实参…)` -> 若干条 `print`。
    *
-   * 方言的 `print` 自带换行，所以按 `\n` 切开、每段一条。格式串**必须以换行收尾** ——
-   * 不以换行收尾的那种要方言里有一条"不换行的输出"，那一格现在只有 JS 后端有。
-   * 收的转换只有 `%d` / `%f` / `%s` / `%c` / `%%`。
+   * 方言的 `print` 自带换行，所以按 `\n` 切开、每段一条。末尾不带换行的那段发 `(write …)`。
+   * 收的转换是 `%d` / `%i` / `%f` / `%s` / `%c` / `%x` / `%X` / `%o` / `%%`，宽度与精度
+   * 收十进制常量也收 `*` / `.*`（第二十七刀）。
    */
   printf(n, args, ind) {
     const pad = ' '.repeat(ind);
@@ -1762,20 +1771,25 @@ class JncLower {
       if (c === '\n') { flush(true); continue; }
       if (c !== '%') { lit += c; continue; }
       // 转换说明：`%` [标志] [宽度] [`.` 精度] 转换字符。标志只收 `-`（左对齐）与 `0`
-      // （补零），宽度与精度只收十进制常量 —— `%*d`（宽度从实参来）要在运行期才知道宽度，
-      // 那是"格式串在运行期解释"那条路，与"格式串必须是字面量"这条边界同一处。
+      // （补零）；宽度与精度收十进制常量，也收 `*` / `.*`（从实参来 —— 第二十七刀）。
       let j = i + 1;
       let left = false;
       let zero = false;
       while (fmt[j] === '-' || fmt[j] === '0') { if (fmt[j] === '-') left = true; else zero = true; j++; }
       let width = 0;
-      while (fmt[j] >= '0' && fmt[j] <= '9') { width = width * 10 + (fmt[j].charCodeAt(0) - 48); j++; }
+      let wStar = false;
+      if (fmt[j] === '*') { wStar = true; j++; } else {
+        while (fmt[j] >= '0' && fmt[j] <= '9') { width = width * 10 + (fmt[j].charCodeAt(0) - 48); j++; }
+      }
       // 精度 `.N`（ADR-0016 第八刀）。`.` 后面不写数字在 C 里是 0（`%.f` = `%.0f`）。
       let prec = -1;
+      let pStar = false;
       if (fmt[j] === '.') {
         j++;
         prec = 0;
-        while (fmt[j] >= '0' && fmt[j] <= '9') { prec = prec * 10 + (fmt[j].charCodeAt(0) - 48); j++; }
+        if (fmt[j] === '*') { pStar = true; j++; } else {
+          while (fmt[j] >= '0' && fmt[j] <= '9') { prec = prec * 10 + (fmt[j].charCodeAt(0) - 48); j++; }
+        }
       }
       const spec = fmt[j];
       i = j;
@@ -1785,13 +1799,25 @@ class JncLower {
         this.nope(n, `printf 的转换 '%${spec === undefined ? '' : spec}'`);
         return null;
       }
-      // C 里精度对整数是"至少几位数字"、对 `%s` 是"最多取几个字符"—— 两件与小数无关的
-      // 事，各要自己的一段。这一刀只做 `%f` 那一格，别的当场说清。
-      if (prec >= 0 && spec !== 'f') {
-        this.nope(n, `'%${spec}' 上的精度（C 里它不是小数位数：对整数是"至少几位"、对 %s 是"最多几个字符"）`);
-        return null;
-      }
       if (prec > 30) { this.err(n, `printf 的精度最多 30 位，这里是 ${prec}`); return null; }
+      // `*` / `.*` 的实参按 C 的顺序取：宽度、精度、值（第二十七刀）。两者都要读好几次
+      //（判正负、算要补几个），所以先落成局部量。
+      let wVar = null;
+      if (wStar) {
+        wVar = this.starArg(n, args, vals, ai, '宽度', pad, out);
+        if (wVar === null) return null;
+        ai++;
+      }
+      let pCode = prec < 0 ? null : `(int ${prec})`;
+      if (pStar) {
+        pCode = this.starArg(n, args, vals, ai, '精度', pad, out);
+        if (pCode === null) return null;
+        ai++;
+      }
+      // 宽度 1 平时不用补（一段文本至少一个字符），可精度**能把它变成空串**
+      //（`%.0d` 印 0 是零个字符），那时宽度 1 也要补一格空格。
+      const wCode = wStar ? wVar
+        : (width > 1 || (width === 1 && pCode !== null) ? `(int ${width})` : null);
       if (ai >= vals.length) { this.err(n, 'printf 的实参比格式串里的转换少'); return null; }
       const v = vals[ai];
       // 这条转换对应的**实参节点**（诊断要指着它）。`vals[k]` 是第 k 个转换的值，而
@@ -1833,11 +1859,20 @@ class JncLower {
         // `%f` 是 C 的 `%.6f`（**默认精度 6**），不是"把这个数印出来" —— 原先这一格降成
         // `(tostr …)`（也就是 `%.6g`），于是 `printf("%f", 1.5)` 印 `1.5` 而 C 印
         // `1.500000`。那是一处静默的差别，第八刀把它补上：`(sfix E N)`，N 默认 6。
+        // `.*` 的实参是负数时"等于没写精度"，也就是回到 6（第二十七刀）。
         if (v.type !== T_REAL) {
           this.err(argNode, `'%f' 要 double，这里是 ${tyName(v.type)}（整数先写 (double)x）`);
           return null;
         }
-        piece = `(sfix ${v.code} (int ${prec < 0 ? 6 : prec}))`;
+        // `.*` 在 `%f` 上还接不了：方言的 `(sfix E N)` 要求 N 写成字面量
+        //（sexpr/lower.js 里那句"(sfix E N) 的位数要写成字面量 (int N)"），而 `%.*f` 的
+        // 位数运行期才知道。要接就得让 sfix 收一个运行期的 N —— 那要动方言与五条腿，另一刀。
+        if (pStar) {
+          this.nope(n, '`%.*f`（方言的 (sfix E N) 现在只收字面量的 N）');
+          return null;
+        }
+        const nf = pCode === null ? '(int 6)' : pCode;
+        piece = `(sfix ${v.code} ${nf})`;
       } else {
         // 到这儿只剩 `%s`（`%d` / `%i` 在整数与 bool 上都在上面接完了，剩下的是类型不对）
         const want = spec === 's' ? T_STR : T_I32;
@@ -1848,15 +1883,34 @@ class JncLower {
         piece = v.type === T_STR ? v.code : `(tostr ${v.code})`;
       }
       flushLit();
-      if (width > 1) {
+      // 精度落在这儿（第二十七刀）：整数是"至少几位数字"、`%s` 是"最多几个字符"。
+      // `%c` 上的精度在 C 里是**未定义行为**（clang 就直说 "precision used with 'c'
+      // conversion specifier, resulting in undefined behavior"），没有可对的答案，所以拒。
+      const intConv = spec === 'd' || spec === 'i' || spec === 'x' || spec === 'X' || spec === 'o';
+      if (pCode !== null && spec === 'c') {
+        this.nope(n, "`%c` 上的精度（C 里它是未定义行为，没有可对的答案）");
+        return null;
+      }
+      // C 里整数上一写精度，`0` 标志就作废（7.19.6.1 的 flags 那一段）；`.*` 的实参是负数时
+      // 等于精度没写，那时 `0` 又活着 —— 那一格的判断落到运行期（见 padTo 的第三种 zero）。
+      let zeroF = zero && !left && spec !== 's' && spec !== 'c';
+      if (intConv && pCode !== null) zeroF = zeroF && pStar ? `(bin "<" ${pCode} (int 0))` : false;
+      if (pCode !== null && (intConv || spec === 's')) {
+        const t = this.spill(piece, pad, out);
+        piece = intConv ? this.precInt(t, pCode) : this.precStr(t, pCode);
+      }
+      if (wCode !== null) {
         // 宽度那一支要**多次读**这段文本（量长度、再拼上去），所以先落成一个局部量。
         // 直接内联的话 `%5d` 里的 `(call f x)` 会被算两遍（补零那一支是四遍）。
         // 落在这儿而不是别处：jancy 与 C 一样在调用前算完所有实参，先算一步更贴。
-        const t = `$f${this.tmp}`;
-        this.tmp++;
-        out.push(`${pad}(let ${t} string ${piece})`);
-        pieces.push(this.padTo(`(var ${t})`, width, left,
-          zero && !left && spec !== 's' && spec !== 'c'));
+        const t = this.spill(piece, pad, out);
+        if (!wStar) pieces.push(this.padTo(t, wCode, left, zeroF));
+        else {
+          // `%*d` 的宽度是负数时"等于写了 `-` 标志、宽度取它的绝对值"（C99 7.19.6.1）。
+          const aw = `(sel (bin "<" ${wCode} (int 0)) (un "-" ${wCode}) ${wCode})`;
+          pieces.push(`(sel (bin "<" ${wCode} (int 0)) ${this.padTo(t, aw, true, false)}`
+            + ` ${this.padTo(t, aw, left, zeroF)})`);
+        }
       } else pieces.push(piece);
     }
     flush(false);   // 末尾没换行的那一段走 write
@@ -1864,23 +1918,84 @@ class JncLower {
     return out;
   }
 
+  /** 把一段要读好几次的东西先落成一个局部量，回它的读法。 */
+  spill(code, pad, out, ty = 'string') {
+    const t = `$f${this.tmp}`;
+    this.tmp++;
+    out.push(`${pad}(let ${t} ${ty} ${code})`);
+    return `(var ${t})`;
+  }
+
   /**
-   * 把一段文本补到至少 `w` 个字符宽。补的那一截是 `(srep 填充字符 (bin "-" w (slen s)))`
-   * —— `srep` 在个数 <= 0 时回空串，所以"本来就够宽"这一情形不用另写一支。
+   * `%*d` / `%.*s` 里那个从实参来的宽度或精度（第二十七刀）。C 里它是一个 `int`，
+   * 在实参表里排在值**前面**（宽度、精度、值）。
+   */
+  starArg(n, args, vals, idx, what, pad, out) {
+    if (idx >= vals.length) return this.err(n, `printf 的 '*'（${what}）没有对应的实参`);
+    const v = vals[idx];
+    if (!isInt(v.type)) {
+      return this.err(args[idx + 1], `printf 的 '*'（${what}）要整数，这里是 ${tyName(v.type)}`);
+    }
+    return this.spill(v.code, pad, out, 'int');
+  }
+
+  /**
+   * 整数上的精度（第二十七刀）。C 里 `%.3d` 是"**至少**三位数字"—— 零补在符号**后面**，
+   * 而且它与宽度是两件事（`%8.3d` 先补到三位数字、再补到八个字符宽）。两条边角也照收：
+   *
+   *   - 精度是 0 而值是 0 时**一个字符都不印**（C99 7.19.6.1："The result of converting
+   *     a zero value with a precision of zero is no characters."）。
+   *   - `.*` 的实参是负数时"等于没写精度"—— 负的个数进 `srep` 回的是空串，所以这一条
+   *     自己就成立，不用另写一支。
+   *
+   * `code` 要是一个局部量（读好几次）。`%x` / `%o` 那一路先掩过、没有符号，所以那一支的
+   * 第一个字符永远不是 `-`，白判一次而已。
+   */
+  precInt(code, pCode) {
+    const neg = `(bin "==" (ssub ${code} (int 0) (int 1)) (str "-"))`;
+    const digits = `(sel ${neg} (ssub ${code} (int 1) (bin "-" (slen ${code}) (int 1))) ${code})`;
+    const sign = `(sel ${neg} (str "-") (str ""))`;
+    // 数字那一截等于 "0" 只可能是值为 0（`%x` / `%o` 同），那时精度 0 收的是空串。
+    const d = `(sel (bin "==" ${digits} (str "0"))`
+      + ` (sel (bin "==" ${pCode} (int 0)) (str "") (str "0")) ${digits})`;
+    return `(bin "+" ${sign} (bin "+" (srep (str "0") (bin "-" ${pCode} (slen ${d}))) ${d}))`;
+  }
+
+  /**
+   * `%s` 上的精度（第二十七刀）：`%.5s` 是"**最多**五个字符"。核心方言的 `(ssub …)`
+   * 不夹范围（越界是运行期错误 —— frontend-asy 那边为此包了个 asy__ssub），所以这儿自己夹：
+   * 本来就短的不动，`.*` 的实参是负数时也不动（C 里那等于没写精度）。
+   */
+  precStr(code, pCode) {
+    const cut = `(sel (bin ">" (slen ${code}) ${pCode}) (ssub ${code} (int 0) ${pCode}) ${code})`;
+    return `(sel (bin "<" ${pCode} (int 0)) ${code} ${cut})`;
+  }
+
+  /**
+   * 把一段文本补到至少 `wCode` 个字符宽（`wCode` 是一段方言代码 —— `%*d` 的宽度运行期
+   * 才知道，第二十七刀）。补的那一截是 `(srep 填充字符 (bin "-" w (slen s)))` ——
+   * `srep` 在个数 <= 0 时回空串，所以"本来就够宽"这一情形不用另写一支。
    *
    * `0` 标志（补零）在 C 里是**补在符号后面**的：`%05d` 印 -42 是 `-0042`，不是 `00-42`。
    * 所以这一支要分开：第一个字符是 `-` 时先把它摘出来，零补在余下那截前面。要补的个数
    * 两种情形一样（`(w-1) - (len-1) == w - len`），所以只有拼法不同。
    * `code` 会被读好几次，调用方**必须**先把它落成一个局部量（见 printf 里那处）。
+   *
+   * `zero` 收三种值：`false`（补空格）、`true`（补零）、以及**一段运行期的 bool** ——
+   * 后一种只有 `%0*.*d` 用得上（写了 `0`、精度又是 `.*`：精度一写出来 `0` 就作废，而
+   * 实参是负数等于精度没写、那时 `0` 又活着）。`sel` 降成 Ternary（两支各一个基本块），
+   * 所以嵌一层不会把两边都算一遍。
    */
-  padTo(code, w, left, zero) {
-    const gap = (fill) => `(srep (str "${fill}") (bin "-" (int ${w}) (slen ${code})))`;
+  padTo(code, wCode, left, zero) {
+    const gap = (fill) => `(srep (str "${fill}") (bin "-" ${wCode} (slen ${code})))`;
     if (left) return `(bin "+" ${code} ${gap(' ')})`;
-    if (!zero) return `(bin "+" ${gap(' ')} ${code})`;
+    const sp = `(bin "+" ${gap(' ')} ${code})`;
+    if (zero === false) return sp;
     const rest = `(ssub ${code} (int 1) (bin "-" (slen ${code}) (int 1)))`;
-    return `(sel (bin "==" (ssub ${code} (int 0) (int 1)) (str "-"))`
+    const zp = `(sel (bin "==" (ssub ${code} (int 0) (int 1)) (str "-"))`
       + ` (bin "+" (str "-") (bin "+" ${gap('0')} ${rest}))`
       + ` (bin "+" ${gap('0')} ${code}))`;
+    return zero === true ? zp : `(sel ${zero} ${zp} ${sp})`;
   }
 
   /* -------------------------------------------------------------- 控制流 */
