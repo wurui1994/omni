@@ -1,0 +1,25 @@
+// 数组下标的越界检查（ADR-0016 第十刀）。这一条正是 type_ptr_data.rst 里那个例子：
+//
+//   void foo(size_t i) {
+//       int a[] = { 1, 2, 3 };
+//       int* p = a;
+//       p += i;
+//       *p = 40;    // <-- error: out-of-bounds
+//       a[i] = 40;  // <-- error: out-of-bounds
+//   }
+//   void bar() { foo(3); }
+//
+// "Range is checked on both array accesses and pointer dereferences" —— 这一层的数组
+// 就是 pnew 出来的那一段，范围在那个 fat 指针里，所以 `a[i]` 的检查与 `*p` 是同一条。
+// 下标从形参来，编译期看不见，所以这一条只能在运行期报。
+void foo(int i) {
+    int a[] = { 1, 2, 3 };
+    a[i] = 40;
+    printf("unreachable\n");
+}
+
+int main() {
+    printf("still fine\n");
+    foo(3);
+    return 0;
+}

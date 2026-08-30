@@ -29,7 +29,9 @@
 // 本来就是这个语义）、`p + i` / `p - i` / `p++`、`p - q`（指针差，按元素）、
 // `p == q` 与 `p == null`、`p->f` 与 `(*p).f` 读写、`unsafe { … }`、
 // `(int thin*)p`（fat 转 thin，-> `(pthin p)`）、`&x` / `&*p` / `&p[i]` / `&p->f`
-// （取地址；局部量按 jancy 自己的办法提到堆上，见 addrOf 那一段）。
+// （取地址；局部量按 jancy 自己的办法提到堆上，见 addrOf 那一段）、**定长数组**
+// `int a[3]` / `int a[] = { … }` / `int c[2];`（下标读写、花括号初值、退化成指针，
+// 见 tArr 与 localDeclCurly 那两段）。
 //
 // ## 纪律：**jancy 不向方言妥协**
 //
@@ -37,7 +39,8 @@
 // 两条核心形式：`(sel c a b)`（条件表达式，惰性）与 `(peq p q)`（指针相等）。理由写在
 // sexpr/lower.js 那两处。真值化不用动方言 —— 那本来就是 jancy 侧的一次隐式转换，
 // 这一层把它显式写出来（`n != 0` / `!pisnull p`）就对了。定宽整数也是这一类：位宽是
-// 这一层的账，回卷是三条已有算符的合成，方言一个字都不用改。
+// 这一层的账，回卷是三条已有算符的合成，方言一个字都不用改。取地址与定长数组也一样 ——
+// 前者照 jancy 自己的办法把局部量提到堆上，后者就是一段 `pnew` 出来的内存，两刀方言都没动。
 //
 // 还没长出来、因此**当场报错**的（每一条都记着该怎么长，不是"不收"）：
 //   - `%*d`（宽度从实参来）—— 那要在运行期才知道宽度，与"格式串必须是字面量"同一处边界。
@@ -48,8 +51,10 @@
 //     （见 tests/jnc/bad/unsigned.jnc）。
 //   - `&p`（指针的地址，`int**`）与整个结构体的 `pload` / `pstore` —— 同一格：要方言先能
 //     把 fat 指针（三个字）当内存里的值搬，`ptrTargetOk` 现在就是照这一条挡的。
-//   - 真数组 `int a[3]`（jancy 的数组是**值**类型，方言这一层的 `(arr T)` 是引用语义）——
-//     要方言有值语义的定长数组。
+//   - 数组那一族里剩下的四条，都是"要方言能把多个字的值当内存里的东西搬"的同一格：
+//     多维数组 `int a[10][20]`（元素是 `int[20]`）、数组之间的赋值（**jancy 自己也只在
+//     常量折叠那条路上有** —— `Cast_Array::llvmCast` 里写着未实现）、数组形参与返回
+//     （要写成 `T*`）、数组字段（要嵌在结构体里）、`&a`（`T(*)[N]`）。
 //   - `printf` 之外的标准库（`std.*`、`io.*`、`gc.*`）
 //   - 格式化字面量 `$"…"`、多行字面量、正则 switch
 //   - class / union / enum / property / reactor / 事件 / 多播 / 协程
@@ -57,8 +62,9 @@
 //
 // **一处刻意留下的差别**：`sizeof` / `offsetof` 意义上的**存储**宽度。四种位宽在方言里
 // 都占一个 64 位的槽（`char*` 与 `int*` 是同一个方言类型），所以 `new char[n]` 占 8n 字节、
-// `struct { char c; int i; }` 是 16 字节。这一格从**语义**上看不见（指针算术按元素走，
-// 而 `sizeof` / `offsetof` 都不收），所以它不在上面那份名单里；要真接 `sizeof` 才要动。
+// `struct { char c; int i; }` 是 16 字节、`char a[3]` 是 24 字节。这一格从**语义**上看不见
+// （指针算术按元素走、数组下标也按元素走，而 `sizeof` / `offsetof` / `countof` 都不收），
+// 所以它不在上面那份名单里；要真接 `sizeof` 才要动。
 //
 // ## printf 怎么降
 //
@@ -116,8 +122,27 @@ const T_VOID = { k: 'void' };
 const T_STR = { k: 'string' };
 const tPtr = (t) => ({ k: 'ptr', target: t });
 const tThin = (t) => ({ k: 'tptr', target: t });
+/**
+ * 定长数组（ADR-0016 第十刀）。jancy 照抄 C/C++ 的模型：**定长**、长度写在声明符上
+ * （decl_simple.rst："Jancy adopts C/C++ model: `int a[10][20]`"）。存储用方言的
+ * `(pnew (ptr T) (int N))` —— 一段长度 N 的堆内存，范围就在那个 fat 指针里，于是
+ * `a[i]` 的越界检查是方言本来就有的那一条（type_ptr_data.rst："Range is checked on
+ * both array accesses and pointer dereferences"）。
+ */
+const tArr = (t, n) => ({ k: 'arr', el: t, n });
 
 const isInt = (t) => t.k === 'int';
+const isArr = (t) => t.k === 'arr';
+
+/**
+ * 数组退化成指针。jancy 的 `int* p = a;`（type_ptr_data.rst:31）就是它 —— 而这一层的
+ * 数组**本来就是**那个 fat 指针，所以退化只改类型、不发一个字的代码。
+ */
+function decay(v) {
+  if (v === null || !isArr(v.type)) return v;
+  return { code: v.code, type: tPtr(v.type.el) };
+}
+
 
 /** 整型提升：比 32 位窄的一律先提到 32 位（C 的规矩，jancy 同）。 */
 const promo = (w) => (w < 32 ? 32 : w);
@@ -139,6 +164,7 @@ function wrapTo(code, w) {
 function tyText(t) {
   if (t.k === 'ptr') return `(ptr ${tyText(t.target)})`;
   if (t.k === 'tptr') return `(tptr ${tyText(t.target)})`;
+  if (t.k === 'arr') return `(ptr ${tyText(t.el)})`;
   if (t.k === 'struct') return t.name;
   if (t.k === 'int') return 'int';
   return t.k;
@@ -149,6 +175,7 @@ const INT_NAMES = new Map([[8, 'char'], [16, 'short'], [32, 'int'], [64, 'long']
 function tyName(t) {
   if (t.k === 'ptr') return `${tyName(t.target)}*`;
   if (t.k === 'tptr') return `${tyName(t.target)} thin*`;
+  if (t.k === 'arr') return `${tyName(t.el)}[${t.n}]`;
   if (t.k === 'struct') return t.name;
   if (t.k === 'int') return INT_NAMES.get(t.w);
   return t.k;
@@ -157,6 +184,7 @@ function tyName(t) {
 function sameTy(a, b) {
   if (a.k !== b.k) return false;
   if (a.k === 'ptr' || a.k === 'tptr') return sameTy(a.target, b.target);
+  if (a.k === 'arr') return a.n === b.n && sameTy(a.el, b.el);
   if (a.k === 'struct') return a.name === b.name;
   if (a.k === 'int') return a.w === b.w;
   return true;
@@ -323,6 +351,9 @@ class JncLower {
         const info = this.declarator(d, sp);
         if (info === null) continue;
         if (info.formals !== null) { this.nope(d, '结构体里的方法'); continue; }
+        // 数组字段（第十刀的边界）：那要数组的存储**嵌在**结构体里，而这一层的数组是一段
+        // 单独的内存加一个 fat 指针。要接就得方言的结构体字段能是定长数组。
+        if (isArr(info.type)) { this.nope(d, `数组字段（'${tyName(info.type)}'）`); continue; }
         fields.push({ name: info.name, type: info.type });
       }
     }
@@ -430,9 +461,25 @@ class JncLower {
         formals = s.items[1];
         continue;
       }
-      // `int a[3]` —— jancy 的数组是**值**类型，而方言的 `(arr T)` 是引用语义，两者对不上。
-      // 硬接就是给错答案（复制一份 vs 共享同一段），所以这一刀明着不收。
-      if (sh === 'array-suffix') return this.nope(s, '数组声明符（`T a[n]`）—— 用 `T* p = new T[n]` 代替');
+      // `int a[3]` / `int a[]`（ADR-0016 第十刀）。长度**只认整数字面量** —— jancy 那边
+      // 它是编译期常量表达式，我们没有常量折叠，所以先收最直的这一格。`[]` 的长度从花括号
+      // 初值数出来，那要 localDeclCurly 才知道，所以这里先记成 n === null。
+      if (sh === 'array-suffix') {
+        if (isArr(t)) return this.nope(s, '多维数组（`int a[10][20]`）—— 要方言的指针能指向数组');
+        if (t.k !== 'int' && t !== T_REAL && t !== T_BOOL) {
+          return this.nope(s, `${tyName(t)} 的数组 —— 要方言能把多个字的值当元素搬（与整个结构体的 pload/pstore 同一格）`);
+        }
+        const cnt = s.items[1];
+        if (isList(cnt) && head(cnt) === 'none') { t = tArr(t, null); continue; }
+        if (!isAtom(cnt) || !/^(0|[1-9][0-9]*)$/.test(cnt.value)) {
+          return this.nope(s, '数组长度不是十进制整数字面量（没有常量折叠）');
+        }
+        const nn = Number(cnt.value);
+        if (nn < 1) return this.err(s, `数组长度要至少 1，这里是 ${nn}`);
+        if (nn > 1000000) return this.err(s, `数组长度最多 1000000，这里是 ${nn}`);
+        t = tArr(t, nn);
+        continue;
+      }
       return this.nope(s, `声明符后缀 '${sh}'`);
     }
     return { name, type: t, formals };
@@ -458,8 +505,12 @@ class JncLower {
       const fi = this.declarator(f.items[2], fsp);
       if (fi === null) return null;
       if (fi.formals !== null) { this.nope(f, '函数类型的形参'); return null; }
+      // 数组形参（第十刀的边界）。C 里 `void f(int a[3])` 就是 `int*`，jancy 保留数组类型
+      // 并要一次数组转换 —— 那正是它自己未实现的那一格。要传数组就写 `int* a`。
+      if (isArr(fi.type)) { this.nope(f, `数组形参（'${tyName(fi.type)}'）—— 写成 ${tyName(fi.type.el)}* 传`); return null; }
       ps.push(fi);
     }
+    if (isArr(info.type)) { this.nope(n, `返回数组（'${tyName(info.type)}'）`); return null; }
     // `int main()` 是入口：降成方言的 `(main …)`。jancy 的 main 回 int，而方言的入口
     // 不回值 —— 那个返回值是给外面的退出码，这一层没有它，所以 `return 0` 就是 `(ret)`。
     const isMain = info.name === 'main' && ps.length === 0;
@@ -531,6 +582,7 @@ class JncLower {
       return b === null ? null : [`${pad}(do`, b, `${pad})`];
     }
     if (h === 'var-decl') return this.localDecl(n, ind);
+    if (h === 'var-decl-curly') return this.localDeclCurly(n, ind);
     if (h === 'expr-stmt') return this.exprStmt(n.items[1], ind);
     if (h === 'if') return this.ifStmt(n, ind);
     if (h === 'while') return this.whileStmt(n, ind);
@@ -574,6 +626,25 @@ class JncLower {
       const info = this.declarator(dcl, sp);
       if (info === null) return null;
       if (info.formals !== null) { this.nope(dcl, '局部的函数原型'); return null; }
+      // 数组（第十刀）：`int a[3];` 就是一段长度 3 的零内存。`int a[] ;` 不合法（长度
+      // 只能从花括号初值数出来），`int b[3] = a;` 也不收 —— **jancy 自己就没实现**这一格
+      // （CastOp_Array.cpp 的 Cast_Array::llvmCast 里写着 "is not yet implemented"），
+      // 而它只在常量折叠那条路上能用。
+      if (isArr(info.type)) {
+        if (info.type.n === null) { this.err(dcl, `'${info.name}[]' 的长度得从花括号初值数出来`); return null; }
+        if (initNode !== null) {
+          this.nope(dcl, '把一个数组赋给另一个数组（jancy 自己也只在常量折叠那条路上有，见 Cast_Array::llvmCast）');
+          return null;
+        }
+        if (this.lifted.has(info.name)) {
+          this.nope(dcl, `对数组取地址（'&a' 是 ${tyName(info.type.el)}(*)[${info.type.n}]，要方言的指针能指向数组）`);
+          return null;
+        }
+        this.push(info.name, info.type);
+        const at = tyText(info.type);
+        out.push(`${pad}(let ${info.name} ${at} (pnew ${at} (int ${info.type.n})))`);
+        continue;
+      }
       let code = null;
       if (initNode === null) {
         code = zeroOf(info.type);
@@ -612,6 +683,74 @@ class JncLower {
     return out;
   }
 
+  /**
+   * 花括号初始化的局部量（第十刀）：`int a[3] = { 1, 2, 3 }` / `int b[] = { 7, 8 }`。
+   *
+   * 语法上它是**另一条**产生式（`decl -> specs dcl "=" curly`，一次只声明一个名字）——
+   * jancy 那边花括号初始化之后可以省掉分号，所以它不能挂在 init-dcl 上。
+   *
+   * 三条语义，都是 jancy 的：
+   *   - `[]` 的长度 = 项数（decl_curly.rst 的 `char buffer[] = { … }`）。
+   *   - 项数少于长度时，剩下的是**零**（CastOp_Array.cpp:`if (dstSize > srcSize) memset(dst, 0, …)`），
+   *     而 pnew 出来的那一段本来就是零，所以少写的那几格一个字都不用发。
+   *   - 项数**多于**长度是错（同一处：`srcElementCount <= dstElementCount` 才是一次转换）。
+   *
+   * 空项 `{ 1, , 3 }` 照 jancy 算一项、跳过不写（84_CurlyInitializers.jnc:45 那行是七项，
+   * 其中四项是空的）。
+   */
+  localDeclCurly(n, ind) {
+    const pad = ' '.repeat(ind);
+    const sp = this.specs(n.items[1]);
+    if (sp === null) return null;
+    const dcl = n.items[2];
+    const info = this.declarator(dcl, sp);
+    if (info === null) return null;
+    if (info.formals !== null) { this.nope(dcl, '函数上的花括号初始化'); return null; }
+    if (!isArr(info.type)) {
+      this.nope(n, `${tyName(info.type)} 的花括号初始化（这一刀只有数组这一格）`);
+      return null;
+    }
+    const curly = n.items[3];
+    if (!isList(curly) || head(curly) !== 'curly') { this.err(n, '认不出的花括号初始化'); return null; }
+    const items = this.flat(curly.items[1]);
+    const len = info.type.n === null ? items.length : info.type.n;
+    if (len < 1) { this.err(n, `'${info.name}[]' 的花括号初值是空的，数不出长度`); return null; }
+    if (items.length > len) {
+      this.err(n, `花括号初值有 ${items.length} 项，而 ${info.name} 只有 ${len} 格`);
+      return null;
+    }
+    if (this.lifted.has(info.name)) {
+      this.nope(dcl, `对数组取地址（'&a' 是 ${tyName(info.type.el)}(*)[${len}]，要方言的指针能指向数组）`);
+      return null;
+    }
+    const el = info.type.el;
+    const vals = [];
+    for (const it of items) {
+      if (isList(it) && head(it) === 'skip-item') { vals.push(null); continue; }
+      if (isList(it) && (head(it) === 'named-item' || head(it) === 'indexed-item' || head(it) === 'curly')) {
+        this.nope(it, `花括号初值里的 '${head(it)}'`);
+        return null;
+      }
+      let v = this.expr(it, el);
+      if (v === null) return null;
+      if (isInt(v.type) && isInt(el)) v = intConv(v, el);
+      if (!sameTy(v.type, el)) {
+        this.err(it, `这一项是 ${tyName(v.type)}，而 ${info.name} 的元素是 ${tyName(el)}`);
+        return null;
+      }
+      vals.push(v.code);
+    }
+    // 初值降完了才进作用域：`int a[2] = { a, 1 }` 里的 a 指外层那个（与 localDecl 同）
+    this.push(info.name, tArr(el, len));
+    const at = tyText(info.type);
+    const out = [`${pad}(let ${info.name} ${at} (pnew ${at} (int ${len})))`];
+    for (let i = 0; i < vals.length; i++) {
+      if (vals[i] === null) continue;
+      out.push(`${pad}(pstore (padd (var ${info.name}) (int ${i})) ${vals[i]})`);
+    }
+    return out;
+  }
+
   /** 可写的位置。方言里只有两种写法：`(set 名字 值)` 与 `(pstore 指针 值)`。 */
   lvalue(n) {
     if (!isList(n)) return this.err(n, '这里要一个可以赋值的位置');
@@ -620,6 +759,9 @@ class JncLower {
       const nm = n.items[1].value;
       const t = this.lookup(nm);
       if (t === null) return this.err(n, `未声明的变量 '${nm}'`);
+      // 数组名字不是可写的位置 —— `a = …` 在 C 里就不合法，jancy 那边也只有常量折叠
+      // 那条路上有数组之间的转换（Cast_Array::llvmCast 里写着未实现）。
+      if (isArr(t)) return this.nope(n, `给整个数组赋值（jancy 自己也只在常量折叠那条路上有）`);
       // 提到堆上的那些名字本身就是一格内存，所以它是 `ptr` 而不是 `var` ——
       // 于是读写自动走 pload / pstore，而 `&x` 就是它的 code（见 expr0 的 addr）。
       if (this.lifted.has(nm)) return { kind: 'ptr', code: `(var ${this.cellName(nm)})`, type: t };
@@ -1104,7 +1246,10 @@ class JncLower {
    * 别的地方 want 只是个建议，不影响结果的类型。
    */
   expr(n, want) {
-    const v = this.expr0(n, want);
+    // 数组在这儿就退化成指针（jancy 的 `int* p = a;`）。放在这一处而不是散在每个用处，
+    // 是因为 expr 是所有取值的唯一入口 —— 声明那两处要看**没退化**的类型，它们直接
+    // 走 expr0 / 自己判（见 localDecl 与 localDeclCurly）。
+    const v = decay(this.expr0(n, want));
     if (v === null) return null;
     // int -> real 的隐式加宽（jancy 与 C 同）。反过来**不**做：那是丢精度，
     // jancy 那边也要一次显式强制转换。

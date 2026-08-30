@@ -14,10 +14,11 @@
 //      且等于 .expected。五方一致比对上期望值更强 —— 指针在这五条腿上是**两套实现**
 //      （arena 模拟 vs 真指针，ADR-0016），逐字节相同不是巧合。
 //   2. rt/*.jnc 在五条腿上报**同一句**运行期错误。
-//   3. bad/*.jnc 必须被拒绝，且拒在正确的理由上。这一组是那些边界的本体：真数组、
-//      整数上的精度、`unsafe` 之外的 thin 转换、`unsigned`。（`? :`、不换行的 printf、
-//      条件真值化曾经在这一组里，第三到第五刀把它们做掉之后转到了 cases/；`&x` 是第九
-//      刀做掉的，现在在 cases/09-addr.jnc。）
+//   3. bad/*.jnc 必须被拒绝，且拒在正确的理由上。这一组是那些边界的本体：多维数组、
+//      数组之间的赋值、整数上的精度、`unsafe` 之外的 thin 转换、`unsigned`。（`? :`、
+//      不换行的 printf、条件真值化曾经在这一组里，第三到第五刀把它们做掉之后转到了
+//      cases/；`&x` 是第九刀、定长数组是第十刀，现在在 cases/09-addr.jnc 与
+//      cases/10-arrays.jnc。）
 //
 //   node tests/jnc/run.js
 //   node tests/jnc/run.js pointers

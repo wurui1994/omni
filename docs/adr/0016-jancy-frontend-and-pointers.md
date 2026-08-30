@@ -219,7 +219,8 @@ jancy 的完整语法与形式，不是"jancy 里能塞进现有方言的那个�
 2. `&x` —— 要局部量可寻址（jancy 那边是"提到 GC 堆上"）。**第九刀做掉了**，照抄 jancy 的
    办法，方言没动；剩下的是 `&p`（`int**`），与"整个结构体的 pload/pstore"同一格。
 3. 真数组 `int a[3]` —— jancy 的数组是**值**类型，方言的 `(arr T)` 是引用语义；
-   要方言有值语义的定长数组。
+   要方言有值语义的定长数组。**第十刀做掉了**，但结论与这条当初的判断相反：不需要那一格 ——
+   数组就是一段 `pnew` 出来的内存，而能看出"值还是引用"的那几处操作，jancy 自己也没有。
 4. 定宽整数——jancy 的 `int` 是 32 位、`char` 8 位，这一层全按 64 位。溢出会不一样，
    这是目前**唯一一处会静默给出不同答案**的地方，所以排在这份名单里而不是"不收"里。
    （第六刀做掉了：位宽是前端的账，方言一个字没改。）
@@ -510,6 +511,75 @@ struct 的那一条并进上面同一格。
 **没跑的**：`tests/asy` 全部（这一刀只碰 `frontend-jnc/lower.js`，四个后端与运行时一行没动）、
 `sweep.js`、`svg.js`、自举、`tests/jit`、`tests/mir`、`tests/llvm`。`npm run lint` 这台机器上
 没有 typescript，跑不了。
+
+### 第十刀：定长数组 —— 债务表上那条判断是错的，方言仍然一个字没改
+
+债务表第 3 条写着"jancy 的数组是值类型，方言的 `(arr T)` 是引用语义，要方言有值语义的定长
+数组"。做的时候发现**那条判断本身站不住**，而且不是因为将就 —— 是因为先去读了 jancy 的源码。
+
+jancy 的数组照抄 C/C++：定长，长度写在声明符上（decl_simple.rst："in C/C++
+compiler-generated arrays are fixed-sized … Since being able to copy-paste C/C++ declarations
+of network protocol headers was crucial, Jancy adopts C/C++ model"）。而它**根本不是**能整份
+搬来搬去的值：`CastOp_Array.cpp` 里 `Cast_Array::llvmCast` 的函数体只有一句
+
+```cpp
+err::setError("CCast_Array::LlvmCast is not yet implemented");
+```
+
+也就是说数组之间的转换只在 `constCast`（编译期常量折叠）那条路上存在。"值语义"能被看出来的
+地方一共就那么几处 —— 赋一份拷贝、当实参传、当返回值、当结构体字段 —— 而这几处 jancy 自己
+都没有（前三处要那次未实现的转换，第四处要嵌进结构体布局）。剩下的操作里"值"与"一段内存"
+**观察不出差别**。
+
+于是这一刀的形状是：`T a[N]` 的存储就是 `(pnew (ptr T) (int N))`，一段长度 N 的堆内存。
+
+```
+int a[3] = { 1, 2, 3 };
+```
+
+降成
+
+```
+(let a (ptr int) (pnew (ptr int) (int 3)))
+(pstore (padd (var a) (int 0)) (int 1))
+(pstore (padd (var a) (int 1)) (int 2))
+(pstore (padd (var a) (int 2)) (int 3))
+```
+
+三件事因此免费得到，而且都正好是 jancy 的语义：
+
+- **越界检查**。范围就在那个 fat 指针里，所以 `a[i]` 走的是 `pload`/`pstore` 本来那一条 ——
+  正是 type_ptr_data.rst 里的例子（"Range is checked on both **array accesses** and pointer
+  dereferences"，`rt/arr-oob.jnc` 把那段例子照抄了下来，`foo(3)` 在五条腿上报同一句）。
+- **退化成指针**。`int* p = a;`（同一份文档 31 行）在这一层**不发一个字的代码** —— 数组本来
+  就是那个 fat 指针，退化只改类型。这一条落在 `expr()` 里一句 `decay(...)`：expr 是所有取值
+  的唯一入口，所以下标、printf、实参、比较、算术全都跟着对。
+- **零初始化**。`int c[2];` 印 `0 0`，因为 `pnew` 出来的那一段是零（五条腿都量过）。这一条的
+  出处不是 C（C 里那是未定值）而是 jancy："Jancy compiler zeros every variable before any
+  user code can touch it"。
+
+花括号初值那一格照 jancy：`[]` 的长度 = 项数；项数少于长度时剩下的是零（`Cast_Array::constCast`
+里那句 `if (dstSize > srcSize) memset(dst, 0, dstSize)`，而 `pnew` 已经是零，所以少写的那几格
+一个字都不用发）；项数多于长度是错（同一处的 `srcElementCount <= dstElementCount`）；空项
+`{ 1, , 3 }` 算一项、跳过不写（84_CurlyInitializers.jnc:45 那行是七项，其中四项是空的）。
+
+**长度只认十进制整数字面量。** jancy 那边它是编译期常量表达式，我们没有常量折叠 —— 与其偷偷
+接受一个求值不出来的东西，不如明着拒。
+
+**边界五条，都是同一格**：多维数组 `int a[10][20]`（元素是 `int[20]`，而 `ptrTargetOk` 只放行
+int / real / bool / struct）、数组之间的赋值、数组形参与返回、数组字段、`&a`（`T(*)[N]`）。它们
+与 `&p`（第九刀留下的那条）、整个结构体的 `pload`/`pstore` 是**一格**：要方言能把多个字的值当
+内存里的东西搬。`bad/array-2d.jnc` 与 `bad/array-copy.jnc` 是前两条的本体。
+
+**期望输出的出处**：C，一份 `cc -O0` 编出来的程序抄在 `cases/10-arrays.jnc` 的头注里，12 行
+逐字节相同；第 13 行（空项那一格）与 `int c[2];` 那一行的出处是 jancy 的文档与语法，头注里
+分开注明了 —— C 表达不出前者、后者在 C 里是未定值。`bad/array-decl.jnc` 删掉，本体转到
+`cases/10-arrays.jnc`。
+
+**跑过的轴**：`tests/jnc`（18/0，新增 `cases/10-arrays`、`rt/arr-oob`、`bad/array-2d`、
+`bad/array-copy`，删掉 `bad/array-decl`）、`tests/sexpr`（63/0）、`tests/glr`（20/0）。
+**没跑的**：`tests/asy` 全部（这一刀只碰 `frontend-jnc/lower.js`）、`sweep.js`、`svg.js`、自举、
+`tests/jit`、`tests/mir`、`tests/llvm`。`npm run lint` 这台机器上没有 typescript，跑不了。
 
 ## 后果与代价
 

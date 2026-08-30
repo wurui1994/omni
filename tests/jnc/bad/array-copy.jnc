@@ -1,0 +1,13 @@
+// 数组之间的赋值。**jancy 自己就没实现这一格**：CastOp_Array.cpp 里
+// `Cast_Array::llvmCast` 的函数体只有一句
+//
+//   err::setError("CCast_Array::LlvmCast is not yet implemented");
+//
+// 也就是说只有 `constCast`（编译期常量折叠）那条路上数组之间能转。所以这里不是
+// "方言接不上"，是照着 jancy 拒 —— 我们没有 oracle，能引的只有它的源码。
+int main() {
+    int a[3] = { 1, 2, 3 };
+    int b[3] = a;
+    printf("%d\n", b[0]);
+    return 0;
+}
