@@ -477,18 +477,97 @@ pen evenodd() {
 // （linewidth 0.5、linecap 1、linejoin 1、miterlimit 10、fontsize/lineskip 0、
 // fillrule 0、baseline 0、font 空、虚线表空）。颜色这一格仍是"盖住"而不是 asy 的
 // **相加再夹**（pen.h:749 那个 switch），两支都带颜色时结果会不一样，写在明处。
+// 颜色空间在这一层是几个 bool 拼出来的，这里换算成 pen.h:84 那个 enum 的序号
+// （DEFCOLOR 0 / INVISIBLE 1 / GRAYSCALE 2 / RGB 3 / CMYK 4 / PATTERN 5）——
+// 两支笔相加时"取大的那一档"要按它比。
+private int asy__pcs(pen p) {
+  if (p.patternval != "") return 5;
+  if (p.isinvisible) return 1;
+  if (p.iscmyk) return 4;
+  if (p.isrgb) return 3;
+  if (p.setcolor) return 2;
+  return 0;
+}
+// 一支笔升到 cmyk 那一档（pen.h:602 的 greytocmyk 与 :608 的 rgbtocmyk）。
+// 没设过颜色的那一支四道都是 0（asy 那边 DEFCOLOR 的 r/g/b/grey 就是 0）。
+private real[] asy__tocmyk(pen p, int cs) {
+  real[] v;
+  if (cs == 4) { v.push(p.cyan); v.push(p.magenta); v.push(p.yellow); v.push(p.black); return v; }
+  if (cs == 2) { v.push(0); v.push(0); v.push(0); v.push(1 - p.gray); return v; }
+  if (cs == 3) {
+    real sat = p.red;
+    if (p.green > sat) sat = p.green;
+    if (p.blue > sat) sat = p.blue;
+    if (sat == 0) { v.push(0); v.push(0); v.push(0); v.push(1); return v; }
+    v.push(1 - p.red / sat);
+    v.push(1 - p.green / sat);
+    v.push(1 - p.blue / sat);
+    v.push(1 - sat);
+    return v;
+  }
+  v.push(0); v.push(0); v.push(0); v.push(0);
+  return v;
+}
 pen operator +(pen a, pen b) {
   pen q = pencopy(a);
   if (b.setwidth) {
     q.width = b.width;
     q.setwidth = true;
   }
-  if (b.setcolor) {
-    q.gray = b.gray;
-    q.red = b.red;
-    q.green = b.green;
-    q.blue = b.blue;
-    q.isrgb = b.isrgb;
+  // 颜色是**相加再夹**（pen.h:739 那个 switch），不是"右边盖住左边"：颜色空间取两支里
+  // 大的那一档、各自先升上去、分量逐个相加，超饱和了整体缩回来（rgbrange / cmykrange）。
+  // 量出来的理由：PythagoreanTree.asy 的 `1/(n+1)*green + n/(n+1)*brown` —— 盖住那一版
+  // 只剩 brown 那一支，绿色那 1/13 凭空消失（参考印 `0.461538 0.0769231 0`，
+  // 盖住版印 `0.461538 0 0`）。
+  int ca = asy__pcs(a);
+  int cb = asy__pcs(b);
+  int cs = ca > cb ? ca : cb;
+  if (cs == 2) {
+    real g2 = a.gray + b.gray;
+    if (g2 > 1.0) g2 = 1.0;
+    q.gray = g2;
+    q.isrgb = false;
+    q.iscmyk = false;
+    q.setcolor = true;
+  } else if (cs == 3) {
+    // 灰的那一支升成 rgb（三道都等于灰度）；没设过颜色的那一支三道都是 0
+    real ar = a.isrgb ? a.red : (ca == 2 ? a.gray : 0);
+    real ag = a.isrgb ? a.green : (ca == 2 ? a.gray : 0);
+    real ab = a.isrgb ? a.blue : (ca == 2 ? a.gray : 0);
+    real br = b.isrgb ? b.red : (cb == 2 ? b.gray : 0);
+    real bg = b.isrgb ? b.green : (cb == 2 ? b.gray : 0);
+    real bb = b.isrgb ? b.blue : (cb == 2 ? b.gray : 0);
+    real r = ar + br;
+    real g = ag + bg;
+    real bl = ab + bb;
+    real sat = r;
+    if (g > sat) sat = g;
+    if (bl > sat) sat = bl;
+    if (sat > 1.0) { r = r / sat; g = g / sat; bl = bl / sat; }
+    q.red = r;
+    q.green = g;
+    q.blue = bl;
+    q.isrgb = true;
+    q.iscmyk = false;
+    q.setcolor = true;
+  } else if (cs == 4) {
+    real[] u = asy__tocmyk(a, ca);
+    real[] v = asy__tocmyk(b, cb);
+    real c = u[0] + v[0];
+    real m = u[1] + v[1];
+    real y = u[2] + v[2];
+    real k = u[3] + v[3];
+    real sat = c;
+    if (m > sat) sat = m;
+    if (y > sat) sat = y;
+    if (k > sat) sat = k;
+    if (sat > 1.0) { c = c / sat; m = m / sat; y = y / sat; k = k / sat; }
+    q.cyan = c;
+    q.magenta = m;
+    q.yellow = y;
+    q.black = k;
+    q.iscmyk = true;
+    q.isrgb = false;
     q.setcolor = true;
   }
   if (b.evenodd) q.evenodd = true;
@@ -1883,12 +1962,20 @@ void grestorepen() {
 
 // 颜色分三档，顺序照 psfile.cc:184 的 setcolor：先 cmyk、再 rgb、最后灰。
 // 量过 `cmyk(1,0,0.5,0.2)`：asy 发的是 `1 0 0.5 0.2 setcmykcolor`，**不转成 rgb**。
+//
+// **颜色是 6 位有效数字，不是 9 位**：那一段 C++ 先攒进一个新的 `ostringstream buf`
+// （psfile.cc:186），新流的 precision 是默认的 6；坐标与笔宽那些是直接写 `out`，
+// 而那个流在印 `%%HiResBoundingBox` 时被 setprecision(9) 粘住了。渐变字典里的颜色又是
+// 直接写 out 的（psfile.cc:279 的 write(pen)），所以那一路仍是 9 位（见 wpen）。
+// 量出来的：PythagoreanTree.asy 印 `0.461538 0.0769231 0 setrgbcolor`，9 位那一版是
+// `0.461538462 …`。
+string ps6(real x) { return string(x, 6); }
 string colorof(pen p) {
   if (p.iscmyk)
-    return ps(p.cyan) + " " + ps(p.magenta) + " " + ps(p.yellow) + " "
-      + ps(p.black) + " setcmykcolor";
-  if (p.isrgb) return ps(p.red) + " " + ps(p.green) + " " + ps(p.blue) + " setrgbcolor";
-  return ps(p.gray) + " setgray";
+    return ps6(p.cyan) + " " + ps6(p.magenta) + " " + ps6(p.yellow) + " "
+      + ps6(p.black) + " setcmykcolor";
+  if (p.isrgb) return ps6(p.red) + " " + ps6(p.green) + " " + ps6(p.blue) + " setrgbcolor";
+  return ps6(p.gray) + " setgray";
 }
 
 bool samecolor(pen a, pen b) {

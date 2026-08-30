@@ -7274,6 +7274,28 @@ yingyang.asy 与 Sierpinski.asy 的最后一处差就是它。
 genusthree.asy 139ms）、EPS 那一轴在 76 个能出图的例子上。
 没跑：EPS 全量（按"先修够了再跑"办）。
 
+### 第八十三刀：两支笔相加是**加颜色**，而颜色只印 6 位
+
+PythagoreanTree.asy 的 `fill(pic, …, 1/(n+1)*green + n/(n+1)*brown)` 露了两处：
+
+**一、`operator +(pen,pen)` 的颜色是"相加再夹"，不是"右边盖住左边"**（pen.h:739 那个
+switch）：颜色空间取两支里大的那一档（DEFCOLOR<INVISIBLE<GRAYSCALE<RGB<CMYK<PATTERN），
+灰的那一支先升上去（greytorgb / greytocmyk / rgbtocmyk），分量逐个相加，超饱和了整体缩回来
+（rgbrange / cmykrange 是**按最大分量缩**，不是逐道截断）。从前这一层是"右边盖住"，于是
+`1/13*green` 那一支凭空消失 —— 参考印 `0.461538 0.0769231 0`，我们印 `0.461538 0 0`。
+
+**二、颜色只印 6 位有效数字。** psfile.cc:186 的 setcolor 先把三/四道攒进一个**新的**
+`ostringstream buf`，新流的 precision 是默认的 6；而坐标、笔宽、setmiterlimit 那些是直接写
+`out`，那个流在印 `%%HiResBoundingBox` 时被 `setprecision(9)` 粘住了（第五十二刀量到的那件事）。
+所以同一份 EPS 里两种精度并存：`0.461538 0.0769231 0 setrgbcolor` 与 `-73.2079403 … curveto`。
+渐变字典里的颜色是 psfile.cc:279 的 `write(pen)`、直接写 out，仍是 9 位 —— 这一层的 `wpen`
+用 `ps`、`colorof` 用新加的 `ps6`，两条路分开。
+
+PythagoreanTree.asy 这一下变成逐字一样。EPS 那一轴：**能出图的 76 个例子里 18 -> 19**，
+全量口径 **21 份逐字一样**（194 份有参考的里）。
+`tests/asy/run.js` 259 passed / 0 failed（draw/colors 那一份钉的数在两种精度下印出来一样，
+所以它没能挡住这个错 —— 这一条记在明处）。
+
 ## 后果与代价
 
 
