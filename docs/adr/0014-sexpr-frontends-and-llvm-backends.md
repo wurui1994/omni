@@ -8263,6 +8263,100 @@ genusthree 115ms）。**跳过的轴**：EPS 全量（同上一刀的理由）�
 （没碰 SVG 出口）、自举（改的是 asy 前端的一处定型顺序，`run.js` 的 run-c / run-llvm
 两条腿已经把后端覆盖了）。
 
+### 第九十九刀：短路的右边不能提到外面去 —— 一条 `||` 里的下标赋值，与裁剪那一格丢了余料
+
+这一刀砍的是两处"搬东西时漏了一格"，都由 `OMNI_RT_TRACE=1` 的栈直接指出来。
+
+先补上那个开关本身（`backend-js/prelude.js` 的 `$rt_error`）：运行期的错只有一句话，
+而 base 里出错的地方常常离入口十几层，光看那句话定不了位。置上
+`OMNI_RT_TRACE=1` 就连 JS 栈一起印到 stderr（只调试用，正常路径一个字不多）。
+下面两条根都是这么一眼看出来的。
+
+**一、`transform * frame` 把 `sh` 与 `nosave` 掉在地上了。** venn 那句
+`clip(circle((1,0),1))` 之后 `shipout(bbox(0.25cm))`，报的是一句干巴巴的
+`null reference`。开 `OMNI_RT_TRACE=1` 一看栈是
+`$nullCheck` ← `opsbox` ← `framebox` ← `min` ← `shipout`：`opsbox`
+（asy_builtins.asy:1938）在 `o.kind == 3` 那一档要读 `o.sh.gs` 算裁剪框，而
+`operator *(transform t, frame f)` 只抄了 `kind`/`g`/`merge`/`p` 四格 —— 裁剪那一格的
+`sh` 是 `clip(frame,path[],…)` 在 asy_builtins.asy:4988 挂上去的，一搬就没了。
+
+补一个 `asy__shtrans(transform, shadeinfo)`，**每一档搬什么照 drawfill.cc:56-113
+那一串 `transformed` 抄**（裁剪那一格是 drawclipbegin.h:83），不是照着字段名猜：
+
+- 超路径 `gs`（`transpath`）与 tensor 的 `bnds`：整条路径吃 `t`
+- axial/radial 的两个中心 `za`/`zb` 吃 `t`；半径按
+  `RA=length(t*(a+ra)-t*a)` 折算 —— C++ 那边 `a+ra` 走的是
+  `pair(double x, double y=0.0)` 的隐式转换（pair.h:49），所以 **`ra` 只加在 x 上**
+- gouraud 的 `verts`、tensor 的 `tz`：逐点吃 `t`
+- lattice 的 `/Matrix` `tt`：左乘成 `t*T`
+- 笔与开关（`pena`/`penb`/`vpens`/`mpens`/`stroke`/`exta`/`extb`）一个字不动：
+  渐变那几档的 `transformed` 传的是 **`pentype` 原件**，没过 `transpen` 那一步 ——
+  于是 `q.p` 也要按档分：`kind == 2` 走 `pencopy`，其余才是 `shiftless(t) * o.p`
+
+`nosave` 一并抄过去：那是"两格 endclip 挨着时省掉 gsave/grestore"的记号，
+是**这一帧自己的形状**决定的，与变换无关。
+
+**二、`||` 的右边被提到了短路外面 —— 一条 `if` 里的下标赋值。** linearregression 也是
+`null reference`，栈是 `$alen` ← `asy__grow_bool` ← graph3 的 `surface`。源头在
+graph3.asy:2099：
+
+```asy
+bool[] activei=all ? null : active[i];
+…
+if(all || (activei[j]=cond(z))) vi[j]=f(z);
+```
+
+`cond` 没给时 `all` 为真、`activei` 是 **null**，那句下标赋值本来一次都不该跑。可我们
+这一层把 `a[i]=v` 当表达式时是**摊成语句**的（绕圈下标、顶长度的 `asy__grow_*`、
+再 `aset`），而 `asyLogic` 把两边的前置语句一并交给外层的 `L.pre` —— 摊出来就成了
+
+```js
+s_asy__grow_bool(v_activei, v_asy__i300);          // ← 提到了 if 外面
+$aset(v_activei, …, $callFn(v_cond, …), false);
+if ((v_all || $aget(v_activei, …))) …
+```
+
+改法与 `? :`（`asyCond`）同一条：右边**先单独攒一份 `pre`**，攒到了就改写成
+"临时量 + if"：`(let t bool <左>)`、`(if <t 或 !t> (do <右边那一摊> (set t <右>)))`，
+值就是 `(var t)`。`&&` 是"左边真才接着算"，`||` 是"左边假才接着算"。右边什么都没摊出来
+时（绝大多数）照旧发一格 `(bin "&&"/"||" …)`，一个临时量都不多花。`&`/`|` 那两个**不动** ——
+它们在 asy 里就是两边都算的。
+
+量过（`asy -noV` 与我们逐字一样）：`all=true` 时 `a[0]=f()` 不跑、计数停在 0；
+`all=false` 时跑一次、`b[1]` 变 true；`false && (a[0]=f())` 也一次不跑。
+
+**这两下一起把 9 个"没出图"打开了。** venn、linearregression 是这一刀直接治的；
+label3solid、label3zoom、stereoscopic、threeviews、fin、logo3、truncatedIcosahedron
+原先记的是"JS 模块错"，从空的 `.omni-cache/asy-mods` 重跑就好 —— 那一栏确实是上一刀
+记下的**缓存串味**（一个不带哈希的 `omni_weak.js` 对好几份 `plain__<hash>`），
+不是各自的毛病。这条隐患仍然在，写在明处。
+
+顺手校正一条记账口径：`abort()` 这一层是**故意越界**触发运行期错误的
+（asy_builtins.asy:113），所以 tiling/tvgen/strokepath/textpath/laserlattice/
+functionshading/clockarray 在 stderr 上都长一个样
+（`array index out of range: 0 (length 0)`），真正那句话 `abort: …` 走的是 stdout。
+只看 stderr 会把七个不同的缺口错记成一个。
+
+**新捞出一条，还没修。** Gouraud / sinxlex 栈溢出的根是 `guide` 与 `path`
+在这一层是**同一个类型**：plain_Label.asy:505 的
+`label(picture, Label, explicit guide g, …)` 体里那句 `label(pic,L,(path) g,…)`
+本该落到 :498 那份 `explicit path`，可两份的签名对我们一模一样，后声明的那份把前一份
+压住 —— `ov6_label` 于是调了自己。alignedaxis 是同一条的另一面：
+`pair exp(pair x) { return exp(x.x)*…; }` 里的 `exp(x.x)` 该走 `real exp(real)`，
+我们挑了刚声明的 `pair exp(pair)` 再把 real 转成 pair。要治得让 `guide` 独立成型、
+并让**签名精确匹配**在打分里压过"要转一次"的候选。
+
+这一刀的账：EPS 那一轴按名字跑了 18 个 —— 一样 **11**（上一刀是 10：新增 venn，
+从"没出图"变成一样）、只有数值差 0、结构不同 5、没出图 **0**（上一刀这一栏里的
+venn 与 linearregression 都清了）。那 5 个结构不同里 4 个是老账（logdown、lmfit1、
+cardioid、gamma，libm 与 plain_bounds 那一族），第 5 个是 linearregression ——
+它现在出图了，可**参考那一份是位图**（674 个记号对我们 523018），比不出来，
+与其余 3D 例子同一栏。跑过的轴：`tests/asy/run.js` 五条腿 259/0（609.5s）、
+`tests/sexpr/run.js` 55/0、`tests/asy/sweep.js` 220 个里干净 219（1.4s，最慢
+genusthree 108ms）。**跳过的轴**：EPS 全量（同上一刀的理由：先成批修准，再谈全量）、
+`tests/asy/svg.js`（没碰 SVG 出口）、自举（改的是 asy 前端的一处短路降级与 base 里
+一个函数，`run.js` 的 run-c / run-llvm 两条腿已经把后端覆盖了）。
+
 ## 后果与代价
 
 

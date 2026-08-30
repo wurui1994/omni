@@ -9,6 +9,11 @@ const $INT_MIN = -(2n ** 63n);
 
 function $rt_error(msg) {
   $flush();  // 先冲刷 stdout，和 C 运行时里 omni_error 的 fflush(stdout) 对齐
+  // OMNI_RT_TRACE=1 时连 JS 栈一起印（只调试用）：运行期的错只有一句话，
+  // 而 base 里出错的地方常常离入口十几层，光看那句话定不了位。
+  if (process.env.OMNI_RT_TRACE === "1") {
+    process.stderr.write(new Error("omni rt: " + msg).stack + "\n");
+  }
   process.stderr.write("omni: runtime error: " + msg + "\n");
   process.exit(70);
 }

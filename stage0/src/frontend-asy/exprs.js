@@ -2473,9 +2473,24 @@ export function asyRereadable(t) {
 
 export function asyLogic(L, n, op) {
   const a = asyCoerce(L, asyExpr(L, n.items[1]), 'bool', n, `'${op}' 的左边`);
+  // 右边**只有短路没发生时才算**，所以它自己摊出来的前置语句不能跟着提到外层去。
+  // 量出来的坑：graph3.asy:2099 的 `if(all || (activei[j]=cond(z)))` —— cond 是 null
+  // 时 activei 也是 null，那句下标赋值提出去就是一发 `null reference`（linearregression）。
+  // 摊的形状与 `? :`（asyCond）同一条：临时量 + if，右边那一摊放进 if 体里。
+  const outer = Array.isArray(L.pre) ? L.pre : null;
+  if (outer !== null) L.pre = [];
   const b = asyCoerce(L, asyExpr(L, n.items[2]), 'bool', n, `'${op}' 的右边`);
+  const bPre = outer === null ? [] : L.pre;
+  if (outer !== null) L.pre = outer;
   if (a === null || b === null) return null;
-  return { code: `(bin "${op}" ${a.code} ${b.code})`, type: 'bool' };
+  // 右边什么都没摊出来（绝大多数）：照旧发一格 `(bin "&&"/"||" …)`，一个临时量都不多花
+  if (bPre.length === 0) return { code: `(bin "${op}" ${a.code} ${b.code})`, type: 'bool' };
+  const nm = `asy__lg${L.unit.ntmp++}`;
+  L.pre.push(`(let ${nm} bool ${a.code})`);
+  // `&&` 是"左边真才接着算"，`||` 是"左边假才接着算"
+  const c = op === '&&' ? `(var ${nm})` : `(un "!" (var ${nm}))`;
+  L.pre.push(`(if ${c} (do ${bPre.concat([`(set ${nm} ${b.code})`]).join(' ')}))`);
+  return { code: `(var ${nm})`, type: 'bool' };
 }
 
 export function asyUnary(L, n) {

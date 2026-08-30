@@ -5730,6 +5730,43 @@ pen operator *(transform t, pen p) {
   return q;
 }
 
+// 渐变/网格/裁剪那一格的余料跟着变换搬（drawfill.cc:56-113 的一串 `transformed`，
+// 裁剪那一格是 drawclipbegin.h:83）。**每一档搬什么是量出来的，不是猜的**：
+//   - 超路径 gs（transpath）与 tensor 的 bnds：整条路径吃 t
+//   - axial/radial 的两个中心 za/zb：吃 t；半径按 `length(t*(a+ra)-t*a)` 折算 ——
+//     C++ 那边 `a+ra` 是 `pair(double,double=0)` 的隐式转换，即 **只加在 x 上**
+//   - gouraud 的 verts、tensor 的 tz：每个点吃 t
+//   - lattice 的 /Matrix tt：左乘成 `t*T`
+//   - 笔（pena/penb/vpens/mpens）与 stroke/exta/extb 一个字都不动：渐变那几档的
+//     `transformed` 传的是 **pentype 原件**，没有 transpen 那一步
+shadeinfo asy__shtrans(transform t, shadeinfo h) {
+  if (h == null) return null;
+  shadeinfo r;
+  r.st = h.st;
+  for (int i = 0; i < h.gs.length; ++i) r.gs.push(t * h.gs[i]);
+  r.stroke = h.stroke;
+  r.pena = pencopy(h.pena);
+  r.penb = pencopy(h.penb);
+  r.za = t * h.za;
+  r.zb = t * h.zb;
+  r.ra = h.st == 3 ? length(t * (h.za + (h.ra, 0)) - r.za) : h.ra;
+  r.rb = h.st == 3 ? length(t * (h.zb + (h.rb, 0)) - r.zb) : h.rb;
+  r.exta = h.exta;
+  r.extb = h.extb;
+  r.vpens = asy__pcopy(h.vpens);
+  for (int i = 0; i < h.verts.length; ++i) r.verts.push(t * h.verts[i]);
+  r.vedges = copy(h.vedges);
+  r.mpens = asy__pcopy2(h.mpens);
+  for (int i = 0; i < h.bnds.length; ++i) r.bnds.push(t * h.bnds[i]);
+  for (int i = 0; i < h.tz.length; ++i) {
+    pair[] row;
+    for (int j = 0; j < h.tz[i].length; ++j) row.push(t * h.tz[i][j]);
+    r.tz.push(row);
+  }
+  r.tt = t * h.tt;
+  return r;
+}
+
 // (1) `transform * frame`（runtime.in:1112）：frame 里每一笔都搬。
 frame operator *(transform t, frame f) {
   frame out;
@@ -5739,9 +5776,15 @@ frame operator *(transform t, frame f) {
     q.g = t * o.g;
     // 一组填充的续标记要跟着搬，不然 `shift(w)*p` 那种搬过的帧会退回"一条一笔填"
     q.merge = o.merge;
+    // 渐变/裁剪那一格的余料**必须跟着搬**：不搬的话 kind 2/3 的 `o.sh` 是 null，
+    // opsbox 里 `o.sh.gs` 就是一发空指针（venn 的 `null reference` 正是这条）。
+    q.sh = asy__shtrans(t, o.sh);
+    // endclip 那一对省不省 gsave/grestore 是**这一帧自己的形状**决定的，与变换无关
+    q.nosave = o.nosave;
     // 笔只吃**去掉平移**的那一半（drawelement.h:302 `transformed(shiftless(t),pentype)`）——
     // 量过：`min(shift(3,4)*f)` 是路径搬过去再 ±0.25，笔那一格没有跟着平移。
-    q.p = shiftless(t) * o.p;
+    // 渐变那一档例外：drawfill.cc 的几个 `transformed` 传 pentype 原件，不过一遍 transpen。
+    q.p = o.kind == 2 ? pencopy(o.p) : shiftless(t) * o.p;
     out.ops.push(q);
   }
   // 标签照 drawlabel.cc:200-204 的 transformed 搬：T 与 position 整个变换吃下去，
