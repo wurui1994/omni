@@ -386,6 +386,13 @@ struct pen {
   real dashoffset = 0;
   bool dashscale = true;
   bool dashadjust = true;
+  // 「这支笔**显式设过**虚线」= asy 的 `LineType::isdefault == false`（pen.h:28/34）。
+  // 光看 dashpat 是不是空的判不出来：`solid` 就是 `linetype(new real[])`（plain_pens.asy:4）——
+  // 一份**空**的、但设过的 pattern。pen.h:790 的加法是 `q.line.isdefault ? p.line : q.line`，
+  // 所以 `p+solid` 要把虚线**清掉**。少了这一格，plain_arrows.asy:205 的
+  // `filltype.fill(f,head,p+solid)` 画出来的箭头还带着虚线节拍 —— mosquito 里参考发
+  // `[] 0 setdash` 而我们发 `[8 8]`，一个例子里多出三处。
+  bool dashset = false;
   // 笔自己的那个变换（pen.h 的 `pen::t`）：`transform * pen` 攒在这儿，min/max(pen) 用它。
   transform pentrans;
   bool hastrans = false;
@@ -425,6 +432,7 @@ pen pencopy(pen p) {
   q.setcolor = p.setcolor;
   q.dashpat = copy(p.dashpat);
   q.dashoffset = p.dashoffset;
+  q.dashset = p.dashset;
   q.dashscale = p.dashscale;
   q.dashadjust = p.dashadjust;
   q.pentrans = p.pentrans;
@@ -452,6 +460,27 @@ pen pencopy(pen p) {
 // 所以这一格叫别的名字，读写走下面 defaultpen() / defaultpen(pen)。
 pen asy__defpen;
 pen currentpen;
+
+// 字号/行距是**用的时候才落地**的（pen.h:433 的 `size()` 与 :463 的 `Lineskip()`）：
+// 笔自己那一格是 0 就读 **defaultpen 的**那一份。这一层的 `fontsizeval` 是构造时就算好的
+// denormalized 值 —— 于是 `currentpen`（声明那一刻就冻住 12pt）在
+// `defaultpen(fontsize(8pt))` 之后还是 12pt，mosquito 的每个标签都印
+// `\fontsize{12.000000}`、字体挑成 CMSY10 而参考是 CMSY8。
+// 所以凡是 asy 那边写 `p.size()` / `p.Lineskip()` 的地方都走这两个，别直接读那一格。
+real asy__psize(pen p) {
+  if (p.fontsizeset != 0) return p.fontsizeset;
+  return asy__defpen.fontsizeset != 0 ? asy__defpen.fontsizeset : asy__defpen.fontsizeval;
+}
+real asy__plskip(pen p) {
+  if (p.lineskipval != 0) return p.lineskipval;
+  return asy__defpen.lineskipval != 0 ? asy__defpen.lineskipval : 1.2 * asy__defpen.fontsizeval;
+}
+// `Font()`（pen.h:437-444）同样两层：笔上没设过就问 defaultpen，两边都空才是那串默认命令。
+string asy__pfont(pen p) {
+  if (p.font != "") return p.font;
+  if (asy__defpen.font != "") return asy__defpen.font;
+  return "\usefont{\ASYencoding}{\ASYfamily}{\ASYseries}{\ASYshape}";
+}
 
 pen linewidth(real w) {
   pen q = pencopy(asy__defpen);
@@ -601,11 +630,12 @@ pen operator +(pen a, pen b) {
   if (b.cap != 1) q.cap = b.cap;
   if (b.join != 1) q.join = b.join;
   if (b.miter != 10) q.miter = b.miter;
-  if (b.dashpat.length > 0) {
+  if (b.dashset) {
     q.dashpat = copy(b.dashpat);
     q.dashoffset = b.dashoffset;
     q.dashscale = b.dashscale;
     q.dashadjust = b.dashadjust;
+    q.dashset = true;
   }
   if (b.font != "") q.font = b.font;
   if (b.fontsizeset != 0) {
@@ -1756,6 +1786,9 @@ struct drawop {
   // 裁剪那一对的 gsave/grestore 省掉没有（picture.cc:301 那个"解释器栈深"的优化：
   // 两格 endclip 挨着时，**前面那一格**与它配对的头都不发 gsave/grestore）。
   bool nosave = false;
+  // 这一格是**上一格填充的续**（`fill(f, path[] g, p)` 拆出来的第 2..n 条）：
+  // 出图时不发 newpath、也不发笔与 fill，攒到这一组最后一条再发。见 emitop。
+  bool merge = false;
 }
 
 struct picture {
@@ -1790,10 +1823,17 @@ void draw(picture pic, path[] g) { for (path q : g) addop(pic, 0, q, currentpen)
 void draw(path[] g, pen p) { for (path q : g) addop(currentpicture, 0, q, p); }
 void draw(path[] g) { for (path q : g) addop(currentpicture, 0, q, currentpen); }
 
-void fill(picture pic, path[] g, pen p) { for (path q : g) addop(pic, 1, q, p); }
-void fill(picture pic, path[] g) { for (path q : g) addop(pic, 1, q, currentpen); }
-void fill(path[] g, pen p) { for (path q : g) addop(currentpicture, 1, q, p); }
-void fill(path[] g) { for (path q : g) addop(currentpicture, 1, q, currentpen); }
+// 这一层自己那份 `fill(picture, path[], …)` 也是**一组一个填充**（与 frame 上那份同一条规矩）
+void asy__fillall(picture pic, path[] g, pen p) {
+  for (int i = 0; i < g.length; ++i) {
+    addop(pic, 1, g[i], p);
+    if (i > 0) pic.ops[pic.ops.length - 1].merge = true;
+  }
+}
+void fill(picture pic, path[] g, pen p) { asy__fillall(pic, g, p); }
+void fill(picture pic, path[] g) { asy__fillall(pic, g, currentpen); }
+void fill(path[] g, pen p) { asy__fillall(currentpicture, g, p); }
+void fill(path[] g) { asy__fillall(currentpicture, g, currentpen); }
 
 // 一个元素在缩放 s 下的 bbox。描边按笔宽的一半外扩（默认是圆头圆角，四个方向都是 w/2）。
 // 描边那一笔的盒子要加上**笔的盒子**（pen.h:931 的 pen::bounds）：没有笔尖时是
@@ -2197,16 +2237,23 @@ private void asy__measure(labelrec[] ls) {
   string[] wkey;       // want 里每条的键
   string[] keys;       // 这一批真要问 latex 的键（去重）
   real[] askfs;        // keys 对应的字号（pt）
+  real[] askls;        // keys 对应的行距（pt）
+  string[] askfn;      // keys 对应的字体命令
   string[] asks;       // keys 对应的文本
   for (int q = 0; q < want.length; ++q) {
     labelrec r = ls[want[q]];
-    real fs = r.p.fontsizeval / asy__tex2ps;
-    string k = ukey + string(fs) + ":" + string(length(r.s)) + ":" + r.s;
+    real fs = asy__psize(r.p) / asy__tex2ps;
+    real ls2 = asy__plskip(r.p) / asy__tex2ps;
+    string fn = asy__pfont(r.p);
+    // 键上要带**字体**：同一句话在 cmss 与 cmr 下宽度不一样，少了这一格
+    // `defaultpen(font(...))` 之后量出来的还是上一份字体的盒子。
+    string k = ukey + string(fs) + ":" + string(ls2) + ":" + fn + ":"
+      + string(length(r.s)) + ":" + r.s;
     wkey.push(k);
     if (asy__mfind(k) >= 0) continue;
     bool dup = false;
     for (int j = 0; j < keys.length; ++j) if (keys[j] == k) { dup = true; break; }
-    if (!dup) { keys.push(k); askfs.push(fs); asks.push(r.s); }
+    if (!dup) { keys.push(k); askfs.push(fs); askls.push(ls2); askfn.push(fn); asks.push(r.s); }
   }
   // 投机那一段试过，**量出来是退步**，所以没有留：既然已经要跑一趟 latex，把"造出来
   // 但还没量过的"全捎上 —— 听起来该赚，实际上 interpolate1 从 6.65s 变成 8.07s。
@@ -2218,12 +2265,15 @@ private void asy__measure(labelrec[] ls) {
     asy__dimload();
     string[] k2;
     real[] f2;
+    real[] l2;
+    string[] n2;
     string[] s2;
     for (int k = 0; k < keys.length; ++k) {
       if (asy__mfind(keys[k]) >= 0) continue;
-      k2.push(keys[k]); f2.push(askfs[k]); s2.push(asks[k]);
+      k2.push(keys[k]); f2.push(askfs[k]); l2.push(askls[k]);
+      n2.push(askfn[k]); s2.push(asks[k]);
     }
-    keys = k2; askfs = f2; asks = s2;
+    keys = k2; askfs = f2; askls = l2; askfn = n2; asks = s2;
   }
   if (keys.length > 0) {
     string dir = "/tmp/omni-asytex";
@@ -2233,13 +2283,25 @@ private void asy__measure(labelrec[] ls) {
     // 字面量 —— latex 照样退出 0，三个数全量成了 0，界只差了一点点，很能骗人。
     string t = "\documentclass[12pt]{article}" + nl + u
       + "\newbox\ASYbox" + nl + "\newdimen\ASYdimen" + nl + "\pagestyle{empty}" + nl
-      + "\begin{document}" + nl;
+      + "\begin{document}" + nl
+      // texfile.h:174-181：管道那一路 `\begin{document}` 之后紧跟 latexfontencoding。
+      // 少了这六行，下面那句默认字体命令 `\usefont{\ASYencoding}{…}` 全是未定义控制序列 ——
+      // 而 latex 在 nonstopmode 下照样退 0，三个数会安静地量成 0。
+      + "\makeatletter%" + nl
+      + "\let\ASYencoding\f@encoding%" + nl
+      + "\let\ASYfamily\f@family%" + nl
+      + "\let\ASYseries\f@series%" + nl
+      + "\let\ASYshape\f@shape%" + nl
+      + "\makeatother%" + nl;
     for (int k = 0; k < keys.length; ++k) {
       // 笔上存的字号是 bp（fontsizeval），TeX 那边要 pt —— 除回去（askfs 里已经是 pt）。
       // 默认那一格 11.9551681195517 / (72/72.27) 正好是 12，与 asy 生的
       // `\fontsize{12.000000}` 对上。
       real fs = askfs[k];
-      t = t + "\fontsize{" + string(fs) + "}{" + string(1.2 * fs) + "}\selectfont" + nl;
+      // 量盒子那一趟也要**先切字体**（drawlabel.cc:81-88 的 setlatexfont + settexfont）：
+      // 行距照 `p.Lineskip()*ps2tex`，不是硬写的 1.2 倍。
+      t = t + "\fontsize{" + string(fs) + "}{" + string(askls[k]) + "}\selectfont" + nl;
+      t = t + askfn[k] + nl;
       t = t + "\setbox\ASYbox=\hbox{" + asks[k] + "}" + nl;
       t = t + "\immediate\write16{>dim(\the\wd\ASYbox)dim}" + nl;
       t = t + "\immediate\write16{>dim(\the\ht\ASYbox)dim}" + nl;
@@ -2309,7 +2371,7 @@ private void asy__labelbox(box bx, labelrec r) {
   al = (al.x, al.y + (dep - r.depth));
   al = r.t * al;
   pair p = r.position + al;
-  real fz = r.p.fontsizeval * 0.1 + 0.3;
+  real fz = asy__psize(r.p) * 0.1 + 0.3;
   addpt(bx, p + r.t * (-fz, -fz));
   addpt(bx, p + r.t * (-fz, vert + fz));
   addpt(bx, p + r.t * (r.width + fz, vert + fz));
@@ -2823,7 +2885,12 @@ void emitshade(drawop o, real s) {
 }
 
 // 一格 drawop 的 EPS（shipout(picture) 与 _shipout(frame) 共用；两处只有缩放不同）
-void emitop(drawop o, real s) {
+//
+// `cont`/`last` 是**一组填充**里的位置（见 drawop.merge）：asy 那边 `fill(f, path[] g, p)`
+// 是**一个** drawFill，drawfill.cc:49-52 走的是 writepath（每条子路径一句、只有第一条发
+// newpath）+ 一句 fill —— 一组路径连着 fillrule 才挖得出洞。这一层一条路径一格 op，
+// 于是靠这两个标记把一组重新拼回去：中间那些只攒路径，笔与 `fill`/`eofill` 留到最后一条。
+void emitop(drawop o, real s, bool cont = false, bool last = true) {
   if (o.kind == 2) { emitshade(o, s); return; }
   // 裁剪的两格（drawclipbegin.h:52 / drawclipend.h:45）：`gsave` + 超路径 + clip，
   // 配对的那一格只发 `grestore`。空路径时只有 gsave / grestore（那份 C++ 的 `empty()` 那一支）。
@@ -2836,14 +2903,25 @@ void emitop(drawop o, real s) {
     return;
   }
   if (o.kind == 4) { if (!o.nosave) { asy__out("grestore"); grestorepen(); } return; }
-  // 描边那一支要把笔自己的变换摊开（drawpath.cc:203-217 的次序：penSave → penTranslate →
-  // 路径 → penConcat → setpen → stroke → penRestore）。**concat 排在路径后面**是有意的：
-  // PostScript 里路径一旦建好就落在设备空间了，之后改 CTM 只影响描边时笔尖的形状。
-  // 填充那一支没有这一套（drawfill.cc:46-54 只有 palette/writepath/fill）。
-  bool ptrans = o.kind == 0 && asy__istrans(o.p);
-  if (ptrans) { asy__out("gsave"); gsavepen(); }
-  if (o.kind == 0) asy__pentranslate(o.p, s);
-  emitpath(o.g, s);
+  // 不可见的笔什么都不发，空路径也一样 —— 那是 drawpath.cc:195 与 drawfill.cc:48 的第一句
+  // （`if(n == 0 || pentype.invisible()) return true;`）。少了这一条，flowchart 的
+  // `roundrectangle`（默认 `fillpen=invisible`）在我们这边真的把框涂上了：controlsystem
+  // 的第一处差就是它，而且这不只是差字节，是画错了。
+  if (o.p.isinvisible || o.g.nodes.length == 0) return;
+  // 笔自己的变换要摊开 —— **填充与描边都要**（drawfill.h:39-48 的 palette/fill 与
+  // drawpath.cc:203-217 的 draw 走的是同一对 penSave/penRestore，drawelement.h:322-342）：
+  //   描边：penSave → penTranslate → 路径 → penConcat → setpen → stroke → penRestore
+  //   填充：penSave → penTranslate → 路径 →           setpen → fill   → penRestore
+  // **concat 只有描边发**（路径一旦建好就落在设备空间了，之后改 CTM 只影响笔尖形状；
+  // 填充用不着），而 gsave/grestore 两边都发。少了填充那一半，cards 里参考把每一笔填充
+  // 都裹在 gsave/grestore 里、grestore 还把 lastpen 弹回去（psfile.h:307/313），
+  // 我们不裹于是后面那一笔描边多印一句 `0 setgray`。
+  // 一组填充（merge）只在**头一格** penSave、**末一格** penRestore。
+  bool ptrans = asy__istrans(o.p);
+  if (ptrans && !cont) { asy__out("gsave"); gsavepen(); }
+  if (!cont) asy__pentranslate(o.p, s);
+  emitpath(o.g, s, !cont);
+  if (!last) return;
   // 描边前先把虚线的节拍收一收（drawpath.cc:198-201）。填充那一支不看虚线。
   // 与那边有一处对不上要说清：asy 量的是 `p.transformed(inverse(笔的变换))` 的弧长，
   // 这一层的笔基本没有自己的变换（hastrans），所以直接量路径本身。
@@ -2891,7 +2969,9 @@ void shipout(picture pic) {
   asy__out("gsave");
   asy__out(" " + ps(ox - bx.l) + " " + ps(oy - bx.b) + " translate");
   lastvalid = false;
-  for (int i = 0; i < pic.ops.length; ++i) emitop(pic.ops[i], s);
+  for (int i = 0; i < pic.ops.length; ++i)
+    emitop(pic.ops[i], s, pic.ops[i].merge,
+           i + 1 >= pic.ops.length || !pic.ops[i + 1].merge);
   asy__out("grestore");
   asy__out("showpage");
   asy__out("%%EOF");
@@ -3468,11 +3548,11 @@ pen fontsize(real size, real lineskip) {
   return q;
 }
 pen fontsize(real size) { return fontsize(size, 1.2 * size); }
-real fontsize(pen p = currentpen) { return p.fontsizeval; }
+real fontsize(pen p = currentpen) { return asy__psize(p); }
 // runtime.in 的 `real lineskip(pen)`（pen::Lineskip()）：设过就是设的那一格，没设过是
 // 字号的 1.2 倍。量过 `lineskip(currentpen)` 是 14.346201743462（= 1.2*11.9551681195517）、
 // `lineskip(fontsize(20))` 是 24、`lineskip(fontsize(10,15))` 是 15。slide.asy:258 要它。
-real lineskip(pen p = currentpen) { return p.lineskipval != 0 ? p.lineskipval : 1.2 * p.fontsizeval; }
+real lineskip(pen p = currentpen) { return asy__plskip(p); }
 // runtime.in:585 的 `string font(pen)`（pen::Font()）。没设过 fontcommand 时回的是那串
 // 默认的 LaTeX 字体命令 —— 量过真 asy：`font(currentpen)` 与 `font(fontsize(9))` 都是
 // `\usefont{\ASYencoding}{\ASYfamily}{\ASYseries}{\ASYshape}`，设过的回设的那一串。
@@ -3480,7 +3560,7 @@ real lineskip(pen p = currentpen) { return p.lineskipval != 0 ? p.lineskipval : 
 // asy 的 `"…"` 里**反斜杠不是转义**（量过：`write("a\\b")` 印 `a\\b`、`length("a\\b")`
 // 是 4），所以这里写一个反斜杠就是一个。
 string font(pen p = currentpen) {
-  return p.font == "" ? "\usefont{\ASYencoding}{\ASYfamily}{\ASYseries}{\ASYshape}" : p.font;
+  return asy__pfont(p);
 }
 
 // (1) 还差的几个非泛型内建：base 里点名要，语义在参考实现里是一句话。
@@ -4688,7 +4768,11 @@ pair min(pen p) {
 
 // (1) defaultpen 那一族（runtime.in:355/360）：读/写上面那一格。
 pen defaultpen() { return pencopy(asy__defpen); }
-void defaultpen(pen p) { asy__defpen = pencopy(p); }
+// 存进来的那一份要把 dashset 抹掉：所有笔的构造函数都是 `pencopy(asy__defpen)` 起手的，
+// 抹掉之后 `defaultpen(dashed)` 之后新造的笔仍旧带着那份 pattern（读的人直接读 dashpat，
+// 等于把 pen.h:468 那层 fallback 在构造时就落了地），但它们**不会**在 `p+q` 里把左边的
+// 虚线盖掉 —— asy 那边 `rgb(1,0,0)` 的 line 一直是 isdefault。
+void defaultpen(pen p) { asy__defpen = pencopy(p); asy__defpen.dashset = false; }
 
 // (1) 虚线（runtime.in:503）：负数截成 0（参考实现里那句 `::max(...,0.0)`），
 // 别的三个属性照原样存着。`linetype(pen)` 回那份 pattern。
@@ -4700,6 +4784,7 @@ pen linetype(real[] pattern, real offset=0, bool scale=true, bool adjust=true) {
   q.dashoffset = offset;
   q.dashscale = scale;
   q.dashadjust = adjust;
+  q.dashset = true;
   return q;
 }
 real[] linetype(pen p = currentpen) { return copy(p.dashpat); }
@@ -4766,11 +4851,14 @@ bool is3D(frame f) { return false; }
 void gsave(frame f) { }
 void grestore(frame f) { }
 
-// (1) frame 上的那一批画图内建（runpicture.in）。`fill(frame, path[], …)` 是真做的：
-// 每条路径进一笔填充。**明写的差别**：asy 那边一组路径连着 fillrule 是**一个**填充区域
-// （挖洞靠它），我们是一笔一笔填，所以带洞的图形会与真 asy 不一样。
+// (1) frame 上的那一批画图内建（runpicture.in）。`fill(frame, path[], …)` 是**一个**填充：
+// asy 那边一组路径连着 fillrule 才是一个区域（挖洞靠它），drawfill.cc:49-52 只发一句
+// newpath、一句 fill。这一层一条路径一格 op，第 2..n 格挂上 merge，出图时再拼回一组。
 void fill(frame f, path[] g, pen p = currentpen, bool copy = true) {
-  for (path q : g) addop(f, 1, q, p);
+  for (int i = 0; i < g.length; ++i) {
+    addop(f, 1, g[i], p);
+    if (i > 0) f.ops[f.ops.length - 1].merge = true;
+  }
 }
 // 下面这些是**声明在这里、体是 abort**：签名照参考实现抄准，语义（渐变、裁剪、TeX、
 // 分层、翻页、3D 盒子）都还没做。抄准签名是为了让"没做"落在运行期那一句话上，
@@ -5649,6 +5737,8 @@ frame operator *(transform t, frame f) {
     drawop q;
     q.kind = o.kind;
     q.g = t * o.g;
+    // 一组填充的续标记要跟着搬，不然 `shift(w)*p` 那种搬过的帧会退回"一条一笔填"
+    q.merge = o.merge;
     // 笔只吃**去掉平移**的那一半（drawelement.h:302 `transformed(shiftless(t),pentype)`）——
     // 量过：`min(shift(3,4)*f)` 是路径搬过去再 ±0.25，笔那一格没有跟着平移。
     q.p = shiftless(t) * o.p;
@@ -6476,8 +6566,9 @@ path[][] _texpath(string[] s, pen[] p) {
   for (int i = 0; i < n; ++i) {
     if (i != 0) t = t + "\newpage" + nl;
     t = t + font(p[i]) + "%" + nl;
-    real fs = p[i].fontsizeval / asy__tex2ps;
-    t = t + "\fontsize{" + string(fs) + "}{" + string(1.2 * fs) + "}\selectfont" + nl;
+    real fs = asy__psize(p[i]) / asy__tex2ps;
+    t = t + "\fontsize{" + string(fs) + "}{"
+      + string(asy__plskip(p[i]) / asy__tex2ps) + "}\selectfont" + nl;
     t = t + "\special{ps:" + nl + ASYx + nl + ASYy + nl + "/ASY1 true def" + nl
       + "/show {" + ASY1 + "currentpoint newpath moveto false charpath " + forall
       + "} bind def" + nl
@@ -6555,7 +6646,9 @@ private string asy__baseeps(frame f, box bx) {
   asy__out("/Setlinewidth {0 exch dtransform dup abs 1 lt {pop 0}{round} ifelse");
   asy__out("idtransform setlinewidth pop} bind def");
   lastvalid = false;
-  for (int i = 0; i < f.ops.length; ++i) emitop(f.ops[i], 1);
+  for (int i = 0; i < f.ops.length; ++i)
+    emitop(f.ops[i], 1, f.ops[i].merge,
+           i + 1 >= f.ops.length || !f.ops[i + 1].merge);
   asy__out("showpage");
   asy__out("%%EOF");
   asy__tobuf = false;
@@ -6682,7 +6775,14 @@ private bool asy__texship(string prefix, frame f, box bx, real ox, real oy, real
   string pre = prefix == "" ? _mainname() : prefix;
   if (pre == "") pre = "t";
   if (_runproc("mkdir -p " + dir + " && rm -f " + dir + "/" + pre + "_*") != 0) return false;
-  _writetext(dir + "/" + pre + "_0.eps", asy__baseeps(f, bx));
+  // 一张**只有标签**的图不出 eps：texfile.cc:153-180 的 beginlayer 拿的是 picture.cc:1345
+  // 那个 `postscript |= (*p)->draw(&out)` —— 画的那几族（drawPath/drawFill/裁剪的头尾）
+  // 一律回 true，drawLabel 没有 draw(psfile*)，走的是 drawelement.h:182 那份 false。
+  // 于是 ops 一格都没有时 `\includegraphics` 那一段整段换成一个等高的空 vbox，
+  // 而且 `_0.eps` 根本不写（量过 `label` 五连的 f1_.tex 是
+  // `\leavevmode\vbox to 57.247657pt{}%`，目录里没有 f1_0.eps）。
+  bool haseps = f.ops.length > 0;
+  if (haseps) _writetext(dir + "/" + pre + "_0.eps", asy__baseeps(f, bx));
   // 标签要先量过才写得出（drawlabel.cc:187 的 checkbounds）。framebox 已经量过了。
   asy__measure(f.labs);
   string t = asy__texpre(nl)
@@ -6696,12 +6796,16 @@ private bool asy__texship(string prefix, frame f, box bx, real ox, real oy, real
     + "\let\ASYfamily\f@family%" + nl
     + "\let\ASYseries\f@series%" + nl
     + "\let\ASYshape\f@shape%" + nl
-    + "\makeatother%" + nl
-    + "{\catcode`\"=12%" + nl
-    + "\includegraphics[bb=" + asy__f6(bx.l) + " " + asy__f6(bx.b) + " "
-      + asy__f6(bx.r) + " " + asy__f6(bx.t) + "]{" + pre + "_0.eps}%" + nl
-    + "}%" + nl
-    + "\kern " + asy__f6(-w / asy__tex2ps) + "pt%" + nl;
+    + "\makeatother%" + nl;
+  if (haseps) {
+    t = t + "{\catcode`\"=12%" + nl
+      + "\includegraphics[bb=" + asy__f6(bx.l) + " " + asy__f6(bx.b) + " "
+        + asy__f6(bx.r) + " " + asy__f6(bx.t) + "]{" + pre + "_0.eps}%" + nl
+      + "}%" + nl
+      + "\kern " + asy__f6(-w / asy__tex2ps) + "pt%" + nl;
+  } else {
+    t = t + "\leavevmode\vbox to " + asy__f6(h / asy__tex2ps) + "pt{}%" + nl;
+  }
   // 走一遍标签那一列。裁剪的头尾按 drawclipbegin.h:66-79 / drawclipend.h:51-56 发：
   // `\begin{picture}` 只在**最外一层**发（texfile.h:268 的 toplevel，嵌套的裁剪只加层数）。
   //
@@ -6720,7 +6824,7 @@ private bool asy__texship(string prefix, frame f, box bx, real ox, real oy, real
   int ie = 0;
   pair sh = (-bx.l, -bx.b);
   int lvl = 0;
-  bool first = true;
+  string lastfont = "<invalid>";
   for (int i = 0; i < f.labs.length; ++i) {
     labelrec r = f.labs[i];
     if (r.kind == 1) {
@@ -6753,14 +6857,27 @@ private bool asy__texship(string prefix, frame f, box bx, real ox, real oy, real
       if (!ns) t = t + "\special{ps:grestore}%" + nl;
       continue;
     }
-    if (r.s == "") continue;
-    real fs = r.p.fontsizeval / asy__tex2ps;
+    // 空文本的标签**不能在这里扔**：那道 `s == ""` 的门在 plain_Label.asy:314，只挡
+    // `Label.label(picture,…)` 这一路；同一个结构体里 292 行的 `label(frame,…)` 没有门。
+    // flowchart 的 `circle("")` 走的正是 frame 那一路（block 自己攒帧），于是参考的
+    // controlsystem 里两个空标签照样各发一份颜色 special + `\fontsize` + `\ASYalign{}`，
+    // 只是排不出字形。这一层把门放在这里，等于把那两格连 lastfont 的推进一起吃掉了。
+    real fs = asy__psize(r.p) / asy__tex2ps;
     pair al = asy__texalign(r);
     t = t + "\special{ps:" + asy__texcolor(r.p) + "}%" + nl
-      + "\fontsize{" + asy__f6(fs) + "}{" + asy__f6(1.2 * fs) + "}\selectfont%" + nl;
-    if (first) {
-      t = t + "\usefont{\ASYencoding}{\ASYfamily}{\ASYseries}{\ASYshape}%" + nl;
-      first = false;
+      + "\fontsize{" + asy__f6(fs) + "}{"
+      + asy__f6(asy__plskip(r.p) / asy__tex2ps) + "}\selectfont%" + nl;
+    // 字体那一句是 **变了才发**（texfile.h:216-224 settexfont：`font != lastpen.Font()`）。
+    // lastpen 是 `pen(initialpen)`，它的 font 是字面量 `"<invalid>"`（pen.h:419），所以
+    // 第一个标签一定发；发完 `lastpen.setfont(p)` 只搬 font 一个字段（texfile.cc:202），
+    // 于是同一字体的后续标签一句不发、换字体的当场再发一句。
+    // 反过来 `\fontsize`（setlatexfont）与颜色 special **每个标签都发**：initialpen 的
+    // fontsize/lineskip 是 -1、colorspace 是 INVISIBLE，永远比不上，量过 lab_.tex 确认
+    // 四个标签四份 `\special{ps:0.000000 setgray}` + 四份 `\fontsize`。
+    string fnt = font(r.p);
+    if (fnt != lastfont) {
+      t = t + fnt + "%" + nl;
+      lastfont = fnt;
     }
     // 带线性变换的标签走 `\ASYalignT`（texfile.cc:290-302）：多一组 `{xx yx xy yy}`，
     // 而且 **非 pdf 那一路 yx/xy 要取负**（那边的 `sign=-1`，因为 TeX 的 y 轴朝下）。
@@ -7023,7 +7140,7 @@ private void asy__svgship(frame f, box bx, real w, real h) {
     real sx = p.x - bx.l;
     real sy = bx.t - (p.y + r.depth);
     asy__out('<text x="' + ps(sx) + '" y="' + ps(sy) + '"'
-      + ' font-family="serif" font-size="' + ps(r.p.fontsizeval) + '"'
+      + ' font-family="serif" font-size="' + ps(asy__psize(r.p)) + '"'
       + ' fill="' + asy__svgcolor(r.p) + '">' + asy__svgtext(r.s) + "</text>");
   }
   asy__out("</svg>");
@@ -7067,7 +7184,9 @@ void _shipout(string prefix="", frame f, frame preamble=null, string format="",
   asy__out("gsave");
   asy__out(" " + ps(ox - bx.l) + " " + ps(oy - bx.b) + " translate");
   lastvalid = false;
-  for (int i = 0; i < f.ops.length; ++i) emitop(f.ops[i], 1);
+  for (int i = 0; i < f.ops.length; ++i)
+    emitop(f.ops[i], 1, f.ops[i].merge,
+           i + 1 >= f.ops.length || !f.ops[i + 1].merge);
   asy__out("grestore");
   asy__out("showpage");
   asy__out("%%EOF");

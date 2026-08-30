@@ -255,10 +255,12 @@ export function asyUnitModules(sections, nameOf, tail) {
   const keyOf = new Map();     // 产物名 -> 它那个源文件（weak 那份没有源文件）
   const ifaceOf = new Map();   // 产物名 -> 它的接口索引（`.aif`，见 iface.js）
   const impsOf = new Map();    // 产物名 -> 它 import 的那几个源文件（指纹用，ADR-0015）
+  const incOf = new Map();     // 产物名 -> 它 `include` 摊进来的那几个文件（印记用，这一刀）
   for (const id of sections.ids) {
     const k = sections.keys.get(id);
     if (k !== undefined) keyOf.set(modOf.get(id), k.file);
     if (k !== undefined && k.imps !== undefined) impsOf.set(modOf.get(id), k.imps);
+    if (k !== undefined && k.inc !== undefined) incOf.set(modOf.get(id), k.inc);
     if (k !== undefined && k.iface !== undefined && k.iface !== null) {
       ifaceOf.set(modOf.get(id), k.iface);
     }
@@ -339,6 +341,8 @@ export function asyUnitModules(sections, nameOf, tail) {
       parts: body,
       // 它那个源文件（weak 那份是 ''：它的内容由整个程序决定，没有对应的源文件）
       key: keyOf.get(mod) === undefined ? '' : keyOf.get(mod),
+      // 它 `include` 摊进来的那几个文件：印记要它们（少一格就会复用旧代码，这一刀）
+      inc: incOf.get(mod) === undefined ? [] : incOf.get(mod),
       deps: [...deps].sort(),
       // 这一份定义了哪些名字（`.sec`：下一趟不降它正文时，别人引它靠这张清单）
       sec: formsOf(list.join('\n')).map((f) => `  ${f.sig}`),

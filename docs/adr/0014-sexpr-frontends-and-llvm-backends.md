@@ -8079,10 +8079,128 @@ linearregression 前进到下一处（`null reference`）。
 **跳过的轴**：SVG（`tests/asy/svg.js`，这一刀没碰 SVG 那条出口）、性能剖面
 （这一刀改的都是判定与格式，没动热路径）。
 
+### 第九十七刀：笔上那三格"用的时候才落地"，与"一组路径是一笔填充"
+
+起点是一份四个标签的小图（`label` 各带默认笔、`red`、`fontsize(8)`），拿 `asy -noV -keep`
+把 `_.tex` 留下来逐行对：颜色 special 与 `\fontsize` **每个标签都发**，而
+`\usefont{\ASYencoding}{…}` 只在第一个标签那里出现一次。照着 texfile.cc:195-213 与
+texfile.h:204-224 读明白了这三句各自的判据 —— `setpen` 里三步：`setcolor`、`setlatexfont`
+（`p.size()` 或 `p.Lineskip()` 变了才发 `\fontsize{}{}\selectfont`）、`settexfont`
+（`p.Font()` 变了才发那一串字体命令）。它们比的都是 `lastpen`，而 `lastpen` 起手是
+`pen(initialpen)`：fontsize/lineskip 是 **-1**、colorspace 是 **INVISIBLE**、font 是字面量
+**`"<invalid>"`**（pen.h:417-423）。所以前两句永远比不过、每个标签都发，字体那一句
+第一个标签一定发 —— 而 `setfont` 收尾只 `lastpen.setfont(p)`（**只搬 font 一格**，
+texfile.cc:202），于是同一字体的后续标签一句不发、换了字体的当场再发一句。
+按这条改完，`font("OT1","cmss","m","n")` 那一组的 `_.tex` 与参考逐字一样。
+
+顺手掉出来一处：**一张只有标签的图根本不出 eps**。picture.cc:1345 那个
+`postscript |= (*p)->draw(&out)` —— 画的那几族（drawPath / drawFill / 裁剪的头尾）一律回
+true，drawLabel 没有 `draw(psfile*)`、走 drawelement.h:182 那份 false；于是
+texfile.cc:175-180 把 `\includegraphics` 整段换成一个等高的空盒子
+`\leavevmode\vbox to 57.247657pt{}%`，目录里也没有 `_0.eps`。
+
+真正卡住 mosquito 的是另一件事：**字号、行距、字体这三格是"用的时候才落地"的**
+（pen.h:433 `size()`、:463 `Lineskip()`、:437 `Font()`）—— 笔自己那一格是 0/空就读
+**defaultpen 的**那一份。这一层的 `fontsizeval` 是构造时就算好的值，而 `currentpen` 是
+声明那一刻冻住的 12pt，于是 `defaultpen(fontsize(8pt))` 之后每个标签仍印
+`\fontsize{12.000000}`，latex 挑的是 CMSY10 而参考是 CMSY8。补了 `asy__psize` /
+`asy__plskip` / `asy__pfont` 三个解析器，凡是那边写 `p.size()` 的地方都走它们。
+连带三处：量盒子那一趟也要**先切字体**（drawlabel.cc:81-88 同一对 setlatexfont/settexfont），
+记忆的键上补进字体与行距（同一句话在 cmss 与 cmr 下不一样宽），量盒子那份 `.tex` 的前言
+补上 texfile.h:174-181 的六行 latexfontencoding —— 少了它，`\usefont{\ASYencoding}{…}`
+是一片未定义控制序列，而 latex 在 nonstopmode 下照样退 0、三个数安静地量成 0。
+mosquito 的 `_.tex` 于是逐字一样。
+
+图那一半还差三处，都在同一个例子里露出来。
+
+**`solid` 是"设过的一份空 pattern"。** plain_pens.asy:4 就一句
+`pen solid=linetype(new real[])`；asy 的 `LineType` 有 `isdefault` 一格（pen.h:28/34），
+加法是 `q.line.isdefault ? p.line : q.line`（pen.h:790）—— 所以 `p+solid` 把虚线**清掉**。
+这一层从前拿"pattern 是不是空的"当判据，空的一律当没设过，于是
+plain_arrows.asy:205 的 `filltype.fill(f,head,p+solid)` 画出来的箭头还带着节拍：参考发
+`[] 0 setdash`，我们发 `[8 8]`，一个 mosquito 里多出三处。补了一格 `dashset`
+（只有 `linetype(…)` 置真），`defaultpen(pen)` 存进来时抹掉它 —— 所有笔的构造函数都是
+`pencopy(asy__defpen)` 起手的，抹掉之后 `defaultpen(dashed)` 之后新造的笔仍带着那份
+pattern（相当于把 pen.h:468 那层 fallback 在构造时落了地），但它们不会在 `p+q` 里
+反过来把左边的虚线盖掉 —— asy 那边 `rgb(1,0,0)` 的 line 一直是 isdefault。
+
+**`fill(frame, path[] g, p)` 是一个填充，不是 n 个。** drawfill.cc:49-52 只发一句
+`newpath`（每条子路径 `writepath` 一句、只有第一条带 newpath）+ 一句 `fill` —— 一组路径
+连着 fillrule 才挖得出洞。这一层一条路径一格 op，加了一格 `merge` 把第 2..n 条标起来，
+出图时中间那些只攒路径、笔与 `fill`/`eofill` 留到最后一条；标记跟着 `transform*frame`
+一起搬（`shift(w)*p` 那种搬过的帧不能退回"一条一笔填"）。这一条同时把从前写在明处的
+那句"带洞的图形会与真 asy 不一样"了结了。
+
+**填充也走 penSave/penRestore。** 从前只有描边那一支摊笔的变换，理由记的是
+"drawfill.cc:46-54 只有 palette/writepath/fill" —— 漏在 drawfill.h:39-48：`palette` 就是
+`penSave + penTranslate`、`fill` 收尾是 `penRestore`，与 drawpath 共用
+drawelement.h:322-342 那一对。只有 `concat` 是描边独有的（路径一旦建好就落在设备空间了，
+之后改 CTM 只影响笔尖形状）。这一条的连带效应比看着大：`grestore` 会把 `lastpen`
+**弹回去**（psfile.h:307/313），所以参考在一笔带变换的填充之后描边不用再印颜色，而我们
+不裹 gsave、多印一句 `0 setgray`。补齐之后 cards 逐字一样。
+
+**追到根但收不了的一处，写在明处。** lmfit1 我们比参考多出一串
+`gsave` + `[ 1 0 0 1 0 0] concat` + 整套笔属性。路径逐字相同，多的只是笔上一份
+**近似单位**的变换。探针打在 `transform*frame` 上，残差量出来是 `xx`、`yy` 各
+`-1.11e-16`（正好一个 ulp），`xy/yx` 与平移都是精确 0 —— 也就是
+`plain_picture.asy:775-790` 的 `scale(frame,…)`：`xgrow=xsize/width` 在参考那边恰好是 1
+（`s == identity()`，`fit2` 一趟就收），在我们这边是 `1-1ulp`，于是多走一趟 `fit(s*t)`，
+笔上就多了这份变换。根在 plain_bounds 的单纯形与 `min/max(frame)` 差的那一个 ulp，
+不是这一刀能收的；cardioid、gamma 是同一族（那边反过来：参考有 `gsave`、我们没有）。
+
+**空标签那道门放错了层。** controlsystem 补上不可见笔那一条之后还差 85 处，头一处是
+`2.05337242e-17` 对 `0`（trig 残差那一族），可数一遍 `setgray` 就发现参考有 **10** 句、
+我们只有 **8** 句：两个 `circle("")` 的空标签，参考照样各发一份颜色 special +
+`\fontsize` + `\ASYalign{}`（排不出字形，dvi 里只剩两次回到 `554 3177`）。
+可另一头量出来的又是反的：`label("",(1,0))` 在顶层**真的被扔掉**（`-keep` 留下的
+`el_.tex` 里只有两个标签）。两条都对 —— 那道 `s == ""` 的门在
+**plain_Label.asy:314**，只挡 `Label.label(picture,…)` 这一路；同一个结构体里 292 行的
+`label(frame,…)` 没有门，而 flowchart 的 block 走的正是 frame 那一路。
+我们把门放在了出图那一层（`asy__texship` 的标签循环），于是两路一起挡掉。
+门撤掉之后 controlsystem 从 85 处掉到 32 处，全是 `e-17` 对 `0` 的成对残差。
+
+**语句位置的 `static` 不是可以剥掉的修饰。** 原来 `asyStmtOne` 的 `modified` 支一律
+`return asyStmt(L, n.items[2], ret)`，于是 `static int n=0;` 就是个普通局部量。量过
+`asy -noV`：连叫三次印 **1 2 3**（我们印 1 1 1）；初值在**外层函数声明**那一刻就求，
+函数一次不叫也求；存储按外层帧的活动算（嵌在 f 里的 g，`f(); f();` 是 1 2 1 2）；
+文件级那一档是空话（那边警告 "static modifier is meaningless at top level"）。
+落法是「一格模块级全局 + 一格 bool 闸」：初值**留在原地**由闸挡着（于是
+`static real dx=sqrtEpsilon, dy=dx;` 里后一格还读得到前一格，vectorfield3.asy:11），
+名字照旧登记在当前作用域、只把符号改成那个全局（`\u0000sy:`，与 declareShadow 同一条
+机制），另记一条 `\u0000st:` 让 `asyCapOf` 认出"这是全局、别抓"—— 抓走就是抄一份值。
+差两处写在明处：求初值的时刻推到了第一次执行，嵌套函数那一档不按活动分格。
+floor、oneoverx、xstitch、worldmap 四个例子当场逐字一样。
+
+**一整轮测量建立在旧代码上 —— `include` 摊平之后印记少一格。** 追 gamma 那份近似单位
+变换时，往 `/tmp/base9/plain_picture.asy` 的 `scale(frame,…)` 里加了一句 `write`，
+OMNI_ASY_MODS=1 那一路**一声不响**（同一份探针在关掉产物缓存时印得出来）。
+翻 `plain__1e2019fc.stamp`：里头有 `plain.asy`、`plain_bounds.asy`、`version.asy`、
+`asy_builtins.asy`，**没有** `plain_picture.asy` —— 印记记的是「编译器 + 它自己那个源文件
++ 它 import 的那几个源文件」，而 plain.asy 那 13 句 `include` 摊进来的文件既不是它的 key、
+也不在 deps 里。改法是 `expandIncludes` 把 `pathOf(nm)` 记在单元上（`u.inc`），
+link 那边随 `keys` 带出来，`stampOf` 把它们也 `inpField` 一遍；复用那一侧不用改 ——
+它是把 `.stamp` 里每一格反过来 stat 一遍。这条不影响任何一轴（base 平时不动），
+但它让"改一份 base 再对比"这种测量手段**默认是骗人的**，所以按 bug 修掉。
+
+**gamma 那一族追到底是 `tgamma`，不是逻辑。** 探针钉在 graph.asy:1212 的
+`t*T*inverse(t)` 上，第一趟两边残差一模一样（`yy-1 = 2.22e-16`），第二趟参考是
+`xx-1 = -1.11e-16`、我们是精确 0；再往上量 `min/max(frame)`：`m.x` 差 1 ulp、
+`width` 跟着差 1 ulp。源头是我们自己那份 `gamma`：`gamma(-0.5)` 差 1 ulp、
+`gamma(0.004)` 差 4 ulp、`gamma(-3.9992)` 差约 **3800 ulp**（`52.14617726178399` 对
+`52.146177261756542`）。这不是"V8 与 libm 差一个 ulp"那一类不可约的账，是我们这份实现
+在极点附近**精度不够**；归到 libm 那条待决策里，与 cardioid/lmfit1 同一族。
+
+这一刀的账：EPS 那一轴按名字跑了 20 个 —— 一样 9（controlsystem、floor、oneoverx、
+xstitch、worldmap、cards、progrid、mosquito、polarcircle 那一批）、只有数值差 1
+（advection 40 处）、结构不同 6（logdown、mergeExample、partitionExample、fjortoft、
+lmfit1、cardioid）、比不出来 2、超时 1（vectorfield3）。跑过的轴：`tests/asy/run.js`
+五条腿 259/0（462.8s）、`tests/sexpr/run.js` 55/0、`tests/asy/sweep.js` 220 个里干净 219
+（1.7s，最慢 genusthree 111ms）。**跳过的轴**：EPS 全量（stage0 一改印记就全失效，
+重跑一遍二十分钟以上，而剩下的结构差已经按名字追清楚了）、`tests/asy/svg.js`
+（这一刀没碰 SVG 那条出口）、自举与 C/LLVM 后端那几轴（改的是 asy 前端与产物印记，
+与后端无关；`run.js` 的 run-c 与 run-llvm 两条腿已经把它们覆盖了）。
+
 ## 后果与代价
-
-
-
 
 - **依赖 LLVM**：本机 `libLLVM.dylib` 157MB。产物变大，但仍然自带执行器、
   不依赖外部 cc。极小构建走 C 后端或第三档自写后端。

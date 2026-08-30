@@ -463,7 +463,7 @@ class AsyLower {
    * 摊平之后后面那几遍（declPass / bodyPass / 顺序解析）一个字都不用改。
    * 循环 include 靠深度兜住 —— 真 asy 那边也是重复 include 就再摊一遍。
    */
-  expandIncludes(rs, depth) {
+  expandIncludes(rs, depth, inc) {
     let has = false;
     for (const r of rs) {
       const u = asyUnwrapMod(this, r);
@@ -493,7 +493,18 @@ class AsyLower {
         this.nope(u, `include '${nm}' 找不到 —— 当前目录与 ASYMPTOTE_DIR 里都没有 ${nm}.asy`);
         continue;
       }
-      for (const x of this.expandIncludes(this.flat(tree, 'block'), depth + 1)) out.push(x);
+      // 摊进来的那个**文件**要记在单元上（这一刀）：产物缓存的印记是「编译器 + 它自己那个
+      // 源文件 + 它 import 的那几个源文件」，`include` 摊平之后正文来自别的文件，可那个文件
+      // 一格都不在印记里 —— 改了 base/plain_picture.asy 而 plain.asy 没动时，`plain` 那份
+      // 产物照旧算"还能用"，于是盘上那份**旧代码**被复用。量出来的样子：往
+      // plain_picture.asy 的 `scale(frame,…)` 里加一句 write，OMNI_ASY_MODS=1 那一路
+      // 印不出来（同一份探针在 stage0 那一路印得出来）—— 一整轮测量都建立在旧代码上。
+      if (inc !== undefined && inc !== null && this.opts.pathOf !== undefined
+          && this.opts.pathOf !== null) {
+        const p = this.opts.pathOf(nm);
+        if (typeof p === 'string' && p !== '' && !inc.includes(p)) inc.push(p);
+      }
+      for (const x of this.expandIncludes(this.flat(tree, 'block'), depth + 1, inc)) out.push(x);
     }
     return out;
   }
@@ -511,13 +522,16 @@ class AsyLower {
   unitNew(tree, key) {
     const id = this.units.length;
     const pfx = id === 0 ? '' : `asy__m${hash16(key).slice(0, 8)}_`;
+    // `include` 摊进来的那几个**文件**（印记要它，见 expandIncludes 末尾那段注释）
+    const inc = [];
     const u = {
       id,
       key,
       // 这个单元来自哪个真文件（模块那一路由 modules.js 从加载器那里填；主文件是 opts.path）。
       // 产物的增量按它判 —— key 只是模块身份，不是路径。
       file: '',
-      rs: this.expandIncludes(this.flat(tree, 'block'), 0),
+      rs: this.expandIncludes(this.flat(tree, 'block'), 0, inc),
+      inc,
       pfx,
       nsym: 0,
       // 局部临时量的编号（`asy__va…`/`asy__c…`/`asy__bx…` 那些）。也是**每个单元自己**的：
@@ -2869,6 +2883,8 @@ class AsyLower {
         // 与"这一趟的入口是谁""这一趟哪几份被跳过"都无关 —— 这正是旧那套 `.stamp`
         // 做不到的一点（它记的是链接算出来的 deps，跟着跳过与否变）。
         imps: u.imps === undefined || u.imps === null ? [] : u.imps.map((im) => im.key),
+        // `include` 摊进来的那几个文件（这一刀）：印记少了它们就会复用旧代码
+        inc: u.inc === undefined || u.inc === null ? [] : u.inc,
       });
     }
     this.sections = { ids, secs, weak, weakLib, keys, main, tail: '', skipped, unitWhy };

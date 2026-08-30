@@ -851,6 +851,12 @@ function asyModsBuild(path, dir) {
     if (u.key === '') return `${cs}|t${hash16(u.text)}|${u.text.length}`;
     const ds = [];
     for (const d of u.deps) ds.push(fstamp(keyOfName.get(d) === undefined ? '' : keyOfName.get(d)));
+    // `include` 摊进来的那几个文件也要进印记（这一刀）：正文有一半来自它们，可它们既不是
+    // 这一份的 key、也不在 deps 里。少了这一格，改 base/plain_picture.asy 而 plain.asy
+    // 没动时 `plain` 那份产物照旧算"还能用"，盘上那份**旧代码**被复用 —— 量出来的样子是
+    // 往 plain_picture.asy 里加的探针在 OMNI_ASY_MODS=1 那一路一声不响。
+    const ic = u.inc === undefined || u.inc === null ? [] : u.inc;
+    for (const p of ic) ds.push(fstamp(p));
     return `${cs}|${fstamp(u.key)}|${ds.join('|')}`;
   };
   let made = 0;

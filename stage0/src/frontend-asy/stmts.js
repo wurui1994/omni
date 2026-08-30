@@ -255,7 +255,27 @@ export function asyStmtOne(L, n, ret) {
   if (!isList(n)) return L.err(n, '认不出的语句');
   const h = head(n);
   if (h === 'empty-stm') return [];
-  if (h === 'modified') return asyStmt(L, n.items[2], ret);
+  if (h === 'modified') {
+    // 语句位置的 `static`（这一刀）：它不是可以剥掉的修饰，是一格**存储类**。量过
+    // `asy -noV`：
+    //   - 值跨调用留着 —— `void g(){static int n=0; ++n; write(n);}` 连叫三次印 1 2 3，
+    //     这一层原先剥掉修饰当普通局部量，印的是 1 1 1；
+    //   - 初值在**外层函数声明**那一刻就求，函数一次不叫也求；
+    //   - 存储按外层帧的**活动**算 —— 嵌在 f 里的 g，`f(); f();` 各自从头数，是 1 2 1 2；
+    //   - 文件级的 `static` 是空话（那边直接警告 "static modifier is meaningless at
+    //     top level"），所以那一档照旧剥掉。
+    // 这一层落到「一格模块级全局 + 一格 bool 闸」（见 asyVardec 的 statik 支）。与那边
+    // 差两处，写在明处：求初值的时刻推到了**第一次执行到这一句**（初值有副作用、或者
+    // 外层函数一次不叫时看得出来），以及嵌套函数那一档不按活动分格（我们只有一格）。
+    // 现用的那几处都是常量与 0/true —— floor/gamma/oneoverx 的 lastsign/first、
+    // xstitch 的 shipoutNumber、bezulate/contour/graph 里那一批常量，量不出差别。
+    const dec = n.items[2];
+    if (asyHasStatic(L, n) && isList(dec) && head(dec) === 'vardec'
+        && !(L.fileLevel && L.scopes.length === 1)) {
+      return asyVardec(L, dec, true);
+    }
+    return asyStmt(L, dec, ret);
+  }
   if (h === 'vardec') return asyVardec(L, n);
   // 语句位置的**声明**（第四十六刀）：asy 的块就是一层作用域，函数/struct/typedef 都能
   // 写在里面。这一层把它们当成"就地登记的顶层声明"：函数走 localFun（换个名字发成顶层
@@ -582,8 +602,20 @@ export function asyForPart(L, n, ret) {
   return out;
 }
 
+/** 这一句的修饰里有 `static` 吗（`(modified (mods "static"…) DEC)`，可以套几层） */
+function asyHasStatic(L, n) {
+  let cur = n;
+  while (isList(cur) && head(cur) === 'modified') {
+    for (const m of L.flat(cur.items[1], 'mods')) {
+      if (isAtom(m) && m.value === 'static') return true;
+    }
+    cur = cur.items[2];
+  }
+  return false;
+}
+
 /** `int a = 1, b;`：没有初值的按类型给零值 —— asy 也是这么定的 */
-export function asyVardec(L, n) {
+export function asyVardec(L, n, statik) {
   // `var`（第四十一刀）：不是一个类型，是"从初值推"。每个名字**各推各的** ——
   // 量过 `var a=1, b=2.5;` 出来是 int 与 real；`var z;` 那边报
   // "inferred variable declaration without initializer" 并退 1。
@@ -712,6 +744,33 @@ export function asyVardec(L, n) {
       }
       const need = d.items[2] !== undefined || L.isRec(t) || asyIsArr(t);
       if (need) out.push(`(set ${g.sym} ${init})`);
+      continue;
+    }
+    // 语句位置的 `static`（这一刀，判定在 asyStmtOne 的 modified 支）：**存储搬到模块级**，
+    // 初值留在原地由一格 bool 闸挡着 —— 于是初值里还看得见形参与外层的局部量
+    // （`static real dx=sqrtEpsilon, dy=dx;`，vectorfield3.asy:11 就是同一句里后一格
+    // 读前一格），而值跨调用留着。
+    // 名字照旧登记在**当前作用域**里，只是记一条 `\u0000sy:` 把符号改成那个全局
+    // （与 declareShadow 同一条机制，读/写/调/捕获四处都问 symOf）；另记一条
+    // `\u0000st:`，让 asyCapOf 认出"这一格是全局，别抓"——抓走就是抄一份值，
+    // 闭包里改的就落在副本上了。
+    if (statik === true) {
+      const top = L.scopes[L.scopes.length - 1];
+      const sg = {
+        sym: `${L.genSym('ls', start)}_${lnm}`, type: t, at: L.at, ok: true,
+        unit: L.unit.id,
+      };
+      const done = `${sg.sym}__set`;
+      L.gdecls.push(sg);
+      L.gdecls.push({ sym: done, type: 'bool', at: L.at, ok: true, unit: L.unit.id });
+      top.set(lnm, t);
+      // 与 declareShadow 一样：这是**全新的一格**，旧那一格的别名/箱子/被遮记号都不留
+      top.delete(`\u0000al:${lnm}`);
+      top.delete(`\u0000bx:${lnm}`);
+      top.delete(`\u0000ov:${lnm}`);
+      top.set(`\u0000sy:${lnm}`, sg.sym);
+      top.set(`\u0000st:${lnm}`, sg.sym);
+      out.push(`(if (un "!" (var ${done})) (do (set ${done} (bool true)) (set ${sg.sym} ${init})))`);
       continue;
     }
     // 同一层里**重新声明**同名的变量：asy 收（量过 `int x=1; int x=2; write(x);` 印 2 ——

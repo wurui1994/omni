@@ -603,6 +603,7 @@ export function asyCapOf(L, node, nm) {
   // 外层那一格在核心方言里叫什么（第六十四刀的改名）：与类型取自**同一层**，
   // 所以不能问 symOf —— 那边走的是 L.scopes，这里走的是 L.cap.outer。
   let sy = nm;
+  let st = null;
   for (const s of L.cap.outer) {
     if (s.has(nm)) {
       t = s.get(nm);
@@ -610,9 +611,15 @@ export function asyCapOf(L, node, nm) {
       bx = b === undefined ? null : b;
       const y = s.get(`\u0000sy:${nm}`);
       sy = y === undefined ? nm : y;
+      const g = s.get(`\u0000st:${nm}`);
+      st = g === undefined ? null : g;
     }
   }
   if (t === null) return asyCapUp(L, node, nm);
+  // 外层那一格是 `static`（见 asyVardec 的 statik 支）：它的存储在**模块级**，闭包里
+  // 直接按名字引用就是同一格 —— 抓进来反倒抄成一份副本，闭包里改的就落在副本上。
+  // 与 struct 的 static 字段同一条路（那边 statOf 回来也是裸的 `(var 那个全局)`）。
+  if (st !== null) return { code: `(var ${st})`, type: t };
   // 装了箱的（见 declareBox / needsBox）：抓走的是**那一格数组**，读写都穿到箱子里去，
   // 于是闭包里外看见的是同一格 —— 这一档就是 asy 的按引用捕获。
   if (bx !== null) {
