@@ -151,6 +151,9 @@ const RT_OPS = new Map([
   ['write.string', { sym: 'omni_write_string', ret: 'void', params: ['[2 x i64]'] }],
   ['chr.int', { sym: 'omni_chr', ret: '[2 x i64]', params: ['i64'] }],
   ['str_repeat.string', { sym: 'omni_str_repeat', ret: '[2 x i64]', params: ['[2 x i64]', 'i64'] }],
+  // 这两条是 ADR-0016 第七刀补的（jancy 的 %x / %X / %o）。
+  ['str_base.int', { sym: 'omni_str_base', ret: '[2 x i64]', params: ['i64', 'i64'] }],
+  ['str_upper.string', { sym: 'omni_str_upper', ret: '[2 x i64]', params: ['[2 x i64]'] }],
 ]);
 
 /** i64 比较 -> icmp 谓词；f64 -> fcmp 谓词。顺序与 OP.EQ..OP.GT 一致。 */

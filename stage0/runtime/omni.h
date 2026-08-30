@@ -210,6 +210,12 @@ void omni_print_string(omni_str v);
 void omni_write_string(omni_str v);
 /* 重复一个串（ADR-0016 第五刀，printf 的宽度要它）。n <= 0 回空串，不报错。 */
 omni_str omni_str_repeat(omni_str s, int64_t n);
+/* 按进制印一个整数（ADR-0016 第七刀，jancy 的 %x / %o 要它）。**v 的位当无符号 64 位
+   读**（C 的 %x 的规矩），数字小写。进制在方言那一层查过（2..36 的字面量）。 */
+omni_str omni_str_base(int64_t v, int64_t base);
+/* 只把 ASCII 的 a-z 换成大写（%X 要它）。不是 toupper（看 locale）、也不是 JS 的
+   toUpperCase（Unicode 的，长度会变）—— ASCII-only 才让四条腿是同一个函数。 */
+omni_str omni_str_upper(omni_str s);
 
 /* 指针（ADR-0016）。这两条原生腿用**真指针** —— 与 JS/解释器那三条的 arena 模拟是
    两套实现、一套语义。选真指针的理由是 FFI：arena 里的偏移递不出去给外面的 C 库。

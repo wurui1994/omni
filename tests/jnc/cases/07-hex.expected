@@ -1,0 +1,16 @@
+h1=ff
+h2=beef
+h3=ffffffff
+h4=ffffffc8
+h5=fffffffe
+h6=ffffffffffffffff
+h7=deadbeef
+h8=BEEF
+o1=10
+o2=37777777770
+w1=[000000ff]
+w2=[ff      ]
+w3=[      FF]
+m1=ff 255
+z1=0
+b1=1

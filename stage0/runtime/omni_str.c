@@ -95,6 +95,38 @@ omni_str omni_str_repeat(omni_str s, int64_t n) {
   return omni_str_new(buf, total);
 }
 
+/* `(sbase E 进制)` —— 按某个进制印一个整数（ADR-0016 第七刀，jancy 的 `%x` / `%o` 要它）。
+   **v 的位当无符号 64 位读**：那是 C 的 `%x` 的规矩（它把实参当 unsigned），所以
+   `omni_str_base(-1, 16)` 是 16 个 f。要 32 位的答案就在上一层先掩一次 —— 位宽是降级
+   那一层的账。数字小写，与 JS 侧 `BigInt.prototype.toString(radix)` 那张表同一套。
+   进制在方言那一层就查过了（必须是 2..36 的字面量），这里不再查。
+   64 位在 2 进制下最多 64 位数字，所以 65 个字节的临时缓冲一定够。 */
+omni_str omni_str_base(int64_t v, int64_t base) {
+  static const char digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+  uint64_t u = (uint64_t)v;
+  uint64_t b = (uint64_t)base;
+  char tmp[65];
+  int k = 0;
+  if (u == 0) tmp[k++] = '0';
+  while (u != 0) { tmp[k++] = digits[u % b]; u /= b; }
+  char *buf = omni_alloc_bytes(k);
+  for (int i = 0; i < k; i++) buf[i] = tmp[k - 1 - i];
+  return omni_str_new(buf, k);
+}
+
+/* `(supper S)` —— **只**把 ASCII 的 a-z 换成大写，别的字节一个不动。
+   刻意不用 `toupper`：那看 locale。JS 那侧的 `toUpperCase()` 也不行 —— 它是 Unicode 的
+   （`"ß"` 会变成两个字符，长度都变了）。定成 ASCII-only 之后四条腿是同一个函数。 */
+omni_str omni_str_upper(omni_str s) {
+  if (s.len == 0) return omni_str_new("", 0);
+  char *buf = omni_alloc_bytes(s.len);
+  for (int64_t i = 0; i < s.len; i++) {
+    char c = s.p[i];
+    buf[i] = (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c;
+  }
+  return omni_str_new(buf, s.len);
+}
+
 /* JS 的 String.fromCodePoint 对代理区返回孤立代理，写出去就是 U+FFFD，这里保持一致 */
 omni_str omni_chr(int64_t cp) {
   if (cp < 0 || cp > 0x10ffff) {

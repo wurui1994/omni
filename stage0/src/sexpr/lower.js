@@ -1269,6 +1269,42 @@ class CoreLowerer {
       if (k.type !== INT) return this.err(n, `(srep S N) 的 N 要是 int，这里是 ${coreTypeText(k.type)}`);
       return { kind: 'Builtin', name: 'str_repeat', args: [s, k], recvType: STRING, type: STRING };
     }
+    // `(sbase E 进制)` —— 把 E 按某个进制印出来（ADR-0016 第七刀，jancy 的 `%x` / `%o` 要它）。
+    //
+    // 两条定死的语义，两套实现上必须一致：
+    //   - **E 的位当无符号 64 位读**。这是 C 的 `%x` 的规矩（它把实参当 unsigned），所以
+    //     `(sbase (int -1) (int 16))` 是 16 个 f。要 32 位的答案就先在上一层掩一次
+    //     （`x & 0xFFFFFFFF`）—— 位宽是**降级那一层的账**，这条形式不管。
+    //   - **数字用小写**（`0-9a-z`）。要大写走 `(supper …)`：不在这条形式里加一个标志位，
+    //     那会让它多一种参数形状，而只省一次调用。
+    //
+    // 进制**要写成字面量**：printf 里它永远是字面量，而收运行期值就得多一条"进制不在
+    // 2..36"的运行期错误路径（四条腿各一份消息）。这条限制在这儿一次说清，便宜得多。
+    if (h === 'sbase') {
+      const v = this.expr(n.items[1]);
+      if (v === null) return null;
+      if (v.type !== INT) return this.err(n, `(sbase E 进制) 的 E 要是 int，这里是 ${coreTypeText(v.type)}`);
+      if (!isList(n.items[2]) || head(n.items[2]) !== 'int') {
+        return this.err(n, '(sbase E 进制) 的进制要写成字面量 (int N)');
+      }
+      const b = this.intLit(n.items[2]);
+      if (b === null) return null;
+      if (b.value < 2n || b.value > 36n) {
+        return this.err(n, `(sbase E 进制) 的进制要在 2..36 之间，这里是 ${b.value}`);
+      }
+      return { kind: 'Builtin', name: 'str_base', args: [v, b], argType: INT, type: STRING };
+    }
+    // `(supper S)` —— **只把 ASCII 的 a-z 换成大写**，别的字节一个不动。
+    //
+    // 刻意不是"Unicode 的 toUpperCase"：JS 那侧 `"ß".toUpperCase()` 是 `"SS"`（长度都变了），
+    // C 那侧 `toupper` 还看 locale —— 两条路上根本对不上。定成 ASCII-only 之后四条腿是
+    // 同一个函数。`%X` 要它（`(supper (sbase …))`）。
+    if (h === 'supper') {
+      const s = this.expr(n.items[1]);
+      if (s === null) return null;
+      if (s.type.k !== 'string') return this.err(n, `(supper S) 的 S 要是 string，这里是 ${coreTypeText(s.type)}`);
+      return { kind: 'Builtin', name: 'str_upper', args: [s], recvType: STRING, type: STRING };
+    }
     // `(readtext E)`：把一份文本文件**整份**读成 string。方言里读文件只有这一个口子 ——
     // 被降级的语言那边的文件对象（asy 的 `input(name).line().word()`：分词、注释、eof）
     // 都在它上面搭，方言不认识"文件"这个概念，只认识"名字 -> 文本"。

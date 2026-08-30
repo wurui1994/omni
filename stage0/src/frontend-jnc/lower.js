@@ -41,9 +41,6 @@
 // 还没长出来、因此**当场报错**的（每一条都记着该怎么长，不是"不收"）：
 //   - printf 的精度（`%.2f`）—— 要先定死 C 的 `%.*f` 与 JS 的 toFixed 在恰好一半上
 //     怎么对齐（0.125 到两位，C 给 0.12、JS 给 0.13）。挑哪边都行，但要两侧都实现。
-//   - `%x` / `%o` —— 位宽这一格已经有了，剩下的是"印出十六进制"本身：方言没有它，
-//     `tostr` 只给十进制。要方言长一条 `(sbase E 进制 位宽)` 或者在这一层用 `srep` +
-//     查表拼出来。负数按 C 当 unsigned 印，位宽从这一层的类型上取（`int` -> 8 个字）。
 //   - `%*d`（宽度从实参来）—— 那要在运行期才知道宽度，与"格式串必须是字面量"同一处边界。
 //   - `unsigned` —— 要无符号那一半的位宽规则：回卷变成 `x & M`（不摊符号位），
 //     `/` `%` `>>` `<` 都得换成无符号那一版。以前是静默忽略的，现在明着拒
@@ -66,9 +63,14 @@
 // jancy 的 `printf` 就是它的打印口（`test/jnc/*.jnc` 里到处是它），语义是 C 的那一套：
 // **不补换行**。这一层按 `\n` 把格式串切成若干段，带换行的段发 `(print …)`（它自带换行），
 // 末尾不带换行的那段发 `(write …)`。两者在每条腿上共用同一个输出缓冲区，所以交替调用
-// 顺序不会乱。收 `%d` / `%i` / `%f` / `%s` / `%c` / `%%`，标志 `-` `0` 与十进制宽度；
-// `%d` 也收 bool（jancy 的 bool 底下是 int8，印 1 / 0）。宽度那一格与 C 的 printf
-// **逐字节相同**（含 `%05d` 印负数是 `-0042` 这一条 —— 零补在符号后面）。
+// 顺序不会乱。收 `%d` / `%i` / `%f` / `%s` / `%c` / `%x` / `%X` / `%o` / `%%`，标志 `-` `0`
+// 与十进制宽度；`%d` 与 `%x` 也收 bool（jancy 的 bool 底下是 int8，印 1 / 0）。宽度那一格
+// 与 C 的 printf **逐字节相同**（含 `%05d` 印负数是 `-0042` 这一条 —— 零补在符号后面）。
+//
+// `%x` / `%X` / `%o` 靠方言第七刀长出来的 `(sbase E 进制)` 与 `(supper S)`。这一格真正的
+// 难处不是"印十六进制"，是**多少位**：C 把实参当 unsigned 读，位数是**默认实参提升之后**
+// 那一格，所以 `char d = -56; printf("%x", d)` 是 `ffffffc8` 而不是 `c8`。定宽整数
+// （第六刀）在这里第一次真正被用到 —— 掩到 `promo(位宽)` 位再交给 `sbase`。
 import { isList, isAtom, isStr, head } from '../sexpr/read.js';
 import { OmniError } from '../source/diag.js';
 
@@ -722,11 +724,10 @@ class JncLower {
       const spec = fmt[j];
       i = j;
       if (spec === '%') { lit += '%'; continue; }
-      // 精度（`%.2f`）与 `%x` / `%o` 还没有。精度要先定死 C 的 `%.*f` 与 JS 的 toFixed
-      // 在**恰好一半**上怎么对齐（0.125 -> C 给 0.12、JS 给 0.13）。`%x` 的位宽这一格
-      // 已经有了（定宽整数，第六刀），剩下的是"印十六进制"本身 —— 方言的 `tostr` 只给
-      // 十进制。两条都记在 ADR-0016 的名单里。
-      if (spec !== 'd' && spec !== 'i' && spec !== 'f' && spec !== 's' && spec !== 'c') {
+      // 精度（`%.2f`）还没有：要先定死 C 的 `%.*f` 与 JS 的 toFixed 在**恰好一半**上
+      // 怎么对齐（0.125 -> C 给 0.12、JS 给 0.13）。记在 ADR-0016 的名单里。
+      if (spec !== 'd' && spec !== 'i' && spec !== 'f' && spec !== 's' && spec !== 'c'
+        && spec !== 'x' && spec !== 'X' && spec !== 'o') {
         this.nope(n, `printf 的转换 '%${spec === undefined ? '' : spec}'`);
         return null;
       }
@@ -748,6 +749,22 @@ class JncLower {
       } else if ((spec === 'd' || spec === 'i') && isInt(v.type)) {
         // 四种位宽都收：值已经是规范形（符号扩展过的），照印就是 C 的样子。
         piece = `(tostr ${v.code})`;
+      } else if (spec === 'x' || spec === 'X' || spec === 'o') {
+        // `%x` / `%X` / `%o`（ADR-0016 第七刀）。C 把实参当 **unsigned** 读，而"多少位"
+        // 是**默认实参提升之后**那一格 —— `printf("%x", (char)-56)` 印 `ffffffc8`（提到
+        // int 之后当 32 位无符号读），不是 `c8`。所以这儿先掩到 promo(位宽) 位。
+        // 64 位不用掩：`(sbase …)` 本来就把它的实参当无符号 64 位读。
+        let code = null;
+        let w = 32;
+        if (v.type === T_BOOL) code = `(sel ${v.code} (int 1) (int 0))`;
+        else if (isInt(v.type)) { code = v.code; w = promo(v.type.w); } else {
+          this.err(args[ai], `'%${spec}' 要整数，这里是 ${tyName(v.type)}`);
+          return null;
+        }
+        if (w < 64) code = `(bin "&" ${code} (int ${(1n << BigInt(w)) - 1n}))`;
+        piece = `(sbase ${code} (int ${spec === 'o' ? 8 : 16}))`;
+        // 大写走 `(supper …)`：`sbase` 只给小写，这条是它们分工的那一刀。
+        if (spec === 'X') piece = `(supper ${piece})`;
       } else {
         const want = spec === 'f' ? T_REAL : (spec === 's' ? T_STR : T_I32);
         if (!sameTy(v.type, want)) {

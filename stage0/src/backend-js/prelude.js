@@ -242,6 +242,21 @@ function $flush() { if ($out.length) { process.stdout.write($out); $out = ""; } 
 // 与 omni_str_repeat 同一套语义（那边也在 n <= 0 时回空串）。
 function $str_repeat(s, n) { return Number(n) <= 0 ? "" : s.repeat(Number(n)); }
 
+// (sbase E 进制) —— E 的位当**无符号 64 位**读（C 的 %x 的规矩），数字小写。
+// BigInt.toString(radix) 给的就是 0-9a-z，与 omni_str_base 的那张表同一套。
+function $str_base(v, b) { return (v < 0n ? v + 18446744073709551616n : v).toString(Number(b)); }
+
+// (supper S) —— **只动 ASCII 的 a-z**。刻意不用 toUpperCase()：那是 Unicode 的
+// （德文 sharp s 会变成两个字符），而 C 那侧的 toupper 还看 locale，两条路对不上。
+function $str_upper(s) {
+  var out = "";
+  for (var i = 0; i < s.length; i++) {
+    var c = s.charCodeAt(i);
+    out += (c >= 97 && c <= 122) ? String.fromCharCode(c - 32) : s[i];
+  }
+  return out;
+}
+
 const $trunc = (x) => {
   if (!Number.isFinite(x)) $rt_error("cannot convert non-finite real to int");
   const t = Math.trunc(x);

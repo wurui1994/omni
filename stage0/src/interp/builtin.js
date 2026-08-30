@@ -251,6 +251,16 @@ function chrOf(code) {
   return decodeUtf8(encodeUtf8(String.fromCharCode(n)));
 }
 
+/** `(supper S)`：**只**把 ASCII 的 a-z 换成大写。与 omni_str_upper / $str_upper 同一份。 */
+function asciiUpper(s) {
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    out += (c >= 97 && c <= 122) ? String.fromCharCode(c - 32) : s[i];
+  }
+  return out;
+}
+
 /* ---------------------------------------------------------------- 容器与 dynamic */
 
 function keyStr(k) {
@@ -770,6 +780,12 @@ export function applyBuiltin(I, e, a) {
     // 负数上抛异常，而"宽度补到至少 N 个字符"里 max(0, N - 长度) 常常是 0 或负数，
     // 那是正常情形。夹在这里，与 omni_str_repeat 同一套语义。
     case 'str_repeat': return Number(a[1]) <= 0 ? '' : a[0].repeat(Number(a[1]));
+    // `(sbase E 进制)` —— **E 的位当无符号 64 位读**（C 的 `%x` 的规矩），数字小写。
+    // BigInt.toString(radix) 给的就是 `0-9a-z`，与 omni_str_base 的那张表同一套。
+    case 'str_base': return (a[0] < 0n ? a[0] + (1n << 64n) : a[0]).toString(Number(a[1]));
+    // `(supper S)` —— **只动 ASCII 的 a-z**。不用 toUpperCase()：那是 Unicode 的
+    // （"ß" 会变成两个字符），C 那侧的 toupper 还看 locale，两条路对不上。
+    case 'str_upper': return asciiUpper(a[0]);
     case 'to_string': return strOf(e.argType.k, a[0]);
     case 'to_string_g': return fmtRealG(a[0], a[1]);
     case 'trunc': return truncReal(a[0]);

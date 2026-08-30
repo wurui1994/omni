@@ -1034,6 +1034,9 @@ class CEmitter {
       // `(write E)` —— 不补换行（ADR-0016 第四刀）
       case 'write': return `omni_write_string(${a[0]})`;
       case 'str_repeat': return `omni_str_repeat(${a[0]}, ${a[1]})`;
+      // `(sbase E 进制)` / `(supper S)`（ADR-0016 第七刀）
+      case 'str_base': return `omni_str_base(${a[0]}, ${a[1]})`;
+      case 'str_upper': return `omni_str_upper(${a[0]})`;
       case 'to_string': return `omni_str_${e.argType.k}(${a[0]})`;
       case 'to_string_g': return `omni_str_realg(${a[0]}, ${a[1]})`;
       case 'trunc': return `omni_trunc(${a[0]})`;

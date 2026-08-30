@@ -1,0 +1,72 @@
+// `%x` / `%X` / `%o`（ADR-0016 第七刀）。方言这一刀长出 `(sbase E 进制)` 与 `(supper S)`。
+//
+// 这一格的关键不是"印十六进制"，是**多少位**：C 把 `%x` 的实参当 unsigned 读，而位数是
+// **默认实参提升之后**那一格。所以 `char d = -56; printf("%x", d)` 是 `ffffffc8`（提到
+// int 之后按 32 位无符号读），不是 `c8`。定宽整数（第六刀）在这里第一次真正被用到。
+//
+// 期望输出的**出处**：C。逐条对照下面这份，`cc -O0` 编出来跑：
+//
+//   #include <stdio.h>
+//   int main(void) {
+//     printf("h1=%x\n", 255);
+//     printf("h2=%x\n", 48879);
+//     int c = -1;                printf("h3=%x\n", c);
+//     signed char d = -56;       printf("h4=%x\n", d);
+//     short e = -2;              printf("h5=%x\n", e);
+//     long long f = -1;          printf("h6=%llx\n", f);
+//     long long g = 3735928559;  printf("h7=%llx\n", g);
+//     int i = 48879;             printf("h8=%X\n", i);
+//     int j = 8;                 printf("o1=%o\n", j);
+//     int k = -8;                printf("o2=%o\n", k);
+//     printf("w1=[%08x]\n", 255);
+//     printf("w2=[%-8x]\n", 255);
+//     printf("w3=[%8X]\n", 255);
+//     printf("m1=%x %d\n", 255, 255);
+//     printf("z1=%x\n", 0);
+//     printf("b1=%x\n", 1);
+//     return 0;
+//   }
+//
+// 与那份 C 的两处写法差别（不是语义差别）：`signed char`（C 那边 char 的符号性由实现定）
+// 与 `%llx`（C 那边 64 位实参要长度修饰符，而这一层的 `%x` 位数从**类型**上取）。
+int main() {
+    // 一、正数：小写数字
+    printf("h1=%x\n", 255);
+    printf("h2=%x\n", 48879);
+
+    // 二、负数当 unsigned 读，**位数是提升之后那一格**
+    int c = -1;
+    printf("h3=%x\n", c);
+    char d = -56;
+    printf("h4=%x\n", d);
+    short e = -2;
+    printf("h5=%x\n", e);
+    long f = -1;
+    printf("h6=%x\n", f);
+    long g = 3735928559;
+    printf("h7=%x\n", g);
+
+    // 三、`%X` 是大写（走 supper）
+    int i = 48879;
+    printf("h8=%X\n", i);
+
+    // 四、八进制同一条路
+    int j = 8;
+    printf("o1=%o\n", j);
+    int k = -8;
+    printf("o2=%o\n", k);
+
+    // 五、标志与宽度都还管用（补零、左对齐、大写右对齐）
+    printf("w1=[%08x]\n", 255);
+    printf("w2=[%-8x]\n", 255);
+    printf("w3=[%8X]\n", 255);
+
+    // 六、混着别的转换
+    printf("m1=%x %d\n", 255, 255);
+
+    // 七、零就是一个 "0"，bool 印 1（jancy 的 bool 底下是 int8）
+    printf("z1=%x\n", 0);
+    bool b = true;
+    printf("b1=%x\n", b);
+    return 0;
+}

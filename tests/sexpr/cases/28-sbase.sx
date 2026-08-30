@@ -1,0 +1,46 @@
+;; `(sbase E 进制)` 与 `(supper S)`（ADR-0016 第七刀）。
+;;
+;; jancy 的 printf 有 `%x` / `%X` / `%o`，而方言的 `tostr` 只给十进制 —— 那一格得方言长。
+;; 位宽已经是降级那一层的账（第六刀），所以这条形式只管"按进制印"这一件事。
+;;
+;; 两条定死的语义，这份 case 就是盯它们：
+;;   - **E 的位当无符号 64 位读**（C 的 %x 的规矩）。所以 (sbase (int -1) (int 16)) 是
+;;     16 个 f，而不是 "-1"。要 32 位的答案就先掩一次 —— 那是上一层的事。
+;;   - **数字小写**，`0-9a-z`。要大写走 (supper …)，而 supper **只动 ASCII 的 a-z**。
+(module
+  (main
+    ;; 十六进制：小写数字
+    (print (sbase (int 255) (int 16)))
+    (print (sbase (int 3735928559) (int 16)))
+    ;; 八进制与二进制
+    (print (sbase (int 8) (int 8)))
+    (print (sbase (int 511) (int 8)))
+    (print (sbase (int 5) (int 2)))
+    ;; 十进制与 tostr 对上
+    (print (sbase (int 123456) (int 10)))
+    (print (tostr (int 123456)))
+    ;; 上界那一格：36 进制里 35 是 'z'
+    (print (sbase (int 35) (int 36)))
+    ;; 零就是一个 "0"（不是空串）
+    (print (bin "+" (str "[") (bin "+" (sbase (int 0) (int 16)) (str "]"))))
+
+    ;; **负数当无符号 64 位读**：-1 是 16 个 f，-256 末两位是 00
+    (print (sbase (int -1) (int 16)))
+    (print (sbase (int -256) (int 16)))
+    ;; 掩到 32 位再印，就是 C 里 `printf("%x", (int)-1)` 的那个答案
+    (print (sbase (bin "&" (int -1) (int 4294967295)) (int 16)))
+    ;; 最负的那个 64 位数：8 后面 15 个 0
+    (print (sbase (int -9223372036854775808) (int 16)))
+
+    ;; 运行期的值也走同一条路（进制才要求是字面量，E 不要求）
+    (let v int (int 48879))
+    (print (sbase (var v) (int 16)))
+
+    ;; supper：a-z 变大写，数字与别的字节一个不动
+    (print (supper (sbase (int 48879) (int 16))))
+    (print (supper (str "abc-XYZ-012_z")))
+    (print (bin "+" (str "[") (bin "+" (supper (str "")) (str "]"))))
+    ;; 幂等：大写再大写还是同一个串
+    (print (supper (supper (str "ff00"))))
+
+    (print (str "end"))))
