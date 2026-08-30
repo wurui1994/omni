@@ -3263,54 +3263,9 @@ private real[] asy__ixnewton(pair[] a, pair[] b, real t0, real s0, real tol) {
   return r;
 }
 
-// 全部交点（按 p 上的时间排好、去重）。asy 那边是 path.cc 的 intersections。
-// 两步：包围盒细分**圈出**每个交点（12 层，段内约 2e-4），再 Newton 收到机器精度。
-real[][] intersections(path p, path q, real fuzz=-1) {
-  int np = length(p);
-  int nq = length(q);
-  real sc = 1;
-  for (int i = 0; i <= np; ++i) { real m = length(point(p, i)); if (m > sc) sc = m; }
-  for (int j = 0; j <= nq; ++j) { real m = length(point(q, j)); if (m > sc) sc = m; }
-  real f = fuzz < 0 ? 1e-9 * sc : fuzz;
-  real tol = 1e-12 * sc;
-  real[][] raw;
-  for (int i = 0; i < np; ++i) {
-    pair[] a = asy__segctl(p, i);
-    for (int j = 0; j < nq; ++j) {
-      pair[] b = asy__segctl(q, j);
-      real[][] cand;
-      asy__ixrec(cand, a, 0, 1, b, 0, 1, f, 12, 0);
-      real[][] seed;
-      for (int k = 0; k < cand.length; ++k) {
-        bool near = false;
-        for (int m = 0; m < seed.length; ++m) {
-          if (abs(seed[m][0] - cand[k][0]) < 1e-3 && abs(seed[m][1] - cand[k][1]) < 1e-3) near = true;
-        }
-        if (!near) seed.push(cand[k]);
-      }
-      for (int k = 0; k < seed.length; ++k) {
-        real[] r = asy__ixnewton(a, b, seed[k][0], seed[k][1], tol);
-        if (r.length == 0) continue;
-        real[] g;
-        g.push(i + r[0]);
-        g.push(j + r[1]);
-        raw.push(g);
-      }
-    }
-  }
-  real[][] out;
-  for (int k = 0; k < raw.length; ++k) {
-    bool dup = false;
-    for (int m = 0; m < out.length; ++m) {
-      if (abs(out[m][0] - raw[k][0]) < 1e-7 && abs(out[m][1] - raw[k][1]) < 1e-7) dup = true;
-    }
-    if (dup) continue;
-    int at = out.length;
-    for (int m = 0; m < out.length; ++m) if (out[m][0] > raw[k][0]) { at = m; break; }
-    out.insert(at, raw[k]);
-  }
-  return out;
-}
+// `intersections(path, path)` 从前摆在这儿，第九十五刀挪到了 asy__lineix / asy__addix
+// 之后（**必须**在那两个之后：exact 那一支要 lineintersections，去重要按点算，而按点算要
+// `point(path, real)`，那一格在这一行下面才声明 —— 这一层的名字解析是顺序的）。
 
 // 第一个交点的两个时间（没有就是空数组）—— runpath.in:245 的 intersect。
 // **不是**"把全部算出来再取第一个"：asy 那边这一路传的是 `single=true`，第一个交点一出来
@@ -5464,6 +5419,117 @@ private void asy__addix(real[] S, real s, path p, real fuzz2) {
   pair z = point(p, s);
   for (int i = 0; i < S.length; ++i) if (asy__abs2(point(p, S[i]) - z) <= fuzz2) return;
   S.push(s);
+}
+// path.cc:906 的 add（两条时间一起进，仍然只按 **p 上那一点** 去重）
+private void asy__addix2(real[] S, real[] T, real s, real t, path p, real fuzz2) {
+  pair z = point(p, s);
+  for (int i = 0; i < S.length; ++i) if (asy__abs2(point(p, S[i]) - z) <= fuzz2) return;
+  S.push(s);
+  T.push(t);
+}
+
+// path.cc:869 的 `intersections(S,T,g,p,q,fuzz)`：**g 与线段 p--q** 的交点，一并给出
+// g 上的时间与线段上的参数。走的是 lineintersections（每段一个三次多项式、解实根），
+// 所以交点正好落在结点上时给的是**准准的 0 / 整数**，不是细分加 Newton 收出来的 1e-16。
+// 这一点就是 bezulate 那个 assert 的命门：`starttime` 差 1.26e-16，
+// countIntersections 从 2 变成 3，forward/backward 两路都找不着，assert 就炸了。
+private void asy__ixline(real[] S, real[] T, path g, pair p, pair q, real fuzz) {
+  real len2 = asy__abs2(q - p);
+  real[] S1;
+  if (len2 == 0.0) {
+    // 线段退化成一点：asy 那边走 intersections(S1,g,p,fuzz)（路径对点）。这一层没有那一份，
+    // 用 p--p 这条退化线段代它 —— asy__lineix 的 `p == q` 那一支正是"点在不在段上"。
+    asy__lineix(S1, g, p, q, fuzz);
+    for (int i = 0; i < S1.length; ++i) { S.push(S1[i]); T.push(0.0); }
+    return;
+  }
+  pair factor = (q - p) / len2;
+  asy__lineix(S1, g, p, q, fuzz);
+  for (int i = 0; i < S1.length; ++i) {
+    real s = S1[i];
+    pair d = point(g, s) - p;
+    real t = d.x * factor.x + d.y * factor.y;
+    if (t >= -asy__Fuzz2 && t <= 1.0 + asy__Fuzz2) { S.push(s); T.push(t); }
+  }
+}
+
+// 全部交点（按 p 上的时间排好、去重）。asy 那边是 path.cc:958 的 intersections。
+//
+// 两条路，与那边一样：
+//   - **exact 那一支**（path.cc:963/972）：两条里有一条是"一段直线或一个点"时，
+//     整条走 asy__ixline —— 解多项式，不细分。
+//   - 一般情形：包围盒细分**圈出**每个交点（12 层，段内约 2e-4），再 Newton 收到机器精度。
+//
+// 去重照 path.cc:897 改成**按点**（从前是按时间差 1e-7）：闭路上 t=0 与 t=length 是同一点、
+// 时间差一整圈，按时间比永远不算重复，于是同一个交点报两遍。
+real[][] intersections(path p, path q, real fuzz=-1) {
+  int np = length(p);
+  int nq = length(q);
+  real sc = 1;
+  for (int i = 0; i <= np; ++i) { real m = length(point(p, i)); if (m > sc) sc = m; }
+  for (int j = 0; j <= nq; ++j) { real m = length(point(q, j)); if (m > sc) sc = m; }
+  real f = fuzz < 0 ? 1e-9 * sc : fuzz;
+  real tol = 1e-12 * sc;
+  real fuzz2 = max(asy__fuzzFactor * f * f, asy__Fuzz2);
+  real[][] raw;
+  // exact：p 是一段直线（或一个点）
+  if (np == 0 || (np == 1 && p.nodes[0].straight)) {
+    real[] T1;
+    real[] S1;
+    asy__ixline(T1, S1, q, point(p, 0), point(p, np), f);
+    for (int i = 0; i < S1.length; ++i) {
+      real[] g;
+      g.push(S1[i]);
+      g.push(T1[i]);
+      raw.push(g);
+    }
+  } else if (nq == 0 || (nq == 1 && q.nodes[0].straight)) {
+    real[] S1;
+    real[] T1;
+    asy__ixline(S1, T1, p, point(q, 0), point(q, nq), f);
+    for (int i = 0; i < S1.length; ++i) {
+      real[] g;
+      g.push(S1[i]);
+      g.push(T1[i]);
+      raw.push(g);
+    }
+  } else for (int i = 0; i < np; ++i) {
+    pair[] a = asy__segctl(p, i);
+    for (int j = 0; j < nq; ++j) {
+      pair[] b = asy__segctl(q, j);
+      real[][] cand;
+      asy__ixrec(cand, a, 0, 1, b, 0, 1, f, 12, 0);
+      real[][] seed;
+      for (int k = 0; k < cand.length; ++k) {
+        bool near = false;
+        for (int m = 0; m < seed.length; ++m) {
+          if (abs(seed[m][0] - cand[k][0]) < 1e-3 && abs(seed[m][1] - cand[k][1]) < 1e-3) near = true;
+        }
+        if (!near) seed.push(cand[k]);
+      }
+      for (int k = 0; k < seed.length; ++k) {
+        real[] r = asy__ixnewton(a, b, seed[k][0], seed[k][1], tol);
+        if (r.length == 0) continue;
+        real[] g;
+        g.push(i + r[0]);
+        g.push(j + r[1]);
+        raw.push(g);
+      }
+    }
+  }
+  real[] S;
+  real[] T;
+  for (int k = 0; k < raw.length; ++k) asy__addix2(S, T, raw[k][0], raw[k][1], p, fuzz2);
+  real[][] out;
+  for (int k = 0; k < S.length; ++k) {
+    real[] g;
+    g.push(S[k]);
+    g.push(T[k]);
+    int at = out.length;
+    for (int m = 0; m < out.length; ++m) if (out[m][0] > S[k]) { at = m; break; }
+    out.insert(at, g);
+  }
+  return out;
 }
 // runpath.in:235：路径 p 与过 a、b 的那条**无穷长**直线的所有交点时间，升序。
 // 量过 8 个探针（三次样条闭路、圆、折线；水平/竖直/斜线/不相交/切过顶点），

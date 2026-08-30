@@ -7931,6 +7931,59 @@ partitionExample，bezulate 那一摊）、`array index out of range`（label3so
 只有 `gradshade`/`gourshade`/`tenshade` 发 —— 一刀切按 `2 * shfill` 扣就成了负数，
 latticeshading 与 strokeshade 于是报 "裁剪 -1 层"。改成扣 `2 * shfill - ShadingType1`。
 
+### 第九十五刀：1.26e-16 把 bezulate 的 assert 炸了 —— intersections 的 exact 支与按点去重
+
+上一刀之后 `abort: assert FAILED` 成了"没出图"里最大的一格（4 份：Klein / logo3 /
+partitionExample / washer）。这一刀顺着 partitionExample 追到底。
+
+**怎么定位的**（还是 `/tmp/base2` 那一招：把 base 拷一份、只在拷的那份里加 `write` 探针、
+两个实现都把 `ASYMPTOTE_DIR` 指过去 —— 同一份 .asy 源码，差出来的必是原语）：
+
+1. 在 bezulate.asy 的两个 `assert` 前各加一句 write，问出是 :196 那个
+   （`assert(found_forward || found_backward)`）。
+2. 在 forward 那个循环里印 `countIntersections`：我们是 4、4、4、3、3、3…（永远到不了 2），
+   oracle 是 3、3、3、2 —— 第四次就成了。
+3. 往上一格印 `starttime`：**我们 1.25965604402352e-16，oracle 0**。
+4. 再往上印那一句 `intersections(end,start,inners[j])`：
+   - oracle：`n=1 t0=0.99999579523512 t1=0`
+   - 我们：`n=2 t0=0.999995795235119 t1=1.25965604402352e-16`
+
+两处不对，出自同一个函数：
+
+- **exact 那一支没做**。asy 的 `intersections(path,path)`（path.cc:963/972）在**一条是
+  单段直线或一个点**时不走细分 —— 走 `lineintersections`：每段把三次贝塞尔投到"到直线的
+  有向距离"上，得到一个三次多项式，**解实根**。根落在结点上时给的就是准准的 `0`。
+  我们那时一律走"包围盒细分圈候选 + Newton 收尾"，收出来是 1.26e-16。
+  这不是"差一点"：`start` 从结点挪开一丝，那条线段于是多穿过一次，countIntersections
+  从 2 变 3，forward/backward 两路都找不着，assert 炸。
+- **去重是按时间比的**。asy 按**点**比（path.cc:897 的 `add`：
+  `|p.point(S[i]) - p.point(s)|² <= fuzz2`）。闭路上 `t=0` 与 `t=length` 是同一点、
+  时间差一整圈 —— 按时间比永远不算重复，同一个交点报两遍。
+
+改动：把 `intersections(path,path)` 从原位挪到 `asy__lineix` / `asy__addix` **之后**
+（这一层名字解析是顺序的，而按点去重要 `point(path,real)`，那一格在原位后面），
+补上 path.cc:869 的 `asy__ixline`（g 与线段 p--q，一并给出两边的时间）与 path.cc:906 的
+`asy__addix2`，函数开头加那两支 exact，末尾的去重换成按点。
+
+**一处没照抄，写在这儿**：asy 的 `lineintersections(...,endpoints=true)` 还会把"这一段与
+p、与 q 这两个**点**的交点"加进候选（path.cc:846 那两句 `intersections(r,h,p,fuzz)`）。
+这一层没有"路径对点"那一份，所以那两句没做 —— 只在"线段端点落在某条曲线段内部且共线"时
+才有分别，这一趟的例子里没碰上。
+
+结果（EPS 全量，`OMNI_EPS_T=20000`）：**一样 36 → 38、没出图 32 → 27**。
+
+顺带一处**判据的修正，不是实现的修正**：eps.js 的 `ASYMPTOTE_DIR` 末尾加上 examples 目录。
+量过 oracle 那一侧（`asy -noV -v -v` 印的那行）：
+`Loading lowupint from /opt/homebrew/.../share/doc/asymptote/examples/lowupint.asy` ——
+真 asy 的默认搜索路径里**本来就有它自己装的 examples 目录**。我们只给到 base，于是
+lowint / upint / spring0 / spring2 那四份的 `import lowupint;` 报"找不到"，差的是路径。
+改了之后 spring0 / spring2 变成逐字一样（那两份就是 38 里新进来的），lowint / upint
+变成"只有数值差"。顺带把另一件事量清、免得下次误改：asy **不**把主文件所在的目录加进
+搜索路径（`cd /tmp/msub && asy sub/user.asy` 里的 `import mm;` 找不到 sub/mm.asy，
+换绝对路径、换独一无二的模块名都一样），所以 cli.js 那条"按 CWD 找"的规矩是对的。
+
+## 后果与代价
+
 
 
 

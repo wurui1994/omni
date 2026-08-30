@@ -54,13 +54,22 @@ if (exDir === undefined) {
   console.error('用法：node tests/asy/eps.js <examples 目录> [名字…]');
   process.exit(2);
 }
-// 模块搜索路径：例子引的是真的 base/*.asy（与 sweep.js 同一条规矩）
+// 模块搜索路径：例子引的是真的 base/*.asy（与 sweep.js 同一条规矩），**再加上 examples
+// 目录本身**。后半句不是给自己开后门，是把 oracle 那一侧的路径原样照过来 ——
+// 量过（`asy -noV -v -v` 印的那一行）：
+//   Loading lowupint from /opt/homebrew/.../share/doc/asymptote/examples/lowupint.asy
+// 也就是真 asy 的默认搜索路径里**本来就有它自己装的 examples 目录**，所以
+// lowint / upint / spring0 / spring2 那几份 `import lowupint;` 在 oracle 那边是找得到的。
+// 我们这一层的路径只到 base，于是同一句就报"找不到" —— 差的是路径，不是实现。
+// 顺带量清了另一件事：asy **不**把主文件所在的目录加进搜索路径（`cd /tmp/msub &&
+// asy sub/user.asy` 里的 `import mm;` 找不到 sub/mm.asy，绝对路径也一样），
+// 所以 cli.js 那条"按 CWD 找"的规矩是对的，不要去改它。
 const base = join(exDir, '..', 'base');
 const env = {
   ...process.env,
   OMNI_ASY_MODS: '1',
-  ASYMPTOTE_DIR: process.env.ASYMPTOTE_DIR === undefined || process.env.ASYMPTOTE_DIR === ''
-    ? base : process.env.ASYMPTOTE_DIR,
+  ASYMPTOTE_DIR: `${process.env.ASYMPTOTE_DIR === undefined || process.env.ASYMPTOTE_DIR === ''
+    ? base : process.env.ASYMPTOTE_DIR}:${exDir}`,
 };
 
 /** 一串字符 -> 16 位十六进制（够当缓存键；这一格不做密码学用途） */
