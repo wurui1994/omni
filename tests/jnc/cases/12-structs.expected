@@ -1,0 +1,9 @@
+a=3 2.500000
+copy a=3 b=9
+assign b=9 c=11
+o=1 2 0.500000
+nested o=2 p2=7
+via ptr a=42
+arr=10 0 30
+elem=30
+global=5 0.000000

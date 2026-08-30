@@ -1,0 +1,91 @@
+// 值语义的结构体（ADR-0016 第十二刀）。jancy 的 struct 是 POD **值**类型（type_struct.rst），
+// 所以 `t = s` 是抄一份、不是共享同一段。
+//
+// 这一层的做法与数组那一刀同一个套路：每格结构体是一段自己的 `(pnew (ptr S) (int 1))` 内存，
+// 名字里放的就是那段内存的地址。于是
+//   - `s.f` 与 `p->f` 落在同一句 `(pfield … f)` 上；
+//   - `&s` 不发一个字（名字里放的**就是**地址）；
+//   - `t = s` 逐字段抄（copyAgg，嵌套的结构体字段递归下去）；
+//   - `S a[3]` 就是长度 3 的那段内存，`a[i].f` 是 `(pfield (padd a i) f)`。
+// 方言一个字没改 —— pnew / pfield / padd / pload / pstore 都是第一刀就有的。
+//
+// 期望输出的出处：**C**，下面这一份 `cc -O0` 编出来的程序，逐字节相同。
+//
+//   #include <stdio.h>
+//   struct Inner { int y; double z; };
+//   struct Outer { int x; struct Inner in; };
+//   struct Inner gi = { 0, 0 };
+//   int main() {
+//       struct Inner a;
+//       a.y = 3; a.z = 2.5;                printf("a=%d %f\n", a.y, a.z);
+//       struct Inner b = a; b.y = 9;       printf("copy a=%d b=%d\n", a.y, b.y);
+//       struct Inner c; c = b; c.y = 11;   printf("assign b=%d c=%d\n", b.y, c.y);
+//       struct Outer o;
+//       o.x = 1; o.in.y = 2; o.in.z = 0.5; printf("o=%d %d %f\n", o.x, o.in.y, o.in.z);
+//       struct Outer p2 = o; p2.in.y = 7;  printf("nested o=%d p2=%d\n", o.in.y, p2.in.y);
+//       struct Inner* q = &a; q->y = 42;   printf("via ptr a=%d\n", a.y);
+//       struct Inner arr[3] = { { 0, 0 }, { 0, 0 }, { 0, 0 } };
+//       arr[0].y = 10; arr[2].y = 30;      printf("arr=%d %d %d\n", arr[0].y, arr[1].y, arr[2].y);
+//       struct Inner* r = &arr[2];         printf("elem=%d\n", r->y);
+//       gi.y = 5;                          printf("global=%d %f\n", gi.y, gi.z);
+//       return 0;
+//   }
+//
+// 两处 C 那份里要写出来、这边不用写的：`struct Inner a;` 与 `struct Inner arr[3];` 的零。
+// C 里那是未定值，jancy 那边是定义好的（type_ptr_data.rst："Jancy compiler zeros every
+// variable before any user code can touch it"），所以 C 那份补了 `= { 0, 0 }`。
+struct Inner {
+    int y;
+    double z;
+}
+
+struct Outer {
+    int x;
+    Inner in;
+}
+
+Inner gi;
+
+int main() {
+    Inner a;
+    a.y = 3;
+    a.z = 2.5;
+    printf("a=%d %f\n", a.y, a.z);
+
+    // 抄一份：改 b 不动 a
+    Inner b = a;
+    b.y = 9;
+    printf("copy a=%d b=%d\n", a.y, b.y);
+
+    Inner c;
+    c = b;
+    c.y = 11;
+    printf("assign b=%d c=%d\n", b.y, c.y);
+
+    Outer o;
+    o.x = 1;
+    o.in.y = 2;
+    o.in.z = 0.5;
+    printf("o=%d %d %f\n", o.x, o.in.y, o.in.z);
+
+    // 嵌套的字段也是抄的
+    Outer p2 = o;
+    p2.in.y = 7;
+    printf("nested o=%d p2=%d\n", o.in.y, p2.in.y);
+
+    Inner* q = &a;
+    q->y = 42;
+    printf("via ptr a=%d\n", a.y);
+
+    Inner arr[3];
+    arr[0].y = 10;
+    arr[2].y = 30;
+    printf("arr=%d %d %d\n", arr[0].y, arr[1].y, arr[2].y);
+
+    Inner* r = &arr[2];
+    printf("elem=%d\n", r->y);
+
+    gi.y = 5;
+    printf("global=%d %f\n", gi.y, gi.z);
+    return 0;
+}

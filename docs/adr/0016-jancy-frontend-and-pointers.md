@@ -217,7 +217,9 @@ jancy 的完整语法与形式，不是"jancy 里能塞进现有方言的那个�
    要方言里有一条"不换行的输出"加一份格式化。`%c` 尤其：这一层没有"整数 -> 一个字符
    的串"，`tostr` 会印出数字。
 2. `&x` —— 要局部量可寻址（jancy 那边是"提到 GC 堆上"）。**第九刀做掉了**，照抄 jancy 的
-   办法，方言没动；剩下的是 `&p`（`int**`），与"整个结构体的 pload/pstore"同一格。
+   办法，方言没动；剩下的是 `&p`（`int**`）—— 那条真要方言能把 fat 指针（三个字）当内存里的值搬。
+   当初写在它旁边的"整个结构体的 pload/pstore"**第十二刀做掉了**，而且同样不需要那一格：
+   结构体每格是一段自己的 `pnew` 内存，抄一份就是逐字段抄。
 3. 真数组 `int a[3]` —— jancy 的数组是**值**类型，方言的 `(arr T)` 是引用语义；
    要方言有值语义的定长数组。**第十刀做掉了**，但结论与这条当初的判断相反：不需要那一格 ——
    数组就是一段 `pnew` 出来的内存，而能看出"值还是引用"的那几处操作，jancy 自己也没有。
@@ -629,6 +631,47 @@ int later = 42;
 
 **跑过的轴**：`tests/jnc`（21/0，新增 `cases/11-globals`、`bad/static-local`、
 `bad/addr-global`）、`tests/sexpr`（63/0）、`tests/glr`（20/0）。
+**没跑的**：`tests/asy` 全部（这一刀只碰 `frontend-jnc/lower.js`）、`sweep.js`、`svg.js`、自举、
+`tests/jit`、`tests/mir`、`tests/llvm`。`npm run lint` 这台机器上没有 typescript，跑不了。
+
+### 第十二刀：值语义的结构体 —— 与数组同一个套路，方言又是一个字没改
+
+jancy 的 struct 是 POD **值**类型，所以 `t = s` 抄一份、不共享同一段。债务表上"整个结构体的
+`pload` / `pstore`"这一条当初的判断与数组那条一样：以为要方言先能整块搬。**不用。**
+
+做法与第十刀同一个套路：每格结构体是一段自己的 `(pnew (ptr S) (int 1))` 内存，名字里放的
+**就是**那段内存的地址。于是四件事一起落下来：
+
+- `s.f` 与 `p->f` 落在同一句 `(pfield … f)` 上（`lvalue` 的 `field` 分支现在去问 `s` 的地址，
+  以前它是一句"结构体只能经指针到达"的拒绝）；
+- `&s` **不发一个字**（名字里放的就是地址），`&s.in` / `&a[i]` 同理；
+- `t = s` 逐字段抄（`copyAgg`，嵌套的结构体字段递归下去）；
+- `S a[3]` 就是长度 3 的那段内存，`a[i].f` 是 `(pfield (padd a i) f)` —— 第十刀那条"元素只能是
+  int / real / bool"的限制因此对结构体解除了。
+
+`pnew` / `pfield` / `padd` / `pload` / `pstore` 都是第一刀就有的，而且这四条在五条腿上先量过
+（零初始化、嵌套 pfield 链、struct 指针上的 padd 按元素走）才动手。
+
+**新增的一格：lvalue 的第三种 kind `agg`。** `var` 的 code 是名字、`ptr` 的 code 是地址且读写
+走 `pload` / `pstore`，`agg` 的 code 是地址但**不 pload** —— 结构体的"值"在这一层一律用它那段
+内存的地址表示。`read()` 对它返回 code 本身，赋值那一处对它走 `copyAgg`。
+
+顺带把两处旧注释改对了：`liftable` 里"这一刀的结构体还不能当局部量"不成立了（结构体本来就是
+一段内存，不用再提一次；`lvalue` / `expr0` 的名字分支里 `isStruct` 要排在 `lifted` **之前**，
+不然 `&s` 会去找一格不存在的 `s$c` —— 这是实现时踩到的唯一一个坑）；`localDecl` 里"结构体的
+零值方言里没有一条形式"也不成立了。
+
+**三条边界。** 按值传形参、按值回返回值 —— 抄一份的机制有了，缺的是**调用约定**那一半：谁来开
+被调那一格、什么时候抄。直接把地址传过去就变成按引用，改形参会改到调用方那一份，与 C/jancy 正好
+相反（那是**给错答案**，不是拒不了），所以明着拒，写 `S*` 传。第三条是结构体的花括号初值
+（`S s = { 1, 2 }` 与 `new S { m_y = 2000 }`，decl_curly.rst 那一节，位置项与命名项各要一段）。
+
+**期望输出的出处**：C，一份 `cc -O0` 编出来的程序抄在 `cases/12-structs.jnc` 的头注里，9 行
+逐字节相同。C 那份里两处补了 `= { 0, 0 }`：`Inner a;` 与 `Inner arr[3];` 的零在 C 里是未定值，
+在 jancy 那边是定义好的（"zeros every variable before any user code can touch it"）。
+
+**跑过的轴**：`tests/jnc`（23/0，新增 `cases/12-structs` 与 `bad/struct-param`）、
+`tests/sexpr`（63/0）、`tests/glr`（20/0）。
 **没跑的**：`tests/asy` 全部（这一刀只碰 `frontend-jnc/lower.js`）、`sweep.js`、`svg.js`、自举、
 `tests/jit`、`tests/mir`、`tests/llvm`。`npm run lint` 这台机器上没有 typescript，跑不了。
 
