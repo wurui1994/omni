@@ -37,13 +37,15 @@
 // 这一层把它显式写出来（`n != 0` / `!pisnull p`）就对了。
 //
 // 还没长出来、因此**当场报错**的（每一条都记着该怎么长，不是"不收"）：
-//   - printf 的宽度与精度（`%5d` / `%.2f`）与 `%x` / `%o` —— 宽度要"重复一个串"、
-//     精度要定死 C 与 JS 的舍入怎么对齐、`%x` 要一个对 int64 精确的进制转换。
-//     三件都是"运行时里加一个符号"的事。下一刀。
-//   - `&x`（取局部量地址）—— 要局部量可寻址（jancy 那边是"提到 GC 堆上"）。下一刀。
+//   - printf 的精度（`%.2f`）与 `%x` / `%o` —— 两者都要先做一个**数值上的决定**：
+//     精度要定死 C 的 `%.*f` 与 JS 的 toFixed 在恰好一半上怎么对齐（0.125 到两位，
+//     C 给 0.12、JS 给 0.13）；`%x` 要定死负数怎么印（C 当 unsigned，位宽直接改答案）。
+//   - `%*d`（宽度从实参来）—— 那要在运行期才知道宽度，与"格式串必须是字面量"同一处边界。
+//   - `&x`（取局部量地址）—— 要局部量可寻址（jancy 那边是"提到 GC 堆上"）。
 //   - 真数组 `int a[3]`（jancy 的数组是**值**类型，方言这一层的 `(arr T)` 是引用语义）——
-//     要方言有值语义的定长数组。下一刀。
+//     要方言有值语义的定长数组。
 //   - 定宽整数（jancy 的 `int` 是 32 位、`char` 8 位，这一层全按 64 位）—— 溢出会不一样。
+//     `%x` 那一条挂在它上面。
 //   - `printf` 之外的标准库（`std.*`、`io.*`、`gc.*`）
 //   - 格式化字面量 `$"…"`、多行字面量、正则 switch
 //   - class / union / enum / property / reactor / 事件 / 多播 / 协程
@@ -54,8 +56,9 @@
 // jancy 的 `printf` 就是它的打印口（`test/jnc/*.jnc` 里到处是它），语义是 C 的那一套：
 // **不补换行**。这一层按 `\n` 把格式串切成若干段，带换行的段发 `(print …)`（它自带换行），
 // 末尾不带换行的那段发 `(write …)`。两者在每条腿上共用同一个输出缓冲区，所以交替调用
-// 顺序不会乱。收的转换是 `%d` / `%i` / `%f` / `%s` / `%c` / `%%`；`%d` 也收 bool
-// （jancy 的 bool 底下是 int8，印 1 / 0）。带宽度或精度的写法当场报错，见上面那份名单。
+// 顺序不会乱。收 `%d` / `%i` / `%f` / `%s` / `%c` / `%%`，标志 `-` `0` 与十进制宽度；
+// `%d` 也收 bool（jancy 的 bool 底下是 int8，印 1 / 0）。宽度那一格与 C 的 printf
+// **逐字节相同**（含 `%05d` 印负数是 `-0042` 这一条 —— 零补在符号后面）。
 import { isList, isAtom, isStr, head } from '../sexpr/read.js';
 import { OmniError } from '../source/diag.js';
 
@@ -623,12 +626,22 @@ class JncLower {
       const c = fmt[i];
       if (c === '\n') { flush(true); continue; }
       if (c !== '%') { lit += c; continue; }
-      const spec = fmt[i + 1];
-      i++;
+      // 转换说明：`%` [标志] [宽度] 转换字符。标志只收 `-`（左对齐）与 `0`（补零），
+      // 宽度只收十进制常量 —— `%*d`（宽度从实参来）要在运行期才知道宽度，那是
+      // "格式串在运行期解释"那条路，与"格式串必须是字面量"这条边界同一处。
+      let j = i + 1;
+      let left = false;
+      let zero = false;
+      while (fmt[j] === '-' || fmt[j] === '0') { if (fmt[j] === '-') left = true; else zero = true; j++; }
+      let width = 0;
+      while (fmt[j] >= '0' && fmt[j] <= '9') { width = width * 10 + (fmt[j].charCodeAt(0) - 48); j++; }
+      const spec = fmt[j];
+      i = j;
       if (spec === '%') { lit += '%'; continue; }
-      // 宽度/精度/`%x`/`%o` 还没有：宽度要"重复一个串"、精度要定死 C 与 JS 的舍入怎么
-      // 对齐、`%x` 要一个对 int64 精确的进制转换。三件都是**运行时里加一个符号**的事，
-      // 记在 ADR-0016 的名单上，下一刀一起做。这里当场报错而不是悄悄忽略掉宽度。
+      // 精度（`%.2f`）与 `%x` / `%o` 还没有 —— 两者都要先做一个数值上的决定：
+      // 精度要定死 C 的 `%.*f` 与 JS 的 toFixed 在**恰好一半**上怎么对齐（0.125 -> C 给
+      // 0.12、JS 给 0.13）；`%x` 要定死负数怎么印（C 把它当 unsigned，位宽是 32 还是 64
+      // 直接改答案 —— 那件事挂在"定宽整数"那一格上）。记在 ADR-0016 的名单里。
       if (spec !== 'd' && spec !== 'i' && spec !== 'f' && spec !== 's' && spec !== 'c') {
         this.nope(n, `printf 的转换 '%${spec === undefined ? '' : spec}'`);
         return null;
@@ -636,34 +649,60 @@ class JncLower {
       if (ai >= vals.length) { this.err(n, 'printf 的实参比格式串里的转换少'); return null; }
       const v = vals[ai];
       ai++;
-      // `%c`：一个码位 -> 一个字符。方言这一刀把 `(chr E)` 露出来了（另外四条腿早就有它）。
+      let piece = null;
+      // `%c`：一个码位 -> 一个字符。方言的 `(chr E)`（另外四条腿早就有它）。
       if (spec === 'c') {
         if (v.type !== T_INT) {
           this.err(args[ai], `'%c' 要 int（jancy 的 char 就是整数），这里是 ${tyName(v.type)}`);
           return null;
         }
-        flushLit();
-        pieces.push(`(chr ${v.code})`);
-        continue;
-      }
-      // `%d` 收 bool：jancy 的 `bool` 底下是 int8，`printf("%d", b)` 印 1 / 0（C 的样子）。
-      // 这里用 `sel` 把它变成 1 / 0，而不是 `(tostr b)`（那会印 true / false）。
-      if ((spec === 'd' || spec === 'i') && v.type === T_BOOL) {
-        flushLit();
-        pieces.push(`(tostr (sel ${v.code} (int 1) (int 0)))`);
-        continue;
-      }
-      const want = spec === 'f' ? T_REAL : (spec === 's' ? T_STR : T_INT);
-      if (!sameTy(v.type, want)) {
-        this.err(args[ai], `'%${spec}' 要 ${tyName(want)}，这里是 ${tyName(v.type)}`);
-        return null;
+        piece = `(chr ${v.code})`;
+      } else if ((spec === 'd' || spec === 'i') && v.type === T_BOOL) {
+        // jancy 的 `bool` 底下是 int8，`printf("%d", b)` 印 1 / 0（C 的样子）——
+        // 用 `sel` 变成 1 / 0，而不是 `(tostr b)`（那会印 true / false）。
+        piece = `(tostr (sel ${v.code} (int 1) (int 0)))`;
+      } else {
+        const want = spec === 'f' ? T_REAL : (spec === 's' ? T_STR : T_INT);
+        if (!sameTy(v.type, want)) {
+          this.err(args[ai], `'%${spec}' 要 ${tyName(want)}，这里是 ${tyName(v.type)}`);
+          return null;
+        }
+        piece = v.type === T_STR ? v.code : `(tostr ${v.code})`;
       }
       flushLit();
-      pieces.push(v.type === T_STR ? v.code : `(tostr ${v.code})`);
+      if (width > 1) {
+        // 宽度那一支要**多次读**这段文本（量长度、再拼上去），所以先落成一个局部量。
+        // 直接内联的话 `%5d` 里的 `(call f x)` 会被算两遍（补零那一支是四遍）。
+        // 落在这儿而不是别处：jancy 与 C 一样在调用前算完所有实参，先算一步更贴。
+        const t = `$f${this.tmp}`;
+        this.tmp++;
+        out.push(`${pad}(let ${t} string ${piece})`);
+        pieces.push(this.padTo(`(var ${t})`, width, left,
+          zero && !left && spec !== 's' && spec !== 'c'));
+      } else pieces.push(piece);
     }
     flush(false);   // 末尾没换行的那一段走 write
     if (ai !== vals.length) { this.err(n, 'printf 的实参比格式串里的转换多'); return null; }
     return out;
+  }
+
+  /**
+   * 把一段文本补到至少 `w` 个字符宽。补的那一截是 `(srep 填充字符 (bin "-" w (slen s)))`
+   * —— `srep` 在个数 <= 0 时回空串，所以"本来就够宽"这一情形不用另写一支。
+   *
+   * `0` 标志（补零）在 C 里是**补在符号后面**的：`%05d` 印 -42 是 `-0042`，不是 `00-42`。
+   * 所以这一支要分开：第一个字符是 `-` 时先把它摘出来，零补在余下那截前面。要补的个数
+   * 两种情形一样（`(w-1) - (len-1) == w - len`），所以只有拼法不同。
+   * `code` 会被读好几次，调用方**必须**先把它落成一个局部量（见 printf 里那处）。
+   */
+  padTo(code, w, left, zero) {
+    const gap = (fill) => `(srep (str "${fill}") (bin "-" (int ${w}) (slen ${code})))`;
+    if (left) return `(bin "+" ${code} ${gap(' ')})`;
+    if (!zero) return `(bin "+" ${gap(' ')} ${code})`;
+    const rest = `(ssub ${code} (int 1) (bin "-" (slen ${code}) (int 1)))`;
+    return `(sel (bin "==" (ssub ${code} (int 0) (int 1)) (str "-"))`
+      + ` (bin "+" (str "-") (bin "+" ${gap('0')} ${rest}))`
+      + ` (bin "+" ${gap('0')} ${code}))`;
   }
 
   /* -------------------------------------------------------------- 控制流 */

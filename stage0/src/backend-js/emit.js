@@ -532,6 +532,8 @@ class JsEmitter {
       case 'print': return `$print($str_${e.argType.k}(${a[0]}))`;
       // `(write E)` —— 不补换行（ADR-0016 第四刀）。$print_raw 与 $print 共用一个缓冲区。
       case 'write': return `$print_raw(${a[0]})`;
+      // `(srep S N)`（ADR-0016 第五刀）。n <= 0 回空串 —— String.repeat 在负数上抛异常。
+      case 'str_repeat': return `$str_repeat(${a[0]}, ${a[1]})`;
       case 'to_string': return `$str_${e.argType.k}(${a[0]})`;
       case 'to_string_g': return `$str_real_g(${a[0]}, ${a[1]})`;
       case 'trunc': return `$trunc(${a[0]})`;

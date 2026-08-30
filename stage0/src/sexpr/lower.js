@@ -1251,16 +1251,23 @@ class CoreLowerer {
     }
     // `(chr E)` —— 一个码位 -> 一个字符的串。**借现成的**（Omni 的 `chr(65)`，四条腿早就
     // 在，LLVM 那条腿补一行 ABI）—— 与 slen/ssub/sfind 同一个路子。jancy 的 `%c` 要它。
-    //
-    // 刻意**没有** `(srep S N)`（重复，printf 的宽度要它）：封闭 ABI 里那个
-    // `js_str_repeat` 收发的是 omni_dyn，从这条按类型走的路上用它要装箱拆箱两次，
-    // 而在运行时里加一个 `omni_str_repeat(omni_str, int64_t)` 才是对的形状。
-    // 那是下一刀 —— 宽度与精度一起做。
+    // `(srep S N)` —— 把 S 重复 N 遍（printf 的宽度要它，ADR-0016 第五刀）：
+    // `%5d` 就是"空格重复 max(0, 5 - 长度) 遍再接上"。**N <= 0 回空串，不报错** ——
+    // 那个 max 常常是 0 或负数，是正常情形。刻意不接封闭 ABI 里的 js_str_repeat：
+    // 它收发 omni_dyn，从这条按类型走的路上用它要装箱拆箱两次。
     if (h === 'chr') {
       const v = this.expr(n.items[1]);
       if (v === null) return null;
       if (v.type !== INT) return this.err(n, `(chr E) 的实参要是 int，这里是 ${coreTypeText(v.type)}`);
       return { kind: 'Builtin', name: 'chr', args: [v], argType: INT, type: STRING };
+    }
+    if (h === 'srep') {
+      const s = this.expr(n.items[1]);
+      const k = this.expr(n.items[2]);
+      if (s === null || k === null) return null;
+      if (s.type.k !== 'string') return this.err(n, `(srep S N) 的 S 要是 string，这里是 ${coreTypeText(s.type)}`);
+      if (k.type !== INT) return this.err(n, `(srep S N) 的 N 要是 int，这里是 ${coreTypeText(k.type)}`);
+      return { kind: 'Builtin', name: 'str_repeat', args: [s, k], recvType: STRING, type: STRING };
     }
     // `(readtext E)`：把一份文本文件**整份**读成 string。方言里读文件只有这一个口子 ——
     // 被降级的语言那边的文件对象（asy 的 `input(name).line().word()`：分词、注释、eof）

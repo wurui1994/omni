@@ -208,6 +208,8 @@ void omni_print_string(omni_str v);
 /* 不加换行的那一路（ADR-0016 第四刀）。只有 string 一个签名：要印数就在方言那一层
    先 (tostr …)。理由与 print 收所有标量不同 —— 那一条有历史，这一条是新的。 */
 void omni_write_string(omni_str v);
+/* 重复一个串（ADR-0016 第五刀，printf 的宽度要它）。n <= 0 回空串，不报错。 */
+omni_str omni_str_repeat(omni_str s, int64_t n);
 
 /* 指针（ADR-0016）。这两条原生腿用**真指针** —— 与 JS/解释器那三条的 arena 模拟是
    两套实现、一套语义。选真指针的理由是 FFI：arena 里的偏移递不出去给外面的 C 库。

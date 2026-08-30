@@ -150,6 +150,7 @@ const RT_OPS = new Map([
   // 另外四条腿早就有 chr（Omni 的 `chr(65)`），漏的一直只是这一行。
   ['write.string', { sym: 'omni_write_string', ret: 'void', params: ['[2 x i64]'] }],
   ['chr.int', { sym: 'omni_chr', ret: '[2 x i64]', params: ['i64'] }],
+  ['str_repeat.string', { sym: 'omni_str_repeat', ret: '[2 x i64]', params: ['[2 x i64]', 'i64'] }],
 ]);
 
 /** i64 比较 -> icmp 谓词；f64 -> fcmp 谓词。顺序与 OP.EQ..OP.GT 一致。 */

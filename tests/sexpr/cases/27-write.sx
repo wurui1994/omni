@@ -39,4 +39,23 @@
 
     ;; 空串写进去什么都不该多出来
     (write (str ""))
+
+    ;; `(srep S N)` —— 重复（printf 的宽度靠它拼）。
+    ;; **N <= 0 回空串，不报错**：宽度是"补到至少 N 个字符"，`max(0, N - 长度)` 常常是
+    ;; 0 或负数，那是正常情形。JS 的 String.repeat 在负数上抛异常，所以那一侧先夹住。
+    (print (srep (str "ab") (int 3)))
+    (print (bin "+" (str "[") (bin "+" (srep (str "-") (int 0)) (str "]"))))
+    (print (bin "+" (str "[") (bin "+" (srep (str "-") (int -5)) (str "]"))))
+    (print (bin "+" (str "[") (bin "+" (srep (str "") (int 4)) (str "]"))))
+    ;; 宽度那一格的样子：把 "42" 右对齐到 5 个字符
+    (let s string (tostr (int 42)))
+    (print (bin "+" (str "[")
+             (bin "+" (bin "+" (srep (str " ") (bin "-" (int 5) (slen (var s)))) (var s))
+               (str "]"))))
+    ;; 本来就够宽：那个减法是负数，srep 回空串，于是不截断
+    (let t string (tostr (int 123456)))
+    (print (bin "+" (str "[")
+             (bin "+" (bin "+" (srep (str " ") (bin "-" (int 3) (slen (var t)))) (var t))
+               (str "]"))))
+
     (print (str "end"))))

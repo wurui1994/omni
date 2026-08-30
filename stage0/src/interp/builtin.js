@@ -766,6 +766,10 @@ export function applyBuiltin(I, e, a) {
     // `(write E)` —— 不补换行（ADR-0016 第四刀）。与 print 共用同一个缓冲区，
     // 否则直写的那段会插到已经缓冲、还没落盘的输出前面去。
     case 'write': printRaw(a[0]); return undefined;
+    // `(srep S N)` —— 重复（ADR-0016 第五刀）。n <= 0 回空串：JS 的 String.repeat 在
+    // 负数上抛异常，而"宽度补到至少 N 个字符"里 max(0, N - 长度) 常常是 0 或负数，
+    // 那是正常情形。夹在这里，与 omni_str_repeat 同一套语义。
+    case 'str_repeat': return Number(a[1]) <= 0 ? '' : a[0].repeat(Number(a[1]));
     case 'to_string': return strOf(e.argType.k, a[0]);
     case 'to_string_g': return fmtRealG(a[0], a[1]);
     case 'trunc': return truncReal(a[0]);

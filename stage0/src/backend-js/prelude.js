@@ -237,6 +237,11 @@ function $print_raw(s) {
 }
 function $flush() { if ($out.length) { process.stdout.write($out); $out = ""; } }
 
+// (srep S N)（ADR-0016 第五刀，printf 的宽度要它）。n <= 0 回空串而不是抛异常：
+// 宽度就是"补到至少 N 个字符"，max(0, N - 长度) 常常是 0 或负数，那是正常情形。
+// 与 omni_str_repeat 同一套语义（那边也在 n <= 0 时回空串）。
+function $str_repeat(s, n) { return Number(n) <= 0 ? "" : s.repeat(Number(n)); }
+
 const $trunc = (x) => {
   if (!Number.isFinite(x)) $rt_error("cannot convert non-finite real to int");
   const t = Math.trunc(x);

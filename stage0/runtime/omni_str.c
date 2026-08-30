@@ -81,6 +81,20 @@ int64_t omni_str_length(omni_str s) {
   return omni_str_len(s);
 }
 
+/* `(srep S N)` —— 把 S 重复 N 遍（ADR-0016 第五刀，printf 的宽度要它）。
+   `n <= 0` 回空串，**不报错**：宽度就是"补到至少 N 个字符"，`max(0, N - 长度)` 常常
+   是 0 或负数，那是正常情形而不是错误。JS 的 `String.repeat` 在负数上抛异常，所以
+   那一侧也得先夹住 —— 五条腿一套语义，夹的位置写在两边同一个地方。
+   刻意**不**接封闭 ABI 里那个 js_str_repeat：它收发 omni_dyn，从这条按类型走的路上
+   用它要装箱拆箱两次。 */
+omni_str omni_str_repeat(omni_str s, int64_t n) {
+  if (n <= 0 || s.len == 0) return omni_str_new("", 0);
+  int64_t total = s.len * n;
+  char *buf = omni_alloc_bytes(total);
+  for (int64_t i = 0; i < n; i++) memcpy(buf + i * s.len, s.p, (size_t)s.len);
+  return omni_str_new(buf, total);
+}
+
 /* JS 的 String.fromCodePoint 对代理区返回孤立代理，写出去就是 U+FFFD，这里保持一致 */
 omni_str omni_chr(int64_t cp) {
   if (cp < 0 || cp > 0x10ffff) {

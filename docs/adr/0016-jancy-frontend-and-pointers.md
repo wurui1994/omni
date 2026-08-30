@@ -257,17 +257,53 @@ jancy 侧的 printf 于是变成：按 `\n` 把格式串切段，带换行的段
 只在两种调用**交替**时才看得见。所以 `tests/sexpr/cases/27-write.sx` 与
 `tests/jnc/cases/05-printf.jnc` 都刻意交替调用。
 
-**刻意没做**：`(srep S N)`（重复一个串，printf 的宽度要它）。封闭 ABI 里确实有个
-`js_str_repeat`，但它收发的是 `omni_dyn`——从这条按类型走的路上用它要装箱拆箱两次。
-对的形状是在运行时里加 `omni_str_repeat(omni_str, int64_t)`。它与 `%.Nf`（精度：要先
-定死 C 的 `%.*f` 与 JS 的 `toFixed` 在舍入上怎么对齐）、`%x`/`%o`（要一个对 int64
-**精确**的进制转换——现有的 `toString(radix)` 只挂在 real 上，大整数会丢精度）是同一类
-问题：都要先做一个数值上的决定。那是下一刀，一起做。
+**这一刀刻意没做**（下面第五刀补上了第一条）：`(srep S N)`（重复一个串，printf 的宽度
+要它）。封闭 ABI 里确实有个 `js_str_repeat`，但它收发的是 `omni_dyn`——从这条按类型走的
+路上用它要装箱拆箱两次。对的形状是在运行时里加 `omni_str_repeat(omni_str, int64_t)`。
+`%.Nf`（精度）与 `%x`/`%o` 留着：两者都要先做一个数值上的决定。
 
 **跑过的轴**：`tests/jnc`（10/0，`bad/printf-tail` 转成了 `cases/05-printf`）、
 `tests/sexpr`（60 -> 61，新增 `27-write.sx`）。**没跑的**：`tests/asy` 全部、
 `sweep.js`、`svg.js`、自举、`tests/jit`、`tests/mir`、`tests/llvm`——这一刀加的是一条
 builtin 与一行 ABI，`tests/sexpr` 的五方一致把两者都走过了。
+
+### 第五刀：printf 的宽度 —— 与 C 的 printf 逐字节对上
+
+`(srep S N)`：把 S 重复 N 遍。新符号 `omni_str_repeat(omni_str, int64_t)`，五条腿各一份
+（C 一份实现、JS 的 `$str_repeat`、解释器的一行、LLVM 一行 ABI）。
+
+**`N <= 0` 回空串，不报错**——这是这条形式唯一需要定的语义。宽度就是"补到至少 N 个
+字符"，而 `max(0, N - 长度)` 常常是 0 或负数，那是正常情形而不是错误。JS 的
+`String.prototype.repeat` 在负数上抛异常，所以 JS 那一侧也得先夹住；夹的位置在两边
+同一处，写在同一段注释里。
+
+jancy 侧的 printf 于是接上了标志与宽度：`%5d` / `%-5d` / `%05d` / `%5s` / `%5c` / `%8f`。
+两处值得记下来：
+
+- **`%05d` 印负数是 `-0042`**，零补在**符号后面**。这是 C 的规矩（`printf '[%05d]' -42`
+  量过），不是我们编的。第一版想偷懒退回补空格，那样差别是"少补了个零"；改成分一支
+  把符号摘出来之后，六种写法与 C 的 printf **逐字节相同**（对照命令写在
+  `tests/jnc/cases/05-printf.jnc` 的注释里）。
+- **实参只算一遍**。宽度那一格要多次读那段文本（量长度、再拼上去），直接内联的话
+  `printf("[%5d]", bump(c))` 里的 `bump` 会被调两遍（补零那一支四遍）。所以降级时先把
+  它落成一个 `(let $fN string …)`。落在 print 之前而不是别处：jancy 与 C 一样在调用前
+  算完所有实参，先算一步更贴。`cases/05-printf.jnc` 里那个计数器就是在盯这件事——
+  `calls=1`。
+
+`%*d`（宽度从实参来）不收：那要在运行期才知道宽度，与"格式串必须是字面量"同一处边界。
+
+**还差的两条**（都要先做一个数值上的决定，没有决定就不动手）：
+
+- `%.Nf`（精度）——要定死 C 的 `%.*f` 与 JS 的 `toFixed` 在**恰好一半**上怎么对齐。
+  两者不一样：`0.125` 到两位，C 给 `0.12`（就近取偶），JS 给 `0.13`（ECMA-262 规定取较大
+  的那个）。挑哪一边都行，但必须挑一边并在两侧都实现它。
+- `%x` / `%o`——要定死负数怎么印。C 把它当 unsigned，于是**位宽直接改答案**：jancy 的
+  `int` 是 32 位（`-1` 印 `ffffffff`），这一层的 int 是 64 位（会印 16 个 f）。所以这一条
+  挂在"定宽整数"那一格上，得先有它。
+
+**跑过的轴**：`tests/jnc`（10/0）、`tests/sexpr`（61/0）。**没跑的**：`tests/asy` 全部、
+`sweep.js`、`svg.js`、自举、`tests/jit`、`tests/mir`、`tests/llvm`——同上，加的是一条
+builtin 与一行 ABI。
 
 ## 后果与代价
 

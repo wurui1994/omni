@@ -1033,6 +1033,7 @@ class CEmitter {
       case 'print': return `omni_print_${e.argType.k}(${a[0]})`;
       // `(write E)` —— 不补换行（ADR-0016 第四刀）
       case 'write': return `omni_write_string(${a[0]})`;
+      case 'str_repeat': return `omni_str_repeat(${a[0]}, ${a[1]})`;
       case 'to_string': return `omni_str_${e.argType.k}(${a[0]})`;
       case 'to_string_g': return `omni_str_realg(${a[0]}, ${a[1]})`;
       case 'trunc': return `omni_trunc(${a[0]})`;
