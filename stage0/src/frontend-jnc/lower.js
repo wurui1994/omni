@@ -64,7 +64,11 @@
 // 按需算布局、撞回来才报 `can't calculate layout of '%s' due to recursion`）、
 // **对模块级变量取地址**（`&g` / `&gp` / `&t` / `&s` —— 标量那一格被 `&` 过就发成
 // `(ptr T)`、值躺在一段 pnew 出来的内存里，与第九刀对局部量做的是同一件事；数组与结构体
-// 那一格里本来就放着块地址。方言一个字没改，见 declareGlobal 与 addrOf）。
+// 那一格里本来就放着块地址。方言一个字没改，见 declareGlobal 与 addrOf）、
+// **`new T { … }`**（那几条语句抬成一个函数、项的值当实参在调用方求，于是它仍旧是一个
+// 表达式，`while` 的条件那种惰性位置上也成立，见 newCurly）、
+// **`.` 与 `->` 是同一个算符**（`point2.m_x` 里的 point2 是 `Point*` ——
+// samples/jnc/84_CurlyInitializers.jnc:66；读、写、右值上的 `.` 三处都收，见 structBehind）。
 //
 // ## 纪律：**jancy 不向方言妥协**
 //
@@ -99,10 +103,11 @@
 //   - 模块级变量那一族里剩下的两条：`static` 的**局部量**（要"初值只跑一次"，jancy 那边是
 //     `once` 的机制）、`threadlocal`（要线程本地存储）。`&g` 第二十四刀收了；只有
 //     **string** 的模块级变量还取不到地址（liftable 那条，见 `bad/addr-global.jnc`）。
-//   - 结构体那一族里剩下的一条：`new T { … }`（decl_curly.rst 最后那一格）。花括号初值是
-//     **几条语句**，而这一层的表达式降级只交出一段文字 —— 没有"顺带发几条语句"的通道，
-//     而 `while (new T { … })` 那种位置连"提到前面去"都不成立（条件每一圈都要重算）。
-//     声明与赋值那两处是语句位置，所以那两处的花括号初值是收的（`bad/curly-new.jnc`）。
+//   - `new T { … }` 里剩下的一条：`new T[n] { … }`。jancy 的语法把个数**折进类型名**里
+//     （`new_operator_type : type_name_impl<&type, &elementCount>`，jnc_ct_Expr.llk:726），
+//     所以那一行在它那边是过的；我们的语法把 `new T[n]` 与 `new T curly` 分成了两条产生式，
+//     合不到一起。而且它到底写哪一格也量不出来（`new_operator_curly_initializer` 是先
+//     `*p` 再套花括号，元素个数 >1 时那一格只是第一格）—— 语义没量清的不硬接。
 //   - 花括号初值里剩下的两条：`[i] = v`（那一条在**我们的**语法里，jancy 的项只有位置与名字
 //     两种，所以它是当场报错的那类）、`char buffer[] = { 10, 20, "null-terminated", … }`
 //     （decl_curly.rst 最后那一段：char 数组里可以混字面量 —— 要"一格一个字节"的存储宽度，
@@ -291,6 +296,18 @@ function intConv(v, to) {
 }
 
 const isPtr = (t) => t.k === 'ptr' || t.k === 'tptr';
+
+/** `.` 的左边落在哪个结构体上。jancy 里 `.` 与 `->` 是同一个算符（第二十五刀，
+ *  samples/jnc/84_CurlyInitializers.jnc:66 那句 `point2.m_x` 的 point2 是 `Point*`），
+ *  所以结构体那一格与"指到结构体的指针"都算 —— 两者的 code 都是那一段内存的地址。 */
+function structBehind(t) {
+  if (isStruct(t)) return t;
+  if (isPtr(t) && isStruct(t.target)) return t.target;
+  return null;
+}
+
+/** `.` 的左边是这几种形状时走左值那条路（它们本身可写）；别的当右值求一次值。 */
+const LV_SHAPES = new Set(['name', 'field', 'index', 'ptr-field', 'indirect']);
 
 /** 零值。jancy 保证"用户代码碰到之前每一格都是零"（type_ptr_data.rst），所以没写初值的
  *  局部量这里显式发一个零 —— 方言的 `(let …)` 要一个初值。 */
@@ -1398,10 +1415,27 @@ class JncLower {
       if (isList(ob) && head(ob) === 'indirect') return this.fieldLv(n, ob.items[1], n.items[2]);
       // `s.f`：s 是结构体那一格，它的 code 就是地址，所以与 `p->f` 落在同一句 pfield 上
       // （第十二刀）。这一条以前不收，理由是"结构体只能经指针到达"。
-      const o = this.lvalue(ob);
-      if (o === null) return null;
-      if (!isStruct(o.type)) return this.err(n, `'.' 的左边不是结构体：${tyName(o.type)}`);
-      return this.memberOf(n, this.read(o), o.type.name, n.items[2]);
+      // **`.` 与 `->` 在 jancy 里是同一个算符**（第二十五刀）：`point2.m_x` 里的 point2 就是
+      // 一个 `Point*`（samples/jnc/84_CurlyInitializers.jnc:66）。所以指针也从这儿走 ——
+      // 那一格读出来的就是基地址，与结构体那一格唯一的差别是多一次 pload。
+      // 左边不是**可写的形状**时（`f().x`、`(new T { … }).x`）当右值求一次值：回来的那一格
+      // 也是一段内存的地址，只是这段内存没名字，读完就没人再指它（第十三刀 / 第二十五刀）。
+      let base = null;
+      let bt = null;
+      if (isList(ob) && !LV_SHAPES.has(head(ob))) {
+        const o = this.expr(ob);
+        if (o === null) return null;
+        base = o.code;
+        bt = o.type;
+      } else {
+        const o = this.lvalue(ob);
+        if (o === null) return null;
+        base = this.read(o);
+        bt = o.type;
+      }
+      const st = structBehind(bt);
+      if (st === null) return this.err(n, `'.' 的左边不是结构体：${tyName(bt)}`);
+      return this.memberOf(n, base, st.name, n.items[2]);
     }
     return this.nope(n, `赋值给 '${h}'`);
   }
@@ -1996,26 +2030,16 @@ class JncLower {
         if (isList(ob) && head(ob) === 'indirect') {
           return this.load(n, this.fieldLv(n, ob.items[1], n.items[2]));
         }
-        // 右值上的 `.`（`f().x`，第十三刀）。回来的结构体也是一段内存的地址，所以取字段与
-        // 左值那一侧是同一句 pfield —— 只是这段内存没名字，读完就没人再指它。
-        if (isList(ob) && head(ob) === 'call') {
-          const o = this.expr(ob);
-          if (o === null) return null;
-          if (!isStruct(o.type)) return this.err(n, `'.' 的左边不是结构体：${tyName(o.type)}`);
-          return this.load(n, this.memberOf(n, o.code, o.type.name, n.items[2]));
-        }
-        // `s.f`：与 `p->f` 落在同一句 pfield 上（第十二刀，见 lvalue 的 field 分支）
+        // `s.f` / `p.f` / `f().x` / `(new T { … }).x` 全落在 lvalue 那一支上：那儿算的是
+        // "这个字段在哪一格内存里"，读一次就是这儿要的值（第十二刀 / 第二十五刀）。
         return this.load(n, this.lvalue(n));
       }
       case 'call': return this.callExpr(n);
       case 'new-array': return this.newPtr(n, n.items[1], n.items[2]);
       case 'new': return this.newPtr(n, n.items[1], null);
-      // `new T { … }`（decl_curly.rst 最后那一格）。花括号初值是**几条语句**（先开那一格，
-      // 再逐格写），而这一层的表达式降级只交出一段文字 —— 没有"顺带发几条语句"的通道。
-      // 声明与赋值那两处有（语句位置），所以那两处的花括号初值是收的（第十四刀）。
-      case 'new-curly':
-        return this.nope(n, '`new T { … }`（要"表达式里能顺带发几条语句"；'
-          + '写成 `T v = { … }` 再取 `&v` 是同一个东西）');
+      // `new T { … }`（第二十五刀）：那几条语句抬成一个函数，项的值当实参传进去 ——
+      // 于是它仍旧是一个表达式，惰性位置上也成立。见 newCurly。
+      case 'new-curly': return this.newCurly(n, n.items[1], n.items[2]);
 
       case 'cast': return this.cast(n, n.items[1], n.items[2]);
       case 'cond': return this.ternary(n, want);
@@ -2245,12 +2269,69 @@ class JncLower {
     return { code: `(call ${nm}${parts.map((p) => ` ${p}`).join('')})`, type: sig.ret };
   }
 
-  /** `new T[n]` -> `(pnew (ptr T) n)`；`new T` -> 一格。两者出来的都是**指针**。 */
-  newPtr(n, tnNode, countNode) {
+  /**
+   * `new T { … }`（第二十五刀，decl_curly.rst 最后那一格：
+   * `Point* point2 = new Point { m_y = 2000 }`）。
+   *
+   * 花括号初值是**几条语句**（先开那一格，再逐格写），而这一层的表达式降级只交出一段文字。
+   * 上一刀在边界表上记的补法是"在表达式降级里开一条语句通道"—— 但那条通道在**惰性**位置
+   * 上立不住：`while (new T { … })` 的条件每一圈都要重算，提到前面去就只算了一次。
+   *
+   * 所以走的是另一条：**把那几条语句抬成一个函数**。项的值在**调用方**这一侧求（顺序、
+   * 作用域都还是原来那个），逐格写与 `pnew` 在被调那一侧，于是整个 `new T { … }` 就是一句
+   * `(call $newc7 …)` —— 一个表达式，放哪儿都成立，每次求值都真的新开一格。方言一个字没改。
+   *
+   * 项的值当**实参**传进去正好解掉两件事：一是"在调用方求值"，二是名字的作用域
+   * （被调那一侧只看得见形参，看不见调用方的局部量，所以不会误捕）。聚合的那些项传的是
+   * 那一格的地址（`slotText`），抄一份由被调里的 copyVal 做 —— 与第十三刀那条"抄在被调
+   * 那一侧"是同一条。
+   */
+  newCurly(n, tnNode, curly) {
+    const t = this.newTy(tnNode);
+    if (t === null) return null;
+    if (t === T_VOID) return this.err(n, 'new void');
+    if (!isStruct(t) && !isArr(t)) {
+      return this.err(n, `new ${tyName(t)} { … }：花括号初值要一格聚合`);
+    }
+    if (isArr(t) && t.n === null) return this.err(n, `new ${tyName(t)} { … } 的长度得写出来`);
+    if (!isList(curly) || head(curly) !== 'curly') return this.err(n, '认不出的花括号初值');
+    const pad = '      ';
+    const body = [];
+    const args = [];
+    const plan = this.curlyPlan(curly, t, pad, body, {
+      shadow: null,          // 被调那一侧没有同名的目标可遮，所以不用钉
+      val: (node, want) => {
+        const code = this.initValue(node, want);
+        if (code === null) return null;
+        const k = args.length;
+        args.push({ code, type: want });
+        return `(var $i${k})`;
+      },
+    }, [], []);
+    if (plan === null) return null;
+    const st = slotText(t);
+    const pre = [`${pad}(let $p ${st} (pnew ${st} (int 1)))`];
+    if (this.curlyEmit(plan, '(var $p)', pad, body) === null) return null;
+    const fn = `$newc${this.tmp++}`;
+    const ps = args.map((a, i) => `($i${i} ${slotText(a.type)})`).join(' ');
+    this.decls.push(`  (fn ${fn} (${ps}) ${st}\n    (do\n${pre.concat(body).join('\n')}\n`
+      + `${pad}(ret (var $p))))`);
+    const as = args.map((a) => ` ${a.code}`).join('');
+    return { code: `(call ${fn}${as})`, type: tPtr(t) };
+  }
+
+
+  /** `new T` / `new T[n]` / `new T { … }` 三处共用的类型解析。 */
+  newTy(tnNode) {
     if (!isList(tnNode) || head(tnNode) !== 'type-name') return this.nope(tnNode, '这种 new 的类型');
     const sp = this.specs(tnNode.items[1]);
     if (sp === null) return null;
-    const t = this.ptrsTy(sp, tnNode.items[2], tnNode);
+    return this.ptrsTy(sp, tnNode.items[2], tnNode);
+  }
+
+  /** `new T[n]` -> `(pnew (ptr T) n)`；`new T` -> 一格。两者出来的都是**指针**。 */
+  newPtr(n, tnNode, countNode) {
+    const t = this.newTy(tnNode);
     if (t === null) return null;
     if (t === T_VOID) return this.err(n, 'new void');
     let count = '(int 1)';

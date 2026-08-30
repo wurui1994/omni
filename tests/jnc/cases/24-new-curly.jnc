@@ -1,0 +1,76 @@
+// `new T { … }`（第二十五刀，decl_curly.rst 最后那一格：
+// `Point* point2 = new Point { m_y = 2000 }`）。
+//
+// 花括号初值是**几条语句**，而表达式降级只交出一段文字。上一刀在边界表上记的补法是
+// "在表达式降级里开一条语句通道"—— 那条通道在**惰性**位置上立不住（`while` 的条件每一圈
+// 都要重算，提到前面去就只算了一次）。所以走的是另一条：把那几条语句**抬成一个函数**，
+// 项的值当实参在调用方求，`new T { … }` 就是一句 `(call $newcN …)`。方言一个字没改。
+//
+// 这一份刻意把它放在四种位置上：声明的初值、实参、`while` 的条件里（每一圈都新开一格）、
+// 以及项本身是一整格聚合（那一项是"抄一份"，deep copy 由被调那一侧的 copyVal 做）。
+// 末尾几行量的是同一份 sample 顺带说出来的另一件事：**`.` 与 `->` 在 jancy 里是同一个算符**
+// （第 66 行 `point2.m_x` 的 point2 是 `Point*`），读、写、右值上的 `.` 三处都收。
+//
+// 期望输出的出处：一份 `cc -O0` 的孪生程序（`calloc` 对上 jancy 的零初始化、
+// 写不满时余下的格子是零 —— 与第十四刀那条 skipCurlyInitializerItem 同一件事）。
+// 逐字节相同。
+
+struct Inner {
+    int m_a;
+    int m_b;
+}
+
+struct Point {
+    int m_x;
+    int m_y;
+    Inner m_in;
+}
+
+int twice(int v) {
+    return v * 2;
+}
+
+Point* mk(int x) {
+    return new Point { x, x + 1, { x + 2, x + 3 } };
+}
+
+int main() {
+    // 命名项；没写到的那些格子是零
+    Point* p = new Point { m_y = 2000 };
+    printf("named=%d %d %d\n", p->m_x, p->m_y, p->m_in.m_a);
+
+    // 位置项 + 嵌套花括号 + 项里调函数（在**调用方**这一侧求值）
+    int k = 3;
+    Point* q = new Point { 1, twice(k), { 7, 8 } };
+    printf("pos=%d %d %d %d\n", q->m_x, q->m_y, q->m_in.m_a, q->m_in.m_b);
+
+    // 实参位置：整个 new 就是一个表达式
+    printf("arg=%d\n", twice((new Point { 5, 6 })->m_y));
+
+    // 惰性位置：条件每一圈都重算，所以每一圈都真的新开一格
+    int i = 0;
+    int sum = 0;
+    while (i < 3) {
+        Point* r = new Point { i, i + 1 };
+        sum += r->m_x + r->m_y;
+        i++;
+    }
+    printf("loop=%d\n", sum);
+
+    // 项本身是一整格聚合：抄一份，之后改源头不影响那一格
+    Inner o = { 5, 6 };
+    Point* z = new Point { 1, 2, o };
+    o.m_a = 99;
+    printf("copy=%d %d / src=%d\n", z->m_in.m_a, z->m_in.m_b, o.m_a);
+
+    // `.` 与 `->` 在 jancy 里是同一个算符：上面那份 sample 第 66 行写的就是 `point2.m_x`，
+    // 而 point2 是 `Point*`。读、写、右值上的 `.`（`mk(10).m_y`）、以及直接在 new 上取字段。
+    printf("dot=%d %d\n", p.m_x, p.m_y);
+    p.m_x = 5;
+    p.m_in.m_a = 6;
+    printf("dotset=%d %d\n", p.m_x, p.m_in.m_a);
+    printf("dotrv=%d %d\n", mk(10).m_y, mk(20).m_in.m_b);
+    printf("dotnew=%d\n", (new Point { 5, 6 }).m_y);
+
+    return 0;
+}

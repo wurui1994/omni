@@ -787,6 +787,10 @@ jancy 的 struct 是 POD **值**类型，所以 `t = s` 抄一份、不共享同
 `char buffer[] = { 10, 20, "null-terminated", … }`：char 数组里混字面量要"一格一个字节"的存储
 宽度，与那处刻意留下的差别（四种位宽都占一个 64 位槽）是同一格。
 
+> **第一条第二十五刀收了。** 那条"语句通道"确实立不住 —— 换的办法是把那几条语句**抬成一个
+> 函数**，项的值当实参在调用方求，于是 `new T { … }` 仍旧是一个表达式。`bad/curly-new.jnc`
+> 因此删掉，重划到 `new T[n] { … }` 上（只记在边界表里）。见第二十五刀。
+
 **期望输出的出处**：前 11 行是 C（`cc -O0 -std=c99`，抄在 `cases/14-curly.jnc` 的头注里，逐字节
 相同）—— jancy 的 `m_z = 30` 与 C99 的 `.m_z = 30` 是同一件事，jancy 的空项对应 C 的 `[i] =`。
 后 6 行 C **写不出来**（C 的 `p = (Point){ … }` 是整块盖过去、剩下的补零，jancy 不是），所以那
@@ -1242,6 +1246,54 @@ int g = 5;  int* p = &g;    ->    (global g (ptr int))
 **没跑的**：`tests/sexpr`、`tests/glr`、`tests/asy` —— 这一刀**只**动了
 `frontend-jnc/lower.js`，方言与四个后端一个字没改，那三条轴都不经过这个文件；
 自举、`tests/jit`、`tests/mir`、`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
+
+### 第二十五刀：`new T { … }` —— 那几条语句抬成一个函数，与顺带落地的"`.` 就是 `->`"
+
+`new T { … }`（`samples/jnc/84_CurlyInitializers.jnc:66`：
+`Point* point2 = new Point { m_y = 2000, m_z = 3000 }`）挂在边界表上的理由是对的：花括号初值
+是**几条语句**，而这一层的表达式降级只交出一段文字。但记的补法（"在表达式降级里开一条语句
+通道"）**立不住** —— 那条通道要把语句提到当前语句之前，而 `while (new T { … })` 的条件每一圈
+都要重算，提出去就只算了一次。
+
+**换的办法是把那几条语句抬成一个函数。** 项的值在**调用方**这一侧求（顺序与作用域都还是原来
+那个），`pnew` 与逐格写在被调那一侧：
+
+```
+new Point { 1, twice(k), { 7, 8 } }
+  ->  (fn $newc0 (($i0 int) ($i1 int) ($i2 int) ($i3 int)) (ptr Point)
+        (do (let $p (ptr Point) (pnew (ptr Point) (int 1)))
+            (pstore (pfield (var $p) m_x) (var $i0)) …
+            (ret (var $p))))
+      (call $newc0 (int 1) (call twice (var k)) (int 7) (int 8))
+```
+
+于是整个 `new T { … }` 就是**一个表达式**，放哪儿都成立，每次求值都真的新开一格 —— 惰性位置
+上也对。方言一个字没改。项的值当实参传进去正好解掉两件事：一是"在调用方求值"，二是名字的
+作用域（被调那一侧只看得见形参，不会误捕调用方的局部量）。聚合的那些项传的是那一格的地址
+（`slotText`），抄一份由被调里的 `copyVal` 做 —— 与第十三刀"抄在被调那一侧"是同一条。
+
+**顺带落地的是"`.` 与 `->` 在 jancy 里是同一个算符"。** 那份 sample 第 67 行写的是
+`point2.m_x`，而 `point2` 是 `Point*` —— 我们以前报「'.' 的左边不是结构体：Point*」。落法是
+一个 `structBehind(t)`：结构体那一格与"指到结构体的指针"都算，两者的 code 都是那一段内存的
+地址，差别只是后者多一次 `pload`。顺带把 `.` 的左边不是**可写形状**的那些（`f().x`、
+`(new T { … }).x`、`mk(20).m_in.m_b`）合到同一条路上：不是可写形状就当右值求一次值，
+回来的那一格也是一段内存的地址。expr0 那边因此少了一个分支 —— 全落到 `lvalue` 上。
+
+**边界重划。** `bad/curly-new.jnc` 删了（功能落地）。剩下的那一条是 `new T[n] { … }`：
+jancy 的语法把个数**折进类型名**（`new_operator_type : type_name_impl<&type, &elementCount>`，
+`jnc_ct_Expr.llk:726`），我们的语法把 `new T[n]` 与 `new T curly` 分成了两条产生式，合不到
+一起。而且它写哪一格也**量不出来**（`new_operator_curly_initializer` 是先 `*p` 再套花括号，
+个数 >1 时那一格只是第一格）—— 语义没量清的不硬接，只记在边界表上。
+
+**期望输出的出处**：`cases/24-new-curly.jnc`，出处是一份 `cc -O0` 的孪生程序（`calloc` 对上
+jancy 的零初始化、写不满时余下的格子是零），逐字节相同。量在里面的有四种位置（声明的初值、
+实参、`while` 的条件、项本身是一整格聚合的 deep copy）加 `.` 的四种用法（读、写、
+右值上的 `.`、直接在 `new` 上取字段）。
+
+**跑过的轴**：`tests/jnc`（35/0，新增 `cases/24-new-curly`，删掉 `bad/curly-new`）。
+**没跑的**：`tests/sexpr`、`tests/glr`、`tests/asy` —— 这一刀又只动了
+`frontend-jnc/lower.js`；自举、`tests/jit`、`tests/mir`、`tests/llvm`；
+`npm run lint` 这台机器上没有 typescript。
 
 ## 后果与代价
 

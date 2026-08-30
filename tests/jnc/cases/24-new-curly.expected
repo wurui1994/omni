@@ -1,0 +1,9 @@
+named=0 2000 0
+pos=1 6 7 8
+arg=12
+loop=9
+copy=5 6 / src=99
+dot=0 2000
+dotset=5 6
+dotrv=11 23
+dotnew=6
