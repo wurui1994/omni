@@ -11,7 +11,7 @@
 // 语言子集里的东西：不用 TextEncoder（自己按 UTF-8 编）、不用 new Function、不用正则字面量
 // 以外的正则。
 
-import { stdout, typeTag, fmtReal, fmtRealG, reprReal, callJsOp, readText } from '../host/native.js';
+import { stdout, typeTag, fmtReal, fmtRealG, reprReal, callJsOp, readText, writeText, spawn } from '../host/native.js';
 import { JS_ABI, JS_MEMBERS } from '../hir/js_abi.js';
 import { OmniError } from '../source/diag.js';
 
@@ -693,6 +693,9 @@ export function applyBuiltin(I, e, a) {
     // `(readtext E)`：整份读一份文本文件。三条腿一份语义（JS 那边 $read_text、
     // C 那边 omni_read_text）—— 读不到就是运行期错误，不回空串。
     case 'read_text': return readTextOrFail(a[0]);
+    // `(writetext P E)` / `(runproc CMD)`：另外两个"对外面"的口子。语义与 JS/C 两侧一字不差。
+    case 'write_text': return writeTextOrFail(a[0], a[1]);
+    case 'run_proc': return runProc(a[0]);
     case 'len':
       if (recv.k === 'string') return slen(a[0]);
       return recv.k === 'list' ? BigInt(a[0].length) : BigInt(a[0].size);
@@ -783,6 +786,29 @@ function readTextOrFail(p) {
   } catch (e) {
     rtError(`cannot read '${p}': ${e && e.code !== undefined ? e.code : String(e)}`);
     return '';
+  }
+}
+
+/** `(writetext P E)`：写不下去就是运行期错误。回写进去的字节数（UTF-8 的字节数，不是码点数） */
+function writeTextOrFail(p, t) {
+  try {
+    writeText(p, t);
+  } catch (e) {
+    rtError(`cannot write '${p}': ${e && e.code !== undefined ? e.code : String(e)}`);
+  }
+  return BigInt(new TextEncoder().encode(t).length);
+}
+
+/**
+ * `(runproc CMD)`：`/bin/sh -c CMD`，回退出码。子进程的两个流**全捕获后丢掉** ——
+ * 这一层的 stdout 是图本身（asy 的 EPS 就在上面），latex 的絮絮叨叨混进去会把图弄坏。
+ * 跑不起来（没这个程序）也回非 0，不抛 —— 调用方要能"试一下，不行就走别的路"。
+ */
+function runProc(cmd) {
+  try {
+    return BigInt(spawn('/bin/sh', ['-c', cmd], 'c')[0]);
+  } catch (e) {
+    return 127n;
   }
 }
 

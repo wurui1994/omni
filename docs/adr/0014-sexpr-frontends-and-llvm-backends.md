@@ -7437,6 +7437,77 @@ if(single || depth <= mindepth) return true;
 最慢 genusthree 128ms）。**跳过**：EPS 全量（照约定，先大批修不对的，不跑全量）、
 `OMNI_LEGS=all` 的另外三条腿。
 
+### 第八十七刀：194 份参考里 67 份的字节是 dvips 写的 —— 方言开两个口子
+
+先把"剩下的到底是什么"量清楚。拿 `/TeXDict`（dvips 前言的记号）在 194 份参考里筛一遍：
+**67 份是 dvips 写的**，不是 asy 自己的 EPS 写手写的。这 67 份里 50 份我们已经出图
+（只是"结构不同"），16 份还出不来，1 份慢。也就是说 EPS 那一轴上最大的一块就是这条管子。
+
+再量"底图是不是已经画对了"。asy 加 `-k` 会留下中间产物：`<名>_0.eps`（**没有标签**的
+底图）、`<名>_.tex`（固定前言 + `\includegraphics` + 每个标签一句 `\ASYalign`）、
+`<名>_.dvi`、`<名>_.ps`。拿 equilateral 比：
+
+```
+asy 的 equilateral_0.eps    %%HiResBoundingBox: -14.589213 -5.58019925 268.875354 233.708044
+                            newpath 127.274393 220.445715 moveto …
+我们的 stdout               %%HiResBoundingBox: 163.767717 272.722748 447.232283 518.277252
+                            gsave  164.017717 272.972748 translate
+                            newpath 141.482283 245.054503 moveto …
+```
+
+两处差别，性质完全不同：
+
+- `gsave / translate` 那一对：`_0.eps` **不摆**（dvips 用 `-O35.3677bp,151.056bp` 去摆），
+  而最终那份非 TeX 的 EPS 是摆的 —— 我们那 23 份逐字一样的正是后者。这不是错。
+- 坐标差一个 1.11163 倍：`141.482283 * 2 + 0.5 = 283.46 = 10cm`，也就是**我们让路径占满了
+  整个 size()**，而 asy 那边路径只有 254.55 宽，剩下的 28.9bp 是**标签占掉的**。
+  与 dvips 那一份的最终界一比更清楚：横向 `163.767717..447.232283` 我们**逐字一样**，
+  只有纵向差着标签的高度。
+
+结论是硬的：这一组不是"再抠一个 PostScript 算符"能过的 —— 标签的尺寸**回流进 size() 的
+定标**，所以非得真去问一趟 TeX。asy 自己也是这么干的（execution 中途跑 latex 量
+`\ASYbox`）。
+
+这一刀只做管子的第一段：**方言开两个口子**，与原有的 `(readtext E)` 并列。
+
+```
+(writetext P E)   把 string 整份写成一份文本文件，回写进去的字节数（UTF-8 字节数）
+(runproc CMD)     `/bin/sh -c CMD`，回退出码
+```
+
+七处真站点，与 `readtext` 一处不差地对齐：`sexpr/lower.js`（两个新头 + 类型检查）、
+`interp/builtin.js`、`backend-js/{emit,prelude}.js`、`backend-c/emit.js`、
+`backend-llvm/emit.js` 的 `RT_OPS`、`runtime/omni.h` + `omni_fmt.c`。
+
+两条纪律写进了语义里：
+
+- **子进程的两个流一律丢掉**。这一层的 stdout 就是产物本身（asy 那边是 EPS），latex 的
+  絮絮叨叨混进去当场把图弄坏。要子进程的输出，就让它自己写文件、我们再 `readtext`
+  读回来 —— dvips 的 `-o<文件>` 本来就是这么用的。
+- **命令行是字符串，拼的人自己负责引号**。走 shell 而不是 argv 数组，是因为方言里还没有
+  `string[]` 实参的 ABI，而这条路上的命令行全是我们自己拼的（latex/dvips 加一个文件名）。
+
+C 那一侧踩到一个真坑，值得记：`system("CMD >/dev/null 2>&1")` **管不住整条命令表**。
+量出来的两处 ——
+
+- `echo LEAK; echo LEAK 1>&2 >/dev/null 2>&1`：第一个 `echo` 照样印到我们的 stdout 上
+  （而且因为它不缓冲、我们缓冲，它排在最前面）；
+- `printf ok > f >/dev/null 2>&1`：后一个重定向赢了，`f` 里什么都没有。
+
+所以要套一层子 shell：`( CMD\n) >/dev/null 2>&1`。`(` 与 `)` 之间垫一个换行，是因为
+CMD 末尾要是个 `#注释`，`)` 会被注掉。这条差异五条腿的对照当场就红了（run-c 与 run-llvm
+印出 LEAK、丢了 ok），不是想出来的。
+
+新增 `tests/sexpr/cases/20-writetext.sx`：字节数（`"hello 一二三"` 是 15 个字节而不是
+9 个字符）、退出码原样回来、没这个程序回 127、`echo LEAK` 不许漏进 stdout、
+"让子进程写文件再读回来"。五条腿逐字节一致。
+
+跑了：`tests/sexpr/run.js`（55 passed / 0 failed，五条腿）、`tests/asy/run.js`
+（259 passed / 0 failed）、sweep（220 里干净 219、1.5s）。**跳过**：EPS 那一轴
+（这一刀不碰 asy 的行为，一个字节都不会变）、`OMNI_LEGS=all` 的另外三条腿。
+
+下一刀才是真的把 `.tex` 生出来、跑 latex 问尺寸。
+
 ## 后果与代价
 
 

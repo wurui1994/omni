@@ -1009,6 +1009,8 @@ class CEmitter {
       case 'int_of_string': return `omni_int_of_string(${a[0]})`;
       case 'real_of_string': return `omni_real_of_string(${a[0]})`;
       case 'read_text': return `omni_read_text(${a[0]})`;
+      case 'write_text': return `omni_write_text(${a[0]}, ${a[1]})`;
+      case 'run_proc': return `omni_run_proc(${a[0]})`;
       case 'len':
         return recv.k === 'string' ? `omni_str_len(${a[0]})` : `${cTypeName(recv)}_len(${a[0]})`;
       case 'push': case 'add': case 'pop': case 'clear':

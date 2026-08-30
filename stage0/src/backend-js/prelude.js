@@ -229,6 +229,27 @@ function $read_text(p) {
     $rt_error("cannot read '" + p + "': " + (e && e.code ? e.code : String(e)));
   }
 }
+// (writetext P E)：整份写一份文本文件，回写进去的字节数。与 omni_write_text 一一对应。
+function $write_text(p, t) {
+  try {
+    $node("node:fs").writeFileSync(p, t);
+  } catch (e) {
+    $rt_error("cannot write '" + p + "': " + (e && e.code ? e.code : String(e)));
+  }
+  return BigInt($node("node:buffer").Buffer.byteLength(t, "utf8"));
+}
+// (runproc CMD)：/bin/sh -c CMD，回退出码。两个流全捕获后丢掉 —— 这一层的 stdout 是
+// 图本身，被调程序的絮絮叨叨混进去就把图弄坏了。跑不起来也回非 0，不抛。
+function $run_proc(cmd) {
+  try {
+    var r = $node("node:child_process").spawnSync("/bin/sh", ["-c", cmd],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 28 });
+    if (r.error) return 127n;
+    return BigInt(r.status === null ? 128 : r.status);
+  } catch (e) {
+    return 127n;
+  }
+}
 // ---------------------------------------------------------------- 容器
 // list -> Array，dict -> Map（插入序，ADR-0006 的硬约束），set -> Set
 function $keyStr(k) {

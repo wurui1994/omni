@@ -1,0 +1,31 @@
+;; `(writetext P E)` 与 `(runproc CMD)`：方言里"对外面"的另两个口子（读那个是 19）。
+;;
+;; 量出来的理由：asy 的标签是 TeX 排的 —— texfile.cc 生一份 `<名>_.tex`，跑 latex 得 dvi，
+;; 再 dvips 出 EPS。194 份参考里 67 份的字节是 dvips 写的（`/TeXDict` 是它的记号），
+;; 那条路上少不了"把文件落到盘上"和"叫外面的程序"这两件事。量过 equilateral：
+;; 我们的横向界与 dvips 那一份**逐字一样**，差的只有标签占的地方 —— 缺的正是这条管子。
+;;
+;; 边界：
+;; - writetext 整份写，回**字节数**（UTF-8 的字节数，不是码点数）；写不下去是运行期错误；
+;; - runproc 走 `/bin/sh -c`，回退出码；子进程的 stdout/stderr **一律丢掉** ——
+;;   这一层的 stdout 是产物本身（asy 那边就是 EPS），latex 的絮絮叨叨混进去就把图弄坏了。
+;;   下面 `echo LEAK` 那一句就是这条纪律的断言：期望值里不许出现 LEAK。
+;; - 要子进程的输出，就让它自己写文件，我们再 readtext 读回来（dvips 的 `-o<文件>` 同理）。
+;; - 命令行是**字符串**：拼的人自己负责引号。这里的路径都是写死的常量。
+(module
+  (main
+    (let p string (str "/tmp/omni-sexpr-20-writetext.txt"))
+    ;; "hello " 6 个 ASCII + 3 个汉字 9 个 UTF-8 字节 = 15（不是 9 个"字符"）
+    (print (writetext (var p) (str "hello 一二三")))
+    (print (readtext (var p)))
+    ;; 退出码原样回来
+    (print (runproc (str "exit 0")))
+    (print (runproc (str "exit 3")))
+    ;; 没这个程序：/bin/sh 回 127（两条路都是同一个 shell）
+    (print (runproc (str "omni-no-such-program-here")))
+    ;; 子进程的输出不许漏进我们的 stdout
+    (print (runproc (str "echo LEAK; echo LEAK 1>&2")))
+    ;; 要它的输出就让它写文件
+    (let q string (str "/tmp/omni-sexpr-20-runproc.txt"))
+    (print (runproc (str "printf ok > /tmp/omni-sexpr-20-runproc.txt")))
+    (print (readtext (var q)))))

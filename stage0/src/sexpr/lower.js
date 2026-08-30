@@ -1179,6 +1179,39 @@ class CoreLowerer {
       }
       return { kind: 'Builtin', name: 'read_text', args: [p], argType: STRING, type: STRING };
     }
+    // `(writetext P E)`：把 string E **整份**写成一份文本文件，回写进去的字节数。
+    // 与 `(readtext E)` 是同一层的一对 —— 方言仍旧不认识"文件"，只认识"名字 <-> 文本"。
+    // 为什么要有：asy 的标签是 TeX 排的（texfile.cc 生一份 `<名>_.tex`，再 latex + dvips），
+    // 那条路上必须先把 `.tex` 落到盘上，别人（latex）才读得到。
+    if (h === 'writetext') {
+      if (n.items.length !== 3) return this.err(n, '(writetext P E)');
+      const p = this.expr(n.items[1]);
+      const v = this.expr(n.items[2]);
+      if (p === null || v === null) return null;
+      if (p.type.k !== 'string') {
+        return this.err(n.items[1], `(writetext P E) 的路径要是 string，这里是 ${coreTypeText(p.type)}`);
+      }
+      if (v.type.k !== 'string') {
+        return this.err(n.items[2], `(writetext P E) 的内容要是 string，这里是 ${coreTypeText(v.type)}`);
+      }
+      return { kind: 'Builtin', name: 'write_text', args: [p, v], argType: STRING, type: INT };
+    }
+    // `(runproc CMD)`：把 CMD 交给 `/bin/sh -c` 跑一趟，回退出码（跑不起来也是非 0）。
+    // 子进程的 stdout/stderr **不接**，直接继承 —— 要输出就让被调的程序自己写文件，
+    // 我们再 `(readtext …)` 读回来（asy 那边 dvips 也是 `-o<文件>`，同一个办法）。
+    // 只有这一个"外面的程序"口子。走 shell 而不是 argv 数组：方言里还没有 string[] 实参
+    // 的 ABI，而这一层的命令行全是我们自己拼的（latex / dvips 加一个文件名）。
+    // **拼命令行的那一处要自己负责引号**：文件名进来之前先过一层引用（见 asy 那一侧的
+    // asy__shq），否则名字里一个空格就能改掉命令的意思。
+    if (h === 'runproc') {
+      if (n.items.length !== 2) return this.err(n, '(runproc CMD)');
+      const c = this.expr(n.items[1]);
+      if (c === null) return null;
+      if (c.type.k !== 'string') {
+        return this.err(n.items[1], `(runproc CMD) 的参数要是 string，这里是 ${coreTypeText(c.type)}`);
+      }
+      return { kind: 'Builtin', name: 'run_proc', args: [c], argType: STRING, type: INT };
+    }
     // `(toreal E)` / `(toint E)`：int <-> real 的**显式**转换。同一条纪律：类型不推导、
     // 不插隐式转换，所以两个方向都得写出来。OIR 侧两个都是现成的（Cast int->real、
     // trunc real->int），方言这边原先没开口 —— 而 asy 的 `1/3` 是实数除法、`(int) 3.7`

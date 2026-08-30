@@ -1,6 +1,8 @@
 /* 值 -> 文本。两套规则，刻意分开（ADR-0005）：
    打印用 %.6g（看值用的，不追求往返）；序列化用 repr（要求 strtod 能往返回原值）。 */
 #include "omni.h"
+/* omni_run_proc 要 WIFEXITED/WEXITSTATUS —— omni.h 里那批标准头不含它。 */
+#include <sys/wait.h>
 
 omni_str omni_str_int(int64_t v) { return omni_str_fmt("%lld", (long long)v); }
 omni_str omni_str_real(double v) { return omni_str_fmt("%.6g", v); }
@@ -40,6 +42,41 @@ omni_str omni_read_text(omni_str path) {
   fclose(f);
   buf[got] = 0;
   return omni_str_new(buf, (int64_t)got);
+}
+
+/* `(writetext P E)`：整份写一份文本文件。回写进去的字节数。 */
+int64_t omni_write_text(omni_str path, omni_str text) {
+  char *p = omni_cstr(path);
+  FILE *f = fopen(p, "wb");
+  if (!f) omni_errorf("cannot write '%s': %s", p, strerror(errno));
+  int64_t n = omni_str_len(text);
+  if (n > 0) {
+    if (fwrite(text.p, 1, (size_t)n, f) != (size_t)n) {
+      fclose(f);
+      omni_errorf("cannot write '%s': %s", p, strerror(errno));
+    }
+  }
+  if (fclose(f) != 0) omni_errorf("cannot write '%s': %s", p, strerror(errno));
+  return n;
+}
+
+/* `(runproc CMD)`：`/bin/sh -c CMD`，回退出码。子进程的两个流都丢掉 —— 这一层的
+   stdout 是产物本身（asy 那边就是 EPS），被调程序的絮絮叨叨混进去会把图弄坏。
+   **必须套一层子 shell**：`CMD >/dev/null` 里的重定向只管命令表的最后一条，
+   量出来过 —— `echo LEAK; echo LEAK 1>&2 >/dev/null 2>&1` 照样把第一个 LEAK 印出来，
+   而 `printf ok > f >/dev/null 2>&1` 后面那个重定向赢了，f 里什么都没有。
+   `(` 与 `)` 之间垫一个换行：CMD 末尾要是个 `#注释`，`)` 会被注掉。
+   跑不起来（system 回 -1）回 127，与 JS 那条腿一致。 */
+int64_t omni_run_proc(omni_str cmd) {
+  char *c = omni_cstr(cmd);
+  size_t n = strlen(c);
+  size_t cap = n + 40;
+  char *line = omni_alloc_bytes((int64_t)cap);
+  snprintf(line, cap, "( %s\n) >/dev/null 2>&1", c);
+  int r = system(line);
+  if (r == -1) return 127;
+  if (WIFEXITED(r)) return WEXITSTATUS(r);
+  return 128;
 }
 
 /* 末尾补 ".0"：否则整数值的 real 序列化成 "1000"，再解析回来就变成 int 了 ——

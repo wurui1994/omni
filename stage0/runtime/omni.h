@@ -135,6 +135,10 @@ omni_str omni_str_string(omni_str v);
 omni_str omni_repr_real(double v);
 /* `(readtext E)`：整份读一份文本文件（读不到是运行期错误） */
 omni_str omni_read_text(omni_str path);
+/* `(writetext P E)`：整份写一份文本文件（写不下去是运行期错误），回写进去的字节数 */
+int64_t omni_write_text(omni_str path, omni_str text);
+/* `(runproc CMD)`：`/bin/sh -c CMD`，回退出码（跑不起来也回非 0，不报错） */
+int64_t omni_run_proc(omni_str cmd);
 
 /* omni_math.c —— 转手 libm（那份文件的头注里写了逐字节/容差的分界） */
 double omni_r_sqrt(double x);
