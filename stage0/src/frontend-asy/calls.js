@@ -631,6 +631,24 @@ export function asyCall(L, n) {
     if (raw.length !== 0) return L.err(n, `'_mainname' 不要实参，给了 ${raw.length} 个`);
     return { code: `(str ${JSON.stringify(L.rootModName())})`, type: 'string' };
   }
+  // `_searchpath()`：找文件的那几个目录，冒号分隔（当前目录在最前）。
+  // 为什么要有它：asy 的 `input()` **不只看当前目录**，它走 locateFile，与找模块同一条路。
+  // 量出来的（把 d.dat 只放在 ASYMPTOTE_DIR 指的目录里、主文件放在别处的 CWD）：
+  //   ASYMPTOTE_DIR=/tmp/inp/dir asy -noV t2.asy   -> 读到了 7 8 9
+  //   不带 ASYMPTOTE_DIR                            -> `Cannot open file "d.dat"`
+  // 所以 filesurface / linearregression / worldmap 那三份读 .dat 的例子在 oracle 那边
+  // 是找得到的（它自己装的 examples 目录在搜索路径里），差的是路径不是实现。
+  // 这一格在**编译期**把路径印成字面量：产物缓存的键里本来就带着当前目录与 ASYMPTOTE_DIR
+  // （见 cli.js 的 asyModsEnv），所以换了环境会重编，不会拿着旧路径乱跑。
+  if (nm === '_searchpath') {
+    const raw = asyCallArgs(L, n);
+    if (raw === null) return null;
+    if (raw.length !== 0) return L.err(n, `'_searchpath' 不要实参，给了 ${raw.length} 个`);
+    const dirs = ['.'];
+    const ad = process.env.ASYMPTOTE_DIR;
+    if (ad !== undefined && ad !== '') for (const d of ad.split(':')) if (d !== '') dirs.push(d);
+    return { code: `(str ${JSON.stringify(dirs.join(':'))})`, type: 'string' };
+  }
   // `_readtext(name)`：不切行的那一份（`_readlines` 是它加一层 asy__lines）。TeX 那一段
   // 要在一份 latex 的 .log 里按次序捞 `>dim(…pt)dim`，切行反而多一道。
   if (nm === '_readtext') {

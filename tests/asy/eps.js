@@ -34,6 +34,7 @@ const REF = join(ROOT, '.omni-cache', 'epsref');
 const RES = join(ROOT, '.omni-cache', 'epsres');
 const WORK = join(ROOT, '.omni-cache', 'epsrun');
 const ASY = '/opt/homebrew/bin/asy';
+const ASYBASE = '/opt/homebrew/share/asymptote';
 const TOL = 1e-3;
 // 一个例子最多跑多久（毫秒）。默认 3s —— 全量 194 个，卡住几个整轴就没法反复问了。
 // 超时的归成"慢"排在最后，单独用 `OMNI_EPS_T=60000 node tests/asy/eps.js <目录> <名字…>` 追。
@@ -64,7 +65,17 @@ if (exDir === undefined) {
 // 顺带量清了另一件事：asy **不**把主文件所在的目录加进搜索路径（`cd /tmp/msub &&
 // asy sub/user.asy` 里的 `import mm;` 找不到 sub/mm.asy，绝对路径也一样），
 // 所以 cli.js 那条"按 CWD 找"的规矩是对的，不要去改它。
-const base = join(exDir, '..', 'base');
+// **这一轴要用 oracle 自己那份 base，不是参考源码树里的那份。** 量出来的：
+// `/opt/homebrew/share/asymptote` 与 `/Users/…/reference/asymptote/base` 有 5 个文件不一样
+// （graph3 / graph_splinetype / plain_shipout / slide / three）—— 装着的 asy 比那份源码树新。
+// 参考只能读、不能改，而 `.omni-cache/epsref` 里的图是 `asy -noV` 出的，吃的是**装着的**那份。
+// 拿源码树那份跑我们这边，等于两侧库版本不同，比出来的差不是我们的：
+//   spline.asy 的 `Hermite(monotonic)` —— 源码树 `d[n-1]=(…-h[n-2]*del[n-2])/…`，
+//   装着的那份是 `del[n-3]`（MATLAB pchip 的正形），最后一段控制点于是
+//   143.375779（oracle）对 156.540136（我们跑源码树）。换成同一份库，这一行就对上了。
+// 这里只改这一轴（它是唯一与 oracle 逐字节对照的）；sweep/run 那两轴问的是"库能不能编过"，
+// 两份都该编得过，先不动。
+const base = existsSync(ASYBASE) ? ASYBASE : join(exDir, '..', 'base');
 const env = {
   ...process.env,
   OMNI_ASY_MODS: '1',

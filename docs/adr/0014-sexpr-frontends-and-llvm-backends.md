@@ -7982,6 +7982,103 @@ lowint / upint / spring0 / spring2 那四份的 `import lowupint;` 报"找不到
 搜索路径（`cd /tmp/msub && asy sub/user.asy` 里的 `import mm;` 找不到 sub/mm.asy，
 换绝对路径、换独一无二的模块名都一样），所以 cli.js 那条"按 CWD 找"的规矩是对的。
 
+### 第九十六刀：`shiftless` 那一剥，与"两侧不是同一份库"
+
+从 struct 桶里最扎眼的那个挑起：spline.asy 的 `%%BoundingBox` 左边参考是 91、我们是 **0**，
+而且我们的图整整宽出五倍（2878 对 520）。stderr 上还挂着四行
+`warning: cannot fit picture to xsize 425.196850393701...enlarging...` —— 单纯的数值飘移
+不会这样，这是"某个量算出了一个荒唐的大数，把线性规划挤成无解"。
+
+`/tmp/base2` 探针一路收下去（`plain_scaling.asy` 的 `calculateScaling` → `plain_bounds.asy`
+的 `addBox` → `graph.asy` 的 `yaxisAt` → `labelaxis`），前十次 `calculateScaling` 两侧
+逐位一样，第十一次的 row 2 分道：`c` 是 **-28.9279097135741 对 -1214.95006198507**，
+`user` 都是 1997。那一格是 graph.asy:1343 的
+`pic.addBox(pos,pos,(min(d).x,min(f).y),(max(d).x,max(f).y))`，也就是 y 轴刻度帧的
+`min(d).x`。再往里，`labelaxis` 里 `frame F=rotate(-angle,z)*f` 的界两侧不同：
+参考 `(-205.852613553015,592.939889295555)`，我们 `(-1398.83360495828,592.939889295555)`
+—— 而同一句的 `min(f)`/`max(f)` 一模一样。**变换帧这一步坏了，坏在有轴心的旋转上。**
+
+单摆出来量（一个帧里放两个标签加一条线段）：
+
+- `rotate(-90)*f`（绕原点）—— 两侧逐位一样
+- `rotate(-90,z)*f`（绕 z）—— 参考 `(-206.109180634138,582.060234183329)`，
+  我们 `(-1398.07948057857,598.609180634138)`
+- 只有路径、没有标签的帧，绕 z 转 —— 两侧一样
+
+于是范围收到"标签 + 带平移的变换"。答案在 drawlabel.h:37 的初始化列表里，一个词：
+
+```cpp
+transform T;          // A linear (shiftless) transformation.
+drawLabel(string label, string size, transform T, pair position, ...)
+  : ..., T(shiftless(T)), position(position), ...
+```
+
+**构造函数当场把平移剥掉。** `transformed` 递进来的是 `t*T`（drawlabel.cc:202），
+但存下来的是 `shiftless(t*T)`。不剥的话，`getbounds` 里那三处 —— `inverse(T)*align`、
+`Align=T*Align`、`A=p+T*(-fuzz,-fuzz)` —— 会把 `rotate(θ,z)` 里 z 那份平移各算一遍，
+界就飞了。改的是两处，都照那份构造函数：`label(frame,…)` 里 `r.t = shiftless(t)`，
+`operator *(transform,frame)` 里 `q.t = shiftless(t * r.t)`。改完 `%%BoundingBox`
+当场变成 `91 146 520 645`，与参考一字不差。
+
+顺着这条线又落下四处，都是同一份 `t*T*inverse(t)` 牵出来的：
+
+1. **`inverse(transform)` 要照抄，不能改写**（transform.h:128-138）。那边先取倒数
+   `d=1.0/det` 再一路乘，不是逐项去除；平移两格也是自己的式子 `(xy*y-yy*x)*d`，
+   不是"线性部分求逆再取负"。量出来的：`inverse(scale(84.8393700787402,19.9619726878046))`
+   的 yy 是 `…3843923`（照抄）对 `…3843924`（先除），两轮迭代之后 x 方向的比例就从
+   76.8297643074162 走成 76.8297643074111。顺带 `-0` 那一格也对上了。
+2. **笔自己带的变换要在 EPS 里摊开**（drawelement.h:322-342）：`penSave` 发 `gsave`
+   的条件是 `!T.isIdentity()`，而 `isIdentity()` 比的是六个数。`t*T*inverse(t)` 在浮点上
+   不见得正好是单位，于是每一条刻度线都套着 `gsave` / `[ 1 0 0 1 0 0] concat` / `grestore`
+   （concat 印出来按 9 位有效数字恰好像单位，但它确实不是）。次序也照抄：
+   **concat 排在路径后面** —— PostScript 里路径一建好就落在设备空间了，之后改 CTM
+   只影响描边时笔尖的形状。填充那一支没有这一套（drawfill.cc:46-54）。
+3. **`.tex` 里带变换的标签走 `\ASYalignT`**（texfile.cc:290-302），多一组
+   `{xx yx xy yy}`，而且非 pdf 那一路 yx/xy 要取负（`sign=-1`）。判定同样是六个数比。
+4. **负零要留住符号**：C 的 `%f` 印 -0.0 是 `-0.000000`，而 `x < 0` 对 -0.0 是假。
+   参考里那一句正是 `{1.000000 -0.000000 -0.000000 1.000000}`。asy__f6 / asy__f9 各补一句。
+
+还有一处格式：`.tex` 里 `\special{ps:…}` 的颜色**两条路不同格式**（psfile.cc:184-218）——
+cmyk/rgb 先攒进新开的 `ostringstream buf`（默认格式，%g 六位有效数字），gray 那一支直接
+往 `*out` 写（吃 texfile 那个流被粘住的 fixed/precision(6)）。参考里黑笔是
+`0.000000 setgray`、红笔却是 `1 0 0 setrgbcolor`，一份文件里两种样子。
+
+#### 最后剩的那一行，不是我们错了
+
+改到这里 spline 只差一行：monotone 那条曲线末段的控制点，参考 143.375779、我们
+156.540136。往回推是 `monotonic` 的 `d[n-1]`：参考 5、我们 3。可探针打在
+`/tmp/base2/graph_splinetype.asy` 上，两侧的 `h`/`del`/`d` **逐位一样，都是 3**。
+
+差在库版本上。装着的那份 `/opt/homebrew/share/asymptote/graph_splinetype.asy` 是
+
+```asy
+d[n-1]=((2*h[n-2]+h[n-3])*del[n-2]-h[n-2]*del[n-3])/(h[n-2]+h[n-3]);
+```
+
+参考源码树 `reference/asymptote/base/` 那份第二项是 `del[n-2]`（同一个下标写了两遍）。
+`(9-(-1))/2=5` 对 `(9-3)/2=3`。全量比一遍：两份 base 有 5 个文件不一样 ——
+graph3 / graph_splinetype / plain_shipout / slide / three，装着的那份更新。
+
+而 `.omni-cache/epsref` 里的图是 `asy -noV` 出的，吃的是**装着的**那份；eps.js 却把
+`ASYMPTOTE_DIR` 指到源码树那份。两侧跑的不是同一份库，比出来的差自然不都是我们的。
+判据的修正：**这一轴改用 oracle 自己那份 base**（`/opt/homebrew/share/asymptote`）。
+只改这一轴 —— 它是唯一与 oracle 逐字节对照的；sweep/run 问的是"库能不能编过"，
+两份都该编得过（换了之后 sweep 仍是 220 里干净 219）。换完 spline 逐字一样。
+
+顺带一处真的实现补：**asy 的 `input()` 不是只看当前目录**，它走 locateFile，与找模块
+同一条搜索路径。量出来的（d.dat 只放在 ASYMPTOTE_DIR 指的目录、主文件在别处的 CWD）：
+带 ASYMPTOTE_DIR 读到了 `7 8 9`，不带就是 `Cannot open file "d.dat"`。加了一个编译期
+降成字面量的 `_searchpath()`（与 `_mainname()` 同一条路子，产物缓存的键里本来就带着
+当前目录与 ASYMPTOTE_DIR），`input()` 逐个候选目录 `test -f` 一下。filesurface /
+worldmap 从"读不到文件"变成**逐字一样**，filesurface 前进到"结构不同"，
+linearregression 前进到下一处（`null reference`）。
+
+结果（EPS 全量，`OMNI_EPS_T=20000`）：**一样 38 → 62、没出图 27 → 25**，
+只有数值差 3、结构不同 89、超时 15。跑过的轴：EPS 全量、run.js（259/0，`OMNI_LEGS=all`
+五条腿 241.0s）、sexpr（55/0）、sweep（220 里干净 219，1.5s，最慢 genusthree 128ms）。
+**跳过的轴**：SVG（`tests/asy/svg.js`，这一刀没碰 SVG 那条出口）、性能剖面
+（这一刀改的都是判定与格式，没动热路径）。
+
 ## 后果与代价
 
 

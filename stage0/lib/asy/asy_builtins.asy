@@ -306,13 +306,17 @@ transform shiftless(transform t) {
   return xform(0, 0, t.xx, t.xy, t.yx, t.yy);
 }
 
+// transform.h:128-138 照抄，**一个字都不能改写**：那边先取倒数 `d=1.0/det` 再一路乘，
+// 不是逐项去除；平移那两格也是自己的式子 `(xy*y-yy*x)*d`，不是"求逆的线性部分再取负"。
+// 差别就在末位一个 ulp 上，而这个 ulp 会顺着 graph 的迭代放大：量过 spline 的
+// `inverse(scale(84.84,19.96))`，yy 是 …3843923（照抄）对 …3843924（先除），
+// 再迭代两轮之后 x 方向的比例从 76.8297643074162 走成了 76.8297643074111。
+// 顺带把 -0 那一格也对上了：`(xy*y-yy*x)*d` 在 x=y=0 时给 +0，而 `-(ixx*x+ixy*y)` 给 -0。
 transform inverse(transform t) {
-  real det = t.xx * t.yy - t.xy * t.yx;
-  real ixx = t.yy / det;
-  real ixy = -t.xy / det;
-  real iyx = -t.yx / det;
-  real iyy = t.xx / det;
-  return xform(-(ixx * t.x + ixy * t.y), -(iyx * t.x + iyy * t.y), ixx, ixy, iyx, iyy);
+  real d = t.xx * t.yy - t.xy * t.yx;
+  d = 1.0 / d;
+  return xform((t.xy * t.y - t.yy * t.x) * d, (t.yx * t.x - t.xx * t.y) * d,
+               t.yy * d, -t.xy * d, -t.yx * d, t.xx * d);
 }
 
 // 变换的幂：n 次复合，0 是 identity、负数先求逆。**从 identity 起乘**（不是从 t 起），
@@ -2007,7 +2011,11 @@ void label(frame f, string s, string size, transform t, pair position, pair alig
   labelrec r;
   r.s = s;
   r.sz = size;
-  r.t = t;
+  // **构造那一步就把平移剥掉**：drawlabel.h:37 的初始化列表是 `T(shiftless(T))`，
+  // 注释写得很直白 —— "A linear (shiftless) transformation."。位置由 position 单独扛，
+  // T 只管线性那一半；不剥的话 getbounds 里那三处（`inverse(T)*align`、`T*Align`、
+  // `T*(-fuzz,-fuzz)`）会把同一个平移各算一遍，界就飞了。
+  r.t = shiftless(t);
   r.position = position;
   r.align = align;
   r.p = pencopy(p);
@@ -2406,8 +2414,13 @@ string ps9(real x) { return string(x, 9); }
 // 定点 6 位。TeX 那一侧的数全是这个样子（`\kern -284.527559pt`、`(-0.500000,0.000000)`、
 // `bb=-14.589213 …`、`\fontsize{12.000000}`）—— C++ 那边是 `fixed` + `setprecision(6)`，
 // 而 `string(x, n)` 是**有效数字**，两回事。
+// **负零要留住符号**：C 的 `%f` 印 -0.0 是 `-0.000000`，而 `x < 0` 对 -0.0 是假。
+// 量过 spline 的 `\ASYalignT{…}`：参考里是 `1.000000 -0.000000 -0.000000 1.000000`，
+// 那两个负号就是 texfile.cc:300 的 `sign*T.getyx()`（sign=-1）乘出来的 -0。
+bool asy__negzero(real x) { return x == 0 && 1 / x < 0; }
+
 string asy__f6(real x) {
-  bool neg = x < 0;
+  bool neg = x < 0 || asy__negzero(x);
   real a = neg ? -x : x;
   real sc = floor(a * 1000000 + 0.5);
   real ip = floor(sc / 1000000);
@@ -2421,7 +2434,7 @@ string asy__f6(real x) {
 // psfile.cc:271 那三行把流临时切成 `fixed`，而流的 precision 早先被 `%%HiResBoundingBox`
 // 那一处按 9 粘住了，所以是「定点 9 位」，与 TeX 那一侧的定点 6 位不是一回事。
 string asy__f9(real x) {
-  bool neg = x < 0;
+  bool neg = x < 0 || asy__negzero(x);
   real a = neg ? -x : x;
   real sc = floor(a * 1000000000 + 0.5);
   real ip = floor(sc / 1000000000);
@@ -2503,6 +2516,33 @@ string asy__dashstr(pen p) {
 // `arclength(scale(s)*g) == s*arclength(g)`，所以桩只要量原坐标那一份。
 real asy__arclenfn(path p) { return 0; }
 pen asy__dashadjfn(pen p, real arclen, bool cyclic) { return p; }
+
+// 笔自己带的变换（drawelement.h:322-342 的 penSave/penTranslate/penConcat/penRestore）。
+// `isIdentity()`（transform.h:99）比的是**六个数**，不是"看起来像单位"—— 这一格要紧：
+// yaxisAt 那句 `t*T*tinv*d` 把 shiftless(t*T*tinv) 摁进笔里，浮点上 s*(1/s) 不见得正好
+// 是 1，于是这笔笔笔都要 gsave；而 concat 印出来按 9 位有效数字又正好是 `[ 1 0 0 1 0 0]`。
+// 量过 spline 的 x/y 轴：参考里每一条刻度线都套着 gsave/…/grestore。
+bool asy__istrans(pen p) {
+  if (!p.hastrans) return false;
+  transform t = p.pentrans;
+  return !(t.x == 0 && t.y == 0 && t.xx == 1 && t.xy == 0 && t.yx == 0 && t.yy == 1);
+}
+// `concat` 自己也挡一道单位（psfile.h:330），所以剥掉平移之后仍要再问一次。
+void asy__penconcat(pen p) {
+  if (!p.hastrans) return;
+  transform t = shiftless(p.pentrans);
+  if (t.xx == 1 && t.xy == 0 && t.yx == 0 && t.yy == 1) return;
+  asy__out("[ " + ps(t.xx) + " " + ps(t.yx) + " " + ps(t.xy) + " " + ps(t.yy)
+        + " 0 0] concat");
+}
+// `translate` 那一句遇到 (0,0) 直接不发（psfile.h:321）。笔上的变换多数是 shiftless 来的，
+// 这一格于是基本不出手；留着是为了 `t*pen` 这条明写的路子。
+void asy__pentranslate(pen p, real s) {
+  if (!p.hastrans) return;
+  transform t = p.pentrans;
+  if (t.x == 0 && t.y == 0) return;
+  asy__out(" " + ps(s * t.x) + " " + ps(s * t.y) + " translate");
+}
 
 void setpen(pen p) {
   if (!lastvalid || !samecolor(p, lastpen)) asy__out(colorof(p));
@@ -2796,6 +2836,13 @@ void emitop(drawop o, real s) {
     return;
   }
   if (o.kind == 4) { if (!o.nosave) { asy__out("grestore"); grestorepen(); } return; }
+  // 描边那一支要把笔自己的变换摊开（drawpath.cc:203-217 的次序：penSave → penTranslate →
+  // 路径 → penConcat → setpen → stroke → penRestore）。**concat 排在路径后面**是有意的：
+  // PostScript 里路径一旦建好就落在设备空间了，之后改 CTM 只影响描边时笔尖的形状。
+  // 填充那一支没有这一套（drawfill.cc:46-54 只有 palette/writepath/fill）。
+  bool ptrans = o.kind == 0 && asy__istrans(o.p);
+  if (ptrans) { asy__out("gsave"); gsavepen(); }
+  if (o.kind == 0) asy__pentranslate(o.p, s);
   emitpath(o.g, s);
   // 描边前先把虚线的节拍收一收（drawpath.cc:198-201）。填充那一支不看虚线。
   // 与那边有一处对不上要说清：asy 量的是 `p.transformed(inverse(笔的变换))` 的弧长，
@@ -2804,10 +2851,12 @@ void emitop(drawop o, real s) {
   if (o.kind == 0 && q.dashpat.length > 0) {
     q = asy__dashadjfn(q, s * asy__arclenfn(o.g), o.g.cyclic);
   }
+  if (o.kind == 0) asy__penconcat(o.p);
   setpen(q);
   if (o.kind == 0) asy__out("stroke");
   else if (o.p.evenodd) asy__out("eofill");
   else asy__out("fill");
+  if (ptrans) { asy__out("grestore"); grestorepen(); }
 }
 
 // 摆放是量出来的（picture.cc:1187 那一段）：bboxshift = (-b.left,-b.bottom) 之后再加
@@ -4096,6 +4145,39 @@ private void asy__fnextline(file f) { f.li = f.li + 1; f.ci = 0; }
 // 那句问的是"这个文件在不在"，而这一层没有"文件在不在"这个原语（readtext 读不到就是
 // 运行期错误）。于是 check=false 一律当"打不开" —— 文件不在时与 asy 一样，文件在时不一样
 // （那句的用法是问输出文件在不在，通常不在）。
+// asy 的 `input()` 不是"只看当前目录"：它走 locateFile，与找模块同一条搜索路径。
+// 量出来的（d.dat 只放在 ASYMPTOTE_DIR 指的目录、主文件在别处的 CWD）：带 ASYMPTOTE_DIR
+// 读到了，不带就是 `Cannot open file "d.dat"`。这一格补上那条路径 ——
+// filesurface / linearregression / worldmap 三份读 .dat 的例子就是差这个。
+//
+// 「这个文件在不在」这一层没有原语（readtext 读不到就直接抛），所以借 `_runproc` 去问
+// `test -f`。代价是每个候选目录一次 fork；input() 一份图里最多几次，量不到。
+private string[] asy__spdirs;
+private bool asy__spdone = false;
+
+private string asy__locate(string name) {
+  if (length(name) == 0) return name;
+  if (substr(name, 0, 1) == "/") return name;
+  if (!asy__spdone) {
+    asy__spdone = true;
+    string sp = _searchpath();
+    int i = 0;
+    while (i <= length(sp)) {
+      int j = find(sp, ":", i);
+      int e = j < 0 ? length(sp) : j;
+      if (e > i) asy__spdirs.push(substr(sp, i, e - i));
+      if (j < 0) break;
+      i = j + 1;
+    }
+  }
+  for (int k = 0; k < asy__spdirs.length; ++k) {
+    string cand = asy__spdirs[k] + "/" + name;
+    // 单引号包住：名字里真有单引号的那种这一格答不准，先不管（例子里没有）。
+    if (_runproc("test -f '" + cand + "'") == 0) return cand;
+  }
+  return name;
+}
+
 file input(string name="", bool check=true, string comment="#", string mode="") {
   file f;
   f.comment = substr(comment, 0, 1);
@@ -4104,7 +4186,7 @@ file input(string name="", bool check=true, string comment="#", string mode="") 
   f.name = name;
   if (mode != "") return f;                      // 二进制/XDR：打不开（v3d.asy:135 那一格）
   if (!check) return f;
-  f.lines = _readlines(name);
+  f.lines = _readlines(asy__locate(name));
   f.nl = f.lines.length;
   if (f.nl > 0 && f.lines[f.nl - 1] == "") f.nl = f.nl - 1;   // 末尾那个 '\n' 不是一行
   f.opened = true;
@@ -5590,7 +5672,11 @@ frame operator *(transform t, frame f) {
     }
     q.s = r.s;
     q.sz = r.sz;
-    q.t = t * r.t;
+    // `transformed` 递的是 `t*T`（drawlabel.cc:202），但构造函数当场再剥一次平移
+    // （drawlabel.h:37）—— 所以真正存下来的是 `shiftless(t*T)`。搬帧时少这一剥，
+    // rotate(θ,z) 这类**带轴心**的变换就会把 z 那份平移混进 T：量过 spline 的
+    // yaxis 标签，min(d).x 从 -28.9279097135741 变成 -1214.95006198507。
+    q.t = shiftless(t * r.t);
     q.position = t * r.position;
     pair a = shiftless(t) * r.align;
     real la = length(r.align);
@@ -6533,16 +6619,17 @@ private string asy__texpre(string nl) {
     + "\makeatother" + nl;
 }
 
-// .tex 里那句 `\special{ps:… setgray}` 的颜色是**定点 6 位**，不是 %g 的 6 位有效数字：
-// texfile 的输出流在构造时就被按 fixed/precision(6) 粘住了（坐标与对齐量同一个流，
-// 所以它们也都是定点 6 位）。量出来的：黑笔那一句参考写 `0.000000 setgray`，
-// 走 psfile 那条 %g 的路会写成 `0 setgray`。
+// .tex 里那句 `\special{ps:… }` 的颜色**两条路不同格式**（psfile.cc:184-218）：
+// cmyk / rgb 先攒进一个新开的 `ostringstream buf` —— 新流是默认格式，%g 的 6 位有效数字；
+// 而 gray 那一支直接往 `*out` 上写，吃的是 texfile 那个流被粘住的 fixed/precision(6)。
+// 量出来的：spline 的参考里黑笔是 `0.000000 setgray`，红笔却是 `1 0 0 setrgbcolor`。
 private string asy__texcolor(pen p) {
   if (p.iscmyk)
-    return asy__f6(p.cyan) + " " + asy__f6(p.magenta) + " " + asy__f6(p.yellow) + " "
-      + asy__f6(p.black) + " setcmykcolor";
+    return string(p.cyan, 6) + " " + string(p.magenta, 6) + " " + string(p.yellow, 6)
+      + " " + string(p.black, 6) + " setcmykcolor";
   if (p.isrgb)
-    return asy__f6(p.red) + " " + asy__f6(p.green) + " " + asy__f6(p.blue) + " setrgbcolor";
+    return string(p.red, 6) + " " + string(p.green, 6) + " " + string(p.blue, 6)
+      + " setrgbcolor";
   return asy__f6(p.gray) + " setgray";
 }
 
@@ -6675,9 +6762,21 @@ private bool asy__texship(string prefix, frame f, box bx, real ox, real oy, real
       t = t + "\usefont{\ASYencoding}{\ASYfamily}{\ASYseries}{\ASYshape}%" + nl;
       first = false;
     }
-    t = t + "\ASYalign(" + asy__f6((r.position.x - bx.l) / asy__tex2ps) + ","
+    // 带线性变换的标签走 `\ASYalignT`（texfile.cc:290-302）：多一组 `{xx yx xy yy}`，
+    // 而且 **非 pdf 那一路 yx/xy 要取负**（那边的 `sign=-1`，因为 TeX 的 y 轴朝下）。
+    // 判定同样是 `!T.isIdentity()` 比六个数 —— 于是 `t*T*inverse(t)` 那种"看着是单位、
+    // 末位差一个 ulp"的也走 T 支，印出来正好是 `{1.000000 -0.000000 -0.000000 1.000000}`。
+    transform lt = r.t;
+    bool ltrans = !(lt.x == 0 && lt.y == 0 && lt.xx == 1 && lt.xy == 0
+                    && lt.yx == 0 && lt.yy == 1);
+    t = t + "\ASYalign" + (ltrans ? "T" : "")
+      + "(" + asy__f6((r.position.x - bx.l) / asy__tex2ps) + ","
       + asy__f6((r.position.y - bx.b) / asy__tex2ps) + ")("
-      + asy__f6(al.x) + "," + asy__f6(al.y) + "){" + r.s + "}%" + nl;
+      + asy__f6(al.x) + "," + asy__f6(al.y) + ")";
+    if (ltrans)
+      t = t + "{" + asy__f6(lt.xx) + " " + asy__f6(-lt.yx)
+        + " " + asy__f6(-lt.xy) + " " + asy__f6(lt.yy) + "}";
+    t = t + "{" + r.s + "}%" + nl;
   }
   t = t + "\end{document}" + nl;
   _writetext(dir + "/" + pre + "_.tex", t);
