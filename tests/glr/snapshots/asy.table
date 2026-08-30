@@ -1,4 +1,4 @@
-grammar asy: 78 terminals, 55 nonterminals, 220 rules, 433 states
+grammar asy: 78 terminals, 55 nonterminals, 222 rules, 437 states
   r0  file -> fileblock
   r1  fileblock -> <empty>
   r2  fileblock -> fileblock runnable
@@ -88,179 +88,181 @@ grammar asy: 78 terminals, 55 nonterminals, 220 rules, 433 states
   r86  formals -> ELLIPSIS formal
   r87  formals -> formals "," formal
   r88  formals -> formals ELLIPSIS formal
-  r89  explicitornot -> "explicit"
-  r90  explicitornot -> <empty>
-  r91  formal -> explicitornot type
-  r92  formal -> explicitornot type decidstart
-  r93  formal -> explicitornot type decidstart ASSIGN varinit
-  r94  formal -> explicitornot type ID decidstart
-  r95  formal -> explicitornot type ID decidstart ASSIGN varinit
-  r96  fundec -> type ID "(" ")" blockstm
-  r97  fundec -> type ID "(" formals ")" blockstm
-  r98  typedec -> "struct" ID block
-  r99  typedec -> "typedef" vardec
-  r100  typedec -> "using" ID ASSIGN type ";"
-  r101  typedec -> "using" ID ASSIGN type "(" ")" ";"
-  r102  typedec -> "using" ID ASSIGN type "(" formals ")" ";"
-  r103  slice -> ":"
-  r104  slice -> exp ":"
-  r105  slice -> ":" exp
-  r106  slice -> exp ":" exp
-  r107  value -> value "." ID
-  r108  value -> name "[" exp "]"
-  r109  value -> value "[" exp "]"
-  r110  value -> name "[" slice "]"
-  r111  value -> value "[" slice "]"
-  r112  value -> name "(" ")"
-  r113  value -> name "(" arglist ")"
-  r114  value -> value "(" ")"
-  r115  value -> value "(" arglist ")"
-  r116  value -> "(" exp ")"
-  r117  value -> "(" name ")"
-  r118  value -> "this"
-  r119  argument -> exp
-  r120  argument -> ID ASSIGN exp
-  r121  arglist -> argument
-  r122  arglist -> ELLIPSIS argument
-  r123  arglist -> arglist "," argument
-  r124  arglist -> arglist ELLIPSIS argument
-  r125  tuple -> exp "," exp
-  r126  tuple -> tuple "," exp
-  r127  exp -> name
-  r128  exp -> value
-  r129  exp -> LIT
-  r130  exp -> STRING
-  r131  exp -> LIT exp
-  r132  exp -> "(" name ")" exp
-  r133  exp -> "(" name dims ")" exp
-  r134  exp -> "+" exp
-  r135  exp -> "-" exp
-  r136  exp -> OPERATOR exp
-  r137  exp -> exp "+" exp
-  r138  exp -> exp "-" exp
-  r139  exp -> exp "*" exp
-  r140  exp -> exp "/" exp
-  r141  exp -> exp "%" exp
-  r142  exp -> exp "#" exp
-  r143  exp -> exp "^" exp
-  r144  exp -> exp LT exp
-  r145  exp -> exp LE exp
-  r146  exp -> exp GT exp
-  r147  exp -> exp GE exp
-  r148  exp -> exp EQ exp
-  r149  exp -> exp NEQ exp
-  r150  exp -> exp CAND exp
-  r151  exp -> exp COR exp
-  r152  exp -> exp CARETS exp
-  r153  exp -> exp AMPERSAND exp
-  r154  exp -> exp BAR exp
-  r155  exp -> exp OPERATOR exp
-  r156  exp -> exp INCR exp
-  r157  exp -> "new" celltype
-  r158  exp -> "new" celltype dimexps
-  r159  exp -> "new" celltype dimexps dims
-  r160  exp -> "new" celltype dims
-  r161  exp -> "new" celltype dims arrayinit
-  r162  exp -> "new" celltype "(" ")" blockstm
-  r163  exp -> "new" celltype dims "(" ")" blockstm
-  r164  exp -> "new" celltype "(" formals ")" blockstm
-  r165  exp -> "new" celltype dims "(" formals ")" blockstm
-  r166  exp -> exp "?" exp ":" exp
-  r167  exp -> exp ASSIGN exp
-  r168  exp -> "(" tuple ")"
-  r169  exp -> exp join exp
-  r170  exp -> exp dir
-  r171  exp -> INCR exp
-  r172  exp -> DASHES exp
-  r173  exp -> exp INCR
-  r174  exp -> exp SELFOP exp
-  r175  exp -> "quote" "{" fileblock "}"
-  r176  join -> DASHES
-  r177  join -> basicjoin
-  r178  join -> dir basicjoin
-  r179  join -> basicjoin dir
-  r180  join -> dir basicjoin dir
-  r181  dir -> "{" "curl" exp "}"
-  r182  dir -> "{" exp "}"
-  r183  dir -> "{" exp "," exp "}"
-  r184  dir -> "{" exp "," exp "," exp "}"
-  r185  basicjoin -> DOTS
-  r186  basicjoin -> DOTS tension DOTS
-  r187  basicjoin -> DOTS controls DOTS
-  r188  basicjoin -> COLONS
-  r189  basicjoin -> LONGDASH
-  r190  tension -> "tension" exp
-  r191  tension -> "tension" exp "and" exp
-  r192  tension -> "tension" "atleast" exp
-  r193  tension -> "tension" "atleast" exp "and" exp
-  r194  controls -> "controls" exp
-  r195  controls -> "controls" exp "and" exp
-  r196  stm -> ";"
-  r197  stm -> blockstm
-  r198  stm -> stmexp ";"
-  r199  stm -> "if" "(" exp ")" stm
-  r200  stm -> "if" "(" exp ")" stm "else" stm
-  r201  stm -> "while" "(" exp ")" stm
-  r202  stm -> "do" stm "while" "(" exp ")" ";"
-  r203  stm -> "for" "(" forinit ";" fortest ";" forupdate ")" stm
-  r204  stm -> "for" "(" type ID ":" exp ")" stm
-  r205  stm -> "break" ";"
-  r206  stm -> "continue" ";"
-  r207  stm -> "return" ";"
-  r208  stm -> "return" exp ";"
-  r209  stmexp -> exp
-  r210  blockstm -> block
-  r211  forinit -> <empty>
-  r212  forinit -> stmexplist
-  r213  forinit -> barevardec
-  r214  fortest -> <empty>
-  r215  fortest -> exp
-  r216  forupdate -> <empty>
-  r217  forupdate -> stmexplist
-  r218  stmexplist -> stmexp
-  r219  stmexplist -> stmexplist "," stmexp
-  r220  $accept -> file
+  r89  formals -> formals "," ELLIPSIS formal
+  r90  explicitornot -> "explicit"
+  r91  explicitornot -> <empty>
+  r92  formal -> explicitornot type
+  r93  formal -> explicitornot type decidstart
+  r94  formal -> explicitornot type decidstart ASSIGN varinit
+  r95  formal -> explicitornot type ID decidstart
+  r96  formal -> explicitornot type ID decidstart ASSIGN varinit
+  r97  fundec -> type ID "(" ")" blockstm
+  r98  fundec -> type ID "(" formals ")" blockstm
+  r99  typedec -> "struct" ID block
+  r100  typedec -> "typedef" vardec
+  r101  typedec -> "using" ID ASSIGN type ";"
+  r102  typedec -> "using" ID ASSIGN type "(" ")" ";"
+  r103  typedec -> "using" ID ASSIGN type "(" formals ")" ";"
+  r104  slice -> ":"
+  r105  slice -> exp ":"
+  r106  slice -> ":" exp
+  r107  slice -> exp ":" exp
+  r108  value -> value "." ID
+  r109  value -> name "[" exp "]"
+  r110  value -> value "[" exp "]"
+  r111  value -> name "[" slice "]"
+  r112  value -> value "[" slice "]"
+  r113  value -> name "(" ")"
+  r114  value -> name "(" arglist ")"
+  r115  value -> value "(" ")"
+  r116  value -> value "(" arglist ")"
+  r117  value -> "(" exp ")"
+  r118  value -> "(" name ")"
+  r119  value -> "this"
+  r120  argument -> exp
+  r121  argument -> ID ASSIGN exp
+  r122  arglist -> argument
+  r123  arglist -> ELLIPSIS argument
+  r124  arglist -> arglist "," argument
+  r125  arglist -> arglist ELLIPSIS argument
+  r126  arglist -> arglist "," ELLIPSIS argument
+  r127  tuple -> exp "," exp
+  r128  tuple -> tuple "," exp
+  r129  exp -> name
+  r130  exp -> value
+  r131  exp -> LIT
+  r132  exp -> STRING
+  r133  exp -> LIT exp
+  r134  exp -> "(" name ")" exp
+  r135  exp -> "(" name dims ")" exp
+  r136  exp -> "+" exp
+  r137  exp -> "-" exp
+  r138  exp -> OPERATOR exp
+  r139  exp -> exp "+" exp
+  r140  exp -> exp "-" exp
+  r141  exp -> exp "*" exp
+  r142  exp -> exp "/" exp
+  r143  exp -> exp "%" exp
+  r144  exp -> exp "#" exp
+  r145  exp -> exp "^" exp
+  r146  exp -> exp LT exp
+  r147  exp -> exp LE exp
+  r148  exp -> exp GT exp
+  r149  exp -> exp GE exp
+  r150  exp -> exp EQ exp
+  r151  exp -> exp NEQ exp
+  r152  exp -> exp CAND exp
+  r153  exp -> exp COR exp
+  r154  exp -> exp CARETS exp
+  r155  exp -> exp AMPERSAND exp
+  r156  exp -> exp BAR exp
+  r157  exp -> exp OPERATOR exp
+  r158  exp -> exp INCR exp
+  r159  exp -> "new" celltype
+  r160  exp -> "new" celltype dimexps
+  r161  exp -> "new" celltype dimexps dims
+  r162  exp -> "new" celltype dims
+  r163  exp -> "new" celltype dims arrayinit
+  r164  exp -> "new" celltype "(" ")" blockstm
+  r165  exp -> "new" celltype dims "(" ")" blockstm
+  r166  exp -> "new" celltype "(" formals ")" blockstm
+  r167  exp -> "new" celltype dims "(" formals ")" blockstm
+  r168  exp -> exp "?" exp ":" exp
+  r169  exp -> exp ASSIGN exp
+  r170  exp -> "(" tuple ")"
+  r171  exp -> exp join exp
+  r172  exp -> exp dir
+  r173  exp -> INCR exp
+  r174  exp -> DASHES exp
+  r175  exp -> exp INCR
+  r176  exp -> exp SELFOP exp
+  r177  exp -> "quote" "{" fileblock "}"
+  r178  join -> DASHES
+  r179  join -> basicjoin
+  r180  join -> dir basicjoin
+  r181  join -> basicjoin dir
+  r182  join -> dir basicjoin dir
+  r183  dir -> "{" "curl" exp "}"
+  r184  dir -> "{" exp "}"
+  r185  dir -> "{" exp "," exp "}"
+  r186  dir -> "{" exp "," exp "," exp "}"
+  r187  basicjoin -> DOTS
+  r188  basicjoin -> DOTS tension DOTS
+  r189  basicjoin -> DOTS controls DOTS
+  r190  basicjoin -> COLONS
+  r191  basicjoin -> LONGDASH
+  r192  tension -> "tension" exp
+  r193  tension -> "tension" exp "and" exp
+  r194  tension -> "tension" "atleast" exp
+  r195  tension -> "tension" "atleast" exp "and" exp
+  r196  controls -> "controls" exp
+  r197  controls -> "controls" exp "and" exp
+  r198  stm -> ";"
+  r199  stm -> blockstm
+  r200  stm -> stmexp ";"
+  r201  stm -> "if" "(" exp ")" stm
+  r202  stm -> "if" "(" exp ")" stm "else" stm
+  r203  stm -> "while" "(" exp ")" stm
+  r204  stm -> "do" stm "while" "(" exp ")" ";"
+  r205  stm -> "for" "(" forinit ";" fortest ";" forupdate ")" stm
+  r206  stm -> "for" "(" type ID ":" exp ")" stm
+  r207  stm -> "break" ";"
+  r208  stm -> "continue" ";"
+  r209  stm -> "return" ";"
+  r210  stm -> "return" exp ";"
+  r211  stmexp -> exp
+  r212  blockstm -> block
+  r213  forinit -> <empty>
+  r214  forinit -> stmexplist
+  r215  forinit -> barevardec
+  r216  fortest -> <empty>
+  r217  fortest -> exp
+  r218  forupdate -> <empty>
+  r219  forupdate -> stmexplist
+  r220  stmexplist -> stmexp
+  r221  stmexplist -> stmexplist "," stmexp
+  r222  $accept -> file
 conflicts left to the GLR driver: 43
-  state 6 on "[": shift/reduce (2 actions)
-  state 6 on "(": shift/reduce (2 actions)
-  state 6 on "]": reduce/reduce (2 actions)
-  state 6 on ";": reduce/reduce (2 actions)
-  state 6 on ",": reduce/reduce (2 actions)
-  state 6 on ":": reduce/reduce (2 actions)
-  state 6 on ")": reduce/reduce (2 actions)
-  state 6 on "+": reduce/reduce (2 actions)
-  state 6 on "-": reduce/reduce (2 actions)
-  state 6 on "*": reduce/reduce (2 actions)
-  state 6 on "/": reduce/reduce (2 actions)
-  state 6 on "%": reduce/reduce (2 actions)
-  state 6 on "#": reduce/reduce (2 actions)
-  state 6 on "^": reduce/reduce (2 actions)
-  state 6 on LT: reduce/reduce (2 actions)
-  state 6 on LE: reduce/reduce (2 actions)
-  state 6 on GT: reduce/reduce (2 actions)
-  state 6 on GE: reduce/reduce (2 actions)
-  state 6 on EQ: reduce/reduce (2 actions)
-  state 6 on NEQ: reduce/reduce (2 actions)
-  state 6 on CAND: reduce/reduce (2 actions)
-  state 6 on COR: reduce/reduce (2 actions)
-  state 6 on CARETS: reduce/reduce (2 actions)
-  state 6 on AMPERSAND: reduce/reduce (2 actions)
-  state 6 on BAR: reduce/reduce (2 actions)
-  state 6 on OPERATOR: reduce/reduce (2 actions)
-  state 6 on INCR: reduce/reduce (2 actions)
-  state 6 on "?": reduce/reduce (2 actions)
-  state 6 on ASSIGN: reduce/reduce (2 actions)
-  state 6 on DASHES: reduce/reduce (2 actions)
-  state 6 on DOTS: reduce/reduce (2 actions)
-  state 6 on COLONS: reduce/reduce (2 actions)
-  state 6 on LONGDASH: reduce/reduce (2 actions)
-  state 6 on "{": reduce/reduce (2 actions)
-  state 6 on SELFOP: reduce/reduce (2 actions)
-  state 6 on "}": reduce/reduce (2 actions)
-  state 6 on "and": reduce/reduce (2 actions)
-  state 6 on ELLIPSIS: reduce/reduce (2 actions)
-  state 123 on ";": reduce/reduce (2 actions)
-  state 123 on ID: reduce/reduce (2 actions)
-  state 123 on ",": reduce/reduce (2 actions)
-  state 129 on ID: reduce/reduce (2 actions)
-  state 138 on "[": shift/reduce (2 actions)
+  state 7 on "[": shift/reduce (2 actions)
+  state 7 on "(": shift/reduce (2 actions)
+  state 7 on "]": reduce/reduce (2 actions)
+  state 7 on ";": reduce/reduce (2 actions)
+  state 7 on ",": reduce/reduce (2 actions)
+  state 7 on ":": reduce/reduce (2 actions)
+  state 7 on ")": reduce/reduce (2 actions)
+  state 7 on "+": reduce/reduce (2 actions)
+  state 7 on "-": reduce/reduce (2 actions)
+  state 7 on "*": reduce/reduce (2 actions)
+  state 7 on "/": reduce/reduce (2 actions)
+  state 7 on "%": reduce/reduce (2 actions)
+  state 7 on "#": reduce/reduce (2 actions)
+  state 7 on "^": reduce/reduce (2 actions)
+  state 7 on LT: reduce/reduce (2 actions)
+  state 7 on LE: reduce/reduce (2 actions)
+  state 7 on GT: reduce/reduce (2 actions)
+  state 7 on GE: reduce/reduce (2 actions)
+  state 7 on EQ: reduce/reduce (2 actions)
+  state 7 on NEQ: reduce/reduce (2 actions)
+  state 7 on CAND: reduce/reduce (2 actions)
+  state 7 on COR: reduce/reduce (2 actions)
+  state 7 on CARETS: reduce/reduce (2 actions)
+  state 7 on AMPERSAND: reduce/reduce (2 actions)
+  state 7 on BAR: reduce/reduce (2 actions)
+  state 7 on OPERATOR: reduce/reduce (2 actions)
+  state 7 on INCR: reduce/reduce (2 actions)
+  state 7 on "?": reduce/reduce (2 actions)
+  state 7 on ASSIGN: reduce/reduce (2 actions)
+  state 7 on DASHES: reduce/reduce (2 actions)
+  state 7 on DOTS: reduce/reduce (2 actions)
+  state 7 on COLONS: reduce/reduce (2 actions)
+  state 7 on LONGDASH: reduce/reduce (2 actions)
+  state 7 on "{": reduce/reduce (2 actions)
+  state 7 on SELFOP: reduce/reduce (2 actions)
+  state 7 on "}": reduce/reduce (2 actions)
+  state 7 on "and": reduce/reduce (2 actions)
+  state 7 on ELLIPSIS: reduce/reduce (2 actions)
+  state 61 on "[": shift/reduce (2 actions)
+  state 127 on ";": reduce/reduce (2 actions)
+  state 127 on ID: reduce/reduce (2 actions)
+  state 127 on ",": reduce/reduce (2 actions)
+  state 133 on ID: reduce/reduce (2 actions)
