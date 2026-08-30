@@ -894,6 +894,10 @@ class CEmitter {
       case 'PtrSub': return e.a.type.k === 'tptr'
         ? `((${this.expr(e.a)} - ${this.expr(e.b)}) / ${e.size})`
         : `omni_pdiff(${this.expr(e.a)}, ${this.expr(e.b)}, ${e.size})`;
+      // 只比**地址那一个字**：整个 omni_ptr 是 24 字节，C 里结构体之间没有 `==`。
+      case 'PtrEq': return e.a.type.k === 'tptr'
+        ? `(${this.expr(e.a)} == ${this.expr(e.b)})`
+        : `((${this.expr(e.a)}).a == (${this.expr(e.b)}).a)`;
       case 'Field': {
         const obj = this.expr(e.object);
         // class 是引用，可能为 null：显式检查，避免"段错误 vs 异常"的跨后端分叉

@@ -1,0 +1,85 @@
+// 控制流与函数。这一条里没有指针 —— 它盯的是"jancy 的语句形状降到方言之后语义还对"，
+// 而方言里**没有 for、没有 do-while、也没有条件表达式**，那三样都是这一层拼出来的。
+//
+// 期望输出的出处：
+//   - for -> `(do INIT (while COND (do BODY STEP)))`：C 的 for 语义，jancy 的
+//     Stmt.llk:467（`for '(' for_init ';' expr_or_empty ';' for_step ')' decl`）
+//     与 C 同 -> 0 1 2 三行、和 = 3
+//   - do-while 的体**至少跑一次**、判断在体之后：Stmt.llk:466 那条产生式的形状 ->
+//     n 从 0 起，`do { n++; } while (n < 4)` 之后 n = 4
+//   - `while` 的判断在体之前 -> `while (m > 0)` 里 m 本来就是 0 时体一次都不跑
+//   - break / continue 只跳一层（jancy 的多层要写成 break2 / break3，Lexer.rl 的
+//     那几个关键字就是为它准备的）-> 内层 break 之后外层还继续
+//   - 步进那一格是**逗号串**（`for (…; …; i++, k += 2)`，Stmt.llk:509 的注释）
+//   - 整除向零截断、`%` 取余随左操作数的符号：C 的语义，jancy 没改 -> -7/2 = -3、
+//     -7%2 = -1
+//   - int -> double 的隐式加宽：jancy 与 C 同 -> `1 / 2.0` 是 0.5
+//   - `%f` 走的是方言的 `tostr`，不是 C 的 `%f` —— 整数值的 real 印出来**没有小数部分**
+//     （`double d = 3` 印 `3`，不是 `3.000000`）。这是刻意的：这一层只有"数 -> 串"
+//     一条，而那一条在五条腿上是同一份语义；要真的 `%f` 就得先在方言里加格式化。
+
+int fact(int n) {
+    if (n <= 1)
+        return 1;
+    return n * fact(n - 1);
+}
+
+bool even(int n) {
+    return n % 2 == 0;
+}
+
+int main() {
+    int i = 0;
+    int sum = 0;
+    for (i = 0; i < 3; i++) {
+        printf("%d\n", i);
+        sum += i;
+    }
+    printf("sum=%d\n", sum);
+
+    // 步进那一格是逗号串
+    int a = 0;
+    int k = 0;
+    for (a = 0; a < 3; a++, k += 2)
+        ;
+    printf("k=%d\n", k);
+
+    int n = 0;
+    do {
+        n++;
+    } while (n < 4);
+    printf("n=%d\n", n);
+
+    int m = 0;
+    while (m > 0)
+        m = m - 1;
+    printf("m=%d\n", m);
+
+    // break 只跳一层
+    int outer = 0;
+    while (outer < 2) {
+        int inner = 0;
+        while (true) {
+            inner++;
+            if (inner >= 2)
+                break;
+        }
+        printf("outer=%d inner=%d\n", outer, inner);
+        outer++;
+    }
+
+    printf("%d %d\n", fact(5), fact(1));
+
+    if (even(4) && !even(3))
+        printf("even works\n");
+    else
+        printf("even is broken\n");
+
+    printf("%d %d\n", -7 / 2, -7 % 2);
+    printf("%f\n", 1 / 2.0);
+
+    double d = 3;
+    printf("%f %d\n", d, (int)2.9);
+
+    return 0;
+}

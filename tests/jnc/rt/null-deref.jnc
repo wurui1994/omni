@@ -1,0 +1,9 @@
+// 空指针解引用。`null` 在这一层要从左边知道自己是哪种指针（`int* z = null`），
+// 而查空是**两种指针都要查**的那一件事 —— thin 把范围丢了，但没丢"是不是 0"。
+int main() {
+    int* z = null;
+    if (z == null)
+        printf("z is null\n");
+    printf("%d\n", *z);
+    return 0;
+}

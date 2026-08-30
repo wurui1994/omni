@@ -649,9 +649,10 @@ class LlvmEmitter {
       this.arrInsn(f, i, op, dst, t);
       return;
     }
-    // 指针八条（ADR-0016）
+    // 指针九条（ADR-0016）
     if (op === OP.PNEW || op === OP.PNULL || op === OP.PISNULL || op === OP.PTHIN
-        || op === OP.PLOAD || op === OP.PSTORE || op === OP.PADD || op === OP.PSUB) {
+        || op === OP.PLOAD || op === OP.PSTORE || op === OP.PADD || op === OP.PSUB
+        || op === OP.PEQ) {
       this.ptrInsn(f, i, op, dst, t);
       return;
     }
@@ -1080,6 +1081,14 @@ class LlvmEmitter {
       const na = this.fresh();
       this.line(`  ${na} = getelementptr i8, ptr ${a}, i64 ${off}`);
       this.line(`  ${dst} = insertvalue ${P} ${this.val(f.a[i])}, ptr ${na}, 0`);
+      return;
+    }
+    // 只比**地址那一个字**。fat 是个 SSA 聚合，LLVM 里聚合之间没有 icmp。
+    if (op === OP.PEQ) {
+      let a = this.val(f.a[i]);
+      let b = this.val(f.b[i]);
+      if (!this.ptrIsThin(f, f.a[i])) { a = this.ptrWord(a, 0); b = this.ptrWord(b, 0); }
+      this.line(`  ${dst} = icmp eq ptr ${a}, ${b}`);
       return;
     }
     // PSUB

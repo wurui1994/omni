@@ -1,0 +1,128 @@
+#!/usr/bin/env node
+// Omni — jancy 前端（第十五条测试轴，ADR-0016 分步 8 的验收）
+//
+// 这条轴与 tests/asy 那条是**两条不同的纪律**。asy 那边有 oracle（`/opt/homebrew/bin/asy
+// -noV`），所以每一条都要"量"；jancy 的 `jnc` 要 LLVM + axl 才编得出来，我们不装它 ——
+// 用户定的是「只借用 jancy 的完整语法和形式」。所以这边每一条期望输出都由我们自己写，
+// 而**每一条都要在源文件的注释里注明出处**（引哪一份文档、哪一条 `.llk` 规则、哪一份语料）。
+//
+// 语法那一半不在这里：`stage0/src/frontend-jnc/jnc.grammar` 在 tests/glr/run.js 的
+// `cases/jnc` 那一组里量（526/528 份真实 `.jnc` 唯一成树）。这里量的是**降级**。
+//
+// 三件事：
+//   1. cases/*.jnc 在 run / run-c / interp / interp --mir / run-llvm 五条腿上逐字节相同，
+//      且等于 .expected。五方一致比对上期望值更强 —— 指针在这五条腿上是**两套实现**
+//      （arena 模拟 vs 真指针，ADR-0016），逐字节相同不是巧合。
+//   2. rt/*.jnc 在五条腿上报**同一句**运行期错误。
+//   3. bad/*.jnc 必须被拒绝，且拒在正确的理由上。第一刀的边界是刻意划的（真数组、
+//      `&x`、`? :`、不换行的 printf、条件真值化），这一组是那些边界的本体。
+//
+//   node tests/jnc/run.js
+//   node tests/jnc/run.js pointers
+
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, dirname, basename } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const root = join(here, '../..');
+const cli = join(root, 'stage0', 'src', 'cli.js');
+const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
+
+const cmd = (args) => {
+  const r = spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8', cwd: root });
+  return { out: r.stdout ?? '', err: r.stderr ?? '', code: r.status ?? 1 };
+};
+const read = (p) => {
+  try {
+    return readFileSync(p, 'utf8');
+  } catch {
+    return null;
+  }
+};
+
+let pass = 0;
+let fail = 0;
+const failures = [];
+const ok = (msg) => { pass++; process.stdout.write(`  ok   ${msg}\n`); };
+const no = (name, why) => { fail++; failures.push(`${name}\n${why}`); process.stdout.write(`  FAIL ${name}\n`); };
+const want = (f) => (!filters.length || filters.some((x) => f.includes(x)));
+
+const LEGS = [
+  { tag: 'run', args: (p) => ['run', p] },
+  { tag: 'run-c', args: (p) => ['run-c', p] },
+  { tag: 'interp', args: (p) => ['interp', p] },
+  { tag: 'interp --mir', args: (p) => ['interp', p, '--mir'] },
+  { tag: 'run-llvm', args: (p) => ['run-llvm', p] },
+];
+
+const list = (sub, ext) => readdirSync(join(here, sub)).filter((x) => x.endsWith(ext)).sort();
+
+// ------------------------------------------------- 1. cases/：五条腿一致 + 对上期望值
+
+for (const f of list('cases', '.jnc')) {
+  if (!want(f)) continue;
+  const name = basename(f, '.jnc');
+  const src = join(here, 'cases', f);
+  const expected = read(join(here, 'cases', `${name}.expected`));
+  const bad = [];
+  const first = cmd(LEGS[0].args(src));
+  if (first.code !== 0) bad.push(`    ${LEGS[0].tag} exit=${first.code}\n${first.err}`);
+  for (const leg of LEGS.slice(1)) {
+    const r = cmd(leg.args(src));
+    if (r.code !== 0) { bad.push(`    ${leg.tag} exit=${r.code}\n${r.err}`); continue; }
+    if (r.out !== first.out) {
+      bad.push(`    ${leg.tag} 与 ${LEGS[0].tag} 不同\n      ${LEGS[0].tag}: ${JSON.stringify(first.out)}\n      ${leg.tag}: ${JSON.stringify(r.out)}`);
+    }
+  }
+  if (expected === null) bad.push('    缺 .expected');
+  else if (first.out !== expected) {
+    bad.push(`    对不上期望值\n      want: ${JSON.stringify(expected)}\n      got:  ${JSON.stringify(first.out)}`);
+  }
+  if (bad.length === 0) ok(`cases/${name} [五方一致 == ${name}.expected]`);
+  else no(`cases/${name}`, bad.join('\n'));
+}
+
+// ------------------------------------------------- 2. rt/：运行期错误，五条腿同一句话
+
+for (const f of list('rt', '.jnc')) {
+  if (!want(f)) continue;
+  const name = basename(f, '.jnc');
+  const exp = read(join(here, 'rt', `${name}.expected`));
+  if (exp === null) { no(`rt/${name}`, `    缺 ${name}.expected`); continue; }
+  const bad = [];
+  for (const leg of LEGS) {
+    const r = cmd(leg.args(join(here, 'rt', f)));
+    if (r.code === 0) { bad.push(`    ${leg.tag} 居然跑完了 —— 这里该报运行期错误`); continue; }
+    if (!r.err.includes(exp.trim())) {
+      bad.push(`    ${leg.tag} 的消息不对\n      want: ${JSON.stringify(exp.trim())}\n      got:  ${JSON.stringify(r.err.trim())}`);
+    }
+  }
+  if (bad.length === 0) ok(`rt/${name} [五条腿同一句：${exp.trim()}]`);
+  else no(`rt/${name}`, bad.join('\n'));
+}
+
+// ------------------------------------------------- 3. bad/：拒绝，且理由正确
+//
+// 一条腿就问得清（这些都是降级期拒的），所以只跑 `run`。
+
+for (const f of list('bad', '.jnc')) {
+  if (!want(f)) continue;
+  const name = basename(f, '.jnc');
+  const exp = read(join(here, 'bad', `${name}.expected`));
+  if (exp === null) { no(`bad/${name}`, `    缺 ${name}.expected`); continue; }
+  const r = cmd(['run', join(here, 'bad', f)]);
+  if (r.code === 0) { no(`bad/${name}`, '    居然通过了 —— 这条边界是刻意划的'); continue; }
+  if (!r.err.includes(exp.trim())) {
+    no(`bad/${name}`, `    拒的理由不对\n      want: ${JSON.stringify(exp.trim())}\n      got:  ${JSON.stringify(r.err.trim())}`);
+    continue;
+  }
+  ok(`bad/${name} [拒绝：${exp.trim()}]`);
+}
+
+process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
+if (fail) {
+  process.stdout.write(`\n${failures.join('\n\n')}\n`);
+  process.exitCode = 1;
+}

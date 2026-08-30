@@ -358,6 +358,13 @@ class Interp {
         const b = this.eval(e.b, env, frame);
         return e.a.type.k === 'tptr' ? BigInt((a - b) / e.size) : ptrSub(a, b, e.size);
       }
+      // 只比**地址那一个字**：fat 在这一层是个三元数组，两个指向同一格的指针各是一份
+      // 拷贝，`===` 比引用就永远不等。跨块也有定义：地址不同，答案是 false。
+      case 'PtrEq': {
+        const a = this.eval(e.a, env, frame);
+        const b = this.eval(e.b, env, frame);
+        return e.a.type.k === 'tptr' ? a === b : a[0] === b[0];
+      }
       case 'JsGlobal': return this.globals.get(e.name);
       case 'GlobalRef': return this.globals.get(e.name);
       case 'Field': {

@@ -1,0 +1,73 @@
+// 真值化、`? :`、`~`、指针相等 —— 这四样都是"jancy 有、方言原先没有"的东西。
+// 纪律是**方言让步**：`? :` 让方言长出了 `(sel c a b)`（惰性），`p == q` 让它长出了
+// `(peq p q)`；真值化与 `~` 不用动方言，因为它们在 jancy 那边本来就是"隐式转换"与
+// "已有算符的组合"，这一层把它们显式写出来。
+//
+// 期望输出的出处：
+//   - 真值化：jancy 与 C 同 —— 非零整数、非空指针为真。Expr.llk 的条件位置收
+//     完整的 expr（没有"必须是 bool"这条限制），而 `if (m_socket)` 这种写法在
+//     jancy 自带的 528 份源码里到处都是
+//   - `? :` **惰性**：只算取中的那一支。这里用一个会报错的解引用当没取中的那一支 ——
+//     它要是被算了，程序就崩了而不是印出 5
+//   - `? :` 右结合（Expr.llk 的级联里它在赋值之上一层）-> `a ? 1 : b ? 2 : 3`
+//     是 `a ? 1 : (b ? 2 : 3)`
+//   - `~x` = `x ^ -1`（补码，64 位）-> `~0` 是 -1、`~5` 是 -6
+//   - `p == q` 比的是**地址**，不是内容：两个指向同一格的指针相等，指向不同格的不等。
+//     跨块也有定义（不等）—— 与 `p - q` 不同，后者跨块是运行期错误
+//   - `&&` / `||` 短路：C 的语义。右边是个会崩的解引用，短路了就不会崩
+
+int main() {
+    // ---- 真值化
+    int n = 3;
+    int z = 0;
+    if (n)
+        printf("n is truthy\n");
+    if (!z)
+        printf("z is falsy\n");
+
+    int* p = new int[2];
+    if (p)
+        printf("p is truthy\n");
+    int* nil = null;
+    if (!nil)
+        printf("nil is falsy\n");
+
+    // 短路：右边那个解引用要是被算了就会崩
+    if (nil && *nil == 0)
+        printf("unreachable\n");
+    else
+        printf("&& short-circuited\n");
+    if (p || *nil == 0)
+        printf("|| short-circuited\n");
+
+    // 循环条件也真值化
+    int k = 3;
+    while (k)
+        k--;
+    printf("k=%d\n", k);
+
+    // ---- ? :
+    printf("%d\n", n > 2 ? 5 : *nil);
+    printf("%d\n", z ? *nil : 7);
+    // 右结合
+    printf("%d %d %d\n", 1 ? 1 : 0 ? 2 : 3, 0 ? 1 : 1 ? 2 : 3, 0 ? 1 : 0 ? 2 : 3);
+    // 两支加宽到 real
+    printf("%f\n", n > 2 ? 1 : 2.5);
+    // 嵌在别的表达式里（拆成语句做不到的那一格）
+    printf("%d\n", (n > 2 ? 10 : 20) + (z ? 1 : 2));
+
+    // ---- ~
+    printf("%d %d %d\n", ~0, ~5, ~-1);
+
+    // ---- 指针相等
+    int* q = p;
+    int* r = p + 1;
+    printf("%d %d %d\n", p == q, p == r, p != r);
+    // 跨块也有定义：不等（psub 跨块会报错，peq 不会）
+    int* other = new int[2];
+    printf("%d %d\n", p == other, p != other);
+    // 走出去再走回来还是同一格
+    printf("%d\n", p == (p + 3) - 3);
+
+    return 0;
+}

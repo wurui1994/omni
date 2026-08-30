@@ -23,10 +23,11 @@
     "test:llvm": "node tests/llvm/run.js",
     "test:sexpr": "node tests/sexpr/run.js",
     "test:asy": "node tests/asy/run.js",
+    "test:jnc": "node tests/jnc/run.js",
     "test:jit": "node tests/jit/run.js",
     "test:gpu": "node tests/gpu/run.js",
     "test:bootstrap": "node tests/bootstrap/run.js",
-    "test:all": "node tests/run.js && node tests/oracle/run.js && node tests/js-roundtrip/run.js && node tests/oir/run.js && node tests/js-exec/run.js && node tests/cabi/run.js && node tests/wat/run.js && node tests/glr/run.js && node tests/mir/run.js && node tests/incr/run.js && node tests/llvm/run.js && node tests/sexpr/run.js && node tests/asy/run.js && node tests/jit/run.js && node tests/gpu/run.js && node tests/bootstrap/run.js",
+    "test:all": "node tests/run.js && node tests/oracle/run.js && node tests/js-roundtrip/run.js && node tests/oir/run.js && node tests/js-exec/run.js && node tests/cabi/run.js && node tests/wat/run.js && node tests/glr/run.js && node tests/mir/run.js && node tests/incr/run.js && node tests/llvm/run.js && node tests/sexpr/run.js && node tests/asy/run.js && node tests/jnc/run.js && node tests/jit/run.js && node tests/gpu/run.js && node tests/bootstrap/run.js",
     "bench": "node bench/compare.js",
     "lint": "tsc --noEmit -p jsconfig.json"
   },

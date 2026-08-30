@@ -484,6 +484,19 @@ class MirInterp {
           return next;
         };
       }
+      // 只比**地址那一个字**：fat 在这一层是个三元数组，两个指向同一格的指针各是一份
+      // 拷贝，`===` 比引用就永远不等。
+      case OP.PEQ: {
+        const a = rd(f.a[i]);
+        const b = rd(f.b[i]);
+        const thin = this.ptrIsThin(f, f.a[i]);
+        return (F) => {
+          const p = a(F);
+          const q = b(F);
+          F.v[i] = thin ? p === q : p[0] === q[0];
+          return next;
+        };
+      }
       default:
         return this.step3(f, i, rd, rdArgs, readAll, I);
     }

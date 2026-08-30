@@ -535,6 +535,10 @@ class ToMir {
         const a = this.expr(e.a);
         return f.emit(OP.PSUB, T_I64, a, this.expr(e.b), e.size);
       }
+      case 'PtrEq': {
+        const a = this.expr(e.a);
+        return f.emit(OP.PEQ, T_BOOL, a, this.expr(e.b), 0);
+      }
       default:
         throw new OmniError(`mir: 还没有处理的表达式 ${e.kind}`);
     }

@@ -420,6 +420,11 @@ class JsEmitter {
       case 'PtrSub': return e.a.type.k === 'tptr'
         ? `BigInt((${this.expr(e.a)} - ${this.expr(e.b)}) / ${e.size})`
         : `$psub(${this.expr(e.a)}, ${this.expr(e.b)}, ${e.size})`;
+      // 只比**地址那一个字**。fat 是个三元数组，`===` 比的是引用（两个指向同一格的
+      // 指针各是一份拷贝，引用永远不等），所以必须显式取 [0]。跨块也有定义：不等。
+      case 'PtrEq': return e.a.type.k === 'tptr'
+        ? `(${this.expr(e.a)} === ${this.expr(e.b)})`
+        : `((${this.expr(e.a)})[0] === (${this.expr(e.b)})[0])`;
       // 数组六条（门槛 2 第四刀）：也是 JS 数组，也是引用语义。零值当参数传 ——
       // BufNew 那条传的是"是不是 int"的布尔，那是只有两种元素时的省事写法，数组有四种。
       // 末尾那个布尔是"元素是值语义、存进去要拷一份"（只有向量），按**静态类型**给：

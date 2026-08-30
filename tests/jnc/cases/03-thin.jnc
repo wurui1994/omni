@@ -1,0 +1,34 @@
+// thin 指针（ADR-0016 决策二与决策三）。fat 指针是**三个字** {addr, base, end}，
+// thin 是**一个字** —— 它把范围丢掉了，所以解引用只能查空、不能查界，于是方言要求
+// 它写在 `unsafe { … }` 里。jancy 那边的写法是一次强制转换：`(int thin*)p`。
+//
+// 期望输出的出处：
+//   - `thin` 是**类型修饰符**（Lexer.rl:222 的关键字表里它跟 const / volatile 同一族），
+//     所以 `int thin*` 的意思是"指向 int 的 thin 指针"
+//   - thin 指针上的算术与差值跟 fat 一样按**元素**走：C 的指针语义 -> t + 2 减 t 是 2
+//   - 经 thin 写进去的值，fat 那一侧读得到 —— 两者指的是同一段内存（转换不复制）
+//   - unsafe 是**块级**、没有任何运行期代价（ADR-0016 决策三）：它的全部作用是"少查一次"
+
+int main() {
+    int* p = new int[3];
+    *p = 11;
+    p[1] = 22;
+    p[2] = 33;
+
+    unsafe {
+        int thin* t = (int thin*)p;
+        printf("%d %d %d\n", *t, t[1], t[2]);
+        printf("%d\n", (t + 2) - t);
+        *t = 44;
+        t[2] = 55;
+    }
+
+    // 经 thin 写进去的，fat 这一侧读得到：同一段内存
+    printf("%d %d %d\n", *p, p[1], p[2]);
+
+    // fat 这一侧照旧查界：走出去不报错，解引用才报
+    int* q = p + 1;
+    printf("%d\n", *q);
+
+    return 0;
+}

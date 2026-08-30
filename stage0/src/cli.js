@@ -20,6 +20,7 @@ import { lowerJs } from './frontend-js/lower.js';import { lowerWat } from './fro
 import { lowerAsy } from './frontend-asy/lower.js';
 import { asyUnitModules } from './frontend-asy/link.js';
 import { parseAsyBuiltins } from './frontend-asy/types.js';
+import { lowerJnc } from './frontend-jnc/lower.js';
 import { readSexpr } from './sexpr/read.js';
 import { lowerCoreSexpr } from './sexpr/lower.js';
 import { printSexpr } from './sexpr/print.js';
@@ -110,6 +111,7 @@ function compile(path, argv = []) {
   if (path.endsWith('.wat')) return compileWat(path);
   if (path.endsWith('.sx')) return compileSexpr(path);
   if (path.endsWith('.asy')) return compileAsy(path);
+  if (path.endsWith('.jnc')) return compileJnc(path);
   return compileProgram(path, undefined, modeFor(path, argv));
 }
 
@@ -1053,6 +1055,41 @@ function compileSexpr(path) {
 }
 
 /**
+ * jancy 前端（ADR-0016 分步 7）。零件比 asy 那一份少得多：只有语法表 + 词法，
+ * 没有内建绑定表（jancy 的标准库这一刀不接）、没有模块加载（没有 import）、
+ * 也没有解析缓存（一份 `.jnc` 就是一趟，没有 base/ 那样每次都重解析的库）。
+ */
+function jncFrontEnd() {
+  const gpath = join(installDir(), '..', 'frontend-jnc', 'jnc.grammar');
+  if (!exists(gpath)) throw new OmniError(`找不到 jnc 语法文件：${gpath}`);
+  return loadGrammar(gpath);
+}
+
+/** 一份 `.jnc` -> 核心方言的文本。`omni sx` 那条路也走它，所以降级只有一份实现。 */
+function jncText(path) {
+  const tb = jncFrontEnd();
+  const diags = new Diagnostics();
+  const file = new SourceFile(path, readText(path));
+  const toks = lexText(tb.grammar.lex, file, diags);
+  diags.throwIfErrors();
+  vStep(`jnc lexer      ${path} -> ${toks.length} tokens`);
+  const tree = glrParse(tb, toks, diags);
+  diags.throwIfErrors();
+  if (tree === null) throw new OmniError(`解析不了：${path}`);
+  const text = lowerJnc(tree, diags, { path });
+  diags.throwIfErrors();
+  return text;
+}
+
+function compileJnc(path) {
+  const diags = new Diagnostics();
+  const mod = lowerCoreSexpr(new SourceFile(`${path}.sx`, jncText(path)), diags);
+  diags.throwIfErrors();
+  vStep(`jnc front end  ${path} -> OIR  ${mod.funcs.length} funcs`);
+  return { ast: null, mod, diags };
+}
+
+/**
  * 入口 -> 模块图 -> 检查 -> OIR。
  * 依赖不再靠"提到 json 就整体拼进来"的猜测（旧的 libsFor），而是靠源码里写下的 import（ADR-0009）。
  * `--mode` 只覆盖入口文件的模式；被导入模块的模式由它自己的后缀决定。
@@ -1493,11 +1530,11 @@ function main(argv) {
       stdout(JSON.stringify(ast, replacer, 2) + '\n');
       return 0;
     }
-    // asy -> 核心方言 那一步的**文本**。核心方言的诊断报的是 `<文件>.asy.sx:L:C`，
+    // asy / jancy -> 核心方言 那一步的**文本**。核心方言的诊断报的是 `<文件>.asy.sx:L:C`，
     // 而那份 .sx 是虚拟的（从不落盘），所以没有这一条就只能拿着行号猜。印出来的
     // 内容与 lowerCoreSexpr 拿到的**逐字节相同** —— 行号可以直接对。
     case 'sx': {
-      stdout(asyText(path));
+      stdout(path.endsWith('.jnc') ? jncText(path) : asyText(path));
       return 0;
     }
     // 一个源文件一份产物（第七十五刀）：`<名字>.sx` 与 `<名字>.js` 摊在一个目录里，

@@ -71,4 +71,17 @@
       (print (pload (padd (var t) (int 1))))
       (pstore (var t) (int 5))
       (print (psub (padd (var t) (int 2)) (var t))))
-    (print (pload (var p)))))
+    (print (pload (var p)))
+
+    ;; 指针相等（`peq`）：比的是**地址**，不是内容。走 `bin "=="` 不行 —— fat 是三个字，
+    ;; C 那边结构体之间没有 `==`、JS 那边比数组是比引用。
+    (let s (ptr int) (var p))
+    (print (peq (var p) (var s)))
+    (print (peq (var p) (padd (var p) (int 1))))
+    ;; 跨块**有定义**（答案是"不等"）—— 与 psub 不同，那一条跨块是运行期错误
+    (let o (ptr int) (pnew (ptr int) (int 1)))
+    (print (peq (var p) (var o)))
+    ;; 走出块外再走回来还是同一格
+    (print (peq (var p) (padd (padd (var p) (int 9)) (int -9))))
+    ;; 两个空指针相等
+    (print (peq (var z) (pnull (ptr int))))))

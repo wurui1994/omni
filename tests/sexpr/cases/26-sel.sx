@@ -1,0 +1,47 @@
+;; `(sel c 甲 乙)` —— 条件表达式（ADR-0016 第三刀）。
+;;
+;; 加它的理由是 jancy 的 `? :`：那门语言里它到处都是，而**方言让步、不是语言让步**。
+;; "拆成一个临时量加一条 if" 只在语句位置成立 —— 一旦它出现在 `&&` 的右边、实参里、
+;; 或另一个 sel 的分支里，拆出来的语句就跑到了不该跑的地方。
+;;
+;; 关键性质是**惰性**：只算取中的那一支。这里用"越界解引用"当没取中的那一支 ——
+;; 它要是被算了，程序就会崩，而不是印出答案。这比印两个数强：它把惰性变成可观测的。
+(module
+  (fn boom ((p (ptr int))) int
+    ;; 只有一格的块，读第 5 格 —— 真被调到就是运行期错误
+    (ret (pload (padd (var p) (int 5)))))
+
+  (main
+    (let p (ptr int) (pnew (ptr int) (int 1)))
+    (pstore (var p) (int 7))
+
+    ;; 惰性：两条各有一支是会崩的
+    (print (sel (bool true) (int 1) (call boom (var p))))
+    (print (sel (bool false) (call boom (var p)) (int 2)))
+
+    ;; 四种标量都过一遍
+    (print (sel (bool true) (real 1.5) (real 2.5)))
+    (print (sel (bool false) (bool true) (bool false)))
+    (print (sel (bool true) (str "yes") (str "no")))
+
+    ;; 条件是算出来的，不是字面量
+    (let n int (int 3))
+    (print (sel (bin ">" (var n) (int 2)) (int 10) (int 20)))
+    (print (sel (bin ">" (var n) (int 9)) (int 10) (int 20)))
+
+    ;; 嵌在别的表达式里 —— 这一格是"拆成语句"做不到的
+    (print (bin "+" (sel (bin ">" (var n) (int 2)) (int 10) (int 20))
+                    (sel (bin ">" (var n) (int 9)) (int 1) (int 2))))
+
+    ;; 嵌在自己的分支里（右结合的那种写法降下来就是这个形状）
+    (print (sel (bin "==" (var n) (int 1)) (int 1)
+             (sel (bin "==" (var n) (int 3)) (int 33) (int 99))))
+
+    ;; 嵌在 `&&` 的右边：`&&` 自己也是惰性的，两层惰性要都成立
+    (print (bin "&&" (bin ">" (var n) (int 2))
+                     (bin "==" (sel (bool true) (int 5) (call boom (var p))) (int 5))))
+
+    ;; 指针也能选（值语义，三个字整份抄）
+    (let q (ptr int) (sel (bool true) (var p) (pnull (ptr int))))
+    (print (pload (var q)))
+    (print (pisnull (sel (bool false) (var p) (pnull (ptr int)))))))

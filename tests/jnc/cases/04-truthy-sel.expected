@@ -1,0 +1,16 @@
+n is truthy
+z is falsy
+p is truthy
+nil is falsy
+&& short-circuited
+|| short-circuited
+k=0
+5
+7
+1 2 3
+1
+12
+-1 -6 0
+1 0 1
+0 1
+1

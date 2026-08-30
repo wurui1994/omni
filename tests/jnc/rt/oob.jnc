@@ -1,0 +1,13 @@
+// 越界。范围检查在**解引用**而不是算术上（type_ptr_data.rst 里 `p += i; *p = 40;`
+// 那段），所以 `p + 5` 本身不报错，`p[5]` 才报。
+//
+// 消息里的两个数是**元素**下标与元素个数（不是字节），而这条消息在五条腿上各有一份
+// 实现（prelude 的 $rt_error、interp/builtin.js 的 ptrChk、omni_mem.c 的 omni_pchk）——
+// 逐字节相同是判据，不是巧合。
+int main() {
+    int* p = new int[3];
+    int* q = p + 5;
+    printf("still fine\n");
+    printf("%d\n", *q);
+    return 0;
+}

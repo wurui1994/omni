@@ -1,0 +1,8 @@
+// thin 指针把范围丢掉了，所以转成它要写在 `unsafe { … }` 里（ADR-0016 决策三）。
+// 这一条在降级期就拦下来 —— 消息指着 jancy 那一行，而不是那份虚拟的 .sx。
+int main() {
+    int* p = new int[3];
+    int thin* t = (int thin*)p;
+    printf("%d\n", *t);
+    return 0;
+}

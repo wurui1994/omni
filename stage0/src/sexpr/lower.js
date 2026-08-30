@@ -1337,8 +1337,30 @@ class CoreLowerer {
     }
     if (h === 'splat' || h === 'vlit' || h === 'lane' || h === 'hsum') return this.vecExpr(n, h);
     if (h === 'bnew' || h === 'bget' || h === 'blen') return this.bufExpr(n, h);
+    // `(sel 条件 甲 乙)` —— 条件表达式，**惰性**（只算取中的那一支）。
+    //
+    // 加这一条是因为 jancy 的 `? :` 不该向方言妥协：那门语言里它到处都是，而
+    // "拆成一个临时量加一条 if" 只在语句位置成立 —— 一旦它出现在 `&&` 的右边、
+    // 实参里、或另一个 `sel` 的分支里，拆出来的语句就跑到了不该跑的地方。
+    //
+    // 代价近乎零：汇聚层下面**早就有** Ternary（Omni 自己的 `?:` 就是它），
+    // 五条腿与 MIR 都认（from_oir.js 的 ternary()：开一个槽、IF/ELSE 各存一次、
+    // 再读回来）。这里缺的一直只是一个**表面形式**。
+    if (h === 'sel') {
+      const c = this.expr(n.items[1]);
+      const a = this.expr(n.items[2]);
+      const b = this.expr(n.items[3]);
+      if (c === null || a === null || b === null) return null;
+      if (c.type !== BOOL) return this.err(n, `(sel …) 的条件要是 bool，这里是 ${coreTypeText(c.type)}`);
+      // 两支必须同型。方言不推导也不隐式加宽（ADR-0014 决策 1）—— 要加宽就在前端写出
+      // `(toreal …)`，那一步在各语言那边本来就是一次隐式转换，写下来才看得见。
+      if (!sameCoreType(a.type, b.type)) {
+        return this.err(n, `(sel …) 两支要同型：甲是 ${coreTypeText(a.type)}，乙是 ${coreTypeText(b.type)}`);
+      }
+      return { kind: 'Ternary', cond: c, then: a, otherwise: b, type: a.type };
+    }
     if (h === 'pnew' || h === 'pnull' || h === 'pload' || h === 'padd' || h === 'psub'
-      || h === 'pisnull' || h === 'pfield' || h === 'pthin') return this.ptrExpr(n, h);
+      || h === 'pisnull' || h === 'pfield' || h === 'pthin' || h === 'peq') return this.ptrExpr(n, h);
     if (h === 'anew' || h === 'aget' || h === 'alen' || h === 'apop') return this.arrExpr(n, h);
     // 结构体的两条读侧（写侧是语句 fldset）：`(new Point)` 零值，`(fld p x)` 读字段。
     // 没有"结构体字面量"：字段一多，字面量就要么按顺序（改字段顺序会静默改语义）、
@@ -1444,6 +1466,13 @@ class CoreLowerer {
    *   (pisnull p)        是不是空指针
    *   (pfield p 字段名)  结构体指针 -> 那个字段的指针（"把协议头盖在缓冲上"靠这一条）
    *   (pthin p)          fat 降成 thin；**只在 `(unsafe …)` 里**
+   *   (peq p q)          两个指针指的是不是同一格
+   *
+   * `peq` 单开一条而不是走 `(bin "==" …)`：`==` 那一条要求"两边同型、按值比"，而 fat
+   * 指针是三个字 —— C 那条腿上比整个结构体编不过，JS 那条腿上比两个数组永远不等。
+   * 而"两个地址相不相等"这件事在**两套实现下都有定义**（arena 偏移与真地址都是标量），
+   * 所以它是一条能立住的形式。刻意**不给** `<` `>`：块间的次序在两套实现下不一样，
+   * 那种比较只在同一块内有意义，而"是不是同一块"要用 `psub`（它会替你报错）。
    *
    * 为什么第一刀里没有 `(addr 局部量)`：那要求局部量可寻址，也就是 jancy 说的
    * "any local taken fat address of, is being lifted to GC heap"（type_ptr_data.rst）。
@@ -1510,13 +1539,16 @@ class CoreLowerer {
       if (k.type !== INT) return this.err(n, `padd 的步数要是 int，这里是 ${coreTypeText(k.type)}`);
       return { kind: 'PtrAdd', ptr: p, delta: k, size: sizeOf(p.type.target), type: p.type };
     }
-    // psub
+    // psub / peq —— 都要第二个指针
     const q = this.expr(n.items[2]);
     if (q === null) return null;
     if (q.type.k !== p.type.k || typeKey(q.type) !== typeKey(p.type)) {
-      return this.err(n, `psub 的两个指针要同型：左是 ${coreTypeText(p.type)}，`
+      return this.err(n, `${h} 的两个指针要同型：左是 ${coreTypeText(p.type)}，`
         + `右是 ${coreTypeText(q.type)}`);
     }
+    // `peq` 不查块：**跨块比相等是有定义的**（答案是"不等"），而 psub 跨块是错误
+    // （C 那边的指针差在不同块之间就是未定义行为，这一层把它变成一句报错）。
+    if (h === 'peq') return { kind: 'PtrEq', a: p, b: q, type: BOOL };
     return { kind: 'PtrSub', a: p, b: q, size: sizeOf(p.type.target), type: INT };
   }
 
