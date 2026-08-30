@@ -781,8 +781,8 @@ function asyModsSkip(dir, cs) {
  * 初值只含自己，每一轮把依赖的指纹掺进来，不再变就停。环里的成员因此共用同一层信息，
  * 等价于按 SCC 整块算一个指纹。
  */
-function asyFps(all, cs) {
-  const ev = asyModsEnv();
+function asyFps(all, cs, mainPath) {
+  const ev = asyModsEnv(mainPath);
   const nameOfKey = new Map();
   for (const u of all) if (u.key !== '') nameOfKey.set(u.key, u.name);
   const self = new Map();
@@ -823,7 +823,12 @@ function asyFps(all, cs) {
  */
 function asyModsBuild(path, dir) {
   mkdirAll(dir);
-  const cs = srcStamp();
+  // 印记里再带上**主文件的名字**：TeX 那条路上 `_mainname()` 降成了字面量（dvips 把 dvi
+  // 的文件名写进产物正文，`TeXDict begin … (equilateral_.dvi)` 那一行），而单元那一级的
+  // 产物是按"源码没变就复用"来的 —— 不带主文件名的话，asy_builtins 那一份会被下一个例子
+  // 照旧拿去用，名字就是上一个例子的。量出来过：先跑 equilateral 再跑 fano，fano 的产物里
+  // 写着 `(equilateral_.dvi)`。代价是单元产物不再跨例子共用，写在明处。
+  const cs = `${srcStamp()}|main:${fileUnitName(path)}`;
   const r = asyUnitTexts(path, asyModsSkip(dir, cs));
   // ADR-0015 第一步与第二步：指纹与归属先只打印不接线，好验两样都与"入口是谁"无关。
   if (env('OMNI_ASY_FP') === '1') {
@@ -953,11 +958,18 @@ function asyModsBuild(path, dir) {
 /**
  * 影响"同一个名字解析到哪个文件"的环境。清单里带上它 —— 换了 ASYMPTOTE_DIR
  * 或者换了当前目录（模块是**按当前目录**找的，量过），同一份清单就不再作数。
+ *
+ * 还带上**主文件的名字**：TeX 那条路上 `_mainname()` 把它降成了字面量（dvips 会把
+ * dvi 的文件名写进产物正文，`TeXDict begin … (equilateral_.dvi)` 那一行），而单元那一级
+ * 的产物缓存是按**源码内容**做键的 —— 不带主文件名的话，asy_builtins 那一份会被下一个
+ * 例子照旧复用，名字就是上一个例子的。量出来过：equilateral 之后跑 fano，产物里写着
+ * `(equilateral_.dvi)`。
  */
-function asyModsEnv() {
+function asyModsEnv(path) {
   const d = env('ASYMPTOTE_DIR');
   const b = env('OMNI_ASY_BUILTINS');
-  return `env|${cwd()}|${d === undefined ? '' : d}|${b === undefined ? '' : b}`;
+  const m = path === undefined ? '' : fileUnitName(path);
+  return `env|${cwd()}|${d === undefined ? '' : d}|${b === undefined ? '' : b}|${m}`;
 }
 
 /**

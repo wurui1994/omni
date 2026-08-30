@@ -2134,6 +2134,16 @@ real fitscale(picture pic) {
 }
 
 // ---------------------------------------------------------------- EPS
+
+// EPS 的每一行都从这里出去。为什么要多这一层：带标签的图**最后一段字节是 dvips 写的**，
+// 那条路上底图得先落到盘上（`<前缀>_0.eps`）给 `\includegraphics` 引，而这一层的 write
+// 只能往 stdout 去。所以给它一个开关 —— 攒进 `asy__bufs` 还是直接印。
+bool asy__tobuf = false;
+string asy__bufs = "";
+void asy__out(string s) {
+  if (asy__tobuf) asy__bufs = asy__bufs + s + '\n';
+  else write(s);
+}
 // 坐标是 **%.9g**，这一条量反过一次，要说准：psfile.h:160 是裸的
 // `*out << " " << x`，看着像"ostream 默认 6 位"，但同一个流在 psfile.h:30 写
 // `%%HiResBoundingBox` 时做过 `std::setprecision(9)` —— **precision 是粘的**，
@@ -2144,6 +2154,20 @@ real fitscale(picture pic) {
 // `%%BoundingBox` 那一行是另一路（psfile.h:27 的 setprecision(0)+fixed）。
 string ps(real x) { return string(x, 9); }
 string ps9(real x) { return string(x, 9); }
+
+// 定点 6 位。TeX 那一侧的数全是这个样子（`\kern -284.527559pt`、`(-0.500000,0.000000)`、
+// `bb=-14.589213 …`、`\fontsize{12.000000}`）—— C++ 那边是 `fixed` + `setprecision(6)`，
+// 而 `string(x, n)` 是**有效数字**，两回事。
+string asy__f6(real x) {
+  bool neg = x < 0;
+  real a = neg ? -x : x;
+  real sc = floor(a * 1000000 + 0.5);
+  real ip = floor(sc / 1000000);
+  int fr = (int) (sc - ip * 1000000);
+  string fs = string(fr);
+  while (length(fs) < 6) fs = "0" + fs;
+  return (neg ? "-" : "") + string((int) ip) + "." + fs;
+}
 
 // psfile 里 lastpen 一开始是 initialpen —— 与默认笔的每一项都不同，所以第一个元素
 // 那几行全印。这里用一个 valid 标志表示"还没有上一支笔"。
@@ -2194,11 +2218,11 @@ bool samecolor(pen a, pen b) {
 }
 
 void setpen(pen p) {
-  if (!lastvalid || !samecolor(p, lastpen)) write(colorof(p));
-  if (!lastvalid || p.width != lastpen.width) write(ps(p.width) + " Setlinewidth");
-  if (!lastvalid || p.cap != lastpen.cap) write(string(p.cap) + " setlinecap");
-  if (!lastvalid || p.join != lastpen.join) write(string(p.join) + " setlinejoin");
-  if (!lastvalid || p.miter != lastpen.miter) write(ps(p.miter) + " setmiterlimit");
+  if (!lastvalid || !samecolor(p, lastpen)) asy__out(colorof(p));
+  if (!lastvalid || p.width != lastpen.width) asy__out(ps(p.width) + " Setlinewidth");
+  if (!lastvalid || p.cap != lastpen.cap) asy__out(string(p.cap) + " setlinecap");
+  if (!lastvalid || p.join != lastpen.join) asy__out(string(p.join) + " setlinejoin");
+  if (!lastvalid || p.miter != lastpen.miter) asy__out(ps(p.miter) + " setmiterlimit");
   lastpen = pencopy(p);
   lastvalid = true;
 }
@@ -2210,28 +2234,28 @@ void setpen(pen p) {
 void emitpath(path g, real s, bool newPath=true) {
   int n = g.nodes.length;
   pair z0 = s * g.nodes[0].point;
-  write((newPath ? "newpath " : " ") + ps(z0.x) + " " + ps(z0.y) + " moveto");
+  asy__out((newPath ? "newpath " : " ") + ps(z0.x) + " " + ps(z0.y) + " moveto");
   for (int i = 1; i < n; ++i) {
     pair z = s * g.nodes[i].point;
-    if (g.nodes[i - 1].straight) write(" " + ps(z.x) + " " + ps(z.y) + " lineto");
+    if (g.nodes[i - 1].straight) asy__out(" " + ps(z.x) + " " + ps(z.y) + " lineto");
     else {
       pair c1 = s * g.nodes[i - 1].post;
       pair c2 = s * g.nodes[i].pre;
-      write(" " + ps(c1.x) + " " + ps(c1.y) + " " + ps(c2.x) + " " + ps(c2.y)
+      asy__out(" " + ps(c1.x) + " " + ps(c1.y) + " " + ps(c2.x) + " " + ps(c2.y)
             + " " + ps(z.x) + " " + ps(z.y) + " curveto");
     }
   }
   if (g.cyclic) {
-    if (g.nodes[n - 1].straight) write(" " + ps(z0.x) + " " + ps(z0.y) + " lineto");
+    if (g.nodes[n - 1].straight) asy__out(" " + ps(z0.x) + " " + ps(z0.y) + " lineto");
     else {
       pair c1 = s * g.nodes[n - 1].post;
       pair c2 = s * g.nodes[0].pre;
-      write(" " + ps(c1.x) + " " + ps(c1.y) + " " + ps(c2.x) + " " + ps(c2.y)
+      asy__out(" " + ps(c1.x) + " " + ps(c1.y) + " " + ps(c2.x) + " " + ps(c2.y)
             + " " + ps(z0.x) + " " + ps(z0.y) + " curveto");
     }
-    write("closepath");
+    asy__out("closepath");
   } else if (n == 1) {
-    write(" " + ps(z0.x) + " " + ps(z0.y) + " lineto");
+    asy__out(" " + ps(z0.x) + " " + ps(z0.y) + " lineto");
   }
 }
 
@@ -2325,21 +2349,21 @@ void latshade(shadeinfo h, pen fillrule, real s) {
   for (int i = 0; i < h.gs.length; ++i) pathboxT(b, h.gs[i], ti, s);
   if (h.stroke) widen(b, fillrule);
   transform mt = h.tt * xform(b.l, b.b, b.r - b.l, 0, 0, b.t - b.b);
-  write("<< /ShadingType 1");
-  write("/Matrix [" + wreal(mt.xx) + wreal(mt.yx) + wreal(mt.xy) + wreal(mt.yy)
+  asy__out("<< /ShadingType 1");
+  asy__out("/Matrix [" + wreal(mt.xx) + wreal(mt.yx) + wreal(mt.xy) + wreal(mt.yy)
         + wreal(mt.x) + wreal(mt.y) + "]");
-  write("/ColorSpace /Device" + csname(cs));
-  write("/Function");
-  write("<< /FunctionType 0");
-  write("/Order 1");
-  write("/Domain [0 1 0 1]");
+  asy__out("/ColorSpace /Device" + csname(cs));
+  asy__out("/Function");
+  asy__out("<< /FunctionType 0");
+  asy__out("/Order 1");
+  asy__out("/Domain [0 1 0 1]");
   string rng = "";
   for (int i = 0; i < cs; ++i) rng += "0 1 ";
-  write("/Range [" + rng + "]");
-  write("/Decode [" + rng + "]");
-  write("/BitsPerSample 8");
-  write("/Size [" + string(m) + " " + string(n) + "]");
-  write("/DataSource <");
+  asy__out("/Range [" + rng + "]");
+  asy__out("/Decode [" + rng + "]");
+  asy__out("/BitsPerSample 8");
+  asy__out("/Size [" + string(m) + " " + string(n) + "]");
+  asy__out("/DataSource <");
   for (int i = n - 1; i >= 0; --i) {
     pen[] row = h.mpens[i];
     if (row.length != m) abort("matrix must be rectangular");
@@ -2347,13 +2371,13 @@ void latshade(shadeinfo h, pen fillrule, real s) {
       real[] v = pencomps(row[j], cs);
       string t = "";
       for (int k = 0; k < v.length; ++k) t += hex2(v[k]);
-      write(t);
+      asy__out(t);
     }
   }
-  write(">");
-  write(">>");
-  write(">>");
-  write("shfill");
+  asy__out(">");
+  asy__out(">>");
+  asy__out(">>");
+  asy__out("shfill");
 }
 
 // psfile.cc:373 的 gradientshade：axial 是 /ShadingType 2、radial 是 3（radial 多两个半径）。
@@ -2363,24 +2387,24 @@ void gradshade(shadeinfo h, real s) {
   bool axial = h.st == 2;
   int cs = csof(h.pena);
   if (csof(h.penb) > cs) cs = csof(h.penb);
-  write(h.pena.evenodd ? "eoclip" : "clip");
-  write("<< /ShadingType " + (axial ? "2" : "3"));
-  write("/ColorSpace /Device" + csname(cs));
+  asy__out(h.pena.evenodd ? "eoclip" : "clip");
+  asy__out("<< /ShadingType " + (axial ? "2" : "3"));
+  asy__out("/ColorSpace /Device" + csname(cs));
   string co = wpair(s * h.za);
   if (!axial) co += wreal(s * h.ra);
   co += wpair(s * h.zb);
   if (!axial) co += wreal(s * h.rb);
-  write("/Coords [" + co + "]");
-  write("/Extend [" + (h.exta ? "true" : "false") + " " + (h.extb ? "true" : "false") + "]");
-  write("/Function");
-  write("<< /FunctionType 2");
-  write("/Domain [0 1]");
-  write("/C0 [" + wpen(h.pena, cs) + "]");
-  write("/C1 [" + wpen(h.penb, cs) + "]");
-  write("/N 1");
-  write(">>");
-  write(">>");
-  write("shfill");
+  asy__out("/Coords [" + co + "]");
+  asy__out("/Extend [" + (h.exta ? "true" : "false") + " " + (h.extb ? "true" : "false") + "]");
+  asy__out("/Function");
+  asy__out("<< /FunctionType 2");
+  asy__out("/Domain [0 1]");
+  asy__out("/C0 [" + wpen(h.pena, cs) + "]");
+  asy__out("/C1 [" + wpen(h.penb, cs) + "]");
+  asy__out("/N 1");
+  asy__out(">>");
+  asy__out(">>");
+  asy__out("shfill");
 }
 
 // psfile.cc:408 的 gouraudshade（/ShadingType 4）：每行是「边标记 顶点 颜色」
@@ -2388,16 +2412,16 @@ void gourshade(shadeinfo h, pen fillrule, real s) {
   int n = h.vpens.length;
   if (n == 0) return;
   int cs = maxcs(h.vpens);
-  write(fillrule.evenodd ? "eoclip" : "clip");
-  write("<< /ShadingType 4");
-  write("/ColorSpace /Device" + csname(cs));
-  write("/DataSource [");
+  asy__out(fillrule.evenodd ? "eoclip" : "clip");
+  asy__out("<< /ShadingType 4");
+  asy__out("/ColorSpace /Device" + csname(cs));
+  asy__out("/DataSource [");
   for (int i = 0; i < n; ++i) {
-    write(" " + string(h.vedges[i]) + wpair(s * h.verts[i]) + " " + wpen(h.vpens[i], cs));
+    asy__out(" " + string(h.vedges[i]) + wpair(s * h.verts[i]) + " " + wpen(h.vpens[i], cs));
   }
-  write("]");
-  write(">>");
-  write("shfill");
+  asy__out("]");
+  asy__out(">>");
+  asy__out("shfill");
 }
 
 // psfile.cc:451 的 tensorshade（/ShadingType 7）：每块补丁一行 —— 边标记 0、
@@ -2407,10 +2431,10 @@ void tenshade(shadeinfo h, pen fillrule, real s) {
   int n = h.mpens.length;
   if (n == 0) return;
   int cs = maxcs2(h.mpens);
-  write(fillrule.evenodd ? "eoclip" : "clip");
-  write("<< /ShadingType 7");
-  write("/ColorSpace /Device" + csname(cs));
-  write("/DataSource [");
+  asy__out(fillrule.evenodd ? "eoclip" : "clip");
+  asy__out("<< /ShadingType 7");
+  asy__out("/ColorSpace /Device" + csname(cs));
+  asy__out("/DataSource [");
   int nz = h.tz.length;
   real nineth = 1.0 / 9.0;
   for (int i = 0; i < n; ++i) {
@@ -2439,27 +2463,27 @@ void tenshade(shadeinfo h, pen fillrule, real s) {
     if (pi.length != 4) abort("specify 4 pens for each path");
     ln += " " + wpen(pi[0], cs) + " " + wpen(pi[3], cs)
       + " " + wpen(pi[2], cs) + " " + wpen(pi[1], cs);
-    write(ln);
+    asy__out(ln);
   }
-  write("]");
-  write(">>");
-  write("shfill");
+  asy__out("]");
+  asy__out(">>");
+  asy__out("shfill");
 }
 
 // drawfill.h:75 的 drawShade::draw：gsave、超路径当裁剪、endpsclip、发那一段字典、grestore。
 void emitshade(drawop o, real s) {
   shadeinfo h = o.sh;
   if (h.gs.length == 0) return;
-  write("gsave");
+  asy__out("gsave");
   gsavepen();
   for (int i = 0; i < h.gs.length; ++i) emitpath(h.gs[i], s, i == 0);
-  if (h.stroke) write("strokepath");
-  write(o.p.evenodd ? "eoclip" : "clip");
+  if (h.stroke) asy__out("strokepath");
+  asy__out(o.p.evenodd ? "eoclip" : "clip");
   if (h.st == 1) latshade(h, o.p, s);
   else if (h.st == 2 || h.st == 3) gradshade(h, s);
   else if (h.st == 4) gourshade(h, o.p, s);
   else tenshade(h, o.p, s);
-  write("grestore");
+  asy__out("grestore");
   grestorepen();
 }
 
@@ -2469,19 +2493,19 @@ void emitop(drawop o, real s) {
   // 裁剪的两格（drawclipbegin.h:52 / drawclipend.h:45）：`gsave` + 超路径 + clip，
   // 配对的那一格只发 `grestore`。空路径时只有 gsave / grestore（那份 C++ 的 `empty()` 那一支）。
   if (o.kind == 3) {
-    if (!o.nosave) { write("gsave"); gsavepen(); }
+    if (!o.nosave) { asy__out("gsave"); gsavepen(); }
     for (int i = 0; i < o.sh.gs.length; ++i) emitpath(o.sh.gs[i], s, i == 0);
     if (o.sh.gs.length == 0) return;
-    if (o.sh.stroke) write("strokepath");
-    write(o.p.evenodd ? "eoclip" : "clip");
+    if (o.sh.stroke) asy__out("strokepath");
+    asy__out(o.p.evenodd ? "eoclip" : "clip");
     return;
   }
-  if (o.kind == 4) { if (!o.nosave) { write("grestore"); grestorepen(); } return; }
+  if (o.kind == 4) { if (!o.nosave) { asy__out("grestore"); grestorepen(); } return; }
   emitpath(o.g, s);
   setpen(o.p);
-  if (o.kind == 0) write("stroke");
-  else if (o.p.evenodd) write("eofill");
-  else write("fill");
+  if (o.kind == 0) asy__out("stroke");
+  else if (o.p.evenodd) asy__out("eofill");
+  else asy__out("fill");
 }
 
 // 摆放是量出来的（picture.cc:1187 那一段）：bboxshift = (-b.left,-b.bottom) 之后再加
@@ -2503,23 +2527,23 @@ void shipout(picture pic) {
   real h = bx.t - bx.b;
   real ox = 0.5 * asy__excess(612, w);
   real oy = 0.5 * asy__excess(792, h);
-  write("%!PS-Adobe-3.0 EPSF-3.0");
-  write("%%BoundingBox: " + string(floor(ox)) + " " + string(floor(oy)) + " "
+  asy__out("%!PS-Adobe-3.0 EPSF-3.0");
+  asy__out("%%BoundingBox: " + string(floor(ox)) + " " + string(floor(oy)) + " "
         + string(ceil(ox + w)) + " " + string(ceil(oy + h)));
-  write("%%HiResBoundingBox: " + ps9(ox) + " " + ps9(oy) + " "
+  asy__out("%%HiResBoundingBox: " + ps9(ox) + " " + ps9(oy) + " "
         + ps9(ox + w) + " " + ps9(oy + h));
-  write("%%Creator: Omni asy");
-  write("%%Pages: 1");
-  write("%%Page: 1 1");
-  write("/Setlinewidth {0 exch dtransform dup abs 1 lt {pop 0}{round} ifelse");
-  write("idtransform setlinewidth pop} bind def");
-  write("gsave");
-  write(" " + ps(ox - bx.l) + " " + ps(oy - bx.b) + " translate");
+  asy__out("%%Creator: Omni asy");
+  asy__out("%%Pages: 1");
+  asy__out("%%Page: 1 1");
+  asy__out("/Setlinewidth {0 exch dtransform dup abs 1 lt {pop 0}{round} ifelse");
+  asy__out("idtransform setlinewidth pop} bind def");
+  asy__out("gsave");
+  asy__out(" " + ps(ox - bx.l) + " " + ps(oy - bx.b) + " translate");
   lastvalid = false;
   for (int i = 0; i < pic.ops.length; ++i) emitop(pic.ops[i], s);
-  write("grestore");
-  write("showpage");
-  write("%%EOF");
+  asy__out("grestore");
+  asy__out("showpage");
+  asy__out("%%EOF");
 }
 
 // 刻意**不给** `void shipout()` 与 `void shipout(string)`：plain_shipout.asy:120 那份
@@ -5828,6 +5852,206 @@ path[][] textpath(string[] s, pen[] p) {
 // prefix / format / wait / view / preamble 这一层都用不上（没有写盘、没有 TeX、没有看图
 // 程序）：EPS 正文印到标准输出。`t` 忽略 —— plain 传下来的是 `identity()` 之外只在
 // xasy 那一路才不是恒等（量过：`-f eps` 走的是恒等）。
+// ------------------------------------------ 带标签的图：latex + dvips 那条路（picture.cc:490）
+// 三份中间产物，与 asy 一样（那边加 -k 就能看到）：
+//   <前缀>_0.eps  底图（没有标签）。**不摆**、坐标原样 —— dvips 用 -O 去摆，所以它的
+//                 llx 是负的（界里已经含了标签占掉的地方）。
+//   <前缀>_.tex   固定前言 + \includegraphics{<前缀>_0.eps} + 每个标签一句 \ASYalign
+//   <前缀>_.dvi -> <前缀>_.ps   最终那份 EPS 的字节是 dvips 写的
+//
+// dvips 的偏移不是魔数（picture.cc:520-528 那段 "Magic dvips offsets"）：
+//   hoffset = -128.4 + b.left + bboxshift.x
+//   voffset = -124.8 + paperHeight - height - b.bottom - bboxshift.y   （height = h + 1）
+// 而 bboxshift 正是我们那个居中平移 (ox - bx.l, oy - bx.b)，代进去 b.left / b.bottom
+// 两边全消掉，剩下：hoffset = -128.4 + ox、voffset = -124.8 + 792 - (h + 1) - oy。
+// 拿 equilateral 对过 asy 自己印在 EPS 里那行 %DVIPSCommandLine（-O35.3677bp,151.056bp）：
+// 我们算出 35.367717 / 151.055879。
+private string asy__texdir = "/tmp/omni-asytex";
+
+// 底图。与 shipout 那份的差别只有两处：界是 bx 原样（不是居中之后的），没有那对
+// gsave/translate（dvips 负责摆）。
+private string asy__baseeps(frame f, box bx) {
+  asy__tobuf = true;
+  asy__bufs = "";
+  asy__out("%!PS-Adobe-3.0 EPSF-3.0");
+  asy__out("%%BoundingBox: " + string(floor(bx.l)) + " " + string(floor(bx.b)) + " "
+        + string(ceil(bx.r)) + " " + string(ceil(bx.t)));
+  asy__out("%%HiResBoundingBox: " + ps9(bx.l) + " " + ps9(bx.b) + " "
+        + ps9(bx.r) + " " + ps9(bx.t));
+  asy__out("%%Creator: Omni asy");
+  asy__out("%%Pages: 1");
+  asy__out("%%Page: 1 1");
+  asy__out("/Setlinewidth {0 exch dtransform dup abs 1 lt {pop 0}{round} ifelse");
+  asy__out("idtransform setlinewidth pop} bind def");
+  lastvalid = false;
+  for (int i = 0; i < f.ops.length; ++i) emitop(f.ops[i], 1);
+  asy__out("showpage");
+  asy__out("%%EOF");
+  asy__tobuf = false;
+  string s = asy__bufs;
+  asy__bufs = "";
+  return s;
+}
+
+// `<前缀>_.tex`。前言照 texfile.h:63-120 的 texpreamble + dvipsfix 那一段写死 ——
+// 它不含任何随例子变的东西（`\ASYprefix` 空、纸张由 dvips 的 -T 定），所以这一份是常量。
+private string asy__texpre(string nl) {
+  return "\documentclass[12pt]{article}" + nl
+    + "\let\paperwidthsave\paperwidth\let\paperwidth\undefined" + nl
+    + "\usepackage{graphicx}" + nl
+    + "\let\paperwidth\paperwidthsave" + nl
+    + "\newbox\ASYbox" + nl
+    + "\newdimen\ASYdimen" + nl
+    + "\def\ASYprefix{}" + nl
+    + "\long\def\ASYbase#1#2{\leavevmode\setbox\ASYbox=\hbox{#1}%\ASYdimen=\ht\ASYbox%" + nl
+    + "\setbox\ASYbox=\hbox{#2}\lower\ASYdimen\box\ASYbox}" + nl
+    + "\long\def\ASYaligned(#1,#2)(#3,#4)#5#6#7{\leavevmode%" + nl
+    + "\setbox\ASYbox=\hbox{#7}%" + nl
+    + "\setbox\ASYbox\hbox{\ASYdimen=\ht\ASYbox%" + nl
+    + "\advance\ASYdimen by\dp\ASYbox\kern#3\wd\ASYbox\raise#4\ASYdimen\box\ASYbox}%" + nl
+    + "\setbox\ASYbox=\hbox{#5\wd\ASYbox 0pt\dp\ASYbox 0pt\ht\ASYbox 0pt\box\ASYbox#6}%" + nl
+    + "\hbox to 0pt{\kern#1pt\raise#2pt\box\ASYbox\hss}}%" + nl
+    + "\long\def\ASYalignT(#1,#2)(#3,#4)#5#6{%" + nl
+    + "\ASYaligned(#1,#2)(#3,#4){%" + nl
+    + "\special{ps:gsave currentpoint currentpoint translate [#5 0 0] concat neg exch neg exch translate}%" + nl
+    + "}{%" + nl
+    + "\special{ps:currentpoint grestore moveto}%" + nl
+    + "}{#6}}" + nl
+    + "\long\def\ASYalign(#1,#2)(#3,#4)#5{\ASYaligned(#1,#2)(#3,#4){}{}{#5}}" + nl
+    + "\def\ASYraw#1{" + nl
+    + "currentpoint currentpoint translate matrix currentmatrix" + nl
+    + "100 12 div -100 12 div scale" + nl
+    + "#1" + nl
+    + "setmatrix neg exch neg exch translate}" + nl
+    + "\makeatletter" + nl
+    + "\def\Ginclude@eps#1{%" + nl
+    + " \message{<#1>}%" + nl
+    + "  \bgroup" + nl
+    + "  \def\@tempa{!}%" + nl
+    + "  \dimen@\Gin@req@width" + nl
+    + "  \dimen@ii.1bp%" + nl
+    + "  \divide\dimen@\dimen@ii" + nl
+    + "  \@tempdima\Gin@req@height" + nl
+    + "  \divide\@tempdima\dimen@ii" + nl
+    + "    \special{PSfile=#1\space" + nl
+    + "      llx=\Gin@llx\space" + nl
+    + "      lly=\Gin@lly\space" + nl
+    + "      urx=\Gin@urx\space" + nl
+    + "      ury=\Gin@ury\space" + nl
+    + "      \ifx\Gin@scalex\@tempa\else rwi=\number\dimen@\space\fi" + nl
+    + "      \ifx\Gin@scaley\@tempa\else rhi=\number\@tempdima\space\fi" + nl
+    + "      \ifGin@clip clip\fi}%" + nl
+    + "  \egroup}" + nl
+    + "\makeatother" + nl;
+}
+
+// 一条标签写进 .tex 的那个对齐量（drawlabel.cc:106-117 的 texAlign）。
+private pair asy__texalign(labelrec r) {
+  pair al = inverse(r.t) * r.align;
+  real s0 = abs(al.x) > abs(al.y) ? abs(al.x) : abs(al.y);
+  if (s0 != 0) al = (al.x * 0.5 / s0, al.y * 0.5 / s0);
+  al = (al.x - 0.5, al.y - 0.5);
+  real vert = r.height + r.depth;
+  real dep = r.depth;                            // NOBASEALIGN
+  if (dep > 0 && vert != 0) al = (al.x, al.y + dep / vert);
+  return al;
+}
+
+// 走 latex + dvips 出图。成了回 true（字节已经印出去了），没成回 false（外面退回那条
+// 不带标签的老路 —— 至少还有图）。
+private bool asy__texship(string prefix, frame f, box bx, real ox, real oy, real w, real h) {
+  string nl = '\n';
+  string dir = asy__texdir;
+  // 前缀要用**真名字**：dvips 把 dvi 的文件名写进产物里（`%%Title:` 那一行是注释不算，
+  // 但 docinfo 里那个 `(名字_.dvi)` 是正文的一个词），拿 "t" 顶就与参考对不上了 ——
+  // 量出来的：equilateral 只差一处，就是 `(equilateral_.dvi)` vs `(t_.dvi)`。
+  string pre = prefix == "" ? _mainname() : prefix;
+  if (pre == "") pre = "t";
+  if (_runproc("mkdir -p " + dir + " && rm -f " + dir + "/" + pre + "_*") != 0) return false;
+  _writetext(dir + "/" + pre + "_0.eps", asy__baseeps(f, bx));
+  // 标签要先量过才写得出（drawlabel.cc:187 的 checkbounds）。framebox 已经量过了。
+  asy__measure(f.labs);
+  string t = asy__texpre(nl)
+    + "\setlength{\unitlength}{1pt}%" + nl
+    + "\pagestyle{empty}" + nl
+    + "\textheight=" + asy__f6(h + 17) + "bp" + nl
+    + "\textwidth=" + asy__f6(w + 18) + "bp" + nl
+    + "\begin{document}" + nl
+    + "\makeatletter%" + nl
+    + "\let\ASYencoding\f@encoding%" + nl
+    + "\let\ASYfamily\f@family%" + nl
+    + "\let\ASYseries\f@series%" + nl
+    + "\let\ASYshape\f@shape%" + nl
+    + "\makeatother%" + nl
+    + "{\catcode`\"=12%" + nl
+    + "\includegraphics[bb=" + asy__f6(bx.l) + " " + asy__f6(bx.b) + " "
+      + asy__f6(bx.r) + " " + asy__f6(bx.t) + "]{" + pre + "_0.eps}%" + nl
+    + "}%" + nl
+    + "\kern " + asy__f6(-w / asy__tex2ps) + "pt%" + nl;
+  for (int i = 0; i < f.labs.length; ++i) {
+    labelrec r = f.labs[i];
+    if (r.s == "") continue;
+    real fs = r.p.fontsizeval / asy__tex2ps;
+    pair al = asy__texalign(r);
+    t = t + "\special{ps:" + colorof(r.p) + "}%" + nl
+      + "\fontsize{" + asy__f6(fs) + "}{" + asy__f6(1.2 * fs) + "}\selectfont%" + nl;
+    if (i == 0) {
+      t = t + "\usefont{\ASYencoding}{\ASYfamily}{\ASYseries}{\ASYshape}%" + nl;
+    }
+    t = t + "\ASYalign(" + asy__f6((r.position.x - bx.l) / asy__tex2ps) + ","
+      + asy__f6((r.position.y - bx.b) / asy__tex2ps) + ")("
+      + asy__f6(al.x) + "," + asy__f6(al.y) + "){" + r.s + "}%" + nl;
+  }
+  t = t + "\end{document}" + nl;
+  _writetext(dir + "/" + pre + "_.tex", t);
+  if (_runproc("cd " + dir + " && latex -interaction=nonstopmode " + pre + "_.tex") != 0) {
+    return false;
+  }
+  real ho = -128.4 + ox;
+  real vo = -124.8 + 792 - (h + 1) - oy;
+  string cmd = "cd " + dir + " && dvips -R -Pdownload35 -D600"
+    + " -O" + asy__f6(ho) + "bp," + asy__f6(vo) + "bp -T612bp,792bp -q"
+    + " -o" + pre + "_.ps " + pre + "_.dvi";
+  if (_runproc(cmd) != 0) return false;
+  // dvips 出来的是**整页** PostScript（`%!PS-Adobe-2.0`、`%%BoundingBox: 0 0 612 792`）。
+  // asy 会再过一遍（picture.cc:552-612）：换掉那行 `%!PS-Adobe-`、把第一处 `%%BoundingBox`
+  // 换成自己算的界、扔掉 `%%DocumentPaperSizes:` 与 `%%BeginPaperSize:`..`%%EndPaperSize`
+  // 那一段（它另外还把 DVIPSRC 指到 base/nopapersize.ps 去，让 dvips 干脆别发；
+  // 这一层不认识 base 在哪，靠这个过滤达到同一个结果）。别的行原样。
+  // `TeXDict begin @defspecial` 那一路的 gsave/concat 这里**没做**：那是 bboxshift 要靠
+  // 特殊块搬的情形，量过 equilateral 的参考里没有一行是它开头的（那些字样都在前言的
+  // 定义里）。哪个例子露出来再补。
+  string[] ls = _readlines(dir + "/" + pre + "_.ps");
+  bool firstbb = true;
+  bool inpaper = false;
+  for (int i = 0; i < ls.length; ++i) {
+    string s = ls[i];
+    if (i == ls.length - 1 && s == "") continue;
+    if (inpaper) {
+      if (find(s, "%%EndPaperSize", 0) == 0) inpaper = false;
+      continue;
+    }
+    if (find(s, "%%BeginPaperSize:", 0) == 0) { inpaper = true; continue; }
+    if (length(s) > 0 && substr(s, 0, 1) == "%") {
+      if (find(s, "%%DocumentPaperSizes:", 0) == 0) continue;
+      if (find(s, "%!PS-Adobe-", 0) == 0) {
+        write("%!PS-Adobe-3.0 EPSF-3.0");
+        continue;
+      }
+      if (firstbb && find(s, "%%BoundingBox:", 0) == 0) {
+        write("%%BoundingBox: " + string(floor(ox)) + " " + string(floor(oy)) + " "
+              + string(ceil(ox + w)) + " " + string(ceil(oy + h)));
+        write("%%HiResBoundingBox: " + ps9(ox) + " " + ps9(oy) + " "
+              + ps9(ox + w) + " " + ps9(oy + h));
+        firstbb = false;
+        continue;
+      }
+    }
+    write(s);
+  }
+  return true;
+}
+
 void _shipout(string prefix="", frame f, frame preamble=null, string format="",
               bool wait=false, bool view=true, transform t=identity()) {
   box bx = framebox(f);
@@ -5835,23 +6059,24 @@ void _shipout(string prefix="", frame f, frame preamble=null, string format="",
   real h = bx.t - bx.b;
   real ox = 0.5 * asy__excess(612, w);
   real oy = 0.5 * asy__excess(792, h);
-  write("%!PS-Adobe-3.0 EPSF-3.0");
-  write("%%BoundingBox: " + string(floor(ox)) + " " + string(floor(oy)) + " "
+  if (f.labs.length > 0 && asy__texship(prefix, f, bx, ox, oy, w, h)) return;
+  asy__out("%!PS-Adobe-3.0 EPSF-3.0");
+  asy__out("%%BoundingBox: " + string(floor(ox)) + " " + string(floor(oy)) + " "
         + string(ceil(ox + w)) + " " + string(ceil(oy + h)));
-  write("%%HiResBoundingBox: " + ps9(ox) + " " + ps9(oy) + " "
+  asy__out("%%HiResBoundingBox: " + ps9(ox) + " " + ps9(oy) + " "
         + ps9(ox + w) + " " + ps9(oy + h));
-  write("%%Creator: Omni asy");
-  write("%%Pages: 1");
-  write("%%Page: 1 1");
-  write("/Setlinewidth {0 exch dtransform dup abs 1 lt {pop 0}{round} ifelse");
-  write("idtransform setlinewidth pop} bind def");
-  write("gsave");
-  write(" " + ps(ox - bx.l) + " " + ps(oy - bx.b) + " translate");
+  asy__out("%%Creator: Omni asy");
+  asy__out("%%Pages: 1");
+  asy__out("%%Page: 1 1");
+  asy__out("/Setlinewidth {0 exch dtransform dup abs 1 lt {pop 0}{round} ifelse");
+  asy__out("idtransform setlinewidth pop} bind def");
+  asy__out("gsave");
+  asy__out(" " + ps(ox - bx.l) + " " + ps(oy - bx.b) + " translate");
   lastvalid = false;
   for (int i = 0; i < f.ops.length; ++i) emitop(f.ops[i], 1);
-  write("grestore");
-  write("showpage");
-  write("%%EOF");
+  asy__out("grestore");
+  asy__out("showpage");
+  asy__out("%%EOF");
 }
 // 三维那两条出口（runpicture.in:486/512）。真 asy 一条走 PRC/v3d 的写盘与 GPU 渲染，
 // 一条是 `f->shipout3(prefix,format)` 的短形。这一层两条都没有，所以体是 abort ——

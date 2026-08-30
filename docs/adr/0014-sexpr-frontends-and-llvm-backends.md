@@ -7563,6 +7563,49 @@ sweep（220 里干净 219、1.6s）。**跳过**：EPS 全量、`OMNI_LEGS=all` 
 
 下一刀：生 `<名>_0.eps` 与 `<名>_.tex`、跑 latex + dvips、把出来的字节印出来。
 
+### 第八十九刀：latex + dvips 那条管子接通 —— equilateral 与 circles 逐字节一样
+
+三段都补齐了（picture.cc:490-612）：
+
+- **底图** `<前缀>_0.eps`：与 shipout 那份只差两处 —— 界是 `bx` 原样（不是居中之后的，
+  所以 llx 是负的），没有那对 `gsave/translate`（摆放交给 dvips 的 `-O`）。
+  为此 EPS 的每一行改从 `asy__out` 出去，它按 `asy__tobuf` 决定攒进字符串还是印到
+  stdout —— 83 处调用点，机械替换。
+- **`<前缀>_.tex`**：前言照 texfile.h:63-120 写死（它不含随例子变的东西）。正文是
+  `\textheight = h+17`、`\textwidth = w+18`、`\includegraphics[bb=…]`、
+  `\kern -{w/tex2ps}pt`，再每个标签一句
+  `\ASYalign((z-bx左下)/tex2ps)(texAlign){正文}`（texfile.cc:294 那两行，
+  `hoffset()` 就是 `box.left`）。数全是**定点 6 位**（`fixed` + `setprecision(6)`），
+  所以多了一个 `asy__f6` —— `string(x, n)` 是有效数字，两回事。
+- **dvips**：`-R -Pdownload35 -D600 -O…bp,…bp -T612bp,792bp -q`。偏移不是魔数：
+  代进 bboxshift（正是我们的居中平移）之后 `b.left`/`b.bottom` 全消掉，剩
+  `hoffset = -128.4 + ox`、`voffset = -124.8 + 792 - (h+1) - oy`。对过 asy 自己写在
+  产物里那行 `%DVIPSCommandLine`：它 `-O35.3677bp,151.056bp`，我们 35.367717 / 151.055878。
+- 出来的是**整页** PS，再过一遍 asy 那个过滤（picture.cc:552-612）：换掉
+  `%!PS-Adobe-` 那行、把第一处 `%%BoundingBox` 换成自己算的界、扔掉
+  `%%DocumentPaperSizes:` 与 `%%BeginPaperSize:`..`%%EndPaperSize`（asy 另外把 DVIPSRC
+  指到 base/nopapersize.ps 让 dvips 干脆别发，这一层不认识 base 在哪，靠过滤达到同一结果）。
+
+**踩到的那个坑值得单独记**：dvips 把 dvi 的文件名写进产物**正文**
+（`TeXDict begin 40258584 52099344 1000 600 600 (equilateral_.dvi)`），不是注释，
+所以名字必须对。于是加了 `_mainname()`（主文件基名，`lower.js:2662` 的 rootModName）。
+第一次量：equilateral 对上了，其余八个产物里全写着 `(equilateral_.dvi)` ——
+**单元那一级的产物是按"源码没变就复用"来的**，而 `_mainname()` 是降成字面量的，
+asy_builtins 那一份于是带着上一个例子的名字被下一个例子拿去用。这是"缓存跑了错的程序"
+那一类的第三次（前两次是 4b3df7b 与第八十四刀的 srcStamp）。修法：印记 `cs` 里带上主文件名
+（cli.js:826）。代价是单元产物不再跨例子共用，写在明处；量出来 `tests/asy/run.js`
+反而从 306s 回到 252s（每个用例本来就是自己的主文件）。
+
+结果：点名的 9 个 TeX 例子里 **equilateral 与 circles 逐字节一样**，剩下的差别第一次
+全是**内容**上的，不再是名字或结构：fano 2 处数值、ring 4 处（`%%BoundingBox` 差 1bp）、
+coag / venn3 长度差、hierarchy 的界差 14bp、buildcycle 与 spiral 是**字体选错**
+（参考 `FontDirectory/CMR12`，我们 `CMMI12` —— `\usefont` 只在第一条标签发了，
+asy 那边是"字体变了就发"，setlatexfont 的条件还没照抄）。
+
+跑了：EPS 点名 9 个 TeX 例子（2 同）+ 23 份原本逐字一样的重跑（**没退**，仍 23）、
+`tests/asy/run.js` 259 passed / 0 failed（252.4s）、sweep（220 里干净 219、1.3s）。
+**跳过**：EPS 全量、`OMNI_LEGS=all` 的另外三条腿。
+
 ## 后果与代价
 
 

@@ -622,6 +622,15 @@ export function asyCall(L, n) {
     L.used.add('asy__lines');
     return { code: `(call asy__lines (readtext ${p.code}))`, type: 'string[]' };
   }
+  // `_mainname()`：主文件的基名（去掉 .asy）。TeX 那一段要用它当中间产物的前缀 ——
+  // dvips 把 dvi 的文件名写进**正文**（`TeXDict begin … (equilateral_.dvi)` 那一行），
+  // 名字不对参考就对不上。真 asy 那边这个名字是 `-o` 给的，而 `-o` 就是例子名。
+  if (nm === '_mainname') {
+    const raw = asyCallArgs(L, n);
+    if (raw === null) return null;
+    if (raw.length !== 0) return L.err(n, `'_mainname' 不要实参，给了 ${raw.length} 个`);
+    return { code: `(str ${JSON.stringify(L.rootModName())})`, type: 'string' };
+  }
   // `_readtext(name)`：不切行的那一份（`_readlines` 是它加一层 asy__lines）。TeX 那一段
   // 要在一份 latex 的 .log 里按次序捞 `>dim(…pt)dim`，切行反而多一道。
   if (nm === '_readtext') {
