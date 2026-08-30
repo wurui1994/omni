@@ -310,13 +310,31 @@ class LlvmEmitter {
     // 结构体的命名类型。按类型池的顺序发，与用到没用到无关 —— 判断"用到了"要先扫一遍
     // 函数体，而多一个没人用的 `type` 在 LLVM 里没有代价，扫一遍的那点代码却要维护。
     // 字段偏移交给 LLVM 算（getelementptr 的第三个下标就是字段号），这一层不自己算字节。
+    //
+    // 一个命名类型的**字段**里可能提到另一个命名类型（内嵌的结构体、或者内嵌的一整块
+    // 结构体 —— 第二十二刀），而那一个未必在类型池里：池子是按**指令**用到的类型攒的，
+    // 而 `(pfield …)` 到了 MIR 已经化成字节偏移了。所以这里补一遍闭包 —— LLVM 要求
+    // `%s_Row = type { [2 x %s_P], i64 }` 里的 `%s_P` 有体，没体的命名类型是 opaque，
+    // 算不出尺寸（`base element of getelementptr must be sized`）。只顺着**内嵌**递归：
+    // 类字段是一个 `ptr`（见 fieldTy），不需要体，也因此不会绕出环来。
     let sawStruct = false;
+    const emittedAgg = new Set();
+    const emitAgg = (ot) => {
+      const key = `%${ot.k === 'class' ? 'c' : 's'}_${ot.name}`;
+      if (emittedAgg.has(key)) return;
+      emittedAgg.add(key);
+      for (const fd of ot.fields) {
+        let ft = fd.type;
+        while (ft.k === 'blk') ft = ft.el;
+        if (ft.k === 'struct') emitAgg(ft);
+      }
+      const fs = ot.fields.map((fd) => this.fieldTy(fd.type, `${ot.name}.${fd.name}`));
+      this.line(`${key} = type { ${fs.join(', ')} }`);
+      sawStruct = true;
+    };
     for (const t of this.mir.types) {
       if (t.kind !== 'struct' && t.kind !== 'class') continue;
-      const fs = [];
-      for (const fd of t.oir.fields) fs.push(this.fieldTy(fd.type, `${t.name}.${fd.name}`));
-      this.line(`%${t.kind === 'class' ? 'c' : 's'}_${t.name} = type { ${fs.join(', ')} }`);
-      sawStruct = true;
+      emitAgg(t.oir);
     }
     if (sawStruct) this.line('');
     if (this.mir.closures.length > 0) this.closureTypes();
@@ -948,6 +966,9 @@ class LlvmEmitter {
     // 所以 COPY 那条 `load %s_S` / `store %s_S` 把三个字一起搬走，不用另写一条。
     if (t.k === 'ptr') return '{ ptr, ptr, ptr }';
     if (t.k === 'tptr') return 'ptr';
+    // 定长内存的字段（第二十二刀）：LLVM 自己就有这个类型 —— `[N x T]`，**摊在父对象里**，
+    // 与内嵌结构体同一档。多维就是嵌套的 `[2 x [3 x i64]]`，尺寸与对齐跟 C 一致。
+    if (t.k === 'blk') return `[${t.n} x ${this.fieldTy(t.el, what)}]`;
     throw new OmniError(`${NOPE}结构体字段的类型 ${t.k}：${what}`);
   }
 
@@ -1002,6 +1023,9 @@ class LlvmEmitter {
     // 也是这个常量），thin 就是 null —— 这里在常量位置，不必借 SSA 那两条指令。
     if (t.k === 'ptr') return 'zeroinitializer';
     if (t.k === 'tptr') return 'null';
+    // 定长内存的字段（第二十二刀）：`[N x T]` 的全零就是 zeroinitializer。元素是 string
+    // 那种"零不是全零位"的类型走不到这里 —— blkTy 那道闸门只放行 ptrTargetOk 的那几种。
+    if (t.k === 'blk') return 'zeroinitializer';
     throw new OmniError(`${NOPE}结构体字段的零值 ${t.k}：${what}`);
   }
 

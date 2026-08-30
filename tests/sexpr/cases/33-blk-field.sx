@@ -1,0 +1,87 @@
+;; 定长内存当**结构体字段**（ADR-0016 第二十二刀）—— 这一刀开的是两处闸门里的第一处：
+;; `(struct …)` 的字段类型现在收 `(blk T N)`。布局那一层从第十八刀起就已经会算它了
+;; （hir/types.js 的 alignOf / sizeOf / structLayout），缺的只是这张白名单。
+;;
+;; 内嵌的那 N 格**不是一个值**：`(fld …)` / `(fldset …)` 在 blk 字段上是当场拒的
+;; （bad/blk-fld.sx 钉着），碰它只能走 `(pfield p f)` 拿地址、再 `(pelem …)` 退成元素指针。
+;;
+;; 期望输出的出处（这一路没有 oracle，逐条注明）：
+;;   - 字段偏移按 C 的默认布局：自然对齐、按声明顺序（hir/types.js 的 structLayout 那一段
+;;     注释引的就是 type_ptr_data.rst 开头那段"把协议头盖在缓冲上"）。所以
+;;     `struct S { int n; int v[4]; int m; }` 里 v 从第 8 字节起、m 从第 40 字节起，
+;;     整个 S 是 48 字节 —— 这一刀刻意留下的差别是"每格 int 占 8 字节"（见前端头注释）。
+;;   - `pnew` 出来的那块是零初始化的（type_ptr_data.rst）
+;;   - `padd` 在 `(ptr S)` 上一步跨一整个 S，退到 `(ptr int)` 之后一步跨一格
+;;
+;; 刻意不印任何裸地址：JS 那条腿是 arena 偏移、C 那条腿是真指针。
+(module
+  (struct S (n int) (v (blk int 4)) (m int))
+  ;; 二维的字段：`int g[2][3]`
+  (struct T (g (blk (blk int 3) 2)) (tag bool))
+  ;; 元素是**前面已经声明过**的结构体：`P ps[2]`。声明在后面的那个是拒的（blkTy 那一条），
+  ;; 理由与直接内嵌同一条 —— 那时候它的字段还空着，而且 C 后端要求被嵌套者先是完整类型。
+  (struct P (x int) (y int))
+  (struct Row (ps (blk P 2)) (k int))
+
+  ;; 字段那一块当普通的 `int*` 使：形参这一侧一个字都不知道它是内嵌的
+  (fn sum4 ((p (ptr int))) int
+    (do
+      (let s int (int 0))
+      (let i int (int 0))
+      (while (bin "<" (var i) (int 4))
+        (do
+          (set s (bin "+" (var s) (pload (padd (var p) (var i)))))
+          (set i (bin "+" (var i) (int 1)))))
+      (ret (var s))))
+
+  (main
+    (let s (ptr S) (pnew (ptr S) (int 1)))
+    ;; 刚出来全零 —— 内嵌那四格也是
+    (print (pload (pfield (var s) n)))
+    (print (pload (pelem (pfield (var s) v))))
+    (print (call sum4 (pelem (pfield (var s) v))))
+
+    ;; 写内嵌的四格，前后两个标量字段不动
+    (pstore (pfield (var s) n) (int 100))
+    (pstore (pfield (var s) m) (int 200))
+    (let i int (int 0))
+    (while (bin "<" (var i) (int 4))
+      (do
+        (pstore (padd (pelem (pfield (var s) v)) (var i)) (bin "*" (var i) (int 3)))
+        (set i (bin "+" (var i) (int 1)))))
+    (print (pload (pfield (var s) n)))
+    (print (pload (pfield (var s) m)))
+    (print (call sum4 (pelem (pfield (var s) v))))
+    (print (pload (padd (pelem (pfield (var s) v)) (int 3))))
+
+    ;; 一格 S 是 48 字节 = 6 个 int：数组里第 1 格的 n 就在第 0 格的 v 之后再隔两格
+    (let arr (ptr S) (pnew (ptr S) (int 2)))
+    (pstore (pfield (padd (var arr) (int 1)) n) (int 7))
+    (print (pload (pfield (padd (var arr) (int 1)) n)))
+    (print (psub (padd (var arr) (int 1)) (var arr)))
+    ;; 相邻两格的同一个字段之间隔 48 字节；换成 int 指针就是 6 格
+    (print (psub (pelem (pfield (padd (var arr) (int 1)) v)) (pelem (pfield (var arr) v))))
+
+    ;; 二维的字段：行主序，第 1 行第 2 格 = 从头数第 5 格
+    (let t (ptr T) (pnew (ptr T) (int 1)))
+    (pstore (padd (pelem (padd (pelem (pfield (var t) g)) (int 1))) (int 2)) (int 55))
+    (print (pload (padd (pelem (pelem (pfield (var t) g))) (int 5))))
+    (print (pload (pfield (var t) tag)))
+
+    ;; 元素是结构体的那一块：`Row.ps` 是两格 P，每格 16 字节
+    (let r (ptr Row) (pnew (ptr Row) (int 1)))
+    (pstore (pfield (padd (pelem (pfield (var r) ps)) (int 1)) y) (int 66))
+    (pstore (pfield (var r) k) (int 4))
+    (print (pload (pfield (pelem (pfield (var r) ps)) x)))
+    (print (pload (pfield (padd (pelem (pfield (var r) ps)) (int 1)) y)))
+    (print (pload (pfield (var r) k)))
+
+    ;; `(new S)` 那条路（结构体当**值**）也得能铺零 —— 五条腿各有一处"逐字段铺"，
+    ;; 内嵌那一块在那儿是一个循环/`zeroinitializer`。这一块本身取不出来
+    ;; （`(fld …)` 在 blk 字段上当场拒，见 bad/blk-fld.sx），能看的是它前后两个字段。
+    (let z S (new S))
+    (print (fld (var z) n))
+    (print (fld (var z) m))
+    ;; 元素是结构体的那一块也要铺得动（C 那侧是 `s_P ps[2]` 加一个循环）
+    (let w Row (new Row))
+    (print (fld (var w) k))))

@@ -1,0 +1,11 @@
+;; 内嵌的定长内存不是一个**值**（ADR-0016 第二十二刀）。`(fld …)` 走的是"结构体是一个值"
+;; 那条路 —— 那一侧的槽装的是标量/句柄，装不下一整块 N 格。这与 `bad/blk-load.sx`
+;; 是同一条理由的另一面：那边是 `(pload p)`，这边是字段。
+;;
+;; 碰它的路只有一条：`(pfield p f)` 拿到那一块的地址，再 `(pelem …)` 退成元素指针。
+(module
+  (struct S (n int) (v (blk int 4)))
+  (main
+    (let z S (new S))
+    (print (fld (var z) n))
+    (print (fld (var z) v))))

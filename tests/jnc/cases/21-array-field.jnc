@@ -1,0 +1,68 @@
+// 数组**字段**（第二十二刀）—— 那 N 格是**真的内嵌**在结构体里的。
+//
+// 出处：jancy 的 struct 字段就是 C 的布局（`type_ptr_data.rst` 开头那段把 TCP/IP 头盖在
+// 缓冲上的例子是这门语言的用处所在），而 `createStructField`
+// （jnc_ct_Parser.cpp 的 `createField`）对数组类型没有额外限制 —— 第二十一刀量出的
+// 「jancy 里数组不是 C」只关形参与返回那一侧，字段这一侧它与 C 一致。
+//
+// 这一份的期望输出**可以**拿 `cc -O0` 的孪生程序对：内嵌字段这一格 jancy 与 C 同。
+// 逐条量的是：
+//   - 刚出来全零（`type_ptr_data.rst`：编译器保证用户代码碰它之前都清零）
+//   - `b.m_v[i]` 读写、`b->m_v[i]` 经指针读写
+//   - 二维字段行主序
+//   - 字段那一块退化成 `int*`（`Cast_DataPtr_FromArray`），经它写回去原对象跟着变
+//   - `Box c = b;` 抄一份 —— 内嵌那几格也抄（copyVal 递归下去），改 c 不动 b
+//   - 花括号初值里嵌一对花括号写那几格
+//
+// 刻意留下的差别（见前端头注释）：每格 int 占 8 字节，所以 sizeof 意义上 Box 比 C 的大。
+// 这一份不印任何尺寸，所以看不见。
+
+struct Box {
+    int m_n;
+    int m_v[4];
+    int m_grid[2][3];
+}
+
+int total(Box* b) {
+    int s = 0;
+    for (int i = 0; i < 4; i++)
+        s += b->m_v[i];
+    return s;
+}
+
+// 字段那一块退化成 `int*` 传出去：形参这一侧一个字都不知道它是内嵌的
+int head2(int* p) {
+    return p[0] + p[1];
+}
+
+int main() {
+    Box b;
+    printf("zero=%d %d %d\n", b.m_n, b.m_v[2], b.m_grid[1][1]);
+
+    b.m_n = 5;
+    for (int i = 0; i < 4; i++)
+        b.m_v[i] = i * 3;
+    printf("v=%d %d / sum=%d / n=%d\n", b.m_v[0], b.m_v[3], total(&b), b.m_n);
+
+    b.m_grid[1][2] = 42;
+    b.m_grid[0][0] = 8;
+    printf("grid=%d %d %d\n", b.m_grid[0][0], b.m_grid[1][2], b.m_grid[0][2]);
+
+    int* p = b.m_v;
+    p[1] = 99;
+    printf("through=%d / decay=%d\n", b.m_v[1], head2(b.m_v));
+
+    Box c = b;
+    c.m_v[0] = 7;
+    c.m_grid[1][2] = 1;
+    printf("copy=%d %d / src=%d %d\n", c.m_v[0], c.m_grid[1][2], b.m_v[0], b.m_grid[1][2]);
+
+    Box d = { 11, { 1, 2, 3, 4 }, { { 5, 6, 7 }, { 8, 9, 10 } } };
+    printf("curly=%d %d %d %d %d\n", d.m_n, d.m_v[0], d.m_v[3], d.m_grid[0][1], d.m_grid[1][2]);
+
+    // 写不满时余下的格子还是零（jancy 的 skipCurlyInitializerItem 只挪游标）
+    Box e = { 1, { 4, 5 } };
+    printf("partial=%d %d %d %d\n", e.m_n, e.m_v[0], e.m_v[2], e.m_grid[0][0]);
+
+    return 0;
+}

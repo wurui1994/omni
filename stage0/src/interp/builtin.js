@@ -580,6 +580,14 @@ export function zeroOf(t, I) {
     // 结构体的指针字段要的：`p == null` 在两条腿上都得是"比一个数"。
     case 'ptr': return [0, 0, 0];
     case 'tptr': return 0;
+    // 定长内存的字段（第二十二刀）。与 JS 后端那一格同一句话：观察不到 —— 结构体整块读写
+    // 方言不给，`(fld …)` / `(fldset …)` 在 blk 字段上当场拒，内嵌那 N 格只能经
+    // `(pfield …)` 在 arena 的字节里碰。留一格 N 个零，是为了"逐字段铺零"处处有东西可写。
+    case 'blk': {
+      const out = [];
+      for (let i = 0; i < t.n; i++) out.push(zeroOf(t.el, I));
+      return out;
+    }
     case 'struct': {
       const def = I.structs.get(t.name);
       const out = {};

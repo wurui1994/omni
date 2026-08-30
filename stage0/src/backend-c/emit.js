@@ -33,6 +33,14 @@ const INT64_MIN_VALUE = -9223372036854775807n - 1n;
 /** 向量上第一阶段只有这四条（ADR-0014 决策 6）：算符 -> C 侧助手名的后缀 */
 const C_VEC_OPS = [['+', 'add'], ['-', 'sub'], ['*', 'mul'], ['/', 'div']];
 
+/** `(blk (blk int 3) 2)` -> `{el: int, n: 6}`：定长内存的字段在 C 侧摊平成一维（第二十二刀） */
+function flatBlk(t) {
+  let el = t.el;
+  let n = t.n;
+  while (el.k === 'blk') { n *= el.n; el = el.el; }
+  return { el, n };
+}
+
 class CEmitter {
   constructor(mod, opts = {}) {
     this.mod = mod;
@@ -346,7 +354,11 @@ class CEmitter {
         for (const v of t.variants) for (const f of v.fields) inner.push(f.type);
       }
       for (const it of inner) {
-        const dep = it.k === 'struct' ? structs.get(it.name) : it.k === 'enum' ? enums.get(it.name) : null;
+        // 定长内存的字段（第二十二刀）：内嵌的是那 N 格，所以依赖在**元素**那一层，
+        // 而且可以套几层（`int[2][3]` 的元素是 `int[3]`）。
+        let ty = it;
+        while (ty.k === 'blk') ty = ty.el;
+        const dep = ty.k === 'struct' ? structs.get(ty.name) : ty.k === 'enum' ? enums.get(ty.name) : null;
         visit(dep, stack);
       }
       stack.delete(key);
@@ -421,10 +433,23 @@ class CEmitter {
     // 字段类型里的向量形状也要登记 —— 一个形状只出现在字段上时（结构体里放个 pair，
     // 函数体里一条向量运算都没有），vecLines 那边没别的地方会记下它。回填的位置
     // （vecAt）在结构体本体之前，所以在这里登记来得及。
-    for (const f of s.fields) this.line(`${cTypeName(this.noteVec(f.type))} f_${f.name};`);
+    for (const f of s.fields) this.line(this.fieldDecl(f.type, `f_${f.name}`));
     this.indent--;
     this.line(`};`);
     this.line(`typedef struct s_${s.name}_s s_${s.name};`);
+  }
+
+  /**
+   * 一格字段的声明。定长内存那一种（第二十二刀）方括号跟在**名字后面**，所以不能只拼类型名。
+   *
+   * 多维就摊平成一维：这个 C 结构体只是那段内存的**值**表示，而 arena 那一侧是字节 +
+   * 偏移（见 PtrField 那一句 `omni_padd(p, off, 1)`），根本不经过它。要紧的只有尺寸与
+   * 对齐，摊平不改这两样 —— `int64_t x[2][3]` 与 `int64_t x[6]` 在 C 里同尺寸同对齐。
+   */
+  fieldDecl(t, name) {
+    if (t.k !== 'blk') return `${cTypeName(this.noteVec(t))} ${name};`;
+    const { el, n } = flatBlk(t);
+    return `${cTypeName(this.noteVec(el))} ${name}[${n}];`;
   }
 
   classBody(c) {
@@ -635,7 +660,16 @@ class CEmitter {
     this.line(`static s_${s.name} omni_new_S_${s.name}(void) {`);
     this.indent++;
     this.line(`s_${s.name} v;`);
-    for (const f of s.fields) this.line(`v.f_${f.name} = ${this.zeroExpr(f.type)};`);
+    for (const f of s.fields) {
+      // 定长内存的字段（第二十二刀）：C 里数组不能整块赋值，所以铺零是一个循环。
+      // 摊平过的一维，与 fieldDecl 那一处同一句理由。
+      if (f.type.k === 'blk') {
+        const { el, n } = flatBlk(f.type);
+        this.line(`for (int64_t oi = 0; oi < INT64_C(${n}); oi++) v.f_${f.name}[oi] = ${this.zeroExpr(el)};`);
+        continue;
+      }
+      this.line(`v.f_${f.name} = ${this.zeroExpr(f.type)};`);
+    }
     this.line('return v;');
     this.indent--;
     this.line('}');

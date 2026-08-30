@@ -262,6 +262,12 @@ class JsEmitter {
       // thin 的空就是 0 —— 与 PtrNull 那条路发的东西一模一样。
       case 'ptr': return '[0, 0, 0]';
       case 'tptr': return '0';
+      // 定长内存的字段（第二十二刀）。这一格**观察不到** —— 结构体整块读写方言不给
+      // （见 sexpr/lower.js 的 pload/pstore 两条），而 `(fld …)` / `(fldset …)` 在
+      // blk 字段上也是当场拒的。内嵌那 N 格只能经 `(pfield …)` 在 arena 里碰，
+      // 而 arena 是字节 + 偏移，跟这个对象表示无关。留一格 N 个元素零值的数组，
+      // 是为了让"逐字段铺零"这条路对每种字段都有东西可写。
+      case 'blk': return `new Array(${t.n}).fill(${this.zero(t.el)})`;
       default: throw new Error(`zero: ${t.k}`);
     }
   }

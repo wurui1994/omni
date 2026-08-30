@@ -38,7 +38,10 @@
 // 见 addrOf 开头那一段；`int(*pa)[3]` 这种声明**jancy 自己的语法里就没有**，见边界表）、
 // **数组是按值的一整块**（`int b[3] = a;` / `c = a` / `void f(int v[3])` / `int g() [3]` /
 // `int rows[2][3] = { a, b }` —— 这一条上 jancy **不是 C**：形参不退化成 `T*`，抄一份由
-// copyArr 逐格做，出处见 copyVal 那一段）、**模块级变量**（`int g = 5;` / `static int g;` /
+// copyArr 逐格做，出处见 copyVal 那一段）、
+// **数组字段**（`int m_v[4]` / `int m_grid[2][3]` / `b->m_v[i]` / `Box c = b` 深抄 /
+// 字段那一块退化成 `int*` —— 又是方言长出来的一格：字段类型那张白名单收了 `(blk T N)`，
+// 见 fieldText 与 sexpr/lower.js 的 structDec）、**模块级变量**（`int g = 5;` / `static int g;` /
 // `int t[3] = { … }`，降成方言的 `(global …)` 加 `(main …)` 开头的几句赋值，见 globalDecl）、
 // **值语义的结构体**（`S s;` / `S t = s;` / `t = s` / `s.f` / `s.in.y` / `&s` / `S a[3]` /
 // 结构体的模块级变量 —— 每格是一段自己的 `pnew` 内存，抄一份由 copyAgg 逐字段做）、
@@ -66,10 +69,11 @@
 // 前者照 jancy 自己的办法把局部量提到堆上，后者就是一段 `pnew` 出来的内存，两刀方言都没动。
 // 结构体那两刀（值语义、按值传与按值回）也在同一条上：一格结构体就是一段 `pnew` 的内存，
 // 「抄一份」是逐字段的 pload/pstore，而按值传把那一下挪到被调那一侧就不用动调用约定。
-// **第十六刀与第十七刀是真的动了方言**：`int**` 要 fat 指针自己能落进内存、`Node* m_next`
-// 要指针能躺在结构体的字段里，那都是布局那一层的事，这一层拆不开 —— 于是 `ptrTargetOk`
-// 放行了指针、`sizeOf` 上多了 24 与 8 两格、字段类型那张白名单收了两种指针，五条腿各加
-// 一格读写与一格零值。这两条正是这份纪律说的"动方言"。
+// **第十六刀、第十七刀与第二十二刀是真的动了方言**：`int**` 要 fat 指针自己能落进内存、
+// `Node* m_next` 要指针能躺在结构体的字段里、`int m_v[4]` 要**一整块**能内嵌在字段里，
+// 那都是布局那一层的事，这一层拆不开 —— 于是 `ptrTargetOk`
+// 放行了指针、`sizeOf` 上多了 24 与 8 两格、字段类型那张白名单收了两种指针与 `(blk T N)`，
+// 五条腿各加一格读写与一格零值。这几条正是这份纪律说的"动方言"。
 //
 // 还没长出来、因此**当场报错**的（每一条都记着该怎么长，不是"不收"）：
 //   - `%*d`（宽度从实参来）—— 那要在运行期才知道宽度，与"格式串必须是字面量"同一处边界。
@@ -82,10 +86,8 @@
 //     `struct Point` 之前会被方言拒）—— jancy 那边名字不看顺序，所以这是一条真差别。
 //     要补的是方言那一侧"内嵌的零值按拓扑序铺"，与第十七刀开的指针字段是两回事：
 //     指针是三个字、与目标布局无关，内嵌是真的内嵌。
-//   - 数组那一族里剩下的一条：数组**字段**（要方言的字段类型也收 `(blk T N)`，撞的是与第
-//     十七刀同一张白名单，而且 C/LLVM 两条腿的结构体零值要多一格）。另外两条**不是我们欠的**：
-//     **不同型**数组之间的赋值（长度不一样、或元素是同宽的另一种整数）——
-//     `Cast_Array::llvmCast` 里写着未实现，而同型的那些走的是 `castOperator` 里
+//   - 数组那一族里**两条不是我们欠的**：**不同型**数组之间的赋值（长度不一样、或元素是同宽的
+//     另一种整数）—— `Cast_Array::llvmCast` 里写着未实现，而同型的那些走的是 `castOperator` 里
 //     `opType->isEqual(type)` 那条恒等捷径，所以是通的（第二十一刀，见 copyVal）；
 //     `int(*pa)[3]` 这种声明 —— **jancy 自己的语法里就没有**带括号的声明符分组
 //     （`jnc_ct_Declarator.llk:402` 的 `declarator_prefix` 只有 `'*' type_modifier*`），
@@ -243,6 +245,15 @@ function blkText(t) {
  */
 function slotText(t) {
   return t.k === 'struct' ? `(ptr ${t.name})` : tyText(t);
+}
+
+/**
+ * 一格**字段**的方言类型（第二十二刀）。与 slotText 正好相反的两处：
+ * 结构体字段是 `S`（内嵌）、数组字段是 `(blk T N)`（也是内嵌，那 N 格就躺在父对象里）。
+ * 一格数组**变量**里放的是块地址（`(ptr (blk T N))`，见 tyText），字段不是。
+ */
+function fieldText(t) {
+  return t.k === 'arr' ? blkText(t) : tyText(t);
 }
 
 /** 给人看的写法（诊断里用）。跟 jancy 自己的拼法一致：`int*` / `int thin*` / `char`。 */
@@ -827,13 +838,18 @@ class JncLower {
         const info = this.declarator(d, sp);
         if (info === null) continue;
         if (info.formals !== null) { this.nope(d, '结构体里的方法'); continue; }
-        // 数组字段（第十刀的边界）：那要数组的存储**嵌在**结构体里，而这一层的数组是一段
-        // 单独的内存加一个 fat 指针。要接就得方言的结构体字段能是定长数组。
-        if (isArr(info.type)) { this.nope(d, `数组字段（'${tyName(info.type)}'）`); continue; }
+        // 数组字段（第二十二刀）：那 N 格是**真的内嵌**在结构体里的 —— 方言的字段类型
+        // 这一刀收了 `(blk T N)`（撞的是与第十七刀同一张白名单）。所以这里的类型文本
+        // 走 fieldText 而不是 tyText：一格数组**变量**里放的是块地址，一格数组**字段**
+        // 里放的是那一块本身。
+        if (isArr(info.type) && info.type.n === null) {
+          this.err(d, `字段 '${info.name}[]' 的长度得写出来`);
+          continue;
+        }
         fields.push({ name: info.name, type: info.type });
       }
     }
-    const fs = fields.map((f) => `(${f.name} ${tyText(f.type)})`).join(' ');
+    const fs = fields.map((f) => `(${f.name} ${fieldText(f.type)})`).join(' ');
     this.decls.push(`  (struct ${name} ${fs})`);
     return null;
   }
@@ -1360,13 +1376,17 @@ class JncLower {
     return this.memberOf(n, p.code, p.type.target.name, memNode);
   }
 
-  /** 一个字段的位置：`(pfield 地址 f)`。字段自己是结构体时它又是一格 `agg`（嵌套）。 */
+  /** 一个字段的位置：`(pfield 地址 f)`。字段自己是结构体或数组时它又是一格 `agg`（嵌套）。 */
   memberOf(n, baseCode, structName, memNode) {
     const nm = isAtom(memNode) ? memNode.value : null;
     const fs = this.structs.get(structName);
     const f = fs === undefined ? undefined : fs.find((x) => x.name === nm);
     if (f === undefined) return this.err(n, `${structName} 没有字段 '${nm}'`);
-    return { kind: isStruct(f.type) ? 'agg' : 'ptr', code: `(pfield ${baseCode} ${nm})`, type: f.type };
+    return {
+      kind: isStruct(f.type) || isArr(f.type) ? 'agg' : 'ptr',
+      code: `(pfield ${baseCode} ${nm})`,
+      type: f.type,
+    };
   }
 
   store(lv, valueCode) {

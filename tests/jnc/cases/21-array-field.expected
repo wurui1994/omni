@@ -1,0 +1,7 @@
+zero=0 0 0
+v=0 9 / sum=18 / n=5
+grid=8 42 0
+through=99 / decay=99
+copy=7 1 / src=0 42
+curly=11 1 4 6 10
+partial=1 4 0 0

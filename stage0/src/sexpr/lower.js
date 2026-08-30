@@ -256,8 +256,10 @@ class CoreLowerer {
   }
 
   /**
-   * `(blk T N)`：**一段 N 格的定长内存**（ADR-0016 第十八刀）。只在 `(ptr …)` / `(tptr …)`
-   * 的目标位置认，所以它不从 `ty()` 里走 —— 它不是一个值，没有"整块的 load/store"。
+   * `(blk T N)`：**一段 N 格的定长内存**（ADR-0016 第十八刀）。它不是一个值 —— 没有"整块的
+   * load/store"，所以不从 `ty()` 里走，只在两处认：`(ptr …)` / `(tptr …)` 的目标（第十八刀），
+   * 与**结构体的字段**（第二十二刀 —— 那一处是真的内嵌那 N 格，`(fld …)` / `(fldset …)`
+   * 在它上面照样是拒的，见 blkNotAValue）。
    *
    * 元素本身可以再是 `(blk …)`：`int a[10][20]` 是 `(ptr (blk int 20))` 上有 10 格
    * （`padd` 一步跨一整行），而三维 `int a[2][3][4]` 的元素是 `int[3][4]`，
@@ -276,6 +278,14 @@ class CoreLowerer {
     if (el.k === 'struct' && structLayout(el) === null) {
       return this.err(node, `${what}：结构体 '${el.name}' 里有落不进内存的字段，`
         + '排不成一段定长内存');
+    }
+    // 元素是**自己或后面才声明**的那个结构体（第二十二刀）：与直接内嵌那一条同一条规矩 ——
+    // 那时候它的字段还空着，尺寸算出来是 0；而且 C 后端要求被嵌套者先是完整类型。
+    // 这一问要看 preStruct（"名字先坐下、字段还空着"的那些），不是看 structLayout：
+    // 空结构体的 layout 不是 null，是 `{fields: [], size: 0}`。
+    if (el.k === 'struct' && this.preStruct.has(el.name)) {
+      return this.err(node, `${what}：结构体 '${el.name}' 声明在后面（或者就是自己）——`
+        + ' 一段定长内存的元素只能是**前面已经声明过**的结构体');
     }
     const cnt = isAtom(node.items[2]) ? Number(node.items[2].value) : NaN;
     if (!Number.isInteger(cnt) || cnt <= 0) {
@@ -580,13 +590,23 @@ class CoreLowerer {
           + ` —— 直接内嵌的字段只能是**前面已经声明过**的结构体（自引用的零值会无限递归）；`
           + `隔一层指针（${tn}*，写成 (ptr ${tn})）可以`);
       }
-      const t = this.ty(fd.items[1], `字段 ${nm}.${fn}`);
+      // 定长内存的字段（第二十二刀）：`(blk T N)` 是**真的内嵌**那 N 格 —— 布局那边
+      // alignOf/sizeOf/structLayout 从第十八刀起就已经会算它了，缺的只有这张白名单与
+      // 上面这一句分发（`(blk …)` 不在 ty 的表里，它只在指针目标那一处被认过）。
+      const fty = fd.items[1];
+      const t = isList(fty) && head(fty) === 'blk'
+        ? this.blkTy(fty, `字段 ${nm}.${fn}`)
+        : this.ty(fty, `字段 ${nm}.${fn}`);
       if (t === null) return null;
+      if (t.k === 'blk' && kind !== 'struct') {
+        return this.err(fd, `字段 ${nm}.${fn}：${what}的字段还不收定长内存 ——`
+          + ' 类是引用、字段在堆上那一格里，内嵌一段定长内存要另一套零值');
+      }
       if (t !== INT && t !== REAL && t !== BOOL && t !== STRING
           && t.k !== 'vec' && t.k !== 'arr' && t.k !== 'struct' && t.k !== 'class'
-          && t.k !== 'ptr' && t.k !== 'tptr' && t.k !== 'fn') {
+          && t.k !== 'ptr' && t.k !== 'tptr' && t.k !== 'fn' && t.k !== 'blk') {
         return this.err(fd, `字段 ${nm}.${fn}：这一刀的字段只能是 int / real / bool / string、`
-          + `(vec T N)、(arr T)、(ptr T)、(tptr T)、(fnty (T...) R) 或另一个结构体/类，`
+          + `(vec T N)、(arr T)、(ptr T)、(tptr T)、(blk T N)、(fnty (T...) R) 或另一个结构体/类，`
           + `这里是 ${coreTypeText(t)}`);
       }
       seen.set(fn, true);
@@ -904,6 +924,7 @@ class CoreLowerer {
     }
     const fd = this.field(n, o.type, nm);
     if (fd === null) return null;
+    if (fd.type.k === 'blk') return this.blkNotAValue(n, o.type, nm, 'fldset', '写');
     const v = this.expr(n.items[3]);
     if (v === null) return null;
     if (!sameCoreType(v.type, fd.type)) {
@@ -919,6 +940,16 @@ class CoreLowerer {
     const names = [];
     for (const f of t.fields) names.push(f.name);
     return this.err(n, `${t.k === 'class' ? '类' : '结构体'} ${t.name} 没有字段 '${nm}' —— 有的是 ${names.join(' / ')}`);
+  }
+
+  /**
+   * 定长内存的字段不能当**值**读写（第二十二刀）。`(fld …)` / `(fldset …)` 走的是"结构体
+   * 是一个值"那条路，而 `(blk T N)` 没有能装它的槽（第十八刀那两条 bad 也是这个理由）。
+   * 内嵌那 N 格只能**在内存里**碰：`(pfield p f)` 拿到它的地址，`(pelem …)` 退成元素指针。
+   */
+  blkNotAValue(n, st, nm, form, verb) {
+    return this.err(n, `(${form} …) 的 ${st.name}.${nm} 是一段定长内存，不是一个值 ——`
+      + ` 用 (pelem (pfield p ${nm})) 拿元素指针再${verb}一格`);
   }
 
   /** `(bset 缓冲 下标 值)`。写回是语句而不是表达式：它的"值"没人用，留着只会多一条路。 */
@@ -1553,6 +1584,7 @@ class CoreLowerer {
       }
       const fd = this.field(n, o.type, nm);
       if (fd === null) return null;
+      if (fd.type.k === 'blk') return this.blkNotAValue(n, o.type, nm, 'fld', '读');
       return { kind: 'Field', object: o, name: nm, type: fd.type };
     }
     // `(cnew NAME)`：新建一个**类**的实例（引用语义，第十三刀）。名字与 `(new …)` 分开是
