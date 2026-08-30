@@ -7178,6 +7178,55 @@ asy-units（只编译）  537/517/508ms     406/333/273ms
 
 一条运行期的越界占了四分之三 —— 下一刀从它开始。
 
+### 第八十一刀：空 frame 的三维界、LU 解方程、二分夹插值求根
+
+上一刀那个"占四分之三的越界"是**假的**：`array index out of range: 0 (length 0)` 是
+`abort` 之后**接着**印出来的第二条，真正的第一条在 stdout 上的 `abort:` 那一行。归类改成
+优先取 `abort:` 之后，队伍才露出真面目 —— 这一刀按队头三格往下削。
+
+**一、`min3(frame)` / `max3(frame)` 空 frame 不该报错。** 从前这两格的体是
+`abort("没有三维的东西")`，是我自己编的。量的（`import three; frame f; write(min3(f));`）：
+真 asy 印 `(0,0,0)` 两行、退出码 0。而 three.asy 里到处是"先量一遍界再决定投影"
+（2461/2617/2883…），于是 **29 个例子当场停在这一句**。改成空 frame 回原点之后
+AiryDisk / BezierPatch / BezierTriangle / RiemannSurface 那一族才走到 `tensorshade` 与 `solve`。
+
+**二、`solve(real[][], real[])` 与 `solve(real[][], real[][])`（runarray.in:1267/1320）。**
+照抄 runarray.in:520 的 `LUdecompose`（Crout，Numerical Recipes 的 ludcmp）：矩阵行优先
+**平铺**成一条 `real[]`，隐式缩放向量 `vv`、部分选主元用 `>=`（并列取后者）、"先把 j 列上三角
+那几格算完再在同一列找主元"的次序都跟着 —— 换个次序浮点尾数就不一样，EPS 就对不上。
+`asy__flat2` 顺手把 arrayop.h:556 那两句错误也抄了。量出来的三格（`asy -noV`，与我们逐字一样）：
+
+```
+solve({{1,2},{2,4}}, {1,2})        → sv.asy: 3.5: Singular matrix        （warn 默认 true）
+solve({{1,2},{2,4}}, {1,2}, false) → 空数组（.length 印 0）
+solve({{1,2,3},{2,4,5}}, {1,2})    → sv2.asy: 3.6: matrix must be square
+solve({{2,1},{1,3}}, {3,5})        → 0.8	1.4
+```
+
+**三、`_findroot`（runarray.in:1758）。** 那份 C++ 自己注明是 Charles Staats III 的 asy 版的
+移植：二分**夹着**一步二次插值。两处细节不能省 —— 先把函数整体翻成"a 端为负"（`sign`），
+以及插值落到端点 `(b-a)*1e-3` 以内时往里推一倍。少了后者根会贴边，迭代次数与最终尾数都变。
+插值那一步调的是这一层已有的 `quadraticroots(real,real,real)`（它回的根已排序，正好对上
+C++ 那个 struct 的 `t1`/`t2`）。量（`import math;`，三份逐位一样）：
+
+```
+findroot(x^2-2, 0, 2)        → 1.41421356237309
+findroot(cos(x)-x, 0, 1)     → 0.739085133211431
+findroot(x^3-x-1, 1, 2, 1e-10) → 1.32471795724475
+```
+
+原来卡在这两格的 11 个例子（AiryDisk arrows3 bars3 cos3 exp3 fin gamma3 genusthree
+genustwo pipes sin3）全部走过去了，各自停在下一层：`_texpath` 5 份、`tensorshade` 1 份、
+运行期越界 2 份、bezulate 的 JS 错 1 份，AiryDisk 与 arrows3 超 3s 归到"慢"。
+
+**没跟着改的两格记一笔**：`determinant` 与 `inverse` 这一层还是自己那套 Gauss（部分选主元 /
+Gauss-Jordan），而 C++ 那边 `determinant` 走的正是这一刀新加的 `LUdecompose`、`inverse` 在
+n==2/n==3 上有闭式、n>=4 走**全**选主元。选主元策略不同 → 尾数不同。没动的理由是这一轴
+按 1e-3 比数值，这点差落不到判定上；真要逐位对齐时再换。
+
+三条回归轴：`tests/asy/run.js` 259 passed / 0 failed；220 例扫一遍 219 干净、1.3s、最慢
+controlsystem.asy 73ms（速度合同没破）。
+
 ## 后果与代价
 
 

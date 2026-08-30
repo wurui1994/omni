@@ -3751,14 +3751,15 @@ void javascript(frame f, string s) { abort("javascript 还没做"); }
 void deconstruct(frame f, frame preamble, transform T=identity()) {
   abort("deconstruct 还没做");
 }
-// 三维的界（runpicture.in:757/762）：记在 frame 上，见 asy__add3
+// 三维的界（runpicture.in:757/762）：记在 frame 上，见 asy__add3。
+// **空 frame 回原点，不报错** —— 量的（`import three; frame f; write(min3(f));`
+// 真 asy 印 `(0,0,0)` 两行、退出码 0）。从前这里 abort("没有三维的东西")，而 three.asy
+// 里到处是"先量一遍界再决定投影"（2461/2617/2883…），于是 220 例里 29 个例子当场停在这一句。
 triple min3(frame f) {
-  if (!f.has3) { abort("min3: 这一格 frame 里没有三维的东西"); return (0, 0, 0); }
-  return f.min3v;
+  return f.has3 ? f.min3v : (0, 0, 0);
 }
 triple max3(frame f) {
-  if (!f.has3) { abort("max3: 这一格 frame 里没有三维的东西"); return (0, 0, 0); }
-  return f.max3v;
+  return f.has3 ? f.max3v : (0, 0, 0);
 }
 
 // ------------------------------------------------- 三维路径（第四十八刀）
@@ -4720,11 +4721,133 @@ pair[] quadraticroots(explicit pair a, explicit pair b, explicit pair c) {
   roots.push(-z1 - 2.0 * factor);
   return roots;
 }
-real[] solve(real[][] a, real[] b, bool warn=true) {
-  abort("solve 还没做（runarray.in:1267 的 LU 分解）"); return new real[];
+// runarray.in:520 的 LUdecompose（Crout 分解，Numerical Recipes 的 ludcmp）：
+// a 是 n×n 行优先**平铺**成的一条 real[]，原地改成 LU；index[j] 记第 j 步选到的主元行。
+// 回换行次数的符号（±1，determinant 要），奇异时 warn 就报错、否则回 0。
+//
+// 平铺与下标算法是照抄那份 C++ 的：隐式缩放向量 vv、选主元用 `>=`（并列取后者）、
+// 以及"先把 j 列上三角那几格算完、再在同一列上找主元"的次序都跟着 —— 换个次序
+// 浮点尾数就不一样，EPS 对不上。
+private int asy__LUdecompose(real[] a, int n, int[] index, bool warn=true) {
+  real[] vv = new real[n];
+  int swap = 1;
+  for (int i = 0; i < n; ++i) {
+    real big = 0.0;
+    for (int j = 0; j < n; ++j) {
+      real temp = abs(a[i * n + j]);
+      if (temp > big) big = temp;
+    }
+    if (big == 0.0) {
+      if (warn) abort("Singular matrix");
+      return 0;
+    }
+    vv[i] = 1.0 / big;
+  }
+  for (int j = 0; j < n; ++j) {
+    for (int i = 0; i < j; ++i) {
+      real sum = a[i * n + j];
+      for (int k = 0; k < i; ++k) sum -= a[i * n + k] * a[k * n + j];
+      a[i * n + j] = sum;
+    }
+    real big = 0.0;
+    int imax = j;
+    for (int i = j; i < n; ++i) {
+      real sum = a[i * n + j];
+      for (int k = 0; k < j; ++k) sum -= a[i * n + k] * a[k * n + j];
+      a[i * n + j] = sum;
+      real temp = vv[i] * abs(sum);
+      if (temp >= big) { big = temp; imax = i; }
+    }
+    if (j != imax) {
+      for (int k = 0; k < n; ++k) {
+        real temp = a[imax * n + k];
+        a[imax * n + k] = a[j * n + k];
+        a[j * n + k] = temp;
+      }
+      swap = -swap;
+      vv[imax] = vv[j];
+    }
+    if (index.length > j) index[j] = imax;
+    real denom = a[j * n + j];
+    if (denom == 0.0) {
+      if (warn) abort("Singular matrix");
+      return 0;
+    }
+    for (int i = j + 1; i < n; ++i) a[i * n + j] = a[i * n + j] / denom;
+  }
+  return swap;
 }
+// arrayop.h:556 的 copyArray2C：二维摊平成一条，顺手把"必须方/必须矩形"那两句错误
+// 也照抄了（量过：`solve({{1,2,3},{2,4,5}}, …)` 印 `matrix must be square`）。
+private real[] asy__flat2(real[][] a, bool square=true) {
+  int n = a.length;
+  int m = (square || n == 0) ? n : a[0].length;
+  real[] d = new real[n * m];
+  for (int i = 0; i < n; ++i) {
+    if (a[i].length != m) {
+      if (square) abort("matrix must be square");
+      abort("matrix must be rectangular");
+    }
+    for (int j = 0; j < m; ++j) d[i * m + j] = a[i][j];
+  }
+  return d;
+}
+// runarray.in:1267：LU 解 ax=b。解不出来（奇异且 warn=false）回**空数组** ——
+// 量过 `solve({{1,2},{2,4}}, {1,2})`：warn 默认 true，那一句是 `Singular matrix`。
+real[] solve(real[][] a, real[] b, bool warn=true) {
+  int n = a.length;
+  if (n == 0) return new real[];
+  if (b.length != n) abort("Incommensurate matrices");
+  real[] A = asy__flat2(a);
+  int[] index = new int[n];
+  if (asy__LUdecompose(A, n, index, warn) == 0) return new real[];
+  real[] B = new real[n];
+  for (int i = 0; i < n; ++i) B[i] = b[i];
+  for (int i = 0; i < n; ++i) {
+    int ip = index[i];
+    real sum = B[ip];
+    B[ip] = B[i];
+    for (int j = 0; j < i; ++j) sum -= A[i * n + j] * B[j];
+    B[i] = sum;
+  }
+  for (int i = n - 1; i >= 0; --i) {
+    real sum = B[i];
+    for (int j = i + 1; j < n; ++j) sum -= A[i * n + j] * B[j];
+    B[i] = sum / A[i * n + i];
+  }
+  return B;
+}
+// runarray.in:1320：同一套分解，右端是 n×m 的一整块（回代按列走，m 步一跨）。
 real[][] solve(real[][] a, real[][] b, bool warn=true) {
-  abort("solve 还没做（runarray.in:1320 的 LU 分解）"); return new real[][];
+  int n = a.length;
+  if (n == 0) return new real[][];
+  if (b.length != n) abort("Incommensurate matrices");
+  int m = b[0].length;
+  real[] A = asy__flat2(a);
+  real[] B = asy__flat2(b, false);
+  int[] index = new int[n];
+  if (asy__LUdecompose(A, n, index, warn) == 0) return new real[][];
+  for (int i = 0; i < n; ++i) {
+    int ip = index[i];
+    for (int k = 0; k < m; ++k) {
+      real sum = B[ip * m + k];
+      B[ip * m + k] = B[i * m + k];
+      int jk = k;
+      for (int j = 0; j < i; ++j) { sum -= A[i * n + j] * B[jk]; jk += m; }
+      B[i * m + k] = sum;
+    }
+  }
+  for (int i = n - 1; i >= 0; --i) {
+    for (int k = 0; k < m; ++k) {
+      real sum = B[i * m + k];
+      int jk = (i + 1) * m + k;
+      for (int j = i + 1; j < n; ++j) { sum -= A[i * n + j] * B[jk]; jk += m; }
+      B[i * m + k] = sum / A[i * n + i];
+    }
+  }
+  real[][] x = new real[n][m];
+  for (int i = 0; i < n; ++i) for (int j = 0; j < m; ++j) x[i][j] = B[i * m + j];
+  return x;
 }
 // runarray.in:1524 的循环三对角解法：解 L u = f，L 是
 //   [ b0 c0          a0    ]
@@ -4805,8 +4928,65 @@ real[] tridiagonal(real[] a, real[] b, real[] c, real[] f) {
   }
   return u;
 }
+// runarray.in:1758 的 _findroot：二分**夹着**一步二次插值（那份 C++ 自己说是 Charles
+// Staats III 写的 asy 版的移植）。保证回来的 t 在 [a,b] 里、且离一次变号不超过 tolerance。
+// fa 与 fb 同号是运行时错（照抄那一句英文）。
+//
+// 两处细节跟着抄：一是先把函数整体翻成"a 端为负"（sign），后面的比较全按这一版写；
+// 二是插值落到区间端点附近（(b-a)*1e-3 以内）时往里推一倍 —— 少了这一步根会贴边，
+// 迭代次数与最终尾数都变。
 real _findroot(real f(real), real a, real b, real tolerance, real fa, real fb) {
-  abort("_findroot 还没做（runarray.in:1758 的 Brent 法）"); return 0;
+  if (fa == 0.0) return a;
+  if (fb == 0.0) return b;
+  int sign;
+  if (fa < 0.0) {
+    if (fb < 0.0) abort("fa and fb must have opposite signs");
+    sign = 1;
+  } else {
+    if (fb > 0.0) abort("fa and fb must have opposite signs");
+    fa = -fa;
+    fb = -fb;
+    sign = -1;
+  }
+  real t = a;
+  real ft = fa;
+  real twicetolerance = 2.0 * tolerance;
+  while (b - a > tolerance) {
+    t = (a + b) * 0.5;
+    ft = sign * f(t);
+    if (ft == 0.0) return t;
+    // 二分这一步本身已经进到 tolerance 里了就不插值了
+    if (b - a >= twicetolerance) {
+      real factor = 1.0 / (b - a);
+      real q_A = 2.0 * (fa - 2.0 * ft + fb) * factor * factor;
+      real q_B = (fb - fa) * factor;
+      real[] Q = quadraticroots(q_A, q_B, ft);
+      real root = 0;
+      bool found = Q.length > 0;
+      if (found) {
+        root = t + Q[0];
+        if (root <= a || root >= b) {
+          if (Q.length == 1) found = false;
+          else {
+            root = t + Q[1];
+            if (root <= a || root >= b) found = false;
+          }
+        }
+      }
+      if (found) {
+        if (ft > 0.0) { b = t; fb = ft; } else { a = t; fa = ft; }
+        t = root;
+        real margin = (b - a) * 1.0e-3;
+        if (t - a < margin) t = a + 2.0 * (t - a);
+        else if (b - t < margin) t = b - 2.0 * (b - t);
+        ft = sign * f(t);
+        if (ft == 0.0) return t;
+      }
+    }
+    if (ft > 0.0) { b = t; fb = ft; }
+    else if (ft < 0.0) { a = t; fa = ft; }
+  }
+  return a - (b - a) / (fb - fa) * fa;
 }
 pair[] fft(pair[] a, int sign=1) {
   abort("fft 还没做（runarray.in:1867 走的是 FFTW）"); return new pair[];
