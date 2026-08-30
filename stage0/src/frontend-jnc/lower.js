@@ -61,7 +61,10 @@
 // **字段的类型不看声明顺序**（`struct Seg { Point m_a; }` 写在 `struct Point` 之前 ——
 // 这一层一个字没改，是**方言**撤掉了一条自己立的规矩：内嵌只拒"按值绕回自己"，
 // 见 sexpr/lower.js 的 cutValueCycles；jancy 那侧的出处是 `Type::prepareLayout`
-// 按需算布局、撞回来才报 `can't calculate layout of '%s' due to recursion`）。
+// 按需算布局、撞回来才报 `can't calculate layout of '%s' due to recursion`）、
+// **对模块级变量取地址**（`&g` / `&gp` / `&t` / `&s` —— 标量那一格被 `&` 过就发成
+// `(ptr T)`、值躺在一段 pnew 出来的内存里，与第九刀对局部量做的是同一件事；数组与结构体
+// 那一格里本来就放着块地址。方言一个字没改，见 declareGlobal 与 addrOf）。
 //
 // ## 纪律：**jancy 不向方言妥协**
 //
@@ -93,9 +96,9 @@
 //     （`jnc_ct_Declarator.llk:402` 的 `declarator_prefix` 只有 `'*' type_modifier*`），
 //     所以 `T(*)[N]` 在 jancy 里是个说不出名字的类型，`&a` 只能就地用
 //     （见 `cases/19-addr-array.jnc`）。
-//   - 模块级变量那一族里剩下的三条：`static` 的**局部量**（要"初值只跑一次"，jancy 那边是
-//     `once` 的机制）、`threadlocal`（要线程本地存储）、`&g`（**方言**这一侧的边界 —— 全局
-//     不在一段可寻址的内存里，jancy 的 `&g` 本身是合法的）。
+//   - 模块级变量那一族里剩下的两条：`static` 的**局部量**（要"初值只跑一次"，jancy 那边是
+//     `once` 的机制）、`threadlocal`（要线程本地存储）。`&g` 第二十四刀收了；只有
+//     **string** 的模块级变量还取不到地址（liftable 那条，见 `bad/addr-global.jnc`）。
 //   - 结构体那一族里剩下的一条：`new T { … }`（decl_curly.rst 最后那一格）。花括号初值是
 //     **几条语句**，而这一层的表达式降级只交出一段文字 —— 没有"顺带发几条语句"的通道，
 //     而 `while (new T { … })` 那种位置连"提到前面去"都不成立（条件每一圈都要重算）。
@@ -321,7 +324,10 @@ class JncLower {
     this.tmp = 0;              // 生成名字的计数（do-while 的那格标志）
     this.lifted = new Set();   // 这个函数里被取过地址的局部量名（ADR-0016 第九刀）
     this.globals = new Map();  // 模块级变量：名字 -> 类型（第十一刀）
+    this.globalCells = [];     // 模块级变量里"要一段自己的内存"的那些 pnew，跑在初值之前
     this.globalInit = [];      // 模块级变量的初值语句，按声明序，跑在 main 的体之前
+    this.gTaken = new Set();   // 这份源码里被 `&` 取过地址的名字（第二十四刀：全局那一半）
+    this.gLifted = new Set();  // 因此被提到一格内存里的**模块级**标量名
     this.alias = new Map();    // 名字 -> 方言里的名字（结构体形参那一份拷贝，第十三刀）
     this.sigs = new Map();     // 函数定义的节点 -> 它的签名（第十五刀，run 里先过一遍）
     this.mainSeen = false;     // `int main()` 见过了（查重要在签名那一遍就做）
@@ -351,7 +357,8 @@ class JncLower {
   }
 
   /** 名字的类型 + "它是模块级的吗"。方言里两者的读写形式相同（`(var …)` / `(set …)`），
-   *  分开是因为**取地址**只对局部量成立（第九刀的那格 cell 是局部量才有的）。 */
+   *  分开是因为"提到一格内存里"那件事两边的落法不一样：局部量提的是另一格 `x$c`
+   *  （第九刀），模块级的是**它自己**发成 `(ptr T)`（第二十四刀，见 declareGlobal）。 */
   lookupRef(name) {
     for (let i = this.scopes.length - 1; i >= 0; i--) {
       const t = this.scopes[i].get(name);
@@ -382,6 +389,11 @@ class JncLower {
    * 判定是**函数级、按名字**的保守判定：一个名字在这个函数里任何地方被 `&` 过，这个函数里
    * 所有同名局部量都提。多提一格堆上的空间，换掉"要先做作用域分析才知道提哪个"——
    * 语义上不会错（提与不提对不取地址的用法**没有可观测差别**）。
+   *
+   * **模块级的那一半是第二十四刀**，同一套办法、同一份 collectAddrTaken：只是那一遍在
+   * `run()` 里对**整份源码**数一次（`&g` 出现在函数体里，而 `(global …)` 要在那之前发），
+   * 而"那一格"不用另起名字 —— 全局自己发成 `(ptr T)` 就是那一格（见 declareGlobal）。
+   * 保守的代价也一样：同名的局部量会把全局也带上，多一次 pnew，没有可观测差别。
    */
   collectAddrTaken(node, out) {
     if (!isList(node)) return;
@@ -641,6 +653,11 @@ class JncLower {
       const s = this.fnSig(it);
       if (s !== null) this.sigs.set(it, s);
     }
+    // `&` 过谁先数一遍（第二十四刀）：模块级的标量被取过地址时，那一格要提到一段**自己的
+    // 内存**里去（与第九刀对局部量做的是同一件事）。这一问必须在 `(global …)` 发出去之前
+    // 答完 —— 而 `&g` 出现在函数体里，也就是后面那一遍。数的是整份源码里所有 `&名字`，
+    // 所以同名的局部量会把全局也带上：**多提一格不影响语义**（读写照旧走那一格），只是多一次 pnew。
+    for (const it of items) this.collectAddrTaken(it, this.gTaken);
     for (const it of items) {
       if (!isList(it)) continue;
       const h = head(it);
@@ -662,10 +679,12 @@ class JncLower {
     for (const d of this.decls) parts.push(d);
     // 模块级变量的初值跑在 main 的体**之前**：jancy 的 module.construct 就是这个顺序
     // （先把所有 static 零初始化，再按声明序跑各自的 initializer，然后才是用户代码）。
-    // 零初始化那一半方言自己做（(global …) 出来就是零），这里只发初值那一半。
-    const body = this.globalInit.length === 0
+    // 零初始化那一半方言自己做（(global …) 出来就是零），这里发的是"要一段自己的内存"的
+    // 那些 pnew（globalCells）加初值（globalInit）——**两阶段**，pnew 全排在初值之前
+    // （第二十四刀）：初值里调的函数可能读到别的全局，那时候它该看见零，而不是空指针。
+    const body = this.globalCells.length === 0 && this.globalInit.length === 0
       ? this.mainBody
-      : `${this.globalInit.join('\n')}\n${this.mainBody}`;
+      : `${[...this.globalCells, ...this.globalInit].join('\n')}\n${this.mainBody}`;
     parts.push(`  (main\n${body})`);
     parts.push(')');
     return `${parts.join('\n')}\n`;
@@ -707,7 +726,7 @@ class JncLower {
         if (info.type.n === null) { this.err(dcl, `'${info.name}[]' 的长度得从花括号初值数出来`); continue; }
         if (this.declareGlobal(dcl, info) === null) continue;
         const at = tyText(info.type);
-        this.globalInit.push(`    (set ${info.name} (pnew ${at} (int 1)))`);
+        this.globalCells.push(`    (set ${info.name} (pnew ${at} (int 1)))`);
         // `int t[3] = s;` 与结构体那一支一样是抄一份（第二十一刀）。
         if (initNode !== null) {
           const v = this.globalValue(initNode, info.type);
@@ -721,7 +740,7 @@ class JncLower {
       // 结构体的模块级变量：与局部量一样先开一格自己的内存，再（有初值的话）逐字段抄。
       if (isStruct(info.type)) {
         const st = slotText(info.type);
-        this.globalInit.push(`    (set ${info.name} (pnew ${st} (int 1)))`);
+        this.globalCells.push(`    (set ${info.name} (pnew ${st} (int 1)))`);
         if (initNode !== null) {
           const v = this.globalValue(initNode, info.type);
           if (v === null) continue;
@@ -733,7 +752,10 @@ class JncLower {
       if (initNode === null) continue;              // 零初始化，方言已经做了
       const v = this.globalValue(initNode, info.type);
       if (v === null) continue;
-      this.globalInit.push(`    (set ${info.name} ${v})`);
+      // 提到一格内存里去的那些（第二十四刀）写的是那一格，不是全局本身
+      this.globalInit.push(this.gLifted.has(info.name)
+        ? `    (pstore (var ${info.name}) ${v})`
+        : `    (set ${info.name} ${v})`);
     }
     return null;
   }
@@ -753,7 +775,7 @@ class JncLower {
     if (this.declareGlobal(dcl, { name: info.name, type: t }) === null) return null;
     // 数组也是**一格**了（第十九刀）：那一格里躺的是一整块的地址，所以个数一律是 1。
     const st = slotText(t);
-    this.globalInit.push(`    (set ${info.name} (pnew ${st} (int 1)))`);
+    this.globalCells.push(`    (set ${info.name} (pnew ${st} (int 1)))`);
     // 全局这一侧不用 shadow：那一格是 `(global …)`，没有"初值之后才发 let"这回事。
     const plan = this.curlyPlan(curly, t, '    ', this.globalInit, {
       shadow: null,
@@ -764,11 +786,23 @@ class JncLower {
     return null;
   }
 
-  /** 一格全局的登记：查重、挡下方言落不了地的类型，再发 `(global …)`。 */
+  /** 一格全局的登记：查重、挡下方言落不了地的类型，再发 `(global …)`。
+   *
+   *  被 `&` 取过地址的**标量**全局在这儿改形状（第二十四刀）：那一格发成 `(ptr T)`，
+   *  真正的值躺在 `(pnew (ptr T) (int 1))` 出来的一格里 —— 与第九刀对局部量做的是同一件事，
+   *  方言一个字没改（指针类型的全局五条腿本来就都收）。聚合与数组不走这儿：它们那一格里
+   *  放的**本来就是**一段内存的地址，`&g` 就是它自己。 */
   declareGlobal(dcl, info) {
     if (this.globals.has(info.name)) return this.err(dcl, `模块级变量 '${info.name}' 声明了两次`);
     if (info.type === T_VOID) return this.err(dcl, `'${info.name}' 的类型是 void`);
     this.globals.set(info.name, info.type);
+    if (this.gTaken.has(info.name) && this.liftable(info.type)) {
+      this.gLifted.add(info.name);
+      const pt = `(ptr ${tyText(info.type)})`;
+      this.decls.push(`  (global ${info.name} ${pt})`);
+      this.globalCells.push(`    (set ${info.name} (pnew ${pt} (int 1)))`);
+      return info;
+    }
     this.decls.push(`  (global ${info.name} ${slotText(info.type)})`);
     return info;
   }
@@ -1323,9 +1357,13 @@ class JncLower {
       if (isStruct(t) || isArr(t)) return { kind: 'agg', code: `(var ${this.dialectName(nm)})`, type: t };
       // 提到堆上的那些名字本身就是一格内存，所以它是 `ptr` 而不是 `var` ——
       // 于是读写自动走 pload / pstore，而 `&x` 就是它的 code（见 expr0 的 addr）。
-      // **只有局部量**有那一格：模块级变量在方言里是一个全局，取不到地址（见 addrOf）。
-      if (!r.global && this.lifted.has(nm)) return { kind: 'ptr', code: `(var ${this.cellName(nm)})`, type: t };
-      return { kind: 'var', name: nm, type: t, global: r.global };
+      // 模块级的那一半是第二十四刀：那一格就是全局自己（发成了 `(ptr T)`）。
+      if (r.global) {
+        if (this.gLifted.has(nm)) return { kind: 'ptr', code: `(var ${nm})`, type: t };
+        return { kind: 'var', name: nm, type: t, global: true };
+      }
+      if (this.lifted.has(nm)) return { kind: 'ptr', code: `(var ${this.cellName(nm)})`, type: t };
+      return { kind: 'var', name: nm, type: t, global: false };
     }
     // `*p = v`
     if (h === 'indirect') {
@@ -1937,8 +1975,13 @@ class JncLower {
         if (isStruct(r.type) || isArr(r.type)) {
           return { code: `(var ${this.dialectName(nm)})`, type: r.type };
         }
-        // 提到堆上的那些名字要 pload 一次（第九刀）。模块级变量没有那一格（第十一刀）。
-        if (!r.global && this.lifted.has(nm)) {
+        // 提到堆上的那些名字要 pload 一次（第九刀）。模块级的那一半是第二十四刀，
+        // 它的"那一格"就是全局自己（发成了 `(ptr T)`），所以不用 cellName。
+        if (r.global) {
+          if (this.gLifted.has(nm)) return { code: `(pload (var ${nm}))`, type: r.type };
+          return { code: `(var ${nm})`, type: r.type };
+        }
+        if (this.lifted.has(nm)) {
           return { code: `(pload (var ${this.cellName(nm)}))`, type: r.type };
         }
         return { code: `(var ${nm})`, type: r.type };
@@ -2008,8 +2051,9 @@ class JncLower {
     if (isList(tgt) && head(tgt) === 'name' && isAtom(tgt.items[1])) {
       const nm = tgt.items[1].value;
       const r = this.lookupRef(nm);
-      if (r !== null && isArr(r.type) && !r.global) {
-        return { code: `(var ${nm})`, type: tPtr(r.type) };
+      // 模块级的数组也算（第二十四刀）：它那一格里放的同样是块地址（globalDecl 里的那句 pnew）
+      if (r !== null && isArr(r.type)) {
+        return { code: `(var ${this.dialectName(nm)})`, type: tPtr(r.type) };
       }
     }
     const lv = this.lvalue(n.items[1]);
@@ -2017,10 +2061,11 @@ class JncLower {
     if (lv.kind !== 'ptr') {
       // 结构体那一格的 code **就是**地址，所以 `&s` / `&a[i]` / `&s.in` 都不发一个字（第十二刀）
       if (lv.kind === 'agg') return { code: lv.code, type: tPtr(lv.type) };
-      // 模块级变量在方言里是一格全局，没有地址（第九刀那格 cell 是局部量才有的）。
-      // 要接就得让方言的全局也能被指到 —— 那是"全局也放在一段内存里"的另一件事。
+      // 标量的模块级变量走的是"提到一格自己的内存里"（第二十四刀，见 declareGlobal），
+      // 所以能落到这儿的只剩方言放不进内存的那些类型（`string` 那一档）。
       if (lv.kind === 'var' && lv.global) {
-        return this.nope(n, `对模块级变量 '${lv.name}' 取地址（要方言的全局也能被指到）`);
+        return this.nope(n, `对 ${tyName(lv.type)} 的模块级变量 '${lv.name}' 取地址`
+          + '（要方言能把它当内存里的值，见 liftable 那处）');
       }
       return this.nope(n, `对这种形状取地址（'&' 后面只认名字、'*p'、'p[i]'、'p->f'）`);
     }

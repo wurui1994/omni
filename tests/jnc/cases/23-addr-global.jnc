@@ -1,0 +1,84 @@
+// **对模块级变量取地址**（第二十四刀）。第九刀把局部量做成了可寻址的（照 jancy 自己的
+// 办法提到 GC 堆上），这一刀是模块级的那一半 —— 而且**方言一个字没改**：被 `&` 取过地址的
+// 标量全局那一格发成 `(ptr T)`，值躺在一格 `pnew` 出来的内存里（见 declareGlobal）。
+// 指针类型的全局五条腿本来就都收，所以这一刀落在前端。
+//
+// 出处：jancy 的模块级变量默认是 static 存储（decl_storage.rst），而 static 变量有地址 ——
+// `&g` 在 jancy 里合法。取地址那一侧照的还是 type_ptr_data.rst 那句
+// "any local taken fat address of, is being lifted to GC heap"：被取地址的东西要有一段
+// 真的内存，我们对全局做的是同一件事。
+//
+// 数组与结构体的模块级变量**本来就**能取地址（第十二刀 / 第十九刀：那一格里放的就是一段
+// 内存的地址），这一刀只是把 addrOf 里那条多余的 `!r.global` 去掉了。
+//
+// 顺带把两阶段的顺序摆正（jancy 的 module.construct：先把所有 static 零初始化，再按声明序
+// 跑各自的 initializer）：所有"要一段自己的内存"的 pnew 现在都排在初值语句**之前**，
+// 于是初值里调的函数读到别的全局时拿到的是零，不是空指针。
+//
+// 这一份的期望输出可以拿 `cc -O0` 的孪生程序对（`static` 变量的地址在 C 里是同一件事）。
+// 刻意避开了求值顺序未定的写法（不在同一个 printf 里既改一格又读它）。
+
+int g = 5;
+int h;
+int* gp;
+double r = 1.5;
+bool b;
+int t[3] = { 1, 2, 3 };
+
+struct P {
+    int m_x;
+    int m_y;
+}
+
+P s;
+
+void bump(int* p) {
+    *p += 10;
+}
+
+int readIt(int* p) {
+    return *p;
+}
+
+int main() {
+    int* p = &g;
+    printf("g=%d *p=%d\n", g, *p);
+
+    *p = 7;
+    printf("after=%d\n", g);
+
+    g = 9;
+    printf("via=%d\n", *p);
+
+    bump(&g);
+    printf("bump=%d\n", g);
+
+    // 没写初值的那一格也一样（零初始化在前）
+    printf("h=%d\n", h);
+    bump(&h);
+    printf("h2=%d %d\n", h, readIt(&h));
+
+    // 指针的模块级变量也提得动：`&gp` 是 `int**`
+    gp = &g;
+    int** pp = &gp;
+    printf("pp=%d\n", **pp);
+    *pp = &h;
+    printf("gp=%d\n", *gp);
+
+    // real 与 bool 那两格
+    double* rp = &r;
+    *rp = 2.5;
+    printf("r=%f\n", r);
+    bool* bp = &b;
+    *bp = true;
+    printf("b=%d\n", b);
+
+    // 数组与结构体的模块级变量：那一格里本来就放着一段内存的地址
+    int* q = &t[1];
+    printf("t=%d %d\n", *q, (*&t)[0]);
+    P* ps = &s;
+    ps->m_x = 4;
+    printf("s=%d %d\n", s.m_x, ps->m_y);
+
+    return 0;
+}
