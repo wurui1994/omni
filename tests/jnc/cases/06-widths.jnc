@@ -1,0 +1,105 @@
+// 定宽整数（ADR-0016 第六刀）。jancy 的整数是定宽有符号的：char 8 位、short 16、
+// int 32、long / intptr 64（Lexer.rl 的关键字表 + Type.cpp 的 TypeKind_Int8..Int64）。
+//
+// 期望输出的**出处**：C 的那一套规矩（整型提升、常用算术转换、赋值收窄、移位的结果
+// 宽度只看左边）。逐条对照过下面这份 C，用 `cc -O0` 编出来跑：
+//
+//   #include <stdio.h>
+//   int main(void) {
+//     signed char c = 200;            printf("c=%d\n", c);
+//     short s = 40000;                printf("s=%d\n", s);
+//     int i = 3000000000;             printf("i=%d\n", i);
+//     long long l = 3000000000;       printf("l=%lld\n", l);
+//     int a = 2147483647; a = a + 1;  printf("a=%d\n", a);
+//     int b = 100000;                 printf("bb=%d\n", b * b);
+//     long long g = 100000;           printf("gg=%lld\n", g * g);
+//     signed char x = 100, y = 100;   printf("xy=%d\n", x * y);
+//     signed char z = x * y;          printf("z=%d\n", z);
+//     signed char t = 127; t++;       printf("t=%d\n", t);
+//     short u = 32767; u += 1;        printf("u=%d\n", u);
+//     signed char m = -128;           printf("nm=%d\n", -m);
+//     signed char nm = -m;            printf("nm2=%d\n", nm);
+//                                     printf("nx=%d\n", ~x);
+//     int sh = 1;                     printf("sh=%d\n", sh << 31);
+//     long long lsh = 1;              printf("lsh=%lld\n", lsh << 31);
+//     int ci = 2000000000;
+//     long long cl = 2000000000;      printf("mix=%lld\n", ci + cl);
+//                                     printf("ii=%d\n", ci + ci);
+//     printf("k1=%d\n", (signed char)300);
+//     printf("k2=%d\n", (short)70000);
+//     printf("k3=%d\n", (int)(signed char)200);
+//     signed char pc = 0; short ps = 0;
+//     printf("rem=%d\n", (int)(signed char)200 % 100);
+//     printf("and=%d\n", (int)(signed char)200 & 255);
+//     return 0;
+//   }
+//
+// 两处写法上的差别（不是语义差别）：C 那边 `char` 的符号性由实现定，所以对照的那份
+// 写 `signed char`；C 那边 64 位实参要 `%lld`，而这一层的 `%d` **四种位宽都收**
+// （值已经是符号扩展过的规范形，照印就是 C 的样子）。
+
+int main() {
+    // 一、装不下就按各自那一格收窄
+    char c = 200;
+    printf("c=%d\n", c);
+    short s = 40000;
+    printf("s=%d\n", s);
+    // 字面量 3000000000 装不下 32 位，所以它自己是 long；赋给 int 时收窄
+    int i = 3000000000;
+    printf("i=%d\n", i);
+    long l = 3000000000;
+    printf("l=%d\n", l);
+
+    // 二、溢出在各自那一格里回卷
+    int a = 2147483647;
+    a = a + 1;
+    printf("a=%d\n", a);
+    int b = 100000;
+    printf("bb=%d\n", b * b);
+    long g = 100000;
+    printf("gg=%d\n", g * g);
+
+    // 三、整型提升：char * char 在 int 里算，不在 8 位里
+    char x = 100;
+    char y = 100;
+    printf("xy=%d\n", x * y);
+    char z = x * y;
+    printf("z=%d\n", z);
+
+    // 四、++ 与 += 也回卷
+    char t = 127;
+    t++;
+    printf("t=%d\n", t);
+    short u = 32767;
+    u += 1;
+    printf("u=%d\n", u);
+
+    // 五、一元 - 与 ~ 按**提升后**那一格
+    char m = -128;
+    printf("nm=%d\n", -m);
+    char nm = -m;
+    printf("nm2=%d\n", nm);
+    printf("nx=%d\n", ~x);
+
+    // 六、移位的结果宽度只看左边
+    int sh = 1;
+    printf("sh=%d\n", sh << 31);
+    long lsh = 1;
+    printf("lsh=%d\n", lsh << 31);
+
+    // 七、常用算术转换：一边 int 一边 long -> long
+    int ci = 2000000000;
+    long cl = 2000000000;
+    printf("mix=%d\n", ci + cl);
+    printf("ii=%d\n", ci + ci);
+
+    // 八、强制转换就是收窄
+    printf("k1=%d\n", (char)300);
+    printf("k2=%d\n", (short)70000);
+    printf("k3=%d\n", (int)(char)200);
+
+    // 九、`%` 与 `&` 不用回卷（规范形上天然还在范围里）
+    printf("rem=%d\n", (int)(char)200 % 100);
+    printf("and=%d\n", (int)(char)200 & 255);
+    return 0;
+}

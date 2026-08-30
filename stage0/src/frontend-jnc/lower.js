@@ -17,7 +17,8 @@
 //
 // ## 第一刀的边界（都是**刻意**的，不是漏的）
 //
-// 收：`int` / `bool` / `double`（-> real）/ `char`（-> int）四种标量与 `void`、
+// 收：**定宽有符号整数** `char` / `short` / `int` / `long` / `intptr`（8 / 16 / 32 / 64 位，
+// 见下面「定宽整数」那一段）、`double`（-> real）、`bool`、`void`、
 // `struct`（值语义，降成方言的 `(struct …)`）、函数（含递归、形参、返回值）、
 // 局部量与赋值、`+ - * / %` 与比较、`&& || !`、一元 `- ~`、`++ --`（前后缀都收，
 // 但只作为语句/for 的步进）、复合赋值 `+= -= *= /=`、`? :`、if/else、while、
@@ -34,22 +35,31 @@
 // 遇到"jancy 有、方言没有"的东西，动的是**方言**，不是这门语言。这一刀里因此长出了
 // 两条核心形式：`(sel c a b)`（条件表达式，惰性）与 `(peq p q)`（指针相等）。理由写在
 // sexpr/lower.js 那两处。真值化不用动方言 —— 那本来就是 jancy 侧的一次隐式转换，
-// 这一层把它显式写出来（`n != 0` / `!pisnull p`）就对了。
+// 这一层把它显式写出来（`n != 0` / `!pisnull p`）就对了。定宽整数也是这一类：位宽是
+// 这一层的账，回卷是三条已有算符的合成，方言一个字都不用改。
 //
 // 还没长出来、因此**当场报错**的（每一条都记着该怎么长，不是"不收"）：
-//   - printf 的精度（`%.2f`）与 `%x` / `%o` —— 两者都要先做一个**数值上的决定**：
-//     精度要定死 C 的 `%.*f` 与 JS 的 toFixed 在恰好一半上怎么对齐（0.125 到两位，
-//     C 给 0.12、JS 给 0.13）；`%x` 要定死负数怎么印（C 当 unsigned，位宽直接改答案）。
+//   - printf 的精度（`%.2f`）—— 要先定死 C 的 `%.*f` 与 JS 的 toFixed 在恰好一半上
+//     怎么对齐（0.125 到两位，C 给 0.12、JS 给 0.13）。挑哪边都行，但要两侧都实现。
+//   - `%x` / `%o` —— 位宽这一格已经有了，剩下的是"印出十六进制"本身：方言没有它，
+//     `tostr` 只给十进制。要方言长一条 `(sbase E 进制 位宽)` 或者在这一层用 `srep` +
+//     查表拼出来。负数按 C 当 unsigned 印，位宽从这一层的类型上取（`int` -> 8 个字）。
 //   - `%*d`（宽度从实参来）—— 那要在运行期才知道宽度，与"格式串必须是字面量"同一处边界。
+//   - `unsigned` —— 要无符号那一半的位宽规则：回卷变成 `x & M`（不摊符号位），
+//     `/` `%` `>>` `<` 都得换成无符号那一版。以前是静默忽略的，现在明着拒
+//     （见 tests/jnc/bad/unsigned.jnc）。
 //   - `&x`（取局部量地址）—— 要局部量可寻址（jancy 那边是"提到 GC 堆上"）。
 //   - 真数组 `int a[3]`（jancy 的数组是**值**类型，方言这一层的 `(arr T)` 是引用语义）——
 //     要方言有值语义的定长数组。
-//   - 定宽整数（jancy 的 `int` 是 32 位、`char` 8 位，这一层全按 64 位）—— 溢出会不一样。
-//     `%x` 那一条挂在它上面。
 //   - `printf` 之外的标准库（`std.*`、`io.*`、`gc.*`）
 //   - 格式化字面量 `$"…"`、多行字面量、正则 switch
 //   - class / union / enum / property / reactor / 事件 / 多播 / 协程
 //   - 异常（try/throw/catch）、`assert`、namespace / import
+//
+// **一处刻意留下的差别**：`sizeof` / `offsetof` 意义上的**存储**宽度。四种位宽在方言里
+// 都占一个 64 位的槽（`char*` 与 `int*` 是同一个方言类型），所以 `new char[n]` 占 8n 字节、
+// `struct { char c; int i; }` 是 16 字节。这一格从**语义**上看不见（指针算术按元素走，
+// 而 `sizeof` / `offsetof` 都不收），所以它不在上面那份名单里；要真接 `sizeof` 才要动。
 //
 // ## printf 怎么降
 //
@@ -69,7 +79,28 @@ const JNC_NOPE = 'jancy 前端第一刀还不收';
  * 方言那一层已经有 ptrTargetOk / sizeOf / structLayout（布局由那一层定死，见 ADR-0016），
  * 这里只要能说出"它是什么"就够。
  */
-const T_INT = { k: 'int' };
+/* ## 定宽整数（ADR-0016 第六刀）
+ *
+ * jancy 的整数是**定宽有符号**的：`char` 8 位、`short` 16、`int` 32、`long` / `intptr` 64
+ * （Lexer.rl 的关键字表 + Type.cpp 的 TypeKind_Int8..Int64）。方言只有一个 64 位的 int，
+ * 所以位宽是**这一层的概念**：存储一律用方言的 int，而每个值都保持在它那一格的范围里
+ * （**符号扩展后的规范形**），窄格的运算之后补一次回卷。
+ *
+ * 为什么这样够：只要两个操作数都是规范形，`% & | ^ >> == <` 的结果**天然**还在范围里，
+ * 只有 `+ - * / <<` 与一元 `-` 会溢出。于是回卷只发生在这五处加上"赋值到更窄的一格"。
+ * 回卷本身不要方言长新形式 —— 它是三条已有算符的合成（掩、异或、减），跟 `~x` -> `x ^ -1`
+ * 与真值化同一类：**jancy 侧的一次隐式动作，这一层把它显式写出来**。
+ *
+ * 与 C 一致的两条规矩也在这儿：**整型提升**（比 32 位窄的先提到 32 位，所以
+ * `char*char` 不会在 8 位里溢出）与**常用算术转换**（两边取较宽的那一格）。
+ */
+const INT_WS = [8, 16, 32, 64];
+const INTS = new Map(INT_WS.map((w) => [w, { k: 'int', w }]));
+const mkInt = (w) => INTS.get(w);
+const T_I8 = mkInt(8);
+const T_I16 = mkInt(16);
+const T_I32 = mkInt(32);
+const T_I64 = mkInt(64);
 const T_REAL = { k: 'real' };
 const T_BOOL = { k: 'bool' };
 const T_VOID = { k: 'void' };
@@ -77,19 +108,40 @@ const T_STR = { k: 'string' };
 const tPtr = (t) => ({ k: 'ptr', target: t });
 const tThin = (t) => ({ k: 'tptr', target: t });
 
-/** 类型 -> 核心方言的写法。 */
+const isInt = (t) => t.k === 'int';
+
+/** 整型提升：比 32 位窄的一律先提到 32 位（C 的规矩，jancy 同）。 */
+const promo = (w) => (w < 32 ? 32 : w);
+
+/**
+ * 回卷到 w 位有符号。`(x & M) ^ S - S` —— 掩到 w 位、再把最高位当符号位摊开。
+ * 64 位就是方言的 int 本身，一个字都不用发。
+ *
+ * 两条腿上都成立：JS 那侧 int 是 BigInt（`-1n & 255n === 255n`），C 那侧是补码的
+ * `int64_t`（`(-1LL) & 255 == 255`）—— 同一串算符给同一个数。
+ */
+function wrapTo(code, w) {
+  if (w >= 64) return code;
+  const s = 1n << BigInt(w - 1);
+  return `(bin "-" (bin "^" (bin "&" ${code} (int ${s * 2n - 1n})) (int ${s})) (int ${s}))`;
+}
+
+/** 类型 -> 核心方言的写法。**四种位宽都写成 `int`** —— 存储就是方言那一个 int。 */
 function tyText(t) {
   if (t.k === 'ptr') return `(ptr ${tyText(t.target)})`;
   if (t.k === 'tptr') return `(tptr ${tyText(t.target)})`;
   if (t.k === 'struct') return t.name;
+  if (t.k === 'int') return 'int';
   return t.k;
 }
 
-/** 给人看的写法（诊断里用）。跟 jancy 自己的拼法一致：`int*` / `int thin*`。 */
+/** 给人看的写法（诊断里用）。跟 jancy 自己的拼法一致：`int*` / `int thin*` / `char`。 */
+const INT_NAMES = new Map([[8, 'char'], [16, 'short'], [32, 'int'], [64, 'long']]);
 function tyName(t) {
   if (t.k === 'ptr') return `${tyName(t.target)}*`;
   if (t.k === 'tptr') return `${tyName(t.target)} thin*`;
   if (t.k === 'struct') return t.name;
+  if (t.k === 'int') return INT_NAMES.get(t.w);
   return t.k;
 }
 
@@ -97,7 +149,18 @@ function sameTy(a, b) {
   if (a.k !== b.k) return false;
   if (a.k === 'ptr' || a.k === 'tptr') return sameTy(a.target, b.target);
   if (a.k === 'struct') return a.name === b.name;
+  if (a.k === 'int') return a.w === b.w;
   return true;
+}
+
+/**
+ * 隐式的整数转换（赋值、初值、实参、返回、`int` 之间的强制转换都走它）。
+ *
+ * 加宽不发一个字 —— 规范形里"8 位的 -1"与"64 位的 -1"是同一个数。变窄才回卷。
+ */
+function intConv(v, to) {
+  if (v.type.w === to.w) return v;
+  return { code: to.w < v.type.w ? wrapTo(v.code, to.w) : v.code, type: to };
 }
 
 const isPtr = (t) => t.k === 'ptr' || t.k === 'tptr';
@@ -239,7 +302,10 @@ class JncLower {
     let thin = false;
     for (const m of mods) {
       if (m === 'thin') { thin = true; continue; }
-      if (m === 'const' || m === 'unsigned') continue;   // 这一层不区分（方言只有一个 int）
+      if (m === 'const') continue;                      // 这一层不区分（没有可变性检查）
+      // `unsigned` 以前是**静默忽略**的，那在有位宽之后会直接给错答案
+      // （`unsigned char c = 200` 该印 200，忽略的话印 -56）。所以现在明着拒。
+      if (m === 'unsigned') { this.nope(n, '`unsigned`（要无符号那一半的位宽规则）'); return null; }
       this.nope(n, `修饰符 '${m}'`);
       return null;
     }
@@ -248,7 +314,11 @@ class JncLower {
     let base = null;
     if (isAtom(ts)) {
       const s = ts.value;
-      if (s === 'int' || s === 'intptr' || s === 'short' || s === 'long' || s === 'char') base = T_INT;
+      // 位宽照 jancy：char 8 / short 16 / int 32 / long 与 intptr 64。
+      if (s === 'char') base = T_I8;
+      else if (s === 'short') base = T_I16;
+      else if (s === 'int') base = T_I32;
+      else if (s === 'long' || s === 'intptr') base = T_I64;
       else if (s === 'double' || s === 'float') base = T_REAL;
       else if (s === 'bool') base = T_BOOL;
       else if (s === 'void') base = T_VOID;
@@ -256,7 +326,7 @@ class JncLower {
     } else {
       const nm = this.qname(ts);
       if (nm === null) { this.nope(ts, '这种类型说明符'); return null; }
-      if (nm === 'size_t') base = T_INT;               // jancy 的语料里到处是它
+      if (nm === 'size_t') base = T_I64;                // jancy 的语料里到处是它
       else if (nm === 'string_t') base = T_STR;
       else if (this.structs.has(nm)) base = { k: 'struct', name: nm };
       else { this.err(ts, `没有这个类型：'${nm}'`); return null; }
@@ -442,8 +512,9 @@ class JncLower {
           return null;
         }
       } else {
-        const v = this.expr(initNode, info.type);
+        let v = this.expr(initNode, info.type);
         if (v === null) return null;
+        if (isInt(v.type) && isInt(info.type)) v = intConv(v, info.type);
         if (!sameTy(v.type, info.type)) {
           this.err(initNode, `初值的类型是 ${tyName(v.type)}，声明的是 ${tyName(info.type)}`);
           return null;
@@ -480,9 +551,9 @@ class JncLower {
       const a = this.expr(n.items[1], null);
       if (a === null) return null;
       if (!isPtr(a.type)) return this.err(n, `下标要一个指针，这里是 ${tyName(a.type)}`);
-      const i = this.expr(n.items[2], T_INT);
+      const i = this.expr(n.items[2], T_I64);
       if (i === null) return null;
-      if (i.type !== T_INT) return this.err(n, `下标要 int，这里是 ${tyName(i.type)}`);
+      if (!isInt(i.type)) return this.err(n, `下标要整数，这里是 ${tyName(i.type)}`);
       return { kind: 'ptr', code: `(padd ${a.code} ${i.code})`, type: a.type.target };
     }
     // `p->f = v` 与 `(*p).f = v` 是同一件事
@@ -524,9 +595,11 @@ class JncLower {
       const op = isStr(n.items[1]) ? n.items[1].value : null;
       const lv = this.lvalue(n.items[2]);
       if (lv === null) return null;
-      const v = this.expr(n.items[3], lv.type);
+      let v = this.expr(n.items[3], lv.type);
       if (v === null) return null;
       if (op === '=') {
+        // 整数之间的赋值是**隐式收窄**（`char c = 300` 存 44）—— C 的规矩，jancy 同。
+        if (isInt(lv.type) && isInt(v.type)) v = intConv(v, lv.type);
         if (!sameTy(v.type, lv.type)) {
           this.err(n, `赋值两边不同型：左是 ${tyName(lv.type)}，右是 ${tyName(v.type)}`);
           return null;
@@ -541,9 +614,16 @@ class JncLower {
       // 指针上的 `p += i` 是**指针算术**，不是加法（type_ptr_data.rst 那段就是它）
       if (isPtr(lv.type)) {
         if (bin !== '+' && bin !== '-') { this.nope(n, `指针上的 '${op}'`); return null; }
-        if (v.type !== T_INT) { this.err(n, `指针上的 '${op}' 右边要 int，这里是 ${tyName(v.type)}`); return null; }
+        if (!isInt(v.type)) { this.err(n, `指针上的 '${op}' 右边要整数，这里是 ${tyName(v.type)}`); return null; }
         const d = bin === '+' ? v.code : `(un "-" ${v.code})`;
         return [`${pad}${this.store(lv, `(padd ${this.read(lv)} ${d})`)}`];
+      }
+      // `lv op= v` 就是 `lv = (T)(lv op v)`：算完之后回卷到 lv 那一格。
+      // 结果宽度总是 >= lv 的宽度（常用算术转换只会变宽），所以直接回卷到 lv 就够，
+      // 中间那一次可以省。`%` 不用回卷 —— 余数的绝对值不超过左边，天然在范围里。
+      if (isInt(lv.type) && isInt(v.type)) {
+        const code = `(bin "${bin}" ${this.read(lv)} ${v.code})`;
+        return [`${pad}${this.store(lv, bin === '%' ? code : wrapTo(code, lv.type.w))}`];
       }
       if (!sameTy(v.type, lv.type)) {
         this.err(n, `'${op}' 两边不同型：左是 ${tyName(lv.type)}，右是 ${tyName(v.type)}`);
@@ -559,12 +639,16 @@ class JncLower {
       if (isPtr(lv.type)) {
         return [`${pad}${this.store(lv, `(padd ${this.read(lv)} (int ${up ? '1' : '-1'}))`)}`];
       }
-      if (lv.type !== T_INT && lv.type !== T_REAL) {
-        this.err(n, `'${up ? '++' : '--'}' 要 int / real / 指针，这里是 ${tyName(lv.type)}`);
+      if (isInt(lv.type)) {
+        // `char c = 127; c++;` 是 -128（回卷），不是 128。
+        const code = `(bin "${up ? '+' : '-'}" ${this.read(lv)} (int 1))`;
+        return [`${pad}${this.store(lv, wrapTo(code, lv.type.w))}`];
+      }
+      if (lv.type !== T_REAL) {
+        this.err(n, `'${up ? '++' : '--'}' 要整数 / real / 指针，这里是 ${tyName(lv.type)}`);
         return null;
       }
-      const one = lv.type === T_INT ? '(int 1)' : '(real 1.0)';
-      return [`${pad}${this.store(lv, `(bin "${up ? '+' : '-'}" ${this.read(lv)} ${one})`)}`];
+      return [`${pad}${this.store(lv, `(bin "${up ? '+' : '-'}" ${this.read(lv)} (real 1.0))`)}`];
     }
     if (h === 'call') return this.callStmt(n, ind);
     this.nope(n, `这条表达式语句（'${h}'）没有副作用，jancy 那边也会拒`);
@@ -638,10 +722,10 @@ class JncLower {
       const spec = fmt[j];
       i = j;
       if (spec === '%') { lit += '%'; continue; }
-      // 精度（`%.2f`）与 `%x` / `%o` 还没有 —— 两者都要先做一个数值上的决定：
-      // 精度要定死 C 的 `%.*f` 与 JS 的 toFixed 在**恰好一半**上怎么对齐（0.125 -> C 给
-      // 0.12、JS 给 0.13）；`%x` 要定死负数怎么印（C 把它当 unsigned，位宽是 32 还是 64
-      // 直接改答案 —— 那件事挂在"定宽整数"那一格上）。记在 ADR-0016 的名单里。
+      // 精度（`%.2f`）与 `%x` / `%o` 还没有。精度要先定死 C 的 `%.*f` 与 JS 的 toFixed
+      // 在**恰好一半**上怎么对齐（0.125 -> C 给 0.12、JS 给 0.13）。`%x` 的位宽这一格
+      // 已经有了（定宽整数，第六刀），剩下的是"印十六进制"本身 —— 方言的 `tostr` 只给
+      // 十进制。两条都记在 ADR-0016 的名单里。
       if (spec !== 'd' && spec !== 'i' && spec !== 'f' && spec !== 's' && spec !== 'c') {
         this.nope(n, `printf 的转换 '%${spec === undefined ? '' : spec}'`);
         return null;
@@ -652,8 +736,8 @@ class JncLower {
       let piece = null;
       // `%c`：一个码位 -> 一个字符。方言的 `(chr E)`（另外四条腿早就有它）。
       if (spec === 'c') {
-        if (v.type !== T_INT) {
-          this.err(args[ai], `'%c' 要 int（jancy 的 char 就是整数），这里是 ${tyName(v.type)}`);
+        if (!isInt(v.type)) {
+          this.err(args[ai], `'%c' 要整数（jancy 的 char 就是 8 位整数），这里是 ${tyName(v.type)}`);
           return null;
         }
         piece = `(chr ${v.code})`;
@@ -661,8 +745,11 @@ class JncLower {
         // jancy 的 `bool` 底下是 int8，`printf("%d", b)` 印 1 / 0（C 的样子）——
         // 用 `sel` 变成 1 / 0，而不是 `(tostr b)`（那会印 true / false）。
         piece = `(tostr (sel ${v.code} (int 1) (int 0)))`;
+      } else if ((spec === 'd' || spec === 'i') && isInt(v.type)) {
+        // 四种位宽都收：值已经是规范形（符号扩展过的），照印就是 C 的样子。
+        piece = `(tostr ${v.code})`;
       } else {
-        const want = spec === 'f' ? T_REAL : (spec === 's' ? T_STR : T_INT);
+        const want = spec === 'f' ? T_REAL : (spec === 's' ? T_STR : T_I32);
         if (!sameTy(v.type, want)) {
           this.err(args[ai], `'%${spec}' 要 ${tyName(want)}，这里是 ${tyName(v.type)}`);
           return null;
@@ -732,7 +819,7 @@ class JncLower {
   truthy(v, node) {
     if (v === null) return null;
     if (v.type === T_BOOL) return v;
-    if (v.type === T_INT) return { code: `(bin "!=" ${v.code} (int 0))`, type: T_BOOL };
+    if (isInt(v.type)) return { code: `(bin "!=" ${v.code} (int 0))`, type: T_BOOL };
     if (v.type === T_REAL) return { code: `(bin "!=" ${v.code} (real 0.0))`, type: T_BOOL };
     if (isPtr(v.type)) return { code: `(un "!" (pisnull ${v.code}))`, type: T_BOOL };
     return this.err(node, `${tyName(v.type)} 不能当条件用`);
@@ -871,8 +958,9 @@ class JncLower {
       if (isAtom(v) && v.value === '0') return [`${pad}(ret)`];
       return this.nope(n, 'main 里 `return` 一个非 0 的值（方言的入口没有退出码）');
     }
-    const v = this.expr(n.items[1], this.retTy);
+    let v = this.expr(n.items[1], this.retTy);
     if (v === null) return null;
+    if (isInt(v.type) && isInt(this.retTy)) v = intConv(v, this.retTy);
     if (!sameTy(v.type, this.retTy)) {
       this.err(n, `return 的类型是 ${tyName(v.type)}，函数声明的是 ${tyName(this.retTy)}`);
       return null;
@@ -893,21 +981,31 @@ class JncLower {
     if (v === null) return null;
     // int -> real 的隐式加宽（jancy 与 C 同）。反过来**不**做：那是丢精度，
     // jancy 那边也要一次显式强制转换。
-    if (want === T_REAL && v.type === T_INT) return { code: `(toreal ${v.code})`, type: T_REAL };
+    if (want === T_REAL && isInt(v.type)) return { code: `(toreal ${v.code})`, type: T_REAL };
     return v;
   }
 
   /** 数值字面量。方言的 `(int …)` 只收十进制，所以 `0x` / `0b` / `0o` 在这儿就折成十进制。 */
   numLit(n) {
     const s = n.value;
-    if (/^0[xX][0-9a-fA-F]+$/.test(s)) return { code: `(int ${BigInt(`0x${s.slice(2)}`)})`, type: T_INT };
-    if (/^0[bB][01]+$/.test(s)) return { code: `(int ${BigInt(`0b${s.slice(2)}`)})`, type: T_INT };
-    if (/^0[oO][0-7]+$/.test(s)) return { code: `(int ${BigInt(`0o${s.slice(2)}`)})`, type: T_INT };
+    if (/^0[xX][0-9a-fA-F]+$/.test(s)) return this.intLit(n, BigInt(`0x${s.slice(2)}`));
+    if (/^0[bB][01]+$/.test(s)) return this.intLit(n, BigInt(`0b${s.slice(2)}`));
+    if (/^0[oO][0-7]+$/.test(s)) return this.intLit(n, BigInt(`0o${s.slice(2)}`));
     if (/^0[oO][0-9]+$/.test(s)) return this.err(n, `八进制字面量里有 8 或 9：'${s}'`);
-    if (/^[0-9]+$/.test(s)) return { code: `(int ${s})`, type: T_INT };
+    if (/^[0-9]+$/.test(s)) return this.intLit(n, BigInt(s));
     // FP 那两条词法规则出来的形状（`1.5` / `1.` / `1e3` / `1.5e-3`）方言的 realLit 都收
     if (/^[0-9]+\.?[0-9]*([eE][+-]?[0-9]+)?$/.test(s)) return { code: `(real ${s})`, type: T_REAL };
     return this.err(n, `认不出的字面量 '${s}'`);
+  }
+
+  /**
+   * 整数字面量的类型：**装得下就是 `int`（32 位），装不下就是 `long`（64 位）**。C 的规矩，
+   * jancy 同。这条有个众所周知的后果，照抄不改：`-2147483648` 是 `long` 而不是 `int`
+   * （一元减在字面量**之外**，而 `2147483648` 已经装不下 32 位了）。
+   */
+  intLit(n, v) {
+    if (v > 0x7fffffffffffffffn) return this.err(n, `整数字面量超出 long 能装的范围：'${n.value}'`);
+    return { code: `(int ${v})`, type: v > 0x7fffffffn ? T_I64 : T_I32 };
   }
 
   expr0(n, want) {
@@ -1015,29 +1113,39 @@ class JncLower {
         if (!sameTy(a.type, b.type)) {
           return this.err(n, `指针差要同型：左是 ${tyName(a.type)}，右是 ${tyName(b.type)}`);
         }
-        return { code: `(psub ${a.code} ${b.code})`, type: T_INT };
+        return { code: `(psub ${a.code} ${b.code})`, type: T_I64 };
       }
-      if ((op === '+' || op === '-') && isPtr(a.type) && b.type === T_INT) {
+      if ((op === '+' || op === '-') && isPtr(a.type) && isInt(b.type)) {
         const d = op === '+' ? b.code : `(un "-" ${b.code})`;
         return { code: `(padd ${a.code} ${d})`, type: a.type };
       }
       // `i + p` 也成立（C 的规矩），但 `i - p` 不成立
-      if (op === '+' && a.type === T_INT && isPtr(b.type)) {
+      if (op === '+' && isInt(a.type) && isPtr(b.type)) {
         return { code: `(padd ${b.code} ${a.code})`, type: b.type };
       }
       return this.nope(n, `指针上的 '${op}'`);
     }
-    // 一边 int 一边 real：加宽 int 那一边
-    if (a.type === T_INT && b.type === T_REAL) a = { code: `(toreal ${a.code})`, type: T_REAL };
-    else if (a.type === T_REAL && b.type === T_INT) b = { code: `(toreal ${b.code})`, type: T_REAL };
+    const cmp = op === '==' || op === '!=' || op === '<' || op === '<=' || op === '>' || op === '>=';
+    // 两边都是整数：先常用算术转换定出结果那一格的宽度，再看要不要回卷。
+    if (isInt(a.type) && isInt(b.type)) {
+      const code = `(bin "${op}" ${a.code} ${b.code})`;
+      // 比较不用管宽度：两边都是规范形，直接比就是对的（这也是"规范形"这条不变式的用处）。
+      if (cmp) return { code, type: T_BOOL };
+      // 移位的结果宽度**只看左边** —— 右边不参与常用算术转换（C 的规矩，jancy 同）。
+      const rw = (op === '<<' || op === '>>')
+        ? promo(a.type.w)
+        : Math.max(promo(a.type.w), promo(b.type.w));
+      // 会溢出的只有这五条；`% & | ^ >>` 在规范形上天然还在范围里，一个字都不用发。
+      const over = op === '+' || op === '-' || op === '*' || op === '/' || op === '<<';
+      return { code: over ? wrapTo(code, rw) : code, type: mkInt(rw) };
+    }
+    // 一边整数一边 real：加宽整数那一边
+    if (isInt(a.type) && b.type === T_REAL) a = { code: `(toreal ${a.code})`, type: T_REAL };
+    else if (a.type === T_REAL && isInt(b.type)) b = { code: `(toreal ${b.code})`, type: T_REAL };
     if (!sameTy(a.type, b.type)) {
       return this.err(n, `'${op}' 两边不同型：左是 ${tyName(a.type)}，右是 ${tyName(b.type)}`);
     }
-    return {
-      code: `(bin "${op}" ${a.code} ${b.code})`,
-      type: (op === '==' || op === '!=' || op === '<' || op === '<=' || op === '>' || op === '>=')
-        ? T_BOOL : a.type,
-    };
+    return { code: `(bin "${op}" ${a.code} ${b.code})`, type: cmp ? T_BOOL : a.type };
   }
 
   unary(n, want) {
@@ -1045,11 +1153,18 @@ class JncLower {
     const a = this.expr(n.items[2], op === '!' ? T_BOOL : want);
     if (a === null) return null;
     if (op === '+') {
-      if (a.type !== T_INT && a.type !== T_REAL) return this.err(n, `一元 '+' 要 int / real，这里是 ${tyName(a.type)}`);
-      return a;   // 一元加是恒等（jancy 那边也是）
+      // 一元加是恒等，但**带整型提升**（`char c; +c` 是 int）。提升在规范形里不发一个字。
+      if (isInt(a.type)) return { code: a.code, type: mkInt(promo(a.type.w)) };
+      if (a.type !== T_REAL) return this.err(n, `一元 '+' 要整数 / real，这里是 ${tyName(a.type)}`);
+      return a;
     }
     if (op === '-') {
-      if (a.type !== T_INT && a.type !== T_REAL) return this.err(n, `一元 '-' 要 int / real，这里是 ${tyName(a.type)}`);
+      // `char c = -128; -c` 还是 -128 吗？不是 —— 提到 int 之后是 128。回卷按**提升后**那一格。
+      if (isInt(a.type)) {
+        const w = promo(a.type.w);
+        return { code: wrapTo(`(un "-" ${a.code})`, w), type: mkInt(w) };
+      }
+      if (a.type !== T_REAL) return this.err(n, `一元 '-' 要整数 / real，这里是 ${tyName(a.type)}`);
       return { code: `(un "-" ${a.code})`, type: a.type };
     }
     if (op === '!') {
@@ -1060,10 +1175,9 @@ class JncLower {
     }
     if (op === '~') {
       // 方言的 `un` 只有 `-` 与 `!`，但按位取反不用新形式：`~x` 就是 `x ^ -1`。
-      // 这一层的 int 是 64 位（jancy 的 `int` 是 32 位 —— 那处差别记在文件头的待办里，
-      // 是**位宽**的事，不是这条算符的事）。
-      if (a.type !== T_INT) return this.err(n, `'~' 要 int，这里是 ${tyName(a.type)}`);
-      return { code: `(bin "^" ${a.code} (int -1))`, type: T_INT };
+      // 不用回卷 —— 提升后那一格里的规范形取反还在同一格里（`~127` = -128）。
+      if (!isInt(a.type)) return this.err(n, `'~' 要整数，这里是 ${tyName(a.type)}`);
+      return { code: `(bin "^" ${a.code} (int -1))`, type: mkInt(promo(a.type.w)) };
     }
     return this.nope(n, `一元 '${op}'`);
   }
@@ -1080,8 +1194,14 @@ class JncLower {
     let a = this.expr(n.items[2], want);
     let b = this.expr(n.items[3], want === null || want === undefined ? (a === null ? null : a.type) : want);
     if (c === null || a === null || b === null) return null;
-    if (a.type === T_INT && b.type === T_REAL) a = { code: `(toreal ${a.code})`, type: T_REAL };
-    else if (a.type === T_REAL && b.type === T_INT) b = { code: `(toreal ${b.code})`, type: T_REAL };
+    // 两支都是整数：结果是较宽的那一格（常用算术转换）。加宽在规范形里不发一个字，
+    // 而方言的 `sel` 看到的两支都是它那一个 int，所以这儿只改类型不改代码。
+    if (isInt(a.type) && isInt(b.type)) {
+      const w = Math.max(promo(a.type.w), promo(b.type.w));
+      return { code: `(sel ${c.code} ${a.code} ${b.code})`, type: mkInt(w) };
+    }
+    if (isInt(a.type) && b.type === T_REAL) a = { code: `(toreal ${a.code})`, type: T_REAL };
+    else if (a.type === T_REAL && isInt(b.type)) b = { code: `(toreal ${b.code})`, type: T_REAL };
     if (!sameTy(a.type, b.type)) {
       return this.err(n, `'? :' 两支不同型：甲是 ${tyName(a.type)}，乙是 ${tyName(b.type)}`);
     }
@@ -1101,8 +1221,10 @@ class JncLower {
     }
     const parts = [];
     for (let i = 0; i < args.length; i++) {
-      const v = this.expr(args[i], sig.params[i]);
+      let v = this.expr(args[i], sig.params[i]);
       if (v === null) return null;
+      // 实参与赋值同一条规矩：整数隐式转到形参那一格（窄了就回卷）。
+      if (isInt(v.type) && isInt(sig.params[i])) v = intConv(v, sig.params[i]);
       if (!sameTy(v.type, sig.params[i])) {
         return this.err(args[i], `'${nm}' 的第 ${i + 1} 个实参要 ${tyName(sig.params[i])}，`
           + `这里是 ${tyName(v.type)}`);
@@ -1123,9 +1245,9 @@ class JncLower {
     if (t === T_VOID) return this.err(n, 'new void');
     let count = '(int 1)';
     if (countNode !== null) {
-      const c = this.expr(countNode, T_INT);
+      const c = this.expr(countNode, T_I64);
       if (c === null) return null;
-      if (c.type !== T_INT) return this.err(countNode, `new T[n] 的 n 要 int，这里是 ${tyName(c.type)}`);
+      if (!isInt(c.type)) return this.err(countNode, `new T[n] 的 n 要整数，这里是 ${tyName(c.type)}`);
       count = c.code;
     }
     return { code: `(pnew ${tyText(tPtr(t))} ${count})`, type: tPtr(t) };
@@ -1146,8 +1268,12 @@ class JncLower {
     const v = this.expr(exprNode, to);
     if (v === null) return null;
     if (sameTy(v.type, to)) return v;
-    if (to === T_REAL && v.type === T_INT) return { code: `(toreal ${v.code})`, type: T_REAL };
-    if (to === T_INT && v.type === T_REAL) return { code: `(toint ${v.code})`, type: T_INT };
+    if (isInt(to) && isInt(v.type)) return intConv(v, to);
+    if (to === T_REAL && isInt(v.type)) return { code: `(toreal ${v.code})`, type: T_REAL };
+    if (isInt(to) && v.type === T_REAL) {
+      // 先向零截断成 64 位（方言的 `toint` 就是它），再回卷到目标那一格。
+      return intConv({ code: `(toint ${v.code})`, type: T_I64 }, to);
+    }
     if (to.k === 'tptr' && v.type.k === 'ptr' && sameTy(to.target, v.type.target)) {
       // 在这儿拦一次而不是等方言报：这条消息能指着 jancy 那一行说话。
       if (!this.unsafe) {
