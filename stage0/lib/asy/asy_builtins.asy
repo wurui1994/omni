@@ -755,6 +755,20 @@ path operator cast(pair z) {
   return pathof(z);
 }
 
+// `path[] operator cast(path)`：真 asy 那边这一条在 **plain**（plain_paths.asy:44），
+// 不在 C++ 内建面里。这一层也备一份 —— 不 import plain 时 `fill(g)` 这种写法要靠它，
+// 而 import 了 plain 之后那边会声明**同签名**的一份把这里盖掉（同签名是替换）。
+// 有了它，绘图层那几格"图上填充"的短路就都收 `path[]` 了，于是 plain 的同名那份
+// （`void fill(picture pic=currentpicture, path[] g, pen p=currentpen)`）与这里
+// 一样都要过一次转换 —— 打平之后取后声明的那份，也就是 plain 的。
+// 少了这一步的样子（量过 yingyang.asy / 一堆例子）：`fill(circle(…))` 落在这一层的
+// `fill(path)` 上，画进了**内建面自己那个 currentpicture**，谁也不印它，那一笔就凭空消失。
+path[] operator cast(path p) {
+  path[] r;
+  r.push(p);
+  return r;
+}
+
 // ------------------------------------------------------------ Hobby 求解器
 // `a..b..c` 的控制点是解一组线性方程得出来的（MetaFont 的那套，asy 在 knot.h/knot.cc
 // 里照搬）。这一段是那份代码的 asy 译本。每个结两侧的规格有 open（`..`）、curl（开路径的
@@ -1523,10 +1537,35 @@ void addcubic(box bx, pair p0, pair p1, pair p2, pair p3) {
 }
 
 // ---------------------------------------------------------------- picture
+// 渐变/网格填充那一族的余料（drawfill.h 的 drawShade 一支）。挂在 drawop 上，
+// **只有 kind == 2 那些才有**（其余是 null）—— 描边与填充那两档一个字段都不多占。
+// st 就是 PostScript 的 ShadingType：1 = lattice、2 = axial、3 = radial、
+// 4 = gouraud、7 = tensor（0 留给 functionshade 那一路，还没做）。
+struct shadeinfo {
+  int st = 0;
+  path[] gs;             // 整条超路径：clip 用它，界也用它
+  bool stroke = false;
+  // axial / radial
+  pen pena; pen penb; pair za = (0, 0); pair zb = (0, 0);
+  real ra = 0; real rb = 0; bool exta = true; bool extb = true;
+  // gouraud
+  pen[] vpens; pair[] verts; int[] vedges;
+  // lattice 与 tensor 的二维笔阵
+  pen[][] mpens;
+  // tensor
+  path[] bnds; pair[][] tz;
+  // lattice 的 /Matrix
+  transform tt;
+}
+
 struct drawop {
-  int kind = 0;      // 0 = 描边，1 = 填充
+  int kind = 0;      // 0 = 描边，1 = 填充，2 = 渐变/网格（看 sh），3/4 = 裁剪的头与尾
   path g;
   pen p;
+  shadeinfo sh = null;
+  // 裁剪那一对的 gsave/grestore 省掉没有（picture.cc:301 那个"解释器栈深"的优化：
+  // 两格 endclip 挨着时，**前面那一格**与它配对的头都不发 gsave/grestore）。
+  bool nosave = false;
 }
 
 struct picture {
@@ -1553,20 +1592,43 @@ void addop(picture pic, int kind, path g, pen p) {
   pic.ops.push(o);
 }
 
-void draw(picture pic, path g, pen p) { addop(pic, 0, g, p); }
-void draw(picture pic, path g) { addop(pic, 0, g, currentpen); }
-void draw(path g, pen p) { addop(currentpicture, 0, g, p); }
-void draw(path g) { addop(currentpicture, 0, g, currentpen); }
+// 图上的描边与填充：**这一层自己的短路**（不 import plain 时用）。收的是 `path[]` ——
+// 与 plain 那几份同一个形状，所以 import 了 plain 之后两边都要过一次 `path[] operator cast`，
+// 打平取后声明的那份（plain 的），画进的是 plain 那个 currentpicture。见上面那条 cast 旁边的注。
+void draw(picture pic, path[] g, pen p) { for (path q : g) addop(pic, 0, q, p); }
+void draw(picture pic, path[] g) { for (path q : g) addop(pic, 0, q, currentpen); }
+void draw(path[] g, pen p) { for (path q : g) addop(currentpicture, 0, q, p); }
+void draw(path[] g) { for (path q : g) addop(currentpicture, 0, q, currentpen); }
 
-void fill(picture pic, path g, pen p) { addop(pic, 1, g, p); }
-void fill(picture pic, path g) { addop(pic, 1, g, currentpen); }
-void fill(path g, pen p) { addop(currentpicture, 1, g, p); }
-void fill(path g) { addop(currentpicture, 1, g, currentpen); }
+void fill(picture pic, path[] g, pen p) { for (path q : g) addop(pic, 1, q, p); }
+void fill(picture pic, path[] g) { for (path q : g) addop(pic, 1, q, currentpen); }
+void fill(path[] g, pen p) { for (path q : g) addop(currentpicture, 1, q, p); }
+void fill(path[] g) { for (path q : g) addop(currentpicture, 1, q, currentpen); }
 
 // 一个元素在缩放 s 下的 bbox。描边按笔宽的一半外扩（默认是圆头圆角，四个方向都是 w/2）。
-box opbox(drawop o, real s) {
-  box eb;
-  path g = o.g;
+// 描边那一笔的盒子要加上**笔的盒子**（pen.h:931 的 pen::bounds）：没有笔尖时是
+// ±0.5*linewidth*(maxx,maxy) 加上笔那个变换的平移，maxx/maxy 是线性部分两行的模长
+// （恒等时就是 1）。min/max(pen) 用的是同一份算法，但它们声明在后面，所以这里现写。
+void widen(box eb, pen p) {
+  real hw = 0.5 * p.width;
+  real mx = 1;
+  real my = 1;
+  real sx = 0;
+  real sy = 0;
+  if (p.hastrans) {
+    mx = length((p.pentrans.xx, p.pentrans.xy));
+    my = length((p.pentrans.yx, p.pentrans.yy));
+    sx = p.pentrans.x;
+    sy = p.pentrans.y;
+  }
+  eb.l -= hw * mx - sx;
+  eb.b -= hw * my - sy;
+  eb.r += hw * mx + sx;
+  eb.t += hw * my + sy;
+}
+
+// 一条路径自己的界（三次段按控制点解极值，见 addcubic）
+void pathbox(box eb, path g, real s) {
   int n = g.nodes.length;
   int segs = length(g);
   for (int i = 0; i < n; ++i) addpt(eb, s * g.nodes[i].point);
@@ -1578,40 +1640,94 @@ box opbox(drawop o, real s) {
                s * g.nodes[j].pre, s * g.nodes[j].point);
     }
   }
-  if (o.kind == 0 && !eb.empty) {
-    // 描边那一笔的盒子要加上**笔的盒子**（pen.h:931 的 pen::bounds）：没有笔尖时是
-    // ±0.5*linewidth*(maxx,maxy) 加上笔那个变换的平移，maxx/maxy 是线性部分两行的模长
-    // （恒等时就是 1）。min/max(pen) 用的是同一份算法，但它们声明在后面，所以这里现写。
-    real hw = 0.5 * o.p.width;
-    real mx = 1;
-    real my = 1;
-    real sx = 0;
-    real sy = 0;
-    if (o.p.hastrans) {
-      mx = length((o.p.pentrans.xx, o.p.pentrans.xy));
-      my = length((o.p.pentrans.yx, o.p.pentrans.yy));
-      sx = o.p.pentrans.x;
-      sy = o.p.pentrans.y;
-    }
-    eb.l -= hw * mx - sx;
-    eb.b -= hw * my - sy;
-    eb.r += hw * mx + sx;
-    eb.t += hw * my + sy;
+}
+
+box opbox(drawop o, real s) {
+  box eb;
+  // 渐变那一档的界是**整条超路径**的（drawelement.h:385 的 strokebounds /
+  // drawSuperPathPenBase::bounds），描边位打开时再加笔的盒子 —— 与描边那一档同一段代码。
+  bool wide = o.kind == 0;
+  if (o.kind == 2) {
+    for (int i = 0; i < o.sh.gs.length; ++i) pathbox(eb, o.sh.gs[i], s);
+    wide = o.sh.stroke;
+  } else {
+    pathbox(eb, o.g, s);
   }
+  if (wide && !eb.empty) widen(eb, o.p);
   return eb;
 }
 
-box picbox(picture pic, real s) {
+box boxcopy(box a) {
+  box r;
+  r.l = a.l; r.b = a.b; r.r = a.r; r.t = a.t; r.empty = a.empty;
+  return r;
+}
+
+void boxadd(box a, box b) {
+  if (b.empty) return;
+  addpt(a, (b.l, b.b));
+  addpt(a, (b.r, b.t));
+}
+
+// bbox.h:167 的 clip：空的不动；交出来是空的话整格清空
+void boxclip(box a, box b) {
+  if (a.empty) return;
+  if (b.l > a.l) a.l = b.l;
+  if (b.r < a.r) a.r = b.r;
+  if (b.b > a.b) a.b = b.b;
+  if (b.t < a.t) a.t = b.t;
+  if (a.l > a.r || a.b > a.t) { a.l = 0; a.b = 0; a.r = 0; a.t = 0; a.empty = true; }
+}
+
+// 一叠 drawop 的界。裁剪那两格（kind 3/4）按 drawclipbegin.h:37 与 drawclipend.h:28 那
+// 两段来：进裁剪时把"到这里为止的界"与"裁剪路径的界"各压一格，出裁剪时先把攒到的界
+// 交上裁剪路径那一格、再把外面那一格并回来 —— 所以裁剪外面画过的东西不会被裁掉。
+box opsbox(drawop[] ops, real s) {
   box bx;
-  for (int i = 0; i < pic.ops.length; ++i) {
-    box eb = opbox(pic.ops[i], s);
-    if (!eb.empty) {
-      addpt(bx, (eb.l, eb.b));
-      addpt(bx, (eb.r, eb.t));
+  box[] stk;
+  // picture.cc:301 的那个优化就发在**量界这一趟**里（那边 bounds() 顺手改 save 标志）：
+  // 两格 endclip 挨着时，前面那一格与它配对的头都不发 gsave/grestore。这里照同一处做，
+  // 所以出图那一趟看到的标志与真 asy 一样（量过 colorplanes.asy：少了这一下会多一对）。
+  int[] open;
+  bool anyclip = false;
+  for (int i = 0; i < ops.length; ++i) if (ops[i].kind == 3) { anyclip = true; break; }
+  if (anyclip) {
+    int[] mate;
+    for (int i = 0; i < ops.length; ++i) mate.push(-1);
+    for (int i = 0; i < ops.length; ++i) {
+      if (ops[i].kind == 3) open.push(i);
+      else if (ops[i].kind == 4 && open.length > 0) mate[i] = open.pop();
     }
+    for (int i = 1; i < ops.length; ++i) {
+      if (ops[i].kind == 4 && ops[i - 1].kind == 4) {
+        ops[i - 1].nosave = true;
+        if (mate[i - 1] >= 0) ops[mate[i - 1]].nosave = true;
+      }
+    }
+  }
+  for (int i = 0; i < ops.length; ++i) {
+    drawop o = ops[i];
+    if (o.kind == 3) {
+      stk.push(boxcopy(bx));
+      box pb;
+      for (int j = 0; j < o.sh.gs.length; ++j) pathbox(pb, o.sh.gs[j], s);
+      if (o.sh.stroke && !pb.empty) widen(pb, o.p);
+      stk.push(pb);
+      continue;
+    }
+    if (o.kind == 4) {
+      if (stk.length < 2) abort("endclip without matching beginclip");
+      box pb = stk.pop();
+      boxclip(bx, pb);
+      boxadd(bx, stk.pop());
+      continue;
+    }
+    boxadd(bx, opbox(o, s));
   }
   return bx;
 }
+
+box picbox(picture pic, real s) { return opsbox(pic.ops, s); }
 
 // ---------------------------------------------------------------- frame
 // asy 的 frame 是「已经定好尺寸的一叠元素」（坐标就是最终坐标，不再跟着 size(…) 缩放），
@@ -1676,17 +1792,7 @@ void label(frame f, string s, string size, transform t, pair position, pair alig
 bool labels(frame f) { return f.haslabel; }
 
 // 缩放固定为 1 —— frame 的坐标已经是最终坐标了
-box framebox(frame f) {
-  box bx;
-  for (int i = 0; i < f.ops.length; ++i) {
-    box eb = opbox(f.ops[i], 1);
-    if (!eb.empty) {
-      addpt(bx, (eb.l, eb.b));
-      addpt(bx, (eb.r, eb.t));
-    }
-  }
-  return bx;
-}
+box framebox(frame f) { return opsbox(f.ops, 1); }
 
 bool empty(frame f) { return f.ops.length == 0; }
 
@@ -1759,6 +1865,22 @@ string ps9(real x) { return string(x, 9); }
 pen lastpen;
 bool lastvalid = false;
 
+// `gsave` / `grestore` 连**上一支笔**一起存取（psfile.h:303/310：gsave 把 lastpen 压进
+// pens 栈，grestore 弹回来）。所以裁剪或渐变那一段里改过的笔，出来之后不算数 ——
+// 下一笔要把颜色/宽度那几行重新发一遍。量过 yingyang.asy：`unfill` 那一对 gsave/grestore
+// 之后的 `fill` 前面，真 asy 确实又发了 `0 setgray` 那五行。
+pen[] pensave;
+bool[] pensavevalid;
+void gsavepen() {
+  pensave.push(pencopy(lastpen));
+  pensavevalid.push(lastvalid);
+}
+void grestorepen() {
+  if (pensave.length == 0) return;
+  lastpen = pensave.pop();
+  lastvalid = pensavevalid.pop();
+}
+
 // 颜色分三档，顺序照 psfile.cc:184 的 setcolor：先 cmyk、再 rgb、最后灰。
 // 量过 `cmyk(1,0,0.5,0.2)`：asy 发的是 `1 0 0.5 0.2 setcmykcolor`，**不转成 rgb**。
 string colorof(pen p) {
@@ -1790,10 +1912,12 @@ void setpen(pen p) {
 
 // 路径本身（psfile.h:295..312 那一段照搬）：第一句是 `newpath … moveto`，
 // 直的段发 lineto、弯的发 curveto；闭合的路径末尾多一句回到起点再 closepath。
-void emitpath(path g, real s) {
+// `newPath` 是给**超路径**用的（drawelement.h:397）：一条超路径只发一句 newpath，
+// 后面那几条子路径接着发 moveto —— 这样一次 clip 才把它们当同一条路径。
+void emitpath(path g, real s, bool newPath=true) {
   int n = g.nodes.length;
   pair z0 = s * g.nodes[0].point;
-  write("newpath " + ps(z0.x) + " " + ps(z0.y) + " moveto");
+  write((newPath ? "newpath " : " ") + ps(z0.x) + " " + ps(z0.y) + " moveto");
   for (int i = 1; i < n; ++i) {
     pair z = s * g.nodes[i].point;
     if (g.nodes[i - 1].straight) write(" " + ps(z.x) + " " + ps(z.y) + " lineto");
@@ -1818,9 +1942,264 @@ void emitpath(path g, real s) {
   }
 }
 
-// 摆放是量出来的：图的整体尺寸 = 缩放后的 bbox（描边已经算进笔宽了），
-// 信纸 612x792 居中再各减 0.5（那 0.5 与笔宽无关，三个尺寸两种笔宽都对上了），
-// translate 把 bbox 的左下角搬到那里。
+// ---------------------------------------- 渐变/网格填充（drawfill.h 的 drawShade 一支）
+// 颜色空间在这一层用**分量个数**记（pen.h:85 的 ColorComponents）：1 灰、3 rgb、4 cmyk。
+// 一族笔取最大的那一档（psfile.h:352 的 maxcolorspace；没设过颜色的按默认笔算，是灰）。
+int csof(pen p) { return p.iscmyk ? 4 : (p.isrgb ? 3 : 1); }
+int maxcs(pen[] ps) {
+  int c = 1;
+  for (int i = 0; i < ps.length; ++i) { int m = csof(ps[i]); if (m > c) c = m; }
+  return c;
+}
+int maxcs2(pen[][] ps) {
+  int c = 1;
+  for (int i = 0; i < ps.length; ++i) { int m = maxcs(ps[i]); if (m > c) c = m; }
+  return c;
+}
+string csname(int c) { return c == 4 ? "CMYK" : (c == 3 ? "RGB" : "Gray"); }
+
+// 一支笔升到 cs 那一档之后的分量（pen.h:591/602/608 的 greytorgb / greytocmyk /
+// rgbtocmyk）。cs 是**一族里最大的**那一档，所以只会往上升，不会往下降。
+real[] pencomps(pen p, int cs) {
+  real[] v;
+  int c = csof(p);
+  if (cs == 1) { v.push(p.gray); return v; }
+  if (cs == 3) {
+    if (c == 3) { v.push(p.red); v.push(p.green); v.push(p.blue); }
+    else { v.push(p.gray); v.push(p.gray); v.push(p.gray); }
+    return v;
+  }
+  if (c == 4) { v.push(p.cyan); v.push(p.magenta); v.push(p.yellow); v.push(p.black); return v; }
+  if (c == 1) { v.push(0); v.push(0); v.push(0); v.push(1 - p.gray); return v; }
+  // `max(real,real)` 在这一行还看不见（内建面是顺序解析的，这里只有 `pair max(frame)`）
+  real sat = p.red;
+  if (p.green > sat) sat = p.green;
+  if (p.blue > sat) sat = p.blue;
+  if (sat == 0) { v.push(0); v.push(0); v.push(0); v.push(1); return v; }
+  v.push(1 - p.red / sat);
+  v.push(1 - p.green / sat);
+  v.push(1 - p.blue / sat);
+  v.push(1 - sat);
+  return v;
+}
+
+// psfile.cc:279 的 write(pen)：分量用空格分开，**开头不带**空格。
+string wpen(pen p, int cs) {
+  real[] v = pencomps(p, cs);
+  string s = "";
+  for (int i = 0; i < v.length; ++i) s += (i == 0 ? "" : " ") + ps(v[i]);
+  return s;
+}
+// psfile.h:168/160 的 write(pair) / write(double)：**开头带**一个空格。
+string wpair(pair z) { return " " + ps(z.x) + " " + ps(z.y); }
+string wreal(real x) { return " " + ps(x); }
+
+// pen.h:143 的 byte：负的按 0，`(int)(r*256)` 之后顶到 255
+string hex2(real r) {
+  string d = "0123456789abcdef";
+  real x = r < 0 ? 0 : r;
+  int c = (int) (x * 256);
+  if (c > 255) c = 255;
+  return substr(d, c # 16, 1) + substr(d, c % 16, 1);
+}
+
+// 一条路径按 t 变过去之后的界（latticeshade 的 /Matrix 要它）
+void pathboxT(box eb, path g, transform t, real s) {
+  int n = g.nodes.length;
+  int segs = length(g);
+  for (int i = 0; i < n; ++i) addpt(eb, s * (t * g.nodes[i].point));
+  for (int i = 0; i < segs; ++i) {
+    int j = i + 1;
+    if (j == n) j = 0;
+    if (!g.nodes[i].straight) {
+      addcubic(eb, s * (t * g.nodes[i].point), s * (t * g.nodes[i].post),
+               s * (t * g.nodes[j].pre), s * (t * g.nodes[j].point));
+    }
+  }
+}
+
+// psfile.cc:316 的 latticeshade（/ShadingType 1 + FunctionType 0 的采样表）。
+// 行是**从后往前**发的（PostScript 的 /Size 是 [列 行]，数据从下往上），每支笔一行十六进制。
+void latshade(shadeinfo h, pen fillrule, real s) {
+  int n = h.mpens.length;
+  if (n == 0) return;
+  int m = h.mpens[0].length;
+  int cs = maxcs2(h.mpens);
+  // /Matrix 是 t * matrix(界的左下, 界的右上)（drawfill.h:107 的 shade）：界在
+  // **t 变回去之后**的坐标里量。matrix(lb,rt) 就是"平移 lb、线性部分 diag(rt-lb)"。
+  transform ti = inverse(h.tt);
+  box b;
+  for (int i = 0; i < h.gs.length; ++i) pathboxT(b, h.gs[i], ti, s);
+  if (h.stroke) widen(b, fillrule);
+  transform mt = h.tt * xform(b.l, b.b, b.r - b.l, 0, 0, b.t - b.b);
+  write("<< /ShadingType 1");
+  write("/Matrix [" + wreal(mt.xx) + wreal(mt.yx) + wreal(mt.xy) + wreal(mt.yy)
+        + wreal(mt.x) + wreal(mt.y) + "]");
+  write("/ColorSpace /Device" + csname(cs));
+  write("/Function");
+  write("<< /FunctionType 0");
+  write("/Order 1");
+  write("/Domain [0 1 0 1]");
+  string rng = "";
+  for (int i = 0; i < cs; ++i) rng += "0 1 ";
+  write("/Range [" + rng + "]");
+  write("/Decode [" + rng + "]");
+  write("/BitsPerSample 8");
+  write("/Size [" + string(m) + " " + string(n) + "]");
+  write("/DataSource <");
+  for (int i = n - 1; i >= 0; --i) {
+    pen[] row = h.mpens[i];
+    if (row.length != m) abort("matrix must be rectangular");
+    for (int j = 0; j < m; ++j) {
+      real[] v = pencomps(row[j], cs);
+      string t = "";
+      for (int k = 0; k < v.length; ++k) t += hex2(v[k]);
+      write(t);
+    }
+  }
+  write(">");
+  write(">>");
+  write(">>");
+  write("shfill");
+}
+
+// psfile.cc:373 的 gradientshade：axial 是 /ShadingType 2、radial 是 3（radial 多两个半径）。
+// **注意这里还会再发一次 clip**（那份 C++ 里 `endclip(pena)` 就在开头），所以渐变那两档的
+// EPS 里 clip 出现两次 —— 量过 axialshade.asy 的参考，确实是两行。
+void gradshade(shadeinfo h, real s) {
+  bool axial = h.st == 2;
+  int cs = csof(h.pena);
+  if (csof(h.penb) > cs) cs = csof(h.penb);
+  write(h.pena.evenodd ? "eoclip" : "clip");
+  write("<< /ShadingType " + (axial ? "2" : "3"));
+  write("/ColorSpace /Device" + csname(cs));
+  string co = wpair(s * h.za);
+  if (!axial) co += wreal(s * h.ra);
+  co += wpair(s * h.zb);
+  if (!axial) co += wreal(s * h.rb);
+  write("/Coords [" + co + "]");
+  write("/Extend [" + (h.exta ? "true" : "false") + " " + (h.extb ? "true" : "false") + "]");
+  write("/Function");
+  write("<< /FunctionType 2");
+  write("/Domain [0 1]");
+  write("/C0 [" + wpen(h.pena, cs) + "]");
+  write("/C1 [" + wpen(h.penb, cs) + "]");
+  write("/N 1");
+  write(">>");
+  write(">>");
+  write("shfill");
+}
+
+// psfile.cc:408 的 gouraudshade（/ShadingType 4）：每行是「边标记 顶点 颜色」
+void gourshade(shadeinfo h, pen fillrule, real s) {
+  int n = h.vpens.length;
+  if (n == 0) return;
+  int cs = maxcs(h.vpens);
+  write(fillrule.evenodd ? "eoclip" : "clip");
+  write("<< /ShadingType 4");
+  write("/ColorSpace /Device" + csname(cs));
+  write("/DataSource [");
+  for (int i = 0; i < n; ++i) {
+    write(" " + string(h.vedges[i]) + wpair(s * h.verts[i]) + " " + wpen(h.vpens[i], cs));
+  }
+  write("]");
+  write(">>");
+  write("shfill");
+}
+
+// psfile.cc:451 的 tensorshade（/ShadingType 7）：每块补丁一行 —— 边标记 0、
+// **倒着走**的 12 个边界控制点、4 个内部控制点、4 个角上的颜色（次序 0/3/2/1）。
+// 没给内部点时按 Coons 那个公式算（那 1/9 与几个系数照抄）。
+void tenshade(shadeinfo h, pen fillrule, real s) {
+  int n = h.mpens.length;
+  if (n == 0) return;
+  int cs = maxcs2(h.mpens);
+  write(fillrule.evenodd ? "eoclip" : "clip");
+  write("<< /ShadingType 7");
+  write("/ColorSpace /Device" + csname(cs));
+  write("/DataSource [");
+  int nz = h.tz.length;
+  real nineth = 1.0 / 9.0;
+  for (int i = 0; i < n; ++i) {
+    path g = h.bnds[i];
+    if (!g.cyclic || length(g) != 4) abort("specify cyclic path of length 4");
+    string ln = " 0";
+    for (int j = 4; j > 0; --j) {
+      ln += wpair(s * point(g, j)) + wpair(s * precontrol(g, j))
+        + wpair(s * postcontrol(g, j - 1));
+    }
+    if (nz == 0) {
+      for (int j = 0; j < 4; ++j) {
+        pair c = nineth * (-4.0 * point(g, j)
+          + 6.0 * (precontrol(g, j) + postcontrol(g, j))
+          - 2.0 * (point(g, j - 1) + point(g, j + 1))
+          + 3.0 * (precontrol(g, j - 1) + postcontrol(g, j + 1))
+          - point(g, j + 2));
+        ln += wpair(s * c);
+      }
+    } else {
+      pair[] zi = h.tz[i];
+      if (zi.length != 4) abort("specify 4 internal control points for each path");
+      ln += wpair(s * zi[0]) + wpair(s * zi[3]) + wpair(s * zi[2]) + wpair(s * zi[1]);
+    }
+    pen[] pi = h.mpens[i];
+    if (pi.length != 4) abort("specify 4 pens for each path");
+    ln += " " + wpen(pi[0], cs) + " " + wpen(pi[3], cs)
+      + " " + wpen(pi[2], cs) + " " + wpen(pi[1], cs);
+    write(ln);
+  }
+  write("]");
+  write(">>");
+  write("shfill");
+}
+
+// drawfill.h:75 的 drawShade::draw：gsave、超路径当裁剪、endpsclip、发那一段字典、grestore。
+void emitshade(drawop o, real s) {
+  shadeinfo h = o.sh;
+  if (h.gs.length == 0) return;
+  write("gsave");
+  gsavepen();
+  for (int i = 0; i < h.gs.length; ++i) emitpath(h.gs[i], s, i == 0);
+  if (h.stroke) write("strokepath");
+  write(o.p.evenodd ? "eoclip" : "clip");
+  if (h.st == 1) latshade(h, o.p, s);
+  else if (h.st == 2 || h.st == 3) gradshade(h, s);
+  else if (h.st == 4) gourshade(h, o.p, s);
+  else tenshade(h, o.p, s);
+  write("grestore");
+  grestorepen();
+}
+
+// 一格 drawop 的 EPS（shipout(picture) 与 _shipout(frame) 共用；两处只有缩放不同）
+void emitop(drawop o, real s) {
+  if (o.kind == 2) { emitshade(o, s); return; }
+  // 裁剪的两格（drawclipbegin.h:52 / drawclipend.h:45）：`gsave` + 超路径 + clip，
+  // 配对的那一格只发 `grestore`。空路径时只有 gsave / grestore（那份 C++ 的 `empty()` 那一支）。
+  if (o.kind == 3) {
+    if (!o.nosave) { write("gsave"); gsavepen(); }
+    for (int i = 0; i < o.sh.gs.length; ++i) emitpath(o.sh.gs[i], s, i == 0);
+    if (o.sh.gs.length == 0) return;
+    if (o.sh.stroke) write("strokepath");
+    write(o.p.evenodd ? "eoclip" : "clip");
+    return;
+  }
+  if (o.kind == 4) { if (!o.nosave) { write("grestore"); grestorepen(); } return; }
+  emitpath(o.g, s);
+  setpen(o.p);
+  if (o.kind == 0) write("stroke");
+  else if (o.p.evenodd) write("eofill");
+  else write("fill");
+}
+
+// 摆放是量出来的（picture.cc:1187 那一段）：bboxshift = (-b.left,-b.bottom) 之后再加
+// 半格"多出来的纸"—— xexcess = max(paperwidth-(宽+1), 0)、yexcess 同理。**那个 max 不能省**：
+// 图比纸还宽时 excess 是 0，左边就顶在 0 上（量过 yingyang.asy：宽 708.66 > 611，
+// 参考的 %%BoundingBox 左边是 0，而"(612-宽)/2-0.5"那一版给的是 -49）。
+// 纸是 letter 的 612x792。
+real asy__excess(real paper, real len) {
+  real e = paper - (len + 1.0);
+  return e < 0 ? 0 : e;
+}
 // `asy__shipped`：印过一张没有。退出时那一次隐式 shipout 靠它挡重复，见下面 atexit 那一段。
 bool asy__shipped = false;
 void shipout(picture pic) {
@@ -1829,8 +2208,8 @@ void shipout(picture pic) {
   box bx = picbox(pic, s);
   real w = bx.r - bx.l;
   real h = bx.t - bx.b;
-  real ox = (612 - w) / 2 - 0.5;
-  real oy = (792 - h) / 2 - 0.5;
+  real ox = 0.5 * asy__excess(612, w);
+  real oy = 0.5 * asy__excess(792, h);
   write("%!PS-Adobe-3.0 EPSF-3.0");
   write("%%BoundingBox: " + string(floor(ox)) + " " + string(floor(oy)) + " "
         + string(ceil(ox + w)) + " " + string(ceil(oy + h)));
@@ -1844,14 +2223,7 @@ void shipout(picture pic) {
   write("gsave");
   write(" " + ps(ox - bx.l) + " " + ps(oy - bx.b) + " translate");
   lastvalid = false;
-  for (int i = 0; i < pic.ops.length; ++i) {
-    drawop o = pic.ops[i];
-    emitpath(o.g, s);
-    setpen(o.p);
-    if (o.kind == 0) write("stroke");
-    else if (o.p.evenodd) write("eofill");
-    else write("fill");
-  }
+  for (int i = 0; i < pic.ops.length; ++i) emitop(pic.ops[i], s);
   write("grestore");
   write("showpage");
   write("%%EOF");
@@ -3702,39 +4074,142 @@ void fill(frame f, path[] g, pen p = currentpen, bool copy = true) {
 // 下面这些是**声明在这里、体是 abort**：签名照参考实现抄准，语义（渐变、裁剪、TeX、
 // 分层、翻页、3D 盒子）都还没做。抄准签名是为了让"没做"落在运行期那一句话上，
 // 而不是编译期一堆"没有能匹配的签名"。
+// 渐变/网格填充那一族（runpicture.in:160..244）：一格 kind == 2 的 drawop，余料挂在 sh 上。
+// 出图那一下在 emitshade 里（那一段照 drawfill.h 的 drawShade::draw 与 psfile.cc 的四个
+// 发字典的函数抄的）。**没做的两处写在明处**：透明度（setopacity 那一路）与
+// functionshade（要把用户那段 PostScript 当函数塞进字典里）。
+path[] asy__gcopy(path[] g) {
+  path[] r;
+  for (int i = 0; i < g.length; ++i) r.push(pathcopy(g[i]));
+  return r;
+}
+pen[] asy__pcopy(pen[] p) {
+  pen[] r;
+  for (int i = 0; i < p.length; ++i) r.push(pencopy(p[i]));
+  return r;
+}
+pen[][] asy__pcopy2(pen[][] p) {
+  pen[][] r;
+  for (int i = 0; i < p.length; ++i) r.push(asy__pcopy(p[i]));
+  return r;
+}
+void asy__addshade(frame f, shadeinfo h, pen fillrule) {
+  drawop o;
+  o.kind = 2;
+  o.p = pencopy(fillrule);
+  o.sh = h;
+  f.ops.push(o);
+}
 void latticeshade(frame f, path[] g, bool stroke=false, pen fillrule=currentpen,
                   pen[][] p, transform t=identity(), bool copy=true) {
-  abort("latticeshade 还没做");
+  shadeinfo h;
+  h.st = 1;
+  h.gs = asy__gcopy(g);
+  h.stroke = stroke;
+  h.mpens = asy__pcopy2(p);
+  h.tt = t;
+  asy__addshade(f, h, fillrule);
 }
 void axialshade(frame f, path[] g, bool stroke=false, pen pena, pair a,
                 bool extenda=true, pen penb, pair b, bool extendb=true,
                 bool copy=true) {
-  abort("axialshade 还没做");
+  shadeinfo h;
+  h.st = 2;
+  h.gs = asy__gcopy(g);
+  h.stroke = stroke;
+  h.pena = pencopy(pena);
+  h.penb = pencopy(penb);
+  h.za = a;
+  h.zb = b;
+  h.exta = extenda;
+  h.extb = extendb;
+  // 渐变那两档的裁剪用的是 pena（drawfill.h 的 drawGradientShade 就拿它当 pentype）
+  asy__addshade(f, h, pena);
 }
 void radialshade(frame f, path[] g, bool stroke=false, pen pena, pair a, real ra,
                  bool extenda=true, pen penb, pair b, real rb, bool extendb=true,
                  bool copy=true) {
-  abort("radialshade 还没做");
+  shadeinfo h;
+  h.st = 3;
+  h.gs = asy__gcopy(g);
+  h.stroke = stroke;
+  h.pena = pencopy(pena);
+  h.penb = pencopy(penb);
+  h.za = a;
+  h.zb = b;
+  h.ra = ra;
+  h.rb = rb;
+  h.exta = extenda;
+  h.extb = extendb;
+  asy__addshade(f, h, pena);
 }
 void gouraudshade(frame f, path[] g, bool stroke=false, pen fillrule=currentpen,
                   pen[] p, pair[] z, int[] edges, bool copy=true) {
-  abort("gouraudshade 还没做");
+  asy__samelen(p.length, z.length);
+  asy__samelen(z.length, edges.length);
+  shadeinfo h;
+  h.st = 4;
+  h.gs = asy__gcopy(g);
+  h.stroke = stroke;
+  h.vpens = asy__pcopy(p);
+  h.verts = z;
+  h.vedges = edges;
+  asy__addshade(f, h, fillrule);
 }
+// 不给顶点那一份（runpicture.in:206）：顶点就是**路径上的结点**，一条条数过去取够 p 那么多
 void gouraudshade(frame f, path[] g, bool stroke=false, pen fillrule=currentpen,
                   pen[] p, int[] edges, bool copy=true) {
-  abort("gouraudshade 还没做");
+  asy__samelen(p.length, edges.length);
+  pair[] z;
+  int n = p.length;
+  for (int j = 0; j < g.length; ++j) {
+    int stop = g[j].nodes.length;
+    if (stop > n - z.length) stop = n - z.length;
+    for (int i = 0; i < stop; ++i) z.push(g[j].nodes[i].point);
+  }
+  gouraudshade(f, g, stroke, fillrule, p, z, edges, copy);
 }
 void tensorshade(frame f, path[] g, bool stroke=false, pen fillrule=currentpen,
                  pen[][] p, path[] b=null, pair[][] z=new pair[][], bool copy=true) {
-  abort("tensorshade 还没做");
+  shadeinfo h;
+  h.st = 7;
+  h.gs = asy__gcopy(g);
+  h.stroke = stroke;
+  h.mpens = asy__pcopy2(p);
+  h.bnds = b == null ? h.gs : asy__gcopy(b);
+  h.tz = z;
+  asy__samelen(p.length, h.bnds.length);
+  if (z.length != 0) asy__samelen(z.length, p.length);
+  asy__addshade(f, h, fillrule);
 }
 void functionshade(frame f, path[] g, bool stroke=false, pen fillrule=currentpen,
                    string shader="", bool copy=true) {
   abort("functionshade 还没做");
 }
+// runpicture.in:256 的 clip：把**已经攒下的那一叠**整个围起来（那边是 `f->enclose`），
+// 之后再画的东西不受裁剪影响。所以这里是"头上插一格 kind 3、尾上追一格 kind 4"。
+// 不描边时路径必须闭合（drawclipbegin.h:21 那一句）。
 void clip(frame f, path[] g, bool stroke=false, pen fillrule=currentpen,
           bool copy=true) {
-  abort("clip(frame) 还没做");
+  if (!stroke) {
+    for (int i = 0; i < g.length; ++i) {
+      if (!g[i].cyclic) abort("cannot clip to non-cyclic path");
+    }
+  }
+  shadeinfo h;
+  h.gs = asy__gcopy(g);
+  h.stroke = stroke;
+  drawop b;
+  b.kind = 3;
+  b.p = pencopy(fillrule);
+  b.sh = h;
+  drawop e;
+  e.kind = 4;
+  drawop[] out;
+  out.push(b);
+  for (int i = 0; i < f.ops.length; ++i) out.push(f.ops[i]);
+  out.push(e);
+  f.ops = out;
 }
 void beginclip(frame f, path[] g, bool stroke=false, pen fillrule=currentpen,
                bool copy=true) {
@@ -5014,8 +5489,8 @@ void _shipout(string prefix="", frame f, frame preamble=null, string format="",
   box bx = framebox(f);
   real w = bx.r - bx.l;
   real h = bx.t - bx.b;
-  real ox = (612 - w) / 2 - 0.5;
-  real oy = (792 - h) / 2 - 0.5;
+  real ox = 0.5 * asy__excess(612, w);
+  real oy = 0.5 * asy__excess(792, h);
   write("%!PS-Adobe-3.0 EPSF-3.0");
   write("%%BoundingBox: " + string(floor(ox)) + " " + string(floor(oy)) + " "
         + string(ceil(ox + w)) + " " + string(ceil(oy + h)));
@@ -5029,14 +5504,7 @@ void _shipout(string prefix="", frame f, frame preamble=null, string format="",
   write("gsave");
   write(" " + ps(ox - bx.l) + " " + ps(oy - bx.b) + " translate");
   lastvalid = false;
-  for (int i = 0; i < f.ops.length; ++i) {
-    drawop o = f.ops[i];
-    emitpath(o.g, 1);
-    setpen(o.p);
-    if (o.kind == 0) write("stroke");
-    else if (o.p.evenodd) write("eofill");
-    else write("fill");
-  }
+  for (int i = 0; i < f.ops.length; ++i) emitop(f.ops[i], 1);
   write("grestore");
   write("showpage");
   write("%%EOF");

@@ -7227,6 +7227,53 @@ n==2/n==3 上有闭式、n>=4 走**全**选主元。选主元策略不同 → �
 三条回归轴：`tests/asy/run.js` 259 passed / 0 failed；220 例扫一遍 219 干净、1.3s、最慢
 controlsystem.asy 73ms（速度合同没破）。
 
+### 第八十二刀：`fill(path)` 画到了没人印的那张图上；渐变、裁剪与摆放
+
+这一刀开头以为要做的是"渐变那 47 份"，做完才发现队伍里混着一条**更要紧的**：
+
+**一、`fill(circle(…))` 那一笔凭空消失。** 这一层为"不 import plain 时也能画"备了几格短路：
+`void fill(path g)` / `void fill(picture pic, path g, pen p)` …，画进的是**内建面自己那个
+`currentpicture`**。而 plain 里那份是 `void fill(picture pic=currentpicture, path[] g,
+pen p=currentpen)` —— 收的是 `path[]`，要过一次 `path[] operator cast(path)`（plain_paths.asy:44，
+真 asy 那边这条 cast 也在 plain 里、不在 C++ 内建面）。重载解析按转换代价挑，于是
+`fill(g)` 落在**这一层**那格上：画进了没人印的那张图，那一笔就没了。`draw(g)` 与 `size(…)`
+没事，因为 plain 那两份的形参类型是精确匹配，打平之后取后声明的（plain 的）。
+
+改法：内建面也备一份 `path[] operator cast(path)`，短路那几格全改收 `path[]` ——
+两边于是都要过一次转换、打平、取 plain 那份。量到的样子（yingyang.asy）：改之前
+`currentpicture.nodes.length` 在三条语句后是 0 / 1 / 1，真 asy 是 1 / 2 / 3。
+
+**二、渐变与网格填充那一族**（`latticeshade` / `axialshade` / `radialshade` /
+`gouraudshade` / `tensorshade`，队里 47 份）。drawop 上多一格 `shadeinfo`（只有渐变那一档
+才有，其余是 null），出图那一段照 drawfill.h:75 的 `drawShade::draw`：`gsave`、整条超路径
+当裁剪、`clip`、发 PostScript 的那一段字典、`grestore`。四份字典逐字照 psfile.cc 抄
+（`/ShadingType 1/2/3/4/7`、`FunctionType 0/2`、lattice 的十六进制采样表、tensor 那 12 个
+边界控制点**倒着走**加 Coons 的内部点公式、颜色按一族笔里最大的那一档升）。
+`functionshade` 还是 abort（要把用户那段 PostScript 当函数塞进字典里），透明度也还没发。
+
+**三、`clip(frame)`**（队里 10 份）。runpicture.in:256 是 `f->enclose`：头上插一格、尾上追
+一格，所以之后再画的东西不受裁剪。界要按 drawclipbegin.h:37 与 drawclipend.h:28 那两段用
+**一个栈**算：进裁剪压"到这里为止的界"与"裁剪路径的界"，出裁剪先交后并。还有 picture.cc:301
+那个"两格 endclip 挨着就把前一格的 gsave/grestore 省掉"的优化 —— 它发在**量界那一趟**里，
+所以这一层也放在 `opsbox` 里做（少了它 colorplanes.asy 会多出一对 gsave/grestore）。
+
+**四、摆放那个 `max` 不能省。** picture.cc:1187：`bboxshift = (-b.left,-b.bottom)` 再加半格
+"多出来的纸"，而 `xexcess = max(paperwidth-(宽+1), 0)`。从前这一层写的是 `(612-宽)/2-0.5`，
+图比纸宽时给出负的左边界（yingyang.asy 宽 708.66，参考是 0、我们是 -49）。
+
+**五、`gsave`/`grestore` 连"上一支笔"一起存取**（psfile.h:303/310 那两句 `pens.push` /
+`pens.top`）。裁剪或渐变段里改过的笔出来之后不算数，下一笔要把那五行重新发一遍 ——
+yingyang.asy 与 Sierpinski.asy 的最后一处差就是它。
+
+这一批之后，**能出图的 76 个例子里逐字一样的从 6 涨到 18**（渐变那 47 份与裁剪那 10 份
+不再 abort）。剩下的 54 份结构不同**绝大多数是同一件事**：参考里有 TeX 排出来的文字
+（`/TeXDict` 那一段），我们这一层只画得出几何，界也就跟着差几个单位 —— 那一格要等
+`_texpath` 那一路，不是这一刀能收的。
+
+跑过的轴：`tests/asy/run.js` 259 passed / 0 failed、220 例扫一遍 219 干净（2.0s、最慢
+genusthree.asy 139ms）、EPS 那一轴在 76 个能出图的例子上。
+没跑：EPS 全量（按"先修够了再跑"办）。
+
 ## 后果与代价
 
 
