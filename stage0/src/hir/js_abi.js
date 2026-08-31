@@ -154,10 +154,14 @@ export const JS_ABI = {
   js_math: { js: '$js_math', c: 'omni_js_math', arity: 2, lit: ['op'] },
 
   // ---------------------------------------------------------------- JSON
-  // 只有 stringify：量过一遍，JSON.parse 全仓库 0 处用到，封闭的 ABI 就不收它。
-  // 实参形态也是量出来的 —— 绝大多数是一个实参给字符串加引号，只有 cli 的 dump
+  // 实参形态是量出来的 —— stringify 绝大多数是一个实参给字符串加引号，只有 cli 的 dump
   // 用了 (v, replacer, 2)。replacer 只支持函数形式。
+  //
+  // parse 从前不在表里（那时量到 0 处用到）。asy 的接口索引把 .aif 读回来之后就有一处：
+  // cli.js:792 的 `JSON.parse(readText(p))`。封闭的 ABI 该长的时候就长 —— 反过来把编译器
+  // 自己的源码改窄是把问题挪个地方。reviver 仍不收：仓库里 parse 全是一个实参。
   js_json_stringify: { js: '$js_json_stringify', c: 'omni_js_json_stringify', arity: 3, throws: true },
+  js_json_parse: { js: '$js_json_parse', c: 'omni_js_json_parse', arity: 1 },
 
   // ---------------------------------------------------------------- RegExp
   // 模式与 flags 是普通的 string 实参（不是 lit）：两侧都按字面量做编译缓存，C 侧的键

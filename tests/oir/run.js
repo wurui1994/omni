@@ -400,6 +400,24 @@ c('json/indent', J(J(js('js_obj_set', [js('js_obj_new', []), str('xs'), arr(real
 c('json/indent-nested', J(J(js('js_obj_set', [js('js_obj_new', []), str('o'), OBJ()]), undef, real(2))),
   'JSON.stringify(JSON.stringify({"o": {"a": 1, "中": "v"}}, null, 2))');
 
+// parse：读回来的是这个值域里的值（对象是 dict、数一律是 real），一行放不下，所以再
+// stringify 一遍来比 —— 参照侧同样是 JSON.stringify(JSON.parse(t))，来回一趟必须逐字相同。
+function jp(t) {
+  c(`json/parse/${JSON.stringify(t)}`, J(js('js_json_parse', [str(t)])),
+    `JSON.stringify(JSON.parse(${JSON.stringify(t)}))`);
+}
+['1', '-1', '0', '-0', '2.5', '1e3', '1E3', '-1.5e-3', '1e+2', '0.5', '1e309',
+  '123456789012345678901234567890', '0.1', '3.141592653589793'].forEach(jp);
+['""', '"a"', '"a\\nb"', '"\\u4e2d"', '"\\"\\\\\\/\\b\\f\\n\\r\\t"', '"\\ud800"', '"中"'].forEach(jp);
+['true', 'false', 'null'].forEach(jp);
+['[]', '[1]', '[1,2,3]', '[1,"a",null,[2,[3]]]', '[[]]'].forEach(jp);
+['{}', '{"a":1}', '{"a":1,"b":[1,2],"中":"v"}', '{"o":{"p":[{"q":true}]}}'].forEach(jp);
+// 空白：值前后、逗号与冒号两边都许有。重复的键后来的赢，位置留在第一次出现的地方。
+[' \t\r\n1 ', ' { "a" : 1 , "b" : [ 1 , 2 ] } ', '{"a":1,"a":2}', '{"b":1,"a":2,"b":3}'].forEach(jp);
+// parse 的实参先按 JS 的口径转字符串：JSON.parse(5) 是 5
+c('json/parse/of-real', J(js('js_json_parse', [real(5)])), 'JSON.stringify(JSON.parse(5))');
+c('json/parse/of-bool', J(js('js_json_parse', [bool(true)])), 'JSON.stringify(JSON.parse(true))');
+
 // ---------------------------------------------------------------- RegExp
 // 模式与 flags 是 JS 域的字符串（正则字面量降下来是个带 source/flags 的对象，
 // 那两个字段是运行期取出来的），所以两侧都按内容做编译缓存，不按字面量身份。

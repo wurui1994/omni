@@ -1661,6 +1661,8 @@ const STATIC_NS = new Set(['JSON', 'Math', 'Object', 'Array', 'String', 'Number'
 
 const STATIC_CALLS = {
   'JSON.stringify': { op: 'js_json_stringify', argc: 3 },
+  // parse 只收一个实参（没有 reviver）：量过，仓库里 JSON.parse 全是一个实参
+  'JSON.parse': { op: 'js_json_parse', argc: 1 },
   'Math.abs': { op: 'js_math', argc: 2, lit: { op: 'a' } },
   'Math.trunc': { op: 'js_math', argc: 2, lit: { op: 't' } },
   'Math.floor': { op: 'js_math', argc: 2, lit: { op: 'f' } },

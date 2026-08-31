@@ -2,11 +2,10 @@
  *
  * 是宏：要走 list<dynamic> 与 dict<string, dynamic>，那是生成 TU 里的实例。
  *
- * 只有 stringify，**没有 parse** —— 量过一遍，全仓库 JSON.parse 是 0 处用到。
- * ABI 是封闭的，用不到的不进来。
+ * stringify 与 parse 两半都在（第三段是 parse）。parse 从前不在表里 —— 那时量到 0 处
+ * 用到；asy 的接口索引把 .aif 读回来之后 cli.js:792 有一处，封闭的 ABI 就该长一格。
  *
- * 实参形态也是量出来的：绝大多数是 JSON.stringify(s) 一个实参（给字符串加引号），
- * 只有 cli.js 的 dump 用了 (v, replacer, 2) 三个实参。所以 replacer 与缩进都支持，
+ * 实参形态也是量出来的：绝大多数是 JSON.stringify(s) 一个实参（给字符串加引号）， * 只有 cli.js 的 dump 用了 (v, replacer, 2) 三个实参。所以 replacer 与缩进都支持，
  * 但 replacer 只支持函数形式（数组白名单没人用）。
  *
  * BigInt 在 JS 里是 TypeError，这里也报错：源码里靠 replacer 先把 int 换成字符串，
@@ -145,7 +144,198 @@ static omni_dyn omni_js_json_stringify(omni_dyn v, omni_dyn rep, omni_dyn indent
   omni_dyn root = omni_js_json_apply(rep, omni_js_s16_lit(""), v); \
   omni_s16 s = omni_js_json_val(root, rep, gap, 0); \
   return s.p ? omni_dyn_of_s16(s) : omni_dyn_undef(); \
-}
+} \
+OMNI_JS_JSON_3(LT, DT)
 
+/* 第三段：JSON.parse。与 backend-js/prelude.js 里的 $js_json_* 是同一套算法 ——
+   两边都按 UTF-16 码元扫，所以报错里的 "position N" 一定是同一个数；文本也逐字相同。
+
+   只认 RFC 8259 那一份：不收注释、单引号、尾逗号、NaN/Infinity。数一律出 real
+   （宿主 JSON.parse 也没有 BigInt 那一支）。重复的键后来的赢、位置留在第一次出现的
+   地方 —— dict_set 与 JS 侧 Map.set 都是这个语义。没有 reviver。
+
+   解析失败是硬错（omni: runtime error），不是能 catch 的 SyntaxError：ADR-0007
+   决定 1 里 throw 是静态降级的，而这个 op 里没有用户回调可以往 pending 槽里放东西。 */
+#define OMNI_JS_JSON_3(LT, DT) \
+typedef struct { const uint16_t *p; int64_t len; int64_t i; } omni_js_json_cur; \
+static OMNI_NORETURN void omni_js_json_eoi(void) { \
+  omni_error("unexpected end of JSON input"); \
+} \
+static OMNI_NORETURN void omni_js_json_bad(omni_js_json_cur *z) { \
+  uint16_t c = z->p[z->i]; \
+  if (c >= 0x20 && c < 0x7f) { \
+    omni_errorf("unexpected token '%c' in JSON at position %lld", (char)c, (long long)z->i); \
+  } \
+  omni_errorf("unexpected token \\u%04x in JSON at position %lld", (unsigned)c, (long long)z->i); \
+} \
+static uint16_t omni_js_json_at(omni_js_json_cur *z) { \
+  if (z->i >= z->len) omni_js_json_eoi(); \
+  return z->p[z->i]; \
+} \
+static void omni_js_json_ws(omni_js_json_cur *z) { \
+  while (z->i < z->len) { \
+    uint16_t c = z->p[z->i]; \
+    if (c != 32 && c != 9 && c != 10 && c != 13) break; \
+    z->i++; \
+  } \
+} \
+static bool omni_js_json_digit(uint16_t c) { return c >= 48 && c <= 57; } \
+static bool omni_js_json_word(omni_js_json_cur *z, const char *w) { \
+  int64_t n = (int64_t)strlen(w); \
+  if (z->i + n > z->len) return false; \
+  for (int64_t k = 0; k < n; k++) { \
+    if (z->p[z->i + k] != (uint16_t)(unsigned char)w[k]) return false; \
+  } \
+  z->i += n; \
+  return true; \
+} \
+OMNI_JS_JSON_4(LT, DT)
+
+
+/* 第四段：字符串与数。
+   字符串进来时游标一定停在开引号上（调用点已经看过了）。缓冲按剩余长度开：转义
+   只会让结果变短。生的控制字符（< U+0020）在 JSON 里非法，这一格必须报错 ——
+   不然 stringify 转义了、parse 又收生的，来回一趟就不是同一份文本了。
+   孤立的代理项照收：宿主 JSON.parse 也照收，s16 存的本来就是码元。 */
+#define OMNI_JS_JSON_4(LT, DT) \
+static omni_s16 omni_js_json_str(omni_js_json_cur *z) { \
+  uint16_t *out = (uint16_t *)omni_alloc((size_t)(z->len - z->i + 1) * sizeof(uint16_t)); \
+  int64_t n = 0; \
+  z->i++; \
+  for (;;) { \
+    uint16_t c = omni_js_json_at(z); \
+    if (c == 0x22) { omni_s16 r; z->i++; r.p = out; r.len = n; return r; } \
+    if (c < 0x20) omni_js_json_bad(z); \
+    if (c != 0x5c) { out[n++] = c; z->i++; continue; } \
+    z->i++; \
+    { \
+      uint16_t e = omni_js_json_at(z); \
+      if (e == 0x22 || e == 0x5c || e == 0x2f) { out[n++] = e; z->i++; continue; } \
+      if (e == 98) { out[n++] = 8; z->i++; continue; } \
+      if (e == 102) { out[n++] = 12; z->i++; continue; } \
+      if (e == 110) { out[n++] = 10; z->i++; continue; } \
+      if (e == 114) { out[n++] = 13; z->i++; continue; } \
+      if (e == 116) { out[n++] = 9; z->i++; continue; } \
+      if (e != 117) omni_js_json_bad(z); \
+      z->i++; \
+      { \
+        int v = 0; \
+        int k; \
+        for (k = 0; k < 4; k++) { \
+          uint16_t h = omni_js_json_at(z); \
+          int d = (h >= 48 && h <= 57) ? h - 48 \
+            : (h >= 97 && h <= 102) ? h - 87 \
+              : (h >= 65 && h <= 70) ? h - 55 : -1; \
+          if (d < 0) omni_js_json_bad(z); \
+          v = v * 16 + d; \
+          z->i++; \
+        } \
+        out[n++] = (uint16_t)v; \
+      } \
+    } \
+  } \
+} \
+static double omni_js_json_num(omni_js_json_cur *z) { \
+  int64_t start = z->i; \
+  if (omni_js_json_at(z) == 45) z->i++; \
+  { \
+    uint16_t c = omni_js_json_at(z); \
+    if (c == 48) z->i++; \
+    else if (c >= 49 && c <= 57) { \
+      while (z->i < z->len && omni_js_json_digit(z->p[z->i])) z->i++; \
+    } else omni_js_json_bad(z); \
+  } \
+  if (z->i < z->len && z->p[z->i] == 46) { \
+    z->i++; \
+    if (!omni_js_json_digit(omni_js_json_at(z))) omni_js_json_bad(z); \
+    while (z->i < z->len && omni_js_json_digit(z->p[z->i])) z->i++; \
+  } \
+  if (z->i < z->len && (z->p[z->i] == 101 || z->p[z->i] == 69)) { \
+    z->i++; \
+    if (z->i < z->len && (z->p[z->i] == 43 || z->p[z->i] == 45)) z->i++; \
+    if (!omni_js_json_digit(omni_js_json_at(z))) omni_js_json_bad(z); \
+    while (z->i < z->len && omni_js_json_digit(z->p[z->i])) z->i++; \
+  } \
+  { \
+    int64_t n = z->i - start; \
+    char *buf = (char *)omni_alloc(n + 1); \
+    int64_t k; \
+    for (k = 0; k < n; k++) buf[k] = (char)z->p[start + k]; \
+    buf[n] = 0; \
+    return strtod(buf, NULL); \
+  } \
+} \
+OMNI_JS_JSON_5(LT, DT)
+
+/* 第五段：一格值与入口。
+   实参先按 JS 的口径转字符串（JSON.parse(5) 是 5，不是报错），再从头读一格值，
+   末尾除了空白不许还有东西。 */
+#define OMNI_JS_JSON_5(LT, DT) \
+static omni_dyn omni_js_json_read(omni_js_json_cur *z) { \
+  uint16_t c; \
+  omni_js_json_ws(z); \
+  c = omni_js_json_at(z); \
+  if (c == 0x22) return omni_dyn_of_s16(omni_js_json_str(z)); \
+  if (c == 0x7b) { \
+    omni_dyn o = omni_js_obj_new(); \
+    z->i++; \
+    omni_js_json_ws(z); \
+    if (omni_js_json_at(z) == 0x7d) { z->i++; return o; } \
+    for (;;) { \
+      omni_s16 k; \
+      omni_js_json_ws(z); \
+      if (omni_js_json_at(z) != 0x22) omni_js_json_bad(z); \
+      k = omni_js_json_str(z); \
+      omni_js_json_ws(z); \
+      if (omni_js_json_at(z) != 0x3a) omni_js_json_bad(z); \
+      z->i++; \
+      omni_js_obj_setk(o, omni_s16_to_utf8(k), omni_js_json_read(z)); \
+      omni_js_json_ws(z); \
+      { \
+        uint16_t d = omni_js_json_at(z); \
+        if (d == 0x2c) { z->i++; continue; } \
+        if (d != 0x7d) omni_js_json_bad(z); \
+      } \
+      z->i++; \
+      return o; \
+    } \
+  } \
+  if (c == 0x5b) { \
+    LT l = LT##_new(); \
+    z->i++; \
+    omni_js_json_ws(z); \
+    if (omni_js_json_at(z) == 0x5d) { z->i++; return omni_js_arr_wrap(l); } \
+    for (;;) { \
+      LT##_push(l, omni_js_json_read(z)); \
+      omni_js_json_ws(z); \
+      { \
+        uint16_t d = omni_js_json_at(z); \
+        if (d == 0x2c) { z->i++; continue; } \
+        if (d != 0x5d) omni_js_json_bad(z); \
+      } \
+      z->i++; \
+      return omni_js_arr_wrap(l); \
+    } \
+  } \
+  if (omni_js_json_word(z, "true")) return omni_dyn_of_bool(true); \
+  if (omni_js_json_word(z, "false")) return omni_dyn_of_bool(false); \
+  if (omni_js_json_word(z, "null")) return omni_dyn_null(); \
+  if (c == 45 || omni_js_json_digit(c)) return omni_dyn_of_real(omni_js_json_num(z)); \
+  omni_js_json_bad(z); \
+} \
+static omni_dyn omni_js_json_parse(omni_dyn text) { \
+  omni_js_json_cur z; \
+  omni_dyn v; \
+  omni_s16 s = omni_js_as_s16(omni_js_str(text)); \
+  z.p = s.p; \
+  z.len = s.len; \
+  z.i = 0; \
+  v = omni_js_json_read(&z); \
+  omni_js_json_ws(&z); \
+  if (z.i != z.len) { \
+    omni_errorf("unexpected non-whitespace character after JSON at position %lld", (long long)z.i); \
+  } \
+  return v; \
+}
 
 #endif /* OMNI_JS_JSON_H */

@@ -1177,7 +1177,6 @@ const $r_hypot = (x, y) => $js_math("Y", x, y);
 // ------------------------------------------------- JSON.stringify（ADR-0011）
 // 不能直接用宿主的 JSON.stringify：这边的对象是 Map、int 是 BigInt，宿主会当成
 // 普通对象序列化成 {} 并且在 BigInt 上抛 TypeError。所以照 C 侧同一套走一遍。
-// 只有 stringify —— 量过，JSON.parse 全仓库 0 处用到。
 function $js_json_quote(s) {
   let out = '"';
   for (let i = 0; i < s.length; i++) {
@@ -1243,6 +1242,158 @@ function $js_json_stringify(v, rep, indent) {
   let gap = 0;
   if ($dynTag(indent) === "real" && indent > 0) gap = Math.min(Math.trunc(indent), 10);
   return $js_json_val($js_json_apply(rep, "", v), rep, gap, 0);
+}
+
+// ----------------------------------------------------- JSON.parse（ADR-0011）
+// 读那一半也不能转手宿主：宿主吐出来的对象是普通对象，这边的对象是 Map；而且报错
+// 文本必须两侧逐字相同，宿主的 SyntaxError 文本各引擎不一样。所以照 C 侧同一套
+// 算法走一遍 —— 两边都是按 UTF-16 码元扫，位置数（position N）也就一定相同。
+//
+// 只认 RFC 8259 那一份：不收注释、单引号、尾逗号、NaN/Infinity。数一律出 real
+// （宿主 JSON.parse 也没有 BigInt 那一支）。重复的键后来的赢、位置留在第一次
+// 出现的地方 —— Map.set 与 C 侧 dict_set 都是这个语义。没有 reviver。
+//
+// 解析失败是硬错（omni: runtime error），不是能 catch 的 SyntaxError：ADR-0007
+// 决定 1 里 throw 是静态降级的，而这个 op 里没有用户回调可以往 pending 槽里放东西。
+// 游标是 { s, i } 一个记录：这一族函数互相递归，下标要共享。
+function $js_json_eoi() { $rt_error("unexpected end of JSON input"); }
+function $js_json_bad(z) {
+  const c = z.s.charCodeAt(z.i);
+  const shown = c >= 0x20 && c < 0x7f
+    ? "'" + z.s[z.i] + "'"
+    : "\\u" + c.toString(16).padStart(4, "0");
+  $rt_error("unexpected token " + shown + " in JSON at position " + z.i);
+}
+function $js_json_at(z) { if (z.i >= z.s.length) $js_json_eoi(); return z.s.charCodeAt(z.i); }
+function $js_json_ws(z) {
+  while (z.i < z.s.length) {
+    const c = z.s.charCodeAt(z.i);
+    if (c !== 32 && c !== 9 && c !== 10 && c !== 13) break;
+    z.i++;
+  }
+}
+function $js_json_digit(c) { return c >= 48 && c <= 57; }
+// 定字：true / false / null 三个。逐码元比，比 startsWith 更容易和 C 侧对齐。
+function $js_json_word(z, w) {
+  if (z.i + w.length > z.s.length) return false;
+  for (let k = 0; k < w.length; k++) if (z.s.charCodeAt(z.i + k) !== w.charCodeAt(k)) return false;
+  z.i += w.length;
+  return true;
+}
+// 字符串：进来时游标一定停在开引号上（调用点已经看过了）。
+// 生的控制字符（< U+0020）在 JSON 里非法 —— 这一格必须报错，不然 stringify 转义了、
+// parse 又收生的，来回一趟就不是同一份文本了。
+function $js_json_str(z) {
+  z.i++;
+  let out = "";
+  for (;;) {
+    const c = $js_json_at(z);
+    if (c === 0x22) { z.i++; return out; }
+    if (c < 0x20) $js_json_bad(z);
+    if (c !== 0x5c) { out += z.s[z.i]; z.i++; continue; }
+    z.i++;
+    const e = $js_json_at(z);
+    if (e === 0x22 || e === 0x5c || e === 0x2f) { out += z.s[z.i]; z.i++; continue; }
+    if (e === 98) { out += "\b"; z.i++; continue; }
+    if (e === 102) { out += "\f"; z.i++; continue; }
+    if (e === 110) { out += "\n"; z.i++; continue; }
+    if (e === 114) { out += "\r"; z.i++; continue; }
+    if (e === 116) { out += "\t"; z.i++; continue; }
+    if (e !== 117) $js_json_bad(z);
+    z.i++;
+    let v = 0;
+    for (let k = 0; k < 4; k++) {
+      const h = $js_json_at(z);
+      const d = h >= 48 && h <= 57 ? h - 48
+        : h >= 97 && h <= 102 ? h - 87
+          : h >= 65 && h <= 70 ? h - 55 : -1;
+      if (d < 0) $js_json_bad(z);
+      v = v * 16 + d;
+      z.i++;
+    }
+    // 孤立的代理项照收：宿主 JSON.parse 也照收，s16 存的本来就是码元
+    out += String.fromCharCode(v);
+  }
+}
+// 数：JSON 的语法是 -? (0 | [1-9]数字*) (.数字+)? ([eE][+-]?数字+)? 。先按这个语法把
+// 一段切准（前导零、光一个点、光一个 e 都得当场报错），再交给 Number / strtod ——
+// 两边都是正确舍入的十进制转二进制，所以同一段文本出同一个 double。
+function $js_json_num(z) {
+  const start = z.i;
+  if ($js_json_at(z) === 45) z.i++;
+  const c = $js_json_at(z);
+  if (c === 48) z.i++;
+  else if (c >= 49 && c <= 57) { while (z.i < z.s.length && $js_json_digit(z.s.charCodeAt(z.i))) z.i++; }
+  else $js_json_bad(z);
+  if (z.i < z.s.length && z.s.charCodeAt(z.i) === 46) {
+    z.i++;
+    if (!$js_json_digit($js_json_at(z))) $js_json_bad(z);
+    while (z.i < z.s.length && $js_json_digit(z.s.charCodeAt(z.i))) z.i++;
+  }
+  if (z.i < z.s.length && (z.s.charCodeAt(z.i) === 101 || z.s.charCodeAt(z.i) === 69)) {
+    z.i++;
+    if (z.i < z.s.length && (z.s.charCodeAt(z.i) === 43 || z.s.charCodeAt(z.i) === 45)) z.i++;
+    if (!$js_json_digit($js_json_at(z))) $js_json_bad(z);
+    while (z.i < z.s.length && $js_json_digit(z.s.charCodeAt(z.i))) z.i++;
+  }
+  return Number(z.s.slice(start, z.i));
+}
+function $js_json_read(z) {
+  $js_json_ws(z);
+  const c = $js_json_at(z);
+  if (c === 0x22) return $js_json_str(z);
+  if (c === 0x7b) {
+    z.i++;
+    const o = new Map();
+    $js_json_ws(z);
+    if ($js_json_at(z) === 0x7d) { z.i++; return o; }
+    for (;;) {
+      $js_json_ws(z);
+      if ($js_json_at(z) !== 0x22) $js_json_bad(z);
+      const k = $js_json_str(z);
+      $js_json_ws(z);
+      if ($js_json_at(z) !== 0x3a) $js_json_bad(z);
+      z.i++;
+      o.set(k, $js_json_read(z));
+      $js_json_ws(z);
+      const d = $js_json_at(z);
+      if (d === 0x2c) { z.i++; continue; }
+      if (d !== 0x7d) $js_json_bad(z);
+      z.i++;
+      return o;
+    }
+  }
+  if (c === 0x5b) {
+    z.i++;
+    const a = [];
+    $js_json_ws(z);
+    if ($js_json_at(z) === 0x5d) { z.i++; return a; }
+    for (;;) {
+      a.push($js_json_read(z));
+      $js_json_ws(z);
+      const d = $js_json_at(z);
+      if (d === 0x2c) { z.i++; continue; }
+      if (d !== 0x5d) $js_json_bad(z);
+      z.i++;
+      return a;
+    }
+  }
+  if ($js_json_word(z, "true")) return true;
+  if ($js_json_word(z, "false")) return false;
+  if ($js_json_word(z, "null")) return null;
+  if (c === 45 || $js_json_digit(c)) return $js_json_num(z);
+  $js_json_bad(z);
+}
+// 实参先按 JS 的口径转字符串（JSON.parse(5) 是 5，不是报错），再从头读一格值，
+// 末尾除了空白不许还有东西。
+function $js_json_parse(text) {
+  const z = { s: $js_str(text), i: 0 };
+  const v = $js_json_read(z);
+  $js_json_ws(z);
+  if (z.i !== z.s.length) {
+    $rt_error("unexpected non-whitespace character after JSON at position " + z.i);
+  }
+  return v;
 }
 
 // ------------------------------------------- throw / try（ADR-0007 决定 1）
