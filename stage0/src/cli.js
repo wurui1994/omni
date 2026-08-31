@@ -1104,6 +1104,41 @@ function jncParse(tb, path, diags) {
   return tree;
 }
 
+/**
+ * 一段**表达式源码** -> 那棵表达式的树（第六十四刀，给格式化字面量里的 `$(…)` 用）。
+ *
+ * 语法只有一个起点（`unit`），所以把这段源码裹成一个合法的单元再解析，再把 `return` 底下
+ * 那一棵挖出来。jancy 那边是词法层做的（`lit_fmt_opener` 之后 `fcall main`，Lexer.rl:142，
+ * 于是里头那段就是普通 token 流）；这一层的词法是一张 DFA，没有 fcall / fret，所以改成
+ * "整块当一个 token、要用时再解析一遍"—— 认的是同一门语言。
+ *
+ * 裹的时候按**原文的行列**补空白：头一段占第一行，再补 line-1 个换行与 col-1 个空格，于是
+ * 里头报的位置就是真文件里的真位置。字面量落在第一行时补不出来（头那段自己占着第一行），
+ * 那时列往右偏 —— 行仍旧是对的。
+ */
+function jncParseExpr(tb, file, text, offset, diags) {
+  const n0 = diags.errorCount();
+  const { line, col } = file.lineCol(offset);
+  const head = 'void __fmt__() { return (';
+  const pad = line > 1 ? '\n'.repeat(line - 1) + ' '.repeat(col - 1) : '';
+  const wrapped = new SourceFile(file.path, `${head}${pad}${text}); }`);
+  const toks = lexText(tb.grammar.lex, wrapped, diags);
+  if (toks === null || diags.errorCount() > n0) return null;
+  const tree = glrParse(tb, toks, diags);
+  if (tree === null || diags.errorCount() > n0) return null;
+  const dig = (nd) => {
+    if (nd === null || typeof nd !== 'object' || !Array.isArray(nd.items)) return null;
+    const h = nd.items[0];
+    if (nd.items.length > 1 && h !== undefined && h !== null && h.value === 'return') return nd.items[1];
+    for (const it of nd.items) {
+      const r = dig(it);
+      if (r !== null) return r;
+    }
+    return null;
+  };
+  return dig(tree);
+}
+
 /** 一份 `.jnc` -> 核心方言的文本。`omni sx` 那条路也走它，所以降级只有一份实现。 */
 function jncText(path, dirs = []) {
   const tb = jncFrontEnd();
@@ -1127,7 +1162,12 @@ function jncText(path, dirs = []) {
     return null;
   };
   const text = lowerJnc(tree, diags, {
-    path, unit: resolve(path), find, parse: (p) => jncParse(tb, p, diags), dirs,
+    path,
+    unit: resolve(path),
+    find,
+    parse: (p) => jncParse(tb, p, diags),
+    parseExpr: (file, src, offset) => jncParseExpr(tb, file, src, offset, diags),
+    dirs,
   });
   diags.throwIfErrors();
   return text;

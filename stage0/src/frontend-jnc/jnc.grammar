@@ -33,8 +33,10 @@
 ;;     格式化字面量里嵌了带引号的子表达式。见下面的边界。
 ;;
 ;; 第一阶段的边界（都写在这儿，不是忘了）：
-;;   - 格式化字面量 `$"..."` 整块当一个 FMT_LITERAL token，**内部不解析** —— jancy 自己也是
-;;     先整块存 token 串（expression_pass1）等第二遍再展开。代价是内层不能出现 `"`。
+;;   - 格式化字面量 `$"..."` 整块当一个 FMT_LITERAL token，**语法这一层不解析** —— jancy 自己
+;;     也是先整块存 token 串（expression_pass1）等第二遍再展开。里头那几段源码由降级交回给
+;;     同一张表解析（第六十四刀，见 lower.js 的 fmtLit / cli.js 的 jncParseExpr）。
+;;     代价还在：内层不能出现 `"`（token 到那儿就收尾了）。
 ;;   - `dynamic(` 那对合成 token（Lexer.cpp:534..543）：这里当成 "dynamic" "(" 两个普通 token
 ;;   - `break2` / `continue3` / `basetype2` 的层号后缀：词法上当作单独的关键字列出前三档
 ;;   - `dylib`、reactor 体里的绑定语法只到形状，语义留给后续阶段

@@ -1,0 +1,9 @@
+// 格式化字面量里的 `$!`（第六十四刀留下的边界之一）。jancy 的词法把 `$!` 认成一格
+// "上一次出错的描述"（lit_fmt_error，Lexer.rl:128 -> createFmtLastErrorDescriptionTokens），
+// 展开是 `std.getLastErrorDescription()` 那一路 —— 要它得先把标准库那一格错误对象接上，
+// 与 `import "std_Error.jnc"` 同一刀。`$id` / `$(…)` / `%N` 这一刀都收了（cases/61-fmtlit.jnc），
+// 单独把这一格记下来：它缺的不是"再解析一遍"，是**那个对象本身**。
+int main() {
+	printf($"last error: $!\n");
+	return 0;
+}

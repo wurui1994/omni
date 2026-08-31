@@ -1,0 +1,52 @@
+// 格式化字面量 `$"…"`（ADR-0016 第六十四刀）。以前它是一条边界（bad/lit-fmt.jnc，第五十四刀
+// 记的），这一刀把它接了 —— 接法是"再解析一遍"：语法把 `$"…"` 整块当一个 FMT_LITERAL token，
+// 降级里把里头那几段源码交回给同一张表解析（jancy 是在词法层做同一件事：`lit_fmt_opener`
+// 之后 `fcall main`，Lexer.rl:142）。
+//
+// 四种注入照 literals.rst:62-88 与 Expr.llk:965-993：
+//   - `$id`：内嵌的一格值，**不占**实参表的位置
+//   - `$(expr)` / `$(expr; spec)`：内嵌的一整条表达式
+//   - `%N` / `%(N; spec)`：实参表里第 N 个（1 起）
+//   - 光一个 `%spec`：也占一个实参位，序号是"上一个用过的 + 1"（Parser.cpp:3496）
+//
+// 没写 spec 时按**静态类型**挑（Parser.cpp:3670-3691）：整数 ≤4 字节 `%d` / `%u`、64 位
+// `%lld` / `%llu`、浮点 `%f`、字符串 `%s`。写了 spec 但末尾不是字母时把默认那个字母补上
+//（prepareFormatString，CoreLib.cpp:702-723）——所以 `$(i; 6)` 是 `%6d`、`$(h; 08x)` 是 `%08x`。
+//
+// 期望的每一行都对着 /tmp/f61.c 那份 C 孪生量过（cc -O0 -std=c99 -Wall）：转换本身与 printf
+// 是同一份实现（fmtRun），所以 C 的 printf 就是这一格的出处。
+int twice(int x) { return x * 2; }
+
+// 字面量位置上也成立（不只是 printf 的实参）：带宽度的那几支要先把值落成局部量，
+// 而 `return` 这儿插得进语句，所以照收。
+string_t label(int i) { return $"w=$(i; 6)|$(twice(i))"; }
+
+int main() {
+	int i = 100;
+	uint_t h = 0xbeef;
+	long l = -3;
+	unsigned long ul = 18446744073709551615;
+	double d = 1.5;
+	bool b = true;
+	string_t s = "abc";
+
+	// `$id`：四种整数格 + 浮点 + bool + 字符串，全靠类型挑转换
+	printf($"a: $i $h $l $ul\n");
+	printf($"b: $d $b $s\n");
+
+	// `$(…)`：里头是一整条表达式；带 spec 的三种（补零的十六进制、精度、宽度）
+	printf($"c: $(i * 2) $(h; 08x) $(d; .3f) $(i; 6)\n");
+
+	// `%N` / `%(N; spec)`：同一个实参可以引用好几次，序号与 spec 各管一半
+	printf($"d: %1 %2 %(1;x) %(2;X)\n" (i, h));
+
+	// 光写 `%spec`：序号自己往下走（第一个是 1、第二个是 2）
+	printf($"e: %d %d %05d\n" (7, 8, 9));
+
+	// 转义与字面量位置上的用法：结果是一格字符串，可以先存起来
+	printf($"f: tab\there\n");
+	string_t t = $"g: $i-$(h; x)";
+	printf("%s\n", t);
+	printf("h: %s\n", label(7));
+	return 0;
+}

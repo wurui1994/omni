@@ -1,0 +1,1 @@
+格式化字面量里的 `$!`（要 std.getLastError 那一套）

@@ -23,7 +23,8 @@
 //      拿结构体当基类、下转、同名方法上再写一遍 `virtual`）、
 //      类里的 `destruct`（jancy 自己的文档就说它是 GC 在不确定的时刻调的，disposable.rst:17）、
 //      类里的 `get` / `set`（要属性那一套）、构造的**重载**（要重载决议）、
-//      格式化字面量 `$"…"`（要在降级里回头解析一小段源码）、二进制字面量 `0x"61 62"` 与
+//      格式化字面量里的 `$!`（要标准库那一格错误对象）与"再喂给 printf 的那一个裸 `%`"
+//      （要运行期的格式解释）、混着拼的字面量（`"a" $"b"`）、二进制字面量 `0x"61 62"` 与
 //      `__FILE__` 那族预定义宏（前者要字节宽度、后者要编译期环境）、
 //      没写初值的函数指针（方言的函数值那一格没有空值）、函数指针的**字段**（方言的结构体
 //      字段放不下函数值 —— 第五十七刀的虚派发因此没走"对象里一格函数指针"，走的是一格整数
@@ -64,7 +65,7 @@
 //      errorcode 那一套（自动传播与 `try`）是第五十八刀、`try { … }` 与 `catch:` 是
 //      第五十九刀、`import "x.jnc"` 是第六十刀、64 位的无符号整数是第六十一刀、
 //      `-I` 给的 import 目录表是第六十二刀、构造函数体里免分号的 `X.construct(…)` 是
-//      第六十三刀，在
+//      第六十三刀、格式化字面量 `$"…"` 是第六十四刀，在
 //      cases/24-new-curly.jnc、
 //      cases/25-static-local.jnc、cases/26-printf-prec.jnc、cases/27-printf-star-prec.jnc、
 //      cases/28-printf-flags.jnc、cases/29-printf-sci.jnc、cases/30-printf-gen.jnc、
@@ -77,9 +78,9 @@
 //      cases/50-construct.jnc、cases/51-litcat.jnc、cases/52-fnptr.jnc、
 //      cases/53-inherit.jnc、cases/54-virtual.jnc、cases/55-errorcode.jnc、
 //      cases/56-catch.jnc、cases/57-import.jnc、cases/58-uint64.jnc、
-//      cases/59-incdir.jnc、cases/60-btm-ctor.jnc。cases/imports/ 底下那三份是 57 那一条
-//      import 进来的、cases/incdirs/ 底下那六份是 59 那一条按 `-I` 找到的，
-//      **都不是**独立的用例 —— 这一层只扫 cases/ 这一级的 `.jnc`。）
+//      cases/59-incdir.jnc、cases/60-btm-ctor.jnc、cases/61-fmtlit.jnc。cases/imports/
+//      底下那三份是 57 那一条 import 进来的、cases/incdirs/ 底下那六份是 59 那一条按 `-I`
+//      找到的，**都不是**独立的用例 —— 这一层只扫 cases/ 这一级的 `.jnc`。）
 //
 //      bad/ 里有**四种**拒，别混：一种是"还没长出来"（做掉就落地）；一种是**这一层不做**
 //      （printf-conv-p：`%p` 要观测裸地址，而五条腿上那不是同一个数；ptrcmp-mixed：不同型的

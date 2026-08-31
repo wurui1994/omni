@@ -119,8 +119,9 @@
 //     （decl_curly.rst 最后那一段：char 数组里可以混字面量 —— 要"一格一个字节"的存储宽度，
 //     与下面那处刻意留下的差别是同一格）。
 //   - `printf` 之外的标准库（`std.*`、`io.*`、`gc.*`）
-//   - 格式化字面量 `$"…"`、二进制字面量 `0x"61 62"`、`__FILE__` 那族预定义宏、多行字面量、
-//     正则 switch。**相邻字面量的拼接**（`"a" "b"`）是第五十四刀，见 litFold。
+//   - 二进制字面量 `0x"61 62"`、`__FILE__` 那族预定义宏、多行字面量、正则 switch。
+//     **相邻字面量的拼接**（`"a" "b"`）是第五十四刀（见 litFold）、**格式化字面量**
+//     `$"…"` 是第六十四刀（见 fmtLit）；混着拼（`"a" $"b"`）与 `$!` 还不收。
 //   - union / property / reactor / 事件 / 多播 / 协程。`enum` 是第三十九刀、`class` 是第
 //     五十二刀、`construct` 与 `static construct` 是第五十三刀、**单继承**是第五十六刀
 //     （一条链在方言里共用一格 `(struct …)`，见 classLayout）、**虚派发**是第五十七刀
@@ -301,6 +302,66 @@ function litFold(n) {
   if (a === null) return null;
   const b = litFold(n.items[2]);
   return b === null ? null : a + b;
+}
+
+/**
+ * 格式化字面量里没写 spec 时，按**静态类型**挑的那个转换字母（Parser.cpp:3670-3691）。
+ * 整数 ≤4 字节 `d` / `u`、64 位 `lld` / `llu`、浮点 `f`、字符串 `s`；别的回 null（jancy
+ * 那儿也是一句 "don't know how to format"）。bool 在 jancy 那边同时带 Integer 标记
+ *（ControlFlowMgr_Eh.cpp:260 那句 "bool or not integer" 反着说了这件事），一字节，所以是 `d`。
+ */
+function fmtDefault(t) {
+  if (t === J_REAL) return 'f';
+  if (t === J_STR) return 's';
+  if (t === J_BOOL) return 'd';
+  const b = isEnum(t) ? t.base : t;
+  if (isInt(b)) return b.w <= 32 ? (b.u ? 'u' : 'd') : (b.u ? 'llu' : 'lld');
+  return null;
+}
+
+/** spec 与默认字母并起来（prepareFormatString，CoreLib.cpp:702-723）：没写就是 `%` 加默认；
+ *  写了但开头不是 `%` 就补一个；末尾不是字母时把默认那个字母接上（`8` -> `%8d`）。 */
+function fmtMergeSpec(spec, dflt) {
+  if (spec === null) return `%${dflt}`;
+  const s = spec.startsWith('%') ? spec : `%${spec}`;
+  return /[A-Za-z]$/.test(s) ? s : s + dflt;
+}
+
+/**
+ * `$(…)` / `%(…)` 那一格的范围（Lexer.rl:132 的 lit_fmt_opener 收 `(` 与 `{` 两种）。
+ * 顶层第一个 `;` 后面是 spec（Lexer.rl:455 的 onSemicolon 切到 lit_fmt_expr_spec）。
+ * 回 null 表示括号没配上。
+ */
+function fmtSplitSite(s, open) {
+  const closer = s[open] === '(' ? ')' : '}';
+  let depth = 0;
+  let semi = -1;
+  for (let i = open; i < s.length; i++) {
+    const c = s[i];
+    if (c === '(' || c === '{') depth++;
+    else if (c === ')' || c === '}') {
+      depth--;
+      if (depth === 0) {
+        if (c !== closer) return null;
+        const spec = semi < 0 ? null : s.slice(semi + 1, i).trim();
+        return {
+          body: semi < 0 ? s.slice(open + 1, i) : s.slice(open + 1, semi),
+          spec: spec === null || spec === '' ? null : spec,
+          end: i + 1,
+        };
+      }
+    } else if (c === ';' && depth === 1 && semi < 0) semi = i;
+  }
+  return null;
+}
+
+/** 这段树是一格格式化字面量吗（`(fmt …)`，或者它带上了实参表的 `(call (fmt …) …)`）。 */
+function fmtNode(n) {
+  if (isList(n) && head(n) === 'fmt') return { tok: n.items[1], args: null };
+  if (isList(n) && head(n) === 'call' && isList(n.items[1]) && head(n.items[1]) === 'fmt') {
+    return { tok: n.items[1].items[1], args: n.items[2] };
+  }
+  return null;
 }
 
 /** 这段树里有 `basetype.construct(…)` 吗（第五十六刀）。没有就自动补一句基类构造 ——
@@ -695,6 +756,8 @@ class JncLower {
     // 所以 `import` 到自己身上是一句空话，不会把整份源码再摊一遍。
     this.impFind = opts.find === undefined ? null : opts.find;
     this.impParse = opts.parse === undefined ? null : opts.parse;
+    // 格式化字面量里 `$(…)` 那一段要再解析一遍（第六十四刀）。没给就当没有那一格。
+    this.parseExpr = opts.parseExpr === undefined ? null : opts.parseExpr;
     // `-I` 那张目录表（第六十二刀）。找文件这件事全在 cli.js 的 find 里，这一层只拿它
     // **报错时说清在哪儿找过**，所以存的是表本身而不是一个数。
     this.impDirs = opts.dirs === undefined ? [] : opts.dirs;
@@ -3809,17 +3872,19 @@ class JncLower {
   /**
    * 折不动的那一格是什么（第五十四刀）。诊断要说得准 —— 三种各是一格自己的边界：
    *
-   *   - 格式化字面量 `$"…"`：它自己那一套注入（`$x` / `$(expr; spec)` / `%1`），而 `$(…)`
-   *     里那一格是**一整条表达式**，要在词法之后再解析一遍（jancy 也是这么做的，语法那处
-   *     的注释记着"整块当一个 FMT_LITERAL token、内部不解析"）。那是自己的一刀。
+   *   - 相邻拼接里的格式化字面量：`"a" $"b"` 那种。jancy 那边这一串整块落到 GC 堆上
+   *     （literals.rst:90），这一层的拼接只管**不含**格式化字面量的那一半 —— 第六十四刀
+   *     把单独的 `$"…"` 接上了，混着拼的那一格仍旧是自己一刀（整份语料里只有 1 处）。
    *   - 二进制字面量 `0x"61 62"`：它定义的是**逐字节**的一块 const char（literals.rst:33），
    *     而这一层一格整数占 64 位（ADR-0016 决策二那处刻意留下的差别）—— 要它得先有"一格
    *     一个字节"的存储宽度，与 `sizeof` 同一格。
    *   - `__FILE__` / `__DIR__` / `__FUNC__` / `__LINE__` / `__DATE__` / `__TIME__`：词法层
-   *     的预定义字面量宏（Lexer.rl 里就是 LITERAL），值要靠编译期环境；后两个还不可复现。
+   *     的预定义字面量宏（Lexer.rl 里就是 LITERAL）；值要靠编译期环境，后两个还不可复现。
    */
   litWhy(n) {
-    if (isList(n) && head(n) === 'fmt') return '格式化字面量 `$"…"`（要它自己那套 $x / %1 的注入）';
+    if (isList(n) && head(n) === 'fmt') {
+      return '格式化字面量（jancy 那边这一串整块落到 GC 堆上，literals.rst:90）';
+    }
     if (isList(n) && head(n) === 'concat') {
       return this.litWhy(litFold(n.items[1]) === null ? n.items[1] : n.items[2]);
     }
@@ -3842,6 +3907,27 @@ class JncLower {
   printf(n, args, ind) {
     const pad = ' '.repeat(ind);
     if (args.length === 0) { this.err(n, 'printf 至少要一个格式串'); return null; }
+    // `printf($"…")`（第六十四刀）：格式化字面量自己就把值排好了，结果是**一格字符串** ——
+    // 这一句就是把它写出去（`write` 不添换行，与 printf 一致）。
+    //
+    // 只有一处不能这么办：结果里还留着裸的 `%`。jancy 那边 printf 会把它**再解释一遍**
+    // （字面量产出的是 char*，printf 是真变参函数），而这一层没有运行期的格式解释 ——
+    // 所以那种写法明说不收，而不是悄悄少印一个 `%`。
+    const fl = fmtNode(args[0]);
+    if (fl !== null && args.length > 1) {
+      this.err(n, '格式化字面量自己带实参表（`$"…"(a, b)`），printf 这儿不能再给别的实参');
+      return null;
+    }
+    if (fl !== null && args.length === 1) {
+      const v = this.fmtLit(args[0], fl.tok, fl.args === null ? [] : this.flat(fl.args));
+      if (v === null) return null;
+      if (v.rawPct === true) {
+        this.nope(args[0], 'printf 的实参是带裸 `%` 的格式化字面量'
+          + '（jancy 那儿这个 `%` 还要被 printf 再解释一遍，要它得有运行期的格式解释）');
+        return null;
+      }
+      return [`${pad}(write ${v.code})`];
+    }
     // 字面量是词法层的 `string` 节点（`{kind:'string', value, raw}`），不是 atom；相邻的几个
     // 拼在一起是 `(concat …)`，编译期折平（第五十四刀）—— 折出来的仍旧是一格字面量。
     const fmt = litFold(args[0]);
@@ -3858,10 +3944,27 @@ class JncLower {
       if (v === null) return null;
       vals.push(v);
     }
+    return this.fmtRun(n, fmt, vals, args.slice(1), pad, [], 'stmt');
+  }
+
+  /**
+   * 一个 C 口径的格式串 + 一串已经算好的值 -> 输出（第六十四刀把它从 printf 里分出来）。
+   *
+   *   - `mode === 'stmt'`：按 `\n` 切开、每段一条 `print`（它自带换行），末段发 `(write …)`。
+   *     回的是那几行语句。printf 走这条。
+   *   - `mode === 'str'`：不切换行，整条拼成**一格字符串的代码**回去。格式化字面量
+   *     `$"…"` 走这条 —— 它产出的是一格值（literals.rst:62），不是一次输出。
+   *
+   * 分出来的理由是"算法只该有一处家"：两条路上 `%08.3f` 该长什么样必须一个字不差。
+   * 第六十一刀那次 `q /= three` 的教训就是同一个形状 —— 两处各写一遍，其中一处写错。
+   *
+   * `nodes[k]` 是第 k 个值对应的**源码节点**（诊断要指着它）。
+   */
+  fmtRun(n, fmt, vals, nodes, pad, out, mode) {
     // 一段一段攒：`pieces` 是当前这一段的若干块（字符串常量与 (tostr …)）。
-    // 遇到 `\n` 就发一条 `print`（它自带换行）；末尾那段没有换行时发 `(write …)`
+    // 'stmt' 那条路遇到 `\n` 就发一条 `print`（它自带换行）；末尾那段没有换行时发 `(write …)`
     // ——方言这一刀刚长出 write，所以"不以 \n 收尾的格式串"不再是边界（ADR-0016 第四刀）。
-    const out = [];
+    // 'str' 那条路一个都不切：换行就是串里的一个字符。
     let pieces = [];
     let ai = 0;
     let lit = '';
@@ -3876,7 +3979,7 @@ class JncLower {
     };
     for (let i = 0; i < fmt.length; i++) {
       const c = fmt[i];
-      if (c === '\n') { flush(true); continue; }
+      if (c === '\n' && mode === 'stmt') { flush(true); continue; }
       if (c !== '%') { lit += c; continue; }
       // 转换说明：`%` [标志] [宽度] [`.` 精度] 转换字符。五个标志都收了：`-`（左对齐）、
       // `0`（补零）、`+` 与空格（符号，第二十九刀）、`#`（另一种形式，同一刀）；宽度与精度
@@ -3954,13 +4057,13 @@ class JncLower {
       //（判正负、算要补几个），所以先落成局部量。
       let wVar = null;
       if (wStar) {
-        wVar = this.starArg(n, args, vals, ai, '宽度', pad, out);
+        wVar = this.starArg(n, nodes, vals, ai, '宽度', pad, out);
         if (wVar === null) return null;
         ai++;
       }
       let pCode = prec < 0 ? null : `(int ${prec})`;
       if (pStar) {
-        pCode = this.starArg(n, args, vals, ai, '精度', pad, out);
+        pCode = this.starArg(n, nodes, vals, ai, '精度', pad, out);
         if (pCode === null) return null;
         ai++;
       }
@@ -3972,9 +4075,8 @@ class JncLower {
       // 枚举在这儿就落到基整数上（第三十九刀）：printf 是变参，jancy 那边这一次转换也是隐式的，
       // 于是 `%d` / `%u` / `%x` 那几条一个字都不用改。
       const v = isEnum(vals[ai].type) ? { code: vals[ai].code, type: vals[ai].type.base } : vals[ai];
-      // 这条转换对应的**实参节点**（诊断要指着它）。`vals[k]` 是第 k 个转换的值，而
-      // `args[0]` 是格式串，所以是 `ai + 1`；先取再自增 —— 自增之后取会指到下一个实参上。
-      const argNode = args[ai + 1];
+      // 这条转换对应的**实参节点**（诊断要指着它）。
+      const argNode = nodes[ai];
       ai++;
       let piece = null;
       // `%c`：一个码位 -> 一个字符。方言的 `(chr E)`（另外四条腿早就有它）。
@@ -4149,9 +4251,222 @@ class JncLower {
         }
       } else pieces.push(pfx === null ? piece : `(bin "+" ${pfx} ${piece})`);
     }
+    if (mode === 'str') {
+      flushLit();
+      if (ai !== vals.length) { this.err(n, 'printf 的实参比格式串里的转换多'); return null; }
+      if (pieces.length === 0) return '(str "")';
+      let code = pieces[0];
+      for (let k = 1; k < pieces.length; k++) code = `(bin "+" ${code} ${pieces[k]})`;
+      return code;
+    }
     flush(false);   // 末尾没换行的那一段走 write
     if (ai !== vals.length) { this.err(n, 'printf 的实参比格式串里的转换多'); return null; }
     return out;
+  }
+
+  /**
+   * 格式化字面量 `$"…"`（第六十四刀）-> 一格字符串的代码。第五十四刀记下的那条边界还上了。
+   *
+   * jancy 的形（literals.rst:62-88；词法 Lexer.rl:128-142；语法 Expr.llk:965-993）：
+   *
+   *   - `$id`：一格**内嵌**的表达式，不占实参表的位置（`site->m_index == -1`）
+   *   - `$(expr)` / `$(expr; spec)`：同上，里头是一整条表达式 —— 这一层再解析一遍（parseExpr）
+   *   - `%N` / `%(N; spec)`：实参表里第 N 个（**1 起**）
+   *   - 光写一个 `%spec`：也占一个实参位，序号是"上一个用过的 + 1"
+   *     （`site->m_index = ++literal->m_fmtIndex`，Parser.cpp:3496）
+   *   - 没写 spec 时按**静态类型**挑（Parser.cpp:3670-3691）：整数 ≤4 字节 `%d` / `%u`、
+   *     64 位 `%lld` / `%llu`、浮点 `%f`、字符串 `%s`。写了 spec 但末尾不是字母时把默认那个
+   *     字母补上（`$(x; 8)` -> `%8d`；prepareFormatString，CoreLib.cpp:702-723）
+   *   - 实参表里有谁没被用到是**错**（Parser.cpp:3583-3587）
+   *
+   * 拼出来的是一个 C 口径的格式串加一串值，交给 fmtRun 的 'str' 那条路 —— 于是 `%08.3f`
+   * 该长什么样与 printf 是同一份实现，不是第二份。
+   */
+  fmtLit(node, tok, argNodes) {
+    if (this.parseExpr === null) return this.nope(node, '格式化字面量 `$"…"`（这一趟没有再解析一遍的入口）');
+    const raw = String(tok.value);
+    const inner = raw.slice(2, raw.length - 1);
+    const base = tok.span.start + 2;   // inner[0] 在文件里的偏移
+    const file = tok.span.file;
+    const argVals = argNodes.map(() => null);
+    const used = argNodes.map(() => false);
+    // 实参按需降级（用两次的 `%(1;x)` 只算一次），并记下谁被用过
+    const argAt = (k) => {
+      if (k >= argNodes.length) {
+        return this.err(node, `格式化字面量里写了 %${k + 1}，可它的实参表只有 ${argNodes.length} 个`);
+      }
+      if (argVals[k] === null) {
+        const v = this.expr(argNodes[k], null);
+        if (v === null) return null;
+        argVals[k] = v;
+      }
+      used[k] = true;
+      return argVals[k];
+    };
+    let cfmt = '';
+    const vals = [];
+    const nodes = [];
+    let seq = 0;   // jancy 的 m_fmtIndex：0 表示还没用过任何一个
+    let bad = false;
+    // 文本里的 `%` 在 C 口径的格式串里要写成 `%%`。记一笔"有过裸的 `%`"——
+    // `printf($"…")` 那条路要用它（printf 会把结果再解释一遍格式）。
+    let rawPct = false;
+    const rawText = (s) => {
+      if (s.includes('%')) rawPct = true;
+      return s.replace(/%/g, '%%');
+    };
+    // 一格注入：把 spec 与"这个类型默认那个字母"并起来，值与节点排进去
+    const site = (v, spec, nd) => {
+      if (v === null) { bad = true; return; }
+      const d = fmtDefault(v.type);
+      if (d === null) {
+        // char* / char[] 在 jancy 那边**是**印得出来的（appendFmtLiteral_p 按 NUL 读一段
+        // 内存，CoreLib.cpp:790-810）；这一层的 `%s` 只认 string，所以那一格另有出处。
+        this.nope(node, isPtr(v.type)
+          ? `格式化字面量里的 ${tyName(v.type)}（jancy 走 appendFmtLiteral_p 按 NUL 读一段内存，`
+            + '这一层的 %s 只认 string）'
+          : `格式化字面量里印不出 ${tyName(v.type)}（jancy 那边这也是一句 `
+            + "\"don't know how to format\"，Parser.cpp:3689）");
+        bad = true;
+        return;
+      }
+      if (spec !== null && /B$/.test(spec)) {
+        this.nope(node, '格式化字面量的 `B` 转换（jancy 那边是逐字节的二进制排版，'
+          + '与二进制字面量同一格）');
+        bad = true;
+        return;
+      }
+      cfmt += fmtMergeSpec(spec, d);
+      vals.push(isEnum(v.type) ? { code: v.code, type: v.type.base } : v);
+      nodes.push(nd);
+    };
+    // `$(…)` / `$id` 里那一段源码 -> 一格值。位置按原文算，所以里头报错指的是真地方。
+    const inlineVal = (src, off) => {
+      const t = this.parseExpr(file, src, base + off);
+      if (t === null) { this.err(node, `格式化字面量里这一段解析不了：'${src}'`); return null; }
+      return this.expr(t, null);
+    };
+    let i = 0;
+    while (i < inner.length && !bad) {
+      const c = inner[i];
+      // 转义照普通字面量那一套（lex.js:282-311 是同一张表）：\t \n \r \xHH，别的脱掉反斜杠
+      if (c === '\\') {
+        const e = inner[i + 1];
+        i += 2;
+        if (e === 't') { cfmt += '\t'; continue; }
+        if (e === 'n') { cfmt += '\n'; continue; }
+        if (e === 'r') { cfmt += '\r'; continue; }
+        if (e === 'x') {
+          const cc = Number.parseInt(inner.slice(i, i + 2), 16);
+          if (Number.isInteger(cc)) { cfmt += rawText(String.fromCharCode(cc)); i += 2; continue; }
+          cfmt += 'x';
+          continue;
+        }
+        cfmt += e === undefined ? '' : rawText(e);
+        continue;
+      }
+      if (c === '$') {
+        const rest = inner.slice(i + 1);
+        if (rest.startsWith('!')) {
+          this.nope(node, '格式化字面量里的 `$!`（要 std.getLastError 那一套）');
+          bad = true;
+          break;
+        }
+        const id = /^[A-Za-z_]\w*/.exec(rest);
+        if (id !== null) {
+          site(inlineVal(id[0], i + 1), null, node);
+          i += 1 + id[0].length;
+          continue;
+        }
+        if (rest.startsWith('(')) {
+          const sp = fmtSplitSite(inner, i + 1);
+          if (sp === null) {
+            this.err(node, '格式化字面量里的 `$(` 没有配对的 `)`');
+            bad = true;
+            break;
+          }
+          site(inlineVal(sp.body, i + 2), sp.spec, node);
+          i = sp.end;
+          continue;
+        }
+        if (/^\d/.test(rest)) {
+          this.nope(node, '格式化字面量里的 `$1`（正则捕获组，要 regex switch 那一套）');
+          bad = true;
+          break;
+        }
+        cfmt += '$';
+        i++;
+        continue;
+      }
+      if (c === '%') {
+        const rest = inner.slice(i + 1);
+        if (rest.startsWith('(')) {
+          const sp = fmtSplitSite(inner, i + 1);
+          if (sp === null) {
+            this.err(node, '格式化字面量里的 `%(` 没有配对的 `)`');
+            bad = true;
+            break;
+          }
+          const k = /^\d+$/.test(sp.body.trim()) ? Number(sp.body.trim()) : -1;
+          if (k <= 0) {
+            this.nope(node, `格式化字面量里的 \`%(${sp.body};…)\`（jancy 那儿这一格是实参的序号）`);
+            bad = true;
+            break;
+          }
+          seq = k;
+          site(argAt(k - 1), sp.spec, argNodes[k - 1] === undefined ? node : argNodes[k - 1]);
+          i = sp.end;
+          continue;
+        }
+        // Ragel 的最长匹配：`%08x` 是 spec（4 字符）、`%8` 是序号（2 字符）。
+        // spec 里的宽度只跟在标志后面（Lexer.rl:133），所以 `%8d` 的 `%8` 是序号、`d` 是文本。
+        const idx = /^\d+/.exec(rest);
+        const sp = /^([-+ #0]\d*)?(\.\d+)?(ll|l|z)?[diuxXfeEgGcsp]/.exec(rest);
+        const spLen = sp === null ? 0 : 1 + sp[0].length;
+        const idxLen = idx === null ? 0 : 1 + idx[0].length;
+        if (spLen >= idxLen && spLen > 0) {
+          seq += 1;
+          site(argAt(seq - 1), `%${sp[0]}`, argNodes[seq - 1] === undefined ? node : argNodes[seq - 1]);
+          i += spLen;
+          continue;
+        }
+        if (idxLen > 0) {
+          seq = Number(idx[0]);
+          if (seq <= 0) {
+            this.err(node, '格式化字面量里的实参序号从 1 起');
+            bad = true;
+            break;
+          }
+          site(argAt(seq - 1), null, argNodes[seq - 1] === undefined ? node : argNodes[seq - 1]);
+          i += idxLen;
+          continue;
+        }
+        cfmt += '%%';
+        rawPct = true;
+        i++;
+        continue;
+      }
+      cfmt += rawText(c);
+      i++;
+    }
+    if (bad) return null;
+    for (let k = 0; k < argNodes.length; k++) {
+      if (!used[k]) {
+        return this.err(argNodes[k], `格式化字面量的第 ${k + 1} 个实参没有被用到`
+          + '（jancy 那边这也是一句错，Parser.cpp:3585）');
+      }
+    }
+    // 补零、宽度、`#` 那几支要先把值落成局部量。表达式位置上能不能插语句看 ecOut
+    //（与第五十八刀 errorcode 那一格是同一个通道）。
+    const out = this.ecOut === null ? [] : this.ecOut;
+    const pad = this.ecOut === null ? '' : this.ecPad;
+    const code = this.fmtRun(node, cfmt, vals, nodes, pad, out, 'str');
+    if (code === null) return null;
+    if (this.ecOut === null && out.length !== 0) {
+      return this.nope(node, '这个位置上带宽度或补零的格式化字面量（那几支要先把值落成局部量，'
+        + '而这儿插不进语句 —— 见 EC_HOIST）');
+    }
+    return { code, type: J_STR, rawPct };
   }
 
   /** 把一段要读好几次的东西先落成一个局部量，回它的读法。 */
@@ -4166,11 +4481,11 @@ class JncLower {
    * `%*d` / `%.*s` 里那个从实参来的宽度或精度（第二十七刀）。C 里它是一个 `int`，
    * 在实参表里排在值**前面**（宽度、精度、值）。
    */
-  starArg(n, args, vals, idx, what, pad, out) {
+  starArg(n, nodes, vals, idx, what, pad, out) {
     if (idx >= vals.length) return this.err(n, `printf 的 '*'（${what}）没有对应的实参`);
     const v = vals[idx];
     if (!isInt(v.type)) {
-      return this.err(args[idx + 1], `printf 的 '*'（${what}）要整数，这里是 ${tyName(v.type)}`);
+      return this.err(nodes[idx], `printf 的 '*'（${what}）要整数，这里是 ${tyName(v.type)}`);
     }
     return this.spill(v.code, pad, out, 'int');
   }
@@ -4944,11 +5259,9 @@ class JncLower {
       // `new T { … }`（第二十五刀）：那几条语句抬成一个函数，项的值当实参传进去 ——
       // 于是它仍旧是一个表达式，惰性位置上也成立。见 newCurly。
       case 'new-curly': return this.newCurly(n, n.items[1], n.items[2]);
-      // 格式化字面量（第五十四刀记的边界）：`$"i = $i"` 产出的是一格**动态**的 char 数组
-      //（literals.rst:62）。`$x` 与 `%1` 那两种注入这一层拼得出来（就是字符串相加），
-      // 可 `$(expr; spec)` 里那一格是一整条表达式 —— 语法把 `$"…"` 整块当一个 token，
-      // 里面没解析，要它就得在词法之后再解析一遍（jancy 自己也是这么做的）。那是自己的一刀。
-      case 'fmt': return this.nope(n, this.litWhy(n));
+      // 格式化字面量（第六十四刀）：`$"i = $i"` 产出的是一格**动态**的字符串
+      //（literals.rst:62）。三种注入都在 fmtLit 里，转换本身与 printf 同一份实现（fmtRun）。
+      case 'fmt': return this.fmtLit(n, n.items[1], []);
 
       // `countof(a)`（第四十五刀）：编译期的元素个数，见 countof。
       case 'countof': return this.countofExpr(n, n.items[1]);
@@ -5343,6 +5656,10 @@ class JncLower {
 
   callExpr(n) {
     const callee = n.items[1];
+    // `$"…"(a, b)`：那对括号不是调用，是**格式化字面量自己的实参表**（Expr.llk:940 把它
+    // 挂在 literal 上）。语法这一层它落成了一次调用，所以在这儿先认出来（第六十四刀）。
+    const fl = fmtNode(n);
+    if (fl !== null) return this.fmtLit(n, fl.tok, fl.args === null ? [] : this.flat(fl.args));
     // 从一格**函数指针**上调（第五十五刀）：`p(…)` 里的 p 是变量而不是函数名，那就是方言的
     // `(callfn …)`。这一问排在按名字找函数之前 —— 同名的局部量遮住模块级的那个函数。
     const fv = this.fnCallee(callee);
