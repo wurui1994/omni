@@ -1695,6 +1695,7 @@ const STATIC_CALLS = {
   'Number.isInteger': { op: 'js_num_is_integer', argc: 1 },
   'Number.parseInt': { op: 'js_num_parse_int', argc: 2 },
   'BigInt.asIntN': { op: 'js_bigint_as_int_n', argc: 2 },
+  'BigInt.asUintN': { op: 'js_bigint_as_uint_n', argc: 2 },
   'process.cwd': { op: 'js_proc_cwd', argc: 0 },
   'process.stdout.write': { op: 'js_proc_stdout_write', argc: 1 },
   'process.stderr.write': { op: 'js_proc_stderr_write', argc: 1 },

@@ -89,7 +89,7 @@ static omni_s16 omni_js_json_val(omni_dyn v, omni_dyn rep, int64_t gap, int64_t 
     case OMNI_DYN_REAL: \
       return isfinite(v.u.r) ? omni_js_as_s16(omni_js_str(v)) : omni_js_s16_lit("null"); \
     case OMNI_DYN_STR16: return omni_js_json_quote_s16(v.u.s16); \
-    case OMNI_DYN_INT: \
+    case OMNI_DYN_INT: case OMNI_DYN_UINT: \
       omni_error("do not know how to serialize a bigint"); \
       return omni_js_json_absent(); \
     case OMNI_DYN_LIST: { \

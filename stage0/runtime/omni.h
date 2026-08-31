@@ -47,7 +47,12 @@ enum {
   OMNI_DYN_UNDEF, OMNI_DYN_FN, OMNI_DYN_STR16,
   /* Map 与 Set 的底子也是 dict<string,dynamic>，但标签必须分开：`o.has(k)` 这种
      成员派发只有标签能区分 Map 和 Set，靠字典里塞个隐藏键会污染迭代（ADR-0011）。 */
-  OMNI_DYN_MAP, OMNI_DYN_SET
+  OMNI_DYN_MAP, OMNI_DYN_SET,
+  /* 无符号 64 位那一格（ADR-0011）：BigInt.asUintN(64, x) 的结果落在 [2^63, 2^64) 时
+     装不进 int64_t，而在 JS 那边它就是一个普通 BigInt。位存在 u.i 里，按 uint64_t 读。
+     **只有装不下的那一半用这个标签** —— 装得下就照旧是 INT，于是每个值只有一种表示，
+     相等、哈希、字典键都不用为它开特例（两个标签的取值区间是不交的）。 */
+  OMNI_DYN_UINT
 };
 
 typedef struct {
@@ -408,6 +413,7 @@ omni_dyn omni_js_num_of(omni_dyn v);
 omni_dyn omni_js_num_parse_int(omni_dyn s, omni_dyn radix);
 omni_dyn omni_js_bigint_of(omni_dyn v);
 omni_dyn omni_js_bigint_as_int_n(omni_dyn bits, omni_dyn v);
+omni_dyn omni_js_bigint_as_uint_n(omni_dyn bits, omni_dyn v);
 omni_dyn omni_js_math(int op, omni_dyn a, omni_dyn b);
 omni_dyn omni_js_num_to_precision(omni_dyn v, omni_dyn digits);
 omni_dyn omni_js_num_to_string(omni_dyn v, omni_dyn radix);
@@ -535,6 +541,16 @@ static inline omni_dyn omni_dyn_of_fn(omni_fn f) { omni_dyn d; d.tag = OMNI_DYN_
 
 static inline omni_dyn omni_dyn_of_bool(bool v) { omni_dyn d; d.tag = OMNI_DYN_BOOL; d.u.b = v; return d; }
 static inline omni_dyn omni_dyn_of_int(int64_t v) { omni_dyn d; d.tag = OMNI_DYN_INT; d.u.i = v; return d; }
+/* 无符号 64 位的规范化构造：装得进 int64_t 就是 INT，装不进才是 UINT。
+   两个标签的区间不交，所以"同一个值只有一种表示"是这个函数保证的 —— 相等与
+   哈希不用为 UINT 开特例，全靠这一格。 */
+static inline omni_dyn omni_dyn_of_uint64(uint64_t v) {
+  omni_dyn d;
+  d.tag = v <= (uint64_t)INT64_MAX ? OMNI_DYN_INT : OMNI_DYN_UINT;
+  d.u.i = (int64_t)v;
+  return d;
+}
+static inline uint64_t omni_dyn_u64(omni_dyn v) { return (uint64_t)v.u.i; }
 static inline omni_dyn omni_dyn_of_real(double v) { omni_dyn d; d.tag = OMNI_DYN_REAL; d.u.r = v; return d; }
 static inline omni_dyn omni_dyn_of_string(omni_str v) { omni_dyn d; d.tag = OMNI_DYN_STRING; d.u.s = v; return d; }
 static inline omni_dyn omni_dyn_of_s16(omni_s16 v) { omni_dyn d; d.tag = OMNI_DYN_STR16; d.u.s16 = v; return d; }

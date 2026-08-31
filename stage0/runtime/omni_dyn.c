@@ -10,6 +10,9 @@ const char *omni_dyn_tag_name(int t) {
     /* Map / Set：底子还是 dict<string, dynamic>，但标签必须分开 —— o.has(k) 这类成员
        派发只有标签能区分 Map 和普通对象（ADR-0011） */
     "Map", "Set",
+    /* 无符号 64 位那一格（ADR-0011）：在 JS 域里它就是一个 BigInt，所以名字与 INT
+       一样是 "int" —— 错误消息里不该冒出一个源语言里没有的类型名 */
+    "int",
   };
   return names[t];
 }
@@ -24,7 +27,7 @@ bool omni_dyn_eq(omni_dyn a, omni_dyn b) {
   switch (a.tag) {
     case OMNI_DYN_NULL: return true;
     case OMNI_DYN_BOOL: return a.u.b == b.u.b;
-    case OMNI_DYN_INT: return a.u.i == b.u.i;
+    case OMNI_DYN_INT: case OMNI_DYN_UINT: return a.u.i == b.u.i;
     case OMNI_DYN_REAL: return a.u.r == b.u.r;
     case OMNI_DYN_STRING: return omni_str_cmp(a.u.s, b.u.s) == 0;
     default: return a.u.ref == b.u.ref;  /* 容器按引用相等，和 JS 侧一致 */

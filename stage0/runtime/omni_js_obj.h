@@ -43,6 +43,7 @@ static omni_str omni_js_key(omni_dyn k) { \
   switch (k.tag) { \
     case OMNI_DYN_STR16: return omni_js_key_tag_('s', omni_s16_to_utf8(k.u.s16)); \
     case OMNI_DYN_INT: return omni_str_fmt("i%lld", (long long)k.u.i); \
+    case OMNI_DYN_UINT: return omni_str_fmt("i%llu", (unsigned long long)omni_dyn_u64(k)); \
     case OMNI_DYN_REAL: \
       return omni_js_key_tag_('n', omni_s16_to_utf8(omni_js_as_s16(omni_js_str(k)))); \
     case OMNI_DYN_BOOL: return omni_str_fmt("b%d", k.u.b ? 1 : 0); \

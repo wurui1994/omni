@@ -698,9 +698,15 @@ function $js_cmp(op, a, b) {
   } else {
     const num = (t) => t === "int" || t === "real";
     if (!num(ta) || !num(tb)) $rt_error("cannot compare " + ta + " with " + tb);
-    const x = Number(a), y = Number(b);
-    if (Number.isNaN(x) || Number.isNaN(y)) return false;
-    c = x < y ? -1 : (x > y ? 1 : 0);
+    // 两个 bigint 之间精确比：Number() 在 2^53 以上丢位，而 BigInt 的 < 是精确的。
+    // C 侧的 int_cmp 是同一条规则 —— 两边都精确，大数上才不分叉。
+    if (ta === "int" && tb === "int") {
+      c = a < b ? -1 : (a > b ? 1 : 0);
+    } else {
+      const x = Number(a), y = Number(b);
+      if (Number.isNaN(x) || Number.isNaN(y)) return false;
+      c = x < y ? -1 : (x > y ? 1 : 0);
+    }
   }
   switch (op) {
     case "<": return c < 0;
@@ -718,6 +724,8 @@ function $js_eq(strict, a, b) {
     const bn = tb === "null" || tb === "undefined";
     if (an || bn) return an && bn;
     const num = (t) => t === "int" || t === "real";
+    // 两个 bigint 之间精确比（Number() 在 2^53 以上丢位，C 侧的 int_cmp 也是精确的）
+    if (ta === "int" && tb === "int") return a === b;
     if (num(ta) && num(tb)) return Number(a) === Number(b);
   }
   if (ta !== tb) return false;
@@ -1093,11 +1101,26 @@ function $js_bigint_of(v) {
   if (t === "string") return $js_str_to_int(v);
   $rt_error("cannot convert " + t + " to a bigint");
 }
+// BigInt.asIntN / BigInt.asUintN。宽度收 0..64：这个值域里的 int 是 int64
+// （ADR-0005），宽度超过 64 的结果装不下，当场报错比悄悄算错好。
+// asUintN 在 JS 这边直接就是宿主的那一个（BigInt 无界）；C 侧结果落在
+// [2^63, 2^64) 时用 OMNI_DYN_UINT 那个标签装。错误文本两侧逐字相同。
+function $js_bits(bits, who) {
+  const n = $js_real(bits, who);
+  if (!Number.isInteger(n) || n < 0 || n > 64) {
+    $rt_error(who + ": width must be an integer in 0..64, got " + n);
+  }
+  return n;
+}
 function $js_bigint_as_int_n(bits, v) {
-  const n = $js_real(bits, "BigInt.asIntN");
-  if (n !== 64) $rt_error("only BigInt.asIntN(64, ..) is supported, got " + n);
+  const n = $js_bits(bits, "BigInt.asIntN");
   if ($dynTag(v) !== "int") $rt_error("BigInt.asIntN expects a bigint, found " + $dynTag(v));
-  return v;
+  return BigInt.asIntN(n, v);
+}
+function $js_bigint_as_uint_n(bits, v) {
+  const n = $js_bits(bits, "BigInt.asUintN");
+  if ($dynTag(v) !== "int") $rt_error("BigInt.asUintN expects a bigint, found " + $dynTag(v));
+  return BigInt.asUintN(n, v);
 }
 function $js_num_to_precision(v, digits) {
   const p = $js_real(digits, "toPrecision");

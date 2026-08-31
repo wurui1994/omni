@@ -11,6 +11,7 @@
 static double want_real(omni_dyn v, const char *who) {
   if (v.tag == OMNI_DYN_REAL) return v.u.r;
   if (v.tag == OMNI_DYN_INT) return (double)v.u.i;
+  if (v.tag == OMNI_DYN_UINT) return (double)omni_dyn_u64(v);
   omni_errorf("%s expects a number, found %s", who, omni_dyn_tag_name(v.tag));
   return 0;
 }
@@ -31,6 +32,7 @@ omni_dyn omni_js_num_of(omni_dyn v) {
   switch (v.tag) {
     case OMNI_DYN_REAL: return v;
     case OMNI_DYN_INT: return omni_dyn_of_real((double)v.u.i);
+    case OMNI_DYN_UINT: return omni_dyn_of_real((double)omni_dyn_u64(v));
     case OMNI_DYN_BOOL: return omni_dyn_of_real(v.u.b ? 1.0 : 0.0);
     case OMNI_DYN_NULL: return omni_dyn_of_real(0.0);
     case OMNI_DYN_UNDEF: return omni_dyn_of_real((double)NAN);
@@ -130,7 +132,7 @@ static int64_t js_str_to_int(omni_str s) {
 /* BigInt(x)：只认整数值的 number 与十进制/0x/0o/0b 字符串。JS 在小数上抛
    RangeError，这里报错 —— 两边都得拒绝，不能一边悄悄截尾。 */
 omni_dyn omni_js_bigint_of(omni_dyn v) {
-  if (v.tag == OMNI_DYN_INT) return v;
+  if (v.tag == OMNI_DYN_INT || v.tag == OMNI_DYN_UINT) return v;
   if (v.tag == OMNI_DYN_BOOL) return omni_dyn_of_int(v.u.b ? 1 : 0);
   if (v.tag == OMNI_DYN_REAL) {
     if (!isfinite(v.u.r) || v.u.r != trunc(v.u.r)) {
@@ -145,12 +147,43 @@ omni_dyn omni_js_bigint_of(omni_dyn v) {
   return omni_dyn_null();
 }
 
-/* BigInt.asIntN：只支持 64 —— 源码里就只有这一个宽度，别的当场报错比悄悄算错好 */
+/* BigInt.asIntN / BigInt.asUintN。宽度收 0..64：这个值域里的 int 是 int64
+   （ADR-0005），宽度超过 64 的结果装不下，当场报错比悄悄算错好。
+   asUintN 的结果落在 [2^63, 2^64) 时同样装不进 int64_t —— 那一半用 OMNI_DYN_UINT
+   这个标签（omni_dyn_of_uint64 负责规范化：装得下的一律还是 INT）。
+   两个函数的错误文本必须与 prelude 的 $js_bigint_as_*_n 逐字相同。 */
+static int64_t want_bits(omni_dyn bits, const char *who) {
+  double n = want_real(bits, who);
+  if (!(n >= 0 && n <= 64 && n == trunc(n))) {
+    omni_errorf("%s: width must be an integer in 0..64, got %g", who, n);
+  }
+  return (int64_t)n;
+}
+
+static uint64_t want_int_bits(omni_dyn v, const char *who) {
+  if (v.tag != OMNI_DYN_INT && v.tag != OMNI_DYN_UINT) {
+    omni_errorf("%s expects a bigint, found %s", who, omni_dyn_tag_name(v.tag));
+  }
+  return (uint64_t)v.u.i;
+}
+
 omni_dyn omni_js_bigint_as_int_n(omni_dyn bits, omni_dyn v) {
-  double n = want_real(bits, "BigInt.asIntN");
-  if (n != 64.0) omni_errorf("only BigInt.asIntN(64, ..) is supported, got %g", n);
-  if (v.tag != OMNI_DYN_INT) omni_errorf("BigInt.asIntN expects a bigint, found %s", omni_dyn_tag_name(v.tag));
-  return v;
+  int64_t w = want_bits(bits, "BigInt.asIntN");
+  uint64_t x = want_int_bits(v, "BigInt.asIntN");
+  if (w == 0) return omni_dyn_of_int(0);
+  if (w == 64) return omni_dyn_of_int((int64_t)x);
+  x &= (~(uint64_t)0) >> (64 - w);
+  /* 低 w 位的最高位是 1 就把上面全填 1（符号扩展），这与 asIntN 的定义一致 */
+  if (x & ((uint64_t)1 << (w - 1))) x |= ~(((uint64_t)1 << w) - 1);
+  return omni_dyn_of_int((int64_t)x);
+}
+
+omni_dyn omni_js_bigint_as_uint_n(omni_dyn bits, omni_dyn v) {
+  int64_t w = want_bits(bits, "BigInt.asUintN");
+  uint64_t x = want_int_bits(v, "BigInt.asUintN");
+  if (w == 0) return omni_dyn_of_int(0);
+  if (w == 64) return omni_dyn_of_uint64(x);
+  return omni_dyn_of_uint64(x & ((~(uint64_t)0) >> (64 - w)));
 }
 
 omni_dyn omni_js_math(int op, omni_dyn a, omni_dyn b) {

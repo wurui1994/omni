@@ -14,7 +14,7 @@ bool omni_js_truthy(omni_dyn v) {
   switch (v.tag) {
     case OMNI_DYN_UNDEF: case OMNI_DYN_NULL: return false;
     case OMNI_DYN_BOOL: return v.u.b;
-    case OMNI_DYN_INT: return v.u.i != 0;
+    case OMNI_DYN_INT: case OMNI_DYN_UINT: return v.u.i != 0;
     /* NaN 与 ±0 都是假 */
     case OMNI_DYN_REAL: return !(v.u.r == 0.0 || isnan(v.u.r));
     case OMNI_DYN_STR16: return v.u.s16.len != 0;
@@ -28,8 +28,9 @@ omni_dyn omni_js_typeof(omni_dyn v) {
     case OMNI_DYN_UNDEF: n = "undefined"; break;
     case OMNI_DYN_NULL: n = "object"; break;
     case OMNI_DYN_BOOL: n = "boolean"; break;
-    /* int 是 BigInt 的映像（ADR-0011 第 5 节），所以 typeof 是 bigint */
-    case OMNI_DYN_INT: n = "bigint"; break;
+    /* int 是 BigInt 的映像（ADR-0011 第 5 节），所以 typeof 是 bigint。
+       UINT 在 JS 那边也就是个 BigInt，同一支。 */
+    case OMNI_DYN_INT: case OMNI_DYN_UINT: n = "bigint"; break;
     case OMNI_DYN_REAL: n = "number"; break;
     case OMNI_DYN_STR16: n = "string"; break;
     case OMNI_DYN_FN: n = "function"; break;
@@ -48,7 +49,7 @@ omni_dyn omni_js_type_tag(omni_dyn v) {
     case OMNI_DYN_UNDEF: n = "undefined"; break;
     case OMNI_DYN_NULL: n = "null"; break;
     case OMNI_DYN_BOOL: n = "bool"; break;
-    case OMNI_DYN_INT: n = "int"; break;
+    case OMNI_DYN_INT: case OMNI_DYN_UINT: n = "int"; break;
     case OMNI_DYN_REAL: n = "real"; break;
     case OMNI_DYN_STRING: case OMNI_DYN_STR16: n = "string"; break;
     case OMNI_DYN_LIST: n = "list"; break;
@@ -66,6 +67,7 @@ omni_dyn omni_js_type_tag(omni_dyn v) {
 static double want_fmt_num(omni_dyn v, const char *who) {
   if (v.tag == OMNI_DYN_REAL) return v.u.r;
   if (v.tag == OMNI_DYN_INT) return (double)v.u.i;
+  if (v.tag == OMNI_DYN_UINT) return (double)omni_dyn_u64(v);
   omni_errorf("%s expects a number, found %s", who, omni_dyn_tag_name(v.tag));
   return 0.0;
 }
@@ -181,6 +183,9 @@ static omni_s16 to_s16(omni_dyn v) {
     case OMNI_DYN_NULL: return omni_s16_of_utf8(omni_str_new("null", 4));
     case OMNI_DYN_BOOL: return omni_s16_of_utf8(omni_str_bool(v.u.b));
     case OMNI_DYN_INT: return omni_s16_of_utf8(omni_str_int(v.u.i));
+    /* UINT 那一格印的是**无符号**的十进制：JS 那边它是一个真的大 BigInt */
+    case OMNI_DYN_UINT:
+      return omni_s16_of_utf8(omni_str_fmt("%llu", (unsigned long long)omni_dyn_u64(v)));
     case OMNI_DYN_REAL: return omni_s16_of_utf8(js_num_str(v.u.r));
     case OMNI_DYN_STR16: return v.u.s16;
     default:
@@ -200,8 +205,28 @@ void omni_js_println(omni_dyn v) {
 
 /* ---------------------------------------------------------------- 算术 */
 
-static bool is_num(omni_dyn v) { return v.tag == OMNI_DYN_INT || v.tag == OMNI_DYN_REAL; }
-static double as_f64(omni_dyn v) { return v.tag == OMNI_DYN_INT ? (double)v.u.i : v.u.r; }
+/* int 那一族有两个标签：INT 与 UINT（无符号 64 位那一半，见 omni.h）。
+   "是不是 bigint" 一律问 is_int，不要直接比 OMNI_DYN_INT —— 漏一处就是 JS 侧收下、
+   C 侧报错的分叉。 */
+static bool is_int(omni_dyn v) { return v.tag == OMNI_DYN_INT || v.tag == OMNI_DYN_UINT; }
+static bool is_num(omni_dyn v) { return is_int(v) || v.tag == OMNI_DYN_REAL; }
+static double as_f64(omni_dyn v) {
+  if (v.tag == OMNI_DYN_INT) return (double)v.u.i;
+  if (v.tag == OMNI_DYN_UINT) return (double)omni_dyn_u64(v);
+  return v.u.r;
+}
+
+/* 两个 bigint 的三态比较，**精确**：转 double 会在 2^53 以上丢位，而 JS 那边
+   BigInt 的比较是精确的 —— 两侧都得精确，否则大数上直接分叉。
+   INT 与 UINT 的取值区间不交（UINT 一律 >= 2^63），所以混标签只看谁是 UINT。 */
+static int int_cmp(omni_dyn a, omni_dyn b) {
+  if (a.tag == OMNI_DYN_UINT || b.tag == OMNI_DYN_UINT) {
+    if (a.tag != OMNI_DYN_UINT) return -1;
+    if (b.tag != OMNI_DYN_UINT) return 1;
+    return omni_dyn_u64(a) < omni_dyn_u64(b) ? -1 : (omni_dyn_u64(a) > omni_dyn_u64(b) ? 1 : 0);
+  }
+  return a.u.i < b.u.i ? -1 : (a.u.i > b.u.i ? 1 : 0);
+}
 
 static void want_num(int op, omni_dyn a, omni_dyn b) {
   if (!is_num(a) || !is_num(b)) {
@@ -209,8 +234,9 @@ static void want_num(int op, omni_dyn a, omni_dyn b) {
                 omni_dyn_tag_name(a.tag), omni_dyn_tag_name(b.tag));
   }
   /* JS 里 BigInt 与 Number 混用是 TypeError；这条一定要保留，否则源码里 int/real
-     混错的地方会被悄悄接受，而 JS 宿主上会抛异常 —— 两个后端就分叉了 */
-  if (a.tag != b.tag) {
+     混错的地方会被悄悄接受，而 JS 宿主上会抛异常 —— 两个后端就分叉了。
+     INT 与 UINT 都算 bigint 那一边，所以问的是 is_int 而不是 tag 相等。 */
+  if (is_int(a) != is_int(b)) {
     omni_errorf("cannot mix bigint and number in '%c'", op);
   }
 }
@@ -220,7 +246,7 @@ omni_dyn omni_js_add(omni_dyn a, omni_dyn b) {
     return omni_dyn_of_s16(omni_s16_cat(to_s16(a), to_s16(b)));
   }
   want_num('+', a, b);
-  if (a.tag == OMNI_DYN_INT) return omni_dyn_of_int(omni_add(a.u.i, b.u.i));
+  if (is_int(a)) return omni_dyn_of_int(omni_add(a.u.i, b.u.i));
   return omni_dyn_of_real(a.u.r + b.u.r);
 }
 
@@ -241,7 +267,17 @@ static int64_t js_ipow(int64_t a, int64_t b) {
 
 omni_dyn omni_js_arith(int op, omni_dyn a, omni_dyn b) {
   want_num(op, a, b);
-  if (a.tag == OMNI_DYN_INT) {
+  if (is_int(a)) {
+    /* 除与取余要看**符号性**：别的运算（- * p）都是回卷的，回卷是模 2^64 的环同态，
+       所以在位模式上算一遍就够，有符号那一支的代码逐位给出同一个答案。
+       量到的用法只有 u/ 与 u%（interp/builtin.js 的 udiv/umod）—— 这两个在
+       [0, 2^64) 里不会溢出，所以结果照 omni_dyn_of_uint64 规范化回来。 */
+    if (a.tag == OMNI_DYN_UINT || b.tag == OMNI_DYN_UINT) {
+      uint64_t x = omni_dyn_u64(a), y = omni_dyn_u64(b);
+      if ((op == '/' || op == '%') && y == 0) omni_error("division by zero");
+      if (op == '/') return omni_dyn_of_uint64(x / y);
+      if (op == '%') return omni_dyn_of_uint64(x % y);
+    }
     switch (op) {
       case '-': return omni_dyn_of_int(omni_sub(a.u.i, b.u.i));
       case '*': return omni_dyn_of_int(omni_mul(a.u.i, b.u.i));
@@ -263,7 +299,8 @@ omni_dyn omni_js_arith(int op, omni_dyn a, omni_dyn b) {
 }
 
 omni_dyn omni_js_neg(omni_dyn a) {
-  if (a.tag == OMNI_DYN_INT) return omni_dyn_of_int(omni_neg(a.u.i));
+  /* $W(-a)：UINT 走同一支 —— 回卷之后位模式与有符号那一支相同 */
+  if (is_int(a)) return omni_dyn_of_int(omni_neg(a.u.i));
   if (a.tag == OMNI_DYN_REAL) return omni_dyn_of_real(-a.u.r);
   omni_errorf("cannot negate %s", omni_dyn_tag_name(a.tag));
   return omni_dyn_null();
@@ -272,9 +309,24 @@ omni_dyn omni_js_neg(omni_dyn a) {
 /* 位运算只对 int（= BigInt）成立。JS 的 Number 位运算会先截成 int32，
    编译器源码不用那条路径，所以这里直接拒绝 real —— 宁可报错也不要静默截断。 */
 omni_dyn omni_js_bitop(int op, omni_dyn a, omni_dyn b) {
-  if (a.tag != OMNI_DYN_INT || b.tag != OMNI_DYN_INT) {
+  if (!is_int(a) || !is_int(b)) {
     omni_errorf("bitwise '%c' requires bigint operands, found %s and %s", op,
                 omni_dyn_tag_name(a.tag), omni_dyn_tag_name(b.tag));
+  }
+  /* 有 UINT 参与时，& | ^ 的结果可能还在 [2^63, 2^64) 里（JS 侧这三个不回卷），
+     所以走规范化构造；>> 在 JS 里对非负的 BigInt 是逻辑右移，这里也必须逻辑移。
+     << 照旧：它在 JS 侧带 $W，回卷之后位模式与有符号那一支相同。 */
+  if (a.tag == OMNI_DYN_UINT || b.tag == OMNI_DYN_UINT) {
+    uint64_t x = omni_dyn_u64(a), y = omni_dyn_u64(b);
+    switch (op) {
+      case '&': return omni_dyn_of_uint64(x & y);
+      case '|': return omni_dyn_of_uint64(x | y);
+      case '^': return omni_dyn_of_uint64(x ^ y);
+      case '>':
+        if (a.tag == OMNI_DYN_UINT) return omni_dyn_of_uint64(x >> (unsigned)(y & 63));
+        break;
+      default: break;
+    }
   }
   switch (op) {
     case '&': return omni_dyn_of_int(a.u.i & b.u.i);
@@ -289,9 +341,10 @@ omni_dyn omni_js_bitop(int op, omni_dyn a, omni_dyn b) {
 
 /* 一元 ~ 单独一个 op：ABI 里所有 op 的实参个数是定的，不做可变长 */
 omni_dyn omni_js_bitnot(omni_dyn a) {
-  if (a.tag != OMNI_DYN_INT) {
+  if (!is_int(a)) {
     omni_errorf("bitwise '~' requires a bigint operand, found %s", omni_dyn_tag_name(a.tag));
   }
+  /* $W(~a)：UINT 走同一支，回卷之后位模式相同 */
   return omni_dyn_of_int(~a.u.i);
 }
 
@@ -340,10 +393,16 @@ bool omni_js_cmp(int op, omni_dyn a, omni_dyn b) {
     if (!is_num(a) || !is_num(b)) {
       omni_errorf("cannot compare %s with %s", omni_dyn_tag_name(a.tag), omni_dyn_tag_name(b.tag));
     }
-    double x = as_f64(a), y = as_f64(b);
-    /* NaN 参与的关系比较全为假，这一条不能靠 c 的三态表达 */
-    if (isnan(x) || isnan(y)) return false;
-    c = x < y ? -1 : (x > y ? 1 : 0);
+    /* 两个 bigint 之间精确比（转 double 在 2^53 以上丢位，JS 那边是精确的）；
+       只要有一边是 real 就照 JS 的口径转 double 再比 */
+    if (is_int(a) && is_int(b)) {
+      c = int_cmp(a, b);
+    } else {
+      double x = as_f64(a), y = as_f64(b);
+      /* NaN 参与的关系比较全为假，这一条不能靠 c 的三态表达 */
+      if (isnan(x) || isnan(y)) return false;
+      c = x < y ? -1 : (x > y ? 1 : 0);
+    }
   }
   switch (op) {
     case '<': return c < 0;
@@ -363,15 +422,16 @@ bool omni_js_eq(bool strict, omni_dyn a, omni_dyn b) {
     bool bn = b.tag == OMNI_DYN_NULL || b.tag == OMNI_DYN_UNDEF;
     if (an || bn) return an && bn;
     if (is_num(a) && is_num(b)) {
-      double x = as_f64(a), y = as_f64(b);
-      return x == y;
+      /* 两个 bigint 精确比，其余（有 real 参与）照 JS 转 double */
+      if (is_int(a) && is_int(b)) return int_cmp(a, b) == 0;
+      return as_f64(a) == as_f64(b);
     }
   }
   if (a.tag != b.tag) return false;
   switch (a.tag) {
     case OMNI_DYN_UNDEF: case OMNI_DYN_NULL: return true;
     case OMNI_DYN_BOOL: return a.u.b == b.u.b;
-    case OMNI_DYN_INT: return a.u.i == b.u.i;
+    case OMNI_DYN_INT: case OMNI_DYN_UINT: return a.u.i == b.u.i;
     /* === 下 NaN 不等于自身、+0 等于 -0（这和 dict 键用的 SameValueZero 不同） */
     case OMNI_DYN_REAL: return a.u.r == b.u.r;
     case OMNI_DYN_STR16: return omni_s16_eq(a.u.s16, b.u.s16);

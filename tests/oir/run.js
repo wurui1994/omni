@@ -356,6 +356,46 @@ c('Number/undef', js('js_num_of', [undef]), 'Number(undefined)');
 c('BigInt/real', js('js_bigint_of', [real(7)]), 'BigInt(7)');
 c('BigInt/str', js('js_bigint_of', [str('-9007199254740993')]), 'BigInt("-9007199254740993")');
 c('asIntN', js('js_bigint_as_int_n', [real(64), int(5)]), 'BigInt.asIntN(64, 5n)');
+// 窄宽度的 asIntN（枚举成员的编译期回卷用得到：frontend-jnc 的 wrapVal）
+const AI = (w, v) => js('js_bigint_as_int_n', [real(w), int(v)]);
+const AU = (w, v) => js('js_bigint_as_uint_n', [real(w), int(v)]);
+[[8, 255n], [8, 128n], [8, -1n], [8, 127n], [16, 65535n], [16, -32768n],
+  [32, 4294967295n], [32, -1n], [64, -1n], [1, 1n], [1, -1n], [0, 7n],
+  [63, -1n], [63, 2n ** 62n]].forEach(([w, v]) => {
+  c(`asIntN/${w}/${v}`, AI(w, v), `BigInt.asIntN(${w}, ${v}n)`);
+});
+// asUintN：宽度 64 且原值为负时结果落在 [2^63, 2^64) —— C 侧那一格是 OMNI_DYN_UINT。
+// 打印、比较、除、取余、右移、再 asIntN 回来，每一格都要与 node 逐字相同。
+[[8, -1n], [8, 255n], [16, -1n], [32, -1n], [63, -1n], [64, -1n], [64, 5n],
+  [64, -2n], [64, 2n ** 63n * -1n], [0, 7n], [1, -1n]].forEach(([w, v]) => {
+  c(`asUintN/${w}/${v}`, AU(w, v), `BigInt.asUintN(${w}, ${v}n)`);
+});
+// U(a)/U(b) 与 U(a)%U(b)：interp/builtin.js 的 udiv/umod 就是这一串
+c('asUintN/udiv', js('js_bigint_as_int_n',
+  [real(64), js('js_arith', [AU(64, -1n), AU(64, 3n)], { op: '/' })]),
+  'BigInt.asIntN(64, BigInt.asUintN(64, -1n) / BigInt.asUintN(64, 3n))');
+c('asUintN/umod', js('js_bigint_as_int_n',
+  [real(64), js('js_arith', [AU(64, -1n), AU(64, 7n)], { op: '%' })]),
+  'BigInt.asIntN(64, BigInt.asUintN(64, -1n) % BigInt.asUintN(64, 7n))');
+c('asUintN/ucmp', jsBool('js_cmp', [AU(64, 5n), AU(64, -1n)], { op: '<' }),
+  'BigInt.asUintN(64, 5n) < BigInt.asUintN(64, -1n)');
+c('asUintN/ucmp-rev', jsBool('js_cmp', [AU(64, -1n), AU(64, 5n)], { op: '<' }),
+  'BigInt.asUintN(64, -1n) < BigInt.asUintN(64, 5n)');
+c('asUintN/ushr', js('js_bitop', [AU(64, -1n), int(60)], { op: '>' }),
+  'BigInt.asUintN(64, -1n) >> 60n');
+c('asUintN/uand', js('js_bitop', [AU(64, -1n), AU(64, -2n)], { op: '&' }),
+  'BigInt.asUintN(64, -1n) & BigInt.asUintN(64, -2n)');
+c('asUintN/ueq', jsBool('js_eq', [AU(64, -1n), AU(64, -1n)], { strict: true }),
+  'BigInt.asUintN(64, -1n) === BigInt.asUintN(64, -1n)');
+c('asUintN/uneq-int', jsBool('js_eq', [AU(64, -1n), int(-1n)], { strict: true }),
+  'BigInt.asUintN(64, -1n) === -1n');
+c('asUintN/typeof', js('js_typeof', [AU(64, -1n)]), 'typeof BigInt.asUintN(64, -1n)');
+// 大 int 之间必须精确比：Number() 在 2^53 以上丢位，从前这两格是错的
+c('cmp/int-exact', jsBool('js_cmp', [int(2n ** 62n - 1n), int(2n ** 62n)], { op: '<' }),
+  '(2n**62n - 1n) < 2n**62n');
+c('cmp/int-exact-eq', jsBool('js_eq', [int(2n ** 62n - 1n), int(2n ** 62n)], { strict: false }),
+  '(2n**62n - 1n) == 2n**62n');
+
 // `**`（op 'p'）。int 那一支与 `*` 一样**回卷到 64 位**，所以这里只摆装得下的值：
 // 溢出之后与 node 的无界 BigInt 就不同了，那是 ADR-0005 的值语义，对 `*` 也一样。
 c('pow/int', js('js_arith', [int(2), int(10)], { op: 'p' }), '2n ** 10n');

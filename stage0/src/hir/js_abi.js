@@ -146,6 +146,11 @@ export const JS_ABI = {
   js_num_of: { js: '$js_num_of', c: 'omni_js_num_of', arity: 1 },
   js_bigint_of: { js: '$js_bigint_of', c: 'omni_js_bigint_of', arity: 1 },
   js_bigint_as_int_n: { js: '$js_bigint_as_int_n', c: 'omni_js_bigint_as_int_n', arity: 2 },
+  // asUintN 的结果可能落在 [2^63, 2^64)：JS 那边是个普通 BigInt，C 那边装不进
+  // int64_t，所以值域里多一格无符号 64 位（omni.h 的 OMNI_DYN_UINT）。
+  // 量到的用法只有 interp/builtin.js 的 udiv/umod/u< 与 u>>，那几个在 [0, 2^64)
+  // 里都不溢出；别的运算碰上这一格会响 —— 那是画出来的边界，不是悄悄算错。
+  js_bigint_as_uint_n: { js: '$js_bigint_as_uint_n', c: 'omni_js_bigint_as_uint_n', arity: 2 },
   js_num_to_precision: { js: '$js_num_to_precision', c: 'omni_js_num_to_precision', arity: 2 },
   js_num_to_string: { js: '$js_num_to_string', c: 'omni_js_num_to_string', arity: 2 },
   // op: 'a' abs / 't' trunc / 'f' floor / 'c' ceil / 'M' max / 'm' min
