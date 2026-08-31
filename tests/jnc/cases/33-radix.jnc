@@ -1,0 +1,38 @@
+// 整数字面量的进制（ADR-0016 第三十四刀）。以前打头那个 `0` 是**被忽略**的 —— `0755` 按十进制
+// 读成 755，而 jancy 读它是 493。这不是"还没长出来"，是**给错答案**，所以这一刀是修错。
+//
+// 出处是 jancy 的词法机（jnc_ct_Parser/jnc_ct_Lexer.rl:429-434），六条规则连基数一起写着：
+//   '0' oct+        -> createIntegerToken(8)         // 打头 0 的八进制
+//   dec+            -> createIntegerToken(10)
+//   '0' [xX] hex+   -> createIntegerToken(16, 2)
+//   '0' [oO] oct+   -> createIntegerToken(8, 2)
+//   '0' [bB] bin+   -> createIntegerToken(2, 2)
+//   '0' [nNdD] dec+ -> createIntegerToken(10, 2)     // 显式写成十进制
+// 那个 `left` 参数（第三个）是"从第几个字符开始读"：所以 `'0' oct+` 是**整串**按 8 读，
+// `0x` 那几条是跳过两个前缀字符再读。
+//
+// 语料里真有打头 0 的八进制：test/ioninja/plugins/SerialMon/SerialMonProcessor_lnx.jnc:44
+// 的 `CBAUD = 0010017`，是 Linux termios 那套八进制掩码（0010017 == 4111）。
+//
+// **两处与 C 不同**，这一格照 jancy，不照 C：
+//   - `08` 在 C 里是错（八进制里没有 8）。jancy 那边 `'0' oct+` 匹配不上它，ragel 的扫描器
+//     取**更长**的那个匹配，也就是 `dec+`，于是 `08` 是十进制 8。
+//   - `0778` 同理：`'0' oct+` 只能吃到 `077`（三个字符），`dec+` 吃满四个，更长的赢 ->
+//     十进制 778。
+// 所以这两行没有 C 孪生可对，它们的出处就是上面那条 ragel 语义。剩下几行 C 是一致的
+// （`cc -O0` 上 `0755` 是 493、`010` 是 8、`0` 是 0），量过。
+//
+// 还有一格不在这里：`0d"127.0.0.1"` 那种**十进制串**字面量（JLinkRttSession.jnc:201）是
+// LITERAL 不是 INTEGER，语法里早就分开了 —— 前缀之后要有数字才轮到这一条，`0d"` 抢不走。
+
+int main() {
+    printf("a=%d %d %d\n", 0755, 010, 0);
+    printf("b=%d %d\n", 08, 0778);
+    printf("c=%d %d\n", 0n42, 0D42);
+    printf("d=%d %d %d\n", 0x1f, 0o17, 0b101);
+    printf("e=%d\n", 0010017);
+    int mask = 0644;
+    mask = mask | 0100;
+    printf("f=%d %o\n", mask, mask);
+    return 0;
+}

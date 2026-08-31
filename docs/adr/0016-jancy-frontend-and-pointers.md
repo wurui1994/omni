@@ -1667,11 +1667,56 @@ u64 装不进去：`4000000000 * 4` 那种数在方言里只能以负数的样�
 两边都改成先声明 `unsigned int m = 4294967295;` 再比，语义相同、出处仍在。那条后缀是**新记下的
 一条边界**，还没有本体。
 
+> **第三十四刀更正**：量了 jancy 的词法机之后这条"边界"作废 —— jancy 的整数字面量规则里
+> **根本没有后缀**（`jnc_ct_Lexer.rl:429-434` 六条，全是纯数字加前缀）。`4294967295u` 在 jancy
+> 里会被拆成 `4294967295` 与标识符 `u` 两个 token。所以后缀不是"还没长出来"，是**不欠 jancy 的**，
+> 从名单里划掉。同一次量出来的真问题在下一刀。
+
 **跑过的轴**：`tests/jnc`（49/0，新增 `cases/32-unsigned` 与 `bad/unsigned-long`，删掉落地了的
 `bad/unsigned`）。
 **没跑的**：`tests/sexpr`、`tests/glr`、`tests/asy` —— 这一刀只动了 `frontend-jnc/lower.js`
 （加 `tests/jnc/run.js` 的头注释），方言、MIR、四个后端与运行时一个字都没改；自举、`tests/jit`、
 `tests/mir`、`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
+
+### 第三十四刀：字面量的进制 —— 这一刀不是长功能，是修一个**错答案**
+
+上一刀写孪生程序时顺手量了 jancy 的词法机，撞出一件比后缀严重得多的事：**打头那个 `0` 我们一直
+在忽略**。`0755` 我们读成十进制 755，jancy 读它是 493。
+
+`jnc_ct_Parser/jnc_ct_Lexer.rl:429-434` 六条规则连基数一起写着，`createIntegerToken(radix,
+left)` 的 `left` 是"从第几个字符开始读"：
+
+- `'0' oct+` → 基数 8、`left` 是 0，也就是**整串**按八进制读
+- `dec+` → 基数 10
+- `'0' [xX] hex+` / `'0' [oO] oct+` / `'0' [bB] bin+` → 16 / 8 / 2，`left` 是 2
+- `'0' [nNdD] dec+` → 基数 10，`left` 是 2（显式写成十进制的那一格）
+
+我们只有后四条里的三条。前两条撞在一起时**是错的**，而且是**静默**的错。
+
+**语料里真这么写**：`test/ioninja/plugins/SerialMon/SerialMonProcessor_lnx.jnc:44` 的
+`CBAUD = 0010017` —— Linux termios 那套八进制掩码，值是 4111，我们以前给 10017。这一条不是
+造出来的极端例子。
+
+**两处照 jancy、不照 C**。`08` 与 `0778` 在 C 里是错（八进制里没有 8 / 9）；在 jancy 里
+`'0' oct+` 匹配不满整个 token，ragel 的扫描器取**更长**的那个匹配，于是落到 `dec+` 上 ——
+`08` 是 10，`0778` 是 778。这两行没有 C 孪生可对，出处就是那条 ragel 语义本身。剩下几行 C 一致
+（`0755` → 493、`010` → 8、`0010017` → 4111、`0644 | 0100` → 484 / `%o` 744），量过。
+
+**`0n` / `0d` 那一格要动语法**：以前 `0n42` 连 token 都成不了（报 `unexpected ID 'n42'`）。
+`jnc.grammar` 里加一条 `(token INTEGER "0" (or "n" "N" "d" "D") (+ digit))`，放在
+`0d"…"` 那条 LITERAL 之后 —— 新规则要求前缀之后至少一位数字，所以 `0d"127.0.0.1"`
+（JLinkRttSession.jnc:201）抢不走。
+
+**顺手撞见但不在这一刀里**：`|=` 这一族位运算复合赋值前端还不收（`mask |= 0100` 当场报"复合赋值
+'|='"），这条早就在名单上，本例改写成 `mask = mask | 0100`。
+
+**跑过的轴**：`tests/jnc`（50/0，新增 `cases/33-radix`）、`tests/glr`（20/0）、jancy 语料整份重扫
+（这一刀动了 `jnc.grammar`，所以要重量一遍）：参考树里 662 份 `.jnc` 有 634 份唯一成树，与改之前
+**同一批** 28 份不过 —— 拿 `git show HEAD:…/jnc.grammar` 把那 28 份逐个又跑了一遍，一份都没变，
+所以这条新 token 没有回归。那 28 份是早就在名单上的两族：`thin` 当函数修饰符
+（io_SocketAddress.jnc:121）与 `stdt_*` 那一整套模板。
+**没跑的**：`tests/sexpr`、`tests/asy` —— 方言、MIR、四个后端与运行时一个字都没改；自举、
+`tests/jit`、`tests/mir`、`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
 
 ## 后果与代价
 

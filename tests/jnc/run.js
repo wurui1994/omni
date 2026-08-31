@@ -26,10 +26,11 @@
 //      cases/16-ptrptr.jnc；`new T { … }` 是第二十五刀、`static` 的局部量是第二十六刀、
 //      整数与 `%s` 上的精度加 `%*d` 是第二十七刀、`%.*f` 是第二十八刀、`+` / 空格 / `#`
 //      三个标志是第二十九刀、`%e` / `%E` 是第三十刀、`%g` / `%G` 是第三十一刀、`%u` 是
-//      第三十二刀、无符号的 8 / 16 / 32 位是第三十三刀，在 cases/24-new-curly.jnc、
-//      cases/25-static-local.jnc、cases/26-printf-prec.jnc、cases/27-printf-star-prec.jnc、
-//      cases/28-printf-flags.jnc、cases/29-printf-sci.jnc、cases/30-printf-gen.jnc、
-//      cases/31-printf-u.jnc、cases/32-unsigned.jnc。）
+//      第三十二刀、无符号的 8 / 16 / 32 位是第三十三刀、字面量的进制是第三十四刀，在
+//      cases/24-new-curly.jnc、cases/25-static-local.jnc、cases/26-printf-prec.jnc、
+//      cases/27-printf-star-prec.jnc、cases/28-printf-flags.jnc、cases/29-printf-sci.jnc、
+//      cases/30-printf-gen.jnc、cases/31-printf-u.jnc、cases/32-unsigned.jnc、
+//      cases/33-radix.jnc。）
 //
 //      bad/ 里有**三种**拒，别混：一种是"还没长出来"（做掉就落地）；一种是**这一层不做**
 //      （printf-conv-p：`%p` 要观测裸地址，而五条腿上那不是同一个数）；一种是**C 自己的

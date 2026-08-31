@@ -2391,6 +2391,12 @@ class JncLower {
     if (/^0[bB][01]+$/.test(s)) return this.intLit(n, BigInt(`0b${s.slice(2)}`));
     if (/^0[oO][0-7]+$/.test(s)) return this.intLit(n, BigInt(`0o${s.slice(2)}`));
     if (/^0[oO][0-9]+$/.test(s)) return this.err(n, `八进制字面量里有 8 或 9：'${s}'`);
+    if (/^0[nNdD][0-9]+$/.test(s)) return this.intLit(n, BigInt(s.slice(2)));
+    // 打头一个 `0` 再跟一串八进制数字**就是八进制**（Lexer.rl:429 `'0' oct+`，基数 8）。
+    // 语料里真这么写：SerialMonProcessor_lnx.jnc:44 的 `CBAUD = 0010017` 是 termios 那套
+    // 八进制掩码。带 8 或 9 的（`0778` / `08`）落不到那条规则上 —— ragel 取更长的匹配，也就是
+    // 下面那条 `dec+`，于是它们是**十进制**（这一格与 C 不同，C 那边 `08` 是错）。
+    if (/^0[0-7]+$/.test(s)) return this.intLit(n, BigInt(`0o${s.slice(1)}`));
     if (/^[0-9]+$/.test(s)) return this.intLit(n, BigInt(s));
     // FP 那两条词法规则出来的形状（`1.5` / `1.` / `1e3` / `1.5e-3`）方言的 realLit 都收
     if (/^[0-9]+\.?[0-9]*([eE][+-]?[0-9]+)?$/.test(s)) return { code: `(real ${s})`, type: T_REAL };

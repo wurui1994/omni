@@ -100,6 +100,9 @@
     (token INTEGER "0" (or "x" "X") (+ hex))
     (token INTEGER "0" (or "b" "B") (+ (set "01")))
     (token INTEGER "0" (or "o" "O") (+ digit))
+    ;; `0n42` / `0d42` —— 显式写成十进制的那一格（Lexer.rl:434）。放在 `0d"…"` 那条
+    ;; LITERAL 之后：前缀之后要求至少一位数字，所以两条不会抢。
+    (token INTEGER "0" (or "n" "N" "d" "D") (+ digit))
     (token INTEGER (+ digit))
     ;; `r"\d+"` —— 原样字面量（反斜杠不转义），正则 case 用的就是它（70_RegexSwitch.jnc:44）
     (token LITERAL "r" "\"" (* (not "\"")) "\"")
