@@ -419,6 +419,7 @@ class JncLower {
     this.retTy = T_VOID;       // 当前函数的返回类型
     this.forStep = null;       // 当前所在 for 的步进（非 null 时 continue 要拦，见 stmt）
     this.swGuard = false;      // 与最近那个真循环之间隔着 switch 摊出来的合成循环（第三十六刀）
+    this.aliases = new Map();  // typedef 起的类型名 -> 解出来的那一格（第三十八刀）
     this.tmp = 0;              // 生成名字的计数（do-while 的那格标志）
     this.lifted = new Set();   // 这个函数里被取过地址的局部量名（ADR-0016 第九刀）
     this.globals = new Map();  // 模块级变量：名字 -> 类型（第十一刀）
@@ -749,6 +750,11 @@ class JncLower {
     for (const it of items) {
       if (isList(it) && head(it) === 'type-decl') this.typeName(it.items[1]);
     }
+    // typedef 排在"结构体的名字坐下"之后、"结构体的体解出来"之前（第三十八刀）：这样别名可以
+    // 引结构体的名字，结构体的字段也可以用别名。
+    for (const it of items) {
+      if (isList(it) && head(it) === 'typedef') this.typedefDecl(it);
+    }
     for (const it of items) {
       if (isList(it) && head(it) === 'type-decl') this.typeDecl(it.items[1]);
     }
@@ -803,7 +809,37 @@ class JncLower {
     const h = head(item);
     if (h === 'empty-stmt') return null;            // 光一个分号
     if (h === 'fn-def') return this.fnDef(item);
+    if (h === 'typedef') return null;               // 已经在前面那一遍收过了（第三十八刀）
     return this.nope(item, `顶层的 '${h}'`);
+  }
+
+  /**
+   * `typedef int myint;`（第三十八刀）。jancy 的 `typedef` 是个**存储类**
+   * （DeclarationSpecifier.llk:83 那条动作就是 `$.m_storageKind = StorageKind_Typedef`），
+   * 所以它后面跟的是普通的声明符串 —— `typedef int* pint, box[3];` 一次起两个名字，
+   * 而指针与数组那几层照常由声明符带。
+   *
+   * 别名**不是新类型**：`myint` 与 `int` 同型，因为存进表里的就是解出来的那一格，
+   * `sameTy` 看到的两边一模一样。
+   */
+  typedefDecl(item) {
+    const sp = this.specs(item.items[1]);
+    if (sp === null) return null;
+    for (const d of this.flat(item.items[2])) {
+      if (isList(d) && (head(d) === 'init' || head(d) === 'ref-init')) {
+        this.err(d, 'typedef 上不能写初值');
+        continue;
+      }
+      const info = this.declarator(d, sp);
+      if (info === null) continue;
+      if (info.formals !== null) { this.nope(d, '函数类型的 typedef'); continue; }
+      if (INT_ALIASES.has(info.name) || this.structs.has(info.name) || this.aliases.has(info.name)) {
+        this.err(d, `类型名 '${info.name}' 重复定义`);
+        continue;
+      }
+      this.aliases.set(info.name, info.type);
+    }
+    return null;
   }
 
   /**
@@ -1056,6 +1092,12 @@ class JncLower {
       else if (nm === 'size_t') base = T_I64;           // jancy 的语料里到处是它
       else if (nm === 'string_t') base = T_STR;
       else if (this.structs.has(nm)) base = { k: 'struct', name: nm };
+      else if (this.aliases.has(nm)) {
+        // typedef 起的名字（第三十八刀）。别名里可能已经带着指针或数组那几层，所以直接拿
+        // 解出来的那一格当 base —— 声明符后面再补的层照常叠上去（`pint* q` 是 `int**`）。
+        if (uns) { this.err(ts, `'${nm}' 是 typedef 起的名字，上面写不了 unsigned`); return null; }
+        base = this.aliases.get(nm);
+      }
       else { this.err(ts, `没有这个类型：'${nm}'`); return null; }
     }
     // 64 位无符号在这一刀之外：方言那一格的规范形是**有符号** 64 位，`uint64` 的值域

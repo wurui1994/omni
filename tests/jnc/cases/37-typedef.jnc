@@ -1,0 +1,57 @@
+// `typedef`（ADR-0016 第三十八刀）。以前顶层写它当场报「顶层的 'typedef'」。
+//
+// 出处：jancy 的 `typedef` 是个**存储类**，不是独立的语法 —— DeclarationSpecifier.llk:83
+// 那条动作就是 `$.m_storageKind = StorageKind_Typedef`。所以它后面跟的是普通的声明符串，
+// `typedef int* pint, box[3];` 一次能起两个名字，指针与数组那几层照常由声明符带。
+//
+// 别名**不是新类型**：表里存的就是解出来的那一格，所以 `myint` 与 `int` 同型 —— `g=` 那行
+// 把 `myint` 与 `int` 混着算，一次转换都没有。
+//
+// 收 typedef 的那一遍排在"结构体的名字坐下"之后、"结构体的体解出来"之前，于是两个方向都通：
+// 别名可以引结构体的名字（`typedef Node* pnode`），结构体的字段也可以用别名（`myint v`）。
+//
+// 期望输出的出处：一份 `cc -O0 -std=c99` 的孪生程序，7 行逐字节相同（五条腿也各自与它相同）。
+// 写法差别：C 那边结构体要写 `struct Node`；`char` 的符号性由实现定，所以 `byte8` 那条
+// typedef 在孪生里是 `signed char`。
+//
+// 边界：**函数类型的 typedef**（`typedef int F(int);`）当场拒 —— 那要先有函数指针那一格。
+
+typedef int myint;
+typedef int* pint;
+typedef char byte8;
+typedef int box[3];
+
+struct Node {
+    myint v;
+    Node* next;
+}
+
+typedef Node* pnode;
+
+myint twice(myint x) {
+    return x * 2;
+}
+
+int main() {
+    myint a = 21;
+    printf("a=%d %d\n", a, twice(a));
+    pint p = &a;
+    printf("b=%d\n", *p);
+    pint* pp = &p;
+    printf("c=%d\n", **pp);
+    byte8 c = 200;
+    printf("d=%d\n", c);
+    Node n;
+    n.v = 7;
+    pnode q = &n;
+    printf("e=%d\n", q.v);
+    box b;
+    b[0] = 4;
+    b[1] = 5;
+    b[2] = 6;
+    printf("f=%d %d %d\n", b[0], b[1], b[2]);
+    myint d = a;
+    int e = d + 1;
+    printf("g=%d\n", e);
+    return 0;
+}

@@ -1,0 +1,11 @@
+// 函数类型的 typedef（第三十八刀的边界）。`typedef int F(int);` 起的是个**函数类型**的名字，
+// 而这一层还没有函数指针那一格 —— 有了才谈得上拿它声明变量或形参。
+//
+// 语法那一半早就能过：jancy 的 typedef 是存储类（DeclarationSpecifier.llk:83），后面跟的
+// 声明符可以带函数后缀。所以拒在降级这一层，理由是"函数类型"，不是"语法不认"。
+typedef int F(int);
+
+int main() {
+    printf("%d\n", 0);
+    return 0;
+}

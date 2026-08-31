@@ -1857,6 +1857,36 @@ iterable`。派发那几条本来就是这个形状，改成 `(if C (do (set …
 （加 `tests/jnc/run.js` 的头注释），语法、方言、MIR、四个后端与运行时一个字都没改；自举、
 `tests/jit`、`tests/mir`、`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
 
+### 第三十八刀：`typedef` —— 它在 jancy 里是个**存储类**，不是独立的语法
+
+`DeclarationSpecifier.llk:83` 那条动作只有一句：`$.m_storageKind = StorageKind_Typedef`。
+知道这一点之后这一刀就小了 —— `typedef` 后面跟的是**普通的声明符串**，所以
+`typedef int* pint, box[3];` 一次起两个名字，指针与数组那几层照常由声明符带，不用另写一套。
+实现就是拿现成的 `specs` + `declarator` 走一遍，把 `名字 -> 解出来的那一格` 存进一张表，
+再在 `specs` 解类型名的地方多查一次。
+
+**别名不是新类型**。表里存的就是解出来的那一格，所以 `myint` 与 `int` 同型，`sameTy` 看到的
+两边一模一样 —— `g=` 那行把两者混着算，一次转换都没有。
+
+**那一遍排在哪儿要紧**：放在"结构体的名字坐下"（第十七刀那一遍）之后、"结构体的体解出来"
+之前。于是两个方向都通 —— 别名能引结构体的名字（`typedef Node* pnode`），结构体的字段也能
+用别名（`myint v`）。
+
+**边界**：函数类型的 typedef（`typedef int F(int);`）当场拒，`bad/typedef-fn.jnc`。语法那一半
+能过（声明符可以带函数后缀），拒在降级这一层 —— 要接它得先有函数指针那一格。
+
+**期望输出的出处**：`cases/37-typedef.jnc`，一份 `cc -O0 -std=c99` 的孪生程序，7 行逐字节相同
+（五条腿也各自与它相同）。写法差别：C 那边结构体要写 `struct Node`；`byte8` 那条 typedef 在
+孪生里是 `signed char`。
+
+**上一刀那次成批探到此清完三条，只剩 `enum`**。它值钱得多也大得多：命名空间、`bitflag`、
+基类型，还要与 `case Request.Terminate:` 共用一格编译期求值。
+
+**跑过的轴**：`tests/jnc`（57/0，新增 `cases/37-typedef` 与 `bad/typedef-fn`）。
+**没跑的**：`tests/sexpr`、`tests/glr`、`tests/asy` —— 只动了 `frontend-jnc/lower.js`
+（加 `tests/jnc/run.js` 的头注释），语法、方言、MIR、四个后端与运行时一个字都没改；自举、
+`tests/jit`、`tests/mir`、`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
+
 ## 后果与代价
 
 - 方言从"没有可算术的引用"变成"有"。这一格会渗到 MIR 与四个后端，改不回去。
