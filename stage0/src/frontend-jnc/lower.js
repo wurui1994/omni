@@ -758,6 +758,8 @@ class JncLower {
     this.impParse = opts.parse === undefined ? null : opts.parse;
     // 格式化字面量里 `$(…)` 那一段要再解析一遍（第六十四刀）。没给就当没有那一格。
     this.parseExpr = opts.parseExpr === undefined ? null : opts.parseExpr;
+    // 要不要入口（第六十五刀）：跑的那几条腿要，`omni sx` 只降不跑，不要。
+    this.needEntry = opts.needEntry !== false;
     // `-I` 那张目录表（第六十二刀）。找文件这件事全在 cli.js 的 find 里，这一层只拿它
     // **报错时说清在哪儿找过**，所以存的是表本身而不是一个数。
     this.impDirs = opts.dirs === undefined ? [] : opts.dirs;
@@ -1348,7 +1350,11 @@ class JncLower {
       this.topItem(e.it);
     }
     this.ns = '';
-    if (this.mainBody === null) {
+    // 没有 `main` 的那种源码（第六十五刀）。语料 662 份里 408 份是这种 —— 它们是**库模块**，
+    // 本来就不该有入口（jancy 那边 `jancy foo.jnc` 找不到 main 才报错，可 `jnc_ct` 把它当
+    // 模块编译是成立的）。所以"要不要入口"由**调用方**说：`omni sx` 只要一份降下来的文本，
+    // 不要入口；五条腿要跑，那就必须有。
+    if (this.mainBody === null && this.needEntry) {
       this.diags.error(null, 'jancy 的入口是 `int main()`，这份源码里没有');
       return '';
     }
@@ -1362,7 +1368,11 @@ class JncLower {
     const body = this.globalCells.length === 0 && this.globalInit.length === 0
       ? this.mainBody
       : `${[...this.globalCells, ...this.globalInit].join('\n')}\n${this.mainBody}`;
-    parts.push(`  (main\n${body})`);
+    // 库模块（没有 main）也发一格 `(main …)`：方言的整程序要它（sexpr/lower.js:779），
+    // 而里头只剩模块级变量那段序幕 —— jancy 的 module.construct 对库模块也是要跑的。
+    parts.push(`  (main\n${this.mainBody === null
+      ? [...this.globalCells, ...this.globalInit].join('\n')
+      : body})`);
     parts.push(')');
     return `${parts.join('\n')}\n`;
   }

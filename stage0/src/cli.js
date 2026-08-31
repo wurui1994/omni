@@ -1139,8 +1139,13 @@ function jncParseExpr(tb, file, text, offset, diags) {
   return dig(tree);
 }
 
-/** 一份 `.jnc` -> 核心方言的文本。`omni sx` 那条路也走它，所以降级只有一份实现。 */
-function jncText(path, dirs = []) {
+/**
+ * 一份 `.jnc` -> 核心方言的文本。`omni sx` 那条路也走它，所以降级只有一份实现。
+ *
+ * `needEntry`（第六十五刀）：要跑的那几条腿要一个 `int main()`；`omni sx` 只要降下来的
+ * 文本，库模块本来就没有入口（语料 662 份里 408 份是这种），所以那条路上不要。
+ */
+function jncText(path, dirs = [], needEntry = true) {
   const tb = jncFrontEnd();
   const diags = new Diagnostics();
   const tree = jncParse(tb, path, diags);
@@ -1168,6 +1173,7 @@ function jncText(path, dirs = []) {
     parse: (p) => jncParse(tb, p, diags),
     parseExpr: (file, src, offset) => jncParseExpr(tb, file, src, offset, diags),
     dirs,
+    needEntry,
   });
   diags.throwIfErrors();
   return text;
@@ -1626,7 +1632,7 @@ function main(argv) {
     // 而那份 .sx 是虚拟的（从不落盘），所以没有这一条就只能拿着行号猜。印出来的
     // 内容与 lowerCoreSexpr 拿到的**逐字节相同** —— 行号可以直接对。
     case 'sx': {
-      stdout(path.endsWith('.jnc') ? jncText(path, incDirs(rest)) : asyText(path));
+      stdout(path.endsWith('.jnc') ? jncText(path, incDirs(rest), false) : asyText(path));
       return 0;
     }
     // 一个源文件一份产物（第七十五刀）：`<名字>.sx` 与 `<名字>.js` 摊在一个目录里，

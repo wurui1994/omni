@@ -9,7 +9,7 @@
 // 语法那一半不在这里：`stage0/src/frontend-jnc/jnc.grammar` 在 tests/glr/run.js 的
 // `cases/jnc` 那一组里量（526/528 份真实 `.jnc` 唯一成树）。这里量的是**降级**。
 //
-// 三件事：
+// 四件事：
 //   1. cases/*.jnc 在 run / run-c / interp / interp --mir / run-llvm 五条腿上逐字节相同，
 //      且等于 .expected。五方一致比对上期望值更强 —— 指针在这五条腿上是**两套实现**
 //      （arena 模拟 vs 真指针，ADR-0016），逐字节相同不是巧合。
@@ -82,6 +82,8 @@
 //      底下那三份是 57 那一条 import 进来的、cases/incdirs/ 底下那六份是 59 那一条按 `-I`
 //      找到的，**都不是**独立的用例 —— 这一层只扫 cases/ 这一级的 `.jnc`。）
 //
+//      mods/ 里现在一份：lib1.jnc（第六十五刀 —— 没有入口的库模块）。
+//
 //      bad/ 里有**四种**拒，别混：一种是"还没长出来"（做掉就落地）；一种是**这一层不做**
 //      （printf-conv-p：`%p` 要观测裸地址，而五条腿上那不是同一个数；ptrcmp-mixed：不同型的
 //      两个指针 jancy 那边其实过得去 —— 它自己的 TODO 记着这个检查没做 —— 而这一层降级用的
@@ -103,8 +105,9 @@
 //   node tests/jnc/run.js
 //   node tests/jnc/run.js pointers
 
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
@@ -215,6 +218,28 @@ for (const f of list('bad', '.jnc')) {
     continue;
   }
   ok(`bad/${name} [拒绝：${exp.trim()}]`);
+}
+
+// ------------------------------------------------- 4. mods/：没有入口的库模块，只问"降得下来"
+//
+// 语料 662 份里 408 份没有 `int main()`（第六十五刀）。它们是库模块，本来就不该有入口 ——
+// `omni sx` 要降得下来。两步都问：先 `sx` 退出码 0，再把降出来的那份 `.sx` 交给 `run` 跑一遍
+// （模块级初值那段序幕就是它的全部），于是"降出来的方言文本本身是合法的"也被钉住了 ——
+// 只看文本非空的话，降成一堆废话也能过。
+
+const mods = list('mods', '.jnc');
+const tmp = mods.length === 0 ? null : mkdtempSync(join(tmpdir(), 'omni-jnc-mods-'));
+for (const f of mods) {
+  if (!want(f)) continue;
+  const name = basename(f, '.jnc');
+  const r = cmd(['sx', join(here, 'mods', f), ...extraArgs('mods', name)]);
+  if (r.code !== 0) { no(`mods/${name}`, `    sx exit=${r.code}\n${r.err}`); continue; }
+  if (!r.out.includes('(module')) { no(`mods/${name}`, `    降出来的不是一个模块：${JSON.stringify(r.out.slice(0, 60))}`); continue; }
+  const sxPath = join(tmp, `${name}.sx`);
+  writeFileSync(sxPath, r.out);
+  const rr = cmd(['run', sxPath]);
+  if (rr.code !== 0) { no(`mods/${name}`, `    降出来的 .sx 跑不动 exit=${rr.code}\n${rr.err}`); continue; }
+  ok(`mods/${name} [没有入口也降得下来，降出来的 .sx 跑得动]`);
 }
 
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);

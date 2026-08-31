@@ -1,0 +1,20 @@
+// 一份**没有入口**的源码（ADR-0016 第六十五刀）。语料 662 份里 408 份是这样的库模块：
+// 里头是类型、全局量与函数，没有 `int main()`。jancy 那边这也是成立的 —— `jancy foo.jnc`
+// 找不着 main 才报错，把它当模块编译不报。
+//
+// 这一组只问一件事：`omni sx` 降得下来（退出码 0）。要跑的那五条腿仍旧要入口，
+// 那一半记在 bad/no-main.jnc 上。
+int g_count = 3;
+
+struct Point {
+	int m_x;
+	int m_y;
+}
+
+int addUp(int a, int b) {
+	return a + b + g_count;
+}
+
+int scale(Point p, int k) {
+	return (p.m_x + p.m_y) * k;
+}
