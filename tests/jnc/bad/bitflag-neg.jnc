@@ -1,0 +1,16 @@
+// `bitflag enum` 里的负值（第四十七刀的边界）。这一格没有"正确答案"可对：jancy 算下一个
+// 成员的那一句是 `value = value ? 2 << sl::getHiBitIdx64(value) : 1`
+// （jnc_ct_EnumType.cpp:305）—— `getHiBitIdx64` 拿到一个负的 int64 会回 63，于是
+// `2 << 63` 在 C++ 里是**未定义行为**（移位量 >= 位宽）。
+//
+// 与 bad/printf-plus-hex 的 `%+x` 同一类：拒的不是"还没做"，是"没有可对的答案"。
+// 正数那一格全收（见 cases/44-bitflag.jnc）。
+bitflag enum Neg {
+	A = -1,
+	B,
+}
+
+int main() {
+	printf("%d\n", Neg.A);
+	return 0;
+}

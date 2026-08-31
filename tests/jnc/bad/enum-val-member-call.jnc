@@ -1,0 +1,22 @@
+// 从一个**要先求值**的东西上问枚举成员（第四十七刀的边界）。
+//
+// jancy 那边这条是合法的：`getEnumTypeMember` 只要一格值，不管这格值是打哪来的
+// （jnc_ct_OperatorMgr_Member.cpp:592-618）。这一层只收左边是**一个名字**的形状 ——
+// 那一步查表是纯的（`lookupRef`，不发一个字），而这一族的降级要把左边的 code 串**用两次**
+// （一次做 `&` / `==` 的左操作数，一次不用），先求值的形状得先落进一格临时量。
+//
+// 语料里 `x.M` 的左边一直是个名字（test55.jnc:22 的 `flags.ReadOnly`），所以这条边界
+// 不欠 jancy 什么。
+bitflag enum Flags {
+	A,
+	B,
+}
+
+Flags pick() {
+	return Flags.A;
+}
+
+int main() {
+	printf("%d\n", pick().A);
+	return 0;
+}

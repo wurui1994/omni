@@ -1020,7 +1020,46 @@ class JncLower {
     if (mn === null || !info.members.has(mn)) {
       return this.err(n, `枚举 '${en}' 里没有 '${mn}'`);
     }
-    return { code: `(int ${info.members.get(mn)})`, type: { k: 'enum', name: en, base: info.base } };
+    return {
+      code: `(int ${info.members.get(mn)})`,
+      type: { k: 'enum', name: en, base: info.base, bits: info.bits === true },
+    };
+  }
+
+  /**
+   * `flags.ReadOnly` —— 从一格**值**上问成员（第四十七刀）。左边不是"枚举类型的变量"时返回
+   * `undefined`，那就是普通的字段访问。
+   *
+   * jancy 那边这一条是 `getEnumTypeMember`：查到成员之后**发一次二元运算** ——
+   * `bitflag` 枚举发 `BinOpKind_BwAnd`、普通枚举发 `BinOpKind_Eq`
+   * （jnc_ct_OperatorMgr_Member.cpp:592-618）。所以：
+   *
+   *   flags.ReadOnly   ->  flags & FileFlags.ReadOnly    （bitflag：那一位在不在，结果是枚举）
+   *   state.Idle       ->  state == State.Idle           （普通枚举：是不是它，结果是 bool）
+   *
+   * 逼出它的是语料 test55.jnc:22 的 `if (flags.ReadOnly)` —— 配上"枚举能当条件用"
+   * （truthy 那一处）刚好读成"这一位置上了吗"。
+   *
+   * 只收左边是**一个名字**的形状：那一步查表是纯的（`lookupRef`，不发一个字）。
+   * `f().Flag` 这类要先求值才知道类型的形状还不收 —— 见 bad/enum-val-member-call.jnc。
+   */
+  enumValueMember(n, ob, mem) {
+    if (!isList(ob) || head(ob) !== 'name') return undefined;
+    const nm = this.qname(ob);
+    if (nm === null) return undefined;
+    const r = this.lookupRef(nm);
+    if (r === null || !isEnum(r.type)) return undefined;
+    const info = this.enums.get(r.type.name);
+    if (info === undefined) return undefined;
+    const mn = isAtom(mem) ? mem.value : this.qname(mem);
+    if (mn === null || !info.members.has(mn)) {
+      return this.err(n, `枚举 '${r.type.name}' 里没有 '${mn}'`);
+    }
+    const v = this.expr(ob, null);
+    if (v === null) return null;
+    const k = `(int ${info.members.get(mn)})`;
+    if (r.type.bits === true) return { code: `(bin "&" ${v.code} ${k})`, type: r.type };
+    return { code: `(bin "==" ${v.code} ${k})`, type: J_BOOL };
   }
 
   typeName(n) {
@@ -1037,18 +1076,18 @@ class JncLower {
 
   /**
    * 枚举的名字先坐下（与结构体同一条理由：字段与别名要在体解出来之前查得着这个名字）。
-   * `bitflag enum` 在这儿就拒 —— 它是另一格（取值 1/2/4/8、`|` 与 `&` 的结果类型另有规矩，
-   * type_enum.rst:66-73），不是"少写几行"能对付的。
+   * `bitflag enum` 是同一格上的一个开关（第四十七刀）：取值序列换成 1/2/4/8，`|` `&` `^`
+   * 的结果类型另有规矩，还有"0 可以隐式赋进去"（type_enum.rst:66-73）。
    */
   enumName(n) {
     const key = isAtom(n.items[1]) ? n.items[1].value : null;
-    if (key !== 'enum') { this.nope(n, `'${key}'`); return null; }
+    if (key !== 'enum' && key !== 'bitflag enum') { this.nope(n, `'${key}'`); return null; }
     const name = this.qname(n.items[2]);
     if (name === null) return this.err(n, '认不出的枚举名字');
     if (this.enums.has(name) || this.structs.has(name)) {
       return this.err(n, `类型名 '${name}' 重复定义`);
     }
-    this.enums.set(name, { base: J_I32, members: new Map() });
+    this.enums.set(name, { base: J_I32, members: new Map(), bits: key === 'bitflag enum' });
     return null;
   }
 
@@ -1071,7 +1110,7 @@ class JncLower {
       if (!isInt(sp.type)) { this.err(bn, `枚举的基类型要是整数，这里是 ${tyName(sp.type)}`); return null; }
       info.base = sp.type;
     }
-    let next = 0n;
+    let next = info.bits ? 1n : 0n;
     for (const m of this.flat(n.items[4])) {
       if (!isList(m) || head(m) !== 'enum-item') { this.err(m, '认不出的枚举成员'); continue; }
       const mn = isAtom(m.items[1]) ? m.items[1].value : this.qname(m.items[1]);
@@ -1083,7 +1122,16 @@ class JncLower {
         next = k;
       }
       info.members.set(mn, wrapVal(next, info.base));
-      next += 1n;
+      if (!info.bits) { next += 1n; continue; }
+      // `bitflag enum` 的下一格（第四十七刀）。照抄 `calcBitflagEnumConstValues`
+      // （jnc_ct_EnumType.cpp:286-306）那一句：`value = value ? 2 << getHiBitIdx64(value) : 1`
+      // —— **不是**乘二，是"最高位再往上一位"。所以显式写了 `0x20` 之后下一个是 `0x40`，
+      // 而显式写了 `0x30`（两个位）之后下一个也是 `0x40`。
+      if (next < 0n) {
+        this.nope(m, `bitflag enum '${name}' 里的负值 —— jancy 那边 \`2 << getHiBitIdx64(负数)\` 是 C++ 的未定义行为，没有可对的答案`);
+        continue;
+      }
+      next = next === 0n ? 1n : 2n ** BigInt(next.toString(2).length);
     }
     return null;
   }
@@ -1189,7 +1237,7 @@ class JncLower {
       else if (this.structs.has(nm)) base = { k: 'struct', name: nm };
       else if (this.enums.has(nm)) {
         if (uns) { this.err(ts, `'${nm}' 是枚举，上面写不了 unsigned`); return null; }
-        base = { k: 'enum', name: nm, base: this.enums.get(nm).base };
+        base = { k: 'enum', name: nm, base: this.enums.get(nm).base, bits: this.enums.get(nm).bits === true };
       }
       else if (this.aliases.has(nm)) {
         // typedef 起的名字（第三十八刀）。别名里可能已经带着指针或数组那几层，所以直接拿
@@ -1831,6 +1879,12 @@ class JncLower {
         bt = o.type;
       }
       const st = structBehind(bt);
+      // 枚举走到这儿说明左边不是**一个名字**（那一条在 expr0 的 field 支上，enumValueMember）。
+      // jancy 那边 `pick().A` 是合法的：`getEnumTypeMember` 只要一格值。这一层还不收 ——
+      // 收它要先求一次值再决定发 `&` 还是 `==`，而这一族里"先求值"的形状要一格临时量。
+      if (st === null && isEnum(bt)) {
+        return this.nope(n, `从一个要先求值的东西上问 ${tyName(bt)} 的成员（只收左边是一个名字的）`);
+      }
       if (st === null) return this.err(n, `'.' 的左边不是结构体：${tyName(bt)}`);
       return this.memberOf(n, base, st.name, n.items[2]);
     }
@@ -1944,6 +1998,24 @@ class JncLower {
         if (!isInt(v.type)) { this.err(n, `指针上的 '${op}' 右边要整数，这里是 ${tyName(v.type)}`); return null; }
         const d = bin === '+' ? v.code : `(un "-" ${v.code})`;
         return [`${pad}${this.store(lv, `(padd ${this.read(lv)} ${d})`)}`];
+      }
+      // `bitflag enum` 上的 `&= |= ^=`（第四十七刀）。它不是新规矩，是二元那三条的复合形式：
+      // `lv op= v` 就是 `lv = lv op v`，而二元那儿 `&` 任一边是 bitflag 枚举、`|` / `^` 两边
+      // 同型 bitflag 枚举时结果就是那个枚举（jnc_ct_BinOp_Arithmetic.cpp:356-388），
+      // 于是回赋进 lv 不用再转一次。语料与文档里的写法就是 `flags &= ~OpenFlags.Exclusive`
+      //（type_enum.rst:87）。值照基整数算，`& | ^` 在规范形上不出范围，所以不回卷。
+      if ((bin === '&' || bin === '|' || bin === '^') && isEnum(lv.type) && lv.type.bits === true) {
+        const vt = isEnum(v.type) ? v.type : null;
+        const ok = bin === '&'
+          ? (vt === null ? isInt(v.type) : sameTy(vt, lv.type))
+          : (vt !== null && sameTy(vt, lv.type));
+        if (!ok) {
+          this.err(n, `'${op}' 的右边要${bin === '&' ? `整数或同型的 ${tyName(lv.type)}` : `同型的 ${tyName(lv.type)}`}，这里是 ${tyName(v.type)}`);
+          return null;
+        }
+        const x = { code: this.read(lv), type: lv.type.base };
+        const y = intConv({ code: v.code, type: vt === null ? v.type : vt.base }, lv.type.base);
+        return [`${pad}${this.store(lv, `(bin "${bin}" ${x.code} ${y.code})`)}`];
       }
       // `lv op= v` 就是 `lv = (T)(lv op v)`。中间那一格照常用算术转换来，**要真的转**
       //（第三十三刀）：以前两边都是有符号，"结果那一格总是 >= lv 那一格"这条让中间那一次
@@ -2436,6 +2508,12 @@ class JncLower {
     if (isInt(v.type)) return { code: `(bin "!=" ${v.code} (int 0))`, type: J_BOOL };
     if (v.type === J_REAL) return { code: `(bin "!=" ${v.code} (real 0.0))`, type: J_BOOL };
     if (isPtr(v.type)) return { code: `(un "!" (pisnull ${v.code}))`, type: J_BOOL };
+    // 枚举当条件用（第四十七刀）：jancy 的 `Cast_Bool::getCastOperator` 里
+    // `case TypeKind_Enum` 走的就是 `m_fromZeroCmp`（jnc_ct_CastOp_Bool.cpp:181）——
+    // 与整数同一条"跟 0 比"。逼出这一条的是 `if (flags & OpenFlags.ReadOnly)`：
+    // bitflag 的 `&` 结果是那个枚举，直接就落在条件位置上。普通枚举也一样收 —— 它在
+    // jancy 那边就是同一个 case。
+    if (isEnum(v.type)) return { code: `(bin "!=" ${v.code} (int 0))`, type: J_BOOL };
     return this.err(node, `${tyName(v.type)} 不能当条件用`);
   }
 
@@ -2825,6 +2903,15 @@ class JncLower {
     if (want !== undefined && want !== null && isInt(want) && isEnum(v.type)) {
       return intConv({ code: v.code, type: v.type.base }, want);
     }
+    // **0 可以隐式赋进 bitflag 枚举**（第四十七刀）。jancy 那边这一条写在 int -> enum 的
+    // getCastKind 里：`(type->getFlags() & EnumTypeFlag_BitFlag) && opValue.isZero()` 时是
+    // `CastKind_Implicit`（jnc_ct_CastOp_Int.cpp:306-311）。注意它问的是 `opValue.isZero()`
+    // —— **编译期常量零**，不是"运行期恰好是 0"。所以这儿也只认常量：`flags = 0` 收，
+    // `flags = x` 不收（哪怕 x 这一趟正好是 0）。别的整数值还是要显式强制转换。
+    if (want !== undefined && want !== null && isEnum(want) && want.bits === true && isInt(v.type)) {
+      const k = this.constInt(n);
+      if (k === 0n) return { code: '(int 0)', type: want };
+    }
     return v;
   }
 
@@ -2910,6 +2997,10 @@ class JncLower {
         // 不是一格值。值在编译期就定了，发出去的就是一个字面量。
         const em = this.enumMember(n, ob, n.items[2]);
         if (em !== undefined) return em;
+        // `flags.ReadOnly` —— 左边是一格**枚举的值**（第四十七刀）。要排在下面那两支之前：
+        // 枚举不是结构体，走到 lvalue 那儿只会报"'.' 的左边不是结构体"。
+        const ev = this.enumValueMember(n, ob, n.items[2]);
+        if (ev !== undefined) return ev;
         if (isList(ob) && head(ob) === 'indirect') {
           return this.load(n, this.fieldLv(n, ob.items[1], n.items[2]));
         }
@@ -3105,6 +3196,28 @@ class JncLower {
       }
       return this.nope(n, `指针上的 '${op}'`);
     }
+    // `bitflag enum` 上的位运算（第四十七刀）。两条规矩照抄 jancy 自己那两个函数
+    // （jnc_ct_BinOp_Arithmetic.cpp:356-388）：
+    //   - `&`：**任一边**是 bitflag 枚举，结果就是那个枚举
+    //     （`getBitFlagEnumBwAndResultType`）—— 所以 `flags & 0x20` 与 `0x20 & flags` 都是枚举；
+    //   - `|` / `^`：**两边都**得是 bitflag 枚举、且同型，结果才是那个枚举
+    //     （`getBitFlagEnumBwOrXorResultType`；不同型就回 NULL，于是落回整数那条路）。
+    // 值本身照基整数算：两边都是规范形，`& | ^` 在规范形上不会出范围，所以不用回卷。
+    if (op === '&' || op === '|' || op === '^') {
+      const ba = isEnum(a.type) && a.type.bits === true;
+      const bb = isEnum(b.type) && b.type.bits === true;
+      let et = null;
+      if (op === '&') et = ba ? a.type : (bb ? b.type : null);
+      else if (ba && bb && sameTy(a.type, b.type)) et = a.type;
+      if (et !== null) {
+        const x = intConv({ code: a.code, type: isEnum(a.type) ? a.type.base : a.type }, et.base);
+        const y = intConv({ code: b.code, type: isEnum(b.type) ? b.type.base : b.type }, et.base);
+        if (!isInt(x.type) || !isInt(y.type)) {
+          return this.err(n, `'${op}' 的另一边要整数，这里是 ${tyName(isInt(a.type) || isEnum(a.type) ? b.type : a.type)}`);
+        }
+        return { code: `(bin "${op}" ${x.code} ${y.code})`, type: et };
+      }
+    }
     const cmp = op === '==' || op === '!=' || op === '<' || op === '<=' || op === '>' || op === '>=';
     // 两个同型枚举比大小 / 相等：在基整数那一格上比（第三十九刀）。两边都是规范形，直接比就对。
     // 不同型的两个枚举、或枚举与整数混算，都先落到基整数上 —— 枚举 -> 整数是隐式的。
@@ -3155,8 +3268,14 @@ class JncLower {
 
   unary(n, want) {
     const op = isStr(n.items[1]) ? n.items[1].value : (isAtom(n.items[1]) ? n.items[1].value : null);
-    const a = this.expr(n.items[2], op === '!' ? J_BOOL : want);
-    if (a === null) return null;
+    const a0 = this.expr(n.items[2], op === '!' ? J_BOOL : want);
+    if (a0 === null) return null;
+    // 枚举落到基整数上再算（第四十七刀）：`getArithmeticOperatorResultType` 见到
+    // TypeKind_Enum 就递归到基类型（jnc_ct_UnOp_Arithmetic.cpp:39）—— 二元那一侧第三十九刀
+    // 已经这么做了，一元这一侧漏了。逼出它的是 `flags &= ~OpenFlags.Exclusive`
+    //（type_enum.rst:87）：`~` 的操作数是个枚举成员。`!` 不走这儿（它要的是 bool，
+    // truthy 那一处管）。
+    const a = isEnum(a0.type) && op !== '!' ? { code: a0.code, type: a0.type.base } : a0;
     if (op === '+') {
       // 一元加是恒等，但**带整型提升**（`char c; +c` 是 int）。提升在规范形里不发一个字。
       if (isInt(a.type)) return { code: a.code, type: arith(a.type) };

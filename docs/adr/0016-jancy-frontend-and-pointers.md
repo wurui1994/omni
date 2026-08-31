@@ -1938,6 +1938,12 @@ iterable`。派发那几条本来就是这个形状，改成 `(if C (do (set …
 **两条边界**：`bitflag enum`（取值 1/2/4/8、`|` 与 `&` 的结果类型另有规矩、`0` 可隐式赋值——
 得连着一起接，`bad/enum-bitflag`）与 `pragma(ExposedEnums, true)`（把成员漏进父命名空间）。
 
+> 第四十七刀把 `bitflag enum` 做掉了，`bad/enum-bitflag` 按规矩删掉、换成三条更窄的。
+> 上面那句「它是另一格」**判重了**：落地之后 `enums` 那张表只多了一个 `bits` 布尔位 ——
+> 是同一格上的一个开关。另外这一刀还留下两处漏，都是"枚举当整数用"漏的：枚举不能当条件用
+> （jancy 那边 `case TypeKind_Enum` 走 `m_fromZeroCmp`），一元算子没落到基整数上
+> （`~Color.Red` 报错）。二元那一侧这一刀做对了，一元与真值化那两处忘了 —— 第四十七刀补齐。
+
 **期望输出的出处**：一份 `cc -O0 -std=c99` 的孪生，10 行逐字节相同。三处写法差别记在
 `cases/38-enum.jnc` 的头注释里：C 那边成员名是裸的、类型要写 `enum Color`、`Small` 的基类型
 写不出来（这几个值在 `int` 里印出来一样，不影响对比）。
@@ -2250,6 +2256,68 @@ size_t 还要一次显式 `(int)`。
 `frontend-jnc/lower.js` 的二元算子那一段加了一支（加 `tests/jnc/run.js` 的头注释），
 语法、方言、MIR、四个后端与运行时一个字都没改；自举、`tests/jit`、`tests/mir`、
 `tests/llvm`；`npm run lint` 这台机器上没有 typescript。
+
+### 第四十七刀：`bitflag enum` —— 一个开关带出四条规矩，外加两处"枚举当整数用"的漏
+
+第三十九刀收 `enum` 时把 `bitflag enum` 记成了边界，理由写的是「它是另一格」。量下来它不是
+另一格，是**同一格上的一个开关** —— 落地之后 `enums` 那张表只多了一个 `bits` 布尔位。
+
+**选题**照上一刀那份语料排序：语料里 `bitflag enum` 22 处，有 `main` 的 207 份里有 4 份
+只剩它这一个拦路的 —— 在 `class`（12 份）之后是最前面的一档，而 `class` 是另一个数量级。
+
+**四条规矩，出处都在 jancy 自己的实现里**：
+
+1. **取值序列**：起始 1，之后 `value = value ? 2 << sl::getHiBitIdx64(value) : 1`
+   （`calcBitflagEnumConstValues`，`jnc_ct_EnumType.cpp:286-306`）。这一句**不是乘二** ——
+   是"最高位再往上一位"。所以 `Exclusive = 0x20` 之后 `DeleteOnClose` 是 `0x40`（文档那个
+   例子的注释就这么写），而显式写 `0x30`（两个位）之后下一个**也是** `0x40`。照抄的话这条
+   差别是免费的；自己想当然写 `*2` 就会在第二种情形上错。
+2. **`&` 的结果类型**：**任一边**是 bitflag 枚举，结果就是那个枚举
+   （`getBitFlagEnumBwAndResultType`，`jnc_ct_BinOp_Arithmetic.cpp:356-370`）。
+3. **`|` / `^` 的结果类型**：**两边都**得是同型的 bitflag 枚举，否则回 NULL、落回整数那条路
+   （同文件 372-388）。文档只提了 `|`，实现里 `^` 与它同一条。
+4. **0 可以隐式赋进去**：`(flags & EnumTypeFlag_BitFlag) && opValue.isZero()` 时是
+   `CastKind_Implicit`（`jnc_ct_CastOp_Int.cpp:306-311`）。注意它问的是 `opValue.isZero()`
+   —— **编译期常量零**，所以 `flags = 0` 收、`flags = x` 不收（哪怕 x 这一趟正好是 0）。
+
+**顺带补了两处漏**，都不只对 bitflag，是第三十九刀留下的：
+
+- **枚举能当条件用**：`Cast_Bool::getCastOperator` 里 `case TypeKind_Enum` 走的就是
+  `m_fromZeroCmp`（`jnc_ct_CastOp_Bool.cpp:181`）—— 与整数同一条"跟 0 比"。
+  逼出它的是 `if (flags & OpenFlags.ReadOnly)`：`&` 的结果是枚举，直接落在条件位置上。
+- **一元算子落到基整数上**：`getArithmeticOperatorResultType` 见到 TypeKind_Enum 就递归到
+  基类型（`jnc_ct_UnOp_Arithmetic.cpp:39`）。二元那一侧第三十九刀已经这么做了，一元这一侧
+  漏了 —— `~OpenFlags.Exclusive`（type_enum.rst:87）就落在这儿。
+
+**外加一格是语料逼出来的**：`x.M` ——**从一格值上问成员**。`getEnumTypeMember` 查到成员之后
+发一次二元运算：bitflag 发 `BinOpKind_BwAnd`、普通枚举发 `BinOpKind_Eq`
+（`jnc_ct_OperatorMgr_Member.cpp:592-618`）。于是 `flags.ReadOnly` 是"这一位置上了吗"、
+`st.Busy` 是"是不是它"。这一格不是我想出来的：做完前四条之后 `test55.jnc:22` 的
+`if (flags.ReadOnly)` 报的是「'.' 的左边不是结构体」—— 一句**错的**诊断，因为那句代码合法。
+这是那份语料排序的第二个用处：它不只挑选题，还在每刀之后告诉你漏了什么。
+
+**边界**三条：`bitflag enum` 里的**负值**（jancy 那句 `2 << getHiBitIdx64(-1)` 在 C++ 里是
+移位越界 —— 与 `%+x` 同一类：没有可对的答案）、非 0 的整数隐式赋进去（**jancy 自己也拒**，
+文档里那句 `flags = 200; // error: cast int->bitflag enum must be explicit`）、
+从一个**要先求值**的东西上问成员（`pick().A` —— jancy 收，这一层还不收：降级要把左边的 code
+串用两次，先求值的形状得先落进一格临时量；语料里左边一直是个名字）。
+
+**期望输出的出处**：一份 `cc -O0 -std=c99 -Wall` 的孪生，十五行逐字节相同。**写法差异**两处：
+C 里没有 bitflag 枚举，那串自动取值要照上面第 1 条算出来写死；C 里也没有 `x.M`，要摊成
+`x & M` / `x == M`。
+
+**放行了什么**：`test/jnc/test26.jnc` 与 `test/jnc/test55.jnc` 整份跑通（后者印
+`read-only is true`）。另两份换成了别的拦路：`test104.jnc:4` 的"枚举成员的值不是整数字面量"
+（要编译期常量折叠那一格 —— 它同时也拦着"数组长度不是字面量"与"case 的标签不是字面量"，
+下一格该是它），`test71.jnc:22` 的 `rand`（要 stdlib）。
+
+**跑过的轴**：`tests/jnc`（73/0，新增 `cases/44-bitflag` 与 `bad/bitflag-neg`、
+`bad/bitflag-from-int`、`bad/enum-val-member-call`；删掉 `bad/enum-bitflag` —— 功能落地了，
+按规矩换成上面那三条更窄的）。
+**没跑的**：`tests/sexpr`、`tests/glr`、`tests/asy`、`tests/oir` —— 只动了
+`frontend-jnc/lower.js` 里枚举与二元 / 一元算子那几段（加 `tests/jnc/run.js` 的头注释），
+语法一个字没改（`bitflag enum` 那个 token 本来就在），方言、MIR、四个后端与运行时也没动；
+自举、`tests/jit`、`tests/mir`、`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
 
 ## 后果与代价
 

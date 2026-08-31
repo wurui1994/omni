@@ -1,0 +1,93 @@
+// 第四十七刀：`bitflag enum`，加"从一格值上问成员"。
+//
+// 出处（jancy 自己的实现），四条：
+//   1. **取值序列**：起始 1，之后 `value = value ? 2 << sl::getHiBitIdx64(value) : 1`
+//      （`calcBitflagEnumConstValues`，jnc_ct_EnumType.cpp:286-306）—— **不是乘二**，是
+//      "最高位再往上一位"。所以 `Exclusive = 0x20` 之后 `DeleteOnClose` 是 0x40；
+//      `Wide.C = 0x30`（两个位）之后 `D` 也是 0x40。
+//   2. **`&` 的结果类型**：任一边是 bitflag 枚举，结果就是那个枚举
+//      （`getBitFlagEnumBwAndResultType`，jnc_ct_BinOp_Arithmetic.cpp:356-370）。
+//   3. **`|` / `^` 的结果类型**：两边都得是同型的 bitflag 枚举
+//      （`getBitFlagEnumBwOrXorResultType`，同文件 372-388）。
+//   4. **0 可以隐式赋进去**：`(flags & EnumTypeFlag_BitFlag) && opValue.isZero()` 时
+//      是 `CastKind_Implicit`（jnc_ct_CastOp_Int.cpp:306-311）。非 0 要显式 ——
+//      见 bad/bitflag-from-int.jnc。
+// 文档那一份是 type_enum.rst:66-89（`OpenFlags` 那个例子就是这里的头一个枚举）。
+//
+// 顺带两条"枚举当整数用"的漏（都不只对 bitflag）：
+//   - **枚举能当条件用**：`Cast_Bool::getCastOperator` 里 `case TypeKind_Enum` 走
+//     `m_fromZeroCmp`（jnc_ct_CastOp_Bool.cpp:181）—— 与整数同一条"跟 0 比"。
+//   - **一元算子落到基整数上**：`getArithmeticOperatorResultType` 见到 TypeKind_Enum
+//     就递归到基类型（jnc_ct_UnOp_Arithmetic.cpp:39）。二元那一侧第三十九刀已经这么做了，
+//     一元这一侧漏了 —— `~OpenFlags.Exclusive` 就落在这儿。
+//
+// **从一格值上问成员**（`flags.ReadOnly` / `st.Busy`）：`getEnumTypeMember` 查到成员之后
+// 发一次二元运算 —— bitflag 发 `BinOpKind_BwAnd`、普通枚举发 `BinOpKind_Eq`
+// （jnc_ct_OperatorMgr_Member.cpp:592-618）。语料里的写法是 test55.jnc:22 的
+// `if (flags.ReadOnly)` —— 配上"枚举能当条件用"刚好读成"这一位置上了吗"。
+//
+// 期望输出的出处：一份 `cc -O0 -std=c99 -Wall` 的孪生件，十五行逐字节相同。
+// **写法差异**两处：C 里没有 bitflag 枚举，那串自动取值要照上面第 1 条自己算出来写死；
+// C 里也没有 `x.M`，要摊成 `x & M` / `x == M`。
+bitflag enum OpenFlags {
+	ReadOnly,             // = 0x01
+	Exclusive = 0x20,
+	DeleteOnClose,        // = 0x40
+	Async,                // = 0x80
+}
+
+bitflag enum Wide: uint16_t {
+	A,
+	B,
+	C = 0x30,
+	D,
+}
+
+enum State {
+	Idle,
+	Busy,
+	Done,
+}
+
+int main() {
+	printf("ro=%d ex=%d doc=%d as=%d\n", OpenFlags.ReadOnly, OpenFlags.Exclusive,
+		OpenFlags.DeleteOnClose, OpenFlags.Async);
+	printf("A=%d B=%d C=%d D=%d\n", Wide.A, Wide.B, Wide.C, Wide.D);
+
+	OpenFlags flags = 0;
+	printf("flags=%d\n", flags);
+
+	flags = OpenFlags.ReadOnly | OpenFlags.Exclusive | OpenFlags.DeleteOnClose;
+	printf("flags=0x%x\n", flags);
+
+	flags &= ~OpenFlags.Exclusive;
+	printf("flags=0x%x\n", flags);
+
+	OpenFlags m = flags & 0x40;
+	printf("m=0x%x\n", m);
+
+	if (flags & OpenFlags.ReadOnly)
+		printf("readonly\n");
+
+	if (!(flags & OpenFlags.Exclusive))
+		printf("not exclusive\n");
+
+	flags |= OpenFlags.Async;
+	printf("flags=0x%x\n", flags);
+
+	flags ^= OpenFlags.ReadOnly;
+	printf("flags=0x%x\n", flags);
+
+	printf("eq=%d\n", flags == OpenFlags.Async);
+
+	// 从一格值上问成员：bitflag 发 `&`、普通枚举发 `==`
+	printf("v.ro=%d v.as=0x%x\n", flags.ReadOnly, flags.Async);
+	if (flags.Async)
+		printf("async\n");
+	if (!flags.ReadOnly)
+		printf("no readonly\n");
+
+	State st = State.Busy;
+	printf("s.idle=%d s.busy=%d s.done=%d\n", st.Idle, st.Busy, st.Done);
+	return 0;
+}

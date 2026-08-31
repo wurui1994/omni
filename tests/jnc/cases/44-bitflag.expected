@@ -1,0 +1,15 @@
+ro=1 ex=32 doc=64 as=128
+A=1 B=2 C=48 D=64
+flags=0
+flags=0x61
+flags=0x41
+m=0x40
+readonly
+not exclusive
+flags=0xc1
+flags=0xc0
+eq=0
+v.ro=0 v.as=0x80
+async
+no readonly
+s.idle=0 s.busy=1 s.done=0

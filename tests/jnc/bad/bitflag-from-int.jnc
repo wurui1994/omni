@@ -1,0 +1,19 @@
+// 非 0 的整数隐式赋进 `bitflag enum` —— **jancy 自己也拒**，所以这条落地了也还是拒。
+// 它的那句就写在文档的例子里：`flags = 200; // error: cast int->bitflag enum must be
+// explicit`（type_enum.rst:88）。实现上是 int -> enum 的 getCastKind：只有
+// `(type->getFlags() & EnumTypeFlag_BitFlag) && opValue.isZero()` 时才是隐式
+// （jnc_ct_CastOp_Int.cpp:306-311），别的值要显式强制转换。
+//
+// `= 0` 那一格是收的（见 cases/44-bitflag.jnc 里的 `OpenFlags flags = 0;`）——
+// 而且只认**编译期常量零**，与 jancy 问的 `opValue.isZero()` 同一格。
+bitflag enum Flags {
+	A,
+	B,
+	C,
+}
+
+int main() {
+	Flags f = 200;
+	printf("%d\n", f);
+	return 0;
+}
