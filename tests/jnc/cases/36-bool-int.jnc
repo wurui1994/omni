@@ -1,0 +1,62 @@
+// bool 参与整数运算与隐式转换（ADR-0016 第三十七刀）。以前 `int b = a > 0;` 当场报
+// 「初值的类型是 bool，声明的是 int」—— 那是错的，jancy 那边这一行合法。
+//
+// 出处两条，都在 jancy 源里：
+//   1. **bool -> 整数是隐式的**。1 位那一格走零扩展（`m_ext_u`，
+//      jnc_ct_OperatorMgr/jnc_ct_CastOp_Int.cpp:354），而扩展这一族的 getCastKind 返回的
+//      就是 `CastKind_Implicit`（jnc_ct_CastOp_Int.h:63）。
+//   2. **bool 参与算术时提到 32 位有符号**。jnc_ct_UnOp_Arithmetic.cpp:23 那张表的头两行是
+//      `TypeKind_Bool1 -> TypeKind_Int32`、`TypeKind_Bool8 -> TypeKind_Int32`。
+//
+// 接的位置只有一处：`expr(n, want)` —— 所有"要一个具体类型"的取值都从那儿过（初值、赋值、
+// 实参、返回值），加上二元运算里 bool 与整数相遇的那一格。
+//
+// 期望输出的出处：一份 `cc -O0 -std=c99` 的孪生程序，11 行逐字节相同（五条腿也各自与它相同）。
+// 与那份 C 的写法差别：`bool` 要 `<stdbool.h>`；`char` 的符号性由实现定，所以写 `signed char`；
+// 64 位要 `%lld`。
+//
+// 几处摆进来的：
+//   - `e=` 那行：两个 bool 比相等**不**绕道整数（方言的 bool 比较本来就精确），而 `t + u`
+//     与 `t * 5` 走整数。
+//   - `h=` `i=` 那两行：目标是 64 位或无符号时也是同一条路（值是 0 或 1，哪一格都装得下）。
+//   - `k=` 那行：`(a > 0) << 4` —— 移位的左边提到 32 位有符号。
+//
+// 反过来**不**做：整数 -> bool 那一次在 jancy 里也是隐式的（真值化），这一层早就有了，
+// 走的是 truthy（`if (n)` 那条路）。`double d = a > 0;` 没量过，还是拒的。
+
+int f(int x) {
+    return x * 10;
+}
+
+bool positive(int x) {
+    return x > 0;
+}
+
+int main() {
+    int a = 1;
+    int b = a > 0 && a < 5;
+    printf("a=%d %d\n", b, a > 0);
+    printf("b=%d %d\n", (a > 0) + 1, (a > 0) * 7);
+    printf("c=%d\n", f(a == 1));
+    char c = a > 0;
+    printf("d=%d\n", c);
+    bool t = true;
+    bool u = false;
+    printf("e=%d %d %d\n", t == u, t + u, t * 5);
+    printf("f=%d %d\n", positive(3), positive(-3));
+    int n = 0;
+    for (int i = 0; i < 5; i++)
+        n += i % 2 == 0;
+    printf("g=%d\n", n);
+    long L = a > 0;
+    printf("h=%d\n", L);
+    unsigned int uu = a > 0;
+    printf("i=%u\n", uu);
+    int arr[3];
+    arr[0] = a > 0;
+    arr[1] = a > 9;
+    arr[2] = arr[0] + arr[1];
+    printf("j=%d %d %d\n", arr[0], arr[1], arr[2]);
+    printf("k=%d\n", (a > 0) << 4);
+    return 0;
+}

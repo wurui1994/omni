@@ -27,12 +27,12 @@
 //      整数与 `%s` 上的精度加 `%*d` 是第二十七刀、`%.*f` 是第二十八刀、`+` / 空格 / `#`
 //      三个标志是第二十九刀、`%e` / `%E` 是第三十刀、`%g` / `%G` 是第三十一刀、`%u` 是
 //      第三十二刀、无符号的 8 / 16 / 32 位是第三十三刀、字面量的进制是第三十四刀、
-//      位运算与移位的复合赋值是第三十五刀、`switch` 是第三十六刀，在
-//      cases/24-new-curly.jnc、
+//      位运算与移位的复合赋值是第三十五刀、`switch` 是第三十六刀、bool 参与整数运算是
+//      第三十七刀，在 cases/24-new-curly.jnc、
 //      cases/25-static-local.jnc、cases/26-printf-prec.jnc、cases/27-printf-star-prec.jnc、
 //      cases/28-printf-flags.jnc、cases/29-printf-sci.jnc、cases/30-printf-gen.jnc、
 //      cases/31-printf-u.jnc、cases/32-unsigned.jnc、cases/33-radix.jnc、
-//      cases/34-bitassign.jnc、cases/35-switch.jnc。）
+//      cases/34-bitassign.jnc、cases/35-switch.jnc、cases/36-bool-int.jnc。）
 //
 //      bad/ 里有**三种**拒，别混：一种是"还没长出来"（做掉就落地）；一种是**这一层不做**
 //      （printf-conv-p：`%p` 要观测裸地址，而五条腿上那不是同一个数）；一种是**C 自己的

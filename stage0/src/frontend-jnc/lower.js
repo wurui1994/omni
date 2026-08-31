@@ -2577,6 +2577,14 @@ class JncLower {
     // int -> real 的隐式加宽（jancy 与 C 同）。反过来**不**做：那是丢精度，
     // jancy 那边也要一次显式强制转换。
     if (want === T_REAL && isInt(v.type)) return { code: `(toreal ${v.code})`, type: T_REAL };
+    // bool -> 整数的隐式转换（第三十七刀）。出处两条：1 位那一格用**零扩展**
+    //（`m_ext_u`，jnc_ct_CastOp_Int.cpp:354），而扩展这一族的 getCastKind 就是
+    // `CastKind_Implicit`（jnc_ct_CastOp_Int.h:63）。所以 `int b = a > 0;` 在 jancy 里合法，
+    // 值是 0 或 1 —— 与 C 同。这一处是所有"要一个具体类型"的取值的唯一入口，所以初值、
+    // 赋值、实参、返回值四个地方一起接上。
+    if (want !== undefined && want !== null && isInt(want) && v.type === T_BOOL) {
+      return { code: `(sel ${v.code} (int 1) (int 0))`, type: want };
+    }
     return v;
   }
 
@@ -2791,6 +2799,18 @@ class JncLower {
       return this.nope(n, `指针上的 '${op}'`);
     }
     const cmp = op === '==' || op === '!=' || op === '<' || op === '<=' || op === '>' || op === '>=';
+    // bool 参与整数运算（第三十七刀）。jancy 的提升表里 Bool1 与 Bool8 都落到 Int32
+    //（jnc_ct_UnOp_Arithmetic.cpp:23 那张表的头两行），所以 `(a > 0) + 1` 是 int 上的加法。
+    // 两个 bool 比相等是例外：方言的 bool 比较本来就精确，绕道整数没有意义。
+    const bothBoolEq = a.type === T_BOOL && b.type === T_BOOL && (op === '==' || op === '!=');
+    if (!bothBoolEq) {
+      if (a.type === T_BOOL && (isInt(b.type) || b.type === T_BOOL)) {
+        a = { code: `(sel ${a.code} (int 1) (int 0))`, type: T_I32 };
+      }
+      if (b.type === T_BOOL && isInt(a.type)) {
+        b = { code: `(sel ${b.code} (int 1) (int 0))`, type: T_I32 };
+      }
+    }
     // 两边都是整数：先常用算术转换定出结果那一格，再看要不要回卷。
     if (isInt(a.type) && isInt(b.type)) {
       // 常用算术转换要**真的转**（第三十三刀）。以前两边都是有符号，规范形在更宽的格里是

@@ -1823,6 +1823,40 @@ iterable`。派发那几条本来就是这个形状，改成 `(if C (do (set …
 （加 `tests/jnc/run.js` 的头注释），语法、方言、MIR、四个后端与运行时一个字都没改；自举、
 `tests/jit`、`tests/mir`、`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
 
+### 第三十七刀：bool 参与整数运算 —— 这一刀也是修错，不是长功能
+
+上一刀开头那次成批探留下四条，这是最便宜的一条，而且**以前的答案是错的**：`int b = a > 0;`
+当场报「初值的类型是 bool，声明的是 int」，可 jancy 那边这一行合法。
+
+两条出处都在 jancy 源里：
+
+- **bool -> 整数是隐式的**。1 位那一格走零扩展（`m_ext_u`，`jnc_ct_CastOp_Int.cpp:354`），
+  而扩展这一族的 `getCastKind` 返回的就是 `CastKind_Implicit`（`jnc_ct_CastOp_Int.h:63`）。
+- **bool 参与算术时提到 32 位有符号**。`jnc_ct_UnOp_Arithmetic.cpp:23` 那张表的头两行是
+  `TypeKind_Bool1 -> TypeKind_Int32`、`TypeKind_Bool8 -> TypeKind_Int32`。这张表第三十三刀
+  已经抄过一遍，当时只看了整数那几行，头两行漏掉了。
+
+**接的位置只有两处**。一处是 `expr(n, want)` —— 所有"要一个具体类型"的取值都从那儿过（初值、
+赋值、实参、返回值四个地方一次接完），旁边就是既有的 `int -> real` 隐式加宽，同一个形状。
+另一处是二元运算里 bool 与整数相遇的那一格。两个 bool 比相等是例外，不绕道整数：方言的 bool
+比较本来就精确。
+
+**反过来那一次早就有了**：整数 -> bool 在 jancy 里也是隐式的（真值化），这一层走 `truthy`
+（`if (n)` 那条路，第五刀）。`double d = a > 0;` 没量过，还是拒的。
+
+**期望输出的出处**：`cases/36-bool-int.jnc`，一份 `cc -O0 -std=c99` 的孪生程序，11 行逐字节相同
+（五条腿也各自与它相同）。写法差别：`bool` 要 `<stdbool.h>`、`signed char`、`%lld`。
+
+**上一刀那次探剩下的两条**（都还没有本体）：`enum`（报"带体的命名类型（只收 struct）"）与
+`typedef`（报"顶层的 'typedef'"）。`enum` 值钱得多 —— 语料里到处是它，而且它与
+`case Request.Terminate:` 要的是同一格编译期求值。
+
+**跑过的轴**：`tests/jnc`（55/0，新增 `cases/36-bool-int`）。这一刀动的是 `expr` 这个热路径，
+所以那 55 条全绿本身就是没回归的证据。
+**没跑的**：`tests/sexpr`、`tests/glr`、`tests/asy` —— 只动了 `frontend-jnc/lower.js`
+（加 `tests/jnc/run.js` 的头注释），语法、方言、MIR、四个后端与运行时一个字都没改；自举、
+`tests/jit`、`tests/mir`、`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
+
 ## 后果与代价
 
 - 方言从"没有可算术的引用"变成"有"。这一格会渗到 MIR 与四个后端，改不回去。
