@@ -1,0 +1,1 @@
+'g_q' 是 const 属性（声明里写了 const，prop.rst:17），写不了

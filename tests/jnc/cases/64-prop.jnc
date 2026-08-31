@@ -1,0 +1,64 @@
+// 第六十八刀：属性（顶层那一格）。
+//
+// jancy 的属性是"看起来像变量、读写时其实在调函数"的一格：读走 getter、写走 setter，
+// 一个 setter 都没有的就是 const 属性（prop.rst:15-17）。**简单声明式**在源码里只有一个
+// 词 `property`，两个体写在别处（prop_simple.rst:19-31）：
+//     int property g_p;
+//     int g_p.get() { … }
+//     g_p.set(int x) { … }
+// 这一层把它降成两格函数 `g_p$get` / `g_p$set`，读写各是一次调用。
+//
+// 类的成员属性、`autoget`、`bindable`、`event`、`indexed`、完整声明式 `property { … }`
+// 与存值器的重载都还不收 —— 各是自己一刀。
+//
+// 期望输出的出处：/tmp/c64.c（`cc -O0 -std=c99 -Wall`）。
+
+int g_backing = 5;
+int g_hits = 0;
+
+int property g_p;
+int const property g_q;
+
+int g_p.get() {
+	g_hits++;
+	return g_backing + 1;
+}
+
+g_p.set(int x) {
+	g_backing = x * 2;
+}
+
+int g_q.get() {
+	return 42;
+}
+
+// 命名空间里的属性（第五十一刀那条前缀规矩照旧管这一格）
+namespace cfg {
+
+int property level;
+
+}
+
+int cfg.level.get() {
+	return g_backing / 5;
+}
+
+cfg.level.set(int x) {
+	g_backing = x * 5;
+}
+
+int main() {
+	printf("%d %d\n", g_p, g_q);
+	g_p = 10;
+	printf("%d %d\n", g_p, g_backing);
+
+	// 属性读出来就是一格普通的值：能参与运算、能当实参
+	printf("%d\n", g_p * 2 + g_q);
+
+	cfg.level = 7;
+	printf("%d %d\n", cfg.level, g_backing);
+
+	// 取值器被调了几次（读一次就是一次调用，不是一格缓存下来的内存）
+	printf("hits=%d\n", g_hits);
+	return 0;
+}

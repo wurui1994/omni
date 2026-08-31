@@ -1,0 +1,13 @@
+// 给 const 属性赋值（ADR-0016 第六十八刀的边界，**jancy 自己也拒**）。
+// `T const property p` 说的就是"这格属性没有存值器"（prop.rst:17："If a property has no
+// setters then it is a const property"），所以写它无从可写。
+int const property g_q;
+
+int g_q.get() {
+	return 42;
+}
+
+int main() {
+	g_q = 1;
+	return 0;
+}

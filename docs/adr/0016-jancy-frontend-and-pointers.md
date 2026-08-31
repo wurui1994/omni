@@ -3946,6 +3946,88 @@ antiModifierTable 里是自己的一位（`PtrTypeFlag_Volatile`，jnc_Type.h:22
 而且 `property` 一个词就是 32 份文件唯一的修饰符拦路项。它也是 `opaque class` 那些 API
 文件的主要内容 —— 第六十六刀打开的那一片，多半就卡在这儿。
 
+### 第六十八刀：属性 —— 长得像变量，读写时是两次调用
+
+上一刀的尺子指的是属性那一套（`property` 130 / `autoget` 124 / `bindable` 80 / `event` 82）。
+这一刀只做**最里面那一层**：一格属性就是**一对函数**。
+
+**模型。** prop.rst:15-17 那两句把它定死了：属性"looks like a variable/field but allows
+performing actions on read or write"，读走 **getter**、写走 **setter**，
+"Each property has a single getter and optionally one or more setters"，一个 setter 都没有
+的就是 **const 属性**。所以这一层的落法没有第二种选择：
+
+- `T property p;` → 方言里的两格函数 `p$get()` 与 `p$set(T)`
+- 读 `p` → `(call p$get)`；写 `p = x` → `(expr (call p$set x))`
+- `T const property p;` → 只有 `p$get`；写它是错
+
+**简单声明式**（prop_simple.rst:19-31）在源码里只有一个词，两个体写在别处：
+
+```jnc
+int property g_p;
+int g_p.get() { … }
+g_p.set(int x) { … }
+```
+
+那两个体在语法里是 `(fn-def … (dcl … (qualified-special (name g_p) (accessor "get")) …))`
+—— 与 `C.construct()` 同一个形状（第五十三刀），所以 `declarator` 那一支只是多认两个词，
+`fnSig0` 多分一条岔路（`propSig`）。唯一的不对称在**取值器有返回类型**（`int g_p.get()`）
+而存值器没有说明符 —— 后者与构造一样，摆一个 void 进去。
+
+**顺序上有一件事非做不可。** 属性得**在签名那一遍之前**登记：那两个函数回什么、收什么，
+是从属性的类型抄来的，而模块级变量那一遍（`globalDecl`）排在签名**之后**，来不及。所以
+`run` 里多了一遍 `propName`，夹在 `classLayout()` 与签名之间。为了让这一遍与 `globalDecl`
+都能看同一条 `var-decl` 而不把诊断发两次，加了个 `propMod(specs)` —— **不发一条诊断**地
+问"这张 mods 表里有 `property` 吗"。
+
+**`cfg.level` 是一个名字，不是"取 cfg 的字段"。** 命名空间里的属性在语法那一层摊成一串
+`field`，所以读那一侧的钩子要挂在 `case 'field'` 里、**排在"把左边当值算"之前** —— 与
+第三十九刀枚举成员 `Color.Red` 同一条理由。写那一侧同理，挂在 `exprStmt` 的 `assign` 上、
+排在 `lvalue` 之前：属性没有"可写的那一格"，`lvalue` 只会去查变量然后报"未声明"。
+
+**边界四条，都记了**：
+
+- **类/结构体的成员属性**（`bad/prop-member.jnc`）。这一条**必须就地拦** —— 类体里的
+  `int property m_value;` 走的是 `typeDecl` 那一遍，不拦它就会被当成一格普通字段，
+  那是"悄悄换了意思"。成员属性要三处让路（取字段、lvalue、方法体里补 `this`），是自己一刀。
+- **属性上的复合赋值**（`bad/prop-compound.jnc`）。`p += 1` 在 jancy 那边是"读一次、加一、
+  写一次"，这一层的赋值降成方言的一句，两次调用摆不进去。
+- **给 const 属性赋值**（`bad/prop-const-set.jnc`）—— jancy 自己也拒。
+- **存值器的重载**：jancy 收（prop.rst:17 那句 "If a setter is overloaded…"），这一层一个
+  名字一格函数，所以第二个 `set` 明说不收。
+
+`autoget` / `bindable` / `event` / `indexed` 与完整声明式 `property { … }` 照旧不收 ——
+它们各自都不只是"多一对函数"：`autoget` 要编译器**生成一格存储**（简单式里那格字段的名字
+是 `m_value`，prop_autoget.rst:26），`bindable` / `event` 要通知机制。
+
+**量出来的**（`tests/jnc` 134/0）：`cases/64-prop.jnc` 把六件事摆在一份里 —— 读、写、
+`const property`、命名空间里的属性、"属性读出来是一格普通值"（参与运算、当实参），
+以及**取值器被调了几次**（`hits=3`：读一次就是一次调用，不是一格缓存下来的内存）。
+五行输出与 `/tmp/c64.c`（`cc -O0 -std=c99 -Wall`，孪生里写的正是那两格函数与那几次调用）
+逐字节相同：`6 42 / 21 20 / 84 / 7 35 / hits=3`。
+
+**尺子**（`/tmp/m68r.sh`）：
+
+「真降得下来」（`sx` 退出码 0）：**50 → 50**（没动）。`ok67 ⊆ ok68`，一份都没退。
+覆盖对得上：612 + 50 = 662。
+
+(文件, 拦路项) 对：6158 → **6264**（+106）。
+
+说明符位置的修饰符 234 → **202**（−32，`property` 那个词从这一格里没了）；
+同时新开一格 **`类的成员属性 '…'` 100 份**。
+
+**这一刀没让任何一份新降下来，而这正是它该有的样子。** 语料里的属性几乎全是**类的成员**
+（`opaque class` 那些 API 文件里的 `X const property m_a;`）—— 顶层那一格在语料里近乎不存在。
+这一刀买的是**机器**：属性表、取/存两个函数的签名、读写两处钩子、"属性名可以是限定名"，
+以及"属性得在签名之前登记"那一遍。下一刀把这套机器接到成员上，那 100 份才动。
+
+> 顺便钉一条：`property` 原先在 `specs` 里被整条拒掉，于是**类体里的那些成员属性根本没被
+> 看见**。这一刀把 `property` 收下之后，如果不在 `typeDecl` 那一遍就地拦，`int property
+> m_value;` 会被当成一格**普通字段**降下去 —— 那不是"拒得松"，那是**换了意思**。
+> 所以那条 `nope` 不是补丁，是这一刀的一部分。这也是 +106 里的一大半：一条 specs 上的拒
+> 变成了每个声明符各一条。
+
+所以下一刀是**类的成员属性**：100 份，而且它是这一刀的机器唯一还没接上的一头。
+
 ## 后果与代价
 
 

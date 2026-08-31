@@ -25,6 +25,9 @@
 //      `opaque class` 上那些**实现在宿主里**的成员（两条：方法与 construct —— jancy 那边由
 //      扩展库的 JNC_BEGIN_CLASS 宏映到 C++ 的函数地址上，abi.rst:60-70，我们还没有宿主面。
 //      construct 那一条尤其不能悄悄放过去：那等于交出一格全零的内存），
+//      属性那一族剩下的三格（类/结构体的成员属性 —— 读挂在取字段那一处、写挂在 lvalue 那一处、
+//      方法体里裸写还要补 this；属性上的复合赋值 `p += 1` —— jancy 那边是先读再写，
+//      这一层的赋值只有一句；给 const 属性赋值 —— jancy 自己也拒，prop.rst:17），
 //      类里的 `get` / `set`（要属性那一套）、构造的**重载**（要重载决议）、
 //      格式化字面量里的 `$!`（要标准库那一格错误对象）与"再喂给 printf 的那一个裸 `%`"
 //      （要运行期的格式解释）、混着拼的字面量（`"a" $"b"`）、二进制字面量 `0x"61 62"` 与
@@ -70,7 +73,8 @@
 //      `-I` 给的 import 目录表是第六十二刀、构造函数体里免分号的 `X.construct(…)` 是
 //      第六十三刀、格式化字面量 `$"…"` 是第六十四刀、`opaque class` 是第六十六刀、
 //      可变性那一族（`readonly` / `cmut`）与访问控制的 Java 式写法（`public` / `protected`）
-//      是第六十七刀，在
+//      是第六十七刀、属性（顶层那一格：`T property p` 加体外的 `p.get()` / `p.set()`）
+//      是第六十八刀，在
 //      cases/24-new-curly.jnc、
 //      cases/25-static-local.jnc、cases/26-printf-prec.jnc、cases/27-printf-star-prec.jnc、
 //      cases/28-printf-flags.jnc、cases/29-printf-sci.jnc、cases/30-printf-gen.jnc、
@@ -84,7 +88,7 @@
 //      cases/53-inherit.jnc、cases/54-virtual.jnc、cases/55-errorcode.jnc、
 //      cases/56-catch.jnc、cases/57-import.jnc、cases/58-uint64.jnc、
 //      cases/59-incdir.jnc、cases/60-btm-ctor.jnc、cases/61-fmtlit.jnc、
-//      cases/62-opaque.jnc、cases/63-dualmod.jnc。cases/imports/
+//      cases/62-opaque.jnc、cases/63-dualmod.jnc、cases/64-prop.jnc。cases/imports/
 //      底下那三份是 57 那一条 import 进来的、cases/incdirs/ 底下那六份是 59 那一条按 `-I`
 //      找到的，**都不是**独立的用例 —— 这一层只扫 cases/ 这一级的 `.jnc`。）
 //
