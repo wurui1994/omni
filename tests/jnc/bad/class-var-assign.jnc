@@ -1,0 +1,20 @@
+// 类的变量**赋不了值** —— 这一条不是"还不收"，是 jancy 自己就拒（第五十二刀）。
+// 出处是文档里那句原话（type_class.rst:19）：
+//   Jancy Classes are what would have been called *reference-types* … You **cannot assign**
+//   varibles or fields of class types. If you need to clone or copy an instance of a
+//   class -- this class should provide a corresponding ``clone`` or ``copy`` method.
+//
+// 所以 `a = b` 里两边都是**对象**时它没有意思：既不是"换个引用"（那要写 `C* p = b`），
+// 也不是"抄一份"（那要类自己提供 clone）。类**指针**之间照旧可以赋 —— 那是换引用。
+class C {
+	int m_x;
+}
+
+int main() {
+	C a;
+	C b;
+	a.m_x = 1;
+	a = b;
+	printf("%d\n", a.m_x);
+	return 0;
+}

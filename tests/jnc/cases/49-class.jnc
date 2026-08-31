@@ -1,0 +1,125 @@
+// 第五十二刀：`class` —— 引用语义、方法与 `this`。
+//
+// 出处（jancy 自己的文档与实现）：
+//   - 类"只能经引用到达"，而且**类变量不能赋值**（type_class.rst:19：Jancy Classes are
+//     what would have been called reference-types … You **cannot assign** varibles or
+//     fields of class types）。
+//   - 声明一个类变量**就是造一个对象**，不是造一条指针（01_Classes.jnc:90-92），局部的那些
+//     在堆上（type_class.rst 的 Construction 一节那句 "same as: `C1* a = heap new C1;`"），
+//     模块级的静态分配。
+//   - `C` 与 `C*` 是**同一个表示**：`calcPtrType` 对 `TypeKind_Class` 走的是
+//     `getClassPtrType`（jnc_ct_DeclTypeCalc.cpp:226-229）—— 所以类上的那个 `*`
+//     不再套一层数据指针。这一层照它落：两者同型，差别只在"声明它要不要造对象"。
+//   - 方法体**体内写与体外写任选其一**（type_class.rst:41-59，`void C1.foo() {}`）。
+//   - 访问控制只有 public / protected，**默认 public**（type_class.rst:23-27）。
+//   - 类指针没有指针算术，有效性就是一次空检查（type_ptr_class.rst 开头）。
+//
+// 期望输出的出处：一份 `cc -O0 -std=c99 -Wall` 的孪生件，七行逐字节相同。**写法差异**三处：
+//   - C 没有引用类型，孪生件里类写成 `struct` + `calloc` + 到处的 `->`；
+//   - C 没有方法，孪生件里方法写成"第一个形参是 self"的自由函数（这一层的落法正是它：
+//     `C$foo(this, …)`）；
+//   - jancy 里 `Counter c;` 自己就造对象，C 那边要显式 `calloc`（模块级那一格也一样，
+//     所以孪生件的 `g_c` 在 main 开头才 calloc —— 这一层是在所有初值之前发那句 pnew）。
+class Counter {
+	int m_n;
+	int m_step;
+
+	// 体内写的方法。裸字段名与 `this.` 两种写法都用一次 —— 两者落在同一句 pfield 上。
+	void bump() {
+		m_n = m_n + m_step;
+		this.m_n = this.m_n + 100;
+	}
+
+	// 同一个类的方法裸名字调（类是一层命名空间），`this` 隐式传进去。
+	int twice() {
+		bump();
+		return m_n * 2;
+	}
+}
+
+// 体外写的方法：与体内写的那些落在同一格名字上（`Counter$reset`）。
+void Counter.reset(int step) {
+	m_n = 0;
+	m_step = step;
+}
+
+class Node {
+	int m_v;
+	Node* m_next;      // 类**指针**的字段：一条引用，不是内嵌的对象
+}
+
+// 嵌套类型：类是一层命名空间，所以 `Pair` 的全名是 `Box.Pair`（type_class.rst 那句
+// "Jancy class is … a namespace"的直接后果；jancy 的 ClassType 就是从 Namespace 派生的）。
+class Box {
+	struct Pair {
+		int m_a;
+		int m_b;
+	}
+
+	int m_sum;
+
+	void take(Pair p) {
+		m_sum = p.m_a + p.m_b;
+	}
+}
+
+// 体外写的方法：签名里的 `Pair` 也在**类那一层**里查（test97.jnc:15 那个 `S1 C.foo()`）
+Pair Box.make(int a) {
+	Pair p;
+	p.m_a = a;
+	p.m_b = a * 2;
+	return p;
+}
+
+Node* mk(int v) {
+	Node* p = new Node;
+	p.m_v = v;
+	return p;
+}
+
+int sum(Node* head) {
+	int s = 0;
+	Node* p = head;
+	while (p != null) {
+		s = s + p.m_v;
+		p = p.m_next;
+	}
+	return s;
+}
+
+Counter g_c;           // 模块级的类变量：那一格在所有初值之前造出来
+
+int main() {
+	Counter c;         // 造一个对象，字段是零
+	c.reset(3);
+	c.bump();
+	printf("%d %d\n", c.m_n, c.m_step);
+	printf("%d\n", c.twice());
+
+	// 引用语义：`r` 与 `c` 是同一个对象，改哪一边都看得见
+	Counter* r = c;
+	r.m_step = 10;
+	c.bump();
+	printf("%d %d\n", c.m_n, r.m_n);
+
+	g_c.reset(7);
+	g_c.bump();
+	printf("%d\n", g_c.m_n);
+
+	Node* h = mk(1);
+	h.m_next = mk(2);
+	h.m_next.m_next = mk(3);
+	printf("%d\n", sum(h));
+
+	Box bx;
+	Box.Pair q = bx.make(4);
+	bx.take(q);
+	printf("%d %d %d\n", q.m_a, q.m_b, bx.m_sum);
+
+	// 写了 `*` 的那一种不造对象：那一格是空引用
+	Node* z;
+	if (z == null)
+		printf("empty\n");
+	printf("%d\n", sum(z));
+	return 0;
+}

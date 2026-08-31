@@ -2542,6 +2542,81 @@ runnable 文件）。尺子那一头的收成是：全量扫一遍，**新露出
 `tyName` 里两句 `shown`），语法、方言、HIR、MIR、四个后端与运行时一个字都没改；自举、
 `tests/jit`、`tests/mir`、`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
 
+### 第五十二刀：`class` —— 引用语义不用方言长东西，"变量里放地址"就是它
+
+按"只有一个卡点、而且带 `int main`"排，上一刀之后 `'class'（只收 struct）` 是第一名（22 份），
+全量里它是 232 条(文件, 卡点)。挑它还有第二条理由：类里的东西一份都没被走进去，所以它后面
+藏着的那些卡点全是暗的 —— 与上一刀挑 `namespace` 是同一个道理。
+
+**先读，再决定长不长方言**。方言里**本来就有** `(class …)` / `(cnew …)` / `(fld …)`
+（`tests/sexpr/cases/07-classes.sx` 逐行证过引用语义），可这一刀**没用它**：那一格的字段还不收
+`(blk T N)`（那份用例自己记着这条边界），而 jancy 的类里数组字段一大把。走的是另一条 ——
+**类在方言里就是一格 `(struct …)`，引用语义由"变量里放的是地址"给出**。于是 `pfield` /
+`pload` / `pstore` 那一整套原样可用，方言一个字没改。
+
+**`C` 与 `C*` 是同一个表示**，这不是我们的简化，是照抄：`calcPtrType` 对 `TypeKind_Class` 走的是
+`getClassPtrType`（jnc_ct_DeclTypeCalc.cpp:226-229）—— 类上的那个 `*` 不再套一层数据指针。
+所以这一层的类型就一格 `{k:'class', name}`，另带一个 `own` 标记"源码里写的是不带 `*` 的那一种"。
+`own` 只管三件事，同型判定不看它：
+
+- **声明要不要造对象**：`C1 a;` 在 jancy 那边就是造一个（01_Classes.jnc:90-92；文档里更直白：
+  局部的那些 "allocated on heap (same as: `C1* a = heap new C1;`)"），`C* p;` 不造（空引用）。
+  模块级的静态分配 —— 落成 `globalCells` 里那句 pnew，排在所有初值之前。
+- **赋不了值**：type_class.rst:19 那句 "You **cannot assign** varibles or fields of class
+  types"。类指针照旧可以赋 —— 那是换个引用，不是拷贝对象。
+- **jancy 自己拒的那三条**照抄它的话：形参（"function cannot accept '%s' as an argument"，
+  jnc_ct_Parser.cpp:2537-2545）、返回（"function cannot return '%s'"，
+  jnc_ct_DeclTypeCalc.cpp:432-441）、数组元素（"cannot create array of '%s'"，同一份 384-390）。
+
+**方法：类是一层命名空间，于是它连一行新机制都不用**。jancy 的 `ClassType` 派生自 `Namespace`，
+而方法体**体内写与体外写任选其一**（type_class.rst:41-59）。所以 `nsFlat` 把类体里的 `fn-def`
+当成"命名空间是这个类"的顶层条目提出来 —— 名字于是与体外写的 `void C.foo() {}` 落在**同一格**
+（`C$foo`，第五十一刀的 `qual` 早就会把点换成 `$`）。落地形状是一个自由函数、`this` 当第一个
+形参（方言里叫 `$this`：`this` 是 JS 的关键字，而 JS 后端把方言的名字原样发出去）。裸写的字段名
+（`m_x`）由 `selfField` 接成 `(pfield (var $this) m_x)`，裸写的方法名（`foo()`）由 `resolve`
+在类那一层里找着、`this` 隐式补上 —— 两条都是"类是一层命名空间"的直接后果。
+
+**嵌套类型是同一条**（`class C { struct S { … } }` 里的 S 就是 `C.S`）：一并提到顶层，登记成
+`C$S`。它逼出两处 ns 的摆放：类体里查名要从**这个类**那一层起（`S1 foo();`，test97.jnc:8），
+而**体外写的方法签名也要**（`S1 C.foo()`，同一份 15 行）—— 后者用的是新的 `nsExtra` 而不是
+`this.ns`，因为登记那一处要的是源码里写的 `C.foo`，`qual` 不能再叠一次前缀。
+
+**一处顺手补的、也是量出来才发现的**：`class T {}` jancy 收（test124.jnc:18、test151.jnc:21），
+而方言的结构体至少要一个字段。类这边发一格 `$hdr` 占位 —— 理由不是"糊过去"：jancy 的类
+**本来就有对象头**（01_Classes.jnc:12-14："Actual user fields are preceded with a header
+containing meta-data such as type, vtable pointer, root object pointer, GC-related flags"），
+一格占位比"零字节的对象"更贴它。**struct 那边不补**：jancy 的 struct 没有头，补一格就是在
+布局上说假话 —— 所以空 struct 记成一条边界（`bad/empty-struct`，卡在方言那一侧）。
+
+**边界三条**：类的基类（`bad/class-base`，要对象头与虚表：`basetype1..9` 加
+`virtual`/`abstract`/`override`）、类里的 `construct`/`destruct`/`get`/`set`
+（`bad/class-construct`，构造要"造完接着调"、析构要"作用域退出按逆序"、`static construct` 要
+一格模块级闸门 —— 三样各是一刀的量，半条构造比没有构造更糟）、类**值**的字段
+（内嵌的对象，要"父对象造出来时把它也造出来"）。加一条 jancy 自己也拒的：给类的变量赋值
+（`bad/class-var-assign`）。
+
+**这一层比 jancy 松的一处**：`public:` / `protected:` 照收，但**不做可见性检查**
+（type_class.rst:23-27，默认 public）。松的方向是"能跑的程序行为不变"，所以先记着。
+
+**期望输出的出处**：一份 `cc -O0 -std=c99 -Wall` 的孪生，八行逐字节相同。**写法差异**三处：
+C 没有引用类型（孪生件里 `struct` + `calloc` + 满地 `->`）、没有方法（写成"第一个形参是
+self"的自由函数，这一层的落法正是它）、类变量不会自己造对象（孪生件要显式 `calloc`）。
+
+**放行了什么**：`test/jnc/test24.jnc`、`test124.jnc`、`test151.jnc` 三份整份跑通（五腿一致）；
+`test97.jnc` 只剩空 struct 那一条。尺子那一头：`'class'（只收 struct）` 那 232 条清零，
+**新露出 605 条**(文件, 卡点)、去掉 331 条，新露的头几名是类的基类 131、`opaque class` 74、
+`try` 与 `? :` 当语句 65、类里的 `construct` 45、修饰符 `override` 45、`property` 19。
+"只有一个卡点、带 `int main`"那张榜现在是：`import` 13、printf 的格式串不是字面量 7、
+修饰符 `bigendian` 3、`opaque class` 2 —— 类那一族从榜首整片消失了。
+
+**跑过的轴**：`tests/jnc`（87/0，新增 `cases/49-class` 与 `bad/class-base`、
+`bad/class-construct`、`bad/class-var-assign`、`bad/empty-struct`）、`tests/sexpr`（75/0）、
+`tests/glr`（20/0）。**没跑的**：`tests/asy`、`tests/oir` —— 只动了
+`frontend-jnc/lower.js`（类型那一格、`nsFlat`/`aggHoist`、`typeName`/`typeDecl`、
+`fnSig`/`fnDef`、`callExpr`/`methodCallee`、`localDecl`/`globalDecl`、`binary`/`truthy`/`null`），
+语法、方言、HIR、MIR、四个后端与运行时一个字都没改；自举、`tests/jit`、`tests/mir`、
+`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
+
 ## 后果与代价
 
 - 方言从"没有可算术的引用"变成"有"。这一格会渗到 MIR 与四个后端，改不回去。
