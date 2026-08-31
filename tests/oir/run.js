@@ -503,6 +503,23 @@ reMatch("'", 'g', 'abc');
 reMatch('[0-9]+', 'g', 'a12b345');
 reMatch('x*', 'g', 'axb');
 
+// 正则当值 + exec（ADR-0011 决策 10 的第二半）。结果是一格 list（整体匹配在 0、
+// 捕获组依次在后），所以拿 stringify 比；参照侧同样是 new RegExp(...).exec(...)。
+// 注意 exec 的结果在 node 那边还挂着 index/input，stringify 不印它们 —— 正是这个值域
+// 里取不到的那两个，所以这个判据不会偷偷放过差别。
+const REV = (p, f) => js('js_re_new', [str(p), str(f)]);
+function reExec(p, f, s) {
+  c(`re/exec/${p}|${f}|${P(s)}`, J(js('js_re_exec', [REV(p, f), str(s)])),
+    `JSON.stringify(${RE(p, f)}.exec(${P(s)}))`);
+}
+reExec('[0-9]+', '', 'a12b');
+reExec('[0-9]+', '', 'abc');
+reExec('[0-9]+', 'g', 'a12b');
+reExec('^\\s*\\((fn|cfn|class)\\s+([A-Za-z_$][\\w$]*)', '', '  (fn foo (x)');
+reExec('^(?:function|const|let|var)\\s+([A-Za-z_$][\\w$]*)', '', 'const $x1 = 1;');
+reExec('(a)|(b)', '', 'b');
+reExec('x*', 'g', 'axb');
+
 reSplit('\\s+', '', 'a b  c');
 reSplit('\\s+', '', 'a b  c', 2);
 reSplit('\\s+', '', '  a b');

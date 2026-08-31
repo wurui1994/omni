@@ -52,8 +52,17 @@ enum {
      装不进 int64_t，而在 JS 那边它就是一个普通 BigInt。位存在 u.i 里，按 uint64_t 读。
      **只有装不下的那一半用这个标签** —— 装得下就照旧是 INT，于是每个值只有一种表示，
      相等、哈希、字典键都不用为它开特例（两个标签的取值区间是不交的）。 */
-  OMNI_DYN_UINT
+  OMNI_DYN_UINT,
+  /* 正则当值那一格（ADR-0011 决策 10 的第二半）：字面量不在
+     .test/.replace/.match/.split 的接收位上时求值出一格正则对象。载荷是
+     omni_js_re_obj*（source / flags / lastIndex），编译结果照旧走
+     omni_js_re_get 的缓存 —— 这一格不存编译产物。 */
+  OMNI_DYN_RE
 };
+
+/* 正则对象。lastIndex 是它自己的可变状态：带 g 的 exec 循环靠它推进，
+   JS 侧的 $JsRe 是同一个三元组，两边的推进算法必须逐字对应。 */
+typedef struct { omni_s16 src; omni_s16 flags; int64_t li; } omni_js_re_obj;
 
 typedef struct {
   int tag;
@@ -401,6 +410,9 @@ bool omni_re_global(omni_re re);
 bool omni_re_multiline(omni_re re);
 bool omni_re_search(omni_re re, omni_s16 s, int64_t start, int64_t *caps);
 omni_re omni_js_re_get(omni_dyn pattern, omni_dyn flags);
+/* 正则当值：造一格正则对象（ADR-0011 决策 10）。编译产物不存在这里 —— exec 每次
+   照旧问 omni_js_re_get 要，缓存键是 (source, flags)。 */
+omni_dyn omni_js_re_new(omni_dyn source, omni_dyn flags);
 bool omni_js_re_test(omni_dyn pattern, omni_dyn flags, omni_dyn s);
 
 /* omni_js_num.c —— JS 的 Number / Math / BigInt。

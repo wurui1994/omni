@@ -536,6 +536,16 @@ function $dictSet(m, k, v) { m.set(k, v); return v; }
 // 和普通对象分开 —— o.has(k) 这种成员派发只有标签能区分。所以造两个子类。
 class $JsMap extends Map {}
 class $JsSet extends Map {}
+// 正则对象（ADR-0011 决策 10 的第二半）。刻意**不用宿主的 RegExp 当这一格的载体**：
+// lastIndex 的推进要与 C 侧逐字对应，靠宿主自己那份状态两边就分叉了。编译产物也不存在
+// 这里 —— exec 每次照旧问 $js_re_get 要，缓存键就是 (src, flags)，与 C 侧同一个口径。
+class $JsRe {
+  constructor(src, flags) {
+    this.src = src;
+    this.flags = flags;
+    this.li = 0;
+  }
+}
 function $dynTag(v) {
   if (v === null) return "null";
   if (v === undefined) return "undefined";
@@ -549,6 +559,7 @@ function $dynTag(v) {
       if (v instanceof $JsSet) return "Set";
       if (v instanceof Map) return "dict";
       if (Array.isArray(v)) return "list";
+      if (v instanceof $JsRe) return "regexp";
       return "function";  // 闭包记录 { fp, c_* }
   }
 }
@@ -623,6 +634,8 @@ function $js_str(v) {
     // JS 语义就是宿主的 Number -> String，直接用；C 侧的 js_num_str 照规范复刻它
     case "real": return String(v);
     case "string": return v;
+    // String(/x/g) 是 "/x/g"
+    case "regexp": return "/" + v.src + "/" + v.flags;
     default: $rt_error("cannot convert " + $dynTag(v) + " to string");
   }
 }
@@ -1567,6 +1580,7 @@ function $js_type_tag(v) {
       if (v instanceof Map) return "dict";
       if (v instanceof Set) return "set";
       if (Array.isArray(v)) return "list";
+      if (v instanceof $JsRe) return "regexp";
       return "function";
   }
 }
@@ -1652,6 +1666,28 @@ function $js_re_find(re, s, start) {
   if (start > s.length) return null;
   re.lastIndex = start;
   return re.exec(s);
+}
+// 正则当值：造一格与 C 侧同形的三元组（source / flags / lastIndex）
+function $js_re_new(src, flags) { return new $JsRe($js_asS16(src), $js_asS16(flags)); }
+// 正则对象上的 exec，照 ECMA-262 22.2.7.2：带 g 才用 lastIndex，找到就把它推到匹配的末尾
+// （**不加 1** —— 空匹配在 JS 里就是停在原地，那是调用方的事，这里不许自己"修好"），
+// 没找到就归 0。不带 g 的一律从 0 起，也不动 lastIndex。
+// 结果是一格 list：整体匹配在 0、捕获组依次在后。JS 的 exec 结果上还挂着 index / input，
+// 而这个值域里 list 带不了属性（决策 18）—— 那两个取不到，是画出来的边界。
+function $js_re_exec(rd, sd) {
+  if ($dynTag(rd) !== "regexp") $rt_error($dynTag(rd) + " is not a regexp");
+  const s = $js_asS16(sd);
+  const g = rd.flags.includes("g");
+  const at = g ? rd.li : 0;
+  const m = at < 0 ? null : $js_re_find($js_re_get(rd.src, rd.flags), s, at);
+  if (m === null) {
+    if (g) rd.li = 0;
+    return null;
+  }
+  if (g) rd.li = m.index + m[0].length;
+  const out = [];
+  for (let i = 0; i < m.length; i++) out.push(m[i] === undefined ? undefined : m[i]);
+  return out;
 }
 function $js_re_test(pat, flags_, s) {
   const flags = $js_asS16(flags_);

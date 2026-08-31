@@ -251,8 +251,12 @@ class Lower {
         break;
       case 'VarDecl':
         for (const d of s.decls) {
-          // 正则是"编译期常量"，不占全局槽：它只能出现在使用点上（ADR-0011 决策 10）
-          if (s.kind === 'const' && d.id.type === 'Ident' && d.init && d.init.type === 'Regex') {
+          // 不带 g 的正则可以当"编译期常量"折到使用点上，不占全局槽：它没有可观察的
+          // 状态（lastIndex 谁都不碰），折一份和共用一份不可区分。
+          // **带 g 的不行** —— lastIndex 是那一格自己的状态，`re.exec(s)` 的循环靠它推进，
+          // 折到使用点就成了每次一格新的，循环永远停在第一个匹配上（ADR-0011 决策 10）。
+          if (s.kind === 'const' && d.id.type === 'Ident' && d.init && d.init.type === 'Regex'
+            && !d.init.flags.includes('g')) {
             this.regexConsts.set(d.id.name, { body: d.init.body, flags: d.init.flags });
             continue;
           }
@@ -1089,8 +1093,10 @@ class Lower {
         this.err(e.span, 'class expressions are not lowered yet (ADR-0011 landing step 6c)');
         return undefExpr();
       case 'Regex':
-        this.err(e.span, 'a regex can only be used directly in .test / .replace / .match / .split (ADR-0011 decision 10)');
-        return undefExpr();
+        // 决策 10 的第二半：不在 .test/.replace/.match/.split 的接收位上，就求值出一格
+        // 正则对象。字面量每次求值都造一格新的（ES5 起就是这个语义），所以 `g` 的
+        // lastIndex 从 0 起 —— 循环里的 `re.exec(s)` 要推进，得先把它存进一个变量。
+        return op('js_re_new', [s16(e.body), s16(e.flags)]);
       case 'Spread':
         this.err(e.span, 'spread is only supported in array literals and call arguments');
         return undefExpr();
@@ -1132,8 +1138,10 @@ class Lower {
     const ent = this.lookup(e.name);
     if (ent) return this.readEntry(ent);
     if (this.regexConsts.has(e.name)) {
-      this.err(e.span, `'${e.name}' holds a regex, which can only be used directly in .test / .replace / .match / .split`);
-      return undefExpr();
+      // 折起来的那批一律不带 g（见 collectTop），所以当值用时现造一格是对的：
+      // 没有 lastIndex 要共用，造一份和共用一份不可区分
+      const r = this.regexConsts.get(e.name);
+      return op('js_re_new', [s16(r.body), s16(r.flags)]);
     }
     if (this.globals.has(e.name)) return globalRef(this.globals.get(e.name).name);
     // 顶层函数当值用：包一个零捕获的转发闭包（每个函数只包一次）

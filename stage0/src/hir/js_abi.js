@@ -180,6 +180,11 @@ export const JS_ABI = {
   js_re_match: { js: '$js_re_match', c: 'omni_js_re_match', arity: 3 },
   js_re_split: { js: '$js_re_split', c: 'omni_js_re_split', arity: 4 },
   js_re_replace: { js: '$js_re_replace', c: 'omni_js_re_replace', arity: 4, throws: true },
+  // 决策 10 的第二半：字面量不在上面四个接收位上时，求值出**一格正则对象**
+  // （source / flags / lastIndex 三元组，编译产物照旧走上面那个缓存）。
+  // 只长 exec 一格：量过，仓库里正则当值的用法就是 `re.exec(s)` 的循环。
+  js_re_new: { js: '$js_re_new', c: 'omni_js_re_new', arity: 2 },
+  js_re_exec: { js: '$js_re_exec', c: 'omni_js_re_exec', arity: 2 },
 
   // -------------------------------------------------- 字符串/数组的其余缺口
   // 都是量出来的：split 的字符串分隔符形式 4 处（'/' 与 '\n'，都不带 limit），
@@ -297,6 +302,7 @@ export const JS_TAG_C = {
   Map: 'OMNI_DYN_MAP',
   Set: 'OMNI_DYN_SET',
   real: 'OMNI_DYN_REAL',
+  regexp: 'OMNI_DYN_RE',
 };
 
 /** @type {Record<string, Record<string, string>>} */
@@ -336,6 +342,7 @@ export const JS_METHODS = {
   concat: { on: { list: 'js_arr_concat' } },
   reverse: { on: { list: 'js_arr_reverse' } },
   fill: { on: { list: 'js_arr_fill' } },
+  exec: { on: { regexp: 'js_re_exec' } },
   join: { on: { list: 'js_arr_join' } },
   map: { on: { list: 'js_arr_map' } },
   filter: { on: { list: 'js_arr_filter' } },

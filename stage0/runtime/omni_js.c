@@ -56,6 +56,7 @@ omni_dyn omni_js_type_tag(omni_dyn v) {
     case OMNI_DYN_DICT: n = "dict"; break;
     case OMNI_DYN_MAP: n = "Map"; break;
     case OMNI_DYN_SET: n = "Set"; break;
+    case OMNI_DYN_RE: n = "regexp"; break;
     default: n = "function"; break;
   }
   return omni_dyn_of_s16(omni_s16_of_utf8(omni_str_fmt("%s", n)));
@@ -188,6 +189,12 @@ static omni_s16 to_s16(omni_dyn v) {
       return omni_s16_of_utf8(omni_str_fmt("%llu", (unsigned long long)omni_dyn_u64(v)));
     case OMNI_DYN_REAL: return omni_s16_of_utf8(js_num_str(v.u.r));
     case OMNI_DYN_STR16: return v.u.s16;
+    /* String(/x/g) 是 "/x/g" —— 源与 flags 之间那两条斜杠是 JS 的字面量写法 */
+    case OMNI_DYN_RE: {
+      omni_js_re_obj *r = (omni_js_re_obj *)v.u.ref;
+      omni_s16 slash = omni_s16_of_utf8(omni_str_new("/", 1));
+      return omni_s16_cat(omni_s16_cat(omni_s16_cat(slash, r->src), slash), r->flags);
+    }
     default:
       omni_errorf("cannot convert %s to string", omni_dyn_tag_name(v.tag));
       return omni_s16_of_utf8(omni_str_new("", 0));

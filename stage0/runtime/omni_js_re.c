@@ -766,8 +766,7 @@ typedef struct {
 static re_cache_ent re_cache[RE_CACHE_N];
 static int re_cache_count;
 
-omni_re omni_js_re_get(omni_dyn pattern_d, omni_dyn flags_d) {
-  omni_s16 pattern = omni_js_as_s16(pattern_d);
+omni_re omni_js_re_get(omni_dyn pattern_d, omni_dyn flags_d) {  omni_s16 pattern = omni_js_as_s16(pattern_d);
   omni_s16 flags = omni_js_as_s16(flags_d);
   size_t h = (size_t)omni_s16_hash(pattern) * 31u + (size_t)omni_s16_hash(flags);
   for (int probe = 0; probe < 8; probe++) {
@@ -791,6 +790,19 @@ omni_re omni_js_re_get(omni_dyn pattern_d, omni_dyn flags_d) {
     break;
   }
   return re;
+}
+
+/* 正则当值（ADR-0011 决策 10 的第二半）：造一格正则对象。编译产物不存在这里 ——
+   exec 每次照旧问 omni_js_re_get 要，缓存键就是 (source, flags)。
+   这里先编译一次：模式不合法要在**造它的那一刻**报错，与 JS 的
+   `new RegExp(bad)` 一样，不能等到第一次 exec 才响。 */
+omni_dyn omni_js_re_new(omni_dyn source, omni_dyn flags) {
+  omni_js_re_obj *r = (omni_js_re_obj *)omni_alloc((int64_t)sizeof(omni_js_re_obj));
+  omni_js_re_get(source, flags);
+  r->src = omni_js_as_s16(source);
+  r->flags = omni_js_as_s16(flags);
+  r->li = 0;
+  return omni_dyn_of_ref((void *)r, OMNI_DYN_RE);
 }
 
 /* test：仓库里所有 `.test()` 的正则都没有 g（量过），所以没有 lastIndex 这回事，

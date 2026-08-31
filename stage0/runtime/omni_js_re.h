@@ -149,6 +149,45 @@ static omni_dyn omni_js_re_split(omni_dyn pat, omni_dyn flags, omni_dyn sd, omni
   } \
   LT##_push(out, omni_dyn_of_s16(omni_s16_slice(s, p, s.len))); \
   return omni_js_arr_wrap(out); \
+} \
+OMNI_JS_RE_4(LT, DT)
+
+/* 第四段：正则对象上的 exec（ADR-0011 决策 10 的第二半）。
+   照 ECMA-262 22.2.7.2：带 g 才用 lastIndex，从那里起找；找到就把 lastIndex 推到匹配的
+   末尾（**不加 1** —— 空匹配在 JS 里就是停在原地，那是调用方的事，这里不许自己"修好"），
+   没找到就把 lastIndex 归 0。不带 g 的一律从 0 起，也不动 lastIndex。
+   结果是一格 list：整体匹配在 0，捕获组依次在后面，没参与的组是 undefined。
+   **画出来的边界**：JS 的 exec 结果上还挂着 index / input，而这个值域里 list 带不了属性
+   （决策 18），所以那两个取不到 —— 要用就得让 ABI 再长一格，不是悄悄给个错的。 */
+#define OMNI_JS_RE_4(LT, DT) \
+static omni_dyn omni_js_re_exec(omni_dyn rd, omni_dyn sd) { \
+  omni_js_re_obj *r; \
+  omni_re re; \
+  omni_s16 s; \
+  int64_t caps[2 * OMNI_RE_MAX_CAPS]; \
+  int64_t at; \
+  int ng, i; \
+  LT out; \
+  if (rd.tag != OMNI_DYN_RE) { \
+    omni_errorf("%s is not a regexp", omni_dyn_tag_name(rd.tag)); \
+  } \
+  r = (omni_js_re_obj *)rd.u.ref; \
+  re = omni_js_re_get(omni_dyn_of_s16(r->src), omni_dyn_of_s16(r->flags)); \
+  s = omni_js_as_s16(sd); \
+  at = omni_re_global(re) ? r->li : 0; \
+  if (at < 0 || at > s.len || !omni_re_search(re, s, at, caps)) { \
+    if (omni_re_global(re)) r->li = 0; \
+    return omni_dyn_null(); \
+  } \
+  if (omni_re_global(re)) r->li = caps[1]; \
+  ng = omni_re_groups(re); \
+  out = LT##_new(); \
+  LT##_push(out, omni_dyn_of_s16(omni_s16_slice(s, caps[0], caps[1]))); \
+  for (i = 1; i <= ng; i++) { \
+    LT##_push(out, caps[2 * i] < 0 ? omni_dyn_undef() \
+                                   : omni_dyn_of_s16(omni_s16_slice(s, caps[2 * i], caps[2 * i + 1]))); \
+  } \
+  return omni_js_arr_wrap(out); \
 }
 
 #endif

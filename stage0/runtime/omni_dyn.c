@@ -13,6 +13,8 @@ const char *omni_dyn_tag_name(int t) {
     /* 无符号 64 位那一格（ADR-0011）：在 JS 域里它就是一个 BigInt，所以名字与 INT
        一样是 "int" —— 错误消息里不该冒出一个源语言里没有的类型名 */
     "int",
+    /* 正则对象（ADR-0011 决策 10）：JS 的 typeof 是 "object"，但错误消息里要能认出来 */
+    "regexp",
   };
   return names[t];
 }
