@@ -124,7 +124,10 @@
     (punct "dynamic countof" "dynamic countof")
     (punct "dynamic typeof" "dynamic typeof")
     (punct "dynamic offsetof" "dynamic offsetof")
-    (keyword ID INTEGER "break2" "break3" "continue2" "continue3" "basetype2")
+    ;; `break2` / `continue3` / `basetype2`：层号后缀。这里**不写改判类型** —— 写了
+    ;; `(keyword ID INTEGER …)` 的话它们会被改判成整数 token，于是 `break2;` 变成一条
+    ;; 表达式语句（量出来的：原来就是这样，`("break2" ";")` 那几条规则一直没被走到）。
+    (keyword ID "break2" "break3" "continue2" "continue3" "basetype2")
     ;; 预定义的字面量宏（Lexer.rl 里就是 LITERAL）：`__DIR__ "/usb.ids"` 靠相邻拼接接上
     (keyword ID LITERAL "__DIR__" "__FILE__" "__FUNC__" "__LINE__" "__DATE__" "__TIME__")
     (keyword ID

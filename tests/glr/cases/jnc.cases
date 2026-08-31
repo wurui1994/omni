@@ -80,7 +80,7 @@ x = dynamic (Foo*) y; ==> (unit-add (unit) (expr-stmt (assign "=" (name x) (dyna
 x = dynamic sizeof(y); ==> (unit-add (unit) (expr-stmt (assign "=" (name x) (dynamic-sizeof (name y)))))
 x = declof(y); ==> (unit-add (unit) (expr-stmt (assign "=" (name x) (declof (name y)))))
 x = bindingof(y); ==> (unit-add (unit) (expr-stmt (assign "=" (name x) (bindingof (name y)))))
-x = basetype2.foo(); ==> (unit-add (unit) (expr-stmt (assign "=" (name x) (call (field basetype2 foo) (args)))))
+x = basetype2.foo(); ==> (unit-add (unit) (expr-stmt (assign "=" (name x) (call (field (basetype 2) foo) (args)))))
 x = await f(); ==> (unit-add (unit) (expr-stmt (assign "=" (name x) (await (call (name f) (args))))))
 x = try f(); ==> (unit-add (unit) (expr-stmt (assign "=" (name x) (try-expr (call (name f) (args))))))
 
@@ -96,7 +96,7 @@ try usbDb.load(__DIR__ "/usb.ids"); ==> (unit-add (unit) (expr-stmt (try-expr (c
 ;; ---- 语句 ------------------------------------------------------------------------
 if (c) f(); else g(); ==> (unit-add (unit) (if (name c) (expr-stmt (call (name f) (args))) (expr-stmt (call (name g) (args)))))
 for (int i = 0; i < n; i++, off += 4) f(i); ==> (unit-add (unit) (for (var-decl (specs int (mods) (mods)) (dcls (init (dcl (ptrs) (name i) (suffixes) (no-ctor)) 0))) (binary "<" (name i) (name n)) (exprs-add (exprs (post-inc (name i))) (assign "+=" (name off) 4)) (expr-stmt (call (name f) (args (name i))))))
-switch (state, string_t(p, 1)) { case "a": break2; } ==> (unit-add (unit) (switch (exprs-add (exprs (name state)) (call (name string_t) (args-add (args (name p)) 1))) (unit-add (unit-add (unit) (case "a")) (expr-stmt break2))))
+switch (state, string_t(p, 1)) { case "a": break2; } ==> (unit-add (unit) (switch (exprs-add (exprs (name state)) (call (name string_t) (args-add (args (name p)) 1))) (unit-add (unit-add (unit) (case "a")) (break 2))))
 assert(x > 0) ==> (unit-add (unit) (assert (binary ">" (name x) 0)))
 dyfield myproto { int x; } ==> (unit-add (unit) (dyfield myproto (unit-add (unit) (var-decl (specs int (mods) (mods)) (dcls (dcl (ptrs) (name x) (suffixes) (no-ctor)))))))
 reactor r { onevent bindingof(g_use)() { f(); } } ==> (unit-add (unit) (fn-def (specs (no-type) (mods-add (mods) reactor)) (dcl (ptrs) (name r) (suffixes) (no-ctor)) (compound (unit-add (unit) (onevent (events (bindingof (name g_use))) (formals) (compound (unit-add (unit) (expr-stmt (call (name f) (args))))))))))
@@ -107,8 +107,8 @@ try { f(); } catch: g(); ==> (unit-add (unit-add (unit-add (unit) (try (compound
 unsafe { f(); } ==> (unit-add (unit) (unsafe (compound (unit-add (unit) (expr-stmt (call (name f) (args)))))))
 nestedscope: ==> (unit-add (unit) (label "nestedscope"))
 dylayout (p) { dyfield int x; } ==> (unit-add (unit) (dylayout (name p) (compound (unit-add (unit) (var-decl (specs int (mods-add (mods) dyfield) (mods)) (dcls (dcl (ptrs) (name x) (suffixes) (no-ctor))))))))
-break3; ==> (unit-add (unit) (expr-stmt break3))
-continue2; ==> (unit-add (unit) (expr-stmt continue2))
+break3; ==> (unit-add (unit) (break 3))
+continue2; ==> (unit-add (unit) (continue 2))
 throw; ==> (unit-add (unit) (throw))
 
 ;; ---- 该拒的要拒 ------------------------------------------------------------------

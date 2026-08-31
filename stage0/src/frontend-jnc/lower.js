@@ -432,8 +432,11 @@ class JncLower {
     this.unsafe = false;       // 在 (unsafe …) 里面
     this.mainBody = null;      // `int main()` 的体（降成方言的 `(main …)`）
     this.retTy = T_VOID;       // 当前函数的返回类型
-    this.forStep = null;       // 当前所在 for 的步进（非 null 时 continue 要拦，见 stmt）
-    this.swGuard = false;      // 与最近那个真循环之间隔着 switch 摊出来的合成循环（第三十六刀）
+    // 循环栈（第四十一刀）。每进一层"可跳的东西"压一格：真循环是 `sw: false`，switch 摊出来
+    // 的那圈合成循环是 `sw: true`。`break N` 数**全部**（jancy 把 switch 也算一层，
+    // cflow_switch.rst:37），`continue N` 只数真循环 —— 与 C 一致。`step` 记着这一层是不是
+    // 带步进的 for（那格的 continue 还接不了，见 stmt）。
+    this.loops = [];
     this.aliases = new Map();  // typedef 起的类型名 -> 解出来的那一格（第三十八刀）
     this.enums = new Map();    // 枚举名 -> { base, members: Map(名字 -> BigInt) }（第三十九刀）
     this.tmp = 0;              // 生成名字的计数（do-while 的那格标志）
@@ -1441,21 +1444,37 @@ class JncLower {
     }
     if (h === 'return') return this.retStmt(n, ind);
     if (h === 'break' || h === 'continue') {
-      const lvl = isAtom(n.items[1]) ? n.items[1].value : '1';
-      if (lvl !== '1') { this.nope(n, `带层号的 ${h}${lvl}`); return null; }
-      if (h === 'continue' && this.forStep !== null) {
-        // 方言的 `cont` 跳到循环头，而 for 的步进在体的末尾 —— 直接接就会漏掉一次步进。
-        // 与其给个错答案，不如在这儿停下（要接就得给方言加一条"带步进的循环"）。
+      const lvl = isAtom(n.items[1]) ? Number(n.items[1].value) : 1;
+      const st = this.loops;
+      // `break N`：jancy 把 switch 也算一层（cflow_switch.rst:37 那个 `break2` 就是
+      // "出 switch 再出循环"），而 switch 摊出来的合成循环在方言里正好也是一层 ——
+      // 两边一一对应，所以层号直接搬。
+      if (h === 'break') {
+        if (st.length < lvl) {
+          this.err(n, `break${lvl === 1 ? '' : lvl} 要往外数 ${lvl} 层（switch 也算一层），这里只有 ${st.length} 层`);
+          return null;
+        }
+        return [`${pad}(brk${lvl === 1 ? '' : ` ${lvl}`})`];
+      }
+      // `continue N` 只数**真循环**：switch 不是一层（与 C 同）。所以 switch 里的
+      // `continue` 落到方言里是 `(cont 2)` —— 跳过合成的那圈，回到外面那个真循环。
+      let seen = 0;
+      let idx = -1;
+      for (let i = st.length - 1; i >= 0; i--) {
+        if (!st[i].sw && ++seen === lvl) { idx = i; break; }
+      }
+      if (idx < 0) {
+        this.err(n, `continue${lvl === 1 ? '' : lvl} 要往外数 ${lvl} 层循环（switch 不算），这里只有 ${seen} 层`);
+        return null;
+      }
+      if (st[idx].step) {
+        // 方言的 `cont` 跳到循环头，而 for 的步进被摊到了体的末尾 —— 直接接会漏掉一次步进。
+        // 与其给个错答案，不如在这儿停下（落地要给 for 的体套一圈一次性循环）。
         this.nope(n, '带步进的 for 里的 continue（方言的 cont 会跳过步进）');
         return null;
       }
-      if (h === 'continue' && this.swGuard) {
-        // switch 摊出来的那一格是一圈**合成的**循环（第三十六刀），`cont` 会跳到它的头上
-        // 而不是外层那个真循环 —— 那是个死循环。要接就得给方言加带层号的 `cont`。
-        this.nope(n, 'switch 里的 continue（要方言里带层号的 cont）');
-        return null;
-      }
-      return [`${pad}(${h === 'break' ? 'brk' : 'cont'})`];
+      const level = st.length - idx;
+      return [`${pad}(cont${level === 1 ? '' : ` ${level}`})`];
     }
     if (h === 'unsafe') {
       const save = this.unsafe;
@@ -2415,8 +2434,9 @@ class JncLower {
    *   3. **每组一层作用域**。jancy 给每个 case 块隐式开一层（cflow_switch.rst:15），所以
    *      `case 0: int i = 10;` 与 `case 1: int i = 20;` 不冲突 —— 这里每组包一个 `(do …)`。
    *
-   * 代价记在这儿：那圈 `while` 是**合成的**，`cont` 会跳到它头上。所以 switch 里的
-   * `continue` 当场拒（见 stmt 里的 swGuard），要接它得给方言加带层号的 `cont`。
+   * 那圈 `while` 是**合成的**，所以它在 `this.loops` 里记成 `sw: true`：`break` 数它
+   * （jancy 也把 switch 算一层，cflow_switch.rst:37），`continue` 不数它 —— switch 里的
+   * `continue` 落到方言里是 `(cont 2)`，跳过这一圈回到外面那个真循环（第四十一刀）。
    */
   switchStmt(n, ind) {
     const pad = ' '.repeat(ind);
@@ -2455,8 +2475,7 @@ class JncLower {
         disp.push(`${pad}(if (bin "==" (var ${sv}) (int ${k})) (do (set ${sk} (int ${i}))))`);
       }
     }
-    const saveSw = this.swGuard;
-    this.swGuard = true;
+    this.loops.push({ sw: true, step: false });
     const bodies = [];
     let bad = false;
     for (let i = 0; i < groups.length; i++) {
@@ -2470,7 +2489,7 @@ class JncLower {
       this.scopes.pop();
       bodies.push(out);
     }
-    this.swGuard = saveSw;
+    this.loops.pop();
     if (bad) return null;
     const out = [
       `${pad}(let ${sv} int ${v.code})`,
@@ -2572,13 +2591,9 @@ class JncLower {
     const pad = ' '.repeat(ind);
     const c = this.cond(n.items[1]);
     if (c === null) return null;
-    const save = this.forStep;
-    const saveSw = this.swGuard;
-    this.forStep = null;
-    this.swGuard = false;
+    this.loops.push({ sw: false, step: false });
     const b = this.body(n.items[2], ind + 2);
-    this.forStep = save;
-    this.swGuard = saveSw;
+    this.loops.pop();
     if (b === null) return null;
     return [`${pad}(while ${c.code}`, b, `${pad})`];
   }
@@ -2600,14 +2615,10 @@ class JncLower {
     const pad = ' '.repeat(ind);
     const flag = `$do${this.tmp}`;
     this.tmp++;
-    const save = this.forStep;
-    const saveSw = this.swGuard;
-    this.forStep = null;
-    this.swGuard = false;
+    this.loops.push({ sw: false, step: false });
     const b = this.body(n.items[1], ind + 4);
     const c = this.cond(n.items[2]);
-    this.forStep = save;
-    this.swGuard = saveSw;
+    this.loops.pop();
     if (b === null || c === null) return null;
     return [
       `${pad}(let ${flag} bool (bool true))`,
@@ -2659,15 +2670,10 @@ class JncLower {
       const c = this.cond(cn);
       if (c === null) bad = true; else cond = c.code;
     }
-    const saveStep = this.forStep;
-    const saveSw = this.swGuard;
-    this.forStep = steps.length === 0 ? null : steps;
-    this.swGuard = false;
+    this.loops.push({ sw: false, step: steps.length > 0 });
     const b = this.body(n.items[4], ind + 4);
-    this.forStep = saveStep;
-    this.swGuard = saveSw;
-    this.scopes.pop();
-    if (bad || b === null) return null;
+    this.loops.pop();
+    this.scopes.pop();    if (bad || b === null) return null;
     out.push(`${pad}  (while ${cond}`);
     out.push(`${pad}    (do`);
     out.push(b);

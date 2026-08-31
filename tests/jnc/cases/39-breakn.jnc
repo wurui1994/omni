@@ -1,0 +1,104 @@
+// `break2` / `continue2` / `break3`（ADR-0016 第四十一刀）。语法早就认（jnc.grammar:480-485
+// 把它们摊成 `(break 2)` / `(continue 3)`），拒在降级那一层的一句「带层号的 break2」。
+//
+// 语义出处：
+//   - 词法是 `'break' [1-9]`，层号就是那一位数字，`break1` 等于 `break`
+//     （jnc_ct_Lexer.rl:317-320）。文档见 cflow_break.rst 与 samples/jnc/83_BreakN.jnc。
+//   - **switch 算一层 break，但不算一层 continue**：cflow_switch.rst:37 那句
+//     "break2 is used to break out of the switch statment and then out of the outer loop"。
+//     所以 switch 里的 `continue` 跳的是外面那个真循环（与 C 同），而 `break2` 是"出 switch
+//     再出循环"。f3 两条都钉住了。
+//
+// 期望输出的出处：一份 `cc -O0 -std=c99` 的孪生程序，四行逐字节相同（五条腿也各自与它相同）。
+// 与那份 C 的唯一写法差别：C 没有 break2 / continue2，多层跳只能写 goto —— jancy 的文档
+// 正是拿"不必写 goto"当卖点的。
+//
+// 边界：带步进的 `for` 里的 `continue` 还是拒（bad/for-continue）—— 方言的 `cont` 跳到
+// 循环头，而 `for` 的步进被摊到了体的末尾。那要另一刀（给 for 的体套一圈一次性循环）。
+
+int f1() {              // break2
+    int acc = 0;
+    int i = 0;
+    while (i < 3) {
+        int j = 0;
+        while (j < 3) {
+            acc += i * 10 + j;
+            if (i * 3 + j == 4)
+                break2;
+            j++;
+        }
+        i++;
+    }
+    return acc;
+}
+
+int f2() {              // continue2
+    int acc = 0;
+    int i = 0;
+    while (i < 3) {
+        i++;
+        int j = 0;
+        while (j < 3) {
+            j++;
+            if (j == 2)
+                continue2;
+            acc += i * j;
+        }
+        acc += 100;     // continue2 每轮都跳过这一句：答案里没有 100 的倍数就是证据
+    }
+    return acc;
+}
+
+int f3() {              // switch 里的 continue 与 break2
+    int acc = 0;
+    int i = 0;
+    while (i < 6) {
+        i++;
+        switch (i) {
+        case 1:
+            acc += 1;
+            break;
+        case 2:
+            continue;   // 跳的是外面那个 while，不是 switch 摊出来的那一圈
+        case 3:
+            acc += 3;
+            break;
+        case 4:
+            break2;     // 出 switch，再出 while
+        default:
+            acc += 1000;
+        }
+        acc += 100;
+    }
+    return acc;
+}
+
+int f4() {              // break3 与单层 break 混写：两者数的是同一套层
+    int acc = 0;
+    int i = 0;
+    while (i < 3) {
+        int j = 0;
+        while (j < 3) {
+            int k = 0;
+            while (k < 3) {
+                acc += 1;
+                if (acc > 7)
+                    break3;
+                if (k == 1)
+                    break;
+                k++;
+            }
+            j++;
+        }
+        i++;
+    }
+    return acc;
+}
+
+int main() {
+    printf("a=%d\n", f1());
+    printf("b=%d\n", f2());
+    printf("c=%d\n", f3());
+    printf("d=%d\n", f4());
+    return 0;
+}

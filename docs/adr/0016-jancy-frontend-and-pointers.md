@@ -1991,6 +1991,48 @@ cflow_break.rst 与 samples/jnc/83_BreakN.jnc），而方言只有单层的 `(br
 `frontend-jnc/lower.js` 的 `zeroOf` 与 `interp/builtin.js` 的 `zeroOf` 上，那是第一刀
 （8cc16be）就欠下的债，与这一刀无关，记在这里免得下次重查。
 
+### 第四十一刀：`break2` / `continue2` 接上层号，顺手抓出一处**词法**上的静默错
+
+上一刀方言长出了层号，这一刀把 jancy 那一头接上去，并且删掉第三十六刀欠的
+`bad/switch-continue`。
+
+**语法那一半早就写好了** —— `jnc.grammar:480-485` 把 `break2;` 摊成 `(break 2)`。但它一直
+没被走到：那一行 `(keyword ID INTEGER "break2" "break3" "continue2" "continue3" "basetype2")`
+里的 `INTEGER` 不是"这几个词是整数后缀"的意思，而是**把这个 ID 改判成 INTEGER token**
+（`glr/lex.js:222-226`：第三项若又是个名字，它就是改判目标）。于是 `break2;` 被当成一条
+**表达式语句**，`(expr-stmt break2)`。这是一处静默错：语料照旧成树（526/528 没变），
+golden 文件里还把错的形状记成了期望值（`tests/glr/cases/jnc.cases` 三行）。改成
+`(keyword ID "break2" …)`，三行 golden 一起改回正确形状，`table/jnc` 快照不变（这几个词
+本来就是终结符，动的只是词法改判），受影响的 12 份语料文件逐个重解都还成树。
+
+**层号怎么对上**：前端记一个循环栈 `this.loops`，每层一格 `{ sw, step }` —— 真循环
+`sw: false`，switch 摊出来的那圈合成循环 `sw: true`。两条规矩，都是量出来的：
+
+- **`break N` 数全部**。jancy 把 switch 也算一层（cflow_switch.rst:37：`break2` 是"出
+  switch 再出循环"），而合成的那圈在方言里正好也是一层 —— 一一对应，层号直接搬。
+- **`continue N` 只数真循环**（与 C 同）。所以 switch 里的 `continue` 落到方言里是
+  `(cont 2)`：跳过合成的那圈，回到外面那个真循环。这正是第三十六刀拒掉的那一格。
+
+这一格顺手把 `swGuard`（布尔）与 `forStep`（能兼作标志的步进串）两个字段并成了一个栈 ——
+它们记的本来就是"最近那一层是什么"，而层号一进来，"最近"就不够用了。
+
+**剩下的那条边界重画得更窄**：`bad/switch-continue` 删掉，换成 `bad/for-continue` ——
+带步进的 `for` 里的 `continue` 还是拒，因为方言里没有 `for`，步进被摊到了体的末尾，而 `cont`
+跳的是循环头。落地要给 for 的体套一圈**一次性**循环（`(while (bool true) (do <体> (brk)))`），
+让 `continue` 变成那圈的 `(brk)` —— 落点正好在步进之前。多层 `(brk N)` 已经有了，所以现在
+只差"什么时候套"这一个判断。（注意这条边界现在也拦着 `continue2` 指向一个带步进的外层 for。）
+
+**期望输出的出处**：一份 `cc -O0 -std=c99` 的孪生，四行逐字节相同（24 / 6 / 204 / 8）。
+唯一的写法差别是 C 没有 `break2`，多层跳只能写 `goto` —— jancy 的文档正是拿"不必写 goto"
+当卖点的（samples/jnc/83_BreakN.jnc 开头那段）。
+
+**跑过的轴**：`tests/jnc`（61/0，新增 `cases/39-breakn` 与 `bad/for-continue`，删掉
+`bad/switch-continue`）、`tests/glr`（20/0，三行 golden 改回正确形状）、语料里带
+`break2`/`break3`/`continue2`/`continue3`/`basetype2` 的 12 份文件逐个重解（12/12 成树）。
+**没跑的**：`tests/sexpr`、`tests/asy`（方言、MIR、四个后端与运行时一个字都没改 —— 只动了
+`frontend-jnc/` 的降级与语法，加两处测试头注释）；自举、`tests/jit`、`tests/mir`、
+`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
+
 ## 后果与代价
 
 - 方言从"没有可算术的引用"变成"有"。这一格会渗到 MIR 与四个后端，改不回去。
