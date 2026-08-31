@@ -1,0 +1,18 @@
+// 属性指针写在顶层（ADR-0016 第七十二刀的边界）。
+// `int property* g_p` 里那个词写在星号**前面** —— 于是它进的是那格 `*` 自己的 prefix
+// （`Declarator::addPointerPrefix` 那三句，jnc_ct_Decl.cpp:292-297），落出来是
+// `getPropertyType` 再套一层 `getPropertyPtrType`（jnc_ct_DeclTypeCalc.cpp:80-85）：
+// 那一格里存的是"取/存两个函数 + 那个对象"，与一格普通指针两码事。
+// 第七十刀在函数体与形参那两处拦过它，顶层与类体里当时漏着 —— 会被悄悄登记成
+// "类型是 int* 的属性"。这一条钉住那个洞。
+int property* g_p;
+
+int* g_p.get() {
+	return null;
+}
+
+int main() {
+	int* q = g_p;
+	printf("%d\n", q == null);
+	return 0;
+}

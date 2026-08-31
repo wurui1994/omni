@@ -655,6 +655,11 @@ function structBehind(t) {
  *  `this` 也在里面（第五十二刀）：它是方法的第一个形参，本身就是一格。 */
 const LV_SHAPES = new Set(['name', 'field', 'index', 'ptr-field', 'indirect', 'this']);
 
+/** `T* … property p` 里，最后一个 `*` 后面那一组词里**这一层认得的**那几个（第七十二刀）。
+ *  取自 jancy 那张 `TypeModifierMaskKind_Property`（jnc_ct_Decl.h:75-85）：属性这条声明能带
+ *  的就是那一张表。别的词落在那儿明说不收 —— 免得"提上来"变成"悄悄丢掉"。 */
+const PROP_TAIL_MODS = new Set(['property', 'autoget', 'const', 'readonly', 'cmut', 'errorcode']);
+
 /** 这条语句是 `名字:` 那种标签吗（第五十九刀）。语法上 `catch:` / `finally:` / `nestedscope:`
  *  都发成 `(label "名字")`，见 jnc.grammar 那三条。 */
 function isLabel(n, name) {
@@ -1358,7 +1363,7 @@ class JncLower {
     // 这两遍只查名字（类名在 typeName 那一遍就坐下了）、不发一行 decls。
     for (const e of items) {
       if (!isList(e.it) || head(e.it) !== 'var-decl') continue;
-      if (!this.propMod(e.it.items[1])) continue;
+      if (!this.propMod(e.it.items[1], e.it.items[2])) continue;
       this.ns = e.ns;
       this.propName(e.it);
     }
@@ -1537,10 +1542,18 @@ class JncLower {
    * 签名之前、而模块级变量那一遍在签名之后，两遍都要看同一条 var-decl，所以"是不是属性"
    * 这一问得先能白问一次。
    */
-  propMod(n) {
-    if (!isList(n) || head(n) !== 'specs') return false;
-    for (const m of [...this.flat(n.items[2]), ...this.flat(n.items[3])]) {
-      if (isAtom(m) && m.value === 'property') return true;
+  propMod(n, dcls = null) {
+    if (isList(n) && head(n) === 'specs') {
+      for (const m of [...this.flat(n.items[2]), ...this.flat(n.items[3])]) {
+        if (isAtom(m) && m.value === 'property') return true;
+      }
+    }
+    // 星号后面那一边（第七十二刀）：`Icon* property m_icon;` 的 property 在声明符里 ——
+    // 那也是一格属性，见 tailMods 那处。所以这一问要把每个声明符的最后一组也过一遍。
+    if (dcls !== null) {
+      for (const d of this.flat(dcls)) {
+        if (this.tailMods(d).includes('property')) return true;
+      }
     }
     return false;
   }
@@ -1562,19 +1575,26 @@ class JncLower {
     // 收下来之后就地拒，理由说清楚。
     const sp = this.specs(n.items[1], true);
     if (sp === null) return null;
-    if (sp.stat) return this.nope(n, '`static` 写在属性上');
-    // `errorcode` 那一位在 jancy 那边落在**取/存那两个函数**的类型上（属性也进 vtable，所以
-    // `virtual` 同理）。这一层的 errorcode 是按函数名记的一张表、虚派发是按方法名接的一格
-    // 标签，而属性那两个函数的名字是这一层自己拼的（`p$get`）—— 两条都还接不上。
-    if (sp.errc) {
-      return this.nope(n, '`errorcode` 写在属性上（那一位落在取/存那两个函数上，'
-        + '而这一层的 errorcode 是按函数名记的）');
-    }
-    if (sp.virt !== null) return this.nope(n, `'${sp.virt}' 写在属性上`);
     for (const d of this.flat(n.items[2])) {
       if (isList(d) && head(d) === 'init') { this.nope(d, '属性的初值'); continue; }
-      const info = this.declarator(d, sp);
+      const info = this.declarator(d, sp, n.items[1], true);
       if (info === null) continue;
+      // 那几个词可能写在星号的**后面**（第七十二刀），所以这三条问的是声明符自己那份袋子。
+      const dsp = info.sp;
+      if (!dsp.prop) {
+        this.nope(d, '同一条声明里属性与普通的一格混着写（`T* property a, b;`）');
+        continue;
+      }
+      if (dsp.stat) { this.nope(d, '`static` 写在属性上'); continue; }
+      // `errorcode` 那一位在 jancy 那边落在**取/存那两个函数**的类型上（属性也进 vtable，所以
+      // `virtual` 同理）。这一层的 errorcode 是按函数名记的一张表、虚派发是按方法名接的一格
+      // 标签，而属性那两个函数的名字是这一层自己拼的（`p$get`）—— 两条都还接不上。
+      if (dsp.errc) {
+        this.nope(d, '`errorcode` 写在属性上（那一位落在取/存那两个函数上，'
+          + '而这一层的 errorcode 是按函数名记的）');
+        continue;
+      }
+      if (dsp.virt !== null) { this.nope(d, `'${dsp.virt}' 写在属性上`); continue; }
       // 声明符上带形参表的是**索引属性**（第七十刀）：`int property g_p(size_t i);` ——
       // 那一串不是"函数的形参"，是**下标**（prop_indexed.rst:15：属性带数组语义，下标的类型
       // 与含义都由写的人定）。取/存两个函数各在前面多这一串，读写落成
@@ -1597,10 +1617,10 @@ class JncLower {
       // `autoget`（第七十一刀）：这一格的取值器**不用写** —— 编译器生成一格存储，读属性就是
       // 读那一格（prop_autoget.rst:15-17）。简单声明式里存值器的体拿 `m_value` 称呼它
       //（同处:26）。与索引属性互斥，那是同一份文档最后一句（:47）。
-      const store = sp.agt ? this.autoStore(d, full, cls, info.type, idx) : null;
-      if (sp.agt && store === null) continue;
+      const store = dsp.agt ? this.autoStore(d, full, cls, info.type, idx) : null;
+      if (dsp.agt && store === null) continue;
       this.props.set(full, {
-        type: info.type, cls, cst: sp.cst, idx, get: false, set: false, store,
+        type: info.type, cls, cst: dsp.cst, idx, get: false, set: false, store,
       });
     }
     return null;
@@ -1656,7 +1676,7 @@ class JncLower {
    */
   globalDecl(n) {
     // 属性那一条在前面那一遍（propName）已经登记过了（第六十八刀）—— 它不是一格内存。
-    if (this.propMod(n.items[1])) return null;
+    if (this.propMod(n.items[1], n.items[2])) return null;
     const sp = this.specs(n.items[1]);
     if (sp === null) return null;
     for (const d of this.flat(n.items[2])) {
@@ -2093,13 +2113,14 @@ class JncLower {
       if (sp === null) continue;
       // 成员属性（第六十九刀）：它**不是一格字段** —— 不在这儿把它挑出来就会被当成一格普通
       // 内存，那是"悄悄换了意思"。登记留给下面那一格（run 里属性那一遍，排在签名之前），
-      // 这儿只把节点连当时的 ns（就是这个类）攒起来。
-      if (sp.prop) {
+      // 这儿只把节点连当时的 ns（就是这个类）攒起来。这一问走 propMod 而不是 `sp.prop`：
+      // 那个词也可能写在星号后面（第七十二刀，`Icon* property m_icon;`）。
+      if (this.propMod(m.items[1], m.items[2])) {
         // 结构体的成员属性不收：类才是一层命名空间，而取/存那两个函数要从那一层查过来
         //（`C.p.get()` 里的 `C.` 与体内裸写 `p.get()` 是同一条路，第五十二刀）。
         if (!cls) {
           for (const pd of this.flat(m.items[2])) {
-            const pi = this.declarator(pd, sp);
+            const pi = this.declarator(pd, sp, m.items[1], cls);
             this.nope(pd, `结构体的成员属性 '${pi === null ? '?' : pi.name}'`);
           }
           continue;
@@ -2548,10 +2569,10 @@ class JncLower {
    *
    *  `allowVirt` 只有方法那两处给 true（第五十七刀）：`virtual`/`override`/`abstract` 在
    *  语法里也落在这张表上，可它只对方法有意思 —— 别的位置默认报错，免得那个词被悄悄丢掉。 */
-  specs(n, allowVirt = false) {
+  specs(n, allowVirt = false, extra = []) {
     if (!isList(n) || head(n) !== 'specs') { this.err(n, '认不出的说明符表'); return null; }
     const mods = [...this.flat(n.items[2]), ...this.flat(n.items[3])]
-      .map((m) => (isAtom(m) ? m.value : '?'));
+      .map((m) => (isAtom(m) ? m.value : '?')).concat(extra);
     let thin = false;
     let stat = false;
     let uns = false;
@@ -2691,9 +2712,35 @@ class JncLower {
     return { type: base, thin, stat, fnptr, virt, errc, prop, cst, agt };
   }
 
+  /**
+   * `*` 那一族修饰符里，**最后一个 `*` 后面**那一组（第七十二刀）。
+   *
+   * jancy 的分法在 `Declarator::addPointerPrefix` 那三句里（jnc_ct_Decl.cpp:292-297）：
+   * 见到一个 `*` 就把**到这儿为止攒着的**那些词搬进这个 `*` 自己的 prefix、然后把袋子清空。
+   * 于是"写在 `*` 前面的词"修饰的是那一格指针，而"写在最后一个 `*` 后面的词"留在袋子里 ——
+   * 那就是**这条声明**的词。`DeclTypeCalc::calcType` 把这两袋分开用：prefix 里带 property 的
+   * 走 `getPropertyType` + `getPropertyPtrType`（**属性指针**，jnc_ct_DeclTypeCalc.cpp:80-85），
+   * 而循环之后剩下那袋带 property 的走 `getPropertyType(type)`（**类型是那格指针的属性**，
+   * 同文件:145-150）。所以 `int property* p` 与 `Icon* property p` 是两码事，差的只是那个词
+   * 写在星号的哪一边。
+   *
+   * 这一层的树形状恰好是同一个分法：写在第一个 `*` 前面的词在 `(specs …)` 里，写在第 i 个
+   * `*` 后面的词在第 i 组 `(ptr (mods …))` 里 —— 所以**最后一组**就是 jancy 那只剩下的袋子。
+   */
+  tailMods(d) {
+    if (!isList(d) || head(d) !== 'dcl') return [];
+    const groups = this.flat(d.items[1]);
+    if (groups.length === 0) return [];
+    const last = groups[groups.length - 1];
+    return this.flat(last).flatMap((m) => this.flat(m)).map((m) => (isAtom(m) ? m.value : '?'));
+  }
+
   /** 说明符表 + 一串 `*` -> 类型。`int thin*` 的 thin 管的是**最外层**那个 `*`
-   *  （jancy 的 `int thin* p` 是"指向 int 的 thin 指针"）。 */
-  ptrsTy(sp, ptrsNode, node) {
+   *  （jancy 的 `int thin* p` 是"指向 int 的 thin 指针"）。
+   *
+   *  `dropTail` 是第七十二刀那一格：最后一组的词已经被 declarator 提成**这条声明**的词
+   *  （见 tailMods），这儿就不能再当指针的修饰符看一遍。 */
+  ptrsTy(sp, ptrsNode, node, dropTail = false) {
     let t = sp.type;
     const groups = this.flat(ptrsNode);
     if (groups.length === 0) {
@@ -2701,7 +2748,8 @@ class JncLower {
       return t;
     }
     for (let i = 0; i < groups.length; i++) {
-      const mods = this.flat(groups[i]).flatMap((m) => this.flat(m)).map((m) => (isAtom(m) ? m.value : '?'));
+      const mods = dropTail && i === groups.length - 1 ? []
+        : this.flat(groups[i]).flatMap((m) => this.flat(m)).map((m) => (isAtom(m) ? m.value : '?'));
       let thin = sp.thin && i === 0;
       for (const m of mods) {
         if (m === 'thin') { thin = true; continue; }
@@ -2738,13 +2786,42 @@ class JncLower {
     return sp.type;
   }
 
-  /** `(dcl 前缀 核心 后缀 构造)` -> `{name, type, formals, ctor, special}`。
+  /** `(dcl 前缀 核心 后缀 构造)` -> `{name, type, formals, ctor, special, sp}`。
    *  `formals` 不是 null 就说明这是个**函数**声明符（后缀里有一对括号）。
    *  `ctor` 不是 null 就说明名字后面挂着一串构造实参（`C1 c(100)` / `C1 g_a construct(1)`，
    *  type_class.rst:143-149）。`special` 不是 null 就说明核心是 `construct` /
-   *  `static construct`，这时 `name` 是**类名那一半**（体外写法带着它，体内写法是空的）。 */
-  declarator(d, sp) {
+   *  `static construct`，这时 `name` 是**类名那一半**（体外写法带着它，体内写法是空的）。
+   *  `sp` 是**这一格声明符自己**的说明符袋子（第七十二刀）：`T* property p` 里那个 property
+   *  写在星号后面，属于声明而不属于指针，所以袋子要按声明符补一次 —— 关心 prop / cst / agt
+   *  的调用方一律读 `info.sp`，不要读自己那一份。 */
+  declarator(d, sp, spNode = null, allowVirt = false) {
     if (!isList(d) || head(d) !== 'dcl') return this.err(d, '认不出的声明符');
+    // `T* … property p`（第七十二刀）：最后一个 `*` 后面那一组词是**这条声明**的词，不是那格
+    // 指针的（三条引文都在 tailMods 那处）。这儿只把 property 那一族提上来，而且提的条件是
+    // 那一组里真写着 `property` —— 于是 `int* thin p` 这类"指针的词写在后面"照旧拦着，不会被
+    // 悄悄当成一格 thin 指针。
+    const tail = this.tailMods(d);
+    let dropTail = false;
+    if (tail.includes('property') && spNode !== null) {
+      // 属性这条声明能带的词就是 jancy 那张 `TypeModifierMaskKind_Property`
+      //（jnc_ct_Decl.h:75-85：Property | ErrorCode | Const | ReadOnly | AutoGet | Bindable |
+      // Indexed | BigEndian | Volatile | 调用约定）里这一层认得的那几个。
+      const bad = tail.find((m) => !PROP_TAIL_MODS.has(m));
+      if (bad !== undefined) return this.nope(d, `属性的声明里 '*' 后面的 '${bad}'`);
+      const sp2 = this.specs(spNode, allowVirt, tail);
+      if (sp2 === null) return null;
+      sp = sp2;
+      dropTail = true;
+    }
+    // `int property* p` 是**属性指针**（35_PropertyPtr.jnc:97-126）：那个词写在星号**前面**，
+    // 于是它进的是那格 `*` 自己的 prefix，落出来是 `getPropertyPtrType`
+    // （jnc_ct_DeclTypeCalc.cpp:80-85）—— 里头存的是"取/存两个函数 + 那个对象"，与一格普通
+    // 指针两码事。第七十刀在函数体与形参那两处拦过它，可顶层与类体里当时漏着：那儿会把它
+    // **悄悄登记成一格"类型是 int* 的属性"**。一处拦住，三处都对。
+    if (sp.prop && !dropTail && this.flat(d.items[1]).length > 0) {
+      return this.nope(d, '属性指针（`int property* p` —— 那一格里存的是"取/存两个函数 + '
+        + '那个对象"，与一格普通指针两码事）');
+    }
     // 声明符尾巴上的构造实参（第五十三刀）。jancy 为了躲开 `C1 a();` 的歧义把空实参那一种
     // 写成 `C1 a construct();`，带实参的两种写法都收（type_class.rst:125-149）。
     let ctor = null;
@@ -2774,12 +2851,21 @@ class JncLower {
         return this.nope(s, `${sk} 上的声明符后缀 '${isList(s) ? head(s) : '?'}'`);
       }
       if (formals0 === null) return this.err(d, `'${sk}' 后面要一对括号`);
+      // 取值器的返回类型也要过那一串 `*`（第七十二刀）：`Icon* g_p.get()` 回的是 `Icon*`。
+      // 先前这儿直接抄 `sp.type`，于是星号被吞掉 —— 类型是指针的属性因此永远对不上它自己的
+      // 取值器（报的是"回的是 int，而属性是 int*"，认错了人）。
+      let at = J_VOID;
+      if (acc) {
+        at = this.ptrsTy(sp, d.items[1], d, dropTail);
+        if (at === null) return null;
+      }
       return {
         name: owner,
-        type: acc ? sp.type : J_VOID,
+        type: at,
         formals: formals0,
         ctor: null,
         special: sk,
+        sp,
       };
     }
     const name = this.qname(d.items[2]);
@@ -2787,7 +2873,7 @@ class JncLower {
     // 函数指针（第五十五刀）：`function` 一出现，名字后面那对括号就不是"这是个函数声明"，
     // 而是**这一格的类型**的形参表 —— 所以它走自己那一支，不进下面的数组/函数后缀那套。
     if (sp.fnptr) return this.fnPtrDcl(d, sp, name, ctor);
-    let t = this.ptrsTy(sp, d.items[1], d);
+    let t = this.ptrsTy(sp, d.items[1], d, dropTail);
     if (t === null) return null;
     let formals = null;
     // 数组后缀先攒着，出了循环再**从右往左**套（第十九刀）：`int a[10][20]` 的元素是
@@ -2837,7 +2923,7 @@ class JncLower {
       return this.nope(s, `声明符后缀 '${sh}'`);
     }
     for (let i = dims.length - 1; i >= 0; i--) t = tArr(t, dims[i]);
-    return { name, type: t, formals, ctor, special: null };
+    return { name, type: t, formals, ctor, special: null, sp };
   }
 
   /**
@@ -2902,7 +2988,7 @@ class JncLower {
       if (ft === J_VOID) continue;                 // `void` 的形参表就是"不带形参"（C 与 jancy 同）
       params.push(ft);
     }
-    return { name, type: tFn(params, sp.type, sp.thin), formals: null, ctor, special: null };
+    return { name, type: tFn(params, sp.type, sp.thin), formals: null, ctor, special: null, sp };
   }
 
   /* -------------------------------------------------------------- 函数 */
@@ -3076,6 +3162,15 @@ class JncLower {
     return { base: cur, subs };
   }
 
+  /** 那对方括号是**属性读出来那一格**的，不是属性自己的（第七十二刀）。属性没声明下标、
+   *  而它的类型是一格指针时就是这样：`int* property g_buf;` 里 `g_buf[0]` 先调取值器拿到那格
+   *  指针、再解引用 —— 与 `int* p; p[0]` 一模一样。所以这一问回真时两处索引钩子都让路，
+   *  普通那条解引用的路接着走。没声明下标又不是指针的那些照旧报"不是索引属性"。 */
+  propSubOnValue(pn) {
+    const pi = this.props.get(pn);
+    return pi !== undefined && pi.idx.length === 0 && isPtr(pi.type);
+  }
+
   /** `p[i…]` 的读（第七十刀）：索引属性那几格下标就是取值器的实参。不是属性回 undefined
    *  （那条路继续按"解引用"走），出错回 null。 */
   propIndexGet(n) {
@@ -3083,6 +3178,7 @@ class JncLower {
     const t = this.propTarget(ch.base);
     if (t === undefined) return undefined;
     if (t === null) return null;
+    if (this.propSubOnValue(t.pn)) return undefined;
     return this.propGet(n, t.pn, t.self, ch.subs);
   }
 
@@ -3224,7 +3320,11 @@ class JncLower {
     // 说明符位置没有类型、只有 `property` 那个词，体里是取/存两个函数与属性自己的字段
     //（prop_full.rst:15：那对花括号开的是一层命名空间）。这一层还接不上那一层，而落到下面
     // specs 那儿报的是"这条声明没有类型"—— 认错了人。
-    if (this.propMod(n.items[1])) {
+    //
+    // 那个词也可能写在星号后面（第七十二刀）：`log.Writer* const property m_logWriter { … }`
+    // 是语料里最常见的一种。这一问漏了它就会落到 ptrsTy 那儿报"指针后面的修饰符 'property'"
+    // —— 同样是认错了人，真拦路的是那对花括号。
+    if (this.propMod(n.items[1]) || this.tailMods(n.items[2]).includes('property')) {
       return this.nope(n, '完整声明式的属性（`property p { … }` 那对花括号开的是一层命名空间，'
         + 'prop_full.rst:15）');
     }
@@ -4255,10 +4355,22 @@ class JncLower {
         base = o.code;
         bt = o.type;
       } else {
-        const o = this.lvalue(ob);
-        if (o === null) return null;
-        base = this.read(o);
-        bt = o.type;
+        // 左边是一格**属性**时（第七十二刀）：`g_icon.m_k` 里的 g_icon 先读一次（调取值器），
+        // 读出来的是一格指针，之后取字段与 `p->f` 同一条。属性自己**没有被写**，所以这跟
+        // "把属性当一格可写的内存用"不是一回事 —— 那一条拦的是 `g_icon++` 那种就地改。
+        const pt = this.propTarget(ob);
+        if (pt === null) return null;
+        if (pt !== undefined) {
+          const v = this.propGet(ob, pt.pn, pt.self);
+          if (v === null) return null;
+          base = v.code;
+          bt = v.type;
+        } else {
+          const o = this.lvalue(ob);
+          if (o === null) return null;
+          base = this.read(o);
+          bt = o.type;
+        }
       }
       const st = structBehind(bt);
       // 枚举走到这儿说明左边不是**一个名字**（那一条在 expr0 的 field 支上，enumValueMember）。
@@ -4377,7 +4489,10 @@ class JncLower {
         const ch = this.indexChain(lhs);
         const t = this.propTarget(ch.base);
         if (t === null) return null;
-        if (t !== undefined) return this.propSet(n, t.pn, op, n.items[3], pad, t.self, ch.subs);
+        // 没声明下标、类型又是指针的那些让路（第七十二刀）：那对方括号是读出来那一格的。
+        if (t !== undefined && !this.propSubOnValue(t.pn)) {
+          return this.propSet(n, t.pn, op, n.items[3], pad, t.self, ch.subs);
+        }
       }
       const lv = this.lvalue(n.items[2]);
       if (lv === null) return null;

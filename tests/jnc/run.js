@@ -29,14 +29,17 @@
 //      查过来，结构体在这一层不是；`virtual` 写在属性上 —— 这一层的虚派发按方法名接，属性
 //      那两个函数的名字是自己拼的；属性当一格**可写的内存**用（`b.p++` / `&b.p`）—— 读写各是
 //      一次调用，"就地改"接不上，而报"没有这个字段"是认错了人；属性指针（`int property* p`）
-//      —— 那一格里存的是"取/存两个函数 + 那个对象"，与函数指针两码事，而 `property` 这个词
-//      specs 是收下的，不拦就会被悄悄降成一格普通指针；完整声明式 `property p { … }` ——
-//      那对花括号开的是一层命名空间（prop_full.rst:15），落到 specs 那儿报的是"这条声明没有
-//      类型"，也是认错了人；`autoget` 写在不是属性的那一格上 —— 它在 jancy 里第二个落点是
-//      完整声明式体内那格字段（prop_autoget.rst:34），而那种写法整个不收，所以剩下的只能是
-//      写错地方，丢掉那个词会让它静默变成一格普通的模块级变量；属性上的复合赋值 `p += 1`
-//      —— jancy 那边是先读再写，这一层的赋值只有一句；给 const 属性赋值 —— jancy 自己也拒，
-//      prop.rst:17；autoget 与索引一起写 —— 同样是 jancy 自己也拒，prop_autoget.rst:47），
+//      —— 那个词写在星号**前面**，于是它进的是那格 `*` 自己的 prefix、落出来是
+//      `getPropertyPtrType`（jnc_ct_DeclTypeCalc.cpp:80-85）：里头存的是"取/存两个函数 + 那个
+//      对象"，与一格普通指针两码事。函数体、形参、顶层（prop-ptr-top）三处各钉一条 —— 不拦
+//      就会被悄悄降成一格普通指针，或者悄悄登记成"类型是 int* 的属性"；完整声明式
+//      `property p { … }` —— 那对花括号开的是一层命名空间（prop_full.rst:15），落到 specs
+//      那儿报的是"这条声明没有类型"，也是认错了人；`autoget` 写在不是属性的那一格上 —— 它在
+//      jancy 里第二个落点是完整声明式体内那格字段（prop_autoget.rst:34），而那种写法整个不收，
+//      所以剩下的只能是写错地方，丢掉那个词会让它静默变成一格普通的模块级变量；属性上的复合
+//      赋值 `p += 1` —— jancy 那边是先读再写，这一层的赋值只有一句；给 const 属性赋值 ——
+//      jancy 自己也拒，prop.rst:17；autoget 与索引一起写 —— 同样是 jancy 自己也拒，
+//      prop_autoget.rst:47），
 //      构造的**重载**（要重载决议），
 //      格式化字面量里的 `$!`（要标准库那一格错误对象）与"再喂给 printf 的那一个裸 `%`"
 //      （要运行期的格式解释）、混着拼的字面量（`"a" $"b"`）、二进制字面量 `0x"61 62"` 与
@@ -85,7 +88,8 @@
 //      是第六十七刀、属性（顶层那一格：`T property p` 加体外的 `p.get()` / `p.set()`）
 //      是第六十八刀、类的成员属性（`obj.p` 的读写与方法体里裸写属性名补 `this`）是
 //      第六十九刀、索引属性（`T property p(下标…)`，读写是 `p[i]`）是第七十刀、
-//      `autoget` 属性（取值器不用写，编译器生成的那一格叫 `m_value`）是第七十一刀，在
+//      `autoget` 属性（取值器不用写，编译器生成的那一格叫 `m_value`）是第七十一刀、
+//      类型是指针的属性（`T* property p` —— 那个词写在星号**后面**）是第七十二刀，在
 //      cases/24-new-curly.jnc、
 //      cases/25-static-local.jnc、cases/26-printf-prec.jnc、cases/27-printf-star-prec.jnc、
 //      cases/28-printf-flags.jnc、cases/29-printf-sci.jnc、cases/30-printf-gen.jnc、
@@ -100,7 +104,8 @@
 //      cases/56-catch.jnc、cases/57-import.jnc、cases/58-uint64.jnc、
 //      cases/59-incdir.jnc、cases/60-btm-ctor.jnc、cases/61-fmtlit.jnc、
 //      cases/62-opaque.jnc、cases/63-dualmod.jnc、cases/64-prop.jnc、
-//      cases/65-propmem.jnc、cases/66-propidx.jnc、cases/67-propauto.jnc。cases/imports/
+//      cases/65-propmem.jnc、cases/66-propidx.jnc、cases/67-propauto.jnc、
+//      cases/68-propptr.jnc。cases/imports/
 //      底下那三份是 57 那一条 import 进来的、cases/incdirs/ 底下那六份是 59 那一条按 `-I`
 //      找到的，**都不是**独立的用例 —— 这一层只扫 cases/ 这一级的 `.jnc`。）
 //

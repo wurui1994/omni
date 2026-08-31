@@ -1,0 +1,73 @@
+// 第七十二刀：那个词写在星号的哪一边 —— `T* property p` 是"类型是 T* 的属性"，
+// 而 `T property* p` 是**属性指针**（后者还不收，见 bad/prop-ptr-top.jnc）。
+
+class Icon {
+	int m_k;
+
+	construct(int k) {
+		m_k = k;
+	}
+}
+
+// 类型是类指针的属性：存值器带逻辑（只认非空），取值器回那一格
+Icon* g_cur;
+
+Icon* property g_icon;
+
+Icon* g_icon.get() {
+	return g_cur;
+}
+
+g_icon.set(Icon* v) {
+	if (v != null) {
+		g_cur = v;
+	}
+}
+
+// 类型是数据指针的 autoget 属性：生成的那一格存储是 `int*`（第七十一刀 + 这一刀）
+int* autoget property g_buf;
+
+g_buf.set(int* p) {
+	m_value = p;
+}
+
+class Btn {
+	// 成员的、类型是类指针的 autoget 属性 —— 生成的那一格是类里的一个字段
+	Icon* autoget property m_icon;
+
+	int m_hits;
+
+	m_icon.set(Icon* v) {
+		m_hits = m_hits + 1;
+		m_value = v;
+	}
+
+	int mine() {
+		return m_icon.m_k;
+	}
+}
+
+int main() {
+	Icon* a = new Icon(7);
+	Icon* b = new Icon(9);
+
+	g_icon = a;
+	printf("%d\n", g_icon.m_k);
+	g_icon = null;
+	printf("%d\n", g_icon.m_k);
+	g_icon = b;
+	printf("%d\n", g_icon.m_k);
+
+	int t[3];
+	t[0] = 11;
+	t[1] = 22;
+	g_buf = t;
+	printf("%d %d\n", g_buf[0], g_buf[1]);
+
+	Btn* w = new Btn;
+	w.m_icon = a;
+	printf("%d %d\n", w.m_icon.m_k, w.mine());
+	w.m_icon = b;
+	printf("%d hits=%d\n", w.mine(), w.m_hits);
+	return 0;
+}
