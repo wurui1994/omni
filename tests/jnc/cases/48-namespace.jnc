@@ -1,0 +1,81 @@
+// 第五十一刀：`namespace` —— 只是名字的作用域。
+//
+// 出处（jancy 自己的实现）：命名空间不生成任何东西，它就是查名的一层。查名是
+// **从当前命名空间一层层往外退到全局**（`NamespaceMgr::findItem` 那一族），而同名的
+// 命名空间可以**重开、内容合并**（`openNamespace` 找得到就复用那一格）—— 下面第二段
+// `namespace a` 就是重开的。
+//
+// 两条照抄才对得上的细节：
+//   - **枚举成员不往外漏**（type_enum.rst:17）：`namespace a` 里也得写 `Kind.Two`，
+//     不能写光一个 `Two`。这一条第三十九刀就在了，命名空间不改它。
+//   - **命名空间里的 `main` 不是入口**：jancy 的入口是全局那一个。
+//
+// 期望输出的出处：一份 `cc -O0 -std=c99 -Wall` 的孪生件，七行逐字节相同。**写法差异**两处：
+// C 没有命名空间，孪生件里的名字写成 `a_g` / `a_b_deep` 这种前缀形（这一层内部也是这么落的，
+// 只是分隔符用 `$`）；C 的枚举成员是裸名、类型要 `typedef enum`。
+enum Color {
+	Red,
+	Green,
+}
+
+namespace a {
+
+typedef uint32_t U32;
+
+struct S {
+	U32 m_x;
+}
+
+enum Kind {
+	One,
+	Two,
+}
+
+int g = 7;
+
+int bump(int d) {
+	g = g + d;
+	return g;
+}
+
+int inner() {
+	S s;
+	s.m_x = 3;
+	Kind k = Kind.Two;
+	return s.m_x + k + bump(1) + Color.Red;
+}
+
+namespace b {
+
+int deep() {
+	return g + 100;
+}
+
+}
+
+}
+
+// 重开同一个命名空间：内容合并，`again` 与上面那些是一伙的。
+namespace a {
+
+int again() {
+	return g * 2;
+}
+
+}
+
+int main() {
+	printf("%d\n", a.inner());
+	printf("%d\n", a.g);
+	printf("%d\n", a.b.deep());
+	printf("%d\n", a.bump(2));
+	printf("%d\n", a.again());
+
+	a.S t;
+	t.m_x = 9;
+	printf("%d\n", t.m_x);
+
+	a.Kind kk = a.Kind.One;
+	printf("%d\n", kk);
+	return 0;
+}

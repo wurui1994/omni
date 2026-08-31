@@ -18,7 +18,8 @@
 //      数组之间的赋值、`threadlocal`、对 string 的模块级变量取地址、`%p`、
 //      `unsafe` 之外的 thin 转换、64 位的无符号整数、`%zd` 那一族的长度修饰、函数类型的
 //      typedef、`sizeof`（要方言的布局先认整数宽度）、`dynamic countof`（要 fat 指针带的
-//      范围）、从一个要先求值的东西上问枚举成员、枚举的底类型是另一个枚举（要枚举之间的基类链），
+//      范围）、从一个要先求值的东西上问枚举成员、枚举的底类型是另一个枚举（要枚举之间的基类链）、
+//      `using namespace`（要查名从一条线变成一张图），
 //      加六条 jancy 自己也拒的（命名项之后不能再写
 //      位置项、`double` 上的 `&=`、int 到枚举的隐式转换、非 0 的 int 到 bitflag 枚举、
 //      `countof` 作用在指针上、`assert` 的第二个实参不是字面量）。（`? :`、不换行的 printf、条件真值化曾经在
@@ -36,7 +37,7 @@
 //      switch 里的 continue 是第四十一刀（方言的层号是第四十刀）、带步进的 for 里的 continue
 //      是第四十二刀、printf 的长度修饰是第四十四刀、`countof` 是第四十五刀、指针比大小是
 //      第四十六刀、`bitflag enum` 是第四十七刀、编译期整数求值是第四十八刀、`assert` 是
-//      第四十九刀、int 到枚举的显式转换是第五十刀，在
+//      第四十九刀、int 到枚举的显式转换是第五十刀、`namespace` 是第五十一刀，在
 //      cases/24-new-curly.jnc、
 //      cases/25-static-local.jnc、cases/26-printf-prec.jnc、cases/27-printf-star-prec.jnc、
 //      cases/28-printf-flags.jnc、cases/29-printf-sci.jnc、cases/30-printf-gen.jnc、
@@ -45,7 +46,7 @@
 //      cases/37-typedef.jnc、cases/38-enum.jnc、cases/39-breakn.jnc、cases/40-forcont.jnc、
 //      cases/41-printf-len.jnc、cases/42-countof.jnc、cases/43-ptrcmp.jnc、
 //      cases/44-bitflag.jnc、cases/45-constfold.jnc、cases/46-assert.jnc、
-//      cases/47-enumcast.jnc。）
+//      cases/47-enumcast.jnc、cases/48-namespace.jnc。）
 //
 //      bad/ 里有**四种**拒，别混：一种是"还没长出来"（做掉就落地）；一种是**这一层不做**
 //      （printf-conv-p：`%p` 要观测裸地址，而五条腿上那不是同一个数；ptrcmp-mixed：不同型的

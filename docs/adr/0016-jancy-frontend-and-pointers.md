@@ -2493,6 +2493,55 @@ C99 里给枚举指定底类型（`: int8_t`）没有可移植写法，孪生件
 头注释），语法、方言、HIR、MIR、四个后端与运行时一个字都没改；自举、`tests/jit`、`tests/mir`、
 `tests/llvm`；`npm run lint` 这台机器上没有 typescript。
 
+### 第五十一刀：`namespace` —— 挑它不是为了分数，是为了**看得见**
+
+语料里 197 份文件卡在 `顶层的 'namespace'` 上，可其中只有 3 份带 `int main`。按"能跑几份"排，
+这一刀几乎不值得做。真正的理由是另一条：**那 197 份的命名空间体根本没被走进去**，所以它们
+"只有一个卡点"是假象 —— 尺子在这儿是坏的，而后面每一刀都要靠这把尺子挑。
+
+**jancy 那边它只是名字的作用域**：命名空间不生成任何东西，查名是"从当前命名空间一层层往外退
+到全局"（`NamespaceMgr::findItem` 那一族），同名的可以**重开、内容合并**
+（`openNamespace` 找得到就复用那一格）。
+
+落法照这个形状：`nsFlat` 把树摊成一串 `{ns, it}`，`run` 的每一遍先把 `this.ns` 摆到那一条
+所在的那一格；登记走 `qual`（加前缀），查名走 `resolve`（从里往外退）。**重开与合并自然成立**——
+两段都往同一个前缀底下登记，摊平之后看不出它们原来是两段。
+
+**内部的分隔符是 `$` 而不是点**：这五张表（`structs` / `enums` / `aliases` / `globals` /
+`fns`）的键**同时**就是方言里的名字，而点不是方言里合法的标识符字符，`$` 是（第九刀的
+`x$c`、第三十六刀的 `$sv0` 早就在用）。所以 `namespace a` 里的 `S` 落成 `(struct a$S …)`，
+报错时再由 `shown` 换回点 —— 那才是源码里写的样子。
+
+**两条照抄的细节**：枚举成员**不往外漏**（type_enum.rst:17，第三十九刀就在了 —— 命名空间
+不改它，`namespace a` 里也得写 `Kind.Two`）；命名空间里的 `main` **不是**入口（jancy 的入口是
+全局那一个，所以 `isMain` 要先看 `this.ns === ''`）。
+
+**顺带掉下来三件**（都不是这一刀瞄着的，是同一个 `qname` 带出来的）：`qname` 以前对限定名
+一律回 null，改成认 `qualified` 之后，「这种类型说明符」（`jnc.Regex` 那种）少了 **125** 份、
+「限定名或特殊名的声明符」（`void a.f() {}` —— jancy 收这种"往那个命名空间里放"的定义）少了
+**99** 份；再加表达式位置上的 `dotted`（`a.b.deep()` 在语法树里是一串 `field`，不是
+`qualified`），「不是直接调一个名字的调用」少了 **72** 份。
+
+**边界一条**：`using namespace`（`bad/using-namespace.jnc`）。这一刀做的是"从里往外退"这条
+**线性**的路，而 `using` 往当前这一格里塞一条别的查名路径 —— 线变成图，撞名还要报歧义。
+同一档的 `using extension` 与 `friend` 各有前置（extension、访问控制），都还没有。
+
+**期望输出的出处**：一份 `cc -O0 -std=c99 -Wall` 的孪生，七行逐字节相同。**写法差异**两处：
+C 没有命名空间，孪生件里写 `a_g` / `a_b_deep` 这种前缀形（这一层内部也是这么落的，只是
+分隔符用 `$`）；C 的枚举成员是裸名、类型要 `typedef enum`。
+
+**放行了什么 —— 以及量出来的那件正事**：`test/jnc/test129.jnc` 整份跑通（这一刀唯一放行的
+runnable 文件）。尺子那一头的收成是：全量扫一遍，**新露出 382 条**(文件, 卡点)，其中
+`opaque class` 71、64 位无符号 57、`class` 52、间接调用 26、函数原型 16、`label` 15 ——
+这些以前全藏在一句"顶层的 namespace"后面。`sys_Timer.jnc` 与 `sys_Thread.jnc` 就是样本：
+它们从"卡在 namespace"变成"卡在 `opaque class`"，那才是真话。
+
+**跑过的轴**：`tests/jnc`（82/0，新增 `cases/48-namespace` 与 `bad/using-namespace`）。
+**没跑的**：`tests/sexpr`、`tests/glr`、`tests/asy`、`tests/oir` —— 只动了
+`frontend-jnc/lower.js`（`nsFlat`/`qual`/`resolve`/`dotted`/`nameLv` 加各处登记与查名，
+`tyName` 里两句 `shown`），语法、方言、HIR、MIR、四个后端与运行时一个字都没改；自举、
+`tests/jit`、`tests/mir`、`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
+
 ## 后果与代价
 
 - 方言从"没有可算术的引用"变成"有"。这一格会渗到 MIR 与四个后端，改不回去。

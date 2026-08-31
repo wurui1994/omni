@@ -226,6 +226,9 @@ const isStruct = (t) => t.k === 'struct';
 /** 一格枚举（第三十九刀）。`base` 是它的基整数类型，值按那一格的规范形存。 */
 const isEnum = (t) => t.k === 'enum';
 
+/** 报错里显示的名字（第五十一刀）：内部用 `$` 连命名空间，源码里写的是点。 */
+const shown = (n) => n.replace(/\$/g, '.');
+
 /**
  * 数组退化成指针。jancy 的 `int* p = a;`（type_ptr_data.rst:31）就是它 —— 数组这一格里躺的
  * 是**一整块**的地址（`(ptr (blk T N))`，第十九刀），所以退化是方言的一句 `(pelem …)`：
@@ -357,9 +360,10 @@ function tyName(t) {
   if (t.k === 'ptr') return `${tyName(t.target)}*`;
   if (t.k === 'tptr') return `${tyName(t.target)} thin*`;
   if (t.k === 'arr') return `${tyName(t.el)}[${t.n === null ? '' : t.n}]`;
-  if (t.k === 'struct') return t.name;
+  // 命名类型的名字内部带 `$` 前缀（第五十一刀），报错里换回点 —— 那是源码里写的样子。
+  if (t.k === 'struct') return shown(t.name);
   if (t.k === 'int') return `${t.u ? 'unsigned ' : ''}${INT_NAMES.get(t.w)}`;
-  if (t.k === 'enum') return t.name;
+  if (t.k === 'enum') return shown(t.name);
   return t.k;
 }
 
@@ -455,6 +459,33 @@ class JncLower {
     this.alias = new Map();    // 名字 -> 方言里的名字（结构体形参那一份拷贝，第十三刀）
     this.sigs = new Map();     // 函数定义的节点 -> 它的签名（第十五刀，run 里先过一遍）
     this.mainSeen = false;     // `int main()` 见过了（查重要在签名那一遍就做）
+    // 命名空间（第五十一刀）。`this.ns` 是当前所在的那一格，内部一律用 `$` 连 —— 点不是
+    // 方言里合法的标识符字符，而上面那五张表的键**同时**就是方言里的名字。报错时换回点
+    // （`shown`），那才是源码里写的样子。
+    this.ns = '';
+  }
+
+  /** 当前命名空间下的全名（第五十一刀）。写的名字里带点（`struct a.S`）也一并换成 `$`。 */
+  qual(name) {
+    const k = name.replace(/\./g, '$');
+    return this.ns === '' ? k : `${this.ns}$${k}`;
+  }
+
+  /**
+   * 从里往外找一个名字。jancy 的查名就是"从当前命名空间一层层往外退到全局"
+   * （`NamespaceMgr::findItem` 那一族），所以 `namespace a` 里写 `S` 先看 `a.S`、
+   * 再看全局的 `S`。`nm` 是**源码里写的**名字，可能带点（`a.S`）。
+   */
+  resolve(nm, has) {
+    const k = nm.replace(/\./g, '$');
+    let p = this.ns;
+    for (;;) {
+      const full = p === '' ? k : `${p}$${k}`;
+      if (has(full)) return full;
+      if (p === '') return null;
+      const i = p.lastIndexOf('$');
+      p = i < 0 ? '' : p.slice(0, i);
+    }
   }
 
   err(node, msg) {
@@ -496,8 +527,10 @@ class JncLower {
       const e = this.scopes[i].get(name);
       if (e !== undefined) return { type: e.t, global: e.s, dname: e.d };
     }
-    const g = this.globals.get(name);
-    return g === undefined ? null : { type: g, global: true, dname: name };
+    // 模块级那一格从里往外找（第五十一刀）：`namespace a` 里写 `g` 先看 `a.g`。
+    const gk = this.resolve(name, (k) => this.globals.has(k));
+    if (gk === null) return null;
+    return { type: this.globals.get(gk), global: true, dname: gk };
   }
 
   lookup(name) {
@@ -762,52 +795,82 @@ class JncLower {
   liftable(t) { return isInt(t) || t === J_REAL || t === J_BOOL || isPtr(t) || isEnum(t); }
 
   /**
+   * `namespace a { … }` 摊平（第五十一刀）。命名空间在 jancy 那边只是**名字的作用域** ——
+   * 它不生成任何东西，而且同名的可以重开、内容合并（`NamespaceMgr::openNamespace` 找得到
+   * 就复用那一格）。摊成一串 `{ns, it}` 之后，重开与合并自然成立：两段都往同一个前缀底下
+   * 登记。嵌套照原样接下去（`a` 里的 `b` 是 `a$b`）。
+   */
+  nsFlat(tree, ns, out) {
+    for (const it of this.flat(tree)) {
+      if (isList(it) && head(it) === 'namespace') {
+        const nm = this.qname(it.items[1]);
+        if (nm === null) { this.err(it, '认不出的命名空间名字'); continue; }
+        const k = nm.replace(/\./g, '$');
+        this.nsFlat(it.items[2], ns === '' ? k : `${ns}$${k}`, out);
+        continue;
+      }
+      out.push({ ns, it });
+    }
+    return out;
+  }
+
+  /**
    * 三遍走顶层（第十一刀）。jancy 的命名空间成员**不看声明顺序** —— 所以命名类型与模块级
    * 变量都得在函数体降级之前就成型，不然 `int f() { return g; }` 写在 `int g = 1;` 上面
    * 就会报"未声明"，而 jancy 那边它是对的。
    *
    * 第三遍里函数仍然是**按源码顺序**降的，所以"调用后面定义的函数"照旧不收 —— 那一条
    * 与这一刀无关，单独记在上面那份名单里。
+   *
+   * 每一遍都先把 `this.ns` 摆到那一条所在的命名空间上（第五十一刀）：登记用 `qual`、
+   * 查名用 `resolve`，两边看的都是这一格。
    */
   run(tree) {
-    const items = this.flat(tree);
+    const items = this.nsFlat(tree, '', []);
     // 结构体的名字先坐下（第十七刀）：`Node* m_next` 要在自己的体里查得着 Node。
-    for (const it of items) {
-      if (isList(it) && head(it) === 'type-decl') this.typeName(it.items[1]);
+    for (const e of items) {
+      this.ns = e.ns;
+      if (isList(e.it) && head(e.it) === 'type-decl') this.typeName(e.it.items[1]);
     }
     // typedef 排在"结构体的名字坐下"之后、"结构体的体解出来"之前（第三十八刀）：这样别名可以
     // 引结构体的名字，结构体的字段也可以用别名。
-    for (const it of items) {
-      if (isList(it) && head(it) === 'typedef') this.typedefDecl(it);
+    for (const e of items) {
+      this.ns = e.ns;
+      if (isList(e.it) && head(e.it) === 'typedef') this.typedefDecl(e.it);
     }
-    for (const it of items) {
-      if (isList(it) && head(it) === 'type-decl') this.typeDecl(it.items[1]);
+    for (const e of items) {
+      this.ns = e.ns;
+      if (isList(e.it) && head(e.it) === 'type-decl') this.typeDecl(e.it.items[1]);
     }
     // 签名先过一遍（第十五刀）：jancy 的命名空间不看顺序，所以"后面定义的函数"要在
     // 模块级变量的初值与所有函数体之前就查得着。
-    for (const it of items) {
-      if (!isList(it) || head(it) !== 'fn-def') continue;
-      const s = this.fnSig(it);
-      if (s !== null) this.sigs.set(it, s);
+    for (const e of items) {
+      if (!isList(e.it) || head(e.it) !== 'fn-def') continue;
+      this.ns = e.ns;
+      const s = this.fnSig(e.it);
+      if (s !== null) this.sigs.set(e.it, s);
     }
     // `&` 过谁先数一遍（第二十四刀）：模块级的标量被取过地址时，那一格要提到一段**自己的
     // 内存**里去（与第九刀对局部量做的是同一件事）。这一问必须在 `(global …)` 发出去之前
     // 答完 —— 而 `&g` 出现在函数体里，也就是后面那一遍。数的是整份源码里所有 `&名字`，
     // 所以同名的局部量会把全局也带上：**多提一格不影响语义**（读写照旧走那一格），只是多一次 pnew。
-    for (const it of items) this.collectAddrTaken(it, this.gTaken);
-    for (const it of items) {
-      if (!isList(it)) continue;
-      const h = head(it);
-      if (h === 'var-decl') this.globalDecl(it);
-      else if (h === 'var-decl-curly') this.globalDeclCurly(it);
+    for (const e of items) this.collectAddrTaken(e.it, this.gTaken);
+    for (const e of items) {
+      if (!isList(e.it)) continue;
+      this.ns = e.ns;
+      const h = head(e.it);
+      if (h === 'var-decl') this.globalDecl(e.it);
+      else if (h === 'var-decl-curly') this.globalDeclCurly(e.it);
     }
-    for (const it of items) {
-      if (isList(it)) {
-        const h = head(it);
+    for (const e of items) {
+      if (isList(e.it)) {
+        const h = head(e.it);
         if (h === 'type-decl' || h === 'var-decl' || h === 'var-decl-curly') continue;
       }
-      this.topItem(it);
+      this.ns = e.ns;
+      this.topItem(e.it);
     }
+    this.ns = '';
     if (this.mainBody === null) {
       this.diags.error(null, 'jancy 的入口是 `int main()`，这份源码里没有');
       return '';
@@ -858,11 +921,12 @@ class JncLower {
       const info = this.declarator(d, sp);
       if (info === null) continue;
       if (info.formals !== null) { this.nope(d, '函数类型的 typedef'); continue; }
-      if (INT_ALIASES.has(info.name) || this.structs.has(info.name) || this.aliases.has(info.name)) {
-        this.err(d, `类型名 '${info.name}' 重复定义`);
+      const an = this.qual(info.name);
+      if (INT_ALIASES.has(info.name) || this.structs.has(an) || this.aliases.has(an)) {
+        this.err(d, `类型名 '${shown(an)}' 重复定义`);
         continue;
       }
-      this.aliases.set(info.name, info.type);
+      this.aliases.set(an, info.type);
     }
     return null;
   }
@@ -889,6 +953,9 @@ class JncLower {
       const info = this.declarator(dcl, sp);
       if (info === null) continue;
       if (info.formals !== null) { this.nope(dcl, '顶层的函数原型（只收带体的定义）'); continue; }
+      // 命名空间里的模块级变量（第五十一刀）：名字带上前缀，而那个带前缀的名字**同时**就是
+      // 方言里那一格的名字（`$` 是合法标识符字符，点不是）。从这一句起 info.name 一律是全名。
+      info.name = this.qual(info.name);
       if (isArr(info.type)) {
         if (info.type.n === null) { this.err(dcl, `'${info.name}[]' 的长度得从花括号初值数出来`); continue; }
         if (this.declareGlobal(dcl, info) === null) continue;
@@ -935,6 +1002,7 @@ class JncLower {
     const info = this.declarator(dcl, sp);
     if (info === null) return null;
     if (info.formals !== null) return this.nope(dcl, '函数上的花括号初始化');
+    info.name = this.qual(info.name);            // 第五十一刀，与 globalDecl 同一条
     const curly = n.items[3];
     if (!isList(curly) || head(curly) !== 'curly') return this.err(n, '认不出的花括号初始化');
     const t = this.curlyType(n, info, curly);
@@ -960,10 +1028,13 @@ class JncLower {
    *  方言一个字没改（指针类型的全局五条腿本来就都收）。聚合与数组不走这儿：它们那一格里
    *  放的**本来就是**一段内存的地址，`&g` 就是它自己。 */
   declareGlobal(dcl, info) {
-    if (this.globals.has(info.name)) return this.err(dcl, `模块级变量 '${info.name}' 声明了两次`);
-    if (info.type === J_VOID) return this.err(dcl, `'${info.name}' 的类型是 void`);
+    if (this.globals.has(info.name)) return this.err(dcl, `模块级变量 '${shown(info.name)}' 声明了两次`);
+    if (info.type === J_VOID) return this.err(dcl, `'${shown(info.name)}' 的类型是 void`);
     this.globals.set(info.name, info.type);
-    if (this.gTaken.has(info.name) && this.liftable(info.type)) {
+    // `&` 数的是**源码里写的**名字（函数体里写的是不带前缀的），所以两个都问一遍 ——
+    // 多提一格对不取地址的用法没有可观测差别（第二十四刀那段注释里的同一条理由）。
+    const bare = info.name.slice(info.name.lastIndexOf('$') + 1);
+    if ((this.gTaken.has(info.name) || this.gTaken.has(bare)) && this.liftable(info.type)) {
       this.gLifted.add(info.name);
       const pt = `(ptr ${tyText(info.type)})`;
       this.decls.push(`  (global ${info.name} ${pt})`);
@@ -1014,14 +1085,17 @@ class JncLower {
    * 字段访问，交给 lvalue 那一支。同名的变量优先当变量看（那样才轮不到这条）。
    */
   enumMember(n, ob, mem) {
-    if (!isList(ob) || head(ob) !== 'name') return undefined;
-    const en = this.qname(ob);
-    if (en === null || !this.enums.has(en)) return undefined;
-    if (this.lookupRef(en) !== null) return undefined;
+    // 左边可以是**限定名**（`a.Color`，第五十一刀）：那在表达式里是一串 `field`。
+    if (!isList(ob) || (head(ob) !== 'name' && head(ob) !== 'field')) return undefined;
+    const en0 = this.dotted(ob);
+    if (en0 === null) return undefined;
+    const en = this.resolve(en0, (k) => this.enums.has(k));
+    if (en === null) return undefined;
+    if (this.lookupRef(en0) !== null) return undefined;
     const info = this.enums.get(en);
     const mn = isAtom(mem) ? mem.value : this.qname(mem);
     if (mn === null || !info.members.has(mn)) {
-      return this.err(n, `枚举 '${en}' 里没有 '${mn}'`);
+      return this.err(n, `枚举 '${shown(en)}' 里没有 '${mn}'`);
     }
     return {
       code: `(int ${info.members.get(mn)})`,
@@ -1070,9 +1144,10 @@ class JncLower {
     if (head(n) === 'enum') return this.enumName(n);
     if (head(n) !== 'agg') return null;                    // 下面那一遍报
     if ((isAtom(n.items[1]) ? n.items[1].value : null) !== 'struct') return null;
-    const name = this.qname(n.items[2]);
-    if (name === null) return null;
-    if (this.structs.has(name)) return this.err(n, `结构体 '${name}' 声明了两次`);
+    const nm0 = this.qname(n.items[2]);
+    if (nm0 === null) return null;
+    const name = this.qual(nm0);
+    if (this.structs.has(name)) return this.err(n, `结构体 '${shown(name)}' 声明了两次`);
     this.structs.set(name, []);
     return null;
   }
@@ -1085,10 +1160,11 @@ class JncLower {
   enumName(n) {
     const key = isAtom(n.items[1]) ? n.items[1].value : null;
     if (key !== 'enum' && key !== 'bitflag enum') { this.nope(n, `'${key}'`); return null; }
-    const name = this.qname(n.items[2]);
-    if (name === null) return this.err(n, '认不出的枚举名字');
+    const nm1 = this.qname(n.items[2]);
+    if (nm1 === null) return this.err(n, '认不出的枚举名字');
+    const name = this.qual(nm1);
     if (this.enums.has(name) || this.structs.has(name)) {
-      return this.err(n, `类型名 '${name}' 重复定义`);
+      return this.err(n, `类型名 '${shown(name)}' 重复定义`);
     }
     this.enums.set(name, { base: J_I32, members: new Map(), bits: key === 'bitflag enum' });
     return null;
@@ -1102,8 +1178,9 @@ class JncLower {
    * 值按基类型那一格回卷（与别处同一个 wrapTo），所以存进表里的就是规范形。
    */
   enumDecl(n) {
-    const name = this.qname(n.items[2]);
-    if (name === null) return null;
+    const nm2 = this.qname(n.items[2]);
+    if (nm2 === null) return null;
+    const name = this.qual(nm2);
     const info = this.enums.get(name);
     if (info === undefined || info.members.size > 0) return null;   // 上一遍报过重复了
     const bn = n.items[3];
@@ -1126,7 +1203,7 @@ class JncLower {
       if (!isList(m) || head(m) !== 'enum-item') { this.err(m, '认不出的枚举成员'); continue; }
       const mn = isAtom(m.items[1]) ? m.items[1].value : this.qname(m.items[1]);
       if (mn === null) { this.err(m, '认不出的枚举成员名字'); continue; }
-      if (info.members.has(mn)) { this.err(m, `枚举 '${name}' 里 '${mn}' 出现了两次`); continue; }
+      if (info.members.has(mn)) { this.err(m, `枚举 '${shown(name)}' 里 '${mn}' 出现了两次`); continue; }
       if (m.items[2] !== undefined) {
         this.constEnum = info;
         const k = this.constInt(m.items[2]);
@@ -1154,8 +1231,9 @@ class JncLower {
     if (!isList(n) || head(n) !== 'agg') return this.nope(n, '带体的命名类型（只收 struct 与 enum）');
     const key = isAtom(n.items[1]) ? n.items[1].value : null;
     if (key !== 'struct') return this.nope(n, `'${key}'（只收 struct）`);
-    const name = this.qname(n.items[2]);
-    if (name === null) return this.err(n, '认不出的结构体名字');
+    const nm3 = this.qname(n.items[2]);
+    if (nm3 === null) return this.err(n, '认不出的结构体名字');
+    const name = this.qual(nm3);
     const bases = this.flat(n.items[3]);
     if (bases.length > 0) return this.nope(n, '结构体的基类');
     const fields = this.structs.get(name);
@@ -1191,7 +1269,29 @@ class JncLower {
   qname(n) {
     if (!isList(n)) return null;
     if (head(n) === 'name' && isAtom(n.items[1])) return n.items[1].value;
-    return null;   // 限定名（`a.b`）第一刀不收
+    // 限定名 `a.b`（第五十一刀）：摊成点连的一串。声明位置上它是"往那个命名空间里放"
+    // （jancy 收 `struct a.S { … }`），查名位置上它是"从那儿找"。
+    if (head(n) === 'qualified') {
+      const l = this.qname(n.items[1]);
+      if (l === null || !isAtom(n.items[2])) return null;
+      return `${l}.${n.items[2].value}`;
+    }
+    return null;
+  }
+
+  /** 表达式位置上的 `a.b.c` —— 那是一串 `field`，而它**可能**整体是个限定名（命名空间里的
+   *  枚举/函数）。摊成点连的一串，摊不动就回 null（那就真是取字段）。（第五十一刀） */
+  dotted(n) {
+    if (!isList(n)) return null;
+    const h = head(n);
+    if (h === 'name' && isAtom(n.items[1])) return n.items[1].value;
+    if (h === 'qualified' || h === 'field') {
+      const l = this.dotted(n.items[1]);
+      if (l === null) return null;
+      const r = isAtom(n.items[2]) ? n.items[2].value : this.dotted(n.items[2]);
+      return r === null ? null : `${l}.${r}`;
+    }
+    return null;
   }
 
   /** `(specs 类型说明符 前置修饰符 后置修饰符)` -> 类型 + `thin` 标记 + `stat` 标记。
@@ -1247,16 +1347,20 @@ class JncLower {
       if (alias !== undefined) base = mkInt(alias.w, alias.u || uns);
       else if (nm === 'size_t') base = J_I64;           // jancy 的语料里到处是它
       else if (nm === 'string_t') base = J_STR;
-      else if (this.structs.has(nm)) base = { k: 'struct', name: nm };
-      else if (this.enums.has(nm)) {
-        if (uns) { this.err(ts, `'${nm}' 是枚举，上面写不了 unsigned`); return null; }
-        base = { k: 'enum', name: nm, base: this.enums.get(nm).base, bits: this.enums.get(nm).bits === true };
+      // 命名类型从里往外找（第五十一刀）：`namespace a` 里写 `S` 先看 `a.S`、再看全局的。
+      else if (this.resolve(nm, (k) => this.structs.has(k)) !== null) {
+        base = { k: 'struct', name: this.resolve(nm, (k) => this.structs.has(k)) };
       }
-      else if (this.aliases.has(nm)) {
+      else if (this.resolve(nm, (k) => this.enums.has(k)) !== null) {
+        const en = this.resolve(nm, (k) => this.enums.has(k));
+        if (uns) { this.err(ts, `'${nm}' 是枚举，上面写不了 unsigned`); return null; }
+        base = { k: 'enum', name: en, base: this.enums.get(en).base, bits: this.enums.get(en).bits === true };
+      }
+      else if (this.resolve(nm, (k) => this.aliases.has(k)) !== null) {
         // typedef 起的名字（第三十八刀）。别名里可能已经带着指针或数组那几层，所以直接拿
         // 解出来的那一格当 base —— 声明符后面再补的层照常叠上去（`pint* q` 是 `int**`）。
         if (uns) { this.err(ts, `'${nm}' 是 typedef 起的名字，上面写不了 unsigned`); return null; }
-        base = this.aliases.get(nm);
+        base = this.aliases.get(this.resolve(nm, (k) => this.aliases.has(k)));
       }
       else { this.err(ts, `没有这个类型：'${nm}'`); return null; }
     }
@@ -1398,12 +1502,15 @@ class JncLower {
     }
     // `int main()` 是入口：降成方言的 `(main …)`。jancy 的 main 回 int，而方言的入口
     // 不回值 —— 那个返回值是给外面的退出码，这一层没有它，所以 `return 0` 就是 `(ret)`。
-    const isMain = info.name === 'main' && ps.length === 0;
+    // 命名空间里的 `main` **不是**入口（jancy 的入口是全局那一个），所以先看 ns（第五十一刀）。
+    const isMain = this.ns === '' && info.name === 'main' && ps.length === 0;
     if (isMain) {
       if (this.mainSeen) return this.err(n, '`int main()` 定义了两次');
       this.mainSeen = true;
     } else {
-      if (this.fns.has(info.name)) return this.err(n, `函数 '${info.name}' 定义了两次`);
+      // 名字带上命名空间前缀，而那个带前缀的名字**同时**就是方言里那个函数的名字。
+      info.name = this.qual(info.name);
+      if (this.fns.has(info.name)) return this.err(n, `函数 '${shown(info.name)}' 定义了两次`);
       this.fns.set(info.name, { params: ps.map((p) => p.type), ret: info.type });
     }
     return { info, ps, isMain };
@@ -1822,8 +1929,20 @@ class JncLower {
   lvalue(n) {
     if (!isList(n)) return this.err(n, '这里要一个可以赋值的位置');
     const h = head(n);
-    if (h === 'name') {
-      const nm = n.items[1].value;
+    if (h === 'name') return this.nameLv(n, n.items[1].value);
+    // `a.g` —— 命名空间里的那一格（第五十一刀）。它在表达式里是一串 `field`，所以要在
+    // "取字段"之前问一次：整体摊得动、而且摊出来的名字查得着，那就是它。
+    if (h === 'field') {
+      const q = this.dotted(n);
+      if (q !== null && this.resolve(q, (k) => this.globals.has(k)) !== null) {
+        return this.nameLv(n, q);
+      }
+    }
+    return this.lvalue0(n, h);
+  }
+
+  /** 一个名字（可能带命名空间前缀）当可写位置。 */
+  nameLv(n, nm) {
       const r = this.lookupRef(nm);
       if (r === null) return this.err(n, `未声明的变量 '${nm}'`);
       const t = r.type;
@@ -1843,7 +1962,9 @@ class JncLower {
       }
       if (this.lifted.has(nm)) return { kind: 'ptr', code: `(var ${this.cellName(nm)})`, type: t };
       return { kind: 'var', name: dn, type: t, global: false };
-    }
+  }
+
+  lvalue0(n, h) {
     // `*p = v`
     if (h === 'indirect') {
       const p = this.expr(n.items[1], null);
@@ -3105,7 +3226,9 @@ class JncLower {
         const nm = n.items[1].value;
         const r = this.lookupRef(nm);
         if (r === null) {
-          if (this.fns.has(nm)) return this.nope(n, `把函数 '${nm}' 当值用`);
+          if (this.resolve(nm, (k) => this.fns.has(k)) !== null) {
+            return this.nope(n, `把函数 '${nm}' 当值用`);
+          }
           return this.err(n, `未声明的变量 '${nm}'`);
         }
         // 它在方言里叫什么：见 lvalue 那一处同一句
@@ -3481,14 +3604,18 @@ class JncLower {
 
   callExpr(n) {
     const callee = n.items[1];
-    const nm = isList(callee) && head(callee) === 'name' ? callee.items[1].value : null;
-    if (nm === null) return this.nope(n, '不是直接调一个名字的调用');
-    if (nm === 'printf') return this.nope(n, '把 printf 的返回值当值用');
+    // 被调的**可以**是个限定名（`a.f()`，第五十一刀）：那在表达式里是一串 `field`，
+    // 整体摊得动才算限定名，摊不动才是"取字段再调"（那一条还不收）。
+    const nm0 = isList(callee) && (head(callee) === 'name' || head(callee) === 'field')
+      ? this.dotted(callee) : null;
+    if (nm0 === null) return this.nope(n, '不是直接调一个名字的调用');
+    if (nm0 === 'printf') return this.nope(n, '把 printf 的返回值当值用');
+    const nm = this.resolve(nm0, (k) => this.fns.has(k));
+    if (nm === null) return this.err(n, `没有这个函数：'${nm0}'`);
     const sig = this.fns.get(nm);
-    if (sig === undefined) return this.err(n, `没有这个函数：'${nm}'`);
     const args = this.flat(n.items[2]);
     if (args.length !== sig.params.length) {
-      return this.err(n, `'${nm}' 要 ${sig.params.length} 个实参，这里给了 ${args.length} 个`);
+      return this.err(n, `'${nm0}' 要 ${sig.params.length} 个实参，这里给了 ${args.length} 个`);
     }
     const parts = [];
     for (let i = 0; i < args.length; i++) {
@@ -3497,7 +3624,7 @@ class JncLower {
       // 实参与赋值同一条规矩：整数隐式转到形参那一格（窄了就回卷）。
       if (isInt(v.type) && isInt(sig.params[i])) v = intConv(v, sig.params[i]);
       if (!sameTy(v.type, sig.params[i])) {
-        return this.err(args[i], `'${nm}' 的第 ${i + 1} 个实参要 ${tyName(sig.params[i])}，`
+        return this.err(args[i], `'${nm0}' 的第 ${i + 1} 个实参要 ${tyName(sig.params[i])}，`
           + `这里是 ${tyName(v.type)}`);
       }
       parts.push(v.code);
