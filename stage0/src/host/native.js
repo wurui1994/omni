@@ -336,6 +336,42 @@ export function fmtSci(x, p) {
   return neg ? `-${s}` : s;
 }
 
+/**
+ * `(sgen E N)` / `(sgenk E N)` 上的 real：C 的 `%.Ng` / `%#.Ng`（ADR-0016 第三十一刀）。
+ *
+ * C99 7.19.6.1 把 `%g` 定义**在 `%e` 与 `%f` 之上**，所以这里也照那个次序搭：
+ *   1. `P = N == 0 ? 1 : N`（精度 0 在 C 里等于 1）；
+ *   2. `X` 是"按 `%.{P-1}e` 印出来会用的指数"—— 注意是**舍入之后**那个（`%.2g` 的 99.9
+ *      舍成 `1.0e+02`，X 是 2 而不是 1），所以只能先真的印一遍 `%e` 再读它的指数；
+ *   3. `-4 <= X < P` 时用 `%.{P-1-X}f`，否则用 `%.{P-1}e`；
+ *   4. 没写 `#` 时**去掉小数部分的尾随零**（点后面空了连点一起去）；`#` 就是"不去"。
+ *
+ * 第 4 步是 `%g` 与方言里 `(tostr E N)` 的差别所在 —— 那一条永远去零，等于只有这里的
+ * `keep = false` 那一支。
+ */
+export function fmtGen(x, p, keep) {
+  const P = Number(p) === 0 ? 1 : Number(p);
+  if (Number.isNaN(x)) return 'nan';
+  if (x === Infinity) return 'inf';
+  if (x === -Infinity) return '-inf';
+  const es = fmtSci(x, BigInt(P - 1));
+  const X = Number(es.slice(es.indexOf('e') + 1));
+  const s = (X >= -4 && X < P) ? fmtFixed(x, BigInt(P - 1 - X)) : es;
+  const ei = s.indexOf('e');
+  let m = ei < 0 ? s : s.slice(0, ei);
+  if (keep) {
+    // `#` 这一支还带着 `%f` / `%e` 上那条"小数点一定印"：`%#.0g` 印 1.5 是 `2.`、
+    // `%#.1g` 印 100 是 `1.e+02`（选中的样式精度是 0 时点会没了，这里补回来）
+    if (m.indexOf('.') < 0) return ei < 0 ? `${m}.` : `${m}.${s.slice(ei)}`;
+    return s;
+  }
+  if (m.indexOf('.') >= 0) {
+    while (m.endsWith('0')) m = m.slice(0, -1);
+    if (m.endsWith('.')) m = m.slice(0, -1);
+  }
+  return ei < 0 ? m : m + s.slice(ei);
+}
+
 /** `(tostr E N)` 上的 real：N 位有效数字。位数是 int，也就是 BigInt，这里转一次 */
 export function fmtRealG(x, p) {
   return fmtG(x, Number(p));

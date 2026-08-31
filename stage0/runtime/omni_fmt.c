@@ -32,6 +32,19 @@ omni_str omni_str_sci(double v, int64_t p) {
   return omni_str_fmt("%.*e", (int)p, v);
 }
 
+/* `(sgen E N)` / `(sgenk E N)`：C 的 `%.Ng` / `%#.Ng`（第三十一刀）。这两行同样就是出处 ——
+   `%g` 那一套（精度 0 等于 1、按舍入之后的指数在 `%e` 与 `%f` 里挑、`#` 不去尾随零）在这儿
+   一个字都不用写，是 C 库自己给的；另外三份是照它搭出来的（见 native.js 的 fmtGen）。 */
+omni_str omni_str_gen(double v, int64_t p) {
+  if (p < 0 || p > 30) omni_errorf("sgen precision out of range: %lld (0..30)", (long long)p);
+  return omni_str_fmt("%.*g", (int)p, v);
+}
+
+omni_str omni_str_genk(double v, int64_t p) {
+  if (p < 0 || p > 30) omni_errorf("sgenk precision out of range: %lld (0..30)", (long long)p);
+  return omni_str_fmt("%#.*g", (int)p, v);
+}
+
 omni_str omni_str_bool(bool v) { return omni_str_new(v ? "true" : "false", v ? 4 : 5); }
 omni_str omni_str_string(omni_str v) { return v; }
 

@@ -1479,8 +1479,16 @@ class CoreLowerer {
     // `(ssci E N)` 是同一条的科学计数那一格（第三十刀，C 的 `%.Ne`）：`d.dddde±dd`，
     // 整数部分正好一位、指数至少两位且一定带符号。舍入、位数范围、"不必是字面量"三条
     // 与 `sfix` 一字不差 —— 所以这两条走同一段代码，只差一个内建名字。
-    if (h === 'sfix' || h === 'ssci') {
-      const bn = h === 'sfix' ? 'str_fixed' : 'str_sci';
+    //
+    // `(sgen E N)` / `(sgenk E N)` 是同一族的第四、第五格（第三十一刀，C 的 `%.Ng` /
+    // `%#.Ng`）：在 `%e` 与 `%f` 里按舍入之后的指数挑一个，精度 0 等于 1。两个名字的差别
+    // 只有那个 `#` —— `sgenk` **不去尾随零**（`%#g` 印 1.5 是 `1.50000`）。`#` 在格式串里
+    // 是编译期就定了的，所以这儿用两个名字而不是加一个 bool 参数：方言的每一格都是表达式。
+    //
+    // 与 `(tostr E N)` 的关系：那一条就是 `sgen`（永远去零）的一个子集，可它的 N 只收字面量、
+    // 范围是 1..17。两条并成一条是以后的事（asy 那边在用 `tostr`），这一刀不动它。
+    if (h === 'sfix' || h === 'ssci' || h === 'sgen' || h === 'sgenk') {
+      const bn = { sfix: 'str_fixed', ssci: 'str_sci', sgen: 'str_gen', sgenk: 'str_genk' }[h];
       const v = this.expr(n.items[1]);
       if (v === null) return null;
       if (v.type !== REAL) return this.err(n, `(${h} E N) 的 E 要是 real，这里是 ${coreTypeText(v.type)}`);

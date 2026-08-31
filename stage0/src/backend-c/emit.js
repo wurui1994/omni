@@ -1081,6 +1081,9 @@ class CEmitter {
       case 'str_fixed': return `omni_str_fixed(${a[0]}, ${a[1]})`;
       // `(ssci E N)`（第三十刀）—— C 的 %.Ne，同上：这一条就是出处
       case 'str_sci': return `omni_str_sci(${a[0]}, ${a[1]})`;
+      // `(sgen E N)` / `(sgenk E N)`（第三十一刀）—— C 的 %.Ng / %#.Ng
+      case 'str_gen': return `omni_str_gen(${a[0]}, ${a[1]})`;
+      case 'str_genk': return `omni_str_genk(${a[0]}, ${a[1]})`;
       case 'to_string': return `omni_str_${e.argType.k}(${a[0]})`;
       case 'to_string_g': return `omni_str_realg(${a[0]}, ${a[1]})`;
       case 'trunc': return `omni_trunc(${a[0]})`;

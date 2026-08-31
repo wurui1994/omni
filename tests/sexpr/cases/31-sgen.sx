@@ -1,0 +1,66 @@
+;; `(sgen E N)` / `(sgenk E N)`（ADR-0016 第三十一刀）—— C 的 `%.Ng` / `%#.Ng`。
+;;
+;; 这一族的第四、第五格（前三格是 `(tostr E)`/`(sfix E N)`/`(ssci E N)`）。C99 7.19.6.1 把
+;; `%g` 定义在 `%e` 与 `%f` **之上**，所以这一份量的就是那几条规则本身：
+;;   1. `P = N == 0 ? 1 : N`（精度 0 等于 1）；
+;;   2. `X` 是"按 `%.{P-1}e` 印会用的指数"，而且是**舍入之后**那个；
+;;   3. `-4 <= X < P` 用 `%f`、否则用 `%e`；
+;;   4. `sgen` 去掉小数部分的尾随零（点后面空了连点一起去），`sgenk` 不去。
+;;
+;; 出处是 C（`printf '%.2g' 99.9` 量过 -> `1e+02`：舍成 `1.0e+02` 之后 X 变成 2，于是从
+;; `%f` 那一支跳到 `%e` 那一支 —— 第 2 条里"舍入之后"那四个字就是这一行钉住的）。
+(module
+  (main
+    ;; 默认精度 6 的那些平常值
+    (print (sgen (real 1.5) (int 6)))
+    (print (sgen (real 0.0001) (int 6)))          ;; X = -4，还在 %f 那一支里
+    (print (sgen (real 0.00001) (int 6)))         ;; X = -5，跳到 %e
+    (print (sgen (real 123456.0) (int 6)))        ;; X = 5 < P
+    (print (sgen (real 1234567.0) (int 6)))       ;; X = 6 = P，跳到 %e
+    (print (sgen (real 100.0) (int 6)))           ;; 去零：100.000 -> 100
+    (print (sgen (real 3.0) (int 6)))
+    (print (sgen (real 1000000.0) (int 6)))       ;; 去零连点一起去：1.00000e+06 -> 1e+06
+    (print (sgen (real 0.5) (int 6)))
+    (print (sgen (real 0.0) (int 6)))
+    (print (sgen (real -0.0) (int 6)))            ;; 负零的符号留着
+    (print (sgen (real -1234.0) (int 6)))
+
+    ;; 精度 0 等于 1
+    (print (sgen (real 1.5) (int 0)))
+    (print (sgen (real 0.00099) (int 1)))
+
+    ;; "舍入之后的指数"那一条：这三行是它的本体
+    (print (sgen (real 9.99) (int 2)))            ;; 舍成 1.0e+01，X = 1 < 2 -> %f -> 10
+    (print (sgen (real 99.9) (int 2)))            ;; 舍成 1.0e+02，X = 2 -> %e -> 1e+02
+    (print (sgen (real 0.0999) (int 2)))
+
+    ;; 位数多的那一头：印的是那个 double 的精确值
+    (print (sgen (real 0.1) (int 17)))
+    (print (sgen (real 0.1) (int 20)))
+    (let x real (bin "/" (real 1.0) (real 3.0)))
+    (print (sgen (var x) (int 30)))               ;; %f 那一支的位数到了 30-1-(-1) = 30
+
+    ;; 三位数的指数与次正规数的最小值
+    (print (sgen (real 1e100) (int 6)))
+    (print (sgen (real 1e-100) (int 6)))
+    (print (sgen (real 5e-324) (int 6)))
+    (print (sgen (real 1e21) (int 10)))
+
+    ;; `sgenk` —— 带 `#` 的那一支：**不去零**
+    (print (sgenk (real 1.5) (int 6)))
+    (print (sgenk (real 1.5) (int 3)))
+    (print (sgenk (real 1.5) (int 0)))            ;; 选中的样式精度是 0，`#` 把点逼出来
+    (print (sgenk (real 100.0) (int 6)))
+    (print (sgenk (real 1.0) (int 4)))
+    (print (sgenk (real 100.0) (int 1)))          ;; %e 那一支上的点：1.e+02
+    (print (sgenk (real 0.0) (int 6)))
+    (print (sgenk (real 0.0) (int 1)))
+    (print (sgenk (real 1e21) (int 3)))
+    (print (sgenk (real -1234.0) (int 6)))
+
+    ;; 位数不必是字面量（与 sfix / ssci 同一段代码）
+    (let p int (int 2))
+    (print (sgen (real 99.9) (var p)))
+    (print (sgenk (real 1.5) (bin "+" (var p) (int 1))))
+
+    (print (str "end"))))

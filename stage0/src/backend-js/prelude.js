@@ -223,7 +223,12 @@ const $fmt_real = (x) => $fmt_g(x, 6);
 // 所以按精确值算：double 是 m * 2^e，于是 |x| * 10^N 是精确的有理数，用 BigInt 取整。
 function $str_fixed(x, p) {
   if (p < 0n || p > 30n) $rt_error("sfix precision out of range: " + p + " (0..30)");
-  var f = Number(p);
+  return $fmt_fixed_n(x, Number(p));
+}
+
+// 位数按**普通数**收、且不查范围的那一层。$str_gen 要它 —— %g 选中 %f 那一支时位数
+// 能到 N-1-X（X 最小 -4），也就是 33，比方言给 sfix 的上界 30 还大。
+function $fmt_fixed_n(x, f) {
   if (Number.isNaN(x)) return "nan";
   if (x === Infinity) return "inf";
   if (x === -Infinity) return "-inf";
@@ -259,7 +264,10 @@ function $str_fixed(x, p) {
 //（%.2e 的 9.999 是 1.00e+01），那时指数加一。
 function $str_sci(x, p) {
   if (p < 0n || p > 30n) $rt_error("ssci precision out of range: " + p + " (0..30)");
-  var f = Number(p);
+  return $fmt_sci_n(x, Number(p));
+}
+
+function $fmt_sci_n(x, f) {
   if (Number.isNaN(x)) return "nan";
   if (x === Infinity) return "inf";
   if (x === -Infinity) return "-inf";
@@ -293,6 +301,42 @@ function $str_sci(x, p) {
   var ae = k < 0 ? -k : k;
   s += "e" + (k < 0 ? "-" : "+") + (ae < 10 ? "0" + ae : "" + ae);
   return neg ? "-" + s : s;
+}
+
+// (sgen E N) / (sgenk E N)：C 的 %.Ng / %#.Ng（ADR-0016 第三十一刀）。C99 7.19.6.1 把 %g
+// 定义在 %e 与 %f 之上，所以这里照那个次序搭：P = N==0 ? 1 : N；X 是"按 %.{P-1}e 印会用的
+// 指数"（**舍入之后**那个 —— %.2g 的 99.9 舍成 1.0e+02，X 是 2 不是 1）；-4 <= X < P 时用
+// %.{P-1-X}f，否则用 %.{P-1}e；没写 # 时去掉小数部分的尾随零（点后空了连点一起去）。
+// # 那一支还带着 %f / %e 上"小数点一定印"那条：%#.0g 印 1.5 是 2.、%#.1g 印 100 是 1.e+02。
+function $fmt_gen_n(x, p, keep) {
+  var P = Number(p) === 0 ? 1 : Number(p);
+  if (Number.isNaN(x)) return "nan";
+  if (x === Infinity) return "inf";
+  if (x === -Infinity) return "-inf";
+  var es = $fmt_sci_n(x, P - 1);
+  var X = Number(es.slice(es.indexOf("e") + 1));
+  var s = (X >= -4 && X < P) ? $fmt_fixed_n(x, P - 1 - X) : es;
+  var ei = s.indexOf("e");
+  var m = ei < 0 ? s : s.slice(0, ei);
+  if (keep) {
+    if (m.indexOf(".") < 0) return ei < 0 ? m + "." : m + "." + s.slice(ei);
+    return s;
+  }
+  if (m.indexOf(".") >= 0) {
+    while (m.endsWith("0")) m = m.slice(0, -1);
+    if (m.endsWith(".")) m = m.slice(0, -1);
+  }
+  return ei < 0 ? m : m + s.slice(ei);
+}
+
+function $str_gen(x, p) {
+  if (p < 0n || p > 30n) $rt_error("sgen precision out of range: " + p + " (0..30)");
+  return $fmt_gen_n(x, p, false);
+}
+
+function $str_genk(x, p) {
+  if (p < 0n || p > 30n) $rt_error("sgenk precision out of range: " + p + " (0..30)");
+  return $fmt_gen_n(x, p, true);
 }
 
 // (tostr E N)：按 N 位有效数字。位数在 Omni 里是 int，也就是 BigInt，$fmt_g 要的是

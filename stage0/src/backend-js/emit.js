@@ -555,6 +555,9 @@ class JsEmitter {
       case 'str_fixed': return `$str_fixed(${a[0]}, ${a[1]})`;
       // `(ssci E N)`（第三十刀）—— C 的 %.Ne，同一条舍入
       case 'str_sci': return `$str_sci(${a[0]}, ${a[1]})`;
+      // `(sgen E N)` / `(sgenk E N)`（第三十一刀）—— C 的 %.Ng / %#.Ng
+      case 'str_gen': return `$str_gen(${a[0]}, ${a[1]})`;
+      case 'str_genk': return `$str_genk(${a[0]}, ${a[1]})`;
       case 'to_string': return `$str_${e.argType.k}(${a[0]})`;
       case 'to_string_g': return `$str_real_g(${a[0]}, ${a[1]})`;
       case 'trunc': return `$trunc(${a[0]})`;

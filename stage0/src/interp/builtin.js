@@ -11,7 +11,7 @@
 // 语言子集里的东西：不用 TextEncoder（自己按 UTF-8 编）、不用 new Function、不用正则字面量
 // 以外的正则。
 
-import { stdout, typeTag, fmtReal, fmtRealG, fmtFixed, fmtSci, reprReal, callJsOp, readText, writeText, spawn } from '../host/native.js';
+import { stdout, typeTag, fmtReal, fmtRealG, fmtFixed, fmtSci, fmtGen, reprReal, callJsOp, readText, writeText, spawn } from '../host/native.js';
 import { JS_ABI, JS_MEMBERS } from '../hir/js_abi.js';
 import { OmniError } from '../source/diag.js';
 
@@ -815,6 +815,14 @@ export function applyBuiltin(I, e, a) {
     case 'str_sci':
       if (a[1] < 0n || a[1] > 30n) rtError(`ssci precision out of range: ${a[1]} (0..30)`);
       return fmtSci(a[0], a[1]);
+    // `(sgen E N)` / `(sgenk E N)` —— C 的 `%.Ng` / `%#.Ng`（第三十一刀）。差别是那个 `#`：
+    // 后者**不去尾随零**。范围与上面两条同 0..30，两个名字各报自己那一句。
+    case 'str_gen':
+      if (a[1] < 0n || a[1] > 30n) rtError(`sgen precision out of range: ${a[1]} (0..30)`);
+      return fmtGen(a[0], a[1], false);
+    case 'str_genk':
+      if (a[1] < 0n || a[1] > 30n) rtError(`sgenk precision out of range: ${a[1]} (0..30)`);
+      return fmtGen(a[0], a[1], true);
     case 'to_string': return strOf(e.argType.k, a[0]);
     case 'to_string_g': return fmtRealG(a[0], a[1]);
     case 'trunc': return truncReal(a[0]);

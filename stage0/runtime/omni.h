@@ -134,6 +134,10 @@ omni_str omni_str_realg(double v, int64_t p);
 omni_str omni_str_fixed(double v, int64_t p);
 /* `(ssci E N)`：C 的 %.Ne（第三十刀）。位数同上 0..30。 */
 omni_str omni_str_sci(double v, int64_t p);
+/* `(sgen E N)` / `(sgenk E N)`：C 的 %.Ng / %#.Ng（第三十一刀）。位数同上 0..30。
+   两个名字的差别就是那个 `#`：后者**不去尾随零**。 */
+omni_str omni_str_gen(double v, int64_t p);
+omni_str omni_str_genk(double v, int64_t p);
 omni_str omni_str_bool(bool v);
 omni_str omni_str_string(omni_str v);
 omni_str omni_repr_real(double v);

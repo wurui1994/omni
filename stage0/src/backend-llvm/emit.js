@@ -157,6 +157,9 @@ const RT_OPS = new Map([
   // 第八刀：C 的 %.Nf（就近取偶）。第三十刀：C 的 %.Ne。
   ['str_fixed.real', { sym: 'omni_str_fixed', ret: '[2 x i64]', params: ['double', 'i64'] }],
   ['str_sci.real', { sym: 'omni_str_sci', ret: '[2 x i64]', params: ['double', 'i64'] }],
+  // 第三十一刀：C 的 %.Ng / %#.Ng（差别就是那个 `#`：后者不去尾随零）。
+  ['str_gen.real', { sym: 'omni_str_gen', ret: '[2 x i64]', params: ['double', 'i64'] }],
+  ['str_genk.real', { sym: 'omni_str_genk', ret: '[2 x i64]', params: ['double', 'i64'] }],
 ]);
 
 /** i64 比较 -> icmp 谓词；f64 -> fcmp 谓词。顺序与 OP.EQ..OP.GT 一致。 */

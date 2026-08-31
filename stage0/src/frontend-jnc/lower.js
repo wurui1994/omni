@@ -160,6 +160,10 @@
 //（`%.2e` 的 `9.999` 是 `1.00e+01`）在方言那一层解决；`#` 要把小数点插在 `e` **前面**
 //（`%#.0e` 的 1.5 是 `2.e+00`），在这一层解决。
 //
+// `%g` / `%G` 是这一族的最后一格（第三十一刀），走 `(sgen E N)` / `(sgenk E N)`
+//（C 的 `%.Ng` / `%#.Ng`）。这一格的 `#` **不在这一层**：它改的是"去不去尾随零"，
+// 那是排版本身的一部分，所以方言给了两个算子，frontend 只按有没有 `#` 挑一个。
+//
 // `%x` / `%X` / `%o` 靠方言第七刀长出来的 `(sbase E 进制)` 与 `(supper S)`。这一格真正的
 // 难处不是"印十六进制"，是**多少位**：C 把实参当 unsigned 读，位数是**默认实参提升之后**
 // 那一格，所以 `char d = -56; printf("%x", d)` 是 `ffffffc8` 而不是 `c8`。定宽整数
@@ -1822,7 +1826,8 @@ class JncLower {
       i = j;
       if (spec === '%') { lit += '%'; continue; }
       if (spec !== 'd' && spec !== 'i' && spec !== 'f' && spec !== 's' && spec !== 'c'
-        && spec !== 'x' && spec !== 'X' && spec !== 'o' && spec !== 'e' && spec !== 'E') {
+        && spec !== 'x' && spec !== 'X' && spec !== 'o' && spec !== 'e' && spec !== 'E'
+        && spec !== 'g' && spec !== 'G') {
         this.nope(n, `printf 的转换 '%${spec === undefined ? '' : spec}'`);
         return null;
       }
@@ -1919,6 +1924,17 @@ class JncLower {
         }
         // 大写走 `(supper …)`：与 `%X` 同一条分工（`ssci` 只给小写的 `e`）
         if (spec === 'E') piece = `(supper ${piece})`;
+      } else if (spec === 'g' || spec === 'G') {
+        // `%g` / `%G`（第三十一刀）—— 方言的 `(sgen E N)` / `(sgenk E N)`。这一格的 `#`
+        // 不在这一层做：它改的是"去不去尾随零"，而那是排版本身的一部分，所以是两个算子。
+        if (v.type !== T_REAL) {
+          this.err(argNode, `'%${spec}' 要 double，这里是 ${tyName(v.type)}（整数先写 (double)x）`);
+          return null;
+        }
+        const nf = pCode === null ? '(int 6)'
+          : (pStar ? `(sel (bin "<" ${pCode} (int 0)) (int 6) ${pCode})` : pCode);
+        piece = `(${alt ? 'sgenk' : 'sgen'} ${v.code} ${nf})`;
+        if (spec === 'G') piece = `(supper ${piece})`;
       } else {
         // 到这儿只剩 `%s`（`%d` / `%i` 在整数与 bool 上都在上面接完了，剩下的是类型不对）
         const want = spec === 's' ? T_STR : T_I32;
@@ -1931,8 +1947,9 @@ class JncLower {
       flushLit();
       const intConv = spec === 'd' || spec === 'i' || spec === 'x' || spec === 'X' || spec === 'o';
       const hexConv = spec === 'x' || spec === 'X';
-      // 带符号的转换（`+` / 空格 / 摘符号那一路认的就是这一族）：`%e` / `%E` 也在里面
-      const signed = spec === 'd' || spec === 'i' || spec === 'f' || spec === 'e' || spec === 'E';
+      // 带符号的转换（`+` / 空格 / 摘符号那一路认的就是这一族）：浮点那三格都在里面
+      const signed = spec === 'd' || spec === 'i' || spec === 'f'
+        || spec === 'e' || spec === 'E' || spec === 'g' || spec === 'G';
       // 三处 C 的**未定义行为**，各有 clang 的一句话，没有可对的答案，所以拒：
       // `%c` 上的精度、不是有符号转换上的 `+` / 空格、`%d` / `%s` / `%c` 上的 `#`。
       if (pCode !== null && spec === 'c') {
@@ -1943,7 +1960,8 @@ class JncLower {
         this.nope(n, `'%${spec}' 上的 '${plus ? '+' : ' '}' 标志（C 里它是未定义行为）`);
         return null;
       }
-      if (alt && !hexConv && spec !== 'o' && spec !== 'f' && spec !== 'e' && spec !== 'E') {
+      if (alt && !hexConv && spec !== 'o' && spec !== 'f' && spec !== 'e' && spec !== 'E'
+        && spec !== 'g' && spec !== 'G') {
         this.nope(n, `'%${spec}' 上的 '#' 标志（C 里它是未定义行为）`);
         return null;
       }
