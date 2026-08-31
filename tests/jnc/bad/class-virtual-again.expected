@@ -1,0 +1,1 @@
+'Derived.foo' 上写 'virtual'，而基类那条链上已经有虚方法 'foo'

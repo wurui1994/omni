@@ -123,15 +123,17 @@
 //     正则 switch。**相邻字面量的拼接**（`"a" "b"`）是第五十四刀，见 litFold。
 //   - union / property / reactor / 事件 / 多播 / 协程。`enum` 是第三十九刀、`class` 是第
 //     五十二刀、`construct` 与 `static construct` 是第五十三刀、**单继承**是第五十六刀
-//     （一条链在方言里共用一格 `(struct …)`，见 classLayout）；类那一族剩下的是多继承与
-//     `basetype1..9`、拿结构体当基类、`virtual`/`override`/`abstract` 的虚派发与下转、
+//     （一条链在方言里共用一格 `(struct …)`，见 classLayout）、**虚派发**是第五十七刀
+//     （`virtual`/`override`/`abstract`：对象头那一格 `$tag` 是动态类型，每个虚方法一段按
+//     标签挑实现的函数，见 dispatch）；类那一族剩下的是多继承与
+//     `basetype1..9`、拿结构体当基类、下转、同名方法上再写一遍 `virtual`、
 //     `destruct`（GC 不定时，disposable.rst:17）、`get` / `set`、构造的重载、
 //     内嵌的类字段与静态字段。
 //   - 函数指针（`R function* p(形参)`）第五十五刀收了 —— 落到方言的函数值那一格
 //     （`(fnty …)` / `(fnref …)` / `(mkclo …)` / `(callfn …)`），`c.foo` 捕的就是那个对象。
 //     剩下的四条：没写初值的那一格（方言的函数值没有空值，跟着 `if (p)` 也立不住）、
-//     函数指针的**字段**（方言的结构体字段放不下函数值 —— 虚表要落的正是这一格）、
-//     `function**` 与它的数组、`~()` 的部分应用。
+//     函数指针的**字段**（方言的结构体字段放不下函数值 —— 第五十七刀的虚派发因此换成了
+//     一格整数标签）、`function**` 与它的数组、`~()` 的部分应用。
 //   - 异常（try/throw/catch）、import。`assert` 是第四十九刀、`namespace` 是第五十一刀。
 //
 // **一处刻意留下的差别**：`sizeof` / `offsetof` 意义上的**存储**宽度。四种位宽在方言里
@@ -627,6 +629,12 @@ class JncLower {
     this.ownFields = new Map();   // 类名 -> 它自己那几格字段（基类的不算）
     this.pendingCls = [];         // 类的 `(struct …)` 推迟到整条链都知道了再发
     this.synthSC = new Set();     // 只有静态构造、那一个实例构造是合成出来的类
+    // 虚派发（第五十七刀）。`virt` 是方言里那个方法名 -> 'virtual' | 'override' | 'abstract'，
+    // `tags` 是类名 -> 那个类的整数标签（根那一格结构体里的 `$tag` 存的就是它，对象一造出来
+    // 就写死）。`disp` 记着按标签分派的那段函数，一个（根, 方法名）一段。
+    this.virt = new Map();
+    this.tags = new Map();
+    this.disp = new Map();
   }
 
   /** 派生类没写 construct 时合成一个（第五十六刀）：它做的事就是把基类那一个调一遍。 */
@@ -1112,6 +1120,8 @@ class JncLower {
       const s = this.fnSig(e.it);
       if (s !== null) this.sigs.set(e.it, s);
     }
+    // `override` 那几条规矩（第五十七刀）：基类的方法这时才都在表里。
+    this.vtCheck();
     // 静态构造那道闸门（第五十三刀）。jancy 的静态构造是**从实例构造的开头调的、只调一次**
     // （`Parser::finalizeConstructor` 那四句里的第二句 `callStaticConstructor`，
     // jnc_ct_Parser.cpp:3005-3009；"只一次"是 `MemberBlock::callStaticConstructor` 里
@@ -1277,6 +1287,10 @@ class JncLower {
           continue;
         }
         this.globalCells.push(`    (set ${info.name} (pnew ${tyText(info.type)} (int 1)))`);
+        // 动态类型那一格（第五十七刀）：与 pnew 挨着，排在所有构造之前。
+        const tg = this.tagStore(dcl, info.type.name, `(var ${info.name})`, '    ');
+        if (tg === null) continue;
+        this.globalCells.push(tg);
         // 构造排在 globalInit 那一段（第五十三刀）：所有 pnew 先做完，构造里读到别的模块级
         // 变量时它才不是空指针 —— 与第二十四刀那条"两阶段"是同一个理由。实参在**模块作用域**
         // 里求（没有局部量、没有取地址、不在 unsafe 里），与 globalValue 那一处同一条。
@@ -1647,7 +1661,7 @@ class JncLower {
         this.nope(m, `${cls ? '类' : '结构体'}里除字段以外的成员`);
         continue;
       }
-      const sp = this.specs(m.items[1]);
+      const sp = this.specs(m.items[1], cls);
       if (sp === null) continue;
       // `static int m_table[10];` —— 静态字段是**类那一格上的**变量，不在对象里
       // （01_Classes.jnc:22）。它要一格模块级的槽加"从方法里查得着"，是另一刀。
@@ -1660,9 +1674,17 @@ class JncLower {
         // 而内嵌本身这一层还不收（下面那条），所以这儿先明说，免得实参被悄悄丢掉。
         if (info.ctor !== null) { this.nope(d, '字段后面的构造实参'); continue; }
         // 声明符上带括号的是**方法原型**（`void foo();`）：与 fn-proto 那一支同一件事，
-        // 体在类外。类里跳过它，结构体里照旧不收。
+        // 体在类外。类里跳过它，结构体里照旧不收。原型上写的 `virtual`/`abstract`/`override`
+        // 要在这儿记下来（第五十七刀）—— 体写在类外时那个词只出现在原型上。
         if (info.formals !== null) {
           if (!cls) this.nope(d, '结构体里的方法');
+          else if (sp.virt !== null) this.methodProto(d, name, info, sp);
+          continue;
+        }
+        // 字段上写不了那三个（第五十七刀）：它管的是"调哪一个方法"。
+        if (sp.virt !== null) {
+          this.err(d, `字段 '${info.name}' 上写不了 '${sp.virt}'（type_class.rst:178：`
+            + '那三个词是方法上的）');
           continue;
         }
         // 类**值**的字段：jancy 那边它是**内嵌**的（对象在父对象那一块里就地造出来，
@@ -1761,6 +1783,8 @@ class JncLower {
       this.roots.set(name, root);
       CLS_ROOT.set(name, root);
       this.structs.set(name, chainFields(name));
+      // 动态类型那一格（第五十七刀）：标签从 1 起，0 是"这一格没写过"，撞不上任何一个类。
+      this.tags.set(name, this.tags.size + 1);
     }
     // 每条链一格结构体：字段按"根先、派生后"的顺序并起来
     const merged = new Map();          // 根 -> 字段数组
@@ -1778,13 +1802,14 @@ class JncLower {
       }
     }
     for (const [root, fields] of merged) {
-      // **一个字段都没有的类**（`class T {}`，test124.jnc:18 与 test151.jnc:21 —— jancy 收）
-      // 发一格 `$hdr`：方言的结构体至少要一个字段，而 jancy 的类**本来就有对象头**
+      // 每条链头上那一格 `$tag`（第五十七刀）就是**对象头**：jancy 的类本来就有一格
       //（01_Classes.jnc:12-14："Actual user fields are preceded with a header containing
       // meta-data such as type, vtable pointer, root object pointer, GC-related flags"），
-      // 所以一格占位比"零字节的对象"更贴它。`$` 不在 jancy 的标识符里，源码里碰不到这一格。
+      // 而这一层的对象头里只需要"是哪个类"这一件事 —— 虚派发按它挑实现。它同时把
+      // "一个字段都没有的类"（`class T {}`，test124.jnc:18 与 test151.jnc:21）那一格填上了：
+      // 方言的结构体至少要一个字段。`$` 不在 jancy 的标识符里，源码里碰不到这一格。
       const fs = fields.map((f) => `(${f.name} ${fieldText(f.type)})`).join(' ');
-      this.decls.push(`  (struct ${root} ${fields.length === 0 ? '($hdr int)' : fs})`);
+      this.decls.push(`  (struct ${root} ($tag int)${fs === '' ? '' : ` ${fs}`})`);
     }
   }
 
@@ -1823,6 +1848,177 @@ class JncLower {
     return isClass(from) && isClass(to) && this.isBase(to.name, from.name);
   }
 
+  /* ------------------------------------------------ 虚派发（第五十七刀） */
+
+  /**
+   * 类体里的方法**原型**上写了 `virtual`/`override`/`abstract`（第五十七刀）。
+   *
+   * `abstract` 的那一个永远没有体（ModuleItem.h:690），所以它的签名只能从原型上来 ——
+   * 登记进 `fns` 但**不发** `(fn …)`：调它一律经分派函数，而分派表里跳过它那一格
+   * （能实例化的类必有实现，见 absLeft）。
+   */
+  methodProto(d, cls, info, sp) {
+    const full = `${cls}$${info.name}`;
+    this.virt.set(full, sp.virt);
+    if (sp.virt !== 'abstract') return true;
+    if (this.fns.has(full)) { this.err(d, `${shown(cls)} 已经有方法 '${info.name}' 了`); return null; }
+    const ps = this.formalList(info.formals);
+    if (ps === null) return null;
+    this.fns.set(full, {
+      params: [tClass(cls, false), ...ps.map((p) => p.type)],
+      ret: info.type,
+    });
+    this.methods.set(full, cls);
+    this.methodNames.add(info.name);
+    return true;
+  }
+
+  /** 从这个类起沿链找"虚的那一个" —— 也就是虚表那一格里放着的（第五十七刀）。
+   *  与 findMethod 差一条：**不是虚方法的同名方法不算**。jancy 那边没写 override 的同名方法
+   *  只是遮住了名字，虚表那一格还是基类的，所以动态派发看的是这一条链。 */
+  findVirt(cls, mn) {
+    let cur = cls;
+    while (cur !== null && cur !== undefined) {
+      const full = `${cur}$${mn}`;
+      if (this.virt.has(full)) return full;
+      cur = this.bases.get(cur);
+    }
+    return null;
+  }
+
+  /**
+   * `virtual`/`override` 那几条规矩（第五十七刀）。抄的是 jancy 自己那几句诊断
+   * （jnc_ct_ClassType.cpp:507/568/573），排在签名那一遍之后 —— 基类的方法那时才都在表里。
+   */
+  vtCheck() {
+    for (const [full, kind] of this.virt) {
+      const owner = this.methods.get(full);
+      if (owner === undefined) continue;               // 报过错了
+      const mn = full.slice(owner.length + 1);
+      const base = this.bases.get(owner);
+      const up = base === null || base === undefined ? null : this.findVirt(base, mn);
+      if (kind === 'override') {
+        if (up === null) {
+          const shad = base === null || base === undefined ? null : this.findMethod(base, mn);
+          this.err(null, `覆盖不了 '${shown(full)}'：${shad === null
+            ? `基类里没有方法 '${mn}'`
+            : `基类那个 '${mn}' 不是虚方法`}（jancy 那句 "cannot override '%s': method ${shad === null
+            ? 'not found' : 'is not virtual'}"）`);
+          continue;
+        }
+        const a = this.fns.get(up);
+        const b = this.fns.get(full);
+        if (a !== undefined && b !== undefined && !this.sameSig(a, b)) {
+          this.err(null, `覆盖不了 '${shown(full)}'：签名与基类那个 '${mn}' 对不上（jancy 那句 `
+            + '"cannot override \'%s\': method signature mismatch"）');
+        }
+        continue;
+      }
+      // `virtual` / `abstract` 开的是**新的一格**。基类那条链上已经有同名的虚方法时，
+      // jancy 收不收、收了算哪一格，这一层没量出来 —— 明说不收，别猜。
+      if (up !== null) {
+        this.nope(null, `'${shown(full)}' 上写 '${kind}'，而基类那条链上已经有虚方法 '${mn}'`
+          + '（覆盖它写 `override`）');
+      }
+    }
+  }
+
+  /** 两个签名同型吗（`this` 那一格不算 —— 它天生不同型）。 */
+  sameSig(a, b) {
+    if (a.params.length !== b.params.length) return false;
+    for (let i = 1; i < a.params.length; i++) {
+      if (!sameTy(a.params[i], b.params[i])) return false;
+    }
+    return sameTy(a.ret, b.ret);
+  }
+
+  /**
+   * 这个类造得出来吗（第五十七刀）。jancy 那句是 "abstract class '%s'"
+   * （jnc_ct_ClassType.cpp:660）：虚表里还留着 abstract 那一格的类不能实例化。
+   * 回的是"还没实现的那个方法名"，全实现了回 null。
+   */
+  absLeft(cls) {
+    const seen = new Set();
+    for (let cur = cls; cur !== null && cur !== undefined; cur = this.bases.get(cur)) {
+      for (const full of this.virt.keys()) {
+        if (!full.startsWith(`${cur}$`)) continue;
+        const mn = full.slice(cur.length + 1);
+        if (mn.includes('$') || seen.has(mn)) continue;
+        seen.add(mn);
+        const impl = this.findVirt(cls, mn);
+        if (impl !== null && this.virt.get(impl) === 'abstract') return mn;
+      }
+    }
+    return null;
+  }
+
+  /** 造一格对象之前先把 `$tag` 写死（第五十七刀）：动态类型就是这一格整数。
+   *  造不出来（还有 abstract 没实现）时报错，回 null。 */
+  tagStore(node, cls, selfCode, pad) {
+    const left = this.absLeft(cls);
+    if (left !== null) {
+      return this.err(node, `${shown(cls)} 造不出来：'${left}' 还是 abstract（jancy 那句 `
+        + '"abstract class \'%s\'"）');
+    }
+    // 类的体没解出来时（上面某一条已经报过错）这张表里没有它 —— 别发一句坏文本出去。
+    const tag = this.tags.get(cls);
+    if (tag === undefined) return this.err(node, `${shown(cls)} 的类体没解出来，造不出对象`);
+    return `${pad}(pstore (pfield ${selfCode} $tag) (int ${tag}))`;
+  }
+
+  /**
+   * 按标签分派的那一段（第五十七刀）。一个（根, 方法名）一段，抬到模块级，`disp` 记着别发两遍。
+   *
+   * 为什么不是"对象里一格函数指针"（也就是真的虚表）：方言的结构体字段放不下函数值
+   * （hir/types.js 的 structLayout 拒落不进内存的字段，见 bad/fnptr-field）。所以对象里放的是
+   * 一格**整数**，虚表那一格换成一串 `if (tag == N) return D$foo(…)` —— 一格 int 加一个
+   * switch，方言一个字都不用长。
+   *
+   * 表是**穷举**的：链上每个类各问一遍 findVirt，所以运行期不会走到"没有这一格"的分支。
+   * 兜底那一格挑的是最靠根的那个实现 —— 也就是"没人覆盖时用基类的"。
+   */
+  dispatch(full) {
+    const owner = this.methods.get(full);
+    const mn = full.slice(owner.length + 1);
+    const root = this.roots.get(owner) === undefined ? owner : this.roots.get(owner);
+    // 键是**分派函数**的名字，不是某一个实现的：链上 Base$area / Derived$area 说的是同一格。
+    const name = `${root}$$vd$${mn}`;
+    const have = this.disp.get(name);
+    if (have !== undefined) return have;
+    const sig = this.fns.get(full);
+    // 表：标签 -> 那个标签该调的实现。链上所有类都在里面（不只 owner 的子孙）。
+    const rows = [];
+    for (const cls of this.tags.keys()) {
+      if (this.roots.get(cls) !== root) continue;
+      const impl = this.findVirt(cls, mn);
+      if (impl === null || this.virt.get(impl) === 'abstract') continue;
+      rows.push({ tag: this.tags.get(cls), impl });
+    }
+    const fallback = this.findVirt(root, mn);
+    const back = fallback !== null && this.virt.get(fallback) !== 'abstract'
+      ? fallback : (rows.length > 0 ? rows[rows.length - 1].impl : null);
+    if (back === null) {
+      return this.err(null, `'${shown(full)}' 一个实现都没有（abstract 的方法要有类覆盖它）`);
+    }
+    this.disp.set(name, name);
+    this.fns.set(name, sig);
+    const ps = sig.params;
+    const decl = ps.map((t, i) => `($a${i} ${slotText(t)})`).join(' ');
+    const as = ps.map((t, i) => ` (var $a${i})`).join('');
+    const call = (impl) => `(call ${impl}${as})`;
+    const done = (impl) => (sig.ret === J_VOID
+      ? `(do (expr ${call(impl)}) (ret))` : `(do (ret ${call(impl)}))`);
+    const lines = [];
+    for (const r of rows) {
+      if (r.impl === back) continue;
+      lines.push(`      (if (bin "==" (pload (pfield (var $a0) $tag)) (int ${r.tag}))`);
+      lines.push(`        ${done(r.impl)})`);
+    }
+    lines.push(`      ${sig.ret === J_VOID ? `(expr ${call(back)})` : `(ret ${call(back)})`}`);
+    this.decls.push(`  (fn ${name} (${decl}) ${slotText(sig.ret)}\n    (do\n${lines.join('\n')}))`);
+    return name;
+  }
+
   /* -------------------------------------------------------------- 类型与声明符 */
 
   qname(n) {
@@ -1855,8 +2051,11 @@ class JncLower {
 
   /** `(specs 类型说明符 前置修饰符 后置修饰符)` -> 类型 + `thin` 标记 + `stat` 标记。
    *  `thin` 在 jancy 里是**类型修饰符**（Lexer.rl:222），语法上落在说明符表里，
-   *  所以它在这儿而不是在 `*` 那一侧。 */
-  specs(n) {
+   *  所以它在这儿而不是在 `*` 那一侧。
+   *
+   *  `allowVirt` 只有方法那两处给 true（第五十七刀）：`virtual`/`override`/`abstract` 在
+   *  语法里也落在这张表上，可它只对方法有意思 —— 别的位置默认报错，免得那个词被悄悄丢掉。 */
+  specs(n, allowVirt = false) {
     if (!isList(n) || head(n) !== 'specs') { this.err(n, '认不出的说明符表'); return null; }
     const mods = [...this.flat(n.items[2]), ...this.flat(n.items[3])]
       .map((m) => (isAtom(m) ? m.value : '?'));
@@ -1864,8 +2063,22 @@ class JncLower {
     let stat = false;
     let uns = false;
     let fnptr = false;
+    let virt = null;
     for (const m of mods) {
       if (m === 'thin') { thin = true; continue; }
+      // 虚方法那三个（第五十七刀，type_class.rst:178："Virtual methods are declared using
+      // keywords virtual, abstract, and override"）。它们在语法里也落在这张 mods 表里，
+      // 所以在这儿收下来往上传 —— 认得它的只有方法那两处（fnSig0 与类体里的方法原型），
+      // 别的位置（变量、形参、字段、强制转换的目标）由 noVirt 挡住。
+      if (m === 'virtual' || m === 'override' || m === 'abstract') {
+        if (!allowVirt) {
+          this.err(n, `'${m}' 只能写在类的方法上（type_class.rst:178）`);
+          return null;
+        }
+        if (virt !== null) { this.err(n, `'${virt}' 与 '${m}' 只能写一个`); return null; }
+        virt = m;
+        continue;
+      }
       // `function`（第五十五刀）是**类型修饰符**，在语法里也落在这张表里（jnc.grammar 的
       // mods 那一格）。它说的是"这一格里放的不是数据的地址，是一个函数"——具体的签名要等
       // 声明符：形参表挂在名字后面的 `fn-suffix` 上，返回类型就是这儿的说明符。
@@ -1940,7 +2153,7 @@ class JncLower {
       this.nope(n, '64 位的无符号整数（要方言里无符号的 `/` `%` `>>` 与比较）');
       return null;
     }
-    return { type: base, thin, stat, fnptr };
+    return { type: base, thin, stat, fnptr, virt };
   }
 
   /** 说明符表 + 一串 `*` -> 类型。`int thin*` 的 thin 管的是**最外层**那个 `*`
@@ -2174,19 +2387,11 @@ class JncLower {
     return this.resolve(left, (k) => this.classes.has(k));
   }
 
-  fnSig0(n) {
-    // 特殊成员没有类型说明符（语法给的就是一个空的 `(specs)`，jnc.grammar:213/217）——
-    // 构造不回值。所以这一格不问 specs，直接摆一个"void、什么修饰符都没有"的说明符
-    // 进去（第五十三刀）。
-    const special = specialCore(n.items[2]);
-    const sp = special === null ? this.specs(n.items[1])
-      : { type: J_VOID, thin: false, stat: false, fnptr: false };
-    if (sp === null) return null;
-    const info = this.declarator(n.items[2], sp);
-    if (info === null) return null;
-    if (info.formals === null) return this.err(n, `'${info.name}' 有函数体，但声明符上没有形参表`);
+  /** 形参表 -> `{name, type, formals}` 一串（抽出来是因为方法**原型**也要问它：
+   *  `abstract void foo(int x);` 永远没有体，签名只能从原型上来，第五十七刀）。 */
+  formalList(formalsNode) {
     const ps = [];
-    for (const f of this.flat(info.formals)) {
+    for (const f of this.flat(formalsNode)) {
       const fh = isList(f) ? head(f) : null;
       if (fh === 'formals-varargs') return this.nope(f, '可变形参');
       if (fh === 'formal-anon') return this.nope(f, '无名形参');
@@ -2213,6 +2418,22 @@ class JncLower {
       }
       ps.push(fi);
     }
+    return ps;
+  }
+
+  fnSig0(n) {
+    // 特殊成员没有类型说明符（语法给的就是一个空的 `(specs)`，jnc.grammar:213/217）——
+    // 构造不回值。所以这一格不问 specs，直接摆一个"void、什么修饰符都没有"的说明符
+    // 进去（第五十三刀）。
+    const special = specialCore(n.items[2]);
+    const sp = special === null ? this.specs(n.items[1], true)
+      : { type: J_VOID, thin: false, stat: false, fnptr: false, virt: null };
+    if (sp === null) return null;
+    const info = this.declarator(n.items[2], sp);
+    if (info === null) return null;
+    if (info.formals === null) return this.err(n, `'${info.name}' 有函数体，但声明符上没有形参表`);
+    const ps = this.formalList(info.formals);
+    if (ps === null) return null;
     // 回一格类**值** jancy 也拒（`prepareReturnType`，jnc_ct_DeclTypeCalc.cpp:432-441）：
     // 回的得是类指针。这一层两者同型，所以差别只在源码里写没写那个 `*`（第五十二刀）。
     if (isClass(info.type) && info.type.own === true) {
@@ -2267,6 +2488,12 @@ class JncLower {
     } else {
       // 名字带上命名空间前缀，而那个带前缀的名字**同时**就是方言里那个函数的名字。
       info.name = this.qual(info.name);
+      // 原型上写了 `abstract`、体又写在类外（第五十七刀）：报的得是"abstract 不能有体"，
+      // 而不是下面那句"定义了两次"—— 原型那一遍已经把签名放进 fns 了。
+      if (this.virt.get(info.name) === 'abstract') {
+        return this.err(n, `'${shown(info.name)}' 是 abstract，不能有函数体（jancy 那句 `
+          + '"\'%s\' is abstract and hence cannot have a body"）');
+      }
       if (this.fns.has(info.name)) return this.err(n, `函数 '${shown(info.name)}' 定义了两次`);
       // 方法（第五十二刀）：名字的前一格是个**类**时这就是它的方法 —— 体内写的那些在 nsFlat
       // 那一遍已经把 ns 设成了类名，体外写的 `void C.foo()` 名字里本来就带着 `C.`，两条路
@@ -2277,6 +2504,17 @@ class JncLower {
         this.methods.set(info.name, owner);
         this.methodNames.add(info.name.slice(cut + 1));
         ps.unshift({ name: 'this', type: tClass(owner, false), formals: null });
+        // 虚方法（第五十七刀）。`abstract` 的那一个**没有体** —— jancy 自己那句话就是
+        // "'%s' is abstract and hence cannot have a body"（jnc_ct_ModuleItem.h:690）。
+        if (sp.virt !== null) {
+          if (sp.virt === 'abstract') {
+            return this.err(n, `'${shown(info.name)}' 是 abstract，不能有函数体（jancy 那句 `
+              + '"\'%s\' is abstract and hence cannot have a body"）');
+          }
+          this.virt.set(info.name, sp.virt);
+        }
+      } else if (sp.virt !== null) {
+        return this.err(n, `'${sp.virt}' 只能写在类的方法上（type_class.rst:178）`);
       }
       this.fns.set(info.name, { params: ps.map((p) => p.type), ret: info.type });
     }
@@ -2610,6 +2848,10 @@ class JncLower {
         this.push(info.name, info.type);
         const ct = tyText(info.type);
         out.push(`${pad}(let ${info.name} ${ct} (pnew ${ct} (int 1)))`);
+        // 动态类型那一格（第五十七刀）：一造出来就写死，往后虚派发按它挑实现。
+        const tg = this.tagStore(dcl, info.type.name, `(var ${info.name})`, pad);
+        if (tg === null) return null;
+        out.push(tg);
         // 造完紧接着构造（第五十三刀）：`C1 a;` 也调 —— 无参构造与"只有静态构造"两种情形
         // 都在 ctorCall 里；两样都没有时一个字都不发。
         if (this.ctorCall(dcl, info.type.name, `(var ${info.name})`, info.ctor, pad, out) === null) {
@@ -4650,6 +4892,12 @@ class JncLower {
     }
     const full = this.findMethod(base, mn);
     if (full === null) return this.err(n, `${shown(base)} 没有方法 '${mn}'`);
+    // `basetype.foo()` 是静态绑定的，而 abstract 的那一个**没有实现**（第五十七刀）——
+    // jancy 那句就是 "'%s' is abstract"（jnc_ct_OperatorMgr_Member.cpp:376）。
+    if (this.virt.get(full) === 'abstract') {
+      return this.err(n, `${shown(base)} 的 '${mn}' 是 abstract，basetype 调不着它（jancy 那句 `
+        + '"\'%s\' is abstract"）');
+    }
     return full;
   }
 
@@ -4674,6 +4922,7 @@ class JncLower {
     // 名字这一层查不着、而 `.` 右边那个名字确实是某个类的方法时才去求左边的值，
     // 免得给"真的没有这个函数"多发一条诊断。
     let self = null;
+    let statBind = false;      // `basetype.foo()` 是**静态**绑定的，不过分派那一格
     const mh = isList(callee) ? head(callee) : null;
     const mn = (mh === 'field' || mh === 'ptr-field') && isAtom(callee.items[2])
       ? callee.items[2].value : null;
@@ -4686,6 +4935,7 @@ class JncLower {
       if (b === null) return null;
       nm = b;
       self = '(var $this)';
+      statBind = true;
     }
     if (nm === null && mn !== null && this.methodNames.has(mn)) {
       const m = this.methodCallee(n, callee, mn);
@@ -4723,6 +4973,14 @@ class JncLower {
           + `这里是 ${tyName(v.type)}`);
       }
       parts.push(v.code);
+    }
+    // 虚方法：调的不是那一个实现，是按 `$tag` 挑实现的那一段（第五十七刀）。签名与被覆盖的
+    // 那一个同型（vtCheck 管着这一条），所以上面那一遍实参照旧按 sig 对 —— 换名字放在最后，
+    // 诊断里印的就还是源码里写的那个名字。
+    if (!statBind && self !== null && this.virt.has(nm)) {
+      const d = this.dispatch(nm);
+      if (d === null) return null;
+      nm = d;
     }
     if (sig.ret === J_VOID) return { code: `(call ${nm}${parts.map((p) => ` ${p}`).join('')})`, type: J_VOID };
     return { code: `(call ${nm}${parts.map((p) => ` ${p}`).join('')})`, type: sig.ret };
@@ -4832,8 +5090,21 @@ class JncLower {
       }
       self = '(var $this)';
     }
+    // 虚方法当值用（第五十七刀）：那一格里放的得是"按对象挑出来的那个实现"，所以 thunk
+    // 转手调的是分派那一段。jancy 也是这么做的（取虚方法的值时它从虚表里取）。abstract
+    // 的那一个本来就没有实现 —— jancy 那句 "'%s' is abstract"（Member.cpp:376）。
+    let target = full;
+    if (this.virt.has(full)) {
+      if (this.virt.get(full) === 'abstract') {
+        return this.err(node, `'${shown(full)}' 是 abstract，拼不出它那一格函数指针（jancy 那句 `
+          + '"\'%s\' is abstract"）');
+      }
+      const d = this.dispatch(full);
+      if (d === null) return null;
+      target = d;
+    }
     return {
-      code: `(mkclo ${this.methodThunk(full, owner, sig)} ${self})`,
+      code: `(mkclo ${this.methodThunk(target, owner, sig)} ${self})`,
       type: tFn(sig.params.slice(1), sig.ret),
     };
   }
@@ -4934,26 +5205,27 @@ class JncLower {
         return this.err(n, `不能造类的数组（jancy 那句 "cannot create array of '${tyName(t)}'"）`);
       }
       const raw = { code: `(pnew (ptr ${clsRoot(t.name)}) (int 1))`, type: tClass(t.name, false) };
-      if (!this.ctors.has(t.name)) {
-        // 没有构造：`new C(…)` 带了实参才是错，光 `new C` 就是那一句 pnew。
-        if (argsNode !== null && this.flat(argsNode).length > 0) {
-          return this.err(n, `${shown(t.name)} 没有 construct，给不了构造实参`);
-        }
-        return raw;
+      const hasCtor = this.ctors.has(t.name);
+      if (!hasCtor && argsNode !== null && this.flat(argsNode).length > 0) {
+        return this.err(n, `${shown(t.name)} 没有 construct，给不了构造实参`);
       }
-      // 有构造：一格新对象加一句构造是**两句**，而 `new` 是一个表达式（惰性位置上每一次
-      // 求值都得真造一格）—— 所以照第二十五刀 newCurly 那条路，把这两句抬成一个函数。
-      const c = this.ctorArgs(n, t.name, argsNode === null ? [] : this.flat(argsNode));
-      if (c === null) return null;
+      // 一格新对象、写死 `$tag`（第五十七刀）、再（有的话）构造 —— **三句**，而 `new` 是一个
+      // 表达式（惰性位置上每一次求值都得真造一格），所以照第二十五刀 newCurly 那条路，
+      // 把这几句抬成一个函数。
+      const c = hasCtor ? this.ctorArgs(n, t.name, argsNode === null ? [] : this.flat(argsNode)) : null;
+      if (hasCtor && c === null) return null;
+      const vals = c === null ? [] : c.vals;
       const st = slotText(t);
-      const ps = c.vals.map((v, i) => `($i${i} ${slotText(v.type)})`).join(' ');
-      const as = c.vals.map((v, i) => ` (var $i${i})`).join('');
+      const ps = vals.map((v, i) => `($i${i} ${slotText(v.type)})`).join(' ');
+      const as = vals.map((v, i) => ` (var $i${i})`).join('');
+      const tg = this.tagStore(n, t.name, '(var $p)', '      ');
+      if (tg === null) return null;
       const fn = `$newo${this.tmp++}`;
       this.decls.push(`  (fn ${fn} (${ps}) ${st}\n    (do\n`
-        + `      (let $p ${st} ${raw.code})\n`
-        + `      (expr (call ${c.name} (var $p)${as}))\n`
+        + `      (let $p ${st} ${raw.code})\n${tg}\n`
+        + (c === null ? '' : `      (expr (call ${c.name} (var $p)${as}))\n`)
         + `      (ret (var $p))))`);
-      return { code: `(call ${fn}${c.vals.map((v) => ` ${v.code}`).join('')})`, type: raw.type };
+      return { code: `(call ${fn}${vals.map((v) => ` ${v.code}`).join('')})`, type: raw.type };
     }
     let count = '(int 1)';
     if (countNode !== null) {

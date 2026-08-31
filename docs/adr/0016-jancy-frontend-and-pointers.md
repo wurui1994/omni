@@ -2934,6 +2934,107 @@ jnc_ct_Parser.cpp:3005-3009 那四句里的第一句是 `callBaseTypeConstructor
 （`fmtFixed`/`fmtSci`/`fmtGen` 不在 `frontend-js/link.js` 的 `NATIVE_OPS` 里，与这一刀无关）；
 `npm run lint` 这台机器上没有 typescript。
 
+### 第五十七刀：虚派发 —— 虚表放不进对象里，可"这是哪个类"那一格放得进
+
+上一刀把 `bad/class-virtual` 那条边界的理由写成了「不能先接了再说」：接了继承却按静态类型
+派发，`Base* b = d; b.foo()` 编得过、跑出来是错的答案，而语料里 `override` 出现 450 次。
+这一刀把它做掉。
+
+**拦路的是方言那一侧，不是这一侧**：jancy 的对象头里有一格虚表指针（01_Classes.jnc:12-14），
+照抄就是"对象里一格函数指针"——**方言的结构体字段放不下函数值**（`hir/types.js` 的
+`structLayout` 拒落不进字节内存的字段，那条边界记在 `bad/fnptr-field`）。
+
+绕法是把那一格从"函数指针"降成"整数"：
+
+- 一条继承链共用的那格结构体（第五十六刀）**头上加一格 `$tag`**。它就是对象头 ——
+  这一层的对象头里只需要"是哪个类"这一件事。顺带把上一刀那个 `$hdr` 占位收掉了：
+  一个字段都没有的类现在天然有一格。
+- 每个类一个整数标签（从 1 起 —— 0 是"没写过"，撞不上任何一个类）。
+- 每个（链, 虚方法名）抬一段**按标签挑实现**的函数：`if (tag == 3) return D$foo(…) … return B$foo(…)`。
+  一格 int 加一串 if，方言一个字都不用长。
+
+**标签写在造对象那一处，不是构造里**。三处：局部量 `C c;`、模块级变量、`new C`。写在构造里
+会漏掉"压根没有 construct 的类"，而那种类照样能有虚方法 —— 漏了它的标签就是 0，分派会掉进
+兜底那一支给出错的答案。写在造对象那一处就没有这个洞：那一处**总是**知道静态类型是谁。
+顺带它也把 jancy 的另一条对上了：标签在**构造之前**就写死，所以基类的构造里调虚方法会派发到
+派生那一个 —— jancy 的虚表指针也是在**分配**那一刻填的（`GcHeap::tryAllocateClass` 里那句
+`primeClass(box, type)`，jnc_rt_GcHeap.cpp:253；填的动作在 jnc_Runtime.cpp:619 的
+`jnc_primeClass`），构造还没开始跑。
+（`new C` 因此从"没构造就直接是一句 pnew"变成了一律抬一段 `$newo` 函数出来 —— 那里现在有
+两三句。）
+
+**分派表是穷举的**：链上每个类各问一遍"从它起沿链找第一个虚的实现"（`findVirt`），所以运行期
+不会走到"没有这一格"的分支。兜底挑的是最靠根那个实现，也就是"没人覆盖时用基类的"。
+代价是一次虚调用要走 O(链长) 次比较，而不是一次间接跳转 —— 这一层没有性能指标，换来的是
+方言不用长。
+
+**静态绑定那一条留着**：`basetype.foo()` 说的就是"调基类那一个"（type_class.rst:226），
+所以它绕过分派。反过来，**非虚方法里调虚方法**（`Shape.tagged` 里的 `area()`）与方法体里
+裸写的 `foo()` 都要过分派 —— 它们都是 `this.foo()`，而 `this` 的动态类型不一定是当前这个类。
+`c.foo` 当**一格函数指针**用（第五十五刀）也一样：thunk 里转手调的是分派那一段。
+
+**`abstract` 是"有签名、没有体"**（jancy 那句 "'%s' is abstract and hence cannot have a body"，
+jnc_ct_ModuleItem.h:690）。所以它的签名只能从类体里那个**原型**上来（`methodProto`）：登记进
+函数表，但**不发** `(fn …)`。于是三处要挡住"调到一段不存在的函数"：
+
+- 造一格链上还留着 abstract 的类 —— 报错，jancy 那句是 "abstract class '%s'"
+  （jnc_ct_ClassType.cpp:660，虚表里还留着 abstract 那一格的类不 Creatable）。
+  `bad/class-abstract-new`。
+- `basetype.foo()` 指着 abstract 的那一个 —— 报错（"'%s' is abstract"，
+  jnc_ct_OperatorMgr_Member.cpp:376）。
+- 把 abstract 的方法当值用 —— 同一句。
+
+**`override` 那几条规矩照抄 jancy 自己的诊断**（jnc_ct_ClassType.cpp:507 / 568 / 573）：
+基类里没有这个方法、有但不是虚方法、签名对不上，各是一句。检查排在签名那一遍之后
+（`vtCheck`）—— 基类的方法那时才都在表里。`bad/class-override-plain` 钉的是中间那条。
+
+**一处没量清、因此没进测试的**：派生类用**普通**方法遮住基类的虚方法。这一层的模型给出的
+结果是"虚表那一格还是基类的"（`findVirt` 跳过不是虚的那一个），而 `d.foo()` 按静态类型直接
+调派生那一个 —— 那是 jancy 虚表模型的自然结论，可"jancy 收不收这种遮盖"我没量，所以没写成
+用例，也没加限制。
+
+**边界两条，都记成了 bad case**（`bad/class-virtual` 整条落地了，按规矩删掉）：
+
+- `bad/class-virtual-again`：同名方法上再写一遍 `virtual`。jancy 那边 `virtual`/`abstract` 走
+  `addVirtualFunction`（新开一格，ClassType.cpp:464）、`override` 走
+  `overrideVirtualFunction`（占基类那一格，:485）—— 基类已经有同名虚方法时前者算哪一格，
+  没量出来。**猜哪一种都会静悄悄给出一个答案**，所以明说不收。
+- `bad/class-abstract-new`：见上，jancy 自己也拒。
+
+**顺手补的一格 —— `basetype1`**。量尺子时发现 `test/jnc/test18.jnc` 报的是
+「未声明的变量 'basetype1'」：那是一句**错话**。`basetype1` 与 `basetype` 在 jancy 里是同一格
+（type_class.rst:226 那一串 `basetype`/`basetype1..9`），单继承下两种写法都指着唯一那个基类；
+可这一层的语法只把 `basetype2` 列进了层号后缀那张关键字表，`basetype1` 于是被当成了普通标识符。
+补法是一个 token 加一条产生式（`(-> ("basetype1") (basetype 1))`）—— 这一刀唯一的语法改动，
+金表因此重生成（353→354 条规则、637→638 个状态、终结符 175→176）。语料里 10 份文件写了它。
+
+**期望输出的出处**：`/tmp/e57.c`，`cc -O0 -std=c99 -Wall`（`-Wall` 干净）。孪生件用的就是这一层
+的模型 —— 一条链一格 C 结构体（第一格是标签）、方法是收 `Shape*` 的自由函数、虚方法多一段
+`Shape_vd_area` 按标签挑实现，所以它算的是同一串数。八行逐字节相同。
+
+**放行了什么**：全量 1567 → 1500 条(文件, 卡点)，**去掉 77 条**（修饰符 `override` 50、
+`virtual` 15、`abstract` 12 —— 这一刀只拆这三个词，所以去掉的正好就是它们），
+**新露出 10 条**（修饰符 `errorcode` 6、64 位无符号整数 3、`basetype2` 1）。
+
+"一条卡点都没有、带 `int main`" 56 → **57**，进来的是 `test/jnc/test18.jnc`；
+"只有一个卡点、带 `int main`" 43 → **44**，进来的是 `samples/jnc/22_ScheduleOperator.jnc`
+（只剩「不是直接调一个名字的调用」）。
+
+test18 那一份**暴露了这把尺子的一个短处**：尺子只数「还不收」，可它当时卡在一句**错话**上
+（`basetype1` 被当成了变量名，报「未声明的变量」）—— 那是 err 不是 nope，所以尺子看不见。
+补上那个 token 之后它才真的跑起来，五条腿印的都是 `main () / C1.foo () / C2.foo ()`
+（`basetype1.foo()` 调基类那一个，正是这份用例要看的）。补完**重新全量扫了一遍**：与上一遍
+逐字节相同（1500 条，diff 空）—— 那一格改掉的只是错话，一条「还不收」都没动。
+
+**跑过的轴**：`tests/jnc`（105/0，新增 `cases/54-virtual` 与 `bad/class-abstract-new`、
+`bad/class-virtual-again`、`bad/class-override-plain`；删掉 `bad/class-virtual` —— 功能落地了，
+按规矩换成上面那三条更窄的）、`tests/glr`（20/0，语法加了一个 token 与一条产生式，金表重生成：
+终结符 175→176、353→354 条规则、637→638 个状态）。
+**没跑的**：`tests/sexpr`、`tests/asy`、`tests/oir` —— 方言、HIR、MIR、四个后端与运行时一个字
+都没改（这一刀是纯前端 + 一条语法产生式）；自举、`tests/jit`、`tests/llvm`；`tests/mir` 是先前
+就红的那一条（`fmtFixed`/`fmtSci`/`fmtGen` 不在 `frontend-js/link.js` 的 `NATIVE_OPS` 里，
+与这一刀无关）；`npm run lint` 这台机器上没有 typescript。
+
 ## 后果与代价
 
 - 方言从"没有可算术的引用"变成"有"。这一格会渗到 MIR 与四个后端，改不回去。

@@ -127,7 +127,7 @@
     ;; `break2` / `continue3` / `basetype2`：层号后缀。这里**不写改判类型** —— 写了
     ;; `(keyword ID INTEGER …)` 的话它们会被改判成整数 token，于是 `break2;` 变成一条
     ;; 表达式语句（量出来的：原来就是这样，`("break2" ";")` 那几条规则一直没被走到）。
-    (keyword ID "break2" "break3" "continue2" "continue3" "basetype2")
+    (keyword ID "break2" "break3" "continue2" "continue3" "basetype1" "basetype2")
     ;; 预定义的字面量宏（Lexer.rl 里就是 LITERAL）：`__DIR__ "/usb.ids"` 靠相邻拼接接上
     (keyword ID LITERAL "__DIR__" "__FILE__" "__FUNC__" "__LINE__" "__DATE__" "__TIME__")
     (keyword ID
@@ -647,6 +647,9 @@
     (-> (ID) (name $1))
     (-> ("this") (this))
     (-> ("basetype") (basetype 1))
+    ;; `basetype1` 与 `basetype` 是同一格（type_class.rst:226 那一串 basetype/basetype1..9）：
+    ;; 单继承下两种写法都对着唯一那个基类（test18.jnc:22 用的是带 1 的那种）。
+    (-> ("basetype1") (basetype 1))
     (-> ("basetype2") (basetype 2))
     (-> (INTEGER) $1)
     (-> (FP) $1)

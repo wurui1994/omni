@@ -1,0 +1,23 @@
+// `override` 却没有可覆盖的（第五十七刀）。jancy 自己那两句诊断分得很清：
+//   - 基类里根本没有这个方法 —— "cannot override '%s': method not found"（ClassType.cpp:507）
+//   - 有，但它不是虚方法 —— "cannot override '%s': method is not virtual"（同一处 :573）
+// 这一层照抄这两条：`override` 说的是"占基类虚表里那一格"，那一格不存在时它没有意思。
+//
+// 这一份要的是第二条：Base.foo 是**普通**方法。
+class Base {
+	int foo() {
+		return 1;
+	}
+}
+
+class Derived: Base {
+	override int foo() {
+		return 2;
+	}
+}
+
+int main() {
+	Derived d;
+	printf("%d\n", d.foo());
+	return 0;
+}

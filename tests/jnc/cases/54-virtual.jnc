@@ -1,0 +1,114 @@
+// 第五十七刀：虚派发 —— `virtual` / `override` / `abstract`（type_class.rst:178）。
+//
+// 对象里那一格 `$tag`（根结构体的第一格）就是**动态类型**：造出来时写死，虚方法调的是一段
+// 按它挑实现的函数。挑法穷举链上每个类，所以运行期不会走到"没有这一格"的分支。
+//
+// 这一份要盖住的几条：
+//   - `Base* b = d; b.area()` 调到派生那一个（上转不丢动态类型）
+//   - 中间那个类**不覆盖**（Cube）：用最近的那个实现（Square 的）
+//   - 非虚方法里调虚方法（Shape.tagged）、裸调（Cube.surface）都按对象走
+//   - `basetype.area()` 是**静态**绑定的（Tall 里拿它当基准再乘 2）；`basetype1` 是同一格
+//     （type_class.rst:226，Cube 的构造用的是带 1 的那种）
+//   - `abstract` 的那一个没有体，覆盖它的类才造得出来（Iface / Impl）
+//   - 虚方法当**一格函数指针**用（第五十五刀那一格）：thunk 转手调的是分派那一段
+//   - 标签写在**造对象**那一处而不是构造里，所以三条造法各走一遍：局部量、模块级变量、`new`
+class Shape {
+	int m_id;
+
+	construct(int id) {
+		m_id = id;
+	}
+
+	virtual int area() {
+		return 0;
+	}
+
+	int tagged() {
+		return m_id * 100 + area();
+	}
+}
+
+class Square: Shape {
+	int m_side;
+
+	construct(int side) {
+		basetype.construct(1);
+		m_side = side;
+	}
+
+	override int area() {
+		return m_side * m_side;
+	}
+}
+
+class Cube: Square {
+	construct(int side) {
+		basetype1.construct(side);
+	}
+
+	int surface() {
+		return area() * 6;
+	}
+}
+
+class Tall: Square {
+	construct(int side) {
+		basetype.construct(side);
+	}
+
+	override int area() {
+		return basetype.area() * 2;
+	}
+}
+
+class Iface {
+	abstract int val();
+
+	int twice() {
+		return val() * 2;
+	}
+}
+
+class Impl: Iface {
+	override int val() {
+		return 7;
+	}
+}
+
+Square g_q(4);
+
+int sum(Shape* s) {
+	return s.area();
+}
+
+Shape* pick(int k, Square* q, Tall* t) {
+	if (k == 0) {
+		return q;
+	}
+
+	return t;
+}
+
+int main() {
+	Square q(3);
+	Cube c(2);
+	Tall t(5);
+	Impl i;
+
+	printf("%d %d\n", q.area(), sum(q));
+	printf("%d %d\n", c.area(), c.surface());
+	printf("%d %d\n", t.area(), sum(t));
+	printf("%d\n", q.tagged());
+	printf("%d %d\n", i.val(), i.twice());
+
+	Shape* s1 = pick(0, q, t);
+	Shape* s2 = pick(1, q, t);
+	printf("%d %d\n", s1.area(), s2.area());
+
+	int function* g() = t.area;
+	printf("%d\n", g());
+
+	Shape* nc = new Cube(3);
+	printf("%d %d\n", g_q.area(), nc.area());
+	return 0;
+}

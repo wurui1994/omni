@@ -1,0 +1,23 @@
+// 同名的方法上再写一遍 `virtual`（第五十七刀的边界）。基类那条链上已经有虚方法 `foo` 了，
+// 派生类这儿写的是 `virtual` 而不是 `override` —— jancy 收不收它、收了算"覆盖那一格"还是
+// "开新的一格"，这一层没量出来。**猜哪一种都会静悄悄给出一个答案**，所以明说不收。
+//
+// 量出来之后再决定：jnc_ct_ClassType.cpp:464 的 addVirtualFunction（virtual / abstract 走它，
+// 新开一格）与 :485 的 overrideVirtualFunction（override 走它，占基类那一格）分的就是这两条路。
+class Base {
+	virtual int foo() {
+		return 1;
+	}
+}
+
+class Derived: Base {
+	virtual int foo() {
+		return 2;
+	}
+}
+
+int main() {
+	Derived d;
+	printf("%d\n", d.foo());
+	return 0;
+}

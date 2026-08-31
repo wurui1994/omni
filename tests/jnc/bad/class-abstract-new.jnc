@@ -1,0 +1,15 @@
+// abstract 的类造不出来（第五十七刀）。jancy 自己那句是 "abstract class '%s'"
+// （jnc_ct_TypeMgr/jnc_ct_ClassType.cpp:660 —— 虚表里还留着 abstract 那一格的类不 Creatable）。
+// 这一层的分派表是穷举链上每个类的，abstract 那一格没有实现可填，所以"造得出来"这一条得在
+// 造对象那一处答清：不然那个对象的标签会指向一格空的分派分支。
+//
+// 报的是**错**而不是"还不收"：它在 jancy 那边本来就不合法。
+class Iface {
+	abstract int val();
+}
+
+int main() {
+	Iface x;
+	printf("%d\n", x.val());
+	return 0;
+}

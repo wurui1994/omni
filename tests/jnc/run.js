@@ -20,17 +20,19 @@
 //      typedef、`sizeof`（要方言的布局先认整数宽度）、`dynamic countof`（要 fat 指针带的
 //      范围）、从一个要先求值的东西上问枚举成员、枚举的底类型是另一个枚举（要枚举之间的基类链）、
 //      `using namespace`（要查名从一条线变成一张图）、类的基类里剩下的那几条（多继承、
-//      拿结构体当基类、`virtual` / `override` 的虚派发、下转）、
+//      拿结构体当基类、下转、同名方法上再写一遍 `virtual`）、
 //      类里的 `destruct`（jancy 自己的文档就说它是 GC 在不确定的时刻调的，disposable.rst:17）、
 //      类里的 `get` / `set`（要属性那一套）、构造的**重载**（要重载决议）、
 //      格式化字面量 `$"…"`（要在降级里回头解析一小段源码）、二进制字面量 `0x"61 62"` 与
 //      `__FILE__` 那族预定义宏（前者要字节宽度、后者要编译期环境）、
 //      没写初值的函数指针（方言的函数值那一格没有空值）、函数指针的**字段**（方言的结构体
-//      字段放不下函数值，而虚表要落的正是这一格）、`function**`、`~()` 的部分应用、
+//      字段放不下函数值 —— 第五十七刀的虚派发因此没走"对象里一格函数指针"，走的是一格整数
+//      标签加一段按标签分派的函数）、`function**`、`~()` 的部分应用、
 //      一个字段都没有的 struct（卡在方言那一侧：`(struct S )` 要方言认零个字段），
-//      加七条 jancy 自己也拒的（命名项之后不能再写
+//      加十条 jancy 自己也拒的（命名项之后不能再写
 //      位置项、`double` 上的 `&=`、int 到枚举的隐式转换、非 0 的 int 到 bitflag 枚举、
-//      `countof` 作用在指针上、`assert` 的第二个实参不是字面量、给类的变量赋值）。（`? :`、不换行的 printf、条件真值化曾经在
+//      `countof` 作用在指针上、`assert` 的第二个实参不是字面量、给类的变量赋值、隐式下转、
+//      造一格还留着 abstract 方法的类、`override` 却没有可覆盖的虚方法）。（`? :`、不换行的 printf、条件真值化曾经在
 //      这一组里，第三到第五刀把它们做掉之后转到了 cases/；`&x` 是第九刀、定长数组是第十刀、
 //      模块级变量是第十一刀、值语义的结构体是第十二刀、结构体按值传与按值回是第十三刀、
 //      花括号初值是第十四刀、不看顺序的名字是第十五刀、指针的地址是第十六刀，现在各在
@@ -48,7 +50,7 @@
 //      第四十九刀、int 到枚举的显式转换是第五十刀、`namespace` 是第五十一刀、`class` 是
 //      第五十二刀、`construct` 与 `static construct` 是第五十三刀、相邻字面量的拼接是
 //      第五十四刀、函数指针（`function*` / `function thin*`）是第五十五刀、单继承是
-//      第五十六刀，在
+//      第五十六刀、虚派发（`virtual` / `override` / `abstract`）是第五十七刀，在
 //      cases/24-new-curly.jnc、
 //      cases/25-static-local.jnc、cases/26-printf-prec.jnc、cases/27-printf-star-prec.jnc、
 //      cases/28-printf-flags.jnc、cases/29-printf-sci.jnc、cases/30-printf-gen.jnc、
@@ -59,7 +61,7 @@
 //      cases/44-bitflag.jnc、cases/45-constfold.jnc、cases/46-assert.jnc、
 //      cases/47-enumcast.jnc、cases/48-namespace.jnc、cases/49-class.jnc、
 //      cases/50-construct.jnc、cases/51-litcat.jnc、cases/52-fnptr.jnc、
-//      cases/53-inherit.jnc。）
+//      cases/53-inherit.jnc、cases/54-virtual.jnc。）
 //
 //      bad/ 里有**四种**拒，别混：一种是"还没长出来"（做掉就落地）；一种是**这一层不做**
 //      （printf-conv-p：`%p` 要观测裸地址，而五条腿上那不是同一个数；ptrcmp-mixed：不同型的
