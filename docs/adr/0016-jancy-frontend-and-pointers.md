@@ -1944,6 +1944,12 @@ iterable`。派发那几条本来就是这个形状，改成 `(if C (do (set …
 > （jancy 那边 `case TypeKind_Enum` 走 `m_fromZeroCmp`），一元算子没落到基整数上
 > （`~Color.Red` 报错）。二元那一侧这一刀做对了，一元与真值化那两处忘了 —— 第四十七刀补齐。
 
+> 还有一处：`bad/enum-from-int` 记的边界该读成「**隐式**的 int 到枚举」。jancy 的
+> `Cast_Enum::getCastKind` 里"隐式"与"显式"是同一个 return 的两条分支
+> （`jnc_ct_CastOp_Int.cpp:295-311`），这一刀只抄了隐式那一条，于是 `(Color)2` 这种**写了
+> cast 的**也一起拒了 —— 那是抄漏，不是边界。第五十刀补上，`bad/enum-from-int` 本身照旧
+> 有效（它拒的就是没写 cast 那一种）。
+
 **期望输出的出处**：一份 `cc -O0 -std=c99` 的孪生，10 行逐字节相同。三处写法差别记在
 `cases/38-enum.jnc` 的头注释里：C 那边成员名是裸的、类型要写 `enum Color`、`Small` 的基类型
 写不出来（这几个值在 `int` 里印出来一样，不影响对比）。
@@ -2440,6 +2446,52 @@ int 转枚举的显式 cast 2 份（`test154/155.jnc:8` 的 `(SerialTapProStatus
 `frontend-jnc/lower.js` 加了 `assertStmt`/`srcText` 与 `stmt` 里的一支分派，语法文件只改注释，
 方言、HIR、MIR、四个后端与运行时一个字都没改；自举、`tests/jit`、`tests/mir`、`tests/llvm`；
 `npm run lint` 这台机器上没有 typescript。
+
+### 第五十刀：int 到枚举的显式转换 —— 一段代码的两条分支，之前只抄了一条
+
+`Color c = 2;` 该拒（第三十九刀记着，`bad/enum-from-int`），可 `Color c = (Color)2;` **该收** ——
+这两件事在 jancy 那边是同一个函数的两条分支：
+
+```cpp
+return
+	opType->getTypeKind() == TypeKind_Enum && ((EnumType*)type)->isBaseType((EnumType*)opType) ||
+	(type->getFlags() & EnumTypeFlag_BitFlag) && opValue.isZero() ?
+		CastKind_Implicit :
+		CastKind_Explicit;
+```
+
+（`Cast_Enum::getCastKind`，`jnc_ct_CastOp_Int.cpp:295-311`）隐式只有两条 —— 枚举到它的**基枚举**、
+字面 0 到 bitflag 枚举 —— 其余全是 `CastKind_Explicit`，也就是"写了 cast 就行"。上两刀把隐式那
+两条抄了（第三十九、第四十七），显式这一条漏了，于是显式写法反而落在 `cast()` 末尾那句
+「把 int 转成 Color」上。这一刀补上。
+
+**转法照它写**（`getCastOperators`，:313-334）：先用 `StdCast_Int` 把源转成枚举的**根类型**
+（`getRootType()`，:323），再 `StdCast_Copy` 原样拷过去。`StdCast_Int` 就是 `Cast_Int`，它的源
+不止整数 —— 实数与 bool 都收。所以 `(Color)3.9`（向零截断成 3）与 `(Color)true` 照 jancy 也是
+能写的，这一刀一起收了；照"借 jancy 就借它完整的形"这一条，不挑着抄。
+
+**顺带改掉一处诊断**：`enum Derived: Base` 原先报「枚举的基类型要是整数，这里是 Base」——
+那句话把"没做"说成了"你写错了"。jancy 是**收**这个的：`EnumType::isBaseType` 头一句就是
+`m_baseType->getTypeKind() != TypeKind_Enum` 的快速退出（`jnc_ct_EnumType.cpp:106-121`），
+而"派生枚举到基枚举"正是上面那两条隐式里的第一条。这一层的枚举只有一格整数底类型、没有基类链，
+所以改成"还不收"，记在 `bad/enum-base-enum.jnc` —— 这是这一刀划出的边界：**隐式那两条里
+剩下的一条，要先有基类链才谈得上**。
+
+**期望输出的出处**：一份 `cc -O0 -std=c99 -Wall` 的孪生，四行逐字节相同。**写法差异**三处：
+C 的枚举成员是裸名且要 `typedef enum`；C 没有 `bitflag enum`，那六个值在孪生件里写死；
+C99 里给枚举指定底类型（`: int8_t`）没有可移植写法，孪生件里省掉 —— 那一段的值都在 int8_t 里
+放得下，省掉不改答案。
+
+**放行了什么**：`test/jnc/test154.jnc` 与 `test155.jnc` 整份跑通（都印
+`lines: 0x12, mask: 0x12` 且断言通过 —— 断言是上一刀刚做的，这两份文件因此是**两刀一起**才
+放行的）。顺带量到一件事：那两份的枚举是 `bitflag enum ... : int8_t`，声明写在 `main`
+**后面**，所以底类型与不看顺序的名字（第十五刀）在这条路上也一起对上了。
+
+**跑过的轴**：`tests/jnc`（80/0，新增 `cases/47-enumcast` 与 `bad/enum-base-enum`）。
+**没跑的**：`tests/sexpr`、`tests/glr`、`tests/asy`、`tests/oir` —— 只动了
+`frontend-jnc/lower.js` 的 `cast()` 与 `enumDecl` 的底类型那一句（加 `tests/jnc/run.js` 的
+头注释），语法、方言、HIR、MIR、四个后端与运行时一个字都没改；自举、`tests/jit`、`tests/mir`、
+`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
 
 ## 后果与代价
 

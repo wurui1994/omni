@@ -1,0 +1,52 @@
+// 第五十刀：int 到枚举的**显式**转换 —— 隐式那一头照旧拒。
+//
+// 出处（jancy 自己的实现）：`Cast_Enum::getCastKind`（jnc_ct_CastOp_Int.cpp:295-311）
+// 只给两种情形 `CastKind_Implicit` —— 枚举到它的**基枚举**（`isBaseType`）、字面 0 到
+// bitflag 枚举 —— 其余一律 `CastKind_Explicit`。也就是说 `Color c = 2;` 不合法而
+// `Color c = (Color)2;` 合法，这两件事在 jancy 那边是同一段代码的两条分支。
+//
+// 转法照它写（`getCastOperators`，:313-334）：先用 `StdCast_Int` 把源转成枚举的**根类型**
+// （`getRootType()`，:323），再 `StdCast_Copy` 原样拷过去。`StdCast_Int` 就是 `Cast_Int`，
+// 它的源不止整数 —— 实数与 bool 都收，所以 `(Color)3.9`（向零截断）与 `(Color)true`
+// 照 jancy 也是能写的。
+//
+// 语料：`test/jnc/test154.jnc:8-10` 与 `test155.jnc` 的那三句（下面第二段照抄）——
+// `bitflag enum ... : int8_t` 的底类型也在那儿一起量到了。
+//
+// 期望输出的出处：一份 `cc -O0 -std=c99 -Wall` 的孪生件，四行逐字节相同。**写法差异**三处：
+// C 的枚举成员是裸名且要 `typedef enum`；C 没有 `bitflag enum`，那六个值在孪生件里写死；
+// C99 里给枚举指定底类型（`: int8_t`）没有可移植的写法，孪生件里省掉 —— 这一段的值都在
+// int8_t 里放得下，所以省掉不改答案。
+enum Color {
+	Red,
+	Green,
+	Blue,
+}
+
+bitflag enum Lines: int8_t {
+	Cts,
+	Dsr,
+	Ring,
+	Dcd,
+	Rts,
+	Dtr,
+}
+
+Lines g_lines = 0;
+
+int main() {
+	Color c = (Color)2;
+	int i = 1;
+	Color d = (Color)i;
+	printf("%d %d\n", c, d);
+	if (c == Color.Blue)
+		printf("blue\n");
+
+	uint8_t b = (Lines)0x12;
+	Lines lines = (Lines)b;
+	uint8_t mask = lines ^ g_lines;
+	printf("0x%x 0x%x\n", lines, mask);
+
+	printf("%d %d\n", (Color)3.9, (Color)true);
+	return 0;
+}

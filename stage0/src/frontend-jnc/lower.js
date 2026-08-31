@@ -1110,6 +1110,14 @@ class JncLower {
     if (!(isList(bn) && head(bn) === 'no-base')) {
       const sp = this.specs(bn);
       if (sp === null) return null;
+      // 底类型是**另一个枚举**在 jancy 那边是合法的：`EnumType::isBaseType` 的第一句就是
+      // `m_baseType->getTypeKind() != TypeKind_Enum` 的快速退出（jnc_ct_EnumType.cpp:106-121），
+      // 而"到基枚举"是那一族里唯一的**隐式**转换（jnc_ct_CastOp_Int.cpp:307）。这一层没做，
+      // 所以这里得说"还不收"而不是"你写错了"（第五十刀改的）。
+      if (isEnum(sp.type)) {
+        this.nope(bn, `枚举的底类型是另一个枚举（${tyName(sp.type)}）—— 要枚举之间的基类链`);
+        return null;
+      }
       if (!isInt(sp.type)) { this.err(bn, `枚举的基类型要是整数，这里是 ${tyName(sp.type)}`); return null; }
       info.base = sp.type;
     }
@@ -3593,6 +3601,22 @@ class JncLower {
     if (isInt(to) && v.type === J_REAL) {
       // 先向零截断成 64 位（方言的 `toint` 就是它），再回卷到目标那一格。
       return intConv({ code: `(toint ${v.code})`, type: J_I64 }, to);
+    }
+    // `(E)i` —— int 到枚举的**显式**转换（第五十刀）。jancy 的 `Cast_Enum::getCastKind`
+    // 给的就是 `CastKind_Explicit`（jnc_ct_CastOp_Int.cpp:295-311）：隐式只留两条 ——
+    // 枚举到它的基枚举、字面 0 到 bitflag 枚举。转法照它写：先转成枚举的**根类型**
+    // （`getRootType()`，:323），再原样拷过去（StdCast_Int + StdCast_Copy，:330-332）。
+    // 第一个算子是 `StdCast_Int`，也就是 `Cast_Int` —— 它的源不止整数，实数与 bool
+    // 都收，所以 `(Color)3.9` 与 `(Color)true` 照 jancy 也是能写的。
+    if (isEnum(to)) {
+      let src = v;
+      if (isEnum(src.type)) src = { code: src.code, type: src.type.base };
+      else if (src.type === J_BOOL) src = { code: `(sel ${src.code} (int 1) (int 0))`, type: J_I64 };
+      else if (src.type === J_REAL) src = { code: `(toint ${src.code})`, type: J_I64 };
+      if (isInt(src.type)) {
+        const x = intConv(src, to.base);
+        return { code: x.code, type: to };
+      }
     }
     if (to.k === 'tptr' && v.type.k === 'ptr' && sameTy(to.target, v.type.target)) {
       // 在这儿拦一次而不是等方言报：这条消息能指着 jancy 那一行说话。

@@ -1,0 +1,25 @@
+// 枚举的底类型是**另一个枚举**（第五十刀的边界）。jancy 收这个：`EnumType::isBaseType`
+// 头一句就是 `m_baseType->getTypeKind() != TypeKind_Enum` 的快速退出
+// （jnc_ct_EnumType.cpp:106-121），而"派生枚举到它的基枚举"是 `Cast_Enum` 那一族里唯一的
+// **隐式**转换（`isBaseType` 那一支，jnc_ct_CastOp_Int.cpp:307-310）。
+//
+// 这一层的枚举只有一格底类型（整数），没有基类链：`getRootType()` 那种"顺着 base 一路走到
+// 整数"的结构没建。第五十刀把 int 到枚举的显式转换做掉了，隐式那一头留了两条（枚举到基枚举、
+// 字面 0 到 bitflag），其中**枚举到基枚举**这一条要先有基类链才谈得上，所以单独记在这里。
+//
+// 在这一刀之前这里报的是「枚举的基类型要是整数，这里是 Base」—— 那句话把"没做"说成了
+// "你写错了"。改成"还不收"。
+enum Base {
+	A,
+	B,
+}
+
+enum Derived: Base {
+	C,
+}
+
+int main() {
+	Base x = Derived.C;
+	printf("%d\n", x);
+	return 0;
+}
