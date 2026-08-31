@@ -119,7 +119,8 @@
 //     （decl_curly.rst 最后那一段：char 数组里可以混字面量 —— 要"一格一个字节"的存储宽度，
 //     与下面那处刻意留下的差别是同一格）。
 //   - `printf` 之外的标准库（`std.*`、`io.*`、`gc.*`）
-//   - 格式化字面量 `$"…"`、多行字面量、正则 switch
+//   - 格式化字面量 `$"…"`、二进制字面量 `0x"61 62"`、`__FILE__` 那族预定义宏、多行字面量、
+//     正则 switch。**相邻字面量的拼接**（`"a" "b"`）是第五十四刀，见 litFold。
 //   - union / property / reactor / 事件 / 多播 / 协程。`enum` 是第三十九刀、`class` 是第
 //     五十二刀、`construct` 与 `static construct` 是第五十三刀；类那一族剩下的是基类（要对象
 //     头与虚表）、`destruct`（GC 不定时，disposable.rst:17）、`get` / `set`、构造的重载、
@@ -251,6 +252,25 @@ const shown = (n) => n.replace(/\$/g, '.');
 function isClassAgg(n) {
   return isList(n) && head(n) === 'agg'
     && (isAtom(n.items[1]) ? n.items[1].value : null) === 'class';
+}
+
+/**
+ * 相邻字面量的拼接（第五十四刀）。jancy 的 `literal` 是 `literal_atom+`（语法那处的注释
+ * 记着这条），也就是 C 的"相邻字符串字面量拼在一起"——而这件事在**编译期**做完：拼出来的
+ * 还是一格字面量（literals.rst:90 那句 "all literal kinds can be concatenated and combined.
+ * If the combination does not include formatting literals, then the result is a statically
+ * allocated const char array"）。
+ *
+ * 折得动就回那一串字符；里面有格式化字面量、二进制字面量或 `__FILE__` 那族预定义宏时回 null
+ * —— 那三种各是一格自己的边界，理由见 litWhy。
+ */
+function litFold(n) {
+  if (isStr(n)) return n.value;
+  if (!isList(n) || head(n) !== 'concat') return null;
+  const a = litFold(n.items[1]);
+  if (a === null) return null;
+  const b = litFold(n.items[2]);
+  return b === null ? null : a + b;
 }
 
 /** 声明符的核心是个**特殊成员**吗（第五十二刀）：`construct` / `destruct` /
@@ -2773,6 +2793,32 @@ class JncLower {
   }
 
   /**
+   * 折不动的那一格是什么（第五十四刀）。诊断要说得准 —— 三种各是一格自己的边界：
+   *
+   *   - 格式化字面量 `$"…"`：它自己那一套注入（`$x` / `$(expr; spec)` / `%1`），而 `$(…)`
+   *     里那一格是**一整条表达式**，要在词法之后再解析一遍（jancy 也是这么做的，语法那处
+   *     的注释记着"整块当一个 FMT_LITERAL token、内部不解析"）。那是自己的一刀。
+   *   - 二进制字面量 `0x"61 62"`：它定义的是**逐字节**的一块 const char（literals.rst:33），
+   *     而这一层一格整数占 64 位（ADR-0016 决策二那处刻意留下的差别）—— 要它得先有"一格
+   *     一个字节"的存储宽度，与 `sizeof` 同一格。
+   *   - `__FILE__` / `__DIR__` / `__FUNC__` / `__LINE__` / `__DATE__` / `__TIME__`：词法层
+   *     的预定义字面量宏（Lexer.rl 里就是 LITERAL），值要靠编译期环境；后两个还不可复现。
+   */
+  litWhy(n) {
+    if (isList(n) && head(n) === 'fmt') return '格式化字面量 `$"…"`（要它自己那套 $x / %1 的注入）';
+    if (isList(n) && head(n) === 'concat') {
+      return this.litWhy(litFold(n.items[1]) === null ? n.items[1] : n.items[2]);
+    }
+    const v = isAtom(n) ? String(n.value) : null;
+    if (v !== null) {
+      if (/^0[xXdD]"/.test(v)) return '二进制字面量（要"一格一个字节"的存储宽度，与 sizeof 同一格）';
+      if (/^r"/.test(v)) return '原始字面量 `r"…"`（里面的转义不处理，词法要另一格）';
+      if (/^__[A-Z]+__$/.test(v)) return `预定义字面量宏 '${v}'（值要靠编译期环境）`;
+    }
+    return '这一格';
+  }
+
+  /**
    * `printf(格式串, 实参…)` -> 若干条 `print`。
    *
    * 方言的 `print` 自带换行，所以按 `\n` 切开、每段一条。末尾不带换行的那段发 `(write …)`。
@@ -2782,12 +2828,16 @@ class JncLower {
   printf(n, args, ind) {
     const pad = ' '.repeat(ind);
     if (args.length === 0) { this.err(n, 'printf 至少要一个格式串'); return null; }
-    // 字面量是词法层的 `string` 节点（`{kind:'string', value, raw}`），不是 atom。
-    if (!isStr(args[0])) {
-      this.nope(args[0], 'printf 的格式串不是字面量（要它就得在运行期解释格式）');
+    // 字面量是词法层的 `string` 节点（`{kind:'string', value, raw}`），不是 atom；相邻的几个
+    // 拼在一起是 `(concat …)`，编译期折平（第五十四刀）—— 折出来的仍旧是一格字面量。
+    const fmt = litFold(args[0]);
+    if (fmt === null) {
+      const why = this.litWhy(args[0]);
+      this.nope(args[0], why === '这一格'
+        ? 'printf 的格式串不是字面量（要它就得在运行期解释格式）'
+        : `printf 的格式串是${why}`);
       return null;
     }
-    const fmt = args[0].value;
     const vals = [];
     for (let i = 1; i < args.length; i++) {
       const v = this.expr(args[i], null);
@@ -3266,11 +3316,12 @@ class JncLower {
     if (n.items[2] !== undefined) {
       // 第二个实参在 jancy 的产生式里写死是 `TokenKind_Literal`（Stmt.llk:415），拿的是
       // `$m.m_data.m_string` —— 编译期就定下的一串字节。收表达式会让"运行期才知道那句话"
-      // 变成能写的东西，而 jancy 写不出来。
-      if (!isStr(n.items[2])) {
+      // 变成能写的东西，而 jancy 写不出来。相邻的几个字面量拼在一起照收（第五十四刀）。
+      const msg = litFold(n.items[2]);
+      if (msg === null) {
         return this.nope(n.items[2], 'assert 的第二个实参不是字符串字面量（jancy 那条产生式只收字面量）');
       }
-      extra = ` (${n.items[2].value})`;
+      extra = ` (${msg})`;
     }
     const text = this.srcText(cn);
     if (text === null) return this.nope(n, 'assert 的条件取不到源码文本');
@@ -3749,6 +3800,10 @@ class JncLower {
     if (/^[0-9]+$/.test(s)) return this.intLit(n, BigInt(s));
     // FP 那两条词法规则出来的形状（`1.5` / `1.` / `1e3` / `1.5e-3`）方言的 realLit 都收
     if (/^[0-9]+\.?[0-9]*([eE][+-]?[0-9]+)?$/.test(s)) return { code: `(real ${s})`, type: J_REAL };
+    // 二进制字面量与预定义的字面量宏在词法里都是 LITERAL，可它们不是"数"（第五十四刀）——
+    // 说清是哪一格，别落到"认不出的字面量"那句上。
+    const why = this.litWhy(n);
+    if (why !== '这一格') return this.nope(n, why);
     return this.err(n, `认不出的字面量 '${s}'`);
   }
 
@@ -3764,6 +3819,13 @@ class JncLower {
 
   expr0(n, want) {
     if (isStr(n)) return { code: `(str ${JSON.stringify(n.value)})`, type: J_STR };
+    // 相邻字面量的拼接（第五十四刀）：`"a" "b"` 在**编译期**折成一格字面量，
+    // 与 C 一样（jancy 的 `literal` 就是 `literal_atom+`，见 jnc.grammar 那处注释）。
+    if (isList(n) && head(n) === 'concat') {
+      const s = litFold(n);
+      if (s === null) return this.nope(n, `字面量拼接里的${this.litWhy(n)}`);
+      return { code: `(str ${JSON.stringify(s)})`, type: J_STR };
+    }
     if (isAtom(n)) return this.numLit(n);
     if (!isList(n)) return this.err(n, '认不出的表达式');
     const h = head(n);
@@ -3843,6 +3905,11 @@ class JncLower {
       // `new T { … }`（第二十五刀）：那几条语句抬成一个函数，项的值当实参传进去 ——
       // 于是它仍旧是一个表达式，惰性位置上也成立。见 newCurly。
       case 'new-curly': return this.newCurly(n, n.items[1], n.items[2]);
+      // 格式化字面量（第五十四刀记的边界）：`$"i = $i"` 产出的是一格**动态**的 char 数组
+      //（literals.rst:62）。`$x` 与 `%1` 那两种注入这一层拼得出来（就是字符串相加），
+      // 可 `$(expr; spec)` 里那一格是一整条表达式 —— 语法把 `$"…"` 整块当一个 token，
+      // 里面没解析，要它就得在词法之后再解析一遍（jancy 自己也是这么做的）。那是自己的一刀。
+      case 'fmt': return this.nope(n, this.litWhy(n));
 
       // `countof(a)`（第四十五刀）：编译期的元素个数，见 countof。
       case 'countof': return this.countofExpr(n, n.items[1]);

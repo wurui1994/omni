@@ -1,0 +1,19 @@
+// 格式化字面量（第五十四刀的边界）。`$"…"` 是 jancy 的第三类字面量：它产出一格**动态**分配
+// 的 char 数组（literals.rst:62-88），里面可以注入
+//   - `$name`：一个名字的值；
+//   - `$(expr)` / `$(expr; spec)`：一整条表达式，可带 printf 式的格式说明；
+//   - `%1` / `%(1;x)`：按下标引用字面量自己那串实参。
+//
+// 前两种里的 `$(…)` 是**一整条表达式**，而语法把 `$"…"` 整块当**一个** FMT_LITERAL token ——
+// 里面一个字都没解析（jnc.grammar 那处注释记着这条，jancy 自己也是这么做的：它在编译期对那段
+// 文字再跑一遍词法与表达式解析）。所以要收它，得先有"在降级里回头解析一小段源码"的路 ——
+// 那是自己的一刀，不是这一刀顺手能带的。
+//
+// 拼接这一刀只管**不含**格式化字面量的那一半，literals.rst:90 那句正好把界划在这里：
+// "If the combination does not include formatting literals, then the result is a statically
+// allocated const char array"。
+int main() {
+	int i = 100;
+	printf($"i = $i\n");
+	return 0;
+}

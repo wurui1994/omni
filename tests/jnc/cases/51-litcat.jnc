@@ -1,0 +1,32 @@
+// 第五十四刀：相邻字面量的拼接 —— 编译期就折平，拼出来的还是一格字面量。
+//
+// 出处：jancy 的 `literal` 是 `literal_atom+`（jnc.grammar 的 literal 规则那处注释记着
+// Expr.llk 的对应写法），而 literals.rst:90 那句把结果也说明白了 —— "all literal kinds can
+// be concatenated and combined. If the combination does not include formatting literals,
+// then the result is a statically allocated const char array"。也就是 C 的老规矩。
+//
+// 语料里它到处是：多行的 printf 格式串就是这么摊开写的（test107.jnc:3、93_HidEnum.jnc:29、
+// 13_DynamicCast.jnc:78）。以前这一层只认"一个 string 词法节点"，所以那些 printf 全被拒在
+// 「格式串不是字面量」上 —— 那句话还说错了原因：它们是**编译期**就定下的。
+//
+// 期望输出的出处：C 自己就有相邻字面量拼接，所以孪生件与这份源码**逐字一样**（除了 jancy 的
+// `string_t` 在 C 那边写成 `const char*`）—— `cc -O0 -std=c99 -Wall`，四行逐字节相同。
+int main() {
+	// 多行摊开的格式串：拼完是 "a=%d b=%d\n"
+	printf(
+		"a=%d "
+		"b=%d\n",
+		1, 2
+	);
+
+	// 转义在拼接的接缝两侧都照旧
+	printf("x\t" "y\n");
+
+	// 值的位置也一样：拼出来的是一格字面量
+	string_t s = "hello" ", " "world";
+	printf("%s\n", s);
+
+	// 拼三段以上（语法上是左递归的 concat 套 concat）
+	printf("1" "2" "3" "\n");
+	return 0;
+}

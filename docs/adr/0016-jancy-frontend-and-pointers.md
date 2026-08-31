@@ -2691,6 +2691,64 @@ self"的自由函数，这一层的落法正是它）、类变量不会自己造
 四个后端与运行时一个字都没改；自举、`tests/jit`、`tests/mir`、`tests/llvm`；
 `npm run lint` 这台机器上没有 typescript。
 
+### 第五十四刀：相邻字面量的拼接 —— 一句说错了原因的诊断
+
+**这一刀是尺子读出来的一处错话**。上一刀之后"只有一个卡点、带 `int main`"那张榜的第二名是
+`printf 的格式串不是字面量（要它就得在运行期解释格式）`（7 份，全量 18 条）。可把那 18 条一条条
+看下来，一多半根本不是"运行期"：
+
+```
+	printf(
+		"system info:\n"
+		"\tcpu:       %s\n"
+		…
+```
+
+这是 C 的相邻字面量拼接（test107.jnc:3、93_HidEnum.jnc:29、13_DynamicCast.jnc:78），
+**编译期**就定下来了。语法早就把它归成了 `(concat …)`（jnc.grammar 的 literal 规则，
+`literal_atom+`），是降级这一侧只认"一个 string 词法节点"。那句诊断因此不只是"还不收"，
+它还把原因说错了。
+
+**落法一行**：`litFold` 递归折平 `(concat …)`，折出来的还是一格字面量 —— printf 的格式串、
+表达式里的字符串值、`assert` 的第二个实参三处共用它。出处是 literals.rst:90 那句
+"all literal kinds can be concatenated and combined. If the combination does not include
+formatting literals, then the result is a statically allocated const char array" —— 界正好
+划在"不含格式化字面量"这里，所以这一刀的边界不是我们挑的，是那句话本身给的。
+
+**折不动的三格，各自记成一条边界，诊断也照着说**（`litWhy`）：
+
+- 格式化字面量 `$"…"`（`bad/lit-fmt`）：它产出的是**动态**的 char 数组（literals.rst:62），
+  `$x` 与 `%1` 这一层拼得出来（就是字符串相加），可 `$(expr; spec)` 里那一格是一整条表达式
+  —— 语法把 `$"…"` 整块当**一个** token、里面一个字没解析（jancy 自己也是这样，它在编译期对
+  那段文字再跑一遍词法与表达式解析）。要收它得先有"在降级里回头解析一小段源码"的路。
+- 二进制字面量 `0x"61 62"`（`bad/lit-binary`）：literals.rst:33 说的是**逐字节**的一块
+  const char，而方言里一格整数占 64 位 —— 与 `sizeof` 卡在同一处（决策二那处刻意留下的差别）。
+- `__FILE__` / `__DIR__` / `__FUNC__` / `__LINE__` / `__DATE__` / `__TIME__`（`bad/lit-macro`）：
+  词法层的预定义宏，值要靠编译期环境；后两个连"每次跑出来一样"都做不到，期望输出没法写。
+
+顺带把 `r"…"`（原始字面量）从「认不出的字面量」那句错话改成一条老实的"还不收"。
+
+**期望输出的出处**：相邻拼接是 C 自己的规矩，所以孪生件与 `cases/51-litcat.jnc` **逐字一样**
+（只有 `string_t` 写成 `const char*`），`cc -O0 -std=c99 -Wall`，四行逐字节相同。
+
+**放行了什么 —— 说清楚：不是新文件，是诊断**。全量 1689 → 1691 条(文件, 卡点)：去掉 17 条
+（`printf 的格式串不是字面量` 13、表达式 `fmt` 2、表达式 `concat` 2），新露出 19 条 —— 而新露的
+每一条都是**同一处**换了个说得准的名字（`printf 的格式串是格式化字面量` 9、格式化字面量当值 2、
+原始字面量 2、拼接里有格式化字面量/二进制字面量各 1、二进制字面量 1、格式串是 `__FILE__` /
+`__DIR__` / 二进制字面量各 1）。"只有一个卡点、带 `int main`"从 42 份变 43 份，其中
+`printf 的格式串` 那一行从 7 降到 4。"一条 `还不收` 都没有、带 `int main`"56 → 55，
+`test107.jnc` 进来、`71_MixedLanguageRecognition.jnc` 与 `test110.jnc` 出去 —— 出去的两份本来
+就卡在**硬错**上（`没有这个类型 'Language'`、`未声明的变量 'ipTable'`），新的 nope 只是把
+字面量那一格也说出来了；进来的 test107.jnc 也**照旧跑不起来**：它要 `sys.g_systemInfo`，
+标准库这一刀不接。所以这一刀的账要这么记：语料里 13 处 printf 的格式串从"被错话拒掉"变成
+能编，剩下的每一处都归到了对的名下 —— 没有新文件整份跑通。
+
+**跑过的轴**：`tests/jnc`（93/0，新增 `cases/51-litcat` 与 `bad/lit-fmt`、`bad/lit-binary`、
+`bad/lit-macro`）。**没跑的**：`tests/glr`（语法一个字没动）、`tests/sexpr`、`tests/asy`、
+`tests/oir`、自举、`tests/jit`、`tests/mir`、`tests/llvm` —— 这一刀只动了
+`frontend-jnc/lower.js`（`litFold`/`litWhy`、`expr0` 的 concat 与 fmt 两支、`printf` 的格式串、
+`numLit` 的兜底、`assertStmt` 的第二个实参）；`npm run lint` 这台机器上没有 typescript。
+
 ## 后果与代价
 
 - 方言从"没有可算术的引用"变成"有"。这一格会渗到 MIR 与四个后端，改不回去。
