@@ -1,0 +1,1 @@
+'Lock.lock' —— 它是 opaque class 上的方法，实现在宿主的 C/C++ 那边（opaque.rst:15-29），这一层还没有宿主面

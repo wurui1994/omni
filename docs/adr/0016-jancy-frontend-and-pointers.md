@@ -3749,8 +3749,115 @@ jancy 自己分得很清 —— `jancy foo.jnc` 找不着 `main` 才报错，而
 - 剩下 28 份卡在**语法**上（`<` 12 份、`*` 7 份、`thin` 5 份、`:` 4 份）—— 那是语法那一层
   的账，不在降级这边。
 
-所以下一刀是 `opaque class`：它是"最大的一格"，也是那 33 份唯一的拦路项。>
+所以下一刀是 `opaque class`：它是"最大的一格"，也是那 33 份唯一的拦路项。
 
+> 第六十六刀更正：那 33 份里**只有 1 份**因这一刀降了下来。"唯一的拦路项"这个数在这儿
+> 高估了 33 倍 —— 原因见下一节开头。
+
+
+### 第六十六刀：`opaque class` —— 不是另一种类型，是类上的一位
+
+先说尺子的教训，因为它比这一刀本身值钱。
+
+上一刀数出"`opaque class` 是 33 份文件唯一的拦路项"，落地之后只有 **1 份**降了下来。
+数错的原因是**拦路项会截断子树**：`typeDecl` 一进门就 `nope('opaque class')` 并 `return`，
+类体里那些成员一个都没走到。于是那 33 份在旧尺子眼里"只剩一条"，其实是"只**看见**一条"。
+
+> 所以这条度量得改口径：**"唯一的拦路项"只是上界**，而且对"整块拒掉"的那类拦路项
+> （类型声明、函数定义、import）高估得最狠 —— 它们后面藏着一整个子树。要真数，得
+> **试着把那一格摘掉再量**。这一刀就是这么量的（`/tmp/m66probe.sh`）：那 33 份摘掉
+> `opaque class` 之后，新冒出来 66 个 (文件, 拦路项) 对，头几格是修饰符 14、`destruct` 13、
+> 多继承 10、没有这个基类 9、指针后面的修饰符 5。
+
+**这一刀本身只有一行半。** jancy 那边 `opaque class` 与 `class` 落在**同一个调用**上：
+
+```
+opaque_class_specifier
+	:	TokenKind_OpaqueClass TokenKind_Identifier $n (':' type_name_list $b)?
+			{ return ($type = createClassType(…, ClassTypeFlag_Opaque)) != NULL; }
+		derivable_type_member_block<$type>
+```
+
+（`NamedTypeSpecifier.llk:199-215`；不带 opaque 的那条是同一个 `createClassType` 少那个
+标记，体也是同一条 `derivable_type_member_block`。）所以"opaque"**不是另一种聚合**，
+是类上的一位。这一层照着这个形状改：一个 `aggCls(k)` 谓词，三处原来写死 `=== 'class'`
+的地方（`isClassAgg`、`typeName`、`typeDecl`）改成问它。
+
+**那一位管什么、我们为什么可以先不读它。** 它只在**布局**那一步被消费
+（`StructType.cpp:203-227`）：宿主登记的 `OpaqueClassTypeInfo::m_size` **顶掉**接口结构体
+算出来的大小（并要求 ≥ 声明字段占的字节），宿主说 `m_isNonCreatable` 时给类补上
+`ClassTypeFlag_OpaqueNonCreatable` —— 而**那个标记**才是真正挡住 `new`
+（`New.cpp:580-582`"cannot instantiate"）与挡住继承（`ClassType.cpp:318-320`"cannot derive
+from non-creatable opaque"）的东西。也就是说 opaque.rst:67 那句"既不能被继承也不能静态/栈上/
+当字段分配"，在编译器里的实际条件是**宿主说了不可创建**，不是源码里写了 `opaque` 这个词。
+
+关键的一句在同一处的条件里：`!(m_module->getCompileFlags() &
+ModuleCompileFlag_IgnoreOpaqueClassTypeInfo)`。**没有宿主登记时，那一整段是跳过的** ——
+jancy 自己的命令行就有这个开关：`--ignore-opaque`，帮助文本写着 "Ignore opaque class type
+information (for testing)"（`CmdLine.h:165-169`），而 `--documentation` 不带 `--compile` 时
+也会自动打开它（`CmdLine.cpp:255-257`）。我们没有宿主扩展库，所以**永远在那个模式里**：
+体照常摆、方法照常降、`new` 照常收、拿它当基类照常收。这不是向方言妥协 —— 这是 jancy
+在同一处境下自己的行为。
+
+`this.opaques` 仍旧记下来了，虽然这一层不读：等宿主面真的来了，"体外还有多少字节"与
+"可不可创建"两条规矩得有地方落。
+
+**第二半：宿主那边的成员，得说清楚是"缺宿主"而不是"缺函数"。** 语料里 `opaque class` 的
+真实形状是一份**只有声明**的 API 文件（`sys_Lock.jnc`、`jnc_Alias.jnc`、opaque.rst:19-29 的
+`io.Serial`）：体内全是原型，实现在宿主的 C++ 里，由 `JNC_BEGIN_CLASS` 那一串宏映到函数
+地址上（`abi.rst:60-70`）。原型这一层本来一个字都不发（与普通类里"体写在类外"同一条），
+于是 `p.lock()` 会落到「没有这个函数：'p.lock'」—— **话说错了**：源码没写错，缺的是宿主。
+
+两处补上（都只在**按名字查不着之后**才问，所以体外真写了定义时这两格用不上）：
+
+- `hostFns`（方法的裸名 → 类名）：`callName` 里报「'Lock.lock' —— 它是 opaque class 上的
+  方法，实现在宿主的 C/C++ 那边（opaque.rst:15-29），这一层还没有宿主面」。
+- `hostCtors`（construct 在宿主那边的类名）：`newPtr` 里报同一族的话。**这一格是必须的**
+  —— 不报就等于"当它没有构造"，交出去一格全零的内存，而 jancy 那边宿主的构造是真跑了的。
+  悄悄少跑一段比报错难查得多。
+
+**量出来的**（`tests/jnc` 129/0）：
+
+- `cases/62-opaque.jnc` —— `opaque class Counter` 带字段、带类外定义的 construct 与方法，
+  再让一个**非** opaque 的 `Derived` 继承它。四行输出与 `/tmp/c62.c`（`cc -O0 -std=c99
+  -Wall`）逐字节相同：`15 / 12 / 101 / 202`。
+- `mods/lib2.jnc` —— 语料的真形状：`namespace sys` 里两个只有声明的 opaque 类加一个继承它的
+  普通类，`sx` 退出码 0，降出来的 `.sx` 跑得动。降出来的是**一格**结构体
+  （`(struct sys$Lock ($tag int) (m_depth int) (m_owner int))`）：一整条继承链共用一格，
+  第五十六刀的 `clsRoot` 本来就是这么设计的。
+- `bad/opaque-host-fn.jnc` / `bad/opaque-host-ctor.jnc` —— 上面那两句话各钉一条。
+
+**尺子**（`/tmp/m66r.sh`，`/tmp/all66.txt` 与 `/tmp/ok66.txt`）：
+
+「真降得下来」（`sx` 退出码 0）：**48 → 49**（+1）。就是 `ui_Icon.jnc` 一份。
+`ok65b ⊆ ok66`，一份都没退。
+
+(文件, 拦路项) 对：4032 → **6250**（**+2218**）。这个数**涨**了两千多，而这是好事 ——
+它就是"截断的子树"被打开之后露出来的东西，也是上面那条口径教训的量化版：一格拦路项
+挡住的不是一条，是它后面的一整片。
+
+`'opaque class'（只收 struct 与 class）` 196 → **3**，剩下那三条是 `union`
+（`jnc_DynamicLayout.jnc`、`SerialTapPro.jnc`、`test19.jnc`）—— 那是另一格。
+
+**露出来的那一片，按大小**（`/tmp/all66.txt`）：
+
+- 修饰符 189 → **278**：眼下最大的一格"还不收"。`opaque class` 的体里全是
+  `readonly` / `const property` / `autoget` / `bindable` 这些词。
+- `destruct` 18 → **145**、形参的默认值 97 → **141**、指针后面的修饰符 6 → **101**、
+  `main` 里 return 非 0 的值 17 → **75**、认不出的枚举名字 51 → **85**、
+  这条声明没有类型 23 → **71**。
+- **新出现的一格**：`函数 '…' 定义了两次` 13 → **113**。这个名字起错了 —— 它其实是
+  **重载**。`ui_Layout.jnc:98-115` 那四个 `addRow`（`Widget*`/`Layout*` × `Widget*`/`string_t`）
+  是四条不同签名的同名方法，jancy 收，我们没有重载决议，于是报成"定义了两次"。
+  这是第二条"话说错了"的诊断（第一条是这一刀上半场修掉的"没有这个函数"）。
+- 没有这个类型 290 / 未声明的变量 276 / 没有这个函数 248 —— 老三样，还是"标准库与扩展库
+  没接上"这同一件事。
+
+覆盖对得上：613 + 49 = 662。
+
+所以下一刀是**修饰符**：278 对，最大的一格，而且它是 `opaque class` 体里那些成员的门槛
+（`readonly`、`const property`、`autoget`、`bindable`）。它后面紧跟着的是**重载**——
+那 113 条报错的真名。
 
 ## 后果与代价
 

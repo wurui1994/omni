@@ -1,0 +1,15 @@
+// `opaque class` 上声明的方法，实现在宿主那边（ADR-0016 第六十六刀）。
+// jancy 的扩展库用 JNC_BEGIN_CLASS 那一串把名字映到 C++ 的函数地址上（abi.rst:60-70），
+// 于是 `p.lock()` 在它那边是一次**真的调用**。我们还没有宿主面，所以这一句得明说 ——
+// 而不能落回"没有这个函数"：那会让人以为是源码写错了。
+opaque class Lock {
+	int m_depth;
+
+	void lock();
+}
+
+int main() {
+	Lock* p = new Lock();
+	p.lock();
+	return 0;
+}

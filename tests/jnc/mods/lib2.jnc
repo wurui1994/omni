@@ -1,0 +1,33 @@
+// 语料里 `opaque class` 的真实形状（ADR-0016 第六十六刀）：一份**只有声明**的 API 文件。
+// 体内全是原型 —— 实现在宿主的 C++ 那边（opaque.rst:15-29 的 `io.Serial` 就是这个样子）。
+// 抄的是 sys_Lock.jnc / jnc_Alias.jnc 那两份的骨架（去掉 `destruct`、属性与多继承 ——
+// 那三格还没到）。
+//
+// 这一组只问一件事：`omni sx` 降得下来（退出码 0），并且降出来的 .sx 跑得动。
+// 原型不发一个字（与普通类里的方法原型同一条），所以"宿主实现的那些成员"在这一层就是
+// 碰不着的：真去调、真去 new，两条边界分别记在 bad/opaque-host-fn.jnc 与
+// bad/opaque-host-ctor.jnc 上。
+namespace sys {
+
+opaque class Lock {
+	int m_depth;
+
+	construct();
+
+	void lock();
+	void unlock();
+}
+
+opaque class Timer {
+	uint64_t m_dueTime;
+
+	void stop();
+}
+
+// 非 opaque 的类拿 opaque 的当基类：挡住继承的是宿主说的 `OpaqueNonCreatable`
+// （ClassType.cpp:318-320），源码里那个 `opaque` 词不挡。
+class RecursiveLock: Lock {
+	int m_owner;
+}
+
+} // namespace sys

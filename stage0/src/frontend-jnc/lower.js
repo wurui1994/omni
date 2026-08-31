@@ -279,10 +279,20 @@ const isEnum = (t) => t.k === 'enum';
 /** 报错里显示的名字（第五十一刀）：内部用 `$` 连命名空间，源码里写的是点。 */
 const shown = (n) => n.replace(/\$/g, '.');
 
+/**
+ * agg 的那个关键字是"类"吗（第五十二刀；`opaque class` 是第六十六刀加进来的）。
+ *
+ * jancy 那边这两个词落在**同一个调用**上：`opaque_class_specifier` 的动作是
+ * `createClassType(…, ClassTypeFlag_Opaque)`，而 `class_specifier` 是同一个
+ * `createClassType` 少那个标记；体也是同一条 `derivable_type_member_block`
+ * （NamedTypeSpecifier.llk:199-215）。所以"opaque"不是另一种类型，是类上的一位。
+ */
+const aggCls = (k) => k === 'class' || k === 'opaque class';
+
 /** `(type-decl (agg class …))` 里的那个 agg 吗（第五十二刀）。 */
 function isClassAgg(n) {
   return isList(n) && head(n) === 'agg'
-    && (isAtom(n.items[1]) ? n.items[1].value : null) === 'class';
+    && aggCls(isAtom(n.items[1]) ? n.items[1].value : null);
 }
 
 /**
@@ -771,6 +781,12 @@ class JncLower {
     // 加"变量里放地址"，所以 `pfield` 那一整套原样可用。`classes` 记的是"这个名字是类"，
     // `methods` 是"这个函数是某个类的方法"（名字 -> 类名），`selfClass` 是正在降的方法属于谁。
     this.classes = new Set();
+    // `opaque class` 的名字（第六十六刀）。见 typeName 那处的注释：这一层不读它。
+    this.opaques = new Set();
+    // 宿主那边的成员（第六十六刀）：`hostFns` 是方法的裸名 -> 类名，`hostCtors` 是
+    // "construct 在宿主那边"的类名。两者都只在**按名字查不着**之后才问，见 callName。
+    this.hostFns = new Map();
+    this.hostCtors = new Set();
     this.methods = new Map();
     this.methodNames = new Set();
     this.selfClass = null;
@@ -1671,17 +1687,22 @@ class JncLower {
     if (head(n) === 'enum') return this.enumName(n);
     if (head(n) !== 'agg') return null;                    // 下面那一遍报
     const key = isAtom(n.items[1]) ? n.items[1].value : null;
-    if (key !== 'struct' && key !== 'class') return null;
+    const cls0 = aggCls(key);
+    if (key !== 'struct' && !cls0) return null;
     const nm0 = this.qname(n.items[2]);
     if (nm0 === null) return null;
     const name = this.qual(nm0);
     if (this.structs.has(name)) {
-      return this.err(n, `${key === 'class' ? '类' : '结构体'} '${shown(name)}' 声明了两次`);
+      return this.err(n, `${cls0 ? '类' : '结构体'} '${shown(name)}' 声明了两次`);
     }
     this.structs.set(name, []);
     // 类的名字另记一格（第五十二刀）：字段表与结构体共用，可"变量里放地址还是放那段内存"
     // 两者相反，所以类型那一格要分得清。
-    if (key === 'class') this.classes.add(name);
+    if (cls0) this.classes.add(name);
+    // `opaque class` 再记一格（第六十六刀）：这一层不读它 —— 那一位管的是"体外还有多少
+    // 字节"与"能不能 new / 能不能被继承"，两者都要宿主登记的 OpaqueClassTypeInfo 才知道
+    // （StructType.cpp:203-227）。记下来是为了那一天有宿主面时，规矩有地方落。
+    if (key === 'opaque class') this.opaques.add(name);
     return null;
   }
 
@@ -1780,8 +1801,8 @@ class JncLower {
     if (isList(n) && head(n) === 'enum') return this.enumDecl(n);
     if (!isList(n) || head(n) !== 'agg') return this.nope(n, '带体的命名类型（只收 struct、class 与 enum）');
     const key = isAtom(n.items[1]) ? n.items[1].value : null;
-    if (key !== 'struct' && key !== 'class') return this.nope(n, `'${key}'（只收 struct 与 class）`);
-    const cls = key === 'class';
+    const cls = aggCls(key);
+    if (key !== 'struct' && !cls) return this.nope(n, `'${key}'（只收 struct 与 class）`);
     const nm3 = this.qname(n.items[2]);
     if (nm3 === null) return this.err(n, `认不出的${cls ? '类' : '结构体'}名字`);
     const name = this.qual(nm3);
@@ -1842,7 +1863,11 @@ class JncLower {
       // 体外那个定义。`construct` 的原型同理（体在类外，第五十三刀）。
       if (isList(m) && head(m) === 'fn-proto') {
         const sk = specialCore(m.items[2]);
-        if (sk === 'construct' || sk === 'static construct') continue;
+        if (sk === 'construct' || sk === 'static construct') {
+          // 同上（第六十六刀）：`opaque class` 的 construct 也在宿主那边。
+          if (cls && key === 'opaque class' && sk === 'construct') this.hostCtors.add(name);
+          continue;
+        }
         if (sk === null) this.nope(m, '类里的特殊成员声明');
         else this.specialNope(m, sk);
         continue;
@@ -1869,6 +1894,11 @@ class JncLower {
         if (info.formals !== null) {
           if (!cls) this.nope(d, '结构体里的方法');
           else if (sp.virt !== null) this.methodProto(d, name, info, sp);
+          // `opaque class` 里的原型（第六十六刀）：**没有体外那个定义** —— 实现在宿主的
+          // C++ 里（opaque.rst:15-29 的 `io.Serial` 就是这个形状）。记下名字，等到真去调
+          // 它的时候好说清楚是"缺宿主"而不是"缺这个函数"。体外真写了定义时这一格用不上：
+          // 调用那边先按名字查，查着了就不问这里。
+          if (cls && key === 'opaque class') this.hostFns.set(info.name, name);
           continue;
         }
         // 字段上写不了那三个（第五十七刀）：它管的是"调哪一个方法"。
@@ -5714,6 +5744,16 @@ class JncLower {
       self = m.self;
     }
     if (nm === null && nm0 === null) return this.nope(n, '不是直接调一个名字的调用');
+    // 名字查不着，而它是某个 `opaque class` 上声明过的方法（第六十六刀）：那不是"没有这个
+    // 函数"，是**实现在宿主那边**。jancy 那边这一格由扩展库登记（JNC_BEGIN_CLASS 那一串，
+    // abi.rst:60-70），我们还没有宿主面，所以这儿只能明说。
+    if (nm === null) {
+      const hostOwner = mn === null ? undefined : this.hostFns.get(mn);
+      if (hostOwner !== undefined) {
+        return this.nope(n, `'${shown(hostOwner)}.${mn}' —— 它是 opaque class 上的方法，`
+          + '实现在宿主的 C/C++ 那边（opaque.rst:15-29），这一层还没有宿主面');
+      }
+    }
     if (nm === null) return this.err(n, `没有这个函数：'${nm0}'`);
     // 方法体里裸写 `foo()` 就是 `this.foo()`（类是一层命名空间，所以 resolve 已经找着了
     // `C$foo`）—— 这儿把 `this` 补上。
@@ -6032,6 +6072,12 @@ class JncLower {
       }
       const raw = { code: `(pnew (ptr ${clsRoot(t.name)}) (int 1))`, type: tClass(t.name, false) };
       const hasCtor = this.ctors.has(t.name);
+      // `opaque class` 声明了 construct、可体在宿主那边（第六十六刀）：造出来的对象不能
+      // 假装"没有构造"就交出去 —— 那是**悄悄少跑一段**。所以这儿明说。
+      if (!hasCtor && this.hostCtors.has(t.name)) {
+        return this.nope(n, `new ${shown(t.name)}(…) —— 它的 construct 声明在 opaque class 里、`
+          + '实现在宿主的 C/C++ 那边（opaque.rst:15-29），这一层还没有宿主面');
+      }
       if (!hasCtor && argsNode !== null && this.flat(argsNode).length > 0) {
         return this.err(n, `${shown(t.name)} 没有 construct，给不了构造实参`);
       }

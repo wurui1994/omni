@@ -1,0 +1,50 @@
+// 第六十六刀：`opaque class` 在这一层与 `class` 是同一格。
+// jancy 那边这两个词落在同一个 `createClassType` 上，只差一个 `ClassTypeFlag_Opaque`
+// （NamedTypeSpecifier.llk:199-215）；那一位管的是"宿主登记的体外字节数"与"能不能 new /
+// 能不能被继承"（StructType.cpp:203-227），而**没有宿主登记时那整段是跳过的**
+// —— jancy 自己的 `--ignore-opaque`（CmdLine.h:165-169）走的就是这条路。我们还没有宿主面，
+// 所以永远在那个模式里：体照常摆，方法照常降，`new` 照常收。
+//
+// 期望输出的出处：/tmp/c62.c（`cc -O0 -std=c99 -Wall`）。
+
+opaque class Counter {
+	int m_n;
+
+	construct(int n);
+	int bump(int d);
+}
+
+Counter.construct(int n) {
+	m_n = n;
+}
+
+int Counter.bump(int d) {
+	m_n += d;
+	return m_n;
+}
+
+int main() {
+	Counter* c = new Counter(10);
+	printf("%d\n", c.bump(5));
+	printf("%d\n", c.bump(-3));
+
+	// 基类那一格：`opaque class` 也能当基类 —— 挡住继承的是宿主说的
+	// `OpaqueNonCreatable`（ClassType.cpp:318-320），不是源码里的 `opaque` 那个词。
+	Derived* d = new Derived();
+	printf("%d\n", d.bump(1));
+	printf("%d\n", d.twice());
+	return 0;
+}
+
+class Derived: Counter {
+	construct();
+	int twice();
+}
+
+Derived.construct() {
+	basetype.construct(100)
+}
+
+int Derived.twice() {
+	return m_n * 2;
+}

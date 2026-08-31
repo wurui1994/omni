@@ -1,0 +1,1 @@
+new Lock(…) —— 它的 construct 声明在 opaque class 里、实现在宿主的 C/C++ 那边（opaque.rst:15-29），这一层还没有宿主面
