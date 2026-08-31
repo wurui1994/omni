@@ -1,0 +1,90 @@
+// 第七十一刀：autoget 属性 —— 取值器不用写，编译器生成一格存储（prop_autoget.rst:15-17），
+// 简单声明式里存值器的体拿 `m_value` 称呼它（同处:26）。
+
+int autoget property g_clamp;
+
+g_clamp.set(int x) {
+	if (x < 0) {
+		m_value = 0;
+	} else if (x > 100) {
+		m_value = 100;
+	} else {
+		m_value = x;
+	}
+}
+
+// 存值器里读那一格自己：读的就是生成的存储，不是再绕回取值器
+int autoget property g_acc;
+
+g_acc.set(int x) {
+	m_value = m_value + x;
+}
+
+// autoget 也可以自己写取值器 —— 写了就用写的那个（同处:17 那句 "if possible … otherwise"）
+int autoget property g_dbl;
+
+int g_dbl.get() {
+	return m_value * 10;
+}
+
+g_dbl.set(int x) {
+	m_value = x;
+}
+
+// 取那一格的地址：第二十四刀那条"被 & 过的模块级量提到自己的一段内存里"对它一样管用
+int autoget property g_via;
+
+g_via.set(int x) {
+	int* q = &m_value;
+	*q = x * 3;
+}
+
+class Cell {
+	int autoget property m_v;
+	int m_hits;
+
+	m_v.set(int x) {
+		m_hits = m_hits + 1;
+		m_value = x + 1;
+	}
+
+	int twice() {
+		return m_v * 2;
+	}
+}
+
+class Sub: Cell {
+	int thrice() {
+		return m_v * 3;
+	}
+}
+
+int main() {
+	g_clamp = 7;
+	printf("%d ", g_clamp);
+	g_clamp = -5;
+	printf("%d ", g_clamp);
+	g_clamp = 300;
+	printf("%d\n", g_clamp);
+
+	g_acc = 3;
+	g_acc = 4;
+	g_acc = 5;
+	printf("%d\n", g_acc);
+
+	g_dbl = 6;
+	printf("%d\n", g_dbl);
+
+	g_via = 4;
+	printf("%d\n", g_via);
+
+	Cell* c = new Cell;
+	c.m_v = 10;
+	printf("%d %d\n", c.m_v, c.twice());
+
+	Sub* s = new Sub;
+	s.m_v = 20;
+	printf("%d %d %d\n", s.m_v, s.twice(), s.thrice());
+	printf("hits=%d\n", s.m_hits);
+	return 0;
+}

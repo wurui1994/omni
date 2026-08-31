@@ -805,6 +805,17 @@ class JncLower {
     // 名字有没有可能是属性" —— 与 methodNames（第五十五刀）同一个用处：没这一格就得为每一次
     // 取字段都把左边算一遍。
     this.propNames = new Set();
+    // `autoget` 属性（第七十一刀）：那格**编译器生成的存储**要落地。顶层的落成一格模块级
+    // 变量、成员的落成类里的一格字段 —— 名字都是 `<属性全名>$m_value`（源码里写的是
+    // `m_value`，prop_autoget.rst:26）。这张单子攒的是"要发的那一格 + 要合成的取值器"，
+    // 发出去的时机排在 gTaken 数完之后（那一问决定顶层那一格要不要提到自己的内存里）。
+    this.autoProps = [];
+    // 取/存那两个函数的名字 -> 属性的全名（第七十一刀）。函数体降下来时靠它把 `this.ns`
+    // 再往里挪一层：属性在 jancy 那边**本来就是一层命名空间**（prop_full.rst:15）。
+    this.propOf = new Map();
+    // 正在降的这个函数是某格成员 autoget 属性的存值器时，这儿放那格字段的**真名**
+    // （`m_p$m_value`）—— selfField 拿它把源码里的 `m_value` 换过去。
+    this.selfProp = null;
     // `opaque class` 的名字（第六十六刀）。见 typeName 那处的注释：这一层不读它。
     this.opaques = new Set();
     // 宿主那边的成员（第六十六刀）：`hostFns` 是方法的裸名 -> 类名，`hostCtors` 是
@@ -981,7 +992,11 @@ class JncLower {
     if (this.selfClass === null) return null;
     const fs = this.structs.get(this.selfClass);
     if (fs === undefined) return null;
-    const f = fs.find((x) => x.name === name);
+    // 成员 autoget 属性的存值器体里那个 `m_value`（第七十一刀，prop_autoget.rst:26）：源码里
+    // 写的是这个名字，而类里那一格叫 `<属性名>$m_value` —— 在这儿换过去。回的是**字段自己**，
+    // 所以下游一律拿 `f.name` 发 pfield，不能再用源码里写的那个名字。
+    const key = name === 'm_value' && this.selfProp !== null ? this.selfProp : name;
+    const f = fs.find((x) => x.name === key);
     return f === undefined ? null : f;
   }
 
@@ -1335,11 +1350,12 @@ class JncLower {
       this.ns = e.ns;
       if (isList(e.it) && head(e.it) === 'type-decl') this.typeDecl(e.it.items[1]);
     }
-    // 类的那几格结构体在这儿才发（第五十六刀）：一整条继承链共用一格，而"谁派生了我"要等
-    // 所有 type-decl 都过完才知道。排在签名那一遍之前 —— 方法的形参里有类指针。
-    this.classLayout();
     // 属性的名字先坐下（第六十八刀）：取/存两个函数的签名要抄它的类型，而那两个函数在
     // 下面那一遍里就得成型 —— 模块级变量那一遍（globalDecl）排在签名之后，来不及。
+    //
+    // 这两遍排在 classLayout **之前**（第七十一刀挪上来的）：`autoget` 的成员属性要往类里
+    // 加一格字段，而那一格得赶在"整条链的结构体发出去"之前进 ownFields。往上挪是安全的 ——
+    // 这两遍只查名字（类名在 typeName 那一遍就坐下了）、不发一行 decls。
     for (const e of items) {
       if (!isList(e.it) || head(e.it) !== 'var-decl') continue;
       if (!this.propMod(e.it.items[1])) continue;
@@ -1352,6 +1368,9 @@ class JncLower {
       this.ns = e.ns;
       this.propName(e.it);
     }
+    // 类的那几格结构体在这儿才发（第五十六刀）：一整条继承链共用一格，而"谁派生了我"要等
+    // 所有 type-decl 都过完才知道。排在签名那一遍之前 —— 方法的形参里有类指针。
+    this.classLayout();
     // 签名先过一遍（第十五刀）：jancy 的命名空间不看顺序，所以"后面定义的函数"要在
     // 模块级变量的初值与所有函数体之前就查得着。
     for (const e of items) {
@@ -1392,6 +1411,43 @@ class JncLower {
     // 答完 —— 而 `&g` 出现在函数体里，也就是后面那一遍。数的是整份源码里所有 `&名字`，
     // 所以同名的局部量会把全局也带上：**多提一格不影响语义**（读写照旧走那一格），只是多一次 pnew。
     for (const e of items) this.collectAddrTaken(e.it, this.gTaken);
+    // `autoget` 那格生成的存储与合成的取值器（第七十一刀）。排在这儿是两件事凑到一起：
+    // gTaken 刚数完 —— 顶层那一格要不要提到"自己的一段内存"里去，由源码里有没有 `&m_value`
+    // 说（与第二十四刀对普通模块级变量的判定同一条）；而"取值器写没写"是上面签名那一遍答完的
+    // （pi.get）—— 写了就用写的那个，没写才合成，那正是 prop_autoget.rst:17 的两半：
+    // "access the data variable/field directly if possible, or automatically generate a getter"。
+    for (const a of this.autoProps) {
+      const pi = this.props.get(a.full);
+      if (pi === undefined) continue;              // 属性那一格登记时就报过错了
+      const g = `${a.full}$get`;
+      if (a.cls === null) {
+        // 顶层的那一格就是一格模块级变量。`&` 数的是**源码里写的**名字，而源码里写的是
+        // `m_value`（prop_autoget.rst:26），所以两个名字都问一遍 —— 与 declareGlobal 同。
+        if ((this.gTaken.has(a.name) || this.gTaken.has('m_value')) && this.liftable(a.type)) {
+          this.gLifted.add(a.name);
+          const pt = `(ptr ${tyText(a.type)})`;
+          this.decls.push(`  (global ${a.name} ${pt})`);
+          this.globalCells.push(`    (set ${a.name} (pnew ${pt} (int 1)))`);
+        } else {
+          this.decls.push(`  (global ${a.name} ${slotText(a.type)})`);
+        }
+        if (pi.get) continue;
+        const rd = this.gLifted.has(a.name) ? `(pload (var ${a.name}))` : `(var ${a.name})`;
+        this.decls.push(`  (fn ${g} () ${slotText(a.type)}\n    (ret ${rd}))`);
+        this.fns.set(g, { params: [], ret: a.type });
+        pi.get = true;
+        continue;
+      }
+      // 成员的那一格已经跟着整条链那格结构体发出去了（propName 那一遍在 classLayout 之前往
+      // ownFields 里加的），所以这儿只剩合成取值器这一件事。
+      if (pi.get) continue;
+      const self = tClass(a.cls, false);
+      this.decls.push(`  (fn ${g} (($this ${slotText(self)})) ${slotText(a.type)}\n`
+        + `    (ret (pload (pfield (var $this) ${a.name}))))`);
+      this.fns.set(g, { params: [self], ret: a.type });
+      this.methods.set(g, a.cls);
+      pi.get = true;
+    }
     for (const e of items) {
       if (!isList(e.it)) continue;
       this.ns = e.ns;
@@ -1538,11 +1594,54 @@ class JncLower {
       const owner = cut < 0 ? null : full.slice(0, cut);
       const cls = owner !== null && this.classes.has(owner) ? owner : null;
       if (cls !== null) this.propNames.add(full.slice(cut + 1));
+      // `autoget`（第七十一刀）：这一格的取值器**不用写** —— 编译器生成一格存储，读属性就是
+      // 读那一格（prop_autoget.rst:15-17）。简单声明式里存值器的体拿 `m_value` 称呼它
+      //（同处:26）。与索引属性互斥，那是同一份文档最后一句（:47）。
+      const store = sp.agt ? this.autoStore(d, full, cls, info.type, idx) : null;
+      if (sp.agt && store === null) continue;
       this.props.set(full, {
-        type: info.type, cls, cst: sp.cst, idx, get: false, set: false,
+        type: info.type, cls, cst: sp.cst, idx, get: false, set: false, store,
       });
     }
     return null;
+  }
+
+  /**
+   * `autoget` 那格生成的存储（第七十一刀）。回它在**方言里**的名字，接不上时发诊断回 null。
+   *
+   * 两种落法，都叫 `<属性全名>$m_value`（`$` 不在 jancy 的标识符里，所以撞不上源码里的名字，
+   * 而同一个类里两格 autoget 属性各带一格自己的存储，不会挤在一起）：
+   *   - 顶层的属性 -> 一格模块级变量。真发出去要等 gTaken 数完（`&m_value` 决定它要不要
+   *     提到自己那一段内存里去），所以这儿只登记类型、发的那一步记在 autoProps 上。
+   *   - 类的成员属性 -> 类自己那张字段表里加一格。这一遍排在 classLayout 之前，于是它跟着
+   *     整条链那格结构体一起发出去。
+   */
+  autoStore(d, full, cls, t, idx) {
+    // 「Autoget and indexed property modifiers are mutually exclusive」（prop_autoget.rst:47）。
+    if (idx.length > 0) {
+      return this.err(d, `'${shown(full)}' 上 autoget 与下标不能一起写`
+        + '（prop_autoget.rst:47 那句 mutually exclusive）');
+    }
+    if (t === J_VOID) return this.err(d, `'${shown(full)}' 的类型是 void`);
+    // 生成的那一格是"一格存储"，所以它落得进内存才行：结构体与数组要抄一份才能读写（那时
+    // 合成的取值器不是一句 `ret`）、类**值**在 jancy 那边是内嵌的对象、函数值方言的结构体
+    // 字段放不下（见 typeDecl 里字段那三条同样的话）。这几种明说不收。
+    if (isStruct(t) || isArr(t) || isFn(t) || (isClass(t) && t.own === true)) {
+      return this.nope(d, `类型是 ${tyName(t)} 的 autoget 属性 —— 编译器要生成的那一格存储`
+        + '得是能一句读完的一格');
+    }
+    const name = `${full}$m_value`;
+    if (cls === null) {
+      if (this.globals.has(name)) return this.err(d, `模块级变量 '${shown(name)}' 声明了两次`);
+      this.globals.set(name, t);
+      this.autoProps.push({ full, name, cls: null, type: t });
+      return name;
+    }
+    const fs = this.ownFields.get(cls);
+    if (fs === undefined) return this.err(d, `'${shown(cls)}' 的字段表还没有 —— autoget 那一格加不进去`);
+    fs.push({ name, type: t });
+    this.autoProps.push({ full, name, cls, type: t });
+    return name;
   }
 
   /**
@@ -2461,6 +2560,7 @@ class JncLower {
     let errc = false;
     let prop = false;
     let cst = false;
+    let agt = false;
     for (const m of mods) {
       if (m === 'thin') { thin = true; continue; }
       // `errorcode`（第五十八刀，exceptions.rst:17）：它说的是"这个函数的返回值就是错误码"。
@@ -2506,6 +2606,10 @@ class JncLower {
       // 所以它落在这张 mods 表里。它说的是"这一格不是一块内存，是一对函数（取/存）"——
       // 简单声明式（prop_simple.rst:19）就一个词，体写在别处：`T p.get() { … }` / `p.set(T x) { … }`。
       if (m === 'property') { prop = true; continue; }
+      // `autoget`（第七十一刀，prop_autoget.rst:15-27）：它说的是"取值器不用写，编译器**生成
+      // 一格存储**、读它就是读那一格"。简单声明式里那格存储的名字是 `m_value`（同一处:26 那句
+      // "name of compiler-generated field is 'm_value'"）—— 存值器的体里就是这么写它的。
+      if (m === 'autoget') { agt = true; continue; }
       // 访问控制的 **Java 式写法**（第六十七刀）。jancy 只有 public 与 protected 两种，
       // 两种写法都收：C++ 式的标签，和这一格"写在声明说明符里"（dual_modifiers.rst:22-24），
       // 而且**顶层的成员也能写**（同处:26 那句 "Global namespace members can also have
@@ -2575,7 +2679,16 @@ class JncLower {
       }
       else { this.err(ts, `没有这个类型：'${nm}'`); return null; }
     }
-    return { type: base, thin, stat, fnptr, virt, errc, prop, cst };
+    // `autoget` 只在属性上有意思（第七十一刀）：完整声明式里它写在属性体内那格字段上、
+    // 「implicitly makes property 'autoget'」（prop_autoget.rst:34），而那种写法这一层还
+    // 整个不收（见 fnSig0 开头那条）。所以到这儿还带着 agt 又没有 property 的，只能是
+    // 写错了地方 —— 明说，不要让它一声不响地当成普通的一格。
+    if (agt && !prop) {
+      this.err(ts, '`autoget` 只能写在属性上（prop_autoget.rst:15；完整声明式里它写在'
+        + '属性体内那格字段上，同处:34）');
+      return null;
+    }
+    return { type: base, thin, stat, fnptr, virt, errc, prop, cst, agt };
   }
 
   /** 说明符表 + 一串 `*` -> 类型。`int thin*` 的 thin 管的是**最外层**那个 `*`
@@ -3099,6 +3212,9 @@ class JncLower {
       this.methods.set(full, pi.cls);
     }
     info.name = full;
+    // 属性是一层命名空间（第七十一刀，prop_full.rst:15）：记下"这个函数属于哪格属性"，
+    // 体降下来时靠它把 `this.ns` 挪进去 —— autoget 生成的 `m_value` 就那样查得着。
+    this.propOf.set(full, pn);
     this.fns.set(full, { params: ps.map((p) => p.type), ret });
     return { info, ps, isMain: false };
   }
@@ -3121,7 +3237,7 @@ class JncLower {
     const sp = special === null || special === 'get' ? this.specs(n.items[1], true)
       : {
         type: J_VOID, thin: false, stat: false, fnptr: false,
-        virt: null, errc: false, prop: false, cst: false,
+        virt: null, errc: false, prop: false, cst: false, agt: false,
       };
     if (sp === null) return null;
     const info = this.declarator(n.items[2], sp);
@@ -3366,6 +3482,18 @@ class JncLower {
     const owner = this.methods.get(info.name);
     if (owner !== undefined) { this.ns = owner; this.selfClass = owner; }
     else this.selfClass = null;
+    // 属性的取/存那两个函数（第七十一刀）：`this.ns` 再往里挪一层，摆到**属性**那一格上 ——
+    // 属性在 jancy 那边本来就是一层命名空间（prop_full.rst:15）。顶层 autoget 生成的那格存储
+    // 在方言里叫 `g_p$m_value`，于是体里写的 `m_value` 由 resolve 从 `g_p` 退出去时接着；
+    // 成员的那一格是类里的字段，名字换过去的活儿在 selfField 里（靠下面这格 selfProp）。
+    const savePr = this.selfProp;
+    this.selfProp = null;
+    const pOf = this.propOf.get(info.name);
+    if (pOf !== undefined) {
+      this.ns = pOf;
+      const pi = this.props.get(pOf);
+      if (pi !== undefined && pi.cls !== null) this.selfProp = pi.store;
+    }
 
     // 取地址那一遍（第九刀）：先扫一遍函数体，知道哪些名字要提到堆上，再降。
     const taken = new Set();
@@ -3395,6 +3523,7 @@ class JncLower {
           this.scopes = [];
           this.ns = saveNs;
           this.selfClass = saveSelf;
+          this.selfProp = savePr;
           this.curErr = saveErr;
           return null;
         }
@@ -3409,6 +3538,7 @@ class JncLower {
         this.scopes = [];
         this.ns = saveNs;
         this.selfClass = saveSelf;
+        this.selfProp = savePr;
         this.curErr = saveErr;
         return null;
       }
@@ -3447,6 +3577,7 @@ class JncLower {
     this.alias = saveAlias;
     this.ns = saveNs;
     this.selfClass = saveSelf;
+    this.selfProp = savePr;
     this.curErr = saveErr;
     if (body === null) return null;
     if (pre.length !== 0) body = `${pre.join('\n')}\n${body}`;
@@ -4043,7 +4174,7 @@ class JncLower {
         if (f !== null) {
           return {
             kind: isStruct(f.type) || isArr(f.type) ? 'agg' : 'ptr',
-            code: `(pfield (var $this) ${nm})`,
+            code: `(pfield (var $this) ${f.name})`,
             type: f.type,
           };
         }

@@ -1,0 +1,1 @@
+'g_slot' 上 autoget 与下标不能一起写（prop_autoget.rst:47 那句 mutually exclusive）

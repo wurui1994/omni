@@ -4215,6 +4215,109 @@ should have the same index arguments"）：取值器是 k 个下标、存值器�
 **78 份**（那对花括号是一层命名空间，还要存值器的重载决议）。`bindable` 80、`event` 82 紧跟
 在后面 —— 那两个要通知机制，不只是多一对函数。
 
+### 第七十一刀：`autoget` 属性 —— 取值器不用写，那一格存储由编译器摆出来
+
+prop_autoget.rst:15-17 把这一格的动机写在明面上：绝大多数取值器的体就是"回一格变量/字段"，
+逻辑全在存值器里。所以 jancy 给了一个词 —— `autoget` —— 「Such properties do not require a
+getter implementation: the compiler will access the data variable/field directly if possible,
+or automatically generate a getter to access it otherwise.」而那格存储在**简单声明式**里叫什么，
+同一份文档第 26 行就是答案：`m_value`（那句注释 "name of compiler-generated field is 'm_value'"
+写在示例的存值器体里）。
+
+于是这一刀要做的是三件事，一件都不能少：**摆出那一格存储**、**让存值器体里的 `m_value`
+认得它**、**在没写取值器时合成一个**。
+
+**那一格存储落在哪儿。** 名字统一是 `<属性全名>$m_value`（`$` 不在 jancy 的标识符里，所以
+撞不上源码里的名字，而同一个类里两格 autoget 属性各带一格自己的存储、不会挤在一起）：
+
+```
+顶层  int autoget property g_p;      ->  (global g_p$m_value int)
+成员  class C { int autoget property m_p; }
+                                     ->  (struct C ($tag int) (C$m_p$m_value int) …)
+```
+
+成员那一格是**类自己那张字段表里加一格**，所以它必须赶在 `classLayout()`（一整条继承链发成
+一格结构体，第五十六刀）之前进 `ownFields`。这就是这一刀在 `run()` 里唯一的结构改动：**属性
+那两遍（顶层的与 `propPend` 里成员的）从 `classLayout()` 之后挪到了它之前**。挪得动是因为那
+两遍只查名字 —— 类名在 `typeName` 那一遍就坐下了 —— 而且**一行 `decls` 都不发**。顶层那一格
+的 `(global …)` 因此不能在那儿发：它排到 `gTaken` 数完之后（`&m_value` 决定它要不要提到"自己
+的一段内存"里去，与第二十四刀对普通模块级变量的判定是同一条）。
+
+**存值器体里的 `m_value` 怎么认。** 属性在 jancy 那边**本来就是一层命名空间**
+（prop_full.rst:15 那对花括号开的就是它）。这一层顺着这句话走：`propOf` 记下"取/存这个函数属
+于哪格属性"，`fnDef` 降它的体时把 `this.ns` 从类再往里挪一层，摆到属性上。于是顶层那一格
+`resolve('m_value')` 从 `g_p` 退出去的第一下就撞上 `g_p$m_value` —— 零特例。成员那一格是类里
+的字段、不走 `resolve`，所以多一格 `selfProp`：`selfField` 拿它把源码里写的 `m_value` 换成
+`C$m_p$m_value`，而**回的是字段自己**，`nameLv` 因此改成发 `f.name` 而不是源码里那个名字。
+
+**合成的取值器。** 只在 `pi.get === false` 时发 —— 写了取值器就用写的那个（那正是文档里
+"if possible … or automatically generate … otherwise" 的两半）：
+
+```
+(fn g_p$get () int (ret (var g_p$m_value)))
+(fn C$m_p$get (($this (ptr C))) int (ret (pload (pfield (var $this) C$m_p$m_value))))
+```
+
+**方言一个字没长。** 一格全局、一格字段、一句 `ret` —— 三样都是现成的。
+
+**顺手划两条边界，两条都是 jancy 自己也拒的：**
+
+- **`autoget` 与索引一起写**（`bad/prop-autoget-idx.jnc`）。prop_autoget.rst:47 那一句就是全部
+  理由：「Autoget and indexed property modifiers are mutually exclusive.」生成的是**一格**存储，
+  而索引属性要的是"一串下标各对一格"。悄悄挑一边就是骗人：挑 autoget 会让 `p[1]` 与 `p[2]`
+  读到同一个字。
+- **`autoget` 写在不是属性的那一格上**（`bad/autoget-nonprop.jnc`）。它在 jancy 里的第二个落点
+  是完整声明式体内的那格字段（同处:34「'autoget' field implicitly makes property 'autoget'」），
+  而完整声明式这一层整个不收（第七十刀的边界）。所以剩下的写法只能是写错了地方 —— 不拦就会
+  被**悄悄降成一格普通的模块级变量**。
+
+**量出来的**（`tests/jnc` 140/0 → **143/0**）：`cases/67-propauto.jnc` 把五种摆齐 —— 存值器里
+带逻辑的 `g_clamp`（三次赋值分别落在下界、上界与中间）、存值器里**读那一格自己**的 `g_acc`
+（累加三次）、**自己写了取值器**的 `g_dbl`（写 6 读出 60，证明写了就用写的那个）、对那一格
+**取地址**的 `g_via`（`int* q = &m_value;` —— 提到自己那段内存的那条路）、类的成员 `Cell.m_v`
+（存值器里同时改另一格真字段 `m_hits`，方法体里裸写 `m_v`，加**派生类** `Sub` 读基类的那一格）。
+七行输出与 `/tmp/c67.c`（`cc -O0 -std=c99 -Wall`）逐字节相同：
+`7 0 100 / 12 / 60 / 12 / 11 22 / 21 42 63 / hits=1`。
+
+**尺子**（`/tmp/m71r.sh`）：
+
+「真降得下来」（`sx` 退出码 0）：**52 → 53**（+1，`test128.jnc` —— 三格 `bool autoget
+property` 加三个存值器，正是这一刀的形状；五条腿都跑得动）。`ok70 ⊆ ok71`，一份都没退。
+覆盖对得上：609 + 53 = 662。
+
+(文件, 拦路项) 对：6227 → **6146**（−81）。
+
+**`修饰符 '…'` 202 → 188**（−14）。这个数比"语料里有 `autoget` 的份数"小得多，原因要说清：
+语料里**字面写着 `autoget` 的只有 56 份**（先前记的 124 是连 import 进来的头文件一起算的），
+而这些文件多半同时还写着 `bindable` / `event`，同一份文件的 `修饰符 '…'` 归一化之后只算一格。
+
+**剩下的 14 份卡在另一个位置上，不是这一刀的漏**：`Icon* autoget property m_icon;` —— 那两个词
+写在 `*` **后面**，落进声明符的指针后缀修饰符表（`ptrsTy`），`specs` 根本没看见它们。所以那
+14 份报的是「指针后面的修饰符 'autoget'」，理由是对的。这一格现在有数了：**97 份**卡在指针后缀
+修饰符上，按词数出来是 `property` 231 处、`autoget` 118 处、`bindable` 57 处、`errorcode` 30 处
+—— 也就是说**"类型是指针的属性"是下一刀最大的一块**，而它是自己一个机制（后缀那张表要把
+`property` 这类"其实是声明的事"的词送回 `specs` 那一侧），不是 `autoget` 的补丁。
+
+**准头是这一刀更大的收成。** 成员 autoget 属性登记上之后，先前一堆"没有这个字段"的误报换成了
+真东西：`ui$BoolProperty 没有字段` **18 → 8**、`ui$IntProperty` **12 → 5**、`ui$StringProperty`
+**5 → 2**、`ui$FileProperty` **4 → 2**，另有**七格整格消失**（`Label` / `doc$Storage` /
+`ui$InformationValue` / `ui$LineEdit` / `ui$LoginDlg` / `ui$Property` / `ui$SpinBox`）。
+`没有这个属性` **15 → 8**。`没有这个类型` 296 → 297 那一份是 `test147fail.jnc` —— jancy 自己的
+**fail** 用例，源码就一句 `AA autoget property m_a;`，我们现在报的正是 jancy 报的那件事
+（`AA` 这个类型不存在），先前停在 `autoget` 上。
+
+**涨上去的两格都是诚实的，得摆明白**：`写属性 '…' —— 它的存值器没有定义` **7 → 66**（+59）。
+autoget 属性第一次登记进表，于是 ioninja 那些"声明在 `.jnc` API 头里、存值器在 C++ 宿主那边"的
+属性第一次照到这一条 —— 它们的 setter 真的不在源码里，这条拦得对（宿主面是另一件事，第
+六十六刀记着）。`errorcode` 写在属性上 16 → **22**（+6）同理：属性登记上了，那一条才照得到。
+另有两格第一次出现：`'…' 一个实现都没有（abstract …）`（`ModbusParserBase.jnc` 走过了原先的
+拦路项、走到了 `vtCheck`）与 `属性 '…' 当一格可写的内存用`（autoget 属性上的 `++` / `&`，
+第六十九刀划的那条边界第一次照到语料）。
+
+**属性这一族剩下的账**：类型是指针的属性（上面那 97 份，下一刀）、完整声明式 `property { … }`
+**78 份**（那对花括号是一层命名空间，还要存值器的重载决议）、`bindable` 与 `event`（要通知机制，
+不只是多一对函数）。
+
 ## 后果与代价
 
 

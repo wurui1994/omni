@@ -1,0 +1,12 @@
+// `autoget` 写在**不是属性**的那一格上（ADR-0016 第七十一刀的边界）。
+// 在 jancy 里它还有第二个落点：完整声明式里写在属性体内的那格字段上，
+// 「'autoget' field implicitly makes property 'autoget'」（prop_autoget.rst:34）——
+// 而完整声明式这一层整个不收（同一刀之前那条边界，bad/prop-full）。所以剩下的这种写法
+// 只能是写错了地方：丢掉那个词会让它静默地变成一格普通的模块级变量。
+int autoget g_x;
+
+int main() {
+	g_x = 1;
+	printf("%d\n", g_x);
+	return 0;
+}

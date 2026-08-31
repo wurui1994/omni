@@ -1,0 +1,15 @@
+// autoget 与索引一起写（ADR-0016 第七十一刀的边界，但这一条**jancy 自己也拒**）。
+// prop_autoget.rst:47 那一句就是全部理由：「Autoget and indexed property modifiers are
+// mutually exclusive.」—— 生成的是**一格**存储，而索引属性要的是"一串下标各对一格"。
+// 悄悄挑一边就是骗人：挑 autoget 会让 `p[1]` 与 `p[2]` 读到同一个字。
+int autoget property g_slot(int i);
+
+g_slot.set(int i, int x) {
+	m_value = x;
+}
+
+int main() {
+	g_slot[0] = 1;
+	printf("%d\n", g_slot[0]);
+	return 0;
+}
