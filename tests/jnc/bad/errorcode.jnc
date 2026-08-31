@@ -1,0 +1,33 @@
+// errorcode 那一套（exceptions.rst）。语料里最大的一格：`errorcode` 98 处、`try` 表达式
+// 52 处、`? :` 当语句 37 处 —— 而那 37 处的一支几乎都是 `try 调用`，所以三条是同一格，
+// 加起来 187 条(文件, 卡点)，是类那一族之后的下一刀。
+//
+// 模型不难，它就是 C 的错误码加一层糖（exceptions.rst:15 那句 "a layer of syntactic sugar
+// over good old C-style error code checking"）：
+//   - `T errorcode f()` 的返回值**就是**错误码，默认值按类型定：bool 用 false、整数用 -1、
+//     指针用 null（:17）。
+//   - 不写 `try` 调它，错就**自动往上传**（:26）—— 落法是"存一格临时、与出错值比一下、
+//     等于就 return 我自己的出错值"（jancy 的 ControlFlowMgr::throwException 走的正是这条：
+//     没有 catch 作用域时 `ret(returnType->getErrorCodeValue())`，
+//     jnc_ct_ControlFlowMgr_Eh.cpp:105-112）。
+//   - `try expr` 挡住那次传播，值照拿（:40）。
+//   - `catch:` / `finally:` 与 `try { … }` 块是同一族的另外三格（:46、:62）。
+//
+// 为什么不"先接了再说"：只认下 `errorcode` 这个词却不传播，等于把出错**悄悄吞掉** ——
+// 那是这条纪律最不能碰的一种。要接就得连传播一起接，而传播要在表达式位置上插语句
+// （`f(g(x))` 里 g 出错就得从 f 那次调用之前返回），那一格这一层还没有。
+bool errorcode ok(int x) {
+	printf("ok(%d)\n", x);
+	return x > 0;
+}
+
+int errorcode use(int x) {
+	ok(x);
+	return x * 2;
+}
+
+int main() {
+	int r = try use(3);
+	printf("%d\n", r);
+	return 0;
+}
