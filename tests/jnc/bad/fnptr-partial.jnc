@@ -1,0 +1,17 @@
+// `~()` 的部分应用（第五十五刀的边界）。jancy 拿它把实参**绑**在一格新的函数指针里
+//（type_ptr_function.rst：`foo~(10)` 造出来的那一格再调时只要剩下的实参），语法上是
+// `expr "~" "(" opt-args ")"`（jnc.grammar:640，那个产生式的名字 `call-operator-new`
+// 是照 jancy 自己的起的，与 `new` 没关系）。
+//
+// 方言的 `(cfn …)` + `(mkclo …)` 说得出这件事 —— 捕获里多存那几个绑住的实参就是了。缺的是
+// "按绑住的位置当场抬一段 thunk"：一格 `f~(1)` 与 `f~(1, 2)` 是两段不同的 thunk，而被绑的
+// 那一头可以是任意表达式（不一定是函数名），所以要先有一格"函数值的形状"能问出签名。
+int add(int a, int b) {
+	return a + b;
+}
+
+int main() {
+	int function* p(int) = add~(10);
+	printf("%d\n", p(32));
+	return 0;
+}

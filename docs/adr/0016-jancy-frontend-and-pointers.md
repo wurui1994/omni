@@ -2749,6 +2749,108 @@ formatting literals, then the result is a statically allocated const char array"
 `frontend-jnc/lower.js`（`litFold`/`litWhy`、`expr0` 的 concat 与 fmt 两支、`printf` 的格式串、
 `numLit` 的兜底、`assertStmt` 的第二个实参）；`npm run lint` 这台机器上没有 typescript。
 
+### 第五十五刀：函数指针 —— jancy 的 fat 指针与方言的函数值本来就是同一个东西
+
+**为什么是它**。上一刀量完，排在第二的是「类的基类」（131 条(文件, 卡点)），而 `override` 在
+语料里出现 450 次、`virtual` 41 次 —— 单继承接了却不做虚派发，编得过但派发到错的那一个，
+那是骗人，所以基类那一刀必须**连虚派发一起**。虚派发要的是"一格里放着一个函数、运行期决定
+调哪个"，于是先问方言有没有这一格：有 —— `(fnty (T…) R)` / `(cfn …)` / `(mkclo …)` /
+`(callfn …)` / `(fnref …)` 是 ADR-0010 定下、ADR-0014 那条 asy 线上落地并五腿验过的一档
+（`tests/sexpr/cases/15-fnvalues.sx` 是它的本体，量它的理由也在那儿：真 base 在场时 304 个
+asy examples 里 203 个第一个撞的就是 math.asy:446 那个函数类型的形参）。
+
+再问 jancy 那一侧叫什么 —— 叫 `R function* p(形参)`，而 type_ptr_function.rst 开头那句把两边
+钉在了一起："a fat function pointer consists of a pointer to the function and a closure
+object"。**那就是 ADR-0010 的 `{fp, c_*}`**：不是"能模拟"，是同一个模型。所以这一刀不是为
+虚表铺路才做的，它本来就该在类那一族之前 —— 只是量出来才知道它已经躺在方言里了。
+
+**语法那一半在哪**（`glr` 打出来的树，探针 `/tmp/p55.jnc`）：`function` 是**类型修饰符**，
+落在 `specs` 的第二组 mods 里（`function` 是 mods 关键字，jnc.grammar:264）；`*` 在声明符的
+`ptrs` 里；形参表是名字后面的 `fn-suffix`，里面的项多是 `formal-anon`（无名形参）。三块分在
+三处，拼起来才是一格类型 —— 所以 `declarator` 在 `sp.fnptr` 为真时**整条走开**（`fnPtrDcl`），
+不进原来那套"数组后缀 + 函数后缀"的循环：那套会把这对括号当成"这是个函数声明"。
+
+**落法**：新一格类型 `{k:'fnptr', params, ret, thin}`，`tyText` 就是 `(fnty (…) …)`。剩下的
+四处各一行：`= foo` 是 `(fnref foo)`（`expr0` 的 name 那支，原来那句「把函数 'x' 当值用」的
+"还不收"删了）、`p(…)` 是 `(callfn (var p) …)`（`fnCallee` 先问一句 `lookupRef`，纯的，
+所以同名的局部量照样遮住模块级的函数）、形参与返回位置什么都不用做（`slotText` 一路通到
+`(fn f ((op (fnty (int int) int))) …)`）、`f(…)(…)` 也收（回一格函数指针的函数，见下）。
+
+**`c.foo` 那一格**：jancy 的 fat 指针捕的就是那个对象，方言里"带捕获的函数"是 `(cfn …)` +
+`(mkclo …)`，所以这一层给每个被当值用的方法抬一段 thunk：
+
+```
+(cfn Counter$bump$clo (($self (ptr Counter))) (($a0 int)) int
+  (ret (call Counter$bump (cap $self) (var $a0))))
+```
+
+`c.bump` 就是 `(mkclo Counter$bump$clo (var c))`。一个方法一段（`this.clos` 记着），
+`d.bump` 是**另一格** `mkclo`、捕的是 d —— 测例里 `b(5)` 两次把 c 从 100 推到 110、
+`e(1)` 把 d 从 7 推到 8 而 c 不动，五条腿上逐字节相同。
+
+**方言一个字没改，语法一个字没改**（上一刀动过 jnc.grammar，这一刀没有，所以 `tests/glr` 的
+金表也没动）。
+
+**边界四条，都记成了 bad case**：
+
+- `bad/fnptr-nozero`：没写初值的**局部**函数指针。方言的函数值那一格**没有空值** ——
+  `(let …)` 要一个初值，而"空的函数指针"发不出来，跟着 `if (p)` 与 `p == null` 也立不住。
+  模块级的那一格不在里面：`(global g (fnty …))` 五条腿都收（测例里的 `g_op` 就是它），
+  只是赋值之前调它未定义 —— 与空的类引用同级。
+- `bad/fnptr-field`：函数指针的**字段**。量出来的：`(struct Box (f (fnty (int) int)))` 在五条
+  腿上都被拒（「落不进内存的字段」，hir/types.js 的 `structLayout`），而方言的 **class** 字段
+  收它（15-fnvalues.sx 的 Holder）。这一层的类与结构体都落成 `(struct …)` + `pfield`
+  （第五十二刀是这么选的：方言的 `(class …)` 字段放不下 `(blk T N)`），所以两边各缺一半。
+  **虚表要落的正是这一格** —— 下一刀的第一件事是量这两条补法哪条便宜。
+- `bad/fnptr-ptrptr`：`function**` 与它的数组（文档末尾那个 `int function** f5[]`）。要方言
+  能对函数值那一格取地址，与上一条挨着。
+- `bad/fnptr-partial`：`~()` 的部分应用（`foo~(10)`）。顺带把它那句诊断从「表达式
+  'call-operator-new'」（照 jancy 产生式起的名字，与 `new` 没关系）改成说得准的那一句
+  —— 与上一刀那件事同一个毛病。
+
+还有两条没单独立文件：`function weak*` 落在 `specs` 那句「修饰符 'weak'」上（要 GC 那侧的
+弱引用），显式转换生成 thunk 落在 `specsTy` 新加的那句上（没有形参表的 `function` 类型）。
+
+**顺带白拿的两格**：`typedef int function* BinOp(int, int);`（第三十八刀那一层本来就是"直接拿
+解出来的类型当 base"）与"回一格函数指针的函数"（`BinOp pick(int k)`，返回类型走 typedef
+那个名字）。所以 `bad/typedef-fn` 那条边界的**理由**要改：它记的是"函数类型"自己当一格名字
+（`typedef int F(int);`），不是函数指针 —— 原来那句"这一层还没有函数指针那一格"已经过期，
+就地改掉了。
+
+**期望输出的出处**：`/tmp/e55.c`，`cc -O0 -std=c99 -Wall`。fat 指针那一段在 C 里写成
+`struct { int (*fp)(Counter*, int); Counter* obj; }` 加一个 `callfn` —— 那正是 jancy 那句
+"函数 + 那个对象"的字面写法，所以孪生件算的是同一串数。十五行逐字节相同。
+
+**放行了什么 —— 又一次要说清楚：没有新文件整份跑通**。全量 1691 → 1688 条(文件, 卡点)：
+去掉 5 条（**全是**「修饰符 'function'」），新露出 2 条（21_WeakFunctionPtr.jnc 的
+「修饰符 'weak'」、test139.jnc 的「void function*() 的局部量不写初值」）。"只有一个卡点、带
+`int main`" 43 → 43，"一条 `还不收` 都没有、带 `int main`" 55 → 55 —— **两个都没动**。
+
+为什么这么少：语料里带 `function*` 的有 34 份（58 处），可其中只有 5 份是**它**当着卡点 ——
+另外 29 份里那一行根本没读到说明符就被更外面那一层拒了，量出来的排行是 `opaque class` 22、
+顶层的 `import` 20、类的基类 7，再往下是 `override` / `errorcode` / `async` 各 3。去掉的那 5 份
+正好是函数指针那一族的样例，各自还差什么也量出来了：
+
+- `20_FunctionPtr.jnc`：只剩「字段的默认值」与「语句 'typedef'」（函数体里的 typedef）。
+- `21_WeakFunctionPtr.jnc`：`weak` 与字段默认值。
+- `22_ScheduleOperator.jnc`：`override` + 基类 + 「不是直接调一个名字的调用」。
+- `23_Multicasts.jnc`：`event` 与 `multicast`。
+- `test139.jnc`：`sizeof`、`pragma`，加上面那条没写初值的。
+
+`f(…)(…)`（回一格函数指针再调）是收工前补的一支，补完**重新全量扫了一遍**：与上一遍逐字
+相同（1688 条，diff 空）—— 语料里那 45 条「不是直接调一个名字的调用」一条都不是这个形状，
+它们是从字段/表达式上调。所以这一支是为完整性收的，不是为分数。
+
+**跑过的轴**：`tests/jnc`（98/0，新增 `cases/52-fnptr` 与 `bad/fnptr-nozero`、`bad/fnptr-field`、
+`bad/fnptr-ptrptr`、`bad/fnptr-partial`）、`tests/sexpr`（75/0）、`tests/glr`（20/0 —— 语法没动，
+跑它是为了证明没动）。**没跑的**：`tests/asy`、`tests/oir`、自举、`tests/jit`、`tests/mir`
+（那条本来就红：`fmtFixed`/`fmtSci`/`fmtGen` 不在 `frontend-js/link.js` 的 `NATIVE_OPS` 里）、
+`tests/llvm` —— 这一刀只动了 `frontend-jnc/lower.js`（`tFn`/`isFn` 与 `tyText`/`tyName`/
+`sameTy` 三处分支、`specs` 的 `function` 修饰符、`declarator` 分岔出的 `fnPtrDcl`、`specsTy`、
+`expr0` 的 name 与 field 两支加 `call-operator-new`、`fnCallee`/`callThrough`/`fnValue`/
+`methodThunk`/`methodRef`、字段那处与 `localDecl` 的两条拒）；`npm run lint` 这台机器上
+没有 typescript。
+
 ## 后果与代价
 
 - 方言从"没有可算术的引用"变成"有"。这一格会渗到 MIR 与四个后端，改不回去。

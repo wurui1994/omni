@@ -1,0 +1,16 @@
+// 函数指针的数组与 `function**`（第五十五刀的边界）。文档里那一格是
+// `int function** f5[] = { … }`（type_ptr_function.rst 末尾那段，取出来还要
+// `(*f5[0])()` 那样解两层），也就是"指向函数指针的指针"再排成一排。
+//
+// 卡的是同一件事的两半：方言的函数值那一格**取不了地址**（`&p` 没有那一格），数组的元素也
+// 只收标量与聚合（第十九刀那张白名单，`(blk T N)` 里的 T 得能当元素搬）。两者补的是同一处
+// —— 与"函数指针的字段"（bad/fnptr-field.jnc）挨着。
+int add(int a, int b) {
+	return a + b;
+}
+
+int main() {
+	int function** q(int, int) = null;
+	printf("%d\n", 0);
+	return 0;
+}

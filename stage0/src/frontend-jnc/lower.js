@@ -125,6 +125,11 @@
 //     五十二刀、`construct` 与 `static construct` 是第五十三刀；类那一族剩下的是基类（要对象
 //     头与虚表）、`destruct`（GC 不定时，disposable.rst:17）、`get` / `set`、构造的重载、
 //     内嵌的类字段与静态字段。
+//   - 函数指针（`R function* p(形参)`）第五十五刀收了 —— 落到方言的函数值那一格
+//     （`(fnty …)` / `(fnref …)` / `(mkclo …)` / `(callfn …)`），`c.foo` 捕的就是那个对象。
+//     剩下的四条：没写初值的那一格（方言的函数值没有空值，跟着 `if (p)` 也立不住）、
+//     函数指针的**字段**（方言的结构体字段放不下函数值 —— 虚表要落的正是这一格）、
+//     `function**` 与它的数组、`~()` 的部分应用。
 //   - 异常（try/throw/catch）、import。`assert` 是第四十九刀、`namespace` 是第五十一刀。
 //
 // **一处刻意留下的差别**：`sizeof` / `offsetof` 意义上的**存储**宽度。四种位宽在方言里
@@ -223,6 +228,21 @@ const tThin = (t) => ({ k: 'tptr', target: t });
  * both array accesses and pointer dereferences"）。
  */
 const tArr = (t, n) => ({ k: 'arr', el: t, n });
+
+/**
+ * 函数指针（第五十五刀）。jancy 写成 `R function* p(形参)` —— `function` 是**类型修饰符**
+ * （在语法里落进 specs 的 mods 那一格，`function` 是 mods 关键字，jnc.grammar:264），
+ * 那个 `*` 是"指针"这件事本身，形参表挂在声明符的后缀上（`fn-suffix`）。
+ *
+ * 它落到方言的**函数值**那一格（`(fnty (T…) R)`，见 tests/sexpr/cases/15-fnvalues.sx）：
+ * 一格里放的是 ADR-0010 那个 `{fp, c_*}`，也就是 jancy 说的 fat function pointer ——
+ * "a pointer to the function and a closure object"（type_ptr_function.rst）。两边是同一个
+ * 模型，所以 `= foo` 是 `(fnref foo)`、`= c.foo` 是一格捕获了 `c` 的闭包、`p(…)` 是
+ * `(callfn …)`。`function thin*` 是**不带**闭包的那一种，方言这一格里装得下它（thin 是
+ * fat 的一个特例：捕获为空），所以两者在这一层是同一格，差的只有诊断里的名字。
+ */
+const tFn = (params, ret, thin = false) => ({ k: 'fnptr', params, ret, thin });
+const isFn = (t) => t.k === 'fnptr';
 
 const isInt = (t) => t.k === 'int';
 const isArr = (t) => t.k === 'arr';
@@ -366,6 +386,8 @@ function tyText(t) {
   if (t.k === 'struct') return t.name;
   // 类是一条引用（第五十二刀）：那一格里放的是对象那段内存的地址，字段表与结构体同一张。
   if (t.k === 'class') return `(ptr ${t.name})`;
+  // 函数指针就是方言的函数值那一格（第五十五刀）：`(fnty (形参…) 返回)`。
+  if (t.k === 'fnptr') return `(fnty (${t.params.map(slotText).join(' ')}) ${slotText(t.ret)})`;
   if (t.k === 'int') return 'int';
   // 枚举在方言里就是它的基整数（第三十九刀）—— 四种位宽在方言里都是 `int`，所以这儿也是
   if (t.k === 'enum') return 'int';
@@ -424,6 +446,10 @@ function tyName(t) {
   // 类（第五十二刀）：不带 `*` 写出来的那一种就是 jancy 的 "class value"，带 `*` 的是它的
   // 类指针 —— jancy 自己的诊断里两者也是这么分的（`C` 与 `C*`）。
   if (t.k === 'class') return `${shown(t.name)}${t.own === true ? '' : '*'}`;
+  // 函数指针（第五十五刀）：照 jancy 自己写出来的样子拼，`thin` 是不带闭包的那一种。
+  if (t.k === 'fnptr') {
+    return `${tyName(t.ret)} function${t.thin ? ' thin*' : '*'}(${t.params.map(tyName).join(', ')})`;
+  }
   if (t.k === 'int') return `${t.u ? 'unsigned ' : ''}${INT_NAMES.get(t.w)}`;
   if (t.k === 'enum') return shown(t.name);
   return t.k;
@@ -437,6 +463,15 @@ function sameTy(a, b) {
   // 类的同型只看名字：`C` 与 `C*` 在 jancy 那边是同一个表示（第五十二刀），`own` 记的只是
   // 源码里写没写 `*`，它管的是"要不要造对象"，不是类型的身份。
   if (a.k === 'class') return a.name === b.name;
+  // 函数指针的同型看签名（第五十五刀）：形参一一同型、返回同型。`thin` 不看 —— 在这一层
+  // fat 与 thin 落在方言的同一格里（thin 就是捕获为空的那一种），jancy 那边 thin 也是
+  // 能隐式转成 fat 的（type_ptr_function.rst 的 "thin function pointers ... can be
+  // converted to fat"）。
+  if (a.k === 'fnptr') {
+    if (a.params.length !== b.params.length) return false;
+    for (let i = 0; i < a.params.length; i++) if (!sameTy(a.params[i], b.params[i])) return false;
+    return sameTy(a.ret, b.ret);
+  }
   if (a.k === 'int') return a.w === b.w && !a.u === !b.u;
   if (a.k === 'enum') return a.name === b.name;
   return true;
@@ -549,6 +584,8 @@ class JncLower {
     this.ctors = new Map();
     this.sctors = new Map();
     this.gates = new Map();     // 类名 -> 那道"静态构造跑过了"的模块级 bool
+    // 方法名 -> 它那段闭包 thunk（第五十五刀）。`c.foo` 当值用时捕的是对象，一个方法一段。
+    this.clos = new Map();
   }
 
   /** 当前命名空间下的全名（第五十一刀）。写的名字里带点（`struct a.S`）也一并换成 `$`。 */
@@ -1536,6 +1573,14 @@ class JncLower {
           this.err(d, `字段 '${info.name}[]' 的长度得写出来`);
           continue;
         }
+        // 函数指针的字段（第五十五刀）。量过：方言的**结构体**字段放不下 `(fnty …)`
+        //（hir/types.js 的 structLayout 拒"落不进内存的字段"），而这一层的类与结构体都是
+        // 一格 `(struct …)` + `pfield`。所以它是自己一格 —— 也正是虚表要落地的那一格。
+        if (isFn(info.type)) {
+          this.nope(d, `类型是函数指针（${tyName(info.type)}）的字段 —— 方言的结构体字段`
+            + '还放不下函数值（见 hir/types.js 的 structLayout）');
+          continue;
+        }
         fields.push({ name: info.name, type: info.type });
       }
     }
@@ -1599,8 +1644,13 @@ class JncLower {
     let thin = false;
     let stat = false;
     let uns = false;
+    let fnptr = false;
     for (const m of mods) {
       if (m === 'thin') { thin = true; continue; }
+      // `function`（第五十五刀）是**类型修饰符**，在语法里也落在这张表里（jnc.grammar 的
+      // mods 那一格）。它说的是"这一格里放的不是数据的地址，是一个函数"——具体的签名要等
+      // 声明符：形参表挂在名字后面的 `fn-suffix` 上，返回类型就是这儿的说明符。
+      if (m === 'function') { fnptr = true; continue; }
       if (m === 'const') continue;                      // 这一层不区分（没有可变性检查）
       // 存储类（decl_storage.rst）。模块级变量**默认**就是 static（"If storage specifier is
       // omitted, then global variables get assigned static storage class"），所以写出来
@@ -1671,7 +1721,7 @@ class JncLower {
       this.nope(n, '64 位的无符号整数（要方言里无符号的 `/` `%` `>>` 与比较）');
       return null;
     }
-    return { type: base, thin, stat };
+    return { type: base, thin, stat, fnptr };
   }
 
   /** 说明符表 + 一串 `*` -> 类型。`int thin*` 的 thin 管的是**最外层**那个 `*`
@@ -1708,6 +1758,10 @@ class JncLower {
   specsTy(n) {
     const sp = this.specs(n);
     if (sp === null) return null;
+    // `function` 写在没有声明符的地方（强制转换的目标、`new` 的类型）时形参表无处可挂 ——
+    // 而 jancy 那边这一格正是"显式转换生成一段 thunk"（type_ptr_function.rst），
+    // 那是自己一格（第五十五刀）。
+    if (sp.fnptr) { this.nope(n, '没有形参表的 `function` 类型（强制转换成函数指针要生成 thunk）'); return null; }
     if (sp.thin) { this.nope(n, '`thin` 用在不是指针的类型上'); return null; }
     return sp.type;
   }
@@ -1749,6 +1803,9 @@ class JncLower {
     }
     const name = this.qname(d.items[2]);
     if (name === null) return this.nope(d.items[2], '限定名或特殊名的声明符');
+    // 函数指针（第五十五刀）：`function` 一出现，名字后面那对括号就不是"这是个函数声明"，
+    // 而是**这一格的类型**的形参表 —— 所以它走自己那一支，不进下面的数组/函数后缀那套。
+    if (sp.fnptr) return this.fnPtrDcl(d, sp, name, ctor);
     let t = this.ptrsTy(sp, d.items[1], d);
     if (t === null) return null;
     let formals = null;
@@ -1802,6 +1859,70 @@ class JncLower {
     return { name, type: t, formals, ctor, special: null };
   }
 
+  /**
+   * 函数指针那一格的声明符（第五十五刀）。`R function* p(形参)` 的三块分散在三处：
+   * 返回类型在说明符里（`sp.type`）、`*` 在 `ptrs` 里、形参表是名字后面的 `fn-suffix`。
+   * 拼起来就是一格 `tFn`，落到方言的 `(fnty …)`。
+   *
+   * `thin` 也从说明符里来（`function thin* p(int)`）：它在这一层只进类型的名字 ——
+   * 方言那一格装得下两者（thin 就是捕获为空的 fat），而 jancy 自己也允许 thin 转成 fat。
+   */
+  fnPtrDcl(d, sp, name, ctor) {
+    const stars = this.flat(d.items[1]);
+    for (const g of stars) {
+      const mods = this.flat(g).flatMap((m) => this.flat(m)).map((m) => (isAtom(m) ? m.value : '?'));
+      for (const m of mods) {
+        if (m === 'const') continue;
+        // `weak` 是弱引用那一族（type_ptr_function.rst 的 "function weak*"）：它要 GC
+        // 那一侧的弱引用语义，而这一层没有。
+        return this.nope(d, `函数指针后面的修饰符 '${m}'`);
+      }
+    }
+    if (stars.length === 0) {
+      return this.err(d, `'${name}' 上写了 function 却没有 '*'（jancy 的函数指针写成 `
+        + "'R function* p(…)'）");
+    }
+    // `function**` 是"指向函数指针的指针"（同一处文档里那个 `f5` 数组用的就是它）——
+    // 那要方言能对函数值那一格取地址，与"函数指针的数组"是同一件事。
+    if (stars.length > 1) return this.nope(d, '指向函数指针的指针（`function**`）');
+    let formals = null;
+    for (const s of this.flat(d.items[3])) {
+      const sh = isList(s) ? head(s) : null;
+      if (sh === 'fn-suffix') {
+        if (formals !== null) return this.nope(s, '函数指针上的第二个形参表');
+        formals = s.items[1];
+        continue;
+      }
+      if (sh === 'array-suffix') return this.nope(s, '函数指针的数组（要方言能把函数值当元素搬）');
+      return this.nope(s, `函数指针上的声明符后缀 '${sh}'`);
+    }
+    if (formals === null) return this.err(d, `'${name}' 是函数指针，后面要一对形参表`);
+    const params = [];
+    for (const f of this.flat(formals)) {
+      const fh = isList(f) ? head(f) : null;
+      if (fh === 'formals-varargs') return this.nope(f, '函数指针的可变形参');
+      if (fh !== 'formal' && fh !== 'formal-anon') return this.nope(f, `函数指针的形参 '${fh}'`);
+      const fsp = this.specs(f.items[1]);
+      if (fsp === null) return null;
+      // 无名形参（`int function* p(int, int)` 里那两个 int）在**类型**上是常态：类型只要
+      // 签名，名字是被调那一头的事。所以这儿不像 fnSig0 那样拒它。
+      let ft = null;
+      if (fh === 'formal-anon') {
+        ft = this.ptrsTy(fsp, f.items[2], f);
+      } else {
+        if (f.items[3] !== undefined) return this.nope(f, '函数指针形参的默认值');
+        const fi = this.declarator(f.items[2], fsp);
+        if (fi === null) return null;
+        if (fi.formals !== null) return this.nope(f, '函数指针的形参又带形参表');
+        ft = fi.type;
+      }
+      if (ft === null) return null;
+      if (ft === J_VOID) continue;                 // `void` 的形参表就是"不带形参"（C 与 jancy 同）
+      params.push(ft);
+    }
+    return { name, type: tFn(params, sp.type, sp.thin), formals: null, ctor, special: null };
+  }
+
   /* -------------------------------------------------------------- 函数 */
 
   /**
@@ -1839,7 +1960,8 @@ class JncLower {
     // 构造不回值。所以这一格不问 specs，直接摆一个"void、什么修饰符都没有"的说明符
     // 进去（第五十三刀）。
     const special = specialCore(n.items[2]);
-    const sp = special === null ? this.specs(n.items[1]) : { type: J_VOID, thin: false, stat: false };
+    const sp = special === null ? this.specs(n.items[1])
+      : { type: J_VOID, thin: false, stat: false, fnptr: false };
     if (sp === null) return null;
     const info = this.declarator(n.items[2], sp);
     if (info === null) return null;
@@ -2286,6 +2408,13 @@ class JncLower {
       }
       let code = null;
       if (initNode === null) {
+        // 函数指针不写初值（第五十五刀）：方言的函数值那一格**没有空值** —— `(let …)` 要一个
+        // 初值，而"空的函数指针"发不出来（连 `if (p)` 也就跟着立不住）。jancy 那边它是零，
+        // 调它是运行期的 "null function pointer" 错，要接得连那一格空值一起接。
+        if (isFn(info.type)) {
+          this.nope(dcl, `${tyName(info.type)} 的局部量不写初值（方言的函数值那一格没有空值）`);
+          return null;
+        }
         code = zeroText(info.type);
         if (code === null) {
           // 走到这儿只剩 void 与 string 那几种不该出现在局部量上的类型（结构体与数组
@@ -3850,9 +3979,10 @@ class JncLower {
         if (r === null) {
           // 方法体里裸写的字段名（第五十二刀）：与写法可写的那一侧同一份（见 nameLv）。
           if (this.selfField(nm) !== null) return this.load(n, this.nameLv(n, nm));
-          if (this.resolve(nm, (k) => this.fns.has(k)) !== null) {
-            return this.nope(n, `把函数 '${nm}' 当值用`);
-          }
+          const fq = this.resolve(nm, (k) => this.fns.has(k));
+          // 函数名当值用（第五十五刀）：那就是一格函数指针。方法要一个对象才拼得出那一格
+          // （闭包里捕的是它），方法体里裸写的名字捕的是 `this` —— 与 `foo()` 补 this 同一条。
+          if (fq !== null) return this.fnValue(n, fq, null);
           return this.err(n, `未声明的变量 '${nm}'`);
         }
         // 它在方言里叫什么：见 lvalue 那一处同一句
@@ -3893,6 +4023,13 @@ class JncLower {
         if (isList(ob) && head(ob) === 'indirect') {
           return this.load(n, this.fieldLv(n, ob.items[1], n.items[2]));
         }
+        // `c.foo` 当**值**用（第五十五刀）：右边那个名字是方法时，这一格是一格捕获了对象的
+        // 函数指针 —— jancy 的 fat function pointer 正是"函数 + 那个对象"。要排在落到 lvalue
+        // 之前问：那儿只会报"没有这个字段"。
+        if (isAtom(n.items[2]) && this.methodNames.has(n.items[2].value)) {
+          const mv = this.methodRef(n, n.items[2].value);
+          if (mv !== undefined) return mv;
+        }
         // `s.f` / `p.f` / `f().x` / `(new T { … }).x` 全落在 lvalue 那一支上：那儿算的是
         // "这个字段在哪一格内存里"，读一次就是这儿要的值（第十二刀 / 第二十五刀）。
         return this.load(n, this.lvalue(n));
@@ -3902,6 +4039,12 @@ class JncLower {
       // `new C1(100)` / `new C1 construct(100)` 的实参在 items[2]（第五十三刀）——
       // 语法上是同一条产生式，那个 `construct` 只是把"这括号是构造实参"写明白。
       case 'new': return this.newPtr(n, n.items[1], null, n.items[2] === undefined ? null : n.items[2]);
+      // `f~(实参…)` —— 部分应用（type_ptr_function.rst 那句 "partial application"，
+      // `foo~(10)`）。语法节点叫 `call-operator-new` 是照 jancy 自己的产生式起的，可它
+      // 与 `new` 没关系：它造的是一格**新的函数指针**，捕获里多存了那几个已经绑住的实参。
+      // 方言的 `(cfn …)` 说得出这件事，但得按"哪几个位置绑住了"当场抬一段 thunk —— 自己一格。
+      case 'call-operator-new':
+        return this.nope(n, '`~()` 的部分应用（要按绑住的实参当场抬一段 thunk）');
       // `new T { … }`（第二十五刀）：那几条语句抬成一个函数，项的值当实参传进去 ——
       // 于是它仍旧是一个表达式，惰性位置上也成立。见 newCurly。
       case 'new-curly': return this.newCurly(n, n.items[1], n.items[2]);
@@ -4250,6 +4393,10 @@ class JncLower {
 
   callExpr(n) {
     const callee = n.items[1];
+    // 从一格**函数指针**上调（第五十五刀）：`p(…)` 里的 p 是变量而不是函数名，那就是方言的
+    // `(callfn …)`。这一问排在按名字找函数之前 —— 同名的局部量遮住模块级的那个函数。
+    const fv = this.fnCallee(callee);
+    if (fv !== undefined) return fv === null ? null : this.callThrough(n, fv);
     // 被调的**可以**是个限定名（`a.f()`，第五十一刀）：那在表达式里是一串 `field`，
     // 整体摊得动才算限定名，摊不动才是"取字段再调"（那一条还不收）。
     const nm0 = isList(callee) && (head(callee) === 'name' || head(callee) === 'field')
@@ -4321,6 +4468,109 @@ class JncLower {
     const full = `${bv.type.name}$${mn}`;
     if (!this.fns.has(full)) return this.err(n, `${shown(bv.type.name)} 没有方法 '${mn}'`);
     return { name: full, self: bv.code };
+  }
+
+  /** `c.foo` 里那个 foo 是方法吗（第五十五刀）。是就把那一格函数指针拼出来；左边不是类、
+   *  或者那个类没有这个方法时回 undefined —— 那条路继续当"取字段"走（诊断留给那一处发）。 */
+  methodRef(n, mn) {
+    const ob = n.items[1];
+    let bv = null;
+    if (isList(ob) && LV_SHAPES.has(head(ob))) {
+      const o = this.lvalue(ob);
+      if (o === null) return null;
+      bv = { code: this.read(o), type: o.type };
+    } else {
+      bv = this.expr(ob, null);
+      if (bv === null) return null;
+    }
+    if (!isClass(bv.type)) return undefined;
+    const full = `${bv.type.name}$${mn}`;
+    if (!this.fns.has(full)) return undefined;
+    return this.fnValue(n, full, bv.code);
+  }
+
+  /** 被调是**一格函数指针**吗（第五十五刀）。不是就回 undefined（那条路继续按名字找函数），   *  是就把那一格求出来 —— 求失败回 null。`lookupRef` 是纯的，问它一句不发一个字。 */
+  fnCallee(callee) {
+    if (!isList(callee)) return undefined;
+    // `f(…)(…)` —— 前一个调用回的是一格函数指针（`BinOp pick(int)` 那种）。这一支没有别的
+    // 意思可撞，所以直接求值再看类型；求不出来那一处自己报过了。
+    if (head(callee) === 'call') {
+      const v = this.expr(callee, null);
+      if (v === null) return null;
+      return isFn(v.type) ? v : undefined;
+    }
+    if (head(callee) !== 'name' || !isAtom(callee.items[1])) return undefined;
+    const r = this.lookupRef(callee.items[1].value);
+    if (r === null || !isFn(r.type)) return undefined;
+    return this.expr(callee, null);
+  }
+
+  /** 从一格函数指针上调（第五十五刀）：方言的 `(callfn E 实参…)`。签名就在那一格的类型里，
+   *  所以实参这一遍与按名字调的那一遍是同一条规矩（整数隐式转、别的要同型）。 */
+  callThrough(n, fv) {
+    const sig = fv.type;
+    const args = this.flat(n.items[2]);
+    if (args.length !== sig.params.length) {
+      return this.err(n, `这一格 ${tyName(sig)} 要 ${sig.params.length} 个实参，`
+        + `这里给了 ${args.length} 个`);
+    }
+    const parts = [];
+    for (let i = 0; i < args.length; i++) {
+      let v = this.expr(args[i], sig.params[i]);
+      if (v === null) return null;
+      if (isInt(v.type) && isInt(sig.params[i])) v = intConv(v, sig.params[i]);
+      if (!sameTy(v.type, sig.params[i])) {
+        return this.err(args[i], `这一格函数指针的第 ${i + 1} 个实参要 ${tyName(sig.params[i])}，`
+          + `这里是 ${tyName(v.type)}`);
+      }
+      parts.push(v.code);
+    }
+    return { code: `(callfn ${fv.code}${parts.map((p) => ` ${p}`).join('')})`, type: sig.ret };
+  }
+
+  /**
+   * 函数名当**值**用（第五十五刀）。jancy 的 fat function pointer 是"函数 + 一个闭包对象"
+   * （type_ptr_function.rst），方言的函数值那一格正是同一个东西（ADR-0010 的 `{fp, c_*}`）：
+   *
+   * - 普通函数：`(fnref 名字)` —— 闭包那一半是空的。
+   * - 方法（`c.foo`）：捕获的就是那个对象。方言里"带捕获的函数"是 `(cfn …)` + `(mkclo …)`，
+   *   所以这一层给每个被当值用的方法抬一段 thunk 出来：捕 `$self`，转手调真正那个方法。
+   *   jancy 自己也是这么说的 —— "if the function is a method, the closure holds the object"。
+   */
+  fnValue(node, full, selfCode) {
+    const sig = this.fns.get(full);
+    const owner = this.methods.get(full);
+    if (owner === undefined) {
+      return { code: `(fnref ${full})`, type: tFn(sig.params, sig.ret) };
+    }
+    let self = selfCode;
+    if (self === null) {
+      // 方法体里裸写方法名就是 `this.foo`（与 `foo()` 补 this 同一条）
+      if (this.selfClass !== owner) {
+        return this.err(node, `'${shown(full)}' 是 ${shown(owner)} 的方法，要一个对象才拼得出`
+          + '它那一格函数指针');
+      }
+      self = '(var $this)';
+    }
+    return {
+      code: `(mkclo ${this.methodThunk(full, owner, sig)} ${self})`,
+      type: tFn(sig.params.slice(1), sig.ret),
+    };
+  }
+
+  /** 方法的 thunk（第五十五刀）：一个方法一段，抬到模块级，用 this.clos 记着别发两遍。 */
+  methodThunk(full, owner, sig) {
+    const have = this.clos.get(full);
+    if (have !== undefined) return have;
+    const name = `${full}$clo`;
+    this.clos.set(full, name);
+    const ps = sig.params.slice(1);
+    const decl = ps.map((t, i) => `($a${i} ${slotText(t)})`).join(' ');
+    const as = ps.map((t, i) => ` (var $a${i})`).join('');
+    const call = `(call ${full} (cap $self)${as})`;
+    this.decls.push(`  (cfn ${name} (($self ${slotText(tClass(owner, false))})) (${decl}) `
+      + `${slotText(sig.ret)}\n    ${sig.ret === J_VOID ? `(expr ${call})` : `(ret ${call})`})`);
+    return name;
   }
 
   /**
