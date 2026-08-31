@@ -2361,6 +2361,86 @@ C 的枚举成员是裸名；`bitflag enum` 的自动取值在 C 里要写死；
 语法、方言、MIR、四个后端与运行时一个字都没改；自举、`tests/jit`、`tests/mir`、`tests/llvm`；
 `npm run lint` 这台机器上没有 typescript。
 
+### 第四十九刀：`assert` —— 那句话是切出来的，不是拼出来的
+
+语料里 `assert` 出现 39 处、19 份文件卡在它上面，而它在 jancy 那边不是内建函数，是一条语句：
+
+```
+assert_stmt
+  :  TokenKind_Assert '(' expression_pass1 (',' TokenKind_Literal $m)? ')' ';'
+```
+
+（`jnc_ct_Stmt.llk:414-419`）降级在 `Parser::assertStmt`（`jnc_ct_Parser.cpp:3779-3827`）：建
+`assert_fail` / `assert_continue` 两个块，条件真去后者、假去前者，前者调
+`assertionFailure(文件, 行, 条件文本, 话)`。那个函数是 jancy 自己写的
+（`jnc_rtl_CoreLib.cpp:527-542`）：
+
+```cpp
+string.format("%s(%d): assertion failure: %s", fileName, line + 1, condition);
+if (message)
+	string.appendFormat(" (%s)", message);
+```
+
+**方言这一次一个字都不用加**：`(fail E)` 就是"印一句、退 70"，五条腿都有
+（`sexpr/lower.js:922-929`，那一条本来是为 asy 的运行期错误加的）。于是整条落成
+
+```
+(if (un "!" C)
+  (do
+    (fail (str "文件(行): assertion failure: 条件文本 (话)"))))
+```
+
+—— 与 jancy 的两个块一一对上。
+
+**这一刀真正要拿准的是"条件文本"**。上一次遇到"要复现源码"这种事（第四十四刀的 `%p`）是
+拒掉的，这次不用拒：jancy 也**不重排**。`Token::getText(list)` 取头 token 的起点到尾 token 的
+终点，**没有换行就直接返回那一段源码**；有换行则把 `\n` 及其后的连续空白换成单个空格
+（`axl_lex_RagelLexer.h:52-84`）。结点的 span 里有 `file.text` 与两个 offset，照着切就行，
+一个字节都不用猜 —— `srcText` 那七行就是这一条。跨行的 `assert` 因此印的是 `x < 10`。
+
+行号同理：`conditionTokenList->getHead()->m_pos`（`jnc_ct_Parser.cpp:3787`）是**条件第一个
+token** 的位置，0 起的 `m_line` 印成 `line + 1`。所以那份跨行的用例报的是 `x` 那一行、不是
+`assert` 那一行，而 `lineCol()` 本来就是 1 起的，直接印。
+
+**两处明写的差别**：
+
+- **jancy 的 assert 是开关点亮的**：`-a`/`--assert`（`CmdLine.h:181-184` →
+  `CmdLine.cpp:90-92` → `jnc_ct_Parser.cpp:3784`），没开就**整条丢掉**、条件都不求值
+  （`ModuleCompileFlag_StdFlags = 0`，`jnc_Module.h:63` —— 默认是关的）。这一层没有开关机构，
+  选的是**一直开着**：反过来那头意味着断言失败静静地过，而这条线是靠"跑起来对不对"往前走的，
+  那种沉默最不能要。
+- **"抛"换成"停"**：jancy 那边是 `err::setError` + `dynamicThrow()`，`try` 接得住；这一层
+  还没有异常（`try`/`throw` 都还在边界上），所以断言失败是到此为止。`rt/assert-fail.jnc`
+  记着这件事：`after` 印不出来，五条腿同一句。
+
+**边界一条**：`assert(C, 一个表达式)`。jancy 那条产生式里第二个实参写死是
+`TokenKind_Literal`，拿的是 `$m.m_data.m_string`，编译期就进静态字面量表
+（`jnc_ct_Parser.cpp:3814`）—— "运行期才知道那句话"在 jancy 里写不出来。这一层的文法比它松
+（收的是 `expr`），于是拦在降级那步，`bad/assert-msg-expr.jnc`。
+
+> 顺带改掉一处**看错了的注释**：`jnc.grammar` 原先写着「assert 后面不带分号 —— jancy 的
+> assert_stmt 就是读到 `)` 为止（Stmt.llk:416..436，那条产生式末尾没有 `';'`）」。产生式末尾
+> **是有** `';'` 的（`Stmt.llk:415`），行号也不对。这里的两条产生式因此比 jancy 松两处：分号
+> 由空语句收、第二个实参收 expr。松的那一半在降级那步拦回来，所以"能跑的都合法"仍然成立。
+
+**期望输出的出处**：一份 `cc -O0 -std=c99 -Wall` 的孪生，两行逐字节相同。**写法差异**两处：
+C 的 `assert` 只收一个实参，所以 `assert(x, "话")` 在孪生件里写成 `assert(x)`；C 的函数定义
+要写 `int bump(void)`。用例里那个 `assert(bump() == 7)` 是量"条件求值一次"的 —— `g` 印出来是 1。
+
+**放行了什么**：`test/jnc/test12.jnc` 整份跑通（`(*p)[i]` 取到 6，断言通过）。剩下 18 份都
+还有别的卡点，扫出来的下一批是：`'class'` 4 份、`variant_t` 3 份、`jnc.Regex` 2 份、
+int 转枚举的显式 cast 2 份（`test154/155.jnc:8` 的 `(SerialTapProStatusLines)0x12`）、
+`async` / `function` / `errorcode` 三个修饰符、结构体基类、顶层 `import`，外加一处**诊断不对**：
+`test69.jnc:12` 的 `enum: uint64_t {`（匿名枚举带显式底类型）报的是「认不出的枚举名字」，
+那句话把"没做"说成了"你写错了"。
+
+**跑过的轴**：`tests/jnc`（78/0，新增 `cases/46-assert`、`rt/assert-fail`、
+`bad/assert-msg-expr`），外加五条腿逐条对过同一句断言失败消息。
+**没跑的**：`tests/sexpr`、`tests/glr`、`tests/asy`、`tests/oir` —— 只在
+`frontend-jnc/lower.js` 加了 `assertStmt`/`srcText` 与 `stmt` 里的一支分派，语法文件只改注释，
+方言、HIR、MIR、四个后端与运行时一个字都没改；自举、`tests/jit`、`tests/mir`、`tests/llvm`；
+`npm run lint` 这台机器上没有 typescript。
+
 ## 后果与代价
 
 - 方言从"没有可算术的引用"变成"有"。这一格会渗到 MIR 与四个后端，改不回去。

@@ -1546,6 +1546,7 @@ class JncLower {
       const level = st.length - idx;
       return [`${pad}(cont${level === 1 ? '' : ` ${level}`})`];
     }
+    if (h === 'assert') return this.assertStmt(n, ind);
     if (h === 'unsafe') {
       const save = this.unsafe;
       this.unsafe = true;
@@ -2539,6 +2540,62 @@ class JncLower {
     const e = this.body(n.items[3], ind + 2);
     if (e === null) return null;
     return [`${pad}(if ${c.code}`, t, e, `${pad})`];
+  }
+
+  /** 一个结点在源码里的原样文本，换行连同紧跟其后的那串空白收成一个空格 —— 与 jancy 的
+   *  `Token::getText(list)` 同一条（axl_lex_RagelLexer.h:52-84：没有换行就**直接切一段源码**，
+   *  有换行则把 `\n` 及其后的连续空白换成单个空格）。所以"条件的文本"不是我们重排出来的，
+   *  是照 jancy 的做法从源码里切的 —— 一个字节都不用猜。 */
+  srcText(node) {
+    if (node === null || node === undefined) return null;
+    const sp = node.span;
+    if (sp === null || sp === undefined) return null;
+    if (sp.file === null || sp.file === undefined || typeof sp.file.text !== 'string') return null;
+    return sp.file.text.slice(sp.start, sp.end).replace(/\n[ \t\r\n\f\v]*/g, ' ');
+  }
+
+  /**
+   * `assert(C)` / `assert(C, "话")`（第四十九刀）。jancy 那边这条摊成两个块：条件真跳
+   * `assert_continue`、假跳 `assert_fail`，后者调 `assertionFailure(文件, 行, 条件文本, 话)`
+   * （jnc_ct_Parser.cpp:3798-3825），而那个函数印的是
+   * `"%s(%d): assertion failure: %s"`、带话的再追一个 `" (%s)"`，然后 `dynamicThrow()`
+   * （jnc_rtl_CoreLib.cpp:534-541）。行号那一格是 `pos.m_line`（0 起）印成 `line + 1`，
+   * 也就是**条件第一个 token 所在的那一行**，1 起。
+   *
+   * 方言这边不用新形式：`(fail E)` 就是"印一句、退 70"（sexpr/lower.js:922-929），五条腿
+   * 都有。于是整条落成 `(if (un "!" C) (do (fail (str 那句话))))` —— 与 jancy 的两块
+   * 一一对上，只是"抛"换成"停"：jancy 的 `dynamicThrow` 能被 `try` 接住，这一层还没有
+   * 异常（`try`/`throw` 都还在边界上），所以断言失败是**到此为止**。
+   *
+   * 一处明写的差别：jancy 的 assert 由 `-a`/`--assert` 开关点亮（CmdLine.h:181-184 →
+   * CmdLine.cpp:90-92 → jnc_ct_Parser.cpp:3784，没开就**整条丢掉**，条件都不求值）。
+   * 这一层没有开关机构，选的是**一直开着** —— 反过来那头意味着断言失败静静地过，
+   * 而这条线是靠"跑起来对不对"往前走的，那种沉默最不能要。
+   */
+  assertStmt(n, ind) {
+    const pad = ' '.repeat(ind);
+    const cn = n.items[1];
+    const c = this.cond(cn);
+    if (c === null) return null;
+    let extra = '';
+    if (n.items[2] !== undefined) {
+      // 第二个实参在 jancy 的产生式里写死是 `TokenKind_Literal`（Stmt.llk:415），拿的是
+      // `$m.m_data.m_string` —— 编译期就定下的一串字节。收表达式会让"运行期才知道那句话"
+      // 变成能写的东西，而 jancy 写不出来。
+      if (!isStr(n.items[2])) {
+        return this.nope(n.items[2], 'assert 的第二个实参不是字符串字面量（jancy 那条产生式只收字面量）');
+      }
+      extra = ` (${n.items[2].value})`;
+    }
+    const text = this.srcText(cn);
+    if (text === null) return this.nope(n, 'assert 的条件取不到源码文本');
+    const where = cn.span.file.lineCol(cn.span.start);
+    const line = `${cn.span.file.path}(${where.line}): assertion failure: ${text}${extra}`;
+    return [
+      `${pad}(if (un "!" ${c.code})`,
+      `${pad}  (do`,
+      `${pad}    (fail (str ${JSON.stringify(line)}))))`,
+    ];
   }
 
   /**

@@ -1,0 +1,45 @@
+// 第四十九刀：`assert` —— 条件假就停在那一句上。
+//
+// 出处（jancy 自己的实现）：`assert_stmt` 的产生式是
+// `TokenKind_Assert '(' expression_pass1 (',' TokenKind_Literal $m)? ')' ';'`
+// （jnc_ct_Stmt.llk:414-419 —— 第二个实参**只收字面量**），降级在
+// `Parser::assertStmt`（jnc_ct_Parser.cpp:3779-3827）：建 `assert_fail` 与
+// `assert_continue` 两个块，条件真去后者、假去前者，前者调
+// `assertionFailure(文件, 行, 条件文本, 话)`。那个函数印的是
+// `"%s(%d): assertion failure: %s"`，带话的再追一个 `" (%s)"`
+// （jnc_rtl_CoreLib.cpp:527-542）。
+//
+// 两处照抄才对得上的细节：
+//   - **行号是条件第一个 token 的行**（`conditionTokenList->getHead()->m_pos`，
+//     jnc_ct_Parser.cpp:3787），0 起的 `m_line` 印成 `line + 1`。所以下面那条跨行的
+//     `assert` 报的是 `x` 那一行，不是 `assert` 那一行。
+//   - **条件文本是从源码里切的**，不是重排出来的：`Token::getText(list)` 取头 token 的
+//     起点到尾 token 的终点，没有换行就直接返回那一段源码；有换行则把 `\n` 及其后的
+//     连续空白换成单个空格（axl_lex_RagelLexer.h:52-84）。
+//
+// 期望输出的出处：一份 `cc -O0 -std=c99 -Wall` 的孪生件，两行逐字节相同。**写法差异**两处：
+// C 的 `assert` 只收一个实参，所以 `assert(x, "话")` 那条在孪生件里写成 `assert(x)`；
+// C 里的函数定义要写 `int bump(void)`。
+int g = 0;
+
+int bump() {
+	g = g + 1;
+	return 7;
+}
+
+int main() {
+	int x = 3;
+	assert(x == 3);
+	assert(x, "x must be nonzero");
+	assert(bump() == 7);
+	printf("%d %d\n", x, g);
+
+	int* p = &x;
+	assert(p);
+	assert(
+		x
+		<
+		10);
+	printf("done\n");
+	return 0;
+}

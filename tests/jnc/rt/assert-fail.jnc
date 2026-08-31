@@ -1,0 +1,14 @@
+// 断言失败（第四十九刀）。jancy 那边这一句会调 `assertionFailure`，那个函数把
+// `"%s(%d): assertion failure: %s"` 加上 `" (%s)"` 设成错误、然后 `dynamicThrow()`
+// （jnc_rtl_CoreLib.cpp:527-542）—— 也就是抛出去，`try` 接得住。
+//
+// 这一层还没有异常（`try`/`throw` 都还在边界上），落的是方言的 `(fail E)`：印一句、
+// 退 70（sexpr/lower.js:922-929）。于是断言失败是**到此为止**，`after` 印不出来。
+// 差别只在"抛"与"停"，那一句话本身是照 jancy 的格式拼的。
+int main() {
+	int x = 3;
+	printf("before\n");
+	assert(x == 4, "x should be four");
+	printf("after\n");
+	return 0;
+}

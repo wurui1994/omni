@@ -496,8 +496,12 @@
     (-> ("nestedscope" ":") (label "nestedscope"))
     (-> ("catch" ":") (label "catch"))
     (-> ("finally" ":") (label "finally"))
-    ;; assert 后面**不带分号** —— jancy 的 assert_stmt 就是读到 `)` 为止
-    ;; （Stmt.llk:416..436，那条产生式末尾没有 `';'`）。分号照旧由空语句收。
+    ;; assert。jancy 那条产生式**末尾是有 `';'` 的**，而且第二个实参写死是 `TokenKind_Literal`：
+    ;;   assert_stmt
+    ;;     :  TokenKind_Assert '(' expression_pass1 (',' TokenKind_Literal $m)? ')' ';'
+    ;; （Stmt.llk:414-419）。这里两条都比它松：分号照旧由空语句收，第二个实参收的是 expr ——
+    ;; 松的那一半在降级那步拦回来（第四十九刀，lower.js 的 assertStmt）。
+    ;; 上面原先写的"jancy 的 assert_stmt 就是读到 `)` 为止，那条产生式末尾没有 `';'`"是**看错了**。
     (-> ("assert" "(" expr ")") (assert $3))
     (-> ("assert" "(" expr "," expr ")") (assert $3 $5))
     (-> ("dylayout" "(" expr ")" compound) (dylayout $3 $5))

@@ -18,9 +18,9 @@
 //      数组之间的赋值、`threadlocal`、对 string 的模块级变量取地址、`%p`、
 //      `unsafe` 之外的 thin 转换、64 位的无符号整数、`%zd` 那一族的长度修饰、函数类型的
 //      typedef、`sizeof`（要方言的布局先认整数宽度）、`dynamic countof`（要 fat 指针带的
-//      范围）、从一个要先求值的东西上问枚举成员，加五条 jancy 自己也拒的（命名项之后不能再写
+//      范围）、从一个要先求值的东西上问枚举成员，加六条 jancy 自己也拒的（命名项之后不能再写
 //      位置项、`double` 上的 `&=`、int 到枚举的隐式转换、非 0 的 int 到 bitflag 枚举、
-//      `countof` 作用在指针上）。（`? :`、不换行的 printf、条件真值化曾经在
+//      `countof` 作用在指针上、`assert` 的第二个实参不是字面量）。（`? :`、不换行的 printf、条件真值化曾经在
 //      这一组里，第三到第五刀把它们做掉之后转到了 cases/；`&x` 是第九刀、定长数组是第十刀、
 //      模块级变量是第十一刀、值语义的结构体是第十二刀、结构体按值传与按值回是第十三刀、
 //      花括号初值是第十四刀、不看顺序的名字是第十五刀、指针的地址是第十六刀，现在各在
@@ -34,7 +34,8 @@
 //      第三十七刀、`typedef` 是第三十八刀、`enum` 是第三十九刀、`break2` / `continue2` 与
 //      switch 里的 continue 是第四十一刀（方言的层号是第四十刀）、带步进的 for 里的 continue
 //      是第四十二刀、printf 的长度修饰是第四十四刀、`countof` 是第四十五刀、指针比大小是
-//      第四十六刀、`bitflag enum` 是第四十七刀、编译期整数求值是第四十八刀，在
+//      第四十六刀、`bitflag enum` 是第四十七刀、编译期整数求值是第四十八刀、`assert` 是
+//      第四十九刀，在
 //      cases/24-new-curly.jnc、
 //      cases/25-static-local.jnc、cases/26-printf-prec.jnc、cases/27-printf-star-prec.jnc、
 //      cases/28-printf-flags.jnc、cases/29-printf-sci.jnc、cases/30-printf-gen.jnc、
@@ -42,7 +43,7 @@
 //      cases/34-bitassign.jnc、cases/35-switch.jnc、cases/36-bool-int.jnc、
 //      cases/37-typedef.jnc、cases/38-enum.jnc、cases/39-breakn.jnc、cases/40-forcont.jnc、
 //      cases/41-printf-len.jnc、cases/42-countof.jnc、cases/43-ptrcmp.jnc、
-//      cases/44-bitflag.jnc、cases/45-constfold.jnc。）
+//      cases/44-bitflag.jnc、cases/45-constfold.jnc、cases/46-assert.jnc。）
 //
 //      bad/ 里有**四种**拒，别混：一种是"还没长出来"（做掉就落地）；一种是**这一层不做**
 //      （printf-conv-p：`%p` 要观测裸地址，而五条腿上那不是同一个数；ptrcmp-mixed：不同型的
@@ -52,7 +53,8 @@
 //      `bitflag enum { A = -1 }` —— jancy 算下一格的那句 `2 << getHiBitIdx64(-1)` 在 C++ 里
 //      是移位越界、const-shift-wide 的 `1 << 64` —— C99 6.5.7p3；四条都没有可对的答案）；
 //      一种是**jancy 自己也拒**（enum-from-int 的 int 到枚举、bitflag-from-int 的非 0 int 到
-//      bitflag 枚举、curly-after-named、bitassign-real、countof-ptr —— 这几条落地了也还是拒，
+//      bitflag 枚举、curly-after-named、bitassign-real、countof-ptr、assert-msg-expr 的
+//      `assert(C, 一个表达式)` —— 这几条落地了也还是拒，
 //      只是理由要对得上 jancy 的那一句）。
 //
 //   node tests/jnc/run.js

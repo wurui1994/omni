@@ -1,0 +1,17 @@
+// `assert(C, 一个表达式)`（第四十九刀的边界，jancy 自己也拒）。它那条产生式里第二个实参
+// 写死是 `TokenKind_Literal`：
+//
+//   assert_stmt
+//     :  TokenKind_Assert '(' expression_pass1 (',' TokenKind_Literal $m)? ')' ';'
+//        { return assertStmt(&$3.m_tokenList, &$m ? $m.m_data.m_string : sl::StringRef()); }
+//
+// （jnc_ct_Stmt.llk:414-419）。拿的是 `$m.m_data.m_string` —— 编译期就定下的一串字节，
+// 后面直接进静态字面量表（`getStaticLiteralVariable(message)`，jnc_ct_Parser.cpp:3814）。
+// 所以"运行期才知道那句话"在 jancy 里根本写不出来。这一层的文法比它松（收的是 expr），
+// 于是这条拦在降级那一步。
+int main() {
+	int x = 3;
+	char const* msg = "nope";
+	assert(x == 4, msg);
+	return 0;
+}
