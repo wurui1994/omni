@@ -1,0 +1,10 @@
+// 与 59-incdir.jnc 一组：这一份是"写 import 的那个文件"，它旁边（incdirs/a/）有一份
+// near62.jnc，`-I` 给的第一个目录（incdirs/b/）里也有一份同名的。按 jancy 的找法
+// 旁边那一份先赢（axl_io_FilePathUtils.cpp:428 的 firstDir 在 dirList 之前）。
+import "near62.jnc";
+import "order62.jnc";
+import "onlyc62.jnc";
+
+int chain62() {
+    return near62() * 100 + order62() * 10 + onlyc62();
+}

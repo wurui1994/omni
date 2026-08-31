@@ -3505,6 +3505,66 @@ Apple M1 给 `shaderFloat64=0`）—— 这两条跑是因为两个后端的"是
 那一条（`fmtFixed` / `fmtSci` / `fmtGen` 不在 `NATIVE_OPS` 里，与这一刀无关）；
 `npm run lint` 这台机器上没有 typescript。
 
+### 第六十二刀：`-I` —— 把第六十刀记下的那条边界当账单来还
+
+第六十刀把 `import` 做成了"这些条目也算我的"，但只在**写 import 那个文件的旁边**找，并且把
+"找不着"记成了一条边界，理由写得很清楚：183 个解不开的 spec 在参考树里**全都找得着**，只是不在
+旁边 —— 少的就是 `-I`。这一刀把它还了。
+
+**找法照 jancy 一字不差**（`jnc_ct_ImportMgr.cpp:110-119` ->
+`axl_io_FilePathUtils.cpp:419-449`）：
+
+1. spec 是绝对路径 -> 只看它在不在，别处不找；
+2. 否则先在**写这条 import 的那个文件自己的目录**里找（`firstDir`，第 428 行）；
+3. 再按 `-I` 给的**顺序**逐个试（`dirList`，第 438-446 行）；
+4. **进程的当前目录不算一格** —— ImportMgr 传进去的 `doFindInCurrentDir` 是 `false`。
+
+第 4 条是这四条里唯一容易写错的：`findFilePath` 里确实有"看当前目录"那一格，但 jancy 调它时
+关掉了。抄了那一格就会出现"从哪个目录敲命令决定编不编得过"这种事。
+
+改动小得不像一刀：`cli.js` 多一个 `incDirs(argv)`、`find` 回调里多一个循环。真正花时间的是
+**测得住它**。三条规则（旁边优先于 `-I`、`-I` 之间按给的顺序、目录表不是"只试第一个"）光看代码
+是看不出对错的，所以 `cases/59-incdir.jnc` 给每条规则各配一份**同名的输家**：`near62.jnc` 在
+旁边和第一个 `-I` 目录里各有一份（返回 1 与 9）、`order62.jnc` 在两个 `-I` 目录里各有一份
+（2 与 8）、`onlyc62.jnc` 只在第二个里（3）。三个数各占一位，`chain62()` 印 `123`；错哪条规则
+就哪一位变。这也是 `tests/jnc` 第一次需要**给某一条 case 传命令行参数** —— 加了一格
+`NN.args`（`cases/59-incdir.args` 里就两个 `-I`），因为这个开关在命令行上，源码里没有它的位置。
+
+**尺子（662 份；ioninja 那一支按它自己 CMakeLists.txt:815 的 `-c --ignore-opaque -I ../api
+-I ../common -I ../protocols` 加 CMakeLists.txt:20-23 的 `-I ../../plugins` 来扫，其余几支的
+CMakeLists 里一个 `-I` 都没有，照旧不给）**：
+
+- 对子 2390 → **2103**。两半反着走：import 那一族 1298 → **570**（−728），非 import 那一半
+  1092 → **1533**（+441）。多出来那 441 对不是退步，是**账单**：被 import 进来的 api / common
+  文件里的拦路项，原来根本没机会被看见。第六十刀说过它是"别的刀的前提"，这就是那句话的兑现。
+- 零 nope 的文件 123 → **140**（+17）。**真降得下来的：30 → 30，一份没多。**又是零收益 ——
+  这一刀和第六十刀一样是前提而不是战果，说白了记在这儿。
+- 那 17 份为什么还是降不下来：它们现在死在**语法**上，不是"还不收"。头一条是
+  `api/ui_Layout.jnc:69` 的 `basetype.construct(Direction.LeftToRight)` —— **后面没有分号**。
+  这不是语料写错了：jancy 的 `btm_construct_stmt`（`jnc_ct_Stmt.llk:51-61`）两条产生式的尾巴上
+  都**没有** `';'`，也就是说构造函数体里那句 `X.construct(...)` 本来就是免分号的。我们的语法
+  要求分号。下一刀就是它。
+- 下一刀的候选（按对子数，全是被这一刀照出来的）：`opaque class` **151**、字段的默认值 **105**、
+  `bitflag enum` 里的负值 **94**（那一格是 C++ 的未定义行为，没有可对的答案 —— 属于"落地了也
+  还是拒"）、枚举成员的值算不出来 **79**、结构体的基类 **66**、形参的默认值 **56**、
+  "不是直接调一个名字的调用" **56**。
+- 「枚举成员的值算不出来」这一格顺手量清了一件事：它**不是**编译期求值缺功能。
+  `enum B { Y = A.X }`、`ns.Enum.Member`、`0x01 | Flags.Foldable` 现在都算得出来（当场试过）；
+  那 79 对全是**引用的枚举不在场** —— `io.SerialParity` 这类名字来自扩展库。所以它不是一刀，
+  是"接标准库"的一部分。
+
+**边界一进一出。** `bad/import-missing` 的理由窄了一格（现在量的是"一个目录都没给"时那句话），
+新加 `bad/import-missing-inc`：给了 `-I` 还找不着。后者的理由**不再是**"我们少了 `-I`" ——
+是"我们没有扩展库里嵌着的那份源码表"（`findSourceFileContents`,
+`jnc_ct_ImportMgr.cpp:52-60`；jancy 翻文件系统**之前**先翻它）。拒的那句话里现在带着"在哪儿
+找过"，不然读的人分不出是名字写错了还是目录表少了一格。
+
+**跑过的轴**：`tests/jnc`（120/0 —— 新增 `cases/59-incdir` 与 `bad/import-missing-inc`）。
+**没跑的**：`tests/sexpr`、`tests/oir`、`tests/llvm`、`tests/gpu`、`tests/glr` —— 这一刀只动
+`cli.js` 的命令行与 `find` 回调、`lower.js` 里报错那句话、`tests/jnc/run.js` 的 `.args`；
+方言、HIR、MIR、后端、语法表一个字都没改。自举、`tests/jit`、`tests/asy` 同理；
+`tests/mir` 是先前就红的那一条；`npm run lint` 这台机器上没有 typescript。
+
 ## 后果与代价
 
 

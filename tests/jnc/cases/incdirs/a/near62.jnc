@@ -1,0 +1,4 @@
+// 旁边那一份（赢）。incdirs/b/near62.jnc 是同名的另一份，返回 9 —— 它不该被解进来。
+int near62() {
+    return 1;
+}

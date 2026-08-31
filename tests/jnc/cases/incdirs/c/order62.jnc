@@ -1,0 +1,4 @@
+// 同名的"输家"：`-I` 的表里 incdirs/b 在 incdirs/c 之前，所以这一份不该被解进来。
+int order62() {
+    return 8;
+}

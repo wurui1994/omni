@@ -34,8 +34,9 @@
 //      `&&` / `||` 的右边与表达式位置上 `? :` 的两支是惰性的、循环的条件每圈重求一次，要它们
 //      得先能给一条表达式里的每一格切出自己的块；errorcode 的函数当函数指针用 —— 那一位在
 //      jancy 那边挂在函数**类型**上，这一层的 fnty 还没有它，从指针调就检不着了），
-//      找不着的 `import`（jancy 那边是硬错，这一层记成"还不收"—— 找不着的原因可能是我们
-//      少了它的 `-I` 目录表，那不是源码写错了），
+//      找不着的 `import`（两条：一个目录都没给的、给了 `-I` 还找不着的。jancy 那边都是硬错，
+//      这一层记成"还不收" —— 它在翻文件系统之前先翻扩展库里嵌着的源码表，我们没有那张表，
+//      所以分不出是名字写错了还是这个名字本来就该从扩展库里拿），
 //      加十三条 jancy 自己也拒的（命名项之后不能再写
 //      位置项、`double` 上的 `&=`、int 到枚举的隐式转换、非 0 的 int 到 bitflag 枚举、
 //      `countof` 作用在指针上、`assert` 的第二个实参不是字面量、给类的变量赋值、隐式下转、
@@ -61,7 +62,8 @@
 //      第五十四刀、函数指针（`function*` / `function thin*`）是第五十五刀、单继承是
 //      第五十六刀、虚派发（`virtual` / `override` / `abstract`）是第五十七刀、
 //      errorcode 那一套（自动传播与 `try`）是第五十八刀、`try { … }` 与 `catch:` 是
-//      第五十九刀、`import "x.jnc"` 是第六十刀、64 位的无符号整数是第六十一刀，在
+//      第五十九刀、`import "x.jnc"` 是第六十刀、64 位的无符号整数是第六十一刀、
+//      `-I` 给的 import 目录表是第六十二刀，在
 //      cases/24-new-curly.jnc、
 //      cases/25-static-local.jnc、cases/26-printf-prec.jnc、cases/27-printf-star-prec.jnc、
 //      cases/28-printf-flags.jnc、cases/29-printf-sci.jnc、cases/30-printf-gen.jnc、
@@ -73,9 +75,10 @@
 //      cases/47-enumcast.jnc、cases/48-namespace.jnc、cases/49-class.jnc、
 //      cases/50-construct.jnc、cases/51-litcat.jnc、cases/52-fnptr.jnc、
 //      cases/53-inherit.jnc、cases/54-virtual.jnc、cases/55-errorcode.jnc、
-//      cases/56-catch.jnc、cases/57-import.jnc、cases/58-uint64.jnc。cases/imports/
-//      底下那三份是 57 那一条
-//      import 进来的，**不是**独立的用例 —— 这一层只扫 cases/ 这一级的 `.jnc`。）
+//      cases/56-catch.jnc、cases/57-import.jnc、cases/58-uint64.jnc、
+//      cases/59-incdir.jnc。cases/imports/ 底下那三份是 57 那一条
+//      import 进来的、cases/incdirs/ 底下那六份是 59 那一条按 `-I` 找到的，
+//      **都不是**独立的用例 —— 这一层只扫 cases/ 这一级的 `.jnc`。）
 //
 //      bad/ 里有**四种**拒，别混：一种是"还没长出来"（做掉就落地）；一种是**这一层不做**
 //      （printf-conv-p：`%p` 要观测裸地址，而五条腿上那不是同一个数；ptrcmp-mixed：不同型的
@@ -137,6 +140,18 @@ const LEGS = [
 
 const list = (sub, ext) => readdirSync(join(here, sub)).filter((x) => x.endsWith(ext)).sort();
 
+/**
+ * 一条 case 可以带一份 `NN.args`（第六十二刀）：里面按空白切开的每一格都追加到命令行后面，
+ * 相对路径按 tests/jnc 这一级解。现在只有 `-I` 用它 —— 那个开关是命令行上的东西，
+ * 不写在源码里，所以没有别的地方能钉住它。
+ */
+const extraArgs = (sub, name) => {
+  const t = read(join(here, sub, `${name}.args`));
+  if (t === null) return [];
+  return t.split(/\s+/).filter((x) => x.length !== 0)
+    .map((x) => (x.startsWith('-') ? x : join(here, x)));
+};
+
 // ------------------------------------------------- 1. cases/：五条腿一致 + 对上期望值
 
 for (const f of list('cases', '.jnc')) {
@@ -145,10 +160,11 @@ for (const f of list('cases', '.jnc')) {
   const src = join(here, 'cases', f);
   const expected = read(join(here, 'cases', `${name}.expected`));
   const bad = [];
-  const first = cmd(LEGS[0].args(src));
+  const xargs = extraArgs('cases', name);
+  const first = cmd([...LEGS[0].args(src), ...xargs]);
   if (first.code !== 0) bad.push(`    ${LEGS[0].tag} exit=${first.code}\n${first.err}`);
   for (const leg of LEGS.slice(1)) {
-    const r = cmd(leg.args(src));
+    const r = cmd([...leg.args(src), ...xargs]);
     if (r.code !== 0) { bad.push(`    ${leg.tag} exit=${r.code}\n${r.err}`); continue; }
     if (r.out !== first.out) {
       bad.push(`    ${leg.tag} 与 ${LEGS[0].tag} 不同\n      ${LEGS[0].tag}: ${JSON.stringify(first.out)}\n      ${leg.tag}: ${JSON.stringify(r.out)}`);
@@ -190,7 +206,7 @@ for (const f of list('bad', '.jnc')) {
   const name = basename(f, '.jnc');
   const exp = read(join(here, 'bad', `${name}.expected`));
   if (exp === null) { no(`bad/${name}`, `    缺 ${name}.expected`); continue; }
-  const r = cmd(['run', join(here, 'bad', f)]);
+  const r = cmd(['run', join(here, 'bad', f), ...extraArgs('bad', name)]);
   if (r.code === 0) { no(`bad/${name}`, '    居然通过了 —— 这条边界是刻意划的'); continue; }
   if (!r.err.includes(exp.trim())) {
     no(`bad/${name}`, `    拒的理由不对\n      want: ${JSON.stringify(exp.trim())}\n      got:  ${JSON.stringify(r.err.trim())}`);

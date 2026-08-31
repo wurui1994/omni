@@ -695,6 +695,9 @@ class JncLower {
     // 所以 `import` 到自己身上是一句空话，不会把整份源码再摊一遍。
     this.impFind = opts.find === undefined ? null : opts.find;
     this.impParse = opts.parse === undefined ? null : opts.parse;
+    // `-I` 那张目录表（第六十二刀）。找文件这件事全在 cli.js 的 find 里，这一层只拿它
+    // **报错时说清在哪儿找过**，所以存的是表本身而不是一个数。
+    this.impDirs = opts.dirs === undefined ? [] : opts.dirs;
     this.unit = opts.unit === undefined ? null : opts.unit;
     this.impSeen = new Set(this.unit === null ? [] : [this.unit]);
     this.impQ = [];                     // 待办：{node, spec, from}
@@ -2780,8 +2783,15 @@ class JncLower {
       for (const e of batch) {
         const p = this.impFind(e.spec, e.from);
         if (p === null) {
-          this.nope(e.node, `import "${e.spec}"（在写这条 import 的那个文件旁边找不着它；`
-            + 'jancy 那边还有 `-I` 给的目录表，我们的命令行没有那个开关）');
+          // 拒的这句话要说清"在哪儿找过"（第六十二刀）：没给 `-I` 时只找过旁边一格，
+          // 给了就把那张表也报出来 —— 不然"找不着"这句话既可能是名字错了、也可能是
+          // 目录表少了一格，读的人分不出来。
+          const where = this.impDirs.length === 0
+            ? '在写这条 import 的那个文件旁边找不着它；jancy 那边还有 `-I` 给的目录表，'
+              + '这一趟一个都没给'
+            : `在写这条 import 的那个文件旁边、以及 -I 给的 ${this.impDirs.length} 个目录里`
+              + '都找不着它';
+          this.nope(e.node, `import "${e.spec}"（${where}）`);
           continue;
         }
         if (this.impSeen.has(p)) continue;

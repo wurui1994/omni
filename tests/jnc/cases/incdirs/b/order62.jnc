@@ -1,0 +1,5 @@
+// `-I` 的**第一个**目录里这一份赢：incdirs/c/order62.jnc 是同名的另一份，返回 8。
+// 目录表按给的顺序逐个试（axl_io_FilePathUtils.cpp:438-446），所以先给的先赢。
+int order62() {
+    return 2;
+}

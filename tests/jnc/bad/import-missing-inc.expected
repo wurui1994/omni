@@ -1,0 +1,1 @@
+import "no-such-lib-62.jnc"（在写这条 import 的那个文件旁边、以及 -I 给的 1 个目录里都找不着它）

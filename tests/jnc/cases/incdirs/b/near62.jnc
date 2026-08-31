@@ -1,0 +1,5 @@
+// 同名的"输家"：spec `"near62.jnc"` 在写 import 的那个文件旁边（incdirs/a/）也有一份，
+// 旁边那一格在 `-I` 之前，所以这一份不该被解进来 —— 解进来 59-incdir 就印 9 而不是 1。
+int near62() {
+    return 9;
+}

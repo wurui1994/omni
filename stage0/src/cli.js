@@ -47,6 +47,26 @@ import { interpret } from './interp/eval.js';
 import { interpretMir } from './mir/interp.js';
 import { bootstrapSelf } from './bootstrap.js';
 
+/**
+ * `-I <目录>` 收成一张有序的表（可重复，第六十二刀）。jancy 的 `jnc` 就是这个开关，
+ * 它把每个 `-I` 追加进 `m_importDirList`，找 import 时按**给的顺序**逐个试
+ * （jnc_ct_ImportMgr.cpp:110-119 -> axl_io_FilePathUtils.cpp:419-449）。
+ * 顺序有意义，所以这儿不去重、不排序 —— 只把 `-I` 后面那一格照原样收下来。
+ */
+function incDirs(argv) {
+  const out = [];
+  let i = 0;
+  for (const a of argv) {
+    if (a === '-I') {
+      const d = argv[i + 1];
+      if (d === undefined || d.startsWith('-')) throw new OmniError('-I 后面要一个目录');
+      out.push(d);
+    }
+    i++;
+  }
+  return out;
+}
+
 /** 文件后缀决定默认的类型模式（ADR-0008 第 1 节）；`--mode` 可覆盖，REPL 用它 */
 function modeFor(path, argv, fallback = 'mixed') {
   const i = argv.indexOf('--mode');
@@ -111,7 +131,7 @@ function compile(path, argv = []) {
   if (path.endsWith('.wat')) return compileWat(path);
   if (path.endsWith('.sx')) return compileSexpr(path);
   if (path.endsWith('.asy')) return compileAsy(path);
-  if (path.endsWith('.jnc')) return compileJnc(path);
+  if (path.endsWith('.jnc')) return compileJnc(path, incDirs(argv));
   return compileProgram(path, undefined, modeFor(path, argv));
 }
 
@@ -1085,30 +1105,37 @@ function jncParse(tb, path, diags) {
 }
 
 /** 一份 `.jnc` -> 核心方言的文本。`omni sx` 那条路也走它，所以降级只有一份实现。 */
-function jncText(path) {
+function jncText(path, dirs = []) {
   const tb = jncFrontEnd();
   const diags = new Diagnostics();
   const tree = jncParse(tb, path, diags);
-  // import 的找法（第六十刀）：绝对路径原样看在不在，否则**在写这条 import 的文件自己的
-  // 目录里**找 —— jancy 的 findImportFile 就是 io::findFilePath(fileName, unit->getDir(),
-  // &m_importDirList, false)（jnc_ct_ImportMgr.cpp:110-119）。`-I` 那份目录表这儿是空的：
-  // 我们的命令行没有那个开关，所以"只在旁边找"是 jancy 行为的一个子集，不是另一套规矩。
+  // import 的找法（第六十刀定的形，第六十二刀补上 `-I`）：绝对路径原样看在不在；否则先
+  // **在写这条 import 的文件自己的目录里**找，再按给的顺序逐个试 `-I` 的目录 —— 与
+  // jancy 的 findImportFile 一模一样（io::findFilePath(fileName, unit->getDir(),
+  // &m_importDirList, false)，jnc_ct_ImportMgr.cpp:110-119；那个 false 是
+  // doFindInCurrentDir，所以**进程的当前目录不算一格**，axl_io_FilePathUtils.cpp:428-446）。
   // 路径过一遍 resolve（jancy 那边是 io::getFullFilePath，jnc_ct_Module.cpp:386）——
   // 查重认的是这一格，所以 `./a.jnc` 与 `a.jnc` 是同一个文件。
   const find = (spec, from) => {
-    const p = isAbsolute(spec) ? spec : join(dirname(from), spec);
-    return exists(p) ? resolve(p) : null;
+    if (isAbsolute(spec)) return exists(spec) ? resolve(spec) : null;
+    const here = join(dirname(from), spec);
+    if (exists(here)) return resolve(here);
+    for (const d of dirs) {
+      const p = join(d, spec);
+      if (exists(p)) return resolve(p);
+    }
+    return null;
   };
   const text = lowerJnc(tree, diags, {
-    path, unit: resolve(path), find, parse: (p) => jncParse(tb, p, diags),
+    path, unit: resolve(path), find, parse: (p) => jncParse(tb, p, diags), dirs,
   });
   diags.throwIfErrors();
   return text;
 }
 
-function compileJnc(path) {
+function compileJnc(path, dirs = []) {
   const diags = new Diagnostics();
-  const mod = lowerCoreSexpr(new SourceFile(`${path}.sx`, jncText(path)), diags);
+  const mod = lowerCoreSexpr(new SourceFile(`${path}.sx`, jncText(path, dirs)), diags);
   diags.throwIfErrors();
   vStep(`jnc front end  ${path} -> OIR  ${mod.funcs.length} funcs`);
   return { ast: null, mod, diags };
@@ -1559,7 +1586,7 @@ function main(argv) {
     // 而那份 .sx 是虚拟的（从不落盘），所以没有这一条就只能拿着行号猜。印出来的
     // 内容与 lowerCoreSexpr 拿到的**逐字节相同** —— 行号可以直接对。
     case 'sx': {
-      stdout(path.endsWith('.jnc') ? jncText(path) : asyText(path));
+      stdout(path.endsWith('.jnc') ? jncText(path, incDirs(rest)) : asyText(path));
       return 0;
     }
     // 一个源文件一份产物（第七十五刀）：`<名字>.sx` 与 `<名字>.js` 摊在一个目录里，
@@ -1741,6 +1768,9 @@ commands:
 flags:
   -v, --verbose  trace every internal step to stderr with its wall-clock time
                  (front end, check, backend, runtime .o cache, cc, exec)
+  -I <dir>       .jnc only: a directory to look in for an import, tried after the
+                 importing file's own directory. Repeatable; tried in the given
+                 order. Same meaning as jancy's own -I.
 
 type modes (ADR-0008) — chosen by extension, overridable with --mode:
   .omni     mixed   omitted type is inferred from the initializer, else dynamic
