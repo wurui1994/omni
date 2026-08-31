@@ -34,12 +34,14 @@
 //      `&&` / `||` 的右边与表达式位置上 `? :` 的两支是惰性的、循环的条件每圈重求一次，要它们
 //      得先能给一条表达式里的每一格切出自己的块；errorcode 的函数当函数指针用 —— 那一位在
 //      jancy 那边挂在函数**类型**上，这一层的 fnty 还没有它，从指针调就检不着了），
-//      加十二条 jancy 自己也拒的（命名项之后不能再写
+//      找不着的 `import`（jancy 那边是硬错，这一层记成"还不收"—— 找不着的原因可能是我们
+//      少了它的 `-I` 目录表，那不是源码写错了），
+//      加十三条 jancy 自己也拒的（命名项之后不能再写
 //      位置项、`double` 上的 `&=`、int 到枚举的隐式转换、非 0 的 int 到 bitflag 枚举、
 //      `countof` 作用在指针上、`assert` 的第二个实参不是字面量、给类的变量赋值、隐式下转、
 //      造一格还留着 abstract 方法的类、`override` 却没有可覆盖的虚方法、
 //      `void errorcode`（void 那一行没有 ErrorCode 那一位，所以定不出出错值）、
-//      一个块里两个 `catch:`）。（`? :`、不换行的 printf、条件真值化曾经在
+//      一个块里两个 `catch:`、两个 `main`）。（`? :`、不换行的 printf、条件真值化曾经在
 //      这一组里，第三到第五刀把它们做掉之后转到了 cases/；`&x` 是第九刀、定长数组是第十刀、
 //      模块级变量是第十一刀、值语义的结构体是第十二刀、结构体按值传与按值回是第十三刀、
 //      花括号初值是第十四刀、不看顺序的名字是第十五刀、指针的地址是第十六刀，现在各在
@@ -59,7 +61,7 @@
 //      第五十四刀、函数指针（`function*` / `function thin*`）是第五十五刀、单继承是
 //      第五十六刀、虚派发（`virtual` / `override` / `abstract`）是第五十七刀、
 //      errorcode 那一套（自动传播与 `try`）是第五十八刀、`try { … }` 与 `catch:` 是
-//      第五十九刀，在
+//      第五十九刀、`import "x.jnc"` 是第六十刀，在
 //      cases/24-new-curly.jnc、
 //      cases/25-static-local.jnc、cases/26-printf-prec.jnc、cases/27-printf-star-prec.jnc、
 //      cases/28-printf-flags.jnc、cases/29-printf-sci.jnc、cases/30-printf-gen.jnc、
@@ -71,19 +73,24 @@
 //      cases/47-enumcast.jnc、cases/48-namespace.jnc、cases/49-class.jnc、
 //      cases/50-construct.jnc、cases/51-litcat.jnc、cases/52-fnptr.jnc、
 //      cases/53-inherit.jnc、cases/54-virtual.jnc、cases/55-errorcode.jnc、
-//      cases/56-catch.jnc。）
+//      cases/56-catch.jnc、cases/57-import.jnc。cases/imports/ 底下那三份是 57 那一条
+//      import 进来的，**不是**独立的用例 —— 这一层只扫 cases/ 这一级的 `.jnc`。）
 //
 //      bad/ 里有**四种**拒，别混：一种是"还没长出来"（做掉就落地）；一种是**这一层不做**
 //      （printf-conv-p：`%p` 要观测裸地址，而五条腿上那不是同一个数；ptrcmp-mixed：不同型的
 //      两个指针 jancy 那边其实过得去 —— 它自己的 TODO 记着这个检查没做 —— 而这一层降级用的
-//      是按元素算差的 `psub`，元素不一样大时"差几个元素"没有意义）；一种是**C 自己的
+//      是按元素算差的 `psub`，元素不一样大时"差几个元素"没有意义；import-jncx：`.jncx` 是
+//      C++ 扩展库编出来的**构建产物**，整棵参考树里一个都没有，没有源码可降）；
+//      一种是**C 自己的
 //      未定义行为**（printf-plus-hex 的 `%+x`、printf-alt-u 的 `%#u`、bitflag-neg 的
 //      `bitflag enum { A = -1 }` —— jancy 算下一格的那句 `2 << getHiBitIdx64(-1)` 在 C++ 里
 //      是移位越界、const-shift-wide 的 `1 << 64` —— C99 6.5.7p3；四条都没有可对的答案）；
 //      一种是**jancy 自己也拒**（enum-from-int 的 int 到枚举、bitflag-from-int 的非 0 int 到
 //      bitflag 枚举、curly-after-named、bitassign-real、countof-ptr、assert-msg-expr 的
 //      `assert(C, 一个表达式)`、class-var-assign 的 `a = b`（两边都是类的**变量** ——
-//      type_class.rst:19 那句 "You cannot assign varibles or fields of class types"）
+//      type_class.rst:19 那句 "You cannot assign varibles or fields of class types"）、
+//      import-main-twice 的两个 `main`（import 进来的条目与本地的是平权的一堆，所以"入口
+//      只能有一个"自然管到跨文件））
 //      —— 这几条落地了也还是拒，
 //      只是理由要对得上 jancy 的那一句）。
 //

@@ -1,0 +1,11 @@
+// 被 lib60.jnc import 的那一份。它**反过来** import lib60.jnc —— 环在这儿，
+// 而 jancy 那张按规范化路径查重的表把第二圈掐掉（jnc_ct_ImportMgr.cpp:126-128）。
+import "lib60.jnc"
+
+typedef int count_t;
+
+int g_dep = 100;
+
+int dep_add(int a, int b) {
+    return a + b;
+}

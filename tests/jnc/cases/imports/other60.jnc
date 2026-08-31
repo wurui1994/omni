@@ -1,0 +1,6 @@
+// 入口文件是在 `namespace inner { … }` 里面 import 这一份的 —— 而它落的是**全局**：
+// 被 import 的文件是另一个 unit，从全局命名空间开始解（jnc_ct_ImportMgr.cpp:162）。
+// 所以 main 里那句不带 `inner.` 的 other_twice 查得着。
+int other_twice(int x) {
+    return x * 2;
+}

@@ -138,7 +138,8 @@
 //     `try { … }` 与 `catch:` 是第五十九刀（出错那一跳落成一圈一次性循环的 `brk`：见 escape
 //     与 catchBlock）；剩下的是 `finally:`（要一张路由表，连 `return` 也得先绕过去）、`throw`，
 //     加传播插不进去的那两个位置（惰性那几支与循环的条件，见 EC_HOIST 与 ecLazy）。
-//     import 还没有。`assert` 是第四十九刀、`namespace` 是第五十一刀。
+//     import 是第六十刀（`import "x.jnc"` 摊成同一个模块里的顶层条目：见 impAdd 与
+//     impDrain；`.jncx` 那一支是永久边界）。`assert` 是第四十九刀、`namespace` 是第五十一刀。
 //
 // **一处刻意留下的差别**：`sizeof` / `offsetof` 意义上的**存储**宽度。四种位宽在方言里
 // 都占一个 64 位的槽（`char*` 与 `int*` 是同一个方言类型），所以 `new char[n]` 占 8n 字节、
@@ -664,6 +665,17 @@ class JncLower {
     // 方言里合法的标识符字符，而上面那五张表的键**同时**就是方言里的名字。报错时换回点
     // （`shown`），那才是源码里写的样子。
     this.ns = '';
+    // import（第六十刀）。`find(spec, from)` 还回来一格规范化好的路径或者 null，
+    // `parse(path)` 还回来那个文件的语法树 —— 两个都由 cli.js 给（降级这一层不碰文件系统）。
+    // `unit` 是入口文件自己那一格，一开始就记进 `impSeen`：jancy 的 parseFile 也是拿
+    // `m_filePathSet` 拦重复的，而入口文件就在那张表里（jnc_ct_Module.cpp:390-392），
+    // 所以 `import` 到自己身上是一句空话，不会把整份源码再摊一遍。
+    this.impFind = opts.find === undefined ? null : opts.find;
+    this.impParse = opts.parse === undefined ? null : opts.parse;
+    this.unit = opts.unit === undefined ? null : opts.unit;
+    this.impSeen = new Set(this.unit === null ? [] : [this.unit]);
+    this.impQ = [];                     // 待办：{node, spec, from}
+    this.impFrom = this.unit;           // 正在摊的是哪个文件（import 的"来处"）
     // 类（第五十二刀）。字段表与结构体共用 `this.structs` —— 类在方言里就是一格 `(struct …)`
     // 加"变量里放地址"，所以 `pfield` 那一整套原样可用。`classes` 记的是"这个名字是类"，
     // `methods` 是"这个函数是某个类的方法"（名字 -> 类名），`selfClass` 是正在降的方法属于谁。
@@ -1106,6 +1118,7 @@ class JncLower {
    */
   nsFlat(tree, ns, out) {
     for (const it of this.flat(tree)) {
+      if (isList(it) && head(it) === 'import') { this.impAdd(it); continue; }
       if (isList(it) && head(it) === 'namespace') {
         const nm = this.qname(it.items[1]);
         if (nm === null) { this.err(it, '认不出的命名空间名字'); continue; }
@@ -1169,6 +1182,9 @@ class JncLower {
    */
   run(tree) {
     const items = this.nsFlat(tree, '', []);
+    // 被 import 的文件在这儿续到同一份名单后面（第六十刀）—— 一定要**在下面那些遍之前**：
+    // 它们的类型名、签名、模块级变量与这个文件的是平权的一堆，不是"外面的库"。
+    this.impDrain(items);
     // 结构体的名字先坐下（第十七刀）：`Node* m_next` 要在自己的体里查得着 Node。
     for (const e of items) {
       this.ns = e.ns;
@@ -2700,6 +2716,65 @@ class JncLower {
     if (c === null) return null;
     out.push(`${pad}(expr (call ${c.name} ${self}${c.vals.map((v) => ` ${v.code}`).join('')}))`);
     return out;
+  }
+
+  /**
+   * `import "x.jnc";`（第六十刀）。jancy 的 import **不是 C 的 #include**：它不在这一点上
+   * 展开文本，而是往一张待办表里记一笔（`ImportMgr::addImport`，jnc_ct_ImportMgr.cpp:34-76），
+   * 等当前这个文件整个解完之后再一个个解那些文件，解出来的东西全都进**同一个模块**。
+   * 也就是说它是"把另一份源码的顶层条目也算进来"，没有作用域、没有可见性、没有顺序。
+   *
+   * 摊平这一层刚好是那个语义：把待办记下来，`impDrain` 再把它们的顶层条目续到同一份
+   * `items` 后面 —— 后面那一串"命名空间成员不看声明顺序"的遍数于是自动管到被 import 的文件。
+   *
+   * `.jncx` 不收：那是**编译好的动态扩展库**（addImport 里 `isExtensionLib` 那一支走的是
+   * `loadDynamicLib`），不是源码；整棵参考树里一个 `.jncx` 文件都没有 —— 它们是构建产物。
+   */
+  impAdd(it) {
+    const a = it.items[1];
+    const spec = isStr(a) || isAtom(a) ? a.value : null;
+    if (spec === null) return this.err(it, 'import 后面要一个字符串');
+    if (spec.endsWith('.jncx')) {
+      return this.nope(it, `import "${spec}"（.jncx 是编译好的扩展库、不是源码，`
+        + '整棵参考树里也没有一个这样的文件）');
+    }
+    if (this.impFind === null || this.impParse === null) {
+      return this.nope(it, `import "${spec}"（这一趟降级没带模块加载）`);
+    }
+    this.impQ.push({ node: it, spec, from: this.impFrom });
+    return null;
+  }
+
+  /**
+   * import 那张待办表（第六十刀）。jancy 的 `parseImports` 是个 **worklist**：把当前攒下的
+   * 那一批整批取走、逐个解，解出来的文件里又会攒下新的一批，循环到空
+   * （jnc_ct_Module.cpp:412-431）。传递依赖与循环 import 都在这一层收掉 —— 收掉靠的是
+   * 那张按规范化路径查重的表（`m_importFilePathMap` 的 FindResult_AlreadyImported，
+   * jnc_ct_ImportMgr.cpp:126-128），环里第二次碰到同一个文件就直接跳过。
+   *
+   * 摊出来的条目一律挂在 `ns ''` 上：被 import 的文件是**另一个 unit**，它从全局命名空间
+   * 开始解（`parseLazyImport` 里那句 `openNamespaceIf(getGlobalNamespace())`，
+   * jnc_ct_ImportMgr.cpp:162），所以写在 `namespace a { import "x.jnc"; }` 里也一样。
+   */
+  impDrain(items) {
+    while (this.impQ.length !== 0) {
+      const batch = this.impQ;
+      this.impQ = [];
+      for (const e of batch) {
+        const p = this.impFind(e.spec, e.from);
+        if (p === null) {
+          this.nope(e.node, `import "${e.spec}"（在写这条 import 的那个文件旁边找不着它；`
+            + 'jancy 那边还有 `-I` 给的目录表，我们的命令行没有那个开关）');
+          continue;
+        }
+        if (this.impSeen.has(p)) continue;
+        this.impSeen.add(p);
+        this.impFrom = p;
+        this.nsFlat(this.impParse(p), '', items);
+      }
+    }
+    this.impFrom = this.unit;
+    return items;
   }
 
   fnDef(n) {

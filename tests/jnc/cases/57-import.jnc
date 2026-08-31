@@ -1,0 +1,29 @@
+// 第六十刀：import。jancy 的 import 不是 #include —— 它是"把另一份源码的顶层条目也算进
+// 这一个模块里"，没有作用域、没有可见性、没有顺序。所以下面这些名字（Pt、Box、lib_sum、
+// dep_add、count_t、g_lib、g_dep、other_twice）与写在这个文件里的完全平权。
+import "imports/lib60.jnc"
+// 同一个文件写两遍：第二遍是句空话（FindResult_AlreadyImported，jnc_ct_ImportMgr.cpp:126-128）。
+import "imports/lib60.jnc"
+// 换个写法指同一个文件 —— 查重认的是 resolve 过的那一格，所以这也是空话
+// （dep60.jnc 已经被 lib60.jnc 拉进来了）。
+import "./imports/dep60.jnc"
+
+namespace inner {
+    // 写在命名空间里面，落的还是全局：见 imports/other60.jnc 顶上那段。
+    // 而它的路径是相对**这个文件**的目录算的，所以还是 "imports/…"。
+    import "imports/other60.jnc"
+}
+
+int main() {
+    Pt p;
+    p.m_x = 3;
+    p.m_y = 4;
+    printf("%d\n", lib_sum(p));
+    printf("%d\n", dep_add(g_lib, g_dep));
+    printf("%d\n", other_twice(g_lib));
+
+    count_t n = 2;
+    Box b(6);
+    printf("%d\n", b.scaled(n));
+    return 0;
+}

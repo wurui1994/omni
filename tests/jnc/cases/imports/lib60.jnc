@@ -1,0 +1,28 @@
+// 这一份的 import 写的是 "dep60.jnc" —— 光一个名字，**旁边**那个目录里的。
+// 而"旁边"指的是**写这条 import 的这个文件**自己的目录（imports/），不是入口文件的目录
+// （cases/）：jancy 的 findImportFile 拿的是 unit->getDir()（jnc_ct_ImportMgr.cpp:114-118）。
+// cases/dep60.jnc 并不存在，所以这一条走对了才找得着。
+import "dep60.jnc"
+
+struct Pt {
+    int m_x;
+    int m_y;
+}
+
+int g_lib = 5;
+
+int lib_sum(Pt p) {
+    return dep_add(p.m_x, p.m_y);
+}
+
+class Box {
+    int m_v;
+
+    construct(int v) {
+        m_v = v;
+    }
+
+    int scaled(int k) {
+        return m_v * k;
+    }
+}

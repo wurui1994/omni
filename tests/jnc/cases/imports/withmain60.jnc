@@ -1,0 +1,4 @@
+// bad/import-main-twice.jnc 用它：被 import 的文件里也有一个 main。
+int main() {
+    return 0;
+}

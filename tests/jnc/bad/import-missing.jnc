@@ -1,0 +1,8 @@
+// 找不着的 import（第六十刀）。jancy 那边这是一条硬错（"import '%s' not found"，
+// jnc_ct_ImportMgr.cpp:122）；这一层记成"还不收"，因为**找不着的原因可能是我们少了 `-I`**
+// —— 那不是这份源码写错了。语料尺子于是照旧诚实：这些文件仍然算在"还有拦路的"里。
+import "no-such-lib-60.jnc"
+
+int main() {
+    return 0;
+}

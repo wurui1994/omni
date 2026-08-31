@@ -13,7 +13,7 @@ import {
   args as procArgs, env, stdout, stderr, setExitCode, spawn, tmpDir, evalJs, hasJsEngine, nowMs,
   cwd, installDir,
 } from './host/native.js';
-import { join, basename } from './host/path.js';
+import { join, basename, dirname, isAbsolute, resolve } from './host/path.js';
 import { hash16 } from './host/hash.js';
 import { linkJs } from './frontend-js/link.js';
 import { lowerJs } from './frontend-js/lower.js';import { lowerWat } from './frontend-wat/lower.js';
@@ -1056,8 +1056,8 @@ function compileSexpr(path) {
 
 /**
  * jancy 前端（ADR-0016 分步 7）。零件比 asy 那一份少得多：只有语法表 + 词法，
- * 没有内建绑定表（jancy 的标准库这一刀不接）、没有模块加载（没有 import）、
- * 也没有解析缓存（一份 `.jnc` 就是一趟，没有 base/ 那样每次都重解析的库）。
+ * 没有内建绑定表（jancy 的标准库这一刀不接）、也没有解析缓存（一份 `.jnc` 就是一趟，
+ * 没有 base/ 那样每次都重解析的库）。模块加载有了，见 jncText 里的 find / parse（第六十刀）。
  */
 function jncFrontEnd() {
   const gpath = join(installDir(), '..', 'frontend-jnc', 'jnc.grammar');
@@ -1065,18 +1065,43 @@ function jncFrontEnd() {
   return loadGrammar(gpath);
 }
 
+/**
+ * 一份 `.jnc` -> 语法树。入口文件与被 import 进来的文件走的是同一条（第六十刀）。
+ *
+ * 抛不抛只看**这个文件自己**新添了错没有，而不是 `throwIfErrors`。一趟降级现在会解好几个
+ * 文件，而前面那些文件已经记下的"还不收"不该把后面的解析掐掉 —— 掐掉的话这一趟就只报得出
+ * 第一条拦路项，语料尺子跟着少数。
+ */
+function jncParse(tb, path, diags) {
+  const n0 = diags.errorCount();
+  const file = new SourceFile(path, readText(path));
+  const toks = lexText(tb.grammar.lex, file, diags);
+  if (diags.errorCount() > n0) throw new OmniError(diags.format());
+  vStep(`jnc lexer      ${path} -> ${toks.length} tokens`);
+  const tree = glrParse(tb, toks, diags);
+  if (diags.errorCount() > n0) throw new OmniError(diags.format());
+  if (tree === null) throw new OmniError(`解析不了：${path}`);
+  return tree;
+}
+
 /** 一份 `.jnc` -> 核心方言的文本。`omni sx` 那条路也走它，所以降级只有一份实现。 */
 function jncText(path) {
   const tb = jncFrontEnd();
   const diags = new Diagnostics();
-  const file = new SourceFile(path, readText(path));
-  const toks = lexText(tb.grammar.lex, file, diags);
-  diags.throwIfErrors();
-  vStep(`jnc lexer      ${path} -> ${toks.length} tokens`);
-  const tree = glrParse(tb, toks, diags);
-  diags.throwIfErrors();
-  if (tree === null) throw new OmniError(`解析不了：${path}`);
-  const text = lowerJnc(tree, diags, { path });
+  const tree = jncParse(tb, path, diags);
+  // import 的找法（第六十刀）：绝对路径原样看在不在，否则**在写这条 import 的文件自己的
+  // 目录里**找 —— jancy 的 findImportFile 就是 io::findFilePath(fileName, unit->getDir(),
+  // &m_importDirList, false)（jnc_ct_ImportMgr.cpp:110-119）。`-I` 那份目录表这儿是空的：
+  // 我们的命令行没有那个开关，所以"只在旁边找"是 jancy 行为的一个子集，不是另一套规矩。
+  // 路径过一遍 resolve（jancy 那边是 io::getFullFilePath，jnc_ct_Module.cpp:386）——
+  // 查重认的是这一格，所以 `./a.jnc` 与 `a.jnc` 是同一个文件。
+  const find = (spec, from) => {
+    const p = isAbsolute(spec) ? spec : join(dirname(from), spec);
+    return exists(p) ? resolve(p) : null;
+  };
+  const text = lowerJnc(tree, diags, {
+    path, unit: resolve(path), find, parse: (p) => jncParse(tb, p, diags),
+  });
   diags.throwIfErrors();
   return text;
 }

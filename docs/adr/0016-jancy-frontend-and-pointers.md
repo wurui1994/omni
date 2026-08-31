@@ -3302,7 +3302,110 @@ HIR、MIR、四个后端与运行时一个字都没改（这一刀连方言的�
 `set` 都是现成的）；自举、`tests/jit`、`tests/llvm`；`tests/mir` 是先前就红的那一条；
 `npm run lint` 这台机器上没有 typescript。
 
+### 第六十刀：`import "x.jnc"` —— 不是 #include，是"这些条目也算我的"
+
+排行榜的头一名，346 对。做它的第一件事是把它**不是什么**先说清楚。
+
+`import` 不是 C 的 `#include`。`#include` 是在那一行上把另一份文本铺进来，所以顺序有意义、
+重复有意义、写在什么作用域里有意义。jancy 的 `import` 一行一个字都不铺：`ImportMgr::addImport`
+只是往一张待办表里 `insertTail` 一笔（jnc_ct_ImportMgr.cpp:70-75），等**当前这个文件整个解完**
+之后 `Module::parseImports` 才去解那些文件（jnc_ct_Module.cpp:407-434），而解出来的东西进的是
+**同一个模块的全局命名空间**。
+
+所以它的语义是一句很短的话：**那份源码的顶层条目也算这个模块的**。没有作用域、没有可见性、
+没有顺序 —— 与第十一刀那句"jancy 的命名空间成员不看声明顺序"是同一件事，只是跨了文件。
+
+这句话一挑明，落法就只有一行的分量。降级这一侧本来就有一遍"把顶层摊平"（`nsFlat`，第五十一刀
+为 `namespace` 加的），摊出来是一串 `{ns, it}`，后面那七八遍（类型名 → typedef → 类型体 →
+`classLayout` → 签名 → `vtCheck` → 静态构造闸门 → 模块级变量 → 函数体）全都在这一串上走。
+于是 `import` 要做的就是：**把被 import 的文件的顶层条目续到同一串后面**，续在那七八遍之前。
+
+```js
+  run(tree) {
+    const items = this.nsFlat(tree, '', []);
+    this.impDrain(items);          // 第六十刀：被 import 的条目在这儿续上
+    for (const e of items) { … }   // 下面这些遍一个字没改
+```
+
+`impDrain` 抄的是 `parseImports` 的 worklist 形状 —— 把攒下的那一批整批取走、逐个解，解出来的
+文件里又会攒下新的一批，循环到空。传递依赖因此自然成立；**环**也自然收掉，收掉靠的是那张按
+规范化路径查重的表（`m_importFilePathMap` 的 `FindResult_AlreadyImported`，
+jnc_ct_ImportMgr.cpp:126-128）。`cases/imports/` 底下那两份互相 import，量的就是这一格。
+
+摊出来的条目一律挂在 `ns ''` 上。这一条不是省事：被 import 的文件是**另一个 unit**，从全局
+命名空间开始解（`parseLazyImport` 里那句 `openNamespaceIf(getGlobalNamespace())`，
+jnc_ct_ImportMgr.cpp:162），所以 `namespace inner { import "x.jnc"; }` 里那些名字落的还是
+全局。`cases/57-import.jnc` 里 `other_twice` 就是这么进来的，main 不带 `inner.` 也查得着。
+
+**找法**照 `findImportFile` 那三句（jnc_ct_ImportMgr.cpp:110-119）：绝对路径就看它在不在；
+否则在 `unit->getDir()` 里找 —— **写这条 import 的那个文件自己的目录**，不是入口文件的目录。
+这一格差别是能量出来的：`cases/imports/lib60.jnc` 写的是 `import "dep60.jnc"`，而
+`cases/dep60.jnc` 并不存在。`io::findFilePath` 后面还有一份 `m_importDirList`（`-I` 给的），
+这一层是空的：我们的命令行没有那个开关。所以这不是另一套规矩，是 jancy 规矩的一个**子集**。
+
+文件系统那两下（在不在、读进来）不进降级这一层。`lowerJnc` 收两个回调：
+`find(spec, from) -> 规范化路径 | null` 与 `parse(path) -> 语法树`，都由 cli.js 给。规范化那一下
+（`resolve`）对着 jancy 的 `io::getFullFilePath`（jnc_ct_Module.cpp:386）—— 查重认的是这一格，
+所以 `"imports/dep60.jnc"` 与 `"./imports/dep60.jnc"` 是同一个文件。入口文件自己**也在那张表里**
+（jancy 那边是 `m_filePathSet`，jnc_ct_Module.cpp:390-392），所以 import 到自己身上是句空话。
+
+**"两个 `main`" 是白捡的。** import 进来的条目与本地的条目平权，所以第十五刀那道"入口只能有
+一个"的闸门（`mainSeen`）一个字不用改就管到了跨文件 —— `bad/import-main-twice.jnc` 量的是这个。
+
+**两格边界，性质不一样，别混：**
+
+- `.jncx` 是**永久**的。那不是源码，是 C++ 写的扩展库编出来的动态库（`isExtensionLib` 那一支
+  走 `loadDynamicLib`，jnc_ct_ImportMgr.cpp:41-49）。整棵参考树里一个 `.jncx` 文件都没有 ——
+  它们是构建产物。没有源码可降，这一格做不出来也不该做。
+- **找不着的 `.jnc`** 记成"还不收"而不是硬错。jancy 那边它是硬错（`"import '%s' not found"`，
+  jnc_ct_ImportMgr.cpp:122），但在这儿找不着的原因很可能是**我们少了它的 `-I`**——
+  那不是这份源码写错了。这一句是量过的：346 份被 import 拦住的文件里，所有解不开的 `.jnc`
+  写法（183 个不同的 spec）**在参考树里全都找得着**，只是不在写 import 那个文件的旁边 ——
+  一个都不是拼错的名字。而且 jancy 找 `.jnc` 时**先翻扩展库里嵌着的那份源码表**
+  （`findSourceFileContents`，jnc_ct_ImportMgr.cpp:52-60）：标准库那些名字它压根没去过文件
+  系统。要接上那一半就是"接 jancy 的标准库"，那是另一件事、另一刀。
+  记成"还不收"，语料尺子于是照旧诚实：这些文件仍然算在"还有拦路的"里。
+
+**顺手修掉一个真 bug。** `jncText` 原来在词法与解析之后各调一次 `diags.throwIfErrors()` ——
+那一句问的是"**到现在为止**有错没有"。一趟只解一个文件时这没问题；一趟解好几个文件时它就成了
+个绞索：第一个解不开的 import 记下一条"还不收"之后，下一个文件的解析一进来就抛，整份源码的
+其余拦路项全部报不出来。`io_ChildProcess.jnc` 就是这样从 8 条变成 1 条的。改成"只在**这个
+文件自己**新添了错时才抛"（比 `errorCount()` 的前后差），见 cli.js 的 `jncParse`。
+这一条不改，下面那把尺子量出来的每个数都是假的。
+
+**尺子（662 份，与前几刀同一副方子；归属一律记到被扫的那个文件上）**：
+
+- 对子 1334 → **2455**。这个数**变大是对的**，而且它的两半来源不一样：一是理由里现在带着
+  spec 的名字（`import "std_Buffer.jnc"` 是一条、`import "io_base.jncx"` 是另一条），原来
+  一格 `顶层的 'import'`（346 份）裂成了 183 格；二是**被 import 的文件的拦路项现在也算进来
+  了** —— 非 import 的对子 988 → **1157**，多出来的 169 对就是原来被那一句 import 挡在后面
+  看不见的东西。这一刀的价值主要在这 169 对上：它把一格粗糙的"有 import"换成了一份具体的账。
+- import 那一族还拦着 **306** 份（原来 346）—— **40 份**文件的 import 全解开了。剩下的按性质
+  分成 157 对 `.jncx`（永久）与 1141 对"旁边找不着"（缺 `-I` / 缺标准库）。
+- **真降得下来的（`sx` 退出码 0）：29 份，一份没多。** 那 40 份 import 解开了的文件全都还有
+  别的拦路项（`opaque class`、`property`、64 位无符号……）。这一刀在语料上的当期收益是**零**；
+  它是别的刀的**前提**，不是它自己的战果。这句话说白了记在这儿，不粉饰。
+- **顺带把尺子的盲点量清了**：117 份"零 nope"的文件里只有 **29** 份真降得下来，另外 88 份卡在
+  **err** 上（`jnc.RegexState`、`rand`、`print` 这类标准库绑定，与 import 无关 —— 抽查过四份）。
+  所以第五十七到五十九刀报的"零 nope 且带 `int main` = 57 / 58 / 60"是**高估**的：那把尺子只
+  数"还不收"，不数 err。按"真降得下来"算，那个数一直是 **29**。往后这一格都按后者报。
+- 下一刀的候选（非 import，按对子数）：64 位无符号 **144**、`opaque class` **85**、
+  `reactor` **62**、`using-extension` **40**、"不是直接调一个名字的调用" **39**、
+  `property` **33**、顶层函数原型 **29**、`attributed` **25**、结构体的基类 **23**、
+  `readonly` **23**、`bindable` **22**、`pragma` **21**、形参默认值 **21**、字段默认值 **21**。
+
+**跑过的轴**：`tests/jnc`（118/0，新增 `cases/57-import` 与 `cases/imports/` 底下那三份被
+import 的源码，加 `bad/import-missing`、`bad/import-jncx`、`bad/import-main-twice`）；
+`tests/sexpr`（75/0）与 `tests/glr`（20/0）—— 这两条跑是因为 cli.js 动了（`jncParse` 的抛法
+与那两个回调），要确认没蹭到别的前端。
+**没跑的**：`tests/asy`、`tests/oir` —— 方言、HIR、MIR、四个后端与运行时一个字都没改（这一刀
+连方言的形式都没多用一个：摊平的是**语法树**，发出来的方言与手写在一个文件里的一模一样）；
+自举、`tests/jit`、`tests/llvm`；`tests/mir` 是先前就红的那一条（`fmtFixed` / `fmtSci` /
+`fmtGen` 不在 `NATIVE_OPS` 里）；`npm run lint` 这台机器上没有 typescript。
+
 ## 后果与代价
+
+
 
 - 方言从"没有可算术的引用"变成"有"。这一格会渗到 MIR 与四个后端，改不回去。
 - fat 指针三字内联：结构体里放指针就胖三倍。可接受——这一层没有 ABI 兼容负担。
