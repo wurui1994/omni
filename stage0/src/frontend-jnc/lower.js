@@ -200,15 +200,15 @@ const INTS = new Map();
 for (const w of INT_WS) for (const u of [false, true]) INTS.set(`${w}${u ? 'u' : ''}`, { k: 'int', w, u });
 /** 一格整数类型。`u` 是无符号（第三十三刀）—— 位宽与符号性合起来才是一格。 */
 const mkInt = (w, u = false) => INTS.get(`${w}${u ? 'u' : ''}`);
-const T_I8 = mkInt(8);
-const T_I16 = mkInt(16);
-const T_I32 = mkInt(32);
-const T_I64 = mkInt(64);
-const T_U32 = mkInt(32, true);
-const T_REAL = { k: 'real' };
-const T_BOOL = { k: 'bool' };
-const T_VOID = { k: 'void' };
-const T_STR = { k: 'string' };
+const J_I8 = mkInt(8);
+const J_I16 = mkInt(16);
+const J_I32 = mkInt(32);
+const J_I64 = mkInt(64);
+const J_U32 = mkInt(32, true);
+const J_REAL = { k: 'real' };
+const J_BOOL = { k: 'bool' };
+const J_VOID = { k: 'void' };
+const J_STR = { k: 'string' };
 const tPtr = (t) => ({ k: 'ptr', target: t });
 const tThin = (t) => ({ k: 'tptr', target: t });
 /**
@@ -250,7 +250,7 @@ const promo = (w) => (w < 32 ? 32 : w);
  * 也就是 C 的整型提升一字不差：窄于 32 位的（有符号无符号都算）都提到**有符号 32 位**，
  * 因为 32 位有符号装得下它们所有的值。
  */
-const arith = (t) => (t.w < 32 ? T_I32 : t);
+const arith = (t) => (t.w < 32 ? J_I32 : t);
 
 /**
  * 两格整数一起算时结果是哪一格（常用算术转换）。jancy 的做法是**取 TypeKind 大的那个**
@@ -404,9 +404,12 @@ function structBehind(t) {
 /** `.` 的左边是这几种形状时走左值那条路（它们本身可写）；别的当右值求一次值。 */
 const LV_SHAPES = new Set(['name', 'field', 'index', 'ptr-field', 'indirect']);
 
-/** 零值。jancy 保证"用户代码碰到之前每一格都是零"（type_ptr_data.rst），所以没写初值的
- *  局部量这里显式发一个零 —— 方言的 `(let …)` 要一个初值。 */
-function zeroOf(t) {
+/** 零值的**方言文本**。jancy 保证"用户代码碰到之前每一格都是零"（type_ptr_data.rst），所以
+ *  没写初值的局部量这里显式发一个零 —— 方言的 `(let …)` 要一个初值。
+ *
+ *  名字里带 Text 不是啰嗦：`interp/builtin.js` 里有个同名的 `zeroOf` 造的是**运行期的值**，
+ *  而自举那一遍要求模块级的名字全局唯一，两个 `zeroOf` 撞在一起会让 `tests/mir` 整条轴红。 */
+function zeroText(t) {
   if (t.k === 'int') return '(int 0)';
   if (t.k === 'real') return '(real 0.0)';
   if (t.k === 'bool') return '(bool false)';
@@ -431,7 +434,7 @@ class JncLower {
     this.scopes = [];          // 局部量：名字 -> 类型
     this.unsafe = false;       // 在 (unsafe …) 里面
     this.mainBody = null;      // `int main()` 的体（降成方言的 `(main …)`）
-    this.retTy = T_VOID;       // 当前函数的返回类型
+    this.retTy = J_VOID;       // 当前函数的返回类型
     // 循环栈（第四十一刀）。每进一层"可跳的东西"压一格：真循环是 `sw: false`，switch 摊出来
     // 的那圈合成循环是 `sw: true`。`break N` 数**全部**（jancy 把 switch 也算一层，
     // cflow_switch.rst:37），`continue N` 只数真循环 —— 与 C 一致。`step` 记着这一层是不是
@@ -753,7 +756,7 @@ class JncLower {
    * （第十二刀：那一格名字里放的就是地址，`&s` 不发一个字），所以走这一条的是三种标量
    * 加两种指针 —— `&p` 于是与 `&x` 同一条路：把 p 提到一格 `(pnew (ptr (ptr int)) …)` 上。
    */
-  liftable(t) { return isInt(t) || t === T_REAL || t === T_BOOL || isPtr(t) || isEnum(t); }
+  liftable(t) { return isInt(t) || t === J_REAL || t === J_BOOL || isPtr(t) || isEnum(t); }
 
   /**
    * 三遍走顶层（第十一刀）。jancy 的命名空间成员**不看声明顺序** —— 所以命名类型与模块级
@@ -955,7 +958,7 @@ class JncLower {
    *  放的**本来就是**一段内存的地址，`&g` 就是它自己。 */
   declareGlobal(dcl, info) {
     if (this.globals.has(info.name)) return this.err(dcl, `模块级变量 '${info.name}' 声明了两次`);
-    if (info.type === T_VOID) return this.err(dcl, `'${info.name}' 的类型是 void`);
+    if (info.type === J_VOID) return this.err(dcl, `'${info.name}' 的类型是 void`);
     this.globals.set(info.name, info.type);
     if (this.gTaken.has(info.name) && this.liftable(info.type)) {
       this.gLifted.add(info.name);
@@ -979,7 +982,7 @@ class JncLower {
     const saveUnsafe = this.unsafe;
     this.scopes = [];
     this.lifted = new Set();
-    this.retTy = T_VOID;
+    this.retTy = J_VOID;
     this.unsafe = false;
     let v = this.expr(node, want);
     this.scopes = saveScopes;
@@ -1045,7 +1048,7 @@ class JncLower {
     if (this.enums.has(name) || this.structs.has(name)) {
       return this.err(n, `类型名 '${name}' 重复定义`);
     }
-    this.enums.set(name, { base: T_I32, members: new Map() });
+    this.enums.set(name, { base: J_I32, members: new Map() });
     return null;
   }
 
@@ -1167,9 +1170,9 @@ class JncLower {
       else if (s === 'short') base = mkInt(16, uns);
       else if (s === 'int') base = mkInt(32, uns);
       else if (s === 'long' || s === 'intptr') base = mkInt(64, uns);
-      else if (s === 'double' || s === 'float') base = T_REAL;
-      else if (s === 'bool') base = T_BOOL;
-      else if (s === 'void') base = T_VOID;
+      else if (s === 'double' || s === 'float') base = J_REAL;
+      else if (s === 'bool') base = J_BOOL;
+      else if (s === 'void') base = J_VOID;
       else { this.nope(ts, `类型 '${s}'`); return null; }
       // 光写 `unsigned` 不写类型在 C 里是 `unsigned int`；这一层的语法把它落成
       // `no-type`，上面已经挡了，所以这儿只会看到"修饰符 + 具体类型"。
@@ -1181,8 +1184,8 @@ class JncLower {
       // 但不冲突（`uint8_t` 本来就是无符号），所以照收。
       const alias = INT_ALIASES.get(nm);
       if (alias !== undefined) base = mkInt(alias.w, alias.u || uns);
-      else if (nm === 'size_t') base = T_I64;           // jancy 的语料里到处是它
-      else if (nm === 'string_t') base = T_STR;
+      else if (nm === 'size_t') base = J_I64;           // jancy 的语料里到处是它
+      else if (nm === 'string_t') base = J_STR;
       else if (this.structs.has(nm)) base = { k: 'struct', name: nm };
       else if (this.enums.has(nm)) {
         if (uns) { this.err(ts, `'${nm}' 是枚举，上面写不了 unsigned`); return null; }
@@ -1262,7 +1265,7 @@ class JncLower {
       if (sh === 'array-suffix') {
         // 枚举也进得来（第三十九刀）：它的 `tyText` 就是 `int`，一个字的标量，与 `int`
         // 的元素同一格；不同的只是名字与它带的成员表。
-        if (t.k !== 'int' && t !== T_REAL && t !== T_BOOL && !isStruct(t) && !isEnum(t)) {
+        if (t.k !== 'int' && t !== J_REAL && t !== J_BOOL && !isStruct(t) && !isEnum(t)) {
           return this.nope(s, `${tyName(t)} 的数组 —— 要方言能把多个字的值当元素搬（与 &p 同一格）`);
         }
         const cnt = s.items[1];
@@ -1390,7 +1393,7 @@ class JncLower {
       pre.push(`    (pstore (var ${c}) (var ${p.name}))`);
     }
     const save = this.retTy;
-    this.retTy = isMain ? T_VOID : info.type;
+    this.retTy = isMain ? J_VOID : info.type;
     let body = this.block(n.items[3], 4);
     this.retTy = save;
     this.scopes = [];
@@ -1569,7 +1572,7 @@ class JncLower {
       }
       let code = null;
       if (initNode === null) {
-        code = zeroOf(info.type);
+        code = zeroText(info.type);
         if (code === null) {
           // 走到这儿只剩 void 与 string 那几种不该出现在局部量上的类型（结构体与数组
           // 在上面两条分支里各自开了自己那一格内存）。
@@ -1641,7 +1644,7 @@ class JncLower {
       this.gLifted.add(dn);
       this.decls.push(`  (global ${dn} ${pt})`);
       this.globalCells.push(`    (set ${dn} (pnew ${pt} (int 1)))`);
-    } else if (zeroOf(t) === null) {
+    } else if (zeroText(t) === null) {
       return this.nope(dcl, `${tyName(t)} 的 static 局部量`);
     } else {
       this.decls.push(`  (global ${dn} ${slotText(t)})`);
@@ -1790,7 +1793,7 @@ class JncLower {
       const a = this.expr(n.items[1], null);
       if (a === null) return null;
       if (!isPtr(a.type)) return this.err(n, `下标要一个指针，这里是 ${tyName(a.type)}`);
-      const i = this.expr(n.items[2], T_I64);
+      const i = this.expr(n.items[2], J_I64);
       if (i === null) return null;
       if (!isInt(i.type)) return this.err(n, `下标要整数，这里是 ${tyName(i.type)}`);
       const tt = a.type.target;
@@ -1983,7 +1986,7 @@ class JncLower {
         const code = `(bin "${up ? '+' : '-'}" ${this.read(lv)} (int 1))`;
         return [`${pad}${this.store(lv, wrapTo(code, lv.type.w, lv.type.u))}`];
       }
-      if (lv.type !== T_REAL) {
+      if (lv.type !== J_REAL) {
         this.err(n, `'${up ? '++' : '--'}' 要整数 / real / 指针，这里是 ${tyName(lv.type)}`);
         return null;
       }
@@ -2128,7 +2131,7 @@ class JncLower {
           return null;
         }
         piece = `(chr ${v.code})`;
-      } else if ((spec === 'd' || spec === 'i') && v.type === T_BOOL) {
+      } else if ((spec === 'd' || spec === 'i') && v.type === J_BOOL) {
         // jancy 的 `bool` 底下是 int8，`printf("%d", b)` 印 1 / 0（C 的样子）——
         // 用 `sel` 变成 1 / 0，而不是 `(tostr b)`（那会印 true / false）。
         piece = `(tostr (sel ${v.code} (int 1) (int 0)))`;
@@ -2148,7 +2151,7 @@ class JncLower {
         // 第三十二刀因此一个字的方言都没长：`%u` 就是这条路子上进制换成 10。
         let code = null;
         let w = 32;
-        if (v.type === T_BOOL) code = `(sel ${v.code} (int 1) (int 0))`;
+        if (v.type === J_BOOL) code = `(sel ${v.code} (int 1) (int 0))`;
         else if (isInt(v.type)) { code = v.code; w = promo(v.type.w); } else {
           this.err(argNode, `'%${spec}' 要整数，这里是 ${tyName(v.type)}`);
           return null;
@@ -2163,7 +2166,7 @@ class JncLower {
         // `(tostr …)`（也就是 `%.6g`），于是 `printf("%f", 1.5)` 印 `1.5` 而 C 印
         // `1.500000`。那是一处静默的差别，第八刀把它补上：`(sfix E N)`，N 默认 6。
         // `.*` 的实参是负数时"等于没写精度"，也就是回到 6（第二十七刀）。
-        if (v.type !== T_REAL) {
+        if (v.type !== J_REAL) {
           this.err(argNode, `'%f' 要 double，这里是 ${tyName(v.type)}（整数先写 (double)x）`);
           return null;
         }
@@ -2175,7 +2178,7 @@ class JncLower {
       } else if (spec === 'e' || spec === 'E') {
         // `%e` / `%E` 是 C 的 `%.6e`（第三十刀）—— 方言新长的 `(ssci E N)`。默认精度、
         // `.*` 是负数回到 6 这两条与 `%f` 一字不差（同一段 C 的规则）。
-        if (v.type !== T_REAL) {
+        if (v.type !== J_REAL) {
           this.err(argNode, `'%${spec}' 要 double，这里是 ${tyName(v.type)}（整数先写 (double)x）`);
           return null;
         }
@@ -2198,7 +2201,7 @@ class JncLower {
       } else if (spec === 'g' || spec === 'G') {
         // `%g` / `%G`（第三十一刀）—— 方言的 `(sgen E N)` / `(sgenk E N)`。这一格的 `#`
         // 不在这一层做：它改的是"去不去尾随零"，而那是排版本身的一部分，所以是两个算子。
-        if (v.type !== T_REAL) {
+        if (v.type !== J_REAL) {
           this.err(argNode, `'%${spec}' 要 double，这里是 ${tyName(v.type)}（整数先写 (double)x）`);
           return null;
         }
@@ -2208,12 +2211,12 @@ class JncLower {
         if (spec === 'G') piece = `(supper ${piece})`;
       } else {
         // 到这儿只剩 `%s`（`%d` / `%i` 在整数与 bool 上都在上面接完了，剩下的是类型不对）
-        const want = spec === 's' ? T_STR : T_I32;
+        const want = spec === 's' ? J_STR : J_I32;
         if (!sameTy(v.type, want)) {
           this.err(argNode, `'%${spec}' 要 ${tyName(want)}，这里是 ${tyName(v.type)}`);
           return null;
         }
-        piece = v.type === T_STR ? v.code : `(tostr ${v.code})`;
+        piece = v.type === J_STR ? v.code : `(tostr ${v.code})`;
       }
       flushLit();
       const intSpec = spec === 'd' || spec === 'i' || spec === 'x' || spec === 'X'
@@ -2400,15 +2403,15 @@ class JncLower {
    */
   truthy(v, node) {
     if (v === null) return null;
-    if (v.type === T_BOOL) return v;
-    if (isInt(v.type)) return { code: `(bin "!=" ${v.code} (int 0))`, type: T_BOOL };
-    if (v.type === T_REAL) return { code: `(bin "!=" ${v.code} (real 0.0))`, type: T_BOOL };
-    if (isPtr(v.type)) return { code: `(un "!" (pisnull ${v.code}))`, type: T_BOOL };
+    if (v.type === J_BOOL) return v;
+    if (isInt(v.type)) return { code: `(bin "!=" ${v.code} (int 0))`, type: J_BOOL };
+    if (v.type === J_REAL) return { code: `(bin "!=" ${v.code} (real 0.0))`, type: J_BOOL };
+    if (isPtr(v.type)) return { code: `(un "!" (pisnull ${v.code}))`, type: J_BOOL };
     return this.err(node, `${tyName(v.type)} 不能当条件用`);
   }
 
   cond(n) {
-    return this.truthy(this.expr(n, T_BOOL), n);
+    return this.truthy(this.expr(n, J_BOOL), n);
   }
 
   ifStmt(n, ind) {
@@ -2734,7 +2737,7 @@ class JncLower {
   retStmt(n, ind) {
     const pad = ' '.repeat(ind);
     if (n.items[1] === undefined) {
-      if (this.retTy !== T_VOID) {
+      if (this.retTy !== J_VOID) {
         this.err(n, `这个函数回 ${tyName(this.retTy)}，光一个 return 不够`);
         return null;
       }
@@ -2742,7 +2745,7 @@ class JncLower {
     }
     // `int main()` 降成方言的 `(main …)`，而那个入口不回值 —— `return 0` 就是 `(ret)`。
     // 只放过字面的 0（`return 1` 是"非零退出码"，这一层还没有那一格，得当场说清）。
-    if (this.retTy === T_VOID) {
+    if (this.retTy === J_VOID) {
       const v = n.items[1];
       if (isAtom(v) && v.value === '0') return [`${pad}(ret)`];
       return this.nope(n, 'main 里 `return` 一个非 0 的值（方言的入口没有退出码）');
@@ -2778,13 +2781,13 @@ class JncLower {
     if (v === null) return null;
     // int -> real 的隐式加宽（jancy 与 C 同）。反过来**不**做：那是丢精度，
     // jancy 那边也要一次显式强制转换。
-    if (want === T_REAL && isInt(v.type)) return { code: `(toreal ${v.code})`, type: T_REAL };
+    if (want === J_REAL && isInt(v.type)) return { code: `(toreal ${v.code})`, type: J_REAL };
     // bool -> 整数的隐式转换（第三十七刀）。出处两条：1 位那一格用**零扩展**
     //（`m_ext_u`，jnc_ct_CastOp_Int.cpp:354），而扩展这一族的 getCastKind 就是
     // `CastKind_Implicit`（jnc_ct_CastOp_Int.h:63）。所以 `int b = a > 0;` 在 jancy 里合法，
     // 值是 0 或 1 —— 与 C 同。这一处是所有"要一个具体类型"的取值的唯一入口，所以初值、
     // 赋值、实参、返回值四个地方一起接上。
-    if (want !== undefined && want !== null && isInt(want) && v.type === T_BOOL) {
+    if (want !== undefined && want !== null && isInt(want) && v.type === J_BOOL) {
       return { code: `(sel ${v.code} (int 1) (int 0))`, type: want };
     }
     // 枚举 -> 整数是**隐式**的（第三十九刀）：getArithmeticOperatorResultType 见到
@@ -2811,7 +2814,7 @@ class JncLower {
     if (/^0[0-7]+$/.test(s)) return this.intLit(n, BigInt(`0o${s.slice(1)}`));
     if (/^[0-9]+$/.test(s)) return this.intLit(n, BigInt(s));
     // FP 那两条词法规则出来的形状（`1.5` / `1.` / `1e3` / `1.5e-3`）方言的 realLit 都收
-    if (/^[0-9]+\.?[0-9]*([eE][+-]?[0-9]+)?$/.test(s)) return { code: `(real ${s})`, type: T_REAL };
+    if (/^[0-9]+\.?[0-9]*([eE][+-]?[0-9]+)?$/.test(s)) return { code: `(real ${s})`, type: J_REAL };
     return this.err(n, `认不出的字面量 '${s}'`);
   }
 
@@ -2822,17 +2825,17 @@ class JncLower {
    */
   intLit(n, v) {
     if (v > 0x7fffffffffffffffn) return this.err(n, `整数字面量超出 long 能装的范围：'${n.value}'`);
-    return { code: `(int ${v})`, type: v > 0x7fffffffn ? T_I64 : T_I32 };
+    return { code: `(int ${v})`, type: v > 0x7fffffffn ? J_I64 : J_I32 };
   }
 
   expr0(n, want) {
-    if (isStr(n)) return { code: `(str ${JSON.stringify(n.value)})`, type: T_STR };
+    if (isStr(n)) return { code: `(str ${JSON.stringify(n.value)})`, type: J_STR };
     if (isAtom(n)) return this.numLit(n);
     if (!isList(n)) return this.err(n, '认不出的表达式');
     const h = head(n);
     switch (h) {
-      case 'true': return { code: '(bool true)', type: T_BOOL };
-      case 'false': return { code: '(bool false)', type: T_BOOL };
+      case 'true': return { code: '(bool true)', type: J_BOOL };
+      case 'false': return { code: '(bool false)', type: J_BOOL };
       case 'null': {
         // `null` 自己没有类型。左边知道要什么时就用它；不知道时（比如 `x == null` 里
         // x 是整数）当场说清，而不是随便挑一个。
@@ -2980,7 +2983,7 @@ class JncLower {
       const ta = this.truthy(a, n.items[2]);
       const tb = this.truthy(b, n.items[3]);
       if (ta === null || tb === null) return null;
-      return { code: `(bin "${op}" ${ta.code} ${tb.code})`, type: T_BOOL };
+      return { code: `(bin "${op}" ${ta.code} ${tb.code})`, type: J_BOOL };
     }
     if (isPtr(a.type) || isPtr(b.type)) {
       if (op === '==' || op === '!=') {
@@ -2993,13 +2996,13 @@ class JncLower {
         } else if (!sameTy(a.type, b.type)) {
           return this.err(n, `'${op}' 两个指针不同型：左是 ${tyName(a.type)}，右是 ${tyName(b.type)}`);
         } else t = `(peq ${a.code} ${b.code})`;
-        return { code: op === '==' ? t : `(un "!" ${t})`, type: T_BOOL };
+        return { code: op === '==' ? t : `(un "!" ${t})`, type: J_BOOL };
       }
       if (op === '-' && isPtr(a.type) && isPtr(b.type)) {
         if (!sameTy(a.type, b.type)) {
           return this.err(n, `指针差要同型：左是 ${tyName(a.type)}，右是 ${tyName(b.type)}`);
         }
-        return { code: `(psub ${a.code} ${b.code})`, type: T_I64 };
+        return { code: `(psub ${a.code} ${b.code})`, type: J_I64 };
       }
       if ((op === '+' || op === '-') && isPtr(a.type) && isInt(b.type)) {
         const d = op === '+' ? b.code : `(un "-" ${b.code})`;
@@ -3016,7 +3019,7 @@ class JncLower {
     // 不同型的两个枚举、或枚举与整数混算，都先落到基整数上 —— 枚举 -> 整数是隐式的。
     if (isEnum(a.type) || isEnum(b.type)) {
       if (isEnum(a.type) && isEnum(b.type) && sameTy(a.type, b.type) && cmp) {
-        return { code: `(bin "${op}" ${a.code} ${b.code})`, type: T_BOOL };
+        return { code: `(bin "${op}" ${a.code} ${b.code})`, type: J_BOOL };
       }
       if (isEnum(a.type)) a = { code: a.code, type: a.type.base };
       if (isEnum(b.type)) b = { code: b.code, type: b.type.base };
@@ -3024,13 +3027,13 @@ class JncLower {
     // bool 参与整数运算（第三十七刀）。jancy 的提升表里 Bool1 与 Bool8 都落到 Int32
     //（jnc_ct_UnOp_Arithmetic.cpp:23 那张表的头两行），所以 `(a > 0) + 1` 是 int 上的加法。
     // 两个 bool 比相等是例外：方言的 bool 比较本来就精确，绕道整数没有意义。
-    const bothBoolEq = a.type === T_BOOL && b.type === T_BOOL && (op === '==' || op === '!=');
+    const bothBoolEq = a.type === J_BOOL && b.type === J_BOOL && (op === '==' || op === '!=');
     if (!bothBoolEq) {
-      if (a.type === T_BOOL && (isInt(b.type) || b.type === T_BOOL)) {
-        a = { code: `(sel ${a.code} (int 1) (int 0))`, type: T_I32 };
+      if (a.type === J_BOOL && (isInt(b.type) || b.type === J_BOOL)) {
+        a = { code: `(sel ${a.code} (int 1) (int 0))`, type: J_I32 };
       }
-      if (b.type === T_BOOL && isInt(a.type)) {
-        b = { code: `(sel ${b.code} (int 1) (int 0))`, type: T_I32 };
+      if (b.type === J_BOOL && isInt(a.type)) {
+        b = { code: `(sel ${b.code} (int 1) (int 0))`, type: J_I32 };
       }
     }
     // 两边都是整数：先常用算术转换定出结果那一格，再看要不要回卷。
@@ -3045,28 +3048,28 @@ class JncLower {
       const y = shift ? intConv(b, arith(b.type)) : intConv(b, rt);
       const code = `(bin "${op}" ${x.code} ${y.code})`;
       // 比较不用管宽度：转到同一格之后两边都是规范形，直接比就是对的。
-      if (cmp) return { code, type: T_BOOL };
+      if (cmp) return { code, type: J_BOOL };
       // 会溢出的只有这五条；`% & | ^ >>` 在规范形上天然还在范围里，一个字都不用发。
       const over = op === '+' || op === '-' || op === '*' || op === '/' || op === '<<';
       return { code: over ? wrapTo(code, rt.w, rt.u) : code, type: rt };
     }
     // 一边整数一边 real：加宽整数那一边
-    if (isInt(a.type) && b.type === T_REAL) a = { code: `(toreal ${a.code})`, type: T_REAL };
-    else if (a.type === T_REAL && isInt(b.type)) b = { code: `(toreal ${b.code})`, type: T_REAL };
+    if (isInt(a.type) && b.type === J_REAL) a = { code: `(toreal ${a.code})`, type: J_REAL };
+    else if (a.type === J_REAL && isInt(b.type)) b = { code: `(toreal ${b.code})`, type: J_REAL };
     if (!sameTy(a.type, b.type)) {
       return this.err(n, `'${op}' 两边不同型：左是 ${tyName(a.type)}，右是 ${tyName(b.type)}`);
     }
-    return { code: `(bin "${op}" ${a.code} ${b.code})`, type: cmp ? T_BOOL : a.type };
+    return { code: `(bin "${op}" ${a.code} ${b.code})`, type: cmp ? J_BOOL : a.type };
   }
 
   unary(n, want) {
     const op = isStr(n.items[1]) ? n.items[1].value : (isAtom(n.items[1]) ? n.items[1].value : null);
-    const a = this.expr(n.items[2], op === '!' ? T_BOOL : want);
+    const a = this.expr(n.items[2], op === '!' ? J_BOOL : want);
     if (a === null) return null;
     if (op === '+') {
       // 一元加是恒等，但**带整型提升**（`char c; +c` 是 int）。提升在规范形里不发一个字。
       if (isInt(a.type)) return { code: a.code, type: arith(a.type) };
-      if (a.type !== T_REAL) return this.err(n, `一元 '+' 要整数 / real，这里是 ${tyName(a.type)}`);
+      if (a.type !== J_REAL) return this.err(n, `一元 '+' 要整数 / real，这里是 ${tyName(a.type)}`);
       return a;
     }
     if (op === '-') {
@@ -3076,14 +3079,14 @@ class JncLower {
         const rt = arith(a.type);
         return { code: wrapTo(`(un "-" ${a.code})`, rt.w, rt.u), type: rt };
       }
-      if (a.type !== T_REAL) return this.err(n, `一元 '-' 要整数 / real，这里是 ${tyName(a.type)}`);
+      if (a.type !== J_REAL) return this.err(n, `一元 '-' 要整数 / real，这里是 ${tyName(a.type)}`);
       return { code: `(un "-" ${a.code})`, type: a.type };
     }
     if (op === '!') {
       // `!p` / `!n` 也成立（jancy 与 C 同）：先真值化再取反。
       const t = this.truthy(a, n.items[2]);
       if (t === null) return null;
-      return { code: `(un "!" ${t.code})`, type: T_BOOL };
+      return { code: `(un "!" ${t.code})`, type: J_BOOL };
     }
     if (op === '~') {
       // 方言的 `un` 只有 `-` 与 `!`，但按位取反不用新形式：`~x` 就是 `x ^ -1`。
@@ -3117,8 +3120,8 @@ class JncLower {
       const y = intConv(b, rt);
       return { code: `(sel ${c.code} ${x.code} ${y.code})`, type: rt };
     }
-    if (isInt(a.type) && b.type === T_REAL) a = { code: `(toreal ${a.code})`, type: T_REAL };
-    else if (a.type === T_REAL && isInt(b.type)) b = { code: `(toreal ${b.code})`, type: T_REAL };
+    if (isInt(a.type) && b.type === J_REAL) a = { code: `(toreal ${a.code})`, type: J_REAL };
+    else if (a.type === J_REAL && isInt(b.type)) b = { code: `(toreal ${b.code})`, type: J_REAL };
     if (!sameTy(a.type, b.type)) {
       return this.err(n, `'? :' 两支不同型：甲是 ${tyName(a.type)}，乙是 ${tyName(b.type)}`);
     }
@@ -3148,7 +3151,7 @@ class JncLower {
       }
       parts.push(v.code);
     }
-    if (sig.ret === T_VOID) return { code: `(call ${nm}${parts.map((p) => ` ${p}`).join('')})`, type: T_VOID };
+    if (sig.ret === J_VOID) return { code: `(call ${nm}${parts.map((p) => ` ${p}`).join('')})`, type: J_VOID };
     return { code: `(call ${nm}${parts.map((p) => ` ${p}`).join('')})`, type: sig.ret };
   }
 
@@ -3172,7 +3175,7 @@ class JncLower {
   newCurly(n, tnNode, curly) {
     const t = this.newTy(tnNode);
     if (t === null) return null;
-    if (t === T_VOID) return this.err(n, 'new void');
+    if (t === J_VOID) return this.err(n, 'new void');
     if (!isStruct(t) && !isArr(t)) {
       return this.err(n, `new ${tyName(t)} { … }：花括号初值要一格聚合`);
     }
@@ -3216,10 +3219,10 @@ class JncLower {
   newPtr(n, tnNode, countNode) {
     const t = this.newTy(tnNode);
     if (t === null) return null;
-    if (t === T_VOID) return this.err(n, 'new void');
+    if (t === J_VOID) return this.err(n, 'new void');
     let count = '(int 1)';
     if (countNode !== null) {
-      const c = this.expr(countNode, T_I64);
+      const c = this.expr(countNode, J_I64);
       if (c === null) return null;
       if (!isInt(c.type)) return this.err(countNode, `new T[n] 的 n 要整数，这里是 ${tyName(c.type)}`);
       count = c.code;
@@ -3243,10 +3246,10 @@ class JncLower {
     if (v === null) return null;
     if (sameTy(v.type, to)) return v;
     if (isInt(to) && isInt(v.type)) return intConv(v, to);
-    if (to === T_REAL && isInt(v.type)) return { code: `(toreal ${v.code})`, type: T_REAL };
-    if (isInt(to) && v.type === T_REAL) {
+    if (to === J_REAL && isInt(v.type)) return { code: `(toreal ${v.code})`, type: J_REAL };
+    if (isInt(to) && v.type === J_REAL) {
       // 先向零截断成 64 位（方言的 `toint` 就是它），再回卷到目标那一格。
-      return intConv({ code: `(toint ${v.code})`, type: T_I64 }, to);
+      return intConv({ code: `(toint ${v.code})`, type: J_I64 }, to);
     }
     if (to.k === 'tptr' && v.type.k === 'ptr' && sameTy(to.target, v.type.target)) {
       // 在这儿拦一次而不是等方言报：这条消息能指着 jancy 那一行说话。

@@ -1991,6 +1991,10 @@ cflow_break.rst 与 samples/jnc/83_BreakN.jnc），而方言只有单层的 `(br
 `frontend-jnc/lower.js` 的 `zeroOf` 与 `interp/builtin.js` 的 `zeroOf` 上，那是第一刀
 （8cc16be）就欠下的债，与这一刀无关，记在这里免得下次重查。
 
+> **第四十三刀把重名这一格清了**：`frontend-jnc/lower.js` 里的 `zeroOf` 改名 `zeroText`、
+> 九个 `T_*` 改名 `J_*`。`tests/mir` 还是红的，但撞的换成了下一格债 —— `fmtFixed` /
+> `fmtSci` / `fmtGen` 不在 `frontend-js/link.js` 的 `NATIVE_OPS` 里。
+
 ### 第四十一刀：`break2` / `continue2` 接上层号，顺手抓出一处**词法**上的静默错
 
 上一刀方言长出了层号，这一刀把 jancy 那一头接上去，并且删掉第三十六刀欠的
@@ -2082,6 +2086,29 @@ while 里 `continue2` 指着外层 for、两层带步进的 for 里 `continue2` 
 **没跑的**：`tests/sexpr`、`tests/glr`、`tests/asy` —— 只动了 `frontend-jnc/lower.js`
 （加 `tests/jnc/run.js` 的头注释），语法、方言、MIR、四个后端与运行时一个字都没改；自举、
 `tests/jit`、`tests/mir`、`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
+
+### 第四十三刀：自举的重名 —— `frontend-jnc` 让位，顺手把下一格债量清
+
+这一刀不长功能，只把 `tests/mir` 整条轴上那道拦路的重名清掉。自举那一遍要求**模块级的名字
+全局唯一**（同一个名字在两个模块里都定义就报错），而 jancy 前端第一刀（8cc16be）带进来五个
+撞名：`zeroOf`（与 `interp/builtin.js` 的同名函数）与 `T_VOID` / `T_I64` / `T_BOOL` / `T_STR`
+（与 `mir/ir.js` 的 MIR 类型标签）。
+
+改名的一边选 `frontend-jnc/lower.js`，因为它的这几个名字**全是文件内私有的** —— 整个仓库只有
+`cli.js` 从这个模块 import 一个 `lowerJnc`。`zeroOf` 改成 `zeroText`（它回的是方言**文本**，
+而 `builtin.js` 那个造的是运行期的值 —— 名字撞在一起本来就说明两者容易被看混）；九个 `T_*`
+一起改成 `J_*`（只改四个撞名的会让 `T_I32` 与 `J_BOOL` 并排，那更难读）。
+
+**`tests/mir` 还是红的**，但撞的换成了下一格：`fmtFixed` / `fmtSci` / `fmtGen` 不在
+`frontend-js/link.js` 的 `NATIVE_OPS` 里（那张表把 `host/native.js` 的每个导出对应到一条
+`js_*` 运行时 op）。那是第二十九到第三十一刀（`sfix` / `ssci` / `sgen`）欠下的：解释器直接
+从宿主 import 了这三个，而自举要求它们在四条腿上都有一份实现与一个 op 名。这不是改名能解决的，
+要单独一刀，记在这儿免得下次从头查。
+
+**跑过的轴**：`tests/jnc`（61/0 —— 改名只动了这一个前端）、`tests/mir`（还是红，但错的那一句
+换了，见上）。
+**没跑的**：`tests/sexpr`、`tests/glr`、`tests/asy`（一个字都没碰到它们的路径）、自举、
+`tests/jit`、`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
 
 ## 后果与代价
 
