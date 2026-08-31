@@ -1827,7 +1827,7 @@ class JncLower {
       if (spec === '%') { lit += '%'; continue; }
       if (spec !== 'd' && spec !== 'i' && spec !== 'f' && spec !== 's' && spec !== 'c'
         && spec !== 'x' && spec !== 'X' && spec !== 'o' && spec !== 'e' && spec !== 'E'
-        && spec !== 'g' && spec !== 'G') {
+        && spec !== 'g' && spec !== 'G' && spec !== 'u') {
         this.nope(n, `printf 的转换 '%${spec === undefined ? '' : spec}'`);
         return null;
       }
@@ -1871,11 +1871,14 @@ class JncLower {
       } else if ((spec === 'd' || spec === 'i') && isInt(v.type)) {
         // 四种位宽都收：值已经是规范形（符号扩展过的），照印就是 C 的样子。
         piece = `(tostr ${v.code})`;
-      } else if (spec === 'x' || spec === 'X' || spec === 'o') {
-        // `%x` / `%X` / `%o`（ADR-0016 第七刀）。C 把实参当 **unsigned** 读，而"多少位"
-        // 是**默认实参提升之后**那一格 —— `printf("%x", (char)-56)` 印 `ffffffc8`（提到
-        // int 之后当 32 位无符号读），不是 `c8`。所以这儿先掩到 promo(位宽) 位。
-        // 64 位不用掩：`(sbase …)` 本来就把它的实参当无符号 64 位读。
+      } else if (spec === 'x' || spec === 'X' || spec === 'o' || spec === 'u') {
+        // `%x` / `%X` / `%o`（ADR-0016 第七刀）与 `%u`（第三十二刀）。C 把实参当
+        // **unsigned** 读，而"多少位"是**默认实参提升之后**那一格 ——
+        // `printf("%x", (char)-56)` 印 `ffffffc8`（提到 int 之后当 32 位无符号读），
+        // 不是 `c8`；`printf("%u", (char)-56)` 同一条，印 `4294967240`。所以这儿先掩到
+        // promo(位宽) 位。64 位不用掩：`(sbase …)` 本来就把它的实参当无符号 64 位读。
+        //
+        // 第三十二刀因此一个字的方言都没长：`%u` 就是这条路子上进制换成 10。
         let code = null;
         let w = 32;
         if (v.type === T_BOOL) code = `(sel ${v.code} (int 1) (int 0))`;
@@ -1884,7 +1887,8 @@ class JncLower {
           return null;
         }
         if (w < 64) code = `(bin "&" ${code} (int ${(1n << BigInt(w)) - 1n}))`;
-        piece = `(sbase ${code} (int ${spec === 'o' ? 8 : 16}))`;
+        const base = spec === 'o' ? 8 : (spec === 'u' ? 10 : 16);
+        piece = `(sbase ${code} (int ${base}))`;
         // 大写走 `(supper …)`：`sbase` 只给小写，这条是它们分工的那一刀。
         if (spec === 'X') piece = `(supper ${piece})`;
       } else if (spec === 'f') {
@@ -1945,7 +1949,8 @@ class JncLower {
         piece = v.type === T_STR ? v.code : `(tostr ${v.code})`;
       }
       flushLit();
-      const intConv = spec === 'd' || spec === 'i' || spec === 'x' || spec === 'X' || spec === 'o';
+      const intConv = spec === 'd' || spec === 'i' || spec === 'x' || spec === 'X'
+        || spec === 'o' || spec === 'u';
       const hexConv = spec === 'x' || spec === 'X';
       // 带符号的转换（`+` / 空格 / 摘符号那一路认的就是这一族）：浮点那三格都在里面
       const signed = spec === 'd' || spec === 'i' || spec === 'f'

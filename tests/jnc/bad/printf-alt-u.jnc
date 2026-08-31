@@ -1,0 +1,10 @@
+// `%#u`（第三十二刀顺手钉的一条）—— C 自己的**未定义行为**，所以拒。clang 的原话：
+// "flag '#' results in undefined behavior with 'u' conversion specifier"。
+//
+// 与 bad/printf-conv-p 是**两种不同的拒**：那一条是"这一层不做"，这一条是"没有可对的
+// 答案"。同一种拒还有 bad/printf-plus-hex（`%+x`）—— `%u` 也在那条里（它不是有符号
+// 转换），这一份补的是 `#` 那一半。
+int main() {
+    printf("%#u\n", 7);
+    return 0;
+}

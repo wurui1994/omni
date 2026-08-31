@@ -1581,6 +1581,9 @@ N+2 位，指数得跟着加一。这一步在方言那一层做（四份实现�
 读、进制也不限于 8 / 16），它只是**下一刀**的事；`%p` 是**这一层不做** —— 它要观测裸地址，
 而那在五条腿上根本不是同一个数（决策一）。
 
+> **第三十二刀更正**：`%u` 落了，边界只剩 `%p`。上面那句"不要方言长任何东西"量准了 ——
+> 这一刀方言真的一个字没改。
+
 **期望输出的出处**：`cases/30-printf-gen.jnc` 与 `tests/sexpr/cases/31-sgen.sx`，各有一份
 `cc -O0` 的孪生程序，逐字节相同（五条腿也各自与它相同）。越界那两句话有 `rt/sgen-range` 与
 `rt/sgenk-range`。
@@ -1592,6 +1595,39 @@ N+2 位，指数得跟着加一。这一步在方言那一层做（四份实现�
 没人用；`tostr` / `sfix` 那两路一个字没动 —— prelude 里 `$str_fixed` 拆成两层是纯粹的搬家，
 外壳的签名与那句越界的话都没变）；自举、`tests/jit`、`tests/mir`、`tests/llvm`；
 `npm run lint` 这台机器上没有 typescript。
+
+### 第三十二刀：`%u` —— 量下来它就是第七刀那条路，进制换成 10
+
+转换字符那一族收尾。这一刀**方言一个字都没长**，frontend 里净增的也只有三处：白名单加个
+`u`、`intConv` 加个 `u`、`(sbase … (int 进制))` 那一格从"8 还是 16"变成"8 / 10 / 16"。
+
+**为什么这么便宜**：C 的 `%u` 与 `%x` 是**同一条**规则 —— 把实参当 unsigned 读，位数是默认
+实参提升之后那一格。`char d = -56;` 上 `%x` 给 `ffffffc8`、`%u` 给 `4294967240`，是同一个
+32 位数的两种写法（都量过）。而方言的 `(sbase E 进制)` 本来就把实参当无符号 64 位读、进制
+那一格也不限于 8 / 16。第七刀把难的那一半（掩到 `promo(位宽)` 位）做完了，这一刀只是又用了它。
+
+**顺手钉的一条 UB**：`%#u` 在 C 里是未定义行为（clang: "flag '#' results in undefined
+behavior with 'u' conversion specifier"），`bad/printf-alt-u.jnc`。`+` / 空格 那一半本来就
+被 `bad/printf-plus-hex` 那条规则挡着（`%u` 不是有符号转换）。
+
+**边界只剩 `%p`**（`bad/printf-conv-p.jnc`），而它是**第三种拒**：不是"还没长出来"，是
+**这一层不做**。裸地址在五条腿上不是同一个数（三条 arena 模拟、两条真指针），而"不许观测裸
+地址"这条纪律正是那两套实现能一直逐字节对上的原因 —— 为 `%p` 破掉它，换来的是整条轴失去意义。
+`tests/jnc/run.js` 的头注释因此从"两种拒"改成了"三种拒"。
+
+**printf 的表面到这儿齐了**：五个标志、宽度、精度、`*` / `.*`、`d i u o x X e E f g G c s %`。
+剩下的是**长度修饰符**（`%ld` / `%llu` / `%hhd` 那一族）—— 这一层的位数从**类型**上取，所以
+C 那边要写修饰符的地方这边不写；真遇到 jancy 源码里写了修饰符，那是下一条边界。
+
+**期望输出的出处**：`cases/31-printf-u.jnc`，一份 `cc -O0 -std=c99` 的孪生程序，逐字节相同
+（五条腿也各自与它相同）。与那份 C 的两处写法差别与 `07-hex.jnc` 那两处同：`signed char`
+与 `%llu`。
+
+**跑过的轴**：`tests/jnc`（48/0，新增 `cases/31-printf-u`、`bad/printf-conv-p`、
+`bad/printf-alt-u`，删掉落地了的 `bad/printf-conv-u`）。
+**没跑的**：`tests/sexpr`、`tests/glr`、`tests/asy` —— 这一刀只动了 `frontend-jnc/lower.js`
+（加 `tests/jnc/run.js` 的头注释），方言一个字没改；自举、`tests/jit`、`tests/mir`、
+`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
 
 ## 后果与代价
 
