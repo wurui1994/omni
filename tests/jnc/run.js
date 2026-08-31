@@ -34,14 +34,15 @@
 //      第三十七刀、`typedef` 是第三十八刀、`enum` 是第三十九刀、`break2` / `continue2` 与
 //      switch 里的 continue 是第四十一刀（方言的层号是第四十刀）、带步进的 for 里的 continue
 //      是第四十二刀、printf 的长度修饰是第四十四刀、`countof` 是第四十五刀、指针比大小是
-//      第四十六刀、`bitflag enum` 是第四十七刀，在 cases/24-new-curly.jnc、
+//      第四十六刀、`bitflag enum` 是第四十七刀、编译期整数求值是第四十八刀，在
+//      cases/24-new-curly.jnc、
 //      cases/25-static-local.jnc、cases/26-printf-prec.jnc、cases/27-printf-star-prec.jnc、
 //      cases/28-printf-flags.jnc、cases/29-printf-sci.jnc、cases/30-printf-gen.jnc、
 //      cases/31-printf-u.jnc、cases/32-unsigned.jnc、cases/33-radix.jnc、
 //      cases/34-bitassign.jnc、cases/35-switch.jnc、cases/36-bool-int.jnc、
 //      cases/37-typedef.jnc、cases/38-enum.jnc、cases/39-breakn.jnc、cases/40-forcont.jnc、
 //      cases/41-printf-len.jnc、cases/42-countof.jnc、cases/43-ptrcmp.jnc、
-//      cases/44-bitflag.jnc。）
+//      cases/44-bitflag.jnc、cases/45-constfold.jnc。）
 //
 //      bad/ 里有**四种**拒，别混：一种是"还没长出来"（做掉就落地）；一种是**这一层不做**
 //      （printf-conv-p：`%p` 要观测裸地址，而五条腿上那不是同一个数；ptrcmp-mixed：不同型的
@@ -49,7 +50,7 @@
 //      是按元素算差的 `psub`，元素不一样大时"差几个元素"没有意义）；一种是**C 自己的
 //      未定义行为**（printf-plus-hex 的 `%+x`、printf-alt-u 的 `%#u`、bitflag-neg 的
 //      `bitflag enum { A = -1 }` —— jancy 算下一格的那句 `2 << getHiBitIdx64(-1)` 在 C++ 里
-//      是移位越界；三条都没有可对的答案）；
+//      是移位越界、const-shift-wide 的 `1 << 64` —— C99 6.5.7p3；四条都没有可对的答案）；
 //      一种是**jancy 自己也拒**（enum-from-int 的 int 到枚举、bitflag-from-int 的非 0 int 到
 //      bitflag 枚举、curly-after-named、bitassign-real、countof-ptr —— 这几条落地了也还是拒，
 //      只是理由要对得上 jancy 的那一句）。

@@ -440,6 +440,9 @@ class JncLower {
     // cflow_switch.rst:37），`continue N` 只数真循环 —— 与 C 一致。`step` 记着这一层是不是
     // 带步进的 for（那格的 continue 还接不了，见 stmt）。
     this.loops = [];
+    // 正在解体的那个枚举（第四十八刀）。只有它非 null 时，编译期求值才认光一个名字 ——
+    // 那是同一个枚举里已经定下的成员（`Bridged = Opened + 1`）。
+    this.constEnum = null;
     this.aliases = new Map();  // typedef 起的类型名 -> 解出来的那一格（第三十八刀）
     this.enums = new Map();    // 枚举名 -> { base, members: Map(名字 -> BigInt) }（第三十九刀）
     this.tmp = 0;              // 生成名字的计数（do-while 的那格标志）
@@ -1117,8 +1120,10 @@ class JncLower {
       if (mn === null) { this.err(m, '认不出的枚举成员名字'); continue; }
       if (info.members.has(mn)) { this.err(m, `枚举 '${name}' 里 '${mn}' 出现了两次`); continue; }
       if (m.items[2] !== undefined) {
+        this.constEnum = info;
         const k = this.constInt(m.items[2]);
-        if (k === null) { this.nope(m.items[2], '枚举成员的值不是整数字面量（要编译期求值那一格）'); continue; }
+        this.constEnum = null;
+        if (k === null) { this.nope(m.items[2], '枚举成员的值算不出来（要一个编译期整数常量）'); continue; }
         next = k;
       }
       info.members.set(mn, wrapVal(next, info.base));
@@ -1323,12 +1328,15 @@ class JncLower {
           dims.push(null);
           continue;
         }
-        if (!isAtom(cnt) || !/^(0|[1-9][0-9]*)$/.test(cnt.value)) {
-          return this.nope(s, '数组长度不是十进制整数字面量（没有常量折叠）');
+        // 长度走编译期求值（第四十八刀）：jancy 那边这一格就是 `parseConstIntegerExpression`
+        //（`ArrayType::calcLayout`，jnc_ct_ArrayType.cpp:175），与枚举成员的值同一个入口。
+        const kn = this.constInt(cnt);
+        if (kn === null) {
+          return this.nope(s, '数组长度不是能在编译期算出来的整数');
         }
-        const nn = Number(cnt.value);
-        if (nn < 1) return this.err(s, `数组长度要至少 1，这里是 ${nn}`);
-        if (nn > 1000000) return this.err(s, `数组长度最多 1000000，这里是 ${nn}`);
+        if (kn < 1n) return this.err(s, `数组长度要至少 1，这里是 ${kn}`);
+        if (kn > 1000000n) return this.err(s, `数组长度最多 1000000，这里是 ${kn}`);
+        const nn = Number(kn);
         dims.push(nn);
         continue;
       }
@@ -2671,17 +2679,33 @@ class JncLower {
   caseLabel(e) {
     const k = this.constInt(e);
     if (k === null) {
-      this.nope(e, 'case 的标签不是整数字面量（要编译期求值那一格）');
+      this.nope(e, 'case 的标签算不出来（要一个编译期整数常量）');
       return null;
     }
     return k;
   }
 
   /**
-   * 标签上那一点点编译期求值：整数字面量与它前面的一元 `+` / `-`。**从语法树上算**，不看
-   * 降出来的文本 —— 降级会把一元减包进回卷（`(bin "-" (bin "^" …))`），照文本认不出来。
-   * 常量折叠（`case 1 + 2:`）与命名常量（`case Request.Terminate:`）都要更大的一格，各是
-   * 一条边界。返回 null 表示"这里不是一个能算的常量"，由调用方报错。
+   * 编译期整数求值（第三十六刀起头，第四十八刀长成）。**从语法树上算**，不看降出来的文本
+   * —— 降级会把一元减包进回卷（`(bin "-" (bin "^" …))`），照文本认不出来。
+   *
+   * jancy 那边的口径是 `parseConstIntegerExpression`：把它当**一整条表达式**解出来，然后
+   * 只要求结果是 `ValueKind_Const` 且类型带 `TypeKindFlag_Integer`
+   * （jnc_ct_OperatorMgr_New.cpp:379-403）。所以"能不能写"这件事在 jancy 那边等于
+   * "编译器折得动吗"，而不是"是不是一个字面量"。这一处照着它收：
+   *
+   *   - 整数字面量（各种进制，走 numLit）
+   *   - `true` / `false` —— **bool 也带 Integer 这个位**（jnc_Type.cpp:38-48 那张表里
+   *     Bool1 与 Bool8 都有 `jnc_TypeKindFlag_Integer`），所以 `C = false` 是 0，合法。
+   *     语料里真这么写：test104.jnc:4。
+   *   - 一元 `+` `-` `~` `!`
+   *   - 二元 `+ - * / % & | ^ << >>` 与六个比较（比较回 bool，同样带 Integer 位）
+   *   - 枚举成员 `Color.Green`（第三十九刀）
+   *
+   * 算在 BigInt 上，**不在这一层回卷**：调用方各自知道该落进哪一格（枚举成员走
+   * `wrapVal(…, info.base)`，数组长度要非负），在那儿收窄一次就够。
+   *
+   * 返回 null 表示"这里不是一个能算的常量"，由调用方报错。
    */
   constInt(e) {
     if (isAtom(e)) {
@@ -2690,12 +2714,30 @@ class JncLower {
       const m = /^\(int (-?\d+)\)$/.exec(v.code);
       return m === null ? null : BigInt(m[1]);
     }
+    if (isList(e) && head(e) === 'true') return 1n;
+    if (isList(e) && head(e) === 'false') return 0n;
+    // 光一个名字 —— 只在**枚举自己的体里**认，指的是同一个枚举里已经定下的成员
+    // （第四十八刀）。jancy 那边成员住在枚举自己的命名空间里（type_enum.rst:17），
+    // 而初值就是在那个命名空间里解的，所以 `Bridged = Opened + 1` 里的 `Opened`
+    // 不用写全名。语料里的写法：test56.jnc:15。
+    if (isList(e) && head(e) === 'name' && this.constEnum !== null) {
+      const nm = this.qname(e);
+      if (nm === null) return null;
+      const v = this.constEnum.members.get(nm);
+      return v === undefined ? null : BigInt(v);
+    }
+    if (isList(e) && head(e) === 'binary' && isStr(e.items[1])) {
+      return this.constBin(e, e.items[1].value);
+    }
     if (isList(e) && head(e) === 'unary' && isStr(e.items[1])) {
       const op = e.items[1].value;
-      if (op !== '-' && op !== '+') return null;
       const k = this.constInt(e.items[2]);
       if (k === null) return null;
-      return op === '-' ? -k : k;
+      if (op === '+') return k;
+      if (op === '-') return -k;
+      if (op === '~') return -k - 1n;               // ~x == -x-1，与位宽无关
+      if (op === '!') return k === 0n ? 1n : 0n;
+      return null;
     }
     // `Color.Green` —— 枚举成员的值在编译期就定了（第三十九刀），所以 `case Color.Green:`
     // 与 `enum X { A = Color.Green }` 都能算。
@@ -2706,6 +2748,40 @@ class JncLower {
       return m === null ? null : BigInt(m[1]);
     }
     return null;
+  }
+
+  /**
+   * 编译期求值里的二元算子（第四十八刀）。BigInt 上的整数语义 —— 与运行期那一份的差别只在
+   * "不回卷"：调用方各自知道该落进哪一格。三处**拒**而不是硬算：
+   *   - 除以 0（jancy 那边也是错，不是"折出个数来"）
+   *   - 移位量不在 0..63（C 里移位量 >= 位宽是未定义行为，没有可对的答案）
+   *   - `&&` / `||`（它们回 bool，也带 Integer 位，但短路语义在常量位置上没有意义 ——
+   *     语料里一处都没有，留着当边界）
+   * `/` 按**向零截断**（C 与 jancy 同），BigInt 的除法本来就是这个。
+   */
+  constBin(e, op) {
+    const a = this.constInt(e.items[2]);
+    const b = this.constInt(e.items[3]);
+    if (a === null || b === null) return null;
+    switch (op) {
+      case '+': return a + b;
+      case '-': return a - b;
+      case '*': return a * b;
+      case '/': return b === 0n ? null : a / b;
+      case '%': return b === 0n ? null : a % b;
+      case '&': return a & b;
+      case '|': return a | b;
+      case '^': return a ^ b;
+      case '<<': return b < 0n || b > 63n ? null : a << b;
+      case '>>': return b < 0n || b > 63n ? null : a >> b;
+      case '==': return a === b ? 1n : 0n;
+      case '!=': return a !== b ? 1n : 0n;
+      case '<': return a < b ? 1n : 0n;
+      case '<=': return a <= b ? 1n : 0n;
+      case '>': return a > b ? 1n : 0n;
+      case '>=': return a >= b ? 1n : 0n;
+      default: return null;
+    }
   }
 
   whileStmt(n, ind) {

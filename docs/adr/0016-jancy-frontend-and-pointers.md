@@ -2319,6 +2319,48 @@ C 里没有 bitflag 枚举，那串自动取值要照上面第 1 条算出来写
 语法一个字没改（`bitflag enum` 那个 token 本来就在），方言、MIR、四个后端与运行时也没动；
 自举、`tests/jit`、`tests/mir`、`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
 
+### 第四十八刀：编译期整数求值 —— 三处边界原来是同一格
+
+`enum { Bridged = Opened + 1 }`、`int a[2 * 3]`、`case 1 + 2:` 以前各报一句"不是整数字面量"。
+三条边界，一格东西：jancy 那边这三处走的都是 `parseConstIntegerExpression`
+（枚举成员 `jnc_ct_EnumType.cpp:271` 与 `:296`、数组长度 `jnc_ct_ArrayType.cpp:175`）。
+
+**它的口径**比"是不是字面量"宽得多也简单得多：把那一段当**一整条表达式**解出来，只要求结果是
+`ValueKind_Const` 且类型带 `TypeKindFlag_Integer`（`jnc_ct_OperatorMgr_New.cpp:379-403`）。
+也就是说在 jancy 那边"能不能写"等于"编译器折得动吗"。照着它收，`constInt` 从"字面量加一元
+正负"长成一个小求值器：一元 `+ - ~ !`、二元 `+ - * / % & | ^ << >>` 与六个比较、枚举成员。
+
+**两处照抄才对得上的细节**（都是量出来的，不是想出来的）：
+
+- **bool 带 Integer 这个位**：`jnc_Type.cpp:38-48` 那张 flag 表里 Bool1 与 Bool8 都有
+  `jnc_TypeKindFlag_Integer`。所以 `C = false` 是 0、`Cmp = 3 > 2` 是 1 —— 都合法。
+  语料里真这么写：`test/jnc/test104.jnc:4`。这一条不查表就会拒错。
+- **光一个名字指的是同一个枚举里已经定下的成员**：成员住在枚举自己的命名空间里
+  （type_enum.rst:17），而初值就在那个命名空间里解，所以 `Bridged = Opened + 1` 不用写全名。
+  语料：`test/jnc/test56.jnc:15`（还有 `All = ReadOnly | Exclusive` —— 一句话同时踩了这一条
+  与 bitflag 的 `|`）。落地是一格 `this.constEnum`：只在解那个枚举的体时非 null。
+
+**不回卷**是这一处的一个决定：求值在 BigInt 上做，落进哪一格由调用方决定 —— 枚举成员走
+`wrapVal(…, info.base)`（那一句本来就在），数组长度要 1..1000000。这样求值器不用带类型。
+
+**边界**：移位量不在 0..63（`1 << 64`）与除以 0。前者在 C 里是未定义行为（C99 6.5.7p3），
+后者 jancy 也是报错而不是折出个数来 —— 与 `%+x`、负 bitflag 同一类：**没有可对的答案**。
+`bad/const-shift-wide.jnc` 记着这两条（同一句诊断）。`&&` / `||` 也留在外面：它们回 bool、
+同样带 Integer 位，但短路在常量位置上没有意义，语料里一处都没有。
+
+**期望输出的出处**：一份 `cc -O0 -std=c99 -Wall` 的孪生，六行逐字节相同。**写法差异**三处：
+C 的枚举成员是裸名；`bitflag enum` 的自动取值在 C 里要写死；`countof(a)` 在 C 里是
+`sizeof(a)/sizeof(a[0])`。
+
+**放行了什么**：`test/jnc/test56.jnc`（印 `State.Bridged = 2` 与 `Flags.All = 0x3`）与
+`test/jnc/test104.jnc` 整份跑通 —— 后者是上一刀量出来的下一格。
+
+**跑过的轴**：`tests/jnc`（75/0，新增 `cases/45-constfold` 与 `bad/const-shift-wide`）。
+**没跑的**：`tests/sexpr`、`tests/glr`、`tests/asy`、`tests/oir` —— 只动了
+`frontend-jnc/lower.js` 的 `constInt` 与三个用它的地方（加 `tests/jnc/run.js` 的头注释），
+语法、方言、MIR、四个后端与运行时一个字都没改；自举、`tests/jit`、`tests/mir`、`tests/llvm`；
+`npm run lint` 这台机器上没有 typescript。
+
 ## 后果与代价
 
 - 方言从"没有可算术的引用"变成"有"。这一格会渗到 MIR 与四个后端，改不回去。

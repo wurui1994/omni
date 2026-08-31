@@ -1,0 +1,66 @@
+// 第四十八刀：编译期整数求值 —— 枚举成员的值、数组长度、`case` 的标签共用同一个入口。
+//
+// 出处（jancy 自己的实现）：这三处在 jancy 那边都是 `parseConstIntegerExpression` ——
+// 枚举成员（`jnc_ct_EnumType.cpp:271` 与 `:296`）、数组长度（`jnc_ct_ArrayType.cpp:175`）。
+// 它的口径是"把这一段当**一整条表达式**解出来，只要求结果是 `ValueKind_Const` 且类型带
+// `TypeKindFlag_Integer`"（`jnc_ct_OperatorMgr_New.cpp:379-403`）。所以在 jancy 那边
+// "能不能写"等于"编译器折得动吗"，不是"是不是一个字面量"。
+//
+// 两处照抄之后才对得上的细节：
+//   - **bool 也带 Integer 这个位**（`jnc_Type.cpp:38-48` 那张表里 Bool1 与 Bool8 都有
+//     `jnc_TypeKindFlag_Integer`），所以 `Zero = false` 是 0、`Cmp = 3 > 2` 是 1。
+//     语料里真这么写：`test/jnc/test104.jnc:4` 的 `C = false`。
+//   - **光一个名字指的是同一个枚举里已经定下的成员**：jancy 的成员住在枚举自己的命名空间里
+//     （type_enum.rst:17），初值就在那个命名空间里解，所以 `Bridged = Opened + 1` 不用写
+//     全名。语料：`test/jnc/test56.jnc:15`。
+//
+// 期望输出的出处：一份 `cc -O0 -std=c99 -Wall` 的孪生件，六行逐字节相同。**写法差异**三处：
+// C 的枚举成员是裸名；`bitflag enum` 的自动取值在 C 里要写死；`countof(a)` 在 C 里是
+// `sizeof(a)/sizeof(a[0])`。
+enum State {
+	Closed,
+	Opened,
+	Bridged = Opened + 1,
+	Wide = 1 << 4,
+	Mask = (1 << 4) - 1,
+	Neg = -3 * 2,
+	Not = ~0,
+	Cmp = 3 > 2,
+	Zero = false,
+	One = true,
+	Div = 100 / 7,
+	Rem = 100 % 7,
+	Ored = 0x0f | 0x30,
+}
+
+bitflag enum Flags {
+	A,
+	B,
+	C = false,
+}
+
+int main() {
+	printf("%d %d %d %d %d\n", State.Closed, State.Opened, State.Bridged, State.Wide, State.Mask);
+	printf("%d %d %d %d %d\n", State.Neg, State.Not, State.Cmp, State.Zero, State.One);
+	printf("%d %d %d\n", State.Div, State.Rem, State.Ored);
+	printf("%d %d %d\n", Flags.A, Flags.B, Flags.C);
+
+	int a[2 * 3];
+	int b[1 << 3];
+	printf("%d %d\n", countof(a), countof(b));
+
+	int i = 3;
+	switch (i) {
+	case 1 + 2:
+		printf("three\n");
+		break;
+
+	case State.Wide:
+		printf("wide\n");
+		break;
+
+	default:
+		printf("other\n");
+	}
+	return 0;
+}
