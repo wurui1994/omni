@@ -2110,6 +2110,41 @@ while 里 `continue2` 指着外层 for、两层带步进的 for 里 `continue2` 
 **没跑的**：`tests/sexpr`、`tests/glr`、`tests/asy`（一个字都没碰到它们的路径）、自举、
 `tests/jit`、`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
 
+### 第四十四刀：printf 的长度修饰 —— 让格式串能盖掉"位数从类型上取"
+
+`printf("%lld", x)` 以前当场报「printf 的转换 '%l'」：解析走到 `l` 就不认了。
+
+**量出来的口径**：语料里真用的只有 `ll` 那一档（`%lld` 15 处、`%llx` 3 处、`%llu` 1 处；
+`%ld` / `%lu` / `%hd` / `%hhd` / `%zd` / `%zu` / `%jd` / `%Lf` **各 0 处**）。但 `hh` / `h` /
+`l` / `ll` 是同一个机制的四档，一起收比只收一档更省事，所以四档全收。
+
+**它在这一层是什么意思**：C 里长度修饰定的是"实参是哪一格整数"，而这一层没有 C 的变参提升
+（方言里整数就一个 64 位的格），所以它定的是**这次转换按多少位读** —— `hh` = 8、`h` = 16、
+`l` / `ll` = 64（jancy 的 `long` 就是 64 位，macOS 的 C 同）。不写修饰时位数从**实参的类型**
+上取，那是第七刀定下的约定；这一刀只是让格式串能盖掉它。落地就是两处各多一行：`%d` / `%i`
+那条的 `intConv` 目标宽度、`%x` / `%X` / `%o` / `%u` 那条的掩码宽度。
+
+于是 `%hhd` 印 300 是 44、`%hu` 印 -1 是 65535、`%llx` 印 -1 是 `ffffffffffffffff` ——
+与 C 逐字节相同（八行孪生量过）。`%lf` 收成"`l` 被忽略"，那也是 C 的规矩。
+
+**边界**：`%zd` / `%jd` / `%td`（宽度是平台 typedef 定的 —— 收它得先决定 `size_t` 是什么）、
+`%Lf`（long double）、`%llf`（C 里本身没定义）、`%lc` / `%ls`（宽字符那一族）。语料里这几个
+一处都没有，所以这条边界不欠 jancy 什么。`bad/printf-len-z.jnc` 记着它。
+
+> 写这一格时踩了一次：`z` 也走进了"整数转换 + 有修饰"那条判断，于是 `%zd` 静默印出了 42。
+> 判据要**先看修饰本身在不在四档里**，再看它配的转换 —— 少了前一半就成了"什么修饰都收"。
+
+**期望输出的出处**：一份 `cc -O0 -std=c99` 的孪生，八行逐字节相同。与它的写法差别两处：
+jancy 的 `long` 就是 64 位（C 那边写 `long long`）；jancy 没有 `unsigned long`（还是边界），
+所以 `%llu` / `%lu` 那两处在 jancy 里就是"拿有符号的 64 位当无符号印"，C 里要显式转一下才算
+有定义。`h` / `hh` 不用转 —— C99 7.19.6.1 说带 `h` 的实参"按整数提升传进来，印之前转成
+short / unsigned short"，所以 `printf("%hu", -1)` 本身就有定义。
+
+**跑过的轴**：`tests/jnc`（63/0，新增 `cases/41-printf-len` 与 `bad/printf-len-z`）。
+**没跑的**：`tests/sexpr`、`tests/glr`、`tests/asy` —— 只动了 `frontend-jnc/lower.js` 的 printf
+那一段（加 `tests/jnc/run.js` 的头注释），语法、方言、MIR、四个后端与运行时一个字都没改；
+自举、`tests/jit`、`tests/mir`、`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
+
 ## 后果与代价
 
 - 方言从"没有可算术的引用"变成"有"。这一格会渗到 MIR 与四个后端，改不回去。

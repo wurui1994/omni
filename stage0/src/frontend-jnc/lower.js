@@ -2087,6 +2087,18 @@ class JncLower {
           while (fmt[j] >= '0' && fmt[j] <= '9') { prec = prec * 10 + (fmt[j].charCodeAt(0) - 48); j++; }
         }
       }
+      // 长度修饰（第四十四刀）。C 里它定的是"实参是哪一格整数"；这一层没有 C 的变参提升，
+      // 所以它定的是**这次转换按多少位读** —— 与不写修饰时"位数从类型上取"是同一个约定。
+      // `hh` = 8、`h` = 16、`l` / `ll` = 64（jancy 的 long 就是 64 位，macOS 的 C 同）。
+      let mod = '';
+      if (fmt[j] === 'h' || fmt[j] === 'l') {
+        mod = fmt[j];
+        j++;
+        if (fmt[j] === mod) { mod += mod; j++; }
+      } else if (fmt[j] === 'z' || fmt[j] === 'j' || fmt[j] === 't' || fmt[j] === 'L') {
+        mod = fmt[j];
+        j++;
+      }
       const spec = fmt[j];
       i = j;
       if (spec === '%') { lit += '%'; continue; }
@@ -2096,6 +2108,21 @@ class JncLower {
         this.nope(n, `printf 的转换 '%${spec === undefined ? '' : spec}'`);
         return null;
       }
+      if (mod !== '') {
+        const modInt = spec === 'd' || spec === 'i' || spec === 'u'
+          || spec === 'x' || spec === 'X' || spec === 'o';
+        // `%lf` 在 C 里就是 `%f`（`l` 对浮点无效，被忽略）。别的组合各是一条边界：
+        // `z` / `j` / `t` 的宽度是平台 typedef 定的（这一层没有那一格）、`L` 是 long double、
+        // `ll` 配浮点在 C 里本身就没定义、`h` / `l` 配 `%c` / `%s` 是宽字符那一族。
+        const sized = mod === 'hh' || mod === 'h' || mod === 'l' || mod === 'll';
+        const floatL = mod === 'l' && (spec === 'f' || spec === 'e' || spec === 'E'
+          || spec === 'g' || spec === 'G');
+        if (!sized || !(modInt || floatL)) {
+          this.nope(n, `printf 的长度修饰 '%${mod}${spec}'`);
+          return null;
+        }
+      }
+      const modW = mod === 'hh' ? 8 : (mod === 'h' ? 16 : (mod === 'l' || mod === 'll' ? 64 : 0));
       if (prec > 30) { this.err(n, `printf 的精度最多 30 位，这里是 ${prec}`); return null; }
       // `*` / `.*` 的实参按 C 的顺序取：宽度、精度、值（第二十七刀）。两者都要读好几次
       //（判正负、算要补几个），所以先落成局部量。
@@ -2139,8 +2166,9 @@ class JncLower {
         // 四种位宽都收：值已经是规范形（符号扩展过的），照印就是 C 的样子。
         // 无符号那一格上 `%d` 是"按**有符号**读"（第三十三刀）——
         // `printf("%d", (unsigned)4294967240)` 在 C 里印 -56，所以先转到同宽的有符号格。
-        // 位数从**类型**上取，与 `%x` 那一条同一个约定（见 07-hex.jnc）。
-        piece = `(tostr ${intConv(v, mkInt(promo(v.type.w), false)).code})`;
+        // 位数从**类型**上取，与 `%x` 那一条同一个约定（见 07-hex.jnc）；写了长度修饰就听它的
+        // （第四十四刀）——`%hhd` 印 300 是 44，与 C 逐字节相同。
+        piece = `(tostr ${intConv(v, mkInt(modW > 0 ? modW : promo(v.type.w), false)).code})`;
       } else if (spec === 'x' || spec === 'X' || spec === 'o' || spec === 'u') {
         // `%x` / `%X` / `%o`（ADR-0016 第七刀）与 `%u`（第三十二刀）。C 把实参当
         // **unsigned** 读，而"多少位"是**默认实参提升之后**那一格 ——
@@ -2156,6 +2184,7 @@ class JncLower {
           this.err(argNode, `'%${spec}' 要整数，这里是 ${tyName(v.type)}`);
           return null;
         }
+        if (modW > 0) w = modW;   // 长度修饰说了算（第四十四刀）
         if (w < 64) code = `(bin "&" ${code} (int ${(1n << BigInt(w)) - 1n}))`;
         const base = spec === 'o' ? 8 : (spec === 'u' ? 10 : 16);
         piece = `(sbase ${code} (int ${base}))`;
