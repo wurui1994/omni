@@ -1,0 +1,29 @@
+// 一个块里写了两遍 `catch:` —— jancy 自己就拒（第五十九刀）。
+//
+// `catchLabel` 里那句话很直白：作用域上没有 `CatchAhead` 那一位就报
+//     "'catch' is already defined"（jnc_ct_ControlFlowMgr/jnc_ct_ControlFlowMgr_Eh.cpp:322-325）
+// —— 第一个 `catch:` 已经把那一位用掉了。道理上也只能这样：一格作用域只有一个出错的落点。
+//
+// 这一层的落法把这条自然分开了：`catch:` 是在 block 那一处**切语句序列**的（只切第一个），
+// 所以第二个 `catch:` 落到普通语句那条路上，在那儿报这条错。它发的是 error 而不是 nope ——
+// 照抄 jancy 的拒。
+int errorcode fetch(int i) {
+	if (i < 0)
+		return -1;
+	return i * 10;
+}
+
+int errorcode twice(int i) {
+	return fetch(i);
+catch:
+	printf("one\n");
+	return 0;
+catch:
+	printf("two\n");
+	return 1;
+}
+
+int main() {
+	printf("%d\n", try twice(2));
+	return 0;
+}

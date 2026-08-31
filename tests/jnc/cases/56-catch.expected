@@ -1,0 +1,45 @@
+before
+fetch 1
+fetch 5
+fetch 2
+after
+before
+fetch 1
+after
+fetch 3
+ok 30
+30
+caught
+0
+fetch 5
+round 0
+fetch 4
+round 1
+fetch 3
+round 2
+9
+fetch 1
+round 0
+fetch 0
+round 1
+loop caught
+1
+head
+fetch 4
+inner ok
+tail
+5
+head
+inner caught
+tail
+5
+fetch 6
+60
+rethrow catch
+-1
+inner done
+fetch 7
+8
+inner done
+outer caught
+2

@@ -3050,6 +3050,12 @@ checking」（exceptions.rst:15）。所以这一刀不是"实现异常"，是**
 
 前三条这一刀落地，第四条明着记成边界（下面说为什么它冒充不了）。
 
+> 第五十九刀把第四条里的 `try { … }` 与 `catch:` 也做掉了（`finally:` 还是边界）。所以下面
+> 那两条边界用例 `bad/errorcode-try-block` 与 `bad/errorcode-catch` 已经按规矩删掉，换成了
+> `bad/errorcode-finally` 与 `bad/errorcode-catch-twice` —— 这一段留着的是当时的记录。
+> 那时说"要给这一块开一个落点"听着像要给方言长新形式，其实不用：那一跳就是一次性循环的
+> `brk`，见第五十九刀。
+
 **出错值那张表不是从文档那句话猜的**，是从 `Type::getErrorCodeValue()` 抄的
 （jnc_ct_Value/jnc_ct_Value.h:697-708）：只有"是整数且不是 bool"那一档给 `-1`，别的一律
 `getZeroValue()`。所以 bool 是 `false`、指针是 `null`、无符号整数是 `-1` 在那一格里的样子
@@ -3193,6 +3199,110 @@ fetch 1 / fetch 2 / 30 / fetch 1 / -1 / …（42 行，见 cases/55-errorcode.ex
 一个字都没改；自举、`tests/jit`、`tests/llvm`；`tests/mir` 是先前就红的那一条
 （`fmtFixed`/`fmtSci`/`fmtGen` 不在 `frontend-js/link.js` 的 `NATIVE_OPS` 里，与这一刀无关）；
 `npm run lint` 这台机器上没有 typescript。
+
+### 第五十九刀：`try { … }` 与 `catch:` —— 出错那一跳，方言里早就有了
+
+第五十八刀留下的那一格是「给一个作用域开一个出错就跳过去的落点」。当时写的是"要那个落点"，
+听起来像要给方言长新东西 —— 其实不用：**一次性循环加一句 `brk`** 就是"跳到这一格作用域的
+出口"，而那一圈第四十二刀（带步进的 for 里的 `continue`）就已经在用了。这一刀因此又是纯前端。
+
+`try { … }` 落成：
+
+```
+(while (bool true)
+  (do
+    …块里的语句…      ; errorcode 出错 -> (brk N)
+    (brk)))           ; 正常走到底也出来
+```
+
+这就是文档那三行的意思（exceptions.rst:53-57）：出错时块里剩下的语句**一句都不跑**，然后从块
+后面接着走。第五十八刀记边界时说过"拿 `shield` 冒充它是错的" —— 正是因为 `shield` 只把传播
+关掉，`baz(21)` 照旧会跑。
+
+它还有一条容易漏的性质：**不要求外面这个函数是 errorcode**。jancy 的 `canStaticThrow()` 是
+「`canCatch()` 或者自己带 `ErrorCode`」（jnc_ct_NamespaceMgr/jnc_ct_Scope.h:144-145），`try` 块
+自己就提供了前一半。所以 `void` 的函数里也能写 —— 用例里 `tryBlock` 就是 `void`。
+
+`catch:` 落成同一圈循环，外加**一格 bool**：
+
+```
+(let $c0 bool (bool false))
+(while (bool true)
+  (do
+    …前一段…          ; 出错 -> (do (set $c0 (bool true)) (brk N))
+    (brk)))           ; 正常走到底：标志还是 false
+(if (var $c0)
+  (do …后一段…))
+```
+
+那格 bool 是这一层与 jancy 的**唯一结构差别**，值得说清：jancy 有两个块可跳 —— 正常流跳
+`catch_follow`、出错跳 `m_catchBlock`（jnc_ct_ControlFlowMgr/jnc_ct_ControlFlowMgr_Eh.cpp:330-345）；
+方言里一圈循环只有一个出口，所以"从哪条路出来的"这件事记在一格标志上。
+
+两段各是自己的作用域，与 jancy 同（`catchLabel` 先 `closeScope()` 再
+`openScope(pos, ScopeFlag_Catch)`，同一文件 :329-348）—— 前一段声明的名字在处理里看不见。
+方言这边它**自然成立**：前一段的 `(let …)` 就在那圈循环的 `(do …)` 里。
+
+处理那一段在**守护之外**，所以它自己再调 errorcode 是往调用方传（jancy 同：`findCatchScope`
+从当前作用域往上走）。用例里 `rethrow(-6)` 印 `rethrow catch` 之后那次 `fetch(-1)` 就传出去了。
+
+`catch:` 不是一条能单独降的语句 —— 它把一个块的语句序列**切成两段**，所以拦它的地方是
+`block()`，不是 `stmt()`。于是"一个块里两个 `catch:`"这条自然分开了：第二个落到普通语句那条
+路上，在那儿照抄 jancy 的拒（「'catch' is already defined」，同一文件 :322-325）。
+
+中间隔着几层真循环都不用这一刀操心：那一跳的层号照第四十刀那条算法算（到栈顶的距离），
+`this.loops` 里那一格 `oneshot` 自然被数进去。用例里 `loopy` 的 for 体里那次出错发的是
+`(brk 2)` —— 出 for 的 while，再出守护那一圈。
+
+jancy 还有一条这一层**不用实现也自然对**的：函数作用域上 `catch:` 之前那段必须 return
+（`checkReturn()`，同一文件 :311-314）。真 return 了，那圈循环末尾的 `(brk)` 就是不可达的死
+代码；没 return（`void` 函数）也对 —— 标志是 false，处理那段跳过去。
+
+`finally:` **没有**跟着落地，它差的不是"跳哪儿"而是"跳几次"：不管走哪条路出这个作用域都要跑一
+遍，连 `return` 也得先绕过去。jancy 为它专门开了一格路由变量（`m_finallyRouteIdxVariable`，
+同一文件 :41-50）；这一层的 `return` 现在是直接发出去的 `(ret …)`，要 `finally` 得先把"函数里
+所有 return 都改成先跳到出口"做掉。语料里它只有 4 处，所以留成边界（`bad/errorcode-finally`）。
+
+**C 双胞胎**（`/tmp/e59.c`，`cc -O0 -std=c99 -Wall`）把那一跳写成 `goto`（C 里就是它；方言没有
+goto，所以用一圈循环），`catch:` 那一格标志照写。五条腿逐字节相同，且与双胞胎逐字节相同
+（42 行，见 `cases/56-catch.expected`）。
+
+**量出来的**（662 份真实 `.jnc`，同一把尺子）：**1402 → 1334**。走掉 79 条，冒出来 11 条。
+
+走掉的那 79 条里真正是这一刀做掉的：`catch:` 57、`try { … }` 块 6。剩下 16 条与冒出来的 11 条
+基本是**同一批话换了措辞** —— `finally:` 那句诊断这一刀重写了（从"要给这个作用域开一个落点"
+改成"不管走哪条路都要跑一遍，连 `return` 也得先绕过去"），`不写 try 调 errorcode 的 …` 那句也
+多了半句（"外面也没有 `try { … }` / `catch:`"）。尺子按 (文件, 卡点文本) 去重，所以改一句话会
+同时进"走掉"和"冒出来"两栏；净下来只有 2 条是真的被露出来的（`disposable` 1、
+`main 里 return 非 0` 1）。
+
+`finally:` 从 4 条变成 6 条也是这个原因加一点：`catch:` 收了之后，两份原先卡在 `catch:` 后面的
+函数体降到了 `finally:` 那一句上。
+
+**能整份跑起来的**（零卡点 + 有 `int main`）：58 → **60**。可这一格得说实话，尺子只数「还不收」、
+不数 error，所以两份里只有一份真跑得起来：
+
+- `test/jnc/test137.jnc` **真跑**（退出码 0，没有输出）—— 它整份就是一个嵌套作用域里的空
+  `catch:`，正好是这一刀那一格。
+- `test/jnc/test47.jnc` **跑不起来**：它卡在几条 error 上（`jnc.RegexState` 是标准库的正则类型、
+  `const char text[] = "…"` 要从字符串字面量数出数组长度）。这是第五十七刀记过的同一个盲点
+  （那次是 test18.jnc）。
+
+**只剩一个卡点的**（同样限定带 `int main`）：48 → **50**，排头的还是 `顶层的 'import'` 14 份。
+
+至此 errorcode 那一族只剩三格：`finally:` 6、传播插不进去的那两类位置约 20、errorcode 函数当
+函数指针用。整张排行榜的头三名已经与异常无关了：`import` 346、64 位无符号 116、
+`opaque class` 74。
+
+**跑过的轴**：`tests/jnc`（114/0，新增 `cases/56-catch` 与 `bad/errorcode-finally`、
+`bad/errorcode-catch-twice`；删掉 `bad/errorcode-try-block` 与 `bad/errorcode-catch` ——
+功能落地了，按规矩换成那两条更窄的）。
+**没跑的**：`tests/glr`（语法一个字没改）；`tests/sexpr`、`tests/asy`、`tests/oir` —— 方言、
+HIR、MIR、四个后端与运行时一个字都没改（这一刀连方言的形式都没多用一个：`while` / `brk` /
+`set` 都是现成的）；自举、`tests/jit`、`tests/llvm`；`tests/mir` 是先前就红的那一条；
+`npm run lint` 这台机器上没有 typescript。
+
+## 后果与代价
 
 - 方言从"没有可算术的引用"变成"有"。这一格会渗到 MIR 与四个后端，改不回去。
 - fat 指针三字内联：结构体里放指针就胖三倍。可接受——这一层没有 ABI 兼容负担。

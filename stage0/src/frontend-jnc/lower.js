@@ -134,10 +134,11 @@
 //     剩下的四条：没写初值的那一格（方言的函数值没有空值，跟着 `if (p)` 也立不住）、
 //     函数指针的**字段**（方言的结构体字段放不下函数值 —— 第五十七刀的虚派发因此换成了
 //     一格整数标签）、`function**` 与它的数组、`~()` 的部分应用。
-//   - 异常里 `errorcode` 那一半是第五十八刀（自动传播 + `try`：见 propagate 与 errText）；
-//     剩下的是 `try { … }` 块、`catch:` / `finally:`、`throw`，加传播插不进去的那两个位置
-//     （惰性那几支与循环的条件，见 EC_HOIST 与 ecLazy）。import 还没有。
-//     `assert` 是第四十九刀、`namespace` 是第五十一刀。
+//   - 异常里 `errorcode` 那一半是第五十八刀（自动传播 + `try`：见 propagate 与 errText），
+//     `try { … }` 与 `catch:` 是第五十九刀（出错那一跳落成一圈一次性循环的 `brk`：见 escape
+//     与 catchBlock）；剩下的是 `finally:`（要一张路由表，连 `return` 也得先绕过去）、`throw`，
+//     加传播插不进去的那两个位置（惰性那几支与循环的条件，见 EC_HOIST 与 ecLazy）。
+//     import 还没有。`assert` 是第四十九刀、`namespace` 是第五十一刀。
 //
 // **一处刻意留下的差别**：`sizeof` / `offsetof` 意义上的**存储**宽度。四种位宽在方言里
 // 都占一个 64 位的槽（`char*` 与 `int*` 是同一个方言类型），所以 `new char[n]` 占 8n 字节、
@@ -547,6 +548,14 @@ function structBehind(t) {
  *  `this` 也在里面（第五十二刀）：它是方法的第一个形参，本身就是一格。 */
 const LV_SHAPES = new Set(['name', 'field', 'index', 'ptr-field', 'indirect', 'this']);
 
+/** 这条语句是 `名字:` 那种标签吗（第五十九刀）。语法上 `catch:` / `finally:` / `nestedscope:`
+ *  都发成 `(label "名字")`，见 jnc.grammar 那三条。 */
+function isLabel(n, name) {
+  if (!isList(n) || head(n) !== 'label') return false;
+  const a = n.items[1];
+  return (isStr(a) || isAtom(a)) && a.value === name;
+}
+
 /** 哪几种语句开"errorcode 传播"的落点（第五十八刀，见 stmt）：条件在这条语句里**只求一遍**
  *  的那些。循环那三种（while / do / for）不在里面 —— 它们的条件每一圈重求一次，把那次调用
  *  抬到循环之前就只检一次，是错的。 */
@@ -697,6 +706,10 @@ class JncLower {
     this.ecOut = null;
     this.ecPad = '';
     this.ecSeq = 0;
+    // 出错往哪儿跳（第五十九刀）。空着就是"回到调用方"（`ret` 我自己的出错值）；非空时栈顶那一
+    // 格说的是"跳到这一格作用域的出口" —— `try { … }` 与 `catch:` 都落成一圈**一次性循环**加
+    // 一句 `brk`，而 `catch:` 那一格还带一格标志（跳出来是因为出错，还是正常走到底）。
+    this.guards = [];
   }
 
   /** 派生类没写 construct 时合成一个（第五十六刀）：它做的事就是把基类那一个调一遍。 */
@@ -2703,6 +2716,7 @@ class JncLower {
     const saveErr = this.curErr;
     this.curErr = this.errFns.has(info.name) ? this.errFns.get(info.name) : null;
     this.shield = 0;
+    this.guards = [];
     const owner = this.methods.get(info.name);
     if (owner !== undefined) { this.ns = owner; this.selfClass = owner; }
     else this.selfClass = null;
@@ -2802,13 +2816,83 @@ class JncLower {
   /** `(compound unit)` -> 一串缩进好的语句文本（不含外层的 `(do …)`）。 */
   block(n, ind) {
     if (!isList(n) || head(n) !== 'compound') { this.err(n, '这里要一个 { … } 块'); return null; }
+    const list = this.flat(n.items[1]);
+    // `catch:` 把这个块的语句序列**切成两段**（第五十九刀），所以它不是一条能单独降的语句。
+    const at = list.findIndex((s) => isLabel(s, 'catch'));
+    if (at >= 0) return this.catchBlock(list, at, ind);
     this.scopes.push(new Map());
     const out = [];
-    for (const s of this.flat(n.items[1])) {
+    for (const s of list) {
       const lines = this.stmt(s, ind);
       if (lines !== null) for (const l of lines) out.push(l);
     }
     this.scopes.pop();
+    return out.join('\n');
+  }
+
+  /**
+   * 带 `catch:` 的一个块（第五十九刀）。前一段是**守着的**那些语句，后一段是处理。
+   *
+   *   (let $c0 bool (bool false))
+   *   (while (bool true)          ; 一次性：出错就 brk 出来
+   *     (do
+   *       …前一段…                ; errorcode 出错 -> (do (set $c0 true) (brk N))
+   *       (brk)))                 ; 正常走到底也出来，只是标志还是 false
+   *   (if (var $c0)
+   *     (do …后一段…))
+   *
+   * 那格标志是必需的：正常走到底与出错走出来是**同一个** `brk`。jancy 那边不用标志，因为它有
+   * 两个块可跳（正常流跳 `catch_follow`、出错跳 `m_catchBlock`，Eh.cpp:330-345）；方言里
+   * 一圈循环只有一个出口，所以差别记在一格 bool 上。
+   *
+   * 两段各是**自己的作用域**，与 jancy 同（`catchLabel` 里先 `closeScope()` 再
+   * `openScope(pos, ScopeFlag_Catch)`）：前一段声明的名字在处理里看不见。方言这边它自然成立 ——
+   * 前一段的 `(let …)` 在那圈循环的 `(do …)` 里。
+   *
+   * jancy 还多一条这一层不用管的：函数作用域上 `catch:` 之前那段**必须 return**
+   * （`checkReturn()`，Eh.cpp:311-314）。真 return 了，下面那句 `(brk)` 就是不可达的死代码；
+   * 没 return（void 函数）也对 —— 标志是 false，处理那段跳过去。
+   */
+  catchBlock(list, at, ind) {
+    const pad = ' '.repeat(ind);
+    const flag = `$c${this.tmp}`;
+    this.tmp++;
+    this.loops.push({ kind: 'oneshot', step: false });
+    this.guards.push({ flag, loopIdx: this.loops.length - 1 });
+    this.scopes.push(new Map());
+    const guarded = [];
+    let bad = false;
+    for (let i = 0; i < at; i++) {
+      const lines = this.stmt(list[i], ind + 4);
+      if (lines === null) bad = true; else for (const l of lines) guarded.push(l);
+    }
+    this.scopes.pop();
+    this.guards.pop();
+    this.loops.pop();
+    // 处理那一段在**守护之外**：里头的 errorcode 调用照旧往调用方传（jancy 同 —— catch 作用域
+    // 里再抛是往外一层找，findCatchScope 从当前作用域往上走）。
+    this.scopes.push(new Map());
+    const handler = [];
+    for (let i = at + 1; i < list.length; i++) {
+      const lines = this.stmt(list[i], ind + 4);
+      if (lines === null) bad = true; else for (const l of lines) handler.push(l);
+    }
+    this.scopes.pop();
+    if (bad) return null;
+    const out = [
+      `${pad}(let ${flag} bool (bool false))`,
+      `${pad}(while (bool true)`,
+      `${pad}  (do`,
+      ...guarded,
+      `${pad}    (brk)`,
+      `${pad}  )`,
+      `${pad})`,
+      `${pad}(if (var ${flag})`,
+      `${pad}  (do`,
+      ...handler,
+      `${pad}  )`,
+      `${pad})`,
+    ];
     return out.join('\n');
   }
 
@@ -2936,21 +3020,41 @@ class JncLower {
       this.unsafe = save;
       return b === null ? null : [`${pad}(unsafe`, b, `${pad})`];
     }
-    // `try { … }`（第五十八刀记的边界）。它**不是**"把里面的错忽略掉"：出错时那一块剩下的
-    // 语句一句都不跑（exceptions.rst:53-57 那个 `baz(21); // never get here`），然后从块后面
-    // 接着走。所以拿 `shield` 冒充它是错的 —— 要它得有"跳到这一块的出口"，也就是给这一块
-    // 开一个落点（jancy 的 `finalizeTryScope`：给作用域挂一个 catch 块，Eh.cpp:296-300）。
+    // `try { … }`（第五十九刀）。它**不是**"把里面的错忽略掉"：出错时那一块剩下的语句一句都
+    // 不跑，然后从块后面接着走（exceptions.rst:53-57 那个 `baz(21); // never get here`）。
+    // 方言里"跳到一格作用域的出口"就是那圈**一次性循环**的 `brk` —— 与第四十二刀给带步进的
+    // for 套的那一圈是同一个东西。于是这一条不用方言长任何新形式。
+    //
+    // 注意它**不要求外面这个函数是 errorcode**：jancy 那边 `canStaticThrow()` 是
+    // "canCatch() || 自己带 ErrorCode"（Scope.h:144-145），`try` 块自己就提供了前一半。
     if (h === 'try') {
-      this.nope(n, '`try { … }` 块（要给这一块开一个"出错就跳到块尾"的落点；`try 表达式` 那一条'
-        + '只挡传播，冒充不了它）');
-      return null;
+      this.loops.push({ kind: 'oneshot', step: false });
+      this.guards.push({ flag: null, loopIdx: this.loops.length - 1 });
+      const b = this.block(n.items[1], ind + 4);
+      this.guards.pop();
+      this.loops.pop();
+      if (b === null) return null;
+      return [
+        `${pad}(while (bool true)`,
+        `${pad}  (do`,
+        b,
+        `${pad}    (brk)`,
+        `${pad}  )`,
+        `${pad})`,
+      ];
     }
-    // `catch:` / `finally:`（第五十八刀记的边界）。语法上它们是标签（`(label "catch")`），
-    // 可管的是**这个作用域出错时跳哪儿** —— 与 `try` 块同一格，都要那个落点。
+    // `catch:` / `finally:`（第五十八刀记的边界，`catch:` 第五十九刀落地）。语法上它们是标签
+    // （`(label "catch")`），可管的是**这个作用域出错时跳哪儿** —— `catch:` 由 block 那一处
+    // 拦下来（它要把语句序列切成两段），所以走到这儿的 `catch:` 只有一种：一个块里写了两遍。
     if (h === 'label' && (isStr(n.items[1]) || isAtom(n.items[1]))
       && (n.items[1].value === 'catch' || n.items[1].value === 'finally')) {
-      this.nope(n, `\`${n.items[1].value}:\`（要给这个作用域开一个落点：出错跳到这儿，`
-        + '而不是回到调用方 —— 与 `try { … }` 同一格）');
+      if (n.items[1].value === 'catch') {
+        this.err(n, "'catch' 在这个块里已经有一个了（jancy 那句 \"'catch' is already defined\"，"
+          + 'jnc_ct_ControlFlowMgr_Eh.cpp:322-325）');
+        return null;
+      }
+      this.nope(n, '`finally:`（不管走哪条路都要跑一遍 —— 连 `return` 也得先绕过去，jancy 为它'
+        + '专门开了一格 `finallyRouteIdx` 变量，jnc_ct_ControlFlowMgr_Eh.cpp:41-50）');
       return null;
     }
     this.nope(n, `语句 '${h}'`);
@@ -5215,17 +5319,20 @@ class JncLower {
    *   - `try` 底下：什么都不插，调用本身就是那一格值。jancy 的 `try` 也不是"不检查" ——
    *     它把那次抛接到自己那一格 phi 上（`endTryOperator`，Eh.cpp:207-244），于是出错时
    *     整条表达式的值就是那个出错值。这一层的调用**回的正是那个值**，所以一个字不用发。
-   *   - 能插语句：抬一格临时、比一下、等于出错值就 return 我自己的出错值。jancy 走的是
-   *     同一条：没有 catch 作用域时 `ret(returnType->getErrorCodeValue())`
-   *     （jnc_ct_ControlFlowMgr_Eh.cpp:103-112）。
+   *   - 能插语句：抬一格临时、比一下，出错就往外跳。往哪儿跳看 `guards`（第五十九刀）——
+   *     里头有 `try { … }` 或 `catch:` 那一格作用域时跳它的出口，没有才回调用方。jancy 是
+   *     同一条：`throwException` 先问 `findCatchScope()`，有就 `escapeScope(catchScope, …)`，
+   *     没有才 `ret(returnType->getErrorCodeValue())`（jnc_ct_ControlFlowMgr_Eh.cpp:103-112）。
    *   - 插不进去：明说不收，而不是**悄悄把错吞掉**。
    */
   propagate(node, code, ret, shownName) {
     if (this.shield > 0) return { code, type: ret };
-    if (this.curErr === null) {
+    const g = this.guards.length === 0 ? null : this.guards[this.guards.length - 1];
+    if (g === null && this.curErr === null) {
       return this.nope(node, `不写 \`try\` 调 errorcode 的 '${shownName}'，而这个函数自己不是 `
-        + 'errorcode（jancy 那儿这条走运行期的 dynamic throw：Scope.h:144-145 的 canStaticThrow '
-        + '为假 -> jnc_ct_ControlFlowMgr_Eh.cpp:98-101，而这一层没有运行期的展开）');
+        + 'errorcode、外面也没有 `try { … }` / `catch:`（jancy 那儿这条走运行期的 dynamic '
+        + 'throw：Scope.h:144-145 的 canStaticThrow 为假 -> '
+        + 'jnc_ct_ControlFlowMgr_Eh.cpp:98-101，而这一层没有运行期的展开）');
     }
     if (this.ecOut === null) {
       return this.nope(node, `这个位置上的 errorcode 调用 '${shownName}'（传播那两句得插成语句，`
@@ -5235,8 +5342,18 @@ class JncLower {
     const t = errTest(`(var ${v})`, ret);
     if (t === null) return this.err(node, `内部错：${tyName(ret)} 定不出出错值的比法`);
     this.ecOut.push(`${this.ecPad}(let ${v} ${slotText(ret)} ${code})`);
-    this.ecOut.push(`${this.ecPad}(if ${t} (do (ret ${this.curErr})))`);
+    this.ecOut.push(`${this.ecPad}(if ${t} (do ${this.escape(g)}))`);
     return { code: `(var ${v})`, type: ret, hoisted: true };
+  }
+
+  /** 出错的那一跳（第五十九刀）：跳到最里那一格 `try` / `catch` 作用域的出口，没有就回调用方。
+   *  方言里"跳到一格作用域的出口"就是那圈一次性循环的 `brk` —— 层号照第四十刀那条算法
+   *  （到栈顶的距离），所以中间隔着几层真循环都不用这一处操心。 */
+  escape(g) {
+    if (g === null) return `(ret ${this.curErr})`;
+    const lvl = this.loops.length - g.loopIdx;
+    const brk = `(brk${lvl === 1 ? '' : ` ${lvl}`})`;
+    return g.flag === null ? brk : `(do (set ${g.flag} (bool true)) ${brk})`;
   }
 
   /** `c.foo(…)` / `p->foo(…)` 里的被调（第五十二刀）：回 `{name, self}`。

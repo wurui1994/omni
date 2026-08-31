@@ -1,0 +1,28 @@
+// `finally:`（第五十九刀记的边界）。
+//
+// 它与 `catch:` 差的不是"跳哪儿"，是**跳几次**：不管走哪条路出这个作用域都要跑一遍 ——
+// 正常走到底要、出错要、`return` 也要。也就是说函数体里每一句 `return` 都得先绕到这儿、
+// 跑完再真的返回，而"绕完回哪儿"要记住来路。jancy 为它专门开了一格变量：
+//     `m_finallyRouteIdxVariable`（jnc_ct_ControlFlowMgr/jnc_ct_ControlFlowMgr_Eh.cpp:41-50）
+// 然后 `normalFinallyFlow` / `setJmpFinally` 按那个下标跳回去（同一文件 :369-420）。
+//
+// 第五十九刀落地的 `catch:` 只要一格 bool（"跳出来是因为出错吗"），因为它只有两条路；
+// `finally:` 要的是**一张路由表**，而这一层的 `return` 现在是直接发出去的 `(ret …)`。
+// 要它得先把"函数里所有的 return 都改成先跳到出口"这件事做掉 —— 那是自己的一格。
+int errorcode fetch(int i) {
+	if (i < 0)
+		return -1;
+	return i * 10;
+}
+
+int errorcode cleaned(int i) {
+	return fetch(i);
+
+finally:
+	printf("cleaned\n");
+}
+
+int main() {
+	printf("%d\n", try cleaned(2));
+	return 0;
+}

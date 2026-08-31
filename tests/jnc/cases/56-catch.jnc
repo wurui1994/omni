@@ -1,0 +1,108 @@
+// `try { … }` 与 `catch:`（第五十九刀，exceptions.rst:46-75）。
+//
+// 两条都是"出错就跳到这一格作用域的出口"，而方言里那一跳早就有了：**一次性循环**加一句
+// `brk`（第四十二刀给带步进的 for 套的就是它）。于是这一刀一个新形式都不用方言长。
+//
+// 这里过的那几格：
+//   - `try { … }` 出错时**那一块剩下的语句一句都不跑**，然后从块后面接着走（:53-57 那句
+//     `baz(21); // never get here`）。
+//   - `try { … }` **不要求外面这个函数是 errorcode**：jancy 的 `canStaticThrow()` 是
+//     "canCatch() || 自己带 ErrorCode"（jnc_ct_NamespaceMgr/jnc_ct_Scope.h:144-145），
+//     `try` 块自己就提供了前一半。所以 `void` 的函数里也能写。
+//   - `catch:` 把一个块的语句序列切成两段：前一段出错跳到处理那一段。语料里 152 处 `catch:`
+//     有 136 处写在函数体那一层（顶格），形状就是 `… return true; catch: …清理…; return false;`。
+//   - 中间隔着几层真循环都不用操心：那一跳的层号照第四十刀那条算法（到栈顶的距离）。
+//   - 处理那一段在**守护之外**：里头的 errorcode 调用照旧往调用方传（jancy 同 ——
+//     `findCatchScope` 从当前作用域往上走）。
+//   - 两段各是自己的作用域（jancy 的 `catchLabel` 先 closeScope 再 openScope，
+//     jnc_ct_ControlFlowMgr_Eh.cpp:329-348）。
+int errorcode fetch(int i) {
+	if (i < 0)
+		return -1;
+	printf("fetch %d\n", i);
+	return i * 10;
+}
+
+void tryBlock(int i) {
+	printf("before\n");
+	try {
+		fetch(1);
+		fetch(i);
+		fetch(2);
+	}
+	printf("after\n");
+}
+
+int errorcode caught(int i) {
+	int a = fetch(i);
+	printf("ok %d\n", a);
+	return a;
+catch:
+	printf("caught\n");
+	return 0;
+}
+
+int errorcode loopy(int i) {
+	int j;
+	for (j = 0; j < 3; j++) {
+		fetch(i - j);
+		printf("round %d\n", j);
+	}
+	return 9;
+catch:
+	printf("loop caught\n");
+	return 1;
+}
+
+// `catch:` 写在一个**嵌套的**块里（语料里那 16 处）：出错跳到这一块的处理，跳完从块后面接着走。
+int errorcode nested(int i) {
+	printf("head\n");
+	{
+		fetch(i);
+		printf("inner ok\n");
+	catch:
+		printf("inner caught\n");
+	}
+	printf("tail\n");
+	return 5;
+}
+
+// 处理那一段自己再调 errorcode：它在守护之外，所以往调用方传。
+int errorcode rethrow(int i) {
+	int a = fetch(i);
+	return a;
+catch:
+	printf("rethrow catch\n");
+	fetch(-1);
+	return 7;
+}
+
+// `try { … }` 套在 `catch:` 守着的那一段里面：里层挡住的错不会跳到外层的处理。
+int errorcode both(int i) {
+	try {
+		fetch(-1);
+		printf("never\n");
+	}
+	printf("inner done\n");
+	fetch(i);
+	return 8;
+catch:
+	printf("outer caught\n");
+	return 2;
+}
+
+int main() {
+	tryBlock(5);
+	tryBlock(-5);
+	printf("%d\n", try caught(3));
+	printf("%d\n", try caught(-3));
+	printf("%d\n", try loopy(5));
+	printf("%d\n", try loopy(1));
+	printf("%d\n", try nested(4));
+	printf("%d\n", try nested(-4));
+	printf("%d\n", try rethrow(6));
+	printf("%d\n", try rethrow(-6));
+	printf("%d\n", try both(7));
+	printf("%d\n", try both(-7));
+	return 0;
+}
