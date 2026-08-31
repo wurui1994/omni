@@ -3085,6 +3085,24 @@ class JncLower {
       if (op === '+' && isInt(a.type) && isPtr(b.type)) {
         return { code: `(padd ${b.code} ${a.code})`, type: b.type };
       }
+      // 指针比大小（第四十六刀）。jancy 那边它就是"两个指针都转成 intptr 再比"
+      // （`getPtrCmpOperatorOperandType` 回 TypeKind_IntPtr，jnc_ct_BinOp_Cmp.cpp:22-29），
+      // 六个比较算子一起。
+      //
+      // 这一层**不**去比裸地址：方言刻意不给指针 `<` `>`，理由与我们拒 `%p` 是同一条 ——
+      // 块之间的次序在 arena 与真地址两套实现下不一样。方言那处注释同时给了正路：
+      //「那种比较只在同一块内有意义，而"是不是同一块"要用 `psub`（它会替你报错）」
+      // （sexpr/lower.js:1761-1762）。所以 `p < q` 降成 `(psub p q) < 0`：
+      //   - 同一块内：psub 是按元素的有符号差，符号就是次序，五条腿一致；
+      //   - 跨块：psub 当场报运行期错 —— C 那边这是未定义行为（C99 6.5.8p5），
+      //     我们把它变成一句能看见的错，比 UB 强。
+      if ((op === '<' || op === '<=' || op === '>' || op === '>=')
+        && isPtr(a.type) && isPtr(b.type)) {
+        if (!sameTy(a.type, b.type)) {
+          return this.err(n, `指针比大小要同型：左是 ${tyName(a.type)}，右是 ${tyName(b.type)}`);
+        }
+        return { code: `(bin "${op}" (psub ${a.code} ${b.code}) (int 0))`, type: J_BOOL };
+      }
       return this.nope(n, `指针上的 '${op}'`);
     }
     const cmp = op === '==' || op === '!=' || op === '<' || op === '<=' || op === '>' || op === '>=';

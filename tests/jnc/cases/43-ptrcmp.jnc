@@ -1,0 +1,50 @@
+// 第四十六刀：指针比大小（`<` `<=` `>` `>=`）。
+//
+// 出处（jancy 自己的实现）：`getPtrCmpOperatorOperandType` 把两个指针都当
+// `TypeKind_IntPtr` 比（jnc_ct_BinOp_Cmp.cpp:22-29）—— 六个比较算子一起，第十六刀已经
+// 收了 `==` / `!=`，这一刀补剩下四个。
+//
+// 这一层**不**比裸地址：方言刻意不给指针 `<` `>`（sexpr/lower.js:1761-1762），理由与我们
+// 拒 `%p` 是同一条 —— 块之间的次序在 arena 与真地址两套实现下不一样。方言那处注释同时
+// 给了正路：「那种比较只在同一块内有意义，而"是不是同一块"要用 `psub`（它会替你报错）」。
+// 所以 `p < q` 降成 `(psub p q) < 0`：同一块内 psub 是按元素的有符号差，符号就是次序；
+// 跨块 psub 当场报运行期错（见 rt/ptrcmp-cross.jnc）—— C 那边跨块比大小是未定义行为
+// （C99 6.5.8p5），我们把它变成一句五条腿上都一样的错，比 UB 强。
+//
+// 期望输出的出处：一份 `cc -O0 -std=c99 -Wall` 的孪生件，逐字节相同。**写法差异**两处：
+// `countof(a)` 在 C 里写 `sizeof(a)/sizeof(a[0])`；C 的比较结果是 int、jancy 是 bool，
+// `%d` 印出来同为 0/1。那份孪生上 `-Wall` 会对 `q <= q` 那三个报 self-comparison ——
+// 那是**故意**的，量的就是自反那一格。
+//
+// 语料里它就是这么用的：samples/jnc/10_DataPtrRange.jnc:34 的 `for (; p < end; p++)`
+// （那份样例现在整份跑通了）。
+int main() {
+	int a[5];
+	int i;
+
+	for (i = 0; i < countof(a); i++)
+		a[i] = (i + 1) * 10;
+
+	int* p = a;
+	int* end = p + countof(a);
+
+	for (; p < end; p++)
+		printf("*p = %d\n", *p);
+
+	printf("p<end=%d p>=end=%d\n", p < end, p >= end);
+
+	int* q = a;
+	int* r = a + 3;
+	printf("q<r=%d q<=r=%d q>r=%d q>=r=%d\n", q < r, q <= r, q > r, q >= r);
+	printf("q<=q=%d q>=q=%d q<q=%d\n", q <= q, q >= q, q < q);
+	printf("r-q=%d\n", r - q);
+
+	int s = 0;
+	int* t = a + 5;
+	while (t > a) {
+		t--;
+		s += *t;
+	}
+	printf("s=%d\n", s);
+	return 0;
+}

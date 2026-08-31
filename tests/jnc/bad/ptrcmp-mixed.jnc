@@ -1,0 +1,14 @@
+// 指针比大小两边不同型 —— **jancy 那边这条其实过得去**（`getPtrCmpOperatorOperandType`
+// 里那句 `// TODO: check that we don't compare pointers of different typekinds`，
+// jnc_ct_BinOp_Cmp.cpp:26 —— 它自己也记着这是个没做的检查）。
+//
+// 这一层拒它，是因为降级用的是 `psub`：那一条按**元素**算差，元素多大要看目标类型 ——
+// 两边的元素不一样大时"差几个元素"没有意义。与 `==` 那两条同一条规矩（第十六刀就要求同型）。
+int main() {
+	int a[4];
+	double b[4];
+	int* p = a;
+	double* q = b;
+	printf("%d\n", p < q);
+	return 0;
+}

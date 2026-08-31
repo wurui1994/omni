@@ -2182,6 +2182,14 @@ short / unsigned short"，所以 `printf("%hu", -1)` 本身就有定义。
 元素步长要 `sizeof` 那一刀）、`countof` 作用在指针上（**jancy 自己也拒**，它的那一句就是
 "'countof' operator is only applicable to arrays"）。三条各有一份 `bad/`。
 
+> 落地之后回头量了一次"这一刀真放行了什么"：语料里**有 `main`** 的 207 份里，原先有 4 份
+> 只剩 `countof` 这一个拦路的。做完之后 `samples/jnc/83_BreakN.jnc` 与
+> `samples/jnc/84_CurlyInitializers.jnc` 整份降完并跑出来了 —— 前者印
+> `negative item found at [1] [2]: -7`，对得上它自己那张 `int a[3][4]` 表里 `a[1][2] = -7`
+> （83_BreakN.jnc:25-28）；它同时也是第四十一刀 `break2` 的那份样例，两刀凑齐才走通。
+> 另两份换成了别的拦路：`10_DataPtrRange.jnc:34` 的 `p < end`（**指针上的 `<`**，下一格），
+> `test110.jnc:5` 的 `0d"-1 -1 -1 -1"`（十进制的那种块字面量）。
+
 **期望输出的出处**：一份 `cc -O0 -std=c99 -Wall` 的孪生，七行逐字节相同。**写法差异**一处：
 jancy 写 `countof(x)`，C 里写 `sizeof(x)/sizeof(x[0])` —— 算的是同一件事；C 那边 `%d` 配
 size_t 还要一次显式 `(int)`。
@@ -2192,6 +2200,56 @@ size_t 还要一次显式 `(int)`。
 `frontend-jnc/lower.js` 的表达式派发上加了两支（加 `tests/jnc/run.js` 的头注释），
 语法一个字没改（`countof` 那条产生式本来就在）、方言、MIR、四个后端与运行时也没动；
 自举、`tests/jit`、`tests/mir`、`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
+
+### 第四十六刀：指针比大小 —— 方言早就写好了正路，照它走
+
+`for (; p < end; p++)` 以前报「还不收：指针上的 `<`」。这是上一刀量出来的下一格：
+`countof` 落地之后 `samples/jnc/10_DataPtrRange.jnc` 就只剩这一个拦路的。
+
+**jancy 那边的口径**：两个指针都当 `TypeKind_IntPtr` 比
+（`getPtrCmpOperatorOperandType`，`jnc_ct_BinOp_Cmp.cpp:22-29`）—— 也就是**比裸地址**。
+六个比较算子里 `==` / `!=` 第十六刀已经收了（`peq`），这一刀补剩下四个。
+
+**可这一层不能照着"比裸地址"落**，理由与我们拒 `%p` 是同一条：块之间的次序在 arena 模拟与
+真指针两套实现下不是同一个数。而方言那边早就把这件事想过一遍，注释里连正路都写好了：
+
+> 刻意**不给** `<` `>`：块间的次序在两套实现下不一样，那种比较只在同一块内有意义，
+> 而"是不是同一块"要用 `psub`（它会替你报错）。 —— `sexpr/lower.js:1761-1762`
+
+所以这一刀**方言一个字没改**，降级就是一句：`p < q` -> `(bin "<" (psub p q) (int 0))`。
+
+- **同一块内**：`psub` 是按元素的有符号差，符号就是次序 —— 五条腿上一致。
+- **跨块**：`psub` 当场报「pointer difference across different blocks」。C 那边跨块比大小
+  是**未定义行为**（C99 6.5.8p5：只有指向同一个数组对象的指针之间才有次序），jancy 那边
+  答案取决于两块内存在地址空间里的先后 —— 我们把它换成一句五条腿上都一样的错。
+  `rt/ptrcmp-cross.jnc` 记着它。
+
+这一格值得单独记一句：**方言的"刻意不给"不是欠债，是把选择推到了该做选择的那一层**。
+前端知道"这两个指针是同型的 `T*`"，所以它能把 `<` 翻成一句有定义的 `psub`；方言不知道，
+所以它不该给一个在两套实现下答案不同的 `<`。第四十刀（层号）那一刀是反过来的：那件事
+前端**做不了**，所以方言长了一格。两刀合起来才是「不可向方言妥协」的完整用法 ——
+先问"这一格该长在哪一层"，再决定长不长。
+
+**边界**：不同型的两个指针比大小（`bad/ptrcmp-mixed.jnc`）。**jancy 那边这条其实过得去** ——
+它自己的 `// TODO: check that we don't compare pointers of different typekinds`
+（`jnc_ct_BinOp_Cmp.cpp:26`）就记着这个检查没做。这一层拒它是降级形式带来的：`psub` 按
+**元素**算差，两边元素不一样大时"差几个元素"没有意义。与 `==` 那两条同一条规矩（第十六刀
+就要求同型）。
+
+**期望输出的出处**：一份 `cc -O0 -std=c99 -Wall` 的孪生，十行逐字节相同。**写法差异**两处：
+`countof(a)` 在 C 里写 `sizeof(a)/sizeof(a[0])`；C 的比较结果是 int、jancy 是 bool，`%d`
+印出来同为 0/1。那份孪生上 `-Wall` 对 `q <= q` 那三个报 self-comparison —— 故意的，
+量的就是自反那一格。
+
+**放行了什么**：`samples/jnc/10_DataPtrRange.jnc` 整份跑通（三行 `*p =` 加三行 `a [i] =`，
+对得上它自己那段注释说的"先按指针走一遍、再按下标走一遍"）。
+
+**跑过的轴**：`tests/jnc`（70/0，新增 `cases/43-ptrcmp`、`rt/ptrcmp-cross`、
+`bad/ptrcmp-mixed`）。
+**没跑的**：`tests/sexpr`、`tests/glr`、`tests/asy`、`tests/oir` —— 只在
+`frontend-jnc/lower.js` 的二元算子那一段加了一支（加 `tests/jnc/run.js` 的头注释），
+语法、方言、MIR、四个后端与运行时一个字都没改；自举、`tests/jit`、`tests/mir`、
+`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
 
 ## 后果与代价
 
