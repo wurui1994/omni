@@ -2033,6 +2033,56 @@ golden 文件里还把错的形状记成了期望值（`tests/glr/cases/jnc.case
 `frontend-jnc/` 的降级与语法，加两处测试头注释）；自举、`tests/jit`、`tests/mir`、
 `tests/llvm`；`npm run lint` 这台机器上没有 typescript。
 
+### 第四十二刀：带步进的 `for` 里的 `continue` —— 给体套一圈**一次性**循环
+
+这是三刀连着的最后一格。方言里没有 `for`：这一层把它摊成 `while`，步进搬到体的末尾，而 `cont`
+跳的是循环头 —— 所以 `for (int i = 0; i < 5; i++) { if (…) continue; … }`（真实 jancy 代码里
+最常见的那一格）一直是当场拒的。
+
+**落地的形状**：
+
+```
+(while COND
+  (do
+    (while (bool true) (do BODY (brk)))    ;; 一次性：体走完就跳出去
+    STEP))
+```
+
+`continue` 变成那圈一次性循环的 `(brk)`，落点正好在 `STEP` 之前 —— 与 C 的 `for` 逐格一致。
+这一格之所以现在才做得成，是因为多层 `(brk N)`（第四十刀）：`break` 在体里得跳出**两层**
+（一次性那圈 + 真循环那圈），没有层号就写不出来。
+
+**只在需要时套**：`steps.length > 0 && contTargets(body, 0)`。白套一圈会让别处的层号无谓变长。
+`contTargets` 在 **AST** 上走，数的规矩与 `continue N` 一致（只数真循环，switch 不算）：体里
+存在一条 `continue N`、它所在的嵌套真循环层数 d 满足 `N === d + 1`，就是指着我。必须在 AST 上
+走 —— 降级后的文本里 `(brk)` 与 `(cont)` 已经分不出是谁的了。
+
+**层号怎么数**：循环栈的每一格现在带 `kind`：`loop`（真循环）、`switch`（switch 摊出来的合成
+循环）、`oneshot`（for 体外套的那圈）。
+
+- `break N` 数 `loop` 与 `switch`，**不数** `oneshot`；找到目标那一格之后，方言层号是"到栈顶
+  的距离"，一次性那几圈自然被数进去。所以带步进的 for 里一句 `break` 是 `(brk 2)`。
+- `continue N` 只数 `loop`。找到目标之后看它上面一格是不是 `oneshot`：是就跳那圈的 `brk`
+  （层号少一），不是就 `cont` 到它头上。
+
+嵌起来也对：两层带步进的 for，里层写 `continue2`，栈是
+`[loop, oneshot, loop, oneshot]`，目标是最外那个 `loop`，它上面那格 `oneshot` 距栈顶 3 ——
+`(brk 3)`，落点正好在外层的 `STEP` 之前。
+
+**边界删了，没有再画**：`bad/for-continue` 删掉。原来那条 `nope` 变成了一句"内部错"——
+走到那儿说明 `forStmt` 该套却没套，那是编译器自己的 bug，不许静默跳错地方。
+
+**期望输出的出处**：一份 `cc -O0 -std=c99` 的孪生，七行逐字节相同（8 / 50 / 6 / 46 / 8 / 433 /
+12）。七格分别钉：最常见那一格、步进是一串（`i++, k += 2`，`continue` 之后两条都要跑）、内层
+while 里 `continue2` 指着外层 for、两层带步进的 for 里 `continue2` 与 `continue` 混写、`break`
+还是出**整个** for、switch 在带步进的 for 里、没有步进的 for 走老路。唯一的写法差别：C 没有
+`continue2`，那两格只能写 `goto`。
+
+**跑过的轴**：`tests/jnc`（61/0，新增 `cases/40-forcont`，删掉 `bad/for-continue`）。
+**没跑的**：`tests/sexpr`、`tests/glr`、`tests/asy` —— 只动了 `frontend-jnc/lower.js`
+（加 `tests/jnc/run.js` 的头注释），语法、方言、MIR、四个后端与运行时一个字都没改；自举、
+`tests/jit`、`tests/mir`、`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
+
 ## 后果与代价
 
 - 方言从"没有可算术的引用"变成"有"。这一格会渗到 MIR 与四个后端，改不回去。

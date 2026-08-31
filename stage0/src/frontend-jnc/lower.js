@@ -1447,30 +1447,41 @@ class JncLower {
       const lvl = isAtom(n.items[1]) ? Number(n.items[1].value) : 1;
       const st = this.loops;
       // `break N`：jancy 把 switch 也算一层（cflow_switch.rst:37 那个 `break2` 就是
-      // "出 switch 再出循环"），而 switch 摊出来的合成循环在方言里正好也是一层 ——
-      // 两边一一对应，所以层号直接搬。
+      // "出 switch 再出循环"），for 的体外面套的那圈一次性循环则**不算** —— 它是我们摊出来的。
+      // 找到目标那一格之后，方言的层号是"到栈顶的距离"，一次性那几圈自然被数进去。
       if (h === 'break') {
-        if (st.length < lvl) {
-          this.err(n, `break${lvl === 1 ? '' : lvl} 要往外数 ${lvl} 层（switch 也算一层），这里只有 ${st.length} 层`);
+        let bseen = 0;
+        let bidx = -1;
+        for (let i = st.length - 1; i >= 0; i--) {
+          if (st[i].kind !== 'oneshot' && ++bseen === lvl) { bidx = i; break; }
+        }
+        if (bidx < 0) {
+          this.err(n, `break${lvl === 1 ? '' : lvl} 要往外数 ${lvl} 层（switch 也算一层），这里只有 ${bseen} 层`);
           return null;
         }
-        return [`${pad}(brk${lvl === 1 ? '' : ` ${lvl}`})`];
+        const blevel = st.length - bidx;
+        return [`${pad}(brk${blevel === 1 ? '' : ` ${blevel}`})`];
       }
-      // `continue N` 只数**真循环**：switch 不是一层（与 C 同）。所以 switch 里的
+      // `continue N` 只数**真循环**：switch 与一次性那圈都不算（与 C 同）。所以 switch 里的
       // `continue` 落到方言里是 `(cont 2)` —— 跳过合成的那圈，回到外面那个真循环。
       let seen = 0;
       let idx = -1;
       for (let i = st.length - 1; i >= 0; i--) {
-        if (!st[i].sw && ++seen === lvl) { idx = i; break; }
+        if (st[i].kind === 'loop' && ++seen === lvl) { idx = i; break; }
       }
       if (idx < 0) {
         this.err(n, `continue${lvl === 1 ? '' : lvl} 要往外数 ${lvl} 层循环（switch 不算），这里只有 ${seen} 层`);
         return null;
       }
+      // 带步进的 for：跳的是它体外那圈**一次性**循环的 `brk` —— 落点正好在步进之前
+      // （第四十二刀）。没有步进的循环直接 `cont` 到头上就行。
+      if (st[idx + 1] !== undefined && st[idx + 1].kind === 'oneshot') {
+        const olevel = st.length - (idx + 1);
+        return [`${pad}(brk${olevel === 1 ? '' : ` ${olevel}`})`];
+      }
       if (st[idx].step) {
-        // 方言的 `cont` 跳到循环头，而 for 的步进被摊到了体的末尾 —— 直接接会漏掉一次步进。
-        // 与其给个错答案，不如在这儿停下（落地要给 for 的体套一圈一次性循环）。
-        this.nope(n, '带步进的 for 里的 continue（方言的 cont 会跳过步进）');
+        // 走到这儿说明 forStmt 该套那圈却没套 —— 那是编译器自己的 bug，不许静默跳错地方。
+        this.err(n, `内部错：带步进的 for 没有套一次性循环，continue${lvl === 1 ? '' : lvl} 无处可跳`);
         return null;
       }
       const level = st.length - idx;
@@ -2475,7 +2486,7 @@ class JncLower {
         disp.push(`${pad}(if (bin "==" (var ${sv}) (int ${k})) (do (set ${sk} (int ${i}))))`);
       }
     }
-    this.loops.push({ sw: true, step: false });
+    this.loops.push({ kind: 'switch', step: false });
     const bodies = [];
     let bad = false;
     for (let i = 0; i < groups.length; i++) {
@@ -2591,7 +2602,7 @@ class JncLower {
     const pad = ' '.repeat(ind);
     const c = this.cond(n.items[1]);
     if (c === null) return null;
-    this.loops.push({ sw: false, step: false });
+    this.loops.push({ kind: 'loop', step: false });
     const b = this.body(n.items[2], ind + 2);
     this.loops.pop();
     if (b === null) return null;
@@ -2615,7 +2626,7 @@ class JncLower {
     const pad = ' '.repeat(ind);
     const flag = `$do${this.tmp}`;
     this.tmp++;
-    this.loops.push({ sw: false, step: false });
+    this.loops.push({ kind: 'loop', step: false });
     const b = this.body(n.items[1], ind + 4);
     const c = this.cond(n.items[2]);
     this.loops.pop();
@@ -2670,18 +2681,54 @@ class JncLower {
       const c = this.cond(cn);
       if (c === null) bad = true; else cond = c.code;
     }
-    this.loops.push({ sw: false, step: steps.length > 0 });
-    const b = this.body(n.items[4], ind + 4);
+    // 体里有 `continue` 指着这一层、而这一层又带步进时，给体套一圈**一次性**循环
+    // （第四十二刀）：`continue` 变成那圈的 `(brk)`，落点正好在步进之前。
+    const oneshot = steps.length > 0 && this.contTargets(n.items[4], 0);
+    this.loops.push({ kind: 'loop', step: steps.length > 0 });
+    if (oneshot) this.loops.push({ kind: 'oneshot', step: false });
+    const b = this.body(n.items[4], ind + (oneshot ? 8 : 4));
+    if (oneshot) this.loops.pop();
     this.loops.pop();
-    this.scopes.pop();    if (bad || b === null) return null;
+    this.scopes.pop();
+    if (bad || b === null) return null;
     out.push(`${pad}  (while ${cond}`);
     out.push(`${pad}    (do`);
-    out.push(b);
+    if (oneshot) {
+      out.push(`${pad}      (while (bool true)`);
+      out.push(`${pad}        (do`);
+      out.push(b);
+      out.push(`${pad}          (brk)`);
+      out.push(`${pad}        )`);
+      out.push(`${pad}      )`);
+    } else {
+      out.push(b);
+    }
     for (const s of steps) out.push(s);
     out.push(`${pad}    )`);
     out.push(`${pad}  )`);
     out.push(`${pad})`);
     return out;
+  }
+
+  /**
+   * 体里有没有一条 `continue` 正好指着"我"这一层（第四十二刀）。
+   *
+   * 数的规矩与 stmt 里的 `continue N` 一致：**只数真循环**（while / do / for），switch 不算。
+   * `d` 是"从我这一层往里又进了几层真循环"，所以 `continue N` 指着我等价于 `N === d + 1`。
+   * 这一遍必须在 AST 上走 —— 降级后的文本里 `(brk)` 与 `(cont)` 已经分不出是谁的了。
+   */
+  contTargets(n, d) {
+    if (!isList(n)) return false;
+    const h = head(n);
+    if (h === 'continue') {
+      const lv = isAtom(n.items[1]) ? Number(n.items[1].value) : 1;
+      return lv === d + 1;
+    }
+    const inner = h === 'while' || h === 'do' || h === 'for' ? d + 1 : d;
+    for (const it of n.items) {
+      if (isList(it) && this.contTargets(it, inner)) return true;
+    }
+    return false;
   }
 
   retStmt(n, ind) {
