@@ -19,7 +19,8 @@
 //      `unsafe` 之外的 thin 转换、64 位的无符号整数、`%zd` 那一族的长度修饰、函数类型的
 //      typedef、`sizeof`（要方言的布局先认整数宽度）、`dynamic countof`（要 fat 指针带的
 //      范围）、从一个要先求值的东西上问枚举成员、枚举的底类型是另一个枚举（要枚举之间的基类链）、
-//      `using namespace`（要查名从一条线变成一张图）、类的基类（要对象头与虚表）、
+//      `using namespace`（要查名从一条线变成一张图）、类的基类里剩下的那几条（多继承、
+//      拿结构体当基类、`virtual` / `override` 的虚派发、下转）、
 //      类里的 `destruct`（jancy 自己的文档就说它是 GC 在不确定的时刻调的，disposable.rst:17）、
 //      类里的 `get` / `set`（要属性那一套）、构造的**重载**（要重载决议）、
 //      格式化字面量 `$"…"`（要在降级里回头解析一小段源码）、二进制字面量 `0x"61 62"` 与
@@ -46,7 +47,8 @@
 //      第四十六刀、`bitflag enum` 是第四十七刀、编译期整数求值是第四十八刀、`assert` 是
 //      第四十九刀、int 到枚举的显式转换是第五十刀、`namespace` 是第五十一刀、`class` 是
 //      第五十二刀、`construct` 与 `static construct` 是第五十三刀、相邻字面量的拼接是
-//      第五十四刀、函数指针（`function*` / `function thin*`）是第五十五刀，在
+//      第五十四刀、函数指针（`function*` / `function thin*`）是第五十五刀、单继承是
+//      第五十六刀，在
 //      cases/24-new-curly.jnc、
 //      cases/25-static-local.jnc、cases/26-printf-prec.jnc、cases/27-printf-star-prec.jnc、
 //      cases/28-printf-flags.jnc、cases/29-printf-sci.jnc、cases/30-printf-gen.jnc、
@@ -56,7 +58,8 @@
 //      cases/41-printf-len.jnc、cases/42-countof.jnc、cases/43-ptrcmp.jnc、
 //      cases/44-bitflag.jnc、cases/45-constfold.jnc、cases/46-assert.jnc、
 //      cases/47-enumcast.jnc、cases/48-namespace.jnc、cases/49-class.jnc、
-//      cases/50-construct.jnc、cases/51-litcat.jnc、cases/52-fnptr.jnc。）
+//      cases/50-construct.jnc、cases/51-litcat.jnc、cases/52-fnptr.jnc、
+//      cases/53-inherit.jnc。）
 //
 //      bad/ 里有**四种**拒，别混：一种是"还没长出来"（做掉就落地）；一种是**这一层不做**
 //      （printf-conv-p：`%p` 要观测裸地址，而五条腿上那不是同一个数；ptrcmp-mixed：不同型的

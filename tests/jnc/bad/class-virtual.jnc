@@ -1,0 +1,29 @@
+// 虚派发（第五十六刀的边界）。单继承这一刀收了，可 `virtual` / `abstract` / `override`
+// 那三个关键字（type_class.rst:178）还不收 —— **这一条不能"先接了再说"**：接了继承却按
+// 静态类型派发，`Base* b = d; b.foo();` 会调到 Base 那一个，编得过、跑出来是错的答案。
+// 语料里 `override` 出现 450 次、`virtual` 41 次，错的答案会到处开花。
+//
+// 补法量过了：方言的**结构体字段放不下函数值**（bad/fnptr-field.jnc 记的那条），所以虚表
+// 不能是"对象里一格函数指针"。这一层的路是给根那一格结构体加一格**整数标签**（`$tag`），
+// 每个虚方法抬一段按标签分派的函数出来 —— 一格 int 与一个 switch，方言一个字都不用长。
+// 那是下一刀。
+class Base {
+	int m_x;
+
+	virtual int twice() {
+		return m_x * 2;
+	}
+}
+
+class Derived: Base {
+	override int twice() {
+		return m_x * 3;
+	}
+}
+
+int main() {
+	Derived d;
+	Base* b = d;
+	printf("%d\n", b.twice());
+	return 0;
+}

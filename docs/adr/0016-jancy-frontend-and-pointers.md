@@ -2851,6 +2851,89 @@ object"。**那就是 ADR-0010 的 `{fp, c_*}`**：不是"能模拟"，是同一
 `methodThunk`/`methodRef`、字段那处与 `localDecl` 的两条拒）；`npm run lint` 这台机器上
 没有 typescript。
 
+### 第五十六刀：单继承 —— 一整条链共用一格结构体，于是上转是零条指令
+
+**卡在哪**。jancy 的类只能经引用到达，`B* b = d;` 是它到处在用的写法 —— 而方言的指针**没有
+类型重解释**那一格（`pnew` / `pnull` / `pload` / `padd` / `psub` / `pisnull` / `pfield` /
+`pthin` / `pelem` / `peq` 就这几个，见 sexpr/lower.js:1646）。前一刀把类落成"一格
+`(struct C …)` + 变量里放地址"，于是 `D*` 与 `B*` 是两个不同的方言类型，上转发不出来。
+
+两条路：给方言长一格指针的重解释，或者**让整条继承链共用一格结构体**。选了后者：一条链一格
+`(struct 根 …)`，字段是链上所有类的**并集**，于是 `D*` 与 `B*` 本来就是同一个方言类型 ——
+上转发**零条指令**，方言一个字没长。方法照旧是带前缀的自由函数，`Derived$construct` 的第一个
+形参就写成 `(ptr Base)`：
+
+```
+(struct Base (m_x int) (m_y int) (m_z int))
+(fn Derived$construct (($this (ptr Base)) (x int) (y int)) void
+  (expr (call Base$construct (var $this) (var x)))
+  (pstore (pfield (var $this) m_y) (var y)))
+```
+
+**代价说清**：一格对象的大小是**整条链里最大那个**（同一条链上的兄弟类共用字段那几格，与
+union 同理 —— 一个对象同一时刻只是链上的一个类）。这一层没有 `sizeof`（那条边界记在
+`bad/sizeof.jnc`），所以这个差别从语义上看不见。同名字段类型一样就共用那一格，不一样就明说
+不收 —— 那要按类给字段改名，而 `pfield` 这一层到处用的是源码里的字段名。
+
+**顺序**：`(struct …)` 的发出推迟到所有 `type-decl` 都过完（`classLayout`）—— jancy 不要求
+先声明后使用，`class D: B` 写在 `class B` 上面是合法的。链上的环当场拒（不然那两个循环不停）。
+
+**构造的三格，各有出处**（jancy 的顺序是"基类构造 → 静态构造 → 字段初值"，
+jnc_ct_Parser.cpp:3005-3009 那四句里的第一句是 `callBaseTypeConstructors`）：
+
+- 源码里写了 `basetype.construct(…)`（type_class.rst:253）就用那一句 —— 它是**静态**绑定的，
+  `basetype.foo()` 说的就是"调基类那一个"。
+- 没写就**自动补**一句（jancy 也只在没显式调时才补）—— 基类那一个要实参时补不出来，报错。
+- 派生类干脆没写 `construct`：合成一个，它做的事就是把基类那一个调一遍
+  （`DerivableType::createDefaultMethods`）。不合成就等于 `D d;` 悄悄跳过基类的构造 ——
+  那是骗人。按链的深度从上往下合成，所以基类那一个（可能也是合成的）已经在表里了。
+
+**查名多了一条链**：类是一层命名空间（第五十一刀），可**基类不是这一层的外层** —— `resolve`
+走的是命名空间前缀，走不到基类上。所以方法与字段各多问一遍：字段表 = 基类的 ++ 自己的，
+方法沿链自下往上找（派生的遮住基类的）。
+
+**边界四条，都记成了 bad case**（`bad/class-base` 那条整条落地了，按规矩删掉，换成这四条）：
+
+- `bad/class-multibase`：多继承。jancy 的模型是多继承（type_class.rst:171-174），两个以上的
+  基类要 `basetype1..9` 与"共享基类各一份实例"，是自己一格。
+- `bad/class-structbase`：拿结构体当基类（jancy 收它，同一处 :218）。这一层 struct 是值语义、
+  class 是引用语义，把前者摆进后者那条链的前面要先答清"`Point p = d;` 抄的是哪几格"。
+- `bad/class-virtual`：`virtual` / `override` / `abstract`（同一处 :178）。**这一条不能"先接了
+  再说"** —— 接了继承却按静态类型派发，`b.foo()` 编得过、跑出来是错的答案，而语料里
+  `override` 出现 450 次。补法量过了：方言的结构体字段放不下函数值（`bad/fnptr-field`），
+  所以虚表不能是"对象里一格函数指针"；路是给根那一格加一格整数标签、每个虚方法抬一段按标签
+  分派的函数出来 —— 一格 int 与一个 switch，方言还是一个字都不用长。那是下一刀。
+- `bad/class-downcast`：下转。它要运行期问"这个对象到底是哪个类"，也就是对象头里那一格类型
+  信息（01_Classes.jnc:12-14）—— 与虚派发同一格。报的是"类型不对"而不是"还不收"：隐式下转
+  在 jancy 那边本来就错。
+
+**期望输出的出处**：`/tmp/e56.c`，`cc -O0 -std=c99 -Wall`（`-Wall` 干净）。孪生件用的就是
+这一层的模型 —— 一条链一格 C 结构体、方法是收 `Animal*` 的自由函数，所以它算的是同一串数。
+七行逐字节相同。
+
+**放行了什么**：全量 1688 → 1567 条(文件, 卡点)，**去掉 143 条**（类的基类 131、
+"不是直接调一个名字的调用" 10、表达式 `basetype` 2），**新露出 22 条**（多继承 18 —— 两个基类的
+16 份加三个基类的 2 份、类型是类的字段 1、修饰符 `override`/`autoget`/`abstract` 各 1）。
+这一刀是少见的"去掉的比露出来的多六倍"：基类那一条挡在整族类文件的最前面，一拆开，后面大多是
+早就收了的东西。
+
+"只有一个卡点、带 `int main`"那张榜没动（43 → 43）。"一条卡点都没有、带 `int main`"从 55 份到
+**56 份**，进来的是 `test/jnc/test108.jnc`，没有出去的 —— 这是好几刀以来第一次真的多跑起来一份
+文件。它印不出东西（`main` 只有 `return 0`），因为它是 jancy 自己的一条查名回归用例：
+`class Bar: a.b.Foo` 要跨命名空间解析限定基类名，而 `Foo.foo` 里那句 `g_x` 又得从基类所在的
+`a.b` 往父命名空间找。五条腿都是 0 字节输出、退出码 0。
+
+**跑过的轴**：`tests/jnc`（102/0，新增 `cases/53-inherit` 与 `bad/class-multibase`、
+`bad/class-structbase`、`bad/class-virtual`、`bad/class-downcast`；删掉 `bad/class-base` ——
+功能落地了，按规矩换成上面那四条更窄的）。
+**没跑的**：`tests/sexpr`、`tests/glr`、`tests/asy`、`tests/oir` —— 只动了
+`frontend-jnc/lower.js`（`typeDecl` 的基类那一段、新的 `classLayout`/`synthCtors`、
+`tyText`/`zeroText` 那几处 `clsRoot`、`fnDef` 的构造前奏、`assignOk` 与十四处值流、
+`callExpr` 与新的 `baseTarget`），加 `tests/jnc/run.js` 的头注释；语法、方言、HIR、MIR、
+四个后端与运行时一个字都没改；自举、`tests/jit`、`tests/llvm`；`tests/mir` 是先前就红的那一条
+（`fmtFixed`/`fmtSci`/`fmtGen` 不在 `frontend-js/link.js` 的 `NATIVE_OPS` 里，与这一刀无关）；
+`npm run lint` 这台机器上没有 typescript。
+
 ## 后果与代价
 
 - 方言从"没有可算术的引用"变成"有"。这一格会渗到 MIR 与四个后端，改不回去。

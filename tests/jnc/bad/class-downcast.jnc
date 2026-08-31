@@ -1,0 +1,20 @@
+// 下转（第五十六刀的边界）。上转收了 —— `Base* b = d;` 在这一层发零条指令（一条继承链
+// 共用一格方言结构体）。反过来把一格基类引用装进派生类那一格要**下转**，而下转得在运行期
+// 问一句"这个对象到底是哪个类"，那要对象头里的类型信息（01_Classes.jnc:12-14 那段说的
+// "meta-data such as type, vtable pointer"）—— 与虚派发是同一格，所以还不收。
+//
+// 报的是"类型不对"而不是"还不收"：这一条在 jancy 那边也要显式的动态转换，隐式写法本来就错。
+class Base {
+	int m_x;
+}
+
+class Derived: Base {
+	int m_y;
+}
+
+int main() {
+	Base b;
+	Derived* d = b;
+	printf("%d\n", d.m_y);
+	return 0;
+}

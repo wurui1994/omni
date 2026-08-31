@@ -1,0 +1,21 @@
+// 拿结构体当基类（第五十六刀的边界）。jancy 收它 —— type_class.rst:218 那句注释就写在
+// 例子里："it's ok to inherit from structs and even unions"。
+//
+// 这一刀只收"基类是类"：一条继承链在方言里共用一格结构体，而 struct 与 class 在这一层是
+// 两种不同的东西（struct 是值语义、一格自己的内存、能按值传；class 是引用语义、变量里放
+// 地址）。把一个值语义的东西摆进引用语义那条链的前面，要先答清"`Point p = d;` 抄的是哪几格"
+// —— 那是自己一格。
+struct Point {
+	int m_x;
+	int m_y;
+}
+
+class C3: Point {
+	int m_c;
+}
+
+int main() {
+	C3 c;
+	printf("%d\n", c.m_c);
+	return 0;
+}

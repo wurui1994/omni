@@ -122,8 +122,10 @@
 //   - 格式化字面量 `$"…"`、二进制字面量 `0x"61 62"`、`__FILE__` 那族预定义宏、多行字面量、
 //     正则 switch。**相邻字面量的拼接**（`"a" "b"`）是第五十四刀，见 litFold。
 //   - union / property / reactor / 事件 / 多播 / 协程。`enum` 是第三十九刀、`class` 是第
-//     五十二刀、`construct` 与 `static construct` 是第五十三刀；类那一族剩下的是基类（要对象
-//     头与虚表）、`destruct`（GC 不定时，disposable.rst:17）、`get` / `set`、构造的重载、
+//     五十二刀、`construct` 与 `static construct` 是第五十三刀、**单继承**是第五十六刀
+//     （一条链在方言里共用一格 `(struct …)`，见 classLayout）；类那一族剩下的是多继承与
+//     `basetype1..9`、拿结构体当基类、`virtual`/`override`/`abstract` 的虚派发与下转、
+//     `destruct`（GC 不定时，disposable.rst:17）、`get` / `set`、构造的重载、
 //     内嵌的类字段与静态字段。
 //   - 函数指针（`R function* p(形参)`）第五十五刀收了 —— 落到方言的函数值那一格
 //     （`(fnty …)` / `(fnref …)` / `(mkclo …)` / `(callfn …)`），`c.foo` 捕的就是那个对象。
@@ -293,6 +295,22 @@ function litFold(n) {
   return b === null ? null : a + b;
 }
 
+/** 这段树里有 `basetype.construct(…)` 吗（第五十六刀）。没有就自动补一句基类构造 ——
+ *  jancy 也是这么做的（`callBaseTypeConstructors` 只在源码没显式调时才补）。 */
+function hasBaseCtorCall(n) {
+  if (!isList(n)) return false;
+  if (head(n) === 'call') {
+    const c = n.items[1];
+    if (isList(c) && head(c) === 'field' && isList(c.items[1])
+      && head(c.items[1]) === 'basetype'
+      && (isAtom(c.items[2]) || isStr(c.items[2])) && c.items[2].value === 'construct') {
+      return true;
+    }
+  }
+  for (const it of n.items) if (hasBaseCtorCall(it)) return true;
+  return false;
+}
+
 /** 声明符的核心是个**特殊成员**吗（第五十二刀）：`construct` / `destruct` /
  *  `static construct` / 属性的 `get` `set`。是就回那个关键字，不是回 null。
  *  这几种在语法里是自己一格（`special` / `accessor`，jnc.grammar 的 special 规则）。 */
@@ -376,6 +394,17 @@ function wrapVal(v, t) {
  * `int a[10][20]` 的元素是 `int[20]`，只有"块的块"说得出来。退化成 `T*` 由 decay 发一句
  * `(pelem …)`（地址与范围都不动，只换类型）。
  */
+/**
+ * 一条继承链在方言里的**那一格结构体**的名字（第五十六刀）。整条链共用一格：字段是链上所有
+ * 类的并集，于是 `D*` 与 `B*` 落成同一个方言类型 —— 上转不用发一个字，方言也不用长出"指针的
+ * 重解释"。没有基类也没有派生类的类就是它自己。
+ *
+ * 它是模块级的一格是因为 `tyText` 这一族是纯函数（这份文件里的类型辅助都在类外），而"哪条链"
+ * 是**这一次降级**才知道的事 —— 所以 lowerJnc 每次进来先清空它，classLayout 那一遍填。
+ */
+const CLS_ROOT = new Map();
+const clsRoot = (name) => (CLS_ROOT.has(name) ? CLS_ROOT.get(name) : name);
+
 function tyText(t) {
   // `T(*)[N]`（第二十刀）：指向一整块的指针，在方言里与那块自己是**同一个写法** ——
   // 都是 `(ptr (blk T N))`。差别只在这一层的类型上（`padd` 一步跨一整块还是一格元素）。
@@ -385,7 +414,8 @@ function tyText(t) {
   if (t.k === 'arr') return `(ptr ${blkText(t)})`;
   if (t.k === 'struct') return t.name;
   // 类是一条引用（第五十二刀）：那一格里放的是对象那段内存的地址，字段表与结构体同一张。
-  if (t.k === 'class') return `(ptr ${t.name})`;
+  // 一整条继承链共用一格结构体（第五十六刀，见 clsRoot）。
+  if (t.k === 'class') return `(ptr ${clsRoot(t.name)})`;
   // 函数指针就是方言的函数值那一格（第五十五刀）：`(fnty (形参…) 返回)`。
   if (t.k === 'fnptr') return `(fnty (${t.params.map(slotText).join(' ')}) ${slotText(t.ret)})`;
   if (t.k === 'int') return 'int';
@@ -524,13 +554,16 @@ function zeroText(t) {
   if (t.k === 'string') return '(str "")';
   if (t.k === 'ptr' || t.k === 'tptr') return `(pnull ${tyText(t)})`;
   // 类指针的零值是空引用（第五十二刀）：`C* p;` 那一格出来是 null，要 `new C` 才有对象。
-  if (t.k === 'class') return `(pnull (ptr ${t.name}))`;
+  if (t.k === 'class') return `(pnull (ptr ${clsRoot(t.name)}))`;
   return null;
 }
 
 /** jnc 语法树 -> 核心方言文本。 */
 export function lowerJnc(tree, diags, opts) {
   const L = new JncLower(diags, opts === undefined ? {} : opts);
+  // 继承链那张表是模块级的（见 CLS_ROOT），所以每次降级先清空 —— 同一个进程里 sx 与 run
+  // 会连着降两遍同一份源码，上一遍的链不能漏到下一遍。
+  CLS_ROOT.clear();
   return L.run(tree);
 }
 
@@ -586,6 +619,53 @@ class JncLower {
     this.gates = new Map();     // 类名 -> 那道"静态构造跑过了"的模块级 bool
     // 方法名 -> 它那段闭包 thunk（第五十五刀）。`c.foo` 当值用时捕的是对象，一个方法一段。
     this.clos = new Map();
+    // 单继承（第五十六刀）：类名 -> 基类的全名 / 类名 -> 这条链的**根**。方言里一整条链
+    // 共用**一格** `(struct 根 …)`（字段是整条链的并集），所以 `D*` 与 `B*` 是同一个方言
+    // 类型 —— 上转一个字都不用发，也不需要方言长出指针的重解释。
+    this.bases = new Map();
+    this.roots = new Map();
+    this.ownFields = new Map();   // 类名 -> 它自己那几格字段（基类的不算）
+    this.pendingCls = [];         // 类的 `(struct …)` 推迟到整条链都知道了再发
+    this.synthSC = new Set();     // 只有静态构造、那一个实例构造是合成出来的类
+  }
+
+  /** 派生类没写 construct 时合成一个（第五十六刀）：它做的事就是把基类那一个调一遍。 */
+  synthCtors() {
+    const depth = (c) => {
+      let d = 0;
+      let cur = this.bases.get(c);
+      while (cur !== null && cur !== undefined) { d++; cur = this.bases.get(cur); }
+      return d;
+    };
+    const order = this.pendingCls.slice().sort((a, b) => depth(a.name) - depth(b.name));
+    for (const { name, node } of order) {
+      const base = this.bases.get(name);
+      if (base === null || base === undefined) continue;
+      const bc = this.ctors.get(base);
+      if (bc === undefined) continue;                 // 基类也没有构造，什么都不用做
+      if (this.ctors.has(name)) {
+        // 自己写了 construct：基类那一个由 `basetype.construct(…)` 显式调，没写就在 fnDef
+        // 那处自动补一句（与 jancy 的 callBaseTypeConstructors 同）。只有 static construct
+        // 的那一种上面已经合成过一个空的了，那一个不会调基类 —— 明说不收。
+        if (this.synthSC.has(name)) {
+          this.nope(node, `${shown(name)} 只有 static construct 而基类 ${shown(base)} 有 construct`
+            + '（合成出来的那一个还要把基类的构造调一遍）');
+        }
+        continue;
+      }
+      if (bc.params.length > 0) {
+        this.err(node, `${shown(name)} 没有 construct，而基类 ${shown(base)} 的 construct 要 `
+          + `${bc.params.length} 个实参 —— 得自己写一个 construct 并在里面调 basetype.construct(…)`);
+        continue;
+      }
+      const full = `${name}$construct`;
+      const self = tClass(name, false);
+      this.fns.set(full, { params: [self], ret: J_VOID });
+      this.methods.set(full, name);
+      this.ctors.set(name, { name: full, params: [] });
+      this.decls.push(`  (fn ${full} (($this ${slotText(self)})) void\n`
+        + `    (expr (call ${bc.name} (var $this))))`);
+    }
   }
 
   /** 当前命名空间下的全名（第五十一刀）。写的名字里带点（`struct a.S`）也一并换成 `$`。 */
@@ -923,7 +1003,7 @@ class JncLower {
     let v = this.expr(node, want);
     if (v === null) return null;
     if (isInt(v.type) && isInt(want)) v = intConv(v, want);
-    if (!sameTy(v.type, want)) return this.err(node, `这一项是 ${tyName(v.type)}，而它对着的是 ${tyName(want)}`);
+    if (!this.assignOk(v.type, want)) return this.err(node, `这一项是 ${tyName(v.type)}，而它对着的是 ${tyName(want)}`);
     return v.code;
   }
 
@@ -1021,6 +1101,9 @@ class JncLower {
       this.ns = e.ns;
       if (isList(e.it) && head(e.it) === 'type-decl') this.typeDecl(e.it.items[1]);
     }
+    // 类的那几格结构体在这儿才发（第五十六刀）：一整条继承链共用一格，而"谁派生了我"要等
+    // 所有 type-decl 都过完才知道。排在签名那一遍之前 —— 方法的形参里有类指针。
+    this.classLayout();
     // 签名先过一遍（第十五刀）：jancy 的命名空间不看顺序，所以"后面定义的函数"要在
     // 模块级变量的初值与所有函数体之前就查得着。
     for (const e of items) {
@@ -1047,7 +1130,13 @@ class JncLower {
       this.ctors.set(cls, { name: full, params: [] });
       this.decls.push(`  (fn ${full} (($this ${slotText(self)})) void\n`
         + `${this.gateLines(cls, '    ').join('\n')})`);
+      this.synthSC.add(cls);
     }
+    // 派生类没写 construct（第五十六刀）。jancy 那边合成的那一个要**把基类的构造调一遍**
+    // （`DerivableType::createDefaultMethods` 里 `createDefaultConstructor` 的那条链），
+    // 不合成就等于 `D d;` 悄悄跳过了基类的构造 —— 那是骗人。按深度从上往下走，所以基类
+    // 那一个（可能也是合成的）已经在表里了。
+    this.synthCtors();
     // `&` 过谁先数一遍（第二十四刀）：模块级的标量被取过地址时，那一格要提到一段**自己的
     // 内存**里去（与第九刀对局部量做的是同一件事）。这一问必须在 `(global …)` 发出去之前
     // 答完 —— 而 `&g` 出现在函数体里，也就是后面那一遍。数的是整份源码里所有 `&名字`，
@@ -1299,7 +1388,7 @@ class JncLower {
     this.unsafe = saveUnsafe;
     if (v === null) return null;
     if (isInt(v.type) && isInt(want)) v = intConv(v, want);
-    if (!sameTy(v.type, want)) {
+    if (!this.assignOk(v.type, want)) {
       this.err(node, isElem === true
         ? `这一项是 ${tyName(v.type)}，而元素是 ${tyName(want)}`
         : `初值的类型是 ${tyName(v.type)}，声明的是 ${tyName(want)}`);
@@ -1493,10 +1582,30 @@ class JncLower {
     if (nm3 === null) return this.err(n, `认不出的${cls ? '类' : '结构体'}名字`);
     const name = this.qual(nm3);
     const bases = this.flat(n.items[3]);
-    // 类的基类是**多继承 + 虚表**那一整套（type_class.rst 的 Inheritance 一节：`basetype1..9`、
-    // `virtual` / `abstract` / `override`）。这一层的类是"一格 struct + 变量里放地址"，
-    // 没有头部、没有虚表，接基类要先有那两样 —— 所以这里明说不收。
-    if (bases.length > 0) return this.nope(n, cls ? '类的基类（要对象头与虚表）' : '结构体的基类');
+    // 基类（第五十六刀）。jancy 的模型是**多继承**（type_class.rst:171-174："a simple
+    // multiple inheritance model (multiple instances of shared bases -- if any)"），这一刀
+    // 只接**单**继承：两个以上的基类要 `basetype1..9` 与"同一个基类在链上出现两次算两份实例"
+    // 那一整套，是自己一格。结构体当基类 jancy 也收（同一处:218 那句 "it's ok to inherit
+    // from structs and even unions"），那要"结构体也能当一层基类"，也是自己一格。
+    if (bases.length > 0 && !cls) return this.nope(n, '结构体的基类');
+    if (bases.length > 1) {
+      return this.nope(n, `多继承（这里有 ${bases.length} 个基类 —— 要 basetype1..9 与`
+        + '"共享基类各一份实例"，type_class.rst:171-174）');
+    }
+    let base = null;
+    if (bases.length === 1) {
+      const bn = this.qname(bases[0]);
+      if (bn === null) return this.nope(bases[0], '认不出的基类名字');
+      base = this.resolve(bn, (k) => this.classes.has(k));
+      if (base === null) {
+        if (this.resolve(bn, (k) => this.structs.has(k)) !== null) {
+          return this.nope(bases[0], `拿结构体 '${bn}' 当基类（jancy 收它，`
+            + 'type_class.rst:218）');
+        }
+        return this.err(bases[0], `没有这个基类：'${bn}'`);
+      }
+      if (base === name) return this.err(bases[0], `'${shown(name)}' 拿自己当基类`);
+    }
     const fields = this.structs.get(name);
     if (fields === undefined || fields.length > 0) return null;   // 上一遍已经报过重复了
     // 类体里查名从**这个类**这一层起（第五十二刀）：嵌套类型在 nsFlat 那一遍登记成了 `C.S`，
@@ -1594,14 +1703,124 @@ class JncLower {
     // 而不是方言的 `(class …)` —— 那一格的字段还不收 `(blk T N)`（tests/sexpr/cases/07-classes.sx
     // 记的那条边界），而类里有数组字段的语料不少。方言一个字没改。
     //
-    // **一个字段都没有的类**（`class T {}`，test124.jnc:18 与 test151.jnc:21 —— jancy 收）
-    // 发一格 `$hdr`：方言的结构体至少要一个字段，而 jancy 的类**本来就有对象头**
-    //（01_Classes.jnc:12-14："Actual user fields are preceded with a header containing
-    // meta-data such as type, vtable pointer, root object pointer, GC-related flags"），
-    // 所以一格占位比"零字节的对象"更贴它。`$` 不在 jancy 的标识符里，源码里碰不到这一格。
-    // 结构体那一边不补 —— jancy 的 struct 没有头，补一格就是在布局上说假话。
-    this.decls.push(`  (struct ${name} ${fields.length === 0 ? '($hdr int)' : fs})`);
+    // 发出去这一步推迟到 classLayout 那一遍（第五十六刀）：一整条继承链共用**一格**结构体，
+    // 而"谁派生了我"要等所有 type-decl 都过完才知道（jancy 不要求先声明后使用）。
+    this.bases.set(name, base);
+    this.ownFields.set(name, fields.slice());
+    this.pendingCls.push({ name, node: n });
     return null;
+  }
+
+  /**
+   * 一整条继承链落成方言里的**一格结构体**（第五十六刀）。
+   *
+   * 为什么是"一格"而不是"每个类一格 + 上转时重解释指针"：方言的指针没有类型重解释那一格
+   * （`(pnew/pnull/pload/padd/psub/pisnull/pfield/pthin/pelem/peq)` 就这几个，见 sexpr/lower.js），
+   * 而 jancy 的类只能经引用到达、`B* b = d;` 是它到处在用的写法。让整条链共用一格结构体
+   * （字段是链上所有类的并集）之后，`D*` 与 `B*` **本来就是同一个方言类型** —— 上转发的是
+   * 零条指令，方言一个字不用长。
+   *
+   * 代价说清：一格对象的大小是**整条链里最大那个**（同一条链上的兄弟类共用字段那几格）。
+   * 这一层没有 `sizeof`（那条边界记在 bad/sizeof.jnc），所以这个差别从语义上看不见。
+   *
+   * 同名的字段：类型一样就共用那一格（兄弟类之间正是这样，与 union 同理 —— 一个对象同一时刻
+   * 只是链上的一个类）；类型不一样就明说不收 —— 那要按类给字段改名，而 `pfield` 这一层到处
+   * 用的是源码里的字段名。
+   */
+  classLayout() {
+    // 先把链走通：环要当场拒（不然下面那两个循环不停）
+    for (const { name, node } of this.pendingCls) {
+      const seen = new Set([name]);
+      let cur = this.bases.get(name);
+      while (cur !== null && cur !== undefined) {
+        if (seen.has(cur)) {
+          this.err(node, `'${shown(name)}' 的基类链绕回了自己（经过 '${shown(cur)}'）`);
+          this.bases.set(name, null);
+          break;
+        }
+        seen.add(cur);
+        cur = this.bases.get(cur);
+      }
+    }
+    const rootOf = (c) => {
+      let r = c;
+      for (;;) {
+        const b = this.bases.get(r);
+        if (b === null || b === undefined) return r;
+        r = b;
+      }
+    };
+    // 每个类的**可见**字段表 = 基类的 ++ 自己的（`this.structs` 那张表是这一层查名用的）
+    const chainFields = (c) => {
+      const b = this.bases.get(c);
+      const up = b === null || b === undefined ? [] : chainFields(b);
+      return up.concat(this.ownFields.get(c) === undefined ? [] : this.ownFields.get(c));
+    };
+    for (const { name } of this.pendingCls) {
+      const root = rootOf(name);
+      this.roots.set(name, root);
+      CLS_ROOT.set(name, root);
+      this.structs.set(name, chainFields(name));
+    }
+    // 每条链一格结构体：字段按"根先、派生后"的顺序并起来
+    const merged = new Map();          // 根 -> 字段数组
+    for (const { name, node } of this.pendingCls) {
+      const root = this.roots.get(name);
+      if (!merged.has(root)) merged.set(root, []);
+      const into = merged.get(root);
+      for (const f of this.ownFields.get(name)) {
+        const had = into.find((g) => g.name === f.name);
+        if (had === undefined) { into.push(f); continue; }
+        if (!sameTy(had.type, f.type)) {
+          this.err(node, `'${shown(name)}' 的字段 '${f.name}' 与同一条继承链上那个同名字段`
+            + `不同型（${tyName(had.type)} 与 ${tyName(f.type)}）—— 这一层一条链共用一格结构体`);
+        }
+      }
+    }
+    for (const [root, fields] of merged) {
+      // **一个字段都没有的类**（`class T {}`，test124.jnc:18 与 test151.jnc:21 —— jancy 收）
+      // 发一格 `$hdr`：方言的结构体至少要一个字段，而 jancy 的类**本来就有对象头**
+      //（01_Classes.jnc:12-14："Actual user fields are preceded with a header containing
+      // meta-data such as type, vtable pointer, root object pointer, GC-related flags"），
+      // 所以一格占位比"零字节的对象"更贴它。`$` 不在 jancy 的标识符里，源码里碰不到这一格。
+      const fs = fields.map((f) => `(${f.name} ${fieldText(f.type)})`).join(' ');
+      this.decls.push(`  (struct ${root} ${fields.length === 0 ? '($hdr int)' : fs})`);
+    }
+  }
+
+  /** b 是 d 的（间接）基类吗（第五十六刀）。上转要它，而上转发零条指令。 */
+  isBase(b, d) {
+    let cur = this.bases.get(d);
+    while (cur !== null && cur !== undefined) {
+      if (cur === b) return true;
+      cur = this.bases.get(cur);
+    }
+    return false;
+  }
+
+  /** 从这个类起沿基类链找一个方法（第五十六刀）：`d.val()` 里的 val 可以是基类的。
+   *  回的是方言里那个名字（`Base$val`），找不着回 null。派生的遮住基类的 —— 自下往上找。 */
+  findMethod(cls, mn) {
+    let cur = cls;
+    while (cur !== null && cur !== undefined) {
+      const full = `${cur}$${mn}`;
+      if (this.fns.has(full)) return full;
+      cur = this.bases.get(cur);
+    }
+    return null;
+  }
+
+  /**
+   * 一格值装不装得进那一格（第五十六刀）。除了同型，还多一条：**上转** —— 派生类的引用装进
+   * 基类那一格（`B* b = d;`、把 `D*` 当 `B*` 的实参传、`return d;`）。jancy 到处在用它，
+   * 而在这一层它发的是**零条指令**：一条继承链共用一格方言结构体，两边本来就是同一个方言类型。
+   *
+   * 反过来（基类装进派生类）要**下转**，那得在运行期问"这个对象到底是哪个类"—— 要对象头里
+   * 那一格类型信息，与虚派发是同一格，所以还不收（照旧报"类型不对"）。
+   */
+  assignOk(from, to) {
+    if (sameTy(from, to)) return true;
+    return isClass(from) && isClass(to) && this.isBase(to.name, from.name);
   }
 
   /* -------------------------------------------------------------- 类型与声明符 */
@@ -2098,7 +2317,7 @@ class JncLower {
       let v = this.expr(argNodes[i], want[i]);
       if (v === null) return null;
       if (isInt(v.type) && isInt(want[i])) v = intConv(v, want[i]);
-      if (!sameTy(v.type, want[i])) {
+      if (!this.assignOk(v.type, want[i])) {
         return this.err(argNodes[i], `${shown(cls)} 的 construct 的第 ${i + 1} 个实参要 `
           + `${tyName(want[i])}，这里是 ${tyName(v.type)}`);
       }
@@ -2191,6 +2410,21 @@ class JncLower {
     // 剩下的就是这一句。闸门保证它只跑一次，run 那一遍已经把 bool 开好了。
     if (owner !== undefined && info.name === `${owner}$construct` && this.sctors.has(owner)) {
       for (const l of this.gateLines(owner, '    ')) pre.push(l);
+    }
+    // 基类的构造（第五十六刀）。jancy 的顺序里它排在最前（同一处 3005 行的第一句
+    // `callBaseTypeConstructors`）：源码里写了 `basetype.construct(…)` 就用那一句，没写就
+    // **自动补**一句 —— 而基类那一个要实参时补不出来，那时报错（jancy 同）。
+    if (owner !== undefined && info.name === `${owner}$construct`) {
+      const base = this.bases.get(owner);
+      const bc = base === null || base === undefined ? undefined : this.ctors.get(base);
+      if (bc !== undefined && !hasBaseCtorCall(n.items[3])) {
+        if (bc.params.length > 0) {
+          this.err(n, `${shown(owner)} 的 construct 里没有调 basetype.construct(…)，而基类 `
+            + `${shown(base)} 的 construct 要 ${bc.params.length} 个实参`);
+        } else {
+          pre.push(`    (expr (call ${bc.name} (var $this)))`);
+        }
+      }
     }
     const save = this.retTy;
     this.retTy = isMain ? J_VOID : info.type;
@@ -2341,7 +2575,7 @@ class JncLower {
         if (initNode !== null) {
           const v = this.expr(initNode, info.type);
           if (v === null) return null;
-          if (!sameTy(v.type, info.type)) {
+          if (!this.assignOk(v.type, info.type)) {
             this.err(initNode, `初值的类型是 ${tyName(v.type)}，声明的是 ${tyName(info.type)}`);
             return null;
           }
@@ -2390,7 +2624,7 @@ class JncLower {
         if (initNode !== null) {
           const v = this.expr(initNode, info.type);
           if (v === null) return null;
-          if (!sameTy(v.type, info.type)) {
+          if (!this.assignOk(v.type, info.type)) {
             this.err(initNode, `初值的类型是 ${tyName(v.type)}，声明的是 ${tyName(info.type)}`);
             return null;
           }
@@ -2426,7 +2660,7 @@ class JncLower {
         let v = this.expr(initNode, info.type);
         if (v === null) return null;
         if (isInt(v.type) && isInt(info.type)) v = intConv(v, info.type);
-        if (!sameTy(v.type, info.type)) {
+        if (!this.assignOk(v.type, info.type)) {
           this.err(initNode, `初值的类型是 ${tyName(v.type)}，声明的是 ${tyName(info.type)}`);
           return null;
         }
@@ -2521,7 +2755,7 @@ class JncLower {
     if (isStruct(t) || isArr(t)) {
       const v = this.expr(initNode, t);
       if (v === null) return null;
-      if (!sameTy(v.type, t)) {
+      if (!this.assignOk(v.type, t)) {
         return this.err(initNode, `初值的类型是 ${tyName(v.type)}，声明的是 ${tyName(t)}`);
       }
       const src = this.aggSource(v.code, slotText(t), pad, out);
@@ -2530,7 +2764,7 @@ class JncLower {
     let v = this.expr(initNode, t);
     if (v === null) return null;
     if (isInt(v.type) && isInt(t)) v = intConv(v, t);
-    if (!sameTy(v.type, t)) {
+    if (!this.assignOk(v.type, t)) {
       return this.err(initNode, `初值的类型是 ${tyName(v.type)}，声明的是 ${tyName(t)}`);
     }
     out.push(lift ? `${pad}(pstore (var ${dn}) ${v.code})` : `${pad}(set ${dn} ${v.code})`);
@@ -2813,7 +3047,7 @@ class JncLower {
       if (op === '=') {
         // 整数之间的赋值是**隐式收窄**（`char c = 300` 存 44）—— C 的规矩，jancy 同。
         if (isInt(lv.type) && isInt(v.type)) v = intConv(v, lv.type);
-        if (!sameTy(v.type, lv.type)) {
+        if (!this.assignOk(v.type, lv.type)) {
           this.err(n, `赋值两边不同型：左是 ${tyName(lv.type)}，右是 ${tyName(v.type)}`);
           return null;
         }
@@ -2878,7 +3112,7 @@ class JncLower {
         this.err(n, `'${op}' 要整数，这里左是 ${tyName(lv.type)}、右是 ${tyName(v.type)}`);
         return null;
       }
-      if (!sameTy(v.type, lv.type)) {
+      if (!this.assignOk(v.type, lv.type)) {
         this.err(n, `'${op}' 两边不同型：左是 ${tyName(lv.type)}，右是 ${tyName(v.type)}`);
         return null;
       }
@@ -3182,7 +3416,7 @@ class JncLower {
       } else {
         // 到这儿只剩 `%s`（`%d` / `%i` 在整数与 bool 上都在上面接完了，剩下的是类型不对）
         const want = spec === 's' ? J_STR : J_I32;
-        if (!sameTy(v.type, want)) {
+        if (!this.assignOk(v.type, want)) {
           this.err(argNode, `'%${spec}' 要 ${tyName(want)}，这里是 ${tyName(v.type)}`);
           return null;
         }
@@ -3858,7 +4092,7 @@ class JncLower {
     let v = this.expr(n.items[1], this.retTy);
     if (v === null) return null;
     if (isInt(v.type) && isInt(this.retTy)) v = intConv(v, this.retTy);
-    if (!sameTy(v.type, this.retTy)) {
+    if (!this.assignOk(v.type, this.retTy)) {
       this.err(n, `return 的类型是 ${tyName(v.type)}，函数声明的是 ${tyName(this.retTy)}`);
       return null;
     }
@@ -3966,7 +4200,7 @@ class JncLower {
         // x 是整数）当场说清，而不是随便挑一个。
         // 类引用也是一种"指针"（第五十二刀）：`C* p = null` 与 `p == null` 都要它。
         if (want !== null && want !== undefined && isClass(want)) {
-          return { code: `(pnull (ptr ${want.name}))`, type: want };
+          return { code: `(pnull (ptr ${clsRoot(want.name)}))`, type: want };
         }
         if (want === null || want === undefined || !isPtr(want)) {
           return this.err(n, 'null 得从左边知道自己是哪种指针（这里问不出来）');
@@ -4391,6 +4625,34 @@ class JncLower {
     return { code: `(sel ${c.code} ${a.code} ${b.code})`, type: a.type };
   }
 
+  /**
+   * `basetype.成员`（第五十六刀）。jancy 拿 `basetype` 与 `basetype1` .. `basetype9`
+   * 指基类，用处是**构造**与**名字解析**（type_class.rst:226）。这一刀只有单继承，所以
+   * 只有 `basetype`（语法树里是 `(basetype 1)`）；`basetype2` 起是多继承那一族。
+   *
+   * 回的是方言里那个函数名 —— 静态绑定，`basetype.foo()` 说的就是"调基类那一个"。
+   */
+  baseTarget(n, bt, mn) {
+    const idx = isAtom(bt.items[1]) ? Number(bt.items[1].value) : 1;
+    if (idx !== 1) {
+      return this.nope(bt, `'basetype${idx}'（多继承那一族：type_class.rst:226 的 basetype1..9）`);
+    }
+    if (this.selfClass === null) return this.err(n, "'basetype' 只能写在方法体里");
+    const base = this.bases.get(this.selfClass);
+    if (base === null || base === undefined) {
+      return this.err(n, `${shown(this.selfClass)} 没有基类，'basetype' 指不着谁`);
+    }
+    if (mn === null) return this.nope(n, "'basetype' 后面那个成员认不出来");
+    if (mn === 'construct') {
+      const c = this.ctors.get(base);
+      if (c === undefined) return this.err(n, `${shown(base)} 没有 construct`);
+      return c.name;
+    }
+    const full = this.findMethod(base, mn);
+    if (full === null) return this.err(n, `${shown(base)} 没有方法 '${mn}'`);
+    return full;
+  }
+
   callExpr(n) {
     const callee = n.items[1];
     // 从一格**函数指针**上调（第五十五刀）：`p(…)` 里的 p 是变量而不是函数名，那就是方言的
@@ -4403,6 +4665,11 @@ class JncLower {
       ? this.dotted(callee) : null;
     if (nm0 === 'printf') return this.nope(n, '把 printf 的返回值当值用');
     let nm = nm0 === null ? null : this.resolve(nm0, (k) => this.fns.has(k));
+    // 方法体里裸写基类的方法（第五十六刀）：类是一层命名空间，可**基类不是这一层的外层** ——
+    // resolve 走的是命名空间的前缀，走不到基类那条链上，所以这儿沿链再问一遍。
+    if (nm === null && nm0 !== null && !nm0.includes('.') && this.selfClass !== null) {
+      nm = this.findMethod(this.selfClass, nm0);
+    }
     // 方法调用（第五十二刀）：`c.foo(…)` 是 `C$foo(c, …)` —— 对象当第一个实参。
     // 名字这一层查不着、而 `.` 右边那个名字确实是某个类的方法时才去求左边的值，
     // 免得给"真的没有这个函数"多发一条诊断。
@@ -4410,6 +4677,16 @@ class JncLower {
     const mh = isList(callee) ? head(callee) : null;
     const mn = (mh === 'field' || mh === 'ptr-field') && isAtom(callee.items[2])
       ? callee.items[2].value : null;
+    // `basetype.construct(…)` / `basetype.foo()`（第五十六刀，type_class.rst:226 与 :253）。
+    // 要排在下面那条方法调用之前：`basetype` 不是一格值，求它会报错。它是**静态**绑定的
+    // —— 说的就是"调基类那一个"，所以名字直接沿链取。
+    if (nm === null && mh === 'field' && isList(callee.items[1])
+      && head(callee.items[1]) === 'basetype') {
+      const b = this.baseTarget(n, callee.items[1], mn);
+      if (b === null) return null;
+      nm = b;
+      self = '(var $this)';
+    }
     if (nm === null && mn !== null && this.methodNames.has(mn)) {
       const m = this.methodCallee(n, callee, mn);
       if (m === null) return null;
@@ -4422,7 +4699,9 @@ class JncLower {
     // `C$foo`）—— 这儿把 `this` 补上。
     const owner = this.methods.get(nm);
     if (owner !== undefined && self === null) {
-      if (this.selfClass !== owner) {
+      // 基类的方法也算（第五十六刀）：`this` 那一格在方言里与基类那一格同型（一条链共用
+      // 一格结构体），所以补上去就是了。
+      if (this.selfClass !== owner && !this.isBase(owner, this.selfClass)) {
         return this.err(n, `'${shown(nm)}' 是 ${shown(owner)} 的方法，要一个对象来调它`);
       }
       self = '(var $this)';
@@ -4439,7 +4718,7 @@ class JncLower {
       if (v === null) return null;
       // 实参与赋值同一条规矩：整数隐式转到形参那一格（窄了就回卷）。
       if (isInt(v.type) && isInt(want[i])) v = intConv(v, want[i]);
-      if (!sameTy(v.type, want[i])) {
+      if (!this.assignOk(v.type, want[i])) {
         return this.err(args[i], `'${nm0 === null ? shown(nm) : nm0}' 的第 ${i + 1} 个实参要 ${tyName(want[i])}，`
           + `这里是 ${tyName(v.type)}`);
       }
@@ -4465,8 +4744,8 @@ class JncLower {
     if (!isClass(bv.type)) {
       return this.err(n, `'${tyName(bv.type)}' 不是类，上面问不出方法 '${mn}'`);
     }
-    const full = `${bv.type.name}$${mn}`;
-    if (!this.fns.has(full)) return this.err(n, `${shown(bv.type.name)} 没有方法 '${mn}'`);
+    const full = this.findMethod(bv.type.name, mn);
+    if (full === null) return this.err(n, `${shown(bv.type.name)} 没有方法 '${mn}'`);
     return { name: full, self: bv.code };
   }
 
@@ -4484,8 +4763,8 @@ class JncLower {
       if (bv === null) return null;
     }
     if (!isClass(bv.type)) return undefined;
-    const full = `${bv.type.name}$${mn}`;
-    if (!this.fns.has(full)) return undefined;
+    const full = this.findMethod(bv.type.name, mn);
+    if (full === null) return undefined;
     return this.fnValue(n, full, bv.code);
   }
 
@@ -4519,7 +4798,7 @@ class JncLower {
       let v = this.expr(args[i], sig.params[i]);
       if (v === null) return null;
       if (isInt(v.type) && isInt(sig.params[i])) v = intConv(v, sig.params[i]);
-      if (!sameTy(v.type, sig.params[i])) {
+      if (!this.assignOk(v.type, sig.params[i])) {
         return this.err(args[i], `这一格函数指针的第 ${i + 1} 个实参要 ${tyName(sig.params[i])}，`
           + `这里是 ${tyName(v.type)}`);
       }
@@ -4545,8 +4824,9 @@ class JncLower {
     }
     let self = selfCode;
     if (self === null) {
-      // 方法体里裸写方法名就是 `this.foo`（与 `foo()` 补 this 同一条）
-      if (this.selfClass !== owner) {
+      // 方法体里裸写方法名就是 `this.foo`（与 `foo()` 补 this 同一条）；基类的方法也算
+      // （第五十六刀）。
+      if (this.selfClass !== owner && !this.isBase(owner, this.selfClass)) {
         return this.err(node, `'${shown(full)}' 是 ${shown(owner)} 的方法，要一个对象才拼得出`
           + '它那一格函数指针');
       }
@@ -4653,7 +4933,7 @@ class JncLower {
       if (countNode !== null) {
         return this.err(n, `不能造类的数组（jancy 那句 "cannot create array of '${tyName(t)}'"）`);
       }
-      const raw = { code: `(pnew (ptr ${t.name}) (int 1))`, type: tClass(t.name, false) };
+      const raw = { code: `(pnew (ptr ${clsRoot(t.name)}) (int 1))`, type: tClass(t.name, false) };
       if (!this.ctors.has(t.name)) {
         // 没有构造：`new C(…)` 带了实参才是错，光 `new C` 就是那一句 pnew。
         if (argsNode !== null && this.flat(argsNode).length > 0) {

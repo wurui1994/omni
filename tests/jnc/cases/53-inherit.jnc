@@ -1,0 +1,117 @@
+// 单继承（第五十六刀）。jancy 的继承是**多**继承（type_class.rst:171-174），这一刀只接
+// 单继承那一格：一条链在方言里共用一格 `(struct …)`（字段是链上的并集），于是 `B* b = d;`
+// 发的是**零条指令** —— 两边本来就是同一个方言类型。虚派发（`virtual`/`override`）不在
+// 这一刀里，那一条记在 bad/class-virtual.jnc。
+
+class Animal {
+	int m_legs;
+
+	construct(int legs) {
+		m_legs = legs;
+	}
+
+	int legs() {
+		return m_legs;
+	}
+
+	int pairs() {
+		// 同一个类里裸写方法名
+		return legs() / 2;
+	}
+}
+
+// 自己写 construct，显式调基类那一个
+class Dog: Animal {
+	int m_barks;
+
+	construct(int barks) {
+		basetype.construct(4);
+		m_barks = barks;
+	}
+
+	// 基类的方法在派生类里裸写就能调（类是一层命名空间，基类那条链另问一遍）
+	int noise() {
+		return m_barks * legs();
+	}
+
+	// `basetype.foo()` 是**静态**绑定：说的就是"调基类那一个"
+	int baseLegs() {
+		return basetype.legs();
+	}
+}
+
+// 三层链：Puppy 的字段表是 Animal ++ Dog ++ 它自己
+class Puppy: Dog {
+	int m_weeks;
+
+	construct(int weeks) {
+		basetype.construct(1);
+		m_weeks = weeks;
+	}
+
+	int total() {
+		return m_legs + m_barks + m_weeks;
+	}
+}
+
+class Bird {
+	int m_wings;
+
+	construct() {
+		m_wings = 2;
+	}
+
+	int wings() {
+		return m_wings;
+	}
+}
+
+// 没写 construct：合成的那一个把基类那一个（不带实参）调一遍
+class Sparrow: Bird {
+	int m_songs;
+
+	int songs() {
+		return m_songs + m_wings;
+	}
+}
+
+// 写了 construct 但没调 basetype.construct：基类那一个不带实参，所以自动补一句
+class Crow: Bird {
+	int m_caws;
+
+	construct(int caws) {
+		m_caws = caws;
+	}
+}
+
+// 上转：形参与返回都收派生类的引用
+int countLegs(Animal* a) {
+	return a.legs();
+}
+
+Animal* pick(int which, Dog* d, Puppy* p) {
+	if (which == 0)
+		return d;
+	return p;
+}
+
+int main() {
+	Dog d(3);
+	printf("%d %d %d %d\n", d.m_legs, d.legs(), d.noise(), d.baseLegs());
+	printf("%d\n", d.pairs());
+
+	Puppy p(7);
+	printf("%d %d %d\n", p.m_legs, p.m_barks, p.total());
+
+	// 上转：变量、实参、返回
+	Animal* a = d;
+	printf("%d %d\n", a.legs(), countLegs(p));
+	printf("%d\n", pick(1, d, p).legs());
+
+	// 合成的构造与自动补的那一句
+	Sparrow s;
+	printf("%d %d\n", s.wings(), s.songs());
+	Crow c(5);
+	printf("%d %d\n", c.m_wings, c.m_caws);
+	return 0;
+}

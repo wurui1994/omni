@@ -1,0 +1,24 @@
+// 多继承（第五十六刀的边界）。jancy 的模型是**多**继承 —— 而且是"共享基类各一份实例"那种
+// （type_class.rst:171-174："a simple multiple inheritance model (multiple instances of
+// shared bases -- if any). The infamous virtual multiple inheritance model of C++ is not
+// and will not be supported"）。它拿 `basetype1` .. `basetype9` 指第几个基类（同一处 :226）。
+//
+// 这一刀只接**单**继承：一条链在方言里共用一格结构体，字段是链上的并集，于是上转发零条指令。
+// 两个基类要的是"同一个对象里有两段基类"加 `basetype1..9`，那是自己一格。
+class I1 {
+	int m_a;
+}
+
+class I2 {
+	int m_b;
+}
+
+class C3: I1, I2 {
+	int m_c;
+}
+
+int main() {
+	C3 c;
+	printf("%d\n", c.m_c);
+	return 0;
+}
