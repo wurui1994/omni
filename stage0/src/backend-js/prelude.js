@@ -637,6 +637,20 @@ function $js_add(a, b) {
   $js_num2("+", a, b);
   return $dynTag(a) === "int" ? $W(a + b) : a + b;
 }
+// 幂的 int 那一支：平方求幂，每一步都回卷。回卷是模 2^64 的环同态，所以这与
+// "先算精确值再回卷"逐位相同，而且不会为了 2n ** 1000000n 去开一块天文数字的内存。
+function $js_ipow(a, b) {
+  if (b < 0n) $rt_error("exponent must not be negative in '**' with bigint operands");
+  let r = 1n;
+  let x = $W(a);
+  let n = b;
+  while (n > 0n) {
+    if ((n & 1n) === 1n) r = $W(r * x);
+    x = $W(x * x);
+    n >>= 1n;
+  }
+  return r;
+}
 function $js_arith(op, a, b) {
   $js_num2(op, a, b);
   const isInt = $dynTag(a) === "int";
@@ -645,6 +659,7 @@ function $js_arith(op, a, b) {
     case "*": return isInt ? $W(a * b) : a * b;
     case "/": return isInt ? $div(a, b) : a / b;
     case "%": return isInt ? $mod(a, b) : $fmod(a, b);
+    case "p": return isInt ? $js_ipow(a, b) : a ** b;
     default: $rt_error("unknown arithmetic op '" + op + "'");
   }
 }

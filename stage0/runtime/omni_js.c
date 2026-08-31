@@ -224,6 +224,21 @@ omni_dyn omni_js_add(omni_dyn a, omni_dyn b) {
   return omni_dyn_of_real(a.u.r + b.u.r);
 }
 
+/* `**` 的 int 那一支：平方求幂，每一步都回卷（omni_mul 就是回卷的乘）。回卷是模 2^64 的
+   环同态，所以这与"先算精确值再回卷"逐位相同 —— 与 JS 侧的 $js_ipow 是同一份算法。 */
+static int64_t js_ipow(int64_t a, int64_t b) {
+  int64_t r = 1, x = a;
+  uint64_t n;
+  if (b < 0) omni_errorf("exponent must not be negative in '**' with bigint operands");
+  n = (uint64_t)b;
+  while (n > 0) {
+    if (n & 1u) r = omni_mul(r, x);
+    x = omni_mul(x, x);
+    n >>= 1;
+  }
+  return r;
+}
+
 omni_dyn omni_js_arith(int op, omni_dyn a, omni_dyn b) {
   want_num(op, a, b);
   if (a.tag == OMNI_DYN_INT) {
@@ -232,6 +247,7 @@ omni_dyn omni_js_arith(int op, omni_dyn a, omni_dyn b) {
       case '*': return omni_dyn_of_int(omni_mul(a.u.i, b.u.i));
       case '/': return omni_dyn_of_int(omni_div(a.u.i, b.u.i));
       case '%': return omni_dyn_of_int(omni_mod(a.u.i, b.u.i));
+      case 'p': return omni_dyn_of_int(js_ipow(a.u.i, b.u.i));
       default: omni_errorf("unknown arithmetic op '%c'", op);
     }
   }
@@ -240,6 +256,7 @@ omni_dyn omni_js_arith(int op, omni_dyn a, omni_dyn b) {
     case '*': return omni_dyn_of_real(a.u.r * b.u.r);
     case '/': return omni_dyn_of_real(a.u.r / b.u.r);
     case '%': return omni_dyn_of_real(fmod(a.u.r, b.u.r));
+    case 'p': return omni_dyn_of_real(pow(a.u.r, b.u.r));
     default: omni_errorf("unknown arithmetic op '%c'", op);
   }
   return omni_dyn_null();

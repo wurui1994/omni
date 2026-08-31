@@ -1241,6 +1241,9 @@ class Lower {
       case '+': return op('js_add', [A(), B()]);
       case '-': case '*': case '/': case '%':
         return op('js_arith', [A(), B()], { op: e.op });
+      // `**` 与别的算术同一格（op 字符 'p'，与 js_math 的 pow 对齐）。int 那一支照样回卷到
+      // 64 位 —— 这个值域里的 int 就是 int64（ADR-0005），不是无界的 BigInt。
+      case '**': return op('js_arith', [A(), B()], { op: 'p' });
       case '<': case '>':
         return op('js_cmp', [A(), B()], { op: e.op });
       case '<=': return op('js_cmp', [A(), B()], { op: 'l' });

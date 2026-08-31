@@ -356,6 +356,15 @@ c('Number/undef', js('js_num_of', [undef]), 'Number(undefined)');
 c('BigInt/real', js('js_bigint_of', [real(7)]), 'BigInt(7)');
 c('BigInt/str', js('js_bigint_of', [str('-9007199254740993')]), 'BigInt("-9007199254740993")');
 c('asIntN', js('js_bigint_as_int_n', [real(64), int(5)]), 'BigInt.asIntN(64, 5n)');
+// `**`（op 'p'）。int 那一支与 `*` 一样**回卷到 64 位**，所以这里只摆装得下的值：
+// 溢出之后与 node 的无界 BigInt 就不同了，那是 ADR-0005 的值语义，对 `*` 也一样。
+c('pow/int', js('js_arith', [int(2), int(10)], { op: 'p' }), '2n ** 10n');
+c('pow/int-odd', js('js_arith', [int(3), int(5)], { op: 'p' }), '3n ** 5n');
+c('pow/int-neg-base', js('js_arith', [int(-2), int(3)], { op: 'p' }), '(-2n) ** 3n');
+c('pow/int-zero', js('js_arith', [int(7), int(0)], { op: 'p' }), '7n ** 0n');
+c('pow/int-62', js('js_arith', [int(2), int(62)], { op: 'p' }), '2n ** 62n');
+c('pow/real', js('js_arith', [real(2), real(0.5)], { op: 'p' }), '2 ** 0.5');
+c('pow/real-neg', js('js_arith', [real(2), real(-2)], { op: 'p' }), '2 ** -2');
 c('math/max', js('js_math', [real(3), real(7)], { op: 'M' }), 'Math.max(3, 7)');
 c('math/max-nan', js('js_math', [real(NaN), real(7)], { op: 'M' }), 'Math.max(NaN, 7)');
 c('math/min', js('js_math', [real(3), real(-7)], { op: 'm' }), 'Math.min(3, -7)');
