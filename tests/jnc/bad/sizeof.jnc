@@ -1,0 +1,22 @@
+// `sizeof`（第四十五刀的边界）。它在 jancy 那边与 `countof` 是同一族的编译期常量
+// （`resultValue->setConstSizeT(type->getSize())`，jnc_ct_OperatorMgr.cpp:952），
+// 拦它的不是"算不出来"，是**算出来是几**这件事两边对不上：
+//
+//   jancy 的字节数是它自己那张表：int8=1 / int16=2 / int32=4 / int64=8 / float=4 /
+//   double=8（`setupPrimitiveType`，jnc_ct_TypeMgr.cpp:1727-1736，与 C 同）。
+//   方言这边一格整数**一律 8 字节**（hir/types.js:144，ADR-0016 决策二定的"一套语义、
+//   两套实现"要求尺寸由那一层定死）。
+//
+// 于是 `sizeof(int)` 照 jancy 写是 4、照这块内存里真占的字节写是 8。挑哪个都会错一处：
+// 语料里 `sizeof(buffer) - 1` 当的是"这块内存有多大"（90_SslSocket.jnc:121），
+// 那必须与真布局一致；而 `printf("sizeof (d) = %d", sizeof(d))`（60_HexLiterals.jnc:53）
+// 要的是 jancy 打印出来的那个数。两个同时对的前提是**方言的布局先认整数宽度** ——
+// 那要动 sizeOf/alignOf、DataView 的读写宽度、C 那条腿的结构体、`psub`，五条腿一起，
+// 是独立的一刀。所以这一刀先明说不收，而不是悄悄挑一个。
+//
+// `countof` 没有这个问题：元素个数与一格占几个字节无关，所以它这一刀就落地了。
+int main() {
+	int a[4];
+	printf("%d\n", sizeof(a));
+	return 0;
+}

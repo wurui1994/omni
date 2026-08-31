@@ -2145,6 +2145,54 @@ short / unsigned short"，所以 `printf("%hu", -1)` 本身就有定义。
 那一段（加 `tests/jnc/run.js` 的头注释），语法、方言、MIR、四个后端与运行时一个字都没改；
 自举、`tests/jit`、`tests/mir`、`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
 
+### 第四十五刀：`countof` 落地，`sizeof` 明说不收 —— 一族里的两个，卡点不在同一处
+
+这一刀的选题是**量出来的**，不是猜的：把 662 份语料逐份过一遍 `sx`，把每一句「还不收：…」
+按出现次数排了个序。表达式那一族里最前面两个就是
+`sizeof`（30 处）与 `countof`（23 处），后面才是 `dynamic-cast`（7）、`dynamic-sizeof`（6）。
+两个的语法早就在（`jnc.grammar:646-647`），拒它们的只有降级那一层 —— 又是"批量探针"那个形状。
+
+**它们在 jancy 里是一件事**：`sizeofOperator` / `countofOperator` 都只用操作数问**类型**
+（`prepareOperandType(..., OpFlag_LoadArrayRef)`），然后 `setConstSizeT(...)` ——
+一个编译期的 size_t 常量，操作数**不求值**（`jnc_ct_OperatorMgr.cpp:931-987`）。
+所以这一层也不该发出操作数的代码：`countofExpr` 只走 lvalue 那几种形状（名字/下标/字段/
+`*p`），别的形状（`countof(f())`）当场说不收，而不是求一遍值再把它丢掉。
+`countof(a[0])` 正好落在 lvalue 的 index 支上 —— 多维数组在那儿退一维，元素个数就是里层那个。
+
+**可两个的卡点不在同一处**，所以这一刀只落地一个：
+
+- `countof` 给的是**元素个数**，与一格占几个字节无关，所以它是纯的：数组类型里那个 `n`
+  照抄成 `(int N)`，类型按 size_t（这个前端把 `size_t` 当 64 位）。
+- `sizeof` 给的是**字节数**，而字节数两边对不上：jancy 的表是 int8=1 / int16=2 / int32=4 /
+  int64=8 / double=8（`setupPrimitiveType`，`jnc_ct_TypeMgr.cpp:1727-1736`，与 C 同），
+  方言这边一格整数**一律 8 字节**（`hir/types.js:144` —— 决策二"一套语义、两套实现"要求
+  尺寸由那一层定死）。于是 `sizeof(int)` 照 jancy 是 4、照真布局是 8。挑哪个都会错一处：
+  `sizeof(buffer) - 1` 当的是"这块内存有多大"（`90_SslSocket.jnc:121`），必须与真布局一致；
+  而 `printf("sizeof (d) = %d", sizeof(d))`（`60_HexLiterals.jnc:53`）要的是 jancy 印出来
+  的那个数。两个同时对的前提是**方言的布局先认整数宽度** —— 那要动 `sizeOf`/`alignOf`、
+  DataView 的读写宽度、C 那条腿的结构体、`psub`，五条腿一起，是独立的一刀。
+
+这一格是「jancy 支持不可向方言妥协」的一个**新形状**：以前的冲突都在语法上，方言长一格就完了；
+这一次冲突在**内存模型**上，长的那一格要动五条腿。所以这一刀的做法是明说不收、把理由与那两条
+出处写在 `bad/sizeof.jnc` 里，而不是悄悄挑一个数糊过去 —— 后者会让 30 处语料**静默**地错。
+
+**边界**：`sizeof`（同上）、`dynamic countof` / `dynamic sizeof`（jancy 那边是运行期调用
+`StdFunc_DynamicCountOf`，读 fat 指针自己带的 validator 范围，`jnc_ct_OperatorMgr.cpp:968-977`；
+方言的 fat 指针本来就带 `{addr, base, end}` 三个字，缺的只是"(end - base) / 元素步长"那一句 ——
+元素步长要 `sizeof` 那一刀）、`countof` 作用在指针上（**jancy 自己也拒**，它的那一句就是
+"'countof' operator is only applicable to arrays"）。三条各有一份 `bad/`。
+
+**期望输出的出处**：一份 `cc -O0 -std=c99 -Wall` 的孪生，七行逐字节相同。**写法差异**一处：
+jancy 写 `countof(x)`，C 里写 `sizeof(x)/sizeof(x[0])` —— 算的是同一件事；C 那边 `%d` 配
+size_t 还要一次显式 `(int)`。
+
+**跑过的轴**：`tests/jnc`（67/0，新增 `cases/42-countof` 与 `bad/countof-ptr`、`bad/sizeof`、
+`bad/dynamic-countof`）。
+**没跑的**：`tests/sexpr`、`tests/glr`、`tests/asy`、`tests/oir` —— 只在
+`frontend-jnc/lower.js` 的表达式派发上加了两支（加 `tests/jnc/run.js` 的头注释），
+语法一个字没改（`countof` 那条产生式本来就在）、方言、MIR、四个后端与运行时也没动；
+自举、`tests/jit`、`tests/mir`、`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
+
 ## 后果与代价
 
 - 方言从"没有可算术的引用"变成"有"。这一格会渗到 MIR 与四个后端，改不回去。

@@ -2924,6 +2924,18 @@ class JncLower {
       // 于是它仍旧是一个表达式，惰性位置上也成立。见 newCurly。
       case 'new-curly': return this.newCurly(n, n.items[1], n.items[2]);
 
+      // `countof(a)`（第四十五刀）：编译期的元素个数，见 countof。
+      case 'countof': return this.countofExpr(n, n.items[1]);
+      // `sizeof(x)` 在 jancy 那边也是编译期常量（`type->getSize()`，
+      // jnc_ct_OperatorMgr.cpp:952），可它给出的**字节数**是 jancy 自己那张表：
+      // int8=1 / int16=2 / int32=4 / int64=8 / double=8（jnc_ct_TypeMgr.cpp:1727-1736）。
+      // 方言这边一格整数一律 8 字节（hir/types.js:144，ADR-0016 决策二），于是
+      // `sizeof(int)` 照 jancy 写是 4、照方言里真占的字节写是 8 —— 两个都不能算错。
+      // 语料里 `sizeof(buffer) - 1` 当的是"这块内存有多大"，所以它必须与真布局一致；
+      // 要两边同时对，得先让方言的布局认整数宽度。那是另一刀，这一刀先明说不收。
+      case 'sizeof':
+        return this.nope(n, 'sizeof —— 要方言的布局先认整数宽度（jancy 的 int 是 4 字节，方言这边一格 8 字节）');
+
       case 'cast': return this.cast(n, n.items[1], n.items[2]);
       case 'cond': return this.ternary(n, want);
       case 'addr':
@@ -2937,6 +2949,38 @@ class JncLower {
 
   /** `(indirect p)` / `(index p i)` 复用 lvalue 那一份 —— 读写两侧算的是同一个地址。 */
   derefLv(n) { return this.lvalue(n); }
+
+  /**
+   * `countof(a)`（第四十五刀）—— **编译期**的元素个数。
+   *
+   * jancy 那边一个字都不多做：`countofOperator` 拿操作数只为了问它的类型
+   * （`prepareOperandType(..., OpFlag_LoadArrayRef)`），不是数组就报
+   * "'countof' operator is only applicable to arrays"，是数组就
+   * `setConstSizeT(getElementCount())` —— 一个 size_t 常量
+   * （jnc_ct_OperatorMgr.cpp:963-986）。所以操作数**不求值**，这儿也不该发出它的代码。
+   *
+   * 于是只走 lvalue 那几种形状：那一族算的是"这个东西在哪一格内存里"，
+   * 名字/下标/字段都是纯的（`a[0]` 这种多维的那一层正好在 lvalue 的 index 支上退一维）。
+   * 别的形状（`countof(f())`、`countof(int)`）当场说不收，而不是求一遍值再把它丢掉。
+   */
+  countofExpr(n, x) {
+    if (!isList(x)) return this.nope(n, 'countof 的操作数不是一个数组变量');
+    const h = head(x);
+    if (h === 'type-name' || h === 'fn-type') return this.nope(n, 'countof 作用在类型名上');
+    if (h !== 'name' && h !== 'index' && h !== 'field' && h !== 'ptr-field' && h !== 'indirect') {
+      return this.nope(n, `countof(${h} …) —— 只收名字/下标/字段这几种不用求值的形状`);
+    }
+    const lv = this.lvalue(x);
+    if (lv === null) return null;
+    // jancy 自己的那句话（jnc_ct_OperatorMgr.cpp:981）：只能作用在数组上。指针不算 ——
+    // 指针要的是 `dynamic countof`（那要 fat 指针带的范围，还不收）。
+    if (!isArr(lv.type)) {
+      return this.err(n, `countof 只能作用在数组上，这里是 ${tyName(lv.type)}`);
+    }
+    if (lv.type.n === null) return this.err(n, 'countof 作用在长度还没定下来的数组上');
+    // size_t —— 这个前端把它当 64 位（见 typeOf 里 `size_t` 那一行）。
+    return { code: `(int ${lv.type.n})`, type: J_I64 };
+  }
 
   /**
    * `&E`（第九刀）。**一条规则管全部**：`lvalue(E)` 已经把每种可写位置算成"名字"或

@@ -1,0 +1,10 @@
+// `countof` 作用在指针上 —— **jancy 自己也拒**，所以这条落地了也还是拒。
+// 它的那一句：「'countof' operator is only applicable to arrays, not to '%s'」
+// （jnc_ct_OperatorMgr.cpp:980-982）。指针要的是 `dynamic countof`，那读的是 fat 指针
+// 自己带的范围（14_DynamicSizeof.jnc:26-28），另见 bad/dynamic-countof.jnc。
+int main() {
+	int a[3];
+	int* p = a;
+	printf("%d\n", countof(p));
+	return 0;
+}

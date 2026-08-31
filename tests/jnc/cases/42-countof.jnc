@@ -1,0 +1,52 @@
+// 第四十五刀：`countof` —— 编译期的元素个数。
+//
+// 出处（jancy 自己的实现）：`countofOperator` 拿操作数只为了问它的类型，不是数组就报
+// "'countof' operator is only applicable to arrays"，是数组就 `setConstSizeT(
+// ((ArrayType*)type)->getElementCount())` —— 一个 size_t 常量
+// （jnc_ct_OperatorMgr.cpp:963-986）。语法早就在：jnc.grammar 的
+// `(-> ("countof" "(" type-or-expr ")") (countof $3))`，那儿的 `(prefer -1)` 让
+// `countof(a)` 里的 a 走表达式那条路（一个数组变量），这一刀补的只是降级。
+//
+// 期望输出的出处：/tmp/e45.c 那份 `cc -O0 -std=c99 -Wall` 的孪生件，逐字节相同。
+// **写法差异**：jancy 写 `countof(x)`，C 里写 `sizeof(x)/sizeof(x[0])` —— 两边算的是
+// 同一件事（数组的元素个数，编译期常量）。C 那边 `%d` 配 size_t 还要一次显式 `(int)`。
+//
+// 语料里它就是这么用的：samples/jnc/83_BreakN.jnc:35-36 的
+// `for (i = 0; i < countof(a); i++)` 与 `countof(a[0])`（多维退一维那格），
+// samples/jnc/10_DataPtrRange.jnc:46、82_Once.jnc:66、doc/language/rst/cflow_break.rst:25。
+struct P {
+	int v[6];
+}
+
+int g[5];
+
+int main() {
+	int a[3];
+	int i;
+	int s = 0;
+
+	for (i = 0; i < countof(a); i++)
+		a[i] = i * 2;
+
+	for (i = 0; i < countof(a); i++)
+		s += a[i];
+
+	printf("a=%d s=%d\n", countof(a), s);
+
+	int b[2][4];
+	printf("b=%d b0=%d\n", countof(b), countof(b[0]));
+	printf("g=%d\n", countof(g));
+
+	char c[8];
+	printf("c=%d\n", countof(c));
+
+	P p;
+	printf("p=%d\n", countof(p.v));
+
+	size_t n = countof(a) + countof(b);
+	printf("n=%d\n", n);
+
+	int d[] = { 7, 8, 9, 10 };
+	printf("d=%d\n", countof(d));
+	return 0;
+}

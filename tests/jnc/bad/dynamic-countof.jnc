@@ -1,0 +1,15 @@
+// `dynamic countof`（第四十五刀的边界）。语法早就在（jnc.grammar 的
+// `(-> ("dynamic countof" "(" expr ")") (dynamic-countof $3))`），拦它的是运行期那一半：
+// jancy 那边它是一次**运行期调用** `StdFunc_DynamicCountOf`，参数是那个 fat 指针
+// （jnc_ct_OperatorMgr.cpp:968-977），读的是指针自己带的 validator 范围
+// （14_DynamicSizeof.jnc 开头那段：range information in validators）。
+//
+// 方言的 fat 指针是三个字，次序 `{addr, base, end}`（hir/types.js:87-88），范围本来就在
+// 那儿 —— 所以这一格是**能**做的，缺的只是"把 (end - base) / 元素步长"这一句放进哪个方言
+// 算子。等 `sizeof` 那一刀把整数宽度的布局定下来再一起做：元素步长要它。
+int main() {
+	int a[3];
+	int* p = a;
+	printf("%d\n", dynamic countof(p));
+	return 0;
+}
