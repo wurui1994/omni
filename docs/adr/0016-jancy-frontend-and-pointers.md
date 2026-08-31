@@ -1882,6 +1882,24 @@ iterable`。派发那几条本来就是这个形状，改成 `(if C (do (set …
 **上一刀那次成批探到此清完三条，只剩 `enum`**。它值钱得多也大得多：命名空间、`bitflag`、
 基类型，还要与 `case Request.Terminate:` 共用一格编译期求值。
 
+> **下一刀的量已经做完了**（`type_enum.rst` 全文 + `jnc_ct_CastOp_Int.cpp:295-311`），记在这儿
+> 免得重查：
+>
+> - **成员是带命名空间的**：`Color.Red`，不往父命名空间里漏（type_enum.rst:17）。
+> - **可以指定基类型**：`enum IcmpType: uint8_t { … }`（同上，21 行那个例子）。
+> - **自动取值** 0、1、2……；写了显式值之后从那儿接着数。
+> - **`enum -> 整数` 是隐式的**：`getArithmeticOperatorResultType` 见到 `TypeKind_Enum` 会递归到
+>   基类型（`jnc_ct_UnOp_Arithmetic.cpp:39`）。
+> - **`整数 -> enum` 要显式**：`state = 100;` 在文档里就标着 "error: cast int->enum must be
+>   explicit"（type_enum.rst:60）。`Cast_Enum::getCastKind` 只在"源是本枚举的基枚举"或
+>   "bitflag 且值是 0"这两种情况下给 `CastKind_Implicit`，别的都是 `CastKind_Explicit`
+>   （`jnc_ct_CastOp_Int.cpp:306-310`）。
+> - **`bitflag enum` 是另一格**：自动取值是 1、2、4、8……；两个同型 bitflag 的 `|` 还是那个
+>   枚举；bitflag 与整数的 `&` 还是那个枚举；`0` 可以直接赋给它（type_enum.rst:66-73）。
+> - **`pragma(ExposedEnums, true)`** 把成员漏进父命名空间，是为了移植 C 代码（type_enum.rst:43）。
+>
+> 按这个量，规矩的 enum 先做，`bitflag` 与 `pragma(ExposedEnums)` 各划一条边界。
+
 **跑过的轴**：`tests/jnc`（57/0，新增 `cases/37-typedef` 与 `bad/typedef-fn`）。
 **没跑的**：`tests/sexpr`、`tests/glr`、`tests/asy` —— 只动了 `frontend-jnc/lower.js`
 （加 `tests/jnc/run.js` 的头注释），语法、方言、MIR、四个后端与运行时一个字都没改；自举、
