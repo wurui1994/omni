@@ -1,0 +1,90 @@
+// 第六十九刀：类的成员属性。
+//
+// 第六十八刀把属性的机器摆好了（读走 getter、写走 setter），可只接了**顶层**那一格。成员
+// 属性差的是"哪一个对象"：jancy 的属性与方法一样是类的成员，取/存那两个函数第一个实参是
+// `this`（第五十二刀那条）。于是三处要接上：
+//   `b.m_value` 的读挂在取字段那一处、`b.m_value = x` 的写挂在赋值那一处（都要排在
+//   lvalue 之前 —— 属性没有"可写的那一格"），方法体里裸写属性名补 `this`。
+//
+// 取/存的体两种放法都收（prop_simple.rst:21-31 那句 "declaring interfaces or when the
+// developer prefers to follow the C++-style of placing definitions outside of a class"）：
+// 写在类体里（`int m_value.get() { … }`，test42.jnc:27）与写在类外（`int Tag.m_double.get()`，
+// test150.jnc:16）。基类的属性派生类里也读得着（沿基类链找，与 findMethod 同一条）。
+//
+// `autoget`、`bindable`、`event`、`indexed`、完整声明式 `property { … }`、存值器的重载与
+// 虚属性都还不收 —— 各是自己一刀。
+//
+// 期望输出的出处：/tmp/c65.c（`cc -O0 -std=c99 -Wall`）。
+
+class Box {
+	int m_raw;
+	int m_hits;
+
+	int property m_value;
+
+	construct() {
+		m_raw = 5;
+		m_hits = 0;
+	}
+
+	// 简单声明式的体写在别处 —— 这儿的"别处"就是类体里
+	int m_value.get() {
+		m_hits++;
+		return m_raw + 1;
+	}
+
+	void m_value.set(int x) {
+		m_raw = x * 2;
+	}
+
+	// 方法体里裸写属性名：`this` 由这一层补上（与裸写字段名、裸写方法名同一条）
+	int twice() {
+		return m_value * 2;
+	}
+
+	void bump() {
+		m_value = m_value + 1;
+	}
+}
+
+// 基类的属性（一条继承链共用一格方言结构体，所以 `this` 那一格同型）
+class Derived: Box {
+	int mine() {
+		return m_value + 100;
+	}
+}
+
+// 体外写的取值器（C++ 式的放法）。没有存值器的就是 const 属性（prop.rst:17）。
+class Tag {
+	int m_n;
+
+	int const property m_double;
+
+	construct() {
+		m_n = 3;
+	}
+}
+
+int Tag.m_double.get() {
+	return m_n * 2;
+}
+
+int main() {
+	Box b;
+	printf("%d\n", b.m_value);
+	b.m_value = 10;
+	printf("%d %d\n", b.m_value, b.m_raw);
+	printf("%d\n", b.twice());
+	b.bump();
+	printf("%d\n", b.m_value);
+
+	Derived d;
+	printf("%d\n", d.mine());
+
+	Tag t;
+	printf("%d\n", t.m_double);
+
+	// 读一次就是一次调用（不是一格缓存下来的内存）
+	printf("hits=%d\n", b.m_hits);
+	return 0;
+}

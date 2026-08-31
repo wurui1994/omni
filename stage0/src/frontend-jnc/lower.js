@@ -403,6 +403,18 @@ function specialCore(dcl) {
   return isStr(core.items[1]) || isAtom(core.items[1]) ? core.items[1].value : h;
 }
 
+/** 这个声明符是**属性的**取/存吗（第六十九刀）：`m_v.get()` 名字写在前面（语法上那是
+ *  `qualified-special`），而类体里裸写的 `int get(int i)` / `void set(int i, int v)` 是
+ *  **下标运算符**（test90.jnc:12-24 里 `c[10] = 100` 走的就是它），与属性没关系 ——
+ *  那一格照旧由 typeDecl 报"还不收"，不能混进属性这条路里。 */
+function accessorNamed(dcl) {
+  if (!isList(dcl) || head(dcl) !== 'dcl') return false;
+  const core = dcl.items[2];
+  if (!isList(core) || head(core) !== 'qualified-special') return false;
+  const sk = specialCore(dcl);
+  return sk === 'get' || sk === 'set';
+}
+
 /**
  * 数组退化成指针。jancy 的 `int* p = a;`（type_ptr_data.rst:31）就是它 —— 数组这一格里躺的
  * 是**一整块**的地址（`(ptr (blk T N))`，第十九刀），所以退化是方言的一句 `(pelem …)`：
@@ -784,6 +796,14 @@ class JncLower {
     // 属性（第六十八刀）。名字 -> {type, cls, cst, get, set}：`cls` 是它属于哪个类
     // （顶层的属性是 null），`cst` 是"只有取"（`T const property p`）。
     this.props = new Map();
+    // 类体里那些成员属性的待办（第六十九刀）：{it, ns}。类体是在 typeDecl 那一遍看的，而
+    // 属性的名字要坐在**签名那一遍之前** —— 于是那一遍只把它们记下来，登记与顶层那一格
+    // 合在同一处（见 run 里属性那一遍）。
+    this.propPend = [];
+    // 成员属性的**裸名**（第六十九刀）。`obj.p` 那一处要在"把左边当值算"之前问一句"右边这个
+    // 名字有没有可能是属性" —— 与 methodNames（第五十五刀）同一个用处：没这一格就得为每一次
+    // 取字段都把左边算一遍。
+    this.propNames = new Set();
     // `opaque class` 的名字（第六十六刀）。见 typeName 那处的注释：这一层不读它。
     this.opaques = new Set();
     // 宿主那边的成员（第六十六刀）：`hostFns` 是方法的裸名 -> 类名，`hostCtors` 是
@@ -1264,10 +1284,14 @@ class JncLower {
       // 特殊成员里 `construct` 与 `static construct` **也提**（第五十三刀）：它们与普通方法
       // 一样就是"类那一层里的一格函数"，只是名字由 fnSig0 拼成 `C$construct`，而体外写法
       //（`C.construct() { … }`）本来就是顶层的一条 —— 两条路于是又落在同一格上。
-      // 剩下那些（`destruct` / `get` / `set`）不提，由 typeDecl 那一遍就地报"还不收"。
+      // 属性的取/存从第六十九刀起也在提上去的那一批里：写在类体里的 `int p.get() { … }`
+      //（test42.jnc:27）与写在类外的 `int C.p.get() { … }`（test150.jnc:16）同理是一格函数，
+      // 名字由 propSig 拼成 `C$p$get`。**名字得写在前面** —— 裸写的 `get` 是下标运算符
+      //（见 accessorNamed）。剩下那些（`destruct`）不提，由 typeDecl 就地报。
       if (h === 'fn-def') {
         const sk = specialCore(m.items[2]);
-        if (sk === null || sk === 'construct' || sk === 'static construct') {
+        if (sk === null || sk === 'construct' || sk === 'static construct'
+          || accessorNamed(m.items[2])) {
           out.push({ ns: inner, it: m });
         }
         continue;
@@ -1318,6 +1342,12 @@ class JncLower {
     for (const e of items) {
       if (!isList(e.it) || head(e.it) !== 'var-decl') continue;
       if (!this.propMod(e.it.items[1])) continue;
+      this.ns = e.ns;
+      this.propName(e.it);
+    }
+    // 类体里那些成员属性（第六十九刀）：上面那一遍（typeDecl）把它们攒在 propPend 里，登记
+    // 走的是同一份代码 —— 那时 `ns` 是类名，于是 `qual` 拼出来就是 `C$p`。
+    for (const e of this.propPend) {
       this.ns = e.ns;
       this.propName(e.it);
     }
@@ -1470,9 +1500,20 @@ class JncLower {
    * 抄来的，而模块级变量那一遍（globalDecl）在签名之后跑，来不及。
    */
   propName(n) {
-    const sp = this.specs(n.items[1]);
+    // 这儿要 `allowVirt`（第六十九刀）：`errorcode` 与 `virtual` 写在属性上 jancy 都收，
+    // 所以不能让 specs 拿"只能写在函数上"把它们挡掉 —— 那句话对属性是**认错了人**。
+    // 收下来之后就地拒，理由说清楚。
+    const sp = this.specs(n.items[1], true);
     if (sp === null) return null;
     if (sp.stat) return this.nope(n, '`static` 写在属性上');
+    // `errorcode` 那一位在 jancy 那边落在**取/存那两个函数**的类型上（属性也进 vtable，所以
+    // `virtual` 同理）。这一层的 errorcode 是按函数名记的一张表、虚派发是按方法名接的一格
+    // 标签，而属性那两个函数的名字是这一层自己拼的（`p$get`）—— 两条都还接不上。
+    if (sp.errc) {
+      return this.nope(n, '`errorcode` 写在属性上（那一位落在取/存那两个函数上，'
+        + '而这一层的 errorcode 是按函数名记的）');
+    }
+    if (sp.virt !== null) return this.nope(n, `'${sp.virt}' 写在属性上`);
     for (const d of this.flat(n.items[2])) {
       if (isList(d) && head(d) === 'init') { this.nope(d, '属性的初值'); continue; }
       const info = this.declarator(d, sp);
@@ -1482,14 +1523,13 @@ class JncLower {
       if (info.formals !== null) { this.nope(d, '带形参表的属性'); continue; }
       const full = this.qual(info.name);
       if (this.props.has(full)) { this.err(d, `属性 '${shown(full)}' 声明了两次`); continue; }
-      // 类的成员属性：`qual` 已经把类名拼在前面了（类体里那些成员在 nsFlat 那一遍提到
-      // 顶层时 ns 就是这个类），所以这儿只要问"前一格是不是类"。
+      // 类的成员属性（第六十九刀）：`qual` 已经把类名拼在前面了（类体里那一批是 propPend
+      // 送过来的，那时 ns 就是这个类），所以这儿只要问"前一格是不是类"。`cls` 非 null 的
+      // 那些取/存两个函数多一格 `this`（见 propSig），读写时那一格从对象或 `this` 来。
       const cut = full.lastIndexOf('$');
       const owner = cut < 0 ? null : full.slice(0, cut);
       const cls = owner !== null && this.classes.has(owner) ? owner : null;
-      // 类的成员属性还不收（第六十八刀只做顶层那一格）：`obj.p` 的读与写要挂在取字段那
-      // 两处（一处在 `field`、一处在 lvalue），加"方法体里裸写属性名补 this"，是自己一刀。
-      if (cls !== null) { this.nope(d, `类的成员属性 '${info.name}'`); continue; }
+      if (cls !== null) this.propNames.add(full.slice(cut + 1));
       this.props.set(full, { type: info.type, cls, cst: sp.cst, get: false, set: false });
     }
     return null;
@@ -1918,7 +1958,8 @@ class JncLower {
       if (isList(m) && head(m) === 'fn-def') {
         if (!cls) { this.nope(m, '结构体里的方法'); continue; }
         const sk = specialCore(m.items[2]);
-        if (sk !== null && sk !== 'construct' && sk !== 'static construct') this.specialNope(m, sk);
+        if (sk !== null && sk !== 'construct' && sk !== 'static construct'
+          && !accessorNamed(m.items[2])) this.specialNope(m, sk);
         continue;
       }
       // 体内只写原型、体外补上（`void C.foo();` + `void C.foo() { … }`）—— 两种放法
@@ -1941,14 +1982,22 @@ class JncLower {
       }
       const sp = this.specs(m.items[1], cls);
       if (sp === null) continue;
-      // 成员属性还不收（第六十八刀只做顶层那一格）：`obj.p` 的读要挂在取字段那一处、写要挂
-      // 在 lvalue 那一处，方法体里裸写属性名还要补 `this`。**这一条必须在这儿拦** ——
-      // 不拦它就会被当成一格普通字段，那是"悄悄换了意思"。
+      // 成员属性（第六十九刀）：它**不是一格字段** —— 不在这儿把它挑出来就会被当成一格普通
+      // 内存，那是"悄悄换了意思"。登记留给下面那一格（run 里属性那一遍，排在签名之前），
+      // 这儿只把节点连当时的 ns（就是这个类）攒起来。
       if (sp.prop) {
-        for (const pd of this.flat(m.items[2])) {
-          const pi = this.declarator(pd, sp);
-          this.nope(pd, `${cls ? '类' : '结构体'}的成员属性 '${pi === null ? '?' : pi.name}'`);
+        // 结构体的成员属性不收：类才是一层命名空间，而取/存那两个函数要从那一层查过来
+        //（`C.p.get()` 里的 `C.` 与体内裸写 `p.get()` 是同一条路，第五十二刀）。
+        if (!cls) {
+          for (const pd of this.flat(m.items[2])) {
+            const pi = this.declarator(pd, sp);
+            this.nope(pd, `结构体的成员属性 '${pi === null ? '?' : pi.name}'`);
+          }
+          continue;
         }
+        // `virtual` / `errorcode` 写在属性上那两条不在这儿拦 —— 与顶层那一格合在 propName 里，
+        // 一处一句（见那儿的注释）。
+        this.propPend.push({ it: m, ns: this.ns });
         continue;
       }
       // `static int m_table[10];` —— 静态字段是**类那一格上的**变量，不在对象里
@@ -2123,6 +2172,18 @@ class JncLower {
     while (cur !== null && cur !== undefined) {
       const full = `${cur}$${mn}`;
       if (this.fns.has(full)) return full;
+      cur = this.bases.get(cur);
+    }
+    return null;
+  }
+
+  /** 从这个类起沿基类链找一格属性（第六十九刀）：与 findMethod 同一条 —— 派生的遮住基类的。
+   *  回的是 props 里那个名字（`Base$m_a`），找不着回 null。 */
+  findProp(cls, pn) {
+    let cur = cls;
+    while (cur !== null && cur !== undefined) {
+      const full = `${cur}$${pn}`;
+      if (this.props.has(full)) return full;
       cur = this.bases.get(cur);
     }
     return null;
@@ -2797,21 +2858,72 @@ class JncLower {
     if (h !== 'name' && h !== 'field') return null;
     const nm = this.dotted(n);
     if (nm === null) return null;
-    return this.resolve(nm, (k) => this.props.has(k));
+    return this.propBare(nm);
+  }
+
+  /** 方法体里裸写的属性名（第六十九刀）：先按命名空间从里往外查（类是一层命名空间，所以
+   *  `C$m_a` 这一格 resolve 就找着了），查不着再沿**基类链**找一格 —— resolve 不走继承链，
+   *  与 callName 里裸写方法名那一条（findMethod）是同一个形状。 */
+  propBare(nm) {
+    const q = this.resolve(nm, (k) => this.props.has(k));
+    if (q !== null) return q;
+    if (this.selfClass === null || nm.includes('.')) return null;
+    return this.findProp(this.selfClass, nm);
+  }
+
+  /**
+   * `obj.p` 里那个 p 是**成员属性**吗（第六十九刀）。是就把属性的全名与那格对象一起回；
+   * 左边不是类、或者那条继承链上没有这个属性时回 undefined —— 那条路继续当"取字段"走，
+   * 诊断留给那一处发。左边算不出来回 null。与第五十五刀的 methodRef 是同一个形状。
+   */
+  propMember(n, mn) {
+    const ob = n.items[1];
+    let bv = null;
+    if (isList(ob) && LV_SHAPES.has(head(ob))) {
+      const o = this.lvalue(ob);
+      if (o === null) return null;
+      bv = { code: this.read(o), type: o.type };
+    } else {
+      bv = this.expr(ob, null);
+      if (bv === null) return null;
+    }
+    if (!isClass(bv.type)) return undefined;
+    const pn = this.findProp(bv.type.name, mn);
+    if (pn === null) return undefined;
+    return { pn, self: bv.code };
+  }
+
+  /**
+   * 属性那两个函数的第一个实参（第六十九刀）：成员属性要一格对象。
+   *
+   * `obj.p` 那一处已经把对象算出来了，直接传进来；方法体里裸写属性名时补 `this` —— 与第
+   * 五十二刀给 `foo()` 补 this 是同一条，基类的属性也算（一条继承链共用一格方言结构体，
+   * 所以 `this` 那一格与基类那一格同型）。顶层的属性回空串。
+   */
+  propSelf(n, pn, pi, self) {
+    if (pi.cls === null) return '';
+    if (self !== null) return ` ${self}`;
+    if (this.selfClass !== pi.cls && !this.isBase(pi.cls, this.selfClass)) {
+      this.err(n, `'${shown(pn)}' 是 ${shown(pi.cls)} 的属性，要一个对象才读得着`);
+      return null;
+    }
+    return ' (var $this)';
   }
 
   /**
    * 读一格属性（第六十八刀）：就是调取值器。属性在源码里长得像变量，所以这一问挂在
-   * "名字查不着变量"之后 —— 见 `case 'name'`。
+   * "名字查不着变量"之后 —— 见 `case 'name'`。成员属性多传一格对象（第六十九刀）。
    */
-  propGet(n, pn) {
+  propGet(n, pn, self = null) {
     const pi = this.props.get(pn);
     const g = `${pn}$get`;
     if (!this.fns.has(g)) {
       return this.nope(n, `读属性 '${shown(pn)}' —— 它的取值器没有定义`
         + '（简单声明式的体写在别处：`T p.get() { … }`，prop_simple.rst:25）');
     }
-    return { code: `(call ${g})`, type: pi.type };
+    const sf = this.propSelf(n, pn, pi, self);
+    if (sf === null) return null;
+    return { code: `(call ${g}${sf})`, type: pi.type };
   }
 
   /**
@@ -2820,7 +2932,7 @@ class JncLower {
    * 复合赋值（`p += 1`）还不收：jancy 那边它是"先读一次再写一次"，而这一层的赋值降成
    * 方言的一句 —— 两次调用摆不进去。const 属性（没有存值器）写不了，那是 prop.rst:17。
    */
-  propSet(n, pn, op, valNode, pad) {
+  propSet(n, pn, op, valNode, pad, self = null) {
     const pi = this.props.get(pn);
     if (op !== '=') {
       return this.nope(n, `属性上的复合赋值 '${op}'（jancy 那边是先读一次再写一次，`
@@ -2834,6 +2946,8 @@ class JncLower {
       return this.nope(n, `写属性 '${shown(pn)}' —— 它的存值器没有定义`
         + '（简单声明式的体写在别处：`p.set(T x) { … }`，prop_simple.rst:29）');
     }
+    const sf = this.propSelf(n, pn, pi, self);
+    if (sf === null) return null;
     let v = this.expr(valNode, pi.type);
     if (v === null) return null;
     if (isInt(v.type) && isInt(pi.type)) v = intConv(v, pi.type);
@@ -2841,7 +2955,7 @@ class JncLower {
       return this.err(n, `属性 '${shown(pn)}' 是 ${tyName(pi.type)}，`
         + `这儿给的是 ${tyName(v.type)}`);
     }
-    return [`${pad}(expr (call ${s} ${v.code}))`];
+    return [`${pad}(expr (call ${s}${sf} ${v.code}))`];
   }
 
   /**
@@ -3828,7 +3942,16 @@ class JncLower {
           };
         }
       }
-      if (r === null) return this.err(n, `未声明的变量 '${nm}'`);
+      if (r === null) {
+        // 属性不是一格内存（第六十九刀，与 memberOf 里那一条同一句）：`g_p++`、`&g_p` 落到
+        // 这儿来。报"未声明"是认错了人 —— 那个名字在，只是它那一格要走取/存两个函数。
+        const pq = this.propBare(nm);
+        if (pq !== null) {
+          return this.nope(n, `属性 '${shown(pq)}' 当一格可写的内存用 —— 读写各是一次调用，`
+            + '`++`、`&` 与复合赋值这类"就地改"的写法这一层接不上');
+        }
+        return this.err(n, `未声明的变量 '${nm}'`);
+      }
       const t = r.type;
       // 它在方言里叫什么：`static` 的局部量那一格是模块级的、名字带函数名（第二十六刀），
       // 别的名字要过一遍 alias（结构体形参的那份拷贝，第十三刀）。
@@ -3926,7 +4049,16 @@ class JncLower {
     const nm = isAtom(memNode) ? memNode.value : null;
     const fs = this.structs.get(structName);
     const f = fs === undefined ? undefined : fs.find((x) => x.name === nm);
-    if (f === undefined) return this.err(n, `${structName} 没有字段 '${nm}'`);
+    if (f === undefined) {
+      // 属性不是一格内存（第六十九刀）：`b.p++`、`&b.p` 这些"就地改/取地址"的写法会落到这儿。
+      // 报"没有这个字段"是认错了人 —— 那个成员在，只是它那一格要走取/存两个函数。左边得是
+      // **类**才问这一句：属性只长在类上，结构体那边同名的字段不存在时报的仍旧是"没有字段"。
+      if (nm !== null && this.propNames.has(nm) && this.classes.has(structName)) {
+        return this.nope(n, `属性 '${nm}' 当一格可写的内存用 —— 读写各是一次调用，`
+          + '`++`、`&` 与复合赋值这类"就地改"的写法这一层接不上');
+      }
+      return this.err(n, `${structName} 没有字段 '${nm}'`);
+    }
     return {
       kind: isStruct(f.type) || isArr(f.type) ? 'agg' : 'ptr',
       code: `(pfield ${baseCode} ${nm})`,
@@ -3993,6 +4125,15 @@ class JncLower {
       // 之前 —— 属性没有"可写的那一格"，lvalue 会去查变量、查不着就报"未声明"。
       const pt = this.propRef(n.items[2]);
       if (pt !== null) return this.propSet(n, pt, op, n.items[3], pad);
+      // `c.m_a = 5` —— 成员属性（第六十九刀）：同样是调存值器，对象当第一个实参。同一条理由
+      // 排在 lvalue 之前 —— 属性没有"可写的那一格"。
+      const lhs = n.items[2];
+      if (isList(lhs) && head(lhs) === 'field' && isAtom(lhs.items[2])
+        && this.propNames.has(lhs.items[2].value)) {
+        const pm = this.propMember(lhs, lhs.items[2].value);
+        if (pm === null) return null;
+        if (pm !== undefined) return this.propSet(n, pm.pn, op, n.items[3], pad, pm.self);
+      }
       const lv = this.lvalue(n.items[2]);
       if (lv === null) return null;
       // 类的变量赋不了值（第五十二刀）：type_class.rst:19 那句 "You cannot assign varibles
@@ -5467,8 +5608,9 @@ class JncLower {
           // （闭包里捕的是它），方法体里裸写的名字捕的是 `this` —— 与 `foo()` 补 this 同一条。
           if (fq !== null) return this.fnValue(n, fq, null);
           // 属性（第六十八刀）：源码里它长得像变量，所以这一问排在"查不着变量、也不是
-          // 函数名"之后。读它就是调取值器。
-          const pq = this.resolve(nm, (k) => this.props.has(k));
+          // 函数名"之后。读它就是调取值器。方法体里裸写的属性名走 propBare（第六十九刀）：
+          // 那一条连基类链一起找，`this` 由 propGet 那一处补上。
+          const pq = this.propBare(nm);
           if (pq !== null) return this.propGet(n, pq);
           return this.err(n, `未声明的变量 '${nm}'`);
         }
@@ -5513,6 +5655,13 @@ class JncLower {
         if (pf !== null) return this.propGet(n, pf);
         if (isList(ob) && head(ob) === 'indirect') {
           return this.load(n, this.fieldLv(n, ob.items[1], n.items[2]));
+        }
+        // `c.m_a` —— 成员属性（第六十九刀）：读它就是调取值器，对象当第一个实参。要排在落到
+        // lvalue 之前问：那儿只会报"没有这个字段"。与下面那条方法名同一个形状。
+        if (isAtom(n.items[2]) && this.propNames.has(n.items[2].value)) {
+          const pm = this.propMember(n, n.items[2].value);
+          if (pm === null) return null;
+          if (pm !== undefined) return this.propGet(n, pm.pn, pm.self);
         }
         // `c.foo` 当**值**用（第五十五刀）：右边那个名字是方法时，这一格是一格捕获了对象的
         // 函数指针 —— jancy 的 fat function pointer 正是"函数 + 那个对象"。要排在落到 lvalue

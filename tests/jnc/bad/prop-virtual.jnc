@@ -1,0 +1,18 @@
+// 虚属性（ADR-0016 第六十九刀的边界）。
+// jancy 的属性也进 vtable（`virtual`/`override`/`abstract` 那三个词在属性上照样合法）。
+// 这一层的虚派发是按**方法名**接的（第五十七刀），而属性那两个函数的名字是这一层自己拼的
+// （`p$get` / `p$set`），不在那条路上 —— 悄悄把那个词丢掉就会静默地调错一个。
+class Shape {
+	int m_n;
+
+	virtual int property m_area;
+
+	construct() {
+		m_n = 2;
+	}
+}
+
+int main() {
+	Shape s;
+	return 0;
+}

@@ -4028,6 +4028,127 @@ g_p.set(int x) { … }
 
 所以下一刀是**类的成员属性**：100 份，而且它是这一刀的机器唯一还没接上的一头。
 
+### 第六十九刀：类的成员属性 —— 那一格 `this` 从对象来，或者从 `this` 来
+
+上一刀把属性的机器摆齐了，只差一头：**哪一个对象**。jancy 的属性与方法一样是类的成员，
+所以取/存那两个函数的第一个实参就是 `this`（第五十二刀那条）—— 上一刀的 `propSig` 里其实
+已经写着 `if (pi.cls !== null) ps.unshift(this)`，只是从来没有一格属性的 `cls` 是非 null
+的：类体里那些成员属性在 `typeDecl` 那一遍就被拦下来了。这一刀拆掉那道拦，把三处接上。
+
+**登记要跨过一遍。** 类体是 `typeDecl` 那一遍看的，而属性的名字必须在**签名那一遍之前**
+坐下（上一刀那条理由：取/存的签名是从属性的类型抄来的）。两遍之间隔着 `classLayout()`。
+于是 `typeDecl` 只把节点连当时的 `ns`（就是那个类名）攒进 `propPend`，登记仍旧交给
+`propName` —— 顶层那一格与成员那一格从此走**同一份代码**：`qual` 在 `ns = C` 下拼出来就是
+`C$p`，`propName` 里那三行"前一格是不是类"于是第一次真的用上了。
+
+**两种放法都收。** prop_simple.rst:21 那句话说得很清楚，简单声明式是给"declaring interfaces
+or when the developer prefers to follow the C++-style of placing definitions outside of a
+class"用的 —— 而语料里两种都有：
+
+```jnc
+class Box {                       // 体写在类体里（test42.jnc:27）
+    int property m_value;
+    int m_value.get() { … }
+    void m_value.set(int x) { … }
+}
+
+class Tag {                       // 体写在类外（test150.jnc:16）
+    int const property m_double;
+}
+int Tag.m_double.get() { … }
+```
+
+写在类外那一种本来就走顶层的 `fn-def`，`propSig` 里 `resolve('Tag.m_double')` 一步就查着了。
+写在类体里那一种要 `aggHoist` 放行：`get` / `set` 从此与 `construct` 一样**提到顶层**，
+`ns` 是那个类。它们与普通方法完全同型 —— 一格自由函数，`this` 当第一个形参，名字由 `propSig`
+拼成 `C$p$get`。于是 `int m_value.get()` 的体里裸写 `m_raw` 照旧是 `this.m_raw`（第五十二刀
+那条），一个字都不用改。
+
+**三处接上，各自都有别的分支要让路。**
+
+- **读 `b.m_value`**：挂在 `case 'field'` 里，**排在落到 `lvalue` 之前** —— 那儿只会报
+  "Box 没有字段 'm_value'"。形状与第五十五刀的 `methodRef`（`c.foo` 当函数指针用）一模一样：
+  先把左边算出来，左边不是类、或者那条继承链上没有这个属性就回 `undefined`，让那条路继续
+  当"取字段"走。
+- **写 `b.m_value = 10`**：挂在 `exprStmt` 的 `assign` 上、排在 `lvalue` 之前，理由与上一刀
+  顶层那一格同一条 —— 属性没有"可写的那一格"。
+- **方法体里裸写 `m_value`**：`this` 由 `propGet` / `propSet` 那一处补，不在调用点补。新开的
+  `propSelf` 就管这一件事：给了对象就用那个，没给就补 `(var $this)`，而"能不能补"那一问与
+  第五十二刀给 `foo()` 补 this 是同一句 —— `selfClass === pi.cls || isBase(pi.cls, selfClass)`。
+
+**`resolve` 不走继承链。** 这是接上之后才露出来的一格：`class Derived: Box` 的方法体里裸写
+`m_value`，`resolve` 从 `Derived` 一层层退到全局，路上没有 `Derived$m_value` 也没有全局的
+`m_value` —— 于是报"未声明的变量"。裸写方法名早就有这条（`callName` 里 `resolve` 之后跟着
+一句 `findMethod(this.selfClass, …)`），属性照抄：`findProp` 沿基类链找，`propBare` 是
+"先 resolve、再 findProp"那两步。
+
+**`propNames` 那一格是有代价换来的。** `b.m_value` 这一问要先把左边算出来才知道它是不是类 ——
+如果每一次取字段都算一遍，光是白算就够难看，何况求值本身可能发诊断。所以照 `methodNames`
+（第五十五刀）的办法先按**裸名**问一句"这个名字有没有可能是属性"。代价说清楚：一个类的属性
+叫 `m_x`，另一个不相干的结构体也有字段 `m_x`，那么 `s.m_x` 会白算一次左边 —— 但 `propMember`
+在"左边不是类"那一步就回 `undefined`，不发一个字，没有可观测差别。
+
+**这一刀删掉了一条边界，重画了三条。** `bad/prop-member.jnc` 是上一刀刻意划的，现在功能落地
+了 —— 按规矩删掉它，换三条更窄的：
+
+- **结构体的成员属性**（`bad/prop-struct.jnc`）。取/存那两个体是从**类那一层命名空间**里查
+  过来的（体外的 `int C.p.get()` 与体内的 `int p.get()` 靠的都是这一件事，第五十二刀），
+  结构体在这一层不是一层命名空间，那两个体没有落脚处。jancy 那边结构体是可以有属性的
+  （属性不占结构体的内存，与字段不同格），要接得先给结构体一层命名空间 —— 那是另一刀。
+- **`virtual` 写在属性上**（`bad/prop-virtual.jnc`）。jancy 的属性也进 vtable，而这一层的虚
+  派发（第五十七刀）是按**方法名**接的一格整数标签加一段分派，属性那两个函数的名字是这一层
+  自己拼的（`p$get`），不在那条路上。悄悄把 `virtual` 丢掉的后果是**静默地调错一个**。
+- **属性当一格可写的内存用**（`bad/prop-inc.jnc`）。`b.p++` 与 `&b.p` 都要求那一格有地址、
+  能就地改。这一条原先报的是 **"Box 没有字段 'm_v'"**（裸名那一侧报的是 **"未声明的变量
+  'g_p'"**）—— 两句都是**认错了人**：那个成员在、那个名字在，只是它那一格要走两次调用。
+  与第六十六刀那两条一样，把误导的诊断改成一条说得清的边界，是这一刀的一部分而不是补丁。
+
+**接上之后露出来两条"认错了人"，都在这一刀里改掉了。** 它们原先被「类的成员属性」那条拒
+整块挡着，看不见：
+
+- **类体里裸写的 `get` / `set` 不是属性，是下标运算符。** `class C2 { int get(int i) …
+  void set(int i, int value) … }` 配上 `c[10] = 100`（test90.jnc:12-24）—— 那是 jancy 的
+  索引运算符。第一版把所有 `get` / `set` 都提到顶层，于是这两个落进 `propSig`、报出
+  「'get' / 'set' 前面要写属性的名字」：语料里 4 份这样，全是**误报**。所以提上去的条件不是
+  "叫 get"，是**名字写在前面** —— 语法上那是 `qualified-special`（见 `accessorNamed`），
+  裸写的那一格照旧由 `typeDecl` 报「'get'（要属性那一套）」。
+- **`errorcode` 写在属性上**（io_WebSocket.jnc:96-101 那一串，语料里 16 份）。`specs` 那句
+  「'errorcode' 只能写在函数上（exceptions.rst:17）」**对属性是错的** —— jancy 那一位落在
+  取/存那两个函数的类型上。于是 `propName` 改成用 `allowVirt` 把它**收下来再就地拒**，
+  理由写明"那一位在取/存那两个函数上，而这一层的 errorcode 是按函数名记的"。`virtual`
+  同理，从 `typeDecl` 挪到这儿，一处一句。
+
+**量出来的**（`tests/jnc` 137/0）：`cases/65-propmem.jnc` 把这一刀的每一头都摆在一份里 ——
+`b.m_value` 的读与写、方法体里裸写属性名（`twice()` 与 `bump()`，后者一句里读一次写一次）、
+**基类的属性**（`Derived.mine()` 里裸写 `m_value`）、体写在类外的 `const property`
+（`int Tag.m_double.get()`），以及取值器被调了几次（`hits=5`）。七行输出与 `/tmp/c65.c`
+（`cc -O0 -std=c99 -Wall`，孪生里那两个函数第一个形参就是 `Box* self`）逐字节相同：
+`6 / 21 20 / 42 / 45 / 106 / 6 / hits=5`。
+
+**尺子**（`/tmp/m69r.sh`）：
+
+「真降得下来」（`sx` 退出码 0）：**50 → 51**（+1，`io_SslCipher.jnc`）。`ok68 ⊆ ok69`，
+一份都没退。覆盖对得上：611 + 51 = 662。
+
+(文件, 拦路项) 对：6264 → **6242**（−22）。
+
+**`类的成员属性 '…'` 100 → 0**（那一格没了）。换出来的三格是：
+`带形参表的属性` 4 → **67**（+63）、
+`` `errorcode` 写在属性上 `` **16 份**（新，就是上面说的那一条）、
+`属性 '…' 声明了两次` **1 份**（test149fail.jnc —— 那是 jancy 自己的 fail 测试，
+一个类里把 `int const property m_a;` 写了两遍，jancy 也拒）。
+`没有这个属性` 18 → 17，`C 没有字段 '…'` 2 → 1（少的那一条正是被改掉的误报）。
+
+**+1 与 100 之间那道落差就是这一刀的诚实账。** 100 份里绝大多数换的不是"降下来了"，是
+**换了一条更靠里的拦路项** —— 它们本来就还压着 `autoget`（124 份）、`bindable`（80）、
+`event`（82）那几个词。真正只差这一刀的只有 `io_SslCipher.jnc` 一份。
+
+**下一刀的名字已经写在尺子上了：`带形参表的属性` 63 份的涨幅**，那是**索引属性**
+（`int property g_simpleProp(size_t i);`，32_IndexedProperties.jnc:22，prop_indexed.rst）——
+属性的类型自己得成一格（jancy 的 `PropertyType` 带形参表），取/存两个函数各多一串下标形参，
+读写落成 `(call p$get i)` / `(call p$set i v)`。它与 `autoget`（124 份，17 份只差它）是眼下
+最大的两块。
+
 ## 后果与代价
 
 
