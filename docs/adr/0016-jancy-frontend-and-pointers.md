@@ -2595,6 +2595,11 @@ containing meta-data such as type, vtable pointer, root object pointer, GC-relat
 （内嵌的对象，要"父对象造出来时把它也造出来"）。加一条 jancy 自己也拒的：给类的变量赋值
 （`bad/class-var-assign`）。
 
+> 更正（第五十三刀）：这一条里说"析构要作用域退出按逆序"是**错的** —— jancy 自己的文档说
+> 析构归 GC，时机不确定（disposable.rst:17）。第五十三刀把 `construct` 与 `static construct`
+> 收了，`bad/class-construct` 因此删掉，边界重画成更窄的两条：`bad/class-destruct`（引那一句
+> 文档）与 `bad/ctor-overload`（构造的重载要重载决议）。`get`/`set` 归"属性那一套"。
+
 **这一层比 jancy 松的一处**：`public:` / `protected:` 照收，但**不做可见性检查**
 （type_class.rst:23-27，默认 public）。松的方向是"能跑的程序行为不变"，所以先记着。
 
@@ -2616,6 +2621,75 @@ self"的自由函数，这一层的落法正是它）、类变量不会自己造
 `fnSig`/`fnDef`、`callExpr`/`methodCallee`、`localDecl`/`globalDecl`、`binary`/`truthy`/`null`），
 语法、方言、HIR、MIR、四个后端与运行时一个字都没改；自举、`tests/jit`、`tests/mir`、
 `tests/llvm`；`npm run lint` 这台机器上没有 typescript。
+
+### 第五十三刀：`construct` / `static construct` —— 造出来那一格之后，还有一句要跑
+
+**挑它是挑第二名**。"只有一个卡点、带 `int main`"那张榜的第一名是 `import`（13 份），可那 13 份
+里 12 份 import 的是 stdlib 单元（`io_*.jncx` / `std_*.jnc` / `sys_*.jnc`），而那些单元自己满是
+`opaque class` 与 `property` —— 接了 `import` 那 12 份照样跑不起来，只是把卡点换成别人的名字。
+构造这一族在全量里是 67 条(文件, 卡点)（`construct` 45、`destruct` 15、限定名/特殊名的声明符里
+一大半、C++ 式的构造声明符 9、`static construct` 3），而且 28 份带 `int main` 的文件提到它。
+
+**两件事，一句话分完**。实例构造就是"一格方法"，第五十二刀那条路整条复用：类是一层命名空间，
+所以体内写的 `construct(int x) {}` 与体外写的 `C.construct() {}` 经 `aggHoist` 落在**同一格**
+名字上（`C$construct`），`this` 当第一个形参。静态构造是"整个类一次"，落成一格模块级 `bool`
+加一句 `if` —— 与第二十六刀 `static` 局部量那道 once 闸门同一个形状。
+
+**时机不是编的，是读出来的**。静态构造在**实例构造的开头**调（`Parser::finalizeConstructor`
+那四句：基类构造 → 静态构造 → 字段初值 → 属性构造，jnc_ct_Parser.cpp:3005-3009），"只一次"
+是 `MemberBlock::callStaticConstructor` 里的 `ModuleItemFlag_Constructed`。还有一条不读就会漏：
+类**只有**静态构造、没有实例构造时 jancy 自己合成一个（`DerivableType::createDefaultMethods`）
+—— 不然那段代码永远跑不着。所以 `Reg r1;` 也要把 `Reg.static construct()` 里那句 printf 打出来，
+`cases/50-construct.jnc` 里量的正是这一条。
+
+**三种写法，语法只加一条**。`C1 a(100)` 与 `C1 g_a construct()` 在声明符尾巴上早就有 `(ctor …)`
+那一格（`jnc.grammar` 的 `ctor` 规则），之前 declarator 把它整条拒成"C++ 式的构造声明符"；这一刀
+把它接进 `info.ctor`。加的唯一一条产生式是 `new C1 construct(20)` —— jancy 那边它与 `new C1(30)`
+**是同一条**（`TokenKind_Construct?` 是可选的一个词，jnc_ct_Expr.llk:726-734），所以这里也归到
+同一个 `(new 类型 实参)` 上：那个词只把"这括号是构造实参"写明白，没有别的意思。
+出处是 type_class.rst:125-149 那一整段（`C1 a();` 的歧义正是它要躲的）。
+
+**`new C(…)` 仍旧是一个表达式**。pnew 一格再调一句构造是**两句**，而 `new` 可以出现在惰性位置上
+（每次求值都得真造一格）—— 所以照第二十五刀 `newCurly` 那条路，把这两句抬成一个函数
+（`$newoN`），实参在调用方求值、传进去。方言一个字没改。
+
+**顺手堵了三处静默**：字段后面的构造实参（内嵌那一格还不收，实参会被丢掉）、`static` 的类局部量
+（`zeroText` 会把它当标量、只发一格空引用出来 —— 那是在骗人）、非类类型后面挂构造实参
+（`new int(3)` / `int x(5)`）。三条都是"以前一个字不说、现在明说"。
+
+**边界两条**（都引 jancy 自己的话）：`bad/class-destruct` —— 析构归 GC，时机不确定
+（disposable.rst:17："destructors in garbage-collected world are not called deterministically"），
+出作用域调会比它早、不调会漏副作用，两种都是编的；`bad/ctor-overload` —— 构造可以重载
+（type_class.rst:63），但那是**重载决议**那一整套（一个名字挂多份签名 + 按实参挑），要接就得连
+普通函数的重载一起接。原来那条 `bad/class-construct` 删掉了：它记的东西落地了。
+
+**这一层比 jancy 松的一处**：特殊成员的声明符不看说明符（语法给的是空的 `(specs)`），所以
+`void C.construct()` 也收，而 jancy 那边构造不写返回类型。松的方向是"能跑的程序行为不变"。
+
+**期望输出的出处**：一份 `cc -O0 -std=c99 -Wall` 的孪生，九行逐字节相同。写法差异与第五十二刀
+那份相同的两条（struct + calloc + `->`、方法写成"第一个形参是 self"的自由函数），加一条：静态构造
+那道闸门在孪生件里是一格 `static int`，这一层落的是一格模块级 bool —— 同一个东西。
+
+**放行了什么**：`test/jnc/test25.jnc` 整份跑通（五腿逐字节一致：`new OpaqueTest(100, 200)`
+加两次方法调用）。尺子那一头：全量 1707 → 1689 条(文件, 卡点)，**去掉 96 条**（`construct` 45、
+限定名或特殊名的声明符 20、`destruct` 15、C++ 式的构造声明符 9、`static construct` 3、
+`set`/`get` 各 2），**新露出 78 条**（`set` 19、`destruct` 19、"不是直接调一个名字的调用" 10、
+`get` 9、`%p` 5、把 `C2` 转成 `I0*`..`I3*`/`C0*`/`C1*` 各 1、形参的默认值 1）。
+"只有一个卡点、带 `int main`"那张榜从 39 份变成 42 份：`import` 12、printf 的格式串不是字面量 7、
+`bigendian` 3、`opaque class` 2、`destruct` 2，剩下的都是 1。"一条卡点都没有、带 `int main`"
+仍是 56 份 —— 但成员换了两个：`test25.jnc` 进来，`test138.jnc` 出去。后者顶层写了个
+`destruct() {}`（模块析构），以前 `fnSig` 在那个空 `(specs)` 上报的是一句**错话**
+（「这种类型说明符」，而且没有位置）—— 它压根就没在这把尺子上，因为尺子只数"还不收"；
+现在它是一条老实的还不收。这不是回退，是把一处哑的错话换成了记在名单上的边界。
+
+**跑过的轴**：`tests/jnc`（89/0，新增 `cases/50-construct` 与 `bad/class-destruct`、
+`bad/ctor-overload`，删掉 `bad/class-construct`）、`tests/glr`（20/0，语法加了一条产生式，
+金表重生成：352→353 条规则、633→637 个状态、留给 GLR 驱动的冲突 1420→1421）、
+`tests/sexpr`（75/0）。**没跑的**：`tests/asy`、`tests/oir` —— 只动了
+`frontend-jnc/lower.js` 与 `jnc.grammar`（`aggHoist`/`typeDecl`/`declarator`/`fnSig0`/`fnDef`/
+`run` 的签名后那一遍/`localDecl`/`globalDecl`/`staticLocal`/`newPtr`），方言、HIR、MIR、
+四个后端与运行时一个字都没改；自举、`tests/jit`、`tests/mir`、`tests/llvm`；
+`npm run lint` 这台机器上没有 typescript。
 
 ## 后果与代价
 

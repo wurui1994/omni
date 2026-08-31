@@ -1,0 +1,26 @@
+// 构造的**重载**（第五十三刀的边界）。jancy 明说构造可以重载 —— "Constructors can be
+// overloaded, the rest of construction methods must have no arguments"（type_class.rst:63），
+// 01_Classes.jnc:36-49 就是一个类里三个 `construct`。
+//
+// 这一层不收，理由是重载不是"构造"这件事的一部分，而是**重载决议**那一整套：一个名字要挂
+// 多份签名，调用那一处得按实参的类型挑一份（jancy 那边是 `OverloadableFunc` 加
+// `chooseOverload` 的一串 cast 代价比较）。这一层的方言里"一个名字一格函数"，函数、方法、
+// 构造走的都是同一格 —— 所以要接就得连普通方法与自由函数的重载一起接，那是自己的一刀。
+class C {
+	int m_x;
+
+	construct() {
+		m_x = 1;
+	}
+
+	construct(int x) {
+		m_x = x;
+	}
+}
+
+int main() {
+	C a;
+	C b(5);
+	printf("%d %d\n", a.m_x, b.m_x);
+	return 0;
+}

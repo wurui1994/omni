@@ -120,8 +120,11 @@
 //     与下面那处刻意留下的差别是同一格）。
 //   - `printf` 之外的标准库（`std.*`、`io.*`、`gc.*`）
 //   - 格式化字面量 `$"…"`、多行字面量、正则 switch
-//   - class / union / enum / property / reactor / 事件 / 多播 / 协程
-//   - 异常（try/throw/catch）、`assert`、namespace / import
+//   - union / property / reactor / 事件 / 多播 / 协程。`enum` 是第三十九刀、`class` 是第
+//     五十二刀、`construct` 与 `static construct` 是第五十三刀；类那一族剩下的是基类（要对象
+//     头与虚表）、`destruct`（GC 不定时，disposable.rst:17）、`get` / `set`、构造的重载、
+//     内嵌的类字段与静态字段。
+//   - 异常（try/throw/catch）、import。`assert` 是第四十九刀、`namespace` 是第五十一刀。
 //
 // **一处刻意留下的差别**：`sizeof` / `offsetof` 意义上的**存储**宽度。四种位宽在方言里
 // 都占一个 64 位的槽（`char*` 与 `int*` 是同一个方言类型），所以 `new char[n]` 占 8n 字节、
@@ -519,6 +522,13 @@ class JncLower {
     this.methodNames = new Set();
     this.selfClass = null;
     this.nsExtra = null;
+    // 构造（第五十三刀）。`ctors` 是类名 -> {name, params}（那一格是实例构造，方言里的名字是
+    // `C$construct`），`sctors` 是类名 -> 静态构造的方言名。静态构造**在实例构造的开头调、
+    // 只调一次**（jnc_ct_Parser.cpp:3005-3009 那四句的第二句 + MemberBlock 里那个
+    // `ModuleItemFlag_Constructed` 闸门），所以要一格模块级的 bool。
+    this.ctors = new Map();
+    this.sctors = new Map();
+    this.gates = new Map();     // 类名 -> 那道"静态构造跑过了"的模块级 bool
   }
 
   /** 当前命名空间下的全名（第五十一刀）。写的名字里带点（`struct a.S`）也一并换成 `$`。 */
@@ -908,9 +918,17 @@ class JncLower {
     for (const m of this.flat(agg.items[4])) {
       if (!isList(m)) continue;
       const h = head(m);
-      // 特殊成员（`construct` / `destruct` / `get` / `set`）**不提**：它们不是普通方法，
-      // 由 typeDecl 那一遍就地报"还不收"（提上去只会多一条"认不出的声明符"）。
-      if (h === 'fn-def' && specialCore(m.items[2]) === null) { out.push({ ns: inner, it: m }); continue; }
+      // 特殊成员里 `construct` 与 `static construct` **也提**（第五十三刀）：它们与普通方法
+      // 一样就是"类那一层里的一格函数"，只是名字由 fnSig0 拼成 `C$construct`，而体外写法
+      //（`C.construct() { … }`）本来就是顶层的一条 —— 两条路于是又落在同一格上。
+      // 剩下那些（`destruct` / `get` / `set`）不提，由 typeDecl 那一遍就地报"还不收"。
+      if (h === 'fn-def') {
+        const sk = specialCore(m.items[2]);
+        if (sk === null || sk === 'construct' || sk === 'static construct') {
+          out.push({ ns: inner, it: m });
+        }
+        continue;
+      }
       if (h === 'type-decl') {
         out.push({ ns: inner, it: m });
         if (isClassAgg(m.items[1])) this.aggHoist(m.items[1], inner, out);
@@ -953,6 +971,25 @@ class JncLower {
       this.ns = e.ns;
       const s = this.fnSig(e.it);
       if (s !== null) this.sigs.set(e.it, s);
+    }
+    // 静态构造那道闸门（第五十三刀）。jancy 的静态构造是**从实例构造的开头调的、只调一次**
+    // （`Parser::finalizeConstructor` 那四句里的第二句 `callStaticConstructor`，
+    // jnc_ct_Parser.cpp:3005-3009；"只一次"是 `MemberBlock::callStaticConstructor` 里
+    // 那个 `ModuleItemFlag_Constructed` 标志）—— 落法就是一格模块级的 bool 加一道 `if`。
+    // 类**只有**静态构造、没有实例构造时 jancy 自己会合成一个（`DerivableType::
+    // createDefaultMethods`），不然那段代码永远跑不着；这儿照做。
+    for (const cls of this.sctors.keys()) {
+      const gate = `${cls}$construct$static$1`;
+      this.decls.push(`  (global ${gate} bool)`);
+      this.gates.set(cls, gate);
+      if (this.ctors.has(cls)) continue;
+      const full = `${cls}$construct`;
+      const self = tClass(cls, false);
+      this.fns.set(full, { params: [self], ret: J_VOID });
+      this.methods.set(full, cls);
+      this.ctors.set(cls, { name: full, params: [] });
+      this.decls.push(`  (fn ${full} (($this ${slotText(self)})) void\n`
+        + `${this.gateLines(cls, '    ').join('\n')})`);
     }
     // `&` 过谁先数一遍（第二十四刀）：模块级的标量被取过地址时，那一格要提到一段**自己的
     // 内存**里去（与第九刀对局部量做的是同一件事）。这一问必须在 `(global …)` 发出去之前
@@ -1057,6 +1094,11 @@ class JncLower {
       const info = this.declarator(dcl, sp);
       if (info === null) continue;
       if (info.formals !== null) { this.nope(dcl, '顶层的函数原型（只收带体的定义）'); continue; }
+      // 声明符尾巴上的构造实参只有类的变量收得下（第五十三刀，与局部量同一条）。
+      if (info.ctor !== null && !(isClass(info.type) && info.type.own === true)) {
+        this.err(dcl, `'${info.name}' 不是类的变量，后面挂不了构造实参`);
+        continue;
+      }
       // 命名空间里的模块级变量（第五十一刀）：名字带上前缀，而那个带前缀的名字**同时**就是
       // 方言里那一格的名字（`$` 是合法标识符字符，点不是）。从这一句起 info.name 一律是全名。
       info.name = this.qual(info.name);
@@ -1089,6 +1131,21 @@ class JncLower {
           continue;
         }
         this.globalCells.push(`    (set ${info.name} (pnew ${tyText(info.type)} (int 1)))`);
+        // 构造排在 globalInit 那一段（第五十三刀）：所有 pnew 先做完，构造里读到别的模块级
+        // 变量时它才不是空指针 —— 与第二十四刀那条"两阶段"是同一个理由。实参在**模块作用域**
+        // 里求（没有局部量、没有取地址、不在 unsafe 里），与 globalValue 那一处同一条。
+        const saveScopes = this.scopes;
+        const saveLifted = this.lifted;
+        const saveUnsafe = this.unsafe;
+        this.scopes = [];
+        this.lifted = new Set();
+        this.unsafe = false;
+        const ok = this.ctorCall(dcl, info.type.name, `(var ${info.name})`, info.ctor, '    ',
+          this.globalInit);
+        this.scopes = saveScopes;
+        this.lifted = saveLifted;
+        this.unsafe = saveUnsafe;
+        if (ok === null) continue;                 // 报过错了
         continue;
       }
       // 结构体的模块级变量：与局部量一样先开一格自己的内存，再（有初值的话）逐字段抄。
@@ -1352,6 +1409,23 @@ class JncLower {
     return null;
   }
 
+  /**
+   * 还收不下的特殊成员（第五十三刀）。`construct` 与 `static construct` 这一刀收了，剩下两格：
+   *
+   *   - `destruct`：jancy 自己的文档就说它在 GC 世界里**不是确定时机**的 —— "the destructor
+   *     is called by the garbage collector at an unspecified moment"（disposable.rst:17，
+   *     那一节讲的正是"要确定时机就用 `dispose` / `nestedscope`"）。所以它不是"把析构调上"
+   *     那么一句话的事：要么先有 GC，要么就是在骗人。
+   *   - `get` / `set`：属性那一整套（`property` / `bindable` / `autoget`），另一刀。
+   */
+  specialNope(n, sk) {
+    if (sk === 'destruct') {
+      return this.nope(n, "'destruct' —— jancy 那边它是 GC 在**不确定的时刻**调的"
+        + '（disposable.rst:17），要确定时机得先有 dispose/nestedscope 那一套');
+    }
+    return this.nope(n, `'${sk}'（要属性那一套：property / bindable / autoget）`);
+  }
+
   typeDecl(n) {
     if (isList(n) && head(n) === 'enum') return this.enumDecl(n);
     if (!isList(n) || head(n) !== 'agg') return this.nope(n, '带体的命名类型（只收 struct、class 与 enum）');
@@ -1384,22 +1458,23 @@ class JncLower {
         if (!cls) this.nope(m, '结构体里的嵌套类型');
         continue;
       }
-      // 体内写的方法（`void foo() { … }`）在 nsFlat 那一遍已经提到顶层了，这儿跳过。
-      // 特殊成员（`construct` / `destruct` / `get` / `set`）没提上去，就地报。
+      // 体内写的方法（`void foo() { … }`）在 nsFlat 那一遍已经提到顶层了，这儿跳过 ——
+      // `construct` / `static construct` 从第五十三刀起也在提上去的那一批里。剩下那些特殊
+      // 成员没提，就地报。
       if (isList(m) && head(m) === 'fn-def') {
         if (!cls) { this.nope(m, '结构体里的方法'); continue; }
         const sk = specialCore(m.items[2]);
-        if (sk !== null) this.nope(m, `类里的 '${sk}'（要构造/析构与属性那一套）`);
+        if (sk !== null && sk !== 'construct' && sk !== 'static construct') this.specialNope(m, sk);
         continue;
       }
       // 体内只写原型、体外补上（`void C.foo();` + `void C.foo() { … }`）—— 两种放法
       // jancy 都收（type_class.rst:41-59）。原型这边一个字都不用发：签名那一遍看的是
-      // 体外那个定义。`construct` / `destruct` / `operator` 那几种特殊成员是另一格。
+      // 体外那个定义。`construct` 的原型同理（体在类外，第五十三刀）。
       if (isList(m) && head(m) === 'fn-proto') {
         const sk = specialCore(m.items[2]);
-        this.nope(m, sk === null
-          ? '类里的特殊成员声明'
-          : `类里的 '${sk}'（要构造/析构与属性那一套）`);
+        if (sk === 'construct' || sk === 'static construct') continue;
+        if (sk === null) this.nope(m, '类里的特殊成员声明');
+        else this.specialNope(m, sk);
         continue;
       }
       if (!isList(m) || head(m) !== 'var-decl') {
@@ -1415,6 +1490,9 @@ class JncLower {
         if (isList(d) && head(d) === 'init') { this.nope(d, '字段的默认值'); continue; }
         const info = this.declarator(d, sp);
         if (info === null) continue;
+        // 字段后面挂构造实参（`C1 m_a(10);`）—— jancy 那边它是"内嵌那一格的构造实参"，
+        // 而内嵌本身这一层还不收（下面那条），所以这儿先明说，免得实参被悄悄丢掉。
+        if (info.ctor !== null) { this.nope(d, '字段后面的构造实参'); continue; }
         // 声明符上带括号的是**方法原型**（`void foo();`）：与 fn-proto 那一支同一件事，
         // 体在类外。类里跳过它，结构体里照旧不收。
         if (info.formals !== null) {
@@ -1614,11 +1692,41 @@ class JncLower {
     return sp.type;
   }
 
-  /** `(dcl 前缀 核心 后缀 构造)` -> `{name, type, formals}`。
-   *  `formals` 不是 null 就说明这是个**函数**声明符（后缀里有一对括号）。 */
+  /** `(dcl 前缀 核心 后缀 构造)` -> `{name, type, formals, ctor, special}`。
+   *  `formals` 不是 null 就说明这是个**函数**声明符（后缀里有一对括号）。
+   *  `ctor` 不是 null 就说明名字后面挂着一串构造实参（`C1 c(100)` / `C1 g_a construct(1)`，
+   *  type_class.rst:143-149）。`special` 不是 null 就说明核心是 `construct` /
+   *  `static construct`，这时 `name` 是**类名那一半**（体外写法带着它，体内写法是空的）。 */
   declarator(d, sp) {
     if (!isList(d) || head(d) !== 'dcl') return this.err(d, '认不出的声明符');
-    if (isList(d.items[4]) && head(d.items[4]) !== 'no-ctor') return this.nope(d, 'C++ 式的构造声明符');
+    // 声明符尾巴上的构造实参（第五十三刀）。jancy 为了躲开 `C1 a();` 的歧义把空实参那一种
+    // 写成 `C1 a construct();`，带实参的两种写法都收（type_class.rst:125-149）。
+    let ctor = null;
+    if (isList(d.items[4]) && head(d.items[4]) !== 'no-ctor') {
+      if (head(d.items[4]) !== 'ctor') return this.nope(d, `声明符尾巴上的 '${head(d.items[4])}'`);
+      ctor = d.items[4].items[1];
+    }
+    // 特殊成员的声明符（第五十三刀）：`construct` / `static construct` 收，别的还不收 ——
+    // 与类体里那一遍报的是同一句（顶层也写得出 `destruct()`，那是模块析构，test138.jnc:7）。
+    const sk = specialCore(d);
+    if (sk !== null) {
+      if (sk !== 'construct' && sk !== 'static construct') {
+        return this.specialNope(d.items[2], sk);
+      }
+      const core = d.items[2];
+      let owner = '';
+      if (isList(core) && head(core) === 'qualified-special') {
+        owner = this.qname(core.items[1]);
+        if (owner === null) return this.nope(core, '认不出的限定名');
+      }
+      let formals0 = null;
+      for (const s of this.flat(d.items[3])) {
+        if (isList(s) && head(s) === 'fn-suffix') { formals0 = s.items[1]; continue; }
+        return this.nope(s, `${sk} 上的声明符后缀 '${isList(s) ? head(s) : '?'}'`);
+      }
+      if (formals0 === null) return this.err(d, `'${sk}' 后面要一对括号`);
+      return { name: owner, type: J_VOID, formals: formals0, ctor: null, special: sk };
+    }
     const name = this.qname(d.items[2]);
     if (name === null) return this.nope(d.items[2], '限定名或特殊名的声明符');
     let t = this.ptrsTy(sp, d.items[1], d);
@@ -1671,7 +1779,7 @@ class JncLower {
       return this.nope(s, `声明符后缀 '${sh}'`);
     }
     for (let i = dims.length - 1; i >= 0; i--) t = tArr(t, dims[i]);
-    return { name, type: t, formals };
+    return { name, type: t, formals, ctor, special: null };
   }
 
   /* -------------------------------------------------------------- 函数 */
@@ -1693,18 +1801,25 @@ class JncLower {
     return r;
   }
 
-  /** 这个声明符是"某个类的成员"吗（第五十二刀）：`C.foo` 里的 `C` 是类就回它的全名。 */
+  /** 这个声明符是"某个类的成员"吗（第五十二刀）：`C.foo` 里的 `C` 是类就回它的全名。
+   *  `C.construct` 走的是另一个形状（`qualified-special`），不过问的是同一件事（第五十三刀）。 */
   declOwner(d) {
     if (!isList(d) || head(d) !== 'dcl') return null;
     const core = d.items[2];
-    if (!isList(core) || head(core) !== 'qualified') return null;
+    if (!isList(core)) return null;
+    const ch = head(core);
+    if (ch !== 'qualified' && ch !== 'qualified-special') return null;
     const left = this.qname(core.items[1]);
     if (left === null) return null;
     return this.resolve(left, (k) => this.classes.has(k));
   }
 
   fnSig0(n) {
-    const sp = this.specs(n.items[1]);
+    // 特殊成员没有类型说明符（语法给的就是一个空的 `(specs)`，jnc.grammar:213/217）——
+    // 构造不回值。所以这一格不问 specs，直接摆一个"void、什么修饰符都没有"的说明符
+    // 进去（第五十三刀）。
+    const special = specialCore(n.items[2]);
+    const sp = special === null ? this.specs(n.items[1]) : { type: J_VOID, thin: false, stat: false };
     if (sp === null) return null;
     const info = this.declarator(n.items[2], sp);
     if (info === null) return null;
@@ -1749,6 +1864,38 @@ class JncLower {
       return this.err(n, `'${info.name}' 回的数组长度省不掉（jancy 那句 "function cannot return `
         + `auto-size-array '${tyName(info.type)}'"）`);
     }
+    // 构造（第五十三刀）。名字在这一层自己拼：实例构造是 `C$construct`，静态构造是
+    // `C$construct$static` —— 与方法同一条路（体内写的 ns 已经是那个类，体外写的
+    // `C.construct()` 名字里本来就带着 `C.`），所以两种放法到这儿又是同一格。
+    if (info.special !== null) {
+      const owner = info.name === ''
+        ? (this.classes.has(this.ns) ? this.ns : null)
+        : this.resolve(info.name, (k) => this.classes.has(k));
+      if (owner === null) {
+        return this.err(n, `'${info.special}' 只能是类的成员（写在类体里，或写成 `
+          + `'${info.name === '' ? 'C' : shown(info.name)}.construct()'）`);
+      }
+      const stat = info.special === 'static construct';
+      const full = stat ? `${owner}$construct$static` : `${owner}$construct`;
+      // 构造的**重载** jancy 是收的（形参不同的好几个 `construct`），这一层一个名字一格函数。
+      if (this.fns.has(full)) {
+        return this.nope(n, `${shown(owner)} 的第二个 '${info.special}'（构造的重载要重载决议）`);
+      }
+      info.name = full;
+      if (stat) {
+        // 静态构造不带 `this`，也**不带形参**：jancy 那句话把两件事一起说了 —— "Constructors
+        // can be overloaded, the rest of construction methods must have no arguments"
+        //（type_class.rst:63）。它是**类那一格上**的一次性初始化，不属于哪个对象。
+        if (ps.length > 0) return this.err(n, "'static construct' 不带形参");
+        this.sctors.set(owner, full);
+      } else {
+        ps.unshift({ name: 'this', type: tClass(owner, false), formals: null });
+        this.methods.set(full, owner);
+        this.ctors.set(owner, { name: full, params: ps.slice(1).map((p) => p.type) });
+      }
+      this.fns.set(full, { params: ps.map((p) => p.type), ret: J_VOID });
+      return { info, ps, isMain: false };
+    }
     // `int main()` 是入口：降成方言的 `(main …)`。jancy 的 main 回 int，而方言的入口
     // 不回值 —— 那个返回值是给外面的退出码，这一层没有它，所以 `return 0` 就是 `(ret)`。
     // 命名空间里的 `main` **不是**入口（jancy 的入口是全局那一个），所以先看 ns（第五十一刀）。
@@ -1773,6 +1920,66 @@ class JncLower {
       this.fns.set(info.name, { params: ps.map((p) => p.type), ret: info.type });
     }
     return { info, ps, isMain };
+  }
+
+  /** 那道闸门那几行（第五十三刀）：`if (!跑过) { 跑过 = true; 静态构造(); }`。
+   *  与第二十六刀 `static` 局部量的初值用的是同一个形状（那边的出处是 jancy 的 `once`）。 */
+  gateLines(cls, pad) {
+    const gate = this.gates.get(cls);
+    return [
+      `${pad}(if (un "!" (var ${gate}))`,
+      `${pad}  (do`,
+      `${pad}    (set ${gate} (bool true))`,
+      `${pad}    (expr (call ${this.sctors.get(cls)}))))`,
+    ];
+  }
+
+  /**
+   * 构造实参那一串（第五十三刀）：`C1 a(100)` / `new C1(100)` / `C1 a construct(100)`
+   * 三处共用。检查与普通调用同一条规矩（个数、整数隐式转、类型对得上）。
+   */
+  ctorArgs(node, cls, argNodes) {
+    const ct = this.ctors.get(cls);
+    if (ct === undefined) {
+      if (argNodes.length > 0) {
+        return this.err(node, `${shown(cls)} 没有 construct，后面挂不了构造实参`);
+      }
+      return null;                     // 没有构造：什么都不用调
+    }
+    const want = ct.params;
+    if (argNodes.length !== want.length) {
+      return this.err(node, `${shown(cls)} 的 construct 要 ${want.length} 个实参，`
+        + `这里给了 ${argNodes.length} 个`);
+    }
+    const vals = [];
+    for (let i = 0; i < argNodes.length; i++) {
+      let v = this.expr(argNodes[i], want[i]);
+      if (v === null) return null;
+      if (isInt(v.type) && isInt(want[i])) v = intConv(v, want[i]);
+      if (!sameTy(v.type, want[i])) {
+        return this.err(argNodes[i], `${shown(cls)} 的 construct 的第 ${i + 1} 个实参要 `
+          + `${tyName(want[i])}，这里是 ${tyName(v.type)}`);
+      }
+      vals.push(v);
+    }
+    return { name: ct.name, vals };
+  }
+
+  /**
+   * `C1 a;` / `C1 a(100);` 里那一句构造调用（第五十三刀）。类的变量一声明就是**造一个对象**
+   * （第五十二刀那段），造完紧接着就是构造 —— jancy 的 `initializeObject` 之后调的正是它。
+   * 没有构造（也没有静态构造）时一个字都不发。回 null 表示报过错了。
+   */
+  ctorCall(node, cls, self, ctorNode, pad, out) {
+    const argNodes = ctorNode === null ? [] : this.flat(ctorNode);
+    if (!this.ctors.has(cls)) {
+      if (argNodes.length > 0) return this.ctorArgs(node, cls, argNodes);
+      return out;
+    }
+    const c = this.ctorArgs(node, cls, argNodes);
+    if (c === null) return null;
+    out.push(`${pad}(expr (call ${c.name} ${self}${c.vals.map((v) => ` ${v.code}`).join('')}))`);
+    return out;
   }
 
   fnDef(n) {
@@ -1836,6 +2043,12 @@ class JncLower {
       const pt = tyText(tPtr(p.type));
       pre.push(`    (let ${c} ${pt} (pnew ${pt} (int 1)))`);
       pre.push(`    (pstore (var ${c}) (var ${p.name}))`);
+    }
+    // 静态构造在**实例构造的开头**调（第五十三刀）：jancy 的顺序是"基类构造 → 静态构造 →
+    // 字段初值 → 属性构造"（jnc_ct_Parser.cpp:3005-3009），前后那两格这一层都没有，所以
+    // 剩下的就是这一句。闸门保证它只跑一次，run 那一遍已经把 bool 开好了。
+    if (owner !== undefined && info.name === `${owner}$construct` && this.sctors.has(owner)) {
+      for (const l of this.gateLines(owner, '    ')) pre.push(l);
     }
     const save = this.retTy;
     this.retTy = isMain ? J_VOID : info.type;
@@ -1965,6 +2178,12 @@ class JncLower {
       const info = this.declarator(dcl, sp);
       if (info === null) return null;
       if (info.formals !== null) { this.nope(dcl, '局部的函数原型'); return null; }
+      // 声明符尾巴上的构造实参只有类的变量收得下（第五十三刀）：别的类型那一格 jancy 也没有
+      // 构造可调 —— 不明说就会被悄悄丢掉。
+      if (info.ctor !== null && !(isClass(info.type) && info.type.own === true)) {
+        this.err(dcl, `'${info.name}' 不是类的变量，后面挂不了构造实参`);
+        return null;
+      }
       // `static int x = 1;` 是另一回事：那一格程序启动时就分配好、初值**只跑一次**
       // （第二十六刀，见 staticLocal）。
       if (sp.stat) {
@@ -2015,6 +2234,11 @@ class JncLower {
         this.push(info.name, info.type);
         const ct = tyText(info.type);
         out.push(`${pad}(let ${info.name} ${ct} (pnew ${ct} (int 1)))`);
+        // 造完紧接着构造（第五十三刀）：`C1 a;` 也调 —— 无参构造与"只有静态构造"两种情形
+        // 都在 ctorCall 里；两样都没有时一个字都不发。
+        if (this.ctorCall(dcl, info.type.name, `(var ${info.name})`, info.ctor, pad, out) === null) {
+          return null;
+        }
         continue;
       }
       // 结构体（第十二刀）：`S s;` 是一格自己的零内存，`S t = s;` 逐字段抄一份。
@@ -2099,6 +2323,12 @@ class JncLower {
    */
   staticLocal(dcl, info, initNode, pad, out) {
     const t = info.type;
+    // 类的 static 局部量（第五十三刀）：那一格要"造一次对象、构造一次"，也就是又一道 once
+    // 闸门（jancy 那边正是 `once` 包着 initializeVariable）。先明说不收 —— 底下那条标量支路
+    // 会把它当一格引用、只发一个空值出来，那是在骗人。类**指针**（`static C* p;`）不在这条里。
+    if (isClass(t) && t.own === true) {
+      return this.nope(dcl, `${tyName(t)} 的 static 局部量（要一道 once 闸门把对象造出来再构造）`);
+    }
     const dn = `${info.name}$s${this.tmp++}`;
     // 被 `&` 取过地址的标量要提到一段自己的内存里（与第二十四刀对模块级变量做的一样）
     const lift = this.gTaken.has(info.name) && this.liftable(t);
@@ -3606,8 +3836,10 @@ class JncLower {
         return this.load(n, this.lvalue(n));
       }
       case 'call': return this.callExpr(n);
-      case 'new-array': return this.newPtr(n, n.items[1], n.items[2]);
-      case 'new': return this.newPtr(n, n.items[1], null);
+      case 'new-array': return this.newPtr(n, n.items[1], n.items[2], null);
+      // `new C1(100)` / `new C1 construct(100)` 的实参在 items[2]（第五十三刀）——
+      // 语法上是同一条产生式，那个 `construct` 只是把"这括号是构造实参"写明白。
+      case 'new': return this.newPtr(n, n.items[1], null, n.items[2] === undefined ? null : n.items[2]);
       // `new T { … }`（第二十五刀）：那几条语句抬成一个函数，项的值当实参传进去 ——
       // 于是它仍旧是一个表达式，惰性位置上也成立。见 newCurly。
       case 'new-curly': return this.newCurly(n, n.items[1], n.items[2]);
@@ -4046,9 +4278,9 @@ class JncLower {
     if (t === null) return null;
     if (t === J_VOID) return this.err(n, 'new void');
     // `new C { … }`（第五十二刀）：jancy 那边花括号初值对类也成立，可它是在**构造之后**跑的
-    // （`initializeObject` 之后才 `parseCurlyInitializer`）—— 构造那一套这一刀不收，
-    // 所以这条也一起留着，免得半条语义。
-    if (isClass(t)) return this.nope(n, `new ${tyName(t)} { … }（要构造那一套先落地）`);
+    // （`initializeObject` 之后才 `parseCurlyInitializer`）。构造第五十三刀收了，可"构造完
+    // 再逐格写"要把 curlyEmit 那一套接到抬出来的那个函数里去 —— 那是另一格，先明说不收。
+    if (isClass(t)) return this.nope(n, `new ${tyName(t)} { … }（花括号初值要接在构造之后）`);
     if (!isStruct(t) && !isArr(t)) {
       return this.err(n, `new ${tyName(t)} { … }：花括号初值要一格聚合`);
     }
@@ -4088,11 +4320,15 @@ class JncLower {
     return this.ptrsTy(sp, tnNode.items[2], tnNode);
   }
 
-  /** `new T[n]` -> `(pnew (ptr T) n)`；`new T` -> 一格。两者出来的都是**指针**。 */
-  newPtr(n, tnNode, countNode) {
+  /** `new T[n]` -> `(pnew (ptr T) n)`；`new T` -> 一格。两者出来的都是**指针**。
+   *  类还多一段构造（第五十三刀）：`new C1(100)` 的实参在 argsNode 里。 */
+  newPtr(n, tnNode, countNode, argsNode) {
     const t = this.newTy(tnNode);
     if (t === null) return null;
     if (t === J_VOID) return this.err(n, 'new void');
+    if (argsNode !== null && !isClass(t)) {
+      return this.err(n, `new ${tyName(t)}(…)：只有类有构造，实参没处去`);
+    }
     // `new C`（第五十二刀）：出来的是一条**类引用**，不是"指向类指针的指针"——
     // jancy 的 `new` 对类给的就是 `C*`（也就是这一层的类类型自己）。`new C[n]` 没有：
     // 类的数组它自己就拒（`getArrayType` 的 TypeKind_Class 那一支）。
@@ -4100,7 +4336,27 @@ class JncLower {
       if (countNode !== null) {
         return this.err(n, `不能造类的数组（jancy 那句 "cannot create array of '${tyName(t)}'"）`);
       }
-      return { code: `(pnew (ptr ${t.name}) (int 1))`, type: tClass(t.name, false) };
+      const raw = { code: `(pnew (ptr ${t.name}) (int 1))`, type: tClass(t.name, false) };
+      if (!this.ctors.has(t.name)) {
+        // 没有构造：`new C(…)` 带了实参才是错，光 `new C` 就是那一句 pnew。
+        if (argsNode !== null && this.flat(argsNode).length > 0) {
+          return this.err(n, `${shown(t.name)} 没有 construct，给不了构造实参`);
+        }
+        return raw;
+      }
+      // 有构造：一格新对象加一句构造是**两句**，而 `new` 是一个表达式（惰性位置上每一次
+      // 求值都得真造一格）—— 所以照第二十五刀 newCurly 那条路，把这两句抬成一个函数。
+      const c = this.ctorArgs(n, t.name, argsNode === null ? [] : this.flat(argsNode));
+      if (c === null) return null;
+      const st = slotText(t);
+      const ps = c.vals.map((v, i) => `($i${i} ${slotText(v.type)})`).join(' ');
+      const as = c.vals.map((v, i) => ` (var $i${i})`).join('');
+      const fn = `$newo${this.tmp++}`;
+      this.decls.push(`  (fn ${fn} (${ps}) ${st}\n    (do\n`
+        + `      (let $p ${st} ${raw.code})\n`
+        + `      (expr (call ${c.name} (var $p)${as}))\n`
+        + `      (ret (var $p))))`);
+      return { code: `(call ${fn}${c.vals.map((v) => ` ${v.code}`).join('')})`, type: raw.type };
     }
     let count = '(int 1)';
     if (countNode !== null) {

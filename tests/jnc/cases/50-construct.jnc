@@ -1,0 +1,96 @@
+// 第五十三刀：`construct` 与 `static construct` —— 造对象与"造完接着跑的那一段"。
+//
+// 出处（jancy 自己的文档与实现）：
+//   - 构造/静态构造的写法与"构造可以重载、其余的构造方法不带实参"（type_class.rst:63）；
+//     体外写法连 `static construct` 也有（同一节 :85 那个 `C1.static construct() {`）。
+//   - 声明一个类变量带构造实参的**三种**写法：`C1 g_b construct(10)`、`new C1 construct(20)`、
+//     `new C1(30)`（type_class.rst:143-149）。`C1 a()` 的歧义正是 `construct` 那个词要躲的
+//     （同一节 :125-132）。
+//   - 静态构造在**实例构造的开头**调、**只调一次**：`Parser::finalizeConstructor` 里那四句
+//     （基类构造 → 静态构造 → 字段初值 → 属性构造，jnc_ct_Parser.cpp:3005-3009），"只一次"
+//     是 `MemberBlock::callStaticConstructor` 里的 `ModuleItemFlag_Constructed`。
+//   - 类只有静态构造、没有实例构造时 jancy **自己合成**一个实例构造
+//     （`DerivableType::createDefaultMethods`）—— 不然那段代码永远跑不着。这一层照做，
+//     所以下面的 `Reg r1;` 也会把 "reg once" 打出来。
+//
+// 期望输出的出处：一份 `cc -O0 -std=c99 -Wall` 的孪生件，九行逐字节相同。**写法差异**两处
+// （与第五十二刀那份同样的两条）：C 那边类写成 `struct` + `calloc` + `->`，构造写成"第一个
+// 形参是 self"的自由函数；静态构造那道闸门在孪生件里是一格 `static int` —— 这一层落的正是它
+// （一格模块级 bool 加一句 `if`）。
+class Point {
+	int m_x;
+	int m_y;
+
+	construct(int x, int y) {
+		m_x = x;
+		m_y = y;
+	}
+
+	int area() {
+		return m_x * m_y;
+	}
+}
+
+// 体内只写原型、体外补上 —— 与普通方法的两种放法同一条（type_class.rst:41-59）。
+// 体外的构造不写返回类型：它不回值。
+class Counter {
+	int m_n;
+	construct();
+
+	int val() {
+		return m_n;
+	}
+}
+
+Counter.construct() {
+	m_n = 42;
+}
+
+// 只有静态构造、没有实例构造：合成出来的那一个把闸门带上。
+class Reg {
+	int m_id;
+	static construct();
+}
+
+Reg.static construct() {
+	printf("reg once\n");
+}
+
+// 两样都有：静态构造在第一个实例构造的开头跑一次。
+class Seq {
+	int m_v;
+
+	static construct() {
+		printf("seq static\n");
+	}
+
+	construct(int v) {
+		m_v = v;
+	}
+}
+
+Point g_p(3, 4);            // 模块级：那一格的 pnew 在所有初值之前，构造紧跟在初值那一段里
+Counter g_c construct();    // 带 `construct` 那个词的写法（type_class.rst:143）
+
+Point* mk(int k) {
+	return new Point(k, k + 1);
+}
+
+int main() {
+	Point a(5, 6);
+	printf("%d %d %d\n", a.m_x, a.m_y, a.area());
+	Point* b = new Point construct(2, 3);
+	printf("%d\n", b.area());
+	Point* c = mk(10);
+	printf("%d\n", c.area());
+	printf("%d %d\n", g_p.area(), g_c.val());
+	Counter d;              // 无参构造也调
+	printf("%d\n", d.val());
+	Seq e(7);
+	Seq f(8);
+	printf("%d %d\n", e.m_v, f.m_v);
+	Reg r1;
+	Reg r2;
+	printf("%d\n", r1.m_id);
+	return 0;
+}

@@ -611,6 +611,15 @@
     ;; `(prefer 1)`：`new Layout(x)` 里的括号既能读成"构造实参"，又能读成 type-name 尾巴上的
     ;; 函数类型后缀（`Layout(无名形参 x)`）。前者才是这行代码的意思。
     (-> ("new" type-name "(" opt-args ")") (prec UNARY) (prefer 1) (new $2 $4))
+    ;; `new C1 construct(20)`（type_class.rst:148）。jancy 那条产生式里 `construct` 是
+    ;; **可选的一个词**，两种写法同一条规则、同一个动作：
+    ;;   new_operator_type
+    ;;     :  …
+    ;;     |  resolver (qualified_name_rslv TokenKind_Construct? '(', 2)
+    ;;        qualified_type_name $t TokenKind_Construct? '(' expression_or_empty_list $a ')'
+    ;; （jnc_ct_Expr.llk:726-734）。所以这里也归到**同一个** `(new 类型 实参)` 上 ——
+    ;; 那个词只是把"这括号是构造实参"写明白，没有别的意思（第五十三刀）。
+    (-> ("new" type-name "construct" "(" opt-args ")") (prec UNARY) (new $2 $5))
     ;; `new ui.EnumPropertyOption[count]` —— 分配一个数组。`[` 的优先级最高，所以
     ;; "先归约 new 再取下标"那条在建表时就被移进赢掉了，这里是唯一解。
     (-> ("new" type-name "[" expr "]") (prec UNARY) (new-array $2 $4))

@@ -1,0 +1,29 @@
+// 类的**析构**（第五十三刀的边界）。构造这一刀收了，析构没有 —— 而理由不是"工作量"，
+// 是 jancy 自己的文档就说它**没有确定时机**：
+//
+//   "destructors in garbage-collected world are not called deterministically. First the
+//    Garbage Collector must decide it needs to free unreachable objects; then the mark
+//    stage must complete. Only then the destructor of an about-to-be-freed object will be
+//    called."（disposable.rst:17）
+//
+// 也就是说 `destruct` 在 jancy 那边既不是"出作用域时调"（那是 `disposable` 存储类加
+// duck-typed 的 `dispose`，同一份 :19），也不是"delete 时调"—— 它归 GC。这一层没有 GC，
+// 所以任何时机都是编出来的：出作用域调会比 jancy 早，永不调会漏掉副作用。两种都在骗人，
+// 于是明说不收。要收得先有 GC，或者先接 `disposable` / `nestedscope` 那一套确定时机的路。
+class C {
+	int m_x;
+
+	construct() {
+		m_x = 7;
+	}
+
+	destruct() {
+		printf("bye %d\n", m_x);
+	}
+}
+
+int main() {
+	C c;
+	printf("%d\n", c.m_x);
+	return 0;
+}
