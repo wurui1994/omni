@@ -1710,12 +1710,55 @@ left)` 的 `left` 是"从第几个字符开始读"：
 **顺手撞见但不在这一刀里**：`|=` 这一族位运算复合赋值前端还不收（`mask |= 0100` 当场报"复合赋值
 '|='"），这条早就在名单上，本例改写成 `mask = mask | 0100`。
 
+> **第三十五刀更正**：下一刀就把它接了。查下去发现它连"名单上的边界"都算不上 —— 语法那一半早就
+> 齐了，缺的只是 `lower.js` 里一条白名单。`cases/33-radix.jnc` 里那行仍写作 `mask = mask | 0100`，
+> 没改回去：这一格由 `cases/34-bitassign.jnc` 专门量。
+
 **跑过的轴**：`tests/jnc`（50/0，新增 `cases/33-radix`）、`tests/glr`（20/0）、jancy 语料整份重扫
 （这一刀动了 `jnc.grammar`，所以要重量一遍）：参考树里 662 份 `.jnc` 有 634 份唯一成树，与改之前
 **同一批** 28 份不过 —— 拿 `git show HEAD:…/jnc.grammar` 把那 28 份逐个又跑了一遍，一份都没变，
 所以这条新 token 没有回归。那 28 份是早就在名单上的两族：`thin` 当函数修饰符
 （io_SocketAddress.jnc:121）与 `stdt_*` 那一整套模板。
 **没跑的**：`tests/sexpr`、`tests/asy` —— 方言、MIR、四个后端与运行时一个字都没改；自举、
+`tests/jit`、`tests/mir`、`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
+
+### 第三十五刀：`&= |= ^= <<= >>=` —— 语法早就有，只有降级那层没接
+
+上一刀写例子时想写 `mask |= 0100`，当场被拒（「复合赋值 '|='」）。查下去发现语法那一半**早就
+齐了**：`jnc.grammar:144-167` 五个 punct、`587-591` 五条产生式，转写自 `jnc_ct_Lexer.rl:369-373`。
+缺的只是 `lower.js` 里那条白名单 —— 第一刀只放了 `+= -= *= /= %=`。
+
+**语义就一条**：`lv op= v` 等于 `lv = (T)(lv op v)`，中间那一格照常用算术转换来。这条第三十三刀
+已经写好了（那一刀为了 `i /= (unsigned)2` 把"中间那一次真的转"补上了），所以位运算那三个
+（`&= |= ^=`）直接落在同一段代码上，一个字都不用加。
+
+**移位要单独一格**：`<<=` / `>>=` 的中间那一格**只看左边**，右边不参与常用算术转换。这与二元
+`<<` / `>>` 是同一条规矩（第三十三刀在二元那边已经写了），复合赋值这边得再写一次：
+
+```js
+const shift = bin === '<<' || bin === '>>';
+const rt = shift ? arith(lv.type) : common(lv.type, v.type);
+const y = shift ? intConv(v, arith(v.type)) : intConv(v, rt);
+```
+
+不这么写就会错：`int j = -8; unsigned one = 1; j >>= one;` 应当是 -4；要是让右边那个无符号把
+结果那一格拖成 u32，`-8` 会先变成 4294967288，答案成 536870911。
+
+**顺手补一条类型诊断**：位运算与移位只在整数上有定义，所以 `double x; x &= 1;` 现在拒在**类型**
+上（以前拒在"还没接"上）。`bad/bitassign-real.jnc` 是它的本体，属于"jancy 自己也拒"那一类。
+指针上那条早就在（「指针上的 '&='」）。
+
+**期望输出的出处**：`cases/34-bitassign.jnc`，一份 `cc -O0 -std=c99` 的孪生程序，17 行逐字节相同
+（五条腿也各自与它相同）。写法差别与前几刀同：`signed char`、`%lld`。
+
+孪生里**去掉过一行**：本来写了 `signed char h = 1; h <<= 10;`。clang 会警告
+`shift count >= width of type`，而那一行的答案要靠"超范围的有符号转换"（C 里那是
+implementation-defined），没有可引的答案。换成 `signed char h = -128; h >>= 3;` —— 中间那一格
+提到 32 位有符号，所以是算术移位，-16，完全有定义。
+
+**跑过的轴**：`tests/jnc`（52/0，新增 `cases/34-bitassign` 与 `bad/bitassign-real`）。
+**没跑的**：`tests/sexpr`、`tests/glr`、`tests/asy` —— 这一刀只动了 `frontend-jnc/lower.js`
+（加 `tests/jnc/run.js` 的头注释），语法、方言、MIR、四个后端与运行时一个字都没改；自举、
 `tests/jit`、`tests/mir`、`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
 
 ## 后果与代价

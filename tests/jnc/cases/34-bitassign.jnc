@@ -1,0 +1,100 @@
+// 位运算与移位的复合赋值（ADR-0016 第三十五刀）。`&= |= ^= <<= >>=` 以前是**当场拒**的
+// （「复合赋值 '|='」），语法早就有 —— `jnc.grammar:144-167` 那五个 punct 与 `587-591` 那五条
+// 产生式都在（转写自 jancy 的 `jnc_ct_Lexer.rl:369-373`），只有降级那一层没接。
+//
+// 语义就一条：`lv op= v` 等于 `lv = (T)(lv op v)`，中间那一格照常用算术转换来。**移位是例外**，
+// 中间那一格只看左边（`jnc_ct_BinOp_Arithmetic.cpp` 里 shift 一族不走 usual arithmetic
+// conversion）—— `j=` 那行就是它：`int j = -8; unsigned one = 1; j >>= one;` 是 -4，
+// 右边那个无符号拖不动结果那一格；要是拖动了，`-8` 会先变成 4294967288，答案就成 536870911。
+//
+// 期望输出的出处：一份 `cc -O0 -std=c99` 的孪生程序，17 行逐字节相同（五条腿也各自与它相同）。
+// 与那份 C 的两处写法差别与前几刀同：C 那边 `char` 的符号性由实现定，所以写 `signed char`；
+// 64 位要 `%lld`。
+//
+// 几处会给错答案的：
+//   - `f=` `g=`：收窄回 lv 那一格要回卷 —— `signed char f = 100; f <<= 1;` 是 -56（不是 200），
+//     `unsigned char g = 200; g <<= 1;` 是 144（400 & 255）。
+//   - `h=`：`signed char h = -128; h >>= 3;` 是 -16 —— 中间那一格提到 32 位有符号，所以是
+//     算术移位；要是在 8 位无符号里做就成 15 了。
+//   - `i=`：同一串位上 `>>=` 无符号是逻辑移位（0xff000000 >> 4 = 267386880）。
+//   - `q=`：`%=` 与 `+=` 那几条老路没被这一刀碰坏。
+//
+// `&= |= ^= <<= >>=` 只在整数上有定义。`double` 与 `bool` 上写它们当场拒（C 与 jancy 同），
+// 见 bad/bitassign-real.jnc。指针上也拒 —— 那条早就在（「指针上的 '&='」）。
+
+struct S {
+    int f;
+    unsigned char b;
+}
+
+int main() {
+    int a = 0x0f0f;
+    a &= 0x00ff;
+    printf("a=%d\n", a);
+    int b = 0x0f00;
+    b |= 0x000f;
+    printf("b=%d\n", b);
+    int c = 0xffff;
+    c ^= 0x00ff;
+    printf("c=%d\n", c);
+    int d = 3;
+    d <<= 4;
+    printf("d=%d\n", d);
+    int e = -1048576;
+    e >>= 4;
+    printf("e=%d\n", e);
+
+    char f = 100;
+    f <<= 1;
+    printf("f=%d\n", f);
+    unsigned char g = 200;
+    g <<= 1;
+    printf("g=%u\n", g);
+    char h = -128;
+    h >>= 3;
+    printf("h=%d\n", h);
+
+    unsigned int i = 0xff000000;
+    i >>= 4;
+    printf("i=%u\n", i);
+    int j = -8;
+    unsigned int one = 1;
+    j >>= one;
+    printf("j=%d\n", j);
+
+    long k = 1;
+    k <<= 40;
+    printf("k=%d\n", k);
+
+    unsigned char l = 0xf0;
+    l &= 0x3c;
+    printf("l=%u\n", l);
+    unsigned char m = 0x0f;
+    m |= 0xf0;
+    printf("m=%u\n", m);
+    char n = -1;
+    n ^= 0x0f;
+    printf("n=%d\n", n);
+
+    S s;
+    s.f = 6;
+    s.b = 3;
+    s.f <<= 3;
+    s.b |= 0x80;
+    printf("o=%d %u\n", s.f, s.b);
+
+    int arr[3];
+    arr[0] = 1;
+    arr[1] = 0xff;
+    arr[2] = 8;
+    arr[0] <<= 5;
+    arr[1] &= 0x0f;
+    arr[2] >>= 2;
+    printf("p=%d %d %d\n", arr[0], arr[1], arr[2]);
+
+    int q = 100;
+    q %= 7;
+    q += 1;
+    printf("q=%d\n", q);
+    return 0;
+}

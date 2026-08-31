@@ -21,7 +21,8 @@
 // 见下面「定宽整数」那一段）、`double`（-> real）、`bool`、`void`、
 // `struct`（值语义，降成方言的 `(struct …)`）、函数（含递归、形参、返回值）、
 // 局部量与赋值、`+ - * / %` 与比较、`&& || !`、一元 `- ~`、`++ --`（前后缀都收，
-// 但只作为语句/for 的步进）、复合赋值 `+= -= *= /=`、`? :`、if/else、while、
+// 但只作为语句/for 的步进）、复合赋值 `+= -= *= /= %=`（位运算与移位那五个
+// `&= |= ^= <<= >>=` 是第三十五刀）、`? :`、if/else、while、
 // do-while、C 式 for、break/continue/return、**真值化**（`if (n)` / `if (p)` /
 // `!n` / `n && m` —— jancy 把整数与指针当条件用，这一层照它办）、
 // **指针那一族**（这一刀的主题）：`T*` -> `(ptr T)`、`T thin*` -> `(tptr T)`、
@@ -1749,7 +1750,8 @@ class JncLower {
         return [`${pad}${this.store(lv, v.code)}`];
       }
       const bin = op === null ? null : op.slice(0, -1);
-      if (bin !== '+' && bin !== '-' && bin !== '*' && bin !== '/' && bin !== '%') {
+      if (bin !== '+' && bin !== '-' && bin !== '*' && bin !== '/' && bin !== '%'
+        && bin !== '&' && bin !== '|' && bin !== '^' && bin !== '<<' && bin !== '>>') {
         this.nope(n, `复合赋值 '${op}'`);
         return null;
       }
@@ -1765,15 +1767,22 @@ class JncLower {
       // 省得掉；混了无符号之后不成立了 —— `int i = -7; i /= (unsigned)2;` 在 C 与 jancy 里
       // 是**无符号除法**（2147483644），省掉中间那一次就成了 -3。
       if (isInt(lv.type) && isInt(v.type)) {
-        const rt = common(lv.type, v.type);
+        // 移位是例外：中间那一格**只看左边**（第三十五刀，与二元 `<<` `>>` 同一条规矩）。
+        const shift = bin === '<<' || bin === '>>';
+        const rt = shift ? arith(lv.type) : common(lv.type, v.type);
         const x = intConv({ code: this.read(lv), type: lv.type }, rt);
-        const y = intConv(v, rt);
+        const y = shift ? intConv(v, arith(v.type)) : intConv(v, rt);
         let code = `(bin "${bin}" ${x.code} ${y.code})`;
         // 回卷只发**一次**：收窄那一次自己就掩了低位，中间那一次省得掉。`%` 例外 ——
         // 余数天然在范围里，只有回到 lv 那一格要换符号性时才要动。
         const same = rt.w === lv.type.w && !rt.u === !lv.type.u;
         if (!same || bin !== '%') code = wrapTo(code, lv.type.w, lv.type.u);
         return [`${pad}${this.store(lv, code)}`];
+      }
+      // 位运算与移位只在整数上有定义（C 的规矩，jancy 同）。走到这儿两边不都是整数。
+      if (bin === '&' || bin === '|' || bin === '^' || bin === '<<' || bin === '>>') {
+        this.err(n, `'${op}' 要整数，这里左是 ${tyName(lv.type)}、右是 ${tyName(v.type)}`);
+        return null;
       }
       if (!sameTy(v.type, lv.type)) {
         this.err(n, `'${op}' 两边不同型：左是 ${tyName(lv.type)}，右是 ${tyName(v.type)}`);
