@@ -63,7 +63,8 @@
 //      第五十六刀、虚派发（`virtual` / `override` / `abstract`）是第五十七刀、
 //      errorcode 那一套（自动传播与 `try`）是第五十八刀、`try { … }` 与 `catch:` 是
 //      第五十九刀、`import "x.jnc"` 是第六十刀、64 位的无符号整数是第六十一刀、
-//      `-I` 给的 import 目录表是第六十二刀，在
+//      `-I` 给的 import 目录表是第六十二刀、构造函数体里免分号的 `X.construct(…)` 是
+//      第六十三刀，在
 //      cases/24-new-curly.jnc、
 //      cases/25-static-local.jnc、cases/26-printf-prec.jnc、cases/27-printf-star-prec.jnc、
 //      cases/28-printf-flags.jnc、cases/29-printf-sci.jnc、cases/30-printf-gen.jnc、
@@ -76,7 +77,7 @@
 //      cases/50-construct.jnc、cases/51-litcat.jnc、cases/52-fnptr.jnc、
 //      cases/53-inherit.jnc、cases/54-virtual.jnc、cases/55-errorcode.jnc、
 //      cases/56-catch.jnc、cases/57-import.jnc、cases/58-uint64.jnc、
-//      cases/59-incdir.jnc。cases/imports/ 底下那三份是 57 那一条
+//      cases/59-incdir.jnc、cases/60-btm-ctor.jnc。cases/imports/ 底下那三份是 57 那一条
 //      import 进来的、cases/incdirs/ 底下那六份是 59 那一条按 `-I` 找到的，
 //      **都不是**独立的用例 —— 这一层只扫 cases/ 这一级的 `.jnc`。）
 //

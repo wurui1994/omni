@@ -1,0 +1,83 @@
+// 构造函数体里那句 `X.construct(…)` **免分号**（ADR-0016 第六十三刀）。
+//
+// 出处是 jancy 的语法本身：构造函数的体是**另一种** compound（`constructor_compound_stmt`,
+// jnc_ct_Stmt.llk:26-43），开头允许零个或多个 `btm_construct_stmt`，而那条规则的两条产生式
+//
+//   btm_construct_stmt
+//     :  TokenKind_BaseType '.' TokenKind_Construct '(' expression_or_empty_list ')'
+//     |  btm_construct_name '(' expression_or_empty_list ')'
+//     |  ';'
+//
+// （jnc_ct_Stmt.llk:51-61）尾巴上**都没有** `';'`。语料里真这么写：
+//
+//   class HBoxLayout: BoxLayout {
+//       construct() {
+//           basetype.construct(Direction.LeftToRight)
+//       }
+//   }
+//
+// （test/ioninja/api/ui_Layout.jnc:67-70）。第六十二刀把 `-I` 接上之后，这一条成了 17 份
+// 新露出来的 api 文件里第一个拦路的东西 —— 而且它是**语法**错，不是"还不收"。
+//
+// 这一层的接法与 jancy 有一处**明写下来的差别**：它那边这一格只出现在构造函数体的开头，
+// 我们的函数体只有一种 `compound`，语法上分不出是不是构造函数，所以那条产生式挂在 `stmt` 上
+// —— 比 jancy **宽**。宽在这儿是安全的：写错地方由降级认（`construct` 得在类里查得着），
+// 语法多认一个位置不会把别的写法读歪。
+//
+// 带分号的写法有两棵树（新那条吃到 `)`、剩下的 `;` 当空语句），靠 `(prefer -1)` 把票投给
+// 原来的 `(expr ";")`。`b=` 那一格钉的就是它：带分号照旧能过、且**唯一**成树。
+//
+// 期望值的出处：不是 C 孪生（C 里没有这个东西），是上面那几条语法行加四个构造实参
+// （7 / 11 / 4 / 5）与 `twice()` 的定义。五条腿逐字节相同。
+
+class Base {
+    int m_x;
+
+    construct(int x) {
+        m_x = x;
+    }
+
+    int twice() {
+        return m_x * 2;
+    }
+}
+
+// 一、免分号，后面紧跟着 `}`
+class D1: Base {
+    construct() {
+        basetype.construct(7)
+    }
+}
+
+// 二、带分号：还是原来那棵树
+class D2: Base {
+    construct() {
+        basetype.construct(11);
+    }
+}
+
+// 三、免分号，后面还有别的语句（那句 `m_y = twice()` 要基类已经构造好）
+class D3: Base {
+    int m_y;
+
+    construct(int x) {
+        basetype.construct(x)
+        m_y = twice();
+    }
+}
+
+// 四、`basetype1` 与 `basetype` 是同一格（type_class.rst:226），免分号一样收
+class D4: Base {
+    construct() {
+        basetype1.construct(5)
+    }
+}
+
+int main() {
+    D1* a = new D1();
+    D2* b = new D2();
+    D3* c = new D3(4);
+    D4* d = new D4();
+    printf("%d %d %d %d %d\n", a.m_x, b.m_x, c.m_x, c.m_y, d.m_x);
+    return 0;
+}

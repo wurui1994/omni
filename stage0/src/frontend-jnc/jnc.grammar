@@ -461,6 +461,28 @@
     (-> (";") (empty-stmt))
     (-> (compound) $1)
     (-> (expr ";") (expr-stmt $1))
+    ;; 构造函数体开头那句 `X.construct(…)` **免分号**（第六十三刀）。不是我们放宽的：jancy 的
+    ;; `btm_construct_stmt`（jnc_ct_Stmt.llk:51-61）两条产生式尾巴上都没有 `';'` ——
+    ;;
+    ;;   class HBoxLayout: BoxLayout {
+    ;;       construct() {
+    ;;           basetype.construct(Direction.LeftToRight)     // 没有分号
+    ;;       }
+    ;;   }
+    ;;
+    ;; （ui_Layout.jnc:67-70）。两处要交待：
+    ;;   1. **比 jancy 宽**：它那边这一格只出现在构造函数体的开头（`constructor_compound_stmt`
+    ;;      里单独的一个 `(…)*`，Stmt.llk:26-43），而这一层的函数体只有一种 `compound`，
+    ;;      语法上分不出是不是构造函数。宽在这儿是安全的：写错地方由降级那一层认
+    ;;      （`construct` 得在类里查得着），语法多认一个位置不会把别的写法读歪。
+    ;;   2. `(prefer -1)`：**带**分号的那种写法有两棵树 —— 这一条吃到 `)`、剩下的 `;` 再当一条
+    ;;      空语句，与上面 `(expr ";")` 并列。偏好把票投给 `(expr ";")`，于是 `X.construct(a);`
+    ;;      还是原来那棵树，只有没写分号时才走这一条。
+    ;; 成员那一格写**裸原子** `construct` 而不是字符串：`callExpr` 认成员名要
+    ;; `isAtom(callee.items[2])`（走 `member` 那条来的是词法记号），写成字符串就是另一格东西，
+    ;; 降级会说"'basetype' 后面那个成员认不出来"。
+    (-> (expr "." "construct" "(" opt-args ")") (prefer -1)
+        (expr-stmt (call (field $1 construct) $5)))
     ;; 控制语句的**体是 decl，不是 stmt**。看着奇怪，理由很实在：属性块挂在 decl 上
     ;; （`decl -> attr-block decl`），而 jancy 真的会往 if 的体上挂属性 ——
     ;;
