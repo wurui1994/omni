@@ -13,7 +13,7 @@
 // 只有"按值嵌套"的 struct 需要拓扑排序。
 
 import { RUNTIME_INCLUDE, amalgamate } from '../runtime/c_runtime.js';
-import { cTypeName, listType, typeKey, cArrOps, arrIsBlob } from '../hir/types.js';
+import { cTypeName, listType, typeKey, cArrOps, arrIsBlob, loopLabelNeeds } from '../hir/types.js';
 import { JS_ABI, JS_ALL, JS_MEMBERS, JS_TAG_C } from '../hir/js_abi.js';
 import { C_ABI, C_TYPE, C_IN, C_OUT } from '../hir/c_abi.js';
 import { utf8Bytes } from '../host/utf8.js';
@@ -47,6 +47,10 @@ class CEmitter {
     this.out = [];
     this.indent = 0;
     this.tmp = 0;
+    // 循环标签栈（第四十刀）。C 里没有带标签的 break，多层跳只能是 goto，而且 break 与
+    // continue 要**两个**标签：break 的落点在循环之后，continue 的落点在循环体末尾
+    // （落到那儿再自然往下走，`for` 的步进就还会跑）。用不着的那个不发，免得 -Wunused-label。
+    this.loops = [];
     this.opts = opts;
     // JS 字符串字面量池（见 s16Lit）。Map 保证发射顺序稳定 —— 自举要逐字节可复现。
     this.s16pool = new Map();
@@ -765,33 +769,62 @@ class CEmitter {
         }
         this.line('}');
         break;
-      case 'While':
+      case 'While': {
+        const lp = this.pushLoop(s);
         this.line(`while (${this.expr(s.cond)}) {`);
         this.indent++;
         for (const x of s.body.stmts) this.stmt(x);
+        if (lp.cont) this.line(`${lp.cont}: ;`);
         this.indent--;
         this.line('}');
+        if (lp.brk) this.line(`${lp.brk}: ;`);
+        this.loops.pop();
         break;
-      case 'For':
+      }
+      case 'For': {
         this.line('{');
         this.indent++;
         if (s.init) this.stmt(s.init);
+        const lp = this.pushLoop(s);
         this.line(`for (; ${s.cond ? this.expr(s.cond) : ''}; ${s.step ? this.expr(s.step) : ''}) {`);
         this.indent++;
         for (const x of s.body.stmts) this.stmt(x);
+        if (lp.cont) this.line(`${lp.cont}: ;`);
         this.indent--;
         this.line('}');
+        if (lp.brk) this.line(`${lp.brk}: ;`);
+        this.loops.pop();
         this.indent--;
         this.line('}');
         break;
+      }
       case 'ForIn': this.forIn(s); break;
       case 'Return':
         this.line(s.value ? `return ${this.expr(s.value)};` : 'return;');
         break;
-      case 'Break': this.line('break;'); break;
-      case 'Continue': this.line('continue;'); break;
+      case 'Break': this.line(this.jump(s, 'break')); break;
+      case 'Continue': this.line(this.jump(s, 'continue')); break;
       default: throw new Error(`c.stmt: ${s.kind}`);
     }
+  }
+
+  /** 进循环前：按需给这一层起两个标签，压栈。用不上的那个是 null，不会发出来。 */
+  pushLoop(s) {
+    const need = loopLabelNeeds(s);
+    const id = this.tmp++;
+    const e = { brk: need.brk ? `omni_brk${id}` : null, cont: need.cont ? `omni_cont${id}` : null };
+    this.loops.push(e);
+    return e;
+  }
+
+  /** `break;` / `continue;`，或者跳到外层那一层的标签上 */
+  jump(s, word) {
+    const lv = s.level === undefined || s.level === null ? 1 : s.level;
+    if (lv === 1) return `${word};`;
+    const e = this.loops[this.loops.length - lv];
+    const label = e === undefined ? null : (word === 'break' ? e.brk : e.cont);
+    if (label === null) throw new Error(`c.${word}: 第 ${lv} 层循环没有标签`);
+    return `goto ${label};`;
   }
 
   /**
@@ -807,14 +840,18 @@ class CEmitter {
     this.indent++;
     this.line(`${cTypeName(t)} ${c} = ${this.expr(s.iterable)};`);
     const bound = t.k === 'list' ? `${c}->len` : `${c}->n`;
+    const lp = this.pushLoop(s);
     this.line(`for (int64_t ${i} = 0; ${i} < ${bound}; ${i}++) {`);
     this.indent++;
     if (t.k !== 'list') this.line(`if (!${c}->live[${i}]) continue;`);
     const slot = t.k === 'list' ? `${c}->items[${i}]` : `${c}->keys[${i}]`;
     this.line(`${cTypeName(s.varType)} v_${s.varName} = ${this.convert(slot, s.elemType, s.varType)};`);
     for (const x of s.body.stmts) this.stmt(x);
+    if (lp.cont) this.line(`${lp.cont}: ;`);
     this.indent--;
     this.line('}');
+    if (lp.brk) this.line(`${lp.brk}: ;`);
+    this.loops.pop();
     this.indent--;
     this.line('}');
   }

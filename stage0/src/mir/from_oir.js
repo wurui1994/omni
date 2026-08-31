@@ -183,12 +183,17 @@ class ToMir {
     this.f.emit(OP.END, T_VOID, REF_NONE, REF_NONE, 0);
   }
 
-  /** 往外数第几层能找到这个标签。找不到就是前端漏了检查，属于编译器 bug。 */
-  levelOf(label) {
+  /**
+   * 往外数第几层能找到这个标签。`nth` 是"第几个同名标签"（第四十刀的 `break2`：
+   * nth = 2，也就是跳过最里那一层循环，找外面那一层的 `break` 区域）。
+   * 找不到就是前端漏了检查，属于编译器 bug。
+   */
+  levelOf(label, nth = 1) {
+    let seen = 0;
     for (let i = this.regions.length - 1; i >= 0; i--) {
-      if (this.regions[i] === label) return this.regions.length - 1 - i;
+      if (this.regions[i] === label && ++seen === nth) return this.regions.length - 1 - i;
     }
-    throw new OmniError(`mir: ${label} 没有对应的区域（函数 ${this.f.name}）`);
+    throw new OmniError(`mir: ${label} 的第 ${nth} 层没有对应的区域（函数 ${this.f.name}）`);
   }
 
   block(stmts) {
@@ -280,10 +285,10 @@ class ToMir {
         return;
       }
       case 'Break':
-        f.emit(OP.BR, T_VOID, REF_NONE, REF_NONE, this.levelOf('break'));
+        f.emit(OP.BR, T_VOID, REF_NONE, REF_NONE, this.levelOf('break', s.level ?? 1));
         return;
       case 'Continue':
-        f.emit(OP.BR, T_VOID, REF_NONE, REF_NONE, this.levelOf('continue'));
+        f.emit(OP.BR, T_VOID, REF_NONE, REF_NONE, this.levelOf('continue', s.level ?? 1));
         return;
       default:
         throw new OmniError(`mir: 还没有处理的语句 ${s.kind}`);

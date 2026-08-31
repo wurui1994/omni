@@ -1947,6 +1947,50 @@ iterable`。派发那几条本来就是这个形状，改成 `(if C (do (set …
 （加 `tests/jnc/run.js` 的头注释），语法、方言、MIR、四个后端与运行时一个字都没改；自举、
 `tests/jit`、`tests/mir`、`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
 
+### 第四十刀：多层 `(brk N)` / `(cont N)` —— 这一刀长的是**方言**，不是 jancy 前端
+
+这是"jancy 不向方言妥协"这条纪律第一次逼着方言在**控制流**上长东西。jancy 有 `break2` /
+`continue2`（`'break' [1-9]`，jnc_ct_Lexer.rl:317-320，`break1` 就是 `break`；文档见
+cflow_break.rst 与 samples/jnc/83_BreakN.jnc），而方言只有单层的 `(brk)` / `(cont)` ——
+第三十六刀因此欠了一条边界（`bad/switch-continue`：switch 里的 `continue` 要跳过我合成的
+那圈一次性循环，正是"往外数第二层"）。
+
+**为什么改动比想象的小**：MIR 那一层**本来就是按层号跳的** —— `OP.BR` 的第三个操作数就是
+"往外数几层区域"，`levelOf('break')` 只是一直在找最近的那一层。所以 MIR、两个 SSA 后端
+（LLVM / SPIR-V）与 MIR 解释器一个字都没改，只把 `levelOf` 加了个"第几个同名标签"的参数。
+
+**改的是四处**：
+
+- `sexpr/lower.js`：`(brk N)` / `(cont N)`，N 是 1..9 的一位数字，`N` 省掉就是 1。层数不够
+  当场拒，与"一层都没有"分成两句话（`bad/brk-outside` 与新的 `bad/brkn-too-deep`）。
+- `hir/check.js`：`Break` / `Continue` 带上 `level`，别的前端造的节点没有这个字段，所以到处
+  都补默认 1。
+- `interp/eval.js`：信号值编成 `base + 4 * (N-1)`。循环见到 `sig >= 4` 就知道"这不是给我的"，
+  减掉一层往外抛；`for` 在往外抛时**不走步进**。刻意不用异常做控制流（ADR-0007 那条规矩）。
+- 两个结构化后端要**标签**。JS 是 `break L` / `continue L`；C 里没有带标签的 break，只能
+  `goto`，而且要**两个**标签：`break` 的落点在循环之后，`continue` 的落点在循环体**末尾**
+  （落到那儿再自然往下走，`for` 的步进与 for-in 的 `i++` 就还会跑 —— 这三种循环的步进都在
+  头部，所以这一条对三种都成立）。
+
+哪一层要标签，由 `hir/types.js` 里新的 `loopLabelNeeds` 一份判断答，两条腿共用：**判错了会
+静默地跳错地方**，各写一份迟早分叉。判据是"body 里存在一条 Break/Continue，它所在的嵌套
+循环层数 d > 0 且 level === d + 1"。用不上的标签不发，免得 C 那边 `-Wunused-label`。
+
+**验的方式**：`tests/sexpr/cases/35-brkn.sx` 三个函数各钉一格（`(brk 2)`、`(cont 2)`、三层里
+`(brk 3)` 与单层 `(brk)` 混写），答案 24 / 6 / 8 手算得出，五条腿逐字节相同。`(cont 2)` 那格
+的证据是外层 body 里那句 `+100` 每轮都被跳过 —— 要是它只跳了内层，答案里就会有 100 的倍数。
+生成的 C 里确认只有被指着的那一层带标签（`omni_brk0` / `omni_cont2` / `omni_brk4`）。
+
+**下一刀欠的**：jancy 前端还没把 `breakN` / `continueN` 接到这一格上，`bad/switch-continue`
+那条边界也还留着 —— 那是第四十一刀的事。
+
+**跑过的轴**：`tests/sexpr`（75/0，新增 `cases/35-brkn` 与 `bad/brkn-too-deep`）、`tests/jnc`
+（60/0）、`tests/oir`（451/0）、`tests/asy`（259/0）。
+**没跑的**：`tests/glr`（语法一个字没改）、自举、`tests/jit`、`tests/llvm`；`npm run lint`
+这台机器上没有 typescript。`tests/mir` 这台机器上本来就红 —— 自举的重名检查撞在
+`frontend-jnc/lower.js` 的 `zeroOf` 与 `interp/builtin.js` 的 `zeroOf` 上，那是第一刀
+（8cc16be）就欠下的债，与这一刀无关，记在这里免得下次重查。
+
 ## 后果与代价
 
 - 方言从"没有可算术的引用"变成"有"。这一格会渗到 MIR 与四个后端，改不回去。

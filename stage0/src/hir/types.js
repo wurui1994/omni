@@ -315,6 +315,39 @@ export function arrIsBlob(elem) {
 }
 
 /**
+ * 这个循环要不要带标签（第四十刀）。多层 `break` / `continue` 在 JS 里是 `break L` /
+ * `continue L`，在 C 里是 `goto` —— 两条腿都得在**发射循环之前**就知道"有没有更里层
+ * 的跳指着我"，所以先扫一遍。
+ *
+ * 判据：body 里存在一条 Break / Continue，它所在的嵌套循环层数 d 大于 0（也就是它在
+ * 更里层的循环里），而 level 正好是 d + 1（正好指着这一层）。d === 0 那些是 C 与 JS
+ * 自带的 `break;` / `continue;`，不用标签。
+ *
+ * 两条腿共用这一份，是因为"哪一层要标签"这个判断错了会静默地跳错地方 —— 各写一份迟早分叉。
+ */
+export function loopLabelNeeds(loop) {
+  const need = { brk: false, cont: false };
+  const walk = (s, d) => {
+    if (s === null || s === undefined) return;
+    switch (s.kind) {
+      case 'Block': for (const x of s.stmts) walk(x, d); return;
+      case 'If': walk(s.then, d); walk(s.otherwise, d); return;
+      case 'While': case 'For': case 'ForIn': walk(s.body, d + 1); return;
+      case 'Break': case 'Continue': {
+        const lv = s.level === undefined || s.level === null ? 1 : s.level;
+        if (d > 0 && lv === d + 1) {
+          if (s.kind === 'Break') need.brk = true; else need.cont = true;
+        }
+        return;
+      }
+      default: return;
+    }
+  };
+  walk(loop.body, 0);
+  return need;
+}
+
+/**
  * 数组六条操作在 C 侧的名字前缀。标量元素直接就是运行时里那四份单态
  * （`omni_arr_i64_get` 之类）；聚合元素的**句柄类型**是同一个 `omni_arr_blob`，
  * 但六条操作要按形状各有一份（读写元素的类型不同），所以名字按 typeKey 生成，

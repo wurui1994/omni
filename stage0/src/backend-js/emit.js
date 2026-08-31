@@ -10,7 +10,7 @@
 //   dynamic -> JS 原生值（null/boolean/BigInt/number/string/Array/Map）
 
 import { JS_PRELUDE } from './prelude.js';
-import { typeKey } from '../hir/types.js';
+import { typeKey, loopLabelNeeds } from '../hir/types.js';
 import { JS_ABI, JS_ALL, JS_MEMBERS } from '../hir/js_abi.js';
 import { C_ABI } from '../hir/c_abi.js';
 
@@ -38,6 +38,27 @@ class JsEmitter {
     this.out = [];
     this.indent = 0;
     this.tmp = 0;
+    // 循环标签栈（第四十刀）：每进一层循环压一个名字（不需要标签时压 null）。
+    // `(brk N)` 往里数第 N 个就是目标。
+    this.loops = [];
+  }
+
+  /** 进循环前：要标签就发一行 `L:`，并把名字压栈；回一个 null 表示这层没标签 */
+  pushLoop(s) {
+    const need = loopLabelNeeds(s);
+    const label = need.brk || need.cont ? `$L${this.tmp++}` : null;
+    if (label !== null) this.line(`${label}:`);
+    this.loops.push(label);
+    return label;
+  }
+
+  /** `break;` / `break $L3;` —— JS 的标签一个就够，break 与 continue 共用 */
+  jump(s, word) {
+    const lv = s.level === undefined || s.level === null ? 1 : s.level;
+    if (lv === 1) return `${word};`;
+    const label = this.loops[this.loops.length - lv];
+    if (label === undefined || label === null) throw new Error(`js.${word}: 第 ${lv} 层循环没有标签`);
+    return `${word} ${label};`;
   }
 
   line(s) {
@@ -318,18 +339,22 @@ class JsEmitter {
         this.line('}');
         break;
       case 'While':
+        this.pushLoop(s);
         this.line(`while (${this.expr(s.cond)}) {`);
         this.body(s.body.stmts);
         this.line('}');
+        this.loops.pop();
         break;
       case 'For':
         // init 可能声明多个变量，放在外层块里；step 仍在 for 头部，保证 continue 语义
         this.line('{');
         this.indent++;
         if (s.init) this.stmt(s.init);
+        this.pushLoop(s);
         this.line(`for (; ${s.cond ? this.expr(s.cond) : ''}; ${s.step ? this.expr(s.step) : ''}) {`);
         this.body(s.body.stmts);
         this.line('}');
+        this.loops.pop();
         this.indent--;
         this.line('}');
         break;
@@ -337,19 +362,21 @@ class JsEmitter {
         const t = s.iterable.type;
         const src = t.k === 'dict' ? `${this.expr(s.iterable)}.keys()` : this.expr(s.iterable);
         const it = `$it${this.tmp++}`;
+        this.pushLoop(s);
         this.line(`for (const ${it} of ${src}) {`);
         this.indent++;
         this.line(`let v_${s.varName} = ${this.convert(it, s.elemType, s.varType)};`);
         this.indent--;
         this.body(s.body.stmts);
         this.line('}');
+        this.loops.pop();
         break;
       }
       case 'Return':
         this.line(s.value ? `return ${this.rvalue(s.value, s.value.type)};` : 'return;');
         break;
-      case 'Break': this.line('break;'); break;
-      case 'Continue': this.line('continue;'); break;
+      case 'Break': this.line(this.jump(s, 'break')); break;
+      case 'Continue': this.line(this.jump(s, 'continue')); break;
       default: throw new Error(`js.stmt: ${s.kind}`);
     }
   }

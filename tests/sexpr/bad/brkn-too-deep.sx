@@ -1,0 +1,10 @@
+;; `(brk 2)` 要有两层循环。方言不猜"你大概是想跳出这一层" —— 层数不够就是写错了。
+;; 与 bad/brk-outside 分开记：那一条是"一层都没有"，这一条是"有但不够深"。
+(module
+  (main
+    (let i int (int 0))
+    (while (bin "<" (var i) (int 3))
+      (do
+        (set i (bin "+" (var i) (int 1)))
+        (brk 2)))
+    (print (var i))))

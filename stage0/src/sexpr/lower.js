@@ -890,9 +890,22 @@ class CoreLowerer {
     // `(brk)` / `(cont)`：OIR 里 Break / Continue 早就有，方言这边一直没开口。
     // 补上不是为 asy 特设的 —— 任何 C 系语言的循环都要它，而"用标志位绕开 break"
     // 会把控制流塞进数据流里，六条腿上都更难读。
+    //
+    // `(brk N)` / `(cont N)` 是往外数第 N 层（第四十刀）。MIR 早就是按层号跳的
+    // （`OP.BR` 的第三个操作数就是层数），这一格只是把方言那一头开出来。N 省掉就是 1。
+    // 上限 9：jancy 的词法就是 `'break' [1-9]`（jnc_ct_Lexer.rl:317-320），没有 `break10`。
     if (h === 'brk' || h === 'cont') {
+      let level = 1;
+      if (n.items[1] !== undefined) {
+        const s = isAtom(n.items[1]) ? n.items[1].value : null;
+        if (s === null || !/^[1-9]$/.test(s)) return this.err(n, `(${h} N) 的 N 要是 1..9 的十进制数字`);
+        level = Number(s);
+      }
       if (this.loopDepth === 0) return this.err(n, `(${h}) 只能写在循环里`);
-      return { kind: h === 'brk' ? 'Break' : 'Continue' };
+      if (this.loopDepth < level) {
+        return this.err(n, `(${h} ${level}) 要往外数 ${level} 层循环，这里只有 ${this.loopDepth} 层`);
+      }
+      return { kind: h === 'brk' ? 'Break' : 'Continue', level: level };
     }
     if (h === 'ret') {
       if (n.items[1] === undefined) {

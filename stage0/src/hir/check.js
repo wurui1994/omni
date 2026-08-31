@@ -863,12 +863,23 @@ class Checker {
         }
         return { kind: 'Return', value: this.coerce(this.expr(node.value), this.currentRet, node.value.span) };
       }
-      case 'Break':
-        if (this.loopDepth === 0) this.err(node.span, "'break' outside of a loop");
-        return { kind: 'Break' };
-      case 'Continue':
-        if (this.loopDepth === 0) this.err(node.span, "'continue' outside of a loop");
-        return { kind: 'Continue' };
+      case 'Break': {
+        // 层号（第四十刀）：往外数第几层循环。别的前端造的 Break 不带 level，所以补默认 1。
+        const lv = node.level === undefined || node.level === null ? 1 : node.level;
+        if (this.loopDepth < lv) {
+          this.err(node.span, lv === 1 ? "'break' outside of a loop"
+            : `'break${lv}' needs ${lv} enclosing loops, found ${this.loopDepth}`);
+        }
+        return { kind: 'Break', level: lv };
+      }
+      case 'Continue': {
+        const lv = node.level === undefined || node.level === null ? 1 : node.level;
+        if (this.loopDepth < lv) {
+          this.err(node.span, lv === 1 ? "'continue' outside of a loop"
+            : `'continue${lv}' needs ${lv} enclosing loops, found ${this.loopDepth}`);
+        }
+        return { kind: 'Continue', level: lv };
+      }
       default:
         throw new Error(`check.stmt: unhandled ${node.kind}`);
     }

@@ -23,10 +23,15 @@ import { callBuiltin, zeroOf, newInstance, flushOut, failRt, jsCallFn, vecHsum, 
 
 // 语句的结果：正常走完 / break / continue / return。刻意不用异常做控制流 —— C 侧的
 // throw 是"待决错误标志 + 普通跳转"（ADR-0007），用信号值两个宿主上形状一致。
+//
+// 多层 break / continue（第四十刀）也编在这个整数里：往外第 N 层是 `base + OUTER * (N-1)`。
+// 循环见到 `sig >= OUTER` 就知道"这不是给我的"，减掉一层再往外抛。RETURN 比 OUTER 小，
+// 所以不会与它撞。
 const NEXT = 0;
 const BREAK = 1;
 const CONTINUE = 2;
 const RETURN = 3;
+const OUTER = 4;
 
 /** 一层作用域。链式查找：块级 let 与 for 的初始化都要能遮蔽外层 */
 class Env {
@@ -162,6 +167,7 @@ class Interp {
           const sig = this.block(s.body, this.scope(s.body, env), frame);
           if (sig === BREAK) break;
           if (sig === RETURN) return sig;
+          if (sig >= OUTER) return sig - OUTER;   // 是外层的 break / continue，往外传一层
         }
         return NEXT;
       case 'For': {
@@ -172,6 +178,7 @@ class Interp {
           const sig = this.block(s.body, this.scope(s.body, outer), frame);
           if (sig === BREAK) break;
           if (sig === RETURN) return sig;
+          if (sig >= OUTER) return sig - OUTER;   // 往外传时不走步进
           if (s.step) this.eval(s.step, outer, frame);
         }
         return NEXT;
@@ -180,8 +187,8 @@ class Interp {
       case 'Return':
         this.ret = s.value ? this.rvalue(s.value, s.value.type, env, frame) : undefined;
         return RETURN;
-      case 'Break': return BREAK;
-      case 'Continue': return CONTINUE;
+      case 'Break': return BREAK + OUTER * ((s.level ?? 1) - 1);
+      case 'Continue': return CONTINUE + OUTER * ((s.level ?? 1) - 1);
       default: throw new OmniError(`interp.stmt: ${s.kind}`);
     }
   }
@@ -206,6 +213,7 @@ class Interp {
       const sig = this.block(s.body, inner, frame);
       if (sig === BREAK) break;
       if (sig === RETURN) return sig;
+      if (sig >= OUTER) return sig - OUTER;
     }
     return NEXT;
   }

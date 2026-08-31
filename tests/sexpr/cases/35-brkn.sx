@@ -1,0 +1,67 @@
+;; 多层 `(brk N)` / `(cont N)`（ADR-0016 第四十刀）。方言以前只有单层的 `(brk)` / `(cont)`。
+;;
+;; MIR 那一层本来就是按**层号**跳的（`OP.BR` 的第三个操作数就是往外数几层区域），所以这一刀
+;; 加的不是新概念，只是把方言那一头开出来，再让两个结构化后端（JS / C）会发标签：
+;; JS 是 `break L` / `continue L`，C 里没有带标签的 break，只能 `goto`。
+;;
+;; 上限 9，跟 jancy 的词法对齐：`'break' [1-9]`（jnc_ct_Lexer.rl:317-320），`break1` 就是 `break`。
+;;
+;; 三个函数各钉一格，答案都能手算：
+;;   f1：`(brk 2)` 从内层一次跳出两层。
+;;   f2：`(cont 2)` 跳到**外层**的下一轮 —— 外层 body 里 `(cont 2)` 之后那句 `+100`
+;;       每轮都被跳过，所以答案里没有 100 的倍数，这正是"真的跳到外层"的证据。
+;;   f3：三层嵌套里 `(brk 3)` 与单层 `(brk)` 混着写，证明两者数的是同一套层。
+(module
+  (fn f1 () int
+    (let acc int (int 0))
+    (let i int (int 0))
+    (while (bin "<" (var i) (int 3))
+      (do
+        (let j int (int 0))
+        (while (bin "<" (var j) (int 3))
+          (do
+            (set acc (bin "+" (var acc) (bin "+" (bin "*" (var i) (int 10)) (var j))))
+            (if (bin "==" (bin "+" (bin "*" (var i) (int 3)) (var j)) (int 4)) (do (brk 2)))
+            (set j (bin "+" (var j) (int 1)))))
+        (set i (bin "+" (var i) (int 1)))))
+    (ret (var acc)))
+
+  (fn f2 () int
+    (let acc int (int 0))
+    (let i int (int 0))
+    (while (bin "<" (var i) (int 3))
+      (do
+        ;; 步进写在**开头**：`(cont 2)` 跳的是外层的下一轮，跳过的是它后面的一切
+        (set i (bin "+" (var i) (int 1)))
+        (let j int (int 0))
+        (while (bin "<" (var j) (int 3))
+          (do
+            (set j (bin "+" (var j) (int 1)))
+            (if (bin "==" (var j) (int 2)) (do (cont 2)))
+            (set acc (bin "+" (var acc) (bin "*" (var i) (var j))))))
+        (set acc (bin "+" (var acc) (int 100)))))
+    (ret (var acc)))
+
+  (fn f3 () int
+    (let acc int (int 0))
+    (let i int (int 0))
+    (while (bin "<" (var i) (int 3))
+      (do
+        (let j int (int 0))
+        (while (bin "<" (var j) (int 3))
+          (do
+            (let k int (int 0))
+            (while (bin "<" (var k) (int 3))
+              (do
+                (set acc (bin "+" (var acc) (int 1)))
+                (if (bin ">" (var acc) (int 7)) (do (brk 3)))
+                (if (bin "==" (var k) (int 1)) (do (brk)))
+                (set k (bin "+" (var k) (int 1)))))
+            (set j (bin "+" (var j) (int 1)))))
+        (set i (bin "+" (var i) (int 1)))))
+    (ret (var acc)))
+
+  (main
+    (print (call f1))
+    (print (call f2))
+    (print (call f3))))
