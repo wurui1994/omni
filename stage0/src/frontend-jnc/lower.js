@@ -2344,7 +2344,22 @@ class JncLower {
       // mods 那一格）。它说的是"这一格里放的不是数据的地址，是一个函数"——具体的签名要等
       // 声明符：形参表挂在名字后面的 `fn-suffix` 上，返回类型就是这儿的说明符。
       if (m === 'function') { fnptr = true; continue; }
-      if (m === 'const') continue;                      // 这一层不区分（没有可变性检查）
+      // 可变性那一族（第六十七刀）。jancy 自己把 `const` / `const?` / `autoconst` /
+      // `readonly` 归进**同一个互斥组** `TypeModifierMaskKind_Const`（Decl.cpp:96 那张
+      // antiModifierTable），`cmut` 是后来加的一格，作者的说明是"与 readonly 一样"
+      //（internal/Required IDE Modifications.rst:21）。`readonly` 的意思是**双重修饰符**：
+      // "自己人当它不存在，外人当它是 const"（dual_modifiers.rst:45-68）。
+      // 这一层没有可变性检查，所以这三个词落地是同一件事：收下、不看。
+      // **代价明写**：`c.m_readOnly = 20` 这种"从外面改只读字段"我们抓不出来，jancy 抓得出来
+      //（dual_modifiers.rst:67 那句 "error: cannot assign to const-location"）。与第五十二刀
+      // 不做可见性检查同一笔账 —— 拒得更松，不改变能跑的程序的行为。
+      if (m === 'const' || m === 'readonly' || m === 'cmut') continue;
+      // 访问控制的 **Java 式写法**（第六十七刀）。jancy 只有 public 与 protected 两种，
+      // 两种写法都收：C++ 式的标签，和这一格"写在声明说明符里"（dual_modifiers.rst:22-24），
+      // 而且**顶层的成员也能写**（同处:26 那句 "Global namespace members can also have
+      // access specifiers just like named type members"）。标签那一半第五十二刀就是跳过的
+      //（`access` 节点），这儿是同一件事的另一半。
+      if (m === 'public' || m === 'protected') continue;
       // 存储类（decl_storage.rst）。模块级变量**默认**就是 static（"If storage specifier is
       // omitted, then global variables get assigned static storage class"），所以写出来
       // 也是同一件事；局部量上的 static 是另一回事，由 staticLocal / staticLocalCurly 落
@@ -2425,7 +2440,12 @@ class JncLower {
       let thin = sp.thin && i === 0;
       for (const m of mods) {
         if (m === 'thin') { thin = true; continue; }
-        if (m === 'const') continue;
+        // 可变性那一族在 `*` 后面也是同一格（第六十七刀）：`Type* readonly` / `Type* cmut`
+        // 与 `Type* const` 在 jancy 那边落在同一个互斥组上（Decl.cpp:96 的
+        // `TypeModifierMaskKind_Const`），这一层没有可变性检查，所以三个都是收下不看。
+        // `volatile` **不在**那一组里（antiModifierTable 那一行是 0，它是自己的一位
+        // `PtrTypeFlag_Volatile`，jnc_Type.h:220）—— 留着，它是自己一刀。
+        if (m === 'const' || m === 'readonly' || m === 'cmut') continue;
         this.nope(node, `指针后面的修饰符 '${m}'`);
         return null;
       }
@@ -2559,7 +2579,8 @@ class JncLower {
     for (const g of stars) {
       const mods = this.flat(g).flatMap((m) => this.flat(m)).map((m) => (isAtom(m) ? m.value : '?'));
       for (const m of mods) {
-        if (m === 'const') continue;
+        // 与 ptrsTy 那处同一族（第六十七刀）：可变性那三个词收下不看。
+        if (m === 'const' || m === 'readonly' || m === 'cmut') continue;
         // `weak` 是弱引用那一族（type_ptr_function.rst 的 "function weak*"）：它要 GC
         // 那一侧的弱引用语义，而这一层没有。
         return this.nope(d, `函数指针后面的修饰符 '${m}'`);

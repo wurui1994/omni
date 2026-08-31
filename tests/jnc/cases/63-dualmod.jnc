@@ -1,0 +1,85 @@
+// 第六十七刀：可变性那一族与访问控制的 Java 式写法。
+//
+// jancy 把 `const` / `const?` / `autoconst` / `readonly` 归进同一个互斥组
+// （`TypeModifierMaskKind_Const`，Decl.cpp:96），`cmut` 的说明是"与 readonly 一样"
+// （internal/Required IDE Modifications.rst:21）。`readonly` 是**双重修饰符**：自己人当它
+// 不存在、外人当它是 const（dual_modifiers.rst:45-68）。这一层没有可变性检查，所以三个词
+// 都是"收下、不看"—— 代价是 `c.m_readOnly = 20` 我们抓不出来（记在 ADR-0016 第六十七刀）。
+//
+// 访问控制只有 public 与 protected 两种，两种写法都收（dual_modifiers.rst:19-26），
+// 顶层的成员也能写（同处:26）。
+//
+// 期望输出的出处：/tmp/c63.c（`cc -O0 -std=c99 -Wall`）。
+
+public int g_pub = 7;
+protected int g_prot = 11;
+
+// 结构体的字段、形参、返回类型上也是同一族（都走 specs 那一格）
+struct Pair {
+	int readonly m_a;
+	int cmut m_b;
+	public int m_c;
+}
+
+int readonly addUp(int readonly x, int cmut y) {
+	return x + y;
+}
+
+// `*` 后面也是同一族（jancy 那边 `const` / `readonly` / `cmut` 落在同一个互斥组上，
+// Decl.cpp:96）。`volatile` 不在这一组里，还不收。
+int deref(int* readonly p, int* cmut q) {
+	return *p + *q;
+}
+
+class Box {
+	int readonly m_ro;
+	int cmut m_cm;
+	public int m_pub;
+protected:
+	int m_hidden;
+}
+
+class Box2 {
+	protected int m_a;
+	public int readonly m_b;
+
+	construct(int a);
+	int sum();
+}
+
+Box2.construct(int a) {
+	m_a = a;
+	// 自己人当 readonly 不存在（dual_modifiers.rst:59-61）
+	m_b = a * 2;
+}
+
+int Box2.sum() {
+	return m_a + m_b;
+}
+
+int main() {
+	printf("%d %d\n", g_pub, g_prot);
+
+	Box* b = new Box();
+	b.m_ro = 3;
+	b.m_cm = 4;
+	b.m_pub = 5;
+	b.m_hidden = 6;
+	printf("%d\n", b.m_ro + b.m_cm + b.m_pub + b.m_hidden);
+
+	Box2* c = new Box2(10);
+	printf("%d\n", c.sum());
+
+	// 局部量上也是同一族
+	int readonly r = 100;
+	int const k = 5;
+	printf("%d\n", r + k);
+
+	Pair p;
+	p.m_a = 1;
+	p.m_b = 2;
+	p.m_c = 3;
+	printf("%d %d\n", p.m_a + p.m_b + p.m_c, addUp(4, 5));
+	printf("%d\n", deref(&p.m_a, &p.m_b));
+	return 0;
+}

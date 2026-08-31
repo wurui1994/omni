@@ -3859,6 +3859,93 @@ information (for testing)"（`CmdLine.h:165-169`），而 `--documentation` 不�
 （`readonly`、`const property`、`autoget`、`bindable`）。它后面紧跟着的是**重载**——
 那 113 条报错的真名。
 
+### 第六十七刀：可变性那一族与访问控制的 Java 式写法 —— 四个词，零行降级
+
+上一刀的尺子指的是"修饰符"这一格（278 对）。它**不是一件事** —— 探子把词拆开数出来
+（`/tmp/m67probe.sh`，抓的是 `修饰符 '…'` 这个子串，所以**说明符位置与 `*` 后面那两个位置
+是混在一起的**，见下面第三条）：
+
+- `readonly` **155**（37 份文件里它是唯一的修饰符拦路项）
+- `property` 130、`autoget` 124、`event` 82、`bindable` 80 —— 属性与事件那一整套，是自己的刀
+- `cmut` **56**、`protected` **26**、`public` **1**
+- `alias` 48、`async` 45、`bigendian` 41、`reactor` 22、`disposable` 6、`weak` 3、`safe` 3
+
+这一刀只取**能证明"收下不看等于什么都没变"**的那四个：`readonly`、`cmut`、`public`、
+`protected`。
+
+**为什么这四个能并成一格。** jancy 自己把可变性那几个词放进**同一个互斥组**：
+
+```
+TypeModifierMaskKind_Const,     // TypeModifier_Const      = 0x00000004,
+TypeModifierMaskKind_Const,     // TypeModifier_MaybeConst = 0x00000008,
+TypeModifierMaskKind_Const,     // TypeModifier_AutoConst  = 0x00000010,
+TypeModifierMaskKind_Const,     // TypeModifier_ReadOnly   = 0x00000020,
+```
+
+（`Decl.cpp:96` 那张 antiModifierTable。）`const` 这一层从一开始就是"收下、不看"，
+因为这里**没有可变性检查**；`readonly` 与它同组，语义是**双重修饰符**——"自己人当它不存在，
+外人当它是 const"（dual_modifiers.rst:45-68）。`cmut` 不在那张表里（它是后加的一格），
+作者自己的说明是「just add `cmut` type modifier and make it behave the same as `readonly`」
+（internal/Required IDE Modifications.rst:21）。
+
+`public` / `protected` 是**同一件事的另一半**：jancy 只有这两种访问说明符，两种写法都收 ——
+C++ 式的标签和"写在声明说明符里"的 Java 式（dual_modifiers.rst:22-24），而且**顶层的成员
+也能写**（同处:26 那句 "Global namespace members can also have access specifiers just like
+named type members"）。标签那一半第五十二刀就是跳过的（`access` 节点），这儿补上另一半。
+
+**三个位置，不是一个。** 修饰符在这一层有三处独立的关卡：说明符表（`specs`）、`*` 后面
+（`ptrsTy`）、函数指针的 `*` 后面（`fnPtrDcl`）。头一版只改了第一处，再量一遍才发现
+`readonly` 还剩 64 份、`volatile` 从 1 涨到 61 —— 那是第二处，原先被第一处挡着看不见
+（又是一次"截断的子树"，与上一刀同一个毛病）。`const` 在后两处本来就是收下不看的，
+所以 `readonly` / `cmut` 跟着进去是同一行。**`volatile` 不进** —— 它在 jancy 那张
+antiModifierTable 里是自己的一位（`PtrTypeFlag_Volatile`，jnc_Type.h:220"class & data ptr"），
+不在 Const 那一组里，是自己一刀。
+
+所以这一刀在降级那一侧**一行代码都没有** —— 只是三处 `continue` 上各多两个词。
+
+**代价，明写。** 这四个词落地之后我们比 jancy **拒得更松**：
+
+- `c.m_readOnly = 20`（从外面改只读字段）jancy 报 "cannot assign to const-location"
+  （dual_modifiers.rst:67），我们不报。
+- `protected` 的成员从外面碰，我们也不报 —— 与第五十二刀那笔账是同一笔。
+
+这两条都不改变**能跑的程序**的行为：一份 jancy 收的源码，在这一层跑出来的字节一样。
+变的只是"jancy 拒、我们收"那一类。这与"悄悄少跑一段"（上一刀 `hostCtors` 那格）不是一回事，
+所以不给它记 `bad/` 边界 —— 记在这儿。
+
+**量出来的**（`tests/jnc` 130/0）：`cases/63-dualmod.jnc` 把四个词摆在能摆的每个位置上
+（顶层变量、类字段、结构体字段、形参与返回类型、`protected:` 标签与 Java 式前缀混写、
+构造体里给自己的 `readonly` 字段赋值、局部量），五行输出与 `/tmp/c63.c`（`cc -O0 -std=c99
+-Wall`，孪生里一个修饰符都不写 ——"一样"这件事本身就是这一刀的内容）逐字节相同：
+`7 11 / 18 / 30 / 105 / 6 9`。
+
+**尺子**（`/tmp/m67r.sh`）：
+
+「真降得下来」（`sx` 退出码 0）：**49 → 50**（+1，`io_I2cSignalDecoder.jnc`）。
+`ok66 ⊆ ok67`，一份都没退。覆盖对得上：612 + 50 = 662。
+
+(文件, 拦路项) 对：6250 → **6158**（−92）。
+
+两格修饰符各挪了一点：说明符位置 278 → **234**（−44 份文件彻底不再被修饰符挡住），
+`*` 后面 101 → **97**。**这一刀买的东西比"238 对"少得多，原因还是那条**：那 278 份里
+大多数不止一个修饰符，摘掉 `readonly` 之后立刻撞上 `property` / `autoget` / `bindable`。
+"某个词值多少"这个数同样只是上界。
+
+四个词在直方图里**归零**了（`/tmp/m67probe3.sh`：`readonly` / `cmut` / `public` /
+`protected` 一条都不剩）。剩下的按大小：
+
+- **属性那一套**：`property` 130（**32 份是它唯一的修饰符拦路项** —— 眼下最大的一格）、
+  `autoget` 124（17 份）、`bindable` 80、`event` 82（3 份）。这四个是**一件事**：
+  jancy 的 property 是"取/存两个函数装成一格看起来像字段的东西"，`autoget` 是"存的那半
+  自动生成"，`bindable` 与 `event` 是它上面的通知机制（dual_modifiers.rst:70-99）。
+- `volatile` 61 —— 上面说过，自己的一位（`PtrTypeFlag_Volatile`），自己一刀。
+- `alias` 48（6 份）、`async` 45（7 份）、`bigendian` 41（**15 份**）、`reactor` 22、
+  `errorcode` 13（写在不是函数的位置上）、`disposable` 6、`weak` 3、`safe` 3。
+
+所以下一刀是**属性那一套**（`property` / `autoget` / `bindable`）：加起来 334 对，
+而且 `property` 一个词就是 32 份文件唯一的修饰符拦路项。它也是 `opaque class` 那些 API
+文件的主要内容 —— 第六十六刀打开的那一片，多半就卡在这儿。
+
 ## 后果与代价
 
 
