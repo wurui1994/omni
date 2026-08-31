@@ -3380,6 +3380,19 @@ class JncLower {
       return [`${pad}${this.store(lv, `(bin "${up ? '+' : '-'}" ${this.read(lv)} (real 1.0))`)}`];
     }
     if (h === 'call') return this.callStmt(n, ind);
+    // 下面这两条**有**副作用，所以不能落进那句"没有副作用"里 —— 那句话会把"还没做"说成
+    // "你写错了"（与第五十四刀那处同一类的错话）。量出来的：语料里 try-expr 52 处、cond 37 处，
+    // 而 cond 那 37 处几乎每一处的一支都是 `try 调用`（`m_state ? close() : try open();`），
+    // 所以两条是**同一格**：都要 errorcode 那一套先落地。
+    if (h === 'try-expr') {
+      this.nope(n, '`try` 表达式（要 errorcode 那一套：把"出错值"变成一条传得动的错）');
+      return null;
+    }
+    if (h === 'cond') {
+      this.nope(n, '`? :` 当语句（两支是有副作用的调用时 jancy 收它 —— 语料里那 37 处的一支'
+        + '几乎都是 `try 调用`，所以它跟着 errorcode 一起）');
+      return null;
+    }
     this.nope(n, `这条表达式语句（'${h}'）没有副作用，jancy 那边也会拒`);
     return null;
   }
