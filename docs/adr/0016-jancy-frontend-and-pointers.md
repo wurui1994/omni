@@ -1905,6 +1905,48 @@ iterable`。派发那几条本来就是这个形状，改成 `(if C (do (set …
 （加 `tests/jnc/run.js` 的头注释），语法、方言、MIR、四个后端与运行时一个字都没改；自举、
 `tests/jit`、`tests/mir`、`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
 
+### 第三十九刀：`enum` —— 一个字的标量，外加一张编译期的成员表
+
+上一刀量出来的那七条里，规矩的那部分这一刀落地。顶层写 `enum` 以前当场报「带体的命名类型
+（只收 struct）」。
+
+**它在方言里是什么**：什么都不是——`tyText` 对枚举返回 `'int'`。枚举值在运行期就是个 32 位
+（或按基类型）的整数，一个字。名字与成员表只活在前端的类型里：`{ k:'enum', name, base }`。
+所以四个后端、MIR、方言一个字都没改。
+
+**三处不一样，都在前端**：
+
+- **成员是编译期常量**。`this.enums: name -> { base, members: Map(name -> BigInt) }`。
+  `Color.Green` 走 `enumMember`，直接吐 `(int 5)` —— 不是一次读内存。取值 0、1、2……，
+  见到显式值就从那儿接着数，每一步按基类型回卷（`wrapVal`：`Small: uint8_t` 里
+  `C = 250` 之后 `D` 是 251，再往下就会绕回 0）。
+- **`enum -> 整数`隐式，反向拒**。隐式那一半塞在 `expr(n, want)` 那个唯一的收口处：
+  `want` 是整数而值是枚举时，按 `v.type.base` 走一次 `intConv`。反向不给：
+  `Color c = 5;` 报「初值的类型是 int，声明的是 Color」——这是 jancy 自己也拒的一格
+  （type_enum.rst:60 的原话 "cast int->enum must be explicit"）。
+- **同型枚举的比较不掉基类型**，别的二元运算两边都掉到 `.base`。`sameTy` 对枚举比的是
+  `a.name === b.name`，所以 `Color` 与 `Small` 不通用。
+
+**顺带长的一格**：`Color arr[3]` 一开始被 `declarator` 的元素类型白名单拒了。加 `isEnum(t)`
+放行，理由是它的 `tyText` 就是 `int` —— 一个字的标量元素，与 `int[3]` 同一格，不碰"多个字的
+元素"那条真边界（那条还留着，`&p` 与它同格）。
+
+**为什么 `constInt` 要认 `(field …)`**：`case Color.Green:` 的标号得在编译期折出 5 来。
+第三十六刀那个从 AST 折常量的 `constInt` 因此多认一条 `field` 分支，调 `enumMember` 拿值。
+（第三十六刀已经说过为什么不能从降级后的文本里 pattern-match：一元负号被 `wrapTo` 包着。）
+
+**两条边界**：`bitflag enum`（取值 1/2/4/8、`|` 与 `&` 的结果类型另有规矩、`0` 可隐式赋值——
+得连着一起接，`bad/enum-bitflag`）与 `pragma(ExposedEnums, true)`（把成员漏进父命名空间）。
+
+**期望输出的出处**：一份 `cc -O0 -std=c99` 的孪生，10 行逐字节相同。三处写法差别记在
+`cases/38-enum.jnc` 的头注释里：C 那边成员名是裸的、类型要写 `enum Color`、`Small` 的基类型
+写不出来（这几个值在 `int` 里印出来一样，不影响对比）。
+
+**跑过的轴**：`tests/jnc`（60/0，新增 `cases/38-enum`、`bad/enum-from-int`、`bad/enum-bitflag`）。
+**没跑的**：`tests/sexpr`、`tests/glr`、`tests/asy` —— 只动了 `frontend-jnc/lower.js`
+（加 `tests/jnc/run.js` 的头注释），语法、方言、MIR、四个后端与运行时一个字都没改；自举、
+`tests/jit`、`tests/mir`、`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
+
 ## 后果与代价
 
 - 方言从"没有可算术的引用"变成"有"。这一格会渗到 MIR 与四个后端，改不回去。

@@ -1,0 +1,14 @@
+// 整数到枚举要**显式**转（第三十九刀的边界，而且这是 jancy 自己也拒的一格）。
+//
+// type_enum.rst:60 那一行原话就是 "error: cast int->enum must be explicit"。实现在
+// Cast_Enum::getCastKind（jnc_ct_CastOp_Int.cpp:306-310）：只有源也是同一个枚举、或者
+// 枚举带 bitflag 且源是 0 的时候才给 Implicit，别的都是 Explicit。
+//
+// 反方向（枚举 -> 整数）是隐式的，那一格在 cases/38-enum.jnc 的 `e=` `i=` `j=` 里。
+enum Color { Red, Green = 5, Blue }
+
+int main() {
+    Color c = 5;
+    printf("%d\n", c);
+    return 0;
+}

@@ -17,7 +17,8 @@
 //   3. bad/*.jnc 必须被拒绝，且拒在正确的理由上。这一组是那些边界的本体：多维数组、
 //      数组之间的赋值、`threadlocal`、对 string 的模块级变量取地址、`%p`、
 //      `unsafe` 之外的 thin 转换、64 位的无符号整数、switch 里的 continue、函数类型的
-//      typedef，加两条 jancy 自己也拒的（命名项之后不能再写位置项、`double` 上的 `&=`）。（`? :`、不换行的 printf、条件真值化曾经在
+//      typedef、`bitflag enum`，加三条 jancy 自己也拒的（命名项之后不能再写位置项、
+//      `double` 上的 `&=`、int 到枚举的隐式转换）。（`? :`、不换行的 printf、条件真值化曾经在
 //      这一组里，第三到第五刀把它们做掉之后转到了 cases/；`&x` 是第九刀、定长数组是第十刀、
 //      模块级变量是第十一刀、值语义的结构体是第十二刀、结构体按值传与按值回是第十三刀、
 //      花括号初值是第十四刀、不看顺序的名字是第十五刀、指针的地址是第十六刀，现在各在
@@ -28,16 +29,18 @@
 //      三个标志是第二十九刀、`%e` / `%E` 是第三十刀、`%g` / `%G` 是第三十一刀、`%u` 是
 //      第三十二刀、无符号的 8 / 16 / 32 位是第三十三刀、字面量的进制是第三十四刀、
 //      位运算与移位的复合赋值是第三十五刀、`switch` 是第三十六刀、bool 参与整数运算是
-//      第三十七刀、`typedef` 是第三十八刀，在 cases/24-new-curly.jnc、
+//      第三十七刀、`typedef` 是第三十八刀、`enum` 是第三十九刀，在 cases/24-new-curly.jnc、
 //      cases/25-static-local.jnc、cases/26-printf-prec.jnc、cases/27-printf-star-prec.jnc、
 //      cases/28-printf-flags.jnc、cases/29-printf-sci.jnc、cases/30-printf-gen.jnc、
 //      cases/31-printf-u.jnc、cases/32-unsigned.jnc、cases/33-radix.jnc、
 //      cases/34-bitassign.jnc、cases/35-switch.jnc、cases/36-bool-int.jnc、
-//      cases/37-typedef.jnc。）
+//      cases/37-typedef.jnc、cases/38-enum.jnc。）
 //
-//      bad/ 里有**三种**拒，别混：一种是"还没长出来"（做掉就落地）；一种是**这一层不做**
+//      bad/ 里有**四种**拒，别混：一种是"还没长出来"（做掉就落地）；一种是**这一层不做**
 //      （printf-conv-p：`%p` 要观测裸地址，而五条腿上那不是同一个数）；一种是**C 自己的
-//      未定义行为**（printf-plus-hex 的 `%+x`、printf-alt-u 的 `%#u` —— 没有可对的答案）。
+//      未定义行为**（printf-plus-hex 的 `%+x`、printf-alt-u 的 `%#u` —— 没有可对的答案）；
+//      一种是**jancy 自己也拒**（enum-from-int 的 int 到枚举、curly-after-named、
+//      bitassign-real —— 这几条落地了也还是拒，只是理由要对得上 jancy 的那一句）。
 //
 //   node tests/jnc/run.js
 //   node tests/jnc/run.js pointers

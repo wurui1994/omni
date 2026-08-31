@@ -223,6 +223,8 @@ const tArr = (t, n) => ({ k: 'arr', el: t, n });
 const isInt = (t) => t.k === 'int';
 const isArr = (t) => t.k === 'arr';
 const isStruct = (t) => t.k === 'struct';
+/** 一格枚举（第三十九刀）。`base` 是它的基整数类型，值按那一格的规范形存。 */
+const isEnum = (t) => t.k === 'enum';
 
 /**
  * 数组退化成指针。jancy 的 `int* p = a;`（type_ptr_data.rst:31）就是它 —— 数组这一格里躺的
@@ -278,6 +280,15 @@ function wrapTo(code, w, u = false) {
 }
 
 /**
+ * 编译期的回卷（第三十九刀）：拿一个 BigInt 落到某一格整数的规范形里。与 wrapTo 是同一条
+ * 算法，只是那个发代码、这个当场算 —— 枚举成员的值在编译期就定下来了。
+ */
+function wrapVal(v, t) {
+  if (t.w >= 64) return BigInt.asIntN(64, v);
+  return t.u ? BigInt.asUintN(t.w, v) : BigInt.asIntN(t.w, v);
+}
+
+/**
  * 类型 -> 核心方言的写法。**四种位宽都写成 `int`** —— 存储就是方言那一个 int。
  *
  * 定长数组是**一整块**（第十九刀）：`int a[3]` -> `(ptr (blk int 3))`，而不是"一条指向 3 格
@@ -294,6 +305,8 @@ function tyText(t) {
   if (t.k === 'arr') return `(ptr ${blkText(t)})`;
   if (t.k === 'struct') return t.name;
   if (t.k === 'int') return 'int';
+  // 枚举在方言里就是它的基整数（第三十九刀）—— 四种位宽在方言里都是 `int`，所以这儿也是
+  if (t.k === 'enum') return 'int';
   return t.k;
 }
 
@@ -346,6 +359,7 @@ function tyName(t) {
   if (t.k === 'arr') return `${tyName(t.el)}[${t.n === null ? '' : t.n}]`;
   if (t.k === 'struct') return t.name;
   if (t.k === 'int') return `${t.u ? 'unsigned ' : ''}${INT_NAMES.get(t.w)}`;
+  if (t.k === 'enum') return t.name;
   return t.k;
 }
 
@@ -355,6 +369,7 @@ function sameTy(a, b) {
   if (a.k === 'arr') return a.n === b.n && sameTy(a.el, b.el);
   if (a.k === 'struct') return a.name === b.name;
   if (a.k === 'int') return a.w === b.w && !a.u === !b.u;
+  if (a.k === 'enum') return a.name === b.name;
   return true;
 }
 
@@ -420,6 +435,7 @@ class JncLower {
     this.forStep = null;       // 当前所在 for 的步进（非 null 时 continue 要拦，见 stmt）
     this.swGuard = false;      // 与最近那个真循环之间隔着 switch 摊出来的合成循环（第三十六刀）
     this.aliases = new Map();  // typedef 起的类型名 -> 解出来的那一格（第三十八刀）
+    this.enums = new Map();    // 枚举名 -> { base, members: Map(名字 -> BigInt) }（第三十九刀）
     this.tmp = 0;              // 生成名字的计数（do-while 的那格标志）
     this.lifted = new Set();   // 这个函数里被取过地址的局部量名（ADR-0016 第九刀）
     this.globals = new Map();  // 模块级变量：名字 -> 类型（第十一刀）
@@ -734,7 +750,7 @@ class JncLower {
    * （第十二刀：那一格名字里放的就是地址，`&s` 不发一个字），所以走这一条的是三种标量
    * 加两种指针 —— `&p` 于是与 `&x` 同一条路：把 p 提到一格 `(pnew (ptr (ptr int)) …)` 上。
    */
-  liftable(t) { return isInt(t) || t === T_REAL || t === T_BOOL || isPtr(t); }
+  liftable(t) { return isInt(t) || t === T_REAL || t === T_BOOL || isPtr(t) || isEnum(t); }
 
   /**
    * 三遍走顶层（第十一刀）。jancy 的命名空间成员**不看声明顺序** —— 所以命名类型与模块级
@@ -984,8 +1000,27 @@ class JncLower {
    *  名字与字段分成两遍（第十七刀）：`Node* m_next` 要在 Node 自己的体里就查得着
    *  Node。所以先把每个名字连着一个**空的**字段数组坐下（typeName），再原地填 ——
    *  memberOf 是在函数体降级的时候才查这张表的，那时候早填完了。 */
+  /**
+   * `E.M` —— 枚举成员（第三十九刀）。左边不是"某个枚举的名字"时返回 `undefined`，那就是普通的
+   * 字段访问，交给 lvalue 那一支。同名的变量优先当变量看（那样才轮不到这条）。
+   */
+  enumMember(n, ob, mem) {
+    if (!isList(ob) || head(ob) !== 'name') return undefined;
+    const en = this.qname(ob);
+    if (en === null || !this.enums.has(en)) return undefined;
+    if (this.lookupRef(en) !== null) return undefined;
+    const info = this.enums.get(en);
+    const mn = isAtom(mem) ? mem.value : this.qname(mem);
+    if (mn === null || !info.members.has(mn)) {
+      return this.err(n, `枚举 '${en}' 里没有 '${mn}'`);
+    }
+    return { code: `(int ${info.members.get(mn)})`, type: { k: 'enum', name: en, base: info.base } };
+  }
+
   typeName(n) {
-    if (!isList(n) || head(n) !== 'agg') return null;      // 下面那一遍报
+    if (!isList(n)) return null;
+    if (head(n) === 'enum') return this.enumName(n);
+    if (head(n) !== 'agg') return null;                    // 下面那一遍报
     if ((isAtom(n.items[1]) ? n.items[1].value : null) !== 'struct') return null;
     const name = this.qname(n.items[2]);
     if (name === null) return null;
@@ -994,8 +1029,62 @@ class JncLower {
     return null;
   }
 
+  /**
+   * 枚举的名字先坐下（与结构体同一条理由：字段与别名要在体解出来之前查得着这个名字）。
+   * `bitflag enum` 在这儿就拒 —— 它是另一格（取值 1/2/4/8、`|` 与 `&` 的结果类型另有规矩，
+   * type_enum.rst:66-73），不是"少写几行"能对付的。
+   */
+  enumName(n) {
+    const key = isAtom(n.items[1]) ? n.items[1].value : null;
+    if (key !== 'enum') { this.nope(n, `'${key}'`); return null; }
+    const name = this.qname(n.items[2]);
+    if (name === null) return this.err(n, '认不出的枚举名字');
+    if (this.enums.has(name) || this.structs.has(name)) {
+      return this.err(n, `类型名 '${name}' 重复定义`);
+    }
+    this.enums.set(name, { base: T_I32, members: new Map() });
+    return null;
+  }
+
+  /**
+   * 枚举的体（第三十九刀）。三条规矩，出处都在 type_enum.rst：
+   *   - **成员带命名空间**（17 行）：只能写 `Color.Red`，不往父命名空间里漏。
+   *   - **可以指定基类型**（21 行那个例子 `enum IcmpType: uint8_t`）。不写时是 32 位有符号。
+   *   - **自动取值** 0、1、2……；写了显式值之后从那个值接着数。
+   * 值按基类型那一格回卷（与别处同一个 wrapTo），所以存进表里的就是规范形。
+   */
+  enumDecl(n) {
+    const name = this.qname(n.items[2]);
+    if (name === null) return null;
+    const info = this.enums.get(name);
+    if (info === undefined || info.members.size > 0) return null;   // 上一遍报过重复了
+    const bn = n.items[3];
+    if (!(isList(bn) && head(bn) === 'no-base')) {
+      const sp = this.specs(bn);
+      if (sp === null) return null;
+      if (!isInt(sp.type)) { this.err(bn, `枚举的基类型要是整数，这里是 ${tyName(sp.type)}`); return null; }
+      info.base = sp.type;
+    }
+    let next = 0n;
+    for (const m of this.flat(n.items[4])) {
+      if (!isList(m) || head(m) !== 'enum-item') { this.err(m, '认不出的枚举成员'); continue; }
+      const mn = isAtom(m.items[1]) ? m.items[1].value : this.qname(m.items[1]);
+      if (mn === null) { this.err(m, '认不出的枚举成员名字'); continue; }
+      if (info.members.has(mn)) { this.err(m, `枚举 '${name}' 里 '${mn}' 出现了两次`); continue; }
+      if (m.items[2] !== undefined) {
+        const k = this.constInt(m.items[2]);
+        if (k === null) { this.nope(m.items[2], '枚举成员的值不是整数字面量（要编译期求值那一格）'); continue; }
+        next = k;
+      }
+      info.members.set(mn, wrapVal(next, info.base));
+      next += 1n;
+    }
+    return null;
+  }
+
   typeDecl(n) {
-    if (!isList(n) || head(n) !== 'agg') return this.nope(n, '带体的命名类型（只收 struct）');
+    if (isList(n) && head(n) === 'enum') return this.enumDecl(n);
+    if (!isList(n) || head(n) !== 'agg') return this.nope(n, '带体的命名类型（只收 struct 与 enum）');
     const key = isAtom(n.items[1]) ? n.items[1].value : null;
     if (key !== 'struct') return this.nope(n, `'${key}'（只收 struct）`);
     const name = this.qname(n.items[2]);
@@ -1092,6 +1181,10 @@ class JncLower {
       else if (nm === 'size_t') base = T_I64;           // jancy 的语料里到处是它
       else if (nm === 'string_t') base = T_STR;
       else if (this.structs.has(nm)) base = { k: 'struct', name: nm };
+      else if (this.enums.has(nm)) {
+        if (uns) { this.err(ts, `'${nm}' 是枚举，上面写不了 unsigned`); return null; }
+        base = { k: 'enum', name: nm, base: this.enums.get(nm).base };
+      }
       else if (this.aliases.has(nm)) {
         // typedef 起的名字（第三十八刀）。别名里可能已经带着指针或数组那几层，所以直接拿
         // 解出来的那一格当 base —— 声明符后面再补的层照常叠上去（`pint* q` 是 `int**`）。
@@ -1164,7 +1257,9 @@ class JncLower {
       // 它是编译期常量表达式，我们没有常量折叠，所以先收最直的这一格。`[]` 的长度从花括号
       // 初值数出来，那要 localDeclCurly 才知道，所以这里先记成 n === null。
       if (sh === 'array-suffix') {
-        if (t.k !== 'int' && t !== T_REAL && t !== T_BOOL && !isStruct(t)) {
+        // 枚举也进得来（第三十九刀）：它的 `tyText` 就是 `int`，一个字的标量，与 `int`
+        // 的元素同一格；不同的只是名字与它带的成员表。
+        if (t.k !== 'int' && t !== T_REAL && t !== T_BOOL && !isStruct(t) && !isEnum(t)) {
           return this.nope(s, `${tyName(t)} 的数组 —— 要方言能把多个字的值当元素搬（与 &p 同一格）`);
         }
         const cnt = s.items[1];
@@ -1988,7 +2083,9 @@ class JncLower {
       const wCode = wStar ? wVar
         : (width > 1 || (width === 1 && pCode !== null) ? `(int ${width})` : null);
       if (ai >= vals.length) { this.err(n, 'printf 的实参比格式串里的转换少'); return null; }
-      const v = vals[ai];
+      // 枚举在这儿就落到基整数上（第三十九刀）：printf 是变参，jancy 那边这一次转换也是隐式的，
+      // 于是 `%d` / `%u` / `%x` 那几条一个字都不用改。
+      const v = isEnum(vals[ai].type) ? { code: vals[ai].code, type: vals[ai].type.base } : vals[ai];
       // 这条转换对应的**实参节点**（诊断要指着它）。`vals[k]` 是第 k 个转换的值，而
       // `args[0]` 是格式串，所以是 `ai + 1`；先取再自增 —— 自增之后取会指到下一个实参上。
       const argNode = args[ai + 1];
@@ -2333,7 +2430,9 @@ class JncLower {
     }
     const v = this.expr(conds[0]);
     if (v === null) return null;
-    if (!isInt(v.type)) {
+    // 枚举当条件：落到基整数上（第三十九刀）。case 的标签那一边同理，见 constInt。
+    const cv = isEnum(v.type) ? { code: v.code, type: v.type.base } : v;
+    if (!isInt(cv.type)) {
       this.err(n, `switch 的条件要整数，这里是 ${tyName(v.type)}`);
       return null;
     }
@@ -2457,6 +2556,14 @@ class JncLower {
       const k = this.constInt(e.items[2]);
       if (k === null) return null;
       return op === '-' ? -k : k;
+    }
+    // `Color.Green` —— 枚举成员的值在编译期就定了（第三十九刀），所以 `case Color.Green:`
+    // 与 `enum X { A = Color.Green }` 都能算。
+    if (isList(e) && head(e) === 'field') {
+      const em = this.enumMember(e, e.items[1], e.items[2]);
+      if (em === undefined || em === null) return null;
+      const m = /^\(int (-?\d+)\)$/.exec(em.code);
+      return m === null ? null : BigInt(m[1]);
     }
     return null;
   }
@@ -2627,6 +2734,12 @@ class JncLower {
     if (want !== undefined && want !== null && isInt(want) && v.type === T_BOOL) {
       return { code: `(sel ${v.code} (int 1) (int 0))`, type: want };
     }
+    // 枚举 -> 整数是**隐式**的（第三十九刀）：getArithmeticOperatorResultType 见到
+    // TypeKind_Enum 会递归到基类型（jnc_ct_UnOp_Arithmetic.cpp:39）。反过来要**显式**
+    //（type_enum.rst:60 那句 "cast int->enum must be explicit"），所以这儿只有一个方向。
+    if (want !== undefined && want !== null && isInt(want) && isEnum(v.type)) {
+      return intConv({ code: v.code, type: v.type.base }, want);
+    }
     return v;
   }
 
@@ -2707,6 +2820,11 @@ class JncLower {
       case 'ptr-field': return this.load(n, this.fieldLv(n, n.items[1], n.items[2]));
       case 'field': {
         const ob = n.items[1];
+        // `Color.Red` —— 枚举成员（第三十九刀）。要在把左边当变量算之前拦下来：
+        // jancy 的枚举成员藏在枚举自己的命名空间里（type_enum.rst:17），所以左边是**类型名**，
+        // 不是一格值。值在编译期就定了，发出去的就是一个字面量。
+        const em = this.enumMember(n, ob, n.items[2]);
+        if (em !== undefined) return em;
         if (isList(ob) && head(ob) === 'indirect') {
           return this.load(n, this.fieldLv(n, ob.items[1], n.items[2]));
         }
@@ -2841,6 +2959,15 @@ class JncLower {
       return this.nope(n, `指针上的 '${op}'`);
     }
     const cmp = op === '==' || op === '!=' || op === '<' || op === '<=' || op === '>' || op === '>=';
+    // 两个同型枚举比大小 / 相等：在基整数那一格上比（第三十九刀）。两边都是规范形，直接比就对。
+    // 不同型的两个枚举、或枚举与整数混算，都先落到基整数上 —— 枚举 -> 整数是隐式的。
+    if (isEnum(a.type) || isEnum(b.type)) {
+      if (isEnum(a.type) && isEnum(b.type) && sameTy(a.type, b.type) && cmp) {
+        return { code: `(bin "${op}" ${a.code} ${b.code})`, type: T_BOOL };
+      }
+      if (isEnum(a.type)) a = { code: a.code, type: a.type.base };
+      if (isEnum(b.type)) b = { code: b.code, type: b.type.base };
+    }
     // bool 参与整数运算（第三十七刀）。jancy 的提升表里 Bool1 与 Bool8 都落到 Int32
     //（jnc_ct_UnOp_Arithmetic.cpp:23 那张表的头两行），所以 `(a > 0) + 1` 是 int 上的加法。
     // 两个 bool 比相等是例外：方言的 bool 比较本来就精确，绕道整数没有意义。

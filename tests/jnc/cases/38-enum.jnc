@@ -1,0 +1,61 @@
+// `enum`（ADR-0016 第三十九刀）。以前顶层写它当场报「带体的命名类型（只收 struct）」。
+//
+// 语义出处，全在 type_enum.rst 与 jancy 源里：
+//   - **成员藏在枚举自己的命名空间里**（type_enum.rst:17）：只能写 `Color.Red`，不往父命名
+//     空间漏。这与 C 不同 —— 下面那份孪生里写的是裸 `Red`。
+//   - **可以指定基类型**（type_enum.rst:21 那个 `enum IcmpType: uint8_t` 的例子）。不写时
+//     是 32 位有符号。值按基类型那一格回卷。
+//   - **自动取值** 0、1、2……；写了显式值之后从那个值接着数（`Green = 5` 之后 `Blue` 是 6，
+//     `C = 250` 之后 `D` 是 251）。
+//   - **枚举 -> 整数隐式**：getArithmeticOperatorResultType 见到 TypeKind_Enum 会递归到基类型
+//     （jnc_ct_UnOp_Arithmetic.cpp:39）。`e=` `i=` `j=` 那几行走的就是它。
+//   - **整数 -> 枚举要显式**：type_enum.rst:60 那句 "error: cast int->enum must be explicit"，
+//     实现上是 Cast_Enum::getCastKind 只在两种情况下给 Implicit（jnc_ct_CastOp_Int.cpp:306-310）。
+//     所以 `Color c = 5;` 当场拒，见 bad/enum-from-int.jnc。
+//
+// 期望输出的出处：一份 `cc -O0 -std=c99` 的孪生程序，10 行逐字节相同（五条腿也各自与它相同）。
+// 与那份 C 的三处写法差别：成员名在 C 里是裸的（`Red` 而不是 `Color.Red`）；C 那边类型要写
+// `enum Color`；`Small` 的基类型在 C 里写不出来（这几个值在 int 里印出来一样，所以不影响对比）。
+//
+// 边界：`bitflag enum` 当场拒（bad/enum-bitflag.jnc）—— 它是另一格，取值是 1/2/4/8，
+// `|` 与 `&` 的结果类型另有规矩（type_enum.rst:66-73）。`pragma(ExposedEnums, true)`
+// （把成员漏进父命名空间，type_enum.rst:43）也还没接。
+
+enum Color { Red, Green = 5, Blue }
+enum Small: uint8_t { A = 1, B, C = 250, D }
+
+int rank(Color c) {
+    switch (c) {
+    case Color.Red:
+        return 1;
+    case Color.Green:
+        return 2;
+    default:
+        return 9;
+    }
+    return 0;
+}
+
+int main() {
+    Color c = Color.Green;
+    printf("a=%d %d %d\n", Color.Red, Color.Green, Color.Blue);
+    printf("b=%d\n", c);
+    printf("c=%d %d %d\n", rank(Color.Red), rank(Color.Green), rank(Color.Blue));
+    printf("d=%d %d %d %d\n", Small.A, Small.B, Small.C, Small.D);
+    int n = Color.Blue;
+    printf("e=%d\n", n + 1);
+    printf("f=%d %d\n", c == Color.Green, c < Color.Blue);
+    Color d = c;
+    printf("g=%d\n", d == c);
+    Color arr[3];
+    arr[0] = Color.Red;
+    arr[1] = Color.Green;
+    arr[2] = Color.Blue;
+    printf("h=%d %d %d\n", arr[0], arr[1], arr[2]);
+    int total = 0;
+    for (int i = 0; i < 3; i++)
+        total += arr[i];
+    printf("i=%d\n", total);
+    printf("j=%d %x\n", Color.Blue * 2, Color.Blue);
+    return 0;
+}
