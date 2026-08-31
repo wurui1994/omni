@@ -1,0 +1,86 @@
+// 第七十刀：索引属性。
+//
+// jancy 的属性可以带**下标**（prop_indexed.rst:15）：`int property g_slot(int i);` 声明的那
+// 一串不是"函数的形参"，是下标 —— 而且"a property index doesn't have to be of the integer
+// type, nor does it mean index exclusively"，怎么用由写的人定。取/存那两个函数各在最前面
+// 多这一串，读写就是 `p[i]` 与 `p[i] = v`（32_IndexedProperties.jnc:104-107）。
+//
+// 落法照旧没有第二种：读 `p[i]` 是 `(call p$get i)`，写 `p[i] = v` 是
+// `(expr (call p$set i v))`；成员的那一格前面还有 `this`（第六十九刀）。
+//
+// 完整声明式 `property g_prop { … }`、属性指针（`int property* p`）、存值器的重载与
+// `autoget` 都还不收 —— 各是自己一刀。
+//
+// 期望输出的出处：/tmp/c66.c（`cc -O0 -std=c99 -Wall`）。
+
+int g_x[3];
+int g_hits = 0;
+
+int property g_slot(int i);
+
+int g_slot.get(int i) {
+	g_hits++;
+	return g_x[i] + 1;
+}
+
+void g_slot.set(int i, int v) {
+	g_x[i] = v * 2;
+}
+
+// 两个下标（prop_indexed.rst:45 那句 "more than one index argument could be used"）。
+// 多维数组这一层还不收，所以底下那格存储自己算偏移。
+int property g_grid(int i, int j);
+
+int g_cells[4];
+
+int g_grid.get(int i, int j) {
+	return g_cells[i * 2 + j];
+}
+
+void g_grid.set(int i, int j, int v) {
+	g_cells[i * 2 + j] = v;
+}
+
+// 类的成员索引属性：下标前面还有一格 this
+class Table {
+	int m_row[3];
+
+	int property m_cell(int i);
+
+	construct() {
+		m_row[0] = 5;
+		m_row[1] = 6;
+		m_row[2] = 7;
+	}
+
+	int m_cell.get(int i) {
+		return m_row[i] * 10;
+	}
+
+	void m_cell.set(int i, int v) {
+		m_row[i] = v;
+	}
+
+	// 方法体里裸写属性名再挂下标：this 与下标各就各位
+	int sum() {
+		return m_cell[0] + m_cell[1];
+	}
+}
+
+int main() {
+	printf("%d\n", g_slot[0]);
+	g_slot[1] = 10;
+	printf("%d %d\n", g_slot[1], g_x[1]);
+
+	g_grid[1][1] = 9;
+	printf("%d\n", g_grid[1][1]);
+
+	Table t;
+	printf("%d %d\n", t.m_cell[0], t.m_cell[2]);
+	t.m_cell[2] = 3;
+	printf("%d\n", t.m_cell[2]);
+	printf("%d\n", t.sum());
+
+	printf("hits=%d\n", g_hits);
+	return 0;
+}

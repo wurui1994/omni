@@ -1,0 +1,16 @@
+// 属性指针（ADR-0016 第七十刀的边界）。
+// `int property* p` 不是"指向 int 的指针"，是一格**属性指针**（35_PropertyPtr.jnc:97-126，
+// prop_ptr.rst）：里头存的是"取/存两个函数 + 那个对象"，与函数指针是两码事（jancy 自己那篇
+// 文档也说这一格要小心 `&` 与 `*`，"this ambiguity can't be automatically resolved"）。
+// 这一层没有那一格类型，而 `property` 这个词 specs 是收下的 —— 不在声明那一处拦，它就会被
+// 悄悄降成一格普通指针，那是换了意思。
+int property g_p;
+
+int g_p.get() {
+	return 7;
+}
+
+int main() {
+	int property* p;
+	return 0;
+}

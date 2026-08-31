@@ -793,8 +793,9 @@ class JncLower {
     // 加"变量里放地址"，所以 `pfield` 那一整套原样可用。`classes` 记的是"这个名字是类"，
     // `methods` 是"这个函数是某个类的方法"（名字 -> 类名），`selfClass` 是正在降的方法属于谁。
     this.classes = new Set();
-    // 属性（第六十八刀）。名字 -> {type, cls, cst, get, set}：`cls` 是它属于哪个类
-    // （顶层的属性是 null），`cst` 是"只有取"（`T const property p`）。
+    // 属性（第六十八刀）。名字 -> {type, cls, cst, idx, get, set}：`cls` 是它属于哪个类
+    // （顶层的属性是 null），`cst` 是"只有取"（`T const property p`），`idx` 是**下标**那一串
+    // 类型（第七十刀的索引属性，空数组就是普通属性）。
     this.props = new Map();
     // 类体里那些成员属性的待办（第六十九刀）：{it, ns}。类体是在 typeDecl 那一遍看的，而
     // 属性的名字要坐在**签名那一遍之前** —— 于是那一遍只把它们记下来，登记与顶层那一格
@@ -1518,9 +1519,16 @@ class JncLower {
       if (isList(d) && head(d) === 'init') { this.nope(d, '属性的初值'); continue; }
       const info = this.declarator(d, sp);
       if (info === null) continue;
-      // 带形参表的是**函数指针型的属性**与 indexed 那一格，都还不收 —— 那要属性的类型
-      // 自己成一格（jancy 的 PropertyType）。
-      if (info.formals !== null) { this.nope(d, '带形参表的属性'); continue; }
+      // 声明符上带形参表的是**索引属性**（第七十刀）：`int property g_p(size_t i);` ——
+      // 那一串不是"函数的形参"，是**下标**（prop_indexed.rst:15：属性带数组语义，下标的类型
+      // 与含义都由写的人定）。取/存两个函数各在前面多这一串，读写落成
+      // `(call p$get i)` / `(call p$set i v)`。
+      let idx = [];
+      if (info.formals !== null) {
+        const ips = this.formalList(info.formals);
+        if (ips === null) continue;
+        idx = ips.map((p) => p.type);
+      }
       const full = this.qual(info.name);
       if (this.props.has(full)) { this.err(d, `属性 '${shown(full)}' 声明了两次`); continue; }
       // 类的成员属性（第六十九刀）：`qual` 已经把类名拼在前面了（类体里那一批是 propPend
@@ -1530,7 +1538,9 @@ class JncLower {
       const owner = cut < 0 ? null : full.slice(0, cut);
       const cls = owner !== null && this.classes.has(owner) ? owner : null;
       if (cls !== null) this.propNames.add(full.slice(cut + 1));
-      this.props.set(full, { type: info.type, cls, cst: sp.cst, get: false, set: false });
+      this.props.set(full, {
+        type: info.type, cls, cst: sp.cst, idx, get: false, set: false,
+      });
     }
     return null;
   }
@@ -2826,6 +2836,11 @@ class JncLower {
       if (f.items[3] !== undefined) return this.nope(f, '形参的默认值');
       const fsp = this.specs(f.items[1]);
       if (fsp === null) return null;
+      // 形参上的 `property`（第七十刀）：那是一格**属性指针**（`int property* p`，
+      // 35_PropertyPtr.jnc:97-126）—— 里头存的是"取/存两个函数 + 那个对象"，与函数指针两码事。
+      // 这一层没有那一格类型，而 `property` 这个词 specs 是收下的：不在这儿拦就会被悄悄
+      // 降成一格普通指针。
+      if (fsp.prop) return this.nope(f, '形参上的属性（属性指针要一格"属性指针"类型）');
       const fi = this.declarator(f.items[2], fsp);
       if (fi === null) return null;
       if (fi.formals !== null) return this.nope(f, '函数类型的形参');
@@ -2911,10 +2926,70 @@ class JncLower {
   }
 
   /**
+   * 索引属性的下标（第七十刀）：`p[i][j]` 里那几格就是取/存两个函数最前面那几个实参
+   * （prop_indexed.rst:15 —— 属性带数组语义，可下标的类型与含义都由写的人定，不一定是整数、
+   * 也不一定真当索引用）。个数与类型照声明里那一串查，回一串能直接拼进 `(call …)` 的文本；
+   * 不对就发一条诊断回 null。普通属性回空串。
+   */
+  propIndexArgs(n, pn, pi, subs) {
+    if (subs.length !== pi.idx.length) {
+      return this.err(n, pi.idx.length === 0
+        ? `'${shown(pn)}' 不是索引属性，后面挂不了下标`
+        : `索引属性 '${shown(pn)}' 要 ${pi.idx.length} 个下标，这里给了 ${subs.length} 个`);
+    }
+    let out = '';
+    for (let i = 0; i < subs.length; i++) {
+      let v = this.expr(subs[i], pi.idx[i]);
+      if (v === null) return null;
+      if (isInt(v.type) && isInt(pi.idx[i])) v = intConv(v, pi.idx[i]);
+      if (!this.assignOk(v.type, pi.idx[i])) {
+        return this.err(subs[i], `索引属性 '${shown(pn)}' 的第 ${i + 1} 个下标要 `
+          + `${tyName(pi.idx[i])}，这里是 ${tyName(v.type)}`);
+      }
+      out += ` ${v.code}`;
+    }
+    return out;
+  }
+
+  /** `p[i][j]` 这条链的底与那几格下标（第七十刀）。语法上它是一串套起来的 `index`，
+   *  最外那一层是**最后**一个下标，所以从外往里 unshift。 */
+  indexChain(n) {
+    const subs = [];
+    let cur = n;
+    while (isList(cur) && head(cur) === 'index') {
+      subs.unshift(cur.items[2]);
+      cur = cur.items[1];
+    }
+    return { base: cur, subs };
+  }
+
+  /** `p[i…]` 的读（第七十刀）：索引属性那几格下标就是取值器的实参。不是属性回 undefined
+   *  （那条路继续按"解引用"走），出错回 null。 */
+  propIndexGet(n) {
+    const ch = this.indexChain(n);
+    const t = this.propTarget(ch.base);
+    if (t === undefined) return undefined;
+    if (t === null) return null;
+    return this.propGet(n, t.pn, t.self, ch.subs);
+  }
+
+  /** 这条 `p` / `a.p` / `obj.p` 是一格属性吗（第七十刀把两条路并成一处）：是就回
+   *  `{pn, self}`，不是回 undefined，左边算不出来回 null。 */
+  propTarget(n) {
+    const q = this.propRef(n);
+    if (q !== null) return { pn: q, self: null };
+    if (isList(n) && head(n) === 'field' && isAtom(n.items[2])
+      && this.propNames.has(n.items[2].value)) {
+      return this.propMember(n, n.items[2].value);
+    }
+    return undefined;
+  }
+
+  /**
    * 读一格属性（第六十八刀）：就是调取值器。属性在源码里长得像变量，所以这一问挂在
    * "名字查不着变量"之后 —— 见 `case 'name'`。成员属性多传一格对象（第六十九刀）。
    */
-  propGet(n, pn, self = null) {
+  propGet(n, pn, self = null, subs = []) {
     const pi = this.props.get(pn);
     const g = `${pn}$get`;
     if (!this.fns.has(g)) {
@@ -2923,7 +2998,9 @@ class JncLower {
     }
     const sf = this.propSelf(n, pn, pi, self);
     if (sf === null) return null;
-    return { code: `(call ${g}${sf})`, type: pi.type };
+    const ix = this.propIndexArgs(n, pn, pi, subs);
+    if (ix === null) return null;
+    return { code: `(call ${g}${sf}${ix})`, type: pi.type };
   }
 
   /**
@@ -2932,7 +3009,7 @@ class JncLower {
    * 复合赋值（`p += 1`）还不收：jancy 那边它是"先读一次再写一次"，而这一层的赋值降成
    * 方言的一句 —— 两次调用摆不进去。const 属性（没有存值器）写不了，那是 prop.rst:17。
    */
-  propSet(n, pn, op, valNode, pad, self = null) {
+  propSet(n, pn, op, valNode, pad, self = null, subs = []) {
     const pi = this.props.get(pn);
     if (op !== '=') {
       return this.nope(n, `属性上的复合赋值 '${op}'（jancy 那边是先读一次再写一次，`
@@ -2948,6 +3025,8 @@ class JncLower {
     }
     const sf = this.propSelf(n, pn, pi, self);
     if (sf === null) return null;
+    const ix = this.propIndexArgs(n, pn, pi, subs);
+    if (ix === null) return null;
     let v = this.expr(valNode, pi.type);
     if (v === null) return null;
     if (isInt(v.type) && isInt(pi.type)) v = intConv(v, pi.type);
@@ -2955,7 +3034,7 @@ class JncLower {
       return this.err(n, `属性 '${shown(pn)}' 是 ${tyName(pi.type)}，`
         + `这儿给的是 ${tyName(v.type)}`);
     }
-    return [`${pad}(expr (call ${s}${sf} ${v.code}))`];
+    return [`${pad}(expr (call ${s}${sf}${ix} ${v.code}))`];
   }
 
   /**
@@ -2979,8 +3058,20 @@ class JncLower {
       return this.nope(n, `${shown(pn)} 的第二个 '${info.special}'（属性的存值器重载要重载决议）`);
     }
     let ret = J_VOID;
+    // 索引属性（第七十刀）：两个函数最前面那几个形参是**下标**，个数与类型照声明里那一串查
+    //（prop_indexed.rst:74 那句 "all accessors should have the same index arguments"）。
+    const k = pi.idx.length;
+    for (let i = 0; i < k && i < ps.length; i++) {
+      if (!sameTy(ps[i].type, pi.idx[i])) {
+        return this.err(n, `'${shown(pn)}.${info.special}()' 的第 ${i + 1} 个形参是 `
+          + `${tyName(ps[i].type)}，而属性声明里那个下标是 ${tyName(pi.idx[i])}`);
+      }
+    }
     if (info.special === 'get') {
-      if (ps.length > 0) return this.err(n, `'${shown(pn)}.get()' 不带形参`);
+      if (ps.length !== k) {
+        return this.err(n, k === 0 ? `'${shown(pn)}.get()' 不带形参`
+          : `'${shown(pn)}.get()' 要 ${k} 个形参（就是那 ${k} 个下标）`);
+      }
       if (!sameTy(info.type, pi.type)) {
         return this.err(n, `'${shown(pn)}.get()' 回的是 ${tyName(info.type)}，`
           + `而属性 '${shown(pn)}' 是 ${tyName(pi.type)}`);
@@ -2993,9 +3084,12 @@ class JncLower {
         return this.err(n, `'${shown(pn)}' 声明里写了 const，那是**只有取**的属性`
           + '（prop.rst:17），不能有 set');
       }
-      if (ps.length !== 1) return this.err(n, `'${shown(pn)}.set()' 要恰好一个形参`);
-      if (!sameTy(ps[0].type, pi.type)) {
-        return this.err(n, `'${shown(pn)}.set()' 收的是 ${tyName(ps[0].type)}，`
+      if (ps.length !== k + 1) {
+        return this.err(n, k === 0 ? `'${shown(pn)}.set()' 要恰好一个形参`
+          : `'${shown(pn)}.set()' 要 ${k + 1} 个形参（那 ${k} 个下标，再加要存的值）`);
+      }
+      if (!sameTy(ps[k].type, pi.type)) {
+        return this.err(n, `'${shown(pn)}.set()' 收的是 ${tyName(ps[k].type)}，`
           + `而属性 '${shown(pn)}' 是 ${tyName(pi.type)}`);
       }
       pi.set = true;
@@ -3010,6 +3104,14 @@ class JncLower {
   }
 
   fnSig0(n) {
+    // 完整声明式的属性（第七十刀）：`property p { … }` 在语法上是一格**带体的 fn-def** ——
+    // 说明符位置没有类型、只有 `property` 那个词，体里是取/存两个函数与属性自己的字段
+    //（prop_full.rst:15：那对花括号开的是一层命名空间）。这一层还接不上那一层，而落到下面
+    // specs 那儿报的是"这条声明没有类型"—— 认错了人。
+    if (this.propMod(n.items[1])) {
+      return this.nope(n, '完整声明式的属性（`property p { … }` 那对花括号开的是一层命名空间，'
+        + 'prop_full.rst:15）');
+    }
     // 特殊成员没有类型说明符（语法给的就是一个空的 `(specs)`，jnc.grammar:213/217）——
     // 构造不回值。所以这一格不问 specs，直接摆一个"void、什么修饰符都没有"的说明符
     // 进去（第五十三刀）。
@@ -3610,6 +3712,10 @@ class JncLower {
     const pad = ' '.repeat(ind);
     const sp = this.specs(n.items[1]);
     if (sp === null) return null;
+    // 函数体里的 `int property* p` 是一格**属性指针**（35_PropertyPtr.jnc:97-126）：里头存的
+    // 是"取/存两个函数 + 那个对象"。这一层没有那一格类型，而 `property` 这个词 specs 是收下
+    // 的 —— 不在这儿拦，它就会被悄悄降成一格普通指针（第七十刀）。
+    if (sp.prop) return this.nope(n, '函数体里的属性声明（属性指针要一格"属性指针"类型）');
     const out = [];
     for (const d of this.flat(n.items[2])) {
       const dh = isList(d) ? head(d) : null;
@@ -4133,6 +4239,14 @@ class JncLower {
         const pm = this.propMember(lhs, lhs.items[2].value);
         if (pm === null) return null;
         if (pm !== undefined) return this.propSet(n, pm.pn, op, n.items[3], pad, pm.self);
+      }
+      // `p[i] = v` / `obj.p[i] = v` —— 索引属性（第七十刀）：下标是存值器最前面那几个实参。
+      // 同一条理由排在 lvalue 之前 —— 那儿只会报"下标要一个指针"。
+      if (isList(lhs) && head(lhs) === 'index') {
+        const ch = this.indexChain(lhs);
+        const t = this.propTarget(ch.base);
+        if (t === null) return null;
+        if (t !== undefined) return this.propSet(n, t.pn, op, n.items[3], pad, t.self, ch.subs);
       }
       const lv = this.lvalue(n.items[2]);
       if (lv === null) return null;
@@ -5636,7 +5750,13 @@ class JncLower {
       case 'this': return this.load(n, this.lvalue(n));
       case 'binary': return this.binary(n);      case 'unary': return this.unary(n, want);
       case 'indirect': return this.load(n, this.derefLv(n));
-      case 'index': return this.load(n, this.derefLv(n));
+      case 'index': {
+        // 索引属性的读（第七十刀）：`p[i][j]` 是"调取值器、下标当实参"，不是解引用。要排在
+        // derefLv 之前问 —— 那儿只会报"下标要一个指针"。
+        const ig = this.propIndexGet(n);
+        if (ig !== undefined) return ig;
+        return this.load(n, this.derefLv(n));
+      }
       case 'ptr-field': return this.load(n, this.fieldLv(n, n.items[1], n.items[2]));
       case 'field': {
         const ob = n.items[1];
