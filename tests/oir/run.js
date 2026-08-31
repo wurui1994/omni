@@ -516,6 +516,14 @@ c('parseInt/empty', PI('', 10), 'parseInt("", 10)');
 c('arr/entries', J(js('js_arr_entries', [arr(str('a'), real(2), nul)])),
   'JSON.stringify([...["a", 2, null].entries()])');
 c('arr/entries-empty', J(js('js_arr_entries', [arr()])), 'JSON.stringify([...[].entries()])');
+// new Array(n)：长度 n、每格 undefined（stringify 里印成 null，与宿主的洞数组一致）。
+// 实参不是数时就是那一格元素。fill 是现成的 op，串起来才是源码里真正用的那一句。
+c('arr/new-n', J(js('js_arr_new_n', [real(3)])), 'JSON.stringify(new Array(3))');
+c('arr/new-n-0', J(js('js_arr_new_n', [real(0)])), 'JSON.stringify(new Array(0))');
+c('arr/new-n-str', J(js('js_arr_new_n', [str('x')])), 'JSON.stringify(new Array("x"))');
+c('arr/new-n-fill', J(js('js_arr_fill', [js('js_arr_new_n', [real(4)]), real(-1)])),
+  'JSON.stringify(new Array(4).fill(-1))');
+c('arr/new-n-len', js('js_arr_len', [js('js_arr_new_n', [real(5)])]), 'new Array(5).length');
 
 // ---------------------------------------------------------------- node 宿主面
 // 三个进程（ref.mjs / out.mjs / a.out）是**顺序**跑的，cwd 都是仓库根，所以

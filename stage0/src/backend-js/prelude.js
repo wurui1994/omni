@@ -808,6 +808,15 @@ function $js_arr_of(v) {
 }
 function $js_call3(f, x, i, self) { return $callFn(f, [x, i, self]); }
 function $js_arr_new() { return []; }
+// new Array(n)。刻意不留洞：宿主的洞会让 map/forEach 跳格，C 侧的 list 是密的，
+// 那样两个后端就分叉了。长度的合法范围照 JS（整数、0..2^32-1），越界是 RangeError。
+function $js_arr_new_n(n) {
+  if ($dynTag(n) !== "real") return [n];
+  if (!Number.isInteger(n) || n < 0 || n > 4294967295) $rt_error("invalid array length");
+  const a = new Array(n);
+  for (let i = 0; i < n; i++) a[i] = undefined;
+  return a;
+}
 function $js_arr_len(a) { return $js_arr_of(a).length; }
 function $js_arr_get(a, i) {
   const l = $js_arr_of(a), k = $js_idx(i, 0);

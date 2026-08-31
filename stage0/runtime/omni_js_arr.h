@@ -55,6 +55,22 @@ static omni_dyn omni_js_call_n(omni_dyn f, int64_t n, const omni_dyn *a) { \
 static LT omni_js_arr_of(omni_dyn v) { return (LT)omni_dyn_as_ref(v, OMNI_DYN_LIST); } \
 static omni_dyn omni_js_arr_wrap(LT l) { return omni_dyn_of_ref((void *)l, OMNI_DYN_LIST); } \
 static omni_dyn omni_js_arr_new(void) { return omni_js_arr_wrap(LT##_new()); } \
+static omni_dyn omni_js_arr_new_n(omni_dyn n) { \
+  LT l = LT##_new(); \
+  int64_t len, k; \
+  if (n.tag != OMNI_DYN_REAL) { \
+    LT##_push(l, n); \
+    return omni_js_arr_wrap(l); \
+  } \
+  if (!(n.u.r >= 0 && n.u.r <= 4294967295.0 && n.u.r == floor(n.u.r))) { \
+    omni_error("invalid array length"); \
+  } \
+  len = (int64_t)n.u.r; \
+  LT##_reserve(l, len); \
+  for (k = 0; k < len; k++) l->items[k] = omni_dyn_undef(); \
+  l->len = len; \
+  return omni_js_arr_wrap(l); \
+} \
 static omni_dyn omni_js_arr_len(omni_dyn a) { \
   return omni_dyn_of_real((double)omni_js_arr_of(a)->len); \
 } \

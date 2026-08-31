@@ -69,6 +69,10 @@ export const JS_ABI = {
   // JS 的 Array 就是 list<dynamic>。length 与下标是 Number（real），不是 int。
   // 这一批在 C 侧长在宏里（runtime/omni_js_arr.h）—— 运行时的 .c 看不见容器实例。
   js_arr_new: { js: '$js_arr_new', c: 'omni_js_arr_new', arity: 0 },
+  // new Array(n)：长度 n、每一格 undefined。这个值域里"洞"与 undefined 不可区分 ——
+  // C 侧的 list 本来就是密的，所以两侧都老老实实把每一格填成 undefined。
+  // 实参不是数时与 JS 一样：那就是一格元素（new Array("x") 是 ["x"]）。
+  js_arr_new_n: { js: '$js_arr_new_n', c: 'omni_js_arr_new_n', arity: 1 },
   js_arr_len: { js: '$js_arr_len', c: 'omni_js_arr_len', arity: 1 },
   js_arr_get: { js: '$js_arr_get', c: 'omni_js_arr_get', arity: 2 },
   js_arr_set: { js: '$js_arr_set', c: 'omni_js_arr_set', arity: 3, ret: 'void' },

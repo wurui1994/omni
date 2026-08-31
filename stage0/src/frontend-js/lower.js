@@ -1536,6 +1536,18 @@ class Lower {
       }
       return op(n === 'Map' ? 'js_map_new' : 'js_set_new', []);
     }
+    // new Array(...)：一个数的实参是"长度 n、每格 undefined"，别的实参个数就是那几格
+    // 元素（与 JS 一样；new Array("x") 是 ["x"]，那一格由 js_arr_new_n 自己分辨）
+    if (n === 'Array' && !this.lookup(n) && !this.classes.has(n)) {
+      const sp = e.args.find((a) => a.type === 'Spread');
+      if (sp !== undefined) {
+        this.err(sp.span, "spread is not supported in a 'new Array' call");
+        return undefExpr();
+      }
+      if (e.args.length === 0) return op('js_arr_new', []);
+      if (e.args.length === 1) return op('js_arr_new_n', [this.expr(e.args[0])]);
+      return arrLit(e.args.map((a) => this.expr(a)));
+    }
     // new Error(msg)：异常对象就是 { $cls: ["Error"], message }（决策 15）
     if (n === 'Error' && !this.lookup(n) && !this.classes.has(n)) {
       const msg = e.args.length ? this.expr(e.args[0]) : s16('');
@@ -1545,7 +1557,7 @@ class Lower {
     if (n && this.classes.has(n) && !this.lookup(n)) {
       return { kind: 'Call', func: this.classes.get(n).mangled, name: n, args: [this.argList(e.args)], type: D };
     }
-    this.err(e.span, `'new ${n ?? '<expr>'}' is not supported; only Map, Set and classes declared in this file`);
+    this.err(e.span, `'new ${n ?? '<expr>'}' is not supported; only Array, Map, Set, Error and classes declared in this file`);
     return undefExpr();
   }
 
