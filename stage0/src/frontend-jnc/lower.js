@@ -23,7 +23,8 @@
 // 局部量与赋值、`+ - * / %` 与比较、`&& || !`、一元 `- ~`、`++ --`（前后缀都收，
 // 但只作为语句/for 的步进）、复合赋值 `+= -= *= /= %=`（位运算与移位那五个
 // `&= |= ^= <<= >>=` 是第三十五刀）、`? :`、if/else、while、
-// do-while、C 式 for、break/continue/return、**真值化**（`if (n)` / `if (p)` /
+// do-while、C 式 for、`switch`（贯穿、中间的 default、每组一层作用域，第三十六刀）、
+// break/continue/return、**真值化**（`if (n)` / `if (p)` /
 // `!n` / `n && m` —— jancy 把整数与指针当条件用，这一层照它办）、
 // **指针那一族**（这一刀的主题）：`T*` -> `(ptr T)`、`T thin*` -> `(tptr T)`、
 // `new T[n]` -> `(pnew …)`、`*p` 读写、`p[i]` 读写（= `*(p + i)`，jancy 的下标
@@ -417,6 +418,7 @@ class JncLower {
     this.mainBody = null;      // `int main()` 的体（降成方言的 `(main …)`）
     this.retTy = T_VOID;       // 当前函数的返回类型
     this.forStep = null;       // 当前所在 for 的步进（非 null 时 continue 要拦，见 stmt）
+    this.swGuard = false;      // 与最近那个真循环之间隔着 switch 摊出来的合成循环（第三十六刀）
     this.tmp = 0;              // 生成名字的计数（do-while 的那格标志）
     this.lifted = new Set();   // 这个函数里被取过地址的局部量名（ADR-0016 第九刀）
     this.globals = new Map();  // 模块级变量：名字 -> 类型（第十一刀）
@@ -1295,6 +1297,11 @@ class JncLower {
     if (h === 'while') return this.whileStmt(n, ind);
     if (h === 'do') return this.doWhileStmt(n, ind);
     if (h === 'for') return this.forStmt(n, ind);
+    if (h === 'switch') return this.switchStmt(n, ind);
+    if (h === 'case' || h === 'default') {
+      this.err(n, `'${h}' 只能写在 switch 的花括号里`);
+      return null;
+    }
     if (h === 'return') return this.retStmt(n, ind);
     if (h === 'break' || h === 'continue') {
       const lvl = isAtom(n.items[1]) ? n.items[1].value : '1';
@@ -1303,6 +1310,12 @@ class JncLower {
         // 方言的 `cont` 跳到循环头，而 for 的步进在体的末尾 —— 直接接就会漏掉一次步进。
         // 与其给个错答案，不如在这儿停下（要接就得给方言加一条"带步进的循环"）。
         this.nope(n, '带步进的 for 里的 continue（方言的 cont 会跳过步进）');
+        return null;
+      }
+      if (h === 'continue' && this.swGuard) {
+        // switch 摊出来的那一格是一圈**合成的**循环（第三十六刀），`cont` 会跳到它的头上
+        // 而不是外层那个真循环 —— 那是个死循环。要接就得给方言加带层号的 `cont`。
+        this.nope(n, 'switch 里的 continue（要方言里带层号的 cont）');
         return null;
       }
       return [`${pad}(${h === 'break' ? 'brk' : 'cont'})`];
@@ -2241,14 +2254,182 @@ class JncLower {
     return [`${pad}(if ${c.code}`, t, e, `${pad})`];
   }
 
+  /**
+   * `switch` —— 方言里没有它，所以摊成「派发下标 + 一串守卫」（第三十六刀）：
+   *
+   *   (let $sv0 int COND)
+   *   (let $sk0 int (int 缺省组))          ;; 一个都不中时指向"组的个数"，于是哪一组都不跑
+   *   (if (bin "==" (var $sv0) (int k)) (set $sk0 (int 组号)))   ;; 每个 case 一条
+   *   (while (bool true)
+   *     (do
+   *       (if (bin "<=" (var $sk0) (int 0)) (do 第0组))
+   *       (if (bin "<=" (var $sk0) (int 1)) (do 第1组))
+   *       …
+   *       (brk)))
+   *
+   * 三件事靠这个形状同时成立：
+   *   1. **贯穿**（fall-through）。case 的值互不相同，所以派发那几条 `if` 谁在前谁在后都一样；
+   *      而守卫是 `<=`，从第 j 组进去就会接着跑 j+1、j+2 …… —— 这正是 C 与 jancy 的贯穿
+   *      （cflow_switch.rst:29 明写着 "even when we fall-through from previous case label"）。
+   *   2. **break 跳出整个 switch**。那圈 `while` 只跑一遍（体的末尾就是 `(brk)`），所以里面的
+   *      `(brk)` 落到 switch 之外。
+   *   3. **每组一层作用域**。jancy 给每个 case 块隐式开一层（cflow_switch.rst:15），所以
+   *      `case 0: int i = 10;` 与 `case 1: int i = 20;` 不冲突 —— 这里每组包一个 `(do …)`。
+   *
+   * 代价记在这儿：那圈 `while` 是**合成的**，`cont` 会跳到它头上。所以 switch 里的
+   * `continue` 当场拒（见 stmt 里的 swGuard），要接它得给方言加带层号的 `cont`。
+   */
+  switchStmt(n, ind) {
+    const pad = ' '.repeat(ind);
+    const es = n.items[1];
+    const conds = isList(es) && head(es) === 'exprs' ? es.items.slice(1) : [es];
+    if (conds.length !== 1) {
+      // `switch (state, string_t(p, 1))` —— 括号里是逗号串时那是**正则** switch
+      //（Stmt.llk:192-195 的 resolver 就按这个分），另一条边界。
+      this.nope(n, '正则 switch（括号里是逗号串）');
+      return null;
+    }
+    const v = this.expr(conds[0]);
+    if (v === null) return null;
+    if (!isInt(v.type)) {
+      this.err(n, `switch 的条件要整数，这里是 ${tyName(v.type)}`);
+      return null;
+    }
+    const groups = this.switchGroups(n);
+    if (groups === null) return null;
+    const sv = `$sv${this.tmp}`;
+    const sk = `$sk${this.tmp}`;
+    this.tmp++;
+    let def = groups.length;
+    const seen = new Map();
+    const disp = [];
+    for (let i = 0; i < groups.length; i++) {
+      if (groups[i].def) {
+        if (def !== groups.length) { this.err(groups[i].defNode, 'switch 里有两个 default'); return null; }
+        def = i;
+      }
+      for (const [k, kn] of groups[i].labels) {
+        if (seen.has(k)) { this.err(kn, `switch 里 case ${k} 出现了两次`); return null; }
+        seen.set(k, i);
+        disp.push(`${pad}(if (bin "==" (var ${sv}) (int ${k})) (do (set ${sk} (int ${i}))))`);
+      }
+    }
+    const saveSw = this.swGuard;
+    this.swGuard = true;
+    const bodies = [];
+    let bad = false;
+    for (let i = 0; i < groups.length; i++) {
+      if (groups[i].stmts.length === 0) { bodies.push(null); continue; }
+      this.scopes.push(new Map());
+      const out = [];
+      for (const s of groups[i].stmts) {
+        const lines = this.stmt(s, ind + 6);
+        if (lines === null) bad = true; else for (const l of lines) out.push(l);
+      }
+      this.scopes.pop();
+      bodies.push(out);
+    }
+    this.swGuard = saveSw;
+    if (bad) return null;
+    const out = [
+      `${pad}(let ${sv} int ${v.code})`,
+      `${pad}(let ${sk} int (int ${def}))`,
+      ...disp,
+      `${pad}(while (bool true)`,
+      `${pad}  (do`,
+    ];
+    for (let i = 0; i < groups.length; i++) {
+      if (bodies[i] === null) continue;
+      out.push(`${pad}    (if (bin "<=" (var ${sk}) (int ${i}))`);
+      out.push(`${pad}      (do`);
+      for (const l of bodies[i]) out.push(l);
+      out.push(`${pad}      )`);
+      out.push(`${pad}    )`);
+    }
+    out.push(`${pad}    (brk)`);
+    out.push(`${pad}  )`);
+    out.push(`${pad})`);
+    return out;
+  }
+
+  /**
+   * switch 的花括号里是一串**扁平**的语句，`case` / `default` 是其中的标记（与 C 同一个形状，
+   * 见 Stmt.llk:180-189）。这里把它切成一组一组：连着写的标记（`case 1: case 2:`）归同一组。
+   */
+  switchGroups(n) {
+    const groups = [];
+    let cur = null;
+    for (const s of this.flat(n.items[2])) {
+      const h = head(s);
+      if (h === 'case' || h === 'default') {
+        // 标记之间没有语句时不另开一组 —— `case 1: case 2: foo();` 两个值指向同一组
+        if (cur === null || cur.stmts.length > 0) {
+          cur = { labels: [], def: false, defNode: null, stmts: [] };
+          groups.push(cur);
+        }
+        if (h === 'default') { cur.def = true; cur.defNode = s; continue; }
+        const k = this.caseLabel(s.items[1]);
+        if (k === null) return null;
+        cur.labels.push([k, s]);
+        continue;
+      }
+      if (cur === null) {
+        this.err(s, 'switch 的第一个 case 之前不能有语句（那段谁也到不了）');
+        return null;
+      }
+      cur.stmts.push(s);
+    }
+    return groups;
+  }
+
+  /**
+   * case 的标签是**常量整数表达式**（Stmt.llk:181 `constant_integer_expr`）。这一层只认
+   * 字面量与一元减 —— 常量折叠（`case 1 + 2:`）与命名常量（`case Request.Terminate:`）
+   * 都要先有编译期求值那一格，各是一条边界。
+   */
+  caseLabel(e) {
+    const k = this.constInt(e);
+    if (k === null) {
+      this.nope(e, 'case 的标签不是整数字面量（要编译期求值那一格）');
+      return null;
+    }
+    return k;
+  }
+
+  /**
+   * 标签上那一点点编译期求值：整数字面量与它前面的一元 `+` / `-`。**从语法树上算**，不看
+   * 降出来的文本 —— 降级会把一元减包进回卷（`(bin "-" (bin "^" …))`），照文本认不出来。
+   * 常量折叠（`case 1 + 2:`）与命名常量（`case Request.Terminate:`）都要更大的一格，各是
+   * 一条边界。返回 null 表示"这里不是一个能算的常量"，由调用方报错。
+   */
+  constInt(e) {
+    if (isAtom(e)) {
+      const v = this.numLit(e);
+      if (v === null || !isInt(v.type)) return null;
+      const m = /^\(int (-?\d+)\)$/.exec(v.code);
+      return m === null ? null : BigInt(m[1]);
+    }
+    if (isList(e) && head(e) === 'unary' && isStr(e.items[1])) {
+      const op = e.items[1].value;
+      if (op !== '-' && op !== '+') return null;
+      const k = this.constInt(e.items[2]);
+      if (k === null) return null;
+      return op === '-' ? -k : k;
+    }
+    return null;
+  }
+
   whileStmt(n, ind) {
     const pad = ' '.repeat(ind);
     const c = this.cond(n.items[1]);
     if (c === null) return null;
     const save = this.forStep;
+    const saveSw = this.swGuard;
     this.forStep = null;
+    this.swGuard = false;
     const b = this.body(n.items[2], ind + 2);
     this.forStep = save;
+    this.swGuard = saveSw;
     if (b === null) return null;
     return [`${pad}(while ${c.code}`, b, `${pad})`];
   }
@@ -2271,10 +2452,13 @@ class JncLower {
     const flag = `$do${this.tmp}`;
     this.tmp++;
     const save = this.forStep;
+    const saveSw = this.swGuard;
     this.forStep = null;
+    this.swGuard = false;
     const b = this.body(n.items[1], ind + 4);
     const c = this.cond(n.items[2]);
     this.forStep = save;
+    this.swGuard = saveSw;
     if (b === null || c === null) return null;
     return [
       `${pad}(let ${flag} bool (bool true))`,
@@ -2327,9 +2511,12 @@ class JncLower {
       if (c === null) bad = true; else cond = c.code;
     }
     const saveStep = this.forStep;
+    const saveSw = this.swGuard;
     this.forStep = steps.length === 0 ? null : steps;
+    this.swGuard = false;
     const b = this.body(n.items[4], ind + 4);
     this.forStep = saveStep;
+    this.swGuard = saveSw;
     this.scopes.pop();
     if (bad || b === null) return null;
     out.push(`${pad}  (while ${cond}`);

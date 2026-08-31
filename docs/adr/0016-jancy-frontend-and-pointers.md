@@ -1761,6 +1761,68 @@ implementation-defined），没有可引的答案。换成 `signed char h = -128
 （加 `tests/jnc/run.js` 的头注释），语法、方言、MIR、四个后端与运行时一个字都没改；自举、
 `tests/jit`、`tests/mir`、`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
 
+### 第三十六刀：`switch` —— 方言里没有它，所以摊成"派发下标 + 一串 `<=` 守卫"
+
+第三十五刀那个"语法早就齐了、只有降级没接"的发现值钱，所以这一刀开头先**成批探**了一遍：
+`switch`、`enum`、`typedef`、`const`、`bool` 当 `int` 用、`for` 里的逗号串。结果是
+`const` 与逗号串本来就通，另外四条各是一格。`switch` 最值钱，先做它。
+
+**摊法**（形状写在 `switchStmt` 的头注里）：
+
+```
+(let $sv0 int COND)
+(let $sk0 int (int 缺省组))       ;; 谁都不中时指向"组的个数"
+(if (bin "==" (var $sv0) (int k)) (do (set $sk0 (int 组号))))   ;; 每个 case 一条
+(while (bool true)
+  (do
+    (if (bin "<=" (var $sk0) (int 0)) (do 第0组))
+    (if (bin "<=" (var $sk0) (int 1)) (do 第1组))
+    …
+    (brk)))
+```
+
+三件事同时靠这个形状成立：
+
+- **贯穿**。case 的值互不相同，所以派发那几条 `if` 顺序无关；守卫是 `<=`，从第 j 组进去就会
+  接着跑 j+1、j+2 ……，直到撞上 `break`。这正是 C 与 jancy 的贯穿（cflow_switch.rst:29 明写
+  "no problem even when we fall-through from previous case label"）。
+- **`break` 跳出整个 switch**。那圈 `while` 的体末尾就是 `(brk)`，所以只跑一遍；里面的
+  `(brk)` 自然落到 switch 之外。case 里套的循环有它自己的一层，`break` 归那个循环 ——
+  `g=` 那一组量的就是这一点。
+- **每组一层作用域**。jancy 给每个 case 块隐式开一层（cflow_switch.rst:15），所以
+  `case 1: int i = 10;` 与 `case 2: int i = 20;` 不冲突；这里每组包一个 `(do …)`。
+
+**`default` 的位置不影响语义**：它只是"谁都不中时 `$sk0` 指哪儿"。所以夹在中间也对，
+`c=` 那一组把它放在 `case 1` 与 `case 3` 之间量了。
+
+**case 的标签要在语法树上算**，不能看降出来的文本。`case -1:` 的树是 `(unary "-" 1)`，降完是
+`(bin "-" (bin "^" (bin "&" (un "-" (int 1)) …)))`（一元减带着回卷），照文本认不出来。所以
+新写了个 `constInt`：只认整数字面量与它前面的一元 `+` / `-`（`constant_integer_expr`，
+Stmt.llk:181）。常量折叠（`case 1 + 2:`）与命名常量（`case Request.Terminate:`）要更大的一格。
+
+**这一刀留下的边界，两条都写清了理由**：
+
+- **switch 里的 `continue`**。那圈 `while` 是合成的，`cont` 会跳到它头上 —— 死循环。当场拒
+  （`bad/switch-continue.jnc`）。要接它得给方言加**带层号**的 `cont`；jancy 自己就有
+  `break2` / `continue2`（cflow_switch.rst:37 演示的正是 `break2` 从 switch 里穿到外层循环），
+  所以那一格本来就欠着，下一刀该做它。
+- **标签的值超出条件那一格**。C 会先把标签转成条件的类型（`signed char` 上的 `case 255`
+  变成 -1），这一层在提升之后那一格里比、不做那次转换。孪生里原本就写了 `case 255`，clang 报
+  "overflow converting case value to switch condition type"，两边都换成了 `case 5` 绕开。
+
+**顺手撞见的一处旧债**（不在这一刀里修）：方言允许 `(if C (set …))` 这种**不带 `(do …)`** 的
+单语句分支，而 `backend-js/emit.js:313` 直接取 `s.then.stmts` —— 于是它当场 `stmts is not
+iterable`。派发那几条本来就是这个形状，改成 `(if C (do (set …)))` 就过了。真正该修的是那两处
+之一（要么方言拒单语句分支，要么后端认它），记在这儿。
+
+**期望输出的出处**：`cases/35-switch.jnc`，一份 `cc -O0 -std=c99` 的孪生程序，18 行逐字节相同
+（五条腿也各自与它相同）。
+
+**跑过的轴**：`tests/jnc`（54/0，新增 `cases/35-switch` 与 `bad/switch-continue`）。
+**没跑的**：`tests/sexpr`、`tests/glr`、`tests/asy` —— 这一刀只动了 `frontend-jnc/lower.js`
+（加 `tests/jnc/run.js` 的头注释），语法、方言、MIR、四个后端与运行时一个字都没改；自举、
+`tests/jit`、`tests/mir`、`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
+
 ## 后果与代价
 
 - 方言从"没有可算术的引用"变成"有"。这一格会渗到 MIR 与四个后端，改不回去。

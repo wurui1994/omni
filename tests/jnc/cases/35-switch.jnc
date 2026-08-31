@@ -1,0 +1,140 @@
+// `switch`（ADR-0016 第三十六刀）。方言里没有 switch，所以这一刀在前端把它摊成
+// 「派发下标 + 一串 `<=` 守卫 + 一圈只跑一遍的合成循环」，形状与理由写在 lower.js 的
+// switchStmt 头上。
+//
+// 语义出处：
+//   - **贯穿**（fall-through）：cflow_switch.rst:29 明写 "no problem even when we
+//     fall-through from previous case label"。`b=` 那几行就是它 —— `x` 是 1，从 `case 1`
+//     进去，`case 2` 那一段接着跑，直到 `break`。
+//   - **每个 case 块隐式一层作用域**：cflow_switch.rst:15。`e=` 那一组三个 `int i` 不冲突。
+//   - **case 的标签是常量整数表达式**：Stmt.llk:181 `constant_integer_expr`。
+//   - `default` 可以写在**中间**（`c=` 那一组把它夹在 case 1 与 case 3 之间），位置不影响
+//     它"谁都不中时才走"这条。
+//
+// 期望输出的出处：一份 `cc -O0 -std=c99` 的孪生程序，18 行逐字节相同（五条腿也各自与它相同）。
+//
+// 几处特意摆进来的：
+//   - `a=` 那一组：`case 1: case 2:` 连着写 —— 两个值指向同一组。
+//   - `d=` 那一组：一个都不中且**没有** default，整段跳过（`d=after` 照印）。
+//   - `f=` 那一组：条件是 8 位的，标签是负数。
+//   - `g=` 那一组：case 里套一个 for，里面的 `break` 归那个 for，不归 switch。
+//   - `h=` 那一组：switch 在 for 里，每圈都重新派发。
+//
+// 两处刻意避开的：
+//   - **switch 里的 continue**：那圈循环是合成的，`cont` 会跳到它头上。当场拒，
+//     见 bad/switch-continue.jnc。
+//   - **标签的值超出条件那一格**（C 里 `signed char` 上的 `case 255` 会先转成 -1）：
+//     这一层在提升之后那一格里比，不做那次转换。孪生里原本写了 `case 255`，clang 报
+//     "overflow converting case value to switch condition type"，两边都换成了 `case 5`。
+
+int classify(int x) {
+    switch (x) {
+    case 0:
+        return 100;
+    case 1:
+    case 2:
+        return 200;
+    default:
+        return 300;
+    }
+    return -1;
+}
+
+int main() {
+    for (int i = 0; i < 4; i++)
+        printf("a=%d %d\n", i, classify(i));
+
+    int x = 1;
+    switch (x) {
+    case 0:
+        printf("b=zero\n");
+    case 1:
+        printf("b=one\n");
+    case 2:
+        printf("b=two\n");
+        break;
+    case 3:
+        printf("b=three\n");
+    }
+
+    for (int i = 0; i < 5; i++) {
+        switch (i) {
+        case 1:
+            printf("c=%d one\n", i);
+            break;
+        default:
+            printf("c=%d def\n", i);
+            break;
+        case 3:
+            printf("c=%d three\n", i);
+            break;
+        }
+    }
+
+    switch (7) {
+    case 0:
+        printf("d=no\n");
+        break;
+    }
+    printf("d=after\n");
+
+    int y = 2;
+    switch (y) {
+    case 1: {
+        int i = 10;
+        printf("e=%d\n", i);
+        break;
+    }
+    case 2: {
+        int i = 20;
+        printf("e=%d\n", i);
+        break;
+    }
+    default: {
+        int i = 30;
+        printf("e=%d\n", i);
+    }
+    }
+
+    char c = -1;
+    switch (c) {
+    case -1:
+        printf("f=neg\n");
+        break;
+    case 5:
+        printf("f=5\n");
+        break;
+    default:
+        printf("f=other\n");
+    }
+
+    int n = 2;
+    switch (n) {
+    case 2:
+        for (int k = 0; k < 4; k++) {
+            if (k == 2)
+                break;
+            printf("g=%d\n", k);
+        }
+        printf("g=out\n");
+        break;
+    default:
+        printf("g=def\n");
+    }
+
+    int total = 0;
+    for (int i = 0; i < 6; i++) {
+        switch (i % 3) {
+        case 0:
+            total += 1;
+            break;
+        case 1:
+            total += 10;
+            break;
+        default:
+            total += 100;
+        }
+    }
+    printf("h=%d\n", total);
+    return 0;
+}
