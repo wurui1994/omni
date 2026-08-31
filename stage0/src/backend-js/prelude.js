@@ -1376,6 +1376,11 @@ function $js_type_tag(v) {
 // 解释器不再写第三份浮点格式化，于是"同一个 double 打印成同一串字符"是构造性的。
 function $js_fmt_real(x) { return $fmt_real(x); }
 function $js_fmt_real_g(x, p) { return $str_real_g(x, p); }
+// %f / %e / %g 那三种排版，同一条纪律：用的就是这条腿自己那三份
+//（sfix / ssci / sgen 降下来调的正是它们）。这几行在一段模板字面量里，所以注释里不写反引号。
+function $js_fmt_fixed(x, p) { return $str_fixed(x, p); }
+function $js_fmt_sci(x, p) { return $str_sci(x, p); }
+function $js_fmt_gen(x, p, keep) { return keep ? $str_genk(x, p) : $str_gen(x, p); }
 function $js_repr_real(x) { return $repr_real(x); }
 // 解释器的函数值（ADR-0013 决策 3）。传进来的 f 是解释器自己那个两形参的 lambda，降级后
 // 它的实参是**一条表**（JS 域的唯一签名），所以这里要造一条转接记录：宿主按 fp(self, args)

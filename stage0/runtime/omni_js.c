@@ -86,6 +86,28 @@ omni_dyn omni_js_repr_real(omni_dyn v) {
   return omni_dyn_of_s16(omni_s16_of_utf8(omni_repr_real(want_fmt_num(v, "reprReal"))));
 }
 
+/* `%f` / `%e` / `%g` 那三种排版：解释器上 `(sfix …)` / `(ssci …)` / `(sgen …)` 走这三条。
+   与 fmtReal 同一条纪律 —— 用的就是这条腿自己那几份（omni_str_fixed / _sci / _gen / _genk），
+   所以解释执行与编译执行印出同一串字符是构造性的。 */
+omni_dyn omni_js_fmt_fixed(omni_dyn v, omni_dyn p) {
+  double x = want_fmt_num(v, "fmtFixed");
+  int64_t n = (int64_t)want_fmt_num(p, "fmtFixed");
+  return omni_dyn_of_s16(omni_s16_of_utf8(omni_str_fixed(x, n)));
+}
+
+omni_dyn omni_js_fmt_sci(omni_dyn v, omni_dyn p) {
+  double x = want_fmt_num(v, "fmtSci");
+  int64_t n = (int64_t)want_fmt_num(p, "fmtSci");
+  return omni_dyn_of_s16(omni_s16_of_utf8(omni_str_sci(x, n)));
+}
+
+omni_dyn omni_js_fmt_gen(omni_dyn v, omni_dyn p, omni_dyn keep) {
+  double x = want_fmt_num(v, "fmtGen");
+  int64_t n = (int64_t)want_fmt_num(p, "fmtGen");
+  omni_str s = omni_dyn_as_bool(keep) ? omni_str_genk(x, n) : omni_str_gen(x, n);
+  return omni_dyn_of_s16(omni_s16_of_utf8(s));
+}
+
 /* ---------------------------------------------------------------- 文本化 */
 
 /* JS 的 Number -> String（ECMA-262 Number::toString）。

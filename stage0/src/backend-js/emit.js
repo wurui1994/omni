@@ -46,7 +46,13 @@ class JsEmitter {
   /** 进循环前：要标签就发一行 `L:`，并把名字压栈；回一个 null 表示这层没标签 */
   pushLoop(s) {
     const need = loopLabelNeeds(s);
-    const label = need.brk || need.cont ? `$L${this.tmp++}` : null;
+    // 自增写在三目里就落在**惰性位置**上（那半边要抬一格临时才算得出来），自举那条路上
+    // 明说不收，所以分成两句写。
+    let label = null;
+    if (need.brk || need.cont) {
+      label = `$L${this.tmp}`;
+      this.tmp++;
+    }
     if (label !== null) this.line(`${label}:`);
     this.loops.push(label);
     return label;

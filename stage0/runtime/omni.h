@@ -324,6 +324,11 @@ omni_dyn omni_js_type_tag(omni_dyn v);
 omni_dyn omni_js_fmt_real(omni_dyn v);
 omni_dyn omni_js_fmt_real_g(omni_dyn v, omni_dyn p);
 omni_dyn omni_js_repr_real(omni_dyn v);
+/* `%f` / `%e` / `%g` 那三种排版，同一条纪律（用的就是上面 omni_str_fixed 那几份）。
+   js_fmt_gen 的第三个实参是"留不留尾随零"（omni_str_gen 与 omni_str_genk 的分工）。 */
+omni_dyn omni_js_fmt_fixed(omni_dyn v, omni_dyn p);
+omni_dyn omni_js_fmt_sci(omni_dyn v, omni_dyn p);
+omni_dyn omni_js_fmt_gen(omni_dyn v, omni_dyn p, omni_dyn keep);
 /* 解释器的函数值那两条（js_wrap_fn / js_call_fn，ADR-0013 决策 3）都要用 omni_js_call，
    那个是 OMNI_JS_ARR 摊出来的 static，所以它们在 omni_js_arr.h 里，不在这里。 */
 omni_dyn omni_js_str(omni_dyn v);

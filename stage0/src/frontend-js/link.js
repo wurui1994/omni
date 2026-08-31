@@ -60,6 +60,12 @@ const NATIVE_OPS = {
   typeTag: 'js_type_tag',
   fmtReal: 'js_fmt_real',
   fmtRealG: 'js_fmt_real_g',
+  // `%f` / `%e` / `%g` 那三种排版（ADR-0016 第八刀 / 第三十刀 / 第三十一刀）。解释器上
+  // `(sfix …)` / `(ssci …)` / `(sgen …)` 走它们 —— 与 fmtReal 同一条纪律：在哪个宿主上就用
+  // 那个宿主已有的那一份（prelude 的 $str_fixed 那几个、runtime 的 omni_str_fixed 那几个）。
+  fmtFixed: 'js_fmt_fixed',
+  fmtSci: 'js_fmt_sci',
+  fmtGen: 'js_fmt_gen',
   reprReal: 'js_repr_real',
   callJsOp: 'js_call_op',
   wrapFn: 'js_wrap_fn',

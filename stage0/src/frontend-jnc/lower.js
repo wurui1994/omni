@@ -4256,7 +4256,9 @@ class JncLower {
       if (ai !== vals.length) { this.err(n, 'printf 的实参比格式串里的转换多'); return null; }
       if (pieces.length === 0) return '(str "")';
       let code = pieces[0];
-      for (let k = 1; k < pieces.length; k++) code = `(bin "+" ${code} ${pieces[k]})`;
+      // 循环变量刻意不叫 `k`：这个函数里的闭包（flush）自己有一个 `k`，自举那一层的检查
+      // 按名字看，同名会被判成"被闭包捕获的循环变量"。
+      for (let q = 1; q < pieces.length; q++) code = `(bin "+" ${code} ${pieces[q]})`;
       return code;
     }
     flush(false);   // 末尾没换行的那一段走 write
@@ -4372,7 +4374,7 @@ class JncLower {
           bad = true;
           break;
         }
-        const id = /^[A-Za-z_]\w*/.exec(rest);
+        const id = rest.match(/^[A-Za-z_]\w*/);
         if (id !== null) {
           site(inlineVal(id[0], i + 1), null, node);
           i += 1 + id[0].length;
@@ -4420,8 +4422,8 @@ class JncLower {
         }
         // Ragel 的最长匹配：`%08x` 是 spec（4 字符）、`%8` 是序号（2 字符）。
         // spec 里的宽度只跟在标志后面（Lexer.rl:133），所以 `%8d` 的 `%8` 是序号、`d` 是文本。
-        const idx = /^\d+/.exec(rest);
-        const sp = /^([-+ #0]\d*)?(\.\d+)?(ll|l|z)?[diuxXfeEgGcsp]/.exec(rest);
+        const idx = rest.match(/^\d+/);
+        const sp = rest.match(/^([-+ #0]\d*)?(\.\d+)?(ll|l|z)?[diuxXfeEgGcsp]/);
         const spLen = sp === null ? 0 : 1 + sp[0].length;
         const idxLen = idx === null ? 0 : 1 + idx[0].length;
         if (spLen >= idxLen && spLen > 0) {
@@ -4450,9 +4452,10 @@ class JncLower {
       i++;
     }
     if (bad) return null;
-    for (let k = 0; k < argNodes.length; k++) {
-      if (!used[k]) {
-        return this.err(argNodes[k], `格式化字面量的第 ${k + 1} 个实参没有被用到`
+    // 同上，循环变量不叫 `k`：这个函数里的 argAt 有一个同名形参。
+    for (let q = 0; q < argNodes.length; q++) {
+      if (!used[q]) {
+        return this.err(argNodes[q], `格式化字面量的第 ${q + 1} 个实参没有被用到`
           + '（jancy 那边这也是一句错，Parser.cpp:3585）');
       }
     }
@@ -4833,7 +4836,7 @@ class JncLower {
     if (isAtom(e)) {
       const v = this.numLit(e);
       if (v === null || !isInt(v.type)) return null;
-      const m = /^\(int (-?\d+)\)$/.exec(v.code);
+      const m = v.code.match(/^\(int (-?\d+)\)$/);
       return m === null ? null : BigInt(m[1]);
     }
     if (isList(e) && head(e) === 'true') return 1n;
@@ -4866,7 +4869,7 @@ class JncLower {
     if (isList(e) && head(e) === 'field') {
       const em = this.enumMember(e, e.items[1], e.items[2]);
       if (em === undefined || em === null) return null;
-      const m = /^\(int (-?\d+)\)$/.exec(em.code);
+      const m = em.code.match(/^\(int (-?\d+)\)$/);
       return m === null ? null : BigInt(m[1]);
     }
     return null;

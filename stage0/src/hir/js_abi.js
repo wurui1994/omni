@@ -238,6 +238,11 @@ export const JS_ABI = {
   js_fmt_real: { js: '$js_fmt_real', c: 'omni_js_fmt_real', arity: 1 },
   // 同上，但按 N 位有效数字 —— 核心方言的 `(tostr E N)` 在解释器上走这一条。
   js_fmt_real_g: { js: '$js_fmt_real_g', c: 'omni_js_fmt_real_g', arity: 2 },
+  // `%f` / `%e` / `%g` 那三种排版：解释器上 `(sfix …)` / `(ssci …)` / `(sgen …)` 走它们。
+  // `js_fmt_gen` 的第三个实参是"留不留尾随零"（`sgen` 与 `sgenk` 的分工）。
+  js_fmt_fixed: { js: '$js_fmt_fixed', c: 'omni_js_fmt_fixed', arity: 2 },
+  js_fmt_sci: { js: '$js_fmt_sci', c: 'omni_js_fmt_sci', arity: 2 },
+  js_fmt_gen: { js: '$js_fmt_gen', c: 'omni_js_fmt_gen', arity: 3 },
   js_repr_real: { js: '$js_repr_real', c: 'omni_js_repr_real', arity: 1 },
   js_eval: { js: '$js_eval', c: 'omni_js_eval', arity: 1 },
   js_eval_captured: { js: '$js_eval_captured', c: 'omni_js_eval_captured', arity: 1 },
