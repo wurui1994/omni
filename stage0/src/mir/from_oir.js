@@ -23,7 +23,7 @@ import { JS_ALL } from '../hir/js_abi.js';
 import {
   OP, REF_NONE, MirFunc, MirModule, mkType,
   T_VOID, T_I64, T_F64, T_BOOL, T_STR, T_DYN, T_AGG, T_BUF, T_ARR, T_PTR, T_TPTR,
-  CVT_I2F, CVT_F2I, CVT_BOX,
+  CVT_I2F, CVT_F2I, CVT_BOX, CVT_U2F,
 } from './ir.js';
 
 /** real 的规范文本。哈希要稳定，所以整数值统一写成 `1.0` 这种形状。 */
@@ -431,7 +431,10 @@ class ToMir {
       }
       case 'Cast': {
         const v = this.expr(e.expr);
-        if (e.from.k === 'int' && e.type.k === 'real') return f.emit(OP.CVT, T_F64, v, REF_NONE, CVT_I2F);
+        // uns = 位当无符号 64 位读（第六十一刀）
+        if (e.from.k === 'int' && e.type.k === 'real') {
+          return f.emit(OP.CVT, T_F64, v, REF_NONE, e.uns === true ? CVT_U2F : CVT_I2F);
+        }
         if (e.from.k === 'real' && e.type.k === 'int') return f.emit(OP.CVT, T_I64, v, REF_NONE, CVT_F2I);
         throw new OmniError(`mir: 转换 ${e.from.k} -> ${e.type.k}`);
       }
@@ -693,6 +696,10 @@ function mirBinOp(op) {
     case '&': return OP.BAND;
     case '|': return OP.BOR;
     case '^': return OP.BXOR;
+    // 无符号那三个（第六十一刀）
+    case 'u/': return OP.UDIV;
+    case 'u%': return OP.UMOD;
+    case 'u>>': return OP.USHR;
     default: throw new OmniError(`mir: 二元 ${op}`);
   }
 }
@@ -705,6 +712,11 @@ function mirCmpOp(op) {
     case '>=': return OP.GE;
     case '<=': return OP.LE;
     case '>': return OP.GT;
+    // 无符号那四个（第六十一刀）
+    case 'u<': return OP.ULT;
+    case 'u>=': return OP.UGE;
+    case 'u<=': return OP.ULE;
+    case 'u>': return OP.UGT;
     default: throw new OmniError(`mir: 比较 ${op}`);
   }
 }

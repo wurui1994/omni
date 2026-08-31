@@ -89,15 +89,15 @@
 // 五条腿各加一格读写与一格零值。这几条正是这份纪律说的"动方言"。
 //
 // 还没长出来、因此**当场报错**的（每一条都记着该怎么长，不是"不收"）：
-//   - printf 剩下的是**转换字符**那一族：`%e` / `%E` / `%g` / `%G`（要方言里一条按 C 的
-//     `%e` / `%g` 排版的算子 —— `(tostr E N)` 是 `%.Ng`，形状近但它去尾随零）、`%u`
-//     （要无符号那一半的位宽规则）、`%p`（要"印地址"这件事本身，而这一层刻意不印裸地址）。
-//     标志（五个都齐了 —— `-` `0` `+` 空格 `#`，第二十九刀）、宽度、精度（含 `*` / `.*`）
-//     都收完了。三处 C 的**未定义行为**是另一种拒（没有可对的答案，不是欠着）：`%c` 上的
-//     精度、不是有符号转换上的 `+` / 空格、`%d` / `%s` / `%c` 上的 `#`。
-//   - `unsigned` —— 要无符号那一半的位宽规则：回卷变成 `x & M`（不摊符号位），
-//     `/` `%` `>>` `<` 都得换成无符号那一版。以前是静默忽略的，现在明着拒
-//     （见 tests/jnc/bad/unsigned.jnc）。
+//   - printf 的**转换字符**那一族只剩 `%p`（要"印地址"这件事本身，而这一层刻意不印裸地址）
+//     与 `%zd` 那一族的长度修饰。`%e` / `%E` 是第三十刀、`%g` / `%G` 是第三十一刀、
+//     `%u` 是第三十二刀，都落地了。标志（五个都齐了 —— `-` `0` `+` 空格 `#`，第二十九刀）、
+//     宽度、精度（含 `*` / `.*`）也都收完了。三处 C 的**未定义行为**是另一种拒（没有可对的
+//     答案，不是欠着）：`%c` 上的精度、不是有符号转换上的 `+` / 空格、`%d` / `%s` / `%c`
+//     上的 `#`。
+//   - `unsigned` 也落地了，分两刀：8 / 16 / 32 位是第三十三刀（回卷变成 `x & M`，
+//     不摊符号位），64 位是第六十一刀（那一格没有更宽的可借，所以
+//     `/` `%` `>>` 与四个大小比较换成方言里无符号那一版，见 uOp / realOf）。
 //   - 数组那一族里**两条不是我们欠的**：**不同型**数组之间的赋值（长度不一样、或元素是同宽的
 //     另一种整数）—— `Cast_Array::llvmCast` 里写着未实现，而同型的那些走的是 `castOperator` 里
 //     `opType->isEqual(type)` 那条恒等捷径，所以是通的（第二十一刀，见 copyVal）；
@@ -223,6 +223,7 @@ const J_I16 = mkInt(16);
 const J_I32 = mkInt(32);
 const J_I64 = mkInt(64);
 const J_U32 = mkInt(32, true);
+const J_U64 = mkInt(64, true);
 const J_REAL = { k: 'real' };
 const J_BOOL = { k: 'bool' };
 const J_VOID = { k: 'void' };
@@ -367,12 +368,34 @@ const kindIdx = (t) => t.w * 2 + (t.u ? 1 : 0);
 const common = (a, b) => arith(kindIdx(a) >= kindIdx(b) ? a : b);
 
 /**
+ * 落到 64 位无符号那一格上时要换成无符号版的那七个算子（第六十一刀）。
+ * 剩下的一个都不换：`+ - * & | ^ <<` 在补码下两种解释的位一模一样，`== !=` 比的也是位。
+ */
+const U_BINOPS = new Set(['/', '%', '>>', '<', '<=', '>', '>=']);
+
+/**
+ * 算子选择的**唯一一处**：中间那一格落到 64 位无符号上时换成 u 版。二元表达式与复合赋值
+ * 都走它 —— 分成两处写过一次，结果 `q /= three` 发的是有符号除法（`-1 / 3` 给 0）。
+ * 窄的那几格不换：intConv 已经把它们掩成非负数，有符号的算子算出来就是对的。
+ */
+const uOp = (op, rt) => (rt.u && rt.w >= 64 && U_BINOPS.has(op) ? `u${op}` : op);
+
+/**
+ * 整数 -> real（第六十一刀把它抽出来的）。64 位无符号那一格要走方言的 `torealu`
+ * （位当无符号 64 位读），不然 `double d = (uint64_t)-1` 会印出 -1 而不是 1.8e19。
+ * 窄的那几格不用：它们的规范形已经是非负数了，`toreal` 就是对的。
+ */
+const realOf = (code, t) => `(${t.u && t.w >= 64 ? 'torealu' : 'toreal'} ${code})`;
+
+
+/**
  * 回卷到 w 位。**有符号**是 `(x & M) ^ S - S`（掩到 w 位、再把最高位当符号位摊开）；
- * **无符号**就只有掩那一步（第三十三刀）—— 这也是 tests/jnc/bad/unsigned.jnc 那一条
- * 记着的"回卷变成 `x & M`（不摊符号位）"。
+ * **无符号**就只有掩那一步（第三十三刀）—— 也就是那一刀记下的"回卷变成 `x & M`
+ * （不摊符号位）"。
  *
- * 64 位有符号就是方言的 int 本身，一个字都不用发。64 位**无符号**装不进方言那一格的
- * 规范形（值域超了），所以那一格在这一刀之外，见 specs 里那条拒。
+ * 64 位有符号就是方言的 int 本身，一个字都不用发。64 位**无符号**也是那一格 ——
+ * 位一模一样，只是读法不同（第六十一刀）：所以这儿照样不发字，而"读法不同"那一半由
+ * 算子承担（`u/` `u%` `u>>` 与四个 `u<` 类比较，见 uOp）。
  *
  * 两条腿上都成立：JS 那侧 int 是 BigInt（`-1n & 255n === 255n`），C 那侧是补码的
  * `int64_t`（`(-1LL) & 255 == 255`）—— 同一串算符给同一个数。
@@ -2279,12 +2302,6 @@ class JncLower {
       }
       else { this.err(ts, `没有这个类型：'${nm}'`); return null; }
     }
-    // 64 位无符号在这一刀之外：方言那一格的规范形是**有符号** 64 位，`uint64` 的值域
-    // 超出去了，于是 `/` `%` `>>` `<` 都得换成无符号那一版 —— 那要方言长新算子。
-    if (isInt(base) && base.u && base.w >= 64) {
-      this.nope(n, '64 位的无符号整数（要方言里无符号的 `/` `%` `>>` 与比较）');
-      return null;
-    }
     return { type: base, thin, stat, fnptr, virt, errc };
   }
 
@@ -3701,7 +3718,7 @@ class JncLower {
         const rt = shift ? arith(lv.type) : common(lv.type, v.type);
         const x = intConv({ code: this.read(lv), type: lv.type }, rt);
         const y = shift ? intConv(v, arith(v.type)) : intConv(v, rt);
-        let code = `(bin "${bin}" ${x.code} ${y.code})`;
+        let code = `(bin "${uOp(bin, rt)}" ${x.code} ${y.code})`;
         // 回卷只发**一次**：收窄那一次自己就掩了低位，中间那一次省得掉。`%` 例外 ——
         // 余数天然在范围里，只有回到 lv 那一格要换符号性时才要动。
         const same = rt.w === lv.type.w && !rt.u === !lv.type.u;
@@ -4744,7 +4761,7 @@ class JncLower {
     if (v === null) return null;
     // int -> real 的隐式加宽（jancy 与 C 同）。反过来**不**做：那是丢精度，
     // jancy 那边也要一次显式强制转换。
-    if (want === J_REAL && isInt(v.type)) return { code: `(toreal ${v.code})`, type: J_REAL };
+    if (want === J_REAL && isInt(v.type)) return { code: realOf(v.code, v.type), type: J_REAL };
     // bool -> 整数的隐式转换（第三十七刀）。出处两条：1 位那一格用**零扩展**
     //（`m_ext_u`，jnc_ct_CastOp_Int.cpp:354），而扩展这一族的 getCastKind 就是
     // `CastKind_Implicit`（jnc_ct_CastOp_Int.h:63）。所以 `int b = a > 0;` 在 jancy 里合法，
@@ -4798,9 +4815,20 @@ class JncLower {
    * 整数字面量的类型：**装得下就是 `int`（32 位），装不下就是 `long`（64 位）**。C 的规矩，
    * jancy 同。这条有个众所周知的后果，照抄不改：`-2147483648` 是 `long` 而不是 `int`
    * （一元减在字面量**之外**，而 `2147483648` 已经装不下 32 位了）。
+   *
+   * 比 INT64_MAX 还大的那一格是 `unsigned long`（第六十一刀）。这不是 C 的规矩（C 那边
+   * 不带后缀的十进制字面量只走有符号那条链，`18446744073709551615` 在 C99 里是"没有类型
+   * 装得下"），是 **jancy 自己的**：整数字面量走 `setConstInt64_u`
+   * （jnc_ct_Expr.llk:856），它挑类型用的 `getInt64TypeKind_u` 最后一格正是
+   * `integer <= INT64_MAX ? TypeKind_Int64 : TypeKind_Int64_u`（jnc_ct_Type.cpp:64）。
+   * 位上存的还是那 64 位（`asIntN` 折一下），无符号性挂在类型上，算子由 binary 那边按
+   * 类型挑 u 版 —— 与第三十三刀"位宽与符号性合起来才是一格"是同一条。
    */
   intLit(n, v) {
-    if (v > 0x7fffffffffffffffn) return this.err(n, `整数字面量超出 long 能装的范围：'${n.value}'`);
+    if (v > 0xffffffffffffffffn) {
+      return this.err(n, `整数字面量超出 unsigned long 能装的范围：'${n.value}'`);
+    }
+    if (v > 0x7fffffffffffffffn) return { code: `(int ${BigInt.asIntN(64, v)})`, type: J_U64 };
     return { code: `(int ${v})`, type: v > 0x7fffffffn ? J_I64 : J_I32 };
   }
 
@@ -5174,7 +5202,12 @@ class JncLower {
       const rt = shift ? arith(a.type) : common(a.type, b.type);
       const x = intConv(a, rt);
       const y = shift ? intConv(b, arith(b.type)) : intConv(b, rt);
-      const code = `(bin "${op}" ${x.code} ${y.code})`;
+      // 64 位无符号那一格（第六十一刀）：它的规范形与有符号 64 位**位一模一样**，所以
+      // 存放、传参、`+ - * & | ^ << == !=` 全都照旧；分岔的只有除、取余、右移与四个大小
+      // 比较，换成方言里无符号那一版（`u/` `u%` `u>>` `u<` …）。
+      // 窄的那几格**不用**换：intConv 已经把它们掩成非负数了，有符号的算子算出来就是对的。
+      const uop = uOp(op, rt);
+      const code = `(bin "${uop}" ${x.code} ${y.code})`;
       // 比较不用管宽度：转到同一格之后两边都是规范形，直接比就是对的。
       if (cmp) return { code, type: J_BOOL };
       // 会溢出的只有这五条；`% & | ^ >>` 在规范形上天然还在范围里，一个字都不用发。
@@ -5182,8 +5215,8 @@ class JncLower {
       return { code: over ? wrapTo(code, rt.w, rt.u) : code, type: rt };
     }
     // 一边整数一边 real：加宽整数那一边
-    if (isInt(a.type) && b.type === J_REAL) a = { code: `(toreal ${a.code})`, type: J_REAL };
-    else if (a.type === J_REAL && isInt(b.type)) b = { code: `(toreal ${b.code})`, type: J_REAL };
+    if (isInt(a.type) && b.type === J_REAL) a = { code: realOf(a.code, a.type), type: J_REAL };
+    else if (a.type === J_REAL && isInt(b.type)) b = { code: realOf(b.code, b.type), type: J_REAL };
     if (!sameTy(a.type, b.type)) {
       return this.err(n, `'${op}' 两边不同型：左是 ${tyName(a.type)}，右是 ${tyName(b.type)}`);
     }
@@ -5256,8 +5289,8 @@ class JncLower {
       const y = intConv(b, rt);
       return { code: `(sel ${c.code} ${x.code} ${y.code})`, type: rt };
     }
-    if (isInt(a.type) && b.type === J_REAL) a = { code: `(toreal ${a.code})`, type: J_REAL };
-    else if (a.type === J_REAL && isInt(b.type)) b = { code: `(toreal ${b.code})`, type: J_REAL };
+    if (isInt(a.type) && b.type === J_REAL) a = { code: realOf(a.code, a.type), type: J_REAL };
+    else if (a.type === J_REAL && isInt(b.type)) b = { code: realOf(b.code, b.type), type: J_REAL };
     if (!sameTy(a.type, b.type)) {
       return this.err(n, `'? :' 两支不同型：甲是 ${tyName(a.type)}，乙是 ${tyName(b.type)}`);
     }
@@ -5706,7 +5739,7 @@ class JncLower {
     if (v === null) return null;
     if (sameTy(v.type, to)) return v;
     if (isInt(to) && isInt(v.type)) return intConv(v, to);
-    if (to === J_REAL && isInt(v.type)) return { code: `(toreal ${v.code})`, type: J_REAL };
+    if (to === J_REAL && isInt(v.type)) return { code: realOf(v.code, v.type), type: J_REAL };
     if (isInt(to) && v.type === J_REAL) {
       // 先向零截断成 64 位（方言的 `toint` 就是它），再回卷到目标那一格。
       return intConv({ code: `(toint ${v.code})`, type: J_I64 }, to);

@@ -30,6 +30,23 @@ function $mod(a, b) {
   return a % b;
 }
 
+// 无符号那三个（ADR-0016 第六十一刀）。位是同一份，只是当无符号 64 位读：
+// $U 把那一格的位读成 0..2^64-1，算完再 $W 回规范形（有符号 64 位）。
+// 除零那句话与有符号那两个一模一样：五条腿上是同一句。
+// $INT_MIN / -1 那道特例这儿不需要 —— 无符号除法没有溢出。
+// （这段里不能出现反引号：整份 prelude 是一个 String.raw 模板。）
+const $U = (x) => BigInt.asUintN(64, x);
+
+function $udiv(a, b) {
+  if (b === 0n) $rt_error("division by zero");
+  return $W($U(a) / $U(b));
+}
+
+function $umod(a, b) {
+  if (b === 0n) $rt_error("division by zero");
+  return $W($U(a) % $U(b));
+}
+
 function $fmod(a, b) { return a % b; }
 
 // 向量（ADR-0014 决策 6）：一条长度 = 宽度的普通数组，每道一个标量。

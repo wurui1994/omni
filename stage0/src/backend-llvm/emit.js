@@ -32,8 +32,8 @@
 import { OmniError } from '../source/diag.js';
 import { utf8Bytes } from '../host/utf8.js';
 import {
-  OP, OP_NAMES, REF_NONE, REF_BIAS, isConstRef, typeText, typeKind, typeLanes,
-  T_VOID, T_I64, T_F64, T_BOOL, T_STR, T_AGG, T_BUF, T_ARR, T_PTR, T_TPTR, CVT_I2F, CVT_F2I,
+  OP, OP_NAMES, REF_NONE, REF_BIAS, isConstRef, isCmp, typeText, typeKind, typeLanes,
+  T_VOID, T_I64, T_F64, T_BOOL, T_STR, T_AGG, T_BUF, T_ARR, T_PTR, T_TPTR, CVT_I2F, CVT_F2I, CVT_U2F,
 } from '../mir/ir.js';
 
 /**
@@ -163,7 +163,11 @@ const RT_OPS = new Map([
 ]);
 
 /** i64 比较 -> icmp 谓词；f64 -> fcmp 谓词。顺序与 OP.EQ..OP.GT 一致。 */
-const ICMP = new Map([[OP.EQ, 'eq'], [OP.NE, 'ne'], [OP.LT, 'slt'], [OP.GE, 'sge'], [OP.LE, 'sle'], [OP.GT, 'sgt']]);
+const ICMP = new Map([[OP.EQ, 'eq'], [OP.NE, 'ne'], [OP.LT, 'slt'], [OP.GE, 'sge'], [OP.LE, 'sle'], [OP.GT, 'sgt'],
+  // 无符号那四个（第六十一刀）：LLVM 里正好就是 ult/uge/ule/ugt —— 方言的
+  // "无符号性挂在算子上"抄的就是它这一格
+  [OP.ULT, 'ult'], [OP.UGE, 'uge'], [OP.ULE, 'ule'], [OP.UGT, 'ugt']]);
+
 const FCMP = new Map([[OP.EQ, 'oeq'], [OP.NE, 'une'], [OP.LT, 'olt'], [OP.GE, 'oge'], [OP.LE, 'ole'], [OP.GT, 'ogt']]);
 
 /**
@@ -179,6 +183,8 @@ class LlvmEmitter {
     this.out = [];
     this.needDiv = false;   // 除法/取模的辅助函数只在用到时才发
     this.needMod = false;
+    this.needUDiv = false;  // 无符号那两个（第六十一刀），同一条规矩
+    this.needUMod = false;
     this.f = null;          // 当前函数
     this.tmp = 0;           // 临时值编号（%t0…），与 %v<i> 分开，不会撞
     this.labels = 0;
@@ -225,7 +231,7 @@ class LlvmEmitter {
   /** 这条指令**结果**的类型（比较的结果是 bool，`t` 上放的是操作数类型）。 */
   resultTy(f, i) {
     const op = f.op[i];
-    return op >= OP.EQ && op <= OP.GT ? T_BOOL : f.t[i];
+    return isCmp(op) ? T_BOOL : f.t[i];
   }
 
   fresh() { const n = this.tmp; this.tmp++; return `%t${n}`; }
@@ -362,11 +368,14 @@ class LlvmEmitter {
 
     if (this.needDiv) this.line(DIV_HELPER);
     if (this.needMod) this.line(MOD_HELPER);
+    if (this.needUDiv) this.line(UDIV_HELPER);
+    if (this.needUMod) this.line(UMOD_HELPER);
     if (this.needFnck) this.line(FNCK_HELPER);
     // `omni_error` 有三个用户（除零、取模、函数值判空），declare 只能有一句。
-    if (this.needDiv || this.needMod || this.needFnck) {
+    const anyDiv = this.needDiv || this.needMod || this.needUDiv || this.needUMod;
+    if (anyDiv || this.needFnck) {
       this.line('declare void @omni_error(ptr)');
-      if (this.needDiv || this.needMod) {
+      if (anyDiv) {
         this.line('@.omni_divzero = private unnamed_addr constant [17 x i8] c"division by zero\\00"');
       }
       if (this.needFnck) {
@@ -725,11 +734,24 @@ class LlvmEmitter {
       this.line(`  ${dst} = call i64 @omni_ll_mod(i64 ${this.val(f.a[i])}, i64 ${this.val(f.b[i])})`);
       return;
     }
-    // 移位量先 `& 63`：C 那边是 `b & 63`，而 LLVM 里移过位宽是 poison
-    if (op === OP.SHL || op === OP.SHR) {
+    // 无符号那两个（第六十一刀）：除零那句话与上面两个共用，溢出特判没有
+    if (op === OP.UDIV) {
+      this.needUDiv = true;
+      this.line(`  ${dst} = call i64 @omni_ll_udiv(i64 ${this.val(f.a[i])}, i64 ${this.val(f.b[i])})`);
+      return;
+    }
+    if (op === OP.UMOD) {
+      this.needUMod = true;
+      this.line(`  ${dst} = call i64 @omni_ll_umod(i64 ${this.val(f.a[i])}, i64 ${this.val(f.b[i])})`);
+      return;
+    }
+    // 移位量先 `& 63`：C 那边是 `b & 63`，而 LLVM 里移过位宽是 poison。
+    // `u>>` 是逻辑右移（lshr）—— 与 `>>` 的算术右移（ashr）差的就是补符号位还是补零。
+    if (op === OP.SHL || op === OP.SHR || op === OP.USHR) {
       const m = this.fresh();
+      const ins = op === OP.SHL ? 'shl' : (op === OP.SHR ? 'ashr' : 'lshr');
       this.line(`  ${m} = and i64 ${this.val(f.b[i])}, 63`);
-      this.line(`  ${dst} = ${op === OP.SHL ? 'shl' : 'ashr'} i64 ${this.val(f.a[i])}, ${m}`);
+      this.line(`  ${dst} = ${ins} i64 ${this.val(f.a[i])}, ${m}`);
       return;
     }
     if (op === OP.NEG) {
@@ -739,7 +761,7 @@ class LlvmEmitter {
     }
     if (op === OP.BNOT) { this.line(`  ${dst} = xor i64 ${this.val(f.a[i])}, -1`); return; }
     if (op === OP.NOT) { this.line(`  ${dst} = xor i1 ${this.val(f.a[i])}, true`); return; }
-    if (op >= OP.EQ && op <= OP.GT) {
+    if (isCmp(op)) {
       const pred = isF ? FCMP.get(op) : ICMP.get(op);
       const cmp = isF ? 'fcmp' : 'icmp';
       this.line(`  ${dst} = ${cmp} ${pred} ${this.ty(t, 'compare')} ${this.val(f.a[i])}, ${this.val(f.b[i])}`);
@@ -747,6 +769,8 @@ class LlvmEmitter {
     }
     if (op === OP.CVT) {
       if (f.aux[i] === CVT_I2F) { this.line(`  ${dst} = sitofp i64 ${this.val(f.a[i])} to double`); return; }
+      // 位当无符号 64 位读再转（第六十一刀）：sitofp 换 uitofp，一条指令的差别
+      if (f.aux[i] === CVT_U2F) { this.line(`  ${dst} = uitofp i64 ${this.val(f.a[i])} to double`); return; }
       if (f.aux[i] === CVT_F2I) { this.line(`  ${dst} = fptosi double ${this.val(f.a[i])} to i64`); return; }
       throw new OmniError(`${NOPE} CVT ${f.aux[i]}（函数 ${f.name}）`);
     }
@@ -1490,6 +1514,34 @@ sat:
   ret i64 0
 ok:
   %r = srem i64 %a, %b
+  ret i64 %r
+}
+`;
+
+/* 无符号那两个（ADR-0016 第六十一刀）。除零那句话与有符号那两个共用同一条字符串常量，
+ * 所以五条腿上是同一句；INT64_MIN/-1 那道特判这儿**没有** —— 无符号除法不会溢出。 */
+const UDIV_HELPER = `define private i64 @omni_ll_udiv(i64 %a, i64 %b) {
+entry:
+  %z = icmp eq i64 %b, 0
+  br i1 %z, label %err, label %ok
+err:
+  call void @omni_error(ptr @.omni_divzero)
+  unreachable
+ok:
+  %r = udiv i64 %a, %b
+  ret i64 %r
+}
+`;
+
+const UMOD_HELPER = `define private i64 @omni_ll_umod(i64 %a, i64 %b) {
+entry:
+  %z = icmp eq i64 %b, 0
+  br i1 %z, label %err, label %ok
+err:
+  call void @omni_error(ptr @.omni_divzero)
+  unreachable
+ok:
+  %r = urem i64 %a, %b
   ret i64 %r
 }
 `;

@@ -57,6 +57,21 @@ function imod(a, b) {
   return a % b;
 }
 
+/** 位当无符号 64 位读（第六十一刀）。与 JS 后端的 `$U`、C 那侧的 `(uint64_t)` 同一件事。 */
+export function U(x) {
+  return BigInt.asUintN(64, x);
+}
+
+function udiv(a, b) {
+  if (b === 0n) rtError('division by zero');
+  return W(U(a) / U(b));
+}
+
+function umod(a, b) {
+  if (b === 0n) rtError('division by zero');
+  return W(U(a) % U(b));
+}
+
 /* ---------------------------------------------------------------- 输出
  * 缓冲到 8192 再落盘，和 prelude 的 $print / $print_raw 共用一个缓冲区的做法一致：
  * 直写的那一路不能插到已缓冲、还没落盘的输出前面去。
@@ -679,9 +694,14 @@ export function callBuiltin(I, e, env, frame) {
   }
 }
 
-/** 比较。静态那半边的类型已经定好了，所以宿主的 === / < 就是对的语义 */
+/** 比较。静态那半边的类型已经定好了，所以宿主的 === / < 就是对的语义。
+ *  `u<` 那四个是无符号那一版（第六十一刀）：两边的位当无符号 64 位读，比法照旧。 */
 export function cmpOp(op, a, b) {
   switch (op) {
+    case 'u<': return U(a) < U(b);
+    case 'u<=': return U(a) <= U(b);
+    case 'u>': return U(a) > U(b);
+    case 'u>=': return U(a) >= U(b);
     case '==': return a === b;
     case '!=': return a !== b;
     case '<': return a < b;
@@ -702,6 +722,10 @@ export function binOp(op, kind, a, b) {
       case '%': return imod(a, b);
       case '<<': return W(a << (b & 63n));
       case '>>': return a >> (b & 63n);
+      // 无符号那三个（第六十一刀）
+      case 'u/': return udiv(a, b);
+      case 'u%': return umod(a, b);
+      case 'u>>': return W(U(a) >> (b & 63n));
       case '&': return a & b;
       case '|': return a | b;
       case '^': return a ^ b;

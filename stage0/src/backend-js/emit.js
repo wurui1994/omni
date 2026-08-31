@@ -483,7 +483,11 @@ class JsEmitter {
         return e.object.type.k === 'class' ? `$nullCheck(${obj}).${e.name}` : `${obj}.${e.name}`;
       }
       case 'Cast':
-        if (e.from.k === 'int' && e.type.k === 'real') return `Number(${this.expr(e.expr)})`;
+        // uns = 位当无符号 64 位读（第六十一刀）：`Number(-1n)` 是 -1，
+        // `Number($U(-1n))` 是 18446744073709551615
+        if (e.from.k === 'int' && e.type.k === 'real') {
+          return e.uns === true ? `Number($U(${this.expr(e.expr)}))` : `Number(${this.expr(e.expr)})`;
+        }
         throw new Error(`js.cast: ${e.from.k}->${e.type.k}`);
       // 装箱在 JS 里是恒等操作：dynamic 就是原生值（ADR-0006 第 2 节）
       case 'Box': return this.expr(e.expr);
@@ -498,6 +502,10 @@ class JsEmitter {
           return e.op === '==' ? eq : `(!${eq})`;
         }
         const op = e.op === '==' ? '===' : e.op === '!=' ? '!==' : e.op;
+        // 无符号那四个比较（第六十一刀）：两边的位当无符号 64 位读，比法照旧
+        if (op.startsWith('u')) {
+          return `($U(${this.expr(e.left)}) ${op.slice(1)} $U(${this.expr(e.right)}))`;
+        }
         return `(${this.expr(e.left)} ${op} ${this.expr(e.right)})`;
       }
       case 'Bin': return this.bin(e);
@@ -551,6 +559,11 @@ class JsEmitter {
         case '%': return `$mod(${a}, ${b})`;
         case '<<': return `$W(${a} << (${b} & 63n))`;
         case '>>': return `(${a} >> (${b} & 63n))`;
+        // 无符号那三个（第六十一刀）：位当无符号 64 位读，算完回规范形。
+        // `u>>` 的移位数照旧只取低 6 位 —— 与 `>>` 同一条规矩。
+        case 'u/': return `$udiv(${a}, ${b})`;
+        case 'u%': return `$umod(${a}, ${b})`;
+        case 'u>>': return `$W($U(${a}) >> (${b} & 63n))`;
         case '&': case '|': case '^': return `(${a} ${op} ${b})`;
         default: throw new Error(`js.bin int: ${op}`);
       }

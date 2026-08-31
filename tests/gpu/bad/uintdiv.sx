@@ -1,0 +1,20 @@
+;; kernel 里的**无符号**整数除法：也刻意不发。
+;;
+;; 第六十一刀给方言加了 `u/` `u%` `u>>` 与四个无符号比较。其中五个在设备上有现成的
+;; 一条指令（OpShiftRightLogical、OpULessThan 那四个），所以它们发得出来；`u/` `u%`
+;; 与有符号那两个卡在同一个地方 —— SPIR-V 里明明有 OpUDiv / OpUMod，但 CPU 那几条腿
+;; 除零时要报错（omni.h 的 omni_udiv / omni_umod、prelude 的 $udiv / $umod），
+;; 设备上没有"报错"这条路径。发出去就是在两条腿之间开一个静默的分叉。
+;;
+;; 与 bad/intdiv.sx 分成两条而不是合成一条：那一条的理由里有 INT64_MIN/-1，
+;; 这一条没有那一格（无符号没有那个不对称），只剩除零。理由不同的边界不合并。
+(module
+  (kernel uscale ((v (buf int)) (d int))
+    (if (bin "<" (gid) (blen (var v))) (do
+      (bset (var v) (gid) (bin "u/" (bget (var v) (gid)) (var d))))))
+
+  (main
+    (let v (buf int) (bnew (buf int) (int 2)))
+    (bset (var v) (int 0) (int 10))
+    (dispatch uscale (int 2) (var v) (int 2))
+    (print (bget (var v) (int 0)))))

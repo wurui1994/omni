@@ -34,7 +34,7 @@ import { lowerToMir } from './from_oir.js';
 import { verifyMir } from './verify.js';
 import {
   OP, OP_NAMES, REF_NONE, REF_BIAS, isConstRef, typeKind, typeLanes,
-  T_I64, T_F64, T_STR, T_DYN, T_PTR, T_TPTR, CVT_I2F, CVT_BOX,
+  T_I64, T_F64, T_STR, T_DYN, T_PTR, T_TPTR, CVT_I2F, CVT_BOX, CVT_U2F,
 } from './ir.js';
 
 /** 常量池条目 -> 宿主值。int 是 BigInt（ADR-0005 的 i64），real 是 number。 */
@@ -347,6 +347,8 @@ class MirInterp {
       case OP.CVT: {
         const v = rd(f.a[i]);
         if (x === CVT_I2F) return (F) => { F.v[i] = Number(v(F)); return next; };
+        // 位当无符号 64 位读再转（第六十一刀）
+        if (x === CVT_U2F) return (F) => { F.v[i] = Number(BigInt.asUintN(64, v(F))); return next; };
         // 装箱是恒等：dynamic 就是原生值（ADR-0006 第 2 节）。C 后端那边它是打标签，
         // 所以指令留着 —— 「哪里发生装箱」是后端要知道的事实。
         if (x === CVT_BOX) return (F) => { F.v[i] = v(F); return next; };
@@ -696,10 +698,13 @@ class MirInterp {
 const BIN_STR = new Map([
   [OP.ADD, '+'], [OP.SUB, '-'], [OP.MUL, '*'], [OP.DIV, '/'], [OP.MOD, '%'],
   [OP.SHL, '<<'], [OP.SHR, '>>'], [OP.BAND, '&'], [OP.BOR, '|'], [OP.BXOR, '^'],
+  // 无符号那三个（第六十一刀）：binOp 那边收的就是这三个字符串
+  [OP.UDIV, 'u/'], [OP.UMOD, 'u%'], [OP.USHR, 'u>>'],
 ]);
 
 const CMP_STR = new Map([
   [OP.EQ, '=='], [OP.NE, '!='], [OP.LT, '<'], [OP.LE, '<='], [OP.GT, '>'], [OP.GE, '>='],
+  [OP.ULT, 'u<'], [OP.ULE, 'u<='], [OP.UGT, 'u>'], [OP.UGE, 'u>='],
 ]);
 
 /**

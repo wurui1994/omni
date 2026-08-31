@@ -19,7 +19,7 @@
 
 import { OmniError } from '../source/diag.js';
 import { stderr, wrapFn, callFnValue } from '../host/native.js';
-import { callBuiltin, zeroOf, newInstance, flushOut, failRt, jsCallFn, vecHsum, bufNew, bufGet, bufSet, arrNew, arrLen, arrGet, arrSet, arrPush, arrPop, ptrNew, ptrChk, ptrTChk, ptrLoad, ptrStore, ptrAdd, ptrSub, InterpFail, InterpUncaught } from './builtin.js';
+import { callBuiltin, zeroOf, newInstance, flushOut, failRt, jsCallFn, vecHsum, bufNew, bufGet, bufSet, arrNew, arrLen, arrGet, arrSet, arrPush, arrPop, ptrNew, ptrChk, ptrTChk, ptrLoad, ptrStore, ptrAdd, ptrSub, InterpFail, InterpUncaught, U } from './builtin.js';
 
 // 语句的结果：正常走完 / break / continue / return。刻意不用异常做控制流 —— C 侧的
 // throw 是"待决错误标志 + 普通跳转"（ADR-0007），用信号值两个宿主上形状一致。
@@ -385,8 +385,9 @@ class Interp {
         }
         return o[e.name];
       }
+      // uns = 位当无符号 64 位读（第六十一刀），与 JS 后端的 `Number($U(x))` 是同一句
       case 'Cast': return e.from.k === 'int' && e.type.k === 'real'
-        ? Number(this.eval(e.expr, env, frame))
+        ? Number(e.uns === true ? U(this.eval(e.expr, env, frame)) : this.eval(e.expr, env, frame))
         : this.eval(e.expr, env, frame);
       // 装箱在这里是恒等：dynamic 就是原生值（ADR-0006 第 2 节）
       case 'Box': return this.eval(e.expr, env, frame);

@@ -983,7 +983,12 @@ class CEmitter {
           : `${obj}.f_${e.name}`;
       }
       case 'Cast':
-        if (e.from.k === 'int' && e.type.k === 'real') return `(double)(${this.expr(e.expr)})`;
+        // uns = 位当无符号 64 位读（第六十一刀）
+        if (e.from.k === 'int' && e.type.k === 'real') {
+          return e.uns === true
+            ? `(double)(uint64_t)(${this.expr(e.expr)})`
+            : `(double)(${this.expr(e.expr)})`;
+        }
         throw new Error(`c.cast: ${e.from.k}->${e.type.k}`);
       case 'Box': return this.box(this.expr(e.expr), e.from);
       case 'Logic': return `(${this.expr(e.left)} ${e.op} ${this.expr(e.right)})`;
@@ -997,6 +1002,10 @@ class CEmitter {
         if (e.opType.k === 'dynamic') {
           const eq = `omni_dyn_eq(${this.expr(e.left)}, ${this.expr(e.right)})`;
           return e.op === '==' ? eq : `(!${eq})`;
+        }
+        // 无符号那四个比较（第六十一刀）：两边的位当无符号 64 位读，比法照旧
+        if (e.op.startsWith('u')) {
+          return `((uint64_t)${this.expr(e.left)} ${e.op.slice(1)} (uint64_t)${this.expr(e.right)})`;
         }
         return `(${this.expr(e.left)} ${e.op} ${this.expr(e.right)})`;
       }
@@ -1088,6 +1097,10 @@ class CEmitter {
         case '%': return `omni_mod(${a}, ${b})`;
         case '<<': return `omni_shl(${a}, ${b})`;
         case '>>': return `omni_shr(${a}, ${b})`;
+        // 无符号那三个（第六十一刀）：位当无符号 64 位读，见 runtime/omni.h
+        case 'u/': return `omni_udiv(${a}, ${b})`;
+        case 'u%': return `omni_umod(${a}, ${b})`;
+        case 'u>>': return `omni_ushr(${a}, ${b})`;
         case '&': case '|': case '^': return `(${a} ${op} ${b})`;
         default: throw new Error(`c.bin int: ${op}`);
       }

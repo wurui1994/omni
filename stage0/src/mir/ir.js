@@ -240,6 +240,19 @@ const OPS = [
   // `==`、JS 里数组比的是引用）。只比**地址那一个字** —— 那件事在 arena 与真指针
   // 两套实现下都有定义。刻意没有 PLT 之类：块间的次序两套实现不一样。
   ['PEQ', 'r', 'r', '-'],       // a、b = 两个同型指针，t = T_BOOL；跨块也有定义（不等）
+
+  // ---- 无符号那七条（ADR-0016 第六十一刀）。方言只有一格整数、规范形是有符号 64 位；
+  // 无符号性挂在**算子**上（LLVM 的 udiv/sdiv、icmp ult/slt 是同一条路子）。
+  // 补码下 ADD/SUB/MUL/BAND/BOR/BXOR/SHL/EQ/NE 两种解释的位一模一样，所以只多这七条。
+  // **接在表尾**而不是插在 DIV / LT 旁边：opcode 是这张表的下标，插进去要把后面全部重编号。
+  ['UDIV', 'r', 'r', '-'],
+  ['UMOD', 'r', 'r', '-'],
+  ['USHR', 'r', 'r', '-'],
+  // 四条连号，`op ^ 1` 照旧是取反（ULT<->UGE, ULE<->UGT）—— 见 negCmp。
+  ['ULT', 'r', 'r', '-'],
+  ['UGE', 'r', 'r', '-'],
+  ['ULE', 'r', 'r', '-'],
+  ['UGT', 'r', 'r', '-'],
 ];
 
 /** opcode 常量：`OP.ADD` 等。加 op 只改 OPS 一行。 */
@@ -257,11 +270,22 @@ for (const row of OPS) {
 }
 
 /**
+ * 是不是一条比较（有符号那六个 EQ..GT，加第六十一刀的无符号四个 ULT..UGT）。
+ * 比较的产出类型永远是 bool，`t` 是**操作数**的类型 —— 分成两段连号之后"是不是比较"
+ * 这一问就不再是一条区间判断了，所以收在这儿一处：漏掉一段的后果是每个
+ * `if (a u< b)` 都被 verifier 判成「条件不是 bool」（第六十一刀真踩过）。
+ */
+export const isCmp = (op) => (op >= OP.EQ && op <= OP.GT) || (op >= OP.ULT && op <= OP.UGT);
+
+/**
  * 取反比较：靠编号算术，不用 switch（LuaJIT `lj_ir.h:154..158` 的做法）。
  * 它那边是 `op ^ 1`，这里只能是「偶数 +1、奇数 -1」—— 同一件事，理由见 mkType。
  */
 export function negCmp(op) {
-  if (op < OP.EQ || op > OP.GT) throw new Error(`negCmp: ${OP_NAMES[op]} 不是比较`);
+  if (!isCmp(op)) throw new Error(`negCmp: ${OP_NAMES[op]} 不是比较`);
+  // 两段都是连号的偶奇对，所以同一句算术管两段 —— 前提是 ULT 落在偶数上，
+  // 而它落在哪儿由表尾的位置定，所以这儿断言一下，别让以后加 op 的人踩着。
+  if (op >= OP.ULT && OP.ULT % 2 !== 0) throw new Error('negCmp: ULT 要落在偶数号上');
   return op % 2 === 0 ? op + 1 : op - 1;
 }
 
@@ -276,7 +300,10 @@ export const CVT_F2I = 1;   // trunc
 export const CVT_BOX = 2;   // T -> dyn
 export const CVT_UNBOX = 3; // dyn -> T（带标签检查，检查由运行时做）
 export const CVT_BITCAST = 4;
-export const CVT_NAMES = ['i2f', 'f2i', 'box', 'unbox', 'bitcast'];
+// 位当无符号 64 位读再转 real（ADR-0016 第六十一刀）。与 CVT_I2F 差的只有"怎么读那 64 位"：
+// LLVM 是 uitofp 对 sitofp、C 是 `(double)(uint64_t)` 对 `(double)`。
+export const CVT_U2F = 5;
+export const CVT_NAMES = ['i2f', 'f2i', 'box', 'unbox', 'bitcast', 'u2f'];
 
 /* ------------------------------------------------------------------ 常量池
  * 常量也是「有类型的记录」，因为 `t` 只在指令上。池按 (类型码, 文本) 去重 ——
@@ -367,7 +394,7 @@ export class MirFunc {
     if (isConstRef(ref)) return consts.get(ref).t;
     const i = this.at(ref);
     const op = this.op[i];
-    if (op >= OP.EQ && op <= OP.GT) return T_BOOL;
+    if (isCmp(op)) return T_BOOL;
     return this.t[i];
   }
 

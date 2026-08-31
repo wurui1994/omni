@@ -70,6 +70,19 @@ const ARITH = new Set(['+', '-', '*', '/', '%', '&', '|', '^', '<<', '>>']);
 const COMPARE = new Set(['==', '!=', '<', '<=', '>', '>=']);
 const LOGIC = new Set(['&&', '||']);
 
+/**
+ * 无符号那一半（ADR-0016 第六十一刀）。方言只有**一格**整数、规范形是有符号 64 位；
+ * 无符号性挂在**算子**上而不是类型上 —— 与 LLVM 的 `udiv`/`sdiv`、`icmp ult`/`icmp slt`
+ * 同一条路子，也与方言里早就有的 `(sbase E 进制)`（那一条明写着"E 的位当无符号 64 位读"）
+ * 一致：位是一份，怎么读是算子的事。
+ *
+ * 只有这七个要分开。补码下 `+ - * & | ^ <<` 两种解释算出来的**位一模一样**，`==` / `!=`
+ * 比的也是位 —— 那些一个都不用加。真正分岔的是除、取余（商与余数的符号）、右移（补符号位
+ * 还是补零）与四个大小比较。
+ */
+const UARITH = new Set(['u/', 'u%', 'u>>']);
+const UCOMPARE = new Set(['u<', 'u<=', 'u>', 'u>=']);
+
 /** `(rmath "NAME" …)` 的名单与参数个数：C99 math.h 与 ECMA-262 Math 的**交集**。
  *  这一层只是转手宿主的数学库（C 走 libm、JS 走 Math.*），没有自己写的实现 ——
  *  标准库有的东西不重造。哪些逐字节、哪些只保证容差，见 runtime/omni_math.c 的头注。 */
@@ -1568,6 +1581,19 @@ class CoreLowerer {
     // 不插隐式转换，所以两个方向都得写出来。OIR 侧两个都是现成的（Cast int->real、
     // trunc real->int），方言这边原先没开口 —— 而 asy 的 `1/3` 是实数除法、`(int) 3.7`
     // 是截断，没有这两条就一句都降不下来。
+    // `(torealu E)` —— 把 E 的位**当无符号 64 位**转成 real（第六十一刀）。
+    // 为什么要单开一条而不是在上一层展开成 `sel`：那个展开要把 E 抄四遍
+    // （`E >= 0 ? (double)E : (double)((E u>> 1) | (E & 1)) * 2`），E 有副作用就跑四次。
+    // 落到各条腿上都是现成的一条：LLVM 的 uitofp、C 的 `(double)(uint64_t)`、
+    // JS 的 `Number(BigInt.asUintN(64, x))`、SPIR-V 的 OpConvertUToF。
+    if (h === 'torealu') {
+      const v = this.expr(n.items[1]);
+      if (v === null) return null;
+      if (v.type.k !== 'int') {
+        return this.err(n, `(torealu E) 的参数要是 int，这里是 ${coreTypeText(v.type)}`);
+      }
+      return { kind: 'Cast', type: REAL, from: INT, expr: v, uns: true };
+    }
     if (h === 'toreal' || h === 'toint') {
       const v = this.expr(n.items[1]);
       if (v === null) return null;
@@ -1988,6 +2014,15 @@ class CoreLowerer {
     if (LOGIC.has(op)) {
       if (a.type !== BOOL) return this.err(n, `'${op}' 要 bool，这里是 ${a.type.k}`);
       return { kind: 'Logic', op: op, left: a, right: b, type: BOOL };
+    }
+    // 无符号那七个（第六十一刀）：只对 int 成立 —— real 上没有"无符号"这回事，
+    // string / bool 更没有。挡在这儿而不是让后端各报一句。
+    if (UARITH.has(op) || UCOMPARE.has(op)) {
+      if (a.type !== INT) {
+        return this.err(n, `'${op}' 是无符号那一版，只对 int 成立，这里是 ${coreTypeText(a.type)}`);
+      }
+      if (UCOMPARE.has(op)) return { kind: 'Cmp', op: op, opType: a.type, left: a, right: b, type: BOOL };
+      return { kind: 'Bin', op: op, opType: a.type, left: a, right: b, type: a.type };
     }
     if (COMPARE.has(op)) {
       return { kind: 'Cmp', op: op, opType: a.type, left: a, right: b, type: BOOL };

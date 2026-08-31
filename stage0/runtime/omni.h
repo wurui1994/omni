@@ -476,6 +476,21 @@ static inline int64_t omni_mod(int64_t a, int64_t b) {
   return a % b;
 }
 
+/* 无符号那三个（ADR-0016 第六十一刀）。位是同一份，只是当无符号 64 位读 ——
+   与 JS 那侧的 BigInt.asUintN(64) 逐位一致。除零那句话与有符号那两个是同一句；
+   INT64_MIN / -1 那道特例这儿不需要（无符号除法没有溢出）。 */
+static inline int64_t omni_ushr(int64_t a, int64_t b) { return (int64_t)((uint64_t)a >> (b & 63)); }
+
+static inline int64_t omni_udiv(int64_t a, int64_t b) {
+  if (b == 0) omni_error("division by zero");
+  return (int64_t)((uint64_t)a / (uint64_t)b);
+}
+
+static inline int64_t omni_umod(int64_t a, int64_t b) {
+  if (b == 0) omni_error("division by zero");
+  return (int64_t)((uint64_t)a % (uint64_t)b);
+}
+
 /* --- 字符串：构造与取字节在 lexer 那类循环里是最内层 --- */
 
 static inline omni_str omni_str_new(const char *p, int64_t len) {

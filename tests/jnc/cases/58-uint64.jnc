@@ -1,0 +1,102 @@
+// 64 位的无符号整数（ADR-0016 第六十一刀）。以前它是一条边界（bad/unsigned-long.jnc），
+// 这一刀把它接了 —— 接法不是"再加一格类型"，是**给方言加无符号那一半算子**。
+//
+// 为什么要加算子：8 / 16 / 32 位那三格（第三十三刀）靠"掩到 w 位"就成了 —— 掩完之后
+// 那个数在有符号 64 位里是非负的，有符号的除法、右移、比大小算出来全对。64 位没有更宽的
+// 一格可以借，`0xFFFFFFFFFFFFFFFF` 在有符号里就是 -1，于是 `/` `%` `>>` 与四个大小比较
+// 必须换成看无符号那一版。加的是七个算子加一条转换：
+//   `u/` `u%` `u>>` `u<` `u<=` `u>` `u>=`、`(torealu E)`。
+// 没换的一个都不换：`+ - * & | ^ <<` 与 `== !=` 在补码下两种解释的位一模一样。
+//
+// 类型与别名照 type_primitive.rst 那张表：`unsigned long`（Int64_u，
+// jnc_ct_Type.cpp:449 那格的名字就是 "unsigned long"），别名 `uint64_t` / `ulong_t` /
+// `qword_t`（jnc_ct_TypeMgr.cpp:1780-1782）。
+//
+// **比 INT64_MAX 大的字面量**是 `unsigned long`，这一格与 C 不同：C 那边不带后缀的十进制
+// 只走有符号那条链（`18446744073709551615` 在 C99 里"没有类型装得下"），jancy 走的是
+// `setConstInt64_u`（jnc_ct_Expr.llk:856），挑类型的 `getInt64TypeKind_u` 最后一格是
+// `integer <= INT64_MAX ? TypeKind_Int64 : TypeKind_Int64_u`（jnc_ct_Type.cpp:64）。
+// 所以 `k=` 那行的 `18446744073709551615` 不用后缀也是无符号的。
+//
+// 期望输出的出处：一份 `cc -O0 -std=c99 -Wall` 的孪生程序，前缀 a= … q= 与下面逐行对应，
+// 五条腿各自与它逐字节相同。与那份 C 的两处写法差别（不是语义差别）：
+//   - C 那边 64 位实参要 `%llu` / `%lld` 的长度修饰，这一层的 `%u` / `%d` 位数从**类型**上取；
+//   - C 那边 `18446744073709551615` 要写 `ULL` 后缀（见上一段），这一层不用。
+//
+// 真正会给错答案的几处（不写它们就等于没接）：
+//   - `a=` / `i=`：`-1 / 3` 有符号是 0，无符号是 6148914691236517205。
+//   - `b=`：同一串位上 `>>` 有符号是算术移位（-1）、无符号是逻辑移位。
+//   - `c=` 对 `d=`：`max > 3` 无符号真、有符号假 —— 同一对操作数、同一个算符、两个答案。
+//   - `e=` / `q=`：`double d = max` 要走 `torealu`，不然印的是 -1。
+//   - `j=` / `p=`：**复合赋值**（`q /= three`、`i /= 3`）也得挑 u 版。第一版只在二元表达式
+//     那一处挑，于是 `q /= three` 发的是有符号除法，给 0；算子选择因此收进了一个 uOp()。
+//   - `o=`：`long s = -1; s < three`（three 是 unsigned long）走常用算术转换 ——
+//     -1 先变成 18446744073709551615，所以是**假**。加 `(long)` 才是真。
+//   - `h=`：32 位无符号提到 64 位无符号**不带符号扩展**（4294967295，不是 -1）。
+
+struct S {
+    unsigned long n;
+}
+
+unsigned long half(unsigned long x) {
+    return x / 2;
+}
+
+int main() {
+    unsigned long max = -1;
+    unsigned long three = 3;
+
+    printf("a=%u %u\n", max / three, max % three);
+    printf("b=%u %d\n", max >> 4, (long)max >> 4);
+    printf("c=%d %d %d %d\n", max > three, max >= three, max < three, max <= three);
+    printf("d=%d %d\n", (long)max > (long)three, (long)max < (long)three);
+
+    double d = max;
+    printf("e=%f\n", d);
+    printf("f=%u %x\n", max, max);
+
+    unsigned long n = 0xDEADBEEF;
+    printf("g=%u %x %d\n", n, n, (long)n);
+
+    unsigned int w = -1;
+    unsigned long wide = w;
+    printf("h=%u %u\n", wide, wide * three);
+
+    printf("i=%u %u\n", three / max, three % max);
+
+    unsigned long q = max;
+    q /= three;
+    q >>= 1;
+    printf("j=%u\n", q);
+
+    uint64_t a1 = 18446744073709551615;
+    ulong_t a2 = 0xFFFFFFFFFFFFFFFF;
+    qword_t a3 = -1;
+    printf("k=%u %u %u\n", a1 / 7, a2 % 7, a3 >> 60);
+
+    S st;
+    st.n = -1;
+    printf("l=%u %u\n", st.n / three, st.n >> 8);
+
+    printf("m=%u %u\n", half(max), half(9));
+
+    unsigned long arr[3];
+    arr[0] = -1;
+    arr[1] = arr[0] / 5;
+    arr[2] = arr[0] >> 32;
+    printf("n=%u %u %u\n", arr[0], arr[1], arr[2]);
+
+    long s = -1;
+    printf("o=%d %d\n", s < three, s < (long)three);
+
+    unsigned long i = -1;
+    int cnt = 0;
+    while (i > 1000000000000000000) {
+        i /= 3;
+        cnt++;
+    }
+    printf("p=%u %d\n", i, cnt);
+
+    printf("q=%f %f\n", max / 2.0, (double)(max / 2));
+    return 0;
+}

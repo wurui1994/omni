@@ -16,7 +16,7 @@
 //   2. rt/*.jnc 在五条腿上报**同一句**运行期错误。
 //   3. bad/*.jnc 必须被拒绝，且拒在正确的理由上。这一组是那些边界的本体：多维数组、
 //      数组之间的赋值、`threadlocal`、对 string 的模块级变量取地址、`%p`、
-//      `unsafe` 之外的 thin 转换、64 位的无符号整数、`%zd` 那一族的长度修饰、函数类型的
+//      `unsafe` 之外的 thin 转换、`%zd` 那一族的长度修饰、函数类型的
 //      typedef、`sizeof`（要方言的布局先认整数宽度）、`dynamic countof`（要 fat 指针带的
 //      范围）、从一个要先求值的东西上问枚举成员、枚举的底类型是另一个枚举（要枚举之间的基类链）、
 //      `using namespace`（要查名从一条线变成一张图）、类的基类里剩下的那几条（多继承、
@@ -61,7 +61,7 @@
 //      第五十四刀、函数指针（`function*` / `function thin*`）是第五十五刀、单继承是
 //      第五十六刀、虚派发（`virtual` / `override` / `abstract`）是第五十七刀、
 //      errorcode 那一套（自动传播与 `try`）是第五十八刀、`try { … }` 与 `catch:` 是
-//      第五十九刀、`import "x.jnc"` 是第六十刀，在
+//      第五十九刀、`import "x.jnc"` 是第六十刀、64 位的无符号整数是第六十一刀，在
 //      cases/24-new-curly.jnc、
 //      cases/25-static-local.jnc、cases/26-printf-prec.jnc、cases/27-printf-star-prec.jnc、
 //      cases/28-printf-flags.jnc、cases/29-printf-sci.jnc、cases/30-printf-gen.jnc、
@@ -73,7 +73,8 @@
 //      cases/47-enumcast.jnc、cases/48-namespace.jnc、cases/49-class.jnc、
 //      cases/50-construct.jnc、cases/51-litcat.jnc、cases/52-fnptr.jnc、
 //      cases/53-inherit.jnc、cases/54-virtual.jnc、cases/55-errorcode.jnc、
-//      cases/56-catch.jnc、cases/57-import.jnc。cases/imports/ 底下那三份是 57 那一条
+//      cases/56-catch.jnc、cases/57-import.jnc、cases/58-uint64.jnc。cases/imports/
+//      底下那三份是 57 那一条
 //      import 进来的，**不是**独立的用例 —— 这一层只扫 cases/ 这一级的 `.jnc`。）
 //
 //      bad/ 里有**四种**拒，别混：一种是"还没长出来"（做掉就落地）；一种是**这一层不做**

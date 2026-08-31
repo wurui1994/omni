@@ -33,8 +33,8 @@
 
 import { OmniError } from '../source/diag.js';
 import {
-  OP, OP_NAMES, REF_NONE, REF_BIAS, isConstRef, typeText, typeLanes,
-  T_VOID, T_I64, T_F64, T_BOOL, T_BUF, CVT_I2F, CVT_F2I, CVT_NAMES,
+  OP, OP_NAMES, REF_NONE, REF_BIAS, isConstRef, isCmp, typeText, typeLanes,
+  T_VOID, T_I64, T_F64, T_BOOL, T_BUF, CVT_I2F, CVT_F2I, CVT_U2F, CVT_NAMES,
 } from '../mir/ir.js';
 
 /** 这一层的边界提示。和 LLVM 那条腿一样收成常量：测试轴按它判「拒得对不对」。 */
@@ -61,6 +61,11 @@ const BIN_OPS = new Map([
   [OP.BAND, ['OpBitwiseAnd', null]],
   [OP.BOR, ['OpBitwiseOr', null]],
   [OP.BXOR, ['OpBitwiseXor', null]],
+  // 无符号的除与取余（第六十一刀）落在与有符号那两个同一格 null 上：SPIR-V 有 OpUDiv /
+  // OpUMod，但 CPU 那几条腿在除零时报错，设备上没有那条路径。写进表里而不是让它掉到
+  // 末尾的兜底 nope，是为了让拒的那句话里带上理由。
+  [OP.UDIV, [null, null]],
+  [OP.UMOD, [null, null]],
 ]);
 
 /** MIR 类型码 -> id 后缀。缓冲的元素类型也用这套后缀（`%rta_f64` 等）。 */
@@ -231,7 +236,7 @@ class SpirvEmitter {
     if (isConstRef(ref)) return this.mir.consts.get(ref).t;
     const i = this.f.at(ref);
     const op = this.f.op[i];
-    return op >= OP.EQ && op <= OP.GT ? T_BOOL : this.f.t[i];
+    return isCmp(op) ? T_BOOL : this.f.t[i];
   }
 
   fresh() { const n = this.tmp; this.tmp++; return `%t${n}`; }
@@ -550,8 +555,9 @@ class SpirvEmitter {
       // null = 这个类型上没有语义相同的一条指令。整数 `/` `%` 就在这里：CPU 那几条腿
       // 要在除零时报错、INT64_MIN/-1 要特判，而设备上没有报错这条路径。
       if (name === null) {
-        this.nope(`${typeText(t)} 上的 ${OP_NAMES[op]}`
-          + (op === OP.DIV || op === OP.MOD ? '（除零与 INT64_MIN/-1 在设备上没有报错的去处）' : ''));
+        const why = op === OP.DIV || op === OP.MOD ? '（除零与 INT64_MIN/-1 在设备上没有报错的去处）'
+          : op === OP.UDIV || op === OP.UMOD ? '（除零在设备上没有报错的去处）' : '';
+        this.nope(`${typeText(t)} 上的 ${OP_NAMES[op]}${why}`);
       }
       this.line(`  ${dst} = ${name} ${this.ty(t, OP_NAMES[op])} ${this.val(f.a[i])} ${this.val(f.b[i])}`);
       return;
@@ -562,13 +568,27 @@ class SpirvEmitter {
     }
     if (op === OP.BNOT) { this.line(`  ${dst} = OpNot ${this.ty(t, 'bnot')} ${this.val(f.a[i])}`); return; }
     if (op === OP.NOT) { this.line(`  ${dst} = OpLogicalNot ${this.ty(T_BOOL, 'not')} ${this.val(f.a[i])}`); return; }
-    if (op === OP.SHL || op === OP.SHR) {
-      // 移位量先 `& 63`，与 omni.h 的 `b & 63` 逐条对应：SPIR-V 里移过位宽是未定义的
+    if (op === OP.SHL || op === OP.SHR || op === OP.USHR) {
+      // 移位量先 `& 63`，与 omni.h 的 `b & 63` 逐条对应：SPIR-V 里移过位宽是未定义的。
+      // `u>>`（第六十一刀）是逻辑右移 —— SPIR-V 里正好有一条，与 `>>` 的算术右移分开。
       const m = this.fresh();
       const i64 = this.ty(T_I64, 'shift');
+      const ins = op === OP.SHL ? 'OpShiftLeftLogical'
+        : (op === OP.SHR ? 'OpShiftRightArithmetic' : 'OpShiftRightLogical');
       this.line(`  ${m} = OpBitwiseAnd ${i64} ${this.val(f.b[i])} ${this.konst(T_I64, '63')}`);
-      this.line(`  ${dst} = ${op === OP.SHL ? 'OpShiftLeftLogical' : 'OpShiftRightArithmetic'} `
-        + `${i64} ${this.val(f.a[i])} ${m}`);
+      this.line(`  ${dst} = ${ins} ${i64} ${this.val(f.a[i])} ${m}`);
+      return;
+    }
+    // 无符号那四个比较（第六十一刀）。SPIR-V 的 OpU* 看的是**指令**而不是类型的符号性，
+    // 与方言把无符号性挂在算子上是同一件事，所以这四条直接对得上。
+    // `u/` `u%` 不在这儿：它们与有符号那两个同一个理由过不去（设备上没有报错的去处），
+    // 落到下面的 nope。
+    if (op >= OP.ULT && op <= OP.UGT) {
+      const bt = this.ty(T_BOOL, 'compare');
+      if (t !== T_I64) this.nope(`${typeText(t)} 上的 ${OP_NAMES[op]}`);
+      const ins = op === OP.ULT ? 'OpULessThan' : op === OP.UGE ? 'OpUGreaterThanEqual'
+        : op === OP.ULE ? 'OpULessThanEqual' : 'OpUGreaterThan';
+      this.line(`  ${dst} = ${ins} ${bt} ${this.val(f.a[i])} ${this.val(f.b[i])}`);
       return;
     }
     if (op >= OP.EQ && op <= OP.GT) {
@@ -592,6 +612,11 @@ class SpirvEmitter {
       }
       if (f.aux[i] === CVT_F2I) {
         this.line(`  ${dst} = OpConvertFToS ${this.ty(T_I64, 'f2i')} ${this.val(f.a[i])}`);
+        return;
+      }
+      // 位当无符号 64 位读再转（第六十一刀）：SPIR-V 里也是现成的一条
+      if (f.aux[i] === CVT_U2F) {
+        this.line(`  ${dst} = OpConvertUToF ${this.ty(T_F64, 'u2f')} ${this.val(f.a[i])}`);
         return;
       }
       this.nope(`CVT ${CVT_NAMES[f.aux[i]]}`);
