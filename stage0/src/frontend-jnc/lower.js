@@ -194,12 +194,15 @@ const JNC_NOPE = 'jancy 前端第一刀还不收';
  * `char*char` 不会在 8 位里溢出）与**常用算术转换**（两边取较宽的那一格）。
  */
 const INT_WS = [8, 16, 32, 64];
-const INTS = new Map(INT_WS.map((w) => [w, { k: 'int', w }]));
-const mkInt = (w) => INTS.get(w);
+const INTS = new Map();
+for (const w of INT_WS) for (const u of [false, true]) INTS.set(`${w}${u ? 'u' : ''}`, { k: 'int', w, u });
+/** 一格整数类型。`u` 是无符号（第三十三刀）—— 位宽与符号性合起来才是一格。 */
+const mkInt = (w, u = false) => INTS.get(`${w}${u ? 'u' : ''}`);
 const T_I8 = mkInt(8);
 const T_I16 = mkInt(16);
 const T_I32 = mkInt(32);
 const T_I64 = mkInt(64);
+const T_U32 = mkInt(32, true);
 const T_REAL = { k: 'real' };
 const T_BOOL = { k: 'bool' };
 const T_VOID = { k: 'void' };
@@ -234,15 +237,41 @@ function decay(v) {
 const promo = (w) => (w < 32 ? 32 : w);
 
 /**
- * 回卷到 w 位有符号。`(x & M) ^ S - S` —— 掩到 w 位、再把最高位当符号位摊开。
- * 64 位就是方言的 int 本身，一个字都不用发。
+ * 算术里一格整数**提升之后**是什么（第三十三刀）。出处是 jancy 自己的那张表
+ * （`jnc_ct_UnOp_Arithmetic.cpp:23`）：
+ *
+ *   Int8 / Int8_u / Int16 / Int16_u / Int32 -> Int32；Int32_u -> Int32_u；
+ *   Int64 -> Int64；Int64_u -> Int64_u
+ *
+ * 也就是 C 的整型提升一字不差：窄于 32 位的（有符号无符号都算）都提到**有符号 32 位**，
+ * 因为 32 位有符号装得下它们所有的值。
+ */
+const arith = (t) => (t.w < 32 ? T_I32 : t);
+
+/**
+ * 两格整数一起算时结果是哪一格（常用算术转换）。jancy 的做法是**取 TypeKind 大的那个**
+ * 再过一遍上面那张表（`jnc_ct_UnOp_Arithmetic.h:38`），而 TypeKind 的顺序正好是
+ * Int8 < Int8_u < Int16 < Int16_u < Int32 < Int32_u < Int64 < Int64_u ——
+ * 也就是先比位宽、同宽时无符号大。量下来这与 C 的常用算术转换在这几格上是同一个答案。
+ */
+const kindIdx = (t) => t.w * 2 + (t.u ? 1 : 0);
+const common = (a, b) => arith(kindIdx(a) >= kindIdx(b) ? a : b);
+
+/**
+ * 回卷到 w 位。**有符号**是 `(x & M) ^ S - S`（掩到 w 位、再把最高位当符号位摊开）；
+ * **无符号**就只有掩那一步（第三十三刀）—— 这也是 tests/jnc/bad/unsigned.jnc 那一条
+ * 记着的"回卷变成 `x & M`（不摊符号位）"。
+ *
+ * 64 位有符号就是方言的 int 本身，一个字都不用发。64 位**无符号**装不进方言那一格的
+ * 规范形（值域超了），所以那一格在这一刀之外，见 specs 里那条拒。
  *
  * 两条腿上都成立：JS 那侧 int 是 BigInt（`-1n & 255n === 255n`），C 那侧是补码的
  * `int64_t`（`(-1LL) & 255 == 255`）—— 同一串算符给同一个数。
  */
-function wrapTo(code, w) {
+function wrapTo(code, w, u = false) {
   if (w >= 64) return code;
   const s = 1n << BigInt(w - 1);
+  if (u) return `(bin "&" ${code} (int ${s * 2n - 1n}))`;
   return `(bin "-" (bin "^" (bin "&" ${code} (int ${s * 2n - 1n})) (int ${s})) (int ${s}))`;
 }
 
@@ -293,13 +322,28 @@ function fieldText(t) {
 
 /** 给人看的写法（诊断里用）。跟 jancy 自己的拼法一致：`int*` / `int thin*` / `char`。 */
 const INT_NAMES = new Map([[8, 'char'], [16, 'short'], [32, 'int'], [64, 'long']]);
+
+/**
+ * 整数类型的**别名**（第三十三刀）。照 type_primitive.rst:25-40 那张表抄，一个不多一个不少。
+ * jancy 的语料里这几个到处是（`uint_t` / `size_t` / `dword_t`），拒了等于拒掉半份语料。
+ */
+const INT_ALIASES = new Map([
+  ['int8_t', { w: 8, u: false }],
+  ['uint8_t', { w: 8, u: true }], ['uchar_t', { w: 8, u: true }], ['byte_t', { w: 8, u: true }],
+  ['int16_t', { w: 16, u: false }],
+  ['uint16_t', { w: 16, u: true }], ['ushort_t', { w: 16, u: true }], ['word_t', { w: 16, u: true }],
+  ['int32_t', { w: 32, u: false }],
+  ['uint32_t', { w: 32, u: true }], ['uint_t', { w: 32, u: true }], ['dword_t', { w: 32, u: true }],
+  ['int64_t', { w: 64, u: false }],
+  ['uint64_t', { w: 64, u: true }], ['ulong_t', { w: 64, u: true }], ['qword_t', { w: 64, u: true }],
+]);
 function tyName(t) {
   if (t.k === 'ptr' && t.target.k === 'arr') return `${tyName(t.target.el)}(*)[${t.target.n}]`;
   if (t.k === 'ptr') return `${tyName(t.target)}*`;
   if (t.k === 'tptr') return `${tyName(t.target)} thin*`;
   if (t.k === 'arr') return `${tyName(t.el)}[${t.n === null ? '' : t.n}]`;
   if (t.k === 'struct') return t.name;
-  if (t.k === 'int') return INT_NAMES.get(t.w);
+  if (t.k === 'int') return `${t.u ? 'unsigned ' : ''}${INT_NAMES.get(t.w)}`;
   return t.k;
 }
 
@@ -308,18 +352,25 @@ function sameTy(a, b) {
   if (a.k === 'ptr' || a.k === 'tptr') return sameTy(a.target, b.target);
   if (a.k === 'arr') return a.n === b.n && sameTy(a.el, b.el);
   if (a.k === 'struct') return a.name === b.name;
-  if (a.k === 'int') return a.w === b.w;
+  if (a.k === 'int') return a.w === b.w && !a.u === !b.u;
   return true;
 }
 
 /**
  * 隐式的整数转换（赋值、初值、实参、返回、`int` 之间的强制转换都走它）。
  *
- * 加宽不发一个字 —— 规范形里"8 位的 -1"与"64 位的 -1"是同一个数。变窄才回卷。
+ * 加宽不发一个字 —— 规范形里"8 位的 -1"与"64 位的 -1"是同一个数。变窄要回卷。
+ *
+ * **换符号性也要回卷**（第三十三刀）：同宽的两格里同一串位是两个不同的数
+ * （`(int)-56` 与 `(unsigned int)4294967240`），所以那一格也得按目标那一侧重新规范化。
+ * 加宽到有符号那一格例外 —— 无符号的规范形本来就是非负数，装进更宽的有符号格里不变。
  */
 function intConv(v, to) {
-  if (v.type.w === to.w) return v;
-  return { code: to.w < v.type.w ? wrapTo(v.code, to.w) : v.code, type: to };
+  if (v.type.w === to.w && !v.type.u === !to.u) return v;
+  const wider = to.w > v.type.w;
+  if (wider && !to.u) return { code: v.code, type: to };
+  if (wider && v.type.u) return { code: v.code, type: to };
+  return { code: wrapTo(v.code, to.w, to.u), type: to };
 }
 
 const isPtr = (t) => t.k === 'ptr' || t.k === 'tptr';
@@ -957,6 +1008,7 @@ class JncLower {
       .map((m) => (isAtom(m) ? m.value : '?'));
     let thin = false;
     let stat = false;
+    let uns = false;
     for (const m of mods) {
       if (m === 'thin') { thin = true; continue; }
       if (m === 'const') continue;                      // 这一层不区分（没有可变性检查）
@@ -968,9 +1020,9 @@ class JncLower {
       // threadlocal 要线程本地存储，而这一层没有线程。文档自己也说它有两条限制
       // （不能有初值、不能是聚合），接它得连那两条一起接。
       if (m === 'threadlocal') { this.nope(n, '`threadlocal`（要线程本地存储）'); return null; }
-      // `unsigned` 以前是**静默忽略**的，那在有位宽之后会直接给错答案
-      // （`unsigned char c = 200` 该印 200，忽略的话印 -56）。所以现在明着拒。
-      if (m === 'unsigned') { this.nope(n, '`unsigned`（要无符号那一半的位宽规则）'); return null; }
+      // `unsigned` 是**类型修饰符**（decl_advanced.rst:22），所以它落在这张表里而不是
+      // 说明符那一格上。第三十三刀把它接了：位宽与符号性合起来才是一格整数类型。
+      if (m === 'unsigned') { uns = true; continue; }
       this.nope(n, `修饰符 '${m}'`);
       return null;
     }
@@ -980,21 +1032,34 @@ class JncLower {
     if (isAtom(ts)) {
       const s = ts.value;
       // 位宽照 jancy：char 8 / short 16 / int 32 / long 与 intptr 64。
-      if (s === 'char') base = T_I8;
-      else if (s === 'short') base = T_I16;
-      else if (s === 'int') base = T_I32;
-      else if (s === 'long' || s === 'intptr') base = T_I64;
+      if (s === 'char') base = mkInt(8, uns);
+      else if (s === 'short') base = mkInt(16, uns);
+      else if (s === 'int') base = mkInt(32, uns);
+      else if (s === 'long' || s === 'intptr') base = mkInt(64, uns);
       else if (s === 'double' || s === 'float') base = T_REAL;
       else if (s === 'bool') base = T_BOOL;
       else if (s === 'void') base = T_VOID;
       else { this.nope(ts, `类型 '${s}'`); return null; }
+      // 光写 `unsigned` 不写类型在 C 里是 `unsigned int`；这一层的语法把它落成
+      // `no-type`，上面已经挡了，所以这儿只会看到"修饰符 + 具体类型"。
+      if (uns && !isInt(base)) { this.err(ts, `'${s}' 上写不了 unsigned`); return null; }
     } else {
       const nm = this.qname(ts);
       if (nm === null) { this.nope(ts, '这种类型说明符'); return null; }
-      if (nm === 'size_t') base = T_I64;                // jancy 的语料里到处是它
+      // 那一串别名照 type_primitive.rst:25-40 抄。写了别名再写 `unsigned` 是重复，
+      // 但不冲突（`uint8_t` 本来就是无符号），所以照收。
+      const alias = INT_ALIASES.get(nm);
+      if (alias !== undefined) base = mkInt(alias.w, alias.u || uns);
+      else if (nm === 'size_t') base = T_I64;           // jancy 的语料里到处是它
       else if (nm === 'string_t') base = T_STR;
       else if (this.structs.has(nm)) base = { k: 'struct', name: nm };
       else { this.err(ts, `没有这个类型：'${nm}'`); return null; }
+    }
+    // 64 位无符号在这一刀之外：方言那一格的规范形是**有符号** 64 位，`uint64` 的值域
+    // 超出去了，于是 `/` `%` `>>` `<` 都得换成无符号那一版 —— 那要方言长新算子。
+    if (isInt(base) && base.u && base.w >= 64) {
+      this.nope(n, '64 位的无符号整数（要方言里无符号的 `/` `%` `>>` 与比较）');
+      return null;
     }
     return { type: base, thin, stat };
   }
@@ -1695,12 +1760,20 @@ class JncLower {
         const d = bin === '+' ? v.code : `(un "-" ${v.code})`;
         return [`${pad}${this.store(lv, `(padd ${this.read(lv)} ${d})`)}`];
       }
-      // `lv op= v` 就是 `lv = (T)(lv op v)`：算完之后回卷到 lv 那一格。
-      // 结果宽度总是 >= lv 的宽度（常用算术转换只会变宽），所以直接回卷到 lv 就够，
-      // 中间那一次可以省。`%` 不用回卷 —— 余数的绝对值不超过左边，天然在范围里。
+      // `lv op= v` 就是 `lv = (T)(lv op v)`。中间那一格照常用算术转换来，**要真的转**
+      //（第三十三刀）：以前两边都是有符号，"结果那一格总是 >= lv 那一格"这条让中间那一次
+      // 省得掉；混了无符号之后不成立了 —— `int i = -7; i /= (unsigned)2;` 在 C 与 jancy 里
+      // 是**无符号除法**（2147483644），省掉中间那一次就成了 -3。
       if (isInt(lv.type) && isInt(v.type)) {
-        const code = `(bin "${bin}" ${this.read(lv)} ${v.code})`;
-        return [`${pad}${this.store(lv, bin === '%' ? code : wrapTo(code, lv.type.w))}`];
+        const rt = common(lv.type, v.type);
+        const x = intConv({ code: this.read(lv), type: lv.type }, rt);
+        const y = intConv(v, rt);
+        let code = `(bin "${bin}" ${x.code} ${y.code})`;
+        // 回卷只发**一次**：收窄那一次自己就掩了低位，中间那一次省得掉。`%` 例外 ——
+        // 余数天然在范围里，只有回到 lv 那一格要换符号性时才要动。
+        const same = rt.w === lv.type.w && !rt.u === !lv.type.u;
+        if (!same || bin !== '%') code = wrapTo(code, lv.type.w, lv.type.u);
+        return [`${pad}${this.store(lv, code)}`];
       }
       if (!sameTy(v.type, lv.type)) {
         this.err(n, `'${op}' 两边不同型：左是 ${tyName(lv.type)}，右是 ${tyName(v.type)}`);
@@ -1717,9 +1790,9 @@ class JncLower {
         return [`${pad}${this.store(lv, `(padd ${this.read(lv)} (int ${up ? '1' : '-1'}))`)}`];
       }
       if (isInt(lv.type)) {
-        // `char c = 127; c++;` 是 -128（回卷），不是 128。
+        // `char c = 127; c++;` 是 -128（回卷），不是 128；`unsigned char c = 255; c++;` 是 0。
         const code = `(bin "${up ? '+' : '-'}" ${this.read(lv)} (int 1))`;
-        return [`${pad}${this.store(lv, wrapTo(code, lv.type.w))}`];
+        return [`${pad}${this.store(lv, wrapTo(code, lv.type.w, lv.type.u))}`];
       }
       if (lv.type !== T_REAL) {
         this.err(n, `'${up ? '++' : '--'}' 要整数 / real / 指针，这里是 ${tyName(lv.type)}`);
@@ -1870,7 +1943,10 @@ class JncLower {
         piece = `(tostr (sel ${v.code} (int 1) (int 0)))`;
       } else if ((spec === 'd' || spec === 'i') && isInt(v.type)) {
         // 四种位宽都收：值已经是规范形（符号扩展过的），照印就是 C 的样子。
-        piece = `(tostr ${v.code})`;
+        // 无符号那一格上 `%d` 是"按**有符号**读"（第三十三刀）——
+        // `printf("%d", (unsigned)4294967240)` 在 C 里印 -56，所以先转到同宽的有符号格。
+        // 位数从**类型**上取，与 `%x` 那一条同一个约定（见 07-hex.jnc）。
+        piece = `(tostr ${intConv(v, mkInt(promo(v.type.w), false)).code})`;
       } else if (spec === 'x' || spec === 'X' || spec === 'o' || spec === 'u') {
         // `%x` / `%X` / `%o`（ADR-0016 第七刀）与 `%u`（第三十二刀）。C 把实参当
         // **unsigned** 读，而"多少位"是**默认实参提升之后**那一格 ——
@@ -1949,7 +2025,7 @@ class JncLower {
         piece = v.type === T_STR ? v.code : `(tostr ${v.code})`;
       }
       flushLit();
-      const intConv = spec === 'd' || spec === 'i' || spec === 'x' || spec === 'X'
+      const intSpec = spec === 'd' || spec === 'i' || spec === 'x' || spec === 'X'
         || spec === 'o' || spec === 'u';
       const hexConv = spec === 'x' || spec === 'X';
       // 带符号的转换（`+` / 空格 / 摘符号那一路认的就是这一族）：浮点那三格都在里面
@@ -1973,12 +2049,12 @@ class JncLower {
       // C 里整数上一写精度，`0` 标志就作废（7.19.6.1 的 flags 那一段）；`.*` 的实参是负数时
       // 等于精度没写，那时 `0` 又活着 —— 那一格的判断落到运行期（见 padTo 的第三种 zero）。
       let zeroF = zero && !left && spec !== 's' && spec !== 'c';
-      if (intConv && pCode !== null) zeroF = zeroF && pStar ? `(bin "<" ${pCode} (int 0))` : false;
+      if (intSpec && pCode !== null) zeroF = zeroF && pStar ? `(bin "<" ${pCode} (int 0))` : false;
       // **前缀**（第二十九刀）：符号（`-` / `+` / 空格）与 `#` 的 `0x` / `0X`。它排在补零
       // **外面**，所以从这儿起分成两段拿着（见 padTo）。把符号摘出来是有代价的（一次 spill
       // 加两个 sel），所以只在真的用得上时摘：写了 `+` / 空格、要补零、或整数上写了精度。
       let pfx = null;
-      if (signed && (plus || space || zeroF !== false || (intConv && pCode !== null))) {
+      if (signed && (plus || space || zeroF !== false || (intSpec && pCode !== null))) {
         const t = this.spill(piece, pad, out);
         const neg = `(bin "==" (ssub ${t} (int 0) (int 1)) (str "-"))`;
         const other = plus ? '+' : (space ? ' ' : '');
@@ -1992,9 +2068,9 @@ class JncLower {
         pfx = `(sel (bin "==" ${t} (str "0")) (str "") (str "${spec === 'x' ? '0x' : '0X'}"))`;
         piece = t;
       }
-      if (pCode !== null && (intConv || spec === 's')) {
+      if (pCode !== null && (intSpec || spec === 's')) {
         const t = this.spill(piece, pad, out);
-        piece = intConv ? this.precInt(t, pCode) : this.precStr(t, pCode);
+        piece = intSpec ? this.precInt(t, pCode) : this.precStr(t, pCode);
       }
       // `#` 在 `%o` 上是"逼出一个前导 0"（C99：把精度提到让第一位是 0），所以它在精度
       // **之后**：`%#.4o` 印 8 是 `0010`（已经以 0 开头，不再加），`%#o` 印 8 是 `010`。
@@ -2513,18 +2589,22 @@ class JncLower {
       return this.nope(n, `指针上的 '${op}'`);
     }
     const cmp = op === '==' || op === '!=' || op === '<' || op === '<=' || op === '>' || op === '>=';
-    // 两边都是整数：先常用算术转换定出结果那一格的宽度，再看要不要回卷。
+    // 两边都是整数：先常用算术转换定出结果那一格，再看要不要回卷。
     if (isInt(a.type) && isInt(b.type)) {
-      const code = `(bin "${op}" ${a.code} ${b.code})`;
-      // 比较不用管宽度：两边都是规范形，直接比就是对的（这也是"规范形"这条不变式的用处）。
+      // 常用算术转换要**真的转**（第三十三刀）。以前两边都是有符号，规范形在更宽的格里是
+      // 同一个数，所以不转也对；有了无符号之后那条不成立了 —— `int i = -1; unsigned u = 1;`
+      // 里 `i < u` 在 C 与 jancy 里都是**假**（-1 转成 u32 是 4294967295），不转就成了真。
+      // 移位是例外：结果那一格**只看左边**，右边不参与常用算术转换（C 的规矩，jancy 同）。
+      const shift = op === '<<' || op === '>>';
+      const rt = shift ? arith(a.type) : common(a.type, b.type);
+      const x = intConv(a, rt);
+      const y = shift ? intConv(b, arith(b.type)) : intConv(b, rt);
+      const code = `(bin "${op}" ${x.code} ${y.code})`;
+      // 比较不用管宽度：转到同一格之后两边都是规范形，直接比就是对的。
       if (cmp) return { code, type: T_BOOL };
-      // 移位的结果宽度**只看左边** —— 右边不参与常用算术转换（C 的规矩，jancy 同）。
-      const rw = (op === '<<' || op === '>>')
-        ? promo(a.type.w)
-        : Math.max(promo(a.type.w), promo(b.type.w));
       // 会溢出的只有这五条；`% & | ^ >>` 在规范形上天然还在范围里，一个字都不用发。
       const over = op === '+' || op === '-' || op === '*' || op === '/' || op === '<<';
-      return { code: over ? wrapTo(code, rw) : code, type: mkInt(rw) };
+      return { code: over ? wrapTo(code, rt.w, rt.u) : code, type: rt };
     }
     // 一边整数一边 real：加宽整数那一边
     if (isInt(a.type) && b.type === T_REAL) a = { code: `(toreal ${a.code})`, type: T_REAL };
@@ -2541,15 +2621,16 @@ class JncLower {
     if (a === null) return null;
     if (op === '+') {
       // 一元加是恒等，但**带整型提升**（`char c; +c` 是 int）。提升在规范形里不发一个字。
-      if (isInt(a.type)) return { code: a.code, type: mkInt(promo(a.type.w)) };
+      if (isInt(a.type)) return { code: a.code, type: arith(a.type) };
       if (a.type !== T_REAL) return this.err(n, `一元 '+' 要整数 / real，这里是 ${tyName(a.type)}`);
       return a;
     }
     if (op === '-') {
       // `char c = -128; -c` 还是 -128 吗？不是 —— 提到 int 之后是 128。回卷按**提升后**那一格。
+      // 无符号那一格上 `-x` 是回卷出来的（`-(unsigned)1` 是 4294967295），同一句话管两边。
       if (isInt(a.type)) {
-        const w = promo(a.type.w);
-        return { code: wrapTo(`(un "-" ${a.code})`, w), type: mkInt(w) };
+        const rt = arith(a.type);
+        return { code: wrapTo(`(un "-" ${a.code})`, rt.w, rt.u), type: rt };
       }
       if (a.type !== T_REAL) return this.err(n, `一元 '-' 要整数 / real，这里是 ${tyName(a.type)}`);
       return { code: `(un "-" ${a.code})`, type: a.type };
@@ -2562,9 +2643,12 @@ class JncLower {
     }
     if (op === '~') {
       // 方言的 `un` 只有 `-` 与 `!`，但按位取反不用新形式：`~x` 就是 `x ^ -1`。
-      // 不用回卷 —— 提升后那一格里的规范形取反还在同一格里（`~127` = -128）。
+      // 有符号那一格不用回卷 —— 提升后那一格里的规范形取反还在同一格里（`~127` = -128）。
+      // 无符号要回卷：`x ^ -1` 是负的，掩一下才回到 `2^w-1-x`（`~(unsigned)0` 是 4294967295）。
       if (!isInt(a.type)) return this.err(n, `'~' 要整数，这里是 ${tyName(a.type)}`);
-      return { code: `(bin "^" ${a.code} (int -1))`, type: mkInt(promo(a.type.w)) };
+      const rt = arith(a.type);
+      const code = `(bin "^" ${a.code} (int -1))`;
+      return { code: rt.u ? wrapTo(code, rt.w, true) : code, type: rt };
     }
     return this.nope(n, `一元 '${op}'`);
   }
@@ -2581,11 +2665,13 @@ class JncLower {
     let a = this.expr(n.items[2], want);
     let b = this.expr(n.items[3], want === null || want === undefined ? (a === null ? null : a.type) : want);
     if (c === null || a === null || b === null) return null;
-    // 两支都是整数：结果是较宽的那一格（常用算术转换）。加宽在规范形里不发一个字，
-    // 而方言的 `sel` 看到的两支都是它那一个 int，所以这儿只改类型不改代码。
+    // 两支都是整数：结果是常用算术转换定出的那一格。有符号之间加宽在规范形里不发一个字，
+    // 可换符号性要真的转（第三十三刀），所以这儿两支都过一遍 intConv。
     if (isInt(a.type) && isInt(b.type)) {
-      const w = Math.max(promo(a.type.w), promo(b.type.w));
-      return { code: `(sel ${c.code} ${a.code} ${b.code})`, type: mkInt(w) };
+      const rt = common(a.type, b.type);
+      const x = intConv(a, rt);
+      const y = intConv(b, rt);
+      return { code: `(sel ${c.code} ${x.code} ${y.code})`, type: rt };
     }
     if (isInt(a.type) && b.type === T_REAL) a = { code: `(toreal ${a.code})`, type: T_REAL };
     else if (a.type === T_REAL && isInt(b.type)) b = { code: `(toreal ${b.code})`, type: T_REAL };

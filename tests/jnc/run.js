@@ -16,7 +16,7 @@
 //   2. rt/*.jnc 在五条腿上报**同一句**运行期错误。
 //   3. bad/*.jnc 必须被拒绝，且拒在正确的理由上。这一组是那些边界的本体：多维数组、
 //      数组之间的赋值、`threadlocal`、对 string 的模块级变量取地址、`%p`、
-//      `unsafe` 之外的 thin 转换、`unsigned`，加一条 jancy 自己的规矩
+//      `unsafe` 之外的 thin 转换、64 位的无符号整数，加一条 jancy 自己的规矩
 //      （命名项之后不能再写位置项）。（`? :`、不换行的 printf、条件真值化曾经在
 //      这一组里，第三到第五刀把它们做掉之后转到了 cases/；`&x` 是第九刀、定长数组是第十刀、
 //      模块级变量是第十一刀、值语义的结构体是第十二刀、结构体按值传与按值回是第十三刀、
@@ -26,9 +26,10 @@
 //      cases/16-ptrptr.jnc；`new T { … }` 是第二十五刀、`static` 的局部量是第二十六刀、
 //      整数与 `%s` 上的精度加 `%*d` 是第二十七刀、`%.*f` 是第二十八刀、`+` / 空格 / `#`
 //      三个标志是第二十九刀、`%e` / `%E` 是第三十刀、`%g` / `%G` 是第三十一刀、`%u` 是
-//      第三十二刀，在 cases/24-new-curly.jnc、cases/25-static-local.jnc、
-//      cases/26-printf-prec.jnc、cases/27-printf-star-prec.jnc、cases/28-printf-flags.jnc、
-//      cases/29-printf-sci.jnc、cases/30-printf-gen.jnc、cases/31-printf-u.jnc。）
+//      第三十二刀、无符号的 8 / 16 / 32 位是第三十三刀，在 cases/24-new-curly.jnc、
+//      cases/25-static-local.jnc、cases/26-printf-prec.jnc、cases/27-printf-star-prec.jnc、
+//      cases/28-printf-flags.jnc、cases/29-printf-sci.jnc、cases/30-printf-gen.jnc、
+//      cases/31-printf-u.jnc、cases/32-unsigned.jnc。）
 //
 //      bad/ 里有**三种**拒，别混：一种是"还没长出来"（做掉就落地）；一种是**这一层不做**
 //      （printf-conv-p：`%p` 要观测裸地址，而五条腿上那不是同一个数）；一种是**C 自己的

@@ -349,6 +349,11 @@ builtin 与一行 ABI。
 消掉的那种错。要接它得先有无符号那一半：回卷变成 `x & M`（不摊符号位），`/` `%` `>>` `<`
 都换成无符号那一版。记在名单里，`bad/unsigned.jnc` 是它的本体。
 
+> **第三十三刀更正**：这条边界落地了一大半 —— 8 / 16 / 32 位的无符号接上了，`bad/unsigned.jnc`
+> 删掉，`cases/32-unsigned.jnc` 是它的本体。上面"要先有无符号那一半"这句量下来只对 64 位那一格
+> 成立：u8 / u16 / u32 的规范形装得进方言的有符号 64 位，`/` `%` `>>` `<` 用现成的有符号版就是
+> 对的。剩下的边界收窄成 `bad/unsigned-long.jnc`。
+
 **一处刻意留下的差别**：`sizeof` 意义上的**存储**宽度。四种位宽在方言里都占一个 64 位的槽
 （`char*` 与 `int*` 是同一个方言类型），所以 `new char[n]` 占 8n 字节。这一格从**语义**上
 看不见 —— 指针算术按元素走，而 `sizeof` / `offsetof` 都不收 —— 所以它不在待办名单里；
@@ -1628,6 +1633,45 @@ C 那边要写修饰符的地方这边不写；真遇到 jancy 源码里写了�
 **没跑的**：`tests/sexpr`、`tests/glr`、`tests/asy` —— 这一刀只动了 `frontend-jnc/lower.js`
 （加 `tests/jnc/run.js` 的头注释），方言一个字没改；自举、`tests/jit`、`tests/mir`、
 `tests/llvm`；`npm run lint` 这台机器上没有 typescript。
+
+### 第三十三刀：无符号 —— 边界划在 64 位，理由是"规范形"
+
+第六刀把 `unsigned` 从"静默忽略"改成"当场拒"，名单上记的是"要接它得先有无符号那一半：`/` `%`
+`>>` `<` 都换成无符号那一版"。这一刀量下来，那句话只对 **64 位**那一格成立。
+
+**为什么 8 / 16 / 32 位不欠方言任何东西**：这一层每个整数值都以**规范形**存着 —— 声明的那格宽度
+里那个真实的数。`unsigned char c = 200` 存的就是 200，`unsigned int u = 4294967295` 存的就是
+4294967295。这些数全都装得进方言的有符号 64 位，而且**都是非负的**，于是有符号的除、取模、右移、
+比较给出的答案与无符号版逐位相同。真正要改的只是**回卷**：有符号是
+`(x & M) ^ S - S`（摊符号位），无符号是 `x & M`（不摊）。
+
+u64 装不进去：`4000000000 * 4` 那种数在方言里只能以负数的样子存着，于是 `/` `%` `>>` `<` 全都
+会给有符号的答案。所以边界收窄成 `bad/unsigned-long.jnc`，接它要方言先长出无符号算子。
+
+**类型格子从"位宽"变成"位宽 × 符号性"**。`INTS` 那张表从 4 格变 8 格，`mkInt(w, u)` 取代
+`mkInt(w)`，`sameTy` / `tyName` 都跟着看 `u`。两条规则照抄 jancy：
+
+- **提升**：比 32 位窄的一律先提到 32 位（`jnc_ct_UnOp_Arithmetic.cpp:23`）。
+- **两边取哪一格**：取 **TypeKind 大**的那个，再过一遍提升
+  （`jnc_ct_UnOp_Arithmetic.h:38`）。jancy 的 TypeKind 顺序里同宽度是"有符号在前、无符号在后"，
+  所以 `kindIdx = w*2 + (u?1:0)` 就是它 —— `int` 与 `unsigned int` 相遇取后者，这正是 C 那条
+  「`-1 < 1u` 是假」的来处，我们照它给假。
+
+**别名**。jancy 的 `uint_t` / `dword_t` / `byte_t` / `word_t` / `qword_t` / `uchar_t` /
+`ushort_t` / `ulong_t` 与 `intN_t` / `uintN_t` 一族都在 `INT_ALIASES` 里落到同一批格子上。
+
+**期望输出的出处**：`cases/32-unsigned.jnc`，一份 `cc -O0 -std=c99` 的孪生程序，18 行逐字节相同
+（五条腿也各自与它相同）。写法上的差别记在这里：孪生那边 `bool` 要 `<stdbool.h>`，jancy 独有的
+`byte_t` / `word_t` / `uint_t` / `dword_t` 要 `typedef`；还有一处 —— 孪生里 `4294967295u` 带
+`u` 后缀，`.jnc` 那边不能带，因为**整数字面量后缀这一层还不认**（`numLit` 的四条正则只吃纯数字）。
+两边都改成先声明 `unsigned int m = 4294967295;` 再比，语义相同、出处仍在。那条后缀是**新记下的
+一条边界**，还没有本体。
+
+**跑过的轴**：`tests/jnc`（49/0，新增 `cases/32-unsigned` 与 `bad/unsigned-long`，删掉落地了的
+`bad/unsigned`）。
+**没跑的**：`tests/sexpr`、`tests/glr`、`tests/asy` —— 这一刀只动了 `frontend-jnc/lower.js`
+（加 `tests/jnc/run.js` 的头注释），方言、MIR、四个后端与运行时一个字都没改；自举、`tests/jit`、
+`tests/mir`、`tests/llvm`；`npm run lint` 这台机器上没有 typescript。
 
 ## 后果与代价
 

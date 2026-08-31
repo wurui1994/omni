@@ -1,0 +1,102 @@
+// 无符号整数（ADR-0016 第三十三刀）。以前 `unsigned` 是**当场拒**的一条边界，这一刀把它接了
+// —— 8 / 16 / 32 位三格。64 位那一格另有一条边界（见 bad/unsigned-long.jnc）。
+//
+// 类型与别名照 type_primitive.rst:25-32 那张表：`unsigned char` / `unsigned short` /
+// `unsigned int`，别名 `uint8_t` `uchar_t` `byte_t` / `uint16_t` `ushort_t` `word_t` /
+// `uint32_t` `uint_t` `dword_t`。`unsigned` 本身是**类型修饰符**（decl_advanced.rst:22）。
+//
+// 三条规则，每一条都有出处：
+//   1. **整型提升**：窄于 32 位的（有符号无符号都算）都提到**有符号 32 位**。出处是 jancy
+//      自己那张表 —— jnc_ct_UnOp_Arithmetic.cpp:23（Int8 / Int8_u / Int16 / Int16_u /
+//      Int32 -> Int32；Int32_u -> Int32_u；Int64 -> Int64；Int64_u -> Int64_u）。
+//   2. **常用算术转换**：两格一起算时取 TypeKind 大的那个再过一遍上面那张表
+//      （jnc_ct_UnOp_Arithmetic.h:38）。TypeKind 的顺序是先比位宽、同宽时无符号大，所以
+//      `int` 与 `unsigned int` 一起算是 `unsigned int` —— 与 C 的常用算术转换同一个答案。
+//   3. **回卷**是 `x & M`（不摊符号位）。有符号那一半是 `(x & M) ^ S - S`，两条在同一个
+//      wrapTo 里，差别就是"摊不摊符号位"。
+//
+// 期望输出的出处：一份 `cc -O0 -std=c99` 的孪生程序，逐字节相同（五条腿也各自与它相同）。
+// 与那份 C 的一处写法差别：`byte_t` / `word_t` / `uint_t` / `dword_t` 在 jancy 里是内建
+// 别名，C 那边得自己 typedef。
+//
+// 真正会给错答案的几处（不写它们就等于没接）：
+//   - `d=` 那行：`int i = -1; unsigned u = 1;` 里 `i < u` 是**假** —— -1 先转成 u32 的
+//     4294967295。这一条逼着常用算术转换"真的转"，不能只改类型不发代码。
+//   - `f=` 那行：同一串位上 `>>` 有符号是算术移位（-1048576）、无符号是逻辑移位
+//     （267386880）。
+//   - `g=` 那行：`int k = -7; k /= (unsigned)2;` 是**无符号除法**（2147483644），不是 -3
+//     —— 复合赋值不能"算完再回卷"，中间那一格得先转。
+//
+// `%d` 印一格 32 位无符号：C 只在**值装得进 int** 时有定义（7.16.1.1 那条 va_arg 例外），
+// 所以这儿只钉 `r=` 那行（值是 5）。装不进的那一格照实现的做法转（同一串位按有符号读），
+// 可 C 自己没定，不钉；要那个答案就写 `(int)u`，也就是 `q=` 那行。
+
+struct S {
+    unsigned char b;
+    unsigned int n;
+}
+
+unsigned int half(unsigned int x) {
+    return x / 2;
+}
+
+int main() {
+    unsigned char c = 200;
+    printf("a=%d %u %x\n", c, c, c);
+    unsigned char d = 255;
+    d++;
+    printf("b=%u\n", d);
+    unsigned char e = 300;                  // 隐式收窄：300 & 255 = 44
+    printf("c=%u\n", e);
+
+    int i = -1;
+    unsigned int u = 1;
+    unsigned int m = 4294967295;
+    printf("d=%d %d %d\n", i < u, i > u, i == m);
+
+    unsigned int big = 4294967290;
+    printf("e=%u %u %u\n", big / 2, big % 7, big >> 4);
+    int neg = 0xff000000;                   // 收窄成 -16777216
+    unsigned int un = neg;                  // 换符号性：同一串位，值是 4278190080
+    printf("f=%d %u\n", neg >> 4, un >> 4);
+
+    int k = -7;
+    unsigned int two = 2;
+    k /= two;
+    printf("g=%d\n", k);
+
+    unsigned int z = 0;
+    unsigned int one = 1;
+    printf("h=%u %u\n", ~z, -one);
+    printf("i=%u %u\n", (unsigned char)-1, (unsigned short)-1);
+    printf("j=%d %d\n", (int)(unsigned char)200, (char)(unsigned char)200);
+
+    unsigned short s = 65535;
+    printf("k=%d %u\n", s + 1, s * two);
+
+    uint8_t a1 = 250;
+    byte_t a2 = 251;
+    word_t a3 = 65530;
+    uint_t a4 = 4294967295;
+    dword_t a5 = 7;
+    int32_t a6 = -7;
+    printf("l=%u %u %u %u %u %d\n", a1, a2, a3, a4, a5, a6);
+
+    S st;
+    st.b = 200;
+    st.n = 4000000000;
+    printf("m=%u %u\n", st.b, st.n);
+
+    unsigned int arr[3];
+    arr[0] = 1;
+    arr[1] = 4000000000;
+    arr[2] = arr[1] + 400000000;            // 回卷：4400000000 & 0xffffffff = 105032704
+    printf("n=%u %u %u\n", arr[0], arr[1], arr[2]);
+
+    printf("o=%u %u\n", half(4000000000), half(7));
+    printf("p=%u\n", 1 ? -one : z);
+    printf("q=%d\n", (int)4294967240);
+    unsigned int small = 5;
+    printf("r=%d %u\n", small, small);
+    return 0;
+}
