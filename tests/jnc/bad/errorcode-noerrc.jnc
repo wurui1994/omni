@@ -1,0 +1,24 @@
+// 不写 `try` 从**不是 errorcode** 的函数里调 errorcode 的函数（第五十八刀记的边界）。
+//
+// jancy 收这一条，可它走的是**运行期**那条路：`canStaticThrow()` 是
+// "canCatch() || 当前函数带 ErrorCode 那一位"（jnc_ct_NamespaceMgr/jnc_ct_Scope.h:144-145），
+// 两条都不成立时 `throwException` 跳的是 `getDynamicThrowBlock()`
+// （jnc_ct_ControlFlowMgr_Eh.cpp:98-101）—— 调 `StdFunc_DynamicThrow`，由运行期去展开。
+//
+// 这一层没有运行期的展开（`try`/`throw` 那一族都还在边界上），所以静态传播不成立的这一条
+// 只能拒。把它当"传播到 main 就算了"来落是**改语义**：那会让错悄悄消失。
+// 写法上的出路 jancy 自己就给了（exceptions.rst:81-88）：`int result = try bar();` 再自己判。
+int errorcode fetch(int i) {
+	if (i < 0)
+		return -1;
+	return i * 10;
+}
+
+int plain(int i) {
+	return fetch(i);
+}
+
+int main() {
+	printf("%d\n", plain(2));
+	return 0;
+}

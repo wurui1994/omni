@@ -1,0 +1,18 @@
+// `void errorcode f()` —— jancy 自己就拒（第五十八刀）。
+//
+// `errorcode` 要求返回类型"当得了错误码"：`isErrorCodeType`（jnc_ct_TypeMgr/jnc_ct_Type.h:635-639）
+// 问的是那张 flagTable 里的 `ErrorCode` 位（jnc_api/jnc_Type.cpp:29-181）。`void` 那一行整个
+// 是 0，于是 `ensureLayout` 里那条硬错就报了：
+//     "'%s' cannot be used as error code"（jnc_ct_TypeMgr/jnc_ct_FunctionType.cpp:180-181）
+// `float` / `double` 那两行也没有那一位（只有 `Fp|Nullable|Numeric`），所以 `double errorcode`
+// 同样是错 —— "整数用 -1、指针用 null" 那句默认值（exceptions.rst:17）对它们定不出来。
+//
+// 这一条不是"还不收"，是**照抄 jancy 的拒**，所以它发的是 error 而不是 nope。
+void errorcode nothing(int i) {
+	printf("%d\n", i);
+}
+
+int main() {
+	try nothing(1);
+	return 0;
+}

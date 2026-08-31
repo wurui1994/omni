@@ -1,0 +1,23 @@
+// errorcode 的传播插不进去的位置之二（第五十八刀）：**循环的条件**。
+//
+// 传播那两句只插得到"这条语句之前"，而循环的条件**每一圈都要重求一次** —— 抬到循环之前
+// 就只检了第一圈那一次，之后每圈的错都被吞掉。这不是"少收一点"，是"跑法不一样"，所以
+// 循环那三种语句（while / do / for）刻意不在 EC_HOIST 里，落进去的 errorcode 调用当场拒。
+//
+// 要它得先能给一条表达式里的每一格切出自己的块，与 `&&` 右边那一条同一格。
+int errorcode fetch(int i) {
+	if (i < 0)
+		return -1;
+	return i * 10;
+}
+
+int errorcode loop(int i) {
+	while (fetch(i) > 5)
+		i = i - 1;
+	return i;
+}
+
+int main() {
+	printf("%d\n", try loop(2));
+	return 0;
+}

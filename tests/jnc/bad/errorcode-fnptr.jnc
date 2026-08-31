@@ -1,0 +1,20 @@
+// errorcode 的函数当**函数指针**用（第五十八刀记的边界）。
+//
+// jancy 的 `errorcode` 是挂在**函数类型**上的一位（`FunctionTypeFlag_ErrorCode`，见
+// jnc_ct_TypeMgr/jnc_ct_FunctionType.cpp:180），所以从那一格指针调过去照旧会检查、照旧会
+// 传播 —— 那一位跟着类型走。
+//
+// 这一层的 `(fnty …)` 上没有那一位：errFns 是按**名字**记的。于是"从指针调"就落到了
+// callThrough 那条路上，一个字都不检 —— 错会悄悄消失。宁可当场拒，也不要吞掉。
+// 要它得让 fnptr 那一格类型自己带上 errorcode（sameTy / assignOk 也跟着多一条）。
+int errorcode fetch(int i) {
+	if (i < 0)
+		return -1;
+	return i * 10;
+}
+
+int main() {
+	int function* f(int) = fetch;
+	printf("%d\n", try f(2));
+	return 0;
+}

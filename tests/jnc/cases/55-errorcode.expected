@@ -1,0 +1,42 @@
+fetch 1
+fetch 2
+30
+fetch 1
+-1
+fetch 3
+30
+-1
+fetch 4
+7
+-1
+okay 5
+8
+-1
+fetch 6
+60
+fetch 7
+1
+fetch 2
+use 20
+21
+-1
+30
+-1
+16
+-1
+-1
+fetch 1
+42
+43
+fetch 1
+43
+-1
+7
+4
+1
+-1
+4
+-1
+2
+-1
+neg

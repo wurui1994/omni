@@ -134,7 +134,10 @@
 //     剩下的四条：没写初值的那一格（方言的函数值没有空值，跟着 `if (p)` 也立不住）、
 //     函数指针的**字段**（方言的结构体字段放不下函数值 —— 第五十七刀的虚派发因此换成了
 //     一格整数标签）、`function**` 与它的数组、`~()` 的部分应用。
-//   - 异常（try/throw/catch）、import。`assert` 是第四十九刀、`namespace` 是第五十一刀。
+//   - 异常里 `errorcode` 那一半是第五十八刀（自动传播 + `try`：见 propagate 与 errText）；
+//     剩下的是 `try { … }` 块、`catch:` / `finally:`、`throw`，加传播插不进去的那两个位置
+//     （惰性那几支与循环的条件，见 EC_HOIST 与 ecLazy）。import 还没有。
+//     `assert` 是第四十九刀、`namespace` 是第五十一刀。
 //
 // **一处刻意留下的差别**：`sizeof` / `offsetof` 意义上的**存储**宽度。四种位宽在方言里
 // 都占一个 64 位的槽（`char*` 与 `int*` 是同一个方言类型），所以 `new char[n]` 占 8n 字节、
@@ -544,6 +547,11 @@ function structBehind(t) {
  *  `this` 也在里面（第五十二刀）：它是方法的第一个形参，本身就是一格。 */
 const LV_SHAPES = new Set(['name', 'field', 'index', 'ptr-field', 'indirect', 'this']);
 
+/** 哪几种语句开"errorcode 传播"的落点（第五十八刀，见 stmt）：条件在这条语句里**只求一遍**
+ *  的那些。循环那三种（while / do / for）不在里面 —— 它们的条件每一圈重求一次，把那次调用
+ *  抬到循环之前就只检一次，是错的。 */
+const EC_HOIST = new Set(['var-decl', 'var-decl-curly', 'expr-stmt', 'return', 'if', 'switch', 'assert']);
+
 /** 零值的**方言文本**。jancy 保证"用户代码碰到之前每一格都是零"（type_ptr_data.rst），所以
  *  没写初值的局部量这里显式发一个零 —— 方言的 `(let …)` 要一个初值。
  *
@@ -558,6 +566,49 @@ function zeroText(t) {
   // 类指针的零值是空引用（第五十二刀）：`C* p;` 那一格出来是 null，要 `new C` 才有对象。
   if (t.k === 'class') return `(pnull (ptr ${clsRoot(t.name)}))`;
   return null;
+}
+
+/**
+ * `errorcode` 那一格的**出错值**（第五十八刀，exceptions.rst:17："Intuitive defaults are
+ * assumed: `false` for bools, `-1` for integers and `null` for pointers"）。
+ *
+ * 无符号整数上的 -1 就是那一格全 1（这一层的整数一律以回卷后的样子存着，所以这儿直接写
+ * 那个数）。别的类型（void / real / 结构体 / 数组 / 函数指针）jancy 没给默认值，回 null。
+ */
+function errText(t) {
+  if (t.k === 'bool') return '(bool false)';
+  if (t.k === 'int') return `(int ${t.u ? (1n << BigInt(t.w)) - 1n : -1n})`;
+  if (t.k === 'ptr' || t.k === 'tptr') return `(pnull ${tyText(t)})`;
+  if (t.k === 'class') return `(pnull (ptr ${clsRoot(t.name)}))`;
+  // 枚举在 jancy 的那张表里带 Integer 位（jnc_Type.cpp:107-111），所以它的出错值走整数那一条
+  // —— 按基整数那一格的 -1。方言里枚举本来就发成 int（tyText 那处），于是文本一模一样。
+  if (t.k === 'enum' && t.base !== undefined && t.base !== null) return errText(t.base);
+  return null;
+}
+
+/**
+ * 「这一次调用出错了吗」（第五十八刀）。jancy 的 `checkErrorCode` 算的是一格**指示值**：
+ * bool 与"不是纯整数"的那些（指针）拿返回值自己当条件，纯整数则先比一次 `!= -1`，
+ * 然后指示值为**假**时才跳去抛（jnc_ct_ControlFlowMgr_Eh.cpp:258-268）。所以这儿就是它的
+ * 反面 —— 指针那一支用 `pisnull`（方言里没有指针相等，跟 null 比只有这一个算子）。
+ */
+function errTest(code, t) {
+  if (t.k === 'bool') return `(un "!" ${code})`;
+  if (t.k === 'ptr' || t.k === 'tptr' || t.k === 'class') return `(pisnull ${code})`;
+  const ev = errText(t);
+  return ev === null ? null : `(bin "==" ${code} ${ev})`;
+}
+
+/**
+ * jancy 认哪些类型当错误码：`isErrorCodeType`（jnc_ct_Type.h:635-639）问的是那张
+ * flagTable 里的 `ErrorCode` 位（jnc_Type.cpp:29-181）—— bool、int8..int64（有无符号
+ * 都算）、枚举、变体、字符串，以及数据 / 类 / 函数 / 属性指针。`void` 那一行整个是 0，
+ * `float` / `double` 那两行只有 `Fp|Nullable|Numeric` —— 它们**当不了**错误码，写上
+ * `errorcode` 在 jancy 那边就是一条硬错（jnc_ct_FunctionType.cpp:180-181）。
+ */
+function errCodeOk(t) {
+  return t.k === 'bool' || t.k === 'int' || t.k === 'enum' || t.k === 'string'
+    || t.k === 'ptr' || t.k === 'tptr' || t.k === 'class' || t.k === 'fnptr';
 }
 
 /** jnc 语法树 -> 核心方言文本。 */
@@ -635,6 +686,17 @@ class JncLower {
     this.virt = new Map();
     this.tags = new Map();
     this.disp = new Map();
+    // errorcode（第五十八刀）。`errFns` 是方言里那个函数名 -> 它的出错值文本，`curErr` 是
+    // 正在降的这个函数自己的出错值（不是 errorcode 的函数为 null），`shield` 是 `try` 的层数
+    // —— 在 `try` 底下调 errorcode 的函数不传播（exceptions.rst:40）。
+    this.errFns = new Map();
+    this.curErr = null;
+    this.shield = 0;
+    // 传播那两句插在哪儿：`ecOut` 是"这条语句之前"那一叠（null = 这个位置插不进语句，于是
+    // 见到 errorcode 的调用就明说不收），`ecPad` 是那一叠的缩进，`ecSeq` 给临时格子编号。
+    this.ecOut = null;
+    this.ecPad = '';
+    this.ecSeq = 0;
   }
 
   /** 派生类没写 construct 时合成一个（第五十六刀）：它做的事就是把基类那一个调一遍。 */
@@ -1870,6 +1932,29 @@ class JncLower {
     });
     this.methods.set(full, cls);
     this.methodNames.add(info.name);
+    // abstract 的那一个也要记 errorcode（第五十八刀）：调它走的是基类那条链上的这个原型，
+    // 不记就从基类指针调时检不着。
+    if (sp.errc && this.errcReg(d, full, info.type) === null) return null;
+    return true;
+  }
+
+  /**
+   * 把一个函数记进 errFns（第五十八刀）。出错值由**返回类型**定（exceptions.rst:17）；
+   * 定不出来时分两种说法 —— jancy 认它当错误码而这一层还没定出出错值的（字符串、函数
+   * 指针）是"还不收"，jancy 自己就不认的（void / real / 结构体 / 数组）是一条硬错。
+   */
+  errcReg(node, full, ty) {
+    const ev = errText(ty);
+    if (ev === null) {
+      if (errCodeOk(ty)) {
+        return this.nope(node, `errorcode 的函数回 ${tyName(ty)}（jancy 那儿它算错误码，`
+          + '可这一层还没定出它的出错值）');
+      }
+      return this.err(node, `'${shown(full)}' 回 ${tyName(ty)}，当不了错误码`
+        + `（jnc_ct_FunctionType.cpp:180 那句 "'%s' cannot be used as error code"：只有 bool、`
+        + '整数、枚举、字符串与各种指针带 ErrorCode 那一位）');
+    }
+    this.errFns.set(full, ev);
     return true;
   }
 
@@ -1911,6 +1996,13 @@ class JncLower {
         if (a !== undefined && b !== undefined && !this.sameSig(a, b)) {
           this.err(null, `覆盖不了 '${shown(full)}'：签名与基类那个 '${mn}' 对不上（jancy 那句 `
             + '"cannot override \'%s\': method signature mismatch"）');
+        }
+        // errorcode 在 jancy 那边是**函数类型上**的一位，所以它也在"签名"里（第五十八刀）：
+        // 两边不一致时从基类指针调过去检不检查就成了看运气。
+        if (this.errFns.has(up) !== this.errFns.has(full)) {
+          this.err(null, `覆盖不了 '${shown(full)}'：基类那个 '${mn}'${this.errFns.has(up)
+            ? ' 是 errorcode，这一个不是' : ' 不是 errorcode，这一个是'}（errorcode 是函数`
+            + '类型上的一位，也算签名的一部分）');
         }
         continue;
       }
@@ -2064,8 +2156,19 @@ class JncLower {
     let uns = false;
     let fnptr = false;
     let virt = null;
+    let errc = false;
     for (const m of mods) {
       if (m === 'thin') { thin = true; continue; }
+      // `errorcode`（第五十八刀，exceptions.rst:17）：它说的是"这个函数的返回值就是错误码"。
+      // 与 virtual 那三个同一处 —— 只有函数签名那两处认得它。
+      if (m === 'errorcode') {
+        if (!allowVirt) {
+          this.err(n, "'errorcode' 只能写在函数上（exceptions.rst:17）");
+          return null;
+        }
+        errc = true;
+        continue;
+      }
       // 虚方法那三个（第五十七刀，type_class.rst:178："Virtual methods are declared using
       // keywords virtual, abstract, and override"）。它们在语法里也落在这张 mods 表里，
       // 所以在这儿收下来往上传 —— 认得它的只有方法那两处（fnSig0 与类体里的方法原型），
@@ -2153,7 +2256,7 @@ class JncLower {
       this.nope(n, '64 位的无符号整数（要方言里无符号的 `/` `%` `>>` 与比较）');
       return null;
     }
-    return { type: base, thin, stat, fnptr, virt };
+    return { type: base, thin, stat, fnptr, virt, errc };
   }
 
   /** 说明符表 + 一串 `*` -> 类型。`int thin*` 的 thin 管的是**最外层**那个 `*`
@@ -2427,7 +2530,7 @@ class JncLower {
     // 进去（第五十三刀）。
     const special = specialCore(n.items[2]);
     const sp = special === null ? this.specs(n.items[1], true)
-      : { type: J_VOID, thin: false, stat: false, fnptr: false, virt: null };
+      : { type: J_VOID, thin: false, stat: false, fnptr: false, virt: null, errc: false };
     if (sp === null) return null;
     const info = this.declarator(n.items[2], sp);
     if (info === null) return null;
@@ -2485,6 +2588,9 @@ class JncLower {
     if (isMain) {
       if (this.mainSeen) return this.err(n, '`int main()` 定义了两次');
       this.mainSeen = true;
+      // `int errorcode main()`：入口没有"上一层"可传，而这一层的 main 连退出码都不回
+      //（那条边界记在 bad/main-nonzero）—— 悄悄丢掉那个词就是骗人。
+      if (sp.errc) return this.nope(n, '`errorcode` 写在 `main` 上（错传不到调用方去）');
     } else {
       // 名字带上命名空间前缀，而那个带前缀的名字**同时**就是方言里那个函数的名字。
       info.name = this.qual(info.name);
@@ -2517,6 +2623,8 @@ class JncLower {
         return this.err(n, `'${sp.virt}' 只能写在类的方法上（type_class.rst:178）`);
       }
       this.fns.set(info.name, { params: ps.map((p) => p.type), ret: info.type });
+      // errorcode（第五十八刀）：出错值由返回类型定，见 errcReg。
+      if (sp.errc && this.errcReg(n, info.name, info.type) === null) return null;
     }
     return { info, ps, isMain };
   }
@@ -2591,6 +2699,10 @@ class JncLower {
     // 体外写的 `void C.foo() {}` 与体内写的走的是同一条路（this.ns 摆到类上）。
     const saveNs = this.ns;
     const saveSelf = this.selfClass;
+    // errorcode（第五十八刀）：这个函数自己的出错值 —— 传播那一句 `return` 回的就是它。
+    const saveErr = this.curErr;
+    this.curErr = this.errFns.has(info.name) ? this.errFns.get(info.name) : null;
+    this.shield = 0;
     const owner = this.methods.get(info.name);
     if (owner !== undefined) { this.ns = owner; this.selfClass = owner; }
     else this.selfClass = null;
@@ -2623,6 +2735,7 @@ class JncLower {
           this.scopes = [];
           this.ns = saveNs;
           this.selfClass = saveSelf;
+          this.curErr = saveErr;
           return null;
         }
         this.alias.set(p.name, v);
@@ -2636,6 +2749,7 @@ class JncLower {
         this.scopes = [];
         this.ns = saveNs;
         this.selfClass = saveSelf;
+        this.curErr = saveErr;
         return null;
       }
       const c = this.cellName(p.name);
@@ -2673,6 +2787,7 @@ class JncLower {
     this.alias = saveAlias;
     this.ns = saveNs;
     this.selfClass = saveSelf;
+    this.curErr = saveErr;
     if (body === null) return null;
     if (pre.length !== 0) body = `${pre.join('\n')}\n${body}`;
     if (isMain) { this.mainBody = body; return null; }
@@ -2697,8 +2812,56 @@ class JncLower {
     return out.join('\n');
   }
 
-  /** 一条语句 -> 若干行。返回 null 表示已经报过错。 */
+  /**
+   * 一条语句 -> 若干行。返回 null 表示已经报过错。
+   *
+   * 这一层只管一件事：**errorcode 的传播插在哪儿**（第五十八刀）。jancy 那边 `checkErrorCode`
+   * 是在那次调用之后**当场**分块的（jnc_ct_OperatorMgr_Call.cpp:591-592），这一层没有块，
+   * 只有"一条语句"这个粒度 —— 于是把那次调用抬成一格临时、把"比一下就 return"插在**这条
+   * 语句之前**。这么做要求那次调用在这条语句里只求一遍值，所以只有下面这几种语句开这个
+   * 落点；循环那三种的条件每一圈都要重求一次，抬到外面就是错的，所以它们不开（落进去的
+   * errorcode 调用会在 callExpr 那儿明说不收）。
+   */
   stmt(n, ind) {
+    const h = isList(n) ? head(n) : null;
+    if (h !== null && EC_HOIST.has(h)) return this.ecScope(ind, () => this.stmt0(n, ind));
+    const save = this.ecOut;
+    this.ecOut = null;
+    const r = this.stmt0(n, ind);
+    this.ecOut = save;
+    return r;
+  }
+
+  /** 开一格新的传播落点，降完把收上来的那几行摆在前面（第五十八刀）。 */
+  ecScope(ind, run) {
+    const saveOut = this.ecOut;
+    const savePad = this.ecPad;
+    this.ecOut = [];
+    this.ecPad = ' '.repeat(ind);
+    const r = run();
+    const pre = this.ecOut;
+    this.ecOut = saveOut;
+    this.ecPad = savePad;
+    if (r === null) return null;
+    return pre.length === 0 ? r : [...pre, ...r];
+  }
+
+  /**
+   * 在**惰性位置**上降一格表达式（第五十八刀）：`&&` / `||` 的右边、表达式位置上 `? :` 的
+   * 两支 —— 那儿求不求值要看别人。传播那两句只插得到"这条语句之前"，插到那儿就成了
+   * "无条件先调一遍"，求值顺序与短路语义一起被改掉。所以这些位置把落点**关掉**：落进去的
+   * errorcode 调用当场说不收，而不是悄悄发一段跑法不一样的代码。
+   */
+  ecLazy(run) {
+    const save = this.ecOut;
+    this.ecOut = null;
+    const r = run();
+    this.ecOut = save;
+    return r;
+  }
+
+  /** 一条语句 -> 若干行。返回 null 表示已经报过错。 */
+  stmt0(n, ind) {
     const pad = ' '.repeat(ind);
     if (!isList(n)) { this.err(n, '认不出的语句'); return null; }
     const h = head(n);
@@ -2772,6 +2935,23 @@ class JncLower {
       const b = this.block(n.items[1], ind + 2);
       this.unsafe = save;
       return b === null ? null : [`${pad}(unsafe`, b, `${pad})`];
+    }
+    // `try { … }`（第五十八刀记的边界）。它**不是**"把里面的错忽略掉"：出错时那一块剩下的
+    // 语句一句都不跑（exceptions.rst:53-57 那个 `baz(21); // never get here`），然后从块后面
+    // 接着走。所以拿 `shield` 冒充它是错的 —— 要它得有"跳到这一块的出口"，也就是给这一块
+    // 开一个落点（jancy 的 `finalizeTryScope`：给作用域挂一个 catch 块，Eh.cpp:296-300）。
+    if (h === 'try') {
+      this.nope(n, '`try { … }` 块（要给这一块开一个"出错就跳到块尾"的落点；`try 表达式` 那一条'
+        + '只挡传播，冒充不了它）');
+      return null;
+    }
+    // `catch:` / `finally:`（第五十八刀记的边界）。语法上它们是标签（`(label "catch")`），
+    // 可管的是**这个作用域出错时跳哪儿** —— 与 `try` 块同一格，都要那个落点。
+    if (h === 'label' && (isStr(n.items[1]) || isAtom(n.items[1]))
+      && (n.items[1].value === 'catch' || n.items[1].value === 'finally')) {
+      this.nope(n, `\`${n.items[1].value}:\`（要给这个作用域开一个落点：出错跳到这儿，`
+        + '而不是回到调用方 —— 与 `try { … }` 同一格）');
+      return null;
     }
     this.nope(n, `语句 '${h}'`);
     return null;
@@ -3380,18 +3560,25 @@ class JncLower {
       return [`${pad}${this.store(lv, `(bin "${up ? '+' : '-'}" ${this.read(lv)} (real 1.0))`)}`];
     }
     if (h === 'call') return this.callStmt(n, ind);
-    // 下面这两条**有**副作用，所以不能落进那句"没有副作用"里 —— 那句话会把"还没做"说成
-    // "你写错了"（与第五十四刀那处同一类的错话）。量出来的：语料里 try-expr 52 处、cond 37 处，
-    // 而 cond 那 37 处几乎每一处的一支都是 `try 调用`（`m_state ? close() : try open();`），
-    // 所以两条是**同一格**：都要 errorcode 那一套先落地。
+    // `try 调用;`（第五十八刀）：`try` 挡的是"抛"，不是"检查" —— 底下那次调用照旧发出去，
+    // 只是出错时不往上传（exceptions.rst:40）。所以这一条就是"把挡板加一层再降底下那条"。
     if (h === 'try-expr') {
-      this.nope(n, '`try` 表达式（要 errorcode 那一套：把"出错值"变成一条传得动的错）');
-      return null;
+      this.shield++;
+      const r = this.exprStmt(n.items[1], ind);
+      this.shield--;
+      return r;
     }
+    // `? :` 当语句（第五十八刀）。语料里那 37 处的形状是 `m_state ? close() : try open();` ——
+    // 两支都是**有副作用的调用**，取的值没人要。于是它就是一个 if：两支各按语句降。
+    // 两支各开自己的传播落点 —— 那两句得落在**那一支里面**，抬到 if 之前就是无条件执行了。
     if (h === 'cond') {
-      this.nope(n, '`? :` 当语句（两支是有副作用的调用时 jancy 收它 —— 语料里那 37 处的一支'
-        + '几乎都是 `try 调用`，所以它跟着 errorcode 一起）');
-      return null;
+      const c = this.cond(n.items[1]);
+      if (c === null) return null;
+      const a = this.ecScope(ind + 4, () => this.exprStmt(n.items[2], ind + 4));
+      if (a === null) return null;
+      const b = this.ecScope(ind + 4, () => this.exprStmt(n.items[3], ind + 4));
+      if (b === null) return null;
+      return [`${pad}(if ${c.code}`, `${pad}  (do`, ...a, `${pad}  )`, `${pad}  (do`, ...b, `${pad}  ))`];
     }
     this.nope(n, `这条表达式语句（'${h}'）没有副作用，jancy 那边也会拒`);
     return null;
@@ -3407,6 +3594,9 @@ class JncLower {
     }
     const v = this.expr(n, null);
     if (v === null) return null;
+    // errorcode 的调用在这儿已经被抬成了"一格临时 + 一句检查"（第五十八刀），那两行就是这条
+    // 语句的全部 —— 再发一句 `(expr (var $e0))` 是一条没有副作用的语句。
+    if (v.hoisted === true) return [];
     return [`${pad}(expr ${v.code})`];
   }
 
@@ -4557,6 +4747,15 @@ class JncLower {
 
       case 'cast': return this.cast(n, n.items[1], n.items[2]);
       case 'cond': return this.ternary(n, want);
+      // `try E`（第五十八刀）：挡一层"抛"。jancy 那边它把底下那次抛接到自己那一格 phi 上，
+      // 出错时整条表达式的值就是**那个出错值**（`endTryOperator`，Eh.cpp:207-244）——
+      // 而这一层的调用回的正好是那个值，所以除了"别往上传"之外一个字都不用发。
+      case 'try-expr': {
+        this.shield++;
+        const v = this.expr(n.items[1], want);
+        this.shield--;
+        return v;
+      }
       case 'addr':
         return this.addrOf(n);
       case 'pre-inc': case 'post-inc': case 'pre-dec': case 'post-dec':
@@ -4657,16 +4856,20 @@ class JncLower {
     // null 那一侧要从另一侧知道自己的类型，所以先降"不是 null"的那一边
     const lNull = isList(n.items[2]) && head(n.items[2]) === 'null';
     const rNull = isList(n.items[3]) && head(n.items[3]) === 'null';
+    // `&&` / `||` 的右边是惰性的（第五十八刀）：那儿插不进传播的语句，见 ecLazy。左边总是求值。
+    const rhs = (want) => (op === '&&' || op === '||'
+      ? this.ecLazy(() => this.expr(n.items[3], want))
+      : this.expr(n.items[3], want));
     let a = null;
     let b = null;
     if (lNull && !rNull) {
-      b = this.expr(n.items[3], null);
+      b = rhs(null);
       if (b === null) return null;
       a = this.expr(n.items[2], b.type);
     } else {
       a = this.expr(n.items[2], null);
       if (a === null) return null;
-      b = this.expr(n.items[3], (isPtr(a.type) || isClass(a.type)) && rNull ? a.type : null);
+      b = rhs((isPtr(a.type) || isClass(a.type)) && rNull ? a.type : null);
     }
     if (a === null || b === null) return null;
     // `&&` / `||` 两边各自真值化（jancy 与 C 同：`p && n` 是合法的）。方言的
@@ -4861,8 +5064,10 @@ class JncLower {
    */
   ternary(n, want) {
     const c = this.cond(n.items[1]);
-    let a = this.expr(n.items[2], want);
-    let b = this.expr(n.items[3], want === null || want === undefined ? (a === null ? null : a.type) : want);
+    // 两支是**惰性**的（第五十八刀）：只算取中的那一支，所以传播那两句插不到这条语句之前去。
+    let a = this.ecLazy(() => this.expr(n.items[2], want));
+    let b = this.ecLazy(() => this.expr(n.items[3],
+      want === null || want === undefined ? (a === null ? null : a.type) : want));
     if (c === null || a === null || b === null) return null;
     // 两支都是整数：结果是常用算术转换定出的那一格。有符号之间加宽在规范形里不发一个字，
     // 可换符号性要真的转（第三十三刀），所以这儿两支都过一遍 intConv。
@@ -4987,6 +5192,9 @@ class JncLower {
       }
       parts.push(v.code);
     }
+    // errorcode 那一位挂在**源码里写的那个函数**上，所以要在下面换名字之前问（换成分派那一段
+    // 之后名字就不在 errFns 里了）。
+    const ec = this.errFns.get(nm);
     // 虚方法：调的不是那一个实现，是按 `$tag` 挑实现的那一段（第五十七刀）。签名与被覆盖的
     // 那一个同型（vtCheck 管着这一条），所以上面那一遍实参照旧按 sig 对 —— 换名字放在最后，
     // 诊断里印的就还是源码里写的那个名字。
@@ -4995,8 +5203,40 @@ class JncLower {
       if (d === null) return null;
       nm = d;
     }
-    if (sig.ret === J_VOID) return { code: `(call ${nm}${parts.map((p) => ` ${p}`).join('')})`, type: J_VOID };
-    return { code: `(call ${nm}${parts.map((p) => ` ${p}`).join('')})`, type: sig.ret };
+    const code = `(call ${nm}${parts.map((p) => ` ${p}`).join('')})`;
+    if (ec !== undefined) return this.propagate(n, code, sig.ret, nm0 === null ? shown(nm) : nm0);
+    if (sig.ret === J_VOID) return { code, type: J_VOID };
+    return { code, type: sig.ret };
+  }
+
+  /**
+   * 一次 errorcode 调用（第五十八刀）。三种去处：
+   *
+   *   - `try` 底下：什么都不插，调用本身就是那一格值。jancy 的 `try` 也不是"不检查" ——
+   *     它把那次抛接到自己那一格 phi 上（`endTryOperator`，Eh.cpp:207-244），于是出错时
+   *     整条表达式的值就是那个出错值。这一层的调用**回的正是那个值**，所以一个字不用发。
+   *   - 能插语句：抬一格临时、比一下、等于出错值就 return 我自己的出错值。jancy 走的是
+   *     同一条：没有 catch 作用域时 `ret(returnType->getErrorCodeValue())`
+   *     （jnc_ct_ControlFlowMgr_Eh.cpp:103-112）。
+   *   - 插不进去：明说不收，而不是**悄悄把错吞掉**。
+   */
+  propagate(node, code, ret, shownName) {
+    if (this.shield > 0) return { code, type: ret };
+    if (this.curErr === null) {
+      return this.nope(node, `不写 \`try\` 调 errorcode 的 '${shownName}'，而这个函数自己不是 `
+        + 'errorcode（jancy 那儿这条走运行期的 dynamic throw：Scope.h:144-145 的 canStaticThrow '
+        + '为假 -> jnc_ct_ControlFlowMgr_Eh.cpp:98-101，而这一层没有运行期的展开）');
+    }
+    if (this.ecOut === null) {
+      return this.nope(node, `这个位置上的 errorcode 调用 '${shownName}'（传播那两句得插成语句，`
+        + '而这儿插不进去 —— 见 EC_HOIST）');
+    }
+    const v = `$e${this.ecSeq++}`;
+    const t = errTest(`(var ${v})`, ret);
+    if (t === null) return this.err(node, `内部错：${tyName(ret)} 定不出出错值的比法`);
+    this.ecOut.push(`${this.ecPad}(let ${v} ${slotText(ret)} ${code})`);
+    this.ecOut.push(`${this.ecPad}(if ${t} (do (ret ${this.curErr})))`);
+    return { code: `(var ${v})`, type: ret, hoisted: true };
   }
 
   /** `c.foo(…)` / `p->foo(…)` 里的被调（第五十二刀）：回 `{name, self}`。
@@ -5090,6 +5330,14 @@ class JncLower {
   fnValue(node, full, selfCode) {
     const sig = this.fns.get(full);
     const owner = this.methods.get(full);
+    // errorcode 的函数当值用（第五十八刀记的边界）：jancy 的 `errorcode` 是**函数类型上**的
+    // 一位（`FunctionTypeFlag_ErrorCode`），所以从那一格指针调过去照旧会检查、照旧会传播。
+    // 这一层的 `(fnty …)` 上没有那一位，errFns 是按**名字**记的 —— 于是从指针调就悄悄
+    // 不检查了。宁可当场拒，也不要把错吞掉。
+    if (this.errFns.has(full)) {
+      return this.nope(node, `errorcode 的 '${shown(full)}' 当函数指针用（那一位是挂在函数`
+        + '**类型**上的，这一层的 fnty 还没有它 —— 从指针调过去就检不着了）');
+    }
     if (owner === undefined) {
       return { code: `(fnref ${full})`, type: tFn(sig.params, sig.ret) };
     }

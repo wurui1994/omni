@@ -3035,7 +3035,164 @@ test18 那一份**暴露了这把尺子的一个短处**：尺子只数「还不
 就红的那一条（`fmtFixed`/`fmtSci`/`fmtGen` 不在 `frontend-js/link.js` 的 `NATIVE_OPS` 里，
 与这一刀无关）；`npm run lint` 这台机器上没有 typescript。
 
-## 后果与代价
+### 第五十八刀：errorcode —— 一次调用之后插两句，就是 jancy 的整套异常
+
+jancy 的异常自己就说了是什么：「a layer of syntactic sugar over good old C-style error code
+checking」（exceptions.rst:15）。所以这一刀不是"实现异常"，是**把那层糖写开**。
+
+四条规矩，逐条都有出处：
+
+- `T errorcode f()` 的返回值**就是**错误码，出错值按返回类型定（:17：bool 的 `false`、整数的
+  `-1`、指针的 `null`）。
+- 不写 `try` 调它，错就**自动往上传**（:26）。
+- `try E` 挡住那次传播，值照拿（:40）。
+- `try { … }` 块、`catch:`、`finally:` 是同一族的另外三格（:46、:62）。
+
+前三条这一刀落地，第四条明着记成边界（下面说为什么它冒充不了）。
+
+**出错值那张表不是从文档那句话猜的**，是从 `Type::getErrorCodeValue()` 抄的
+（jnc_ct_Value/jnc_ct_Value.h:697-708）：只有"是整数且不是 bool"那一档给 `-1`，别的一律
+`getZeroValue()`。所以 bool 是 `false`、指针是 `null`、无符号整数是 `-1` 在那一格里的样子
+（全 1）—— 与文档那句话对得上，可它顺手回答了文档没说的两件事（无符号怎么办、枚举怎么办）。
+枚举在那张 flagTable 里带 `Integer` 位（jnc_api/jnc_Type.cpp:107-111），所以它也是 `-1`。
+
+**哪些类型当得了错误码**同样是抄的：`isErrorCodeType`（jnc_ct_TypeMgr/jnc_ct_Type.h:635-639）
+问那张表里的 `ErrorCode` 位。`void` 那一行整个是 0，`float` / `double` 那两行只有
+`Fp|Nullable|Numeric` —— 于是 `void errorcode f()` 与 `double errorcode f()` 在 jancy 那边就是
+一条硬错：「'%s' cannot be used as error code」（jnc_ct_TypeMgr/jnc_ct_FunctionType.cpp:180-181）。
+这一层照抄这条**错**（`bad/errorcode-void`），而 jancy 认、这一层还没定出出错值的那两个
+（字符串、函数指针）发的是「还不收」。两种拒说的不是一件事，不许混。
+
+**那句判断也是抄的**。`checkErrorCode`（jnc_ct_ControlFlowMgr/jnc_ct_ControlFlowMgr_Eh.cpp:248-294）
+算一格**指示值**：bool 与"不是纯整数"的那些拿返回值自己当条件，纯整数先比一次 `!= -1`，
+指示值为**假**时跳去抛。这一层发的是它的反面，三种形状：
+
+```
+bool      (un "!" v)
+整数/枚举  (bin "==" v 出错值)
+各种指针   (pisnull v)
+```
+
+指针那一支用 `pisnull` 不是省事：方言里没有指针相等（第四十六刀那处记着），跟 `null` 比只有
+这一个算子。
+
+**传播落成什么**：抬一格临时、比一下、等于出错值就 `return` 我自己的出错值。
+
+```
+(let $e0 int (call fetch (var a)))
+(if (bin "==" (var $e0) (int -1)) (do (ret (int -1))))
+(let x int (var $e0))
+```
+
+最后那句 `ret` 与 jancy 完全同一句：没有 catch 作用域时 `throwException()` 走的就是
+`ret(currentFunctionType->getReturnType()->getErrorCodeValue())`（同一文件 :103-112）。
+
+**难的那一格是"插在哪儿"。** jancy 是在那次调用之后**当场把基本块切开**的
+（jnc_ct_OperatorMgr/jnc_ct_OperatorMgr_Call.cpp:591-592 那一句 `checkErrorCode`），它想插哪儿
+插哪儿。这一层降的是**语句序列**，只有"一条语句"这个粒度。所以落法是：把那次调用抬成一格
+临时，把判断那句插在**这条语句之前**（`ecOut` 那一叠，见 `stmt` / `ecScope`）。
+
+这么做要求那次调用在这条语句里**只求一遍值、而且一定求**。于是只有这几种语句开这个落点
+（`EC_HOIST`）：局部量声明、表达式语句、`return`、`if`、`switch`、`assert`。剩下的位置分两类，
+都当场拒而不是悄悄发一段跑法不一样的代码：
+
+- **循环的条件**（`while` / `do` / `for`）：每一圈都要重求一次，抬到循环之前就只检了第一圈
+  （`bad/errorcode-loop`）。
+- **惰性那几支**：`&&` / `||` 的右边、表达式位置上 `? :` 的两支 —— 求不求值要看别人，抬出来就
+  成了"无条件先调一遍"，短路语义与求值顺序一起没了（`bad/errorcode-lazy`，落法见 `ecLazy`）。
+
+**嵌在实参里反而是对的**，这一格值得说清：`use(fetch(i))` 里 fetch 是 use 的实参，本来就在
+外层那次调用**之前**求值。抬出来之后顺序正好：
+
+```
+(let $e0 int (call fetch (var i)))
+(if (bin "==" (var $e0) (int -1)) (do (ret (int -1))))
+(let $e1 int (call use (var $e0)))
+(if (bin "==" (var $e1) (int -1)) (do (ret (int -1))))
+(ret (var $e1))
+```
+
+fetch 出错时 use 一次都不调 —— 与 jancy 同。所以"嵌套不收"那句话是错的，不该记成边界；
+真正卡住的是上面那两类**惰性**位置。
+
+**`try` 落成"什么都不插"。** 这不是偷懒：jancy 的 `endTryOperator` 把那次抛接到自己那一格 phi
+上，两条边一条是正常值、一条是**那个出错值**（同一文件 :207-244）。而这一层的调用回的正好就是
+那个出错值 —— 于是 `try f()` 与 `f()` 发出来的代码一模一样，差别只在"要不要接着插那两句"。
+挡板是一个计数（`shield`），`try` 底下降完就减回去。
+
+> 没跟着落的那一格：jancy 的 `throwException(value)` 会先调 `std.setError`（同一文件 :68-87），
+> 于是 `try` 之后还能问 `jnc.getLastError()`。这一层没有那格线程状态，所以"错是什么"取不到，
+> 只有"出没出错"。语料里 `try` 的用法几乎都是后者（`int result = try bar(); if (result < 0)`,
+> exceptions.rst:81-88），所以这一格先欠着，且明写在这里。
+
+**`? :` 当语句**跟着这一刀一起落地。语料里那 37 处的形状是 `m_state ? close() : try open();`
+—— 两支都是有副作用的调用，值没人要。于是它就是一个 `if`，两支各按**语句**降，而传播那两句落在
+**那一支里面**（各开一格自己的落点）。第五十四刀之后那两句错话（把 `try 表达式` 与 `? :` 当语句
+说成"没有副作用"）到这儿一起消掉。
+
+**三条为了不吞错而拒的**：
+
+- 不写 `try` 从**不是 errorcode** 的函数里调（`bad/errorcode-noerrc`）。jancy 收这条，可它走
+  运行期：`canStaticThrow()` 是「有 catch 或者自己带 ErrorCode 那一位」
+  （jnc_ct_NamespaceMgr/jnc_ct_Scope.h:144-145），都不成立时跳 `getDynamicThrowBlock()`
+  （Eh.cpp:98-101）由运行期展开。这一层没有运行期的展开，所以只能拒 —— 出路 jancy 自己给了：
+  `int result = try bar();` 再自己判。
+- errorcode 的函数**当函数指针用**（`bad/errorcode-fnptr`）。jancy 的 `errorcode` 是挂在函数
+  **类型**上的一位（`FunctionTypeFlag_ErrorCode`），跟着类型走；这一层的 `errFns` 是按**名字**
+  记的，`(fnty …)` 上没有那一位 —— 从指针调就一个字都不检。
+- `override` 与基类那一个在 errorcode 上必须一致。同一个道理：那一位是签名的一部分，两边不一样
+  时"从基类指针调过去检不检查"就成了看运气。
+
+`errorcode` 写在 `main` 上也拒（错传不到调用方去，`main` 是那条链的头）。
+
+**C 双胞胎**（`/tmp/e58.c`，`cc -O0 -std=c99 -Wall`）就是把那层糖手写开的样子：每次调用抬一格
+临时、比一下、等于出错值就 `return` 自己的出错值；`try` 那几处就是"不比"。`bool` 写成 `int`
+（0/1），无符号那一格的出错值写成 `(unsigned int)-1`。五条腿逐字节相同，且与双胞胎逐字节相同：
+
+```
+fetch 1 / fetch 2 / 30 / fetch 1 / -1 / …（42 行，见 cases/55-errorcode.expected）
+```
+
+用例里还锁了一格**两刀的交界**：errorcode 的**虚方法**。按标签分派的那一段（第五十七刀的
+`dispatch`）只是转手调实现，出错值原样回来；检查那两句插在"调分派那一段的地方"。所以两刀不用
+互相知道 —— 唯一要接的一条是 `override` 与基类那一个在 errorcode 上必须一致。
+
+**量出来的**（662 份真实 `.jnc`，尺子与前几刀同一把：`sx` 里那句「还不收」的 (文件, 卡点) 去重
+对数）：**1500 → 1402**。走掉 220 条，冒出来 122 条。
+
+走掉的那 220 条正是这一格的全部：`修饰符 'errorcode'` 98、`这条表达式语句` 73、`语句 'label'`
+32、`表达式 'try-expr'` 11、`语句 'try'` 6。挑这一刀时算的那个 187 条的口袋，实际比预估还大 ——
+因为 `errorcode` 一被 `specs` 拒掉，整条函数声明就地返回，**函数体根本没降**；那 73 条
+「这条表达式语句」有很大一部分是同一批文件里 `? :` 与 `try 调用` 的位置。
+
+**冒出来的 122 条要分两半看**，这一条是尺子的老毛病，得写明：
+
+- 真正是这一族剩下的：`catch:` 57、`try { … }` 块 6、`finally:` 4，加"传播插不进去"的那两类
+  约 20 条（`connect` 8、`capture` 6、`open` 3…都是 `&&` 右边或循环条件里的 errorcode 调用），
+  加"从不是 errorcode 的函数里不写 try 调" 5 条。
+- 与这一刀无关、只是**被露出来**的：格式化字面量 4、64 位无符号 4、形参默认值 2…… 它们本来就在
+  那些函数体里，只是以前 `errorcode` 那一拒把整个体挡在了后面。所以 `catch:` 从 32 条
+  「语句 'label'」变成 57+4 条并不是"退步"：以前一个文件里带 `catch:` 的那些函数**压根没降到
+  那一步**。
+
+**能整份跑起来的**（零卡点 + 有 `int main`）：57 → **58**，新进来的是
+`test/jnc/test01.jnc`（它自己的注释说是 mcjit 的行号信息用例，内容正好是"类里一个
+`bool errorcode` 方法 + main 里连着 `try c.foo(&point);` 六次"，跑出来是 `hello world!` 加六行
+`foo ()`）。**只剩一个卡点的**（同样限定带 `int main`）：44 → **48**。那 48 份里排头的还是
+`顶层的 'import'` 14 份。
+
+这一族的下一格因此是量出来的、不是猜的：`catch:` / `finally:` 61 条，是"给一个作用域开一个
+出错就跳过去的落点"那一格；`try { … }` 块 6 条与它同一格。
+
+**跑过的轴**：`tests/jnc`（113/0，新增 `cases/55-errorcode` 与 `bad/errorcode-lazy`、
+`bad/errorcode-loop`、`bad/errorcode-noerrc`、`bad/errorcode-try-block`、`bad/errorcode-catch`、
+`bad/errorcode-fnptr`、`bad/errorcode-void`；删掉 `bad/errorcode` —— 功能落地了，按规矩换成上面
+那七条更窄的）。
+**没跑的**：`tests/glr`（语法一个字没改 —— `try` / `catch` / `finally` 那几条产生式第一刀就在了，
+这一刀只动降级）；`tests/sexpr`、`tests/asy`、`tests/oir` —— 方言、HIR、MIR、四个后端与运行时
+一个字都没改；自举、`tests/jit`、`tests/llvm`；`tests/mir` 是先前就红的那一条
+（`fmtFixed`/`fmtSci`/`fmtGen` 不在 `frontend-js/link.js` 的 `NATIVE_OPS` 里，与这一刀无关）；
+`npm run lint` 这台机器上没有 typescript。
 
 - 方言从"没有可算术的引用"变成"有"。这一格会渗到 MIR 与四个后端，改不回去。
 - fat 指针三字内联：结构体里放指针就胖三倍。可接受——这一层没有 ABI 兼容负担。

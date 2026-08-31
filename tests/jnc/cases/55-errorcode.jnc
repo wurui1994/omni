@@ -1,0 +1,195 @@
+// errorcode 那一套（第五十八刀，exceptions.rst）。它就是 C 的错误码加一层糖（:15 那句
+// "a layer of syntactic sugar over good old C-style error code checking"），所以这一份的
+// C 双胞胎是把那层糖**手写开**的样子 —— 见 ADR-0016 第五十八刀那一节。
+//
+// 这里过的那几格：
+//   - 出错值按返回类型定（:17）：整数 -1、bool false、指针 null；无符号那一格是全 1。
+//   - 不写 `try` 就**自动往上传**（:26）：局部量初值、赋值、调用当语句、return、`if` 的条件
+//     五个位置都插得进那两句。
+//   - 嵌在实参里也成立（`use(fetch(i))`）：实参本来就在外层那次调用之前求值，所以抬出来的
+//     顺序正好是对的 —— fetch 出错时 use 一次都不调。
+//   - `try E` 挡住传播（:40），值照拿；`try 调用;` 当语句也一样。
+//   - `? :` 当语句：两支各按语句降，传播那两句落在**那一支里面**。
+//   - errorcode 的方法（`Box.take`）：那一位记在方法名上，调用方照旧检查。
+int errorcode fetch(int i) {
+	if (i < 0)
+		return -1;
+	printf("fetch %d\n", i);
+	return i * 10;
+}
+
+bool errorcode okay(int i) {
+	if (i < 0)
+		return false;
+	printf("okay %d\n", i);
+	return true;
+}
+
+// 指针那一支的 `errorcode` 写在类型**前面**：jancy 的类型修饰符与类型说明符在同一个列表里
+// （`bool errorcode f()` 与 `errorcode bool f()` 都是它），而写在 `*` 后面那一格（与 `thin`
+// / `const` 同一处）这一层还不收 —— 那是指针自己的修饰符位置。
+errorcode int* pick(int* p, int i) {
+	if (i < 0)
+		return null;
+	return p + i;
+}
+
+unsigned int errorcode usize(int i) {
+	if (i < 0)
+		return -1;
+	return i * 3;
+}
+
+int errorcode use(int x) {
+	printf("use %d\n", x);
+	return x + 1;
+}
+
+int errorcode viaDecl(int a, int b) {
+	int x = fetch(a);
+	int y = fetch(b);
+	return x + y;
+}
+
+int errorcode viaAssign(int a) {
+	int t = 0;
+	t = fetch(a);
+	return t;
+}
+
+int errorcode viaStmt(int a) {
+	fetch(a);
+	return 7;
+}
+
+int errorcode viaBool(int a) {
+	okay(a);
+	return 8;
+}
+
+int errorcode viaRet(int a) {
+	return fetch(a);
+}
+
+int errorcode viaIf(int a) {
+	if (fetch(a) > 5)
+		return 1;
+	return 0;
+}
+
+int errorcode viaArg(int a) {
+	return use(fetch(a));
+}
+
+int errorcode viaPtr(int i) {
+	int a[4] = { 10, 20, 30, 40 };
+	int* q = pick(a, i);
+	return *q;
+}
+
+int errorcode viaUns(int i) {
+	unsigned int u = usize(i);
+	return u + 1;
+}
+
+int errorcode branch(int i) {
+	i > 0 ? fetch(i - 5) : fetch(1);
+	return 42;
+}
+
+int errorcode mixed(int i) {
+	i > 0 ? try fetch(-1) : fetch(1);
+	return 43;
+}
+
+class Box {
+	int m_v;
+
+	construct(int v) {
+		m_v = v;
+	}
+
+	int errorcode take(int i) {
+		if (i > m_v)
+			return -1;
+		m_v = m_v - i;
+		return m_v;
+	}
+}
+
+int errorcode drain(Box* b) {
+	int r = b.take(3);
+	return r;
+}
+
+// errorcode 加**虚派发**（第五十七刀 + 第五十八刀）：按标签分派的那一段只是转手调实现，
+// 出错值原样回来；检查那两句插在**调分派那一段的地方**。所以两刀不用互相知道。
+class Shape {
+	int m_side;
+
+	construct(int s) {
+		m_side = s;
+	}
+
+	virtual int errorcode step(int i) {
+		if (i > m_side)
+			return -1;
+		return m_side - i;
+	}
+}
+
+class Wide: Shape {
+	construct(int s) {
+		basetype1.construct(s);
+	}
+
+	override int errorcode step(int i) {
+		if (i > m_side * 2)
+			return -1;
+		return m_side * 2 - i;
+	}
+}
+
+int errorcode stepped(Shape* s, int i) {
+	int r = s.step(i);
+	return r + 1;
+}
+
+int main() {
+	printf("%d\n", try viaDecl(1, 2));
+	printf("%d\n", try viaDecl(1, -1));
+	printf("%d\n", try viaAssign(3));
+	printf("%d\n", try viaAssign(-2));
+	printf("%d\n", try viaStmt(4));
+	printf("%d\n", try viaStmt(-3));
+	printf("%d\n", try viaBool(5));
+	printf("%d\n", try viaBool(-4));
+	printf("%d\n", try viaRet(6));
+	printf("%d\n", try viaIf(7));
+	printf("%d\n", try viaArg(2));
+	printf("%d\n", try viaArg(-2));
+	printf("%d\n", try viaPtr(2));
+	printf("%d\n", try viaPtr(-1));
+	printf("%d\n", try viaUns(5));
+	printf("%d\n", try viaUns(-5));
+	printf("%d\n", try branch(2));
+	printf("%d\n", try branch(-1));
+	printf("%d\n", try mixed(2));
+	printf("%d\n", try mixed(-1));
+	int q = try viaIf(-5);
+	printf("%d\n", q);
+	try viaStmt(-6);
+	Box* b = new Box(10);
+	printf("%d\n", try drain(b));
+	printf("%d\n", try drain(b));
+	printf("%d\n", try drain(b));
+	printf("%d\n", try drain(b));
+	Shape* s = new Shape(5);
+	Shape* w = new Wide(5);
+	printf("%d\n", try stepped(s, 2));
+	printf("%d\n", try stepped(s, 9));
+	printf("%d\n", try stepped(w, 9));
+	printf("%d\n", try stepped(w, 99));
+	q > 0 ? printf("pos\n") : printf("neg\n");
+	return 0;
+}
