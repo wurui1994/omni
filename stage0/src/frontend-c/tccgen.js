@@ -1663,6 +1663,8 @@ export class CGen {  /**
    *
    * 指定初始化器（`[3] =` / `.f =`）只作用在花括号那一层（C11 6.7.9 第 7 段说的
    * current object 就是它），所以碰到它先把下降出来的那些层全弹掉。
+   *
+   * 范围那种（`[0 ... 3] =`）只填**头一格**，剩下几格由 `initRange` 复制字节。
    */
   initBraced(dest, off, ty) {
     this.next();      // `{`
@@ -1674,9 +1676,10 @@ export class CGen {  /**
        * 定的（`{ .i.b = 3, 4 }` 里的 4 进 `d`）；clang 与 gcc 把它放进 `i.c`，标准正文
        * 那一段（C11 6.7.9 第 17-18 段）两种读法都能站得住。oracle 是 tcc，所以跟 tcc。 */
       let chainAt = -1;
+      let nb = 1;
       if (this.tok === LBRACK || this.tok === DOT) {
         while (stack.length > 1) stack.pop();
-        this.initDesignators(stack);
+        nb = this.initDesignators(stack);
         if (stack.length > 1) chainAt = stack[0].i;
       }
       for (;;) {
@@ -1691,7 +1694,12 @@ export class CGen {  /**
       }
       const lv = stack[stack.length - 1];
       const at = this.initElem(lv);
+      const mark = this.pendingData.length;
       this.initializer(dest, at.off, at.ty);
+      if (nb > 1) {
+        this.initRange(dest, at.off, at.ty, nb, mark);
+        lv.i += nb - 1;
+      }
       this.initBump(lv);
       while (stack.length > 1 && this.initFull(stack[stack.length - 1])) {
         stack.pop();
@@ -1706,6 +1714,49 @@ export class CGen {  /**
       this.next();
     }
     this.skip(RBRACE);
+  }
+
+  /**
+   * 范围指定初始化器的后几格：把**头一格的字节**复制过去。
+   *
+   * tcc 也是复制字节、不是把初始化式再解析一遍（`tccgen.c:7768-7787`：把栈顶那个值
+   * 当成一个 `elem_size` 大的 struct，反复 `init_putv` 出去）。这条选择是有观察差别的 ——
+   * `int a[3] = { [0 ... 2] = f() }` 只叫一次 `f`。「把记号收下来放三遍」会叫三次，
+   * 那是另一门语言，所以这里跟着 tcc 走。
+   *
+   * 静态那一侧要复制的就是刚追加进 `pendingData` 的那几条（`mark` 之后），偏移整体挪
+   * 一格；自动那一侧是 load + store，与 `structCopy` 同一手法。整块清零在前面已经做过，
+   * 所以头一格没写到的那些字节是 0，一起复制过去正好。
+   */
+  initRange(dest, off, ty, nb, mark) {
+    const size = typeSize(ty).size;
+    if (size === 0) return;
+    if (dest.stat) {
+      /* 只挪**落在这一格里**的那几条。`[0 ... 1] = "BB"` 除了那个指针，还往 data 段
+       * 另一处写了字符串本身 —— 那一块是共享的，跟着挪就会踩别人。 */
+      const lo = dest.addr + off;
+      const fresh = this.pendingData.slice(mark)
+        .filter((d) => d.off >= lo && d.off + d.bytes.length <= lo + size);
+      for (let k = 1; k < nb; k++) {
+        for (const d of fresh) {
+          this.pendingData.push({ off: d.off + k * size, bytes: d.bytes });
+        }
+      }
+      return;
+    }
+    const f = this.f;
+    for (let k = 1; k < nb; k++) {
+      for (let done = 0; done < size;) {
+        const left = size - done;
+        const w = left >= 8 ? 8 : left >= 4 ? 4 : left >= 2 ? 2 : 1;
+        const mt = w === 8 ? T_I64 : T_I32;
+        const r = f.emit(OP.MLOAD, mt, dest.addr, REF_NONE,
+          memDesc(COPY_MK[w], off + done));
+        f.emit(OP.MSTORE, mt, dest.addr, r,
+          memDesc(COPY_SK[w], off + k * size + done));
+        done += w;
+      }
+    }
   }
 
   /** 填完一格：序号 +1。union 例外 —— 它只初始化**一个**成员（C11 6.7.9 第 17 段），
@@ -1744,6 +1795,10 @@ export class CGen {  /**
    * 它作用在**花括号那一层**的 current object 上，所以调用方已经把省花括号下降出来的层
    * 全弹掉了。串起来的那种就是「挪一格之后再往里下降一层，接着挪」—— 于是它与省花括号
    * 用的是同一个下降栈，`initBraced` 的回卷那一步一行都不用改。
+   *
+   * `[0 ... 3] =` 是范围（GNU 扩展，`tccgen.c:7696-7710`）：回**这一串管几格**，
+   * 调用方据此复制字节、并把序号一次挪过去。范围只许出现在**最后一个**指定符上
+   * （tcc 那边是 `while (nb_elems == 1 && …)` 这个循环条件），后面必须是 `=`。
    */
   initDesignators(stack) {
     for (;;) {
@@ -1752,9 +1807,23 @@ export class CGen {  /**
         if (!isArray(lv.ty.t)) this.err('array index in non-array initializer');
         this.next();
         const k = Number(this.constExpr());
+        let last = k;
+        if (this.tok === TOK_DOTS) {
+          this.next();
+          last = Number(this.constExpr());
+        }
         this.skip(RBRACK);
-        if (k < 0) this.err('negative array designator');
+        /* tcc 的那一条检查（`tccgen.c:7703`）把三件事合成一句话：负下标、越界、空范围。
+         * 长度未知的那种（`int a[] = {[3]=1}`）现在还走不到这儿（`sizeFromInit` 里
+         * 有一条明写的 todo），所以只在长度已知时比上界。 */
+        if (k < 0 || last < k || (lv.ty.count >= 0 && last >= lv.ty.count)) {
+          this.err('index exceeds array bounds or range is empty');
+        }
         lv.i = k;
+        if (last > k) {
+          this.skip(ASSIGN);
+          return last - k + 1;
+        }
       } else if (this.tok === DOT) {
         if (!isStruct(lv.ty.t)) this.err('field name not in record or union initializer');
         this.next();
@@ -1764,7 +1833,7 @@ export class CGen {  /**
         lv.i = k;
       } else {
         this.skip(ASSIGN);
-        return;
+        return 1;
       }
       if (this.tok !== LBRACK && this.tok !== DOT) continue;
       const el = this.initElem(lv);
