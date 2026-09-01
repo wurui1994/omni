@@ -114,11 +114,11 @@
 // （调用、回调、函数指针表、当静态初始化式）、**浮点**（`float`/`double`、与整型互转、
 // 静态初始化式、printf 的 `%f/%e/%g`）、**堆**（`malloc`/`calloc`/`realloc`/`free`/
 // `strdup`，簿记全在线性内存上）、**变参函数的定义**（`va_list`/`va_start`/`va_arg`/
-// `va_end`/`va_copy`，签名定死成「固定形参 + 一个变参区指针」）、**`exit`**（宿主抛一个
-// 信号，从任意深处一路退出去）**。
+// `va_end`/`va_copy`，签名定死成「固定形参 + 一个变参区指针」，**通过函数指针调也行**）、
+// **`exit`**（宿主抛一个信号，从任意深处一路退出去）、**函数类型的 typedef**
+// （`typedef int cb(int);`，之后能当声明符的基本类型用）**。
 // 还没到：`goto` 跳到不在外围块上的标签（relooper 那一路）、标签长在里层控制结构里
-// （Duff's device）、**外部**函数上的 struct 传值/返回（要真的 ABI）、通过函数指针调
-// **变参**函数、函数类型的 typedef、`long double`（它不是
+// （Duff's device）、**外部**函数上的 struct 传值/返回（要真的 ABI）、`long double`（它不是
 // double）、整型的**静态**初始化式里的浮点常量、printf 的 `%a`、
 // 把 struct 传进变参的可变部分、从变参里 `va_arg` 出 struct 或大于 8 字节的东西、
 // 串起来的指定初始化器（`.a.b = 3`）、不定长数组配省掉里层花括号（`int a[][2] = {1,2,3,4}`）。
@@ -1922,11 +1922,14 @@ export class CGen {  /**
    * 通过函数指针调用（第十三片）。`fnTy` 是**函数类型**（不是指针），`callee` 是
    * 函数指针值的 ref。直接调用照旧发 `CALL`（下标是常量，一条指令就够）——
    * 只有这里发 `CALLI`。
+   *
+   * 变参也走这一条（第十九片）：第十六片把变参函数的签名定死成「固定形参 + 一个变参区
+   * 指针」之后，间接调用与直接调用的实参形状就是同一个，这儿只要把 `variadic` 那一位
+   * 交给 `callArgs`。
    */
   indirectCall(fnTy, callee) {
     const fi = fnTy.ref;
-    if (fi.variadic) this.todo('通过函数指针调变参函数还没到（要 CCALL 那条路）');
-    const a = this.callArgs('function pointer', fi.params, false, fi.ret);
+    const a = this.callArgs('function pointer', fi.params, fi.variadic, fi.ret);
     const r = this.f.emit(OP.CALLI, mirTypeOf(fi.ret), callee, this.f.pushArgs(a.refs), 0);
     if (a.sret !== null) return sMem(fi.ret, r, 0);
     return sVal(fi.ret, r);
@@ -3573,7 +3576,6 @@ export class CGen {  /**
         const d = this.declarator(base, 'need');
         const name = /** @type {string} */ (d.name);
         if (isTypedef) {
-          if (isFunc(d.ty.t)) this.todo('函数类型的 typedef 还没到');
           /* `typedef` 不声明对象，只给一个类型起名。重复的 typedef 是合法的（C11
            * 6.7 第 3 段：同一个类型可以说两遍），不同类型的重名才是错。 */
           const prev = this.typedefs.get(name);
