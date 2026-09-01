@@ -1459,7 +1459,16 @@ export class Cpp {
            * 而且 `#endif` 恰好在末尾，就把它登记成 include 守卫（`tccpp.c:1842-1848`）。
            * 这是 tcc 不用 `#pragma once` 也能跳过重复 include 的办法。 */
           if (bof && c) this.file.ifndefMacro = this.tok;
-          if (this.defineFind(this.tok) !== null) c ^= 1;
+          /* `#ifdef __has_include` 也是**真**（`tccpp.c:1850-1853`，与 `defined` 那一格
+           * 同一条判断）。少了这一下，macOS 的 `<sys/cdefs.h>` 会走「这编译器没有
+           * `__has_include`」那一支、把它 `#define` 成一个恒回 0 的宏 —— 从那以后
+           * SDK 里每一处 `__has_include(...)` 都答「没有」，整份头文件的配置全变。
+           * 第一处看得见的后果：`malloc/_malloc.h:35` 因此去 `#include <stddef.h>`，
+           * 于是 `offsetof` 提前有了定义，`tcc.h:107` 那个 `#ifndef offsetof` 就不成立。 */
+          if (this.defineFind(this.tok) !== null
+            || this.tok === TOK___HAS_INCLUDE || this.tok === TOK___HAS_INCLUDE_NEXT) {
+            c ^= 1;
+          }
           this.nextNomacro();
           this.ifdefStack.push(c);
           if (!(c & 1)) {

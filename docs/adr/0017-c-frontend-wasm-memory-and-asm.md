@@ -288,7 +288,7 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
 8. **C 的库面**：`libtcc1` 的等价物（软除法/浮点辅助/`alloca`/`setjmp`）与 libc 的接法。
    原先写的是"先转手宿主的 libc，走既有的 extern-C FFI"，第五片证明**转手不成立**
    （指针是自家线性内存里的偏移，宿主 libc 读不到），改成一个读写线性内存的宿主模块，
-   见第五片的落地节。**前二十片已落地**（预定义的宏 —— 目标的自述，五十条，
+   见第五片的落地节。**前二十一片已落地**（预定义的宏 —— 目标的自述，五十条，
    顺序与值都对着 `tcc -dM -E` 抄；自带的系统头目录 + 编译器必须自己给的那四份头；
    `stdio.h`/`stdlib.h`/`string.h` 的最小子集 —— libc 的自述；
    `strtol` 一族与 `strncpy`/`strchr`/`strstr` 那几条；
@@ -308,8 +308,9 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
    收起来的记号串带着行号；
    **tinycc 自己那一整份源码编过了** —— `__func__`、常量表达式里的 `sizeof 表达式`、
    转换的常量折叠（于是 `offsetof` 是常量）、`inline` 的体等被引用才发、
-   `__builtin_expect`），
-   见下面的第八刀第一到二十片节。
+   `__builtin_expect`；
+   **预处理那一路也与 `tcc -E -P` 逐字节相同** —— `#ifdef __has_include` 也算真），
+   见下面的第八刀第一到二十一片节。
 
 最后三步是**后端**：
 
@@ -4158,6 +4159,91 @@ tcc 编得过，正是因为它连体都还没读。
 之后：`-dM`、`__has_include_next`、路径 A 的 GLR 与路径 B 对账（第七步）。
 
 <!-- 第八刀第二十片-END -->
+
+## 落地：第八刀第二十一片
+
+**整份 tinycc 的预处理输出与 `tcc -E -P` 逐字节相同。**
+
+```
+node stage0/src/cli.js cpp -I"$SDK/usr/include" -I.omni-cache/tcc-build \
+  -I"$TCCSRC" -DONE_SOURCE=1 -DTCC_TARGET_ARM64 "$TCCSRC/tcc.c"
+cmp 出来 IDENTICAL —— 27825 行
+```
+
+### 一 `#ifdef __has_include` 也是真
+
+`tccpp.c:1850-1853` 与 `tccpp.c:1464-1466` 是**同一条**判断：
+
+```c
+if (define_find(tok) || tok == TOK___HAS_INCLUDE || tok == TOK___HAS_INCLUDE_NEXT)
+```
+
+前者在 `#ifdef` / `#ifndef` 上，后者在 `defined` 上。我们只补了后者（第十八片）。
+
+一行之差，后果是整份系统头换了一套配置：macOS 的 `<sys/cdefs.h>` 里那句
+`#ifndef __has_include` 对我们成立，于是它把 `__has_include` **`#define` 成一个恒回
+0 的宏**。从那一刻起 SDK 里每一处 `__has_include(...)` 都答「没有」。
+
+第一处看得见的后果隔了三层：`malloc/_malloc.h:35`
+
+```c
+#if __has_include(<sys/_types/_size_t.h>)
+#include <sys/_types/_size_t.h>
+#else
+#define __need_size_t
+#include <stddef.h>
+#endif
+```
+
+我们走 `#else`，于是 `<stdlib.h>` 就把 `<stddef.h>` 拖进来了，`offsetof` 提前有了
+定义，而 `tcc.h:107` 是
+
+```c
+#ifndef offsetof
+#ifdef __clang__
+#define offsetof(type, field) __builtin_offsetof(type, field)
+#else
+#define offsetof(type, field) ((size_t) &((type *)0)->field)
+#endif
+#endif
+```
+
+`#ifndef` 不成立，于是 tinycc 全篇的 `offsetof` 展开式与 tcc 不一样。找这一格是从
+输出的第 7454 行倒着追到第 1 行的：**`-E` 逐字节比是唯一能把这种「配置分岔」逼出来的
+工具** —— 编译那一路照样 exit=0，因为两种 `offsetof` 算出来的数是同一个。
+
+顺带记一笔查法：`#ifdef X`（X 逐个换成 tcc.h 前 107 行 include 的那些头）在两条腿上
+的真假表，一次就把范围缩到 `<stdlib.h>`；再往里两层缩到 `malloc/_malloc.h`。
+
+### 二 自带的 `<stdarg.h>` 照 tcc 那份
+
+输出第 2 行就不同：tcc 的 `include/stdarg.h:11` 有一条
+`typedef va_list __gnuc_va_list;`（原注释：fix a buggy dependency on GCC in libio.h；
+macOS 的 `<_stdio.h>` 也认这个名字）与 `#define _VA_LIST_DEFINED`，我们那份没有。
+
+同一份文件里那四个 `va_*` 在 tcc 那边是**对象式**宏，不是函数式的
+（`include/stdarg.h:5-8`）。差别在 `-E` 的输出上看得见：`va_start` 单独出现时
+对象式那种会展开成 `__builtin_va_start`，函数式那种原样留下。照 tcc。
+
+### 量出来的数
+
+- 整份 tinycc（`tcc.c`，arm64 + ONE_SOURCE，27825 行输出）：`cpp` 的输出与
+  `tcc -E -P` **逐字节相同**。改之前是 111 行 diff。
+- 编译那一路照旧 exit=0（`c-mir`，98200 行 MIR）。
+- `tests/c/cpp/08-has-include.c` 多了四格：`#ifdef` / `#ifndef` 认它、
+  `__has_include_next` 也认、真的被 `#define` 掉之后 `#ifdef` 照样是真而调用走那个宏。
+- `tests/c/run.js`：**78 passed, 0 failed**。
+
+### 下一片
+
+第八刀第二十二片：**把那 98200 行 MIR 喂给 verifier 与解释器**。
+「生成出来了」与「跑得动」是两件事，中间隔着 struct 按值传/返回（`div`、
+`__sincosf_stret` 那一类），而那要真的 ABI —— 也就是第 9-11 步的后端。
+所以下一步大概是先把 verifier 过一遍、把「哪些指令我们发得出但跑不动」列成一张表。
+
+之后：`-dM`、`__has_include_next`、路径 A 的 GLR 与路径 B 对账（第七步）。
+
+<!-- 第八刀第二十一片-END -->
 
 
 
