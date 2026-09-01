@@ -7,6 +7,12 @@ export const JS_PRELUDE = String.raw`
 const $W = (x) => BigInt.asIntN(64, x);
 const $INT_MIN = -(2n ** 63n);
 
+// 运行期错误的去处：默认是"打一行、退 70"（与 C 侧 omni_error 逐字对齐）。
+// REPL 的 js 引擎会装一个钩子进来 —— 它 throw，于是一批跑挂了只掀翻那一批，不掀翻会话。
+// 钩子存在这一份运行时模块自己的槽里（不是 globalThis）：prelude 内部那些函数引用的是
+// 这个词法绑定，改 globalThis 上的同名副本对它们无效。
+let $onRtError = null;
+function $js_set_error_hook(f) { $onRtError = f; }
 function $rt_error(msg) {
   $flush();  // 先冲刷 stdout，和 C 运行时里 omni_error 的 fflush(stdout) 对齐
   // OMNI_RT_TRACE=1 时连 JS 栈一起印（只调试用）：运行期的错只有一句话，
@@ -14,6 +20,7 @@ function $rt_error(msg) {
   if (process.env.OMNI_RT_TRACE === "1") {
     process.stderr.write(new Error("omni rt: " + msg).stack + "\n");
   }
+  if ($onRtError !== null) $onRtError(msg);
   process.stderr.write("omni: runtime error: " + msg + "\n");
   process.exit(70);
 }
@@ -1694,10 +1701,13 @@ function $js_cabi_unavailable(sym) {
 }
 // 宿主里跑一段生成的 JS（omni run 与 REPL 的进程内快路径）。原生构建里没有 JS
 // 引擎，C 侧那两个同名函数只会报错 —— 这是宿主面唯一"只有一代能做"的能力。
+// 间接 eval 而不是 new Function：后者的函数体是一层函数作用域，片段里的函数声明与
+// var 都关在里面，下一次调用看不见。REPL 的 js 引擎要的正相反 —— 一批输入编出一段
+// 片段，装进同一个全局作用域，于是上一批的函数与全局量这一批还在（增量）。
 function $js_eval(code) {
   $flush();
-  new Function($js_asS16(code))();
-  return undefined;
+  const indirect = eval;
+  return indirect($js_asS16(code));
 }
 // 同上，但把 stdout/stderr 收进字符串，结果是 [out, err, failed]。REPL 要靠它算
 // "这次输入多打出来的那一段"，而且被跑的代码里 $rt_error 会 process.exit(70)，

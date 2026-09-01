@@ -26,10 +26,10 @@
 // 默认模式是 `dynamic`（ADR-0008 第 3 节）：REPL 里 `x = 1` 之后 `x = "s"` 必须能过，
 // 而混合模式下推断出来的变量是单态的。`--mode` 可覆盖。
 
-import { stdout, stderr, stdinIsTty, readLine } from './host/native.js';
+import { stdout, stderr, stdinIsTty, readLine, evalJs, hasJsEngine } from './host/native.js';
 import { SourceFile, Diagnostics, OmniError } from './source/diag.js';
 import { lex } from './parse/lexer.js';
-import { emitJs } from './backend-js/emit.js';
+import { emitJs, emitJsRuntimeModule } from './backend-js/emit.js';
 import { emitC } from './backend-c/emit.js';
 import { loadProgram, newLoadState } from './module/load.js';
 import { check, CheckSession } from './hir/check.js';
@@ -372,13 +372,82 @@ function replLang(name, mode, deps) {
 }
 
 /**
+ * 执行引擎之二：**JS 后端**（`--engine js`）。
+ *
+ * 与解释器那一份的差别只在"一批怎么跑"，装进会话的接口是同一个（install / runEntry），
+ * 所以驱动、回滚、跨批可见性一行都不用改。增量在这一层是这样成立的：
+ *   - 运行时那一份（prelude + 两张派发表）**只装一次**，它自己把顶层名字挂到 globalThis；
+ *   - 每批只发这一批的片段（`emitJs(..., {repl: true})`），装进**同一个全局作用域** ——
+ *     于是第 1 批的函数与模块级变量第 2 批照样看得见，旧批次一个字节都不重发。
+ * 每批发出去的字节数因此是常数（tests/repl/incremental.js 钉的就是这个数）。
+ *
+ * 这一格要的是**第三方 JS 引擎**（node 的 eval），不是"JS 能力" —— 原生构建里 JS 源码
+ * 照样能编能跑（前端 + 别的后端，tests/js-exec 那条轴在自举出来的编译器上也过），
+ * 缺的只是"把一段 JS 文本当程序直接跑"的那一步。所以 newEngine 在没有引擎的宿主上
+ * 报的是这句话，而不是"这边没有 JS"。把它补上的路子是让**后端的产物落回前端**
+ * （generated JS 走 frontend-js -> OIR -> 解释器），那要先把产物用到的 JS 收进子集
+ * （已经补了带标签的 break/continue；还差 Object.is、`>>>`、process.exit、2^64 字面量，
+ * 以及一张"prelude 的 $ 辅助名字 -> 运行时原语"的表）。
+ */
+export class JsSession {
+  constructor() {
+    evalJs(emitJsRuntimeModule());
+    // 运行期错误默认是"打一行、退 70"，在 REPL 里那等于杀掉会话。装个钩子改成 throw；
+    // 消息先落在一个全局槽里，于是**跨回这一侧的只有字符串**（宿主的异常对象在这个
+    // 值域里不是 dict，漏进来就是一句莫名的 "function is not an object"）。
+    evalJs('$js_set_error_hook(function (m) {'
+      + ' globalThis.$OMNI_REPL_ERR = "rt:" + m; throw new Error("omni-repl-abort"); });');
+    this.lastBytes = 0;
+  }
+
+  install(mod) {
+    const src = emitJs(mod, { repl: true });
+    this.lastBytes = src.length;
+    evalJs(src);
+  }
+
+  runEntry(name) {
+    // try/catch 与"取待决错误"都写在被 eval 的那段里，理由同上：边界上只过字符串。
+    const st = evalJs(`(function () {
+      globalThis.$OMNI_REPL_ERR = "";
+      try { ${name}(); } catch (e) { if (globalThis.$OMNI_REPL_ERR === "") throw e; }
+      $flush();
+      if ($js_pending()) {
+        globalThis.$OMNI_REPL_ERR = "uncaught:" + $js_asS16($js_str($js_take_pending()));
+      }
+      return globalThis.$OMNI_REPL_ERR;
+    })()`);
+    if (st === '') return { failed: false, err: '' };
+    if (st.startsWith('rt:')) return { failed: true, err: `omni: runtime error: ${st.slice(3)}\n` };
+    return { failed: true, err: `omni: uncaught: ${st.slice(9)}\n` };
+  }
+}
+
+/** 引擎名 -> 一份常驻运行期。表在这里，加一条就多一个方向。 */
+function newEngine(name) {
+  if (name === 'interp') return new InterpSession();
+  if (name === 'js') {
+    // 能力先问再用（宿主的错误不是可以 catch 的异常）。这句话要说清缺的是**哪一格**：
+    // 不是"这边没有 JS"，而是"这边没有能直接吃 JS 文本的引擎"。
+    if (!hasJsEngine()) {
+      throw new OmniError('omni: repl --engine js needs a host that can evaluate JS text '
+        + "(the node host can; this build cannot). JS *sources* still compile and run here "
+        + "— try 'omni run x.js' — and the repl's other engines are unaffected.");
+    }
+    return new JsSession();
+  }
+  throw new OmniError(`unknown repl engine '${name}' (interp | js)`);
+}
+
+/**
  * 会话驱动。与语言无关：它只知道"编译一批、装进运行期、跑这一批的入口"。
  */
 class Session {
-  constructor(langName, mode, deps) {
+  constructor(langName, mode, deps, engine) {
     this.langName = langName;
     this.mode = mode;
     this.deps = deps;
+    this.engine = engine === undefined ? 'interp' : engine;
     this.lang = null;
     this.rt = null;
     /** @type {string[]} 已接受的源码块，按输入顺序（只为 `:list` 与 `:js`/`:c` 而留） */
@@ -389,7 +458,7 @@ class Session {
   /** 开一份干净的会话状态。`:reset` 就是再开一份 —— 没有"要清哪些表"的清单要维护。 */
   boot() {
     this.lang = replLang(this.langName, this.mode, this.deps);
-    this.rt = new InterpSession();
+    this.rt = newEngine(this.engine);
     this.chunks = [];
     const pre = this.lang.prelude();
     // 隐式前言自成第 0 批：跑它是为了让被导入模块的顶层初始化真的发生
@@ -530,9 +599,10 @@ function command(s, line) {
  * @param {string} mode 缺省类型注解的处理方式（ADR-0008）
  * @param {string} [lang] 语言（`--lang`）；默认 omni
  * @param {any} [deps] 需要文件 IO / 语法表的那些零件，由 cli.js 注入（asy 用）
+ * @param {string} [engine] 执行引擎（`--engine`）：interp | js；默认 interp
  */
-export function startRepl(mode, lang = 'omni', deps = undefined) {
-  const s = new Session(lang, mode, deps);
+export function startRepl(mode, lang = 'omni', deps = undefined, engine = 'interp') {
+  const s = new Session(lang, mode, deps, engine);
   const tty = stdinIsTty();
   let buf = '';
 

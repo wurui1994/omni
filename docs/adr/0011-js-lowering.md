@@ -481,6 +481,16 @@ Break / Continue / Return，所以形状是定下来的：
   `omni run` 只能走"编成 C 再执行"那条路，这条快路径要挂在能力检查后面。
   顺带：prelude 里因此不能出现 `import` —— 它整段也会被 `new Function` 吃进去，
   宿主模块一律走 `process.getBuiltinModule`。
+  **改过一次**：这一格现在是**间接 eval**，不是 `new Function`。REPL 的 js 引擎要的是
+  "一批一段片段，装进同一个全局作用域"，而 `new Function` 的函数体是一层函数作用域 ——
+  片段里的函数声明与 `var` 都关在里面，下一批看不见（ADR-0013 决策 6）。
+- **带标签的 `break L` / `continue L` 收进子集了**（原先当场拒）。降级成 OIR 的多层
+  Break/Continue（`level`）：标签只许打在循环上，level 数的是 **OIR 的**循环层数，
+  所以 switch 与 try 摊出来的那层合成循环也算进去 —— 于是"跨过一个 switch 的 `break L`"
+  就是多跳一层，不需要 switch 那套标志位。跨 try 仍然拒：try 的合成循环出来之后紧跟着
+  pending 检查（catch 长在那儿），从里面跳出去等于跳过 catch。
+  收它的直接动机是**让后端的产物落回前端**：`backend-js/emit.js` 的 `pushLoop` 发的就是
+  `$L0:` + `break $L0`，不认标签的话生成出来的 JS 连自己的前端都过不去。
 
 ## 已知风险
 

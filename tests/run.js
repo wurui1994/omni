@@ -154,18 +154,23 @@ if (existsSync(replDir)) {
     if (filters.length && !filters.some((x) => f.includes(x))) continue;
     const path = join(replDir, f);
     const m = /^session-([a-z]+)\.in$/.exec(f);
-    const args = m ? [CLI, 'repl', '--lang', m[1]] : [CLI, 'repl'];
-    // 管道输入时 REPL 不打提示符，所以 stdout 可以逐字节比对
-    const r = spawnSync(process.execPath, args, {
-      encoding: 'utf8', cwd: root, input: readFileSync(path, 'utf8'),
-    });
-    const got = { stdout: r.stdout ?? '', stderr: r.stderr ?? '', code: r.status ?? -1 };
-    if (hostCrash(got.stderr)) {
-      record(`${f} [host crash]`, false, show('repl', got));
-      continue;
+    const input = readFileSync(path, 'utf8');
+    // 同一份 .in 喂给**每个执行引擎**，对的是同一份快照：REPL 的引擎换了，
+    // 会话的可见行为一个字节都不该变（这才是"所有方向都增量"里"所有方向"那半句）。
+    for (const eng of ['interp', 'js']) {
+      const args = [CLI, 'repl', ...(m ? ['--lang', m[1]] : []), '--engine', eng];
+      // 管道输入时 REPL 不打提示符，所以 stdout 可以逐字节比对
+      const r = spawnSync(process.execPath, args, { encoding: 'utf8', cwd: root, input: input });
+      const got = { stdout: r.stdout ?? '', stderr: r.stderr ?? '', code: r.status ?? -1 };
+      if (hostCrash(got.stderr)) {
+        record(`${f} [${eng}] [host crash]`, false, show('repl', got));
+        continue;
+      }
+      const actual = `exit ${got.code}\n--- stdout ---\n${got.stdout}--- stderr ---\n${got.stderr}`;
+      if (checkSnapshot(`${f} [${eng}]`, path.replace(/\.in$/, '.expected'), actual)) {
+        record(`${f} [repl ${eng}]`, true, '');
+      }
     }
-    const actual = `exit ${got.code}\n--- stdout ---\n${got.stdout}--- stderr ---\n${got.stderr}`;
-    if (checkSnapshot(f, path.replace(/\.in$/, '.expected'), actual)) record(`${f} [repl]`, true, '');
   }
   // 增量性是**结构性**判据，钉不到快照里（快照只看输出，不看每批干了多少活），
   // 所以单独一个脚本：见 tests/repl/incremental.js 的头注。

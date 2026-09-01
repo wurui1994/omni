@@ -166,6 +166,53 @@ JS 域的函数只有一个签名 `fn(list<dynamic>) -> dynamic`，形参**是�
 两条都不是解释器的 bug，是子集的边界。挡住它们的是 `tests/bootstrap` 阶段 7 —— 只有
 在原生构建上真跑一遍解释器，这类分歧才会暴露。
 
+## 决策 6：REPL 的执行引擎是可换的一格，每条腿都得自己增量
+
+REPL 的驱动（读行、续行、回显、命令、失败回滚）与"哪个运行期跑这一批"是两件事，接缝就是
+两个方法：`install(delta)` 把一批新增的 OIR 并进常驻状态，`runEntry(name)` 跑这一批的入口
+并把运行期失败收成 `{failed, err}`。`--engine` 选的就是这一格（`stage0/src/repl.js` 的
+`newEngine`）：
+
+- `interp`（默认）：`interp/eval.js` 的 `InterpSession`。函数表/全局量/**顶层 Env** 常驻，
+  每批的入口函数跑在同一个 Env 里，所以第 1 批的 `x` 第 2 批还在。
+- `js`：`repl.js` 的 `JsSession`。运行时那一份（prelude + 两张派发表）只装一次，每批只发
+  这一批的片段（`emitJs(delta, {repl: true})`），装进**同一个全局作用域**。
+
+两条腿对的是**同一份会话快照**（`tests/repl/session*.expected`，每个引擎各跑一遍）：引擎换了，
+会话的可见行为一个字节都不该变。增量性另有结构性判据（`tests/repl/incremental.js`）——
+解释器那几段钉"每批新检查的函数个数是常数"，js 这段钉"每批 install 的字节数是常数"。
+
+JS 这条腿上有三件事必须专门解决，它们都是"一批一段、装进同一个全局"这个形态逼出来的：
+
+- **模块级名字要跨批活着**：间接 eval（不是 `new Function`，也不是直接 eval）——
+  只有它让片段里的函数声明与 `var` 落在全局上。`var g_x;`（不带初值）在那里的语义正好是
+  "没有就建、已经有就保留原值"，所以第 2 批重新声明不会清掉第 1 批的值；`let` 只活在那一段
+  片段里，下一批根本看不见。
+- **会话的顶层变量不是全局量，是入口函数最外层的局部量**（解释器靠常驻 Env 让它活着）。
+  JS 上函数体就是函数作用域，所以最外层那几条 `Local` 得提成模块级的 `var`
+  （`backend-js/emit.js` 的 `hoistTop`）。只提最外层：`for` 体里的同名局部量仍然是 `let`，
+  它在解释器那边也是子 Env。
+- **运行期错误不能退进程**：`$rt_error` 默认是"打一行、退 70"，那在 REPL 里等于杀掉会话。
+  prelude 因此留了 `$js_set_error_hook`；钩子把消息放进一个全局槽再 throw，于是**跨回驱动
+  那一侧的只有字符串** —— 宿主的异常对象在这个值域里不是 dict，漏进来就是一句莫名的
+  "function is not an object"。钩子存在运行时模块自己的词法槽里，不是 globalThis 上的副本。
+
+`js` 这一格要的是**能直接吃一段 JS 文本的引擎**，不是"JS 能力"。这两件事必须分开说：
+原生构建里 JS *源码* 照样能编能跑（前端 + 任一后端；`tests/js-exec` 那条轴在自举出来的
+编译器上也过，`omni run x.js` 在原生二进制上就是走 C 路径），缺的只是"把一段 JS 文本当
+程序直接跑"的那一步 —— 所以 `newEngine` 在那种宿主上报的是这句话，而不是"这边没有 JS"。
+
+要把这一格也补齐，路子是让**后端的产物落回前端**：generated JS 走 frontend-js -> OIR ->
+解释器。已经量过差什么了 —— 带标签的 `break L` / `continue L` 已经收进子集（降级成 OIR 的
+多层 Break/Continue，见 frontend-js 的 `labelLevel`；`tests/js-exec/cases/02-control.js`
+钉住），还差 `Object.is`、`>>>`、`process.exit`、`2^64` 这个字面量，以及一张"prelude 的
+`$` 辅助名字 -> 运行时原语"的表。补完之后原生构建上的 `--engine js` 就不是一句错误，
+而是"JS 后端发的产物，由自己的 JS 前端 + 解释器执行"。
+
+其余方向（`mir` / `c` / `jit`）在原生与 node 上都成立，待做：`mir` 要给 `mir/interp.js`
+一个会话（今天只有整程序的 `interpretMir`），`c` 是常驻宿主 + 每批 dlopen 一个增量模块，
+`jit` 是把 `stage0/jit/omni_jit.c` 改成能收多份 `.ll` 的常驻宿主。
+
 ## 借鉴与对照
 
 量过 `reference/quickjs-2026-06-04` 的源码之后，逐条对照（行号是那份快照里的）：

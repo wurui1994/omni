@@ -361,8 +361,15 @@ class Lower {
       captured: capturedNames(bodyStmts), uses: new Set(), isMain: !!opts.isMain,
       // try 的嵌套深度，以及每层 try 进去时的循环层数（用来拦跨 try 的 break/continue）
       tries: 0, tryLoops: [],
+      // 每层 try 进去时的 OIR 循环层数（带标签的跳转要用它拦"跳过 catch"）
+      tryOLoops: [],
       // 每层 switch 进去时的循环层数，以及那层的"出去之后要 continue"标志位（懒声明）
       switchLoops: [], switchFlags: [],
+      // **OIR 的**循环层数，以及每个还在作用域里的标签记下的那一层。
+      // 与 loops 的差别是它把合成的循环也算进去（switch / try / do-while 各摊出一个
+      // while(true)）—— OIR 的 Break/Continue 的 level 数的正是 OIR 的层数，
+      // 所以带标签的跳转只能按这个数算。
+      oloops: 0, labels: [],
     };
     if (opts.outerScopes) {
       // 外层可见的 cell 全摆进捕获层；lookup 命中过的才会真进闭包记录
@@ -691,8 +698,10 @@ class Lower {
       }];
       case 'While': {
         this.fn.loops++;
+        this.fn.oloops++;
         const cond = this.lazy(() => truthy(this.expr(s.test)));
         const st = { kind: 'While', cond, body: this.bodyBlock(s.body) };
+        this.fn.oloops--;
         this.fn.loops--;
         return [st];
       }
@@ -709,7 +718,16 @@ class Lower {
           return [{ kind: 'Return', value: this.readEntry(this.lookup('this')) }];
         }
         return [{ kind: 'Return', value: s.arg ? this.expr(s.arg) : undefExpr() }];
+      case 'Labeled': {
+        // 标签只打在循环上（parser 那边保证）。记下"进了这层循环之后 OIR 有多少层"，
+        // 里面的 `break L` 就能算出要跳出几层。
+        this.fn.labels.push({ name: s.label, depth: this.fn.oloops + 1 });
+        const st = this.stmt(s.body);
+        this.fn.labels.pop();
+        return st;
+      }
       case 'Break':
+        if (s.label) return [{ kind: 'Break', level: this.labelLevel(s, 'break') }];
         if (this.crossesTry()) {
           this.err(s.span, "'break' cannot cross a try boundary; restructure the try");
         } else if (this.fn.loops === 0 && this.fn.switches === 0) {
@@ -718,6 +736,7 @@ class Lower {
         return [{ kind: 'Break' }];
       case 'Continue':
         // do-while 摊成 while(true) 之后，continue 会跳过尾部的条件检查
+        if (s.label) return [{ kind: 'Continue', level: this.labelLevel(s, 'continue') }];
         if (this.crossesTry()) {
           this.err(s.span, "'continue' cannot cross a try boundary; restructure the try");
         } else if ((this.fn.doWhiles ?? 0) > 0) {
@@ -869,9 +888,11 @@ class Lower {
   /** do-while：OIR 没有 do-while，摊成 while(true) { body; if (!test) break; } */
   doWhile(s) {
     this.fn.loops++;
+    this.fn.oloops++;
     this.fn.doWhiles = (this.fn.doWhiles ?? 0) + 1;
     const body = this.bodyBlock(s.body);
     this.fn.doWhiles--;
+    this.fn.oloops--;
     this.fn.loops--;
     body.stmts.push({
       kind: 'If',
@@ -898,7 +919,9 @@ class Lower {
     const cond = s.test ? this.lazy(() => truthy(this.expr(s.test))) : { kind: 'Const', type: BOOL, value: true };
     const step = s.update ? this.lazy(() => this.exprDiscard(s.update)) : null;
     this.fn.loops++;
+    this.fn.oloops++;
     const body = this.bodyBlock(s.body);
+    this.fn.oloops--;
     this.fn.loops--;
     this.popScope();
     // init 摊在 For 外面（多个声明时 OIR 的 init 放不下），所以套一层块管作用域
@@ -922,8 +945,10 @@ class Lower {
     const cond = boolOp('js_cmp', [varRef(i), op('js_p_length', [varRef(it)])], { op: '<' });
     const step = assign(varRef(i), op('js_add', [varRef(i), constReal(1)]));
     this.fn.loops++;
+    this.fn.oloops++;
     const inner = this.bindPattern(s.left, op('js_idx_get', [varRef(it), varRef(i)]));
     const body = this.bodyBlock(s.body);
+    this.fn.oloops--;
     this.fn.loops--;
     this.popScope();
     return [block([...pre, { kind: 'For', init: null, cond, step, body: block([...inner, ...body.stmts]) }])];
@@ -942,6 +967,8 @@ class Lower {
     const pre = [localStmt(d, this.expr(s.disc))];
     this.fn.switches++;
     this.fn.switchLoops.push(this.fn.loops);
+    // 下面那层合成的 while(true) 在 OIR 里是**一层真的循环**，case 体是在它里面降的
+    this.fn.oloops++;
     this.fn.switchFlags.push(null);
     /** @type {{tests: any[], body: any[]}[]} */
     const groups = [];
@@ -971,6 +998,7 @@ class Lower {
       chain = { kind: 'If', cond, then: block(g.body), otherwise: chain ? block([chain]) : null };
     }
     this.fn.switches--;
+    this.fn.oloops--;
     this.fn.switchLoops.pop();
     const flag = this.fn.switchFlags.pop();
     this.popScope();
@@ -985,6 +1013,32 @@ class Lower {
       loop,
       { kind: 'If', cond: truthy(varRef(flag)), then: block(this.continueStmts()), otherwise: null },
     ])];
+  }
+
+  /**
+   * 带标签的跳转要跳出/继续第几层 OIR 循环。
+   *
+   * level 数的是 **OIR** 的层数，所以 switch 与 try 摊出来的那层合成循环也算 ——
+   * 这也正是"跨过一个 switch 的 `break L`"能一句话说清的原因：它就是多跳一层。
+   * 跨 try 不行：try 的合成循环出来之后紧跟着 pending 检查（catch 就长在那儿），
+   * 从里面跳出去等于跳过 catch。
+   */
+  labelLevel(s, what) {
+    const labs = this.fn.labels;
+    let ent = null;
+    for (let i = labs.length - 1; i >= 0; i--) {
+      if (labs[i].name === s.label) { ent = labs[i]; break; }
+    }
+    if (ent === null) {
+      this.err(s.span, `no enclosing label '${s.label}' for '${what}'`);
+      return 1;
+    }
+    const tries = this.fn.tryOLoops;
+    if (tries.length > 0 && ent.depth <= tries[tries.length - 1]) {
+      this.err(s.span, `'${what} ${s.label}' cannot cross a try boundary; restructure the try`);
+      return 1;
+    }
+    return this.fn.oloops - ent.depth + 1;
   }
 
   /** 当前位置的 `continue` 该发什么：switch 是一层合成循环，得靠标志位翻出去 */
@@ -1019,9 +1073,13 @@ class Lower {
     if (!s.handler) { this.err(s.span, "'try' needs a 'catch'"); return []; }
     this.fn.tries++;
     this.fn.tryLoops.push(this.fn.loops);
+    this.fn.oloops++;   // try 体也摊在一层合成的 while(true) 里
+    this.fn.tryOLoops.push(this.fn.oloops);
     this.pushScope();
     const body = s.block.body.flatMap((x) => this.stmt(x));
     this.popScope();
+    this.fn.tryOLoops.pop();
+    this.fn.oloops--;
     this.fn.tryLoops.pop();
     this.fn.tries--;
     const loop = {

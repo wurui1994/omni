@@ -503,8 +503,16 @@ class Gen {
         return;
       }
 
-      case 'Break': this.emit('break;'); return;
-      case 'Continue': this.emit('continue;'); return;
+      case 'Break': this.emit(s.label ? `break ${s.label};` : 'break;'); return;
+      case 'Continue': this.emit(s.label ? `continue ${s.label};` : 'continue;'); return;
+
+      // 带标签的循环：标签只打在循环上（parser.labeled 保证），所以这里就是一行前缀
+      case 'Labeled': {
+        this.emit(`${s.label}:`);
+        this.nl();
+        this.stmt(s.body);
+        return;
+      }
 
       case 'If': {
         this.emit('if (');

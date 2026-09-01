@@ -9,6 +9,7 @@
 import { CheckSession } from '../../stage0/src/hir/check.js';
 import { CoreSession } from '../../stage0/src/sexpr/lower.js';
 import { InterpSession } from '../../stage0/src/interp/eval.js';
+import { JsSession } from '../../stage0/src/repl.js';
 import { loadProgram, newLoadState } from '../../stage0/src/module/load.js';
 import { Diagnostics, SourceFile } from '../../stage0/src/source/diag.js';
 import { AsySession } from '../../stage0/src/frontend-asy/lower.js';
@@ -126,6 +127,49 @@ const ok = (msg) => process.stdout.write(`  ok   ${msg}\n`);
   const flat = counts.slice(1).every((c) => c === first);
   if (!flat) bad(`asy 每批新降级的函数个数不是常数：${counts.join(',')}`);
   else ok(`asy ${M} 批，每批新降级 ${first} 个函数（常数）`);
+}
+
+// ------------------------------------------------ js 后端那条腿（--engine js 的增量性）
+//
+// 解释器那几段钉的是**前端**的增量（每批新检查的函数个数）。执行引擎换成 JS 后端之后，
+// 增量还得在"每批发出去多少代码"上成立：运行时那一份（prelude + 两张派发表）只装一次，
+// 每批只发这一批的片段，旧批次一个字节都不重发。所以判据是 install 的字节数是常数。
+//
+// 函数名补齐成三位数（f001…f040）：不补的话 f9 -> f10 那一批会多一个字符，
+// "常数"就得换成"约等于常数"，那种判据钉不住东西。批号（omni_chunk_10 比
+// omni_chunk_9 长一位）同理，那个名字每批出现一次，所以从字节数里减掉它。
+{
+  const cs = new CoreSession();
+  const rt = new JsSession();
+  const nm = (k) => `f${String(k).padStart(3, '0')}`;
+  const bytes = [];
+  for (let i = 1; i <= N; i++) {
+    const diags = new Diagnostics();
+    const text = i === 1
+      ? `(fn ${nm(1)} ((n int)) int (ret (bin "+" (var n) (int 1))))\n(let base int (int 100))\n`
+      : `(fn ${nm(i)} ((n int)) int (ret (bin "+" (call ${nm(i - 1)} (var n)) (int 1))))\n`
+        + `(let r${nm(i)} int (call ${nm(i)} (var base)))\n`;
+    const delta = cs.add(text, diags);
+    diags.throwIfErrors();
+    rt.install(delta);
+    bytes.push(rt.lastBytes - delta.entry.length);
+    const run = rt.runEntry(delta.entry);
+    if (run.failed) bad(`js 第 ${i} 批跑挂了：${run.err.trim()}`);
+  }
+  const first = bytes[1];
+  const flat = bytes.slice(1).every((b) => b === first);
+  if (!flat) bad(`js 每批发出的字节数不是常数：${bytes.join(',')}`);
+  else ok(`js ${N} 批，每批发 ${first} 字节（常数，不随会话长度涨）`);
+  // 跨批可见性：第 1 批的变量与第 1 批的函数，在第 N+1 批里都还在。
+  // 这一条在 JS 这条腿上不是白拿的 —— 会话的顶层变量得被提成模块级的 var
+  // （backend-js/emit.js 的 hoistTop），否则它只活到那一批的 chunk 函数结束。
+  const d2 = new Diagnostics();
+  const last = cs.add(`(let done int (call ${nm(1)} (var base)))\n`, d2);
+  d2.throwIfErrors();
+  rt.install(last);
+  const r2 = rt.runEntry(last.entry);
+  if (r2.failed) bad(`js 跨批可见性：${r2.err.trim()}`);
+  else ok('js 第 41 批仍能读第 1 批的变量、调第 1 批的函数');
 }
 
 // ---------------------------------------------------------------- 失败要能回滚

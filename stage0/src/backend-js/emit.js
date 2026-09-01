@@ -41,6 +41,9 @@ class JsEmitter {
     // 循环标签栈（第四十刀）：每进一层循环压一个名字（不需要标签时压 null）。
     // `(brk N)` 往里数第 N 个就是目标。
     this.loops = [];
+    // REPL（--engine js）里被提成模块级 var 的那几条 Local，按语句对象的身份记；
+    // 不在 REPL 模式下一直是 null（见 hoistTop）
+    this.hoisted = null;
   }
 
   /** 进循环前：要标签就发一行 `L:`，并把名字压栈；回一个 null 表示这层没标签 */
@@ -128,10 +131,16 @@ class JsEmitter {
     for (const c of this.mod.closures ?? []) this.closureMake(c);
     // JS 前端的模块级变量（ADR-0011）：顶层函数要能互相看见，所以是真全局，
     // 不是 omni_main 的局部量。C 侧对应一批 static omni_dyn。
-    for (const g of this.mod.jsGlobals ?? []) this.line(`let g_${g.name} = undefined;`);
+    // REPL 里是 `var`：一批一份片段、装进同一个全局作用域，而 `var g_x;`（不带初值）
+    // 在那里的语义正好是"没有就建、已经有就保留原值"—— 第 2 批不该把第 1 批的 x 清掉。
+    // `let` 在间接 eval 里只活在那一段片段里，下一批根本看不见。
+    for (const g of this.mod.jsGlobals ?? []) {
+      this.line(this.repl === true ? `var g_${g.name};` : `let g_${g.name} = undefined;`);
+    }
     // 核心方言的模块级变量（第二十四刀）：有类型，初值由 omni_main 最前面那几句赋 ——
     // 所以这里只要把存储声明出来。ESM 模式下那一格是装箱的（见 globalRef）。
     for (const g of this.mod.globals ?? []) {
+      if (this.repl === true) { this.line(`var g_${g.name};`); continue; }
       this.line(this.esm === true
         ? `export const g_${g.name} = { v: undefined };`
         : `let g_${g.name} = undefined;`);
@@ -299,7 +308,36 @@ class JsEmitter {
     }
   }
 
+  /**
+   * REPL 的会话顶层变量（`--engine js`）。
+   *
+   * 一批输入编出来的 delta 里，会话的顶层变量是**入口函数最外层的局部量** ——
+   * 解释器那条腿靠"入口函数跑在常驻的顶层 Env 里"让它跨批活着（interp/eval.js 的
+   * InterpSession.runEntry）。JS 这条腿上函数体就是函数作用域，`let v_x` 只活到这一批
+   * 结束，于是第 2 批的 `print(x * x)` 撞上 `v_x is not defined`。
+   *
+   * 所以最外层那几个提成模块级的 `var v_x;`：在间接 eval 里那就是全局，而不带初值的
+   * `var` 语义正好是"没有就建、已经有就保留原值"，重复装同一个名字不会清掉上一批的值。
+   * 只提**最外层**（transparent 的块是降级器塞多条语句用的，不开作用域，所以算最外层）——
+   * `for` 体里的同名局部量仍然是 `let`，它在解释器那边也是子 Env。
+   * 按语句对象的身份记，不是按名字：内层块里同名的那个不受影响。
+   */
+  hoistTop(stmts) {
+    for (const s of stmts) {
+      if (s.kind === 'Local') {
+        this.hoisted.add(s);
+        this.line(`var v_${s.name};`);
+      } else if (s.kind === 'Block' && s.transparent === true) {
+        this.hoistTop(s.stmts);
+      }
+    }
+  }
+
   func(f) {
+    if (this.repl === true && f.mangled === this.mod.entry) {
+      this.hoisted = new Set();
+      this.hoistTop(f.body.stmts);
+    }
     // 闭包体的第一个形参是闭包记录本身：捕获从它上面读（C 侧同一套约定）
     const params = [...(f.closureId === undefined ? [] : ['self']), ...f.params.map((p) => `v_${p.name}`)];
     this.line(`${this.ex()}function ${f.mangled}(${params.join(', ')}) {`);
@@ -313,6 +351,7 @@ class JsEmitter {
     for (const s of f.body.stmts) this.stmt(s);
     this.indent--;
     this.line('}');
+    this.hoisted = null;
   }
 
   body(stmts) {
@@ -330,7 +369,10 @@ class JsEmitter {
         this.line('}');
         break;
       case 'Local':
-        this.line(`let v_${s.name} = ${this.rvalue(s.init, s.type)};`);
+        // REPL 的会话顶层变量已经提成模块级的 var 了（见 hoistTop），这里只剩赋值
+        this.line(this.hoisted !== null && this.hoisted.has(s)
+          ? `v_${s.name} = ${this.rvalue(s.init, s.type)};`
+          : `let v_${s.name} = ${this.rvalue(s.init, s.type)};`);
         break;
       case 'ExprStmt':
         this.line(`${this.expr(s.expr)};`);
@@ -682,10 +724,12 @@ function fmtRealLit(v) {
   return v > 0 ? 'Infinity' : Number.isNaN(v) ? 'NaN' : '-Infinity';
 }
 
-/** @param {any} mod OIR 模块 @param {{chunk?: boolean, esm?: boolean}} [opts] */
+/** @param {any} mod OIR 模块 @param {{chunk?: boolean, esm?: boolean, repl?: boolean}} [opts] */
 export function emitJs(mod, opts) {
   const e = new JsEmitter(mod);
   if (opts !== undefined && opts.chunk === true) e.chunk = true;
+  // REPL 的一批：也是片段，区别在模块级变量用 `var`（见 emit() 里那段注释）
+  if (opts !== undefined && opts.repl === true) { e.repl = true; e.chunk = true; }
   // ESM 模式一定是片段：它自己就是一个模块文件，入口由**引它的那一份**去调
   if (opts !== undefined && opts.esm === true) { e.esm = true; e.chunk = true; }
   return e.emit();

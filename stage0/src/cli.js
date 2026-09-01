@@ -1488,10 +1488,14 @@ function main(argv) {
   }
   // repl 没有源文件；默认模式是 ADR-0008 第 3 节的 dynamic（沿革见 repl.js 文件头）。
   // `--lang` 选前端：驱动是与语言无关的，omni 走检查器的增量会话，sx/asy 走核心方言的。
+  // `--engine` 选**执行引擎**：interp（OIR 解释器）| js（JS 后端，产物装进同一个全局
+  // 作用域）。两条都是增量的 —— 引擎只需要 install/runEntry 这一对口子。
   // asy 要语法表与内建绑定表，那是文件 IO，所以由这里注入（repl.js 不碰盘）。
   if (cmd === 'repl') {
     const li = rest.indexOf('--lang');
-    return startRepl(modeFor('', rest, 'dynamic'), li >= 0 ? rest[li + 1] : 'omni', { asy: asyFrontEnd });
+    const ei = rest.indexOf('--engine');
+    return startRepl(modeFor('', rest, 'dynamic'), li >= 0 ? rest[li + 1] : 'omni',
+      { asy: asyFrontEnd }, ei >= 0 ? rest[ei + 1] : 'interp');
   }
   // 自举也没有源文件参数（默认就是编译器自己）。整条链与四条门槛见 bootstrap.js
   if (cmd === 'bootstrap') {
@@ -1539,7 +1543,7 @@ function main(argv) {
         if (hit !== null) {
           vStep(`asy js cache  ${hit.length} bytes`);
           evalJs(hit);
-          vStep('exec in-process (node host, new Function)');
+          vStep('exec in-process (node host, indirect eval)');
           return 0;
         }
       }
@@ -1547,8 +1551,11 @@ function main(argv) {
       // 自己的解释器（ADR-0013）。阶段 1 还没覆盖全部 op，所以要显式要它
       if (rest.includes('--interp')) return runInterp(mod);
       // `run` 的意思是"解析完直接执行"，怎么执行是**这一代宿主的事**：node 上是生成 JS
-      // 在本进程里 eval；原生构建里没有 JS 引擎，那条路就是 C 路径。所以先问一句能力，
-      // 而不是让 js_eval 报错 —— 用户要的是执行，不是一句"换个命令重试"。
+      // 在本进程里 eval；原生构建里没有第三方 JS 引擎，那边同一件事走 C 路径 ——
+      // 前端、检查、OIR 都是同一份，换的只是"谁来跑最后那一步"。所以先问一句能力，
+      // 而不是让 js_eval 报错：用户要的是执行，不是一句"换个命令重试"。
+      // 注意这不是"原生构建少了一种能力"：JS 源码在两边都能编能跑（tests/js-exec 那条轴
+      // 在自举出来的编译器上也过），少的只是"直接吃一段 JS 文本当程序跑"的那个引擎。
       if (hasJsEngine()) {
         const js = emitJs(mod);
         vStep(`backend js  ${js.length} bytes`);
@@ -1788,6 +1795,7 @@ usage: omni <command> <file.omni>
 
 commands:
   repl      interactive session (no file; defaults to --mode dynamic; --lang omni|sx)
+            --engine interp|js  which runtime runs each batch (both incremental)
   run       parse and execute (node host: in-process JS; native build: via the C path)
   run-c     compile to C, build with cc, execute
   build     compile to a native executable  (-o NAME; --work DIR keeps the generated C there)

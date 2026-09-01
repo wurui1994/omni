@@ -208,10 +208,19 @@ export function typeTag(v) {
   }
 }
 
+/**
+ * 在**宿主的全局作用域**里跑一段 JS，回它的值。
+ *
+ * 间接 eval 而不是 `new Function`：后者的函数体是一层函数作用域，片段里的
+ * `function u_f(){}` 与 `var g_x` 都关在里面，下一次调用看不见。REPL 的 js 引擎要的
+ * 恰好是相反的一件事 —— 一批输入编出一份产物片段，装进同一个全局作用域，于是上一批的
+ * 函数与全局量这一批还在（增量）。整程序的 `omni run` 在这一点上无所谓，两种都跑得掉。
+ * 也不用直接 eval：那种在调用者的词法作用域里跑，同样进不了全局。
+ */
 export function evalJs(code) {
-  // eslint-disable-next-line no-new-func
-  new Function(code)();
-  return undefined;
+  // eslint-disable-next-line no-eval
+  const indirect = eval;
+  return indirect(code);
 }
 
 /**

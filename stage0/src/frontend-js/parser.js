@@ -136,7 +136,26 @@ class JsParser {
         default: break;
       }
     }
+    // `L: for (…)` —— 带标签的循环。靠下一个 token 是 `:` 分流（`x: 1` 那种对象字面量
+    // 的键值对不会走到这里，它在表达式里）
+    if (t.kind === 'ident' && this.at(':', 1)) return this.labeled();
     return this.exprStatement();
+  }
+
+  /**
+   * 带标签的语句。只收**循环**上的标签：`break L` / `continue L` 会被降级成 OIR 的
+   * 多层 Break/Continue（level），而 OIR 的 level 数的就是循环层数。标签打在块上
+   * （`L: { … break L; }`）没有这个落点，当场拒 —— 那要的是"跳出一个块"，
+   * 结构化控制流里没有这条边。
+   */
+  labeled() {
+    const start = this.next();
+    this.expect(':');
+    const body = this.statement();
+    const loop = body.type === 'For' || body.type === 'ForOf' || body.type === 'ForIn'
+      || body.type === 'While' || body.type === 'DoWhile';
+    if (!loop) this.error(this.spanFrom(start), 'a label is only supported on a loop');
+    return { type: 'Labeled', label: start.value, body, span: this.spanFrom(start) };
   }
 
   exprStatement() {
@@ -322,13 +341,11 @@ class JsParser {
 
   breakLike() {
     const start = this.next();
-    // 标签不支持：stage0 里没有，而且带标签的跳转要额外的 CFG 处理
-    if (this.cur().kind === 'ident' && !this.cur().nl) {
-      this.error(this.cur().span, 'labeled break/continue is not supported');
-      this.next();
-    }
+    // `break L;` / `continue L;`：标签必须在同一行（受限产生式，和 return 一样）
+    let label = null;
+    if (this.cur().kind === 'ident' && !this.cur().nl) label = this.next().value;
     this.semicolon();
-    return { type: start.value === 'break' ? 'Break' : 'Continue', span: this.spanFrom(start) };
+    return { type: start.value === 'break' ? 'Break' : 'Continue', label, span: this.spanFrom(start) };
   }
 
   tryStmt() {
