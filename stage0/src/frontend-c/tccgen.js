@@ -52,7 +52,9 @@
 // ## 内存的版图
 //
 // 页 0（0..64K）整页留空 —— C 的 `NULL` 于是**一定**访问不到。data 段从 64K 往上长
-// （字符串字面量，以后是全局量）；影子栈接在它后面，`$sp`（一个 i64 全局）从栈顶往下长。
+// （字符串字面量与全局量）；影子栈接在它后面，`$sp`（一个 i64 全局）从栈顶往下长。
+// 全局量的地址是编译期常量，所以它们不用影子栈；**没有初始化式的全局量不写一个字节
+// data** —— 线性内存出生时全是 0，而 C 正好规定静态存储期零初始化。
 // 指针就是**线性内存里的字节偏移**（`T_I64`），不是 ADR-0016 的 `T_PTR`/`T_TPTR` ——
 // 那两个带范围检查、一块一块地分配，而 C 要的是一整片可寻址的字节。
 //
@@ -65,9 +67,10 @@
 // 已经做到：`void`、`_Bool`、`char`/`short`/`int`/`long`/`long long` 及其 `unsigned`
 // 版本、整型提升与常规算术转换、强制转换、`sizeof`、函数（互相递归随便）、局部变量、
 // C 的全部优先级、`if/else`、`while`、`do`、`for`、`break`、`continue`、`return`、
-// **指针（`&`/`*`/算术/比较）、数组（含多维）、下标、影子栈、字符串字面量、常量表达式**。
-// 还没到：struct/union/enum、typedef、聚合初始化器、带括号的声明符（`int (*a)[3]`、
-// 函数指针）、浮点、`switch`/`goto`、全局变量、外部符号与变参（printf 在那一片跑通）。
+// 指针（`&`/`*`/算术/比较）、数组（含多维）、下标、影子栈、字符串字面量、常量表达式、
+// **全局量（data 段，常量初始化式）、`typedef`、`extern` 与「用过但没定义」的诊断**。
+// 还没到：struct/union/enum、聚合初始化器、带括号的声明符（`int (*a)[3]`、函数指针）、
+// 浮点、`switch`/`goto`、外部符号与变参（printf 在那一片跑通）。
 //
 // 碰到还没做到的东西**当场报错**，报错文本里带「第六刀」字样 —— 一眼能看出是进度不是
 // bug，而且下一片把它做掉时 `gen-bad/` 里那条用例会跟着红，于是「边界移动了」这件事
@@ -244,6 +247,17 @@ function promotedType(ty) {
   return ty;
 }
 
+/**
+ * 去掉存储类（`static int x;` 的类型是 `int`；tcc 用 `VT_STORAGE` 掩码做同一件事，
+ * `tcc.h:1093`）。`count` 要手工带着走 —— 它挂在 CType 对象上而不在 `t` 里，
+ * 少这一句 `typedef int V[4]; static V a;` 就退化成指针。
+ */
+function stripStorage(ty) {
+  const r = ctype(ty.t & ~VT_STORAGE, ty.ref);
+  if (ty.count !== undefined) r.count = ty.count;
+  return r;
+}
+
 
 /**
  * 二元运算符的记号 -> MIR 的 op。`uns` 挑无符号那一套（ADR-0016 第六十一刀把无符号性
@@ -375,6 +389,10 @@ export class CGen {  /**
     this.strs = new Map();
     /** @type {{off:number,bytes:number[]}[]} 攒着的 data 段（内存要等 dataOff 定了才能声明） */
     this.pendingData = [];
+    /** @type {Map<string,object>} `typedef` 的名字表（tcc 用 `VT_TYPEDEF` 挂在符号上） */
+    this.typedefs = new Map();
+    /** @type {Map<string,{ty:object,addr:number,defined:boolean,used:boolean}>} 全局量 */
+    this.gvars = new Map();
   }
 
   /* ------------------------------------------------------------ 记号与报错 */
@@ -817,17 +835,14 @@ export class CGen {  /**
   }
 
   /**
-   * 字符串字面量：进 data 段，类型是 `char[N+1]`（含结尾的 0）。
+   * 字符串字面量进 data 段，回它的地址。
    * 同一份文本只进一次 —— C 没规定字面量是否共享，但共享省 data 段，而且
    * 「同一份输入两次编译逐字节相同」要求这张表是确定的（Map 按插入序，是）。
-   *
-   * 类型是**数组**而不是指针，所以 `sizeof("abc")` 是 4，而用在表达式里会退化成
-   * `char *` —— 这一格用指针会让 sizeof 变成 8，而那是最难发现的那种错。
+   * 函数体解析两遍（见 finishFunc），所以这个去重同时也保证第二遍不再多占 data。
    */
-  strLit(bytes) {
+  strData(bytes) {
     const hit = this.strs.get(bytes);
-    const ty = mkArray(TY_CHAR, bytes.length + 1);
-    if (hit !== undefined) return sMem(ty, this.mod.consts.int(BigInt(hit)), 0);
+    if (hit !== undefined) return hit;
     const addr = this.dataOff;
     const raw = [];
     for (let i = 0; i < bytes.length; i++) raw.push(bytes.charCodeAt(i) % 256);
@@ -835,7 +850,91 @@ export class CGen {  /**
     this.strs.set(bytes, addr);
     this.dataOff = alignUp(addr + raw.length, 8);
     this.pendingData.push({ off: addr, bytes: raw });
-    return sMem(ty, this.mod.consts.int(BigInt(addr)), 0);
+    return addr;
+  }
+
+  /**
+   * 一个字符串字面量当**表达式**用。类型是 `char[N+1]`（含结尾的 0）而不是 `char *`，
+   * 所以 `sizeof("abc")` 是 4，用在表达式里再退化成指针 —— 用指针的话 sizeof 会变成 8，
+   * 而那是最难发现的那种错。
+   */
+  strLit(bytes) {
+    return sMem(mkArray(TY_CHAR, bytes.length + 1),
+      this.mod.consts.int(BigInt(this.strData(bytes))), 0);
+  }
+
+  /**
+   * 收当前这一串字符串字面量的字节。**相邻的要拼起来**（C11 6.4.5 第 5 段）：
+   * `"a" "b"` 是一个 `char[3]`。tcc 在 `parse_string` 之后同样靠一个循环吃掉后续的
+   * TOK_STR。进来时当前记号是第一个 TOK_STR，`v` 是它的字节串。
+   */
+  readStrTok(v) {
+    let s = String(v);
+    this.next();
+    while (this.tok === TOK_STR) {
+      s += String(this.tokc);
+      this.next();
+    }
+    return s;
+  }
+
+  /**
+   * 往 data 段写一个整数（小端）。全局量的初始化式走这儿 —— 值在**编译期**就算出来了
+   * （`constExpr`），所以运行期一条指令都没有，与 tcc 把它放进 `.data` 是同一件事。
+   */
+  emitBytes(addr, size, value) {
+    const v = BigInt.asUintN(size * 8, value);
+    const raw = [];
+    for (let i = 0; i < size; i++) raw.push(Number((v >> BigInt(i * 8)) & 255n));
+    this.pendingData.push({ off: addr, bytes: raw });
+  }
+
+  /**
+   * 全局量：住在 data 段里，地址是**编译期常量**。没有初始化式就不写 data ——
+   * 线性内存出生时全是 0，而 C 正好规定静态存储期的对象零初始化（C11 6.7.9 第 10 段）。
+   * 这一条让「几千个全局量」不多一个字节的 data 段。
+   */
+  declareGlobal(name, ty, isExtern) {
+    const hit = this.gvars.get(name);
+    if (hit !== undefined) {
+      if (!sameType(hit.ty, ty)) this.err(`conflicting types for '${name}'`);
+      if (!isExtern) hit.defined = true;
+      return hit;
+    }
+    if (btype(ty.t) === VT_VOID) this.err(`variable '${name}' has void type`);
+    const s = typeSize(ty);
+    if (s.size === 0) this.err(`storage size of '${name}' isn't known`);
+    this.dataOff = alignUp(this.dataOff, s.align);
+    const e = { ty, addr: this.dataOff, defined: !isExtern, used: false };
+    this.dataOff += s.size;
+    this.gvars.set(name, e);
+    return e;
+  }
+
+  /** 一个全局量 -> 左值。地址是常量，静态偏移 0（`p->f` 那种偏移进描述符是后面的事）。 */
+  gvarLval(e) {
+    e.used = true;
+    return sMem(e.ty, this.mod.consts.int(BigInt(e.addr)), 0);
+  }
+
+  /**
+   * 全局量的初始化式。**必须是常量表达式**（C11 6.7.9 第 4 段）—— 这正好与
+   * 「没有常量折叠」那条偏离和解：折叠不在主路上，但 C 本来就要求这些位置是常量，
+   * 所以这儿走 `constExpr` 那个独立的小求值器。
+   */
+  globalInit(e) {
+    const ty = e.ty;
+    if (this.tok === LBRACE) this.todo('聚合初始化器 `{…}` 还没到');
+    if (isArray(ty.t)) this.todo('数组的初始化器还没到（`char s[] = "…"`）');
+    if (this.tok === TOK_STR) {
+      /* `char *s = "abc";` —— 值是那个字面量在 data 段里的地址。这在真的目标文件里是
+       * 一条重定位；我们的「链接」是一个常量，所以它就是一个 8 字节的数。 */
+      if (!isPtr(ty.t)) this.err(`invalid initializer for '${typeText(ty)}'`);
+      const addr = this.strData(this.readStrTok(this.tokc));
+      this.emitBytes(e.addr, 8, BigInt(addr));
+      return;
+    }
+    this.emitBytes(e.addr, typeSize(ty).size, this.constExpr());
   }
 
   /** `unary`（`tccgen.c:5595`）。前缀与后缀都在这儿，与 tcc 一样。 */
@@ -849,17 +948,7 @@ export class CGen {  /**
         this.todo('浮点常量还没到');
       }
       if (t === TOK_LSTR) this.todo('宽字符串字面量还没到');
-      if (t === TOK_STR) {
-        /* 相邻的字面量要拼起来（C11 6.4.5 第 5 段）：`"a" "b"` 是一个 `char[3]`。
-         * tcc 在 `parse_string` 之后同样靠一个循环吃掉后续的 TOK_STR。 */
-        let s = String(cv);
-        this.next();
-        while (this.tok === TOK_STR) {
-          s += String(this.tokc);
-          this.next();
-        }
-        return this.postfix(this.strLit(s));
-      }
+      if (t === TOK_STR) return this.postfix(this.strLit(this.readStrTok(cv)));
       if (t === TOK_LCHAR) this.todo('宽字符常量还没到');
       this.next();
       /* 字面量的类型由后缀定（`parseNumber` 已经按 tcc 的规则挑好了记号号）。
@@ -944,9 +1033,11 @@ export class CGen {  /**
       const name = this.identName();
       const local = this.lookup(name);
       if (local !== null) return this.postfix(this.entryLval(name, local));
-      /* 不是局部变量：那就只能是函数（这一片没有全局变量）。tcc 在这里走
-       * `external_global_sym`，我们同样先建符号 —— 但只在紧跟着 `(` 时才算调用，
-       * 否则是「取函数地址」，那要指针。 */
+      const gv = this.gvars.get(name);
+      if (gv !== undefined) return this.postfix(this.gvarLval(gv));
+      /* 既不是局部量也不是全局量：那就只能是函数。tcc 在这里走 `external_global_sym`
+       * （`tccgen.c:1143`）建一个待重定位的符号，我们同样先建 —— 但只在紧跟着 `(`
+       * 时才算调用，否则是「取函数地址」，那要函数指针。 */
       if (this.tok !== LPAR) {
         this.err(`'${name}' undeclared`);
       }
@@ -1454,8 +1545,14 @@ export class CGen {  /**
 
   /* -------------------------------------------------------------- 声明 */
 
-  /** 当前记号是不是一个类型的开头（tcc 靠 `parse_btype` 试着读一遍来判断）。 */
+  /**
+   * 当前记号是不是一个类型的开头（tcc 靠 `parse_btype` 试着读一遍来判断）。
+   * 标识符要查 `typedef` 表 —— 这是 C 的语法**不是上下文无关**的那一处：`(T)*x` 是
+   * 强制转换还是乘法，取决于 T 是不是一个类型名。路径 A 的 GLR 到这儿会两条都留着，
+   * 而路径 B（这一条）与 tcc 一样靠符号表当场断。
+   */
   isTypeStart(t) {
+    if (t >= TOK_UIDENT) return this.typedefs.has(this.cpp.tokStr(t, null));
     return t === TOK_INT || t === TOK_VOID || t === TOK_BOOL || t === TOK_SIGNED
       || t === TOK_UNSIGNED || t === TOK_CHAR || t === TOK_SHORT || t === TOK_LONG
       || t === TOK_FLOAT || t === TOK_DOUBLE || t === TOK_STRUCT || t === TOK_UNION
@@ -1483,8 +1580,12 @@ export class CGen {  /**
     let storage = 0;
     let quals = 0;
     let any = false;
+    /** @type {object|null} `typedef` 名带来的整个类型（可能是指针、数组） */
+    let tdef = null;
     const setBt = (b) => {
-      if (bt !== -1) this.err('two or more data types in declaration specifiers');
+      if (bt !== -1 || tdef !== null) {
+        this.err('two or more data types in declaration specifiers');
+      }
       bt = b;
     };
     for (;;) {
@@ -1506,6 +1607,7 @@ export class CGen {  /**
       if (t === TOK_EXTERN) { storage = storage | VT_EXTERN; any = true; this.next(); continue; }
       if (t === TOK_STATIC) { storage = storage | VT_STATIC; any = true; this.next(); continue; }
       if (t === TOK_INLINE) { storage = storage | VT_INLINE; any = true; this.next(); continue; }
+      if (t === TOK_TYPEDEF) { storage = storage | VT_TYPEDEF; any = true; this.next(); continue; }
       if (t === TOK_CONST) { quals = quals | VT_CONSTANT; any = true; this.next(); continue; }
       if (t === TOK_VOLATILE) { quals = quals | VT_VOLATILE; any = true; this.next(); continue; }
       // `auto` / `register` 在这一片没有可观察的效果，吃掉
@@ -1513,10 +1615,30 @@ export class CGen {  /**
       if (t === TOK_FLOAT || t === TOK_DOUBLE) this.todo('浮点还没到');
       if (t === TOK_STRUCT || t === TOK_UNION) this.todo('struct / union 还没到');
       if (t === TOK_ENUM) this.todo('enum 还没到');
-      if (t === TOK_TYPEDEF) this.todo('typedef 还没到');
+      if (t >= TOK_UIDENT) {
+        /* `typedef` 名当基本类型用（tcc 在符号表里找带 `VT_TYPEDEF` 的那条，
+         * `tccgen.c:4880` 一带）。**只在还没有基本类型时**才吃它 —— 否则
+         * `int x;` 里的 `x` 会被当成类型名（如果恰好有一个同名 typedef 的话）。
+         * 这正是 C 那条著名的「typedef 名与标识符不可分辨」，tcc 与我们都靠
+         * 「先看有没有基本类型」来断。 */
+        if (bt !== -1 || tdef !== null || sign !== 0 || longs > 0 || shorts > 0) break;
+        const td = this.typedefs.get(this.cpp.tokStr(t, null));
+        if (td === undefined) break;
+        tdef = td; any = true; this.next(); continue;
+      }
       break;
     }
     if (!any) this.expect('declaration');
+
+    if (tdef !== null) {
+      /* `typedef` 名不能再被 `short`/`long`/`signed` 修饰（`typedef int T; unsigned T x;`
+       * 是错的）—— 上面的循环已经保证这几个不会与它同时出现，这里只把限定词与存储类合上。
+       * `count` 要手工带过去：它挂在 CType 对象上而不在 `t` 里（ctype.js:129），
+       * 所以 `typedef int V[4];` 少了这一句就变成 `int *`，`sizeof(V)` 从 16 变 8。 */
+      const r = ctype(tdef.t | quals | storage, tdef.ref);
+      if (tdef.count !== undefined) r.count = tdef.count;
+      return r;
+    }
 
     if (shorts > 1) this.err("too many 'short' specifiers");
     if (longs > 2) this.err("too many 'long' specifiers");
@@ -1543,7 +1665,7 @@ export class CGen {  /**
    */
   typeName() {
     const base = this.parseBtype();
-    return this.declarator(ctype(base.t & ~VT_STORAGE, base.ref), 'none').ty;
+    return this.declarator(stripStorage(base), 'none').ty;
   }
 
   /**
@@ -1666,17 +1788,28 @@ export class CGen {  /**
     for (;;) {
       if (!this.isTypeStart(this.tok)) break;
       const spec = this.parseBtype();
-      /* 存储类**先剥掉**再进声明符：`static int a[3];` 的类型是 `int[3]`，而
-       * 「剥」这件事必须在套数组之前 —— 套完再剥就得重建一个 CType，而 `count`
-       * 挂在对象上（ctype.js:129），重建时最容易掉的正是它。 */
-      const base = ctype(spec.t & ~VT_STORAGE, spec.ref);
+      const isTypedef = (spec.t & VT_TYPEDEF) !== 0;
+      const isExtern = (spec.t & VT_EXTERN) !== 0;
+      /* 存储类**先剥掉**再进声明符：`static int a[3];` 的类型是 `int[3]`，而「剥」
+       * 必须在套数组之前 —— 套完再剥就得重建一个 CType，而 `count` 挂在对象上
+       * （ctype.js:129），重建时最容易掉的正是它。 */
+      const base = stripStorage(spec);
       any = true;
       if (this.tok === SEMI) { this.next(); continue; }
       let wasBody = false;
       for (;;) {
         const d = this.declarator(base, 'need');
         const name = /** @type {string} */ (d.name);
-        if (this.tok === LPAR) {
+        if (isTypedef) {
+          if (this.tok === LPAR) this.todo('函数类型的 typedef 还没到');
+          /* `typedef` 不声明对象，只给一个类型起名。重复的 typedef 是合法的（C11
+           * 6.7 第 3 段：同一个类型可以说两遍），不同类型的重名才是错。 */
+          const prev = this.typedefs.get(name);
+          if (prev !== undefined && !sameType(prev, d.ty)) {
+            this.err(`typedef '${name}' redefined with a different type`);
+          }
+          this.typedefs.set(name, d.ty);
+        } else if (this.tok === LPAR) {
           if (this.funcDecl(global, name, d.ty)) { wasBody = true; break; }
         } else if (!global) {
           if (isArray(d.ty.t) && d.ty.count < 0) {
@@ -1692,7 +1825,15 @@ export class CGen {  /**
             this.vstore(this.entryLval(name, e), this.exprEq());
           }
         } else {
-          this.todo(`全局变量还没到（'${name}'）`);
+          if (isArray(d.ty.t) && d.ty.count < 0) {
+            this.err(`array size missing in '${name}'`);
+          }
+          const e = this.declareGlobal(name, d.ty, isExtern);
+          if (this.tok === ASSIGN) {
+            this.next();
+            if (isExtern) this.err(`'${name}' has both 'extern' and initializer`);
+            this.globalInit(e);
+          }
         }
         if (this.tok !== COMMA) break;
         this.next();
@@ -1727,13 +1868,13 @@ export class CGen {  /**
     } else {
       this.paramList(params);
     }
-    return this.finishFunc(global, info, name, ctype(ret.t & ~VT_STORAGE, ret.ref), params);
+    return this.finishFunc(global, info, name, stripStorage(ret), params);
   }
 
   paramList(params) {
     for (;;) {
       const spec = this.parseBtype();
-      const d = this.declarator(ctype(spec.t & ~VT_STORAGE, spec.ref), 'opt');
+      const d = this.declarator(stripStorage(spec), 'opt');
       let ty = d.ty;
       /* 形参上的数组**就是**指针（C11 6.7.6.3 第 7 段）：`int f(int a[])` 与
        * `int f(int *a)` 是同一个函数。所以这里退化，而不是让 declareLocal 去帧上划
@@ -1915,6 +2056,12 @@ export class CGen {  /**
     }
     for (const [name, info] of this.funcs) {
       if (!info.defined) this.err(`undefined symbol '${name}'`);
+    }
+    /* `extern int x;` 之后没有定义：真的编译器要等链接期才知道。我们只有一个翻译单元，
+     * 所以「用过但没定义」当场就是错。地址仍然分配过（一遍过里引用发生在定义之前，
+     * 代码得先有个地址可发），所以这一问只能等到这儿再答 —— 与 `funcs` 那一条同一个理由。 */
+    for (const [name, e] of this.gvars) {
+      if (!e.defined && e.used) this.err(`undefined symbol '${name}'`);
     }
   }
 }
