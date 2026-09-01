@@ -39,6 +39,7 @@ import {
   T_VOID, T_I64, T_F64, T_STR, T_DYN, T_PTR, T_TPTR, T_I32, T_F32,
   MLOAD_KINDS, MSTORE_KINDS, memKindNo, memOff,
   CVT_I2F, CVT_BOX, CVT_U2F, CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16, CVT_FCVT,
+  fnPtrNo,
 } from './ir.js';
 
 /** 常量池条目 -> 宿主值。int 是 BigInt（ADR-0005 的 i64），real 是 number。 */
@@ -801,6 +802,19 @@ class MirInterp {
           const g = fv(F);
           if (g === null || g === undefined) failRt('call of a null function value');
           F.v[i] = callFnValue(g, readAll(args, F));
+          return next;
+        };
+      }
+      case OP.CALLI: {
+        /* 间接调用（C 的函数指针）。a 是**函数指针值** —— 0 是空、非 0 是函数号 + 1
+         * （编码定在 ir.js 的 `CALLI` 上）。签名对不对是前端的事，这儿只查这两格。 */
+        const fv = rd(f.a[i]);
+        const args = rdArgs(f.b[i]);
+        return (F) => {
+          const no = fnPtrNo(fv(F));
+          if (no < 0) failRt('call of a null function pointer');
+          if (I.mir.funcs[no] === undefined) failRt(`function pointer index ${no} out of range`);
+          F.v[i] = I.callFunc(no, undefined, readAll(args, F));
           return next;
         };
       }

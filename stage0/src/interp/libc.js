@@ -64,7 +64,7 @@ function uText(v, bits, base, upper) {
  *   3. `0` 标志把零填在**符号之后**，`-` 与空格填在两侧。
  * 反过来做会让 `%+05d` 印成 `00+42` 而不是 `+0042`。
  */
-function pad(body, sign, spec) {
+function padTo(body, sign, spec) {
   let s = body;
   if (spec.prec >= 0 && spec.numeric) {
     while (s.length < spec.prec) s = '0' + s;
@@ -156,43 +156,43 @@ export function cFormat(fmt, args, at) {
       const v = BigInt.asIntN(bits, BigInt(nextArg()));
       const neg = v < 0n;
       const body = (neg ? -v : v).toString(10);
-      out += pad(body, neg ? '-' : (spec.plus ? '+' : (spec.space ? ' ' : '')), spec);
+      out += padTo(body, neg ? '-' : (spec.plus ? '+' : (spec.space ? ' ' : '')), spec);
       continue;
     }
     if (conv === 'u') {
-      out += pad(uText(BigInt(nextArg()), bits, 10, false), '', spec);
+      out += padTo(uText(BigInt(nextArg()), bits, 10, false), '', spec);
       continue;
     }
     if (conv === 'o') {
       const body = uText(BigInt(nextArg()), bits, 8, false);
       if (spec.alt && body[0] !== '0') spec.prefix = '0';
-      out += pad(body, '', spec);
+      out += padTo(body, '', spec);
       continue;
     }
     if (conv === 'x' || conv === 'X') {
       const v = BigInt(nextArg());
       const body = uText(v, bits, 16, conv === 'X');
       if (spec.alt && v !== 0n) spec.prefix = conv === 'X' ? '0X' : '0x';
-      out += pad(body, '', spec);
+      out += padTo(body, '', spec);
       continue;
     }
     if (conv === 'c') {
       spec.numeric = false;
-      out += pad(String.fromCharCode(Number(BigInt.asUintN(8, BigInt(nextArg())))), '', spec);
+      out += padTo(String.fromCharCode(Number(BigInt.asUintN(8, BigInt(nextArg())))), '', spec);
       continue;
     }
     if (conv === 's') {
       spec.numeric = false;
       let s = readCStr(nextArg());
       if (spec.prec >= 0 && s.length > spec.prec) s = s.slice(0, spec.prec);
-      out += pad(s, '', spec);
+      out += padTo(s, '', spec);
       continue;
     }
     if (conv === 'p') {
       /* 地址本身与 tcc 不同（我们的是线性内存偏移），所以这一格**不能对账**。
        * 形状照 glibc/macOS：`0x` 加小写十六进制，空指针印 `0x0`。 */
       spec.numeric = false;
-      out += pad('0x' + uText(BigInt(nextArg()), 64, 16, false), '', spec);
+      out += padTo('0x' + uText(BigInt(nextArg()), 64, 16, false), '', spec);
       continue;
     }
     if (conv === 'f' || conv === 'e' || conv === 'E' || conv === 'g' || conv === 'G'

@@ -79,6 +79,18 @@
 // 真的 ABI（arm64 ≤16 字节走两个寄存器之类）是后端那几步的事；这一层只需要地址。
 // 这个约定**只在自家人之间成立** —— 外部符号那一侧的 struct 传值还没到（`externThunk`）。
 //
+// ## 函数指针的值是什么（第十三片）
+//
+// **函数表下标 + 1**，不是线性内存里的偏移（编码定在 `ir.js` 的 `CALLI` 上，0 留给
+// 空指针）。这与 wasm 一致：那边的函数也不在线性内存里，`call_indirect` 拿的是表下标。
+// 于是 `(void *)fp` 这种「把函数指针当数据指针用」的写法在这条路上没有意义 ——
+// C 本来也没定义它。
+//
+// 前端这一侧只有一条纪律：**函数指示符是一个函数类型的内存左值**，它的「地址」就是
+// 那个函数指针值。于是 `f`、`&f`、`*f`、`f(x)`、`fp(x)`、`(*fp)(x)` 六种写法共用
+// `gv` / `decay` / `addrOf` / `postfix` 里各一行，一个特例都不用写。
+// 直接调用照旧发 `CALL`（下标是编译期常量），只有真的经过指针才发 `CALLI`。
+//
 // ## 这一片做到哪儿（**是路标，不是终点**）
 //
 // 终点是「能编译 tinycc 自己的全部源码」，所以 printf、struct、变参、`setjmp`
@@ -94,12 +106,12 @@
 // **struct/union/enum、`.` 与 `->`、整块的 struct 赋值、不完整类型的指针、位域、
 // 聚合初始化器（含指定初始化器与不定长数组）、`switch`（含贯穿、`BRTABLE`/比较链两条路）、
 // `goto` 与语句标签（外围块上的，前向后向都行）、struct 的**传值与返回**（传地址 +
-// 隐藏的返回指针）、带括号的声明符（`int (*a)[3]`、`int (*f(int))[3]`、函数指针的
-// **类型**）**。
+// 隐藏的返回指针）、带括号的声明符（`int (*a)[3]`、`int (*f(int))[3]`）、**函数指针**
+// （调用、回调、函数指针表、当静态初始化式）**。
 // 还没到：`goto` 跳到不在外围块上的标签（relooper 那一路）、标签长在里层控制结构里
-// （Duff's device）、**外部**函数上的 struct 传值/返回（要真的 ABI）、**通过函数指针
-// 调用**与取函数地址（MIR 还没有间接调用）、函数类型的 typedef、嵌套聚合省掉里层
-// 花括号、浮点（含 printf 的 `%f/%e/%g`）、`malloc` 那一族
+// （Duff's device）、**外部**函数上的 struct 传值/返回（要真的 ABI）、通过函数指针调
+// **变参**函数、函数类型的 typedef、嵌套聚合省掉里层花括号、浮点（含 printf 的
+// `%f/%e/%g`）、`malloc` 那一族
 // （要堆）、变参函数的**定义**（要 `va_list`/`va_arg`）。
 //
 // 碰到还没做到的东西**当场报错**，报错文本里带「第六刀」字样 —— 一眼能看出是进度不是
@@ -136,7 +148,7 @@ import {
 } from './ctype.js';
 import {
   MirModule, MirFunc, OP, T_VOID, T_I32, T_I64, T_BOOL, REF_NONE,
-  CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16, memDesc, MEM_PAGE,
+  CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16, memDesc, MEM_PAGE, fnPtr,
 } from '../mir/ir.js';
 
 /* 线性内存的访问描述符号（`MLOAD_KINDS` / `MSTORE_KINDS` 的下标，ir.js:383）。
@@ -278,7 +290,19 @@ function sCmp(ref) { return { ty: TY_INT, ref, slot: null, mem: null, cmp: true,
 function isLval(v) { return v.slot !== null || v.mem !== null; }
 
 /** 退化之后的类型（**不发指令**，只回类型）。`T[N]` -> `T*`，别的原样。 */
-function decayedType(ty) { return isArray(ty.t) ? mkPointer(ty.ref) : ty; }
+/* 数组与函数在表达式里都**退化成指针**（C11 6.3.2.1 第 3、4 段）：数组退成「指向元素」，
+ * 函数退成「指向这个函数」。两条并排放在这儿，于是「问类型」与「真的取值」（`decay`）
+ * 用的是同一套规则。 */
+function decayedType(ty) {
+  if (isArray(ty.t)) return mkPointer(ty.ref);
+  if (isFunc(ty.t)) return mkPointer(ty);
+  return ty;
+}
+
+/** 一条函数登记（`funcs` 里那个 info）-> 它的 C 函数类型。 */
+function funcTypeOf(info) {
+  return mkFunc(info.ret, info.params === null ? [] : info.params, info.variadic);
+}
 
 /**
  * 位域**取过值之后**是什么类型 —— 也就是 `gvBitfield` 那两条移位所用的容器类型：
@@ -668,6 +692,9 @@ export class CGen {  /**
      * `decay` 里，是因为 gv 是所有「我要一个值」的必经之路 —— 漏一处就会 MLOAD 一个
      * 数组，而那条 MLOAD 的宽度是元素的宽度，错得很像对。 */
     if (isArray(v.ty.t)) return this.addrOf(v);
+    /* 函数指示符的**值**是指向它的指针（C11 6.3.2.1 第 4 段）。与数组那一条同一个位置、
+     * 同一个理由：gv 是「我要一个值」的必经之路，漏一处就会 MLOAD 一个函数。 */
+    if (isFunc(v.ty.t)) return this.addrOf(v);
     /* struct 的**值**在这一片没有形态：MIR 的一条指令只产出一个标量。传参、返回、
      * 比较都要 ABI 的那套（按大小决定寄存器还是隐藏指针），是下一片的事。
      * 赋值不走这儿 —— `vstore` 在调 gv 之前就分岔去 `structCopy` 了。 */
@@ -741,6 +768,9 @@ export class CGen {  /**
    */
   decay(v) {
     if (isArray(v.ty.t)) return sVal(mkPointer(v.ty.ref), this.addrOf(v));
+    /* 函数指示符退化成「指向这个函数」的指针（C11 6.3.2.1 第 4 段）。它的地址就是
+     * 那个函数指针值本身（第十三片：值是函数表下标 + 1，见 ir.js 的 `CALLI`）。 */
+    if (isFunc(v.ty.t)) return sVal(mkPointer(v.ty), this.addrOf(v));
     return v;
   }
 
@@ -1464,9 +1494,10 @@ export class CGen {  /**
     if (t === AMP) {
       this.next();
       const v = this.unary();
-      if (isFunc(v.ty.t)) this.todo('取函数地址还没到（要函数指针与 call_indirect）');
       /* `&a`（a 是数组）的类型是「指向数组的指针」，不是「指向元素的指针」——
-       * 两者的**值**相同，但 `sizeof(*&a)` 差一个数量级。所以这里不退化。 */
+       * 两者的**值**相同，但 `sizeof(*&a)` 差一个数量级。所以这里不退化。
+       * 函数也走这一条：`&f` 与 `f` 的值一模一样（C11 6.5.3.2 第 3 段），
+       * 而 `addrOf` 对函数指示符回的就是那个函数指针值。 */
       return sVal(mkPointer(v.ty), this.addrOf(v));
     }
     if (t === STAR) {
@@ -1500,14 +1531,13 @@ export class CGen {  /**
        * （`tccgen.c:1143`）建一个待重定位的符号，我们同样先建 —— 但只在紧跟着 `(`
        * 时才算调用，否则是「取函数地址」，那要函数指针。 */
       if (this.tok !== LPAR) {
-        /* 函数名不跟着 `(` 就是「函数指示符退化成指针」（C11 6.3.2.1 第 4 段）。
-         * 那要一个能装函数的值 —— 而 MIR 只有直接调用（`CALL` 的 a 是函数表下标），
-         * 没有间接调用，所以这一格与 `postfix` 里那一条是同一片。 */
+        /* 函数名不跟着 `(` 就是「函数指示符」（C11 6.3.2.1 第 4 段：它退化成指针）。
+         * 表示成一个**内存左值**：类型是函数类型，「地址」是那个函数指针值 ——
+         * 与 `*fp` 得到的东西一模一样，于是 `f`、`&f`、`*f`、`(*f)(x)`、`f(x)` 五种写法
+         * 走的都是同一条路，一个特例都不用写（`gv` / `decay` / `addrOf` 各一行）。 */
         const fn = this.funcs.get(name);
-        if (fn !== undefined && fn.declared) {
-          this.todo('取函数地址还没到（MIR 还没有间接调用）');
-        }
-        this.err(`'${name}' undeclared`);
+        if (fn === undefined || !fn.declared) this.err(`'${name}' undeclared`);
+        return this.postfix(sMem(funcTypeOf(fn), this.mod.consts.int(fnPtr(fn.no)), 0));
       }
       return this.postfix(this.funcCall(name));
     }
@@ -1565,7 +1595,22 @@ export class CGen {  /**
         cur = this.incdec(cur, t === TOK_INC ? PLUS : MINUS, true);
         continue;
       }
-      if (t === LPAR) this.todo('通过函数指针调用还没到（MIR 还没有间接调用）');
+      if (t === LPAR) {
+        /* 通过函数指针调用。`cur` 有两副面孔，而它们指的是同一件事：
+         *   - 函数指示符（`f`、`*fp`、`**fp`）—— 一个函数类型的内存左值；
+         *   - 函数指针的值（`fps[i]`、`s.cb` 取过值之后）。
+         * 两条都归一成「函数类型 + 一个指针值的 ref」，然后发 CALLI。 */
+        if (isFunc(cur.ty.t)) {
+          cur = this.indirectCall(cur.ty, this.gv(cur));
+          continue;
+        }
+        if (isPtr(cur.ty.t) && isFunc(cur.ty.ref.t)) {
+          cur = this.indirectCall(cur.ty.ref, this.gv(cur));
+          continue;
+        }
+        this.err(`called object is not a function or function pointer`
+          + ` ('${typeText(cur.ty)}')`);
+      }
       if (t === LBRACK) {
         /* `a[i]` **就是** `*(a + i)`（C11 6.5.2.1 第 2 段）。照这一句写而不是另开一条
          * 地址计算：于是 `i[a]` 自动对、数组与指针自动一视同仁、多维数组自动是
@@ -1637,6 +1682,46 @@ export class CGen {  /**
   /** 调用：`名字 ( 实参… )`。名字已经吃掉，当前记号是 `(`。 */
   funcCall(name) {
     const info = this.funcSym(name);
+    const a = this.callArgs(`function '${name}'`, info.params, info.variadic, info.ret);
+    if (info.params === null) {
+      info.params = a.vals.map((v, i) => ({
+        name: `$p${i}`, ty: promotedType(decayedType(v.ty)),
+      }));
+    }
+    const rt = mirTypeOf(info.ret);
+    if (info.variadic) {
+      /* 变参函数：**每个调用点的实参个数都不同**，所以不能像非变参那样在 `unit()` 末尾
+       * 造一个转发桩（一个桩只装得下一副形参）。直接在调用点发 CCALL。
+       * 这一片里变参函数一定是外部的 —— 在 C 里**定义**一个变参函数要 `va_arg`，还没到。 */
+      return sVal(info.ret, this.f.emit(OP.CCALL, rt,
+        this.mod.cabiNo(name), this.f.pushArgs(a.refs), 0));
+    }
+    const r = this.f.emit(OP.CALL, rt, info.no, this.f.pushArgs(a.refs), 0);
+    /* 回的是那块地方的地址（SysV 的 rax 也是这么回的）。用**回来的**那个 ref 而不是
+     * 手上的 `sret`：两者一定相等，而用回来的那个把「返回值在哪儿」这件事记在数据流里。 */
+    if (a.sret !== null) return sMem(info.ret, r, 0);
+    return sVal(info.ret, r);
+  }
+
+  /**
+   * 通过函数指针调用（第十三片）。`fnTy` 是**函数类型**（不是指针），`callee` 是
+   * 函数指针值的 ref。直接调用照旧发 `CALL`（下标是常量，一条指令就够）——
+   * 只有这里发 `CALLI`。
+   */
+  indirectCall(fnTy, callee) {
+    const fi = fnTy.ref;
+    if (fi.variadic) this.todo('通过函数指针调变参函数还没到（要 CCALL 那条路）');
+    const a = this.callArgs('function pointer', fi.params, false, fi.ret);
+    const r = this.f.emit(OP.CALLI, mirTypeOf(fi.ret), callee, this.f.pushArgs(a.refs), 0);
+    if (a.sret !== null) return sMem(fi.ret, r, 0);
+    return sVal(fi.ret, r);
+  }
+
+  /**
+   * 实参那一段（直接调用与间接调用共用）：读实参、按原型转换、struct 的两条 ABI。
+   * 回 `{refs, sret, vals}` —— `vals` 只有「先调用后定义」那条路要（拿它回填形参表）。
+   */
+  callArgs(what, params, variadic, ret) {
     this.skip(LPAR);
     /** @type {object[]} */
     const vals = [];
@@ -1650,11 +1735,11 @@ export class CGen {  /**
     this.skip(RPAR);
     /* 形参个数与类型：声明过就核对并**按声明的类型转换实参**（C 的原型就是干这个的）。
      * 没声明过（先调用后定义）就只记个数，定义时反过来核对。 */
-    const np = info.params === null ? -1 : info.params.length;
+    const np = params === null ? -1 : params.length;
     if (np >= 0) {
-      const bad = info.variadic ? vals.length < np : vals.length !== np;
+      const bad = variadic ? vals.length < np : vals.length !== np;
       if (bad) {
-        this.err(`too ${vals.length < np ? 'few' : 'many'} arguments to function '${name}'`);
+        this.err(`too ${vals.length < np ? 'few' : 'many'} arguments to ${what}`);
       }
     }
     const refs = [];
@@ -1662,8 +1747,8 @@ export class CGen {  /**
      * （第十一片的 ABI，见 `runBody`）。划这一块在两遍里都做，于是第一遍数出来的帧
      * 一定装得下它。 */
     let sret = null;
-    if (isStruct(info.ret.t)) {
-      sret = sMem(info.ret, this.fpRef, this.frameAlloc(info.ret));
+    if (isStruct(ret.t)) {
+      sret = sMem(ret, this.fpRef, this.frameAlloc(ret));
       refs.push(this.addrOf(sret));
     }
     for (let i = 0; i < vals.length; i++) {
@@ -1671,7 +1756,7 @@ export class CGen {  /**
        * （C11 6.5.2.2 第 6 段）：窄整数提到 int、数组与函数退化成指针。
        * 用 `promotedType` 而不是 `promote`：后者会真的取一次值，这里只想问类型。 */
       const want = (np >= 0 && i < np)
-        ? info.params[i].ty
+        ? params[i].ty
         : promotedType(decayedType(vals[i].ty));
       /* 传值的 struct 传的是**地址**，拷贝由被调方在入口处做（`runBody`）。
        * 于是一次调用只有一次拷贝，而且那次拷贝是 C 要求的那一次
@@ -1686,24 +1771,7 @@ export class CGen {  /**
       }
       refs.push(this.gv(this.castTo(vals[i], want)));
     }
-    if (info.params === null) {
-      info.params = vals.map((v, i) => ({
-        name: `$p${i}`, ty: promotedType(decayedType(v.ty)),
-      }));
-    }
-    const rt = mirTypeOf(info.ret);
-    if (info.variadic) {
-      /* 变参函数：**每个调用点的实参个数都不同**，所以不能像非变参那样在 `unit()` 末尾
-       * 造一个转发桩（一个桩只装得下一副形参）。直接在调用点发 CCALL。
-       * 这一片里变参函数一定是外部的 —— 在 C 里**定义**一个变参函数要 `va_arg`，还没到。 */
-      return sVal(info.ret, this.f.emit(OP.CCALL, rt,
-        this.mod.cabiNo(name), this.f.pushArgs(refs), 0));
-    }
-    const r = this.f.emit(OP.CALL, rt, info.no, this.f.pushArgs(refs), 0);
-    /* 回的是那块地方的地址（SysV 的 rax 也是这么回的）。用**回来的**那个 ref 而不是
-     * 手上的 `sret`：两者一定相等，而用回来的那个把「返回值在哪儿」这件事记在数据流里。 */
-    if (sret !== null) return sMem(info.ret, r, 0);
-    return sVal(info.ret, r);
+    return { refs, sret, vals };
   }
 
   /**
@@ -3032,12 +3100,22 @@ export class CGen {  /**
       return BigInt(typeSize(ty).size);
     }
     if (t >= TOK_UIDENT) {
+      const nm = this.cpp.tokStr(t, null);
       /* 枚举常量。`enum {A, B = A + 2}` 里的 `A` 走这一格 —— 也就是说 enumDecl 一边
        * 登记一边求值这件事在这里闭环。查不到就落到下面报「要一个常量表达式」。 */
-      const ec = this.enumConsts.get(this.cpp.tokStr(t, null));
+      const ec = this.enumConsts.get(nm);
       if (ec !== undefined) {
         this.next();
         return ec.val;
+      }
+      /* 函数名是一个**地址常量**（C11 6.6 第 9 段），所以它能当静态初始化式：
+       * `static int (*tab[])(int) = { twice, thrice };` —— tinycc 自己的源码里到处是
+       * 这种表。真的目标文件里这是一条重定位；我们的「链接」是一个数，所以它就是
+       * 那个函数指针值（函数号 + 1，见 ir.js 的 `CALLI`）。 */
+      const fn = this.funcs.get(nm);
+      if (fn !== undefined && fn.declared) {
+        this.next();
+        return fnPtr(fn.no);
       }
     }
     this.err('constant expression expected');
