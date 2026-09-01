@@ -123,6 +123,12 @@ bool omni_js_fs_exists(omni_dyn path) {
   return stat(cpath(path), &st) == 0;
 }
 
+bool omni_js_fs_is_dir(omni_dyn path) {
+  struct stat st;
+  if (stat(cpath(path), &st) != 0) return false;
+  return S_ISDIR(st.st_mode) ? true : false;
+}
+
 /* statSync 的两个字段各给一个 op：编译器只读 mtimeMs 与 size（运行时对象缓存的键），
    为此造一个 stat 对象不值得。 */
 omni_dyn omni_js_fs_mtime_ms(omni_dyn path) {

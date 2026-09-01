@@ -177,11 +177,11 @@ function augment(g) {
   // 增广：`$accept -> start`。归约它就是接受，所以它不进 rules，单独认。
   const acceptRule = g.rules.length;
   const rules = [...g.rules, { lhs: ACCEPT, rhs: [g.start], action: null, prec: null, prefer: 0, span: null }];
-  // Map 的拷贝手写一遍。刻意不写 `new Map(g.nonterms)`：封闭 ABI 里 `new Map(x)` 落到
-  // `js_map_of_pairs`，它要的是"成对的列表"而不是 Map —— node 上照跑，原生构建里当场
-  // 报 "dynamic value is Map, expected list"。量出来的（自举链阶段 9）。
-  const nonterms = new Map();
-  for (const [k, v] of g.nonterms) nonterms.set(k, v);
+  // `new Map(x)` 落到 `js_map_of_pairs`，它现在**也收 Map**（浅拷贝），所以这里就是
+  // 一句拷贝。从前手写一遍循环，是因为闭 ABI 的初值只收"成对的列表"—— node 上照跑，
+  // 原生构建里当场报 "dynamic value is Map, expected list"（量出来的：自举链阶段 9）。
+  // 这一刀是把那条界往回收：不该由方言的窄处决定源码怎么写。
+  const nonterms = new Map(g.nonterms);
   // 字段手写，不用 `{...g, ...}`：dict 的展开在原生构建里要走一条动态路径，而这里
   // 需要的字段就这几个。多写一行换掉一处不必要的动态性。
   const gg = { name: g.name, terms: g.terms, nonterms, rules, start: g.start, prec: g.prec };

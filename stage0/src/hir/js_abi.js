@@ -49,6 +49,7 @@ export const JS_ABI = {
   js_str_len: { js: '$js_str_len', c: 'omni_js_str_len', arity: 1 },
   js_str_index: { js: '$js_str_index', c: 'omni_js_str_index', arity: 2 },
   js_str_at: { js: '$js_str_at', c: 'omni_js_str_at', arity: 2 },
+  js_str_char_at: { js: '$js_str_char_at', c: 'omni_js_str_char_at', arity: 2 },
   js_str_char_code_at: { js: '$js_str_char_code_at', c: 'omni_js_str_char_code_at', arity: 2 },
   js_str_code_point_at: { js: '$js_str_code_point_at', c: 'omni_js_str_code_point_at', arity: 2 },
   js_str_slice: { js: '$js_str_slice', c: 'omni_js_str_slice', arity: 3 },
@@ -58,7 +59,7 @@ export const JS_ABI = {
   js_str_lower: { js: '$js_str_lower', c: 'omni_js_str_lower', arity: 1 },
   js_str_upper: { js: '$js_str_upper', c: 'omni_js_str_upper', arity: 1 },
   js_str_index_of: { js: '$js_str_index_of', c: 'omni_js_str_index_of', arity: 3 },
-  js_str_last_index_of: { js: '$js_str_last_index_of', c: 'omni_js_str_last_index_of', arity: 2 },
+  js_str_last_index_of: { js: '$js_str_last_index_of', c: 'omni_js_str_last_index_of', arity: 3 },
   js_str_includes: { js: '$js_str_includes', c: 'omni_js_str_includes', arity: 2, ret: 'bool' },
   js_str_starts_with: { js: '$js_str_starts_with', c: 'omni_js_str_starts_with', arity: 3, ret: 'bool' },
   js_str_ends_with: { js: '$js_str_ends_with', c: 'omni_js_str_ends_with', arity: 2, ret: 'bool' },
@@ -77,8 +78,10 @@ export const JS_ABI = {
   js_arr_get: { js: '$js_arr_get', c: 'omni_js_arr_get', arity: 2 },
   js_arr_set: { js: '$js_arr_set', c: 'omni_js_arr_set', arity: 3, ret: 'void' },
   js_arr_push: { js: '$js_arr_push', c: 'omni_js_arr_push', arity: 2 },
-  // a.push(x, ...ys)：实参拼成一个 list 整段追加（定长的 op 表达不了可变实参）
-  js_arr_push_all: { js: '$js_arr_push_all', c: 'omni_js_arr_push_all', arity: 2 },
+  // a.push(x, ...ys)：实参拼成一个 list 整段追加（定长的 op 表达不了可变实参）。
+  // 落到的是**派发器**：接收者不是 list 时退回"取属性、当函数调"（决策 12），
+  // 因为 `x.push()` / `x.push(...xs)` 这两种形状在降级时分不出接收者是谁。
+  js_arr_push_all: { js: '$js_arr_push_dyn', c: 'omni_js_arr_push_dyn', arity: 2 },
   js_arr_pop: { js: '$js_arr_pop', c: 'omni_js_arr_pop', arity: 1 },
   js_arr_slice: { js: '$js_arr_slice', c: 'omni_js_arr_slice', arity: 3 },
   js_arr_concat: { js: '$js_arr_concat', c: 'omni_js_arr_concat', arity: 2 },
@@ -133,7 +136,7 @@ export const JS_ABI = {
   js_set_add: { js: '$js_set_add', c: 'omni_js_set_add', arity: 2 },
   js_set_delete: { js: '$js_set_delete', c: 'omni_js_set_delete', arity: 2, ret: 'bool' },
   js_set_items: { js: '$js_set_items', c: 'omni_js_set_items', arity: 1 },
-  // new Map(pairs) / new Set(items)：初值只收 list，缺参数就是空容器
+  // new Map(pairs) / new Set(items)：初值收 list，也收同类容器（浅拷贝），缺参数就是空容器
   js_map_of_pairs: { js: '$js_map_of_pairs', c: 'omni_js_map_of_pairs', arity: 1 },
   js_set_of_list: { js: '$js_set_of_list', c: 'omni_js_set_of_list', arity: 1 },
 
@@ -236,6 +239,9 @@ export const JS_ABI = {
   js_fs_write_text: { js: '$js_fs_write_text', c: 'omni_js_fs_write_text', arity: 2 },
   js_fs_exists: { js: '$js_fs_exists', c: 'omni_js_fs_exists', arity: 1, ret: 'bool' },
   js_fs_readdir: { js: '$js_fs_readdir', c: 'omni_js_fs_readdir', arity: 1 },
+  // 是不是目录（不存在也回 false）。走一遍文件系统而不是看名字：装好的那份里编译器
+  // 自己就叫 `omni`，没有后缀 —— 靠"名字里有没有点"猜就会 readdir 一个普通文件。
+  js_fs_is_dir: { js: '$js_fs_is_dir', c: 'omni_js_fs_is_dir', arity: 1, ret: 'bool' },
   js_fs_mtime_ms: { js: '$js_fs_mtime_ms', c: 'omni_js_fs_mtime_ms', arity: 1 },
   js_fs_size: { js: '$js_fs_size', c: 'omni_js_fs_size', arity: 1 },
   js_fs_mkdtemp: { js: '$js_fs_mkdtemp', c: 'omni_js_fs_mkdtemp', arity: 1 },
@@ -342,6 +348,8 @@ export const JS_PROPS = {
 export const JS_METHODS = {
   // String
   at: { on: { string: 'js_str_at' } },
+  // charAt 与 at 不是一回事：越界给空串、且不认负下标（规范 22.1.3.1）
+  charAt: { on: { string: 'js_str_char_at' } },
   charCodeAt: { on: { string: 'js_str_char_code_at' } },
   codePointAt: { on: { string: 'js_str_code_point_at' } },
   repeat: { on: { string: 'js_str_repeat' } },

@@ -78,9 +78,15 @@ static omni_dyn omni_js_iter(omni_dyn v) { \
       return omni_dyn_undef(); \
   } \
 } \
+/* 下标是数就是元素，否则是**挂在数组身上的属性**（JS 里数组也是对象，见 omni_js_obj.h
+   的旁表）。`a.foo` 与 `a["foo"]` 于是走到同一个地方 —— 降级器把成员赋值发成 idx_set。 */ \
+static bool omni_js_num_key(omni_dyn k) { \
+  return k.tag == OMNI_DYN_INT || k.tag == OMNI_DYN_REAL || k.tag == OMNI_DYN_UINT; \
+} \
 static omni_dyn omni_js_idx_get(omni_dyn o, omni_dyn k) { \
   switch (o.tag) { \
-    case OMNI_DYN_LIST: return omni_js_arr_get(o, k); \
+    case OMNI_DYN_LIST: \
+      return omni_js_num_key(k) ? omni_js_arr_get(o, k) : omni_js_obj_get(o, k); \
     case OMNI_DYN_STR16: return omni_js_str_index(o, k); \
     case OMNI_DYN_DICT: return omni_js_obj_get(o, k); \
     default: \
@@ -90,7 +96,9 @@ static omni_dyn omni_js_idx_get(omni_dyn o, omni_dyn k) { \
 } \
 static omni_dyn omni_js_idx_set(omni_dyn o, omni_dyn k, omni_dyn v) { \
   switch (o.tag) { \
-    case OMNI_DYN_LIST: omni_js_arr_set(o, k, v); return v; \
+    case OMNI_DYN_LIST: \
+      if (omni_js_num_key(k)) omni_js_arr_set(o, k, v); else omni_js_obj_set(o, k, v); \
+      return v; \
     case OMNI_DYN_DICT: omni_js_obj_set(o, k, v); return v; \
     default: \
       omni_errorf("cannot assign to an index of a %s", omni_dyn_tag_name(o.tag)); \

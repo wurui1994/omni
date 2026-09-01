@@ -2,6 +2,7 @@
 
 declare void @omni_print_int(i64)
 declare void @omni_host_init(i32, ptr)
+declare void @omni_run_entry(ptr)
 declare i32 @omni_host_exit_code()
 declare void @omni_js_check_uncaught()
 declare i32 @fflush(ptr)
@@ -198,7 +199,7 @@ entry:
 define i32 @main(i32 %argc, ptr %argv) {
 entry:
   call void @omni_host_init(i32 %argc, ptr %argv)
-  call void @omni_main()
+  call void @omni_run_entry(ptr @omni_main)
   call void @omni_js_check_uncaught()
   %fl = call i32 @fflush(ptr null)
   %code = call i32 @omni_host_exit_code()

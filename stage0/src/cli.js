@@ -11,7 +11,7 @@
 import {
   writeText, readText, exists, readDir, mtimeMs, fileSize, mkdTemp, mkdirAll, rename,
   args as procArgs, env, stdout, stderr, setExitCode, spawn, tmpDir, evalJs, hasJsEngine, nowMs,
-  cwd, installDir,
+  cwd, installDir, isDir,
 } from './host/native.js';
 import { join, basename, dirname, isAbsolute, resolve } from './host/path.js';
 import { hash16 } from './host/hash.js';
@@ -402,8 +402,11 @@ let lastAsyDeps = [];
 /**
  * 编译器自己那一份的印记：stage0/src 底下每个文件的「路径 + 改动时间 + 字节数」。
  * 产物缓存的键里带它 —— 改了降级器或后端，缓存整片失效。
- * 目录与文件按"名字里有没有点"分（stage0/src 底下目录都没有后缀，文件都有），
- * 因为 host/native.js 那张封闭表里没有 isDir。
+ * 目录与文件**问文件系统**（isDir），不按名字猜。原先按"名字里有没有点"分
+ * —— 在 stage0/src 底下确实成立（目录都没有后缀，文件都有），但装好的那份里
+ * 编译器自己就叫 `dist/src/host/omni`、没有后缀，于是它被当成目录走进去，
+ * readdir 一个普通文件：`ENOTDIR: not a directory, scandir '…/dist/src/host/omni'`。
+ * 一条"在源码树里恰好成立"的命名约定不能当成布局的判据。
  *
  * **这里原先只走了 `installDir()`**（那是 `stage0/src/host`），于是改了
  * frontend-asy/ 底下任何一处降级器，印记都不动、产物缓存整片误命中 —— 量到过：
@@ -420,7 +423,7 @@ function srcStamp() {
   const walk = (d) => {
     for (const f of readDir(d).sort()) {
       const p = join(d, f);
-      if (f.indexOf('.') < 0) walk(p);
+      if (isDir(p)) walk(p);
       else parts.push(`${p}:${mtimeMs(p)}:${fileSize(p)}`);
     }
   };

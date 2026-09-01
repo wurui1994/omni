@@ -55,6 +55,15 @@ omni_dyn omni_js_str_at(omni_dyn s, omni_dyn i) {
   return omni_dyn_of_s16(omni_s16_slice(v, k, k + 1));
 }
 
+/* charAt 越界给**空串**（不是 undefined，也不是 NaN）—— 规范 22.1.3.1 就是这么写的。
+   与 .at() 的区别是它不认负下标：charAt(-1) 是空串，at(-1) 是最后一个字符。 */
+omni_dyn omni_js_str_char_at(omni_dyn s, omni_dyn i) {
+  omni_s16 v = want_s16(s);
+  int64_t k = to_int_arg(i, 0);
+  if (k < 0 || k >= v.len) return omni_dyn_of_s16(omni_s16_slice(v, 0, 0));
+  return omni_dyn_of_s16(omni_s16_slice(v, k, k + 1));
+}
+
 /* charCodeAt 越界给 NaN —— 不是 undefined，也不是 0，这个区别会被词法器看见 */
 omni_dyn omni_js_str_char_code_at(omni_dyn s, omni_dyn i) {
   omni_s16 v = want_s16(s);
@@ -110,9 +119,27 @@ omni_dyn omni_js_str_index_of(omni_dyn s, omni_dyn needle, omni_dyn from) {
   return omni_dyn_of_real((double)i);
 }
 
-omni_dyn omni_js_str_last_index_of(omni_dyn s, omni_dyn needle) {
-  int64_t i = omni_s16_last_index_of(want_s16(s), want_s16(needle));
-  return omni_dyn_of_real((double)i);
+/* 第二个实参是「从哪一格往前找」（含），缺省从末尾找。规范 22.1.3.11：位置先夹到
+   [0, len]，匹配本身可以越过它往右伸；NaN 当 +∞（也就是整串都找）。
+   cli.js 的 inpPath 就是这么一段段往前切印记的。 */
+omni_dyn omni_js_str_last_index_of(omni_dyn s, omni_dyn needle, omni_dyn from) {
+  omni_s16 v = want_s16(s);
+  omni_s16 n = want_s16(needle);
+  bool whole = from.tag == OMNI_DYN_UNDEF
+    || (from.tag == OMNI_DYN_REAL && !(from.u.r == from.u.r));
+  if (whole) return omni_dyn_of_real((double)omni_s16_last_index_of(v, n));
+  int64_t start = to_int_arg(from, 0);
+  if (start < 0) start = 0;
+  if (start > v.len) start = v.len;
+  for (int64_t i = start; i >= 0; i--) {
+    if (i + n.len > v.len) continue;
+    bool eq = true;
+    for (int64_t j = 0; j < n.len; j++) {
+      if (v.p[i + j] != n.p[j]) { eq = false; break; }
+    }
+    if (eq) return omni_dyn_of_real((double)i);
+  }
+  return omni_dyn_of_real(-1.0);
 }
 
 bool omni_js_str_includes(omni_dyn s, omni_dyn needle) {

@@ -38,6 +38,15 @@ export function readDir(p) {
   return node('node:fs').readdirSync(p);
 }
 
+/* 是不是目录。不存在也回 false —— 调用方要的是"能不能往里走"，不是"这条路存不存在"。
+   刻意问文件系统而不是看名字：srcStamp 原先按"名字里有没有点"猜，装好的那份里编译器
+   自己就叫 `omni`（没有后缀），于是它被当成目录走进去 —— readdir 一个普通文件。 */
+export function isDir(p) {
+  const fs = node('node:fs');
+  if (!fs.existsSync(p)) return false;
+  return fs.statSync(p).isDirectory();
+}
+
 export function mtimeMs(p) {
   return node('node:fs').statSync(p).mtimeMs;
 }

@@ -775,6 +775,11 @@ function $js_str_at(s, i) {
   if (k < 0) k += v.length;
   return k < 0 || k >= v.length ? undefined : v[k];
 }
+function $js_str_char_at(s, i) {
+  const v = $js_asS16(s), k = $js_idx(i, 0);
+  // 越界是**空串**（规范 22.1.3.1）；也不认负下标 —— 那是 .at() 的事
+  return k < 0 || k >= v.length ? "" : v[k];
+}
 function $js_str_char_code_at(s, i) {
   const v = $js_asS16(s), k = $js_idx(i, 0);
   return k < 0 || k >= v.length ? NaN : v.charCodeAt(k);
@@ -809,8 +814,13 @@ function $js_str_upper(s) {
 function $js_str_index_of(s, needle, from) {
   return $js_asS16(s).indexOf($js_asS16(needle), $js_idx(from, 0));
 }
-function $js_str_last_index_of(s, needle) {
-  return $js_asS16(s).lastIndexOf($js_asS16(needle));
+// 第二个实参是"从哪一格往前找"（含）；缺省从末尾找。规范 22.1.3.11：位置先夹到
+// [0, len]，匹配本身可以越过它往右伸。cli.js 的 inpPath 就是这么一段段往前切印记的，
+// 少了这个实参，降级器会以为"这不是 ABI 那个 lastIndexOf"、退回通用取属性 ——
+// 于是装好的那份读缓存时报 "string is not an object"。
+function $js_str_last_index_of(s, needle, from) {
+  const v = $js_asS16(s), n = $js_asS16(needle);
+  return from === undefined ? v.lastIndexOf(n) : v.lastIndexOf(n, $js_idx(from, 0));
 }
 function $js_str_includes(s, needle) { return $js_asS16(s).includes($js_asS16(needle)); }
 // 第二个实参是起始位置：词法器的标点匹配靠它，而且在热路径上
@@ -857,6 +867,13 @@ function $js_arr_push_all(a, items) {
   const l = $js_arr_of(a);
   for (const v of $js_arr_of(items)) l.push(v);
   return l.length;
+}
+// x.push(…) 的派发器：接收者不是 list 就退回"取属性、当函数调"—— 与成员派发器表外
+// 那一支同一条路（决策 12）。用户自己的方法也可以叫 push（asy 前端的 AsyLower.push()
+// 就是压一层作用域），而这两种形状（零实参、带展开）降级时走的是定长 op，静态分不出接收者。
+function $js_arr_push_dyn(a, items) {
+  if ($dynTag(a) === "list") return $js_arr_push_all(a, items);
+  return $js_call_n($js_obj_get(a, "push"), $js_arr_of(items));
 }
 function $js_arr_pop(a) { return $js_arr_of(a).pop(); }
 function $js_arr_slice(a, s, e) {
@@ -972,17 +989,27 @@ function $js_iter(v) {
 // Map/Set 上的 o[k] 在 JS 里是属性访问而不是条目，量过的源码里没有，所以报错。
 function $js_idx_get(o, k) {
   switch ($dynTag(o)) {
-    case "list": return $js_arr_get(o, k);
+    // 下标是数就是元素，否则是**挂在数组身上的属性**（JS 里数组也是对象）。
+    // a.foo 与 a["foo"] 于是走到同一个地方（降级器把成员赋值发成 idx_set）。
+    case "list": return $js_num_key(k) ? $js_arr_get(o, k) : $js_obj_get(o, k);
     case "string": return $js_str_index(o, k);
     case "dict": return $js_obj_get(o, k);
     default: $rt_error("cannot index a " + $dynTag(o));
   }
 }
+function $js_num_key(k) {
+  const t = $dynTag(k);
+  return t === "int" || t === "real";
+}
 // idx_set 的结果是**被赋的值**（JS 里赋值表达式的值就是右边），不是容器本身 ——
 // 和 obj_set 那个"返回对象好串成字面量"的约定不一样，别混。
 function $js_idx_set(o, k, v) {
   switch ($dynTag(o)) {
-    case "list": $js_arr_set(o, k, v); return v;
+    case "list": {
+      if ($js_num_key(k)) $js_arr_set(o, k, v);
+      else $js_obj_set(o, k, v);
+      return v;
+    }
     case "dict": $js_obj_set(o, k, v); return v;
     default: $rt_error("cannot assign to an index of a " + $dynTag(o));
   }
@@ -995,6 +1022,17 @@ function $js_dict_of(v) {
   if ($dynTag(v) !== "dict") $rt_error($dynTag(v) + " is not an object");
   return v;
 }
+// 引用值当 Map/Set 键：按**同一性**认（JS 就是这么规定的，两个内容相同的对象是两个键）。
+// 这个值域里键必须规范化成一个字符串，所以给每个对象发一个号。号只在内部当键用 ——
+// 不进迭代（键与值都是原样存的）、不被打印，所以两侧各自发号就行：JS 这边是个计数器，
+// C 那边直接拿地址（那个运行时不搬对象、也不回收，地址在一趟里就是同一性）。
+const $IDS = new WeakMap();
+let $idNext = 1;
+function $js_ident(o) {
+  let n = $IDS.get(o);
+  if (n === undefined) { n = $idNext; $idNext = $idNext + 1; $IDS.set(o, n); }
+  return "o" + n;
+}
 function $js_key(k) {
   switch ($dynTag(k)) {
     case "string": return "s" + k;
@@ -1003,19 +1041,51 @@ function $js_key(k) {
     case "bool": return "b" + (k ? 1 : 0);
     case "null": return "z";
     case "undefined": return "u";
-    default: $rt_error("cannot use a " + $dynTag(k) + " as a Map/Set key");
+    default: return $js_ident(k);
   }
 }
 function $js_prop(k) { return $js_asS16(k); }
 function $js_obj_new() { return new Map(); }
+// JS 里数组也是对象，身上可以挂字段（asy 前端的 do-while 就往那一格更新列表上挂一个 dw）。
+// 这个值域里 list 只是一个数组、没有属性槽，所以额外属性放在**一张按同一性索引的旁表**里：
+// 键就是 $js_key 给引用值发的那个号。list 本身于是不为此多一个字段，没挂过属性的
+// list 一分钱不付。刻意只对 list 开这条路 —— 字符串、Map 上取不到的成员照旧当场报，
+// 那句话是"成员表缺一格"的固定签名，不能让它变成静悄悄的 undefined。
+const $XPROPS = new Map();
+function $js_xprops(o, make) {
+  const k = $js_ident(o);
+  let d = $XPROPS.get(k);
+  if (d === undefined && make) { d = new Map(); $XPROPS.set(k, d); }
+  return d;
+}
 function $js_obj_get(o, k) {
+  if ($dynTag(o) === "list") {
+    const x = $js_xprops(o, false), key = $js_prop(k);
+    return x === undefined || !x.has(key) ? undefined : x.get(key);
+  }
   const d = $js_dict_of(o), key = $js_prop(k);
   return d.has(key) ? d.get(key) : undefined;
 }
 // set 返回对象本身，这样对象字面量可以降级成一串链式调用，不需要临时变量
-function $js_obj_set(o, k, v) { $js_dict_of(o).set($js_prop(k), v); return o; }
-function $js_obj_has(o, k) { return $js_dict_of(o).has($js_prop(k)); }
-function $js_obj_delete(o, k) { return $js_dict_of(o).delete($js_prop(k)); }
+function $js_obj_set(o, k, v) {
+  if ($dynTag(o) === "list") { $js_xprops(o, true).set($js_prop(k), v); return o; }
+  $js_dict_of(o).set($js_prop(k), v);
+  return o;
+}
+function $js_obj_has(o, k) {
+  if ($dynTag(o) === "list") {
+    const x = $js_xprops(o, false);
+    return x === undefined ? false : x.has($js_prop(k));
+  }
+  return $js_dict_of(o).has($js_prop(k));
+}
+function $js_obj_delete(o, k) {
+  if ($dynTag(o) === "list") {
+    const x = $js_xprops(o, false);
+    return x === undefined ? true : x.delete($js_prop(k));
+  }
+  return $js_dict_of(o).delete($js_prop(k));
+}
 function $js_obj_keys(o) { return [...$js_dict_of(o).keys()]; }
 function $js_obj_values(o) { return [...$js_dict_of(o).values()]; }
 function $js_obj_entries(o) { return [...$js_dict_of(o)].map(([k, v]) => [k, v]); }
@@ -1054,18 +1124,21 @@ function $js_set_has(s, v) { return $js_set_of(s).has($js_key(v)); }
 function $js_set_add(s, v) { $js_set_of(s).set($js_key(v), v); return s; }
 function $js_set_delete(s, v) { return $js_set_of(s).delete($js_key(v)); }
 function $js_set_items(s) { return [...$js_set_of(s).values()]; }
-// new Map(pairs) / new Set(items)。初值只收 list（JS 的可迭代协议不在这个值域里）；
-// 缺参数就是空容器，和 new Map() 一样。
+// new Map(pairs) / new Set(items)。初值收 list，**也收同类容器**—— new Map(m)
+// 与 new Set(s) 是这套编译器自己最常用的浅拷贝（量到三十多处），不能不认。
+// JS 的可迭代协议整体不在这个值域里，所以别的类型仍然报错；缺参数就是空容器。
 function $js_map_of_pairs(init) {
   const m = $js_map_new();
   if (init === undefined) return m;
-  for (const p of $js_arr_of(init)) $js_map_set(m, $js_arr_get(p, 0), $js_arr_get(p, 1));
+  const src = $dynTag(init) === "Map" ? $js_map_entries(init) : $js_arr_of(init);
+  for (const p of src) $js_map_set(m, $js_arr_get(p, 0), $js_arr_get(p, 1));
   return m;
 }
 function $js_set_of_list(init) {
   const s = $js_set_new();
   if (init === undefined) return s;
-  for (const v of $js_arr_of(init)) $js_set_add(s, v);
+  const src = $dynTag(init) === "Set" ? $js_set_items(init) : $js_arr_of(init);
+  for (const v of src) $js_set_add(s, v);
   return s;
 }
 
@@ -1490,6 +1563,11 @@ function $js_fs_write_text(p, t) {
 }
 function $js_fs_exists(p) { return $node("node:fs").existsSync($js_asS16(p)); }
 function $js_fs_readdir(p) { return $node("node:fs").readdirSync($js_asS16(p)); }
+function $js_fs_is_dir(p) {
+  const fs = $node("node:fs"), s = $js_asS16(p);
+  if (!fs.existsSync(s)) return false;
+  return fs.statSync(s).isDirectory();
+}
 function $js_fs_mtime_ms(p) { return $node("node:fs").statSync($js_asS16(p)).mtimeMs; }
 function $js_fs_size(p) { return $node("node:fs").statSync($js_asS16(p)).size; }
 function $js_fs_mkdtemp(pre) { return $node("node:fs").mkdtempSync($js_asS16(pre)); }

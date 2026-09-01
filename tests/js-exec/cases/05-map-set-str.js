@@ -60,6 +60,39 @@ console.log("  pad  ".trim() + "!");
 console.log("ab".repeat(3));
 console.log(String("7".padStart(3, "0")));
 console.log(String(text.at(-1)));
+// charAt：越界是空串、负下标也是空串（和 .at() 正好相反）。asy 前端的 rootModName
+// 就靠它一格一格往回找路径分隔符，从前不在成员表里，于是落到通用取属性上，
+// 装好的那份一跑就 "string is not an object"。
+console.log(`[${text.charAt(0)}][${text.charAt(4)}][${text.charAt(11)}][${text.charAt(-1)}]`);
+console.log(`${text.charAt(0) === "H"} ${text.charAt(99) === ""} ${"".charAt(0) === ""}`);
+
+// 对象当 Map/Set 的键：按**同一性**认。内容相同的两个对象是两个键，同一个对象取回来
+// 还是那一格。asy 前端的 callAt / oiByNode / castByNode 都是拿语法树节点当键的，
+// 从前这个值域里当场报 "cannot use a dict as a Map/Set key"。
+const k1 = { n: 1 };
+const k2 = { n: 1 };
+const byObj = new Map();
+byObj.set(k1, "one");
+byObj.set(k2, "two");
+console.log(`${byObj.size} ${String(byObj.get(k1))} ${String(byObj.get(k2))} ${String(byObj.get({ n: 1 }))}`);
+byObj.set(k1, "again");
+console.log(`${byObj.size} ${String(byObj.get(k1))}`);
+// 键取回来是**原来那个对象**，不是号
+let sum = 0;
+for (const [k, v] of byObj) sum = sum + k.n + v.length;
+console.log(String(sum));
+// 数组、以及 Set 里的对象
+const arrKey = [1, 2];
+const objSet = new Set();
+objSet.add(arrKey);
+objSet.add([1, 2]);
+objSet.add(arrKey);
+console.log(`${objSet.size} ${String(objSet.has(arrKey))} ${String(objSet.has([1, 2]))}`);
+// 字符串键仍然按内容认（同一性只管引用值）
+const byStr = new Map();
+byStr.set("a", 1);
+byStr.set("a", 2);
+console.log(`${byStr.size} ${String(byStr.get("a"))}`);
 
 // 正则：字面量直接用在使用点上
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -80,3 +113,28 @@ nulKeys.set("", "empty");
 nulKeys.set("\u0000", "nul");
 console.log(`${nulKeys.size} ${String(nulKeys.get(""))} ${String(nulKeys.get("\u0000"))}`);
 console.log(`${"\u0000".length} ${String("\u0000" === "")} ${"a\u0000b".length}`);
+
+// new Map(m) / new Set(s)：拿同类容器当初值的浅拷贝。编译器自己到处这么存一层作用域
+// （hir/check.js、frontend-asy/lower.js、sexpr/lower.js 里三十多处），从前闭 ABI 的初值
+// 只收 list，于是装好的那份一跑 asy 就 `dynamic value is Set, expected list`。
+// 要验的是「拷出来的是另一个容器」：改副本不动原件。
+const csrc = new Map();
+csrc.set("a", 1);
+csrc.set(2, "two");
+const ccp = new Map(csrc);
+ccp.set("a", 99);
+ccp.set("new", 3);
+console.log(`${csrc.size} ${String(csrc.get("a"))} ${String(csrc.get(2))} ${String(csrc.has("new"))}`);
+console.log(`${ccp.size} ${String(ccp.get("a"))} ${String(ccp.get(2))} ${String(ccp.get("new"))}`);
+console.log([...ccp.keys()].join(","));
+const ss = new Set();
+ss.add("x");
+ss.add(7);
+const sc = new Set(ss);
+sc.add("y");
+sc.delete("x");
+console.log(`${ss.size} ${String(ss.has("x"))} ${String(ss.has("y"))}`);
+console.log(`${sc.size} ${String(sc.has("x"))} ${String(sc.has(7))} ${String(sc.has("y"))}`);
+// 空容器的拷贝、以及仍然收 list 的老路子
+console.log(`${new Map(new Map()).size} ${new Set(new Set()).size}`);
+console.log(`${new Map([["k", 1]]).size} ${new Set([1, 1, 2]).size}`);

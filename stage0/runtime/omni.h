@@ -388,6 +388,7 @@ omni_dyn omni_js_s16(omni_str s);
 omni_dyn omni_js_str_len(omni_dyn s);
 omni_dyn omni_js_str_index(omni_dyn s, omni_dyn i);
 omni_dyn omni_js_str_at(omni_dyn s, omni_dyn i);
+omni_dyn omni_js_str_char_at(omni_dyn s, omni_dyn i);
 omni_dyn omni_js_str_char_code_at(omni_dyn s, omni_dyn i);
 omni_dyn omni_js_str_code_point_at(omni_dyn s, omni_dyn i);
 omni_dyn omni_js_str_slice(omni_dyn s, omni_dyn a, omni_dyn b);
@@ -397,7 +398,7 @@ omni_dyn omni_js_str_trim(int side, omni_dyn s);
 omni_dyn omni_js_str_lower(omni_dyn s);
 omni_dyn omni_js_str_upper(omni_dyn s);
 omni_dyn omni_js_str_index_of(omni_dyn s, omni_dyn needle, omni_dyn from);
-omni_dyn omni_js_str_last_index_of(omni_dyn s, omni_dyn needle);
+omni_dyn omni_js_str_last_index_of(omni_dyn s, omni_dyn needle, omni_dyn from);
 bool omni_js_str_includes(omni_dyn s, omni_dyn needle);
 bool omni_js_str_starts_with(omni_dyn s, omni_dyn pre, omni_dyn pos);
 bool omni_js_str_ends_with(omni_dyn s, omni_dyn suf);
@@ -471,6 +472,9 @@ void omni_run_entry(void (*entry)(void));
 omni_dyn omni_js_fs_read_text(omni_dyn path);
 omni_dyn omni_js_fs_write_text(omni_dyn path, omni_dyn text);
 bool omni_js_fs_exists(omni_dyn path);
+/* 是不是目录（不存在也回 false）。问文件系统而不是看名字 —— 装好的那份里编译器自己
+   就叫 `omni`，没有后缀。 */
+bool omni_js_fs_is_dir(omni_dyn path);
 omni_dyn omni_js_fs_mtime_ms(omni_dyn path);
 omni_dyn omni_js_fs_size(omni_dyn path);
 omni_dyn omni_js_fs_mkdtemp(omni_dyn prefix);

@@ -33,11 +33,17 @@
 // 镜像做 ad-hoc 签名，所以 `cmp` 两个原生二进制必然不同。那不是自举失败。
 
 import {
-  readText, writeText, exists, readDir, mkdirAll, nowMs, spawn, env, stdout,
+  readText, writeText, exists, readDir, mkdirAll, nowMs, spawn, env, stdout, installDir,
 } from './host/native.js';
 import { join, basename } from './host/path.js';
 import { RUNTIME_DIR, JIT_DIR } from './runtime/c_runtime.js';
 import { LIB_DIR } from './module/load.js';
+
+/* 语法与内建表是**数据**，不进二进制：两个语法驱动的前端在 `installDir()/../frontend-*`
+   底下找它们（cli.js 的 asyGrammar / jncGrammar）。所以这里的源目录也照同一条算 ——
+   装好的那一份自己再 bootstrap 时，这两个常量指的就是它自己带的那份。 */
+const ASY_DIR = join(installDir(), '..', 'frontend-asy');
+const JNC_DIR = join(installDir(), '..', 'frontend-jnc');
 
 /** 文本树复制。产物要自包含，所以是复制而不是 symlink —— 打包带走才不会断。 */
 function copyTree(from, to, exts) {
@@ -110,11 +116,22 @@ export function bootstrapSelf(o) {
   mkdirAll(bin);
   mkdirAll(work);
   const libN = copyTree(LIB_DIR, join(o.outDir, 'lib'), ['.omni']);
+  // asy 的那份 base（`lib/asy/*.asy`）：`import settings;` 这些从这里找（cli.js 的 asyLibDir）。
+  // copyTree 是平的，所以子目录要单独来一趟。
+  const libAsyN = copyTree(join(LIB_DIR, 'asy'), join(o.outDir, 'lib', 'asy'), ['.asy']);
   const rtN = copyTree(RUNTIME_DIR, join(o.outDir, 'runtime'), ['.c', '.h']);
   // JIT 宿主的 C 源码也要带走，否则 N1 的 run-jit 找不到它（布局错，不是编译器错）
   const jitN = copyTree(JIT_DIR, join(o.outDir, 'jit'), ['.c', '.h']);
-  if (libN > 0 && rtN > 0 && jitN > 0) ok(`layout ${o.outDir}  lib ${libN} files, runtime ${rtN} files, jit ${jitN} files`);
-  else bad(`layout ${o.outDir}`, `lib ${libN} files, runtime ${rtN} files, jit ${jitN} files (all must be > 0)`);
+  // 语法与内建表同理：它们是**数据**、不进二进制，而两个语法驱动的前端在
+  // `installDir()/../frontend-*` 底下按名字找（cli.js:248/253/1083）。不带走的话装好的
+  // 编译器一跑 `.asy` 就报"找不到 asy 语法文件"—— 同样是布局错，不是编译器错。
+  const gAsyN = copyTree(ASY_DIR, join(o.outDir, 'src', 'frontend-asy'), ['.grammar', '.tab']);
+  const gJncN = copyTree(JNC_DIR, join(o.outDir, 'src', 'frontend-jnc'), ['.grammar']);
+  const counts = `lib ${libN}+${libAsyN} files, runtime ${rtN} files, jit ${jitN} files,`
+    + ` grammar ${gAsyN}+${gJncN} files`;
+  if (libN > 0 && libAsyN > 0 && rtN > 0 && jitN > 0 && gAsyN > 0 && gJncN > 0) {
+    ok(`layout ${o.outDir}  ${counts}`);
+  } else bad(`layout ${o.outDir}`, `${counts} (all must be > 0)`);
 
   // ---- 阶段 1：C1 = 我 emit-js 我自己
   const c1Text = o.emitOf('js', o.source);

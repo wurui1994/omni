@@ -42,6 +42,9 @@ static omni_str omni_js_key_tag_(char t, omni_str u) { \
 static omni_str omni_js_key(omni_dyn k) { \
   switch (k.tag) { \
     case OMNI_DYN_STR16: return omni_js_key_tag_('s', omni_s16_to_utf8(k.u.s16)); \
+    /* 核心方言的 string 也可能经 dynamic 走到这里：它必须与 STR16 同键（内容相同就是
+       同一个键），**不能**掉进底下那条按地址认的路 —— 那会把两个相等的字符串算成两个键。 */ \
+    case OMNI_DYN_STRING: return omni_js_key_tag_('s', k.u.s); \
     case OMNI_DYN_INT: return omni_str_fmt("i%lld", (long long)k.u.i); \
     case OMNI_DYN_UINT: return omni_str_fmt("i%llu", (unsigned long long)omni_dyn_u64(k)); \
     case OMNI_DYN_REAL: \
@@ -49,31 +52,65 @@ static omni_str omni_js_key(omni_dyn k) { \
     case OMNI_DYN_BOOL: return omni_str_fmt("b%d", k.u.b ? 1 : 0); \
     case OMNI_DYN_NULL: return omni_str_new("z", 1); \
     case OMNI_DYN_UNDEF: return omni_str_new("u", 1); \
-    default: \
-      omni_errorf("cannot use a %s as a Map/Set key", omni_dyn_tag_name(k.tag)); \
-      return omni_str_new("", 0); \
+    /* 引用值按**同一性**当键（JS 就是这么规定的）。这个运行时不搬对象、也不回收
+       （bump arena），所以地址在一趟里就是同一性。号只在内部当键用 —— 键与值都原样
+       存着、迭代不看它，所以 JS 侧发计数器、这里发地址，两边输出仍然逐字节相同。 */ \
+    default: return omni_str_fmt("o%p", k.u.ref); \
   } \
 } \
 static omni_str omni_js_prop(omni_dyn k) { return omni_s16_to_utf8(omni_js_as_s16(k)); } \
 static omni_dyn omni_js_obj_new(void) { return omni_js_dict_wrap(DT##_new()); } \
+/* JS 里数组也是对象，身上可以挂字段（asy 前端的 do-while 就往那一格更新列表上挂一个 dw）。
+   这个值域里 list 只是一段 items/len、没有属性槽，所以额外属性放在一张**按同一性索引的
+   旁表**里：键就是 omni_js_key 给引用值发的那个（地址）。list 本身于是不为此多一个字段，
+   没挂过属性的 list 一分钱不付。刻意只对 list 开这条路 —— 字符串、Map 上取不到的成员
+   照旧当场报，那句话是「成员表缺一格」的固定签名，不能让它变成静悄悄的 undefined。 */ \
+static DT omni_js_xprops_tbl_; \
+static DT omni_js_xprops_(omni_dyn o, bool make) { \
+  omni_str id = omni_js_key(o); \
+  if (omni_js_xprops_tbl_ == NULL) { \
+    if (!make) return NULL; \
+    omni_js_xprops_tbl_ = DT##_new(); \
+  } \
+  int64_t e = DT##_find(omni_js_xprops_tbl_, id); \
+  if (e >= 0) return (DT)omni_js_xprops_tbl_->vals[e].u.ref; \
+  if (!make) return NULL; \
+  DT d = DT##_new(); \
+  DT##_set(omni_js_xprops_tbl_, id, omni_js_dict_wrap(d)); \
+  return d; \
+} \
 /* 键是编译期字面量时走这四条：字典里的键本来就是 UTF-8，字面量池已经把它算好了
  * （见 backend-c/emit.js 的 s16PoolLines），omni_js_prop 那次转换和分配就整个省掉。
  * 解释器把 OIR 节点当 dict 读，`e.kind` 这类取字段全落在这里，是原生构建最热的一条。 */ \
 static omni_dyn omni_js_obj_getk(omni_dyn o, omni_str key) { \
-  DT d = omni_js_dict_of(o); \
+  DT d; \
+  if (o.tag == OMNI_DYN_LIST) { \
+    d = omni_js_xprops_(o, false); \
+    if (d == NULL) return omni_dyn_undef(); \
+  } else { \
+    d = omni_js_dict_of(o); \
+  } \
   /* contains + get 是两次哈希 —— 取属性是解释器最热的一条，只探一次 */ \
   int64_t e = DT##_find(d, key); \
   if (e < 0) return omni_dyn_undef(); \
   return d->vals[e]; \
 } \
 static omni_dyn omni_js_obj_setk(omni_dyn o, omni_str key, omni_dyn v) { \
-  DT##_set(omni_js_dict_of(o), key, v); \
+  DT##_set(o.tag == OMNI_DYN_LIST ? omni_js_xprops_(o, true) : omni_js_dict_of(o), key, v); \
   return o; \
 } \
 static bool omni_js_obj_hask(omni_dyn o, omni_str key) { \
+  if (o.tag == OMNI_DYN_LIST) { \
+    DT d = omni_js_xprops_(o, false); \
+    return d == NULL ? false : DT##_contains(d, key); \
+  } \
   return DT##_contains(omni_js_dict_of(o), key); \
 } \
 static bool omni_js_obj_deletek(omni_dyn o, omni_str key) { \
+  if (o.tag == OMNI_DYN_LIST) { \
+    DT d = omni_js_xprops_(o, false); \
+    return d == NULL ? true : DT##_remove(d, key); \
+  } \
   return DT##_remove(omni_js_dict_of(o), key); \
 } \
 static omni_dyn omni_js_obj_get(omni_dyn o, omni_dyn k) { \
@@ -127,6 +164,16 @@ static omni_dyn omni_js_obj_assign(omni_dyn dst, omni_dyn src) { \
   DT d = omni_js_dict_of(dst); \
   for (int64_t i = 0; i < s->n; i++) if (s->live[i]) DT##_set(d, s->keys[i], s->vals[i]); \
   return dst; \
+} \
+/* `x.push(…)` 的派发器。接收者是 list 就整段追加，否则退回「取属性、当函数调」——
+   与成员派发器表外那一支同一条路（ADR-0011 决策 12）。用户自己的方法也可以叫 push
+   （asy 前端的 `AsyLower.push()` 就是压一层作用域），而 `x.push()` 与 `x.push(...xs)`
+   这两种形状降级时走的是这个定长 op，静态分不出接收者 —— 只能在运行期看标签。
+   定义在这里而不是 omni_js_arr.h：那个宏先展开，还看不见 omni_js_obj_getk。 */ \
+static omni_dyn omni_js_arr_push_dyn(omni_dyn a, omni_dyn items) { \
+  if (a.tag == OMNI_DYN_LIST) return omni_js_arr_push_all(a, items); \
+  LT l = omni_js_arr_of(items); \
+  return omni_js_call_n(omni_js_obj_getk(a, omni_str_new("push", 4)), l->len, l->items); \
 } \
 OMNI_JS_MAP(LT, DT)
 
@@ -204,12 +251,13 @@ static omni_dyn omni_js_set_items(omni_dyn s) { \
   for (int64_t i = 0; i < d->n; i++) if (d->live[i]) out->items[out->len++] = d->vals[i]; \
   return omni_js_arr_wrap(out); \
 } \
-/* new Map(pairs) / new Set(items)。初值只收 list（JS 的可迭代协议不在这个值域里）；
+/* new Map(pairs) / new Set(items)。初值收 list，**也收同类容器**（浅拷贝）；
+   JS 的可迭代协议整体不在这个值域里，别的类型仍然报错；
    缺参数（undefined）就是空容器，和 new Map() 一样。 */ \
 static omni_dyn omni_js_map_of_pairs(omni_dyn init) { \
   omni_dyn m = omni_js_map_new(); \
   if (init.tag == OMNI_DYN_UNDEF) return m; \
-  LT l = omni_js_arr_of(init); \
+  LT l = omni_js_arr_of(init.tag == OMNI_DYN_MAP ? omni_js_map_entries(init) : init); \
   for (int64_t i = 0; i < l->len; i++) { \
     LT p = omni_js_arr_of(l->items[i]); \
     omni_js_map_set(m, p->len > 0 ? p->items[0] : omni_dyn_undef(), \
@@ -220,7 +268,7 @@ static omni_dyn omni_js_map_of_pairs(omni_dyn init) { \
 static omni_dyn omni_js_set_of_list(omni_dyn init) { \
   omni_dyn s = omni_js_set_new(); \
   if (init.tag == OMNI_DYN_UNDEF) return s; \
-  LT l = omni_js_arr_of(init); \
+  LT l = omni_js_arr_of(init.tag == OMNI_DYN_SET ? omni_js_set_items(init) : init); \
   for (int64_t i = 0; i < l->len; i++) omni_js_set_add(s, l->items[i]); \
   return s; \
 }

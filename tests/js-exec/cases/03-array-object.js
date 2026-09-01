@@ -82,3 +82,26 @@ console.log(String(nested.nope?.list[0]));
 console.log(String(nested.nope?.list.join(",")));
 console.log(String(nested.list?.find((x) => x > 1)));
 console.log(String(JSON.stringify({ k: [1, "s", true, null] })));
+
+// 数组身上挂字段：JS 里数组也是对象。asy 前端的 do-while 就往那一格更新列表上挂一个 dw
+// （stmts.js 的 `ctx.dw = []`），从前这个值域里一读就 "dynamic value is list, expected dict"。
+// 元素与属性互不干扰：length 只数元素，for-of 只走元素。
+const withProp = [1, 2];
+console.log(String(withProp.tag));
+withProp.tag = "loop";
+withProp.extra = [7];
+console.log(`${withProp.tag} ${withProp.extra[0]} ${withProp.length}`);
+withProp.push(3);
+let propAcc = 0;
+for (const v of withProp) propAcc = propAcc + v;
+console.log(`${propAcc} ${withProp.length} ${withProp.join(",")}`);
+console.log(String("tag" in withProp));
+console.log(String(delete withProp.tag));
+console.log(String(withProp.tag));
+// 两个数组各自一份，互不串味
+const a1 = [];
+const a2 = [];
+a1.mark = "one";
+console.log(`${String(a1.mark)} ${String(a2.mark)}`);
+// JSON 只看元素（宿主也是这样）
+console.log(JSON.stringify(withProp));

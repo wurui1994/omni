@@ -122,3 +122,31 @@ console.log(bag.get(1));
 console.log(String(bag.has("a")));
 console.log(String(bag.has("z")));
 console.log(String(bag.keys()));
+
+// 自己的方法叫 push：零实参与展开这两种形状降级时走的是定长的整段追加 op，
+// 静态分不出接收者是 list 还是对象 —— 派发器得在运行期看标签。
+// asy 前端的 AsyLower.push() 正是这个形状（压一层作用域），从前装好的那份一跑就
+// "dynamic value is dict, expected list"。
+class Scopes {
+  constructor() {
+    this.depth = 0;
+    this.log = [];
+  }
+  push(...names) {
+    this.depth = this.depth + 1;
+    for (const n of names) this.log.push(n);
+    return this.depth;
+  }
+}
+const sc = new Scopes();
+console.log(String(sc.push()));
+const more = ["a", "b"];
+console.log(String(sc.push(...more)));
+console.log(String(sc.push("c", "d")));
+console.log(`${sc.depth} ${sc.log.join(",")}`);
+// 真数组上这三种形状照旧
+const xs = [1];
+console.log(String(xs.push()));
+console.log(String(xs.push(...[2, 3])));
+console.log(String(xs.push(4, 5)));
+console.log(xs.join(","));

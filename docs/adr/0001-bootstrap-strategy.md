@@ -188,6 +188,25 @@ pthread 就在 libSystem 里、这个开关等于空操作；glibc 2.34 起也�
 答案是把那三遍里最深的那一遍改成显式栈；在那之前，512MB 是一条量得出来的余量，而不是
 一个猜的数。
 
+### 8. 装好的那一份是完整的：数据文件跟着走，布局不靠命名约定
+
+`bootstrap` 铺 `dist/` 时，除了编译器自己，还要把**运行时真正会读的数据文件**一起拷过去：
+`frontend-asy/asy.grammar` 与 `builtins.tab`、`frontend-jnc/jnc.grammar`、`lib/asy/*.asy`
+（`runtime/*.{c,h}` 与 `jit/*` 本来就在拷）。少了它们，装好的那份能起来、能编译 JS，
+一跑 asy 就 `找不到 asy 语法文件：…/dist/src/frontend-asy/asy.grammar` —— 一个只在
+装好之后才现形的洞。所以 layout 那一格现在**六个计数全部必须 > 0** 才算过
+（`lib 1+4 files, runtime 26 files, jit 1 files, grammar 2+1 files`），而不是只看目录建出来了。
+
+第二条同源的错更隐蔽：产物缓存的键要走一遍 `stage0/src` 底下所有文件，从前**按"名字里有没有
+点"分目录与文件**。这在源码树里恰好成立（目录都没后缀、文件都有），而装好的那份里编译器
+自己就叫 `dist/src/host/omni`、没有后缀 —— 于是它被当成目录走进去，`readdir` 一个普通文件：
+`ENOTDIR: not a directory, scandir '…/dist/src/host/omni'`。改成问文件系统（新的
+`js_fs_is_dir`，闭 ABI 里六处齐备）。**判据**：一条"在我们这棵树里恰好成立"的命名约定，
+不能当成布局的判据 —— 布局的事只有文件系统说了算。
+
+**画出来的边界**：`dist/` 的完整性只由 layout 那一格与"装好的那份跑一遍 asy"守着，
+还没有一格"把 dist 挪到别的路径再跑"——路径无关性没被量过。
+
 ## 落地顺序
 
 1. ✅ 运行时出 JS，变成真的 C 文件树 + `.o` 缓存 + `--amalgamate`

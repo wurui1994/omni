@@ -36,6 +36,7 @@ const NATIVE_OPS = {
   writeText: 'js_fs_write_text',
   exists: 'js_fs_exists',
   readDir: 'js_fs_readdir',
+  isDir: 'js_fs_is_dir',
   mtimeMs: 'js_fs_mtime_ms',
   fileSize: 'js_fs_size',
   mkdTemp: 'js_fs_mkdtemp',
