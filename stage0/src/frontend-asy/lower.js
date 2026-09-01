@@ -2958,6 +2958,15 @@ class AsyLower {
         inc: u.inc === undefined || u.inc === null ? [] : u.inc,
       });
     }
+    // main 的**第一句**：把"这一趟的主文件叫什么"填进那格 weak 全局（`_mainname()` 读它，
+    // 见 calls.js 那一段）。放在这儿而不是降成字面量，是为了让库与 weak 两边的产物都与
+    // "入口是谁"无关 —— 只有入口自己那一份带着名字，于是库跨入口共用。
+    // 塞进 `main` 而不是下面那个 `body`：模块路（link.js）是从 `sections.main` **重拼**
+    // 一遍 main 的，只改 body 的话那条路上一句都不发 —— 量出来的样子是 `_mainname()`
+    // 回空串（同一个例子单体路对、模块路空）。
+    if (this.arrGen.has('asy__mainname')) {
+      main.unshift(`(set asy__mainname_v (str ${JSON.stringify(this.rootModName())}))`);
+    }
     this.sections = { ids, secs, weak, weakLib, keys, main, tail: '', skipped, unitWhy };
     const body = [];
     for (const s of main) body.push(`    ${s}`);

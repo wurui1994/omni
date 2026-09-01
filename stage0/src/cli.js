@@ -574,6 +574,16 @@ function fileUnitName(p) {  return unitName({ key: p, file: p, tpl: false });
 }
 
 /**
+ * `_mainname()` 会降成什么（源文件的基名，去掉 `.asy` —— 与 lower.js 的 rootModName 同一条规矩）。
+ * 单元的印记里那格 `main:` 用它，见 asyModsBuild 里的 stampOf。
+ */
+function asyMainWord(p) {
+  const cut = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+  const nm = cut < 0 ? p : p.slice(cut + 1);
+  return nm.endsWith('.asy') ? nm.slice(0, nm.length - 4) : nm;
+}
+
+/**
  * asy -> **每个源文件一份**核心方言模块（第七十五刀）。
  * 每一份里用到的别人家的名字是 `(sig "出处" (…))`，所以每一份都能单独编 ——
  * 一个库改了只重编它自己那一份，别的照旧从盘上拿。
@@ -703,7 +713,7 @@ const ASY_WK_SEP = ';;--';
  * 量出来的账：13 个库的 asyBodyPass 是 368ms（整个前端 645ms 的一半多），而它降出来的
  * 东西逐字节等于盘上那份 —— 这一刀省的就是它。声明遍那 221ms 省不掉：入口要那些表。
  */
-function asyModsSkip(dir, cs) {
+function asyModsSkip(dir, cs, mainTag) {
   const extras = new Map();          // 产物名 -> {name, key, sigs, weak}
   // 一份产物旁边那格 `.dep`：`key|源文件`、`need|要跟着进来的产物名`
   const readDep = (nm) => {
@@ -729,6 +739,8 @@ function asyModsSkip(dir, cs) {
       const f = fs[i];
       if (f === '-') continue;                 // 没有源文件的那种依赖（omni_weak）
       if (f.startsWith('t')) return null;      // 按文本哈希记的那种（omni_weak 自己）：不复用
+      // 「这一份的正文里有主文件的基名」那一格（见 asyModsBuild 的 stampOf）：换了入口就不复用
+      if (f.startsWith('main:')) { if (f !== mainTag) return null; continue; }
       if (!inpOk(f).ok) return null;
     }
     const dep = readDep(nm);
@@ -865,13 +877,22 @@ function asyFps(all, cs, mainPath) {
  */
 function asyModsBuild(path, dir) {
   mkdirAll(dir);
-  // 印记里再带上**主文件的名字**：TeX 那条路上 `_mainname()` 降成了字面量（dvips 把 dvi
-  // 的文件名写进产物正文，`TeXDict begin … (equilateral_.dvi)` 那一行），而单元那一级的
-  // 产物是按"源码没变就复用"来的 —— 不带主文件名的话，asy_builtins 那一份会被下一个例子
-  // 照旧拿去用，名字就是上一个例子的。量出来过：先跑 equilateral 再跑 fano，fano 的产物里
-  // 写着 `(equilateral_.dvi)`。代价是单元产物不再跨例子共用，写在明处。
-  const cs = `${srcStamp()}|main:${fileUnitName(path)}`;
-  const r = asyUnitTexts(path, asyModsSkip(dir, cs));
+  // 主文件的名字**只进用得着它的那几份**印记（这一刀）。
+  //
+  // 从前它进的是 `cs` —— 每一份产物的印记都带着它，于是**库那几份跨不了入口**：
+  // 量出来的样子是 01-arith 编完之后跑 02-strings，日志写着「新编 4 份、复用 0 份」，
+  // 28 行代码 0.9s。为什么当初要带上它：TeX 那条路上 `_mainname()` 降成了字面量
+  // （dvips 把 dvi 的文件名写进产物正文，`TeXDict begin … (equilateral_.dvi)` 那一行），
+  // 不带的话 fano 会复用 equilateral 那份产物，名字就是上一个例子的。
+  //
+  // 现在按「这一份的正文里到底有没有那个名字」分：有就在它自己那格印记尾巴上补一格
+  // `main:<基名>`，别的入口来了对不上就重编；没有的（asy_builtins、settings、绝大多数库）
+  // 一格都不带，谁都能复用。判据故意**偏保守** —— 正文里恰好出现同名字符串的库会白重编
+  // 一次，但绝不会拿着别的例子的名字跑。
+  const cs = srcStamp();
+  const mainWord = asyMainWord(path);
+  const mainTag = `main:${mainWord}`;
+  const r = asyUnitTexts(path, asyModsSkip(dir, cs, mainTag));
   // ADR-0015 第一步与第二步：指纹与归属先只打印不接线，好验两样都与"入口是谁"无关。
   if (env('OMNI_ASY_FP') === '1') {
     const fps = asyFps([...r.units, ...r.reused], cs);
@@ -899,7 +920,10 @@ function asyModsBuild(path, dir) {
     // 往 plain_picture.asy 里加的探针在 OMNI_ASY_MODS=1 那一路一声不响。
     const ic = u.inc === undefined || u.inc === null ? [] : u.inc;
     for (const p of ic) ds.push(fstamp(p));
-    return `${cs}|${fstamp(u.key)}|${ds.join('|')}`;
+    // 正文里出现过主文件的基名（`_mainname()` 那一格）就把它记进印记的尾巴，别的入口对不上
+    // 就重编；没出现的一格都不带，于是库那几份跨入口共用（见函数头那段账）。
+    const mn = u.text.indexOf(mainWord) >= 0 ? `|${mainTag}` : '';
+    return `${cs}|${fstamp(u.key)}|${ds.join('|')}${mn}`;
   };
   let made = 0;
   let kept = r.reused.length;
@@ -986,11 +1010,22 @@ function asyModsBuild(path, dir) {
   // 入口那一份的启动器**按入口起名**：这个目录是共用的，叫 main.js 的话两个入口互相盖
   const mainPath = join(dir, `main-${r.entry}.js`);
   writeText(mainPath, lines.join('\n'));
-  // 清单：这个入口用到哪几份产物、每份对应的源文件与它的改动时间/字节数。
+  // 清单：这个入口用到哪几份产物、每份对应的源文件与它的改动时间/字节数，
+  // 再加一格「这一份的印记里有没有 `main:`」（第一百〇四刀）。
   // 下一趟只要这张清单还成立，**整个前端一步都不走**（见 asyModsFast）。
+  //
+  // 那一格是必须的：库的产物现在**跨入口共用**了，而带主文件名的那几份（`_mainname()`）
+  // 换个入口跑就会被原地盖掉 —— 清单只核源文件的话，A 的快路会拿起 B 刚写下的那一份。
+  // 与 `w|` 那一格是同一类问题（同一个共用目录、同一个名字、内容却按程序变）。
+  const mrec = (nm) => {
+    const st = join(dir, `${nm}.stamp`);
+    if (!exists(st)) return '-';
+    for (const f of readText(st).split('|')) if (f.startsWith('main:')) return f;
+    return '-';
+  };
   const man = [asyModsEnv(), cs, r.entry];
-  for (const u of r.units) man.push(`u|${u.name}|${u.key}|${fstamp(u.key)}`);
-  for (const u of r.reused) man.push(`u|${u.name}|${u.key}|${fstamp(u.key)}`);
+  for (const u of r.units) man.push(`u|${u.name}|${u.key}|${fstamp(u.key)}|${mrec(u.name)}`);
+  for (const u of r.reused) man.push(`u|${u.name}|${u.key}|${fstamp(u.key)}|${mrec(u.name)}`);
   // **omni_weak 那一份也要记一格**：它的内容由整个程序决定（名字却必须固定 ——
   // 库那几份 `.js` 里写死的是 `from './omni_weak.js'`），所以换个入口跑一趟就会把它盖掉。
   // 记下这一趟那份的印记，下一趟对不上就老老实实重来。
@@ -1027,6 +1062,11 @@ function asyModsEnv(path) {
  * 为什么这一格是必须的：产物缓存只砍掉"核心方言 -> JS"那一段，而量出来的大头在前端 ——
  * 一趟 1.8s 里 AST 读回来约 250ms、把库重新降级约 800ms，两样都发生在"知道产物还能用"
  * **之前**。所以判断"能不能用"这件事本身必须便宜：只 stat 清单里那几十个文件。
+ *
+ * 这里的每一问都必须与 asyModsBuild 写清单时**一模一样**：从前那边写的是
+ * `srcStamp()|main:<入口>`、这边只比 `srcStamp()`，于是这条快路**永远不命中** ——
+ * 同一个入口连跑两趟，第二趟照旧满编（量出来 5.9s，日志里那句「asy mods 不命中
+ * 编译器自己变了」每趟都在，没人细看）。
  */
 function asyModsFast(path, dir) {
   const nm = fileUnitName(path);
@@ -1056,8 +1096,17 @@ function asyModsFast(path, dir) {
     if (!exists(join(dir, `${parts[1]}.js`))) return miss(`产物 ${parts[1]}.js 没了`);
     // 这一格记的是 `路径:改动时间:字节数:h内容哈希`（inpField 那一份），没有源文件的记 `-`。
     // 改动时间变了但内容哈希一样也算成立（touch / 重新 checkout 不该让整张清单作废）。
-    const want = parts.slice(3).join('|');
+    const want = parts[3] === undefined ? '' : parts[3];
     if (!inpOk(want).ok) return miss(`源文件 ${parts[1]} 变了`);
+    // 「这一份是不是带着某个入口的名字」那一格（第一百〇四刀）：库的产物跨入口共用之后，
+    // 带 `_mainname()` 的那几份换个入口跑会被盖掉，只核源文件的话就会拿起别人那一份。
+    const mwant = parts[4] === undefined ? '-' : parts[4];
+    let mhave = '-';
+    const stp = join(dir, `${parts[1]}.stamp`);
+    if (exists(stp)) {
+      for (const f of readText(stp).split('|')) if (f.startsWith('main:')) mhave = f;
+    }
+    if (mhave !== mwant) return miss(`产物 ${parts[1]} 是别的入口的那一份`);
   }
   if (!exists(join(dir, 'omni_rt.js'))) return miss('运行时那一份没了');
   vStep(`asy mods 命中   ${lines.length - 3} 份产物一份没动`);
@@ -1497,7 +1546,8 @@ function main(argv) {
     const li = rest.indexOf('--lang');
     const ei = rest.indexOf('--engine');
     return startRepl(modeFor('', rest, 'dynamic'), li >= 0 ? rest[li + 1] : 'omni',
-      { asy: asyFrontEnd }, ei >= 0 ? rest[ei + 1] : 'interp');
+      { asy: asyFrontEnd, asyPrelude: () => (env('OMNI_ASY_BUILTINS') === '0' ? '' : 'asy_builtins') },
+      ei >= 0 ? rest[ei + 1] : 'interp');
   }
   // 自举也没有源文件参数（默认就是编译器自己）。整条链与四条门槛见 bootstrap.js
   if (cmd === 'bootstrap') {
@@ -1526,9 +1576,11 @@ function main(argv) {
     case 'run': {
       // 一个源文件一份产物那条路（第七十五刀）：产物按源文件名躺在一个**共用目录**里，
       // 跑的是 node 自己的 ESM 模块图 —— 复用与增量都在那个目录上，不在这一趟里。
+      // **这是默认**（第一百〇四刀）：它是唯一一条"改一个文件只重编一份"的路，
+      // 而那条整份程序一份大 JS 的缓存只在源码一个字节都没动时才管用。
       // `OMNI_ASY_MODS=0` 回到"整份程序一份大 JS"那条（对照用）。
       if (path.endsWith('.asy') && hasJsEngine() && !rest.includes('--interp')
-        && env('OMNI_ASY_MODS') === '1') {
+        && env('OMNI_ASY_MODS') !== '0') {
         const dir = asyModsDir();
         // 先问一句"上一趟的清单还成立吗"。成立就一步前端都不走 —— 判断本身只是几十个 stat。
         const hit = asyModsFast(path, dir);

@@ -260,7 +260,20 @@ class AsyLang {
       throw new OmniError('omni: repl --lang asy 需要 asy 的语法零件（由 cli 注入）');
     }
     this.fe = deps.asy();
-    this.as = new AsySession({ path: '<repl>', load: null, builtins: this.fe.builtins });
+    // 这一批的诊断袋：模块加载器是在 add 里面被调起来的，所以它得能拿到当前这一袋
+    this.diags = new Diagnostics();
+    this.preludeName = deps.asyPrelude === undefined ? 'asy_builtins' : deps.asyPrelude();
+    // `run` 那一路有的两样，这里一样要有（第一百〇四刀）：**模块加载器**与那层隐式的
+    // `asy_builtins`。从前是 `load: null`，于是 REPL 里 `import settings;` 报的是
+    // "asy 前端第一刀还不支持：模块 'settings'（这条路上没有模块加载器）" —— 同一门语言
+    // 在 REPL 里少了一半，而 asy 自己的 REPL 是能 import 的。文件 IO 与解析缓存都在
+    // fe 那一侧（cli.js 注入），这边只是把它接上。
+    this.as = new AsySession({
+      path: '<repl>', builtins: this.fe.builtins,
+      load: (nm) => this.fe.loader(this.diags)(nm),
+      pathOf: (n) => this.fe.resolve(n),
+      prelude: this.preludeName,
+    });
     this.cs = new CoreSession();
   }
 
@@ -292,6 +305,7 @@ class AsyLang {
   }
 
   add(text, diags) {
+    this.diags = diags;
     const tree = this.fe.parseText('<repl>', `${text}\n`, diags);
     diags.throwIfErrors();
     const sx = this.as.add(tree, diags);
@@ -303,10 +317,16 @@ class AsyLang {
 
   full(chunks) {
     const diags = new Diagnostics();
+    this.diags = diags;
     const text = `${chunks.join('\n')}\n`;
     const tree = this.fe.parseText('<repl>', text, diags);
     diags.throwIfErrors();
-    const sx = lowerAsy(tree, diags, { path: '<repl>', load: null, builtins: this.fe.builtins });
+    const sx = lowerAsy(tree, diags, {
+      path: '<repl>', builtins: this.fe.builtins,
+      load: (nm) => this.fe.loader(diags)(nm),
+      pathOf: (n) => this.fe.resolve(n),
+      prelude: this.preludeName,
+    });
     diags.throwIfErrors();
     const mod = lowerCoreSession(sx, diags);
     diags.throwIfErrors();

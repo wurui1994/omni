@@ -655,11 +655,31 @@ export function asyCall(L, n) {
   // `_mainname()`：主文件的基名（去掉 .asy）。TeX 那一段要用它当中间产物的前缀 ——
   // dvips 把 dvi 的文件名写进**正文**（`TeXDict begin … (equilateral_.dvi)` 那一行），
   // 名字不对参考就对不上。真 asy 那边这个名字是 `-o` 给的，而 `-o` 就是例子名。
+  //
+  // **不当场降成字面量**（第一百〇四刀）：字面量会把主文件的名字烙进用到它的那一份产物，
+  // 而用到它的正是 `asy_builtins.asy:6851`（outprefix 那一句）—— 那份 380KB 的库于是
+  // 跨不了入口，每换一个例子就重编一遍。量出来的样子：01-arith 编完再跑 02-strings，
+  // 日志写着「新编 4 份、复用 0 份」，28 行的例子 0.9s。
+  //
+  // 落法是一格 weak 全局 + 一个 getter，名字**这一趟的入口在 main 的第一句里填**
+  // （见 lower.js 里 `(main …)` 那一段）。为什么不把字面量放进 weak：weak 那一份是
+  // 按程序生成的**共用文件**，内容一变就把别的入口的清单也一起作废 —— 量出来的样子是
+  // 两个例子交替跑，每趟都「weak 那一份被别的入口盖掉了」（0.46s vs 命中时 0.22s）。
+  // 现在库与 weak 两边都与"入口是谁"无关，只有入口自己那一份带着名字。
+  //
+  // 代价写在明处：读到值的时刻从"编译期"挪到了"main 的第一句之后"。库的**全局初始化**
+  // 里调 `_mainname()` 会拿到空串（那些 init 在入口的 main 之前跑）；shipout 那条路
+  // （atexit 或显式 shipout）都在 main 里面，所以 TeX 那一段照旧。
   if (nm === '_mainname') {
     const raw = asyCallArgs(L, n);
     if (raw === null) return null;
     if (raw.length !== 0) return L.err(n, `'_mainname' 不要实参，给了 ${raw.length} 个`);
-    return { code: `(str ${JSON.stringify(L.rootModName())})`, type: 'string' };
+    const g = 'asy__mainname';
+    if (!L.arrGen.has(g)) {
+      L.arrGen.set(`${g}__v`, `  (global ${g}_v string)`);
+      L.arrGen.set(g, `  (fn ${g} () string\n    (ret (var ${g}_v)))`);
+    }
+    return { code: `(call ${g})`, type: 'string' };
   }
   // `_searchpath()`：找文件的那几个目录，冒号分隔（当前目录在最前）。
   // 为什么要有它：asy 的 `input()` **不只看当前目录**，它走 locateFile，与找模块同一条路。
