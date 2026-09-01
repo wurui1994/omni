@@ -161,6 +161,8 @@ import {
   TOK_EXTENSION, TOK_ATOMIC, TOK_THREAD_LOCAL, TOK_THREAD,
   TOK_ATTRIBUTE1, TOK_ATTRIBUTE2, TOK_ASM1, TOK_ASM2, TOK_ASM3,
   TOK_BUILTIN_VA_START, TOK_BUILTIN_VA_ARG, TOK_BUILTIN_VA_END, TOK_BUILTIN_VA_COPY,
+  TOK_BUILTIN_EXPECT,
+  TOK___FUNCTION__, TOK___FUNC__, TOK_LINENUM,
   isAssignOp, assignOpOf,
 } from './tcctok.js';
 import {
@@ -177,7 +179,7 @@ import {
 import {
   MirModule, MirFunc, OP, T_VOID, T_I32, T_I64, T_BOOL, T_F32, T_F64, REF_NONE,
   CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16, CVT_I2F, CVT_U2F, CVT_F2I,
-  CVT_FCVT, memDesc, MEM_PAGE, fnPtr,
+  CVT_FCVT, memDesc, MEM_PAGE, fnPtr, isConstRef,
 } from '../mir/ir.js';
 
 /* 线性内存的访问描述符号（`MLOAD_KINDS` / `MSTORE_KINDS` 的下标，ir.js:383）。
@@ -577,6 +579,10 @@ export class CGen {  /**
     /** 当前函数的返回类型（tcc 的 `func_vt`） */
     this.funcRet = TY_VOID;
     this.funcName = '';
+    /** @type {object[]} 收着的 `inline` 函数体（tcc 的 `inline_fns`），读完单元才发 */
+    this.inlineFns = [];
+    /** `sizeof (` 那一次「这个括号里可能是类型名」的标记（tcc 的 `TOK_SOTYPE`） */
+    this.soType = false;
     /** @type {Map<string,{slot:number,ty:object}>[]} 作用域栈（tcc 的 `local_stack`） */
     this.scopes = [];
     /** @type {string[]} 区域标签栈：BR 的层数按它算，与 from_oir 同一套记账 */
@@ -853,7 +859,17 @@ export class CGen {  /**
   }
 
   /**
-   * `float` / `double` 的常量。
+   * 一个 ref 背后的整数常量，不是整数常量就回 null。
+   * 「这个值在编译期就知道」这件事在好几处要问（转换的常量折叠、`offsetof` 的展开式），
+   * 而常量池是按 (类型码, 文本) 存的，所以问法只此一处。
+   */
+  kintOf(ref) {
+    if (ref === REF_NONE || !isConstRef(ref)) return null;
+    const k = this.mod.consts.get(ref);
+    return k.kind === 'int' ? BigInt(k.text) : null;
+  }
+
+  /**
    *
    * 文本用 JS 的 `String(number)`：它是**往回读得回同一个 double** 的最短十进制
    * （ECMA-262 Number::toString），所以常量池按文本去重不会把两个不同的 double
@@ -1095,6 +1111,16 @@ export class CGen {  /**
     }
 
     let r = this.gv(v);
+    /* 常量折叠。tcc 的 `gen_cast` 在 `VT_CONST` 上也是当场算完（`tccgen.c:2135` 一带），
+     * 不发指令 —— 而这不只是省一条指令：`offsetof` 展开出来的 `&((T*)0)->f` 要靠
+     * 「`(T*)0` 还是个常量」才是常量表达式（见 `ceUnary` 的 `&` 那一格）。
+     * 截断规则与 `ceCastTo` 同一套：先按目标宽度回绕，再进 `konst` 收成规范形。 */
+    const kv = this.kintOf(r);
+    if (kv !== null) {
+      const bits = isPtr(ty.t) ? 64 : intBitsOf(ty);
+      return sVal(ty, this.konst(ty,
+        isUnsigned(ty.t) ? BigInt.asUintN(bits, kv) : BigInt.asIntN(bits, kv)));
+    }
     const srcMir = mirTypeOf(from);
     const dstMir = mirTypeOf(ty);
     if (srcMir === T_I32 && dstMir === T_I64) {
@@ -1742,6 +1768,10 @@ export class CGen {  /**
     let fresh = true;
     for (const t of toks) {
       if (t === TOK_EOF) break;
+      /* 行号记录不是记号（第八刀第十九片起 `tok_str_add_tok` 会插进来，为的是回放时
+       * 诊断的行号还对）。这一遍是**生扫**记号数组、不走 `next()`，所以得自己跳掉 ——
+       * 不跳的话它会被当成一项的头，`{1,2},\n{3,4}` 就数成三项。 */
+      if (t === TOK_LINENUM) continue;
       if (t === RBRACE || t === RPAR || t === RBRACK) {
         depth--;
         if (depth === 0) break;
@@ -1777,6 +1807,23 @@ export class CGen {  /**
   /** `unary`（`tccgen.c:5595`）。前缀与后缀都在这儿，与 tcc 一样。 */
   unary() {
     const t = this.tok;
+    /* `sizeof (` 的那一次标记（见 `sizeofType`）。一次性：取下来就清掉，于是里层的
+     * 括号是普通括号 —— tcc 那边是「换掉那一个记号」，效果一样。 */
+    const soType = this.soType;
+    this.soType = false;
+
+    /* `__func__` 与 `__FUNCTION__`（`tccgen.c:5656-5666`）：tcc 把记号**换成**一个
+     * TOK_STR、内容是 `funcname`，再落到字符串那一支 —— 于是它的类型是 `char[N+1]`、
+     * 相邻字面量照样拼、`sizeof(__func__)` 是名字长度加一。我们照这个次序办。 */
+    if (t === TOK___FUNC__ || t === TOK___FUNCTION__) {
+      this.next();
+      let s = this.funcName;
+      while (this.tok === TOK_STR) {
+        s += String(this.tokc);
+        this.next();
+      }
+      return this.postfix(this.strLit(s));
+    }
 
     // 带值的记号：整数与字符常量。`next()` 会毁掉 tokc，所以先取（`tccgen.c:7185`）
     if (tokHasValue(t)) {
@@ -1813,6 +1860,9 @@ export class CGen {  /**
       if (this.isTypeStart(this.tok)) {
         const ty = this.typeName();
         this.skip(RPAR);
+        /* `sizeof (类型名)`：只要类型，**不进后缀循环** —— `sizeof(int)[0]` 不是
+         * 「int 数组的第 0 项」，它就是个语法错。 */
+        if (soType) return sVal(ty, REF_NONE);
         return this.castTo(this.unary(), ty);
       }
       const v = this.gexpr();
@@ -1883,6 +1933,18 @@ export class CGen {  /**
       || t === TOK_BUILTIN_VA_END || t === TOK_BUILTIN_VA_COPY) {
       return this.vaBuiltin(t);
     }
+    /* `__builtin_expect(x, c)`：分支预测的提示，在 tcc 那边就是**空操作**
+     * （`tccgen.c:5811`：`parse_builtin_params(0, "ee"); vpop();`）—— 两个操作数都
+     * 求值，只留左边那个。tinycc 自己的源码里在用它。 */
+    if (t === TOK_BUILTIN_EXPECT) {
+      this.next();
+      this.skip(LPAR);
+      const v = this.exprEq();
+      this.skip(COMMA);
+      this.exprEq();
+      this.skip(RPAR);
+      return this.postfix(v);
+    }
 
     if (t >= TOK_UIDENT) {
       const name = this.identName();
@@ -1928,31 +1990,32 @@ export class CGen {  /**
    * 而那个函数马上被丢掉，所以不涨真的。
    */
   sizeofExpr() {
-    let ty;
-    if (this.tok === LPAR) {
-      this.next();
-      if (this.isTypeStart(this.tok)) {
-        ty = this.typeName();
-        this.skip(RPAR);
-      } else {
-        // `sizeof (x)` —— 括号是表达式的括号，不是类型名的
-        const scratch = new MirFunc('$sizeof', [], T_VOID);
-        const outer = this.f;
-        this.f = scratch;
-        ty = this.gexpr().ty;
-        this.f = outer;
-        this.skip(RPAR);
-      }
-    } else {
-      const scratch = new MirFunc('$sizeof', [], T_VOID);
-      const outer = this.f;
-      this.f = scratch;
-      ty = this.unary().ty;
-      this.f = outer;
-    }
     /* `sizeof` 的类型是 `size_t`（LP64 上是 `unsigned long`，8 字节）。 */
-    const n = typeSize(ty).size;
+    const n = typeSize(this.sizeofType()).size;
     return sVal(TY_ULLONG, this.konst(TY_ULLONG, n));
+  }
+
+  /**
+   * `sizeof` 后面那个操作数的类型。表达式一路与常量表达式一路（`ceUnary`）共用这一段 ——
+   * 于是 `sizeof(默认调试表) / sizeof(表[0])` 这种数组长度算式在两边都是同一个数。
+   */
+  sizeofType() {
+    /* `sizeof` 的操作数**总是**一个 unary（`tccgen.c:5796` 的 `expr_type(&type, unary)`），
+     * 类型名那一种是 unary 里 `(` 那一格的特例。tcc 的办法是把那个 `(` 记号换成
+     * `TOK_SOTYPE`（`tccgen.c:5794`）：只有**这一个**括号会被当成可能的类型名，而且
+     * 认出类型名之后 `return`、不进后缀循环（`tccgen.c:5708`）。
+     *
+     * 换记号我们做不到（记号是数），所以用一个一次性的标志。少了这一层就会把
+     * `sizeof ((Stab_Sym*)0)->n_value` 读成 `sizeof((Stab_Sym*)0)` 再剩一个 `->` ——
+     * 里层那个 `(` 是真的强制转换，外层那个才是「可能的类型名」。 */
+    const scratch = new MirFunc('$sizeof', [], T_VOID);
+    const outer = this.f;
+    this.f = scratch;
+    if (this.tok === LPAR) this.soType = true;
+    const ty = this.unary().ty;
+    this.soType = false;
+    this.f = outer;
+    return ty;
   }
 
   /** 后缀：`x++` / `x--`、`a[i]`、`s.f`、`p->f`。（`(…)` 那种函数指针调用还没到） */
@@ -2279,7 +2342,9 @@ export class CGen {  /**
     /* 桩要把实参**原样**转给宿主，而我们的 struct 传的是自家线性内存里的一个偏移 ——
      * 宿主读不到（第五片证明「转手宿主 libc」不成立，同一个理由）。所以外部符号上的
      * struct 传值/返回是边界，不是错误。 */
-    if (isStruct(info.ret.t)) this.todo('外部函数返回 struct 还没到（要真的 ABI）');
+    if (isStruct(info.ret.t)) {
+      this.todo(`外部函数 '${name}' 返回 struct 还没到（要真的 ABI）`);
+    }
     for (const p of params) {
       if (isStruct(p.ty.t)) this.todo('外部函数按值收 struct 还没到（要真的 ABI）');
       const mt = mirTypeOf(p.ty);
@@ -2394,6 +2459,11 @@ export class CGen {  /**
     const fslot = this.temp(T_F64, 'fsel');
     /** 一支落地：整型/指针进 i64 那个槽，算术类型**另外**再进 f64 那个槽。 */
     const put = (x) => {
+      /* 两支都是 `void` 时结果也是 void（C11 6.5.15 第 5 段）—— 没有值可存。
+       * tinycc 自己的 `c ? vdup() : gv_dup();`（tccgen.c:1804）就是这一形状：
+       * 整条 `? :` 当一条语句用，两支都是返回 void 的调用。
+       * 只有一支是 void 的那种在下面报错（tcc 也报 `cannot convert 'void' to …`）。 */
+      if (btype(x.ty.t) === VT_VOID) return;
       if (isFloat(x.ty.t)) {
         f.emit(OP.STORE, T_VOID, this.gv(this.castTo(x, TY_DOUBLE)), REF_NONE, fslot);
         return;
@@ -2413,6 +2483,15 @@ export class CGen {  /**
     const b = this.exprCond();
     put(b);
     this.close();
+    /* 两支都是 void：整条表达式是 void。只有一支是 void 的是一条错 —— 那个值没法产生
+     * （tcc 是在**用**它的地方报 `cannot convert 'void' to …`，我们提前到这儿报，
+     * 同一句话）。 */
+    const va = btype(a.ty.t) === VT_VOID;
+    const vb = btype(b.ty.t) === VT_VOID;
+    if (va && vb) return sVal(TY_VOID, REF_NONE);
+    if (va || vb) {
+      this.err(`cannot convert 'void' to '${typeText(va ? b.ty : a.ty)}'`);
+    }
     /* 有一支是浮点：公共类型是两支里等级高的那个浮点（C11 6.5.15 第 5 段走的是
      * 常规算术转换），值从 f64 那个槽里读。 */
     if (isFloat(a.ty.t) || isFloat(b.ty.t)) {
@@ -2439,10 +2518,8 @@ export class CGen {  /**
         || (intBitsOf(b.ty) === 64 && isUnsigned(b.ty.t));
     }
     let ty;
-    if (btype(a.ty.t) === VT_VOID && btype(b.ty.t) === VT_VOID) ty = TY_VOID;
-    else if (bits === 64) ty = uns ? TY_ULLONG : TY_LLONG;
+    if (bits === 64) ty = uns ? TY_ULLONG : TY_LLONG;
     else ty = uns ? TY_UINT : TY_INT;
-    if (btype(ty.t) === VT_VOID) return sVal(TY_VOID, REF_NONE);
     return this.castTo(wide, ty);
   }
 
@@ -4133,12 +4210,32 @@ export class CGen {  /**
       return v;
     }
     if (t === TOK_SIZEOF) {
+      /* 类型名与表达式两种写法都走 `sizeofType` —— 与表达式一路同一段代码。
+       * `sizeof(表)/sizeof(表[0])` 这种数组长度算式于是在数组维度、`case` 标签、
+       * 位域宽度这些「必须是常量」的位置上也能用（tccdbg.c 的 `N_DEFAULT_DEBUG`）。 */
       this.next();
-      this.skip(LPAR);
-      if (!this.isTypeStart(this.tok)) this.todo('常量表达式里的 sizeof 只支持类型名');
-      const ty = this.typeName();
-      this.skip(RPAR);
-      return BigInt(typeSize(ty).size);
+      return BigInt(typeSize(this.sizeofType()).size);
+    }
+    if (t === AMP) {
+      /* `offsetof(T, f)` 展开出来就是这个形状（tccdefs.h 的 `__builtin_offsetof`：
+       * `((__SIZE_TYPE__)&((T*)0)->f)`）。tcc 那边它一点都不特殊 —— `(T*)0` 是个
+       * VT_CONST 的 0，`->f` 只是往上加一个偏移，于是它自然是常量。
+       *
+       * 我们的常量求值器是**另一台**机器（只认记号，不建值），所以这一格借表达式一路：
+       * 在一个用完就丢的函数里解析（与 `sizeof` 同一手法），拿到的内存左值如果地址
+       * 本身是个常量，那「地址常量 + 静态偏移」就是这个常量表达式的值。
+       * 地址不是常量（`&某个全局`）的那一种还没到 —— 那要真的重定位。 */
+      this.next();
+      const scratch = new MirFunc('$addr', [], T_VOID);
+      const outer = this.f;
+      this.f = scratch;
+      const v = this.unary();
+      this.f = outer;
+      if (v.mem !== null && isConstRef(v.mem.addr)) {
+        const k = this.mod.consts.get(v.mem.addr);
+        if (k.kind === 'int') return BigInt(k.text) + BigInt(v.mem.off);
+      }
+      this.err('constant expression expected');
     }
     if (t >= TOK_UIDENT) {
       const nm = this.cpp.tokStr(t, null);
@@ -4212,6 +4309,7 @@ export class CGen {  /**
       const spec = this.parseBtype();
       const isTypedef = (spec.t & VT_TYPEDEF) !== 0;
       const isExtern = (spec.t & VT_EXTERN) !== 0;
+      const isInline = (spec.t & VT_INLINE) !== 0;
       /* 存储类**先剥掉**再进声明符：`static int a[3];` 的类型是 `int[3]`，而「剥」
        * 必须在套数组之前 —— 套完再剥就得重建一个 CType，而 `count` 挂在对象上
        * （ctype.js:129），重建时最容易掉的正是它。 */
@@ -4245,7 +4343,7 @@ export class CGen {  /**
           }
           this.typedefs.set(name, d.ty);
         } else if (isFunc(d.ty.t)) {
-          if (this.funcDecl(global, name, d.ty)) { wasBody = true; break; }
+          if (this.funcDecl(global, name, d.ty, isInline)) { wasBody = true; break; }
         } else {
           /* 局部量与全局量走**同一段**代码：不同的只有「往哪儿落地」（一个 dest 对象），
            * 遍历嵌套结构那套规则在 `initializer` 里只有一份。 */
@@ -4317,12 +4415,13 @@ export class CGen {  /**
   }
 
   /** 函数声明或定义。当前记号是 `(`。回 true 表示读掉了一个**函数体**。 */
-  funcDecl(global, name, fnTy) {
+  funcDecl(global, name, fnTy, isInline) {
     const info = this.funcSym(name);
     /* 形参表已经在声明符里读完了（第十二片：`(…)` 是声明符的后缀，不是函数定义的
-     * 一部分）—— 这儿只把函数类型拆开交给 `finishFunc`。 */
+     * 一部分）—— 这儿只把函数类型拆开交给 `finishFunc`。`inline` 从 `decl` 传进来：
+     * 存储类在进声明符之前就剥掉了（`stripStorage`），函数类型上已经没有它。 */
     return this.finishFunc(global, info, name, stripStorage(fnTy.ref.ret),
-      fnTy.ref.params, fnTy.ref.variadic);
+      fnTy.ref.params, fnTy.ref.variadic, isInline);
   }
 
   paramList(params) {
@@ -4392,7 +4491,7 @@ export class CGen {  /**
    * C 允许它不同，可那会让「循环里取地址」变成一件说不清的事。平铺让每个声明的地址在
    * 整个函数里恒定，代价是帧大一点。
    */
-  finishFunc(global, info, name, ret, params, variadic) {
+  finishFunc(global, info, name, ret, params, variadic, isInline) {
     if (info.params !== null && info.params.length !== params.length) {
       this.err(`conflicting types for '${name}'`);
     }
@@ -4411,6 +4510,45 @@ export class CGen {  /**
     const afterTok = this.cpp.tok;
     const afterVal = this.cpp.tokc;
 
+    if (isInline) {
+      /* `inline` 的函数体**先收着**，读完整个单元再看谁真被引用过才发
+       * （`tccgen.c:8873-8883`：「static inline 函数只是一种宏」）。
+       *
+       * 这不是优化。macOS 的 `math.h` 里有一串 `__header_always_inline` 的定义，
+       * 其中 `__sincosf` 的体里调 `__sincosf_stret` —— 一个返回 struct 的外部符号。
+       * body 一进来就分析的话，那个名字当场被标成「引用过」，于是一份根本没用到
+       * 三角函数的程序会撞上「外部函数返回 struct 还没到」。tcc 编得过，正是因为
+       * 它连体都还没读。
+       *
+       * `filename` 要记下来：诊断的行号靠记号串里的 `TOK_LINENUM`（第十九片）复原，
+       * 但文件名不在记号里，而这时早已经读到主文件的末尾了。 */
+      this.inlineFns.push({
+        name, info, ret, params,
+        body,
+        filename: this.cpp.file === null ? '<inline>' : this.cpp.file.filename,
+      });
+      this.cpp.tok = afterTok;
+      this.cpp.tokc = afterVal;
+      this.tok = afterTok;
+      this.tokc = afterVal;
+      return true;
+    }
+
+    this.genFuncBody(body, info, name, ret, params);
+
+    // 记号还原（`replayStep` 同一手法）：函数体是从记号串里读的，读完要回到文件流上
+    this.cpp.tok = afterTok;
+    this.cpp.tokc = afterVal;
+    this.tok = afterTok;
+    this.tokc = afterVal;
+    return true;
+  }
+
+  /**
+   * 一个收好的函数体 -> 两遍。第一遍只为了知道帧要多大，第二遍才是真的发指令。
+   * 普通函数在 `finishFunc` 里当场走这儿，`inline` 的等到 `genInlineFuncs`。
+   */
+  genFuncBody(body, info, name, ret, params) {
     // ---- 第一遍：只为了知道谁要落在内存上、帧要多大。输出丢掉
     this.pass1 = true;
     this.addrTaken = new Set();
@@ -4425,7 +4563,6 @@ export class CGen {  /**
     this.runBody(body, new MirFunc(`$scan$${name}`, [], mirTypeOf(ret)), ret, name, params,
       info.variadic);
 
-
     let est = this.frameOff;   // 数组之类「非落内存不可」的已经算在里面了
     for (const d of this.declScalars) {
       if (this.addrTaken.has(d.name)) est += alignUp(d.size, FRAME_ALIGN);
@@ -4437,13 +4574,37 @@ export class CGen {  /**
     this.frameSize = alignUp(est, 16);
     this.frameOff = 0;
     this.runBody(body, info.f, ret, name, params, info.variadic);
+  }
 
-    // 记号还原（`replayStep` 同一手法）：函数体是从记号串里读的，读完要回到文件流上
-    this.cpp.tok = afterTok;
-    this.cpp.tokc = afterVal;
-    this.tok = afterTok;
-    this.tokc = afterVal;
-    return true;
+  /**
+   * 收着的那些 `inline` 函数体（`gen_inline_functions`，`tccgen.c:8661`）。
+   *
+   * 循环到不再有新的为止：一个被引用的 inline 函数体里可以调另一个 inline 函数，
+   * 而那一次引用发生在这一轮**之后** —— tcc 那边同样是 `do { } while (inline_generated)`。
+   *
+   * 一次都没被引用的：tcc 什么都不发。我们的 MirFunc 已经登记在模块里、拿不掉，
+   * 所以给它一条 `RET` 收口 —— 谁都不会调到它，只是让模块自洽。
+   */
+  genInlineFuncs() {
+    for (;;) {
+      let any = false;
+      for (const fn of this.inlineFns) {
+        if (fn.done || !fn.info.used) continue;
+        fn.done = true;
+        any = true;
+        const saveName = this.cpp.file === null ? null : this.cpp.file.filename;
+        if (this.cpp.file !== null) this.cpp.file.filename = fn.filename;
+        this.genFuncBody(fn.body, fn.info, fn.name, fn.ret, fn.params);
+        if (saveName !== null) this.cpp.file.filename = saveName;
+      }
+      if (!any) break;
+    }
+    for (const fn of this.inlineFns) {
+      if (fn.done) continue;
+      const f = fn.info.f;
+      if (f.ret === T_VOID) f.emit(OP.RET, T_VOID, REF_NONE, REF_NONE, 0);
+      else f.emit(OP.RET, f.ret, this.konst(fn.ret, 0), REF_NONE, 0);
+    }
   }
 
   /**
@@ -4567,6 +4728,9 @@ export class CGen {  /**
     else if (isStruct(ret.t)) f.emit(OP.RET, T_I64, this.sretRef, REF_NONE, 0);
     else f.emit(OP.RET, f.ret, this.konst(ret, 0), REF_NONE, 0);
     this.f = outer;
+    /* tcc 在 `gen_function` 之后把 `funcname` 收回 `""`（`tccgen.c:8610`）：
+     * 函数外面的 `__func__` 于是是空串，而不是上一个函数的名字。 */
+    this.funcName = '';
   }
 
   /** `$sp` 的全局号。第一次用到才登记 —— 没有函数要帧的模块于是不多一个全局。 */
@@ -4603,6 +4767,10 @@ export class CGen {  /**
     while (this.tok !== TOK_EOF) {
       if (!this.decl(true)) this.expect('declaration');
     }
+    /* `decl` 读完才发那些 inline 的体（`tccgen.c:420`：`decl(VT_CONST)` 紧跟着
+     * `gen_inline_functions(s1)`）。次序要紧：它可能新标出一批「引用过」的外部符号，
+     * 所以必须在下面那两轮收尾检查之前。 */
+    this.genInlineFuncs();
     for (const [name, info] of this.funcs) {
       if (info.defined) continue;
       /* 声明了但一次都没引用：真的编译器不为它产生任何符号引用，我们也不发桩。

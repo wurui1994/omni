@@ -69,3 +69,15 @@ int t = TAIL(6, 7);
 /* 形参名恰好是关键字或另一个宏名 */
 #define KW(int) (int)
 int u = KW(8);
+
+/* 一层宏的**体里**又调一个函数式宏，而那个 `(` 前面隔着一个空格。
+   `tccpp.c:3286` 的 `while (t == ' ' || --i)` 是短路的：空白**不减**那个计数。
+   数错的话 `SP(zz)` 会被当成两个实参 —— tcc 自己的 `ELFW(ST_BIND)` 撞的正是这一格
+   （第八刀第二十片）。 */
+#define BRK(val) [val]
+#define SP(val) BRK (val)
+int v = 0; /* SP(zz) 在下一行 */
+int w[] = { SP(1), SP(2) };
+#define ELFW(sym) ELF32_##sym
+#define ELF32_ST_BIND(i) ((i) >> 4)
+int x1 = ELFW(ST_BIND) (0x12);

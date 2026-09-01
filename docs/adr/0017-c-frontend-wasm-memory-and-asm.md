@@ -288,7 +288,7 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
 8. **C 的库面**：`libtcc1` 的等价物（软除法/浮点辅助/`alloca`/`setjmp`）与 libc 的接法。
    原先写的是"先转手宿主的 libc，走既有的 extern-C FFI"，第五片证明**转手不成立**
    （指针是自家线性内存里的偏移，宿主 libc 读不到），改成一个读写线性内存的宿主模块，
-   见第五片的落地节。**前十九片已落地**（预定义的宏 —— 目标的自述，五十条，
+   见第五片的落地节。**前二十片已落地**（预定义的宏 —— 目标的自述，五十条，
    顺序与值都对着 `tcc -dM -E` 抄；自带的系统头目录 + 编译器必须自己给的那四份头；
    `stdio.h`/`stdlib.h`/`string.h` 的最小子集 —— libc 的自述；
    `strtol` 一族与 `strncpy`/`strchr`/`strstr` 那几条；
@@ -305,8 +305,11 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
    编 tinycc 自己的源码撞出来的六格 —— `__has_include`、`#pragma pack`、
    `_Static_assert`、匿名 struct/union 成员、常量表达式里的 `?:`、顶层多余的分号；
    诊断逐字节对齐 + `__asm__` 当语句 —— 行号那条减法、`pp_error` 的记号流、
-   收起来的记号串带着行号），
-   见下面的第八刀第一到十九片节。
+   收起来的记号串带着行号；
+   **tinycc 自己那一整份源码编过了** —— `__func__`、常量表达式里的 `sizeof 表达式`、
+   转换的常量折叠（于是 `offsetof` 是常量）、`inline` 的体等被引用才发、
+   `__builtin_expect`），
+   见下面的第八刀第一到二十片节。
 
 最后三步是**后端**：
 
@@ -3994,6 +3997,167 @@ macOS SDK 里这一条有三个名字（`dispatch_compiler_barrier`、`os_compil
 路径 A 的 GLR 与路径 B 对账（第七步）。
 
 <!-- 第八刀第十九片-END -->
+
+## 落地：第八刀第二十片
+
+**tinycc 自己那一整份源码编过了。**
+
+```
+node stage0/src/cli.js c-mir -I"$SDK/usr/include" -I.omni-cache/tcc-build \
+  -I"$TCCSRC" -DONE_SOURCE=1 -DTCC_TARGET_ARM64 "$TCCSRC/tcc.c"
+exit=0     98200 行 MIR，零错误零警告
+```
+
+`-DONE_SOURCE=1` 于是这一份里有 `tccpp.c`、`tccgen.c`、`tccdbg.c`、`tccasm.c`、
+`tccelf.c`、`tccrun.c`、`arm64-gen.c`、`arm64-link.c`、`arm64-asm.c`、`tccmacho.c`，
+加上 `libtcc.c` 与 `tcc.c` 自己 —— 也就是 ADR 顶上那句「终点是编完 tinycc 自己的
+源码」的**前端那一半**。后端还没有（第 9-11 步），所以这是「读懂了」，不是「跑起来了」。
+
+上一片预测的那条分岔（`ELFW` / `PTR_SIZE` 的 `#if` 求值不同）**是错的**。真相是
+`readMacroArgs` 数实参时把空白也算进去了 —— 一个纯粹的记号层 bug，与 `#if` 无关。
+预测错在「行号对不上」那件事已经修好之后还照着旧结论推。
+
+### 一 空白不减那个计数
+
+`tccpp.c:3286` 的循环：
+
+```c
+do { t = next_argstream(nested_list, NULL); }
+while (t == ' ' || --i);
+```
+
+`||` **短路**：`t == ' '` 真的那一轮，`--i` 根本不执行。所以空白不减计数。`i` 从 2 起
+（要吃掉 `(`），每收完一个实参重置成 1。我们原来写的是后自减、且没有短路，于是
+`B (val)` 里 `(` 前面那个空格白吃掉一格，`A(zz)` 就被数成两个实参 ——
+`macro 'ELF32_ST_BIND' used with too many args`。最小重现：
+
+```c
+#define B(val) [val]
+#define A(val) B (val)
+X A(zz) Y
+```
+
+### 二 `?:` 的两臂是 void
+
+C11 6.5.15 第 5 段：两臂都是 void，结果是 void；只有一臂是 void 是错。
+`tccgen.c:1804` 的 `c ? vdup() : gv_dup();` 走的正是第一种。我们原来一律去求
+「共同的算术类型」，于是报 `cannot convert 'void' to 'long long'`。
+
+### 三 `__func__` / `__FUNCTION__`
+
+`tccgen.c:5656-5666`：tcc 把记号**换成**一个 `TOK_STR`、内容是 `funcname`，再落到
+字符串那一支。于是它的类型是 `char[N+1]`、相邻字面量照样拼、`sizeof(__func__)` 是
+名字长度加一。`__PRETTY_FUNCTION__` 不是记号 —— `include/tccdefs.h:151` 一条
+`#define __PRETTY_FUNCTION__ __FUNCTION__`，我们那一条在 `tccdefs.js` 里本来就有。
+函数外面 `funcname` 收回 `""`（`tccgen.c:8610`）。
+
+### 四 行号记录不是记号
+
+第十九片让 `tok_str_add_tok` 往收起来的记号串里插 `TOK_LINENUM`。代价在这一片
+现出来：`sizeFromInit` 的 `initHeads` 是**生扫**记号数组、不走 `next()`，于是那些
+行号记录被当成了「一项的头」——
+
+```c
+static const struct { int t; const char *n; } tab[] = {
+  { 1, "a" },
+  { 2, "b" },     /* 报 excess elements in array initializer */
+};
+```
+
+一行一项的表全错。tcc 那边不会：它数长度也走 `next()`，而 `next()` 认得
+`TOK_LINENUM`。生扫的地方只此一处，跳掉就好。
+
+### 五 `sizeof` 的操作数总是一个 unary
+
+`tccgen.c:5794`：`if (tok == '(') tok = TOK_SOTYPE;` —— 把那**一个**括号换成一个特殊
+记号，然后照常 `expr_type(&type, unary)`。`unary` 里 `case TOK_SOTYPE` 认出类型名之后
+`vpush(&type); return;`（`tccgen.c:5708`）—— **`return` 而不是 `break`**，于是不进后缀
+循环，`sizeof(int)[0]` 是语法错而不是「int 数组的第 0 项」。
+
+这一层不能省。`tccdbg.c:497` 是
+
+```c
+stab_section->sh_addralign = sizeof ((Stab_Sym*)0)->n_value;
+```
+
+**里层**那个 `(` 是真的强制转换，**外层**那个才是「可能的类型名」。我们原来在
+`sizeofType` 里自己判「括号后面是不是类型名」，判的是里层，于是把
+`sizeof((Stab_Sym*)0)` 读完就剩一个 `->` 在手上。换记号我们做不到（记号是数），
+用一个一次性的标志代替，取下来就清掉 —— 效果一样。
+
+顺带把常量表达式那一路的 `sizeof` 接到同一段代码上：`tccdbg.c:394` 的
+`base_type_used[N_DEFAULT_DEBUG]`，而 `N_DEFAULT_DEBUG` 是
+`sizeof(default_debug) / sizeof(default_debug[0])`。
+
+### 六 转换的常量折叠，于是 `offsetof` 是常量
+
+`offsetof(T, f)` 展开成 `((__SIZE_TYPE__)&((T*)0)->f)`（tccdefs.h 的
+`__builtin_offsetof`）。tcc 那边它一点都不特殊：`(T*)0` 是个 `VT_CONST` 的 0，
+`->f` 只是往上加一个偏移，于是它自然是常量。
+
+我们的常量求值器是**另一台**机器（只认记号、不建值），所以补了两处：
+`castTo` 在源是整数常量时当场算完（`gen_cast` 在 `VT_CONST` 上也是这样），
+截断规则与 `ceCastTo` 同一套；`ceUnary` 的 `&` 那一格借表达式一路解析
+（用完就丢的函数里，与 `sizeof` 同一手法），拿到的内存左值如果地址本身是常量，
+「地址常量 + 静态偏移」就是这个常量表达式的值。地址不是常量（`&某个全局`）的
+那一种还没到 —— 那要真的重定位。
+
+`libtcc.c` 的 `options_W` / `options_f` 那几张表全靠这一格。
+
+### 七 `inline` 的体等被引用才发
+
+`tccgen.c:8873`：「static inline 函数只是一种宏。它的代码在编译单元末尾、
+而且只在被用到时才发。」`decl` 里只 `skip_or_save_block` 收下记号串，
+`gen_inline_functions`（`tccgen.c:8661`）循环到不再有新的为止 ——
+一个被引用的 inline 体里可以调另一个 inline 函数。
+
+这不是优化。macOS 的 `<math.h>` 里有一串 `__header_always_inline` 的定义，其中
+
+```c
+__header_always_inline void __sincosf(float __x, float *__sinp, float *__cosp) {
+    const struct __float2 __stret = __sincosf_stret(__x);
+    ...
+}
+```
+
+`__sincosf_stret` 返回 struct，是个外部符号。体一进来就分析的话那个名字当场被标成
+「引用过」，于是一份根本没用三角函数的程序会撞上「外部函数返回 struct 还没到」。
+tcc 编得过，正是因为它连体都还没读。
+
+一处偏离：一次都没被引用的 inline 函数，tcc 什么都不发；我们的 `MirFunc` 已经登记
+在模块里、拿不掉，所以给它一条 `RET` 收口。谁都不会调到它，只是让模块自洽。
+
+### 八 `__builtin_expect`
+
+`tccgen.c:5811`：`parse_builtin_params(0, "ee"); vpop();` —— 两个操作数都求值，
+只留左边那个。`tcctok.js` 的 builtin 那一段于是从四条变五条。
+
+### 量出来的数
+
+- `tcc.c`（整份 tinycc，arm64 + ONE_SOURCE）：**exit=0**，98200 行 MIR，
+  零错误零警告。上一片停在 `tccgen.c:515`，这一片依次推过
+  `tccgen.c:1804`（void 的 `?:`）、`tccgen.c:7604`（`__FUNCTION__`）、
+  `tccdbg.c:48`（行号记录被当成项）、`tccdbg.c:394`（`sizeof 表达式`）、
+  `tccdbg.c:497`（`TOK_SOTYPE`）、`libtcc.c:1709`（`offsetof`）、
+  `__sincosf_stret`（inline 的体），最后只剩 `undefined symbol 'main'` ——
+  而那是因为 `libtcc.c` 是个库。
+- `tests/c/gen/44-tinycc.c`：退出码 24 + 与 `tcc -run` 逐字节相同的 stdout。
+  上面八格里能在一份小程序里钉住的七格都在里面（`readMacroArgs` 那一格钉在
+  `tests/c/cpp/` 已有的宏展开组里）。
+- `tests/c/run.js`：**78 passed, 0 failed**。`tests/run.js`：96 passed。
+- 边界钉子仍是 7 条。`externThunk` 的那句「外部函数返回 struct」现在**带上名字**——
+  这一片查 `__sincosf_stret` 花掉的时间全在这一句上。
+
+### 下一片
+
+第八刀第二十一片：**`-E` 那一路也编完整份 tinycc**（预处理的输出与
+`tcc -E` 逐字节比），然后把 `c-mir` 的输出真的喂给 verifier 与解释器 ——
+98200 行 MIR「生成出来了」与「跑得动」是两件事，中间隔着
+`struct` 按值传/返回（第 9-11 步的后端要它）。
+
+之后：`-dM`、`__has_include_next`、路径 A 的 GLR 与路径 B 对账（第七步）。
+
+<!-- 第八刀第二十片-END -->
 
 
 

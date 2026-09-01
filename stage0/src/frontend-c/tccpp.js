@@ -1058,13 +1058,16 @@ export class Cpp {
     const params = s.args ?? [];
     let pi = 0;
     let t;
-    // 先吃掉那个 '('，再吃掉紧跟的空白（tcc 用 `i = 2` 那个计数器做这件事）
     let eat = 2;
     for (;;) {
+      /* 先吃掉那个 `(`，再停在第一个实参记号上。tcc 的写法是 `while (t == ' ' || --i)`
+       * （`tccpp.c:3286-3288`）—— **空白不算一格**：`--i` 靠 `||` 的短路跳过去。
+       * 写成「每读一个就减一」的话，`(` 前面有空白时会少读一格、把 `(` 当成实参的开头
+       * （宏体里写 `B (val)` 就是这个形状，elf.h 的 `ELF64_ST_BIND` 正是这么写的）。
+       * 每读完一个实参 `eat` 复位成 1（下面那一行）：往后就不再多吃一格了。 */
       do {
         t = this.nextArgstream(nested, null);
-        eat--;
-      } while (t === SPC || eat > 0);
+      } while (t === SPC || --eat);
 
       if (pi >= params.length) {
         if (t === 41) break; // `F()` 打到 `#define F()` 上

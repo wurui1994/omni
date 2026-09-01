@@ -159,7 +159,10 @@ const PP_NAMES = [
   // 这一片只要 arm64 上那两个（`tcctok.h:181-182`，`TCC_TARGET_ARM64` 那一支）——
   // `__builtin_va_list` 在 tcc 那边是 tccdefs.h 里的一个 typedef，不是记号，
   // 我们照它办（见 tccgen.js 构造函数里那条 typedef）。
+  // `__builtin_expect`（`tcctok.h:169`）是第二十片补的：tinycc 自己的源码里
+  // `PROBE_INLINE` 一带在用，而它在 tcc 那边就是「算两边、留左边」的空操作。
   '__builtin_va_start', '__builtin_va_arg', '__builtin_va_end', '__builtin_va_copy',
+  '__builtin_expect',
   // tcctok.h:207-220 的 pragma 名。**这里编号与 tcc 分岔**（见文件头的阶段边界）：
   // tcc 在这之前还有 attribute 与 builtin 两大段。
   'pack', 'push', 'pop', 'comment', 'lib', 'push_macro', 'pop_macro', 'once', 'option',
@@ -198,6 +201,12 @@ export const TOK___FILE__ = fixed('__FILE__');
 export const TOK___DATE__ = fixed('__DATE__');
 export const TOK___TIME__ = fixed('__TIME__');
 export const TOK___VA_ARGS__ = fixed('__VA_ARGS__');
+/* `__func__`（C99 6.4.2.2）与 GNU 的 `__FUNCTION__` 是同一件事，tcc 也是同一支
+ * （`tccgen.c:5656`，`case TOK___FUNCTION__` 落到 `case TOK___FUNC__`）。
+ * `__PRETTY_FUNCTION__` 不是记号 —— 它在 tccdefs.h 里是 `#define … __FUNCTION__`，
+ * 我们照它办（见 tccdefs.js 的那一条）。 */
+export const TOK___FUNCTION__ = fixed('__FUNCTION__');
+export const TOK___FUNC__ = fixed('__func__');
 export const TOK___COUNTER__ = fixed('__COUNTER__');
 export const TOK___HAS_INCLUDE = fixed('__has_include');
 export const TOK___HAS_INCLUDE_NEXT = fixed('__has_include_next');
@@ -281,6 +290,7 @@ export const TOK_BUILTIN_VA_START = fixed('__builtin_va_start');
 export const TOK_BUILTIN_VA_ARG = fixed('__builtin_va_arg');
 export const TOK_BUILTIN_VA_END = fixed('__builtin_va_end');
 export const TOK_BUILTIN_VA_COPY = fixed('__builtin_va_copy');
+export const TOK_BUILTIN_EXPECT = fixed('__builtin_expect');
 
 /**
  * `TOK_ASSIGN(t)`（`tcc.h:1168`）与 `TOK_ASSIGN_OP(t)`（`tcc.h:1169`）。
