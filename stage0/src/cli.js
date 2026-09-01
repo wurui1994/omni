@@ -64,6 +64,8 @@ function incDirs(argv) {
       const d = argv[i + 1];
       if (d === undefined || d.startsWith('-')) throw new OmniError('-I 后面要一个目录');
       out.push(d);
+    } else if (a.startsWith('-I') && a.length > 2) {
+      out.push(a.slice(2)); // `-I目录`（贴着写，tcc 两种都认）
     }
     i++;
   }
@@ -71,18 +73,28 @@ function incDirs(argv) {
 }
 
 /**
- * `-D 名字` / `-D 名字=宏体`（与 tcc 同形）。回 [名字, 宏体|undefined] 的表。
+ * `-D 名字` / `-D 名字=宏体` / `-D名字`（三种都与 tcc 同形）。回 [名字, 宏体] 的表。
  * 顺序有意义：后面的 `-D` 会盖掉前面同名的那个，与 tcc 一样。
+ *
+ * **没有 `=` 的宏体是 `1`，不是空**（tcc 的 `tcc_define_symbol`：`value = *eq ? eq+1 : "1"`）。
+ * 这一条不是细节：`config.h` 里 `#if !(TCC_TARGET_I386 || … || TCC_TARGET_ARM64 || …)`
+ * 那一行要求每个名字都能当数用，展开成空就是「bad preprocessor expression」。
+ * `-D 名字=`（等号后面什么都没有）才是空宏体 —— tcc 也是这么分的。
  */
 function defArgs(argv) {
   const out = [];
   let i = 0;
   for (const a of argv) {
+    let d = null;
     if (a === '-D') {
-      const d = argv[i + 1];
+      d = argv[i + 1];
       if (d === undefined || d.startsWith('-')) throw new OmniError('-D 后面要一个名字');
+    } else if (a.startsWith('-D') && a.length > 2) {
+      d = a.slice(2);
+    }
+    if (d !== null) {
       const eq = d.indexOf('=');
-      out.push(eq < 0 ? [d, undefined] : [d.slice(0, eq), d.slice(eq + 1)]);
+      out.push(eq < 0 ? [d, '1'] : [d.slice(0, eq), d.slice(eq + 1)]);
     }
     i++;
   }

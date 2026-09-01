@@ -257,3 +257,19 @@ export function sameType(a, b) {
   }
   return a.ref === b.ref;
 }
+
+/**
+ * 两个类型「去掉最外层的 const/volatile 之后一样吗」。
+ *
+ * 赋值要的是这一问，不是 `sameType`：C11 6.5.16.1 说两边必须是**去掉限定符之后**
+ * 相容的类型。`const struct __float2 x = f();`（macOS 的 `<math.h>` 里就有）两侧
+ * 只差一个 `const`，比全等就会把对的代码判成错的。
+ *
+ * 只脱最外层 —— `const char *` 与 `char *` 那种差别在指向的东西上，不在这一层，
+ * 那是另一条规则（还没到）。
+ */
+export function sameTypeUnqual(a, b) {
+  const q = VT_CONSTANT | VT_VOLATILE;
+  if ((a.t & q) === (b.t & q)) return sameType(a, b);
+  return sameType({ t: a.t & ~q, ref: a.ref, count: a.count }, { t: b.t & ~q, ref: b.ref, count: b.count });
+}

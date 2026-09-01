@@ -204,6 +204,11 @@ export const TOK___HAS_INCLUDE_NEXT = fixed('__has_include_next');
 export const TOK_push_macro = fixed('push_macro');
 export const TOK_pop_macro = fixed('pop_macro');
 export const TOK_once = fixed('once');
+/* `#pragma pack(push, 4)`（第八刀第十八片）。`push`/`pop` 在 tcc 那边是汇编器的记号
+ * （`TOK_ASM_push`），这儿单独两条 —— 我们还没有汇编器那张表。 */
+export const TOK_pack = fixed('pack');
+export const TOK_push = fixed('push');
+export const TOK_pop = fixed('pop');
 
 /* ------------------------------------------------- tccgen 要用的那些（第六刀）
  * 语句关键字与类型关键字。之前只有预处理器在用这张表，所以只导出了指令名那一段。 */
@@ -264,6 +269,9 @@ export const TOK_UNION = fixed('union');
 export const TOK_TYPEDEF = fixed('typedef');
 export const TOK_ENUM = fixed('enum');
 export const TOK_SIZEOF = fixed('sizeof');
+/* `_Static_assert(sizeof(t) == 12, "…")`（第八刀第十八片）。macOS 的 `<mach/message.h>`
+ * 用它把 mach 消息那几个结构体的尺寸钉住 —— 也就是说它同时在考我们的 struct 布局。 */
+export const TOK_STATIC_ASSERT = fixed('_Static_assert');
 
 /* arm64 上 `va_start` / `va_arg` 是**编译器内建**（`tcctok.h:181-182`）：它们要的不是
  * 函数调用，是「按调用约定去形参区里走」的代码。`va_end` / `va_copy` 在 tcc 那边是

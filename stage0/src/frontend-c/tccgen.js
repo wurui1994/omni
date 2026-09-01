@@ -152,7 +152,7 @@ import {
   TOK_INC, TOK_DEC, TOK_SHL, TOK_SAR, TOK_LAND, TOK_LOR,
   TOK_EQ, TOK_NE, TOK_LT, TOK_GE, TOK_LE, TOK_GT, TOK_ULE, TOK_UGT,
   TOK_IF, TOK_ELSE, TOK_WHILE, TOK_FOR, TOK_DO, TOK_BREAK, TOK_CONTINUE, TOK_RETURN,
-  TOK_SWITCH, TOK_CASE, TOK_DEFAULT, TOK_GOTO, TOK_SIZEOF, TOK_DOTS,
+  TOK_SWITCH, TOK_CASE, TOK_DEFAULT, TOK_GOTO, TOK_SIZEOF, TOK_DOTS, TOK_STATIC_ASSERT,
   TOK_INT, TOK_VOID, TOK_BOOL, TOK_SIGNED, TOK_UNSIGNED, TOK_CHAR, TOK_SHORT, TOK_LONG,
   TOK_FLOAT, TOK_DOUBLE, TOK_STRUCT, TOK_UNION, TOK_ENUM, TOK_TYPEDEF,
   TOK_EXTERN, TOK_STATIC, TOK_CONST, TOK_REGISTER, TOK_AUTO, TOK_VOLATILE, TOK_INLINE,
@@ -170,6 +170,7 @@ import {
   btype, isInteger, isFloat, isUnsigned, isPtr, isArray, isFunc, isStruct, isUnion,
   isBitfield, bitPosOf, bitSizeOf, mkBitfield, bitfieldBase,
   ctype, mkPointer, mkArray, mkStruct, mkEnum, mkFunc, typeSize, typeText, sameType,
+  sameTypeUnqual,
   TY_VOID, TY_INT, TY_UINT, TY_LLONG, TY_ULLONG, TY_CHAR, TY_SHORT, TY_BOOL,
   TY_FLOAT, TY_DOUBLE, TY_LDOUBLE, VT_LDOUBLE,
 } from './ctype.js';
@@ -1200,7 +1201,7 @@ export class CGen {  /**
    * 所以全 `char` 的 struct 也照样八字节一步走。
    */
   structCopy(target, v) {
-    if (!sameType(target.ty, v.ty)) {
+    if (!sameTypeUnqual(target.ty, v.ty)) {
       this.err(`cannot assign '${typeText(v.ty)}' to '${typeText(target.ty)}'`);
     }
     if (target.mem === null || v.mem === null) {
@@ -3333,6 +3334,7 @@ export class CGen {  /**
     }
     const info = {
       kind, name: name === null ? '<anonymous>' : name,
+      anon: name === null,   // 没有 tag —— 「匿名成员」那一条要问它
       fields: null, size: 0, align: 1,
     };
     if (name !== null) this.tags.set(name, info);
@@ -3376,7 +3378,38 @@ export class CGen {  /**
         this.err(`storage class specified for '${kind}' member`);
       }
       const base = stripStorage(spec);
-      if (this.tok === SEMI) this.todo('匿名的 struct/union 成员还没到（C11 6.7.2.1 第 13 段）');
+      /* 没有声明符就分号（`struct { … };` 长在另一个 struct 里面）：
+       *   - 有 tag 的（`struct S { … };`）只是在这儿**声明了一个 tag**，不产生成员；
+       *   - 没有 tag 的就是 C11 6.7.2.1 第 13 段的**匿名成员** —— 它自己按自己的对齐
+       *     占一块，而它的字段名**摊进外层**（`s.jtrue` 直接可用）。tinycc 自己的
+       *     `SValue`（tcc.h:488）就是这么写的，所以这一格是「编 tinycc」的必经之路。 */
+      if (this.tok === SEMI) {
+        if (!isStruct(base.t)) this.err('declaration does not declare anything');
+        if (base.ref.fields === null) this.err(`field has incomplete type '${typeText(base)}'`);
+        if (!base.ref.anon) { this.skip(SEMI); continue; }
+        const { size, align } = typeSize(base);
+        let a = align;
+        const pk = this.cpp.packStack[this.cpp.packStack.length - 1];
+        if (pk !== 0 && pk < a) a = pk;
+        let at;
+        if (union) {
+          at = 0;
+          if (size > c) c = size;
+        } else {
+          c += (bitPos + 7) >> 3;
+          c = alignUp(c, a);
+          at = c;
+          c += size;
+          bitPos = 0;
+        }
+        if (a > maxalign) maxalign = a;
+        for (const f of base.ref.fields) {
+          if (fields.some((x) => x.name === f.name)) this.err(`duplicate member '${f.name}'`);
+          fields.push({ name: f.name, ty: f.ty, off: at + f.off });
+        }
+        this.skip(SEMI);
+        continue;
+      }
       for (;;) {
         /* 匿名位域（`int : 3;` 只占位、`int : 0;` 换一个存储单元）没有声明符，
          * 所以「有没有名字」要在进 declarator 之前问。 */
@@ -3419,6 +3452,11 @@ export class CGen {  /**
         }
 
         let { size, align } = typeSize(fty);
+        /* `#pragma pack(N)`（第八刀第十八片，`tccgen.c:4224-4228`）：N 比这个成员自己的
+         * 对齐小就按 N 排。宽度 0 的位域不受影响（PCC 模式下 tcc 也这么留）。
+         * pack 值从预处理器那边问 —— 它是**当前**那一格（`#pragma pack` 有栈）。 */
+        const pack = this.cpp.packStack[this.cpp.packStack.length - 1];
+        if (pack !== 0 && bits !== 0 && pack < align) align = pack;
         let off;
         if (union) {
           /* union 里的位域一律从第 0 位起（tcc 干脆不给它填 bitPos，`tccgen.c:4238`），
@@ -3893,10 +3931,31 @@ export class CGen {  /**
    * 优先级表**共用** `precedence()`，所以结合性不会与主路分岔。
    */
   constExpr() {
-    const v = this.ceInfix(this.ceUnary(), 1);
+    const v = this.ceCond();
     if (typeof v === 'bigint') return v;
     if (!Number.isFinite(v)) this.err('constant expression is not finite');
     return BigInt(Math.trunc(v));
+  }
+
+  /**
+   * 常量表达式里的 `?:`（C11 6.6 第 3 段允许它）。macOS 的 `<sys/_types/_fd_def.h>` 靠它
+   * 算 `fd_set` 的数组维度：`__DARWIN_howmany(x,y)` 展开成
+   * `((((x) % (y)) == 0) ? ((x) / (y)) : (((x) / (y)) + 1))` —— 少了这一格，
+   * `#include <sys/select.h>` 的那条路整条走不通。
+   *
+   * **两边都会算**（不是短路）。真的编译器在死的那一支上不求值，所以
+   * `1 ? 0 : 1/0` 在 tcc 那边是合法的，在我们这儿会骂「除以零」。这一格记在这儿：
+   * 要修就得给这台求值器一个「只读记号不算数」的模式，与 `sizeof` 那边的
+   * 「发进一个用完就丢的函数」是同一个手法。
+   */
+  ceCond() {
+    const c = this.ceInfix(this.ceUnary(), 1);
+    if (this.tok !== QUEST) return c;
+    this.next();
+    const a = this.ceCond();
+    this.skip(COLON);
+    const b = this.ceCond();
+    return (typeof c === 'bigint' ? c !== 0n : c !== 0) ? a : b;
   }
 
   /**
@@ -3905,7 +3964,7 @@ export class CGen {  /**
    * **在整数里算**，转换发生在最后，不在中间。
    */
   constFloatExpr() {
-    return Number(this.ceInfix(this.ceUnary(), 1));
+    return Number(this.ceCond());
   }
 
   /**
@@ -3985,8 +4044,9 @@ export class CGen {  /**
         this.skip(RPAR);
         return this.ceCastTo(ty, this.ceUnary());
       }
-      /* 分组：回的是原样值 —— 不在这儿提前截断，否则 `(1.5 + 1) * 2` 会算成 4。 */
-      const v = this.ceInfix(this.ceUnary(), 1);
+      /* 分组：回的是原样值 —— 不在这儿提前截断，否则 `(1.5 + 1) * 2` 会算成 4。
+       * 走 `ceCond` 而不是 `ceInfix`：括号里可以有 `?:`。 */
+      const v = this.ceCond();
       this.skip(RPAR);
       return v;
     }
@@ -4030,6 +4090,34 @@ export class CGen {  /**
   decl(global) {
     let any = false;
     for (;;) {
+      /* 多余的分号（`tccgen.c:8761-8765`）：顶层的 `;` 读掉就算。系统头里到处是 ——
+       * macOS 的 `<os/object.h>` 那些宏在非 Objective-C 下展开成空，
+       * `OS_WORKGROUP_SUBCLASS_DECL_PROTO(…);` 整行就只剩一个分号。
+       * 块内也一样（那是一条空语句，`stmt` 那边照旧认）—— 所以这一格只在顶层收。 */
+      if (global && this.tok === SEMI) {
+        this.next();
+        any = true;
+        continue;
+      }
+      /* `_Static_assert(表达式, "话")`（`tccgen.c:8704`）：假就当场报那句话。
+       * macOS 的 `<mach/message.h>` 拿它钉住 mach 消息那几个结构体的尺寸 ——
+       * 也就是说这一格顺手在**考我们的 struct 布局**（位域 + `#pragma pack(4)`）。 */
+      if (this.tok === TOK_STATIC_ASSERT) {
+        this.next();
+        this.skip(LPAR);
+        const c = this.constExpr();
+        let msg = '_Static_assert fail';
+        if (this.tok === COMMA) {
+          this.next();
+          if (this.tok !== TOK_STR) this.expect('string constant');
+          msg = this.readStrTok(this.tokc);
+        }
+        this.skip(RPAR);
+        if (c === 0n) this.err(msg);
+        this.skip(SEMI);
+        any = true;
+        continue;
+      }
       if (!this.isTypeStart(this.tok)) break;
       const spec = this.parseBtype();
       const isTypedef = (spec.t & VT_TYPEDEF) !== 0;

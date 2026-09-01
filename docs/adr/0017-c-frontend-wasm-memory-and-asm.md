@@ -288,7 +288,7 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
 8. **C 的库面**：`libtcc1` 的等价物（软除法/浮点辅助/`alloca`/`setjmp`）与 libc 的接法。
    原先写的是"先转手宿主的 libc，走既有的 extern-C FFI"，第五片证明**转手不成立**
    （指针是自家线性内存里的偏移，宿主 libc 读不到），改成一个读写线性内存的宿主模块，
-   见第五片的落地节。**前十七片已落地**（预定义的宏 —— 目标的自述，五十条，
+   见第五片的落地节。**前十八片已落地**（预定义的宏 —— 目标的自述，五十条，
    顺序与值都对着 `tcc -dM -E` 抄；自带的系统头目录 + 编译器必须自己给的那四份头；
    `stdio.h`/`stdlib.h`/`string.h` 的最小子集 —— libc 的自述；
    `strtol` 一族与 `strncpy`/`strchr`/`strstr` 那几条；
@@ -301,8 +301,10 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
    `sscanf` / `vsscanf` / `fscanf` —— cFormat 的反向；
    Duff's device —— 里层的 case 就是一个没有名字的标签；
    真的 macOS 系统头 —— 预定义的宏本来就是两份，而没引用的声明不发桩；
-   SDK 的三条标准流 —— 宿主填的全局量），
-   见下面的第八刀第一到十七片节。
+   SDK 的三条标准流 —— 宿主填的全局量；
+   编 tinycc 自己的源码撞出来的六格 —— `__has_include`、`#pragma pack`、
+   `_Static_assert`、匿名 struct/union 成员、常量表达式里的 `?:`、顶层多余的分号），
+   见下面的第八刀第一到十八片节。
 
 最后三步是**后端**：
 
@@ -3823,6 +3825,68 @@ fd 级 IO）；`getc`/`putc` 在 macOS 上是真的函数（宏那一套是 `__s
 之后：`struct-byval`（等真的后端）、`-dM`、路径 A 的 GLR 与路径 B 对账（第七步）。
 
 <!-- 第八刀第十七片-END -->
+
+## 落地：第八刀第十八片
+
+**把 tinycc 自己的源码交给我们，看第一个拦路的是什么。**
+
+第十七片末尾的预判是「预期是 `setjmp`/`longjmp`、`struct` 传值、`__attribute__`」。
+量下来一个都不是 —— 拦路的六格全在**更前面**，而且每一格都是先在 macOS 的系统头里
+撞到的（`node stage0/src/cli.js c-mir libtcc.c -I …`，一次一格往前推）：
+
+1. **`-D 名字` 的宏体是 `1`，不是空**（`tcc_define_symbol`：`value = *eq ? eq+1 : "1"`）。
+   `config.h` 第一行就是 `#if !(TCC_TARGET_I386 || … || TCC_TARGET_ARM64 || …)`，
+   展开成空当场就是「bad preprocessor expression」。顺手把 `-D名字` / `-I目录`
+   贴着写的形状也认了（tcc 两种都认）。
+2. **`__has_include`**（`tccpp.c:1474-1483`）。`<Availability.h>` 一进门就用。
+   实现是把 `parse_include` 拆成「读名字」+「摊成候选路径」两半，`#include` 与
+   `__has_include` 共用后者 —— 找的顺序必须一个字不差。`defined(__has_include)`
+   也要是真（它不是宏，但要装成有）。
+3. **`#pragma pack`**（`<sys/fcntl.h>` 的 `struct log2phys`）。它改的是**布局**，
+   所以必须真的实现：预处理器一个栈，struct 排成员时 `pack < align` 就按 pack 排。
+   **有一条只有对着 tcc 才看得见**：`tcc -E` 下 `#pragma pack` 是**原样印回**、
+   不解释的 —— tcc 的 `pragma_parse` 里「-E 就印回」那一支排在 `pack` **前面**
+   （`tccpp.c:1688` vs `1696`）。所以我们也分两路：只预处理时印回，编译时解释；
+   而认不出的 pragma 在编译那一路上是「警告一句、整行丢掉」，不是印回 ——
+   印回的话那些记号会漏进语法分析器（第一次撞上的正是这个）。
+4. **`_Static_assert`**（`<mach/message.h>` 拿它钉住 mach 消息的尺寸）。
+   它顺手在考我们的 struct 布局：位域 + `pack(4)` 算错就当场炸。
+5. **匿名 struct/union 成员**（C11 6.7.2.1 第 13 段）。tinycc 自己的 `SValue`
+   （tcc.h:488）就是这么写的。换法：那个没有名字的成员按自己的对齐占一块，
+   然后把它的字段**带着偏移摊进外层的字段表** —— 于是 `s.jtrue` 一个特例都不用写。
+   有 tag 的 `struct S { … };` 长在里面则只是声明一个 tag，不产生成员。
+6. **常量表达式里的 `?:`**（`<sys/_types/_fd_def.h>` 算 `fd_set` 的维度）与
+   **顶层多余的分号**（`<os/object.h>` 那些宏在非 Objective-C 下展开成空，
+   `OS_WORKGROUP_SUBCLASS_DECL_PROTO(…);` 整行只剩一个分号）。
+
+外加一条**真的类型规则**：赋值比的是「**去掉最外层限定符**之后相容」
+（C11 6.5.16.1），不是全等。`<math.h>` 里 `const struct __float2 __stret = f();`
+两侧只差一个 `const`，`sameType` 会把对的代码判成错的 —— 新的 `sameTypeUnqual`。
+
+### 量出来的数
+
+- `tests/c/gen/42-c11.c`：退出码 13 + 30 字节 stdout，与 `tcc -run` 逐字节相同。
+  六格全在里面，而且 `_Static_assert` 把三个 `sizeof`（7 / 12 / 12）钉住了 ——
+  那是 pack 与不 pack 的差别，tcc 认这三个数。
+- `tests/c/cpp/08-has-include.c`：与 `tcc -E -P` 逐字节相同（5 行）。
+- `tests/c/run.js`：**72 passed, 0 failed**。`tests/run.js`：96 passed。
+- 边界钉子 6 -> **6** 条：`cpp-bad/has-include` 拆了（实现了），
+  换上 `cpp-bad/has-include-next`（那一格要给每份打开的文件记住它是在第几个 `-I`
+  里找到的；macOS 那套头文件一次都没用到它）。
+
+### 下一片
+
+第八刀第十九片：**`__asm__` 出现在声明的中间**。现在 `libtcc.c` 停在
+`<dispatch/data.h>:45`（`unexpected keyword '__asm__' in expression`）——
+Apple 的 `API_AVAILABLE(...)` 一族在「编译器什么都没有」的分支上会展开出
+`__asm__(…)`，而我们只在**声明符之后**认它（`skipAsmName`）。这一格连着两件事：
+`__asm__` 能出现在哪些位置，以及我们的诊断行号比 tcc 晚一行（`#if` 那条也一样，
+tcc 的 `pp_error` 还会把整行记号印出来 —— 那是对账时最好用的一条线索）。
+
+之后：`struct-byval`（等真的后端）、`-dM`、路径 A 的 GLR 与路径 B 对账（第七步）。
+
+<!-- 第八刀第十八片-END -->
+
 
 
 

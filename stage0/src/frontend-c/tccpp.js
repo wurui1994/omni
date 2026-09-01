@@ -67,6 +67,7 @@ import {
   TOK_IF, TOK_ELSE, TOK___LINE__, TOK___FILE__, TOK___DATE__, TOK___TIME__,
   TOK___VA_ARGS__, TOK___COUNTER__, TOK___HAS_INCLUDE, TOK___HAS_INCLUDE_NEXT,
   TOK_push_macro, TOK_pop_macro, TOK_once,
+  TOK_pack, TOK_push, TOK_pop,
 } from './tcctok.js';
 import { PREDEFS, PP_ONLY_DEFS, COMPILE_DEFS } from './tccdefs.js';
 
@@ -230,6 +231,11 @@ export class Cpp {
     this.warnings = [];
     /** 预定义的宏装过了没有（见 `installPredefs`） */
     this.predefsDone = false;
+    /** `#pragma pack` 的栈（tcc 的 `pack_stack`）。栈顶是当前值，0 = 没有 pack */
+    this.packStack = [0];
+    /** 只预处理（`-E`）还是要编译。tcc 那边是 `output_type == TCC_OUTPUT_PREPROCESS`，
+     *  它决定 `#pragma` 是**原样印回**还是**当场解释**（见 `pragmaParse`）。 */
+    this.ppOnly = false;
 
     /* __LINE__ 那一族在 tcc 里也要有个 Sym 占位，否则 `defined(__LINE__)` 是假的
      * （`tccpp.c:3734`）。`special` 就是 tcc 的 `d == NULL`。 */
@@ -1614,6 +1620,15 @@ export class Cpp {
     this.defines.set(v, { type, str, args, special: false });
   }
 
+  /** `#pragma pack(N)` 里那个 N：1/2/4/8/16 之一（tcc 的 `val < 1 || val > 16 || 非 2 的幂`）。 */
+  packNumber() {
+    if (this.tok !== TOK_CINT) this.err('malformed #pragma directive');
+    const val = Number(this.tokc);
+    if (val < 1 || val > 16 || (val & (val - 1)) !== 0) this.err('malformed #pragma directive');
+    this.next();
+    return val;
+  }
+
   /** `#pragma`（`tccpp.c:1654`）。回 false = 这一行原样跳过。 */
   pragmaParse() {
     this.nextNomacro();
@@ -1648,54 +1663,64 @@ export class Cpp {
       this.next();
       return true;
     }
-    /* 其余的 pragma 在 `tcc -E` 下**原样印回输出**（`tccpp.c:1688-1694`）：
-     * 它是给下一道工序看的，预处理器无权吃掉。四个 unget 倒着叠，读出来正好是
-     * 换行、`#`、`pragma`、空格，然后接着读这一行剩下的部分。 */
-    this.ungetTok(SPC);
-    this.ungetTok(TOK_PRAGMA);
-    this.ungetTok(35);
-    this.ungetTok(TOK_LINEFEED);
-    return true;
+    /* **只预处理时，下面这些 pragma 一律原样印回**（`tccpp.c:1688-1694`）——
+     * 注意这一支在 tcc 那边排在 `pack` **前面**：`tcc -E` 不解释 `#pragma pack`，
+     * 它是给下一道工序看的。四个 unget 倒着叠，读出来正好是换行、`#`、`pragma`、
+     * 空格，然后接着读这一行剩下的部分。 */
+    if (this.ppOnly) {
+      this.ungetTok(SPC);
+      this.ungetTok(TOK_PRAGMA);
+      this.ungetTok(35);
+      this.ungetTok(TOK_LINEFEED);
+      return true;
+    }
+    /* `#pragma pack`（`tccpp.c:1696-1735`）：**它改的是 struct 的布局**，所以必须
+     * 真的实现，不能吃掉也不能原样印回。五种写法：
+     *   `pack(N)` 设成 N、`pack()` 回默认、`pack(push)` 压栈、`pack(push,N)` 压栈并设、
+     *   `pack(pop)` 弹栈。
+     * 0 = 「没有 pack」（按类型自己的对齐来）。macOS 的 `<sys/fcntl.h>` 用 `pack(4)`。 */
+    if (this.tok === TOK_pack) {
+      this.next();
+      if (this.tok !== 40) this.err('malformed #pragma directive');
+      this.next();
+      if (this.tok === TOK_pop) {
+        this.next();
+        if (this.packStack.length <= 1) this.err('out of pack stack');
+        this.packStack.pop();
+      } else {
+        let val = 0;
+        if (this.tok !== 41) {
+          if (this.tok === TOK_push) {
+            this.next();
+            val = this.packStack[this.packStack.length - 1];
+            this.packStack.push(val);
+            if (this.tok === 44) { // ','
+              this.next();
+              val = this.packNumber();
+            }
+          } else {
+            val = this.packNumber();
+          }
+        }
+        this.packStack[this.packStack.length - 1] = val;
+      }
+      if (this.tok !== 41) this.err('malformed #pragma directive');
+      this.next();
+      return true;
+    }
+    /* 编译那一路上，认不出的 pragma **警告一句然后整行丢掉**
+     * （`tccpp.c:1758-1760`）。不能原样印回 —— 那些记号会漏进语法分析器，
+     * 而 `#pragma GCC diagnostic …` 不是一个声明。 */
+    this.warn(`#pragma ${this.tokStr(this.tok, this.tokc)} ignored`);
+    return false;
   }
 
   /** `parse_include`（`tccpp.c:1324`） */
   parseInclude() {
-    const c = this.skipSpaces();
-    let name;
-    let kind;
-    if (c === 60 || c === 34) { // '<' '"'
-      name = this.parsePpString(c === 60 ? 62 : c, true);
-      kind = c;
-      this.nextNomacro();
-    } else {
-      /* 「算出来的 include」：`#include HEADER`，宏展开之后拼成 `"a.h"` 或 `<a.h>`
-       * （`tccpp.c:1337-1357`）。拼的是**印回文本**，所以中间的空格会进去 —— tcc 如此。 */
-      this.parseFlags = PF_PREPROCESS | PF_LINEFEED;
-      let acc = '';
-      for (;;) {
-        this.next();
-        const n = acc.length - 1;
-        if (n > 0
-          && ((acc[0] === '"' && acc[n] === '"') || (acc[0] === '<' && acc[n] === '>'))) break;
-        if (this.tok === TOK_LINEFEED) this.err("'#include' expects \"FILENAME\" or <FILENAME>");
-        acc += this.tokStr(this.tok, this.tokc);
-      }
-      kind = acc.charCodeAt(0);
-      name = acc.slice(1, acc.length - 1);
-    }
+    const { name, kind } = this.parseIncludeName();
     this.skipToEol(true);
 
-    /* 搜索顺序照 `tccpp.c:1364-1405`：绝对路径 -> `"..."` 才看的「当前文件所在目录」
-     * -> `-I` 给的那些 -> **系统目录**（`sysinclude_paths`，第八刀第二片）。
-     * 系统目录在最后，而且 `"..."` 也会走到那儿 —— tcc 就是这个顺序，于是
-     * `#include "stddef.h"` 与 `#include <stddef.h>` 都能找到自带的那一份。 */
-    const tries = [];
-    if (isAbsPath(name)) tries.push(name);
-    if (kind === 34) tries.push(this.joinPath(this.dirnameOf(this.file.trueFilename), name));
-    for (const d of this.includeDirs) tries.push(this.joinPath(d, name));
-    for (const d of this.sysIncludeDirs) tries.push(this.joinPath(d, name));
-
-    for (const path of tries) {
+    for (const path of this.includeTries(name, kind)) {
       const e = this.cachedInclude(path, false);
       if (e !== null && (e.once || (e.ifndefMacro && this.defineFind(e.ifndefMacro) !== null))) {
         return; // 守卫已经定义过或者 #pragma once：整份跳过，连读都不读
@@ -1711,6 +1736,64 @@ export class Cpp {
       return;
     }
     this.err(`include file '${name}' not found`);
+  }
+
+  /**
+   * 头文件名那一段（`parse_include` 的前半，`tccpp.c:1326-1357`）。**读的是原始字符**，
+   * 不是记号 —— `<sys/types.h>` 里那些斜杠与点在记号层面不是一个东西。
+   *
+   * 单独拆出来是因为 `__has_include(...)` 要的正是同一段（tcc 那边是同一个函数的
+   * `do_test` 分支）：名字怎么读、按什么顺序找，两处必须一个字不差。
+   */
+  parseIncludeName() {
+    const c = this.skipSpaces();
+    if (c === 60 || c === 34) { // '<' '"'
+      const name = this.parsePpString(c === 60 ? 62 : c, true);
+      this.nextNomacro();
+      return { name, kind: c };
+    }
+    /* 「算出来的 include」：`#include HEADER`，宏展开之后拼成 `"a.h"` 或 `<a.h>`
+     * （`tccpp.c:1337-1357`）。拼的是**印回文本**，所以中间的空格会进去 —— tcc 如此。 */
+    this.parseFlags = PF_PREPROCESS | PF_LINEFEED;
+    let acc = '';
+    for (;;) {
+      this.next();
+      const n = acc.length - 1;
+      if (n > 0
+        && ((acc[0] === '"' && acc[n] === '"') || (acc[0] === '<' && acc[n] === '>'))) break;
+      if (this.tok === TOK_LINEFEED) this.err("'#include' expects \"FILENAME\" or <FILENAME>");
+      acc += this.tokStr(this.tok, this.tokc);
+    }
+    return { name: acc.slice(1, acc.length - 1), kind: acc.charCodeAt(0) };
+  }
+
+  /**
+   * 一个头文件名摊成一串候选路径，顺序照 `tccpp.c:1364-1405`：绝对路径 ->
+   * `"..."` 才看的「当前文件所在目录」-> `-I` 给的那些 -> **系统目录**
+   * （`sysinclude_paths`，第八刀第二片）。系统目录在最后，而且 `"..."` 也会走到那儿 ——
+   * tcc 就是这个顺序，于是 `#include "stddef.h"` 与 `#include <stddef.h>` 都能找到
+   * 自带的那一份。
+   */
+  includeTries(name, kind) {
+    const tries = [];
+    if (isAbsPath(name)) tries.push(name);
+    if (kind === 34) tries.push(this.joinPath(this.dirnameOf(this.file.trueFilename), name));
+    for (const d of this.includeDirs) tries.push(this.joinPath(d, name));
+    for (const d of this.sysIncludeDirs) tries.push(this.joinPath(d, name));
+    return tries;
+  }
+
+  /**
+   * `__has_include(<x.h>)`（tcc 的 `parse_include(s1, 0, 1)`，`tccpp.c:1480`）：
+   * 只问「找不找得到」，不打开、不进 include 栈、不碰守卫缓存。
+   * macOS 的 `<Availability.h>` 一进门就用它。
+   */
+  hasInclude() {
+    const { name, kind } = this.parseIncludeName();
+    for (const path of this.includeTries(name, kind)) {
+      if (this.readFile(path) !== null) return true;
+    }
+    return false;
   }
 
   /* ------------------------------------------------- `#if` 的求值
@@ -1745,7 +1828,10 @@ export class Cpp {
         if (paren) this.next();
         this.parseFlags |= PF_PREPROCESS;
         if (this.tok < TOK_IDENT) this.err("identifier expected after 'defined'");
-        const c = this.defineFind(this.tok) !== null ? 1n : 0n;
+        /* `defined(__has_include)` 是**真**（`tccpp.c:1464-1467`）：它不是一个宏，
+         * 但要装成「有这个宏」，否则头文件会走「这编译器没有 __has_include」那一支。 */
+        const c = (this.defineFind(this.tok) !== null
+          || this.tok === TOK___HAS_INCLUDE || this.tok === TOK___HAS_INCLUDE_NEXT) ? 1n : 0n;
         if (paren) {
           this.next();
           if (this.tok !== 41) this.err("')' expected");
@@ -1753,7 +1839,18 @@ export class Cpp {
         str.add2(TOK_CLLONG, c);
         continue;
       }
-      if (t === TOK___HAS_INCLUDE || t === TOK___HAS_INCLUDE_NEXT) {
+      if (t === TOK___HAS_INCLUDE) {
+        /* `__has_include(<x.h>)`（`tccpp.c:1474-1483`）。名字那一段读的是**原始字符**，
+         * 所以这儿的形状照 tcc：先 `next()` 拿到 `(`，再让 `hasInclude()` 从文件里
+         * 往下读，读完它已经把 `)` 摆在 `this.tok` 上。 */
+        this.next();
+        if (this.tok !== 40) this.err("'(' expected");
+        const c = this.hasInclude() ? 1n : 0n;
+        if (this.tok !== 41) this.err("')' expected");
+        str.add2(TOK_CLLONG, c);
+        continue;
+      }
+      if (t === TOK___HAS_INCLUDE_NEXT) {
         this.err(`'${this.tokStr(t, null)}' is not supported yet`);
       }
       // 没定义的宏名在 `#if` 里就是 0（C 的规定）
@@ -1783,6 +1880,7 @@ export class Cpp {
    *      这一条是「输出还能再被读一遍」的全部保证。
    */
   preprocessToText(filename, text) {
+    this.ppOnly = true;
     this.installPredefs(filename);
     this.file = new CFile(filename, text, null);
     this.file.ifdefBase = 0;
