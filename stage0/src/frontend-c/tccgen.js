@@ -117,10 +117,10 @@
 // `va_end`/`va_copy`，签名定死成「固定形参 + 一个变参区指针」，**通过函数指针调也行**）、
 // **`exit`**（宿主抛一个信号，从任意深处一路退出去）、**函数类型的 typedef**
 // （`typedef int cb(int);`，之后能当声明符的基本类型用）、**`long double`**（在这个目标上
-// 就是 double，见 `tcc.h:237-241`）**。
+// 就是 double，见 `tcc.h:237-241`）、**常量表达式里的浮点**（整型与浮点合成一份求值器：
+// `int n = 1.9;` 是 1、`(int)2.9` 也认）、printf 的 `%a`**。
 // 还没到：`goto` 跳到不在外围块上的标签（relooper 那一路）、标签长在里层控制结构里
 // （Duff's device）、**外部**函数上的 struct 传值/返回（要真的 ABI）、
-// 整型的**静态**初始化式里的浮点常量、printf 的 `%a`、
 // 把 struct 传进变参的可变部分、从变参里 `va_arg` 出 struct 或大于 8 字节的东西、
 // 串起来的指定初始化器（`.a.b = 3`）、不定长数组配省掉里层花括号（`int a[][2] = {1,2,3,4}`）。
 //
@@ -486,6 +486,28 @@ function ceApply(t, a, b, err) {
   if (t === TOK_GT) return a > b ? 1n : 0n;
   err('invalid operator in constant expression');
   return 0n;
+}
+
+/**
+ * 常量表达式的算子，**有一边是浮点**那一支（`ceApply` 是两边都是整数那一支）。
+ * 分岔的理由就是 C 的常规算术转换：`%` 与位运算/移位在浮点上不存在（`genOp` 那儿是
+ * 同一条规则），而比较与逻辑运算的**结果是 int**，所以那几格回的是 BigInt。
+ */
+function cefApply(t, x, y, err) {
+  if (t === PLUS) return x + y;
+  if (t === MINUS) return x - y;
+  if (t === STAR) return x * y;
+  if (t === SLASH) return x / y;
+  if (t === TOK_LAND) return (x !== 0 && y !== 0) ? 1n : 0n;
+  if (t === TOK_LOR) return (x !== 0 || y !== 0) ? 1n : 0n;
+  if (t === TOK_EQ) return x === y ? 1n : 0n;
+  if (t === TOK_NE) return x !== y ? 1n : 0n;
+  if (t === TOK_LT) return x < y ? 1n : 0n;
+  if (t === TOK_GE) return x >= y ? 1n : 0n;
+  if (t === TOK_LE) return x <= y ? 1n : 0n;
+  if (t === TOK_GT) return x > y ? 1n : 0n;
+  err('invalid operands to binary operator (floating point)');
+  return 0;
 }
 
 export class CGen {  /**
@@ -3407,8 +3429,8 @@ export class CGen {  /**
   }
 
   /**
-   * 常量表达式（`expr_const`，`tccgen.c:6795`）：数组的维度要它，以后 `case` 标签与
-   * 位域宽度也要。
+   * 常量表达式（`expr_const`，`tccgen.c:6795`）：数组的维度、`case` 标签、位域宽度、
+   * 枚举值、静态初始化式都要它。
    *
    * tcc 那边是**同一套**表达式解析器加常量折叠 —— 它的 `vtop` 上带着 `VT_CONST`，
    * `gen_op` 顺手就折了。这一片没有折叠（文件头偏离 3：折叠是语义可见的），所以这里
@@ -3416,10 +3438,50 @@ export class CGen {  /**
    * 收益是主路上一行折叠代码都没有 —— 而 `1/0` 在数组维度里该是编译错、在表达式里
    * 该是运行时错，两份代码正好各自说对一半。
    *
+   * 一个值在这儿有**两种宿主表示**：整数是 BigInt、浮点是 number —— 也就是 C 的
+   * 「整型常量」与「浮点常量」这两类，原样带着走（第二十一片起整型与浮点合成一份）。
+   * `constExpr` 要的是整型：落在 number 上就按 C 的规则**向零截断**
+   * （C11 6.3.1.4 第 1 段），于是 `int n = 1.9;` 是 1、`char c = 65.7;` 是 'A'。
+   *
    * 优先级表**共用** `precedence()`，所以结合性不会与主路分岔。
    */
   constExpr() {
-    return this.ceInfix(this.ceUnary(), 1);
+    const v = this.ceInfix(this.ceUnary(), 1);
+    if (typeof v === 'bigint') return v;
+    if (!Number.isFinite(v)) this.err('constant expression is not finite');
+    return BigInt(Math.trunc(v));
+  }
+
+  /**
+   * 常量表达式的**浮点**出口（静态的 `double x = 1.5 * 2;` 要它）：同一个求值器，
+   * 只是最后不截断。`double x = 1 / 2;` 因此是 0.0 而不是 0.5 —— 两边都是整数就
+   * **在整数里算**，转换发生在最后，不在中间。
+   */
+  constFloatExpr() {
+    return Number(this.ceInfix(this.ceUnary(), 1));
+  }
+
+  /**
+   * 常量表达式里的一次转换（`(int)2.9`，也是 `constExpr` 最后那一步的通用版）。
+   * 整型目标：先向零截断（C11 6.3.1.4 第 1 段），再按目标宽度回绕（6.3.1.3 第 2 段）。
+   * `_Bool` 是例外：它只有「零与非零」（6.3.1.2）。
+   */
+  ceCastTo(ty, v) {
+    if (isFloat(ty.t)) {
+      const x = Number(v);
+      return btype(ty.t) === VT_FLOAT ? Math.fround(x) : x;
+    }
+    if (!isInteger(ty.t) && !isPtr(ty.t)) this.err('invalid cast in constant expression');
+    if (btype(ty.t) === VT_BOOL) return (typeof v === 'bigint' ? v !== 0n : v !== 0) ? 1n : 0n;
+    let bv;
+    if (typeof v === 'bigint') {
+      bv = v;
+    } else {
+      if (!Number.isFinite(v)) this.err('constant expression is not finite');
+      bv = BigInt(Math.trunc(v));
+    }
+    const bits = isPtr(ty.t) ? 64 : intBitsOf(ty);
+    return isUnsigned(ty.t) ? BigInt.asUintN(bits, bv) : BigInt.asIntN(bits, bv);
   }
 
   ceInfix(left, p) {
@@ -3431,7 +3493,9 @@ export class CGen {  /**
       this.next();
       let right = this.ceUnary();
       if (precedence(this.tok) > p2) right = this.ceInfix(right, p2 + 1);
-      acc = ceApply(t, acc, right, (m) => this.err(m));
+      acc = typeof acc === 'bigint' && typeof right === 'bigint'
+        ? ceApply(t, acc, right, (m) => this.err(m))
+        : cefApply(t, Number(acc), Number(right), (m) => this.err(m));
       t = this.tok;
     }
     return acc;
@@ -3445,13 +3509,37 @@ export class CGen {  /**
       this.next();
       return v;
     }
+    if (t === TOK_CFLOAT || t === TOK_CDOUBLE || t === TOK_CLDOUBLE) {
+      const v = Number(this.tokc);
+      this.next();
+      return v;
+    }
+    // 一元 `+` / `-` 在 BigInt 与 number 上是同一个写法，所以这两格不分岔
     if (t === PLUS) { this.next(); return this.ceUnary(); }
     if (t === MINUS) { this.next(); return -this.ceUnary(); }
-    if (t === TILDE) { this.next(); return ~this.ceUnary(); }
-    if (t === BANG) { this.next(); return this.ceUnary() === 0n ? 1n : 0n; }
+    if (t === TILDE) {
+      this.next();
+      const v = this.ceUnary();
+      if (typeof v !== 'bigint') this.err("invalid operand to unary '~' (floating point)");
+      return ~(/** @type {bigint} */ (v));
+    }
+    if (t === BANG) {
+      // `!` 在浮点上是合法的（C11 6.5.3.3 第 5 段），结果是 int
+      this.next();
+      const v = this.ceUnary();
+      return (typeof v === 'bigint' ? v === 0n : v === 0) ? 1n : 0n;
+    }
     if (t === LPAR) {
       this.next();
-      const v = this.constExpr();
+      /* `(int)2.9` —— 常量表达式里的强制转换（数组维度与 `case` 标签上都常见）。
+       * 括号后面是类型名就按转换走，否则一律当分组。 */
+      if (this.isTypeStart(this.tok)) {
+        const ty = this.typeName();
+        this.skip(RPAR);
+        return this.ceCastTo(ty, this.ceUnary());
+      }
+      /* 分组：回的是原样值 —— 不在这儿提前截断，否则 `(1.5 + 1) * 2` 会算成 4。 */
+      const v = this.ceInfix(this.ceUnary(), 1);
       this.skip(RPAR);
       return v;
     }
@@ -3482,79 +3570,8 @@ export class CGen {  /**
         return fnPtr(fn.no);
       }
     }
-    if (t === TOK_CFLOAT || t === TOK_CDOUBLE || t === TOK_CLDOUBLE) {
-      /* 整型的静态初始化式里出现浮点常量（`int n = 1.9;`，C 说结果是 1）。
-       * 这一格要的是「常量表达式在**浮点**里算完再截」，而这个求值器是 BigInt 的；
-       * 浮点那一半有自己的一份（`constFloatExpr`），两份合流是下一片的事。 */
-      this.todo('整型的静态初始化式里的浮点常量还没到');
-    }
     this.err('constant expression expected');
     return 0n;
-  }
-
-  /**
-   * 常量表达式的**浮点**那一半（静态的 `double x = 1.5 * 2;` 要它）。
-   *
-   * 一个值在这儿有两种宿主表示：整数是 BigInt、浮点是 number —— 也就是 C 的
-   * 「整型常量」与「浮点常量」这两类，原样带着走。算子那一步照 C 的常规算术转换分岔：
-   *   - 两边都是整数：**在整数里算**，用的就是 `constExpr` 那一份 `ceApply`。
-   *     于是 `double x = 1 / 2;` 是 0.0，不是 0.5 —— 转换发生在最后，不在中间。
-   *   - 有一边是浮点：两边都变成 number，只有 `+ - * /`（`%` 与位运算在浮点上不存在，
-   *     `genOp` 那儿是同一条规则）。
-   * 优先级共用 `precedence()`，所以结合性不会与主路分岔。
-   */
-  constFloatExpr() {
-    return Number(this.cefInfix(this.cefUnary(), 1));
-  }
-
-  cefInfix(left, p) {
-    let acc = left;
-    let t = this.tok;
-    for (;;) {
-      const p2 = precedence(t);
-      if (p2 < p) break;
-      this.next();
-      let right = this.cefUnary();
-      if (precedence(this.tok) > p2) right = this.cefInfix(right, p2 + 1);
-      if (typeof acc === 'bigint' && typeof right === 'bigint') {
-        acc = ceApply(t, acc, right, (m) => this.err(m));
-      } else {
-        const x = Number(acc);
-        const y = Number(right);
-        if (t === PLUS) acc = x + y;
-        else if (t === MINUS) acc = x - y;
-        else if (t === STAR) acc = x * y;
-        else if (t === SLASH) acc = x / y;
-        else this.err(`invalid operands to binary '${this.cpp.tokStr(t, null)}' (floating point)`);
-      }
-      t = this.tok;
-    }
-    return acc;
-  }
-
-  cefUnary() {
-    const t = this.tok;
-    if (t === TOK_CFLOAT || t === TOK_CDOUBLE || t === TOK_CLDOUBLE) {
-      const v = Number(this.tokc);
-      this.next();
-      return v;
-    }
-    if (t === PLUS) { this.next(); return this.cefUnary(); }
-    if (t === MINUS) {
-      this.next();
-      // 一元负号在 BigInt 与 number 上是同一个写法，所以这儿不分岔
-      return -this.cefUnary();
-    }
-    if (t === LPAR) {
-      this.next();
-      /* 括号里也可能整个是整数（`(double)` 的强制转换还没到这一格 —— 那要类型名，
-       * 而这儿的括号一律当分组）。所以回的是 `cefInfix` 的原样值，不提前变成 number。 */
-      const v = this.cefInfix(this.cefUnary(), 1);
-      this.skip(RPAR);
-      return v;
-    }
-    // 整数常量、枚举常量、`sizeof`、函数名：借整型那一份的**一元**那一步
-    return this.ceUnary();
   }
 
   /**

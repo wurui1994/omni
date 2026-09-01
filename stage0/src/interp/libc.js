@@ -22,7 +22,8 @@
 //
 // **不能拿 tcc 对账的那一格**（第四片记下的那份清单在长）：
 //   - `%p`：地址本身不同（我们的是线性内存偏移，tcc 的是进程地址）。
-// 浮点原先也在这份清单里，第十四片之后 `%f`/`%e`/`%g` 已经逐字节对上了（见 `fText`）。
+// 浮点原先也在这份清单里，第十四片之后 `%f`/`%e`/`%g` 已经逐字节对上了（见 `fText`），
+// 第二十一片补上了 `%a`（见 `aText`）—— 于是这份清单只剩 `%p` 一格。
 
 import { memLoad, memStore, printRaw, memSize, memGrow } from './builtin.js';
 
@@ -171,6 +172,63 @@ function fText(x, conv, spec) {
  * 从前这一格是「CCALL 的实参数组」，那等于假装宿主能看见 C 的实参表；
  * 换成变参区之后，`printf` 与它在真的 ABI 上做的事一模一样。
  */
+/**
+ * `%a` / `%A` 的数字部分（不带符号、也不带 `0x`）：把 double 的**位模式**印成
+ * `1.8p+0` 这种形状。它与 `%f/%e/%g` 不是一条路 —— 那三种是十进制、靠宿主的
+ * `toFixed`/`toExponential`；这一种是二进制的直读，宿主没有现成函数，得自己拆。
+ *
+ * 规则（C11 7.21.6.1 第 8 段，细节按 oracle 量出来的）：
+ *   - 首位数字是 1，**次正规数也规格化**（`5e-324` 印 `0x1p-1074`，不是 `0x0.0…1p-1022`）。
+ *   - 不给精度就印「够用的位数」：13 个十六进制位去掉末尾的零。
+ *   - 给了精度就round到那么多位，**半值向偶**（`%.0a`：1.5 是 `0x1p+0`、1.75 是 `0x2p+0`）。
+ *     进位落在**首位数字**上（于是有 `0x2.0p+0`），指数不跟着动。
+ *   - 指数是十进制带符号、**不补两位**（`p+0`，与 `%e` 的 `e+00` 不同）。
+ *   - 零是 `0x0p+0`；`#` 要求小数点即使没有小数位也留着。
+ */
+function aText(x, upper, spec) {
+  const dv = new DataView(new ArrayBuffer(8));
+  dv.setFloat64(0, x, true);
+  const bits = dv.getBigUint64(0, true);
+  const rawExp = Number((bits >> 52n) & 0x7ffn);
+  let man = bits & 0xfffffffffffffn;      // 52 位小数部分
+  let lead = 1n;
+  let e = rawExp - 1023;
+  if (rawExp === 0) {
+    if (man === 0n) {
+      lead = 0n;
+      e = 0;
+    } else {
+      /* 次正规：把最高位挪上去当首位。man = 2^p + r，值 = 2^(p-1074) * (1 + r/2^p)。 */
+      let p = 51;
+      while ((man & (1n << BigInt(p))) === 0n) p--;
+      e = p - 1074;
+      man = (man ^ (1n << BigInt(p))) << BigInt(52 - p);
+    }
+  }
+  let digits;
+  if (spec.prec < 0) {
+    digits = man.toString(16).padStart(13, '0').replace(/0+$/, '');
+  } else if (spec.prec >= 13) {
+    digits = man.toString(16).padStart(13, '0').padEnd(spec.prec, '0');
+  } else {
+    const drop = BigInt((13 - spec.prec) * 4);
+    let kept = man >> drop;
+    const rem = man & ((1n << drop) - 1n);
+    const half = 1n << (drop - 1n);
+    if (rem > half || (rem === half && (kept & 1n) === 1n)) {
+      kept++;
+      if (kept === 1n << BigInt(spec.prec * 4)) {   // 进位溢出到首位数字上
+        kept = 0n;
+        lead++;
+      }
+    }
+    digits = spec.prec === 0 ? '' : kept.toString(16).padStart(spec.prec, '0');
+  }
+  const point = digits.length > 0 || spec.alt ? '.' : '';
+  const body = `${lead.toString(16)}${point}${digits}p${e < 0 ? '-' : '+'}${e < 0 ? -e : e}`;
+  return upper ? body.toUpperCase() : body;
+}
+
 function vaCursor(addr) {
   let p = BigInt(addr);
   const take = (kind) => {
@@ -299,33 +357,38 @@ export function cFormat(fmt, va) {
       continue;
     }
     if (conv === 'f' || conv === 'F' || conv === 'e' || conv === 'E'
-      || conv === 'g' || conv === 'G') {
+      || conv === 'g' || conv === 'G' || conv === 'a' || conv === 'A') {
       /* 变参里的浮点已经被默认实参提升拉成 double（`float` 也是），所以变参区那一格
        * 就是 8 个字节的 f64 —— 按 f64 读，与写的那一侧（`vaBlock`）对上。 */
       const x = ap.real();
+      const hex = conv === 'a' || conv === 'A';
       if (!Number.isFinite(x)) {
         /* `inf` / `nan`：宽度照用，但**不补零**（C11 7.21.6.1 第 8 段最后一句）。
-         * 大写的转换印大写。 */
+         * 大写的转换印大写 —— `%A` 也算大写，而且它连 `0x` 都不印。 */
         spec.numeric = false;
         const body = Number.isNaN(x) ? 'nan' : 'inf';
-        const up = conv === 'F' || conv === 'E' || conv === 'G';
+        const up = conv === 'F' || conv === 'E' || conv === 'G' || conv === 'A';
         const sign = x < 0 ? '-' : (spec.plus ? '+' : (spec.space ? ' ' : ''));
         out += padTo(up ? body.toUpperCase() : body, sign, spec);
         continue;
       }
       /* 负号看的是 `x < 0` 之外还有 `-0.0`：C 印 `-0.000000`，而 `-0 < 0` 是假。 */
       const neg = x < 0 || Object.is(x, -0);
-      /* 浮点这一格的「精度」已经在 `fText` 里用掉了（小数位数 / 有效数字），
-       * 不能再让 `padTo` 拿它去补前导零 —— 所以按非数字对待。 */
+      /* 浮点这一格的「精度」已经在 `fText`/`aText` 里用掉了（小数位数 / 有效数字 /
+       * 十六进制位数），不能再让 `padTo` 拿它去补前导零 —— 所以按非数字对待。 */
       spec.numeric = false;
-      const body = fText(x, conv, spec);
+      const v = neg ? -x : x;
+      const body = hex ? aText(v, conv === 'A', spec) : fText(x, conv, spec);
+      /* `%a` 的 `0x` 是**前缀**（与 `%#x` 同一格）：补空格在它左边、补零在它右边。 */
+      const pfx = hex ? (conv === 'A' ? '0X' : '0x') : '';
+      spec.prefix = pfx;
       const sign = neg ? '-' : (spec.plus ? '+' : (spec.space ? ' ' : ''));
       if (spec.zero && !spec.left) {
         /* `%08.2f` 的零补在**符号之后**，而 `padTo` 的补零那一支被上面关掉了，
          * 所以这一格自己补 —— 数字部分补零是安全的（它已经有小数点了）。 */
-        let n = spec.width - sign.length - body.length;
+        let n = spec.width - sign.length - pfx.length - body.length;
         if (n < 0) n = 0;
-        out += sign + '0'.repeat(n) + body;
+        out += sign + pfx + '0'.repeat(n) + body;
         continue;
       }
       out += padTo(body, sign, spec);
