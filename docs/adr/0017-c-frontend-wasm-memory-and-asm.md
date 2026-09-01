@@ -288,9 +288,10 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
 8. **C 的库面**：`libtcc1` 的等价物（软除法/浮点辅助/`alloca`/`setjmp`）与 libc 的接法。
    原先写的是"先转手宿主的 libc，走既有的 extern-C FFI"，第五片证明**转手不成立**
    （指针是自家线性内存里的偏移，宿主 libc 读不到），改成一个读写线性内存的宿主模块，
-   见第五片的落地节。**前两片已落地**（预定义的宏 —— 目标的自述，五十条，
-   顺序与值都对着 `tcc -dM -E` 抄；自带的系统头目录 + 我们自己写的那四份头），
-   见下面的第八刀第一、二片节。
+   见第五片的落地节。**前三片已落地**（预定义的宏 —— 目标的自述，五十条，
+   顺序与值都对着 `tcc -dM -E` 抄；自带的系统头目录 + 编译器必须自己给的那四份头；
+   `stdio.h`/`stdlib.h`/`string.h` 的最小子集 —— libc 的自述），
+   见下面的第八刀第一、二、三片节。
 
 最后三步是**后端**：
 
@@ -2702,6 +2703,91 @@ C99 要求它，tcc 不给。测试里先写了它，tcc 报 `'FLT_EVAL_METHOD' 
 `undefined symbol '...'`。
 
 <!-- 第八刀第二片-END -->
+
+
+## 落地：第八刀第三片 —— libc 的自述
+
+第二片装的四份头是**编译器必须自己给**的，tcc 也自带。这一片装的三份不是：
+tcc 把 `<stdio.h>` / `<stdlib.h>` / `<string.h>` 转手给系统，链接期再去 libc 里找符号。
+我们在解释器这条腿上**没有真的 libc 可转手** —— 指针是自家线性内存里的偏移，
+宿主的 libc 读不到（`interp/libc.js` 头上那一节记着这个结论是怎么来的）。
+
+于是这三份头的身份是**自述**：`interp/libc.js` 那张表有什么，头文件就声明什么，
+**多一个都不声明**。缺的那些不会悄悄退化成 implicit int，而是照 tcc 的原话报
+`undefined symbol '...'`。
+
+这是一处**刻意的分岔**，写在这儿免得将来被当成 bug：等自带后端那条路（第 9-11 步）
+真的链上 libc，这三份就换成「转手系统的」，那时 `#include_next` / `__asm("_name")` /
+`__attribute__` 也都到位了。
+
+### 装了哪些
+
+- `stdio.h`：`putchar` / `puts` / `printf` / `sprintf` / `snprintf`，加 `EOF`。
+- `stdlib.h`：`malloc` / `calloc` / `realloc` / `free` / `abs` / `labs` /
+  `exit` / `abort`，加 `EXIT_SUCCESS` / `EXIT_FAILURE`。
+- `string.h`：`strlen` / `strcmp` / `strcpy` / `strcat` / `strdup` /
+  `memcpy` / `memmove` / `memset` / `memcmp`。
+
+三份都 `#include <stddef.h>` 拿 `size_t` —— 于是「同一个 typedef 被三份头各带一次」
+这件事也被验了一遍（`_SIZE_T_DEFINED` 守卫）。
+
+`strdup` 是 POSIX 而不是 C 标准里的，照样放进 `string.h`：这三份头跟的是
+**那张表**，不是标准的目录。
+
+### 少了什么，为什么（每一格都是一片）
+
+- **`FILE` / `fopen` / `fprintf` / `stdout` / `stderr`**：要真的文件描述符与宿主 IO。
+  现在输出只有一条路（`printRaw` 写进程的 stdout），而对账的正是这一条。
+- **`vprintf` 一族**：要把 `va_list` 再往下传一层。有意思的是这一格几乎是白送的 ——
+  `cFormat` 现在拿的就是**变参区的地址**（第十六片的 ABI），而 `va_list` 在这个目标上
+  就是那个地址，两者是同一个东西。但它得连着 `vsnprintf` 一起量，所以还是独立一格。
+- **`atoi` / `strtol` 一族**：要自己写字符串到数的解析。tinycc 的源码在用，下一格。
+- **`qsort` / `bsearch`**：要让 libc **回头**调 MIR（函数指针回调），而 CCALL 现在是
+  「宿主调宿主」的单向门。这是真的一格新东西，不是补一个函数。
+- **`strncpy` / `strchr` / `strstr` / `strtok`**：`interp/libc.js` 里还没有实现，
+  加声明就得加实现，连着做。
+- **`atexit`**：要一张退出时跑的表，而 `exit` 现在是一个抛出去的信号（`ExitCall`）。
+- **`getenv` / `system`**：要宿主进程环境。
+
+### 顺手清掉的那 47 行
+
+从第五片起每份 `gen/` 用例头上都手写着 libc 的原型，最少一行
+（`int printf(const char *fmt, ...);` —— arm64 上**必须**有，没有的话 tcc 自己
+就把变参编错，第五片踩过），`06-libc.c` 那份手写了十三行。这一片把它们全换成
+`#include`：**23 份用例、47 行声明**清零。
+
+这不只是好看：那 47 行是**手抄的原型**，与 `interp/libc.js` 那张表之间没有任何
+机械保证。换成头文件之后两边只有一处说法，而且「我们支持哪些 libc」变成一件
+**看头文件就知道**的事。
+
+顺带一件事：那些手写原型里 `size_t` 都写成了 `unsigned long`（那时还没有
+`stddef.h`）。两者在这个目标上是同一个类型，所以换过来 stdout 一个字节都没变 ——
+28 份既有用例全部逐字节照旧，这本身就是一次「头文件与手写原型等价」的对账。
+
+`17-vararg.c` 是唯一保留 `__builtin_va_*` 写法的一份：它验的就是那几个内建本身，
+标准名字那一层由 `gen/28` 验。
+
+### 量出来的数
+
+- `stage0/include/` 从 4 份 138 行长到 7 份 235 行。
+- `tests/c/gen/29-libc-headers.c`：退出码 24 + 210B stdout，与 `tcc -run` 逐字节相同。
+  **一行手写声明都没有**，三行 `#include` 就够。oracle 那一侧 tcc 用的是 macOS 真正的
+  头（量过：`#include <stdio.h>` 那三份 tcc 编得过），我们用自带的三份 ——
+  两边的原型必须兼容，逐字节对账正是在验这一句。
+- `tests/c/run.js`：**56 passed, 0 failed**。`tests/js-roundtrip/run.js`：110 passed。
+- 边界钉子仍是 6 条，一条没动。
+
+### 下一片
+
+第八刀第四片：**`atoi` / `strtol` 一族 + `strncpy` / `strchr` / `strstr`**。
+选它们的理由不是「顺着标准往下抄」，而是 tinycc 的源码在用 —— 而那份源码是这一刀的
+终点。做法与前几片相同：`interp/libc.js` 加实现、头文件加声明、一份 `gen/` 用例与
+`tcc -run` 逐字节对账。
+
+`strtol` 那一格要小心：`errno` / `ERANGE` 我们还没有，而 tcc 那边有真的 libc，
+于是**溢出的输入**两边会分岔。用例先避开溢出，边界写成 `todo`。
+
+<!-- 第八刀第三片-END -->
 
 
 

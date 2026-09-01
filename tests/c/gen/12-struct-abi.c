@@ -4,9 +4,9 @@
  * 一份可改的拷贝）；返回走**隐藏的第一个形参** —— 调用方划一块、把地址传进去，被调方
  * 拷进去再把这个地址返回（SysV 用 rax 回同一个东西）。
  *
- * printf 一定要有原型：arm64 的变参走栈，没原型时 **tcc 自己**会编错。 */
+ * printf 一定要先有声明：arm64 的变参走栈，没声明时 **tcc 自己**会编错。 */
 
-int printf(const char *fmt, ...);
+#include <stdio.h>
 
 struct Point { int x, y; };                  /* 8 字节，真 ABI 里能走寄存器 */
 struct Big { int a[6]; char tag; };          /* 28 字节，一定走内存 */

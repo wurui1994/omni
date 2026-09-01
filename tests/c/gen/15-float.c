@@ -8,9 +8,9 @@
  * 与「舍入不落在正中间」的商（1/3），所以「宿主的 toFixed 与 C 的向偶数舍入」
  * 那一格分歧碰不到（libc.js 的 `fText` 记着这件事）。
  *
- * printf 一定要有原型：arm64 的变参走栈，没原型时 **tcc 自己**会编错。 */
+ * printf 一定要先有声明：arm64 的变参走栈，没声明时 **tcc 自己**会编错。 */
 
-int printf(const char *fmt, ...);
+#include <stdio.h>
 
 struct P { double x; float y; int n; };
 

@@ -3,7 +3,7 @@
  * 这一份与 cpp/07-predef.c 不同：那边量的是「展开成什么」，这边量的是
  * 「拿它们声明的类型、开的分支，编出来跑起来对不对」。 */
 
-int printf(const char *fmt, ...);
+#include <stdio.h>
 
 /* 标准类型的底子：用它们声明，而不是硬写 unsigned long */
 typedef __SIZE_TYPE__ my_size_t;

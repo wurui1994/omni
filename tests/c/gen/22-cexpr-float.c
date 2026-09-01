@@ -1,6 +1,6 @@
 /* 第六刀第二十一片：常量表达式里的浮点（整型与浮点两个求值器合成一份）与 printf 的 `%a`。
- * arm64 上凡是用 printf 的用例都必须自己声明它，否则 tcc 自己会编错（变参 ABI）。 */
-int printf(const char *fmt, ...);
+ * arm64 上凡是用 printf 的用例都必须先有它的声明，否则 tcc 自己会编错（变参 ABI）。 */
+#include <stdio.h>
 
 /* 整型的位置上出现浮点常量：向零截断（C11 6.3.1.4 第 1 段） */
 static int a = 1.9;

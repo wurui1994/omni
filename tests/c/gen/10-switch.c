@@ -2,7 +2,7 @@
  * 一个标签 = 关掉一层，于是**贯穿自动就对**。
  * 密集的值走 BRTABLE，疏的走一串比较 —— 两条路都要跟 tcc 逐字节相同。 */
 
-int printf(const char *fmt, ...);
+#include <stdio.h>
 
 /* 密集：0..4 连号，走 BRTABLE */
 static int dense(int x) {

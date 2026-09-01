@@ -3,7 +3,7 @@
  *
  * oracle 是 `tcc -run` 的退出码加 stdout 逐字节。 */
 
-int printf(const char *fmt, ...);
+#include <stdio.h>
 
 struct P { int x; int y; };
 struct N { struct P a; char c; int v[3]; };

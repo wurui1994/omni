@@ -1,6 +1,6 @@
 /* 第六刀第二十二片：struct 进变参的可变部分（写侧摊进变参区、读侧 `va_arg` 回一个左值）。
- * arm64 上凡是用 printf 的用例都必须自己声明它，否则 tcc 自己会编错（变参 ABI）。 */
-int printf(const char *fmt, ...);
+ * arm64 上凡是用 printf 的用例都必须先有它的声明，否则 tcc 自己会编错（变参 ABI）。 */
+#include <stdio.h>
 
 struct pt { int x, y; };
 struct big { int a; double d; char s[10]; };   /* 24 字节，跨三格 */

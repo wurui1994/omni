@@ -8,8 +8,7 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include <float.h>
-
-int printf(const char *fmt, ...);
+#include <stdio.h>
 
 struct pt { char tag; int x; double y; char name[4]; };
 

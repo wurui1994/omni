@@ -2,10 +2,10 @@
  * 带标签的块外面套一圈 LOOP，循环开头按状态分派，`goto Li` = 写状态 + 回到开头。
  * 与 switch 共用「一个标签关掉一层 block」那个骨架，多的只有 LOOP 与状态槽。
  *
- * printf 一定要有原型：arm64 的变参走栈，没原型时 **tcc 自己**会编错，
- * 那样 oracle 就不能用了（第五片踩过）。 */
+ * printf 一定要先有声明：arm64 的变参走栈，没声明时 **tcc 自己**会编错，
+ * 那样 oracle 就不能用了（第五片踩过）。第八刀第三片起它从 `<stdio.h>` 来。 */
 
-int printf(const char *fmt, ...);
+#include <stdio.h>
 
 /* 往回跳 —— tinycc 自己的源码里到处是这个形状（`goto redo;`） */
 static int back(int n) {

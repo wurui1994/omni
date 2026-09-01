@@ -6,7 +6,7 @@
  *
  * 每一形都算得死死的，没有一处依赖未初始化的量。 */
 
-int printf(const char *fmt, ...);
+#include <stdio.h>
 
 /* 1. 往回跳 —— tinycc 自己满地都是的 `goto redo;` */
 static int redoLoop(int n) {

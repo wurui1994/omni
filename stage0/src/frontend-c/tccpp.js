@@ -34,10 +34,13 @@
 //   找到的」（`tccpp.c:1363` 的 include_next_index），后者要把 include 搜索接进 `#if`
 //   的求值里。两条都等要接**本机真正的**系统头的时候再做 —— 那时才躲不开。
 // - **只有自带的那个系统头目录，没接本机的**：`sysIncludeDirs`（第八刀第二片）指向
-//   `stage0/include/`，里头是我们自己写的 `stddef.h` / `stdarg.h` / `stdbool.h` /
-//   `float.h` —— 与 tcc 自带的那四份一一对应。搜索顺序照 tcc：`-I` 之后才试它。
-//   再往外（`/usr/include`、SDK 里的那些）还没接，找不到就报
-//   `include file '...' not found`（与 tcc 同一句）。
+//   `stage0/include/`。里头两类东西：一是**编译器必须自己给**的那四份
+//   `stddef.h` / `stdarg.h` / `stdbool.h` / `float.h`（与 tcc 自带的一一对应），
+//   二是 `stdio.h` / `stdlib.h` / `string.h` 的**最小子集**（第八刀第三片）——
+//   声明的正好是 `interp/libc.js` 那张表里有的，多一个都没有。后者是刻意的分岔：
+//   tcc 把这三份转手给系统，我们在解释器上没有真的 libc 可转手。
+//   搜索顺序照 tcc：`-I` 之后才试它。再往外（`/usr/include`、SDK 里的那些）还没接，
+//   找不到就报 `include file '...' not found`（与 tcc 同一句）。
 //   **预定义的宏也有了**（第八刀第一片，见 tccdefs.js）：`__aarch64__`、
 //   `__SIZE_TYPE__`、`_Nonnull` 那五十条，顺序与值都对着 `tcc -dM -E` 抄的。
 // - **`-dM` 不认**：tcc 的 `-dM` 是**边定义边印**（`#undef` 也印、同名重定义印两遍），

@@ -1,22 +1,13 @@
 /* 第六刀第五片：外部符号、变参、libc。**这一份用例是 oracle 升级的分界**：
  * 从这里起 `tests/c/run.js` 不只比退出码，还比整条 stdout 逐字节。
  *
- * 没有头文件（`#include <stdio.h>` 要一整套 libc 头，那是第八步），所以原型自己写。
+ * 原来这儿手写着十三行原型（「没有头文件」那句现在过时了）—— 第八刀第三片装上了
+ * `<stdio.h>` / `<stdlib.h>` / `<string.h>` 的最小子集，于是三行 include 就够。
  * 不能拿 tcc 对账的两格不出现在这儿：`%p`（地址不同）与浮点（前端还没有）。 */
 
-int printf(const char *fmt, ...);
-int sprintf(char *buf, const char *fmt, ...);
-int snprintf(char *buf, unsigned long n, const char *fmt, ...);
-int puts(const char *s);
-int putchar(int c);
-unsigned long strlen(const char *s);
-int strcmp(const char *a, const char *b);
-char *strcpy(char *d, const char *s);
-char *strcat(char *d, const char *s);
-void *memcpy(void *d, const void *s, unsigned long n);
-void *memset(void *d, int c, unsigned long n);
-int memcmp(const void *a, const void *b, unsigned long n);
-int abs(int x);
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 static int fib(int n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); }
 

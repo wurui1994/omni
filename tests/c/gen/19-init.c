@@ -1,7 +1,7 @@
 /* 第六刀第十八片：嵌套聚合省掉里层花括号（C11 6.7.9 第 20 段）。
  * 一格一格地看：省的、写全的、混着写的；静态的与自动的；数组套 struct、struct 套数组。
- * arm64 上凡是用 printf 的用例都必须自己声明它，否则 tcc 自己会编错（变参 ABI）。 */
-int printf(const char *fmt, ...);
+ * arm64 上凡是用 printf 的用例都必须先有它的声明，否则 tcc 自己会编错（变参 ABI）。 */
+#include <stdio.h>
 
 struct in { int b, c; };
 struct s { int a; struct in i; int d; };

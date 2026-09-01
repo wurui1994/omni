@@ -1,7 +1,6 @@
 /* 第六刀第十九片：函数类型的 typedef，与通过函数指针调变参函数。
- * arm64 上凡是用 printf 的用例都必须自己声明它，否则 tcc 自己会编错（变参 ABI）。 */
-int printf(const char *fmt, ...);
-int sprintf(char *buf, const char *fmt, ...);
+ * arm64 上凡是用 printf 的用例都必须先有它的声明，否则 tcc 自己会编错（变参 ABI）。 */
+#include <stdio.h>
 
 typedef int cb(int);                 /* 函数类型本身的别名 */
 typedef int pf(const char *, ...);   /* 变参函数类型的别名 */

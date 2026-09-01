@@ -1,4 +1,4 @@
-int printf(const char *fmt, ...);
+#include <stdio.h>
 
 struct in { int b, c; };
 struct s { int a; struct in i; int d; };

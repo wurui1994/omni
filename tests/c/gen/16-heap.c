@@ -7,17 +7,12 @@
  *
  * 这一份**不印任何地址**（`%p` 与 tcc 对不上，地址空间不同），只印内容与长度。
  *
- * printf 一定要有原型：arm64 的变参走栈，没原型时 **tcc 自己**会编错。 */
+ * printf 一定要有声明：arm64 的变参走栈，没声明时 **tcc 自己**会编错 ——
+ * 第八刀第三片起那个声明从 `<stdio.h>` 来，不必手写。 */
 
-int printf(const char *fmt, ...);
-void *malloc(unsigned long n);
-void *calloc(unsigned long n, unsigned long size);
-void *realloc(void *p, unsigned long n);
-void free(void *p);
-char *strdup(const char *s);
-unsigned long strlen(const char *s);
-char *strcpy(char *d, const char *s);
-int strcmp(const char *a, const char *b);
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 struct Node { int v; struct Node *next; };
 

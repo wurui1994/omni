@@ -4,9 +4,9 @@
  * 前端只需要一条纪律：函数指示符是一个**函数类型的内存左值**，「地址」就是那个值 ——
  * 于是 `f`、`&f`、`*f`、`f(x)`、`(*fp)(x)`、`fp(x)` 六种写法走同一条路。
  *
- * printf 一定要有原型：arm64 的变参走栈，没原型时 **tcc 自己**会编错。 */
+ * printf 一定要先有声明：arm64 的变参走栈，没声明时 **tcc 自己**会编错。 */
 
-int printf(const char *fmt, ...);
+#include <stdio.h>
 
 static int twice(int x) { return x * 2; }
 static int thrice(int x) { return x * 3; }

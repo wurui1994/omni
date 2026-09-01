@@ -7,7 +7,7 @@
  * 函数指针的**类型**在这一片就有了（能声明、能 sizeof、能当形参），
  * 但「调用它」要 MIR 有间接调用，那是下一片（`gen-bad/paren-decl` 钉着）。 */
 
-int printf(const char *fmt, ...);
+#include <stdio.h>
 
 struct S {
   int (*p)[2];      /* 一个指针 */

@@ -1,8 +1,8 @@
 /* 第六刀第十七片：`exit` —— 从任意深处一路退出去。
- * arm64 上凡是用 printf 的用例都必须自己声明它，否则 tcc 自己会编错（变参 ABI）。
- * `exit` 也自己声明：这一刀还没有 <stdlib.h>。 */
-int printf(const char *fmt, ...);
-void exit(int code);
+ * arm64 上凡是用 printf 的用例都必须先有它的声明，否则 tcc 自己会编错（变参 ABI）；
+ * 第八刀第三片起那个声明从头文件来。 */
+#include <stdio.h>
+#include <stdlib.h>
 
 static int trace = 0;
 

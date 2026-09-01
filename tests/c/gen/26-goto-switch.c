@@ -4,7 +4,7 @@
  * 发（`openSegs`）：状态非 0 就按区间送到带标签的那条子语句，状态 0 才轮到 case 那台。
  * 选择子落在一个槽上，而且被重新进入时整段求值都跳过。 */
 
-int printf(const char *fmt, ...);
+#include <stdio.h>
 
 /* 1. 从 switch 外面跳进一个 case 里的标签（选择子一次都不算）。 */
 static int intoCase(int x) {

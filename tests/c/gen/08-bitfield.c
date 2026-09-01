@@ -4,7 +4,7 @@
  * 布局的三句话（`tccgen.c:4256-4294`）：位域紧挨着前一个放，除了宽度是 0 或者
  * 「放下去会越过它自己的基类型容器」这两种情形要换一个新的存储单元。 */
 
-int printf(const char *fmt, ...);
+#include <stdio.h>
 
 /* 三个位域挤在一个 int 里 */
 struct A {

@@ -2,10 +2,10 @@
  * oracle 是 `tcc -run` 的退出码加 stdout 逐字节 —— sizeof 与成员偏移都印出来，
  * 于是 struct 布局（对齐、填充、整体大小）被逐位钉住，而不只是「能编过」。
  *
- * printf 的原型必须自己写（还没有头文件）：arm64 的变参实参走栈，没有原型时
- * **tcc 自己**就印出乱码 —— 那会让 oracle 变成一份垃圾。 */
+ * printf 的声明必须先有（arm64 的变参实参走栈，没有声明时 **tcc 自己**就印出乱码 ——
+ * 那会让 oracle 变成一份垃圾）；第八刀第三片起它从 `<stdio.h>` 来。 */
 
-int printf(const char *fmt, ...);
+#include <stdio.h>
 
 struct Point {
   int x;
