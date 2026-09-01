@@ -26,6 +26,25 @@
 
 import { memLoad, memStore, printRaw, memSize, memGrow } from './builtin.js';
 
+/**
+ * `exit` 抛的那个信号（第六刀第十七片）。
+ *
+ * C 的 `exit` 是「从任意深处一路退出去」，而这条腿上的控制流是**结构化**的
+ * （BLOCK/LOOP/IF + 往外数几层的 BR，ADR-0017 第六刀的四条偏离之一）—— 没有哪个 `BR`
+ * 能跨过函数边界。所以退出这件事不走 MIR，走宿主：libc 抛，跑模块的那一层收
+ * （`mir/interp.js` 的 `runMirModule`）。wasm 那边是同一个形状（wasi 的 `proc_exit`
+ * 也是宿主 trap 掉整个实例）；自带后端那条路上它就是真的 `exit` 系统调用。
+ *
+ * 它**不是** `InterpFail`：那一类是「程序错了」（退出码 70），而 `exit(3)` 是程序
+ * 正常地要求退出码 3。所以 CCALL 那层的 try/catch 必须把它原样放过去。
+ */
+export class ExitCall extends Error {
+  constructor(code) {
+    super(`exit(${code})`);
+    this.code = code;
+  }
+}
+
 /** 从线性内存里读一个 C 字符串（读到 0 为止）。回 JS 字符串，一个字符一个字节。 */
 export function readCStr(addr) {
   let s = '';
@@ -545,6 +564,10 @@ const LIBC = {
     const v = BigInt.asIntN(64, BigInt(a[0]));
     return v < 0n ? -v : v;
   },
+  /* `exit` 与 `abort`：都不回来（见 `ExitCall`）。`abort` 的退出码照 shell 的规矩
+   * 是 128 + SIGABRT(6) = 134 —— `tcc -run` 那边也是这个数。 */
+  exit: (a) => { throw new ExitCall(Number(BigInt.asIntN(32, BigInt(a[0])))); },
+  abort: () => { throw new ExitCall(134); },
 };
 
 /** 这个名字在 libc 里有吗（降级器**不**问这一句：链接期缺符号是运行期的错）。 */

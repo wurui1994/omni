@@ -31,7 +31,7 @@ import {
   memInit, memData, memSize, memGrow, memLoadFn, memStoreFn,
 } from '../interp/builtin.js';
 import { JS_ALL } from '../hir/js_abi.js';
-import { hasLibc, callLibc } from '../interp/libc.js';
+import { hasLibc, callLibc, ExitCall } from '../interp/libc.js';
 import { lowerToMir } from './from_oir.js';
 import { verifyMir } from './verify.js';
 import {
@@ -889,6 +889,8 @@ class MirInterp {
           try {
             F.v[i] = callLibc(entry, vals);
           } catch (e) {
+            /* `exit` 抛的信号要原样穿过去：它不是「程序错了」，而是程序要求的退出码。 */
+            if (e instanceof ExitCall) throw e;
             failRt(`${entry}: ${e instanceof Error ? e.message : String(e)}`);
           }
           return next;
@@ -965,6 +967,11 @@ export function runMirModule(oir, mir) {
   try {
     code = I.run();
   } catch (e) {
+    /* `exit(n)`：stdout 照样要刷出去（C 的 `exit` 也是先冲 stdio 再退），退出码就是 n。 */
+    if (e instanceof ExitCall) {
+      flushOut();
+      return e.code;
+    }
     if (e instanceof InterpFail) {
       stderr(`omni: runtime error: ${e.message}\n`);
       return 70;
