@@ -107,11 +107,12 @@
 // 聚合初始化器（含指定初始化器与不定长数组）、`switch`（含贯穿、`BRTABLE`/比较链两条路）、
 // `goto` 与语句标签（外围块上的，前向后向都行）、struct 的**传值与返回**（传地址 +
 // 隐藏的返回指针）、带括号的声明符（`int (*a)[3]`、`int (*f(int))[3]`）、**函数指针**
-// （调用、回调、函数指针表、当静态初始化式）**。
+// （调用、回调、函数指针表、当静态初始化式）、**浮点**（`float`/`double`、与整型互转、
+// 静态初始化式、printf 的 `%f/%e/%g`）**。
 // 还没到：`goto` 跳到不在外围块上的标签（relooper 那一路）、标签长在里层控制结构里
 // （Duff's device）、**外部**函数上的 struct 传值/返回（要真的 ABI）、通过函数指针调
-// **变参**函数、函数类型的 typedef、嵌套聚合省掉里层花括号、浮点（含 printf 的
-// `%f/%e/%g`）、`malloc` 那一族
+// **变参**函数、函数类型的 typedef、嵌套聚合省掉里层花括号、`long double`（它不是
+// double）、整型的**静态**初始化式里的浮点常量、printf 的 `%a`、`malloc` 那一族
 // （要堆）、变参函数的**定义**（要 `va_list`/`va_arg`）。
 //
 // 碰到还没做到的东西**当场报错**，报错文本里带「第六刀」字样 —— 一眼能看出是进度不是
@@ -120,7 +121,10 @@
 //
 // oracle 原先只是 `tcc -run` 的**进程退出码**（`main` 的返回值，8 位）；printf 通了之后
 // 升级成「退出码 **加 stdout 逐字节相同**」—— 一次比较从 1 字节变成几百字节，同一份用例
-// 能钉住的东西多了两个数量级。有两格**不能**跟 tcc 对：`%p`（地址空间不同）与浮点。
+// 能钉住的东西多了两个数量级。有一格**不能**跟 tcc 对：`%p`（地址空间不同）。浮点原先
+// 也在这一格里，第十四片之后它进了对账范围 —— `%f/%e/%g` 逐字节相同，只有「正好落在两个
+// 十进制数正中间」的舍入还有分歧（libc.js 的 `fText` 记着这件事，用例避开那些值）。
+
 
 import { OmniError } from '../source/diag.js';
 import { Cpp } from './tccpp.js';
@@ -145,10 +149,12 @@ import {
   isBitfield, bitPosOf, bitSizeOf, mkBitfield, bitfieldBase,
   ctype, mkPointer, mkArray, mkStruct, mkEnum, mkFunc, typeSize, typeText, sameType,
   TY_VOID, TY_INT, TY_UINT, TY_LLONG, TY_ULLONG, TY_CHAR, TY_SHORT, TY_BOOL,
+  TY_FLOAT, TY_DOUBLE, VT_LDOUBLE,
 } from './ctype.js';
 import {
-  MirModule, MirFunc, OP, T_VOID, T_I32, T_I64, T_BOOL, REF_NONE,
-  CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16, memDesc, MEM_PAGE, fnPtr,
+  MirModule, MirFunc, OP, T_VOID, T_I32, T_I64, T_BOOL, T_F32, T_F64, REF_NONE,
+  CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16, CVT_I2F, CVT_U2F, CVT_F2I,
+  CVT_FCVT, memDesc, MEM_PAGE, fnPtr,
 } from '../mir/ir.js';
 
 /* 线性内存的访问描述符号（`MLOAD_KINDS` / `MSTORE_KINDS` 的下标，ir.js:383）。
@@ -159,10 +165,14 @@ const MK_I16S = 2;
 const MK_I16U = 3;
 const MK_I32S = 4;
 const MK_I64 = 6;
+const MK_F32 = 7;
+const MK_F64 = 8;
 const SK_I8 = 0;
 const SK_I16 = 1;
 const SK_I32 = 2;
 const SK_I64 = 3;
+const SK_F32 = 4;
+const SK_F64 = 5;
 
 /* 逐字节拷贝（struct 赋值）用的宽度表。读一律用**无符号/满宽**的那格：搬字节的时候
  * 符号扩展是有害的 —— 8 位那格若用 `i8s`，0x80 会被扩成 0xffffff80，存回去时低 8 位
@@ -183,6 +193,8 @@ function loadKindOf(ty) {
   if (b === VT_BYTE) return isUnsigned(ty.t) ? MK_I8U : MK_I8S;
   if (b === VT_SHORT) return isUnsigned(ty.t) ? MK_I16U : MK_I16S;
   if (b === VT_INT) return MK_I32S;
+  if (b === VT_FLOAT) return MK_F32;
+  if (b === VT_DOUBLE) return MK_F64;
   return MK_I64;   // long / long long / 指针
 }
 
@@ -192,6 +204,8 @@ function storeKindOf(ty) {
   if (b === VT_BOOL || b === VT_BYTE) return SK_I8;
   if (b === VT_SHORT) return SK_I16;
   if (b === VT_INT) return SK_I32;
+  if (b === VT_FLOAT) return SK_F32;
+  if (b === VT_DOUBLE) return SK_F64;
   return SK_I64;
 }
 
@@ -251,7 +265,8 @@ function mirTypeOf(ty) {
   if (b === VT_VOID) return T_VOID;
   if (b === VT_BYTE || b === VT_SHORT || b === VT_INT || b === VT_BOOL) return T_I32;
   if (b === VT_LLONG || b === VT_PTR || b === VT_FUNC) return T_I64;
-  if (b === VT_FLOAT) return T_I32;   // 到不了这儿（浮点还没做），留着让 switch 完整
+  if (b === VT_FLOAT) return T_F32;
+  if (b === VT_DOUBLE) return T_F64;
   /* struct/union/数组在 MIR 里**只以地址的形态出现**（第十一片的 ABI：传值传地址、
    * 返回走隐藏的返回指针）。所以它们的 MIR 类型就是指针的类型。 */
   return T_I64;
@@ -265,6 +280,30 @@ function intBitsOf(ty) {
   if (b === VT_SHORT) return 16;
   if (b === VT_INT) return 32;
   return 64;   // long / long long / 指针
+}
+
+/**
+ * 浮点类型的**等级**（C11 6.3.1.8 里 "greater rank" 的那个序）。只用来比大小，
+ * 数值本身没有意义 —— 所以 `long double` 是 2 而不是 80 或 128：它在这一片
+ * 还没到（`parseBtype` 那儿报边界），但序里留着它的位置，将来加进来时
+ * `usualArith` 一个字都不用改。
+ */
+function floatRankOf(ty) {
+  const b = btype(ty.t);
+  if (b === VT_FLOAT) return 0;
+  if (b === VT_DOUBLE) return 1;
+  return 2;   // VT_LDOUBLE
+}
+
+/** 一个 double / float 的 IEEE 754 位模式（小端，与线性内存同一个字节序）。 */
+function floatBits(x, size) {
+  const buf = new DataView(new ArrayBuffer(8));
+  if (size === 4) {
+    buf.setFloat32(0, x, true);
+    return BigInt(buf.getUint32(0, true));
+  }
+  buf.setFloat64(0, x, true);
+  return buf.getBigUint64(0, true);
 }
 
 /**
@@ -321,11 +360,18 @@ function bfValTypeOf(ty) {
   return w64 ? (uns ? TY_ULLONG : TY_LLONG) : (uns ? TY_UINT : TY_INT);
 }
 
-/** 整型提升之后的类型（**不发指令**）。只问类型的地方用它，别叫 `promote`。 */
+/**
+ * 默认实参提升之后的类型（**不发指令**）。只问类型的地方用它，别叫 `promote`。
+ *
+ * 整型提升那一半（`_Bool`/`char`/`short` -> `int`）之外还有一条：`float` -> `double`
+ * （C11 6.5.2.2 第 6 段）。少这一条，`printf("%f", 1.5f)` 会往变参里放 4 个字节，
+ * 而 `%f` 那边按 8 个字节读 —— 印出来是一个随便的数，而且只在 `float` 上错。
+ */
 function promotedType(ty0) {
   const ty = bfValTypeOf(ty0);
   const b = btype(ty.t);
   if (b === VT_BOOL || b === VT_BYTE || b === VT_SHORT) return TY_INT;
+  if (b === VT_FLOAT) return TY_DOUBLE;
   return ty;
 }
 
@@ -674,10 +720,32 @@ export class CGen {  /**
    * 解释器里比的是 `18446744073709551615n` 与 `-1n`，判假。逐位比对当场抓住。
    */
   konst(ty, v) {
+    const mt = mirTypeOf(ty);
+    /* 浮点也从这儿走：`gtst` 与「掉出函数尾巴的隐式 return」都是 `konst(ty, 0)`，
+     * 而 `double` 的那个 0 必须是 `f64 0`，不是 `i32 0` —— MIR 的算术两侧同类型，
+     * 类型码错了会在 verifier 那儿炸，而不是在这儿。 */
+    if (mt === T_F64 || mt === T_F32) return this.fkonst(ty, Number(v));
     const bv = BigInt(v);
-    return mirTypeOf(ty) === T_I64
+    return mt === T_I64
       ? this.mod.consts.int(BigInt.asIntN(64, bv))
       : this.mod.consts.i32(BigInt.asIntN(32, bv));
+  }
+
+  /**
+   * `float` / `double` 的常量。
+   *
+   * 文本用 JS 的 `String(number)`：它是**往回读得回同一个 double** 的最短十进制
+   * （ECMA-262 Number::toString），所以常量池按文本去重不会把两个不同的 double
+   * 合成一个。`f32` 那一格先 `fround` 再取文本 —— 池子那边说了「造它的人负责 fround」
+   * （`ir.js:453`），不 fround 的话 `0.1f` 会以 double 的文本进池，再往 f32 上读一次，
+   * 而那两个数在 `x == 0.1f` 上就不相等了。
+   */
+  fkonst(ty, x) {
+    if (mirTypeOf(ty) === T_F32) {
+      const s = Math.fround(x);
+      return this.mod.consts.f32(String(s));
+    }
+    return this.mod.consts.real(String(x));
   }
 
 
@@ -848,6 +916,16 @@ export class CGen {  /**
   usualArith(a, b) {
     const x = this.promote(a);
     const y = this.promote(b);
+    /* 浮点先收：C11 6.3.1.8 第 1 段是「有一边是浮点，就都转到较宽的那个浮点」——
+     * 整型那三句一句都用不上（`double` 与 `unsigned long long` 相遇是 `double`）。
+     * `float + float` 留在 `float`：C 不要求中间算成 double（那是 K&R 的规则），
+     * 而 tcc 也是按声明的类型算的。 */
+    if (isFloat(x.ty.t) || isFloat(y.ty.t)) {
+      const fx = isFloat(x.ty.t) ? floatRankOf(x.ty) : -1;
+      const fy = isFloat(y.ty.t) ? floatRankOf(y.ty) : -1;
+      const ty = (fx > fy ? x.ty : y.ty);
+      return { ty, a: this.castTo(x, ty), b: this.castTo(y, ty) };
+    }
     const bx = intBitsOf(x.ty);
     const by = intBitsOf(y.ty);
     const bits = bx > by ? bx : by;
@@ -883,7 +961,7 @@ export class CGen {  /**
     }
 
     const from = v.ty;
-    if (isFloat(from.t) || isFloat(ty.t)) this.todo('浮点还没到');
+    if (isFloat(from.t) || isFloat(ty.t)) return this.castFloat(v, ty);
     if (isStruct(from.t) || isStruct(ty.t)) {
       /* 同类型的 struct 往 struct 走一定是「当值用」（传参、返回、`?:` 的两臂），
        * 不是转换 —— 报「还没到」而不是「转不了」，否则报错文本会写成
@@ -904,6 +982,50 @@ export class CGen {  /**
     } else if (srcMir === T_I64 && dstMir === T_I32) {
       r = f.emit(OP.CVT, T_I32, r, REF_NONE, CVT_TRUNC);
     }
+    return sVal(ty, this.narrow(r, ty));
+  }
+
+  /**
+   * 有浮点参与的转换（`gen_cast` 里浮点那几支，`tccgen.c:2100` 一带）。
+   *
+   * 四条路，每条一两条指令：
+   *   - 浮点 -> 浮点：宽度一样就什么都不发，不一样发一条 `CVT_FCVT`。
+   *   - 整型 -> 浮点：**先把整数扩到 64 位**，再发 `CVT_I2F` / `CVT_U2F`。
+   *     那次扩宽不是多余的：`CVT_U2F` 在 MIR 里是「把这 64 位当无符号读」
+   *     （`interp.js:485` 的 `asUintN(64, ...)`），而 `unsigned int` 的规范形是
+   *     **符号扩展过的** i32（见文件头那条不变量）—— 直接喂给 U2F，
+   *     `(double)(unsigned)-1` 会算成 1.8446744073709552e19 而不是 4294967295。
+   *     扩宽走整型那条 `castTo`，于是符号性那一格只在一处判。
+   *   - 浮点 -> 整型：一条 `CVT_F2I`（朝零截尾，C11 6.3.1.4 第 1 段）再收口窄宽度。
+   *     无符号目标也走同一条：`F2I` 出来的是两补的位，而无符号在 MIR 里挂在算子上，
+   *     不挂在位上（第六十一刀）。
+   *   - 浮点 <-> 指针：C 里不存在，报错。静悄悄按位走会让 `(void*)1.5` 编过。
+   *
+   * `_Bool` 与 `void` 不到这儿 —— `castTo` 在前面就分岔了，所以「非零就是 1」
+   * 对浮点也自动是对的（`gtst` 与 `0.0` 比）。
+   */
+  castFloat(v, ty) {
+    const f = this.f;
+    const from = v.ty;
+    if (isPtr(from.t) || isPtr(ty.t) || isStruct(from.t) || isStruct(ty.t)) {
+      this.err(`cannot convert '${typeText(from)}' to '${typeText(ty)}'`);
+    }
+    const srcMir = mirTypeOf(from);
+    const dstMir = mirTypeOf(ty);
+    if (isFloat(from.t) && isFloat(ty.t)) {
+      const r = this.gv(v);
+      if (srcMir === dstMir) return sVal(ty, r);
+      return sVal(ty, f.emit(OP.CVT, dstMir, r, REF_NONE, CVT_FCVT));
+    }
+    if (isFloat(ty.t)) {
+      if (!isInteger(from.t)) this.err(`cannot convert '${typeText(from)}' to '${typeText(ty)}'`);
+      const w = isUnsigned(from.t) ? TY_ULLONG : TY_LLONG;
+      const r = this.gv(this.castTo(v, w));
+      return sVal(ty, f.emit(OP.CVT, dstMir, r, REF_NONE,
+        isUnsigned(from.t) ? CVT_U2F : CVT_I2F));
+    }
+    if (!isInteger(ty.t)) this.err(`cannot convert '${typeText(from)}' to '${typeText(ty)}'`);
+    const r = f.emit(OP.CVT, dstMir, this.gv(v), REF_NONE, CVT_F2I);
     return sVal(ty, this.narrow(r, ty));
   }
 
@@ -1036,6 +1158,17 @@ export class CGen {  /**
     const a = this.decay(a0);
     const b = this.decay(b0);
     if (isPtr(a.ty.t) || isPtr(b.ty.t)) return this.genPtrOp(op, a, b);
+    /* 浮点上没有的那几个运算符（C11 6.5.5 第 2 段要求 `%` 的两侧是整型，
+     * 6.5.7 / 6.5.10-12 要求移位与位运算的两侧是整型）。在这儿拦而不是让
+     * `usualArith` 出来的浮点类型撞上 `OP.MOD`：撞上去是 verifier 的内部错，
+     * 而这是用户代码里的一个普通错误，该有普通的报错文本。 */
+    if (isFloat(a.ty.t) || isFloat(b.ty.t)) {
+      if (op === PERCENT || op === AMP || op === PIPE || op === CARET
+        || op === TOK_SHL || op === TOK_SAR) {
+        this.err(`invalid operands to binary '${this.cpp.tokStr(op, null)}' (floating point)`);
+      }
+    }
+
     if (op === TOK_SHL || op === TOK_SAR) {
       const l = this.promote(a);
       const r = this.promote(b);
@@ -1252,6 +1385,14 @@ export class CGen {  /**
       this.emitBytes(dest.addr + off, 8, BigInt(addr));
       return;
     }
+    if (isFloat(ty.t)) {
+      /* 静态的浮点初始化式：**在这儿就把它编码成 IEEE 754 的那几个字节**。
+       * 整型那一侧写的是数值，这儿写的是位模式 —— 因为 data 段就是字节，
+       * 而「浮点数怎么变成字节」是一张定死的表（`floatBits`），不是一次转换。 */
+      const size = typeSize(ty).size;
+      this.emitBytes(dest.addr + off, size, floatBits(this.constFloatExpr(), size));
+      return;
+    }
     this.emitBytes(dest.addr + off, typeSize(ty).size, this.constExpr());
   }
 
@@ -1429,9 +1570,14 @@ export class CGen {  /**
     // 带值的记号：整数与字符常量。`next()` 会毁掉 tokc，所以先取（`tccgen.c:7185`）
     if (tokHasValue(t)) {
       const cv = this.tokc;
-      if (t === TOK_CFLOAT || t === TOK_CDOUBLE || t === TOK_CLDOUBLE) {
-        this.todo('浮点常量还没到');
+      if (t === TOK_CFLOAT || t === TOK_CDOUBLE) {
+        /* 浮点字面量。`tokc` 在这一格是宿主的 number（`parseNumber` 那边算好的，
+         * `f` 后缀已经 fround 过），所以这里只是挑类型再进常量池。 */
+        this.next();
+        const fty = t === TOK_CFLOAT ? TY_FLOAT : TY_DOUBLE;
+        return this.postfix(sVal(fty, this.fkonst(fty, /** @type {number} */ (cv))));
       }
+      if (t === TOK_CLDOUBLE) this.todo('long double 还没到（它不是 double）');
       if (t === TOK_LSTR) this.todo('宽字符串字面量还没到');
       if (t === TOK_STR) return this.postfix(this.strLit(this.readStrTok(cv)));
       if (t === TOK_LCHAR) this.todo('宽字符常量还没到');
@@ -1475,6 +1621,9 @@ export class CGen {  /**
     if (t === TILDE) {
       this.next();
       const v = this.promote(this.unary());
+      // `~` 的操作数必须是整型（C11 6.5.3.3 第 4 段）；浮点在这儿拦，
+      // 否则 `BNOT` 拿到一个 f64 会变成 verifier 的内部错
+      if (!isInteger(v.ty.t)) this.err(`invalid type argument of unary '~' ('${typeText(v.ty)}')`);
       return sVal(v.ty, this.f.emit(OP.BNOT, mirTypeOf(v.ty), this.gv(v), REF_NONE, 0));
     }
     if (t === BANG) {
@@ -1886,6 +2035,12 @@ export class CGen {  /**
    * 就知道它，先按第一支的类型开槽，第二支若更宽则整条重来 —— 重来的代价太大，
    * 所以退一步：**槽按 i64 开**，两支各自转成公共类型之后存进去，读出来再转回公共类型。
    * i64 装得下这一片的每一种整型，于是不损失精度；无符号性靠最后那次转换恢复。
+   *
+   * 浮点进来之后 i64 那个槽不够了（`c ? 1.5 : 2.5` 存进 i64 就成了 1）。办法是**再开一个
+   * f64 的槽**，算术类型的那一支往两个槽里各存一份（一次 F2I、一次 I2F 或恒等），
+   * 最后按公共类型挑一个读。多出来的那条 store 只在 `? :` 上，而它买到的是
+   * 「不必知道第二支的类型就能给第一支开槽」—— 也就是不必为此再扫一遍记号。
+   * f64 装得下 float 的每一个值，所以公共类型是 `float` 时最后那次 FCVT 是精确的。
    */
   exprCond() {
     const v = this.exprLor();
@@ -1894,15 +2049,39 @@ export class CGen {  /**
     const f = this.f;
     const c = this.gtst(v);
     const slot = this.temp(T_I64, 'sel');
+    const fslot = this.temp(T_F64, 'fsel');
+    /** 一支落地：整型/指针进 i64 那个槽，算术类型**另外**再进 f64 那个槽。 */
+    const put = (x) => {
+      if (isFloat(x.ty.t)) {
+        f.emit(OP.STORE, T_VOID, this.gv(this.castTo(x, TY_DOUBLE)), REF_NONE, fslot);
+        return;
+      }
+      f.emit(OP.STORE, T_VOID, this.gv(this.castTo(x, TY_LLONG)), REF_NONE, slot);
+      /* 整型那一支也要往 f64 里存一份：另一支可能是浮点，而那时公共类型是浮点，
+       * 读的就是这个槽。反过来不必 —— 浮点那一支存进 i64 只会被丢掉。 */
+      if (isInteger(x.ty.t)) {
+        f.emit(OP.STORE, T_VOID, this.gv(this.castTo(x, TY_DOUBLE)), REF_NONE, fslot);
+      }
+    };
     this.open(OP.IF, 'if', c);
     const a = this.gexpr();
-    f.emit(OP.STORE, T_VOID, this.gv(this.castTo(a, TY_LLONG)), REF_NONE, slot);
+    put(a);
     this.elseHalf();
     this.skip(COLON);
     const b = this.exprCond();
-    f.emit(OP.STORE, T_VOID, this.gv(this.castTo(b, TY_LLONG)), REF_NONE, slot);
+    put(b);
     this.close();
+    /* 有一支是浮点：公共类型是两支里等级高的那个浮点（C11 6.5.15 第 5 段走的是
+     * 常规算术转换），值从 f64 那个槽里读。 */
+    if (isFloat(a.ty.t) || isFloat(b.ty.t)) {
+      const fa = isFloat(a.ty.t) ? floatRankOf(a.ty) : -1;
+      const fb = isFloat(b.ty.t) ? floatRankOf(b.ty) : -1;
+      const fty = fa > fb ? a.ty : b.ty;
+      const got = sVal(TY_DOUBLE, f.emit(OP.LOAD, T_F64, REF_NONE, REF_NONE, fslot));
+      return this.castTo(got, fty);
+    }
     const wide = sVal(TY_LLONG, f.emit(OP.LOAD, T_I64, REF_NONE, REF_NONE, slot));
+
     /* 有一支是指针（或数组）：结果就是那个指针类型。放在整型那套规则**之前**，
      * 因为 intBitsOf(指针) 是 64，落到下面会算出 `long long` —— 于是 `(c?p:q)[0]`
      * 会说「下标用在了不是数组也不是指针的东西上」，而错的其实是这一格。 */
@@ -2845,7 +3024,8 @@ export class CGen {  /**
       if (t === TOK_VOLATILE) { quals = quals | VT_VOLATILE; any = true; this.next(); continue; }
       // `auto` / `register` 在这一片没有可观察的效果，吃掉
       if (t === TOK_AUTO || t === TOK_REGISTER) { any = true; this.next(); continue; }
-      if (t === TOK_FLOAT || t === TOK_DOUBLE) this.todo('浮点还没到');
+      if (t === TOK_FLOAT) { setBt(VT_FLOAT); any = true; this.next(); continue; }
+      if (t === TOK_DOUBLE) { setBt(VT_DOUBLE); any = true; this.next(); continue; }
       if (t === TOK_STRUCT || t === TOK_UNION || t === TOK_ENUM) {
         /* struct/union/enum 走 `tdef` 那一格：它们和 typedef 名一样是「一整个类型」，
          * 不是一位说明符，所以不能与 `short`/`long`/`signed` 同时出现。 */
@@ -2886,6 +3066,17 @@ export class CGen {  /**
     if (longs > 2) this.err("too many 'long' specifiers");
     if (shorts > 0 && longs > 0) this.err("'short' and 'long' together");
     if (bt === -1) bt = VT_INT;   // `unsigned` / `long` 单独出现就是 int 系
+    /* `long double`：语法上认得（否则报的是「long 不能和 double 一起用」，那是错的说法），
+     * 但它是这一片划出去的一格 —— 本机 arm64 上它是 128 位 IEEE quad，x86 上是 80 位
+     * 扩展精度，两者都不是宿主的 double，得有自己的一套算术与自己的一套 printf。 */
+    if (longs > 0 && bt === VT_DOUBLE) {
+      bt = VT_LDOUBLE;
+      this.todo('long double 还没到（它不是 double）');
+    }
+
+    if ((bt === VT_FLOAT || bt === VT_DOUBLE) && (sign !== 0 || shorts > 0 || longs > 0)) {
+      this.err(`'${typeText(ctype(bt))}' cannot be signed or sized`);
+    }
     if ((shorts > 0 || longs > 0) && bt !== VT_INT) {
       this.err(`'short'/'long' cannot be used with '${typeText(ctype(bt))}'`);
     }
@@ -3118,8 +3309,80 @@ export class CGen {  /**
         return fnPtr(fn.no);
       }
     }
+    if (t === TOK_CFLOAT || t === TOK_CDOUBLE || t === TOK_CLDOUBLE) {
+      /* 整型的静态初始化式里出现浮点常量（`int n = 1.9;`，C 说结果是 1）。
+       * 这一格要的是「常量表达式在**浮点**里算完再截」，而这个求值器是 BigInt 的；
+       * 浮点那一半有自己的一份（`constFloatExpr`），两份合流是下一片的事。 */
+      this.todo('整型的静态初始化式里的浮点常量还没到');
+    }
     this.err('constant expression expected');
     return 0n;
+  }
+
+  /**
+   * 常量表达式的**浮点**那一半（静态的 `double x = 1.5 * 2;` 要它）。
+   *
+   * 一个值在这儿有两种宿主表示：整数是 BigInt、浮点是 number —— 也就是 C 的
+   * 「整型常量」与「浮点常量」这两类，原样带着走。算子那一步照 C 的常规算术转换分岔：
+   *   - 两边都是整数：**在整数里算**，用的就是 `constExpr` 那一份 `ceApply`。
+   *     于是 `double x = 1 / 2;` 是 0.0，不是 0.5 —— 转换发生在最后，不在中间。
+   *   - 有一边是浮点：两边都变成 number，只有 `+ - * /`（`%` 与位运算在浮点上不存在，
+   *     `genOp` 那儿是同一条规则）。
+   * 优先级共用 `precedence()`，所以结合性不会与主路分岔。
+   */
+  constFloatExpr() {
+    return Number(this.cefInfix(this.cefUnary(), 1));
+  }
+
+  cefInfix(left, p) {
+    let acc = left;
+    let t = this.tok;
+    for (;;) {
+      const p2 = precedence(t);
+      if (p2 < p) break;
+      this.next();
+      let right = this.cefUnary();
+      if (precedence(this.tok) > p2) right = this.cefInfix(right, p2 + 1);
+      if (typeof acc === 'bigint' && typeof right === 'bigint') {
+        acc = ceApply(t, acc, right, (m) => this.err(m));
+      } else {
+        const x = Number(acc);
+        const y = Number(right);
+        if (t === PLUS) acc = x + y;
+        else if (t === MINUS) acc = x - y;
+        else if (t === STAR) acc = x * y;
+        else if (t === SLASH) acc = x / y;
+        else this.err(`invalid operands to binary '${this.cpp.tokStr(t, null)}' (floating point)`);
+      }
+      t = this.tok;
+    }
+    return acc;
+  }
+
+  cefUnary() {
+    const t = this.tok;
+    if (t === TOK_CFLOAT || t === TOK_CDOUBLE) {
+      const v = Number(this.tokc);
+      this.next();
+      return v;
+    }
+    if (t === TOK_CLDOUBLE) this.todo('long double 还没到（它不是 double）');
+    if (t === PLUS) { this.next(); return this.cefUnary(); }
+    if (t === MINUS) {
+      this.next();
+      // 一元负号在 BigInt 与 number 上是同一个写法，所以这儿不分岔
+      return -this.cefUnary();
+    }
+    if (t === LPAR) {
+      this.next();
+      /* 括号里也可能整个是整数（`(double)` 的强制转换还没到这一格 —— 那要类型名，
+       * 而这儿的括号一律当分组）。所以回的是 `cefInfix` 的原样值，不提前变成 number。 */
+      const v = this.cefInfix(this.cefUnary(), 1);
+      this.skip(RPAR);
+      return v;
+    }
+    // 整数常量、枚举常量、`sizeof`、函数名：借整型那一份的**一元**那一步
+    return this.ceUnary();
   }
 
   /**

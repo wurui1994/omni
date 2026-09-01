@@ -49,7 +49,7 @@ import {
   TOK_A_ADD, TOK_A_SUB, TOK_A_MUL, TOK_A_DIV, TOK_A_MOD,
   TOK_A_AND, TOK_A_OR, TOK_A_XOR, TOK_A_SHL, TOK_A_SAR,
   TOK_CCHAR, TOK_LCHAR, TOK_CINT, TOK_CUINT, TOK_CLLONG, TOK_CULLONG,
-  TOK_STR, TOK_LSTR, TOK_CDOUBLE, TOK_CLDOUBLE, TOK_PPNUM, TOK_PPSTR,
+  TOK_STR, TOK_LSTR, TOK_CFLOAT, TOK_CDOUBLE, TOK_CLDOUBLE, TOK_PPNUM, TOK_PPSTR,
   TOK_EOF, TOK_LINEFEED, TOK_IDENT, SYM_FIELD, TOK_PPJOIN,
   MACRO_OBJ, MACRO_FUNC, MACRO_JOIN, TOK_TWO_CHARS, IDENT_NAMES,
   TOK_DEFINE, TOK_INCLUDE, TOK_INCLUDE_NEXT, TOK_IFDEF, TOK_IFNDEF, TOK_ELIF,
@@ -267,6 +267,7 @@ export class Cpp {
         for (const ch of /** @type {string} */ (cv)) out += addChar(ch.codePointAt(0));
         return `${out}"`;
       }
+      case TOK_CFLOAT: return '<float>';
       case TOK_CDOUBLE: return '<double>';
       case TOK_CLDOUBLE: return '<long double>';
       case TOK_LT: return '<';
@@ -1962,13 +1963,30 @@ function utf8Of(cp) {
 }
 
 /**
- * `parse_number`（`tccpp.c:2243`）的整数部分。回 `{tok, val}`，val 是 bigint。
+ * 十六进制浮点字面量（`0x1.8p3`，C99 6.4.4.2）。`Number()` 不认它，所以自己算：
+ * 尾数按 16 进制读、小数点后每一位是 4 个二进制位，指数是**二**的幂。
+ * 分开算尾数与 2 的幂再乘，于是只有最后那一次乘法舍入 —— 与 strtod 的结果一致。
+ */
+function hexFloatValue(text) {
+  const m = /^0[xX]([0-9a-fA-F]*)(?:[.]([0-9a-fA-F]*))?(?:[pP]([-+]?[0-9]+))?$/.exec(text);
+  if (m === null) return null;
+  const int = m[1] === undefined ? '' : m[1];
+  const frac = m[2] === undefined ? '' : m[2];
+  if (int === '' && frac === '') return null;
+  let mant = 0;
+  for (const c of int + frac) mant = mant * 16 + parseInt(c, 16);
+  const exp = (m[3] === undefined ? 0 : Number(m[3])) - frac.length * 4;
+  return mant * Math.pow(2, exp);
+}
+
+/**
+ * `parse_number`（`tccpp.c:2243`）。回 `{tok, val}`：整数的 val 是 bigint，
+ * 浮点的 val 是宿主的 double（第六刀第十四片起真的算值 —— 它要进 MIR 的常量池）。
  *
- * 浮点回 `TOK_CDOUBLE`（值不算）：这一刀里它唯一的用处是让 `#if 1.0` 报
- * 「invalid constant in preprocessor expression」—— 与 tcc 同一句。真正要算浮点值
- * 是第六刀的事（那时它要进 MIR 的常量池）。
+ * `#if` 里浮点照旧是错（`invalid constant in preprocessor expression`，与 tcc 同一句）：
+ * 那一格看的是记号号，不是值，所以算不算值都一样。
  *
- * 类型只分「有没有符号」两档，不区分 int / long / long long：`#if` 的算术全在
+ * 整数的类型只分「有没有符号」两档，不区分 int / long / long long：`#if` 的算术全在
  * intmax_t 上做，宽度不可观测，**只有无符号性可观测**（它改比较与除法）。
  */
 export function parseNumber(text) {
@@ -2001,7 +2019,21 @@ export function parseNumber(text) {
     if (!/^([0-9]*[.]?[0-9]*([eE][-+]?[0-9]+)?|0[xX][0-9a-fA-F]*[.]?[0-9a-fA-F]*([pP][-+]?[0-9]+)?)[fFlL]*$/.test(text)) {
       return null;
     }
-    return { tok: TOK_CDOUBLE, val: 0n };
+    /* 后缀（C11 6.4.4.2）：`f` 是 float、`l` 是 long double、没有就是 double。
+     * 只许一个 —— `1.0fl` 不合法。 */
+    const sfx = /[fFlL]*$/.exec(text)[0];
+    if (sfx.length > 1) return null;
+    const num = text.slice(0, text.length - sfx.length);
+    const val = base === 16 ? hexFloatValue(num) : Number(num);
+    if (val === null || Number.isNaN(val)) return null;
+    const c = sfx.toLowerCase();
+    return {
+      tok: c === 'f' ? TOK_CFLOAT : c === 'l' ? TOK_CLDOUBLE : TOK_CDOUBLE,
+      /* f32 的字面量要**先舍到单精度**：`0.1f` 在 C 里是那个单精度数，
+       * 而 `Number('0.1')` 是双精度的 0.1，两者不等。少这一次 fround，
+       * `float x = 0.1f; x == 0.1f` 在解释器里会判假。 */
+      val: c === 'f' ? Math.fround(val) : val,
+    };
   }
   if (body === '') return null;
 

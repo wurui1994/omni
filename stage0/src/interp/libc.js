@@ -79,8 +79,75 @@ function padTo(body, sign, spec) {
 }
 
 /**
+ * 浮点转换的指数部分：`e+05` 那一段。C 要求**至少两位**（C11 7.21.6.1 第 8 段），
+ * 而 JS 的 `toExponential` 印的是一位（`1.5e+0`）—— 差的就是这个补零。
+ */
+function expText(e, upper) {
+  const s = (e < 0 ? -e : e).toString(10);
+  return (upper ? 'E' : 'e') + (e < 0 ? '-' : '+') + (s.length < 2 ? '0' + s : s);
+}
+
+/** 去掉小数部分末尾的零，全没了就连小数点一起去掉（`%g` 的规则）。 */
+function trimZeros(s) {
+  if (s.indexOf('.') < 0) return s;
+  let t = s;
+  while (t.length > 0 && t[t.length - 1] === '0') t = t.slice(0, t.length - 1);
+  if (t[t.length - 1] === '.') t = t.slice(0, t.length - 1);
+  return t;
+}
+
+/**
+ * `%f` / `%e` / `%g` 的**数字部分**（不带符号，符号由 `padTo` 那一步加）。
+ *
+ * 骨架借宿主的 `toFixed` / `toExponential`：它们的舍入是「在这个 double 的**精确**
+ * 十进制值上取最近」，与 C 的 printf 同一件事。三处要自己补：
+ *   1. 指数至少两位（`expText`）；
+ *   2. `%g` 挑形态的规则（指数 < -4 或 >= 精度走 `%e`，否则走 `%f`），
+ *      而且精度是**有效数字**位数，不是小数位数；
+ *   3. `%g` 去掉末尾的零（`#` 标志时不去）。
+ *
+ * 有一格与 C 有分歧、而且**不打算**追平：正好落在两个十进制数正中间的那些值
+ * （`%.2f` 的 0.125）。C 按当前舍入模式（默认「向偶数」）给 0.12，宿主的 `toFixed`
+ * 给 0.13。这种值要求「double 的精确值在切点上恰好终止」，测试里避开它；
+ * 真要追平得自己写一份任意精度的十进制展开，那是浮点自己那一片的事。
+ */
+function fText(x, conv, spec) {
+  const upper = conv === 'F' || conv === 'E' || conv === 'G';
+  const kind = conv === 'F' ? 'f' : (conv === 'E' ? 'e' : (conv === 'G' ? 'g' : conv));
+  const prec = spec.prec < 0 ? 6 : spec.prec;
+  const v = x < 0 ? -x : x;
+  if (kind === 'f') {
+    let s = v.toFixed(prec);
+    if (spec.alt && prec === 0) s += '.';
+    return s;
+  }
+  if (kind === 'e') {
+    const t = v.toExponential(prec);
+    const at = t.indexOf('e');
+    let mant = t.slice(0, at);
+    if (spec.alt && prec === 0) mant += '.';
+    return mant + expText(Number(t.slice(at + 1)), upper);
+  }
+  // `%g`：精度 0 当 1（C11 7.21.6.1 第 8 段）
+  const p = prec === 0 ? 1 : prec;
+  /* 指数要在**已经舍到 p 位有效数字之后**再读 —— 9.99 按 2 位有效数字是 1.0e+01，
+   * 指数从 0 变成了 1，而 `%g` 挑形态看的正是这个变化之后的指数。 */
+  const t = v.toExponential(p - 1);
+  const e = Number(t.slice(t.indexOf('e') + 1));
+  if (e < -4 || e >= p) {
+    const at = t.indexOf('e');
+    let mant = t.slice(0, at);
+    if (!spec.alt) mant = trimZeros(mant);
+    return mant + expText(e, upper);
+  }
+  const s = v.toFixed(p - 1 - e);
+  return spec.alt ? s : trimZeros(s);
+}
+
+/**
  * `printf` 的格式化。`fmt` 是格式串（已经从内存里读出来），`args` 是宿主值的数组，
  * `at` 是下一个要取的实参下标。回格式化好的字符串。
+
  *
  * 变参那一侧的类型信息**只在格式串里**（C 就是这么设计的），所以这儿是唯一知道
  * 「第三个实参是个指针还是个整数」的地方 —— 与真的 libc 处境完全一样。
@@ -195,9 +262,42 @@ export function cFormat(fmt, args, at) {
       out += padTo('0x' + uText(BigInt(nextArg()), 64, 16, false), '', spec);
       continue;
     }
-    if (conv === 'f' || conv === 'e' || conv === 'E' || conv === 'g' || conv === 'G'
-      || conv === 'a' || conv === 'A') {
-      throw new Error(`第六刀：printf 的浮点转换 '%${conv}' 还没到`);
+    if (conv === 'f' || conv === 'F' || conv === 'e' || conv === 'E'
+      || conv === 'g' || conv === 'G') {
+      /* 变参里的浮点已经被默认实参提升拉成 double（`float` 也是），所以宿主这边
+       * 拿到的就是一个 number。`Number(...)` 那一步是为了 `%f` 收到一个整数实参时
+       * 不静悄悄印成 NaN —— 那在 C 里是未定义行为，但印一个数比印 NaN 好查。 */
+      const x = Number(nextArg());
+      if (!Number.isFinite(x)) {
+        /* `inf` / `nan`：宽度照用，但**不补零**（C11 7.21.6.1 第 8 段最后一句）。
+         * 大写的转换印大写。 */
+        spec.numeric = false;
+        const body = Number.isNaN(x) ? 'nan' : 'inf';
+        const up = conv === 'F' || conv === 'E' || conv === 'G';
+        const sign = x < 0 ? '-' : (spec.plus ? '+' : (spec.space ? ' ' : ''));
+        out += padTo(up ? body.toUpperCase() : body, sign, spec);
+        continue;
+      }
+      /* 负号看的是 `x < 0` 之外还有 `-0.0`：C 印 `-0.000000`，而 `-0 < 0` 是假。 */
+      const neg = x < 0 || Object.is(x, -0);
+      /* 浮点这一格的「精度」已经在 `fText` 里用掉了（小数位数 / 有效数字），
+       * 不能再让 `padTo` 拿它去补前导零 —— 所以按非数字对待。 */
+      spec.numeric = false;
+      const body = fText(x, conv, spec);
+      const sign = neg ? '-' : (spec.plus ? '+' : (spec.space ? ' ' : ''));
+      if (spec.zero && !spec.left) {
+        /* `%08.2f` 的零补在**符号之后**，而 `padTo` 的补零那一支被上面关掉了，
+         * 所以这一格自己补 —— 数字部分补零是安全的（它已经有小数点了）。 */
+        let n = spec.width - sign.length - body.length;
+        if (n < 0) n = 0;
+        out += sign + '0'.repeat(n) + body;
+        continue;
+      }
+      out += padTo(body, sign, spec);
+      continue;
+    }
+    if (conv === 'a' || conv === 'A') {
+      throw new Error(`第六刀：printf 的十六进制浮点 '%${conv}' 还没到`);
     }
     throw new Error(`printf: 不认识的转换 '%${conv}'`);
   }

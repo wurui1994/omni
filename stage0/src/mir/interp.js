@@ -38,7 +38,7 @@ import {
   OP, OP_NAMES, REF_NONE, REF_BIAS, isConstRef, typeKind, typeLanes,
   T_VOID, T_I64, T_F64, T_STR, T_DYN, T_PTR, T_TPTR, T_I32, T_F32,
   MLOAD_KINDS, MSTORE_KINDS, memKindNo, memOff,
-  CVT_I2F, CVT_BOX, CVT_U2F, CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16, CVT_FCVT,
+  CVT_I2F, CVT_F2I, CVT_BOX, CVT_U2F, CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16, CVT_FCVT,
   fnPtrNo,
 } from './ir.js';
 
@@ -472,13 +472,32 @@ class MirInterp {
       }
       case OP.CVT: {
         const v = rd(f.a[i]);
-        if (x === CVT_I2F) return (F) => { F.v[i] = Number(v(F)); return next; };
+        /* 整数 -> 浮点。目标是 f32 就要**真的舍到单精度** —— 少这一次 fround，
+         * `(float)16777217` 在解释器里会保住那个 1，而在真的 f32 上它舍成 16777216。 */
+        if (x === CVT_I2F) {
+          if (t === T_F32) return (F) => { F.v[i] = Math.fround(Number(v(F))); return next; };
+          return (F) => { F.v[i] = Number(v(F)); return next; };
+        }
         // 位当无符号 64 位读再转（第六十一刀）。`BigInt.asUintN` 现在在闭 ABI 里了
         // （ADR-0011 决策 19），所以直接用它。从前那句 `u < 0 ? u + 2^64 : u` 靠的是
         // **无界** BigInt，而这个值域里 int 就是 int64 —— 那个字面量连落点都没有，
         // C 后端会发出一个 int64 装不下的整数常量，clang 当场拒收。
         if (x === CVT_U2F) {
+          if (t === T_F32) {
+            return (F) => { F.v[i] = Math.fround(Number(BigInt.asUintN(64, v(F)))); return next; };
+          }
           return (F) => { F.v[i] = Number(BigInt.asUintN(64, v(F))); return next; };
+        }
+        /* 浮点 -> 整数：**朝零截尾**（C11 6.3.1.4 第 1 段）。装不下（含 NaN/无穷）在 C 里
+         * 是未定义行为，这里收成 0 而不是抛错 —— 抛错会让「UB」变成「一定崩」，
+         * 那是另一种语义，而且两条腿不可能一致（原生那边是随便一个值）。 */
+        if (x === CVT_F2I) {
+          const bits = t === T_I32 ? 32 : 64;
+          return (F) => {
+            const d = Math.trunc(v(F));
+            F.v[i] = Number.isFinite(d) ? BigInt.asIntN(bits, BigInt(d)) : 0n;
+            return next;
+          };
         }
         // 装箱是恒等：dynamic 就是原生值（ADR-0006 第 2 节）。C 后端那边它是打标签，
         // 所以指令留着 —— 「哪里发生装箱」是后端要知道的事实。
