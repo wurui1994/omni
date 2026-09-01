@@ -645,10 +645,20 @@ export class CGen {  /**
     /* C 有**四个独立的名字空间**（C11 6.2.3）：普通标识符、struct/union/enum 的 tag、
      * 成员名、语句标签。所以 `struct S { int S; } S;` 三个 S 互不相干。tag 这一个
      * 必须与 typedefs/gvars 分开存 —— 合到一起的话上面那行会互相覆盖。 */
-    /** @type {Map<string,object>} `struct S` / `union U` / `enum E` 的 tag */
+    /** @type {Map<string,object>} `struct S` / `union U` / `enum E` 的 tag（文件作用域） */
     this.tags = new Map();
+    /* tag 也是**分作用域**的（C11 6.2.1 第 7 段：tag 的作用域就是那个块），而且
+     * 这一条对我们尤其硬：函数体要走两遍（`genFuncBody`），块里定义的 `struct S {…}`
+     * 第二遍会再看见一次 —— 不分作用域的话第二遍必然报「redefinition」。
+     * 最外一层就是 `this.tags` 自己，进块推一层、出块弹掉，与 `this.scopes` 同步。 */
+    /** @type {Map<string,object>[]} tag 的作用域栈，`[0]` 是文件作用域 */
+    this.tagStack = [this.tags];
     /** @type {Map<string,{ty:object,val:bigint}>} 枚举常量（它们是**普通标识符**） */
     this.enumConsts = new Map();
+    /* 枚举常量也分作用域 —— 它们是普通标识符，块里的 `enum {E_IN = 5}` 出了块就没了，
+     * 而且与 tag 同理：函数体走两遍，第二遍会再登记一次。 */
+    /** @type {Map<string,{ty:object,val:bigint}>[]} 枚举常量的作用域栈 */
+    this.ecStack = [this.enumConsts];
     /** @type {{left:number}[]} 正在解析的 switch（嵌套时是一叠），见 `switchStmt` */
     this.swStack = [];
 
@@ -1963,7 +1973,7 @@ export class CGen {  /**
       if (local !== null) return this.postfix(this.entryLval(name, local));
       /* 枚举常量是**普通标识符**，所以查在这一格：局部量之后（局部量能遮蔽它），
        * 全局量之前。它不是左值 —— `A = 1` 该报错，而 `sVal` 天然不是左值。 */
-      const ec = this.enumConsts.get(name);
+      const ec = this.ecLookup(name);
       if (ec !== undefined) {
         return this.postfix(sVal(ec.ty, this.konst(ec.ty, ec.val)));
       }
@@ -2644,17 +2654,17 @@ export class CGen {  /**
       }
       this.skip(RPAR);
       this.open(OP.IF, 'if', c);
-      this.scopes.push(new Map());
+      this.pushScope();
       this.block();
-      this.scopes.pop();
+      this.popScope();
       /* then 那一半读完了 —— 这儿正是 `thenHi` 的定义：编号到此为止的都在 then 里。 */
       if (this.pass1) r.thenHi = this.labelCount;
       if (this.tok === TOK_ELSE) {
         this.next();
         this.elseHalf();
-        this.scopes.push(new Map());
+        this.pushScope();
         this.block();
-        this.scopes.pop();
+        this.popScope();
       }
       this.close();
       return;
@@ -2674,9 +2684,9 @@ export class CGen {  /**
       const nc = this.f.emit(OP.NOT, T_BOOL, c, REF_NONE, 0);
       this.f.emit(OP.BRIF, T_VOID, nc, REF_NONE, this.levelOf('break'));
       if (skip) this.close();
-      this.scopes.push(new Map());
+      this.pushScope();
       this.block();
-      this.scopes.pop();
+      this.popScope();
       this.f.emit(OP.BR, T_VOID, REF_NONE, REF_NONE, this.levelOf('continue'));
       this.close();
       this.close();
@@ -2694,7 +2704,7 @@ export class CGen {  /**
       this.pendingSwitch = null;
       const d = this.reentry(r) ? this.openSegs(r, sw) : null;
       if (sw !== null && d === null) this.err('internal: switch 的段界没接上');
-      this.scopes.push(new Map());
+      this.pushScope();
       /* tcc 的复合语句循环（`tccgen.c:7243-7248`）：先试声明，不是声明才当语句。
        * 「声明和语句可以交替出现」（C99）就是这个循环的形状带来的。 */
       while (this.tok !== RBRACE) {
@@ -2705,7 +2715,7 @@ export class CGen {  /**
         }
       }
       this.next();
-      this.scopes.pop();
+      this.popScope();
       if (d !== null) this.closeSegs(d);
       return;
     }
@@ -2782,9 +2792,9 @@ export class CGen {  /**
       this.open(OP.BLOCK, 'break', REF_NONE);
       this.open(OP.LOOP, 'loop', REF_NONE);
       this.open(OP.BLOCK, 'continue', REF_NONE);
-      this.scopes.push(new Map());
+      this.pushScope();
       this.block();
-      this.scopes.pop();
+      this.popScope();
       this.close();
       this.skip(TOK_WHILE);
       this.skip(LPAR);
@@ -3323,7 +3333,7 @@ export class CGen {  /**
     const f = this.f;
     this.next();
     this.skip(LPAR);
-    this.scopes.push(new Map());
+    this.pushScope();
     this.open(OP.BLOCK, 'break', REF_NONE);
 
     /* 里面有标签：被重新进入时初始化式与测条件都要**跳过**。初始化式那一跳在循环
@@ -3358,16 +3368,16 @@ export class CGen {  /**
     this.skip(RPAR);
 
     this.open(OP.BLOCK, 'continue', REF_NONE);
-    this.scopes.push(new Map());
+    this.pushScope();
     this.block();
-    this.scopes.pop();
+    this.popScope();
     this.close();
 
     if (stepStr !== null) this.replayStep(stepStr);
     f.emit(OP.BR, T_VOID, REF_NONE, REF_NONE, this.levelOf('loop'));
     this.close();
     this.close();
-    this.scopes.pop();
+    this.popScope();
   }
 
   /** 把收起来的步进式放回来解析一遍，然后把当前记号还原。 */
@@ -3421,12 +3431,18 @@ export class CGen {  /**
    * 对象**里填成员，`p` 手上那份 CType 自动变完整。换成「定义时新建一个对象」就得
    * 回头去修所有已经发出去的类型 —— 一遍过时那是做不到的。
    */
-  tagOf(kind, name) {
+  tagOf(kind, name, defining) {
     if (name !== null) {
-      const hit = this.tags.get(name);
-      if (hit !== undefined) {
-        if (hit.kind !== kind) this.err(`'${name}' defined as wrong kind of tag`);
-        return hit;
+      /* 定义（后面就是 `{`）只看**当前**这一层：外层有同名的 tag 也照样新建一个，
+       * 那是 C 的遮蔽（`struct S` 在文件作用域，函数里再 `struct S {…}` 是两个类型）。
+       * 引用则从里往外找 —— 这就是「作用域」这两个字的全部内容。 */
+      const from = defining ? this.tagStack.length - 1 : 0;
+      for (let i = this.tagStack.length - 1; i >= from; i--) {
+        const hit = this.tagStack[i].get(name);
+        if (hit !== undefined) {
+          if (hit.kind !== kind) this.err(`'${name}' defined as wrong kind of tag`);
+          return hit;
+        }
       }
     }
     const info = {
@@ -3434,8 +3450,36 @@ export class CGen {  /**
       anon: name === null,   // 没有 tag —— 「匿名成员」那一条要问它
       fields: null, size: 0, align: 1,
     };
-    if (name !== null) this.tags.set(name, info);
+    if (name !== null) this.tagStack[this.tagStack.length - 1].set(name, info);
     return info;
+  }
+
+  /** 进一层块：普通标识符、tag、枚举常量各推一层。三个必须同步，所以只有这一个入口。 */
+  pushScope() {
+    this.scopes.push(new Map());
+    this.tagStack.push(new Map());
+    this.ecStack.push(new Map());
+  }
+
+  /** 出一层块。 */
+  popScope() {
+    this.scopes.pop();
+    this.tagStack.pop();
+    this.ecStack.pop();
+  }
+
+  /** 当前这一层的枚举常量表（登记与「重复的枚举常量」都只看这一层）。 */
+  ecScope() {
+    return this.ecStack[this.ecStack.length - 1];
+  }
+
+  /** 从里往外找一个枚举常量。 */
+  ecLookup(name) {
+    for (let i = this.ecStack.length - 1; i >= 0; i--) {
+      const hit = this.ecStack[i].get(name);
+      if (hit !== undefined) return hit;
+    }
+    return undefined;
   }
 
   /**
@@ -3449,7 +3493,7 @@ export class CGen {  /**
   structDecl(union) {
     const kind = union ? 'union' : 'struct';
     const name = this.tok >= TOK_UIDENT ? this.identName() : null;
-    const info = this.tagOf(kind, name);
+    const info = this.tagOf(kind, name, this.tok === LBRACE);
     if (this.tok !== LBRACE) {
       /* 只是引用（`struct S x;` / `struct S *p;`）。不完整也照样给出去 —— 指针不需要
        * 大小，而「拿不完整类型当变量」由 declareLocal / declareGlobal 抓。 */
@@ -3698,7 +3742,7 @@ export class CGen {  /**
    */
   enumDecl() {
     const name = this.tok >= TOK_UIDENT ? this.identName() : null;
-    const info = this.tagOf('enum', name);
+    const info = this.tagOf('enum', name, this.tok === LBRACE);
     const ty = mkEnum(info);
     if (this.tok !== LBRACE) {
       if (name === null) this.err("'enum' has no tag and no enumerator list");
@@ -3713,7 +3757,7 @@ export class CGen {  /**
     while (this.tok !== RBRACE) {
       if (this.tok === TOK_EOF) this.err("'}' expected");
       const en = this.identName();
-      if (this.enumConsts.has(en)) this.err(`redefinition of enumerator '${en}'`);
+      if (this.ecScope().has(en)) this.err(`redefinition of enumerator '${en}'`);
       if (this.tok === ASSIGN) {
         this.next();
         val = this.constExpr();
@@ -3721,7 +3765,7 @@ export class CGen {  /**
       /* 收成 32 位有符号：枚举常量的类型是 `int`，而 `konst` 要的是规范形。
        * 不收的话 `enum {BIG = 0x80000000}` 会带着一个 33 位的数走下去。 */
       val = BigInt.asIntN(32, val);
-      this.enumConsts.set(en, { ty, val });
+      this.ecScope().set(en, { ty, val });
       names.push(en);
       val = val + 1n;
       if (this.tok !== COMMA) break;
@@ -4317,7 +4361,7 @@ export class CGen {  /**
       const nm = this.cpp.tokStr(t, null);
       /* 枚举常量。`enum {A, B = A + 2}` 里的 `A` 走这一格 —— 也就是说 enumDecl 一边
        * 登记一边求值这件事在这里闭环。查不到就落到下面报「要一个常量表达式」。 */
-      const ec = this.enumConsts.get(nm);
+      const ec = this.ecLookup(nm);
       if (ec !== undefined) {
         this.next();
         return ec.val;
@@ -4693,6 +4737,10 @@ export class CGen {  /**
     this.funcRet = ret;
     this.funcName = name;
     this.scopes = [new Map()];
+    /* 函数体这一层的 tag 也要新的一份：两遍走同一串记号，第二遍必须重新认识块里
+     * 定义的那些 `struct S {…}` —— 第一遍留下的那份成员已经填好了。 */
+    this.tagStack = [this.tags, new Map()];
+    this.ecStack = [this.enumConsts, new Map()];
     this.regions = [];
     this.swStack = [];
     /* 两遍各自从 0 数起，于是同一条语句在两遍里是同一个序号（`block` 那个包装）。 */
@@ -4804,6 +4852,10 @@ export class CGen {  /**
     else if (isStruct(ret.t)) f.emit(OP.RET, T_I64, this.sretRef, REF_NONE, 0);
     else f.emit(OP.RET, f.ret, this.konst(ret, 0), REF_NONE, 0);
     this.f = outer;
+    /* 回到文件作用域：tag 与枚举常量的栈要收回去，不然函数**之后**的
+     * `struct rec { … };` 会落在这个函数体那一层里，下一个函数就看不见它了。 */
+    this.tagStack = [this.tags];
+    this.ecStack = [this.enumConsts];
     /* tcc 在 `gen_function` 之后把 `funcname` 收回 `""`（`tccgen.c:8610`）：
      * 函数外面的 `__func__` 于是是空串，而不是上一个函数的名字。 */
     this.funcName = '';

@@ -628,8 +628,10 @@ function scanReal(s) {
       /* `p` 后面没有数字：指数那一段整个不算（C11 那条「最长的合法前缀」）。 */
       if (ed > 0) { exp = esign * n; j = k; }
     }
-    /* 尾数先转 double（超过 53 位时宿主按就近舍入），再乘 2 的幂 —— 那一步是精确的。 */
-    const v = Number(mant) * Math.pow(2, exp - 4 * frac);
+    /* 尾数先转 double（超过 53 位时宿主按就近舍入），再乘 2 的幂 —— 那一步是精确的。
+     * 缩放走 `ldexpReal`，不是 `Math.pow(2, e)`：`e` 到了 -1075 那个幂自己就是 0，
+     * 于是 `0x88p-1030` 这种**次正规**的答案会被算成 0（本机 `strtod` 给的不是 0）。 */
+    const v = ldexpReal(Number(mant), exp - 4 * frac);
     return { v: neg ? -v : v, used: j };
   }
 
@@ -641,8 +643,30 @@ function scanReal(s) {
   return { v: neg ? -v : v, used: i + txt.length };
 }
 
-/** 一个十六进制数字的值，不是就回 -1。 */
-function hexVal(ch) {
+/**
+ * `x * 2**e`，分步做（第八刀第二十六片）。
+ *
+ * 一步到位的 `x * Math.pow(2, e)` 在两头都会坏掉：`e` 大于 1023 时那个幂先变
+ * `Infinity`，小于 -1074 时先变 0，于是本该是**次正规**的答案成了 0 或者 inf。
+ * 分步走每一步都留在正规数里（乘以 2**-1022 是精确的），只有最后那一步可能落进
+ * 次正规区 —— 也就只舍入一次，与本机的 `ldexp` 一样。
+ */
+function ldexpReal(x, e) {
+  if (x === 0 || !Number.isFinite(x)) return x;
+  while (e > 1023) {
+    x *= 2 ** 1023;
+    e -= 1023;
+    if (!Number.isFinite(x)) return x;
+  }
+  while (e < -1022) {
+    x *= 2 ** -1022;
+    e += 1022;
+    if (x === 0) return x;
+  }
+  return x * 2 ** e;
+}
+
+/** 一个十六进制数字的值，不是就回 -1。 */function hexVal(ch) {
   if (ch === undefined) return -1;
   const c = ch.charCodeAt(0);
   if (c >= 48 && c <= 57) return c - 48;
@@ -1851,6 +1875,13 @@ const LIBC = {
     putEnd(BigInt(a[1]), a[0], r.used);
     return Math.fround(r.v);
   },
+  /* `ldexp` 一族（第八刀第二十六片）。tinycc 读十六进制浮点字面量时用它把尾数缩放
+   * 到位（`tccpp.c:2367`：`d = ldexpl(d, exp_val - frac_bits)`），所以编 tcctest.c
+   * 这种带 `0x0.88p-1022` 的源码非它不可。第二个实参是 `int`，第一个与回值是浮点，
+   * 到解释器这一层就是宿主的 number。 */
+  ldexp: (a) => ldexpReal(Number(a[0]), Number(BigInt.asIntN(32, BigInt(a[1])))),
+  ldexpl: (a) => ldexpReal(Number(a[0]), Number(BigInt.asIntN(32, BigInt(a[1])))),
+  ldexpf: (a) => Math.fround(ldexpReal(Number(a[0]), Number(BigInt.asIntN(32, BigInt(a[1]))))),
   strtol: (a) => {
     const s = readCStr(a[0]);
     const r = scanInt(s, Number(BigInt(a[2])));
