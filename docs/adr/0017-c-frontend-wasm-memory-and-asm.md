@@ -288,12 +288,12 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
 8. **C 的库面**：`libtcc1` 的等价物（软除法/浮点辅助/`alloca`/`setjmp`）与 libc 的接法。
    原先写的是"先转手宿主的 libc，走既有的 extern-C FFI"，第五片证明**转手不成立**
    （指针是自家线性内存里的偏移，宿主 libc 读不到），改成一个读写线性内存的宿主模块，
-   见第五片的落地节。**前五片已落地**（预定义的宏 —— 目标的自述，五十条，
+   见第五片的落地节。**前六片已落地**（预定义的宏 —— 目标的自述，五十条，
    顺序与值都对着 `tcc -dM -E` 抄；自带的系统头目录 + 编译器必须自己给的那四份头；
    `stdio.h`/`stdlib.h`/`string.h` 的最小子集 —— libc 的自述；
    `strtol` 一族与 `strncpy`/`strchr`/`strstr` 那几条；
-   `qsort`/`bsearch` —— libc 回头调 MIR 的那扇门），
-   见下面的第八刀第一到五片节。
+   `qsort`/`bsearch` —— libc 回头调 MIR 的那扇门；`vprintf` 一族），
+   见下面的第八刀第一到六片节。
 
 最后三步是**后端**：
 
@@ -2936,6 +2936,58 @@ C 只要求「排好」（C11 7.22.5.2），不要求稳定、也不要求 O(n l
 （要真的文件描述符与宿主 IO，是这一刀里最大的一格）。
 
 <!-- 第八刀第五片-END -->
+
+
+## 落地：第八刀第六片 —— `vprintf` 一族
+
+这一片几乎是白送的，而**为什么**白送是这一节唯一值得写的东西。
+
+第十六片定的变参 ABI 是：变参函数的签名里多一个隐藏的最后一个形参，指向调用方帧上的
+一块「变参区」（一格 8 字节）。`va_list` 就是那个指针（`tccgen.js` 把
+`__builtin_va_list` 定成 `void *`），`va_arg` 就是「按要的类型读一格、加 8」。
+而 `cFormat` 拿的第二个实参**正是那个地址**。
+
+于是 `vprintf(fmt, ap)` 的实现是把 `ap` 原样交给 `cFormat` —— 与 `printf` 那条
+一个字不差，区别只在地址从哪儿来：`printf` 那条是编译器在调用点摊出来的变参区，
+这条是调用方传进来的一个指针。**同一个东西的两个名字**。
+
+这不是巧合，是第十六片选那个 ABI 时就想要的性质：真的 ABI 里 `va_list` 也是「指向
+实参区的游标」，所以照着做的结果自然对上。
+
+`vsprintf` / `vsnprintf` 同理，`vsnprintf` 照旧回「本来会写多少」。
+
+### 量出来的一格：`<stdio.h>` 不能替你带 `<stdarg.h>`
+
+我们的 `stdio.h` 里 `#include <stdarg.h>`（要 `va_list` 才能声明 `vprintf`），
+所以在我们这一侧 `va_start` 那几个宏顺带就有了。macOS 真正的 `stdio.h` 只带**类型**
+（`__darwin_va_list`）不带宏 —— 于是只写 `#include <stdio.h>` 的代码在 tcc 那一侧
+报 `implicit declaration of function 'va_start'` 加三条 `unresolved reference`。
+
+这不是我们的 bug（C 标准把那几个宏放在 `<stdarg.h>` 里，用了就该包），
+但它是一个**真实存在的分岔**：我们更宽松。用例照标准写 —— 显式包
+`<stdarg.h>` —— 于是它同时在两边成立。
+
+### 量出来的数
+
+- `tests/c/gen/32-vprintf.c`：退出码 9 + 9 行 stdout，与 `tcc -run` 逐字节相同。
+  钉了六格：包一层 `vprintf`、包一层 `vsnprintf`（正常/截断/`cap = 0` 三种）、
+  `va_copy` 之后「先量长度再写」（`vsnprintf(NULL, 0, …)` 那个惯用法）、
+  `ap` **再往下传一层**（`vprintf` 不是终点）、以及浮点与宽度/左对齐/正号
+  穿过去之后还对。
+- `tests/c/run.js`：**59 passed, 0 failed**。`tests/js-roundtrip/run.js`：110 passed。
+- 边界钉子仍是 6 条。
+
+### 下一片
+
+第八刀第七片：**`<errno.h>` 与 `<ctype.h>`**。前者是第四片欠下的（`strtol` 的溢出
+那一格在等它），要一个「宿主与 C 都看得见」的变量 —— 也就是线性内存上的一格，
+加一条取它地址的 libc 入口（glibc 的 `__errno_location` 就是这个形状）。
+后者是十几个一行函数，但它有一处容易错：`isupper` 那些收的是 `int` 而且允许 `EOF`。
+
+再往后是这一刀最大的一格：`FILE` / `fopen` / `fread` / `fprintf` —— 要真的文件
+描述符与宿主 IO。tinycc 的源码从命令行读文件、往 stderr 写诊断，绕不开它。
+
+<!-- 第八刀第六片-END -->
 
 
 

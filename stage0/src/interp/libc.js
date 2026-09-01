@@ -669,6 +669,16 @@ const LIBC = {
     printRaw(s);
     return BigInt(s.length);
   },
+  /* `v` 那一族（第八刀第六片）：`va_list` 在这个目标上**就是**变参区的地址
+   * （`tccgen.js` 把 `__builtin_va_list` 定成 `void *`），而 `cFormat` 拿的正是
+   * 那个地址 —— 所以这三条与上面三条**共用同一个游标**，区别只在实参从哪儿来：
+   * `printf` 那条是编译器在调用点摊出来的变参区，这条是调用方传进来的一个指针。
+   * 也就是说 `printf(fmt, ...)` 与 `vprintf(fmt, ap)` 在这一层是同一件事。 */
+  vprintf: (a) => {
+    const s = cFormat(readCStr(a[0]), a[1]);
+    printRaw(s);
+    return BigInt(s.length);
+  },
   sprintf: (a) => {
     const s = cFormat(readCStr(a[1]), a[2]);
     return BigInt(writeCStr(a[0], s));
@@ -676,6 +686,13 @@ const LIBC = {
   snprintf: (a) => {
     /* 回的是「本来会写多少」，不是「实际写了多少」（C11 7.21.6.5）—— 这一格
      * 搞反的话「先量长度再分配」那种常见写法会静悄悄少一个字节。 */
+    const s = cFormat(readCStr(a[2]), a[3]);
+    const n = Number(BigInt(a[1]));
+    if (n > 0) writeCStr(a[0], s.slice(0, n - 1));
+    return BigInt(s.length);
+  },
+  vsprintf: (a) => BigInt(writeCStr(a[0], cFormat(readCStr(a[1]), a[2]))),
+  vsnprintf: (a) => {
     const s = cFormat(readCStr(a[2]), a[3]);
     const n = Number(BigInt(a[1]));
     if (n > 0) writeCStr(a[0], s.slice(0, n - 1));

@@ -21,15 +21,12 @@
  *   它们要真的文件描述符与宿主 IO，是另一片。现在的输出只有一条路：
  *   `printRaw` 写到进程的 stdout（对账的正是这一条）。
  * - **没有 `scanf` 一族**：读进来的方向一个字节都还没做。
- * - **没有 `vprintf` 一族**：要把 `va_list` 再往下传一层，而 `cFormat` 现在拿的是
- *   **变参区的地址**（第十六片的 ABI）。这两件事恰好是同一个东西 ——
- *   `va_list` 在这个目标上就是那个地址 —— 所以这一格是「接上去」而不是「做出来」，
- *   但它得连着 `vsnprintf` 一起量，独立一格。
  */
 #ifndef _STDIO_H
 #define _STDIO_H
 
 #include <stddef.h>
+#include <stdarg.h>
 
 #define EOF (-1)
 
@@ -38,5 +35,9 @@ int puts(const char *s);
 int printf(const char *fmt, ...);
 int sprintf(char *dst, const char *fmt, ...);
 int snprintf(char *dst, size_t n, const char *fmt, ...);
+
+int vprintf(const char *fmt, va_list ap);
+int vsprintf(char *dst, const char *fmt, va_list ap);
+int vsnprintf(char *dst, size_t n, const char *fmt, va_list ap);
 
 #endif /* _STDIO_H */
