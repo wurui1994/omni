@@ -68,7 +68,7 @@ import {
   TOK___VA_ARGS__, TOK___COUNTER__, TOK___HAS_INCLUDE, TOK___HAS_INCLUDE_NEXT,
   TOK_push_macro, TOK_pop_macro, TOK_once,
 } from './tcctok.js';
-import { PREDEFS } from './tccdefs.js';
+import { PREDEFS, PP_ONLY_DEFS, COMPILE_DEFS } from './tccdefs.js';
 
 const CH_EOF = -1;
 const SPC = 32; // ' '
@@ -1829,7 +1829,7 @@ export class Cpp {
    * 调用方随后自己叫一次 `next()`（tcc 也是这么排的：`parse_flags = …; next(); decl(…)`）。
    */
   startParse(filename, text) {
-    this.installPredefs(filename);
+    this.installPredefs(filename, false);
     this.file = new CFile(filename, text, null);
     this.file.ifdefBase = 0;
     this.parseFlags = PF_PREPROCESS | PF_TOK_NUM | PF_TOK_STR;
@@ -1853,11 +1853,16 @@ export class Cpp {
    * 谁来叫：**想让 `-D` 盖掉预定义的调用方自己先叫一次**（tcc 的顺序：预定义在前，
    * 命令行在后）。没叫过的话 `preprocessToText` / `startParse` 会补上 —— 于是
    * 「忘了装预定义」这种事不会悄悄发生，而 REPL 那一路也不必知道这回事。
+   *
+   * `forPP`：这一路是只预处理（`-E`）还是要编译。tcc 靠 `__TCC_PP__` 这一条区分，
+   * 而 tccdefs.h 里一大半（内建、`__uint128_t`）都在 `#ifndef __TCC_PP__` 里面 ——
+   * 也就是说**两条路装的预定义本来就不是同一份**。见 tccdefs.js 的三张表。
    */
-  installPredefs(baseFile) {
+  installPredefs(baseFile, forPP = true) {
     if (this.predefsDone) return;
     this.predefsDone = true;
     for (const [name, body] of PREDEFS) this.define(name, body);
+    for (const [name, body] of (forPP ? PP_ONLY_DEFS : COMPILE_DEFS)) this.define(name, body);
     this.define('__BASE_FILE__', `"${baseFile}"`);
   }
 }

@@ -288,7 +288,7 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
 8. **C 的库面**：`libtcc1` 的等价物（软除法/浮点辅助/`alloca`/`setjmp`）与 libc 的接法。
    原先写的是"先转手宿主的 libc，走既有的 extern-C FFI"，第五片证明**转手不成立**
    （指针是自家线性内存里的偏移，宿主 libc 读不到），改成一个读写线性内存的宿主模块，
-   见第五片的落地节。**前十五片已落地**（预定义的宏 —— 目标的自述，五十条，
+   见第五片的落地节。**前十六片已落地**（预定义的宏 —— 目标的自述，五十条，
    顺序与值都对着 `tcc -dM -E` 抄；自带的系统头目录 + 编译器必须自己给的那四份头；
    `stdio.h`/`stdlib.h`/`string.h` 的最小子集 —— libc 的自述；
    `strtol` 一族与 `strncpy`/`strchr`/`strstr` 那几条；
@@ -299,8 +299,9 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
    stdout 是字节不是字符 —— C 那条腿自己一扇门；
    `strerror` / `perror` —— 一张量出来的表 + 一号一格；
    `sscanf` / `vsscanf` / `fscanf` —— cFormat 的反向；
-   Duff's device —— 里层的 case 就是一个没有名字的标签），
-   见下面的第八刀第一到十五片节。
+   Duff's device —— 里层的 case 就是一个没有名字的标签；
+   真的 macOS 系统头 —— 预定义的宏本来就是两份，而没引用的声明不发桩），
+   见下面的第八刀第一到十六片节。
 
 最后三步是**后端**：
 
@@ -3688,6 +3689,86 @@ END t0   → state = id0; BR gotoloop
 之后：`struct-byval`（等真的后端）、`-dM`、路径 A 的 GLR 与路径 B 对账（第七步）。
 
 <!-- 第八刀第十五片-END -->
+
+## 落地：第八刀第十六片
+
+**真的 macOS 系统头。**`-I <SDK>/usr/include`，两条腿读**同一份** `/usr/include`。
+
+写在第十五片末尾的预判是「要 `#include_next` + `__asm("_name")` + 一整套
+`__attribute__`」。量下来只对了一半：`__attribute__` 与 `__asm` 改名确实是拦路的
+（第十六片的前半，见 tcctok.js 里新加的那些拼法与 `skipAttrs`/`skipAsmName`），
+而 `#include_next` 一次都没用上 —— macOS 那套头文件不靠它。真正没料到的是另外两件事。
+
+### 一：预定义的宏本来就是两份
+
+`tcc -dM -E` 量到的那 51 条**只是一半**。tccdefs.h 里有一道
+
+```c
+#ifndef __TCC_PP__      /* 只预处理时整段跳过 */
+    struct __uint128__ { char x[16]; } __attribute((__aligned__(16)));
+    #define __uint128_t struct __uint128__
+    #define __builtin_offsetof(type, field) ((__SIZE_TYPE__)&((type*)0)->field)
+    …
+#endif
+```
+
+而 `__TCC_PP__` 恰恰**只在 `-E` 那一路上定义**。也就是说：拿 `-dM -E` 当 oracle 量预
+定义，量到的永远是「只预处理」那一份；编译那一路要的那一半（内建 + `__uint128_t`）
+在那份输出里根本不出现。所以 tccdefs.js 从一张表变成三张：`PREDEFS`（两路共有）、
+`PP_ONLY_DEFS`（`__TCC_PP__` 一条）、`COMPILE_DEFS`（编译那一路），加一份
+`COMPILE_PREAMBLE`（真的声明）。
+
+`__uint128_t` 不是个可选项：`#include <stdlib.h>` 一路会带到
+`<mach/arm/_structs.h>`，那儿用它声明 NEON 的寄存器组 —— 不认它就编不了**任何**
+一份用系统头的 C。tcc 的换法是「拿一个同宽同对齐的类型顶着」，我们照抄。
+
+那份 preamble 是**主文件之前的一个独立单元**（`CGen.preamble`），不是拼在主文件
+前面 —— 拼上去主文件的行号就全错了，而行号是与 tcc 对账的一部分。
+
+### 二：没引用的声明不发桩
+
+第一次编成功之后撞上的是自家的边界消息：`第六刀：外部函数返回 struct 还没到`。
+源码里一个 struct 都没有 —— 是 `<stdlib.h>` 里的 `div()`。原来那条循环把**所有**
+「声明过但这个单元里没有函数体」的名字都发一个转发桩，而自带的头文件里只有几十个
+声明，SDK 那套是几百个，里面自然有 `div`/`imaxdiv`/`localeconv` 这种。
+
+所以函数符号多了一位 `used`（调用、取地址、当地址常量用 —— 三处置位），
+`unit()` 只给引用过的外部符号发桩。这一条与真的编译器一致（没引用的声明不产生任何
+符号引用），而且顺手把 `heapUsed`/`errnoUsed`/`strerrorUsed` 那三问也变准了：
+以前 `#include <stdlib.h>` 就算「用到堆」，现在得真的调 `malloc`。
+
+### 三：`extern` 可以不知道自己多大
+
+`extern char *sys_errlist[];`（`_stdio.h:473`）连着触发两条检查：先是
+「array size missing」（不完整的 extern 数组现在允许，尺寸记 0），再是
+`declareGlobal` 里那条「storage size isn't known」。后者放宽成**只拦非 extern** ——
+`extern` 只是「别处有」，尺寸不必现在知道；真用起来仍然会被「用过但没定义」拦住。
+
+### 量出来的数
+
+- `tests/c/sys/01-sdk-headers.c`：退出码 26 + 35 字节 stdout，与 `tcc -run` 逐字节
+  相同。它用的是 `malloc`/`free`/`strcpy`/`strlen`/`printf`/`sscanf`/`strerror`，
+  头文件全部来自 SDK。测试轴新加一组 `sys/`（`tests/c/run.js`）：`-I` 只给我们这一条
+  腿，tcc 自己就默认读那儿；`xcrun --show-sdk-path` 取不到就整组跳过。
+- `tests/c/run.js`：**69 passed, 0 failed**。`tests/run.js`：96 passed。
+- 边界钉子仍是 6 条。
+
+少了什么（都记在 tccdefs.js 里）：`__attribute__((aligned))` 是**吃掉**而不是实现，
+所以 `struct __uint128__` 的对齐是 1 而不是 16 —— 装着它的那些结构体尺寸会与 tcc
+不同（一个都还没用到）；`stdout`/`stderr` 在 SDK 里是 `extern FILE *__stdoutp`，
+那要「外部全局量」与 `FILE` 的真布局，所以 `sys/` 这一组还不碰流。
+
+### 下一片
+
+第八刀第十七片：**SDK 的 `stdout`**。`__stdoutp` 是一个外部的 `FILE *`，
+`putc` 是个碰 `FILE` 内部字段的宏 —— 也就是说这一片要的是「宿主给的全局量」加
+一份**布局兼容**的 `FILE`。它是「编 tinycc 自己的源码」路上下一块必过的：
+tinycc 的每个 .c 都 `#include <stdio.h>` 并且真的往 stderr 写字。
+
+之后：`struct-byval`（等真的后端）、`-dM`、路径 A 的 GLR 与路径 B 对账（第七步）。
+
+<!-- 第八刀第十六片-END -->
+
 
 
 

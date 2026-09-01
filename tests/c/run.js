@@ -165,8 +165,11 @@ for (const f of pick('cpp-bad')) {
 // ------------------------------------------------------------ 4. gen/：跑起来，退出码与 tcc -run 相同
 
 /** `tcc -run`：`-B` 指到构建目录，否则它找不到 runmain.o 与 libtcc1.a。 */
-function tccRun(path) {
-  const r = spawnSync(TCC, ['-B', TCC_DIR, '-run', path], { encoding: 'utf8' });
+function tccRun(path, incDirs = []) {
+  const args = ['-B', TCC_DIR];
+  for (const d of incDirs) args.push('-I', d);
+  args.push('-run', path);
+  const r = spawnSync(TCC, args, { encoding: 'utf8' });
   return { code: r.status, out: r.stdout ?? '', err: r.stderr ?? '' };
 }
 
@@ -187,34 +190,40 @@ function isTccDiag(err) {
 }
 
 /** 我们这一条腿：`cli.js c-run`（C -> MIR -> 闭包解释器），退出码同样是 main 的返回值。 */
-function cRun(path) {
-  const r = spawnSync(process.execPath, [CLI, 'c-run', path], { encoding: 'utf8' });
+function cRun(path, incDirs = []) {
+  const args = [CLI, 'c-run', path];
+  for (const d of incDirs) args.push('-I', d);
+  const r = spawnSync(process.execPath, args, { encoding: 'utf8' });
   return { code: r.status, out: r.stdout ?? '', err: r.stderr ?? '' };
 }
 
-for (const f of pick('gen')) {
-  const name = `gen/${basename(f, '.c')}`;
-  const path = join(here, 'gen', f);
+/**
+ * 一份用例：编译、跑、与 `tcc -run` 逐字节对账（退出码 + stdout + stderr）。
+ * `incDirs` 只给**我们这一条腿** —— tcc 自己知道系统头在哪儿，而我们要被告知（`sys/` 组）。
+ */
+function runCase(group, f, incDirs = []) {
+  const name = `${group}/${basename(f, '.c')}`;
+  const path = join(here, group, f);
   if (!hasTcc) {
     skip++;
-    continue;
+    return;
   }
   const want = tccRun(path);
   if (isTccDiag(want.err)) {
     bad(name, `    tcc 自己就拒了这份用例：\n${want.err.trim()}`);
-    continue;
+    return;
   }
-  const got = cRun(path);
+  const got = cRun(path, incDirs);
   if (got.code !== want.code) {
     bad(name, `    退出码不同：tcc=${want.code} ours=${got.code}\n${got.err}`);
-    continue;
+    return;
   }
   /* stdout 也要**逐字节**相同（第六刀第五片起）。printf 一通，oracle 就从「一个字节的
    * 退出码」升级成「整条 stdout」—— 之前一次 `s % 251` 的碰撞让一个真错误躲过了二分，
    * 这条轴宽得多。 */
   if (got.out !== want.out) {
     bad(name, `    stdout 不同：\n--- tcc ---\n${want.out}--- ours ---\n${got.out}`);
-    continue;
+    return;
   }
   /* stderr 同样逐字节（第八刀第九片起）。在这之前它是「非空就说明 tcc 拒了」，
    * 而 `fprintf(stderr, …)` 一有，那条口径就把对的用例判成错的。
@@ -222,12 +231,33 @@ for (const f of pick('gen')) {
    * 所以这一条**同时**在管「不该有的错误消息」—— 它一出现就与 tcc 的空 stderr 不同。 */
   if (got.err !== want.err) {
     bad(name, `    stderr 不同：\n--- tcc ---\n${want.err}--- ours ---\n${got.err}`);
-    continue;
+    return;
   }
   const n = want.out.length;
   const e = want.err.length;
   ok(`${name} [exit ${want.code}${n > 0 ? ` + ${n}B stdout` : ''}`
     + `${e > 0 ? ` + ${e}B stderr` : ''} == tcc -run]`);
+}
+
+for (const f of pick('gen')) runCase('gen', f);
+
+// ------------------------------------------------------------ 4.5 sys/：真的系统头，两条腿读同一份
+
+/** SDK 里那份 `/usr/include`（`xcrun --show-sdk-path`）。取不到就整组跳过。 */
+function sdkInclude() {
+  const r = spawnSync('xcrun', ['--show-sdk-path'], { encoding: 'utf8' });
+  if (r.status !== 0) return null;
+  const p = join((r.stdout ?? '').trim(), 'usr', 'include');
+  return existsSync(p) ? p : null;
+}
+
+const SDK_INC = sdkInclude();
+for (const f of pick('sys')) {
+  if (SDK_INC === null) {
+    skip++;
+    continue;
+  }
+  runCase('sys', f, [SDK_INC]);
 }
 
 // ------------------------------------------------------------ 5. gen-bad/：边界与语法错误

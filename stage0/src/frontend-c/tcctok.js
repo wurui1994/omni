@@ -229,6 +229,28 @@ export const TOK_AUTO = fixed('auto');
 export const TOK_VOLATILE = fixed('volatile');
 export const TOK_INLINE = fixed('inline');
 
+/* gcc 的下划线拼法各占一格（tcc 不做别名折叠，见 KEYWORD_NAMES 那儿的理由），
+ * 所以要用的时候得一个一个报出来。真的系统头里这些到处都是（第八刀第十六片）。 */
+export const TOK_CONST1 = fixed('__const');
+export const TOK_CONST2 = fixed('__const__');
+export const TOK_VOLATILE1 = fixed('__volatile');
+export const TOK_VOLATILE2 = fixed('__volatile__');
+export const TOK_SIGNED1 = fixed('__signed');
+export const TOK_SIGNED2 = fixed('__signed__');
+export const TOK_INLINE1 = fixed('__inline');
+export const TOK_INLINE2 = fixed('__inline__');
+export const TOK_RESTRICT = fixed('restrict');
+export const TOK_RESTRICT1 = fixed('__restrict');
+export const TOK_RESTRICT2 = fixed('__restrict__');
+export const TOK_EXTENSION = fixed('__extension__');
+export const TOK_ATOMIC = fixed('_Atomic');
+export const TOK_THREAD_LOCAL = fixed('_Thread_local');
+export const TOK_THREAD = fixed('__thread');
+export const TOK_ATTRIBUTE1 = fixed('__attribute');
+export const TOK_ATTRIBUTE2 = fixed('__attribute__');
+export const TOK_ASM2 = fixed('__asm');
+export const TOK_ASM3 = fixed('__asm__');
+
 export const TOK_VOID = fixed('void');
 export const TOK_CHAR = fixed('char');
 export const TOK_INT = fixed('int');

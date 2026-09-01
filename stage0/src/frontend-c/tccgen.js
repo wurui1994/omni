@@ -144,6 +144,7 @@
 
 import { OmniError } from '../source/diag.js';
 import { Cpp } from './tccpp.js';
+import { COMPILE_PREAMBLE } from './tccdefs.js';
 import {
   TOK_EOF, TOK_IDENT, TOK_UIDENT,
   TOK_CCHAR, TOK_LCHAR, TOK_CINT, TOK_CUINT, TOK_CLLONG, TOK_CULLONG,
@@ -155,6 +156,10 @@ import {
   TOK_INT, TOK_VOID, TOK_BOOL, TOK_SIGNED, TOK_UNSIGNED, TOK_CHAR, TOK_SHORT, TOK_LONG,
   TOK_FLOAT, TOK_DOUBLE, TOK_STRUCT, TOK_UNION, TOK_ENUM, TOK_TYPEDEF,
   TOK_EXTERN, TOK_STATIC, TOK_CONST, TOK_REGISTER, TOK_AUTO, TOK_VOLATILE, TOK_INLINE,
+  TOK_CONST1, TOK_CONST2, TOK_VOLATILE1, TOK_VOLATILE2, TOK_SIGNED1, TOK_SIGNED2,
+  TOK_INLINE1, TOK_INLINE2, TOK_RESTRICT, TOK_RESTRICT1, TOK_RESTRICT2,
+  TOK_EXTENSION, TOK_ATOMIC, TOK_THREAD_LOCAL, TOK_THREAD,
+  TOK_ATTRIBUTE1, TOK_ATTRIBUTE2, TOK_ASM1, TOK_ASM2, TOK_ASM3,
   TOK_BUILTIN_VA_START, TOK_BUILTIN_VA_ARG, TOK_BUILTIN_VA_END, TOK_BUILTIN_VA_COPY,
   isAssignOp, assignOpOf,
 } from './tcctok.js';
@@ -690,6 +695,11 @@ export class CGen {  /**
       defined: false,     // 这个单元里有函数体
       declared: false,    // 这个单元里见过原型或定义（没见过就是隐式声明）
       variadic: false,    // 形参表里有 `...`
+      /* 这个单元里**引用过**（调用、取地址、当常量用）。只有引用过的外部符号才发桩：
+       * 系统头文件一份 `<stdlib.h>` 就声明上百个函数，一个不落地发桩的话，`div` 那种
+       * 返回 struct 的会当场撞上「外部函数返回 struct 还没到」——而那份程序根本没用它。
+       * 真的编译器也是这样：没引用的声明不产生任何符号引用。 */
+      used: false,
     };
     this.funcs.set(name, info);
     return info;
@@ -1397,7 +1407,9 @@ export class CGen {  /**
     }
     if (btype(ty.t) === VT_VOID) this.err(`variable '${name}' has void type`);
     const s = typeSize(ty);
-    if (s.size === 0) this.err(`storage size of '${name}' isn't known`);
+    // `extern` 只是「别处有」，尺寸不必现在知道 —— 系统头里满地都是
+    // `extern char *sys_errlist[];`。真用起来会在 extern 那一关被拦（没有定义）。
+    if (s.size === 0 && !isExtern) this.err(`storage size of '${name}' isn't known`);
     this.dataOff = alignUp(this.dataOff, s.align);
     const e = { ty, addr: this.dataOff, defined: !isExtern, used: false };
     this.dataOff += s.size;
@@ -1870,6 +1882,7 @@ export class CGen {  /**
          * 走的都是同一条路，一个特例都不用写（`gv` / `decay` / `addrOf` 各一行）。 */
         const fn = this.funcs.get(name);
         if (fn === undefined || !fn.declared) this.err(`'${name}' undeclared`);
+        fn.used = true;
         return this.postfix(sMem(funcTypeOf(fn), this.mod.consts.int(fnPtr(fn.no)), 0));
       }
       return this.postfix(this.funcCall(name));
@@ -2015,6 +2028,7 @@ export class CGen {  /**
   /** 调用：`名字 ( 实参… )`。名字已经吃掉，当前记号是 `(`。 */
   funcCall(name) {
     const info = this.funcSym(name);
+    info.used = true;
     const a = this.callArgs(`function '${name}'`, info.params, info.variadic, info.ret);
     if (info.params === null) {
       info.params = a.vals.map((v, i) => ({
@@ -3267,7 +3281,17 @@ export class CGen {  /**
       || t === TOK_FLOAT || t === TOK_DOUBLE || t === TOK_STRUCT || t === TOK_UNION
       || t === TOK_ENUM || t === TOK_TYPEDEF || t === TOK_EXTERN || t === TOK_STATIC
       || t === TOK_CONST || t === TOK_REGISTER || t === TOK_AUTO || t === TOK_VOLATILE
-      || t === TOK_INLINE;
+      || t === TOK_INLINE
+      /* gcc 的拼法与那几个「吃掉就行」的（第八刀第十六片）。它们也能**打头** ——
+       * `__attribute__((…)) int f(void);` 与 `__extension__ typedef …` 系统头里都有。 */
+      || t === TOK_CONST1 || t === TOK_CONST2
+      || t === TOK_VOLATILE1 || t === TOK_VOLATILE2
+      || t === TOK_SIGNED1 || t === TOK_SIGNED2
+      || t === TOK_INLINE1 || t === TOK_INLINE2
+      || t === TOK_RESTRICT || t === TOK_RESTRICT1 || t === TOK_RESTRICT2
+      || t === TOK_EXTENSION || t === TOK_ATOMIC
+      || t === TOK_THREAD_LOCAL || t === TOK_THREAD
+      || t === TOK_ATTRIBUTE1 || t === TOK_ATTRIBUTE2;
   }
 
   /**
@@ -3500,6 +3524,49 @@ export class CGen {  /**
    * tcc 的选择一致，`sizeof` 必须跟着它，否则与 oracle 分岔）。`VT_LONG` 那一位留着，
    * 只为报错消息印得对。
    */
+  /**
+   * `__attribute__((…))` / `__attribute((…))` 整块跳过（第八刀第十六片）。
+   *
+   * 真的系统头里它无处不在：`__printflike(1,2)`、`__dead2`、`__pure2`、`__DARWIN_ALIAS`
+   * 里的那些。**语义一条都不做** —— 我们要的只是「能读过去」。真要做的那几条
+   * （`packed`、`aligned`、`noreturn`）各自是独立的一格，做的时候这儿会变成一台
+   * 真的分派，而不是「原来漏了」。
+   *
+   * 括号是**成对的两层**，不过这儿只按平衡数括号：`((a(1),b))` 里面还能再嵌。
+   */
+  skipAttrs() {
+    while (this.tok === TOK_ATTRIBUTE1 || this.tok === TOK_ATTRIBUTE2) {
+      this.next();
+      this.skip(LPAR);
+      let depth = 1;
+      while (depth > 0) {
+        if (this.tok === TOK_EOF) this.err("')' expected");
+        if (this.tok === LPAR) depth++;
+        else if (this.tok === RPAR) depth--;
+        this.next();
+      }
+    }
+  }
+
+  /**
+   * 声明符后面的 `__asm("_name")`（第八刀第十六片）：**符号改名**。
+   *
+   * glibc 的 `__REDIRECT` 与 macOS 的 `__DARWIN_ALIAS` 都靠它把 `fopen` 指到
+   * `_fopen$UNIX2003` 之类的真符号上。我们这一侧的 libc 是**按 C 的名字**查表的
+   * （`interp/libc.js` 的那张表），所以这儿读掉那个串、**不改名** —— 改了反而找不到。
+   * 自带后端那条路上真的要链接时，这一格会变成一次真的改名。
+   */
+  skipAsmName() {
+    if (this.tok !== TOK_ASM1 && this.tok !== TOK_ASM2 && this.tok !== TOK_ASM3) return;
+    this.next();
+    this.skip(LPAR);
+    while (this.tok !== RPAR) {
+      if (this.tok === TOK_EOF) this.err("')' expected");
+      this.next();
+    }
+    this.skip(RPAR);
+  }
+
   parseBtype() {
     let bt = -1;
     let longs = 0;
@@ -3534,10 +3601,34 @@ export class CGen {  /**
       }
       if (t === TOK_EXTERN) { storage = storage | VT_EXTERN; any = true; this.next(); continue; }
       if (t === TOK_STATIC) { storage = storage | VT_STATIC; any = true; this.next(); continue; }
-      if (t === TOK_INLINE) { storage = storage | VT_INLINE; any = true; this.next(); continue; }
+      if (t === TOK_INLINE || t === TOK_INLINE1 || t === TOK_INLINE2) {
+        storage = storage | VT_INLINE; any = true; this.next(); continue;
+      }
       if (t === TOK_TYPEDEF) { storage = storage | VT_TYPEDEF; any = true; this.next(); continue; }
-      if (t === TOK_CONST) { quals = quals | VT_CONSTANT; any = true; this.next(); continue; }
-      if (t === TOK_VOLATILE) { quals = quals | VT_VOLATILE; any = true; this.next(); continue; }
+      if (t === TOK_CONST || t === TOK_CONST1 || t === TOK_CONST2) {
+        quals = quals | VT_CONSTANT; any = true; this.next(); continue;
+      }
+      if (t === TOK_VOLATILE || t === TOK_VOLATILE1 || t === TOK_VOLATILE2) {
+        quals = quals | VT_VOLATILE; any = true; this.next(); continue;
+      }
+      /* 真的系统头里到处都是的那几个（第八刀第十六片）。它们在这一层**没有可观察的
+       * 效果**，所以吃掉就行：
+       *   - `restrict` 是一个**承诺**（不别名），只影响优化，不影响语义；
+       *   - `__extension__` 是「别为下面这个 gcc 扩展警告」；
+       *   - `_Atomic` / `_Thread_local` / `__thread` 我们是单线程一条腿；
+       *   - `__attribute__((…))` 整块跳过（`skipAttrs`）。
+       * 吃掉不等于装作没看见：`_Atomic` 真要做的话是另一件事，那时这一行会变成一条
+       * 真的实现，而不是「原来漏了」。 */
+      if (t === TOK_RESTRICT || t === TOK_RESTRICT1 || t === TOK_RESTRICT2
+          || t === TOK_EXTENSION || t === TOK_ATOMIC
+          || t === TOK_THREAD_LOCAL || t === TOK_THREAD) {
+        any = true; this.next(); continue;
+      }
+      if (t === TOK_ATTRIBUTE1 || t === TOK_ATTRIBUTE2) { any = true; this.skipAttrs(); continue; }
+      if (t === TOK_SIGNED1 || t === TOK_SIGNED2) {
+        if (sign !== 0) this.err('two or more sign specifiers');
+        sign = 1; any = true; this.next(); continue;
+      }
       // `auto` / `register` 在这一片没有可观察的效果，吃掉
       if (t === TOK_AUTO || t === TOK_REGISTER) { any = true; this.next(); continue; }
       if (t === TOK_FLOAT) { setBt(VT_FLOAT); any = true; this.next(); continue; }
@@ -3647,12 +3738,26 @@ export class CGen {  /**
    *   - `int (*f[3])(v)` 外层 posts=[(v)]，里层 pre=1+posts=[[3]] -> 3 个函数指针
    */
   declaratorParts(want) {
+    /* 声明符**前面**也能挂 attribute（`__attribute__((…)) *p`），系统头里有。 */
+    this.skipAttrs();
     let pre = 0;
     while (this.tok === STAR) {
       this.next();
+      /* 指针自己的限定词（`char * const p`、`char * __restrict p`）：吃掉，
+       * 这一片没有可观察的效果。系统头里 `__restrict` 几乎每个 `char *` 后面都有。 */
+      for (;;) {
+        const q = this.tok;
+        if (q === TOK_CONST || q === TOK_CONST1 || q === TOK_CONST2
+            || q === TOK_VOLATILE || q === TOK_VOLATILE1 || q === TOK_VOLATILE2
+            || q === TOK_RESTRICT || q === TOK_RESTRICT1 || q === TOK_RESTRICT2
+            || q === TOK_ATOMIC) {
+          this.next();
+          continue;
+        }
+        if (q === TOK_ATTRIBUTE1 || q === TOK_ATTRIBUTE2) { this.skipAttrs(); continue; }
+        break;
+      }
       pre++;
-      // 指针自己的限定词（`char * const p`）：吃掉，这一片没有可观察的效果
-      while (this.tok === TOK_CONST || this.tok === TOK_VOLATILE) this.next();
     }
 
     /** @type {{name:string|null,wrap:(ty:object)=>object}|null} */
@@ -3888,6 +3993,7 @@ export class CGen {  /**
       const fn = this.funcs.get(nm);
       if (fn !== undefined && fn.declared) {
         this.next();
+        fn.used = true;
         return fnPtr(fn.no);
       }
     }
@@ -3917,6 +4023,20 @@ export class CGen {  /**
       for (;;) {
         const d = this.declarator(base, 'need');
         const name = /** @type {string} */ (d.name);
+        /* 声明符后面还能挂两样东西（第八刀第十六片，系统头里全是）：
+         *   `__asm("_name")` —— 符号改名，读掉不改名（见 `skipAsmName`）；
+         *   `__attribute__((…))` —— 整块跳过。
+         * 顺序两种都有（`int f(void) __asm("_f") __attribute__((weak));`），所以
+         * 交替着吃到不是它们为止。 */
+        for (;;) {
+          const t2 = this.tok;
+          if (t2 === TOK_ASM1 || t2 === TOK_ASM2 || t2 === TOK_ASM3) {
+            this.skipAsmName();
+            continue;
+          }
+          if (t2 === TOK_ATTRIBUTE1 || t2 === TOK_ATTRIBUTE2) { this.skipAttrs(); continue; }
+          break;
+        }
         if (isTypedef) {
           /* `typedef` 不声明对象，只给一个类型起名。重复的 typedef 是合法的（C11
            * 6.7 第 3 段：同一个类型可以说两遍），不同类型的重名才是错。 */
@@ -3941,8 +4061,14 @@ export class CGen {  /**
           let strBytes = null;
           const braced = hasInit && this.tok === LBRACE;
           if (isArray(vty.t) && vty.count < 0) {
-            if (!hasInit) this.err(`array size missing in '${name}'`);
-            if (this.tok === TOK_STR) {
+            if (!hasInit) {
+              /* `extern const char *const sys_errlist[];`（第八刀第十六片）——
+               * `extern` 的数组可以是**不完整类型**（C11 6.7.6.2 第 4 段）：大小在别的
+               * 翻译单元里。这儿按 0 个元素登记：不占 data 段，`sizeof` 会得到 0
+               * （真的编译器那儿是一条错误 —— 那一格还没到）。 */
+              if (!isExtern) this.err(`array size missing in '${name}'`);
+              vty = mkArray(vty.ref, 0);
+            } else if (this.tok === TOK_STR) {
               /* 相邻的字面量要拼起来（`char s[] = "a" "b"`），所以只能真的读一遍；
                * 读完记号已经吃掉，字节留在手上。 */
               strBytes = this.readStrTok(this.tokc);
@@ -3952,7 +4078,7 @@ export class CGen {  /**
               vty = r.ty;
               body = r.body;
             }
-            if (vty.count === 0) this.err(`zero-sized array '${name}'`);
+            if (vty.count === 0 && hasInit) this.err(`zero-sized array '${name}'`);
           }
 
           const e = global ? this.declareGlobal(name, vty, isExtern)
@@ -4259,6 +4385,19 @@ export class CGen {  /**
     this.f.emit(OP.GSTORE, T_VOID, this.spSave, REF_NONE, this.spNo);
   }
 
+  /**
+   * 主文件之前先读的那一小份（tccdefs.h 里的声明部分，见 tccdefs.js 的
+   * `COMPILE_PREAMBLE`）。只读声明，读完**不做**那两轮收尾检查 —— 「外部符号有没有
+   * 定义」要等整个单元读完才答得了，而这一份只是主文件的前半段。
+   */
+  preamble(text) {
+    this.cpp.startParse('<tccdefs>', text);
+    this.next();
+    while (this.tok !== TOK_EOF) {
+      if (!this.decl(true)) this.expect('declaration');
+    }
+  }
+
   /** 一个翻译单元（`tccgen_compile`，`tccgen.c:417-419`）。 */
   unit() {
     this.next();
@@ -4267,6 +4406,9 @@ export class CGen {  /**
     }
     for (const [name, info] of this.funcs) {
       if (info.defined) continue;
+      /* 声明了但一次都没引用：真的编译器不为它产生任何符号引用，我们也不发桩。
+       * 系统头文件一份就声明上百个函数，这一条是「能编系统头」的前提。 */
+      if (!info.used) continue;
       /* 这个单元里没有函数体 = 外部符号。C99 起「隐式声明」是错，tcc 只警告（并且当
        * `int f()`）—— 照 tcc，因为它是 oracle。 */
       if (!info.declared) this.cpp.warn(`implicit declaration of function '${name}'`);
@@ -4326,10 +4468,11 @@ function utf8Bytes(s) {
  */
 export function lowerC(path, text, host, defs, args) {
   const cpp = new Cpp(host);
-  cpp.installPredefs(path);
+  cpp.installPredefs(path, false);
   for (const d of defs ?? []) cpp.define(d.name, d.body);
   const mod = new MirModule('omni_main');
   const gen = new CGen(cpp, mod);
+  gen.preamble(COMPILE_PREAMBLE);
   cpp.startParse(path, text);
   gen.unit();
 

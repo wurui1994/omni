@@ -47,7 +47,6 @@ export const PREDEFS = [
   ['__APPLE__', '1'],
   ['__unix__', '1'],
   ['__unix', '1'],
-  ['__TCC_PP__', '1'],
   ['__leading_underscore', '1'],
 
   // ---- 模型（LP64）
@@ -109,3 +108,59 @@ export const PREDEFS = [
   ['_Nullable_result', undefined],
   ['_Null_unspecified', undefined],
 ];
+
+/**
+ * 只在 **`-E`**（只预处理）那一路上定义的（tcc 的 `tcc_predefs`：
+ * `if (s1->output_type == TCC_OUTPUT_PREPROCESS) putdef(cs, "__TCC_PP__")`）。
+ *
+ * 它就是 tccdefs.h 里那道 `#ifndef __TCC_PP__` 的**开关**：只预处理时，tcc 把
+ * 「内建、`__uint128_t`、`__builtin_va_list`」整段跳掉 —— 那一段里有真的声明，
+ * 而 `-E` 的输出里不该多出声明。所以 `tcc -dM -E` 量到的那 51 条**只是一半**；
+ * 另一半（编译那一路才有的）在下面 `COMPILE_DEFS` 与 `COMPILE_PREAMBLE`。
+ */
+export const PP_ONLY_DEFS = [
+  ['__TCC_PP__', '1'],
+];
+
+/**
+ * 只在**编译**那一路上定义的宏（tccdefs.h 那道 `#ifndef __TCC_PP__` 里面的宏部分，
+ * 按 `__aarch64__` + `__APPLE__` 这一支选）。
+ *
+ * 这些是**系统头文件当编译器内建来用的东西**：`<math.h>` 拿 `__builtin_huge_val()`
+ * 定 `HUGE_VAL`，`<sys/_types/_fd_def.h>` 拿 `__builtin_bzero` 清 fd_set，
+ * `<stddef.h>` 拿 `__builtin_offsetof` 定 `offsetof`。少一条，头文件就语法错。
+ *
+ * `__builtin_va_list` **不在这儿** —— 我们那一份是 `void *` 的 typedef，在 CGen 的
+ * 构造函数里预置（`va_list` 就是变参区的地址，见 tccgen.js 的 vaBlock）。tcc 在
+ * arm64+APPLE 上把它定成 `struct { void *__stack; }`，形状不同、意思相同。
+ */
+export const COMPILE_DEFS = [
+  ['__builtin_offsetof(type,field)', '((__SIZE_TYPE__)&((type*)0)->field)'],
+  ['__builtin_extract_return_addr(x)', 'x'],
+  ['__builtin_huge_val()', '1e500'],
+  ['__builtin_huge_valf()', '1e50f'],
+  ['__builtin_huge_vall()', '1e5000L'],
+  ['__builtin_nanf(ignored)', '(0.0F/0.0F)'],
+  ['__builtin_flt_rounds()', '1'],
+  ['__builtin_bzero(p,ignored)', 'bzero(p, sizeof(*(p)))'],
+  ['__int128_t', 'struct __uint128__'],
+  ['__uint128_t', 'struct __uint128__'],
+];
+
+/**
+ * 编译那一路上，主输入文件**之前**先读的一小份源码（tccdefs.h 里那些真的声明）。
+ * tcc 把它连着预定义一起塞进 include 栈；我们让语法分析器先读这一份、再读主文件 ——
+ * 于是主文件的行号一个不差（把它拼到主文件前面就会全错，那是最容易犯的一个错）。
+ *
+ * 现在只有一条：`__uint128_t`。macOS 的 `<mach/arm/_structs.h>` 用它声明 NEON 的
+ * 寄存器组，而 `#include <stdlib.h>` 会一路带到那儿 —— 也就是说**不认它就编不了
+ * 任何一份用系统头的 C**。tcc 的换法是「拿一个同宽同对齐的类型顶着」，我们照抄。
+ *
+ * 少了什么：tcc 那边还写了 `__attribute((__aligned__(16)))`，我们的
+ * `__attribute__` 是**吃掉**（不实现语义），所以这个结构体的对齐是 1 而不是 16 ——
+ * 里面装着它的那些结构体（`__darwin_arm_neon_state` 之类）尺寸会与 tcc 不同。
+ * 那些结构体我们一个都还没用到；真用到的那天，`__attribute__((aligned))` 得先落地。
+ */
+export const COMPILE_PREAMBLE = `struct __uint128__ { char x[16]; };
+`;
+
