@@ -5,7 +5,7 @@
 // asy 那条线靠的是本机的 `asy`，这里靠的是本机编出来的 tcc
 // （`.omni-cache/tcc-build/tcc`，源码树在 /Users/wurui/Documents/Lang/reference/tinycc）。
 //
-// 五组：
+// 七组：
 //   1. `cpp/`     —— 预处理输出与 tcc -E -P 逐字节相同。**没有 .expected 文件**：
 //                    期望值就是 tcc 的输出，写死一份反而会在 tcc 升级时骗人。
 //   2. `inc/`     —— `#include` 的搜索与守卫：同样与 tcc 比，只是多给一个 -I。
@@ -16,7 +16,11 @@
 //                    所以用例都把结果收在 0..255。第五片 printf 一通之后 stdout 也进了
 //                    对账范围 —— 一个字节的 oracle 会撞（`s % 251` 曾经让一个真错误躲过
 //                    二分），整条 stdout 宽得多。
-//   5. `gen-bad/` —— 第六刀的阶段边界与真语法错误。同样有 .expected。
+//   5. `sys/`     —— 与 `gen/` 同一口径，只是用**真的系统头**（macOS SDK）。SDK 不在
+//                    就跳过。
+//   6. `gen-bad/` —— 第六刀的阶段边界与真语法错误。同样有 .expected。
+//   7. `diag/`    —— 第八刀第十九片：**诊断本身**与 tcc 逐字节相同（同一个行号、同一句
+//                    话）。同样没有 .expected —— 期望值就是 tcc 的那一行。
 //
 // tcc 不在的时候整组**跳过而不是假过**（印 skip 并说明原因）—— 悄悄变成 0 passed
 // 才是最坏的结局。
@@ -279,8 +283,52 @@ for (const f of pick('gen-bad')) {
   }
 }
 
-process.stdout.write(`\n${pass} passed, ${fail} failed${skip ? `, ${skip} skipped` : ''}\n`);
-if (fail) {
+// ------------------------------------------------------------ 6. diag/：诊断逐字节相同
+
+/** `tcc -c`：只编译，只要那句诊断。`-o /dev/null` 免得留下 .o。 */
+function tccCompile(path) {
+  const r = spawnSync(TCC, ['-B', TCC_DIR, '-c', '-o', '/dev/null', path], { encoding: 'utf8' });
+  return { code: r.status, err: (r.stderr ?? '').trim() };
+}
+
+/** 我们这一条腿：`c-mir`（不跑，只编译）。 */
+function cCompile(path) {
+  const r = spawnSync(process.execPath, [CLI, 'c-mir', path], { encoding: 'utf8' });
+  return { code: r.status, err: (r.stderr ?? '').trim() };
+}
+
+/**
+ * 第八刀第十九片的测试轴：**诊断本身**要与 tcc 逐字节相同 —— 不是「也报了个错」，
+ * 而是同一个文件名、同一个行号、同一句话。行号那条减法（`Cpp.errLine`）与
+ * `(got 'x')` 那一段都只有这样才钉得住。
+ *
+ * 只比**第一行**：tcc 报完第一条致命错误就 longjmp 出去了，后面没有别的。
+ */
+for (const f of pick('diag')) {
+  const name = `diag/${basename(f, '.c')}`;
+  const path = join(here, 'diag', f);
+  if (!hasTcc) {
+    skip++;
+    continue;
+  }
+  const want = tccCompile(path);
+  const got = cCompile(path);
+  if (want.code === 0) {
+    bad(name, '    tcc 自己没拒这份用例 —— diag/ 里的每一份都该被拒');
+  } else if (got.code === 0) {
+    bad(name, '    我们没拒，tcc 拒了');
+  } else {
+    const w = want.err.split('\n')[0];
+    const g = got.err.split('\n')[0];
+    if (w !== g) {
+      bad(name, `    tcc:  ${JSON.stringify(w)}\n    ours: ${JSON.stringify(g)}`);
+    } else {
+      ok(`${name} [ours == tcc: ${w}]`);
+    }
+  }
+}
+
+process.stdout.write(`\n${pass} passed, ${fail} failed${skip ? `, ${skip} skipped` : ''}\n`);if (fail) {
   process.stdout.write(`\n${failures.join('\n\n')}\n`);
   process.exitCode = 1;
 }

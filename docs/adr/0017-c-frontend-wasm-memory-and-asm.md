@@ -288,7 +288,7 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
 8. **C 的库面**：`libtcc1` 的等价物（软除法/浮点辅助/`alloca`/`setjmp`）与 libc 的接法。
    原先写的是"先转手宿主的 libc，走既有的 extern-C FFI"，第五片证明**转手不成立**
    （指针是自家线性内存里的偏移，宿主 libc 读不到），改成一个读写线性内存的宿主模块，
-   见第五片的落地节。**前十八片已落地**（预定义的宏 —— 目标的自述，五十条，
+   见第五片的落地节。**前十九片已落地**（预定义的宏 —— 目标的自述，五十条，
    顺序与值都对着 `tcc -dM -E` 抄；自带的系统头目录 + 编译器必须自己给的那四份头；
    `stdio.h`/`stdlib.h`/`string.h` 的最小子集 —— libc 的自述；
    `strtol` 一族与 `strncpy`/`strchr`/`strstr` 那几条；
@@ -303,8 +303,10 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
    真的 macOS 系统头 —— 预定义的宏本来就是两份，而没引用的声明不发桩；
    SDK 的三条标准流 —— 宿主填的全局量；
    编 tinycc 自己的源码撞出来的六格 —— `__has_include`、`#pragma pack`、
-   `_Static_assert`、匿名 struct/union 成员、常量表达式里的 `?:`、顶层多余的分号），
-   见下面的第八刀第一到十八片节。
+   `_Static_assert`、匿名 struct/union 成员、常量表达式里的 `?:`、顶层多余的分号；
+   诊断逐字节对齐 + `__asm__` 当语句 —— 行号那条减法、`pp_error` 的记号流、
+   收起来的记号串带着行号），
+   见下面的第八刀第一到十九片节。
 
 最后三步是**后端**：
 
@@ -3886,6 +3888,112 @@ tcc 的 `pp_error` 还会把整行记号印出来 —— 那是对账时最好�
 之后：`struct-byval`（等真的后端）、`-dM`、路径 A 的 GLR 与路径 B 对账（第七步）。
 
 <!-- 第八刀第十八片-END -->
+
+## 落地：第八刀第十九片
+
+**诊断逐字节对齐，与 `__asm__` 当一条语句。**
+
+第十八片末尾把这一片写成「`__asm__` 出现在声明的中间」。量下来**不是** —— 整份
+预处理过的 `libtcc.c` 里，不是「声明符后面改名」的 `__asm__` **只有一处**：
+
+```
+dispatch/once.h:115  __asm__ __volatile__ ( "" : : : "memory" )
+```
+
+也就是 `dispatch_compiler_barrier()`（`dispatch/base.h:195`）。它在一个 `static inline`
+函数**体**里，是一条**语句**，不是声明的一部分。第十八片那句预判之所以偏了，正是因为
+当时的行号是错的 —— 它报的是 `<dispatch/data.h>:45`，那儿是一段注释。
+
+于是这一片的两件事其实是**同一件事的两头**：诊断不准，下一格就找不到。
+
+### 一、报错报在哪一行
+
+tcc 只有一行（`libtcc.c:669`）：
+
+```c
+line = f->line_num - ((tok_flags & TOK_FLAG_BOL) && !macro_ptr);
+```
+
+`lineNum` 记的是「读到哪儿了」，而换行是**读完上一行**才数的：当前记号正好落在行首时
+`lineNum` 已经跨过去了，要减回来一行。宏流里读记号不动 `lineNum`，所以在宏里不减。
+我们从第六刀起一直晚一行，全是缺这条减法（`Cpp.errLine`）。
+
+第二件更要紧的，是**收起来再放一遍**那几路（函数体、`for` 的步进式、`switch` 的体 ——
+文件头偏离 2 换来的代价）。放的时候文件早就读到那一段的末尾了，于是重放期间报的每一个
+错都指向末尾。tcc 里有现成的答案，两处：
+
+- `tok_str_add_tok`（`tccpp.c:1142`）记一个记号之前，**行号变了就先塞一条
+  `TOK_LINENUM`** 进记号串；`next()` 从宏流里读到它就把 `file.lineNum` 拨过去
+  （`tccpp.c:3478`）。我们的 `TokStr.addTok` 与 `captureTokens`/`captureBraced` 照此。
+- `begin_macro` / `end_macro` **存下并还原 `file->line_num`**（`save_line_num`）。
+  少了这一半，一段重放结束之后行号会停在那一段的末行，后面整片文件跟着偏。
+
+### 二、`#if` 出错要印记号流
+
+tcc 的 `error1` 里有一支很容易漏掉（`libtcc.c:677`）：
+
+```c
+if (pp_expr > 1)
+    pp_error(&cs);            /* 不用原来那句话 */
+```
+
+`pp_expr` 在求值那一段里是 `#if` / `#elif` 本身，于是**求值期间出的任何错**都换成
+`pp_error` 的转印：`bad preprocessor expression: #if` 后面跟**整条展开后的记号流**。
+理由很实在 —— 那一行源码长得完全不像展开后的样子（`TargetConditionals.h:140` 的
+`#if !defined(__has_extension) || !__has_extension(...)` 展开成 `! 0 || ! 0 ( 0 )`），
+错在哪儿只有看记号流才知道。tcc 宁可丢掉具体错因也要印这一串。
+
+顺带 `skip()` 也补齐了：tcc 印的是 `'x' expected (got 'y')`（`tccpp.c:100`），
+**看见的那个记号**才是有用的一半。
+
+### 三、`__asm__` 当一条语句
+
+自带汇编器还没到（第九到十一步），所以这一格只认一种形状：**模板是空串、没有操作数**
+—— 编译屏障。它说的是「别把内存访问搬过这一行」，而我们既不重排也不把内存缓进寄存器
+（每次访问都是一条 LOAD/STORE），所以**一条指令都不发**就是它的正确实现，不是近似。
+macOS SDK 里这一条有三个名字（`dispatch_compiler_barrier`、`os_compiler_barrier`、
+`<sys/cdefs.h>` 的 `__compiler_barrier`），glibc 里也到处是。
+
+位置两处，与 tcc 一样：语句（`tccgen.c:7465`）与顶层（`asm_global_instr`，
+`tccgen.c:8774`）。三段冒号的进入条件照抄 `tccasm.c:1352-1380`——「下一个不是 `:`」
+才算这一段有东西，于是 `__asm__("" :)` 在 tcc 那儿也是一条错（它会去读操作数、撞上
+`)`，报 `string constant expected`），我们也报同一句。模板非空或真有操作数的，
+报边界。`;` 与 tcc 一样**只检查、不吃掉**（`tccasm.c:1420` 的注释）。
+
+### 量出来的数
+
+- 新的一组 `tests/c/diag/`：**诊断本身**与 `tcc -c` 逐字节相同（同一个文件名、
+  同一个行号、同一句话）。三份，三条都对上了：
+  - `01-if-expr.c:8: error: bad preprocessor expression: #if ! 0 || ! 0 ( 0 )`
+  - `02-semi-decl.c:4: error: ';' expected (got 'int')`
+  - `03-semi-body.c:12: error: ';' expected (got 'return')` —— 这一条在**函数体里**，
+    钉的正是 `TOK_LINENUM` 那条线；没有它这儿会报到第 15 行。
+  这一组同样**没有 .expected** —— 期望值就是 tcc 那一行。
+- `tests/c/gen/43-asm.c`：退出码 23 + 10 字节 stdout，与 `tcc -run` 逐字节相同。
+  三种拼法、`__volatile__` 的有无、三段冒号、顶层那一条都在里面。
+- `tests/c/run.js`：**77 passed, 0 failed**。`tests/run.js`：96 passed。
+- 边界钉子 6 -> **7** 条：加 `gen-bad/asm-tmpl`（模板非空）。
+- `libtcc.c` 现在**读完了所有系统头**，停在 tcc 自己的 `tcc.h` 上：
+  `tccgen.c:515: error: macro 'ELF32_ST_BIND' used with too many args`。
+
+### 下一片
+
+第八刀第二十片：**`ELFW` 那一格**。`tcc.h` 里
+
+```c
+#define ELFW(sym) ELF##32##_##sym      /* PTR_SIZE == 4 */
+#define ELFW(sym) ELF##64##_##sym      /* PTR_SIZE == 8 */
+```
+
+我们选到了 32 位那一支（于是 `ELFW(ST_BIND)(...)` 展开成
+`ELF32_ST_BIND(...)` 而 elf.h 里那个宏只收一个参数）。也就是说我们对 `tcc.h` 里
+`PTR_SIZE` 那一串 `#if` 的求值与 tcc 不同 —— 是一条**真的分岔**，得一层层二分到
+第一个不一样的 `#if` 上。第十九片那组 `diag/` 正好是为这种活准备的工具。
+
+之后：`struct-byval`（等真的后端）、`-dM`、`__has_include_next`、
+路径 A 的 GLR 与路径 B 对账（第七步）。
+
+<!-- 第八刀第十九片-END -->
 
 
 

@@ -60,7 +60,7 @@ import {
   TOK_A_AND, TOK_A_OR, TOK_A_XOR, TOK_A_SHL, TOK_A_SAR,
   TOK_CCHAR, TOK_LCHAR, TOK_CINT, TOK_CUINT, TOK_CLLONG, TOK_CULLONG,
   TOK_STR, TOK_LSTR, TOK_CFLOAT, TOK_CDOUBLE, TOK_CLDOUBLE, TOK_PPNUM, TOK_PPSTR,
-  TOK_EOF, TOK_LINEFEED, TOK_IDENT, SYM_FIELD, TOK_PPJOIN,
+  TOK_EOF, TOK_LINEFEED, TOK_IDENT, SYM_FIELD, TOK_PPJOIN, TOK_LINENUM,
   MACRO_OBJ, MACRO_FUNC, MACRO_JOIN, TOK_TWO_CHARS, IDENT_NAMES,
   TOK_DEFINE, TOK_INCLUDE, TOK_INCLUDE_NEXT, TOK_IFDEF, TOK_IFNDEF, TOK_ELIF,
   TOK_ENDIF, TOK_DEFINED, TOK_UNDEF, TOK_ERROR, TOK_WARNING, TOK_LINE, TOK_PRAGMA,
@@ -114,6 +114,8 @@ class TokStr {
     /** @type {(string|bigint|number|null)[]} 与 toks 等长，见文件头「记号流的表示」 */
     this.vals = [];
     this.needSpc = 0;
+    /** `tok_str_add_tok` 记的「上一次记下的行号」（`tccpp.c:1147`）。0 = 一条都还没记。 */
+    this.lastLine = 0;
   }
 
   add(t) {
@@ -124,6 +126,22 @@ class TokStr {
   add2(t, v) {
     this.toks.push(t);
     this.vals.push(v);
+  }
+
+  /**
+   * `tok_str_add_tok`（`tccpp.c:1142`）：**带行号**地记一个记号。
+   *
+   * 行号与上一次记的不一样，就先塞一条 `TOK_LINENUM` 进去 —— 放回来的时候 `next()`
+   * 见到它就把 `file.lineNum` 拨回去（`tccpp.c:3478`）。收起来再放一遍的那几路
+   * （函数体、`for` 的步进式、`switch` 的体）全靠这条线把诊断的行号带回原处；
+   * 没有它，重放期间报的每一个错都会指到那一段的**末尾**。
+   */
+  addTok(t, v, line) {
+    if (line !== this.lastLine) {
+      this.lastLine = line;
+      this.add2(TOK_LINENUM, line);
+    }
+    this.add2(t, v);
   }
 
   /** `tok_str_add2_spc`（`tccpp.c:1156`） */
@@ -221,8 +239,11 @@ export class Cpp {
     this.parseFlags = 0;
     this.tokFlags = 0;
     this.ppCounter = 0;
-    /** `#if` 的求值途中（`pp_expr`）：GCC 允许宏展开出 `defined`，靠这一格放行 */
+    /** `#if` 的求值途中（`pp_expr`）：GCC 允许宏展开出 `defined`，靠这一格放行。
+     *  求值那一段里它换成 `#if`/`#elif` 本身（>1），于是又兼作 `pp_error` 的开关 */
     this.ppExpr = 0;
+    /** @type {TokStr|null} 正在求值的那条记号流，出错时要整条印出来（`ppErrorMsg`） */
+    this.ppExprStr = null;
 
     /** 宏展开用的记号流栈（tcc 的 `macro_stack` / `macro_ptr`） */
     this.macroFrame = null; // {str: TokStr, i: number}
@@ -246,14 +267,36 @@ export class Cpp {
 
   /* ------------------------------------------------- 报错与名字 */
 
+  /**
+   * 报错报在**哪一行**（`libtcc.c:669`）：
+   *
+   * ```c
+   * line = f->line_num - ((tok_flags & TOK_FLAG_BOL) && !macro_ptr);
+   * ```
+   *
+   * `lineNum` 记的是「读到哪儿了」，而换行是**读完上一行**才数的 —— 当前记号正好落在
+   * 行首（`TOK_FLAG_BOL`）时，`lineNum` 已经跨过去了，要减回来一行。宏流里读记号不
+   * 动 `lineNum`，所以 `macroFrame !== null` 时不减。
+   *
+   * 这条减法就是我们从第六刀起一直比 tcc 晚一行的原因。
+   */
+  errLine() {
+    let n = this.file.lineNum;
+    if ((this.tokFlags & TOK_FLAG_BOL) && this.macroFrame === null) n--;
+    return n;
+  }
+
   /** tcc 的 `tcc_error`：**致命**，当场停。位置形如 `a.c:12:` —— 与 tcc 的前缀同形。 */
   err(msg) {
-    const where = this.file ? `${this.file.filename}:${this.file.lineNum}: ` : '';
+    const where = this.file ? `${this.file.filename}:${this.errLine()}: ` : '';
+    /* `#if` 求值期间出的**任何**错都换成那一条记号流的转印（`libtcc.c:677`）：
+     * 展开之后的样子才是真正有用的线索，原来那句话反而没什么信息。 */
+    if (this.ppExpr > 1) msg = this.ppErrorMsg();
     throw new OmniError(`${where}error: ${msg}`);
   }
 
   warn(msg) {
-    const where = this.file ? `${this.file.filename}:${this.file.lineNum}: ` : '';
+    const where = this.file ? `${this.file.filename}:${this.errLine()}: ` : '';
     this.warnings.push(`${where}warning: ${msg}`);
   }
 
@@ -283,6 +326,8 @@ export class Cpp {
         return `'${addChar(Number(cv))}'`;
       case TOK_PPNUM: case TOK_PPSTR:
         return /** @type {string} */ (cv);
+      case TOK_LINENUM:
+        return '<linenumber>';
       case TOK_STR: case TOK_LSTR: {
         const pre = v === TOK_LSTR ? 'L' : '';
         let out = `${pre}"`;
@@ -710,14 +755,20 @@ export class Cpp {
    * 递归防护是一条链（`nestedList`）：正在展开的宏名在链上，链上的名字遇到就打个
    * `SYM_FIELD` 的印、永远不再展开 —— 这就是 `#define REC REC` 不会死循环的原因。 */
 
-  /** 把一段记号流压成当前输入（`begin_macro`，`tccpp.c:1053`） */
+  /** 把一段记号流压成当前输入（`begin_macro`，`tccpp.c:1053`）。
+   *
+   *  连**行号**一起存（tcc 的 `save_line_num`）：流里可能带着 `TOK_LINENUM`，读的时候
+   *  会把 `file.lineNum` 拨到别处去；这一层读完必须拨回来，否则后面整段的诊断都跟着跑偏。 */
   beginMacro(str, i) {
     if (this.macroFrame !== null) this.macroFrames.push(this.macroFrame);
-    this.macroFrame = { str, i };
+    this.macroFrame = { str, i, saveLine: this.file === null ? 0 : this.file.lineNum };
     return this.macroFrame;
   }
 
   endMacro() {
+    if (this.file !== null && this.macroFrame !== null) {
+      this.file.lineNum = this.macroFrame.saveLine;
+    }
     this.macroFrame = this.macroFrames.length > 0 ? this.macroFrames.pop() : null;
   }
 
@@ -749,7 +800,7 @@ export class Cpp {
       if (depth === 0 && this.tok === endTok) break;
       if (this.tok === 40 || this.tok === 91 || this.tok === 123) depth++;
       else if (this.tok === 41 || this.tok === 93 || this.tok === 125) depth--;
-      str.add2(this.tok, this.tokc);
+      str.addTok(this.tok, this.tokc, this.errLine());
       this.next();
     }
     str.add2(TOK_EOF, null);
@@ -781,7 +832,7 @@ export class Cpp {
       if (this.tok === TOK_EOF) this.err('unexpected end of file');
       if (this.tok === 123) depth++;
       else if (this.tok === 125) depth--;
-      str.add2(this.tok, this.tokc);
+      str.addTok(this.tok, this.tokc, this.errLine());
       this.next();
       if (depth === 0) break;
     }
@@ -810,6 +861,11 @@ export class Cpp {
         const t = fr.str.toks[fr.i];
         const v = fr.str.vals[fr.i];
         fr.i++;
+        if (t === TOK_LINENUM) {
+          // 收的时候记下的行号（`TokStr.addTok`），放的时候拨回去（`tccpp.c:3478`）
+          this.file.lineNum = /** @type {number} */ (v);
+          continue;
+        }
         if (t === TOK_EOF) {
           // 宏里的 EOF 是 `#if` 求值那一路造的哨兵，原样交出去
           this.tok = TOK_EOF;
@@ -1857,14 +1913,32 @@ export class Cpp {
       str.add2(TOK_CLLONG, 0n);
     }
     if (str.len() === 0) this.err(`#${this.tokStr(t0, null)} with no expression`);
-    this.ppExpr = 0;
 
+    /* 求值这一段里 `ppExpr` 记的是 `#if` / `#elif` 本身（tcc 的 `pp_expr = t0`，
+     * `tccpp.c:1496`）—— 它同时是「出错要转印记号流」的开关，见 `err`。 */
+    this.ppExpr = t0;
+    this.ppExprStr = str;
     const ev = { str, i: 0, cpp: this };
     const val = evalCond(ev);
-    if (ev.i < str.len()) {
-      this.err(`bad preprocessor expression: #${this.tokStr(t0, null)}`);
-    }
+    if (ev.i < str.len()) this.err('bad preprocessor expression');
+    this.ppExpr = 0;
+    this.ppExprStr = null;
     return val.v !== 0n;
+  }
+
+  /**
+   * `pp_error`（`tccpp.c:1510`）：`#if` 求值出的错不报原话，改印**整条展开后的记号流**。
+   *
+   * `#if ! 0 || ! 0 ( 0 )` 这样的东西是一串宏套出来的，源码那一行长得完全不一样；
+   * 对账的时候唯一有用的线索就是这一串。所以 tcc 宁可丢掉具体的错因。
+   */
+  ppErrorMsg() {
+    let s = `bad preprocessor expression: #${this.tokStr(this.ppExpr, null)}`;
+    const str = this.ppExprStr;
+    for (let i = 0; str !== null && i < str.len(); i++) {
+      s += ` ${this.tokStr(str.toks[i], str.vals[i])}`;
+    }
+    return s;
   }
 
   /* ------------------------------------------------- 输出（`tcc_preprocess`，tccpp.c:3891） */

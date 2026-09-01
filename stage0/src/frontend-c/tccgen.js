@@ -685,9 +685,11 @@ export class CGen {  /**
     this.err(`${what} expected`);
   }
 
-  /** `skip(c)`：当前记号必须是 `c`，然后往前走一格。 */
+  /** `skip(c)`（`tccpp.c:100`）：当前记号必须是 `c`，然后往前走一格。 */
   skip(t) {
-    if (this.tok !== t) this.expect(`'${this.cpp.tokStr(t, null)}'`);
+    if (this.tok !== t) {
+      this.err(`'${this.cpp.tokStr(t, this.tokc)}' expected (got '${this.cpp.tokStr(this.tok, this.tokc)}')`);
+    }
     this.next();
   }
 
@@ -2728,6 +2730,13 @@ export class CGen {  /**
       return;
     }
 
+    /* `__asm__(…)` 当语句（`tccgen.c:7465`）。它在语句这一层，不是表达式 —— 所以要在
+     * 落到 `exprStmt()` 之前认掉。 */
+    if (t === TOK_ASM1 || t === TOK_ASM2 || t === TOK_ASM3) {
+      this.asmInstr();
+      return;
+    }
+
     /* `name :` 是语句标签（`tccgen.c:7376`：tcc 也是看下一个记号是不是 `:`）。
      * 猜错了要把名字**交回去**，`ungetTok` 就是为这一格存在的（funcDecl 的 `(void)`
      * 同一手法）。标识符自己没有 tokc，所以推回去不丢信息。 */
@@ -3626,6 +3635,79 @@ export class CGen {  /**
     this.skip(RPAR);
   }
 
+  /**
+   * `asm_instr`（`tccasm.c:1327`）：`__asm__` 当**一条语句**。
+   *
+   * 自带汇编器还没到（ADR-0017 第九到十一步），所以这一格只认一种形状：**模板是空串、
+   * 没有操作数**的那种 —— `__asm__ __volatile__("" ::: "memory")`，一条编译屏障。
+   * 它说的是「别把内存访问搬过这一行」，而我们既不重排也不把内存缓进寄存器（每次访问
+   * 都是一条 LOAD/STORE），所以**什么都不发**就是它的正确实现。
+   * macOS SDK 的 `dispatch_compiler_barrier()`（`dispatch/base.h:195`）就是这一条，
+   * `dispatch/once.h` 的两个 inline 函数里各有一次 —— 编 tinycc 的源码时撞上的正是它。
+   *
+   * 模板非空、或者带了操作数的，报错并钉住边界（`gen-bad/asm-stmt`）：那些要真的发指令。
+   *
+   * 与 tcc 一样**不吃掉那个 `;`**（`tccasm.c:1420` 的注释），只检查它在 —— 留给外面
+   * 当一条空语句读掉。
+   */
+  asmInstr() {
+    this.next();
+    while (this.tok === TOK_VOLATILE || this.tok === TOK_VOLATILE1
+      || this.tok === TOK_VOLATILE2 || this.tok === TOK_GOTO) {
+      this.next();
+    }
+    this.skip(LPAR);
+    if (this.tok !== TOK_STR) this.expect('string constant');
+    // `parse_asm_str`：相邻的字符串字面量接成一个模板（`readStrTok` 顺手往前走）
+    const tmpl = this.readStrTok(this.tokc);
+    if (tmpl !== '') this.err('第八刀：非空的 __asm__ 模板还没到（等自带汇编器）');
+    /* `: 输出 : 输入 : 破坏列表` —— 形状照抄 tcc（`tccasm.c:1352-1380`）：
+     * 「下一个不是 `:`」才算这一段有东西。真的有操作数就是边界；不是操作数的东西
+     * （比如 `("" :)` 里的 `)`）与 tcc 一样报 `string constant expected`。
+     * 第三段是一串逗号分隔的字符串（寄存器/内存的破坏列表），对我们没有意义，读掉。 */
+    if (this.tok === COLON) {
+      this.next();
+      this.asmOperands('输出');
+      if (this.tok === COLON) {
+        this.next();
+        if (this.tok !== RPAR) {
+          this.asmOperands('输入');
+          if (this.tok === COLON) {
+            this.next();
+            for (;;) {
+              if (this.tok === COLON) break;
+              if (this.tok !== TOK_STR) this.expect('string constant');
+              this.readStrTok(this.tokc);
+              if (this.tok !== COMMA) break;
+              this.next();
+            }
+          }
+        }
+      }
+    }
+    while (this.tok !== RPAR) {
+      if (this.tok === TOK_EOF) this.expect("')'");
+      this.next();
+    }
+    this.skip(RPAR);
+    if (this.tok !== SEMI) this.expect("';'");
+  }
+
+  /**
+   * `parse_asm_operands`（`tccasm.c:1268`）的边界版：一段操作数表。
+   *
+   * tcc 那边「下一个不是 `:`」就当这一段有操作数、去读 `[名字] "约束" (表达式)`。
+   * 我们读不了 —— 那要把值搬进指定的寄存器。所以：看着**像**操作数（`[` 或字符串）的
+   * 报边界；别的与 tcc 一样报 `string constant expected`。
+   */
+  asmOperands(which) {
+    if (this.tok === COLON) return;
+    if (this.tok === LBRACK || this.tok === TOK_STR) {
+      this.err(`第八刀：__asm__ 的${which}操作数还没到（等自带汇编器）`);
+    }
+    this.expect('string constant');
+  }
+
   parseBtype() {
     let bt = -1;
     let longs = 0;
@@ -4096,6 +4178,14 @@ export class CGen {  /**
        * 块内也一样（那是一条空语句，`stmt` 那边照旧认）—— 所以这一格只在顶层收。 */
       if (global && this.tok === SEMI) {
         this.next();
+        any = true;
+        continue;
+      }
+      /* 顶层的 `__asm__(…)`（`asm_global_instr`，`tccgen.c:8774`）。与语句那一层
+       * 同一个界：空模板放过，非空的报错。 */
+      if (global && (this.tok === TOK_ASM1 || this.tok === TOK_ASM2 || this.tok === TOK_ASM3)) {
+        this.asmInstr();
+        this.skip(SEMI);
         any = true;
         continue;
       }
