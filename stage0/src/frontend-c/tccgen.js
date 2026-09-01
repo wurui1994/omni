@@ -624,6 +624,8 @@ export class CGen {  /**
     this.dataOff = MEM_PAGE;
     /** @type {Map<string,number>} 字符串字面量去重（同一份文本一份 data） */
     this.strs = new Map();
+    /** @type {Map<string,number>} 宽字符串字面量去重（键是那串 wchar 的值） */
+    this.wstrs = new Map();
     /** @type {{off:number,bytes:number[]}[]} 攒着的 data 段（内存要等 dataOff 定了才能声明） */
     this.pendingData = [];
     /** 这个单元用到堆了吗（`malloc` 那一族）。用到才发那条 `__omni_heap_init` */
@@ -1433,6 +1435,33 @@ export class CGen {  /**
       this.mod.consts.int(BigInt(this.strData(bytes))), 0);
   }
 
+  /** 宽字符串字面量的那一块 data：一格四字节小端，末尾补一个 0。 */
+  wstrData(vals) {
+    const key = vals.join(',');
+    const hit = this.wstrs.get(key);
+    if (hit !== undefined) return hit;
+    const addr = this.dataOff;
+    const raw = [];
+    for (const v of [...vals, 0]) {
+      const u = v >>> 0;
+      raw.push(u & 255, (u >>> 8) & 255, (u >>> 16) & 255, (u >>> 24) & 255);
+    }
+    this.wstrs.set(key, addr);
+    this.dataOff = alignUp(addr + raw.length, 8);
+    this.pendingData.push({ off: addr, bytes: raw });
+    return addr;
+  }
+
+  /**
+   * 一个宽字符串字面量当表达式用。类型是 `wchar_t[N+1]` —— 而 `wchar_t` 在这个目标上
+   * 就是 `int`（tcc 那边是 `nwchar_t`，非 PE 目标上 `typedef int`），所以
+   * `sizeof(L"ab")` 是 12。
+   */
+  wstrLit(vals) {
+    return sMem(mkArray(TY_INT, vals.length + 1),
+      this.mod.consts.int(BigInt(this.wstrData(vals))), 0);
+  }
+
   /**
    * 收当前这一串字符串字面量的字节。**相邻的要拼起来**（C11 6.4.5 第 5 段）：
    * `"a" "b"` 是一个 `char[3]`。tcc 在 `parse_string` 之后同样靠一个循环吃掉后续的
@@ -1446,6 +1475,28 @@ export class CGen {  /**
       this.next();
     }
     return s;
+  }
+
+  /**
+   * 宽字符串那一路（`L"a" L"b"`）。一格是一个 `wchar_t`，所以值是一串数字而不是文本。
+   *
+   * 宽窄混着拼（`L"abc" "def"`）tcc 认：它在**字节**层面接（`tccgen.c:8075-8083`
+   * 那个循环对两种记号都 `cstr_cat`），于是窄的那半截字节被当成 wchar 读。那是一次
+   * 「按表示接、不按元素接」的巧合，不是一条能解释的规则 —— 这一格明着报错，
+   * 而 tinycc 自己的 `tcctest.c` 把这种写法关在 `#if 0` 里，oracle 也问不到。
+   */
+  readWStrTok(v) {
+    const vals = Array.from(/** @type {number[]} */ (v));
+    this.next();
+    for (;;) {
+      if (this.tok === TOK_LSTR) {
+        for (const x of /** @type {number[]} */ (this.tokc)) vals.push(x);
+      } else if (this.tok === TOK_STR) {
+        this.todo('第八刀：宽窄字面量混着拼还没到（tcc 是按字节接的）');
+      } else break;
+      this.next();
+    }
+    return vals;
   }
 
   /**
@@ -1514,6 +1565,13 @@ export class CGen {  /**
       this.initString(dest, off, ty, this.readStrTok(this.tokc));
       return;
     }
+    /* `wchar_t s[4] = L"ab"` 同理。类型不对（`char s[] = L"ab"`）就**不**走这一路 ——
+     * tcc 那儿的条件也是「元素类型是 wchar_t 才当字符串铺，否则当 (w)char* 表达式」
+     * （`tccgen.c:8064-8070` 那个 if 的注释）。 */
+    if (isArray(ty.t) && this.tok === TOK_LSTR && btype(ty.ref.t) === VT_INT) {
+      this.initWString(dest, off, ty, this.readWStrTok(this.tokc));
+      return;
+    }
     if (this.tok === LBRACE) {
       if (isArray(ty.t) || isStruct(ty.t)) {
         /* `{ "abc" }`：一对花括号裹着的字符串照旧是「铺进数组」（C11 6.7.9 第 14 段）。
@@ -1524,6 +1582,14 @@ export class CGen {  /**
           const bytes = this.tryBracedStr();
           if (bytes !== null) {
             this.initString(dest, off, ty, bytes);
+            return;
+          }
+        }
+        if (isArray(ty.t) && btype(ty.ref.t) === VT_INT) {
+          // `wchar_t w[3] = { L"ab" };` —— 同一条规则的宽版本。
+          const vals = this.tryBracedStr(TOK_LSTR);
+          if (vals !== null) {
+            this.initWString(dest, off, ty, vals);
             return;
           }
         }
@@ -1548,27 +1614,29 @@ export class CGen {  /**
 
   /**
    * 试着把 `{ "…" }` 整个读掉（第八刀第二十八片）。回并好的字节，不是这个形状就把
-   * 记号**原样放回去**、回 null。
+   * 记号**原样放回去**、回 null。宽的那一路（`{ L"…" }`）传 `TOK_LSTR`，回的是
+   * 一串 wchar 的值。
    *
    * 不定长数组要它：`char a[] = { "abc" };` 的大小是 strlen + 1，而数格子那一遍
    * （`sizeFromInit`）会把这一整格数成 1 个元素。判「是不是这个形状」照 tcc
    * （`tccgen.c:8086`）：并完相邻的字面量之后下一格是 `}` 或 `,` 才算。
    */
-  tryBracedStr() {
+  tryBracedStr(kind = TOK_STR) {
     if (this.tok !== LBRACE) return null;
     this.next();
-    if (this.tok !== TOK_STR) {
+    if (this.tok !== kind) {
       this.ungetWith(LBRACE, null);
       return null;
     }
-    const bytes = this.readStrTok(this.tokc);
+    const merged = kind === TOK_LSTR
+      ? this.readWStrTok(this.tokc) : this.readStrTok(this.tokc);
     if (this.tok === RBRACE || this.tok === COMMA) {
       if (this.tok === COMMA) this.next();
       this.skip(RBRACE);
-      return bytes;
+      return merged;
     }
     /* 不是孤零零的一个字面量（`{ "xy" "z"[2], 0 }`）：把并好的串与那个 `{` 都放回去。 */
-    this.ungetWith(TOK_STR, bytes);
+    this.ungetWith(kind, merged);
     this.ungetWith(LBRACE, null);
     return null;
   }
@@ -1611,6 +1679,17 @@ export class CGen {  /**
       /* 是个更大的表达式的开头：把并好的串放回去，交给常量求值器。 */
       this.ungetWith(TOK_STR, bytes);
     }
+    if (this.tok === TOK_LSTR) {
+      /* `wchar_t *p = L"ab";` —— 同一件事，指向的是宽串那一块。
+       * `L"ab"[1]` 那种（下标）留给常量求值器。 */
+      const vals = this.readWStrTok(this.tokc);
+      if (this.tok === COMMA || this.tok === RBRACE || this.tok === SEMI) {
+        if (!isPtr(ty.t)) this.err(`invalid initializer for '${typeText(ty)}'`);
+        this.emitBytes(dest.addr + off, 8, BigInt(this.wstrData(vals)));
+        return;
+      }
+      this.ungetWith(TOK_LSTR, vals);
+    }
     if (isFloat(ty.t)) {
       /* 静态的浮点初始化式：**在这儿就把它编码成 IEEE 754 的那几个字节**。
        * 整型那一侧写的是数值，这儿写的是位模式 —— 因为 data 段就是字节，
@@ -1650,6 +1729,26 @@ export class CGen {  /**
   }
 
   /**
+   * 宽字符串铺进 `wchar_t` 数组（`wchar_t s[] = L"ab"`）。与 `initString` 同一条规则，
+   * 只是一格四字节：装不下的那个结尾 0 照样可以丢（`wchar_t s[2] = L"ab"`）。
+   */
+  initWString(dest, off, ty, vals) {
+    if (btype(ty.ref.t) !== VT_INT) {
+      this.err(`array of '${typeText(ty.ref)}' cannot be initialized from a wide string`);
+    }
+    const n = ty.count < 0 ? vals.length + 1 : ty.count;
+    if (vals.length > n) this.err('initializer-string is too long');
+    for (let i = 0; i < n; i++) {
+      const v = BigInt(i < vals.length ? vals[i] >>> 0 : 0);
+      if (dest.stat) this.emitBytes(dest.addr + off + i * 4, 4, v);
+      else {
+        this.f.emit(OP.MSTORE, T_I32, dest.addr, this.mod.consts.i32(v),
+          memDesc(SK_I32, off + i * 4));
+      }
+    }
+  }
+
+  /**
    * `{…}` 铺进聚合。数组与 struct/union **合成一份**，因为「省掉里层花括号」这条规则
    * （C11 6.7.9 第 20 段）是跨着两者的：`struct S a[2] = {1,2,3,4}` 一层是数组、
    * 一层是 struct，而「上一层没吃完的东西交给下一层接着吃」的走法只有一套。
@@ -1685,7 +1784,7 @@ export class CGen {  /**
       for (;;) {
         const el = this.initElem(stack[stack.length - 1]);
         if (this.tok === LBRACE) break;                          // 花括号写全了
-        if (isArray(el.ty.t) && this.tok === TOK_STR) break;      // 字符串铺进 char 数组
+        if (isArray(el.ty.t) && (this.tok === TOK_STR || this.tok === TOK_LSTR)) break;
         if (!isArray(el.ty.t) && !isStruct(el.ty.t)) break;       // 标量，到底了
         if (isStruct(el.ty.t) && el.ty.ref.fields === null) {
           this.err(`'${typeText(el.ty)}' is an incomplete type`);
@@ -1886,7 +1985,7 @@ export class CGen {  /**
       for (;;) {
         const el = this.initElem(stack[stack.length - 1]);
         if (head === LBRACE) break;                             // 花括号写全了
-        if (isArray(el.ty.t) && head === TOK_STR) break;         // 字符串铺进 char 数组
+        if (isArray(el.ty.t) && (head === TOK_STR || head === TOK_LSTR)) break;
         if (!isArray(el.ty.t) && !isStruct(el.ty.t)) break;      // 标量，到底了
         if (isStruct(el.ty.t) && el.ty.ref.fields === null) {
           this.err(`'${typeText(el.ty)}' is an incomplete type`);
@@ -1984,12 +2083,12 @@ export class CGen {  /**
         const fty = t === TOK_CFLOAT ? TY_FLOAT : t === TOK_CDOUBLE ? TY_DOUBLE : TY_LDOUBLE;
         return this.postfix(sVal(fty, this.fkonst(fty, /** @type {number} */ (cv))));
       }
-      if (t === TOK_LSTR) this.todo('宽字符串字面量还没到');
+      if (t === TOK_LSTR) return this.postfix(this.wstrLit(this.readWStrTok(cv)));
       if (t === TOK_STR) return this.postfix(this.strLit(this.readStrTok(cv)));
-      if (t === TOK_LCHAR) this.todo('宽字符常量还没到');
       this.next();
       /* 字面量的类型由后缀定（`parseNumber` 已经按 tcc 的规则挑好了记号号）。
-       * `'a'` 在 C 里是 **int**，不是 char —— 这一格错了 `sizeof('a')` 就是 1 而不是 4。 */
+       * `'a'` 在 C 里是 **int**，不是 char —— 这一格错了 `sizeof('a')` 就是 1 而不是 4。
+       * `L'a'` 也是 int（`tccgen.c:5614` 那一支在非 PE 目标上就落到 `t = VT_INT`）。 */
       let ty = TY_INT;
       if (t === TOK_CUINT) ty = TY_UINT;
       else if (t === TOK_CLLONG || t === TOK_CLONG) ty = TY_LLONG;
@@ -4470,6 +4569,16 @@ export class CGen {  /**
       if (i < 0 || i > bytes.length) this.err('string literal index out of range');
       return BigInt.asIntN(8, BigInt(i === bytes.length ? 0 : bytes.charCodeAt(i) % 256));
     }
+    if (t === TOK_LSTR) {
+      // 宽的那一路同理，一格是一个带符号的 `wchar_t`（这个目标上就是 int）。
+      const vals = this.readWStrTok(this.tokc);
+      if (this.tok !== LBRACK) this.err('constant expression expected');
+      this.next();
+      const i = Number(this.constExpr());
+      this.skip(RBRACK);
+      if (i < 0 || i > vals.length) this.err('string literal index out of range');
+      return BigInt.asIntN(32, BigInt(i === vals.length ? 0 : vals[i]));
+    }
     // 一元 `+` / `-` 在 BigInt 与 number 上是同一个写法，所以这两格不分岔
     if (t === PLUS) { this.next(); return this.ceUnary(); }
     if (t === MINUS) { this.next(); return -this.ceUnary(); }
@@ -4651,6 +4760,7 @@ export class CGen {  /**
           let vty = d.ty;
           let body = null;
           let strBytes = null;
+          let wstrVals = null;
           const braced = hasInit && this.tok === LBRACE;
           if (isArray(vty.t) && vty.count < 0) {
             if (!hasInit) {
@@ -4665,11 +4775,18 @@ export class CGen {  /**
                * 读完记号已经吃掉，字节留在手上。 */
               strBytes = this.readStrTok(this.tokc);
               vty = mkArray(vty.ref, strBytes.length + 1);
+            } else if (this.tok === TOK_LSTR && btype(vty.ref.t) === VT_INT) {
+              /* `wchar_t s[] = L"ab"` —— 同一件事，一格四字节。 */
+              wstrVals = this.readWStrTok(this.tokc);
+              vty = mkArray(vty.ref, wstrVals.length + 1);
             } else if (btype(vty.ref.t) === VT_BYTE
               && (strBytes = this.tryBracedStr()) !== null) {
               /* `char a[] = { "abc" };`（第八刀第二十八片）—— 与上一格同一件事，
                * 只是外面多一对花括号。大小照样是 strlen + 1，而**不是**「1 个元素」。 */
               vty = mkArray(vty.ref, strBytes.length + 1);
+            } else if (btype(vty.ref.t) === VT_INT
+              && (wstrVals = this.tryBracedStr(TOK_LSTR)) !== null) {
+              vty = mkArray(vty.ref, wstrVals.length + 1);
             } else {
               const r = this.sizeFromInit(vty);
               vty = r.ty;
@@ -4699,6 +4816,7 @@ export class CGen {  /**
               this.autoZero(this.fpRef, e.off, typeSize(vty).size);
             }
             if (strBytes !== null) this.initString(dest, base, vty, strBytes);
+            else if (wstrVals !== null) this.initWString(dest, base, vty, wstrVals);
             else if (body !== null) {
               this.replayBraced(body, () => this.initializer(dest, base, vty));
             } else this.initializer(dest, base, vty);

@@ -329,8 +329,12 @@ export class Cpp {
       case TOK_LINENUM:
         return '<linenumber>';
       case TOK_STR: case TOK_LSTR: {
-        const pre = v === TOK_LSTR ? 'L' : '';
-        let out = `${pre}"`;
+        if (v === TOK_LSTR) {
+          let out = 'L"';
+          for (const ch of /** @type {number[]} */ (cv)) out += addChar(ch);
+          return `${out}"`;
+        }
+        let out = '"';
         for (const ch of /** @type {string} */ (cv)) out += addChar(ch.codePointAt(0));
         return `${out}"`;
       }
@@ -922,13 +926,16 @@ export class Cpp {
       s = s.slice(1);
     }
     const sep = s.charCodeAt(0);
-    const body = parseEscapeString(s.slice(1, s.length - 1), (m) => this.err(m));
+    const body = parseEscapeString(s.slice(1, s.length - 1), (m) => this.err(m), isLong);
     if (sep === 39) { // 字符常量
       if (body.length < 1) this.err('empty character constant');
       if (body.length > 1) this.warn('multi-character character constant');
       if (isLong) {
+        /* `L'ab'` 的值是**最后**那个（`tccpp.c:2198-2203` 的循环对宽的是直接赋值，
+         * 不像窄的那样左移八位再或）。`wchar_t` 在这个目标上是 `int`，所以按 32 位
+         * 有符号收口：`L'\xffffffff'` 是 -1。 */
         this.tok = TOK_LCHAR;
-        this.tokc = BigInt(body[body.length - 1]);
+        this.tokc = BigInt.asIntN(32, BigInt(body[body.length - 1]));
         return;
       }
       /* `c = (c << 8) | (char)byte`（`tccpp.c:2202`）—— `char` 在本机（arm64 Darwin）
@@ -943,7 +950,14 @@ export class Cpp {
       this.tokc = c;
       return;
     }
-    this.tok = isLong ? TOK_LSTR : TOK_STR;
+    /* 窄串的值是一个 JS 字符串（一格一字节），宽串是一个**数字数组**（一格一个 wchar）——
+     * 码位可以超过 0xFFFF，塞进 JS 字符串就会变成代理对、格数就错了。 */
+    if (isLong) {
+      this.tok = TOK_LSTR;
+      this.tokc = body;
+      return;
+    }
+    this.tok = TOK_STR;
     this.tokc = body.map((b) => String.fromCharCode(b)).join('');
   }
 
@@ -2106,36 +2120,53 @@ function defaultJoin(a, b) {
 }
 
 /**
- * `parse_escape_string`（`tccpp.c:1987`）：解字符串/字符常量里的转义，回**字节**数组。
- * `\x` 后面的十六进制**不限位数**（C 的规定，也是 tcc 的做法），八进制最多三位。
+ * `parse_escape_string`（`tccpp.c:1987`）：解字符串/字符常量里的转义。
+ * `\x` 后面的十六进制**不限位数**（C 的规定，也是 tcc 的做法），八进制最多三位，
+ * `\u` 要四位、`\U` 要八位（少一位就是错，不是「有几位算几位」）。
+ *
+ * `isLong`（`L'…'` / `L"…"`）改的是**一格装什么**：窄的一格是一个字节，宽的一格是一个
+ * `wchar_t`（这个目标上 4 字节、带符号）。于是宽的那一路不截到 8 位，源码里的非 ASCII
+ * 字符也不按 UTF-8 铺开、而是一个码位一格；`\u`/`\U` 反过来 —— 窄的要按 UTF-8 编码，
+ * 宽的直接就是那个值（tcc 的 `add_hex_or_ucn` 与 `cstr_u8cat` 那两条岔路）。
  */
-function parseEscapeString(s, fail) {
+function parseEscapeString(s, fail, isLong = false) {
   const out = [];
+  const add = (c) => out.push(isLong ? c : c & 0xff);
   let i = 0;
   while (i < s.length) {
     let c = s.charCodeAt(i);
     if (c !== 92) { // 不是 '\\'
-      // 非 ASCII 按 UTF-8 的字节进去（源码是 UTF-8，字符串常量也就是那些字节）
-      if (c < 128) out.push(c);
-      else for (const b of utf8Of(s.codePointAt(i))) out.push(b);
-      i += String.fromCodePoint(s.codePointAt(i)).length;
+      const cp = s.codePointAt(i);
+      // 窄的：源码是 UTF-8，字符串常量也就是那些字节。宽的：一个码位一格。
+      if (isLong) out.push(cp);
+      else if (c < 128) out.push(c);
+      else for (const b of utf8Of(cp)) out.push(b);
+      i += String.fromCodePoint(cp).length;
       continue;
     }
     i++;
     c = s.charCodeAt(i);
-    if (c === 120 || c === 88) { // x X
+    if (c === 120 || c === 88 || c === 117 || c === 85) { // x X u U
+      const want = c === 117 ? 4 : c === 85 ? 8 : 0;      // \u 四位、\U 八位、\x 不限
       i++;
       let n = 0;
-      let any = false;
+      let k = 0;
       for (;;) {
         const h = hexVal(s.charCodeAt(i));
         if (h < 0) break;
-        n = n * 16 + h;
-        any = true;
+        n = (n * 16 + h) >>> 0;
+        k++;
         i++;
+        if (want > 0 && k === want) break;
       }
-      if (!any) fail("invalid hex digit in escape sequence");
-      out.push(n & 0xff);
+      if (want > 0 ? k < want : k === 0) {
+        fail(want > 0
+          ? 'more hex digits in universal-character-name expected'
+          : 'invalid hex digit in escape sequence');
+      }
+      // `\u`/`\U` 在窄字符串里是**一个字符**、按 UTF-8 铺开；`\x` 从来不铺。
+      if (want > 0 && !isLong) for (const b of utf8Of(n)) out.push(b);
+      else add(n);
       continue;
     }
     if (isOctCh(c)) {
@@ -2146,20 +2177,20 @@ function parseEscapeString(s, fail) {
         i++;
         k++;
       }
-      out.push(n & 0xff);
+      add(n);
       continue;
     }
     i++;
     switch (c) {
-      case 97: out.push(7); break; // \a
-      case 98: out.push(8); break; // \b
-      case 102: out.push(12); break; // \f
-      case 110: out.push(10); break; // \n
-      case 114: out.push(13); break; // \r
-      case 116: out.push(9); break; // \t
-      case 118: out.push(11); break; // \v
-      case 101: out.push(27); break; // \e —— gcc 扩展，tcc 也认
-      case 39: case 34: case 92: case 63: out.push(c); break; // ' " \ ?
+      case 97: add(7); break; // \a
+      case 98: add(8); break; // \b
+      case 102: add(12); break; // \f
+      case 110: add(10); break; // \n
+      case 114: add(13); break; // \r
+      case 116: add(9); break; // \t
+      case 118: add(11); break; // \v
+      case 101: add(27); break; // \e —— gcc 扩展，tcc 也认
+      case 39: case 34: case 92: case 63: add(c); break; // ' " \ ?
       case LF: break; // 行拼接：什么都不产出
       default:
         fail(`unknown escape sequence: '\\${String.fromCharCode(c)}'`);
