@@ -68,16 +68,19 @@
 // 版本、整型提升与常规算术转换、强制转换、`sizeof`、函数（互相递归随便）、局部变量、
 // C 的全部优先级、`if/else`、`while`、`do`、`for`、`break`、`continue`、`return`、
 // 指针（`&`/`*`/算术/比较）、数组（含多维）、下标、影子栈、字符串字面量、常量表达式、
-// **全局量（data 段，常量初始化式）、`typedef`、`extern` 与「用过但没定义」的诊断**。
+// 全局量（data 段，常量初始化式）、`typedef`、`extern` 与「用过但没定义」的诊断、
+// **外部符号（`unit()` 末尾的转发桩）与变参调用（printf/sprintf 那一族已经跑通）**。
 // 还没到：struct/union/enum、聚合初始化器、带括号的声明符（`int (*a)[3]`、函数指针）、
-// 浮点、`switch`/`goto`、外部符号与变参（printf 在那一片跑通）。
+// 浮点（含 printf 的 `%f/%e/%g`）、`switch`/`goto`、`malloc` 那一族（要堆）、
+// 变参函数的**定义**（要 `va_list`/`va_arg`）。
 //
 // 碰到还没做到的东西**当场报错**，报错文本里带「第六刀」字样 —— 一眼能看出是进度不是
 // bug，而且下一片把它做掉时 `gen-bad/` 里那条用例会跟着红，于是「边界移动了」这件事
 // 不会悄悄发生（第四刀前半那一节讲过这条纪律）。
 //
-// oracle 是 `tcc -run` 的**进程退出码** —— `main` 的返回值就是它，于是这条轴完全不需要
-// libc。printf 要等外部符号那一片，到那时 oracle 升级成 stdout 逐字节。
+// oracle 原先只是 `tcc -run` 的**进程退出码**（`main` 的返回值，8 位）；printf 通了之后
+// 升级成「退出码 **加 stdout 逐字节相同**」—— 一次比较从 1 字节变成几百字节，同一份用例
+// 能钉住的东西多了两个数量级。有两格**不能**跟 tcc 对：`%p`（地址空间不同）与浮点。
 
 import { OmniError } from '../source/diag.js';
 import { Cpp } from './tccpp.js';
@@ -88,7 +91,7 @@ import {
   TOK_INC, TOK_DEC, TOK_SHL, TOK_SAR, TOK_LAND, TOK_LOR,
   TOK_EQ, TOK_NE, TOK_LT, TOK_GE, TOK_LE, TOK_GT, TOK_ULE, TOK_UGT,
   TOK_IF, TOK_ELSE, TOK_WHILE, TOK_FOR, TOK_DO, TOK_BREAK, TOK_CONTINUE, TOK_RETURN,
-  TOK_SWITCH, TOK_CASE, TOK_DEFAULT, TOK_GOTO, TOK_SIZEOF,
+  TOK_SWITCH, TOK_CASE, TOK_DEFAULT, TOK_GOTO, TOK_SIZEOF, TOK_DOTS,
   TOK_INT, TOK_VOID, TOK_BOOL, TOK_SIGNED, TOK_UNSIGNED, TOK_CHAR, TOK_SHORT, TOK_LONG,
   TOK_FLOAT, TOK_DOUBLE, TOK_STRUCT, TOK_UNION, TOK_ENUM, TOK_TYPEDEF,
   TOK_EXTERN, TOK_STATIC, TOK_CONST, TOK_REGISTER, TOK_AUTO, TOK_VOLATILE, TOK_INLINE,
@@ -445,7 +448,12 @@ export class CGen {  /**
     if (hit !== undefined) return hit;
     const f = new MirFunc(name, [], T_I32);
     const no = this.mod.addFunc(f);
-    const info = { no, f, defined: false, params: null, ret: TY_INT };
+    const info = {
+      no, f, params: null, ret: TY_INT,
+      defined: false,     // 这个单元里有函数体
+      declared: false,    // 这个单元里见过原型或定义（没见过就是隐式声明）
+      variadic: false,    // 形参表里有 `...`
+    };
     this.funcs.set(name, info);
     return info;
   }
@@ -1147,19 +1155,21 @@ export class CGen {  /**
     this.skip(RPAR);
     /* 形参个数与类型：声明过就核对并**按声明的类型转换实参**（C 的原型就是干这个的）。
      * 没声明过（先调用后定义）就只记个数，定义时反过来核对。 */
-    if (info.params !== null) {
-      if (info.params.length !== vals.length) {
-        this.err(`too ${vals.length < info.params.length ? 'few' : 'many'} arguments to function '${name}'`);
+    const np = info.params === null ? -1 : info.params.length;
+    if (np >= 0) {
+      const bad = info.variadic ? vals.length < np : vals.length !== np;
+      if (bad) {
+        this.err(`too ${vals.length < np ? 'few' : 'many'} arguments to function '${name}'`);
       }
     }
     const refs = [];
     for (let i = 0; i < vals.length; i++) {
-      /* 没有原型时按**实参提升**定形参类型（C11 6.5.2.2 第 6 段）。用
-       * `promotedType` 而不是 `promote`：后者会真的取一次值，而这里只想问类型 ——
-       * 多出来的那条 LOAD 谁也不读，但它会进 MIR，两条腿的输出就都多一条。 */
-      const want = info.params === null
-        ? promotedType(decayedType(vals[i].ty))
-        : info.params[i].ty;
+      /* 固定形参按**声明的类型**转（原型的作用）；`...` 后面那些按**默认实参提升**
+       * （C11 6.5.2.2 第 6 段）：窄整数提到 int、数组与函数退化成指针。
+       * 用 `promotedType` 而不是 `promote`：后者会真的取一次值，这里只想问类型。 */
+      const want = (np >= 0 && i < np)
+        ? info.params[i].ty
+        : promotedType(decayedType(vals[i].ty));
       refs.push(this.gv(this.castTo(vals[i], want)));
     }
     if (info.params === null) {
@@ -1168,8 +1178,42 @@ export class CGen {  /**
       }));
     }
     const rt = mirTypeOf(info.ret);
-    const ref = this.f.emit(OP.CALL, rt, info.no, this.f.pushArgs(refs), 0);
-    return sVal(info.ret, ref);
+    if (info.variadic) {
+      /* 变参函数：**每个调用点的实参个数都不同**，所以不能像非变参那样在 `unit()` 末尾
+       * 造一个转发桩（一个桩只装得下一副形参）。直接在调用点发 CCALL。
+       * 这一片里变参函数一定是外部的 —— 在 C 里**定义**一个变参函数要 `va_arg`，还没到。 */
+      return sVal(info.ret, this.f.emit(OP.CCALL, rt,
+        this.mod.cabiNo(name), this.f.pushArgs(refs), 0));
+    }
+    return sVal(info.ret, this.f.emit(OP.CALL, rt, info.no, this.f.pushArgs(refs), 0));
+  }
+
+  /**
+   * 外部函数的转发桩。这个翻译单元里没有函数体的名字就是外部符号 —— 真的编译器把它交给
+   * 链接器，我们给它一个桩：读进形参、发一条 CCALL、把结果返回。
+   *
+   * 为什么是桩、而不是在调用点直接发 CCALL：一遍过里**调用点可能出现在定义之前**，
+   * 那时还不知道这个名字最后有没有定义。桩把这个问题推到读完整个单元之后 —— 与
+   * 「undefined symbol」那条检查同一个位置，而调用点照旧发 CALL，一条都不用改。
+   *
+   * 变参函数是例外（见 funcCall），它们的桩因此是死代码 —— 就当它是 PLT 里那条
+   * 永远走不到的项。留着而不是删掉，是因为删一个函数会挪动 `funcIndex`，
+   * 而那些下标已经发在别人的 CALL 里了。
+   */
+  externThunk(name, info) {
+    const f = info.f;
+    const params = info.params === null ? [] : info.params;
+    const refs = [];
+    for (const p of params) {
+      const mt = mirTypeOf(p.ty);
+      const slot = f.slot(p.name, mt);
+      f.params.push({ name: p.name, t: mt, slot });
+      refs.push(f.emit(OP.LOAD, mt, REF_NONE, REF_NONE, slot));
+    }
+    const rt = mirTypeOf(info.ret);
+    const r = f.emit(OP.CCALL, rt, this.mod.cabiNo(name), f.pushArgs(refs), 0);
+    if (rt === T_VOID) f.emit(OP.RET, T_VOID, REF_NONE, REF_NONE, 0);
+    else f.emit(OP.RET, rt, r, REF_NONE, 0);
   }
 
   /**
@@ -1851,6 +1895,7 @@ export class CGen {  /**
     this.skip(LPAR);
     /** @type {{name:string,ty:object}[]} */
     const params = [];
+    let variadic = false;
     if (this.tok === RPAR) {
       // 老式的 `f()`：形参没说。这一片当「没有形参」处理
       this.next();
@@ -1863,16 +1908,25 @@ export class CGen {  /**
         this.cpp.ungetTok(TOK_VOID);
         this.tok = this.cpp.tok;
         this.tokc = this.cpp.tokc;
-        this.paramList(params);
+        variadic = this.paramList(params);
       }
     } else {
-      this.paramList(params);
+      variadic = this.paramList(params);
     }
-    return this.finishFunc(global, info, name, stripStorage(ret), params);
+    return this.finishFunc(global, info, name, stripStorage(ret), params, variadic);
   }
 
   paramList(params) {
+    let variadic = false;
     for (;;) {
+      if (this.tok === TOK_DOTS) {
+        /* `...`：变参。C 要求它前面至少有一个具名形参（C11 6.7.6.3 第 4 段）——
+         * 因为 `va_start` 要一个「从谁之后开始」的锚。 */
+        if (params.length === 0) this.err("at least one parameter before '...'");
+        this.next();
+        variadic = true;
+        break;
+      }
       const spec = this.parseBtype();
       const d = this.declarator(stripStorage(spec), 'opt');
       let ty = d.ty;
@@ -1893,6 +1947,7 @@ export class CGen {  /**
       this.next();
     }
     this.skip(RPAR);
+    return variadic;
   }
 
   /**
@@ -1921,17 +1976,20 @@ export class CGen {  /**
    * C 允许它不同，可那会让「循环里取地址」变成一件说不清的事。平铺让每个声明的地址在
    * 整个函数里恒定，代价是帧大一点。
    */
-  finishFunc(global, info, name, ret, params) {
+  finishFunc(global, info, name, ret, params, variadic) {
     if (info.params !== null && info.params.length !== params.length) {
       this.err(`conflicting types for '${name}'`);
     }
     info.params = params;
     info.ret = ret;
+    info.variadic = variadic === true;
+    info.declared = true;
     info.f.ret = mirTypeOf(ret);
 
     if (this.tok !== LBRACE) return false;          // 只是个原型，`;` 交给 decl
     if (!global) this.err('nested function definition');
     if (info.defined) this.err(`redefinition of '${name}'`);
+    if (info.variadic) this.todo('变参函数的**定义**还没到（要 va_list / va_arg）');
     info.defined = true;
 
     const body = this.cpp.captureBraced();
@@ -2055,7 +2113,11 @@ export class CGen {  /**
       if (!this.decl(true)) this.expect('declaration');
     }
     for (const [name, info] of this.funcs) {
-      if (!info.defined) this.err(`undefined symbol '${name}'`);
+      if (info.defined) continue;
+      /* 这个单元里没有函数体 = 外部符号。C99 起「隐式声明」是错，tcc 只警告（并且当
+       * `int f()`）—— 照 tcc，因为它是 oracle。 */
+      if (!info.declared) this.cpp.warn(`implicit declaration of function '${name}'`);
+      this.externThunk(name, info);
     }
     /* `extern int x;` 之后没有定义：真的编译器要等链接期才知道。我们只有一个翻译单元，
      * 所以「用过但没定义」当场就是错。地址仍然分配过（一遍过里引用发生在定义之前，

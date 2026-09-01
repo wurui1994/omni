@@ -11,9 +11,11 @@
 //   2. `inc/`     —— `#include` 的搜索与守卫：同样与 tcc 比，只是多给一个 -I。
 //   3. `cpp-bad/` —— 该拒的要拒，而且拒在正确的理由上（阶段边界与真错误各占一半）。
 //                    这一组有 .expected（一行，错误消息的关键片段）。
-//   4. `gen/`     —— 第六刀：编译并跑，**进程退出码**与 `tcc -run` 相同。退出码就是
-//                    C 的 `main` 的返回值，于是这条轴完全不需要 libc（printf 是第八步）。
-//                    退出状态只有 8 位（wait(2) 的规矩），所以用例都把结果收在 0..255。
+//   4. `gen/`     —— 第六刀：编译并跑，**进程退出码与整条 stdout** 都与 `tcc -run` 相同。
+//                    退出码就是 C 的 `main` 的返回值，只有 8 位（wait(2) 的规矩），
+//                    所以用例都把结果收在 0..255。第五片 printf 一通之后 stdout 也进了
+//                    对账范围 —— 一个字节的 oracle 会撞（`s % 251` 曾经让一个真错误躲过
+//                    二分），整条 stdout 宽得多。
 //   5. `gen-bad/` —— 第六刀的阶段边界与真语法错误。同样有 .expected。
 //
 // tcc 不在的时候整组**跳过而不是假过**（印 skip 并说明原因）—— 悄悄变成 0 passed
@@ -191,7 +193,15 @@ for (const f of pick('gen')) {
     bad(name, `    退出码不同：tcc=${want.code} ours=${got.code}\n${got.err}`);
     continue;
   }
-  ok(`${name} [exit ${want.code} == tcc -run]`);
+  /* stdout 也要**逐字节**相同（第六刀第五片起）。printf 一通，oracle 就从「一个字节的
+   * 退出码」升级成「整条 stdout」—— 之前一次 `s % 251` 的碰撞让一个真错误躲过了二分，
+   * 这条轴宽得多。 */
+  if (got.out !== want.out) {
+    bad(name, `    stdout 不同：\n--- tcc ---\n${want.out}--- ours ---\n${got.out}`);
+    continue;
+  }
+  const n = want.out.length;
+  ok(`${name} [exit ${want.code}${n > 0 ? ` + ${n}B stdout` : ''} == tcc -run]`);
 }
 
 // ------------------------------------------------------------ 5. gen-bad/：边界与语法错误

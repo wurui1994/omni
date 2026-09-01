@@ -31,6 +31,7 @@ import {
   memInit, memData, memSize, memGrow, memLoadFn, memStoreFn,
 } from '../interp/builtin.js';
 import { JS_ALL } from '../hir/js_abi.js';
+import { hasLibc, callLibc } from '../interp/libc.js';
 import { lowerToMir } from './from_oir.js';
 import { verifyMir } from './verify.js';
 import {
@@ -843,9 +844,23 @@ class MirInterp {
       };
     }
     if (op === OP.CCALL) {
-      // 和 OIR 解释器同一个立场（eval.js 的 CCall 分支）：解释执行是 oracle，
-      // 它不该假装能做 FFI —— C_ABI 每条 op 的签名各不相同，按名字查一张函数指针表过不去。
       const entry = this.mir.cabi[f.a[i]];
+      /* C 的 libc 走宿主提供的那一份（`interp/libc.js`）：它认得线性内存，所以指针
+       * 实参在它手里有意义 —— 与 wasm 那边「宿主模块 + 一块共享内存」是同一个结构。
+       * 其余的 C_ABI 入口**照旧拒绝**：那些是 ADR-0014 的封闭表，每条签名各不相同，
+       * 而解释执行是 oracle，它不该假装能做 FFI（eval.js 的 CCall 分支同一个立场）。 */
+      if (hasLibc(entry)) {
+        const args = rdArgs(f.b[i]);
+        return (F) => {
+          const vals = readAll(args, F);
+          try {
+            F.v[i] = callLibc(entry, vals);
+          } catch (e) {
+            failRt(`${entry}: ${e instanceof Error ? e.message : String(e)}`);
+          }
+          return next;
+        };
+      }
       return () => {
         failRt(`interp: C ABI call '${entry}' is not supported by the interpreter`);
         return next;
