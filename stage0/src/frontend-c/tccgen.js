@@ -28,29 +28,46 @@
 //
 // 3. **不折常量。** tcc 的 `gen_opic` 在解析时就把 `1+2*3` 算成 7。这里不折：MIR 的
 //    消费者本来就会折，而折叠是**语义可见**的（`1/0` 折了成编译期错误、不折是运行期
-//    错误）。先记在这儿不做。
+//    错误）。先记在这儿不做。**唯一的例外**是数组维度那种「C 要求必须是常量」的位置 ——
+//    那里有一个独立的小求值器（`constExpr`），它只认常量，见不到变量。
+//
+// 4. **函数体解析两遍。** `&x` 要求 `x` 落在线性内存上，而「谁被取过地址」在一遍过里
+//    没法提前知道。tcc 不需要知道（它把所有局部量都上栈，帧大小最后**回填**进序言），
+//    MIR 不能回填。所以函数体的记号先整块收下来，放一遍收集信息（输出丢掉）、再放一遍
+//    才是真的。理由与代价写在 `finishFunc` 头上。
 //
 // ## 窄整数在寄存器里是什么样（这一片最要紧的一条不变量）
 //
 // `char` / `short` / `_Bool` 在 MIR 里都是 `T_I32`，而且**永远处在规范形**：
 // 有符号的那些符号扩展过、无符号的那些落在 0..2^n-1 里。tcc 与 wasm 都是这么做的
 // （`tcc.h` 里根本没有 8/16 位的寄存器类）。这条不变量买到两件事：
-//   - **整型提升不发任何指令** —— `char` 提到 `int` 只是换一个 CType，位一个都不动；
-//   - 宽度只在两处看得见：存进内存（`MSTORE` 的描述符）与显式转换（`CVT_SEXT8/16`）。
+//   - **整型提升不发任何转换指令** —— `char` 提到 `int` 只是换一个 CType，位一个都不动；
+//   - 宽度只在两处看得见：访问内存（`MLOAD`/`MSTORE` 的描述符）与显式转换（`CVT_SEXT8/16`）。
 // 反过来，任何产生窄类型值的地方都**必须**收口回规范形，否则「提升不发指令」这条
 // 就成了错的。收口只在 `castTo` 一处，别处不许自己截。
 //
+// 「宽度只在访问那一刻有意义」还有一条推论：提升一个**左值**必须先按原类型取值，
+// 换完类型码再取就会按 `int` 的宽度读内存。这一格错过一次，见 `promote`。
+//
+// ## 内存的版图
+//
+// 页 0（0..64K）整页留空 —— C 的 `NULL` 于是**一定**访问不到。data 段从 64K 往上长
+// （字符串字面量，以后是全局量）；影子栈接在它后面，`$sp`（一个 i64 全局）从栈顶往下长。
+// 指针就是**线性内存里的字节偏移**（`T_I64`），不是 ADR-0016 的 `T_PTR`/`T_TPTR` ——
+// 那两个带范围检查、一块一块地分配，而 C 要的是一整片可寻址的字节。
+//
 // ## 这一片做到哪儿（**是路标，不是终点**）
 //
-// 终点是「能编译 tinycc 自己的全部源码」，所以 printf、指针、struct、变参、`setjmp`
+// 终点是「能编译 tinycc 自己的全部源码」，所以 printf、struct、变参、`setjmp`
 // 一个都躲不过去 —— 下面这些不是「刻意不做」，是**还没做到那一片**。分片顺序与理由写在
 // ADR-0017 第六刀的落地节里，一句话：按解锁能力排，不按语法书的章节排。
 //
 // 已经做到：`void`、`_Bool`、`char`/`short`/`int`/`long`/`long long` 及其 `unsigned`
-// 版本、整型提升与常规算术转换、强制转换、`sizeof(类型)`、函数（互相递归随便）、
-// 局部变量、C 的全部优先级、`if/else`、`while`、`do`、`for`、`break`、`continue`、`return`。
-// 还没到：指针与数组（下一片，要影子栈）、struct/union/enum、typedef、浮点、
-// `switch`/`goto`、全局变量、字符串字面量、外部符号与变参（printf 在那一片跑通）。
+// 版本、整型提升与常规算术转换、强制转换、`sizeof`、函数（互相递归随便）、局部变量、
+// C 的全部优先级、`if/else`、`while`、`do`、`for`、`break`、`continue`、`return`、
+// **指针（`&`/`*`/算术/比较）、数组（含多维）、下标、影子栈、字符串字面量、常量表达式**。
+// 还没到：struct/union/enum、typedef、聚合初始化器、带括号的声明符（`int (*a)[3]`、
+// 函数指针）、浮点、`switch`/`goto`、全局变量、外部符号与变参（printf 在那一片跑通）。
 //
 // 碰到还没做到的东西**当场报错**，报错文本里带「第六刀」字样 —— 一眼能看出是进度不是
 // bug，而且下一片把它做掉时 `gen-bad/` 里那条用例会跟着红，于是「边界移动了」这件事
@@ -79,18 +96,74 @@ import {
   VT_UNSIGNED, VT_DEFSIGN, VT_LONG, VT_FLOAT, VT_DOUBLE,
   VT_EXTERN, VT_STATIC, VT_TYPEDEF, VT_INLINE, VT_CONSTANT, VT_VOLATILE, VT_STORAGE,
   btype, isInteger, isFloat, isUnsigned, isPtr, isArray, isFunc,
-  ctype, typeSize, typeText,
+  ctype, mkPointer, mkArray, typeSize, typeText, sameType,
   TY_VOID, TY_INT, TY_UINT, TY_LLONG, TY_ULLONG, TY_CHAR, TY_SHORT, TY_BOOL,
 } from './ctype.js';
 import {
   MirModule, MirFunc, OP, T_VOID, T_I32, T_I64, T_BOOL, REF_NONE,
-  CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16,
+  CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16, memDesc, MEM_PAGE,
 } from '../mir/ir.js';
+
+/* 线性内存的访问描述符号（`MLOAD_KINDS` / `MSTORE_KINDS` 的下标，ir.js:383）。
+ * 写成常量是为了 `loadKindOf` 读起来像一张表 —— 下标写字面量的话改一次表就全错。 */
+const MK_I8S = 0;
+const MK_I8U = 1;
+const MK_I16S = 2;
+const MK_I16U = 3;
+const MK_I32S = 4;
+const MK_I64 = 6;
+const SK_I8 = 0;
+const SK_I16 = 1;
+const SK_I32 = 2;
+const SK_I64 = 3;
+
+/**
+ * 从内存里读一个这种类型的值，用哪个宽度符号。
+ *
+ * **满宽的读没有无符号变体**：`unsigned int` 也走 `i32s`。理由在 ir.js:376 与
+ * verify.js:161 —— T_I32 的规范形是符号扩展过的，而无符号性挂在算子上
+ * （ADR-0016 第六十一刀）。写成 `i32u` 会被 verifier 当场骂。
+ */
+function loadKindOf(ty) {
+  const b = btype(ty.t);
+  if (b === VT_BOOL) return MK_I8U;
+  if (b === VT_BYTE) return isUnsigned(ty.t) ? MK_I8U : MK_I8S;
+  if (b === VT_SHORT) return isUnsigned(ty.t) ? MK_I16U : MK_I16S;
+  if (b === VT_INT) return MK_I32S;
+  return MK_I64;   // long / long long / 指针
+}
+
+/** 往内存里写：只是「把低若干位拍进去」，没有符号可言（load 有 `_s`/`_u`，store 没有）。 */
+function storeKindOf(ty) {
+  const b = btype(ty.t);
+  if (b === VT_BOOL || b === VT_BYTE) return SK_I8;
+  if (b === VT_SHORT) return SK_I16;
+  if (b === VT_INT) return SK_I32;
+  return SK_I64;
+}
+
+/** 向上对齐。`a` 是 2 的幂，但这里不假设 —— 一句除法比一句位运算好读。 */
+function alignUp(n, a) {
+  const r = n % a;
+  return r === 0 ? n : n + (a - r);
+}
+
+/** 影子栈的对齐：一律 8（arm64 的 ABI 要 16，但我们只在内存里放标量与小聚合）。 */
+const FRAME_ALIGN = 8;
+
+/**
+ * 影子栈的大小。1 MiB —— 与 tcc 在本机上的默认线程栈同一个量级，而递归深度超出它时
+ * 得到的是「内存越界」（memChk 会喊），不是静悄悄踩别的东西。写死是因为这一片没有
+ * `-Wl,-z,stacksize` 那类开关；将来要调就是一个命令行参数。
+ */
+const C_STACK_BYTES = 1024 * 1024;
+
 
 /* 单字符记号的码位。写成常量是为了读得出来 —— `this.tok === 40` 谁也认不出是 `(`。 */
 const LPAR = 40;
 const RPAR = 41;
 const LBRACK = 91;
+const RBRACK = 93;
 const LBRACE = 123;
 const RBRACE = 125;
 const SEMI = 59;
@@ -140,16 +213,37 @@ function intBitsOf(ty) {
 }
 
 /**
- * 一个 C 值。三种形态，对应 tcc 的 `SValue` 里真正带语义的那三格：
+ * 一个 C 值。四种形态，对应 tcc 的 `SValue` 里真正带语义的那几格：
  *   - 普通值：`ref` 是产出它的那条 MIR 指令（或常量池的 ref）
- *   - 左值（`VT_LVAL`）：`slot` 是那个局部变量的槽号，`ref` 是 null —— 取值要发 LOAD，
- *     赋值直接发 STORE。**不预先 LOAD** 是有用的：`a = 5` 于是不多出一条没人读的 LOAD。
+ *   - 槽左值（`VT_LVAL` + 寄存器）：`slot` 是 MIR 槽号。取值发 LOAD，赋值发 STORE。
+ *     **不预先 LOAD** 是有用的：`a = 5` 于是不多出一条没人读的 LOAD。
+ *   - 内存左值（`VT_LVAL` + `VT_LOCAL`）：`mem = {addr, off}`，地址是线性内存里的字节
+ *     偏移。取值发 MLOAD、赋值发 MSTORE，静态偏移进访问描述符（于是 `p->f` 不多一条加法）。
  *   - 比较（`VT_CMP`，`tccgen.c:1028`）：`ref` 是一个 `T_BOOL`，`cmp` 为真。
  *     当条件用（`if`/`while`/`&&`）就直接用；当整数用才摊成 0/1，见 `gv`。
  */
-function sVal(ty, ref) { return { ty, ref, slot: null, cmp: false }; }
-function sLval(ty, slot) { return { ty, ref: null, slot, cmp: false }; }
-function sCmp(ref) { return { ty: TY_INT, ref, slot: null, cmp: true }; }
+function sVal(ty, ref) { return { ty, ref, slot: null, mem: null, cmp: false, name: null }; }
+function sLval(ty, slot, name) {
+  return { ty, ref: null, slot, mem: null, cmp: false, name: name === undefined ? null : name };
+}
+function sMem(ty, addr, off) {
+  return { ty, ref: null, slot: null, mem: { addr, off }, cmp: false, name: null };
+}
+function sCmp(ref) { return { ty: TY_INT, ref, slot: null, mem: null, cmp: true, name: null }; }
+
+/** 是不是左值（能赋值、能取地址）。 */
+function isLval(v) { return v.slot !== null || v.mem !== null; }
+
+/** 退化之后的类型（**不发指令**，只回类型）。`T[N]` -> `T*`，别的原样。 */
+function decayedType(ty) { return isArray(ty.t) ? mkPointer(ty.ref) : ty; }
+
+/** 整型提升之后的类型（**不发指令**）。只问类型的地方用它，别叫 `promote`。 */
+function promotedType(ty) {
+  const b = btype(ty.t);
+  if (b === VT_BOOL || b === VT_BYTE || b === VT_SHORT) return TY_INT;
+  return ty;
+}
+
 
 /**
  * 二元运算符的记号 -> MIR 的 op。`uns` 挑无符号那一套（ADR-0016 第六十一刀把无符号性
@@ -202,8 +296,37 @@ function precedence(t) {
   return 0;
 }
 
-export class CGen {
-  /**
+/**
+ * 常量表达式里的二元运算（`constExpr` 用）。全在 JS 的 bigint 上算 ——
+ * 常量表达式的中间结果按 C 的规矩是 `intmax_t`，bigint 更宽，而维度最后要收成 Number，
+ * 所以宽一点不会让谁看出差别。除以零在这儿是**编译期错误**，见 constExpr 的注释。
+ */
+function ceApply(t, a, b, err) {
+  if (t === PLUS) return a + b;
+  if (t === MINUS) return a - b;
+  if (t === STAR) return a * b;
+  if (t === SLASH || t === PERCENT) {
+    if (b === 0n) err('division by zero in constant expression');
+    return t === SLASH ? a / b : a % b;
+  }
+  if (t === AMP) return a & b;
+  if (t === PIPE) return a | b;
+  if (t === CARET) return a ^ b;
+  if (t === TOK_SHL) return a << b;
+  if (t === TOK_SAR) return a >> b;
+  if (t === TOK_LAND) return (a !== 0n && b !== 0n) ? 1n : 0n;
+  if (t === TOK_LOR) return (a !== 0n || b !== 0n) ? 1n : 0n;
+  if (t === TOK_EQ) return a === b ? 1n : 0n;
+  if (t === TOK_NE) return a !== b ? 1n : 0n;
+  if (t === TOK_LT) return a < b ? 1n : 0n;
+  if (t === TOK_GE) return a >= b ? 1n : 0n;
+  if (t === TOK_LE) return a <= b ? 1n : 0n;
+  if (t === TOK_GT) return a > b ? 1n : 0n;
+  err('invalid operator in constant expression');
+  return 0n;
+}
+
+export class CGen {  /**
    * @param {Cpp} cpp 记号源（已经 startParse 过）
    * @param {MirModule} mod 往里发指令的模块
    */
@@ -225,6 +348,33 @@ export class CGen {
     this.regions = [];
     /** @type {Map<string,{no:number,f:MirFunc,defined:boolean,params:object[]|null,ret:object}>} */
     this.funcs = new Map();
+
+    /* ---- 影子栈与线性内存（第六刀第三片）。
+     * 一个 i64 全局 `$sp` 往下长；只有**被取过地址的**局部量与聚合落在它上面，其余照旧
+     * 在槽里。`fp` 是当前帧的基址（`$sp` 减掉帧大小之后的值），一个 ref 用到底 ——
+     * MIR 是 SSA，函数顶层发的那条指令在整个函数体里都可用。 */
+    this.spNo = -1;
+    /** 帧基址的 ref（没有帧就是 REF_NONE） */
+    this.fpRef = REF_NONE;
+    /** 进函数时的 `$sp`，每条 RET 前写回去 */
+    this.spSave = REF_NONE;
+    this.frameSize = 0;
+    /** 帧内的下一个空位。**不回收** —— 见 finishFunc 头上「平铺的帧」那一节 */
+    this.frameOff = 0;
+    /** 第一遍（收集期）吗 */
+    this.pass1 = false;
+    /** @type {Set<string>} 第一遍收到的「被取过地址的名字」 */
+    this.addrTaken = new Set();
+    /** @type {{name:string,size:number,align:number}[]} 第一遍见到的标量声明 */
+    this.declScalars = [];
+    /** @type {Set<string>} 第二遍要落在内存上的名字（= 第一遍的 addrTaken） */
+    this.frameNames = new Set();
+    /** data 段的下一个空位。页 0 整页留空，于是 C 的 `NULL` 一定访问不到 */
+    this.dataOff = MEM_PAGE;
+    /** @type {Map<string,number>} 字符串字面量去重（同一份文本一份 data） */
+    this.strs = new Map();
+    /** @type {{off:number,bytes:number[]}[]} 攒着的 data 段（内存要等 dataOff 定了才能声明） */
+    this.pendingData = [];
   }
 
   /* ------------------------------------------------------------ 记号与报错 */
@@ -282,12 +432,50 @@ export class CGen {
     return info;
   }
 
-  /** 声明一个局部变量：占一个槽，登记进最内层作用域。同名遮蔽是 C 的规矩。 */
+  /**
+   * 这个类型**必须**落在线性内存上吗。
+   * 数组（以后还有 struct/union）没有「装在一个寄存器里」的形态：`a[i]` 要能算地址。
+   * 标量则相反 —— 只有被 `&` 取过地址才不得不落到内存，那一问由第一遍回答。
+   */
+  needsMem(ty) {
+    return isArray(ty.t);
+  }
+
+  /** 在当前帧里划一块，回帧内偏移。**不回收**（见 finishFunc 头上「平铺的帧」）。 */
+  frameAlloc(ty) {
+    const s = typeSize(ty);
+    this.frameOff = alignUp(this.frameOff, s.align);
+    const off = this.frameOff;
+    this.frameOff += s.size === 0 ? 1 : s.size;
+    return off;
+  }
+
+  /**
+   * 声明一个局部变量。登记进最内层作用域（同名遮蔽是 C 的规矩），回那条登记。
+   * 两种落法二选一：帧上的偏移（`off >= 0`）或者 MIR 的槽（`slot >= 0`）。
+   */
   declareLocal(name, ty) {
     if (btype(ty.t) === VT_VOID) this.err(`variable '${name}' has void type`);
-    const slot = this.f.slot(name, mirTypeOf(ty));
-    this.scopes[this.scopes.length - 1].set(name, { slot, ty });
-    return slot;
+    const scope = this.scopes[this.scopes.length - 1];
+    if (this.needsMem(ty) || this.frameNames.has(name)) {
+      const e = { ty, slot: -1, off: this.frameAlloc(ty) };
+      scope.set(name, e);
+      return e;
+    }
+    /* 第一遍：把标量声明记下来，等这一遍读完、知道谁被取过地址了，再算帧大小的上界。 */
+    if (this.pass1) {
+      const s = typeSize(ty);
+      this.declScalars.push({ name, size: s.size, align: s.align });
+    }
+    const e = { ty, slot: this.f.slot(name, mirTypeOf(ty)), off: -1 };
+    scope.set(name, e);
+    return e;
+  }
+
+  /** 一条作用域登记 -> 一个左值。 */
+  entryLval(name, e) {
+    if (e.off >= 0) return sMem(e.ty, this.fpRef, e.off);
+    return sLval(e.ty, e.slot, name);
   }
 
   /** 查一个名字（由内往外）。查不到回 null —— 调用方要区分「函数名」与「未声明」。 */
@@ -356,6 +544,15 @@ export class CGen {
    * 分成两条正是 tcc 保留 `VT_CMP` 的全部收益：`if (a < b)` 一条比较就够。 */
 
   gv(v) {
+    /* 数组的**值**是它首元素的地址（C11 6.3.2.1 第 3 段）。落在这儿而不是只落在
+     * `decay` 里，是因为 gv 是所有「我要一个值」的必经之路 —— 漏一处就会 MLOAD 一个
+     * 数组，而那条 MLOAD 的宽度是元素的宽度，错得很像对。 */
+    if (isArray(v.ty.t)) return this.addrOf(v);
+    if (v.mem !== null) {
+      /* 内存左值：静态偏移进访问描述符，于是 `a[3]` 与 `p->f` 不多一条加法。 */
+      return this.f.emit(OP.MLOAD, mirTypeOf(v.ty), v.mem.addr, REF_NONE,
+        memDesc(loadKindOf(v.ty), v.mem.off));
+    }
     if (v.slot !== null) {
       return this.f.emit(OP.LOAD, mirTypeOf(v.ty), REF_NONE, REF_NONE, v.slot);
     }
@@ -376,6 +573,40 @@ export class CGen {
     return v.ref;
   }
 
+  /**
+   * 数组 -> 指向首元素的指针（`gen_cast` 之前 tcc 靠 `VT_ARRAY` 与 `VT_PTR` 同在一格
+   * 免了大部分这类代码，见 ctype.js 头）。**值**不变，只是类型从 `T[N]` 变成 `T*` ——
+   * 所以这里没有指令，只有一次 `addrOf`（它本身可能发一条 ADD）。
+   */
+  decay(v) {
+    if (isArray(v.ty.t)) return sVal(mkPointer(v.ty.ref), this.addrOf(v));
+    return v;
+  }
+
+  /**
+   * 取地址（`&x`，tcc 的 `VT_LLOCAL`/`gaddrof`）。
+   *
+   * 内存左值：帧基址加帧内偏移，**一条 ADD**（偏移是 0 时连这条也没有）。
+   * 槽左值：在**第一遍**里只把名字记下来（那一遍的输出要丢掉），第二遍这个名字已经
+   * 落在内存上了，所以再走到这儿就是 bug —— 报出来，别静悄悄发一个错地址。
+   */
+  addrOf(v) {
+    if (v.mem !== null) {
+      if (v.mem.off === 0) return v.mem.addr;
+      return this.f.emit(OP.ADD, T_I64, v.mem.addr,
+        this.mod.consts.int(BigInt(v.mem.off)), 0);
+    }
+    if (v.slot !== null) {
+      if (this.pass1) {
+        if (v.name !== null) this.addrTaken.add(v.name);
+        return this.mod.consts.int(0n);
+      }
+      this.err(`internal: 取 '${v.name}' 的地址，但第二遍里它还在槽上`);
+    }
+    this.err("lvalue required as unary '&' operand");
+    return REF_NONE;
+  }
+
   gtst(v) {
     if (v.cmp) return v.ref;
     const r = this.gv(v);
@@ -392,17 +623,20 @@ export class CGen {
   /**
    * 整型提升（C11 6.3.1.1）。`_Bool`/`char`/`short` -> `int`。
    *
-   * **不发任何指令** —— 因为窄整数在寄存器里永远是规范形（见文件头那一节）。
+   * **不发任何转换指令** —— 因为窄整数在寄存器里永远是规范形（见文件头那一节）。
    * 无符号的窄类型也一样：`unsigned char` 的取值落在 0..255，当 `int` 读还是同一个数。
    * 这就是那条不变量买到的东西；它也意味着任何产生窄值的地方必须自己收口，
    * 而收口只在 `castTo` 一处。
+   *
+   * 但**左值要先取出来**：宽度只在「访问那一刻」有意义（内存左值的 MLOAD 描述符按
+   * 声明的类型选，槽的 LOAD 也是）。先换类型码再取值，就会按 `int` 的宽度去读 ——
+   * `char *t; t[1]` 于是读了 4 个字节。这一格错过一次，MIR 里印出来是
+   * `mload i32 %5 i32s`（该是 `i8s`），而 `t[1]` 的值变成了后面三个字节拼出来的数。
    */
   promote(v) {
     const b = btype(v.ty.t);
-    if (b === VT_BOOL || b === VT_BYTE || b === VT_SHORT) {
-      return { ty: TY_INT, ref: v.ref, slot: v.slot, cmp: v.cmp };
-    }
-    return v;
+    if (b !== VT_BOOL && b !== VT_BYTE && b !== VT_SHORT) return v;
+    return sVal(TY_INT, this.gv(v));
   }
 
   /**
@@ -436,8 +670,10 @@ export class CGen {
    * 三步，顺序有讲究：先在 MIR 的两个宽度之间挪（i32 <-> i64），再收口到 C 的位宽。
    * 反过来做会在 `(char)(long long)x` 上少截一次。
    */
-  castTo(v, ty) {
+  castTo(v0, ty) {
     const f = this.f;
+    /* 源侧先退化：`char *p = "abc"` 与 `int *q = a`（a 是数组）走的是同一条路。 */
+    const v = this.decay(v0);
     const tb = btype(ty.t);
     if (tb === VT_VOID) return sVal(TY_VOID, REF_NONE);
     // 转成 `_Bool`：C 规定「非零就是 1」，不是「截低位」。`(_Bool)256` 是 1，不是 0。
@@ -482,10 +718,18 @@ export class CGen {
 
   /** 把一个值存进左值（`vstore`，`tccgen.c:3690`）。赋值表达式的值是**转换之后**的值。 */
   vstore(target, v) {
-    if (target.slot === null) this.err('lvalue expected');
+    if (!isLval(target)) this.err('lvalue expected');
+    if (isArray(target.ty.t)) this.err('assignment to expression with array type');
     const cv = this.castTo(v, target.ty);
     const r = this.gv(cv);
-    this.f.emit(OP.STORE, T_VOID, r, REF_NONE, target.slot);
+    if (target.mem !== null) {
+      /* MSTORE 的 `t` 是**值**的类型，宽度在描述符里（ir.js:293）。窄类型于是
+       * 「存低若干位、读回来重新收口」—— 那条不变量（见文件头）在内存这一侧是免费的。 */
+      this.f.emit(OP.MSTORE, mirTypeOf(target.ty), target.mem.addr, r,
+        memDesc(storeKindOf(target.ty), target.mem.off));
+    } else {
+      this.f.emit(OP.STORE, T_VOID, r, REF_NONE, target.slot);
+    }
     return sVal(target.ty, r);
   }
 
@@ -500,8 +744,11 @@ export class CGen {
    *     里会让 `(unsigned char)x >> 1` 变成无符号右移 —— 提升之后它是 `int`，该是算术右移。
    *   - **比较**：操作数照常规算术转换，但结果是 `int`（我们回一个 VT_CMP，不摊平）。
    */
-  genOp(op, a, b) {
+  genOp(op, a0, b0) {
     const f = this.f;
+    const a = this.decay(a0);
+    const b = this.decay(b0);
+    if (isPtr(a.ty.t) || isPtr(b.ty.t)) return this.genPtrOp(op, a, b);
     if (op === TOK_SHL || op === TOK_SAR) {
       const l = this.promote(a);
       const r = this.promote(b);
@@ -523,6 +770,74 @@ export class CGen {
     return sVal(u.ty, f.emit(mop, mirTypeOf(u.ty), this.gv(u.a), this.gv(u.b), 0));
   }
 
+  /** 一个操作数当 i64 用：指针本来就是 i64（字节偏移），整数先转过去。 */
+  asI64(v) {
+    if (isPtr(v.ty.t)) return this.gv(v);
+    return this.gv(this.castTo(v, TY_LLONG));
+  }
+
+  /**
+   * 指针参与的运算（`gen_op` 里 `VT_PTR` 那几支，`tccgen.c:3042` 一带）。
+   * 指针在 MIR 里是线性内存的**字节偏移**（i64），于是三条规则各自只有一两条指令：
+   *   - `p + n` / `p - n`：n 转成 i64，乘元素大小，再加/减。元素是 1 字节时不发那条
+   *     MUL —— 那不是常量折叠（文件头偏离 3 说不折叠），是不发一条无操作。
+   *   - `p - q`：两个偏移相减再除以元素大小。结果类型是 `ptrdiff_t`，LP64 上是 long。
+   *   - 比较：比两个偏移。用**无符号**比较 —— C 只定义同一个对象内的指针比较，而同一个
+   *     对象内的偏移都是正数；无符号这一选择也要与将来的后端一致（地址不是负数）。
+   * `p + q`（两个指针相加）与 `p * n` 之类是错的，报出来 —— 静悄悄按整数算会让
+   * `p * 2` 编过，而那是一个几乎不可能查出来的错。
+   */
+  genPtrOp(op, a, b) {
+    const f = this.f;
+    const pa = isPtr(a.ty.t);
+    const pb = isPtr(b.ty.t);
+    const cop = cmpOpOf(op, true);
+    if (cop !== null) return sCmp(f.emit(cop, T_I64, this.asI64(a), this.asI64(b), 0));
+    if (op !== PLUS && op !== MINUS) {
+      this.err(`invalid operands to binary '${this.cpp.tokStr(op, null)}' (pointer)`);
+    }
+    if (pa && pb) {
+      if (op !== MINUS) this.err("invalid operands to binary '+' (two pointers)");
+      const es = typeSize(a.ty.ref).size;
+      if (es === 0) this.err('arithmetic on a pointer to an incomplete type');
+      const d = f.emit(OP.SUB, T_I64, this.gv(a), this.gv(b), 0);
+      if (es === 1) return sVal(TY_LLONG, d);
+      return sVal(TY_LLONG, f.emit(OP.DIV, T_I64, d, this.mod.consts.int(BigInt(es)), 0));
+    }
+    // 一个指针一个整数。`n - p` 是错的（`p - n` 才对），所以减法只认指针在左
+    if (op === MINUS && !pa) this.err("invalid operands to binary '-'");
+    const p = pa ? a : b;
+    const n = pa ? b : a;
+    if (!isInteger(n.ty.t)) this.err("invalid operands to binary '+'");
+    const es = typeSize(p.ty.ref).size;
+    if (es === 0) this.err('arithmetic on a pointer to an incomplete type');
+    let k = this.asI64(n);
+    if (es !== 1) k = f.emit(OP.MUL, T_I64, k, this.mod.consts.int(BigInt(es)), 0);
+    return sVal(p.ty, f.emit(op === PLUS ? OP.ADD : OP.SUB, T_I64, this.gv(p), k, 0));
+  }
+
+  /**
+   * 字符串字面量：进 data 段，类型是 `char[N+1]`（含结尾的 0）。
+   * 同一份文本只进一次 —— C 没规定字面量是否共享，但共享省 data 段，而且
+   * 「同一份输入两次编译逐字节相同」要求这张表是确定的（Map 按插入序，是）。
+   *
+   * 类型是**数组**而不是指针，所以 `sizeof("abc")` 是 4，而用在表达式里会退化成
+   * `char *` —— 这一格用指针会让 sizeof 变成 8，而那是最难发现的那种错。
+   */
+  strLit(bytes) {
+    const hit = this.strs.get(bytes);
+    const ty = mkArray(TY_CHAR, bytes.length + 1);
+    if (hit !== undefined) return sMem(ty, this.mod.consts.int(BigInt(hit)), 0);
+    const addr = this.dataOff;
+    const raw = [];
+    for (let i = 0; i < bytes.length; i++) raw.push(bytes.charCodeAt(i) % 256);
+    raw.push(0);
+    this.strs.set(bytes, addr);
+    this.dataOff = alignUp(addr + raw.length, 8);
+    this.pendingData.push({ off: addr, bytes: raw });
+    return sMem(ty, this.mod.consts.int(BigInt(addr)), 0);
+  }
+
   /** `unary`（`tccgen.c:5595`）。前缀与后缀都在这儿，与 tcc 一样。 */
   unary() {
     const t = this.tok;
@@ -533,8 +848,17 @@ export class CGen {
       if (t === TOK_CFLOAT || t === TOK_CDOUBLE || t === TOK_CLDOUBLE) {
         this.todo('浮点常量还没到');
       }
-      if (t === TOK_STR || t === TOK_LSTR) {
-        this.todo('字符串字面量还没到（要 data 段，下一片）');
+      if (t === TOK_LSTR) this.todo('宽字符串字面量还没到');
+      if (t === TOK_STR) {
+        /* 相邻的字面量要拼起来（C11 6.4.5 第 5 段）：`"a" "b"` 是一个 `char[3]`。
+         * tcc 在 `parse_string` 之后同样靠一个循环吃掉后续的 TOK_STR。 */
+        let s = String(cv);
+        this.next();
+        while (this.tok === TOK_STR) {
+          s += String(this.tokc);
+          this.next();
+        }
+        return this.postfix(this.strLit(s));
       }
       if (t === TOK_LCHAR) this.todo('宽字符常量还没到');
       this.next();
@@ -593,8 +917,23 @@ export class CGen {
       const target = this.unary();
       return this.incdec(target, t === TOK_INC ? PLUS : MINUS, false);
     }
-    if (t === STAR || t === AMP) {
-      this.todo('指针还没到（`*` 与 `&` 要影子栈，下一片）');
+    if (t === AMP) {
+      this.next();
+      const v = this.unary();
+      if (isFunc(v.ty.t)) this.todo('取函数地址还没到（要函数指针与 call_indirect）');
+      /* `&a`（a 是数组）的类型是「指向数组的指针」，不是「指向元素的指针」——
+       * 两者的**值**相同，但 `sizeof(*&a)` 差一个数量级。所以这里不退化。 */
+      return sVal(mkPointer(v.ty), this.addrOf(v));
+    }
+    if (t === STAR) {
+      this.next();
+      const v = this.decay(this.unary());
+      if (!isPtr(v.ty.t)) this.err(`invalid type argument of unary '*' ('${typeText(v.ty)}')`);
+      const et = v.ty.ref;
+      if (btype(et.t) === VT_VOID) this.err("dereferencing 'void *'");
+      /* `*p` 是一个**内存左值**：地址是 p 的值，静态偏移 0。于是 `*p = 5` 与 `p[0] = 5`
+       * 走的是同一条 vstore，一条 MSTORE，没有中间的临时。 */
+      return this.postfix(sMem(et, this.gv(v), 0));
     }
     if (t === TOK_SIZEOF) {
       this.next();
@@ -604,7 +943,7 @@ export class CGen {
     if (t >= TOK_UIDENT) {
       const name = this.identName();
       const local = this.lookup(name);
-      if (local !== null) return this.postfix(sLval(local.ty, local.slot));
+      if (local !== null) return this.postfix(this.entryLval(name, local));
       /* 不是局部变量：那就只能是函数（这一片没有全局变量）。tcc 在这里走
        * `external_global_sym`，我们同样先建符号 —— 但只在紧跟着 `(` 时才算调用，
        * 否则是「取函数地址」，那要指针。 */
@@ -668,7 +1007,18 @@ export class CGen {
         continue;
       }
       if (t === LPAR) this.todo('函数指针调用还没到');
-      if (t === LBRACK) this.todo('下标运算还没到（要数组与指针，下一片）');
+      if (t === LBRACK) {
+        /* `a[i]` **就是** `*(a + i)`（C11 6.5.2.1 第 2 段）。照这一句写而不是另开一条
+         * 地址计算：于是 `i[a]` 自动对、数组与指针自动一视同仁、多维数组自动是
+         * 「先退化外层再退化内层」—— 三件事一行代码都不用多写。 */
+        this.next();
+        const idx = this.gexpr();
+        this.skip(RBRACK);
+        const p = this.genOp(PLUS, cur, idx);
+        if (!isPtr(p.ty.t)) this.err('subscripted value is not an array or pointer');
+        cur = sMem(p.ty.ref, this.gv(p), 0);
+        continue;
+      }
       if (t === DOT || t === TOK_ARROW) this.todo('struct 还没到');
       return cur;
     }
@@ -683,15 +1033,11 @@ export class CGen {
    * 要经 `vstore` 收口，而回出去的旧值也是 char。
    */
   incdec(target, op, post) {
-    if (target.slot === null) this.err('lvalue expected');
-    const f = this.f;
-    const mt = mirTypeOf(target.ty);
-    const old = f.emit(OP.LOAD, mt, REF_NONE, REF_NONE, target.slot);
-    const one = sVal(TY_INT, this.mod.consts.i32(1));
-    const nv = this.genOp(op, sVal(target.ty, old), one);
-    const stored = this.gv(this.castTo(nv, target.ty));
-    f.emit(OP.STORE, T_VOID, stored, REF_NONE, target.slot);
-    return sVal(target.ty, post ? old : stored);
+    if (!isLval(target)) this.err('lvalue expected');
+    const old = this.gv(target);
+    const nv = this.genOp(op, sVal(target.ty, old), sVal(TY_INT, this.mod.consts.i32(1)));
+    const stored = this.vstore(target, nv);
+    return sVal(target.ty, post ? old : stored.ref);
   }
 
   /** 调用：`名字 ( 实参… )`。名字已经吃掉，当前记号是 `(`。 */
@@ -717,11 +1063,18 @@ export class CGen {
     }
     const refs = [];
     for (let i = 0; i < vals.length; i++) {
-      const want = info.params === null ? this.promote(vals[i]).ty : info.params[i].ty;
+      /* 没有原型时按**实参提升**定形参类型（C11 6.5.2.2 第 6 段）。用
+       * `promotedType` 而不是 `promote`：后者会真的取一次值，而这里只想问类型 ——
+       * 多出来的那条 LOAD 谁也不读，但它会进 MIR，两条腿的输出就都多一条。 */
+      const want = info.params === null
+        ? promotedType(decayedType(vals[i].ty))
+        : info.params[i].ty;
       refs.push(this.gv(this.castTo(vals[i], want)));
     }
     if (info.params === null) {
-      info.params = vals.map((v, i) => ({ name: `$p${i}`, ty: this.promote(v).ty }));
+      info.params = vals.map((v, i) => ({
+        name: `$p${i}`, ty: promotedType(decayedType(v.ty)),
+      }));
     }
     const rt = mirTypeOf(info.ret);
     const ref = this.f.emit(OP.CALL, rt, info.no, this.f.pushArgs(refs), 0);
@@ -824,6 +1177,12 @@ export class CGen {
     f.emit(OP.STORE, T_VOID, this.gv(this.castTo(b, TY_LLONG)), REF_NONE, slot);
     this.close();
     const wide = sVal(TY_LLONG, f.emit(OP.LOAD, T_I64, REF_NONE, REF_NONE, slot));
+    /* 有一支是指针（或数组）：结果就是那个指针类型。放在整型那套规则**之前**，
+     * 因为 intBitsOf(指针) 是 64，落到下面会算出 `long long` —— 于是 `(c?p:q)[0]`
+     * 会说「下标用在了不是数组也不是指针的东西上」，而错的其实是这一格。 */
+    const pa = decayedType(a.ty);
+    const pb = decayedType(b.ty);
+    if (isPtr(pa.t) || isPtr(pb.t)) return this.castTo(wide, isPtr(pa.t) ? pa : pb);
     // 公共类型：两支提升后做常规算术转换。两支的类型在这一点上都已知了。
     const bits = intBitsOf(a.ty) > intBitsOf(b.ty) ? intBitsOf(a.ty) : intBitsOf(b.ty);
     let uns;
@@ -845,7 +1204,7 @@ export class CGen {
     const v = this.exprCond();
     const t = this.tok;
     if (t !== ASSIGN && !isAssignOp(t)) return v;
-    if (v.slot === null) this.err('lvalue expected');
+    if (!isLval(v)) this.err('lvalue expected');
     this.next();
     if (t === ASSIGN) return this.vstore(v, this.exprEq());
     /* `a += b` = `a = a + b`。tcc 在这儿 `vdup()` 复制左值、算完再 `vstore`
@@ -939,18 +1298,26 @@ export class CGen {
         if (hasVal) {
           // `gen_assign_cast(&func_vt)`（`tccgen.c:7263`）：按返回类型转换
           const cv = this.castTo(v, this.funcRet);
-          this.f.emit(OP.RET, mirTypeOf(this.funcRet), this.gv(cv), REF_NONE, 0);
+          const r = this.gv(cv);
+          /* 收场在 RET **之前**：返回值已经算完了（它可能读了帧上的东西），
+           * 这时把 `$sp` 还回去才安全。反过来（先还再算）会让 `return *&x` 读到
+           * 已经归还的那段栈 —— 那种错在解释器上看不出来，在真的栈上是随机的。 */
+          this.emitEpilogue();
+          this.f.emit(OP.RET, mirTypeOf(this.funcRet), r, REF_NONE, 0);
         } else {
           if (btype(v.ty.t) !== VT_VOID) this.cpp.warn('void function returns a value');
+          this.emitEpilogue();
           this.f.emit(OP.RET, T_VOID, REF_NONE, REF_NONE, 0);
         }
       } else if (hasVal) {
         /* `int f() { return; }` —— tcc 只警告（`tccgen.c:7272`），返回值是垃圾。
          * MIR 要一个值，补 0；这与「垃圾」不同，所以照 tcc 出一条警告。 */
         this.cpp.warn("'return' with no value");
+        this.emitEpilogue();
         this.f.emit(OP.RET, mirTypeOf(this.funcRet),
           this.konst(this.funcRet, 0), REF_NONE, 0);
       } else {
+        this.emitEpilogue();
         this.f.emit(OP.RET, T_VOID, REF_NONE, REF_NONE, 0);
       }
       this.skip(SEMI);
@@ -1172,14 +1539,121 @@ export class CGen {
   }
 
   /**
-   * 类型名（`(int)x` 里那个、`sizeof(long)` 里那个）：基本类型加抽象声明符。
-   * 抽象声明符现在只可能是空的 —— 指针与数组是下一片。
+   * 类型名（`(int *)x` 里那个、`sizeof(char[4])` 里那个）：基本类型加**抽象**声明符。
    */
   typeName() {
-    const ty = this.parseBtype();
-    if (this.tok === STAR) this.todo('指针还没到（下一片）');
-    if (this.tok === LBRACK) this.todo('数组还没到（下一片）');
-    return ty;
+    const base = this.parseBtype();
+    return this.declarator(ctype(base.t & ~VT_STORAGE, base.ref), 'none').ty;
+  }
+
+  /**
+   * 声明符（`type_decl` 与 `post_type`，`tccgen.c:5049` 一带）。
+   *
+   * 顺序是这一段唯一的难点：**先吃前缀的 `*`，再吃后缀的 `[]`，而后缀绑得更紧**。
+   * 于是 `int *a[3]` 是「3 个 `int *` 的数组」而不是「指向 `int[3]` 的指针」，
+   * `int *f(void)` 是「回 `int *` 的函数」。`int (*a)[3]` 要在括号里再来一层，
+   * 那要把「已经攒了一半的类型」当参数往里传（tcc 的 `type_decl` 递归就是干这个的），
+   * 这一片还没做。
+   *
+   * @param {object} base 基本类型（**存储类已经剥掉**）
+   * @param {'need'|'opt'|'none'} want 名字：必须有 / 可省（原型里的形参）/ 不能有
+   */
+  declarator(base, want) {
+    let ptr = 0;
+    while (this.tok === STAR) {
+      this.next();
+      ptr++;
+      // 指针自己的限定词（`char * const p`）：吃掉，这一片没有可观察的效果
+      while (this.tok === TOK_CONST || this.tok === TOK_VOLATILE) this.next();
+    }
+    if (this.tok === LPAR) {
+      this.todo('带括号的声明符还没到（`int (*a)[3]`、函数指针）');
+    }
+    let name = null;
+    if (this.tok >= TOK_UIDENT) {
+      if (want === 'none') this.err('unexpected identifier in type name');
+      name = this.identName();
+    } else if (want === 'need') {
+      this.expect('identifier');
+    }
+    /* 维度先收进一个表、再**倒着**套：`int a[2][3]` 是「2 个 `int[3]`」。
+     * 顺着套会得到「3 个 `int[2]`」—— 大小一样，`sizeof(a[0])` 不一样（8 vs 12）。 */
+    const dims = [];
+    while (this.tok === LBRACK) {
+      this.next();
+      if (this.tok === RBRACK) dims.push(-1);
+      else dims.push(Number(this.constExpr()));
+      this.skip(RBRACK);
+    }
+    let ty = base;
+    for (let i = 0; i < ptr; i++) ty = mkPointer(ty);
+    for (let i = dims.length - 1; i >= 0; i--) {
+      if (dims[i] === 0) this.err('zero-sized array');
+      if (dims[i] < -1) this.err('array size must not be negative');
+      ty = mkArray(ty, dims[i]);
+    }
+    return { ty, name };
+  }
+
+  /**
+   * 常量表达式（`expr_const`，`tccgen.c:6795`）：数组的维度要它，以后 `case` 标签与
+   * 位域宽度也要。
+   *
+   * tcc 那边是**同一套**表达式解析器加常量折叠 —— 它的 `vtop` 上带着 `VT_CONST`，
+   * `gen_op` 顺手就折了。这一片没有折叠（文件头偏离 3：折叠是语义可见的），所以这里
+   * 是一个独立的小求值器：只认常量，见到变量就报错。代价是「运算符怎么算」有两份，
+   * 收益是主路上一行折叠代码都没有 —— 而 `1/0` 在数组维度里该是编译错、在表达式里
+   * 该是运行时错，两份代码正好各自说对一半。
+   *
+   * 优先级表**共用** `precedence()`，所以结合性不会与主路分岔。
+   */
+  constExpr() {
+    return this.ceInfix(this.ceUnary(), 1);
+  }
+
+  ceInfix(left, p) {
+    let acc = left;
+    let t = this.tok;
+    for (;;) {
+      const p2 = precedence(t);
+      if (p2 < p) break;
+      this.next();
+      let right = this.ceUnary();
+      if (precedence(this.tok) > p2) right = this.ceInfix(right, p2 + 1);
+      acc = ceApply(t, acc, right, (m) => this.err(m));
+      t = this.tok;
+    }
+    return acc;
+  }
+
+  ceUnary() {
+    const t = this.tok;
+    if (t === TOK_CINT || t === TOK_CUINT || t === TOK_CLLONG || t === TOK_CULLONG
+      || t === TOK_CLONG || t === TOK_CULONG || t === TOK_CCHAR) {
+      const v = BigInt(/** @type {bigint} */ (this.tokc));
+      this.next();
+      return v;
+    }
+    if (t === PLUS) { this.next(); return this.ceUnary(); }
+    if (t === MINUS) { this.next(); return -this.ceUnary(); }
+    if (t === TILDE) { this.next(); return ~this.ceUnary(); }
+    if (t === BANG) { this.next(); return this.ceUnary() === 0n ? 1n : 0n; }
+    if (t === LPAR) {
+      this.next();
+      const v = this.constExpr();
+      this.skip(RPAR);
+      return v;
+    }
+    if (t === TOK_SIZEOF) {
+      this.next();
+      this.skip(LPAR);
+      if (!this.isTypeStart(this.tok)) this.todo('常量表达式里的 sizeof 只支持类型名');
+      const ty = this.typeName();
+      this.skip(RPAR);
+      return BigInt(typeSize(ty).size);
+    }
+    this.err('constant expression expected');
+    return 0n;
   }
 
   /**
@@ -1191,29 +1665,31 @@ export class CGen {
     let any = false;
     for (;;) {
       if (!this.isTypeStart(this.tok)) break;
-      const base = this.parseBtype();
+      const spec = this.parseBtype();
+      /* 存储类**先剥掉**再进声明符：`static int a[3];` 的类型是 `int[3]`，而
+       * 「剥」这件事必须在套数组之前 —— 套完再剥就得重建一个 CType，而 `count`
+       * 挂在对象上（ctype.js:129），重建时最容易掉的正是它。 */
+      const base = ctype(spec.t & ~VT_STORAGE, spec.ref);
       any = true;
       if (this.tok === SEMI) { this.next(); continue; }
       let wasBody = false;
       for (;;) {
-        if (this.tok === STAR) this.todo('指针还没到（下一片）');
-        const name = this.identName();
+        const d = this.declarator(base, 'need');
+        const name = /** @type {string} */ (d.name);
         if (this.tok === LPAR) {
-          if (this.funcDecl(global, name, base)) { wasBody = true; break; }
-        } else if (this.tok === LBRACK) {
-          this.todo('数组还没到（下一片）');
+          if (this.funcDecl(global, name, d.ty)) { wasBody = true; break; }
         } else if (!global) {
-          /* 存储类去掉再登记：`static int x;` 的类型是 `int`，`static` 不是类型的一部分
-           * （tcc 靠 `VT_STORAGE` 掩码做同一件事，`tcc.h:1093`）。 */
-          const ty = ctype(base.t & ~VT_STORAGE, base.ref);
-          const slot = this.declareLocal(name, ty);
+          if (isArray(d.ty.t) && d.ty.count < 0) {
+            this.err(`array size missing in '${name}'`);
+          }
+          const e = this.declareLocal(name, d.ty);
           if (this.tok === ASSIGN) {
             this.next();
+            if (this.tok === LBRACE) this.todo('聚合初始化器 `{…}` 还没到');
+            if (isArray(d.ty.t)) this.todo('数组的初始化器还没到（`char s[] = "…"`）');
             /* 初始化式是**赋值表达式**，不是逗号表达式（`int a = 1, b = 2;` 里那个
              * 逗号是声明的分隔符）—— 这一格错了整行都会读歪。 */
-            const v = this.exprEq();
-            const cv = this.castTo(v, ty);
-            this.f.emit(OP.STORE, T_VOID, this.gv(cv), REF_NONE, slot);
+            this.vstore(this.entryLval(name, e), this.exprEq());
           }
         } else {
           this.todo(`全局变量还没到（'${name}'）`);
@@ -1256,24 +1732,54 @@ export class CGen {
 
   paramList(params) {
     for (;;) {
-      const pt = this.parseBtype();
-      if (this.tok === STAR) this.todo('指针还没到（下一片）');
-      if (btype(pt.t) === VT_VOID) this.err('parameter has void type');
+      const spec = this.parseBtype();
+      const d = this.declarator(ctype(spec.t & ~VT_STORAGE, spec.ref), 'opt');
+      let ty = d.ty;
+      /* 形参上的数组**就是**指针（C11 6.7.6.3 第 7 段）：`int f(int a[])` 与
+       * `int f(int *a)` 是同一个函数。所以这里退化，而不是让 declareLocal 去帧上划
+       * 一块 —— 那块地方永远也填不上，因为实参传进来的是一个地址。 */
+      if (isArray(ty.t)) ty = mkPointer(ty.ref);
+      if (btype(ty.t) === VT_VOID) this.err('parameter has void type');
       // 形参名可以省（原型里），那就给它一个占位名
-      const pn = this.tok >= TOK_UIDENT ? this.identName() : `$p${params.length}`;
-      if (this.tok === LBRACK) this.todo('数组形参还没到（下一片）');
+      const pn = d.name === null ? `$p${params.length}` : d.name;
       /* 形参**保留声明的类型**（`char c` 就是 char）。「实参提升」（`char` -> `int`）
        * 只对**没有原型**的函数与变参的可变部分成立（C11 6.5.2.2 第 6 段）——
        * 有原型时是**调用方**把实参转成声明的类型，见 funcCall。
        * 这一格搞反过一次：形参提成 int 之后 `int f(char c){return c;}` 里的 c 不再收口，
        * 于是 `f(300)` 回 300 而不是 44。 */
-      params.push({ name: pn, ty: ctype(pt.t & ~VT_STORAGE, pt.ref) });
+      params.push({ name: pn, ty });
       if (this.tok !== COMMA) break;
       this.next();
     }
     this.skip(RPAR);
   }
 
+  /**
+   * 函数定义（`gen_function`，`tccgen.c:8020` 一带）加**帧的两遍解析**。
+   *
+   * ## 为什么函数体要解析两遍
+   *
+   * `&x` 要求 `x` 有地址，也就是落在线性内存上。哪些局部量被取过地址，一遍过里**没法
+   * 提前知道** —— 声明在前，`&` 在后。tcc 不需要知道：它把所有局部量都放在栈帧上
+   * （`loc -= size`），而「帧有多大」是在函数体读完之后**回填**进序言的
+   * （`gfunc_prolog` 与 `gfunc_epilog` 之间那次回填）。
+   *
+   * MIR 不能回填（文件头偏离 2），序言里那个常量必须在发它之前就定下来。办法：函数体
+   * 的记号先整块收下来（`Cpp.captureBraced`），放一遍**把输出丢掉**（发进一个用完就扔
+   * 的 MirFunc，与 `sizeofExpr` 同一手法），收集「谁被取过地址」与帧大小的上界；
+   * 再放一遍才是真的。
+   *
+   * 代价是函数体解析两遍。换来的是绝大多数局部量仍然留在 MIR 的槽上（后端能把它们分到
+   * 寄存器），只有真被取地址的那些落到内存 —— 这与 tcc 那种「全部上栈」在生成的代码上
+   * 差得很远，而我们没有它的回填能力。
+   *
+   * ## 平铺的帧
+   *
+   * 帧里**一个声明一个偏移，兄弟块之间不复用**。复用能省空间，但要在块结束时回退分配
+   * 指针；循环体里那样做的话 `$sp` 每轮都动，`&x` 在两轮之间就不是同一个地址。
+   * C 允许它不同，可那会让「循环里取地址」变成一件说不清的事。平铺让每个声明的地址在
+   * 整个函数里恒定，代价是帧大一点。
+   */
   finishFunc(global, info, name, ret, params) {
     if (info.params !== null && info.params.length !== params.length) {
       this.err(`conflicting types for '${name}'`);
@@ -1287,27 +1793,118 @@ export class CGen {
     if (info.defined) this.err(`redefinition of '${name}'`);
     info.defined = true;
 
-    const f = info.f;
+    const body = this.cpp.captureBraced();
+    const afterTok = this.cpp.tok;
+    const afterVal = this.cpp.tokc;
+
+    // ---- 第一遍：只为了知道谁要落在内存上、帧要多大。输出丢掉
+    this.pass1 = true;
+    this.addrTaken = new Set();
+    this.declScalars = [];
+    this.frameNames = new Set();
+    this.frameSize = 0;
+    this.frameOff = 0;
+    this.fpRef = this.mod.consts.int(0n);
+    this.runBody(body, new MirFunc(`$scan$${name}`, [], mirTypeOf(ret)), ret, name, params);
+
+    let est = this.frameOff;   // 数组之类「非落内存不可」的已经算在里面了
+    for (const d of this.declScalars) {
+      if (this.addrTaken.has(d.name)) est += alignUp(d.size, FRAME_ALIGN);
+    }
+    this.pass1 = false;
+    this.frameNames = this.addrTaken;
+
+    // ---- 第二遍：真的
+    this.frameSize = alignUp(est, 16);
+    this.frameOff = 0;
+    this.runBody(body, info.f, ret, name, params);
+
+    // 记号还原（`replayStep` 同一手法）：函数体是从记号串里读的，读完要回到文件流上
+    this.cpp.tok = afterTok;
+    this.cpp.tokc = afterVal;
+    this.tok = afterTok;
+    this.tokc = afterVal;
+    return true;
+  }
+
+  /**
+   * 把收好的函数体放一遍，发进 `f`。序言、收场、形参落位都在这儿 ——
+   * 两遍走**同一段**代码，于是第一遍数出来的帧与第二遍分配出来的帧一定是同一套规则。
+   */
+  runBody(body, f, ret, name, params) {
     const outer = this.f;
     this.f = f;
     this.funcRet = ret;
     this.funcName = name;
     this.scopes = [new Map()];
     this.regions = [];
-    /* 形参就是前几个槽 —— MIR 的解释器按这个约定填帧（interp.js:274 的注释）。 */
+
+    if (!this.pass1) {
+      this.spSave = REF_NONE;
+      this.fpRef = REF_NONE;
+      if (this.frameSize > 0) {
+        /* 序言：`$sp -= frameSize`。`$sp` 是一个往下长的 i64 全局（ADR-0017 第三刀：
+         * MIR 没有 `ADDR`，取地址靠影子栈）。帧基址就是减完那条指令的 ref —— MIR 是
+         * SSA，函数顶层发的指令在整个函数体里都可用，不必再存进一个槽。 */
+        const spNo = this.spGlobal();
+        const sp0 = f.emit(OP.GLOAD, T_I64, REF_NONE, REF_NONE, spNo);
+        const nsp = f.emit(OP.SUB, T_I64, sp0,
+          this.mod.consts.int(BigInt(this.frameSize)), 0);
+        f.emit(OP.GSTORE, T_VOID, nsp, REF_NONE, spNo);
+        this.spSave = sp0;
+        this.fpRef = nsp;
+      }
+    }
+
+    /* 形参就是前几个槽 —— MIR 的解释器按这个约定填帧（interp.js:274 的注释）。
+     * 被取过地址的形参**两处都有**：ABI 那个槽照旧（值从调用方来），再拷一份到帧上，
+     * 名字绑帧上那份。少了这次拷贝，`&x` 指向的是一块没人写过的内存。 */
     for (const p of params) {
       const mt = mirTypeOf(p.ty);
       const slot = f.slot(p.name, mt);
       f.params.push({ name: p.name, t: mt, slot });
-      this.scopes[0].set(p.name, { slot, ty: p.ty });
+      if (!this.pass1 && this.frameNames.has(p.name)) {
+        const off = this.frameAlloc(p.ty);
+        this.scopes[0].set(p.name, { ty: p.ty, slot: -1, off });
+        f.emit(OP.MSTORE, mt, this.fpRef,
+          f.emit(OP.LOAD, mt, REF_NONE, REF_NONE, slot),
+          memDesc(storeKindOf(p.ty), off));
+      } else {
+        this.scopes[0].set(p.name, { ty: p.ty, slot, off: -1 });
+        if (this.pass1) {
+          const s = typeSize(p.ty);
+          this.declScalars.push({ name: p.name, size: s.size, align: s.align });
+        }
+      }
     }
+
+    this.cpp.pushTokens(body);
+    this.next();
     this.block();  // 当前记号是 `{`
+    if (this.tok !== TOK_EOF) this.err('internal: 函数体没读完');
+    this.cpp.endMacro();
+
     /* 落到函数尾：C 里非 void 函数不 return 是 UB（tcc 让返回值是垃圾）。MIR 要
      * 每条路都有 RET 才良构，所以无条件补一条 —— 前面已经 RET 的路走不到这里。 */
+    this.emitEpilogue();
     if (f.ret === T_VOID) f.emit(OP.RET, T_VOID, REF_NONE, REF_NONE, 0);
     else f.emit(OP.RET, f.ret, this.konst(ret, 0), REF_NONE, 0);
     this.f = outer;
-    return true;
+  }
+
+  /** `$sp` 的全局号。第一次用到才登记 —— 没有函数要帧的模块于是不多一个全局。 */
+  spGlobal() {
+    if (this.spNo < 0) {
+      this.spNo = this.mod.globalNo('$sp');
+      this.mod.setGlobalTy(this.spNo, T_I64);
+    }
+    return this.spNo;
+  }
+
+  /** 收场：把 `$sp` 还回去。**每条 RET 之前都要**，所以单独一个函数。 */
+  emitEpilogue() {
+    if (this.pass1 || this.frameSize === 0) return;
+    this.f.emit(OP.GSTORE, T_VOID, this.spSave, REF_NONE, this.spNo);
   }
 
   /** 一个翻译单元（`tccgen_compile`，`tccgen.c:417-419`）。 */
@@ -1344,13 +1941,30 @@ export function lowerC(path, text, host, defs) {
   cpp.startParse(path, text);
   gen.unit();
 
+  /* 线性内存的版图（ADR-0017 第六刀第三片）：
+   *   [0, 64K)            页 0 整页留空 —— C 的 `NULL` 于是**一定**访问不到，
+   *                       而不是「碰巧落在别的东西上」
+   *   [64K, dataOff)      data 段：字符串字面量（以后还有全局量），往上长
+   *   [栈底, 栈顶)        影子栈：16 对齐，`$sp` 从栈顶往下长
+   * `mem.min` 按栈顶算出页数。上界不设（0）—— 这一片没人调 `MGROW`。 */
+  const stackBase = alignUp(gen.dataOff, 16);
+  const stackTop = stackBase + C_STACK_BYTES;
+  mod.setMem(Math.ceil(stackTop / MEM_PAGE), 0);
+  for (const d of gen.pendingData) mod.addData(d.off, d.bytes);
+
   const info = gen.funcs.get('main');
   if (info === undefined) throw new OmniError(`${path}: error: undefined symbol 'main'`);
   if (info.params !== null && info.params.length !== 0) {
-    throw new OmniError(`${path}: error: 第六刀：'int main(argc, argv)' 还没到（要指针）`);
+    throw new OmniError(`${path}: error: 第六刀：'int main(argc, argv)' 还没到（要变参与 argv）`);
   }
   const entry = new MirFunc('omni_main', [], T_I32);
   mod.addFunc(entry);
+  /* `$sp` 的初值在入口里写 —— 解释器的全局初值是 undefined（interp.js:216），
+   * 而 wasm 那边的 `(global $sp (mut i64) (i64.const …))` 是同一件事的静态写法。
+   * 没有任何函数要帧时 spNo 还是 -1，这条也就不发。 */
+  if (gen.spNo >= 0) {
+    entry.emit(OP.GSTORE, T_VOID, mod.consts.int(BigInt(stackTop)), REF_NONE, gen.spNo);
+  }
   const rt = mirTypeOf(info.ret);
   if (rt === T_VOID) {
     entry.emit(OP.CALL, T_VOID, info.no, entry.pushArgs([]), 0);

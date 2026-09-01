@@ -738,6 +738,34 @@ export class Cpp {
     this.beginMacro(str, 0);
   }
 
+  /**
+   * 收一整个 `{ … }`（**含两端的花括号**），停在 `}` 之后的那个记号上。
+   *
+   * 与 `captureTokens` 分成两个函数、而不是给它加一个开关：那个函数的语义是「收到某个
+   * 定界符**之前**」，这个是「收一个配平的组」——「配平」在这里是收的条件本身，
+   * 不是顺带的记账。tcc 也有这一路：`skip_or_save_block` 把 inline 函数体整块存成
+   * `TokStr` 留到用的时候再放（`tccgen.c:8262` 一带）。
+   *
+   * 第六刀第三片要它：一个局部量要不要落在线性内存上，取决于函数体里有没有对它取地址 ——
+   * 而那是**后面**的事。一遍过没法后看，所以函数体解析两遍：第一遍收「谁被取过地址」
+   * 与帧大小的上界（发出的指令丢掉），第二遍才是真的。
+   */
+  captureBraced() {
+    if (this.tok !== 123) this.err("'{' expected");
+    const str = new TokStr();
+    let depth = 0;
+    for (;;) {
+      if (this.tok === TOK_EOF) this.err('unexpected end of file');
+      if (this.tok === 123) depth++;
+      else if (this.tok === 125) depth--;
+      str.add2(this.tok, this.tokc);
+      this.next();
+      if (depth === 0) break;
+    }
+    str.add2(TOK_EOF, null);
+    return str;
+  }
+
   defineFind(v) {
     const d = this.defines.get(v);
     return d === undefined ? null : d;
