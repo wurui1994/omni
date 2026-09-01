@@ -201,6 +201,39 @@ function zeroOfCode(t) {
   return null;
 }
 
+/**
+ * `setjmp` / `longjmp`（ADR-0017 第八刀第二十二片）。
+ *
+ * 这两个不是 libc 里的一条普通调用 —— `setjmp` 要**返回两次**，而 `interp/libc.js`
+ * 那张表里的函数只认实参、不认帧。能在这一层做的理由是这个解释器的形状：一帧一个
+ * `while (pc …) pc = prog[pc](F)`，所以「回到某一帧的某条指令之后」是可表达的。
+ *
+ * 做法：
+ *   - `setjmp(buf)` 记下**调用它的那一帧**（`buf` 的地址当键），回 0。
+ *     外部符号是经桩函数调的，所以 `F` 是桩的帧、`F.up` 才是 C 那边的调用者。
+ *   - `longjmp(buf, v)` 抛一个 `LongJmp`。中间那些帧靠宿主的异常自然退掉。
+ *   - 目标帧的那个 pc 循环 catch 住：抛出的那一刻 `pc` 还停在**正在执行的那条指令**上，
+ *     也就是那条 CALL。于是 `F.v[pc] = v; pc = pc + 1` 就等于「那次调用回了 v」。
+ *
+ * 键取 `jmp_buf` 的**地址**而不是往里写一个号：真的 `setjmp` 往那块地方存寄存器，
+ * 没人读它的内容；按地址记还顺带对上了「同一个 buf 上后一次 setjmp 盖掉前一次」。
+ *
+ * 已经返回的帧上 longjmp 是 C 的未定义行为。这里不装作能做：那个异常会一路飘到
+ * `runMirModule`，在那儿变成一条明确的运行期错误。
+ */
+class LongJmp {
+  constructor(target, pc, val) {
+    this.target = target;
+    this.pc = pc;
+    this.val = val;
+  }
+}
+
+/** @type {Map<bigint, object>} `jmp_buf` 的地址 -> `{ f: 那一帧, pc: 那条 CALL }` */
+const jmpTargets = new Map();
+const SETJMP_NAMES = new Set(['setjmp', '_setjmp', 'sigsetjmp', '__sigsetjmp']);
+const LONGJMP_NAMES = new Set(['longjmp', '_longjmp', 'siglongjmp']);
+
 class MirInterp {
   constructor(oir, mir) {
     this.mir = mir;
@@ -218,7 +251,13 @@ class MirInterp {
     this.globals = mir.globals.map(() => undefined);
     this.progs = mir.funcs.map(() => null);
     this.depth = 0;
+    /* 当前帧（`F.up` 那条链的头）。只有 setjmp 要它：它得知道**谁**调了自己。 */
+    this.cur = undefined;
+    /* 这个模块里有没有 setjmp。有才给每一帧套上 try —— 没有的话那五条既有的轴
+     * 连一个 try 都不多付。 */
+    this.usesSetjmp = mir.cabi.some((e) => SETJMP_NAMES.has(e));
   }
+
 
   run() {
     // 线性内存在进入口之前就位（第二刀）：wasm 的 instantiate 也是先建内存、再拷 data 段、
@@ -281,7 +320,9 @@ class MirInterp {
     if (this.depth > 4000) throw new OmniError('mir.interp: call stack too deep');
     // 帧 = 值窗口 + 槽位窗口（ADR-0013 决策 3）。形参就是前几个槽 —— 降级器是这么分的，
     // 值语义要的拷贝由函数体入口那几条 COPY 负责，不在这里重复。
-    const F = { v: [], s: [], captures, ret: undefined };
+    const F = { v: [], s: [], captures, ret: undefined, up: this.cur };
+    this.cur = F;
+    const myDepth = this.depth;
     let i = 0;
     while (i < f.slots.length) { F.s.push(i < args.length ? args[i] : zeroOfCode(f.slots[i].t)); i++; }
     // 值窗口要**先铺满**：封闭 ABI 里 list 的下标写入必须落在长度之内（越界在原生构建里
@@ -290,9 +331,28 @@ class MirInterp {
     while (i < f.count()) { F.v.push(undefined); i++; }
     let pc = 0;
     const n = prog.length;
-    while (pc >= 0 && pc < n) pc = prog[pc](F);
+    if (this.usesSetjmp) {
+      /* longjmp 的落点（见 `LongJmp` 那一段）。抛出的那一刻 `pc` 还停在正在执行的
+       * 那条指令上 —— 也就是调 setjmp 的那条 CALL —— 所以写回它的值、再往下一条走。
+       * 中间那些帧的 `depth`/`cur` 复原被异常跳过了，在这儿一次收回。 */
+      for (;;) {
+        try {
+          while (pc >= 0 && pc < n) pc = prog[pc](F);
+          break;
+        } catch (e) {
+          if (!(e instanceof LongJmp) || e.target !== F) throw e;
+          this.depth = myDepth;
+          this.cur = F;
+          F.v[e.pc] = e.val;
+          pc = e.pc + 1;
+        }
+      }
+    } else {
+      while (pc >= 0 && pc < n) pc = prog[pc](F);
+    }
     const out = F.ret;
     this.depth = this.depth - 1;
+    this.cur = F.up;
     return out;
   }
 
@@ -809,6 +869,16 @@ class MirInterp {
       case OP.CALL: {
         const no = f.a[i];
         const args = rdArgs(f.b[i]);
+        /* 有 setjmp 的模块里，每条 CALL 先把**自己的下标**记进帧：`setjmp` 落在桩函数
+         * 里，它要问的正是「调我的那一帧停在哪条指令上」，而那条指令就是 longjmp 的落点
+         * （见 `LongJmp` 那一节）。没有 setjmp 的模块连这一次写都不付。 */
+        if (this.usesSetjmp) {
+          return (F) => {
+            F.pc = i;
+            F.v[i] = I.callFunc(no, undefined, readAll(args, F));
+            return next;
+          };
+        }
         return (F) => { F.v[i] = I.callFunc(no, undefined, readAll(args, F)); return next; };
       }
       case OP.CALLFN: {
@@ -878,6 +948,29 @@ class MirInterp {
     }
     if (op === OP.CCALL) {
       const entry = this.mir.cabi[f.a[i]];
+      /* `setjmp` / `longjmp` 在这一层截住，不进 libc 那张表：它们要的是**帧**，
+       * 而那张表里的函数只认实参（整段理由见 `LongJmp` 那一节）。 */
+      if (SETJMP_NAMES.has(entry)) {
+        const args = rdArgs(f.b[i]);
+        return (F) => {
+          /* 记的是 `F.up` —— 外部符号是经桩函数调的，`F` 是桩自己的帧，
+           * 一返回就没了；要回去的是 C 那边的调用者，落点是它那条 CALL。 */
+          const up = F.up;
+          jmpTargets.set(args[0](F), { f: up, pc: up.pc });
+          F.v[i] = 0n;
+          return next;
+        };
+      }
+      if (LONGJMP_NAMES.has(entry)) {
+        const args = rdArgs(f.b[i]);
+        return (F) => {
+          const rec = jmpTargets.get(args[0](F));
+          if (rec === undefined) failRt('longjmp: 这个 jmp_buf 没有被 setjmp 装过');
+          /* C11 7.13.2.1：`val` 是 0 的话 `setjmp` 那边回 1。 */
+          const v = args.length > 1 ? args[1](F) : 0n;
+          throw new LongJmp(rec.f, rec.pc, v === 0n ? 1n : v);
+        };
+      }
       /* C 的 libc 走宿主提供的那一份（`interp/libc.js`）：它认得线性内存，所以指针
        * 实参在它手里有意义 —— 与 wasm 那边「宿主模块 + 一块共享内存」是同一个结构。
        * 其余的 C_ABI 入口**照旧拒绝**：那些是 ADR-0014 的封闭表，每条签名各不相同，
@@ -889,8 +982,9 @@ class MirInterp {
           try {
             F.v[i] = callLibc(entry, vals);
           } catch (e) {
-            /* `exit` 抛的信号要原样穿过去：它不是「程序错了」，而是程序要求的退出码。 */
-            if (e instanceof ExitCall) throw e;
+            /* `exit` 抛的信号要原样穿过去：它不是「程序错了」，而是程序要求的退出码。
+             * `longjmp`（从 libc 回调进去的那种，比如比较器里报错）同理。 */
+            if (e instanceof ExitCall || e instanceof LongJmp) throw e;
             failRt(`${entry}: ${e instanceof Error ? e.message : String(e)}`);
           }
           return next;
@@ -987,6 +1081,12 @@ export function runMirModule(oir, mir) {
     }
     if (e instanceof InterpUncaught) {
       stderr(`omni: uncaught: ${e.message}\n`);
+      return 70;
+    }
+    /* 没人接的 `longjmp`：装它的那一帧早就返回了（C11 7.13.2.1 说这是未定义行为）。
+     * 这一条明说，而不是让一个陌生的宿主异常飘出去。 */
+    if (e instanceof LongJmp) {
+      stderr('omni: runtime error: longjmp: 装这个 jmp_buf 的那一帧已经返回了\n');
       return 70;
     }
     throw e;

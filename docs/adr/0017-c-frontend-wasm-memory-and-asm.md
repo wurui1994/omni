@@ -288,7 +288,7 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
 8. **C 的库面**：`libtcc1` 的等价物（软除法/浮点辅助/`alloca`/`setjmp`）与 libc 的接法。
    原先写的是"先转手宿主的 libc，走既有的 extern-C FFI"，第五片证明**转手不成立**
    （指针是自家线性内存里的偏移，宿主 libc 读不到），改成一个读写线性内存的宿主模块，
-   见第五片的落地节。**前二十一片已落地**（预定义的宏 —— 目标的自述，五十条，
+   见第五片的落地节。**前二十二片已落地**（预定义的宏 —— 目标的自述，五十条，
    顺序与值都对着 `tcc -dM -E` 抄；自带的系统头目录 + 编译器必须自己给的那四份头；
    `stdio.h`/`stdlib.h`/`string.h` 的最小子集 —— libc 的自述；
    `strtol` 一族与 `strncpy`/`strchr`/`strstr` 那几条；
@@ -309,8 +309,12 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
    **tinycc 自己那一整份源码编过了** —— `__func__`、常量表达式里的 `sizeof 表达式`、
    转换的常量折叠（于是 `offsetof` 是常量）、`inline` 的体等被引用才发、
    `__builtin_expect`；
-   **预处理那一路也与 `tcc -E -P` 逐字节相同** —— `#ifdef __has_include` 也算真），
-   见下面的第八刀第一到二十一片节。
+   **预处理那一路也与 `tcc -E -P` 逐字节相同** —— `#ifdef __has_include` 也算真；
+   **编出来的 tinycc 真的在预处理文件了** —— `getenv`、fd 那一层
+   （`open`/`read`/`write`/`lseek`/`close`/`unlink`，与 `fopen` 共用同一张快照表）、
+   dispatch 的信号量、以及 `setjmp`/`longjmp` —— 后者在**解释器**这一层做：
+   一帧一个 pc 循环，所以「回到某一帧的某条指令之后」是可表达的），
+   见下面的第八刀第一到二十二片节。
 
 最后三步是**后端**：
 
@@ -4244,6 +4248,127 @@ macOS 的 `<_stdio.h>` 也认这个名字）与 `#define _VA_LIST_DEFINED`，我
 之后：`-dM`、`__has_include_next`、路径 A 的 GLR 与路径 B 对账（第七步）。
 
 <!-- 第八刀第二十一片-END -->
+
+## 落地：第八刀第二十二片
+
+**编出来的 tinycc 真的在预处理文件了**，而且输出与 tcc 自己逐字节相同：
+
+```
+node stage0/src/cli.js c-run "$TCCSRC/tcc.c" -I"$SDK/usr/include" \
+  -I.omni-cache/tcc-build -I"$TCCSRC" -DONE_SOURCE=1 -DTCC_TARGET_ARM64 \
+  -- -E -P .omni-cache/tiny.c
+cmp 我们跑出来的与 tcc 跑出来的 —— IDENTICAL
+```
+
+也就是说这条链现在整条通了：**我们的 C 前端 -> MIR -> 我们的解释器 -> tinycc ->
+预处理的输出**，而末端与 oracle 一致。
+
+### 零 上一片那个预测错了：`c-mir` 本来就在 verify
+
+上一片写「下一步先把 verifier 过一遍」。读了 `cli.js:155` 才发现 `c-mir` / `c-run`
+走的那条路默认就跑 `verifyMir`（良构检查不是可选的调试开关，理由在
+`mir/verify.js` 文件头）。所以那 98200 行 MIR 从第二十片起就是良构的 —— 该问的
+不是「良不良构」而是「跑到哪一格停」。
+
+### 一 `getenv`
+
+第一格。tcc 的 `main` 一开头就读环境（`CPATH`、`C_INCLUDE_PATH`）。
+
+回的地址必须**在线性内存里**且**同一个名字两次回同一个地址**（真的 libc 就是这样），
+所以一个 `Map` 缓存 + 一次 `heapAlloc`。宿主那一侧走 `host/native.js` 的 `env()`，
+不是直接 `process.env` —— 那一层是 ADR-0011 的边界。
+
+### 二 fd 那一层：`open` / `read` / `write` / `lseek` / `close` / `unlink`
+
+第二格。tinycc 读源文件走的是 `tcc_open` -> `open`/`read`，不是 stdio。
+
+**与 `fopen` 共用同一张表、同一个计数器**：两边都是「打开时整份读进来、关的时候整份
+落盘」的快照（第十片那处刻意的简化），所以没有第二套记账。标志位的数值从 macOS 的
+`<sys/fcntl.h>` 量出来 —— 与 tcc 编同一份头时看到的是同一批数。
+
+两格是量出来才对上的：
+
+- `read` 回的是**字节数**，读到末尾回 0（不是 -1）。搞错的话读循环不停。
+- fd 1/2 的 `write` **不过 stdio 的缓冲**。它是系统调用，与 `printf` 攒的那份缓冲
+  互不相干，所以直接交给宿主而不是走 `streamWrite(F_STDOUT)`。走了的话
+  「先 `printf` 再 `write(1, …)`」两句的先后与 tcc 相反：tcc 那边 `write` 先出来、
+  `printf` 那份要等退出时才冲。`tests/c/sys/03-fd.c` 第一次跑就是被这一条判掉的。
+
+顺带把 `remove` 补成真的删（`host/native.js` 新增 `removeFile`）—— 第十片那儿只是
+把还开着的那份忘掉，盘上的文件还在。
+
+### 三 dispatch 的信号量
+
+第三格，三行。`tcc.h:1943` 的 `__APPLE__` 分支里 `TCCSem` 就是
+`dispatch_semaphore_t`。解释器只有一条线，所以互斥是白给的：`create` 回一个非 0 的
+句柄，`wait`/`signal` 回 0。
+
+### 四 `setjmp` / `longjmp` —— 这一片真的那一格
+
+第四格，也是唯一一格不是「补一条 libc」的。tinycc 的错误恢复就是它：
+`libtcc.c` 的 `_tcc_error` 里 `longjmp(s1->error_jmp_buf, 1)`，落点是
+`tcc_compile` 的 `if (setjmp(…) == 0)`。
+
+`setjmp` 要**返回两次**，而 `interp/libc.js` 那张表里的函数只认实参、不认帧。
+能做的理由是这个解释器的形状：一帧一个 `while (pc …) pc = prog[pc](F)`，于是
+「回到某一帧的某条指令之后」是可表达的（`mir/interp.js`）。
+
+- `setjmp(buf)` 记下**调用它的那一帧**与那一帧的**那条 CALL**，回 0。
+- `longjmp(buf, v)` 抛一个 `LongJmp`。中间那些帧靠宿主的异常自然退掉。
+- 目标帧的 pc 循环 catch 住，`F.v[pc] = v; pc = pc + 1` —— 等于「那次调用回了 v」。
+
+三处是踩过才知道的：
+
+1. **落点不能取抛出那一刻的 pc**。第一版这么写，结果 `longjmp` 落在了「主函数当时
+   正在执行的那条 CALL」上（也就是调 `outer()` 那条），而不是当初调 `setjmp` 的那条。
+   所以要在 `setjmp` 的时候把落点记下来。
+2. **要记的是 `F.up`，不是 `F`**。外部符号是经桩函数（`externThunk`）调的，
+   `setjmp` 那条 CCALL 在桩自己的帧里，那一帧一返回就没了。
+3. **`depth` 与 `cur` 要在 catch 里收回**。中间那些帧的复原被异常跳过了。
+
+键取 `jmp_buf` 的**地址**而不是往那块地方写一个号：真的 `setjmp` 往里存寄存器，
+没人读它的内容；按地址记还顺带对上了「同一个 buf 上后一次 `setjmp` 盖掉前一次」。
+
+代价只落在用 setjmp 的模块上：`usesSetjmp` 是装载期一次判断（`mir.cabi` 里有没有
+那几个名字），没有的话每帧连一个 `try` 都不多付、每条 CALL 也不多写一次 `F.pc`。
+
+已经返回的帧上 `longjmp` 是 C 的未定义行为（C11 7.13.2.1）。不装作能做：那个异常
+一路飘到 `runMirModule`，在那儿变成一条明说的运行期错误。
+
+### 量出来的数
+
+- 编出来的 tinycc `-E -P` 一份小文件：与 `tcc -E -P` **IDENTICAL**，exit=0。
+- `tests/c/cpp/` 那八份用例全部**交给编出来的 tinycc** 跑一遍，与本机 tcc 的
+  `-E -P` 比：**7 份逐字节相同**。不同的那一份是 `07-predef.c`，差的全是
+  **目标配置**那几条（`__APPLE__`、`__arm64__`、`__GNUC__`、`long long` 对 `long`、
+  `wchar_t` 的符号）—— 我们喂的是 `-DTCC_TARGET_ARM64`（arm64 Linux），
+  本机那个二进制是 arm64 macOS。同一份源码、两套配置，这一格是对的。
+- 错误那一路也对：`#error boom here` 两边都是
+  `.omni-cache/bad.c:2: error: #error boom here` + exit=1 —— 这一条走的正是
+  编出来的 tinycc 自己的 `longjmp`。
+- 跑一趟（编 tcc.c 到 MIR + 解释执行它去预处理一个文件）1.7s。
+- `tests/c/sys/03-fd.c`：exit 64 + 150B stdout + 8B stderr == `tcc -run`。
+- `tests/c/sys/04-setjmp.c`：exit 9 + 126B stdout == `tcc -run`。
+- `tests/c/run.js`：**80 passed, 0 failed**。`tests/run.js`：**96 passed, 0 failed**。
+
+### 下一片
+
+第八刀第二十三片：**把配置也换成 macOS**（`-DTCC_TARGET_MACHO`），于是上面那
+一份 `07-predef.c` 也该逐字节相同。量出来的第一格已经在那儿等着：
+
+```
+tccmacho.c:2142: error: internal: 位域跨过了它的容器（要 packed 那条按字节读的路）
+```
+
+`struct dyld_chained_ptr_64_rebase` 是 `uint64_t target:36, high8:8, …` —— 一个
+**64 位的容器**，我们那条路目前只走到 32 位。
+
+再往后是让它走到**编译**那一路（`-c` / `tcc -run`）而不只是 `-E`：那要 `mmap`/`mprotect`
+（`tccrun.c`）与 `struct` 按值传/返回（第 9-11 步的后端要它）。
+
+之后：`-dM`、路径 A 的 GLR 与路径 B 对账（第七步）。
+
+<!-- 第八刀第二十二片-END -->
 
 
 

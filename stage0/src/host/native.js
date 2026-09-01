@@ -83,6 +83,12 @@ export function rename(a, b) {
   return undefined;
 }
 
+/** 删一个文件。不在就抛 —— 与 `unlink(2)` 一样，「不在」是错，不是成功。 */
+export function removeFile(p) {
+  node('node:fs').unlinkSync(p);
+  return undefined;
+}
+
 export function realPath(p) {
   return node('node:fs').realpathSync(p);
 }

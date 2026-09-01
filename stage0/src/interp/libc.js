@@ -26,7 +26,7 @@
 // 第二十一片补上了 `%a`（见 `aText`）—— 于是这份清单只剩 `%p` 一格。
 
 import { memLoad, memStore, printBytes, flushOut, memSize, memGrow } from './builtin.js';
-import { stderrBytes as hostStderr, readBinary, writeBinary, env as hostEnv } from '../host/native.js';
+import { stderrBytes as hostStderr, stdoutBytes as hostStdout, readBinary, writeBinary, removeFile, env as hostEnv } from '../host/native.js';
 
 /**
  * `exit` 抛的那个信号（第六刀第十七片）。
@@ -967,8 +967,8 @@ const F_STDERR = 3n;
  *
  * 于是不成立的有两件事：**很大的文件**（整份进内存）、以及**边写边被别人读**
  * （别人看到的是落盘那一刻的样子）。选它的理由是 tinycc 的源码读源文件正是
- * 「整份读进来」，而真的 fd 级 IO 要给 `host/native.js` 加一套 open/read/seek/close ——
- * 那是后端那几步真的要跑 `tcc -run` 时才必须的一格。
+ * 「整份读进来」。第八刀第二十二片起 fd 那一层（`open`/`read`/`write`/`lseek`）
+ * **共用这同一张表**，见下面那一节。
  */
 const files = new Map();      // 句柄 -> 那张表里的一行
 let nextFile = 4n;            // 1/2/3 是三条标准流
@@ -1273,6 +1273,120 @@ const LIBC = {
   },
 
   /* ---- 真的文件（第八刀第十片）。整份快照，见上面那一节。 */
+  /* ---- fd 那一层（第八刀第二十二片）。tinycc 读源文件走的是 `open`/`read`/`close`，
+   * 不是 stdio —— 编出来的 tinycc 跑起来之后第二格边界就是它。
+   *
+   * 句柄与 `fopen` **共用同一张表、同一个计数器**：两边都是「打开时整份读进来、
+   * 关的时候整份落盘」的快照（理由见 `files` 那一节），所以没有第二套记账。
+   * 0/1/2 是三条标准流：`write` 认，`read`/`lseek` 在它们上面还没到。
+   *
+   * 标志位的数值是 macOS 的 `<sys/fcntl.h>` 量出来的 —— 与 tcc 编同一份源码时
+   * 看到的是同一批数。 */
+  open: (a) => {
+    const path = readCStr(a[0]);
+    const flags = Number(BigInt.asIntN(32, BigInt(a[1])));
+    const acc = flags & 3;                    // O_RDONLY 0 / O_WRONLY 1 / O_RDWR 2
+    const creat = (flags & 0x0200) !== 0;     // O_CREAT
+    const trunc = (flags & 0x0400) !== 0;     // O_TRUNC
+    const append = (flags & 0x0008) !== 0;    // O_APPEND
+    const excl = (flags & 0x0800) !== 0;      // O_EXCL
+    let data = '';
+    let found = true;
+    try {
+      data = readBinary(path);
+    } catch {
+      found = false;
+    }
+    if (!found && !creat) { setErrno(2); return -1n; }   // ENOENT
+    if (found && creat && excl) { setErrno(17); return -1n; }   // EEXIST
+    if (trunc) data = '';
+    const h = nextFile;
+    nextFile += 1n;
+    files.set(h, {
+      path,
+      data,
+      pos: append ? data.length : 0,
+      write: acc !== 0,
+      eof: false,
+      err: false,
+      /* 新建的、或者被截断的，哪怕一个字节没写也得落盘 —— 与 `fopen` 的 `w` 同理。 */
+      dirty: (!found && creat) || trunc,
+    });
+    return h;
+  },
+  close: (a) => {
+    const f = BigInt(a[0]);
+    const e = files.get(f);
+    if (e === undefined) { setErrno(9); return -1n; }    // EBADF
+    fileSync(e);
+    files.delete(f);
+    return 0n;
+  },
+  read: (a) => {
+    const f = BigInt(a[0]);
+    const e = files.get(f);
+    if (e === undefined) { setErrno(9); return -1n; }
+    const want = Number(BigInt(a[2]));
+    const have = e.data.length - e.pos;
+    const got = want < have ? want : have;
+    for (let i = 0; i < got; i++) {
+      memStore('i8', BigInt(a[1]) + BigInt(i), 0, BigInt(e.data.charCodeAt(e.pos + i)));
+    }
+    e.pos += got;
+    /* 回的是**字节数**，读到末尾回 0（不是 -1）—— 这一格搞错的话读循环不停。 */
+    return BigInt(got);
+  },
+  write: (a) => {
+    const f = BigInt(a[0]);
+    const n = Number(BigInt(a[2]));
+    let s = '';
+    for (let i = 0; i < n; i++) {
+      s += String.fromCharCode(Number(memLoad('i8u', BigInt(a[1]) + BigInt(i), 0)));
+    }
+    /* fd 1/2 是 stdout/stderr，但**不过 stdio 的缓冲** —— `write` 是系统调用，
+     * 与 `printf` 攒的那份缓冲互不相干。所以这儿直接交给宿主，不能走
+     * `streamWrite(F_STDOUT)`（那是 stdio 那条腿）：走了的话
+     * 「先 printf 再 write(1)」两句的先后就与 tcc 相反 —— tcc 那边 write 先出来，
+     * printf 那份要等退出时才冲。量出来的：`tests/c/sys/03-fd.c`。 */
+    if (f === 1n) { hostStdout(s); return BigInt(n); }
+    if (f === 2n) { hostStderr(s); return BigInt(n); }
+    const e = files.get(f);
+    if (e === undefined) { setErrno(9); return -1n; }
+    if (!e.write) { setErrno(9); return -1n; }
+    streamWrite(f, s);
+    return BigInt(n);
+  },
+  lseek: (a) => {
+    const e = files.get(BigInt(a[0]));
+    if (e === undefined) { setErrno(9); return -1n; }
+    const off = Number(BigInt.asIntN(64, BigInt(a[1])));
+    const whence = Number(BigInt.asIntN(32, BigInt(a[2])));
+    const base = whence === 0 ? 0 : whence === 1 ? e.pos : e.data.length;
+    const p = base + off;
+    if (p < 0) { setErrno(22); return -1n; }            // EINVAL
+    e.pos = p;
+    e.eof = false;
+    return BigInt(p);
+  },
+  unlink: (a) => {
+    const path = readCStr(a[0]);
+    try {
+      removeFile(path);
+    } catch {
+      setErrno(2);
+      return -1n;
+    }
+    return 0n;
+  },
+  /* ---- macOS 的 dispatch 信号量（第八刀第二十二片）。tcc.h:1943 那一段 `__APPLE__`
+   * 分支里 `TCCSem` 就是它，`wait_sem`/`post_sem` 一路包住 tcc 那几处全局状态。
+   *
+   * 解释器只有**一条线**（一个 JS 栈，没有真的线程），所以互斥这件事是白给的：
+   * `create` 回一个不为 0 的句柄，`wait`/`signal` 什么都不做回 0。这不是把边界
+   * 蒙过去 —— 真要有第二条线时它会连同整个解释器一起重做。 */
+  dispatch_semaphore_create: () => 1n,
+  dispatch_semaphore_wait: () => 0n,
+  dispatch_semaphore_signal: () => 0n,
   fopen: (a) => {
     const path = readCStr(a[0]);
     const mode = openMode(readCStr(a[1]));
@@ -1412,11 +1526,16 @@ const LIBC = {
     return e !== undefined && e.err ? 1n : 0n;
   },
   remove: (a) => {
-    /* 这一片没有真的 unlink（`host/native.js` 里也没有）。只把还开着的那份忘掉 ——
-     * 于是「写出去、读回来、删掉」这条链在同一次运行里成立，但盘上的文件还在。
-     * 这是上面那处简化的一部分，将来接真的 fd 级 IO 时一起补。 */
+    /* `remove` 与 `unlink` 在文件上是同一件事（C11 7.21.4.1 / POSIX）。这一片起
+     * 真的落到盘上 —— 顺手把还开着的那份忘掉，不然它 `fclose` 时又写回来。 */
     const path = readCStr(a[0]);
     for (const [h, e] of files) if (e.path === path) files.delete(h);
+    try {
+      removeFile(path);
+    } catch {
+      setErrno(2);
+      return -1n;
+    }
     return 0n;
   },
   strlen: (a) => BigInt(readCStr(a[0]).length),
