@@ -69,6 +69,16 @@
 // 指针就是**线性内存里的字节偏移**（`T_I64`），不是 ADR-0016 的 `T_PTR`/`T_TPTR` ——
 // 那两个带范围检查、一块一块地分配，而 C 要的是一整片可寻址的字节。
 //
+// ## 调用约定里聚合类型那一格（第十一片）
+//
+// MIR 的实参与返回值都是**标量**，而 C 能按值传一整个 struct。前端这一层的约定：
+//   - **传值传地址**，拷贝由**被调方**在入口处做（`runBody`）。一次调用于是只有一次拷贝，
+//     而且那一次正是 C 要求的那一次（形参是实参的一份可改的拷贝，C11 6.9.1 第 10 段）。
+//   - **返回走隐藏的第一个形参**：调用方在自己帧上划一块、把地址传进去，被调方拷进去
+//     再把这个地址返回（SysV 用 rax 回同一个东西）。于是 RET 照旧只带一个 i64。
+// 真的 ABI（arm64 ≤16 字节走两个寄存器之类）是后端那几步的事；这一层只需要地址。
+// 这个约定**只在自家人之间成立** —— 外部符号那一侧的 struct 传值还没到（`externThunk`）。
+//
 // ## 这一片做到哪儿（**是路标，不是终点**）
 //
 // 终点是「能编译 tinycc 自己的全部源码」，所以 printf、struct、变参、`setjmp`
@@ -83,10 +93,12 @@
 // 外部符号（`unit()` 末尾的转发桩）与变参调用（printf/sprintf 那一族已经跑通）、
 // **struct/union/enum、`.` 与 `->`、整块的 struct 赋值、不完整类型的指针、位域、
 // 聚合初始化器（含指定初始化器与不定长数组）、`switch`（含贯穿、`BRTABLE`/比较链两条路）、
-// `goto` 与语句标签（外围块上的，前向后向都行）**。
+// `goto` 与语句标签（外围块上的，前向后向都行）、struct 的**传值与返回**（传地址 +
+// 隐藏的返回指针）**。
 // 还没到：`goto` 跳到不在外围块上的标签（relooper 那一路）、标签长在里层控制结构里
-// （Duff's device）、struct 的**传值/返回**（要 ABI）、嵌套聚合省掉里层花括号、带括号的
-// 声明符（`int (*a)[3]`、函数指针）、浮点（含 printf 的 `%f/%e/%g`）、`malloc` 那一族
+// （Duff's device）、**外部**函数上的 struct 传值/返回（要真的 ABI）、嵌套聚合省掉里层
+// 花括号、带括号的声明符（`int (*a)[3]`、函数指针）、浮点（含 printf 的 `%f/%e/%g`）、
+// `malloc` 那一族
 // （要堆）、变参函数的**定义**（要 `va_list`/`va_arg`）。
 //
 // 碰到还没做到的东西**当场报错**，报错文本里带「第六刀」字样 —— 一眼能看出是进度不是
@@ -227,6 +239,8 @@ function mirTypeOf(ty) {
   if (b === VT_BYTE || b === VT_SHORT || b === VT_INT || b === VT_BOOL) return T_I32;
   if (b === VT_LLONG || b === VT_PTR || b === VT_FUNC) return T_I64;
   if (b === VT_FLOAT) return T_I32;   // 到不了这儿（浮点还没做），留着让 switch 完整
+  /* struct/union/数组在 MIR 里**只以地址的形态出现**（第十一片的 ABI：传值传地址、
+   * 返回走隐藏的返回指针）。所以它们的 MIR 类型就是指针的类型。 */
   return T_I64;
 }
 
@@ -415,6 +429,8 @@ export class CGen {  /**
     this.fpRef = REF_NONE;
     /** 进函数时的 `$sp`，每条 RET 前写回去 */
     this.spSave = REF_NONE;
+    /** 返回 struct 时那个隐藏的返回指针（第十一片的 ABI，见 `runBody`） */
+    this.sretRef = REF_NONE;
     this.frameSize = 0;
     /** 帧内的下一个空位。**不回收** —— 见 finishFunc 头上「平铺的帧」那一节 */
     this.frameOff = 0;
@@ -1634,6 +1650,14 @@ export class CGen {  /**
       }
     }
     const refs = [];
+    /* struct 的返回：调用方先在自己的帧上划一块，把地址当**第一个**实参传进去
+     * （第十一片的 ABI，见 `runBody`）。划这一块在两遍里都做，于是第一遍数出来的帧
+     * 一定装得下它。 */
+    let sret = null;
+    if (isStruct(info.ret.t)) {
+      sret = sMem(info.ret, this.fpRef, this.frameAlloc(info.ret));
+      refs.push(this.addrOf(sret));
+    }
     for (let i = 0; i < vals.length; i++) {
       /* 固定形参按**声明的类型**转（原型的作用）；`...` 后面那些按**默认实参提升**
        * （C11 6.5.2.2 第 6 段）：窄整数提到 int、数组与函数退化成指针。
@@ -1641,6 +1665,17 @@ export class CGen {  /**
       const want = (np >= 0 && i < np)
         ? info.params[i].ty
         : promotedType(decayedType(vals[i].ty));
+      /* 传值的 struct 传的是**地址**，拷贝由被调方在入口处做（`runBody`）。
+       * 于是一次调用只有一次拷贝，而且那次拷贝是 C 要求的那一次
+       * （形参是实参的一份可改的拷贝，C11 6.9.1 第 10 段）。 */
+      if (isStruct(want.t)) {
+        if (!sameType(want, vals[i].ty)) {
+          this.err(`cannot pass '${typeText(vals[i].ty)}' as '${typeText(want)}'`);
+        }
+        if (np < 0 || i >= np) this.todo('把 struct 传给变参的可变部分还没到');
+        refs.push(this.addrOf(vals[i]));
+        continue;
+      }
       refs.push(this.gv(this.castTo(vals[i], want)));
     }
     if (info.params === null) {
@@ -1656,7 +1691,11 @@ export class CGen {  /**
       return sVal(info.ret, this.f.emit(OP.CCALL, rt,
         this.mod.cabiNo(name), this.f.pushArgs(refs), 0));
     }
-    return sVal(info.ret, this.f.emit(OP.CALL, rt, info.no, this.f.pushArgs(refs), 0));
+    const r = this.f.emit(OP.CALL, rt, info.no, this.f.pushArgs(refs), 0);
+    /* 回的是那块地方的地址（SysV 的 rax 也是这么回的）。用**回来的**那个 ref 而不是
+     * 手上的 `sret`：两者一定相等，而用回来的那个把「返回值在哪儿」这件事记在数据流里。 */
+    if (sret !== null) return sMem(info.ret, r, 0);
+    return sVal(info.ret, r);
   }
 
   /**
@@ -1675,7 +1714,12 @@ export class CGen {  /**
     const f = info.f;
     const params = info.params === null ? [] : info.params;
     const refs = [];
+    /* 桩要把实参**原样**转给宿主，而我们的 struct 传的是自家线性内存里的一个偏移 ——
+     * 宿主读不到（第五片证明「转手宿主 libc」不成立，同一个理由）。所以外部符号上的
+     * struct 传值/返回是边界，不是错误。 */
+    if (isStruct(info.ret.t)) this.todo('外部函数返回 struct 还没到（要真的 ABI）');
     for (const p of params) {
+      if (isStruct(p.ty.t)) this.todo('外部函数按值收 struct 还没到（要真的 ABI）');
       const mt = mirTypeOf(p.ty);
       const slot = f.slot(p.name, mt);
       f.params.push({ name: p.name, t: mt, slot });
@@ -1916,7 +1960,15 @@ export class CGen {  /**
       const hasVal = btype(this.funcRet.t) !== VT_VOID;
       if (this.tok !== SEMI) {
         const v = this.gexpr();
-        if (hasVal) {
+        if (isStruct(this.funcRet.t)) {
+          /* 返回 struct：拷进调用方划好的那块地方，再把那个地址返回（第十一片的 ABI）。
+           * 拷贝在 `emitEpilogue` **之前** —— 返回值可能就在自己的帧上（`return s;`），
+           * 先把 `$sp` 还回去再拷会拷一块已经归还的栈。 */
+          const dst = sMem(this.funcRet, this.sretRef, 0);
+          this.structCopy(dst, v);
+          this.emitEpilogue();
+          this.f.emit(OP.RET, T_I64, this.sretRef, REF_NONE, 0);
+        } else if (hasVal) {
           // `gen_assign_cast(&func_vt)`（`tccgen.c:7263`）：按返回类型转换
           const cv = this.castTo(v, this.funcRet);
           const r = this.gv(cv);
@@ -3044,9 +3096,10 @@ export class CGen {  /**
        * 一块 —— 那块地方永远也填不上，因为实参传进来的是一个地址。 */
       if (isArray(ty.t)) ty = mkPointer(ty.ref);
       if (btype(ty.t) === VT_VOID) this.err('parameter has void type');
-      /* struct 传值要 ABI 的那一套（arm64 上 ≤16 字节走两个寄存器，再大就是调用方
-       * 分配一块、传地址）。那是分步 9-11 的形状，不该在这一片先猜一个。 */
-      if (isStruct(ty.t)) this.todo('struct 传值还没到（要 ABI：寄存器还是隐藏指针）');
+      /* 传值的 struct 传的是**地址**（第十一片的 ABI，见 `runBody` 与 `funcCall`）：
+       * 调用方给出实参那个对象的地址，被调方在入口处拷进自己的帧。arm64/x64 真的 ABI
+       * 里 ≤16 字节还能走寄存器，那是后端那几步的事 —— 前端这一层只需要地址。 */
+      this.needComplete(d.name === null ? 'parameter' : d.name, ty);
       // 形参名可以省（原型里），那就给它一个占位名
       const pn = d.name === null ? `$p${params.length}` : d.name;
       /* 形参**保留声明的类型**（`char c` 就是 char）。「实参提升」（`char` -> `int`）
@@ -3092,7 +3145,6 @@ export class CGen {  /**
     if (info.params !== null && info.params.length !== params.length) {
       this.err(`conflicting types for '${name}'`);
     }
-    if (isStruct(ret.t)) this.todo('返回 struct 还没到（要 ABI 的隐藏返回指针）');
     info.params = params;
     info.ret = ret;
     info.variadic = variadic === true;
@@ -3175,6 +3227,16 @@ export class CGen {  /**
       }
     }
 
+    /* 返回 struct 的函数多一个**隐藏的第一个形参**：调用方划好的那块地方的地址
+     * （第十一片的 ABI）。`return` 把返回值拷进去、再把这个地址返回，于是 MIR 那条 RET
+     * 照旧只带一个 i64 —— 与 SysV 用 rax 回那个隐藏指针是同一件事。 */
+    this.sretRef = REF_NONE;
+    if (isStruct(ret.t)) {
+      const slot = f.slot('$sret', T_I64);
+      f.params.push({ name: '$sret', t: T_I64, slot });
+      this.sretRef = f.emit(OP.LOAD, T_I64, REF_NONE, REF_NONE, slot);
+    }
+
     /* 形参就是前几个槽 —— MIR 的解释器按这个约定填帧（interp.js:274 的注释）。
      * 被取过地址的形参**两处都有**：ABI 那个槽照旧（值从调用方来），再拷一份到帧上，
      * 名字绑帧上那份。少了这次拷贝，`&x` 指向的是一块没人写过的内存。 */
@@ -3182,6 +3244,18 @@ export class CGen {  /**
       const mt = mirTypeOf(p.ty);
       const slot = f.slot(p.name, mt);
       f.params.push({ name: p.name, t: mt, slot });
+      if (isStruct(p.ty.t)) {
+        /* 传值的 struct：进来的是**调用方那个对象的地址**，而形参是它的一份可改的拷贝
+         * （C11 6.9.1 第 10 段）。所以拷贝落在**被调方**这一侧 —— 一次调用于是只有
+         * 一次拷贝，而且它正是 C 要求的那一次。 */
+        const off = this.frameAlloc(p.ty);
+        this.scopes[0].set(p.name, { ty: p.ty, slot: -1, off });
+        if (!this.pass1) {
+          this.structCopy(sMem(p.ty, this.fpRef, off),
+            sMem(p.ty, f.emit(OP.LOAD, T_I64, REF_NONE, REF_NONE, slot), 0));
+        }
+        continue;
+      }
       if (!this.pass1 && this.frameNames.has(p.name)) {
         const off = this.frameAlloc(p.ty);
         this.scopes[0].set(p.name, { ty: p.ty, slot: -1, off });
@@ -3204,9 +3278,12 @@ export class CGen {  /**
     this.cpp.endMacro();
 
     /* 落到函数尾：C 里非 void 函数不 return 是 UB（tcc 让返回值是垃圾）。MIR 要
-     * 每条路都有 RET 才良构，所以无条件补一条 —— 前面已经 RET 的路走不到这里。 */
+     * 每条路都有 RET 才良构，所以无条件补一条 —— 前面已经 RET 的路走不到这里。
+     * 返回 struct 的函数补的是那个隐藏指针：回 0 会让调用方去读地址 0（页 0 是空的，
+     * 当场炸），而 tcc 那边只是一块没写过的内存 —— 补指针更像它。 */
     this.emitEpilogue();
     if (f.ret === T_VOID) f.emit(OP.RET, T_VOID, REF_NONE, REF_NONE, 0);
+    else if (isStruct(ret.t)) f.emit(OP.RET, T_I64, this.sretRef, REF_NONE, 0);
     else f.emit(OP.RET, f.ret, this.konst(ret, 0), REF_NONE, 0);
     this.f = outer;
   }
