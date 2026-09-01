@@ -123,8 +123,9 @@
 // 就是 double，见 `tcc.h:237-241`）、**常量表达式里的浮点**（整型与浮点合成一份求值器：
 // `int n = 1.9;` 是 1、`(int)2.9` 也认）、printf 的 `%a`、**变参里的 struct**（写侧摊进
 // 变参区、`va_arg` 回一个左值）、**`goto` 跳到哪儿都行**（一台函数级状态机 +
-// 一条分派链换掉「每个块一台」）**。
-// 还没到：语句标签长在 `switch` 里（case 那台分派与标签这台要交错）、
+// 一条分派链换掉「每个块一台」，**语句标签长在 `switch` 里也行** —— case 的段界与
+// 标签的段界摆在同一串嵌套 `BLOCK` 上）**。
+// 还没到：`case` 标签长在里层的控制结构里（真的 Duff's device）、
 // **外部**函数上的 struct 传值/返回（要真的 ABI）。
 //
 // 碰到还没做到的东西**当场报错**，报错文本里带「第六刀」字样 —— 一眼能看出是进度不是
@@ -603,6 +604,8 @@ export class CGen {  /**
     this.labelCount = 0;
     /** 第二遍：状态槽的槽号；-1 = 这个函数里没有标签，整台状态机都不摆 */
     this.gotoSlot = -1;
+    /** @type {?{slot:number,ty:object,labels:object[]}} switch 交给函数体那台分派的选择子 */
+    this.pendingSwitch = null;
   }
 
   /* ------------------------------------------------------------ 记号与报错 */
@@ -2418,14 +2421,14 @@ export class CGen {  /**
   block() {
     const sn = this.stmtNo++;
     if (this.pass1) {
-      const r = { lo: this.labelCount, hi: this.labelCount, kids: [], thenHi: 0 };
+      const r = { lo: this.labelCount, hi: this.labelCount, kids: [], thenHi: 0, isCase: false };
       this.stmtRanges[sn] = r;
       const outer = this.kids;
       this.kids = r.kids;
       this.stmt(r);
       this.kids = outer;
       r.hi = this.labelCount;
-      if (r.hi > r.lo) outer.push(r);
+      if (r.hi > r.lo || r.isCase) outer.push(r);
       return;
     }
     const r = this.stmtRanges[sn];
@@ -2521,8 +2524,13 @@ export class CGen {  /**
       this.next();
       /* 里面有标签的复合语句要一台**分派**：状态落在哪个直接子语句的区间里，就把控制
        * 送到那条子语句的开头（`openSegs`/`segCut`）。它没有「头」要跳过，所以状态 0
-       * 与状态非 0 走的是同一台分派。 */
-      const d = this.reentry(r) ? this.openSegs(r) : null;
+       * 与状态非 0 走的是同一台分派。
+       * switch 的函数体多一件事：case 的那台分派也在这儿发（`switchStmt` 把选择子
+       * 挂在 `pendingSwitch` 上交过来），于是两台分派共用同一串嵌套 `BLOCK`。 */
+      const sw = this.pendingSwitch;
+      this.pendingSwitch = null;
+      const d = this.reentry(r) ? this.openSegs(r, sw) : null;
+      if (sw !== null && d === null) this.err('internal: switch 的段界没接上');
       this.scopes.push(new Map());
       /* tcc 的复合语句循环（`tccgen.c:7243-7248`）：先试声明，不是声明才当语句。
        * 「声明和语句可以交替出现」（C99）就是这个循环的形状带来的。 */
@@ -2627,7 +2635,12 @@ export class CGen {  /**
     }
 
     if (t === TOK_SWITCH) return this.switchStmt(r);
-    if (t === TOK_CASE || t === TOK_DEFAULT) return this.caseLabel(t);
+    if (t === TOK_CASE || t === TOK_DEFAULT) {
+      /* `case v:` / `default:` 自己就是一条语句，而且它是一处**段界** —— 与「里面有标签的
+       * 子语句」同一件事，所以两者共用 `kids`（见 `block` 那个包装与 `openSegs`）。 */
+      r.isCase = true;
+      return this.caseLabel(t);
+    }
 
     if (t === TOK_GOTO) {
       this.next();
@@ -2694,7 +2707,9 @@ export class CGen {  /**
    *    - `if`：条件变成「state == 0 ? cond : state <= thenHi」，于是能直接进对的那一半。
    *    - `L: 语句`：到了就把状态清零（`labelStmt`），此后一切照常。
    *    - `do-while`：循环体就在最前面，什么都不用跳过。
-   *    - `switch`：还没到 —— case 的那台分派与标签的这台要交错，见 `switchStmt`。
+   *    - `switch`（第二十五片）：case 的段界与标签的段界摆在**同一串**嵌套 `BLOCK` 上，
+   *      两台分派都由函数体那一层发（`openSegs`）；选择子落在一个槽上，重新进入时整段
+   *      求值跳过。
    *
    * 「状态落在谁里面」为什么只是一次比较：标签编号按**定义的源码顺序**从 1 起，
    * 而一条语句占一段连续的源码，所以它里面的标签编号一定是连续区间 `(lo, hi]`
@@ -2708,36 +2723,64 @@ export class CGen {  /**
 
   /**
    * 里面有标签的复合语句开场：摆好 k+1 层 `BLOCK`、发分派、关掉 `entry`。
-   * `r.kids` 是第一遍量出来的「带标签的直接子语句」，k 就是它的长度。
+   *
+   * `r.kids` 是第一遍量出来的**段界**：里面有标签的直接子语句，加上 `case`/`default`
+   * （它们也是直接子语句）。第 i 个段界的层数是 `i+1`，最里层（0）是第一处段界之前那一段。
+   *
+   * 分派分两截：
+   *   1. 状态非 0 -> 按区间送到那条带标签的子语句。区间判断用一次**无符号**比较：
+   *      `(unsigned)(state - 1) <= hi_i - 1`。状态 0 会变成 0xFFFFFFFF，一条都不中，
+   *      于是「状态 0」不必单独测一次。
+   *   2. 落到这儿说明状态是 0（正常进来）：switch 就发 case 那台分派（它末尾是无条件的），
+   *      不是 switch 就 `BR` 到 `entry`。
    */
-  openSegs(r) {
+  openSegs(r, sw) {
     const f = this.f;
     const kids = r.kids;
     const k = kids.length;
-    if (k === 0) this.err('internal: 有标签的块却没有带标签的子语句');
+    if (k === 0) this.err('internal: 有标签的块却没有段界');
     /* 比较全在**开 BLOCK 之前**发：MIR 是 SSA，区域外面发的 ref 在里面照样可用，
      * 反过来（在一个已经关掉的区域里发）就要读者自己去论证支配关系了。 */
     const st = f.emit(OP.LOAD, T_I32, REF_NONE, REF_NONE, this.gotoSlot);
-    const z = f.emit(OP.EQ, T_I32, st, this.mod.consts.i32(0), 0);
-    const les = [];
-    for (let i = 0; i < k - 1; i++) {
-      les.push(f.emit(OP.LE, T_I32, st, this.mod.consts.i32(kids[i].hi), 0));
+    const d = f.emit(OP.SUB, T_I32, st, this.mod.consts.i32(1), 0);
+    const tests = [];
+    for (let i = 0; i < k; i++) {
+      if (kids[i].hi <= kids[i].lo) { tests.push(-1); continue; }
+      tests.push(f.emit(OP.ULE, T_I32, d, this.mod.consts.i32(kids[i].hi - 1), 0));
     }
+    let selRef = REF_NONE;
+    if (sw !== null) selRef = f.emit(OP.LOAD, mirTypeOf(sw.ty), REF_NONE, REF_NONE, sw.slot);
+
     for (let i = 0; i <= k; i++) this.open(OP.BLOCK, 'seg', REF_NONE);
-    /* 最里层（层数 0）是 `entry` = 第一条带标签子语句**之前**那一段；往外一层一段。 */
-    f.emit(OP.BRIF, T_VOID, z, REF_NONE, 0);
-    for (let i = 0; i < k - 1; i++) {
-      f.emit(OP.BRIF, T_VOID, les[i], REF_NONE, i + 1);
+    for (let i = 0; i < k; i++) {
+      if (tests[i] >= 0) f.emit(OP.BRIF, T_VOID, tests[i], REF_NONE, i + 1);
     }
-    f.emit(OP.BR, T_VOID, REF_NONE, REF_NONE, k);
+    if (sw === null) {
+      f.emit(OP.BR, T_VOID, REF_NONE, REF_NONE, 0);
+    } else {
+      /* case 的层数：源码顺序里第 j 个 case 标签，就是第 j 个 `isCase` 段界。数不上就说明
+       * 有 case 长在里层的控制结构里（真的 Duff's device）—— 它不是这个块的直接子语句，
+       * 于是没有自己的段界。与 `caseLabel` 那条是同一个边界、同一个理由。 */
+      const caseAt = [];
+      for (let i = 0; i < k; i++) if (kids[i].isCase) caseAt.push(i + 1);
+      if (caseAt.length !== sw.labels.length) {
+        this.todo('case 标签长在里层的控制结构里还没到（Duff\'s device）');
+      }
+      let defLevel = this.levelOf('break');
+      for (let j = 0; j < sw.labels.length; j++) {
+        sw.labels[j].lv = caseAt[j];
+        if (sw.labels[j].def) defLevel = caseAt[j];
+      }
+      this.dispatch(selRef, sw.ty, sw.labels, defLevel, sw.labels.length);
+    }
     this.close();                     // entry：立刻关掉
     return { kids, next: 0 };
   }
 
-  /** 下一条语句里有标签 -> 它是一段的开头 -> 关掉一层。 */
+  /** 下一条语句是一处段界（里面有标签，或者它是 `case`/`default`）-> 关掉一层。 */
   segCut(d) {
     const nr = this.stmtRanges[this.stmtNo];
-    if (nr === undefined || nr.hi <= nr.lo) return;
+    if (nr === undefined || (nr.hi <= nr.lo && !nr.isCase)) return;
     if (d.next >= d.kids.length) this.err('internal: 段数与第一遍量的不符');
     d.next++;
     this.close();
@@ -2827,12 +2870,15 @@ export class CGen {  /**
    * 扫那一遍**只走记号**（`scanCases`），所以不声明局部量、不占帧、不发指令。
    */
   switchStmt(r) {
-    /* 语句标签长在 switch 里面：case 那台分派与标签那台分派要**交错**（同一串
-     * 嵌套 BLOCK 上既有 case 的段界又有标签的段界），而且重新进入时还得跳过选择子的
-     * 求值。第二十四片的那条分派链在别处都够用，只有这儿不够 —— 当场说清楚。 */
-    if (r.hi > r.lo) this.todo('语句标签长在 switch 里还没到');
+    /* 里面有语句标签的 switch 走**合流**那一路（第二十五片）：case 的段界与标签的段界
+     * 摆在同一串嵌套 `BLOCK` 上，两台分派都由函数体那一层发（`openSegs`）。这儿要多做
+     * 两件事：选择子落在一个槽上（重新进入时那一段被跳过，SSA 的 ref 就不能用了），
+     * 以及被重新进入时**跳过选择子的求值**（不能重跑副作用）。 */
+    const merged = this.reentry(r);
     this.next();
     this.skip(LPAR);
+    if (merged) this.open(OP.BLOCK, 'break', REF_NONE);
+    const skipSel = merged ? this.headSkip(r) : false;
     /* 控制表达式先做整型提升（C11 6.8.4.2 第 5 段），case 的值随后按这个类型收口。
      * 在开 block **之前**求值：它只在分派里用一次，而放在外面读起来就是 tcc 的顺序。 */
     const sel = this.promote(this.gexpr());
@@ -2840,6 +2886,12 @@ export class CGen {  /**
       this.err(`switch quantity is not an integer ('${typeText(sel.ty)}')`);
     }
     const selRef = this.gv(sel);
+    let selSlot = -1;
+    if (merged) {
+      selSlot = this.temp(mirTypeOf(sel.ty), 'sel');
+      this.f.emit(OP.STORE, T_VOID, selRef, REF_NONE, selSlot);
+    }
+    if (skipSel) this.close();
     this.skip(RPAR);
     if (this.tok !== LBRACE) this.todo('switch 的函数体不是花括号还没到');
 
@@ -2850,17 +2902,21 @@ export class CGen {  /**
     // ---- 扫一遍：标签按**源码顺序**排成一列
     const labels = this.scanCases(body, sel.ty);
     const k = labels.length;
-    /* 兜底跳到哪儿：有 `default` 就是它那一层，没有就是 break 那一层（= 跳出去）。 */
-    let defLevel = k;
-    for (let i = 0; i < k; i++) if (labels[i].def) defLevel = i;
 
-    // ---- 摆好 block，发分派
-    this.open(OP.BLOCK, 'break', REF_NONE);
-    for (let i = k - 1; i >= 0; i--) this.open(OP.BLOCK, 'case', REF_NONE);
-    this.dispatch(selRef, sel.ty, labels, defLevel, k);
+    if (!merged) {
+      /* 兜底跳到哪儿：有 `default` 就是它那一层，没有就是 break 那一层（= 跳出去）。 */
+      let defLevel = k;
+      for (let i = 0; i < k; i++) if (labels[i].def) defLevel = i;
+      // ---- 摆好 block，发分派
+      this.open(OP.BLOCK, 'break', REF_NONE);
+      for (let i = k - 1; i >= 0; i--) this.open(OP.BLOCK, 'case', REF_NONE);
+      this.dispatch(selRef, sel.ty, labels, defLevel, k);
+    } else {
+      this.pendingSwitch = { slot: selSlot, ty: sel.ty, labels };
+    }
 
     // ---- 再放一遍：真的做
-    this.swStack.push({ left: k });
+    this.swStack.push({ left: k, merged });
     this.cpp.pushTokens(body);
     this.next();
     this.block();
@@ -2890,12 +2946,15 @@ export class CGen {  /**
     if (t === TOK_CASE) this.constExpr();
     this.skip(COLON);
     /* 标签必须直接长在 switch 的函数体上。长在里层的 `if`/`while` 里（Duff's device
-     * 那种）会让「关掉一层」关错对象 —— 当场报出来，别悄悄生成一个形状不同的东西。 */
-    if (this.regions[this.regions.length - 1] !== 'case') {
+     * 那种）会让「关掉一层」关错对象 —— 当场报出来，别悄悄生成一个形状不同的东西。
+     * 合流那一路上这条已经在 `openSegs` 里查过了（段界数与扫出来的对不上），
+     * 而且那儿查得更早，所以这儿只管第十片那个形状。 */
+    if (!st.merged && this.regions[this.regions.length - 1] !== 'case') {
       this.todo('case 标签长在里层的控制结构里还没到（Duff\'s device）');
     }
     st.left--;
-    this.close();
+    /* 合流那一路上「关掉一层」已经由 `segCut` 在解析这条语句**之前**做过了。 */
+    if (!st.merged) this.close();
   }
 
   /**
@@ -2913,7 +2972,13 @@ export class CGen {  /**
     const f = this.f;
     const mt = mirTypeOf(ty);
     const vals = [];
-    for (let i = 0; i < k; i++) if (!labels[i].def) vals.push({ v: labels[i].val, lv: i });
+    for (let i = 0; i < k; i++) {
+      /* 层数默认就是下标（第十片那个形状：一个标签一层）。合流那一路上段界里还夹着
+       * 语句标签，层数不再等于下标，于是由调用方填 `lv`（见 `openSegs`）。 */
+      if (!labels[i].def) {
+        vals.push({ v: labels[i].val, lv: labels[i].lv === undefined ? i : labels[i].lv });
+      }
+    }
     if (vals.length === 0) {
       f.emit(OP.BR, T_VOID, REF_NONE, REF_NONE, defLevel);
       return;
@@ -3979,6 +4044,7 @@ export class CGen {  /**
     /* 两遍各自从 0 数起，于是同一条语句在两遍里是同一个序号（`block` 那个包装）。 */
     this.stmtNo = 0;
     this.kids = [];
+    this.pendingSwitch = null;
 
     if (!this.pass1) {
       this.spSave = REF_NONE;
