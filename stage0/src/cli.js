@@ -35,6 +35,7 @@ import { dumpBytes } from './mir/bytes.js';
 import { IncrCache, compileIncremental, incrReport } from './incr/cache.js';
 import { Diagnostics, OmniError, SourceFile } from './source/diag.js';
 import { check } from './hir/check.js';
+import { pruneFuncs } from './hir/prune.js';
 import { cAbiLibs } from './hir/c_abi.js';
 import { emitJs, emitJsFunc, emitJsRuntimeModule } from './backend-js/emit.js';
 import { emitC } from './backend-c/emit.js';
@@ -127,6 +128,17 @@ function compileWat(path) {
 }
 
 function compile(path, argv = []) {
+  const r = compileFront(path, argv);
+  // 摇树（第一百〇六刀）：所有前端都是"把库整份降下来"，从入口不可达的那些函数一个都不发。
+  // `OMNI_PRUNE=0` 关掉 —— 要对比"摇没摇"两份产物时用。
+  if (env('OMNI_PRUNE') !== '0' && r !== undefined && r.mod !== undefined) {
+    const n = pruneFuncs(r.mod);
+    if (n.after !== n.before) vStep(`prune  ${n.before} -> ${n.after} funcs（摇掉 ${n.before - n.after}）`);
+  }
+  return r;
+}
+
+function compileFront(path, argv) {
   if (path.endsWith('.js')) return compileJs(path);
   if (path.endsWith('.wat')) return compileWat(path);
   if (path.endsWith('.sx')) return compileSexpr(path);
