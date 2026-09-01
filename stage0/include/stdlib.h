@@ -2,8 +2,9 @@
  * 身份与取舍见 stdio.h 头上那一节 —— 这一份是同一件事的另一半。
  *
  * 少了什么：`strtod`（要一份十进制到 double 的正确舍入，
- * 而那与 `%f` 那一侧的分歧是同一件事）、`getenv` / `system`（要宿主进程环境）、
+ * 而那与 `%f` 那一侧的分歧是同一件事）、`system`（要宿主起进程）、
  * `atexit`（要一张退出时跑的表，而 `exit` 现在是一个抛出去的信号）。
+ * `getenv` 第八刀第二十二片补上了 —— 跑起来的 tinycc 一进门就问 `CPATH` 一族。
  *
  * `strtol` 一族有一格与 tcc 对不上：**溢出**。C 说回端点值并设 `errno = ERANGE`，
  * 我们回同样的值但没有 `errno`（要一份 `<errno.h>` 与一个每线程的变量，独立一格），
@@ -40,5 +41,10 @@ void *bsearch(const void *key, const void *base, size_t n, size_t size,
 
 void exit(int code);
 void abort(void);
+
+/* 环境。回的指针**不归调用方**（C11 7.22.4.6：不许改、不许 free）——
+ * 解释器那边一个名字缓存一格，于是同一个名字问两次是同一个地址。
+ * 宿主的环境原样透出：与三条标准流同一个道理，「环境是谁的」只有宿主答得了。 */
+char *getenv(const char *name);
 
 #endif /* _STDLIB_H */

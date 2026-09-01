@@ -248,7 +248,7 @@ const FRAME_ALIGN = 8;
  * 分配器本身在 `interp/libc.js` 里，簿记全在线性内存上；前端在这儿要做的只有两件事：
  * 版图上给堆留出位置、在入口处把堆的起点交过去。
  */
-const HEAP_FNS = new Set(['malloc', 'calloc', 'realloc', 'free', 'strdup']);
+const HEAP_FNS = new Set(['malloc', 'calloc', 'realloc', 'free', 'strdup', 'getenv']);
 
 /**
  * 用到这个名字，就说明这个单元要一格 `errno`（第八刀第八片）。

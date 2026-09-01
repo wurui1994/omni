@@ -26,7 +26,7 @@
 // 第二十一片补上了 `%a`（见 `aText`）—— 于是这份清单只剩 `%p` 一格。
 
 import { memLoad, memStore, printBytes, flushOut, memSize, memGrow } from './builtin.js';
-import { stderrBytes as hostStderr, readBinary, writeBinary } from '../host/native.js';
+import { stderrBytes as hostStderr, readBinary, writeBinary, env as hostEnv } from '../host/native.js';
 
 /**
  * `exit` 抛的那个信号（第六刀第十七片）。
@@ -765,6 +765,8 @@ function getErrno() {
  * 都量过，见下面那条。这块地方同样由**前端**在 data 段里留、开跑前用
  * `__omni_strerror_init` 把地址与大小交过来（与 errno 那一格同一个形状，只是大一片）。 */
 let strerrAddr = 0n;
+/** @type {Map<string,bigint>} `getenv` 的答案：一个名字一格，回过的地址不再变。 */
+const envCache = new Map();
 
 /* 号到文字那张表（第八刀第十三片）。**整张表都是从 oracle 上量出来的**
  * （`tcc -run` 里一个 `for` 印 `strerror(0..110)`），不是自己编的 —— 这些串要与
@@ -1108,6 +1110,26 @@ const LIBC = {
     const msg = errText(getErrno());
     streamWrite(F_STDERR, pre === '' ? `${msg}\n` : `${pre}: ${msg}\n`);
     return undefined;
+  },
+  /* `getenv`（C11 7.22.4.6）。回的指针要**活到程序结束**，而且同一个名字每次问
+   * 都该是同一个地址（调用方会存着它）—— 所以一个名字缓存一格、住在堆上。
+   * 名字查不到就回 NULL。宿主的环境**原样透出**：这一格与三条标准流同一个道理，
+   * 「环境是谁的」只有宿主答得了（tinycc 的 `tcc_set_environ` 一路要它）。 */
+  getenv: (a) => {
+    const name = readCStr(a[0]);
+    const hit = envCache.get(name);
+    if (hit !== undefined) return hit;
+    const v = hostEnv(name);
+    if (v === undefined) {
+      envCache.set(name, 0n);
+      return 0n;
+    }
+    const bytes = new TextEncoder().encode(v);
+    const p = heapAlloc(BigInt(bytes.length + 1));
+    for (let i = 0; i < bytes.length; i++) memStore('i8', p, i, BigInt(bytes[i]));
+    memStore('i8', p, bytes.length, 0n);
+    envCache.set(name, p);
+    return p;
   },
   malloc: (a) => heapAlloc(BigInt(a[0])),
   calloc: (a) => {
