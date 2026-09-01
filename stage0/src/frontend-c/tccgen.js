@@ -112,12 +112,13 @@
 // 隐藏的返回指针）、带括号的声明符（`int (*a)[3]`、`int (*f(int))[3]`）、**函数指针**
 // （调用、回调、函数指针表、当静态初始化式）、**浮点**（`float`/`double`、与整型互转、
 // 静态初始化式、printf 的 `%f/%e/%g`）、**堆**（`malloc`/`calloc`/`realloc`/`free`/
-// `strdup`，簿记全在线性内存上）**。
+// `strdup`，簿记全在线性内存上）、**变参函数的定义**（`va_list`/`va_start`/`va_arg`/
+// `va_end`/`va_copy`，签名定死成「固定形参 + 一个变参区指针」）**。
 // 还没到：`goto` 跳到不在外围块上的标签（relooper 那一路）、标签长在里层控制结构里
 // （Duff's device）、**外部**函数上的 struct 传值/返回（要真的 ABI）、通过函数指针调
 // **变参**函数、函数类型的 typedef、嵌套聚合省掉里层花括号、`long double`（它不是
 // double）、整型的**静态**初始化式里的浮点常量、printf 的 `%a`、
-// 变参函数的**定义**（要 `va_list`/`va_arg`）。
+// 把 struct 传进变参的可变部分、从变参里 `va_arg` 出 struct 或大于 8 字节的东西。
 //
 // 碰到还没做到的东西**当场报错**，报错文本里带「第六刀」字样 —— 一眼能看出是进度不是
 // bug，而且下一片把它做掉时 `gen-bad/` 里那条用例会跟着红，于是「边界移动了」这件事
@@ -143,6 +144,7 @@ import {
   TOK_INT, TOK_VOID, TOK_BOOL, TOK_SIGNED, TOK_UNSIGNED, TOK_CHAR, TOK_SHORT, TOK_LONG,
   TOK_FLOAT, TOK_DOUBLE, TOK_STRUCT, TOK_UNION, TOK_ENUM, TOK_TYPEDEF,
   TOK_EXTERN, TOK_STATIC, TOK_CONST, TOK_REGISTER, TOK_AUTO, TOK_VOLATILE, TOK_INLINE,
+  TOK_BUILTIN_VA_START, TOK_BUILTIN_VA_ARG, TOK_BUILTIN_VA_END, TOK_BUILTIN_VA_COPY,
   isAssignOp, assignOpOf,
 } from './tcctok.js';
 import {
@@ -513,6 +515,8 @@ export class CGen {  /**
     this.spSave = REF_NONE;
     /** 返回 struct 时那个隐藏的返回指针（第十一片的 ABI，见 `runBody`） */
     this.sretRef = REF_NONE;
+    /** 变参函数里那个隐藏的**变参区指针**（第十六片的 ABI，见 `runBody` 与 `vaBlock`） */
+    this.vaRef = REF_NONE;
     this.frameSize = 0;
     /** 帧内的下一个空位。**不回收** —— 见 finishFunc 头上「平铺的帧」那一节 */
     this.frameOff = 0;
@@ -534,6 +538,11 @@ export class CGen {  /**
     this.heapUsed = false;
     /** @type {Map<string,object>} `typedef` 的名字表（tcc 用 `VT_TYPEDEF` 挂在符号上） */
     this.typedefs = new Map();
+    /* `__builtin_va_list`：tcc 在 arm64 上把它定在 tccdefs.h 里（本机是
+     * `struct { void *__stack; }`），而不是一个记号。我们照它的位置办 —— 一条预置的
+     * typedef —— 但形态取 `void *`：程序只把它当不透明的东西传给那几个内建，
+     * 而我们的变参区就是一串 8 字节的格子，一个指针足够走完它（见 `vaBlock`）。 */
+    this.typedefs.set('__builtin_va_list', mkPointer(TY_VOID));
     /** @type {Map<string,{ty:object,addr:number,defined:boolean,used:boolean}>} 全局量 */
     this.gvars = new Map();
     /* C 有**四个独立的名字空间**（C11 6.2.3）：普通标识符、struct/union/enum 的 tag、
@@ -1676,6 +1685,14 @@ export class CGen {  /**
       this.next();
       return this.sizeofExpr();
     }
+    /* 变参那四个内建。它们**不是函数**（`va_arg` 的第二个实参是个类型名，函数写不出来），
+     * 所以与 tcc 一样在这儿按记号号认出来（`tccgen.c:5943` 一带的 arm64 那一支）。
+     * 位置必须在下面那条「标识符」之前 —— 它们的记号号在 `TOK_UIDENT` 之后
+     * （tcc 也是：`int __builtin_expect;` 是合法 C，所以它们不是关键字）。 */
+    if (t === TOK_BUILTIN_VA_START || t === TOK_BUILTIN_VA_ARG
+      || t === TOK_BUILTIN_VA_END || t === TOK_BUILTIN_VA_COPY) {
+      return this.vaBuiltin(t);
+    }
 
     if (t >= TOK_UIDENT) {
       const name = this.identName();
@@ -1851,13 +1868,6 @@ export class CGen {  /**
       }));
     }
     const rt = mirTypeOf(info.ret);
-    if (info.variadic) {
-      /* 变参函数：**每个调用点的实参个数都不同**，所以不能像非变参那样在 `unit()` 末尾
-       * 造一个转发桩（一个桩只装得下一副形参）。直接在调用点发 CCALL。
-       * 这一片里变参函数一定是外部的 —— 在 C 里**定义**一个变参函数要 `va_arg`，还没到。 */
-      return sVal(info.ret, this.f.emit(OP.CCALL, rt,
-        this.mod.cabiNo(name), this.f.pushArgs(a.refs), 0));
-    }
     const r = this.f.emit(OP.CALL, rt, info.no, this.f.pushArgs(a.refs), 0);
     /* 回的是那块地方的地址（SysV 的 rax 也是这么回的）。用**回来的**那个 ref 而不是
      * 手上的 `sret`：两者一定相等，而用回来的那个把「返回值在哪儿」这件事记在数据流里。 */
@@ -1913,13 +1923,15 @@ export class CGen {  /**
       sret = sMem(ret, this.fpRef, this.frameAlloc(ret));
       refs.push(this.addrOf(sret));
     }
+    /** @type {{ty:object,ref:number}[]} `...` 后面那些实参（进变参区，不进实参表） */
+    const extra = [];
     for (let i = 0; i < vals.length; i++) {
       /* 固定形参按**声明的类型**转（原型的作用）；`...` 后面那些按**默认实参提升**
-       * （C11 6.5.2.2 第 6 段）：窄整数提到 int、数组与函数退化成指针。
-       * 用 `promotedType` 而不是 `promote`：后者会真的取一次值，这里只想问类型。 */
-      const want = (np >= 0 && i < np)
-        ? params[i].ty
-        : promotedType(decayedType(vals[i].ty));
+       * （C11 6.5.2.2 第 6 段）：窄整数提到 int、`float` 提到 double、
+       * 数组与函数退化成指针。用 `promotedType` 而不是 `promote`：后者会真的取一次值，
+       * 这里只想问类型。 */
+      const fixed = np >= 0 && i < np;
+      const want = fixed ? params[i].ty : promotedType(decayedType(vals[i].ty));
       /* 传值的 struct 传的是**地址**，拷贝由被调方在入口处做（`runBody`）。
        * 于是一次调用只有一次拷贝，而且那次拷贝是 C 要求的那一次
        * （形参是实参的一份可改的拷贝，C11 6.9.1 第 10 段）。 */
@@ -1927,13 +1939,105 @@ export class CGen {  /**
         if (!sameType(want, vals[i].ty)) {
           this.err(`cannot pass '${typeText(vals[i].ty)}' as '${typeText(want)}'`);
         }
-        if (np < 0 || i >= np) this.todo('把 struct 传给变参的可变部分还没到');
+        if (!fixed) this.todo('把 struct 传给变参的可变部分还没到');
         refs.push(this.addrOf(vals[i]));
         continue;
       }
-      refs.push(this.gv(this.castTo(vals[i], want)));
+      const r = this.gv(this.castTo(vals[i], want));
+      if (fixed) refs.push(r);
+      else extra.push({ ty: want, ref: r });
     }
+    /* 变参：`...` 后面的实参不进实参表，进帧上的一块「变参区」，地址当**最后一个**
+     * 实参传进去（第十六片的 ABI）。于是变参函数的 MIR 签名是**定死的**
+     * （固定形参 + 一个 i64），自家的与外部的一个形状 —— 调用点因此不必知道
+     * 这个名字最后有没有定义，照旧发 CALL。 */
+    if (variadic) refs.push(this.vaBlock(extra));
     return { refs, sret, vals };
+  }
+
+  /**
+   * 变参区：一格 8 字节，顺序照实参，回它的地址（第十六片的 ABI）。
+   *
+   * 一格 8 字节而不是「按类型的宽度紧排」，是因为读的那一侧（`va_arg`）只知道
+   * **它自己要的类型**，不知道写的时候是什么 —— 格子等宽，两边才能算出同一个位置。
+   * 每一格只写它自己那几个字节（`int` 写 4 个），读的时候也按要的类型读：
+   * 这与 arm64/SysV 的变参区是同一条规则（栈上一格一格，只用得着的那几个字节有效）。
+   *
+   * 一个实参都没有时也划一格：`printf("hi")` 的变参区不会被读，但「地址」得有一个。
+   * 划在帧上而不是别处，是因为它必须活到被调方读完 —— 而调用结束前帧一直在。
+   */
+  vaBlock(extra) {
+    const n = extra.length === 0 ? 1 : extra.length;
+    const off = this.frameAlloc(mkArray(TY_LLONG, n));
+    for (let i = 0; i < extra.length; i++) {
+      this.f.emit(OP.MSTORE, mirTypeOf(extra[i].ty), this.fpRef, extra[i].ref,
+        memDesc(storeKindOf(extra[i].ty), off + i * 8));
+    }
+    return this.addrOf(sMem(TY_LLONG, this.fpRef, off));
+  }
+
+  /**
+   * `__builtin_va_start` / `__builtin_va_arg` / `__builtin_va_end` /
+   * `__builtin_va_copy`（`tccgen.c:5943` 一带 arm64 那一支）。当前记号是那个内建的名字。
+   *
+   * 四个都不是函数：`va_arg` 的第二个实参是**类型名**，而另外三个要的是「一个左值」。
+   * tcc 那边 `va_end`/`va_copy` 是 tccdefs.h 里的宏（`(void)(ap)` 与 `(dest)=(src)`），
+   * 这里做成内建 —— 少一份要与头文件同步的东西，可观察的行为一模一样。
+   */
+  vaBuiltin(t) {
+    this.next();
+    this.skip(LPAR);
+    const ap = this.exprEq();
+    if (t === TOK_BUILTIN_VA_END) {
+      /* `(void)(ap)`：什么都不做。**照旧要求它是个左值**（C 的 `va_end(ap)` 里 ap 是
+       * 那个 va_list），于是拼错名字仍然当场被抓住。 */
+      this.skip(RPAR);
+      if (!isPtr(ap.ty.t)) this.err('__builtin_va_end expects a va_list');
+      return sVal(TY_VOID, REF_NONE);
+    }
+    this.skip(COMMA);
+    if (t === TOK_BUILTIN_VA_ARG) {
+      const ty = this.typeName();
+      this.skip(RPAR);
+      return this.postfix(this.vaArg(ap, ty));
+    }
+    if (t === TOK_BUILTIN_VA_COPY) {
+      const src = this.exprEq();
+      this.skip(RPAR);
+      this.vstore(ap, src);
+      return sVal(TY_VOID, REF_NONE);
+    }
+    /* `va_start(ap, last)`：把隐藏的那个变参区指针写进 ap。`last` 按 C 的规定是最后一个
+     * 固定形参，这一片**不核对**（tcc 也只在注释里写了「xx check types」）—— 但要读掉，
+     * 否则括号对不上。 */
+    this.exprEq();
+    this.skip(RPAR);
+    if (this.vaRef === REF_NONE) {
+      this.err('__builtin_va_start used in a function with fixed arguments');
+    }
+    if (!isPtr(ap.ty.t)) this.err('__builtin_va_start expects a va_list');
+    this.vstore(ap, sVal(mkPointer(TY_VOID), this.vaRef));
+    return sVal(TY_VOID, REF_NONE);
+  }
+
+  /**
+   * `va_arg(ap, T)`：读走一格、把 ap 推到下一格。
+   *
+   * **先读后推**，而且读的宽度按 T（一格 8 字节里只有 T 那几个字节有效，见 `vaBlock`）。
+   * 回的是一个**值**不是左值 —— C 的 `va_arg` 是一个表达式的值（`va_arg(ap,int) = 3`
+   * 不合法），而且它有副作用，所以不能让别人再取一次。
+   */
+  vaArg(ap, ty) {
+    const size = typeSize(ty).size;
+    if (isStruct(ty.t) || isArray(ty.t) || size > 8) {
+      this.todo('从变参里取 struct / 大于 8 字节的东西还没到（那要按大小分格）');
+    }
+    const f = this.f;
+    const cur = this.gv(ap);
+    const v = f.emit(OP.MLOAD, mirTypeOf(ty), cur, REF_NONE, memDesc(loadKindOf(ty), 0));
+    this.vstore(ap, sVal(ap.ty,
+      f.emit(OP.ADD, T_I64, cur, this.mod.consts.int(8n), 0)));
+    return sVal(ty, v);
   }
 
   /**
@@ -1944,9 +2048,9 @@ export class CGen {  /**
    * 那时还不知道这个名字最后有没有定义。桩把这个问题推到读完整个单元之后 —— 与
    * 「undefined symbol」那条检查同一个位置，而调用点照旧发 CALL，一条都不用改。
    *
-   * 变参函数是例外（见 funcCall），它们的桩因此是死代码 —— 就当它是 PLT 里那条
-   * 永远走不到的项。留着而不是删掉，是因为删一个函数会挪动 `funcIndex`，
-   * 而那些下标已经发在别人的 CALL 里了。
+   * 变参函数走的是同一条路（第十六片起）：它的 MIR 签名是**定死的**（固定形参 +
+   * 一个变参区指针），所以一个桩装得下所有调用点。宿主那边的变参函数因此也从
+   * 那块变参区里读实参 —— 与真的 ABI 是同一件事（见 `interp/libc.js` 的 `vaCursor`）。
    */
   externThunk(name, info) {
     const f = info.f;
@@ -1962,6 +2066,11 @@ export class CGen {  /**
       const slot = f.slot(p.name, mt);
       f.params.push({ name: p.name, t: mt, slot });
       refs.push(f.emit(OP.LOAD, mt, REF_NONE, REF_NONE, slot));
+    }
+    if (info.variadic) {
+      const slot = f.slot('$va', T_I64);
+      f.params.push({ name: '$va', t: T_I64, slot });
+      refs.push(f.emit(OP.LOAD, T_I64, REF_NONE, REF_NONE, slot));
     }
     const rt = mirTypeOf(info.ret);
     const r = f.emit(OP.CCALL, rt, this.mod.cabiNo(name), f.pushArgs(refs), 0);
@@ -3584,7 +3693,6 @@ export class CGen {  /**
     if (this.tok !== LBRACE) return false;          // 只是个原型，`;` 交给 decl
     if (!global) this.err('nested function definition');
     if (info.defined) this.err(`redefinition of '${name}'`);
-    if (info.variadic) this.todo('变参函数的**定义**还没到（要 va_list / va_arg）');
     info.defined = true;
 
     const body = this.cpp.captureBraced();
@@ -3601,7 +3709,9 @@ export class CGen {  /**
     this.blockLabels = [];
     this.funcLabels = new Set();
     this.fpRef = this.mod.consts.int(0n);
-    this.runBody(body, new MirFunc(`$scan$${name}`, [], mirTypeOf(ret)), ret, name, params);
+    this.runBody(body, new MirFunc(`$scan$${name}`, [], mirTypeOf(ret)), ret, name, params,
+      info.variadic);
+
 
     let est = this.frameOff;   // 数组之类「非落内存不可」的已经算在里面了
     for (const d of this.declScalars) {
@@ -3613,7 +3723,7 @@ export class CGen {  /**
     // ---- 第二遍：真的
     this.frameSize = alignUp(est, 16);
     this.frameOff = 0;
-    this.runBody(body, info.f, ret, name, params);
+    this.runBody(body, info.f, ret, name, params, info.variadic);
 
     // 记号还原（`replayStep` 同一手法）：函数体是从记号串里读的，读完要回到文件流上
     this.cpp.tok = afterTok;
@@ -3627,7 +3737,7 @@ export class CGen {  /**
    * 把收好的函数体放一遍，发进 `f`。序言、收场、形参落位都在这儿 ——
    * 两遍走**同一段**代码，于是第一遍数出来的帧与第二遍分配出来的帧一定是同一套规则。
    */
-  runBody(body, f, ret, name, params) {
+  runBody(body, f, ret, name, params, variadic) {
     const outer = this.f;
     this.f = f;
     this.funcRet = ret;
@@ -3701,9 +3811,21 @@ export class CGen {  /**
       }
     }
 
+    /* 变参函数多一个**隐藏的最后一个形参**：调用方那块变参区的地址（第十六片的 ABI，
+     * 见 `vaBlock`）。`va_start` 就是把它取出来 —— 也就是说 `va_list` 在这一片里
+     * 就是一个指针，而「走到下一个实参」是加 8。位置在固定形参**之后**，
+     * 与调用点那一侧（`callArgs` 末尾那条 push）是同一个顺序。 */
+    this.vaRef = REF_NONE;
+    if (variadic === true) {
+      const slot = f.slot('$va', T_I64);
+      f.params.push({ name: '$va', t: T_I64, slot });
+      this.vaRef = f.emit(OP.LOAD, T_I64, REF_NONE, REF_NONE, slot);
+    }
+
     this.cpp.pushTokens(body);
     this.next();
     this.block();  // 当前记号是 `{`
+
     if (this.tok !== TOK_EOF) this.err('internal: 函数体没读完');
     this.cpp.endMacro();
 

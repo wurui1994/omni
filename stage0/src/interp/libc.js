@@ -145,23 +145,40 @@ function fText(x, conv, spec) {
 }
 
 /**
- * `printf` 的格式化。`fmt` 是格式串（已经从内存里读出来），`args` 是宿主值的数组，
- * `at` 是下一个要取的实参下标。回格式化好的字符串。
-
+ * 变参区上的游标（第六刀第十六片的 ABI）：一格 8 字节，读的宽度按**要的类型**。
  *
- * 变参那一侧的类型信息**只在格式串里**（C 就是这么设计的），所以这儿是唯一知道
- * 「第三个实参是个指针还是个整数」的地方 —— 与真的 libc 处境完全一样。
+ * 这就是真的 varargs：类型信息只在格式串里，而格子等宽 —— 写的那一侧
+ * （`tccgen.js` 的 `vaBlock`）只写它自己那几个字节，读的这一侧按转换说明去读。
+ * 从前这一格是「CCALL 的实参数组」，那等于假装宿主能看见 C 的实参表；
+ * 换成变参区之后，`printf` 与它在真的 ABI 上做的事一模一样。
  */
-export function cFormat(fmt, args, at) {
-  let out = '';
-  let i = 0;
-  let k = at;
-  const nextArg = () => {
-    if (k >= args.length) throw new Error('printf: 实参不够（格式串里的转换比实参多）');
-    const v = args[k];
-    k++;
+function vaCursor(addr) {
+  let p = BigInt(addr);
+  const take = (kind) => {
+    const v = memLoad(kind, p, 0);
+    p += 8n;
     return v;
   };
+  return {
+    // 整数一格：32 位的按 i32 读（`int` 只写了 4 个字节），64 位的按 i64
+    int: (bits) => take(bits === 64 ? 'i64' : 'i32s'),
+    ptr: () => take('i64'),
+    real: () => take('f64'),
+  };
+}
+
+/**
+ * `printf` 的格式化。`fmt` 是格式串（已经从内存里读出来），`va` 是**变参区的地址**。
+ * 回格式化好的字符串。
+ *
+ * 变参那一侧的类型信息**只在格式串里**（C 就是这么设计的），所以这儿是唯一知道
+ * 「下一格是个指针还是个整数」的地方 —— 与真的 libc 处境完全一样。
+ */
+export function cFormat(fmt, va) {
+  let out = '';
+  let i = 0;
+  const ap = vaCursor(va);
+
   while (i < fmt.length) {
     const c = fmt.charCodeAt(i);
     if (c !== 37) { out += fmt[i]; i++; continue; }  // '%'
@@ -183,7 +200,7 @@ export function cFormat(fmt, args, at) {
     }
     // 宽度
     if (fmt[i] === '*') {
-      spec.width = Number(BigInt.asIntN(32, BigInt(nextArg())));
+      spec.width = Number(ap.int(32));
       if (spec.width < 0) { spec.left = true; spec.width = -spec.width; }
       i++;
     } else {
@@ -197,7 +214,7 @@ export function cFormat(fmt, args, at) {
       i++;
       spec.prec = 0;
       if (fmt[i] === '*') {
-        spec.prec = Number(BigInt.asIntN(32, BigInt(nextArg())));
+        spec.prec = Number(ap.int(32));
         i++;
       } else {
         while (i < fmt.length && fmt.charCodeAt(i) >= 48 && fmt.charCodeAt(i) <= 57) {
@@ -220,24 +237,24 @@ export function cFormat(fmt, args, at) {
     const conv = fmt[i];
     i++;
     if (conv === 'd' || conv === 'i') {
-      const v = BigInt.asIntN(bits, BigInt(nextArg()));
+      const v = BigInt.asIntN(bits, ap.int(bits));
       const neg = v < 0n;
       const body = (neg ? -v : v).toString(10);
       out += padTo(body, neg ? '-' : (spec.plus ? '+' : (spec.space ? ' ' : '')), spec);
       continue;
     }
     if (conv === 'u') {
-      out += padTo(uText(BigInt(nextArg()), bits, 10, false), '', spec);
+      out += padTo(uText(ap.int(bits), bits, 10, false), '', spec);
       continue;
     }
     if (conv === 'o') {
-      const body = uText(BigInt(nextArg()), bits, 8, false);
+      const body = uText(ap.int(bits), bits, 8, false);
       if (spec.alt && body[0] !== '0') spec.prefix = '0';
       out += padTo(body, '', spec);
       continue;
     }
     if (conv === 'x' || conv === 'X') {
-      const v = BigInt(nextArg());
+      const v = ap.int(bits);
       const body = uText(v, bits, 16, conv === 'X');
       if (spec.alt && v !== 0n) spec.prefix = conv === 'X' ? '0X' : '0x';
       out += padTo(body, '', spec);
@@ -245,12 +262,12 @@ export function cFormat(fmt, args, at) {
     }
     if (conv === 'c') {
       spec.numeric = false;
-      out += padTo(String.fromCharCode(Number(BigInt.asUintN(8, BigInt(nextArg())))), '', spec);
+      out += padTo(String.fromCharCode(Number(BigInt.asUintN(8, ap.int(32)))), '', spec);
       continue;
     }
     if (conv === 's') {
       spec.numeric = false;
-      let s = readCStr(nextArg());
+      let s = readCStr(ap.ptr());
       if (spec.prec >= 0 && s.length > spec.prec) s = s.slice(0, spec.prec);
       out += padTo(s, '', spec);
       continue;
@@ -259,15 +276,14 @@ export function cFormat(fmt, args, at) {
       /* 地址本身与 tcc 不同（我们的是线性内存偏移），所以这一格**不能对账**。
        * 形状照 glibc/macOS：`0x` 加小写十六进制，空指针印 `0x0`。 */
       spec.numeric = false;
-      out += padTo('0x' + uText(BigInt(nextArg()), 64, 16, false), '', spec);
+      out += padTo('0x' + uText(ap.ptr(), 64, 16, false), '', spec);
       continue;
     }
     if (conv === 'f' || conv === 'F' || conv === 'e' || conv === 'E'
       || conv === 'g' || conv === 'G') {
-      /* 变参里的浮点已经被默认实参提升拉成 double（`float` 也是），所以宿主这边
-       * 拿到的就是一个 number。`Number(...)` 那一步是为了 `%f` 收到一个整数实参时
-       * 不静悄悄印成 NaN —— 那在 C 里是未定义行为，但印一个数比印 NaN 好查。 */
-      const x = Number(nextArg());
+      /* 变参里的浮点已经被默认实参提升拉成 double（`float` 也是），所以变参区那一格
+       * 就是 8 个字节的 f64 —— 按 f64 读，与写的那一侧（`vaBlock`）对上。 */
+      const x = ap.real();
       if (!Number.isFinite(x)) {
         /* `inf` / `nan`：宽度照用，但**不补零**（C11 7.21.6.1 第 8 段最后一句）。
          * 大写的转换印大写。 */
@@ -452,18 +468,18 @@ const LIBC = {
     return BigInt(s.length + 1);
   },
   printf: (a) => {
-    const s = cFormat(readCStr(a[0]), a, 1);
+    const s = cFormat(readCStr(a[0]), a[1]);
     printRaw(s);
     return BigInt(s.length);
   },
   sprintf: (a) => {
-    const s = cFormat(readCStr(a[1]), a, 2);
+    const s = cFormat(readCStr(a[1]), a[2]);
     return BigInt(writeCStr(a[0], s));
   },
   snprintf: (a) => {
     /* 回的是「本来会写多少」，不是「实际写了多少」（C11 7.21.6.5）—— 这一格
      * 搞反的话「先量长度再分配」那种常见写法会静悄悄少一个字节。 */
-    const s = cFormat(readCStr(a[2]), a, 3);
+    const s = cFormat(readCStr(a[2]), a[3]);
     const n = Number(BigInt(a[1]));
     if (n > 0) writeCStr(a[0], s.slice(0, n - 1));
     return BigInt(s.length);

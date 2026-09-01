@@ -154,6 +154,12 @@ const PP_NAMES = [
   '__COUNTER__', '__has_include', '__has_include_next',
   // tcctok.h:99-104
   '__func__', '__nan__', '__snan__', '__inf__',
+  // tcctok.h:168-185 的 builtin 那一段。**它们不是关键字**（`int __builtin_expect;`
+  // 是合法 C），所以与 tcc 一样排在 TOK_UIDENT 之后：只在 `unary` 里按记号号认出来。
+  // 这一片只要 arm64 上那两个（`tcctok.h:181-182`，`TCC_TARGET_ARM64` 那一支）——
+  // `__builtin_va_list` 在 tcc 那边是 tccdefs.h 里的一个 typedef，不是记号，
+  // 我们照它办（见 tccgen.js 构造函数里那条 typedef）。
+  '__builtin_va_start', '__builtin_va_arg', '__builtin_va_end', '__builtin_va_copy',
   // tcctok.h:207-220 的 pragma 名。**这里编号与 tcc 分岔**（见文件头的阶段边界）：
   // tcc 在这之前还有 attribute 与 builtin 两大段。
   'pack', 'push', 'pop', 'comment', 'lib', 'push_macro', 'pop_macro', 'once', 'option',
@@ -236,6 +242,15 @@ export const TOK_UNION = fixed('union');
 export const TOK_TYPEDEF = fixed('typedef');
 export const TOK_ENUM = fixed('enum');
 export const TOK_SIZEOF = fixed('sizeof');
+
+/* arm64 上 `va_start` / `va_arg` 是**编译器内建**（`tcctok.h:181-182`）：它们要的不是
+ * 函数调用，是「按调用约定去形参区里走」的代码。`va_end` / `va_copy` 在 tcc 那边是
+ * tccdefs.h 里的两个宏（`(void)(ap)` 与 `(dest)=(src)`）—— 我们没有那份头文件，
+ * 所以把它们也做成内建，可观察的行为一模一样。 */
+export const TOK_BUILTIN_VA_START = fixed('__builtin_va_start');
+export const TOK_BUILTIN_VA_ARG = fixed('__builtin_va_arg');
+export const TOK_BUILTIN_VA_END = fixed('__builtin_va_end');
+export const TOK_BUILTIN_VA_COPY = fixed('__builtin_va_copy');
 
 /**
  * `TOK_ASSIGN(t)`（`tcc.h:1168`）与 `TOK_ASSIGN_OP(t)`（`tcc.h:1169`）。
