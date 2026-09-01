@@ -2071,6 +2071,15 @@ export class CGen {  /**
       return this.postfix(this.strLit(s));
     }
 
+    /* `&&label`（GNU 的「标签当值」）：一个 `void *`，值是那个标签的编号。
+     * 词法上它就是 `&&` 那个记号 —— 一元位置上的 `&&` 只可能是这个意思。 */
+    if (t === TOK_LAND) {
+      this.next();
+      const name = this.identName();
+      const pv = mkPointer(TY_VOID);
+      return this.postfix(sVal(pv, this.konst(pv, BigInt(this.labelValue(name)))));
+    }
+
     // 带值的记号：整数与字符常量。`next()` 会毁掉 tokc，所以先取（`tccgen.c:7185`）
     if (tokHasValue(t)) {
       const cv = this.tokc;
@@ -3050,6 +3059,16 @@ export class CGen {  /**
 
     if (t === TOK_GOTO) {
       this.next();
+      /* `goto *表达式`（GNU 的计算跳转）：状态槽本来就是「下一个要去的标签编号」，
+       * 所以这一格就是「把算出来的那个值写进状态槽」—— 与写死的 `goto name` 只差
+       * 编号是常量还是算出来的。 */
+      if (this.tok === STAR) {
+        this.next();
+        const v = this.gexpr();
+        this.skip(SEMI);
+        this.gotoPtr(v);
+        return;
+      }
       const name = this.identName();
       this.skip(SEMI);
       this.gotoStmt(name);
@@ -3281,6 +3300,33 @@ export class CGen {  /**
     }
     this.f.emit(OP.STORE, T_VOID, this.mod.consts.i32(id), REF_NONE, this.gotoSlot);
     this.f.emit(OP.BR, T_VOID, REF_NONE, REF_NONE, this.levelOf('gotoloop'));
+  }
+
+  /** `goto *p;` —— 同上，只是编号是算出来的（状态槽是 i32，所以那个「地址」要收口）。 */
+  gotoPtr(v) {
+    if (this.pass1) return;
+    if (this.gotoSlot < 0) this.err('internal: 计算跳转却没摆状态机');
+    const st = this.gv(this.castTo(v, TY_INT));
+    this.f.emit(OP.STORE, T_VOID, st, REF_NONE, this.gotoSlot);
+    this.f.emit(OP.BR, T_VOID, REF_NONE, REF_NONE, this.levelOf('gotoloop'));
+  }
+
+  /**
+   * `&&label` 的值（第八刀第三十一片）。我们的 `goto` 是「状态槽 + 分派链」，标签本来
+   * 就有一个编号（`labelIds`），所以这个「地址」就是那个编号 —— 于是它是**编译期常量**，
+   * `static void *t[] = { &&l1, &&l2 };` 也就跟着成立，不需要往 data 段里放重定位。
+   *
+   * 第一遍还在给标签编号（`labelStmt`），这时候前向引用的那些还没有号 —— 回 0。
+   * 第一遍发出来的指令是丢掉的，所以 0 不会被谁看见。
+   */
+  labelValue(name) {
+    if (this.pass1) return 0;
+    const id = this.labelIds.get(name);
+    if (id === undefined) {
+      this.err(`label '${name}' used but not defined`);
+      return 0;
+    }
+    return id;
   }
 
   /**
@@ -4579,6 +4625,11 @@ export class CGen {  /**
       if (i < 0 || i > vals.length) this.err('string literal index out of range');
       return BigInt.asIntN(32, BigInt(i === vals.length ? 0 : vals[i]));
     }
+    if (t === TOK_LAND) {
+      /* `static void *t[] = { &&l1 };` —— 标签的编号就是那个「地址」，是个常量。 */
+      this.next();
+      return BigInt(this.labelValue(this.identName()));
+    }
     // 一元 `+` / `-` 在 BigInt 与 number 上是同一个写法，所以这两格不分岔
     if (t === PLUS) { this.next(); return this.ceUnary(); }
     if (t === MINUS) { this.next(); return -this.ceUnary(); }
@@ -4710,6 +4761,18 @@ export class CGen {  /**
        * 只在文件作用域成立：块里那样开头的是表达式语句，不是声明。 */
       const oldint = global && !this.isTypeStart(this.tok) && this.tok >= TOK_UIDENT;
       if (!oldint && !this.isTypeStart(this.tok)) break;
+      /* `typedef_and_label:` —— 一个 typedef 名后面跟 `:` 是**语句标签**，不是声明的
+       * 开头（tcc 的那一格在 `block` 里：`if (tok == ':' && t >= TOK_UIDENT)` 先判，
+       * 所以标签比声明先赢）。这儿只往前看一格再把名字交回去。 */
+      if (!global && this.tok >= TOK_UIDENT && this.isTypeStart(this.tok)) {
+        const t0 = this.tok;
+        this.next();
+        const isLabel = this.tok === COLON;
+        this.cpp.ungetTok(t0);
+        this.tok = this.cpp.tok;
+        this.tokc = this.cpp.tokc;
+        if (isLabel) break;
+      }
       const spec = oldint ? ctype(VT_INT, null) : this.parseBtype();
       const isTypedef = (spec.t & VT_TYPEDEF) !== 0;
       const isExtern = (spec.t & VT_EXTERN) !== 0;
