@@ -68,12 +68,13 @@ function toMir(path) {
 
 // ------------------------------------------------- 1. 冷 / 热
 
-const SRC = (gBody, extra = '') => [
+const SRC = (gBody, extra = '', tail = '') => [
   extra,
   'int f(int a) { return a + 1; }',
   `int g(int a) { return ${gBody}; }`,
   'int caller(int a) { return f(a) + g(a); }',
   'print(caller(3));',
+  tail,
   '',
 ].join('\n');
 
@@ -115,14 +116,18 @@ if (one.miss !== 1) {
 
 const pc = join(dir, 'c.omni');
 // 新常量 424242 会挤进模块常量池的前面 —— 裸字节做哈希的话，f/g/caller 的常量 ref
-// 全部位移，这一条就会变成全 miss
-writeFileSync(pc, SRC('a * 3', 'int inserted(int a) { return a + 424242; }'));
+// 全部位移，这一条就会变成全 miss。
+//
+// `inserted` **必须真的被调到**：摇树那一刀（42c084f）之后没人调的函数在降级前就被摘掉，
+// 它的常量根本不会进池 —— 那样这一条什么都没测（那个版本里它"通过"是因为 miss=0，
+// 而不是因为键对）。代价是 omni_main 的函数体也跟着变，所以预期是 miss=2：
+// inserted 是新的、omni_main 改了，而 f/g/caller 三个的键不含常量池下标，照样 hit。
+writeFileSync(pc, SRC('a * 3', 'int inserted(int a) { return a + 424242; }', 'print(inserted(1));'));
 const ins = incr(pc, cacheA);
-if (ins.miss !== 1) {
-  // 只有 inserted 自己是新的：omni_main 没调它，MIR 一条没动 —— 于是它照样命中
-  bad('insert-front', `    插一个函数应该只 miss inserted，实得 miss=${ins.miss}\n${ins.text}`);
+if (ins.miss !== 2 || ins.hit !== 3) {
+  bad('insert-front', `    插一个被调到的新函数应该 miss=2（inserted 与 omni_main）hit=3，实得 miss=${ins.miss} hit=${ins.hit}\n${ins.text}`);
 } else {
-  ok(`insert-front [miss=1 hit=${ins.hit}：f/g/caller/omni_main 的键不含常量池下标]`);
+  ok(`insert-front [miss=2 hit=${ins.hit}：f/g/caller 的键不含常量池下标]`);
 }
 
 // ------------------------------------------------- 4. 被调者签名变了，调用者要失效

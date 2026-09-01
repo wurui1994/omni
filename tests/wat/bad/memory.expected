@@ -1,1 +1,1 @@
-module field 'memory' is not supported yet
+needs a (memory ...) field in the module

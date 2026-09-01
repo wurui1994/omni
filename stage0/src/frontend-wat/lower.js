@@ -20,7 +20,9 @@
 // - `br` / `br_if` 只能跳最内层的那个 `block` / `loop`（或整个函数 = return）。
 //   OIR 只有 break/continue，没有带标签的跳转。跳更外层会明确报错。
 // - `block` / `loop` / `if` 不能带 `(result ...)`：它们在这里是语句，不是表达式。
-// - 线性内存、表、全局变量、`call_indirect`、`br_table` 一律不认。
+// - 表、`call_indirect`、`br_table` 一律不认。**线性内存与全局量已经认了**（ADR-0017
+//   第四刀）：那两格在 ADR-0017 第二刀里长进了核心方言与五条腿，这里只是把 wasm 的
+//   写法接上去 —— 于是同一套内存语义有了**第二个互不相干的前端**来证。
 // - **求值顺序没有钉死**。wasm 是栈机，操作数必然从左到右求值；OIR 的 Bin/Call 落到 C
 //   之后，实参顺序是 unspecified。所以「在同一条指令里既 `local.tee $x` 又 `local.get $x`」
 //   这种写法在三个执行器上可以给出不同答案。这不是能靠报错挡住的（要挡就得做副作用分析），
@@ -41,6 +43,7 @@
 
 import { INT, REAL, BOOL, STRING, VOID, zeroValue } from '../hir/types.js';
 import { readSexpr, isList, isAtom, isStr, head } from '../sexpr/read.js';
+import { utf8Bytes } from '../host/utf8.js';
 
 /** wasm 值类型 -> OIR 类型。i32 与 i64 都落在 int 上，区别只在算术要不要回绕。 */
 const OIR_TYPE = { i32: INT, i64: INT, f64: REAL };
@@ -48,7 +51,32 @@ const OIR_TYPE = { i32: INT, i64: INT, f64: REAL };
 /** 只能出现在语句位置的指令（不产生值）。`call` 要看被调者有没有结果，单独判。 */
 const STMT_HEADS = new Set([
   'nop', 'unreachable', 'drop', 'local.set', 'br', 'br_if', 'return', 'block', 'loop', 'if',
+  'global.set',
 ]);
+
+/* ------------------------------------------------- 线性内存（ADR-0017 第四刀）
+ * wasm 的 load/store 指令名 -> 核心方言 `mload`/`mstore` 的 KIND。这张表就是
+ * 「一族指令 = 一条 op + 一个描述符」那句话的另一半：wasm 把宽度与符号写进指令名，
+ * 我们写进描述符，两边逐条对得上。
+ *
+ * `i32.load` 落到 `i32s` 而不是 `i32u`：这个前端里 i32 的表示是**符号扩展后的 int64**
+ * （见文件头），所以读 4 个字节要按有符号扩展 —— 与 wasm 的「i32 就是那 32 位」一致。
+ * `i64.load32_u` 才是零扩展的那一条，而 wasm 里也**没有** `i32.load32_u`。
+ * f32 那两条不认：这个前端没有 f32（OIR 只有 double，硬塞会在舍入上撒谎）。
+ */
+const MEM_LOAD_OP = {
+  'i32.load': 'i32s', 'i32.load8_s': 'i8s', 'i32.load8_u': 'i8u',
+  'i32.load16_s': 'i16s', 'i32.load16_u': 'i16u',
+  'i64.load': 'i64', 'i64.load8_s': 'i8s', 'i64.load8_u': 'i8u',
+  'i64.load16_s': 'i16s', 'i64.load16_u': 'i16u',
+  'i64.load32_s': 'i32s', 'i64.load32_u': 'i32u',
+  'f64.load': 'f64',
+};
+const MEM_STORE_OP = {
+  'i32.store': 'i32', 'i32.store8': 'i8', 'i32.store16': 'i16',
+  'i64.store': 'i64', 'i64.store8': 'i8', 'i64.store16': 'i16', 'i64.store32': 'i32',
+  'f64.store': 'f64',
+};
 
 const iconst = (v) => ({ kind: 'Const', type: INT, value: BigInt(v) });
 const rconst = (v) => ({ kind: 'Const', type: REAL, value: v });
@@ -78,6 +106,12 @@ class LowerWat {
     this.funcNames = new Map();
     this.usedMangled = new Set(['omni_main']);
     this.startRef = null;
+    // 线性内存与全局量（ADR-0017 第四刀）。两者都是**模块级**的，所以在这一层，
+    // 不在 ctx 里 —— 函数体只是引用它们。
+    this.mem = null;              // {min, max, data:[{off, bytes}]}
+    this.globals = [];            // {wasmName, name, wt, mut, init}
+    this.globalNames = new Map(); // `$g` -> globals 下标
+    this.usedGlobalNames = new Set();
   }
 
   err(span, msg) {
@@ -139,12 +173,176 @@ class LowerWat {
     const h = head(f);
     if (h === 'func') return this.declareFunc(f);
     if (h === 'import') return this.declareImport(f);
+    if (h === 'memory') return this.declareMemory(f);
+    if (h === 'data') return this.declareData(f);
+    if (h === 'global') return this.declareGlobal(f);
     if (h === 'export' || h === 'start') return;   // 第二遍处理，那时函数都在表里了
     if (h === null) {
       this.err(f.span, 'expected a module field like (func ...) / (import ...) / (start ...)');
       return;
     }
-    this.err(f.span, `module field '${h}' is not supported yet (stage 1 has func / import / export / start)`);
+    this.err(f.span, `module field '${h}' is not supported yet (func / import / export / start / memory / data / global)`);
+  }
+
+  /**
+   * `(memory MIN [MAX])`。一个模块一块（wasm 的 MVP 就是这样），所以不带名字也不带下标。
+   * `(memory (export "mem") 1)` 那种内联导出不认：导出对我们没有意义（没有宿主来 import）。
+   */
+  declareMemory(f) {
+    if (this.mem !== null) {
+      this.err(f.span, 'only one memory is supported (wasm MVP has exactly one)');
+      return;
+    }
+    const items = f.items.slice(1);
+    const pages = (n, what) => {
+      const v = n === undefined ? null : intLit(n, 64);
+      if (v === null || v < 0n || v > 65536n) {
+        this.err((n ?? f).span, `(memory MIN [MAX]) needs ${what} between 0 and 65536 pages`);
+        return null;
+      }
+      return Number(v);
+    };
+    const min = pages(items[0], 'a minimum');
+    if (min === null) return;
+    let max = 0;
+    if (items.length > 1) {
+      const m = pages(items[1], 'a maximum');
+      if (m === null) return;
+      if (m < min) {
+        this.err(f.span, `the memory maximum (${m}) is below the minimum (${min})`);
+        return;
+      }
+      max = m;
+    }
+    if (items.length > 2) {
+      this.err(items[2].span, '(memory MIN [MAX]) takes at most two numbers');
+      return;
+    }
+    this.mem = { min, max, data: [] };
+  }
+
+  /**
+   * `(data (i32.const OFF) 字节…)`。
+   *
+   * **与 WAT 规范刻意的一处不同**：字节写成字符串（按 UTF-8 展开）或 0..255 的整数，
+   * 而**不认 WAT 的 `\hh` 转义**。理由是读取器是共用的（sexpr/read.js，六个前端一份）：
+   * 它认 `\n` / `\u{...}` 那一套，加一条「两位十六进制、无前缀」的转义就会同时改掉 sx
+   * 方言的词法，而那条轴上「源码 -> 树 -> 文本 -> 树」是要逐节点相同的。整数写法与
+   * 核心方言的 `(data OFF 字节…)` 是同一种，所以这一处不同不引入第二套概念。
+   */
+  declareData(f) {
+    if (this.mem === null) {
+      this.err(f.span, '(data ...) needs a (memory ...) field before it');
+      return;
+    }
+    const items = f.items.slice(1);
+    const offNode = items[0];
+    let off = null;
+    // `(i32.const N)`、`(offset (i32.const N))`，或者干脆一个数
+    let inner = offNode;
+    if (head(inner) === 'offset') inner = inner.items[1];
+    if (head(inner) === 'i32.const' || head(inner) === 'i64.const') {
+      off = intLit(inner.items[1], 64);
+    } else if (isAtom(inner)) {
+      off = intLit(inner, 64);
+    }
+    if (off === null || off < 0n) {
+      this.err((offNode ?? f).span, '(data OFFSET ...) needs (i32.const N) with a non-negative N');
+      return;
+    }
+    const bytes = [];
+    for (const it of items.slice(1)) {
+      if (isStr(it)) {
+        for (const b of utf8Bytes(it.value)) bytes.push(b);
+        continue;
+      }
+      const v = intLit(it, 64);
+      if (v === null || v < 0n || v > 255n) {
+        this.err(it.span, 'data bytes are strings or integers in 0..255');
+        return;
+      }
+      bytes.push(Number(v));
+    }
+    const end = Number(off) + bytes.length;
+    if (end > this.mem.min * 65536) {
+      this.err(f.span, `this data segment ends at ${end}, past the declared ${this.mem.min} page(s) (${this.mem.min * 65536} bytes)`);
+      return;
+    }
+    this.mem.data.push({ off: Number(off), bytes });
+  }
+
+  /**
+   * `(global $g (mut i32) (i32.const 7))` / `(global $g i32 (i32.const 7))`。
+   *
+   * 初值只认常量指令（wasm 的 const expr 也只允许 `T.const` 与 `global.get` 一个已定义的
+   * 不可变全局；后者不认 —— 它要求全局之间有个初始化顺序，而那件事没有第二个用户）。
+   * 不可变的全局写起来会被拒（`global.set`），这是 wasm 校验器的规则，不是我们加的限制。
+   */
+  declareGlobal(f) {
+    const items = f.items.slice(1);
+    let k = 0;
+    let wasmName = null;
+    if (isAtom(items[k]) && items[k].value.startsWith('$')) wasmName = items[k++].value;
+    let tyNode = items[k++];
+    let mut = false;
+    if (head(tyNode) === 'mut') { mut = true; tyNode = tyNode.items[1]; }
+    const wt = this.valType(tyNode);
+    if (wt === null) return;
+    const initNode = items[k];
+    if (initNode === undefined) {
+      this.err(f.span, '(global ...) needs an initializer like (i32.const 0)');
+      return;
+    }
+    const ih = head(initNode);
+    let init = null;
+    if (ih === 'i32.const' || ih === 'i64.const') {
+      const v = intLit(initNode.items[1], wt === 'i32' ? 32 : 64);
+      if (v !== null && OIR_TYPE[wt] === INT) init = { kind: 'Const', type: INT, value: v };
+    } else if (ih === 'f64.const') {
+      const v = floatLit(initNode.items[1]);
+      if (v !== null && wt === 'f64') init = rconst(v);
+    }
+    if (init === null) {
+      this.err(initNode.span, `a global initializer must be a (${wt}.const ...) literal`);
+      return;
+    }
+    if (items.length > k + 1) {
+      this.err(items[k + 1].span, '(global ...) takes one initializer');
+      return;
+    }
+    // 名字：`$sp` -> `sp`，撞了加尾号。OIR 的全局是按名字找的，所以要唯一且 C 安全。
+    const base = (wasmName === null ? `g${this.globals.length}` : wasmName.slice(1))
+      .replace(/[^A-Za-z0-9_]/g, '_') || `g${this.globals.length}`;
+    let nm = base;
+    for (let n = 2; this.usedGlobalNames.has(nm); n++) nm = `${base}_${n}`;
+    this.usedGlobalNames.add(nm);
+    if (wasmName !== null) {
+      if (this.globalNames.has(wasmName)) this.err(f.span, `duplicate global name '${wasmName}'`);
+      else this.globalNames.set(wasmName, this.globals.length);
+    }
+    this.globals.push({ wasmName, name: nm, wt, mut, init });
+  }
+
+  /** `$name` 或数字下标 -> 全局 */
+  resolveGlobal(n) {
+    if (!isAtom(n)) {
+      this.err(n ? n.span : null, 'expected a global name or index');
+      return null;
+    }
+    if (n.value.startsWith('$')) {
+      const i = this.globalNames.get(n.value);
+      if (i === undefined) {
+        this.err(n.span, `unknown global '${n.value}'`);
+        return null;
+      }
+      return this.globals[i];
+    }
+    const i = Number.parseInt(n.value, 10);
+    if (!Number.isInteger(i) || i < 0 || i >= this.globals.length) {
+      this.err(n.span, `global index ${n.value} is out of range`);
+      return null;
+    }
+    return this.globals[i];
   }
 
   /** 登记一个函数，把签名、局部量、函数体分开存好；函数体这一遍不看 */
@@ -325,6 +523,7 @@ class LowerWat {
     const h = head(n);
     if (h === null) return true;
     if (STMT_HEADS.has(h)) return true;
+    if (MEM_STORE_OP[h] !== undefined) return true;
     if (h === 'call') {
       const d = this.resolveFunc(n.items[1]);
       return d === null || d.results.length === 0;
@@ -336,6 +535,8 @@ class LowerWat {
 
   stmt(n, out, ctx) {
     const h = head(n);
+    // 存指令没有结果，所以它只能是语句（wasm 校验器也这么看）
+    if (MEM_STORE_OP[h] !== undefined) { this.memStore(n, h, ctx, out); return; }
     switch (h) {
       case 'nop':
         return;
@@ -349,6 +550,11 @@ class LowerWat {
       }
       case 'local.set': {
         const a = this.assignLocal(n, ctx);
+        if (a !== null) out.push({ kind: 'ExprStmt', expr: a.e });
+        return;
+      }
+      case 'global.set': {
+        const a = this.assignGlobal(n, ctx);
         if (a !== null) out.push({ kind: 'ExprStmt', expr: a.e });
         return;
       }
@@ -540,8 +746,32 @@ class LowerWat {
       return null;
     }
     if (h === 'call') return this.call(n, ctx);
-    if (h === 'global.get' || h === 'global.set' || h === 'call_indirect' || h === 'br_table') {
-      this.err(n.span, `'${h}' is not supported yet (see the stage-1 boundary at the top of frontend-wat/lower.js)`);
+    if (h === 'global.get') {
+      const g = this.resolveGlobal(n.items[1]);
+      if (g === null) return null;
+      return { e: { kind: 'GlobalRef', name: g.name, type: OIR_TYPE[g.wt] }, t: g.wt };
+    }
+    if (h === 'global.set') {
+      this.err(n.span, "'global.set' produces no value");
+      return null;
+    }
+    if (h === 'memory.size') {
+      if (this.mem === null) return this.noMem(n, h);
+      return { e: { kind: 'MemSize', type: INT }, t: 'i32' };
+    }
+    if (h === 'memory.grow') {
+      if (this.mem === null) return this.noMem(n, h);
+      const a = this.operand(n, 1, 'i32', ctx);
+      if (a === null) return null;
+      return { e: { kind: 'MemGrow', pages: a, type: INT }, t: 'i32' };
+    }
+    if (MEM_LOAD_OP[h] !== undefined) return this.memLoad(n, h, ctx);
+    if (MEM_STORE_OP[h] !== undefined) {
+      this.err(n.span, `'${h}' produces no value`);
+      return null;
+    }
+    if (h === 'call_indirect' || h === 'br_table' || h.startsWith('table.')) {
+      this.err(n.span, `'${h}' is not supported yet (see the boundary at the top of frontend-wat/lower.js)`);
       return null;
     }
     const dot = h.indexOf('.');
@@ -610,6 +840,106 @@ class LowerWat {
     const v = this.coerce(this.value(n.items[2], ctx), s.wt, n.span);
     const t = OIR_TYPE[s.wt];
     return { e: { kind: 'Assign', target: { kind: 'VarRef', name: s.name, type: t }, value: v, type: t }, t: s.wt };
+  }
+
+  /** `global.set` 的赋值。不可变的全局写起来要拒 —— 那是 wasm 校验器的规则。 */
+  assignGlobal(n, ctx) {
+    const g = this.resolveGlobal(n.items[1]);
+    if (g === null) return null;
+    if (!g.mut) {
+      this.err(n.span, `global '${g.wasmName ?? g.name}' is immutable; declare it as (mut ${g.wt}) to assign it`);
+      return null;
+    }
+    if (n.items[2] === undefined) {
+      this.err(n.span, 'the folded (global.set GLOBAL VALUE) form is required');
+      return null;
+    }
+    const t = OIR_TYPE[g.wt];
+    const v = this.coerce(this.value(n.items[2], ctx), g.wt, n.span);
+    return {
+      e: { kind: 'Assign', target: { kind: 'GlobalRef', name: g.name, type: t }, value: v, type: t },
+      t: g.wt,
+    };
+  }
+
+  /* ------------------------------------------------ 线性内存（第四刀） */
+
+  noMem(n, h) {
+    this.err(n.span, `'${h}' needs a (memory ...) field in the module`);
+    return null;
+  }
+
+  /**
+   * `offset=N` / `align=N` 立即数 —— 紧跟指令名的 atom，在折叠实参之前。
+   * `align=` 读了就丢：wasm 里它只是给引擎的优化提示、不改语义，而三套实现都不要求对齐
+   * （第二刀的描述符里也刻意没有这一格）。返回第一个折叠实参的下标。
+   */
+  memImm(n) {
+    let k = 1;
+    let off = 0;
+    let bad = false;
+    while (isAtom(n.items[k]) && /^(offset|align)=/.test(n.items[k].value)) {
+      const it = n.items[k];
+      const eq = it.value.indexOf('=');
+      const v = intLit({ kind: 'atom', value: it.value.slice(eq + 1), span: it.span }, 64);
+      if (v === null || v < 0n) {
+        this.err(it.span, `'${it.value}' needs a non-negative number`);
+        bad = true;
+      } else if (it.value.slice(0, eq) === 'offset') {
+        off = Number(v);
+      }
+      k++;
+    }
+    return bad ? null : { k, off };
+  }
+
+  /**
+   * 地址是 i32，而 wasm **按无符号**读它 —— 这个前端里 i32 的表示是符号扩展的，所以要
+   * 零扩展一次，否则 `0x80000000` 那个地址会变成负数（越界消息里印出来的也是负数）。
+   * 代价是每次访问多一条 `&`。常量地址在这里就折掉，不留那条与 —— 手写的 wat 里
+   * 绝大多数访存的地址都是常量或常量加局部量。
+   */
+  memAddr(e) {
+    if (e.kind === 'Const' && e.value >= 0n && e.value < 0x80000000n) return e;
+    return zext32(e);
+  }
+
+  memLoad(n, h, ctx) {
+    if (this.mem === null) return this.noMem(n, h);
+    const imm = this.memImm(n);
+    if (imm === null) return null;
+    const a = n.items[imm.k];
+    if (a === undefined) {
+      this.err(n.span, `the folded (${h} ADDR) form is required`);
+      return null;
+    }
+    const rt = h.slice(0, h.indexOf('.'));
+    const addr = this.memAddr(this.coerce(this.value(a, ctx), 'i32', a.span));
+    return {
+      e: { kind: 'MemLoad', mkind: MEM_LOAD_OP[h], addr, off: imm.off, type: OIR_TYPE[rt] },
+      t: rt,
+    };
+  }
+
+  memStore(n, h, ctx, out) {
+    if (this.mem === null) { this.noMem(n, h); return; }
+    const imm = this.memImm(n);
+    if (imm === null) return;
+    const a = n.items[imm.k];
+    const v = n.items[imm.k + 1];
+    if (a === undefined || v === undefined) {
+      this.err(n.span, `the folded (${h} ADDR VALUE) form is required`);
+      return;
+    }
+    const vt = h.slice(0, h.indexOf('.'));
+    const addr = this.memAddr(this.coerce(this.value(a, ctx), 'i32', a.span));
+    const val = this.coerce(this.value(v, ctx), vt, v.span);
+    out.push({
+      kind: 'ExprStmt',
+      expr: {
+        kind: 'MemStore', mkind: MEM_STORE_OP[h], addr, off: imm.off, value: val, type: OIR_TYPE[vt],
+      },
+    });
   }
 
   call(n, ctx) {
@@ -775,6 +1105,18 @@ class LowerWat {
       }
     }
     const stmts = [];
+    // 全局量的初值就是入口最前面的几句赋值（核心方言的 `(global …)` 也是这么做的，
+    // 见 sexpr/lower.js）—— 于是六个后端只要会存取一个全局就够，不必各写一份初始化。
+    // 顺序是声明序，所以两次降级出来的文本一样。
+    for (const g of this.globals) {
+      stmts.push({
+        kind: 'ExprStmt',
+        expr: {
+          kind: 'Assign', target: { kind: 'GlobalRef', name: g.name, type: OIR_TYPE[g.wt] },
+          value: g.init, type: OIR_TYPE[g.wt],
+        },
+      });
+    }
     if (entry === null) {
       this.err(null, 'no entry point: add (start $f) or export a function as "main"');
     } else if (entry.params.length !== 0) {
@@ -797,6 +1139,8 @@ class LowerWat {
     return {
       structs: [], classes: [], enums: [], containers: [], closures: [], fnTypes: [],
       funcs,
+      globals: this.globals.map((g) => ({ name: g.name, mangled: `g_${g.name}`, type: OIR_TYPE[g.wt] })),
+      mem: this.mem,
       entry: 'omni_main',
     };
   }
