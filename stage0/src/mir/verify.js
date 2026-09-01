@@ -19,7 +19,7 @@
 
 import {
   OP, OP_NAMES, OP_MODES, REF_NONE, REF_BIAS, isConstRef, refText, typeText, typeLanes, T_BOOL,
-  MLOAD_KINDS, MSTORE_KINDS, memKindNo, memBytes, isFloatType, intBits,
+  MLOAD_KINDS, MSTORE_KINDS, memKindNo, memBytes, isFloatType, isIntType, intBits,
 } from './ir.js';
 
 export function verifyMir(mod) {
@@ -93,8 +93,19 @@ function checkOperands(mod, f, i, live, regionOf, depth, bad) {
       const n = f.args[v];
       if (n === undefined || v + 1 + n > f.args.length) { bad(i, `实参池 ${v} 越界`); continue; }
       for (const r of f.argsOf(v)) checkRef(mod, f, i, r, live, regionOf, bad);
+    } else if (role === 'j') {
+      // 跳表（第三刀）。池的形状与 'p' 相同，但里头是层数 —— 一律不当 ref 查。
+      const n = f.args[v];
+      if (n === undefined || v + 1 + n > f.args.length) { bad(i, `跳表池 ${v} 越界`); continue; }
+      for (const lv of f.levelsOf(v)) {
+        if (lv >= depth) bad(i, `跳表里有一项跳 ${lv} 层，但此处只有 ${depth} 层可跳`);
+      }
+      // 下标的类型：只有整数说得清"第几项"。浮点/bool 落进来的话两条腿会各自转一次
+      // （LLVM 的 switch 只收整数、解释器那边 BigInt 与 Number 的比较还悄悄成立）。
+      const it = f.typeOf(f.a[i], mod.consts);
+      if (!isIntType(it)) bad(i, `BRTABLE 的下标是 ${typeText(it)}，不是整数`);
     } else if (role === 'n') {
-      if (op === OP.BR || op === OP.BRIF) {
+      if (op === OP.BR || op === OP.BRIF || op === OP.BRTABLE) {
         // 层数是「往外数第几层」。栈底那一层是函数体本身，跳到它没有意义（该用 RET）。
         if (v >= depth) bad(i, `跳 ${v} 层，但此处只有 ${depth} 层可跳`);
         continue;
@@ -115,7 +126,7 @@ function checkRef(mod, f, i, ref, live, regionOf, bad) {
 }
 
 function checkIndex(mod, f, i, op, v, bad) {
-  if (op === OP.BR || op === OP.BRIF) return;   // 层数在 verifyFunc 的栈深里查
+  if (op === OP.BR || op === OP.BRIF || op === OP.BRTABLE) return;   // 层数在 verifyFunc 的栈深里查
   // 道号：向量的宽度在 `t` 上，所以这一条不用查类型池，一次比较就够。
   // 越界的道在 LLVM 里是 poison、在 C 里是越界读 —— 两条腿会给出不同的错答案，所以查。
   if (op === OP.VEXT || op === OP.VINS) {

@@ -60,8 +60,12 @@ function resolveRegions(f) {
   const endOf = [];
   const elseOf = [];
   const brTarget = [];
+  // 跳表（第三刀）：一条 BRTABLE 的所有目标，**兜底放在最后一项**。
+  // 与 brTarget 同样只记「开区域的那条指令的下标」，真正的 pc 在 step 里算 ——
+  // endOf 那时才填全（END 在 BR 后面）。
+  const tabTarget = [];
   let i = 0;
-  while (i < f.count()) { endOf.push(-1); elseOf.push(-1); brTarget.push(-1); i++; }
+  while (i < f.count()) { endOf.push(-1); elseOf.push(-1); brTarget.push(-1); tabTarget.push(null); i++; }
   const stack = [];
   i = 0;
   while (i < f.count()) {
@@ -79,9 +83,21 @@ function resolveRegions(f) {
       if (start === undefined) throw new OmniError(`mir.interp: ${f.name} 的 BR 跳出了函数`);
       brTarget[i] = start;
     }
+    else if (op === OP.BRTABLE) {
+      const starts = [];
+      for (const lv of f.levelsOf(f.b[i])) {
+        const s = stack[stack.length - 1 - lv];
+        if (s === undefined) throw new OmniError(`mir.interp: ${f.name} 的 BRTABLE 跳出了函数`);
+        starts.push(s);
+      }
+      const d = stack[stack.length - 1 - f.aux[i]];
+      if (d === undefined) throw new OmniError(`mir.interp: ${f.name} 的 BRTABLE 兜底跳出了函数`);
+      starts.push(d);
+      tabTarget[i] = starts;
+    }
     i++;
   }
-  return { endOf, elseOf, brTarget };
+  return { endOf, elseOf, brTarget, tabTarget };
 }
 
 /** MIR 的类型码 -> OIR 那套 kind 字符串（binOp/cmpOp 收的是后者）。 */
@@ -279,7 +295,7 @@ class MirInterp {
   compile(no) {
     const f = this.mir.funcs[no];
     const I = this;
-    const { endOf, elseOf, brTarget } = resolveRegions(f);
+    const { endOf, elseOf, brTarget, tabTarget } = resolveRegions(f);
     // 操作数读取器：常量在编译期就取出值，指令引用编成一次数组访问
     const rd = (ref) => {
       if (ref === REF_NONE) return () => undefined;
@@ -293,14 +309,14 @@ class MirInterp {
     const prog = [];
     let i = 0;
     while (i < f.count()) {
-      prog.push(this.step(f, i, rd, rdArgs, readAll, endOf, elseOf, brTarget, I));
+      prog.push(this.step(f, i, rd, rdArgs, readAll, endOf, elseOf, brTarget, tabTarget, I));
       i++;
     }
     return prog;
   }
 
   /** 一条指令 -> 一个闭包。控制流与槽位这一半。 */
-  step(f, i, rd, rdArgs, readAll, endOf, elseOf, brTarget, I) {
+  step(f, i, rd, rdArgs, readAll, endOf, elseOf, brTarget, tabTarget, I) {
     const op = f.op[i];
     const t = f.t[i];
     const a = f.a[i];
@@ -335,6 +351,22 @@ class MirInterp {
         const start = brTarget[i];
         const target = f.op[start] === OP.LOOP ? start + 1 : endOf[start] + 1;
         return (F) => (c(F) === true ? target : next);
+      }
+      // 跳表（第三刀）。**pc 表在装载期就算好**，运行期只剩「一次范围比较 + 一次数组下标」
+      // —— 这就是跳表相对比较链的全部意义，编译期不把它算掉就白加了这条 op。
+      case OP.BRTABLE: {
+        const idx = rd(a);
+        const starts = tabTarget[i];
+        const pcs = starts.map((s) => (f.op[s] === OP.LOOP ? s + 1 : endOf[s] + 1));
+        const n = BigInt(pcs.length - 1);   // 最后一项是兜底
+        const def = pcs[pcs.length - 1];
+        return (F) => {
+          const v = idx(F);
+          // 下标按无符号读（wasm）。规范形是符号扩展过的，所以负数就是"很大的无符号数"
+          // —— 一律走兜底，与 `v u>= n` 等价（n 不会大到 2^31）。
+          if (v < 0n || v >= n) return def;
+          return pcs[Number(v)];
+        };
       }
       case OP.RET: {
         if (a === REF_NONE) return (F) => { F.ret = undefined; return -1; };

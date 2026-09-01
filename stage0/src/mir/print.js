@@ -42,6 +42,12 @@ function operands(mod, f, i) {
       out.push(`(${items.join(' ')})`);
       continue;
     }
+    if (role === 'j') {
+      // 跳表（第三刀）：印成 `[^0 ^2 ^0]`。带 `^` 是因为这一串是**层数**，
+      // 与 'p' 的 ref 只差一个字母，快照里得能一眼分开。
+      out.push(`[${f.levelsOf(v).map((lv) => `^${lv}`).join(' ')}]`);
+      continue;
+    }
     // 'n'：整数字面量。语义值得印成名字的那几个 op 单列 —— 快照要能读。
     if (op === OP.CVT) { out.push(CVT_NAMES[v]); continue; }
     if (op === OP.CALL) { out.push(mod.funcs[v] === undefined ? `fn?${v}` : mod.funcs[v].name); continue; }
@@ -55,7 +61,7 @@ function operands(mod, f, i) {
     }
     if (op === OP.FLD || op === OP.FLDSET) { out.push(accText(mod, v)); continue; }
     if (op === OP.GLOAD || op === OP.GSTORE) { out.push(`g_${mod.globals[v]}`); continue; }
-    if (op === OP.BR || op === OP.BRIF) { out.push(`^${v}`); continue; }
+    if (op === OP.BR || op === OP.BRIF || op === OP.BRTABLE) { out.push(`^${v}`); continue; }
     if (op === OP.VINS || op === OP.VEXT) { out.push(`lane${v}`); continue; }
     if (op === OP.MLOAD || op === OP.MSTORE) { out.push(memDescText(v, op === OP.MLOAD)); continue; }
     out.push(String(v));

@@ -91,6 +91,9 @@ function digestOperands(mod, f, i, ks) {
     if (role === 'r') out.push(refDigest(mod, v, ks));
     if (role === 's') out.push(`s${v}`);
     if (role === 'p') out.push(`(${f.argsOf(v).map((r) => refDigest(mod, r, ks)).join(' ')})`);
+    // 'j'（第三刀）：层数表。**不能走 refDigest** —— 层数 3 会被写成 `k#…` 或 `%3`，
+    // 于是「跳第 3 层」和「用 %3 那条指令」在哈希里成了同一串字节。
+    if (role === 'j') out.push(`[${f.levelsOf(v).map((lv) => `^${lv}`).join(' ')}]`);
     if (role === 'n') out.push(auxDigest(mod, op, v));
     k++;
   }

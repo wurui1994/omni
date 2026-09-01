@@ -683,6 +683,24 @@ class LlvmEmitter {
       this.startBlock(next);
       return;
     }
+    // 跳表（ADR-0017 第三刀）。LLVM 的 `switch` 收的是「值 -> 标签」，MIR 的表是
+    // 「下标 -> 层数」—— 下标本来就是 0..n-1，所以这一步是逐项配一个常量，不用再算什么。
+    // 多个下标指向同一层是允许的（LLVM 只要求 case 的**值**互不相同）。
+    // 越界走 default，这与 wasm 的语义逐条相同，所以这条腿上不必自己补范围判断。
+    if (op === OP.BRTABLE) {
+      const levels = f.levelsOf(f.b[i]);
+      const labelOf = (lv) => {
+        const r = this.regions[this.regions.length - 1 - lv];
+        if (r === undefined) throw new OmniError(`llvm: BRTABLE 的层数越界（函数 ${f.name}）`);
+        return r.kind === 'loop' ? r.head : r.end;
+      };
+      const it = this.ty(this.tyOf(f.a[i]), 'BRTABLE 的下标');
+      const arms = [];
+      let n = 0;
+      for (const lv of levels) { arms.push(`${it} ${n}, label %${labelOf(lv)}`); n++; }
+      this.term(`switch ${it} ${this.val(f.a[i])}, label %${labelOf(f.aux[i])} [ ${arms.join(' ')} ]`);
+      return;
+    }
     if (op === OP.RET) {
       if (f.a[i] === REF_NONE) this.term('ret void');
       else this.term(`ret ${this.typed(f.a[i])}`);
