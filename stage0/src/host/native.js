@@ -38,8 +38,14 @@ export function readBinary(p) {
   return node('node:fs').readFileSync(p, 'latin1');
 }
 
-export function writeBinary(p, t) {
-  node('node:fs').writeFileSync(p, Buffer.from(t, 'latin1'));
+/**
+ * 写一份字节。`mode` 给了的话只在**新建**那一刻生效，而且照旧过 umask ——
+ * 与 `open(…, O_CREAT, mode)` 一样（`open` 那一层要它：tinycc 写可执行文件时
+ * 给的是 0777，本机 umask 022，落下来是 0755）。
+ */
+export function writeBinary(p, t, mode) {
+  const opts = mode === undefined ? undefined : { mode };
+  node('node:fs').writeFileSync(p, Buffer.from(t, 'latin1'), opts);
   return undefined;
 }
 

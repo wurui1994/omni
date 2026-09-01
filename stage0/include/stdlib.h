@@ -35,6 +35,14 @@ long atol(const char *s);
 long strtol(const char *s, char **end, int base);
 unsigned long strtoul(const char *s, char **end, int base);
 
+/* 浮点那一族（第八刀第二十四片）—— 编出来的 tinycc 用 `strtold` 读源码里的浮点
+ * 字面量。这个目标上 `long double` 就是 `double`（见 ctype.js 的 typeSize），
+ * 所以三条只差一次到单精度的舍入。十六进制的字面量（`0x1.8p3`）也认。 */
+double atof(const char *s);
+double strtod(const char *s, char **end);
+float strtof(const char *s, char **end);
+long double strtold(const char *s, char **end);
+
 void qsort(void *base, size_t n, size_t size, int (*cmp)(const void *, const void *));
 void *bsearch(const void *key, const void *base, size_t n, size_t size,
               int (*cmp)(const void *, const void *));

@@ -288,7 +288,7 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
 8. **C 的库面**：`libtcc1` 的等价物（软除法/浮点辅助/`alloca`/`setjmp`）与 libc 的接法。
    原先写的是"先转手宿主的 libc，走既有的 extern-C FFI"，第五片证明**转手不成立**
    （指针是自家线性内存里的偏移，宿主 libc 读不到），改成一个读写线性内存的宿主模块，
-   见第五片的落地节。**前二十三片已落地**（预定义的宏 —— 目标的自述，五十条，
+   见第五片的落地节。**前二十五片已落地**（预定义的宏 —— 目标的自述，五十条，
    顺序与值都对着 `tcc -dM -E` 抄；自带的系统头目录 + 编译器必须自己给的那四份头；
    `stdio.h`/`stdlib.h`/`string.h` 的最小子集 —— libc 的自述；
    `strtol` 一族与 `strncpy`/`strchr`/`strstr` 那几条；
@@ -316,8 +316,13 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
    一帧一个 pc 循环，所以「回到某一帧的某条指令之后」是可表达的；
    **编出来的 tinycc 在预处理 tinycc 自己那一整份源码了**，与本机 tcc 逐字节相同 ——
    位域的**访问类型**（`adjust_bf`：声明的类型装不下时另挑一个，符号性看声明的、
-   宽度看访问的），以及别在命令行上替它回答目标配置那件事），
-   见下面的第八刀第一到二十三片节。
+   宽度看访问的），以及别在命令行上替它回答目标配置那件事；
+   **编出来的 tinycc 在产可执行文件了**，与本机 tcc 产的逐字节相同 ——
+   `open` 的第三个实参是变参、`fdopen` 几乎是空操作、`system` 回 `wait(2)` 的编码
+   且不冲调用方的 stdio、`errno` 的第三个名字 `__error`、`dlopen` 回 NULL 是真话；
+   **自举到不动点** —— 编出来的 tinycc 编它自己，产出的 `tcc2` 与本机 tcc 编的
+   逐字节相同，`tcc2` 再编一遍自己也一样（`strtod` 一族 + 十六进制浮点是最后一格）），
+   见下面的第八刀第一到二十五片节。
 
 最后三步是**后端**：
 
@@ -4473,6 +4478,159 @@ if ((vtop->type.t & VT_BTYPE) == VT_LLONG) type.t |= VT_LLONG; else type.t |= VT
 之后：`-dM`、路径 A 的 GLR 与路径 B 对账（第七步）。
 
 <!-- 第八刀第二十三片-END -->
+
+## 落地：第八刀第二十四片
+
+**编出来的 tinycc 在产可执行文件了**，而且与本机 tcc 产的**逐字节相同**：
+
+```
+node stage0/src/cli.js c-run "$TCCSRC/tcc.c" … -DONE_SOURCE=1 \
+  -- -B.omni-cache/tcc-build -o .omni-cache/ours/a.out .omni-cache/tiny.c
+.omni-cache/ours/a.out            # 真的跑起来，退出码 3（f(2) = 3）
+cmp 我们产的与本机 tcc 产的 —— IDENTICAL（36112 字节，0755，已签名）
+```
+
+也就是说这一路整条通了：**预处理 -> 语法分析 -> arm64 代码生成 -> Mach-O 写出 ->
+codesign**，全在我们的解释器上跑，产物与 oracle 一个字节不差。`-c` 那一档同样
+（976 字节的 `.o`，IDENTICAL）。
+
+### 一 `open` 的第三个实参是**变参**
+
+第一版把 `a[2]` 当成权限用了，结果产物的权限是 `--w-r-x---`：SDK 里
+`int open(const char *, int, ...)` 是变参函数，所以桩函数交过来的 `a[2]` 是
+**变参区的地址**，不是那个数。从那儿按 `int` 读一格才是 0777。
+
+这一格错了的表现很有意思：**链接成功、文件正确，但跑不起来**（0644，没有执行位）。
+落盘那一侧也要跟着改 —— `writeBinary` 多收一个 `mode`，只在新建那一刻生效、
+照旧过 umask（本机 022，于是 0777 落成 0755，与 tcc 一样）。
+
+### 二 `fdopen` 几乎是空操作
+
+tinycc 写产物走 `open` + `fdopen`（`tcc_output_file`）。fd 与 `FILE*`
+在我们这儿**本来就是同一张表**（第二十二片那个决定），所以 `fdopen` 只按 mode
+把几个标志对齐、句柄原样回去 —— 之后的 `fclose` 关的就是同一格，与真的一样。
+
+### 三 `system` 回的是 `wait(2)` 那套编码
+
+arm64 的 macOS 上没签名的可执行文件跑不起来，所以 tinycc 写完 Mach-O 之后会
+`system("codesign -f -s - <文件>")`（`tccmacho.c:2243`）。宿主那一侧走
+`host/native.js` 的 `spawn`。
+
+两格要注意：
+
+- 回的**不是**退出码，是 `wait(2)` 的编码（高 8 位是退出码）：tinycc 拿
+  `WIFEXITED`/`WEXITSTATUS` 读它。回成裸的退出码，成功也会被判成失败。
+- **不能冲 stdout**。第一版顺手冲了一次，想让先后好看；但真的 `system` 不管调用方的
+  stdio 缓冲（POSIX 只说「像创建了一个子进程」）。于是 tcc 那边子进程的输出先出来、
+  调用方攒着的等退出才出去 —— 冲了反而与 oracle 对不上。
+
+### 四 `errno` 有第三个名字
+
+`__error`。macOS 的 `<errno.h>` 把 `errno` 定义成 `(*__error())`，glibc 那边是
+`__errno_location()` —— 用**真的系统头**的程序（编出来的 tinycc 正是）走的是这条，
+而不是我们自带那份 `<errno.h>` 的 `__omni_errno_location`。三个名字回**同一格**，
+于是 `open` 失败时 libc 写下的号，tinycc 那边读得到。
+
+### 五 `dlopen` 回 NULL 是真话
+
+`tccmacho.c:2270` 拿 `libxcselect.dylib` 问「当前的 SDK 在哪儿」。解释器里没有
+动态装载器（线性内存里放不下一个宿主的 dylib，宿主函数的地址在这套指针上也没有意义），
+所以一律回 NULL —— 而 tinycc 那边正好按「问不到」写的：退到写死的两条 SDK 路径，
+那条路径与 configure 量出来的正是同一个。
+
+`-run` 那一路另说：它要**执行生成出来的机器码**，那在 MIR 解释器上根本不成立
+（第 9-11 步的后端才有这一格）。撞上去是一条明确的错误，不是一个错答案。
+
+### 量出来的数
+
+- `-c`：976 字节的 `.o`，与本机 tcc **IDENTICAL**。
+- 链接成可执行文件：36112 字节、0755、已签名，与本机 tcc **IDENTICAL**，跑起来
+  退出码也对。带 `printf` 的那份（要连 libSystem）同样 IDENTICAL，输出正确。
+- 比对产物时**输出文件名要一样**：ad-hoc 签名把标识符（取自文件名）嵌在签名块里，
+  名字不同则签名块不同。第一次比是 `tiny.exe` 对 `tiny-tcc.exe`，差的 8 个字节
+  全在那儿 —— 不是代码生成的差别。
+- `tests/c/sys/05-fdopen.c`：exit 33 + 109B stdout == `tcc -run`。
+- `tests/c/run.js`：**82 passed, 0 failed**。`tests/run.js`：**96 passed, 0 failed**。
+
+### 下一片
+
+第八刀第二十五片：让编出来的 tinycc 编**它自己**（`tcc.c` -> 一个能跑的 `tcc`），
+也就是把这条链再套一层。第一格已经量出来了 —— `__error` 就是那一趟撞出来的。
+
+之后：`-dM`、路径 A 的 GLR 与路径 B 对账（第七步）、第 9-11 步的后端。
+
+<!-- 第八刀第二十四片-END -->
+
+## 落地：第八刀第二十五片
+
+**自举到不动点了。** 编出来的 tinycc 编**它自己**，产出的 `tcc2` 与本机 tcc 编同一份
+源码产出的逐字节相同；拿那份 `tcc2` 再编一遍自己，产物与它自己**又**逐字节相同：
+
+```
+node stage0/src/cli.js c-run "$TCCSRC/tcc.c" … -DONE_SOURCE=1 \
+  -- -B.omni-cache/tcc-build -o .omni-cache/ours/tcc2 … "$TCCSRC/tcc.c"
+cmp ours/tcc2 theirs/tcc2                  # IDENTICAL，590272 字节，1m17s
+.omni-cache/ours/tcc2 -v                   # tcc version 0.9.28rc (AArch64 Darwin)
+.omni-cache/ours/tcc2 -o stage3/tcc2 … tcc.c && cmp ours/tcc2 stage3/tcc2
+                                           # FIXED-POINT IDENTICAL，0.165s
+```
+
+这一格值得说清楚它证明了什么。链条是：**我们的 C 前端**读 tinycc 的源码，把它编成
+MIR，在**我们的解释器**上跑；跑起来的那个 tinycc 读它自己的源码，走它自己的预处理、
+语法分析、arm64 代码生成、Mach-O 写出、`codesign`，落出一个**原生**可执行文件。那个
+文件与本机 tcc 落出的一个字节不差 —— 也就是说我们对 tinycc 这五万行的**行为**复现，
+在这条路径上没有一处偏差；有偏差的话，产物里必然看得见（第二十三片就是这么抓出位域
+那一格的）。第三段更强一点：`ours/tcc2` 自己再编一遍自己得到同一个文件，说明它不只是
+"这一次的输入恰好对"，而是**这个编译器本身**是那个不动点。
+
+### 一 最后一格是 `strtod`
+
+自举那一趟撞出来的边界只剩浮点的读入。`tccpp.c` 的 `parse_number` 把浮点字面量交给
+`strtod`/`strtold`/`strtof`（`tccpp.c:1962`），于是 tinycc 编自己的源码时，源码里每
+一个 `1e6`、每一个 `0x1p-52` 都从这儿过。
+
+`scanReal` 照 C 标准那三条分支写：
+
+- 空白 + 符号；
+- `inf` / `infinity` / `nan` / `nan(字符序列)`；
+- **十六进制浮点** `0x1.8p3` —— 尾数按 16 进制攒成整数，再 `mant * 2**(exp - 4*小数位)`。
+  分两步是为了精度：先攒成一个精确的整数、再一次二的幂缩放，只有最后那一步舍入；
+- 其余交给 `Number()`。JS 的十进制串转 double 与 C 的 `strtod` 是同一套
+  round-to-nearest-even，所以这一格不需要自己写。
+
+`strtof` 在结果上再 `Math.fround`；`strtold` 与 `strtod` 同一格 —— 这个目标上
+`long double == double`（`stage0/include/float.h` 头上那节写了量出来的数）。
+
+`atof` 是 `strtod(s, NULL)`，不是另写一份。
+
+### 二 `endptr` 是"停在哪儿"，不是"对不对"
+
+`1e` 这种：C 说 `strtod` 认下 `1`、`endptr` 停在 `e`。写成"看见 `e` 就吃指数"会把
+`1e` 读成错误或者 `10`。`scanReal` 里指数那一段是**试着吃**：符号加至少一位数字都齐了
+才认，否则回退到 `e` 之前。同一条规则也管十六进制那份 —— 只是那儿的 `p` 是必需的
+（没有 `p` 就不是十六进制浮点，退回按 `0` 加 `x…` 读）。
+
+### 量出来的数
+
+- 编出来的 tinycc 编 **`tcc.c` + ONE_SOURCE**（五万行）：产物 590272 字节，与本机
+  tcc 的同一条命令 **IDENTICAL**，1m17s。
+- 那份 `tcc2` 编它自己：**FIXED-POINT IDENTICAL**，0.165s（原生，所以快了 470 倍）。
+- `tcc2 -v` / `tcc2 -run hello.c a b`：与本机 tcc 一样 —— 输出相同、退出码 7 相同。
+  JIT 那一路在**它**身上是通的（我们的解释器上不通，那是第 9-11 步的事）。
+- `tests/c/gen/46-strtod.c`：exit 42 + 567B stdout == `tcc -run`（20 组 `strtod`，
+  含 `5e-324`、`1e`、十六进制浮点、inf/nan，再加 strtof/strtold/atof）。
+- `tests/c/run.js`：**83 passed, 0 failed**。`tests/run.js`：**96 passed, 0 failed**。
+
+### 下一片
+
+第八刀第二十六片：把 tinycc 自己那套测试拿来当尺子 —— `tests/tcctest.c` 那一大份，
+让**编出来的 tinycc** 去编它、再与本机 tcc 编的产物/输出比。自举只证明了"编 tcc.c
+这条路径"没有偏差，`tcctest.c` 是专门为了踩边角写的，覆盖面不一样。
+
+之后：`-dM`、路径 A 的 GLR 与路径 B 对账（第七步）、第 9-11 步的后端。
+
+<!-- 第八刀第二十五片-END -->
+
 
 
 

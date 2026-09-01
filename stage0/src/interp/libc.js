@@ -26,7 +26,7 @@
 // 第二十一片补上了 `%a`（见 `aText`）—— 于是这份清单只剩 `%p` 一格。
 
 import { memLoad, memStore, printBytes, flushOut, memSize, memGrow } from './builtin.js';
-import { stderrBytes as hostStderr, stdoutBytes as hostStdout, readBinary, writeBinary, removeFile, env as hostEnv } from '../host/native.js';
+import { stderrBytes as hostStderr, stdoutBytes as hostStdout, readBinary, writeBinary, removeFile, env as hostEnv, spawn as hostSpawn } from '../host/native.js';
 
 /**
  * `exit` 抛的那个信号（第六刀第十七片）。
@@ -561,6 +561,96 @@ function putEnd(endp, addr, used) {
   memStore('i64', endp, 0, BigInt(addr) + BigInt(used));
 }
 
+/**
+ * `strtod` 一族的扫描（第八刀第二十四片）。回 `{ v, used }`，一位都没认出来时
+ * `used` 是 0（于是 `endptr` 写回原地址，C11 7.22.1.3）。
+ *
+ * 认四种形状：十进制、**十六进制**（`0x1.8p3`）、`inf`/`infinity`、`nan`。
+ * 十六进制那一种是必须的 —— 编出来的 tinycc 用 `strtold` 读源码里的浮点字面量，
+ * 而 C99 起 `0x1p3` 是合法的字面量；宿主的 `Number()` 不认它。
+ *
+ * 十进制那一支交给宿主的 `Number()`：它与 macOS 的 `strtod` 一样是**正确舍入**的
+ * （IEEE-754 就近舍入），所以同一串字符两边得到同一个 double —— 这条对「产物逐字节
+ * 相同」是必要的。
+ */
+function scanReal(s) {
+  let i = 0;
+  while (i < s.length && ' \t\n\v\f\r'.indexOf(s[i]) >= 0) i++;
+  let neg = false;
+  if (s[i] === '+' || s[i] === '-') { neg = s[i] === '-'; i++; }
+  const rest = s.slice(i).toLowerCase();
+
+  if (rest.startsWith('infinity')) return { v: neg ? -Infinity : Infinity, used: i + 8 };
+  if (rest.startsWith('inf')) return { v: neg ? -Infinity : Infinity, used: i + 3 };
+  if (rest.startsWith('nan')) {
+    /* `nan(…)` 那个括号里的串是实现定义的；本机接受并忽略它。 */
+    let j = i + 3;
+    if (s[j] === '(') {
+      const close = s.indexOf(')', j);
+      if (close >= 0) j = close + 1;
+    }
+    return { v: NaN, used: j };
+  }
+
+  if (rest.startsWith('0x')) {
+    let j = i + 2;
+    let mant = 0n;
+    let digits = 0;
+    let frac = 0;
+    while (j < s.length) {
+      const d = hexVal(s[j]);
+      if (d < 0) break;
+      mant = mant * 16n + BigInt(d);
+      digits++;
+      j++;
+    }
+    if (s[j] === '.') {
+      j++;
+      while (j < s.length) {
+        const d = hexVal(s[j]);
+        if (d < 0) break;
+        mant = mant * 16n + BigInt(d);
+        digits++;
+        frac++;
+        j++;
+      }
+    }
+    /* 一位十六进制数字都没有：整个 `0x` 都不算，退回到那个 `0` 上（它是有效的）。 */
+    if (digits === 0) return { v: 0, used: i + 1 };
+    let exp = 0;
+    if (s[j] === 'p' || s[j] === 'P') {
+      let k = j + 1;
+      let esign = 1;
+      if (s[k] === '+' || s[k] === '-') { esign = s[k] === '-' ? -1 : 1; k++; }
+      let ed = 0;
+      let n = 0;
+      while (k < s.length && s[k] >= '0' && s[k] <= '9') { n = n * 10 + (s.charCodeAt(k) - 48); k++; ed++; }
+      /* `p` 后面没有数字：指数那一段整个不算（C11 那条「最长的合法前缀」）。 */
+      if (ed > 0) { exp = esign * n; j = k; }
+    }
+    /* 尾数先转 double（超过 53 位时宿主按就近舍入），再乘 2 的幂 —— 那一步是精确的。 */
+    const v = Number(mant) * Math.pow(2, exp - 4 * frac);
+    return { v: neg ? -v : v, used: j };
+  }
+
+  const m = /^(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?/.exec(s.slice(i));
+  if (m === null) return { v: 0, used: 0 };
+  let txt = m[0];
+  /* 指数那一段不完整（`1e`、`1e+`）时正则已经把它排掉了，但 `Number('1.')` 是 1 —— 对。 */
+  const v = Number(txt);
+  return { v: neg ? -v : v, used: i + txt.length };
+}
+
+/** 一个十六进制数字的值，不是就回 -1。 */
+function hexVal(ch) {
+  if (ch === undefined) return -1;
+  const c = ch.charCodeAt(0);
+  if (c >= 48 && c <= 57) return c - 48;
+  if (c >= 97 && c <= 102) return c - 87;
+  if (c >= 65 && c <= 70) return c - 55;
+  return -1;
+}
+
 const LONG_MAX = (1n << 63n) - 1n;
 const LONG_MIN = -(1n << 63n);
 const ULONG_MAX = (1n << 64n) - 1n;
@@ -984,7 +1074,9 @@ function openMode(m) {
 /** 把一份还没落盘的写入落到盘上。只读的流上是空操作。 */
 function fileSync(e) {
   if (!e.write || !e.dirty) return;
-  writeBinary(e.path, e.data);
+  /* `mode` 只有从 `open(…, O_CREAT, mode)` 来的那些有（新建时才生效，见宿主那一侧）。
+   * 少这一格，tinycc 写出来的可执行文件是 0644 —— 链接成功了但跑不起来。 */
+  writeBinary(e.path, e.data, e.mode);
   e.dirty = false;
 }
 
@@ -1073,6 +1165,21 @@ const LIBC = {
   },
   __omni_errno_location: () => {
     if (errnoAddr === 0n) throw new Error('libc: errno 那一格没交过来（__omni_errno_init 没发？）');
+    return errnoAddr;
+  },
+  /* 宿主 libc 自己那两个名字（第八刀第二十四片）。macOS 的 `<errno.h>` 把 `errno`
+   * 定义成 `(*__error())`，glibc 那边是 `__errno_location()` —— 用**真的系统头**的
+   * 程序（编出来的 tinycc 就是）走的是这条，而不是我们自带那份 `<errno.h>`。
+   *
+   * 回的是同一格：于是 `open` 失败时 libc 写下的那个号，tinycc 那边读得到。
+   * 前端没留过（没引用我们那份 `<errno.h>`）就在堆上要一格 —— 出生是 0，
+   * 正好是 C 要求的「启动时 errno 为 0」（C11 7.5 第 3 段）。 */
+  __error: () => {
+    if (errnoAddr === 0n) errnoAddr = heapAlloc(8n);
+    return errnoAddr;
+  },
+  __errno_location: () => {
+    if (errnoAddr === 0n) errnoAddr = heapAlloc(8n);
     return errnoAddr;
   },
   /* `strerror` 那块共用的缓冲，与 errno 那一格同一个形状（第八刀第十三片）。
@@ -1297,6 +1404,16 @@ const LIBC = {
     } catch {
       found = false;
     }
+    /* 第三个实参是**变参**（SDK 里 `int open(const char *, int, ...)`），所以
+     * `a[2]` 是变参区的地址、不是权限本身 —— 从那儿按 `int` 读一格。
+     * 只有新建时才生效（POSIX 的规矩）。tinycc 写可执行文件给的是 0777：
+     * 少这一格产物是 0644，链接成功了但跑不起来。 */
+    let perm;
+    if (!found && creat) {
+      perm = a.length > 2 && BigInt(a[2]) !== 0n
+        ? Number(BigInt.asUintN(32, BigInt(vaCursor(a[2]).int(32))) & 0o7777n)
+        : 0o666;
+    }
     if (!found && !creat) { setErrno(2); return -1n; }   // ENOENT
     if (found && creat && excl) { setErrno(17); return -1n; }   // EEXIST
     if (trunc) data = '';
@@ -1309,6 +1426,7 @@ const LIBC = {
       write: acc !== 0,
       eof: false,
       err: false,
+      mode: perm,
       /* 新建的、或者被截断的，哪怕一个字节没写也得落盘 —— 与 `fopen` 的 `w` 同理。 */
       dirty: (!found && creat) || trunc,
     });
@@ -1387,6 +1505,54 @@ const LIBC = {
   dispatch_semaphore_create: () => 1n,
   dispatch_semaphore_wait: () => 0n,
   dispatch_semaphore_signal: () => 0n,
+  /* ---- 动态装载那三条（第八刀第二十四片）。解释器里**没有动态装载器**：线性内存里
+   * 放不下一个宿主的 dylib，而一个宿主函数的地址在这套指针上也没有意义。
+   *
+   * 所以一律回 NULL —— 这不是敷衍，是**真话**：「找不到」。tinycc 那边正好都按
+   * 「找不到」写的：`tccmacho.c:2270` 拿 `libxcselect.dylib` 问 SDK 在哪儿，
+   * `if (f) f(...)` 之后 `if (path.size) … else` 退到写死的那两条 SDK 路径，
+   * 而这台机器上那条路径与 `config.h` 里 configure 量出来的正是同一个。
+   *
+   * `-run` 那一路另说：它要**执行生成出来的机器码**，那在 MIR 解释器上根本不成立
+   * （第 9-11 步的后端才有这一格）。到那儿会撞上一条明确的错误，不是一个错答案。 */
+  dlopen: () => 0n,
+  dlsym: () => 0n,
+  dlclose: () => 0n,
+  dlerror: () => 0n,
+  /* `system`（第八刀第二十四片）：Mach-O 写完之后 tinycc 会跑一条
+   * `codesign -f -s - <文件>`（`tccmacho.c:2243`，configure 开了 CONFIG_CODESIGN）——
+   * arm64 的 macOS 上没签名的可执行文件跑不起来，所以这一步是产物的一部分。
+   *
+   * 回的**不是**退出码，是 `wait(2)` 那套编码：tinycc 拿 `WIFEXITED`/`WEXITSTATUS`
+   * 读它（高 8 位是退出码）。回成裸的退出码，成功也会被判成失败。 */
+  system: (a) => {
+    if (BigInt(a[0]) === 0n) return 1n;    // NULL 是问「有没有命令处理器」
+    const cmd = readCStr(a[0]);
+    /* **不冲 stdout**：真的 `system` 不管调用方的 stdio 缓冲（POSIX 只说「像创建了
+     * 一个子进程」，glibc 与 macOS 都不冲）。所以子进程的输出先出来、我们攒着的那些
+     * 等退出时才出去 —— 与 tcc 那边的先后一样。冲了反而对不上。 */
+    const [status] = hostSpawn('/bin/sh', ['-c', cmd], 'i');
+    return BigInt(status) << 8n;
+  },
+  /* `fdopen`（第八刀第二十四片）：tinycc 写产物走的是 `open` + `fdopen`
+   * （`tcc_output_file`）。fd 与 FILE* **本来就是同一张表**（见上面那一节），
+   * 所以这儿几乎是空操作 —— 只按 mode 把那几个标志对齐，句柄原样回去。
+   * 于是之后的 `fclose` 关的就是同一格，与真的 `fdopen` 一样。 */
+  fdopen: (a) => {
+    const f = BigInt(a[0]);
+    const mode = openMode(readCStr(a[1]));
+    if (mode === null) { setErrno(22); return 0n; }
+    /* POSIX 的 0/1/2 就是那三条标准流。编号两套各有出处，这儿换一次。 */
+    if (f === 0n) return F_STDIN;
+    if (f === 1n) return F_STDOUT;
+    if (f === 2n) return F_STDERR;
+    const e = files.get(f);
+    if (e === undefined) { setErrno(9); return 0n; }
+    if (mode !== 'r') e.write = true;
+    if (mode === 'w') { e.data = ''; e.pos = 0; e.dirty = true; }
+    if (mode === 'a') e.pos = e.data.length;
+    return f;
+  },
   fopen: (a) => {
     const path = readCStr(a[0]);
     const mode = openMode(readCStr(a[1]));
@@ -1610,6 +1776,16 @@ const LIBC = {
     const i = h.indexOf(readCStr(a[1]));
     return i < 0 ? 0n : BigInt(a[0]) + BigInt(i);
   },
+  strpbrk: (a) => {
+    /* 第一个「出现在那一组字符里」的位置（C11 7.24.5.4）。一组是空的就回 NULL ——
+     * `.tbd` 那个解析器（`tccmacho.c` 的 `tbd_parse_movetoany`）走的是这一条。 */
+    const s = readCStr(a[0]);
+    const set = readCStr(a[1]);
+    for (let i = 0; i < s.length; i++) {
+      if (set.indexOf(s[i]) >= 0) return BigInt(a[0]) + BigInt(i);
+    }
+    return 0n;
+  },
   memcpy: (a) => {
     const n = Number(BigInt(a[2]));
     for (let i = 0; i < n; i++) {
@@ -1656,6 +1832,25 @@ const LIBC = {
    * （C11 7.22.1.2：等价于 `strtol(s, NULL, 10)`，除了出错时的行为没规定）。 */
   atoi: (a) => BigInt.asIntN(32, scanInt(readCStr(a[0]), 10).v),
   atol: (a) => BigInt.asIntN(64, scanInt(readCStr(a[0]), 10).v),
+  /* 浮点那三条（第八刀第二十四片）。`long double` 在这个目标上**就是 double**
+   * （`tcc.h:237-241` 对 MACHO+ARM64 开 TCC_USING_DOUBLE_FOR_LDOUBLE），
+   * 所以 `strtold` 与 `strtod` 是同一件事；`strtof` 多舍一次到单精度。 */
+  atof: (a) => scanReal(readCStr(a[0])).v,
+  strtod: (a) => {
+    const r = scanReal(readCStr(a[0]));
+    putEnd(BigInt(a[1]), a[0], r.used);
+    return r.v;
+  },
+  strtold: (a) => {
+    const r = scanReal(readCStr(a[0]));
+    putEnd(BigInt(a[1]), a[0], r.used);
+    return r.v;
+  },
+  strtof: (a) => {
+    const r = scanReal(readCStr(a[0]));
+    putEnd(BigInt(a[1]), a[0], r.used);
+    return Math.fround(r.v);
+  },
   strtol: (a) => {
     const s = readCStr(a[0]);
     const r = scanInt(s, Number(BigInt(a[2])));
