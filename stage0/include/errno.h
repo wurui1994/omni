@@ -10,8 +10,8 @@
  * 那几个数照本机的 `<sys/errno.h>` 量的（`tcc -run` 印出来对过）。**只放我们真的会设的
  * 与常用的几个** —— 一整张表有八十多个，而多出来的那些没有一个地方会写它们。
  *
- * 少了什么：`strerror` / `perror`（要一张号到文字的表，而那张表的文字得与本机的 libc
- * 逐字节相同才能对账 —— 独立一格）。
+ * `strerror` 在 `<string.h>` 里、`perror` 在 `<stdio.h>` 里（标准就是这么分的），
+ * 那张号到文字的表在 `interp/libc.js` 里，整张都是从 oracle 上量出来的（第十三片）。
  */
 #ifndef _ERRNO_H
 #define _ERRNO_H

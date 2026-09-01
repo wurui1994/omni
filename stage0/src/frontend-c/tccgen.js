@@ -251,6 +251,16 @@ const HEAP_FNS = new Set(['malloc', 'calloc', 'realloc', 'free', 'strdup']);
 const ERRNO_FN = '__omni_errno_location';
 
 /**
+ * `strerror` 要一块地方（第八刀第十三片）：它回一个 `char *`，而那些串必须落在线性
+ * 内存里。macOS 上量出来的是「一号一格、互不干扰，只有表外的号共用一格」，所以这块
+ * 地方是 **109 格 × 48 字节**（108 个号 + 表外那一格；最长的那句 46 个字符 + 结尾的 0
+ * 是 47，48 让每格 8 对齐）。宿主一侧的 `STRERR_SLOT` 与这个数对得上，对不上会当场骂。
+ * 前端要做的与 errno 那一格一样两件事：data 段里留出来、在入口处把地址与大小交过去。
+ */
+const STRERROR_FN = 'strerror';
+const STRERROR_BYTES = 109 * 48;
+
+/**
  * 影子栈的大小。1 MiB —— 与 tcc 在本机上的默认线程栈同一个量级，而递归深度超出它时
  * 得到的是「内存越界」（memChk 会喊），不是静悄悄踩别的东西。写死是因为这一片没有
  * `-Wl,-z,stacksize` 那类开关；将来要调就是一个命令行参数。
@@ -582,6 +592,7 @@ export class CGen {  /**
     this.heapUsed = false;
     /** 这个单元用到 `errno` 了吗。用到才在 data 段留一格、才发 `__omni_errno_init` */
     this.errnoUsed = false;
+    this.strerrorUsed = false;
     /** @type {Map<string,object>} `typedef` 的名字表（tcc 用 `VT_TYPEDEF` 挂在符号上） */
     this.typedefs = new Map();
     /* `__builtin_va_list`：tcc 在 arm64 上把它定在 tccdefs.h 里（本机是
@@ -4196,6 +4207,7 @@ export class CGen {  /**
        * 这个单元里的一个外部符号」。 */
       if (HEAP_FNS.has(name)) this.heapUsed = true;
       if (name === ERRNO_FN) this.errnoUsed = true;
+      if (name === STRERROR_FN) this.strerrorUsed = true;
       this.externThunk(name, info);
     }
     /* `extern int x;` 之后没有定义：真的编译器要等链接期才知道。我们只有一个翻译单元，
@@ -4257,7 +4269,8 @@ export function lowerC(path, text, host, defs, args) {
    *   [0, 64K)            页 0 整页留空 —— C 的 `NULL` 于是**一定**访问不到，
    *                       而不是「碰巧落在别的东西上」
    *   [64K, dataOff)      data 段：字符串字面量与全局量，往上长；末尾还摆着 `argv`
-   *                       那几个串与那张指针表、以及 `errno` 那一格（都只在用到时才留）
+   *                       那几个串与那张指针表、`errno` 那一格、`strerror` 那 109 格
+   *                       （都只在用到时才留）
    *   [栈底, 栈顶)        影子栈：16 对齐，`$sp` 从栈顶往下长
    *   [堆底, …)           堆：从栈顶之上的**下一个页边界**起，往上长，不够就 `MGROW`
    * `mem.min` 按栈顶（用到堆时按堆底加一页）算出页数。上界不设（0）。
@@ -4311,6 +4324,12 @@ export function lowerC(path, text, host, defs, args) {
     errnoAddr = alignUp(gen.dataOff, 4);
     gen.dataOff = errnoAddr + 4;
   }
+  /* `strerror` 那块共用的缓冲（第八刀第十三片），同样只在用到时才留。 */
+  let strerrAddr = 0;
+  if (gen.strerrorUsed) {
+    strerrAddr = alignUp(gen.dataOff, 8);
+    gen.dataOff = strerrAddr + STRERROR_BYTES;
+  }
   const stackBase = alignUp(gen.dataOff, 16);
   const stackTop = stackBase + C_STACK_BYTES;
   const heapBase = alignUp(stackTop, MEM_PAGE);
@@ -4339,6 +4358,12 @@ export function lowerC(path, text, host, defs, args) {
   if (gen.errnoUsed) {
     entry.emit(OP.CCALL, T_VOID, mod.cabiNo('__omni_errno_init'),
       entry.pushArgs([mod.consts.int(BigInt(errnoAddr))]), 0);
+  }
+  /* `strerror` 那块缓冲的地址**与大小**，同理 —— 用到 `strerror` 才发。 */
+  if (gen.strerrorUsed) {
+    entry.emit(OP.CCALL, T_VOID, mod.cabiNo('__omni_strerror_init'),
+      entry.pushArgs([mod.consts.int(BigInt(strerrAddr)),
+        mod.consts.int(BigInt(STRERROR_BYTES))]), 0);
   }
   const rt = mirTypeOf(info.ret);
   /* `main` 的实参：要么一个都没有，要么就是 `argc` 与 `argv`（上面只放过这两种）。

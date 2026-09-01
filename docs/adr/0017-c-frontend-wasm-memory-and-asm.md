@@ -288,7 +288,7 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
 8. **C 的库面**：`libtcc1` 的等价物（软除法/浮点辅助/`alloca`/`setjmp`）与 libc 的接法。
    原先写的是"先转手宿主的 libc，走既有的 extern-C FFI"，第五片证明**转手不成立**
    （指针是自家线性内存里的偏移，宿主 libc 读不到），改成一个读写线性内存的宿主模块，
-   见第五片的落地节。**前十二片已落地**（预定义的宏 —— 目标的自述，五十条，
+   见第五片的落地节。**前十三片已落地**（预定义的宏 —— 目标的自述，五十条，
    顺序与值都对着 `tcc -dM -E` 抄；自带的系统头目录 + 编译器必须自己给的那四份头；
    `stdio.h`/`stdlib.h`/`string.h` 的最小子集 —— libc 的自述；
    `strtol` 一族与 `strncpy`/`strchr`/`strstr` 那几条；
@@ -296,8 +296,9 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
    `<errno.h>` —— data 段里一格 + `__omni_errno_location`；三条标准流与 `fprintf`；
    真的文件 —— `fopen`/`fread`/`fgets`/`fseek`，整份快照；
    `int main(int argc, char **argv)` —— argv 住 data 段；
-   stdout 是字节不是字符 —— C 那条腿自己一扇门），
-   见下面的第八刀第一到十二片节。
+   stdout 是字节不是字符 —— C 那条腿自己一扇门；
+   `strerror` / `perror` —— 一张量出来的表 + 一号一格），
+   见下面的第八刀第一到十三片节。
 
 最后三步是**后端**：
 
@@ -3463,6 +3464,89 @@ oracle 上量出来，而不是自己编。`perror` 是它加一句 `: ` 与 `\n
 真的 macOS 系统头。
 
 <!-- 第八刀第十二片-END -->
+
+## 落地：第八刀第十三片
+
+**`strerror` / `perror`。**
+
+这一片的难处不在实现，在**那张表**：`strerror(2)` 在 macOS 上是
+`No such file or directory`，那串字必须与本机的 libc 逐字节相同，否则 `perror`
+的输出进不了对账。所以整张表（0..107）与「表外是什么样」都是从 oracle 上量出来的
+—— `tcc -run` 里一个 `for` 印 `strerror(0..110)`，抄下来的就是 `libc.js` 的 `ERRSTR`。
+
+第 0 格也占着：macOS 上 `strerror(0)` 是 `Undefined error: 0`，不是空串。
+表外（含负数）是 `Unknown error: N`。
+
+### 两条**指针**上的性质，也是量出来的
+
+一开始的设计是「一块共用的缓冲，每次写进去」—— C11 7.24.6.2 第 3 段确实允许
+「下一次调用改掉上一次的串」。可量出来 macOS **不是**这样：
+
+```
+char *a = strerror(1), *b = strerror(2);
+printf("[%s][%s] same=%d\n", a, b, a == b);
+→ [Operation not permitted][No such file or directory] same=0
+```
+
+也就是说已知的号是一张**常量表**：同一个号两次回同一个地址，不同的号回不同的地址，
+先拿到的那个串不会被后来的调用改掉。而表**外**的号确实共用一块：
+
+```
+char *a = strerror(999), *b = strerror(1000);
+→ [Unknown error: 1000][Unknown error: 1000] same=1
+```
+
+共用一块缓冲的实现会在第一条上分岔（`same` 会是 1，两个 `%s` 会印同一句话）。
+所以落地的形状是**一号一格**：
+
+```
+strerror(n) 的地址 = base + (n 在表内 ? n : 108) * 48
+```
+
+48 字节一格（最长那句 46 个字符 + 结尾的 0 是 47，48 让每格 8 对齐），
+109 格（108 个号 + 表外那一格），一共 5232 字节。好处是**不必记账** ——
+地址是号算出来的，两条性质自动成立；坏处是用到 `strerror` 的模块 data 段多 5K。
+
+那块地方与 errno 那一格同一个形状：**前端**在 data 段里留、开跑前一条
+`__omni_strerror_init(addr, bytes)` 交过去。大小也交，是为了让宿主能**当场核对**
+—— 两处各写一个数，写错了要立刻骂而不是悄悄写出界：
+
+```js
+const need = (BigInt(ERRSTR.length) + 1n) * STRERR_SLOT;
+if (BigInt(a[1]) < need) throw new Error(`libc: strerror 那块地方不够（…）`);
+```
+
+一个字节 data 都不写：那些串由宿主在**第一次调用时**写进去，而线性内存出生全是 0。
+
+### `perror` 的两条边角
+
+- 前缀是空指针**或空串**时只写那句话，连 `: ` 都不写。
+- 那句话取的是**当时**的 `errno`（`errno = 0` 时是 `Undefined error: 0`，不是不写）。
+
+两条都量出来的。它走的是第九片那扇 stderr 的门（直写，不带缓冲）。
+
+### 量出来的数
+
+- `tests/c/gen/39-strerror.c`：退出码 17 + 326 字节 stdout + 75 字节 stderr，
+  与 `tcc -run` 逐字节相同。量的是：`strerror(0)`、我们 `<errno.h>` 里那几个号、
+  表的最后一格（107）与表外（108、-1、500、501）、最长那句的长度（46）、
+  一号一格的三条（同号同址、异号异址、先拿到的串不被改）、表外共用一格、
+  `strerror(errno)`、`perror` 的三种前缀。
+- `tests/c/run.js`：**67 passed, 0 failed**。`tests/run.js`：96 passed。
+  `tests/js-roundtrip/run.js`：110 passed。
+- 边界钉子仍是 7 条。
+
+### 下一片
+
+第八刀第十四片：**`scanf` 一族**（`sscanf` 先，`scanf`/`fscanf` 跟上）。
+它是 `cFormat` 的反向：一个格式串驱动的**扫描器**，`%d`/`%s`/`%c`/`%x`/`%f` 与
+宽度、`*`（跳过）、空白的规则（C11 7.21.6.2 那一长条）。回的是**成功赋值的个数**，
+而 `EOF` 与 0 是两回事 —— 那几条边角同样要从 oracle 上量。
+`strtol` 那台扫描器（第二片）可以直接给整数那几个转换用。
+
+之后仍是原来的顺序：`gen-bad/duff`、`struct-byval`、真的 macOS 系统头。
+
+<!-- 第八刀第十三片-END -->
 
 
 

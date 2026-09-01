@@ -82,4 +82,9 @@ int feof(FILE *f);
 int ferror(FILE *f);
 int remove(const char *path);
 
+/* `perror`（C11 7.21.10.4）：往 stderr 写 `前缀: 那句话\n`。前缀是空指针或空串时
+ * 只写那句话，连 `: ` 都不写 —— 两条都是从 `tcc -run` 上量出来的（第八刀第十三片）。
+ * 那句话与 `strerror(errno)` 是同一张表。 */
+void perror(const char *s);
+
 #endif /* _STDIO_H */

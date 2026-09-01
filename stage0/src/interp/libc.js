@@ -586,6 +586,148 @@ function setErrno(v) {
   if (errnoAddr !== 0n) memStore('i32', errnoAddr, 0, BigInt(v));
 }
 
+/** 读一次 errno（`perror` 要）。没装上就当 0。 */
+function getErrno() {
+  if (errnoAddr === 0n) return 0;
+  return Number(BigInt.asIntN(32, memLoad('i32s', errnoAddr, 0)));
+}
+
+/* `strerror` 回一个 `char *`，所以那些串必须**落在线性内存里**。macOS 上它是一张
+ * 常量表（同一个号两次回同一个地址，不同的号互不干扰），只有表外的号共用一块 ——
+ * 都量过，见下面那条。这块地方同样由**前端**在 data 段里留、开跑前用
+ * `__omni_strerror_init` 把地址与大小交过来（与 errno 那一格同一个形状，只是大一片）。 */
+let strerrAddr = 0n;
+
+/* 号到文字那张表（第八刀第十三片）。**整张表都是从 oracle 上量出来的**
+ * （`tcc -run` 里一个 `for` 印 `strerror(0..110)`），不是自己编的 —— 这些串要与
+ * 本机 libc 逐字节相同，`perror` 的输出才能进对账。
+ * 表外的号（含负数）是 `Unknown error: N`，同样量出来的。
+ * 下标就是 errno 的号，所以第 0 格也占着（macOS 上它有一句自己的话）。 */
+const ERRSTR = [
+  'Undefined error: 0',
+  'Operation not permitted',
+  'No such file or directory',
+  'No such process',
+  'Interrupted system call',
+  'Input/output error',
+  'Device not configured',
+  'Argument list too long',
+  'Exec format error',
+  'Bad file descriptor',
+  'No child processes',
+  'Resource deadlock avoided',
+  'Cannot allocate memory',
+  'Permission denied',
+  'Bad address',
+  'Block device required',
+  'Resource busy',
+  'File exists',
+  'Cross-device link',
+  'Operation not supported by device',
+  'Not a directory',
+  'Is a directory',
+  'Invalid argument',
+  'Too many open files in system',
+  'Too many open files',
+  'Inappropriate ioctl for device',
+  'Text file busy',
+  'File too large',
+  'No space left on device',
+  'Illegal seek',
+  'Read-only file system',
+  'Too many links',
+  'Broken pipe',
+  'Numerical argument out of domain',
+  'Result too large',
+  'Resource temporarily unavailable',
+  'Operation now in progress',
+  'Operation already in progress',
+  'Socket operation on non-socket',
+  'Destination address required',
+  'Message too long',
+  'Protocol wrong type for socket',
+  'Protocol not available',
+  'Protocol not supported',
+  'Socket type not supported',
+  'Operation not supported',
+  'Protocol family not supported',
+  'Address family not supported by protocol family',
+  'Address already in use',
+  "Can't assign requested address",
+  'Network is down',
+  'Network is unreachable',
+  'Network dropped connection on reset',
+  'Software caused connection abort',
+  'Connection reset by peer',
+  'No buffer space available',
+  'Socket is already connected',
+  'Socket is not connected',
+  "Can't send after socket shutdown",
+  "Too many references: can't splice",
+  'Operation timed out',
+  'Connection refused',
+  'Too many levels of symbolic links',
+  'File name too long',
+  'Host is down',
+  'No route to host',
+  'Directory not empty',
+  'Too many processes',
+  'Too many users',
+  'Disc quota exceeded',
+  'Stale NFS file handle',
+  'Too many levels of remote in path',
+  'RPC struct is bad',
+  'RPC version wrong',
+  'RPC prog. not avail',
+  'Program version wrong',
+  'Bad procedure for program',
+  'No locks available',
+  'Function not implemented',
+  'Inappropriate file type or format',
+  'Authentication error',
+  'Need authenticator',
+  'Device power is off',
+  'Device error',
+  'Value too large to be stored in data type',
+  'Bad executable (or shared library)',
+  'Bad CPU type in executable',
+  'Shared library version mismatch',
+  'Malformed Mach-o file',
+  'Operation canceled',
+  'Identifier removed',
+  'No message of desired type',
+  'Illegal byte sequence',
+  'Attribute not found',
+  'Bad message',
+  'EMULTIHOP (Reserved)',
+  'No message available on STREAM',
+  'ENOLINK (Reserved)',
+  'No STREAM resources',
+  'Not a STREAM',
+  'Protocol error',
+  'STREAM ioctl timeout',
+  'Operation not supported on socket',
+  'Policy not found',
+  'State not recoverable',
+  'Previous owner died',
+  'Interface output queue is full',
+  'Capabilities insufficient',
+];
+
+/** 号 -> 那句话。表外的（含负数）与 macOS 一样是 `Unknown error: N`。 */
+function errText(n) {
+  const i = Number(BigInt.asIntN(32, BigInt(n)));
+  if (i >= 0 && i < ERRSTR.length) return ERRSTR[i];
+  return `Unknown error: ${i}`;
+}
+
+/* 一格多大（第八刀第十三片）。量出来最长的那句是 46 个字符
+ * （`Address family not supported by protocol family`），加结尾的 0 是 47 ——
+ * 48 让每一格都 8 对齐，而「一格一个定长」换来的是**不必记账**：
+ * 第 n 号的地址永远是 `base + n*48`，于是同一个号两次调用回同一个地址、
+ * 不同的号回不同的地址，与 macOS 量出来的一样。 */
+const STRERR_SLOT = 48n;
+
 /* ------------------------------------------------------------------ 回头的那扇门
  *
  * `qsort` / `bsearch`（第八刀第五片）与前面每一条都不同：它们**回头调 MIR**。
@@ -762,6 +904,42 @@ const LIBC = {
   __omni_errno_location: () => {
     if (errnoAddr === 0n) throw new Error('libc: errno 那一格没交过来（__omni_errno_init 没发？）');
     return errnoAddr;
+  },
+  /* `strerror` 那块共用的缓冲，与 errno 那一格同一个形状（第八刀第十三片）。
+   * 大小**跟着地址一起交过来** —— 版图是前端定的，宿主不猜；对不上就当场骂，
+   * 而不是悄悄写出界。 */
+  __omni_strerror_init: (a) => {
+    const need = (BigInt(ERRSTR.length) + 1n) * STRERR_SLOT;
+    if (BigInt(a[1]) < need) {
+      throw new Error(`libc: strerror 那块地方不够（要 ${need}，前端留了 ${a[1]}）`);
+    }
+    strerrAddr = BigInt(a[0]);
+    return undefined;
+  },
+  /* `strerror`（C11 7.24.6.2）。macOS 上量出来的两条：
+   *   - 同一个号两次调用回**同一个**地址，不同的号回**不同的**地址，
+   *     而且先拿到的那个串不会被后来的调用改掉（那是一张常量表）；
+   *   - 表**外**的号（`Unknown error: N`）共用一块 —— `strerror(999)` 之后
+   *     `strerror(1000)`，先拿到的那个指针跟着变成后一句话。
+   * 所以这儿一号一格（`base + n*48`），表外的都落在最后那一格上。 */
+  strerror: (a) => {
+    if (strerrAddr === 0n) {
+      throw new Error('libc: strerror 那块地方没交过来（__omni_strerror_init 没发？）');
+    }
+    const n = Number(BigInt.asIntN(32, BigInt(a[0])));
+    const known = n >= 0 && n < ERRSTR.length;
+    const slot = strerrAddr + BigInt(known ? n : ERRSTR.length) * STRERR_SLOT;
+    writeCStr(slot, errText(n));
+    return slot;
+  },
+  /* `perror`（C11 7.21.10.4）：往 **stderr** 写。前缀是空指针或空串时只写那句话，
+   * 不写 `: ` —— 两条都是从 oracle 上量出来的。 */
+  perror: (a) => {
+    const p = BigInt(a[0]);
+    const pre = p === 0n ? '' : readCStr(p);
+    const msg = errText(getErrno());
+    streamWrite(F_STDERR, pre === '' ? `${msg}\n` : `${pre}: ${msg}\n`);
+    return undefined;
   },
   malloc: (a) => heapAlloc(BigInt(a[0])),
   calloc: (a) => {
@@ -1241,6 +1419,7 @@ export function libcAtExit() {
   nextFile = 4n;
   errnoAddr = 0n;
   heapBase = 0n;
+  strerrAddr = 0n;
 }
 
 /**
