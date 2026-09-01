@@ -293,6 +293,15 @@ static inline int64_t omni_pdiff(omni_ptr p, omni_ptr q, int64_t size) {
   return omni_psub(p.a, p.b, p.e, q.a, q.b, q.e, size);
 }
 
+/* omni_linmem.c —— 线性内存（ADR-0017 第二刀）。一个进程一块，按字节寻址。
+   `omni_lin_at` 查一次界、回可直接读写的指针：宽度与符号在生成的代码里是编译期常量，
+   所以运行时不必知道"读的是 i32 还是 f64"。回 void* 而不是 char*，生成的代码里少一次强转。 */
+void omni_lin_init(int64_t minPages, int64_t maxPages);
+void omni_lin_data(int64_t off, const unsigned char *bytes, int64_t n);
+int64_t omni_lin_size(void);
+int64_t omni_lin_grow(int64_t add);
+void *omni_lin_at(int64_t addr, int64_t bytes);
+
 /* omni_conv.c */
 int64_t omni_int_of_string(omni_str s);
 double omni_real_of_string(omni_str s);

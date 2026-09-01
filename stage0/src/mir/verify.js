@@ -19,6 +19,7 @@
 
 import {
   OP, OP_NAMES, OP_MODES, REF_NONE, REF_BIAS, isConstRef, refText, typeText, typeLanes, T_BOOL,
+  MLOAD_KINDS, MSTORE_KINDS, memKindNo, memBytes, isFloatType, intBits,
 } from './ir.js';
 
 export function verifyMir(mod) {
@@ -123,6 +124,34 @@ function checkIndex(mod, f, i, op, v, bad) {
     return;
   }
   if (op === OP.CALL && mod.funcs[v] === undefined) bad(i, `函数号 ${v} 越界`);
+  // 线性内存（ADR-0017 第二刀）。三件事都在这儿查：有没有内存、描述符号在不在表里、
+  // **宽度与 `t` 配不配**。第三条是关键：`(mload i64 …)` 落到 t=T_F64 上，两条腿会
+  // 各自猜一个（DataView 那边读出整数、memcpy 那边读出位模式当浮点），错得还不一样。
+  if (op === OP.MLOAD || op === OP.MSTORE) {
+    const isLoad = op === OP.MLOAD;
+    const kn = memKindNo(v);
+    const names = isLoad ? MLOAD_KINDS : MSTORE_KINDS;
+    if (mod.mem === null) { bad(i, `${OP_NAMES[op]}：这个模块没有声明线性内存`); return; }
+    if (names[kn] === undefined) { bad(i, `内存访问号 ${kn} 越界`); return; }
+    const t = f.t[i];
+    const wantFloat = names[kn].charCodeAt(0) === 102;   // 'f'
+    if (wantFloat !== isFloatType(t)) {
+      bad(i, `${OP_NAMES[op]} 的描述符是 ${names[kn]}，但 t 是 ${typeText(t)}`);
+      return;
+    }
+    // 整数侧：读进来的字节数不能超过结果类型的宽度（`i64` 的描述符配 i32 的 t 会丢高位）。
+    if (!wantFloat && memBytes(v, isLoad) * 8 > intBits(t)) {
+      bad(i, `${OP_NAMES[op]} 的描述符是 ${names[kn]}（${memBytes(v, isLoad)} 字节），装不进 ${typeText(t)}`);
+      return;
+    }
+    // 满宽的读没有符号可言（wasm 也是这样：有 `i32.load8_u`，没有 `i32.load32_u`）。
+    // 放过去的后果是宿主表示脱离规范形 —— `i32u` 读出 0x80000000 得到 2147483648n，
+    // 而 T_I32 的规范形是 -2147483648n，之后每一条比较都会与 LLVM 那条腿分叉。
+    if (isLoad && !wantFloat && memBytes(v, isLoad) * 8 === intBits(t) && names[kn].endsWith('u')) {
+      bad(i, `${OP_NAMES[op]} 的描述符是 ${names[kn]}，但满宽的读没有无符号变体 —— 用 ${names[kn - 1]}`);
+    }
+    return;
+  }
   if (op === OP.CALLOP && mod.ops[v] === undefined) bad(i, `op 号 ${v} 越界`);
   if (op === OP.CCALL && mod.cabi[v] === undefined) bad(i, `C 入口号 ${v} 越界`);
   if (op === OP.CLOSURE && mod.closures[v] === undefined) bad(i, `闭包号 ${v} 越界`);

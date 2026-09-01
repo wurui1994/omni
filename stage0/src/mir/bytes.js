@@ -19,7 +19,7 @@
  */
 
 import { hash16 } from '../host/hash.js';
-import { OP, OP_NAMES, OP_MODES, REF_BIAS, REF_NONE, isConstRef, typeText, CVT_NAMES } from './ir.js';
+import { OP, OP_NAMES, OP_MODES, REF_BIAS, REF_NONE, isConstRef, typeText, CVT_NAMES, memDescText } from './ir.js';
 
 /** 一条指令 -> 8 个字节。 */
 function insnBytes(f, i, out) {
@@ -124,6 +124,9 @@ function auxDigest(mod, op, v) {
     return `type:${mod.types[v].kind}:${mod.types[v].name}`;
   }
   if (op === OP.CVT) return `cvt:${CVT_NAMES[v]}`;
+  // 内存访问描述符（第二刀）：印成 `mem:i32u@8`。原样留个数字也是对的（打包是确定的），
+  // 但哈希摘要是给人读的诊断文本，宽度与偏移分开看才认得出"两次降级差在哪"。
+  if (op === OP.MLOAD || op === OP.MSTORE) return `mem:${memDescText(v, op === OP.MLOAD)}`;
   return String(v);
 }
 

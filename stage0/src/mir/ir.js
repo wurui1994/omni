@@ -274,6 +274,21 @@ const OPS = [
   ['UGE', 'r', 'r', '-'],
   ['ULE', 'r', 'r', '-'],
   ['UGT', 'r', 'r', '-'],
+
+  // ---- 线性内存（ADR-0017 第二刀）。**一整个模块一块**，按字节寻址，长度是 64KB 页的
+  // 整数倍。形状照 wasm 规范，不自创：`MGROW` 只增不减、失败回 -1（不抛错）；越界访问
+  // 是运行期错误。地址 0 是合法字节，但第 0 页整页保留不用 —— C 的空指针要能与它区分。
+  //
+  // 与 T_PTR/T_TPTR（ADR-0016）的关系：那两个是「一块一块的分配」加范围检查，
+  // 这一块是「一整片可寻址的字节」。C 前端要的是后者（`&x`、`memcpy`、影子栈都在这片上），
+  // 模拟实现里 fat 指针的 addr 本来就是 arena 的字节偏移，两者是同一件事的两种视角。
+  //
+  // 访问描述符全在 aux 上（`memDesc` 打包：静态偏移 * 16 + 宽度符号号），所以
+  // `i64.load32_u` 那一族**不是**几十条 op，而是这两条 + 一个描述符。
+  ['MSIZE', '-', '-', '-'],     // t = T_I64，当前页数
+  ['MGROW', 'r', '-', '-'],     // a = 要加的页数，t = T_I64；回**旧**页数，失败回 -1
+  ['MLOAD', 'r', '-', 'n'],     // a = 地址，t = 结果类型，aux = 描述符（MLOAD_KINDS）
+  ['MSTORE', 'r', 'r', 'n'],    // a = 地址，b = 值，t = 值类型，aux = 描述符（MSTORE_KINDS）
 ];
 
 /** opcode 常量：`OP.ADD` 等。加 op 只改 OPS 一行。 */
@@ -339,6 +354,44 @@ export const CVT_SEXT16 = 10;
 export const CVT_FCVT = 11;   // 浮点之间（f32 <-> f64，方向由 `t` 定）
 export const CVT_NAMES = ['i2f', 'f2i', 'box', 'unbox', 'bitcast', 'u2f',
   'sext', 'zext', 'trunc', 'sext8', 'sext16', 'fcvt'];
+
+/* -------------------------------------------- 线性内存的访问描述符（第二刀）
+ * wasm 的 `i32.load8_s` / `i64.load32_u` / `f32.store` 那一族，在这里是
+ * 「一条 op + 一个描述符」。描述符两格：**宽度加符号**（下面两张表的下标）与
+ * **静态偏移**（wasm 的 `offset=` 立即数；C 的 `p->field` 就落在这一格上）。
+ *
+ * 为什么读侧九个、写侧六个：读的时候「4 个字节怎么变成结果类型的值」要说清符号
+ * （`i32u` 是零扩展、`i32s` 是符号扩展），写的时候只是「把低若干位拍进内存」，
+ * 没有符号可言 —— 这与 wasm 的指令表一模一样（load 有 `_s`/`_u`，store 没有）。
+ *
+ * 对齐提示**刻意不进描述符**：wasm 里它只是给引擎的优化提示，不改语义，而我们两套
+ * 实现（DataView 与 memcpy）都不要求对齐。留着不做比留一格没人读的字段好。
+ */
+export const MLOAD_KINDS = ['i8s', 'i8u', 'i16s', 'i16u', 'i32s', 'i32u', 'i64', 'f32', 'f64'];
+export const MLOAD_BYTES = [1, 1, 2, 2, 4, 4, 8, 4, 8];
+export const MSTORE_KINDS = ['i8', 'i16', 'i32', 'i64', 'f32', 'f64'];
+export const MSTORE_BYTES = [1, 2, 4, 8, 4, 8];
+
+/** 描述符打包。低 4 位是宽度符号号（两张表都不到 16 项），其余是静态偏移。 */
+export function memDesc(kindNo, off) {
+  if (kindNo < 0 || kindNo > 15) throw new Error(`mir: 内存访问号 ${kindNo} 越界`);
+  if (off < 0 || !Number.isInteger(off)) throw new Error(`mir: 静态偏移 ${off} 不合法`);
+  return off * 16 + kindNo;
+}
+export function memKindNo(aux) { return aux % 16; }
+export function memOff(aux) { return (aux - (aux % 16)) / 16; }
+/** 打印用：`i32u@8`（静态偏移为 0 时不带 `@`）。 */
+export function memDescText(aux, isLoad) {
+  const names = isLoad ? MLOAD_KINDS : MSTORE_KINDS;
+  const off = memOff(aux);
+  const nm = names[memKindNo(aux)];
+  return off === 0 ? nm : `${nm}@${off}`;
+}
+export function memBytes(aux, isLoad) {
+  return (isLoad ? MLOAD_BYTES : MSTORE_BYTES)[memKindNo(aux)];
+}
+/** 一页 64KB —— wasm 的页大小，两套实现共用这一个常量。 */
+export const MEM_PAGE = 65536;
 
 /* ------------------------------------------------------------------ 常量池
  * 常量也是「有类型的记录」，因为 `t` 只在指令上。池按 (类型码, 文本) 去重 ——
@@ -484,6 +537,23 @@ export class MirModule {
     this.cabi = [];               // C_ABI 入口名，CCALL 的 a
     this.cabiIndex = new Map();
     this.closures = [];           // {make, funcName, captures:[名字]}
+    // 线性内存（第二刀）。`null` = 这个模块不用内存 —— 于是既有的五个前端一个字节都不多发。
+    // `{min, max, data}`：页数下界/上界（`max === 0` 表示不设上界），data 是
+    // `[{off, bytes:[…]}]`，编译期算好、运行期一次拷进内存。**一个模块一块**（wasm 的
+    // MVP 就是这样），所以不用池、不用下标。
+    this.mem = null;
+  }
+
+  /** 声明线性内存。重复声明是降级器的 bug（一个模块只有一块）。 */
+  setMem(min, max) {
+    if (this.mem !== null) throw new Error('mir: 线性内存已经声明过了');
+    this.mem = { min, max, data: [] };
+  }
+
+  /** 加一段初始字节。`bytes` 是 0..255 的数组。 */
+  addData(off, bytes) {
+    if (this.mem === null) throw new Error('mir: 没有线性内存，data 段无处可放');
+    this.mem.data.push({ off, bytes });
   }
 
   addFunc(f) {

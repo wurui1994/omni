@@ -432,6 +432,116 @@ export function ptrSub(p, q, size) {
   return BigInt((p[0] - q[0]) / size);
 }
 
+/* ------------------------------------------------------------ 线性内存
+ * ADR-0017 第二刀。**一个模块一块**，按字节寻址，长度是 64KB 页的整数倍 —— 形状照
+ * wasm 规范。这一份是两个解释器共用的实现（backend-js 的 prelude 里另有一份同算法的
+ * 文本，backend-c/LLVM 走 omni_mem.c）；三份的判据是 tests/sexpr 那一轴：同一段 sx
+ * 在五条腿上输出逐字节相同，越界的那句话也逐字节相同。
+ *
+ * 字节序**固定小端**，不跟宿主走：DataView 的每次调用都显式传 `true`。wasm 规定小端，
+ * 而 C 那条腿上是 memcpy 到本机字节序 —— 本机是大端的机器上这两条会分叉，所以那一天
+ * 到来时要改的是 C 那边（做一次字节翻转），不是这里。
+ *
+ * 地址与偏移分两个参数收（不是加好了再传）：静态偏移是描述符里的常量，越界检查要按
+ * `addr + off` 算，而"是 addr 太大还是 off 太大"在报错文本里要能分辨。
+ */
+let linMem = null;
+let linDv = null;
+let linBy = null;
+let linMaxPages = 0;     // 0 = 不设上界（实际天花板是 wasm32 的 65536 页 = 4GB）
+
+/** 一页 64KB。与 mir/ir.js 的 MEM_PAGE 是同一个数 —— 这一份不从那儿 import，
+ *  因为 OIR 这一层不许依赖 MIR（两个解释器一个在 MIR 上、一个在 OIR 上）。 */
+const LIN_PAGE = 65536;
+
+/** 声明内存。`(memory MIN MAX)` 在模块的入口处调一次；重复调是降级器的 bug。 */
+export function memInit(minPages, maxPages) {
+  linMem = new ArrayBuffer(minPages * LIN_PAGE);
+  linDv = new DataView(linMem);
+  linBy = new Uint8Array(linMem);
+  linMaxPages = maxPages;
+}
+
+/** 拷一段 data 段进去。越界是编译期就能算出来的错，所以这里冒的是运行期错误兜底。 */
+export function memData(off, bytes) {
+  if (linMem === null) rtError('memory access without a memory');
+  if (off < 0 || off + bytes.length > linMem.byteLength) {
+    rtError('data segment does not fit in memory: ' + off + '+' + bytes.length
+      + ' (size ' + linMem.byteLength + ')');
+  }
+  linBy.set(bytes, off);
+}
+
+export function memSize() { return BigInt(linMem === null ? 0 : linMem.byteLength / LIN_PAGE); }
+
+/** 只增不减，回**旧**页数；加不了回 -1（wasm 的约定 —— 不抛错，让调用方查）。 */
+export function memGrow(n) {
+  if (linMem === null) rtError('memory access without a memory');
+  const add = Number(n);
+  const old = linMem.byteLength / LIN_PAGE;
+  if (add < 0) return -1n;
+  const want = old + add;
+  if (want > 65536) return -1n;
+  if (linMaxPages !== 0 && want > linMaxPages) return -1n;
+  if (add === 0) return BigInt(old);
+  const nb = new ArrayBuffer(want * LIN_PAGE);
+  new Uint8Array(nb).set(linBy);
+  linMem = nb;
+  linDv = new DataView(linMem);
+  linBy = new Uint8Array(linMem);
+  return BigInt(old);
+}
+
+/** 越界检查。回的是**算好的字节地址**，于是每条访问只算一次加法。 */
+function memChk(addr, off, bytes) {
+  if (linMem === null) rtError('memory access without a memory');
+  const a = Number(addr) + off;
+  if (a < 0 || a + bytes > linMem.byteLength) {
+    rtError('memory access out of bounds: ' + a + '+' + bytes
+      + ' (size ' + linMem.byteLength + ')');
+  }
+  return a;
+}
+
+/* 读侧九种、写侧六种，名字与 mir/ir.js 的 MLOAD_KINDS / MSTORE_KINDS 逐字相同。
+ * 整数一律以 **i64 的宿主表示（BigInt）** 出入：方言只有一格整数，`i8s` 是"读一个字节、
+ * 符号扩展到 64 位"，`i8u` 是"读一个字节、零扩展"。浮点是 Number；`f32` 读出来是那个
+ * 单精度值在 double 里的精确表示（getFloat32 已经做到了），写进去按单精度舍入。 */
+const MEM_LD = {
+  i8s: (a, o) => BigInt(linDv.getInt8(memChk(a, o, 1))),
+  i8u: (a, o) => BigInt(linDv.getUint8(memChk(a, o, 1))),
+  i16s: (a, o) => BigInt(linDv.getInt16(memChk(a, o, 2), true)),
+  i16u: (a, o) => BigInt(linDv.getUint16(memChk(a, o, 2), true)),
+  i32s: (a, o) => BigInt(linDv.getInt32(memChk(a, o, 4), true)),
+  i32u: (a, o) => BigInt(linDv.getUint32(memChk(a, o, 4), true)),
+  i64: (a, o) => linDv.getBigInt64(memChk(a, o, 8), true),
+  f32: (a, o) => linDv.getFloat32(memChk(a, o, 4), true),
+  f64: (a, o) => linDv.getFloat64(memChk(a, o, 8), true),
+};
+const MEM_ST = {
+  i8: (a, o, v) => { linDv.setUint8(memChk(a, o, 1), Number(BigInt.asUintN(8, v))); },
+  i16: (a, o, v) => { linDv.setUint16(memChk(a, o, 2), Number(BigInt.asUintN(16, v)), true); },
+  i32: (a, o, v) => { linDv.setUint32(memChk(a, o, 4), Number(BigInt.asUintN(32, v)), true); },
+  i64: (a, o, v) => { linDv.setBigInt64(memChk(a, o, 8), BigInt.asIntN(64, v), true); },
+  f32: (a, o, v) => { linDv.setFloat32(memChk(a, o, 4), v, true); },
+  f64: (a, o, v) => { linDv.setFloat64(memChk(a, o, 8), v, true); },
+};
+
+/** 编译期选一次的入口：MIR 那条腿在造闭包时调它，于是每次访问不再查表。 */
+export function memLoadFn(kind) {
+  const f = MEM_LD[kind];
+  if (f === undefined) throw new Error(`memLoadFn: 不认识的访问 ${kind}`);
+  return f;
+}
+export function memStoreFn(kind) {
+  const f = MEM_ST[kind];
+  if (f === undefined) throw new Error(`memStoreFn: 不认识的访问 ${kind}`);
+  return f;
+}
+/** 树遍历那条腿（interp/eval.js）的入口：一次调用一次查表。 */
+export function memLoad(kind, addr, off) { return memLoadFn(kind)(addr, off); }
+export function memStore(kind, addr, off, v) { memStoreFn(kind)(addr, off, v); return v; }
+
 /* ---------------------------------------------------------------- 数组
  * 门槛 2 第四刀：可增长的引用语义数组（asy 的 `T[]`）。宿主表示同样是普通数组 ——
  * push/pop 都是现成的，别名天然共享。零值由**调用方**给（OIR 的 ArrNew 挂着一个零值

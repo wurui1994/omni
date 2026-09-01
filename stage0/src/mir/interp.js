@@ -28,6 +28,7 @@ import {
   InterpFail, InterpUncaught, binOp, cmpOp, vecBinOp, bufNew, bufGet, bufSet,
   arrNew, arrLen, arrGet, arrSet, arrPush, arrPop, listGet, listSet, dictGet, dynTag, W,
   ptrNew, ptrChk, ptrTChk, ptrLoad, ptrStore, ptrAdd, ptrSub,
+  memInit, memData, memSize, memGrow, memLoadFn, memStoreFn,
 } from '../interp/builtin.js';
 import { JS_ALL } from '../hir/js_abi.js';
 import { lowerToMir } from './from_oir.js';
@@ -35,6 +36,7 @@ import { verifyMir } from './verify.js';
 import {
   OP, OP_NAMES, REF_NONE, REF_BIAS, isConstRef, typeKind, typeLanes,
   T_I64, T_F64, T_STR, T_DYN, T_PTR, T_TPTR, T_I32, T_F32,
+  MLOAD_KINDS, MSTORE_KINDS, memKindNo, memOff,
   CVT_I2F, CVT_BOX, CVT_U2F, CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16, CVT_FCVT,
 } from './ir.js';
 
@@ -201,6 +203,12 @@ class MirInterp {
   }
 
   run() {
+    // 线性内存在进入口之前就位（第二刀）：wasm 的 instantiate 也是先建内存、再拷 data 段、
+    // 最后才调 start。`mem === null` 的模块（既有的五个前端）这里一个字节都不动。
+    if (this.mir.mem !== null) {
+      memInit(this.mir.mem.min, this.mir.mem.max);
+      for (const d of this.mir.mem.data) memData(d.off, d.bytes);
+    }
     const no = this.mir.funcIndex.get(this.mir.entry);
     if (no === undefined) throw new OmniError(`mir.interp: no entry function '${this.mir.entry}'`);
     this.callFunc(no, undefined, []);
@@ -575,6 +583,27 @@ class MirInterp {
           F.v[i] = ptrStore(kind, thin ? ptrTChk(q) : ptrChk(q, x), v(F));
           return next;
         };
+      }
+      // ---- 线性内存（ADR-0017 第二刀）。四条都在**闭包构造期**把描述符拆开：
+      // 宽度、符号、静态偏移全是编译期常量，于是每次访问只剩"一次加法 + 一次
+      // DataView 调用"。查表（MLOAD_KINDS -> 那九个函数之一）也只在这儿做一次。
+      case OP.MSIZE: return (F) => { F.v[i] = memSize(); return next; };
+      case OP.MGROW: {
+        const n = rd(f.a[i]);
+        return (F) => { F.v[i] = memGrow(n(F)); return next; };
+      }
+      case OP.MLOAD: {
+        const p = rd(f.a[i]);
+        const ld = memLoadFn(MLOAD_KINDS[memKindNo(x)]);
+        const off = memOff(x);
+        return (F) => { F.v[i] = ld(p(F), off); return next; };
+      }
+      case OP.MSTORE: {
+        const p = rd(f.a[i]);
+        const v = rd(f.b[i]);
+        const st = memStoreFn(MSTORE_KINDS[memKindNo(x)]);
+        const off = memOff(x);
+        return (F) => { const w = v(F); st(p(F), off, w); F.v[i] = w; return next; };
       }
       case OP.PADD: {
         const p = rd(f.a[i]);

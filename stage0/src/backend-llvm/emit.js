@@ -36,6 +36,7 @@ import {
   T_VOID, T_I64, T_F64, T_BOOL, T_STR, T_AGG, T_BUF, T_ARR, T_PTR, T_TPTR, T_I32, T_F32,
   isFloatType, CVT_I2F, CVT_F2I, CVT_U2F,
   CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16, CVT_FCVT,
+  MLOAD_KINDS, MSTORE_KINDS, memKindNo, memOff, memBytes,
 } from '../mir/ir.js';
 
 /**
@@ -182,6 +183,14 @@ const FCMP = new Map([[OP.EQ, 'oeq'], [OP.NE, 'une'], [OP.LT, 'olt'], [OP.GE, 'o
  */
 const NOPE = 'llvm 后端目前不支持';
 
+/* 线性内存的访问描述符 -> **内存里那几个字节**的 LLVM 类型（ADR-0017 第二刀）。
+ * 一张表管读写两侧：`i8s`/`i8u` 与 `i8` 落到同一个 `i8`，差别只在扩展方向，
+ * 而那件事由描述符名字的最后一个字母决定（见 memInsn）。 */
+const MEM_LL_TY = {
+  i8s: 'i8', i8u: 'i8', i16s: 'i16', i16u: 'i16', i32s: 'i32', i32u: 'i32',
+  i8: 'i8', i16: 'i16', i32: 'i32', i64: 'i64', f32: 'float', f64: 'double',
+};
+
 class LlvmEmitter {
   constructor(mir) {
     this.mir = mir;
@@ -215,6 +224,7 @@ class LlvmEmitter {
     // run-c 那条腿调的是同一个符号的同一份机器码，所以越界与空引用的消息不可能分叉。
     this.needPtr = false;
     this.needTPtr = false;
+    this.needLinMem = false;   // 线性内存那五个符号（第二刀）
   }
 
   line(s) { this.out.push(s); }
@@ -451,6 +461,23 @@ class LlvmEmitter {
     if (this.needTPtr) {
       this.line('declare ptr @omni_tchk(ptr)');
     }
+    // 线性内存（第二刀）：四个符号，与 run-c 那条腿调的是同一份 omni_linmem.c
+    if (this.needLinMem || this.mir.mem !== null) {
+      this.line('declare void @omni_lin_init(i64, i64)');
+      this.line('declare void @omni_lin_data(i64, ptr, i64)');
+      this.line('declare i64 @omni_lin_size()');
+      this.line('declare i64 @omni_lin_grow(i64)');
+      this.line('declare ptr @omni_lin_at(i64, i64)');
+    }
+    // data 段的字节：与字符串字面量同一个形状（private constant），顺序按声明顺序。
+    if (this.mir.mem !== null) {
+      let di = 0;
+      for (const d of this.mir.mem.data) {
+        const bs = d.bytes.map((b) => `i8 ${b}`).join(', ');
+        this.line(`@omni_data_${di} = private unnamed_addr constant [${d.bytes.length} x i8] [${bs}]`);
+        di++;
+      }
+    }
     // 字符串字面量的字节。放在最后是因为它们是函数体发到一半才登记的；
     // 顺序按登记顺序，所以同一份输入两次发出来逐字节相同（快照轴要这个）。
     for (const e of this.strs.values()) {
@@ -464,6 +491,15 @@ class LlvmEmitter {
     this.line('define i32 @main(i32 %argc, ptr %argv) {');
     this.line('entry:');
     this.line('  call void @omni_host_init(i32 %argc, ptr %argv)');
+    // 内存要在入口之前就位（第二刀）：先建、再拷 data 段，与 wasm 的 instantiate 同序。
+    if (this.mir.mem !== null) {
+      this.line(`  call void @omni_lin_init(i64 ${this.mir.mem.min}, i64 ${this.mir.mem.max})`);
+      let di = 0;
+      for (const d of this.mir.mem.data) {
+        this.line(`  call void @omni_lin_data(i64 ${d.off}, ptr @omni_data_${di}, i64 ${d.bytes.length})`);
+        di++;
+      }
+    }
     this.line(`  call void @omni_run_entry(ptr @${this.mir.entry})`);
     this.line('  call void @omni_js_check_uncaught()');
     this.line('  %fl = call i32 @fflush(ptr null)');
@@ -708,6 +744,11 @@ class LlvmEmitter {
         || op === OP.PLOAD || op === OP.PSTORE || op === OP.PADD || op === OP.PSUB
         || op === OP.PEQ) {
       this.ptrInsn(f, i, op, dst, t);
+      return;
+    }
+    // 线性内存四条（ADR-0017 第二刀）
+    if (op === OP.MSIZE || op === OP.MGROW || op === OP.MLOAD || op === OP.MSTORE) {
+      this.memInsn(f, i, op, dst, t);
       return;
     }
     // 向量三条 + 向量上的四则运算。分流要在标量表之前：`add <4 x i64>` 是合法的，
@@ -1278,6 +1319,60 @@ class LlvmEmitter {
   ptrIsThin(f, ref) {
     if (ref === REF_NONE || isConstRef(ref)) return false;
     return f.t[ref - REF_BIAS] === T_TPTR;
+  }
+
+  /* ------------------------------------------------------- 线性内存（第二刀）
+   * 形状与指针那一路刻意一致：**先调运行时查一次界、拿到一个真地址，然后就地 load/store**。
+   * 于是越界的那句话只有一份（omni_linmem.c 里那一句），run-c 与 run-llvm 调的是同一个
+   * 符号的同一份机器码，不可能分叉。宽度与符号是编译期常量，所以扩展/截断发在 IR 里 ——
+   * 运行时不需要知道"读的是 i32 还是 f64"。
+   *
+   * `align 1`：wasm 允许非对齐访问，而这一块的地址是程序算出来的。不写 align 1 的话
+   * LLVM 会假定自然对齐，在 arm64 上生成的指令对非对齐地址是未定义行为。
+   */
+  memInsn(f, i, op, dst, t) {
+    this.needLinMem = true;
+    if (op === OP.MSIZE) { this.line(`  ${dst} = call i64 @omni_lin_size()`); return; }
+    if (op === OP.MGROW) {
+      this.line(`  ${dst} = call i64 @omni_lin_grow(i64 ${this.val(f.a[i])})`);
+      return;
+    }
+    const isLoad = op === OP.MLOAD;
+    const x = f.aux[i];
+    const kind = (isLoad ? MLOAD_KINDS : MSTORE_KINDS)[memKindNo(x)];
+    const off = memOff(x);
+    const bytes = memBytes(x, isLoad);
+    let a = this.val(f.a[i]);
+    if (off !== 0) {
+      const s = this.fresh();
+      this.line(`  ${s} = add i64 ${a}, ${off}`);
+      a = s;
+    }
+    const p = this.fresh();
+    this.line(`  ${p} = call ptr @omni_lin_at(i64 ${a}, i64 ${bytes})`);
+    const nt = MEM_LL_TY[kind];              // 内存里那几个字节的类型
+    const rt = this.ty(t, '线性内存访问');    // MIR 上这条指令的类型
+    if (isLoad) {
+      if (nt === rt) { this.line(`  ${dst} = load ${nt}, ptr ${p}, align 1`); return; }
+      const raw = this.fresh();
+      this.line(`  ${raw} = load ${nt}, ptr ${p}, align 1`);
+      if (kind.charCodeAt(0) === 102) this.line(`  ${dst} = fpext ${nt} ${raw} to ${rt}`);
+      else if (kind.endsWith('u')) this.line(`  ${dst} = zext ${nt} ${raw} to ${rt}`);
+      else this.line(`  ${dst} = sext ${nt} ${raw} to ${rt}`);
+      return;
+    }
+    const v = this.val(f.b[i]);
+    let w = v;
+    if (nt !== rt) {
+      w = this.fresh();
+      if (kind.charCodeAt(0) === 102) this.line(`  ${w} = fptrunc ${rt} ${v} to ${nt}`);
+      else this.line(`  ${w} = trunc ${rt} ${v} to ${nt}`);
+    }
+    this.line(`  store ${nt} ${w}, ptr ${p}, align 1`);
+    // 这条指令的结果是**存进去之前的那个值**（另外三条腿也是），不是回读 —— 存 i8 的 300
+    // 回读得到 44，那就与解释器分叉了。`select i1 true` 是恒等且对 -0.0 安全的写法
+    // （`fadd 0.0` 会把 -0.0 变成 0.0），LLVM 当场折掉它。
+    this.line(`  ${dst} = select i1 true, ${rt} ${v}, ${rt} ${v}`);
   }
 
   /** 记下用到的元素类型，返回助手名字的后缀。表外的报错 —— 缓冲只装 int/real。 */

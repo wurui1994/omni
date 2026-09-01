@@ -10,7 +10,7 @@
  */
 
 import {
-  OP, OP_NAMES, OP_MODES, REF_NONE, refText, typeText, CVT_NAMES, isConstRef,
+  OP, OP_NAMES, OP_MODES, REF_NONE, refText, typeText, CVT_NAMES, isConstRef, memDescText,
 } from './ir.js';
 
 /** 常量的文本：字符串要转义（快照里得能看出空白与换行）。 */
@@ -57,6 +57,7 @@ function operands(mod, f, i) {
     if (op === OP.GLOAD || op === OP.GSTORE) { out.push(`g_${mod.globals[v]}`); continue; }
     if (op === OP.BR || op === OP.BRIF) { out.push(`^${v}`); continue; }
     if (op === OP.VINS || op === OP.VEXT) { out.push(`lane${v}`); continue; }
+    if (op === OP.MLOAD || op === OP.MSTORE) { out.push(memDescText(v, op === OP.MLOAD)); continue; }
     out.push(String(v));
   }
   return out.join(' ');
@@ -96,6 +97,15 @@ export function printMir(mod) {
     L.push(`const ${pad(`k${i}`, 6)} ${pad(typeText(c.t), 6)} ${constText(c)}`);
   }
   for (const g of mod.globals) L.push(`global g_${g}`);
+  // 线性内存（第二刀）：页数与 data 段。data 的字节印成十六进制 —— 快照要能一眼看出
+  // "初始字节到底是哪几个"，而这正是 JS 与 C 两套实现最容易分叉的地方（字节序）。
+  if (mod.mem !== null) {
+    L.push(`memory ${mod.mem.min} ${mod.mem.max === 0 ? 'unbounded' : mod.mem.max} pages`);
+    for (const d of mod.mem.data) {
+      const hex = d.bytes.map((b) => (b < 16 ? `0${b.toString(16)}` : b.toString(16))).join('');
+      L.push(`data @${d.off} ${d.bytes.length} bytes  ${hex}`);
+    }
+  }
   for (const c of mod.closures) L.push(`closure ${c.make} -> ${c.funcName}  captures: ${c.captures.join(' ')}`);
   for (let i = 0; i < mod.ops.length; i++) L.push(`op ${pad(`o${i}`, 5)} ${opText(mod, i)}`);
   for (let i = 0; i < mod.cabi.length; i++) L.push(`cabi c${i} ${mod.cabi[i]}`);
