@@ -1515,7 +1515,20 @@ export class CGen {  /**
       return;
     }
     if (this.tok === LBRACE) {
-      if (isArray(ty.t) || isStruct(ty.t)) return this.initBraced(dest, off, ty);
+      if (isArray(ty.t) || isStruct(ty.t)) {
+        /* `{ "abc" }`：一对花括号裹着的字符串照旧是「铺进数组」（C11 6.7.9 第 14 段）。
+         * 但 `{ "xy" "z"[2], 0 }` 不是 —— 那个字面量只是一个更大表达式的开头。
+         * tcc 的判法（`tccgen.c:8086`）：把相邻的字面量并完之后看下一格，
+         * 是 `}` 或 `,` 才算「孤零零的一个字面量」，否则把并好的串塞回去按表达式走。 */
+        if (isArray(ty.t) && btype(ty.ref.t) === VT_BYTE) {
+          const bytes = this.tryBracedStr();
+          if (bytes !== null) {
+            this.initString(dest, off, ty, bytes);
+            return;
+          }
+        }
+        return this.initBraced(dest, off, ty);
+      }
       /* 标量外面套一层花括号是合法的：`int x = { 5 };`（C11 6.7.9 第 11 段）。 */
       this.next();
       this.initializer(dest, off, ty);
@@ -1533,6 +1546,41 @@ export class CGen {  /**
     this.initScalar(dest, off, ty);
   }
 
+  /**
+   * 试着把 `{ "…" }` 整个读掉（第八刀第二十八片）。回并好的字节，不是这个形状就把
+   * 记号**原样放回去**、回 null。
+   *
+   * 不定长数组要它：`char a[] = { "abc" };` 的大小是 strlen + 1，而数格子那一遍
+   * （`sizeFromInit`）会把这一整格数成 1 个元素。判「是不是这个形状」照 tcc
+   * （`tccgen.c:8086`）：并完相邻的字面量之后下一格是 `}` 或 `,` 才算。
+   */
+  tryBracedStr() {
+    if (this.tok !== LBRACE) return null;
+    this.next();
+    if (this.tok !== TOK_STR) {
+      this.ungetWith(LBRACE, null);
+      return null;
+    }
+    const bytes = this.readStrTok(this.tokc);
+    if (this.tok === RBRACE || this.tok === COMMA) {
+      if (this.tok === COMMA) this.next();
+      this.skip(RBRACE);
+      return bytes;
+    }
+    /* 不是孤零零的一个字面量（`{ "xy" "z"[2], 0 }`）：把并好的串与那个 `{` 都放回去。 */
+    this.ungetWith(TOK_STR, bytes);
+    this.ungetWith(LBRACE, null);
+    return null;
+  }
+
+  /** 把当前记号推回输入、换上 `t`（`tokc` 一起换）。`ungetTok` 只管记号号。 */
+  ungetWith(t, val) {
+    this.cpp.ungetTok(t);
+    this.cpp.tokc = val;
+    this.tok = this.cpp.tok;
+    this.tokc = this.cpp.tokc;
+  }
+
   /** 最里面那一层：一个标量落地。静态写字节、自动发 store。 */
   initScalar(dest, off, ty) {
     if (dest.slot !== undefined) {
@@ -1548,11 +1596,20 @@ export class CGen {  /**
     if (isBitfield(ty.t)) this.todo('静态位域的初始化式还没到（要按位往 data 里并）');
     if (this.tok === TOK_STR) {
       /* `char *s = "abc";` —— 值是那个字面量在 data 段里的地址。真的目标文件里这是
-       * 一条重定位；我们的「链接」是一个常量，所以它就是 8 个字节。 */
-      if (!isPtr(ty.t)) this.err(`invalid initializer for '${typeText(ty)}'`);
-      const addr = this.strData(this.readStrTok(this.tokc));
-      this.emitBytes(dest.addr + off, 8, BigInt(addr));
-      return;
+       * 一条重定位；我们的「链接」是一个常量，所以它就是 8 个字节。
+       *
+       * 但只有**孤零零的一个字面量**才是这个意思：`"ab"[1]` 也以字符串开头，而它是
+       * 一个整型常量表达式（第八刀第二十八片）。判法与 tcc 一样（`tccgen.c:8086`）——
+       * 并完相邻的字面量之后看下一格。 */
+      const bytes = this.readStrTok(this.tokc);
+      if (this.tok === COMMA || this.tok === RBRACE || this.tok === SEMI) {
+        if (!isPtr(ty.t)) this.err(`invalid initializer for '${typeText(ty)}'`);
+        const addr = this.strData(bytes);
+        this.emitBytes(dest.addr + off, 8, BigInt(addr));
+        return;
+      }
+      /* 是个更大的表达式的开头：把并好的串放回去，交给常量求值器。 */
+      this.ungetWith(TOK_STR, bytes);
     }
     if (isFloat(ty.t)) {
       /* 静态的浮点初始化式：**在这儿就把它编码成 IEEE 754 的那几个字节**。
@@ -4323,6 +4380,27 @@ export class CGen {  /**
       this.next();
       return v;
     }
+    if (t === TOK_STR) {
+      /* 字符串字面量的下标是个常量（第八刀第二十八片）：`"ab"[1]` 就是 `'b'`。
+       * 相邻的字面量先并起来（`"xy" "z"[2]` 是 `"xyz"[2]`，也就是 `'z'`），
+       * 所以并完再取下标 —— 次序反了会得到 `"z"[2]`（越界）。
+       *
+       * 类型是 `char`，这个目标上带符号，于是 `"\xff"[0]` 是 -1。
+       * 越过末尾那个 0 才是越界；正好落在它上面是 0（那个 0 属于这个数组）。
+       *
+       * 顺带一句量出来的数：**tcc 在静态初始化式里这一格是按目标类型的宽度读的** ——
+       * `int n = "abcde"[1];` 在 tcc 那儿是 0x65646362（"bcde" 四个字节），clang/gcc
+       * 与运行期的 tcc 都是 98。这是 tcc 的一个 bug（它把那个左值当成一块内存整读），
+       * 而且读到的是 data 段里紧跟着的字节 —— 复现它就得连 data 段的排布一起复现。
+       * 这一格我们照 C 来（读一个字节），并把这条差别记在这儿。 */
+      const bytes = this.readStrTok(this.tokc);
+      if (this.tok !== LBRACK) this.err('constant expression expected');
+      this.next();
+      const i = Number(this.constExpr());
+      this.skip(RBRACK);
+      if (i < 0 || i > bytes.length) this.err('string literal index out of range');
+      return BigInt.asIntN(8, BigInt(i === bytes.length ? 0 : bytes.charCodeAt(i) % 256));
+    }
     // 一元 `+` / `-` 在 BigInt 与 number 上是同一个写法，所以这两格不分岔
     if (t === PLUS) { this.next(); return this.ceUnary(); }
     if (t === MINUS) { this.next(); return -this.ceUnary(); }
@@ -4517,6 +4595,11 @@ export class CGen {  /**
               /* 相邻的字面量要拼起来（`char s[] = "a" "b"`），所以只能真的读一遍；
                * 读完记号已经吃掉，字节留在手上。 */
               strBytes = this.readStrTok(this.tokc);
+              vty = mkArray(vty.ref, strBytes.length + 1);
+            } else if (btype(vty.ref.t) === VT_BYTE
+              && (strBytes = this.tryBracedStr()) !== null) {
+              /* `char a[] = { "abc" };`（第八刀第二十八片）—— 与上一格同一件事，
+               * 只是外面多一对花括号。大小照样是 strlen + 1，而**不是**「1 个元素」。 */
               vty = mkArray(vty.ref, strBytes.length + 1);
             } else {
               const r = this.sizeFromInit(vty);
