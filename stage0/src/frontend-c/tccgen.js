@@ -126,9 +126,10 @@
 // `int n = 1.9;` 是 1、`(int)2.9` 也认）、printf 的 `%a`、**变参里的 struct**（写侧摊进
 // 变参区、`va_arg` 回一个左值）、**`goto` 跳到哪儿都行**（一台函数级状态机 +
 // 一条分派链换掉「每个块一台」，**语句标签长在 `switch` 里也行** —— case 的段界与
-// 标签的段界摆在同一串嵌套 `BLOCK` 上）**。
-// 还没到：`case` 标签长在里层的控制结构里（真的 Duff's device）、
-// **外部**函数上的 struct 传值/返回（要真的 ABI）。
+// 标签的段界摆在同一串嵌套 `BLOCK` 上），**`case` 标签长在里层的控制结构里也行**
+// （真的 Duff's device：那种 case 在状态机眼里就是一个没有名字的标签，分派那边发一小段
+// 蹦床「写状态、回函数那圈 LOOP」，第八刀第十五片）**。
+// 还没到：**外部**函数上的 struct 传值/返回（要真的 ABI）。
 //
 // 碰到还没做到的东西**当场报错**，报错文本里带「第六刀」字样 —— 一眼能看出是进度不是
 // bug，而且下一片把它做掉时 `gen-bad/` 里那条用例会跟着红，于是「边界移动了」这件事
@@ -630,6 +631,8 @@ export class CGen {  /**
     this.gotoSlot = -1;
     /** @type {?{slot:number,ty:object,labels:object[]}} switch 交给函数体那台分派的选择子 */
     this.pendingSwitch = null;
+    /** 语句的嵌套深度（`block()` 的层数）。`case` 靠它判断自己是不是直接子语句 */
+    this.blockDepth = 0;
   }
 
   /* ------------------------------------------------------------ 记号与报错 */
@@ -2443,6 +2446,16 @@ export class CGen {  /**
    * **连续区间** `(lo, hi]` —— 「状态落在谁里面」这个判断就只是一次比较。
    */
   block() {
+    /* 语句的**嵌套深度**（第八刀第十五片）：`case` 标签要靠它判断自己是不是 switch
+     * 函数体的直接子语句 —— 长在里层的（Duff's device）走状态机那条路。
+     * 数的是 `block()` 的层数，所以 `switch(x){ { case 1: … } }` 里那个 case 也算
+     * 「里层」：多一层花括号就多一层，那条路虽然慢一点但是对的。 */
+    this.blockDepth++;
+    this.blockBody();
+    this.blockDepth--;
+  }
+
+  blockBody() {
     const sn = this.stmtNo++;
     if (this.pass1) {
       const r = { lo: this.labelCount, hi: this.labelCount, kids: [], thenHi: 0, isCase: false };
@@ -2782,20 +2795,45 @@ export class CGen {  /**
     if (sw === null) {
       f.emit(OP.BR, T_VOID, REF_NONE, REF_NONE, 0);
     } else {
-      /* case 的层数：源码顺序里第 j 个 case 标签，就是第 j 个 `isCase` 段界。数不上就说明
-       * 有 case 长在里层的控制结构里（真的 Duff's device）—— 它不是这个块的直接子语句，
-       * 于是没有自己的段界。与 `caseLabel` 那条是同一个边界、同一个理由。 */
+      /* case 的层数：源码顺序里第 j 个 case 标签，就是第 j 个 `isCase` 段界 ——
+       * 这是「直接长在 switch 函数体上」的那些。
+       *
+       * 长在里层的（Duff's device，第十五片）没有自己的段界，改用一层**蹦床**：
+       * 蹦床开在 entry 里面（分派在最里层发），跳到它 = 「写状态、`BR` 回函数那圈
+       * LOOP」，此后就与一条 `goto` 走的是同一条路 —— 函数体那条分派链一层一层把控制
+       * 送进去，到了那个 case 处 `arriveLabel` 把状态清零。
+       *
+       *   BLOCK t0            ← 第一个里层 case
+       *    BLOCK t1
+       *      分派（要么送到段界，要么送到某层蹦床）
+       *    END t1  → state = id1; BR gotoloop
+       *   END t0   → state = id0; BR gotoloop
+       *
+       * 多开了 T 层，所以段界的层数要 +T（那几条区间判断在开蹦床**之前**就发完了，
+       * 不受影响）。 */
+      const nest = sw.nest ?? [];
+      const T = nest.length;
+      for (let j = 0; j < T; j++) this.open(OP.BLOCK, 'tramp', REF_NONE);
       const caseAt = [];
-      for (let i = 0; i < k; i++) if (kids[i].isCase) caseAt.push(i + 1);
-      if (caseAt.length !== sw.labels.length) {
-        this.todo('case 标签长在里层的控制结构里还没到（Duff\'s device）');
+      for (let i = 0; i < k; i++) if (kids[i].isCase) caseAt.push(i + 1 + T);
+      if (caseAt.length + T !== sw.labels.length) {
+        this.err('internal: case 的段界数与扫出来的不符');
       }
+      const trampOf = new Map();
+      for (let j = 0; j < T; j++) trampOf.set(nest[j].idx, T - 1 - j);
       let defLevel = this.levelOf('break');
+      let at = 0;
       for (let j = 0; j < sw.labels.length; j++) {
-        sw.labels[j].lv = caseAt[j];
-        if (sw.labels[j].def) defLevel = caseAt[j];
+        const lv = trampOf.has(j) ? trampOf.get(j) : caseAt[at++];
+        sw.labels[j].lv = lv;
+        if (sw.labels[j].def) defLevel = lv;
       }
       this.dispatch(selRef, sw.ty, sw.labels, defLevel, sw.labels.length);
+      for (let j = T - 1; j >= 0; j--) {
+        this.close();
+        f.emit(OP.STORE, T_VOID, this.mod.consts.i32(nest[j].id), REF_NONE, this.gotoSlot);
+        f.emit(OP.BR, T_VOID, REF_NONE, REF_NONE, this.levelOf('gotoloop'));
+      }
     }
     this.close();                     // entry：立刻关掉
     return { kids, next: 0 };
@@ -2836,9 +2874,16 @@ export class CGen {  /**
       this.labelIds.set(name, ++this.labelCount);
       return;
     }
+    this.arriveLabel(this.labelIds.get(name));
+  }
+
+  /**
+   * 「控制到了编号为 id 的这个标签处」。语句标签（`labelStmt`）与长在里层的 `case`
+   * （第十五片）共用它 —— 后者在状态机眼里就是一个没有名字的标签。
+   */
+  arriveLabel(id) {
     if (this.gotoSlot < 0) this.err('internal: 有标签却没摆状态机');
     const f = this.f;
-    const id = this.labelIds.get(name);
     /* 状态正好是这个标签 = 「分派把控制送到这儿了」，清零，此后一切照常。
      * 状态是别的（更里层的标签）就原样留着，交给里面那一层的分派。
      * 顺着掉进来（状态本来就是 0）走的是同一条路，什么都不做。 */
@@ -2936,11 +2981,14 @@ export class CGen {  /**
       for (let i = k - 1; i >= 0; i--) this.open(OP.BLOCK, 'case', REF_NONE);
       this.dispatch(selRef, sel.ty, labels, defLevel, k);
     } else {
-      this.pendingSwitch = { slot: selSlot, ty: sel.ty, labels };
+      /* 长在里层的那些 case（第十五片）：它们在第一遍里已经领到了标签编号，
+       * 现在把编号交给 `openSegs` —— 那儿给每个这样的 case 发一小段蹦床
+       * 「写状态、`BR` 回函数那圈 LOOP」。 */
+      this.pendingSwitch = { slot: selSlot, ty: sel.ty, labels, nest: r.caseNest ?? [] };
     }
 
     // ---- 再放一遍：真的做
-    this.swStack.push({ left: k, merged });
+    this.swStack.push({ left: k, merged, k, r, childDepth: this.blockDepth + 2, nested: 0 });
     this.cpp.pushTokens(body);
     this.next();
     this.block();
@@ -2948,6 +2996,9 @@ export class CGen {  /**
     this.cpp.endMacro();
     const st = this.swStack.pop();
     if (st.left !== 0) this.err('internal: switch 的标签数与扫出来的不符');
+    /* 第一遍的形状是假的（发出去的指令扔掉），可**区域要平**：长在里层的 case 没有
+     * 关掉自己那一层，剩下的在这儿一起关。第二遍不欠 —— 那儿根本没开这些层。 */
+    if (this.pass1) for (let i = 0; i < st.nested; i++) this.close();
 
     this.close();      // break
     this.cpp.tok = afterTok;
@@ -2969,14 +3020,31 @@ export class CGen {  /**
     this.next();
     if (t === TOK_CASE) this.constExpr();
     this.skip(COLON);
-    /* 标签必须直接长在 switch 的函数体上。长在里层的 `if`/`while` 里（Duff's device
-     * 那种）会让「关掉一层」关错对象 —— 当场报出来，别悄悄生成一个形状不同的东西。
-     * 合流那一路上这条已经在 `openSegs` 里查过了（段界数与扫出来的对不上），
-     * 而且那儿查得更早，所以这儿只管第十片那个形状。 */
-    if (!st.merged && this.regions[this.regions.length - 1] !== 'case') {
-      this.todo('case 标签长在里层的控制结构里还没到（Duff\'s device）');
-    }
+    /* 直接长在 switch 函数体上的 case = 「关掉一层 block」（上面那个形状）。
+     * 长在里层的 `if`/`while`/`do` 里（Duff's device，第十五片）就不行 —— 那一层不是
+     * 它的。这种 case 在状态机眼里**就是一个没有名字的标签**：第一遍领一个编号
+     * （于是外面每一层「里面有标签」的语句都自动变得可以被重新进入），
+     * 第二遍是「到了就把状态清零」，而分派那边由 `openSegs` 发一小段蹦床送过来。 */
+    const nested = this.blockDepth !== st.childDepth;
+    const idx = st.k - st.left;
     st.left--;
+    if (this.pass1) {
+      if (nested) {
+        const id = ++this.labelCount;
+        st.nested++;
+        if (st.r.caseNest === undefined) st.r.caseNest = [];
+        st.r.caseNest.push({ idx, id });
+      } else if (!st.merged) {
+        this.close();
+      }
+      return;
+    }
+    if (nested) {
+      const e = (st.r.caseNest ?? []).find((x) => x.idx === idx);
+      if (e === undefined) this.err('internal: 里层的 case 在第一遍没领到编号');
+      this.arriveLabel(e.id);
+      return;
+    }
     /* 合流那一路上「关掉一层」已经由 `segCut` 在解析这条语句**之前**做过了。 */
     if (!st.merged) this.close();
   }

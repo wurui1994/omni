@@ -288,7 +288,7 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
 8. **C 的库面**：`libtcc1` 的等价物（软除法/浮点辅助/`alloca`/`setjmp`）与 libc 的接法。
    原先写的是"先转手宿主的 libc，走既有的 extern-C FFI"，第五片证明**转手不成立**
    （指针是自家线性内存里的偏移，宿主 libc 读不到），改成一个读写线性内存的宿主模块，
-   见第五片的落地节。**前十四片已落地**（预定义的宏 —— 目标的自述，五十条，
+   见第五片的落地节。**前十五片已落地**（预定义的宏 —— 目标的自述，五十条，
    顺序与值都对着 `tcc -dM -E` 抄；自带的系统头目录 + 编译器必须自己给的那四份头；
    `stdio.h`/`stdlib.h`/`string.h` 的最小子集 —— libc 的自述；
    `strtol` 一族与 `strncpy`/`strchr`/`strstr` 那几条；
@@ -298,8 +298,9 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
    `int main(int argc, char **argv)` —— argv 住 data 段；
    stdout 是字节不是字符 —— C 那条腿自己一扇门；
    `strerror` / `perror` —— 一张量出来的表 + 一号一格；
-   `sscanf` / `vsscanf` / `fscanf` —— cFormat 的反向），
-   见下面的第八刀第一到十四片节。
+   `sscanf` / `vsscanf` / `fscanf` —— cFormat 的反向；
+   Duff's device —— 里层的 case 就是一个没有名字的标签），
+   见下面的第八刀第一到十五片节。
 
 最后三步是**后端**：
 
@@ -3617,6 +3618,76 @@ C11 7.21.6.2 第 16 段：**一次转换都没做成就撞到输入的末尾**�
 （要 `#include_next`、`__asm("_name")`、`__attribute__`）、`-dM`。
 
 <!-- 第八刀第十四片-END -->
+
+## 落地：第八刀第十五片
+
+**Duff's device —— `case` 标签长在里层的控制结构里。**
+
+这一格从第二十五片起就钉着（`gen-bad/duff.c`）。原来的形状是「一个 case = 一层
+`BLOCK`，一个标签关掉一层」，而它要求 case 是 switch 函数体的**直接子语句**：
+
+```c
+switch (count % 8) {
+case 0: do { *to++ = *from++;
+case 7:      *to++ = *from++;   /* ← 这个 case 长在 do 的循环体里 */
+```
+
+### 换法：里层的 case 就是一个没有名字的标签
+
+第二十四片已经有一台**函数级的状态机**（一个状态槽 + 一圈 `LOOP` + 一条分派链），
+`goto` 就是「写状态、回到 LOOP 的开头」，而每种语句都会「被重新进入」。
+里层的 case 需要的正是这件事，所以这一片没有新机器，只有一次**接线**：
+
+1. **第一遍**（`caseLabel`）：里层的 case 领一个标签编号（与 `L:` 同一个计数器）。
+   于是外面每一层「里面有标签」的语句自动变得可以被重新进入 —— `while`/`for` 跳过头、
+   `if` 直接进对的那一半、复合语句一台分派，全是现成的。
+2. **第二遍**：到了那个 case 处就是 `arriveLabel(id)`（把状态清零），与 `L:` 一个字不差。
+3. **分派**（`openSegs`）：里层的 case 没有自己的段界，给它一层**蹦床** ——
+   跳到蹦床 = 「写状态、`BR` 回函数那圈 LOOP」，此后与一条 `goto` 走的是同一条路。
+
+```
+BLOCK t0            ← 第一个里层 case
+ BLOCK t1
+   分派（要么送到段界，要么送到某层蹦床）
+ END t1  → state = id1; BR gotoloop
+END t0   → state = id0; BR gotoloop
+```
+
+蹦床开在 `entry` 里面，所以段界的层数要 +T（那几条区间判断在开蹦床之前就发完了，
+不受影响）。
+
+「是不是直接子语句」怎么问：新加一个 `blockDepth`（`block()` 的层数），
+直接子语句的深度是「switch 函数体的深度 + 1」。所以 `switch(x){ { case 1: … } }`
+里那个 case 也算「里层」—— 多一层花括号就走蹦床，慢一点，但是对的。
+
+### 第一遍的区域要平
+
+第一遍发出去的指令是扔掉的，可**区域栈要平**：那一遍仍然按老形状开了 k 层 `case`
+`BLOCK`，而里层的 case 不再关掉自己那一层。所以 `switchStmt` 在第一遍结束时把剩下的
+`nested` 层一起关掉。第二遍不欠 —— 那儿走的是合流那一路，根本没开这些层。
+
+### 量出来的数
+
+- `tests/c/gen/41-duff.c`：退出码 16 + 251 字节 stdout，与 `tcc -run` 逐字节相同。
+  四种形状：教科书上那个 `count % 8` 的拷贝（1/7/8/9/17 五种长度逐字节比）、
+  case 长在 `if` 的两半里、case 长在 `while` 的循环体里**并且**与一条真的语句标签
+  加 `goto` 混在一起、以及最小的那个 `do { } while (0)`。
+- `tests/c/run.js`：**68 passed, 0 failed**。`tests/run.js`：96 passed。
+  `tests/js-roundtrip/run.js`：110 passed。
+- 边界钉子 7 -> **6** 条（`duff` 从 `gen-bad/` 挪进了 `gen/`）。
+  剩下的六条里只有 `struct-byval` 是「还没到」，别的五条都是真错误。
+
+### 下一片
+
+第八刀第十六片：**真的 macOS 系统头**。到现在为止 `#include <stdio.h>` 拿到的是
+`stage0/include/` 里我们自己那份最小子集；要编 tinycc 自己的源码就得能读
+`/usr/include`（准确地说是 SDK 里那份），而那需要三样东西：`#include_next`、
+`__asm("_name")`（符号改名）、以及一整套 `__attribute__` 的**吃掉**（不必实现语义，
+但要能读过去）。它是「编 tinycc 自己的源码」这条路上最大的一块。
+
+之后：`struct-byval`（等真的后端）、`-dM`、路径 A 的 GLR 与路径 B 对账（第七步）。
+
+<!-- 第八刀第十五片-END -->
 
 
 
