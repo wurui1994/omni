@@ -116,10 +116,11 @@
 // `strdup`，簿记全在线性内存上）、**变参函数的定义**（`va_list`/`va_start`/`va_arg`/
 // `va_end`/`va_copy`，签名定死成「固定形参 + 一个变参区指针」，**通过函数指针调也行**）、
 // **`exit`**（宿主抛一个信号，从任意深处一路退出去）、**函数类型的 typedef**
-// （`typedef int cb(int);`，之后能当声明符的基本类型用）**。
+// （`typedef int cb(int);`，之后能当声明符的基本类型用）、**`long double`**（在这个目标上
+// 就是 double，见 `tcc.h:237-241`）**。
 // 还没到：`goto` 跳到不在外围块上的标签（relooper 那一路）、标签长在里层控制结构里
-// （Duff's device）、**外部**函数上的 struct 传值/返回（要真的 ABI）、`long double`（它不是
-// double）、整型的**静态**初始化式里的浮点常量、printf 的 `%a`、
+// （Duff's device）、**外部**函数上的 struct 传值/返回（要真的 ABI）、
+// 整型的**静态**初始化式里的浮点常量、printf 的 `%a`、
 // 把 struct 传进变参的可变部分、从变参里 `va_arg` 出 struct 或大于 8 字节的东西、
 // 串起来的指定初始化器（`.a.b = 3`）、不定长数组配省掉里层花括号（`int a[][2] = {1,2,3,4}`）。
 //
@@ -158,7 +159,7 @@ import {
   isBitfield, bitPosOf, bitSizeOf, mkBitfield, bitfieldBase,
   ctype, mkPointer, mkArray, mkStruct, mkEnum, mkFunc, typeSize, typeText, sameType,
   TY_VOID, TY_INT, TY_UINT, TY_LLONG, TY_ULLONG, TY_CHAR, TY_SHORT, TY_BOOL,
-  TY_FLOAT, TY_DOUBLE, VT_LDOUBLE,
+  TY_FLOAT, TY_DOUBLE, TY_LDOUBLE, VT_LDOUBLE,
 } from './ctype.js';
 import {
   MirModule, MirFunc, OP, T_VOID, T_I32, T_I64, T_BOOL, T_F32, T_F64, REF_NONE,
@@ -203,7 +204,7 @@ function loadKindOf(ty) {
   if (b === VT_SHORT) return isUnsigned(ty.t) ? MK_I16U : MK_I16S;
   if (b === VT_INT) return MK_I32S;
   if (b === VT_FLOAT) return MK_F32;
-  if (b === VT_DOUBLE) return MK_F64;
+  if (b === VT_DOUBLE || b === VT_LDOUBLE) return MK_F64;
   return MK_I64;   // long / long long / 指针
 }
 
@@ -214,7 +215,7 @@ function storeKindOf(ty) {
   if (b === VT_SHORT) return SK_I16;
   if (b === VT_INT) return SK_I32;
   if (b === VT_FLOAT) return SK_F32;
-  if (b === VT_DOUBLE) return SK_F64;
+  if (b === VT_DOUBLE || b === VT_LDOUBLE) return SK_F64;
   return SK_I64;
 }
 
@@ -282,7 +283,10 @@ function mirTypeOf(ty) {
   if (b === VT_BYTE || b === VT_SHORT || b === VT_INT || b === VT_BOOL) return T_I32;
   if (b === VT_LLONG || b === VT_PTR || b === VT_FUNC) return T_I64;
   if (b === VT_FLOAT) return T_F32;
-  if (b === VT_DOUBLE) return T_F64;
+  if (b === VT_DOUBLE || b === VT_LDOUBLE) return T_F64;
+  /* `long double` 在这个目标上**就是 double**（`tcc.h:237-241`：MACHO + ARM64 与 PE
+   * 都开 `TCC_USING_DOUBLE_FOR_LDOUBLE`）。x86_64 那边它是 80 位/16 字节，
+   * 到那条后端上再说 —— 那时它需要一个真的 f80，而 MIR 现在没有。 */
   /* struct/union/数组在 MIR 里**只以地址的形态出现**（第十一片的 ABI：传值传地址、
    * 返回走隐藏的返回指针）。所以它们的 MIR 类型就是指针的类型。 */
   return T_I64;
@@ -1635,14 +1639,15 @@ export class CGen {  /**
     // 带值的记号：整数与字符常量。`next()` 会毁掉 tokc，所以先取（`tccgen.c:7185`）
     if (tokHasValue(t)) {
       const cv = this.tokc;
-      if (t === TOK_CFLOAT || t === TOK_CDOUBLE) {
+      if (t === TOK_CFLOAT || t === TOK_CDOUBLE || t === TOK_CLDOUBLE) {
         /* 浮点字面量。`tokc` 在这一格是宿主的 number（`parseNumber` 那边算好的，
-         * `f` 后缀已经 fround 过），所以这里只是挑类型再进常量池。 */
+         * `f` 后缀已经 fround 过），所以这里只是挑类型再进常量池。
+         * `1.5L` 的类型是 `long double` —— 在这个目标上它与 double 同一个表示，
+         * 但类型要留着（`sizeof`、`_Generic` 那些看的是类型不是表示）。 */
         this.next();
-        const fty = t === TOK_CFLOAT ? TY_FLOAT : TY_DOUBLE;
+        const fty = t === TOK_CFLOAT ? TY_FLOAT : t === TOK_CDOUBLE ? TY_DOUBLE : TY_LDOUBLE;
         return this.postfix(sVal(fty, this.fkonst(fty, /** @type {number} */ (cv))));
       }
-      if (t === TOK_CLDOUBLE) this.todo('long double 还没到（它不是 double）');
       if (t === TOK_LSTR) this.todo('宽字符串字面量还没到');
       if (t === TOK_STR) return this.postfix(this.strLit(this.readStrTok(cv)));
       if (t === TOK_LCHAR) this.todo('宽字符常量还没到');
@@ -3234,13 +3239,13 @@ export class CGen {  /**
     if (longs > 2) this.err("too many 'long' specifiers");
     if (shorts > 0 && longs > 0) this.err("'short' and 'long' together");
     if (bt === -1) bt = VT_INT;   // `unsigned` / `long` 单独出现就是 int 系
-    /* `long double`：语法上认得（否则报的是「long 不能和 double 一起用」，那是错的说法），
-     * 但它是这一片划出去的一格 —— 本机 arm64 上它是 128 位 IEEE quad，x86 上是 80 位
-     * 扩展精度，两者都不是宿主的 double，得有自己的一套算术与自己的一套 printf。 */
-    if (longs > 0 && bt === VT_DOUBLE) {
-      bt = VT_LDOUBLE;
-      this.todo('long double 还没到（它不是 double）');
-    }
+    /* `long double`：在**这个目标**上它就是 `double`（`tcc.h:237-241`：MACHO+ARM64 与
+     * PE 都开 `TCC_USING_DOUBLE_FOR_LDOUBLE`）。类型码仍然分开 —— `sizeof` 与
+     * `typeText` 看的是类型，而 x86_64（80 位）与 riscv64（128 位）那两条后端上
+     * 表示会不一样，那时改的只有 `typeSize` 与 `mirTypeOf` 两处。
+     * `long` 那一票**在这儿就用掉**（`longs = 0`）—— 否则下面「short/long 只能配 int」
+     * 与「longs>0 就是 long long」两条会把它按整型处理。 */
+    if (longs > 0 && bt === VT_DOUBLE) { bt = VT_LDOUBLE; longs = 0; }
 
     if ((bt === VT_FLOAT || bt === VT_DOUBLE) && (sign !== 0 || shorts > 0 || longs > 0)) {
       this.err(`'${typeText(ctype(bt))}' cannot be signed or sized`);
@@ -3529,12 +3534,11 @@ export class CGen {  /**
 
   cefUnary() {
     const t = this.tok;
-    if (t === TOK_CFLOAT || t === TOK_CDOUBLE) {
+    if (t === TOK_CFLOAT || t === TOK_CDOUBLE || t === TOK_CLDOUBLE) {
       const v = Number(this.tokc);
       this.next();
       return v;
     }
-    if (t === TOK_CLDOUBLE) this.todo('long double 还没到（它不是 double）');
     if (t === PLUS) { this.next(); return this.cefUnary(); }
     if (t === MINUS) {
       this.next();

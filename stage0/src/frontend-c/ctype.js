@@ -117,6 +117,7 @@ export const TY_USHORT = ctype(VT_SHORT | VT_UNSIGNED);
 export const TY_BOOL = ctype(VT_BOOL);
 export const TY_FLOAT = ctype(VT_FLOAT);
 export const TY_DOUBLE = ctype(VT_DOUBLE);
+export const TY_LDOUBLE = ctype(VT_LDOUBLE);
 
 /** `mk_pointer`（`tccgen.c:3569`）：把一个类型套上一层指针。 */
 export function mkPointer(ty) {
@@ -198,7 +199,10 @@ export function typeSize(ty) {
   if (b === VT_INT || b === VT_FLOAT) return { size: 4, align: 4 };
   if (b === VT_SHORT) return { size: 2, align: 2 };
   if (b === VT_BYTE || b === VT_BOOL) return { size: 1, align: 1 };
-  if (b === VT_LDOUBLE) return { size: 16, align: 16 };
+  /* `long double` 在这个目标上**就是 double**：`tcc.h:237-241` 对 MACHO+ARM64 与 PE
+   * 开 `TCC_USING_DOUBLE_FOR_LDOUBLE`（注释原话：window 与 macos 上没有十字节的
+   * long double）。x86_64/i386/riscv64 是 16/12/16，跟着那几条后端一起来。 */
+  if (b === VT_LDOUBLE) return { size: 8, align: 8 };
   if (b === VT_STRUCT) return { size: ty.ref.size, align: ty.ref.align };
   if (b === VT_VOID) return { size: 1, align: 1 };  // gcc 的 `sizeof(void)`，tcc 跟着
   if (b === VT_FUNC) return { size: 8, align: 8 };  // 函数指针

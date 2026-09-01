@@ -267,7 +267,7 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
    `-E` 输出当 oracle。**已落地**，见下面的第五刀节。
 6. **路径 B 的一遍过降级器**：声明、类型、表达式（值栈 `vtop` 的等价物）、语句、
    初始化器、位域、可变实参。这是最大的一块（tcc 那边 9001 行），要拆成十来刀。
-   **前十九片已落地**（第一片 `int`/`void` + 表达式 + 语句 + 自定义函数；第二片整型的宽度
+   **前二十片已落地**（第一片 `int`/`void` + 表达式 + 语句 + 自定义函数；第二片整型的宽度
    与符号；第三片指针/数组/影子栈/字符串字面量；第四片全局量/`typedef`/`extern`；
    第五片外部符号/变参/libc shim —— oracle 从这一片起是**退出码加 stdout 逐字节**；
    第六片 struct/union/enum 与成员访问；第七片位域；第八片聚合初始化器；第九片 `switch`；
@@ -276,7 +276,8 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
    也进了逐字节对账；第十五片堆 —— `malloc` 一族，簿记全在线性内存上；第十六片变参函数的
    定义 —— 签名定死成「固定形参 + 一个变参区指针」；第十七片 `exit` —— 宿主抛一个信号，
    不进 MIR 的控制流；第十八片嵌套聚合省掉里层花括号 —— 一个下降栈换掉两份遍历；
-   第十九片函数类型的 typedef 与变参的间接调用 —— 两条边界原来只是保守），
+   第十九片函数类型的 typedef 与变参的间接调用 —— 两条边界原来只是保守；
+   第二十片 `long double` —— 在这个目标上它就是 double），
    见下面的落地节；那几节里也写了剩下几片的顺序与理由。
 7. **路径 A 的 GLR grammar + lower**，与路径 B 比对。
 8. **C 的库面**：`libtcc1` 的等价物（软除法/浮点辅助/`alloca`/`setjmp`）与 libc 的接法。
@@ -2132,6 +2133,57 @@ tinycc 的 `tccgen.c` 里 `ST_FUNC`/`ST_DATA` 那一族声明大量用它。它�
 `goto` 主要用来跳到出错处理，那一半已经能用，所以这一片可以慢慢做 —— 但躲不过去。
 
 <!-- 第六刀第十九片-END -->
+
+## 落地：第六刀第二十片 —— `long double`
+
+### 在这个目标上它就是 `double`
+
+原来的边界文本写的是「它不是 double：arm64 上是 128 位 IEEE quad，x86 上是 80 位」。
+**前半句是错的**，而错法很有教育意义：`arm64-gen.c:36` 确实写着 `LDOUBLE_SIZE 16`，
+但 `tcc.h:237-241` 在它之上还有一条：
+
+> No ten-byte long doubles on window and macos except in cross-compilers made by a
+> mingw-GCC —— `TCC_TARGET_PE` 或（`TCC_TARGET_MACHO` 且 `TCC_TARGET_ARM64`）就开
+> `TCC_USING_DOUBLE_FOR_LDOUBLE`。
+
+也就是说在**我们的 oracle 上** `sizeof(long double)` 是 8，精度就是 double 的精度
+（`1.0L + 1e-18L == 1.0L`，量过）。查这一条的路子值得记下来：先问二进制（`sizeof`、
+`1e-18` 那个加法），发现与源码里的常量对不上，再回源码找覆盖它的那一层 ——
+**别信一条 `#define`，信整条预处理链**。
+
+### 于是这一片改了五处
+
+- `typeSize`：VT_LDOUBLE 是 8/8（x86_64 16、i386 12、riscv64 16，跟着那几条后端来）。
+- `mirTypeOf`、`loadKindOf`、`storeKindOf`：VT_LDOUBLE 与 VT_DOUBLE 同一格（f64）。
+  忘了后两个的下场是 `MSTORE 的描述符是 i64，但 t 是 f64` —— MIR 的良构检查逮住了它，
+  这正是「一条映射只写一处」那条纪律没做到时该出现的红。
+- `parseBtype`：`long double` 认下来之后**把 `long` 那一票用掉**（`longs = 0`），
+  否则「short/long 只能配 int」与「longs>0 就是 long long」会把它按整型处理。
+- 字面量后缀 `L`（`TOK_CLDOUBLE`）与常量求值器的浮点那一半：都归到 long double 上。
+
+**类型码不合并。**`VT_LDOUBLE` 仍然是自己一格 —— `sizeof`、`typeText`、以后的
+`_Generic` 看的是类型而不是表示；x86_64 那条后端上来时改的只有 `typeSize` 与
+`mirTypeOf` 两处（那时 MIR 需要一个真的 f80，是它自己的一刀）。
+
+### 量出来的
+
+`tests/c/gen/21-ldouble.c`：退出码 5 + 148B stdout，与 `tcc -run` 逐字节相同。
+钉住的形状：`sizeof` 四种（标量、数组、`struct{char; long double;}` 的布局）、
+`1.5L` 字面量、与 `double`/`float`/整型互转、常规算术转换里「最宽的赢」、
+静态初始化式（含 `1.0/4` 在浮点里算、没写满的那格归零）、传参与返回、
+`printf` 的 `%Lf`/`%.3Lf`/`%Lg`/`%Le`、比较。
+
+`tests/c` **54 passed / 0 failed**（gen 21 条、gen-bad 13 条），
+`tests/js-roundtrip` 109 passed / 0 failed。
+
+### 下一片
+
+**整型的静态初始化式里的浮点常量**（`gen-bad/static-float-int` 钉着）：`int n = 1.9;`
+要的是 1。现在常量求值器有两份 —— 整型那份是 BigInt、浮点那份是 number，而这一格
+要求「在浮点里算完再截到整型」。合流的办法已经想清楚：让整型那份在**碰到浮点常量时
+切到浮点那份**，回来时按 C 的规则截断（向零）。同一并把 printf 的 `%a` 收掉。
+
+<!-- 第六刀第二十片-END -->
 
 
 
