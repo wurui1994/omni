@@ -105,3 +105,10 @@ a1.mark = "one";
 console.log(`${String(a1.mark)} ${String(a2.mark)}`);
 // JSON 只看元素（宿主也是这样）
 console.log(JSON.stringify(withProp));
+
+// unshift：往头上插一格，回新长度（第一百〇四刀补的那格 ABI —— 编译器自己
+// 往 `(main …)` 头上补一句时要它，而从前动态接收者上取 "unshift" 取到的是 undefined）
+const uns = [2, 3];
+console.log(`${uns.unshift(1)} ${uns.join(",")}`);
+const uns0 = [];
+console.log(`${uns0.unshift("a")} ${uns0.join(",")}`);

@@ -161,8 +161,9 @@ export function glrParse(tb, toks, diags) {
         if (a.kind === 'accept') { accepted.push(n); continue; }
         const r = rules[a.rule];
         let base = n;
-        // 沿前驱链往下走，收到的是**倒序**的子节点，最后翻过来。刻意不写 `kids.unshift(...)`：
-        // unshift 不在封闭 ABI 里（reverse 在），原生构建里它会变成"在 list 上取属性"。
+        // 沿前驱链往下走，收到的是**倒序**的子节点，最后翻过来。这里不写
+        // `kids.unshift(...)`：翻一次是线性的，逐格 unshift 是二次的
+        //（第一百〇四刀给 ABI 补了 unshift，所以现在只是效率的取舍，不是缺口）。
         const rev = [];
         let broken = false;
         for (let k = 0; k < r.rhs.length; k++) {

@@ -83,6 +83,12 @@ export const JS_ABI = {
   // 因为 `x.push()` / `x.push(...xs)` 这两种形状在降级时分不出接收者是谁。
   js_arr_push_all: { js: '$js_arr_push_dyn', c: 'omni_js_arr_push_dyn', arity: 2 },
   js_arr_pop: { js: '$js_arr_pop', c: 'omni_js_arr_pop', arity: 1 },
+  // a.unshift(x)：往头上插一格（第一百〇四刀）。从前 ABI 里没有它，而编译器自己
+  // 新写的代码用上了（asy 前端往 `(main …)` 头上补一句），量出来的样子是自举出来的
+  // 那份当场 `omni rt: undefined is not a function` —— 动态接收者上取 "unshift"
+  // 取到 undefined。**只收一个实参**：可变实参的形状与 push 一样要走派发器，
+  // 而源码里只有一处、只插一格，等真有第二处再长那一格。
+  js_arr_unshift: { js: '$js_arr_unshift', c: 'omni_js_arr_unshift', arity: 2 },
   js_arr_slice: { js: '$js_arr_slice', c: 'omni_js_arr_slice', arity: 3 },
   js_arr_concat: { js: '$js_arr_concat', c: 'omni_js_arr_concat', arity: 2 },
   js_arr_reverse: { js: '$js_arr_reverse', c: 'omni_js_arr_reverse', arity: 1 },
@@ -375,6 +381,7 @@ export const JS_METHODS = {
   // Array
   push: { on: { list: 'js_arr_push' } },
   pop: { on: { list: 'js_arr_pop' } },
+  unshift: { on: { list: 'js_arr_unshift' } },
   concat: { on: { list: 'js_arr_concat' } },
   reverse: { on: { list: 'js_arr_reverse' } },
   fill: { on: { list: 'js_arr_fill', bytes: 'js_buf_fill' } },

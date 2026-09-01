@@ -883,6 +883,7 @@ function $js_arr_push_dyn(a, items) {
   return $js_call_n($js_obj_get(a, "push"), $js_arr_of(items));
 }
 function $js_arr_pop(a) { return $js_arr_of(a).pop(); }
+function $js_arr_unshift(a, v) { return $js_arr_of(a).unshift(v); }
 function $js_arr_slice(a, s, e) {
   const l = $js_arr_of(a);
   return l.slice($js_idx(s, 0), $js_idx(e, l.length));

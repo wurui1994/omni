@@ -1369,8 +1369,8 @@ class Lower {
 
   /** 静态命名空间的点路径（JSON.stringify / process.stdout.write），被局部量遮住就不算 */
   staticPath(node) {
-    // 从里往外收，最后翻过来。刻意不用 unshift：封闭 ABI 里没有它（决策 2），
-    // 而这个文件自己也要被降级
+    // 从里往外收，最后翻过来。这里不用 unshift 是因为 reverse 一趟就够
+    //（第一百〇四刀之后 ABI 里有 unshift 了，但它是 O(n)，这条路上没必要）
     const parts = [];
     let cur = node;
     while (cur.type === 'Member' && !cur.computed) { parts.push(cur.name); cur = cur.object; }

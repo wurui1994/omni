@@ -513,8 +513,15 @@ Break / Continue / Return，所以形状是定下来的：
   `repl --lang asy` 的回显就挂：`regexp: \b (word boundary) is not supported (at index 98)`。
   现在是一格零宽断言（`omni_js_re.c` 的 `RE_WB`，两侧"是不是 \w"不同即成立），
   `tests/oir` 里 15 条钉住，四条腿一致。教训是：**编译器自己新写的代码会给封闭 ABI
-  提新需求**，正则的"用到的特性清单"不是一次数完就固定的。（顺带：在 UTF-16 定长码元上
-  写回溯比在 UTF-8 上简单，见第 8 条。）
+  提新需求**，正则的"用到的特性清单"不是一次数完就固定的。
+  **同一条教训又来了一次**（第一百〇四刀）：asy 前端要往 `(main …)` 头上补一句，写的是
+  `main.unshift(…)` —— 数组成员表里没有它，于是自举出来的那份当场
+  `omni rt: undefined is not a function`（动态接收者上取 "unshift" 取到 undefined），
+  而 node 上跑源码那一代一点事没有。补法照旧是四处：`js_abi.js` 的 op 与成员表、
+  prelude 的 `$js_arr_unshift`、`omni_js_arr.h` 的 C 实现（push 占一格再整体后挪，O(n)，
+  与 JS 那边同阶），`tests/js-exec/03-array-object.js` 里两条钉住（五条腿一致）。
+  只收**一个**实参：可变实参要像 push 那样另走派发器，源码里没有那种形状。
+  （顺带：在 UTF-16 定长码元上写回溯比在 UTF-8 上简单，见第 8 条。）
   已落地（`runtime/omni_js_re.c` 引擎 + `omni_js_re.h` 的 match/split/replace）。
   落地时定下的四件事，都是"宁可响亮地失败"而不是悄悄分叉：
   - **没有 RegExp 对象**：模式与 flags 当普通字符串实参传，两侧各按字面量做编译缓存

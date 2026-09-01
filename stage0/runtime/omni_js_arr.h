@@ -121,6 +121,15 @@ static omni_dyn omni_js_arr_pop(omni_dyn a) { \
   if (l->len == 0) return omni_dyn_undef(); \
   return l->items[--l->len]; \
 } \
+/* a.unshift(x)：往头上插一格，回新长度。先 push 占一格（顺带把容量扩够），
+   再从后往前挪一位。O(n) —— JS 那边也是。 */ \
+static omni_dyn omni_js_arr_unshift(omni_dyn a, omni_dyn v) { \
+  LT l = omni_js_arr_of(a); \
+  LT##_push(l, v); \
+  for (int64_t i = l->len - 1; i > 0; i--) l->items[i] = l->items[i - 1]; \
+  l->items[0] = v; \
+  return omni_dyn_of_real((double)l->len); \
+} \
 OMNI_JS_ARR_2(LT, DT)
 
 /* js_wrap_fn（ADR-0013 决策 3）：解释器造函数值走这一条。传进来的 f 是解释器自己那个
