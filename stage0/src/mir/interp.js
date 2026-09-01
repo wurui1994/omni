@@ -35,7 +35,7 @@ import { lowerToMir } from './from_oir.js';
 import { verifyMir } from './verify.js';
 import {
   OP, OP_NAMES, REF_NONE, REF_BIAS, isConstRef, typeKind, typeLanes,
-  T_I64, T_F64, T_STR, T_DYN, T_PTR, T_TPTR, T_I32, T_F32,
+  T_VOID, T_I64, T_F64, T_STR, T_DYN, T_PTR, T_TPTR, T_I32, T_F32,
   MLOAD_KINDS, MSTORE_KINDS, memKindNo, memOff,
   CVT_I2F, CVT_BOX, CVT_U2F, CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16, CVT_FCVT,
 } from './ir.js';
@@ -227,8 +227,14 @@ class MirInterp {
     }
     const no = this.mir.funcIndex.get(this.mir.entry);
     if (no === undefined) throw new OmniError(`mir.interp: no entry function '${this.mir.entry}'`);
-    this.callFunc(no, undefined, []);
-    return 0;
+    const v = this.callFunc(no, undefined, []);
+    /* 入口**可以带一个整数退出码**（ADR-0017 第六刀）：C 的 `main` 返回的就是进程
+     * 退出码，而这一刀的 oracle 正是 `tcc -run` 的退出码。既有的五个前端的入口是
+     * T_VOID，callFunc 回 undefined，这里照旧回 0 —— 那五条轴一个字节都不变。
+     * 只留低 8 位：wait(2) 只传得下一个字节（`return -1` 于是是 255，与 tcc 一致）。 */
+    const ret = this.mir.funcs[no].ret;
+    if (ret === T_VOID || v === undefined || v === null) return 0;
+    return Number(BigInt.asUintN(8, BigInt(v)));
   }
 
   /** 数组类型号 -> 元素是不是向量（"存进去要拷一份"的唯一一种）。类型池的 oir 上挂着
@@ -907,8 +913,9 @@ export function interpretMir(oir) {
  */
 export function runMirModule(oir, mir) {
   const I = new MirInterp(oir, mir);
+  let code = 0;
   try {
-    I.run();
+    code = I.run();
   } catch (e) {
     if (e instanceof InterpFail) {
       stderr(`omni: runtime error: ${e.message}\n`);
@@ -921,7 +928,7 @@ export function runMirModule(oir, mir) {
     throw e;
   }
   flushOut();
-  return 0;
+  return code;
 }
 
 /** `m[k] = v` 的 dict 一支。写成函数是为了和 listSet 在调用点对称。 */

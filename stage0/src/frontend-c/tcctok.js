@@ -20,8 +20,10 @@
 //
 // `tcctok.h` 里 attribute 名（`section`/`aligned`/…）、`__builtin_*`、原子操作、
 // libtcc1 的辅助函数名、以及整个 Tiny Assembler 的指令与伪指令**都还没进来** ——
-// 它们的消费者（`tccgen` 与 `*-asm`）还不存在。于是从 `TOK___INF__` 之后，编号是我们的、
-// 不是 tcc 的：pragma 那几个名字在 tcc 里排在 builtin 后面。这一格补齐是第六刀的事。
+// 它们的消费者（`tccgen` 的属性一路与 `*-asm`）还不存在。于是从 `TOK___INF__` 之后，
+// 编号是我们的、不是 tcc 的：pragma 那几个名字在 tcc 里排在 builtin 后面。
+// 第六刀补上的只是**语句与类型关键字**那一段（它们在 KEYWORD_NAMES 里本来就有，
+// 只是没导出过），那一段的编号与 tcc 一致；分岔点仍然在 `TOK___INF__` 之后。
 
 /* ------------------------------------------------- 运算符与带值记号（tcc.h:1114-1192）
  * 这些数值一个都不能动：见文件头「为什么编号本身要照抄」。 */
@@ -196,3 +198,50 @@ export const TOK___HAS_INCLUDE_NEXT = fixed('__has_include_next');
 export const TOK_push_macro = fixed('push_macro');
 export const TOK_pop_macro = fixed('pop_macro');
 export const TOK_once = fixed('once');
+
+/* ------------------------------------------------- tccgen 要用的那些（第六刀）
+ * 语句关键字与类型关键字。之前只有预处理器在用这张表，所以只导出了指令名那一段。 */
+
+export const TOK_WHILE = fixed('while');
+export const TOK_FOR = fixed('for');
+export const TOK_DO = fixed('do');
+export const TOK_CONTINUE = fixed('continue');
+export const TOK_BREAK = fixed('break');
+export const TOK_RETURN = fixed('return');
+export const TOK_GOTO = fixed('goto');
+export const TOK_SWITCH = fixed('switch');
+export const TOK_CASE = fixed('case');
+export const TOK_DEFAULT = fixed('default');
+
+export const TOK_EXTERN = fixed('extern');
+export const TOK_STATIC = fixed('static');
+export const TOK_UNSIGNED = fixed('unsigned');
+export const TOK_SIGNED = fixed('signed');
+export const TOK_CONST = fixed('const');
+export const TOK_REGISTER = fixed('register');
+export const TOK_AUTO = fixed('auto');
+export const TOK_VOLATILE = fixed('volatile');
+export const TOK_INLINE = fixed('inline');
+
+export const TOK_VOID = fixed('void');
+export const TOK_CHAR = fixed('char');
+export const TOK_INT = fixed('int');
+export const TOK_FLOAT = fixed('float');
+export const TOK_DOUBLE = fixed('double');
+export const TOK_SHORT = fixed('short');
+export const TOK_LONG = fixed('long');
+export const TOK_STRUCT = fixed('struct');
+export const TOK_UNION = fixed('union');
+export const TOK_TYPEDEF = fixed('typedef');
+export const TOK_ENUM = fixed('enum');
+export const TOK_SIZEOF = fixed('sizeof');
+
+/**
+ * `TOK_ASSIGN(t)`（`tcc.h:1168`）与 `TOK_ASSIGN_OP(t)`（`tcc.h:1169`）。
+ * 后者把**顺序当数据用**：`"+-*\/%&|^<>"[t - TOK_A_ADD]` 直接得到那个二元运算符的记号号，
+ * 因为 `<<`/`>>` 借的正是 `'<'`/`'>'` 的码位（见上面 TOK_SHL）。所以照抄这张字符串，
+ * 不写 switch —— 换成 switch 就多了一份要与编号同步维护的东西。
+ */
+export const TOK_ASSIGN_CHARS = '+-*/%&|^<>';
+export function isAssignOp(t) { return t >= TOK_A_ADD && t <= TOK_A_SAR; }
+export function assignOpOf(t) { return TOK_ASSIGN_CHARS.charCodeAt(t - TOK_A_ADD); }

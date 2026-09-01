@@ -707,6 +707,37 @@ export class Cpp {
     this.tokc = null;
   }
 
+  /**
+   * 收一串记号存着，回头再放一遍（tcc 用同一个 `TokStr` 干这件事：inline 函数体
+   * `store_inline_functions`、`#if` 的表达式、宏体，都是「先收成记号串、之后再当输入放」）。
+   * 从当前记号起收，一直收到**深度 0 上**的 `endTok`（那个记号不收，留在 `tok` 上）。
+   * 末尾补一个 `TOK_EOF` 当哨兵 —— `next()` 对宏流里的 EOF 是原样交出（见那里的注释），
+   * 于是放的时候能知道「这一串放完了」，而不会一路读到文件里去。
+   *
+   * 第六刀要它是为了 `for` 的步进式：它在源码里写在**循环体前面**，却必须在循环体
+   * **后面**执行。tcc 靠跳转绕过去（`tccgen.c:7326-7331`：先 `gjmp` 跳过步进，
+   * 循环体末尾再跳回来），而 MIR 是结构化控制流、指令不能重排 —— 所以只能先收后放。
+   */
+  captureTokens(endTok) {
+    const str = new TokStr();
+    let depth = 0;
+    for (;;) {
+      if (this.tok === TOK_EOF) this.err('unexpected end of file');
+      if (depth === 0 && this.tok === endTok) break;
+      if (this.tok === 40 || this.tok === 91 || this.tok === 123) depth++;
+      else if (this.tok === 41 || this.tok === 93 || this.tok === 125) depth--;
+      str.add2(this.tok, this.tokc);
+      this.next();
+    }
+    str.add2(TOK_EOF, null);
+    return str;
+  }
+
+  /** 把 `captureTokens` 收来的记号串压回输入。读到那个哨兵 EOF 就该叫 `endMacro()`。 */
+  pushTokens(str) {
+    this.beginMacro(str, 0);
+  }
+
   defineFind(v) {
     const d = this.defines.get(v);
     return d === undefined ? null : d;
@@ -1738,8 +1769,24 @@ export class Cpp {
     return out;
   }
 
-  /** 命令行上的 `-D name[=body]`（tcc 的 `tcc_define_symbol`） */
-  define(name, body) {
+  /**
+   * 给**编译**那一路开工（`tccgen_compile`，`tccgen.c:417`）。
+   * 开关与 tcc 那一行一模一样：`PREPROCESS | TOK_NUM | TOK_STR` —— 三个都在，于是
+   *   - 宏照展开（PREPROCESS），
+   *   - `TOK_PPNUM` 当场变成有类型的整数/浮点常量（TOK_NUM，见 convert），
+   *   - `TOK_PPSTR` 当场解成字符/字符串常量（TOK_STR）。
+   * **没有** LINEFEED 与 SPACES：空白与换行在这一路上根本不出现在记号流里，
+   * 所以语法分析器不必自己滤空白 —— 这是 tcc 一遍过的前提之一。
+   * 调用方随后自己叫一次 `next()`（tcc 也是这么排的：`parse_flags = …; next(); decl(…)`）。
+   */
+  startParse(filename, text) {
+    this.file = new CFile(filename, text, null);
+    this.file.ifdefBase = 0;
+    this.parseFlags = PF_PREPROCESS | PF_TOK_NUM | PF_TOK_STR;
+    this.tokFlags = TOK_FLAG_BOL | TOK_FLAG_BOF;
+  }
+
+  /** 命令行上的 `-D name[=body]`（tcc 的 `tcc_define_symbol`） */  define(name, body) {
     const src = `#define ${name}${body === undefined ? '' : ` ${body}`}\n`;
     const saved = this.file;
     this.file = new CFile('<command line>', src, null);

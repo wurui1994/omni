@@ -22,6 +22,7 @@ import { asyUnitModules } from './frontend-asy/link.js';
 import { parseAsyBuiltins } from './frontend-asy/types.js';
 import { lowerJnc } from './frontend-jnc/lower.js';
 import { Cpp } from './frontend-c/tccpp.js';
+import { lowerC } from './frontend-c/tccgen.js';
 import { readSexpr } from './sexpr/read.js';
 import { lowerCoreSexpr } from './sexpr/lower.js';
 import { printSexpr } from './sexpr/print.js';
@@ -46,7 +47,7 @@ import { RUNTIME_DIR, JIT_DIR, runtimeSources } from './runtime/c_runtime.js';
 import { loadProgram, MODE_BY_EXT } from './module/load.js';
 import { startRepl } from './repl.js';
 import { interpret } from './interp/eval.js';
-import { interpretMir } from './mir/interp.js';
+import { interpretMir, runMirModule } from './mir/interp.js';
 import { bootstrapSelf } from './bootstrap.js';
 
 /**
@@ -110,6 +111,29 @@ function cppText(path, incs, defs) {
   const out = cpp.preprocessToText(path, readText(path));
   for (const w of cpp.warnings) stderr(`${w}\n`);
   return out;
+}
+
+/**
+ * 一份 `.c` -> MIR（ADR-0017 第六刀）。宿主回调与 `cppText` 同一套。
+ * 良构检查在这里做完 —— 前端刚长出来，让 verifier 先骂比让解释器崩掉好查。
+ */
+function cMir(path, incs, defs) {
+  const { mod, warnings } = lowerC(path, readText(path), {
+    readFile: (p) => {
+      try {
+        return readText(p);
+      } catch {
+        return null;
+      }
+    },
+    includeDirs: incs,
+    dirname,
+    join,
+  }, defs.map(([name, body]) => ({ name, body })));
+  for (const w of warnings) stderr(`${w}\n`);
+  const errs = verifyMir(mod);
+  if (errs.length > 0) throw new OmniError(`mir is not well-formed:\n  ${errs.join('\n  ')}`);
+  return mod;
 }
 /** 文件后缀决定默认的类型模式（ADR-0008 第 1 节）；`--mode` 可覆盖，REPL 用它 */
 function modeFor(path, argv, fallback = 'mixed') {
@@ -1881,6 +1905,16 @@ function main(argv) {
       stdout(cppText(path, incDirs(rest), defArgs(rest)));
       return 0;
     }
+    // C -> MIR（ADR-0017 第六刀）。`c-mir` 印 MIR，`c-run` 跑它 ——
+    // **退出码就是 C 的 `main` 的返回值**，与 `tcc -run` 逐条相同，那也是这一刀的 oracle。
+    case 'c-mir': {
+      stdout(printMir(cMir(path, incDirs(rest), defArgs(rest))));
+      return 0;
+    }
+    case 'c-run': {
+      const mod = cMir(path, incDirs(rest), defArgs(rest));
+      return runMirModule({ structs: [], enums: [], classes: [], js: false }, mod);
+    }
     // 一个源文件一份产物（第七十五刀）：`<名字>.sx` 与 `<名字>.js` 摊在一个目录里，
     // 名字就是源文件自己的名字。`-o 目录` 指定去处，默认 .omni-cache/asy-mods。
     // 加 `--run` 就直接跑（node 自己按 ESM 的模块图把它们串起来）。
@@ -2045,6 +2079,10 @@ commands:
             core-dialect diagnostics cite; line numbers line up exactly)
   cpp       preprocess a .c file (ADR-0017 cut 5). The output is byte-identical to
             tcc -E -P; that equality is the test axis (tests/c/). Takes -I and -D.
+  c-mir     compile a .c file straight to MIR (ADR-0017 cut 6, path B: the tccgen
+            equivalent -- one pass, no AST). Takes -I and -D.
+  c-run     the same, then run it. The exit status is C main's return value, so
+            tcc -run is the oracle (tests/c/gen/). Takes -I and -D.
   oir       print the OIR as JSON
   mir       print the MIR (ADR-0014 decision 6): SSA values + slots + structured
             control flow, one 8-byte record per instruction (--bytes: sizes and
