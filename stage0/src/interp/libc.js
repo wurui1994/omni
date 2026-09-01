@@ -491,6 +491,86 @@ function heapFree(p) {
   heapCoalesce();
 }
 
+/* ------------------------------------------------------------------ 字符串到数
+ *
+ * `strtol` 一族（第八刀第四片）。选它们的理由是 tinycc 的源码在用，而那份源码是
+ * 这一刀的终点。
+ *
+ * **不能拿 tcc 对账的一格**：溢出。C 说溢出时回 `LONG_MAX`/`LONG_MIN`（或
+ * `ULONG_MAX`）并把 `errno` 设成 `ERANGE`；我们回同样的值，但**没有 `errno`** ——
+ * 那要一个每线程的变量与一份 `<errno.h>`，独立一格。所以用例避开溢出的输入。
+ */
+
+const SPACE = ' \t\n\v\f\r';
+
+/** 一位十六进制以内的数字的值，不是就回 -1（`0`-`9`、`a`-`z`、`A`-`Z`）。 */
+function digitVal(ch) {
+  const c = ch.charCodeAt(0);
+  if (c >= 48 && c <= 57) return c - 48;
+  if (c >= 97 && c <= 122) return c - 97 + 10;
+  if (c >= 65 && c <= 90) return c - 65 + 10;
+  return -1;
+}
+
+/**
+ * `strtol` / `strtoul` 共用的那一遍（C11 7.22.1.4）。回 `{ v, used }`：
+ * `v` 是**还没截断的**真值（带符号），`used` 是吃掉了多少个字符
+ * （一个有效数字都没有的时候是 0 —— 那时 `endptr` 要回原地址）。
+ */
+function scanInt(s, base) {
+  let i = 0;
+  while (i < s.length && SPACE.indexOf(s[i]) >= 0) i++;
+  let neg = false;
+  if (s[i] === '+' || s[i] === '-') {
+    neg = s[i] === '-';
+    i++;
+  }
+  let b = base;
+  if (b === 0) {
+    if (s[i] === '0' && (s[i + 1] === 'x' || s[i + 1] === 'X')) { b = 16; i += 2; }
+    else if (s[i] === '0') { b = 8; i++; }        // 这个 `0` 本身就是一位有效数字
+    else b = 10;
+  } else if (b === 16 && s[i] === '0' && (s[i + 1] === 'x' || s[i + 1] === 'X')) {
+    i += 2;
+  }
+  /* 上面那两处 `0x` 是**试探性**的：`"0xz"` 里的 `0` 算一位有效数字、`x` 不算，
+   * 于是回的是 0 而 `endptr` 指着 `x`。所以数字从哪儿开始要单独记。 */
+  const digitsFrom = i;
+  let v = 0n;
+  const bb = BigInt(b);
+  while (i < s.length) {
+    const d = digitVal(s[i]);
+    if (d < 0 || d >= b) break;
+    v = v * bb + BigInt(d);
+    i++;
+  }
+  if (i === digitsFrom) {
+    /* 一位有效数字都没有。`"0x"` 这种：退回到那个 `0` 上（它是有效的）。 */
+    if (digitsFrom >= 2 && (s[digitsFrom - 1] === 'x' || s[digitsFrom - 1] === 'X')) {
+      return { v: 0n, used: digitsFrom - 1 };
+    }
+    return { v: 0n, used: 0 };
+  }
+  return { v: neg ? -v : v, used: i };
+}
+
+/** `endptr` 非空就写「停在哪儿」（`used` 是 0 时写原地址，C 就是这么说的）。 */
+function putEnd(endp, addr, used) {
+  if (endp === 0n) return;
+  memStore('i64', endp, 0, BigInt(addr) + BigInt(used));
+}
+
+const LONG_MAX = (1n << 63n) - 1n;
+const LONG_MIN = -(1n << 63n);
+const ULONG_MAX = (1n << 64n) - 1n;
+
+/* ------------------------------------------------------------------ str 一族
+ *
+ * `strncpy` / `strchr` / `strstr` 那几条（第八刀第四片）。它们都只要「在线性内存上
+ * 数字节」，所以实现是一句话；写在这儿的理由是**它们的边角**：`strncpy` 不一定补 0、
+ * `strchr` 要认那个终止的 0、`strncat` 的 n 不算那个 0。这三条搞错的代码到处都是。
+ */
+
 /**
  * libc 的那张表。键是 C 里的名字，值拿到**宿主值的实参数组**、回一个宿主值
  * （`void` 的函数回 `undefined`）。
@@ -580,10 +660,63 @@ const LIBC = {
     return BigInt(x.length - y.length);
   },
   strcpy: (a) => { writeCStr(a[0], readCStr(a[1])); return BigInt(a[0]); },
+  strncpy: (a) => {
+    /* 两处边角：源短了要**用 0 填满 n 个字节**，源长了**不补终止的 0**
+     * （C11 7.24.2.4）。所以它不是「安全的 strcpy」，写错的人比写对的多。 */
+    const s = readCStr(a[1]);
+    const n = Number(BigInt(a[2]));
+    const d = BigInt(a[0]);
+    for (let i = 0; i < n; i++) {
+      memStore('i8', d + BigInt(i), 0, i < s.length ? BigInt(s.charCodeAt(i)) : 0n);
+    }
+    return d;
+  },
   strcat: (a) => {
     const d = readCStr(a[0]);
     writeCStr(BigInt(a[0]) + BigInt(d.length), readCStr(a[1]));
     return BigInt(a[0]);
+  },
+  strncat: (a) => {
+    /* n 说的是**从源那边最多取几个**，终止的 0 不算在里头（C11 7.24.3.2）——
+     * 与 `strncpy` 的 n 不是同一个意思。 */
+    const d = readCStr(a[0]);
+    let s = readCStr(a[1]);
+    const n = Number(BigInt(a[2]));
+    if (s.length > n) s = s.slice(0, n);
+    writeCStr(BigInt(a[0]) + BigInt(d.length), s);
+    return BigInt(a[0]);
+  },
+  strncmp: (a) => {
+    /* 与 `strcmp` 一样回**字节差**（宿主的 libc 就是这样，要逐字节对账就得跟着），
+     * 而且遇到 0 就停 —— 不是「比满 n 个字节」。 */
+    const n = Number(BigInt(a[2]));
+    for (let i = 0; i < n; i++) {
+      const x = Number(memLoad('i8u', BigInt(a[0]) + BigInt(i), 0));
+      const y = Number(memLoad('i8u', BigInt(a[1]) + BigInt(i), 0));
+      if (x !== y) return BigInt(x - y);
+      if (x === 0) return 0n;
+    }
+    return 0n;
+  },
+  strchr: (a) => {
+    /* `c` 按 `char` 转换，**0 也算**（`strchr(s, 0)` 回的是那个终止符的地址，
+     * C11 7.24.5.2 明说终止的 0 算这个字符串的一部分）。 */
+    const s = readCStr(a[0]);
+    const c = String.fromCharCode(Number(BigInt.asUintN(8, BigInt(a[1]))));
+    const i = (c === '\0' ? s.length : s.indexOf(c));
+    return i < 0 ? 0n : BigInt(a[0]) + BigInt(i);
+  },
+  strrchr: (a) => {
+    const s = readCStr(a[0]);
+    const c = String.fromCharCode(Number(BigInt.asUintN(8, BigInt(a[1]))));
+    const i = (c === '\0' ? s.length : s.lastIndexOf(c));
+    return i < 0 ? 0n : BigInt(a[0]) + BigInt(i);
+  },
+  strstr: (a) => {
+    /* 空的针在任何草堆里都在最前面（C11 7.24.5.7）—— `indexOf('')` 正好回 0。 */
+    const h = readCStr(a[0]);
+    const i = h.indexOf(readCStr(a[1]));
+    return i < 0 ? 0n : BigInt(a[0]) + BigInt(i);
   },
   memcpy: (a) => {
     const n = Number(BigInt(a[2]));
@@ -627,6 +760,28 @@ const LIBC = {
     const v = BigInt.asIntN(64, BigInt(a[0]));
     return v < 0n ? -v : v;
   },
+  /* `atoi` / `atol`：就是 base 10 的 `strtol`，只是**不报错也不给 endptr**
+   * （C11 7.22.1.2：等价于 `strtol(s, NULL, 10)`，除了出错时的行为没规定）。 */
+  atoi: (a) => BigInt.asIntN(32, scanInt(readCStr(a[0]), 10).v),
+  atol: (a) => BigInt.asIntN(64, scanInt(readCStr(a[0]), 10).v),
+  strtol: (a) => {
+    const s = readCStr(a[0]);
+    const r = scanInt(s, Number(BigInt(a[2])));
+    putEnd(BigInt(a[1]), a[0], r.used);
+    // 溢出：回端点值（errno 那一格还没有，见上面那节）
+    if (r.v > LONG_MAX) return LONG_MAX;
+    if (r.v < LONG_MIN) return LONG_MIN;
+    return r.v;
+  },
+  strtoul: (a) => {
+    const s = readCStr(a[0]);
+    const r = scanInt(s, Number(BigInt(a[2])));
+    putEnd(BigInt(a[1]), a[0], r.used);
+    if (r.v > ULONG_MAX) return ULONG_MAX;
+    /* 负号是**合法**的（C11 7.22.1.4 第 5 段：按无符号取负），`strtoul("-1")`
+     * 回的是 ULONG_MAX 而不是错误。 */
+    return BigInt.asUintN(64, r.v);
+  },
   /* `exit` 与 `abort`：都不回来（见 `ExitCall`）。`abort` 的退出码照 shell 的规矩
    * 是 128 + SIGABRT(6) = 134 —— `tcc -run` 那边也是这个数。 */
   exit: (a) => { throw new ExitCall(Number(BigInt.asIntN(32, BigInt(a[0])))); },
@@ -639,10 +794,17 @@ export function hasLibc(name) { return Object.prototype.hasOwnProperty.call(LIBC
 /**
  * 调一个 libc 函数。`args` 是宿主值数组。名字不认识就抛 —— 那等于链接期缺符号，
  * 而在解释器上「链接」发生在第一次调用那一刻。
+ *
+ * 出口处**归一到有符号 64 位**：这条腿上整数一律以有符号 BigInt 表示
+ * （`builtin.js` 的 `W`），而 libc 里算出来的东西天然是无符号的（`strtoul`、
+ * `ULONG_MAX`）。不归一的话 `strtoul("-1", …) == 18446744073709551615UL`
+ * 会是假 —— 两边印出来都是 18446744073709551615，比起来一个是 `-1n`
+ * 一个是 `2n**64n-1n`。第八刀第四片踩过这一格。
  */
 export function callLibc(name, args) {
   if (!hasLibc(name)) {
     throw new Error(`libc: 没有这个函数 '${name}'（第六刀的 libc 还只有一小把）`);
   }
-  return LIBC[name](args);
+  const v = LIBC[name](args);
+  return typeof v === 'bigint' ? BigInt.asIntN(64, v) : v;
 }

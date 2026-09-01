@@ -4,8 +4,8 @@
  * `strdup` 是 POSIX 而不是 C 标准里的，但它在 `interp/libc.js` 的表里
  * （tinycc 的源码在用），所以放这儿 —— 这一份跟的是那张表，不是标准的目录。
  *
- * 少了什么：`strncpy` / `strncmp` / `strchr` / `strrchr` / `strstr` /
- * `strtok`（都是 `interp/libc.js` 里还没有的，下一格连着实现一起加）。
+ * 少了什么：`strspn` / `strcspn` / `strtok` / `strpbrk` / `strerror`
+ * （都是 `interp/libc.js` 里还没有的，加声明就得加实现）。
  */
 #ifndef _STRING_H
 #define _STRING_H
@@ -14,9 +14,15 @@
 
 size_t strlen(const char *s);
 int strcmp(const char *a, const char *b);
+int strncmp(const char *a, const char *b, size_t n);
 char *strcpy(char *dst, const char *src);
+char *strncpy(char *dst, const char *src, size_t n);
 char *strcat(char *dst, const char *src);
+char *strncat(char *dst, const char *src, size_t n);
 char *strdup(const char *s);
+char *strchr(const char *s, int c);
+char *strrchr(const char *s, int c);
+char *strstr(const char *haystack, const char *needle);
 
 void *memcpy(void *dst, const void *src, size_t n);
 void *memmove(void *dst, const void *src, size_t n);
