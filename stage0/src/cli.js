@@ -9,8 +9,8 @@
 //   omni ast/oir f.omni      打印中间结果（调试用）
 
 import {
-  writeText, readText, exists, readDir, mtimeMs, fileSize, mkdTemp, mkdirAll, rename,
-  args as procArgs, env, stdout, stderr, setExitCode, spawn, tmpDir, evalJs, hasJsEngine, nowMs,
+  writeText, readText, exists, readDir, mtimeMs, fileSize, mkdirAll, rename,
+  args as procArgs, env, stdout, stderr, setExitCode, spawn, evalJs, hasJsEngine, nowMs,
   cwd, installDir, isDir,
 } from './host/native.js';
 import { join, basename, dirname, isAbsolute, resolve } from './host/path.js';
@@ -261,8 +261,7 @@ function asyFrontEnd() {
   // 键里带语法表的哈希：语法一改，缓存整片失效。`OMNI_NO_ASTCACHE=1` 关掉它（对照用）。
   // span 里的 `file` 是个带全文与行表的对象，不进 JSON —— 读回来再挂上（astReattach）。
   const gkey = hash16(readText(gpath));
-  const astDir = env('OMNI_NO_ASTCACHE') === '1' ? null
-    : join(installDir(), '..', '..', '..', '.omni-cache', 'asy-ast');
+  const astDir = env('OMNI_NO_ASTCACHE') === '1' ? null : join(cacheRoot(), 'asy-ast');
   if (astDir !== null) mkdirAll(astDir);
   const parseText = (p, text, diags) => {
     const file = new SourceFile(p, text);
@@ -445,8 +444,38 @@ function srcStamp() {
  * 这一条只在 `run` 那一路上用：它的输入输出都是"这一份源码跑出来的 JS"，
  * 与后端/解释器那几条腿无关。`OMNI_NO_JSCACHE=1` 关掉（对照用）。
  */
+/**
+ * 一切中间文件与缓存的根：**仓库里的 `.omni-cache`**，不再用系统临时目录（第一百〇五刀）。
+ *
+ * 为什么不用 `/tmp` / `/var/folders`：
+ *   - 系统会清它。EPS 参考那 192 份就是这么丢的（一趟 5 分钟的真 asy 重跑），
+ *     而 glr 表、运行时 `.o`、链好的可执行文件都是"重算很贵、内容只由输入决定"的东西。
+ *   - 看不见。`omni-l2pb0k/a.out.c` 这种名字在 `/var/folders/x6/dw0k…` 底下，
+ *     出了问题连"上一趟到底编了什么"都翻不出来。
+ *   - 一台机器上两个 checkout 的印记里带的是路径与 mtime，撞不撞全靠运气。
+ * `OMNI_CACHE_DIR` 可以把整棵搬走（CI 上想放到 workspace 之外时用）。
+ */
+function cacheRoot() {
+  const e = env('OMNI_CACHE_DIR');
+  if (e !== undefined && e !== '') return e;
+  return join(installDir(), '..', '..', '..', '.omni-cache');
+}
+
+/**
+ * 一次性的工作目录（生成的 `.c`、链出来的 `a.out`、写缓存前的暂存…）。
+ *
+ * **名字是确定的**，不是 mkdtemp 那种随机名：从前靠系统清 `/tmp` 才不攒垃圾，
+ * 搬进仓库之后随机名就等于每跑一趟多一个目录。同一个 kind + key 的下一趟原地盖掉。
+ * 代价写在明处：**并发跑同一个输入会撞**（同一份源码同时编两遍本来也会争缓存那一格）。
+ */
+function workDirFor(kind, key) {
+  const dir = join(cacheRoot(), 'work', key === '' ? kind : `${kind}-${key}`);
+  mkdirAll(dir);
+  return dir;
+}
+
 function jsCacheDir() {
-  return join(installDir(), '..', '..', '..', '.omni-cache', 'asy-js');
+  return join(cacheRoot(), 'asy-js');
 }
 function jsCacheStamp() {
   // 印记里必须带**找模块的那几样**：同一个主文件在 `ASYMPTOTE_DIR` 指着真 base 时
@@ -482,6 +511,59 @@ function jsCachePut(path, js, deps) {
   // 先写产物再写清单：清单是"这一条成了"的凭据，反过来会留下半条。
   writeText(join(jsCacheDir(), `${key}.js`), js);
   writeText(join(jsCacheDir(), `${key}.dep`), lines.join('\n'));
+}
+
+/**
+ * 原生那一路的产物缓存（第一百〇五刀）：**链好的可执行文件**按同一把印记躺在
+ * `.omni-cache/asy-exe` 里，源码与它引的库都没动就直接 exec。
+ *
+ * 为什么必须有这一条：node 上那一路（模块产物 / 整份 JS）早就有缓存了，而自举出来的
+ * 原生二进制一趟都没有 —— 量出来 `run tests/asy/cases/03-quotes.asy` **每趟 12s**
+ * （AST 读回来 3.4s + 前端 5.0s + 发 C 2.5s + clang 0.5s），而这 12s 的输入
+ * 一个字节都没变。命中之后剩下的只有 exec。
+ *
+ * 印记比 JS 那份多一格 **cc**：同一份源码用 clang 与用 tcc 链出来的是两个可执行文件。
+ * 依赖清单与 jsCache 同一套（`路径\t改动时间\t字节数`，事后从 lastAsyDeps 取）。
+ * `OMNI_NO_EXECACHE=1` 关掉（对照用）。
+ */
+function exeCacheDir() {
+  return join(cacheRoot(), 'asy-exe');
+}
+function exeCacheStamp(cc) {
+  // 编译器与**它的 flags** 都在印记里：`OMNI_OPT=2` 与默认 -O0 是两个可执行文件
+  return `e1|${jsCacheStamp()}|cc:${cc}|${ccFlags(cc).join(' ')}`;
+}
+function exeCacheGet(path, cc) {
+  if (env('OMNI_NO_EXECACHE') === '1') return null;
+  const key = `e-${hash16(path)}`;
+  const dep = join(exeCacheDir(), `${key}.dep`);
+  const exe = join(exeCacheDir(), `${key}.bin`);
+  if (!exists(dep) || !exists(exe)) return null;
+  const lines = readText(dep).split('\n');
+  if (lines[0] !== exeCacheStamp(cc)) return null;
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i] === '') continue;
+    const f = lines[i].split('\t');
+    if (!exists(f[0]) || `${mtimeMs(f[0])}` !== f[1] || `${fileSize(f[0])}` !== f[2]) return null;
+  }
+  return exe;
+}
+function exeCachePut(path, cc, deps) {
+  if (env('OMNI_NO_EXECACHE') === '1' || deps.length === 0) return;
+  const key = `e-${hash16(path)}`;
+  const lines = [exeCacheStamp(cc)];
+  for (const p of deps) {
+    if (exists(p)) lines.push(`${p}\t${mtimeMs(p)}\t${fileSize(p)}`);
+  }
+  // 清单最后写：可执行文件是 buildNative 直接链到那个名字上的，链一半的话没有清单，
+  // 下一趟老老实实重来。
+  writeText(join(exeCacheDir(), `${key}.dep`), lines.join('\n'));
+}
+/** 这一趟该把可执行文件链到哪儿（缓存开着就直接链进缓存那一格，省一次拷贝） */
+function exeCachePath(path) {
+  if (env('OMNI_NO_EXECACHE') === '1') return null;
+  mkdirAll(exeCacheDir());
+  return join(exeCacheDir(), `e-${hash16(path)}.bin`);
 }
 
 /**
@@ -626,7 +708,7 @@ function stampSame(a, b) {
 
 /** 产物的默认去处。**一个共用目录** —— 复用的就是这里面按文件名躺着的那些 `.js`。 */
 function asyModsDir() {
-  return join(installDir(), '..', '..', '..', '.omni-cache', 'asy-mods');
+  return join(cacheRoot(), 'asy-mods');
 }
 
 /**
@@ -1257,12 +1339,14 @@ function compileProgram(path, text, mode) {
 }
 
 /** 找一个可用的 C 编译器：tcc 最快，适合开发循环；clang/gcc 用于发布 */
+let findCCMemo = '';
 function findCC() {
+  if (findCCMemo !== '') return findCCMemo;
   const explicit = env('OMNI_CC');
-  if (explicit) return explicit;
+  if (explicit) { findCCMemo = explicit; return findCCMemo; }
   for (const cc of ['tcc', 'clang', 'gcc', 'cc']) {
     const r = spawn('which', [cc], 'c');
-    if (r[0] === 0 && r[1].trim()) return cc;
+    if (r[0] === 0 && r[1].trim()) { findCCMemo = cc; return findCCMemo; }
   }
   throw new OmniError('no C compiler found (tried tcc, clang, gcc, cc; override with OMNI_CC)');
 }
@@ -1308,15 +1392,15 @@ function runtimeObjects(cc) {
       return `${f}:${mtimeMs(p)}:${fileSize(p)}`;
     });
   const key = hash16([cc, ...flags, ...deps].join('|'));
-  const dir = join(tmpDir(), `omni-rt-${key}`);
+  const dir = join(cacheRoot(), 'rt', key);
   const objs = srcs.map((p) => join(dir, `${basename(p, '.c')}.o`));
   if (objs.every((o) => exists(o))) {
     vStep(`runtime .o  ${objs.length} objects, cache hit ${dir}`);
     return objs;
   }
 
-  // 先编进临时目录再整体 rename：中断或并发都不会留下半个缓存
-  const stage = mkdTemp(join(tmpDir(), 'omni-rt-stage-'));
+  // 先编进暂存目录再整体 rename：中断不会留下半个缓存
+  const stage = workDirFor('rt-stage', key);
   const staged = srcs.map((p) => join(stage, `${basename(p, '.c')}.o`));
   for (let i = 0; i < srcs.length; i++) {
     const r = spawn(cc, [...flags, '-c', '-o', staged[i], srcs[i]], 'c');
@@ -1325,19 +1409,21 @@ function runtimeObjects(cc) {
     }
   }
   // 目标已存在 = 别人先建好了，下面那句会用它（rename 到一个非空目录在两个宿主上都是硬错，
-  // 而宿主的错误不是可以 catch 的异常，所以先看一眼）
+  // 而宿主的错误不是可以 catch 的异常，所以先看一眼）。父目录得先在，rename 才有地方落。
+  mkdirAll(join(cacheRoot(), 'rt'));
   if (!exists(dir)) rename(stage, dir);
   vStep(`runtime .o  ${srcs.length} objects compiled with ${cc}`);
   return objs.every((o) => exists(o)) ? objs : staged;
 }
 
 /**
- * workDir 给的时候，生成的 .c 就留在那里（名字跟着产物走），不进临时目录 ——
+ * workDir 给的时候，生成的 .c 就留在那里（名字跟着产物走）——
  * `omni bootstrap` 与 `build --work DIR` 要的是"中间产物留在构建目录里"：链断在哪一代
- * 都能直接翻出那份 C 来看，而不是去 /var/folders 里捞一个随机名字的目录。
+ * 都能直接翻出那份 C 来看。不给的时候落在 `.omni-cache/work/c-<产物名>` 底下，
+ * 名字是确定的（从前是 /var/folders 里一个随机名，出了问题捞不着）。
  */
 function buildNative(mod, outPath, workDir) {
-  const dir = workDir === undefined ? mkdTemp(join(tmpDir(), 'omni-')) : workDir;
+  const dir = workDir === undefined ? workDirFor('c', hash16(outPath)) : workDir;
   if (workDir !== undefined) mkdirAll(dir);
   const cPath = join(dir, `${basename(outPath)}.c`);
   const cText = emitC(mod);
@@ -1375,11 +1461,22 @@ function runInterpMir(mod) {
   return code;
 }
 
-function runViaC(mod, argv) {  const wi = argv.indexOf('--work');
-  const dir = wi >= 0 ? argv[wi + 1] : mkdTemp(join(tmpDir(), 'omni-run-'));
+/**
+ * @param srcPath 这一趟的源文件（工作目录按它起名 —— **不能是一个固定名字**：
+ *   测试轴上好几个例子的同一条腿是同时跑的，共用一个 `a.out` 就会跑到别人的程序上。
+ *   量出来的样子：`cases/95-sig-batch` 的 run-llvm 印的是另一个例子的输出。）
+ * @param cache 吃不吃可执行文件缓存。`run` 吃，`run-c`（明说要走这条腿）不吃。
+ */
+function runViaC(mod, argv, srcPath, cache) {
+  const wi = argv.indexOf('--work');
+  // `--work` 给了就照它办（要的是"留在那儿"）；否则**直接链进产物缓存那一格** ——
+  // 下一趟同一份源码进来，exeCacheGet 命中就只剩 exec（第一百〇五刀）。
+  const cached = wi >= 0 || cache !== true ? null : exeCachePath(srcPath);
+  const dir = wi >= 0 ? argv[wi + 1] : workDirFor('run', hash16(srcPath === undefined ? '' : srcPath));
   if (wi >= 0) mkdirAll(dir);
-  const exe = join(dir, 'a.out');
-  buildNative(mod, exe, wi >= 0 ? dir : undefined);
+  const exe = cached === null ? join(dir, 'a.out') : cached;
+  const built = buildNative(mod, exe, wi >= 0 ? dir : undefined);
+  if (cached !== null) exeCachePut(srcPath, built.cc, lastAsyDeps);
   const code = spawn(exe, [], 'i')[0];
   vStep(`exec ${exe}  exit=${code}`);
   return code;
@@ -1410,7 +1507,7 @@ function buildLlvm(mod, outPath, workDir) {
   const errs = verifyMir(mir);
   if (errs.length > 0) throw new OmniError(`mir is not well-formed:\n  ${errs.join('\n  ')}`);
   const ir = emitLlvm(mir);
-  const dir = workDir === undefined ? mkdTemp(join(tmpDir(), 'omni-ll-')) : workDir;
+  const dir = workDir === undefined ? workDirFor('ll', hash16(outPath)) : workDir;
   if (workDir !== undefined) mkdirAll(dir);
   const llPath = join(dir, `${basename(outPath)}.ll`);
   writeText(llPath, ir);
@@ -1426,9 +1523,9 @@ function buildLlvm(mod, outPath, workDir) {
   return { llPath, cc };
 }
 
-function runViaLlvm(mod, argv) {
+function runViaLlvm(mod, argv, srcPath) {
   const wi = argv.indexOf('--work');
-  const dir = wi >= 0 ? argv[wi + 1] : mkdTemp(join(tmpDir(), 'omni-run-ll-'));
+  const dir = wi >= 0 ? argv[wi + 1] : workDirFor('run-ll', hash16(srcPath === undefined ? '' : srcPath));
   if (wi >= 0) mkdirAll(dir);
   const exe = join(dir, 'a.out');
   buildLlvm(mod, exe, wi >= 0 ? dir : undefined);
@@ -1479,7 +1576,7 @@ function buildJitHost() {
 
   const objs = runtimeObjects(cc);
   const key = hash16([cc, ver[1].trim(), src, mtimeMs(src), fileSize(src), ...objs].join('|'));
-  const dir = join(tmpDir(), `omni-jit-${key}`);
+  const dir = join(cacheRoot(), 'jit', key);
   const exe = join(dir, 'omni-jit');
   if (exists(exe)) {
     vStep(`jit host  cache hit ${exe}`);
@@ -1488,20 +1585,21 @@ function buildJitHost() {
   // 运行时的 .o 直接链进宿主，JIT 出来的代码靠「进程符号搜索」找到它们（见 omni_jit.c）。
   // -Wl,-export_dynamic 是必须的：默认情况下可执行文件的符号不进动态符号表，
   // ORC 就找不到 omni_print_int 这些。
-  const stage = mkdTemp(join(tmpDir(), 'omni-jit-stage-'));
+  const stage = workDirFor('jit-stage', key);
   const staged = join(stage, 'omni-jit');
   const args = ['-O2', '-w', '-pthread', '-I', inc[1].trim(), '-I', RUNTIME_DIR, src, ...objs,
     '-L', libdir[1].trim(), '-lLLVM', '-lm', '-Wl,-export_dynamic', '-o', staged];
   const r = spawn(cc, args, 'o');
   if (r[0] !== 0) throw new OmniError(`the jit host failed to build with ${cc}:\n${r[2]}`);
+  mkdirAll(join(cacheRoot(), 'jit'));
   if (!exists(exe)) rename(stage, dir);
   vStep(`jit host  built with ${cc} + LLVM ${ver[1].trim()} -> ${exists(exe) ? exe : staged}`);
   return exists(exe) ? exe : staged;
 }
 
-function runViaJit(mod, argv) {
+function runViaJit(mod, argv, srcPath) {
   const wi = argv.indexOf('--work');
-  const dir = wi >= 0 ? argv[wi + 1] : mkdTemp(join(tmpDir(), 'omni-run-jit-'));
+  const dir = wi >= 0 ? argv[wi + 1] : workDirFor('run-jit', hash16(srcPath === undefined ? '' : srcPath));
   if (wi >= 0) mkdirAll(dir);
   const mir = lowerToMir(mod);
   const errs = verifyMir(mir);
@@ -1601,6 +1699,21 @@ function main(argv) {
           return 0;
         }
       }
+      // 原生那一路的产物缓存（第一百〇五刀）：**链好的可执行文件**按同一把印记躺在
+      // `.omni-cache/asy-exe` 里，源码与它引的库都没动就只剩 exec。
+      // 量出来（自举出来的二进制，03-quotes.asy）：那 12.6s 里 AST 读回来 3.4s、
+      // 前端 5.0s、发 C 2.5s、clang 0.5s，而输入一个字节都没变。
+      // 这一格必须在 compile **之前**问 —— 大头全在前端。
+      if (path.endsWith('.asy') && !hasJsEngine() && !rest.includes('--interp')
+        && !rest.includes('--mir') && !rest.includes('--work')) {
+        const exe = exeCacheGet(path, findCC());
+        if (exe !== null) {
+          vStep(`asy exe cache  ${fileSize(exe)} bytes  ${exe}`);
+          const st = spawn(exe, [], 'i')[0];
+          vStep(`exec ${exe}  exit=${st}`);
+          return st;
+        }
+      }
       const { mod } = compile(path, rest);
       // 自己的解释器（ADR-0013）。阶段 1 还没覆盖全部 op，所以要显式要它
       if (rest.includes('--interp')) return runInterp(mod);
@@ -1618,8 +1731,8 @@ function main(argv) {
         vStep('exec in-process (node host, new Function)');
         return 0;
       }
-      // 这一代没有 JS 引擎，"直接执行"就是 C 路径
-      return runViaC(mod, rest);
+      // 这一代没有 JS 引擎，"直接执行"就是 C 路径（产物缓存见 runViaC）
+      return runViaC(mod, rest, path, true);
     }
     case 'emit-js': {
       const { mod } = compile(path, rest);
@@ -1643,7 +1756,9 @@ function main(argv) {
     }
     case 'run-c': {
       const { mod } = compile(path, rest);
-      return runViaC(mod, rest);
+      // `run-c` 是"明说要走 C 这条腿"（测试轴的一条），所以**不吃产物缓存**：
+      // 那条缓存是给 `run`（"把我的程序跑起来"）的，见 exeCacheGet。
+      return runViaC(mod, rest, path, false);
     }
     // LLVM 路径（ADR-0014 决策 3，第一阶段 = AOT via 文本 IR）
     case 'emit-llvm': {
@@ -1656,7 +1771,7 @@ function main(argv) {
     }
     case 'run-llvm': {
       const { mod } = compile(path, rest);
-      return runViaLlvm(mod, rest);
+      return runViaLlvm(mod, rest, path);
     }
     // GPU 路径（ADR-0014 门槛 7 的另一半）：一个 kernel 一份 SPIR-V 汇编。
     // 只发文本 —— 打包成二进制字是 spirv-as 的活，而它是官方工具（见 backend-spirv 的文件头）。
@@ -1671,7 +1786,7 @@ function main(argv) {
     }
     case 'run-jit': {
       const { mod } = compile(path, rest);
-      return runViaJit(mod, rest);
+      return runViaJit(mod, rest, path);
     }
     case 'build-llvm': {
       const { mod } = compile(path, rest);
@@ -1738,7 +1853,7 @@ function main(argv) {
       const { mod } = compile(path, rest);
       const mir = lowerToMir(mod);
       const ci = rest.indexOf('--cache');
-      const dir = ci >= 0 ? rest[ci + 1] : join(tmpDir(), 'omni-incr');
+      const dir = ci >= 0 ? rest[ci + 1] : join(cacheRoot(), 'incr');
       const byName = new Map();
       for (const f of mod.funcs) byName.set(f.mangled, f);
       const cache = new IncrCache(dir);
@@ -1816,7 +1931,7 @@ function loadGrammar(path) {
   const text = readText(path);
   const g = readGrammar(readSexpr(new SourceFile(path, text), diags), diags);
   diags.throwIfErrors();
-  const dir = join(tmpDir(), `omni-glr-${hash16(`${TABLE_FORMAT}|${text}`)}`);
+  const dir = join(cacheRoot(), 'glr', hash16(`${TABLE_FORMAT}|${text}`));
   const cpath = join(dir, 'table.txt');
   if (exists(cpath)) {
     const hit = tableFromText(readText(cpath), g);
@@ -1828,7 +1943,7 @@ function loadGrammar(path) {
   const tb = buildTable(g);
   vStep(`grammar ${g.name}  ${tb.states.length} states, ${tb.conflicts.length} conflicts left to GLR`);
   mkdirAll(dir);
-  const tmp = join(mkdTemp(join(tmpDir(), 'omni-glr-w-')), 'table.txt');
+  const tmp = join(workDirFor('glr-w', hash16(path)), 'table.txt');
   writeText(tmp, tableText(tb));
   rename(tmp, cpath);
   vStep(`grammar ${g.name}  table cached at ${cpath}`);
@@ -1869,7 +1984,7 @@ commands:
             per-function content hashes instead of the listing)
   incr      compile function by function through the content-addressed cache
             (ADR-0014 decision 5) and print hit/miss counts
-            (--cache DIR, default \$TMPDIR/omni-incr; --list: one line per unit)
+            (--cache DIR, default .omni-cache/incr; --list: one line per unit)
   glr-table print the parsing table for a .grammar file (ADR-0014 decision 2)
             (--brief: rules and remaining conflicts only, no per-state dump)
   glr       parse a source file with a .grammar and print the resulting s-expr

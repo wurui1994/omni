@@ -26,7 +26,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { workDir } from '../work.js';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { KERNELS, NO_KERNEL, DEVICE } from './kernels.js';
@@ -35,7 +35,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '../..');
 const cli = join(root, 'stage0', 'src', 'cli.js');
 const update = process.argv.includes('--update');
-const dir = mkdtempSync(join(tmpdir(), 'omni-gpu-'));
+const dir = workDir('gpu');
 
 const NOPE = 'spirv 后端目前不支持';
 

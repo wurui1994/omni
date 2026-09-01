@@ -12,7 +12,7 @@
 //   node tests/oir/run.js add     只跑名字含 add 的用例
 
 import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { workDir } from '../work.js';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -843,7 +843,7 @@ function run(cmd, args, opts = {}) {
 }
 
 const cases = CASES.filter((x) => !filters.length || filters.some((f) => x.name.includes(f)));
-const dir = mkdtempSync(join(tmpdir(), 'omni-oir-'));
+const dir = workDir('oir');
 
 // 参照：在 node 里把每条 jsSrc 求值，按 JS 的 String() 打印
 const refSrc = cases.map((x) => `console.log(String(${x.jsSrc}));`).join('\n');

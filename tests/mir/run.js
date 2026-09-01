@@ -18,7 +18,7 @@
 //   node tests/mir/run.js basics        # 只跑名字里含 basics 的
 
 import { readdirSync, readFileSync, writeFileSync, existsSync, mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { workDir } from '../work.js';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Diagnostics, SourceFile } from '../../stage0/src/source/diag.js';
@@ -146,7 +146,7 @@ for (const [name, path] of snaps) {
 // ------------------------------------------------- 3. 哈希是内容哈希
 
 if (keep('hash')) {
-  const dir = mkdtempSync(join(tmpdir(), 'omni-mir-'));
+  const dir = workDir('mir');
   const src = (gBody) => [
     'int f(int a) { return a + 1; }',
     `int g(int a) { return ${gBody}; }`,

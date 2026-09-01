@@ -135,7 +135,7 @@
 
 import { readdirSync, readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
-import { tmpdir } from 'node:os';
+import { workDir } from '../work.js';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
@@ -256,7 +256,7 @@ for (const f of list('bad', '.jnc')) {
 // 只看文本非空的话，降成一堆废话也能过。
 
 const mods = list('mods', '.jnc');
-const tmp = mods.length === 0 ? null : mkdtempSync(join(tmpdir(), 'omni-jnc-mods-'));
+const tmp = mods.length === 0 ? null : workDir('jnc-mods');
 for (const f of mods) {
   if (!want(f)) continue;
   const name = basename(f, '.jnc');

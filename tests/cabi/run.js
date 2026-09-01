@@ -15,7 +15,7 @@
 //   node tests/cabi/run.js libc     只跑名字含 libc 的用例
 
 import { mkdtempSync, writeFileSync, readdirSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { workDir } from '../work.js';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -40,7 +40,7 @@ const run = (cmd, args) => {
 const NATIVE_ONLY = 'is only available in a native build';
 const INTERP_ONLY = 'is not supported by the interpreter';
 
-const dir = mkdtempSync(join(tmpdir(), 'omni-cabi-'));
+const dir = workDir('cabi');
 const cc = ['clang', 'cc', 'gcc'].find((x) => run('which', [x]).code === 0);
 const cases = readdirSync(join(here, 'cases')).filter((f) => f.endsWith('.js')).sort()
   .filter((f) => !filters.length || filters.some((x) => f.includes(x)));

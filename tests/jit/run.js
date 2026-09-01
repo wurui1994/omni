@@ -19,7 +19,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readdirSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { workDir } from '../work.js';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SUPPORTED } from '../llvm/supported.js';
@@ -75,7 +75,7 @@ for (const rel of SUPPORTED) {
 
 // ------------------------------------------------- 2. 不落目标文件
 
-const work = mkdtempSync(join(tmpdir(), 'omni-jit-axis-'));
+const work = workDir('jit-axis');
 const r = run(['run-jit', join(root, 'tests', 'cases', '02_numeric.omni'), '--work', work]);
 const left = readdirSync(work).sort();
 if (r.code !== 0) bad('no-objects', `    run-jit --work exit=${r.code}\n${r.err}`);

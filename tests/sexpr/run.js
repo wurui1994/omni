@@ -23,7 +23,7 @@
 //   node tests/sexpr/run.js numeric
 
 import { mkdtempSync, writeFileSync, readdirSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { workDir } from '../work.js';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -32,7 +32,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '../..');
 const cli = join(root, 'stage0', 'src', 'cli.js');
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
-const dir = mkdtempSync(join(tmpdir(), 'omni-sexpr-'));
+const dir = workDir('sexpr');
 
 const cmd = (args) => {
   // cwd 钉在仓库根上：cases 里有一份要**读文件**的（19-readtext），它的路径是相对仓库根

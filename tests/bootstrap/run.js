@@ -18,7 +18,7 @@
 //   node tests/bootstrap/run.js -q     只测 JS 侧的不动点，跳过逐用例对照与 C 路径
 
 import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { workDir } from '../work.js';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -27,7 +27,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
 const quick = process.argv.includes('-q');
 const cli = join(root, 'stage0', 'src', 'cli.js');
-const dir = mkdtempSync(join(tmpdir(), 'omni-boot-'));
+const dir = workDir('boot');
 
 // 自举这条路上的 C **必须带优化**，与 cli.js 的默认档（-O0，为了迭代速度）分开。
 // 量出来的：-O0 编出来的 N1 一跑 `emit-c cli.js` 就 SIGSEGV（那份编译器的降级是深递归，

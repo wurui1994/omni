@@ -19,7 +19,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, readdirSync, existsSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { workDir } from '../work.js';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Diagnostics } from '../../stage0/src/source/diag.js';
@@ -44,7 +44,7 @@ const bad = (label, detail) => {
   process.stdout.write(`  FAIL ${label}\n`);
 };
 
-const dir = mkdtempSync(join(tmpdir(), 'omni-incr-'));
+const dir = workDir('incr');
 
 /** `omni incr` 一次，返回 {units, hit, miss, emit}。子进程 = 缓存真的过了磁盘。 */
 function incr(src, cache, extra = []) {

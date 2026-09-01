@@ -23,7 +23,7 @@
 //   UPDATE=1 node tests/glr/run.js      重写快照
 
 import { mkdtempSync, writeFileSync, readdirSync, readFileSync, mkdirSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { workDir } from '../work.js';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -32,7 +32,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const cli = join(here, '../../stage0/src/cli.js');
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 const update = process.env.UPDATE === '1';
-const dir = mkdtempSync(join(tmpdir(), 'omni-glr-'));
+const dir = workDir('glr');
 mkdirSync(join(here, 'snapshots'), { recursive: true });
 
 const run = (args) => {

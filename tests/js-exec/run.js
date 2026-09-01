@@ -12,7 +12,7 @@
 // JS，见 ADR-0011）。输出一律用 console.log(单个字符串)。
 
 import { mkdtempSync, writeFileSync, readdirSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { workDir } from '../work.js';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -30,7 +30,7 @@ const run = (cmd, args) => {
   return { out: r.stdout ?? '', err: r.stderr ?? '', code: r.status ?? 1 };
 };
 
-const dir = mkdtempSync(join(tmpdir(), 'omni-jsexec-'));
+const dir = workDir('jsexec');
 const cc = ['clang', 'cc', 'gcc'].find((x) => run('which', [x]).code === 0);
 const cases = readdirSync(join(here, 'cases')).filter((f) => f.endsWith('.js')).sort()
   .filter((f) => !filters.length || filters.some((x) => f.includes(x)));

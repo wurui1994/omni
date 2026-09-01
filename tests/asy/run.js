@@ -46,7 +46,7 @@ import { readdirSync, readFileSync, mkdtempSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
+import { workDir } from '../work.js';
 
 import { ASY_NOPE } from '../../stage0/src/frontend-asy/types.js';
 
@@ -86,6 +86,10 @@ const read = (p) => {
     return null;
   }
 };
+
+// 真 asy 出的那些 EPS 放哪儿（第一百〇五刀）：一趟清一次、名字确定，不是系统临时目录。
+// 整趟只算一次 —— workDir 是"进来先清空"，放在每个例子里就把上一个例子的产物删了。
+const asyWork = workDir('asy');
 
 let pass = 0;
 let fail = 0;
@@ -348,7 +352,7 @@ for (const f of readdirSync(join(here, 'draw')).filter(isCase).sort()) {
 
   let judged = '';
   if (asyBin !== null) {
-    const out = join(mkdtempSync(join(tmpdir(), 'omni-asy-')), name);
+    const out = join(asyWork, name);
     const r = asyRun(['-noV', '-f', 'eps', '-o', out, path], dir);
     const real = read(`${out}.eps`);
     if ((r.status ?? 1) !== 0 || real === null) {

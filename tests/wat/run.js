@@ -17,7 +17,7 @@
 //   node tests/wat/run.js numeric
 
 import { mkdtempSync, writeFileSync, readdirSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { workDir } from '../work.js';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -55,7 +55,7 @@ function sameTree(a, b) {
 let pass = 0;
 let fail = 0;
 const failures = [];
-const dir = mkdtempSync(join(tmpdir(), 'omni-wat-'));
+const dir = workDir('wat');
 
 const pick = (d) => readdirSync(join(here, d)).filter((f) => f.endsWith('.wat')).sort()
   .filter((f) => !filters.length || filters.some((x) => f.includes(x)));
