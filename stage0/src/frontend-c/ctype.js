@@ -148,6 +148,18 @@ export function mkEnum(info) {
   return ty;
 }
 
+/**
+ * 函数类型。`ref` 是 `{ret, params, variadic}` —— tcc 那边是一个 `Sym`，形参挂在
+ * `sym->next` 那条链上（`tcc.h` 的 `Sym.type` + `func_type`），同一件事。
+ *
+ * 函数类型在 C 里**几乎总是立刻退化成指针**（C11 6.3.2.1 第 4 段），所以它主要是
+ * 声明符里的一个中间产物：`int f(void)` 的 `f` 是函数，`int (*p)(void)` 的 `p` 是
+ * 指向它的指针。有了这个类型，带括号的声明符才有东西可套。
+ */
+export function mkFunc(ret, params, variadic) {
+  return ctype(VT_FUNC, { ret, params, variadic: variadic === true });
+}
+
 /* ------------------------------------------------- 位域（`tcc.h:1087-1088`）
  * 「从第几位开始」与「几位宽」各占 6 位，就挤在 `VT_STRUCT_SHIFT` 那一段里 ——
  * 于是位域信息**跟着类型走**：`s.f` 回一个内存左值，宽度与偏移在它的 `t` 里，
@@ -201,7 +213,11 @@ export function typeText(ty) {
   const t = ty.t;
   if (isArray(t)) return `${typeText(ty.ref)}[${ty.count < 0 ? '' : ty.count}]`;
   if (isPtr(t)) return `${typeText(ty.ref)} *`;
-  if (isFunc(t)) return `${typeText(ty.ref.ret)} ()`;
+  if (isFunc(t)) {
+    const ps = ty.ref.params.map((p) => typeText(p.ty));
+    if (ty.ref.variadic) ps.push('...');
+    return `${typeText(ty.ref.ret)} (${ps.length === 0 ? 'void' : ps.join(', ')})`;
+  }
   if (isStruct(t)) return `${isUnion(t) ? 'union' : 'struct'} ${ty.ref.name}`;
   if (isEnum(t)) return `enum ${ty.ref === null ? '<anonymous>' : ty.ref.name}`;
   const u = isUnsigned(t) ? 'unsigned ' : '';
@@ -223,5 +239,17 @@ export function sameType(a, b) {
   if ((a.t & ~VT_STORAGE) !== (b.t & ~VT_STORAGE)) return false;
   if (a.ref === null || b.ref === null) return a.ref === b.ref;
   if (isPtr(a.t) || isArray(a.t)) return sameType(a.ref, b.ref);
+  /* 函数类型是**结构性**地比的：`int (*)(int)` 每写一次就是一个新的 ref 对象，
+   * 而 C 说这两个类型相同（C11 6.7.6.3 第 15 段）。struct 那边相反 —— 一个 tag
+   * 一个对象，所以比引用就够（见 `mkStruct`）。 */
+  if (isFunc(a.t)) {
+    if (a.ref.variadic !== b.ref.variadic) return false;
+    if (a.ref.params.length !== b.ref.params.length) return false;
+    if (!sameType(a.ref.ret, b.ref.ret)) return false;
+    for (let i = 0; i < a.ref.params.length; i++) {
+      if (!sameType(a.ref.params[i].ty, b.ref.params[i].ty)) return false;
+    }
+    return true;
+  }
   return a.ref === b.ref;
 }

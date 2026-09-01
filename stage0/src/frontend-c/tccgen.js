@@ -94,11 +94,12 @@
 // **struct/union/enum、`.` 与 `->`、整块的 struct 赋值、不完整类型的指针、位域、
 // 聚合初始化器（含指定初始化器与不定长数组）、`switch`（含贯穿、`BRTABLE`/比较链两条路）、
 // `goto` 与语句标签（外围块上的，前向后向都行）、struct 的**传值与返回**（传地址 +
-// 隐藏的返回指针）**。
+// 隐藏的返回指针）、带括号的声明符（`int (*a)[3]`、`int (*f(int))[3]`、函数指针的
+// **类型**）**。
 // 还没到：`goto` 跳到不在外围块上的标签（relooper 那一路）、标签长在里层控制结构里
-// （Duff's device）、**外部**函数上的 struct 传值/返回（要真的 ABI）、嵌套聚合省掉里层
-// 花括号、带括号的声明符（`int (*a)[3]`、函数指针）、浮点（含 printf 的 `%f/%e/%g`）、
-// `malloc` 那一族
+// （Duff's device）、**外部**函数上的 struct 传值/返回（要真的 ABI）、**通过函数指针
+// 调用**与取函数地址（MIR 还没有间接调用）、函数类型的 typedef、嵌套聚合省掉里层
+// 花括号、浮点（含 printf 的 `%f/%e/%g`）、`malloc` 那一族
 // （要堆）、变参函数的**定义**（要 `va_list`/`va_arg`）。
 //
 // 碰到还没做到的东西**当场报错**，报错文本里带「第六刀」字样 —— 一眼能看出是进度不是
@@ -130,7 +131,7 @@ import {
   VT_EXTERN, VT_STATIC, VT_TYPEDEF, VT_INLINE, VT_CONSTANT, VT_VOLATILE, VT_STORAGE,
   btype, isInteger, isFloat, isUnsigned, isPtr, isArray, isFunc, isStruct, isUnion,
   isBitfield, bitPosOf, bitSizeOf, mkBitfield, bitfieldBase,
-  ctype, mkPointer, mkArray, mkStruct, mkEnum, typeSize, typeText, sameType,
+  ctype, mkPointer, mkArray, mkStruct, mkEnum, mkFunc, typeSize, typeText, sameType,
   TY_VOID, TY_INT, TY_UINT, TY_LLONG, TY_ULLONG, TY_CHAR, TY_SHORT, TY_BOOL,
 } from './ctype.js';
 import {
@@ -1499,6 +1500,13 @@ export class CGen {  /**
        * （`tccgen.c:1143`）建一个待重定位的符号，我们同样先建 —— 但只在紧跟着 `(`
        * 时才算调用，否则是「取函数地址」，那要函数指针。 */
       if (this.tok !== LPAR) {
+        /* 函数名不跟着 `(` 就是「函数指示符退化成指针」（C11 6.3.2.1 第 4 段）。
+         * 那要一个能装函数的值 —— 而 MIR 只有直接调用（`CALL` 的 a 是函数表下标），
+         * 没有间接调用，所以这一格与 `postfix` 里那一条是同一片。 */
+        const fn = this.funcs.get(name);
+        if (fn !== undefined && fn.declared) {
+          this.todo('取函数地址还没到（MIR 还没有间接调用）');
+        }
         this.err(`'${name}' undeclared`);
       }
       return this.postfix(this.funcCall(name));
@@ -1557,7 +1565,7 @@ export class CGen {  /**
         cur = this.incdec(cur, t === TOK_INC ? PLUS : MINUS, true);
         continue;
       }
-      if (t === LPAR) this.todo('函数指针调用还没到');
+      if (t === LPAR) this.todo('通过函数指针调用还没到（MIR 还没有间接调用）');
       if (t === LBRACK) {
         /* `a[i]` **就是** `*(a + i)`（C11 6.5.2.1 第 2 段）。照这一句写而不是另开一条
          * 地址计算：于是 `i[a]` 自动对、数组与指针自动一视同仁、多维数组自动是
@@ -2837,50 +2845,133 @@ export class CGen {  /**
   /**
    * 声明符（`type_decl` 与 `post_type`，`tccgen.c:5049` 一带）。
    *
-   * 顺序是这一段唯一的难点：**先吃前缀的 `*`，再吃后缀的 `[]`，而后缀绑得更紧**。
-   * 于是 `int *a[3]` 是「3 个 `int *` 的数组」而不是「指向 `int[3]` 的指针」，
-   * `int *f(void)` 是「回 `int *` 的函数」。`int (*a)[3]` 要在括号里再来一层，
-   * 那要把「已经攒了一半的类型」当参数往里传（tcc 的 `type_decl` 递归就是干这个的），
-   * 这一片还没做。
+   * 顺序是这一段唯一的难点：**先吃前缀的 `*`，再吃后缀的 `[]` 与 `(…)`，而后缀绑得
+   * 更紧**。于是 `int *a[3]` 是「3 个 `int *` 的数组」而不是「指向 `int[3]` 的指针」，
+   * `int *f(void)` 是「回 `int *` 的函数」。
+   *
+   * 带括号的那一层（`int (*a)[3]`、`int (*fp)(int)`）要把「已经攒了一半的类型」往里传。
+   * tcc 的办法是先建一个带**洞**的类型、解析完外层再把洞补上（`type_decl` 那次递归）；
+   * 我们的 CType 不改已经建好的对象，所以反过来：里层回一个**函数** `wrap`，
+   * 外层把自己攒出来的类型喂给它。同一件事，只是洞在函数里而不在数据里。
    *
    * @param {object} base 基本类型（**存储类已经剥掉**）
    * @param {'need'|'opt'|'none'} want 名字：必须有 / 可省（原型里的形参）/ 不能有
    */
   declarator(base, want) {
-    let ptr = 0;
+    const d = this.declaratorParts(want);
+    return { ty: d.wrap(base), name: d.name };
+  }
+
+  /**
+   * 声明符的形状（名字 + 一个「把基本类型套成最终类型」的函数）。
+   *
+   * 一层里的三段：前缀的 `*`、里层的 `(…)`（或者名字）、后缀的 `[]` / `(形参表)`。
+   * 套的次序是**前缀 -> 后缀（倒着）-> 交给里层**：
+   *   - `int *a[3]`      pre=1, posts=[[3]]      -> ptr(int) 再 arr3  = 3 个 int*
+   *   - `int (*a)[3]`    外层 posts=[[3]]，里层 pre=1 -> arr3(int) 交给里层 -> ptr
+   *   - `int (*f[3])(v)` 外层 posts=[(v)]，里层 pre=1+posts=[[3]] -> 3 个函数指针
+   */
+  declaratorParts(want) {
+    let pre = 0;
     while (this.tok === STAR) {
       this.next();
-      ptr++;
+      pre++;
       // 指针自己的限定词（`char * const p`）：吃掉，这一片没有可观察的效果
       while (this.tok === TOK_CONST || this.tok === TOK_VOLATILE) this.next();
     }
-    if (this.tok === LPAR) {
-      this.todo('带括号的声明符还没到（`int (*a)[3]`、函数指针）');
-    }
+
+    /** @type {{name:string|null,wrap:(ty:object)=>object}|null} */
+    let inner = null;
     let name = null;
-    if (this.tok >= TOK_UIDENT) {
+    if (this.tok === LPAR && this.isGroupParen()) {
+      this.next();
+      inner = this.declaratorParts(want);
+      this.skip(RPAR);
+    } else if (this.tok >= TOK_UIDENT) {
       if (want === 'none') this.err('unexpected identifier in type name');
       name = this.identName();
     } else if (want === 'need') {
       this.expect('identifier');
     }
-    /* 维度先收进一个表、再**倒着**套：`int a[2][3]` 是「2 个 `int[3]`」。
-     * 顺着套会得到「3 个 `int[2]`」—— 大小一样，`sizeof(a[0])` 不一样（8 vs 12）。 */
-    const dims = [];
-    while (this.tok === LBRACK) {
+
+    /* 后缀：从左往右收进一个表。维度**倒着**套（`int a[2][3]` 是「2 个 `int[3]`」；
+     * 顺着套会得到「3 个 `int[2]`」—— 大小一样，`sizeof(a[0])` 不一样），而函数与
+     * 数组混在一起时同一个次序也正好对：`int (*f[3])(void)` 的里层是 `[3]` 套在 ptr 上。 */
+    const posts = [];
+    for (;;) {
+      if (this.tok === LBRACK) {
+        this.next();
+        posts.push({ k: 'arr', n: this.tok === RBRACK ? -1 : Number(this.constExpr()) });
+        this.skip(RBRACK);
+        continue;
+      }
+      if (this.tok === LPAR) {
+        posts.push({ k: 'fn', ...this.funcParams() });
+        continue;
+      }
+      break;
+    }
+
+    const wrap = (base) => {
+      let ty = base;
+      for (let i = 0; i < pre; i++) ty = mkPointer(ty);
+      for (let i = posts.length - 1; i >= 0; i--) {
+        const p = posts[i];
+        if (p.k === 'fn') {
+          ty = mkFunc(ty, p.params, p.variadic);
+          continue;
+        }
+        if (p.n === 0) this.err('zero-sized array');
+        if (p.n < -1) this.err('array size must not be negative');
+        ty = mkArray(ty, p.n);
+      }
+      return inner === null ? ty : inner.wrap(ty);
+    };
+    return { name: inner === null ? name : inner.name, wrap };
+  }
+
+  /**
+   * 当前的 `(` 是**分组**还是形参表。
+   *
+   * 位置本来就能分开这两件事：形参表只会跟在名字（或者里层那一组）**后面**，而这儿是
+   * 声明符的开头。抽象声明符是唯一的例外 —— `int (*)(void)` 里的第一个 `(` 是分组，
+   * `int (void)`（一个函数类型）里的那个是形参表。所以只在这一处看一格：
+   * 后面是类型的开头或者 `)` 的话就是形参表，别的都是分组。
+   */
+  isGroupParen() {
+    this.next();
+    const t = this.tok;
+    const group = !(t === RPAR || t === TOK_DOTS || this.isTypeStart(t));
+    this.cpp.ungetTok(LPAR);
+    this.tok = this.cpp.tok;
+    this.tokc = this.cpp.tokc;
+    return group;
+  }
+
+  /**
+   * 形参表：`(` 已经在手上。回 `{params, variadic}`。
+   * `(void)` 是「没有形参」；`()` 是「形参没说」（老式声明），这一片当没有形参处理。
+   */
+  funcParams() {
+    this.skip(LPAR);
+    /** @type {{name:string,ty:object}[]} */
+    const params = [];
+    if (this.tok === RPAR) {
       this.next();
-      if (this.tok === RBRACK) dims.push(-1);
-      else dims.push(Number(this.constExpr()));
-      this.skip(RBRACK);
+      return { params, variadic: false };
     }
-    let ty = base;
-    for (let i = 0; i < ptr; i++) ty = mkPointer(ty);
-    for (let i = dims.length - 1; i >= 0; i--) {
-      if (dims[i] === 0) this.err('zero-sized array');
-      if (dims[i] < -1) this.err('array size must not be negative');
-      ty = mkArray(ty, dims[i]);
+    if (this.tok === TOK_VOID) {
+      // `(void)` = 没有形参；`(void *p)` 之类要交回去按普通形参走
+      this.next();
+      if (this.tok === RPAR) {
+        this.next();
+        return { params, variadic: false };
+      }
+      this.cpp.ungetTok(TOK_VOID);
+      this.tok = this.cpp.tok;
+      this.tokc = this.cpp.tokc;
     }
-    return { ty, name };
+    return { params, variadic: this.paramList(params) };
   }
 
   /**
@@ -2976,7 +3067,7 @@ export class CGen {  /**
         const d = this.declarator(base, 'need');
         const name = /** @type {string} */ (d.name);
         if (isTypedef) {
-          if (this.tok === LPAR) this.todo('函数类型的 typedef 还没到');
+          if (isFunc(d.ty.t)) this.todo('函数类型的 typedef 还没到');
           /* `typedef` 不声明对象，只给一个类型起名。重复的 typedef 是合法的（C11
            * 6.7 第 3 段：同一个类型可以说两遍），不同类型的重名才是错。 */
           const prev = this.typedefs.get(name);
@@ -2984,7 +3075,7 @@ export class CGen {  /**
             this.err(`typedef '${name}' redefined with a different type`);
           }
           this.typedefs.set(name, d.ty);
-        } else if (this.tok === LPAR) {
+        } else if (isFunc(d.ty.t)) {
           if (this.funcDecl(global, name, d.ty)) { wasBody = true; break; }
         } else {
           /* 局部量与全局量走**同一段**代码：不同的只有「往哪儿落地」（一个 dest 对象），
@@ -3051,30 +3142,12 @@ export class CGen {  /**
   }
 
   /** 函数声明或定义。当前记号是 `(`。回 true 表示读掉了一个**函数体**。 */
-  funcDecl(global, name, ret) {
+  funcDecl(global, name, fnTy) {
     const info = this.funcSym(name);
-    this.skip(LPAR);
-    /** @type {{name:string,ty:object}[]} */
-    const params = [];
-    let variadic = false;
-    if (this.tok === RPAR) {
-      // 老式的 `f()`：形参没说。这一片当「没有形参」处理
-      this.next();
-    } else if (this.tok === TOK_VOID) {
-      // `(void)` = 没有形参；`(void *p)` 之类要交回去按普通形参走
-      this.next();
-      if (this.tok === RPAR) {
-        this.next();
-      } else {
-        this.cpp.ungetTok(TOK_VOID);
-        this.tok = this.cpp.tok;
-        this.tokc = this.cpp.tokc;
-        variadic = this.paramList(params);
-      }
-    } else {
-      variadic = this.paramList(params);
-    }
-    return this.finishFunc(global, info, name, stripStorage(ret), params, variadic);
+    /* 形参表已经在声明符里读完了（第十二片：`(…)` 是声明符的后缀，不是函数定义的
+     * 一部分）—— 这儿只把函数类型拆开交给 `finishFunc`。 */
+    return this.finishFunc(global, info, name, stripStorage(fnTy.ref.ret),
+      fnTy.ref.params, fnTy.ref.variadic);
   }
 
   paramList(params) {
@@ -3095,6 +3168,9 @@ export class CGen {  /**
        * `int f(int *a)` 是同一个函数。所以这里退化，而不是让 declareLocal 去帧上划
        * 一块 —— 那块地方永远也填不上，因为实参传进来的是一个地址。 */
       if (isArray(ty.t)) ty = mkPointer(ty.ref);
+      /* 形参上的函数类型**就是**函数指针（C11 6.7.6.3 第 8 段）：`int f(int g(void))`
+       * 与 `int f(int (*g)(void))` 是同一个函数。 */
+      if (isFunc(ty.t)) ty = mkPointer(ty);
       if (btype(ty.t) === VT_VOID) this.err('parameter has void type');
       /* 传值的 struct 传的是**地址**（第十一片的 ABI，见 `runBody` 与 `funcCall`）：
        * 调用方给出实参那个对象的地址，被调方在入口处拷进自己的帧。arm64/x64 真的 ABI
