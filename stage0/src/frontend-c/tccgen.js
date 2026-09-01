@@ -78,8 +78,9 @@
 // 指针（`&`/`*`/算术/比较）、数组（含多维）、下标、影子栈、字符串字面量、常量表达式、
 // 全局量（data 段，常量初始化式）、`typedef`、`extern` 与「用过但没定义」的诊断、
 // 外部符号（`unit()` 末尾的转发桩）与变参调用（printf/sprintf 那一族已经跑通）、
-// **struct/union/enum、`.` 与 `->`、整块的 struct 赋值、不完整类型的指针、位域**。
-// 还没到：struct 的**传值/返回**（要 ABI）、聚合初始化器、带括号的声明符
+// **struct/union/enum、`.` 与 `->`、整块的 struct 赋值、不完整类型的指针、位域、
+// 聚合初始化器（含指定初始化器与不定长数组）**。
+// 还没到：struct 的**传值/返回**（要 ABI）、嵌套聚合省掉里层花括号、带括号的声明符
 // （`int (*a)[3]`、函数指针）、浮点（含 printf 的 `%f/%e/%g`）、`switch`/`goto`、
 // `malloc` 那一族（要堆）、变参函数的**定义**（要 `va_list`/`va_arg`）。
 //
@@ -1089,6 +1090,11 @@ export class CGen {  /**
     this.pendingData.push({ off: addr, bytes: raw });
   }
 
+  /** 往 data 段写一串现成的字节（字符串初始化数组走这儿）。 */
+  emitRaw(addr, bytes) {
+    if (bytes.length > 0) this.pendingData.push({ off: addr, bytes });
+  }
+
   /**
    * 全局量：住在 data 段里，地址是**编译期常量**。没有初始化式就不写 data ——
    * 线性内存出生时全是 0，而 C 正好规定静态存储期的对象零初始化（C11 6.7.9 第 10 段）。
@@ -1118,23 +1124,234 @@ export class CGen {  /**
   }
 
   /**
-   * 全局量的初始化式。**必须是常量表达式**（C11 6.7.9 第 4 段）—— 这正好与
-   * 「没有常量折叠」那条偏离和解：折叠不在主路上，但 C 本来就要求这些位置是常量，
-   * 所以这儿走 `constExpr` 那个独立的小求值器。
+   * 初始化式（`decl_initializer`，`tccgen.c:7990` 一带）。
+   *
+   * **一份代码同时管静态与自动**，这是这一片的核心决定。静态（全局量）要往 data 段写
+   * 字节、值必须是常量表达式（C11 6.7.9 第 4 段）；自动（局部量）要发 MSTORE、值是
+   * 任意表达式。两者不同的只有**最里面那一层怎么落地**，而「怎么走这棵嵌套结构」
+   * 完全一样。tcc 也是这么合的（它靠 `c >= 0` 区分 data 与代码）—— 分成两份的代价是
+   * `{{1,2},{3,4}}` 那套遍历规则要写两遍，而它们迟早会在某个边角上不一致。
+   *
+   * `dest` 三种形状：
+   *   `{ stat: true, addr }`  —— data 段，addr 是绝对地址
+   *   `{ stat: false, addr }` —— 线性内存，addr 是基址的 ref，`off` 是它上面的偏移
+   *   `{ slot }`              —— MIR 的槽（只可能是标量，没被取过地址的局部量）
    */
-  globalInit(e) {
-    const ty = e.ty;
-    if (this.tok === LBRACE) this.todo('聚合初始化器 `{…}` 还没到');
-    if (isArray(ty.t)) this.todo('数组的初始化器还没到（`char s[] = "…"`）');
-    if (this.tok === TOK_STR) {
-      /* `char *s = "abc";` —— 值是那个字面量在 data 段里的地址。这在真的目标文件里是
-       * 一条重定位；我们的「链接」是一个常量，所以它就是一个 8 字节的数。 */
-      if (!isPtr(ty.t)) this.err(`invalid initializer for '${typeText(ty)}'`);
-      const addr = this.strData(this.readStrTok(this.tokc));
-      this.emitBytes(e.addr, 8, BigInt(addr));
+  initializer(dest, off, ty) {
+    // `char s[4] = "ab"`：字符串直接铺进数组（不是「指针赋值」）
+    if (isArray(ty.t) && this.tok === TOK_STR) {
+      this.initString(dest, off, ty, this.readStrTok(this.tokc));
       return;
     }
-    this.emitBytes(e.addr, typeSize(ty).size, this.constExpr());
+    if (this.tok === LBRACE) {
+      if (isArray(ty.t)) return this.initArray(dest, off, ty);
+      if (isStruct(ty.t)) return this.initStruct(dest, off, ty);
+      /* 标量外面套一层花括号是合法的：`int x = { 5 };`（C11 6.7.9 第 11 段）。 */
+      this.next();
+      this.initializer(dest, off, ty);
+      if (this.tok === COMMA) this.next();
+      this.skip(RBRACE);
+      return;
+    }
+    if (isArray(ty.t)) this.err(`invalid initializer for '${typeText(ty)}'`);
+    if (isStruct(ty.t)) {
+      /* `struct P a = b;` —— 这不是聚合初始化器，是一次整块拷贝。 */
+      if (dest.stat) this.err('initializer element is not constant');
+      this.structCopy(sMem(ty, dest.addr, off), this.exprEq());
+      return;
+    }
+    this.initScalar(dest, off, ty);
+  }
+
+  /** 最里面那一层：一个标量落地。静态写字节、自动发 store。 */
+  initScalar(dest, off, ty) {
+    if (dest.slot !== undefined) {
+      this.vstore(sLval(ty, dest.slot, null), this.exprEq());
+      return;
+    }
+    if (!dest.stat) {
+      /* `vstore` 认得位域（`storeBitfield`），所以 `struct{int a:3;} x = {5};`
+       * 在自动这一侧不用多写一行。 */
+      this.vstore(sMem(ty, dest.addr, off), this.exprEq());
+      return;
+    }
+    if (isBitfield(ty.t)) this.todo('静态位域的初始化式还没到（要按位往 data 里并）');
+    if (this.tok === TOK_STR) {
+      /* `char *s = "abc";` —— 值是那个字面量在 data 段里的地址。真的目标文件里这是
+       * 一条重定位；我们的「链接」是一个常量，所以它就是 8 个字节。 */
+      if (!isPtr(ty.t)) this.err(`invalid initializer for '${typeText(ty)}'`);
+      const addr = this.strData(this.readStrTok(this.tokc));
+      this.emitBytes(dest.addr + off, 8, BigInt(addr));
+      return;
+    }
+    this.emitBytes(dest.addr + off, typeSize(ty).size, this.constExpr());
+  }
+
+  /**
+   * 字符串铺进 char 数组。`bytes` **不含**结尾的 0，那个 0 由这儿补。
+   * `char s[3] = "abc"` 是合法的：装不下的那个结尾 0 直接丢掉（C11 6.7.9 第 14 段）——
+   * 少这一条会把一个常见的写法判成错。
+   */
+  initString(dest, off, ty, bytes) {
+    if (btype(ty.ref.t) !== VT_BYTE) {
+      this.err(`array of '${typeText(ty.ref)}' cannot be initialized from a string`);
+    }
+    const n = ty.count < 0 ? bytes.length + 1 : ty.count;
+    if (bytes.length > n) this.err('initializer-string is too long');
+    const raw = [];
+    for (let i = 0; i < n; i++) {
+      raw.push(i < bytes.length ? bytes.charCodeAt(i) % 256 : 0);
+    }
+    if (dest.stat) {
+      this.emitRaw(dest.addr + off, raw);
+      return;
+    }
+    /* 自动这一侧一个字节一条 store。整块的 data 段那种「一次拷进去」要有一条
+     * 把 data 搬到栈上的指令，MIR 没有 —— 而这里长度是编译期常量，摊开就完了。 */
+    for (let i = 0; i < n; i++) {
+      this.f.emit(OP.MSTORE, T_I32, dest.addr, this.mod.consts.i32(BigInt(raw[i])),
+        memDesc(SK_I8, off + i));
+    }
+  }
+
+  /** `{…}` 铺进数组。`[3] = v` 那种指定初始化器也在这儿。 */
+  initArray(dest, off, ty) {
+    this.next();      // `{`
+    const es = typeSize(ty.ref).size;
+    const n = ty.count;
+    let i = 0;
+    while (this.tok !== RBRACE) {
+      if (this.tok === TOK_EOF) this.err("'}' expected");
+      if (this.tok === LBRACK) {
+        // 指定初始化器（C99 6.7.9 第 6 段）：`[3] = v` 之后接着往下排
+        this.next();
+        i = Number(this.constExpr());
+        this.skip(RBRACK);
+        this.skip(ASSIGN);
+        if (i < 0) this.err('negative array designator');
+      }
+      if (n >= 0 && i >= n) this.err('excess elements in array initializer');
+      /* 嵌套的数组可以省掉里面那层花括号（`int a[2][2] = {1,2,3,4}`）—— C 允许，
+       * 而要支持它得在这儿把「还没吃完的元素」交给下一层。这一片没做：省花括号
+       * 的写法当场报错，别静悄悄按别的意思铺。 */
+      if (isArray(ty.ref.t) && this.tok !== LBRACE && this.tok !== TOK_STR) {
+        this.todo('嵌套数组省掉里层花括号还没到（`int a[2][2] = {1,2,3,4}`）');
+      }
+      this.initializer(dest, off + i * es, ty.ref);
+      i++;
+      if (this.tok !== COMMA) break;
+      this.next();
+    }
+    this.skip(RBRACE);
+  }
+
+  /** `{…}` 铺进 struct / union。`.f = v` 那种指定初始化器也在这儿。 */
+  initStruct(dest, off, ty) {
+    this.next();      // `{`
+    const info = ty.ref;
+    if (info.fields === null) this.err(`'${typeText(ty)}' is an incomplete type`);
+    const un = isUnion(ty.t);
+    let k = 0;
+    while (this.tok !== RBRACE) {
+      if (this.tok === TOK_EOF) this.err("'}' expected");
+      if (this.tok === DOT) {
+        this.next();
+        const nm = this.identName();
+        k = info.fields.findIndex((x) => x.name === nm);
+        if (k < 0) this.err(`'${typeText(ty)}' has no member named '${nm}'`);
+        this.skip(ASSIGN);
+      }
+      if (k >= info.fields.length) this.err('excess elements in struct initializer');
+      const fd = info.fields[k];
+      if (isStruct(fd.ty.t) && this.tok !== LBRACE) {
+        this.todo('嵌套 struct 省掉里层花括号还没到');
+      }
+      this.initializer(dest, off + fd.off, fd.ty);
+      k++;
+      /* union 只初始化**一个**成员（C11 6.7.9 第 17 段）—— 没有 designator 时是第一个。
+       * 后面还跟着东西就是错，别静悄悄把第二个盖到第一个身上。 */
+      if (un) break;
+      if (this.tok !== COMMA) break;
+      this.next();
+    }
+    this.skip(RBRACE);
+  }
+
+  /**
+   * 把一块内存清零。聚合的初始化式**只覆盖写出来的那些**，剩下的按 C 要零
+   * （C11 6.7.9 第 21 段）。静态那一侧免费（线性内存出生就是 0），自动这一侧要发指令。
+   *
+   * 先整块清零、再写给出的那些 —— 而不是「算出哪些没被覆盖再补零」。后者省几条指令，
+   * 但要在指定初始化器与嵌套之下维护一张「覆盖到哪儿了」的表，那张表是错误的温床。
+   */
+  autoZero(addr, off, size) {
+    const f = this.f;
+    for (let done = 0; done < size;) {
+      const left = size - done;
+      const w = left >= 8 ? 8 : left >= 4 ? 4 : left >= 2 ? 2 : 1;
+      const mt = w === 8 ? T_I64 : T_I32;
+      const zero = w === 8 ? this.mod.consts.int(0n) : this.mod.consts.i32(0n);
+      f.emit(OP.MSTORE, mt, addr, zero, memDesc(COPY_SK[w], off + done));
+      done += w;
+    }
+  }
+
+  /**
+   * `int a[] = {…}` / `char s[] = "…"` 的长度由初始化式定（C11 6.7.9 第 22 段）。
+   *
+   * 一遍过时这是个鸡生蛋：要先知道长度才能划地方，而长度写在后面。tcc 的办法是把
+   * 初始化式的记号收下来先跑一遍「只数大小」（`decl_initializer_alloc`）；这里同样收，
+   * 但只数**顶层元素个数** —— 那在记号层面就数完了，不必真的解析一遍表达式。
+   *
+   * 回 `{ ty, body }`：body 非 null 时调用方要用 `replayBraced` 把它放一遍。
+   */
+  sizeFromInit(ty) {
+    if (this.tok !== LBRACE) this.err(`array size missing`);
+    const body = this.cpp.captureBraced();
+    const toks = body.toks;
+    let depth = 0;
+    let n = 0;
+    let item = false;
+    for (let i = 0; i < toks.length; i++) {
+      const t = toks[i];
+      if (t === TOK_EOF) break;
+      if (t === LBRACE || t === LPAR) { depth++; continue; }
+      if (t === LBRACK) {
+        if (depth === 1) {
+          this.todo('不定长数组配指定初始化器还没到（`int a[] = {[3]=1}`）');
+        }
+        depth++;
+        continue;
+      }
+      if (t === RBRACE || t === RPAR || t === RBRACK) {
+        depth--;
+        if (depth === 0) break;
+        continue;
+      }
+      if (depth !== 1) continue;
+      if (t === COMMA) { n++; item = false; continue; }
+      item = true;
+    }
+    // 末尾多余的那个逗号不算一个元素：`{1, 2, }` 是两个
+    return { ty: mkArray(ty.ref, item ? n + 1 : n), body };
+  }
+
+  /**
+   * 把收好的 `{…}` 放一遍。与函数体那两遍（`finishFunc`）同一手法、同一理由：
+   * 一遍过没法后看，只能把记号留着再走一次。
+   */
+  replayBraced(body, fn) {
+    const afterTok = this.cpp.tok;
+    const afterVal = this.cpp.tokc;
+    this.cpp.pushTokens(body);
+    this.next();
+    fn();
+    if (this.tok !== TOK_EOF) this.err('internal: 初始化式没读完');
+    this.cpp.endMacro();
+    this.cpp.tok = afterTok;
+    this.cpp.tokc = afterVal;
+    this.tok = afterTok;
+    this.tokc = afterVal;
   }
 
   /** `unary`（`tccgen.c:5595`）。前缀与后缀都在这儿，与 tcc 一样。 */
@@ -2325,28 +2542,58 @@ export class CGen {  /**
           this.typedefs.set(name, d.ty);
         } else if (this.tok === LPAR) {
           if (this.funcDecl(global, name, d.ty)) { wasBody = true; break; }
-        } else if (!global) {
-          if (isArray(d.ty.t) && d.ty.count < 0) {
-            this.err(`array size missing in '${name}'`);
-          }
-          const e = this.declareLocal(name, d.ty);
-          if (this.tok === ASSIGN) {
-            this.next();
-            if (this.tok === LBRACE) this.todo('聚合初始化器 `{…}` 还没到');
-            if (isArray(d.ty.t)) this.todo('数组的初始化器还没到（`char s[] = "…"`）');
-            /* 初始化式是**赋值表达式**，不是逗号表达式（`int a = 1, b = 2;` 里那个
-             * 逗号是声明的分隔符）—— 这一格错了整行都会读歪。 */
-            this.vstore(this.entryLval(name, e), this.exprEq());
-          }
         } else {
-          if (isArray(d.ty.t) && d.ty.count < 0) {
-            this.err(`array size missing in '${name}'`);
+          /* 局部量与全局量走**同一段**代码：不同的只有「往哪儿落地」（一个 dest 对象），
+           * 遍历嵌套结构那套规则在 `initializer` 里只有一份。 */
+          const hasInit = this.tok === ASSIGN;
+          if (hasInit) this.next();
+          if (isExtern && hasInit) this.err(`'${name}' has both 'extern' and initializer`);
+
+          /* 不定长数组（`int a[] = {…}`）的类型要等初始化式才定得下来 —— 于是这儿
+           * 「定类型」与「划地方」的顺序是反的：先看初始化式，再声明。 */
+          let vty = d.ty;
+          let body = null;
+          let strBytes = null;
+          const braced = hasInit && this.tok === LBRACE;
+          if (isArray(vty.t) && vty.count < 0) {
+            if (!hasInit) this.err(`array size missing in '${name}'`);
+            if (this.tok === TOK_STR) {
+              /* 相邻的字面量要拼起来（`char s[] = "a" "b"`），所以只能真的读一遍；
+               * 读完记号已经吃掉，字节留在手上。 */
+              strBytes = this.readStrTok(this.tokc);
+              vty = mkArray(vty.ref, strBytes.length + 1);
+            } else {
+              const r = this.sizeFromInit(vty);
+              vty = r.ty;
+              body = r.body;
+            }
+            if (vty.count === 0) this.err(`zero-sized array '${name}'`);
           }
-          const e = this.declareGlobal(name, d.ty, isExtern);
-          if (this.tok === ASSIGN) {
-            this.next();
-            if (isExtern) this.err(`'${name}' has both 'extern' and initializer`);
-            this.globalInit(e);
+
+          const e = global ? this.declareGlobal(name, vty, isExtern)
+            : this.declareLocal(name, vty);
+          if (hasInit) {
+            let dest;
+            let base;
+            if (global) {
+              dest = { stat: true, addr: e.addr };
+              base = 0;
+            } else if (e.off >= 0) {
+              dest = { stat: false, addr: this.fpRef };
+              base = e.off;
+            } else {
+              dest = { slot: e.slot };
+              base = 0;
+            }
+            /* 花括号的初始化式只覆盖写出来的那些，剩下的按 C 要是 0。静态那一侧免费
+             * （线性内存出生就是 0），自动这一侧先整块清零。 */
+            if (braced && !global && e.off >= 0) {
+              this.autoZero(this.fpRef, e.off, typeSize(vty).size);
+            }
+            if (strBytes !== null) this.initString(dest, base, vty, strBytes);
+            else if (body !== null) {
+              this.replayBraced(body, () => this.initializer(dest, base, vty));
+            } else this.initializer(dest, base, vty);
           }
         }
         if (this.tok !== COMMA) break;
