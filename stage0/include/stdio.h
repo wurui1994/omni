@@ -82,6 +82,14 @@ int feof(FILE *f);
 int ferror(FILE *f);
 int remove(const char *path);
 
+/* `scanf` 一族（第八刀第十四片）。`sscanf` 的输入是一个串，`fscanf` 的是一条流。
+ * `scanf`（也就是 stdin 上的那条）**还没有** —— 宿主那侧还没有一条同步读 stdin 的路。
+ * 少了什么：`%[…]`（扫描集）、`%p`、十六进制的浮点字面量 —— 撞上会当场骂，
+ * 而不是悄悄少赋一个值。 */
+int sscanf(const char *s, const char *fmt, ...);
+int vsscanf(const char *s, const char *fmt, va_list ap);
+int fscanf(FILE *f, const char *fmt, ...);
+
 /* `perror`（C11 7.21.10.4）：往 stderr 写 `前缀: 那句话\n`。前缀是空指针或空串时
  * 只写那句话，连 `: ` 都不写 —— 两条都是从 `tcc -run` 上量出来的（第八刀第十三片）。
  * 那句话与 `strerror(errno)` 是同一张表。 */

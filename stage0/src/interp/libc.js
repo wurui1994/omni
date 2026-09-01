@@ -565,6 +565,174 @@ const LONG_MAX = (1n << 63n) - 1n;
 const LONG_MIN = -(1n << 63n);
 const ULONG_MAX = (1n << 64n) - 1n;
 
+/* ------------------------------------------------------------------ scanf 一族
+ *
+ * `cScan`（第八刀第十四片）是 `cFormat` 的反向：一个格式串驱动的**扫描器**。
+ * 三条腿共用它 —— `sscanf` 的输入是内存里的一个串，`scanf`/`fscanf` 的输入是一条流
+ * （现在的实现是「整条先读出来，用了多少再退回去」，见那两条的注释）。
+ *
+ * 回 `{n, eof}`：`n` 是**成功赋值的个数**（`%*d` 与 `%n` 都不算），`eof` 说明
+ * 「一次转换都没做成就先撞到输入的末尾」—— 那时 C 要求回 `EOF` 而不是 0
+ * （C11 7.21.6.2 第 16 段）。这两件事是分开回的，因为「回 0」与「回 -1」的差别
+ * 全在这条上，量出来的（`sscanf("", "%d", &a)` 是 -1，`sscanf("abc", "%d", &a)` 是 0）。
+ */
+
+/** C 的 `isspace`：scanf 的「空白」就是这一套（C11 7.4.1.10）。 */
+function isWsCh(c) {
+  return c === 32 || (c >= 9 && c <= 13);
+}
+
+/** 一个数字字符在 `base` 进制里的值，不是数字就回 -1。`ch` 是一个字符（不是码）。 */
+function scanDigit(ch, base) {
+  const v = digitVal(ch);
+  return v >= 0 && v < base ? v : -1;
+}
+
+/** 长度修饰符 -> 存的时候用哪种访问。`d` 是「有没有符号」之外的默认。 */
+function scanIntKind(len) {
+  if (len === 'hh') return 'i8';
+  if (len === 'h') return 'i16';
+  if (len === 'l' || len === 'll' || len === 'z' || len === 'j' || len === 't') return 'i64';
+  return 'i32';
+}
+
+/**
+ * 扫描。`fmt` 与 `input` 都是已经读出来的串，`va` 是变参区的地址。
+ * 回 `{n, eof, used}`：赋值了几个、有没有「一次都没做成就撞到末尾」、吃掉了多少字符。
+ */
+function cScan(fmt, input, va) {
+  const ap = vaCursor(va);
+  let ip = 0;
+  let n = 0;
+  let fi = 0;
+  const atEnd = () => ip >= input.length;
+  const stop = () => ({ n, eof: n === 0, used: ip });
+  const fail = () => ({ n, eof: false, used: ip });
+  const skipWs = () => { while (ip < input.length && isWsCh(input.charCodeAt(ip))) ip++; };
+
+  while (fi < fmt.length) {
+    const fc = fmt.charCodeAt(fi);
+    /* 格式串里的空白吃掉输入里**任意多个**空白，**含零个** —— 所以 `"  %d"` 与
+     * `"%d"` 对 `"12"` 一样成功。 */
+    if (isWsCh(fc)) { fi++; skipWs(); continue; }
+    if (fc !== 37) {                                  // 普通字符：逐字符对上，不跳空白
+      if (atEnd()) return stop();
+      if (input.charCodeAt(ip) !== fc) return fail();
+      ip++; fi++; continue;
+    }
+    fi++;
+    if (fi >= fmt.length) throw new Error('scanf: 格式串末尾的 %');
+    if (fmt.charCodeAt(fi) === 37) {                   // `%%`：一个字面的 '%'
+      if (atEnd()) return stop();
+      if (input.charCodeAt(ip) !== 37) return fail();
+      ip++; fi++; continue;
+    }
+    let skip = false;
+    if (fmt[fi] === '*') { skip = true; fi++; }
+    let width = 0;
+    for (;;) {
+      const d = fi < fmt.length ? digitVal(fmt[fi]) : -1;
+      if (d < 0 || d > 9) break;
+      width = width * 10 + d; fi++;
+    }
+    let len = '';
+    for (;;) {
+      const m = fmt[fi];
+      if (m === 'h' || m === 'l') { len += m; fi++; continue; }
+      if (m === 'L' || m === 'z' || m === 'j' || m === 't') { len += m; fi++; }
+      break;
+    }
+    const conv = fmt[fi];
+    fi++;
+
+    /* `%c`：**不跳空白**，读正好 width 个（默认 1），不补结尾的 0。 */
+    if (conv === 'c') {
+      const w = width === 0 ? 1 : width;
+      if (input.length - ip < w) return stop();
+      const s = input.slice(ip, ip + w);
+      ip += w;
+      if (!skip) {
+        const p = ap.ptr();
+        for (let k = 0; k < s.length; k++) {
+          memStore('i8', p + BigInt(k), 0, BigInt(s.charCodeAt(k) % 256));
+        }
+        n++;
+      }
+      continue;
+    }
+    /* `%s`：跳空白，读到下一个空白为止，补结尾的 0。 */
+    if (conv === 's') {
+      skipWs();
+      if (atEnd()) return stop();
+      const w = width === 0 ? Infinity : width;
+      const start = ip;
+      let cnt = 0;
+      while (ip < input.length && !isWsCh(input.charCodeAt(ip)) && cnt < w) { ip++; cnt++; }
+      if (!skip) { writeCStr(ap.ptr(), input.slice(start, ip)); n++; }
+      continue;
+    }
+    /* `%n`：不读输入、**不算进返回值**（量出来的：`sscanf("42abc","%d%n",&a,&n)` 回 1）。 */
+    if (conv === 'n') {
+      if (!skip) memStore(scanIntKind(len), ap.ptr(), 0, BigInt(ip));
+      continue;
+    }
+    if (conv === 'd' || conv === 'i' || conv === 'u' || conv === 'o'
+        || conv === 'x' || conv === 'X') {
+      skipWs();
+      if (atEnd()) return stop();
+      const lim = width === 0 ? input.length : Math.min(input.length, ip + width);
+      let p = ip;
+      let neg = false;
+      if (p < lim && (input[p] === '+' || input[p] === '-')) { neg = input[p] === '-'; p++; }
+      let base = conv === 'x' || conv === 'X' ? 16 : conv === 'o' ? 8 : conv === 'i' ? 0 : 10;
+      /* `0x` 只在**后面真的跟着一个十六进制数字**时才算前缀；`%i` 没有前缀时
+       * 由第一个字符决定八进制还是十进制（与 `strtol(…, 0)` 同一套规矩）。 */
+      if ((base === 16 || base === 0)
+          && p + 2 < lim && input[p] === '0'
+          && (input[p + 1] === 'x' || input[p + 1] === 'X')
+          && scanDigit(input[p + 2], 16) >= 0) {
+        base = 16;
+        p += 2;
+      } else if (base === 0) {
+        base = p < lim && input[p] === '0' ? 8 : 10;
+      }
+      let v = 0n;
+      let got = 0;
+      while (p < lim) {
+        const d = scanDigit(input[p], base);
+        if (d < 0) break;
+        v = v * BigInt(base) + BigInt(d);
+        p++; got++;
+      }
+      if (got === 0) return fail();
+      ip = p;
+      if (!skip) { memStore(scanIntKind(len), ap.ptr(), 0, neg ? -v : v); n++; }
+      continue;
+    }
+    if (conv === 'e' || conv === 'f' || conv === 'g'
+        || conv === 'E' || conv === 'F' || conv === 'G') {
+      skipWs();
+      if (atEnd()) return stop();
+      const lim = width === 0 ? input.length : Math.min(input.length, ip + width);
+      const m = /^[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?/
+        .exec(input.slice(ip, lim));
+      if (m === null) return fail();
+      ip += m[0].length;
+      /* `%f` 存的是 **float**，`%lf` 才是 double —— 这一条错了的话
+       * `printf("%.3f")` 印出来会差在第七位上。 */
+      if (!skip) {
+        memStore(len === 'l' || len === 'L' ? 'f64' : 'f32', ap.ptr(), 0, Number(m[0]));
+        n++;
+      }
+      continue;
+    }
+    /* 还没到的：`%[…]`（扫描集）、`%p`、十六进制的浮点字面量。
+     * 错在明处 —— 悄悄少赋一个值是最难查的那种错。 */
+    throw new Error(`scanf: 还没到的转换 '%${conv === undefined ? '' : conv}'`);
+  }
+  return { n, eof: false, used: ip };
+}
+
 /* ------------------------------------------------------------------ errno
  *
  * `errno`（第八刀第八片）。C 要求它是一个**可改的左值**（`errno = 0` 得能写），
@@ -1141,6 +1309,31 @@ const LIBC = {
     }
     writeCStr(a[0], s);
     return BigInt(a[0]);
+  },
+  /* `sscanf`（C11 7.21.6.7）：输入是内存里的一个串。`va_list` 就是变参区的地址，
+   * 所以 `vsscanf` 与它是同一条 —— 与 `printf`/`vprintf` 那一对完全一样。 */
+  sscanf: (a) => {
+    const r = cScan(readCStr(a[1]), readCStr(a[0]), a[2]);
+    return r.eof ? -1n : BigInt(r.n);
+  },
+  vsscanf: (a) => {
+    const r = cScan(readCStr(a[1]), readCStr(a[0]), a[2]);
+    return r.eof ? -1n : BigInt(r.n);
+  },
+  /* `fscanf`：输入是一条流。文件在我们这儿是一整份快照（第十片），所以「从当前位置起
+   * 到末尾」这一段直接就是一个串 —— 扫完把游标推过**真的用掉的那些字节**
+   * （`cScan` 回的 `used`），效果与真的 libc 一个字符一个字符读、多读的那个再
+   * `ungetc` 回去相同。
+   * stdin 还没有（宿主那侧还没有一条同步读的路），撞上就当场骂。 */
+  fscanf: (a) => {
+    const f = BigInt(a[0]);
+    if (f === F_STDIN) throw new Error('libc: stdin 上的 fscanf 还没到');
+    const e = files.get(f);
+    if (e === undefined) throw new Error(`libc: 不是一条流的句柄（${f}）`);
+    const r = cScan(readCStr(a[1]), e.data.slice(e.pos), a[2]);
+    e.pos += r.used;
+    if (r.eof) { e.eof = true; return -1n; }
+    return BigInt(r.n);
   },
   fgetc: (a) => {
     const e = files.get(BigInt(a[0]));
