@@ -25,7 +25,8 @@
 // 浮点原先也在这份清单里，第十四片之后 `%f`/`%e`/`%g` 已经逐字节对上了（见 `fText`），
 // 第二十一片补上了 `%a`（见 `aText`）—— 于是这份清单只剩 `%p` 一格。
 
-import { memLoad, memStore, printRaw, memSize, memGrow } from './builtin.js';
+import { memLoad, memStore, printRaw, flushOut, memSize, memGrow } from './builtin.js';
+import { stderr as hostStderr } from '../host/native.js';
 
 /**
  * `exit` 抛的那个信号（第六刀第十七片）。
@@ -620,6 +621,42 @@ function swapBytes(p, q, n) {
   }
 }
 
+/* ------------------------------------------------------------------ 三条标准流
+ *
+ * `FILE` 与 `stdout` / `stderr`（第八刀第九片）。这一片**只有那三条标准流**，
+ * 真的文件（`fopen`）是下一片。
+ *
+ * `FILE` 在 C 里是**不透明**的，所以它不必是线性内存上的一个对象 —— 一个小整数就够。
+ * 我们取 1 / 2 / 3（stdin / stdout / stderr）：它们落在**页 0** 里，而页 0 整页留空
+ * （版图的第一条，见 tccgen.js），于是这几个句柄不可能与任何真的指针撞上。
+ * `NULL` 是 0，所以 `f == NULL` 也照旧对。
+ *
+ * `stdout` / `stderr` 在头文件里是宏，展开成 `__omni_stdout()` —— C 只要求它们是
+ * **`FILE *` 类型的表达式**（C11 7.21.1），不要求是可改的左值，所以函数调用够了。
+ * 这与 `errno` 那一片不同：那个必须是左值，所以只能是内存。
+ *
+ * stdout 走解释器自己那个缓冲（`printRaw`，与 `printf` 同一个），stderr **直写**
+ * —— C 的 stderr 就是不带缓冲的（C11 7.21.3 第 7 段）。两条流在测试轴上分开对账，
+ * 所以它们之间的交错不进入 oracle。
+ */
+const F_STDIN = 1n;
+const F_STDOUT = 2n;
+const F_STDERR = 3n;
+
+/** 往一条流上写一段文字。认不出的句柄当场抛 —— 那是程序把野指针当 FILE* 用了。 */
+function streamWrite(f, s) {
+  if (f === F_STDOUT) { printRaw(s); return; }
+  if (f === F_STDERR) {
+    /* 先把 stdout 攒着的那些落盘：C 的 stderr 不带缓冲，而我们的 stdout 带 ——
+     * 不先冲的话同一个终端上两条流的先后会与 tcc 那边相反。 */
+    flushOut();
+    hostStderr(s);
+    return;
+  }
+  if (f === F_STDIN) throw new Error('libc: 往 stdin 上写');
+  throw new Error(`libc: 不是一条流的句柄（${f}）`);
+}
+
 /* ------------------------------------------------------------------ ctype
  *
  * `<ctype.h>` 的那十几条（第八刀第七片）。三件事值得写下来：
@@ -760,6 +797,54 @@ const LIBC = {
     const n = Number(BigInt(a[1]));
     if (n > 0) writeCStr(a[0], s.slice(0, n - 1));
     return BigInt(s.length);
+  },
+
+  /* 三条标准流（第八刀第九片）。头文件里 `stdout` / `stderr` 是宏，展开成这几个调用 ——
+   * C 只要求它们是 `FILE *` 类型的**表达式**，不要求是左值。 */
+  __omni_stdin: () => F_STDIN,
+  __omni_stdout: () => F_STDOUT,
+  __omni_stderr: () => F_STDERR,
+  fprintf: (a) => {
+    const s = cFormat(readCStr(a[1]), a[2]);
+    streamWrite(BigInt(a[0]), s);
+    return BigInt(s.length);
+  },
+  vfprintf: (a) => {
+    const s = cFormat(readCStr(a[1]), a[2]);
+    streamWrite(BigInt(a[0]), s);
+    return BigInt(s.length);
+  },
+  fputs: (a) => {
+    /* 与 `puts` 不同：**不补换行**（C11 7.21.7.4），而且回的只是「非负」。
+     * 本机回的是 0，我们也回 0 —— 用例照 C 的保证写（`>= 0`）。 */
+    streamWrite(BigInt(a[1]), readCStr(a[0]));
+    return 0n;
+  },
+  fputc: (a) => {
+    const c = BigInt.asUintN(8, BigInt(a[0]));
+    streamWrite(BigInt(a[1]), String.fromCharCode(Number(c)));
+    return c;
+  },
+  fwrite: (a) => {
+    /* 回的是**写成功了几个成员**，不是几个字节（C11 7.21.8.2）。
+     * 而 `size` 或 `nmemb` 是 0 时**回 0**（同一段最后一句）—— 不是回 nmemb。
+     * 量过：本机的 libc 回 0，我们一开始回了 4。 */
+    const size = BigInt(a[1]);
+    const n = BigInt(a[2]);
+    if (size === 0n || n === 0n) return 0n;
+    let s = '';
+    const total = Number(size * n);
+    for (let i = 0; i < total; i++) {
+      s += String.fromCharCode(Number(memLoad('i8u', BigInt(a[0]) + BigInt(i), 0)));
+    }
+    streamWrite(BigInt(a[3]), s);
+    return n;
+  },
+  fflush: (a) => {
+    /* `fflush(NULL)` 是「所有流一起冲」（C11 7.21.5.2）。我们只有 stdout 带缓冲，
+     * 所以这一条无论给谁都是把它冲掉 —— 除了 stdin，那是未定义行为，照本机放过。 */
+    flushOut();
+    return 0n;
   },
   strlen: (a) => BigInt(readCStr(a[0]).length),
   strcmp: (a) => {

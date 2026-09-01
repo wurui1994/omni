@@ -167,13 +167,29 @@ for (const f of pick('cpp-bad')) {
 /** `tcc -run`：`-B` 指到构建目录，否则它找不到 runmain.o 与 libtcc1.a。 */
 function tccRun(path) {
   const r = spawnSync(TCC, ['-B', TCC_DIR, '-run', path], { encoding: 'utf8' });
-  return { code: r.status, out: r.stdout ?? '', err: (r.stderr ?? '').trim() };
+  return { code: r.status, out: r.stdout ?? '', err: r.stderr ?? '' };
+}
+
+/**
+ * 这段 stderr 是 **tcc 自己的诊断**，还是**被跑的程序写的**？（第八刀第九片）
+ *
+ * 到第八片为止 `gen/` 那一组把「tcc 的 stderr 非空」一律当成「tcc 拒了这份用例」——
+ * 那时没有任何用例会往 stderr 写字。第九片有了 `fprintf(stderr, …)`，这条口径就得改：
+ * 不改的话第一个写 stderr 的用例会被判成失败，而它其实是对的。
+ *
+ * tcc 自己的话有两种形状：`tcc: error: …` / `tcc: warning: …`，以及
+ * `文件.c:行: error: …`（`tccpp.c` 的 `tcc_error` 与 `tcc_warning`）。两种都认成
+ * 「这份用例本身有问题」；别的都当成程序的输出，逐字节比。
+ */
+function isTccDiag(err) {
+  if (/(^|\n)tcc: /.test(err)) return true;
+  return /(^|\n)[^\n]*:\d+: (error|warning):/.test(err);
 }
 
 /** 我们这一条腿：`cli.js c-run`（C -> MIR -> 闭包解释器），退出码同样是 main 的返回值。 */
 function cRun(path) {
   const r = spawnSync(process.execPath, [CLI, 'c-run', path], { encoding: 'utf8' });
-  return { code: r.status, out: r.stdout ?? '', err: (r.stderr ?? '').trim() };
+  return { code: r.status, out: r.stdout ?? '', err: r.stderr ?? '' };
 }
 
 for (const f of pick('gen')) {
@@ -184,8 +200,8 @@ for (const f of pick('gen')) {
     continue;
   }
   const want = tccRun(path);
-  if (want.err !== '') {
-    bad(name, `    tcc 自己就拒了这份用例：\n${want.err}`);
+  if (isTccDiag(want.err)) {
+    bad(name, `    tcc 自己就拒了这份用例：\n${want.err.trim()}`);
     continue;
   }
   const got = cRun(path);
@@ -200,8 +216,18 @@ for (const f of pick('gen')) {
     bad(name, `    stdout 不同：\n--- tcc ---\n${want.out}--- ours ---\n${got.out}`);
     continue;
   }
+  /* stderr 同样逐字节（第八刀第九片起）。在这之前它是「非空就说明 tcc 拒了」，
+   * 而 `fprintf(stderr, …)` 一有，那条口径就把对的用例判成错的。
+   * 我们这一侧的运行期错误也走 stderr（`omni: runtime error: …`），
+   * 所以这一条**同时**在管「不该有的错误消息」—— 它一出现就与 tcc 的空 stderr 不同。 */
+  if (got.err !== want.err) {
+    bad(name, `    stderr 不同：\n--- tcc ---\n${want.err}--- ours ---\n${got.err}`);
+    continue;
+  }
   const n = want.out.length;
-  ok(`${name} [exit ${want.code}${n > 0 ? ` + ${n}B stdout` : ''} == tcc -run]`);
+  const e = want.err.length;
+  ok(`${name} [exit ${want.code}${n > 0 ? ` + ${n}B stdout` : ''}`
+    + `${e > 0 ? ` + ${e}B stderr` : ''} == tcc -run]`);
 }
 
 // ------------------------------------------------------------ 5. gen-bad/：边界与语法错误

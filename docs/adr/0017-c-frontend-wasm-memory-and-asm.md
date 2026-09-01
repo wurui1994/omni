@@ -288,13 +288,13 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
 8. **C 的库面**：`libtcc1` 的等价物（软除法/浮点辅助/`alloca`/`setjmp`）与 libc 的接法。
    原先写的是"先转手宿主的 libc，走既有的 extern-C FFI"，第五片证明**转手不成立**
    （指针是自家线性内存里的偏移，宿主 libc 读不到），改成一个读写线性内存的宿主模块，
-   见第五片的落地节。**前八片已落地**（预定义的宏 —— 目标的自述，五十条，
+   见第五片的落地节。**前九片已落地**（预定义的宏 —— 目标的自述，五十条，
    顺序与值都对着 `tcc -dM -E` 抄；自带的系统头目录 + 编译器必须自己给的那四份头；
    `stdio.h`/`stdlib.h`/`string.h` 的最小子集 —— libc 的自述；
    `strtol` 一族与 `strncpy`/`strchr`/`strstr` 那几条；
    `qsort`/`bsearch` —— libc 回头调 MIR 的那扇门；`vprintf` 一族；`<ctype.h>`；
-   `<errno.h>` —— data 段里一格 + `__omni_errno_location`），
-   见下面的第八刀第一到八片节。
+   `<errno.h>` —— data 段里一格 + `__omni_errno_location`；三条标准流与 `fprintf`），
+   见下面的第八刀第一到九片节。
 
 最后三步是**后端**：
 
@@ -3141,6 +3141,80 @@ fine 123 0
 最后一条说明这一片**得先动测试轴**，不是先动 libc。
 
 <!-- 第八刀第八片-END -->
+
+
+## 落地：第八刀第九片 —— 三条标准流，与测试轴的一次口径改动
+
+`FILE` 那一格分成两片：这一片只有 `stdout` / `stderr` / `stdin` 三条标准流与
+往上写的那几条，真的文件（`fopen`）是下一片。
+
+### 先动测试轴，不是先动 libc
+
+到第八片为止 `gen/` 那一组的判据里有这么一句：
+
+```js
+if (want.err !== '') { bad(name, `tcc 自己就拒了这份用例`); continue; }
+```
+
+那时**没有任何用例会往 stderr 写字**，所以「tcc 的 stderr 非空」等价于「这份用例
+本身有问题」。第一个 `fprintf(stderr, …)` 的用例一进来，这条判据就会把对的判成错的。
+
+改成两件事：
+
+1. `isTccDiag(err)` —— 认出 **tcc 自己的话**：`tcc: error: …` / `tcc: warning: …`
+   以及 `文件.c:行: error: …`（`tccpp.c` 的 `tcc_error`/`tcc_warning` 那两种形状）。
+   这两种仍然算「tcc 拒了这份用例」。
+2. 别的 stderr **逐字节对账**，与 stdout 同一条纪律。
+
+第 2 条顺带把测试轴收紧了一格：我们这一侧的运行期错误也走 stderr
+（`omni: runtime error: …`），所以从这一片起「多出一句错误消息」也会被抓住 ——
+以前它只在退出码变了的时候才露出来。
+
+### `FILE` 是不透明的，所以它可以是一个小整数
+
+C 不让程序碰 `FILE` 的里头（`typedef struct __omni_FILE FILE;` —— 一个**不完整**
+类型）。于是句柄取 1 / 2 / 3（stdin / stdout / stderr）。这三个数落在**页 0** 里，
+而页 0 整页留空（版图的第一条），所以它们**不可能与任何真的指针撞上**；
+`NULL` 是 0，`f == NULL` 也照旧对。
+
+`stdout` / `stderr` 是宏，展开成 `__omni_stdout()`。这一处与 `errno` 那一片
+**刻意不同**：C 只要求这三个是「`FILE *` 类型的**表达式**」（C11 7.21.1），
+不要求可改的左值，所以一次函数调用就够 —— 不必像 `errno` 那样在 data 段里留格子。
+两片放在一起正好说明「什么时候必须是内存、什么时候不必」。
+
+### 缓冲：stdout 攒着，stderr 直写
+
+`printf` 与 `fprintf(stdout, …)` 走的是同一个缓冲（`printRaw`），而 stderr **直写**
+—— C 的 stderr 本来就不带缓冲（C11 7.21.3 第 7 段）。写 stderr 之前先把 stdout
+攒着的冲掉，否则同一个终端上两条流的先后会与 tcc 那边相反。测试轴上两条流分开
+对账，所以它们之间的交错不进入 oracle。
+
+### 量出来的一格：`fwrite(p, 0, n, f)` 回 0
+
+C11 7.21.8.2 最后一句：`size` 或 `nmemb` 是 0 时回 **0**，而不是回 `nmemb`。
+我们一开始回了 4，本机的 libc 回 0 —— 逐字节对账当场抓住。
+
+### 量出来的数
+
+- `tests/c/gen/35-streams.c`：退出码 12 + 11 行 stdout + 3 行 **stderr**，
+  三样都与 `tcc -run` 逐字节相同。钉了七格：`fprintf` 到 stdout 与 printf 同流、
+  `fputs` 不补换行、`fputc` 回那个字符、`fwrite` 回成员数与「长度 0 回 0」、
+  `fflush(NULL)`、三条句柄互不相同且都非 NULL、以及**包一层
+  `vfprintf(stderr, …)`**（tinycc 自己的诊断就是这个形状）。
+- `tests/c/run.js`：**62 passed, 0 failed**。`tests/js-roundtrip/run.js`：110 passed。
+- 边界钉子仍是 6 条。
+
+### 下一片
+
+第八刀第十片：**`fopen` / `fread` / `fgets` / `fseek` / `ftell` / `fclose` / `feof`**。
+要的东西这一片已经备好一半：句柄从 4 起、宿主那边一张表。缺的是真的宿主 IO ——
+`host/native.js` 现在有 `readText`/`writeText`（整份读写），而 `fread` 要**按位置读
+一段**。两条路：一是开文件时整份读进宿主的一个缓冲、`fread` 从那儿切（简单，
+但大文件与「边写边读」不成立），二是给 `host/native.js` 加真的 fd 级入口。
+tinycc 的源码读源文件正是「整份读进来」，所以第一条够用 —— 但要在 ADR 里写明
+它是一个**刻意的简化**，而不是忘了。
+
+<!-- 第八刀第九片-END -->
 
 
 

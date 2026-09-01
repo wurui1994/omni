@@ -21,6 +21,9 @@
  *   它们要真的文件描述符与宿主 IO，是另一片。现在的输出只有一条路：
  *   `printRaw` 写到进程的 stdout（对账的正是这一条）。
  * - **没有 `scanf` 一族**：读进来的方向一个字节都还没做。
+ * - **`FILE` 只有那三条标准流**（第八刀第九片）：`fopen` / `fread` / `fclose` 要真的
+ *   文件描述符与宿主 IO，是下一片。`FILE` 本身是**不透明**的，我们的句柄是 1/2/3 ——
+ *   它们落在页 0 里，而页 0 整页留空，所以不可能与真的指针撞上。
  */
 #ifndef _STDIO_H
 #define _STDIO_H
@@ -29,6 +32,19 @@
 #include <stdarg.h>
 
 #define EOF (-1)
+
+/* 不完整类型：程序只能拿 `FILE *`，碰不到里头 —— C 就是这么规定的。 */
+typedef struct __omni_FILE FILE;
+
+FILE *__omni_stdin(void);
+FILE *__omni_stdout(void);
+FILE *__omni_stderr(void);
+
+/* C 只要求这三个是 `FILE *` 类型的**表达式**（C11 7.21.1），不要求是可改的左值 ——
+ * 所以宏展开成一次调用就够。`errno` 那一片不同：那个必须是左值，只能是内存。 */
+#define stdin __omni_stdin()
+#define stdout __omni_stdout()
+#define stderr __omni_stderr()
 
 int putchar(int c);
 int puts(const char *s);
@@ -39,5 +55,12 @@ int snprintf(char *dst, size_t n, const char *fmt, ...);
 int vprintf(const char *fmt, va_list ap);
 int vsprintf(char *dst, const char *fmt, va_list ap);
 int vsnprintf(char *dst, size_t n, const char *fmt, va_list ap);
+
+int fprintf(FILE *f, const char *fmt, ...);
+int vfprintf(FILE *f, const char *fmt, va_list ap);
+int fputs(const char *s, FILE *f);
+int fputc(int c, FILE *f);
+size_t fwrite(const void *p, size_t size, size_t n, FILE *f);
+int fflush(FILE *f);
 
 #endif /* _STDIO_H */
