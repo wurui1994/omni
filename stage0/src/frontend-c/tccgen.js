@@ -118,10 +118,10 @@
 // **`exit`**（宿主抛一个信号，从任意深处一路退出去）、**函数类型的 typedef**
 // （`typedef int cb(int);`，之后能当声明符的基本类型用）、**`long double`**（在这个目标上
 // 就是 double，见 `tcc.h:237-241`）、**常量表达式里的浮点**（整型与浮点合成一份求值器：
-// `int n = 1.9;` 是 1、`(int)2.9` 也认）、printf 的 `%a`**。
+// `int n = 1.9;` 是 1、`(int)2.9` 也认）、printf 的 `%a`、**变参里的 struct**（写侧摊进
+// 变参区、`va_arg` 回一个左值）**。
 // 还没到：`goto` 跳到不在外围块上的标签（relooper 那一路）、标签长在里层控制结构里
 // （Duff's device）、**外部**函数上的 struct 传值/返回（要真的 ABI）、
-// 把 struct 传进变参的可变部分、从变参里 `va_arg` 出 struct 或大于 8 字节的东西、
 // 串起来的指定初始化器（`.a.b = 3`）、不定长数组配省掉里层花括号（`int a[][2] = {1,2,3,4}`）。
 //
 // 碰到还没做到的东西**当场报错**，报错文本里带「第六刀」字样 —— 一眼能看出是进度不是
@@ -2012,8 +2012,15 @@ export class CGen {  /**
         if (!sameType(want, vals[i].ty)) {
           this.err(`cannot pass '${typeText(vals[i].ty)}' as '${typeText(want)}'`);
         }
-        if (!fixed) this.todo('把 struct 传给变参的可变部分还没到');
-        refs.push(this.addrOf(vals[i]));
+        if (fixed) {
+          refs.push(this.addrOf(vals[i]));
+          continue;
+        }
+        /* `...` 后面的 struct 是**摊在变参区里**的一份拷贝，不是一个地址（第二十二片）：
+         * `va_arg(ap, struct P)` 只知道自己要的类型，拿不到「这一格里放的是地址还是
+         * 内容」这条额外信息 —— 所以内容必须直接躺在格子里。arm64/SysV 的变参区
+         * 也是这么放的（小的摊开，只有超大的才改成地址，而那一格由 ABI 定死）。 */
+        extra.push({ ty: want, val: vals[i] });
         continue;
       }
       const r = this.gv(this.castTo(vals[i], want));
@@ -2029,22 +2036,33 @@ export class CGen {  /**
   }
 
   /**
-   * 变参区：一格 8 字节，顺序照实参，回它的地址（第十六片的 ABI）。
+   * 变参区：一格至少 8 字节，顺序照实参，回它的地址（第十六片的 ABI）。
    *
-   * 一格 8 字节而不是「按类型的宽度紧排」，是因为读的那一侧（`va_arg`）只知道
-   * **它自己要的类型**，不知道写的时候是什么 —— 格子等宽，两边才能算出同一个位置。
-   * 每一格只写它自己那几个字节（`int` 写 4 个），读的时候也按要的类型读：
+   * 格子等宽（8 的整数倍）而不是「按类型的宽度紧排」，是因为读的那一侧（`va_arg`）只
+   * 知道**它自己要的类型**，不知道写的时候是什么 —— 格子按同一条规则算大小，两边才
+   * 能落在同一个位置。标量那一格只写它自己那几个字节（`int` 写 4 个），读的时候也按
+   * 要的类型读；struct 是**整份摊进去**（第二十二片），占 `对齐到8(sizeof)` 个字节。
    * 这与 arm64/SysV 的变参区是同一条规则（栈上一格一格，只用得着的那几个字节有效）。
    *
    * 一个实参都没有时也划一格：`printf("hi")` 的变参区不会被读，但「地址」得有一个。
    * 划在帧上而不是别处，是因为它必须活到被调方读完 —— 而调用结束前帧一直在。
    */
   vaBlock(extra) {
-    const n = extra.length === 0 ? 1 : extra.length;
-    const off = this.frameAlloc(mkArray(TY_LLONG, n));
+    const at = [];
+    let total = 0;
+    for (const e of extra) {
+      at.push(total);
+      total += alignUp(typeSize(e.ty).size, 8);
+    }
+    const off = this.frameAlloc(mkArray(TY_LLONG, total === 0 ? 1 : total / 8));
     for (let i = 0; i < extra.length; i++) {
-      this.f.emit(OP.MSTORE, mirTypeOf(extra[i].ty), this.fpRef, extra[i].ref,
-        memDesc(storeKindOf(extra[i].ty), off + i * 8));
+      const e = extra[i];
+      if (e.val !== undefined) {
+        this.structCopy(sMem(e.ty, this.fpRef, off + at[i]), e.val);
+        continue;
+      }
+      this.f.emit(OP.MSTORE, mirTypeOf(e.ty), this.fpRef, e.ref,
+        memDesc(storeKindOf(e.ty), off + at[i]));
     }
     return this.addrOf(sMem(TY_LLONG, this.fpRef, off));
   }
@@ -2101,15 +2119,22 @@ export class CGen {  /**
    * 不合法），而且它有副作用，所以不能让别人再取一次。
    */
   vaArg(ap, ty) {
-    const size = typeSize(ty).size;
-    if (isStruct(ty.t) || isArray(ty.t) || size > 8) {
-      this.todo('从变参里取 struct / 大于 8 字节的东西还没到（那要按大小分格）');
+    if (isArray(ty.t) || isFunc(ty.t)) {
+      this.err(`'${typeText(ty)}' cannot be an argument type`);
     }
     const f = this.f;
     const cur = this.gv(ap);
+    /* 游标按**格子的大小**往前走，而格子的大小与写的那一侧（`vaBlock`）同一条规则。 */
+    const step = this.mod.consts.int(BigInt(alignUp(typeSize(ty).size, 8)));
+    const next = () => this.vstore(ap, sVal(ap.ty, f.emit(OP.ADD, T_I64, cur, step, 0)));
+    if (isStruct(ty.t)) {
+      /* struct 整份摊在变参区里，所以这儿回的是**指向那一份的左值** —— 要拷贝的话由
+       * 赋值那一步去拷（`structCopy`），取成员就直接读。与 struct 返回同一个手法。 */
+      next();
+      return sMem(ty, cur, 0);
+    }
     const v = f.emit(OP.MLOAD, mirTypeOf(ty), cur, REF_NONE, memDesc(loadKindOf(ty), 0));
-    this.vstore(ap, sVal(ap.ty,
-      f.emit(OP.ADD, T_I64, cur, this.mod.consts.int(8n), 0)));
+    next();
     return sVal(ty, v);
   }
 
