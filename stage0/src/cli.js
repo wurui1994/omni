@@ -125,7 +125,7 @@ const C_SYS_INCLUDE = [join(installDir(), '..', '..', 'include')];
  * 一份 `.c` -> MIR（ADR-0017 第六刀）。宿主回调与 `cppText` 同一套。
  * 良构检查在这里做完 —— 前端刚长出来，让 verifier 先骂比让解释器崩掉好查。
  */
-function cMir(path, incs, defs) {
+function cMir(path, incs, defs, args) {
   const { mod, warnings } = lowerC(path, readText(path), {
     readFile: (p) => {
       try {
@@ -138,12 +138,25 @@ function cMir(path, incs, defs) {
     sysIncludeDirs: C_SYS_INCLUDE,
     dirname,
     join,
-  }, defs.map(([name, body]) => ({ name, body })));
+  }, defs.map(([name, body]) => ({ name, body })), args);
   for (const w of warnings) stderr(`${w}\n`);
   const errs = verifyMir(mod);
   if (errs.length > 0) throw new OmniError(`mir is not well-formed:\n  ${errs.join('\n  ')}`);
   return mod;
 }
+/**
+ * `c-mir` / `c-run` 的命令行切一刀：`--` 之后的都是**被跑的程序自己的**实参。
+ *
+ * tcc 那边不需要这一刀 —— `-run` 是个开关，它后面的第一个非选项就是源文件，再往后
+ * 全归被跑的程序。我们这儿选项跟在**源文件之后**（`c-run x.c -I dir`），于是
+ * `argv` 与 `-I/-D` 会撞在一起，只能用 `--` 分开：`c-run x.c -I dir -- aa bb`。
+ */
+function cSplitArgs(rest) {
+  const cut = rest.indexOf('--');
+  if (cut < 0) return { flags: rest, prog: [] };
+  return { flags: rest.slice(0, cut), prog: rest.slice(cut + 1) };
+}
+
 /** 文件后缀决定默认的类型模式（ADR-0008 第 1 节）；`--mode` 可覆盖，REPL 用它 */
 function modeFor(path, argv, fallback = 'mixed') {
   const i = argv.indexOf('--mode');
@@ -1917,11 +1930,13 @@ function main(argv) {
     // C -> MIR（ADR-0017 第六刀）。`c-mir` 印 MIR，`c-run` 跑它 ——
     // **退出码就是 C 的 `main` 的返回值**，与 `tcc -run` 逐条相同，那也是这一刀的 oracle。
     case 'c-mir': {
-      stdout(printMir(cMir(path, incDirs(rest), defArgs(rest))));
+      const { flags, prog } = cSplitArgs(rest);
+      stdout(printMir(cMir(path, incDirs(flags), defArgs(flags), prog)));
       return 0;
     }
     case 'c-run': {
-      const mod = cMir(path, incDirs(rest), defArgs(rest));
+      const { flags, prog } = cSplitArgs(rest);
+      const mod = cMir(path, incDirs(flags), defArgs(flags), prog);
       return runMirModule({ structs: [], enums: [], classes: [], js: false }, mod);
     }
     // 一个源文件一份产物（第七十五刀）：`<名字>.sx` 与 `<名字>.js` 摊在一个目录里，
@@ -2091,7 +2106,8 @@ commands:
   c-mir     compile a .c file straight to MIR (ADR-0017 cut 6, path B: the tccgen
             equivalent -- one pass, no AST). Takes -I and -D.
   c-run     the same, then run it. The exit status is C main's return value, so
-            tcc -run is the oracle (tests/c/gen/). Takes -I and -D.
+            tcc -run is the oracle (tests/c/gen/). Takes -I and -D; whatever
+            follows -- becomes the program's own argv (argv[0] is the .c path).
   oir       print the OIR as JSON
   mir       print the MIR (ADR-0014 decision 6): SSA values + slots + structured
             control flow, one 8-byte record per instruction (--bytes: sizes and

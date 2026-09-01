@@ -4208,6 +4208,28 @@ export class CGen {  /**
 }
 
 /**
+ * 一个 JS 串 -> 它的 UTF-8 字节（`argv` 那几个串走这儿）。
+ *
+ * 字符串字面量那条路（`strData`）是 `charCodeAt % 256` —— 源文件的字节在预处理器里
+ * 就已经是「一个字符一个字节」了，那儿不需要再编码。命令行上的串不一样：它是 node
+ * 解码过的 JS 串，要还原成字节才能写进线性内存。
+ */
+function utf8Bytes(s) {
+  const out = [];
+  for (const ch of s) {
+    const c = ch.codePointAt(0);
+    if (c < 0x80) out.push(c);
+    else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63));
+    else if (c < 0x10000) out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+    else {
+      out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63),
+        0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+    }
+  }
+  return out;
+}
+
+/**
  * 入口：一份 `.c` -> 一个 MIR 模块。
  *
  * MIR 的入口函数必须叫 `omni_main`（LLVM 后端自己会发一个 C 的 `main`，撞名字
@@ -4220,8 +4242,9 @@ export class CGen {  /**
  * @param {{readFile: (p: string) => (string|null), includeDirs?: string[],
  *          dirname?: (p: string) => string, join?: (a: string, b: string) => string}} host
  * @param {{name: string, body?: string}[]} [defs] 命令行上的 `-D`
+ * @param {string[]} [args] 被跑的程序自己的命令行实参（`argv[1]` 起；`argv[0]` 是 `path`）
  */
-export function lowerC(path, text, host, defs) {
+export function lowerC(path, text, host, defs, args) {
   const cpp = new Cpp(host);
   cpp.installPredefs(path);
   for (const d of defs ?? []) cpp.define(d.name, d.body);
@@ -4233,12 +4256,53 @@ export function lowerC(path, text, host, defs) {
   /* 线性内存的版图（ADR-0017 第六刀第三片，第十五片在末尾加了堆）：
    *   [0, 64K)            页 0 整页留空 —— C 的 `NULL` 于是**一定**访问不到，
    *                       而不是「碰巧落在别的东西上」
-   *   [64K, dataOff)      data 段：字符串字面量与全局量，往上长
+   *   [64K, dataOff)      data 段：字符串字面量与全局量，往上长；末尾还摆着 `argv`
+   *                       那几个串与那张指针表、以及 `errno` 那一格（都只在用到时才留）
    *   [栈底, 栈顶)        影子栈：16 对齐，`$sp` 从栈顶往下长
    *   [堆底, …)           堆：从栈顶之上的**下一个页边界**起，往上长，不够就 `MGROW`
    * `mem.min` 按栈顶（用到堆时按堆底加一页）算出页数。上界不设（0）。
    * 堆按页边界起是为了「先给整整一页」，于是 `__omni_heap_init` 写第一个字节时
    * 内存一定已经够 —— 那条初始化不必自己先长内存。 */
+  /* `main` 的形参表要在**摆版图之前**问 —— `argv` 那几个串与那张指针表也住 data 段。 */
+  const info = gen.funcs.get('main');
+  if (info === undefined) throw new OmniError(`${path}: error: undefined symbol 'main'`);
+  const mainParams = info.params ?? [];
+  if (mainParams.length !== 0 && mainParams.length !== 2) {
+    throw new OmniError(`${path}: error: 第八刀：'main' 只认 () 与 (int, char **)`
+      + `（这份有 ${mainParams.length} 个形参）`);
+  }
+  if (mainParams.length === 2) {
+    if (!isInteger(mainParams[0].ty.t)) {
+      throw new OmniError(`${path}: error: first argument of 'main' should be 'int'`);
+    }
+    if (!isPtr(mainParams[1].ty.t)) {
+      throw new OmniError(`${path}: error: second argument of 'main' should be 'char **'`);
+    }
+  }
+
+  /* `argv`（第八刀第十一片）：命令行上的那几个串与 `argv` 那张指针表都住在 **data 段**
+   * 里 —— 地址在编译期就定了，于是入口处一条写内存的指令都不必发。tcc 那边 argv 在真的
+   * 进程栈上；「argv 住 data 段」是同一件事在线性内存上的写法。
+   *   `argv[0]` 是**命令行上写的那个源文件名**，`argv[argc]` 是 NULL —— 两条都是从
+   *   `tcc -run x.c aa bb` 上量出来的。后者不写一个字节：data 段出生全是 0。
+   * 这几个串**不去重**（不走 `strData`）：C11 5.1.2.2.1 第 2 段要求 argv 的那些串是
+   * **可改的**，与某个字符串字面量共享一份就会让改一个把另一个也改了。 */
+  const argvStrs = mainParams.length === 2 ? [path, ...(args ?? [])] : [];
+  let argvAddr = 0;
+  if (mainParams.length === 2) {
+    const ptrs = [];
+    for (const s of argvStrs) {
+      const at = gen.dataOff;
+      const raw = utf8Bytes(s);
+      raw.push(0);
+      gen.pendingData.push({ off: at, bytes: raw });
+      gen.dataOff = at + raw.length;
+      ptrs.push(at);
+    }
+    argvAddr = alignUp(gen.dataOff, 8);
+    gen.dataOff = argvAddr + (ptrs.length + 1) * 8;
+    for (let i = 0; i < ptrs.length; i++) gen.emitBytes(argvAddr + i * 8, 8, BigInt(ptrs[i]));
+  }
   /* `errno` 那一格（第八刀第八片）：data 段末尾 4 个字节，**只在用到时才留**。
    * 不写一个字节 data —— 线性内存出生全是 0，而 C 正好要求「程序启动时 errno 是 0」
    * （C11 7.5 第 3 段）。地址在入口处用一条 `__omni_errno_init` 交给宿主。 */
@@ -4257,11 +4321,6 @@ export function lowerC(path, text, host, defs) {
 
   for (const d of gen.pendingData) mod.addData(d.off, d.bytes);
 
-  const info = gen.funcs.get('main');
-  if (info === undefined) throw new OmniError(`${path}: error: undefined symbol 'main'`);
-  if (info.params !== null && info.params.length !== 0) {
-    throw new OmniError(`${path}: error: 第六刀：'int main(argc, argv)' 还没到（要变参与 argv）`);
-  }
   const entry = new MirFunc('omni_main', [], T_I32);
   mod.addFunc(entry);
   /* `$sp` 的初值在入口里写 —— 解释器的全局初值是 undefined（interp.js:216），
@@ -4282,11 +4341,19 @@ export function lowerC(path, text, host, defs) {
       entry.pushArgs([mod.consts.int(BigInt(errnoAddr))]), 0);
   }
   const rt = mirTypeOf(info.ret);
+  /* `main` 的实参：要么一个都没有，要么就是 `argc` 与 `argv`（上面只放过这两种）。
+   * `argc` 按形参声明的类型给（`int` 是 i32，`long` 之类是 i64）。 */
+  const mainArgs = mainParams.length === 0 ? [] : [
+    mirTypeOf(mainParams[0].ty) === T_I32
+      ? mod.consts.i32(argvStrs.length)
+      : mod.consts.int(BigInt(argvStrs.length)),
+    mod.consts.int(BigInt(argvAddr)),
+  ];
   if (rt === T_VOID) {
-    entry.emit(OP.CALL, T_VOID, info.no, entry.pushArgs([]), 0);
+    entry.emit(OP.CALL, T_VOID, info.no, entry.pushArgs(mainArgs), 0);
     entry.emit(OP.RET, T_I32, mod.consts.i32(0), REF_NONE, 0);
   } else {
-    let v = entry.emit(OP.CALL, rt, info.no, entry.pushArgs([]), 0);
+    let v = entry.emit(OP.CALL, rt, info.no, entry.pushArgs(mainArgs), 0);
     // `main` 声明成 long 之类时把它收到 i32（退出码只有 8 位，但入口的类型要对得上）
     if (rt === T_I64) v = entry.emit(OP.CVT, T_I32, v, REF_NONE, CVT_TRUNC);
     entry.emit(OP.RET, T_I32, v, REF_NONE, 0);
