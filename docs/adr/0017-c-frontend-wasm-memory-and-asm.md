@@ -288,7 +288,8 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
 8. **C 的库面**：`libtcc1` 的等价物（软除法/浮点辅助/`alloca`/`setjmp`）与 libc 的接法。
    原先写的是"先转手宿主的 libc，走既有的 extern-C FFI"，第五片证明**转手不成立**
    （指针是自家线性内存里的偏移，宿主 libc 读不到），改成一个读写线性内存的宿主模块，
-   见第五片的落地节。
+   见第五片的落地节。**第一片已落地**（预定义的宏 —— 目标的自述，五十条，
+   顺序与值都对着 `tcc -dM -E` 抄），见下面的第八刀第一片节。
 
 最后三步是**后端**：
 
@@ -688,7 +689,8 @@ intmax_t，字符串与浮点都要报错（`tccpp.c:1449`）。两条容易漏�
   `__FILE__` / `__COUNTER__` 都认。
 - **`#include_next` 与 `__has_include` 不认**：前者要记住「上一次是在第几个搜索目录里
   找到的」（`tccpp.c:1363`），后者要把 include 搜索接进 `#if` 的求值。
-- **没有系统头目录**：`#include <...>` 只在 `-I` 给的目录里找。libc 的接法是第八刀。
+- **没有系统头目录**：`#include <...>` 只在 `-I` 给的目录里找。libc 头文件的接法是
+  第八刀第二片；**预定义的宏是第八刀第一片，已落地**（见下面那一节）。
 - 三字母词（trigraph）不认 —— tcc 也不认，这一格不是我们的边界。
 
 ### 量出来的
@@ -2500,6 +2502,67 @@ libc 头文件那一摊 —— 那是「拿自己编译 tinycc」路上下一堵
 `#include "tcc.h"`）。
 
 <!-- 第六刀第二十五片-END -->
+
+## 落地：第八刀第一片 —— 预定义的宏（目标的自述）
+
+### 为什么它是库面的第一格
+
+第六刀让 C 的语法基本齐了，可 `tests/c/gen/` 里每一份还得自己写
+`int printf(const char *fmt, ...);` —— 因为 `#include <stdio.h>` 走不通。走不通的第一层
+原因不是「找不到 stdio.h」，是**头文件不知道自己在哪个目标上**：macOS 的
+`sys/cdefs.h` 第一件事就是看 `__APPLE__`、`__LP64__`、`__has_builtin`、`_Nonnull`，
+少一条就展开成另一份声明。
+
+所以库面的第一格是这五十条宏。它们是**目标的自述**，不是 C 的语法 ——
+换目标要换表，所以 `tccdefs.js` 里按 tcc 那边的来源分了段（tcc 自己 / 目标 CPU /
+目标 OS / 模型 / C 标准 / 标准类型的底子 / 装成 GCC 4 / macOS 头文件要的那几条 /
+指针类型 / glibc 的 `__REDIRECT` / clang 的探测宏 / nullability 标注）。
+
+### 三条照抄 tcc 的取舍
+
+- `_Nonnull` / `_Nullable` / `_Null_unspecified` / `_Nullable_result` **展开成空**：
+  clang 的 nullability 标注，tcc 不认就抹掉。
+- `__has_builtin` / `__has_feature` / `__has_attribute` 一律 **回 0**，`__REDIRECT`
+  一族照定：让系统头文件走「这编译器什么都没有」那一支。
+- `#define _Float16 short unsigned int`：tcc 没有 `_Float16`，拿一个同宽的整型顶着，
+  于是那些声明至少能过语法。**它不是一份能算的 `_Float16`** —— 这一条是 tcc 自己的
+  取舍，我们照抄，并且把「会算错」写在 `tccdefs.js` 那一条旁边。
+
+装的顺序也照 tcc：预定义在前、命令行的 `-D` 在后（于是 `-D` 盖得掉预定义），
+最后一条是 `__BASE_FILE__` = 主输入文件。谁来叫 `installPredefs`：想控制这个先后的
+调用方自己先叫一次，没叫过的话 `preprocessToText` / `startParse` 会补上 ——
+「忘了装预定义」这种事于是不会悄悄发生。
+
+### 量出来的
+
+- `tests/c/cpp/07-predef.c`：与 `tcc -E -P` **逐字节相同**，24 行。量的是「展开成什么」：
+  五十条的值、函数宏（`__has_builtin(x)` / `__REDIRECT(...)`）、抹成空的那四条、
+  `__BASE_FILE__`，以及拿它们做条件编译（`__aarch64__ && __SIZEOF_POINTER__ == 8`、
+  `__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__`、`#ifdef __x86_64__` 走否、
+  `#undef __TINYC__` 之后确实没了）。
+- `tests/c/gen/27-predef.c`：退出码 45 + 165B stdout，与 `tcc -run` 逐字节相同。
+  量的是「拿它们写真代码」：`typedef __SIZE_TYPE__ my_size_t;` 一族的 `sizeof`、
+  有无符号、`__UINTPTR_TYPE__` 装指针再取回来、`_Nonnull` 在声明里被抹掉、
+  `__has_builtin` 决定 `LIKELY` 走哪一支、小端下逐字节看 `0x11223344`。
+- `tests/c` **54 passed / 0 failed**，`tests/js-roundtrip` 109 passed / 0 failed。
+  两份新用例都**一次就对**。
+
+### 下一片
+
+第八刀第二片：**系统头目录 + 我们自己那几份头文件**。tcc 自带
+`stddef.h` / `stdarg.h` / `stdbool.h` / `float.h`（`include/`），其余转手系统的。
+我们要的顺序是：
+
+1. 一个内建的系统头目录（`#include <...>` 在 `-I` 之后再试它），
+2. 在那儿放 `stddef.h` / `stdarg.h` / `stdbool.h` / `limits.h` / `float.h` ——
+   照 tcc 的语义写，值来自第一片那几条宏（`__SIZE_TYPE__`、`__INT_MAX__`……），
+3. 一份声明我们真的 shim 了的那些 libc 函数的头（`interp/libc.js` 的那张表），
+   于是 `gen/` 里那行 `int printf(...);` 可以删掉。
+
+**先不碰 macOS 真正的系统头** —— 那要 `#include_next`、`__asm("_name")`、
+`__attribute__` 一整套，而且一进去就是几千行。它是第八刀后半的事。
+
+<!-- 第八刀第一片-END -->
 
 
 

@@ -34,7 +34,11 @@
 //   找到的」（`tccpp.c:1363` 的 include_next_index），后者要把 include 搜索接进 `#if`
 //   的求值里。两条都等有真的系统头目录之后再做。
 // - **没有系统头目录**：`#include <...>` 只在 `-I` 给的目录里找，找不到就报
-//   `include file '...' not found`（与 tcc 同一句）。libc 的接法是第八刀。
+//   `include file '...' not found`（与 tcc 同一句）。libc 头文件的接法是第八刀第二片。
+//   **预定义的宏已经有了**（第八刀第一片，见 tccdefs.js）：`__aarch64__`、
+//   `__SIZE_TYPE__`、`_Nonnull` 那五十条，顺序与值都对着 `tcc -dM -E` 抄的。
+// - **`-dM` 不认**：tcc 的 `-dM` 是**边定义边印**（`#undef` 也印、同名重定义印两遍），
+//   要一台挂在 `#define`/`#undef` 上的钩子，独立一片。
 // - **`#if` 里只有整数**：`'a'` 那类字符常量认（值按 signed char 算，量过 tcc 在本机
 //   是这样），字符串与浮点按 tcc 的规矩报 `invalid constant in preprocessor expression`。
 // - **三字母词（trigraph）不认** —— tcc 也不认，这一格不是我们的边界。
@@ -58,6 +62,7 @@ import {
   TOK___VA_ARGS__, TOK___COUNTER__, TOK___HAS_INCLUDE, TOK___HAS_INCLUDE_NEXT,
   TOK_push_macro, TOK_pop_macro, TOK_once,
 } from './tcctok.js';
+import { PREDEFS } from './tccdefs.js';
 
 const CH_EOF = -1;
 const SPC = 32; // ' '
@@ -214,6 +219,8 @@ export class Cpp {
     this.macroFrames = [];
     /** @type {string[]} 警告（tcc 的 tcc_warning：不致命） */
     this.warnings = [];
+    /** 预定义的宏装过了没有（见 `installPredefs`） */
+    this.predefsDone = false;
 
     /* __LINE__ 那一族在 tcc 里也要有个 Sym 占位，否则 `defined(__LINE__)` 是假的
      * （`tccpp.c:3734`）。`special` 就是 tcc 的 `d == NULL`。 */
@@ -1764,6 +1771,7 @@ export class Cpp {
    *      这一条是「输出还能再被读一遍」的全部保证。
    */
   preprocessToText(filename, text) {
+    this.installPredefs(filename);
     this.file = new CFile(filename, text, null);
     this.file.ifdefBase = 0;
     this.parseFlags = PF_PREPROCESS | PF_LINEFEED | PF_SPACES | PF_ACCEPT_STRAYS;
@@ -1809,6 +1817,7 @@ export class Cpp {
    * 调用方随后自己叫一次 `next()`（tcc 也是这么排的：`parse_flags = …; next(); decl(…)`）。
    */
   startParse(filename, text) {
+    this.installPredefs(filename);
     this.file = new CFile(filename, text, null);
     this.file.ifdefBase = 0;
     this.parseFlags = PF_PREPROCESS | PF_TOK_NUM | PF_TOK_STR;
@@ -1823,6 +1832,21 @@ export class Cpp {
     this.tokFlags = TOK_FLAG_BOL | TOK_FLAG_BOF;
     this.nextNomacro(); // 行首的 `#` 会把 preprocess() 叫起来
     this.file = saved;
+  }
+
+  /**
+   * 目标的自述（`tcc_predefs` + `tcc_new` 里按目标补的那几条，见 tccdefs.js）。
+   * 顺序照 tcc，最后一条是 `__BASE_FILE__` = 主输入文件 —— 与 tcc 同一个位置。
+   *
+   * 谁来叫：**想让 `-D` 盖掉预定义的调用方自己先叫一次**（tcc 的顺序：预定义在前，
+   * 命令行在后）。没叫过的话 `preprocessToText` / `startParse` 会补上 —— 于是
+   * 「忘了装预定义」这种事不会悄悄发生，而 REPL 那一路也不必知道这回事。
+   */
+  installPredefs(baseFile) {
+    if (this.predefsDone) return;
+    this.predefsDone = true;
+    for (const [name, body] of PREDEFS) this.define(name, body);
+    this.define('__BASE_FILE__', `"${baseFile}"`);
   }
 }
 

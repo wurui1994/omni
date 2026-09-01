@@ -107,9 +107,9 @@ function cppText(path, incs, defs) {
     dirname,
     join,
   });
+  cpp.installPredefs(path);
   for (const [name, body] of defs) cpp.define(name, body);
-  const out = cpp.preprocessToText(path, readText(path));
-  for (const w of cpp.warnings) stderr(`${w}\n`);
+  const out = cpp.preprocessToText(path, readText(path));  for (const w of cpp.warnings) stderr(`${w}\n`);
   return out;
 }
 

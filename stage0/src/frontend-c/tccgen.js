@@ -4209,6 +4209,7 @@ export class CGen {  /**
  */
 export function lowerC(path, text, host, defs) {
   const cpp = new Cpp(host);
+  cpp.installPredefs(path);
   for (const d of defs ?? []) cpp.define(d.name, d.body);
   const mod = new MirModule('omni_main');
   const gen = new CGen(cpp, mod);
