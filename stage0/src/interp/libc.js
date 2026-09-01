@@ -564,6 +564,41 @@ const LONG_MAX = (1n << 63n) - 1n;
 const LONG_MIN = -(1n << 63n);
 const ULONG_MAX = (1n << 64n) - 1n;
 
+/* ------------------------------------------------------------------ 回头的那扇门
+ *
+ * `qsort` / `bsearch`（第八刀第五片）与前面每一条都不同：它们**回头调 MIR**。
+ * 到这一片之前 CCALL 是一扇单向门（MIR 调宿主），而比较器是 C 里的一个函数指针。
+ *
+ * 门开在这儿而不是在 `interp.js` 里，理由是方向：libc 是被调的一方，它需要一个
+ * 「拿函数指针值 + 实参数组，回返回值」的回调。跑模块的那一层（`runMirModule`）
+ * 在开跑前把它装上 —— 那一层认得函数表，而这一份不认得（也不该认得：
+ * 函数指针值的编码是 MIR 的事，定在 `ir.js` 的 `CALLI` 上）。
+ *
+ * wasm 那边是同一个形状：宿主模块通过 `table` 回头调实例里的函数。
+ */
+let callFnPtr = null;
+
+/**
+ * 装上「回头调 MIR」的那条路。`fn(ptr, args)`：`ptr` 是函数指针值（宿主的 BigInt），
+ * `args` 是宿主值数组，回返回值。跑模块的那一层在开跑前调一次。
+ */
+export function setFnPtrCaller(fn) { callFnPtr = fn; }
+
+/** 调一次 C 的回调。门没装上就抛 —— 那是装配错了，不是程序错了。 */
+function callback(ptr, args) {
+  if (callFnPtr === null) throw new Error('libc: 回调那扇门没装上（setFnPtrCaller）');
+  return callFnPtr(ptr, args);
+}
+
+/** 线性内存上两块**不重叠**的 `n` 字节对调。给 `qsort` 用。 */
+function swapBytes(p, q, n) {
+  for (let i = 0n; i < n; i++) {
+    const x = memLoad('i8u', p + i, 0);
+    memStore('i8', p + i, 0, memLoad('i8u', q + i, 0));
+    memStore('i8', q + i, 0, x);
+  }
+}
+
 /* ------------------------------------------------------------------ str 一族
  *
  * `strncpy` / `strchr` / `strstr` 那几条（第八刀第四片）。它们都只要「在线性内存上
@@ -786,6 +821,47 @@ const LIBC = {
    * 是 128 + SIGABRT(6) = 134 —— `tcc -run` 那边也是这个数。 */
   exit: (a) => { throw new ExitCall(Number(BigInt.asIntN(32, BigInt(a[0])))); },
   abort: () => { throw new ExitCall(134); },
+
+  /* `qsort`：插入排序。比较器拿到的是**真的元素地址**（C 要求如此），
+   * 所以这一份不需要临时缓冲区、也不碰堆 —— 交换就地做。
+   *
+   * 选插入排序而不是快排：C 只要求「排好」，不要求稳定也不要求 O(n log n)
+   * （C11 7.22.5.2）。**相等元素之间的次序是未规定的**，宿主的 libc 与我们大概率
+   * 不同 —— 所以拿 tcc 对账的用例里不能有比较相等的元素。这一格记在
+   * stage0/include/stdlib.h 上。 */
+  qsort: (a) => {
+    const base = BigInt(a[0]);
+    const n = Number(BigInt(a[1]));
+    const sz = BigInt(a[2]);
+    const cmp = BigInt(a[3]);
+    for (let i = 1; i < n; i++) {
+      for (let j = i; j > 0; j--) {
+        const l = base + BigInt(j - 1) * sz;
+        const r = base + BigInt(j) * sz;
+        if (BigInt.asIntN(32, BigInt(callback(cmp, [l, r]))) <= 0n) break;
+        swapBytes(l, r, sz);
+      }
+    }
+    return undefined;
+  },
+  bsearch: (a) => {
+    /* 比较器的两个实参有次序：**key 在前**，数组元素在后（C11 7.22.5.1）。 */
+    const key = BigInt(a[0]);
+    const base = BigInt(a[1]);
+    const sz = BigInt(a[3]);
+    const cmp = BigInt(a[4]);
+    let lo = 0;
+    let hi = Number(BigInt(a[2])) - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const p = base + BigInt(mid) * sz;
+      const d = BigInt.asIntN(32, BigInt(callback(cmp, [key, p])));
+      if (d === 0n) return p;
+      if (d < 0n) hi = mid - 1;
+      else lo = mid + 1;
+    }
+    return 0n;
+  },
 };
 
 /** 这个名字在 libc 里有吗（降级器**不**问这一句：链接期缺符号是运行期的错）。 */

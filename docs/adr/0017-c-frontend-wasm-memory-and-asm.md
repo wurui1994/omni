@@ -288,11 +288,12 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
 8. **C 的库面**：`libtcc1` 的等价物（软除法/浮点辅助/`alloca`/`setjmp`）与 libc 的接法。
    原先写的是"先转手宿主的 libc，走既有的 extern-C FFI"，第五片证明**转手不成立**
    （指针是自家线性内存里的偏移，宿主 libc 读不到），改成一个读写线性内存的宿主模块，
-   见第五片的落地节。**前四片已落地**（预定义的宏 —— 目标的自述，五十条，
+   见第五片的落地节。**前五片已落地**（预定义的宏 —— 目标的自述，五十条，
    顺序与值都对着 `tcc -dM -E` 抄；自带的系统头目录 + 编译器必须自己给的那四份头；
    `stdio.h`/`stdlib.h`/`string.h` 的最小子集 —— libc 的自述；
-   `strtol` 一族与 `strncpy`/`strchr`/`strstr` 那几条），
-   见下面的第八刀第一到四片节。
+   `strtol` 一族与 `strncpy`/`strchr`/`strstr` 那几条；
+   `qsort`/`bsearch` —— libc 回头调 MIR 的那扇门），
+   见下面的第八刀第一到五片节。
 
 最后三步是**后端**：
 
@@ -2864,6 +2865,77 @@ C 说溢出时回端点值（`LONG_MAX` / `LONG_MIN` / `ULONG_MAX`）并把 `err
 所以它值得单独一片。
 
 <!-- 第八刀第四片-END -->
+
+
+## 落地：第八刀第五片 —— `qsort` / `bsearch`，libc 回头调 MIR
+
+前四片都是「宿主替 C 干一件事」。这一片不同：比较器是 C 里的一个**函数指针**，
+libc 得**回头**调 MIR。在这之前 CCALL 是一扇单向门。
+
+### 门开在哪儿，为什么
+
+开在 `interp/libc.js` 上，一个模块级的钩子：
+
+```js
+let callFnPtr = null;
+export function setFnPtrCaller(fn) { callFnPtr = fn; }
+```
+
+由跑模块的那一层（`runMirModule`）在开跑前装上：
+
+```js
+setFnPtrCaller((ptr, args) => {
+  const no = fnPtrNo(ptr);
+  if (no < 0) failRt('call of a null function pointer');
+  if (I.mir.funcs[no] === undefined) failRt(`function pointer index ${no} out of range`);
+  return I.callFunc(no, undefined, args);
+});
+```
+
+方向决定了它该在哪儿：libc 是**被调**的一方，它要的是一个「拿函数指针值 + 实参，
+回返回值」的回调；而**函数指针值的编码**（函数号 + 1，第十三片定在 `ir.js` 的
+`CALLI` 上）是 MIR 的事，libc 不该认得它。所以钩子的声明在 libc、实现在解释器 ——
+两边各知道自己该知道的那一半。
+
+检查与 `CALLI` 那一支**逐条相同**（空指针、下标越界、同样的消息）：同一件事只该有
+一种失败方式。
+
+这条路一通，`atexit` / `signal` 与 wasm 那边的 `table` 调用都是同一个形状。
+
+### `qsort` 用插入排序，而且这是个决定
+
+C 只要求「排好」（C11 7.22.5.2），不要求稳定、也不要求 O(n log n)。插入排序在这儿
+有一个具体的好处：**比较器拿到的是真的元素地址**，交换就地做，所以这一份实现
+不需要临时缓冲区、也不碰堆 —— 而堆可能根本没初始化（没用过 `malloc` 的程序连
+`__omni_heap_init` 都不发）。
+
+代价写在明处：**相等元素之间的次序是未规定的**，宿主的 libc 与我们不是同一个算法。
+所以要逐字节对账的用例里不能有比较相等的元素，也不能把「比较器被调了几次」
+算进输出 —— `gen/31` 只问 `calls > 0`。这一格记在 `stage0/include/stdlib.h` 上。
+
+`bsearch` 那边有一处次序容易写反：比较器的两个实参是 **key 在前**、数组元素在后
+（C11 7.22.5.1）。
+
+### 量出来的数
+
+- `tests/c/gen/31-qsort.c`：退出码 18 + 12 行 stdout，与 `tcc -run` 逐字节相同。
+  钉了七格：int 数组升/降、一个元素与零个元素、struct 数组（元素比一个字宽，
+  交换按字节做）、比较器有副作用（说明它真的在我们这边跑）、`bsearch` 命中/未命中/
+  空数组、以及**通过一个函数指针变量**传比较器（不是直接写函数名）。
+- `tests/c/run.js`：**58 passed, 0 failed**。`tests/js-roundtrip/run.js`：110 passed。
+- 边界钉子仍是 6 条。
+
+### 下一片
+
+第八刀第六片：**`vsnprintf` 一族**。`cFormat` 现在拿的就是变参区的地址，而
+`va_list` 在这个目标上**就是**那个地址 —— 所以 `vprintf(fmt, ap)` 是把 `ap`
+原样交给 `cFormat`。要量的是「变参区的地址能不能穿过一层函数调用」，
+以及 `va_copy` 之后两条游标互不干扰。
+
+再往后是 `<errno.h>`（`strtol` 的溢出那一格等着它）与 `FILE` / `fopen`
+（要真的文件描述符与宿主 IO，是这一刀里最大的一格）。
+
+<!-- 第八刀第五片-END -->
 
 
 

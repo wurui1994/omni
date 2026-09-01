@@ -31,7 +31,7 @@ import {
   memInit, memData, memSize, memGrow, memLoadFn, memStoreFn,
 } from '../interp/builtin.js';
 import { JS_ALL } from '../hir/js_abi.js';
-import { hasLibc, callLibc, ExitCall } from '../interp/libc.js';
+import { hasLibc, callLibc, ExitCall, setFnPtrCaller } from '../interp/libc.js';
 import { lowerToMir } from './from_oir.js';
 import { verifyMir } from './verify.js';
 import {
@@ -963,6 +963,14 @@ export function interpretMir(oir) {
  */
 export function runMirModule(oir, mir) {
   const I = new MirInterp(oir, mir);
+  /* libc 回头调 MIR 的那扇门（第八刀第五片，`qsort` 的比较器就走这儿）。
+   * 装在这一层的理由：函数指针值的编码（函数号 + 1）是 MIR 的事，libc 不该认得它。 */
+  setFnPtrCaller((ptr, args) => {
+    const no = fnPtrNo(ptr);
+    if (no < 0) failRt('call of a null function pointer');
+    if (I.mir.funcs[no] === undefined) failRt(`function pointer index ${no} out of range`);
+    return I.callFunc(no, undefined, args);
+  });
   let code = 0;
   try {
     code = I.run();
