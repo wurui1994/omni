@@ -1,0 +1,5 @@
+;; 没有 (memory …) 就不许有内存访问 —— 与 wasm 一致（那边是"没有 memory 段就没有
+;; memory.grow/load/store"）。拒在**降级期**而不是运行期：这不是"没做完"，是方言的边界。
+(module
+  (main
+    (print (mload i64 (int 65536)))))

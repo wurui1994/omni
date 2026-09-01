@@ -33,6 +33,19 @@ const INT64_MIN_VALUE = -9223372036854775807n - 1n;
 /** 向量上第一阶段只有这四条（ADR-0014 决策 6）：算符 -> C 侧助手名的后缀 */
 const C_VEC_OPS = [['+', 'add'], ['-', 'sub'], ['*', 'mul'], ['/', 'div']];
 
+/* 线性内存的访问描述符 -> [内存里那几个字节的 C 类型, 字节数]（ADR-0017 第二刀）。
+ * 符号扩展与零扩展不用写代码：`*(int8_t*)p` 提升到 int64_t 就是符号扩展，
+ * `*(uint8_t*)p` 就是零扩展 —— 与 DataView 的 getInt8/getUint8 一一对应。 */
+const C_MEM_LD = {
+  i8s: ['int8_t', 1], i8u: ['uint8_t', 1], i16s: ['int16_t', 2], i16u: ['uint16_t', 2],
+  i32s: ['int32_t', 4], i32u: ['uint32_t', 4], i64: ['int64_t', 8],
+  f32: ['float', 4], f64: ['double', 8],
+};
+const C_MEM_ST = {
+  i8: ['uint8_t', 1], i16: ['uint16_t', 2], i32: ['uint32_t', 4], i64: ['int64_t', 8],
+  f32: ['float', 4], f64: ['double', 8],
+};
+
 /** `(blk (blk int 3) 2)` -> `{el: int, n: 6}`：定长内存的字段在 C 侧摊平成一维（第二十二刀） */
 function flatBlk(t) {
   let el = t.el;
@@ -284,10 +297,30 @@ class CEmitter {
     this.line();
     for (const c of closures) this.closureMake(c);
     for (const f of this.mod.funcs) this.func(f);
+    // 线性内存的 data 段（ADR-0017 第二刀）：字节发成 static 数组，main 里一次拷进去。
+    // 与 backend-llvm 的 private constant、backend-js 的数组字面量是同一件事的三种写法。
+    const mem = this.mod.mem === undefined ? null : this.mod.mem;
+    if (mem !== null) {
+      let di = 0;
+      for (const d of mem.data) {
+        this.line(`static const unsigned char omni_data_${di}[${d.bytes.length}] = { ${d.bytes.join(', ')} };`);
+        di++;
+      }
+    }
+    let memInit = '';
+    if (mem !== null) {
+      const parts = [`omni_lin_init(${mem.min}, ${mem.max});`];
+      let di = 0;
+      for (const d of mem.data) {
+        parts.push(`omni_lin_data(${d.off}, omni_data_${di}, ${d.bytes.length});`);
+        di++;
+      }
+      memInit = ` ${parts.join(' ')}`;
+    }
     // argc/argv 要存下来：process.argv 与"我装在哪"（import.meta.url 的对应物）都要它。
     // 退出码走 omni_host_exit_code —— process.exitCode 是个可写的槽，不是返回值。
     // 入口过一层 omni_run_entry：那一层把活挪到一条大栈的线程上（见 omni_js_host.c）。
-    this.line(`int main(int argc, char **argv) { omni_host_init(argc, argv); omni_run_entry(${this.mod.entry}); omni_js_check_uncaught(); fflush(stdout); return omni_host_exit_code(); }`);
+    this.line(`int main(int argc, char **argv) { omni_host_init(argc, argv);${memInit} omni_run_entry(${this.mod.entry}); omni_js_check_uncaught(); fflush(stdout); return omni_host_exit_code(); }`);
     this.out[this.s16At] = this.s16PoolLines().join('\n');
     // 三段各自 concat 一次：封闭 ABI 里 `concat` 的 arity 是 2（js_abi.js），
     // 写成 `concat(a, b)` 两个实参在自举出来的编译器上不是同一件事
@@ -882,6 +915,12 @@ class CEmitter {
     return p.type.k === 'tptr'
       ? `omni_tchk(${this.expr(p)})` : `omni_pderef(${this.expr(p)}, ${size})`;
   }
+
+  /** 线性内存的地址：静态偏移在这儿加进去（第二刀）。偏移是常量，所以 C 编译器会把
+   *  `a + 8` 折进寻址 —— 与 LLVM 那条腿发一条 `add i64` 是同一件事。 */
+  memAddr(e) {
+    return e.off === 0 ? this.expr(e.addr) : `(${this.expr(e.addr)}) + ${e.off}`;
+  }
   expr(e) {
     switch (e.kind) {
       case 'Const': return this.constant(e);
@@ -963,6 +1002,24 @@ class CEmitter {
         return `(*(${cTypeName(e.type)} *)${this.ptrChk(e.ptr, e.size)})`;
       case 'PtrStore':
         return `(*(${cTypeName(e.type)} *)${this.ptrChk(e.ptr, e.size)} = ${this.expr(e.value)})`;
+      // 线性内存（ADR-0017 第二刀）。与指针那一路同一个形状：先 omni_lin_at 查一次界拿到
+      // 真地址，再就地读写 —— 越界那句话因此只有 omni_linmem.c 里那一份，run-llvm 调的是
+      // 同一个符号的同一份机器码。宽度与符号靠 C 的强转表达：`*(int8_t*)` 再隐式提升到
+      // int64_t 就是符号扩展，`*(uint8_t*)` 就是零扩展。
+      case 'MemSize': return 'omni_lin_size()';
+      case 'MemGrow': return `omni_lin_grow(${this.expr(e.pages)})`;
+      case 'MemLoad': {
+        const d = C_MEM_LD[e.mkind];
+        const rt = e.type.k === 'real' ? 'double' : 'int64_t';
+        return `((${rt})*(${d[0]} *)omni_lin_at(${this.memAddr(e)}, ${d[1]}))`;
+      }
+      // 写侧当**语句**用（方言里 mstore 是语句）：所以这个 C 表达式的值是被丢掉的。
+      // 它的类型是窄类型，值也是截断后的 —— 与 MIR 上"MSTORE 的结果是存进去之前的值"
+      // 不同，但那条差别在方言里不可观测（没有 `(let x (mstore …))` 这种写法）。
+      case 'MemStore': {
+        const d = C_MEM_ST[e.mkind];
+        return `(*(${d[0]} *)omni_lin_at(${this.memAddr(e)}, ${d[1]}) = (${d[0]})(${this.expr(e.value)}))`;
+      }
       case 'PtrAdd': return e.ptr.type.k === 'tptr'
         ? `(${this.expr(e.ptr)} + (${this.expr(e.delta)}) * ${e.size})`
         : `omni_padd(${this.expr(e.ptr)}, ${this.expr(e.delta)}, ${e.size})`;

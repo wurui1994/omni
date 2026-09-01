@@ -1,0 +1,69 @@
+;; 线性内存（ADR-0017 第二刀）—— 方言这一层的形状，与五条腿上的**三套实现**：
+;; JS 后端与两个解释器是 ArrayBuffer + DataView（固定小端），C 与 LLVM 是
+;; omni_linmem.c 那块 realloc 出来的字节（本机字节序，小端机上与前者一致）。
+;;
+;; 期望输出的出处（照 wasm 规范，不是从某条腿抄的）：
+;;   - `memory MIN MAX` 的单位是 64KB 页；`mgrow` 只增不减、回**旧**页数、加不了回 -1
+;;     （wasm 的 memory.grow 就是这个约定 —— 不 trap，让调用方查）
+;;   - data 段是初始内容，编译期算好，运行期一次拷进去
+;;   - 读侧带符号（`i8s` 符号扩展 / `i8u` 零扩展），写侧不带 —— 与 wasm 的指令表一致
+;;     （有 `i32.load8_u`，没有 `i32.store8_u`）
+;;   - 新长出来的页是零
+;;
+;; 第 0 页整页不用（约定：C 的空指针要能与地址 0 区分），所以所有地址从 65536 起。
+(module
+  (memory 2 4)
+  ;; 字节可以写成整数，也可以写成字符串（按 UTF-8 展开）
+  (data 65536 1 2 3 4)
+  (data 65552 "AB")
+
+  ;; 内存穿过函数：它是模块级的一块，不是谁的局部量
+  (fn poke ((a int) (v int)) void
+    (mstore i32 (var a) (var v)))
+
+  (main
+    ;; 小端：01 02 03 04 按 i32 读是 0x04030201
+    (print (mload i32s (int 65536)))
+    ;; 逐字节：第 0 个与第 3 个（静态偏移那一格）
+    (print (mload i8u (int 65536)))
+    (print (mload i8u (int 65536) 3))
+    ;; 字符串那一段：'A' = 65、'B' = 66
+    (print (mload i8u (int 65552)))
+    (print (mload i8u (int 65552) 1))
+
+    ;; 窄读的符号：-1 的最低字节是 255，按 i8s 读是 -1
+    (mstore i64 (int 65600) (int -1))
+    (print (mload i8u (int 65600)))
+    (print (mload i8s (int 65600)))
+    (print (mload i32u (int 65600)))
+    (print (mload i32s (int 65600)))
+
+    ;; 窄写只留低位：300 & 255 = 44
+    (mstore i8 (int 65608) (int 300))
+    (print (mload i8u (int 65608)))
+
+    ;; 0x80000000 的两种读法
+    (mstore i32 (int 65616) (int 2147483648))
+    (print (mload i32s (int 65616)))
+    (print (mload i32u (int 65616)))
+
+    ;; real：f64 原样，f32 舍到单精度（0.5 与 1.25 在单精度里是精确的，
+    ;; 所以这两行在 %g 下也不会因为舍入而分叉）
+    (mstore f64 (int 65624) (real 0.1))
+    (print (mload f64 (int 65624)))
+    (mstore f32 (int 65632) (real 1.25))
+    (print (mload f32 (int 65632)))
+
+    ;; 穿过函数写、回来读
+    (expr (call poke (int 65640) (int 4242)))
+    (print (mload i32s (int 65640)))
+
+    ;; 页数与增长
+    (print (msize))
+    (print (mgrow (int 1)))
+    (print (msize))
+    ;; 新长出来的那一页是零（第 2 页的头 8 个字节）
+    (print (mload i64 (int 131072)))
+    ;; 上界是 4 页，现在 3 页，再要 2 页要不到 —— 回 -1，页数不变
+    (print (mgrow (int 2)))
+    (print (msize))))

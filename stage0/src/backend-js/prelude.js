@@ -133,9 +133,73 @@ function $pstore_p(a, p) {
 }
 function $pstore_t(a, v) { $mdv.setBigInt64(a, BigInt(v), true); return v; }
 
+/* 线性内存（ADR-0017 第二刀）。与上面那块 arena（$mem/$mtop，指针用的）是**两块**内存：
+   arena 是"分配出来的块"，这一块是"一整片可寻址的字节"。名字全带 lin 前缀，别混。
+   算法与 interp/builtin.js 里那一份逐条相同（那份是宿主函数、这份是拼进产物的文本），
+   越界那句话也与 omni_linmem.c 逐字节相同 —— tests/sexpr 五条腿的判据在盯这件事。
+   字节序固定小端：每次 DataView 调用都显式传 true。 */
+let $linMem = null;
+let $linDv = null;
+let $linBy = null;
+let $linMax = 0;
+function $lin_init(minPages, maxPages) {
+  $linMem = new ArrayBuffer(minPages * 65536);
+  $linDv = new DataView($linMem);
+  $linBy = new Uint8Array($linMem);
+  $linMax = maxPages;
+}
+function $lin_data(off, bytes) {
+  if ($linMem === null) $rt_error("memory access without a memory");
+  if (off < 0 || off + bytes.length > $linMem.byteLength) {
+    $rt_error("data segment does not fit in memory: " + off + "+" + bytes.length
+      + " (size " + $linMem.byteLength + ")");
+  }
+  $linBy.set(bytes, off);
+}
+function $lin_size() { return BigInt($linMem === null ? 0 : $linMem.byteLength / 65536); }
+function $lin_grow(n) {
+  if ($linMem === null) $rt_error("memory access without a memory");
+  const add = Number(n);
+  const old = $linMem.byteLength / 65536;
+  if (add < 0) return -1n;
+  const want = old + add;
+  if (want > 65536) return -1n;
+  if ($linMax !== 0 && want > $linMax) return -1n;
+  if (add === 0) return BigInt(old);
+  const nb = new ArrayBuffer(want * 65536);
+  new Uint8Array(nb).set($linBy);
+  $linMem = nb;
+  $linDv = new DataView($linMem);
+  $linBy = new Uint8Array($linMem);
+  return BigInt(old);
+}
+function $lin_at(addr, off, bytes) {
+  if ($linMem === null) $rt_error("memory access without a memory");
+  const a = Number(addr) + off;
+  if (a < 0 || a + bytes > $linMem.byteLength) {
+    $rt_error("memory access out of bounds: " + a + "+" + bytes
+      + " (size " + $linMem.byteLength + ")");
+  }
+  return a;
+}
+function $lin_ld_i8s(a, o) { return BigInt($linDv.getInt8($lin_at(a, o, 1))); }
+function $lin_ld_i8u(a, o) { return BigInt($linDv.getUint8($lin_at(a, o, 1))); }
+function $lin_ld_i16s(a, o) { return BigInt($linDv.getInt16($lin_at(a, o, 2), true)); }
+function $lin_ld_i16u(a, o) { return BigInt($linDv.getUint16($lin_at(a, o, 2), true)); }
+function $lin_ld_i32s(a, o) { return BigInt($linDv.getInt32($lin_at(a, o, 4), true)); }
+function $lin_ld_i32u(a, o) { return BigInt($linDv.getUint32($lin_at(a, o, 4), true)); }
+function $lin_ld_i64(a, o) { return $linDv.getBigInt64($lin_at(a, o, 8), true); }
+function $lin_ld_f32(a, o) { return $linDv.getFloat32($lin_at(a, o, 4), true); }
+function $lin_ld_f64(a, o) { return $linDv.getFloat64($lin_at(a, o, 8), true); }
+function $lin_st_i8(a, o, v) { $linDv.setUint8($lin_at(a, o, 1), Number(BigInt.asUintN(8, v))); return v; }
+function $lin_st_i16(a, o, v) { $linDv.setUint16($lin_at(a, o, 2), Number(BigInt.asUintN(16, v)), true); return v; }
+function $lin_st_i32(a, o, v) { $linDv.setUint32($lin_at(a, o, 4), Number(BigInt.asUintN(32, v)), true); return v; }
+function $lin_st_i64(a, o, v) { $linDv.setBigInt64($lin_at(a, o, 8), BigInt.asIntN(64, v), true); return v; }
+function $lin_st_f32(a, o, v) { $linDv.setFloat32($lin_at(a, o, 4), v, true); return v; }
+function $lin_st_f64(a, o, v) { $linDv.setFloat64($lin_at(a, o, 8), v, true); return v; }
+
 function $psub(p, q, size) {
-  if (p[1] !== q[1] || p[2] !== q[2]) $rt_error("pointer difference across different blocks");
-  return BigInt((p[0] - q[0]) / size);
+  if (p[1] !== q[1] || p[2] !== q[2]) $rt_error("pointer difference across different blocks");  return BigInt((p[0] - q[0]) / size);
 }
 // 走到块外**不报错**（只有解引用才报）：jancy 的 p += i 是合法的，*p 才是那句
 // out-of-bounds（type_ptr_data.rst 里的例子就是先加再解引用）。

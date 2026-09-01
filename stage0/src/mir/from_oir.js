@@ -24,6 +24,7 @@ import {
   OP, REF_NONE, MirFunc, MirModule, mkType,
   T_VOID, T_I64, T_F64, T_BOOL, T_STR, T_DYN, T_AGG, T_BUF, T_ARR, T_PTR, T_TPTR,
   CVT_I2F, CVT_F2I, CVT_BOX, CVT_U2F,
+  MLOAD_KINDS, MSTORE_KINDS, memDesc,
 } from './ir.js';
 
 /** real 的规范文本。哈希要稳定，所以整数值统一写成 `1.0` 这种形状。 */
@@ -55,6 +56,12 @@ class ToMir {
 
   run() {
     const m = this.mod;
+    // 线性内存（第二刀）：模块级的一格，先建起来 —— MLOAD/MSTORE 的 verifier 要查
+    // "这个模块有没有内存"，而那一步在函数体降完之后才跑，所以顺序上只要在 run 里就行。
+    if (this.oir.mem !== undefined && this.oir.mem !== null) {
+      m.setMem(this.oir.mem.min, this.oir.mem.max);
+      for (const d of this.oir.mem.data) m.addData(d.off, d.bytes);
+    }
     for (const g of this.oir.jsGlobals ?? []) m.globalNo(g.name);
     // 核心方言的模块级变量（第二十四刀）：同一个全局池，先按声明顺序登记，
     // 全局号因此是稳定的（bytes.js 的哈希要它稳定）。
@@ -533,6 +540,22 @@ class ToMir {
       case 'PtrElem': return this.expr(e.ptr);
       case 'PtrLoad':
         return f.emit(OP.PLOAD, this.ty(e.type), this.expr(e.ptr), REF_NONE, e.size);
+      // 线性内存（ADR-0017 第二刀）。方言里的 KIND 是个名字（`i32u`），MIR 上是描述符号 ——
+      // 翻译只发生在这一处，所以"名字与号的对应"只有一份。
+      case 'MemSize': return f.emit(OP.MSIZE, T_I64, REF_NONE, REF_NONE, 0);
+      case 'MemGrow': return f.emit(OP.MGROW, T_I64, this.expr(e.pages), REF_NONE, 0);
+      case 'MemLoad': {
+        const no = MLOAD_KINDS.indexOf(e.mkind);
+        if (no < 0) throw new Error(`from_oir: 不认识的 mload 访问 ${e.mkind}`);
+        return f.emit(OP.MLOAD, this.ty(e.type), this.expr(e.addr), REF_NONE, memDesc(no, e.off));
+      }
+      case 'MemStore': {
+        const no = MSTORE_KINDS.indexOf(e.mkind);
+        if (no < 0) throw new Error(`from_oir: 不认识的 mstore 访问 ${e.mkind}`);
+        const a = this.expr(e.addr);
+        const v = this.expr(e.value);
+        return f.emit(OP.MSTORE, this.ty(e.type), a, v, memDesc(no, e.off));
+      }
       case 'PtrStore': {
         const p = this.expr(e.ptr);
         const v = this.expr(e.value);

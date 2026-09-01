@@ -59,8 +59,20 @@ import { INT, REAL, BOOL, STRING, VOID, vecType, bufType, arrType, structType, c
   ptrType, tptrType, ptrTargetOk, blkType, structLayout, sizeOf } from '../hir/types.js';
 import { readSexpr, isList, isAtom, isStr, head } from './read.js';
 import { SourceFile } from '../source/diag.js';
+import { utf8Bytes } from '../host/utf8.js';
 
 const TYPES = new Map([['int', INT], ['real', REAL], ['bool', BOOL], ['string', STRING], ['void', VOID]]);
+
+/* 线性内存的访问描述符（ADR-0017 第二刀）。名字与 mir/ir.js 的 MLOAD_KINDS / MSTORE_KINDS
+ * 逐字相同 —— 这一层不 import 那两张表（方言不依赖 MIR），但两处的名字是同一套约定，
+ * 而 from_oir 会把这里的名字翻成那里的号。值是"读出来/写进去的是 int 还是 real"。 */
+const MEM_LOAD_KINDS = new Map([
+  ['i8s', INT], ['i8u', INT], ['i16s', INT], ['i16u', INT], ['i32s', INT], ['i32u', INT],
+  ['i64', INT], ['f32', REAL], ['f64', REAL],
+]);
+const MEM_STORE_KINDS = new Map([
+  ['i8', INT], ['i16', INT], ['i32', INT], ['i64', INT], ['f32', REAL], ['f64', REAL],
+]);
 
 /** 向量宽度：2 的幂，上界 8。放宽之前先想清楚 C 那条腿要展开多少行。 */
 const VEC_LANES = new Set([2, 4, 8]);
@@ -113,6 +125,11 @@ class CoreLowerer {
     // 模块级变量（第二十四刀）：名字 -> OIR 类型。查名字时它是**最外层的兜底** ——
     // 局部量与形参先赢，所以同名的局部量是遮蔽而不是错。
     this.globals = new Map();
+    // 线性内存（ADR-0017 第二刀）：`null` = 这份模块不用内存。一个模块**一块**（wasm MVP
+    // 就是这样），所以这里是一个字段而不是一张表。`emitted` 记的是"这一批产物里发过了吗" ——
+    // REPL 一批一份产物，内存只该在声明它的那一批里被建起来，后面几批要接着用同一块。
+    this.mem = null;
+    this.memEmitted = false;
     this.tmpNo = 0;           // dispatch 展开出来的临时量编号，保证名字唯一
     this.loopDepth = 0;       // (brk) / (cont) 只在循环里合法，跟 hir/check.js 同一条规矩
     // 结构体：名字 -> OIR 的 struct 类型对象。**声明就是类型**（hir/types.js 的 structType），
@@ -457,6 +474,13 @@ class CoreLowerer {
       }
       this.globals.set(nm, t);
     }
+    // 第二遍半：线性内存与 data 段（ADR-0017 第二刀）。要在函数体之前收，因为
+    // `(mload …)` 的合法性取决于"这份模块有没有内存"。
+    for (const f of forms) {
+      const h = head(f);
+      if (h === 'memory') this.memDecl(f);
+      else if (h === 'data') this.dataDecl(f);
+    }
     // 第三遍收函数签名，函数才能互相调用（也才能递归）
     for (const f of forms) {
       const h = head(f);
@@ -773,7 +797,8 @@ class CoreLowerer {
       }
       if (h === 'struct' || h === 'class') continue;   // 第一遍已经收过了
       if (h === 'global') continue;                    // 第二遍已经收过了
-      this.err(f, `(module ...) 里只能是 (struct ...) / (class ...) / (global ...) / (fn ...) / (cfn ...) / (kernel ...) / (main ...)，见到 '${h}'`);
+      if (h === 'memory' || h === 'data') continue;    // 第二遍半已经收过了
+      this.err(f, `(module ...) 里只能是 (struct ...) / (class ...) / (global ...) / (memory ...) / (data ...) / (fn ...) / (cfn ...) / (kernel ...) / (main ...)，见到 '${h}'`);
     }
     // REPL 的一批里没有 `(main …)` 是正常的（只写了个函数定义）；整程序时必须有入口。
     if (!sawMain && entryName === 'omni_main') this.err(null, '缺入口：加一个 (main ...)');
@@ -818,6 +843,12 @@ class CoreLowerer {
     const fnTys = [];
     let fi = 0;
     for (const t of this.fnUsed.values()) if (fi++ >= base.fnUsed) fnTys.push(t);
+    // 线性内存：只有声明它的那一批产物负责把它建起来（见构造器里的 memEmitted）。
+    let memOut = null;
+    if (this.mem !== null && !this.memEmitted) {
+      memOut = this.mem;
+      this.memEmitted = true;
+    }
     return {
       structs: structs, classes: classes, enums: [], containers: [],
       closures: clos, fnTypes: fnTys,
@@ -825,6 +856,142 @@ class CoreLowerer {
       globals: globals,
       imports: this.sigImports,
       entry: entryName,
+      // 线性内存只在**声明它的那一批**里发出去（见构造器里的 memEmitted）：
+      // 后面几批的产物里 mem 是 null，于是它们不会把内存重建一遍、把字节清掉。
+      mem: memOut,
+    };
+  }
+
+  /* --------------------------------------------- 线性内存的两条声明（第二刀）
+   * `(memory MIN MAX)`  —— 页数下界与上界，一页 64KB。MAX = 0 表示不设上界。
+   * `(data OFF 字节…)`  —— 初始字节，OFF 是字节偏移。字节可以写成整数（0..255）
+   *                        或字符串（按 UTF-8 展开），一条 data 里可以混着写。
+   *
+   * 为什么 data 的字节不是表达式：它们要在**编译期**算好（wasm 的 data 段也是常量），
+   * 于是四条腿各自把它们发成自己的字面量 —— C 那边是一个 static 数组，JS 那边是一个
+   * 数组字面量，LLVM 那边是 private constant。允许表达式就等于要求四条腿各有一个
+   * 编译期求值器。
+   *
+   * 第 0 页刻意不检查"你别用" —— 那是约定（C 的空指针要能与地址 0 区分），
+   * 但把它做成硬检查就等于给 wasm 的 data 段加一条 wasm 没有的规则。
+   */
+  memDecl(n) {
+    if (this.mem !== null) return this.err(n, '(memory …) 只能有一条 —— 一个模块一块线性内存');
+    const min = this.constInt(n.items[1]);
+    const max = n.items.length > 2 ? this.constInt(n.items[2]) : 0;
+    if (min === null || max === null) return this.err(n, '(memory MIN [MAX])：页数要是整数字面量');
+    if (min < 0 || max < 0) return this.err(n, '(memory MIN MAX)：页数不能是负数');
+    if (max !== 0 && max < min) return this.err(n, `(memory ${min} ${max})：上界比下界还小`);
+    if (min > 65536 || max > 65536) return this.err(n, '(memory …)：页数上限是 65536（wasm32 的 4GB）');
+    this.mem = { min: min, max: max, data: [] };
+    this.memEmitted = false;
+    return null;
+  }
+
+  dataDecl(n) {
+    if (this.mem === null) return this.err(n, '(data …) 之前要先有 (memory …)');
+    const off = this.constInt(n.items[1]);
+    if (off === null || off < 0) return this.err(n, '(data OFF 字节…)：OFF 要是非负的整数字面量');
+    const bytes = [];
+    let i = 2;
+    while (i < n.items.length) {
+      const it = n.items[i];
+      if (isStr(it)) { for (const b of utf8Bytes(it.value)) bytes.push(b); i++; continue; }
+      const v = this.constInt(it);
+      if (v === null || v < 0 || v > 255) {
+        return this.err(it, '(data OFF 字节…) 的字节要是 0..255 的整数或一个字符串字面量');
+      }
+      bytes.push(v);
+      i++;
+    }
+    const end = off + bytes.length;
+    if (end > this.mem.min * 65536) {
+      return this.err(n, `(data ${off} …) 有 ${bytes.length} 个字节，越过了声明的 ${this.mem.min} 页`
+        + `（${this.mem.min * 65536} 字节）—— data 段是初始内容，不会触发 grow`);
+    }
+    this.mem.data.push({ off: off, bytes: bytes });
+    return null;
+  }
+
+  /** 整数字面量（不是表达式）。`(memory 2 4)` 与 `(data 65536 …)` 的那几格。 */
+  constInt(x) {
+    if (x === undefined || !isAtom(x)) return null;
+    if (!/^[+-]?[0-9]+$/.test(x.value)) return null;
+    return Number(x.value);
+  }
+
+  /**
+   * 线性内存的读侧（写侧是语句 `mstore`）。ADR-0017 第二刀。
+   *
+   *   (msize)                当前页数
+   *   (mgrow N)              加 N 页；回**旧**页数，加不了回 -1（wasm 的约定，不报错）
+   *   (mload KIND ADDR)      读；KIND 是 i8s/i8u/i16s/i16u/i32s/i32u/i64/f32/f64
+   *   (mload KIND ADDR OFF)  带静态偏移
+   *
+   * 为什么 KIND 是**字面量**而不是表达式：它决定这条指令读几个字节、怎么扩展、结果是
+   * int 还是 real —— 那是类型，不是值。wasm 那边它也是指令名的一部分（`i64.load32_u`）。
+   *
+   * 为什么 OFF 也是字面量：它是 wasm 的 `offset=` 立即数、C 的 `p->field` 那个常量偏移。
+   * 写成表达式就等于 `(mload k (bin "+" a off))`，那本来就能写 —— 分开一格是为了让
+   * 四条腿都能把它折进寻址里（LLVM 一条 add、C 一次常量折叠），而不是每次多算一次。
+   *
+   * 结果类型只有 int 与 real 两种（方言就这两格数）：`i32s` 读出来是符号扩展到 64 位的
+   * int，`f32` 读出来是加宽到 double 的 real。C 前端将来发的是同一条 MLOAD，只是它的
+   * `t` 会是 T_I32 / T_F32 —— 那一格已经在第一刀里就位了。
+   */
+  memExpr(n, h) {
+    if (this.mem === null) {
+      return this.err(n, `(${h} …) 要先在模块里写一条 (memory MIN [MAX])`);
+    }
+    if (h === 'msize') return { kind: 'MemSize', type: INT };
+    if (h === 'mgrow') {
+      const c = this.expr(n.items[1]);
+      if (c === null) return null;
+      if (c.type !== INT) return this.err(n, `(mgrow N) 的 N 要是 int，这里是 ${coreTypeText(c.type)}`);
+      return { kind: 'MemGrow', pages: c, type: INT };
+    }
+    const kind = isAtom(n.items[1]) ? n.items[1].value : null;
+    const rt = kind === null ? undefined : MEM_LOAD_KINDS.get(kind);
+    if (rt === undefined) {
+      return this.err(n, `(mload KIND ADDR) 的 KIND 要是 ${[...MEM_LOAD_KINDS.keys()].join(' / ')}`
+        + `，这里是 '${kind === null ? '?' : kind}'`);
+    }
+    const a = this.expr(n.items[2]);
+    if (a === null) return null;
+    if (a.type !== INT) return this.err(n, `(mload …) 的地址要是 int，这里是 ${coreTypeText(a.type)}`);
+    const off = n.items.length > 3 ? this.constInt(n.items[3]) : 0;
+    if (off === null || off < 0) return this.err(n, '(mload KIND ADDR OFF) 的 OFF 要是非负的整数字面量');
+    return { kind: 'MemLoad', mkind: kind, addr: a, off: off, type: rt };
+  }
+
+  /**
+   * `(mstore KIND ADDR VAL)` / `(mstore KIND ADDR VAL OFF)`。跟 `pstore` 一样是**语句**。
+   * KIND 是 i8/i16/i32/i64/f32/f64 —— **没有符号**：写只是把低若干位拍进内存
+   * （wasm 的 store 也没有 `_s`/`_u`）。窄写会丢高位，这是刻意的：`(mstore i8 a 300)`
+   * 存进去的是 44，而 C 的 `*(char*)p = 300` 也是这个意思。
+   */
+  memStore(n) {
+    if (this.mem === null) {
+      return this.err(n, '(mstore …) 要先在模块里写一条 (memory MIN [MAX])');
+    }
+    const kind = isAtom(n.items[1]) ? n.items[1].value : null;
+    const vt = kind === null ? undefined : MEM_STORE_KINDS.get(kind);
+    if (vt === undefined) {
+      return this.err(n, `(mstore KIND ADDR VAL) 的 KIND 要是 ${[...MEM_STORE_KINDS.keys()].join(' / ')}`
+        + `，这里是 '${kind === null ? '?' : kind}'`);
+    }
+    const a = this.expr(n.items[2]);
+    const v = this.expr(n.items[3]);
+    if (a === null || v === null) return null;
+    if (a.type !== INT) return this.err(n, `(mstore …) 的地址要是 int，这里是 ${coreTypeText(a.type)}`);
+    if (v.type !== vt) {
+      return this.err(n, `(mstore ${kind} …) 的值要是 ${coreTypeText(vt)}，这里是 ${coreTypeText(v.type)}`);
+    }
+    const off = n.items.length > 4 ? this.constInt(n.items[4]) : 0;
+    if (off === null || off < 0) return this.err(n, '(mstore KIND ADDR VAL OFF) 的 OFF 要是非负的整数字面量');
+    return {
+      kind: 'ExprStmt',
+      expr: { kind: 'MemStore', mkind: kind, addr: a, off: off, value: v, type: vt },
     };
   }
 
@@ -976,6 +1143,7 @@ class CoreLowerer {
     }
     if (h === 'bset') return this.bufSet(n);
     if (h === 'pstore') return this.ptrStore(n);
+    if (h === 'mstore') return this.memStore(n);
     if (h === 'unsafe') return this.unsafeBlock(n, ret);
     if (h === 'aset' || h === 'apush') return this.arrWrite(n, h);
     if (h === 'fldset') return this.fldSet(n);
@@ -1669,6 +1837,7 @@ class CoreLowerer {
       }
       return { kind: 'Ternary', cond: c, then: a, otherwise: b, type: a.type };
     }
+    if (h === 'msize' || h === 'mgrow' || h === 'mload') return this.memExpr(n, h);
     if (h === 'pnew' || h === 'pnull' || h === 'pload' || h === 'padd' || h === 'psub'
       || h === 'pisnull' || h === 'pfield' || h === 'pthin' || h === 'pelem'
       || h === 'peq') return this.ptrExpr(n, h);

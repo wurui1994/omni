@@ -147,6 +147,14 @@ class JsEmitter {
     }
     for (const f of this.mod.funcs) this.func(f);
     if (chunk) return this.out.join('\n') + '\n';
+    // 线性内存（ADR-0017 第二刀）：建内存、拷 data 段，都在调入口**之前**（wasm 的
+    // instantiate 同序）。data 段的字节发成一个数组字面量 —— 它们是编译期算好的。
+    if (this.mod.mem !== undefined && this.mod.mem !== null) {
+      this.line(`$lin_init(${this.mod.mem.min}, ${this.mod.mem.max});`);
+      for (const d of this.mod.mem.data) {
+        this.line(`$lin_data(${d.off}, [${d.bytes.join(', ')}]);`);
+      }
+    }
     this.line(`${this.mod.entry}();`);
     // 没人接的错误：和 C 侧的 main 一样，在入口返回之后查一次（ADR-0007 决定 1）
     this.line('$js_check_uncaught();');
@@ -498,6 +506,15 @@ class JsEmitter {
       case 'PtrLoad': return `${jsPtrLoad(e.type)}(${jsPtrChk(this, e.ptr, e.size)})`;
       case 'PtrStore':
         return `${jsPtrStore(e.type)}(${jsPtrChk(this, e.ptr, e.size)}, ${this.expr(e.value)})`;
+      // 线性内存（ADR-0017 第二刀）。一个访问一个函数（`$lin_ld_i32u(a, off)`），不是一个
+      // 带 kind 参数的通用函数：宽度与符号是编译期常量，发成名字之后每个调用点都是单态的，
+      // 函数体里只剩一次 DataView 调用。名字带 `lin` 前缀是因为 prelude 里 `$mgrow` 已经
+      // 是 arena 的增长了（ADR-0016），两块内存两套名字，别混。
+      case 'MemSize': return '$lin_size()';
+      case 'MemGrow': return `$lin_grow(${this.expr(e.pages)})`;
+      case 'MemLoad': return `$lin_ld_${e.mkind}(${this.expr(e.addr)}, ${e.off})`;
+      case 'MemStore':
+        return `$lin_st_${e.mkind}(${this.expr(e.addr)}, ${e.off}, ${this.expr(e.value)})`;
       // padd / pfield 造**新**的三元组，base/end 照抄：范围是"这块内存"的属性，
       // 走到哪儿都不变（jancy 的 validator 也是跟着块走的，不跟着指针走）。
       case 'PtrAdd': return e.ptr.type.k === 'tptr'

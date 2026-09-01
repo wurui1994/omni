@@ -19,7 +19,7 @@
 
 import { OmniError } from '../source/diag.js';
 import { stderr, wrapFn, callFnValue } from '../host/native.js';
-import { callBuiltin, zeroOf, newInstance, flushOut, failRt, jsCallFn, vecHsum, bufNew, bufGet, bufSet, arrNew, arrLen, arrGet, arrSet, arrPush, arrPop, ptrNew, ptrChk, ptrTChk, ptrLoad, ptrStore, ptrAdd, ptrSub, InterpFail, InterpUncaught, U, jsPendingText } from './builtin.js';
+import { callBuiltin, zeroOf, newInstance, flushOut, failRt, jsCallFn, vecHsum, bufNew, bufGet, bufSet, arrNew, arrLen, arrGet, arrSet, arrPush, arrPop, ptrNew, ptrChk, ptrTChk, ptrLoad, ptrStore, ptrAdd, ptrSub, memInit, memData, memSize, memGrow, memLoad, memStore, InterpFail, InterpUncaught, U, jsPendingText } from './builtin.js';
 
 // 语句的结果：正常走完 / break / continue / return。刻意不用异常做控制流 —— C 侧的
 // throw 是"待决错误标志 + 普通跳转"（ADR-0007），用信号值两个宿主上形状一致。
@@ -91,6 +91,12 @@ class Interp {
   }
 
   run() {
+    // 线性内存先就位（第二刀），与 wasm 的 instantiate 同序：建内存 -> 拷 data 段 -> 调入口。
+    // REPL 的第二批产物里 mem 是 null（sexpr/lower.js 的 memEmitted），所以字节不会被清掉。
+    if (this.mod.mem !== undefined && this.mod.mem !== null) {
+      memInit(this.mod.mem.min, this.mod.mem.max);
+      for (const d of this.mod.mem.data) memData(d.off, d.bytes);
+    }
     const entry = this.funcs.get(this.mod.entry);
     if (entry === undefined) throw new OmniError(`interp: no entry function '${this.mod.entry}'`);
     this.callFunc(entry, undefined, []);
@@ -350,6 +356,16 @@ class Interp {
       // `(pelem p)`（第十八刀）：类型上的一步，运行期是恒等的。
       case 'PtrElem': return this.eval(e.ptr, env, frame);
       case 'PtrLoad': return ptrLoad(e.type.k, this.ptrChk(e.ptr, e.size, env, frame));
+      // 线性内存（ADR-0017 第二刀）。这条腿一次访问查一次表（memLoad 里那一步）——
+      // 树遍历的执行器本来每个节点就是一次 switch，多一次 Map 查找不改数量级；
+      // MIR 那条腿是在造闭包时把函数选好的，那才是要省的地方。
+      case 'MemSize': return memSize();
+      case 'MemGrow': return memGrow(this.eval(e.pages, env, frame));
+      case 'MemLoad': return memLoad(e.mkind, this.eval(e.addr, env, frame), e.off);
+      case 'MemStore': {
+        const a = this.eval(e.addr, env, frame);
+        return memStore(e.mkind, a, e.off, this.eval(e.value, env, frame));
+      }
       case 'PtrStore': {
         const a = this.ptrChk(e.ptr, e.size, env, frame);
         return ptrStore(e.type.k, a, this.eval(e.value, env, frame));

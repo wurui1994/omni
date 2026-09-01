@@ -17,19 +17,23 @@
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+// 静态 import 而不是 `await import(join(S, …))`：这一份也在**自解析轴**里
+// （tests/js-roundtrip 把仓库里的每个 .js 都喂给我们自己的 JS 前端），而 async/await
+// 不在那个子集里 —— 这曾是那条轴上唯一的一条红。路径本来就是固定的，动态 import
+// 一样东西也没多给。
+import { lexText } from '../../stage0/src/glr/lex.js';
+import { glrParse } from '../../stage0/src/glr/driver.js';
+import { readGrammar } from '../../stage0/src/glr/grammar.js';
+import { buildTable } from '../../stage0/src/glr/table.js';
+import { readSexpr } from '../../stage0/src/sexpr/read.js';
+import { Diagnostics, SourceFile } from '../../stage0/src/source/diag.js';
+import { AsySession } from '../../stage0/src/frontend-asy/lower.js';
+import { parseAsyBuiltins } from '../../stage0/src/frontend-asy/types.js';
+// 核心方言那一层的检查（只在 OMNI_SWEEP_SX=1 时用，见下面 SXCHK 那一段话）
+import { lowerCoreSexpr } from '../../stage0/src/sexpr/lower.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const S = join(HERE, '..', '..', 'stage0', 'src');
-const { lexText } = await import(join(S, 'glr/lex.js'));
-const { glrParse } = await import(join(S, 'glr/driver.js'));
-const { readGrammar } = await import(join(S, 'glr/grammar.js'));
-const { buildTable } = await import(join(S, 'glr/table.js'));
-const { readSexpr } = await import(join(S, 'sexpr/read.js'));
-const { Diagnostics, SourceFile } = await import(join(S, 'source/diag.js'));
-const { AsySession } = await import(join(S, 'frontend-asy/lower.js'));
-const { parseAsyBuiltins } = await import(join(S, 'frontend-asy/types.js'));
-// 核心方言那一层的检查（只在 OMNI_SWEEP_SX=1 时用，见下面 SXCHK 那一段话）
-const { lowerCoreSexpr } = await import(join(S, 'sexpr/lower.js'));
 
 const gpath = join(S, 'frontend-asy/asy.grammar');
 const gdiag = new Diagnostics();
