@@ -25,8 +25,8 @@
 // 浮点原先也在这份清单里，第十四片之后 `%f`/`%e`/`%g` 已经逐字节对上了（见 `fText`），
 // 第二十一片补上了 `%a`（见 `aText`）—— 于是这份清单只剩 `%p` 一格。
 
-import { memLoad, memStore, printRaw, flushOut, memSize, memGrow } from './builtin.js';
-import { stderr as hostStderr, readBinary, writeBinary } from '../host/native.js';
+import { memLoad, memStore, printBytes, flushOut, memSize, memGrow } from './builtin.js';
+import { stderrBytes as hostStderr, readBinary, writeBinary } from '../host/native.js';
 
 /**
  * `exit` 抛的那个信号（第六刀第十七片）。
@@ -635,7 +635,8 @@ function swapBytes(p, q, n) {
  * **`FILE *` 类型的表达式**（C11 7.21.1），不要求是可改的左值，所以函数调用够了。
  * 这与 `errno` 那一片不同：那个必须是左值，所以只能是内存。
  *
- * stdout 走解释器自己那个缓冲（`printRaw`，与 `printf` 同一个），stderr **直写**
+ * stdout 走解释器自己那个缓冲（`printBytes`，与 `printf` 同一个 —— 它按**字节**
+ * 落盘，见第十二片），stderr **直写**
  * —— C 的 stderr 就是不带缓冲的（C11 7.21.3 第 7 段）。两条流在测试轴上分开对账，
  * 所以它们之间的交错不进入 oracle。
  */
@@ -677,7 +678,7 @@ function fileSync(e) {
 
 /** 往一条流上写一段文字。认不出的句柄当场抛 —— 那是程序把野指针当 FILE* 用了。 */
 function streamWrite(f, s) {
-  if (f === F_STDOUT) { printRaw(s); return; }
+  if (f === F_STDOUT) { printBytes(s); return; }
   if (f === F_STDERR) {
     /* 先把 stdout 攒着的那些落盘：C 的 stderr 不带缓冲，而我们的 stdout 带 ——
      * 不先冲的话同一个终端上两条流的先后会与 tcc 那边相反。 */
@@ -796,17 +797,17 @@ const LIBC = {
   },
 
   putchar: (a) => {
-    printRaw(String.fromCharCode(Number(BigInt.asUintN(8, BigInt(a[0])))));
+    printBytes(String.fromCharCode(Number(BigInt.asUintN(8, BigInt(a[0])))));
     return BigInt.asIntN(32, BigInt(a[0]));
   },
   puts: (a) => {
     const s = readCStr(a[0]);
-    printRaw(s + '\n');
+    printBytes(s + '\n');
     return BigInt(s.length + 1);
   },
   printf: (a) => {
     const s = cFormat(readCStr(a[0]), a[1]);
-    printRaw(s);
+    printBytes(s);
     return BigInt(s.length);
   },
   /* `v` 那一族（第八刀第六片）：`va_list` 在这个目标上**就是**变参区的地址
@@ -816,7 +817,7 @@ const LIBC = {
    * 也就是说 `printf(fmt, ...)` 与 `vprintf(fmt, ap)` 在这一层是同一件事。 */
   vprintf: (a) => {
     const s = cFormat(readCStr(a[0]), a[1]);
-    printRaw(s);
+    printBytes(s);
     return BigInt(s.length);
   },
   sprintf: (a) => {

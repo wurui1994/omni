@@ -112,6 +112,21 @@ export function stderr(s) {
   return undefined;
 }
 
+/* C 那条腿的输出是**字节**，不是字符（ADR-0017 第八刀第十二片）。
+ * 上面那两条把一个 JS 串按 UTF-8 编出去 —— 对 asy/jancy 是对的（那儿的串是真的
+ * JS 串），对 C 是错的：C 的「串」已经是一串字节了（一个字符一个字节，latin1），
+ * 再按 UTF-8 编一遍就成了 `漢` -> `303 246 302 274 302 242`。
+ * 所以字节那一路自己一扇门，两侧各写各的，谁也不必将就谁。 */
+export function stdoutBytes(s) {
+  process.stdout.write(Buffer.from(s, 'latin1'));
+  return undefined;
+}
+
+export function stderrBytes(s) {
+  process.stderr.write(Buffer.from(s, 'latin1'));
+  return undefined;
+}
+
 export function setExitCode(n) {
   process.exitCode = n === undefined ? 0 : Math.trunc(n);
   return undefined;

@@ -288,15 +288,16 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
 8. **C 的库面**：`libtcc1` 的等价物（软除法/浮点辅助/`alloca`/`setjmp`）与 libc 的接法。
    原先写的是"先转手宿主的 libc，走既有的 extern-C FFI"，第五片证明**转手不成立**
    （指针是自家线性内存里的偏移，宿主 libc 读不到），改成一个读写线性内存的宿主模块，
-   见第五片的落地节。**前十一片已落地**（预定义的宏 —— 目标的自述，五十条，
+   见第五片的落地节。**前十二片已落地**（预定义的宏 —— 目标的自述，五十条，
    顺序与值都对着 `tcc -dM -E` 抄；自带的系统头目录 + 编译器必须自己给的那四份头；
    `stdio.h`/`stdlib.h`/`string.h` 的最小子集 —— libc 的自述；
    `strtol` 一族与 `strncpy`/`strchr`/`strstr` 那几条；
    `qsort`/`bsearch` —— libc 回头调 MIR 的那扇门；`vprintf` 一族；`<ctype.h>`；
    `<errno.h>` —— data 段里一格 + `__omni_errno_location`；三条标准流与 `fprintf`；
    真的文件 —— `fopen`/`fread`/`fgets`/`fseek`，整份快照；
-   `int main(int argc, char **argv)` —— argv 住 data 段），
-   见下面的第八刀第一到十一片节。
+   `int main(int argc, char **argv)` —— argv 住 data 段；
+   stdout 是字节不是字符 —— C 那条腿自己一扇门），
+   见下面的第八刀第一到十二片节。
 
 最后三步是**后端**：
 
@@ -3392,6 +3393,76 @@ C 这条腿的输出走一条**按字节**写的门（`writeBytes`），而不�
 `gen-bad/duff`、`struct-byval`、真的 macOS 系统头。
 
 <!-- 第八刀第十一片-END -->
+
+## 落地：第八刀第十二片
+
+**stdout 是字节，不是字符。**
+
+上一片量 argv 的时候撞见的：`printf("漢字")` 两条腿的 `sizeof` 都是 7（内存里的
+字节是对的），可 stdout 上 tcc 是 `346 274 242`，我们是 `303 246 302 274 302 242`。
+`host/native.js` 的 `stdout` 是 `process.stdout.write(s)`，node 默认按 UTF-8 编 ——
+而 C 这一条腿上一个「串」**已经是一串字节了**（一个字符一个字节），再编一遍就成了
+每个字节自己变两个字节。
+
+这是一条 **byte-exact 的轴上的真错**，不是一个显示问题：`tests/c/gen/` 那一组比的
+就是整条 stdout 的字节。它到第十一片才露出来，只因为在那之前没有一份用例里有非 ASCII。
+
+### 为什么不能就地把 `stdout` 改成 latin1
+
+那个 `stdout` 是**五门语言共用**的。asy/jancy 那一路的串是真的 JS 串（`print "漢字"`
+里那个是两个字符），按 UTF-8 写是对的；改成 latin1 会把那一侧弄坏（`漢` 的
+`charCodeAt` 是 0x6F22，latin1 只取低 8 位，出去就成了 `"`）。
+
+所以两侧各一扇门：
+
+- `host/native.js`：`stdout` / `stderr` 照旧按 UTF-8；新增 `stdoutBytes` /
+  `stderrBytes`，走 `Buffer.from(s, 'latin1')`。
+- `interp/builtin.js`：`printRaw`（asy 的 `write`、`js_proc_stdout_write`）照旧；
+  新增 `printBytes`，C 的 `printf`/`puts`/`putchar`/`vprintf` 与 `streamWrite` 的
+  stdout 那一支改走它。
+- `interp/libc.js`：stderr 直写那一支从 `stderr` 换成 `stderrBytes`。
+
+### 一个缓冲区两种口径
+
+`outBuf` 仍然只有一个 —— 两个缓冲区会让「谁先落盘」变成一件说不清的事，而
+「直写的那一路不能插到已缓冲、还没落盘的输出前面去」这条不变量是原来就有的。
+办法是缓冲区带一个口径标记，切换口径时**先把攒着的落盘**：
+
+```js
+function outMode(bytes) {
+  if (outBuf.length > 0 && bytes !== outIsBytes) flushOut();
+  outIsBytes = bytes;
+}
+```
+
+一次运行实际上只会是其中一种（C 的模块不会调 asy 的 `write`），这几行只是让
+「万一」也是对的 —— 顺序比省一次 `write` 重要。
+
+我们自己的运行期错误（`omni: runtime error: …`）仍走 UTF-8 那扇门：那是我们的诊断，
+不是被跑的程序的输出，而它的文字里有中文。
+
+### 量出来的数
+
+- `tests/c/gen/38-bytes.c`：退出码 25 + 6 行 stdout + 2 行 stderr，与 `tcc -run`
+  逐字节相同。量的是：源文件里的非 ASCII 字面量（`sizeof` 与 `strlen` 都数字节）、
+  `putchar` 一个字节一个字节凑出一个字、`%c` 拿高字节、`%s` 里高字节在串中间、
+  一个字节一个字节印 `(unsigned char)`（`char` 在这个目标上是**有符号**的）、
+  stderr 那条也是字节。
+- `tests/c/run.js`：**66 passed, 0 failed**。`tests/run.js`：96 passed。
+  `tests/js-roundtrip/run.js`：110 passed。
+- 边界钉子仍是 7 条。
+
+### 下一片
+
+第八刀第十三片：**`strerror` / `perror`**。它要一张**逐字节对得上的消息表** ——
+`strerror(ENOENT)` 在 macOS 上是 `No such file or directory`，那串字必须从
+oracle 上量出来，而不是自己编。`perror` 是它加一句 `: ` 与 `\n` 往 stderr 上写，
+第九片那扇门已经在了。
+
+之后仍是原来的顺序：`scanf` 一族、`gen-bad/duff`、`struct-byval`、
+真的 macOS 系统头。
+
+<!-- 第八刀第十二片-END -->
 
 
 

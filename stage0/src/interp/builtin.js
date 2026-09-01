@@ -11,7 +11,7 @@
 // 语言子集里的东西：不用 TextEncoder（自己按 UTF-8 编）、不用 new Function、不用正则字面量
 // 以外的正则。
 
-import { stdout, typeTag, fmtReal, fmtRealG, fmtFixed, fmtSci, fmtGen, reprReal, callJsOp, readText, writeText, spawn } from '../host/native.js';
+import { stdout, stdoutBytes, typeTag, fmtReal, fmtRealG, fmtFixed, fmtSci, fmtGen, reprReal, callJsOp, readText, writeText, spawn } from '../host/native.js';
 import { JS_ABI, JS_MEMBERS } from '../hir/js_abi.js';
 import { OmniError } from '../source/diag.js';
 
@@ -75,21 +75,47 @@ function umod(a, b) {
 /* ---------------------------------------------------------------- 输出
  * 缓冲到 8192 再落盘，和 prelude 的 $print / $print_raw 共用一个缓冲区的做法一致：
  * 直写的那一路不能插到已缓冲、还没落盘的输出前面去。
+ *
+ * 一个缓冲区**两种口径**（ADR-0017 第八刀第十二片）：asy/jancy 那一路的串是真的
+ * JS 串，按 UTF-8 写；C 那一路的串是**一串字节**（一个字符一个字节），按 latin1 写。
+ * 混着来的时候切换口径要先把攒着的落盘 —— 顺序比省一次 write 重要。
+ * 实际上一次运行只会是其中一种，这几行只是让「万一」也是对的。
  */
 let outBuf = '';
+let outIsBytes = false;
+
+function outMode(bytes) {
+  if (outBuf.length > 0 && bytes !== outIsBytes) flushOut();
+  outIsBytes = bytes;
+}
+
+function outPut(s) {
+  outBuf = outBuf + s;
+  if (outBuf.length > 8192) flushOut();
+}
 
 function printLine(s) {
-  outBuf = outBuf + s + '\n';
-  if (outBuf.length > 8192) { stdout(outBuf); outBuf = ''; }
+  outMode(false);
+  outPut(s + '\n');
 }
 
 export function printRaw(s) {
-  outBuf = outBuf + s;
-  if (outBuf.length > 8192) { stdout(outBuf); outBuf = ''; }
+  outMode(false);
+  outPut(s);
+}
+
+/** C 的 `printf` 一族走这儿：攒的是**字节**，落盘时按 latin1 写。 */
+export function printBytes(s) {
+  outMode(true);
+  outPut(s);
 }
 
 export function flushOut() {
-  if (outBuf.length > 0) { stdout(outBuf); outBuf = ''; }
+  if (outBuf.length === 0) return;
+  const s = outBuf;
+  outBuf = '';
+  if (outIsBytes) stdoutBytes(s);
+  else stdout(s);
 }
 
 /* ------------------------------------------------------------ 实数的格式化
