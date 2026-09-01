@@ -20,6 +20,7 @@
     "test:glr": "node tests/glr/run.js",
     "test:mir": "node tests/mir/run.js",
     "test:incr": "node tests/incr/run.js",
+    "test:c": "node tests/c/run.js",
     "test:llvm": "node tests/llvm/run.js",
     "test:sexpr": "node tests/sexpr/run.js",
     "test:asy": "node tests/asy/run.js",

@@ -21,6 +21,7 @@ import { lowerAsy } from './frontend-asy/lower.js';
 import { asyUnitModules } from './frontend-asy/link.js';
 import { parseAsyBuiltins } from './frontend-asy/types.js';
 import { lowerJnc } from './frontend-jnc/lower.js';
+import { Cpp } from './frontend-c/tccpp.js';
 import { readSexpr } from './sexpr/read.js';
 import { lowerCoreSexpr } from './sexpr/lower.js';
 import { printSexpr } from './sexpr/print.js';
@@ -68,6 +69,48 @@ function incDirs(argv) {
   return out;
 }
 
+/**
+ * `-D 名字` / `-D 名字=宏体`（与 tcc 同形）。回 [名字, 宏体|undefined] 的表。
+ * 顺序有意义：后面的 `-D` 会盖掉前面同名的那个，与 tcc 一样。
+ */
+function defArgs(argv) {
+  const out = [];
+  let i = 0;
+  for (const a of argv) {
+    if (a === '-D') {
+      const d = argv[i + 1];
+      if (d === undefined || d.startsWith('-')) throw new OmniError('-D 后面要一个名字');
+      const eq = d.indexOf('=');
+      out.push(eq < 0 ? [d, undefined] : [d.slice(0, eq), d.slice(eq + 1)]);
+    }
+    i++;
+  }
+  return out;
+}
+
+/**
+ * 一份 `.c` -> 预处理后的文本。**格式与 `tcc -E -P` 逐字节相同**（ADR-0017 第五刀）。
+ * 文件 IO 在这里，预处理器自己只认一个 `readFile` 回调 —— 于是 REPL 那一路可以把
+ * 内存里的几份 `.h` 直接喂进去，测试也不必碰 fs。
+ */
+function cppText(path, incs, defs) {
+  const cpp = new Cpp({
+    readFile: (p) => {
+      try {
+        return readText(p);
+      } catch {
+        return null;
+      }
+    },
+    includeDirs: incs,
+    dirname,
+    join,
+  });
+  for (const [name, body] of defs) cpp.define(name, body);
+  const out = cpp.preprocessToText(path, readText(path));
+  for (const w of cpp.warnings) stderr(`${w}\n`);
+  return out;
+}
 /** 文件后缀决定默认的类型模式（ADR-0008 第 1 节）；`--mode` 可覆盖，REPL 用它 */
 function modeFor(path, argv, fallback = 'mixed') {
   const i = argv.indexOf('--mode');
@@ -1632,11 +1675,14 @@ function main(argv) {
   // --verbose 要在做任何事之前生效，否则第一步的耗时就丢了
   VERBOSE = rest.includes('--verbose') || rest.includes('-v');
   vMark = nowMs();
-  // 带值的开关（-o NAME / --mode M）的值不能被当成源文件
+  // 带值的开关（-o NAME / --mode M / -I 目录 / -D 宏）的值不能被当成源文件。
+  // `-I` 与 `-D` 是补上的（第五刀）：少了它们，`cpp -I dir x.c` 会把 `dir` 当成源文件 ——
+  // 而 `.jnc` 那一路的 `-I` 本来就有同一个毛病，一并修掉。
   const files = [];
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
-    if (a === '-o' || a === '--mode' || a === '--work' || a === '--cache') { i++; continue; }
+    if (a === '-o' || a === '--mode' || a === '--work' || a === '--cache'
+      || a === '-I' || a === '-D') { i++; continue; }
     if (a.startsWith('-')) continue;
     files.push(a);
   }
@@ -1828,6 +1874,13 @@ function main(argv) {
       stdout(path.endsWith('.jnc') ? jncText(path, incDirs(rest), false) : asyText(path));
       return 0;
     }
+    // C 的预处理（ADR-0017 第五刀）。**格式与 `tcc -E -P` 逐字节相同** —— 那是它的
+    // 测试轴（`tests/c/`）：同一份 `.c` 交给我们和 tcc，两份输出必须一样。
+    // `-I <目录>` 与 `.jnc` 那一路共用同一个收集器；`-D 名字[=宏体]` 与 tcc 同形。
+    case 'cpp': {
+      stdout(cppText(path, incDirs(rest), defArgs(rest)));
+      return 0;
+    }
     // 一个源文件一份产物（第七十五刀）：`<名字>.sx` 与 `<名字>.js` 摊在一个目录里，
     // 名字就是源文件自己的名字。`-o 目录` 指定去处，默认 .omni-cache/asy-mods。
     // 加 `--run` 就直接跑（node 自己按 ESM 的模块图把它们串起来）。
@@ -1990,6 +2043,8 @@ commands:
   ast       print the AST as JSON
   sx        print the core-dialect text an .asy file lowers to (the *.asy.sx that
             core-dialect diagnostics cite; line numbers line up exactly)
+  cpp       preprocess a .c file (ADR-0017 cut 5). The output is byte-identical to
+            tcc -E -P; that equality is the test axis (tests/c/). Takes -I and -D.
   oir       print the OIR as JSON
   mir       print the MIR (ADR-0014 decision 6): SSA values + slots + structured
             control flow, one 8-byte record per instruction (--bytes: sizes and
@@ -2008,9 +2063,10 @@ commands:
 flags:
   -v, --verbose  trace every internal step to stderr with its wall-clock time
                  (front end, check, backend, runtime .o cache, cc, exec)
-  -I <dir>       .jnc only: a directory to look in for an import, tried after the
-                 importing file's own directory. Repeatable; tried in the given
-                 order. Same meaning as jancy's own -I.
+  -I <dir>       .jnc and .c: a directory to look in for an import / #include, tried
+                 after the importing file's own directory. Repeatable; tried in the
+                 given order. Same meaning as jancy's and tcc's own -I.
+  -D name[=body] cpp only: predefine a macro, same spelling as tcc's -D.
 
 type modes (ADR-0008) — chosen by extension, overridable with --mode:
   .omni     mixed   omitted type is inferred from the initializer, else dynamic

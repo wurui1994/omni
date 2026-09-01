@@ -22,6 +22,7 @@ const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 const SUITES = [
   'run.js', 'oracle/run.js', 'js-roundtrip/run.js', 'oir/run.js', 'js-exec/run.js',
   'cabi/run.js', 'wat/run.js', 'glr/run.js', 'mir/run.js', 'incr/run.js',
+  'c/run.js',
   'llvm/run.js', 'sexpr/run.js', 'asy/run.js', 'jnc/run.js', 'jit/run.js',
   'gpu/run.js', 'bootstrap/run.js',
 ];
