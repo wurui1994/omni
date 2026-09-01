@@ -288,7 +288,7 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
 8. **C 的库面**：`libtcc1` 的等价物（软除法/浮点辅助/`alloca`/`setjmp`）与 libc 的接法。
    原先写的是"先转手宿主的 libc，走既有的 extern-C FFI"，第五片证明**转手不成立**
    （指针是自家线性内存里的偏移，宿主 libc 读不到），改成一个读写线性内存的宿主模块，
-   见第五片的落地节。**前二十二片已落地**（预定义的宏 —— 目标的自述，五十条，
+   见第五片的落地节。**前二十三片已落地**（预定义的宏 —— 目标的自述，五十条，
    顺序与值都对着 `tcc -dM -E` 抄；自带的系统头目录 + 编译器必须自己给的那四份头；
    `stdio.h`/`stdlib.h`/`string.h` 的最小子集 —— libc 的自述；
    `strtol` 一族与 `strncpy`/`strchr`/`strstr` 那几条；
@@ -313,8 +313,11 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
    **编出来的 tinycc 真的在预处理文件了** —— `getenv`、fd 那一层
    （`open`/`read`/`write`/`lseek`/`close`/`unlink`，与 `fopen` 共用同一张快照表）、
    dispatch 的信号量、以及 `setjmp`/`longjmp` —— 后者在**解释器**这一层做：
-   一帧一个 pc 循环，所以「回到某一帧的某条指令之后」是可表达的），
-   见下面的第八刀第一到二十二片节。
+   一帧一个 pc 循环，所以「回到某一帧的某条指令之后」是可表达的；
+   **编出来的 tinycc 在预处理 tinycc 自己那一整份源码了**，与本机 tcc 逐字节相同 ——
+   位域的**访问类型**（`adjust_bf`：声明的类型装不下时另挑一个，符号性看声明的、
+   宽度看访问的），以及别在命令行上替它回答目标配置那件事），
+   见下面的第八刀第一到二十三片节。
 
 最后三步是**后端**：
 
@@ -4369,6 +4372,107 @@ tccmacho.c:2142: error: internal: 位域跨过了它的容器（要 packed 那�
 之后：`-dM`、路径 A 的 GLR 与路径 B 对账（第七步）。
 
 <!-- 第八刀第二十二片-END -->
+
+## 落地：第八刀第二十三片
+
+**编出来的 tinycc 在预处理 tinycc 自己那一整份源码了**，而且逐字节相同：
+
+```
+node stage0/src/cli.js c-run "$TCCSRC/tcc.c" -I"$SDK/usr/include" \
+  -I.omni-cache/tcc-build -I"$TCCSRC" -DONE_SOURCE=1 \
+  -- -E -P -B.omni-cache/tcc-build -I.omni-cache/tcc-build -I"$TCCSRC" \
+     -DONE_SOURCE=1 "$TCCSRC/tcc.c"
+29009 行，与本机 tcc 的同一条命令 cmp —— IDENTICAL
+```
+
+这一条是**自指**的：我们的 C 前端把 tinycc 编成 MIR，MIR 在我们的解释器上跑，
+那份 tinycc 再去读它自己的源码 —— 答案与本机那个二进制一个字节不差。
+
+它自报的身份也从上一片的 `(AArch64 Linux)` 变成了 `(AArch64 Darwin)`：这一片起
+配置与本机那个二进制**是同一套**。
+
+### 一 别在命令行上告诉它目标
+
+上一片喂的是 `-DTCC_TARGET_ARM64`，于是它是 arm64 **Linux**，`07-predef.c` 那一格
+对不上（`__APPLE__`、`__arm64__`、`long long` 对 `long`、`wchar_t` 的符号）。
+
+原因在 `config.h`（configure 生成的那份）：
+
+```c
+#if !(TCC_TARGET_I386 || TCC_TARGET_X86_64 || … || TCC_TARGET_ARM64 || …)
+#define TCC_TARGET_ARM64 1
+#define TCC_TARGET_MACHO 1
+#define CONFIG_TCC_SYSINCLUDEPATHS "{B}/include:…/MacOSX.sdk/usr/include"
+#endif
+```
+
+命令行上一定义 `TCC_TARGET_ARM64`，这**一整块**就被跳过 —— 目标是 arm64 了，但
+Mach-O 没了、系统头的搜索路径也没了（这正是它找不到 `stdlib.h` 的原因）。
+把那个 `-D` 去掉，让 `config.h` 自己说，一次就全对了。
+
+一句话：**别替被编的程序回答它自己的配置问题**。
+
+### 二 位域的访问类型（`adjust_bf`）
+
+换成 Mach-O 之后第一格就在 `tccmacho.c:2142`：
+
+```c
+struct dyld_chained_ptr_64_rebase { uint64_t target:36, high8:8, reserved:7, …; };
+rebase->high8 = cur >> (64 - 8);
+```
+
+我们报的是「位域跨过了它的容器」。这不是布局错了 —— 布局与 tcc 逐字相同，包括
+PCC 那句「装得下的 `long long` 位域按 `int` 算」（`tccgen.c:4280`）。`high8` 排在
+第 36 位而类型已经是 4 字节的 `int`，**36 + 8 越过 32**，按声明的类型确实读不出来。
+
+缺的是 tcc 布局之后那一遍收尾（`tccgen.c:4365-4436`）：**给这些位域挑一个别的
+访问类型**。`high8` 这一格挑出来是「偏移 4、位置 4、按 2 字节访问」。
+那个 `for(;;)` 是在找一个不动点：按当前对齐算容器起点 `cx`，据此算需要几个字节、
+挑一个类型，那个类型的对齐又会改变 `cx` —— 直到 `cx` 不再变。
+
+访问类型挂在**成员记录**上、由类型的 `ref` 指过去（`f->type.ref = f`，
+`tccgen.c:4372`）：标量类型的 `ref` 本来空着，于是它和位域信息一样跟着类型走，
+传递过程中不会掉。声明的类型**不动** —— 符号性还得按它算。
+
+### 三 值的容器宽度跟着**访问**类型，不是声明的类型
+
+这一格是量出来的。第一版写完，`struct { unsigned long long a:20, b:20, c:20, d:4; }`
+的 `b` 读出来是 `345ab` 而不是 `12345`。
+
+`b` 的声明类型被布局改成了 4 字节的 `int`，而访问类型挑出来是 8 字节（位置 20、
+20 + 20 = 40 越过 32，但落在 64 里）。移位的宽度按哪个算？`tccgen.c:1859-1868`
+把这两件事分在了 `adjust_bf` 的**两侧**：
+
+```c
+type.t = vtop->type.t & VT_UNSIGNED;      /* 之前：符号性按声明的类型 */
+r = adjust_bf(vtop, bit_pos, bit_size);   /* 这一句把基类型换成访问类型 */
+if ((vtop->type.t & VT_BTYPE) == VT_LLONG) type.t |= VT_LLONG; else type.t |= VT_INT;
+```
+
+也就是**符号性看声明的、宽度看访问的**。按声明的 32 位去移，`b` 那 20 位有 8 位
+被移出去了 —— 而 `345ab` 与 `12345` 只差这么多。
+
+### 量出来的数
+
+- 编出来的 tinycc 预处理**整份 tinycc**（`tcc.c` + ONE_SOURCE，29009 行输出）：
+  与本机 tcc 的同一条命令 **IDENTICAL**，18.0s。这一条是自指的：我们的 C 前端编出
+  tinycc，那份 tinycc 再去读它自己的源码，答案与本机那个二进制一个字节不差。
+- 单独一份 `tccasm.c`（6553 行）：同样 **IDENTICAL**，7.7s。
+- `tests/c/cpp/` 那八份用例全部交给编出来的 tinycc：**8/8 逐字节相同**
+  （上一片是 7/8，差的那一份就是配置）。
+- `tests/c/gen/45-bitfield-access.c`：exit 241 + 106B stdout == `tcc -run`。
+- `tests/c/run.js`：**81 passed, 0 failed**。`tests/run.js`：**96 passed, 0 failed**。
+
+### 下一片
+
+第八刀第二十四片：让编出来的 tinycc 走到**编译**那一路（`-c` / `tcc -run`）。
+`-E` 只用到预处理器；`-c` 会把 `tccgen.c`、arm64 的代码生成、`tccmacho.c` 的写出
+全拉进来，于是它要的东西也另一批：`mmap`/`mprotect`（`tccrun.c`）、
+写文件那一路（已经有了）、以及 `struct` 按值传/返回（第 9-11 步的后端要它）。
+
+之后：`-dM`、路径 A 的 GLR 与路径 B 对账（第七步）。
+
+<!-- 第八刀第二十三片-END -->
 
 
 

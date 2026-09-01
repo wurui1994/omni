@@ -179,9 +179,31 @@ export function mkBitfield(ty, pos, bits) {
   return ctype(t, ty.ref);
 }
 
-/** 去掉位域信息，回它**声明的**那个类型 —— 访问内存要按它的宽度来。 */
+/** 去掉位域信息，回它**声明的**那个类型 —— 值的符号性与容器宽度按它算。 */
 export function bitfieldBase(ty) {
   return ctype(ty.t & ~VT_STRUCT_MASK, ty.ref);
+}
+
+/**
+ * 真正**用来访问内存**的那个类型（`adjust_bf`，`tccgen.c:1828`）。
+ *
+ * 多数位域就是它声明的那个类型。但 PCC 的布局会把一个位域摆在声明的类型装不下的
+ * 地方：`unsigned long long high8:8` 排在第 36 位，而布局那一句
+ * 「装得下的 long long 位域按 int 算」（`tccgen.c:4280`）已经把它的类型改成了 4 字节 ——
+ * 36 + 8 越过 32。那时布局那一遍的收尾会给这条成员挑一个**别的**访问类型
+ * （`tccgen.c:4366-4436`），偏移与位置一起改过，访问类型记在成员记录的 `aux` 上。
+ *
+ * 挂在 `ref` 上而不是给 SValue 加一格：tcc 就是这么做的（`f->type.ref = f`），
+ * 标量类型的 `ref` 本来空着，于是访问类型和位域信息一样**跟着类型走**。
+ *
+ * 符号性仍然跟着**声明的**类型（`sv->type.t & ~(VT_BTYPE|VT_LONG) | t`）：
+ * 读出来要不要符号扩展是声明说的事，与拿几个字节读无关。
+ */
+export function bfAccess(ty) {
+  const base = bitfieldBase(ty);
+  const fd = ty.ref;
+  if (fd === null || fd === undefined || typeof fd.aux !== 'number' || fd.aux < 0) return base;
+  return ctype((base.t & ~(VT_BTYPE | VT_LONG)) | fd.aux, null);
 }
 
 /**

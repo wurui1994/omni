@@ -170,7 +170,7 @@ import {
   VT_BTYPE, VT_UNSIGNED, VT_DEFSIGN, VT_LONG, VT_FLOAT, VT_DOUBLE,
   VT_EXTERN, VT_STATIC, VT_TYPEDEF, VT_INLINE, VT_CONSTANT, VT_VOLATILE, VT_STORAGE,
   btype, isInteger, isFloat, isUnsigned, isPtr, isArray, isFunc, isStruct, isUnion,
-  isBitfield, bitPosOf, bitSizeOf, mkBitfield, bitfieldBase,
+  isBitfield, bitPosOf, bitSizeOf, mkBitfield, bitfieldBase, bfAccess,
   ctype, mkPointer, mkArray, mkStruct, mkEnum, mkFunc, typeSize, typeText, sameType,
   sameTypeUnqual,
   TY_VOID, TY_INT, TY_UINT, TY_LLONG, TY_ULLONG, TY_CHAR, TY_SHORT, TY_BOOL,
@@ -418,17 +418,23 @@ function funcTypeOf(info) {
 
 /**
  * 位域**取过值之后**是什么类型 —— 也就是 `gvBitfield` 那两条移位所用的容器类型：
- * `long long` 的位域按 64 位，别的都按 32 位；符号性跟着声明的类型（`_Bool` 按无符号）。
+ * 宽度跟着**访问类型**（`long long` 的按 64 位，别的按 32 位），符号性跟着**声明的**
+ * 类型（`_Bool` 按无符号）。
  *
- * 这个函数存在的理由是一条不变量：**位域信息只能挂在左值上**。一旦取过值，类型上
- * 再带着「第几位、几位宽」就会骗人 —— 下一次 `gv` 会以为它还得去内存里读一遍，而
- * 它手上已经没有地址了。所以凡是「把左值变成值」的地方（`promote`、`castTo`、
+ * 两处来源不同不是笔误，`tccgen.c:1859-1868` 就是这么分的：符号性在 `adjust_bf`
+ * **之前**从声明的类型上取，宽度在 `adjust_bf` **之后**读 `vtop->type.t` —— 那时
+ * 基类型已经被换成访问类型了。换过访问类型的位域，它的位置是相对新容器算的
+ * （比如 `b:20` 排在第 20 位、访问类型换成 8 字节），按声明的 32 位去移就错。
+ *
+ * 这个函数存在的另一个理由是一条不变量：**位域信息只能挂在左值上**。一旦取过值，
+ * 类型上再带着「第几位、几位宽」就会骗人 —— 下一次 `gv` 会以为它还得去内存里读一遍，
+ * 而它手上已经没有地址了。所以凡是「把左值变成值」的地方（`promote`、`castTo`、
  * `incdec`）都要在这儿过一道。这一格错过一次，printf 的实参上当场炸。
  */
 function bfValTypeOf(ty) {
   if (!isBitfield(ty.t)) return ty;
   const base = bitfieldBase(ty);
-  const w64 = btype(base.t) === VT_LLONG;
+  const w64 = btype(bfAccess(ty).t) === VT_LLONG;
   const uns = isUnsigned(base.t) || btype(base.t) === VT_BOOL;
   return w64 ? (uns ? TY_ULLONG : TY_LLONG) : (uns ? TY_UINT : TY_INT);
 }
@@ -946,19 +952,22 @@ export class CGen {  /**
     const pos = bitPosOf(v.ty.t);
     const bits = bitSizeOf(v.ty.t);
     const base = bitfieldBase(v.ty);
-    if (pos + bits > typeSize(base).size * 8) {
+    /* 拿几个字节读是**访问类型**说的事（`adjust_bf`）：多数时候就是声明的那个类型，
+     * 越过容器的那些由布局的收尾挑过一个（见 `fixBitfields`）。 */
+    const acc = bfAccess(v.ty);
+    if (pos + bits > typeSize(acc).size * 8) {
       this.err('internal: 位域跨过了它的容器（要 packed 那条按字节读的路）');
     }
-    const w64 = btype(base.t) === VT_LLONG;
     /* 符号性跟着**声明的**类型；`_Bool` 位域按无符号（`tccgen.c:1860`）。 */
     const uns = isUnsigned(base.t) || btype(base.t) === VT_BOOL;
     const cont = bfValTypeOf(v.ty);
-    const W = w64 ? 64 : 32;
+    /* 移位的宽度按**容器**来 —— 而容器的宽度跟着访问类型（见 `bfValTypeOf`）。 */
+    const W = btype(cont.t) === VT_LLONG ? 64 : 32;
     const f = this.f;
     const mt = mirTypeOf(cont);
-    /* 容器整个读出来（宽度按声明的类型，于是 `char c:3` 只读一个字节），
+    /* 容器整个读出来（宽度按访问类型，于是 `char c:3` 只读一个字节），
      * 再转成容器类型 —— `castTo` 顺手把窄类型那条收口规则也用上了。 */
-    let r = this.gv(this.castTo(sMem(base, v.mem.addr, v.mem.off), cont));
+    let r = this.gv(this.castTo(sMem(acc, v.mem.addr, v.mem.off), cont));
     const up = W - (pos + bits);
     if (up > 0) r = f.emit(OP.SHL, mt, r, this.konst(cont, up), 0);
     const down = W - bits;
@@ -1268,24 +1277,26 @@ export class CGen {  /**
     if (target.mem === null) this.err('internal: 位域左值不在内存上');
     const pos = bitPosOf(target.ty.t);
     const bits = bitSizeOf(target.ty.t);
-    const base = bitfieldBase(target.ty);
-    const w64 = btype(base.t) === VT_LLONG;
+    /* 读改写都按**访问类型**（`vstore` 里也是先 `adjust_bf` 再 `gen_cast`，
+     * 于是掩码的宽度、那条 load、那条 store 用的都是它）。 */
+    const acc = bfAccess(target.ty);
+    const w64 = btype(acc.t) === VT_LLONG;
     const cont = w64 ? TY_ULLONG : TY_UINT;
     const mt = mirTypeOf(cont);
     const f = this.f;
     const mask = (1n << BigInt(bits)) - 1n;
 
-    let r = this.gv(this.castTo(v, base));
+    let r = this.gv(this.castTo(v, acc));
     r = f.emit(OP.BAND, mt, r, this.konst(cont, mask), 0);
     if (pos > 0) r = f.emit(OP.SHL, mt, r, this.konst(cont, pos), 0);
 
-    let old = this.gv(sMem(base, target.mem.addr, target.mem.off));
+    let old = this.gv(sMem(acc, target.mem.addr, target.mem.off));
     old = f.emit(OP.BAND, mt, old, this.konst(cont, ~(mask << BigInt(pos))), 0);
     const nv = f.emit(OP.BOR, mt, old, r, 0);
-    /* MSTORE 的 `t` 是**值**的类型，宽度在描述符里 —— 描述符按声明的类型选，
+    /* MSTORE 的 `t` 是**值**的类型，宽度在描述符里 —— 描述符按访问类型选，
      * 于是 `char c:3` 只写回那一个字节，不会碰到旁边的成员。 */
     f.emit(OP.MSTORE, mt, target.mem.addr, nv,
-      memDesc(storeKindOf(base), target.mem.off));
+      memDesc(storeKindOf(acc), target.mem.off));
     return target;
   }
 
@@ -3608,7 +3619,72 @@ export class CGen {  /**
     info.fields = fields;
     info.align = maxalign;
     info.size = alignUp(c, maxalign);
+    this.fixBitfields(fields, info.size);
     return mkStruct(info, union);
+  }
+
+  /**
+   * 布局那一遍的收尾（`tccgen.c:4365-4436`）：**能不能按声明的类型访问每个位域**。
+   *
+   * 不能的那些换一个访问类型。会撞上这一格的正是 PCC 那句「装得下的 `long long`
+   * 位域按 `int` 算」：
+   *
+   * ```c
+   * struct { unsigned long long target:36, high8:8, …; };   // dyld 的 chained rebase
+   * ```
+   *
+   * `high8` 排在第 36 位，而它的类型已经被改成 4 字节的 `int` —— 36 + 8 越过 32。
+   * 这个循环把偏移挪到第 4 个字节、位置变成 4，访问类型记成 1 字节，于是
+   * 4 + 8 落在一个字节里。
+   *
+   * 那个 `for(;;)`（照抄 `tccgen.c:4390-4408`）是在**找一个不动点**：按当前的对齐
+   * 算出容器的起点 `cx`，据此算出需要几个字节、挑一个类型，那个类型的对齐又会改变
+   * `cx` —— 直到 `cx` 不再变。
+   */
+  fixBitfields(fields, total) {
+    for (const fd of fields) {
+      if (!isBitfield(fd.ty.t)) continue;
+      /* `ref` 指回这条成员（`tccgen.c:4372` 的 `f->type.ref = f`）：访问类型要跟着
+       * 类型一起传，而标量的 `ref` 本来空着。默认 -1 = 按声明的类型访问。 */
+      fd.aux = -1;
+      fd.ty = ctype(fd.ty.t, fd);
+      const bits = bitSizeOf(fd.ty.t);
+      if (bits === 0) continue;
+      const pos = bitPosOf(fd.ty.t);
+      const decl = typeSize(bitfieldBase(fd.ty));
+      if (pos + bits <= decl.size * 8 && fd.off + decl.size <= total) continue;
+
+      let c0 = -1;
+      let s = 1;
+      let align = 1;
+      let tt = VT_BYTE;
+      let px = 0;
+      let cx = 0;
+      for (;;) {
+        px = fd.off * 8 + pos;
+        cx = (px >> 3) & -align;
+        px -= cx * 8;
+        if (c0 === cx) break;
+        s = (px + bits + 7) >> 3;
+        tt = s > 4 ? VT_LLONG : s > 2 ? VT_INT : s > 1 ? VT_SHORT : VT_BYTE;
+        const ts = typeSize(ctype(tt, null));
+        s = ts.size;
+        align = ts.align;
+        c0 = cx;
+      }
+
+      if (px + bits > s * 8 || cx + s > total) {
+        /* tcc 这时退到**按字节读写**（`f->auxtype = VT_STRUCT`，`load_packed_bf`）。
+         * 那条路只有 `__attribute__((packed))` 才走得到，而 packed 还没到 —— 所以
+         * 这儿是一条声明出来的边界，不是一个错答案。 */
+        this.todo('位域要按字节读写那条路（packed）还没到');
+      }
+      fd.off = cx;
+      fd.aux = tt;
+      /* 声明的类型**不动**（值的符号性与容器宽度还按它算，`tccgen.c` 只改 `auxtype`）；
+       * 变的是偏移与位置，以及 `aux` 上那个访问类型。 */
+      fd.ty = mkBitfield(ctype(fd.ty.t, fd), px, bits);
+    }
   }
 
   /**
