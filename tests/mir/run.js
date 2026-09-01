@@ -18,6 +18,7 @@
 //   node tests/mir/run.js basics        # 只跑名字里含 basics 的
 
 import { readdirSync, readFileSync, writeFileSync, existsSync, mkdtempSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { workDir } from '../work.js';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -181,6 +182,58 @@ if (keep('hash')) {
 
   if (detail.length > 0) bad('hash/content-addressed', detail.join('\n'));
   else ok(`hash/content-addressed [两次降级逐字节相同；改 g 不动 f：${h1.get('u_f').body}]`);
+}
+
+// ------------------------------------------------- 4. MIR 单元用例：两条腿逐字节相同
+//
+// i32 / f32（ADR-0017 第一刀）现在**没有前端能产出** —— 核心方言只有一格 int、一格 real。
+// 所以这一组直接造 MIR（见 mirkit.mjs），在两条腿上跑同一份：闭包解释器（32 位回绕与
+// fround 在它里头是显式写出来的）与 LLVM 后端（`add i32` / `fadd float` 由 LLVM 与硬件定）。
+// 期望值写在用例里、按 IEEE-754 与 wasm 规范算出来的，不是从任何一条腿抄回来的。
+//
+// LLVM 那条腿在这里**自己链**：`clang 用例.ll stage0/runtime/*.c`。不走 cli.js 的
+// buildLlvm 是因为那条路要一个源文件当输入，而这一组的输入就是 MIR 本身。
+{
+  const units = readdirSync(join(here, 'units')).filter((x) => x.endsWith('.mjs')).sort();
+  const legDir = workDir('mir-units');
+  for (const u of units) {
+    const name = u.replace(/\.mjs$/, '');
+    if (!keep(name)) continue;
+    const unitPath = join(here, 'units', u);
+    const leg = (which) => spawnSync('node', [join(here, 'unit-leg.mjs'), unitPath, which],
+      { encoding: 'utf8' });
+    const re = leg('expected');
+    if (re.status !== 0) { bad(`unit/${name} expected`, `    exit=${re.status}\n    ${re.stderr.trim()}`); continue; }
+    const want = re.stdout;
+
+    const ri = leg('interp');
+    if (ri.status !== 0) { bad(`unit/${name} interp`, `    exit=${ri.status}\n    ${ri.stderr.trim()}`); continue; }
+    if (ri.stdout !== want) {
+      bad(`unit/${name} interp`, `    want: ${JSON.stringify(want)}\n    got:  ${JSON.stringify(ri.stdout)}`);
+      continue;
+    }
+
+    const rl = leg('ll');
+    if (rl.status !== 0) { bad(`unit/${name} llvm-emit`, `    exit=${rl.status}\n    ${rl.stderr.trim()}`); continue; }
+    const llPath = join(legDir, `${name}.ll`);
+    const exePath = join(legDir, `${name}.out`);
+    writeFileSync(llPath, rl.stdout);
+    const rc = spawnSync('clang', ['-O0', '-w', '-ffp-contract=off', '-pthread',
+      '-I', join(root, 'stage0', 'runtime'), llPath,
+      ...readdirSync(join(root, 'stage0', 'runtime')).filter((x) => x.endsWith('.c'))
+        .map((x) => join(root, 'stage0', 'runtime', x)),
+      '-o', exePath, '-lm'], { encoding: 'utf8' });
+    if (rc.status !== 0) {
+      bad(`unit/${name} llvm-link`, `    clang 拒收（IR 留在 ${llPath}）\n    ${rc.stderr.trim().split('\n').slice(0, 6).join('\n    ')}`);
+      continue;
+    }
+    const rx = spawnSync(exePath, [], { encoding: 'utf8' });
+    if (rx.stdout !== want) {
+      bad(`unit/${name} llvm`, `    want: ${JSON.stringify(want)}\n    got:  ${JSON.stringify(rx.stdout)}`);
+      continue;
+    }
+    ok(`unit/${name} [interp == llvm == 期望，${want.split('\n').length - 1} 行]`);
+  }
 }
 
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);

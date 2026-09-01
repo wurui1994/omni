@@ -1787,6 +1787,9 @@ const STATIC_CALLS = {
   'Math.ceil': { op: 'js_math', argc: 2, lit: { op: 'c' } },
   'Math.max': { op: 'js_math', argc: 2, lit: { op: 'M' } },
   'Math.min': { op: 'js_math', argc: 2, lit: { op: 'm' } },
+  // fround（ADR-0017 第一刀）：MIR 的 f32 语义就是"按 double 算完再舍一次到单精度"，
+  // 而闭包解释器要在**我们自己编出来的**编译器里也这么算 —— 所以它必须进封闭 ABI。
+  'Math.fround': { op: 'js_math', argc: 2, lit: { op: 'F' } },
   'Object.keys': { op: 'js_obj_keys', argc: 1 },
   'Object.values': { op: 'js_obj_values', argc: 1 },
   'Object.entries': { op: 'js_obj_entries', argc: 1 },

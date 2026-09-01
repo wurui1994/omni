@@ -34,6 +34,12 @@ console.log(String(typeof undefined));
 console.log(String(Math.floor(b)));
 console.log(String(Math.max(a, 3)));
 console.log(String(Math.abs(-b)));
+// fround 是为 MIR 的 T_F32 长出来的那个闭合 ABI 口子（ADR-0017 第一刀）：
+// 单精度回绕必须真的发生，否则下面三行都会退化成恒等。
+console.log(String(Math.fround(0.1 + 0.2)));
+console.log(String(Math.fround(1 / 3)));
+console.log(String(Math.fround(16777217)));
+console.log(String(Math.fround(-0.5)));
 console.log(String(Number("42") + 1));
 console.log(String(parseInt("ff", 16)));
 console.log(String(String(12.5)));

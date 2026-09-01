@@ -33,7 +33,9 @@ import { OmniError } from '../source/diag.js';
 import { utf8Bytes } from '../host/utf8.js';
 import {
   OP, OP_NAMES, REF_NONE, REF_BIAS, isConstRef, isCmp, typeText, typeKind, typeLanes,
-  T_VOID, T_I64, T_F64, T_BOOL, T_STR, T_AGG, T_BUF, T_ARR, T_PTR, T_TPTR, CVT_I2F, CVT_F2I, CVT_U2F,
+  T_VOID, T_I64, T_F64, T_BOOL, T_STR, T_AGG, T_BUF, T_ARR, T_PTR, T_TPTR, T_I32, T_F32,
+  isFloatType, CVT_I2F, CVT_F2I, CVT_U2F,
+  CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16, CVT_FCVT,
 } from '../mir/ir.js';
 
 /**
@@ -43,6 +45,9 @@ import {
  */
 const LL_TYPES = new Map([
   [T_VOID, 'void'], [T_I64, 'i64'], [T_F64, 'double'], [T_BOOL, 'i1'], [T_STR, '[2 x i64]'],
+  // 机器宽度那两格（ADR-0017 第一刀）：LLVM 这边它们就是一等类型，`add i32` / `fadd float`
+  // 各是一条指令 —— 回绕与舍入都由类型自己带着，不像解释器那边要显式 asIntN/fround。
+  [T_I32, 'i32'], [T_F32, 'float'],
   // 缓冲：`{长度, 指针}`。这一个不是量出来的 ABI，是**我们自己定的** —— 运行时里没有
   // 任何函数收发缓冲（print 不接受缓冲），所以这条腿只要自洽就够，和 [2 x i64] 那条不同。
   [T_BUF, '{ i64, ptr }'],
@@ -245,8 +250,10 @@ class LlvmEmitter {
     if (!isConstRef(ref)) return `%v${ref - REF_BIAS}`;
     const c = this.mir.consts.get(ref);
     if (c.t === T_I64) return c.text;
+    if (c.t === T_I32) return c.text;
     if (c.t === T_BOOL) return c.text === 'true' ? 'true' : 'false';
     if (c.t === T_F64) return llFloat(c.text);
+    if (c.t === T_F32) return llFloat32(c.text);
     if (c.t === T_STR) return this.strConst(c.text);
     // 空引用（OIR 的 NullRef）。方言里写不出 null，但两条路走得到它：「非 void 的函数掉出
     // 尾巴」会补一个零值 return（类的零值就是它），以及多维数组那一刀 —— `(anew (arr (arr T)) N)`
@@ -652,7 +659,12 @@ class LlvmEmitter {
 
   dataInsn(f, i, op, dst, t) {
     const lanes = typeLanes(t);
-    const isF = typeKind(t) === T_F64;
+    // f32 也是浮点（ADR-0017 第一刀）：`fadd float` 与 `fadd double` 同一条通路，
+    // 类型由 ty() 给出。写成 `=== T_F64` 的话 f32 会掉进整数那一支，发出 `add float`。
+    const isF = isFloatType(t);
+    // 32 位整数：算术那一族与 i64 同一条通路（`add i32`），但**除法与移位不是** ——
+    // 除零/溢出的那两个辅助函数是 i64 签名，移位掩码也是 63。见下面 i32 的两处分流。
+    const is32 = typeKind(t) === T_I32;
     if (op === OP.LOAD) {
       this.line(`  ${dst} = load ${this.ty(t, 'slot')}, ptr %s${f.aux[i]}`);
       return;
@@ -724,6 +736,38 @@ class LlvmEmitter {
         return;
       }
     }
+    // i32 的除法与无符号除法（ADR-0017 第一刀）：**扩到 64 位借那四个辅助函数，再截回来**。
+    // 不为 i32 另写四个辅助函数的理由是语义要一条：除零那句错误消息、
+    // INT32_MIN / -1 的回绕（借 i64 算出 2147483648 再 trunc 就是 INT32_MIN），
+    // 与解释器的 bin32 逐条对上。多一份辅助函数就多一处两条腿会分叉的地方。
+    if (is32 && (op === OP.DIV || op === OP.MOD || op === OP.UDIV || op === OP.UMOD)) {
+      const un = op === OP.UDIV || op === OP.UMOD;
+      const cast = un ? 'zext' : 'sext';
+      const a64 = this.fresh();
+      const b64 = this.fresh();
+      const wide = this.fresh();
+      this.line(`  ${a64} = ${cast} i32 ${this.val(f.a[i])} to i64`);
+      this.line(`  ${b64} = ${cast} i32 ${this.val(f.b[i])} to i64`);
+      let sym = '@omni_ll_div';
+      if (op === OP.MOD) sym = '@omni_ll_mod';
+      if (op === OP.UDIV) sym = '@omni_ll_udiv';
+      if (op === OP.UMOD) sym = '@omni_ll_umod';
+      if (op === OP.DIV) this.needDiv = true;
+      if (op === OP.MOD) this.needMod = true;
+      if (op === OP.UDIV) this.needUDiv = true;
+      if (op === OP.UMOD) this.needUMod = true;
+      this.line(`  ${wide} = call i64 ${sym}(i64 ${a64}, i64 ${b64})`);
+      this.line(`  ${dst} = trunc i64 ${wide} to i32`);
+      return;
+    }
+    // i32 的移位：掩码是 **31**（wasm 的 `i32.shl` 是 count mod 32；C 那边 tcc 同样掩码）
+    if (is32 && (op === OP.SHL || op === OP.SHR || op === OP.USHR)) {
+      const m = this.fresh();
+      const ins = op === OP.SHL ? 'shl' : (op === OP.SHR ? 'ashr' : 'lshr');
+      this.line(`  ${m} = and i32 ${this.val(f.b[i])}, 31`);
+      this.line(`  ${dst} = ${ins} i32 ${this.val(f.a[i])}, ${m}`);
+      return;
+    }
     // `/` `%` 走辅助函数：除零要报错、INT64_MIN/-1 要特判，与 omni.h:332..343 逐条对应
     if (op === OP.DIV && !isF) {
       this.needDiv = true;
@@ -756,11 +800,11 @@ class LlvmEmitter {
       return;
     }
     if (op === OP.NEG) {
-      if (isF) this.line(`  ${dst} = fneg double ${this.val(f.a[i])}`);
-      else this.line(`  ${dst} = sub i64 0, ${this.val(f.a[i])}`);
+      if (isF) this.line(`  ${dst} = fneg ${this.ty(t, 'neg')} ${this.val(f.a[i])}`);
+      else this.line(`  ${dst} = sub ${this.ty(t, 'neg')} 0, ${this.val(f.a[i])}`);
       return;
     }
-    if (op === OP.BNOT) { this.line(`  ${dst} = xor i64 ${this.val(f.a[i])}, -1`); return; }
+    if (op === OP.BNOT) { this.line(`  ${dst} = xor ${this.ty(t, 'bnot')} ${this.val(f.a[i])}, -1`); return; }
     if (op === OP.NOT) { this.line(`  ${dst} = xor i1 ${this.val(f.a[i])}, true`); return; }
     if (isCmp(op)) {
       const pred = isF ? FCMP.get(op) : ICMP.get(op);
@@ -769,11 +813,33 @@ class LlvmEmitter {
       return;
     }
     if (op === OP.CVT) {
-      if (f.aux[i] === CVT_I2F) { this.line(`  ${dst} = sitofp i64 ${this.val(f.a[i])} to double`); return; }
-      // 位当无符号 64 位读再转（第六十一刀）：sitofp 换 uitofp，一条指令的差别
-      if (f.aux[i] === CVT_U2F) { this.line(`  ${dst} = uitofp i64 ${this.val(f.a[i])} to double`); return; }
-      if (f.aux[i] === CVT_F2I) { this.line(`  ${dst} = fptosi double ${this.val(f.a[i])} to i64`); return; }
-      throw new OmniError(`${NOPE} CVT ${f.aux[i]}（函数 ${f.name}）`);
+      const mode = f.aux[i];
+      // 整数 <-> 浮点那三条：源类型看操作数、目标类型看 `t`，所以 i32/f32 不用另立模式
+      const st = this.ty(f.typeOf(f.a[i], this.mir.consts), 'cvt 源');
+      const rt = this.ty(t, 'cvt 目标');
+      if (mode === CVT_I2F) { this.line(`  ${dst} = sitofp ${st} ${this.val(f.a[i])} to ${rt}`); return; }
+      // 位当无符号读再转（第六十一刀）：sitofp 换 uitofp，一条指令的差别
+      if (mode === CVT_U2F) { this.line(`  ${dst} = uitofp ${st} ${this.val(f.a[i])} to ${rt}`); return; }
+      if (mode === CVT_F2I) { this.line(`  ${dst} = fptosi ${st} ${this.val(f.a[i])} to ${rt}`); return; }
+      // ---- 宽度转换（ADR-0017 第一刀）
+      if (mode === CVT_SEXT) { this.line(`  ${dst} = sext ${st} ${this.val(f.a[i])} to ${rt}`); return; }
+      if (mode === CVT_ZEXT) { this.line(`  ${dst} = zext ${st} ${this.val(f.a[i])} to ${rt}`); return; }
+      if (mode === CVT_TRUNC) { this.line(`  ${dst} = trunc ${st} ${this.val(f.a[i])} to ${rt}`); return; }
+      // 低 8/16 位的符号扩展：LLVM 没有一条"就地扩展"的指令，是 trunc 到窄宽再 sext 回来。
+      // 这两条在 arm64 上会被折成一条 sxtb/sxth —— 我们不替它做，那是它的活。
+      if (mode === CVT_SEXT8 || mode === CVT_SEXT16) {
+        const nb = mode === CVT_SEXT8 ? 'i8' : 'i16';
+        const cut = this.fresh();
+        this.line(`  ${cut} = trunc ${st} ${this.val(f.a[i])} to ${nb}`);
+        this.line(`  ${dst} = sext ${nb} ${cut} to ${rt}`);
+        return;
+      }
+      if (mode === CVT_FCVT) {
+        const ins = t === T_F32 ? 'fptrunc' : 'fpext';
+        this.line(`  ${dst} = ${ins} ${st} ${this.val(f.a[i])} to ${rt}`);
+        return;
+      }
+      throw new OmniError(`${NOPE} CVT ${mode}（函数 ${f.name}）`);
     }
     if (op === OP.CALL) {
       const g = this.mir.funcs[f.a[i]];
@@ -1475,6 +1541,29 @@ function llFloat(text) {
   if (v === 0 && 1 / v < 0) return '0x8000000000000000';
   const s = v.toPrecision(17);
   return s.includes('.') || s.includes('e') || s.includes('E') ? s : `${s}.0`;
+}
+
+/**
+ * f32 字面量（ADR-0017 第一刀）。**一律走 64 位十六进制形式**：LLVM 只在字面量对该类型
+ * 精确时才接受十进制，而 `0.1f` 的十进制拼法是 `0.10000000149011612` 这种 —— 靠
+ * `toPrecision(17)` 撞对它是运气。十六进制是双精度的位模式，float 那边只要值本身是
+ * float 能精确表示的（我们的 f32 常量都 fround 过，所以恒成立）就合法。
+ */
+function llFloat32(text) {
+  const v = Math.fround(Number(text));
+  if (Number.isNaN(v)) return '0x7FF8000000000000';
+  if (v === Infinity) return '0x7FF0000000000000';
+  if (v === -Infinity) return '0xFFF0000000000000';
+  const buf = new DataView(new ArrayBuffer(8));
+  buf.setFloat64(0, v, false);
+  let hex = '';
+  let i = 0;
+  while (i < 8) {
+    const b = buf.getUint8(i);
+    hex += (b < 16 ? '0' : '') + b.toString(16).toUpperCase();
+    i++;
+  }
+  return `0x${hex}`;
 }
 
 /* `/` 与 `%` 的语义（omni.h:332..343）：除零报错，INT64_MIN / -1 不走硬件除法。

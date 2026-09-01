@@ -220,6 +220,13 @@ omni_dyn omni_js_math(int op, omni_dyn a, omni_dyn b) {
     case 'Q': return omni_dyn_of_real(log10(x));
     case 'P': return omni_dyn_of_real(log1p(x));
     case 'B': return omni_dyn_of_real(cbrt(x));
+    /* fround（ADR-0017 第一刀）：把一个 double 舍到最近的 float 再读回来。
+       C 这边就是一次 (float) 强制转换 —— 唯一要小心的是编译器不许把它优化掉，
+       所以中间量显式落在一个 float 变量上。MIR 的 f32 语义（每步之后舍一次）靠它。 */
+    case 'F': {
+      float f = (float)x;
+      return omni_dyn_of_real((double)f);
+    }
     default: break;
   }
   double y = want_real(b, "Math");

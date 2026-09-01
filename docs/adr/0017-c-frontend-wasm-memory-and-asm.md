@@ -292,6 +292,82 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
   `/Users/wurui/Documents/Lang/reference/tinycc` 不改一个字节。哪天要改（比如加计时探针），
   改在我们自己的构建目录里，并把改动记在这份 ADR 里。
 
+## 落地：第一刀 —— MIR 的 `T_I32` / `T_F32` 与八种截断扩展
+
+**加了什么。**`T_I32 = 11`、`T_F32 = 12` 两个类型码（低 5 位还剩 19 个空位，位布局与
+`REF_BIAS` 一个字节都没动），`CVT` 长出六种模式：`sext` / `zext` / `trunc` / `sext8` /
+`sext16` / `fcvt`。加上原有的 `i2f` / `f2i` / `u2f`，C 要的那八种整数宽度转换与
+`f32 <-> f64` 就都能表达了。常量池加 `i32()` / `f32()` 两个入口。
+
+**规范形。**这一条是整刀的地基，写在 `ir.js` 的注释里：`T_I32` 的宿主表示仍是 bigint，
+**规范形是符号扩展后的值** —— 也就是说 `-1` 就是 `-1n`，不是 `4294967295n`；无符号语义
+只出现在运算里（`u/` `u%` `u>>` `u<` 那一族先 `asUintN(32)`），不出现在表示里。
+`T_F32` 的宿主表示是 Number，**每一步运算之后都要 `Math.fround`**。这两句话让"同一份 MIR
+在闭包解释器与 LLVM 上逐字节相同"成为可判定的事，而不是靠运气。
+
+**五个消费者跟了几个。**`mir/print.js`、`mir/verify.js`、`mir/bytes.js` 三个是**类型无关**的
+（走 `TYPE_NAMES` / `CVT_NAMES` 表），扩表即完成，一行代码没改。真正要逐 op 跟的是两个：
+- 闭包解释器（`mir/interp.js`）：新增 `bin32` / `cmp32` / `bin32f` 三族，加减乘回绕 32 位、
+  除零与 `INT32_MIN / -1` 的行为、移位量掩 31、`u>>` 走 `asUintN`，f32 每步 `fround`。
+  这些分支落在**闭包构造期**（`step2` 里按类型选闭包），不在每步执行的热路径上 ——
+  所以既有腿的稳态吞吐不受影响。
+- LLVM 后端（`backend-llvm/emit.js`）：`i32` / `float` 两个类型，`NEG` / `BNOT` 改成按
+  `this.ty(t)` 发而不是硬编码 `i64` / `double`，移位先 `and i32 ..., 31`，`CVT` 全部重写。
+  两处刻意的选择：(1) i32 的 `/` `%` **先扩到 i64、调既有的 `@omni_ll_div` 家族、再 `trunc`
+  回来** —— 不是为了省事，是为了让"除零的报错文本"和"`INT32_MIN / -1` 的回绕"与 `bin32`
+  逐字节一致；(2) f32 常量发 64 位十六进制形（`llFloat32`），因为 LLVM 只接受对该类型精确的
+  十进制字面量，`0.1` 这种写法它会拒收。
+
+`backend-spirv` 这一刀**没跟**：它遇到不认识的类型走 `nope()`，是个诚实的报错而不是错码。
+GPU 那边 f32 其实比 f64 更自然，留成后面单独一刀。
+
+**新增一条测试轴：MIR 级单元用例。**i32/f32 现在**没有任何前端能产出**（核心方言只有一格
+`int`、一格 `real`），所以测法只能是直接造 MIR：`tests/mir/mirkit.mjs` 搭模块，
+`tests/mir/units/{i32,f32}.mjs` 是 20 个用例，`tests/mir/unit-leg.mjs` 一条腿一个进程跑，
+`tests/mir/run.js` 第 4 节比对。**期望值是按 IEEE-754 与 wasm 规范算出来的，不是从任何一条
+腿抄回来的** —— 抄回来的期望值只能证明"两条腿一样错"。
+- i32 13 例：加/乘回绕、`INT32_MIN / -1`、`1 << 33 == 2`（掩 31）、`-8 >> 1` 与
+  `-8 u>> 1 == 2147483644`、`-1 u/ 2 == 2147483647`、有符号与无符号比较分岔、
+  `sext8(200) == -56`、`sext16(40000) == -25536`、`zext(-1) == 4294967295`
+- f32 7 例：`0.1f + 0.2f == 0.30000001192092896`、`1f/3f == 0.3333333432674408`、
+  `16777216 + 1 == 16777216`、`3.4e38 * 2 == inf`、最小非规格化数
+  `1.4012984643248171e-45`、`-0`、`0.1f + 0.2f == 0.3f` 为**真**（f64 下这是假的）
+- 结果：`unit/i32 [interp == llvm == 期望，13 行]`、`unit/f32 [interp == llvm == 期望，7 行]`
+
+**两个踩到的坑。**(1) 用例入口不能叫 `main` —— LLVM 后端自己会发一个 C `main` 去调
+`omni_run_entry`，clang 报 `invalid redefinition of function 'main'`；改叫 `omni_main`。
+(2) 一开始用 `print.real` 印 f32，两条腿都印出 `0.3` —— `print.real` 是 `%g`、六位有效数字，
+**把 f32 与 f64 的差别整个盖掉了**，那版测试什么都没证明。改成
+`to_string_g.real(x, 17)` + `print.string` 才看得见 `0.30000001192092896`。
+
+**闭合 ABI 长出 `Math.fround`。**f32 的规范形要在 JS 侧落地就必须有 fround，而它不在闭合
+ABI 里（ADR-0011 决策二会当场报错）。按「jancy 支持不可向方言妥协」那条，**长 ABI，不绕路**：
+op 字母 `'F'`，四个落点 —— `frontend-js/lower.js` 的 `'Math.x'` 表、`hir/js_abi.js` 的 op
+表与注释、`backend-js/prelude.js`（在那个 `String.raw` 模板里，不能有反引号）、
+`stage0/runtime/omni_js_num.c`（`(float)x` 再回 double）。
+`tests/js-exec/cases/01-expr.js` 加了四行断言（`fround(0.1+0.2)` / `fround(1/3)` /
+`fround(16777217)` / `fround(-0.5)`），**参照是 node** ——
+`node == omni-js == omni-c == interp == interp-mir` 五方逐字节相同才算过。
+
+**量出来的。**
+- `tests/mir` 35/0（含新增两条）、`tests/js-exec` 11/0（42 行断言）、`tests/llvm` 22/0、
+  `tests/jit` 22/0、`tests/sexpr`、`tests/wat`、`tests/incr`、`tests/gpu`、`tests/asy`、
+  `tests/jnc`、`tests/cabi`、`tests/glr`、`tests/oir`、`tests/oracle` 全绿
+- 自举 `tests/bootstrap` 60/0，`npm run build:self` 9/0 —— 运行时的 C 与 prelude 都动了，
+  所以这一条是必须跑的：`fixpoint C1 == C2` 168099 行、`N1 emit-c == N2` 12988256 字节、
+  `N1 emit-js == N2` 6874214 字节，三个不动点都还在。全套 137.0s。
+- 自解析轴（`tests/js-roundtrip`）101/1 —— 那个 1 是既有欠账 `tests/asy/sweep.js` 的
+  `await import`。**这里有个自绊的教训**：第一版 `tests/mir/run.js` 也用了 `await import`
+  去读用例的 `expected`，于是这条轴从 101/1 掉到 100/2 —— 仓库自己的 JS 必须在
+  我们自己的方言里（async/await 未支持）。改成向 `unit-leg.mjs` 多要一条 `expected` 腿，
+  动态 import 留在 `.mjs` 里（`.mjs` 不在自解析轴内）。async/await 是一刀独立的活
+  （要 Promise 与微任务队列），不在这一刀里顺手做。
+- 代码量：`ir.js` +45、`interp.js` +103、`backend-llvm/emit.js` +109、闭合 ABI 四处 +13，
+  测试 +51 与三个新文件。改动集中在两个消费者上，这个比例正是"类型码扩展"应有的样子。
+
+<!-- 第一刀-END -->
+
+
 
 
 

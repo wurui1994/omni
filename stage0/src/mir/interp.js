@@ -34,7 +34,8 @@ import { lowerToMir } from './from_oir.js';
 import { verifyMir } from './verify.js';
 import {
   OP, OP_NAMES, REF_NONE, REF_BIAS, isConstRef, typeKind, typeLanes,
-  T_I64, T_F64, T_STR, T_DYN, T_PTR, T_TPTR, CVT_I2F, CVT_BOX, CVT_U2F,
+  T_I64, T_F64, T_STR, T_DYN, T_PTR, T_TPTR, T_I32, T_F32,
+  CVT_I2F, CVT_BOX, CVT_U2F, CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16, CVT_FCVT,
 } from './ir.js';
 
 /** 常量池条目 -> 宿主值。int 是 BigInt（ADR-0005 的 i64），real 是 number。 */
@@ -90,6 +91,72 @@ function kindOf(t) {
   return 'other';
 }
 
+/* ------------------------------------------- 32 位那一族（ADR-0017 第一刀）
+ * 不复用 `interp/builtin.js` 的 `binOp('int', …)`：那一份的回绕是 64 位、移位掩码是 63，
+ * 而 i32 要的是 32 位回绕与掩码 31（wasm 的 `i32.shl` 就是 count mod 32，C 那边 tcc 同样掩码）。
+ * i32 的规范形是**符号扩展后的值**（见 ir.js 的 T_I32），所以每条运算之后 asIntN(32)；
+ * 无符号那一族先 asUintN(32) 再算 —— 拿 64 位的 U() 去读一个符号扩展过的 32 位负数
+ * 会得到 1.8e19 那个数，无符号比较当场就错。
+ */
+const W32 = (x) => BigInt.asIntN(32, x);
+const U32 = (x) => BigInt.asUintN(32, x);
+
+function bin32(op, a, b) {
+  switch (op) {
+    case '+': return W32(a + b);
+    case '-': return W32(a - b);
+    case '*': return W32(a * b);
+    // 除零与 INT32_MIN / -1 两条边角与 64 位那份同一个立场（idiv/imod）：
+    // 除零是运行期错误，溢出回绕而不是陷入。
+    case '/': {
+      if (b === 0n) failRt('division by zero');
+      return W32(a / b);
+    }
+    case '%': {
+      if (b === 0n) failRt('division by zero');
+      return W32(a % b);
+    }
+    case '<<': return W32(a << (b & 31n));
+    case '>>': return W32(a >> (b & 31n));
+    case 'u/': {
+      if (b === 0n) failRt('division by zero');
+      return W32(U32(a) / U32(b));
+    }
+    case 'u%': {
+      if (b === 0n) failRt('division by zero');
+      return W32(U32(a) % U32(b));
+    }
+    case 'u>>': return W32(U32(a) >> (b & 31n));
+    case '&': return W32(a & b);
+    case '|': return W32(a | b);
+    case '^': return W32(a ^ b);
+    default: throw new OmniError(`mir.interp.bin i32: ${op}`);
+  }
+}
+
+/** i32 的比较。有符号那六条在规范形上直接成立，无符号四条要先零扩展到 32 位。 */
+function cmp32(op, a, b) {
+  switch (op) {
+    case 'u<': return U32(a) < U32(b);
+    case 'u<=': return U32(a) <= U32(b);
+    case 'u>': return U32(a) > U32(b);
+    case 'u>=': return U32(a) >= U32(b);
+    default: return cmpOp(op, a, b);
+  }
+}
+
+/** f32 运算：按 double 算完再舍一次到单精度。除法与乘法在这条路上与硬件 single 一致。 */
+function bin32f(op, a, b) {
+  switch (op) {
+    case '+': return Math.fround(a + b);
+    case '-': return Math.fround(a - b);
+    case '*': return Math.fround(a * b);
+    case '/': return Math.fround(a / b);
+    case '%': return Math.fround(a % b);
+    default: throw new OmniError(`mir.interp.bin f32: ${op}`);
+  }
+}
+
 /**
  * PLOAD / PSTORE 的**目标**类型码 -> ptrLoad/ptrStore 收的 kind（ADR-0016）。
  * 与 kindOf 分开一份：这里的"其余"是 bool（内存里只有那四种加两种指针），
@@ -108,6 +175,8 @@ function memKind(t) {
 function zeroOfCode(t) {
   if (t === T_I64) return 0n;
   if (t === T_F64) return 0;
+  if (t === T_I32) return 0n;
+  if (t === T_F32) return 0;
   if (t === T_STR) return '';
   return null;
 }
@@ -309,6 +378,9 @@ class MirInterp {
         const vt = { lanes: typeLanes(t), elem: { k: kindOf(typeKind(t)) } };
         return (F) => { F.v[i] = vecBinOp(o, vt, l(F), r(F)); return next; };
       }
+      // 32 位那两格走各自的一份（ADR-0017 第一刀）：回绕宽度与移位掩码都不一样
+      if (t === T_I32) return (F) => { F.v[i] = bin32(o, l(F), r(F)); return next; };
+      if (t === T_F32) return (F) => { F.v[i] = bin32f(o, l(F), r(F)); return next; };
       return (F) => { F.v[i] = binOp(o, kind, l(F), r(F)); return next; };
     }
     if (CMP_STR.has(op)) {
@@ -327,6 +399,9 @@ class MirInterp {
           return next;
         };
       }
+      // i32 的无符号比较要先零扩展到 32 位（见 cmp32 的注释）；有符号那六条在规范形上
+      // 直接成立，所以这一支只在 t 是 i32 时接手。
+      if (t === T_I32) return (F) => { F.v[i] = cmp32(o, l(F), r(F)); return next; };
       return (F) => { F.v[i] = cmpOp(o, l(F), r(F)); return next; };
     }
     switch (op) {
@@ -334,10 +409,13 @@ class MirInterp {
         const v = rd(f.a[i]);
         // 一元负号也会溢出：-INT64_MIN == INT64_MIN，必须回绕
         if (t === T_I64) return (F) => { F.v[i] = W(-v(F)); return next; };
+        if (t === T_I32) return (F) => { F.v[i] = W32(-v(F)); return next; };
+        if (t === T_F32) return (F) => { F.v[i] = Math.fround(-v(F)); return next; };
         return (F) => { F.v[i] = -v(F); return next; };
       }
       case OP.BNOT: {
         const v = rd(f.a[i]);
+        if (t === T_I32) return (F) => { F.v[i] = W32(~v(F)); return next; };
         return (F) => { F.v[i] = W(~v(F)); return next; };
       }
       case OP.NOT: {
@@ -357,6 +435,20 @@ class MirInterp {
         // 装箱是恒等：dynamic 就是原生值（ADR-0006 第 2 节）。C 后端那边它是打标签，
         // 所以指令留着 —— 「哪里发生装箱」是后端要知道的事实。
         if (x === CVT_BOX) return (F) => { F.v[i] = v(F); return next; };
+        // ---- 宽度转换（ADR-0017 第一刀）。`t` 是**结果**类型，方向由它定。
+        // 整数扩宽：i32 的规范形本来就是符号扩展过的，所以 sext 是恒等；
+        // zext 要把那 32 位当无符号读回来。**恒等也要留着这条指令** —— LLVM 那边它是
+        // 真的 sext/zext，两条腿看到的是同一份 MIR。
+        if (x === CVT_SEXT) return (F) => { F.v[i] = v(F); return next; };
+        if (x === CVT_ZEXT) return (F) => { F.v[i] = U32(v(F)); return next; };
+        if (x === CVT_TRUNC) return (F) => { F.v[i] = W32(v(F)); return next; };
+        if (x === CVT_SEXT8) return (F) => { F.v[i] = BigInt.asIntN(8, v(F)); return next; };
+        if (x === CVT_SEXT16) return (F) => { F.v[i] = BigInt.asIntN(16, v(F)); return next; };
+        // 浮点宽度：变窄要真的舍到单精度，变宽是恒等（single 的每个值都是 double 的值）
+        if (x === CVT_FCVT) {
+          if (t === T_F32) return (F) => { F.v[i] = Math.fround(v(F)); return next; };
+          return (F) => { F.v[i] = v(F); return next; };
+        }
         throw new OmniError(`mir.interp: 还不支持的转换模式 ${x}`);
       }
       // 向量三条。VINS **拷一份再改**，不就地改：MIR 的值是 SSA，就地改会让源向量
@@ -744,6 +836,15 @@ export function interpretMir(oir) {
   const mir = lowerToMir(oir);
   const errs = verifyMir(mir);
   if (errs.length > 0) throw new OmniError(`mir is not well-formed:\n  ${errs.join('\n  ')}`);
+  return runMirModule(oir, mir);
+}
+
+/**
+ * 已经有 MIR 在手上时的入口（ADR-0017 第一刀）：`tests/mir` 的单元用例直接造 MIR，
+ * 不经过任何前端 —— i32/f32 现在还没有前端能产出，而它们的语义必须在两条腿上钉住。
+ * verify 由调用方负责（那条轴自己要单独报"良构"这一项）。
+ */
+export function runMirModule(oir, mir) {
   const I = new MirInterp(oir, mir);
   try {
     I.run();

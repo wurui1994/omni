@@ -1264,6 +1264,7 @@ function $js_math(op, a, b) {
   if (op === "Q") return Math.log10(x);
   if (op === "P") return Math.log1p(x);
   if (op === "B") return Math.cbrt(x);
+  if (op === "F") return Math.fround(x);
   const y = $js_real(b, "Math");
   if (op === "M") return Math.max(x, y);
   if (op === "m") return Math.min(x, y);

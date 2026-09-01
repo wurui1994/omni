@@ -169,6 +169,8 @@ export const JS_ABI = {
   //     'S' sin / 'C' cos / 'T' tan / 'I' asin / 'A' acos / 'N' atan / '2' atan2 /
   //     'H' sinh / 'D' cosh / 'G' tanh / 'J' asinh / 'K' acosh / 'L' atanh /
   //     'E' exp / 'X' expm1 / 'O' log / 'Q' log10 / 'P' log1p / 'B' cbrt / 'Y' hypot
+  //     'F' fround（ADR-0017 第一刀）：C 那边是一次 `(float)` 强制转换。MIR 的 f32
+  //     语义（每步之后舍一次到单精度）靠它，而闭包解释器要在自举出来的编译器里也这么算。
   js_math: { js: '$js_math', c: 'omni_js_math', arity: 2, lit: ['op'] },
 
   // ---------------------------------------------------------------- JSON

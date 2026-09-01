@@ -68,11 +68,32 @@ export const T_TPTR = 10; // thin 指针（ADR-0016）：**一个字**。与 T_P
                           // 上加一位，因为它们在 LLVM 那条腿上是真正不同的类型（三字结构体
                           // vs 一个 i8*），而 aux 已经被步长占了。指针的胖瘦于是从 `t` 就看得出，
                           // 不必回头查操作数是怎么产生的。
+// ---- 机器宽度的两格（ADR-0017 第一刀）。C 与 wasm 要的是**真的 32 位**，不是
+// 「存成符号扩展的 64 位、每步再回绕」——`frontend-wat/lower.js:61` 那招在 wasm 的小子集里
+// 够用，但 C 里每一个 `int` 运算都要回绕，等于给每条算术加两条指令，吞吐和码质量一起赔。
+// `float` 更没得商量：它的舍入与 double 不同，用 double 冒充会在与 tcc/clang 的三方比对里露馅。
+export const T_I32 = 11;  // 32 位整数。**规范形是符号扩展后的值**（宿主表示仍是 bigint）：
+                          // 无符号那一族（UDIV/USHR/ULT…）照旧靠零扩展一步做对，与 T_I64 同一条路数。
+export const T_F32 = 12;  // 单精度。宿主表示是 Number，但每一步之后要 Math.fround ——
+                          // 「算完再舍入一次」与硬件的 single 运算等价（IEEE-754 的双舍入
+                          // 在 double 中间值 + fround 这一组合下不会发生，见 f32 那组用例）。
 export const T_KIND_BITS = 5;
 export const T_KIND_MASK = 31;
 export const T_KIND_SPAN = 32;   // = 2^T_KIND_BITS。位运算不可用，见 mkType
 
-export const TYPE_NAMES = ['void', 'i64', 'f64', 'bool', 'str', 'dyn', 'ptr', 'agg', 'buf', 'arr', 'tptr'];
+export const TYPE_NAMES = ['void', 'i64', 'f64', 'bool', 'str', 'dyn', 'ptr', 'agg', 'buf', 'arr', 'tptr', 'i32', 'f32'];
+
+/** 是不是整数类型（i32/i64）。宽度见 intBits。 */
+export function isIntType(t) { const k = typeKind(t); return k === T_I64 || k === T_I32; }
+/** 是不是浮点类型（f32/f64）。 */
+export function isFloatType(t) { const k = typeKind(t); return k === T_F64 || k === T_F32; }
+/** 整数的位宽。非整数返回 0 —— 调用方拿它当"要不要回绕"的开关。 */
+export function intBits(t) {
+  const k = typeKind(t);
+  if (k === T_I64) return 64;
+  if (k === T_I32) return 32;
+  return 0;
+}
 
 /**
  * `t` 字段：种类 + 向量宽度（1 = 标量）。宽度必须是 2 的幂。
@@ -303,7 +324,21 @@ export const CVT_BITCAST = 4;
 // 位当无符号 64 位读再转 real（ADR-0016 第六十一刀）。与 CVT_I2F 差的只有"怎么读那 64 位"：
 // LLVM 是 uitofp 对 sitofp、C 是 `(double)(uint64_t)` 对 `(double)`。
 export const CVT_U2F = 5;
-export const CVT_NAMES = ['i2f', 'f2i', 'box', 'unbox', 'bitcast', 'u2f'];
+// ---- 宽度转换（ADR-0017 第一刀）。**只有整数之间与浮点之间需要模式**：
+// 整数与浮点之间那三条（I2F / F2I / U2F）已经能靠"操作数的类型 + `t`（结果类型）"分辨
+// 到底是 i32 还是 i64、f32 还是 f64 —— 所以不为它们再分裂模式。
+// 整数扩宽必须给模式：从 i32 到 i64，符号扩展与零扩展是两件事，光看类型分不出来。
+export const CVT_SEXT = 6;    // 整数扩宽，符号扩展（i32 -> i64）
+export const CVT_ZEXT = 7;    // 整数扩宽，零扩展（i32 -> i64，把它当无符号读）
+export const CVT_TRUNC = 8;   // 整数变窄，回绕（i64 -> i32；结果是符号扩展后的规范形）
+// 低 8 / 16 位的符号扩展。wasm 的 `i32.extend8_s` / `extend16_s`，也是 C 的
+// `(signed char)x` / `(short)x`。**没有 8/16 位的类型码** —— char 与 short 在寄存器里
+// 就是 i32（tcc 与 wasm 都是这么做的），只在存进内存和这两条上才看得见宽度。
+export const CVT_SEXT8 = 9;
+export const CVT_SEXT16 = 10;
+export const CVT_FCVT = 11;   // 浮点之间（f32 <-> f64，方向由 `t` 定）
+export const CVT_NAMES = ['i2f', 'f2i', 'box', 'unbox', 'bitcast', 'u2f',
+  'sext', 'zext', 'trunc', 'sext8', 'sext16', 'fcvt'];
 
 /* ------------------------------------------------------------------ 常量池
  * 常量也是「有类型的记录」，因为 `t` 只在指令上。池按 (类型码, 文本) 去重 ——
@@ -327,7 +362,13 @@ export class ConstPool {
   }
 
   int(v) { return this.intern(T_I64, 'int', String(v)); }
+  // i32 的常量也存**符号扩展后的十进制**（规范形，见 T_I32）：常量池是按 (类型码, 文本)
+  // 去重的，所以 `i32 -1` 与 `i64 -1` 是两条，不会互相顶掉。
+  i32(v) { return this.intern(T_I32, 'int', String(v)); }
   real(text) { return this.intern(T_F64, 'real', text); }
+  // f32 的常量文本是**已经 fround 过的那个 double 的十进制**（造它的人负责 fround）——
+  // 池按文本去重，所以 `f32 0.1` 与 `f64 0.1` 也是两条不同的常量。
+  f32(text) { return this.intern(T_F32, 'real', text); }
   bool(v) { return this.intern(T_BOOL, 'bool', v ? 'true' : 'false'); }
   str(s) { return this.intern(T_STR, 'str', s); }
   nul(t) { return this.intern(t, 'null', 'null'); }
