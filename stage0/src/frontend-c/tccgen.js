@@ -79,10 +79,10 @@
 // 全局量（data 段，常量初始化式）、`typedef`、`extern` 与「用过但没定义」的诊断、
 // 外部符号（`unit()` 末尾的转发桩）与变参调用（printf/sprintf 那一族已经跑通）、
 // **struct/union/enum、`.` 与 `->`、整块的 struct 赋值、不完整类型的指针、位域、
-// 聚合初始化器（含指定初始化器与不定长数组）**。
-// 还没到：struct 的**传值/返回**（要 ABI）、嵌套聚合省掉里层花括号、带括号的声明符
-// （`int (*a)[3]`、函数指针）、浮点（含 printf 的 `%f/%e/%g`）、`switch`/`goto`、
-// `malloc` 那一族（要堆）、变参函数的**定义**（要 `va_list`/`va_arg`）。
+// 聚合初始化器（含指定初始化器与不定长数组）、`switch`（含贯穿、`BRTABLE`/比较链两条路）**。
+// 还没到：`goto`、struct 的**传值/返回**（要 ABI）、嵌套聚合省掉里层花括号、带括号的
+// 声明符（`int (*a)[3]`、函数指针）、浮点（含 printf 的 `%f/%e/%g`）、`malloc` 那一族
+// （要堆）、变参函数的**定义**（要 `va_list`/`va_arg`）。
 //
 // 碰到还没做到的东西**当场报错**，报错文本里带「第六刀」字样 —— 一眼能看出是进度不是
 // bug，而且下一片把它做掉时 `gen-bad/` 里那条用例会跟着红，于是「边界移动了」这件事
@@ -438,6 +438,8 @@ export class CGen {  /**
     this.tags = new Map();
     /** @type {Map<string,{ty:object,val:bigint}>} 枚举常量（它们是**普通标识符**） */
     this.enumConsts = new Map();
+    /** @type {{left:number}[]} 正在解析的 switch（嵌套时是一叠），见 `switchStmt` */
+    this.swStack = [];
   }
 
   /* ------------------------------------------------------------ 记号与报错 */
@@ -1954,9 +1956,8 @@ export class CGen {  /**
       return;
     }
 
-    if (t === TOK_SWITCH || t === TOK_CASE || t === TOK_DEFAULT) {
-      this.todo('switch 还没到（MIR 的 BRTABLE 已经有了，缺前端这侧的密集化判断）');
-    }
+    if (t === TOK_SWITCH) return this.switchStmt();
+    if (t === TOK_CASE || t === TOK_DEFAULT) return this.caseLabel(t);
     if (t === TOK_GOTO) this.todo('goto 还没到（结构化控制流下它要另一套办法）');
 
     if (t === SEMI) {
@@ -1965,6 +1966,225 @@ export class CGen {  /**
     }
 
     this.exprStmt();
+  }
+
+  /**
+   * `switch`（`tccgen.c` 的 `TOK_SWITCH` 那一支 + `gcase`）。
+   *
+   * ## 为什么它是这一片里最不一样的一个
+   *
+   * tcc 的 switch 是「先把每个 case 记成一条待回填的跳转，最后统一 patch」。我们**没有
+   * 跳转也不回填**（文件头偏离 2），所以要另一个形状 —— wasm 那个「层层嵌套的 block」：
+   *
+   * ```
+   * BLOCK break
+   *  BLOCK L3          ← 第三个标签
+   *   BLOCK L2
+   *    BLOCK L1        ← 第一个标签，最里层
+   *      分派（BRTABLE 或者一串比较）
+   *    END             ← 跳到这儿 = 第一个标签的代码
+   *    第一个标签的代码
+   *   END              ← 第二个标签
+   *   第二个标签的代码
+   *  END
+   *  第三个标签的代码
+   * END                ← break 跳到这儿
+   * ```
+   *
+   * 妙处是**贯穿（fallthrough）自动就对**：第一个标签的代码走完自然落到 `END L2`
+   * 后面，也就是第二个标签的代码。C 的 switch 默认贯穿，而这个形状不用为它写一行。
+   * 「一个标签 = 关掉一层 block」于是成了 `caseLabel` 的全部内容。
+   *
+   * 代价是**分派要在函数体之前发**，而那时还不知道有几个标签 —— 一遍过又撞上同一堵墙。
+   * 办法还是第三片那一套：函数体的记号整块收下来，先扫一遍收标签，再放一遍真的做。
+   * 扫那一遍**只走记号**（`scanCases`），所以不声明局部量、不占帧、不发指令。
+   */
+  switchStmt() {
+    this.next();
+    this.skip(LPAR);
+    /* 控制表达式先做整型提升（C11 6.8.4.2 第 5 段），case 的值随后按这个类型收口。
+     * 在开 block **之前**求值：它只在分派里用一次，而放在外面读起来就是 tcc 的顺序。 */
+    const sel = this.promote(this.gexpr());
+    if (!isInteger(sel.ty.t)) {
+      this.err(`switch quantity is not an integer ('${typeText(sel.ty)}')`);
+    }
+    const selRef = this.gv(sel);
+    this.skip(RPAR);
+    if (this.tok !== LBRACE) this.todo('switch 的函数体不是花括号还没到');
+
+    const body = this.cpp.captureBraced();
+    const afterTok = this.cpp.tok;
+    const afterVal = this.cpp.tokc;
+
+    // ---- 扫一遍：标签按**源码顺序**排成一列
+    const labels = this.scanCases(body, sel.ty);
+    const k = labels.length;
+    /* 兜底跳到哪儿：有 `default` 就是它那一层，没有就是 break 那一层（= 跳出去）。 */
+    let defLevel = k;
+    for (let i = 0; i < k; i++) if (labels[i].def) defLevel = i;
+
+    // ---- 摆好 block，发分派
+    this.open(OP.BLOCK, 'break', REF_NONE);
+    for (let i = k - 1; i >= 0; i--) this.open(OP.BLOCK, 'case', REF_NONE);
+    this.dispatch(selRef, sel.ty, labels, defLevel, k);
+
+    // ---- 再放一遍：真的做
+    this.swStack.push({ left: k });
+    this.cpp.pushTokens(body);
+    this.next();
+    this.block();
+    if (this.tok !== TOK_EOF) this.err('internal: switch 的函数体没读完');
+    this.cpp.endMacro();
+    const st = this.swStack.pop();
+    if (st.left !== 0) this.err('internal: switch 的标签数与扫出来的不符');
+
+    this.close();      // break
+    this.cpp.tok = afterTok;
+    this.cpp.tokc = afterVal;
+    this.tok = afterTok;
+    this.tokc = afterVal;
+  }
+
+  /**
+   * `case v:` / `default:` —— 在上面那个形状里，一个标签**就是**「关掉一层 block」。
+   * 值在扫那一遍已经收过了，这一遍只需要把记号吃掉。
+   */
+  caseLabel(t) {
+    const st = this.swStack[this.swStack.length - 1];
+    if (st === undefined) {
+      this.err(`'${t === TOK_CASE ? 'case' : 'default'}' label not within a switch`);
+      return;
+    }
+    this.next();
+    if (t === TOK_CASE) this.constExpr();
+    this.skip(COLON);
+    /* 标签必须直接长在 switch 的函数体上。长在里层的 `if`/`while` 里（Duff's device
+     * 那种）会让「关掉一层」关错对象 —— 当场报出来，别悄悄生成一个形状不同的东西。 */
+    if (this.regions[this.regions.length - 1] !== 'case') {
+      this.todo('case 标签长在里层的控制结构里还没到（Duff\'s device）');
+    }
+    st.left--;
+    this.close();
+  }
+
+  /**
+   * 分派：把控制表达式的值送到某一层。两条路，和 tcc 的密集化判断同一个判断
+   * （`tccgen.c` 的 `gcase`：值排好序之后看「一段连续区间里够不够密」）。
+   *
+   *   - **密**：`BRTABLE`。下标是 `v - min`，表里第 i 格是「值 min+i 该去哪一层」，
+   *     没有 case 的格子填兜底。BRTABLE 的下标按**无符号**与表长比（ir.js:301），
+   *     所以 `v < min` 会绕成一个大数、自动落到兜底 —— 但我们还是先发一条区间检查：
+   *     64 位的值截到 32 位下标时，差 2^32 的两个值会撞在同一格。
+   *   - **疏**：一串 `BRIF (v == ci) -> 那一层`，最后一条 `BR -> 兜底`。
+   *     `case 1: case 1000000:` 走这条 —— 密集表会是 4 MB。
+   */
+  dispatch(selRef, ty, labels, defLevel, k) {
+    const f = this.f;
+    const mt = mirTypeOf(ty);
+    const vals = [];
+    for (let i = 0; i < k; i++) if (!labels[i].def) vals.push({ v: labels[i].val, lv: i });
+    if (vals.length === 0) {
+      f.emit(OP.BR, T_VOID, REF_NONE, REF_NONE, defLevel);
+      return;
+    }
+    let min = vals[0].v;
+    let max = vals[0].v;
+    for (const c of vals) {
+      if (c.v < min) min = c.v;
+      if (c.v > max) max = c.v;
+    }
+    const span = max - min + 1n;
+    /* 密集的门槛：表不超过 1024 格，而且平均每格至少有 1/8 个 case。两个数都是取舍，
+     * 写在这儿而不是散在判断里 —— 改门槛只改这两个字面量。 */
+    const dense = span <= 1024n && span <= BigInt(vals.length) * 8n;
+    if (dense) {
+      const uty = isUnsigned(ty.t) ? ty : (mt === T_I64 ? TY_ULLONG : TY_UINT);
+      let d = selRef;
+      if (min !== 0n) d = f.emit(OP.SUB, mt, selRef, this.konst(ty, min), 0);
+      // 区间检查：`(unsigned)(v - min) > span - 1` 就走兜底
+      const over = f.emit(OP.UGT, mt, d, this.konst(uty, span - 1n), 0);
+      f.emit(OP.BRIF, T_VOID, over, REF_NONE, defLevel);
+      // 下标收成 i32：区间检查过了，所以截断是安全的
+      const idx = mt === T_I64 ? f.emit(OP.CVT, T_I32, d, REF_NONE, CVT_TRUNC) : d;
+      const table = [];
+      for (let i = 0n; i < span; i++) {
+        let lv = defLevel;
+        for (const c of vals) if (c.v === min + i) lv = c.lv;
+        table.push(lv);
+      }
+      f.emit(OP.BRTABLE, T_VOID, idx, f.pushLevels(table), defLevel);
+      return;
+    }
+    for (const c of vals) {
+      const eq = f.emit(OP.EQ, mt, selRef, this.konst(ty, c.v), 0);
+      f.emit(OP.BRIF, T_VOID, eq, REF_NONE, c.lv);
+    }
+    f.emit(OP.BR, T_VOID, REF_NONE, REF_NONE, defLevel);
+  }
+
+  /**
+   * 扫一遍 switch 的函数体，把标签按源码顺序收成一列。
+   *
+   * **只走记号**：不解析语句，于是不声明局部量、不占帧、不发一条指令 —— 这一点很要紧，
+   * 因为帧的大小是在函数那一层的两遍里数出来的，这儿多数一次就会数歪。唯一真的要解析
+   * 的是 `case` 后面那个常量表达式，而 `constExpr` 本来就不发指令。
+   *
+   * 里层 switch 的 case 属于它自己，所以整块跳过。
+   */
+  scanCases(body, ty) {
+    const out = [];
+    const bits = intBitsOf(ty);
+    const uns = isUnsigned(ty.t);
+    const seen = new Set();
+    let hasDef = false;
+    this.cpp.pushTokens(body);
+    this.next();
+    while (this.tok !== TOK_EOF) {
+      const t = this.tok;
+      if (t === TOK_SWITCH) {
+        this.next();
+        this.skipBalanced(LPAR, RPAR);
+        if (this.tok !== LBRACE) this.todo('switch 的函数体不是花括号还没到');
+        this.skipBalanced(LBRACE, RBRACE);
+        continue;
+      }
+      if (t === TOK_CASE) {
+        this.next();
+        /* case 的值按控制表达式提升之后的类型收口（C11 6.8.4.2 第 5 段）——
+         * 不收的话 `switch ((char)x) { case 256: }` 会挑不出重复。 */
+        const raw = this.constExpr();
+        const v = uns ? BigInt.asUintN(bits, raw) : BigInt.asIntN(bits, raw);
+        this.skip(COLON);
+        if (seen.has(v)) this.err(`duplicate case value '${v}'`);
+        seen.add(v);
+        out.push({ def: false, val: v });
+        continue;
+      }
+      if (t === TOK_DEFAULT) {
+        this.next();
+        this.skip(COLON);
+        if (hasDef) this.err('multiple default labels in one switch');
+        hasDef = true;
+        out.push({ def: true, val: 0n });
+        continue;
+      }
+      this.next();
+    }
+    this.cpp.endMacro();
+    return out;
+  }
+
+  /** 吃掉一组配平的 `(…)` / `{…}`。当前记号必须是开的那个。 */
+  skipBalanced(open, close) {
+    if (this.tok !== open) this.expect(String.fromCharCode(open));
+    let depth = 0;
+    for (;;) {
+      if (this.tok === TOK_EOF) this.err('unexpected end of file');
+      if (this.tok === open) depth++;
+      else if (this.tok === close) depth--;
+      this.next();
+      if (depth === 0) break;
+    }
   }
 
   /** 表达式语句：算完把值丢掉（`tccgen.c` 的 `expr: gexpr(); vpop();`）。 */
@@ -2758,6 +2978,7 @@ export class CGen {  /**
     this.funcName = name;
     this.scopes = [new Map()];
     this.regions = [];
+    this.swStack = [];
 
     if (!this.pass1) {
       this.spSave = REF_NONE;
