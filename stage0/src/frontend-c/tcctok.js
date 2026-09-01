@@ -226,6 +226,7 @@ export const TOK_INLINE = fixed('inline');
 export const TOK_VOID = fixed('void');
 export const TOK_CHAR = fixed('char');
 export const TOK_INT = fixed('int');
+export const TOK_BOOL = fixed('_Bool');
 export const TOK_FLOAT = fixed('float');
 export const TOK_DOUBLE = fixed('double');
 export const TOK_SHORT = fixed('short');
