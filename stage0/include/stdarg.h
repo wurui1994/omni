@@ -11,10 +11,18 @@
 
 typedef __builtin_va_list va_list;
 
-#define va_start(ap, last) __builtin_va_start(ap, last)
-#define va_arg(ap, type) __builtin_va_arg(ap, type)
-#define va_copy(dst, src) __builtin_va_copy(dst, src)
-#define va_end(ap) __builtin_va_end(ap)
+/* 这四条与 tcc 的 `include/stdarg.h:5-8` 一样是**对象式**宏，不是函数式的。
+ * 差别在 `-E` 的输出上看得见：`va_start` 单独出现时对象式那种会展开成
+ * `__builtin_va_start`，函数式那种原样留下。既然 tcc 是 oracle，照它。 */
+#define va_start __builtin_va_start
+#define va_arg __builtin_va_arg
+#define va_copy __builtin_va_copy
+#define va_end __builtin_va_end
+
+/* glibc 的 libio.h 里有一处写死了 GCC 的名字（tcc 的原注释：fix a buggy
+ * dependency on GCC in libio.h）。macOS 的 `<_stdio.h>` 也认这个名字。 */
+typedef va_list __gnuc_va_list;
+#define _VA_LIST_DEFINED
 
 /* 早年的 `<varargs.h>` 写法（tcc 也带一份）：这一格还没到 —— `va_alist` /
  * `va_dcl` 要一套「形参列表里不写名字」的规则，与 K&R 的旧式声明是同一件事。 */
