@@ -564,6 +564,27 @@ const LONG_MAX = (1n << 63n) - 1n;
 const LONG_MIN = -(1n << 63n);
 const ULONG_MAX = (1n << 64n) - 1n;
 
+/* ------------------------------------------------------------------ errno
+ *
+ * `errno`（第八刀第八片）。C 要求它是一个**可改的左值**（`errno = 0` 得能写），
+ * 所以宿主这边放一个 JS 变量是不行的 —— 函数回不出左值。
+ *
+ * 走的是 glibc 的形状：`errno` 是宏，展开成 `(*__omni_errno_location())`，
+ * 那个函数回一个指进**线性内存**的 `int *`。那一格由**前端**在 data 段里留
+ * （版图是前端定的，见 tccgen.js 末尾那张表），开跑前用一条 `__omni_errno_init`
+ * 把地址交过来 —— 与第十五片的 `__omni_heap_init` 完全同一个形状：
+ * 宿主不猜版图，没用到的模块连那条 CCALL 都不发。
+ *
+ * 出生时是 0：线性内存出生全是 0，而 C 正好要求「程序启动时 errno 是 0」
+ * （C11 7.5 第 3 段）。所以那一格不写一个字节 data。
+ */
+let errnoAddr = 0n;
+
+/** libc 里出错的地方写它。**没装上就什么都不做** —— 那说明这个程序没用 errno。 */
+function setErrno(v) {
+  if (errnoAddr !== 0n) memStore('i32', errnoAddr, 0, BigInt(v));
+}
+
 /* ------------------------------------------------------------------ 回头的那扇门
  *
  * `qsort` / `bsearch`（第八刀第五片）与前面每一条都不同：它们**回头调 MIR**。
@@ -654,6 +675,15 @@ const LIBC = {
     heapBase = BigInt(a[0]);
     brkSet(heapBase + HEAP_HDR);
     return undefined;
+  },
+  /* `errno` 那一格的地址（第八刀第八片）。与上面那条同一个形状。 */
+  __omni_errno_init: (a) => {
+    errnoAddr = BigInt(a[0]);
+    return undefined;
+  },
+  __omni_errno_location: () => {
+    if (errnoAddr === 0n) throw new Error('libc: errno 那一格没交过来（__omni_errno_init 没发？）');
+    return errnoAddr;
   },
   malloc: (a) => heapAlloc(BigInt(a[0])),
   calloc: (a) => {
@@ -853,18 +883,19 @@ const LIBC = {
     const s = readCStr(a[0]);
     const r = scanInt(s, Number(BigInt(a[2])));
     putEnd(BigInt(a[1]), a[0], r.used);
-    // 溢出：回端点值（errno 那一格还没有，见上面那节）
-    if (r.v > LONG_MAX) return LONG_MAX;
-    if (r.v < LONG_MIN) return LONG_MIN;
+    /* 溢出：回端点值并把 `errno` 设成 `ERANGE`（34 —— 本机的 `<sys/errno.h>` 量过）。
+     * 第四片欠下的这一格由第八刀第八片补上，于是这一条现在能与 tcc 对上账了。 */
+    if (r.v > LONG_MAX) { setErrno(34); return LONG_MAX; }
+    if (r.v < LONG_MIN) { setErrno(34); return LONG_MIN; }
     return r.v;
   },
   strtoul: (a) => {
     const s = readCStr(a[0]);
     const r = scanInt(s, Number(BigInt(a[2])));
     putEnd(BigInt(a[1]), a[0], r.used);
-    if (r.v > ULONG_MAX) return ULONG_MAX;
+    if (r.v > ULONG_MAX) { setErrno(34); return ULONG_MAX; }
     /* 负号是**合法**的（C11 7.22.1.4 第 5 段：按无符号取负），`strtoul("-1")`
-     * 回的是 ULONG_MAX 而不是错误。 */
+     * 回的是 ULONG_MAX 而不是错误 —— 而且**不设 errno**。 */
     return BigInt.asUintN(64, r.v);
   },
   /* `exit` 与 `abort`：都不回来（见 `ExitCall`）。`abort` 的退出码照 shell 的规矩

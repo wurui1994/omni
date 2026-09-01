@@ -288,12 +288,13 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
 8. **C 的库面**：`libtcc1` 的等价物（软除法/浮点辅助/`alloca`/`setjmp`）与 libc 的接法。
    原先写的是"先转手宿主的 libc，走既有的 extern-C FFI"，第五片证明**转手不成立**
    （指针是自家线性内存里的偏移，宿主 libc 读不到），改成一个读写线性内存的宿主模块，
-   见第五片的落地节。**前七片已落地**（预定义的宏 —— 目标的自述，五十条，
+   见第五片的落地节。**前八片已落地**（预定义的宏 —— 目标的自述，五十条，
    顺序与值都对着 `tcc -dM -E` 抄；自带的系统头目录 + 编译器必须自己给的那四份头；
    `stdio.h`/`stdlib.h`/`string.h` 的最小子集 —— libc 的自述；
    `strtol` 一族与 `strncpy`/`strchr`/`strstr` 那几条；
-   `qsort`/`bsearch` —— libc 回头调 MIR 的那扇门；`vprintf` 一族；`<ctype.h>`），
-   见下面的第八刀第一到七片节。
+   `qsort`/`bsearch` —— libc 回头调 MIR 的那扇门；`vprintf` 一族；`<ctype.h>`；
+   `<errno.h>` —— data 段里一格 + `__omni_errno_location`），
+   见下面的第八刀第一到八片节。
 
 最后三步是**后端**：
 
@@ -3045,6 +3046,101 @@ C 只要求「排好」（C11 7.22.5.2），不要求稳定、也不要求 O(n l
 它是这一刀里第一次**因为库面而动前端**，所以单独一片。
 
 <!-- 第八刀第七片-END -->
+
+
+## 落地：第八刀第八片 —— `<errno.h>`，第一次因为库面而动前端
+
+第七片末尾把三条路摆出来了，落下来的是第三条。这一节记它长什么样、以及它顺带补上了
+第四片欠的那笔账。
+
+### 那一格在哪儿
+
+`errno` 必须是**可改的左值**（`errno = 0`、`errno++`、`&errno` 都得成立），
+所以它只能是一块**内存**。形状照 glibc：
+
+```c
+int *__omni_errno_location(void);
+#define errno (*__omni_errno_location())
+```
+
+那块内存在 **data 段的末尾 4 个字节**，由前端留（版图是前端定的）：
+
+```js
+let errnoAddr = 0;
+if (gen.errnoUsed) {
+  errnoAddr = alignUp(gen.dataOff, 4);
+  gen.dataOff = errnoAddr + 4;
+}
+```
+
+地址在入口处交给宿主，与第十五片的堆一字不差地对称：
+
+```js
+if (gen.errnoUsed) {
+  entry.emit(OP.CCALL, T_VOID, mod.cabiNo('__omni_errno_init'),
+    entry.pushArgs([mod.consts.int(BigInt(errnoAddr))]), 0);
+}
+```
+
+「用到了吗」在**外部符号那张清单**里问（`unit()` 末尾那个循环），与 `HEAP_FNS`
+同一处 —— 因为「用到 errno」就等于「`__omni_errno_location` 是这个单元里的一个
+外部符号」。没用到的模块**不留那 4 个字节、也不发那条 CCALL**。
+
+**那一格不写一个字节 data**：线性内存出生全是 0，而 C 正好要求「程序启动时 `errno`
+是 0」（C11 7.5 第 3 段）。这与「没有初始化式的全局量不写 data」是同一条。
+
+### 顺带补上第四片欠的账
+
+`strtol` 溢出时现在设 `ERANGE`（34，照本机的 `<sys/errno.h>` 量的），于是
+**溢出的输入也能与 tcc 对账了** —— 第四片那条「用例避开溢出」的限制解除。
+`gen/34` 里那四行正是它：
+
+```
+over 9223372036854775807 1     /* LONG_MAX + errno == ERANGE */
+under -9223372036854775808 1
+edge 9223372036854775807 0     /* 正好在边界上：不算溢出，errno 不动 */
+fine 123 0
+```
+
+`strtoul("-1")` 那一格照旧**不设** errno（按无符号取负是合法的，不是错误）。
+
+### 头文件里只放我们真的会设的那几个
+
+本机的 `<sys/errno.h>` 有八十多个 `E*`。我们放十个（`EPERM` / `ENOENT` / `EINTR` /
+`EIO` / `ENOMEM` / `EACCES` / `EEXIST` / `EINVAL` / `EDOM` / `ERANGE`），值都量过。
+多出来的那些没有一个地方会写它们 —— 而「有哪些」应当等于「我们真的会设哪些」，
+与第三片那条纪律相同。
+
+`strerror` / `perror` 没有：要一张号到文字的表，而那些文字得与本机 libc 逐字节相同
+才能对账。独立一格。
+
+### 量出来的数
+
+- `stage0/include/errno.h`：36 行。前端那边一共 12 行（一个字段、一个常量、
+  留格子的四行、发 CCALL 的四行）。
+- `tests/c/gen/34-errno.c`：退出码 10 + 11 行 stdout，与 `tcc -run` 逐字节相同。
+  钉了五格：出生是 0、读写与清零、那几个数、`strtol`/`strtoul` 的溢出与边界、
+  以及**它真的是左值**（`+=`、`++`、`&errno` 拿去写）。
+- `tests/c/run.js`：**61 passed, 0 failed**。`tests/js-roundtrip/run.js`：110 passed。
+- 边界钉子仍是 6 条。
+
+### 下一片
+
+第八刀第九片：**`FILE` / `fopen` / `fread` / `fclose` / `fprintf` / `stderr`**。
+这是这一刀里最大的一格，也是绕不开的一格 —— tinycc 的源码从命令行读文件、往
+`stderr` 写诊断。要想清楚的是：
+
+- `FILE` 是**不透明的**，所以它可以就是一个小整数包在结构里（fd），宿主那边一张表。
+  但 `stdout` / `stderr` 是**对象的地址**（`FILE *`），得在 data 段里有真的一格 ——
+  与 `errno` 这一片同一个手法，只是要三格而不是一格。
+- 读文件要真的宿主 IO，而解释器现在只有 `printRaw` 一条出去的路。
+- `fprintf(stderr, …)` 与 `printf` 的对账口径不同：stdout 逐字节比，stderr
+  在测试轴上现在是「非空就算 tcc 拒了这份用例」（`tests/c/run.js` 那一句）——
+  这一片要先把那条口径改掉，否则第一个 `fprintf(stderr, …)` 的用例会被判成失败。
+
+最后一条说明这一片**得先动测试轴**，不是先动 libc。
+
+<!-- 第八刀第八片-END -->
 
 
 

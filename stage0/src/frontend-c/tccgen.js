@@ -72,6 +72,8 @@
 // 堆（第十五片）在影子栈之上的下一个页边界起，往上长、不够就 `MGROW`；分配器在
 // `interp/libc.js` 里，**簿记全在线性内存上**，而堆的起点由入口函数用一条
 // `__omni_heap_init` 交给它 —— 宿主那边不猜版图，没用到堆的模块也不发那条。
+// `errno`（第八刀第八片）是同一个形状的第二例：data 段末尾 4 个字节，
+// 地址由 `__omni_errno_init` 交过去，用到 `<errno.h>` 才留、才发。
 //
 // ## 调用约定里聚合类型那一格（第十一片）
 //
@@ -238,6 +240,15 @@ const FRAME_ALIGN = 8;
  * 版图上给堆留出位置、在入口处把堆的起点交过去。
  */
 const HEAP_FNS = new Set(['malloc', 'calloc', 'realloc', 'free', 'strdup']);
+
+/**
+ * 用到这个名字，就说明这个单元要一格 `errno`（第八刀第八片）。
+ * `<errno.h>` 里 `errno` 是宏，展开成 `(*__omni_errno_location())` —— 与 glibc 的
+ * `__errno_location` 同一个形状，因为 C 要求 `errno` 是一个**可改的左值**，
+ * 而函数回不出左值、只能回一个指针。
+ * 前端要做的与堆那条一样两件事：data 段里留 4 个字节、在入口处把地址交过去。
+ */
+const ERRNO_FN = '__omni_errno_location';
 
 /**
  * 影子栈的大小。1 MiB —— 与 tcc 在本机上的默认线程栈同一个量级，而递归深度超出它时
@@ -569,6 +580,8 @@ export class CGen {  /**
     this.pendingData = [];
     /** 这个单元用到堆了吗（`malloc` 那一族）。用到才发那条 `__omni_heap_init` */
     this.heapUsed = false;
+    /** 这个单元用到 `errno` 了吗。用到才在 data 段留一格、才发 `__omni_errno_init` */
+    this.errnoUsed = false;
     /** @type {Map<string,object>} `typedef` 的名字表（tcc 用 `VT_TYPEDEF` 挂在符号上） */
     this.typedefs = new Map();
     /* `__builtin_va_list`：tcc 在 arm64 上把它定在 tccdefs.h 里（本机是
@@ -4182,6 +4195,7 @@ export class CGen {  /**
        * 在调用点问：外部符号的清单正好在这个循环里，而「有没有用到」就是「它是不是
        * 这个单元里的一个外部符号」。 */
       if (HEAP_FNS.has(name)) this.heapUsed = true;
+      if (name === ERRNO_FN) this.errnoUsed = true;
       this.externThunk(name, info);
     }
     /* `extern int x;` 之后没有定义：真的编译器要等链接期才知道。我们只有一个翻译单元，
@@ -4225,6 +4239,14 @@ export function lowerC(path, text, host, defs) {
    * `mem.min` 按栈顶（用到堆时按堆底加一页）算出页数。上界不设（0）。
    * 堆按页边界起是为了「先给整整一页」，于是 `__omni_heap_init` 写第一个字节时
    * 内存一定已经够 —— 那条初始化不必自己先长内存。 */
+  /* `errno` 那一格（第八刀第八片）：data 段末尾 4 个字节，**只在用到时才留**。
+   * 不写一个字节 data —— 线性内存出生全是 0，而 C 正好要求「程序启动时 errno 是 0」
+   * （C11 7.5 第 3 段）。地址在入口处用一条 `__omni_errno_init` 交给宿主。 */
+  let errnoAddr = 0;
+  if (gen.errnoUsed) {
+    errnoAddr = alignUp(gen.dataOff, 4);
+    gen.dataOff = errnoAddr + 4;
+  }
   const stackBase = alignUp(gen.dataOff, 16);
   const stackTop = stackBase + C_STACK_BYTES;
   const heapBase = alignUp(stackTop, MEM_PAGE);
@@ -4253,6 +4275,11 @@ export function lowerC(path, text, host, defs) {
   if (gen.heapUsed) {
     entry.emit(OP.CCALL, T_VOID, mod.cabiNo('__omni_heap_init'),
       entry.pushArgs([mod.consts.int(BigInt(heapBase))]), 0);
+  }
+  /* `errno` 那一格的地址，同理 —— 用到 `<errno.h>` 才发。 */
+  if (gen.errnoUsed) {
+    entry.emit(OP.CCALL, T_VOID, mod.cabiNo('__omni_errno_init'),
+      entry.pushArgs([mod.consts.int(BigInt(errnoAddr))]), 0);
   }
   const rt = mirTypeOf(info.ret);
   if (rt === T_VOID) {
