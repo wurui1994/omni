@@ -599,6 +599,39 @@ function swapBytes(p, q, n) {
   }
 }
 
+/* ------------------------------------------------------------------ ctype
+ *
+ * `<ctype.h>` 的那十几条（第八刀第七片）。三件事值得写下来：
+ *
+ * 1. **收的是 `int`，而且 `EOF`（-1）是合法的输入**（C11 7.4 第 1 段：实参要么是
+ *    `unsigned char` 能表示的值，要么是 `EOF`）。所以不能先 `asUintN(8)` ——
+ *    那会把 -1 变成 255（`ÿ`）。范围外的一概回 0。
+ * 2. 回的只保证是**非零**，不保证是 1。本机（macOS）回的是 1，我们也回 1；
+ *    要逐字节对账的用例照 C 的保证写（`!= 0`），于是换一台机器也仍然成立。
+ * 3. 只做 **"C" locale**。C 说 `isalpha` 在别的 locale 下可以更宽 —— 那要一整套
+ *    locale，而 tinycc 的源码只用 C locale。
+ */
+
+/** `c` 在 `unsigned char` 的范围里吗（`EOF` 与别的负数都不在）。 */
+function ctypeOk(c) { return c >= 0 && c <= 255; }
+
+const isDigit = (c) => c >= 48 && c <= 57;
+const isUpper = (c) => c >= 65 && c <= 90;
+const isLower = (c) => c >= 97 && c <= 122;
+const isAlpha = (c) => isUpper(c) || isLower(c);
+const isSpace = (c) => c === 32 || (c >= 9 && c <= 13);
+const isXdigit = (c) => isDigit(c) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70);
+/** 可打印且不是空格也不是字母数字（C11 7.4.1.10）。 */
+const isPunct = (c) => c >= 33 && c <= 126 && !isDigit(c) && !isAlpha(c);
+
+/** 一条谓词包成 libc 的入口：范围外回 0，范围内回 0/1。 */
+function ctypeFn(pred) {
+  return (a) => {
+    const c = Number(BigInt.asIntN(32, BigInt(a[0])));
+    return ctypeOk(c) && pred(c) ? 1n : 0n;
+  };
+}
+
 /* ------------------------------------------------------------------ str 一族
  *
  * `strncpy` / `strchr` / `strstr` 那几条（第八刀第四片）。它们都只要「在线性内存上
@@ -838,6 +871,28 @@ const LIBC = {
    * 是 128 + SIGABRT(6) = 134 —— `tcc -run` 那边也是这个数。 */
   exit: (a) => { throw new ExitCall(Number(BigInt.asIntN(32, BigInt(a[0])))); },
   abort: () => { throw new ExitCall(134); },
+
+  isalpha: ctypeFn(isAlpha),
+  isdigit: ctypeFn(isDigit),
+  isalnum: ctypeFn((c) => isAlpha(c) || isDigit(c)),
+  isspace: ctypeFn(isSpace),
+  isupper: ctypeFn(isUpper),
+  islower: ctypeFn(isLower),
+  isxdigit: ctypeFn(isXdigit),
+  ispunct: ctypeFn(isPunct),
+  isprint: ctypeFn((c) => c >= 32 && c <= 126),
+  isgraph: ctypeFn((c) => c >= 33 && c <= 126),
+  iscntrl: ctypeFn((c) => c < 32 || c === 127),
+  /* `toupper` / `tolower`：**不认识的一概原样回**（C11 7.4.2）——
+   * 包括 `EOF` 与非字母。 */
+  toupper: (a) => {
+    const c = BigInt.asIntN(32, BigInt(a[0]));
+    return isLower(Number(c)) ? c - 32n : c;
+  },
+  tolower: (a) => {
+    const c = BigInt.asIntN(32, BigInt(a[0]));
+    return isUpper(Number(c)) ? c + 32n : c;
+  },
 
   /* `qsort`：插入排序。比较器拿到的是**真的元素地址**（C 要求如此），
    * 所以这一份不需要临时缓冲区、也不碰堆 —— 交换就地做。
