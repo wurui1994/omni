@@ -148,6 +148,29 @@ export function mkEnum(info) {
   return ty;
 }
 
+/* ------------------------------------------------- 位域（`tcc.h:1087-1088`）
+ * 「从第几位开始」与「几位宽」各占 6 位，就挤在 `VT_STRUCT_SHIFT` 那一段里 ——
+ * 于是位域信息**跟着类型走**：`s.f` 回一个内存左值，宽度与偏移在它的 `t` 里，
+ * 不必给 SValue 加一格，也不会在传递过程中掉。
+ *
+ * 一律用 `>>>` 而不是 `>>`：宽度那一段占到第 26-31 位，`t` 在 JS 里是 int32，
+ * 带着最高位的时候 `>>` 会把符号拖进来，读出来的宽度就成了 63。 */
+export function isBitfield(t) { return (t & VT_BITFIELD) !== 0; }
+export function bitPosOf(t) { return (t >>> VT_STRUCT_SHIFT) & 0x3f; }
+export function bitSizeOf(t) { return (t >>> (VT_STRUCT_SHIFT + 6)) & 0x3f; }
+
+/** 给一个类型挂上位域信息。`pos`/`bits` 各 ≤ 63。 */
+export function mkBitfield(ty, pos, bits) {
+  const t = (ty.t & ~VT_STRUCT_MASK) | VT_BITFIELD
+    | (pos << VT_STRUCT_SHIFT) | (bits << (VT_STRUCT_SHIFT + 6));
+  return ctype(t, ty.ref);
+}
+
+/** 去掉位域信息，回它**声明的**那个类型 —— 访问内存要按它的宽度来。 */
+export function bitfieldBase(ty) {
+  return ctype(ty.t & ~VT_STRUCT_MASK, ty.ref);
+}
+
 /**
  * `type_size`（`tccgen.c:3494`）：字节数与对齐。**LP64**（arm64/x86_64 的 Darwin 与
  * Linux 都是它）：`long` 与指针都是 8 字节。这个选择要与 tcc 在本机上的选择一致，

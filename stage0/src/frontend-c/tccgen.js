@@ -49,6 +49,14 @@
 // 「宽度只在访问那一刻有意义」还有一条推论：提升一个**左值**必须先按原类型取值，
 // 换完类型码再取就会按 `int` 的宽度读内存。这一格错过一次，见 `promote`。
 //
+// ## 位域信息只能挂在左值上（第二条不变量）
+//
+// 位域的「第几位、几位宽」和 tcc 一样挤在 CType 的位里（`mkBitfield`），于是它跟着
+// 类型走，不必给 SValue 加一格。代价是一条纪律：**一旦取过值，类型上就不能再带着它**
+// —— 否则下一次 `gv` 会以为自己还得去内存里读一遍，而手上已经没有地址了。所以
+// `promote` / `castTo` / `incdec` 三处都要先过 `bfValTypeOf`。这一格错过一次，
+// printf 的实参上当场炸（报「位域左值不在内存上」）。
+//
 // ## 内存的版图
 //
 // 页 0（0..64K）整页留空 —— C 的 `NULL` 于是**一定**访问不到。data 段从 64K 往上长
@@ -70,8 +78,8 @@
 // 指针（`&`/`*`/算术/比较）、数组（含多维）、下标、影子栈、字符串字面量、常量表达式、
 // 全局量（data 段，常量初始化式）、`typedef`、`extern` 与「用过但没定义」的诊断、
 // 外部符号（`unit()` 末尾的转发桩）与变参调用（printf/sprintf 那一族已经跑通）、
-// **struct/union/enum、`.` 与 `->`、整块的 struct 赋值、不完整类型的指针**。
-// 还没到：位域、struct 的**传值/返回**（要 ABI）、聚合初始化器、带括号的声明符
+// **struct/union/enum、`.` 与 `->`、整块的 struct 赋值、不完整类型的指针、位域**。
+// 还没到：struct 的**传值/返回**（要 ABI）、聚合初始化器、带括号的声明符
 // （`int (*a)[3]`、函数指针）、浮点（含 printf 的 `%f/%e/%g`）、`switch`/`goto`、
 // `malloc` 那一族（要堆）、变参函数的**定义**（要 `va_list`/`va_arg`）。
 //
@@ -100,9 +108,10 @@ import {
 } from './tcctok.js';
 import {
   VT_VOID, VT_BYTE, VT_SHORT, VT_INT, VT_LLONG, VT_BOOL, VT_PTR, VT_FUNC, VT_STRUCT,
-  VT_UNSIGNED, VT_DEFSIGN, VT_LONG, VT_FLOAT, VT_DOUBLE,
+  VT_BTYPE, VT_UNSIGNED, VT_DEFSIGN, VT_LONG, VT_FLOAT, VT_DOUBLE,
   VT_EXTERN, VT_STATIC, VT_TYPEDEF, VT_INLINE, VT_CONSTANT, VT_VOLATILE, VT_STORAGE,
   btype, isInteger, isFloat, isUnsigned, isPtr, isArray, isFunc, isStruct, isUnion,
+  isBitfield, bitPosOf, bitSizeOf, mkBitfield, bitfieldBase,
   ctype, mkPointer, mkArray, mkStruct, mkEnum, typeSize, typeText, sameType,
   TY_VOID, TY_INT, TY_UINT, TY_LLONG, TY_ULLONG, TY_CHAR, TY_SHORT, TY_BOOL,
 } from './ctype.js';
@@ -250,8 +259,26 @@ function isLval(v) { return v.slot !== null || v.mem !== null; }
 /** 退化之后的类型（**不发指令**，只回类型）。`T[N]` -> `T*`，别的原样。 */
 function decayedType(ty) { return isArray(ty.t) ? mkPointer(ty.ref) : ty; }
 
+/**
+ * 位域**取过值之后**是什么类型 —— 也就是 `gvBitfield` 那两条移位所用的容器类型：
+ * `long long` 的位域按 64 位，别的都按 32 位；符号性跟着声明的类型（`_Bool` 按无符号）。
+ *
+ * 这个函数存在的理由是一条不变量：**位域信息只能挂在左值上**。一旦取过值，类型上
+ * 再带着「第几位、几位宽」就会骗人 —— 下一次 `gv` 会以为它还得去内存里读一遍，而
+ * 它手上已经没有地址了。所以凡是「把左值变成值」的地方（`promote`、`castTo`、
+ * `incdec`）都要在这儿过一道。这一格错过一次，printf 的实参上当场炸。
+ */
+function bfValTypeOf(ty) {
+  if (!isBitfield(ty.t)) return ty;
+  const base = bitfieldBase(ty);
+  const w64 = btype(base.t) === VT_LLONG;
+  const uns = isUnsigned(base.t) || btype(base.t) === VT_BOOL;
+  return w64 ? (uns ? TY_ULLONG : TY_LLONG) : (uns ? TY_UINT : TY_INT);
+}
+
 /** 整型提升之后的类型（**不发指令**）。只问类型的地方用它，别叫 `promote`。 */
-function promotedType(ty) {
+function promotedType(ty0) {
+  const ty = bfValTypeOf(ty0);
   const b = btype(ty.t);
   if (b === VT_BOOL || b === VT_BYTE || b === VT_SHORT) return TY_INT;
   return ty;
@@ -606,6 +633,7 @@ export class CGen {  /**
      * 比较都要 ABI 的那套（按大小决定寄存器还是隐藏指针），是下一片的事。
      * 赋值不走这儿 —— `vstore` 在调 gv 之前就分岔去 `structCopy` 了。 */
     if (isStruct(v.ty.t)) this.todo('struct 当值用还没到（传参、返回、比较）');
+    if (isBitfield(v.ty.t)) return this.gvBitfield(v);
     if (v.mem !== null) {
       /* 内存左值：静态偏移进访问描述符，于是 `a[3]` 与 `p->f` 不多一条加法。 */
       return this.f.emit(OP.MLOAD, mirTypeOf(v.ty), v.mem.addr, REF_NONE,
@@ -632,6 +660,42 @@ export class CGen {  /**
   }
 
   /**
+   * 读一个位域（`gv` 里 `VT_BITFIELD` 那一支，`tccgen.c:1850`）。
+   *
+   * **两条移位就够**：先左移把要的那几位顶到最高位，再右移回来 —— 有符号用算术右移，
+   * 于是符号扩展是免费的（`int a:3` 里存 7，读出来是 -1）。写成
+   * `(x >> pos) & mask` 也对，但那样有符号的还要另写一次符号扩展，两条路。
+   *
+   * 容器只有两种宽度：`long long` 的位域按 64 位，别的都按 32 位（tcc 同样只有这两种）。
+   * 布局那一侧保证了一个位域不会跨过它自己的容器，所以这里没有「按字节读」那条路 ——
+   * 那条只有 `__attribute__((packed))` 才用得上，而 packed 还没到。
+   */
+  gvBitfield(v) {
+    if (v.mem === null) this.err('internal: 位域左值不在内存上');
+    const pos = bitPosOf(v.ty.t);
+    const bits = bitSizeOf(v.ty.t);
+    const base = bitfieldBase(v.ty);
+    if (pos + bits > typeSize(base).size * 8) {
+      this.err('internal: 位域跨过了它的容器（要 packed 那条按字节读的路）');
+    }
+    const w64 = btype(base.t) === VT_LLONG;
+    /* 符号性跟着**声明的**类型；`_Bool` 位域按无符号（`tccgen.c:1860`）。 */
+    const uns = isUnsigned(base.t) || btype(base.t) === VT_BOOL;
+    const cont = bfValTypeOf(v.ty);
+    const W = w64 ? 64 : 32;
+    const f = this.f;
+    const mt = mirTypeOf(cont);
+    /* 容器整个读出来（宽度按声明的类型，于是 `char c:3` 只读一个字节），
+     * 再转成容器类型 —— `castTo` 顺手把窄类型那条收口规则也用上了。 */
+    let r = this.gv(this.castTo(sMem(base, v.mem.addr, v.mem.off), cont));
+    const up = W - (pos + bits);
+    if (up > 0) r = f.emit(OP.SHL, mt, r, this.konst(cont, up), 0);
+    const down = W - bits;
+    if (down > 0) r = f.emit(uns ? OP.USHR : OP.SHR, mt, r, this.konst(cont, down), 0);
+    return r;
+  }
+
+  /**
    * 数组 -> 指向首元素的指针（`gen_cast` 之前 tcc 靠 `VT_ARRAY` 与 `VT_PTR` 同在一格
    * 免了大部分这类代码，见 ctype.js 头）。**值**不变，只是类型从 `T[N]` 变成 `T*` ——
    * 所以这里没有指令，只有一次 `addrOf`（它本身可能发一条 ADD）。
@@ -649,6 +713,8 @@ export class CGen {  /**
    * 落在内存上了，所以再走到这儿就是 bug —— 报出来，别静悄悄发一个错地址。
    */
   addrOf(v) {
+    /* 位域没有地址（C11 6.5.3.2 第 1 段：`&` 的操作数不能是位域）—— 它连整字节都不占。 */
+    if (isBitfield(v.ty.t)) this.err("cannot take address of bit-field");
     if (v.mem !== null) {
       if (v.mem.off === 0) return v.mem.addr;
       return this.f.emit(OP.ADD, T_I64, v.mem.addr,
@@ -691,7 +757,10 @@ export class CGen {  /**
    * `char *t; t[1]` 于是读了 4 个字节。这一格错过一次，MIR 里印出来是
    * `mload i32 %5 i32s`（该是 `i8s`），而 `t[1]` 的值变成了后面三个字节拼出来的数。
    */
-  promote(v) {
+  promote(v0) {
+    /* 位域先取出来：位域信息只能挂在左值上（见 `bfValTypeOf`）。取出来之后它已经是
+     * 容器那个宽度（int / long long），所以下面那条窄类型的提升不会再动它。 */
+    const v = isBitfield(v0.ty.t) ? sVal(bfValTypeOf(v0.ty), this.gv(v0)) : v0;
     const b = btype(v.ty.t);
     if (b !== VT_BOOL && b !== VT_BYTE && b !== VT_SHORT) return v;
     return sVal(TY_INT, this.gv(v));
@@ -736,6 +805,13 @@ export class CGen {  /**
     if (tb === VT_VOID) return sVal(TY_VOID, REF_NONE);
     // 转成 `_Bool`：C 规定「非零就是 1」，不是「截低位」。`(_Bool)256` 是 1，不是 0。
     if (tb === VT_BOOL) return sVal(ty, this.gvBool(v));
+
+    /* 源侧是位域就先取出来 —— 位域信息只能挂在左值上（见 `bfValTypeOf`）。
+     * 不在这儿收口的话，`castTo` 会回一个「带着位域信息但没有地址」的值，
+     * 下一次 gv 当场炸。printf 的实参上踩过这一格。 */
+    if (isBitfield(v.ty.t)) {
+      return this.castTo(sVal(bfValTypeOf(v.ty), this.gv(v)), ty);
+    }
 
     const from = v.ty;
     if (isFloat(from.t) || isFloat(ty.t)) this.todo('浮点还没到');
@@ -786,6 +862,7 @@ export class CGen {  /**
     if (!isLval(target)) this.err('lvalue expected');
     if (isArray(target.ty.t)) this.err('assignment to expression with array type');
     if (isStruct(target.ty.t)) return this.structCopy(target, v);
+    if (isBitfield(target.ty.t)) return this.storeBitfield(target, v);
     const cv = this.castTo(v, target.ty);
     const r = this.gv(cv);
     if (target.mem !== null) {
@@ -835,6 +912,42 @@ export class CGen {  /**
     }
     /* 赋值表达式的值是「赋完之后的左边」。struct 没有寄存器形态，所以回那个左值本身 ——
      * 于是 `a = b = c` 与 `(a = b).f` 都对，而且不多一次拷贝。 */
+    return target;
+  }
+
+  /**
+   * 写一个位域（`vstore` 里 `VT_BITFIELD` 那一支，`tccgen.c:3748`）。
+   *
+   * 读改写：`容器 = (容器 & ~(mask << pos)) | ((值 & mask) << pos)`。掩码运算一律按
+   * **无符号**做 —— 有符号的 `~mask` 在算术上是负数，虽然位一样，但按无符号写就不必
+   * 每次都想一遍「这里会不会被符号扩展带歪」。
+   *
+   * 回的是**左值本身**，不是那个存进去的值：`x = s.a = 300` 里 `s.a` 只有 3 位，
+   * 表达式的值该是截断后的 4 而不是 300。回左值让读那一侧走 `gvBitfield`，
+   * 于是「截断」这件事只在一处实现（tcc 靠 `vdup` 把左值留在栈上，同一个用意）。
+   */
+  storeBitfield(target, v) {
+    if (target.mem === null) this.err('internal: 位域左值不在内存上');
+    const pos = bitPosOf(target.ty.t);
+    const bits = bitSizeOf(target.ty.t);
+    const base = bitfieldBase(target.ty);
+    const w64 = btype(base.t) === VT_LLONG;
+    const cont = w64 ? TY_ULLONG : TY_UINT;
+    const mt = mirTypeOf(cont);
+    const f = this.f;
+    const mask = (1n << BigInt(bits)) - 1n;
+
+    let r = this.gv(this.castTo(v, base));
+    r = f.emit(OP.BAND, mt, r, this.konst(cont, mask), 0);
+    if (pos > 0) r = f.emit(OP.SHL, mt, r, this.konst(cont, pos), 0);
+
+    let old = this.gv(sMem(base, target.mem.addr, target.mem.off));
+    old = f.emit(OP.BAND, mt, old, this.konst(cont, ~(mask << BigInt(pos))), 0);
+    const nv = f.emit(OP.BOR, mt, old, r, 0);
+    /* MSTORE 的 `t` 是**值**的类型，宽度在描述符里 —— 描述符按声明的类型选，
+     * 于是 `char c:3` 只写回那一个字节，不会碰到旁边的成员。 */
+    f.emit(OP.MSTORE, mt, target.mem.addr, nv,
+      memDesc(storeKindOf(base), target.mem.off));
     return target;
   }
 
@@ -1250,10 +1363,13 @@ export class CGen {  /**
    */
   incdec(target, op, post) {
     if (!isLval(target)) this.err('lvalue expected');
+    /* 取过值之后类型上不能再带位域信息（见 `bfValType`）—— 否则那个「旧值」下一次
+     * 被 gv 时会以为自己还要去内存里读一遍，而它手上没有地址。 */
+    const ty = bfValTypeOf(target.ty);
     const old = this.gv(target);
-    const nv = this.genOp(op, sVal(target.ty, old), sVal(TY_INT, this.mod.consts.i32(1)));
+    const nv = this.genOp(op, sVal(ty, old), sVal(TY_INT, this.mod.consts.i32(1)));
     const stored = this.vstore(target, nv);
-    return sVal(target.ty, post ? old : stored.ref);
+    return sVal(ty, post ? old : this.gv(stored));
   }
 
   /** 调用：`名字 ( 实参… )`。名字已经吃掉，当前记号是 `(`。 */
@@ -1768,8 +1884,14 @@ export class CGen {  /**
     this.next();
 
     const fields = [];
-    let size = 0;      // struct：当前偏移；union：目前最大的成员
-    let align = 1;
+    /* 布局的状态就两格，与 `struct_layout`（`tccgen.c:4190`）一样：
+     *   c       —— 已经排到第几个字节
+     *   bitPos  —— 从 c 起，当前这一串位域已经用掉几位（非位域成员一进来就把它冲掉）
+     * 两格而不是一格是位域的全部难点：`int a:3; int b:5;` 两个成员的 `off` 相同，
+     * 差别只在 bitPos。 */
+    let c = 0;
+    let bitPos = 0;
+    let maxalign = 1;
     while (this.tok !== RBRACE) {
       if (this.tok === TOK_EOF) this.err("'}' expected");
       const spec = this.parseBtype();
@@ -1779,30 +1901,99 @@ export class CGen {  /**
       const base = stripStorage(spec);
       if (this.tok === SEMI) this.todo('匿名的 struct/union 成员还没到（C11 6.7.2.1 第 13 段）');
       for (;;) {
-        const d = this.declarator(base, 'need');
-        const fname = /** @type {string} */ (d.name);
-        if (this.tok === COLON) this.todo('位域还没到');
-        if (fields.some((x) => x.name === fname)) {
-          this.err(`duplicate member '${fname}'`);
+        /* 匿名位域（`int : 3;` 只占位、`int : 0;` 换一个存储单元）没有声明符，
+         * 所以「有没有名字」要在进 declarator 之前问。 */
+        let fname = null;
+        let fty = base;
+        if (this.tok !== COLON) {
+          const d = this.declarator(base, 'need');
+          fname = /** @type {string} */ (d.name);
+          fty = d.ty;
         }
-        if (isStruct(d.ty.t) && d.ty.ref.fields === null) {
-          this.err(`field '${fname}' has incomplete type '${typeText(d.ty)}'`);
+
+        let bits = -1;
+        if (this.tok === COLON) {
+          this.next();
+          bits = Number(this.constExpr());
+          if (!isInteger(fty.t)) {
+            this.err(`bit-field has non-integral type '${typeText(fty)}'`);
+          }
+          if (bits < 0) this.err('negative width in bit-field');
+          const w = typeSize(fty).size * 8;
+          if (bits > w) this.err(`width of bit-field exceeds its type (${w} bits)`);
+          if (bits > 63) this.todo('64 位宽的位域还没到（宽度只有 6 位存放，tcc.h:1088）');
+          if (bits === 0 && fname !== null) {
+            this.err("named bit-field with zero width");
+          }
         }
-        if (isArray(d.ty.t) && d.ty.count < 0) {
-          this.todo('柔性数组成员还没到（`char buf[];`）');
+        if (fname === null && bits < 0) {
+          this.err('declaration does not declare anything');
         }
-        const s = typeSize(d.ty);
-        if (s.align > align) align = s.align;
+        if (fname !== null) {
+          if (fields.some((x) => x.name === fname)) {
+            this.err(`duplicate member '${fname}'`);
+          }
+          if (isStruct(fty.t) && fty.ref.fields === null) {
+            this.err(`field '${fname}' has incomplete type '${typeText(fty)}'`);
+          }
+          if (isArray(fty.t) && fty.count < 0) {
+            this.todo('柔性数组成员还没到（`char buf[];`）');
+          }
+        }
+
+        let { size, align } = typeSize(fty);
         let off;
         if (union) {
+          /* union 里的位域一律从第 0 位起（tcc 干脆不给它填 bitPos，`tccgen.c:4238`），
+           * 大小按宽度进位到整字节。**位域标记还是要打上** —— 少这一句 `u.a`
+           * 就成了一个普通的 unsigned 成员，读出来是整个容器而不是低 3 位。 */
+          if (bits >= 0) {
+            size = (bits + 7) >> 3;
+            fty = mkBitfield(fty, 0, bits);
+          }
           off = 0;
-          if (s.size > size) size = s.size;
+          if (size > c) c = size;
+        } else if (bits < 0) {
+          // 普通成员：先把没排完的那一串位冲成整字节，再按自己的对齐排
+          c += (bitPos + 7) >> 3;
+          c = alignUp(c, align);
+          off = c;
+          if (size > 0) c += size;
+          bitPos = 0;
         } else {
-          size = alignUp(size, s.align);
-          off = size;
-          size += s.size;
+          /* PCC（也就是 gcc）的位域布局：紧挨着前一个位域放，除了两种情形要换一个新的
+           * 存储单元 —— 宽度是 0，或者放下去会**越过它自己的基类型容器**。第二种那句
+           * 判断照抄（`tccgen.c:4274`）：它算的是「从当前位置起，这个位域要横跨几个
+           * align 单位」，超过基类型本来占几个单位就得换。 */
+          let newUnit = bits === 0;
+          if (!newUnit) {
+            const a8 = align * 8;
+            const ofs = Math.floor(((c * 8 + bitPos) % a8 + bits + a8 - 1) / a8);
+            if (ofs > size / align) newUnit = true;
+          }
+          if (newUnit) {
+            c = alignUp(c + ((bitPos + 7) >> 3), align);
+            bitPos = 0;
+          }
+          /* PCC 模式下装得下的 `long long` 位域按 `int` 算（`tccgen.c:4280`）——
+           * 这一句直接改成员的**类型**，于是后面读写用的是 4 字节的访问。 */
+          if (size === 8 && bits <= 32) {
+            fty = ctype((fty.t & ~VT_BTYPE) | VT_INT, fty.ref);
+            size = 4;
+          }
+          while (bitPos >= align * 8) {
+            c += align;
+            bitPos -= align * 8;
+          }
+          off = c;
+          /* 匿名位域**不影响**整体的对齐（`tccgen.c:4290`）。少这一句
+           * `struct { char c; int :0; }` 的对齐会从 1 变成 4。 */
+          if (fname === null) align = 1;
+          fty = mkBitfield(fty, bitPos, bits);
+          bitPos += bits;
         }
-        fields.push({ name: fname, ty: d.ty, off });
+        if (align > maxalign) maxalign = align;
+        if (fname !== null) fields.push({ name: fname, ty: fty, off });
         if (this.tok !== COMMA) break;
         this.next();
       }
@@ -1810,9 +2001,12 @@ export class CGen {  /**
     }
     this.next();       // `}`
 
+    // 末尾那一串没排完的位也要占字节（`tccgen.c:4344`）
+    c += (bitPos + 7) >> 3;
+
     info.fields = fields;
-    info.align = align;
-    info.size = alignUp(size, align);
+    info.align = maxalign;
+    info.size = alignUp(c, maxalign);
     return mkStruct(info, union);
   }
 
