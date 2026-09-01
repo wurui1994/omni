@@ -1487,7 +1487,9 @@ function main(argv) {
     return 0;
   }
   // repl 没有源文件；默认模式是 ADR-0008 第 3 节的 dynamic（沿革见 repl.js 文件头）。
-  // `--lang` 选前端：驱动是与语言无关的，omni 走检查器的增量会话，sx/asy 走核心方言的。
+  // `--lang` 选前端：驱动是与语言无关的，omni 走检查器的增量会话，sx/asy 走核心方言的，
+  // js 走 frontend-js 的增量会话（原生二进制上一样有交互式 JS —— 那是前端，不需要
+  // 宿主有能吃 JS 文本的引擎）。
   // `--engine` 选**执行引擎**：interp（OIR 解释器）| js（JS 后端，产物装进同一个全局
   // 作用域）。两条都是增量的 —— 引擎只需要 install/runEntry 这一对口子。
   // asy 要语法表与内建绑定表，那是文件 IO，所以由这里注入（repl.js 不碰盘）。
@@ -1794,7 +1796,7 @@ const USAGE = `omni — stage0 bootstrap compiler
 usage: omni <command> <file.omni>
 
 commands:
-  repl      interactive session (no file; defaults to --mode dynamic; --lang omni|sx)
+  repl      interactive session (no file; defaults to --mode dynamic; --lang omni|sx|asy|js)
             --engine interp|js  which runtime runs each batch (both incremental)
   run       parse and execute (node host: in-process JS; native build: via the C path)
   run-c     compile to C, build with cc, execute

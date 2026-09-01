@@ -35,6 +35,8 @@ import { loadProgram, newLoadState } from './module/load.js';
 import { check, CheckSession } from './hir/check.js';
 import { lowerCoreSession, CoreSession } from './sexpr/lower.js';
 import { lowerAsy, AsySession } from './frontend-asy/lower.js';
+import { parseJs } from './frontend-js/parser.js';
+import { lowerJs, JsFrontSession } from './frontend-js/lower.js';
 import { InterpSession } from './interp/eval.js';
 
 const PROMPT = 'omni> ';
@@ -368,7 +370,84 @@ function replLang(name, mode, deps) {
   if (name === 'omni') return new OmniLang(mode);
   if (name === 'sx') return new CoreLang();
   if (name === 'asy') return new AsyLang(deps);
-  throw new OmniError(`omni: repl: unknown language '${name}' (have: omni, sx, asy)`);
+  if (name === 'js') return new JsLang();
+  throw new OmniError(`omni: repl: unknown language '${name}' (have: omni, sx, asy, js)`);
+}
+
+/** JS 那条腿的"像不像表达式"。判据与 Omni 那条同一套，只是关键字表是 JS 的。 */
+function jsLooksLikeExpr(text) {
+  const t = text.trim();
+  if (!t || /[;}]$/.test(t)) return false;
+  if (/^(const|let|var|function|class|if|else|while|for|do|return|throw|try|switch|break|continue|import|export|new)\b/.test(t)) return false;
+  const bare = t.replace(/"[^"]*"/g, '""').replace(/'[^']*'/g, "''");
+  if (/(\+\+|--)/.test(bare)) return false;
+  let depth = 0;
+  for (let i = 0; i < bare.length; i++) {
+    const c = bare[i];
+    if (c === '(' || c === '[' || c === '{') depth++;
+    else if (c === ')' || c === ']' || c === '}') depth--;
+    else if (depth === 0 && c === '=' && bare[i + 1] !== '=' && '=!<>+-*/%'.indexOf(bare[i - 1] ?? ' ') < 0) return false;
+  }
+  return true;
+}
+
+/**
+ * JS 那条腿：frontend-js 的增量会话（`--lang js`）。
+ *
+ * 这一条不需要宿主有"能吃 JS 文本"的引擎 —— 它是**前端**：一批 JS 输入降成 OIR delta，
+ * 谁来执行是引擎那一格的事（解释器在任何宿主上都成立）。所以原生二进制上一样有
+ * 交互式的 JS：`omni repl --lang js`。
+ *
+ * 跨批可见性靠的是"JS 的顶层 let/const/var 本来就降成模块级全局"（ADR-0011），
+ * 不是常驻的顶层 Env —— 见 frontend-js/lower.js 的 JsFrontSession 头注。
+ * import/export 在这条腿上还不支持（collectTop 会报），所以会话里只有封闭 ABI 的全局。
+ */
+class JsLang {
+  constructor() {
+    this.name = 'js';
+    this.fs = new JsFrontSession();
+  }
+
+  // JS 的值域全是 dynamic，没有"缺省注解怎么办"这回事
+  getMode() { return 'dynamic'; }
+
+  setMode(m) { throw new OmniError(`omni: ${this.name} has no type modes to switch`); }
+
+  prelude() { return null; }
+
+  blank(text) {
+    return text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '').trim() === '';
+  }
+
+  // 括号平衡：JS 的注释与字符串规则和 asy 那份一样（模板字面量里的括号算多了也只是多读一行）
+  complete(text) { return asyBalanced(text); }
+
+  echo(text) { return jsLooksLikeExpr(text) ? `console.log(${text});` : null; }
+
+  echoOptional(text) { return text.trim().endsWith(')'); }
+
+  asStmt(text) { return /[;}]$/.test(text.trim()) ? text : `${text};`; }
+
+  snapshot() { return this.fs.snapshot(); }
+
+  restore(s) { this.fs.restore(s); }
+
+  add(text, diags) {
+    const prog = parseJs(new SourceFile('<repl>', `${text}\n`), diags);
+    diags.throwIfErrors();
+    const delta = this.fs.add(prog, diags);
+    diags.throwIfErrors();
+    return delta;
+  }
+
+  full(chunks) {
+    const diags = new Diagnostics();
+    const prog = parseJs(new SourceFile('<repl>', `${chunks.join('\n')}\n`), diags);
+    diags.throwIfErrors();
+    const mod = lowerJs(prog, diags);
+    diags.throwIfErrors();
+    return mod;
+  }
 }
 
 /**
@@ -408,13 +487,22 @@ export class JsSession {
 
   runEntry(name) {
     // try/catch 与"取待决错误"都写在被 eval 的那段里，理由同上：边界上只过字符串。
+    // **整段都在 try 里**：取待决错误那几句自己也会碰上运行期错误（比如错误对象不是
+    // 字符串），钩子一 throw 就会从 eval 里飞出来把整个会话带走 —— 曾经就是。
+    // 文本化用 prelude 自己的 $js_err_text，和整程序那条路（js_check_uncaught）
+    // 以及解释器那条腿（builtin.js 的 jsErrText）说同一句话。
     const st = evalJs(`(function () {
       globalThis.$OMNI_REPL_ERR = "";
-      try { ${name}(); } catch (e) { if (globalThis.$OMNI_REPL_ERR === "") throw e; }
-      $flush();
-      if ($js_pending()) {
-        globalThis.$OMNI_REPL_ERR = "uncaught:" + $js_asS16($js_str($js_take_pending()));
+      try {
+        ${name}();
+        $flush();
+        if ($js_pending()) {
+          globalThis.$OMNI_REPL_ERR = "uncaught:" + $js_err_text($js_take_pending());
+        }
+      } catch (e) {
+        if (globalThis.$OMNI_REPL_ERR === "") throw e;
       }
+      $flush();
       return globalThis.$OMNI_REPL_ERR;
     })()`);
     if (st === '') return { failed: false, err: '' };

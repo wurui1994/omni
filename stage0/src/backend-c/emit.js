@@ -1227,7 +1227,12 @@ class CEmitter {
           const v = e[k];
           return typeof v === 'string' ? `'${v}'` : String(v === true);
         });
-        return `${abi.c}(${[...lits, ...a].join(', ')})`;
+        // 少给的尾部实参补 undefined。JS 那边少传就是 undefined，C 是定参函数 ——
+        // 不补的话"把一个 op 的 arity 加宽"就会让老调用点在 clang 上炸（曾经就是：
+        // js_str_last_index_of 从 2 变 3 之后，tests/oir 里那个两参调用编不过）。
+        const pad = [];
+        for (let i = a.length; i < (abi.arity ?? a.length); i++) pad.push('omni_dyn_undef()');
+        return `${abi.c}(${[...lits, ...a, ...pad].join(', ')})`;
       }
     }
   }

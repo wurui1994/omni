@@ -1005,7 +1005,7 @@ function jsOp(I, e, a) {
       if (!pendingSet) return undefined;
       const v = takePending();
       flushOut();
-      throw new InterpUncaught(callJsOp('js_str', [v]));
+      throw new InterpUncaught(jsErrText(v));
     }
     // 输出的两条 op 落在解释器自己的缓冲上，不走宿主的那一份。宿主的缓冲和这边的是
     // 两个缓冲区，谁先落盘由冲刷时机决定 —— 交错就分叉了。字符串化仍然只有一份（js_str）。
@@ -1036,6 +1036,32 @@ function takePending() {
   const v = pendingVal;
   pendingVal = undefined;
   return v;
+}
+
+/**
+ * 抛出来的值文本化。异常对象是 { $cls: [类名…], message } 的普通对象（ADR-0011 决策 15），
+ * 而 js_str 收不了 dict —— 按 JS 自己的 String(new Error(m)) === "Cls: m" 拼。
+ * prelude 里那份同名的是 $js_err_text，两边必须说同一句话。
+ */
+export function jsErrText(v) {
+  if (v instanceof Map) {
+    const cls = v.get('$cls');
+    if (Array.isArray(cls) && cls.length > 0) {
+      const msg = v.get('message');
+      return `${cls[0]}: ${msg === undefined ? '' : callJsOp('js_str', [msg])}`;
+    }
+  }
+  return callJsOp('js_str', [v]);
+}
+
+/**
+ * REPL 用：一批跑完之后待决槽里还有东西，就是这一批没人接的 throw。
+ * 整程序那条路上做这件事的是 js_check_uncaught（后端在入口之后发一句），
+ * 而 REPL 的 chunk 里没有那一句 —— 不查的话一批的 throw 就被悄悄吃掉了。
+ */
+export function jsPendingText() {
+  if (!pendingSet) return null;
+  return jsErrText(takePending());
 }
 
 /**

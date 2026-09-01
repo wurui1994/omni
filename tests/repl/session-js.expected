@@ -1,0 +1,20 @@
+exit 0
+--- stdout ---
+len 4
+4
+49
+10
+{"a":[1,2,3,4],"sq":100,"t":10}
+20
+in a box
+caught neg
+10
+session reset
+--- stderr ---
+<repl>:1:13: error: unresolved identifier 'nope'
+  console.log(nope + 1);
+              ^^^^
+omni: uncaught: Error: uncaught here
+<repl>:1:13: error: unresolved identifier 't'
+  console.log(t);
+              ^

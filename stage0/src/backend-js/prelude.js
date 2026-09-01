@@ -1536,11 +1536,25 @@ function $js_take_pending() {
   $pendingSet = false;
   return $pending;
 }
+// 抛出来的值文本化。异常对象是 { $cls: [类名…], message } 的普通对象（决策 15），而
+// js_str 收不了 dict —— 所以这里按 JS 自己的 String(new Error(m)) === "Cls: m" 拼。
+// 不是 ABI op，是 prelude 自己的助手：REPL 的 js 引擎与整程序的 uncaught 检查共用它，
+// 两条路因此说同一句话（解释器那边对应 interp/builtin.js 的 jsErrText）。
+function $js_err_text(v) {
+  if ($dynTag(v) === "dict") {
+    const cls = $js_obj_get(v, "$cls");
+    if ($dynTag(cls) === "list" && cls.length > 0) {
+      const msg = $js_obj_get(v, "message");
+      return cls[0] + ": " + (msg === undefined ? "" : $js_asS16($js_str(msg)));
+    }
+  }
+  return $js_asS16($js_str(v));
+}
 // 未捕获：宿主会打栈回溯，C 侧打不出同样的东西，所以两侧一律只打这一行
 function $js_check_uncaught() {
   if (!$pendingSet) return;
   $flush();
-  process.stderr.write("omni: uncaught: " + $js_asS16($js_str($pending)) + "\n");
+  process.stderr.write("omni: uncaught: " + $js_err_text($pending) + "\n");
   process.exit(70);
 }
 // 异常对象就是普通对象：{ $cls: [类名…，最派生的在前], message }（ADR-0011 决策 15）

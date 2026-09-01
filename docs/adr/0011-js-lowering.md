@@ -494,7 +494,16 @@ Break / Continue / Return，所以形状是定下来的：
 
 ## 已知风险
 
-- **正则**原以为是最大的一块未知，用自己的 JS 词法器数完之后反而是最小的一块：49 个字面量，
+- **没人接的 throw，C 那条腿还在说错话**。异常对象是 `{ $cls, message }` 的普通对象，
+  文本化按 JS 的 `String(new Error(m)) === "Cls: m"` 来 —— node 侧（prelude 的
+  `$js_err_text`）与解释器（`interp/builtin.js` 的 `jsErrText`）已经对齐，而
+  `runtime/omni_js.c` 的 `omni_js_check_uncaught` 拿不到 dict 的字段（通用 dict 类型是
+  按 TU 生成的，所以对象访问全是 `omni_js_obj.h` 里的宏），于是 `omni run-c` 上顶层未捕获
+  的 throw 打的是 `omni: runtime error: cannot convert dict to string`。
+  复现：`function f() { throw new Error("boom"); } f();` —— node/interp 打
+  `omni: uncaught: Error: boom`，run-c 打上面那句。补法是给生成的 TU 一个注册口
+  （宏那边能读字段，把文本化函数指针交给运行时），要动 backend-c 的 main 发射，
+  所以单独一刀。顺带：这也说明 tests/js-exec 缺"顶层未捕获"的用例。- **正则**原以为是最大的一块未知，用自己的 JS 词法器数完之后反而是最小的一块：49 个字面量，
   去重后 35 条，全部很短。用到的特性只有：字符类（含范围与 `[^...]`）、锚点 `^ $`、
   量词 `* + ? {n} {n,m}`、捕获组、转义 `\. \n \r \s \d \/`、flags 里的 `g` 与 `m`。
   **一个 `|` 都没有**，没有 lookahead、没有反向引用、没有懒惰量词、没有 unicode 属性转义。

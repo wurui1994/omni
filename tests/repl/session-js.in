@@ -1,0 +1,34 @@
+// JS 那条腿的 REPL（--lang js）。意义有两层：
+//   1. 驱动与语言无关这件事又多一门语言 —— 增量、跨批可见性、失败回滚都在共用那一层；
+//   2. **交互式的 JS 不需要宿主有能吃 JS 文本的引擎**：这一条走的是 frontend-js 的
+//      增量会话（前端）+ 执行引擎那一格，所以原生二进制上一样有。
+// 跨批可见性靠"JS 的顶层 let/const/var 本来就降成模块级全局"（ADR-0011），不是常驻 Env。
+const xs = [1, 2, 3];
+xs.push(4);
+console.log("len " + xs.length);
+xs.length
+function sq(n) { return n * n; }
+sq(7)
+let t = 0;
+for (const v of xs) { t = t + v; }
+t
+// 第 1 批的数组、第 5 批的函数、第 7 批的变量，在这一批里一起用
+console.log(JSON.stringify({ a: xs, sq: sq(t), t: t }));
+// 闭包：捕获的是上一批声明的全局
+function adder(k) { return (x) => x + k; }
+const add10 = adder(10);
+add10(t)
+// 类（降成"造实例"的函数，决策 13）
+class Box { constructor(v) { this.v = v; } get() { return this.v; } }
+const b = new Box("in a box");
+b.get()
+// throw / try 摊成待决错误标志 + 普通控制流（决策 14）
+function risky(x) { if (x < 0) throw new Error("neg"); return x; }
+try { risky(-1); } catch (e) { console.log("caught " + e.message); }
+// 编译不过的一批：报错、回滚，会话照旧
+nope + 1
+// 没人接的 throw：这一批算失败，但会话还在
+throw new Error("uncaught here");
+t
+:reset
+t

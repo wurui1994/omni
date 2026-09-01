@@ -1833,3 +1833,97 @@ export function lowerJs(program, diags) {
   return new Lower(diags).module(program);
 }
 
+/**
+ * JS 前端的**增量会话**（REPL 的 `--lang js`）。
+ *
+ * 与 CheckSession / CoreSession / AsySession 是同一个形状：一批输入 -> 这一批新增的 OIR
+ * （几个新函数 + 一个入口 `omni_chunk_N`），装进运行期会话再跑那个入口。
+ *
+ * 跨批可见性在这条腿上几乎是白拿的：JS 的顶层 `let/const/var` 本来就降成**模块级全局**
+ * （`collectTop` 里那句 `this.globals.set(...)`，两个后端各发一个真全局），而运行期会话
+ * 对已经见过的名字不重开格子 —— 所以第 1 批的 `x` 第 2 批还在，不需要"常驻顶层 Env"
+ * 那套东西。函数与类同理（`topFns` / `classes` 留在 Lower 里）。
+ *
+ * 这一条也是"原生二进制不丢 JS 能力"的落点：它只用前端 + 任一执行引擎，
+ * 不需要宿主有能吃 JS 文本的引擎。
+ */
+export class JsFrontSession {
+  constructor() {
+    this.L = new Lower(null);
+    this.no = 0;
+  }
+
+  snapshot() {
+    const L = this.L;
+    return {
+      funcs: L.funcs.length,
+      closures: L.closures.length,
+      cused: L.cused.length,
+      globals: new Map(L.globals),
+      topFns: new Map(L.topFns),
+      regexConsts: new Map(L.regexConsts),
+      classes: new Map(L.classes),
+      fnValues: new Map(L.fnValues),
+      used: new Set(L.used),
+      no: this.no,
+    };
+  }
+
+  restore(s) {
+    const L = this.L;
+    L.funcs.length = s.funcs;
+    L.closures.length = s.closures;
+    L.cused.length = s.cused;
+    L.globals = s.globals;
+    L.topFns = s.topFns;
+    L.regexConsts = s.regexConsts;
+    L.classes = s.classes;
+    L.fnValues = s.fnValues;
+    L.used = s.used;
+    this.no = s.no;
+  }
+
+  /** 一批（parser.js 的 Program） -> 这一批新增的 OIR。诊断按批传进来。 */
+  add(program, diags) {
+    const L = this.L;
+    L.diags = diags;
+    this.no = this.no + 1;
+    const baseFuncs = L.funcs.length;
+    const baseClosures = L.closures.length;
+    if (program.natives) L.natives = program.natives;
+    if (program.cnatives) L.cnatives = program.cnatives;
+    for (const s of program.body) L.collectTop(s);
+    for (const s of program.body) if (s.type === 'FuncDecl') L.funcDecl(s);
+    for (const s of program.body) if (s.type === 'ClassDecl') L.classDecl(s);
+    const entry = `omni_chunk_${this.no}`;
+    L.fn = L.newFrame(program.body, { isMain: true });
+    const stmts = [];
+    for (const s of program.body) {
+      if (s.type === 'FuncDecl') continue;
+      stmts.push(...L.stmt(s));
+    }
+    const main = {
+      name: entry, mangled: entry, ret: { k: 'void' }, params: [],
+      body: block([...L.fn.prelude, ...stmts]),
+    };
+    L.fn = null;
+    L.funcs.push(main);
+    // 全局槽每批都整份带上：运行期会话对见过的名字不重开格子（值留着），
+    // 而新名字必须有人声明 —— 只带增量就得再算一次差集，没意义。
+    return {
+      structs: [],
+      // JS 的类降成"造实例"的函数（决策 13），所以 OIR 的 classes 一直是空的 ——
+      // 新增的类就在 funcs 的增量里
+      classes: [],
+      containers: [listType(STRING), listType(D), dictType(STRING, D)],
+      closures: L.closures.slice(baseClosures),
+      fnTypes: [JS_FN],
+      jsGlobals: [...L.globals.values()],
+      funcs: L.funcs.slice(baseFuncs),
+      entry,
+      js: true,
+      cabi: L.cused,
+    };
+  }
+}
+

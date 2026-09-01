@@ -19,7 +19,7 @@
 
 import { OmniError } from '../source/diag.js';
 import { stderr, wrapFn, callFnValue } from '../host/native.js';
-import { callBuiltin, zeroOf, newInstance, flushOut, failRt, jsCallFn, vecHsum, bufNew, bufGet, bufSet, arrNew, arrLen, arrGet, arrSet, arrPush, arrPop, ptrNew, ptrChk, ptrTChk, ptrLoad, ptrStore, ptrAdd, ptrSub, InterpFail, InterpUncaught, U } from './builtin.js';
+import { callBuiltin, zeroOf, newInstance, flushOut, failRt, jsCallFn, vecHsum, bufNew, bufGet, bufSet, arrNew, arrLen, arrGet, arrSet, arrPush, arrPop, ptrNew, ptrChk, ptrTChk, ptrLoad, ptrStore, ptrAdd, ptrSub, InterpFail, InterpUncaught, U, jsPendingText } from './builtin.js';
 
 // 语句的结果：正常走完 / break / continue / return。刻意不用异常做控制流 —— C 侧的
 // throw 是"待决错误标志 + 普通跳转"（ADR-0007），用信号值两个宿主上形状一致。
@@ -477,6 +477,14 @@ export function interpret(mod) {
     throw e;
   }
   flushOut();
+  // 入口返回之后再查一次待决槽（ADR-0007 决定 1）。两个后端是在 main 之后发一句
+  // js_check_uncaught 做这件事，而解释器看到的是 OIR，那一句不在里面 ——
+  // 不查的话顶层没人接的 throw 会静默退 0（原先就是）。
+  const un = jsPendingText();
+  if (un !== null) {
+    stderr(`omni: uncaught: ${un}\n`);
+    return 70;
+  }
   return 0;
 }
 
@@ -534,6 +542,10 @@ export class InterpSession {
       throw e;
     }
     flushOut();
+    // 这一批里没人接的 throw。整程序那条路靠后端在入口之后发的 js_check_uncaught，
+    // 而 chunk 里没有那一句 —— 不查的话一批的 throw 会被悄悄吃掉（原先就是）。
+    const un = jsPendingText();
+    if (un !== null) return { failed: true, err: `omni: uncaught: ${un}\n` };
     return { failed: false, err: '' };
   }
 }
