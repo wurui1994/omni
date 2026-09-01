@@ -26,8 +26,9 @@
 //        循环体之后再放一遍**（`Cpp.captureTokens`）。这是 MIR 换来的代价，明写在这儿；
 //        自带后端那条路上它会退回成一条跳转；
 //      - `switch` 是「层层嵌套的 block，一个标签关掉一层」（`switchStmt`）；
-//      - `goto` 是「一圈 LOOP + 一个状态槽 + 开头分派」（`openLabels`）—— 结构化控制流
-//        里**往回跳只有这一种写法**。代价是往前跳与往回跳一样贵。
+//      - `goto` 是「函数那一层一圈 LOOP + 一个状态槽 + 一条分派链」（`gotoStmt` 头上
+//        那一段）—— 结构化控制流里**往回跳只有这一种写法**，而「跳进去」靠每层语句
+//        各出一小段（跳过头、进对的那一半）。代价是往前跳与往回跳一样贵。
 //
 // 3. **不折常量。** tcc 的 `gen_opic` 在解析时就把 `1+2*3` 算成 7。这里不折：MIR 的
 //    消费者本来就会折，而折叠是**语义可见**的（`1/0` 折了成编译期错误、不折是运行期
@@ -110,7 +111,8 @@
 // 聚合初始化器（含指定初始化器（**串起来的也行**）、不定长数组（**元素是聚合、里层花括号
 // 省掉了也数得对**）、省掉里层花括号的嵌套写法）、`switch`
 // （含贯穿、`BRTABLE`/比较链两条路）、
-// `goto` 与语句标签（外围块上的，前向后向都行）、struct 的**传值与返回**（传地址 +
+// `goto` 与语句标签（**跳到哪儿都行**：跳进兄弟块、跳进循环体、标签长在 `if` 里；
+// 函数那一层一台状态机 + 一条分派链）、struct 的**传值与返回**（传地址 +
 // 隐藏的返回指针）、带括号的声明符（`int (*a)[3]`、`int (*f(int))[3]`）、**函数指针**
 // （调用、回调、函数指针表、当静态初始化式）、**浮点**（`float`/`double`、与整型互转、
 // 静态初始化式、printf 的 `%f/%e/%g`）、**堆**（`malloc`/`calloc`/`realloc`/`free`/
@@ -120,10 +122,10 @@
 // （`typedef int cb(int);`，之后能当声明符的基本类型用）、**`long double`**（在这个目标上
 // 就是 double，见 `tcc.h:237-241`）、**常量表达式里的浮点**（整型与浮点合成一份求值器：
 // `int n = 1.9;` 是 1、`(int)2.9` 也认）、printf 的 `%a`、**变参里的 struct**（写侧摊进
-// 变参区、`va_arg` 回一个左值）**。
-// 还没到：`goto` 跳到不在外围块上的标签（relooper 那一路）、标签长在里层控制结构里
-// （Duff's device）、**外部**函数上的 struct 传值/返回（要真的 ABI）、
-// 串起来的指定初始化器（`.a.b = 3`）、不定长数组配省掉里层花括号（`int a[][2] = {1,2,3,4}`）。
+// 变参区、`va_arg` 回一个左值）、**`goto` 跳到哪儿都行**（一台函数级状态机 +
+// 一条分派链换掉「每个块一台」）**。
+// 还没到：语句标签长在 `switch` 里（case 那台分派与标签这台要交错）、
+// **外部**函数上的 struct 传值/返回（要真的 ABI）。
 //
 // 碰到还没做到的东西**当场报错**，报错文本里带「第六刀」字样 —— 一眼能看出是进度不是
 // bug，而且下一片把它做掉时 `gen-bad/` 里那条用例会跟着红，于是「边界移动了」这件事
@@ -585,19 +587,22 @@ export class CGen {  /**
     /** @type {{left:number}[]} 正在解析的 switch（嵌套时是一叠），见 `switchStmt` */
     this.swStack = [];
 
-    /* ---- 语句标签与 goto（第六刀第十片）。见 `openLabels` 头上那一段。
-     * 复合语句在两遍里的**序号**是同一个，于是第一遍收下来的「这个块里有哪些标签」
-     * 第二遍能按序号取回 —— `goto` 的前向引用就有了答案，而不必再收一遍记号。 */
-    /** 当前函数里第几个复合语句（两遍各自从 0 数起） */
-    this.blockNo = 0;
-    /** @type {string[][]} 块序号 -> 那个块**自己那一层**上的标签名（源码顺序） */
-    this.blockLabels = [];
-    /** @type {string[][]} 第一遍：正在收标签的那些数组，栈顶是最内层的块 */
-    this.labelSink = [];
-    /** @type {Set<string>} 第一遍：这个函数里出现过的所有标签名 */
-    this.funcLabels = new Set();
-    /** @type {{names:string[],slot:number,loopIdx:number,seen:number}[]} 第二遍：外围的带标签块 */
-    this.gotoStack = [];
+    /* ---- 语句标签与 goto（第六刀第十片 + 第二十四片）。见 `gotoStmt` 头上那一段。
+     * 语句在两遍里的**序号**是同一个（两遍走同一串记号），于是第一遍量出来的
+     * 「这条语句里面有哪些标签」第二遍能按序号取回 —— `goto` 的前向引用就有了答案，
+     * 而不必再收一遍记号。 */
+    /** 当前函数里第几条语句（两遍各自从 0 数起） */
+    this.stmtNo = 0;
+    /** @type {{lo:number,hi:number,kids:object[],thenHi:number}[]} 语句序号 -> 它的标签区间 */
+    this.stmtRanges = [];
+    /** @type {object[]} 第一遍：当前语句的**带标签的直接子语句**（`block` 的包装在收） */
+    this.kids = [];
+    /** @type {Map<string,number>} 标签名 -> 编号（1 起，按定义的源码顺序） */
+    this.labelIds = new Map();
+    /** 这个函数里的标签个数（= 最大编号） */
+    this.labelCount = 0;
+    /** 第二遍：状态槽的槽号；-1 = 这个函数里没有标签，整台状态机都不摆 */
+    this.gotoSlot = -1;
   }
 
   /* ------------------------------------------------------------ 记号与报错 */
@@ -2400,10 +2405,44 @@ export class CGen {  /**
   /* -------------------------------------------------------------- 语句 */
 
   /**
+   * 一条语句。
+   *
+   * 这一层只做一件事：给语句**编号**，并在第一遍量出「这条语句里面有哪些标签」。
+   * 两遍走的是同一串记号，所以同一条语句在两遍里是同一个号码；第二遍据此就知道
+   * 「这条语句里有没有标签」「哪些直接子语句里有标签」—— 那是 `goto` 那台状态机
+   * 唯一需要的前向信息（见 `gotoStmt` 头上那一段）。
+   *
+   * 标签编号按**定义的源码顺序**从 1 起，于是一条语句里的标签编号一定是一段
+   * **连续区间** `(lo, hi]` —— 「状态落在谁里面」这个判断就只是一次比较。
+   */
+  block() {
+    const sn = this.stmtNo++;
+    if (this.pass1) {
+      const r = { lo: this.labelCount, hi: this.labelCount, kids: [], thenHi: 0 };
+      this.stmtRanges[sn] = r;
+      const outer = this.kids;
+      this.kids = r.kids;
+      this.stmt(r);
+      this.kids = outer;
+      r.hi = this.labelCount;
+      if (r.hi > r.lo) outer.push(r);
+      return;
+    }
+    const r = this.stmtRanges[sn];
+    if (r === undefined) this.err('internal: 两遍的语句序号不一致');
+    this.stmt(r);
+  }
+
+  /** 第二遍：这条语句要不要「被状态机重新进入」的那一套（有标签在里面才要）。 */
+  reentry(r) {
+    return !this.pass1 && this.gotoSlot >= 0 && r.hi > r.lo;
+  }
+
+  /**
    * `block`（`tccgen.c:7177`）。分派的顺序照 tcc：`if` / `while` / `{` / `return` /
    * `break` / `continue` / `for` / `do`，最后落到表达式语句。
    */
-  block() {
+  stmt(r) {
     const t = this.tok;
     /* 带值的记号不能先 next()：`next()` 会毁掉 tokc（`tccgen.c:7185-7188`）。 */
     if (tokHasValue(t)) {
@@ -2414,12 +2453,36 @@ export class CGen {  /**
     if (t === TOK_IF) {
       this.next();
       this.skip(LPAR);
-      const c = this.gtst(this.gexpr());
+      /* 里面有标签的 `if`：被状态机重新进入时**不能算条件**（那会重跑副作用），
+       * 得直接进对的那一半。于是条件变成「state == 0 ? cond : state <= thenHi」——
+       * 结构化控制流里没有 select，所以借一个 bool 槽把两条路合起来。
+       * `thenHi` 是 then 那一半里最大的标签号，第一遍量的（见下面 pass1 那一行）。 */
+      let c;
+      if (this.reentry(r)) {
+        const f = this.f;
+        const sel = this.temp(T_BOOL, 'ifsel');
+        const st = f.emit(OP.LOAD, T_I32, REF_NONE, REF_NONE, this.gotoSlot);
+        const nz = f.emit(OP.NE, T_I32, st, this.mod.consts.i32(0), 0);
+        const inThen = f.emit(OP.LE, T_I32, st, this.mod.consts.i32(r.thenHi), 0);
+        this.open(OP.BLOCK, 'seldone', REF_NONE);
+        this.open(OP.BLOCK, 'selre', REF_NONE);
+        f.emit(OP.BRIF, T_VOID, nz, REF_NONE, 0);
+        f.emit(OP.STORE, T_VOID, this.gtst(this.gexpr()), REF_NONE, sel);
+        f.emit(OP.BR, T_VOID, REF_NONE, REF_NONE, 1);
+        this.close();                     // selre
+        f.emit(OP.STORE, T_VOID, inThen, REF_NONE, sel);
+        this.close();                     // seldone
+        c = f.emit(OP.LOAD, T_BOOL, REF_NONE, REF_NONE, sel);
+      } else {
+        c = this.gtst(this.gexpr());
+      }
       this.skip(RPAR);
       this.open(OP.IF, 'if', c);
       this.scopes.push(new Map());
       this.block();
       this.scopes.pop();
+      /* then 那一半读完了 —— 这儿正是 `thenHi` 的定义：编号到此为止的都在 then 里。 */
+      if (this.pass1) r.thenHi = this.labelCount;
       if (this.tok === TOK_ELSE) {
         this.next();
         this.elseHalf();
@@ -2436,11 +2499,15 @@ export class CGen {  /**
       this.next();
       this.open(OP.BLOCK, 'break', REF_NONE);
       this.open(OP.LOOP, 'continue', REF_NONE);
+      /* 里面有标签：被重新进入时要**跳过测条件**，直接落进循环体。测条件在 LOOP 里面，
+       * 所以这个跳过每一圈都重新判断 —— 到了标签那儿状态清零，下一圈就照常测。 */
+      const skip = this.headSkip(r);
       this.skip(LPAR);
       const c = this.gtst(this.gexpr());
       this.skip(RPAR);
       const nc = this.f.emit(OP.NOT, T_BOOL, c, REF_NONE, 0);
       this.f.emit(OP.BRIF, T_VOID, nc, REF_NONE, this.levelOf('break'));
+      if (skip) this.close();
       this.scopes.push(new Map());
       this.block();
       this.scopes.pop();
@@ -2452,30 +2519,23 @@ export class CGen {  /**
 
     if (t === LBRACE) {
       this.next();
-      /* 复合语句在两遍里的**序号**（`blockNo`）是同一个 —— 两遍走的是同一串记号。
-       * 于是第一遍收下来的「这个块里有哪些标签」在第二遍能按序号取回，`goto` 的
-       * 前向引用就有了答案，而不必再收一遍记号。 */
-      const bn = this.blockNo++;
-      let names;
-      if (this.pass1) {
-        names = [];
-        this.blockLabels[bn] = names;
-        this.labelSink.push(names);
-      } else {
-        names = this.blockLabels[bn] === undefined ? [] : this.blockLabels[bn];
-      }
-      const g = (!this.pass1 && names.length > 0) ? this.openLabels(names) : null;
+      /* 里面有标签的复合语句要一台**分派**：状态落在哪个直接子语句的区间里，就把控制
+       * 送到那条子语句的开头（`openSegs`/`segCut`）。它没有「头」要跳过，所以状态 0
+       * 与状态非 0 走的是同一台分派。 */
+      const d = this.reentry(r) ? this.openSegs(r) : null;
       this.scopes.push(new Map());
       /* tcc 的复合语句循环（`tccgen.c:7243-7248`）：先试声明，不是声明才当语句。
        * 「声明和语句可以交替出现」（C99）就是这个循环的形状带来的。 */
       while (this.tok !== RBRACE) {
         this.decl(false);
-        if (this.tok !== RBRACE) this.block();
+        if (this.tok !== RBRACE) {
+          if (d !== null) this.segCut(d);
+          this.block();
+        }
       }
       this.next();
       this.scopes.pop();
-      if (this.pass1) this.labelSink.pop();
-      if (g !== null) this.closeLabels(g);
+      if (d !== null) this.closeSegs(d);
       return;
     }
 
@@ -2540,7 +2600,7 @@ export class CGen {  /**
     }
 
     if (t === TOK_FOR) {
-      this.forStmt();
+      this.forStmt(r);
       return;
     }
 
@@ -2566,7 +2626,7 @@ export class CGen {  /**
       return;
     }
 
-    if (t === TOK_SWITCH) return this.switchStmt();
+    if (t === TOK_SWITCH) return this.switchStmt(r);
     if (t === TOK_CASE || t === TOK_DEFAULT) return this.caseLabel(t);
 
     if (t === TOK_GOTO) {
@@ -2610,110 +2670,129 @@ export class CGen {  /**
    * ## 为什么它是这一刀里最绕的一个
    *
    * `goto` 是**任意跳转**，而我们没有跳转（文件头偏离 2）。wasm 那套结构化控制流里能
-   * 表达它的只有一个形状：把带标签的那个块变成一台**状态机** —— 一个 `LOOP` 套着
-   * 层层嵌套的 `BLOCK`，循环开头按状态分派，`goto Li` = 「写状态、回到循环开头」。
+   * 表达它的只有一个形状：一台**状态机** —— 一个 `LOOP`、一个状态槽，
+   * `goto Li` = 「写状态、回到循环开头」，循环开头按状态把控制送回去。
    *
-   * ```
-   * BLOCK gotoend
-   *  LOOP gotoloop
-   *   BLOCK Lk ... BLOCK L1 BLOCK entry
-   *     BRTABLE state -> [entry, L1, ..., Lk]
-   *   END(entry)         ← 状态 0 落在这儿 = 第一个标签**之前**那一段
-   *   seg0
-   *   END(L1) seg1 ... END(Lk) segk
-   *   BR gotoend         ← 走完最后一段，出去
-   *  END(gotoloop)
-   * END(gotoend)
-   * ```
+   * 第十片只做到「标签直接长在某个复合语句的语句层上，而且 `goto` 在那个块里面」：
+   * 每个带标签的块自己一台状态机，一个标签关掉一层 `BLOCK`。两条边界卡在那儿 ——
+   * 跳到兄弟块里的标签（`goto inner` 进一个 for 的循环体），以及标签长在里层的
+   * `if`/`while` 里（Duff's device 那种）。这一片（第二十四片）把它们一起补掉。
    *
-   * 与 switch 是同一个「一个标签关掉一层 block」的骨架（`switchStmt` 头上那张图），
-   * 多出来的只有外面那圈 `LOOP` 与那个状态槽 —— switch 只往前跳，`goto` 要能往回跳，
-   * 而结构化控制流里**往回跳只有一种写法**：跳到一个 `LOOP` 的开头。
+   * ## 一台状态机 + 一条分派链
    *
-   * 于是 `goto` 的代价是诚实的：往前跳与往后跳一样贵（一次写状态、一次分派），而
-   * tinycc 里那些 `goto redo;` 恰好都是往回跳。
+   * 关键的换法有两处：
    *
-   * 前向引用怎么办：分派要在块的**第一条语句之前**发，那时还没见到后面的标签。
-   * 答案不是再收一遍记号，而是**白拿**函数体本来就有的那两遍（见 `finishFunc`）：
-   * 第一遍把每个块自己那一层的标签按序号记下来，第二遍按同一个序号取回来。
+   * 1. **状态机只有一台，在函数那一层**（`runBody`）。`goto` 不再挑「哪个外围块」，
+   *    永远是「写状态、`BR` 到函数那圈 `LOOP`」。往前跳、往后跳、跳进跳出，一个形状。
+   * 2. **每条「里面有标签」的语句都要能被重新进入**。函数那一层的分派只能把控制送到
+   *    函数体的直接子语句上，再往里就得靠下一层自己接。于是每种语句各出一小段：
+   *    - 复合语句：一台分派（`openSegs`/`segCut`），状态落在哪个子语句的区间里就送到
+   *      那条子语句的开头。这就是第十片那台状态机，只是**段的边界从「标签」变成
+   *      「里面有标签的子语句」**，而且它不再自带 `LOOP`。
+   *    - `while` / `for`：把「测条件」（和 `for` 的初始化）**跳过**（`headSkip`），
+   *      直接落进循环体 —— 重新进入时不能重跑那些副作用。
+   *    - `if`：条件变成「state == 0 ? cond : state <= thenHi」，于是能直接进对的那一半。
+   *    - `L: 语句`：到了就把状态清零（`labelStmt`），此后一切照常。
+   *    - `do-while`：循环体就在最前面，什么都不用跳过。
+   *    - `switch`：还没到 —— case 的那台分派与标签的这台要交错，见 `switchStmt`。
+   *
+   * 「状态落在谁里面」为什么只是一次比较：标签编号按**定义的源码顺序**从 1 起，
+   * 而一条语句占一段连续的源码，所以它里面的标签编号一定是连续区间 `(lo, hi]`
+   * （见 `block` 那个包装）。同一层的兄弟子语句的区间又是**递增且相接**的，
+   * 于是分派就是一串 `state <= hi_i`。
+   *
+   * 代价是诚实的：`goto` 一次要重走一遍分派链（深度那么多次比较），而
+   * tinycc 里那些 `goto redo;` 都很浅。前向引用照旧**白拿**函数体本来就有的那两遍
+   * （见 `finishFunc`）：第一遍量区间，第二遍按同一个语句序号取回来。
    */
 
   /**
-   * 一个带标签的块开场：状态清零、摆好 `LOOP` 与 k+1 层 `BLOCK`、发分派。
-   * 回一个记账对象（`closeLabels` 与 `labelStmt` 要它）。
+   * 里面有标签的复合语句开场：摆好 k+1 层 `BLOCK`、发分派、关掉 `entry`。
+   * `r.kids` 是第一遍量出来的「带标签的直接子语句」，k 就是它的长度。
    */
-  openLabels(names) {
+  openSegs(r) {
     const f = this.f;
-    const k = names.length;
-    const slot = this.temp(T_I32, 'state');
-    f.emit(OP.STORE, T_VOID, this.mod.consts.i32(0), REF_NONE, slot);
-    this.open(OP.BLOCK, 'gotoend', REF_NONE);
-    this.open(OP.LOOP, 'gotoloop', REF_NONE);
-    const loopIdx = this.regions.length - 1;
-    for (let i = 0; i <= k; i++) this.open(OP.BLOCK, 'label', REF_NONE);
-    /* 表里第 i 格 = 状态 i 该去哪一层。最里层（层数 0）是 `entry`，往外一层一个标签，
-     * 所以状态 i 的层数正好是 i。分派是无条件的，表已经覆盖了全部状态，
-     * 兜底那一格填 0（= entry）只是 BRTABLE 要一个值。 */
-    const table = [];
-    for (let i = 0; i <= k; i++) table.push(i);
-    const st = f.emit(OP.LOAD, T_I32, REF_NONE, REF_NONE, slot);
-    f.emit(OP.BRTABLE, T_VOID, st, f.pushLevels(table), 0);
-    this.close();                       // entry：立刻关掉，后面就是第一个标签之前那一段
-    const g = { names, slot, loopIdx, seen: 0 };
-    this.gotoStack.push(g);
-    return g;
+    const kids = r.kids;
+    const k = kids.length;
+    if (k === 0) this.err('internal: 有标签的块却没有带标签的子语句');
+    /* 比较全在**开 BLOCK 之前**发：MIR 是 SSA，区域外面发的 ref 在里面照样可用，
+     * 反过来（在一个已经关掉的区域里发）就要读者自己去论证支配关系了。 */
+    const st = f.emit(OP.LOAD, T_I32, REF_NONE, REF_NONE, this.gotoSlot);
+    const z = f.emit(OP.EQ, T_I32, st, this.mod.consts.i32(0), 0);
+    const les = [];
+    for (let i = 0; i < k - 1; i++) {
+      les.push(f.emit(OP.LE, T_I32, st, this.mod.consts.i32(kids[i].hi), 0));
+    }
+    for (let i = 0; i <= k; i++) this.open(OP.BLOCK, 'seg', REF_NONE);
+    /* 最里层（层数 0）是 `entry` = 第一条带标签子语句**之前**那一段；往外一层一段。 */
+    f.emit(OP.BRIF, T_VOID, z, REF_NONE, 0);
+    for (let i = 0; i < k - 1; i++) {
+      f.emit(OP.BRIF, T_VOID, les[i], REF_NONE, i + 1);
+    }
+    f.emit(OP.BR, T_VOID, REF_NONE, REF_NONE, k);
+    this.close();                     // entry：立刻关掉
+    return { kids, next: 0 };
   }
 
-  /** 带标签的块收场：最后一段走完要**出去**，而不是掉回循环开头。 */
-  closeLabels(g) {
-    if (g.seen !== g.names.length) this.err('internal: 标签数与第一遍收的不符');
-    this.gotoStack.pop();
-    this.f.emit(OP.BR, T_VOID, REF_NONE, REF_NONE, this.levelOf('gotoend'));
-    this.close();      // gotoloop
-    this.close();      // gotoend
-  }
-
-  /** `name :` —— 第一遍只记名字，第二遍是「关掉一层 block」。 */
-  labelStmt(name) {
-    if (this.pass1) {
-      const sink = this.labelSink[this.labelSink.length - 1];
-      if (sink === undefined) return;          // 到不了：函数体本身就是一个块
-      if (this.funcLabels.has(name)) this.err(`duplicate label '${name}'`);
-      this.funcLabels.add(name);
-      sink.push(name);
-      return;
-    }
-    const g = this.gotoStack[this.gotoStack.length - 1];
-    /* 标签必须直接长在它所在复合语句的语句层上。长在里层的 `if`/`while` 里（Duff's
-     * device 那种）会让「关掉一层」关错对象 —— 与 `caseLabel` 同一个判断、同一个理由。 */
-    if (g === undefined || this.regions[this.regions.length - 1] !== 'label'
-      || g.names[g.seen] !== name) {
-      this.todo('标签长在里层的控制结构里还没到（Duff\'s device）');
-      return;
-    }
-    g.seen++;
+  /** 下一条语句里有标签 -> 它是一段的开头 -> 关掉一层。 */
+  segCut(d) {
+    const nr = this.stmtRanges[this.stmtNo];
+    if (nr === undefined || nr.hi <= nr.lo) return;
+    if (d.next >= d.kids.length) this.err('internal: 段数与第一遍量的不符');
+    d.next++;
     this.close();
   }
 
-  /** `goto name;` —— 写状态、回到那个块的 `LOOP` 开头，让分派把控制送过去。 */
+  /** 收场：k+1 层里 `entry` 与 k 个段各关过一次，所以这儿只对账。 */
+  closeSegs(d) {
+    if (d.next !== d.kids.length) this.err('internal: 段数与第一遍量的不符');
+  }
+
+  /**
+   * 「被状态机重新进入时跳过这一段」：开一层 `BLOCK`，状态非 0 就直接跳到它的末尾。
+   * 回 true 表示开了一层，调用方读完那一段要 `close()`。
+   */
+  headSkip(r) {
+    if (!this.reentry(r)) return false;
+    const f = this.f;
+    const st = f.emit(OP.LOAD, T_I32, REF_NONE, REF_NONE, this.gotoSlot);
+    const nz = f.emit(OP.NE, T_I32, st, this.mod.consts.i32(0), 0);
+    this.open(OP.BLOCK, 'skiphead', REF_NONE);
+    f.emit(OP.BRIF, T_VOID, nz, REF_NONE, 0);
+    return true;
+  }
+
+  /** `name :` —— 第一遍给它编号，第二遍是「到了就把状态清零」。 */
+  labelStmt(name) {
+    if (this.pass1) {
+      if (this.labelIds.has(name)) this.err(`duplicate label '${name}'`);
+      this.labelIds.set(name, ++this.labelCount);
+      return;
+    }
+    if (this.gotoSlot < 0) this.err('internal: 有标签却没摆状态机');
+    const f = this.f;
+    const id = this.labelIds.get(name);
+    /* 状态正好是这个标签 = 「分派把控制送到这儿了」，清零，此后一切照常。
+     * 状态是别的（更里层的标签）就原样留着，交给里面那一层的分派。
+     * 顺着掉进来（状态本来就是 0）走的是同一条路，什么都不做。 */
+    const st = f.emit(OP.LOAD, T_I32, REF_NONE, REF_NONE, this.gotoSlot);
+    const ne = f.emit(OP.NE, T_I32, st, this.mod.consts.i32(id), 0);
+    this.open(OP.BLOCK, 'arrive', REF_NONE);
+    f.emit(OP.BRIF, T_VOID, ne, REF_NONE, 0);
+    f.emit(OP.STORE, T_VOID, this.mod.consts.i32(0), REF_NONE, this.gotoSlot);
+    this.close();
+  }
+
+  /** `goto name;` —— 写状态、回到函数那圈 `LOOP` 的开头，让分派链把控制送过去。 */
   gotoStmt(name) {
     if (this.pass1) return;
-    for (let i = this.gotoStack.length - 1; i >= 0; i--) {
-      const g = this.gotoStack[i];
-      const j = g.names.indexOf(name);
-      if (j < 0) continue;
-      this.f.emit(OP.STORE, T_VOID, this.mod.consts.i32(j + 1), REF_NONE, g.slot);
-      this.f.emit(OP.BR, T_VOID, REF_NONE, REF_NONE,
-        this.regions.length - 1 - g.loopIdx);
+    const id = this.labelIds.get(name);
+    if (id === undefined) {
+      this.err(`label '${name}' used but not defined`);
       return;
     }
-    /* 标签在这个函数里有、但不在外围的块上（兄弟块里，或者更里层）。C 允许
-     * （标签的作用域是整个函数），可这个形状表达不了 —— 当场说清楚是哪一种。 */
-    if (this.funcLabels.has(name)) {
-      this.todo(`goto 跳到不在外围块上的标签（'${name}'）还没到`);
-      return;
-    }
-    this.err(`label '${name}' used but not defined`);
+    this.f.emit(OP.STORE, T_VOID, this.mod.consts.i32(id), REF_NONE, this.gotoSlot);
+    this.f.emit(OP.BR, T_VOID, REF_NONE, REF_NONE, this.levelOf('gotoloop'));
   }
 
   /**
@@ -2747,7 +2826,11 @@ export class CGen {  /**
    * 办法还是第三片那一套：函数体的记号整块收下来，先扫一遍收标签，再放一遍真的做。
    * 扫那一遍**只走记号**（`scanCases`），所以不声明局部量、不占帧、不发指令。
    */
-  switchStmt() {
+  switchStmt(r) {
+    /* 语句标签长在 switch 里面：case 那台分派与标签那台分派要**交错**（同一串
+     * 嵌套 BLOCK 上既有 case 的段界又有标签的段界），而且重新进入时还得跳过选择子的
+     * 求值。第二十四片的那条分派链在别处都够用，只有这儿不够 —— 当场说清楚。 */
+    if (r.hi > r.lo) this.todo('语句标签长在 switch 里还没到');
     this.next();
     this.skip(LPAR);
     /* 控制表达式先做整型提升（C11 6.8.4.2 第 5 段），case 的值随后按这个类型收口。
@@ -2946,13 +3029,17 @@ export class CGen {  /**
    *   BLOCK'break'{ init; LOOP'loop'{ BRIF !cond ^break; BLOCK'continue'{ body }; step; BR ^loop } }
    * 步进式**先收记号、循环体之后再放**（见文件头偏离 2 与 `Cpp.captureTokens`）。
    */
-  forStmt() {
+  forStmt(r) {
     const f = this.f;
     this.next();
     this.skip(LPAR);
     this.scopes.push(new Map());
     this.open(OP.BLOCK, 'break', REF_NONE);
 
+    /* 里面有标签：被重新进入时初始化式与测条件都要**跳过**。初始化式那一跳在循环
+     * 外面（只可能发生一次），测条件那一跳在 LOOP 里面（每一圈都重新判断，
+     * 到了标签那儿状态清零，下一圈就照常测）。 */
+    const skipInit = this.headSkip(r);
     // 初始化：可以是声明（C99），也可以是表达式
     if (this.tok !== SEMI) {
       if (!this.decl(false)) this.exprStmt();
@@ -2960,13 +3047,16 @@ export class CGen {  /**
     } else {
       this.next();
     }
+    if (skipInit) this.close();
 
     this.open(OP.LOOP, 'loop', REF_NONE);
+    const skipCond = this.headSkip(r);
     if (this.tok !== SEMI) {
       const c = this.gtst(this.gexpr());
       const nc = f.emit(OP.NOT, T_BOOL, c, REF_NONE, 0);
       f.emit(OP.BRIF, T_VOID, nc, REF_NONE, this.levelOf('break'));
     }
+    if (skipCond) this.close();
     this.skip(SEMI);
 
     const stepStr = this.tok === RPAR ? null : this.cpp.captureTokens(RPAR);
@@ -3846,8 +3936,9 @@ export class CGen {  /**
     this.frameNames = new Set();
     this.frameSize = 0;
     this.frameOff = 0;
-    this.blockLabels = [];
-    this.funcLabels = new Set();
+    this.stmtRanges = [];
+    this.labelIds = new Map();
+    this.labelCount = 0;
     this.fpRef = this.mod.consts.int(0n);
     this.runBody(body, new MirFunc(`$scan$${name}`, [], mirTypeOf(ret)), ret, name, params,
       info.variadic);
@@ -3885,10 +3976,9 @@ export class CGen {  /**
     this.scopes = [new Map()];
     this.regions = [];
     this.swStack = [];
-    /* 两遍各自从 0 数起，于是同一个复合语句在两遍里是同一个序号（`openLabels` 头）。 */
-    this.blockNo = 0;
-    this.labelSink = [];
-    this.gotoStack = [];
+    /* 两遍各自从 0 数起，于是同一条语句在两遍里是同一个序号（`block` 那个包装）。 */
+    this.stmtNo = 0;
+    this.kids = [];
 
     if (!this.pass1) {
       this.spSave = REF_NONE;
@@ -3962,10 +4052,26 @@ export class CGen {  /**
       this.vaRef = f.emit(OP.LOAD, T_I64, REF_NONE, REF_NONE, slot);
     }
 
+    /* 这个函数里有标签 -> 摆那台**唯一**的状态机（第二十四片，见 `gotoStmt` 头上那段）：
+     * 一个状态槽、一圈 `LOOP`。`goto` = 「写状态、`BR` 回这圈 LOOP 的开头」，
+     * 剩下的由函数体那条分派链把控制送到位。走完函数体要**出去**而不是掉回循环开头。 */
+    this.gotoSlot = -1;
+    if (!this.pass1 && this.labelCount > 0) {
+      this.gotoSlot = this.temp(T_I32, 'state');
+      f.emit(OP.STORE, T_VOID, this.mod.consts.i32(0), REF_NONE, this.gotoSlot);
+      this.open(OP.BLOCK, 'gotoend', REF_NONE);
+      this.open(OP.LOOP, 'gotoloop', REF_NONE);
+    }
+
     this.cpp.pushTokens(body);
     this.next();
     this.block();  // 当前记号是 `{`
 
+    if (this.gotoSlot >= 0) {
+      f.emit(OP.BR, T_VOID, REF_NONE, REF_NONE, this.levelOf('gotoend'));
+      this.close();      // gotoloop
+      this.close();      // gotoend
+    }
     if (this.tok !== TOK_EOF) this.err('internal: 函数体没读完');
     this.cpp.endMacro();
 
