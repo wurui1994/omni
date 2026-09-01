@@ -69,10 +69,11 @@
 // C 的全部优先级、`if/else`、`while`、`do`、`for`、`break`、`continue`、`return`、
 // 指针（`&`/`*`/算术/比较）、数组（含多维）、下标、影子栈、字符串字面量、常量表达式、
 // 全局量（data 段，常量初始化式）、`typedef`、`extern` 与「用过但没定义」的诊断、
-// **外部符号（`unit()` 末尾的转发桩）与变参调用（printf/sprintf 那一族已经跑通）**。
-// 还没到：struct/union/enum、聚合初始化器、带括号的声明符（`int (*a)[3]`、函数指针）、
-// 浮点（含 printf 的 `%f/%e/%g`）、`switch`/`goto`、`malloc` 那一族（要堆）、
-// 变参函数的**定义**（要 `va_list`/`va_arg`）。
+// 外部符号（`unit()` 末尾的转发桩）与变参调用（printf/sprintf 那一族已经跑通）、
+// **struct/union/enum、`.` 与 `->`、整块的 struct 赋值、不完整类型的指针**。
+// 还没到：位域、struct 的**传值/返回**（要 ABI）、聚合初始化器、带括号的声明符
+// （`int (*a)[3]`、函数指针）、浮点（含 printf 的 `%f/%e/%g`）、`switch`/`goto`、
+// `malloc` 那一族（要堆）、变参函数的**定义**（要 `va_list`/`va_arg`）。
 //
 // 碰到还没做到的东西**当场报错**，报错文本里带「第六刀」字样 —— 一眼能看出是进度不是
 // bug，而且下一片把它做掉时 `gen-bad/` 里那条用例会跟着红，于是「边界移动了」这件事
@@ -98,11 +99,11 @@ import {
   isAssignOp, assignOpOf,
 } from './tcctok.js';
 import {
-  VT_VOID, VT_BYTE, VT_SHORT, VT_INT, VT_LLONG, VT_BOOL, VT_PTR, VT_FUNC,
+  VT_VOID, VT_BYTE, VT_SHORT, VT_INT, VT_LLONG, VT_BOOL, VT_PTR, VT_FUNC, VT_STRUCT,
   VT_UNSIGNED, VT_DEFSIGN, VT_LONG, VT_FLOAT, VT_DOUBLE,
   VT_EXTERN, VT_STATIC, VT_TYPEDEF, VT_INLINE, VT_CONSTANT, VT_VOLATILE, VT_STORAGE,
-  btype, isInteger, isFloat, isUnsigned, isPtr, isArray, isFunc,
-  ctype, mkPointer, mkArray, typeSize, typeText, sameType,
+  btype, isInteger, isFloat, isUnsigned, isPtr, isArray, isFunc, isStruct, isUnion,
+  ctype, mkPointer, mkArray, mkStruct, mkEnum, typeSize, typeText, sameType,
   TY_VOID, TY_INT, TY_UINT, TY_LLONG, TY_ULLONG, TY_CHAR, TY_SHORT, TY_BOOL,
 } from './ctype.js';
 import {
@@ -122,6 +123,12 @@ const SK_I8 = 0;
 const SK_I16 = 1;
 const SK_I32 = 2;
 const SK_I64 = 3;
+
+/* 逐字节拷贝（struct 赋值）用的宽度表。读一律用**无符号/满宽**的那格：搬字节的时候
+ * 符号扩展是有害的 —— 8 位那格若用 `i8s`，0x80 会被扩成 0xffffff80，存回去时低 8 位
+ * 仍然对，但中间那条指令的值不再是「一个字节」。用 `i8u` 让每一步都只是搬运。 */
+const COPY_MK = { 1: MK_I8U, 2: MK_I16U, 4: MK_I32S, 8: MK_I64 };
+const COPY_SK = { 1: SK_I8, 2: SK_I16, 4: SK_I32, 8: SK_I64 };
 
 /**
  * 从内存里读一个这种类型的值，用哪个宽度符号。
@@ -396,6 +403,13 @@ export class CGen {  /**
     this.typedefs = new Map();
     /** @type {Map<string,{ty:object,addr:number,defined:boolean,used:boolean}>} 全局量 */
     this.gvars = new Map();
+    /* C 有**四个独立的名字空间**（C11 6.2.3）：普通标识符、struct/union/enum 的 tag、
+     * 成员名、语句标签。所以 `struct S { int S; } S;` 三个 S 互不相干。tag 这一个
+     * 必须与 typedefs/gvars 分开存 —— 合到一起的话上面那行会互相覆盖。 */
+    /** @type {Map<string,object>} `struct S` / `union U` / `enum E` 的 tag */
+    this.tags = new Map();
+    /** @type {Map<string,{ty:object,val:bigint}>} 枚举常量（它们是**普通标识符**） */
+    this.enumConsts = new Map();
   }
 
   /* ------------------------------------------------------------ 记号与报错 */
@@ -460,11 +474,24 @@ export class CGen {  /**
 
   /**
    * 这个类型**必须**落在线性内存上吗。
-   * 数组（以后还有 struct/union）没有「装在一个寄存器里」的形态：`a[i]` 要能算地址。
+   * 数组与 struct/union 没有「装在一个寄存器里」的形态：`a[i]` 与 `s.f` 都要能算地址。
    * 标量则相反 —— 只有被 `&` 取过地址才不得不落到内存，那一问由第一遍回答。
    */
   needsMem(ty) {
-    return isArray(ty.t);
+    return isArray(ty.t) || isStruct(ty.t);
+  }
+
+  /**
+   * 「拿一个不完整类型当对象」要报错（C11 6.7 第 7 段）。`struct S *p;` 合法，
+   * `struct S s;` 不合法 —— 差别只在这一问，而问的时机是**声明的那一刻**：
+   * 一遍过时后面才出现的 `struct S {…}` 补不上这一格，tcc 也是当场报。
+   */
+  needComplete(name, ty) {
+    let t = ty;
+    while (isArray(t.t)) t = t.ref;
+    if (isStruct(t.t) && t.ref.fields === null) {
+      this.err(`'${name}' has incomplete type '${typeText(t)}'`);
+    }
   }
 
   /** 在当前帧里划一块，回帧内偏移。**不回收**（见 finishFunc 头上「平铺的帧」）。 */
@@ -482,6 +509,7 @@ export class CGen {  /**
    */
   declareLocal(name, ty) {
     if (btype(ty.t) === VT_VOID) this.err(`variable '${name}' has void type`);
+    this.needComplete(name, ty);
     const scope = this.scopes[this.scopes.length - 1];
     if (this.needsMem(ty) || this.frameNames.has(name)) {
       const e = { ty, slot: -1, off: this.frameAlloc(ty) };
@@ -574,6 +602,10 @@ export class CGen {  /**
      * `decay` 里，是因为 gv 是所有「我要一个值」的必经之路 —— 漏一处就会 MLOAD 一个
      * 数组，而那条 MLOAD 的宽度是元素的宽度，错得很像对。 */
     if (isArray(v.ty.t)) return this.addrOf(v);
+    /* struct 的**值**在这一片没有形态：MIR 的一条指令只产出一个标量。传参、返回、
+     * 比较都要 ABI 的那套（按大小决定寄存器还是隐藏指针），是下一片的事。
+     * 赋值不走这儿 —— `vstore` 在调 gv 之前就分岔去 `structCopy` 了。 */
+    if (isStruct(v.ty.t)) this.todo('struct 当值用还没到（传参、返回、比较）');
     if (v.mem !== null) {
       /* 内存左值：静态偏移进访问描述符，于是 `a[3]` 与 `p->f` 不多一条加法。 */
       return this.f.emit(OP.MLOAD, mirTypeOf(v.ty), v.mem.addr, REF_NONE,
@@ -707,6 +739,13 @@ export class CGen {  /**
 
     const from = v.ty;
     if (isFloat(from.t) || isFloat(ty.t)) this.todo('浮点还没到');
+    if (isStruct(from.t) || isStruct(ty.t)) {
+      /* 同类型的 struct 往 struct 走一定是「当值用」（传参、返回、`?:` 的两臂），
+       * 不是转换 —— 报「还没到」而不是「转不了」，否则报错文本会写成
+       * `cannot convert 'struct P' to 'struct P'`，看着像 bug 而不是进度。 */
+      if (sameType(from, ty)) this.todo('struct 当值用还没到（传参、返回、比较）');
+      this.err(`cannot convert '${typeText(from)}' to '${typeText(ty)}'`);
+    }
     if (!isInteger(from.t) && !isPtr(from.t)) {
       this.err(`cannot convert '${typeText(from)}' to '${typeText(ty)}'`);
     }
@@ -746,6 +785,7 @@ export class CGen {  /**
   vstore(target, v) {
     if (!isLval(target)) this.err('lvalue expected');
     if (isArray(target.ty.t)) this.err('assignment to expression with array type');
+    if (isStruct(target.ty.t)) return this.structCopy(target, v);
     const cv = this.castTo(v, target.ty);
     const r = this.gv(cv);
     if (target.mem !== null) {
@@ -757,6 +797,45 @@ export class CGen {  /**
       this.f.emit(OP.STORE, T_VOID, r, REF_NONE, target.slot);
     }
     return sVal(target.ty, r);
+  }
+
+  /**
+   * struct / union 的赋值（`vstore` 里 `VT_STRUCT` 那一支，`tccgen.c:3690`）。
+   *
+   * C 规定它是**整块字节的拷贝**（6.5.16.1），padding 里是什么不指定。tcc 在这里发一次
+   * `memcpy` 的等价物；这一片大小是**编译期常量**，所以直接摊成几条 8/4/2/1 字节的
+   * load + store：没有循环、没有对 libc 的依赖，也不必给 MIR 加一条块拷贝指令。
+   * 12 字节的 struct 是三条 store，一个 `memcpy` 调用换不来这个。
+   *
+   * 两侧都必须是内存左值 —— `needsMem` 保证了 struct 变量一定落在帧或 data 段上，
+   * 所以这条前提不是巧合。真走到 else 那支就是别处漏了 `needsMem`，报内部错。
+   *
+   * 不按 struct 自己的对齐去切：线性内存允许非对齐访问（wasm 与我们的解释器都允许），
+   * 所以全 `char` 的 struct 也照样八字节一步走。
+   */
+  structCopy(target, v) {
+    if (!sameType(target.ty, v.ty)) {
+      this.err(`cannot assign '${typeText(v.ty)}' to '${typeText(target.ty)}'`);
+    }
+    if (target.mem === null || v.mem === null) {
+      this.err('internal: struct 赋值的两侧都该是内存左值');
+      return target;
+    }
+    const size = typeSize(target.ty).size;
+    const f = this.f;
+    for (let done = 0; done < size;) {
+      const left = size - done;
+      const w = left >= 8 ? 8 : left >= 4 ? 4 : left >= 2 ? 2 : 1;
+      const mt = w === 8 ? T_I64 : T_I32;
+      const r = f.emit(OP.MLOAD, mt, v.mem.addr, REF_NONE,
+        memDesc(COPY_MK[w], v.mem.off + done));
+      f.emit(OP.MSTORE, mt, target.mem.addr, r,
+        memDesc(COPY_SK[w], target.mem.off + done));
+      done += w;
+    }
+    /* 赋值表达式的值是「赋完之后的左边」。struct 没有寄存器形态，所以回那个左值本身 ——
+     * 于是 `a = b = c` 与 `(a = b).f` 都对，而且不多一次拷贝。 */
+    return target;
   }
 
   /* ------------------------------------------------------------ 表达式 */
@@ -1041,6 +1120,12 @@ export class CGen {  /**
       const name = this.identName();
       const local = this.lookup(name);
       if (local !== null) return this.postfix(this.entryLval(name, local));
+      /* 枚举常量是**普通标识符**，所以查在这一格：局部量之后（局部量能遮蔽它），
+       * 全局量之前。它不是左值 —— `A = 1` 该报错，而 `sVal` 天然不是左值。 */
+      const ec = this.enumConsts.get(name);
+      if (ec !== undefined) {
+        return this.postfix(sVal(ec.ty, this.konst(ec.ty, ec.val)));
+      }
       const gv = this.gvars.get(name);
       if (gv !== undefined) return this.postfix(this.gvarLval(gv));
       /* 既不是局部量也不是全局量：那就只能是函数。tcc 在这里走 `external_global_sym`
@@ -1095,7 +1180,7 @@ export class CGen {  /**
     return sVal(TY_ULLONG, this.konst(TY_ULLONG, n));
   }
 
-  /** 后缀：`x++` / `x--`。（`->`、`.`、`[]` 是后面几片的事） */
+  /** 后缀：`x++` / `x--`、`a[i]`、`s.f`、`p->f`。（`(…)` 那种函数指针调用还没到） */
   postfix(v) {
     let cur = v;
     for (;;) {
@@ -1118,7 +1203,39 @@ export class CGen {  /**
         cur = sMem(p.ty.ref, this.gv(p), 0);
         continue;
       }
-      if (t === DOT || t === TOK_ARROW) this.todo('struct 还没到');
+      if (t === DOT || t === TOK_ARROW) {
+        /* `s.f` 与 `p->f` 是**同一段代码**：C11 6.5.2.3 第 4 段说 `p->f` 就是 `(*p).f`，
+         * 所以只在开头把箭头那一侧先解引用，剩下的一模一样。 */
+        this.next();
+        let base = cur;
+        if (t === TOK_ARROW) {
+          const p = this.decay(base);
+          if (!isPtr(p.ty.t)) {
+            this.err(`invalid type argument of '->' ('${typeText(base.ty)}')`);
+          }
+          base = sMem(p.ty.ref, this.gv(p), 0);
+        }
+        if (!isStruct(base.ty.t)) {
+          this.err(`request for member in something not a structure or union`
+            + ` ('${typeText(base.ty)}')`);
+        }
+        const info = base.ty.ref;
+        if (info.fields === null) {
+          this.err(`'${typeText(base.ty)}' is an incomplete type`);
+        }
+        const fname = this.identName();
+        const fld = info.fields.find((x) => x.name === fname);
+        if (fld === undefined) {
+          this.err(`'${typeText(base.ty)}' has no member named '${fname}'`);
+          return cur;
+        }
+        if (base.mem === null) this.err('internal: struct 左值不在内存上');
+        /* 成员偏移**加进静态偏移**，不发一条 ADD。于是 `a.b.c.d` 与 `p->f` 都是
+         * 一条 MLOAD —— 这正是把静态偏移放进访问描述符（sMem 的 off）换来的东西，
+         * 而 `&s.f` 那一侧由 `addrOf` 统一发那条加法。 */
+        cur = sMem(fld.ty, base.mem.addr, base.mem.off + fld.off);
+        continue;
+      }
       return cur;
     }
   }
@@ -1606,6 +1723,147 @@ export class CGen {  /**
   }
 
   /**
+   * tag 表里查/建一条（`struct_find` 与 `struct_add` 的合体，`tccgen.c:4269` 一带）。
+   *
+   * **一个 tag 只有一个 info 对象，全程不换**。这条纪律买到的是不完整类型：
+   * `struct S *p;` 先拿到一个 `fields: null` 的空壳，后来 `struct S {…}` 往**同一个
+   * 对象**里填成员，`p` 手上那份 CType 自动变完整。换成「定义时新建一个对象」就得
+   * 回头去修所有已经发出去的类型 —— 一遍过时那是做不到的。
+   */
+  tagOf(kind, name) {
+    if (name !== null) {
+      const hit = this.tags.get(name);
+      if (hit !== undefined) {
+        if (hit.kind !== kind) this.err(`'${name}' defined as wrong kind of tag`);
+        return hit;
+      }
+    }
+    const info = {
+      kind, name: name === null ? '<anonymous>' : name,
+      fields: null, size: 0, align: 1,
+    };
+    if (name !== null) this.tags.set(name, info);
+    return info;
+  }
+
+  /**
+   * `struct` / `union`（`struct_decl`，`tccgen.c:4269`）。进来时 `struct` 已经吃掉。
+   *
+   * 布局照 System V / arm64 AAPCS 的规则，也就是 tcc 在本机上的规则：成员按声明顺序
+   * 排，每个成员对齐到自己的对齐，整体的对齐是成员里最大的那个，整体大小向上对齐到它。
+   * 这几句是**数据**，`sizeof` 与 oracle 逐位对账靠它 —— 差一格 `sizeof(struct)` 就不同。
+   * union 是同一段代码的另一支：每个成员偏移 0，大小取最大。
+   */
+  structDecl(union) {
+    const kind = union ? 'union' : 'struct';
+    const name = this.tok >= TOK_UIDENT ? this.identName() : null;
+    const info = this.tagOf(kind, name);
+    if (this.tok !== LBRACE) {
+      /* 只是引用（`struct S x;` / `struct S *p;`）。不完整也照样给出去 —— 指针不需要
+       * 大小，而「拿不完整类型当变量」由 declareLocal / declareGlobal 抓。 */
+      if (name === null) this.err(`'${kind}' has no tag and no member list`);
+      return mkStruct(info, union);
+    }
+    if (info.fields !== null) this.err(`redefinition of '${kind} ${info.name}'`);
+    this.next();
+
+    const fields = [];
+    let size = 0;      // struct：当前偏移；union：目前最大的成员
+    let align = 1;
+    while (this.tok !== RBRACE) {
+      if (this.tok === TOK_EOF) this.err("'}' expected");
+      const spec = this.parseBtype();
+      if ((spec.t & VT_STORAGE) !== 0) {
+        this.err(`storage class specified for '${kind}' member`);
+      }
+      const base = stripStorage(spec);
+      if (this.tok === SEMI) this.todo('匿名的 struct/union 成员还没到（C11 6.7.2.1 第 13 段）');
+      for (;;) {
+        const d = this.declarator(base, 'need');
+        const fname = /** @type {string} */ (d.name);
+        if (this.tok === COLON) this.todo('位域还没到');
+        if (fields.some((x) => x.name === fname)) {
+          this.err(`duplicate member '${fname}'`);
+        }
+        if (isStruct(d.ty.t) && d.ty.ref.fields === null) {
+          this.err(`field '${fname}' has incomplete type '${typeText(d.ty)}'`);
+        }
+        if (isArray(d.ty.t) && d.ty.count < 0) {
+          this.todo('柔性数组成员还没到（`char buf[];`）');
+        }
+        const s = typeSize(d.ty);
+        if (s.align > align) align = s.align;
+        let off;
+        if (union) {
+          off = 0;
+          if (s.size > size) size = s.size;
+        } else {
+          size = alignUp(size, s.align);
+          off = size;
+          size += s.size;
+        }
+        fields.push({ name: fname, ty: d.ty, off });
+        if (this.tok !== COMMA) break;
+        this.next();
+      }
+      this.skip(SEMI);
+    }
+    this.next();       // `}`
+
+    info.fields = fields;
+    info.align = align;
+    info.size = alignUp(size, align);
+    return mkStruct(info, union);
+  }
+
+  /**
+   * `enum`（`struct_decl` 里 `TOK_ENUM` 那一支）。进来时 `enum` 已经吃掉。
+   *
+   * 枚举常量是**普通标识符**（与 tag 不在同一个名字空间），而且它们的作用域是
+   * 包着这个 enum 的作用域 —— 不是「enum 内部」。所以 `enum {A, B = A + 2}` 里
+   * 的 `A` 要立刻可见：一边登记一边求值，共用 `constExpr`。
+   *
+   * 底层类型就是 `int`（tcc 也是这么选的），`VT_ENUM` 那一位只用来印错误消息。
+   */
+  enumDecl() {
+    const name = this.tok >= TOK_UIDENT ? this.identName() : null;
+    const info = this.tagOf('enum', name);
+    const ty = mkEnum(info);
+    if (this.tok !== LBRACE) {
+      if (name === null) this.err("'enum' has no tag and no enumerator list");
+      if (info.fields === null) this.err(`'enum ${info.name}' is incomplete`);
+      return ty;
+    }
+    if (info.fields !== null) this.err(`redefinition of 'enum ${info.name}'`);
+    this.next();
+
+    const names = [];
+    let val = 0n;
+    while (this.tok !== RBRACE) {
+      if (this.tok === TOK_EOF) this.err("'}' expected");
+      const en = this.identName();
+      if (this.enumConsts.has(en)) this.err(`redefinition of enumerator '${en}'`);
+      if (this.tok === ASSIGN) {
+        this.next();
+        val = this.constExpr();
+      }
+      /* 收成 32 位有符号：枚举常量的类型是 `int`，而 `konst` 要的是规范形。
+       * 不收的话 `enum {BIG = 0x80000000}` 会带着一个 33 位的数走下去。 */
+      val = BigInt.asIntN(32, val);
+      this.enumConsts.set(en, { ty, val });
+      names.push(en);
+      val = val + 1n;
+      if (this.tok !== COMMA) break;
+      this.next();
+    }
+    this.skip(RBRACE);
+    info.fields = names;
+    info.size = 4;
+    info.align = 4;
+    return ty;
+  }
+
+  /**
    * `parse_btype`（`tccgen.c:4711` 一带）的整型这一片。
    *
    * 形状照 tcc：**一个循环，见到一个说明符就往 `t` 上按位或**。说明符可以乱序
@@ -1657,8 +1915,17 @@ export class CGen {  /**
       // `auto` / `register` 在这一片没有可观察的效果，吃掉
       if (t === TOK_AUTO || t === TOK_REGISTER) { any = true; this.next(); continue; }
       if (t === TOK_FLOAT || t === TOK_DOUBLE) this.todo('浮点还没到');
-      if (t === TOK_STRUCT || t === TOK_UNION) this.todo('struct / union 还没到');
-      if (t === TOK_ENUM) this.todo('enum 还没到');
+      if (t === TOK_STRUCT || t === TOK_UNION || t === TOK_ENUM) {
+        /* struct/union/enum 走 `tdef` 那一格：它们和 typedef 名一样是「一整个类型」，
+         * 不是一位说明符，所以不能与 `short`/`long`/`signed` 同时出现。 */
+        if (bt !== -1 || tdef !== null || sign !== 0 || longs > 0 || shorts > 0) {
+          this.err('two or more data types in declaration specifiers');
+        }
+        this.next();
+        tdef = t === TOK_ENUM ? this.enumDecl() : this.structDecl(t === TOK_UNION);
+        any = true;
+        continue;
+      }
       if (t >= TOK_UIDENT) {
         /* `typedef` 名当基本类型用（tcc 在符号表里找带 `VT_TYPEDEF` 的那条，
          * `tccgen.c:4880` 一带）。**只在还没有基本类型时**才吃它 —— 否则
@@ -1818,6 +2085,15 @@ export class CGen {  /**
       this.skip(RPAR);
       return BigInt(typeSize(ty).size);
     }
+    if (t >= TOK_UIDENT) {
+      /* 枚举常量。`enum {A, B = A + 2}` 里的 `A` 走这一格 —— 也就是说 enumDecl 一边
+       * 登记一边求值这件事在这里闭环。查不到就落到下面报「要一个常量表达式」。 */
+      const ec = this.enumConsts.get(this.cpp.tokStr(t, null));
+      if (ec !== undefined) {
+        this.next();
+        return ec.val;
+      }
+    }
     this.err('constant expression expected');
     return 0n;
   }
@@ -1935,6 +2211,9 @@ export class CGen {  /**
        * 一块 —— 那块地方永远也填不上，因为实参传进来的是一个地址。 */
       if (isArray(ty.t)) ty = mkPointer(ty.ref);
       if (btype(ty.t) === VT_VOID) this.err('parameter has void type');
+      /* struct 传值要 ABI 的那一套（arm64 上 ≤16 字节走两个寄存器，再大就是调用方
+       * 分配一块、传地址）。那是分步 9-11 的形状，不该在这一片先猜一个。 */
+      if (isStruct(ty.t)) this.todo('struct 传值还没到（要 ABI：寄存器还是隐藏指针）');
       // 形参名可以省（原型里），那就给它一个占位名
       const pn = d.name === null ? `$p${params.length}` : d.name;
       /* 形参**保留声明的类型**（`char c` 就是 char）。「实参提升」（`char` -> `int`）
@@ -1980,6 +2259,7 @@ export class CGen {  /**
     if (info.params !== null && info.params.length !== params.length) {
       this.err(`conflicting types for '${name}'`);
     }
+    if (isStruct(ret.t)) this.todo('返回 struct 还没到（要 ABI 的隐藏返回指针）');
     info.params = params;
     info.ret = ret;
     info.variadic = variadic === true;

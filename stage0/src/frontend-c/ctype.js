@@ -131,6 +131,24 @@ export function mkArray(elem, n) {
 }
 
 /**
+ * struct / union。`ref` 是那张成员表 `{name, fields, size, align, done}`，
+ * **一个 tag 只有一个这样的对象**（在 `tags` 里 intern）—— 于是：
+ *   - `sameType` 比一次引用相等就够（tcc 那边是同一个 `Sym` 指针，同一件事）；
+ *   - `struct S *p;` 出现在 `struct S {…}` 之前也能编：先建一个 `done: false` 的空壳，
+ *     成员表后来填进同一个对象，`p` 手上那份类型自动跟着变完整。这正是 C 允许
+ *     不完整类型的指针的实现方式，一遍过时它是必需的而不是优化。
+ */
+export function mkStruct(info, union) {
+  return ctype(union ? VT_UNION : VT_STRUCT, info);
+}
+
+/** `enum`：底层就是 `int`（tcc 也是），`VT_ENUM` 那一位只用来记住「它本来是个枚举」。 */
+export function mkEnum(info) {
+  const ty = ctype(VT_INT | VT_ENUM, info);
+  return ty;
+}
+
+/**
  * `type_size`（`tccgen.c:3494`）：字节数与对齐。**LP64**（arm64/x86_64 的 Darwin 与
  * Linux 都是它）：`long` 与指针都是 8 字节。这个选择要与 tcc 在本机上的选择一致，
  * 否则 `sizeof` 与 struct 布局会与 oracle 分岔。
@@ -162,6 +180,7 @@ export function typeText(ty) {
   if (isPtr(t)) return `${typeText(ty.ref)} *`;
   if (isFunc(t)) return `${typeText(ty.ref.ret)} ()`;
   if (isStruct(t)) return `${isUnion(t) ? 'union' : 'struct'} ${ty.ref.name}`;
+  if (isEnum(t)) return `enum ${ty.ref === null ? '<anonymous>' : ty.ref.name}`;
   const u = isUnsigned(t) ? 'unsigned ' : '';
   const b = btype(t);
   if (b === VT_VOID) return 'void';
