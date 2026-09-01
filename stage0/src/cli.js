@@ -1236,8 +1236,10 @@ function optFlag() {
  * 是**逐个运算**的语义，编译器不许替我们改写 —— 这跟数学库怎么绑没关系。
  */
 function ccFlags(cc) {
+  // -pthread：入口跑在一条大栈的线程上（omni_run_entry），编译与链接两边都要这一位。
+  // macOS 上 pthread 就在 libSystem 里、这个开关等于空操作；glibc 2.34 起也已并进 libc。
   return cc === 'tcc' ? ['-I', RUNTIME_DIR]
-    : [optFlag(), '-std=c99', '-ffp-contract=off', '-w', '-I', RUNTIME_DIR];
+    : [optFlag(), '-std=c99', '-ffp-contract=off', '-w', '-pthread', '-I', RUNTIME_DIR];
 }
 
 /**
@@ -1362,7 +1364,7 @@ function buildLlvm(mod, outPath, workDir) {
   writeText(llPath, ir);
   vStep(`backend llvm  ${ir.length} bytes -> ${llPath}`);
   const cc = findClang();
-  const args = [optFlag(), '-w', '-ffp-contract=off', '-I', RUNTIME_DIR, llPath,
+  const args = [optFlag(), '-w', '-ffp-contract=off', '-pthread', '-I', RUNTIME_DIR, llPath,
     ...runtimeObjects(cc), '-o', outPath, '-lm'];
   const r = spawn(cc, args, 'o');
   if (r[0] !== 0) {
@@ -1436,7 +1438,7 @@ function buildJitHost() {
   // ORC 就找不到 omni_print_int 这些。
   const stage = mkdTemp(join(tmpDir(), 'omni-jit-stage-'));
   const staged = join(stage, 'omni-jit');
-  const args = ['-O2', '-w', '-I', inc[1].trim(), '-I', RUNTIME_DIR, src, ...objs,
+  const args = ['-O2', '-w', '-pthread', '-I', inc[1].trim(), '-I', RUNTIME_DIR, src, ...objs,
     '-L', libdir[1].trim(), '-lLLVM', '-lm', '-Wl,-export_dynamic', '-o', staged];
   const r = spawn(cc, args, 'o');
   if (r[0] !== 0) throw new OmniError(`the jit host failed to build with ${cc}:\n${r[2]}`);

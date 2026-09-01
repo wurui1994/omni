@@ -76,7 +76,7 @@ for (const file of cases) {
   const cPath = join(dir, `${name}.c`);
   writeFileSync(cPath, emitC(mod));
   const exe = join(dir, `${name}.out`);
-  const build = run(cc, ['-std=c99', '-O1', `-I${RUNTIME_DIR}`, cPath, ...runtimeSources(), '-o', exe, '-lm']);
+  const build = run(cc, ['-std=c99', '-O1', '-pthread', `-I${RUNTIME_DIR}`, cPath, ...runtimeSources(), '-o', exe, '-lm']);
   const viaC = build.code === 0 ? run(exe, []) : { out: '', err: build.err, code: build.code };
 
   // 第三条腿：自己的执行器（ADR-0013）。同一段 JS，同一棵 OIR，解释一遍 —— 参照还是 node。

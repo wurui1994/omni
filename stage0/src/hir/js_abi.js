@@ -186,6 +186,30 @@ export const JS_ABI = {
   js_re_new: { js: '$js_re_new', c: 'omni_js_re_new', arity: 2 },
   js_re_exec: { js: '$js_re_exec', c: 'omni_js_re_exec', arity: 2 },
 
+  // ------------------------------------------- 字节缓冲（ArrayBuffer / 两种视图）
+  // interp/builtin.js 用它们模拟指针内存（ADR-0016）：一块 arena，"地址"就是偏移。
+  // 值域里因此多一格 bytes（omni.h 的 OMNI_DYN_BYTES），载荷是 {p, len} —— 一个
+  // **视图**。ArrayBuffer 与它上面的 Uint8Array / DataView 在这里是同一种值，区别只在
+  // off/len 怎么截：三者共享同一块内存，别名关系于是天然成立。
+  //
+  // 存取一律**显式按字节拼**（不 memcpy 一个 int64/double 下去）：这样与宿主的 DataView
+  // 逐位相同，不看机器的字节序。le 那个实参照 DataView 的签名收，两种都真支持。
+  js_buf_new: { js: '$js_buf_new', c: 'omni_js_buf_new', arity: 1 },
+  js_buf_view: { js: '$js_buf_view', c: 'omni_js_buf_view', arity: 3 },
+  js_buf_len: { js: '$js_buf_len', c: 'omni_js_buf_len', arity: 1 },
+  js_buf_set: { js: '$js_buf_set', c: 'omni_js_buf_set', arity: 2, ret: 'void' },
+  js_buf_fill: { js: '$js_buf_fill', c: 'omni_js_buf_fill', arity: 2 },
+  js_buf_get_u8: { js: '$js_buf_get_u8', c: 'omni_js_buf_get_u8', arity: 2 },
+  js_buf_set_u8: { js: '$js_buf_set_u8', c: 'omni_js_buf_set_u8', arity: 3, ret: 'void' },
+  js_buf_get_i64: { js: '$js_buf_get_i64', c: 'omni_js_buf_get_i64', arity: 3 },
+  js_buf_set_i64: { js: '$js_buf_set_i64', c: 'omni_js_buf_set_i64', arity: 4, ret: 'void' },
+  js_buf_get_f64: { js: '$js_buf_get_f64', c: 'omni_js_buf_get_f64', arity: 3 },
+  js_buf_set_f64: { js: '$js_buf_set_f64', c: 'omni_js_buf_set_f64', arity: 4, ret: 'void' },
+  // TextEncoder 是无状态的，但 `new TextEncoder().encode(t)` 是两步，所以那一格也得
+  // 有个值。单独一个标签而不是拿 bytes 塞个哨兵 —— 哨兵一漏就是悄悄算错。
+  js_text_enc_new: { js: '$js_text_enc_new', c: 'omni_js_text_enc_new', arity: 0 },
+  js_text_encode: { js: '$js_text_encode', c: 'omni_js_text_encode', arity: 2 },
+
   // -------------------------------------------------- 字符串/数组的其余缺口
   // 都是量出来的：split 的字符串分隔符形式 4 处（'/' 与 '\n'，都不带 limit），
   // parseInt(hex, 16) 2 处，Buffer.from(s, 'utf8') 1 处（backend-c 发字符串字面量），
@@ -303,12 +327,16 @@ export const JS_TAG_C = {
   Set: 'OMNI_DYN_SET',
   real: 'OMNI_DYN_REAL',
   regexp: 'OMNI_DYN_RE',
+  bytes: 'OMNI_DYN_BYTES',
+  TextEncoder: 'OMNI_DYN_TEXTENC',
 };
 
 /** @type {Record<string, Record<string, string>>} */
 export const JS_PROPS = {
-  length: { list: 'js_arr_len', string: 'js_str_len' },
+  length: { list: 'js_arr_len', string: 'js_str_len', bytes: 'js_buf_len' },
   size: { Map: 'js_map_size', Set: 'js_set_size' },
+  // ArrayBuffer 与 DataView 上都叫 byteLength；这一格里三者是同一种值，所以同一个 op
+  byteLength: { bytes: 'js_buf_len' },
 };
 /** @type {Record<string, {on: Record<string, string>, lit?: Record<string, any>}>} */
 export const JS_METHODS = {
@@ -341,8 +369,16 @@ export const JS_METHODS = {
   pop: { on: { list: 'js_arr_pop' } },
   concat: { on: { list: 'js_arr_concat' } },
   reverse: { on: { list: 'js_arr_reverse' } },
-  fill: { on: { list: 'js_arr_fill' } },
+  fill: { on: { list: 'js_arr_fill', bytes: 'js_buf_fill' } },
   exec: { on: { regexp: 'js_re_exec' } },
+  // 字节缓冲上的那几个（DataView / Uint8Array 的方法）
+  getUint8: { on: { bytes: 'js_buf_get_u8' } },
+  setUint8: { on: { bytes: 'js_buf_set_u8' } },
+  getBigInt64: { on: { bytes: 'js_buf_get_i64' } },
+  setBigInt64: { on: { bytes: 'js_buf_set_i64' } },
+  getFloat64: { on: { bytes: 'js_buf_get_f64' } },
+  setFloat64: { on: { bytes: 'js_buf_set_f64' } },
+  encode: { on: { TextEncoder: 'js_text_encode' } },
   join: { on: { list: 'js_arr_join' } },
   map: { on: { list: 'js_arr_map' } },
   filter: { on: { list: 'js_arr_filter' } },
@@ -357,7 +393,7 @@ export const JS_METHODS = {
 
   // Map / Set
   get: { on: { Map: 'js_map_get' } },
-  set: { on: { Map: 'js_map_set' } },
+  set: { on: { Map: 'js_map_set', bytes: 'js_buf_set' } },
   add: { on: { Set: 'js_set_add' } },
   has: { on: { Map: 'js_map_has', Set: 'js_set_has' } },
   delete: { on: { Map: 'js_map_delete', Set: 'js_set_delete' } },

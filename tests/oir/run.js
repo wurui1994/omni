@@ -54,7 +54,16 @@ function printStmt(e) {
 }
 const stmt = (e) => ({ kind: 'ExprStmt', expr: e });
 
-function moduleOf(exprs) {
+// 一条用例可以带 pre：一串前置语句（只求值、不打印），最后那个表达式才是要比的那一行。
+// 字节缓冲那类**有状态**的 op 非如此不可 —— 写和读得落在同一格值上，而一个表达式里
+// 没有地方存住它。每条用例各套一层 Block，局部名于是不会跨用例撞车（两个后端都按花括号分作用域）。
+function moduleOf(items) {
+  const body = items.map((it) => {
+    const x = it.oir === undefined ? { oir: it } : it;
+    return x.pre && x.pre.length
+      ? { kind: 'Block', stmts: [...x.pre, printStmt(x.oir)] }
+      : printStmt(x.oir);
+  });
   return {
     structs: [],
     classes: [],
@@ -65,7 +74,7 @@ function moduleOf(exprs) {
     fnTypes: [],
     funcs: [{
       name: 'main', mangled: 'omni_main', ret: VOID, params: [],
-      body: { kind: 'Block', stmts: exprs.map(printStmt) },
+      body: { kind: 'Block', stmts: body },
     }],
     entry: 'omni_main',
   };
@@ -75,6 +84,10 @@ function moduleOf(exprs) {
 // 每条给三样东西：名字、OIR 表达式、以及**在 node 里等价的 JS 源码**（参照实现）。
 const CASES = [];
 const c = (name, oir, jsSrc) => CASES.push({ name, oir, jsSrc });
+/** 带前置语句的用例：pre 里的语句先跑，oir 是最后要打印的那个表达式 */
+const cp = (name, pre, oir, jsSrc) => CASES.push({ name, pre, oir, jsSrc });
+const local = (name, init) => ({ kind: 'Local', name, type: D, init });
+const V = (name) => ({ kind: 'VarRef', name, type: D });
 
 c('add/int', js('js_add', [int(2), int(3)]), '2n + 3n');
 c('add/int-wrap', js('js_add', [int(2n ** 62n), int(2n ** 62n)]), 'BigInt.asIntN(64, 2n**62n + 2n**62n)');
@@ -582,6 +595,152 @@ c('arr/new-n-fill', J(js('js_arr_fill', [js('js_arr_new_n', [real(4)]), real(-1)
   'JSON.stringify(new Array(4).fill(-1))');
 c('arr/new-n-len', js('js_arr_len', [js('js_arr_new_n', [real(5)])]), 'new Array(5).length');
 
+// ------------------------- 字节缓冲（ADR-0011：ArrayBuffer 与它上面的 Uint8Array/DataView）
+// 这一格里三者是**同一种值**（一个 {p,len} 视图），所以参照侧写 ArrayBuffer 也好、
+// Uint8Array 也好、DataView 也好，在这边都落到同一批 op 上。判据有三样：
+//   1) 长度与视图的截法；2) 别名 —— 两个视图落在同一块内存上，改一个另一个看得见；
+//   3) 字节序 —— 同一个 int64 写下去，le 与 be 的第 0 个字节必须不同。第 3 条最要紧：
+//      两侧都是显式按字节拼的，所以这个结果不能跟着机器变。
+const AB = (n) => js('js_buf_new', [real(n)]);
+const U8N = (n) => js('js_buf_view', [real(n), undef, undef]);
+const VIEW = (b, o, l) => js('js_buf_view', [b,
+  o === undefined ? undef : real(o), l === undefined ? undef : real(l)]);
+const BLEN = (b) => js('js_buf_len', [b]);
+const FILL = (b, v) => js('js_buf_fill', [b, real(v)]);
+const G8 = (b, at) => js('js_buf_get_u8', [b, real(at)]);
+const S8 = (b, at, v) => stmt(js('js_buf_set_u8', [b, real(at), real(v)]));
+const GI = (b, at, le) => js('js_buf_get_i64', [b, real(at), bool(le)]);
+const SI = (b, at, v, le) => stmt(js('js_buf_set_i64', [b, real(at), int(v), bool(le)]));
+const GF = (b, at, le) => js('js_buf_get_f64', [b, real(at), bool(le)]);
+const SF = (b, at, v, le) => stmt(js('js_buf_set_f64', [b, real(at), real(v), bool(le)]));
+/** 把一段字节接成字符串（一条用例只有一行，逐字节比才看得出是哪一位错了） */
+const BSTR = (b, from, n) => {
+  let e = str('');
+  for (let i = 0; i < n; i++) e = js('js_add', [e, js('js_buf_get_u8', [b, real(from + i)])]);
+  return e;
+};
+const RBSTR = (d, from, n) => {
+  let s = '""';
+  for (let i = 0; i < n; i++) s += ` + ${d}.getUint8(${from + i})`;
+  return s;
+};
+
+c('buf/ab-len', BLEN(AB(8)), 'new ArrayBuffer(8).byteLength');
+c('buf/ab-len-0', BLEN(AB(0)), 'new ArrayBuffer(0).byteLength');
+c('buf/len-is-number', js('js_typeof', [BLEN(AB(2))]), 'typeof new ArrayBuffer(2).byteLength');
+c('buf/typeof', js('js_typeof', [AB(1)]), 'typeof new ArrayBuffer(1)');
+c('buf/u8-len', BLEN(U8N(5)), 'new Uint8Array(5).length');
+c('buf/u8-len-0', BLEN(U8N(0)), 'new Uint8Array(0).length');
+c('buf/view-len', BLEN(VIEW(AB(8), 2)), 'new Uint8Array(new ArrayBuffer(8), 2).length');
+c('buf/view-len-3', BLEN(VIEW(AB(8), 2, 3)), 'new Uint8Array(new ArrayBuffer(8), 2, 3).length');
+c('buf/view-of-view', BLEN(VIEW(VIEW(AB(8), 2), 1, 2)),
+  'new Uint8Array(new Uint8Array(new ArrayBuffer(8), 2).buffer, 3, 2).length');
+c('buf/zeroed', BSTR(U8N(4), 0, 4), RBSTR('new DataView(new Uint8Array(4).buffer)', 0, 4));
+c('buf/fill', BSTR(FILL(U8N(3), 255), 0, 3), RBSTR('new DataView(new Uint8Array(3).fill(255).buffer)', 0, 3));
+c('buf/fill-trunc', G8(FILL(U8N(2), 300), 0), 'new Uint8Array(2).fill(300)[0]');
+c('buf/fill-neg', G8(FILL(U8N(2), -1), 0), 'new Uint8Array(2).fill(-1)[0]');
+c('buf/fill-frac', G8(FILL(U8N(2), 1.9), 0), 'new Uint8Array(2).fill(1.9)[0]');
+c('buf/fill-ret-len', BLEN(FILL(U8N(3), 0)), 'new Uint8Array(3).fill(0).length');
+// fill 只碰视图自己那一段：外面那两个字节必须还是 0
+cp('buf/fill-view-only', [local('u', AB(4)), stmt(js('js_buf_fill', [VIEW(V('u'), 1, 2), real(7)]))],
+  BSTR(V('u'), 0, 4),
+  '(() => { const u = new ArrayBuffer(4); new Uint8Array(u, 1, 2).fill(7);'
+  + ` const d = new DataView(u); return ${RBSTR('d', 0, 4)}; })()`);
+
+cp('buf/set-get-u8', [local('b', U8N(4)), S8(V('b'), 1, 7)], G8(V('b'), 1),
+  '(() => { const d = new DataView(new ArrayBuffer(4)); d.setUint8(1, 7); return d.getUint8(1); })()');
+cp('buf/set-u8-trunc', [local('b', U8N(2)), S8(V('b'), 0, 258)], G8(V('b'), 0),
+  '(() => { const d = new DataView(new ArrayBuffer(2)); d.setUint8(0, 258); return d.getUint8(0); })()');
+cp('buf/set-u8-last', [local('b', U8N(3)), S8(V('b'), 2, 1)], BSTR(V('b'), 0, 3),
+  '(() => { const d = new DataView(new ArrayBuffer(3)); d.setUint8(2, 1);'
+  + ` return ${RBSTR('d', 0, 3)}; })()`);
+
+// 字节序：同一个值写下去，两种排法的字节必须真的不同
+const DV8 = 'const d = new DataView(new ArrayBuffer(8));';
+cp('buf/i64-be-bytes', [local('b', AB(8)), SI(V('b'), 0, 0x0102030405060708n, false)], BSTR(V('b'), 0, 8),
+  `(() => { ${DV8} d.setBigInt64(0, 0x0102030405060708n, false); return ${RBSTR('d', 0, 8)}; })()`);
+cp('buf/i64-le-bytes', [local('b', AB(8)), SI(V('b'), 0, 0x0102030405060708n, true)], BSTR(V('b'), 0, 8),
+  `(() => { ${DV8} d.setBigInt64(0, 0x0102030405060708n, true); return ${RBSTR('d', 0, 8)}; })()`);
+cp('buf/i64-be-round', [local('b', AB(8)), SI(V('b'), 0, 0x0102030405060708n, false)], GI(V('b'), 0, false),
+  `(() => { ${DV8} d.setBigInt64(0, 0x0102030405060708n, false); return d.getBigInt64(0, false); })()`);
+cp('buf/i64-le-round', [local('b', AB(8)), SI(V('b'), 0, -1234567890123n, true)], GI(V('b'), 0, true),
+  `(() => { ${DV8} d.setBigInt64(0, -1234567890123n, true); return d.getBigInt64(0, true); })()`);
+cp('buf/i64-neg-bytes', [local('b', AB(8)), SI(V('b'), 0, -2n, false)], BSTR(V('b'), 0, 8),
+  `(() => { ${DV8} d.setBigInt64(0, -2n, false); return ${RBSTR('d', 0, 8)}; })()`);
+cp('buf/i64-min', [local('b', AB(8)), SI(V('b'), 0, -(2n ** 63n), false)], GI(V('b'), 0, false),
+  `(() => { ${DV8} d.setBigInt64(0, -(2n ** 63n), false); return d.getBigInt64(0, false); })()`);
+cp('buf/i64-max', [local('b', AB(8)), SI(V('b'), 0, 2n ** 63n - 1n, true)], GI(V('b'), 0, true),
+  `(() => { ${DV8} d.setBigInt64(0, 2n ** 63n - 1n, true); return d.getBigInt64(0, true); })()`);
+// 写 be 读 le：结果是字节反过来的那个数，两侧必须都错得一样
+cp('buf/i64-cross', [local('b', AB(8)), SI(V('b'), 0, 258n, false)], GI(V('b'), 0, true),
+  `(() => { ${DV8} d.setBigInt64(0, 258n, false); return d.getBigInt64(0, true); })()`);
+cp('buf/i64-at-8', [local('b', AB(16)), SI(V('b'), 8, 77n, false)], GI(V('b'), 8, false),
+  '(() => { const d = new DataView(new ArrayBuffer(16)); d.setBigInt64(8, 77n, false);'
+  + ' return d.getBigInt64(8, false); })()');
+cp('buf/i64-typeof', [local('b', AB(8)), SI(V('b'), 0, 1n, false)], js('js_typeof', [GI(V('b'), 0, false)]),
+  `(() => { ${DV8} d.setBigInt64(0, 1n, false); return typeof d.getBigInt64(0, false); })()`);
+
+cp('buf/f64-le-round', [local('b', AB(8)), SF(V('b'), 0, 0.1, true)], GF(V('b'), 0, true),
+  `(() => { ${DV8} d.setFloat64(0, 0.1, true); return d.getFloat64(0, true); })()`);
+cp('buf/f64-be-bytes', [local('b', AB(8)), SF(V('b'), 0, 0.1, false)], BSTR(V('b'), 0, 8),
+  `(() => { ${DV8} d.setFloat64(0, 0.1, false); return ${RBSTR('d', 0, 8)}; })()`);
+cp('buf/f64-le-bytes', [local('b', AB(8)), SF(V('b'), 0, 0.1, true)], BSTR(V('b'), 0, 8),
+  `(() => { ${DV8} d.setFloat64(0, 0.1, true); return ${RBSTR('d', 0, 8)}; })()`);
+cp('buf/f64-neg-round', [local('b', AB(8)), SF(V('b'), 0, -1.5e308, false)], GF(V('b'), 0, false),
+  `(() => { ${DV8} d.setFloat64(0, -1.5e308, false); return d.getFloat64(0, false); })()`);
+cp('buf/f64-int-round', [local('b', AB(8)), SF(V('b'), 0, 3, true)], GF(V('b'), 0, true),
+  `(() => { ${DV8} d.setFloat64(0, 3, true); return d.getFloat64(0, true); })()`);
+cp('buf/f64-typeof', [local('b', AB(8)), SF(V('b'), 0, 1, true)], js('js_typeof', [GF(V('b'), 0, true)]),
+  `(() => { ${DV8} d.setFloat64(0, 1, true); return typeof d.getFloat64(0, true); })()`);
+
+// 别名：两个视图落在同一块内存上（interp/builtin.js 的指针 arena 就靠这个）
+cp('buf/alias-view-sees-write',
+  [local('u', AB(8)), local('v', VIEW(V('u'), 4, 4)), S8(V('u'), 5, 3)], G8(V('v'), 1),
+  '(() => { const u = new ArrayBuffer(8); const v = new Uint8Array(u, 4, 4);'
+  + ' new DataView(u).setUint8(5, 3); return v[1]; })()');
+cp('buf/alias-i64-through-view',
+  [local('u', AB(8)), local('v', VIEW(V('u'), 0, 8)), SI(V('v'), 0, 0x0a0b0c0d0e0f1011n, false)],
+  BSTR(V('u'), 0, 8),
+  '(() => { const u = new ArrayBuffer(8); new DataView(u, 0, 8).setBigInt64(0, 0x0a0b0c0d0e0f1011n, false);'
+  + ` const d = new DataView(u); return ${RBSTR('d', 0, 8)}; })()`);
+cp('buf/set-copies',
+  [local('u', AB(8)), local('a', VIEW(V('u'), 0, 4)), local('b', VIEW(V('u'), 4, 4)),
+    stmt(js('js_buf_fill', [V('a'), real(9)])), stmt(js('js_buf_set', [V('b'), V('a')]))],
+  BSTR(V('u'), 0, 8),
+  '(() => { const u = new ArrayBuffer(8); const a = new Uint8Array(u, 0, 4); const b = new Uint8Array(u, 4, 4);'
+  + ` a.fill(9); b.set(a); const d = new DataView(u); return ${RBSTR('d', 0, 8)}; })()`);
+// 重叠的 .set：必须像 memmove 一样先读后写，逐字节向前抄会把源自己抹掉
+cp('buf/set-overlap',
+  [local('u', AB(8)), local('a', VIEW(V('u'), 0, 4)), local('b', VIEW(V('u'), 2, 4)),
+    S8(V('u'), 0, 1), S8(V('u'), 1, 2), S8(V('u'), 2, 3), S8(V('u'), 3, 4),
+    stmt(js('js_buf_set', [V('b'), V('a')]))],
+  BSTR(V('u'), 0, 8),
+  '(() => { const u = new ArrayBuffer(8); const a = new Uint8Array(u, 0, 4); const b = new Uint8Array(u, 2, 4);'
+  + ` a.set([1, 2, 3, 4]); b.set(a); const d = new DataView(u); return ${RBSTR('d', 0, 8)}; })()`);
+cp('buf/set-shorter',
+  [local('u', AB(4)), local('a', VIEW(V('u'), 0, 2)), stmt(js('js_buf_fill', [V('a'), real(5)])),
+    local('t', U8N(4)), stmt(js('js_buf_set', [V('t'), V('a')]))],
+  BSTR(V('t'), 0, 4),
+  '(() => { const u = new ArrayBuffer(4); const a = new Uint8Array(u, 0, 2); a.fill(5);'
+  + ` const t = new Uint8Array(4); t.set(a); const d = new DataView(t.buffer); return ${RBSTR('d', 0, 4)}; })()`);
+
+// TextEncoder：无状态，但 new TextEncoder().encode(t) 是两步，所以那一格也得有个值
+const ENC = (s) => js('js_text_encode', [js('js_text_enc_new', []), str(s)]);
+const RENC = (s) => `new TextEncoder().encode(${s})`;
+c('text/typeof', js('js_typeof', [js('js_text_enc_new', [])]), 'typeof new TextEncoder()');
+c('text/enc-len-ascii', BLEN(ENC('AZ')), `${RENC('"AZ"')}.length`);
+c('text/enc-len-empty', BLEN(ENC('')), `${RENC('""')}.length`);
+c('text/enc-len-cjk', BLEN(ENC('中a')), `${RENC('"中a"')}.length`);
+c('text/enc-len-astral', BLEN(ENC('a\u{1f600}')), `${RENC('"a\u{1f600}"')}.length`);
+c('text/enc-bytes-cjk', BSTR(ENC('中'), 0, 3), RBSTR(`new DataView(${RENC('"中"')}.buffer)`, 0, 3));
+c('text/enc-bytes-astral', BSTR(ENC('\u{1f600}'), 0, 4),
+  RBSTR(`new DataView(${RENC('"\u{1f600}"')}.buffer)`, 0, 4));
+// 孤立代理：宿主换成 U+FFFD，我们这边也必须是同一个三字节
+c('text/enc-lone-surrogate', BSTR(ENC('\ud800'), 0, 3),
+  RBSTR(`new DataView(${RENC('"\\ud800"')}.buffer)`, 0, 3));
+c('text/enc-then-view', BLEN(VIEW(ENC('中a'), 1, 2)),
+  `new Uint8Array(${RENC('"中a"')}.buffer, 1, 2).length`);
+
 // ---------------------------------------------------------------- node 宿主面
 // 三个进程（ref.mjs / out.mjs / a.out）是**顺序**跑的，cwd 都是仓库根，所以
 // "同一个固定路径先写后读"这种跨用例的状态是各自独立且一致的。
@@ -691,7 +850,7 @@ if (ref.code !== 0) {
   }
 }
 
-const mod = moduleOf(cases.map((x) => x.oir));
+const mod = moduleOf(cases);
 const jsPath = join(dir, 'out.mjs');
 writeFileSync(jsPath, emitJs(mod));
 const viaJs = run(process.execPath, [jsPath]);
@@ -700,7 +859,7 @@ const cPath = join(dir, 'out.c');
 writeFileSync(cPath, emitC(mod));
 const exe = join(dir, 'a.out');
 const cc = ['clang', 'cc', 'gcc'].find((x) => run('which', [x]).code === 0);
-const build = run(cc, ['-std=c99', '-O1', `-I${RUNTIME_DIR}`, cPath, ...runtimeSources(), '-o', exe, '-lm']);
+const build = run(cc, ['-std=c99', '-O1', '-pthread', `-I${RUNTIME_DIR}`, cPath, ...runtimeSources(), '-o', exe, '-lm']);
 const viaC = build.code === 0 ? run(exe, []) : { out: '', err: build.err, code: build.code };
 
 const lines = (s) => s.replace(/\n+$/, '').split('\n');
@@ -750,7 +909,7 @@ if (!filters.length || filters.some((f) => 'uncaught'.includes(f))) {
   const uc = join(dir, 'uncaught.c');
   writeFileSync(uc, emitC(um));
   const uExe = join(dir, 'uncaught.out');
-  const ub = run(cc, ['-std=c99', '-O1', `-I${RUNTIME_DIR}`, uc, ...runtimeSources(), '-o', uExe, '-lm']);
+  const ub = run(cc, ['-std=c99', '-O1', '-pthread', `-I${RUNTIME_DIR}`, uc, ...runtimeSources(), '-o', uExe, '-lm']);
   const rJs = run(process.execPath, [uJs]);
   const rC = ub.code === 0 ? run(uExe, []) : { out: '', err: ub.err, code: ub.code };
   const want = { out: 'before\n', err: 'omni: uncaught: nobody catches me\n', code: 70 };

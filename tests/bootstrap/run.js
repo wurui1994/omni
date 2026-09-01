@@ -218,7 +218,7 @@ if (c1 && !quick) {
     //
     // 这一条要 14s（node 1.8s + 原生 9s，另有 clang 那边的常数）：原生构表比 node 慢 5 倍，
     // 慢在 Map 上。这个比值本身是要记住的数 —— C 后端的 Map/Set 是待优化项，不是这条门槛的问题。
-    const gJnc = join(root, 'tests', 'glr', 'grammars', 'jnc.grammar');
+    const gJnc = join(root, 'stage0', 'src', 'frontend-jnc', 'jnc.grammar');
     const inJnc = join(dir, 'glr-jnc.in');
     writeFileSync(inJnc, 'class C1 { int m_x; }\nC1* c;\nint f(int a) { return a * 2; }\n');
     both('glr jnc (prefer)', ['glr', gJnc, inJnc], false);

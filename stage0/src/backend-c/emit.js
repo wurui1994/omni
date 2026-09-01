@@ -286,7 +286,8 @@ class CEmitter {
     for (const f of this.mod.funcs) this.func(f);
     // argc/argv 要存下来：process.argv 与"我装在哪"（import.meta.url 的对应物）都要它。
     // 退出码走 omni_host_exit_code —— process.exitCode 是个可写的槽，不是返回值。
-    this.line(`int main(int argc, char **argv) { omni_host_init(argc, argv); ${this.mod.entry}(); omni_js_check_uncaught(); fflush(stdout); return omni_host_exit_code(); }`);
+    // 入口过一层 omni_run_entry：那一层把活挪到一条大栈的线程上（见 omni_js_host.c）。
+    this.line(`int main(int argc, char **argv) { omni_host_init(argc, argv); omni_run_entry(${this.mod.entry}); omni_js_check_uncaught(); fflush(stdout); return omni_host_exit_code(); }`);
     this.out[this.s16At] = this.s16PoolLines().join('\n');
     // 三段各自 concat 一次：封闭 ABI 里 `concat` 的 arity 是 2（js_abi.js），
     // 写成 `concat(a, b)` 两个实参在自举出来的编译器上不是同一件事

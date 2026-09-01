@@ -92,8 +92,10 @@ omni_dyn omni_js_num_parse_int(omni_dyn sd, omni_dyn radixd) {
 
 /* JS 的 StringToBigInt。刻意**不**走 omni_int_of_string：那是 Omni 的 int(string)
    语义（只认十进制），而 BigInt("0xf0") 在 JS 里是 240n —— 编译器自己的 js 词法器
-   就靠它读十六进制的 bigint 字面量。超出 int64 报错（这个值域的 int 就是 int64）。 */
-static int64_t js_str_to_int(omni_str s) {
+   就靠它读十六进制的 bigint 字面量。收的范围是 [INT64_MIN, UINT64_MAX]：正的那半
+   超过 INT64_MAX 就落到无符号那一格（决策 19），因为 jancy 的 `0xffffffffffffffff`
+   要能读出来；再往外报错。 */
+static omni_dyn js_str_to_int(omni_str s) {
   int64_t i = 0, n = s.len;
   while (i < n && (s.p[i] == ' ' || s.p[i] == '\t' || s.p[i] == '\n' || s.p[i] == '\r')) i++;
   while (n > i && (s.p[n - 1] == ' ' || s.p[n - 1] == '\t' || s.p[n - 1] == '\n' || s.p[n - 1] == '\r')) n--;
@@ -121,12 +123,15 @@ static int64_t js_str_to_int(omni_str s) {
       omni_errorf("invalid integer: \"%.*s\"", (int)s.len, s.p);
     }
     acc = acc * (uint64_t)base + (uint64_t)d;
-    uint64_t limit = (uint64_t)INT64_MAX + (neg ? 1u : 0u);
-    if (acc > limit) omni_errorf("invalid integer: \"%.*s\"", (int)s.len, s.p);
+    /* 负的那半只到 INT64_MIN（|acc| <= 2^63）；正的那半到 UINT64_MAX，上面那个
+       乘加的溢出检查已经把它卡住了 */
+    if (neg && acc > (uint64_t)INT64_MAX + 1u) {
+      omni_errorf("invalid integer: \"%.*s\"", (int)s.len, s.p);
+    }
   }
   if (digits == 0) omni_errorf("invalid integer: \"%.*s\"", (int)s.len, s.p);
-  if (neg) return acc == (uint64_t)INT64_MAX + 1u ? INT64_MIN : -(int64_t)acc;
-  return (int64_t)acc;
+  if (neg) return omni_dyn_of_int(acc == (uint64_t)INT64_MAX + 1u ? INT64_MIN : -(int64_t)acc);
+  return omni_dyn_of_uint64(acc);
 }
 
 /* BigInt(x)：只认整数值的 number 与十进制/0x/0o/0b 字符串。JS 在小数上抛
@@ -141,7 +146,7 @@ omni_dyn omni_js_bigint_of(omni_dyn v) {
     return omni_dyn_of_int((int64_t)v.u.r);
   }
   if (v.tag == OMNI_DYN_STR16) {
-    return omni_dyn_of_int(js_str_to_int(omni_s16_to_utf8(v.u.s16)));
+    return js_str_to_int(omni_s16_to_utf8(v.u.s16));
   }
   omni_errorf("cannot convert %s to a bigint", omni_dyn_tag_name(v.tag));
   return omni_dyn_null();

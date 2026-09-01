@@ -340,6 +340,23 @@ a 正好在 arena 顶上时直接往后追加，以及一条**累加缓存**（�
   停在第一个匹配上。所以现在只折不带 `g` 的（那种没有可观察状态，折一份与共用一份
   不可区分）。**画出来的边界**：`exec` 的结果是一格 list，而 JS 那边它还挂着
   `index` / `input`，这个值域里 list 带不了属性（决策 18）—— 那两个取不到。
+- **字节缓冲那一族**（`ArrayBuffer` / `Uint8Array` / `DataView` / `TextEncoder`）。三者在这个
+  值域里是**同一种值**：一个 `{p, len}` 视图（`omni.h` 的 `OMNI_DYN_BYTES`），区别只在
+  off/len 怎么截 —— 别名关系于是天然成立，而 `interp/builtin.js` 拿一块 arena 模拟指针内存
+  （ADR-0016）靠的正是它。读写一律**显式按字节拼**，不 memcpy 一个 int64/double 下去：
+  这样与宿主的 `DataView` 逐位相同、不看机器的字节序，`le` 那个实参两种都真支持。
+  `.set` 走 memmove —— 两个视图可能落在同一块内存上并且重叠。`TextEncoder` 另占一格
+  （`OMNI_DYN_TEXTENC`）而不是拿 bytes 塞个哨兵：哨兵一漏就是悄悄算错。
+  **画出来的边界**：`.buffer` 没有 —— 带偏移的视图取不回整块内存，硬给一个就是悄悄算错；
+  要整块就把整块自己传下去。
+- **整数字面量的落点画清楚**：`[INT64_MIN, INT64_MAX]` 是 int，`(INT64_MAX, UINT64_MAX]`
+  落到无符号那一格（降成 `BigInt.asUintN(64, 位模式)`），再往外**当场报**。中间那一段必须
+  真能表达：jancy 的整数字面量在 INT64_MAX 之上就是 `unsigned long`（`frontend-jnc/lower.js`
+  的 `intLit` 里就写着 `0xffffffffffffffffn`）。`BigInt(string)` 的上界跟着抬到 UINT64_MAX，
+  两侧同时改（`$js_str_to_int` / `js_str_to_int`）。这条是被两处真实的崩塌逼出来的：
+  `mir/interp.js` 从前拿 `u < 0 ? u + 2^64 : u` 当"位当无符号读"，那需要**无界** BigInt，
+  C 后端于是发出 `INT64_C(18446744073709551616)`，clang 当场拒收 —— 现在那里直接用
+  `BigInt.asUintN`（它已经在 ABI 里了），而超界的字面量本身成了一条编译期诊断。
 
 顺带修掉一条**旧的静默错**：两个 `int` 之间的 `<` / `==` 从前两侧都先转 `double` 再比，而 `double` 在 2^53 以上丢位 —— `(2n**62n - 1n) < 2n**62n` 会答 `false`。JS 的 BigInt 比较
 是精确的，所以两侧都改成精确比（JS 侧直接比 BigInt，C 侧是 `int_cmp`）。这条与无符号那一格

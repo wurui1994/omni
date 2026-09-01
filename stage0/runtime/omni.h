@@ -57,8 +57,18 @@ enum {
      .test/.replace/.match/.split 的接收位上时求值出一格正则对象。载荷是
      omni_js_re_obj*（source / flags / lastIndex），编译结果照旧走
      omni_js_re_get 的缓存 —— 这一格不存编译产物。 */
-  OMNI_DYN_RE
+  OMNI_DYN_RE,
+  /* 字节缓冲那一格（ADR-0011）：ArrayBuffer 与它上面的 Uint8Array / DataView 在这个
+     值域里是**同一种值** —— 一个视图 omni_js_bytes*（{p, len}）。三者共享同一块内存，
+     别名关系于是天然成立，interp/builtin.js 模拟指针内存靠的正是这个（ADR-0016）。
+     TextEncoder 无状态，但 `new TextEncoder().encode(t)` 是两步，所以那一格也得有个值；
+     单独一个标签而不是拿 bytes 塞哨兵 —— 哨兵一漏就是悄悄算错。 */
+  OMNI_DYN_BYTES, OMNI_DYN_TEXTENC
 };
+
+/* 字节缓冲的视图。p 指进底层那块内存，所以两个视图重叠时改一个另一个看得见 —— 与
+   ArrayBuffer 上开两个 TypedArray 是同一件事。 */
+typedef struct { uint8_t *p; int64_t len; } omni_js_bytes;
 
 /* 正则对象。lastIndex 是它自己的可变状态：带 g 的 exec 循环靠它推进，
    JS 侧的 $JsRe 是同一个三元组，两边的推进算法必须逐字对应。 */
@@ -413,6 +423,22 @@ omni_re omni_js_re_get(omni_dyn pattern, omni_dyn flags);
 /* 正则当值：造一格正则对象（ADR-0011 决策 10）。编译产物不存在这里 —— exec 每次
    照旧问 omni_js_re_get 要，缓存键是 (source, flags)。 */
 omni_dyn omni_js_re_new(omni_dyn source, omni_dyn flags);
+
+/* 字节缓冲（ADR-0011）。存取一律**显式按字节拼**，不 memcpy 一个 int64/double 下去 ——
+   这样与宿主的 DataView 逐位相同，不看机器的字节序。le 那个实参两种都真支持。 */
+omni_dyn omni_js_buf_new(omni_dyn n);
+omni_dyn omni_js_buf_view(omni_dyn b, omni_dyn off, omni_dyn len);
+omni_dyn omni_js_buf_len(omni_dyn b);
+void omni_js_buf_set(omni_dyn dst, omni_dyn src);
+omni_dyn omni_js_buf_fill(omni_dyn b, omni_dyn v);
+omni_dyn omni_js_buf_get_u8(omni_dyn b, omni_dyn at);
+void omni_js_buf_set_u8(omni_dyn b, omni_dyn at, omni_dyn v);
+omni_dyn omni_js_buf_get_i64(omni_dyn b, omni_dyn at, omni_dyn le);
+void omni_js_buf_set_i64(omni_dyn b, omni_dyn at, omni_dyn v, omni_dyn le);
+omni_dyn omni_js_buf_get_f64(omni_dyn b, omni_dyn at, omni_dyn le);
+void omni_js_buf_set_f64(omni_dyn b, omni_dyn at, omni_dyn v, omni_dyn le);
+omni_dyn omni_js_text_enc_new(void);
+omni_dyn omni_js_text_encode(omni_dyn e, omni_dyn s);
 bool omni_js_re_test(omni_dyn pattern, omni_dyn flags, omni_dyn s);
 
 /* omni_js_num.c —— JS 的 Number / Math / BigInt。
@@ -436,6 +462,12 @@ omni_dyn omni_js_num_to_string(omni_dyn v, omni_dyn radix);
    结果是数组的三个（readdir / argv / spawnSync）在 omni_js_host.h 的宏里。 */
 void omni_host_init(int argc, char **argv);
 int omni_host_exit_code(void);
+/* 入口不在主线程上跑：开一条大栈的线程，把 entry 交给它。
+   主线程的栈是链接期定死的（macOS 8MB），而这条链上最深的递归就是编译器自己 ——
+   `emit-c` 一份 16 万行的 JS，词法/语法/降级三遍全是递归下降，8MB 上只剩一点余量，
+   多一层就是 Segmentation fault 而且看起来是随机的。栈要多大不该由 `ulimit` 决定。
+   开不出线程就退回直接调用：那种机器上跑小程序照旧，只是没有这份余量。 */
+void omni_run_entry(void (*entry)(void));
 omni_dyn omni_js_fs_read_text(omni_dyn path);
 omni_dyn omni_js_fs_write_text(omni_dyn path, omni_dyn text);
 bool omni_js_fs_exists(omni_dyn path);

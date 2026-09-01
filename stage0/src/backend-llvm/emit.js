@@ -313,6 +313,7 @@ class LlvmEmitter {
       this.line(`declare ${d.ret} @${d.sym}(${d.params.join(', ')})`);
     }
     this.line('declare void @omni_host_init(i32, ptr)');
+    this.line('declare void @omni_run_entry(ptr)');
     this.line('declare i32 @omni_host_exit_code()');
     this.line('declare void @omni_js_check_uncaught()');
     this.line('declare i32 @fflush(ptr)');
@@ -456,7 +457,7 @@ class LlvmEmitter {
     this.line('define i32 @main(i32 %argc, ptr %argv) {');
     this.line('entry:');
     this.line('  call void @omni_host_init(i32 %argc, ptr %argv)');
-    this.line(`  call void @${this.mir.entry}()`);
+    this.line(`  call void @omni_run_entry(ptr @${this.mir.entry})`);
     this.line('  call void @omni_js_check_uncaught()');
     this.line('  %fl = call i32 @fflush(ptr null)');
     this.line('  %code = call i32 @omni_host_exit_code()');

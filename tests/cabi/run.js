@@ -80,7 +80,7 @@ for (const file of cases) {
   writeFileSync(cPath, emitC(mod));
   const exe = join(dir, `${name}.out`);
   const libs = cAbiLibs(mod.cabi ?? []).map((l) => `-l${l}`);
-  const build = run(cc, ['-std=c99', '-O1', `-I${RUNTIME_DIR}`, cPath, ...runtimeSources(), '-o', exe, '-lm', ...libs]);
+  const build = run(cc, ['-std=c99', '-O1', '-pthread', `-I${RUNTIME_DIR}`, cPath, ...runtimeSources(), '-o', exe, '-lm', ...libs]);
   if (build.code !== 0) bad.push(`    cc failed:\n${build.err}`);
   else {
     const viaC = run(exe, []);

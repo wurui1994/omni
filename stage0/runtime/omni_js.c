@@ -57,6 +57,8 @@ omni_dyn omni_js_type_tag(omni_dyn v) {
     case OMNI_DYN_MAP: n = "Map"; break;
     case OMNI_DYN_SET: n = "Set"; break;
     case OMNI_DYN_RE: n = "regexp"; break;
+    case OMNI_DYN_BYTES: n = "bytes"; break;
+    case OMNI_DYN_TEXTENC: n = "TextEncoder"; break;
     default: n = "function"; break;
   }
   return omni_dyn_of_s16(omni_s16_of_utf8(omni_str_fmt("%s", n)));
@@ -445,3 +447,169 @@ bool omni_js_eq(bool strict, omni_dyn a, omni_dyn b) {
     default: return a.u.ref == b.u.ref;  /* 对象/数组/函数比同一性 */
   }
 }
+
+/* ------------------------------------------------ 字节缓冲（ADR-0011）
+ *
+ * ArrayBuffer 与它上面的 Uint8Array / DataView 是同一种值：一个 {p, len} 视图。
+ * 存取一律**显式按字节拼**，不 memcpy 一个 int64/double 下去 —— 这样与宿主的 DataView
+ * 逐位相同，不看机器的字节序。每一条错误文本都要与 prelude 里那一份逐字相同。
+ */
+
+static omni_js_bytes *want_bytes(omni_dyn v, const char *who) {
+  if (v.tag != OMNI_DYN_BYTES) {
+    omni_errorf("%s expects a byte buffer, found %s", who, omni_dyn_tag_name(v.tag));
+  }
+  return (omni_js_bytes *)v.u.ref;
+}
+
+/* 与 prelude 的 $js_real 同一套：real 直接用，int 转 double，别的报错 */
+static double want_bufnum(omni_dyn v, const char *who) {
+  if (v.tag == OMNI_DYN_REAL) return v.u.r;
+  if (is_int(v)) return as_f64(v);
+  omni_errorf("%s expects a number, found %s", who, omni_dyn_tag_name(v.tag));
+  return 0;
+}
+
+/* JS 的 `x & 255`：ToInt32 之后取低 8 位，等价于按 2^32 取模再截 */
+static uint8_t js_to_u8(double d) {
+  if (!isfinite(d)) return 0;
+  d = trunc(d);
+  d = fmod(d, 4294967296.0);
+  if (d < 0) d += 4294967296.0;
+  return (uint8_t)((uint64_t)d & 255u);
+}
+
+static omni_dyn bytes_wrap(uint8_t *p, int64_t len) {
+  omni_js_bytes *b = (omni_js_bytes *)omni_alloc(sizeof(omni_js_bytes));
+  b->p = p;
+  b->len = len;
+  return omni_dyn_of_ref((void *)b, OMNI_DYN_BYTES);
+}
+
+omni_dyn omni_js_buf_new(omni_dyn n) {
+  double d = want_bufnum(n, "new ArrayBuffer");
+  int64_t len;
+  uint8_t *p;
+  if (!(d >= 0 && d == trunc(d) && d < 9.2233720368547758e18)) omni_error("invalid byte length");
+  len = (int64_t)d;
+  p = (uint8_t *)omni_alloc((size_t)(len == 0 ? 1 : len));
+  if (len > 0) memset(p, 0, (size_t)len);
+  return bytes_wrap(p, len);
+}
+
+omni_dyn omni_js_buf_view(omni_dyn bd, omni_dyn off, omni_dyn len) {
+  omni_js_bytes *b;
+  double od, nd;
+  /* new Uint8Array(n) 那一支：实参是个数就是"新开 n 字节"，不是开视图 */
+  if (bd.tag == OMNI_DYN_REAL) return omni_js_buf_new(bd);
+  b = want_bytes(bd, "a byte-buffer view");
+  od = off.tag == OMNI_DYN_UNDEF ? 0 : want_bufnum(off, "a byte-buffer view");
+  nd = len.tag == OMNI_DYN_UNDEF ? (double)b->len - od : want_bufnum(len, "a byte-buffer view");
+  if (!(od == trunc(od) && nd == trunc(nd) && od >= 0 && nd >= 0 && od + nd <= (double)b->len)) {
+    omni_error("byte-buffer view out of range");
+  }
+  return bytes_wrap(b->p + (int64_t)od, (int64_t)nd);
+}
+
+omni_dyn omni_js_buf_len(omni_dyn b) {
+  return omni_dyn_of_real((double)want_bytes(b, ".length")->len);
+}
+
+/* 用 memmove：两个视图可能落在同一块内存上并且重叠，宿主的 TypedArray.set 也是安全的 */
+void omni_js_buf_set(omni_dyn dst, omni_dyn src) {
+  omni_js_bytes *d = want_bytes(dst, ".set");
+  omni_js_bytes *s = want_bytes(src, ".set");
+  if (s->len > d->len) omni_error("byte-buffer .set source is too long");
+  if (s->len > 0) memmove(d->p, s->p, (size_t)s->len);
+}
+
+omni_dyn omni_js_buf_fill(omni_dyn bd, omni_dyn v) {
+  omni_js_bytes *b = want_bytes(bd, ".fill");
+  uint8_t x = js_to_u8(want_bufnum(v, ".fill"));
+  if (b->len > 0) memset(b->p, (int)x, (size_t)b->len);
+  return bd;
+}
+
+static int64_t buf_at(omni_js_bytes *b, omni_dyn at, int64_t size, const char *who) {
+  double d = want_bufnum(at, who);
+  if (!(d == trunc(d) && d >= 0 && d + (double)size <= (double)b->len)) {
+    omni_errorf("%s offset is outside the bounds of the buffer", who);
+  }
+  return (int64_t)d;
+}
+
+static uint64_t buf_rd8(const uint8_t *p, bool le) {
+  uint64_t x = 0;
+  int i;
+  for (i = 0; i < 8; i++) x |= (uint64_t)p[le ? i : 7 - i] << (8 * i);
+  return x;
+}
+
+static void buf_wr8(uint8_t *p, uint64_t x, bool le) {
+  int i;
+  for (i = 0; i < 8; i++) p[le ? i : 7 - i] = (uint8_t)((x >> (8 * i)) & 0xffu);
+}
+
+omni_dyn omni_js_buf_get_u8(omni_dyn bd, omni_dyn at) {
+  omni_js_bytes *b = want_bytes(bd, ".getUint8");
+  return omni_dyn_of_real((double)b->p[buf_at(b, at, 1, ".getUint8")]);
+}
+
+void omni_js_buf_set_u8(omni_dyn bd, omni_dyn at, omni_dyn v) {
+  omni_js_bytes *b = want_bytes(bd, ".setUint8");
+  int64_t o = buf_at(b, at, 1, ".setUint8");
+  b->p[o] = js_to_u8(want_bufnum(v, ".setUint8"));
+}
+
+omni_dyn omni_js_buf_get_i64(omni_dyn bd, omni_dyn at, omni_dyn le) {
+  omni_js_bytes *b = want_bytes(bd, ".getBigInt64");
+  int64_t o = buf_at(b, at, 8, ".getBigInt64");
+  return omni_dyn_of_int((int64_t)buf_rd8(b->p + o, omni_js_truthy(le)));
+}
+
+void omni_js_buf_set_i64(omni_dyn bd, omni_dyn at, omni_dyn v, omni_dyn le) {
+  omni_js_bytes *b = want_bytes(bd, ".setBigInt64");
+  int64_t o;
+  /* 查标签在查偏移之前 —— 与 prelude 里那一份同一个顺序，报错才是同一句 */
+  if (!is_int(v)) {
+    omni_errorf(".setBigInt64 expects a bigint, found %s", omni_dyn_tag_name(v.tag));
+  }
+  o = buf_at(b, at, 8, ".setBigInt64");
+  buf_wr8(b->p + o, (uint64_t)v.u.i, omni_js_truthy(le));
+}
+
+omni_dyn omni_js_buf_get_f64(omni_dyn bd, omni_dyn at, omni_dyn le) {
+  omni_js_bytes *b = want_bytes(bd, ".getFloat64");
+  int64_t o = buf_at(b, at, 8, ".getFloat64");
+  union { uint64_t u; double d; } u;
+  u.u = buf_rd8(b->p + o, omni_js_truthy(le));
+  return omni_dyn_of_real(u.d);
+}
+
+void omni_js_buf_set_f64(omni_dyn bd, omni_dyn at, omni_dyn v, omni_dyn le) {
+  omni_js_bytes *b = want_bytes(bd, ".setFloat64");
+  int64_t o = buf_at(b, at, 8, ".setFloat64");
+  union { uint64_t u; double d; } u;
+  u.d = want_bufnum(v, ".setFloat64");
+  buf_wr8(b->p + o, u.u, omni_js_truthy(le));
+}
+
+/* TextEncoder 无状态，但 === 比的是同一性，所以还是各分一格 */
+omni_dyn omni_js_text_enc_new(void) {
+  uint8_t *tag = (uint8_t *)omni_alloc(1);
+  *tag = 0;
+  return omni_dyn_of_ref((void *)tag, OMNI_DYN_TEXTENC);
+}
+
+omni_dyn omni_js_text_encode(omni_dyn e, omni_dyn s) {
+  omni_str u;
+  uint8_t *p;
+  if (e.tag != OMNI_DYN_TEXTENC) {
+    omni_errorf(".encode expects a TextEncoder, found %s", omni_dyn_tag_name(e.tag));
+  }
+  u = omni_s16_to_utf8(omni_js_as_s16(s));
+  p = (uint8_t *)omni_alloc((size_t)(u.len == 0 ? 1 : u.len));
+  if (u.len > 0) memcpy(p, u.p, (size_t)u.len);
+  return bytes_wrap(p, u.len);
+}
+

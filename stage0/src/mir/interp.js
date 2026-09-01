@@ -347,15 +347,12 @@ class MirInterp {
       case OP.CVT: {
         const v = rd(f.a[i]);
         if (x === CVT_I2F) return (F) => { F.v[i] = Number(v(F)); return next; };
-        // 位当无符号 64 位读再转（第六十一刀）。`BigInt.asUintN` 不在闭 ABI 里
-        //（ADR-0011 决策二），而"当无符号读"就是负数加 2^64 —— 同一个值，用的都是闭 ABI
-        // 里已有的算术，所以自举那条路上也过得去。
+        // 位当无符号 64 位读再转（第六十一刀）。`BigInt.asUintN` 现在在闭 ABI 里了
+        // （ADR-0011 决策 19），所以直接用它。从前那句 `u < 0 ? u + 2^64 : u` 靠的是
+        // **无界** BigInt，而这个值域里 int 就是 int64 —— 那个字面量连落点都没有，
+        // C 后端会发出一个 int64 装不下的整数常量，clang 当场拒收。
         if (x === CVT_U2F) {
-          return (F) => {
-            const u = v(F);
-            F.v[i] = Number(u < 0n ? u + 18446744073709551616n : u);
-            return next;
-          };
+          return (F) => { F.v[i] = Number(BigInt.asUintN(64, v(F))); return next; };
         }
         // 装箱是恒等：dynamic 就是原生值（ADR-0006 第 2 节）。C 后端那边它是打标签，
         // 所以指令留着 —— 「哪里发生装箱」是后端要知道的事实。

@@ -15,6 +15,8 @@ const char *omni_dyn_tag_name(int t) {
     "int",
     /* 正则对象（ADR-0011 决策 10）：JS 的 typeof 是 "object"，但错误消息里要能认出来 */
     "regexp",
+    /* 字节缓冲与 TextEncoder（ADR-0011）：ArrayBuffer 与它上面的两种视图是同一个标签 */
+    "bytes", "TextEncoder",
   };
   return names[t];
 }

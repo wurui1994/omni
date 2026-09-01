@@ -16,6 +16,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,6 +37,35 @@ void omni_host_init(int argc, char **argv) {
 }
 
 int omni_host_exit_code(void) { return host_exit_code; }
+
+/* 入口跑在一条自己开的线程上，栈 512MB。为什么不留在主线程：那个栈的大小是链接期
+   定死的（macOS 上 8MB），而这条链上最深的递归就是编译器自己 —— `emit-c` 一份 16 万行
+   的 JS，词法/语法/降级三遍全是递归下降，8MB 上只剩一点余量，于是"多编译一个文件"
+   就成了 Segmentation fault，看起来还像随机的。512MB 只是**保留**地址空间，页要用到
+   才落地，小程序不为此付一分钱。开不出线程就退回直接调用 —— 那种机器上小程序照旧跑，
+   只是没有这份余量。 */
+static void (*run_entry_fn)(void);
+
+static void *run_entry_thread(void *arg) {
+  (void)arg;
+  run_entry_fn();
+  return NULL;
+}
+
+void omni_run_entry(void (*entry)(void)) {
+  pthread_attr_t attr;
+  pthread_t th;
+  run_entry_fn = entry;
+  if (pthread_attr_init(&attr) != 0) { entry(); return; }
+  if (pthread_attr_setstacksize(&attr, (size_t)512 * 1024 * 1024) != 0
+      || pthread_create(&th, &attr, run_entry_thread, NULL) != 0) {
+    pthread_attr_destroy(&attr);
+    entry();
+    return;
+  }
+  pthread_attr_destroy(&attr);
+  pthread_join(th, NULL);
+}
 
 /* ---------------------------------------------------------------- 小助手 */
 

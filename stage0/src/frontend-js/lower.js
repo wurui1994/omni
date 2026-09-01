@@ -1057,7 +1057,19 @@ class Lower {
   expr(e) {
     switch (e.type) {
       case 'Num': return constReal(e.value);
-      case 'BigIntLit': return constInt(e.value);
+      // int 是 int64，外加一格无符号 64 位（决策 19 的 OMNI_DYN_UINT）。两段都要真能表达：
+      // jancy 的整数字面量在 INT64_MAX 之上就是 `unsigned long`（见 frontend-jnc 的 intLit，
+      // 那里写着 0xffffffffffffffffn），而"位当无符号读"也落在这一段。再往上没有落点 ——
+      // 当场报，而不是一路走到 backend-c 发一个 clang 拒收的整数常量，或者悄悄回卷成别的数。
+      case 'BigIntLit': {
+        const v = e.value;
+        if (v >= -9223372036854775807n - 1n && v <= 9223372036854775807n) return constInt(v);
+        if (v <= 0xffffffffffffffffn) {
+          return op('js_bigint_as_uint_n', [constReal(64), constInt(BigInt.asIntN(64, v))]);
+        }
+        this.err(e.span, `integer literal does not fit in 64 bits: ${v}n`);
+        return constInt(0n);
+      }
       case 'Str': return s16(e.value);
       case 'Lit': return e.value === null ? nullExpr() : constBool(e.value);
       case 'Ident': return this.ident(e);
@@ -1555,6 +1567,34 @@ class Lower {
       if (e.args.length === 0) return op('js_arr_new', []);
       if (e.args.length === 1) return op('js_arr_new_n', [this.expr(e.args[0])]);
       return arrLit(e.args.map((a) => this.expr(a)));
+    }
+    // 字节缓冲那一族（ADR-0011）：ArrayBuffer 与它上面的 Uint8Array / DataView 在这个
+    // 值域里是**同一种值**（一个视图），三者共享同一块内存 —— interp/builtin.js 模拟
+    // 指针内存靠的就是这个别名关系。TextEncoder 无状态，但 .encode 是第二步，所以也得有值。
+    if ((n === 'ArrayBuffer' || n === 'Uint8Array' || n === 'DataView' || n === 'TextEncoder')
+      && !this.lookup(n) && !this.classes.has(n)) {
+      const sp = e.args.find((a) => a.type === 'Spread');
+      if (sp !== undefined) {
+        this.err(sp.span, `spread is not supported in a 'new ${n}' call`);
+        return undefExpr();
+      }
+      const as = e.args.map((a) => this.expr(a));
+      if (n === 'TextEncoder') {
+        if (as.length !== 0) this.err(e.span, 'new TextEncoder() takes no arguments');
+        return op('js_text_enc_new', []);
+      }
+      if (n === 'ArrayBuffer') {
+        if (as.length !== 1) {
+          this.err(e.span, 'new ArrayBuffer(n) takes exactly one argument');
+          return undefExpr();
+        }
+        return op('js_buf_new', [as[0]]);
+      }
+      if (as.length < 1 || as.length > 3) {
+        this.err(e.span, `new ${n}(buf[, offset[, length]]) takes one to three arguments`);
+        return undefExpr();
+      }
+      return op('js_buf_view', [as[0], as[1] ?? undefExpr(), as[2] ?? undefExpr()]);
     }
     // new Error(msg)：异常对象就是 { $cls: ["Error"], message }（决策 15）
     if (n === 'Error' && !this.lookup(n) && !this.classes.has(n)) {

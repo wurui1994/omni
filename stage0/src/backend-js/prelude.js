@@ -560,6 +560,8 @@ function $dynTag(v) {
       if (v instanceof Map) return "dict";
       if (Array.isArray(v)) return "list";
       if (v instanceof $JsRe) return "regexp";
+      if (v instanceof $JsBytes) return "bytes";
+      if (v instanceof $JsTextEnc) return "TextEncoder";
       return "function";  // 闭包记录 { fp, c_* }
   }
 }
@@ -1091,14 +1093,16 @@ function $js_num_of(v) {
 }
 // JS 的 StringToBigInt。刻意**不**走 $int_of_string：那是 Omni 的 int(string) 语义
 // （只认十进制），而 BigInt("0xf0") 在 JS 里是 240n —— 编译器自己的 js 词法器就靠它
-// 读十六进制的 bigint 字面量。超出 int64 报错（这个值域的 int 就是 int64）。
+// 读十六进制的 bigint 字面量。收的范围是 [INT64_MIN, UINT64_MAX]：正的那半超过
+// INT64_MAX 就落到无符号那一格（决策 19），jancy 的 0xffffffffffffffff 要能读出来；
+// 再往外报错。
 function $js_str_to_int(s) {
   const t = $js_asS16(s).trim();
   if (!/^([+-]?[0-9]+|0[xX][0-9a-fA-F]+|0[oO][0-7]+|0[bB][01]+)$/.test(t)) {
     $rt_error('invalid integer: "' + s + '"');
   }
   const v = BigInt(t);
-  if (v < $INT_MIN || v > 9223372036854775807n) $rt_error('invalid integer: "' + s + '"');
+  if (v < $INT_MIN || v > 18446744073709551615n) $rt_error('invalid integer: "' + s + '"');
   return v;
 }
 function $js_bigint_of(v) {
@@ -1581,6 +1585,8 @@ function $js_type_tag(v) {
       if (v instanceof Set) return "set";
       if (Array.isArray(v)) return "list";
       if (v instanceof $JsRe) return "regexp";
+      if (v instanceof $JsBytes) return "bytes";
+      if (v instanceof $JsTextEnc) return "TextEncoder";
       return "function";
   }
 }
@@ -1688,6 +1694,92 @@ function $js_re_exec(rd, sd) {
   const out = [];
   for (let i = 0; i < m.length; i++) out.push(m[i] === undefined ? undefined : m[i]);
   return out;
+}
+
+// ------------------------- 字节缓冲：ArrayBuffer / Uint8Array / DataView（ADR-0011）
+// 三者在这一格里是**同一种值**：一个 {u8, dv} 视图。ArrayBuffer 与它上面的视图共享同一
+// 块内存，别名关系天然成立 —— interp/builtin.js 模拟指针内存靠的正是这个（ADR-0016）。
+// 越界一律先自己查一遍再动手：宿主抛的是 RangeError，文本各引擎不同，两侧要逐字相同。
+class $JsBytes {
+  constructor(u8) {
+    this.u8 = u8;
+    this.dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  }
+}
+class $JsTextEnc {}
+function $js_bytes(v, who) {
+  if ($dynTag(v) !== "bytes") $rt_error(who + " expects a byte buffer, found " + $dynTag(v));
+  return v;
+}
+function $js_buf_new(n) {
+  const len = $js_real(n, "new ArrayBuffer");
+  if (!Number.isInteger(len) || len < 0) $rt_error("invalid byte length");
+  return new $JsBytes(new Uint8Array(new ArrayBuffer(len)));
+}
+function $js_buf_view(b, off, len) {
+  // new Uint8Array(n) 那一支：实参是个数就是"新开 n 字节"，不是开视图
+  if ($dynTag(b) === "real") return $js_buf_new(b);
+  const src = $js_bytes(b, "a byte-buffer view").u8;
+  const o = off === undefined ? 0 : $js_real(off, "a byte-buffer view");
+  const n = len === undefined ? src.byteLength - o : $js_real(len, "a byte-buffer view");
+  if (!Number.isInteger(o) || !Number.isInteger(n) || o < 0 || n < 0 || o + n > src.byteLength) {
+    $rt_error("byte-buffer view out of range");
+  }
+  return new $JsBytes(new Uint8Array(src.buffer, src.byteOffset + o, n));
+}
+function $js_buf_len(b) { return $js_bytes(b, ".length").u8.byteLength; }
+function $js_buf_set(dst, src) {
+  const d = $js_bytes(dst, ".set").u8, s = $js_bytes(src, ".set").u8;
+  if (s.byteLength > d.byteLength) $rt_error("byte-buffer .set source is too long");
+  d.set(s);
+  return undefined;
+}
+function $js_buf_fill(b, v) {
+  $js_bytes(b, ".fill").u8.fill($js_real(v, ".fill") & 255);
+  return b;
+}
+function $js_buf_at(v, at, size, who) {
+  const o = $js_real(at, who);
+  if (!Number.isInteger(o) || o < 0 || o + size > v.u8.byteLength) {
+    $rt_error(who + " offset is outside the bounds of the buffer");
+  }
+  return o;
+}
+function $js_buf_get_u8(b, at) {
+  const v = $js_bytes(b, ".getUint8");
+  return v.dv.getUint8($js_buf_at(v, at, 1, ".getUint8"));
+}
+function $js_buf_set_u8(b, at, x) {
+  const v = $js_bytes(b, ".setUint8");
+  v.dv.setUint8($js_buf_at(v, at, 1, ".setUint8"), $js_real(x, ".setUint8") & 255);
+  return undefined;
+}
+function $js_buf_get_i64(b, at, le) {
+  const v = $js_bytes(b, ".getBigInt64");
+  return v.dv.getBigInt64($js_buf_at(v, at, 8, ".getBigInt64"), $js_truthy(le));
+}
+function $js_buf_set_i64(b, at, x, le) {
+  const v = $js_bytes(b, ".setBigInt64");
+  if ($dynTag(x) !== "int") $rt_error(".setBigInt64 expects a bigint, found " + $dynTag(x));
+  v.dv.setBigInt64($js_buf_at(v, at, 8, ".setBigInt64"), $W(x), $js_truthy(le));
+  return undefined;
+}
+function $js_buf_get_f64(b, at, le) {
+  const v = $js_bytes(b, ".getFloat64");
+  return v.dv.getFloat64($js_buf_at(v, at, 8, ".getFloat64"), $js_truthy(le));
+}
+function $js_buf_set_f64(b, at, x, le) {
+  const v = $js_bytes(b, ".setFloat64");
+  v.dv.setFloat64($js_buf_at(v, at, 8, ".setFloat64"), $js_real(x, ".setFloat64"), $js_truthy(le));
+  return undefined;
+}
+// TextEncoder 是无状态的，但 new TextEncoder().encode(t) 是两步，所以那一格也得有个值
+function $js_text_enc_new() { return new $JsTextEnc(); }
+function $js_text_encode(e, s) {
+  if ($dynTag(e) !== "TextEncoder") {
+    $rt_error(".encode expects a TextEncoder, found " + $dynTag(e));
+  }
+  return new $JsBytes(new TextEncoder().encode($js_asS16(s)));
 }
 function $js_re_test(pat, flags_, s) {
   const flags = $js_asS16(flags_);
