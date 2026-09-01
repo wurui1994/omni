@@ -32,10 +32,13 @@
 //   `__LINE__` / `__FILE__` / `__COUNTER__` 都认。
 // - **`#include_next` 与 `__has_include` 不认**：前者要记住「上一次是在第几个搜索目录里
 //   找到的」（`tccpp.c:1363` 的 include_next_index），后者要把 include 搜索接进 `#if`
-//   的求值里。两条都等有真的系统头目录之后再做。
-// - **没有系统头目录**：`#include <...>` 只在 `-I` 给的目录里找，找不到就报
-//   `include file '...' not found`（与 tcc 同一句）。libc 头文件的接法是第八刀第二片。
-//   **预定义的宏已经有了**（第八刀第一片，见 tccdefs.js）：`__aarch64__`、
+//   的求值里。两条都等要接**本机真正的**系统头的时候再做 —— 那时才躲不开。
+// - **只有自带的那个系统头目录，没接本机的**：`sysIncludeDirs`（第八刀第二片）指向
+//   `stage0/include/`，里头是我们自己写的 `stddef.h` / `stdarg.h` / `stdbool.h` /
+//   `float.h` —— 与 tcc 自带的那四份一一对应。搜索顺序照 tcc：`-I` 之后才试它。
+//   再往外（`/usr/include`、SDK 里的那些）还没接，找不到就报
+//   `include file '...' not found`（与 tcc 同一句）。
+//   **预定义的宏也有了**（第八刀第一片，见 tccdefs.js）：`__aarch64__`、
 //   `__SIZE_TYPE__`、`_Nonnull` 那五十条，顺序与值都对着 `tcc -dM -E` 抄的。
 // - **`-dM` 不认**：tcc 的 `-dM` 是**边定义边印**（`#undef` 也印、同名重定义印两遍），
 //   要一台挂在 `#define`/`#undef` 上的钩子，独立一片。
@@ -172,11 +175,14 @@ const PF_TOK_STR = 0x40;
 export class Cpp {
   /**
    * @param {{readFile: (p: string) => (string|null), includeDirs?: string[],
+   *          sysIncludeDirs?: string[],
    *          dirname?: (p: string) => string, join?: (a: string, b: string) => string}} host
    */
   constructor(host) {
     this.readFile = host.readFile;
     this.includeDirs = host.includeDirs ?? [];
+    /** 自带的系统头目录（tcc 的 `sysinclude_paths`）。在 `-I` **之后**试，见 `parseInclude` */
+    this.sysIncludeDirs = host.sysIncludeDirs ?? [];
     this.dirnameOf = host.dirname ?? defaultDirname;
     this.joinPath = host.join ?? defaultJoin;
 
@@ -1677,11 +1683,14 @@ export class Cpp {
     this.skipToEol(true);
 
     /* 搜索顺序照 `tccpp.c:1364-1405`：绝对路径 -> `"..."` 才看的「当前文件所在目录」
-     * -> `-I` 给的那些。系统目录这一格还没有（见文件头的阶段边界）。 */
+     * -> `-I` 给的那些 -> **系统目录**（`sysinclude_paths`，第八刀第二片）。
+     * 系统目录在最后，而且 `"..."` 也会走到那儿 —— tcc 就是这个顺序，于是
+     * `#include "stddef.h"` 与 `#include <stddef.h>` 都能找到自带的那一份。 */
     const tries = [];
     if (isAbsPath(name)) tries.push(name);
     if (kind === 34) tries.push(this.joinPath(this.dirnameOf(this.file.trueFilename), name));
     for (const d of this.includeDirs) tries.push(this.joinPath(d, name));
+    for (const d of this.sysIncludeDirs) tries.push(this.joinPath(d, name));
 
     for (const path of tries) {
       const e = this.cachedInclude(path, false);

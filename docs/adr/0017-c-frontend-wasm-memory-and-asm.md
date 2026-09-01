@@ -288,8 +288,9 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
 8. **C 的库面**：`libtcc1` 的等价物（软除法/浮点辅助/`alloca`/`setjmp`）与 libc 的接法。
    原先写的是"先转手宿主的 libc，走既有的 extern-C FFI"，第五片证明**转手不成立**
    （指针是自家线性内存里的偏移，宿主 libc 读不到），改成一个读写线性内存的宿主模块，
-   见第五片的落地节。**第一片已落地**（预定义的宏 —— 目标的自述，五十条，
-   顺序与值都对着 `tcc -dM -E` 抄），见下面的第八刀第一片节。
+   见第五片的落地节。**前两片已落地**（预定义的宏 —— 目标的自述，五十条，
+   顺序与值都对着 `tcc -dM -E` 抄；自带的系统头目录 + 我们自己写的那四份头），
+   见下面的第八刀第一、二片节。
 
 最后三步是**后端**：
 
@@ -2563,6 +2564,144 @@ libc 头文件那一摊 —— 那是「拿自己编译 tinycc」路上下一堵
 `__attribute__` 一整套，而且一进去就是几千行。它是第八刀后半的事。
 
 <!-- 第八刀第一片-END -->
+
+
+## 落地：第八刀第二片 —— 自带的那几份头文件
+
+第一片给了目标的**自述**（那五十条宏）。这一片把自述**用起来**：`size_t` 到底是什么，
+不该由头文件里的 `#ifdef __LP64__` 猜，而该由 `__SIZE_TYPE__` 说。
+
+### 搜索顺序：`-I` 之后才是自带的
+
+`Cpp` 多一个 `sysIncludeDirs`（tcc 的 `sysinclude_paths`）。`parseInclude` 的 tries
+按 `tccpp.c:1364-1405` 排：
+
+1. 绝对路径（只有它自己），
+2. `"..."` 才看的「当前文件所在目录」，
+3. `-I` 给的那些，
+4. **`sysIncludeDirs`**。
+
+两处值得记：
+
+- 自带目录在**最后**。于是用户的 `-I` 能盖掉我们的 `stddef.h` —— tcc 就是这个顺序，
+  不是我们为了方便挑的。
+- `"..."` 也会一路走到第 4 步。于是 `#include "stddef.h"` 与 `#include <stddef.h>`
+  都能找到自带的那份，也是照 tcc。
+
+`cli.js` 里一个常量把它接上，`cppText` 与 `cMir` 两条路都用：
+
+```js
+const C_SYS_INCLUDE = [join(installDir(), '..', '..', 'include')];
+```
+
+即 `stage0/include/`。
+
+### 装哪几份：与 tcc 自带的**一一对应**
+
+tcc 的 `include/` 里有 `stddef.h`、`stdarg.h`、`stdbool.h`、`float.h`、`varargs.h`、
+`stdatomic.h`、`tccdefs.h` 等；真正「C 标准要求编译器自己给」的是前四份。我们装的就是
+前四份：
+
+- **`stddef.h`** —— `NULL`、`size_t` / `ptrdiff_t` / `wchar_t`，类型全部从
+  `__SIZE_TYPE__` / `__PTRDIFF_TYPE__` / `__WCHAR_TYPE__` 取，各自带一个
+  `_SIZE_T_DEFINED` 式的守卫（同一个 typedef 被两份头各写一遍是常事）。
+  外加 `offsetof(type, member) ((size_t) & ((type *)0)->member)`。
+- **`stdarg.h`** —— `typedef __builtin_va_list va_list;` 加四个宏转手到
+  `__builtin_va_start` / `__builtin_va_arg` / `__builtin_va_copy` / `__builtin_va_end`。
+  第十七、二十三片已经把这四个内建做了，这一片只是给它们**标准的名字**。
+- **`stdbool.h`** —— 四行。`bool` / `true` / `false` / `__bool_true_false_are_defined`。
+- **`float.h`** —— 见下。
+
+**没装 `limits.h`**：tcc 也不装（转手系统的）。装了就是分岔，不是复刻。
+`stdalign.h` / `stdnoreturn.h` 同理。
+
+### 量出来的一处矛盾：tcc 的 `float.h` 与 tcc 的编译器不一致
+
+tcc 的 `float.h` 把 `LDBL_*` 按 **binary128** 写：
+
+```
+LDBL_MANT_DIG   113
+LDBL_DIG        33
+LDBL_MIN_EXP    -16381      LDBL_MAX_EXP    16384
+LDBL_MIN_10_EXP -4931       LDBL_MAX_10_EXP 4932
+LDBL_MAX        1.18973149535723176508575932662800702e+4932L
+LDBL_MIN        3.36210314311209350626267781732175260e-4932L
+LDBL_EPSILON    1.92592994438723585305597794258492732e-34L
+DECIMAL_DIG     36
+```
+
+而在这个目标（aarch64-macos）上 tcc 自己的 `sizeof(long double) == 8` ——
+`long double` 就是 `double`（第二十一片量过）。两边合起来的实际后果，量出来是：
+
+```
+ldbl 113 8 1 1          /* LDBL_MANT_DIG, sizeof(long double),
+                           LDBL_MAX > DBL_MAX, LDBL_MIN == 0.0 */
+```
+
+即 `LDBL_MAX` 的字面量**溢出成 `inf`**（所以 `> DBL_MAX` 为真），`LDBL_MIN`
+**下溢成 `0`**（所以 `== 0.0` 为真），而 `LDBL_MANT_DIG` 仍说 113。
+一份自称 113 位有效数字的类型，`MAX` 是 `inf`、`MIN` 是 `0`。
+
+**我们照抄这处矛盾**，理由还是那一条：tcc 的二进制是 oracle，一份逐字节对账的测试轴
+不能一边说"以 tcc 为准"一边挑着改。它进了「将来 `-std=` 严格档」的候选表，
+成为**第二**条（第一条是第二十三片那处链式指定初始化器的分岔）。
+`stage0/include/float.h` 头上有一节写着这些量出来的数，免得将来有人"顺手修好它"。
+
+`gen/28-headers.c` 里 `float.h` 那一段因此**不比十进制字面量，只比形状与关系**：
+
+```c
+printf("eps %d %d\n", 1.0 + DBL_EPSILON > 1.0, 1.0 + DBL_EPSILON / 2.0 == 1.0);
+printf("range %d %d\n", DBL_MAX > 1e307, DBL_MIN < 1e-307);
+printf("ldbl %d %d %d %d\n",
+  LDBL_MANT_DIG, (int)sizeof(long double), LDBL_MAX > DBL_MAX, LDBL_MIN == 0.0);
+```
+
+前两行说的是"`EPSILON` 真的是最小的那个可加量"、"`MAX`/`MIN` 真的在指数范围两端"；
+最后一行把矛盾**钉住**。这样写，将来换目标（`long double` 真是 binary128 的机器上）
+这份用例仍然对，因为它问的是关系而不是数。
+
+### oracle 需要的一处环境
+
+`.omni-cache/tcc-build/` 是**树外构建**，里头没有 `include/`，于是 `-B` 指过去
+`tcc -run` 也找不到自带的头，会报 `include file 'stdarg.h' not found`。补一条软链：
+
+```
+ln -s /Users/wurui/Documents/Lang/reference/tinycc/include .omni-cache/tcc-build/include
+```
+
+这不是我们代码里的事，但不写下来，下一台机器上重建 oracle 时会白花时间。
+
+### 顺手量到的一格：tcc 的 `float.h` 里没有 `FLT_EVAL_METHOD`
+
+C99 要求它，tcc 不给。测试里先写了它，tcc 报 `'FLT_EVAL_METHOD' undeclared` ——
+于是从用例和我们的 `float.h` 里一起删掉，保持**宏集合与 tcc 相同**。
+
+### 量出来的数
+
+- `stage0/include/` 四份头，共 138 行（`float.h` 69 行，一半是那节说明）。
+- `tests/c/gen/28-headers.c`：退出码 67 + 209B stdout，与 `tcc -run` 逐字节相同。
+  它一份文件里同时用上四份头：`offsetof`、`size_t` 的宽度与无符号回绕、
+  `va_list` 转接一层、`bool` 的宽度与"真值只有 0/1"、`float.h` 的形状与那处矛盾。
+- `tests/c/run.js`：**55 passed, 0 failed**（cpp 7、inc 1、cpp-bad 13、
+  gen 28、gen-bad 6）。`tests/js-roundtrip/run.js`：110 passed, 0 failed。
+- 边界钉子仍是 6 条，一条没动 —— 这一片没有搬动任何边界，它只是把已有的能力
+  换上标准的名字。
+
+### 下一片
+
+第八刀第三片：**一份声明我们真的 shim 了的那些 libc 函数的头**。
+`interp/libc.js` 里那张表（`printf` / `puts` / `exit` / `malloc` / `memcpy` ……）
+现在只有实现没有声明，于是 `gen/` 里每份用例都得手写一行
+`int printf(const char *fmt, ...);`（在 arm64 上还是**必须**手写 —— 不写 tcc 自己
+都会编错，第五片量过）。装上 `stdio.h` / `stdlib.h` / `string.h` 的**最小子集**
+之后那些手写声明可以删掉，而且"我们支持哪些 libc"就成了一件**看头文件就知道**的事。
+
+要小心的是：这一步一旦开始，就会有人想 `#include <stdio.h>` 然后用
+`FILE *` / `fopen` —— 那要真的文件描述符与宿主 IO，是另一片。这一片只装
+"我们已经 shim 了的那些"，多一个都不装，缺的按 tcc 的原话报
+`undefined symbol '...'`。
+
+<!-- 第八刀第二片-END -->
 
 
 

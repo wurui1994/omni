@@ -90,11 +90,18 @@ function defArgs(argv) {
 }
 
 /**
+ * C 前端自带的系统头目录（tcc 的 `sysinclude_paths` 里那个 `$tccdir/include`）。
+ * `#include <stddef.h>` 一族从这儿来 —— 位置与 `RUNTIME_DIR` 同一手法：相对
+ * 程序镜像固定两级上去，于是不依赖当前工作目录。**真正的系统头（macOS 那一摊）
+ * 还没接**，见 ADR-0017 第八刀第二片。
+ */
+const C_SYS_INCLUDE = [join(installDir(), '..', '..', 'include')];
+
+/**
  * 一份 `.c` -> 预处理后的文本。**格式与 `tcc -E -P` 逐字节相同**（ADR-0017 第五刀）。
  * 文件 IO 在这里，预处理器自己只认一个 `readFile` 回调 —— 于是 REPL 那一路可以把
  * 内存里的几份 `.h` 直接喂进去，测试也不必碰 fs。
- */
-function cppText(path, incs, defs) {
+ */function cppText(path, incs, defs) {
   const cpp = new Cpp({
     readFile: (p) => {
       try {
@@ -104,6 +111,7 @@ function cppText(path, incs, defs) {
       }
     },
     includeDirs: incs,
+    sysIncludeDirs: C_SYS_INCLUDE,
     dirname,
     join,
   });
@@ -127,6 +135,7 @@ function cMir(path, incs, defs) {
       }
     },
     includeDirs: incs,
+    sysIncludeDirs: C_SYS_INCLUDE,
     dirname,
     join,
   }, defs.map(([name, body]) => ({ name, body })));
