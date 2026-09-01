@@ -1191,6 +1191,15 @@ const LIBC = {
   __omni_stdin: () => F_STDIN,
   __omni_stdout: () => F_STDOUT,
   __omni_stderr: () => F_STDERR,
+  /* SDK 的 `<stdio.h>` 里三条流是**外部全局量**（`extern FILE *__stdoutp`），不是
+   * 函数调用（第八刀第十七片）。前端在 data 段里给那一格留位置、把地址与序号交过来，
+   * 我们把自己的句柄写进去 —— 于是同一份 libc 同时接得住两种头文件的写法。 */
+  __omni_stream_init: (a) => {
+    const h = [F_STDIN, F_STDOUT, F_STDERR][Number(BigInt(a[1]))];
+    if (h === undefined) throw new Error(`libc: __omni_stream_init: 不认识的流 ${a[1]}`);
+    memStore('i64', BigInt(a[0]), 0, h);
+    return undefined;
+  },
   fprintf: (a) => {
     const s = cFormat(readCStr(a[1]), a[2]);
     streamWrite(BigInt(a[0]), s);

@@ -267,6 +267,25 @@ const STRERROR_FN = 'strerror';
 const STRERROR_BYTES = 109 * 48;
 
 /**
+ * **宿主提供的全局量**（第八刀第十七片）。SDK 的 `<stdio.h>` 里三条标准流是
+ *
+ * ```c
+ * extern FILE *__stdinp, *__stdoutp, *__stderrp;
+ * #define stdout __stdoutp
+ * ```
+ *
+ * 也就是说它们不是函数调用（我们自带那份头文件里是 `__omni_stdout()`），而是三个
+ * **外部全局量**。所以这一片要的是「一个 extern 的全局量由宿主填」：data 段里那一格
+ * 照旧由前端留（`declareGlobal` 已经留了，`FILE *` 是 8 个字节），入口处一条
+ * `__omni_stream_init(地址, 第几条)` 让宿主把自己那个句柄写进去 —— 与 `errno`
+ * 那一格同一个形状，方向相反（那一格是宿主写别人读，这一格是宿主写自己读）。
+ *
+ * 值是几由**宿主**说（`interp/libc.js` 的 `F_STDIN`/`F_STDOUT`/`F_STDERR`），
+ * 前端只交地址与序号 —— 前端不该知道句柄长什么样。
+ */
+const STREAM_GVARS = new Map([['__stdinp', 0], ['__stdoutp', 1], ['__stderrp', 2]]);
+
+/**
  * 影子栈的大小。1 MiB —— 与 tcc 在本机上的默认线程栈同一个量级，而递归深度超出它时
  * 得到的是「内存越界」（memChk 会喊），不是静悄悄踩别的东西。写死是因为这一片没有
  * `-Wl,-z,stacksize` 那类开关；将来要调就是一个命令行参数。
@@ -599,6 +618,8 @@ export class CGen {  /**
     /** 这个单元用到 `errno` 了吗。用到才在 data 段留一格、才发 `__omni_errno_init` */
     this.errnoUsed = false;
     this.strerrorUsed = false;
+    /** @type {{addr:number,which:number}[]} 宿主提供的全局量（三条标准流，见 STREAM_GVARS） */
+    this.streamGvars = [];
     /** @type {Map<string,object>} `typedef` 的名字表（tcc 用 `VT_TYPEDEF` 挂在符号上） */
     this.typedefs = new Map();
     /* `__builtin_va_list`：tcc 在 arm64 上把它定在 tccdefs.h 里（本机是
@@ -4424,7 +4445,15 @@ export class CGen {  /**
      * 所以「用过但没定义」当场就是错。地址仍然分配过（一遍过里引用发生在定义之前，
      * 代码得先有个地址可发），所以这一问只能等到这儿再答 —— 与 `funcs` 那一条同一个理由。 */
     for (const [name, e] of this.gvars) {
-      if (!e.defined && e.used) this.err(`undefined symbol '${name}'`);
+      if (e.defined || !e.used) continue;
+      /* 宿主提供的那几个（三条标准流，见 `STREAM_GVARS`）：不是「没定义」，是**别人定的**。
+       * 记下来，入口处一条 `__omni_stream_init` 让宿主把句柄写进那一格。 */
+      const which = STREAM_GVARS.get(name);
+      if (which !== undefined) {
+        this.streamGvars.push({ addr: e.addr, which });
+        continue;
+      }
+      this.err(`undefined symbol '${name}'`);
     }
   }
 }
@@ -4575,6 +4604,12 @@ export function lowerC(path, text, host, defs, args) {
     entry.emit(OP.CCALL, T_VOID, mod.cabiNo('__omni_strerror_init'),
       entry.pushArgs([mod.consts.int(BigInt(strerrAddr)),
         mod.consts.int(BigInt(STRERROR_BYTES))]), 0);
+  }
+  /* 宿主提供的全局量（第十七片）：三条标准流那几格。地址与序号交过去，宿主把自己的
+   * 句柄写进去 —— 前端不知道句柄长什么样，宿主不知道版图长什么样。 */
+  for (const s of gen.streamGvars) {
+    entry.emit(OP.CCALL, T_VOID, mod.cabiNo('__omni_stream_init'),
+      entry.pushArgs([mod.consts.int(BigInt(s.addr)), mod.consts.i32(s.which)]), 0);
   }
   const rt = mirTypeOf(info.ret);
   /* `main` 的实参：要么一个都没有，要么就是 `argc` 与 `argv`（上面只放过这两种）。

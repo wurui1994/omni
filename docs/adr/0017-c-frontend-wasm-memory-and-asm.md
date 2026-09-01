@@ -288,7 +288,7 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
 8. **C 的库面**：`libtcc1` 的等价物（软除法/浮点辅助/`alloca`/`setjmp`）与 libc 的接法。
    原先写的是"先转手宿主的 libc，走既有的 extern-C FFI"，第五片证明**转手不成立**
    （指针是自家线性内存里的偏移，宿主 libc 读不到），改成一个读写线性内存的宿主模块，
-   见第五片的落地节。**前十六片已落地**（预定义的宏 —— 目标的自述，五十条，
+   见第五片的落地节。**前十七片已落地**（预定义的宏 —— 目标的自述，五十条，
    顺序与值都对着 `tcc -dM -E` 抄；自带的系统头目录 + 编译器必须自己给的那四份头；
    `stdio.h`/`stdlib.h`/`string.h` 的最小子集 —— libc 的自述；
    `strtol` 一族与 `strncpy`/`strchr`/`strstr` 那几条；
@@ -300,8 +300,9 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
    `strerror` / `perror` —— 一张量出来的表 + 一号一格；
    `sscanf` / `vsscanf` / `fscanf` —— cFormat 的反向；
    Duff's device —— 里层的 case 就是一个没有名字的标签；
-   真的 macOS 系统头 —— 预定义的宏本来就是两份，而没引用的声明不发桩），
-   见下面的第八刀第一到十六片节。
+   真的 macOS 系统头 —— 预定义的宏本来就是两份，而没引用的声明不发桩；
+   SDK 的三条标准流 —— 宿主填的全局量），
+   见下面的第八刀第一到十七片节。
 
 最后三步是**后端**：
 
@@ -3768,6 +3769,61 @@ tinycc 的每个 .c 都 `#include <stdio.h>` 并且真的往 stderr 写字。
 之后：`struct-byval`（等真的后端）、`-dM`、路径 A 的 GLR 与路径 B 对账（第七步）。
 
 <!-- 第八刀第十六片-END -->
+
+## 落地：第八刀第十七片
+
+**SDK 的三条标准流 —— 宿主填的全局量。**
+
+自带那份 `<stdio.h>` 里 `stdout` 是宏，展开成 `__omni_stdout()`（C 只要求它是
+`FILE *` 类型的表达式）。SDK 那份不是：
+
+```c
+extern FILE *__stdinp, *__stdoutp, *__stderrp;
+#define stdout __stdoutp
+```
+
+三个**外部全局量**。所以第十六片的第二条（没引用的声明不发桩）在这儿有个对偶：
+引用了、但这个单元里没有定义的**全局量**，以前一律是「undefined symbol」。
+
+### 换法：与 errno 那一格同一个形状，方向相反
+
+`declareGlobal` 本来就给它留了 8 个字节（`FILE *`），所以这一片只加一条接线：
+`unit()` 收尾时，名字在 `STREAM_GVARS`（三条流）里的就不算「没定义」，而是记下
+`{地址, 第几条}`；入口处一条 `__omni_stream_init(地址, 序号)`，宿主把自己的句柄
+写进那一格。
+
+- 前端不知道句柄是几（`F_STDIN`/`F_STDOUT`/`F_STDERR` 在 `interp/libc.js` 里）；
+- 宿主不知道版图（地址是交过去的）。
+
+与 `errno` 那一格的差别只是方向：那一格是**宿主写、程序读写**，这一格是
+**宿主写一次、程序只读**。`__omni_stdout()` 那条门照旧留着 —— 同一份 libc 于是
+同时接得住两种头文件的写法，自带的那份一个字都不用改。
+
+### 量出来的数
+
+- `tests/c/sys/02-streams.c`：退出码 5 + 21 字节 stdout + 9 字节 stderr，
+  与 `tcc -run` 逐字节相同（`fprintf(stdout,…)`、`fputs`、`fputc`、
+  `fprintf(stderr,…)` 四条都走 SDK 的 `__stdoutp`/`__stderrp`）。
+- `tests/c/run.js`：**70 passed, 0 failed**。
+- 终端上两条流的**交错**与 tcc 相反（我们的 stdout 带缓冲、stderr 直写）——
+  测试轴分开对账，这一条不进 oracle，与第九片一样。
+
+少了什么：`stdin` 那一格也填了，但读它仍然会抛（我们的文件是整份快照，没有真的
+fd 级 IO）；`getc`/`putc` 在 macOS 上是真的函数（宏那一套是 `__sgetc`/`__sputc`，
+只有 `*_unlocked` 用），所以 `FILE` 的内部字段还是一次都没被碰过 ——
+`FILE` 至今仍然是不透明的一个小整数。
+
+### 下一片
+
+第八刀第十八片：**tinycc 自己那份 `libtcc.c` 的头几百行**。到这一片为止「能读 SDK
+的头」与「三条流」都有了，下一步该拿真的输入来量：把 tinycc 的一个 .c 交给我们，
+看第一个拦路的是什么（预期是 `setjmp`/`longjmp`、`struct` 传值、以及
+`static` 函数指针表里的那些 `__attribute__`）。
+
+之后：`struct-byval`（等真的后端）、`-dM`、路径 A 的 GLR 与路径 B 对账（第七步）。
+
+<!-- 第八刀第十七片-END -->
+
 
 
 
