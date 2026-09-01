@@ -2137,7 +2137,8 @@ export class CGen {  /**
   funcCall(name) {
     const info = this.funcSym(name);
     info.used = true;
-    const a = this.callArgs(`function '${name}'`, info.params, info.variadic, info.ret);
+    const a = this.callArgs(`function '${name}'`, info.params, info.variadic, info.ret,
+      info.old === true);
     if (info.params === null) {
       info.params = a.vals.map((v, i) => ({
         name: `$p${i}`, ty: promotedType(decayedType(v.ty)),
@@ -2162,7 +2163,8 @@ export class CGen {  /**
    */
   indirectCall(fnTy, callee) {
     const fi = fnTy.ref;
-    const a = this.callArgs('function pointer', fi.params, fi.variadic, fi.ret);
+    const a = this.callArgs('function pointer', fi.params, fi.variadic, fi.ret,
+      fi.old === true);
     const r = this.f.emit(OP.CALLI, mirTypeOf(fi.ret), callee, this.f.pushArgs(a.refs), 0);
     if (a.sret !== null) return sMem(fi.ret, r, 0);
     return sVal(fi.ret, r);
@@ -2172,7 +2174,7 @@ export class CGen {  /**
    * 实参那一段（直接调用与间接调用共用）：读实参、按原型转换、struct 的两条 ABI。
    * 回 `{refs, sret, vals}` —— `vals` 只有「先调用后定义」那条路要（拿它回填形参表）。
    */
-  callArgs(what, params, variadic, ret) {
+  callArgs(what, params, variadic, ret, old) {
     this.skip(LPAR);
     /** @type {object[]} */
     const vals = [];
@@ -2188,7 +2190,10 @@ export class CGen {  /**
      * 没声明过（先调用后定义）就只记个数，定义时反过来核对。 */
     const np = params === null ? -1 : params.length;
     if (np >= 0) {
-      const bad = variadic ? vals.length < np : vals.length !== np;
+      /* 老式的函数（`int f(a, b) {…}`）没有原型可核对：多给的实参 tcc 照旧算、
+       * 照旧传，被调方不看（`tccgen.c:5352`）。少给的仍然是错 —— 形参会读到垃圾。 */
+      const bad = old === true ? vals.length < np
+        : (variadic ? vals.length < np : vals.length !== np);
       if (bad) {
         this.err(`too ${vals.length < np ? 'few' : 'many'} arguments to ${what}`);
       }
@@ -2210,6 +2215,9 @@ export class CGen {  /**
        * 数组与函数退化成指针。用 `promotedType` 而不是 `promote`：后者会真的取一次值，
        * 这里只想问类型。 */
       const fixed = np >= 0 && i < np;
+      /* 老式函数多给的那些实参：算，但**不进变参区** —— 被调方没有变参区那一格
+       * （它不是变参函数），塞进去签名就对不上了。tcc 那边它们进寄存器、没人读。 */
+      const drop = old === true && !fixed;
       const want = fixed ? params[i].ty : promotedType(decayedType(vals[i].ty));
       /* 传值的 struct 传的是**地址**，拷贝由被调方在入口处做（`runBody`）。
        * 于是一次调用只有一次拷贝，而且那次拷贝是 C 要求的那一次
@@ -2231,7 +2239,7 @@ export class CGen {  /**
       }
       const r = this.gv(this.castTo(vals[i], want));
       if (fixed) refs.push(r);
-      else extra.push({ ty: want, ref: r });
+      else if (!drop) extra.push({ ty: want, ref: r });
     }
     /* 变参：`...` 后面的实参不进实参表，进帧上的一块「变参区」，地址当**最后一个**
      * 实参传进去（第十六片的 ABI）。于是变参函数的 MIR 签名是**定死的**
@@ -4137,6 +4145,9 @@ export class CGen {  /**
         const p = posts[i];
         if (p.k === 'fn') {
           ty = mkFunc(ty, p.params, p.variadic);
+          /* 「老式」这一格跟着函数类型走：`{` 之前那串形参声明要认得它
+           * （`tccgen.c:8814`），而调用点也靠它决定「实参提升」那一套。 */
+          if (p.old === true) ty.ref.old = true;
           continue;
         }
         if (p.n === 0) this.err('zero-sized array');
@@ -4188,6 +4199,19 @@ export class CGen {  /**
       this.cpp.ungetTok(TOK_VOID);
       this.tok = this.cpp.tok;
       this.tokc = this.cpp.tokc;
+    }
+    /* K&R 的**标识符表**（`tccgen.c:5077-5082`）：`int op(a, b)` 里括号中是名字，
+     * 不是类型。类型一律先当 int，真正的类型在 `{` 之前那串声明里
+     * （`oldParamDecls`）—— 没有那串的话 int 就是最终答案。 */
+    if (this.tok >= TOK_UIDENT && !this.isTypeStart(this.tok)) {
+      for (;;) {
+        if (this.tok < TOK_UIDENT) this.expect('identifier');
+        params.push({ name: this.identName(), ty: ctype(VT_INT, null) });
+        if (this.tok !== COMMA) break;
+        this.next();
+      }
+      this.skip(RPAR);
+      return { params, variadic: false, old: true };
     }
     return { params, variadic: this.paramList(params) };
   }
@@ -4425,8 +4449,12 @@ export class CGen {  /**
         any = true;
         continue;
       }
-      if (!this.isTypeStart(this.tok)) break;
-      const spec = this.parseBtype();
+      /* 顶层一个**光头的标识符**开头：K&R 的「省掉 int」（`tccgen.c:8777-8781`）。
+       * `f() { … }` 与 `kr_func1(a, b) { … }` 都是这一格 —— 类型默认 int。
+       * 只在文件作用域成立：块里那样开头的是表达式语句，不是声明。 */
+      const oldint = global && !this.isTypeStart(this.tok) && this.tok >= TOK_UIDENT;
+      if (!oldint && !this.isTypeStart(this.tok)) break;
+      const spec = oldint ? ctype(VT_INT, null) : this.parseBtype();
       const isTypedef = (spec.t & VT_TYPEDEF) !== 0;
       const isExtern = (spec.t & VT_EXTERN) !== 0;
       const isInline = (spec.t & VT_INLINE) !== 0;
@@ -4537,11 +4565,55 @@ export class CGen {  /**
   /** 函数声明或定义。当前记号是 `(`。回 true 表示读掉了一个**函数体**。 */
   funcDecl(global, name, fnTy, isInline) {
     const info = this.funcSym(name);
+    /* K&R 的形参声明串（`tccgen.c:8811-8819`）：`)` 与 `{` 之间那几行。
+     * 只有老式的函数、而且在文件作用域才认 —— 与 tcc 同一个条件。 */
+    if (global && fnTy.ref.old === true) this.oldParamDecls(fnTy.ref.params);
     /* 形参表已经在声明符里读完了（第十二片：`(…)` 是声明符的后缀，不是函数定义的
      * 一部分）—— 这儿只把函数类型拆开交给 `finishFunc`。`inline` 从 `decl` 传进来：
      * 存储类在进声明符之前就剥掉了（`stripStorage`），函数类型上已经没有它。 */
     return this.finishFunc(global, info, name, stripStorage(fnTy.ref.ret),
-      fnTy.ref.params, fnTy.ref.variadic, isInline);
+      fnTy.ref.params, fnTy.ref.variadic, isInline, fnTy.ref.old === true);
+  }
+
+  /**
+   * K&R 的形参声明串：`void f(a, b) int a; double b; { … }` 里中间那一段。
+   *
+   * 它不声明新东西，只是**给已经在标识符表里的那些名字定类型**（`tccgen.c:8897-8912`）：
+   * 名字对不上是错，重复声明同一个形参是错，带存储类是错。类型照形参的规则退化
+   * （数组/函数 -> 指针），而老式形参里的 `float` 要提成 `double`
+   * （`tccgen.c:8867-8870` —— 调用方按「实参提升」传的就是 double）。
+   */
+  oldParamDecls(params) {
+    const done = new Set();
+    while (this.isTypeStart(this.tok) && this.tok !== LBRACE) {
+      const spec = this.parseBtype();
+      if ((spec.t & VT_STORAGE) !== 0) {
+        this.err('storage class specified for parameter');
+      }
+      const base = stripStorage(spec);
+      for (;;) {
+        const d = this.declarator(base, 'need');
+        if (d.name === null) this.expect('identifier');
+        const p = params.find((x) => x.name === d.name);
+        if (p === undefined) {
+          this.err(`declaration for parameter '${d.name}' but no such parameter`);
+        }
+        if (done.has(d.name)) this.err(`redefinition of parameter '${d.name}'`);
+        done.add(d.name);
+        let ty = d.ty;
+        if (isArray(ty.t)) ty = mkPointer(ty.ref);
+        if (isFunc(ty.t)) ty = mkPointer(ty);
+        if (btype(ty.t) === VT_VOID) this.err('parameter has void type');
+        /* 老式形参上的 float 就是 double —— 调用方那一侧提升过了，
+         * 形参再按 float 收会把一个 double 的位模式当 float 读。 */
+        if (btype(ty.t) === VT_FLOAT) ty = ctype((ty.t & ~VT_BTYPE) | VT_DOUBLE, null);
+        this.needComplete(d.name, ty);
+        p.ty = ty;
+        if (this.tok !== COMMA) break;
+        this.next();
+      }
+      this.skip(SEMI);
+    }
   }
 
   paramList(params) {
@@ -4611,13 +4683,16 @@ export class CGen {  /**
    * C 允许它不同，可那会让「循环里取地址」变成一件说不清的事。平铺让每个声明的地址在
    * 整个函数里恒定，代价是帧大一点。
    */
-  finishFunc(global, info, name, ret, params, variadic, isInline) {
+  finishFunc(global, info, name, ret, params, variadic, isInline, old) {
     if (info.params !== null && info.params.length !== params.length) {
       this.err(`conflicting types for '${name}'`);
     }
     info.params = params;
     info.ret = ret;
     info.variadic = variadic === true;
+    /* 老式的（`FUNC_OLD`）：调用点不核对实参个数（`gfunc_param_typed`，
+     * `tccgen.c:5352` —— 没有原型就没有可核对的东西）。 */
+    info.old = old === true;
     info.declared = true;
     info.f.ret = mirTypeOf(ret);
 
