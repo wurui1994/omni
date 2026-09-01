@@ -510,6 +510,21 @@ reTest('^[0-9a-fA-F]{1,6}$', '', 'abcdef');
 reTest('://', '', 'http://x');
 reTest('^a', 'm', 'b\va');
 reTest('^[A-Za-z_$][A-Za-z0-9_$]*$', '', '$x1');
+// \b / \B（零宽断言）。REPL 的"像不像表达式"判断就用它 —— 原先 C 侧当场报错，
+// 于是自举出来的编译器一进 repl 的回显就挂（\b 在索引 98 那一条）。
+reTest('^(if|else|while|return)\\b', '', 'return x');
+reTest('^(if|else|while|return)\\b', '', 'returnish');
+reTest('\\bcat\\b', '', 'a cat sat');
+reTest('\\bcat\\b', '', 'concatenate');
+reTest('\\Bcat', '', 'concat');
+reTest('\\Bcat', '', 'cat');
+reTest('\\bx', '', 'x');
+reTest('x\\b', '', 'x');
+reTest('\\b_', '', '_a');
+reTest('[\\b]', '', 'a\bb');
+reMatch('\\b\\w+\\b', 'g', 'one two, three!');
+reReplace('\\bfoo\\b', 'g', 'foo food foo', 'X');
+reSplit('\\b', '', 'ab cd');
 
 reMatch("'", 'g', "a'b'c");
 reMatch("'", 'g', 'abc');

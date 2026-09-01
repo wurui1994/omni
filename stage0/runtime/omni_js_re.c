@@ -38,6 +38,7 @@ enum {
   RE_CLASS,  /* [...] / [^...] / \d \w \s 那一批 */
   RE_BOL,    /* ^ */
   RE_EOL,    /* $ */
+  RE_WB,     /* \b / \B（negate 区分）—— 零宽断言，两侧"是不是单词码元"不同即成立 */
   RE_GROUP,  /* (...) 与 (?:...) */
   RE_ALT,    /* a|b|c */
   RE_REP     /* 量词 */
@@ -78,6 +79,11 @@ struct omni_re_s {
 /* JS 的 LineTerminator。`.` 不匹配这四个，`m` 下的 ^ $ 认这四个。 */
 static bool re_is_lt(uint16_t c) {
   return c == 0x0a || c == 0x0d || c == 0x2028 || c == 0x2029;
+}
+
+/* \b 认的"单词码元"就是 \w 那一套：[A-Za-z0-9_]（非 unicode 模式的 JS 语义） */
+static bool re_is_wordc(uint16_t c) {
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
 }
 
 /* ---------------------------------------------------------------- 解析 */
@@ -203,8 +209,8 @@ static uint16_t re_esc_char(re_parse *ps, uint16_t c) {
       ps->i += 4;
       return (uint16_t)v;
     }
-    case 'b': re_err(ps, "\\b (word boundary) is not supported");
-    case 'B': re_err(ps, "\\B (word boundary) is not supported");
+    case 'b': return 0x08;   /* 只有类里面会走到这儿：`[\b]` 在 JS 里是退格 */
+    case 'B': return 'B';    /* `[\B]` 是身份转义（Annex B） */
     case 'x': re_err(ps, "\\xNN escape is not supported, use \\uXXXX");
     case 'c': re_err(ps, "\\cX control escape is not supported");
     case 'p': re_err(ps, "\\p{...} unicode property escape is not supported");
@@ -318,6 +324,13 @@ static int re_atom(re_parse *ps) {
       ps->i++;
       if (ps->i >= ps->n) re_err(ps, "trailing backslash");
       uint16_t e = ps->p[ps->i++];
+      /* \b / \B 是**断言**，不是码元，所以在这里分流（类里面的 `[\b]` 仍然是退格，
+         那条走 re_esc_char）。零宽，位置不动。 */
+      if (e == 'b' || e == 'B') {
+        int node = re_new(ps, RE_WB);
+        ps->nodes[node].negate = (e == 'B');
+        return node;
+      }
       int rlo, rn, neg;
       if (re_esc_set(ps, e, &rlo, &rn, &neg)) {
         int node = re_new(ps, RE_CLASS);
@@ -386,7 +399,7 @@ static int re_quant(re_parse *ps, int atom, int g0) {
   }
 
   int kind = ps->nodes[atom].kind;
-  if (kind == RE_BOL || kind == RE_EOL) re_err(ps, "quantifier after an anchor is not supported");
+  if (kind == RE_BOL || kind == RE_EOL || kind == RE_WB) re_err(ps, "quantifier after an anchor is not supported");
 
   int lazy = 0;
   if (ps->i < ps->n && ps->p[ps->i] == '?') { lazy = 1; ps->i++; }
@@ -660,6 +673,15 @@ static bool re_m1(re_mc *cx, int node, int64_t pos, const re_kont *k) {
       case RE_EOL:
         if (!(pos == cx->slen || (cx->re->multiline && re_is_lt(cx->s[pos])))) return false;
         node = nd->next; continue;
+      /* \b：左右两侧"是不是单词码元"不同就成立（串首/串尾当非单词侧）。\B 取反。
+         零宽 —— pos 不动，所以量词后缀在解析期就拒了。 */
+      case RE_WB: {
+        bool before = pos > 0 && re_is_wordc(cx->s[pos - 1]);
+        bool after = pos < cx->slen && re_is_wordc(cx->s[pos]);
+        bool at = before != after;
+        if (nd->negate ? at : !at) return false;
+        node = nd->next; continue;
+      }
       case RE_ALT: {
         re_kont kk;
         kk.kind = RE_K_NODE;

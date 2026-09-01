@@ -1044,9 +1044,11 @@ function takePending() {
  * prelude 里那份同名的是 $js_err_text，两边必须说同一句话。
  */
 export function jsErrText(v) {
-  if (v instanceof Map) {
+  // 标签用 typeTag 问，不用 instanceof —— 后者只对 Error 开（ADR-0011 决策 15），
+  // 这份源码自己也要被降级
+  if (typeTag(v) === 'dict') {
     const cls = v.get('$cls');
-    if (Array.isArray(cls) && cls.length > 0) {
+    if (typeTag(cls) === 'list' && cls.length > 0) {
       const msg = v.get('message');
       return `${cls[0]}: ${msg === undefined ? '' : callJsOp('js_str', [msg])}`;
     }
