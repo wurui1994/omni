@@ -288,13 +288,14 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
 8. **C 的库面**：`libtcc1` 的等价物（软除法/浮点辅助/`alloca`/`setjmp`）与 libc 的接法。
    原先写的是"先转手宿主的 libc，走既有的 extern-C FFI"，第五片证明**转手不成立**
    （指针是自家线性内存里的偏移，宿主 libc 读不到），改成一个读写线性内存的宿主模块，
-   见第五片的落地节。**前九片已落地**（预定义的宏 —— 目标的自述，五十条，
+   见第五片的落地节。**前十片已落地**（预定义的宏 —— 目标的自述，五十条，
    顺序与值都对着 `tcc -dM -E` 抄；自带的系统头目录 + 编译器必须自己给的那四份头；
    `stdio.h`/`stdlib.h`/`string.h` 的最小子集 —— libc 的自述；
    `strtol` 一族与 `strncpy`/`strchr`/`strstr` 那几条；
    `qsort`/`bsearch` —— libc 回头调 MIR 的那扇门；`vprintf` 一族；`<ctype.h>`；
-   `<errno.h>` —— data 段里一格 + `__omni_errno_location`；三条标准流与 `fprintf`），
-   见下面的第八刀第一到九片节。
+   `<errno.h>` —— data 段里一格 + `__omni_errno_location`；三条标准流与 `fprintf`；
+   真的文件 —— `fopen`/`fread`/`fgets`/`fseek`，整份快照），
+   见下面的第八刀第一到十片节。
 
 最后三步是**后端**：
 
@@ -3215,6 +3216,75 @@ tinycc 的源码读源文件正是「整份读进来」，所以第一条够用 
 它是一个**刻意的简化**，而不是忘了。
 
 <!-- 第八刀第九片-END -->
+
+
+## 落地：第八刀第十片 —— 真的文件，与一处写在明处的简化
+
+`fopen` / `fclose` / `fread` / `fgets` / `fgetc` / `fseek` / `ftell` / `rewind` /
+`feof` / `ferror` / `remove`。句柄从 4 起（1/2/3 是三条标准流），宿主那边一张表：
+`{ path, data, pos, write, eof, err, dirty }`。
+
+### 那处简化：整份快照
+
+`fopen` 时把整份文件读进宿主的一个字符串（**一个字符一个字节**），`fread`/`fgets`/
+`fseek` 都在那份快照上走；写模式攒在同一个字符串里，`fclose`/`fflush` 时整份落盘。
+
+于是**不成立**的有三件事，逐条写在这儿而不是留给将来的人猜：
+
+- **很大的文件**：整份进内存。
+- **边写边被别人读**：别人看到的是落盘那一刻的样子。
+- **`remove` 不真的删盘上的文件**，只把还开着的那份忘掉（`host/native.js` 里没有
+  unlink）。
+
+选它的理由：tinycc 的源码读源文件正是「整份读进来」，而真的 fd 级 IO 要给
+`host/native.js` 加一套 open/read/seek/close —— 那是后端那几步真的要跑
+`tcc -run` 时才必须的一格。
+
+`host/native.js` 只加了两条，而且与既有的 `readText`/`writeText` 差别只有一处：
+**latin1 而不是 UTF-8**（`readBinary`/`writeBinary`）。C 的 `FILE` 是字节流、
+线性内存里也是字节，中间过一遍 UTF-8 解码会把非 ASCII 的字节改掉。
+
+### 「从 main 返回」也要收摊
+
+C11 5.1.2.2.3：从 `main` 返回等价于 `exit`，而 `exit` 会冲刷并关掉所有流
+（7.22.4.4）。所以没写 `fclose` 的程序**也该**看到文件里有东西 —— 新加的
+`libcAtExit()` 在跑模块那一层的**两条**出去的路上（正常返回与 `ExitCall`）都调。
+
+它顺带把三样进程级状态清了：文件表、句柄计数、`errno` 那一格的地址、堆的起点。
+同一个进程里跑两个模块时不清就会把上一遍的状态漏进下一遍 —— `tests/mir` 那条轴
+正是一个进程里跑很多个模块。
+
+### 四处照实量出来的边角
+
+- **`fread` 回成员个数**，读到一半停下的那个成员**不算**（C11 7.21.8.1）。
+  搞错的话「读满一块就继续」的循环会多走一轮。
+- **`fseek` 成功要清掉 eof 标志**（7.21.9.2）。漏了的话「seek 回开头再读一遍」
+  立刻以为又到头了。
+- **`feof` 说的是「上一次读撞到了末尾」**，不是「现在在末尾」（7.21.10.2）——
+  所以它由 `fread`/`fgets`/`fgetc` 置，不在 `feof` 里现算。
+- **`fgets` 一个字节都没读到时回 NULL**，不是回空串（7.21.7.2）。
+
+### 量出来的数
+
+- `tests/c/gen/36-files.c`：退出码 35 + 18 行 stdout，与 `tcc -run` 逐字节相同。
+  写三行（`fputs`/`fprintf`/`fwrite` 各一种）、`fgets` 逐行读回、`fseek` 三种
+  `whence`、`fread` 的成员计数、`SEEK_END` + `ftell` 当文件长度、`fgetc` 数到底、
+  `rewind` 后整份读、打不开回 NULL、追加模式接在后面。
+  文件放 `/tmp` 下一个固定的名字 —— 工作目录不留东西，而文件名不进 stdout。
+- `tests/c/run.js`：**63 passed, 0 failed**。`tests/js-roundtrip/run.js`：110 passed。
+- 边界钉子仍是 6 条。
+
+### 下一片
+
+第八刀第十一片：**`int main(int argc, char **argv)`**。现在 `lowerC` 那儿还钉着
+`第六刀：'int main(argc, argv)' 还没到（要变参与 argv）`，而这一格现在**只差
+版图上的一块**：入口函数要把命令行的那几个串写进 data 段（或堆），再把
+`argv` 那张指针表也摆好，然后按两个实参调 `main`。
+
+它是「让 `omni tcc x.c` 这条命令真的能跑」的最后一格库面 —— tinycc 的
+`main` 第一件事就是读 `argv`。
+
+<!-- 第八刀第十片-END -->
 
 
 

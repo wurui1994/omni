@@ -31,7 +31,7 @@ import {
   memInit, memData, memSize, memGrow, memLoadFn, memStoreFn,
 } from '../interp/builtin.js';
 import { JS_ALL } from '../hir/js_abi.js';
-import { hasLibc, callLibc, ExitCall, setFnPtrCaller } from '../interp/libc.js';
+import { hasLibc, callLibc, ExitCall, setFnPtrCaller, libcAtExit } from '../interp/libc.js';
 import { lowerToMir } from './from_oir.js';
 import { verifyMir } from './verify.js';
 import {
@@ -977,6 +977,7 @@ export function runMirModule(oir, mir) {
   } catch (e) {
     /* `exit(n)`：stdout 照样要刷出去（C 的 `exit` 也是先冲 stdio 再退），退出码就是 n。 */
     if (e instanceof ExitCall) {
+      libcAtExit();
       flushOut();
       return e.code;
     }
@@ -990,6 +991,9 @@ export function runMirModule(oir, mir) {
     }
     throw e;
   }
+  /* 从 `main` 返回等价于 `exit`（C11 5.1.2.2.3），所以这一条路上也要收摊：
+   * 还开着的文件流落盘（第八刀第十片），然后冲 stdout。 */
+  libcAtExit();
   flushOut();
   return code;
 }

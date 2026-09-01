@@ -30,6 +30,19 @@ export function writeText(p, t) {
   return undefined;
 }
 
+/* C 那条腿的 `fopen` 用的两条（ADR-0017 第八刀第十片）。与上面两条的差别只有一处：
+ * **一个字符一个字节**（latin1），不是 UTF-8。C 的 `FILE` 是字节流，而线性内存里
+ * 存的也是字节 —— 中间过一遍 UTF-8 解码就会把非 ASCII 的字节改掉。 */
+
+export function readBinary(p) {
+  return node('node:fs').readFileSync(p, 'latin1');
+}
+
+export function writeBinary(p, t) {
+  node('node:fs').writeFileSync(p, Buffer.from(t, 'latin1'));
+  return undefined;
+}
+
 export function exists(p) {
   return node('node:fs').existsSync(p);
 }

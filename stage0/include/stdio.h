@@ -20,10 +20,12 @@
  * - **没有 `FILE`**、没有 `fopen` / `fprintf` / `fputs` / `stdout` / `stderr`。
  *   它们要真的文件描述符与宿主 IO，是另一片。现在的输出只有一条路：
  *   `printRaw` 写到进程的 stdout（对账的正是这一条）。
- * - **没有 `scanf` 一族**：读进来的方向一个字节都还没做。
- * - **`FILE` 只有那三条标准流**（第八刀第九片）：`fopen` / `fread` / `fclose` 要真的
- *   文件描述符与宿主 IO，是下一片。`FILE` 本身是**不透明**的，我们的句柄是 1/2/3 ——
- *   它们落在页 0 里，而页 0 整页留空，所以不可能与真的指针撞上。
+ * - **没有 `scanf` 一族**：读进来的方向只有 `fgets` / `fgetc` / `fread`，
+ *   格式化地读还没有。
+ * - **文件是一份快照**（第八刀第十片）：`fopen` 时整份读进宿主的一个缓冲，
+ *   `fclose`/`fflush` 时整份落盘。于是很大的文件与「边写边被别人读」不成立 ——
+ *   刻意的简化，见 ADR-0017 第八刀第十片那一节。
+ * - **`remove` 不真的删盘上的文件**，只把还开着的那份忘掉（同一处简化）。
  */
 #ifndef _STDIO_H
 #define _STDIO_H
@@ -32,6 +34,11 @@
 #include <stdarg.h>
 
 #define EOF (-1)
+
+/* `fseek` 的第三个实参。值照本机的 `<stdio.h>` 量的。 */
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
 
 /* 不完整类型：程序只能拿 `FILE *`，碰不到里头 —— C 就是这么规定的。 */
 typedef struct __omni_FILE FILE;
@@ -62,5 +69,17 @@ int fputs(const char *s, FILE *f);
 int fputc(int c, FILE *f);
 size_t fwrite(const void *p, size_t size, size_t n, FILE *f);
 int fflush(FILE *f);
+
+FILE *fopen(const char *path, const char *mode);
+int fclose(FILE *f);
+size_t fread(void *p, size_t size, size_t n, FILE *f);
+char *fgets(char *dst, int n, FILE *f);
+int fgetc(FILE *f);
+int fseek(FILE *f, long off, int whence);
+long ftell(FILE *f);
+void rewind(FILE *f);
+int feof(FILE *f);
+int ferror(FILE *f);
+int remove(const char *path);
 
 #endif /* _STDIO_H */

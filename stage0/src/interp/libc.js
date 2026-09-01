@@ -26,7 +26,7 @@
 // 第二十一片补上了 `%a`（见 `aText`）—— 于是这份清单只剩 `%p` 一格。
 
 import { memLoad, memStore, printRaw, flushOut, memSize, memGrow } from './builtin.js';
-import { stderr as hostStderr } from '../host/native.js';
+import { stderr as hostStderr, readBinary, writeBinary } from '../host/native.js';
 
 /**
  * `exit` 抛的那个信号（第六刀第十七片）。
@@ -643,6 +643,38 @@ const F_STDIN = 1n;
 const F_STDOUT = 2n;
 const F_STDERR = 3n;
 
+/* ------------------------------------------------------------------ 真的文件
+ *
+ * `fopen` 一族（第八刀第十片）。句柄从 4 起，宿主这边一张表：
+ *   `{ path, data, pos, write, eof, err }`
+ *
+ * **一处刻意的简化，不是忘了**：打开时就把整份文件读进宿主的一个字符串
+ * （一个字符一个字节），`fread` / `fgets` / `fseek` 都在那份**快照**上走；
+ * 写模式攒在同一个字符串里，`fclose` / `fflush` 时整份落盘。
+ *
+ * 于是不成立的有两件事：**很大的文件**（整份进内存）、以及**边写边被别人读**
+ * （别人看到的是落盘那一刻的样子）。选它的理由是 tinycc 的源码读源文件正是
+ * 「整份读进来」，而真的 fd 级 IO 要给 `host/native.js` 加一套 open/read/seek/close ——
+ * 那是后端那几步真的要跑 `tcc -run` 时才必须的一格。
+ */
+const files = new Map();      // 句柄 -> 那张表里的一行
+let nextFile = 4n;            // 1/2/3 是三条标准流
+
+/** `fopen` 的模式串：C 只认那几个字母，多的（`b`、`x`、`+`）在这一片按主字母算。 */
+function openMode(m) {
+  if (m.indexOf('r') >= 0) return 'r';
+  if (m.indexOf('w') >= 0) return 'w';
+  if (m.indexOf('a') >= 0) return 'a';
+  return null;
+}
+
+/** 把一份还没落盘的写入落到盘上。只读的流上是空操作。 */
+function fileSync(e) {
+  if (!e.write || !e.dirty) return;
+  writeBinary(e.path, e.data);
+  e.dirty = false;
+}
+
 /** 往一条流上写一段文字。认不出的句柄当场抛 —— 那是程序把野指针当 FILE* 用了。 */
 function streamWrite(f, s) {
   if (f === F_STDOUT) { printRaw(s); return; }
@@ -654,7 +686,15 @@ function streamWrite(f, s) {
     return;
   }
   if (f === F_STDIN) throw new Error('libc: 往 stdin 上写');
-  throw new Error(`libc: 不是一条流的句柄（${f}）`);
+  const e = files.get(f);
+  if (e === undefined) throw new Error(`libc: 不是一条流的句柄（${f}）`);
+  if (!e.write) { e.err = true; return; }   // 只读的流上写：置错误标志，不抛
+  /* 写在 `pos` 那儿（`fseek` 之后可能不在末尾）。落盘要等 `fclose`/`fflush`。 */
+  const head = e.data.slice(0, e.pos);
+  const pad = e.pos > e.data.length ? '\0'.repeat(e.pos - e.data.length) : '';
+  e.data = head + pad + s + e.data.slice(e.pos + s.length);
+  e.pos += s.length;
+  e.dirty = true;
 }
 
 /* ------------------------------------------------------------------ ctype
@@ -841,9 +881,139 @@ const LIBC = {
     return n;
   },
   fflush: (a) => {
-    /* `fflush(NULL)` 是「所有流一起冲」（C11 7.21.5.2）。我们只有 stdout 带缓冲，
-     * 所以这一条无论给谁都是把它冲掉 —— 除了 stdin，那是未定义行为，照本机放过。 */
+    /* `fflush(NULL)` 是「所有流一起冲」（C11 7.21.5.2）。stdout 那条冲缓冲，
+     * 文件那条**落盘** —— 也就是说「冲」在两种流上是两件不同的事，但对调用方一样。 */
     flushOut();
+    const f = BigInt(a[0]);
+    if (f === 0n) {
+      for (const e of files.values()) fileSync(e);
+      return 0n;
+    }
+    const e = files.get(f);
+    if (e !== undefined) fileSync(e);
+    return 0n;
+  },
+
+  /* ---- 真的文件（第八刀第十片）。整份快照，见上面那一节。 */
+  fopen: (a) => {
+    const path = readCStr(a[0]);
+    const mode = openMode(readCStr(a[1]));
+    if (mode === null) return 0n;
+    let data = '';
+    if (mode === 'r' || mode === 'a') {
+      try {
+        data = readBinary(path);
+      } catch {
+        // `r` 打不开就是 NULL（而且该设 errno = ENOENT）；`a` 打不开当空文件
+        if (mode === 'r') { setErrno(2); return 0n; }
+      }
+    }
+    const h = nextFile;
+    nextFile += 1n;
+    files.set(h, {
+      path,
+      data,
+      pos: mode === 'a' ? data.length : 0,
+      write: mode !== 'r',
+      eof: false,
+      err: false,
+      dirty: mode === 'w',      // `w` 要清空原文件，所以哪怕一个字节没写也得落盘
+    });
+    return h;
+  },
+  fclose: (a) => {
+    const f = BigInt(a[0]);
+    const e = files.get(f);
+    if (e === undefined) return -1n;
+    fileSync(e);
+    files.delete(f);
+    return 0n;
+  },
+  fread: (a) => {
+    /* 回**成员个数**（C11 7.21.8.1）。读到一半停下的那个成员**不算** ——
+     * 这一格搞错的话「读满一块就继续」的循环会多走一轮。 */
+    const size = BigInt(a[1]);
+    const n = BigInt(a[2]);
+    const e = files.get(BigInt(a[3]));
+    if (e === undefined || size === 0n || n === 0n) return 0n;
+    const want = Number(size * n);
+    const have = e.data.length - e.pos;
+    const got = want < have ? want : have;
+    for (let i = 0; i < got; i++) {
+      memStore('i8', BigInt(a[0]) + BigInt(i), 0, BigInt(e.data.charCodeAt(e.pos + i)));
+    }
+    e.pos += got;
+    if (got < want) e.eof = true;
+    return BigInt(Math.floor(got / Number(size)));
+  },
+  fgets: (a) => {
+    /* 读到换行**为止（含它）**，最多 n-1 个字节，末尾补 0（C11 7.21.7.2）。
+     * 一个字节都没读到就回 NULL —— 而不是回一个空串。 */
+    const n = Number(BigInt(a[1]));
+    const e = files.get(BigInt(a[2]));
+    if (e === undefined || n <= 0) return 0n;
+    if (e.pos >= e.data.length) { e.eof = true; return 0n; }
+    let s = '';
+    while (s.length < n - 1 && e.pos < e.data.length) {
+      const ch = e.data[e.pos];
+      e.pos++;
+      s += ch;
+      if (ch === '\n') break;
+    }
+    writeCStr(a[0], s);
+    return BigInt(a[0]);
+  },
+  fgetc: (a) => {
+    const e = files.get(BigInt(a[0]));
+    if (e === undefined || e.pos >= e.data.length) {
+      if (e !== undefined) e.eof = true;
+      return -1n;                       // EOF
+    }
+    const c = BigInt(e.data.charCodeAt(e.pos));
+    e.pos++;
+    return c;
+  },
+  fseek: (a) => {
+    /* `whence`：SEEK_SET 0 / SEEK_CUR 1 / SEEK_END 2（本机的 `<stdio.h>` 量过）。
+     * **成功时要清掉 eof 标志**（C11 7.21.9.2）—— 这一格漏了的话
+     * 「seek 回开头再读一遍」的循环会立刻以为又到头了。 */
+    const e = files.get(BigInt(a[0]));
+    if (e === undefined) return -1n;
+    const off = Number(BigInt.asIntN(64, BigInt(a[1])));
+    const whence = Number(BigInt(a[2]));
+    let p = off;
+    if (whence === 1) p = e.pos + off;
+    else if (whence === 2) p = e.data.length + off;
+    if (p < 0) return -1n;
+    e.pos = p;
+    e.eof = false;
+    return 0n;
+  },
+  ftell: (a) => {
+    const e = files.get(BigInt(a[0]));
+    return e === undefined ? -1n : BigInt(e.pos);
+  },
+  rewind: (a) => {
+    const e = files.get(BigInt(a[0]));
+    if (e !== undefined) { e.pos = 0; e.eof = false; e.err = false; }
+    return undefined;
+  },
+  feof: (a) => {
+    /* `feof` 说的是「**上一次读**撞到了末尾」，不是「现在在末尾」（C11 7.21.10.2）。
+     * 所以它由 `fread`/`fgets`/`fgetc` 置，而不是在这儿现算。 */
+    const e = files.get(BigInt(a[0]));
+    return e !== undefined && e.eof ? 1n : 0n;
+  },
+  ferror: (a) => {
+    const e = files.get(BigInt(a[0]));
+    return e !== undefined && e.err ? 1n : 0n;
+  },
+  remove: (a) => {
+    /* 这一片没有真的 unlink（`host/native.js` 里也没有）。只把还开着的那份忘掉 ——
+     * 于是「写出去、读回来、删掉」这条链在同一次运行里成立，但盘上的文件还在。
+     * 这是上面那处简化的一部分，将来接真的 fd 级 IO 时一起补。 */
+    const path = readCStr(a[0]);
+    for (const [h, e] of files) if (e.path === path) files.delete(h);
     return 0n;
   },
   strlen: (a) => BigInt(readCStr(a[0]).length),
@@ -1054,6 +1224,23 @@ const LIBC = {
 
 /** 这个名字在 libc 里有吗（降级器**不**问这一句：链接期缺符号是运行期的错）。 */
 export function hasLibc(name) { return Object.prototype.hasOwnProperty.call(LIBC, name); }
+
+/**
+ * 程序结束时要做的事（第八刀第十片）：还开着的流一律落盘。
+ *
+ * C 的 `exit` 会冲刷并关掉所有流（C11 7.22.4.4 第 2 段），而**从 `main` 返回等价于
+ * `exit`**（5.1.2.2.3）—— 所以没写 `fclose` 的程序也该看到文件里有东西。
+ * 跑模块的那一层在两条出去的路上（正常返回与 `ExitCall`）都调它。
+ */
+export function libcAtExit() {
+  for (const e of files.values()) fileSync(e);
+  files.clear();
+  /* 下一次运行是新的一遍：句柄从 4 重新开始，errno 那一格与堆也都会重新交过来。
+   * 同一个进程里跑两个模块时不清就会把上一遍的状态漏过去。 */
+  nextFile = 4n;
+  errnoAddr = 0n;
+  heapBase = 0n;
+}
 
 /**
  * 调一个 libc 函数。`args` 是宿主值数组。名字不认识就抛 —— 那等于链接期缺符号，
