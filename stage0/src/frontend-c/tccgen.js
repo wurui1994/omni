@@ -107,7 +107,8 @@
 // 全局量（data 段，常量初始化式）、`typedef`、`extern` 与「用过但没定义」的诊断、
 // 外部符号（`unit()` 末尾的转发桩）与变参调用（printf/sprintf 那一族已经跑通）、
 // **struct/union/enum、`.` 与 `->`、整块的 struct 赋值、不完整类型的指针、位域、
-// 聚合初始化器（含指定初始化器与不定长数组）、`switch`（含贯穿、`BRTABLE`/比较链两条路）、
+// 聚合初始化器（含指定初始化器、不定长数组、**省掉里层花括号**的嵌套写法）、`switch`
+// （含贯穿、`BRTABLE`/比较链两条路）、
 // `goto` 与语句标签（外围块上的，前向后向都行）、struct 的**传值与返回**（传地址 +
 // 隐藏的返回指针）、带括号的声明符（`int (*a)[3]`、`int (*f(int))[3]`）、**函数指针**
 // （调用、回调、函数指针表、当静态初始化式）、**浮点**（`float`/`double`、与整型互转、
@@ -117,9 +118,10 @@
 // 信号，从任意深处一路退出去）**。
 // 还没到：`goto` 跳到不在外围块上的标签（relooper 那一路）、标签长在里层控制结构里
 // （Duff's device）、**外部**函数上的 struct 传值/返回（要真的 ABI）、通过函数指针调
-// **变参**函数、函数类型的 typedef、嵌套聚合省掉里层花括号、`long double`（它不是
+// **变参**函数、函数类型的 typedef、`long double`（它不是
 // double）、整型的**静态**初始化式里的浮点常量、printf 的 `%a`、
-// 把 struct 传进变参的可变部分、从变参里 `va_arg` 出 struct 或大于 8 字节的东西。
+// 把 struct 传进变参的可变部分、从变参里 `va_arg` 出 struct 或大于 8 字节的东西、
+// 串起来的指定初始化器（`.a.b = 3`）、不定长数组配省掉里层花括号（`int a[][2] = {1,2,3,4}`）。
 //
 // 碰到还没做到的东西**当场报错**，报错文本里带「第六刀」字样 —— 一眼能看出是进度不是
 // bug，而且下一片把它做掉时 `gen-bad/` 里那条用例会跟着红，于是「边界移动了」这件事
@@ -1368,8 +1370,7 @@ export class CGen {  /**
       return;
     }
     if (this.tok === LBRACE) {
-      if (isArray(ty.t)) return this.initArray(dest, off, ty);
-      if (isStruct(ty.t)) return this.initStruct(dest, off, ty);
+      if (isArray(ty.t) || isStruct(ty.t)) return this.initBraced(dest, off, ty);
       /* 标量外面套一层花括号是合法的：`int x = { 5 };`（C11 6.7.9 第 11 段）。 */
       this.next();
       this.initializer(dest, off, ty);
@@ -1446,67 +1447,105 @@ export class CGen {  /**
     }
   }
 
-  /** `{…}` 铺进数组。`[3] = v` 那种指定初始化器也在这儿。 */
-  initArray(dest, off, ty) {
+  /**
+   * `{…}` 铺进聚合。数组与 struct/union **合成一份**，因为「省掉里层花括号」这条规则
+   * （C11 6.7.9 第 20 段）是跨着两者的：`struct S a[2] = {1,2,3,4}` 一层是数组、
+   * 一层是 struct，而「上一层没吃完的东西交给下一层接着吃」的走法只有一套。
+   *
+   * 做法是一个**下降栈**，不是递归：栈顶是「现在正在填的那一层」，每层记着类型、
+   * 这一层在 dest 上的偏移、下一个要填的序号。
+   *   - 要填的东西是聚合、而记号不是 `{` → 省了花括号，往里**下降**一层。
+   *   - 一层填满 → 往外**回卷**一格（外层的序号 +1）。
+   *   - 逗号**只由花括号那一层吃**。省花括号的层不碰分隔符，于是不存在「吃多了要还回去」
+   *     那种回退 —— 一遍过的降级器里能不回退就别回退。
+   *
+   * 指定初始化器（`[3] =` / `.f =`）只作用在花括号那一层（C11 6.7.9 第 7 段说的
+   * current object 就是它），所以碰到它先把下降出来的那些层全弹掉。
+   */
+  initBraced(dest, off, ty) {
     this.next();      // `{`
-    const es = typeSize(ty.ref).size;
-    const n = ty.count;
-    let i = 0;
+    const stack = [{ ty, off, i: 0 }];
     while (this.tok !== RBRACE) {
       if (this.tok === TOK_EOF) this.err("'}' expected");
-      if (this.tok === LBRACK) {
-        // 指定初始化器（C99 6.7.9 第 6 段）：`[3] = v` 之后接着往下排
-        this.next();
-        i = Number(this.constExpr());
-        this.skip(RBRACK);
-        this.skip(ASSIGN);
-        if (i < 0) this.err('negative array designator');
+      if (this.tok === LBRACK || this.tok === DOT) {
+        while (stack.length > 1) stack.pop();
+        this.initDesignator(stack[0]);
       }
-      if (n >= 0 && i >= n) this.err('excess elements in array initializer');
-      /* 嵌套的数组可以省掉里面那层花括号（`int a[2][2] = {1,2,3,4}`）—— C 允许，
-       * 而要支持它得在这儿把「还没吃完的元素」交给下一层。这一片没做：省花括号
-       * 的写法当场报错，别静悄悄按别的意思铺。 */
-      if (isArray(ty.ref.t) && this.tok !== LBRACE && this.tok !== TOK_STR) {
-        this.todo('嵌套数组省掉里层花括号还没到（`int a[2][2] = {1,2,3,4}`）');
+      for (;;) {
+        const el = this.initElem(stack[stack.length - 1]);
+        if (this.tok === LBRACE) break;                          // 花括号写全了
+        if (isArray(el.ty.t) && this.tok === TOK_STR) break;      // 字符串铺进 char 数组
+        if (!isArray(el.ty.t) && !isStruct(el.ty.t)) break;       // 标量，到底了
+        if (isStruct(el.ty.t) && el.ty.ref.fields === null) {
+          this.err(`'${typeText(el.ty)}' is an incomplete type`);
+        }
+        stack.push({ ty: el.ty, off: el.off, i: 0 });
       }
-      this.initializer(dest, off + i * es, ty.ref);
-      i++;
+      const lv = stack[stack.length - 1];
+      const at = this.initElem(lv);
+      this.initializer(dest, at.off, at.ty);
+      this.initBump(lv);
+      while (stack.length > 1 && this.initFull(stack[stack.length - 1])) {
+        stack.pop();
+        this.initBump(stack[stack.length - 1]);
+      }
       if (this.tok !== COMMA) break;
       this.next();
     }
     this.skip(RBRACE);
   }
 
-  /** `{…}` 铺进 struct / union。`.f = v` 那种指定初始化器也在这儿。 */
-  initStruct(dest, off, ty) {
-    this.next();      // `{`
-    const info = ty.ref;
-    if (info.fields === null) this.err(`'${typeText(ty)}' is an incomplete type`);
-    const un = isUnion(ty.t);
-    let k = 0;
-    while (this.tok !== RBRACE) {
-      if (this.tok === TOK_EOF) this.err("'}' expected");
-      if (this.tok === DOT) {
-        this.next();
-        const nm = this.identName();
-        k = info.fields.findIndex((x) => x.name === nm);
-        if (k < 0) this.err(`'${typeText(ty)}' has no member named '${nm}'`);
-        this.skip(ASSIGN);
+  /** 填完一格：序号 +1。union 例外 —— 它只初始化**一个**成员（C11 6.7.9 第 17 段），
+   *  所以直接跳到「满」，后面再来东西就是 excess 而不是悄悄盖掉第一个。 */
+  initBump(lv) {
+    lv.i++;
+    if (isUnion(lv.ty.t)) lv.i = lv.ty.ref.fields.length;
+  }
+
+  /** 这一层填满了吗（不定长数组永远没满，它的长度是数出来的）。 */
+  initFull(lv) {
+    if (isArray(lv.ty.t)) return lv.ty.count >= 0 && lv.i >= lv.ty.count;
+    return lv.i >= lv.ty.ref.fields.length;
+  }
+
+  /** 这一层的第 `i` 格是什么类型、在哪儿。满了还要就是 excess。 */
+  initElem(lv) {
+    if (isArray(lv.ty.t)) {
+      if (lv.ty.count >= 0 && lv.i >= lv.ty.count) {
+        this.err('excess elements in array initializer');
       }
-      if (k >= info.fields.length) this.err('excess elements in struct initializer');
-      const fd = info.fields[k];
-      if (isStruct(fd.ty.t) && this.tok !== LBRACE) {
-        this.todo('嵌套 struct 省掉里层花括号还没到');
-      }
-      this.initializer(dest, off + fd.off, fd.ty);
-      k++;
-      /* union 只初始化**一个**成员（C11 6.7.9 第 17 段）—— 没有 designator 时是第一个。
-       * 后面还跟着东西就是错，别静悄悄把第二个盖到第一个身上。 */
-      if (un) break;
-      if (this.tok !== COMMA) break;
-      this.next();
+      return { ty: lv.ty.ref, off: lv.off + lv.i * typeSize(lv.ty.ref).size };
     }
-    this.skip(RBRACE);
+    const fields = lv.ty.ref.fields;
+    if (fields === null) this.err(`'${typeText(lv.ty)}' is an incomplete type`);
+    if (lv.i >= fields.length) {
+      this.err(`excess elements in ${isUnion(lv.ty.t) ? 'union' : 'struct'} initializer`);
+    }
+    const fd = fields[lv.i];
+    return { ty: fd.ty, off: lv.off + fd.off };
+  }
+
+  /** `[3] = v`（C99 6.7.9 第 6 段）与 `.f = v`：把这一层的序号挪过去，之后接着往下排。 */
+  initDesignator(lv) {
+    if (this.tok === LBRACK) {
+      if (!isArray(lv.ty.t)) this.err('array index in non-array initializer');
+      this.next();
+      const k = Number(this.constExpr());
+      this.skip(RBRACK);
+      if (k < 0) this.err('negative array designator');
+      lv.i = k;
+    } else {
+      if (!isStruct(lv.ty.t)) this.err('field name not in record or union initializer');
+      this.next();
+      const nm = this.identName();
+      const k = lv.ty.ref.fields.findIndex((x) => x.name === nm);
+      if (k < 0) this.err(`'${typeText(lv.ty)}' has no member named '${nm}'`);
+      lv.i = k;
+    }
+    if (this.tok === LBRACK || this.tok === DOT) {
+      this.todo('串起来的指定初始化器还没到（`.a.b = 3`、`[1][2] = 3`）');
+    }
+    this.skip(ASSIGN);
   }
 
   /**
@@ -1541,28 +1580,31 @@ export class CGen {  /**
     if (this.tok !== LBRACE) this.err(`array size missing`);
     const body = this.cpp.captureBraced();
     const toks = body.toks;
+    /* 元素本身是聚合时，「一格」与「一个记号」不再是一回事 —— 见下面那条边界。 */
+    const aggElem = isArray(ty.ref.t) || isStruct(ty.ref.t);
     let depth = 0;
     let n = 0;
     let item = false;
     for (let i = 0; i < toks.length; i++) {
       const t = toks[i];
       if (t === TOK_EOF) break;
-      if (t === LBRACE || t === LPAR) { depth++; continue; }
-      if (t === LBRACK) {
-        if (depth === 1) {
-          this.todo('不定长数组配指定初始化器还没到（`int a[] = {[3]=1}`）');
-        }
-        depth++;
-        continue;
-      }
       if (t === RBRACE || t === RPAR || t === RBRACK) {
         depth--;
         if (depth === 0) break;
         continue;
       }
-      if (depth !== 1) continue;
-      if (t === COMMA) { n++; item = false; continue; }
-      item = true;
+      if (depth === 1) {
+        if (t === LBRACK) this.todo('不定长数组配指定初始化器还没到（`int a[] = {[3]=1}`）');
+        if (t === COMMA) { n++; item = false; continue; }
+        /* 这一格的头一个记号。省掉里层花括号（`int a[][2] = {1,2,3,4}`）在这儿数不出
+         * 长度：得先按元素类型把记号分格，那是 `initBraced` 那个下降栈的活，而这一遍
+         * 只看记号。所以当场报错，别数出一个错的长度。 */
+        if (!item && aggElem && t !== LBRACE && t !== TOK_STR) {
+          this.todo('不定长数组配省掉里层花括号的初始化式还没到（`int a[][2] = {1,2,3,4}`）');
+        }
+        item = true;
+      }
+      if (t === LBRACE || t === LPAR || t === LBRACK) depth++;
     }
     // 末尾多余的那个逗号不算一个元素：`{1, 2, }` 是两个
     return { ty: mkArray(ty.ref, item ? n + 1 : n), body };
