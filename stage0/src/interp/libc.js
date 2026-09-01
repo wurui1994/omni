@@ -20,11 +20,11 @@
 // 之前只比 `tcc -run` 的退出码（一个字节），从这里起比 stdout 的每一个字节。
 // 所以 `%d`/`%s`/宽度/精度这些格式规则必须照 C 的规矩来，不能照 JS 的习惯。
 //
-// **不能拿 tcc 对账的那几格**（第四片记下的那份清单在长）：
+// **不能拿 tcc 对账的那一格**（第四片记下的那份清单在长）：
 //   - `%p`：地址本身不同（我们的是线性内存偏移，tcc 的是进程地址）。
-//   - 浮点的 `%f`/`%e`/`%g`：前端还没有浮点，到那一片再说。
+// 浮点原先也在这份清单里，第十四片之后 `%f`/`%e`/`%g` 已经逐字节对上了（见 `fText`）。
 
-import { memLoad, memStore, printRaw } from './builtin.js';
+import { memLoad, memStore, printRaw, memSize, memGrow } from './builtin.js';
 
 /** 从线性内存里读一个 C 字符串（读到 0 为止）。回 JS 字符串，一个字符一个字节。 */
 export function readCStr(addr) {
@@ -304,15 +304,144 @@ export function cFormat(fmt, args, at) {
   return out;
 }
 
+/* ------------------------------------------------------------------ 堆
+ *
+ * `malloc` 一族（第六刀第十五片）。**所有簿记都在线性内存里**，宿主这边一个字节的状态
+ * 都不留 —— 于是「换成真的 malloc」是把这几个函数换掉，版图与不变量一个字都不用改，
+ * 而「上一次运行留下的堆」也不可能漏到下一次（内存每次 `memInit` 都是新的）。
+ *
+ * 版图（前端定的，见 tccgen.js 末尾那张表）：堆从影子栈之上的**下一个页边界**起。
+ *   [heapBase, +8)      brk：已经用掉的那一段的末尾
+ *   [heapBase+8, +16)   留空（让块头落在 16 的整数倍上）
+ *   [heapBase+16, brk)  一串块：每块 16 字节块头 + 载荷
+ * 块头：`[+0] i64 载荷字节数（16 的整数倍）`、`[+8] i64 在用吗`。
+ * 隐式空闲链表（块头就是链表 —— 顺着走就能找到下一块），首次适配，free 之后合并相邻的
+ * 空闲块。这是 K&R 那一版的形状：够 tinycc 用，而且每一步都看得懂。
+ *
+ * `heapBase` 由入口函数在 `main` 之前用一条 CCALL 交过来（`__omni_heap_init`）——
+ * 宿主这边不猜版图。没用到堆的模块连这条 CCALL 都不发。 */
+
+const HEAP_HDR = 16n;    // 块头字节数（也是对齐粒度）
+let heapBase = 0n;       // 0 = 还没初始化（也就是这个模块没用到堆）
+
+function heapNeed(n) {
+  /* `malloc(0)` 也给一块真地址（C11 7.22.3 允许两种，glibc 与 tcc 的 libc 都给地址）——
+   * 回 NULL 会让「分配了就往里写」的常见写法在这一格上崩，而那不是它的错。 */
+  const w = n < 16n ? 16n : n;
+  return (w + 15n) / 16n * 16n;
+}
+
+function brkGet() { return memLoad('i64', heapBase, 0); }
+function brkSet(v) { memStore('i64', heapBase, 0, v); }
+
+/** 相邻的空闲块并成一块。free 之后走一遍 —— O(块数)，但没有它碎片会一路长。 */
+function heapCoalesce() {
+  const end = brkGet();
+  let p = heapBase + HEAP_HDR;
+  while (p < end) {
+    if (memLoad('i64', p, 8) === 0n) {
+      for (;;) {
+        const nxt = p + HEAP_HDR + memLoad('i64', p, 0);
+        if (nxt >= end || memLoad('i64', nxt, 8) !== 0n) break;
+        memStore('i64', p, 0, memLoad('i64', p, 0) + HEAP_HDR + memLoad('i64', nxt, 0));
+      }
+    }
+    // 大小要**当场再读一遍**：上面那个循环可能刚把它改大了
+    p = p + HEAP_HDR + memLoad('i64', p, 0);
+  }
+}
+
+function heapAlloc(bytes) {
+  if (heapBase === 0n) {
+    throw new Error('libc: malloc 之前堆没有初始化（入口那条 __omni_heap_init 没发？）');
+  }
+  const need = heapNeed(bytes);
+  const end = brkGet();
+  /* 首次适配。够大就用，**多得下一整块**才切开 —— 切出一个装不下块头的碎片
+   * 等于把它永久丢掉。 */
+  let p = heapBase + HEAP_HDR;
+  while (p < end) {
+    const size = memLoad('i64', p, 0);
+    if (memLoad('i64', p, 8) === 0n && size >= need) {
+      if (size >= need + HEAP_HDR + 16n) {
+        const rest = p + HEAP_HDR + need;
+        memStore('i64', rest, 0, size - need - HEAP_HDR);
+        memStore('i64', rest, 8, 0n);
+        memStore('i64', p, 0, need);
+      }
+      memStore('i64', p, 8, 1n);
+      return p + HEAP_HDR;
+    }
+    p = p + HEAP_HDR + size;
+  }
+  // 往上推 brk。不够就 MGROW（页数向上取整；wasm 的 memory.grow 是同一个形状）
+  const want = end + HEAP_HDR + need;
+  const have = memSize() * 65536n;
+  if (want > have) {
+    const pages = (want - have + 65535n) / 65536n;
+    if (memGrow(pages) === -1n) return 0n;   // 真的没内存了：回 NULL，与 C 一致
+  }
+  memStore('i64', end, 0, need);
+  memStore('i64', end, 8, 1n);
+  brkSet(want);
+  return end + HEAP_HDR;
+}
+
+function heapFree(p) {
+  if (p === 0n) return;      // `free(NULL)` 什么都不做（C11 7.22.3.3 第 2 段）
+  memStore('i64', p - HEAP_HDR, 8, 0n);
+  heapCoalesce();
+}
+
 /**
  * libc 的那张表。键是 C 里的名字，值拿到**宿主值的实参数组**、回一个宿主值
  * （`void` 的函数回 `undefined`）。
  *
- * 只放「tinycc 的源码真的在用、而且不需要一个真的堆」的那些。`malloc` 一族要一个
- * 分配器，那是下一片的事 —— 缺的名字在运行期报「libc: 没有这个函数」，一眼能看出
- * 是进度而不是 bug（与前端那个「第六刀：」前缀同一条纪律）。
+ * 只放「tinycc 的源码真的在用」的那些。缺的名字在运行期报「libc: 没有这个函数」，
+ * 一眼能看出是进度而不是 bug（与前端那个「第六刀：」前缀同一条纪律）。
  */
 const LIBC = {
+  /* 入口函数在 `main` 之前发的那一条：把堆的起点交过来。宿主这边不猜版图 ——
+   * 版图是前端定的（tccgen.js 末尾那张表）。名字带 `__omni_` 前缀，
+   * 因为它不是 C 标准里的东西，而 C 程序不该撞上它。 */
+  __omni_heap_init: (a) => {
+    heapBase = BigInt(a[0]);
+    brkSet(heapBase + HEAP_HDR);
+    return undefined;
+  },
+  malloc: (a) => heapAlloc(BigInt(a[0])),
+  calloc: (a) => {
+    /* `nmemb * size` 会溢出 —— C 里那是 UB，这里在 BigInt 上算所以先算出真值再判：
+     * 装不下就回 NULL，而不是分配一小块然后让调用方写出界。 */
+    const n = BigInt(a[0]) * BigInt(a[1]);
+    const p = heapAlloc(n);
+    if (p === 0n) return 0n;
+    for (let i = 0n; i < n; i++) memStore('i8', p + i, 0, 0n);
+    return p;
+  },
+  realloc: (a) => {
+    const p = BigInt(a[0]);
+    const n = BigInt(a[1]);
+    if (p === 0n) return heapAlloc(n);
+    if (n === 0n) { heapFree(p); return 0n; }
+    const old = memLoad('i64', p - HEAP_HDR, 0);
+    // 原地够用就原地 —— C 只保证「内容保留到两者较小的那个长度」，地址允许不变
+    if (heapNeed(n) <= old) return p;
+    const q = heapAlloc(n);
+    if (q === 0n) return 0n;
+    for (let i = 0n; i < old; i++) memStore('i8', q + i, 0, memLoad('i8u', p + i, 0));
+    heapFree(p);
+    return q;
+  },
+  free: (a) => { heapFree(BigInt(a[0])); return undefined; },
+  strdup: (a) => {
+    const s = readCStr(a[0]);
+    const p = heapAlloc(BigInt(s.length + 1));
+    if (p === 0n) return 0n;
+    writeCStr(p, s);
+    return p;
+  },
+
   putchar: (a) => {
     printRaw(String.fromCharCode(Number(BigInt.asUintN(8, BigInt(a[0])))));
     return BigInt.asIntN(32, BigInt(a[0]));

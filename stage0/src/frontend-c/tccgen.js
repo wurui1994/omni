@@ -68,6 +68,9 @@
 // data** —— 线性内存出生时全是 0，而 C 正好规定静态存储期零初始化。
 // 指针就是**线性内存里的字节偏移**（`T_I64`），不是 ADR-0016 的 `T_PTR`/`T_TPTR` ——
 // 那两个带范围检查、一块一块地分配，而 C 要的是一整片可寻址的字节。
+// 堆（第十五片）在影子栈之上的下一个页边界起，往上长、不够就 `MGROW`；分配器在
+// `interp/libc.js` 里，**簿记全在线性内存上**，而堆的起点由入口函数用一条
+// `__omni_heap_init` 交给它 —— 宿主那边不猜版图，没用到堆的模块也不发那条。
 //
 // ## 调用约定里聚合类型那一格（第十一片）
 //
@@ -108,12 +111,13 @@
 // `goto` 与语句标签（外围块上的，前向后向都行）、struct 的**传值与返回**（传地址 +
 // 隐藏的返回指针）、带括号的声明符（`int (*a)[3]`、`int (*f(int))[3]`）、**函数指针**
 // （调用、回调、函数指针表、当静态初始化式）、**浮点**（`float`/`double`、与整型互转、
-// 静态初始化式、printf 的 `%f/%e/%g`）**。
+// 静态初始化式、printf 的 `%f/%e/%g`）、**堆**（`malloc`/`calloc`/`realloc`/`free`/
+// `strdup`，簿记全在线性内存上）**。
 // 还没到：`goto` 跳到不在外围块上的标签（relooper 那一路）、标签长在里层控制结构里
 // （Duff's device）、**外部**函数上的 struct 传值/返回（要真的 ABI）、通过函数指针调
 // **变参**函数、函数类型的 typedef、嵌套聚合省掉里层花括号、`long double`（它不是
-// double）、整型的**静态**初始化式里的浮点常量、printf 的 `%a`、`malloc` 那一族
-// （要堆）、变参函数的**定义**（要 `va_list`/`va_arg`）。
+// double）、整型的**静态**初始化式里的浮点常量、printf 的 `%a`、
+// 变参函数的**定义**（要 `va_list`/`va_arg`）。
 //
 // 碰到还没做到的东西**当场报错**，报错文本里带「第六刀」字样 —— 一眼能看出是进度不是
 // bug，而且下一片把它做掉时 `gen-bad/` 里那条用例会跟着红，于是「边界移动了」这件事
@@ -217,6 +221,13 @@ function alignUp(n, a) {
 
 /** 影子栈的对齐：一律 8（arm64 的 ABI 要 16，但我们只在内存里放标量与小聚合）。 */
 const FRAME_ALIGN = 8;
+
+/**
+ * 用到这几个名字之一，就说明这个单元要一个堆（第六刀第十五片）。
+ * 分配器本身在 `interp/libc.js` 里，簿记全在线性内存上；前端在这儿要做的只有两件事：
+ * 版图上给堆留出位置、在入口处把堆的起点交过去。
+ */
+const HEAP_FNS = new Set(['malloc', 'calloc', 'realloc', 'free', 'strdup']);
 
 /**
  * 影子栈的大小。1 MiB —— 与 tcc 在本机上的默认线程栈同一个量级，而递归深度超出它时
@@ -519,6 +530,8 @@ export class CGen {  /**
     this.strs = new Map();
     /** @type {{off:number,bytes:number[]}[]} 攒着的 data 段（内存要等 dataOff 定了才能声明） */
     this.pendingData = [];
+    /** 这个单元用到堆了吗（`malloc` 那一族）。用到才发那条 `__omni_heap_init` */
+    this.heapUsed = false;
     /** @type {Map<string,object>} `typedef` 的名字表（tcc 用 `VT_TYPEDEF` 挂在符号上） */
     this.typedefs = new Map();
     /** @type {Map<string,{ty:object,addr:number,defined:boolean,used:boolean}>} 全局量 */
@@ -3731,6 +3744,10 @@ export class CGen {  /**
       /* 这个单元里没有函数体 = 外部符号。C99 起「隐式声明」是错，tcc 只警告（并且当
        * `int f()`）—— 照 tcc，因为它是 oracle。 */
       if (!info.declared) this.cpp.warn(`implicit declaration of function '${name}'`);
+      /* 用到堆的模块要在入口处把堆的起点交给宿主（见 `lowerC` 末尾）。在这儿问而不是
+       * 在调用点问：外部符号的清单正好在这个循环里，而「有没有用到」就是「它是不是
+       * 这个单元里的一个外部符号」。 */
+      if (HEAP_FNS.has(name)) this.heapUsed = true;
       this.externThunk(name, info);
     }
     /* `extern int x;` 之后没有定义：真的编译器要等链接期才知道。我们只有一个翻译单元，
@@ -3764,15 +3781,23 @@ export function lowerC(path, text, host, defs) {
   cpp.startParse(path, text);
   gen.unit();
 
-  /* 线性内存的版图（ADR-0017 第六刀第三片）：
+  /* 线性内存的版图（ADR-0017 第六刀第三片，第十五片在末尾加了堆）：
    *   [0, 64K)            页 0 整页留空 —— C 的 `NULL` 于是**一定**访问不到，
    *                       而不是「碰巧落在别的东西上」
-   *   [64K, dataOff)      data 段：字符串字面量（以后还有全局量），往上长
+   *   [64K, dataOff)      data 段：字符串字面量与全局量，往上长
    *   [栈底, 栈顶)        影子栈：16 对齐，`$sp` 从栈顶往下长
-   * `mem.min` 按栈顶算出页数。上界不设（0）—— 这一片没人调 `MGROW`。 */
+   *   [堆底, …)           堆：从栈顶之上的**下一个页边界**起，往上长，不够就 `MGROW`
+   * `mem.min` 按栈顶（用到堆时按堆底加一页）算出页数。上界不设（0）。
+   * 堆按页边界起是为了「先给整整一页」，于是 `__omni_heap_init` 写第一个字节时
+   * 内存一定已经够 —— 那条初始化不必自己先长内存。 */
   const stackBase = alignUp(gen.dataOff, 16);
   const stackTop = stackBase + C_STACK_BYTES;
-  mod.setMem(Math.ceil(stackTop / MEM_PAGE), 0);
+  const heapBase = alignUp(stackTop, MEM_PAGE);
+  const pages = gen.heapUsed
+    ? heapBase / MEM_PAGE + 1
+    : Math.ceil(stackTop / MEM_PAGE);
+  mod.setMem(pages, 0);
+
   for (const d of gen.pendingData) mod.addData(d.off, d.bytes);
 
   const info = gen.funcs.get('main');
@@ -3787,6 +3812,12 @@ export function lowerC(path, text, host, defs) {
    * 没有任何函数要帧时 spNo 还是 -1，这条也就不发。 */
   if (gen.spNo >= 0) {
     entry.emit(OP.GSTORE, T_VOID, mod.consts.int(BigInt(stackTop)), REF_NONE, gen.spNo);
+  }
+  /* 堆的起点交给宿主那份分配器（`interp/libc.js`）。**只有用到堆才发** —— 没用到的
+   * 模块不该多一个外部符号（将来自带后端那条路上它是一次真的链接）。 */
+  if (gen.heapUsed) {
+    entry.emit(OP.CCALL, T_VOID, mod.cabiNo('__omni_heap_init'),
+      entry.pushArgs([mod.consts.int(BigInt(heapBase))]), 0);
   }
   const rt = mirTypeOf(info.ret);
   if (rt === T_VOID) {
