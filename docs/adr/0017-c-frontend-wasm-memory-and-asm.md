@@ -9259,6 +9259,77 @@ SysV 要按 8 字节一格分 INTEGER/SSE，苹果 arm64 要按「装不装得�
 
 <!-- 第九刀第三十六片-END -->
 
+## 落地：第九刀第三十七片 —— 换尺子：对齐的对象是 tcc，不是 clang
+
+这一片不加功能，改的是**验收标准**，以及为它做的一次勘察。结论有一条是意外的，
+而它把后面几刀的工作量砍掉了一大块。
+
+### 一、标准：最后写进文件的字节要与交叉编译的 tcc 相同
+
+从第九刀第一片起，native 这条腿的尺子是 clang：我们出 `.o`、clang 链、真机器上跑，
+输出对了就算过（`tests/c/native.js`）。这条路**留着** —— 它是"真的能跑"唯一的证据。
+但它不是对齐的尺子，理由是它只能覆盖**本机这一个目标**：本机的 clang/llvm 没法方便地
+交叉编译，而 PE（Windows）与 ELF（Linux）也在要支持的范围里。
+
+tcc 可以把交叉编译全开（必要时改它的代码）。而编译本身是一个**纯计算过程**：
+同一份输入、同一个目标，写出来的字节应当唯一。所以标准换成：
+
+> 最后写进文件的字节，与交叉编译的 tcc 写出来的逐字节相同。
+
+可执行文件上有一个例外：签名（macOS 的 ad-hoc code signature）那一段**跳过**。
+签名数据的结构是已知的，按结构定位并排除即可 —— 要求签名字节相同没有意义，
+它是对文件其余部分的一个函数。
+
+### 二、交叉编译器怎么来
+
+```
+mkdir .omni-cache/tcc-cross && cd .omni-cache/tcc-cross
+<tinycc>/configure --enable-cross && make -j8 cross
+```
+
+一次出全套：`arm64-osx-tcc`、`x86_64-osx-tcc`、`x86_64-tcc`、`i386-tcc`、
+`x86_64-win32-tcc`、`i386-win32-tcc`、`arm64-win32-tcc`、`arm64-tcc`、`arm-tcc`、
+`riscv64-tcc`、`arm-wince-tcc`、`c67-tcc`，以及各自的 `*-libtcc1.a`。
+调它们要带 `-B<tinycc 源码目录>`（win32 目标带 `-B<源码>/win32`）——
+否则找不到 `libtcc1.a` 与 `include/`。
+
+### 三、意外的那条：**tcc 的 `-c` 在所有目标上都写 ELF**
+
+拿一行 C（`int f(int x){return x+1;}`）在四个目标上各出一个 `.o`，头四个字节：
+
+```
+tcc arm64-osx   7f 45 4c 46   ELF
+tcc x86_64-osx  7f 45 4c 46   ELF
+tcc x86_64      7f 45 4c 46   ELF
+tcc x86_64-win32 7f 45 4c 46  ELF
+我们 arm64      cf fa ed fe   Mach-O
+```
+
+也就是说 Mach-O（`tccmacho.c`）与 PE（`tccpe.c`）**只在最终可执行文件那一步**出现；
+目标文件一律是 ELF（`tccelf.c` 的 `output_type == TCC_OUTPUT_OBJ` 那一路）。
+
+两个后果：
+
+1. **"目标文件对齐"只有一种格式要复刻**，四个目标共用同一段代码，
+   差别只在 `e_machine` 与重定位号。那是一个杠杆很长的活 —— 一份 ELF 目标写出
+   同时把 arm64/x86_64/i386/win32 四条腿的 `-c` 都对上。
+2. 我们现在的 `stage0/src/link/macho.js` 写的 Mach-O `.o` **不在对齐路径上** ——
+   它属于 clang oracle 那条腿（clang 只吃 Mach-O）。所以它不用改、也不该拿它去对账。
+   曾经以为"下一步是把 macho.js 写得和 tcc 一样"，那是个错的方向。
+
+第一次量的差距（同一行 C，arm64-osx 目标）：tcc 的 ELF `.o` 是 **789 字节**，
+我们的 Mach-O `.o` 是 **412 字节** —— 两个不同格式，这个数只是记个起点，不是差距。
+
+### 四、于是后面的排布
+
+- **ELF 目标文件写出**（对 `tccelf.c`）：一片，四个目标的 `-c` 一起对上。
+- **ELF 可执行文件**（Linux）、**Mach-O 可执行文件 + ad-hoc 签名**（macOS，
+  比对时跳过签名段）、**PE 可执行文件**（Windows）：各一片。
+- clang 那条腿照旧跑 `tests/c/native.js`，管"真的能跑"；tcc 那条腿管"字节相同"。
+  两条腿都要绿。
+
+<!-- 第九刀第三十七片-END -->
+
 
 
 
