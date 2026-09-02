@@ -33,7 +33,7 @@ import { OmniError } from '../source/diag.js';
 import * as a from './encode.js';
 import { CodeBuf } from './asm.js';
 import {
-  OP, REF_NONE, isConstRef, T_I32, T_I64, T_BOOL, typeKind,
+  OP, REF_NONE, isConstRef, T_I32, T_I64, T_BOOL, T_VOID, typeKind,
   CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16, OP_NAMES,
 } from '../mir/ir.js';
 
@@ -57,10 +57,12 @@ function widthOf(t) {
 }
 
 class FnGen {
-  constructor(mod, f) {
+  /** `buf` 是整个模块共用的一个缓冲，`callLabels` 是「函数号 -> 标签」（没有就不认 CALL）。 */
+  constructor(mod, f, buf, callLabels) {
     this.mod = mod;
     this.f = f;
-    this.buf = new CodeBuf();
+    this.buf = buf === undefined ? new CodeBuf() : buf;
+    this.callLabels = callLabels === undefined ? null : callLabels;
     /** 帧里 0 号槽位的偏移是 0，值的栈位接在槽位后面。 */
     this.valBase = f.slots.length * 8;
     const bytes = this.valBase + f.count() * 8;
@@ -220,6 +222,26 @@ class FnGen {
       return;
     }
 
+    /* ---- 调用。实参进 x0-x7，返回值在 x0。
+     * 不用管调用者保存的寄存器：这一片的值全在栈位上，跨调用活着的东西一个也没有 ——
+     * 「全落栈」这个笨办法在这儿一次性省掉了整个调用点的溢出逻辑。 */
+    if (op === OP.CALL) {
+      if (this.callLabels === null) nyi('单个函数里的 CALL（要按整个模块生成才有落点）');
+      const args = f.argsOf(f.b[i]);
+      if (args.length > 8) nyi(`${args.length} 个实参（超过 8 个要走栈）`);
+      let r = 0;
+      for (const ar of args) {
+        this.loadRef(r, ar);
+        r++;
+      }
+      const label = this.callLabels[f.a[i]];
+      if (label === undefined) throw new OmniError(`arm64: 没有 ${f.a[i]} 号函数`);
+      buf.bl(label);
+      if (typeKind(t) === T_VOID) return;
+      /* i32 的返回值要按规范形符号扩展：AAPCS 只保证 w0 有值，x0 的高 32 位不算数。 */
+      return this.def(i, 0, widthOf(t));
+    }
+
     /* ---- 槽位 */
     if (op === OP.LOAD) {
       this.frameLoad(RES, this.slotOff(f.aux[i]));
@@ -336,7 +358,8 @@ CMP[OP.UGE] = a.COND.cs;
 CMP[OP.ULE] = a.COND.ls;
 CMP[OP.UGT] = a.COND.hi;
 
-/** 一个 MIR 函数 -> 一段 arm64 机器码（`CodeBuf`，已回填）。 */
+/** 一个 MIR 函数 -> 一段 arm64 机器码（`CodeBuf`，已回填）。不认 CALL —— 单个函数
+ * 里没有别的函数的落点，要发调用得走 `genModule`。 */
 export function genFunc(mod, f) {
   const g = new FnGen(mod, f);
   g.gen();
@@ -347,4 +370,31 @@ export function genFunc(mod, f) {
 /** 图省事的入口：直接要字节。 */
 export function codeOf(mod, f) {
   return genFunc(mod, f).bytes();
+}
+
+/**
+ * 整个模块 -> 一段连着的机器码。
+ *
+ * 函数之间的调用走**标签**而不是符号：一个模块的函数全在同一个缓冲里，`bl` 的
+ * ±128MB 够得着，于是这一层不欠链接器任何账（跨模块的符号才欠，见 `asm.js` 的
+ * `blSym`）。`offsets[i]` 是第 i 个函数在这段字节里的起点。
+ */
+export function genModule(mod) {
+  const buf = new CodeBuf();
+  const labels = [];
+  for (let i = 0; i < mod.funcs.length; i++) labels.push(buf.label());
+  const offsets = [];
+  let i = 0;
+  for (const f of mod.funcs) {
+    offsets.push(buf.pos);
+    buf.place(labels[i]);
+    new FnGen(mod, f, buf, labels).gen();
+    i++;
+  }
+  const bytes = buf.bytes();
+  const sizes = [];
+  for (let k = 0; k < offsets.length; k++) {
+    sizes.push((k + 1 < offsets.length ? offsets[k + 1] : bytes.length) - offsets[k]);
+  }
+  return { bytes, offsets, sizes, relocs: buf.relocs };
 }

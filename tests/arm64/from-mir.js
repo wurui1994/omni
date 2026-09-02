@@ -20,20 +20,28 @@ import {
   MirModule, MirFunc, OP, REF_NONE, T_I64, T_I32, T_BOOL, T_VOID, T_F64,
   CVT_SEXT8, CVT_SEXT16, CVT_TRUNC, CVT_ZEXT,
 } from '../../stage0/src/mir/ir.js';
-import { codeOf } from '../../stage0/src/arm64/from_mir.js';
+import { codeOf, genModule } from '../../stage0/src/arm64/from_mir.js';
 
 const mod = new MirModule('main');
 const K = mod.consts;
 
+/** 收 n 个 long long 的函数，登记进模块（CALL 的 a 就是这个下标）。 */
+function mkFunc(m, name, nparams, body) {
+  const f = new MirFunc(name, [], T_I64);
+  const slots = [];
+  for (let i = 0; i < nparams; i++) {
+    const s = f.slot(`p${i}`, T_I64);
+    f.params.push({ name: `p${i}`, t: T_I64, slot: s });
+    slots.push(s);
+  }
+  const no = m.addFunc(f);
+  body(f, slots, no);
+  return f;
+}
+
 /** 一个「收两个 long long、回一个 long long」的函数。`body(f, x, y)` 里 x/y 是槽号。 */
 function fn(name, body) {
-  const f = new MirFunc(name, [], T_I64);
-  const sx = f.slot('x', T_I64);
-  const sy = f.slot('y', T_I64);
-  f.params.push({ name: 'x', t: T_I64, slot: sx });
-  f.params.push({ name: 'y', t: T_I64, slot: sy });
-  body(f, sx, sy);
-  return f;
+  return mkFunc(mod, name, 2, (f, s, no) => body(f, s[0], s[1], no));
 }
 
 const ld = (f, t, slot) => f.emit(OP.LOAD, t, REF_NONE, REF_NONE, slot);
@@ -202,18 +210,86 @@ t('中途 return', [1n, 2n], 11n, (f) => {
   ret(f, T_I64, K.int(22n));
 });
 
+// ---- 调用（第九刀第五片）。同一个模块里的函数之间走标签，不欠链接器的账。
+{
+  /* 递归：阶乘。自己叫自己 —— 函数号就是自己的下标，`no` 是 mkFunc 给的。 */
+  const fact = mkFunc(mod, 'omni_fact', 1, (f, s, no) => {
+    const n = ld(f, T_I64, s[0]);
+    const small = f.emit(OP.LE, T_I64, n, K.int(1n), 0);
+    f.emit(OP.IF, T_VOID, small, REF_NONE, 0);
+    ret(f, T_I64, K.int(1n));
+    f.emit(OP.END, T_VOID, REF_NONE, REF_NONE, 0);
+    const sub = f.emit(OP.SUB, T_I64, ld(f, T_I64, s[0]), K.int(1n), 0);
+    const rec = f.emit(OP.CALL, T_I64, no, f.pushArgs([sub]), 0);
+    ret(f, T_I64, f.emit(OP.MUL, T_I64, ld(f, T_I64, s[0]), rec, 0));
+  });
+  const factNo = mod.funcIndex.get(fact.name);
+  t('递归：阶乘', [10n, 0n], 3628800n, (f, x) =>
+    ret(f, T_I64, f.emit(OP.CALL, T_I64, factNo, f.pushArgs([ld(f, T_I64, x)]), 0)));
+
+  /* 八个实参正好占满 x0-x7。少一个多一个都错得很像，所以这条要有。 */
+  const sum8 = mkFunc(mod, 'omni_sum8', 8, (f, s) => {
+    let acc = ld(f, T_I64, s[0]);
+    for (let i = 1; i < 8; i++) {
+      acc = f.emit(OP.ADD, T_I64, acc, f.emit(OP.MUL, T_I64, ld(f, T_I64, s[i]),
+        K.int(BigInt(10 ** i)), 0), 0);
+    }
+    ret(f, T_I64, acc);
+  });
+  const sum8No = mod.funcIndex.get(sum8.name);
+  t('八个实参', [0n, 0n], 87654321n, (f) =>
+    ret(f, T_I64, f.emit(OP.CALL, T_I64, sum8No, f.pushArgs([
+      K.int(1n), K.int(2n), K.int(3n), K.int(4n),
+      K.int(5n), K.int(6n), K.int(7n), K.int(8n),
+    ]), 0)));
+
+  /* 调用点前后的值都在栈位上，所以 callee 把寄存器搅乱了也不影响 —— 这条查的正是它：
+   * 两次调用之间还夹着一个活着的值。 */
+  const twice = mkFunc(mod, 'omni_dbl', 1, (f, s) =>
+    ret(f, T_I64, f.emit(OP.MUL, T_I64, ld(f, T_I64, s[0]), K.int(2n), 0)));
+  const twiceNo = mod.funcIndex.get(twice.name);
+  t('调用夹着活着的值', [3n, 5n], 6n * 10n + 1n, (f, x, y) => {
+    const lx = ld(f, T_I64, x);
+    const ly = ld(f, T_I64, y);
+    const dx = f.emit(OP.CALL, T_I64, twiceNo, f.pushArgs([lx]), 0);
+    const dy = f.emit(OP.CALL, T_I64, twiceNo, f.pushArgs([ly]), 0);
+    /* dx*10 + (dy - dx - 3) = 60 + (10 - 9) = 61 */
+    const t1 = f.emit(OP.MUL, T_I64, dx, K.int(10n), 0);
+    const t2 = f.emit(OP.SUB, T_I64, dy, f.emit(OP.ADD, T_I64, dx, K.int(3n), 0), 0);
+    ret(f, T_I64, f.emit(OP.ADD, T_I64, t1, t2, 0));
+  });
+
+  /* i32 的返回值：AAPCS 只保证 w0 有值，所以调用点要按规范形符号扩展一次。 */
+  const neg32 = mkFunc(mod, 'omni_neg32', 1, (f, s) => {
+    const v = f.emit(OP.CVT, T_I32, ld(f, T_I64, s[0]), REF_NONE, CVT_TRUNC);
+    f.emit(OP.RET, T_I32, f.emit(OP.NEG, T_I32, v, REF_NONE, 0), REF_NONE, 0);
+  });
+  const neg32No = mod.funcIndex.get(neg32.name);
+  t('i32 的返回值要按规范形扩展', [5n, 0n], -5n, (f, x) =>
+    ret(f, T_I64, f.emit(OP.CALL, T_I32, neg32No, f.pushArgs([ld(f, T_I64, x)]), 0)));
+}
+
 // ---------------------------------------------------------------- 边界
 // 还没做的东西必须**明着报**。一个悄悄发错指令的后端比一个报错的后端坏得多。
+// 这些函数不进 `mod` —— 它们发不出来，混进去会把整个模块的生成一起拖倒。
+const badMod = new MirModule('bad');
 let bad = 0;
 for (const [what, build] of [
   ['浮点', (f) => { const l = ld(f, T_I64, 0); ret(f, T_I64, f.emit(OP.ADD, T_F64, l, l, 0)); }],
-  ['调用', (f) => { ret(f, T_I64, f.emit(OP.CALL, T_I64, 0, f.pushArgs([]), 0)); }],
   ['线性内存', (f) => { ret(f, T_I64, f.emit(OP.MLOAD, T_I64, ld(f, T_I64, 0), REF_NONE, 6)); }],
   ['槽号越界', (f) => { ret(f, T_I64, ld(f, T_I64, 99)); }],
+  ['单个函数里的 CALL 没有落点',
+    (f) => { ret(f, T_I64, f.emit(OP.CALL, T_I64, 0, f.pushArgs([]), 0)); }],
+  ['九个实参', (f, s, no) => {
+    ret(f, T_I64, f.emit(OP.CALL, T_I64, no, f.pushArgs(new Array(9).fill(K.int(1n))), 0));
+  }],
 ]) {
-  const f = fn(`omni_bad_${bad}`, build);
+  const f = mkFunc(badMod, `omni_bad_${bad}`, 2, build);
   let threw = false;
-  try { codeOf(mod, f); } catch { threw = true; }
+  try {
+    if (bad === 4) genModule(badMod);   // 九个实参那条要走模块路径才到得了
+    else codeOf(badMod, f);
+  } catch { threw = true; }
   if (!threw) {
     process.stdout.write(`  FAIL 「${what}」还没做，可是没报错\n`);
     process.exitCode = 1;
@@ -235,14 +311,22 @@ if (process.arch !== 'arm64') {
 const dir = mkdtempSync(join(tmpdir(), 'omni-frommir-'));
 let failed = 0;
 try {
-  const stub = ['.text'];
+  /* 整个模块生成一段连着的字节，函数之间的 `bl` 已经在里头回填好了。
+   * 用例要的符号靠 `.incbin 文件, 跳过, 取多少` 在同一段里切出来 —— 切成几个文件的话
+   * 链接器未必把它们摆在一起，函数间的相对跳转就会指到别处。 */
+  const blob = genModule(mod);
+  const binPath = join(dir, 'blob.bin');
+  writeFileSync(binPath, blob.bytes);
+  const stub = ['.text', '.p2align 2'];
   const main = ['#include <stdio.h>'];
   const calls = [];
-  for (let i = 0; i < cases.length; i++) {
-    const c = cases[i];
-    const bin = join(dir, `f${i}.bin`);
-    writeFileSync(bin, codeOf(mod, c.f));
-    stub.push('.p2align 2', `.global _${c.f.name}`, `_${c.f.name}:`, `.incbin "${bin}"`);
+  /* **必须按 blob 里的顺序切**：函数之间的 `bl` 是相对跳转，摆乱了就指到别处。 */
+  for (let k = 0; k < mod.funcs.length; k++) {
+    const nm = mod.funcs[k].name;
+    stub.push(`.global _${nm}`, `_${nm}:`,
+      `.incbin "${binPath}", ${blob.offsets[k]}, ${blob.sizes[k]}`);
+  }
+  for (const c of cases) {
     main.push(`extern long long ${c.f.name}(long long, long long);`);
     calls.push(`  printf("%lld\\n", ${c.f.name}(${c.args[0]}LL, ${c.args[1]}LL));`);
   }
