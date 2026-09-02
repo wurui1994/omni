@@ -3406,10 +3406,15 @@ export class CGen {  /**
     if (t === TOK_BUILTIN_VA_COPY) {
       const src = this.exprEq();
       this.skip(RPAR);
-      /* native（第二十五片）：`va_list` 在这条腿上是「指向后端那个 va_list 的指针」，
-       * 直接赋值只复制指针 —— SysV 上两个 ap 于是**互相牵动**（arm64 上恰好是对的）。
-       * 与其静默地错，明着报：要做对得让后端再出一条 `VACOPY`。 */
-      if (this.native) this.todo('native：va_copy（要后端复制 va_list 本身）');
+      /* native（第三十二片）：`va_list` 在这条腿上的内容归后端 —— arm64 上它就是那个
+       * 游标（直接赋值恰好对），SysV 上它是**指向**那个 24 字节结构的指针，抄指针会让
+       * 两个 ap 共用一个游标。所以这儿只发一条 `VACOPY`，两个实参都是**那两个 va_list
+       * 变量的地址**（后端要就地写 dest）。 */
+      if (this.native) {
+        if (!isPtr(ap.ty.t) || !isPtr(src.ty.t)) this.err('__builtin_va_copy expects two va_list');
+        this.f.emit(OP.VACOPY, T_I64, this.addrOf(ap), this.addrOf(src), 0);
+        return sVal(TY_VOID, REF_NONE);
+      }
       this.vstore(ap, src);
       return sVal(TY_VOID, REF_NONE);
     }

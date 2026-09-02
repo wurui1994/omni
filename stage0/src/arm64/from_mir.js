@@ -534,6 +534,16 @@ class FnGen {
       buf.emit(a.addImm(1, TMP1, TMP1, 8), a.strU(3, TMP1, TMP0, 0));
       return this.def(i, RES);
     }
+    /* `va_copy`（第三十二片）：苹果 arm64 上 `va_list` 就是那个游标，所以「抄一份」
+     * 就是抄那 8 字节 —— 两个 ap 从此各走各的。用 RES 当中转而不是 TMP1，是因为
+     * `loadRef` 会再要一个寄存器；这一条不产值，RES 正好闲着。 */
+    if (op === OP.VACOPY) {
+      this.loadRef(TMP0, f.b[i]);
+      buf.emit(a.ldrU(3, RES, TMP0, 0));
+      this.loadRef(TMP0, f.a[i]);
+      buf.emit(a.strU(3, RES, TMP0, 0));
+      return;
+    }
 
     /* ---- 存取（第九刀第七片）。地址就是真指针 —— native 上没有线性内存。 */
     if (op === OP.MLOAD) return this.mload(i);

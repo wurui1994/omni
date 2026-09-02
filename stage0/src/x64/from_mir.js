@@ -193,14 +193,18 @@ class FnGen {
       if (depth % 16 !== 0) depth += 16 - (depth % 16);
       this.regSave = -depth;
       bytes = depth;
-      let k = 0;
-      while (k < f.count()) {
-        if (f.op[k] === OP.VASTART) {
-          bytes += 24;
-          this.vaOffs.set(k, -bytes);
-        }
-        k++;
+    }
+    /* 一条 `VASTART` 或 `VACOPY` 一个 24 字节的结构。这个循环**不在** `f.variadic`
+     * 里面（第三十二片）：收一个 `va_list` 形参、抄一份自己用的那种函数（`vfprintf`
+     * 那个形状）自己不是变参的，可是它照样要一块新的结构 —— 不给它就只能与源共用，
+     * 那正是 `va_copy` 要避开的事。 */
+    let k = 0;
+    while (k < f.count()) {
+      if (f.op[k] === OP.VASTART || f.op[k] === OP.VACOPY) {
+        bytes += 24;
+        this.vaOffs.set(k, -bytes);
       }
+      k++;
     }
     this.frame = bytes + (bytes % 16 === 0 ? 0 : 16 - (bytes % 16));
     /* 出参区（第二十三片）：放不下寄存器的实参摆在 `rsp + 0` 起的一块。
@@ -537,6 +541,22 @@ class FnGen {
       buf.emit(x.aluRI(ALU.add, 8, TMP1, 8), x.movMR(8, TMP0, 8, TMP1));
       buf.place(done);
       return this.def(i, RES);
+    }
+    /* `va_copy`（第三十二片）：SysV 上要抄的是那个 24 字节的结构**本身**，不是指向它的
+     * 指针 —— 抄指针会让两个 ap 共用一个游标，`va_arg(ap2)` 于是把 ap 也推了一格。
+     * 所以给 dest 另开一块（帧里那 24 字节，见 `vaOffs`），三个 8 字节抄过去，
+     * 最后把新那块的地址写进 dest 那个 va_list 变量。 */
+    if (op === OP.VACOPY) {
+      const vl = this.vaOffs.get(i);
+      if (vl === undefined) throw new OmniError('x64: VACOPY 没有分到 va_list 的位置');
+      this.loadRef(TMP0, f.b[i]);
+      buf.emit(x.movRM(8, TMP0, TMP0, 0));            // TMP0 = 源结构的地址
+      for (let o = 0; o < 24; o += 8) {
+        buf.emit(x.movRM(8, TMP1, TMP0, o), x.movMR(8, BP, vl + o, TMP1));
+      }
+      this.loadRef(TMP0, f.a[i]);
+      buf.emit(x.lea(8, TMP1, BP, vl), x.movMR(8, TMP0, 0, TMP1));
+      return;
     }
 
     /* ---- 模块级变量。x86_64 上一条 RIP 相对的 `mov` 就够 —— 不必先取址

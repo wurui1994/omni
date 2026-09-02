@@ -208,13 +208,19 @@ function checkIndex(mod, f, i, op, v, bad, k) {
    * 「收一个 va_list 形参、替别人取实参」是合法的（`vfprintf` 就是那个形状）。
    * 取出来的类型限于 C 的变参能传的那几个：`float`/`bool` 过不来（默认提升成
    * double/int），放过去只会读到半格。 */
-  if (op === OP.VASTART || op === OP.VAARG) {
+  if (op === OP.VASTART || op === OP.VAARG || op === OP.VACOPY) {
     if (!mod.native) { bad(i, `${OP_NAMES[op]}：只有 native 这条腿有真的 va_list`); return; }
     if (v !== 0) { bad(i, `${OP_NAMES[op]} 的 aux 只能是 0`); return; }
     const t = f.t[i];
     if (op === OP.VASTART) {
       if (!f.variadic) { bad(i, `VASTART：函数 '${f.name}' 的形参表里没有 ...`); return; }
       if (t !== T_I64) bad(i, `VASTART 的 t 是 ${typeText(t)}，va_list 只能是 i64`);
+      return;
+    }
+    /* `VACOPY` 与 `VAARG` 一样不要求函数自己是变参的：`va_copy` 最常出现的地方
+     * 正是「收一个 va_list 形参、抄一份自己用」那种函数（第三十二片）。 */
+    if (op === OP.VACOPY) {
+      if (t !== T_I64) bad(i, `VACOPY 的 t 是 ${typeText(t)}，va_list 只能是 i64`);
       return;
     }
     if (t !== T_I64 && t !== T_I32 && t !== T_F64) {

@@ -102,6 +102,11 @@ const CASES = [
   ['变参的定义：类型混着（i64、double、指针）', 'return vmix(3, 7LL, 2.5, "abcd");'],
   ['变参的定义：va_list 传给别人（vprintf 那个形状）', 'return vhead(5, 2, 4, 6, 8, 10);'],
   ['变参的定义：一个变参都没取', 'return vsum(0, 1, 2);'],
+  /* va_copy（第三十二片）。 */
+  ['va_copy：抄一份，两边各走一遍', 'return vtwice(4, 1, 2, 3, 4);'],
+  ['va_copy：十个 int（跨过寄存器那条线）', 'return vtwice(10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10);'],
+  ['va_copy：走了一格之后再抄', 'return vskip(3, 7, 8, 9);'],
+  ['va_copy：在收 va_list 的那种函数里抄', 'return vhead2(4, 1, 2, 3, 4);'],
   /* 函数指针（第二十七片）：取地址是真符号地址，调用是间接调用。 */
   ['函数指针：直接调', 'long long (*f)(long long) = dbl; return f(21);'],
   ['函数指针：当实参传下去', 'return apply(trip, 7);'],
@@ -211,6 +216,51 @@ long long vhead(int n, ...) {
   __builtin_va_list ap;
   __builtin_va_start(ap, n);
   long long r = vrelay(n, ap);
+  __builtin_va_end(ap);
+  return r;
+}
+/* va_copy（第三十二片）：抄的是**一份新的游标**。这几条都刻意「抄完之后两边各走一遍」——
+ * 如果只抄了个指针（SysV 上直接赋值就是那样），第二遍会从第一遍停下的地方接着读。 */
+long long vtwice(int n, ...) {
+  __builtin_va_list ap, ap2;
+  long long a = 0, b = 0;
+  int i;
+  __builtin_va_start(ap, n);
+  __builtin_va_copy(ap2, ap);
+  for (i = 0; i < n; i++) a += __builtin_va_arg(ap2, int);
+  __builtin_va_end(ap2);
+  for (i = 0; i < n; i++) b += __builtin_va_arg(ap, int);
+  __builtin_va_end(ap);
+  return a * 1000 + b;
+}
+/* 走了一格之后再抄 —— 抄的是当前的游标，不是起点。 */
+long long vskip(int n, ...) {
+  __builtin_va_list ap, ap2;
+  long long r;
+  __builtin_va_start(ap, n);
+  __builtin_va_arg(ap, int);
+  __builtin_va_copy(ap2, ap);
+  r = __builtin_va_arg(ap2, int) * 10 + __builtin_va_arg(ap, int);
+  __builtin_va_end(ap2);
+  __builtin_va_end(ap);
+  return r;
+}
+/* 在**收 va_list 当形参**的函数里 va_copy：这种函数自己不是变参的，
+ * 而 SysV 上它照样要一块新的 24 字节结构。 */
+long long vrelay2(int n, __builtin_va_list ap) {
+  __builtin_va_list ap2;
+  long long s = 0;
+  int i;
+  __builtin_va_copy(ap2, ap);
+  for (i = 0; i < n; i++) s += __builtin_va_arg(ap2, int) * 2;
+  __builtin_va_end(ap2);
+  for (i = 0; i < n; i++) s += __builtin_va_arg(ap, int);
+  return s;
+}
+long long vhead2(int n, ...) {
+  __builtin_va_list ap;
+  __builtin_va_start(ap, n);
+  long long r = vrelay2(n, ap);
   __builtin_va_end(ap);
   return r;
 }
