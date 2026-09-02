@@ -236,7 +236,7 @@ function cName(name) {
  * @param isLast 是不是节表里最后一条（`.shstrtab` 认这个，`k` 直接按成 0xff）
  * @param isGot 是不是那条 `.got`（它单独一档 0x47，为的是进 PT_GNU_RELRO）
  */
-function sectionClass(s, i, named, bss, hasAllocReloc, isLast, isGot, isInterp) {
+function sectionClass(s, i, named, bss, hasAllocReloc, isLast, isGot, isInterp, isPltReloc) {
   let j;
   if (!named) j = 0x900;
   else if ((s.flags & SHF_ALLOC) !== 0) {
@@ -249,7 +249,9 @@ function sectionClass(s, i, named, bss, hasAllocReloc, isLast, isGot, isInterp) 
   else if (s.type === SHT_HASH || s.type === SHT_GNU_HASH) k = 0x12;
   else if (s.type === SHT_GNU_verdef || s.type === SHT_GNU_verneed
     || s.type === SHT_GNU_versym) k = 0x13;
-  else if (s.type === SHT_RELA) k = 0x20;
+  /* `.rela.plt` 单独一档 —— 于是它排在别的重定位表**后头**，`update_reloc_sections`
+   * 里 DT_RELA 那一段（把余下几张表接成连着的一块）就不会被它插一脚。 */
+  else if (s.type === SHT_RELA) k = isPltReloc ? 0x21 : 0x20;
   else if ((s.flags & SHF_EXECINSTR) !== 0) k = 0x60;
   else if ((s.flags & SHF_TLS) !== 0) k = 0x40 + (s.type === SHT_NOBITS ? 1 : 0);
   else if (s.type === SHT_PREINIT_ARRAY) k = 0x42;
@@ -483,6 +485,68 @@ export function elfExeImage(inp) {
   };
   const globDat = machine === EM_X86_64 ? R_X86_64_GLOB_DAT : R_AARCH64_GLOB_DAT;
   const jmpSlot = machine === EM_X86_64 ? R_X86_64_JUMP_SLOT : R_AARCH64_JUMP_SLOT;
+  /** symtab 的符号号 -> `.plt` 里那一格的偏移（`attr->plt_offset`）。 */
+  const pltOff = new Map();
+  /** symtab 的符号号 -> `name@plt` 那条符号的号（`attr->plt_sym`）。 */
+  const pltSym = new Map();
+  let PLT = -1;
+  let RELAPLT = -1;
+  const buildPlt = () => {
+    PLT = st.newSec('.plt', SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, 8, 4);
+  };
+  /** 动态那一路跳板的重定位表（`put_elf_reloc(dynsym, s1->plt, ...)`）。 */
+  const putPltReloc = (at, dynIdx) => {
+    if (RELAPLT < 0) {
+      RELAPLT = st.newSec('.rela.plt', SHT_RELA, SHF_ALLOC, 8, 24);
+      secs[RELAPLT].link = DYNSYM;
+      /* `build_got_entries` 末尾那一句：`.rela.plt` 的 `sh_info` 改指 `.got`
+       * —— 表里的 `r_offset` 落的是 GOT 那几格。 */
+      secs[RELAPLT].info = GOT;
+      secs[RELAPLT].relaFor = GOT;
+      relas.set(RELAPLT, []);
+    }
+    const list = relas.get(RELAPLT);
+    list.push({ at, sym: dynIdx, type: jmpSlot, add: 0n });
+    secs[RELAPLT].size = list.length * 24;
+    return list.length;
+  };
+  /**
+   * `create_plt_entry`：往 `.plt` 里加一格，返回这一格的偏移。
+   *
+   * 静态链接这一路**不叫** `relocate_plt`（`elf_output_file` 里那一句在
+   * `if (dynamic)` 里头），所以这些字节就是最后写进文件的样子 —— 里头的
+   * `got_offset` 还是节内偏移，没换成地址差。跳板本身跳不通，可这不打紧：
+   * 静态链接里没有解析例程，弱符号那一格是 0，谁也不会真跳进来。
+   */
+  const pltEntry = (gotOffset, nrel) => {
+    const d = secs[PLT].data;
+    const w32 = (v) => d.push(v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >>> 24) & 0xff);
+    if (machine === EM_X86_64) {
+      if (d.length === 0) {
+        /* PLT0：push 库的标识（GOT + 8），再跳去解析例程（GOT + 16）。 */
+        d.push(0xff, 0x35); w32(8);
+        d.push(0xff, 0x25); w32(16);
+        w32(0);
+      }
+      const at = d.length;
+      d.push(0xff, 0x25); w32(gotOffset);        // jmp *(got + x)
+      /* push 的是「这一格对应的重定位在表里的号」。静态那一路 `.plt` 没有自己的
+       * 重定位表（那几条在 `.rela.got` 里），`relofs` 于是是 0 —— 号是 -1。 */
+      d.push(0x68); w32(nrel - 1);
+      d.push(0xe9); w32(-(at + 16));             // jmp plt_start
+      secs[PLT].size = d.length;
+      return at;
+    }
+    /* arm64：头一格 32 字节先留空，每格 16 字节里只写 got 的偏移（64 位小端），
+     * 剩下 8 字节留给 `relocate_plt` 的 adrp/ldr/add/br。 */
+    if (d.length === 0) for (let k = 0; k < 32; k++) d.push(0);
+    const at = d.length;
+    w32(gotOffset);
+    w32(0);
+    for (let k = 0; k < 8; k++) d.push(0);
+    secs[PLT].size = d.length;
+    return at;
+  };
   for (let pass = 0; pass < 2; pass++) {
     for (let i = 1; i < secs.length; i++) {
       if (secs[i].type !== SHT_RELA) continue;
@@ -519,12 +583,21 @@ export function elfExeImage(inp) {
         }
         if (GOT < 0) buildGot();
         if (g === BUILD_GOT_ONLY) continue;
-        if (rt === jmpSlot) throw new OmniError(`elf: 符号 '${sym.name}' 要一条 .plt，还没写`);
-        if (gotOff.has(r.sym)) continue;
+        /* ---- put_got_entry。
+         *
+         * 「被调用」与「被取地址」记在**两个**格子里（`plt_offset` 与 `got_offset`），
+         * 于是同一个函数两样都来一遍就有两格 GOT：头一趟（代码那类）给跳板占一格，
+         * 第二趟（数据那类）再给取地址占一格。 */
+        const needPlt = rt === jmpSlot;
+        if (needPlt) {
+          if (pltOff.has(r.sym)) { r.sym = pltSym.get(r.sym); continue; }
+          if (PLT < 0) buildPlt();
+        } else if (gotOff.has(r.sym)) continue;
         const off = secs[GOT].size;
         secs[GOT].size = off + 8;
         for (let k = 0; k < 8; k++) secs[GOT].data.push(0);
-        gotOff.set(r.sym, off);
+        if (!needPlt) gotOff.set(r.sym, off);
+        let nrel = 0;
         if (DYNSYM < 0) {
           putGotReloc(off, rt, r.sym);
         } else if (Math.floor(sym.info / 16) === STB_LOCAL) {
@@ -537,7 +610,24 @@ export function elfExeImage(inp) {
             di = dynPutSym(sym.name, sym.value, sym.size, sym.info, 0, sym.shndx);
             dynIndex.set(r.sym, di);
           }
-          putGotReloc(off, rt, di);
+          if (needPlt) nrel = putPltReloc(off, di);
+          else putGotReloc(off, rt, di);
+        }
+        if (needPlt) {
+          const at = pltEntry(off, nrel);
+          pltOff.set(r.sym, at);
+          /* 跳板那一格自己是一条符号 `name@plt`（`plt_name` 那块 200 字节的栈缓冲
+           * 只留 195 个字符给名字），调用点的重定位改指它。 */
+          const ps = st.setSym({
+            name: `${sym.name.slice(0, 195)}@plt`,
+            value: at,
+            size: 0,
+            info: 1 * 16 + 2,
+            other: 0,
+            shndx: PLT,
+          });
+          pltSym.set(r.sym, ps);
+          r.sym = ps;
         }
       }
     }
@@ -629,6 +719,13 @@ export function elfExeImage(inp) {
     t.push([DT_RELA, relAddr]);
     t.push([DT_RELASZ, relSize]);
     t.push([DT_RELAENT, 24]);
+    if (RELAPLT >= 0) {
+      /* 跳板那一路的四条：DT_PLTGOT / DT_PLTRELSZ / DT_JMPREL / DT_PLTREL。 */
+      t.push([3, at(GOT)]);
+      t.push([2, secs[RELAPLT].size]);
+      t.push([23, at(RELAPLT)]);
+      t.push([20, DT_RELA]);
+    }
     t.push([DT_RELACOUNT, 0]);
     for (const nm of ['.preinit_array', '.init_array', '.fini_array']) {
       const i = findSec(nm);
@@ -688,7 +785,8 @@ export function elfExeImage(inp) {
       if (secs[r].relaFor === i && (secs[r].flags & SHF_ALLOC) !== 0) hasAllocReloc = true;
     }
     /* `.shstrtab` 是最后一条 —— `sort_sections` 把它的 `k` 直接按成 0xff。 */
-    const k = sectionClass(s, i, named, BSS, hasAllocReloc, i === SHSTR, i === GOT, i === INTERP);
+    const k = sectionClass(s, i, named, BSS, hasAllocReloc, i === SHSTR, i === GOT,
+      i === INTERP, i === RELAPLT);
     let n = ord.length;
     ord.push(i);
     cls.push(k);
@@ -862,6 +960,68 @@ export function elfExeImage(inp) {
     g[0] = a & 0xff; g[1] = (a >> 8) & 0xff; g[2] = (a >> 16) & 0xff; g[3] = (a >>> 24) & 0xff;
   }
 
+  /* ---- relocate_plt。
+   *
+   * `create_plt_entry` 落笔时只知道 GOT 里那一格的**偏移**，取址要的地址差得等摆好了
+   * 才算得出来 —— 这一趟就是回填那几处。`.rela.plt` 里的 `r_offset` 这会儿还是 GOT
+   * 里的偏移（换成绝对地址是 `relocate_sections` 末尾的事），所以每一格跳板对应的
+   * GOT 单元也在这儿写：动态链接器第一次跳进来之前，它得指着解析用的那段。
+   *
+   * 静态那一路不叫这一趟（`elf_output_file` 里那句在 `if (dynamic)` 里头）。 */
+  if (dynamic && PLT >= 0) {
+    const p = secs[PLT].bytes;
+    const dvp = new DataView(p.buffer, p.byteOffset, p.byteLength);
+    const gotB = secs[GOT].bytes;
+    const dvgot = new DataView(gotB.buffer, gotB.byteOffset, gotB.byteLength);
+    const pltAddr = secs[PLT].addr;
+    const gotAddr = secs[GOT].addr;
+    if (machine === EM_X86_64) {
+      const x = gotAddr - pltAddr - 6;
+      dvp.setInt32(2, dvp.getInt32(2, true) + x, true);
+      dvp.setInt32(8, dvp.getInt32(8, true) + x - 6, true);
+      for (let at = 16; at < p.length; at += 16) {
+        dvp.setInt32(at + 2, dvp.getInt32(at + 2, true) + x - at, true);
+      }
+      /* GOT 那一格先指着「本格跳板的第二条指令」——push 那一句，动态链接器由此
+       * 认出是哪一格要解析。 */
+      let x2 = pltAddr + 16 + 6;
+      for (const r of relas.get(RELAPLT) ?? []) {
+        dvgot.setBigUint64(r.at, BigInt(x2), true);
+        x2 += 16;
+      }
+    } else {
+      const page = (v) => Math.floor(v / 4096);
+      const adrp = (off) => ((0x90000000 | 16 | ((off & 0x1ffffc) << 3)
+        | ((off & 3) << 29)) >>> 0);
+      const ldrX17 = (a2) => ((0xf9400000 | 17 | (16 << 5) | ((a2 & 0xff8) << 7)) >>> 0);
+      const addX16 = (a2) => ((0x91000000 | 16 | (16 << 5) | ((a2 & 0xfff) << 10)) >>> 0);
+      const BR_X17 = 0xd61f0220;
+      const NOP = 0xd503201f;
+      /* 头一格 32 字节：先把 x16/x30 压栈，再从 GOT 的第三格取解析例程的地址。 */
+      const got0 = gotAddr + 16;
+      dvp.setUint32(0, 0xa9bf7bf0, true);          // stp x16,x30,[sp,#-16]!
+      dvp.setUint32(4, adrp(page(got0) - page(pltAddr)), true);
+      dvp.setUint32(8, ldrX17(got0), true);
+      dvp.setUint32(12, addX16(got0), true);
+      dvp.setUint32(16, BR_X17, true);
+      dvp.setUint32(20, NOP, true);
+      dvp.setUint32(24, NOP, true);
+      dvp.setUint32(28, NOP, true);
+      for (let at = 32; at < p.length; at += 16) {
+        const target = gotAddr + Number(dvp.getBigUint64(at, true));
+        const pc = pltAddr + at;
+        dvp.setUint32(at, adrp(page(target) - page(pc)), true);
+        dvp.setUint32(at + 4, ldrX17(target), true);
+        dvp.setUint32(at + 8, addX16(target), true);
+        dvp.setUint32(at + 12, BR_X17, true);
+      }
+      /* arm64 的每一格都从 `.plt` 头上那一段进，GOT 里填的于是都是 `.plt` 的地址。 */
+      for (const r of relas.get(RELAPLT) ?? []) {
+        dvgot.setBigUint64(r.at, BigInt(pltAddr), true);
+      }
+    }
+  }
+
   /* ---- relocate_syms(dynsym, 2)：有定义的加上节的地址。 */
   for (const s of dsyms) {
     if (s.shndx !== SHN_UNDEF && s.shndx < SHN_LORESERVE) s.value += secs[s.shndx].addr;
@@ -893,6 +1053,9 @@ export function elfExeImage(inp) {
     if (secs[i].type !== SHT_RELA || (secs[i].flags & SHF_ALLOC) === 0) continue;
     const tgt = secs[secs[i].relaFor];
     for (const r of relas.get(i) ?? []) r.at += tgt.addr;
+    /* `update_reloc_sections` 把 `.rela.plt` 摘出去不算 —— DT_RELA 那一段说的是
+     * 「剩下那几张接成连着的一块」，跳板那张由 DT_JMPREL 单独说。 */
+    if (i === RELAPLT) continue;
     if (relSize === 0) relAddr = secs[i].addr;
     relSize += secs[i].size;
   }
@@ -1050,9 +1213,10 @@ export function elfExeImage(inp) {
       }
       put(EHFH, hdr);
     }
-    // .rela.got
-    if (RELAGOT >= 0) {
-      const list = relas.get(RELAGOT);
+    // .rela.got / .rela.plt
+    for (const ri of [RELAGOT, RELAPLT]) {
+      if (ri < 0) continue;
+      const list = relas.get(ri);
       const rb = new Uint8Array(list.length * 24);
       const dvr = new DataView(rb.buffer);
       for (let k = 0; k < list.length; k++) {
@@ -1062,7 +1226,7 @@ export function elfExeImage(inp) {
           BigInt(r.dynSym ?? r.sym) * 4294967296n + BigInt(r.type), true);
         dvr.setBigInt64(k * 24 + 16, r.add, true);
       }
-      secs[RELAGOT].bytes = rb;
+      secs[ri].bytes = rb;
     }
   }
 

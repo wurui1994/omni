@@ -433,7 +433,10 @@ tcc 逐字节相同了**（第五十片，`peWrite`：两个 win32 目标 160 �
 `___GLOBAL_init_65535`，`tests/c/gen` 里那八十几份要 `printf` 的用例两个目标各 86 份
 逐字节相同）。**macOS 上也把 tcc 自己链了出来**（第五十七片，`tests/c/macho-tcc.js`：
 `ONE_SOURCE` 与拆开编的十二个 `.o` 两种都逐字节相同，arm64 那份签完名还拿它编了个 hello
-跑起来）。
+跑起来）。**ELF 的 `.plt` 也补上了**（第五十八片：未定义的弱函数既取地址又调用 ——
+两格 GOT、调用点改指 `name@plt`、静态那一路故意「没修完」的跳板、动态那一路的
+`.rela.plt` 与 `DT_JMPREL` 四条标签外加现场编出来的 adrp/ldr/add/br，静态与动态
+各 11 × 2 份逐字节相同）。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -10309,6 +10312,39 @@ arm64-macos  parts     : 597040 字节逐字节相同（12 个 .o）
 **tcc 自己**链了出来。
 
 <!-- 第九刀第五十七片-END -->
+
+## 落地：第九刀第五十八片 —— ELF 的 `.plt`
+
+之前 `elf_exe.js` 碰上「未定义的函数被调用」就抛 `要一条 .plt，还没写`。这一片把它写完，
+两条路（静态与动态）都逐字节对上：
+
+```
+tests/c/elf-exe.js  11 × 2 = 22 条相同（-static -nostdlib）
+tests/c/elf-dyn.js  11 × 2 = 22 条相同（动态）
+```
+
+新的那条用例是 `tests/c/elf-gen/15-plt.c`：一个**未定义的弱函数**，既取地址又调用。
+这一条同时踩到三处讲究：
+
+- **两格 GOT。**「被调用」记在 `attr->plt_offset`，「被取地址」记在 `attr->got_offset`，
+  两个格子互不相认，于是同一个符号有两格 —— 头一趟（代码类 `R_JMP_SLOT`）给跳板占
+  偏移 24 那格，第二趟（数据类 `R_GLOB_DAT`）再占偏移 32 那格。
+- **调用点改指 `name@plt`。** `build_got_entries` 末尾那句
+  `rel->r_info = ELFW(R_INFO)(attr->plt_sym, type)` 把重定位的符号号换成了跳板那条符号，
+  所以 `.text` 里的 `call`/`bl` 落在 `.plt` 上，而不是落回那个值为 0 的弱符号。
+- **静态那一路 `.plt` 是「没修完」的。** `relocate_plt` 只在 `if (dynamic)` 里叫，
+  静态输出里跳板里存的还是 GOT 的**节内偏移**：x86_64 那格是 `jmp *(0x18)`，
+  arm64 那格干脆只有 `18 00 00 00` 加一串 0。跳不通，可静态链接里也没有解析例程可跳，
+  弱符号那一格本就是 0 —— tcc 就这么写，我们也就这么写。
+
+动态那一路多出来的东西：`.rela.plt`（`sh_info` 末了改指 `.got`）、`.dynamic` 里
+`DT_PLTGOT`/`DT_PLTRELSZ`/`DT_JMPREL`/`DT_PLTREL` 四条、以及 `relocate_plt` 本身 ——
+x86_64 是往三处 `add32le` 补地址差，arm64 是把整段 adrp/ldr/add/br 现场编出来。
+`sort_sections` 里还藏着一句 `if (s == s1->plt->reloc) k = 0x21`：跳板那张重定位表要排在
+别的重定位表**后头**，`update_reloc_sections` 把余下几张接成连着的一块时才不会被它插一脚
+（`DT_RELASZ` 因此只算 `.rela.got` 那 24 字节）。
+
+<!-- 第九刀第五十八片-END -->
 
 
 
