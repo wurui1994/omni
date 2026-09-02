@@ -7,8 +7,10 @@
 //
 // 每一副三步：
 //
-//   1. `omni c-obj` 把那副的源码（`Makefile:203-219` 的 `<target>_FILES`）编成 `.o`；
-//   2. `clang` 链成一个**本机 arm64** 的可执行文件 —— 交叉编译器自己是本机程序；
+//   1. `omni c-obj --format elf` 把那副的源码（`Makefile:203-219` 的 `<target>_FILES`）
+//      编成 tcc 那种 `ET_REL`；
+//   2. `omni macho-link … -lc` 链成一个**本机 arm64** 的可执行文件（第一百片：链也是
+//      自己的，libc 自己找）—— 交叉编译器自己是本机程序；
 //   3. 它 `-c` 编探针，出来的目标文件与 `.omni-cache/tcc-cross/<target>-tcc`
 //      写出的**逐字节相同**。
 //
@@ -124,7 +126,7 @@ for (const t of TARGETS) {
   for (const u of units) {
     const r = spawnSync(process.execPath,
       [CLI, 'c-obj', join(SRC, `${u}.c`), '-I', TCC_DIR, '-DONE_SOURCE=0', ...t.defs,
-        ...(u === 'tcc' ? gitDefs : []), '-o', join(dir, `${u}.o`)],
+        ...(u === 'tcc' ? gitDefs : []), '--format', 'elf', '-o', join(dir, `${u}.o`)],
       { encoding: 'utf8', maxBuffer: 1 << 26 });
     if (r.status !== 0) {
       bad(`${t.name}: c-obj ${u}.c`,
@@ -134,11 +136,16 @@ for (const t of TARGETS) {
   }
   if (!built) continue;
   const exe = join(dir, 'tcc');
-  const ln = spawnSync('clang', ['-o', exe, ...units.map((u) => join(dir, `${u}.o`))],
+  /* 链也是自己的（第一百片）：`c-obj --format elf` 出 tcc 那种 `ET_REL`，
+   * 我们的 `macho-link` 读回来写出 `MH_EXECUTE`，libc 一句 `-lc`（第九十八片）。
+   * 十二副交叉编译器于是整条链上没有别人 —— 下面拿 clang 建的那副是**尺子**，
+   * 不是工具。 */
+  const ln = spawnSync(process.execPath,
+    [CLI, 'macho-link', ...units.map((u) => join(dir, `${u}.o`)), '-o', exe, '-lc'],
     { encoding: 'utf8', maxBuffer: 1 << 26 });
   if (ln.status !== 0) {
     const msg = (ln.stderr ?? '').trim().split('\n');
-    bad(`${t.name}: clang -o tcc *.o`, `    ${msg.length} 行，前三条：\n    ${msg.slice(0, 3).join('\n    ')}`);
+    bad(`${t.name}: macho-link -o tcc *.o`, `    ${msg.length} 行，前三条：\n    ${msg.slice(0, 3).join('\n    ')}`);
     continue;
   }
   chmodSync(exe, 0o755);

@@ -715,6 +715,12 @@ MACHO 上是 `lib%s.dylib`、`lib%s.tbd`、`lib%s.a`，**外层循环是拼法**
 （不是翻译单元，`tcc.c` 把它 `#include` 进去）与 `il-gen.c`（Makefile 里没有它）。
 十二个目标的文件集与宏挪进了 `tests/c/tcc-targets.js`，与 `selfcross.js` 共用一张表。
 
+**十二副都自己链**（第一百片）：第九十六片那十二副交叉编译器是 `clang` 链的。这一片把
+那一步也换掉 —— `c-obj --format elf` 出 `ET_REL`、`macho-link … -lc` 写出
+`MH_EXECUTE`，十二副全绿。于是从源码到十二副能跑的交叉 tcc，链上除了 SDK 的头与
+那份 `libc.tbd`（只读符号名）没有别人；`selfcross.js` 里还留着的 `clang` 只在
+「差出来了先建第二把尺子」那一支上 —— 那是**尺子**，不是工具。
+
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
 地址交给真的 libc（`strlen`/`memcpy`）验过。C 前端现在还把 `&x` 降到影子栈上，
@@ -12930,6 +12936,27 @@ arm riscv` 只跑对得上的）。第 1 步先用 `omni c-obj` 把我们那份 
 （`clang` 只管链），`-v` 与尺子的版本行相同才往下走。
 
 <!-- 第九刀第九十九片-END -->
+
+## 落地：第九刀第一百片
+
+第九十六片那十二副交叉编译器是 `clang` 链的。这一片把链那一步也换成自己的。
+
+改的就是 `selfcross.js` 里两处：`c-obj` 加 `--format elf`（tcc 的 `-c` 在所有目标上
+都写 ELF，所以我们的 `.o` 也是），`clang -o tcc *.o` 换成
+`omni macho-link *.o -o tcc -lc`。libc 那一句是第九十八片的 `-l`：`.tbd` 的路径
+不必手工递。十二副全绿，探针照旧逐字节相同。
+
+于是这条链上现在只剩别人的两样东西：SDK 的头，与那份 `libc.tbd`（从里头只读符号名，
+用来回答「这个未定义的名字是不是来自某个 dylib」）。`selfcross.js` 里还留着一处
+`clang` —— 「与预先建好的那份不同时，先拿 clang 编同源的一副当第二把尺子」那一支。
+那是**尺子**，不是工具：第九十六、九十七片就是靠它把 c67 那一位的账算清的。
+
+### 门
+
+`tests/c/selfcross.js`，十二副全绿（分三批量过：x86 那五副、arm 那五副加 riscv64、
+c67 与 arm64-win32）。
+
+<!-- 第九刀第一百片-END -->
 
 
 
