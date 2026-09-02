@@ -287,6 +287,16 @@ if (pick('inc').includes('02-include-next.c')) {
   optCase('inc', '02-include-next.c', ['-isystem', incDir, '-isystem', incDir2]);
   optCase('inc', '02-include-next.c', ['-nostdinc', '-isystem', incDir, '-isystem', incDir2]);
 }
+/* `-include`：开工前先读的那几份（第八十六片）。路径给绝对的 —— tcc 那边这一格算的是
+ * `<command line>` 的目录，也就是当前工作目录，而门是从仓库根上跑的。 */
+if (pick('inc').includes('01-include.c')) {
+  const via = join(incDir, 'viaflag.h');
+  const local = join(here, 'inc', 'local.h');
+  optCase('inc', '01-include.c', ['-I', incDir, '-include', via]);
+  optCase('inc', '01-include.c', ['-I', incDir, '-include', local, '-include', via]);
+  // 依赖清单里也要有它（`<command line>` 那一层是真的 include 层）
+  depsCase('inc', '01-include.c', [incDir], ['-MM', '-include', via]);
+}
 
 // ------------------------------------------------------------ 3. cpp-bad/：该拒的要拒
 

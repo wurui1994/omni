@@ -254,6 +254,8 @@ export class Cpp {
     /** `target_deps`：主文件在前（调用方自己 push），随后按读到的次序。重复留着，
      *  去重是印的时候做的（`gen_makedeps`，tcctools.c:625）。 */
     this.targetDeps = [];
+    /** `-include 文件`（tcc 的 `cmdline_incl`）：开工前先读的那几份，按命令行次序。 */
+    this.cmdlineIncls = [];
     /** `pp_debug_tok` / `pp_debug_symv`：刚过去那一条指示是什么、动的是哪个名字。 */
     this.ppDebugTok = 0;
     this.ppDebugSymv = 0;
@@ -2162,6 +2164,7 @@ export class Cpp {
       this.Pflag = 1;
     }
     this.tokFlags = TOK_FLAG_BOL | TOK_FLAG_BOF;
+    this.pushCmdlineIncls();
 
     let out = '';
     /* `-dD`/`-dM` 下预定义与命令行上的 `-D` 也要印出来。tcc 那边是把它们当成一份
@@ -2241,6 +2244,7 @@ export class Cpp {
     this.file.ifdefBase = 0;
     this.parseFlags = PF_PREPROCESS | PF_TOK_NUM | PF_TOK_STR;
     this.tokFlags = TOK_FLAG_BOL | TOK_FLAG_BOF;
+    this.pushCmdlineIncls();
   }
 
   /** 命令行上的 `-D name[=body]`（tcc 的 `tcc_define_symbol`） */  define(name, body) {
@@ -2256,9 +2260,26 @@ export class Cpp {
     this.cmdlineLine(`#undef ${name}\n`);
   }
 
+  /**
+   * `-include 文件`（tcc 的 `cmdline_incl`，libtcc.c:2019）：`#include "文件"` 那几行
+   * 压在主文件**上面**成为一个真的 include 层 —— tcc 那边 `<command line>` 一直是这么
+   * 一层（预定义、`-D`、`-include` 都在里头，读完了才回到主文件）。
+   *
+   * 于是 `"..."` 那一格（下标 1）算的是 `<command line>` 的目录 = 当前工作目录，
+   * 再往后才是 `-I`。找不到就报错，与 `#include` 同一句话。
+   */
+  pushCmdlineIncls() {
+    if (this.cmdlineIncls.length === 0) return;
+    const src = this.cmdlineIncls.map((n) => `#include "${n}"\n`).join('');
+    this.includeStack.push(this.file);
+    const f = new CFile('<command line>', src, this.file);
+    f.ifdefBase = this.ifdefStack.length;
+    this.file = f;
+    this.tokFlags = TOK_FLAG_BOL | TOK_FLAG_BOF;
+  }
+
   /** 一行「假装是 `<command line>` 里的」指示：装上去，读完还原。 */
-  cmdlineLine(src) {
-    const saved = this.file;
+  cmdlineLine(src) {    const saved = this.file;
     this.file = new CFile('<command line>', src, null);
     this.parseFlags = PF_PREPROCESS | PF_LINEFEED;
     this.tokFlags = TOK_FLAG_BOL | TOK_FLAG_BOF;

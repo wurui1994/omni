@@ -601,6 +601,10 @@ Bellard 拿它让 tcc 编译自己）也通了。`cpp/` 与 `inc/` 两组各多�
 排在自带那一份**前面**，`-nostdinc` 只掐掉自带的那一份。门里多了一支 `optCase`：
 拿 `tcc -E -P <开关>` 当尺子比两边 CLI 的 stdout，八种走法。
 
+**`-include`**（第八十六片）：`<command line>` 成了一个**真的 include 层** ——
+`#include "…"` 那几行压在主文件上面，读完了才回到主文件。于是 `"..."` 那一格算的是
+当前工作目录，依赖清单里也有它，`# 行号 "文件"` 那套进出层级的行标自动就对。
+
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
 地址交给真的 libc（`strlen`/`memcpy`）验过。C 前端现在还把 `&x` 降到影子栈上，
@@ -11990,6 +11994,53 @@ void tcc_undefine_symbol(TCCState *s1, const char *sym)
 要把它变成真的（主文件压栈、`file->prev` 指回去），那是独立一片。
 
 <!-- 第九刀第八十五片-END -->
+
+## 落地：第九刀第八十六片
+
+`-include` —— `<command line>` 成了一个真的 include 层。
+
+tcc 那边这一层一直是真的：`preprocess_start`（tccpp.c:3653）把预定义、`-D`/`-U`、
+`-include` 拼成一份文本，当成一个**压在主文件上面**的文件读；读完了自然回到主文件。
+`-E` 的输出开头那三行就是它的凭据：
+
+```
+# 1 "a.c"
+# 1 "<command line>" 1
+# 1 "a.c" 2
+```
+
+我们的预定义是三张表、`-D`/`-U` 是一行一行喂进去的，所以这一层以前不存在。这一片让它
+在**有 `-include` 的时候**存在：
+
+```js
+pushCmdlineIncls() {
+  if (this.cmdlineIncls.length === 0) return;
+  const src = this.cmdlineIncls.map((n) => `#include "${n}"\n`).join('');
+  this.includeStack.push(this.file);
+  const f = new CFile('<command line>', src, this.file);
+  f.ifdefBase = this.ifdefStack.length;
+  this.file = f;
+  this.tokFlags = TOK_FLAG_BOL | TOK_FLAG_BOF;
+}
+```
+
+三件事跟着自动就对了：`"..."` 那一格（下标 1）算的是 `<command line>` 的目录 ——
+`dirname("<command line>")` 没有斜杠，`join` 出来就是文件名本身，也就是**当前工作
+目录**，与 tcc 的 `tcc_basename(p) - p == 0` 一样；进出这一层的行标（` 1` / ` 2`）
+走的是第八十二片那套 `level` 逻辑；依赖清单里也有它（`i === 1` 顺着 `prev` 认到主文件
+那一格 0，于是记上）。
+
+### 门
+
+`optCase` 三条（一个 `-include`、两个 `-include`、`-MM -include`）。路径给绝对的 ——
+这一格算的是当前工作目录，而门是从仓库根上跑的。
+
+**`-E` 加 `-include` 不逐字节比**：差的正好是 `<command line>` 那份文本的**行数** ——
+tcc 的里头有 133 行预定义，我们的只有那几行 `#include`，于是 `# 134 "<command line>"`
+对上 `# 2 "<command line>"`。要对上就得把预定义也变成一份源码，那是另一回事
+（`-dM` 已经证明表的次序与源码的次序一致，值也一样）。带 `-P` 的那三条一个字节不差。
+
+<!-- 第九刀第八十六片-END -->
 
 
 

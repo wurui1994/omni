@@ -143,6 +143,21 @@ function sysIncDirs(argv) {
   return out;
 }
 
+/** `-include 文件`（tcc 的 `cmdline_incl`）：开工前先读的那几份，按命令行次序。 */
+function inclArgs(argv) {
+  const out = [];
+  let i = 0;
+  for (const a of argv) {
+    if (a === '-include') {
+      const f = argv[i + 1];
+      if (f === undefined) throw new OmniError('-include 后面要一个文件');
+      out.push(f);
+    }
+    i++;
+  }
+  return out;
+}
+
 /**
  * C 前端自带的系统头目录（tcc 的 `sysinclude_paths` 里那个 `$tccdir/include`）。
  * `#include <stddef.h>` 一族从这儿来 —— 位置与 `RUNTIME_DIR` 同一手法：相对
@@ -156,7 +171,7 @@ const C_SYS_INCLUDE = [join(installDir(), '..', '..', 'include')];
  * 默认带 GCC 那种 `# 行号 "文件"` 的行标，`-P` 一族把它换掉或关掉。
  * 文件 IO 在这里，预处理器自己只认一个 `readFile` 回调 —— 于是 REPL 那一路可以把
  * 内存里的几份 `.h` 直接喂进去，测试也不必碰 fs。
- */function cppText(path, incs, defs, dflag, pflag, deps, sysIncs) {
+ */function cppText(path, incs, defs, dflag, pflag, deps, sysIncs, incls) {
   const cpp = new Cpp({
     readFile: (p) => {
       try {
@@ -171,6 +186,8 @@ const C_SYS_INCLUDE = [join(installDir(), '..', '..', 'include')];
     join,
   });
   cpp.installPredefs(path);
+  /* `-include`：开工前先读的那几份（压在主文件上面的 `<command line>` 那一层）。 */
+  if (incls !== undefined) cpp.cmdlineIncls = incls;
   /* `-D` 与 `-U` 共用一条顺序（宏体 `null` = `#undef`）。 */
   for (const [name, body] of defs) {
     if (body === null) cpp.undefine(name);
@@ -1879,7 +1896,7 @@ function main(argv) {
       || a === '--soname' || a === '--rpath' || a === '--install-name'
       || a === '--subsystem' || a === '--image-base' || a === '--stack'
       || a === '--file-align' || a === '--section-align' || a === '--dwarf'
-      || a === '-MF' || a === '-U' || a === '-isystem') { i++; continue; }
+      || a === '-MF' || a === '-U' || a === '-isystem' || a === '-include') { i++; continue; }
     if (a.startsWith('-')) continue;
     files.push(a);
   }
@@ -2093,7 +2110,8 @@ function main(argv) {
       const oi = rest.indexOf('-o');
       const deps = wantDeps
         ? { sys: rest.includes('-M') || rest.includes('-MD') } : undefined;
-      const out = cppText(path, incDirs(rest), defArgs(rest), dflag, pflag, deps, sysIncDirs(rest));
+      const out = cppText(path, incDirs(rest), defArgs(rest), dflag, pflag, deps,
+        sysIncDirs(rest), inclArgs(rest));
       if (wantDeps) {
         const target = oi >= 0 ? rest[oi + 1] : depTarget(path);
         const text = makedepsText(target, deps.list, rest.includes('-MP'));
