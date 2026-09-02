@@ -30,6 +30,7 @@
  */
 
 import { OmniError } from '../source/diag.js';
+import { utf8Bytes } from '../host/utf8.js';
 import * as a from './encode.js';
 import { CodeBuf } from './asm.js';
 import {
@@ -86,12 +87,14 @@ function widthOf(t) {
 }
 
 class FnGen {
-  /** `buf` 是整个模块共用的一个缓冲，`callLabels` 是「函数号 -> 标签」（没有就不认 CALL）。 */
-  constructor(mod, f, buf, callLabels) {
+  /** `buf` 是整个模块共用的一个缓冲，`callLabels` 是「函数号 -> 标签」（没有就不认 CALL），
+   * `strSyms` 是「字符串常量的 ref -> 数据段里的符号名」（没有就不认串常量）。 */
+  constructor(mod, f, buf, callLabels, strSyms) {
     this.mod = mod;
     this.f = f;
     this.buf = buf === undefined ? new CodeBuf() : buf;
     this.callLabels = callLabels === undefined ? null : callLabels;
+    this.strSyms = strSyms === undefined ? null : strSyms;
     /** 帧里 0 号槽位的偏移是 0，值的栈位接在槽位后面。 */
     this.valBase = f.slots.length * 8;
     const bytes = this.valBase + f.count() * 8;
@@ -149,6 +152,9 @@ class FnGen {
       if (k.kind === 'real') {
         return this.movImm(reg, floatBits(Number(k.text), typeKind(k.t) === T_F32 ? 4 : 8));
       }
+      /* 串常量取的是**地址**：字节躺在数据段里，这一格只要把那个符号的地址算出来。
+       * 于是 `f("hi")` 在这一层与 `f(&g)` 是同一件事 —— 都是 adrp+add。 */
+      if (k.kind === 'str') return this.symAddr(reg, this.strSym(ref));
       return nyi(`常量 ${k.kind}`);
     }
     this.frameLoad(reg, this.valOff(this.f.at(ref)));
@@ -523,6 +529,15 @@ class FnGen {
     return name;
   }
 
+  /** 串常量的符号名。名字是 `genModule` 分的 —— 单个函数编不出数据段，所以那儿明着报。 */
+  strSym(ref) {
+    const sym = this.strSyms === null ? undefined : this.strSyms.get(ref);
+    if (sym === undefined) {
+      throw new OmniError('arm64: 字符串常量的字节要落在数据段里，得走 genModule');
+    }
+    return sym;
+  }
+
   /** 一个符号的地址算进 `reg`：`adrp` 取页、`add` 取页内偏移。两格都记一笔重定位。 */
   symAddr(reg, sym) {
     this.buf.adrpSym(reg, sym);
@@ -701,6 +716,35 @@ export function codeOf(mod, f) {
  * `blSym`）。`offsets[i]` 是第 i 个函数在这段字节里的起点。
  */
 export function genModule(mod) {
+  /* 数据段先排出来 —— 函数体里 `loadRef` 要拿串常量的符号名，所以这一步得在生成之前。
+   *
+   * 布局：模块级变量**一个八字节一格**、零初始化，串常量接在后面（UTF-8 + 一个 0）。
+   * MIR 没有「全局的初值」这回事（初始化是入口函数里的一串 GSTORE），所以变量那段只管留位。
+   * 每个变量都是一个真符号 —— 于是 C 那边 `extern long long x;` 就能看见它。
+   *
+   * 串常量**不必扫函数体**：常量池自己就是去重表（`ConstPool.intern` 按 `类型|种类|文本`
+   * 去重），所以同一个 `"hi"` 在整个模块里只有一条 ref、于是只有一个符号、只有一份字节。
+   * 代价是没被用到的串也会占数据段 —— 那是死代码消除的事，不是这一层的事。
+   *
+   * 欠账：这些符号现在是**外部**符号（`macho.js` 里 defs 一律 `N_EXT`），于是两个模块
+   * 各有一个 `omni_str_0` 就会撞。真正的办法是局部符号 + 按节的重定位，等自己的链接器。 */
+  const dataSyms = [];
+  const dataBytes = [];
+  for (const g of mod.globals) {
+    dataSyms.push({ name: g, off: dataBytes.length, sect: 2 });
+    for (let k = 0; k < 8; k++) dataBytes.push(0);
+  }
+  const strSyms = new Map();
+  const items = mod.consts.items;
+  for (let r = 0; r < items.length; r++) {
+    if (items[r].kind !== 'str') continue;
+    const name = `omni_str_${r}`;
+    strSyms.set(r, name);
+    dataSyms.push({ name, off: dataBytes.length, sect: 2 });
+    for (const byte of utf8Bytes(items[r].text)) dataBytes.push(byte);
+    dataBytes.push(0);
+  }
+
   const buf = new CodeBuf();
   const labels = [];
   for (let i = 0; i < mod.funcs.length; i++) labels.push(buf.label());
@@ -709,7 +753,7 @@ export function genModule(mod) {
   for (const f of mod.funcs) {
     offsets.push(buf.pos);
     buf.place(labels[i]);
-    new FnGen(mod, f, buf, labels).gen();
+    new FnGen(mod, f, buf, labels, strSyms).gen();
     i++;
   }
   const bytes = buf.bytes();
@@ -717,21 +761,12 @@ export function genModule(mod) {
   for (let k = 0; k < offsets.length; k++) {
     sizes.push((k + 1 < offsets.length ? offsets[k + 1] : bytes.length) - offsets[k]);
   }
-  /* 模块级变量落在数据段里，**一个八字节一格**、零初始化。
-   * MIR 没有「全局的初值」这回事（初始化是入口函数里的一串 GSTORE），所以这儿只管留位。
-   * 每个变量都是一个真符号 —— 于是 C 那边 `extern long long x;` 就能看见它。 */
-  const dataSyms = [];
-  let dataAt = 0;
-  for (const g of mod.globals) {
-    dataSyms.push({ name: g, off: dataAt, sect: 2 });
-    dataAt += 8;
-  }
   return {
     bytes,
     offsets,
     sizes,
     relocs: buf.relocs,
-    data: new Uint8Array(dataAt),
+    data: new Uint8Array(dataBytes),
     dataSyms,
   };
 }

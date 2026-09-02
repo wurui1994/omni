@@ -23,6 +23,7 @@ import {
 } from '../../stage0/src/mir/ir.js';
 import { codeOf, genModule } from '../../stage0/src/arm64/from_mir.js';
 import { writeObject } from '../../stage0/src/arm64/macho.js';
+import { utf8Bytes } from '../../stage0/src/host/utf8.js';
 
 const mod = new MirModule('main');
 const K = mod.consts;
@@ -484,6 +485,37 @@ td('外部的 double 函数（实参走 d0/d1、返回走 d0）', [2.5, 4.0], d2
   });
 }
 
+// ---- 字符串字面量（第九刀第十片）。字节进 __DATA，用到的地方取的是**地址**。
+{
+  const HELLO = 'hello, 世界';
+  const hi = K.str(HELLO);
+  t('串常量：strlen 数出来的是 UTF-8 的字节数', [0n, 0n],
+    BigInt(utf8Bytes(HELLO).length), (f) =>
+      ret(f, T_I64, f.emit(OP.CCALL, T_I64, mod.cabiNo('strlen'), f.pushArgs([hi]), 0)));
+  /* 末尾那个 0 是我们补的 —— 没补的话 `strlen("")` 会一路数到下一段数据里去。 */
+  t('串常量：末尾有 0（空串的 strlen 是 0）', [0n, 0n], 0n, (f) =>
+    ret(f, T_I64, f.emit(OP.CCALL, T_I64, mod.cabiNo('strlen'), f.pushArgs([K.str('')]), 0)));
+  t('串常量：第一个字节读得到', [0n, 0n], 104n, (f) =>
+    ret(f, T_I64, mld(f, T_I64, hi, 'i8u')));
+  /* 第 7 个字节是「世」的第一节（U+4E16 -> e4 b8 96）—— 这一条同时查 UTF-8 与静态偏移。 */
+  t('串常量：多字节字符按字节躺着', [0n, 0n], 0xe4n, (f) =>
+    ret(f, T_I64, mld(f, T_I64, hi, 'i8u', 7)));
+  /* 同一份文本在常量池里只有一条 ref，于是只有一个符号、一份字节 —— 两个地址相减是 0。 */
+  t('串常量：同一份文本只有一个符号', [0n, 0n], 0n, (f) =>
+    ret(f, T_I64, f.emit(OP.SUB, T_I64, K.str(HELLO), K.str(HELLO), 0)));
+  /* 不同的文本是不同的符号、不同的字节：两个长度差 1。 */
+  t('串常量：不同的文本是两个符号', [0n, 0n], 1n, (f) => {
+    const no1 = mod.cabiNo('strlen');
+    const l1 = f.emit(OP.CCALL, T_I64, no1, f.pushArgs([K.str('abcd')]), 0);
+    const l2 = f.emit(OP.CCALL, T_I64, no1, f.pushArgs([K.str('abc')]), 0);
+    ret(f, T_I64, f.emit(OP.SUB, T_I64, l1, l2, 0));
+  });
+  /* 串常量当实参传给自家写的 C 函数：地址就是真指针，`strcmp` 那边认得。 */
+  t('串常量：传给外部 C 函数比对内容', [0n, 0n], 1n, (f) =>
+    ret(f, T_I64, f.emit(OP.CCALL, T_I64, mod.cabiNo('omni_ext_same'),
+      f.pushArgs([K.str('abcd'), K.str('abcd')]), 0)));
+}
+
 // ---------------------------------------------------------------- 边界
 // 还没做的东西必须**明着报**。一个悄悄发错指令的后端比一个报错的后端坏得多。
 // 这些函数不进 `mod` —— 它们发不出来，混进去会把整个模块的生成一起拖倒。
@@ -500,6 +532,10 @@ for (const [what, build] of [
   ['九个实参', (f, s, no) => {
     ret(f, T_I64, f.emit(OP.CALL, T_I64, no, f.pushArgs(new Array(9).fill(K.int(1n))), 0));
   }],
+  /* 单个函数编不出数据段，于是串常量在那条路上没有落点 —— 必须明着报，
+   * 不能悄悄发一条指着 0 的 `adrp`。 */
+  ['单个函数里的串常量没有数据段',
+    (f) => { ret(f, T_I64, badMod.consts.str('nope')); }],
 ]) {
   const f = mkFunc(badMod, `omni_bad_${bad}`, 2, build);
   let threw = false;
@@ -544,6 +580,7 @@ try {
     'static double b2d(unsigned long long b){ double d; memcpy(&d,&b,8); return d; }',
     'static unsigned long long d2b(double d){ unsigned long long b; memcpy(&b,&d,8); return b; }',
     'long long omni_ext_add(long long a, long long b){ return a + b; }',
+    'long long omni_ext_same(const char *a, const char *b){ return strcmp(a, b) == 0; }',
     'double omni_ext_scale(double a, double b){ return a * b + 1.0; }'];
   const calls = [];
   for (const c of cases) {
