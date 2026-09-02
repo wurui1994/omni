@@ -297,12 +297,18 @@ class FnGen {
     const f = this.f;
     const buf = this.buf;
     buf.emit(a.stpPre(1, 29, 30, SP, -16), a.movSp(1, 29, SP));
+    /* 帧超过 4096 时**不能**用「造立即数 + sub 寄存器形式」（第二十六片改掉的一个真错误）：
+     * add/sub 的**移位寄存器形式**里 31 号是 `xzr`、不是 `sp` —— `sub sp, sp, x9` 那条
+     * 于是编成 `sub xzr, xzr, x9`，一条空指令。`sp` 没降下来，随后的 `str [sp, #off]`
+     * 就写到**调用者的帧**里去，症状是回不去（PC 变成一个小整数）而现场早已离开。
+     * 立即数形式有 `lsl #12` 那一位，所以拆成「多少个 4096」+「余下的」两条 —— 两条都
+     * 是立即数形式，31 号在那儿就是 `sp`。 */
     if (this.frame > 0) {
-      if (this.frame < 4096) buf.emit(a.subImm(1, SP, SP, this.frame));
-      else {
-        this.movImm(TMP0, BigInt(this.frame));
-        buf.emit(a.subReg(1, SP, SP, TMP0));
-      }
+      const hi = Math.floor(this.frame / 4096);
+      const lo = this.frame % 4096;
+      if (hi > 4095) nyi(`帧 ${this.frame} 字节（一次 sub 装不下）`);
+      if (hi > 0) buf.emit(a.subImm(1, SP, SP, hi, 1));
+      if (lo > 0) buf.emit(a.subImm(1, SP, SP, lo));
     }
     /* 形参：AAPCS 把整数与浮点**分成两串**数（x0-x7 与 v0-v7 各自从 0 起），
      * 所以两个计数器。放不下的从**入参区**读（第二十三片）：调用方摆在它自己的

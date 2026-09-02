@@ -2833,6 +2833,13 @@ export class CGen {  /**
         const fn = this.funcs.get(name);
         if (fn === undefined || !fn.declared) this.err(`'${name}' undeclared`);
         fn.used = true;
+        /* native（第二十六片）：函数指针的**值**在线性内存那条腿上是「函数号 + 1」——
+         * 一个只有解释器认得的小整数。native 上它必须是那个符号的**真地址**，而
+         * 「取一个函数的地址」与「按寄存器里的地址调用」两条都还没有（要一条 MIR 的
+         * `FADDR` 与 `CALLI` 在两个后端上的实现）。
+         * 不在这儿拦的话，`qsort(a, n, sz, cmp)` 会让 libc 跳到地址 3 上去 ——
+         * 崩在别人家里，堆栈里连我们的名字都没有。 */
+        if (this.native) this.todo('native：函数指针（要符号的真地址与间接调用）');
         return this.postfix(sMem(funcTypeOf(fn), this.mod.consts.int(fnPtr(fn.no)), 0));
       }
       return this.postfix(this.funcCall(name));
@@ -6937,6 +6944,15 @@ export class CGen {  /**
         if (HEAP_FNS.has(name)) this.heapUsed = true;
         if (name === ERRNO_FN) this.errnoUsed = true;
         if (name === STRERROR_FN) this.strerrorUsed = true;
+      }
+      /* native 上「宿主那几格」还没落地（第九刀第二十六片）：我们自带那份头文件里
+       * `errno` 与三条标准流都展开成 `__omni_*()` —— 那是**宿主的接口**，真的 libc 里
+       * 没有这些符号。放过去的话 `.o` 编得出来、**链不上**（`ld: symbol not found`），
+       * 而那时错误信息里只剩一个名字，离原因很远。所以在这儿就明着报。
+       * 真要做对是「`errno` 落到 macOS 的 `__error()`、`stdout` 落到 `__stdoutp`
+       * 这个外部全局量上」，后者还欠「目标文件里的未定义数据符号」那一格。 */
+      if (this.native && name.startsWith('__omni_')) {
+        this.todo(`native：宿主那几格（${name}）—— errno 与标准流还没落到真 libc 上`);
       }
       /* native 上变参函数没有桩（调用点直接 CCALL，见 `funcCall`）—— 发一个反而会
        * 定义一个签名对不上的符号。 */

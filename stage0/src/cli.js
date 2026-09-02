@@ -11,7 +11,7 @@
 import {
   writeText, readText, exists, readDir, mtimeMs, fileSize, mkdirAll, rename,
   args as procArgs, env, stdout, stderr, setExitCode, spawn, evalJs, hasJsEngine, nowMs,
-  cwd, installDir, isDir,
+  cwd, installDir, isDir, writeBinary,
 } from './host/native.js';
 import { join, basename, dirname, isAbsolute, resolve } from './host/path.js';
 import { hash16 } from './host/hash.js';
@@ -22,7 +22,10 @@ import { asyUnitModules } from './frontend-asy/link.js';
 import { parseAsyBuiltins } from './frontend-asy/types.js';
 import { lowerJnc } from './frontend-jnc/lower.js';
 import { Cpp } from './frontend-c/tccpp.js';
-import { lowerC } from './frontend-c/tccgen.js';
+import { lowerC, lowerCNative } from './frontend-c/tccgen.js';
+import { genModule as genArm64 } from './arm64/from_mir.js';
+import { genModule as genX64 } from './x64/from_mir.js';
+import { writeObject } from './link/macho.js';
 import { readSexpr } from './sexpr/read.js';
 import { lowerCoreSexpr } from './sexpr/lower.js';
 import { printSexpr } from './sexpr/print.js';
@@ -155,6 +158,42 @@ function cMir(path, incs, defs, args) {
   const errs = verifyMir(mod);
   if (errs.length > 0) throw new OmniError(`mir is not well-formed:\n  ${errs.join('\n  ')}`);
   return mod;
+}
+
+/**
+ * 一份 `.c` -> 一个**目标文件**（ADR-0017 第九刀第二十六片）。
+ *
+ * 与 `cMir` 的差别只有一个：走 `lowerCNative` —— 出来的 MIR 没有线性内存，地址就是真
+ * 地址，全局与串常量是数据段里的真符号，libc 直接调。生成之后写一个 Mach-O 的
+ * `MH_OBJECT`，之后由 `clang`（或我们自己的链接器）与 crt/libc 链起来。
+ *
+ * `arch` 给 `x86_64` 就在 Apple Silicon 上交叉出 Rosetta 能跑的码，不给按本机。
+ */
+function cObj(path, out, arch, incs, defs) {
+  const { mod, warnings } = lowerCNative(path, readText(path), {
+    readFile: (p) => {
+      try {
+        return readText(p);
+      } catch {
+        return null;
+      }
+    },
+    includeDirs: incs,
+    sysIncludeDirs: C_SYS_INCLUDE,
+    dirname,
+    join,
+  }, defs.map(([name, body]) => ({ name, body })));
+  for (const w of warnings) stderr(`${w}\n`);
+  const errs = verifyMir(mod);
+  if (errs.length > 0) throw new OmniError(`mir is not well-formed:\n  ${errs.join('\n  ')}`);
+  const blob = arch === 'x86_64' ? genX64(mod) : genArm64(mod);
+  const syms = [];
+  for (let k = 0; k < mod.funcs.length; k++) {
+    syms.push({ name: mod.funcs[k].name, off: blob.offsets[k] });
+  }
+  writeBinary(out, writeObject(blob.bytes, blob.data,
+    [...syms, ...blob.dataSyms], blob.relocs, arch));
+  return out;
 }
 /**
  * `c-mir` / `c-run` 的命令行切一刀：`--` 之后的都是**被跑的程序自己的**实参。
@@ -1951,6 +1990,17 @@ function main(argv) {
       const mod = cMir(path, incDirs(flags), defArgs(flags), prog);
       return runMirModule({ structs: [], enums: [], classes: [], js: false }, mod);
     }
+    /* `c-obj`：C -> 真机器码 -> 一个 `.o`（第九刀第二十六片）。
+     * 链接留给外面（`clang a.o -o a`）—— 可执行文件的写出还没到。 */
+    case 'c-obj': {
+      const { flags } = cSplitArgs(rest);
+      const oi = flags.indexOf('-o');
+      const out = oi >= 0 ? flags[oi + 1] : `${basename(path, '.c')}.o`;
+      const ai = flags.indexOf('--arch');
+      const arch = ai >= 0 ? flags[ai + 1] : 'arm64';
+      stdout(`${cObj(path, out, arch, incDirs(flags), defArgs(flags))}\n`);
+      return 0;
+    }
     // 一个源文件一份产物（第七十五刀）：`<名字>.sx` 与 `<名字>.js` 摊在一个目录里，
     // 名字就是源文件自己的名字。`-o 目录` 指定去处，默认 .omni-cache/asy-mods。
     // 加 `--run` 就直接跑（node 自己按 ESM 的模块图把它们串起来）。
@@ -2120,6 +2170,8 @@ commands:
   c-run     the same, then run it. The exit status is C main's return value, so
             tcc -run is the oracle (tests/c/gen/). Takes -I and -D; whatever
             follows -- becomes the program's own argv (argv[0] is the .c path).
+  c-obj     compile a .c file to a real object file (ADR-0017 cut 9: native, no linear
+            memory). -o NAME, --arch arm64|x86_64. Link it yourself: clang a.o -o a
   oir       print the OIR as JSON
   mir       print the MIR (ADR-0014 decision 6): SSA values + slots + structured
             control flow, one 8-byte record per instruction (--bytes: sizes and
