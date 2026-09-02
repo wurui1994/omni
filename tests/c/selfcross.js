@@ -15,6 +15,9 @@
 // 探针不带任何 `#include`：交叉编译器没有目标那一侧的系统头（`configure` 只给本机
 // 那一份烤了 SDK 的路径）。称的是代码生成与目标文件写出那两段。
 //
+// c67 换一套探针：tinycc 的 c67 后端在**跨两个字的参数**上读越界（`PROBE_SRC` 里
+// 那段注释量得很细），那种输入的输出取决于全局量摆在哪，称不出我们的对错。
+//
 // `tcctools.c` **不单独编**：`tcc.c` 里有一句 `#include "tcctools.c"`
 // （Makefile 的 `LIBTCC_SRC` 也把它与 `tcc.c` 一起滤掉了）。单独编会撞
 // `duplicate symbol '_tcc_tool_ar'` —— 这一格量过。
@@ -59,38 +62,55 @@ const TARGETS = [
   { name: 'arm64-win32', files: [...ARM64, 'tccpe'], defs: ['-DTCC_TARGET_ARM64', '-DTCC_TARGET_PE'] },
   { name: 'riscv64', files: ['riscv64-gen', 'riscv64-link', 'riscv64-asm'], defs: ['-DTCC_TARGET_RISCV64'] },
   /* c67 那副 tinycc 自己都要 `-w`（它的代码生成器有一堆警告）。
-   * 这一副是**已知不同**的：最小的复现是 `long long f(long long a){return a<<3;}`
-   * —— 32 位目标上的 64 位移位走的是运行时的 `__ashldi3`，而那次调用的参数落位上
-   * 差一个 c67 的寻址模式位（我们发 mode 0、clang 编出来的那份发 mode 1）。
-   * 二分过：只换 `c67-gen.o` 一份就差出来，所以账在我们编 `c67-gen.c` 这一步。 */
+   * 探针换一套：c67 的 `load()` 在**跨两个字的参数**上读越界（见 `C67_PROBES`）。 */
   {
     name: 'c67',
     files: ['c67-gen', 'c67-link', 'tcccoff'],
     defs: ['-DTCC_TARGET_C67', '-w'],
-    known: 'long long f(long long a){return a<<3;} —— 差一个 c67 的寻址模式位（第九十六片）',
+    probes: ['wide64', 'float', 'struct1', 'flow'],
   },
 ];
 
 /* 探针。不带 `#include` —— 交叉编译器没有目标那一侧的头。
  * 挑的是几段最容易在「换一副后端」时露馅的东西：整数与浮点的算术、结构体传值、
  * switch、串常量、局部数组、递归。 */
-const PROBES = [
-  ['arith', 'int add(int a, int b) { return a + b * 3 - (a / 7) % 5; }\n'
-    + 'long long wide(long long a, unsigned b) { return (a << 3) ^ (long long) b; }\n'],
-  ['float', 'double mix(double d, float g, int i) { return d * g + i / 2.0; }\n'
-    + 'int trunc_(double d) { return (int) d; }\n'],
-  ['struct', 'struct P { int x, y; char c; };\n'
+const PROBE_SRC = {
+  arith: 'int add(int a, int b) { return a + b * 3 - (a / 7) % 5; }\n'
+    + 'long long wide(long long a, unsigned b) { return (a << 3) ^ (long long) b; }\n',
+  float: 'double mix(double d, float g, int i) { return d * g + i / 2.0; }\n'
+    + 'int trunc_(double d) { return (int) d; }\n',
+  struct: 'struct P { int x, y; char c; };\n'
     + 'int sum(struct P p) { return p.x + p.y + p.c; }\n'
-    + 'struct P mk(int v) { struct P p; p.x = v; p.y = v * 2; p.c = (char) v; return p; }\n'],
-  ['flow', 'static const char *msg = "hello";\n'
+    + 'struct P mk(int v) { struct P p; p.x = v; p.y = v * 2; p.c = (char) v; return p; }\n',
+  flow: 'static const char *msg = "hello";\n'
     + 'int pick(int k) { switch (k) { case 0: return 1; case 3: return 7;'
     + ' default: return msg[k & 3]; } }\n'
-    + 'int fib(int n) { int a[4]; a[0] = n; return n < 2 ? n : fib(n - 1) + fib(n - 2); }\n'],
-];
+    + 'int fib(int n) { int a[4]; a[0] = n; return n < 2 ? n : fib(n - 1) + fib(n - 2); }\n',
+  /* c67 专用的两份：把**跨两个字的参数**换掉，别的照旧。
+   *
+   * 为什么要换：c67 的 `load()`（`c67-gen.c:1592-1605`）碰上 `fc > 0`（tcc 以为这是
+   * 栈上的参数）时，在 `TranslateStackToReg` 上找那个偏移属于第几个参数；一个跨两个字的
+   * 参数只有**第一个字**的偏移对得上（`stack_pos` 一次加整个参数的大小），第二个字
+   * 找不到，循环走满，`t == NoCallArgsPassedOnStack`，接着那句
+   * `fc = ParamLocOnStack[t] - 8;` 读的是 `int[10]` 的**第 11 格** —— 越界。
+   * 量过：`long long f(long long a){return a<<3;}` 在两份 tcc 里都是 `fc=12 t=10`，
+   * 差的只是那一格里躺着什么（我们编的那份是 0、clang 编的那份是 8），于是发出去的
+   * MVKL 常量差 2、指令字差一位。结构体传值（`struct P` 12 字节）走的是同一条路。
+   *
+   * 这不是代码生成的账，是**被编的那份程序自己踩了未定义行为** —— 它的输出取决于
+   * 全局量的摆法，量不出我们的对错，所以这一副换成一个字的参数：64 位的移位与异或
+   * 从局部量上走，结构体只留一个 `int`（第九十七片）。 */
+  wide64: 'long long wide(int k, unsigned b) { long long a = k;'
+    + ' return (a << 3) ^ (long long) b; }\n'
+    + 'int add(int a, int b) { return a + b * 3 - (a / 7) % 5; }\n',
+  struct1: 'struct S { int x; };\n'
+    + 'int one(struct S s) { return s.x + 1; }\n'
+    + 'struct S mk(int v) { struct S s; s.x = v * 2; return s; }\n',
+};
+const DEFAULT_PROBES = ['arith', 'float', 'struct', 'flow'];
 
 let pass = 0;
 let fail = 0;
-let known = 0;
 const failures = [];
 const ok = (name) => { pass++; process.stdout.write(`  ok   ${name}\n`); };
 const bad = (name, detail) => {
@@ -107,7 +127,7 @@ if (!existsSync(join(SRC, 'tccpp.c')) || !existsSync(join(CROSS, 'riscv64-tcc'))
 
 rmSync(OUT, { recursive: true, force: true });
 mkdirSync(OUT, { recursive: true });
-for (const [n, src] of PROBES) writeFileSync(join(OUT, `${n}.c`), src);
+for (const [n, src] of Object.entries(PROBE_SRC)) writeFileSync(join(OUT, `${n}.c`), src);
 
 for (const t of TARGETS) {
   if (filters.length > 0 && !filters.some((x) => t.name.includes(x))) continue;
@@ -152,7 +172,8 @@ for (const t of TARGETS) {
     continue;
   }
   const diffs = [];
-  for (const [n] of PROBES) {
+  const probes = t.probes ?? DEFAULT_PROBES;
+  for (const n of probes) {
     const p = join(OUT, `${n}.c`);
     const mo = join(dir, `${n}.mine.o`);
     const ro = join(dir, `${n}.ref.o`);
@@ -166,12 +187,12 @@ for (const t of TARGETS) {
     if (Buffer.compare(readFileSync(mo), readFileSync(ro)) !== 0) diffs.push(`    ${n}：字节不同`);
   }
   if (diffs.length === 0) {
-    ok(`${t.name}（${units.length} 份源码 -> 一副交叉编译器，${PROBES.length} 个探针逐字节相同）`);
+    ok(`${t.name}（${units.length} 份源码 -> 一副交叉编译器，${probes.length} 个探针逐字节相同）`);
     continue;
   }
   /* 与预先建好的那份不同 —— **先别急着认账**。`.omni-cache/tcc-cross/` 里那些是
    * 另一次（另一个源码版本）建出来的：它们的 git 戳是 `main@4fb21a4`，而源码树在
-   * `mob@2ba12e83`。c67 那副就是这么差出来的。
+   * `mob@2ba12e83`。
    *
    * 所以差异出现时再拿 **clang 编同一份源码、同一套 `-D`** 当第二把尺子：
    * 我们与它相同，说明差的是「尺子那份的版本」，不是我们的代码生成。 */
@@ -196,7 +217,7 @@ for (const t of TARGETS) {
     continue;
   }
   const vs = [];
-  for (const [n] of PROBES) {
+  for (const n of probes) {
     const p = join(OUT, `${n}.c`);
     const co = join(cDir, `${n}.o`);
     if (spawnSync(cExe, ['-c', p, '-o', co], { encoding: 'utf8' }).status !== 0) {
@@ -208,17 +229,7 @@ for (const t of TARGETS) {
     }
   }
   if (vs.length > 0) {
-    /* 标了 `known` 的：差是记在账上的，报出来但不算失败。反过来 —— 它要是**相同**了，
-     * 那就该把这一格去掉，所以「不该相同却相同」在下面当失败报。 */
-    if (t.known !== undefined) {
-      process.stdout.write(`  知道 ${t.name}：与 clang 编的同源 tcc 不同（${t.known}）\n`);
-      known++;
-      continue;
-    }
     bad(`${t.name}: -c 探针`, `${diffs.join('\n')}\n${vs.join('\n')}`);
-  } else if (t.known !== undefined) {
-    bad(`${t.name}: 已知不同那一格`,
-      '    与 clang 编的同源 tcc 相同了 —— 把 TARGETS 里那个 known 去掉');
   } else {
     ok(`${t.name}（${units.length} 份源码 -> 一副交叉编译器；与 clang 编的同源 tcc`
       + ` 逐字节相同，与 .omni-cache 里那份不同 —— 那份是 ${m === null ? '?' : m[1]} 建的）`);
@@ -231,5 +242,5 @@ if (failures.length > 0) {
   process.stdout.write('\n');
   for (const f of failures) process.stdout.write(`${f}\n`);
 }
-process.stdout.write(`\n${pass} passed, ${fail} failed${known > 0 ? `, ${known} 已知不同` : ''}\n`);
+process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail > 0 ? 1 : 0);
