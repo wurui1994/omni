@@ -23,7 +23,7 @@
 
 import { OmniError } from '../source/diag.js';
 import { readObject } from './elf.js';
-import { mergeObjects } from './elf_merge.js';
+import { mergeObjects, DWARF_SECTIONS } from './elf_merge.js';
 import { readSymbols } from './pe_load.js';
 import { buildImports } from './pe.js';
 
@@ -288,7 +288,7 @@ export function buildReloc(entries) {
  */
 export function peSections(inp) {
   const merged = mergeObjects(inp.objs, {
-    rdata: '.rdata', debug: inp.debug === true, declare: inp.declare,
+    rdata: '.rdata', debug: inp.debug === true, dwarf: inp.dwarf, declare: inp.declare,
   });
   const mo = readObject(merged);
   const machine = mo.machine;
@@ -503,14 +503,24 @@ export function peSections(inp) {
 
     if (sec === reloc) {
       const direct = directRelocType(machine);
+      /* `pe_build_reloc` 里那句 `if (dwarf) … continue`：**dwarf 指向 dwarf** 的
+       * 那些不进 `.reloc`（`s1->dwlo` 到 `dwhi` 那个区间）。装载时搬动映像不影响
+       * 调试信息内部互相指的偏移。 */
+      const dw = new Set(DWARF_SECTIONS);
       const entries = [];
       for (const info of infos) {
         for (const s of info.secs) {
           const rela = find(`.rela${s.name}`);
           if (rela !== undefined) {
+            const inDwarf = dw.has(s.name);
             const dv = new DataView(rela.bytes.buffer, rela.bytes.byteOffset, rela.bytes.byteLength);
             for (let p = 0; p + 24 <= rela.bytes.length; p += 24) {
               if (dv.getUint32(p + 8, true) !== direct) continue;
+              if (inDwarf) {
+                const sym = syms[dv.getUint32(p + 12, true)];
+                const tgt = sym === undefined || sym.shndx === 0 ? undefined : secs[sym.shndx - 1];
+                if (tgt !== undefined && dw.has(tgt.name)) continue;
+              }
               entries.push(s.vaddr - imagebase + Number(dv.getBigUint64(p, true)));
             }
           }

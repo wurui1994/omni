@@ -42,6 +42,8 @@ const SHT_PREINIT_ARRAY = 16;
 const SHF_WRITE = 0x1;
 const SHF_ALLOC = 0x2;
 const SHF_EXECINSTR = 0x4;
+const SHF_MERGE = 0x10;
+const SHF_STRINGS = 0x20;
 
 const SHN_UNDEF = 0;
 const SHN_LORESERVE = 0xff00;
@@ -96,6 +98,17 @@ class StrTab {
     return new Uint8Array(this.bytes);
   }
 }
+
+/**
+ * dwarf 那一路 `tcc_debug_new` 造的那十来节，次序就是建的次序。
+ *
+ * 中间七节（`.debug_macro` 起）是空的，只为了让 `R_DATA_32DW` 那种重定位有地方落。
+ * 这一串也就是 `s1->dwlo` 到 `dwhi` 那个区间 —— `pe_build_reloc` 靠它把「dwarf 指向
+ * dwarf」的重定位排除掉。dwarf 5 末尾还多一节 `.debug_line_str`。
+ */
+export const DWARF_SECTIONS = ['.debug_info', '.debug_abbrev', '.debug_line', '.debug_aranges',
+  '.debug_macro', '.debug_loc', '.debug_ranges', '.debug_loclists',
+  '.debug_rnglists', '.debug_str_offsets', '.debug_addr', '.debug_str', '.debug_line_str'];
 
 /** 这一节的内容要不要跟着并（`tcc_load_object_file` 里那一串 `sh_type` 的筛子）。 */
 function mergeable(type, name, unwind, debug) {
@@ -165,6 +178,7 @@ export function linkObjects(objs, opts) {
   const rdata = o.rdata === undefined ? '.data.ro' : o.rdata;
   const unwind = o.unwind === true;
   const debug = o.debug === true;
+  const dwarf = o.dwarf ?? 0;
   const declare = o.declare ?? [];
   /* 起手那几条节要按 `tccelf_new` 的次序造，而 `.eh_frame` 的 CIE 认架构 —— 先把
    * 输入都读进来，架构就知道了。 */
@@ -189,11 +203,25 @@ export function linkObjects(objs, opts) {
   const SYMTAB = newSec('.symtab', SHT_SYMTAB, 0, 8, SYM_SIZE);
   const STRTAB = newSec('.strtab', SHT_STRTAB, 0, 1, 0);
   secs[SYMTAB].link = STRTAB;
-  /* `-g`（不带 dwarf）的时候 `tccelf_new` 就把 `.stab` 与 `.stabstr` 造好了
-   * （`tcc_debug_new`），并且**先放一条全 0 的 `Stab_Sym`**（`put_stabs(s1, "", …)`）——
-   * 那一条的名字是 `put_elf_str(stabstr, "")`，于是 `.stabstr` 起手也有一个 `\0`。
-   * 并出来的 `.stab` 因此比几份输入加起来长 12 字节、`.stabstr` 长 1 字节。 */
-  if (debug) {
+  /* `-g` 的时候 `tccelf_new` 就把调试那几节造好了（`tcc_debug_new`）。
+   *
+   * 不带 dwarf 那一路是 `.stab` 与 `.stabstr`，并且**先放一条全 0 的 `Stab_Sym`**
+   * （`put_stabs(s1, "", …)`）—— 那一条的名字是 `put_elf_str(stabstr, "")`，于是
+   * `.stabstr` 起手也有一个 `\0`。并出来的两节因此比几份输入加起来各长 12 与 1 字节。
+   *
+   * dwarf 那一路造的是十来节，全都空着 —— 可**造出来这件事本身有用**：一是节的次序
+   * （摆地址时同一类里按建的次序走），二是 `dwlo`/`dwhi` 那个区间，`pe_build_reloc`
+   * 靠它把「dwarf 指向 dwarf」的那些重定位排除掉。 */
+  const dwarfSecs = [];
+  if (debug && dwarf !== 0) {
+    /* 前四节是真写的，中间七节只是「为了让 `R_DATA_32DW` 那种重定位有地方落」，
+     * 最后 `.debug_str`（与 dwarf 5 的 `.debug_line_str`）带 `SHF_MERGE|SHF_STRINGS`。 */
+    for (const nm of DWARF_SECTIONS) {
+      if (nm === '.debug_line_str' && dwarf < 5) continue;
+      const str = nm === '.debug_str' || nm === '.debug_line_str';
+      dwarfSecs.push(newSec(nm, SHT_PROGBITS, str ? SHF_MERGE | SHF_STRINGS : 0, 1, str ? 1 : 0));
+    }
+  } else if (debug) {
     const stab = newSec('.stab', SHT_PROGBITS, 0, 4, STAB_SIZE);
     const stabstr = newSec('.stabstr', SHT_STRTAB, 0, 1, 0);
     secs[stab].link = stabstr;
@@ -421,6 +449,7 @@ export function linkObjects(objs, opts) {
   return {
     machine,
     secs,
+    dwarfSecs,
     syms,
     relas,
     strs,

@@ -59,7 +59,7 @@ if (src === null) {
   process.exit(0);
 }
 
-/** 每条一份链接：一个或几个源文件，加上要不要 `-shared`。 */
+/** 每条一份链接：一个或几个源文件，加上要不要 `-shared`、要不要 dwarf。 */
 const CASES = [
   { name: 'global', srcs: [join(here, 'gen', '05-global.c')] },
   { name: 'libc', srcs: [join(here, 'gen', '06-libc.c')] },
@@ -72,6 +72,20 @@ const CASES = [
   { name: 'two-objs', srcs: [join(here, 'pe-debug', '01-a.c'), join(here, 'pe-debug', '01-b.c')] },
   { name: 'dll', srcs: [join(here, 'gen', '06-libc.c')], dll: true },
   { name: 'dll-two', srcs: [join(here, 'pe-debug', '01-a.c'), join(here, 'pe-debug', '01-b.c')], dll: true },
+  /* dwarf 那一路：十来节调试信息，其中「dwarf 指向 dwarf」的重定位写节内偏移、
+   * 也不进 `.reloc`。 */
+  { name: 'dw-global', srcs: [join(here, 'gen', '05-global.c')], dwarf: 5 },
+  { name: 'dw-libc', srcs: [join(here, 'gen', '06-libc.c')], dwarf: 5 },
+  { name: 'dw-float', srcs: [join(here, 'gen', '15-float.c')], dwarf: 5 },
+  { name: 'dw-sections', srcs: [join(here, 'elf-gen', '11-sections.c')], dwarf: 5 },
+  { name: 'dw-weak', srcs: [join(here, 'elf-gen', '12-weak.c')], dwarf: 5 },
+  { name: 'dw-tls', srcs: [join(here, 'elf-gen', '16-tls.c')], dwarf: 5 },
+  {
+    name: 'dw-two-objs',
+    srcs: [join(here, 'pe-debug', '01-a.c'), join(here, 'pe-debug', '01-b.c')],
+    dwarf: 5,
+  },
+  { name: 'dw-dll', srcs: [join(here, 'gen', '06-libc.c')], dll: true, dwarf: 5 },
 ];
 
 function firstDiff(a, b) {
@@ -93,7 +107,7 @@ try {
       process.stdout.write(`  skip ${t.name}（${t.tcc} 没建）\n`);
       continue;
     }
-    const flags = [`-B${join(src, 'win32')}`, `-I${join(src, 'include')}`, `-L${CROSS}`, '-g'];
+    const flags = [`-B${join(src, 'win32')}`, `-I${join(src, 'include')}`, `-L${CROSS}`];
     const paths = [CROSS, join(src, 'win32', 'lib')];
     const open = (names) => {
       for (const p of paths) {
@@ -108,11 +122,13 @@ try {
     for (const c of CASES) {
       if (!keep(c.name)) continue;
       const stem = `${t.name}-${c.name}`;
+      const dwarf = c.dwarf ?? 0;
+      const gflag = dwarf === 0 ? '-g' : '-gdwarf';
       const objs = [];
       let bad = false;
       for (const s of c.srcs) {
         const o = join(dir, `${stem}-${basename(s, '.c')}.o`);
-        if (spawnSync(tcc, [...flags, '-c', s, '-o', o], { encoding: 'utf8' }).status !== 0) {
+        if (spawnSync(tcc, [...flags, gflag, '-c', s, '-o', o], { encoding: 'utf8' }).status !== 0) {
           bad = true;
           break;
         }
@@ -121,7 +137,7 @@ try {
       if (bad) continue;
       const dll = c.dll === true;
       const outPath = join(dir, `${stem}.${dll ? 'dll' : 'exe'}`);
-      const args = [...flags, ...(dll ? ['-shared'] : []), ...objs, '-o', outPath];
+      const args = [...flags, gflag, ...(dll ? ['-shared'] : []), ...objs, '-o', outPath];
       const link = spawnSync(tcc, args, { encoding: 'utf8' });
       if (link.status !== 0 || !existsSync(outPath)) { skipped++; continue; }
       const opt = dll ? { dll: true, outName: outPath } : {};
@@ -132,6 +148,7 @@ try {
           libtcc1: `${t.name}-libtcc1.a`,
           open,
           debug: true,
+          dwarf,
           ...opt,
         });
         got = peWrite({
@@ -141,6 +158,7 @@ try {
           startName: loaded.entryName,
           gui: loaded.peType === PE_GUI,
           debug: true,
+          dwarf,
           declare: [{ name: loaded.start, after: loaded.objs.length }],
           ...opt,
         }).bytes;

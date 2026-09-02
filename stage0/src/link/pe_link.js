@@ -18,6 +18,7 @@
 
 import { OmniError } from '../source/diag.js';
 import { peSections, CLS } from './pe_sections.js';
+import { DWARF_SECTIONS } from './elf_merge.js';
 import { buildImports, writeImage } from './pe.js';
 import { relocateOne } from './pe_reloc.js';
 
@@ -156,6 +157,12 @@ export function peImage(inp) {
   const TLS_RELOC = new Set([23, 549, 550]);
   const tlsSeg = r.tls === null ? undefined
     : { start: r.tls.start, end: r.tls.start, symSecEnd: 0, tcb: 0 };
+  /* `relocate_section` 里那个 dwarf 的例外：调试节里 `R_DATA_32DW`（x86_64 是
+   * `R_X86_64_32`、别的目标是 `R_DATA_32`）指到**另一个调试节**时，写的是
+   * `tgt - 那一节的地址`，也就是**节内偏移**，不是绝对地址。调试信息内部互相指的
+   * 就该是偏移。 */
+  const DW = new Set(DWARF_SECTIONS);
+  const dw32 = machine === EM_AARCH64 ? 258 : 10;
   for (const rela of secs) {
     if (rela.type !== SHT_RELA) continue;
     const tgt = secs[rela.info - 1];
@@ -170,6 +177,11 @@ export function peImage(inp) {
       if (sym === undefined) throw new OmniError('pe: 重定位指的符号不存在');
       const weak = sym.shndx === SHN_UNDEF && sym.bind === STB_WEAK
         && !imports.bind.has(sym.name) && !r.linker.has(sym.name);
+      if (type === dw32 && DW.has(tgt.name) && sym.shndx !== SHN_UNDEF
+        && sym.shndx < SHN_LORESERVE && DW.has(secs[sym.shndx - 1]?.name)) {
+        relocateOne(machine, type, tgt.data, off, tgt.vaddr + off, sym.value + addend, imagebase);
+        continue;
+      }
       relocateOne(machine, type, tgt.data, off, tgt.vaddr + off,
         addrOf(sym) + addend, imagebase, weak, undefined,
         TLS_RELOC.has(type) ? tlsSeg : undefined);

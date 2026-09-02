@@ -494,6 +494,12 @@ Mach-O 的 dylib 不叫、PE 的 dll **照叫**（`pe_add_runtime` 在
 九种走法各 2 份逐字节相同。真正难的一格不是这些 —— 是**符号表里的次序**：
 `tcc_add_linker_symbols` 那一批「表里没有也要建」，入口符号则是在「命令行上那几份装完、
 库还没扫」的缝里加的，这两处以前都能偷懒，`-g` 一开就看得见了）。
+**`-gdwarf` 也认了**（第七十片：`tcc_debug_new` 的另一支造十三节（其中七节永远空着，
+只为了让 `R_DATA_32DW` 有地方落 —— 它们还全落在同一个地址上，因为「空节照样推地址」
+碰上「已经对齐就不再推」）；两处例外都在问「目标节与符号所在的节是不是都在 `dwlo`
+到 `dwhi` 里」：`relocate_section` 里那种要写**节内偏移**而不是绝对地址，
+`pe_build_reloc` 里那种**不进** `.reloc`。`pe-debug` 那道门长到十七种走法、34 份逐字节
+相同）。PE 那一路 tcc 自己会走的每条路于是都对上了。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -11025,11 +11031,56 @@ break;`，也就是「表里压根没有就不建」。所以 tcc 的表里有 `
 
 尺子：`<target>-win32-tcc -g …`。九种走法（四份单目标的 C 案例、`.init_array` 那份长节
 名的、弱符号、线程局部、两份都带 stabs 的，以及 `-shared` 的两种）乘两个目标，
-**18 份逐字节相同**（180010 字节）。`-gdwarf` 那一路（`.debug_*` 一堆节、
-`pe_build_reloc` 里 `dwlo`/`dwhi` 那个「dwarf 指向 dwarf 的不进 `.reloc`」的例外）
-还没做。
+**18 份逐字节相同**（180010 字节）。`-gdwarf` 那一路是下一片。
 
 <!-- 第九刀第六十九片-END -->
+
+## 落地：第九刀第七十片
+
+**`-gdwarf`。** 接着上一片，把调试信息的另一路补齐。跑下来出乎意料地短 —— 因为第六十九片
+把「谁在什么时候进符号表」那一格解决之后，剩下的只有两处不同。
+
+**一、造出来的是另一套节。** `tcc_debug_new` 里 `if (s1->dwarf)` 那一支造十三节：
+`.debug_info`、`.debug_abbrev`、`.debug_line`、`.debug_aranges` 是真会写的；接着七节
+（`.debug_macro`、`.debug_loc`、`.debug_ranges`、`.debug_loclists`、`.debug_rnglists`、
+`.debug_str_offsets`、`.debug_addr`）注释里写明只是「为了让 `R_DATA_32DW` 那种重定位有
+地方落」，一个字节都不写；最后 `.debug_str`（带 `SHF_MERGE|SHF_STRINGS`），dwarf 5 还多
+一节 `.debug_line_str`。与 stabs 那一路不同，**它们都不带起手内容**。
+
+那七节空着也不白占：摆地址那一步里，空节虽然不进节表，可 `s->sh_addr = addr =
+pe_virtual_align(pe, addr)` 是在 `continue` **之前**做的。第一节把地址推到下一个
+0x1000，后面六节看到的地址已经对齐了，`pe_virtual_align` 就是个恒等式 —— 于是七节全落在
+同一个地址上，一页也没浪费。`.debug_str` 接着从那儿开始。这一格是「空节照样推地址」
+（第四十八片）与「已经对齐就不再推」两条规则合起来的结果，看着像巧合，其实是必然。
+
+`s1->dwlo` / `dwhi` 就是这十三节的区间。我们那边把这一串导出成 `DWARF_SECTIONS`，
+按名字判断 —— 反正只有 `tcc_debug_new` 造的这几个名字落在区间里，输入里别的
+`.debug_*` 是后建的，号在 `dwhi` 之外。
+
+**二、dwarf 指向 dwarf 的重定位有两处例外。** 两处都在问同一个问题「这条重定位的目标节
+与符号所在的节是不是都在 dwarf 区间里」：
+
+- `relocate_section`：`if (is_dwarf && type == R_DATA_32DW && sym->st_shndx` 在区间里
+  `) add32le(ptr, tgt - s1->sections[sym->st_shndx]->sh_addr)` —— 写的是**节内偏移**，
+  不是绝对地址。`R_DATA_32DW` 在 x86_64 上是 `R_X86_64_32`、别的目标上是 `R_DATA_32`
+  （arm64 的 `R_AARCH64_ABS32`）。DWARF 里 `.debug_info` 指 `.debug_str` 的那些字段本来
+  就该是节内偏移。
+- `pe_build_reloc`：同样的条件，这几条**不进** `.reloc`。装载时搬动映像不影响调试信息
+  内部互相指的偏移。
+
+第一处不加，`.debug_info` 里指向 `.debug_str`、`.debug_line_str` 的那几格就写成了映像
+地址（第一次跑出来 x86_64 差 38 个字节，全在 `.debug_info` 里）；第二处不加，arm64 的
+`.reloc` 会多出一堆条目。
+
+命令行上是 `omni pe-link -gdwarf`（也认 `-gdwarf-N`）。`pe-debug` 那道门于是从九种走法
+长到十七种（八种 dwarf 的），两个目标 **34 份逐字节相同**（345955 字节）。
+
+至此 PE 那一路 tcc 自己会走的每条路都对上了：可执行文件、dll、接着 `.def` / 真 `.dll` /
+资源文件链、十二个链接器开关、`__thread`、`-g` 与 `-gdwarf`。剩下的是 tcc 自己也不常走
+的几处（`-Wl,--no-*` 那几个反开关、i386/arm 那两个目标的 stdcall 修饰、造 dll 时顺手写
+的那份 `<输出>.def`）。
+
+<!-- 第九刀第七十片-END -->
 
 
 
