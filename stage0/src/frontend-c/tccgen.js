@@ -585,9 +585,9 @@ function cefApply(t, x, y, err) {
  * 别的差异一律是 `conflicting types` —— 我们不做完整的「类型兼容」那一套
  * （C11 6.2.7：形参表里 `int f()` 与 `int f(int)` 也算兼容），撞上了再说。
  *
- * 数组那一格必须**先**判：`sameType` 比数组时只看元素类型，**不看长度**
- * （ctype.js:267 —— 那是给赋值/形参那些地方用的，C 里 `int[]` 与 `int[10]` 确实
- * 相容）。所以先问 `sameType(a, b)` 会让 `int t[]; int t[10];` 直接回第一条的
+ * 数组那一格必须**先**判：`sameType` 比数组长度时**有一边没写就算相容**
+ * （`compareTypes`，照 tcc 的 `compare_types` —— C 里 `int[]` 与 `int[10]` 确实相容）。
+ * 所以先问 `sameType(a, b)` 会让 `int t[]; int t[10];` 直接回第一条的
  * 「没长度」类型，长度就永远补不上了。
  */
 function mergeTentative(a, b) {
@@ -3241,12 +3241,15 @@ export class CGen {  /**
     }
     const wide = sVal(TY_LLONG, f.emit(OP.LOAD, T_I64, REF_NONE, REF_NONE, slot));
 
-    /* 有一支是指针（或数组）：结果就是那个指针类型。放在整型那套规则**之前**，
+    /* 有一支是指针（或数组）：结果类型照 C11 6.5.15 第 6 段那三条走（tcc 的
+     * `gen_op`/`? :` 那一支，`tccgen.c:2931-2999`）。放在整型那套规则**之前**，
      * 因为 intBitsOf(指针) 是 64，落到下面会算出 `long long` —— 于是 `(c?p:q)[0]`
      * 会说「下标用在了不是数组也不是指针的东西上」，而错的其实是这一格。 */
     const pa = decayedType(a.ty);
     const pb = decayedType(b.ty);
-    if (isPtr(pa.t) || isPtr(pb.t)) return this.castTo(wide, isPtr(pa.t) ? pa : pb);
+    if (isPtr(pa.t) || isPtr(pb.t)) {
+      return this.castTo(wide, this.condPtrType(a, b, pa, pb));
+    }
     // 公共类型：两支提升后做常规算术转换。两支的类型在这一点上都已知了。
     const bits = intBitsOf(a.ty) > intBitsOf(b.ty) ? intBitsOf(a.ty) : intBitsOf(b.ty);
     let uns;
@@ -3261,8 +3264,57 @@ export class CGen {  /**
     return this.castTo(wide, ty);
   }
 
-  /** `expr_eq`（`tccgen.c:6738`）：赋值。**右结合**，所以递归调自己。 */
-  exprEq() {
+  /**
+   * 空指针常量（tcc 的 `is_null_pointer`，`tccgen.c:2814`）：**常量 0**，类型是
+   * `int`/`long long`，或者是套了一层 `void *`（不带限定符）的那种 —— `(void *)0`。
+   *
+   * 「是不是常量」在我们这儿只能问 ref 是不是常量池里的一条（偏离 2：主表达式那条路
+   * 不折常量）。所以 `(void *)0` 认不认得出来，取决于那次强制转换有没有落成一条常量；
+   * 落不成的话这一问回 false，于是走的是「两支都是指针」那条规则 —— 对 `(void *)0`
+   * 与 `T *` 这一对来说答案一样（`void *` 那一支优先），所以不影响结果。
+   */
+  nullPtrConst(v) {
+    if (v.ref === null || !isConstRef(v.ref)) return false;
+    const c = this.mod.consts.get(v.ref);
+    if (c === undefined || c.kind !== 'int' || BigInt(c.text) !== 0n) return false;
+    const b = btype(v.ty.t);
+    if (isArray(v.ty.t)) return false;
+    if (b === VT_INT || b === VT_LLONG) return true;
+    if (b !== VT_PTR || v.ty.ref === null) return false;
+    return btype(v.ty.ref.t) === VT_VOID
+      && (v.ty.ref.t & (VT_CONSTANT | VT_VOLATILE)) === 0;
+  }
+
+  /**
+   * `? :` 两支里有指针时的结果类型（C11 6.5.15 第 6 段 / `tccgen.c:2931-2999`）。
+   * 三条，顺序照 tcc：
+   *   1. 一支是**空指针常量** -> 结果是另一支的类型（`0 ? 0 : s` 是 `struct S *`）；
+   *   2. 一支是指针、另一支是整数（而且不是 0）-> 结果是那个指针类型（tcc 只警告）；
+   *   3. 两支都是指针 -> **指向 `void` 的优先**，否则取第二支；两边指向的东西上的
+   *      限定符要**并起来**（`const char *` 与 `char *` -> `const char *`），
+   *      而「指向长度未定的数组」要让位给写了长度的那一个。
+   */
+  condPtrType(a, b, pa, pb) {
+    if (this.nullPtrConst(b)) return pa;
+    if (this.nullPtrConst(a)) return pb;
+    if (isPtr(pa.t) !== isPtr(pb.t)) return isPtr(pa.t) ? pa : pb;
+    const p1 = pa.ref;
+    const p2 = pb.ref;
+    if (p1 === null || p2 === null) return pa;
+    /* tcc 那句是 `type = *((pbt1 == VT_VOID) ? type1 : type2)` —— 先整份拷过来
+     * （外层那一层的限定符跟着走），再动「指向的东西」。 */
+    const outer = btype(p1.t) === VT_VOID ? pa : pb;
+    let tgt = outer.ref;
+    const newq = (p1.t | p2.t) & (VT_CONSTANT | VT_VOLATILE);
+    if ((~tgt.t & newq) !== 0) tgt = { ...tgt, t: tgt.t | newq };
+    if (isArray(p1.t) && isArray(p2.t) && !(tgt.count > 0)
+      && (p1.count > 0 || p2.count > 0)) {
+      tgt = { ...tgt, count: p1.count > 0 ? p1.count : p2.count };
+    }
+    return tgt === outer.ref ? outer : { ...outer, ref: tgt };
+  }
+
+  /** `expr_eq`（`tccgen.c:6738`）：赋值。**右结合**，所以递归调自己。 */  exprEq() {
     const v = this.exprCond();
     const t = this.tok;
     if (t !== ASSIGN && !isAssignOp(t)) return v;
