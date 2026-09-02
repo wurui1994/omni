@@ -2969,6 +2969,17 @@ export class CGen {  /**
 
   /** 调用：`名字 ( 实参… )`。名字已经吃掉，当前记号是 `(`。 */
   funcCall(name) {
+    /* `alloca`（第六十三片）。tcc 那边它是运行时库里的一个真函数（`lib/alloca.S`：
+     * 一句 `sub sp` 就完了），只在边界检查那一路上被特判（`tccgen.c:1701`）。我们没有
+     * FFI（ADR-0014 决策 4：解释器不假装能做 FFI），所以在这儿把它编成「在 `$sp` 上
+     * 切一刀」—— 与变长数组（第四十九片）**同一刀**，区别只有「什么时候还」：
+     * VLA 出作用域就还，alloca 那一块要活到函数返回。
+     *
+     * 这个单元里真的定义了一个叫 alloca 的函数时不拦（那就是它自己的函数）。 */
+    if (name === 'alloca' || name === '__builtin_alloca') {
+      const hit = this.funcs.get(name);
+      if (hit === undefined || !hit.defined) return this.allocaCall();
+    }
     const info = this.funcSym(name);
     info.used = true;
     const a = this.callArgs(`function '${name}'`, info.params, info.variadic, info.ret,
@@ -2984,6 +2995,31 @@ export class CGen {  /**
      * 手上的 `sret`：两者一定相等，而用回来的那个把「返回值在哪儿」这件事记在数据流里。 */
     if (a.sret !== null) return sMem(info.ret, r, 0);
     return this.retNarrow(info.ret, r);
+  }
+
+  /**
+   * `alloca(n)`：在 `$sp` 上切 n 个字节，回那块地方的地址。
+   *
+   * 与 `vlaAlloc` 的三条指令一模一样（读 `$sp`、减、按 16 对齐、写回），少的是
+   * 「把切之前的 `$sp` 存起来」那一步 —— 因为没人要把它还回来。还回来的只有函数
+   * 收场那一条（`emitEpilogue`），所以这儿借 `vlaSeen` 那条规矩：这个函数必须有
+   * 序言/收场那一对，不然递归调用一圈就把栈走穿了。
+   *
+   * 同一个作用域里既有 VLA 又有 alloca 时，那个作用域退出会把 alloca 切的这一块
+   * 也一起收回去 —— 那不是我们的取舍，tcc 的 `gen_vla_sp_restore` 也是这个效果。
+   */
+  allocaCall() {
+    this.skip(LPAR);
+    const n = this.castTo(this.exprEq(), TY_ULLONG);
+    this.skip(RPAR);
+    const f = this.f;
+    const spNo = this.spGlobal();
+    this.vlaSeen = true;
+    const sp = f.emit(OP.GLOAD, T_I64, REF_NONE, REF_NONE, spNo);
+    const base = f.emit(OP.BAND, T_I64, f.emit(OP.SUB, T_I64, sp, this.gv(n), 0),
+      this.mod.consts.int(-16n), 0);
+    f.emit(OP.GSTORE, T_VOID, base, REF_NONE, spNo);
+    return this.postfix(sVal(mkPointer(TY_VOID), base));
   }
 
   /**

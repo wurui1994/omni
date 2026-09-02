@@ -288,7 +288,7 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
 8. **C 的库面**：`libtcc1` 的等价物（软除法/浮点辅助/`alloca`/`setjmp`）与 libc 的接法。
    原先写的是"先转手宿主的 libc，走既有的 extern-C FFI"，第五片证明**转手不成立**
    （指针是自家线性内存里的偏移，宿主 libc 读不到），改成一个读写线性内存的宿主模块，
-   见第五片的落地节。**前六十二片已落地**（预定义的宏 —— 目标的自述，五十条，
+   见第五片的落地节。**前六十三片已落地**（预定义的宏 —— 目标的自述，五十条，
    顺序与值都对着 `tcc -dM -E` 抄；自带的系统头目录 + 编译器必须自己给的那四份头；
    `stdio.h`/`stdlib.h`/`string.h` 的最小子集 —— libc 的自述；
    `strtol` 一族与 `strncpy`/`strchr`/`strstr` 那几条；
@@ -383,8 +383,9 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
    装得进 int 就还是 int；
    **typedef 上的 `aligned(N)`** —— 属性跟着名字走，成员自己写的赢，而对齐是覆盖不是取大；
    **柔性数组成员配初始化式** —— `sizeof` 不变、划的地方变大，于是 tcctest.c 前 842 行
-   与 tcc 逐字节相同），
-   见下面的第八刀第一到六十二片节。
+   与 tcc 逐字节相同；
+   **`alloca`** —— 与变长数组同一刀，区别只在「什么时候还」），
+   见下面的第八刀第一到六十三片节。
 
 最后三步是**后端**：
 
@@ -7069,6 +7070,67 @@ omni: runtime error: interp: C ABI call 'alloca' is not supported by the interpr
 再之后：`-dM`、路径 A 的 GLR 与路径 B 对账（第七步）、第 9-11 步的后端。
 
 <!-- 第八刀第六十二片-END -->
+
+## 落地：第八刀第六十三片
+
+**`alloca`。**改的是 `tccgen.js` 两处（`funcCall` 头上一个拦子、一个 `allocaCall`），
+用例是 `tests/c/gen/83-alloca.c`。
+
+### 一、它在 tcc 那边是个真函数，在我们这边只能是编译期的一刀
+
+tcc 的 `alloca` 来自它自己的运行时库（`lib/alloca.S`，arm64 上就是一句 `sub sp`），
+编译器里只在边界检查那一路特判它（`tccgen.c:1701`：`func_bound_add_epilog = 1`）。
+我们没有 FFI（ADR-0014 决策 4：解释执行是 oracle，它不该假装能做 FFI），所以只能在
+前端把它编开 —— 编成的东西与变长数组（第四十九片）**是同一刀**：
+
+```js
+    const sp = f.emit(OP.GLOAD, T_I64, REF_NONE, REF_NONE, spNo);
+    const base = f.emit(OP.BAND, T_I64, f.emit(OP.SUB, T_I64, sp, this.gv(n), 0),
+      this.mod.consts.int(-16n), 0);
+    f.emit(OP.GSTORE, T_VOID, base, REF_NONE, spNo);
+```
+
+`vlaAlloc` 比它多一步：把切之前的 `$sp` 存进一个槽，好让 `popScope` 写回。alloca
+没有那一步 —— **没人要把它还回来**，那块地方活到函数返回。
+
+### 二、「活到函数返回」这一条靠 `vlaSeen` 兑现
+
+函数收场那一条（`emitEpilogue`）只在 `frameSize > 0` 时才发，而 `char *p = alloca(16);`
+这种函数的帧可能一格都不用。第四十九片为变长数组立过一条规矩：
+
+```js
+    if (this.vlaSeen && est === 0) est = FRAME_ALIGN;
+```
+
+alloca 直接借这一条（`this.vlaSeen = true`）—— 理由一字不改：那块地方是运行期从 `$sp`
+上切的，不在返回前把 `$sp` 还回去，递归一圈就把栈走穿了。用例里 `rec(20)` 与随后的
+`rec(5)` 就是问这个：两次调用切的是同一段地址，答案分别是 210 与 15。
+
+### 三、拦名字，但让位给真的定义
+
+`if (name === 'alloca' || name === '__builtin_alloca')` 之后还要问一句
+`hit === undefined || !hit.defined` —— 这个单元里真的定义了一个叫 `alloca` 的函数时
+不拦。tcc 那边天然如此（它就是个普通符号，谁定义了就用谁），我们靠这一句追上。
+
+### 四、一个作用域里 VLA 与 alloca 撞上时，alloca 那块会被提前收走
+
+作用域退出发的是 `spRestore(cur.sp)`，而 `cur.sp` 存的是**这个作用域里第一个 VLA
+之前**的 `$sp` —— 在它之后 alloca 切的那些块也就一起还了。这不是我们的取舍：tcc 的
+`gen_vla_sp_restore(cur_scope->vla.locorig)` 是同一个效果。
+
+### 五、对账方式从这一片起变了：不再每片跑整份 tcctest
+
+补上 alloca 之后 tcctest.c 不再停在第 843 行，而我们的解释器跑它**每 20 秒大约 630
+行** —— 整份跑完加上 oracle 那一遍已经超出一次命令的窗口。所以从这一片起，
+每片的对账是「新加的那个 `tests/c/gen/*.c` 与 `tcc -run` 逐字节相同」加上两条测试链，
+整份 tcctest 的差异清单改成攒几片量一次。
+
+`tests/c/run.js` 124 过 0 挂，`tests/run.js` 96 过 0 挂，83 那条与 oracle 逐字节相同。
+
+**下一片**：解释器的速度（每 20 秒 630 行这件事本身现在是路上的石头），或者 `-dM`。
+再之后：路径 A 的 GLR 与路径 B 对账（第七步）、第 9-11 步的后端。
+
+<!-- 第八刀第六十三片-END -->
 
 
 
