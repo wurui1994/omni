@@ -17,8 +17,8 @@
  */
 
 import { OmniError } from '../source/diag.js';
-import { peSections } from './pe_sections.js';
-import { buildImports } from './pe.js';
+import { peSections, CLS } from './pe_sections.js';
+import { buildImports, writeImage } from './pe.js';
 import { relocateOne } from './pe_reloc.js';
 
 const SHT_NOBITS = 8;
@@ -147,5 +147,55 @@ export function peImage(inp) {
   const start = syms.find((s) => s.name === (inp.startName ?? '_start'));
   r.entry = start === undefined ? 0 : addrOf(start) - imagebase;
   r.addrOf = addrOf;
+  return r;
+}
+
+/** ELF 的 `e_machine` → PE 的机器号与 `Characteristics`（`CHARACTERISTICS_EXE`）。 */
+const PE_MACHINE = new Map([
+  [EM_X86_64, { machine: 0x8664, chars: 0x022f }],
+  [EM_AARCH64, { machine: 0xaa64, chars: 0x0022 }],
+]);
+
+/**
+ * 链一份 PE 并把整个文件写出来。
+ *
+ * 头部那三十几个字段照 `pe_write`：`subsystem` 默认 3（console），栈默认 0x100000，
+ * 数据目录里填导入表、IAT、异常表（`.pdata`）与重定位表（`.reloc`）。
+ */
+export function peWrite(inp) {
+  const r = peImage(inp);
+  const cpu = PE_MACHINE.get(r.machine);
+  if (cpu === undefined) throw new OmniError(`pe: 不认识的架构 0x${r.machine.toString(16)}`);
+  const base = r.imagebase;
+  const dirs = [];
+  for (let i = 0; i < 16; i++) dirs.push({ addr: 0, size: 0 });
+  for (const info of r.infos) {
+    const d = { addr: info.vaddr - base, size: info.vsize };
+    if (info.cls === CLS.pdata) dirs[3] = d;       // EXCEPTION
+    else if (info.cls === CLS.reloc) dirs[5] = d;  // BASERELOC
+    else if (info.cls === CLS.rsrc) dirs[2] = d;   // RESOURCE
+  }
+  if (r.imp !== null) {
+    let nsyms = 0;
+    for (const d of r.imp.dlls) nsyms += d.syms.length;
+    const impSize = (r.imp.dlls.length + 1) * IMP_DESC_SIZE;
+    const at = r.thunk.vaddr - base + r.imp.at;
+    dirs[1] = { addr: at, size: impSize };                                  // IMPORT
+    dirs[12] = { addr: at + impSize, size: (nsyms + r.imp.dlls.length) * THUNK_SIZE }; // IAT
+  }
+  const img = {
+    machine: cpu.machine,
+    chars: cpu.chars,
+    subsystem: inp.subsystem ?? 3,
+    imagebase: base,
+    entry: r.entry,
+    stack: inp.stack ?? 0x100000,
+    dirs,
+    secs: r.infos.map((i) => ({
+      name: i.name, vsize: i.vsize, vaddr: i.vaddr - base, chars: i.flags, bytes: i.bytes,
+    })),
+  };
+  r.img = img;
+  r.bytes = writeImage(img);
   return r;
 }
