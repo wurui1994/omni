@@ -413,11 +413,13 @@ native 上的堆就是系统的堆 —— `malloc`/`free` 落成普通的外部 
 加一块 176 字节的寄存器保存区）。还没到的是 `va_copy`（在 native 上明着报）。
 
 **`gen/` 那一批已经在 native 上整批跑**（第二十六片）：`omni c-obj` 出 `.o`、clang 链、
-真进程跑，83 条里 **66 条**与 `tcc -run` 逐字节相同（`tests/c/native-gen.js`）。
+真进程跑，83 条里 **70 条**与 `tcc -run` 逐字节相同（`tests/c/native-gen.js`）。
 **函数指针也通了**（第二十七片：MIR 的 `FADDR` 取函数符号的真地址、`CALLI` 落成
 `blr` / `call *r`），**初值里的地址也通了**（第二十八片：数据节里的 `POINTER64`
 重定位 —— 静态指针表、`char *p = "…"`、`&g`、`&s.f`、函数指针的全局都在这一格上）。
-剩下的按堆记在那几节里，最大的几堆是 `va_copy`、宿主的 errno/标准流、变长数组。
+**宿主的那几格也通了**（第三十一片：外部的全局量是未定义符号、取地址过 GOT、
+`errno` 映到 macOS 的 `__error`、三个标准流映到 `__stdinp`/`__stdoutp`/`__stderrp`）。
+剩下的按堆记在那几节里，最大的几堆是 `va_copy`、变长数组、还落在线性内存上的那几条。
 
 ## 后果与代价
 
@@ -8863,6 +8865,93 @@ bytes(bs) { /* text 是十六进制 */ return this.intern(T_STR, 'bytes', hex); 
 （`__omni_errno_location` 映到 `__error()`、`__omni_stdout` 映到 `__stdoutp`）。
 
 <!-- 第九刀第三十片-END -->
+
+## 落地：第九刀第三十一片
+
+**宿主的那几格通了：errno、标准流、外部的全局量。**`gen/` 那一批 66 -> **70 条**
+（`24-errno`、`35-streams`、`40-perror`、`58-fputs`）。
+
+### 一、外部的全局量：`globalBlob` 上多一种「没有内容」
+
+从前 `globalBlob[i]` 只有两种：`null`（wasm 那种一格的全局）与 `{size, align, bytes, fixups}`。
+native 上还需要第三种 —— **只声明、别处定义**：
+
+```js
+setGlobalExtern(i, size, align) {
+  if (!this.native) throw new Error('mir: 外部的全局量只有 native 这条腿上有');
+  this.globalBlob[i] = { size, align, bytes: [], fixups: [], extern: true };
+}
+```
+
+只在 native 上有，是因为 wasm 那条腿的全局是模块内的一格，「未定义」在那里没有意义。
+两条后端在铺数据段时 `continue` 掉这一种：不占 `__data` 的字节，于是它在 `.o` 里
+自然就是个**未定义符号**，链接时由别的 `.o` 或 dylib 供上。
+
+### 二、`adrp` 到不了住在 dylib 里的东西 —— 要过 GOT
+
+先按老路走（`adrp` + `add`），链接器直接顶回来：
+
+```
+ld: fixup error (kind=arm64_adrp_lo12) … target '___stdoutp' does not have address
+```
+
+这不是编码错，是**原理上不可能**：`adrp` 算的是「本镜像里某一页的地址」，
+而 `__stdoutp` 在 libSystem 里 —— 链接时它根本没有页号。这一类只能间接来一步：
+先取 GOT 里那一格的地址，再从那一格里**读出**真地址。
+
+```js
+// arm64
+adrpSymGot(rd, sym)  // ARM64_RELOC_GOT_LOAD_PAGE21   = 5
+ldrSymGot(rt, rn, sym)  // ARM64_RELOC_GOT_LOAD_PAGEOFF12 = 6
+// x86_64
+loadSymGot(reg, name)  // mov reg,[rip + sym@GOTPCREL]，X86_64_RELOC_GOT_LOAD = 3
+```
+
+代价是多一次内存访问。省不掉：本地定义的全局仍走 `adrp`/`lea`，
+分岔就一句（`globalAddr` / `isExternGlobal`），`GLOAD`/`GSTORE`/`GADDR` 三处都走它。
+
+### 三、`errno` 只是改个名，标准流不是
+
+`errno` 在 macOS 上是 `*__error()` —— 一个函数。我们的 `__omni_errno_location`
+形状与它一样（返回 `int *`），所以只要**改个名**就行：
+
+```js
+const NATIVE_CNAME = new Map([['__omni_errno_location', '__error']]);
+```
+
+标准流不行。`stdout` 在 macOS 上是 `__stdoutp`，那是一个**变量**，
+而我们这边 `__omni_stdout` 是个**函数**。改名不成 —— 名字改过去了，
+调用点还是 `bl`，跳到一个数据地址上去。所以给它一个**真的身子**：
+
+```js
+streamThunk(name, info) {
+  const gno = this.mod.globalNo(NATIVE_STREAM_SYMS.get(name));
+  this.mod.setGlobalExtern(gno, 8, 8);
+  const v = f.emit(OP.GLOAD, T_I64, REF_NONE, REF_NONE, gno);
+  f.emit(OP.RET, T_I64, v, REF_NONE, 0);
+}
+```
+
+一格 `GLOAD` 加一个 `RET`。原来那个没身子的名字照旧被 `sealExternSymbols` 改成
+`$ext$__omni_stdout`（第二十六片的规矩：任何没身子的名字都要改名，不许和真 libc 撞）。
+
+### 四、验到哪一步
+
+`tests/c/native.js`：**144 passed**（新增六条 —— 读、写完读回、数组、取地址、
+住在 dylib 里的 `__stdoutp`、`*__error() = 42`）。`host_g` 与 `host_arr` 的**定义**
+放在 clang 编的 `main.c` 那一边，probe.c 只声明 —— 于是它们在我们的 `.o` 里
+是未定义符号，正好是要验的那件事。边界那一节里「外部的全局量必须明着报」这一条
+删掉了（它已经不成立）。
+
+`tests/c/native-gen.js`：**70 passed, 0 failed, 11 not yet, 2 skipped**，`MIN_OK` 提到 70。
+
+**还没到的 11 条，按堆分**：`va_copy`（3 条）、变长数组与 alloca（3 条）、
+还落在线性内存上的（3 条：复合字面量、宽串两条）、`va_arg` 取 struct（1 条）、
+外部变参函数的地址（1 条）。
+
+**下一片**：`va_copy` —— 三条里最大的一堆，而且是一个新的 MIR 指令（`VACOPY`）就够。
+
+<!-- 第九刀第三十一片-END -->
 
 
 

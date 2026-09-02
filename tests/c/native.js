@@ -135,6 +135,13 @@ const CASES = [
   ['非 ASCII 的串常量：全局的初值',
     'return (unsigned char) g_uni[0] * 10000L + (unsigned char) g_uni[1] * 100L + g_uni[2];'],
   ['非 ASCII 的串常量：长度还是字节数', 'return (long long) strlen("\\xe4\\xb8\\x96" "ab");'],
+  /* 外部的全局量（第三十一片）。 */
+  ['外部的全局量：读', 'return host_g;'],
+  ['外部的全局量：写完再读回来', 'host_g = 88; long long r = host_g; host_g = 77; return r;'],
+  ['外部的全局量：数组', 'return host_arr[0] * 100 + host_arr[2];'],
+  ['外部的全局量：取地址', 'return &host_arr[2] - &host_arr[0];'],
+  ['外部的全局量：住在 dylib 里的（标准流的那个指针）', 'return __stdoutp != 0;'],
+  ['外部的全局量：errno 那一格（macOS 的 __error）', '*__error() = 42; return *__error();'],
 ];
 
 const SUPPORT = `struct P { int x; int y; };
@@ -238,12 +245,22 @@ int g_al16 __attribute__((aligned(16))) = 5;
 int g_al32 __attribute__((aligned(32))) = 6;
 /* 非 ASCII 的串常量（第三十片）：常量池里是一串**字节**，不是一串字符。 */
 char *g_uni = "\\xc3\\xa9!";
+/* 外部的全局量（第三十一片）：这个 .o 里它们是**未定义符号**，取地址要过 GOT。
+ * host_g 与 host_arr 由 main.c 定义（那份是 clang 编的），
+ * __stdoutp 与 __error 来自真的 libc —— 后两个正是「住在 dylib 里」那一种。 */
+extern int host_g;
+extern long long host_arr[3];
+extern void *__stdoutp;
+extern int *__error(void);
 `;
 
 let src = SUPPORT;
 for (let i = 0; i < CASES.length; i++) src += `long long probe${i}(void) { ${CASES[i][1]} }\n`;
 
-const mainSrc = ['extern long long probe0(void);'];
+/* main.c 由 clang 编，`host_g`/`host_arr` 的**定义**放在这一边 ——
+ * probe.c 那一边只声明，于是它们在我们的 .o 里是未定义符号。 */
+const mainSrc = ['int host_g = 77;', 'long long host_arr[3] = {5, 6, 7};'];
+mainSrc.push('extern long long probe0(void);');
 for (let i = 1; i < CASES.length; i++) mainSrc.push(`extern long long probe${i}(void);`);
 mainSrc.push('extern int printf(const char *, ...);');
 mainSrc.push('int main(void) {');
@@ -325,7 +342,6 @@ try {
  * 那种错在解释器上看不出来，在真机器上是段错误，而且现场离原因很远。 */
 for (const [what, code] of [
   ['变长数组', 'int n = 4; int a[n]; a[0] = 1; return a[0];'],
-  ['外部的全局量', 'extern int nope;\nlong long f(void) { return nope; }'],
 ]) {
   total++;
   const body = code.indexOf('\n') >= 0 ? code : `long long f(void) { ${code} }`;

@@ -26,6 +26,15 @@ export const RELOC = {
   PAGE21: 'PAGE21',
   /** `add`/`ldr` 取符号在页内的偏移：12 位。 */
   PAGEOFF12: 'PAGEOFF12',
+  /**
+   * 过 GOT 取一个符号的地址（第九刀第三十一片）。**外部的数据符号只有这一条路**：
+   * 它可能住在一个 dylib 里，链接期没有「它的页」可谈，直接 `adrp` 会被链接器骂
+   * `target does not have address`。形状是
+   * `adrp Rd, sym@GOTPAGE` + `ldr Rd, [Rd, sym@GOTPAGEOFF]` ——
+   * 多一次内存读，换来「真地址由加载器填进 GOT 那一格」。
+   */
+  GOT_PAGE21: 'GOT_PAGE21',
+  GOT_PAGEOFF12: 'GOT_PAGEOFF12',
   /** 数据里的一个 8 字节绝对地址。 */
   ABS64: 'ABS64',
 };
@@ -132,6 +141,18 @@ export class CodeBuf {
   ldrSymOff(size, rt, rn, sym, addend = 0) {
     this.relocs.push({ at: this.pos, kind: RELOC.PAGEOFF12, sym, addend });
     return this.word(e.ldrU(size, rt, rn, 0));
+  }
+
+  /** `adrp Rd, <sym>@GOTPAGE`（外部数据符号那一对的头一条，见 `RELOC.GOT_PAGE21`）。 */
+  adrpSymGot(rd, sym) {
+    this.relocs.push({ at: this.pos, kind: RELOC.GOT_PAGE21, sym, addend: 0 });
+    return this.word(e.adrp(rd, 0));
+  }
+
+  /** `ldr Rt, [Rn, <sym>@GOTPAGEOFF]`。取出来的就是那个符号的真地址。 */
+  ldrSymGot(rt, rn, sym) {
+    this.relocs.push({ at: this.pos, kind: RELOC.GOT_PAGEOFF12, sym, addend: 0 });
+    return this.word(e.ldrU(3, rt, rn, 0));
   }
 
   /* ---------------------------------------------------------------- 收工 */

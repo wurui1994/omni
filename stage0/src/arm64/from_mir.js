@@ -499,21 +499,21 @@ class FnGen {
      * （`ARM64_RELOC_PAGE21` + `PAGEOFF12`）—— 第九刀第一片对账时被 llvm 挡回来的
      * 那个「adrp 的页号填不出来」，现在从写出去的那一头解释清楚了。 */
     if (op === OP.GLOAD) {
-      this.symAddr(TMP0, this.globalSym(f.aux[i]));
+      this.globalAddr(TMP0, f.aux[i]);
       GLOAD_EMIT[widthKey(t)](buf, RES, TMP0);
       return this.def(i, RES);
     }
     if (op === OP.GSTORE) {
       this.loadRef(TMP1, f.a[i]);
       buf.emit(a.movReg(1, RES, TMP1));
-      this.symAddr(TMP0, this.globalSym(f.aux[i]));
+      this.globalAddr(TMP0, f.aux[i]);
       buf.emit(a.strU(STORE_SIZE[widthKey(f.t[i])], RES, TMP0, 0));
       return;
     }
     /* 全局的**地址**（第二十一片）：`GLOAD` 里那两条的前半截，只是不接 `ldr`。
      * C 的全局量都从这儿走 —— 取地址、按成员写、按下标写，后头接 `MLOAD`/`MSTORE`。 */
     if (op === OP.GADDR) {
-      this.symAddr(RES, this.globalSym(f.aux[i]));
+      this.globalAddr(RES, f.aux[i]);
       return this.def(i, RES);
     }
 
@@ -751,6 +751,25 @@ class FnGen {
     this.buf.addSymOff(reg, reg, sym);
   }
 
+  /**
+   * **外部**符号的地址算进 `reg`：过 GOT（`adrp @GOTPAGE` + `ldr @GOTPAGEOFF`）。
+   *
+   * 为什么不能与自家符号走同一条路：外部的数据符号可能住在一个 dylib 里，
+   * 那时链接期没有「它的页」可谈 —— 链接器会说 `target does not have address`
+   * （第三十一片上 `__stdoutp` 就是这么挡回来的）。
+   */
+  symAddrGot(reg, sym) {
+    this.buf.adrpSymGot(reg, sym);
+    this.buf.ldrSymGot(reg, reg, sym);
+  }
+
+  /** 一个模块级变量的地址算进 `reg`：自家的直接算，外部的过 GOT。 */
+  globalAddr(reg, no) {
+    const blob = this.mod.globalBlob[no];
+    if (blob !== null && blob.extern) return this.symAddrGot(reg, this.globalSym(no));
+    return this.symAddr(reg, this.globalSym(no));
+  }
+
   /** 真址 = 地址本身 + 静态偏移，算进 `reg`。地址就是真指针 —— 见文件上头那段。 */
   memAddr(reg, ref, off) {
     this.loadRef(reg, ref);
@@ -952,6 +971,9 @@ export function genModule(mod) {
   let dataAlign = 8;
   for (let gi = 0; gi < mod.globals.length; gi++) {
     const blob = mod.globalBlob[gi];
+    /* 外部的全局量（第三十一片）：不占字节、不定义符号 —— 它落进「未定义的外部符号」
+     * 那一段，靠取它地址的那几条重定位把名字带进符号表。 */
+    if (blob !== null && blob.extern) continue;
     const size = blob === null ? 8 : blob.size;
     const al = blob === null ? 8 : blob.align;
     if (al > 4096) nyi(`全局 '${mod.globals[gi]}' 要 ${al} 字节对齐（__data 这一节最多 4096）`);

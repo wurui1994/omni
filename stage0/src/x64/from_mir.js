@@ -543,7 +543,15 @@ class FnGen {
      * （arm64 那边 `ldr` 的立即数格装不下符号，所以要 `adrp`+`add` 两条）。 */
     if (op === OP.GLOAD) {
       const key = widthKey(t);
-      const sym = this.globalSym(f.aux[i]);
+      const gno = f.aux[i];
+      /* 外部的全局量（第三十一片）：地址得先过 GOT 取出来，再从那个地址读 ——
+       * `mov RES, sym(%rip)` 这条路走不通（链接期没有它的地址）。 */
+      if (this.isExternGlobal(gno)) {
+        buf.loadSymGot(TMP0, this.globalSym(gno));
+        MLOAD_EMIT[key === 'i32' ? 'i32s' : key](buf, RES, TMP0);
+        return this.def(i, RES);
+      }
+      const sym = this.globalSym(gno);
       if (key === 'i32') {
         /* i32 的规范形是符号扩展过的 64 位，而 `movslq sym(%rip)` 我们没有 ——
          * 先读四字节（零扩展），再一条 `movslq` 扩成规范形。 */
@@ -559,12 +567,21 @@ class FnGen {
     }
     if (op === OP.GSTORE) {
       this.loadRef(RES, f.a[i]);
-      buf.storeSym(STORE_SIZE[widthKey(f.t[i])], this.globalSym(f.aux[i]), RES);
+      const gno = f.aux[i];
+      const size = STORE_SIZE[widthKey(f.t[i])];
+      if (this.isExternGlobal(gno)) {
+        buf.loadSymGot(TMP0, this.globalSym(gno));
+        buf.emit(x.movMR(size, TMP0, 0, RES));
+        return;
+      }
+      buf.storeSym(size, this.globalSym(gno), RES);
       return;
     }
     /* 全局的**地址**（第二十一片）：x86_64 上就是一条 `leaq sym(%rip)`。 */
     if (op === OP.GADDR) {
-      buf.leaSym(RES, this.globalSym(f.aux[i]));
+      const gno = f.aux[i];
+      if (this.isExternGlobal(gno)) buf.loadSymGot(RES, this.globalSym(gno));
+      else buf.leaSym(RES, this.globalSym(gno));
       return this.def(i, RES);
     }
 
@@ -691,6 +708,12 @@ class FnGen {
     const name = this.mod.globals[no];
     if (name === undefined) throw new OmniError(`x64: 没有 ${no} 号模块级变量`);
     return name;
+  }
+
+  /** 这个全局是外部的吗（第三十一片）——是就得过 GOT，不能 RIP 相对直取。 */
+  isExternGlobal(no) {
+    const blob = this.mod.globalBlob[no];
+    return blob !== null && blob.extern === true;
   }
 
   /** 一个函数的符号名（`FADDR` 用）。 */
@@ -981,6 +1004,8 @@ export function genModule(mod) {
   let dataAlign = 8;
   for (let gi = 0; gi < mod.globals.length; gi++) {
     const blob = mod.globalBlob[gi];
+    /* 外部的全局量（第三十一片）：不占字节、不定义符号，与 arm64 那一份同一条。 */
+    if (blob !== null && blob.extern) continue;
     const size = blob === null ? 8 : blob.size;
     const al = blob === null ? 8 : blob.align;
     if (al > 4096) nyi(`全局 '${mod.globals[gi]}' 要 ${al} 字节对齐（__data 这一节最多 4096）`);

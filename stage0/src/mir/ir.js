@@ -823,6 +823,21 @@ export class MirModule {
     this.globalBlob[i] = { size, align, bytes: bs, fixups: fs };
   }
 
+  /**
+   * 一个**外部**的全局量（第九刀第三十一片）：别的目标文件里定义，我们只用它。
+   *
+   * 与 `setGlobalData` 的差别只有一件事：数据段里**不占字节、也不定义符号**，
+   * 于是写目标文件时它落进「未定义的外部符号」那一段，由链接器去找。
+   * `size`/`align` 还是记下来 —— 不是布局要用，是给校验器与将来的越界检查留一个说法。
+   *
+   * 只在 native 上成立：线性内存那条腿没有链接器可指望，那儿的外部全局是另一回事。
+   */
+  setGlobalExtern(i, size, align) {
+    if (this.globals[i] === undefined) throw new Error(`mir: 没有 ${i} 号模块级变量`);
+    if (!this.native) throw new Error('mir: 外部的全局量只有 native 这条腿上有');
+    this.globalBlob[i] = { size, align, bytes: [], fixups: [], extern: true };
+  }
+
   /** 给一个已登记的全局钉上类型（核心方言的 `(global …)`；不叫就还是 T_DYN）。 */
   setGlobalTy(i, t) { this.globalTy[i] = t; }
 

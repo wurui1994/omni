@@ -64,12 +64,15 @@ const PLATFORM_MACOS = 1;
 const ARM64_RELOC_BRANCH26 = 2;
 const ARM64_RELOC_PAGE21 = 3;
 const ARM64_RELOC_PAGEOFF12 = 4;
+const ARM64_RELOC_GOT_LOAD_PAGE21 = 5;
+const ARM64_RELOC_GOT_LOAD_PAGEOFF12 = 6;
 
 /* <mach-o/reloc.h> 的 x86_64 那一族。`SIGNED` 是「RIP 相对、带符号的四字节」，
  * `BRANCH` 是 `call`/`jmp` 的那一格 —— 两者的 pcrel 都是 1。 */
 const X86_64_RELOC_UNSIGNED = 0;
 const X86_64_RELOC_SIGNED = 1;
 const X86_64_RELOC_BRANCH = 2;
+const X86_64_RELOC_GOT_LOAD = 3;
 
 /* <mach-o/nlist.h>：n_type 的位。 */
 const N_EXT = 0x01;
@@ -171,9 +174,12 @@ const RELOC_TYPE = {};
 RELOC_TYPE[RELOC.BRANCH26] = { type: ARM64_RELOC_BRANCH26, pcrel: 1, len: 2 };
 RELOC_TYPE[RELOC.PAGE21] = { type: ARM64_RELOC_PAGE21, pcrel: 1, len: 2 };
 RELOC_TYPE[RELOC.PAGEOFF12] = { type: ARM64_RELOC_PAGEOFF12, pcrel: 0, len: 2 };
+RELOC_TYPE[RELOC.GOT_PAGE21] = { type: ARM64_RELOC_GOT_LOAD_PAGE21, pcrel: 1, len: 2 };
+RELOC_TYPE[RELOC.GOT_PAGEOFF12] = { type: ARM64_RELOC_GOT_LOAD_PAGEOFF12, pcrel: 0, len: 2 };
 RELOC_TYPE.X86_64_RELOC_BRANCH = { type: X86_64_RELOC_BRANCH, pcrel: 1, len: 2 };
 RELOC_TYPE.X86_64_RELOC_SIGNED = { type: X86_64_RELOC_SIGNED, pcrel: 1, len: 2 };
 RELOC_TYPE.X86_64_RELOC_UNSIGNED = { type: X86_64_RELOC_UNSIGNED, pcrel: 0, len: 2 };
+RELOC_TYPE.X86_64_RELOC_GOT_LOAD = { type: X86_64_RELOC_GOT_LOAD, pcrel: 1, len: 2 };
 /* 数据段里的一个八字节指针（第九刀第二十八片）。两种架构的类型号**都是 0**
  * （`ARM64_RELOC_UNSIGNED` 与 `X86_64_RELOC_UNSIGNED`），语义也一样：
  * 链接器把「原地那八个字节」当加数，加上符号的地址写回去。
@@ -190,12 +196,14 @@ const ARCH = {
   arm64: {
     cpu: CPU_TYPE_ARM64,
     sub: CPU_SUBTYPE_ARM64_ALL,
-    kinds: [RELOC.BRANCH26, RELOC.PAGE21, RELOC.PAGEOFF12, 'POINTER64'],
+    kinds: [RELOC.BRANCH26, RELOC.PAGE21, RELOC.PAGEOFF12,
+      RELOC.GOT_PAGE21, RELOC.GOT_PAGEOFF12, 'POINTER64'],
   },
   x86_64: {
     cpu: CPU_TYPE_X86_64,
     sub: CPU_SUBTYPE_X86_64_ALL,
-    kinds: ['X86_64_RELOC_BRANCH', 'X86_64_RELOC_SIGNED', 'X86_64_RELOC_UNSIGNED', 'POINTER64'],
+    kinds: ['X86_64_RELOC_BRANCH', 'X86_64_RELOC_SIGNED', 'X86_64_RELOC_UNSIGNED',
+      'X86_64_RELOC_GOT_LOAD', 'POINTER64'],
   },
 };
 

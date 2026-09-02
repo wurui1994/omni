@@ -292,6 +292,29 @@ const STRERROR_BYTES = 109 * 48;
 const STREAM_GVARS = new Map([['__stdinp', 0], ['__stdoutp', 1], ['__stderrp', 2]]);
 
 /**
+ * native 上「宿主那几格」落到真 libc 上（第九刀第三十一片）。
+ *
+ * 我们自带那份头文件里 `errno` 展开成 `(*__omni_errno_location())` —— 形状照 glibc。
+ * macOS 的 libc 里那个函数叫 `__error`，形状一模一样（回一个 `int *`），
+ * 所以这一格只是**换个名字**：CCALL 的目标名在 native 上映过去就行。
+ *
+ * 为什么不改头文件：那份头文件两条腿共用，而线性内存那条腿上 `__omni_errno_location`
+ * 是宿主的接口、真的存在。映射放在「发 CCALL 那一步」，两边各得其所。
+ */
+const NATIVE_CNAME = new Map([['__omni_errno_location', '__error']]);
+
+/**
+ * native 上三条标准流（第三十一片）。SDK 里它们是三个**外部全局量**
+ * （`extern FILE *__stdinp, *__stdoutp, *__stderrp;`），而我们的头文件里是三次调用。
+ *
+ * 所以这一格不能靠改名收口 —— 一个函数名映不到一个变量名。做法是**给它一个真的函数体**：
+ * `__omni_stdout()` 编成「读那个外部全局量、返回它」。一条 `GLOAD` 加一条 `RET`。
+ */
+const NATIVE_STREAM_SYMS = new Map([
+  ['__omni_stdin', '__stdinp'], ['__omni_stdout', '__stdoutp'], ['__omni_stderr', '__stderrp'],
+]);
+
+/**
  * 影子栈的大小。1 MiB —— 与 tcc 在本机上的默认线程栈同一个量级，而递归深度超出它时
  * 得到的是「内存越界」（memChk 会喊），不是静悄悄踩别的东西。写死是因为这一片没有
  * `-Wl,-z,stacksize` 那类开关；将来要调就是一个命令行参数。
@@ -3493,9 +3516,27 @@ export class CGen {  /**
       refs.push(f.emit(OP.LOAD, T_I64, REF_NONE, REF_NONE, slot));
     }
     const rt = mirTypeOf(info.ret);
-    const r = f.emit(OP.CCALL, rt, this.mod.cabiNo(name), f.pushArgs(refs), 0);
+    const cname = this.native ? NATIVE_CNAME.get(name) ?? name : name;
+    const r = f.emit(OP.CCALL, rt, this.mod.cabiNo(cname), f.pushArgs(refs), 0);
     if (rt === T_VOID) f.emit(OP.RET, T_VOID, REF_NONE, REF_NONE, 0);
     else f.emit(OP.RET, rt, r, REF_NONE, 0);
+  }
+
+  /**
+   * native：`__omni_stdout()` 那三个的函数体（第三十一片）——「读那个外部全局量、返回它」。
+   *
+   * 与 `externThunk` 并列而不是特例化它：那一条是「转发给同名的外部函数」，
+   * 这一条是「读一个外部**变量**」，中间没有共用的部分。三条流都没有形参，
+   * 所以这个函数比那个短得多。
+   */
+  streamThunk(name, info) {
+    const sym = NATIVE_STREAM_SYMS.get(name);
+    this.mod.renameFunc(info.no, `$ext$${name}`);
+    const gno = this.mod.globalNo(sym);
+    this.mod.setGlobalExtern(gno, 8, 8);
+    const f = info.f;
+    const v = f.emit(OP.GLOAD, T_I64, REF_NONE, REF_NONE, gno);
+    f.emit(OP.RET, T_I64, v, REF_NONE, 0);
   }
 
   /**
@@ -7060,14 +7101,16 @@ export class CGen {  /**
         if (name === ERRNO_FN) this.errnoUsed = true;
         if (name === STRERROR_FN) this.strerrorUsed = true;
       }
-      /* native 上「宿主那几格」还没落地（第九刀第二十六片）：我们自带那份头文件里
-       * `errno` 与三条标准流都展开成 `__omni_*()` —— 那是**宿主的接口**，真的 libc 里
-       * 没有这些符号。放过去的话 `.o` 编得出来、**链不上**（`ld: symbol not found`），
-       * 而那时错误信息里只剩一个名字，离原因很远。所以在这儿就明着报。
-       * 真要做对是「`errno` 落到 macOS 的 `__error()`、`stdout` 落到 `__stdoutp`
-       * 这个外部全局量上」，后者还欠「目标文件里的未定义数据符号」那一格。 */
-      if (this.native && name.startsWith('__omni_')) {
-        this.todo(`native：宿主那几格（${name}）—— errno 与标准流还没落到真 libc 上`);
+      /* native 上「宿主那几格」（第三十一片）：`errno` 靠改名落到 macOS 的 `__error`
+       * （见 `NATIVE_CNAME`），三条标准流靠一个真的函数体落到 `__stdoutp` 那三个外部
+       * 全局量上（见 `streamThunk`）。剩下的 `__omni_*` 还是明着报 —— 真的 libc 里
+       * 没有那些符号，放过去只会得到一条 `ld: symbol not found`，那时线索只剩一个名字。 */
+      if (this.native && NATIVE_STREAM_SYMS.has(name)) {
+        this.streamThunk(name, info);
+        continue;
+      }
+      if (this.native && name.startsWith('__omni_') && !NATIVE_CNAME.has(name)) {
+        this.todo(`native：宿主那几格（${name}）—— 还没落到真 libc 上`);
       }
       /* native 上变参函数没有桩（调用点直接 CCALL，见 `funcCall`）—— 发一个反而会
        * 定义一个签名对不上的符号。 */
@@ -7079,6 +7122,10 @@ export class CGen {  /**
      * 代码得先有个地址可发），所以这一问只能等到这儿再答 —— 与 `funcs` 那一条同一个理由。 */
     for (const [name, e] of this.gvars) {
       if (e.defined || !e.used) continue;
+      /* native（第三十一片）：没定义**就是**外部符号，交给链接器 —— 目标文件里它落进
+       * 「未定义的外部符号」那一段（`setGlobalExtern`）。这是真编译器的行为，
+       * 而我们从前只有一个翻译单元、没有链接器可指望，所以只能当场报错。 */
+      if (this.native) continue;
       /* 宿主提供的那几个（三条标准流，见 `STREAM_GVARS`）：不是「没定义」，是**别人定的**。
        * 记下来，入口处一条 `__omni_stream_init` 让宿主把句柄写进那一格。 */
       const which = STREAM_GVARS.get(name);
@@ -7308,11 +7355,18 @@ export function lowerCNative(path, text, host, defs) {
   for (const fx of gen.pendingFix) fixes.set(fx.off, fx);
   for (const [name, e] of gen.gvars) {
     if (e.addr < 0) continue;   // 试探性定义没补上长度：用它的地方已经报过了
+    const s0 = typeSize(e.ty);
     if (!e.defined) {
-      throw new OmniError(`${path}: error: native 这条腿还不认外部的全局量 '${name}'`
-        + `（要目标文件里的未定义符号）`);
+      /* 外部的全局量（第三十一片）：数据段里不占字节、不定义符号 —— 它落进目标文件的
+       * 「未定义的外部符号」那一段，由链接器去找。前端照旧给它留过一块暂存地址
+       * （一遍过里引用发生在定义之前），那块地方这儿**不认领**、下面 `stage` 的账
+       * 也不该算它，所以顺手把那几个字节丢掉。 */
+      const no0 = e.gno === undefined ? mod.globalNo(name) : e.gno;
+      mod.setGlobalExtern(no0, s0.size, s0.align);
+      for (let k = 0; k < s0.size; k++) stage.delete(e.addr + k);
+      continue;
     }
-    const s = typeSize(e.ty);
+    const s = s0;
     const size = s.size + (e.extra === undefined ? 0 : e.extra);
     const al = e.align !== 0 ? e.align : s.align;
     if (al > 4096) {
@@ -7347,9 +7401,6 @@ export function lowerCNative(path, text, host, defs) {
       + `不在任何全局量里`);
   }
   if (gen.heapUsed) throw new OmniError(`${path}: error: native 这条腿还没有堆（malloc 那一摊）`);
-  if (gen.errnoUsed || gen.strerrorUsed || gen.streamGvars.length !== 0) {
-    throw new OmniError(`${path}: error: native 这条腿还没有宿主那几格（errno/strerror/标准流）`);
-  }
   return { mod, warnings: cpp.warnings };
 }
 

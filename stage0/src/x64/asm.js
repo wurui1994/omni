@@ -32,6 +32,13 @@ export const RELOC = {
   BRANCH: 'X86_64_RELOC_BRANCH',
   SIGNED: 'X86_64_RELOC_SIGNED',
   UNSIGNED: 'X86_64_RELOC_UNSIGNED',
+  /**
+   * 过 GOT 取一个符号的地址（第九刀第三十一片）。**外部的数据符号只有这一条路**：
+   * 它可能住在一个 dylib 里，链接期没有它的地址可谈。形状是
+   * `mov reg, [rip + sym@GOTPCREL]` —— 与「直接读一个全局」的编码一模一样，
+   * 差别只在重定位：GOT 那一格里躺的是**地址**，不是值。
+   */
+  GOT_LOAD: 'X86_64_RELOC_GOT_LOAD',
 };
 
 export class CodeBuf {
@@ -151,6 +158,13 @@ export class CodeBuf {
   storeSym(size, name, reg) {
     this.emit(x.movRipR(size, 0, reg));
     this.relocs.push({ at: this.pos - 4, kind: RELOC.SIGNED, sym: name });
+    return this;
+  }
+
+  /** `mov reg, [rip + <符号>@GOTPCREL]`：取出来的是那个**外部**符号的真地址。 */
+  loadSymGot(reg, name) {
+    this.emit(x.movRRip(8, reg, 0));
+    this.relocs.push({ at: this.pos - 4, kind: RELOC.GOT_LOAD, sym: name });
     return this;
   }
 
