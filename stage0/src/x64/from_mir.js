@@ -325,6 +325,9 @@ class FnGen {
     if (op === OP.CCALL) {
       const name = this.mod.cabi[f.a[i]];
       if (name === undefined) throw new OmniError(`x64: 没有 ${f.a[i]} 号 C 入口`);
+      /* aux 是变参分界（第二十二片），**x86_64 用不着它**：SysV 把变参也放寄存器里，
+       * 与固定实参一个待遇；要报的只有 `al`（xmm 个数），而那一条对非变参函数无害，
+       * 所以一律发。苹果的 arm64 不一样（变参走栈），那一边才要看 aux。 */
       this.callArgs(f.argsOf(f.b[i]), true);
       buf.callSym(name);
       return this.callRet(i, t);

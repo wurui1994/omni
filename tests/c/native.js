@@ -72,11 +72,23 @@ const CASES = [
     + ' return (long long) strlen(g_buf);'],
   ['全局：double', 'g_d = 1.5; return (long long) (g_d * 8);'],
   ['全局：static 局部量记着上次', 'return bump() * 100 + bump() * 10 + bump();'],
+  /* 变参调用（第二十二片）：真的 libc 按真 ABI 读实参。苹果的 arm64 上变参走栈、
+   * SysV 的 x86_64 上进寄存器加一个 `al` —— 同一段 C，两条腿的代码差得远。 */
+  ['变参：snprintf 数出来的长度', 'char b[32]; return snprintf(b, 32, "%d-%d", 42, 7);'],
+  ['变参：snprintf 写出来的字节', 'char b[32]; snprintf(b, 32, "%d-%d", 42, 7);'
+    + ' return b[0] * 100 + b[2] + b[3];'],
+  ['变参：串实参', 'char b[32]; snprintf(b, 32, "[%s]", "hi"); return b[1] * 10 + b[3];'],
+  ['变参：double 实参', 'char b[32]; snprintf(b, 32, "%.2f", 1.5);'
+    + ' return b[0] * 1000 + b[2] * 10 + b[3];'],
+  ['变参：整数与 double 混着', 'char b[40]; int n = snprintf(b, 40, "%d %.1f %d", 1, 2.5, 3);'
+    + ' return n * 100 + b[2] + b[6];'],
+  ['变参：一个变参都没有', 'char b[8]; return snprintf(b, 8, "hi") * 100 + b[0];'],
 ];
 
 const SUPPORT = `struct P { int x; int y; };
 union U { int i; unsigned char b[4]; };
 extern unsigned long strlen(const char *);
+extern int snprintf(char *, unsigned long, const char *, ...);
 long long helper_addr(int n) { int *p = &n; *p = *p + 1; return n * 2; }
 long long sq(struct P *p) { return (long long) p->x * p->x + (long long) p->y * p->y; }
 void swap(int *a, int *b) { int t = *a; *a = *b; *b = t; }

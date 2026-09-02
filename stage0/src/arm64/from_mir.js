@@ -86,6 +86,26 @@ function widthOf(t) {
   return nyi(`类型 ${k}`);
 }
 
+/**
+ * 出参区要多大：本函数里最费的那次调用要往栈上摆几个字节（按 16 取整）。
+ *
+ * 只有变参调用要（苹果的 arm64 把 `...` 后面的实参一律放栈上）。固定实参多过 8 个
+ * 也该走栈，那一格还没做（`callArgs` 里明着报），所以这里只数变参那部分。
+ */
+function outArgsBytes(f) {
+  let most = 0;
+  let i = 0;
+  while (i < f.count()) {
+    if (f.op[i] === OP.CCALL && f.aux[i] !== 0) {
+      const n = f.args[f.b[i]];
+      const onStack = n - (f.aux[i] - 1);
+      if (onStack > 0) most = Math.max(most, onStack * 8);
+    }
+    i++;
+  }
+  return most + (most % 16 === 0 ? 0 : 16 - (most % 16));
+}
+
 class FnGen {
   /** `buf` 是整个模块共用的一个缓冲，`callLabels` 是「函数号 -> 标签」（没有就不认 CALL），
    * `strSyms` 是「字符串常量的 ref -> 数据段里的符号名」（没有就不认串常量）。 */
@@ -95,8 +115,15 @@ class FnGen {
     this.buf = buf === undefined ? new CodeBuf() : buf;
     this.callLabels = callLabels === undefined ? null : callLabels;
     this.strSyms = strSyms === undefined ? null : strSyms;
-    /** 帧里 0 号槽位的偏移是 0，值的栈位接在槽位后面。 */
-    this.valBase = f.slots.length * 8;
+    /* 出参区（第二十二片）：`sp + 0` 起的一块，专给「要走栈的实参」。
+     * 苹果的 arm64 上**变参一律走栈**（AAPCS64 的苹果改动）—— 固定实参进 x0-x7/v0-v7，
+     * `...` 后面那些一格 8 字节摆在 `sp` 上。所以帧的最底下要留出这一块，
+     * 它的大小是本函数里最费的那次调用要的字节数（按 16 取整）。
+     * 槽位与值的栈位都往上让开这一块 —— 它必须**紧贴 `sp`**，被调方按 `sp` 找它。 */
+    this.outArgs = outArgsBytes(f);
+    /** 帧里 0 号槽位的偏移。出参区在它下面（第二十二片）。 */
+    this.slotBase = this.outArgs;
+    this.valBase = this.slotBase + f.slots.length * 8;
     let bytes = this.valBase + f.count() * 8;
     /* 帧块（第十八片）：接在值的栈位后面，每块按自己的 `align` 对齐。**能这么算是因为
      * `sp` 本身 16 对齐**（AAPCS64 要求，序言里的 `sub sp` 也按 16 取整），于是
@@ -119,7 +146,7 @@ class FnGen {
     if (!Number.isInteger(no) || no < 0 || no >= this.f.slots.length) {
       throw new OmniError(`arm64: 槽号 ${no} 越界`);
     }
-    return no * 8;
+    return this.slotBase + no * 8;
   }
 
   valOff(i) {
@@ -327,7 +354,7 @@ class FnGen {
      * 也没有 —— 「全落栈」这个笨办法在这儿一次性省掉了整个调用点的溢出逻辑。 */
     if (op === OP.CALL) {
       if (this.callLabels === null) nyi('单个函数里的 CALL（要按整个模块生成才有落点）');
-      this.callArgs(f.argsOf(f.b[i]));
+      this.callArgs(f.argsOf(f.b[i]), -1);
       const label = this.callLabels[f.a[i]];
       if (label === undefined) throw new OmniError(`arm64: 没有 ${f.a[i]} 号函数`);
       buf.bl(label);
@@ -339,7 +366,8 @@ class FnGen {
     if (op === OP.CCALL) {
       const name = this.mod.cabi[f.a[i]];
       if (name === undefined) throw new OmniError(`arm64: 没有 ${f.a[i]} 号 C 入口`);
-      this.callArgs(f.argsOf(f.b[i]));
+      /* aux 是变参分界（第二十二片）：0 = 不是变参调用，否则固定实参个数 + 1。 */
+      this.callArgs(f.argsOf(f.b[i]), f.aux[i] === 0 ? -1 : f.aux[i] - 1);
       buf.blSym(name);
       return this.callRet(i, t);
     }
@@ -544,21 +572,34 @@ class FnGen {
   }
 
   /** 实参就位：整数一串（x0-x7）、浮点一串（v0-v7），**各自从 0 起数**（AAPCS）。 */
-  callArgs(args) {
+  callArgs(args, nfixed) {
     let ngrn = 0;
     let nsrn = 0;
+    let stack = 0;
+    let k = 0;
     for (const ar of args) {
+      /* 变参那几个走栈（苹果的 arm64）。一格 8 字节，顺序照实参 —— 与 `va_arg` 那边
+       * 「加 8 走到下一个」是同一条规则。浮点也是 8 字节一格（double 正好）。 */
+      if (nfixed >= 0 && k >= nfixed) {
+        this.loadRef(TMP0, ar);
+        this.frameStore(TMP0, stack);
+        stack += 8;
+        k++;
+        continue;
+      }
       const at = this.typeOfRef(ar);
       if (isFloatType(at)) {
         if (nsrn > 7) nyi(`第 ${nsrn + 1} 个浮点实参（超过 8 个要走栈）`);
         this.loadRef(TMP0, ar);
         this.toFp(nsrn, TMP0, typeKind(at) === T_F64);
         nsrn++;
+        k++;
         continue;
       }
       if (ngrn > 7) nyi(`第 ${ngrn + 1} 个整数实参（超过 8 个要走栈）`);
       this.loadRef(ngrn, ar);
       ngrn++;
+      k++;
     }
   }
 

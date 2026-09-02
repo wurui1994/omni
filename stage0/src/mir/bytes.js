@@ -97,7 +97,7 @@ function digestOperands(mod, f, i, ks) {
     // 'j'（第三刀）：层数表。**不能走 refDigest** —— 层数 3 会被写成 `k#…` 或 `%3`，
     // 于是「跳第 3 层」和「用 %3 那条指令」在哈希里成了同一串字节。
     if (role === 'j') out.push(`[${f.levelsOf(v).map((lv) => `^${lv}`).join(' ')}]`);
-    if (role === 'n') out.push(auxDigest(mod, op, v));
+    if (role === 'n') out.push(auxDigest(mod, op, v, k));
     k++;
   }
   return out.join(' ');
@@ -113,10 +113,12 @@ function refDigest(mod, ref, ks) {
 }
 
 /** `aux` 里的整数：是池下标的换成名字，是层数/kind 的原样留着。 */
-function auxDigest(mod, op, v) {
+/** aux（或 a）上那个数字。`k` 是它是第几个字段 —— CCALL 的 a 与 aux **都是数字、
+ * 意思不同**（入口号 / 变参分界），少了 `k` 会把「固定实参 2 个」印成一个 C 入口名。 */
+function auxDigest(mod, op, v, k) {
+  if (op === OP.CCALL) return k === 0 ? `cabi:${mod.cabi[v]}` : `vafix:${v}`;
   if (op === OP.CALL) return `func:${mod.funcs[v].name}`;
   if (op === OP.CALLOP) return `op:${mod.ops[v].name}[${JSON.stringify(mod.ops[v].lits)}]`;
-  if (op === OP.CCALL) return `cabi:${mod.cabi[v]}`;
   if (op === OP.CLOSURE) return `closure:${mod.closures[v].make}`;
   if (op === OP.GLOAD || op === OP.GSTORE || op === OP.GADDR) return `global:${mod.globals[v]}`;
   if (op === OP.FLD || op === OP.FLDSET) {

@@ -111,7 +111,7 @@ function checkOperands(mod, f, i, live, regionOf, depth, bad) {
         if (v >= depth) bad(i, `跳 ${v} 层，但此处只有 ${depth} 层可跳`);
         continue;
       }
-      checkIndex(mod, f, i, op, v, bad);
+      checkIndex(mod, f, i, op, v, bad, k);
     }
   }
 }
@@ -126,8 +126,22 @@ function checkRef(mod, f, i, ref, live, regionOf, bad) {
   if (!live.has(regionOf[j])) bad(i, `${refText(ref)} 定义在一个已经关掉的区域里（支配关系不成立）`);
 }
 
-function checkIndex(mod, f, i, op, v, bad) {
+function checkIndex(mod, f, i, op, v, bad, k) {
   if (op === OP.BR || op === OP.BRIF || op === OP.BRTABLE) return;   // 层数在 verifyFunc 的栈深里查
+  /* CCALL 的两个数字字段（第二十二片）：a 是 C 入口号，aux 是变参分界。
+   * 分界要么是 0（不是变参调用），要么在 1..实参数+1 里 —— 「固定实参比实参还多」
+   * 会让后端把一个不存在的实参往寄存器里放。 */
+  if (op === OP.CCALL) {
+    if (k === 0) {
+      if (mod.cabi[v] === undefined) bad(i, `C 入口号 ${v} 越界`);
+      return;
+    }
+    const n = f.args[f.b[i]];
+    if (v !== 0 && (n === undefined || v > n + 1)) {
+      bad(i, `变参分界 ${v}（固定实参 ${v - 1} 个）超过实参个数 ${n}`);
+    }
+    return;
+  }
   // 道号：向量的宽度在 `t` 上，所以这一条不用查类型池，一次比较就够。
   // 越界的道在 LLVM 里是 poison、在 C 里是越界读 —— 两条腿会给出不同的错答案，所以查。
   if (op === OP.VEXT || op === OP.VINS) {

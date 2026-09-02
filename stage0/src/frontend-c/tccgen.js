@@ -3028,7 +3028,13 @@ export class CGen {  /**
       }));
     }
     const rt = mirTypeOf(info.ret);
-    const r = this.f.emit(OP.CALL, rt, info.no, this.f.pushArgs(a.refs), 0);
+    /* native 上的变参调用**不走桩**：一个桩装不下「实参个数各不相同」的调用点，
+     * 而真的 ABI 要求实参就在寄存器与栈上（第二十二片）。所以这儿直接发 CCALL，
+     * 分界记在 aux 上。 */
+    const r = this.native && info.variadic
+      ? this.f.emit(OP.CCALL, rt, this.mod.cabiNo(name),
+        this.f.pushArgs(a.refs), a.nfixed + 1)
+      : this.f.emit(OP.CALL, rt, info.no, this.f.pushArgs(a.refs), 0);
     /* 回的是那块地方的地址（SysV 的 rax 也是这么回的）。用**回来的**那个 ref 而不是
      * 手上的 `sret`：两者一定相等，而用回来的那个把「返回值在哪儿」这件事记在数据流里。 */
     if (a.sret !== null) return sMem(info.ret, r, 0);
@@ -3175,9 +3181,24 @@ export class CGen {  /**
     /* 变参：`...` 后面的实参不进实参表，进帧上的一块「变参区」，地址当**最后一个**
      * 实参传进去（第十六片的 ABI）。于是变参函数的 MIR 签名是**定死的**
      * （固定形参 + 一个 i64），自家的与外部的一个形状 —— 调用点因此不必知道
-     * 这个名字最后有没有定义，照旧发 CALL。 */
-    if (variadic) refs.push(this.vaBlock(extra));
-    return { refs, sret, vals };
+     * 这个名字最后有没有定义，照旧发 CALL。
+     *
+     * native（第二十二片）不能这么做：真的 `printf` 按真 ABI 读实参，读不到我们自己摆的
+     * 变参区。所以变参就**跟在固定实参后面**一起传，由后端按 ABI 分寄存器与栈 ——
+     * 分界（固定实参个数）记在 `CCALL` 的 aux 上。 */
+    let nfixed = -1;
+    if (variadic) {
+      if (this.native) {
+        nfixed = refs.length;
+        for (const e of extra) {
+          if (e.val !== undefined) this.todo('native：变参里的 struct（要按真 ABI 摊开）');
+          refs.push(e.ref);
+        }
+      } else {
+        refs.push(this.vaBlock(extra));
+      }
+    }
+    return { refs, sret, vals, nfixed };
   }
 
   /**
@@ -6747,6 +6768,10 @@ export class CGen {  /**
      * 与调用点那一侧（`callArgs` 末尾那条 push）是同一个顺序。 */
     this.vaRef = REF_NONE;
     if (variadic === true) {
+      /* native 上**定义**一个变参函数还没到：`va_start` 要按真 ABI 把寄存器里那几个
+       * 实参先泼到栈上（SysV 的 register save area、AAPCS 的 va_list 三段），
+       * 那是另一片。调用一个变参函数是好的（第二十二片）。 */
+      if (this.native) this.todo('native：变参函数的定义（va_start 要真 ABI）');
       const slot = f.slot('$va', T_I64);
       f.params.push({ name: '$va', t: T_I64, slot });
       this.vaRef = f.emit(OP.LOAD, T_I64, REF_NONE, REF_NONE, slot);
@@ -6832,6 +6857,29 @@ export class CGen {  /**
     }
   }
 
+  /**
+   * native 收尾：**不能让没有函数体的名字变成我们定义的符号**（第二十二片）。
+   *
+   * 每个声明过的函数在模块里都已经有一个 MirFunc（一遍过：调用点可能在定义之前）。
+   * 没有函数体的那些如果留着原名，后端就会把它们当函数发出去 —— 于是我们的 `.o` 里
+   * 定义了一个空的 `_snprintf`，链接器拿它盖掉 libc 那个，调用回来一堆垃圾。
+   * 这个 bug 的症状离原因很远（返回值像个截断的指针），所以在这儿一次收干净：
+   * 改名成 `$ext$名字`，再给一条 `RET` 收口（谁都不会调它）。
+   *
+   * 有桩的那些（非变参的外部函数）在 `externThunk` 里已经改过名，这儿只剩两类：
+   * 变参的（调用点直接 CCALL，见 `funcCall`）与声明了却没用过的。
+   */
+  sealExternSymbols() {
+    for (const [name, info] of this.funcs) {
+      if (info.defined) continue;
+      const f = info.f;
+      if (f.count() !== 0) continue;
+      if (f.name === name) this.mod.renameFunc(info.no, `$ext$${name}`);
+      if (f.ret === T_VOID) f.emit(OP.RET, T_VOID, REF_NONE, REF_NONE, 0);
+      else f.emit(OP.RET, f.ret, this.konst(info.ret, 0), REF_NONE, 0);
+    }
+  }
+
   /** 一个翻译单元（`tccgen_compile`，`tccgen.c:417-419`）。 */
   unit() {
     this.next();
@@ -6856,6 +6904,9 @@ export class CGen {  /**
       if (HEAP_FNS.has(name)) this.heapUsed = true;
       if (name === ERRNO_FN) this.errnoUsed = true;
       if (name === STRERROR_FN) this.strerrorUsed = true;
+      /* native 上变参函数没有桩（调用点直接 CCALL，见 `funcCall`）—— 发一个反而会
+       * 定义一个签名对不上的符号。 */
+      if (this.native && info.variadic) continue;
       this.externThunk(name, info);
     }
     /* `extern int x;` 之后没有定义：真的编译器要等链接期才知道。我们只有一个翻译单元，
@@ -7078,6 +7129,7 @@ export function lowerCNative(path, text, host, defs) {
   gen.preamble(COMPILE_PREAMBLE);
   cpp.startParse(path, text);
   gen.unit();
+  gen.sealExternSymbols();
 
   /* 全局量（第二十一片）：前端照旧在**一块暂存的线性地址**上摆它们（`allocGlobal` 与
    * 整套初值代码一字不改），这里再把每一块切出来交给 MIR 的全局。于是「初值怎么算」
