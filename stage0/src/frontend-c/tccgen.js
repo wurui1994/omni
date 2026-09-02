@@ -1749,6 +1749,24 @@ export class CGen {  /**
   }
 
   /**
+   * native：一个 C 串字面量在 MIR 常量池里的那一条（第三十片）。
+   *
+   * 全是 ASCII 就用 `str`（文本，后端按 UTF-8 写出去 —— 对 ASCII 是恒等），
+   * 有 0x80 以上的字节就用 `bytes`。分开而不是一律用 `bytes`：`str` 是另外几条腿
+   * 也在用的那一种，印出来也是可读的。挑法只看字节内容，所以去重照旧成立。
+   */
+  strConst(bytes) {
+    let ascii = true;
+    for (let i = 0; i < bytes.length; i++) {
+      if (bytes.charCodeAt(i) > 127) { ascii = false; break; }
+    }
+    if (ascii) return this.mod.consts.str(bytes);
+    const bs = [];
+    for (let i = 0; i < bytes.length; i++) bs.push(bytes.charCodeAt(i) % 256);
+    return this.mod.consts.bytes(bs);
+  }
+
+  /**
    * 一个字符串字面量当**表达式**用。类型是 `char[N+1]`（含结尾的 0）而不是 `char *`，
    * 所以 `sizeof("abc")` 是 4，用在表达式里再退化成指针 —— 用指针的话 sizeof 会变成 8，
    * 而那是最难发现的那种错。
@@ -1756,19 +1774,10 @@ export class CGen {  /**
   strLit(bytes) {
     /* native（第九刀第二十片）：字节进 `__DATA` 的一个**符号**，值是那个符号的地址 ——
      * 编译期算不出来（要等链接），所以只能是 MIR 的串常量，后端把它发成
-     * `omni_str_<ref>` 加一笔重定位。去重靠常量池（`intern` 按文本），
-     * 与线性内存那边的 `this.strs` 是同一个效果。
-     *
-     * 非 ASCII 还不行：MIR 的串常量存的是**文本**，后端写数据段时按 UTF-8 编码，
-     * 而这里的 `bytes` 每个字符已经是一个字节了 —— 0x80 以上会被编成两个字节。
-     * 要一个「字节串」常量种类才能收口，那是往后的一片。 */
+     * `omni_str_<ref>` 加一笔重定位。去重靠常量池，与线性内存那边的 `this.strs`
+     * 是同一个效果。 */
     if (this.native) {
-      for (let i = 0; i < bytes.length; i++) {
-        if (bytes.charCodeAt(i) > 127) {
-          this.todo('native：字符串字面量里的非 ASCII 字节（要一个字节串常量种类）');
-        }
-      }
-      return sMem(mkArray(TY_CHAR, bytes.length + 1), this.mod.consts.str(bytes), 0);
+      return sMem(mkArray(TY_CHAR, bytes.length + 1), this.strConst(bytes), 0);
     }
     return sMem(mkArray(TY_CHAR, bytes.length + 1),
       this.mod.consts.int(BigInt(this.strData(bytes))), 0);
@@ -2120,7 +2129,7 @@ export class CGen {  /**
         /* native（第二十八片）：这个字面量是 MIR 常量池里的一条，后端给它一个符号
          * （`omni_str_<ref>`），这儿只留一条「指着它」的记录。 */
         if (this.native) {
-          this.putSymBytes(dest.addr + off, { kind: 's', no: this.mod.consts.str(bytes), add: 0n });
+          this.putSymBytes(dest.addr + off, { kind: 's', no: this.strConst(bytes), add: 0n });
           return;
         }
         const addr = this.strData(bytes);

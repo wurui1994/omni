@@ -16,6 +16,8 @@ import {
 /** 常量的文本：字符串要转义（快照里得能看出空白与换行）。 */
 function constText(c) {
   if (c.kind === 'str') return JSON.stringify(c.text);
+  /* 字节串（第九刀第三十片）：`text` 本来就是十六进制，加个前缀好认。 */
+  if (c.kind === 'bytes') return `bytes"${c.text}"`;
   return c.text;
 }
 

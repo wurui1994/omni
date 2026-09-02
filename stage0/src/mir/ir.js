@@ -497,7 +497,7 @@ export const MEM_PAGE = 65536;
  */
 export class ConstPool {
   constructor() {
-    this.items = [];      // {t, kind:'int'|'real'|'str'|'bool'|'null', text}
+    this.items = [];      // {t, kind:'int'|'real'|'str'|'bytes'|'bool'|'null', text}
     this.index = new Map();
   }
 
@@ -522,8 +522,29 @@ export class ConstPool {
   f32(text) { return this.intern(T_F32, 'real', text); }
   bool(v) { return this.intern(T_BOOL, 'bool', v ? 'true' : 'false'); }
   str(s) { return this.intern(T_STR, 'str', s); }
+  /**
+   * 一串**字节**（第九刀第三十片）。与 `str` 的差别只有一件事，但它是必须分开的：
+   * `str` 存的是**文本**，后端写数据段时按 UTF-8 编码 —— 于是 0x80 以上的一个字符
+   * 会变成两个字节。C 的串字面量要的是「就这几个字节」（`"\xe4\xb8\x96"` 是三个字节，
+   * 不是三个字符各自的 UTF-8）。
+   *
+   * `text` 存**十六进制**：常量池按文本去重，而十六进制与字节串一对一，
+   * 并且摘要（`bytes.js`）里印出来还是可打印的。
+   */
+  bytes(bs) {
+    let hex = '';
+    for (const b of bs) hex += (b % 256).toString(16).padStart(2, '0');
+    return this.intern(T_STR, 'bytes', hex);
+  }
   nul(t) { return this.intern(t, 'null', 'null'); }
   get(ref) { return this.items[ref]; }
+}
+
+/** `bytes` 种类的常量 -> 字节数组（`text` 是十六进制，见 `ConstPool.bytes`）。 */
+export function hexBytes(text) {
+  const out = [];
+  for (let i = 0; i + 1 < text.length; i += 2) out.push(parseInt(text.slice(i, i + 2), 16));
+  return out;
 }
 
 /* -------------------------------------------------------------- 函数与模块 */
@@ -792,8 +813,11 @@ export class MirModule {
       if (fx.kind === 'f' && this.funcs[fx.no] === undefined) {
         throw new Error(`mir: 初值里的地址指着 ${fx.no} 号函数，没有那一个`);
       }
-      if (fx.kind === 's' && this.consts.get(fx.no).kind !== 'str') {
-        throw new Error(`mir: 初值里的地址指着 ${refText(fx.no)}，那不是串常量`);
+      if (fx.kind === 's') {
+        const c = this.consts.get(fx.no);
+        if (c === undefined || (c.kind !== 'str' && c.kind !== 'bytes')) {
+          throw new Error(`mir: 初值里的地址指着 ${refText(fx.no)}，那不是串常量`);
+        }
       }
     }
     this.globalBlob[i] = { size, align, bytes: bs, fixups: fs };

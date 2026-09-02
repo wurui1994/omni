@@ -48,7 +48,7 @@ import {
   OP, REF_NONE, isConstRef, T_I32, T_I64, T_BOOL, T_VOID, T_F32, T_F64,
   typeKind, isFloatType, intBits, memKindNo, memOff, MLOAD_KINDS, MSTORE_KINDS,
   CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16,
-  CVT_I2F, CVT_U2F, CVT_F2I, CVT_FCVT, CVT_BITCAST, OP_NAMES,
+  CVT_I2F, CVT_U2F, CVT_F2I, CVT_FCVT, CVT_BITCAST, OP_NAMES, hexBytes,
 } from '../mir/ir.js';
 
 /* 草稿寄存器。挑 r10/r11 是因为它们**既不是实参寄存器、也不是被调用者保存的** ——
@@ -261,7 +261,7 @@ class FnGen {
       if (k.kind === 'real') {
         return this.movImm(reg, floatBits(Number(k.text), typeKind(k.t) === T_F32 ? 4 : 8));
       }
-      if (k.kind === 'str') return this.buf.leaSym(reg, this.strSym(ref));
+      if (k.kind === 'str' || k.kind === 'bytes') return this.buf.leaSym(reg, this.strSym(ref));
       return nyi(`常量 ${k.kind}`);
     }
     this.frameLoad(reg, this.valOff(this.f.at(ref)));
@@ -999,11 +999,14 @@ export function genModule(mod) {
   const strSyms = new Map();
   const items = mod.consts.items;
   for (let r = 0; r < items.length; r++) {
-    if (items[r].kind !== 'str') continue;
+    /* 两种串常量（第三十片）：`str` 是文本（UTF-8），`bytes` 是「就这几个字节」。 */
+    const kind = items[r].kind;
+    if (kind !== 'str' && kind !== 'bytes') continue;
     const name = `omni_str_${r}`;
     strSyms.set(r, name);
     dataSyms.push({ name, off: dataBytes.length, sect: 2 });
-    for (const byte of utf8Bytes(items[r].text)) dataBytes.push(byte);
+    const raw = kind === 'bytes' ? hexBytes(items[r].text) : utf8Bytes(items[r].text);
+    for (const byte of raw) dataBytes.push(byte);
     dataBytes.push(0);
   }
 

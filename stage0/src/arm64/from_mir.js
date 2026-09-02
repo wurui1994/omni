@@ -37,7 +37,7 @@ import {
   OP, REF_NONE, isConstRef, T_I32, T_I64, T_BOOL, T_VOID, T_F32, T_F64,
   typeKind, isFloatType, intBits, memKindNo, memOff, MLOAD_KINDS, MSTORE_KINDS,
   CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16,
-  CVT_I2F, CVT_U2F, CVT_F2I, CVT_FCVT, CVT_BITCAST, OP_NAMES,
+  CVT_I2F, CVT_U2F, CVT_F2I, CVT_FCVT, CVT_BITCAST, OP_NAMES, hexBytes,
 } from '../mir/ir.js';
 
 /* 草稿寄存器。x8 是 arm64 的「间接结果」寄存器、x9-x15 是调用者保存的临时 ——
@@ -256,7 +256,7 @@ class FnGen {
       }
       /* 串常量取的是**地址**：字节躺在数据段里，这一格只要把那个符号的地址算出来。
        * 于是 `f("hi")` 在这一层与 `f(&g)` 是同一件事 —— 都是 adrp+add。 */
-      if (k.kind === 'str') return this.symAddr(reg, this.strSym(ref));
+      if (k.kind === 'str' || k.kind === 'bytes') return this.symAddr(reg, this.strSym(ref));
       return nyi(`常量 ${k.kind}`);
     }
     this.frameLoad(reg, this.valOff(this.f.at(ref)));
@@ -970,11 +970,15 @@ export function genModule(mod) {
   const strSyms = new Map();
   const items = mod.consts.items;
   for (let r = 0; r < items.length; r++) {
-    if (items[r].kind !== 'str') continue;
+    /* 两种串常量（第三十片）：`str` 是文本（按 UTF-8 写出去），`bytes` 是「就这几个字节」
+     * （C 的串字面量里的 `\xe4` 那种）。摆在数据段里的差别只有「怎么变成字节」这一步。 */
+    const kind = items[r].kind;
+    if (kind !== 'str' && kind !== 'bytes') continue;
     const name = `omni_str_${r}`;
     strSyms.set(r, name);
     dataSyms.push({ name, off: dataBytes.length, sect: 2 });
-    for (const byte of utf8Bytes(items[r].text)) dataBytes.push(byte);
+    const raw = kind === 'bytes' ? hexBytes(items[r].text) : utf8Bytes(items[r].text);
+    for (const byte of raw) dataBytes.push(byte);
     dataBytes.push(0);
   }
 

@@ -128,6 +128,13 @@ const CASES = [
   ['全局要 16/32 字节对齐',
     'return ((long long) &g_al16 % 16) * 1000 + ((long long) &g_al32 % 32) * 100'
     + ' + g_al16 * 10 + g_al32;'],
+  /* 非 ASCII 的串常量（第三十片）。 */
+  ['非 ASCII 的串常量：局部',
+    'char *p = "\\xe4\\xb8\\x96"; return (unsigned char) p[0] * 10000L'
+    + ' + (unsigned char) p[1] * 100L + (unsigned char) p[2];'],
+  ['非 ASCII 的串常量：全局的初值',
+    'return (unsigned char) g_uni[0] * 10000L + (unsigned char) g_uni[1] * 100L + g_uni[2];'],
+  ['非 ASCII 的串常量：长度还是字节数', 'return (long long) strlen("\\xe4\\xb8\\x96" "ab");'],
 ];
 
 const SUPPORT = `struct P { int x; int y; };
@@ -229,6 +236,8 @@ long long bigframe(void) {
 }
 int g_al16 __attribute__((aligned(16))) = 5;
 int g_al32 __attribute__((aligned(32))) = 6;
+/* 非 ASCII 的串常量（第三十片）：常量池里是一串**字节**，不是一串字符。 */
+char *g_uni = "\\xc3\\xa9!";
 `;
 
 let src = SUPPORT;
@@ -316,7 +325,6 @@ try {
  * 那种错在解释器上看不出来，在真机器上是段错误，而且现场离原因很远。 */
 for (const [what, code] of [
   ['变长数组', 'int n = 4; int a[n]; a[0] = 1; return a[0];'],
-  ['非 ASCII 的串常量', 'char *p = "\\xe4\\xb8\\x96"; return p[0];'],
   ['外部的全局量', 'extern int nope;\nlong long f(void) { return nope; }'],
 ]) {
   total++;
