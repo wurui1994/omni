@@ -19,7 +19,7 @@ import { join } from 'node:path';
 import {
   MirModule, MirFunc, OP, REF_NONE, T_I64, T_I32, T_BOOL, T_VOID, T_F64, T_F32,
   CVT_SEXT8, CVT_SEXT16, CVT_TRUNC, CVT_ZEXT,
-  CVT_I2F, CVT_U2F, CVT_F2I, CVT_FCVT, CVT_BITCAST,
+  CVT_I2F, CVT_U2F, CVT_F2I, CVT_FCVT, CVT_BITCAST, memDesc,
 } from '../../stage0/src/mir/ir.js';
 import { codeOf, genModule } from '../../stage0/src/arm64/from_mir.js';
 
@@ -362,6 +362,72 @@ td('double 的减法（次序不能反）', [1.5, 0.25], d2b(1.5 - 0.25), (f, x,
     ]), 0)));
 }
 
+// ---- 线性内存（第九刀第七片）。基址钉在 x28 上，测里用一段手写的蹦床把它设好。
+/** @type {{f:MirFunc, args:[bigint,bigint], want:bigint, what:string}[]} */
+const mcases = [];
+let mno = 0;
+function tm(what, args, want, body) {
+  const f = mkFunc(mod, `omni_m${mno}`, 2, (g, s, n) => body(g, s[0], s[1], n));
+  mno++;
+  mcases.push({ f, args, want, what });
+}
+/** 宽度符号 -> 描述符里的号（两张表的下标，见 `ir.js`）。 */
+const LDK = { i8s: 0, i8u: 1, i16s: 2, i16u: 3, i32s: 4, i32u: 5, i64: 6, f32: 7, f64: 8 };
+const STK = { i8: 0, i16: 1, i32: 2, i64: 3, f32: 4, f64: 5 };
+const mst = (f, t, addr, v, kind, off) =>
+  f.emit(OP.MSTORE, t, addr, v, memDesc(STK[kind], off === undefined ? 0 : off));
+const mld = (f, t, addr, kind, off) =>
+  f.emit(OP.MLOAD, t, addr, REF_NONE, memDesc(LDK[kind], off === undefined ? 0 : off));
+
+tm('存取 i64', [8n, -12345678901n], -12345678901n, (f, x, y) => {
+  mst(f, T_I64, ld(f, T_I64, x), ld(f, T_I64, y), 'i64');
+  ret(f, T_I64, mld(f, T_I64, ld(f, T_I64, x), 'i64'));
+});
+tm('存一个字节，按有符号读', [3n, 255n], -1n, (f, x, y) => {
+  mst(f, T_I64, ld(f, T_I64, x), ld(f, T_I64, y), 'i8');
+  ret(f, T_I64, mld(f, T_I64, ld(f, T_I64, x), 'i8s'));
+});
+tm('存一个字节，按无符号读', [4n, 255n], 255n, (f, x, y) => {
+  mst(f, T_I64, ld(f, T_I64, x), ld(f, T_I64, y), 'i8');
+  ret(f, T_I64, mld(f, T_I64, ld(f, T_I64, x), 'i8u'));
+});
+tm('存半字，按有符号读', [6n, 0x8000n], -32768n, (f, x, y) => {
+  mst(f, T_I64, ld(f, T_I64, x), ld(f, T_I64, y), 'i16');
+  ret(f, T_I64, mld(f, T_I64, ld(f, T_I64, x), 'i16s'));
+});
+tm('存四字节，按无符号读', [16n, -1n], 4294967295n, (f, x, y) => {
+  mst(f, T_I64, ld(f, T_I64, x), ld(f, T_I64, y), 'i32');
+  ret(f, T_I64, mld(f, T_I64, ld(f, T_I64, x), 'i32u'));
+});
+tm('存四字节，按有符号读', [24n, -1n], -1n, (f, x, y) => {
+  mst(f, T_I64, ld(f, T_I64, x), ld(f, T_I64, y), 'i32');
+  ret(f, T_I64, mld(f, T_I64, ld(f, T_I64, x), 'i32s'));
+});
+tm('静态偏移在描述符上（p->field 就落这一格）', [32n, 7777n], 7777n, (f, x, y) => {
+  mst(f, T_I64, ld(f, T_I64, x), ld(f, T_I64, y), 'i64', 40);
+  ret(f, T_I64, mld(f, T_I64, ld(f, T_I64, x), 'i64', 40));
+});
+tm('静态偏移大过一格立即数（要先造出来）', [64n, 4242n], 4242n, (f, x, y) => {
+  mst(f, T_I64, ld(f, T_I64, x), ld(f, T_I64, y), 'i64', 5000);
+  ret(f, T_I64, mld(f, T_I64, ld(f, T_I64, x), 'i64', 5000));
+});
+tm('没对齐的 i64（arm64 的普通存取不挑对齐）', [131n, 0x1122334455667788n],
+  0x1122334455667788n, (f, x, y) => {
+    mst(f, T_I64, ld(f, T_I64, x), ld(f, T_I64, y), 'i64');
+    ret(f, T_I64, mld(f, T_I64, ld(f, T_I64, x), 'i64'));
+  });
+tm('double 过一趟内存再加 1', [200n, 0n], d2b(2.5 + 1), (f, x) => {
+  mst(f, T_F64, ld(f, T_I64, x), K.real('2.5'), 'f64');
+  const v = mld(f, T_F64, ld(f, T_I64, x), 'f64');
+  const s = f.emit(OP.ADD, T_F64, v, K.real('1'), 0);
+  ret(f, T_I64, f.emit(OP.CVT, T_I64, s, REF_NONE, CVT_BITCAST));
+});
+tm('float 过一趟内存（只占四个字节）', [208n, 0n], f2b(0.5), (f, x) => {
+  mst(f, T_F32, ld(f, T_I64, x), K.f32('0.5'), 'f32');
+  ret(f, T_I64, f.emit(OP.CVT, T_I64, mld(f, T_F32, ld(f, T_I64, x), 'f32'),
+    REF_NONE, CVT_BITCAST));
+});
+
 // ---------------------------------------------------------------- 边界
 // 还没做的东西必须**明着报**。一个悄悄发错指令的后端比一个报错的后端坏得多。
 // 这些函数不进 `mod` —— 它们发不出来，混进去会把整个模块的生成一起拖倒。
@@ -370,7 +436,8 @@ let bad = 0;
 for (const [what, build] of [
   ['浮点的取余（没有单条指令，也还没落到 fmod）',
     (f) => { const l = ld(f, T_F64, 0); ret(f, T_I64, f.emit(OP.MOD, T_F64, l, l, 0)); }],
-  ['线性内存', (f) => { ret(f, T_I64, f.emit(OP.MLOAD, T_I64, ld(f, T_I64, 0), REF_NONE, 6)); }],
+  ['内存的页数与扩容（没有运行期，谈不上 grow）',
+    (f) => { ret(f, T_I64, f.emit(OP.MSIZE, T_I64, REF_NONE, REF_NONE, 0)); }],
   ['槽号越界', (f) => { ret(f, T_I64, ld(f, T_I64, 99)); }],
   ['单个函数里的 CALL 没有落点',
     (f) => { ret(f, T_I64, f.emit(OP.CALL, T_I64, 0, f.pushArgs([]), 0)); }],
@@ -433,12 +500,38 @@ try {
     calls.push(`  printf("%llu\\n", d2b(${c.f.name}(b2d(${d2b(c.args[0])}ULL),`
       + ` b2d(${d2b(c.args[1])}ULL))));`);
   }
+  /* 线性内存那批要先把基址钉进 x28 —— 那是**驱动**的活，测里用这一段手写的蹦床代劳。
+   * 它同时也是这一层调用约定的说明书：进模块的代码之前 x28 = 内存基址。 */
+  if (mcases.length > 0) {
+    stub.push(
+      '.global _omni_thunk',
+      '_omni_thunk:',                    // (fn, base, a, b) -> long long
+      '  stp x29, x30, [sp, #-32]!',
+      '  mov x29, sp',
+      '  str x28, [sp, #16]',
+      '  mov x28, x1',
+      '  mov x9, x0',
+      '  mov x0, x2',
+      '  mov x1, x3',
+      '  blr x9',
+      '  ldr x28, [sp, #16]',
+      '  ldp x29, x30, [sp], #32',
+      '  ret',
+    );
+    main.push('extern long long omni_thunk(void*, void*, long long, long long);',
+      'static char membuf[65536];');
+    for (const c of mcases) {
+      main.push(`extern long long ${c.f.name}(long long, long long);`);
+      calls.push(`  printf("%lld\\n", omni_thunk((void*)${c.f.name}, membuf,`
+        + ` ${c.args[0]}LL, ${c.args[1]}LL));`);
+    }
+  }
   main.push('int main(void) {', ...calls, '  return 0;', '}');
   writeFileSync(join(dir, 'stub.s'), stub.join('\n') + '\n');
   writeFileSync(join(dir, 'main.c'), main.join('\n') + '\n');
   execFileSync(CLANG, ['-o', join(dir, 'prog'), join(dir, 'main.c'), join(dir, 'stub.s')]);
   const out = execFileSync(join(dir, 'prog'), { encoding: 'utf8' }).trim().split('\n');
-  const all = [...cases, ...dcases];
+  const all = [...cases, ...dcases, ...mcases];
   if (out.length !== all.length) {
     process.stdout.write(`arm64/from-mir: 印了 ${out.length} 行，用例 ${all.length} 条\n`);
     process.exit(1);

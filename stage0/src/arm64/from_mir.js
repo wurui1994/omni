@@ -34,7 +34,7 @@ import * as a from './encode.js';
 import { CodeBuf } from './asm.js';
 import {
   OP, REF_NONE, isConstRef, T_I32, T_I64, T_BOOL, T_VOID, T_F32, T_F64,
-  typeKind, isFloatType, intBits,
+  typeKind, isFloatType, intBits, memKindNo, memOff, MLOAD_KINDS, MSTORE_KINDS,
   CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16,
   CVT_I2F, CVT_U2F, CVT_F2I, CVT_FCVT, CVT_BITCAST, OP_NAMES,
 } from '../mir/ir.js';
@@ -50,6 +50,19 @@ const SP = 31;
 const FTMP0 = 16;
 const FTMP1 = 17;
 const FRES = 18;
+/**
+ * 线性内存的基址钉在 **x28** 上。
+ *
+ * 为什么钉一个寄存器：MIR 的线性内存是「一整片可寻址的字节」，地址是**从 0 起的偏移**，
+ * 而真机上那片字节在哪要到运行期才知道。可选的路子有三条 —— 每次访问都从一个全局符号
+ * 里读基址（多一次访存，而且欠链接器一笔重定位）、把基址当隐含形参层层传（改了所有函数
+ * 的签名）、或者钉一个寄存器。wasm 的几个引擎都选第三条，我们照做。
+ *
+ * x28 是**被调用者保存**的，所以：模块里的代码从不写它（于是不必在序言里存），
+ * 而调用外部的 C 函数回来之后它还在（ABI 保证）。进入模块代码之前把它设好是**驱动**
+ * 的事（第 10 步的「在内存里执行」那一半），这一层只管读。
+ */
+const MEM_BASE = 28;
 
 /** 一个 double / float 的 IEEE 754 位模式。与 C 前端的 `floatBits` 同一个写法。 */
 function floatBits(x, size) {
@@ -315,6 +328,10 @@ class FnGen {
       return;
     }
 
+    /* ---- 线性内存（第九刀第七片）。地址是从 0 起的字节偏移，真址 = x28 + 偏移。 */
+    if (op === OP.MLOAD) return this.mload(i);
+    if (op === OP.MSTORE) return this.mstore(i);
+
     /* ---- 浮点。`t` 是浮点就整条交给 `float()`：算术、取负、比较、以及**结果是浮点的**
      * 那几种 CVT 都在那儿。结果是整数的 F2I 留在 `cvt()`（那条的 `t` 是整数）。 */
     if (isFloatType(t)) return this.float(i);
@@ -465,6 +482,56 @@ class FnGen {
     return this.def(i, RES);
   }
 
+  /** 真址 = x28 + 地址 + 静态偏移，算进 `reg`。 */
+  memAddr(reg, ref, off) {
+    this.loadRef(reg, ref);
+    this.buf.emit(a.addReg(1, reg, MEM_BASE, reg));
+    if (off === 0) return;
+    if (off < 4096) {
+      this.buf.emit(a.addImm(1, reg, reg, off));
+      return;
+    }
+    /* 静态偏移大过一格立即数就先造出来 —— 用 TMP1 当中转（这两条路上它都还没被占）。 */
+    this.movImm(TMP1, BigInt(off));
+    this.buf.emit(a.addReg(1, reg, reg, TMP1));
+  }
+
+  /**
+   * `MLOAD`。九种宽度符号（`MLOAD_KINDS`）落成六条指令：
+   *
+   * - 符号扩展的三种走 `ldrsb`/`ldrsh`/`ldrsw`，一律**扩到 64 位** —— i32 的规范形是
+   *   符号扩展过的 64 位，所以扩到 x 正好两种结果类型通用；
+   * - 零扩展的三种走 `ldrb`/`ldrh`/`ldr w`（w 系的加载天然把高 32 位清零）；
+   * - `f32`/`f64` 也走**整数**加载：栈位里躺的是位模式，不必绕 FP 寄存器。
+   *
+   * 静态偏移一律折进地址，不进 `ldr` 的立即数格：那一格是**按宽度缩放**的，而 C 的
+   * `p->field` 给的偏移未必是宽度的倍数（`struct { char c; int i; }` 的 `i` 在 4，
+   * 按 4 缩放正好，但 `short` 数组里的第三个元素在 6，按 8 缩放就除不尽）。折进地址
+   * 是一条 `add`，比在这儿分情况稳。
+   */
+  mload(i) {
+    const f = this.f;
+    const kind = MLOAD_KINDS[memKindNo(f.aux[i])];
+    this.memAddr(TMP0, f.a[i], memOff(f.aux[i]));
+    const ld = MLOAD_EMIT[kind];
+    if (ld === undefined) return nyi(`MLOAD 的宽度 ${kind}`);
+    ld(this.buf, RES, TMP0);
+    return this.def(i, RES);
+  }
+
+  /** `MSTORE`。六种宽度只管「把低若干位拍进内存」，没有符号可言（与 wasm 同）。 */
+  mstore(i) {
+    const f = this.f;
+    const kind = MSTORE_KINDS[memKindNo(f.aux[i])];
+    const size = MSTORE_SIZE[kind];
+    if (size === undefined) return nyi(`MSTORE 的宽度 ${kind}`);
+    this.loadRef(TMP1, f.b[i]);
+    /* 先取值再算地址：`memAddr` 在偏移大的时候要借 TMP1，所以值得换个落脚点。 */
+    this.buf.emit(a.movReg(1, RES, TMP1));
+    this.memAddr(TMP0, f.a[i], memOff(f.aux[i]));
+    this.buf.emit(a.strU(size, RES, TMP0, 0));
+  }
+
   /** 把结果写回这条指令的栈位。32 位的结果先按 i32 的规范形符号扩展。 */
   def(i, reg, w) {
     if (w === 32) this.buf.emit(a.sxtw(reg, reg));
@@ -528,6 +595,23 @@ FCMP[OP.LT] = a.COND.mi;
 FCMP[OP.LE] = a.COND.ls;
 FCMP[OP.GT] = a.COND.gt;
 FCMP[OP.GE] = a.COND.ge;
+
+/* 线性内存的九种读。`ldrs*` 一律扩到 64 位（i32 的规范形就是那个样子），
+ * 零扩展的三种与两种浮点都走整数加载 —— 栈位里躺的是位模式。 */
+const MLOAD_EMIT = {
+  i8s: (b, d, p) => b.emit(a.ldrsU(0, d, p, 0)),
+  i8u: (b, d, p) => b.emit(a.ldrU(0, d, p, 0)),
+  i16s: (b, d, p) => b.emit(a.ldrsU(1, d, p, 0)),
+  i16u: (b, d, p) => b.emit(a.ldrU(1, d, p, 0)),
+  i32s: (b, d, p) => b.emit(a.ldrsU(2, d, p, 0)),
+  i32u: (b, d, p) => b.emit(a.ldrU(2, d, p, 0)),
+  i64: (b, d, p) => b.emit(a.ldrU(3, d, p, 0)),
+  f32: (b, d, p) => b.emit(a.ldrU(2, d, p, 0)),
+  f64: (b, d, p) => b.emit(a.ldrU(3, d, p, 0)),
+};
+
+/* 六种写 -> `str` 的宽度对数。 */
+const MSTORE_SIZE = { i8: 0, i16: 1, i32: 2, i64: 3, f32: 2, f64: 3 };
 
 /** 一个 MIR 函数 -> 一段 arm64 机器码（`CodeBuf`，已回填）。不认 CALL —— 单个函数
  * 里没有别的函数的落点，要发调用得走 `genModule`。 */
