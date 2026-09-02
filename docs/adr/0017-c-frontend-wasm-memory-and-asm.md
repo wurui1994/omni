@@ -397,7 +397,10 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
 差别只在 `e_machine`、重定位号与符号名前那条下划线）。**读回来能原样写回去**（第四十一片，
 六个目标 108 条逐字节相同），**并合与 `tcc -r` 也对上了字节**（第四十二片，
 `stage0/src/link/elf_merge.js`，命令行 `omni elf-r`：六个目标 108 条逐字节相同 ——
-输入是 tcc 自己出的 `.o`，所以这一步的对账不必等代码生成对齐）。
+输入是 tcc 自己出的 `.o`，所以这一步的对账不必等代码生成对齐）。**可执行文件从 PE 起手**
+（第四十三片，`stage0/src/link/pe.js`：读一份 PE 映像再从 `pe_template` 写回去，两个
+win32 目标 160 条逐字节相同 —— 三种可执行格式里只有 PE 没有代码签名、没有 dyld 那一摊，
+而且在 macOS 上就链得出来）。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -9671,6 +9674,56 @@ mergeObjects([a.o, mate.o])   ← 我们
 + ad-hoc 签名 / PE）都能这么办。
 
 <!-- 第九刀第四十二片-END -->
+
+## 落地：第九刀第四十三片 —— PE 映像的容器（**160 条逐字节**，顺带把交叉目标的覆盖从 5 条提到 82 条）
+
+可执行文件的写出有三个（ELF / Mach-O / PE）。先挑 PE，理由是**只有它能现在就对账**：
+
+- **它是三种里唯一完全确定的**。macOS 上 arm64 的可执行文件必须签名，而 tcc 自己不签 ——
+  它 `system("codesign -f -s - <file>")` 让系统去签（`tccmacho.c:2242`）；PE 没有签名，
+  也没有 dyld 那一摊（chained fixups、export trie）。
+- **本机就链得出来**。`x86_64-win32-tcc a.o -o a.exe` 不需要 Windows 的 sysroot（win32 的
+  导入库随 tinycc 源码走），而 `x86_64-tcc`（Linux）少一个 Linux 的 crt/libc，本机链不了。
+
+这一片先立容器：读一份 PE 映像，再**从模板**写回去，字节相同。
+
+```
+<target>-win32-tcc a.o -o a.exe   （tcc 链出来的映像）
+readImage -> writeImage           （头部除了算出来的那几格全部来自 pe_template）
+两个目标：160 条，全部逐字节相同，0 条不同
+```
+
+`stage0/src/link/pe.js` + `tests/c/pe-roundtrip.js`。算出来的那几格是：`NumberOfSections`、
+`SizeOfHeaders`、`SizeOfImage`、`SizeOfCode`、`SizeOfInitializedData`、`BaseOfCode`，
+以及每节的 `PointerToRawData` / `SizeOfRawData`：
+
+```
+sizeofheaders = fileAlign(392 + 节数 * 40)     // 392 = DOS 头 128 + "PE\0\0" 4 + 20 + 240
+每节有数据才占文件：ptr = off；off = fileAlign(off + 数据长度)；size = off - ptr
+```
+
+### 一、又是靠对字节才发现的一格：**PE 有校验和，而且 tcc 真的填**
+
+模板里 `CheckSum` 那一格写的是 0，`pe_write` 里也看不到给它赋值 —— 但文件里是
+`0x00006e96`。它是**边写边攒**的（`pe_fwrite` 每写一段就把那一段按十六位小端的字加进
+`pe->sum`，每加一次把高半边折回来），最后 `pe->sum += file_offset`，`fseek` 回到那一格
+写下去（`tccpe.c:850`）。
+
+一格值得记：tcc 只把**真写出去的字节**算进和里，补齐的 0 走的是另一条路（`pe_fpad`）。
+但补的是 0，加进去也一样 —— 连「奇数长度的最后一个字节单独加」那一格也一样，因为小端下
+`(字节, 0)` 这个字就等于那个字节。所以我们直接对整个文件算，结果相同。
+
+### 二、顺带一格：交叉目标上 tcc 缺的不是系统头，是**它自己的头**
+
+前几片的报告里，非 macOS 的目标一直只有 5 条（「tcc 自己编不过大多数用例」）。真正的原因
+不是缺 Windows/Linux 的头，是 `-B<src>/win32` 之后 tcc 只往 `win32/include` 里找，而
+`stddef.h` / `stdarg.h` 这几个**它自己的**头在 `include/` 里 —— 于是凡是
+`#include <stdio.h>` 的用例都在 `_mingw.h` 那一行断掉。补一个 `-I<src>/include`：
+
+- `tests/c/elf-roundtrip.js`：108 -> **262 条**（win32 两个目标各 5 -> 82）
+- `tests/c/elf-merge.js`：108 -> **262 条**
+
+<!-- 第九刀第四十三片-END -->
 
 
 

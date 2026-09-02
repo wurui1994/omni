@@ -83,8 +83,11 @@ try {
       continue;
     }
     const B = t.win32 ? `-B${join(src, 'win32')}` : `-B${src}`;
+    /* win32 目标的 `-B` 指着 `win32/`，tcc 自己那几个头（`stddef.h`/`stdarg.h`）在
+     * `include/` 里，得单独挂上 —— 少了它，凡是 `#include <stdio.h>` 的用例都编不过。 */
+    const F = t.win32 ? [B, `-I${join(src, 'include')}`] : [B];
     const mateObj = join(dir, `${t.name}-mate.o`);
-    const mate = spawnSync(tcc, [B, '-c', matePath, '-o', mateObj], { encoding: 'utf8' });
+    const mate = spawnSync(tcc, [...F, '-c', matePath, '-o', mateObj], { encoding: 'utf8' });
     if (mate.status !== 0) {
       process.stdout.write(`  skip ${t.name}（陪衬都编不过：${mate.stderr.trim()}）\n`);
       continue;
@@ -93,11 +96,11 @@ try {
     let ok = 0;
     for (const c of cases) {
       const objPath = join(dir, `${t.name}-${basename(c, '.c')}.o`);
-      const one = spawnSync(tcc, [B, '-c', join(SRC, c), '-o', objPath], { encoding: 'utf8' });
+      const one = spawnSync(tcc, [...F, '-c', join(SRC, c), '-o', objPath], { encoding: 'utf8' });
       /* tcc 自己都编不过的用例不算账（有些要它没有的头文件）。 */
       if (one.status !== 0 || !existsSync(objPath)) continue;
       const wantPath = join(dir, `${t.name}-${basename(c, '.c')}-m.o`);
-      const r = spawnSync(tcc, [B, '-r', objPath, mateObj, '-o', wantPath], { encoding: 'utf8' });
+      const r = spawnSync(tcc, [...F, '-r', objPath, mateObj, '-o', wantPath], { encoding: 'utf8' });
       if (r.status !== 0 || !existsSync(wantPath)) continue;
       const want = readFileSync(wantPath);
       let got;

@@ -72,10 +72,13 @@ try {
       continue;
     }
     const B = t.win32 ? `-B${join(src, 'win32')}` : `-B${src}`;
+    /* win32 目标的 `-B` 指着 `win32/`，tcc 自己那几个头（`stddef.h`/`stdarg.h`）在
+     * `include/` 里，得单独挂上 —— 少了它，凡是 `#include <stdio.h>` 的用例都编不过。 */
+    const extra = t.win32 ? [`-I${join(src, 'include')}`] : [];
     let ok = 0;
     for (const c of cases) {
       const refPath = join(dir, `${t.name}-${basename(c, '.c')}.o`);
-      const ref = spawnSync(tcc, [B, '-c', join(SRC, c), '-o', refPath], { encoding: 'utf8' });
+      const ref = spawnSync(tcc, [B, ...extra, '-c', join(SRC, c), '-o', refPath], { encoding: 'utf8' });
       /* tcc 自己都编不过的用例不算账（有些要它没有的头文件）。 */
       if (ref.status !== 0 || !existsSync(refPath)) continue;
       const want = readFileSync(refPath);
