@@ -590,6 +590,12 @@ Bellard 拿它让 tcc 编译自己）也通了。`cpp/` 与 `inc/` 两组各多�
 `inc/` 那一份走四种（`-MM`/`-M` 各配 `-MP`），加 `gen/01-expr.c` 一条没有头的，
 `51 条` → `56 条`。
 
+**`#include_next` 与 `__has_include_next`**（第八十四片）：上一片记下的
+「在第几格找到的」这一格，正好是这两条要的东西 —— 从**我自己那一格之后**接着数
+（`i = file->include_next_index` 起步），于是「盖一层但还要用底下那一层」写得出来，
+也不会又找回自己。两个阶段边界（`cpp-bad/include-next`、`cpp-bad/has-include-next`）
+换成了 `inc/02-include-next.c` 这份真的用例，`inc/` 那一组从此有两个搜索目录。
+
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
 地址交给真的 libc（`strlen`/`memcpy`）验过。C 前端现在还把 `&x` 降到影子栈上，
@@ -11896,6 +11902,43 @@ tcc 在 macOS 上直奔 SDK —— 同一句 `#include <stddef.h>` 两边找到�
 `-M`。
 
 <!-- 第九刀第八十三片-END -->
+
+## 落地：第九刀第八十四片
+
+`#include_next` 与 `__has_include_next` —— 两个阶段边界拆掉。
+
+这两条一直是明着报错的（`cpp-bad/include-next`、`cpp-bad/has-include-next`），
+留的话是「要给每份打开的文件记住它是在第几个 `-I` 里找到的」。上一片为了 `-M`
+已经把那一格（`includeNextIndex`）记上了 —— 于是这一片只剩下一行的事：
+
+```c
+i = do_next ? file->include_next_index : -1;
+for (;;) {
+    ++i;
+    ...
+}
+```
+
+`includeTries` 多一个 `doNext`：从 `file.includeNextIndex + 1` 那一格起才收。
+「跳过的格子也占号」这件事在这儿变成硬要求 —— 少算一格就会又找回自己，
+成了自己 include 自己。
+
+`__has_include_next` 与 `__has_include` 在 tcc 那边是**同一句**
+（`parse_include(s1, t - TOK___HAS_INCLUDE, 1)`，tccpp.c:1480），我们也并成一支。
+
+### 门
+
+`inc/` 那一组从此有两个搜索目录（`include`、`include2`，都有一份 `next.h`）。
+新用例 `inc/02-include-next.c`：
+
+- `include/next.h` 里 `#include_next <next.h>` 落到 `include2/next.h`；
+- `include2/next.h` 里 `__has_include_next(<next.h>)` 是**假**（没有第三层了）；
+- 主文件里 `__has_include_next(<next.h>)` 是**真**（主文件那一格是 0，只跳过绝对路径那一格）。
+
+三种走法（`-P`、`-E`、`-P1`）加四种 `-M` 走法，与 tcc 逐字节相同。`sys/` 那一组
+（真的 macOS SDK）也重新验过 —— SDK 里的 `__has_include_next` 从此走真的路子。
+
+<!-- 第九刀第八十四片-END -->
 
 
 

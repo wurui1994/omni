@@ -26,13 +26,8 @@
 //
 // ## 阶段边界（刻意的，全部报错而不是给错答案）
 //
-// - **输出格式只有 `-P` 那一种**（不发 `# 行号 "文件"` 标记）。`pp_line`（`tccpp.c:3796`）
-//   那套「差 8 行以内就补空行、否则印行号标记」的逻辑要跟 include 层级联动，是独立一格。
 // - **`__DATE__` / `__TIME__` 不认**：它们的值随时钟走，进不了逐字节比对的测试轴。
 //   `__LINE__` / `__FILE__` / `__COUNTER__` 都认。
-// - **`#include_next` 与 `__has_include` 不认**：前者要记住「上一次是在第几个搜索目录里
-//   找到的」（`tccpp.c:1363` 的 include_next_index），后者要把 include 搜索接进 `#if`
-//   的求值里。两条都等要接**本机真正的**系统头的时候再做 —— 那时才躲不开。
 // - **只有自带的那个系统头目录，没接本机的**：`sysIncludeDirs`（第八刀第二片）指向
 //   `stage0/include/`。里头两类东西：一是**编译器必须自己给**的那四份
 //   `stddef.h` / `stdarg.h` / `stdbool.h` / `float.h`（与 tcc 自带的一一对应），
@@ -1534,8 +1529,9 @@ export class Cpp {
           this.parseFlags = savedFlags;
           return;
         case TOK_INCLUDE_NEXT:
-          this.err("'#include_next' is not supported yet");
-          break;
+          this.parseInclude(true);
+          this.parseFlags = savedFlags;
+          return;
         case TOK_IFNDEF: case TOK_IFDEF: {
           c = this.tok === TOK_IFNDEF ? 1 : 0;
           this.nextNomacro();
@@ -1872,12 +1868,12 @@ export class Cpp {
     return false;
   }
 
-  /** `parse_include`（`tccpp.c:1324`） */
-  parseInclude() {
+  /** `parse_include`（`tccpp.c:1324`）。`doNext` = `#include_next`。 */
+  parseInclude(doNext = false) {
     const { name, kind } = this.parseIncludeName();
     this.skipToEol(true);
 
-    for (const t of this.includeTries(name, kind)) {
+    for (const t of this.includeTries(name, kind, doNext)) {
       const e = this.cachedInclude(t.path, false);
       if (e !== null && (e.once || (e.ifndefMacro && this.defineFind(e.ifndefMacro) !== null))) {
         return; // 守卫已经定义过或者 #pragma once：整份跳过，连读都不读
@@ -1944,16 +1940,21 @@ export class Cpp {
    * 回的每一格都带上 tcc 的那个下标 `i`：0 = 绝对路径、1 = 当前文件所在目录、
    * `2 + j` = 第 j 个 `-I`、再往后是系统目录。跳过的格子**也占号**（`i` 是照着
    * `for(;;) ++i` 数的），因为 `-M` 拿 `i - 2 < nb_include_paths` 分自己的头与系统的头。
+   *
+   * `doNext`（`#include_next` / `__has_include_next`）：从**当前这份文件是在哪一格
+   * 找到的**之后接着数（`i = file->include_next_index` 起步，`tccpp.c:1363`）。
+   * 于是 `-I a -I b` 下 `a/x.h` 里的 `#include_next <x.h>` 会拿到 `b/x.h` ——
+   * 「盖一层但还要用底下那一层」就是这么写的。
    */
-  includeTries(name, kind) {
+  includeTries(name, kind, doNext = false) {
+    const from = doNext ? this.file.includeNextIndex + 1 : 0;
     const tries = [];
-    if (isAbsPath(name)) tries.push({ path: name, i: 0 });
-    if (kind === 34) {
-      tries.push({ path: this.joinPath(this.dirnameOf(this.file.trueFilename), name), i: 1 });
-    }
+    const put = (i, path) => { if (i >= from) tries.push({ path, i }); };
+    if (isAbsPath(name)) put(0, name);
+    if (kind === 34) put(1, this.joinPath(this.dirnameOf(this.file.trueFilename), name));
     let i = 2;
-    for (const d of this.includeDirs) tries.push({ path: this.joinPath(d, name), i: i++ });
-    for (const d of this.sysIncludeDirs) tries.push({ path: this.joinPath(d, name), i: i++ });
+    for (const d of this.includeDirs) put(i++, this.joinPath(d, name));
+    for (const d of this.sysIncludeDirs) put(i++, this.joinPath(d, name));
     return tries;
   }
 
@@ -1962,9 +1963,9 @@ export class Cpp {
    * 只问「找不找得到」，不打开、不进 include 栈、不碰守卫缓存。
    * macOS 的 `<Availability.h>` 一进门就用它。
    */
-  hasInclude() {
+  hasInclude(doNext = false) {
     const { name, kind } = this.parseIncludeName();
-    for (const t of this.includeTries(name, kind)) {
+    for (const t of this.includeTries(name, kind, doNext)) {
       if (this.readFile(t.path) !== null) return true;
     }
     return false;
@@ -2013,19 +2014,18 @@ export class Cpp {
         str.add2(TOK_CLLONG, c);
         continue;
       }
-      if (t === TOK___HAS_INCLUDE) {
+      if (t === TOK___HAS_INCLUDE || t === TOK___HAS_INCLUDE_NEXT) {
         /* `__has_include(<x.h>)`（`tccpp.c:1474-1483`）。名字那一段读的是**原始字符**，
          * 所以这儿的形状照 tcc：先 `next()` 拿到 `(`，再让 `hasInclude()` 从文件里
-         * 往下读，读完它已经把 `)` 摆在 `this.tok` 上。 */
+         * 往下读，读完它已经把 `)` 摆在 `this.tok` 上。
+         * tcc 那边两条是同一句 `parse_include(s1, t - TOK___HAS_INCLUDE, 1)` —— 差别
+         * 只在「从第几格接着找」。 */
         this.next();
         if (this.tok !== 40) this.err("'(' expected");
-        const c = this.hasInclude() ? 1n : 0n;
+        const c = this.hasInclude(t === TOK___HAS_INCLUDE_NEXT) ? 1n : 0n;
         if (this.tok !== 41) this.err("')' expected");
         str.add2(TOK_CLLONG, c);
         continue;
-      }
-      if (t === TOK___HAS_INCLUDE_NEXT) {
-        this.err(`'${this.tokStr(t, null)}' is not supported yet`);
       }
       // 没定义的宏名在 `#if` 里就是 0（C 的规定）
       str.add2(TOK_CLLONG, 0n);

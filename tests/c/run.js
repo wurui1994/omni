@@ -192,9 +192,13 @@ for (const f of pick('cpp')) for (const m of ['-dD', '-dM', '-E', '-P1', '-P10']
 // ------------------------------------------------------------ 2. inc/：#include 的搜索与守卫
 
 const incDir = join(here, 'inc', 'include');
-for (const f of pick('inc')) compare('inc', f, [incDir]);
+/* 第二个搜索目录：`#include_next` 得有「底下那一层」才试得出来（第八十四片）。
+ * 两边都有 `next.h`，`include` 在前。别的用例不受影响 —— 只有 `next.h` 是重名的。 */
+const incDir2 = join(here, 'inc', 'include2');
+const incDirs = [incDir, incDir2];
+for (const f of pick('inc')) compare('inc', f, incDirs);
 // 进出文件的行标（` 1` / ` 2`）只有真 include 才试得到。
-for (const f of pick('inc')) for (const m of ['-E', '-P1']) compare('inc', f, [incDir], m);
+for (const f of pick('inc')) for (const m of ['-E', '-P1']) compare('inc', f, incDirs, m);
 
 /**
  * `-M` 一族：给 make 的依赖清单（`gen_makedeps`）。这一组比的是**两边 CLI 的 stdout** ——
@@ -232,7 +236,7 @@ function depsCase(group, file, incDirs, flags) {
 }
 
 for (const f of pick('inc')) {
-  for (const fl of [['-MM'], ['-MM', '-MP'], ['-M'], ['-M', '-MP']]) depsCase('inc', f, [incDir], fl);
+  for (const fl of [['-MM'], ['-MM', '-MP'], ['-M'], ['-M', '-MP']]) depsCase('inc', f, incDirs, fl);
 }
 /* 一个头都不 include 的样子（清单里只有 `.c` 自己）。用 `gen/` 里的 —— `-M` 一族不带
  * `-E`，tcc 会真的把文件编一遍，而 `cpp/` 那几份是预处理器的探针、本来就不是合法的 C。 */
