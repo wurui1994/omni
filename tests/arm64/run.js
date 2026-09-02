@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 
 import * as a from '../../stage0/src/arm64/encode.js';
+import { CodeBuf, RELOC } from '../../stage0/src/arm64/asm.js';
 
 /** llvm-mc 在哪。没有就整份跳过 —— 这条链是「有 llvm 的机器上必须过」。 */
 function findLlvm(name) {
@@ -271,6 +272,75 @@ t('dmb ish', a.dmbIsh());
 t('dsb ish', a.dsbIsh());
 t('isb', a.isb());
 
+// ================================================================ 第九刀第三片
+// 指令缓冲：标签、往前跳的回填。整段程序与 llvm 汇编同一段带标签的源比。
+
+/** @type {{name:string, asm:string, words:number[]}[]} */
+const programs = [];
+/** 缓冲收工后的那几个字（小端 -> 无符号 32 位）。 */
+const wordsOf = (buf) => [...new Uint32Array(buf.bytes().buffer)];
+
+{
+  /* 一个阶乘的循环：往后跳（`b L1`）与往前跳（`cbz L2`、`b.lt L3`）各有，
+   * 还有一条 `adr` 指到后面的标签。 */
+  const buf = new CodeBuf();
+  const L1 = buf.label();
+  const L2 = buf.label();
+  const L3 = buf.label();
+  buf.emit(a.movz(X, 0, 1), a.movz(X, 1, 5));
+  buf.place(L1);
+  buf.cbz(X, 1, L2);
+  buf.emit(a.mul(X, 0, 0, 1), a.subImm(X, 1, 1, 1));
+  buf.b(L1);
+  buf.place(L2);
+  buf.emit(a.cmpImm(X, 0, 100));
+  buf.bcond(a.COND.lt, L3);
+  buf.emit(a.movz(X, 0, 0));
+  buf.adr(2, L3);
+  buf.place(L3);
+  buf.emit(a.ret());
+  programs.push({
+    name: '阶乘的循环',
+    asm: [
+      'mov x0, #1', 'mov x1, #5',
+      'L1: cbz x1, L2',
+      'mul x0, x0, x1', 'sub x1, x1, #1',
+      'b L1',
+      'L2: cmp x0, #100',
+      'b.lt L3',
+      'mov x0, #0',
+      'adr x2, L3',
+      'L3: ret',
+    ].join('\n'),
+    words: wordsOf(buf),
+  });
+}
+
+{
+  /* 序言 + 收场，中间一条前后都跳的嵌套。 */
+  const buf = new CodeBuf();
+  const top = buf.label();
+  const out = buf.label();
+  buf.emit(a.stpPre(X, 29, 30, SP, -16), a.movSp(X, 29, SP));
+  buf.place(top);
+  buf.emit(a.subsImm(X, 0, 0, 1));
+  buf.bcond(a.COND.eq, out);
+  buf.cbnz(X, 0, top);
+  buf.place(out);
+  buf.emit(a.ldpPost(X, 29, 30, SP, 16), a.ret());
+  programs.push({
+    name: '序言收场夹一个循环',
+    asm: [
+      'stp x29, x30, [sp, #-16]!', 'mov x29, sp',
+      'top: subs x0, x0, #1',
+      'b.eq out',
+      'cbnz x0, top',
+      'out: ldp x29, x30, [sp], #16', 'ret',
+    ].join('\n'),
+    words: [...new Uint32Array(buf.bytes().buffer)],
+  });
+}
+
 // ---- 边界：编不下去的要当场报，不许悄悄截断
 /** @type {{what:string, fn:Function}[]} */
 const bounds = [
@@ -292,6 +362,11 @@ const bounds = [
   { what: 'bfi 宽度是 0', fn: () => a.bfi(X, 0, 1, 0, 0) },
   { what: 'extr 的 lsb 越界', fn: () => a.extr(X, 0, 1, 2, 64) },
   { what: '浮点存取偏移没对齐', fn: () => a.ldrFpU(3, 0, 1, 4) },
+  /* 第九刀第三片：缓冲自己的边界 */
+  { what: '标签从没落地', fn: () => { const b = new CodeBuf(); b.b(b.label()); b.finish(); } },
+  { what: '同一个标签落两次', fn: () => { const b = new CodeBuf(); const l = b.label(); b.place(l); b.place(l); } },
+  { what: '跳到不存在的标签', fn: () => new CodeBuf().b(7) },
+  { what: '往缓冲里塞不是指令字的东西', fn: () => new CodeBuf().word(-1) },
 ];
 
 // ---------------------------------------------------------------- 跑
@@ -321,6 +396,52 @@ try {
     process.stdout.write(`  FAIL ${c.asm}\n    ours   ${c.word.toString(16).padStart(8, '0')}`
       + `\n    llvm   ${words[i].toString(16).padStart(8, '0')}\n`);
   }
+  for (const p of programs) {
+    const ps = join(dir, 'prog.s');
+    const po = join(dir, 'prog.o');
+    writeFileSync(ps, '.text\n' + p.asm + '\n');
+    execFileSync(MC, ['-triple=arm64', '-filetype=obj', ps, '-o', po]);
+    const pd = execFileSync(OBJDUMP, ['-d', po], { encoding: 'utf8' });
+    const want = [];
+    for (const line of pd.split('\n')) {
+      const m = /^\s+[0-9a-f]+:\s+([0-9a-f]{8})\s/.exec(line);
+      if (m !== null) want.push(parseInt(m[1], 16) >>> 0);
+    }
+    if (want.length !== p.words.length) {
+      failed++;
+      process.stdout.write(`  FAIL 程序「${p.name}」条数对不上：ours ${p.words.length}，llvm ${want.length}\n`);
+      continue;
+    }
+    let same = true;
+    for (let i = 0; i < want.length; i++) {
+      if (p.words[i] === want[i]) continue;
+      same = false;
+      process.stdout.write(`  FAIL 程序「${p.name}」第 ${i} 条`
+        + `\n    ours   ${p.words[i].toString(16).padStart(8, '0')}`
+        + `\n    llvm   ${want[i].toString(16).padStart(8, '0')}\n`);
+    }
+    if (same) passed++; else failed++;
+  }
+
+  /* 符号那几条只查「记了什么账、字里留的是不是 0」—— 填是第 11 步链接器的事。 */
+  {
+    const buf = new CodeBuf();
+    buf.adrpSym(0, '_msg');
+    buf.addSymOff(0, 0, '_msg');
+    buf.blSym('_printf');
+    const w = wordsOf(buf);
+    const wantKinds = [RELOC.PAGE21, RELOC.PAGEOFF12, RELOC.BRANCH26];
+    const gotKinds = buf.relocs.map((r) => r.kind);
+    const ok = gotKinds.join(',') === wantKinds.join(',')
+      && buf.relocs.map((r) => r.at).join(',') === '0,4,8'
+      && w[0] === a.adrp(0, 0) && w[1] === a.addImm(1, 0, 0, 0) && w[2] === a.bl(0);
+    if (ok) passed++;
+    else {
+      failed++;
+      process.stdout.write(`  FAIL 符号记账：${gotKinds.join(',')} / ${buf.relocs.map((r) => r.at).join(',')}\n`);
+    }
+  }
+
   for (const b of bounds) {
     let threw = false;
     try { b.fn(); } catch { threw = true; }
