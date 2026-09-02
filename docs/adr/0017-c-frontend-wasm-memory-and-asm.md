@@ -428,7 +428,10 @@ tcc 逐字节相同了**（第五十片，`peWrite`：两个 win32 目标 160 �
 `<target>-osx-tcc -nostdlib`，两个目标 22 份逐字节相同 —— 段套节、按用途归类的
 `enum skind`、链式修正（`LC_DYLD_CHAINED_FIXUPS` 的 bind/rebase 链）、导出符号的前缀树
 （`LC_DYLD_EXPORTS_TRIE`）、`__stubs` 桩子；arm64 那一份签完名能跑，命令行上是
-`omni macho-link`）。三个格式于是都是我们自己写出来的了。
+`omni macho-link`）。三个格式于是都是我们自己写出来的了。**macOS 上也接上真的 libc 了**
+（第五十六片：`.tbd` 里的导出符号、`LC_LOAD_DYLIB`、按需取用 `libtcc1.a`、当场生成的
+`___GLOBAL_init_65535`，`tests/c/gen` 里那八十几份要 `printf` 的用例两个目标各 86 份
+逐字节相同）。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -10240,6 +10243,47 @@ LC_LOAD_DYLINKER  LC_BUILD_VERSION  LC_SOURCE_VERSION  LC_MAIN
 自己写出来的 arm64 文件签完名能跑：`22-bss.c` 返回 15，`./a.out; echo $?` 就是 15。
 
 <!-- 第九刀第五十五片-END -->
+
+## 落地：第九刀第五十六片 —— 接上真的 libc
+
+上一片是 `-nostdlib`，只能编那十一份自带的用例。这一片把 libc 接上，于是
+`tests/c/gen` 里那八十几份**要 `stdio.h`、要 `printf`** 的用例全进了门：
+
+```
+<target>-osx-tcc -B<dir> -L<sdk>/usr/lib a.o -o a.out
+```
+
+`tests/c/macho-libc.js`：
+
+```
+x86_64-macos: 86 份可执行文件逐字节相同
+arm64-macos : 86 份可执行文件逐字节相同   （共 8658712 字节，从 libtcc1.a 里拉了 6 个成员）
+```
+
+多出来的三样：
+
+- **`.tbd`**：SDK 里那种文本 stub。`tcc_add_library(s1, "c")` 找到的是 `libc.tbd`，
+  从里头读出安装名 `/usr/lib/libSystem.B.dylib` 与一大堆导出符号。那些名字**进不了我们的
+  符号表** —— 它们只用来回答 `check_symbols` 里那一句「这个未定义符号是不是来自某个
+  dylib」，是就标成 `SHN_FROMDLL`，不是就报「没有定义」。tcc 的「解析器」照抄过来了：
+  它不认 YAML，只会找 `install-name: `、再一遍遍找 `symbols: [`，连 `targets:` 都不看
+  （于是 x86_64 专属的导出在 arm64 上也一并进表 —— 反正只判断存在性）。
+- **`LC_LOAD_DYLIB`**：装了哪个 dylib 就多一条，排在 `LC_MAIN` 后面；`timestamp` 是 2，
+  两个版本号都是 `1 << 16`。
+- **`libtcc1.a` 按需取用**：跟 PE 那一路同一套（`ar.js` 的 `alacarte`），拉进来的成员
+  **接在命令行那些目标文件后面**再一起并合。
+
+顺手把上一片欠的那一块补了：**`.fini_array` 在 Mach-O 上不是一节，是一段当场生成的代码**。
+`tcc_macho_add_destructor` 造一个 `___GLOBAL_init_65535`，对每个析构函数写一段
+`___cxa_atexit(dtor, 0, &__mh_execute_header)`（arm64 每条 24 字节：adrp/add 取析构函数、
+`mov x1, #0`、adrp/add 取 mach 头、`bl`；x86_64 每条 26 字节），前后加上帧的开合，
+然后把 `.fini_array` 清空、摘掉 `SHF_ALLOC`，把这个函数挂到 `.init_array` 上。
+`23-dtor.c` 两个架构头一遍就逐字节相同，跑起来是 `main 10` / `down2` / `down 10` ——
+构造函数、经桩子的 `printf`、倒序的析构函数都对。
+
+命令行：`omni macho-link a.o -o a.out --dylib <sdk>/usr/lib/libc.tbd --libtcc1 libtcc1.a`。
+
+<!-- 第九刀第五十六片-END -->
 
 
 

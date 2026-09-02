@@ -43,6 +43,9 @@
 import { OmniError } from '../source/diag.js';
 import { linkObjects } from './elf_merge.js';
 import { relocateOne } from './pe_reloc.js';
+import { readObject } from './elf.js';
+import { readArchive, alacarte } from './ar.js';
+import { readSymbols, SymTab } from './pe_load.js';
 
 const EM_X86_64 = 62;
 const EM_AARCH64 = 183;
@@ -93,6 +96,7 @@ const CPU_SUBTYPE_ARM64_ALL = 0;
 const LC_REQ_DYLD = 0x80000000;
 const LC_SYMTAB = 0x2;
 const LC_DYSYMTAB = 0xb;
+const LC_LOAD_DYLIB = 0xc;
 const LC_LOAD_DYLINKER = 0xe;
 const LC_SEGMENT_64 = 0x19;
 const LC_MAIN = 0x28 | LC_REQ_DYLD;
@@ -218,6 +222,8 @@ const R_X86_64_PLT32 = 4;
 const R_X86_64_GOTPCREL = 9;
 const R_X86_64_JUMP_SLOT = 7;
 const R_AARCH64_ABS64 = 257;
+const R_AARCH64_ADR_PREL_PG_HI21 = 275;
+const R_AARCH64_LDST8_ABS_LO12_NC = 278;
 const R_AARCH64_JUMP_SLOT = 1026;
 const R_AARCH64_CALL26 = 283;
 const R_AARCH64_ADR_GOT_PAGE = 311;
@@ -468,14 +474,106 @@ function exportTrie(syms, secs, vmaddr) {
 }
 
 /**
+ * `macho_load_tbd`：一份 `.tbd`（SDK 里那种文本 stub）里的安装名与导出符号。
+ *
+ * 这个「解析器」照抄 tcc 的那几个宏，粗得可以 —— 它不认 YAML，只会
+ * 「找到 `install-name: `」「一遍遍找 `symbols: [`，把方括号里的名字一个个撕下来」。
+ * 于是 `targets:` 那一格根本不看：x86_64 专属的导出也一并进表。存在性判断够用了。
+ */
+export function parseTbd(text) {
+  let pos = 0;
+  const at = (i) => (i < text.length ? text[i] : '');
+  const movepast = (s) => {
+    const i = text.indexOf(s, pos);
+    if (i < 0) return false;
+    pos = i + s.length;
+    return true;
+  };
+  const movetoany = (cs) => {
+    let i = pos;
+    while (i < text.length && !cs.includes(text[i])) i++;
+    if (i >= text.length) return false;
+    pos = i;
+    return true;
+  };
+  const skipws = () => { while (pos < text.length && (at(pos) === ' ' || at(pos) === '\n')) pos++; };
+  const quote = () => { if (at(pos) === "'" || at(pos) === '"') pos++; };
+  if (!movepast('install-name: ')) return null;
+  skipws();
+  quote();
+  const start = pos;
+  if (!movetoany('\n "\'')) return null;
+  const soname = text.slice(start, pos);
+  pos++;
+  const syms = [];
+  for (;;) {
+    if (!movepast('symbols: ')) break;
+    if (!movepast('[')) break;
+    let cont = true;
+    while (cont) {
+      skipws();
+      quote();
+      const s0 = pos;
+      if (!movetoany(',] "\'')) break;
+      const name = text.slice(s0, pos);
+      quote();
+      if (at(pos) === ' ') pos++;
+      skipws();
+      if (pos >= text.length || at(pos) === ']') cont = false;
+      pos++;
+      syms.push(name);
+    }
+  }
+  return { soname, syms };
+}
+
+/**
+ * `tcc_add_runtime` 那一段：装 dylib（记下安装名与它导出的符号）、按需从 `libtcc1.a`
+ * 里取成员。
+ *
+ * @param inp `{objs, dylibs, libtcc1}`；`dylibs` 每条是一份 `.tbd` 的文本
+ * @returns `{objs, dylibNames, dynsym, members}`；`objs` 是「命令行上的那些 + 拉进来的
+ *          成员」，次序就是 tcc 装它们的次序
+ */
+function loadInputs(inp) {
+  const objs = [...inp.objs];
+  const dylibNames = [];
+  const dynsym = new Set();
+  for (const text of inp.dylibs === undefined ? [] : inp.dylibs) {
+    const d = parseTbd(text);
+    if (d === null) throw new OmniError('macho: 这份 .tbd 里没有 install-name');
+    if (dylibNames.includes(d.soname)) continue;      // `tcc_add_dllref(...)->found`
+    dylibNames.push(d.soname);
+    for (const s of d.syms) dynsym.add(s);
+  }
+  const members = [];
+  if (inp.libtcc1 !== undefined) {
+    const tab = new SymTab();
+    for (const b of inp.objs) tab.addObject(readSymbols(readObject(b)));
+    alacarte(readArchive(inp.libtcc1), (n) => tab.isUndef(n), (m) => {
+      members.push(m.name);
+      objs.push(m.bytes);
+      tab.addObject(readSymbols(readObject(m.bytes)));
+    });
+  }
+  return {
+    objs, dylibNames, dynsym, members,
+  };
+}
+
+/**
  * 把几个 Mach-O 目标文件链成一个可执行文件（`macho_output_file` 的 EXE 那一路）。
  *
- * @param inp `{objs, entryName}`；`entryName` 默认 `_main`（Mach-O 的名字带下划线）
- * @returns `{bytes, ncmds, nsects, entryoff}`；`bytes` 还**没签名** —— 签名是
+ * @param inp `{objs, entryName, dylibs, libtcc1}`；`entryName` 默认 `_main`
+ *            （Mach-O 的名字带下划线），`dylibs` 是几份 `.tbd` 的文本，`libtcc1` 是
+ *            支持库的字节（按需取用）
+ * @returns `{bytes, ncmds, nsects, entryoff, members}`；`bytes` 还**没签名** —— 签名是
  *          `codesign -f -s -` 干的事，tcc 自己也是 `system()` 出去喊的
  */
 export function machoExe(inp) {
-  const st = linkObjects(inp.objs, { rdata: '.data.ro', unwind: false });
+  const loaded = loadInputs(inp);
+  const st = linkObjects(loaded.objs, { rdata: '.data.ro', unwind: false });
+
   const {
     machine, secs, syms, relas, byName,
   } = st;
@@ -484,6 +582,29 @@ export function machoExe(inp) {
   const findSec = (n) => {
     for (let i = 1; i < secs.length; i++) if (secs[i].name === n) return i;
     return -1;
+  };
+
+  /* ---- `put_elf_reloca`：给某一节添一条重定位，头一条顺手把 `.rela<名字>` 那一节造出来。
+   * 造析构函数那一段、造 GOT 与桩子都要用它。 */
+  const relocSec = new Map();
+  for (let i = 1; i < secs.length; i++) {
+    if (secs[i].type === SHT_RELA) relocSec.set(secs[i].relaFor, i);
+  }
+  const putReloc = (target, at, type, sym, add) => {
+    let ri = relocSec.get(target);
+    if (ri === undefined) {
+      ri = st.newSec(`.rela${secs[target].name}`, SHT_RELA, 0, 8, 24);
+      secs[ri].link = SYMTAB;
+      secs[ri].info = target;
+      secs[ri].relaFor = target;
+      relocSec.set(target, ri);
+      relas.set(ri, []);
+    }
+    relas.get(ri).push({
+      at, sym, type, add: BigInt(add === undefined ? 0 : add),
+    });
+    secs[ri].size = relas.get(ri).length * 24;
+    return ri;
   };
 
   /* ---- tcc_macho_add_destructor。
@@ -498,11 +619,96 @@ export function machoExe(inp) {
     other: 0,
     shndx: TEXT,
   });
+  const mhSym = byName.get('__mh_execute_header');
   const FINI = findSec('.fini_array') < 0
     ? st.newSec('.fini_array', SHT_PROGBITS, SHF_ALLOC, 8, 0)
     : findSec('.fini_array');
   if (secs[FINI].size !== 0) {
-    throw new OmniError('macho: 带析构函数的那一段（___GLOBAL_init_65535）还没写');
+    /* Mach-O 上没有 `.fini_array` 这回事：tcc **当场生成一段代码** ——
+     * 一个 `___GLOBAL_init_65535`，里头对每个析构函数调一次 `___cxa_atexit(f, 0,
+     * &__mh_execute_header)`，然后把这个函数自己挂到 `.init_array` 上，
+     * 再把 `.fini_array` 清空、摘掉 `SHF_ALLOC`。 */
+    const initSym = st.setSym({
+      name: '___GLOBAL_init_65535',
+      value: secs[TEXT].size,
+      size: 0,
+      info: STB_LOCAL * 16 + STT_FUNC,
+      other: 0,
+      shndx: TEXT,
+    });
+    const atExit = st.setSym({
+      name: '___cxa_atexit',
+      value: 0,
+      size: 0,
+      info: STB_GLOBAL * 16 + STT_FUNC,
+      other: 0,
+      shndx: SHN_UNDEF,
+    });
+    const t = secs[TEXT];
+    const push32 = (v) => {
+      t.data.push(v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >>> 24) & 0xff);
+      t.size += 4;
+    };
+    const pushB = (bs) => {
+      for (const b of bs) t.data.push(b);
+      t.size += bs.length;
+    };
+    const fr = relocSec.get(FINI);
+    const dtors = fr === undefined ? [] : (relas.get(fr) ?? []);
+    if (machine === EM_AARCH64) {
+      push32(0xa9bf7bfd);                          // stp x29, x30, [sp, #-16]!
+      push32(0x910003fd);                          // mov x29, sp
+      for (const rel of dtors) {
+        const base = t.size;
+        putReloc(TEXT, base, R_AARCH64_ADR_PREL_PG_HI21, rel.sym, 0);
+        push32(0x90000000);                        // adrp x0, dtor@page
+        putReloc(TEXT, base + 4, R_AARCH64_LDST8_ABS_LO12_NC, rel.sym, 0);
+        push32(0x91000000);                        // add x0, x0, dtor@pageoff
+        push32(0xd2800001);                        // mov x1, #0
+        putReloc(TEXT, base + 12, R_AARCH64_ADR_PREL_PG_HI21, mhSym, 0);
+        push32(0x90000002);                        // adrp x2, mh@page
+        putReloc(TEXT, base + 16, R_AARCH64_LDST8_ABS_LO12_NC, mhSym, 0);
+        push32(0x91000042);                        // add x2, x2, mh@pageoff
+        putReloc(TEXT, base + 20, R_AARCH64_CALL26, atExit, 0);
+        push32(0x94000000);                        // bl ___cxa_atexit
+      }
+      push32(0xa8c17bfd);                          // ldp x29, x30, [sp], #16
+      push32(0xd65f03c0);                          // ret
+    } else {
+      pushB([0x55, 0x48, 0x89, 0xe5]);             // push %rbp; mov %rsp,%rbp
+      for (const rel of dtors) {
+        const base = t.size;
+        pushB([
+          0x48, 0x8d, 0x05, 0, 0, 0, 0,            // lea dtor(%rip),%rax
+          0x48, 0x89, 0xc7,                        // mov %rax,%rdi
+          0x31, 0xc9,                              // xor %ecx,%ecx
+          0x89, 0xce,                              // mov %ecx,%esi
+          0x48, 0x8d, 0x15, 0, 0, 0, 0,            // lea mh(%rip),%rdx
+          0xe8, 0, 0, 0, 0,                        // call ___cxa_atexit
+        ]);
+        putReloc(TEXT, base + 3, R_X86_64_PC32, rel.sym, -4);
+        putReloc(TEXT, base + 17, R_X86_64_PC32, mhSym, -4);
+        putReloc(TEXT, base + 22, R_X86_64_PLT32, atExit, -4);
+      }
+      pushB([0x5d, 0xc3]);                         // pop %rbp; ret
+    }
+    if (fr !== undefined) {
+      relas.set(fr, []);
+      secs[fr].size = 0;
+    }
+    secs[FINI].data = [];
+    secs[FINI].size = 0;
+    secs[FINI].flags &= ~SHF_ALLOC;
+    /* `add_array(s1, ".init_array", init_sym)`：`shf_RELRO` 在非 PE 上就是 `SHF_ALLOC`。 */
+    const IA = findSec('.init_array') < 0
+      ? st.newSec('.init_array', SHT_PROGBITS, SHF_ALLOC, 8, 0)
+      : findSec('.init_array');
+    secs[IA].flags = SHF_ALLOC;
+    secs[IA].type = SHT_INIT_ARRAY;
+    secs[IA].al = 8;
+    putReloc(IA, secs[IA].size, conf.dataPtr, initSym, 0);
+    for (let k = 0; k < 8; k++) secs[IA].data.push(0);
+    secs[IA].size += 8;
   }
 
   // ---- resolve_common_syms
@@ -617,26 +823,6 @@ export function machoExe(inp) {
    * 这个循环的上界在 C 那边是**每轮重读**的 `s1->nb_sections` —— 这一趟里新造出来的
    * `.rela.got` / `.rela__stubs` 会被同一个循环接着扫到，于是每个 GOT 格子在那儿
    * 领到一条 bind 或 rebase。 */
-  const relocSec = new Map();
-  for (let i = 1; i < secs.length; i++) {
-    if (secs[i].type === SHT_RELA) relocSec.set(secs[i].relaFor, i);
-  }
-  const putReloc = (target, at, type, sym, add) => {
-    let ri = relocSec.get(target);
-    if (ri === undefined) {
-      ri = st.newSec(`.rela${secs[target].name}`, SHT_RELA, 0, 8, 24);
-      secs[ri].link = SYMTAB;
-      secs[ri].info = target;
-      secs[ri].relaFor = target;
-      relocSec.set(target, ri);
-      relas.set(ri, []);
-    }
-    relas.get(ri).push({
-      at, sym, type, add: BigInt(add === undefined ? 0 : add),
-    });
-    secs[ri].size = relas.get(ri).length * 24;
-    return ri;
-  };
   /** `s1->got->reloc->data_offset -= sizeof(rel)`：刚放进去那一条又拿掉。 */
   const dropGotReloc = () => {
     const ri = relocSec.get(GOT);
@@ -761,7 +947,10 @@ export function machoExe(inp) {
       if (iundef !== -1) throw new OmniError('macho: 有定义的外部符号排到未定义后头了');
     } else {
       if (iundef === -1) iundef = k;
-      if (bind !== STB_WEAK) throw new OmniError(`macho: 符号 '${sym.name}' 没有定义`);
+      /* 弱符号、或者某个 dylib 导出了这个名字 —— 那就不是「没定义」，是「来自 dylib」。 */
+      if (bind !== STB_WEAK && !loaded.dynsym.has(sym.name)) {
+        throw new OmniError(`macho: 符号 '${sym.name}' 没有定义`);
+      }
       sym.shndx = SHN_FROMDLL;
     }
   }
@@ -836,6 +1025,8 @@ export function machoExe(inp) {
   lcs.push({ kind: 'buildver' });
   lcs.push({ kind: 'sourcever' });
   lcs.push({ kind: 'main', obj: mainLc });
+  /* 装了哪些 dylib 就多几条 `LC_LOAD_DYLIB`，排在 `LC_MAIN` 后面。 */
+  for (const name of loaded.dylibNames) lcs.push({ kind: 'dylib', name });
 
   /* ---- calc_fixup_size：链式修正那一块有多大，摆放之前就得算出来 —— 它自己
    * 也在 `__LINKEDIT` 里，长度差一个字节后面的偏移全错。 */
@@ -1155,6 +1346,7 @@ export function machoExe(inp) {
     if (l.kind === 'symtab') return 24;
     if (l.kind === 'dysymtab') return 80;
     if (l.kind === 'dylinker') return align(12 + l.name.length + 1, 8);
+    if (l.kind === 'dylib') return align(24 + l.name.length + 1, 8);
     if (l.kind === 'buildver') return 24;
     if (l.kind === 'sourcever') return 16;
     return 24;                                      // main
@@ -1251,6 +1443,14 @@ export function machoExe(inp) {
       dv.setUint32(o, LC_SOURCE_VERSION, true);
       dv.setUint32(o + 4, sz, true);
       dv.setBigUint64(o + 8, 0n, true);
+    } else if (l.kind === 'dylib') {
+      dv.setUint32(o, LC_LOAD_DYLIB, true);
+      dv.setUint32(o + 4, sz, true);
+      dv.setUint32(o + 8, 24, true);                // name 从结构体末尾起
+      dv.setUint32(o + 12, 2, true);                // timestamp
+      dv.setUint32(o + 16, 1 << 16, true);          // current_version 1.0.0
+      dv.setUint32(o + 20, 1 << 16, true);          // compatibility_version 1.0.0
+      for (let k = 0; k < l.name.length; k++) buf[o + 24 + k] = l.name.charCodeAt(k);
     } else {
       dv.setUint32(o, LC_MAIN, true);
       dv.setUint32(o + 4, sz, true);
@@ -1268,6 +1468,10 @@ export function machoExe(inp) {
     }
   }
   return {
-    bytes: buf, ncmds: lcs.length, nsects: numsec, entryoff: mainLc.entryoff,
+    bytes: buf,
+    ncmds: lcs.length,
+    nsects: numsec,
+    entryoff: mainLc.entryoff,
+    members: loaded.members,
   };
 }
