@@ -29,6 +29,8 @@ const TARGETS = [
   /* 32 位那两个（第九刀第七十三片）：PE32 的可选头短 16 字节、多一格 `BaseOfData`，
    * IAT 一格 4 字节，`.reloc` 里的类型是 `HIGHLOW`。 */
   { name: 'i386-win32', tcc: 'i386-win32-tcc' },
+  /* arm-wince（第九刀第七十四片）：桩是 12 字节的两条 `ldr`，subsystem 一律 9。 */
+  { name: 'arm-wince', tcc: 'arm-wince-tcc' },
 ];
 
 const filters = process.argv.slice(2).filter((x) => !x.startsWith('-'));

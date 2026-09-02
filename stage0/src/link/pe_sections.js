@@ -94,7 +94,8 @@ function thunkSize(machine) {
 function directRelocType(machine) {
   if (machine === EM_AARCH64) return 257;                // R_AARCH64_ABS64
   if (machine === EM_X86_64) return 1;                   // R_X86_64_64
-  if (machine === EM_386 || machine === EM_ARM) return 1;// R_386_32 / R_ARM_ABS32
+  if (machine === EM_386) return 1;                      // R_386_32
+  if (machine === EM_ARM) return 2;                      // R_ARM_ABS32
   throw new OmniError(`pe: 不认识的架构 0x${machine.toString(16)}`);
 }
 
@@ -329,8 +330,10 @@ export function peSections(inp) {
   /* `.reloc` 那一节：DLL 一定有，可执行文件只在带 `DYNAMIC_BASE`（0x40）时才有 ——
    * arm64 默认就带，所以它默认有；x86_64 要 `-Wl,--dynamicbase` 才有。 */
   const hasReloc = dll || (dllChars & 0x40) !== 0;
-  /* `pe_set_options`：DLL 与 GUI 是 2、别的是 3，`-Wl,-subsystem=` 一律盖过。 */
-  const subsystem = inp.subsystem ?? (dll || inp.gui === true ? 2 : 3);
+  /* `pe_set_options`：DLL 与 GUI 是 2、别的是 3，`-Wl,-subsystem=` 一律盖过。
+   * arm（wince）那一支整个 `#if` 掉了 —— 一律 9，连 DLL 也是。 */
+  const subsystem = inp.subsystem
+    ?? (machine === EM_ARM ? 9 : (dll || inp.gui === true ? 2 : 3));
   /* subsystem 1（native）那两个对齐都是 0x20，别的是 0x1000 / 0x200。 */
   const sectionAlign = inp.sectionAlign ?? (subsystem === 1 ? 0x20 : SECTION_ALIGN);
   const fileAlign = inp.fileAlign ?? (subsystem === 1 ? 0x20 : FILE_ALIGN);

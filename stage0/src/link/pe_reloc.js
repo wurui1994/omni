@@ -14,6 +14,7 @@
 import { OmniError } from '../source/diag.js';
 
 const EM_386 = 3;
+const EM_ARM = 40;
 const EM_X86_64 = 62;
 const EM_AARCH64 = 183;
 
@@ -30,6 +31,24 @@ const R_386_GOTOFF = 9;
 const R_386_GOTPC = 10;
 const R_386_GOT32X = 43;
 const R_386_TLS_LE = 17;
+
+/* arm（`arm-link.c`）。`REL_TYPE_DIRECT` 与 `R_XXX_THUNKFIX` 都是 `R_ARM_ABS32`。 */
+const R_ARM_NONE = 0;
+const R_ARM_PC24 = 1;
+const R_ARM_ABS32 = 2;
+const R_ARM_REL32 = 3;
+const R_ARM_GLOB_DAT = 21;
+const R_ARM_JUMP_SLOT = 22;
+const R_ARM_RELATIVE = 23;
+const R_ARM_GOTOFF = 24;
+const R_ARM_GOTPC = 25;
+const R_ARM_GOT32 = 26;
+const R_ARM_PLT32 = 27;
+const R_ARM_CALL = 28;
+const R_ARM_JUMP24 = 29;
+const R_ARM_TARGET1 = 38;
+const R_ARM_PREL31 = 42;
+const R_ARM_TLS_LE32 = 108;
 
 /* x86_64 */
 const R_X86_64_64 = 1;
@@ -202,6 +221,51 @@ export function relocateOne(machine, type, b, at, addr, val, imagebase, weakUnde
       case R_AARCH64_TLSLE_ADD_TPREL_LO12:
         return put32(0xffc003ff, ((tprel() & 0xfff) << 10) >>> 0);
       default: throw new OmniError(`reloc: arm64 还不会 ${type} 号`);
+    }
+  }
+  if (machine === EM_ARM) {
+    switch (type) {
+      case R_ARM_NONE: return undefined;
+      /* `bl` / `b` 那一族：26 位（存的是右移 2 位的字数），原地那 24 位是加数。
+       * `val & 1` 是 thumb，那时 `bl` 换成 `blx`（0xfa000000）并把第 1 位挪到 24 位上。 */
+      case R_ARM_PC24:
+      case R_ARM_PLT32:
+      case R_ARM_CALL:
+      case R_ARM_JUMP24: {
+        const code = insn();
+        let x = (code & 0x00ffffff) << 2;
+        if ((x & 0x2000000) !== 0) x -= 0x4000000;
+        x += val - addr;
+        if (x >= 0x2000000 || x < -0x2000000) {
+          throw new OmniError(`reloc: arm 的 ${type} 号跳不到 0x${(val >>> 0).toString(16)}`);
+        }
+        const thumb = (val & 1) !== 0;
+        const h = x & 2;
+        const base = thumb ? 0xfa000000 : (code & 0xff000000) >>> 0;
+        const imm = ((x >> 2) & 0xffffff) | (thumb ? h << 24 : 0);
+        return dv.setUint32(at, (base | imm) >>> 0, true);
+      }
+      case R_ARM_ABS32:
+      case R_ARM_TARGET1: return add32(val);
+      case R_ARM_REL32: return add32(val - addr);
+      case R_ARM_RELATIVE: return add32(val - imagebase);
+      case R_ARM_GLOB_DAT:
+      case R_ARM_JUMP_SLOT: return dv.setUint32(at, val >>> 0, true);
+      case R_ARM_GOTPC: return add32(slot() - addr);
+      case R_ARM_GOTOFF: return add32(val - slot());
+      case R_ARM_GOT32: return add32(slot());
+      /* `.ARM.exidx` 里那种「31 位的自相对偏移」，最高位原样留着。 */
+      case R_ARM_PREL31: {
+        const old = insn();
+        const x = (((old & 0x7fffffff) << 1) >> 1) + (val - addr);
+        return dv.setUint32(at, ((old & 0x80000000) | (x & 0x7fffffff)) >>> 0, true);
+      }
+      /* arm 的线程局部**多 8 字节**（`x = val - tls_start + 8`）—— 与 x86 那两个不同。 */
+      case R_ARM_TLS_LE32: {
+        const t = tlsSeg();
+        return add32((t.end !== 0 ? val - t.start : val - t.symSecEnd) + 8);
+      }
+      default: throw new OmniError(`reloc: arm 还不会 ${type} 号`);
     }
   }
   throw new OmniError(`reloc: 不认识的架构 0x${machine.toString(16)}`);

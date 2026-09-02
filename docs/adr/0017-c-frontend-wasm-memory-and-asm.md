@@ -517,6 +517,13 @@ Mach-O 的 dylib 不叫、PE 的 dll **照叫**（`pe_add_runtime` 在
 最不显眼的一格是 `PE_STDSYM` 是**按目标**定的宏，不是按 `leading_underscore`：i386 的
 DLL 入口是 `___dllstart@12`，削成 `__dllstart@12`，找错了名字连 `dllcrt1.o` 都拉不出来。
 十一道 PE 门各长出第三个目标，全 0 条不同）。
+**arm-wince**（第七十四片：桩是 12 字节的两条 `ldr`，subsystem 一律 9（连 DLL 也是），
+`R_ARM_TLS_LE32` 比 x86 那两个多加 8。最贵的一格是 `REL_TYPE_DIRECT` —— 原先把 i386 与
+arm 合在一起回 1，可 `R_ARM_ABS32` 是 2，`.reloc` 于是收了一批 `R_ARM_PC24` 的位置，
+条数与偏移全不对。另外 arm 上谁都不引用 `__tls_index`，所以 tcc 的 COFF 符号表末尾多出
+一条 —— `set_elf_sym` 的「有就改、没有就接在末尾」这一格只有 arm 撞得着。
+`pe-tcc` 于是走到 **四个目标 × 两种编法、八份 tinycc 自己的 `.exe` 逐字节相同**：
+tcc 在 Windows 上支持的目标，链接器这一层全对齐了）。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -11252,6 +11259,49 @@ i386 那边这一片新学了三件事：
 那份 `.def` 也与 tcc 逐字节相同。
 
 <!-- 第九刀第七十三片-END -->
+
+## 落地：第九刀第七十四片
+
+第四个 PE 目标：**arm-wince**。尺子是 `arm-wince-tcc a.o -o a.exe` 与 `-shared`。
+位宽那一层第七十三片已经铺好，剩下的都是 arm 自己的几格：
+
+- **桩是 12 字节**：`ldr ip, [pc]`（0xe59fc000，`pc+8` 正好指着后面那一格）、
+  `ldr pc, [ip]`（0xe59cf000），再跟一格 IAT 的绝对地址。`R_XXX_THUNKFIX` 是
+  `R_ARM_ABS32`，落在 +8。
+- **`REL_TYPE_DIRECT` 是 2**，不是 1。这一格原先写错了 —— `directRelocType` 把 i386 与
+  arm 合在一起回 1，可 `R_386_32` 是 1、`R_ARM_ABS32` 是 2。错的后果不是「少一条」而是
+  「换了一批」：`.reloc` 里收进来的是一堆 `R_ARM_PC24`（也是 1 号）的位置，条数与偏移
+  全不对。DLL 那一路第一次跑，六条 `HIGHLOW` 变成三条、偏移从 0x4f0…0x5b4 变成
+  0x5fc…0x620。
+- **subsystem 一律 9**：`pe_set_options` 里 arm 那一支是整段 `#if defined TCC_TARGET_ARM`
+  —— 连 DLL 都不走「DLL/GUI 是 2」那条路。`pe_setsubsy` 那张表在 arm 上也只有
+  `wince` 一档，所以 `-Wl,-subsystem=gui` 这类开关 tcc 自己就报错。
+- **`R_ARM_TLS_LE32`（108）多加 8**：`x = val - tls_start + 8`（`tls_end` 是 0 时退回
+  符号所在那一节的末尾，同样 +8）。x86 那两个目标既不加也是减 `tls_end`，这是三份
+  算式里唯一带常数的一份。
+- **`R_ARM_PC24` 那一族**（`PC24`/`PLT32`/`CALL`/`JUMP24`）：原地那 24 位是右移过 2 位
+  的加数，要先左移、按 26 位符号扩展，加完再移回去；`val & 1` 是 thumb，那时把
+  `bl` 换成 `blx`（0xfa000000）并把第 1 位挪到 24 位上。
+
+还有一条不在 arm 名下、可只有 arm 撞得着：**`__tls_index` 这个符号**。
+`pe_build_tls` 用 `set_elf_sym` 写它 —— 符号表里本来有就原地改，没有就接在末尾。
+i386 的代码生成会引用它，所以那一路它早就在表里（位置也就对得上）；arm 用
+`TLS_LE32` 直接算偏移，谁都不引用，于是 tcc 的 COFF 符号表末尾多出一条而我们没有
+（`-g` 出来的映像少 30 字节，`NumberOfSymbols` 63 对 64）。`buildCoffSyms` 于是在有
+TLS 且表里还没有的时候补上这一条。
+
+十二道 PE 门都长到**四个目标**：`pe-exe` `344 条`、`pe-dll` `359 条`、
+`pe-secs`/`pe-content`/`pe-imports`/`pe-load`/`pe-roundtrip` 各 `320 条`、
+`pe-flags` `270 条`（arm 上那三档 subsystem 归到「tcc 自己就链不上」）、
+`pe-rsrc` `144 条`、`pe-debug` `68 条`、`pe-def` `64 条`、`pe-dll-link` `8 条`，
+全 0 条不同。命令行上 `omni pe-link --target arm-wince` 的 `.exe`、`.dll` 与 `.def`
+也都对上。
+
+最能说明问题的是 `pe-tcc`：**四个目标 × 两种编法（`ONE_SOURCE` 与拆成 12 个 `.o`）
+八份 tinycc 自己的 `.exe` 全部逐字节相同** —— i386 那份 323072 字节、arm 那份
+415232 字节。tcc 在 Windows 上支持的四个目标，链接器这一层至此全部对齐。
+
+<!-- 第九刀第七十四片-END -->
 
 
 

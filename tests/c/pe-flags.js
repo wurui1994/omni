@@ -34,6 +34,9 @@ const TARGETS = [
   { name: 'x86_64-win32', tcc: 'x86_64-win32-tcc' },
   { name: 'arm64-win32', tcc: 'arm64-win32-tcc' },
   { name: 'i386-win32', tcc: 'i386-win32-tcc' },
+  /* arm-wince 的 `pe_setsubsy` 只认 `wince` —— `gui`/`native`/`efiapp` 那三档
+   * tcc 自己就报错，落到「链不上」那一栏里。 */
+  { name: 'arm-wince', tcc: 'arm-wince-tcc' },
 ];
 
 /** arm64-win32 的 `DllCharacteristics` 默认值（`libtcc.c`）。 */

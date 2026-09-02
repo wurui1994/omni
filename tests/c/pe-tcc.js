@@ -25,6 +25,8 @@ const CROSS = join(root, '.omni-cache', 'tcc-cross');
 const TARGETS = [
   { name: 'x86_64-win32', tcc: 'x86_64-win32-tcc', def: 'TCC_TARGET_X86_64' },
   { name: 'arm64-win32', tcc: 'arm64-win32-tcc', def: 'TCC_TARGET_ARM64' },
+  { name: 'i386-win32', tcc: 'i386-win32-tcc', def: 'TCC_TARGET_I386' },
+  { name: 'arm-wince', tcc: 'arm-wince-tcc', def: 'TCC_TARGET_ARM' },
 ];
 
 const filters = process.argv.slice(2).filter((x) => !x.startsWith('-'));
@@ -49,6 +51,8 @@ const PARTS = ['tcc', 'libtcc', 'tccpp', 'tccgen', 'tccdbg', 'tccelf', 'tccasm',
 const GEN = {
   'x86_64-win32': ['x86_64-gen', 'x86_64-link', 'i386-asm'],
   'arm64-win32': ['arm64-gen', 'arm64-link', 'arm64-asm'],
+  'i386-win32': ['i386-gen', 'i386-link', 'i386-asm'],
+  'arm-wince': ['arm-gen', 'arm-link', 'arm-asm'],
 };
 
 function firstDiff(a, b) {

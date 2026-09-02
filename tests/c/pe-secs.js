@@ -33,6 +33,7 @@ const TARGETS = [
    * 于是多一节 `.reloc` —— 这两件事 `peSections` 自己按目标定，不用告诉它。 */
   { name: 'arm64-win32', tcc: 'arm64-win32-tcc' },
   { name: 'i386-win32', tcc: 'i386-win32-tcc' },
+  { name: 'arm-wince', tcc: 'arm-wince-tcc' },
 ];
 
 const filters = process.argv.slice(2).filter((x) => !x.startsWith('-'));

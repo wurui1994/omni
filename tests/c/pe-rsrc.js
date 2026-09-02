@@ -38,6 +38,7 @@ const TARGETS = [
   { name: 'x86_64-win32', tcc: 'x86_64-win32-tcc', machine: 0x8664 },
   { name: 'arm64-win32', tcc: 'arm64-win32-tcc', machine: 0xaa64 },
   { name: 'i386-win32', tcc: 'i386-win32-tcc', machine: 0x14c, rsrcRel: 7 },
+  { name: 'arm-wince', tcc: 'arm-wince-tcc', machine: 0x1c0, rsrcRel: 7 },
 ];
 
 /** `RSRC_RELTYPE`：x86_64 与 arm64 都是 3（`IMAGE_REL_*_ADDR32NB`），i386/arm 是 7。 */

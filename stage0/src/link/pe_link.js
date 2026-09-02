@@ -53,6 +53,15 @@ function thunkCode(machine) {
      * 里面。原地留 0。 */
     return new Uint8Array([0xff, 0x25, 0, 0, 0, 0, 0, 0]);
   }
+  if (machine === EM_ARM) {
+    /* 12 字节：`ldr ip, [pc]`（pc+8 正好是后面那 4 字节）、`ldr pc, [ip]`，
+     * 再跟一格 IAT 的**绝对地址**（`R_ARM_ABS32`，也就是 `R_XXX_THUNKFIX`）。 */
+    const b = new Uint8Array(12);
+    const dv = new DataView(b.buffer);
+    dv.setUint32(0, 0xe59fc000, true);            // ldr ip, [pc]
+    dv.setUint32(4, 0xe59cf000, true);            // ldr pc, [ip]
+    return b;
+  }
   if (machine === EM_AARCH64) {
     const b = new Uint8Array(24);
     const dv = new DataView(b.buffer);
@@ -117,11 +126,14 @@ export function peImage(inp) {
     const at = r.thunkAt + i * r.thunkSize;
     r.text.data.set(code, at);
     /* 桩里指向 IAT 那一格的那条重定位，就地落笔。x86_64 是 `R_X86_64_PC32`、
-     * i386 是 `R_386_32`（绝对地址）、arm64 是 `R_AARCH64_ABS64`。 */
+     * i386 是 `R_386_32`（绝对地址）、arm 是 `R_ARM_ABS32`（在 +8）、
+     * arm64 是 `R_AARCH64_ABS64`（在 +16）。 */
     if (machine === EM_X86_64) {
       relocateOne(machine, 2, r.text.data, at + 2, r.text.vaddr + at + 2, iatAddr(key), imagebase);
     } else if (machine === EM_386) {
       relocateOne(machine, 1, r.text.data, at + 2, r.text.vaddr + at + 2, iatAddr(key), imagebase);
+    } else if (machine === EM_ARM) {
+      relocateOne(machine, 2, r.text.data, at + 8, r.text.vaddr + at + 8, iatAddr(key), imagebase);
     } else {
       relocateOne(machine, 257, r.text.data, at + 16, r.text.vaddr + at + 16, iatAddr(key), imagebase);
     }
@@ -170,7 +182,7 @@ export function peImage(inp) {
    * 末尾那一句是 `s1->tls_end = s1->tls_start` —— 两头是同一个地址，所以 x86_64 的
    * `TPOFF32` 与 arm64 的 `TLSLE_*` 算出来都是「相对 `.tls` 那一段的起点」。
    * arm64 那两号在 Windows 上**不加** `tcbhead_t` 那 16 个字节（`#if TCC_TARGET_PE`）。 */
-  const TLS_RELOC = new Set([17, 23, 549, 550]);
+  const TLS_RELOC = new Set([17, 23, 108, 549, 550]);
   const tlsSeg = r.tls === null ? undefined
     : { start: r.tls.start, end: r.tls.start, symSecEnd: 0, tcb: 0 };
   /* `relocate_section` 里那个 dwarf 的例外：调试节里 `R_DATA_32DW`（x86_64 是
@@ -267,6 +279,13 @@ function buildCoffSyms(r, putStr) {
       value: p === null ? sym.value : p.off,
       scnum: p === null ? (sym.shndx >= SHN_LORESERVE ? sym.shndx : 0) : (p.sec.peIndex ?? 0),
     });
+  }
+  /* `pe_build_tls` 那句 `set_elf_sym(…, "__tls_index")`：符号表里本来有就原地改，
+   * 没有就**接在末尾**。i386 上代码自己会引用它，arm 上不引用（`TLS_LE32` 直接算），
+   * 于是只有 arm 这一路会多出这一条。 */
+  if (r.tls !== null && !list.some((e) => e.name === '__tls_index')) {
+    const l = r.linker.get('__tls_index');
+    list.push({ name: '__tls_index', value: l.off, scnum: l.sec.peIndex ?? 0 });
   }
   const bytes = new Uint8Array(list.length * SYMENT_SIZE);
   const dv = new DataView(bytes.buffer);
