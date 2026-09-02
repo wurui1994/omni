@@ -66,6 +66,7 @@ const EM_386 = 3;
 const EM_ARM = 40;
 const EM_X86_64 = 62;
 const EM_AARCH64 = 183;
+const EM_RISCV = 243;
 
 /* `.eh_frame` 那一条 CIE 用到的几个 DWARF 常量（`dwarf.h` / `tccdbg.c:431`）。 */
 const DW_CFA_nop = 0x00;
@@ -140,18 +141,22 @@ function mergeable(type, name, unwind, debug) {
 function ehFrameCie(machine) {
   /* code_alignment_factor / data_alignment_factor / 返回地址列 / CFA 寄存器与偏移；
    * x86 那两个还多记一条「返回地址在 CFA - 一格」（`DW_CFA_offset + 列号`），
-   * arm 那两个没有。`data_alignment_factor` 是 sleb：-8 是 0x78，-4 是 0x7c。 */
+   * arm 那两个没有。`data_alignment_factor` 是 sleb：-8 是 0x78，-4 是 0x7c。
+   *
+   * riscv64 是唯一把**版本写成 3** 的（`tccdbg.c:864` 那句
+   * `data[eh_start + 8] = 3`），返回地址列是 1（ra），CFA 寄存器是 2（sp）。 */
   const K = new Map([
     [EM_386, { code: 1, data: 0x7c, ra: 8, cfaReg: 4, cfaOff: 4, ret: [DW_CFA_offset + 8, 1] }],
     [EM_X86_64, { code: 1, data: 0x78, ra: 16, cfaReg: 7, cfaOff: 8, ret: [DW_CFA_offset + 16, 1] }],
     [EM_AARCH64, { code: 4, data: 0x78, ra: 30, cfaReg: 31, cfaOff: 0, ret: [] }],
+    [EM_RISCV, { code: 1, data: 0x7c, ra: 1, cfaReg: 2, cfaOff: 0, ret: [], ver: 3 }],
   ]);
   const k = K.get(machine);
   if (k === undefined) throw new OmniError(`elf: 不知道 0x${machine.toString(16)} 的 .eh_frame CIE`);
   const b = [
     0, 0, 0, 0,                 // 长度，末尾回填
     0, 0, 0, 0,                 // CIE ID
-    1,                          // 版本
+    k.ver ?? 1,                 // 版本
     0x7a, 0x52, 0,              // 增补串 "zR"
     k.code,                     // uleb code_alignment_factor
     k.data,                     // sleb data_alignment_factor

@@ -35,6 +35,8 @@ const TARGETS = [
    * `Elf32_Rel` 没有加数、`.gnu.hash` 的 bloom 一格四字节。 */
   { name: 'i386-linux', tcc: 'i386-tcc' },
   { name: 'arm-linux', tcc: 'arm-tcc' },
+  /* riscv64（第九刀第七十六片）。 */
+  { name: 'riscv64-linux', tcc: 'riscv64-tcc' },
 ];
 
 const filters = process.argv.slice(2).filter((x) => !x.startsWith('-'));

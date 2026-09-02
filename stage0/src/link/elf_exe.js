@@ -52,6 +52,7 @@ const ET_DYN = 3;
 const EM_X86_64 = 62;
 const EM_386 = 3;
 const EM_ARM = 40;
+const EM_RISCV = 243;
 /** `SHT_LOPROC + 3`：arm 的 `.ARM.attributes`（`elf.h:2339`）。 */
 const SHT_ARM_ATTRIBUTES = 0x70000003;
 /**
@@ -200,6 +201,9 @@ const RELOC_KIND = new Map([
   }],
   [EM_386, { relative: 8, globDat: 6, jmpSlot: 7, copy: 5 }],
   [EM_ARM, { relative: 23, globDat: 21, jmpSlot: 22, copy: 20 }],
+  /* riscv64 的 `R_GLOB_DAT` 就是 `R_RISCV_64` —— 它没有单独的一号
+   * （`riscv64-link.c` 开头那一串 `#define`）。 */
+  [EM_RISCV, { relative: 3, globDat: 2, jmpSlot: 5, copy: 4 }],
 ]);
 
 /* `prepare_dynamic_rel` 认的那几号：绝对地址（要装载时改）与 PC 相对（能顶掉的才要）。 */
@@ -208,14 +212,16 @@ const ABS_RELOC = new Map([
   [EM_AARCH64, new Set([257, 258])],          // R_AARCH64_ABS64 / ABS32
   [EM_386, new Set([1])],                     // R_386_32
   [EM_ARM, new Set([2])],                     // R_ARM_ABS32
+  [EM_RISCV, new Set([1, 2])],                // R_RISCV_32 / _64
 ]);
 /** 这几号里「64 位那一号」要写回加数，32 位那号只写 RELATIVE。 */
-const ABS64_RELOC = new Map([[EM_X86_64, 1], [EM_AARCH64, 257]]);
+const ABS64_RELOC = new Map([[EM_X86_64, 1], [EM_AARCH64, 257], [EM_RISCV, 2]]);
 const PCREL_RELOC = new Map([
   [EM_X86_64, new Set([2])],                  // R_X86_64_PC32
   [EM_AARCH64, new Set([261])],               // R_AARCH64_PREL32
   [EM_386, new Set([2])],                     // R_386_PC32
   [EM_ARM, new Set([3])],                     // R_ARM_REL32
+  [EM_RISCV, new Set([57])],                  // R_RISCV_32_PCREL
 ]);
 
 /** `code_reloc`：1 是「跳转/调用」，0 是数据（`*-link.c` 开头那张表）。 */
@@ -224,6 +230,7 @@ const CODE_RELOC = new Map([
   [EM_AARCH64, new Set([282, 283, 1026, 280, 279])],
   [EM_386, new Set([2, 4, 7, 21])],           // PC32 / PLT32 / JMP_SLOT / PC16
   [EM_ARM, new Set([1, 28, 29, 27, 10, 30, 42, 40, 22])],
+  [EM_RISCV, new Set([16, 17, 18, 19])],      // BRANCH / JAL / CALL / CALL_PLT
 ]);
 
 /** `gotplt_entry_type`：只列 NO 与 ALWAYS/BUILD_GOT_ONLY，剩下的算 AUTO。 */
@@ -252,6 +259,12 @@ const GOTPLT = new Map([
     always: new Set([26, 96]),                // GOT32 / GOT_PREL
     buildOnly: new Set([25, 24]),             // GOTPC / GOTOFF
     auto: new Set([1, 28, 29, 27, 10, 30, 44, 43, 48, 47, 42, 2, 3, 40, 38, 46, 45]),
+  }],
+  [EM_RISCV, {
+    no: new Set([43, 51, 44, 45, 5, 53, 54, 55, 52, 34, 37, 38, 60, 61, 29, 30]),
+    always: new Set([20]),                    // GOT_HI20
+    buildOnly: new Set(),
+    auto: new Set([16, 18, 23, 24, 25, 57, 35, 36, 39, 40, 1, 2, 17, 19]),
   }],
 ]);
 
@@ -282,6 +295,14 @@ function targetConf(machine) {
   }
   if (machine === EM_386) {
     return { start: 0x08048000, page: 0x1000, interp: '/lib/ld-linux.so.2', c32: true };
+  }
+  if (machine === EM_RISCV) {
+    return {
+      start: 0x00010000,
+      page: 0x1000,
+      interp: '/lib/ld-linux-riscv64-lp64d.so.1',
+      c32: false,
+    };
   }
   if (machine === EM_ARM) {
     /* `TCC_ARM_EABI` 且硬浮点（默认就是）时是 `/lib/ld-linux-armhf.so.3`
@@ -563,6 +584,9 @@ export function elfExeImage(inp) {
     setLinkerSym('_etext', TEXT, false);
     setLinkerSym('_edata', DATA, false);
     setLinkerSym('_end', BSS, false);
+    /* riscv64 上还多一条 `__global_pointer$`（`.data + 0x800`）—— gp 寄存器指着它，
+     * `tcc_add_linker_symbols` 里那个 `#ifdef TCC_TARGET_RISCV64`。 */
+    if (machine === EM_RISCV) defineSym('__global_pointer$', DATA, 0x800);
     for (const nm of ['.preinit_array', '.init_array', '.fini_array']) {
       let i = findSec(nm);
       let end;
@@ -1505,6 +1529,33 @@ export function elfExeImage(inp) {
       for (const r of relas.get(RELAPLT) ?? []) {
         dvgot.setUint32(r.at, pltAddr >>> 0, true);
       }
+    } else if (machine === EM_RISCV) {
+      /* riscv64：头一格 32 字节是八条指令，靠 `auipc` + `ld` 从 GOT 的第三格取解析
+       * 例程；每一格 16 字节里原先记着 got 的偏移（64 位小端），这一趟换成
+       * `auipc t3` + `ld t3` + `jalr t1, t3` + `nop`。 */
+      const hi = (v) => ((v + 0x800) >> 12) & 0xfffff;
+      const lo = (v) => (v & 0xfff) << 20;
+      const d = gotAddr - pltAddr;
+      dvp.setUint32(0, (0x397 | (hi(d) << 12)) >>> 0, true);      // auipc t2, %hi(got)
+      dvp.setUint32(4, 0x41c30333, true);                         // sub t1, t1, t3
+      dvp.setUint32(8, (0x0003be03 | lo(d)) >>> 0, true);         // ld t3, %lo(got)(t2)
+      dvp.setUint32(12, 0xfd430313, true);                        // addi t1, t1, -(32+12)
+      dvp.setUint32(16, (0x00038293 | lo(d)) >>> 0, true);        // addi t0, t2, %lo(got)
+      dvp.setUint32(20, 0x00135313, true);                        // srli t1, t1, 1
+      dvp.setUint32(24, 0x0082b283, true);                        // ld t0, 8(t0)
+      dvp.setUint32(28, 0x000e0067, true);                        // jr t3
+      for (let at = 32; at < p.length; at += 16) {
+        const pc = pltAddr + at;
+        const target = gotAddr + Number(dvp.getBigUint64(at, true));
+        const off = target - pc;
+        dvp.setUint32(at, (0xe17 | (hi(off) << 12)) >>> 0, true); // auipc t3, %hi(got 那一格)
+        dvp.setUint32(at + 4, (0x000e3e03 | lo(off)) >>> 0, true);
+        dvp.setUint32(at + 8, 0x000e0367, true);                  // jalr t1, t3
+        dvp.setUint32(at + 12, 0x00000013, true);                 // nop
+      }
+      for (const r of relas.get(RELAPLT) ?? []) {
+        dvgot.setBigUint64(r.at, BigInt(pltAddr), true);
+      }
     } else {
       const page = (v) => Math.floor(v / 4096);
       const adrp = (off) => ((0x90000000 | 16 | ((off & 0x1ffffc) << 3)
@@ -1544,6 +1595,9 @@ export function elfExeImage(inp) {
   }
 
   const abs64 = ABS64_RELOC.get(machine);
+  /* riscv 的 `HI20`/`LO12` 是**成对**的：`LO12` 那条要回头找同一处 `HI20` 记下的值
+   * （`riscv64_record_pcrel_hi` / `_lookup_pcrel_hi` 那个数组）。 */
+  const pcrelHi = new Map();
   for (const [si, list] of relas) {
     const tgt = secs[secs[si].relaFor];
     if (tgt === undefined || tgt.bytes.length === 0) continue;
@@ -1589,7 +1643,7 @@ export function elfExeImage(inp) {
       const g = gotOff.get(r.sym);
       relocateOne(machine, r.type, tgt.bytes, r.at, tgt.addr + r.at,
         val, 0, false,
-        g === undefined ? undefined : secs[GOT].addr + g, tlsSeg);
+        g === undefined ? undefined : secs[GOT].addr + g, tlsSeg, pcrelHi);
     }
     if (qrel !== null) {
       relas.set(si, qrel);
@@ -1874,7 +1928,7 @@ export function elfExe(inp) {
     dv.setBigUint64(24, BigInt(r.entry), true);
     dv.setBigUint64(32, BigInt(phnum > 0 ? ehSize : 0), true);
     dv.setBigUint64(40, BigInt(shoff), true);
-    dv.setUint32(48, 0, true);
+    dv.setUint32(48, r.eflags ?? 0, true);
     dv.setUint16(52, ehSize, true);
     dv.setUint16(54, phnum > 0 ? phSize : 0, true);
     dv.setUint16(56, phnum, true);

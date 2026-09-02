@@ -36,6 +36,8 @@ const TARGETS = [
   { name: 'arm-linux', tcc: 'arm-tcc', win32: false, unwind: false },
   { name: 'i386-win32', tcc: 'i386-win32-tcc', win32: true, unwind: false },
   { name: 'arm-wince', tcc: 'arm-wince-tcc', win32: true, unwind: false },
+  /* riscv64（第九刀第七十六片）：ELF64，`.eh_frame` 照造，多一节 `.riscv.attributes`。 */
+  { name: 'riscv64-linux', tcc: 'riscv64-tcc', win32: false, unwind: true },
 ];
 
 const filters = process.argv.slice(2).filter((x) => !x.startsWith('-'));

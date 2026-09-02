@@ -50,6 +50,23 @@ const R_ARM_TARGET1 = 38;
 const R_ARM_PREL31 = 42;
 const R_ARM_TLS_LE32 = 108;
 
+/* riscv64（`riscv64-link.c`）。`R_GLOB_DAT` 与 `R_DATA_PTR` 都是 `R_RISCV_64`。 */
+const EM_RISCV = 243;
+const R_RISCV_NONE = 0; const R_RISCV_32 = 1; const R_RISCV_64 = 2;
+const R_RISCV_RELATIVE = 3; const R_RISCV_COPY = 4; const R_RISCV_JUMP_SLOT = 5;
+const R_RISCV_BRANCH = 16; const R_RISCV_JAL = 17; const R_RISCV_CALL = 18;
+const R_RISCV_CALL_PLT = 19; const R_RISCV_GOT_HI20 = 20;
+const R_RISCV_PCREL_HI20 = 23; const R_RISCV_PCREL_LO12_I = 24;
+const R_RISCV_PCREL_LO12_S = 25;
+const R_RISCV_TPREL_HI20 = 29; const R_RISCV_TPREL_LO12_I = 30;
+const R_RISCV_ADD16 = 34; const R_RISCV_ADD32 = 35; const R_RISCV_ADD64 = 36;
+const R_RISCV_SUB8 = 37; const R_RISCV_SUB16 = 38; const R_RISCV_SUB32 = 39;
+const R_RISCV_SUB64 = 40; const R_RISCV_ALIGN = 43;
+const R_RISCV_RVC_BRANCH = 44; const R_RISCV_RVC_JUMP = 45; const R_RISCV_RELAX = 51;
+const R_RISCV_SUB6 = 52; const R_RISCV_SET6 = 53; const R_RISCV_SET8 = 54;
+const R_RISCV_SET16 = 55; const R_RISCV_32_PCREL = 57;
+const R_RISCV_SET_ULEB128 = 60; const R_RISCV_SUB_ULEB128 = 61;
+
 /* x86_64 */
 const R_X86_64_64 = 1;
 const R_X86_64_PC32 = 2;
@@ -104,7 +121,8 @@ const R_AARCH64_RELATIVE = 1027;
  *        —— 符号所在那一节的末尾。`tcb` 是 tp 指着的那个头有多大，arm64 要加上它：
  *        glibc 的 `tcbhead_t` 是 16 字节，Windows 上 tp 直接指着数据，是 0
  */
-export function relocateOne(machine, type, b, at, addr, val, imagebase, weakUndef, gotSlot, tls) {
+export function relocateOne(machine, type, b, at, addr, val, imagebase, weakUndef, gotSlot, tls,
+  pcrelHi) {
   const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
   const add32 = (v) => dv.setUint32(at, (dv.getUint32(at, true) + v) >>> 0, true);
   const add64 = (v) => dv.setBigUint64(at, dv.getBigUint64(at, true) + BigInt(v), true);
@@ -266,6 +284,98 @@ export function relocateOne(machine, type, b, at, addr, val, imagebase, weakUnde
         return add32((t.end !== 0 ? val - t.start : val - t.symSecEnd) + 8);
       }
       default: throw new OmniError(`reloc: arm 还不会 ${type} 号`);
+    }
+  }
+  if (machine === EM_RISCV) {
+    const hiMap = () => {
+      if (pcrelHi === undefined) throw new OmniError('reloc: riscv 的 hi/lo 配对要一张表');
+      return pcrelHi;
+    };
+    /* `riscv64_lookup_pcrel_hi`：`LO12` 那条的**符号值就是 `HI20` 那条的地址**，
+     * 拿它去查刚才记下的 val（`unsupported hi/lo pcrel reloc scheme` 就是查不着）。 */
+    const lookupHi = () => {
+      const v = hiMap().get(val);
+      if (v === undefined) throw new OmniError('reloc: riscv 的 hi/lo 配对查不着');
+      return v - val;
+    };
+    const set16 = (v) => dv.setUint16(at, v & 0xffff, true);
+    const ins16 = () => dv.getUint16(at, true);
+    switch (type) {
+      case R_RISCV_NONE:
+      case R_RISCV_ALIGN:
+      case R_RISCV_RELAX:
+      case R_RISCV_COPY:
+      case R_RISCV_RELATIVE:
+      case R_RISCV_SET_ULEB128:
+      case R_RISCV_SUB_ULEB128: return undefined;
+      /* 条件跳转：12 位（存的是右移 1 位的字节数），位散在四处。 */
+      case R_RISCV_BRANCH: {
+        const off = (val - addr) >> 1;
+        return put32(~0xfe000f80, (((off & 0x800) << 20) | ((off & 0x3f0) << 21)
+          | ((off & 0x00f) << 8) | ((off & 0x400) >> 3)) >>> 0);
+      }
+      case R_RISCV_JAL: {
+        const off = val - addr;
+        return put32(0xfff, ((((off >> 12) & 0xff) << 12) | (((off >> 11) & 1) << 20)
+          | (((off >> 1) & 0x3ff) << 21) | (((off >> 20) & 1) << 31)) >>> 0);
+      }
+      /* `auipc` + `jalr` 一对：高 20 位带 0x800 的进位补偿，低 12 位落在第二条上。 */
+      case R_RISCV_CALL:
+      case R_RISCV_CALL_PLT: {
+        put32(0xfff, ((val - addr + 0x800) & ~0xfff) >>> 0);
+        return dv.setUint32(at + 4, ((dv.getUint32(at + 4, true) & 0xfffff)
+          | (((val - addr) & 0xfff) << 20)) >>> 0, true);
+      }
+      case R_RISCV_PCREL_HI20:
+      case R_RISCV_GOT_HI20: {
+        const v = type === R_RISCV_GOT_HI20 ? slot() : val;
+        const off = (v - addr + 0x800) >> 12;
+        hiMap().set(addr, v);
+        return put32(0xfff, ((off & 0xfffff) << 12) >>> 0);
+      }
+      case R_RISCV_PCREL_LO12_I:
+        return put32(0xfffff, ((lookupHi() & 0xfff) << 20) >>> 0);
+      case R_RISCV_PCREL_LO12_S: {
+        const off = lookupHi();
+        return put32(~0xfe000f80, (((off & 0xfe0) << 20) | ((off & 0x01f) << 7)) >>> 0);
+      }
+      case R_RISCV_RVC_BRANCH: {
+        const off = val - addr;
+        return set16((ins16() & 0xe383) | (((off >> 5) & 1) << 2) | (((off >> 1) & 3) << 3)
+          | (((off >> 6) & 3) << 5) | (((off >> 3) & 3) << 10) | (((off >> 8) & 1) << 12));
+      }
+      case R_RISCV_RVC_JUMP: {
+        const off = val - addr;
+        return set16((ins16() & 0xe003) | (((off >> 5) & 1) << 2) | (((off >> 1) & 7) << 3)
+          | (((off >> 7) & 1) << 6) | (((off >> 6) & 1) << 7) | (((off >> 10) & 1) << 8)
+          | (((off >> 8) & 3) << 9) | (((off >> 4) & 1) << 11) | (((off >> 11) & 1) << 12));
+      }
+      case R_RISCV_32:
+      case R_RISCV_ADD32: return add32(val);
+      case R_RISCV_64:
+      case R_RISCV_JUMP_SLOT:
+      case R_RISCV_ADD64: return add64(val);
+      case R_RISCV_SUB32: return add32(-val);
+      case R_RISCV_SUB64: return add64(-val);
+      case R_RISCV_ADD16: return set16(ins16() + val);
+      case R_RISCV_SUB16: return set16(ins16() - val);
+      case R_RISCV_SET16: return set16(val);
+      case R_RISCV_SUB8: return dv.setUint8(at, (dv.getUint8(at) - val) & 0xff);
+      case R_RISCV_SET8: return dv.setUint8(at, val & 0xff);
+      case R_RISCV_SET6:
+        return dv.setUint8(at, (dv.getUint8(at) & ~0x3f) | (val & 0x3f));
+      case R_RISCV_SUB6:
+        return dv.setUint8(at, (dv.getUint8(at) & ~0x3f) | ((dv.getUint8(at) - val) & 0x3f));
+      case R_RISCV_32_PCREL: return add32(val - addr);
+      /* 线程局部：偏移是**相对 PT_TLS 的起点**（riscv 的 tp 指着数据头），高 20 位
+       * 与低 12 位分两条写。 */
+      case R_RISCV_TPREL_HI20: {
+        const off = (val - tlsSeg().start + 0x800) >> 12;
+        return put32(0xfff, ((off & 0xfffff) << 12) >>> 0);
+      }
+      case R_RISCV_TPREL_LO12_I:
+        return put32(0xfffff, (((val - tlsSeg().start) & 0xfff) << 20) >>> 0);
+      default: throw new OmniError(`reloc: riscv 还不会 ${type} 号`);
     }
   }
   throw new OmniError(`reloc: 不认识的架构 0x${machine.toString(16)}`);

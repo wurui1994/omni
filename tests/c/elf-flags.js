@@ -45,6 +45,8 @@ const TARGETS = [
   /* 32 位那两个（第九刀第七十五片）。`-pie` 那一档要另一份交叉编译器，没建就跳过。 */
   { name: 'i386-linux', tcc: 'i386-tcc' },
   { name: 'arm-linux', tcc: 'arm-tcc' },
+  /* riscv64（第九刀第七十六片）。 */
+  { name: 'riscv64-linux', tcc: 'riscv64-tcc' },
 ];
 
 const RPATH = '/opt/omni/lib:/usr/local/omni';

@@ -533,6 +533,13 @@ i386 的跳板 push 的是**字节**而不是条数，arm 的跳板要四条 `ad
 符号一格 GOT 都不给；`fill_local_got_entries` 在 REL 架构上要把值**写进 GOT 那一格**；
 `.ARM.attributes` 只有可执行文件与共享库有（`elf_output_obj` 不叫那个函数），而且是
 非 alloc 的节里唯一留得住 `sh_size` 的一条。五道 ELF 门各长出两个目标，全 0 条不同）。
+**riscv64**（第七十六片：真正新的只有四处 —— `.eh_frame` 的 CIE **版本是 3**（五个
+目标里只有它）、可执行文件头的 `e_flags` 要照 `.o` 抄（riscv 上是 4）、`relocate_plt`
+是自己的八条指令（`create_plt_entry` 与 arm64 形状一样，一个字都不用改）、
+`__global_pointer$` 落在 `.data + 0x800`。重定位那一层要紧的是 **hi/lo 成对**：
+`PCREL_LO12` 那条的符号值就是 `PCREL_HI20` 那条的地址，得回头查 HI20 记下的值。
+六道 ELF 门各长出第五个目标，全 0 条不同 —— tcc 支持的九个目标在链接器这一层
+至此全部逐字节对齐）。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -11381,6 +11388,49 @@ i386 的 `16-tls` 卡在这儿 —— 整份只差 GOT 里那两个字节。
 `omni elf-link` 的 i386/arm 可执行文件与共享库也都逐字节对上。
 
 <!-- 第九刀第七十五片-END -->
+
+## 落地：第九刀第七十六片
+
+riscv64 —— tcc 支持的第五个 Linux 目标，`.o`、可执行文件、共享库一并对齐。
+
+这一片小得出人意料：ELF64 的骨架、`Elf64_Rela`、`.dynamic` 那一套全都现成，真正
+新的只有四处。
+
+**`.eh_frame` 的 CIE 版本是 3**（`tccdbg.c:864` 那句
+`eh_frame_section->data[eh_start + 8] = 3`）。五个目标里只有它这么写；`code`/`data`
+是 1 / -4，返回地址列是 1（ra），CFA 寄存器是 2（sp）。这一格错了，并合出来的 `.o`
+从 `.eh_frame` 起全不对 —— 而这也是 `.o` 那一路**唯一**要改的地方。
+
+**`e_flags`**：`.o` 那一路早就从输入里抄了，可可执行文件那个写头的分支 64 位那一半
+一直写死 0（32 位那一半在第七十五片补的时候顺手加了）。riscv64 的 `.o` 里是 4
+（`EF_RISCV_FLOAT_ABI_DOUBLE`），于是整份文件只差 `e_flags` 那四个字节。
+
+**跳板**：`create_plt_entry` 与 arm64 形状完全一样（头一格 32 字节留空，每格 16
+字节里先记 GOT 的偏移，64 位小端），所以那一段一个字都不用改；`relocate_plt` 是
+riscv 自己的八条指令 —— `auipc t2` / `sub t1,t1,t3` / `ld t3` / `addi t1,t1,-44` /
+`addi t0,t2` / `srli t1,t1,1` / `ld t0,8(t0)` / `jr t3`，每一格四条
+（`auipc t3` / `ld t3` / `jalr t1,t3` / `nop`）。
+
+**`__global_pointer$`**：`tcc_add_linker_symbols` 里 riscv 独有的一条，落在
+`.data + 0x800`（源码里那句注释说「本该是 `.sdata`」）。它只在 `-rdynamic` 那一档
+露头 —— 那时所有有定义的非局部符号都进 `.dynsym`，少这一条就少 24 字节符号加 18
+字节名字。
+
+重定位那一层是新写的一整段（`riscv64-link.c` 的 `relocate`），要紧的是 **hi/lo 是
+成对的**：`PCREL_HI20`/`GOT_HI20` 落笔时把「这一处的地址 -> 目标值」记下来，
+`PCREL_LO12_I`/`_S` 那条的**符号值就是 HI20 那条的地址**，拿它回头查
+（`riscv64_record_pcrel_hi` / `_lookup_pcrel_hi`）。于是 `relocateOne` 多了一个
+参数：一张按链接过程活着的表。`auipc` 的高 20 位都带 `+0x800` 的进位补偿，
+`BRANCH`/`JAL`/`RVC_*` 的位散在四五处，一处一处照抄。
+
+五道 ELF 关口现在都是五个目标：`elf-exe` `53 条`、`elf-dyn` `53 条`、`elf-so`
+`60 条`、`elf-dll` `21 条`、`elf-flags` `243 条`、`elf-merge` `441 条`，全 0 条
+不同。命令行上 `omni elf-link` 的 riscv64 可执行文件与共享库也逐字节对上。
+
+至此 tcc 支持的**九个目标**（Linux 五个、Windows 四个、macOS 两个里的 arm64/x86_64）
+在链接器这一层全部与 tcc 逐字节相同。
+
+<!-- 第九刀第七十六片-END -->
 
 
 
