@@ -658,6 +658,21 @@ export class MirModule {
     return this.funcs.length - 1;
   }
 
+  /**
+   * 给一个函数改名，`funcIndex` 跟着改。
+   *
+   * 用处只有一处：native 上「外部函数的转发桩」不能与它转发的那个符号同名
+   * （`_strlen` 里 `call _strlen` 就是无穷递归，症状是段错误）。
+   */
+  renameFunc(no, name) {
+    const f = this.funcs[no];
+    if (f === undefined) throw new Error(`mir: 没有 ${no} 号函数`);
+    if (this.funcIndex.has(name)) throw new Error(`mir: 已经有一个函数叫 ${name}`);
+    this.funcIndex.delete(f.name);
+    f.name = name;
+    this.funcIndex.set(name, no);
+  }
+
   funcNo(name) {
     const i = this.funcIndex.get(name);
     if (i === undefined) throw new Error(`mir: 没有这个函数 ${name}`);

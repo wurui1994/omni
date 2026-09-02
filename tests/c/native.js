@@ -53,10 +53,17 @@ const CASES = [
   ['二维数组', 'int m[3][3]; int i, j; long long s = 0;'
     + ' for (i = 0; i < 3; i++) for (j = 0; j < 3; j++) m[i][j] = i * 3 + j;'
     + ' for (i = 0; i < 3; i++) s += m[i][i]; return s;'],
+  /* 串常量（第二十片）：字节进 __DATA 的一个符号，值是**符号的地址**。 */
+  ['串常量：按字节读', 'char *p = "hi!"; return p[0] * 100 + p[2];'],
+  ['串常量：末尾有 0', 'char *p = "abcd"; int n = 0; while (p[n] != 0) n++; return n;'],
+  ['串常量：sizeof 是数组的大小', 'return sizeof("abcd");'],
+  ['串常量：地址交给真的 strlen', 'return (long long) strlen("hello, world");'],
+  ['串常量：指针算术', 'char *p = "abcdef"; return *(p + 3) - *p;'],
 ];
 
 const SUPPORT = `struct P { int x; int y; };
 union U { int i; unsigned char b[4]; };
+extern unsigned long strlen(const char *);
 long long helper_addr(int n) { int *p = &n; *p = *p + 1; return n * 2; }
 long long sq(struct P *p) { return (long long) p->x * p->x + (long long) p->y * p->y; }
 void swap(int *a, int *b) { int t = *a; *a = *b; *b = t; }
@@ -148,9 +155,9 @@ try {
 /* 还要线性内存的那些东西必须**明着报**。悄悄发出去会得到一个指着 64K 的指针 ——
  * 那种错在解释器上看不出来，在真机器上是段错误，而且现场离原因很远。 */
 for (const [what, code] of [
-  ['字符串字面量', 'char *p = "hi"; return p[0];'],
   ['带初值的全局量', 'int g = 7;\nlong long f(void) { return g; }'],
   ['变长数组', 'int n = 4; int a[n]; a[0] = 1; return a[0];'],
+  ['非 ASCII 的串常量', 'char *p = "\\xe4\\xb8\\x96"; return p[0];'],
 ]) {
   total++;
   const body = code.indexOf('\n') >= 0 ? code : `long long f(void) { ${code} }`;

@@ -1675,6 +1675,22 @@ export class CGen {  /**
    * 而那是最难发现的那种错。
    */
   strLit(bytes) {
+    /* native（第九刀第二十片）：字节进 `__DATA` 的一个**符号**，值是那个符号的地址 ——
+     * 编译期算不出来（要等链接），所以只能是 MIR 的串常量，后端把它发成
+     * `omni_str_<ref>` 加一笔重定位。去重靠常量池（`intern` 按文本），
+     * 与线性内存那边的 `this.strs` 是同一个效果。
+     *
+     * 非 ASCII 还不行：MIR 的串常量存的是**文本**，后端写数据段时按 UTF-8 编码，
+     * 而这里的 `bytes` 每个字符已经是一个字节了 —— 0x80 以上会被编成两个字节。
+     * 要一个「字节串」常量种类才能收口，那是往后的一片。 */
+    if (this.native) {
+      for (let i = 0; i < bytes.length; i++) {
+        if (bytes.charCodeAt(i) > 127) {
+          this.todo('native：字符串字面量里的非 ASCII 字节（要一个字节串常量种类）');
+        }
+      }
+      return sMem(mkArray(TY_CHAR, bytes.length + 1), this.mod.consts.str(bytes), 0);
+    }
     return sMem(mkArray(TY_CHAR, bytes.length + 1),
       this.mod.consts.int(BigInt(this.strData(bytes))), 0);
   }
@@ -3263,6 +3279,11 @@ export class CGen {  /**
    */
   externThunk(name, info) {
     const f = info.f;
+    /* native（第二十片）：桩**不能与它转发的符号同名** —— `_strlen` 里 `call _strlen`
+     * 是无穷递归，症状是段错误，而现场（栈满）离原因（同名）很远。改名成 `$ext$strlen`，
+     * 调用点照旧按函数号 CALL 它，它再 CCALL 真的 `strlen`。
+     * 线性内存那条腿上不存在这个问题：那边的 CCALL 落到宿主的 JS 实现上，不是符号。 */
+    if (this.native) this.mod.renameFunc(info.no, `$ext$${name}`);
     const params = info.params === null ? [] : info.params;
     const refs = [];
     /* 桩要把实参**原样**转给宿主，而我们的 struct 传的是自家线性内存里的一个偏移 ——
