@@ -1,7 +1,11 @@
-/* Mach-O 目标文件的写出 —— ADR-0017 第 11 步，第九刀第八片。
+/* Mach-O 目标文件的写出 —— ADR-0017 第 11 步，第九刀第八片；第十五片起两种架构都写。
  *
- * 只写 **MH_OBJECT**（`.o`），arm64。写出来的东西要能被系统链接器（`ld`/`clang`）
- * 吃下去 —— 这一片的验法就是「clang 把我们的 .o 与一个 C 的 main 链起来，跑，对结果」。
+ * 只写 **MH_OBJECT**（`.o`），arm64 与 x86_64。写出来的东西要能被系统链接器
+ * （`ld`/`clang`）吃下去 —— 验法就是「clang 把我们的 .o 与一个 C 的 main 链起来，
+ * 跑，对结果」。x86_64 那条腿在 Apple Silicon 上靠 `clang -arch x86_64` 加 Rosetta 跑。
+ *
+ * 两种架构只差三格（cpu 类型、子类型、重定位的类型号），段/节/符号表/字符串表的形状
+ * 与次序完全一样 —— 所以这个文件没有按架构分叉，只多一张 `ARCH` 表。
  *
  * 为什么先写 .o 而不是直接写可执行文件
  * ------------------------------------
@@ -29,13 +33,16 @@
  */
 
 import { OmniError } from '../source/diag.js';
-import { RELOC } from './asm.js';
+import { RELOC } from '../arm64/asm.js';
 
 /* ---------------------------------------------------------------- 常量
  * 名字与值都照 <mach-o/loader.h>。 */
 const MH_MAGIC_64 = 0xfeedfacf;
 const CPU_TYPE_ARM64 = 0x0100000c;
 const CPU_SUBTYPE_ARM64_ALL = 0;
+const CPU_TYPE_X86_64 = 0x01000007;
+/** x86_64 的子类型是 `CPU_SUBTYPE_X86_ALL = 3`，不是 0 —— 填 0 的话 `ld` 说架构不认识。 */
+const CPU_SUBTYPE_X86_64_ALL = 3;
 const MH_OBJECT = 1;
 /** 「每个符号自成一个子段」—— 汇编器一律打这一位，链接器靠它做死代码剔除。 */
 const MH_SUBSECTIONS_VIA_SYMBOLS = 0x2000;
@@ -57,6 +64,12 @@ const PLATFORM_MACOS = 1;
 const ARM64_RELOC_BRANCH26 = 2;
 const ARM64_RELOC_PAGE21 = 3;
 const ARM64_RELOC_PAGEOFF12 = 4;
+
+/* <mach-o/reloc.h> 的 x86_64 那一族。`SIGNED` 是「RIP 相对、带符号的四字节」，
+ * `BRANCH` 是 `call`/`jmp` 的那一格 —— 两者的 pcrel 都是 1。 */
+const X86_64_RELOC_UNSIGNED = 0;
+const X86_64_RELOC_SIGNED = 1;
+const X86_64_RELOC_BRANCH = 2;
 
 /* <mach-o/nlist.h>：n_type 的位。 */
 const N_EXT = 0x01;
@@ -158,6 +171,28 @@ const RELOC_TYPE = {};
 RELOC_TYPE[RELOC.BRANCH26] = { type: ARM64_RELOC_BRANCH26, pcrel: 1 };
 RELOC_TYPE[RELOC.PAGE21] = { type: ARM64_RELOC_PAGE21, pcrel: 1 };
 RELOC_TYPE[RELOC.PAGEOFF12] = { type: ARM64_RELOC_PAGEOFF12, pcrel: 0 };
+RELOC_TYPE.X86_64_RELOC_BRANCH = { type: X86_64_RELOC_BRANCH, pcrel: 1 };
+RELOC_TYPE.X86_64_RELOC_SIGNED = { type: X86_64_RELOC_SIGNED, pcrel: 1 };
+RELOC_TYPE.X86_64_RELOC_UNSIGNED = { type: X86_64_RELOC_UNSIGNED, pcrel: 0 };
+
+/**
+ * 两种架构的头部字段。**除了这三格，两者的目标文件布局一模一样** ——
+ * 段、节、符号表、字符串表、重定位表的形状与次序都不分架构，所以这个文件没有分叉，
+ * 只是多一张表。（重定位的**类型号**分架构，但它们的名字不同，所以一张 `RELOC_TYPE`
+ * 就够；把 arm64 的重定位混进 x86_64 的文件里会在 `kinds` 那一格挡下来。）
+ */
+const ARCH = {
+  arm64: {
+    cpu: CPU_TYPE_ARM64,
+    sub: CPU_SUBTYPE_ARM64_ALL,
+    kinds: [RELOC.BRANCH26, RELOC.PAGE21, RELOC.PAGEOFF12],
+  },
+  x86_64: {
+    cpu: CPU_TYPE_X86_64,
+    sub: CPU_SUBTYPE_X86_64_ALL,
+    kinds: ['X86_64_RELOC_BRANCH', 'X86_64_RELOC_SIGNED', 'X86_64_RELOC_UNSIGNED'],
+  },
+};
 
 /**
  * 写一个 arm64 的 `.o`。
@@ -168,8 +203,12 @@ RELOC_TYPE[RELOC.PAGEOFF12] = { type: ARM64_RELOC_PAGEOFF12, pcrel: 0 };
  *              `off` 是在那一节里的字节偏移
  * @param relocs 要等链接器填的地方：`[{at, kind, sym}]`，`kind` 是 `RELOC.*`，
  *               `sym` 是符号名（不带下划线，这儿加）。`at` 是**代码节里**的偏移。
+ * @param arch  `'arm64'`（默认）或 `'x86_64'`
  */
-export function writeObject(text, data, defs, relocs) {
+export function writeObject(text, data, defs, relocs, arch) {
+  const archName = arch === undefined ? 'arm64' : arch;
+  const cpu = ARCH[archName];
+  if (cpu === undefined) throw new OmniError(`macho: 还不认识架构 ${archName}`);
   const dataBytes = data === undefined ? new Uint8Array(0) : data;
   const nsects = dataBytes.length === 0 ? 1 : 2;
   /* 节的地址在段里是**接着排**的：代码从 0 起，数据紧跟着（按 8 对齐）。
@@ -221,7 +260,7 @@ export function writeObject(text, data, defs, relocs) {
 
   const b = new Buf();
   // ---- mach_header_64
-  b.u32(MH_MAGIC_64).u32(CPU_TYPE_ARM64).u32(CPU_SUBTYPE_ARM64_ALL).u32(MH_OBJECT);
+  b.u32(MH_MAGIC_64).u32(cpu.cpu).u32(cpu.sub).u32(MH_OBJECT);
   b.u32(4).u32(HEAD - 32).u32(MH_SUBSECTIONS_VIA_SYMBOLS).u32(0);
 
   // ---- LC_SEGMENT_64（目标文件里段名是空的，节自己带段名）
@@ -268,6 +307,9 @@ export function writeObject(text, data, defs, relocs) {
   for (const r of rs) {
     const kind = RELOC_TYPE[r.kind];
     if (kind === undefined) throw new OmniError(`macho: 还不认识重定位 ${r.kind}`);
+    if (!cpu.kinds.includes(r.kind)) {
+      throw new OmniError(`macho: 重定位 ${r.kind} 不是 ${archName} 的`);
+    }
     b.u32(r.at);
     /* 位拼装用乘法，不用 `<<` —— `1 << 31` 在 JS 里是负数（arm64 编码器那边同一条）。 */
     b.u32(symIndexOf(r.sym) + kind.pcrel * 2 ** 24 + 2 * 2 ** 25 + 1 * 2 ** 27

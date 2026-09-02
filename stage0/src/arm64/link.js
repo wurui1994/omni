@@ -23,6 +23,7 @@ import { RELOC } from './asm.js';
 
 const MH_MAGIC_64 = 0xfeedfacf;
 const MH_OBJECT = 1;
+const CPU_TYPE_ARM64 = 0x0100000c;
 const LC_SEGMENT_64 = 0x19;
 const LC_SYMTAB = 0x02;
 
@@ -92,6 +93,9 @@ export function readObject(bytes) {
   const r = new Rd(bytes);
   if (r.u32(0) !== MH_MAGIC_64) throw new OmniError('macho: 不是 64 位的 Mach-O');
   if (r.u32(12) !== MH_OBJECT) throw new OmniError('macho: 只读 MH_OBJECT（.o）');
+  /* 重定位的类型号是**分架构**的（`ARM64_RELOC_*` 与 `X86_64_RELOC_*` 同号不同义），
+   * 而这个文件只有 arm64 的那张表。所以先认架构 —— 不认就报，别按错的表往下读。 */
+  if (r.u32(4) !== CPU_TYPE_ARM64) throw new OmniError('link: 这一层只读 arm64 的 .o');
   const ncmds = r.u32(16);
 
   /** 节按文件里的次序排，`n_sect` 是**从 1 起**的下标。 */

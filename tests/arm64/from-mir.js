@@ -22,7 +22,7 @@ import {
   CVT_I2F, CVT_U2F, CVT_F2I, CVT_FCVT, CVT_BITCAST, memDesc,
 } from '../../stage0/src/mir/ir.js';
 import { codeOf, genModule } from '../../stage0/src/arm64/from_mir.js';
-import { writeObject } from '../../stage0/src/arm64/macho.js';
+import { writeObject } from '../../stage0/src/link/macho.js';
 import { utf8Bytes } from '../../stage0/src/host/utf8.js';
 
 const mod = new MirModule('main');

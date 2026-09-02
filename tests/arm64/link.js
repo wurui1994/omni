@@ -17,7 +17,7 @@ import { join } from 'node:path';
 
 import { MirModule, MirFunc, OP, REF_NONE, T_I64 } from '../../stage0/src/mir/ir.js';
 import { genModule } from '../../stage0/src/arm64/from_mir.js';
-import { writeObject } from '../../stage0/src/arm64/macho.js';
+import { writeObject } from '../../stage0/src/link/macho.js';
 import { readObject, linkObjects } from '../../stage0/src/arm64/link.js';
 import { RELOC } from '../../stage0/src/arm64/asm.js';
 
