@@ -2083,9 +2083,10 @@ function main(argv) {
       stdout(`${out} (${r.bytes.length} 字节，${r.infos.length} 节，${r.nthunks} 个导入桩)\n`);
       return 0;
     }
-    /* `elf-link`：几个 `.o` 链成一份静态的 Linux 可执行文件（第九刀第五十三片）。
-     * 没有 libc，入口自己指：
-     *   omni elf-link a.o [b.o …] -o a.out [-e main] */
+    /* `elf-link`：几个 `.o` 链成一份 Linux 可执行文件（第九刀第五十三、五十四片）。
+     * 默认动态（跟 tcc 一样，`.interp` / `.dynsym` / `.dynamic` 那一套都摆出来），
+     * `--static` 只摆装载得下的那几条。没有 libc，入口自己指：
+     *   omni elf-link a.o [b.o …] -o a.out [-e main] [--static] */
     case 'elf-link': {
       const oi = rest.indexOf('-o');
       const out = oi >= 0 ? rest[oi + 1] : 'a.out';
@@ -2097,7 +2098,11 @@ function main(argv) {
         for (let k = 0; k < s.length; k++) b[k] = s.charCodeAt(k);
         return b;
       };
-      const r = elfExe({ objs: files.map(bytesOf), entryName });
+      const r = elfExe({
+        objs: files.map(bytesOf),
+        entryName,
+        static: rest.includes('--static'),
+      });
       writeBinary(out, r.bytes);
       stdout(`${out} (${r.bytes.length} 字节，${r.shnum} 节，${r.phnum} 段，`
         + `入口 0x${r.entry.toString(16)})\n`);
@@ -2281,8 +2286,10 @@ commands:
             libtcc1.a on demand and the .def import libraries from -L DIR, builds the
             import table and thunks, applies every relocation. -o NAME,
             --target x86_64-win32|arm64-win32
-  elf-link  link .o files into a static Linux executable (ADR-0017 cut 9 slice 53):
-            no libc, so give the entry with -e NAME (default main). -o NAME
+  elf-link  link .o files into a Linux executable (ADR-0017 cut 9 slices 53-54):
+            dynamic by default like tcc (.interp/.dynsym/.dynamic/.got), --static for
+            the plain one. No libc, so give the entry with -e NAME (default main).
+            -o NAME
   oir       print the OIR as JSON
   mir       print the MIR (ADR-0014 decision 6): SSA values + slots + structured
             control flow, one 8-byte record per instruction (--bytes: sizes and

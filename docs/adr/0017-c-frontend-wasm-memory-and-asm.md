@@ -421,7 +421,9 @@ tcc 逐字节相同了**（第五十片，`peWrite`：两个 win32 目标 160 �
 **换个格式也走通了**（第五十三片，`stage0/src/link/elf_exe.js`：Linux 的 ELF 可执行文件，
 尺子是 `<target>-tcc -static -nostdlib -Wl,-e,main`，两个目标 20 份逐字节相同 —— 节的
 两级排序、程序头、静态链接下照样要造的 `.got` 与 PT_GNU_RELRO 都在里面；命令行上是
-`omni elf-link`）。
+`omni elf-link`）。**动态链接那一整套也对上了**（第五十四片：`.interp`、`.dynsym`/`.dynstr`
+与两张哈希表、`.dynamic` 的十五条标签、`.rela.got`、`.eh_frame_hdr`，十六条节八个段头，
+两个目标又是 20 份逐字节相同）。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -10111,6 +10113,61 @@ arm64-linux : 10 份可执行文件逐字节相同        （共 35676 字节）
 命令行上是 `omni elf-link a.o b.o -o a.out -e main`。
 
 <!-- 第九刀第五十三片-END -->
+
+## 落地：第九刀第五十四片 —— 动态链接的那一整套
+
+上一片是 `-static`。这一片把 `-static` 去掉 —— tcc 默认就是动态链接，**一个共享库都没装
+也照样把整套家当摆出来**：
+
+```
+<target>-tcc -nostdlib -Wl,-e,main a.o -o a.out
+```
+
+`tests/c/elf-dyn.js`：
+
+```
+x86_64-linux: 10 份可执行文件逐字节相同
+arm64-linux : 10 份可执行文件逐字节相同        （共 63112 字节）
+```
+
+摊出来是十六条节、八个段头：
+
+```
+.interp .dynsym .dynstr .hash .gnu.hash .rela.got .eh_frame .eh_frame_hdr
+.data.ro .text .init_array .dynamic .got mysec .data .bss .shstrtab
+PT_PHDR  PT_INTERP  PT_LOAD×3  PT_DYNAMIC  PT_GNU_EH_FRAME  PT_GNU_RELRO
+```
+
+新写的东西：`.interp`（`CONFIG_TCC_ELFINTERP` 那个串）、`.dynsym`/`.dynstr` 与它们的
+**两张哈希表**（老的 `.hash` 与 `.gnu.hash`）、`.dynamic` 的十五条标签、`.rela.got`、
+`.eh_frame_hdr`（走一遍 `.eh_frame` 数 FDE，再按函数地址排一张二分查找表）。
+
+### 又是几格照着读代码想不到的
+
+- **`.got` 是无条件造的**。动态那一路里 `build_got(s1)` 直接就调了，一格都不用也照样
+  占 24 字节（`_DYNAMIC` 加两条哑项），头一格还要 `write32le` 记 `.dynamic` 的地址。
+  第一版我把它写成「按需造」，于是整个文件短了 93 字节、后面每个地址都错。
+- **`.dynsym` 里的 `st_shndx` 是重排之后的节号**。`reorder_sections` 那一圈
+  `sym->st_shndx = backmap[...]` 对 `SHT_DYNSYM` 也生效，而 `.dynsym` 是**要写进文件**
+  的（`.symtab` 不写，所以上一片看不出这一格）。我们的 4/2 对着 tcc 的 14/13。
+- **局部符号那几格 GOT 在文件里是 0**。`fill_local_got_entries` 在 RELA 的架构上只改
+  `r_addend`，`write32le(got->data + offset, …)` 那一句在 `#else` 里 —— 值留给动态链接器
+  按 `R_RELATIVE` 写。x86_64 的用例里没有走 GOT 的局部符号，所以这一格是 arm64 先报的。
+- **`.rela.got` 不参加 `build_got_entries` 的扫描**：那个循环有一句
+  `if (s->link != symtab_section) continue`，而动态那一路的 `.rela.got` 指着 `.dynsym`。
+  少了这道筛子，`R_AARCH64_RELATIVE` 会被拿去问「该不该走 GOT」，而 arm64 的表里没有
+  这一号。
+- **`.rela.*` 装载得下的那些，`r_offset` 最后要换成绝对地址**（`relocate_section` 末尾
+  那一句 `rel->r_offset += s->sh_addr`），`.dynamic` 里的 `DT_RELA`/`DT_RELASZ` 也是从
+  这一遍里数出来的。
+- **两张哈希表的形状**：老的 `.hash` 起手一个桶，`put_elf_sym` 每加一个非局部符号就多一格
+  链，攒到 `> 2 * 桶数` 就把桶数翻倍重建一次；`.gnu.hash` 的桶数是 `有定义的符号数 / 4 + 1`，
+  布隆过滤器的大小是「翻倍到 `ndef < size * 8`」，最后 `update_gnu_hash` 还要**按桶把
+  `.dynsym` 重排一遍**，再把 `.rela.got` 里的符号号跟着改、老哈希表重建。
+
+命令行上默认就是动态：`omni elf-link a.o -o a.out -e main`，要上一片那种就加 `--static`。
+
+<!-- 第九刀第五十四片-END -->
 
 
 

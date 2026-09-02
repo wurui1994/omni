@@ -1,15 +1,14 @@
 #!/usr/bin/env node
-/* 整份 ELF 可执行文件与 tcc 逐字节相同（ADR-0017 第九刀第五十三片）。
+/* 动态链接的 ELF 可执行文件与 tcc 逐字节相同（ADR-0017 第九刀第五十四片）。
  *
- * 尺子：`<target>-tcc -static -nostdlib -Wl,-e,main a.o -o a.out`。
+ * 尺子：`<target>-tcc -nostdlib -Wl,-e,main a.o -o a.out`。**没有** `-static` ——
+ * tcc 默认就是动态链接，即使一个共享库都没装，它也会把整套家当摆出来：`.interp`、
+ * `.dynsym`/`.dynstr`/`.hash`/`.gnu.hash`、`.dynamic`、`.rela.got`、`.eh_frame_hdr`，
+ * 八个程序头（PT_PHDR / PT_INTERP / 三个 PT_LOAD / PT_DYNAMIC / PT_GNU_EH_FRAME /
+ * PT_GNU_RELRO）。
  *
- * 为什么是这三个开关：交叉编译的 Linux 目标在 macOS 上没有 libc 可装，动态那一整套
- * （`.interp`/`.dynsym`/`.dynamic`/`.got`）也还没写；`-static -nostdlib` 剩下的正好是
- * 「摆放 + 写出」这一段，而那一段是三个格式共用的骨架。没有 crt 也就没有 `_start`，
- * 入口只能自己指。
- *
- *   node tests/c/elf-exe.js
- *   node tests/c/elf-exe.js arm64
+ *   node tests/c/elf-dyn.js
+ *   node tests/c/elf-dyn.js arm64
  */
 
 import {
@@ -34,14 +33,10 @@ const filters = process.argv.slice(2).filter((x) => !x.startsWith('-'));
 const keep = (s) => filters.length === 0 || filters.some((f) => s.includes(f));
 
 if (!existsSync(CROSS)) {
-  process.stdout.write('c/elf-exe: 交叉编译器还没建，跳过\n');
+  process.stdout.write('c/elf-dyn: 交叉编译器还没建，跳过\n');
   process.exit(0);
 }
 
-/** 不带 libc 也能编的那些用例：`gen/` 里的前几条，加上专为这一片写的几份。
- *
- * 名字以 `-a.c` 结尾的那一份要跟同名的 `-b.c` 一起链 —— 多个目标文件的并合、
- * 跨文件的调用与共享变量都在那一条上。 */
 const DIRS = [join(here, 'gen'), join(here, 'elf-gen')];
 const cases = [];
 for (const d of DIRS) {
@@ -60,7 +55,7 @@ function firstDiff(a, b) {
   return a.length === b.length ? -1 : n;
 }
 
-const dir = mkdtempSync(join(tmpdir(), 'omni-elfexe-'));
+const dir = mkdtempSync(join(tmpdir(), 'omni-elfdyn-'));
 let same = 0;
 let diff = 0;
 let bytesTotal = 0;
@@ -72,7 +67,7 @@ try {
       process.stdout.write(`  skip ${t.name}（${t.tcc} 没建）\n`);
       continue;
     }
-    const link = ['-static', '-nostdlib', '-Wl,-e,main'];
+    const link = ['-nostdlib', '-Wl,-e,main'];
     let ok = 0;
     for (const srcs of cases) {
       const stem = `${t.name}-${basename(srcs[0], '.c')}`;
@@ -84,14 +79,13 @@ try {
         if (one.status !== 0 || !existsSync(objPath)) { compiled = false; break; }
         objs.push(objPath);
       }
-      if (!compiled) continue;                                   // 要 libc 的头，编不了
+      if (!compiled) continue;
       const exePath = join(dir, `${stem}.out`);
       const ln = spawnSync(tcc, [...link, ...objs, '-o', exePath], { encoding: 'utf8' });
-      if (ln.status !== 0 || !existsSync(exePath)) continue;     // 要 libc 的符号，链不了
+      if (ln.status !== 0 || !existsSync(exePath)) continue;
       let got;
       try {
-        got = elfExe({ objs: objs.map((p) => readFileSync(p)), entryName: 'main', static: true })
-          .bytes;
+        got = elfExe({ objs: objs.map((p) => readFileSync(p)), entryName: 'main' }).bytes;
       } catch (e) {
         diff++;
         if (diff <= 6) process.stdout.write(`  THROW ${stem}：${e.message}\n`);
@@ -115,6 +109,6 @@ try {
 
 process.stdout.write(`\n${same} 条相同, ${diff} 条不同（共 ${bytesTotal} 字节）\n`);
 if (diff !== 0 || same === 0) {
-  process.stdout.write('c/elf-exe: 写出来的可执行文件与 tcc 不一样\n');
+  process.stdout.write('c/elf-dyn: 写出来的可执行文件与 tcc 不一样\n');
   process.exitCode = 1;
 }
