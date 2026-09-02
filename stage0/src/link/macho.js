@@ -239,20 +239,28 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign) {
   const dataAddr = align(text.length, dal);
   const strs = new StrTab();
   /* 符号表的次序是**有讲究**的：局部、定义的外部、未定义的外部，三段各自连着 ——
-   * LC_DYSYMTAB 里报的就是这三段的起点与长度。乱了链接器会说符号表坏了。 */
+   * LC_DYSYMTAB 里报的就是这三段的起点与长度。乱了链接器会说符号表坏了。
+   *
+   * `local: true` 的进第一段、**不打 `N_EXT`**（第九刀第九十二片）：串常量
+   * （`omni_str_3`）、`static` 的函数与全局、外部函数的转发桩（`$ext$printf`）——
+   * 这些名字每个翻译单元里都有一份，当外部符号的话两个 `.o` 一链就是
+   * `duplicate symbol`。 */
   const syms = [];
   const defNo = new Map();
-  for (const d of defs) {
+  const locals = defs.filter((d) => d.local === true);
+  const globals = defs.filter((d) => d.local !== true);
+  for (const d of [...locals, ...globals]) {
     const sect = d.sect === undefined ? 1 : d.sect;
     defNo.set(d.name, syms.length);
     syms.push({
       strx: strs.intern(macName(d.name)),
-      type: N_SECT | N_EXT,
+      type: d.local === true ? N_SECT : (N_SECT | N_EXT),
       sect,
       value: d.off + (sect === 2 ? dataAddr : 0),
     });
   }
-  const nextdef = defs.length;
+  const nlocal = locals.length;
+  const nextdef = globals.length;
   /* 未定义的那些按名字去重：同一个 `printf` 被叫十次也只占一条符号。
    * 已经定义过的名字**不许**再进未定义那一段 —— 自家的全局也是靠符号寻址的。 */
   const undefNo = new Map();
@@ -261,7 +269,7 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign) {
     undefNo.set(r.sym, syms.length);
     syms.push({ strx: strs.intern(macName(r.sym)), type: N_UNDF | N_EXT, sect: 0, value: 0 });
   }
-  const nundef = syms.length - nextdef;
+  const nundef = syms.length - nlocal - nextdef;
   const symIndexOf = (name) => {
     const hit = defNo.has(name) ? defNo.get(name) : undefNo.get(name);
     if (hit === undefined) throw new OmniError(`macho: 重定位指着一个没登记的符号 ${name}`);
@@ -318,9 +326,9 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign) {
 
   // ---- LC_DYSYMTAB：三段的起点与长度，其余的表一律空
   b.u32(LC_DYSYMTAB).u32(80);
-  b.u32(0).u32(0);                 // ilocalsym / nlocalsym
-  b.u32(0).u32(nextdef);           // iextdefsym / nextdefsym
-  b.u32(nextdef).u32(nundef);      // iundefsym / nundefsym
+  b.u32(0).u32(nlocal);                    // ilocalsym / nlocalsym
+  b.u32(nlocal).u32(nextdef);              // iextdefsym / nextdefsym
+  b.u32(nlocal + nextdef).u32(nundef);     // iundefsym / nundefsym
   b.u32(0).u32(0).u32(0).u32(0).u32(0).u32(0).u32(0).u32(0);
   b.u32(0).u32(0).u32(0).u32(0);
 

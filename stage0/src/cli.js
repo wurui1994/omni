@@ -347,7 +347,9 @@ function cObj(path, out, arch, incs, defs, fmt, os) {
   const blob = arch === 'x86_64' ? genX64(mod) : genArm64(mod);
   const syms = [];
   for (let k = 0; k < mod.funcs.length; k++) {
-    syms.push({ name: mod.funcs[k].name, off: blob.offsets[k] });
+    /* `local`（第九十二片）：`static` 的函数与外部函数的转发桩不进外部符号表 ——
+     * 多份 `.o` 一起链的时候（编 tinycc 自己就是十二份）它们每份都有一个同名的。 */
+    syms.push({ name: mod.funcs[k].name, off: blob.offsets[k], local: mod.funcs[k].local });
   }
   /* 两个写出器同一份入参（第三十八片）：Mach-O 那个喂 clang 那条「真的能跑」的腿，
    * ELF 那个喂 tcc 那条「字节相同」的腿 —— tcc 的 `-c` 在**所有**目标上都写 ELF。 */

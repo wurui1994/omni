@@ -928,6 +928,9 @@ export class CGen {  /**
     let g = this.gvars.get(key);
     if (g === undefined) g = this.declareGlobal(key, ty, false, align, extra);
     else g.ty = ty;
+    /* 块里的 `static` 也是内部链接（第九十二片）—— 名字里带了函数名，可两个翻译单元
+     * 里各有一个 `f.buf.0` 还是会撞，所以照 `static` 全局那样标成局部符号。 */
+    g.isStatic = true;
     const e = { ty, slot: -1, off: -1, align, gvar: g };
     this.scopes[this.scopes.length - 1].set(name, e);
     return e;
@@ -3619,7 +3622,12 @@ export class CGen {  /**
      * 是无穷递归，症状是段错误，而现场（栈满）离原因（同名）很远。改名成 `$ext$strlen`，
      * 调用点照旧按函数号 CALL 它，它再 CCALL 真的 `strlen`。
      * 线性内存那条腿上不存在这个问题：那边的 CCALL 落到宿主的 JS 实现上，不是符号。 */
-    if (this.native) this.mod.renameFunc(info.no, `$ext$${name}`);
+    if (this.native) {
+      this.mod.renameFunc(info.no, `$ext$${name}`);
+      /* 桩的符号是**局部**的（第九十二片）：每份 `.o` 里都有一个 `$ext$printf`，
+       * 外部符号的话十二份一起链就是十二次 `duplicate symbol`。 */
+      f.local = true;
+    }
     const params = info.params === null ? [] : info.params;
     const refs = [];
     /* 桩要把实参**原样**转给宿主，而我们的 struct 传的是自家线性内存里的一个偏移 ——
@@ -6594,7 +6602,9 @@ export class CGen {  /**
            * —— 与 `count` 同一个位置、同一种带法。 */
           if (dad.aligned > 0) d.ty.talign = dad.aligned;
         } else if (isFunc(d.ty.t)) {
-          if (this.funcDecl(global, name, d.ty, isInline)) { wasBody = true; break; }
+          if (this.funcDecl(global, name, d.ty, isInline, (spec.t & VT_STATIC) !== 0)) {
+            wasBody = true; break;
+          }
         } else {
           /* 局部量与全局量走**同一段**代码：不同的只有「往哪儿落地」（一个 dest 对象），
            * 遍历嵌套结构那套规则在 `initializer` 里只有一份。 */
@@ -6673,8 +6683,12 @@ export class CGen {  /**
           const hasStatic = (spec.t & VT_STATIC) !== 0;
           const inData = global || hasStatic || isExtern;
           let e;
-          if (global) e = this.declareGlobal(name, vty, isExtern && !hasInit, dad.aligned, extra);
-          else if (isExtern) e = this.declareExternLocal(name, vty, hasInit, dad.aligned);
+          if (global) {
+            e = this.declareGlobal(name, vty, isExtern && !hasInit, dad.aligned, extra);
+            /* `static` 的全局量是内部链接（第九十二片）。记在登记上、封盘那一步才用 ——
+             * 与函数那一侧同一个道理：先写 `static int x;` 后写 `int x = 1;` 是合法的。 */
+            if (hasStatic) e.isStatic = true;
+          } else if (isExtern) e = this.declareExternLocal(name, vty, hasInit, dad.aligned);
           else if (hasStatic) e = this.declareStaticLocal(name, vty, dad.aligned, extra);
           else e = this.declareLocal(name, vty, dad.aligned, extra);
           if (hasInit) {
@@ -6713,8 +6727,21 @@ export class CGen {  /**
   }
 
   /** 函数声明或定义。当前记号是 `(`。回 true 表示读掉了一个**函数体**。 */
-  funcDecl(global, name, fnTy, isInline) {
+  funcDecl(global, name, fnTy, isInline, isStatic) {
     const info = this.funcSym(name);
+    /* `static` 的函数是**内部链接**（C11 6.2.2）：符号只在这个翻译单元里有效。
+     * 记在 `info` 上而不是当场用 —— 原型上写了 `static`、定义时省掉的写法是合法的，
+     * 内部链接跟着第一次那个声明（第九十二片）。 */
+    if (isStatic === true) info.isStatic = true;
+    /* `inline` 也是局部符号 —— 这一格是量出来的，不是推出来的：tcc 那边判的是
+     * `if (sym->type.t & (VT_STATIC | VT_INLINE)) sym_bind = STB_LOCAL`
+     * （tccgen.c:478 与 534，两处一样），`inline` 与 `static` 同一个待遇。
+     *
+     * 为什么非它不可：macOS 的 `sys/cdefs.h:375` 那串条件对我们成立
+     * （`__STDC_VERSION__` 是 199901L、没有 `__GNUC__`），于是 `__header_inline`
+     * 展成的是**光秃秃的 `inline`**，`__sputc` 这种头里的函数身上没有 `static`。
+     * 当外部符号发的话，十二个翻译单元一链就是十二个 `___sputc`。 */
+    if (this.native && (info.isStatic === true || isInline === true)) info.f.local = true;
     /* K&R 的形参声明串（`tccgen.c:8811-8819`）：`)` 与 `{` 之间那几行。
      * 只有老式的函数、而且在文件作用域才认 —— 与 tcc 同一个条件。 */
     if (global && fnTy.ref.old === true) this.oldParamDecls(fnTy.ref.params);
@@ -7174,6 +7201,8 @@ export class CGen {  /**
       const f = info.f;
       if (f.count() !== 0) continue;
       if (f.name === name) this.mod.renameFunc(info.no, `$ext$${name}`);
+      /* 与 `externThunk` 那一条同一个理由（第九十二片）：这个名字每份 `.o` 里都有。 */
+      f.local = true;
       if (f.ret === T_VOID) f.emit(OP.RET, T_VOID, REF_NONE, REF_NONE, 0);
       else f.emit(OP.RET, f.ret, this.konst(info.ret, 0), REF_NONE, 0);
     }
@@ -7496,6 +7525,7 @@ export function lowerCNative(path, text, host, defs) {
       fixes.delete(e.addr + k);
     }
     const no = e.gno === undefined ? mod.globalNo(name) : e.gno;
+    if (e.isStatic === true) mod.markGlobalLocal(no);
     mod.setGlobalData(no, size, al, bytes, fixups);
   }
   /* 匿名的静态块（第三十四片）：静态的复合字面量。与有名字的那些一模一样地切 ——
@@ -7514,6 +7544,9 @@ export function lowerCNative(path, text, host, defs) {
       fixups.push({ off: k, kind: fx.kind, no: fx.no, add: fx.add });
       fixes.delete(b.addr + k);
     }
+    /* 匿名块的名字（`$cl$3`）是**按出现顺序编**的，于是每个翻译单元里都有一个
+     * `$cl$0` —— 局部符号（第九十二片）。 */
+    mod.markGlobalLocal(b.gno);
     mod.setGlobalData(b.gno, b.size, b.align, bytes, fixups);
   }
   /* 暂存区里没人认领的字节：那是还落在线性内存上的东西（`argv`、宿主那几格，

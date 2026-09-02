@@ -1112,7 +1112,9 @@ export function genModule(mod) {
     if (al > dataAlign) dataAlign = al;
     while (dataBytes.length % al !== 0) dataBytes.push(0);
     const base = dataBytes.length;
-    dataSyms.push({ name: mod.globals[gi], off: base, sect: 2 });
+    dataSyms.push({
+      name: mod.globals[gi], off: base, sect: 2, local: mod.globalLocal[gi] === true,
+    });
     for (let k = 0; k < size; k++) {
       const b = blob === null ? 0 : blob.bytes[k];
       dataBytes.push(b === undefined ? 0 : b);
@@ -1134,7 +1136,9 @@ export function genModule(mod) {
      * （`L"ab"`，一格四字节）的地址会被交给按 `int` 读的代码。按内容算每一条的对齐
      * 要在常量池里多记一个字段，而 8 是所有 C 标量的上界，一条 while 就够。 */
     while (dataBytes.length % 8 !== 0) dataBytes.push(0);
-    dataSyms.push({ name, off: dataBytes.length, sect: 2 });
+    /* `local: true`（第九十二片）：串常量的编号是**这个模块里**的序号，两个 `.o` 各有
+     * 一个 `omni_str_0` —— 当外部符号的话一链就撞。局部符号里各归各家。 */
+    dataSyms.push({ name, off: dataBytes.length, sect: 2, local: true });
     const raw = kind === 'bytes' ? hexBytes(items[r].text) : utf8Bytes(items[r].text);
     for (const byte of raw) dataBytes.push(byte);
     dataBytes.push(0);

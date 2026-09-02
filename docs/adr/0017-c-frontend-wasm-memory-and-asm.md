@@ -639,6 +639,19 @@ tcc 没装，它 `{B}` 那一格不存在、一路掉到 SDK 上；拿 `-B` 指�
 输出的一部分：typedef 的条数与次序、`offsetof` 展开成 `__builtin_offsetof` 还是就地
 展开、那句 `void *alloca(size_t size);` 在不在，都在输出里看得见。
 
+**编出一个 tcc，让它去编 tinycc**（第九十二片）：tinycc 的十二份源码（arm64-osx 那一套）
+用 `omni c-obj` 各编成一个 `.o`，`clang` 链成 `omni-tcc`，跑得起来；它 `-c` 编
+`tests/c/gen/` 那 83 份、以及**tinycc 自己那十二份源码**，出来的目标文件与尺子 tcc
+的**逐字节相同**（`tests/c/selfobj.js`，16 条）。为此还的账是**局部符号**：串常量
+（`omni_str_0`）、匿名静态块（`$cl$0`）、`static` 的函数与全局、外部函数的转发桩
+（`$ext$printf`）、以及 `inline` 的函数 —— 这些名字每个翻译单元里都有一份，当外部符号
+发的话十二个 `.o` 一链就是 1402 条 `duplicate symbol`。`inline` 那一格是量出来的：
+tcc 判的是 `sym->type.t & (VT_STATIC | VT_INLINE)`（`tccgen.c:478`），而 macOS 的
+`__header_inline` 对我们展成光秃秃的 `inline`（`sys/cdefs.h:375`），`__sputc` 身上
+没有 `static`。Mach-O 的符号表因此按局部/外部定义/未定义**三段**摆，`LC_DYSYMTAB`
+的三对下标跟着走。ELF 那一侧不用改：`link/elf.js` 的 `buildSyms` 本来就按 `d.local`
+分段（第三十八片建的时候就照 tcc 的 `sort_syms` 办了），两个写出器同一份入参。
+
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
 地址交给真的 libc（`strlen`/`memcpy`）验过。C 前端现在还把 `&x` 降到影子栈上，
@@ -12335,6 +12348,113 @@ tcc:  tcc -B <构建目录> -I <构建目录> -E -P x.c
 不过从这儿起，喂给它们的记号流已经是与 tcc 一模一样的那一份了。
 
 <!-- 第九刀第九十一片-END -->
+
+## 落地：第九刀第九十二片
+
+局部符号 —— 十二个 `.o` 链成一个 tcc，那个 tcc 编 tinycc，出来的字节与尺子相同。
+
+上一片称完预处理器就写了一句「**这不是「能编 tinycc」**」。这一片把那句话取消掉。
+
+### 起点：编得出来，链不上
+
+先量了一遍：tinycc 的十二份源码（arm64-osx 那一套，`Makefile:201-240` 的
+`CORE_FILES` + `arm64-gen/link/asm` + `tccmacho`，`tcc.c` 与 `libtcc.c` 要
+`-DONE_SOURCE=0`）用 `omni c-obj` 一个不落地都编得出来 —— `tccpp.c` 0.33 秒、378 KB、
+1373 个符号。然后 `clang -o omni-tcc *.o`：
+
+```
+1402 条 duplicate symbol
+```
+
+三族：
+
+- `$ext$printf` 这样的**外部函数转发桩**（第二十九片建的），
+- `omni_str_0`、`omni_str_1` …… **串常量**，
+- `___sputc`、`___sincospi`、`___OSSwapInt32` —— **系统头里的函数**。
+
+`arm64/from_mir.js:1087` 早把这笔账记下来了：「这些符号现在是**外部**符号
+（`macho.js` 里 defs 一律 `N_EXT`），于是两个模块各有一个 `omni_str_0` 就会撞。
+真正的办法是局部符号 + 按节的重定位」。这一片就是去还它。
+
+### Mach-O 的符号表是**三段**
+
+`nlist` 里没有「这是局部还是全局」的自由排布：符号表**必须**按局部、外部定义、
+未定义三段连续摆好，`LC_DYSYMTAB` 用三对 `(i*sym, n*sym)` 指出三段的起止。
+所以 `link/macho.js` 里不是「给某个符号打个标记」，而是**先分段再编号**：
+
+```js
+const locals = defs.filter((d) => d.local === true);
+const globals = defs.filter((d) => d.local !== true);
+for (const d of [...locals, ...globals]) { … }
+b.u32(0).u32(nlocal);                    // ilocalsym / nlocalsym
+b.u32(nlocal).u32(nextdef);              // iextdefsym / nextdefsym
+b.u32(nlocal + nextdef).u32(nundef);     // iundefsym / nundefsym
+```
+
+局部的那些**不打 `N_EXT`**（只 `N_SECT`）。重定位那一侧一个字没改：`r_extern=1` +
+符号下标对局部符号同样成立，而下标是在这个循环里现编的，所以分段自动带着它走。
+
+### 谁是局部的：三处，全是量出来的
+
+1. **串常量与匿名静态块**（`omni_str_3`、`$cl$0`）—— 名字是**按出现顺序编**的，
+   每个翻译单元里都有一个 0 号。
+2. **`static`** 的函数与全局量 —— C11 6.2.2 的内部链接。记在登记上（`info.isStatic` /
+   `e.isStatic`）而不是当场用：先写 `static int f(void);` 后写定义时省掉 `static`
+   是合法的，内部链接跟着**第一次**那个声明。块里的 `static`（键是 `f.buf.0`）同理。
+3. **`inline`** —— 这一格是量出来的，不是推出来的。tcc 判的是
+
+   ```c
+   if (sym->type.t & (VT_STATIC | VT_INLINE)) sym_bind = STB_LOCAL;
+   ```
+
+   （`tccgen.c:478` 与 `534`，两处一样）：`inline` 与 `static` 同一个待遇。
+
+   为什么非它不可：macOS `sys/cdefs.h:375` 那串条件对我们成立（`__STDC_VERSION__`
+   是 `199901L`、没有 `__GNUC__`），于是 `__header_inline` 展成的是**光秃秃的
+   `inline`** —— `__sputc` 身上根本没有 `static`。我原先只跟着 `static` 走，
+   于是那三个符号漏了出去，十二份一链就是十二个 `___sputc`。
+
+MIR 这一侧加的只是两个**标注**：`MirFunc.local` 与模块上与 `globals` 同下标的
+`globalLocal`。与 `kernel` 同一个性质 —— 只有写目标文件那一步看它，没有语义。
+
+### 收口：`omni-tcc` 编 tinycc
+
+改完之后链接一条 `duplicate symbol` 都没有，`./omni-tcc -v` 印出版本行。往下三步：
+
+- `omni-tcc -c` 编 `tests/c/gen/` 那 83 份，与尺子 tcc 的 `.o` **逐字节相同**；
+- `omni-tcc -c` 编 **tinycc 自己那十二份源码**，同样逐字节相同；
+- `omni-tcc -run`、`omni-tcc x.c -o x` 都跑得起来。
+
+可执行文件那一级**不比字节**：tcc 写出的可执行文件里带着一个临时名，尺子自己跑两遍
+出来的字节都不一样（量过）。目标文件才是有定义的尺子。
+
+版本行里那一段 git 戳（`2026-09-01 main@cf0e1fe*`）不在源码里 ——
+`Makefile:267` 只给 `tcc.o` 加一个 `-DTCC_GITHASH="…"`，内容是建那份 tcc 时的 git
+状态，算不出来。所以从尺子自己的版本行里读回来，当命令行上的 `-D` 递进去：与
+Makefile 做的是同一件事。
+
+### 门
+
+`tests/c/selfobj.js`，16 条，跑完 8.4 秒：十二个 `.o`、一次链接、版本行、两组字节比。
+前两步任一步失败就直接停下（`.o` 没编齐、链不上，后面几步没有意义）。
+不是 arm64 macOS、或者尺子/源码树不在，整组跳过。
+
+`tests/c/run.js`（206）、`tests/c/native.js`（217）、`native-gen.js`（81）、
+`tcc-link.js`（81）以及 macho 那一排（`macho-exe/libc/tcc/dylib/dll/debug`）照旧全绿。
+
+### 还欠着的
+
+- **ELF 那一侧不欠**：写这一片的时候以为欠着，量过才发现 `link/elf.js` 的 `buildSyms`
+  从第三十八片起就按 `d.local` 分段（局部在前、`sh_info = nlocal + 1`、`STT_FILE`
+  插在 1 号那一格），两个写出器吃的是同一份 `defs` —— 这一片新打的那些标记它自动就
+  用上了。量法：`c-obj a.c --format elf --os linux --arch x86_64`，85 条局部符号，
+  `main` 是唯一的 `T`。
+- `-fvisibility`、`weak`、别名（`__attribute__((alias))`）这些还没有一格。
+- `tcc-obj.js` 依旧是「6 容器相同、99 不同」：那要的是 B 路（与 tcc 同构的一遍过
+  代码生成），与这一片无关。
+
+<!-- 第九刀第九十二片-END -->
+
 
 
 

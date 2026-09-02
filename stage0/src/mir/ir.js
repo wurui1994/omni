@@ -634,6 +634,13 @@ export class MirFunc {
     this.kernel = false;
     /** 形参表末尾有 `...`（见 `VASTART`/`VAARG`）。只有 native 那条腿用得上。 */
     this.variadic = false;
+    /**
+     * 这个函数的符号是**局部**的吗（第九刀第九十二片）。与 `kernel` 同一个性质：
+     * 标注，不是语义 —— 只有写目标文件那一步看它（Mach-O 的 `N_EXT`）。
+     * C 前端在两处打上它：`static` 的函数，与外部函数的转发桩（`$ext$printf`）。
+     * 不打的话多份 `.o` 一链就是 `duplicate symbol`。
+     */
+    this.local = false;
   }
 
   /** 声明「这个函数是变参的」。固定形参就是 `params` 里那些。 */
@@ -746,6 +753,11 @@ export class MirModule {
      * `GLOAD`/`GSTORE` 按类型读写），`{size, align, bytes}` = C 的全局量那种一块地方，
      * 能被 `GADDR` 取地址。 */
     this.globalBlob = [];
+    /* 与 globals 同下标的「这个符号是**局部**的吗」（第九刀第九十二片）。与
+     * `MirFunc.local` 同一个性质：标注，不是语义 —— 只有写目标文件那一步看它。
+     * `static` 的全局量就在这一格上：C11 6.2.2 的内部链接，两个翻译单元里各有一个
+     * `static int nb_syms` 不该撞。 */
+    this.globalLocal = [];
     this.ops = [];                // {name, lits}：运行时 op，CALLOP 的 a
     this.opIndex = new Map();
     this.accs = [];               // {type, field}：字段访问描述符，FLD/FLDSET 的 aux
@@ -832,8 +844,15 @@ export class MirModule {
     this.globals.push(name);
     this.globalTy.push(T_DYN);
     this.globalBlob.push(null);
+    this.globalLocal.push(false);
     this.globalIndex.set(name, i);
     return i;
+  }
+
+  /** 这个全局的符号是局部的（`static`）。见 `globalLocal` 头上那段。 */
+  markGlobalLocal(no) {
+    if (this.globals[no] === undefined) throw new Error(`mir: 没有 ${no} 号模块级变量`);
+    this.globalLocal[no] = true;
   }
 
   /**

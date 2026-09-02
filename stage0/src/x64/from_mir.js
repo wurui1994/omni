@@ -1216,7 +1216,9 @@ export function genModule(mod) {
     if (al > dataAlign) dataAlign = al;
     while (dataBytes.length % al !== 0) dataBytes.push(0);
     const base = dataBytes.length;
-    dataSyms.push({ name: mod.globals[gi], off: base, sect: 2 });
+    dataSyms.push({
+      name: mod.globals[gi], off: base, sect: 2, local: mod.globalLocal[gi] === true,
+    });
     for (let k = 0; k < size; k++) {
       const b = blob === null ? 0 : blob.bytes[k];
       dataBytes.push(b === undefined ? 0 : b);
@@ -1236,7 +1238,9 @@ export function genModule(mod) {
     /* 串常量的符号一律 8 对齐（第三十三片，与 arm64 那一份同一个理由：宽串的地址
      * 会被交给按 `int` 读的代码）。 */
     while (dataBytes.length % 8 !== 0) dataBytes.push(0);
-    dataSyms.push({ name, off: dataBytes.length, sect: 2 });
+    /* `local: true`（第九十二片，与 arm64 那一份同一条）：编号是模块内的序号，
+     * 当外部符号的话两个 `.o` 各有一个 `omni_str_0`，一链就撞。 */
+    dataSyms.push({ name, off: dataBytes.length, sect: 2, local: true });
     const raw = kind === 'bytes' ? hexBytes(items[r].text) : utf8Bytes(items[r].text);
     for (const byte of raw) dataBytes.push(byte);
     dataBytes.push(0);
