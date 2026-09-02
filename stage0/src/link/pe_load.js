@@ -65,6 +65,8 @@ export function readSymbols(obj) {
       name: nameAt(dv.getUint32(p, true)),
       info,
       bind: Math.floor(info / 16),
+      type: info % 16,
+      other: st.bytes[p + 5],
       shndx: dv.getUint16(p + 6, true),
       value: Number(dv.getBigUint64(p + 8, true)),
       size: Number(dv.getBigUint64(p + 16, true)),

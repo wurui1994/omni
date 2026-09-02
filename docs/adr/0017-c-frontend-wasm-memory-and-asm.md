@@ -407,7 +407,10 @@ win32 目标 160 条逐字节相同 —— 三种可执行格式里只有 PE 没
 7 个库、65 个成员、825 条索引）。**「该读哪些字节」也与 tcc 一致了**（第四十七片，
 `stage0/src/link/pe_load.js`：入口符号的挑法、要接哪几个库、`.def` 导入库与按需取用，
 用 `tcc -vv` 打出来的那串 `-> 文件` / `   -> 成员` 当尺子，两个 win32 目标 160 条足迹
-逐条相同，共拉出 242 个成员）。
+逐条相同，共拉出 242 个成员）。**节表也摆对了**（第四十八片，
+`stage0/src/link/pe_sections.js`：按类重排、同类并节、导入桩把 `.text` 撑长、导入表接在
+thunk 节后面、arm64 的 `.reloc`，160 张节表的虚拟地址、文件偏移、长度与节名逐条相同 ——
+这一步与重定位无关，所以能单独对准）。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -9861,6 +9864,55 @@ x86_64 上一次就对上了，arm64 上每份都短 64 到 80 字节。差的�
 错得干净，也就好找。
 
 <!-- 第九刀第四十七片-END -->
+
+## 落地：第九刀第四十八片 —— 这些字节摆在哪（160 张节表与 tcc 一样）
+
+上一片解决「该读哪些字节」，这一片解决「摆在哪」。尺子还是 `tcc -vv`：它在写文件之前会
+把最终的节表打出来（`虚拟地址 文件偏移 长度 节名`），那正是 `pe_assign_addresses` 的
+结果加上 `pe_write` 算出来的文件偏移。
+
+关键在于**节表只与长度有关**，一个字节的重定位都不用改 —— 于是这一步能单独对准，不必
+等到整份 `.exe` 写得出来。
+
+```
+两个 win32 目标：160 张节表与 tcc 逐条相同（虚拟地址、文件偏移、长度、节名）
+```
+
+`stage0/src/link/pe_sections.js`（`sectionClass` / `collectImports` / `buildReloc` /
+`peSections`）+ `tests/c/pe-secs.js`，照的是 `pe_section_class` /
+`pe_assign_addresses` / `pe_check_symbols` / `pe_build_reloc`。
+
+规矩：
+
+- 节**按「类」重排**，不按名字：text < rdata < data < bss < idata < pdata < tls <
+  other < rsrc < debug < reloc。用的是插入排序，所以同一类里保持原来的次序 —— 这也是
+  第四十二片那份并合能直接接上来的原因（并合出来的次序与 tcc 链接时的一样）。
+- 同一类连着的几节**并成一条**（对到 16），换类就对到 `SectionAlignment`（0x1000）。
+  `PE_MERGE_DATA` 把 `.bss` 也算进 data 那一类。
+- `.text` 在链接时会长：先对到 8，然后每个「用作函数的导入符号」加一个跳转桩 ——
+  x86_64 是 `ff 25` 那 8 字节，arm64 是 24 字节（`ldr x16` / `ldr x16,[x16]` / `br x16`
+  / `nop` + 4 字节地址）。
+- 第一个 rdata 类的节就是 thunk 节，导入表接在它后面（对到 16）。
+- `.reloc` 只在 DLL 或者 `DYNAMIC_BASE` 时才建 —— arm64-win32 默认带，x86_64 不带。
+
+### 三格是撞出来的
+
+- **空节照样推地址**。`if (0 == s->data_offset) continue` 是在 `s->sh_addr = addr =
+  pe_virtual_align(...)` **之后**，所以一个空的 `.data` 会把后面的 `.bss` 顶到下一个
+  0x1000。少了这一条，`.bss` 就落在 `.rdata` 屁股上。
+- **`-vv` 打的「文件偏移」不是 `PointerToRawData`**，是打印那一刻的游标 —— 那一句在
+  `if (si->data_size)` 之前。所以 `.bss` 那一行打的是下一节的起点，而它自己的
+  `PointerToRawData` 是 0。
+- **arm64 上导入桩里那条重定位要进 `.reloc`**：`R_XXX_THUNKFIX` 在 arm64 上**就是**
+  `REL_TYPE_DIRECT`（都是 `R_AARCH64_ABS64`），而 x86_64 上它是 PC32。第一版没算这几条，
+  arm64 的 `.reloc` 整节都空了，80 条全差一节。
+
+顺手补了第四十四片留下的一个坑：`buildImports` 判序号写的是 `s.ordinal !== undefined`，
+可 tcc 那一句是 `if (ordinal)` —— `.def` 里没写 `@N` 的符号序号是 0，要按名字导入。
+读回来的那条路上序号总是非零，所以第四十四片的尺子照不出这一格；自己造导入表的时候
+所有名字都丢了，`.rdata` 一下短了 0x9d 字节。
+
+<!-- 第九刀第四十八片-END -->
 
 
 

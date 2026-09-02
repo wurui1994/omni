@@ -385,7 +385,9 @@ export function buildImports(imp) {
       let v = 0n;
       if (k < d.syms.length) {
         const s = d.syms[k];
-        if (s.ordinal !== undefined) {
+        /* 序号是**非零**才走序号那条路（tcc 那一句就是 `if (ordinal)`）——
+         * `.def` 里没写 `@N` 的符号序号是 0，那要按名字导入。 */
+        if (s.ordinal) {
           v = BigInt(s.ordinal) | ORDINAL_FLAG;
         } else {
           v = BigInt(nextRva());
