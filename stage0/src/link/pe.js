@@ -37,11 +37,15 @@ const FILEHDR_SIZE = 20;
 const OPTHDR_OFF = FILEHDR_OFF + FILEHDR_SIZE;
 /** PE32+ 的可选头：`0xE0 + (8-4)*4`。 */
 const OPTHDR_SIZE = 0xf0;
+/** PE32 的可选头：多一格 `BaseOfData`，可四个 `ADDR3264` 各短 4 字节 —— 净短 16。 */
+const OPTHDR32_SIZE = 0xe0;
 const HDR_SIZE = OPTHDR_OFF + OPTHDR_SIZE;    // 392
+const HDR32_SIZE = OPTHDR_OFF + OPTHDR32_SIZE; // 376
 const SECHDR_SIZE = 40;
 const NDIRS = 16;
 
 const PE_MAGIC64 = 0x020b;
+const PE_MAGIC32 = 0x010b;
 /** 节里头是代码（`IMAGE_SCN_CNT_CODE`）—— `SizeOfCode` 只数这一类。 */
 const SCN_CNT_CODE = 0x00000020;
 
@@ -51,12 +55,12 @@ const SCN_CNT_CODE = 0x00000020;
 const HDR_SECTION_ALIGN = 0x1000;
 const HDR_FILE_ALIGN = 0x200;
 
-/** 每个目标的操作系统版本号（`tccpe.c` 开头那一串 `#if`）。 */
+/** 每个目标的操作系统版本号（`tccpe.c` 开头那一串 `#if`）与位宽。 */
 const MACHINES = new Map([
-  [0x8664, { name: 'x86_64', osVer: 0x0400 }],
-  [0xaa64, { name: 'arm64', osVer: 0x0602 }],
-  [0x014c, { name: 'i386', osVer: 0x0400 }],
-  [0x01c0, { name: 'arm', osVer: 0x0400 }],
+  [0x8664, { name: 'x86_64', osVer: 0x0400, ptr: 8 }],
+  [0xaa64, { name: 'arm64', osVer: 0x0602, ptr: 8 }],
+  [0x014c, { name: 'i386', osVer: 0x0400, ptr: 4 }],
+  [0x01c0, { name: 'arm', osVer: 0x0400, ptr: 4 }],
 ]);
 
 /* DOS 头那 64 字节：`pe_template` 里一格一格写死的。 */
@@ -113,31 +117,37 @@ class Image {
  */
 export function readImage(bytes) {
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  if (bytes.length < HDR_SIZE) throw new OmniError('pe: 文件比一个 PE 头还短');
+  if (bytes.length < HDR32_SIZE) throw new OmniError('pe: 文件比一个 PE 头还短');
   if (dv.getUint16(0, true) !== 0x5a4d) throw new OmniError('pe: 开头不是 MZ');
   const lfanew = dv.getUint32(60, true);
   if (lfanew !== NT_SIG_OFF) throw new OmniError(`pe: e_lfanew 不是 0x80（是 0x${lfanew.toString(16)}）`);
   if (dv.getUint32(NT_SIG_OFF, true) !== NT_SIGNATURE) throw new OmniError('pe: 少了 "PE\\0\\0"');
   const machine = dv.getUint16(FILEHDR_OFF, true);
-  if (!MACHINES.has(machine)) throw new OmniError(`pe: 不认识的机器号 0x${machine.toString(16)}`);
+  const cpu = MACHINES.get(machine);
+  if (cpu === undefined) throw new OmniError(`pe: 不认识的机器号 0x${machine.toString(16)}`);
+  const c32 = cpu.ptr === 4;
   const nsec = dv.getUint16(FILEHDR_OFF + 2, true);
   if (dv.getUint32(FILEHDR_OFF + 8, true) !== 0) {
     throw new OmniError('pe: 带 COFF 符号表（-g 出来的），这一片不认');
   }
-  if (dv.getUint16(FILEHDR_OFF + 16, true) !== OPTHDR_SIZE) {
-    throw new OmniError('pe: 可选头不是 PE32+ 的 0xf0 字节');
+  const optSize = c32 ? OPTHDR32_SIZE : OPTHDR_SIZE;
+  const hdrSize = c32 ? HDR32_SIZE : HDR_SIZE;
+  if (dv.getUint16(FILEHDR_OFF + 16, true) !== optSize) {
+    throw new OmniError(`pe: 可选头不是 0x${optSize.toString(16)} 字节`);
   }
-  if (dv.getUint16(OPTHDR_OFF, true) !== PE_MAGIC64) throw new OmniError('pe: 只认 PE32+');
+  if (dv.getUint16(OPTHDR_OFF, true) !== (c32 ? PE_MAGIC32 : PE_MAGIC64)) {
+    throw new OmniError('pe: 可选头的 Magic 与机器号的位宽不合');
+  }
 
   const dirs = [];
   for (let i = 0; i < NDIRS; i++) {
-    const at = OPTHDR_OFF + 112 + i * 8;
+    const at = OPTHDR_OFF + (c32 ? 96 : 112) + i * 8;
     dirs.push({ addr: dv.getUint32(at, true), size: dv.getUint32(at + 4, true) });
   }
 
   const secs = [];
   for (let i = 0; i < nsec; i++) {
-    const at = HDR_SIZE + i * SECHDR_SIZE;
+    const at = hdrSize + i * SECHDR_SIZE;
     let name = '';
     for (let k = 0; k < 8 && bytes[at + k] !== 0; k++) name += String.fromCharCode(bytes[at + k]);
     const rawSize = dv.getUint32(at + 16, true);
@@ -159,9 +169,14 @@ export function readImage(bytes) {
     dllChars: dv.getUint16(OPTHDR_OFF + 70, true),
     sectionAlign: dv.getUint32(OPTHDR_OFF + 32, true),
     fileAlign: dv.getUint32(OPTHDR_OFF + 36, true),
-    imagebase: Number(dv.getBigUint64(OPTHDR_OFF + 24, true)),
+    imagebase: c32 ? dv.getUint32(OPTHDR_OFF + 28, true)
+      : Number(dv.getBigUint64(OPTHDR_OFF + 24, true)),
     entry: dv.getUint32(OPTHDR_OFF + 16, true),
-    stack: Number(dv.getBigUint64(OPTHDR_OFF + 72, true)),
+    /* PE32 才有的那一格。链的时候是按节的类算出来的（见 `writeImage`），可读回来的
+     * 时候节的类已经没了 —— 原样留着，写回去照抄。 */
+    baseOfData: c32 ? dv.getUint32(OPTHDR_OFF + 24, true) : undefined,
+    stack: c32 ? dv.getUint32(OPTHDR_OFF + 72, true)
+      : Number(dv.getBigUint64(OPTHDR_OFF + 72, true)),
     dirs,
     secs,
   };
@@ -179,10 +194,13 @@ export function readImage(bytes) {
 export function writeImage(img) {
   const cpu = MACHINES.get(img.machine);
   if (cpu === undefined) throw new OmniError(`pe: 不认识的机器号 0x${img.machine.toString(16)}`);
+  const c32 = cpu.ptr === 4;
+  const optSize = c32 ? OPTHDR32_SIZE : OPTHDR_SIZE;
+  const hdrSize = c32 ? HDR32_SIZE : HDR_SIZE;
   const nsec = img.secs.length;
   const secAlign = img.sectionAlign;
   const filAlign = img.fileAlign;
-  const headers = align(HDR_SIZE + nsec * SECHDR_SIZE, filAlign);
+  const headers = align(hdrSize + nsec * SECHDR_SIZE, filAlign);
 
   /* 先把每节在文件里的位置算出来 —— 没数据的节（`.bss`）不占文件，两格都留 0。 */
   const place = [];
@@ -191,9 +209,14 @@ export function writeImage(img) {
   let sizeOfData = 0;
   let sizeOfImage = 0;
   let baseOfCode = 0;
+  /* PE32 的可选头里多一格 `BaseOfData`：第一条 `sec_data` 类的节的 RVA ——
+   * **不是**「第一个不是代码的节」，`.rdata`（`sec_rdata`）那一条不算（`tccpe.c:741`
+   * 那个 `case sec_data` 里的 `#if PTR_SIZE == 4`）。 */
+  let baseOfData = img.baseOfData ?? 0;
   for (const s of img.secs) {
     const code = (s.chars & SCN_CNT_CODE) !== 0;
     if (code && baseOfCode === 0) baseOfCode = s.vaddr;
+    if (s.data === true && baseOfData === 0) baseOfData = s.vaddr;
     sizeOfImage = Math.max(sizeOfImage, align(s.vaddr + s.vsize, secAlign));
     if (s.bytes.length === 0) {
       place.push({ ptr: 0, size: 0 });
@@ -221,12 +244,13 @@ export function writeImage(img) {
     out.u32(FILEHDR_OFF + 8, at);                 // PointerToSymbolTable
     out.u32(FILEHDR_OFF + 12, img.symtab.count);  // NumberOfSymbols
   }
-  out.u16(FILEHDR_OFF + 16, OPTHDR_SIZE);
+  out.u16(FILEHDR_OFF + 16, optSize);
   out.u16(FILEHDR_OFF + 18, img.chars);
 
-  /* ---- 可选头。 */
+  /* ---- 可选头。32 位那一路多一格 `BaseOfData`（24），于是 `ImageBase` 起
+   * 后面每一格都挪 4 字节，而四个 `ADDR3264`（映像基址、栈与堆那四个）各短 4 字节。 */
   const o = OPTHDR_OFF;
-  out.u16(o, PE_MAGIC64);
+  out.u16(o, c32 ? PE_MAGIC32 : PE_MAGIC64);
   out.b[o + 2] = 6;                      // MajorLinkerVersion
   out.b[o + 3] = 0;                      // MinorLinkerVersion
   out.u32(o + 4, sizeOfCode);
@@ -234,51 +258,71 @@ export function writeImage(img) {
   out.u32(o + 12, 0);                    // SizeOfUninitializedData：tcc 不填
   out.u32(o + 16, img.entry);
   out.u32(o + 20, baseOfCode);
-  out.u64(o + 24, img.imagebase);
-  out.u32(o + 32, HDR_SECTION_ALIGN);
-  out.u32(o + 36, HDR_FILE_ALIGN);
-  out.u16(o + 40, cpu.osVer >> 8);       // MajorOperatingSystemVersion
-  out.u16(o + 42, cpu.osVer & 255);
-  out.u16(o + 44, 0);                    // MajorImageVersion
-  out.u16(o + 46, 0);
-  out.u16(o + 48, cpu.osVer >> 8);       // MajorSubsystemVersion
-  out.u16(o + 50, cpu.osVer & 255);
-  out.u32(o + 52, 0);                    // Win32VersionValue
-  out.u32(o + 56, sizeOfImage);
-  out.u32(o + 60, headers);
-  out.u32(o + 64, 0);                    // CheckSum
-  out.u16(o + 68, img.subsystem);
-  out.u16(o + 70, img.dllChars);
-  out.u64(o + 72, img.stack);            // SizeOfStackReserve
-  out.u64(o + 80, 0x1000);               // SizeOfStackCommit
-  out.u64(o + 88, 0x100000);             // SizeOfHeapReserve
-  out.u64(o + 96, 0x1000);               // SizeOfHeapCommit
-  out.u32(o + 104, 0);                   // LoaderFlags
-  out.u32(o + 108, NDIRS);
+  /** 32 位与 64 位从 `SectionAlignment` 起就对齐了 —— 前面差的那 4 字节在这儿抵掉。 */
+  let p = o + 24;
+  if (c32) {
+    out.u32(p, baseOfData);
+    out.u32(p + 4, img.imagebase);
+    p += 8;
+  } else {
+    out.u64(p, img.imagebase);
+    p += 8;
+  }
+  out.u32(p, HDR_SECTION_ALIGN);
+  out.u32(p + 4, HDR_FILE_ALIGN);
+  out.u16(p + 8, cpu.osVer >> 8);        // MajorOperatingSystemVersion
+  out.u16(p + 10, cpu.osVer & 255);
+  out.u16(p + 12, 0);                    // MajorImageVersion
+  out.u16(p + 14, 0);
+  out.u16(p + 16, cpu.osVer >> 8);       // MajorSubsystemVersion
+  out.u16(p + 18, cpu.osVer & 255);
+  out.u32(p + 20, 0);                    // Win32VersionValue
+  out.u32(p + 24, sizeOfImage);
+  out.u32(p + 28, headers);
+  out.u32(p + 32, 0);                    // CheckSum
+  out.u16(p + 36, img.subsystem);
+  out.u16(p + 38, img.dllChars);
+  const sumAt = p + 32;
+  p += 40;
+  if (c32) {
+    out.u32(p, img.stack);               // SizeOfStackReserve
+    out.u32(p + 4, 0x1000);              // SizeOfStackCommit
+    out.u32(p + 8, 0x100000);            // SizeOfHeapReserve
+    out.u32(p + 12, 0x1000);             // SizeOfHeapCommit
+    p += 16;
+  } else {
+    out.u64(p, img.stack);
+    out.u64(p + 8, 0x1000);
+    out.u64(p + 16, 0x100000);
+    out.u64(p + 24, 0x1000);
+    p += 32;
+  }
+  out.u32(p, 0);                         // LoaderFlags
+  out.u32(p + 4, NDIRS);
   for (let i = 0; i < NDIRS; i++) {
-    out.u32(o + 112 + i * 8, img.dirs[i].addr);
-    out.u32(o + 116 + i * 8, img.dirs[i].size);
+    out.u32(p + 8 + i * 8, img.dirs[i].addr);
+    out.u32(p + 12 + i * 8, img.dirs[i].size);
   }
 
   /* ---- 节头表，再把每节的字节摆进去。 */
   for (let i = 0; i < nsec; i++) {
     const s = img.secs[i];
-    const p = place[i];
-    const h = HDR_SIZE + i * SECHDR_SIZE;
+    const pl = place[i];
+    const h = hdrSize + i * SECHDR_SIZE;
     if (typeof s.name === 'string') out.name8(h, s.name);
     else out.bytes(h, s.name);                    // `-g` 时换成 `/<偏移>` 的那 8 字节
     out.u32(h + 8, s.vsize);
     out.u32(h + 12, s.vaddr);
-    out.u32(h + 16, p.size);
-    out.u32(h + 20, p.ptr);
+    out.u32(h + 16, pl.size);
+    out.u32(h + 20, pl.ptr);
     out.u32(h + 36, s.chars);
-    if (p.size !== 0) out.bytes(p.ptr, s.bytes);
+    if (pl.size !== 0) out.bytes(pl.ptr, s.bytes);
   }
   /* `-g` 时那张 COFF 符号表与字符串表接在最后一节补齐之后，不再补齐 —— 于是整份
    * 文件的长度不是 `FileAlignment` 的整数倍。校验和里那个「加上文件长度」自然
    * 也就把它们算进去了。 */
   if (img.tail !== undefined) out.bytes(at, img.tail);
-  out.u32(o + 64, checksum(out.b));
+  out.u32(sumAt, checksum(out.b));
   return out.b;
 }
 
@@ -320,8 +364,11 @@ function checksum(bytes) {
 
 const IMP_DESC_SIZE = 20;
 const THUNK_SIZE = 8;
-/** 按序号导入的标志位：`(ADDR3264)1 << 63`。 */
+/** 32 位上一格 thunk 是 4 字节，按序号导入的标志位也就落在第 31 位。 */
+const THUNK32_SIZE = 4;
+/** 按序号导入的标志位：`(ADDR3264)1 << (位宽 - 1)`。 */
 const ORDINAL_FLAG = 2n ** 63n;
+const ORDINAL_FLAG32 = 2n ** 31n;
 
 /**
  * 把一份映像里的导入表读成「哪个 dll、按什么次序导入哪些符号」。
@@ -335,6 +382,9 @@ export function readImports(img) {
   if (dir.size === 0) return null;
   const si = img.secs.findIndex((s) => dir.addr >= s.vaddr && dir.addr < s.vaddr + s.vsize);
   if (si < 0) throw new OmniError('pe: 导入表不在任何一节里');
+  const cpu = MACHINES.get(img.machine);
+  const thk = cpu !== undefined && cpu.ptr === 4 ? THUNK32_SIZE : THUNK_SIZE;
+  const ordFlag = thk === THUNK32_SIZE ? ORDINAL_FLAG32 : ORDINAL_FLAG;
   const sec = img.secs[si];
   const dv = new DataView(sec.bytes.buffer, sec.bytes.byteOffset, sec.bytes.byteLength);
   /** RVA -> 这一节字节里的下标。 */
@@ -356,14 +406,16 @@ export function readImports(img) {
     if (ent === 0 && name === 0) break;                 // 末尾那条全 0
     const syms = [];
     for (let k = 0; ; k++) {
-      const v = dv.getBigUint64(off(ent) + k * THUNK_SIZE, true);
+      const v = thk === THUNK32_SIZE
+        ? BigInt(dv.getUint32(off(ent) + k * thk, true))
+        : dv.getBigUint64(off(ent) + k * thk, true);
       if (v === 0n) break;
-      if ((v & ORDINAL_FLAG) !== 0n) syms.push({ ordinal: Number(v & 0xffffffffn) });
+      if ((v & ordFlag) !== 0n) syms.push({ ordinal: Number(v & 0xffffffffn & (ordFlag - 1n)) });
       else syms.push({ name: strAt(Number(v) + 2) });    // 前面两个字节是提示字
     }
     dlls.push({ name: strAt(name), syms });
   }
-  return { sec: si, at, rva: sec.vaddr, dlls };
+  return { sec: si, at, rva: sec.vaddr, ptr: thk, dlls };
 }
 
 /**
@@ -373,11 +425,13 @@ export function readImports(img) {
  * @returns 从 `at` 到那一节末尾的字节
  */
 export function buildImports(imp) {
+  const thk = imp.ptr === 4 ? THUNK32_SIZE : THUNK_SIZE;
+  const ordFlag = thk === THUNK32_SIZE ? ORDINAL_FLAG32 : ORDINAL_FLAG;
   const ndlls = imp.dlls.length;
   let nsyms = 0;
   for (const d of imp.dlls) nsyms += d.syms.length;
   const impSize = (ndlls + 1) * IMP_DESC_SIZE;
-  const iatSize = (nsyms + ndlls) * THUNK_SIZE;
+  const iatSize = (nsyms + ndlls) * thk;
 
   /* 先摆下描述符与两份 thunk 数组，名字接在它们后面（`section_ptr_add` 那一句）。 */
   const head = new Uint8Array(impSize + 2 * iatSize);
@@ -408,17 +462,22 @@ export function buildImports(imp) {
         /* 序号是**非零**才走序号那条路（tcc 那一句就是 `if (ordinal)`）——
          * `.def` 里没写 `@N` 的符号序号是 0，那要按名字导入。 */
         if (s.ordinal) {
-          v = BigInt(s.ordinal) | ORDINAL_FLAG;
+          v = BigInt(s.ordinal) | ordFlag;
         } else {
           v = BigInt(nextRva());
           tail.push(0, 0);                                      // 提示字，没人用
           put(s.name);
         }
       }
-      hv.setBigUint64(thkPtr, v, true);
-      hv.setBigUint64(entPtr, v, true);
-      thkPtr += THUNK_SIZE;
-      entPtr += THUNK_SIZE;
+      if (thk === THUNK32_SIZE) {
+        hv.setUint32(thkPtr, Number(v), true);
+        hv.setUint32(entPtr, Number(v), true);
+      } else {
+        hv.setBigUint64(thkPtr, v, true);
+        hv.setBigUint64(entPtr, v, true);
+      }
+      thkPtr += thk;
+      entPtr += thk;
     }
     dllPtr += IMP_DESC_SIZE;
   }

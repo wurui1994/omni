@@ -26,6 +26,7 @@ const CROSS = join(root, '.omni-cache', 'tcc-cross');
 const TARGETS = [
   { name: 'x86_64-win32', tcc: 'x86_64-win32-tcc' },
   { name: 'arm64-win32', tcc: 'arm64-win32-tcc' },
+  { name: 'i386-win32', tcc: 'i386-win32-tcc' },
 ];
 
 const filters = process.argv.slice(2).filter((x) => !x.startsWith('-'));

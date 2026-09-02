@@ -31,14 +31,16 @@ import { readImage } from './pe.js';
 
 const SHT_SYMTAB = 2;
 const SYM_SIZE = 24;
+const EM_386 = 3;
+const EM_ARM = 40;
 const SHN_UNDEF = 0;
 const STB_LOCAL = 0;
 /* `struct pe_rsrc_header`：COFF 的文件头加一条节表项。 */
 const RES_HDR_SIZE = 20 + 40;
 /* `struct pe_rsrc_reloc`：偏移、符号号、类型 —— 紧排，10 字节。 */
 const RES_RELOC_SIZE = 10;
-/* `RSRC_RELTYPE`：x86_64 与 arm64 都是 3（`ADDR32NB`），i386/arm 是 7。 */
-const RSRC_RELTYPE = 3;
+/* `RSRC_RELTYPE`：x86_64 与 arm64 都是 3（`ADDR32NB`），i386/arm 是 7（`DIR32NB`）。 */
+const RSRC_RELTYPE = new Map([[0x8664, 3], [0xaa64, 3], [0x14c, 7], [0x1c0, 7]]);
 
 /** `pe_add_runtime` 里那四种映像类型。 */
 export const PE_EXE = 1;
@@ -66,17 +68,21 @@ export function readSymbols(obj) {
   };
   const dv = new DataView(st.bytes.buffer, st.bytes.byteOffset, st.bytes.byteLength);
   const out = [];
-  for (let p = 0; p + SYM_SIZE <= st.bytes.length; p += SYM_SIZE) {
-    const info = st.bytes[p + 4];
+  /* 32 位的 `Elf32_Sym` 是 16 字节，而且字段次序不一样：名字、值、大小在前，
+   * `st_info` / `st_other` / `st_shndx` 在后。 */
+  const c32 = obj.class32 === true;
+  const size = c32 ? 16 : SYM_SIZE;
+  for (let p = 0; p + size <= st.bytes.length; p += size) {
+    const info = st.bytes[p + (c32 ? 12 : 4)];
     out.push({
       name: nameAt(dv.getUint32(p, true)),
       info,
       bind: Math.floor(info / 16),
       type: info % 16,
-      other: st.bytes[p + 5],
-      shndx: dv.getUint16(p + 6, true),
-      value: Number(dv.getBigUint64(p + 8, true)),
-      size: Number(dv.getBigUint64(p + 16, true)),
+      other: st.bytes[p + (c32 ? 13 : 5)],
+      shndx: dv.getUint16(p + (c32 ? 14 : 6), true),
+      value: c32 ? dv.getUint32(p + 4, true) : Number(dv.getBigUint64(p + 8, true)),
+      size: c32 ? dv.getUint32(p + 8, true) : Number(dv.getBigUint64(p + 16, true)),
     });
   }
   return out;
@@ -124,13 +130,18 @@ export class SymTab {
  * `pe_add_runtime` 的前半：挑入口符号与映像类型。
  *
  * @param tab 已经装完命令行上那些目标文件的符号表
- * @param opts `{subsystem, dll, entry, leadingUnderscore}`
+ * @param opts `{subsystem, dll, entry, leadingUnderscore, stdcall}`
+ *        - `stdcall`：32 位的那两个 PE 目标（i386/arm）。`PE_STDSYM` 是**按目标**定的宏
+ *          （`#if defined TCC_TARGET_X86_64 || defined TCC_TARGET_ARM64` 时是 `n`，
+ *          否则是 `"_" n s`），与 `leading_underscore` 无关
  * @returns `{start, peType}`，`start` 就是要当作未定义符号加进去的那个名字
  */
 export function peStart(tab, opts) {
   const o = opts ?? {};
-  const under = o.leadingUnderscore === true;   // i386-win32 才是 true
-  const std = (n, s) => (under ? `_${n}${s}` : n);
+  const under = o.leadingUnderscore === true;   // PE 上默认是 0，只有 `-fleading-underscore` 才开
+  /* `PE_STDSYM(n,s)`：64 位那两个目标上就是 `n`，32 位上是 `"_" n s` —— 也就是
+   * i386/arm 上入口是 `___dllstart@12`、要找的是 `_WinMain@16`。 */
+  const std = (n, s) => (o.stdcall === true ? `_${n}${s}` : n);
   let start;
   let peType;
   if (o.dll === true) {
@@ -255,8 +266,10 @@ export function readDllExports(bytes, path) {
  * 所以这一步必须在认 `MZ` 之前，而且 ELF 那 `\x7fELF` 落在机器号那两字节上，撞不着。
  *
  * 装进来的东西就两样：那一节的原始字节，以及它自己那张重定位表。COFF 里每条重定位
- * 是 10 字节（偏移、符号号、类型），类型必须是 `RSRC_RELTYPE`（x86_64 与 arm64 都是
- * 3，也就是 `ADDR32NB`）。符号号一律不看 —— tcc 把每一条都改挂到自己新加的那个
+ * 是 10 字节（偏移、符号号、类型），类型必须是 `RSRC_RELTYPE`（x86_64 与 arm64 是 3，
+ * 也就是 `ADDR32NB`；i386/arm 是 7）。tcc 那句 `hdr.filehdr.Machine != IMAGE_FILE_MACHINE`
+ * 保证机器号就是目标的机器号，所以这里按文件头里那个机器号选。符号号一律不看 ——
+ * tcc 把每一条都改挂到自己新加的那个
  * `.rsrc` 符号上，落笔时成了 `R_XXX_RELATIVE`，也就是「原地那个节内偏移 + 这一节的
  * RVA」。资源目录里指向数据的那几格正是这么补上的。
  *
@@ -266,6 +279,8 @@ export function readRes(bytes) {
   if (bytes.length < RES_HDR_SIZE) return null;
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   if (dv.getUint16(2, true) !== 1) return null;             // NumberOfSections
+  const relType = RSRC_RELTYPE.get(dv.getUint16(0, true));  // Machine
+  if (relType === undefined) return null;
   let name = '';
   for (let i = 0; i < 8 && bytes[20 + i] !== 0; i++) name += String.fromCharCode(bytes[20 + i]);
   if (name !== '.rsrc') return null;
@@ -278,7 +293,7 @@ export function readRes(bytes) {
   for (let i = 0; i < nrel; i++) {
     const p = relPtr + i * RES_RELOC_SIZE;
     if (p + RES_RELOC_SIZE > bytes.length) throw new OmniError('res: 重定位表超出文件');
-    if (dv.getUint16(p + 8, true) !== RSRC_RELTYPE) {
+    if (dv.getUint16(p + 8, true) !== relType) {
       throw new OmniError(`res: 不认识的重定位类型 ${dv.getUint16(p + 8, true)}`);
     }
     relocs.push(dv.getUint32(p, true));
@@ -306,8 +321,13 @@ export function peLoad(inp) {
   const dlls = [];
   const objs = [];
   const res = [];
+  let machine = null;
 
-  const loadObject = (bytes) => tab.addObject(readSymbols(readObject(bytes)));
+  const loadObject = (bytes) => {
+    const obj = readObject(bytes);
+    if (machine === null) machine = obj.machine;
+    tab.addObject(readSymbols(obj));
+  };
 
   for (const o of inp.objs) {
     trace.push({ kind: 'file', path: o.path });
@@ -319,7 +339,8 @@ export function peLoad(inp) {
     loadObject(o.bytes);
   }
 
-  const { start, entryName, peType } = peStart(tab, inp);
+  const { start, entryName, peType } = peStart(tab,
+    { ...inp, stdcall: machine === EM_386 || machine === EM_ARM });
   tab.declare(start);                            // 就是这一句把 crt 拉进来
 
   if (inp.nostdlib === true) {

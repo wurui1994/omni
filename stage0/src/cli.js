@@ -2395,7 +2395,7 @@ commands:
   pe-link   link .o files into a Windows .exe (ADR-0017 cut 9 slices 47-50): reads
             libtcc1.a on demand and the .def import libraries from -L DIR, builds the
             import table and thunks, applies every relocation. -o NAME,
-            --target x86_64-win32|arm64-win32, --shared (build a .dll: slice 64),
+            --target x86_64-win32|arm64-win32|i386-win32, --shared (a .dll: slice 64),
             --subsystem NAME, --image-base HEX, --stack N, --section-align HEX,
             --file-align HEX, -e NAME (slice 66). Inputs are told apart by content:
             a one-section COFF named .rsrc is a resource file (slice 68), one starting

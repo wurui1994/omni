@@ -38,8 +38,16 @@ const SHF_ALLOC = 0x2;
 const SHF_EXECINSTR = 0x4;
 const SHF_TLS = 0x400;
 const RELA_SIZE = 24;
+/** 32 位那一路：`SHT_REL`，一条 8 字节，`r_info` 是「高 24 位符号号 + 低 8 位类型」。 */
+const SHT_REL = 9;
+const REL32_SIZE = 8;
 const R_X86_64_RELATIVE = 8;
 const R_AARCH64_RELATIVE = 1027;
+const R_386_RELATIVE = 8;
+const R_ARM_RELATIVE = 23;
+/** `pe_build_reloc` 里那个 `PE_IMAGE_REL`：64 位是 `DIR64`，32 位是 `HIGHLOW`。 */
+const IMAGE_REL_BASED_HIGHLOW = 3;
+const IMAGE_REL_BASED_DIR64 = 10;
 
 const SHN_UNDEF = 0;
 const SHN_COMMON = 0xfff2;
@@ -244,7 +252,8 @@ export function buildExports(syms, outName, baseO, rvaBase, under) {
 }
 
 /** `pe_build_reloc`：把要装载时重定位的地方按 4K 分页摆成一串块。 */
-export function buildReloc(entries) {
+export function buildReloc(entries, type) {
+  const kind = type ?? IMAGE_REL_BASED_DIR64;
   const out = [];
   const put16 = (v) => { out.push(v & 0xff, (v >> 8) & 0xff); };
   let count = 0;
@@ -270,7 +279,7 @@ export function buildReloc(entries) {
       for (let i = 0; i < 8; i++) out.push(0);
       page = addr & ~0xfff;
     }
-    put16((addr - page) | (10 << 12));              // IMAGE_REL_BASED_DIR64
+    put16((addr - page) | (kind << 12));
     count++;
   }
   if (count !== 0) close();
@@ -301,6 +310,12 @@ export function peSections(inp) {
   });
   const mo = readObject(merged);
   const machine = mo.machine;
+  /* 32 位的目标（i386 / arm-wince）：符号 16 字节、重定位表叫 `.rel.X` 而不是
+   * `.rela.X`、一条 8 字节没有加数，装载时重定位那张表里的类型是 `HIGHLOW`。 */
+  const c32 = mo.class32 === true;
+  const relSize = c32 ? REL32_SIZE : RELA_SIZE;
+  const relType = c32 ? SHT_REL : SHT_RELA;
+  const relPfx = c32 ? '.rel' : '.rela';
   const syms = readSymbols(mo);
   /* 映像基址与「要不要 `.reloc`」都是按目标定的（`IMAGE_BASE_EXE` 与
    * `DLLCHARACTERISTICS`）：x86_64 是 0x400000 且不带 `DYNAMIC_BASE`，
@@ -319,9 +334,13 @@ export function peSections(inp) {
   /* subsystem 1（native）那两个对齐都是 0x20，别的是 0x1000 / 0x200。 */
   const sectionAlign = inp.sectionAlign ?? (subsystem === 1 ? 0x20 : SECTION_ALIGN);
   const fileAlign = inp.fileAlign ?? (subsystem === 1 ? 0x20 : FILE_ALIGN);
+  /* `IMAGE_BASE_EXE` / `IMAGE_BASE_DLL`：DLL 那一路除了 arm64 都是 0x10000000，
+   * 可执行文件那一路 x86_64 与 i386 是 0x400000、arm64 是 0x140000000、arm 是 0x100000。 */
+  const BASE_EXE = new Map([[EM_X86_64, 0x400000], [EM_386, 0x400000],
+    [EM_AARCH64, 0x140000000], [EM_ARM, 0x100000]]);
   let imagebase = dll
     ? (arm64 ? 0x180000000 : 0x10000000)
-    : (arm64 ? 0x140000000 : 0x400000);
+    : (BASE_EXE.get(machine) ?? 0x400000);
   if (subsystem >= 10 && subsystem <= 12) imagebase = 0;   // EFI 那三种从 0 起
   /* `-Wl,--image-base=` / `-Wl,-Ttext=`（`s1->has_text_addr`）最后说话。 */
   if (inp.imagebase !== undefined) imagebase = inp.imagebase;
@@ -355,16 +374,24 @@ export function peSections(inp) {
     const shndx = secs.length;                   // `secs` 是从 1 号节开始摆的
     const symx = syms.length;
     syms.push({ name: '.rsrc', info: 0, bind: 0, type: 0, other: 0, shndx, value: 0, size: 0 });
-    const rela = new Uint8Array(rs.relocs.length * RELA_SIZE);
+    const rela = new Uint8Array(rs.relocs.length * relSize);
     const dv = new DataView(rela.buffer);
-    const rel = machine === EM_AARCH64 ? R_AARCH64_RELATIVE : R_X86_64_RELATIVE;
+    const REL = new Map([[EM_AARCH64, R_AARCH64_RELATIVE], [EM_X86_64, R_X86_64_RELATIVE],
+      [EM_386, R_386_RELATIVE], [EM_ARM, R_ARM_RELATIVE]]);
+    const rel = REL.get(machine);
+    if (rel === undefined) throw new OmniError(`pe: 不认识的架构 0x${machine.toString(16)}`);
     for (let i = 0; i < rs.relocs.length; i++) {
-      dv.setBigUint64(i * RELA_SIZE, BigInt(rs.relocs[i]), true);
-      dv.setUint32(i * RELA_SIZE + 8, rel, true);
-      dv.setUint32(i * RELA_SIZE + 12, symx, true);
+      if (c32) {
+        dv.setUint32(i * relSize, rs.relocs[i], true);
+        dv.setUint32(i * relSize + 4, ((symx << 8) | rel) >>> 0, true);
+        continue;
+      }
+      dv.setBigUint64(i * relSize, BigInt(rs.relocs[i]), true);
+      dv.setUint32(i * relSize + 8, rel, true);
+      dv.setUint32(i * relSize + 12, symx, true);
     }
     secs.push({
-      name: '.rela.rsrc', type: SHT_RELA, flags: 0,
+      name: `${relPfx}.rsrc`, type: relType, flags: 0,
       size: rela.length, bytes: rela, info: shndx,
     });
   }
@@ -434,17 +461,19 @@ export function peSections(inp) {
   const tsz = thunkSize(machine);
   const thunkAt = align(text.size, 8);
   text.size = thunkAt + nthunks * tsz;
-  /* arm64（与 arm）上 `R_XXX_THUNKFIX` 正好**就是** `REL_TYPE_DIRECT` —— 于是每个桩
-   * 里指向 IAT 那一格也要进 `.reloc`。x86_64 上它是 PC32，不算。 */
-  if (machine === EM_AARCH64 || machine === EM_ARM) {
-    const fixAt = machine === EM_AARCH64 ? 16 : 8;
+  /* arm64、arm 与 i386 上 `R_XXX_THUNKFIX` 正好**就是** `REL_TYPE_DIRECT` —— 于是每个桩
+   * 里指向 IAT 那一格也要进 `.reloc`。只有 x86_64 上它是 PC32，不算。 */
+  const THUNKFIX_AT = new Map([[EM_AARCH64, 16], [EM_ARM, 8], [EM_386, 2]]);
+  const fixAt = THUNKFIX_AT.get(machine);
+  if (fixAt !== undefined) {
     text.extraDirect = [];
     for (let k = 0; k < nthunks; k++) text.extraDirect.push(thunkAt + k * tsz + fixAt);
   }
 
   const hasTls = secs.some((s) => (s.flags & SHF_TLS) !== 0);
-  /* `sizeof(IMAGE_TLS_DIRECTORY)`：四个指针加两个 DWORD。 */
-  const tlsSize = hasTls ? 4 * 8 + 8 : 0;
+  /* `sizeof(IMAGE_TLS_DIRECTORY)`：四个指针加两个 DWORD —— 32 位上是 24 字节。 */
+  const ptrSize = c32 ? 4 : 8;
+  const tlsSize = hasTls ? 4 * ptrSize + 8 : 0;
 
   const reloc = hasReloc
     ? { name: '.reloc', type: SHT_PROGBITS, flags: 0, size: 0, bytes: new Uint8Array(0) }
@@ -483,7 +512,7 @@ export function peSections(inp) {
       thunk = sec;
       if (dlls.length !== 0) {
         const at = align(sec.size, 16);
-        imp = { rva: addr - imagebase, at, dlls };
+        imp = { rva: addr - imagebase, at, dlls, ptr: c32 ? 4 : 8 };
         sec.size = at + buildImports(imp).length;
       }
       /* `pe_build_exports` 是无条件调的 —— 可执行文件里带 `__declspec(dllexport)`
@@ -491,20 +520,21 @@ export function peSections(inp) {
       exp = buildExports(syms, inp.outName, align(sec.size, 16),
         addr - imagebase, inp.leadingUnderscore === true);
       if (exp !== null) sec.size = exp.at + exp.size;
-      /* `pe_build_tls(pe, NULL)`：导出表后面再留 40 字节的 `IMAGE_TLS_DIRECTORY`，
-       * 顺手在 `.data` 里划 32 字节（`__tls_index` 加三格），四个指针各挂一条
-       * `REL_TYPE_DIRECT` —— 于是它们也要进 `.reloc`。 */
+      /* `pe_build_tls(pe, NULL)`：导出表后面再留一份 `IMAGE_TLS_DIRECTORY`（64 位
+       * 40 字节、32 位 24 字节），顺手在 `.data` 里划 `PTR_SIZE * 4` 字节
+       * （`__tls_index` 加三格），四个指针各挂一条 `REL_TYPE_DIRECT` —— 于是它们
+       * 也要进 `.reloc`。 */
       if (tlsSize !== 0) {
         const dataSec = find('.data');
         if (dataSec === undefined) throw new OmniError('pe: 有线程局部的节，可是没有 .data');
         const dir = align(sec.size, 16);
         sec.size = dir + tlsSize;
         const data = align(dataSec.size, 16);
-        dataSec.size = data + 8 * 4;
+        dataSec.size = data + ptrSize * 4;
         sec.extraDirect = [];
-        for (let n = 0; n < 4; n++) sec.extraDirect.push(dir + n * 8);
+        for (let n = 0; n < 4; n++) sec.extraDirect.push(dir + n * ptrSize);
         linker.set('__tls_index', { sec: dataSec, off: data });
-        tls = { dir, size: tlsSize, data, dataSec, start: 0, end: 0 };
+        tls = { dir, size: tlsSize, data, dataSec, start: 0, end: 0, ptr: ptrSize };
       }
     }
 
@@ -517,18 +547,22 @@ export function peSections(inp) {
       const entries = [];
       for (const info of infos) {
         for (const s of info.secs) {
-          const rela = find(`.rela${s.name}`);
+          const rela = find(`${relPfx}${s.name}`);
           if (rela !== undefined) {
             const inDwarf = dw.has(s.name);
             const dv = new DataView(rela.bytes.buffer, rela.bytes.byteOffset, rela.bytes.byteLength);
-            for (let p = 0; p + 24 <= rela.bytes.length; p += 24) {
-              if (dv.getUint32(p + 8, true) !== direct) continue;
+            for (let p = 0; p + relSize <= rela.bytes.length; p += relSize) {
+              const info32 = c32 ? dv.getUint32(p + 4, true) : 0;
+              const type = c32 ? info32 & 0xff : dv.getUint32(p + 8, true);
+              if (type !== direct) continue;
               if (inDwarf) {
-                const sym = syms[dv.getUint32(p + 12, true)];
+                const symx = c32 ? info32 >>> 8 : dv.getUint32(p + 12, true);
+                const sym = syms[symx];
                 const tgt = sym === undefined || sym.shndx === 0 ? undefined : secs[sym.shndx - 1];
                 if (tgt !== undefined && dw.has(tgt.name)) continue;
               }
-              entries.push(s.vaddr - imagebase + Number(dv.getBigUint64(p, true)));
+              const off = c32 ? dv.getUint32(p, true) : Number(dv.getBigUint64(p, true));
+              entries.push(s.vaddr - imagebase + off);
             }
           }
           /* 链接时才加的那几条（arm64 的导入桩、TLS 目录里那四个指针）挂在这一节
@@ -536,7 +570,7 @@ export function peSections(inp) {
           for (const at of s.extraDirect ?? []) entries.push(s.vaddr - imagebase + at);
         }
       }
-      sec.bytes = buildReloc(entries);
+      sec.bytes = buildReloc(entries, c32 ? IMAGE_REL_BASED_HIGHLOW : IMAGE_REL_BASED_DIR64);
       sec.size = sec.bytes.length;
     }
 
@@ -587,6 +621,7 @@ export function peSections(inp) {
     machine, infos, imp, exp, tls, nthunks, syms, secs, merged, imagebase, fileSize: off,
     imports: imps, text, thunkAt, thunkSize: tsz, thunk, linker, dll, hasReloc,
     dllChars, subsystem, sectionAlign, fileAlign, debug: inp.debug === true,
+    class32: c32, relSize, relType,
   };
 }
 

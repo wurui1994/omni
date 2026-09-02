@@ -37,9 +37,10 @@ const CROSS = join(root, '.omni-cache', 'tcc-cross');
 const TARGETS = [
   { name: 'x86_64-win32', tcc: 'x86_64-win32-tcc', machine: 0x8664 },
   { name: 'arm64-win32', tcc: 'arm64-win32-tcc', machine: 0xaa64 },
+  { name: 'i386-win32', tcc: 'i386-win32-tcc', machine: 0x14c, rsrcRel: 7 },
 ];
 
-/** `RSRC_RELTYPE`：x86_64 与 arm64 都是 3（`IMAGE_REL_*_ADDR32NB`）。 */
+/** `RSRC_RELTYPE`：x86_64 与 arm64 都是 3（`IMAGE_REL_*_ADDR32NB`），i386/arm 是 7。 */
 const RSRC_RELTYPE = 3;
 const RT_RCDATA = 10;
 
@@ -85,7 +86,7 @@ function resTree(blobs) {
 }
 
 /** 把 `{bytes, relocs}` 包成一份 `windres -O coff` 那样的单节 COFF。 */
-function resFile(machine, tree) {
+function resFile(machine, tree, relType) {
   const HDR = 20 + 40;
   const out = new Uint8Array(HDR + tree.bytes.length + tree.relocs.length * 10);
   const dv = new DataView(out.buffer);
@@ -103,7 +104,7 @@ function resFile(machine, tree) {
   for (const off of tree.relocs) {
     dv.setUint32(p, off, true);
     dv.setUint32(p + 4, 0, true);                  // 符号号（tcc 一律不看）
-    dv.setUint16(p + 8, RSRC_RELTYPE, true);
+    dv.setUint16(p + 8, relType, true);
     p += 10;
   }
   return out;
@@ -184,7 +185,7 @@ try {
     for (const sh of SHAPES) {
       if (!keep(sh.name)) continue;
       const resPath = join(dir, `${t.name}-${sh.name}.res`);
-      writeFileSync(resPath, resFile(t.machine, sh.tree()));
+      writeFileSync(resPath, resFile(t.machine, sh.tree(), t.rsrcRel ?? RSRC_RELTYPE));
       const dll = sh.dll === true;
       for (const c of cases) {
         const stem = `${t.name}-${sh.name}-${basename(c, '.c')}`;

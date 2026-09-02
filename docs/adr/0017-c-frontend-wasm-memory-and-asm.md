@@ -511,6 +511,12 @@ Mach-O 的 dylib 不叫、PE 的 dll **照叫**（`pe_add_runtime` 在
 `PTR_SIZE` = 4，arm 还带 `e_flags`。顺带挖出来一格：arm 上 tcc **不造** `.eh_frame` ——
 `tccdbg.c` 里那段 arm 的 CIE 是死代码。`elf-merge` 从六个目标长到十个，436 份逐字节
 相同）。
+**i386-win32 的映像**（第七十三片：PE32 的可选头短 16 字节，多一格 `BaseOfData` ——
+那一格只认 `sec_data` 类，`.rdata` 不算。导入桩是 `ff 25 <绝对地址>`，而且 i386 上
+`R_XXX_THUNKFIX` 就是 `REL_TYPE_DIRECT`，所以每个桩里那 4 字节还要进 `.reloc`。
+最不显眼的一格是 `PE_STDSYM` 是**按目标**定的宏，不是按 `leading_underscore`：i386 的
+DLL 入口是 `___dllstart@12`，削成 `__dllstart@12`，找错了名字连 `dllcrt1.o` 都拉不出来。
+十一道 PE 门各长出第三个目标，全 0 条不同）。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -11197,6 +11203,55 @@ arm-wince 四个新的，`436 条相同, 0 条不同`。这一格是 PE32 的地
 `.o` 读不进来，链接器那一层无从谈起。
 
 <!-- 第九刀第七十二片-END -->
+
+## 落地：第九刀第七十三片
+
+第七十二片把 32 位的 `.o` 读进来了，这一片把它们**链成一份 PE32**。尺子是
+`i386-win32-tcc a.o -o a.exe` 与 `-shared a.o -o a.dll`。
+
+PE32 与 PE32+ 的差，全在几格宽度上：可选头 0xe0 而不是 0xf0（整个头 376 而不是 392）、
+魔数 0x010b、`ImageBase` 与那四格栈/堆是 4 字节，并且**多一格 `BaseOfData`**（偏移 24）。
+那一格我一开始按「第一个不是代码的节」写，错了 —— `tccpe.c:741` 只在 `case sec_data`
+里填它，`.rdata`（`sec_rdata`）不算，所以 `.text`/`.rdata`/`.data` 的映像里它是 `.data`
+的 RVA，不是 `.rdata` 的。`writeImage` 于是改成走一个游标 `p`，那一格插进去，后面所有
+偏移自然跟着挪；往返那一路（`pe-roundtrip`）读回来的时候节的类已经没了，所以
+`readImage` 把这一格原样留下，写回去照抄。
+
+i386 那边这一片新学了三件事：
+
+- **导入桩是 8 字节的 `ff 25 <绝对地址>`**。`write32le(p+2, -4)` 那一句在
+  `#ifdef TCC_TARGET_X86_64` 里 —— 32 位上 `ff 25` 后面跟的是 IAT 那一格的**绝对**
+  地址，重定位是 `R_386_32`。IAT 一格 4 字节，序号位是第 31 位。
+- **`R_XXX_THUNKFIX` 在 i386 上就是 `REL_TYPE_DIRECT`**（都是 `R_386_32`），所以每个
+  桩里那 4 字节也得进 `.reloc`。这一格漏了，`.reloc` 就短 4 字节 —— DLL 那一路第一次
+  跑就是这么差的：`08-bitfield` 少两条 `HIGHLOW`，块长 0x34 而不是 0x38。arm64 上
+  THUNKFIX 也是 DIRECT（`ABS64`），那一支早就有了；只有 x86_64 是 PC32，不算。
+- **`R_386_TLS_LE`（17）** 与 x86_64 的 `TPOFF32` 同一个形状：`tls_end` 有就
+  `val - tls_end`，没有就退回符号所在那一节的末尾。PE 上 `tls_end == tls_start`。
+  `IMAGE_TLS_DIRECTORY` 也跟着窄一半：四个指针加两个 DWORD，32 位上是 **24** 字节。
+
+最费时间的是入口符号。`PE_STDSYM(n,s)` 是**按目标**定的宏 ——
+`#if defined TCC_TARGET_X86_64 || defined TCC_TARGET_ARM64` 时是 `n`，否则是 `"_" n s`。
+我原先把它挂在 `leading_underscore` 上，于是 i386 的 DLL 去找 `_dllstart`，
+`dllcrt1.o` 一个都没拉出来（`.text` 136 字节对 tcc 的 1024）。真正的名字是
+`___dllstart@12`，`pe_add_runtime` 那两句
+`pe->start_symbol = start_symbol + 1; if (!leading_underscore || strchr(start_symbol,'@')) ++start_symbol;`
+把它削成 `__dllstart@12` —— 带 `@` 的一律再削一次，与前导下划线无关。`WinMain` 那两条
+查的也是 `_WinMain@16`。`peStart` 于是多收一个 `stdcall`，由 `peLoad` 从输入 `.o` 的
+机器号定；`leading_underscore` 只管最后削不削那一下。
+
+顺带一格：`pe_load_res` 里 `rel.type != RSRC_RELTYPE` 是硬卡的，i386/arm 上那个值是
+**7**（`DIR32NB`）不是 3。`readRes` 改成按资源文件自己头里那个机器号选 —— tcc 那句
+`hdr.filehdr.Machine != IMAGE_FILE_MACHINE` 保证它就是目标的机器号。
+
+十一道 PE 门于是都长出第三个目标：`pe-exe` `258 条相同`、`pe-dll` `270 条相同`、
+`pe-secs`/`pe-content`/`pe-imports`/`pe-load`/`pe-roundtrip` 各 `240 条`、
+`pe-flags` `216 条`、`pe-rsrc` `108 条`、`pe-debug` `51 条`、`pe-def` `48 条`、
+`pe-dll-link` `6 条`，全 0 条不同。命令行上
+`omni pe-link --target i386-win32`（带与不带 `--shared`）写出来的 `.exe`、`.dll` 与
+那份 `.def` 也与 tcc 逐字节相同。
+
+<!-- 第九刀第七十三片-END -->
 
 
 

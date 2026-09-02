@@ -13,8 +13,23 @@
 
 import { OmniError } from '../source/diag.js';
 
+const EM_386 = 3;
 const EM_X86_64 = 62;
 const EM_AARCH64 = 183;
+
+/* i386（`i386-link.c` 的 `relocate`）。32 位上一格就是 4 字节，所以「直接」那一号
+ * （`REL_TYPE_DIRECT`）也是 `R_386_32` —— 与 x86_64 上的 `R_X86_64_64` 对应。 */
+const R_386_32 = 1;
+const R_386_PC32 = 2;
+const R_386_GOT32 = 3;
+const R_386_PLT32 = 4;
+const R_386_GLOB_DAT = 6;
+const R_386_JMP_SLOT = 7;
+const R_386_RELATIVE = 8;
+const R_386_GOTOFF = 9;
+const R_386_GOTPC = 10;
+const R_386_GOT32X = 43;
+const R_386_TLS_LE = 17;
 
 /* x86_64 */
 const R_X86_64_64 = 1;
@@ -111,6 +126,29 @@ export function relocateOne(machine, type, b, at, addr, val, imagebase, weakUnde
         return add32(t.end !== 0 ? val - t.end : val - t.symSecEnd);
       }
       default: throw new OmniError(`reloc: x86_64 还不会 ${type} 号`);
+    }
+  }
+  if (machine === EM_386) {
+    switch (type) {
+      case R_386_32: return add32(val);
+      case R_386_PC32:
+      case R_386_PLT32: return add32(val - addr);
+      case R_386_RELATIVE: return add32(val - imagebase);
+      case R_386_GLOB_DAT:
+      case R_386_JMP_SLOT: return dv.setUint32(at, val >>> 0, true);
+      case R_386_GOTPC: return add32(slot() - addr);
+      case R_386_GOTOFF: return add32(val - slot());
+      /* `add32le(ptr, got_offset)`：写的是**这个符号在 GOT 里的偏移**，不是地址。
+       * 调用方把那个偏移当 `gotSlot` 递进来。 */
+      case R_386_GOT32:
+      case R_386_GOT32X: return add32(slot());
+      /* 与 x86_64 的 `TPOFF32` 同一个形状：`tls_end` 有就减它，没有就退回符号所在
+       * 那一节的末尾（`i386-link.c` 里 `R_386_TLS_LE` 那一段）。 */
+      case R_386_TLS_LE: {
+        const t = tlsSeg();
+        return add32(t.end !== 0 ? val - t.end : val - t.symSecEnd);
+      }
+      default: throw new OmniError(`reloc: i386 还不会 ${type} 号`);
     }
   }
   if (machine === EM_AARCH64) {

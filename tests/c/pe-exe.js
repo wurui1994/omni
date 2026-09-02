@@ -26,6 +26,9 @@ const CROSS = join(root, '.omni-cache', 'tcc-cross');
 const TARGETS = [
   { name: 'x86_64-win32', tcc: 'x86_64-win32-tcc' },
   { name: 'arm64-win32', tcc: 'arm64-win32-tcc' },
+  /* 32 位那两个（第九刀第七十三片）：PE32 的可选头短 16 字节、多一格 `BaseOfData`，
+   * IAT 一格 4 字节，`.reloc` 里的类型是 `HIGHLOW`。 */
+  { name: 'i386-win32', tcc: 'i386-win32-tcc' },
 ];
 
 const filters = process.argv.slice(2).filter((x) => !x.startsWith('-'));

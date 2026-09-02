@@ -36,6 +36,8 @@ const THUNK_SIZE = 8;
 /** `sizeof(struct syment)` —— 紧排的 18 字节。 */
 const SYMENT_SIZE = 18;
 
+const EM_386 = 3;
+const EM_ARM = 40;
 const EM_X86_64 = 62;
 const EM_AARCH64 = 183;
 
@@ -44,6 +46,12 @@ function thunkCode(machine) {
   if (machine === EM_X86_64) {
     /* `ff 25 <rel32>`：跳到 IAT 那一格里存的地址。rel32 原地先写 -4。 */
     return new Uint8Array([0xff, 0x25, 0xfc, 0xff, 0xff, 0xff, 0, 0]);
+  }
+  if (machine === EM_386) {
+    /* 同一句 `ff 25`，可 32 位上后面那 4 字节是**绝对地址**（`R_386_32`），
+     * 不是 rel32 —— tcc 那个 `write32le(p + 2, -4)` 在 `#ifdef TCC_TARGET_X86_64`
+     * 里面。原地留 0。 */
+    return new Uint8Array([0xff, 0x25, 0, 0, 0, 0, 0, 0]);
   }
   if (machine === EM_AARCH64) {
     const b = new Uint8Array(24);
@@ -88,24 +96,32 @@ export function peImage(inp) {
   if (r.tls !== null) {
     const t = r.tls;
     const dv = new DataView(r.thunk.data.buffer, r.thunk.data.byteOffset + t.dir, t.size);
-    dv.setBigUint64(0, BigInt(t.start), true);                      // StartAddressOfRawData
-    dv.setBigUint64(8, BigInt(t.end), true);                        // EndAddressOfRawData
-    dv.setBigUint64(16, BigInt(t.dataSec.vaddr + t.data), true);    // AddressOfIndex
-    dv.setBigUint64(24, BigInt(t.dataSec.vaddr + t.data + 8), true); // AddressOfCallBacks
+    const w = t.ptr === 4
+      ? (o, v) => dv.setUint32(o, v >>> 0, true)
+      : (o, v) => dv.setBigUint64(o, BigInt(v), true);
+    const q = t.ptr;
+    w(0, t.start);                            // StartAddressOfRawData
+    w(q, t.end);                              // EndAddressOfRawData
+    w(q * 2, t.dataSec.vaddr + t.data);       // AddressOfIndex
+    w(q * 3, t.dataSec.vaddr + t.data + q);   // AddressOfCallBacks
   }
 
   /* 导入桩的代码。 */
   const code = thunkCode(machine);
+  const thk = r.class32 === true ? 4 : THUNK_SIZE;
   const iatBase = imp === null ? 0
     : r.thunk.vaddr + imp.at + (imp.dlls.length + 1) * IMP_DESC_SIZE;
-  const iatAddr = (key) => iatBase + imports.slot.get(key) * THUNK_SIZE;
+  const iatAddr = (key) => iatBase + imports.slot.get(key) * thk;
   const thunkAddr = (key) => r.text.vaddr + r.thunkAt + imports.thunkIdx.get(key) * r.thunkSize;
   for (const [key, i] of imports.thunkIdx) {
     const at = r.thunkAt + i * r.thunkSize;
     r.text.data.set(code, at);
-    /* 桩里指向 IAT 那一格的那条重定位，就地落笔。 */
+    /* 桩里指向 IAT 那一格的那条重定位，就地落笔。x86_64 是 `R_X86_64_PC32`、
+     * i386 是 `R_386_32`（绝对地址）、arm64 是 `R_AARCH64_ABS64`。 */
     if (machine === EM_X86_64) {
       relocateOne(machine, 2, r.text.data, at + 2, r.text.vaddr + at + 2, iatAddr(key), imagebase);
+    } else if (machine === EM_386) {
+      relocateOne(machine, 1, r.text.data, at + 2, r.text.vaddr + at + 2, iatAddr(key), imagebase);
     } else {
       relocateOne(machine, 257, r.text.data, at + 16, r.text.vaddr + at + 16, iatAddr(key), imagebase);
     }
@@ -154,7 +170,7 @@ export function peImage(inp) {
    * 末尾那一句是 `s1->tls_end = s1->tls_start` —— 两头是同一个地址，所以 x86_64 的
    * `TPOFF32` 与 arm64 的 `TLSLE_*` 算出来都是「相对 `.tls` 那一段的起点」。
    * arm64 那两号在 Windows 上**不加** `tcbhead_t` 那 16 个字节（`#if TCC_TARGET_PE`）。 */
-  const TLS_RELOC = new Set([23, 549, 550]);
+  const TLS_RELOC = new Set([17, 23, 549, 550]);
   const tlsSeg = r.tls === null ? undefined
     : { start: r.tls.start, end: r.tls.start, symSecEnd: 0, tcb: 0 };
   /* `relocate_section` 里那个 dwarf 的例外：调试节里 `R_DATA_32DW`（x86_64 是
@@ -162,17 +178,25 @@ export function peImage(inp) {
    * `tgt - 那一节的地址`，也就是**节内偏移**，不是绝对地址。调试信息内部互相指的
    * 就该是偏移。 */
   const DW = new Set(DWARF_SECTIONS);
-  const dw32 = machine === EM_AARCH64 ? 258 : 10;
+  /* `R_DATA_32DW`：x86_64 是 `R_X86_64_32`（10）、arm64 是 `R_AARCH64_ABS32`（258）、
+   * i386 是 `R_386_32`（1）、arm 是 `R_ARM_ABS32`（2）。 */
+  const DW32 = new Map([[EM_X86_64, 10], [EM_AARCH64, 258], [EM_386, 1], [EM_ARM, 2]]);
+  const dw32 = DW32.get(machine);
+  const c32 = r.class32 === true;
+  const relSize = r.relSize;
   for (const rela of secs) {
-    if (rela.type !== SHT_RELA) continue;
+    if (rela.type !== r.relType) continue;
     const tgt = secs[rela.info - 1];
     if (tgt === undefined || tgt.data === null || tgt.vaddr === undefined) continue;
     const dv = new DataView(rela.bytes.buffer, rela.bytes.byteOffset, rela.bytes.byteLength);
-    for (let p = 0; p + RELA_SIZE <= rela.bytes.length; p += RELA_SIZE) {
-      const off = Number(dv.getBigUint64(p, true));
-      const type = dv.getUint32(p + 8, true);
-      const symx = dv.getUint32(p + 12, true);
-      const addend = Number(dv.getBigInt64(p + 16, true));
+    for (let p = 0; p + relSize <= rela.bytes.length; p += relSize) {
+      /* `Elf32_Rel` 没有加数那一格 —— 加数写在被修的那几个字节里，而我们这几条
+       * 落笔的算式本来就是 `add32`（原地的值也算进去），所以这儿的加数是 0。 */
+      const info32 = c32 ? dv.getUint32(p + 4, true) : 0;
+      const off = c32 ? dv.getUint32(p, true) : Number(dv.getBigUint64(p, true));
+      const type = c32 ? info32 & 0xff : dv.getUint32(p + 8, true);
+      const symx = c32 ? info32 >>> 8 : dv.getUint32(p + 12, true);
+      const addend = c32 ? 0 : Number(dv.getBigInt64(p + 16, true));
       const sym = syms[symx];
       if (sym === undefined) throw new OmniError('pe: 重定位指的符号不存在');
       const weak = sym.shndx === SHN_UNDEF && sym.bind === STB_WEAK
@@ -191,7 +215,8 @@ export function peImage(inp) {
   /* 导出表里那几格函数 RVA：tcc 给它们挂的是 `R_XXX_RELATIVE`，也就是
    * `add32(val - imagebase)` —— 原地是 0，于是写进去的正是符号的 RVA。 */
   if (r.exp !== null) {
-    const rel = machine === EM_AARCH64 ? 1027 : 8;
+    const REL = new Map([[EM_AARCH64, 1027], [EM_X86_64, 8], [EM_386, 8], [EM_ARM, 23]]);
+    const rel = REL.get(machine);
     for (const sl of r.exp.slots) {
       relocateOne(machine, rel, r.thunk.data, sl.at,
         r.thunk.vaddr + sl.at, addrOf(syms[sl.sym]), imagebase);
@@ -264,6 +289,8 @@ function buildCoffSyms(r, putStr) {
 const PE_MACHINE = new Map([
   [EM_X86_64, { machine: 0x8664, chars: 0x022f, charsDll: 0x222e }],
   [EM_AARCH64, { machine: 0xaa64, chars: 0x0022, charsDll: 0x2022 }],
+  [EM_386, { machine: 0x014c, chars: 0x030f, charsDll: 0x230e }],
+  [EM_ARM, { machine: 0x01c0, chars: 0x010f, charsDll: 0x230f }],
 ]);
 
 /**
@@ -291,9 +318,10 @@ export function peWrite(inp) {
     let nsyms = 0;
     for (const d of r.imp.dlls) nsyms += d.syms.length;
     const impSize = (r.imp.dlls.length + 1) * IMP_DESC_SIZE;
+    const thk = r.class32 === true ? 4 : THUNK_SIZE;
     const at = r.thunk.vaddr - base + r.imp.at;
     dirs[1] = { addr: at, size: impSize };                                  // IMPORT
-    dirs[12] = { addr: at + impSize, size: (nsyms + r.imp.dlls.length) * THUNK_SIZE }; // IAT
+    dirs[12] = { addr: at + impSize, size: (nsyms + r.imp.dlls.length) * thk }; // IAT
   }
   if (r.exp !== null) {
     dirs[0] = { addr: r.thunk.vaddr - base + r.exp.at, size: r.exp.size };   // EXPORT
@@ -317,6 +345,7 @@ export function peWrite(inp) {
   };
   const secs = r.infos.map((i) => ({
     name: i.name, vsize: i.vsize, vaddr: i.vaddr - base, chars: i.flags, bytes: i.bytes,
+    data: i.cls === CLS.data,          // 32 位那格 `BaseOfData` 只看 `sec_data` 类
   }));
   if (r.debug) for (const s of secs) if (s.name.length > 8) s.name = longName(s.name, putStr);
   let tail;
