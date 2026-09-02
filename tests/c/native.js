@@ -113,6 +113,16 @@ const CASES = [
     + ' return (f == dbl) * 10 + (f == trip) + (f != 0) * 100;'],
   ['函数指针：返回 double 的', 'double (*f)(double) = dscale; return (long long) (f(6.0) * 2);'],
   ['函数指针：不带名字也能调（先转成指针）', 'return (*dbl)(50) + pickAdd(1);'],
+  /* 初值里的地址（第二十八片）：数据节里的重定位。 */
+  ['初值里的地址：指着另一个全局', 'return *g_pg;'],
+  ['初值里的地址：带加数（数组里第三格）', 'return *g_p2;'],
+  ['初值里的地址：加数是负的', 'return *g_pm;'],
+  ['初值里的地址：指着成员', 'return *g_pb;'],
+  ['初值里的地址：串常量', 'return g_msg[0] * 100 + (long long) strlen(g_msg);'],
+  ['初值里的地址：串常量带加数', 'return g_msg2[0] * 100 + (long long) strlen(g_msg2);'],
+  ['初值里的地址：一张串的表',
+    'return g_tab[0][0] + g_tab[1][0] * 10 + g_tab[2][0] * 100;'],
+  ['初值里的地址：一个函数', 'return g_fp(11);'],
 ];
 
 const SUPPORT = `struct P { int x; int y; };
@@ -191,6 +201,19 @@ long long trip(long long x) { return x * 3; }
 long long apply(long long (*f)(long long), long long x) { return f(x); }
 long long pickAdd(int n) { return n == 0 ? dbl(10) : trip(10); }
 double dscale(double x) { return x * 2.5; }
+/* 初值里的地址（第二十八片）：这几格在目标文件里是**数据节的重定位** ——
+ * 编译期算不出来的东西，链接器填。 */
+int g_targ = 41;
+int g_arr2[4] = {5, 6, 7, 8};
+int *g_pg = &g_targ;
+int *g_p2 = g_arr2 + 2;
+int *g_pm = &g_arr2[3] - 1;
+char *g_msg = "omni";
+char *g_msg2 = "omni" + 2;
+struct P g_pp = {12, 34};
+int *g_pb = &g_pp.y;
+long long (*g_fp)(long long) = dbl;
+char *g_tab[3] = {"aa", "bb", "cc"};
 `;
 
 let src = SUPPORT;
@@ -258,7 +281,7 @@ try {
     }
     const objPath = join(dir, `probe-${leg.arch}.o`);
     writeFileSync(objPath, writeObject(blob.bytes, blob.data,
-      [...defs, ...blob.dataSyms], blob.relocs, leg.arch));
+      [...defs, ...blob.dataSyms], [...blob.relocs, ...blob.dataRelocs], leg.arch));
     const progPath = join(dir, `prog-${leg.arch}`);
     execFileSync(CLANG, [...leg.cc, mainPath, objPath, '-o', progPath], { stdio: 'pipe' });
     const out = execFileSync(progPath, [], { encoding: 'utf8' }).trim().split('\n');
@@ -278,8 +301,6 @@ try {
 for (const [what, code] of [
   ['变长数组', 'int n = 4; int a[n]; a[0] = 1; return a[0];'],
   ['非 ASCII 的串常量', 'char *p = "\\xe4\\xb8\\x96"; return p[0];'],
-  ['全局的初值里的串常量', 'char *p = "x";\nlong long f(void) { return p[0]; }'],
-  ['全局的初值里的地址', 'int g;\nint *p = &g;\nlong long f(void) { return *p; }'],
   ['外部的全局量', 'extern int nope;\nlong long f(void) { return nope; }'],
 ]) {
   total++;

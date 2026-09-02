@@ -180,8 +180,13 @@ export function readObject(bytes) {
     defs.push({ name, off: value - s.addr, sect });
   }
 
-  /* 重定位只读代码节的 —— 这一层发出去的数据节里没有需要填的格子。 */
+  /* 重定位只读代码节的。数据节里也可能有（第二十八片：初值里的地址）—— 那种我们自己的
+   * 链接器还不会填，所以**明着报**而不是悄悄漏掉：漏掉的结果是一个指着 0 的指针。 */
   const relocs = [];
+  const ds = sectBy('__data');
+  if (ds !== undefined && ds.nreloc !== 0) {
+    throw new OmniError(`macho: 数据节里有 ${ds.nreloc} 条重定位，这一层还不会读回它们`);
+  }
   const ts = sectBy('__text');
   if (ts !== undefined) {
     for (let i = 0; i < ts.nreloc; i++) {

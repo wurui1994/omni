@@ -168,12 +168,17 @@ class StrTab {
 }
 
 const RELOC_TYPE = {};
-RELOC_TYPE[RELOC.BRANCH26] = { type: ARM64_RELOC_BRANCH26, pcrel: 1 };
-RELOC_TYPE[RELOC.PAGE21] = { type: ARM64_RELOC_PAGE21, pcrel: 1 };
-RELOC_TYPE[RELOC.PAGEOFF12] = { type: ARM64_RELOC_PAGEOFF12, pcrel: 0 };
-RELOC_TYPE.X86_64_RELOC_BRANCH = { type: X86_64_RELOC_BRANCH, pcrel: 1 };
-RELOC_TYPE.X86_64_RELOC_SIGNED = { type: X86_64_RELOC_SIGNED, pcrel: 1 };
-RELOC_TYPE.X86_64_RELOC_UNSIGNED = { type: X86_64_RELOC_UNSIGNED, pcrel: 0 };
+RELOC_TYPE[RELOC.BRANCH26] = { type: ARM64_RELOC_BRANCH26, pcrel: 1, len: 2 };
+RELOC_TYPE[RELOC.PAGE21] = { type: ARM64_RELOC_PAGE21, pcrel: 1, len: 2 };
+RELOC_TYPE[RELOC.PAGEOFF12] = { type: ARM64_RELOC_PAGEOFF12, pcrel: 0, len: 2 };
+RELOC_TYPE.X86_64_RELOC_BRANCH = { type: X86_64_RELOC_BRANCH, pcrel: 1, len: 2 };
+RELOC_TYPE.X86_64_RELOC_SIGNED = { type: X86_64_RELOC_SIGNED, pcrel: 1, len: 2 };
+RELOC_TYPE.X86_64_RELOC_UNSIGNED = { type: X86_64_RELOC_UNSIGNED, pcrel: 0, len: 2 };
+/* 数据段里的一个八字节指针（第九刀第二十八片）。两种架构的类型号**都是 0**
+ * （`ARM64_RELOC_UNSIGNED` 与 `X86_64_RELOC_UNSIGNED`），语义也一样：
+ * 链接器把「原地那八个字节」当加数，加上符号的地址写回去。
+ * 所以这一格不分架构，一个名字就够。 */
+RELOC_TYPE.POINTER64 = { type: 0, pcrel: 0, len: 3 };
 
 /**
  * 两种架构的头部字段。**除了这三格，两者的目标文件布局一模一样** ——
@@ -185,12 +190,12 @@ const ARCH = {
   arm64: {
     cpu: CPU_TYPE_ARM64,
     sub: CPU_SUBTYPE_ARM64_ALL,
-    kinds: [RELOC.BRANCH26, RELOC.PAGE21, RELOC.PAGEOFF12],
+    kinds: [RELOC.BRANCH26, RELOC.PAGE21, RELOC.PAGEOFF12, 'POINTER64'],
   },
   x86_64: {
     cpu: CPU_TYPE_X86_64,
     sub: CPU_SUBTYPE_X86_64_ALL,
-    kinds: ['X86_64_RELOC_BRANCH', 'X86_64_RELOC_SIGNED', 'X86_64_RELOC_UNSIGNED'],
+    kinds: ['X86_64_RELOC_BRANCH', 'X86_64_RELOC_SIGNED', 'X86_64_RELOC_UNSIGNED', 'POINTER64'],
   },
 };
 
@@ -201,8 +206,9 @@ const ARCH = {
  * @param data  数据字节（`Uint8Array`，可以是空的 —— 那就不写第二节）
  * @param defs  这个文件**定义**的符号：`[{name, off, sect}]`，`sect` 1 是代码、2 是数据，
  *              `off` 是在那一节里的字节偏移
- * @param relocs 要等链接器填的地方：`[{at, kind, sym}]`，`kind` 是 `RELOC.*`，
- *               `sym` 是符号名（不带下划线，这儿加）。`at` 是**代码节里**的偏移。
+ * @param relocs 要等链接器填的地方：`[{at, kind, sym, sect}]`，`kind` 是 `RELOC.*`
+ *               或 `'POINTER64'`，`sym` 是符号名（不带下划线，这儿加）。
+ *               `at` 是**自己那一节里**的偏移，`sect` 1 是代码（默认）、2 是数据。
  * @param arch  `'arm64'`（默认）或 `'x86_64'`
  */
 export function writeObject(text, data, defs, relocs, arch) {
@@ -252,9 +258,17 @@ export function writeObject(text, data, defs, relocs, arch) {
   /* 数据节在文件里紧跟着代码（地址上的位置是上面那个 `dataAddr`）。 */
   const dataOff = textOff + dataAddr;
   const relOff = dataOff + dataBytes.length;
-  /* 重定位按地址升序 —— 汇编器出来的就是这个次序，链接器也认它。 */
-  const rs = [...relocs].sort((x, y) => x.at - y.at);
-  const symOff = relOff + rs.length * 8;
+  /* 重定位按地址升序 —— 汇编器出来的就是这个次序，链接器也认它。
+   * **一节一张表**：节头里的 `reloff`/`nreloc` 是那一节自己的，而 `r_address` 是
+   * 节里的偏移。混成一张（代码的 0x10 与数据的 0x10 撞在一起）链接器会往代码里填数据的坑。 */
+  const byAt = (x, y) => x.at - y.at;
+  const rsText = relocs.filter((r) => (r.sect === undefined ? 1 : r.sect) === 1).sort(byAt);
+  const rsData = relocs.filter((r) => r.sect === 2).sort(byAt);
+  if (rsData.length !== 0 && nsects !== 2) {
+    throw new OmniError('macho: 有数据节的重定位，可是数据节是空的');
+  }
+  const dataRelOff = relOff + rsText.length * 8;
+  const symOff = relOff + (rsText.length + rsData.length) * 8;
   const strOff = symOff + syms.length * 16;
   const strBytes = strs.bytes();
 
@@ -270,13 +284,13 @@ export function writeObject(text, data, defs, relocs, arch) {
   // ---- section_64：__TEXT,__text
   b.name16('__text').name16('__TEXT');
   b.u64(0).u64(text.length).u32(textOff).u32(2);   // align = 2^2 = 4，指令的对齐
-  b.u32(rs.length === 0 ? 0 : relOff).u32(rs.length);
+  b.u32(rsText.length === 0 ? 0 : relOff).u32(rsText.length);
   b.u32(S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS).u32(0).u32(0).u32(0);
   // ---- section_64：__DATA,__data（没有数据就整节不写）
   if (nsects === 2) {
     b.name16('__data').name16('__DATA');
     b.u64(dataAddr).u64(dataBytes.length).u32(dataOff).u32(3);   // align = 8
-    b.u32(0).u32(0);
+    b.u32(rsData.length === 0 ? 0 : dataRelOff).u32(rsData.length);
     b.u32(0).u32(0).u32(0).u32(0);
   }
 
@@ -304,7 +318,7 @@ export function writeObject(text, data, defs, relocs, arch) {
 
   // ---- 重定位。第二个字是位域：
   //      低 24 位符号号、24 位 pcrel、25-26 长度、27 extern、28-31 类型。
-  for (const r of rs) {
+  for (const r of [...rsText, ...rsData]) {
     const kind = RELOC_TYPE[r.kind];
     if (kind === undefined) throw new OmniError(`macho: 还不认识重定位 ${r.kind}`);
     if (!cpu.kinds.includes(r.kind)) {
@@ -312,7 +326,7 @@ export function writeObject(text, data, defs, relocs, arch) {
     }
     b.u32(r.at);
     /* 位拼装用乘法，不用 `<<` —— `1 << 31` 在 JS 里是负数（arm64 编码器那边同一条）。 */
-    b.u32(symIndexOf(r.sym) + kind.pcrel * 2 ** 24 + 2 * 2 ** 25 + 1 * 2 ** 27
+    b.u32(symIndexOf(r.sym) + kind.pcrel * 2 ** 24 + kind.len * 2 ** 25 + 1 * 2 ** 27
       + kind.type * 2 ** 28);
   }
 

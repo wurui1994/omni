@@ -681,6 +681,14 @@ export class CGen {  /**
     this.wstrs = new Map();
     /** @type {{off:number,bytes:number[]}[]} 攒着的 data 段（内存要等 dataOff 定了才能声明） */
     this.pendingData = [];
+    /**
+     * native：初值里的**地址**（第九刀第二十八片）。`off` 是那块暂存区上的绝对偏移，
+     * 八个字节宽；`kind`/`no` 是它指着的符号（`g` 全局 / `f` 函数 / `s` 串常量）。
+     * 加数照旧写进 `pendingData` 的那八个字节里 —— 目标文件里 `POINTER64` 就是
+     * 「原地那几个字节 + 符号的地址」，所以这两半合起来正好。
+     * @type {{off:number,kind:string,no:number,add:bigint}[]}
+     */
+    this.pendingFix = [];
     /** @type {Map<number,{off:number,bytes:number[]}>} 静态位域按地址找那一条记录（见 `emitBitfield`） */
     this.statBits = new Map();
     /** 这个单元用到堆了吗（`malloc` 那一族）。用到才发那条 `__omni_heap_init` */
@@ -1082,6 +1090,73 @@ export class CGen {  /**
     if (ref === REF_NONE || !isConstRef(ref)) return null;
     const k = this.mod.consts.get(ref);
     return k.kind === 'int' ? BigInt(k.text) : null;
+  }
+
+  /**
+   * native：一个 ref 背后的**地址常量**（`符号 + 加数`），不是就回 null。
+   *
+   * C 的静态初始化式里指针的值只能是「某个对象或函数的地址，可加可减一个整型常量」
+   * （C11 6.6 第 9 段）。线性内存那条腿上这整件事是一个数（地址就是编译期常量），
+   * native 上它算不出来 —— 得留给链接器。于是这儿把刚才那个用完就丢的函数里
+   * 攒下来的几条指令**反着读一遍**：`GADDR`/`FADDR`/串常量是根，`ADD`/`SUB` 一个
+   * 整数常量往上摞。摞不出来（读了内存、乘了什么）就不是地址常量。
+   *
+   * 为什么不在表达式一路上顺手带个 `sym` 字段（tcc 的 `vtop->sym` 就是那样）：
+   * 那要让每一处造 `SValue` 的地方都记得传它，而漏掉一处的后果是**静静地**丢掉
+   * 符号、只剩加数 —— 一个指着 0 的指针。反着读只此一处，漏不掉。
+   */
+  symConstOf(f, ref) {
+    if (ref === REF_NONE) return null;
+    if (isConstRef(ref)) {
+      return this.mod.consts.get(ref).kind === 'str' ? { kind: 's', no: ref, add: 0n } : null;
+    }
+    const i = f.at(ref);
+    const op = f.op[i];
+    if (op === OP.GADDR) return { kind: 'g', no: f.aux[i], add: 0n };
+    if (op === OP.FADDR) return { kind: 'f', no: f.aux[i], add: 0n };
+    if (op === OP.ADD || op === OP.SUB) {
+      const base = this.symConstOf(f, f.a[i]);
+      if (base === null) return null;
+      const k = this.kfoldOf(f, f.b[i]);
+      if (k === null) return null;
+      return { kind: base.kind, no: base.no, add: op === OP.ADD ? base.add + k : base.add - k };
+    }
+    return null;
+  }
+
+  /**
+   * 那一小段指令里能在编译期算出来的整数：常量本身，或几个常量之间的 `+ - *`。
+   * 算不出来回 null。
+   *
+   * 只给 `symConstOf` 用。为什么需要它：`arr + 2` 里那个「乘元素大小」是一条真的
+   * `MUL`（文件头偏离 3：这一层不做常量折叠），所以加数不是一个常量 ref 而是一小棵树。
+   * 折叠放在**这儿**而不是放回 `genPtrOp`：那一层多折一次会改掉每个函数体里的指令，
+   * 而这一格只影响「静态初始化式认不认这个加数」。
+   */
+  kfoldOf(f, ref) {
+    const k = this.kintOf(ref);
+    if (k !== null) return k;
+    if (ref === REF_NONE || isConstRef(ref)) return null;
+    const i = f.at(ref);
+    const op = f.op[i];
+    if (op !== OP.ADD && op !== OP.SUB && op !== OP.MUL) return null;
+    const a = this.kfoldOf(f, f.a[i]);
+    if (a === null) return null;
+    const b = this.kfoldOf(f, f.b[i]);
+    if (b === null) return null;
+    if (op === OP.ADD) return a + b;
+    if (op === OP.SUB) return a - b;
+    return a * b;
+  }
+
+  /**
+   * native：往暂存区的 `addr` 上放一个「符号 + 加数」的八字节（第二十八片）。
+   * 加数走 `emitBytes` 进那八个字节，符号进 `pendingFix` —— 两半在目标文件里
+   * 由一条 `POINTER64` 合起来。
+   */
+  putSymBytes(addr, fix) {
+    this.emitBytes(addr, 8, BigInt.asUintN(64, fix.add));
+    this.pendingFix.push({ off: addr, kind: fix.kind, no: fix.no, add: fix.add });
   }
 
   /**
@@ -2042,6 +2117,12 @@ export class CGen {  /**
       const bytes = this.readStrTok(this.tokc);
       if (this.tok === COMMA || this.tok === RBRACE || this.tok === SEMI) {
         if (!isPtr(ty.t)) this.err(`invalid initializer for '${typeText(ty)}'`);
+        /* native（第二十八片）：这个字面量是 MIR 常量池里的一条，后端给它一个符号
+         * （`omni_str_<ref>`），这儿只留一条「指着它」的记录。 */
+        if (this.native) {
+          this.putSymBytes(dest.addr + off, { kind: 's', no: this.mod.consts.str(bytes), add: 0n });
+          return;
+        }
         const addr = this.strData(bytes);
         this.emitBytes(dest.addr + off, 8, BigInt(addr));
         return;
@@ -2073,6 +2154,7 @@ export class CGen {  /**
       const outer = this.f;
       this.f = scratch;
       let k = null;
+      let fix = null;
       try {
         const v = this.decay(this.exprEq());
         const kaddr = v.mem !== null ? this.kintOf(v.mem.addr) : null;
@@ -2082,10 +2164,18 @@ export class CGen {  /**
            * （`init_putv` 的 `VT_LVAL` 那一支），而不是发一条 load。 */
           k = this.staticRead(Number(kaddr) + v.mem.off, typeSize(v.ty).size);
         } else {
-          k = this.kintOf(this.gv(this.castTo(v, ty)));
+          const ref = this.gv(this.castTo(v, ty));
+          k = this.kintOf(ref);
+          /* native（第二十八片）：算不出数的那一格里可能是「符号 + 加数」——
+           * `&g`、`arr + 2`、`&s.f`、一个函数名。那不是「不是常量」，那是一条重定位。 */
+          if (k === null && this.native) fix = this.symConstOf(scratch, ref);
         }
       } finally {
         this.f = outer;
+      }
+      if (fix !== null) {
+        this.putSymBytes(dest.addr + off, fix);
+        return;
       }
       if (k === null) this.err('initializer element is not constant');
       this.emitBytes(dest.addr + off, 8, k);
@@ -2237,9 +2327,16 @@ export class CGen {  /**
       const lo = dest.addr + off;
       const fresh = this.pendingData.slice(mark)
         .filter((d) => d.off >= lo && d.off + d.bytes.length <= lo + size);
+      /* 初值里的地址（第二十八片）也要跟着复制 —— 落在这一格里的那几条。
+       * 按**偏移**挑而不是按 `mark` 挑：这一格是刚清零刚写的，别人的地址不会落在里面。
+       * 漏掉这一句的症状是 `char *gs[4] = {[0 ... 1] = "BB"}` 的第二格是空指针。 */
+      const freshFix = this.pendingFix.filter((x) => x.off >= lo && x.off + 8 <= lo + size);
       for (let k = 1; k < nb; k++) {
         for (const d of fresh) {
           this.pendingData.push({ off: d.off + k * size, bytes: d.bytes });
+        }
+        for (const x of freshFix) {
+          this.pendingFix.push({ off: x.off + k * size, kind: x.kind, no: x.no, add: x.add });
         }
       }
       return;
@@ -7197,6 +7294,9 @@ export function lowerCNative(path, text, host, defs) {
   for (const d of gen.pendingData) {
     for (let k = 0; k < d.bytes.length; k++) stage.set(d.off + k, d.bytes[k]);
   }
+  /* 初值里的地址（第二十八片）：也按绝对偏移攒着，切全局的时候一起切出来。 */
+  const fixes = new Map();   // 绝对偏移 -> {kind, no, add}
+  for (const fx of gen.pendingFix) fixes.set(fx.off, fx);
   for (const [name, e] of gen.gvars) {
     if (e.addr < 0) continue;   // 试探性定义没补上长度：用它的地方已经报过了
     if (!e.defined) {
@@ -7216,13 +7316,26 @@ export function lowerCNative(path, text, host, defs) {
       bytes.push(b === undefined ? 0 : b);
       stage.delete(e.addr + k);
     }
+    const fixups = [];
+    for (let k = 0; k < size; k++) {
+      const fx = fixes.get(e.addr + k);
+      if (fx === undefined) continue;
+      fixups.push({ off: k, kind: fx.kind, no: fx.no, add: fx.add });
+      fixes.delete(e.addr + k);
+    }
     const no = e.gno === undefined ? mod.globalNo(name) : e.gno;
-    mod.setGlobalData(no, size, al, bytes);
+    mod.setGlobalData(no, size, al, bytes, fixups);
   }
   /* 暂存区里没人认领的字节：那是还落在线性内存上的东西（`argv`、宿主那几格，
    * 或者哪个初值偷偷要了一块地方）。放过去会得到一个指着 64K 的指针。 */
   if (stage.size !== 0) {
     throw new OmniError(`${path}: error: native 这条腿上有 ${stage.size} 个字节还落在线性内存上`);
+  }
+  /* 没人认领的地址：那说明它不在任何全局的字节里（静态复合字面量那种还在线性内存上）。
+   * 放过去会得到一个指着 0 的指针。 */
+  if (fixes.size !== 0) {
+    throw new OmniError(`${path}: error: native 这条腿上有 ${fixes.size} 个初值里的地址`
+      + `不在任何全局量里`);
   }
   if (gen.heapUsed) throw new OmniError(`${path}: error: native 这条腿还没有堆（malloc 那一摊）`);
   if (gen.errnoUsed || gen.strerrorUsed || gen.streamGvars.length !== 0) {

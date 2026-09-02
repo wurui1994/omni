@@ -928,6 +928,14 @@ export function genModule(mod) {
    * 各有一个 `omni_str_0` 就会撞。真正的办法是局部符号 + 按节的重定位，等自己的链接器。 */
   const dataSyms = [];
   const dataBytes = [];
+  /* 初值里的地址（第二十八片）：一条 `POINTER64`，原地那八个字节是加数。
+   * 这些坑落在**数据节**里，所以 `sect: 2` —— 节头里各有一张重定位表。 */
+  const dataRelocs = [];
+  const fixSym = (fx) => {
+    if (fx.kind === 'g') return mod.globals[fx.no];
+    if (fx.kind === 'f') return mod.funcs[fx.no].name;
+    return `omni_str_${fx.no}`;
+  };
   /* 模块级变量（第二十一片起两种）：说过大小的按它的大小与对齐摆（C 的全局量），
    * 没说过的还是「一格」八个零字节（wasm 的 `(global …)` 与 JS 前端那批）。
    * 对齐只到 8 —— `__data` 那一节的对齐字段写的就是 8（`macho.js`），
@@ -938,10 +946,14 @@ export function genModule(mod) {
     const al = blob === null ? 8 : blob.align;
     if (al > 8) nyi(`全局 '${mod.globals[gi]}' 要 ${al} 字节对齐（__data 这一节只保证 8）`);
     while (dataBytes.length % al !== 0) dataBytes.push(0);
-    dataSyms.push({ name: mod.globals[gi], off: dataBytes.length, sect: 2 });
+    const base = dataBytes.length;
+    dataSyms.push({ name: mod.globals[gi], off: base, sect: 2 });
     for (let k = 0; k < size; k++) {
       const b = blob === null ? 0 : blob.bytes[k];
       dataBytes.push(b === undefined ? 0 : b);
+    }
+    for (const fx of blob === null ? [] : blob.fixups ?? []) {
+      dataRelocs.push({ at: base + fx.off, kind: 'POINTER64', sym: fixSym(fx), sect: 2 });
     }
   }
   const strSyms = new Map();
@@ -978,5 +990,6 @@ export function genModule(mod) {
     relocs: buf.relocs,
     data: new Uint8Array(dataBytes),
     dataSyms,
+    dataRelocs,
   };
 }

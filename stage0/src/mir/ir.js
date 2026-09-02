@@ -763,8 +763,14 @@ export class MirModule {
    * `int a[100]`、`struct S s = {…}`，而且能被 `GADDR` 取地址。
    *
    * `bytes` 短于 `size` 的部分是 0（C11 6.7.9 第 10 段：静态存储期零初始化）。
+   *
+   * `fixups`（第九刀第二十八片）是初值里的**地址**：`[{off, kind, no, add}]` ——
+   * `off` 是这块字节里的偏移（八个字节宽），`kind` 是 `'g'`（全局）/`'f'`（函数）/
+   * `'s'`（串常量），`no` 是对应的号，`add` 是加数（bigint）。
+   * 为什么不直接把地址算成数写进 `bytes`：编译期算不出来 —— 那是链接器的事
+   * （目标文件里这一格是一条指向别的符号的重定位）。
    */
-  setGlobalData(i, size, align, bytes) {
+  setGlobalData(i, size, align, bytes, fixups) {
     if (this.globals[i] === undefined) throw new Error(`mir: 没有 ${i} 号模块级变量`);
     if (!Number.isInteger(size) || size < 0) throw new Error(`mir: 全局的大小 ${size} 不合法`);
     if (align !== 1 && align !== 2 && align !== 4 && align !== 8 && align !== 16) {
@@ -772,7 +778,25 @@ export class MirModule {
     }
     const bs = bytes === undefined ? [] : bytes;
     if (bs.length > size) throw new Error(`mir: 全局的初值 ${bs.length} 字节装不进 ${size} 字节`);
-    this.globalBlob[i] = { size, align, bytes: bs };
+    const fs = fixups === undefined ? [] : fixups;
+    for (const fx of fs) {
+      if (!Number.isInteger(fx.off) || fx.off < 0 || fx.off + 8 > size) {
+        throw new Error(`mir: 全局 ${this.globals[i]} 的初值里第 ${fx.off} 字节的地址装不进去`);
+      }
+      if (fx.kind !== 'g' && fx.kind !== 'f' && fx.kind !== 's') {
+        throw new Error(`mir: 初值里的地址 kind='${fx.kind}'，只有 g/f/s`);
+      }
+      if (fx.kind === 'g' && this.globals[fx.no] === undefined) {
+        throw new Error(`mir: 初值里的地址指着 ${fx.no} 号全局，没有那一个`);
+      }
+      if (fx.kind === 'f' && this.funcs[fx.no] === undefined) {
+        throw new Error(`mir: 初值里的地址指着 ${fx.no} 号函数，没有那一个`);
+      }
+      if (fx.kind === 's' && this.consts.get(fx.no).kind !== 'str') {
+        throw new Error(`mir: 初值里的地址指着 ${refText(fx.no)}，那不是串常量`);
+      }
+    }
+    this.globalBlob[i] = { size, align, bytes: bs, fixups: fs };
   }
 
   /** 给一个已登记的全局钉上类型（核心方言的 `(global …)`；不叫就还是 T_DYN）。 */
