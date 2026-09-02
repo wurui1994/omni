@@ -28,6 +28,8 @@ import { genModule as genX64 } from './x64/from_mir.js';
 import { writeObject } from './link/macho.js';
 import { writeObject as writeElfObject } from './link/elf.js';
 import { mergeObjects as mergeElfObjects } from './link/elf_merge.js';
+import { peLoad } from './link/pe_load.js';
+import { peWrite } from './link/pe_link.js';
 import { readSexpr } from './sexpr/read.js';
 import { lowerCoreSexpr } from './sexpr/lower.js';
 import { printSexpr } from './sexpr/print.js';
@@ -1787,7 +1789,8 @@ function main(argv) {
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a === '-o' || a === '--mode' || a === '--work' || a === '--cache'
-      || a === '-I' || a === '-D' || a === '--rdata') { i++; continue; }
+      || a === '-I' || a === '-D' || a === '--rdata'
+      || a === '-L' || a === '--target') { i++; continue; }
     if (a.startsWith('-')) continue;
     files.push(a);
   }
@@ -2036,6 +2039,49 @@ function main(argv) {
       stdout(`${out}\n`);
       return 0;
     }
+    /* `pe-link`：几个 `.o` 链成一份 `.exe`（第九刀第四十七到五十片）。库从 `-L` 那几个
+     * 目录里找：`<目标>-libtcc1.a` 与 `msvcrt.def` / `kernel32.def`。
+     *   omni pe-link a.o -o a.exe -L dir [-L dir …] [--target x86_64-win32] */
+    case 'pe-link': {
+      const oi = rest.indexOf('-o');
+      const out = oi >= 0 ? rest[oi + 1] : 'a.exe';
+      const ti = rest.indexOf('--target');
+      const target = ti >= 0 ? rest[ti + 1] : 'x86_64-win32';
+      const bytesOf = (p) => {
+        const s = readBinary(p);
+        const b = new Uint8Array(s.length);
+        for (let k = 0; k < s.length; k++) b[k] = s.charCodeAt(k);
+        return b;
+      };
+      const libDirs = [];
+      for (let i = 0; i < rest.length; i++) {
+        if (rest[i] === '-L') { libDirs.push(rest[i + 1]); i++; continue; }
+        if (rest[i].startsWith('-L')) libDirs.push(rest[i].slice(2));
+      }
+      const open = (names) => {
+        for (const d of libDirs) {
+          for (const n of names) {
+            const p = join(d, n);
+            if (exists(p)) return { path: p, bytes: bytesOf(p) };
+          }
+        }
+        return null;
+      };
+      const objs = files.map(bytesOf);
+      const loaded = peLoad({
+        objs: files.map((p, i) => ({ path: p, bytes: objs[i] })),
+        libtcc1: `${target}-libtcc1.a`,
+        open,
+      });
+      const r = peWrite({
+        objs: [...objs, ...loaded.members.map((m) => m.bytes)],
+        dlls: loaded.dlls,
+        startName: loaded.entryName,
+      });
+      writeBinary(out, r.bytes);
+      stdout(`${out} (${r.bytes.length} 字节，${r.infos.length} 节，${r.nthunks} 个导入桩)\n`);
+      return 0;
+    }
     // 一个源文件一份产物（第七十五刀）：`<名字>.sx` 与 `<名字>.js` 摊在一个目录里，
 
     // 名字就是源文件自己的名字。`-o 目录` 指定去处，默认 .omni-cache/asy-mods。
@@ -2210,6 +2256,10 @@ commands:
             memory). -o NAME, --arch arm64|x86_64. Link it yourself: clang a.o -o a
   elf-r     merge several ELF object files into one, i.e. tcc -r (ADR-0017 cut 9 slice
             42). -o NAME, --rdata NAME (PE calls it .rdata), --unwind (.eh_frame)
+  pe-link   link .o files into a Windows .exe (ADR-0017 cut 9 slices 47-50): reads
+            libtcc1.a on demand and the .def import libraries from -L DIR, builds the
+            import table and thunks, applies every relocation. -o NAME,
+            --target x86_64-win32|arm64-win32
   oir       print the OIR as JSON
   mir       print the MIR (ADR-0014 decision 6): SSA values + slots + structured
             control flow, one 8-byte record per instruction (--bytes: sizes and

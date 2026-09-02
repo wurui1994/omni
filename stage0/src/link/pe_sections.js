@@ -208,11 +208,16 @@ export function buildReloc(entries) {
  *          `{name, cls, vaddr, vsize, dataSize, ptr, rawSize, flags}`
  */
 export function peSections(inp) {
-  const imagebase = inp.imagebase ?? 0x400000;
   const merged = mergeObjects(inp.objs, { rdata: '.rdata' });
   const mo = readObject(merged);
   const machine = mo.machine;
   const syms = readSymbols(mo);
+  /* 映像基址与「要不要 `.reloc`」都是按目标定的（`IMAGE_BASE_EXE` 与
+   * `DLLCHARACTERISTICS`）：x86_64 是 0x400000 且不带 `DYNAMIC_BASE`，
+   * arm64 是 0x140000000 且带。 */
+  const arm64 = machine === EM_AARCH64;
+  const imagebase = inp.imagebase ?? (arm64 ? 0x140000000 : 0x400000);
+  const dynamicBase = inp.dynamicBase ?? arm64;
 
   /* `.def` 那张表：名字 → dll 与序号。同名先到先得（`set_elf_sym` 里未定义的那一条
    * 不会被后来的未定义符号顶掉）。 */
@@ -285,7 +290,7 @@ export function peSections(inp) {
     for (let k = 0; k < nthunks; k++) text.extraDirect.push(thunkAt + k * tsz + fixAt);
   }
 
-  const reloc = inp.dynamicBase === true
+  const reloc = dynamicBase === true
     ? { name: '.reloc', type: SHT_PROGBITS, flags: 0, size: 0, bytes: new Uint8Array(0) }
     : null;
   if (reloc !== null) secs.push(reloc);
