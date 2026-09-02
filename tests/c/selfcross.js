@@ -30,6 +30,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
+import { TCC_TARGETS, unitsOf } from './tcc-targets.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
@@ -40,36 +41,11 @@ const SRC = process.env.TINYCC_SRC ?? '/Users/wurui/Documents/Lang/reference/tin
 const OUT = join(tmpdir(), 'omni-selfcross');
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 
-/* `CORE_FILES` 减掉 `tcctools.c`（见文件头）。 */
-const CORE = ['tcc', 'libtcc', 'tccpp', 'tccgen', 'tccdbg', 'tccelf', 'tccasm', 'tccrun'];
-const I386 = ['i386-gen', 'i386-link', 'i386-asm'];
-const X64 = ['x86_64-gen', 'x86_64-link', 'i386-asm'];
-const ARM = ['arm-gen', 'arm-link', 'arm-asm'];
-const ARM64 = ['arm64-gen', 'arm64-link', 'arm64-asm'];
-const ARM_DEF = ['-DTCC_TARGET_ARM', '-DTCC_ARM_VFP', '-DTCC_ARM_EABI', '-DTCC_ARM_HARDFLOAT'];
+/* 十二个目标的文件集与宏在 `tcc-targets.js`（两个门共用，第九十九片挪出去的）。
+ * c67 那副的探针换一套：它的 `load()` 在**跨两个字的参数**上读越界（见 `PROBE_SRC`）。 */
+const PROBES_OF = { c67: ['wide64', 'float', 'struct1', 'flow'] };
+const TARGETS = TCC_TARGETS.map((t) => ({ ...t, probes: PROBES_OF[t.name] }));
 
-/** 十二副。`defs` 抄的是 Makefile:100-120 的 `DEF-<target>`。 */
-const TARGETS = [
-  { name: 'i386', files: I386, defs: ['-DTCC_TARGET_I386'] },
-  { name: 'i386-win32', files: [...I386, 'tccpe'], defs: ['-DTCC_TARGET_I386', '-DTCC_TARGET_PE'] },
-  { name: 'x86_64', files: X64, defs: ['-DTCC_TARGET_X86_64'] },
-  { name: 'x86_64-win32', files: [...X64, 'tccpe'], defs: ['-DTCC_TARGET_X86_64', '-DTCC_TARGET_PE'] },
-  { name: 'x86_64-osx', files: [...X64, 'tccmacho'], defs: ['-DTCC_TARGET_X86_64', '-DTCC_TARGET_MACHO'] },
-  { name: 'arm', files: ARM, defs: ARM_DEF },
-  { name: 'arm-wince', files: [...ARM, 'tccpe'], defs: [...ARM_DEF, '-DTCC_TARGET_PE'] },
-  { name: 'arm64', files: ARM64, defs: ['-DTCC_TARGET_ARM64'] },
-  { name: 'arm64-osx', files: [...ARM64, 'tccmacho'], defs: ['-DTCC_TARGET_ARM64', '-DTCC_TARGET_MACHO'] },
-  { name: 'arm64-win32', files: [...ARM64, 'tccpe'], defs: ['-DTCC_TARGET_ARM64', '-DTCC_TARGET_PE'] },
-  { name: 'riscv64', files: ['riscv64-gen', 'riscv64-link', 'riscv64-asm'], defs: ['-DTCC_TARGET_RISCV64'] },
-  /* c67 那副 tinycc 自己都要 `-w`（它的代码生成器有一堆警告）。
-   * 探针换一套：c67 的 `load()` 在**跨两个字的参数**上读越界（见 `C67_PROBES`）。 */
-  {
-    name: 'c67',
-    files: ['c67-gen', 'c67-link', 'tcccoff'],
-    defs: ['-DTCC_TARGET_C67', '-w'],
-    probes: ['wide64', 'float', 'struct1', 'flow'],
-  },
-];
 
 /* 探针。不带 `#include` —— 交叉编译器没有目标那一侧的头。
  * 挑的是几段最容易在「换一副后端」时露馅的东西：整数与浮点的算术、结构体传值、
@@ -143,7 +119,7 @@ for (const t of TARGETS) {
   const gitDefs = m === null ? [] : [`-DTCC_GITHASH="${m[1]}"`];
   const dir = join(OUT, t.name);
   mkdirSync(dir, { recursive: true });
-  const units = [...CORE, ...t.files];
+  const units = unitsOf(t);
   let built = true;
   for (const u of units) {
     const r = spawnSync(process.execPath,

@@ -706,6 +706,15 @@ MACHO 上是 `lib%s.dylib`、`lib%s.tbd`、`lib%s.a`，**外层循环是拼法**
 只在最后那一处）。顺手把 `machoExe` 的 `libtcc1`（一份）换成 `archives`（几份）：
 `-lfoo` 找到的 `.a` 与 `libtcc1.a` 走同一条按需取用的路。
 
+**全部源码，不只十二份**（第九十九片）：第九十二片那句「我们编出来的 tcc 去编 tinycc」
+量的是 arm64-osx 那**十二份**。这一片把范围推到十二个目标各一套源码 —— 同一份 `.c`
+换一套 `-DTCC_TARGET_*` 就是另一条路，六个后端（i386/x86_64/arm/arm64/riscv64/c67）、
+三个目标文件写出器（`tccpe.c`/`tccmacho.c`/`tcccoff.c`）、四份汇编器都在里头，
+**138 个（文件，宏）组合**，我们编出来的 tcc 与尺子写出同一串字节
+（`tests/c/selfsrc.js`，13 条）。顶层那 24 份源码里没量到的只有两份：`tcctools.c`
+（不是翻译单元，`tcc.c` 把它 `#include` 进去）与 `il-gen.c`（Makefile 里没有它）。
+十二个目标的文件集与宏挪进了 `tests/c/tcc-targets.js`，与 `selfcross.js` 共用一张表。
+
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
 地址交给真的 libc（`strlen`/`memcpy`）验过。C 前端现在还把 `&x` 降到影子栈上，
@@ -12883,6 +12892,44 @@ SDK 的根与 `-I` 那一格共用（`SDKROOT` -> 两条写死的路径 -> `xcru
 `library 'nosuchlib' not found`。
 
 <!-- 第九刀第九十八片-END -->
+
+## 落地：第九刀第九十九片
+
+第九十二片那句「我们编出来的 tcc 去编 tinycc，一个字节不差」量的是 arm64-osx
+那**十二份**源码。这一片把范围推到十二个目标各一套。
+
+### 同一份 `.c`，换一套宏就是另一条路
+
+tinycc 的源码是靠 `-DTCC_TARGET_*` 切的。`tccgen.c` 在 `TCC_TARGET_C67` 下与在
+`TCC_TARGET_ARM64` 下走的不是同一堆条件编译；`tccelf.c` 在 PE 那一路少半个文件。
+所以「编过十二份」离「编过这棵树」还差得远。这一组按 `tests/c/tcc-targets.js`
+那张表（第九十六片抄 Makefile 抄的，这一片挪出来两个门共用）一行行走：
+
+- 六个后端：`i386-gen`、`x86_64-gen`、`arm-gen`、`arm64-gen`、`riscv64-gen`、`c67-gen`
+- 六个重定位器：同名的 `*-link.c`
+- 四个汇编器：`i386-asm`、`arm-asm`、`arm64-asm`、`riscv64-asm`
+- 三个目标文件写出器：`tccpe.c`、`tccmacho.c`、`tcccoff.c`
+- 八份 core，每份乘以十二套宏
+
+一共 **138 个（文件，宏）组合**，两边逐字节相同。顶层那 24 份源码里没量到的只有
+两份：`tcctools.c`（不是翻译单元 —— `tcc.c` 把它 `#include` 进去，`Makefile:266`）
+与 `il-gen.c`（Makefile 里根本没有它，是个没人维护的老后端）。
+
+### 这一组称的是什么
+
+两边的**代码生成都是本机 arm64**（尺子是 `.omni-cache/tcc-build/tcc`，我们那份是同一套
+源码用 `omni c-obj` 编出来的），`-DTCC_TARGET_C67` 只改被编的那份程序自己的形状。
+所以这里称的不是「我们会不会生成 c67 的码」（那是第九十六片的事），而是
+**我们编出来的那个 tcc 在读这些源码时与真的 tcc 走同一条路**：一百多个组合里
+任何一处条件编译、任何一处 `switch` 的落点不同，写出来的字节就会分叉。
+
+### 门
+
+`tests/c/selfsrc.js`，十二套约 60 秒（可以按名字过滤，`node tests/c/selfsrc.js
+arm riscv` 只跑对得上的）。第 1 步先用 `omni c-obj` 把我们那份 tcc 编出来
+（`clang` 只管链），`-v` 与尺子的版本行相同才往下走。
+
+<!-- 第九刀第九十九片-END -->
 
 
 
