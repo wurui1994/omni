@@ -73,11 +73,12 @@ const pick = (d) => {
 };
 
 /** 我们的预处理器跑一份文件，回 {out} 或 {err} */
-function ours(path, incDirs) {
+function ours(path, incDirs, dflag = 0) {
   const cpp = new Cpp({
     readFile: (p) => read(p),
     includeDirs: incDirs,
   });
+  cpp.dflag = dflag;
   try {
     return { out: cpp.preprocessToText(path, read(path)), warnings: cpp.warnings };
   } catch (e) {
@@ -86,8 +87,8 @@ function ours(path, incDirs) {
 }
 
 /** tcc -E -P 跑同一份，回 {out} 或 {err} */
-function oracle(path, incDirs) {
-  const args = ['-E', '-P'];
+function oracle(path, incDirs, extra = []) {
+  const args = ['-E', '-P', ...extra];
   for (const d of incDirs) args.push('-I', d);
   args.push(path);
   const r = spawnSync(TCC, args, { encoding: 'utf8' });
@@ -102,15 +103,17 @@ if (!hasTcc) {
 }
 
 /** 一份文件：我们的输出必须与 tcc 的逐字节相同 */
-function compare(group, file, incDirs) {
-  const name = `${group}/${basename(file, '.c')}`;
+function compare(group, file, incDirs, mode = '') {
+  const name = `${group}/${basename(file, '.c')}${mode === '' ? '' : ` ${mode}`}`;
   const path = join(here, group, file);
   if (!hasTcc) {
     skip++;
     return;
   }
-  const want = oracle(path, incDirs);
-  const got = ours(path, incDirs);
+  // `-dD` = dflag 3，`-dM` = dflag 7（libtcc.c:1979）。
+  const dflag = mode === '-dM' ? 7 : (mode === '-dD' ? 3 : 0);
+  const want = oracle(path, incDirs, mode === '' ? [] : [mode]);
+  const got = ours(path, incDirs, dflag);
   if (want.err !== undefined) {
     bad(name, `    tcc 自己就拒了这份用例：\n${want.err}`);
     return;
@@ -136,12 +139,15 @@ function compare(group, file, incDirs) {
     return;
   }
   const n = want.out === '' ? 0 : want.out.replace(/\n$/, '').split('\n').length;
-  ok(`${name} [ours == tcc -E -P] ${n} lines`);
+  ok(`${name} [ours == tcc -E -P${mode === '' ? '' : ` ${mode}`}] ${n} lines`);
 }
 
 // ------------------------------------------------------------ 1. cpp/：与 tcc 逐字节相同
 
 for (const f of pick('cpp')) compare('cpp', f, []);
+
+// 同一批文件再走一遍 `-dD` / `-dM`：宏表本身也要与 tcc 逐行相同（次序 = 定义次序）。
+for (const f of pick('cpp')) for (const m of ['-dD', '-dM']) compare('cpp', f, [], m);
 
 // ------------------------------------------------------------ 2. inc/：#include 的搜索与守卫
 

@@ -122,7 +122,7 @@ const C_SYS_INCLUDE = [join(installDir(), '..', '..', 'include')];
  * 一份 `.c` -> 预处理后的文本。**格式与 `tcc -E -P` 逐字节相同**（ADR-0017 第五刀）。
  * 文件 IO 在这里，预处理器自己只认一个 `readFile` 回调 —— 于是 REPL 那一路可以把
  * 内存里的几份 `.h` 直接喂进去，测试也不必碰 fs。
- */function cppText(path, incs, defs) {
+ */function cppText(path, incs, defs, dflag) {
   const cpp = new Cpp({
     readFile: (p) => {
       try {
@@ -138,6 +138,8 @@ const C_SYS_INCLUDE = [join(installDir(), '..', '..', 'include')];
   });
   cpp.installPredefs(path);
   for (const [name, body] of defs) cpp.define(name, body);
+  /* `-dD` = 3、`-dM` = 7（tcc 的 `dflag`）。 */
+  cpp.dflag = dflag ?? 0;
   const out = cpp.preprocessToText(path, readText(path));  for (const w of cpp.warnings) stderr(`${w}\n`);
   return out;
 }
@@ -1992,7 +1994,10 @@ function main(argv) {
     // 测试轴（`tests/c/`）：同一份 `.c` 交给我们和 tcc，两份输出必须一样。
     // `-I <目录>` 与 `.jnc` 那一路共用同一个收集器；`-D 名字[=宏体]` 与 tcc 同形。
     case 'cpp': {
-      stdout(cppText(path, incDirs(rest), defArgs(rest)));
+      /* `-dD` / `-dM`：把 `#define`/`#undef`/`#pragma *_macro` 边过边印，
+       * `-dM` 再把记号流那一半掐掉（tcc 的 `dflag` = 3 / 7）。 */
+      const dflag = rest.includes('-dM') ? 7 : (rest.includes('-dD') ? 3 : 0);
+      stdout(cppText(path, incDirs(rest), defArgs(rest), dflag));
       return 0;
     }
     // C -> MIR（ADR-0017 第六刀）。`c-mir` 印 MIR，`c-run` 跑它 ——

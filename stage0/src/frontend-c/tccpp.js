@@ -69,7 +69,9 @@ import {
   TOK_push_macro, TOK_pop_macro, TOK_once,
   TOK_pack, TOK_push, TOK_pop,
 } from './tcctok.js';
-import { PREDEFS, PP_ONLY_DEFS, COMPILE_DEFS } from './tccdefs.js';
+import {
+  PREDEFS, PP_ONLY_DEFS, PP_ONLY_AFTER, COMPILE_DEFS,
+} from './tccdefs.js';
 
 const CH_EOF = -1;
 const SPC = 32; // ' '
@@ -239,6 +241,11 @@ export class Cpp {
     this.parseFlags = 0;
     this.tokFlags = 0;
     this.ppCounter = 0;
+    /** `-dD`（3）/ `-dM`（7）：`dflag & 7` 开「边定义边印」，`& 4` 再把记号流那一半掐掉。 */
+    this.dflag = 0;
+    /** `pp_debug_tok` / `pp_debug_symv`：刚过去那一条指示是什么、动的是哪个名字。 */
+    this.ppDebugTok = 0;
+    this.ppDebugSymv = 0;
     /** `#if` 的求值途中（`pp_expr`）：GCC 允许宏展开出 `defined`，靠这一格放行。
      *  求值那一段里它换成 `#if`/`#elif` 本身（>1），于是又兼作 `pp_error` 的开关 */
     this.ppExpr = 0;
@@ -1490,11 +1497,15 @@ export class Cpp {
       let c;
       switch (this.tok) {
         case TOK_DEFINE:
+          this.ppDebugTok = this.tok;
           this.nextNomacro();
+          this.ppDebugSymv = this.tok;
           this.parseDefine();
           break;
         case TOK_UNDEF: {
+          this.ppDebugTok = this.tok;
           this.nextNomacro();
+          this.ppDebugSymv = this.tok;
           const s = this.defineFind(this.tok);
           if (s !== null) this.defines.delete(this.tok);
           this.nextNomacro();
@@ -1781,6 +1792,8 @@ export class Cpp {
           else this.defines.set(v, prev);
         }
       }
+      this.ppDebugTok = isPush ? TOK_push_macro : TOK_pop_macro;
+      this.ppDebugSymv = v;
       this.next();
       return true;
     }
@@ -2023,6 +2036,57 @@ export class Cpp {
    *   3. 相邻两个记号如果贴在一起会粘成另一个记号，就插一个空格 —— `ppNeedSpace()`。
    *      这一条是「输出还能再被读一遍」的全部保证。
    */
+  /**
+   * `tok_print`（`tccpp.c:3772`）：把一条记号流印成一行，末尾带换行。
+   *
+   * 空格那一格容易看反：tcc 写的是 `fprintf(fp, &" %s"[s], …)` —— `s === 0` 指向
+   * `" %s"`（**带**前导空格），`s === 1` 跳过那个空格。头一个记号 `s` 是 0，所以
+   * `#define A` 后面那个空格是从这儿来的；之后一律不加空格，只有 `ppNeedSpace`
+   * 说「这两个挨着会粘成一个记号」时才把 `s` 拨回 0 补一个。
+   *
+   * 宏体里**本来就有的**空格是 `add2Spc` 存进去的 `SPC` 记号，与这一层无关。
+   */
+  tokPrint(str, prefix) {
+    let out = prefix;
+    let s = 0;
+    let t0 = 0;
+    const toks = str === null || str === undefined ? [] : str.toks;
+    for (let i = 0; i < toks.length; i++) {
+      const t = toks[i];
+      if (t === 0 || t === TOK_EOF) break;
+      if (ppNeedSpace(t0, t)) s = 0;
+      out += (s === 0 ? ' ' : '') + (t === TOK_PLCHLDR ? '<>' : this.tokStr(t, str.vals[i]));
+      s = 1;
+      t0 = t;
+    }
+    return `${out}\n`;
+  }
+
+  /** `define_print`（`tccpp.c:3817`）：`__LINE__` 那一族没有宏体（`s->d == NULL`），不印。 */
+  definePrint(v) {
+    const s = this.defineFind(v);
+    if (s === null || s === undefined || s.special === true) return '';
+    let head = `#define ${IDENT_NAMES[v] ?? this.tokStr(v, null)}`;
+    if ((s.type & MACRO_FUNC) !== 0) {
+      head += `(${(s.args ?? []).map((a) => this.tokStr(a.v, null)).join(',')})`;
+    }
+    return this.tokPrint(s.str, head);
+  }
+
+  /** `pp_debug_defines`（`tccpp.c:3843`）：刚过去那一条指示印成一行。 */
+  ppDebugDefines() {
+    const t = this.ppDebugTok;
+    if (t === 0) return '';
+    const v = this.ppDebugSymv;
+    const vs = IDENT_NAMES[v] ?? this.tokStr(v, null);
+    this.ppDebugTok = 0;
+    if (t === TOK_DEFINE) return this.definePrint(v);
+    if (t === TOK_UNDEF) return `#undef ${vs}\n`;
+    if (t === TOK_push_macro) return `#pragma push_macro("${vs}")\n`;
+    if (t === TOK_pop_macro) return `#pragma pop_macro("${vs}")\n`;
+    return '';
+  }
+
   preprocessToText(filename, text) {
     this.ppOnly = true;
     this.installPredefs(filename);
@@ -2032,11 +2096,25 @@ export class Cpp {
     this.tokFlags = TOK_FLAG_BOL | TOK_FLAG_BOF;
 
     let out = '';
+    /* `-dD`/`-dM` 下预定义与命令行上的 `-D` 也要印出来。tcc 那边是把它们当成一份
+     * 内建头文件在**同一个循环里**过掉的，于是印出来的次序就是进表的次序；我们的
+     * 预定义是直接 `define()` 装的，所以在这儿按表的次序补印一遍 —— 效果一样，
+     * 量过 tcc：预定义、`__BASE_FILE__`、命令行的 `-D`、源文件里的，正是这个次序。 */
+    if ((this.dflag & 7) !== 0) {
+      for (const v of this.defines.keys()) out += this.definePrint(v);
+      this.ppDebugTok = 0;
+    }
     let tokenSeen = TOK_LINEFEED;
     let white = '';
     for (;;) {
       this.next();
       if (this.tok === TOK_EOF) break;
+      /* `-dD`/`-dM`：刚过去那一条 `#define`/`#undef`/`#pragma *_macro` 印成一行。
+       * `-dM`（`& 4`）连记号流那一半都不印 —— 输出就只剩这些行。 */
+      if ((this.dflag & 7) !== 0) {
+        out += this.ppDebugDefines();
+        if ((this.dflag & 4) !== 0) continue;
+      }
       if (this.tok === SPC || this.tok === TAB) {
         white += String.fromCharCode(this.tok);
         continue;
@@ -2103,8 +2181,14 @@ export class Cpp {
   installPredefs(baseFile, forPP = true) {
     if (this.predefsDone) return;
     this.predefsDone = true;
-    for (const [name, body] of PREDEFS) this.define(name, body);
-    for (const [name, body] of (forPP ? PP_ONLY_DEFS : COMPILE_DEFS)) this.define(name, body);
+    for (const [name, body] of PREDEFS) {
+      this.define(name, body);
+      // `__TCC_PP__` 不在表尾：tcc 在目标/OS 那一段之后就 putdef 了（见 tccdefs.js）。
+      if (forPP && name === PP_ONLY_AFTER) {
+        for (const [n, b] of PP_ONLY_DEFS) this.define(n, b);
+      }
+    }
+    if (!forPP) for (const [name, body] of COMPILE_DEFS) this.define(name, body);
     this.define('__BASE_FILE__', `"${baseFile}"`);
   }
 }

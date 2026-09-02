@@ -568,6 +568,14 @@ tcc 那段不在 EXE 的分支里，所以 dylib 也发。门涨到 `27 条`。
 四条各清出一个不同的值，清掉 0x40 的那一条还会让它丢掉 `.reloc`。写出的那一层
 一个字没改就对上了，`tests/c/pe-flags.js` 从 `243 条`涨到 `390 条`。
 
+**`-dM` / `-dD`：宏表自己也印出来**（第八十一片）：`-dD` 是 dflag 3、`-dM` 是 7，
+`& 7` 开「边定义边印」，`& 4` 再把记号流那一半掐掉 —— 所以 `-dM` 的输出只有指令行。
+印的次序就是**宏表的插入次序**，这把预定义那张表的次序也量出来了：`__TCC_PP__`
+不在表尾，tcc 是在目标/OS 那一段之后（紧跟 `__unix`）就 `putdef` 的。
+`#define` 的宏体里那些空格是真存进记号流的（`SPC`），加上 `pp_need_space`
+补出来的分隔位，才能逐字节对上。门是 `tests/c/run.js` 里 `cpp/` 那八份文件
+再各走一遍两个开关，`8 条` → `24 条`。
+
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
 地址交给真的 libc（`strlen`/`memcpy`）验过。C 前端现在还把 `&x` 降到影子栈上，
@@ -11659,6 +11667,84 @@ s->sh_offset = file_offset + dyninf->rel_size;
 就是这个道理。
 
 <!-- 第九刀第八十片-END -->
+
+## 落地：第九刀第八十一片
+
+`-dM` / `-dD` —— 把宏表自己印出来。
+
+两个开关落成同一个数（libtcc.c:1979）：`-dD` → `dflag = 3`，`-dM` → `dflag = 7`。
+读的地方只有两处：
+
+- `dflag & 7` 开「边定义边印」（`pp_debug_defines`）；
+- `dflag & 4` 再把**记号流那一半**掐掉（`pp_line` 一进来就返回，正文一个字不印）。
+
+所以 `-dM` 的输出就是纯指令行，`-dD` 是指令行**夹在**正文里。
+
+### 预定义那一批是怎么印出来的
+
+tcc **没有**「先把表里已有的印一遍」这一步。`tcc_preprocess` 的循环里只有一处钩子
+（tccpp.c:3933）：
+
+```c
+if (s1->dflag & 7) {
+    pp_debug_defines(s1);
+    if (s1->dflag & 4)
+        continue;
+}
+```
+
+预定义之所以会印出来，是因为在 tcc 里它们**本来就是一份源码**：`tcc_predefs` 把
+tccdefs.h 那段文本当成 `<command line>` 这个文件喂进同一个循环，里头每条 `#define`
+都走 `TOK_DEFINE` 那个 case —— `-dD` 的输出里那几行
+`# 1 "<command line>" 1` / `# 132 "<command line>"` 就是这么来的。
+
+我们的预定义是**三张表**（`tccdefs.js`），不是一段源码。所以这一步换了个形状：
+`preprocessToText` 开头遍历一遍 `this.defines.keys()`（Map，次序就是插入次序），
+之后循环里每取一个记号叫一次 `ppDebugDefines()`。印出来的东西一模一样 ——
+但这也意味着**表的次序就是输出的次序**，见下面那一节。
+
+`TOK_DEFINE` / `TOK_UNDEF` 那两个 case 与 `pragmaParse` 的 push/pop 分支各留一对
+`ppDebugTok` / `ppDebugSymv`，照 tcc 的样子。
+
+### 空格是量出来的
+
+`tok_print`（tccpp.c:3772）那一行是这么写的：
+
+```c
+fprintf(fp, &" %s"[s], get_tok_str(t, v));
+```
+
+`s` 是**下标**：0 → `" %s"`（带一个前导空格），1 → `"%s"`（不带）。
+起手 `s = 0`，印的就是 `#define NAME` 后面那个空格；之后一直是 1，
+只有 `pp_need_space(t0, t)` 说「这两个记号贴着会粘成一个」时才回 0 补一格。
+宏体源码里本来有的空格是**真的记号**（`add2Spc` 在 `needSpc === 3` 时存的 `SPC`），
+不是靠这里补的。这条读反了输出就到处差一格 —— 我一开始就读反了，
+拿 `#define A a b` / `#define F(x,y) x ## y + 1` 印一遍才纠回来。
+
+### 顺手量出了预定义表的次序
+
+`-dM` 是逐行比的，于是**表的次序**也进了对账范围。第一次跑出来只差一行：
+
+```
+8d7
+< #define __TCC_PP__ 1
+50a50
+> #define __TCC_PP__ 1
+```
+
+`__TCC_PP__` 不在表尾 —— tcc 是在目标/OS 那一段之后就 `putdef` 的
+（tccpp.c:3597，紧跟 `__unix`，在 `__leading_underscore` 前面）。
+`tccdefs.js` 多了一个 `PP_ONLY_AFTER = '__unix'`，`installPredefs` 走到那一条就
+把 `PP_ONLY_DEFS` 插进去。这种事只有逐行的尺子量得出来。
+
+### 门
+
+不新开文件：`tests/c/run.js` 里 `cpp/` 那八份各再走一遍 `-dD` 与 `-dM`
+（尺子是 `tcc -E -P -dD` / `-dM`，`-P` 是因为我们从来不印 `# 行号 "文件"` 的行标 ——
+那是另一片的事）。`compare()` 多一个 `mode` 参数，`8 条` → `24 条`，全部相同。
+CLI 那一路 `omni cpp <文件> -dM|-dD` 同样与 `arm64-osx-tcc` 逐字节相同。
+
+<!-- 第九刀第八十一片-END -->
 
 
 

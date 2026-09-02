@@ -122,6 +122,11 @@ export const PP_ONLY_DEFS = [
   ['__TCC_PP__', '1'],
 ];
 
+/** `__TCC_PP__` 那一条**不在表尾**：tcc 是在目标/OS 那一段之后就 `putdef` 的
+ * （`tccpp.c:3597`，紧跟 `__unix`）。`-dM` 的逐行输出把这个位置量出来了 ——
+ * 表里的次序就是印出来的次序，差一格就对不上。 */
+export const PP_ONLY_AFTER = '__unix';
+
 /**
  * 只在**编译**那一路上定义的宏（tccdefs.h 那道 `#ifndef __TCC_PP__` 里面的宏部分，
  * 按 `__aarch64__` + `__APPLE__` 这一支选）。
