@@ -442,7 +442,10 @@ tcc 逐字节相同了**（第五十片，`peWrite`：两个 win32 目标 160 �
 11 份逐字节相同；命令行上是 `omni elf-link --shared`）。**也能接着真的共享库链了**
 （第六十片：读库的 `DT_SONAME` 与 `.dynsym`、函数走跳板、数据在自己的 `.bss` 里划一块
 加一条 `R_*_COPY`、库里提到的名字反过来导出、`DT_NEEDED`，两个目标各 3 份逐字节相同；
-命令行上是 `omni elf-link --dll libfoo.so`）。
+命令行上是 `omni elf-link --dll libfoo.so`）。**`__thread` 也认了**（第六十一片：PT_TLS
+那一段的起止穿到重定位里，x86_64 的 `TPOFF32` 相对整块的**末尾**算、arm64 的
+`TLSLE_ADD_TPREL_HI12`/`LO12` 相对起点加 16 个字节的 `tcbhead_t` 算 —— tcc 只出
+local-exec 这一种模型，静态、动态、共享库三道门各 12 × 2 份逐字节相同）。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -10412,6 +10415,30 @@ arm64-linux : 3 份可执行文件逐字节相同
 - **`DT_NEEDED`**：库名进 `.dynstr` 是在所有符号名之后，标签排在 `DT_FLAGS` 之前。
 
 <!-- 第九刀第六十片-END -->
+
+## 落地：第九刀第六十一片 —— 线程局部（local-exec）
+
+`__thread` 的变量落在 `.tdata`/`.tbss`，摆放时多一个 PT_TLS 段。用例是
+`tests/c/elf-gen/16-tls.c`（初始化过的、没初始化过的、静态的各一份），三道门都自动收了它：
+
+```
+elf-exe: 12 × 2 逐字节相同    elf-dyn: 12 × 2    elf-so: 12 × 2
+```
+
+要点只有一条：**偏移相对哪里算**。tcc 只出 local-exec 这一种模型（不生成位置无关码，
+连 `-shared` 也一样），于是编译期就能把偏移写死，两条腿的算法却不同：
+
+- **x86_64**（`R_X86_64_TPOFF32`，23 号）：`add32(val - tls_end)`。`fs` 基址指的是整块
+  TLS 的**末尾**，所以偏移一律是负数。`tls_end` 要把 `p_memsz` 按 `p_align` 向上取整
+  之后再算 —— PT_TLS 的对齐是从节里来的，不取整就差几个字节。
+- **arm64**（`TLSLE_ADD_TPREL_HI12` 549 / `LO12` 550）：`tp = val - tls_start + 16`，
+  高 12 位与低 12 位分别填进 `add` 的 imm 位（`(insn & 0xffc003ff) | (imm << 10)`）。
+  那 16 个字节是 `tcbhead_t`：`tpidr_el0` 指着它，线程数据跟在它后面。
+
+落笔的地方仍是 `relocateOne`，只是多收一个 `{start, end}`。这一段是在**摆放**时才知道的
+（PT_TLS 的 `p_vaddr`/`p_memsz`），所以要从布局那里穿过来 —— 没摆就用，只能报错。
+
+<!-- 第九刀第六十一片-END -->
 
 
 

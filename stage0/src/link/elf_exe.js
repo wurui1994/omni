@@ -1142,6 +1142,8 @@ export function elfExeImage(inp) {
 
   let ph = null;
   let n = 0;
+  /** PT_TLS 那一段的起止（线程局部那几号重定位要它）。 */
+  let tlsSeg;
   for (let i = 1; i <= SHSTR; i++) {
     const s = secs[ord[i]];
     const f = fs[i];
@@ -1188,6 +1190,12 @@ export function elfExeImage(inp) {
       const ph2 = updatePhdr(phdrs[tlsIdx], PT_TLS, s, addr, fileOffset);
       if (s.al > ph2.al) ph2.al = s.al;
       if (s.type === SHT_NOBITS) addr -= s.shsize;
+      /* 落笔那几号线程局部重定位要的两个数（tcc 里那两句 `for xxx-link.c:relocate()`）：
+       * 段的起点，与「起点 + 按对齐补齐的长度」。 */
+      tlsSeg = {
+        start: ph2.vaddr,
+        end: ph2.vaddr + ph2.memsz + ((-ph2.memsz) & (ph2.al - 1)),
+      };
     }
   }
 
@@ -1345,7 +1353,7 @@ export function elfExeImage(inp) {
       const g = gotOff.get(r.sym);
       relocateOne(machine, r.type, tgt.bytes, r.at, tgt.addr + r.at,
         val, 0, false,
-        g === undefined ? undefined : secs[GOT].addr + g);
+        g === undefined ? undefined : secs[GOT].addr + g, tlsSeg);
     }
     if (qrel !== null) {
       relas.set(si, qrel);
