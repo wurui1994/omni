@@ -407,3 +407,116 @@ export function buildImports(imp) {
   return out;
 }
 
+/* ------------------------------------------------------- 异常展开表（第四十五片）
+ * `pe_add_unwind_data` / `pe_add_unwind_info`。Windows 上 x86_64 与 arm64 都要它 ——
+ * 每个函数在 `.pdata` 里有一条记录，说「这一段代码的栈帧长什么样」。两个目标的形状
+ * 不一样：
+ *
+ *  - x86_64：`.pdata` 一条 12 字节（起、止、展开信息的 RVA）。展开信息（`UNWIND_INFO`，
+ *    8 字节）**只有一份**、住在 `.text` 里 —— tcc 的函数帧长得都一样，一条够用。
+ *  - arm64：`.pdata` 一条 8 字节（起、`.xdata` 里那一条的 RVA），每个函数在 `.xdata`
+ *    里有自己的 8 字节：一个头 + 四个展开码（`set_fp` / `save_fplr_x` / `end` / 一个
+ *    补位的 `nop`）。头里装着函数长度（按 4 字节数）、一个 epilog、展开码的字数。
+ */
+
+/** x86_64 那一份共用的 `UNWIND_INFO`：版本 1、prolog 4 字节、两条展开码、帧寄存器 rbp。 */
+const UW_INFO_X64 = [0x01, 0x04, 0x02, 0x05, 0x04, 0x03, 0x01, 0x50];
+/** arm64 每个函数的展开码：`mov x29,sp` / `stp x29,lr,[sp,#-224]!` / 结束 / 补位。 */
+const UW_CODES_ARM64 = [0xe1, 0x9b, 0xe4, 0xe3];
+
+/**
+ * 读一份映像的异常展开表。
+ *
+ * @param img `readImage` 的结果
+ * @returns `null`（没有）或 `{machine, psec, pat, xsec, xat, xbase, uwRva, funcs}`：
+ *          `psec`/`pat` 是 `.pdata` 在哪一节的哪个偏移，`xsec`/`xat`/`xbase` 是 arm64 的
+ *          `.xdata`，`uwRva` 是 x86_64 那一份共用展开信息的 RVA
+ */
+export function readUnwind(img) {
+  const dir = img.dirs[3];
+  if (dir.size === 0) return null;
+  const find = (rva) => img.secs.findIndex((s) => rva >= s.vaddr && rva < s.vaddr + s.vsize);
+  const psec = find(dir.addr);
+  if (psec < 0) throw new OmniError('pe: .pdata 不在任何一节里');
+  const sec = img.secs[psec];
+  const pat = dir.addr - sec.vaddr;
+  const dv = new DataView(sec.bytes.buffer, sec.bytes.byteOffset, sec.bytes.byteLength);
+  const arm64 = img.machine === 0xaa64;
+  const stride = arm64 ? 8 : 12;
+  if (dir.size % stride !== 0) throw new OmniError(`pe: .pdata 的长度 ${dir.size} 不是 ${stride} 的倍数`);
+
+  const funcs = [];
+  for (let i = 0; i * stride < dir.size; i++) {
+    const p = pat + i * stride;
+    if (arm64) funcs.push({ begin: dv.getUint32(p, true), data: dv.getUint32(p + 4, true) });
+    else {
+      funcs.push({
+        begin: dv.getUint32(p, true),
+        end: dv.getUint32(p + 4, true),
+        data: dv.getUint32(p + 8, true),
+      });
+    }
+  }
+  if (funcs.length === 0) return null;
+
+  if (!arm64) {
+    /* x86_64：展开信息**一个目标文件一份** —— `s1->uw_offs` 是编译那一趟的状态，
+     * 每个 `.o` 都在自己的 `.text` 里放一份，链完就有好几份（都是同样的 8 字节）。 */
+    const uwRvas = [];
+    for (const f of funcs) if (!uwRvas.includes(f.data)) uwRvas.push(f.data);
+    return { machine: img.machine, psec, pat, uwRvas, funcs };
+  }
+
+  /* arm64：每个函数在 `.xdata` 里有自己的一条，函数长度从那个头里取。 */
+  const xsec = find(funcs[0].data);
+  if (xsec < 0) throw new OmniError('pe: .xdata 不在任何一节里');
+  const xs = img.secs[xsec];
+  const xdv = new DataView(xs.bytes.buffer, xs.bytes.byteOffset, xs.bytes.byteLength);
+  const xbase = funcs[0].data;
+  for (const f of funcs) f.funcLen = xdv.getUint32(f.data - xs.vaddr, true) & 0x3ffff;
+  return { machine: img.machine, psec, pat, xsec, xat: xbase - xs.vaddr, xbase, funcs };
+}
+
+/**
+ * 把异常展开表写出来。
+ *
+ * @param u `readUnwind` 那个形状
+ * @returns `{pdata, xdata}`：`xdata` 只有 arm64 有（x86_64 上那一份展开信息在 `.text` 里，
+ *          是 `UW_INFO_X64` 那 8 字节）
+ */
+export function buildUnwind(u) {
+  const arm64 = u.machine === 0xaa64;
+  const stride = arm64 ? 8 : 12;
+  const pdata = new Uint8Array(u.funcs.length * stride);
+  const pv = new DataView(pdata.buffer);
+  const xdata = arm64 ? new Uint8Array(u.funcs.length * 8) : new Uint8Array(0);
+  const xv = new DataView(xdata.buffer);
+
+  for (let i = 0; i < u.funcs.length; i++) {
+    const f = u.funcs[i];
+    const p = i * stride;
+    if (!arm64) {
+      pv.setUint32(p, f.begin, true);
+      pv.setUint32(p + 4, f.end, true);
+      pv.setUint32(p + 8, f.data, true);
+      continue;
+    }
+    /* 每条 `.xdata` 是 4 + code_bytes 字节，code_bytes = (0 + 3 + 3) & ~3 = 4，
+     * 所以一条正好 8 字节、天生 4 对齐 —— 于是第 i 个函数的那一条就在 xbase + 8i。 */
+    const at = i * 8;
+    pv.setUint32(p, f.begin, true);
+    pv.setUint32(p + 4, u.xbase + at, true);
+    /* 头：函数长度（18 位）| E=1（一个 epilog）| epilog 起点 0 | 展开码的字数。 */
+    const header = (f.funcLen & 0x3ffff) | (1 << 21) | (0 << 22) | (1 << 27);
+    xv.setUint32(at, header >>> 0, true);
+    xdata.set(new Uint8Array(UW_CODES_ARM64), at + 4);
+  }
+  return { pdata, xdata };
+}
+
+/** x86_64 上那一份共用的展开信息（住在 `.text` 里，8 字节）。 */
+export function unwindInfoX64() {
+  return new Uint8Array(UW_INFO_X64);
+}
+
+
