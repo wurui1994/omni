@@ -309,3 +309,281 @@ export const ret = (rn = 30) => branchReg(2, rn);
 
 /** `nop` 是 hint #0（C6.2.203）。 */
 export const nop = () => 0xd503201f;
+
+/* ================================================================ 第九刀第二片
+ * 逻辑立即数、位段、单目位运算、浮点、单向屏障的存取。 */
+
+/* ---------------------------------------------------------------- 逻辑立即数
+ * C4.1.4 Logical (immediate)：sf opc 1 0 0 1 0 0 N immr imms Rn Rd
+ *
+ * arm64 最绕的一格：立即数不是照原样存的，存的是「**一段连着的 1**，转一下，
+ * 再按某个长度重复铺满」这三件事的编码（N:immr:imms 一共 13 位，能表示 5334 个
+ * 不同的 64 位值）。所以 `and x0, x1, #0xff` 编得下去，`and x0, x1, #0xff00ff` 也
+ * 编得下去（重复的），`and x0, x1, #0x3ff0` 也编得下去（转过 4 位的十个 1），而
+ * `and x0, x1, #0x1234` 编不下去 —— 1 分成了好几段，怎么转都凑不成一段。
+ *
+ * 编法（ARM 手册 J1 的 `DecodeBitMasks` 反过来）：
+ *   1. 猜元素长度 e ∈ {2,4,8,16,32,64}：值必须是「每 e 位一个样」；
+ *   2. 元素里必须是「若干个 1 连成一段，绕着 e 位转过某个角度」；
+ *   3. imms = (那段 1 的个数 - 1) | 掩掉 e 的那几位，immr = 转的角度，N = (e === 64)。
+ * 编不下去的当场报 —— 调用方该改走 movz/movk 再 and 那条路（tcc 也是这么分的）。
+ */
+export function bitmaskImm(sf, value) {
+  const width = sf ? 64n : 32n;
+  let v = BigInt.asUintN(Number(width), BigInt(value));
+  if (v === 0n || v === BigInt.asUintN(Number(width), -1n)) {
+    bad(`逻辑立即数 0x${v.toString(16)} 全 0 或全 1，编不了`);
+  }
+  for (let e = 2n; e <= width; e *= 2n) {
+    /* 一、每 e 位一个样吗 */
+    const mask = (1n << e) - 1n;
+    const first = v & mask;
+    let uniform = true;
+    for (let i = e; i < width; i += e) {
+      if (((v >> i) & mask) !== first) { uniform = false; break; }
+    }
+    if (!uniform) continue;
+    /* 二、元素里是不是「一段 1 转过某个角度」。先数低位有几个 0（那就是转角），
+     * 转回去之后必须是 0b0…011…1 那个形状。 */
+    let rot = 0n;
+    let x = first;
+    while ((x & 1n) === 0n) { x >>= 1n; rot++; }
+    /* 转回来：把低位那段 1 挪到最低位。`x` 现在最低位是 1。 */
+    let ones = 0n;
+    let y = x;
+    while ((y & 1n) === 1n) { y >>= 1n; ones++; }
+    if (y !== 0n) {
+      /* 低位那段 1 上面还有 1 —— 只有「1 在两头、0 在中间」这一种还有救：
+       * 那说明这一段 1 是**绕过元素边界**的，转角要从高位那头数。 */
+      let hi = 0n;
+      let bit = e - 1n;
+      while (bit >= 0n && ((first >> bit) & 1n) === 1n) { hi++; bit--; }
+      let lo = 0n;
+      let z = first;
+      while ((z & 1n) === 1n) { z >>= 1n; lo++; }
+      if (hi === 0n || lo === 0n) continue;
+      /* 该长什么样：高 hi 位全 1、低 lo 位全 1、中间全 0。不是这个形状就换下一个 e。 */
+      const want = (((1n << hi) - 1n) << (e - hi)) | ((1n << lo) - 1n);
+      if (first !== want) continue;
+      ones = hi + lo;
+      rot = e - hi;
+    }
+    if (ones === 0n || ones >= e) continue;
+    const N = e === 64n ? 1 : 0;
+    /* imms 的高几位是 `NOT e` 的那串 1（手册里管这叫 "the element size is encoded
+     * in the upper bits of imms"）。 */
+    const immsHi = e === 64n ? 0n : (0x7en & ~((e * 2n) - 1n)) & 0x3fn;
+    const imms = Number(immsHi | (ones - 1n));
+    /* `immr` 是**右**转的角度（手册 J1 的 `DecodeBitMasks` 里是 `ROR(welem, R)`），
+     * 而上面数出来的 `rot` 是「那段 1 从最低位往左挪了多少」—— 两者互为补角。
+     * 这一格错过一次：`and x0, x1, #0x8000000000000000` 编成了 immr=63，llvm 说是 1。 */
+    const immr = Number((e - (rot % e)) % e);
+    return { N, immr, imms };
+  }
+  return bad(`逻辑立即数 0x${v.toString(16)} 不是「一段 1 转一下再铺满」的形状`);
+}
+
+function logicImmRaw(sf, opc, N, immr, imms, rn, rd) {
+  return u32(sf * 2 ** 31 + opc * 2 ** 29 + 0x24 * 2 ** 23 + N * 2 ** 22
+    + chkU(immr, 6, 'immr') * 2 ** 16 + chkU(imms, 6, 'imms') * 2 ** 10
+    + chkReg(rn) * 2 ** 5 + chkReg(rd));
+}
+
+function logicImm(sf, opc, rd, rn, value) {
+  /* w 系不会走出 N=1 —— 上面的循环在 width=32 时最大只试到 e=32，而 N 只在 e=64
+   * 时是 1。所以「w 系用了 N=1」这件事根本不可能发生，不必再挡一道。 */
+  const m = bitmaskImm(sf, value);
+  return logicImmRaw(sf, opc, m.N, m.immr, m.imms, rn, rd);
+}
+
+export const andImm = (sf, rd, rn, v) => logicImm(sf, 0, rd, rn, v);
+export const orrImm = (sf, rd, rn, v) => logicImm(sf, 1, rd, rn, v);
+export const eorImm = (sf, rd, rn, v) => logicImm(sf, 2, rd, rn, v);
+export const andsImm = (sf, rd, rn, v) => logicImm(sf, 3, rd, rn, v);
+/** `tst Rn, #imm` = `ands xzr, Rn, #imm`。 */
+export const tstImm = (sf, rn, v) => andsImm(sf, 31, rn, v);
+
+/* ---------------------------------------------------------------- 位段
+ * C4.1.4 Bitfield：sf opc 1 0 0 1 1 0 N immr imms Rn Rd
+ * opc: 00 sbfm, 01 bfm, 10 ubfm。`lsl`/`lsr`/`asr` 的立即数版、`sxtb`/`uxth`、
+ * `ubfx`/`sbfx`/`bfi` 全是这三条的别名 —— 别名多是因为 arm64 根本没有独立的
+ * 「移位立即数」指令。 */
+function bfm(sf, opc, immr, imms, rn, rd) {
+  return u32(sf * 2 ** 31 + opc * 2 ** 29 + 0x26 * 2 ** 23 + sf * 2 ** 22
+    + chkU(immr, 6, 'immr') * 2 ** 16 + chkU(imms, 6, 'imms') * 2 ** 10
+    + chkReg(rn) * 2 ** 5 + chkReg(rd));
+}
+
+export const sbfm = (sf, rd, rn, immr, imms) => bfm(sf, 0, immr, imms, rn, rd);
+export const bfmIns = (sf, rd, rn, immr, imms) => bfm(sf, 1, immr, imms, rn, rd);
+export const ubfm = (sf, rd, rn, immr, imms) => bfm(sf, 2, immr, imms, rn, rd);
+
+/** 查移位量合不合法，回的是**这一档的宽度**（32 或 64）—— 三条别名都要用它算 immr/imms。 */
+function shWidth(sf, n) {
+  const w = sf ? 64 : 32;
+  if (!Number.isInteger(n) || n < 0 || n >= w) bad(`移位 ${n} 不在 0-${w - 1}`);
+  return w;
+}
+
+/** `lsl Rd, Rn, #n` = `ubfm Rd, Rn, #(-n mod w), #(w-1-n)`（C6.2.178 的别名）。 */
+export function lslImm(sf, rd, rn, n) {
+  const w = shWidth(sf, n);
+  return ubfm(sf, rd, rn, (w - n) % w, w - 1 - n);
+}
+/** `lsr Rd, Rn, #n` = `ubfm Rd, Rn, #n, #(w-1)`。 */
+export function lsrImm(sf, rd, rn, n) {
+  const w = shWidth(sf, n);
+  return ubfm(sf, rd, rn, n, w - 1);
+}
+/** `asr Rd, Rn, #n` = `sbfm Rd, Rn, #n, #(w-1)`。 */
+export function asrImm(sf, rd, rn, n) {
+  const w = shWidth(sf, n);
+  return sbfm(sf, rd, rn, n, w - 1);
+}
+/** `ubfx Rd, Rn, #lsb, #width` = `ubfm Rd, Rn, #lsb, #(lsb+width-1)`。 */
+export function ubfx(sf, rd, rn, lsb, width) {
+  chkField(sf, lsb, width);
+  return ubfm(sf, rd, rn, lsb, lsb + width - 1);
+}
+export function sbfx(sf, rd, rn, lsb, width) {
+  chkField(sf, lsb, width);
+  return sbfm(sf, rd, rn, lsb, lsb + width - 1);
+}
+/** `bfi Rd, Rn, #lsb, #width` = `bfm Rd, Rn, #(-lsb mod w), #(width-1)`。 */
+export function bfi(sf, rd, rn, lsb, width) {
+  const w = chkField(sf, lsb, width);
+  return bfmIns(sf, rd, rn, (w - lsb) % w, width - 1);
+}
+
+/** 取/插一段的两个参数：段要在寄存器里放得下，且宽度至少 1。 */
+function chkField(sf, lsb, width) {
+  const w = sf ? 64 : 32;
+  if (!Number.isInteger(lsb) || lsb < 0 || lsb >= w) bad(`位段起点 ${lsb} 不在 0-${w - 1}`);
+  if (!Number.isInteger(width) || width < 1 || lsb + width > w) {
+    bad(`位段 [${lsb}, +${width}) 出了 ${w} 位`);
+  }
+  return w;
+}
+/* 符号/零扩展：`sxtb w0, w1` 就是 `sbfm w0, w1, #0, #7`。注意 `sxtb`/`sxth` 的目标
+ * 可以是 x 系（源永远按 w 系读），`uxtb`/`uxth` 只有 w 系（x 系那两个写起来是
+ * `and Rd, Rn, #0xff`，因为高 32 位本来就是 0）。 */
+export const sxtb = (sf, rd, rn) => sbfm(sf, rd, rn, 0, 7);
+export const sxth = (sf, rd, rn) => sbfm(sf, rd, rn, 0, 15);
+export const sxtw = (rd, rn) => sbfm(1, rd, rn, 0, 31);
+export const uxtb = (rd, rn) => ubfm(0, rd, rn, 0, 7);
+export const uxth = (rd, rn) => ubfm(0, rd, rn, 0, 15);
+
+/** `extr Rd, Rn, Rm, #lsb`（C4.1.4 Extract）：两个寄存器接起来取一段，
+ * `ror Rd, Rn, #n` 就是它的 Rn===Rm 那一种。 */
+export function extr(sf, rd, rn, rm, lsb) {
+  return u32(sf * 2 ** 31 + 0x27 * 2 ** 23 + sf * 2 ** 22 + chkReg(rm) * 2 ** 16
+    + chkU(lsb, 6, 'lsb') * 2 ** 10 + chkReg(rn) * 2 ** 5 + chkReg(rd));
+}
+export const rorImm = (sf, rd, rn, n) => extr(sf, rd, rn, rn, n);
+
+/* ---------------------------------------------------------------- 单目位运算
+ * C4.1.5 Data-processing (1 source)：sf 1 0 1 1 0 1 0 1 1 0 0 0 0 0 opcode(6) Rn Rd */
+function dp1(sf, opcode, rn, rd) {
+  return u32(sf * 2 ** 31 + 0x2d6 * 2 ** 21 + chkU(opcode, 6, 'opcode') * 2 ** 10
+    + chkReg(rn) * 2 ** 5 + chkReg(rd));
+}
+
+export const rbit = (sf, rd, rn) => dp1(sf, 0x00, rn, rd);
+export const rev16 = (sf, rd, rn) => dp1(sf, 0x01, rn, rd);
+/** `rev` 的 opcode 随宽度变：w 系是 2（32 位翻转），x 系是 3。 */
+export const rev = (sf, rd, rn) => dp1(sf, sf ? 0x03 : 0x02, rn, rd);
+export const rev32 = (rd, rn) => dp1(1, 0x02, rn, rd);
+export const clz = (sf, rd, rn) => dp1(sf, 0x04, rn, rd);
+export const cls = (sf, rd, rn) => dp1(sf, 0x05, rn, rd);
+
+/* ---------------------------------------------------------------- 浮点
+ * `type` 这两位是宽度：00 单精度、01 双精度（10 保留、11 半精度）。
+ * 下面所有函数的第一个参数 `dbl` 就是它（真 = double）。
+ *
+ * C4.1.9 Floating-point data-processing (2 source)：
+ *   0 0 0 1 1 1 1 0 type 1 Rm opcode(4) 1 0 Rn Rd */
+function fp2(dbl, opcode, rm, rn, rd) {
+  return u32(0x1e * 2 ** 24 + (dbl ? 1 : 0) * 2 ** 22 + 2 ** 21 + chkReg(rm) * 2 ** 16
+    + chkU(opcode, 4, 'opcode') * 2 ** 12 + 2 ** 11 + chkReg(rn) * 2 ** 5 + chkReg(rd));
+}
+
+export const fmul = (dbl, rd, rn, rm) => fp2(dbl, 0x0, rm, rn, rd);
+export const fdiv = (dbl, rd, rn, rm) => fp2(dbl, 0x1, rm, rn, rd);
+export const fadd = (dbl, rd, rn, rm) => fp2(dbl, 0x2, rm, rn, rd);
+export const fsub = (dbl, rd, rn, rm) => fp2(dbl, 0x3, rm, rn, rd);
+export const fmax = (dbl, rd, rn, rm) => fp2(dbl, 0x4, rm, rn, rd);
+export const fmin = (dbl, rd, rn, rm) => fp2(dbl, 0x5, rm, rn, rd);
+export const fnmul = (dbl, rd, rn, rm) => fp2(dbl, 0x8, rm, rn, rd);
+
+/* Floating-point data-processing (1 source)：
+ *   0 0 0 1 1 1 1 0 type 1 opcode(6) 1 0 0 0 0 Rn Rd */
+function fp1(dbl, opcode, rn, rd) {
+  return u32(0x1e * 2 ** 24 + (dbl ? 1 : 0) * 2 ** 22 + 2 ** 21
+    + chkU(opcode, 6, 'opcode') * 2 ** 15 + 0x10 * 2 ** 10
+    + chkReg(rn) * 2 ** 5 + chkReg(rd));
+}
+
+export const fmovFp = (dbl, rd, rn) => fp1(dbl, 0x00, rn, rd);
+export const fabsFp = (dbl, rd, rn) => fp1(dbl, 0x01, rn, rd);
+export const fneg = (dbl, rd, rn) => fp1(dbl, 0x02, rn, rd);
+export const fsqrt = (dbl, rd, rn) => fp1(dbl, 0x03, rn, rd);
+/** `fcvt d, s`：源的宽度进 `type`、目标的宽度进 opcode 的低两位（00=S、01=D）。 */
+export const fcvtSD = (rd, rn) => fp1(false, 0x05, rn, rd);   // s -> d
+export const fcvtDS = (rd, rn) => fp1(true, 0x04, rn, rd);    // d -> s
+
+/* Floating-point compare：0 0 0 1 1 1 1 0 type 1 Rm op(2) 1 0 0 0 Rn opcode2(5) */
+function fcmpRaw(dbl, rm, op, opcode2, rn) {
+  return u32(0x1e * 2 ** 24 + (dbl ? 1 : 0) * 2 ** 22 + 2 ** 21 + rm * 2 ** 16
+    + op * 2 ** 14 + 2 ** 13 + chkReg(rn) * 2 ** 5 + chkU(opcode2, 5, 'opcode2'));
+}
+
+export const fcmp = (dbl, rn, rm) => fcmpRaw(dbl, chkReg(rm), 0, 0x00, rn);
+export const fcmpZero = (dbl, rn) => fcmpRaw(dbl, 0, 0, 0x08, rn);
+export const fcmpe = (dbl, rn, rm) => fcmpRaw(dbl, chkReg(rm), 0, 0x10, rn);
+
+/* Conversion between floating-point and integer：
+ *   sf 0 0 1 1 1 1 0 type 1 rmode(2) opcode(3) 0 0 0 0 0 0 Rn Rd */
+function fpInt(sf, dbl, rmode, opcode, rn, rd) {
+  return u32(sf * 2 ** 31 + 0x1e * 2 ** 24 + (dbl ? 1 : 0) * 2 ** 22 + 2 ** 21
+    + rmode * 2 ** 19 + opcode * 2 ** 16 + chkReg(rn) * 2 ** 5 + chkReg(rd));
+}
+
+/** 有符号整数 -> 浮点。`sf` 是**源**（整数）那一头的宽度。 */
+export const scvtf = (sf, dbl, rd, rn) => fpInt(sf, dbl, 0, 2, rn, rd);
+export const ucvtf = (sf, dbl, rd, rn) => fpInt(sf, dbl, 0, 3, rn, rd);
+/** 浮点 -> 整数，**向零取整**（C 的强制转换就是这一种）。`sf` 是目标那一头。 */
+export const fcvtzs = (sf, dbl, rd, rn) => fpInt(sf, dbl, 3, 0, rn, rd);
+export const fcvtzu = (sf, dbl, rd, rn) => fpInt(sf, dbl, 3, 1, rn, rd);
+/** 位搬家（不改位）：`fmov x0, d0` 与 `fmov d0, x0`。 */
+export const fmovToInt = (sf, dbl, rd, rn) => fpInt(sf, dbl, 0, 6, rn, rd);
+export const fmovFromInt = (sf, dbl, rd, rn) => fpInt(sf, dbl, 0, 7, rn, rd);
+
+/* 浮点的存取：与整数那一族同一个编码，多一个 V 位（bit 26）。
+ * `size` 照旧是宽度的对数（2 = s、3 = d）。 */
+function ldstFpUimm(size, opc, imm12, rn, rt) {
+  return u32(size * 2 ** 30 + 0x3d * 2 ** 24 + opc * 2 ** 22
+    + chkU(imm12, 12, 'imm12') * 2 ** 10 + chkReg(rn) * 2 ** 5 + chkReg(rt));
+}
+
+export const strFpU = (size, rt, rn, off) => ldstFpUimm(size, 0, scaled(off, size), rn, rt);
+export const ldrFpU = (size, rt, rn, off) => ldstFpUimm(size, 1, scaled(off, size), rn, rt);
+
+/* ---------------------------------------------------------------- 带屏障的存取
+ * C4.1.3 Load/store exclusive 里 `o2`=1、`o1`=0、`o0`=1 的那两条（单向屏障）：
+ *   size 0 0 1 0 0 0 o2 L o1 (1)(1)(1)(1)(1) o0 (1)(1)(1)(1)(1) Rn Rt
+ * `o2`（bit 23）是「带 acquire/release 语义」那一格 —— 漏了它编出来就是普通的
+ * `ldxr`/`stxr`（对着 llvm 验的时候正是这一位差了）。
+ * `_Atomic` 的读写要靠它们（第八刀还没走到原子那一片，但编码先备好）。 */
+function ldstAcqRel(size, L, rn, rt) {
+  return u32(size * 2 ** 30 + 0x08 * 2 ** 24 + 2 ** 23 + L * 2 ** 22 + 0x1f * 2 ** 16
+    + 2 ** 15 + 0x1f * 2 ** 10 + chkReg(rn) * 2 ** 5 + chkReg(rt));
+}
+
+export const ldar = (size, rt, rn) => ldstAcqRel(size, 1, rn, rt);
+export const stlr = (size, rt, rn) => ldstAcqRel(size, 0, rn, rt);
+
+/** 数据/指令屏障（C6.2.79/C6.2.114）。`dmb ish` 是 0xd5033bbf 那一条。 */
+export const dmbIsh = () => 0xd5033bbf;
+export const dsbIsh = () => 0xd5033b9f;
+export const isb = () => 0xd5033fdf;
+

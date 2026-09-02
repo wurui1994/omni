@@ -155,6 +155,122 @@ t('ret', a.ret());
 t('ret x4', a.ret(4));
 t('nop', a.nop());
 
+// ================================================================ 第九刀第二片
+
+// ---- 逻辑立即数（N/immr/imms 那一族）
+t('and x0, x1, #0xff', a.andImm(X, 0, 1, 0xff));
+t('and w2, w3, #0xff', a.andImm(W, 2, 3, 0xff));
+t('and x4, x5, #0xffff', a.andImm(X, 4, 5, 0xffff));
+t('and x6, x7, #0xffffffff', a.andImm(X, 6, 7, 0xffffffff));
+t('and x8, x9, #1', a.andImm(X, 8, 9, 1));
+t('and x10, x11, #0x8000000000000000', a.andImm(X, 10, 11, -0x8000000000000000n));
+t('and x12, x13, #0xff00ff00ff00ff00', a.andImm(X, 12, 13, 0xff00ff00ff00ff00n));
+t('and w14, w15, #0xff00ff', a.andImm(W, 14, 15, 0xff00ff));
+t('and x16, x17, #0xfffffffffffffff0', a.andImm(X, 16, 17, -16n));
+t('and w18, w19, #0xfffffff0', a.andImm(W, 18, 19, 0xfffffff0));
+t('and x20, x21, #0xf000000000000003', a.andImm(X, 20, 21, 0xf000000000000003n));
+t('and x22, x23, #0x3ff0', a.andImm(X, 22, 23, 0x3ff0));
+t('orr x0, x1, #0xfff', a.orrImm(X, 0, 1, 0xfff));
+t('orr w2, w3, #0x80000000', a.orrImm(W, 2, 3, 0x80000000));
+t('eor x4, x5, #0x5555555555555555', a.eorImm(X, 4, 5, 0x5555555555555555n));
+t('eor w6, w7, #0x55555555', a.eorImm(W, 6, 7, 0x55555555));
+t('ands x8, x9, #0x3f', a.andsImm(X, 8, 9, 0x3f));
+t('tst w10, #7', a.tstImm(W, 10, 7));
+
+// ---- 位段与它的一堆别名
+t('sbfm x0, x1, #3, #7', a.sbfm(X, 0, 1, 3, 7));
+t('bfm w2, w3, #1, #5', a.bfmIns(W, 2, 3, 1, 5));
+t('ubfm x4, x5, #8, #15', a.ubfm(X, 4, 5, 8, 15));
+t('lsl x6, x7, #1', a.lslImm(X, 6, 7, 1));
+t('lsl x8, x9, #63', a.lslImm(X, 8, 9, 63));
+t('lsl w10, w11, #4', a.lslImm(W, 10, 11, 4));
+t('lsl x12, x13, #0', a.lslImm(X, 12, 13, 0));
+t('lsr x14, x15, #7', a.lsrImm(X, 14, 15, 7));
+t('lsr w16, w17, #31', a.lsrImm(W, 16, 17, 31));
+t('asr x18, x19, #12', a.asrImm(X, 18, 19, 12));
+t('asr w20, w21, #1', a.asrImm(W, 20, 21, 1));
+t('ubfx x0, x1, #4, #8', a.ubfx(X, 0, 1, 4, 8));
+t('sbfx w2, w3, #2, #6', a.sbfx(W, 2, 3, 2, 6));
+t('bfi x4, x5, #8, #16', a.bfi(X, 4, 5, 8, 16));
+t('bfi w6, w7, #0, #4', a.bfi(W, 6, 7, 0, 4));
+t('sxtb w8, w9', a.sxtb(W, 8, 9));
+t('sxtb x10, w11', a.sxtb(X, 10, 11));
+t('sxth x12, w13', a.sxth(X, 12, 13));
+t('sxtw x14, w15', a.sxtw(14, 15));
+t('uxtb w16, w17', a.uxtb(16, 17));
+t('uxth w18, w19', a.uxth(18, 19));
+
+// ---- 接起来取一段
+t('extr x0, x1, x2, #17', a.extr(X, 0, 1, 2, 17));
+t('extr w3, w4, w5, #7', a.extr(W, 3, 4, 5, 7));
+t('ror x6, x7, #13', a.rorImm(X, 6, 7, 13));
+
+// ---- 单目位运算
+t('rbit x0, x1', a.rbit(X, 0, 1));
+t('rbit w2, w3', a.rbit(W, 2, 3));
+t('rev16 x4, x5', a.rev16(X, 4, 5));
+t('rev w6, w7', a.rev(W, 6, 7));
+t('rev x8, x9', a.rev(X, 8, 9));
+t('rev32 x10, x11', a.rev32(10, 11));
+t('clz x12, x13', a.clz(X, 12, 13));
+t('clz w14, w15', a.clz(W, 14, 15));
+t('cls x16, x17', a.cls(X, 16, 17));
+
+// ---- 浮点：两目
+t('fmul d0, d1, d2', a.fmul(true, 0, 1, 2));
+t('fmul s3, s4, s5', a.fmul(false, 3, 4, 5));
+t('fdiv d6, d7, d8', a.fdiv(true, 6, 7, 8));
+t('fadd d9, d10, d11', a.fadd(true, 9, 10, 11));
+t('fsub s12, s13, s14', a.fsub(false, 12, 13, 14));
+t('fmax d15, d16, d17', a.fmax(true, 15, 16, 17));
+t('fmin d18, d19, d20', a.fmin(true, 18, 19, 20));
+t('fnmul d21, d22, d23', a.fnmul(true, 21, 22, 23));
+
+// ---- 浮点：单目与宽度转换
+t('fmov d0, d1', a.fmovFp(true, 0, 1));
+t('fabs d2, d3', a.fabsFp(true, 2, 3));
+t('fneg s4, s5', a.fneg(false, 4, 5));
+t('fsqrt d6, d7', a.fsqrt(true, 6, 7));
+t('fcvt d8, s9', a.fcvtSD(8, 9));
+t('fcvt s10, d11', a.fcvtDS(10, 11));
+
+// ---- 浮点：比较
+t('fcmp d0, d1', a.fcmp(true, 0, 1));
+t('fcmp s2, s3', a.fcmp(false, 2, 3));
+t('fcmp d4, #0.0', a.fcmpZero(true, 4));
+t('fcmpe d5, d6', a.fcmpe(true, 5, 6));
+
+// ---- 浮点 <-> 整数
+t('scvtf d0, x1', a.scvtf(X, true, 0, 1));
+t('scvtf d2, w3', a.scvtf(W, true, 2, 3));
+t('scvtf s4, x5', a.scvtf(X, false, 4, 5));
+t('ucvtf d6, x7', a.ucvtf(X, true, 6, 7));
+t('ucvtf s8, w9', a.ucvtf(W, false, 8, 9));
+t('fcvtzs x10, d11', a.fcvtzs(X, true, 10, 11));
+t('fcvtzs w12, d13', a.fcvtzs(W, true, 12, 13));
+t('fcvtzs x14, s15', a.fcvtzs(X, false, 14, 15));
+t('fcvtzu w16, d17', a.fcvtzu(W, true, 16, 17));
+t('fmov x18, d19', a.fmovToInt(X, true, 18, 19));
+t('fmov w20, s21', a.fmovToInt(W, false, 20, 21));
+t('fmov d22, x23', a.fmovFromInt(X, true, 22, 23));
+t('fmov s24, w25', a.fmovFromInt(W, false, 24, 25));
+
+// ---- 浮点存取
+t('str d0, [x1, #16]', a.strFpU(3, 0, 1, 16));
+t('ldr d2, [x3, #32760]', a.ldrFpU(3, 2, 3, 32760));
+t('str s4, [x5, #4]', a.strFpU(2, 4, 5, 4));
+t('ldr s6, [sp, #8]', a.ldrFpU(2, 6, SP, 8));
+
+// ---- 单向屏障的存取与屏障本身
+t('ldar x0, [x1]', a.ldar(3, 0, 1));
+t('ldar w2, [x3]', a.ldar(2, 2, 3));
+t('ldarb w4, [x5]', a.ldar(0, 4, 5));
+t('stlr x6, [x7]', a.stlr(3, 6, 7));
+t('stlrh w8, [x9]', a.stlr(1, 8, 9));
+t('dmb ish', a.dmbIsh());
+t('dsb ish', a.dsbIsh());
+t('isb', a.isb());
+
 // ---- 边界：编不下去的要当场报，不许悄悄截断
 /** @type {{what:string, fn:Function}[]} */
 const bounds = [
@@ -165,6 +281,17 @@ const bounds = [
   { what: 'imm9 越界', fn: () => a.stur(3, 0, 1, 256) },
   { what: 'w 系 movz 的 hw', fn: () => a.movz(W, 0, 1, 2) },
   { what: '寄存器号越界', fn: () => a.addReg(X, 32, 0, 0) },
+  /* 第九刀第二片 */
+  { what: '逻辑立即数编不出来', fn: () => a.andImm(X, 0, 1, 0x1234) },
+  { what: '逻辑立即数是两段 1', fn: () => a.andImm(X, 0, 1, 5) },
+  { what: '逻辑立即数全 0', fn: () => a.andImm(X, 0, 1, 0) },
+  { what: '逻辑立即数全 1', fn: () => a.andImm(X, 0, 1, -1n) },
+  { what: 'lsl 移过头', fn: () => a.lslImm(W, 0, 1, 32) },
+  { what: 'asr 移过头', fn: () => a.asrImm(X, 0, 1, 64) },
+  { what: 'ubfx 段出了寄存器', fn: () => a.ubfx(W, 0, 1, 28, 8) },
+  { what: 'bfi 宽度是 0', fn: () => a.bfi(X, 0, 1, 0, 0) },
+  { what: 'extr 的 lsb 越界', fn: () => a.extr(X, 0, 1, 2, 64) },
+  { what: '浮点存取偏移没对齐', fn: () => a.ldrFpU(3, 0, 1, 4) },
 ];
 
 // ---------------------------------------------------------------- 跑
