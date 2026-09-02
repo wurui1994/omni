@@ -130,9 +130,10 @@ function checkIndex(mod, f, i, op, v, bad, k) {
   if (op === OP.BR || op === OP.BRIF || op === OP.BRTABLE) return;   // 层数在 verifyFunc 的栈深里查
   /* CCALL 的两个数字字段（第二十二片）：a 是 C 入口号，aux 是变参分界。
    * 分界要么是 0（不是变参调用），要么在 1..实参数+1 里 —— 「固定实参比实参还多」
-   * 会让后端把一个不存在的实参往寄存器里放。 */
-  if (op === OP.CCALL) {
-    if (k === 0) {
+   * 会让后端把一个不存在的实参往寄存器里放。
+   * `CALLI` 的 aux 是同一个编码（第三十五片），所以同一段查。 */
+  if (op === OP.CCALL || op === OP.CALLI) {
+    if (op === OP.CCALL && k === 0) {
       if (mod.cabi[v] === undefined) bad(i, `C 入口号 ${v} 越界`);
       return;
     }

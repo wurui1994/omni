@@ -3036,12 +3036,23 @@ export class CGen {  /**
          * 符号没有桩（桩装不下「实参个数各不相同」的调用点，第二十二片），于是我们的
          * `.o` 里那个名字只剩一条 `RET` —— 取它的地址会拿到一个什么都不做的函数。
          * 要做对得让「没有函数体的名字」在目标文件里变成**未定义符号**，那是下一片。 */
+        /* 一个例外：**外部的变参函数**（`pf *fp = printf;`）。native 上变参外部符号
+         * 没有桩（桩装不下「实参个数各不相同」的调用点，第二十二片），于是我们的 `.o`
+         * 里那个名字只剩一条 `RET` —— 取它的地址会拿到一个什么都不做的函数。
+         * 要取的是**真 libc 里那个符号**的地址，而那个符号在这个 `.o` 里是未定义的，
+         * 于是与「住在 dylib 里的外部全局量」是同一件事：过 GOT（第三十一片）。
+         * 所以登记一个同名的外部全局量，地址就是一条 `GADDR`（第三十五片）。
+         * 大小写 8 只是占个形状 —— 这一格从来只取地址，一个字节都不读写。 */
+        let fptr;
         if (this.native && fn.variadic && !fn.defined) {
-          this.todo(`native：取外部变参函数 '${name}' 的地址（我们的 .o 里它没有函数体）`);
+          const gno = this.mod.globalNo(name);
+          if (this.mod.globalBlob[gno] === null) this.mod.setGlobalExtern(gno, 8, 8);
+          fptr = this.f.emit(OP.GADDR, T_I64, REF_NONE, REF_NONE, gno);
+        } else {
+          fptr = this.native
+            ? this.f.emit(OP.FADDR, T_I64, REF_NONE, REF_NONE, fn.no)
+            : this.mod.consts.int(fnPtr(fn.no));
         }
-        const fptr = this.native
-          ? this.f.emit(OP.FADDR, T_I64, REF_NONE, REF_NONE, fn.no)
-          : this.mod.consts.int(fnPtr(fn.no));
         return this.postfix(sMem(funcTypeOf(fn), fptr, 0));
 
       }
@@ -3312,7 +3323,11 @@ export class CGen {  /**
     const fi = fnTy.ref;
     const a = this.callArgs('function pointer', fi.params, fi.variadic, fi.ret,
       fi.old === true);
-    const r = this.f.emit(OP.CALLI, mirTypeOf(fi.ret), callee, this.f.pushArgs(a.refs), 0);
+    /* native（第三十五片）：变参的分界也要交给后端 —— 苹果的 arm64 上变参一律走栈，
+     * 按指针调 `printf` 与直接调它必须摆成同一个样子。解释器那条腿不看这一格。 */
+    const vafix = this.native && fi.variadic ? a.nfixed + 1 : 0;
+    const r = this.f.emit(OP.CALLI, mirTypeOf(fi.ret), callee,
+      this.f.pushArgs(a.refs), vafix);
     if (a.sret !== null) return sMem(fi.ret, r, 0);
     return this.retNarrow(fi.ret, r);
   }

@@ -133,7 +133,7 @@ function outArgsBytes(mod, f) {
   while (i < f.count()) {
     const op = f.op[i];
     if (op === OP.CALL || op === OP.CCALL || op === OP.CALLI) {
-      const nfixed = op === OP.CCALL && f.aux[i] !== 0 ? f.aux[i] - 1 : -1;
+      const nfixed = op !== OP.CALL && f.aux[i] !== 0 ? f.aux[i] - 1 : -1;
       const p = argPlaces(mod, f, f.argsOf(f.b[i]), nfixed);
       most = Math.max(most, p.stack);
     }
@@ -452,7 +452,8 @@ class FnGen {
      * 取进草稿 —— 反过来的话备实参那几条会把目标踩掉。 */
     if (op === OP.CALLI) {
       if (!this.mod.native) nyi('CALLI（解释器那条腿上函数指针是「号 + 1」，不是地址）');
-      this.callArgs(f.argsOf(f.b[i]), -1);
+      /* aux 是变参分界（第三十五片），与 `CCALL` 同一个编码。 */
+      this.callArgs(f.argsOf(f.b[i]), f.aux[i] === 0 ? -1 : f.aux[i] - 1);
       this.loadRef(TMP0, f.a[i]);
       buf.emit(a.blr(TMP0));
       return this.callRet(i, t);

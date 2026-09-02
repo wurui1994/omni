@@ -162,6 +162,24 @@ const CASES = [
   ['静态复合字面量：标量的那一种（值就是里面那一项）', 'return (long long) g_clv;'],
   ['静态复合字面量：没写满的那几格是 0', 'return g_clpart[0] * 10 + g_clpart[3];'],
   ['静态复合字面量：地址加了偏移', 'return g_cloff[0] * 10 + g_cloff[-2];'],
+  /* 外部变参函数的地址（第三十五片）：取的是真 libc 里那个符号，按指针调也得按变参 ABI。 */
+  ['变参函数指针：按指针调 snprintf',
+    'int (*fp)(char *, unsigned long, const char *, ...) = snprintf;'
+    + ' char b[32]; return fp(b, 32, "%d-%d", 42, 7);'],
+  ['变参函数指针：写出来的字节',
+    'int (*fp)(char *, unsigned long, const char *, ...) = snprintf;'
+    + ' char b[32]; fp(b, 32, "%d-%d", 42, 7); return b[0] * 100 + b[2] + b[4];'],
+  ['变参函数指针：跨过寄存器那条线（八个变参）',
+    'int (*fp)(char *, unsigned long, const char *, ...) = snprintf;'
+    + ' char b[40]; return fp(b, 40, "%d%d%d%d%d%d%d%d", 1, 2, 3, 4, 5, 6, 7, 8);'],
+  ['变参函数指针：double 混着',
+    'int (*fp)(char *, unsigned long, const char *, ...) = snprintf;'
+    + ' char b[40]; fp(b, 40, "%d %.1f %d", 1, 2.5, 3); return b[2] * 100 + b[4];'],
+  ['变参函数指针：一个变参都没有',
+    'int (*fp)(char *, unsigned long, const char *, ...) = snprintf;'
+    + ' char b[8]; return fp(b, 8, "hi") * 100 + b[0];'],
+  ['变参函数指针：与直接用那个名字是同一个地址',
+    'int (*fp)(char *, unsigned long, const char *, ...) = snprintf; return fp == snprintf;'],
 ];
 
 const SUPPORT = `struct P { int x; int y; };
