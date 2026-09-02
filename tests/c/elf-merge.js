@@ -29,6 +29,13 @@ const TARGETS = [
   { name: 'arm64-linux', tcc: 'arm64-tcc', win32: false, unwind: true },
   { name: 'x86_64-win32', tcc: 'x86_64-win32-tcc', win32: true, unwind: false },
   { name: 'arm64-win32', tcc: 'arm64-win32-tcc', win32: true, unwind: false },
+  /* 32 位那四个（第九刀第七十二片）：`.o` 是 ELF32 —— 头短 12 字节、节头短 24、
+   * 符号 16 字节，重定位是 `Elf32_Rel`（8 字节，加数写在被修的字节里）。arm 那两个
+   * 还带 `e_flags`，而且 tcc 在 arm 上**不造** `.eh_frame`（`TCC_EH_FRAME` 关着）。 */
+  { name: 'i386-linux', tcc: 'i386-tcc', win32: false, unwind: true },
+  { name: 'arm-linux', tcc: 'arm-tcc', win32: false, unwind: false },
+  { name: 'i386-win32', tcc: 'i386-win32-tcc', win32: true, unwind: false },
+  { name: 'arm-wince', tcc: 'arm-wince-tcc', win32: true, unwind: false },
 ];
 
 const filters = process.argv.slice(2).filter((x) => !x.startsWith('-'));

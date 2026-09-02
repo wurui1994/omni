@@ -2026,6 +2026,7 @@ function main(argv) {
     }
     /* `elf-r`：几个 `.o` 并成一个 `.o`，就是 `tcc -r`（第九刀第四十二片）。
      * 输入可以是 **tcc 自己出的**目标文件 —— 于是这一步的字节对账不必等代码生成对齐。
+     * 32 位（i386 / arm）的 ELF32 一样认，位宽从输入里看（第七十二片）。
      *   omni elf-r a.o b.o -o m.o [--rdata .rdata] [--unwind] */
     case 'elf-r': {
       const oi = rest.indexOf('-o');

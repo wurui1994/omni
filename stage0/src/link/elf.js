@@ -39,6 +39,7 @@ import { RELOC } from '../arm64/asm.js';
  * 名字与值照 `<elf.h>`。 */
 const ET_REL = 1;
 const EV_CURRENT = 1;
+const ELFCLASS32 = 1;
 const ELFCLASS64 = 2;
 const ELFDATA2LSB = 1;
 
@@ -69,6 +70,15 @@ const EHDR_SIZE = 64;
 const SHDR_SIZE = 64;
 const SYM_SIZE = 24;
 const RELA_SIZE = 24;
+
+/* 32 位那一套（i386 / arm）。tcc 那边是 `ElfW()` 与 `SHT_RELX` 两个宏一换 ——
+ * 头短 12 字节、节头短 24 字节、符号 16 字节，重定位是 `Elf32_Rel`：**没有加数**那一格，
+ * 加数写在被修的那几个字节里。 */
+const EHDR32_SIZE = 52;
+const SHDR32_SIZE = 40;
+const SYM32_SIZE = 16;
+const REL32_SIZE = 8;
+const SHT_REL = 9;
 
 /* aarch64 的那一族（`<elf.h>` 的 `R_AARCH64_*`）。
  * 值得记一笔：**tcc 在 arm64 上取任何数据的地址都过 GOT**（`ADR_GOT_PAGE` +
@@ -388,14 +398,21 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
  * @param machine `e_machine`
  * @param secs 1 号起的那些节：`[{strx, type, flags, link, info, al, ent, bytes}]`，
  *             `.shstrtab` 要在**最后**一条（`e_shstrndx = 节数 - 1`）
+ * @param opts `{class32, flags}`：32 位的目标（i386 / arm）头与节头都短一截；
+ *             `flags` 是 `e_flags` —— arm 那一路写的是
+ *             `EF_ARM_EABI_VER5 | EF_ARM_VFP_FLOAT`（`tccelf.c:2697`），别的目标是 0
  */
-export function writeSections(machine, secs) {
+export function writeSections(machine, secs, opts) {
+  const c32 = opts !== undefined && opts.class32 === true;
+  const eflags = opts === undefined || opts.flags === undefined ? 0 : opts.flags;
+  const ehdr = c32 ? EHDR32_SIZE : EHDR_SIZE;
+  const shdr = c32 ? SHDR32_SIZE : SHDR_SIZE;
   const shnum = secs.length + 1;
   /* `sh_size` 与「文件里有多少字节」不是一回事：NOBITS（`.bss`）有大小、没字节。
    * 所以这一层认 `size` 那一格（不给就按字节数算）。 */
   const sizeOf = (s) => (s.size === undefined ? s.bytes.length : s.size);
   const off = [0];
-  let at = align(EHDR_SIZE, 4) + shnum * SHDR_SIZE;
+  let at = align(ehdr, 4) + shnum * shdr;
   for (const s of secs) {
     at = align(at, 16);
     off.push(at);
@@ -405,18 +422,25 @@ export function writeSections(machine, secs) {
   const b = new Buf();
   // ---- ELF 头
   b.u8(0x7f).u8(0x45).u8(0x4c).u8(0x46);
-  b.u8(ELFCLASS64).u8(ELFDATA2LSB).u8(EV_CURRENT).u8(0);
+  b.u8(c32 ? ELFCLASS32 : ELFCLASS64).u8(ELFDATA2LSB).u8(EV_CURRENT).u8(0);
   b.u64(0);                                     // e_ident 剩下的八格
   b.u16(ET_REL).u16(machine).u32(EV_CURRENT);
-  b.u64(0).u64(0).u64(EHDR_SIZE);               // e_entry / e_phoff / e_shoff
-  b.u32(0).u16(EHDR_SIZE).u16(0).u16(0);        // e_flags / e_ehsize / e_phentsize / e_phnum
-  b.u16(SHDR_SIZE).u16(shnum).u16(shnum - 1);
-  if (b.len !== EHDR_SIZE) throw new OmniError(`elf: 头写成了 ${b.len} 字节`);
+  if (c32) b.u32(0).u32(0).u32(ehdr);           // e_entry / e_phoff / e_shoff
+  else b.u64(0).u64(0).u64(ehdr);
+  b.u32(eflags).u16(ehdr).u16(0).u16(0);        // e_flags / e_ehsize / e_phentsize / e_phnum
+  b.u16(shdr).u16(shnum).u16(shnum - 1);
+  if (b.len !== ehdr) throw new OmniError(`elf: 头写成了 ${b.len} 字节`);
 
   // ---- 节头表。0 号那一条全是 0。
-  for (let k = 0; k < SHDR_SIZE; k++) b.u8(0);
+  for (let k = 0; k < shdr; k++) b.u8(0);
   for (let i = 0; i < secs.length; i++) {
     const s = secs[i];
+    if (c32) {
+      b.u32(s.strx).u32(s.type).u32(s.flags);
+      b.u32(0).u32(off[i + 1]).u32(sizeOf(s));       // sh_addr 在 .o 里一律 0
+      b.u32(s.link).u32(s.info).u32(s.al).u32(s.ent);
+      continue;
+    }
     b.u32(s.strx).u32(s.type).u64(s.flags);
     b.u64(0).u64(off[i + 1]).u64(sizeOf(s));         // sh_addr 在 .o 里一律 0
     b.u32(s.link).u32(s.info).u64(s.al).u64(s.ent);
@@ -432,7 +456,8 @@ export function writeSections(machine, secs) {
 }
 
 /**
- * 读一个 `ET_REL` 的 ELF：回 `{machine, secs}`，形状与 `writeSections` 的入参一样。
+ * 读一个 `ET_REL` 的 ELF：回 `{machine, class32, flags, secs}`，形状与 `writeSections`
+ * 的入参一样。
  *
  * 只读节头表与节的字节 —— 符号与重定位**不解释**。链接器要的正是这个粒度：
  * 并合是「把同名的节接起来、把符号表并起来、把重定位的偏移与符号号改一遍」，
@@ -440,21 +465,36 @@ export function writeSections(machine, secs) {
  */
 export function readObject(bytes) {
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  if (bytes.length < EHDR_SIZE || bytes[0] !== 0x7f || bytes[1] !== 0x45
+  if (bytes.length < EHDR32_SIZE || bytes[0] !== 0x7f || bytes[1] !== 0x45
     || bytes[2] !== 0x4c || bytes[3] !== 0x46) {
     throw new OmniError('elf: 这不是一个 ELF 文件');
   }
-  if (bytes[4] !== ELFCLASS64 || bytes[5] !== ELFDATA2LSB) {
-    throw new OmniError('elf: 只认 64 位小端');
+  const c32 = bytes[4] === ELFCLASS32;
+  if ((bytes[4] !== ELFCLASS64 && !c32) || bytes[5] !== ELFDATA2LSB) {
+    throw new OmniError('elf: 只认小端的 32 位或 64 位');
   }
+  const shdrSize = c32 ? SHDR32_SIZE : SHDR_SIZE;
   if (dv.getUint16(16, true) !== ET_REL) throw new OmniError('elf: 只认 ET_REL（目标文件）');
   const machine = dv.getUint16(18, true);
-  const shoff = Number(dv.getBigUint64(40, true));
-  const shnum = dv.getUint16(60, true);
-  const shstrndx = dv.getUint16(62, true);
-  if (shoff + shnum * SHDR_SIZE > bytes.length) throw new OmniError('elf: 节头表越出了文件');
+  const shoff = c32 ? dv.getUint32(32, true) : Number(dv.getBigUint64(40, true));
+  const shnum = dv.getUint16(c32 ? 48 : 60, true);
+  const shstrndx = dv.getUint16(c32 ? 50 : 62, true);
+  if (shoff + shnum * shdrSize > bytes.length) throw new OmniError('elf: 节头表越出了文件');
   const shdr = (i) => {
-    const o = shoff + i * SHDR_SIZE;
+    const o = shoff + i * shdrSize;
+    if (c32) {
+      return {
+        strx: dv.getUint32(o, true),
+        type: dv.getUint32(o + 4, true),
+        flags: dv.getUint32(o + 8, true),
+        off: dv.getUint32(o + 16, true),
+        size: dv.getUint32(o + 20, true),
+        link: dv.getUint32(o + 24, true),
+        info: dv.getUint32(o + 28, true),
+        al: dv.getUint32(o + 32, true),
+        ent: dv.getUint32(o + 36, true),
+      };
+    }
     return {
       strx: dv.getUint32(o, true),
       type: dv.getUint32(o + 4, true),
@@ -498,5 +538,5 @@ export function readObject(bytes) {
       bytes: body,
     });
   }
-  return { machine, secs };
+  return { machine, class32: c32, flags: dv.getUint32(c32 ? 36 : 48, true), secs };
 }

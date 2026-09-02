@@ -55,9 +55,16 @@ const STB_WEAK = 2;
 
 const SYM_SIZE = 24;
 const RELA_SIZE = 24;
+/** 32 位那一套：符号 16 字节，重定位是 `Elf32_Rel`（8 字节，**没有加数**那一格）。 */
+const SYM32_SIZE = 16;
+const REL32_SIZE = 8;
+const SHT_REL = 9;
 /** `sizeof(Stab_Sym)`：`n_strx`、`n_type`、`n_other`、`n_desc`、`n_value`。 */
 const STAB_SIZE = 12;
 
+const EM_386 = 3;
+const EM_ARM = 40;
+const EM_X86_64 = 62;
 const EM_AARCH64 = 183;
 
 /* `.eh_frame` 那一条 CIE 用到的几个 DWARF 常量（`dwarf.h` / `tccdbg.c:431`）。 */
@@ -126,20 +133,28 @@ function mergeable(type, name, unwind, debug) {
  *
  * 这一条不是从输入里并来的，是 `tccelf_new` 造节的时候**当场写下**的 —— 于是并出来的
  * `.eh_frame` 天生比几个输入加起来长一截。少了它，字节就从 `.eh_frame` 起全错。
+ *
+ * arm 那一路 tcc 根本不造这一节（`tcc.h:1839` 那个 `#if` 把 `TCC_EH_FRAME` 关了，
+ * 尽管 `tccdbg.c` 里还留着一段 arm 的 CIE），所以这张表里没有它。
  */
 function ehFrameCie(machine) {
-  /* code_alignment_factor / 返回地址列 / CFA 寄存器与偏移；x86_64 还多记一条
-   * 「返回地址在 CFA-8」（`DW_CFA_offset + 16`），arm64 那一段没有。 */
-  const k = machine === EM_AARCH64
-    ? { code: 4, ra: 30, cfaReg: 31, cfaOff: 0, ret: [] }
-    : { code: 1, ra: 16, cfaReg: 7, cfaOff: 8, ret: [DW_CFA_offset + 16, 1] };
+  /* code_alignment_factor / data_alignment_factor / 返回地址列 / CFA 寄存器与偏移；
+   * x86 那两个还多记一条「返回地址在 CFA - 一格」（`DW_CFA_offset + 列号`），
+   * arm 那两个没有。`data_alignment_factor` 是 sleb：-8 是 0x78，-4 是 0x7c。 */
+  const K = new Map([
+    [EM_386, { code: 1, data: 0x7c, ra: 8, cfaReg: 4, cfaOff: 4, ret: [DW_CFA_offset + 8, 1] }],
+    [EM_X86_64, { code: 1, data: 0x78, ra: 16, cfaReg: 7, cfaOff: 8, ret: [DW_CFA_offset + 16, 1] }],
+    [EM_AARCH64, { code: 4, data: 0x78, ra: 30, cfaReg: 31, cfaOff: 0, ret: [] }],
+  ]);
+  const k = K.get(machine);
+  if (k === undefined) throw new OmniError(`elf: 不知道 0x${machine.toString(16)} 的 .eh_frame CIE`);
   const b = [
     0, 0, 0, 0,                 // 长度，末尾回填
     0, 0, 0, 0,                 // CIE ID
     1,                          // 版本
     0x7a, 0x52, 0,              // 增补串 "zR"
     k.code,                     // uleb code_alignment_factor
-    0x78,                       // sleb data_alignment_factor = -8
+    k.data,                     // sleb data_alignment_factor
     k.ra,                       // uleb 返回地址列
     1,                          // uleb 增补数据长度
     FDE_ENCODING,
@@ -184,8 +199,19 @@ export function linkObjects(objs, opts) {
    * 输入都读进来，架构就知道了。 */
   const parsed = objs.map((b) => readObject(b));
   const machine = parsed[0].machine;
+  /* 32 位的目标（i386 / arm）：符号短一半，重定位没有加数那一格，而 `new_section`
+   * 默认的对齐是 `PTR_SIZE` —— 起手那几条节因此是 4 而不是 8。 */
+  const c32 = parsed[0].class32 === true;
+  /* `e_flags`：arm 那一路是 `EF_ARM_EABI_VER5 | EF_ARM_VFP_FLOAT`。tcc 是按自己的
+   * 配置写的，我们照输入里那份抄 —— 并合的输入本来就是同一个 tcc 出的。 */
+  const eflags = parsed[0].flags ?? 0;
+  const symSize = c32 ? SYM32_SIZE : SYM_SIZE;
+  const relSize = c32 ? REL32_SIZE : RELA_SIZE;
+  const relType = c32 ? SHT_REL : SHT_RELA;
+  const ptrSize = c32 ? 4 : 8;
   for (const p of parsed) {
     if (p.machine !== machine) throw new OmniError('elf: 这几个目标文件不是一个架构的');
+    if ((p.class32 === true) !== c32) throw new OmniError('elf: 这几个目标文件位宽不一样');
   }
 
   /* ---- 起手那几条（`tccelf_new` 的次序，序号写死）。 */
@@ -196,11 +222,11 @@ export function linkObjects(objs, opts) {
     });
     return secs.length - 1;
   };
-  const TEXT = newSec('.text', SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, 8, 0);
-  const DATA = newSec('.data', SHT_PROGBITS, SHF_ALLOC | SHF_WRITE, 8, 0);
-  const RDATA = newSec(rdata, SHT_PROGBITS, SHF_ALLOC, 8, 0);
-  const BSS = newSec('.bss', SHT_NOBITS, SHF_ALLOC | SHF_WRITE, 8, 0);
-  const SYMTAB = newSec('.symtab', SHT_SYMTAB, 0, 8, SYM_SIZE);
+  const TEXT = newSec('.text', SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, ptrSize, 0);
+  const DATA = newSec('.data', SHT_PROGBITS, SHF_ALLOC | SHF_WRITE, ptrSize, 0);
+  const RDATA = newSec(rdata, SHT_PROGBITS, SHF_ALLOC, ptrSize, 0);
+  const BSS = newSec('.bss', SHT_NOBITS, SHF_ALLOC | SHF_WRITE, ptrSize, 0);
+  const SYMTAB = newSec('.symtab', SHT_SYMTAB, 0, ptrSize, symSize);
   const STRTAB = newSec('.strtab', SHT_STRTAB, 0, 1, 0);
   secs[SYMTAB].link = STRTAB;
   /* `-g` 的时候 `tccelf_new` 就把调试那几节造好了（`tcc_debug_new`）。
@@ -231,7 +257,7 @@ export function linkObjects(objs, opts) {
     secs[stabstr].size = 1;
   }
   if (unwind) {
-    const eh = newSec('.eh_frame', SHT_PROGBITS, SHF_ALLOC, 8, 0);
+    const eh = newSec('.eh_frame', SHT_PROGBITS, SHF_ALLOC, ptrSize, 0);
     secs[eh].data = ehFrameCie(machine);
     secs[eh].size = secs[eh].data.length;
   }
@@ -315,7 +341,7 @@ export function linkObjects(objs, opts) {
       const dbg = sh.name.startsWith('.stab') || sh.name.startsWith('.debug_');
       if (sh.type === SHT_STRTAB && !dbg) continue;
       /* 重定位表：能不能并要看**它修的那一节**（`sh = &shdr[sh->sh_info]`）。 */
-      const probe = sh.type === SHT_RELA ? at(sh.info) : sh;
+      const probe = sh.type === relType ? at(sh.info) : sh;
       if (!mergeable(probe.type, probe.name, unwind, debug)) continue;
       const al = sh.al < 1 ? 1 : sh.al;
       let no = -1;
@@ -335,7 +361,7 @@ export function linkObjects(objs, opts) {
       map.set(i, { no, off });
       /* arm64/arm/riscv：代码节接完补齐到 4 —— 后面还可能接别的东西，
        * 而指令必须落在 4 的整数倍上（`tcc_load_object_file` 里那个 `#if`）。 */
-      if (machine === EM_AARCH64 && (s.flags & SHF_EXECINSTR) !== 0) {
+      if ((machine === EM_AARCH64 || machine === EM_ARM) && (s.flags & SHF_EXECINSTR) !== 0) {
         s.size = align(s.size, 4);
         while (s.data.length < s.size) s.data.push(0);
       }
@@ -368,7 +394,7 @@ export function linkObjects(objs, opts) {
       const m = map.get(i);
       if (m === undefined) continue;
       const sh = at(i);
-      if (sh.type === SHT_RELA) {
+      if (sh.type === relType) {
         const tgt = map.get(sh.info);
         if (tgt === undefined) throw new OmniError(`elf: ${sh.name} 修的那一节没并进来`);
         secs[m.no].link = SYMTAB;
@@ -392,10 +418,19 @@ export function linkObjects(objs, opts) {
         return s;
       };
       const dv = new DataView(st.bytes.buffer, st.bytes.byteOffset, st.bytes.byteLength);
-      const count = Math.floor(st.bytes.length / SYM_SIZE);
+      const count = Math.floor(st.bytes.length / symSize);
       for (let k = 1; k < count; k++) {
-        const p = k * SYM_SIZE;
-        const sym = {
+        const p = k * symSize;
+        /* `Elf32_Sym` 的次序与 64 位那份**不一样**：名字、值、大小在前，
+         * `st_info` / `st_other` / `st_shndx` 在后。 */
+        const sym = c32 ? {
+          name: nameAt(dv.getUint32(p, true)),
+          info: st.bytes[p + 12],
+          other: st.bytes[p + 13],
+          shndx: dv.getUint16(p + 14, true),
+          value: dv.getUint32(p + 4, true),
+          size: dv.getUint32(p + 8, true),
+        } : {
           name: nameAt(dv.getUint32(p, true)),
           info: st.bytes[p + 4],
           other: st.bytes[p + 5],
@@ -421,25 +456,27 @@ export function linkObjects(objs, opts) {
       const m = map.get(i);
       if (m === undefined) continue;
       const sh = at(i);
-      if (sh.type !== SHT_RELA) continue;
+      if (sh.type !== relType) continue;
       const base = map.get(sh.info).off;
       const dv = new DataView(sh.bytes.buffer, sh.bytes.byteOffset, sh.bytes.byteLength);
-      const count = Math.floor(sh.bytes.length / RELA_SIZE);
+      const count = Math.floor(sh.bytes.length / relSize);
       const list = relas.get(m.no) === undefined ? [] : relas.get(m.no);
       for (let k = 0; k < count; k++) {
-        const p = k * RELA_SIZE;
-        const info = dv.getBigUint64(p + 8, true);
-        const oldSym = Number(info >> 32n);
+        const p = k * relSize;
+        /* `Elf32_Rel`：`r_info` 是一个 32 位的字 —— 高 24 位是符号号，低 8 位是类型，
+         * 而且**没有加数那一格**（加数写在被修的那几个字节里，跟着内容一起并过来）。 */
+        const oldSym = c32 ? dv.getUint32(p + 4, true) >>> 8 : Number(dv.getBigUint64(p + 8, true) >> 32n);
         if (oldSym >= trans.length) throw new OmniError('elf: 重定位指着一个不存在的符号');
         list.push({
-          at: Number(dv.getBigUint64(p, true)) + base,
+          at: (c32 ? dv.getUint32(p, true) : Number(dv.getBigUint64(p, true))) + base,
           sym: trans[oldSym],
-          type: Number(info & 0xffffffffn),
-          add: dv.getBigInt64(p + 16, true),
+          type: c32 ? dv.getUint32(p + 4, true) & 0xff
+            : Number(dv.getBigUint64(p + 8, true) & 0xffffffffn),
+          add: c32 ? 0n : dv.getBigInt64(p + 16, true),
         });
       }
       relas.set(m.no, list);
-      secs[m.no].size = list.length * RELA_SIZE;
+      secs[m.no].size = list.length * relSize;
     }
   }
 
@@ -448,6 +485,11 @@ export function linkObjects(objs, opts) {
   if (secs[TEXT].name !== '.text') throw new OmniError('elf: 1 号节不是 .text');
   return {
     machine,
+    class32: c32,
+    eflags,
+    symSize,
+    relSize,
+    relType,
     secs,
     dwarfSecs,
     syms,
@@ -472,7 +514,7 @@ export function linkObjects(objs, opts) {
 export function mergeObjects(objs, opts) {
   const st = linkObjects(objs, opts);
   const {
-    machine, secs, syms, relas, strs,
+    machine, secs, syms, relas, strs, class32, symSize, relSize, relType, eflags,
   } = st;
   const { SYMTAB, STRTAB } = st.idx;
   /* ---- 排符号（`sort_syms`）：局部在前、全局在后，重定位里的号跟着改。 */
@@ -485,12 +527,20 @@ export function mergeObjects(objs, opts) {
   const sorted = order.map((i) => syms[i]);
 
   /* ---- 写出：符号表、字符串表、重定位表，最后 `.shstrtab`。 */
-  const symBuf = new Uint8Array(sorted.length * SYM_SIZE);
+  const symBuf = new Uint8Array(sorted.length * symSize);
   const symDv = new DataView(symBuf.buffer);
   for (let k = 0; k < sorted.length; k++) {
     const s = sorted[k];
-    const p = k * SYM_SIZE;
+    const p = k * symSize;
     symDv.setUint32(p, s.strx, true);
+    if (class32) {
+      symDv.setUint32(p + 4, s.value, true);
+      symDv.setUint32(p + 8, s.size, true);
+      symBuf[p + 12] = s.info;
+      symBuf[p + 13] = s.other;
+      symDv.setUint16(p + 14, s.shndx, true);
+      continue;
+    }
     symBuf[p + 4] = s.info;
     symBuf[p + 5] = s.other;
     symDv.setUint16(p + 6, s.shndx, true);
@@ -506,15 +556,20 @@ export function mergeObjects(objs, opts) {
     let body;
     if (i === SYMTAB) body = symBuf;
     else if (i === STRTAB) body = strs.out();
-    else if (s.type === SHT_RELA) {
+    else if (s.type === relType) {
       const list = relas.get(i) === undefined ? [] : relas.get(i);
-      body = new Uint8Array(list.length * RELA_SIZE);
+      body = new Uint8Array(list.length * relSize);
       const dv = new DataView(body.buffer);
       for (let k = 0; k < list.length; k++) {
         const r = list[k];
-        dv.setBigUint64(k * RELA_SIZE, BigInt(r.at), true);
-        dv.setBigUint64(k * RELA_SIZE + 8, BigInt(newNo[r.sym]) * 4294967296n + BigInt(r.type), true);
-        dv.setBigInt64(k * RELA_SIZE + 16, r.add, true);
+        if (class32) {
+          dv.setUint32(k * relSize, r.at, true);
+          dv.setUint32(k * relSize + 4, ((newNo[r.sym] << 8) | (r.type & 0xff)) >>> 0, true);
+          continue;
+        }
+        dv.setBigUint64(k * relSize, BigInt(r.at), true);
+        dv.setBigUint64(k * relSize + 8, BigInt(newNo[r.sym]) * 4294967296n + BigInt(r.type), true);
+        dv.setBigInt64(k * relSize + 16, r.add, true);
       }
     } else if (s.type === SHT_NOBITS) body = new Uint8Array(0);
     else body = new Uint8Array(s.data);
@@ -538,5 +593,5 @@ export function mergeObjects(objs, opts) {
   for (const s of out) s.strx = shstr.intern(s.name);
   out[out.length - 1].bytes = shstr.out();
   out[out.length - 1].size = out[out.length - 1].bytes.length;
-  return writeSections(machine, out);
+  return writeSections(machine, out, { class32, flags: eflags });
 }

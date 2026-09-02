@@ -505,6 +505,12 @@ Mach-O 的 dylib 不叫、PE 的 dll **照叫**（`pe_add_runtime` 在
 `.def` 本身只有三行 `fprintf`，难的是换扩展名那一步认的是**基名里最后一个点**
 （`my.lib.dll` → `my.lib.def`），`LIBRARY` 后面写的是带扩展名的基名。8 种 × 2 个目标，
 映像与 `.def` 都逐字节相同）。PE 那一路 tcc 自己会走的每条路于是都对上了。
+**32 位那两个目标的 `.o`**（第七十二片：i386 与 arm 的目标文件是 ELF32 —— 不只是「短
+一半」，`Elf32_Sym` 的字段次序不一样，`Elf32_Rel` 的 `r_info` 是「高 24 位符号号 + 低
+8 位类型」而且**没有加数那一格**（加数写在被修的字节里），起手那几条节的对齐是
+`PTR_SIZE` = 4，arm 还带 `e_flags`。顺带挖出来一格：arm 上 tcc **不造** `.eh_frame` ——
+`tccdbg.c` 里那段 arm 的 CIE 是死代码。`elf-merge` 从六个目标长到十个，436 份逐字节
+相同）。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -11144,6 +11150,54 @@ fprintf(op, "LIBRARY %s\n\nEXPORTS\n", dllname);
 才有活干）。
 
 <!-- 第九刀第七十一片-END -->
+
+## 落地：第九刀第七十二片
+
+32 位那两个目标（i386 / arm）的目标文件：**ELF32**。
+
+到这一片为止我们只读得懂 ELF64。可 `i386-win32-tcc -c` 与 `arm-wince-tcc -c` 出来的
+`.o` 是 `ELFCLASS32`：头 52 字节、节头 40 字节、符号 16 字节，而重定位是 `Elf32_Rel` ——
+**没有加数那一格**。tcc 那边这一整套是两个宏一换（`tcc.h:401`）：
+
+```c
+#if PTR_SIZE == 8
+# define ElfW_Rel ElfW(Rela)
+# define SHT_RELX SHT_RELA
+#else
+# define ElfW_Rel ElfW(Rel)
+# define SHT_RELX SHT_REL
+#endif
+```
+
+四处不只是「短一半」，是**摆得不一样**：
+
+- `Elf32_Sym` 的字段次序与 64 位那份不同：`st_name`、`st_value`、`st_size` 在前，
+  `st_info` / `st_other` / `st_shndx` 在后。64 位那份是 name、info、other、shndx 之后
+  才是 value 与 size。
+- `Elf32_Rel.r_info` 是一个 32 位的字：**高 24 位**是符号号、低 8 位是类型（64 位那份是
+  高 32 位符号号、低 32 位类型）。加数写在被修的那几个字节里，跟着节的内容一起并过来 ——
+  于是并合这一步反而更省事，`r_addend` 那一格根本不存在。
+- `new_section` 默认的对齐是 `PTR_SIZE`，所以起手那几条节（`.text`/`.data`/`.data.ro`/
+  `.bss`/`.symtab`）在 32 位上是 **4** 而不是 8。
+- arm 还带 `e_flags`：`EF_ARM_EABI_VER5 | EF_ARM_VFP_FLOAT`（0x05000400）。我们照输入
+  里那份抄 —— 并合的输入本来就是同一个 tcc 出的。
+
+还挖出来一格：**arm 上 tcc 根本不造 `.eh_frame`**。`tccdbg.c` 里明明有一段 arm 的 CIE，
+可 `tcc.h:1839` 那个 `#if` 把 `TCC_EH_FRAME` 关掉了（`defined TCC_TARGET_ARM` 在排除
+列表里），所以那段代码是死的。第一次跑的时候 arm-linux 每份都长出 90 字节，就是我们照
+x86 的样子给它建了一条。
+
+代码上是 `elf.js` 的 `readObject` / `writeSections` 认位宽（`readObject` 顺手回
+`class32` 与 `flags`），`elf_merge.js` 把 `SYM_SIZE` / `RELA_SIZE` / `SHT_RELA` 换成
+按位宽算的 `symSize` / `relSize` / `relType`，另外 `.eh_frame` 的 CIE 表补上 i386 那一
+支（`data_alignment_factor` 是 -4 不是 -8，返回地址列 8，CFA 是 `esp + 4`）。
+
+`elf-merge` 那道门于是从六个目标长到**十个**：i386-linux、arm-linux、i386-win32、
+arm-wince 四个新的，`436 条相同, 0 条不同`。这一格是 PE32 的地基 —— 那两个目标的
+`.o` 读不进来，链接器那一层无从谈起。
+
+<!-- 第九刀第七十二片-END -->
+
 
 
 
