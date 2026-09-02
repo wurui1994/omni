@@ -288,7 +288,7 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
 8. **C 的库面**：`libtcc1` 的等价物（软除法/浮点辅助/`alloca`/`setjmp`）与 libc 的接法。
    原先写的是"先转手宿主的 libc，走既有的 extern-C FFI"，第五片证明**转手不成立**
    （指针是自家线性内存里的偏移，宿主 libc 读不到），改成一个读写线性内存的宿主模块，
-   见第五片的落地节。**前三十一片已落地**（预定义的宏 —— 目标的自述，五十条，
+   见第五片的落地节。**前三十三片已落地**（预定义的宏 —— 目标的自述，五十条，
    顺序与值都对着 `tcc -dM -E` 抄；自带的系统头目录 + 编译器必须自己给的那四份头；
    `stdio.h`/`stdlib.h`/`string.h` 的最小子集 —— libc 的自述；
    `strtol` 一族与 `strncpy`/`strchr`/`strstr` 那几条；
@@ -334,8 +334,11 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
    **宽字符常量与宽字符串** `L'a'` / `L"ab"` —— 一格是一个 `wchar_t`（这个目标上是
    带符号的 int），`\u`/`\U` 在窄串里按 UTF-8 铺、在宽串里就是那个值；
    **标签当值与计算跳转** `&&label` / `goto *p` —— 状态机那一套摆好了之后它就是
-   「编号当地址」，顺手把「typedef 名后面跟 `:` 是标签」也补上），
-   见下面的第八刀第一到三十一片节。
+   「编号当地址」，顺手把「typedef 名后面跟 `:` 是标签」也补上；
+   **typedef 名是普通标识符** —— 它跟变量分同一套作用域、能被同名的变量遮住；
+   **长度 0 的数组** —— `double a[0]` 是 size 0 / align 8，「不完整」不能再拿 size 是 0
+   当替身），
+   见下面的第八刀第一到三十三片节。
 
 最后三步是**后端**：
 
@@ -5043,6 +5046,117 @@ struct { int bla; typedef_and_label : 32; } y;   /* 类型：一个没名字的�
 
 <!-- 第八刀第三十一片-END -->
 
+## 落地：第八刀第三十二片
+
+**typedef 名是普通标识符。** tcctest.c 里那三行（655-662）：
+
+```c
+typedef int mytype2;
+…
+mytype1 mytype2;      /* 变量名正好是另一个 typedef 的名字 */
+mytype2 = 2;          /* 于是这一行是表达式，不是声明 */
+```
+
+我们原来把 typedef 单独放在一张**平的**表里（`this.typedefs`），于是两件事都错了：
+块里的 `typedef char T;` 出了块还在，而一个叫 `mytype2` 的变量遮不住同名的 typedef ——
+`mytype2 = 2;` 被当成了声明的开头，报 `identifier expected`。
+
+tcc 不会撞上这个，因为它的 typedef 与变量**本来就在同一张符号表里**：`VT_TYPEDEF`
+只是那条符号上的一个位，`sym_find` 找到的是最内层那一条。C 的说法也是这个
+（C11 6.2.3：typedef 名属于「普通标识符」那个名字空间）。
+
+所以这一片把 typedef 表也做成一叠（`tdefStack`），与 `scopes` / `tagStack` / `ecStack`
+同进同出，并且多一种值：`null` = 「这一层有个普通标识符占了这个名字」。
+`declareLocal` 声明一个局部量时，如果这个名字现在解析成 typedef，就在当前层记一个
+`null` —— 「遮住」于是与「定义」是同一套机制。
+
+第二十六片那条教训在这儿又用了一次：函数体走两遍，所以这一叠也要在 `runBody` 里
+换成函数体那一层、在 `finishFunc` 末尾收回文件作用域。三条栈现在是并排的三行 ——
+下一次再加第四种作用域化的东西时，它们该合成一张表。
+
+### 一 顺手一格：struct 成员表里的空成员
+
+```c
+struct empty_mem { /* nothing */ ; int x; };
+```
+
+成员表里一个孤零零的分号。tcc 的做法（`tccgen.c:4585-4592`）是「`parse_btype` 认不出
+类型就 `skip(';')` 接着来」，顺带同一个岔路上还收 `_Static_assert` —— 于是那一段从
+`decl` 里提成了 `staticAssert()`，两处共用。顶层多余的分号我们第二十片就收了，
+struct 里这一格是同一件事的另一半。
+
+### 量出来的数
+
+- `tests/c/gen/53-typedef-shadow.c`（`mytype1 mytype2;` 那一格、形参遮 typedef、
+  块里的 `typedef char shadow_me` 遮外层且出块即失效、局部变量遮 typedef、
+  以及遮完之后外面那个名字还是类型；再加 struct 里的空成员与成员表里的
+  `_Static_assert`）：与 `tcc -run` 一致。
+- `tests/c/run.js`：**92 passed, 0 failed**。`tests/run.js`：**96 passed, 0 failed**。
+- 自举那一条重量一遍：`tcc.c` -> 与本机 tcc 编的逐字节 **IDENTICAL**。
+- 我们自己的前端读 tcctest.c 从 661 行走到了 **985 行**（`typedef_test`、`forward_test`、
+  结构体那一大段全过去了）。
+
+### 下一片
+
+第八刀第三十三片：**长度 0 的数组**。停在 tcctest.c:985 ——
+`struct aligntest4 { double a[0]; };`，GNU 的零长数组（`sizeof` 是 0，但对齐还是 8）。
+我们的声明符现在见到 `[0]` 就报 `zero-sized array`。紧跟着的 989 行是
+`struct __attribute__((aligned(16))) aligntest5`，也在同一段。
+
+之后：`-dM`、路径 A 的 GLR 与路径 B 对账（第七步）、第 9-11 步的后端。
+
+<!-- 第八刀第三十二片-END -->
+
+## 落地：第八刀第三十三片
+
+**长度 0 的数组。** tcctest.c 那一段（985 起）：
+
+```c
+struct aligntest4 { double a[0]; };   /* sizeof 是 0，_Alignof 还是 8 */
+```
+
+我们原来在声明符里见到 `[0]` 就报 `zero-sized array`。tcc 的 `post_type`
+（`tccgen.c` 里读 `[` 那一段）**根本没有这个检查** —— 它只在乎「有没有写数」，
+写了 0 就是 0。零长数组是 GNU 的扩展，tcc 一声不响地收下：成员占 0 字节，
+但元素类型的对齐照算，所以上面那个结构体是 **size 0 / align 8**。
+
+去掉那个检查以后又冒出第二件事：`int gz[0];` 报 `storage size of 'gz' isn't known`。
+`declareGlobal` 一直拿「size === 0」当「类型不完整」的替身 —— 在这之前这个替身是对的，
+因为除了不完整类型没有别的东西 size 是 0。现在有了，所以得说真话：
+
+```js
+if (!isExtern) this.needComplete(name, ty);
+if (!isExtern && isArray(ty.t) && ty.count < 0) this.err(`storage size of '${name}' isn't known`);
+```
+
+「不完整」交给 `needComplete`（它查的是 struct/union 有没有定义过），
+「没写长度的数组」单独一条。这是同一类错误在这个仓里的第三次：**用一个可观测量
+去替代另一个概念**，等到那个概念真的能取到那个值的时候就塌了（第十九片的
+`ty.count < 0`、第二十九片的 pendingData 范围，也都是这个形状）。
+
+零长数组还顺带把柔性数组那套写法喂通了：`struct hdr { int len; char data[0]; }` ——
+`sizeof(struct hdr)` 是 4，`data` 的偏移也是 4，越过末尾去写就是调用者的事了。
+
+### 量出来的数
+
+- `tests/c/gen/54-zero-array.c`（`double a[0]` / `char b[0]` 收尾成员 / 全局 `int gz[0]` /
+  零长结构体的数组 / 借 `struct hdr` 走一遍柔性数组）：与 `tcc -run` 一致。
+  量到的：`sizes: 0 4 0 0 0`、`four=0 hdr=4`、`a=5 off=4`、`len=4 data=abcd off=4`。
+- `tests/c/run.js`：**93 passed, 0 failed**。`tests/run.js`：**96 passed, 0 failed**。
+- 自举那一条重量一遍：`tcc.c` -> 与本机 tcc 编的逐字节 **IDENTICAL**。
+- 我们自己的前端读 tcctest.c 从 985 行走到了 **988 行**（对齐那一段的第一格）。
+
+### 下一片
+
+第八刀第三十四片：**`__attribute__((aligned(N)))` 与 `packed`**。停在 tcctest.c:988 ——
+`struct __attribute__((aligned(16))) aligntest5 { int i; };`，紧跟着 993 行是尾置的
+`struct aligntest6 { int i; } __attribute__((aligned(16)));`。我们的 `skipAttrs()`
+现在把属性整段扔掉，所以这两个位置都得先认出来，再把对齐喂给 `structDecl` 的
+`maxalign`（它已经认 `this.cpp.packStack` 了）。
+
+之后：`-dM`、路径 A 的 GLR 与路径 B 对账（第七步）、第 9-11 步的后端。
+
+<!-- 第八刀第三十三片-END -->
 
 
 

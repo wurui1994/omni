@@ -642,6 +642,12 @@ export class CGen {  /**
      * typedef —— 但形态取 `void *`：程序只把它当不透明的东西传给那几个内建，
      * 而我们的变参区就是一串 8 字节的格子，一个指针足够走完它（见 `vaBlock`）。 */
     this.typedefs.set('__builtin_va_list', mkPointer(TY_VOID));
+    /* typedef 名是**普通标识符**（C11 6.2.3），所以它跟变量一样分作用域、而且能被
+     * 同名的变量遮住（`mytype1 mytype2; mytype2 = 2;` —— tcctest.c:655 那两行）。
+     * 于是这张表也是一叠：一层一个 Map，值是 `null` 表示「这一层有个普通标识符
+     * 占了这个名字」。tcc 那边不需要这一叠，因为它的 typedef 与变量本来就在同一张
+     * 符号表里（`VT_TYPEDEF` 只是那条符号上的一个位）。 */
+    this.tdefStack = [this.typedefs];
     /** @type {Map<string,{ty:object,addr:number,defined:boolean,used:boolean}>} 全局量 */
     this.gvars = new Map();
     /* C 有**四个独立的名字空间**（C11 6.2.3）：普通标识符、struct/union/enum 的 tag、
@@ -791,6 +797,9 @@ export class CGen {  /**
   declareLocal(name, ty) {
     if (btype(ty.t) === VT_VOID) this.err(`variable '${name}' has void type`);
     this.needComplete(name, ty);
+    /* 这个名字要是外面某层的 typedef，从这儿起它是个变量（C11 6.2.1 第 4 段）——
+     * `mytype1 mytype2; mytype2 = 2;` 的第二行于是是表达式而不是声明。 */
+    this.tdefShadow(name);
     const scope = this.scopes[this.scopes.length - 1];
     if (this.needsMem(ty) || this.frameNames.has(name)) {
       const e = { ty, slot: -1, off: this.frameAlloc(ty) };
@@ -1529,9 +1538,15 @@ export class CGen {  /**
     }
     if (btype(ty.t) === VT_VOID) this.err(`variable '${name}' has void type`);
     const s = typeSize(ty);
-    // `extern` 只是「别处有」，尺寸不必现在知道 —— 系统头里满地都是
-    // `extern char *sys_errlist[];`。真用起来会在 extern 那一关被拦（没有定义）。
-    if (s.size === 0 && !isExtern) this.err(`storage size of '${name}' isn't known`);
+    /* `extern` 只是「别处有」，尺寸不必现在知道 —— 系统头里满地都是
+     * `extern char *sys_errlist[];`。真用起来会在 extern 那一关被拦（没有定义）。
+     *
+     * 「不完整」要按类型问，不能按「尺寸是 0」问：`int gz[0];` 的尺寸也是 0，
+     * 而那是合法的（GNU 的零长数组，tcc 收）。 */
+    if (!isExtern) this.needComplete(name, ty);
+    if (!isExtern && isArray(ty.t) && ty.count < 0) {
+      this.err(`storage size of '${name}' isn't known`);
+    }
     this.dataOff = alignUp(this.dataOff, s.align);
     const e = { ty, addr: this.dataOff, defined: !isExtern, used: false };
     this.dataOff += s.size;
@@ -3683,7 +3698,7 @@ export class CGen {  /**
    * 而路径 B（这一条）与 tcc 一样靠符号表当场断。
    */
   isTypeStart(t) {
-    if (t >= TOK_UIDENT) return this.typedefs.has(this.cpp.tokStr(t, null));
+    if (t >= TOK_UIDENT) return this.tdefLookup(this.cpp.tokStr(t, null)) !== null;
     return t === TOK_INT || t === TOK_VOID || t === TOK_BOOL || t === TOK_SIGNED
       || t === TOK_UNSIGNED || t === TOK_CHAR || t === TOK_SHORT || t === TOK_LONG
       || t === TOK_FLOAT || t === TOK_DOUBLE || t === TOK_STRUCT || t === TOK_UNION
@@ -3738,6 +3753,7 @@ export class CGen {  /**
     this.scopes.push(new Map());
     this.tagStack.push(new Map());
     this.ecStack.push(new Map());
+    this.tdefStack.push(new Map());
   }
 
   /** 出一层块。 */
@@ -3745,6 +3761,29 @@ export class CGen {  /**
     this.scopes.pop();
     this.tagStack.pop();
     this.ecStack.pop();
+    this.tdefStack.pop();
+  }
+
+  /** 现在这一层的 typedef 表。 */
+  tdefScope() {
+    return this.tdefStack[this.tdefStack.length - 1];
+  }
+
+  /**
+   * 这个名字现在是不是一个类型名。从里往外找，头一个有这个名字的那一层说了算 ——
+   * 值是 `null` 就是「被一个普通标识符占了」，也就是**不是**类型名。
+   */
+  tdefLookup(name) {
+    for (let i = this.tdefStack.length - 1; i >= 0; i--) {
+      const hit = this.tdefStack[i].get(name);
+      if (hit !== undefined) return hit;
+    }
+    return null;
+  }
+
+  /** 一个普通标识符占了这个名字 -> 在这一层把同名的 typedef 遮掉。 */
+  tdefShadow(name) {
+    if (this.tdefLookup(name) !== null) this.tdefScope().set(name, null);
   }
 
   /** 当前这一层的枚举常量表（登记与「重复的枚举常量」都只看这一层）。 */
@@ -3793,6 +3832,17 @@ export class CGen {  /**
     let maxalign = 1;
     while (this.tok !== RBRACE) {
       if (this.tok === TOK_EOF) this.err("'}' expected");
+      /* 成员表里认不出类型的那几格（`tccgen.c:4585-4592`）：`_Static_assert` 收下，
+       * 孤零零的分号读掉（`struct empty_mem { ; int x; };` —— tcctest.c:700 那一格），
+       * 别的就是 `';' expected`。 */
+      if (this.tok === TOK_STATIC_ASSERT) {
+        this.staticAssert();
+        continue;
+      }
+      if (!this.isTypeStart(this.tok)) {
+        this.skip(SEMI);
+        continue;
+      }
       const spec = this.parseBtype();
       if ((spec.t & VT_STORAGE) !== 0) {
         this.err(`storage class specified for '${kind}' member`);
@@ -4268,8 +4318,8 @@ export class CGen {  /**
          * 这正是 C 那条著名的「typedef 名与标识符不可分辨」，tcc 与我们都靠
          * 「先看有没有基本类型」来断。 */
         if (bt !== -1 || tdef !== null || sign !== 0 || longs > 0 || shorts > 0) break;
-        const td = this.typedefs.get(this.cpp.tokStr(t, null));
-        if (td === undefined) break;
+        const td = this.tdefLookup(this.cpp.tokStr(t, null));
+        if (td === null) break;
         tdef = td; any = true; this.next(); continue;
       }
       break;
@@ -4421,7 +4471,9 @@ export class CGen {  /**
           if (p.old === true) ty.ref.old = true;
           continue;
         }
-        if (p.n === 0) this.err('zero-sized array');
+        /* 长度 0 的数组是 GNU 扩展，tcc 照收（`post_type` 那儿对 0 没有任何检查）：
+         * `struct S { double a[0]; }` 的 sizeof 是 0、对齐还是 8 —— 老代码拿它当
+         * 「只要对齐、不要空间」的垫片，tinycc 自己的 tcctest.c 也考这一格（985 行）。 */
         if (p.n < -1) this.err('array size must not be negative');
         ty = mkArray(ty, p.n);
       }
@@ -4713,6 +4765,27 @@ export class CGen {  /**
   }
 
   /**
+   * `_Static_assert(表达式, "话")`（`tccgen.c:8704`）：假就当场报那句话。
+   * macOS 的 `<mach/message.h>` 拿它钉住 mach 消息那几个结构体的尺寸 ——
+   * 也就是说这一格顺手在**考我们的 struct 布局**（位域 + `#pragma pack(4)`）。
+   * 声明那一层与 struct 的成员表里都能出现（tcc 两处都收）。
+   */
+  staticAssert() {
+    this.next();
+    this.skip(LPAR);
+    const c = this.constExpr();
+    let msg = '_Static_assert fail';
+    if (this.tok === COMMA) {
+      this.next();
+      if (this.tok !== TOK_STR) this.expect('string constant');
+      msg = this.readStrTok(this.tokc);
+    }
+    this.skip(RPAR);
+    if (c === 0n) this.err(msg);
+    this.skip(SEMI);
+  }
+
+  /**
    * `decl`（`tccgen.c:8747`）。回 `true` 表示「读掉了至少一个声明」——
    * 复合语句的循环与 `for` 的初始化都靠这个返回值区分声明与语句（`tccgen.c:7311`）。
    * @param {boolean} global 顶层（可以有函数定义）还是块内
@@ -4741,18 +4814,7 @@ export class CGen {  /**
        * macOS 的 `<mach/message.h>` 拿它钉住 mach 消息那几个结构体的尺寸 ——
        * 也就是说这一格顺手在**考我们的 struct 布局**（位域 + `#pragma pack(4)`）。 */
       if (this.tok === TOK_STATIC_ASSERT) {
-        this.next();
-        this.skip(LPAR);
-        const c = this.constExpr();
-        let msg = '_Static_assert fail';
-        if (this.tok === COMMA) {
-          this.next();
-          if (this.tok !== TOK_STR) this.expect('string constant');
-          msg = this.readStrTok(this.tokc);
-        }
-        this.skip(RPAR);
-        if (c === 0n) this.err(msg);
-        this.skip(SEMI);
+        this.staticAssert();
         any = true;
         continue;
       }
@@ -4803,12 +4865,13 @@ export class CGen {  /**
         }
         if (isTypedef) {
           /* `typedef` 不声明对象，只给一个类型起名。重复的 typedef 是合法的（C11
-           * 6.7 第 3 段：同一个类型可以说两遍），不同类型的重名才是错。 */
-          const prev = this.typedefs.get(name);
-          if (prev !== undefined && !sameType(prev, d.ty)) {
+           * 6.7 第 3 段：同一个类型可以说两遍），不同类型的重名才是错。
+           * 只跟**这一层**比：里层的同名 typedef 是遮住外层，不是重定义。 */
+          const prev = this.tdefScope().get(name);
+          if (prev !== undefined && prev !== null && !sameType(prev, d.ty)) {
             this.err(`typedef '${name}' redefined with a different type`);
           }
-          this.typedefs.set(name, d.ty);
+          this.tdefScope().set(name, d.ty);
         } else if (isFunc(d.ty.t)) {
           if (this.funcDecl(global, name, d.ty, isInline)) { wasBody = true; break; }
         } else {
@@ -5149,6 +5212,8 @@ export class CGen {  /**
      * 定义的那些 `struct S {…}` —— 第一遍留下的那份成员已经填好了。 */
     this.tagStack = [this.tags, new Map()];
     this.ecStack = [this.enumConsts, new Map()];
+    /* typedef 名同理：形参与函数体里的变量可以遮住外面的 typedef，而那只在这个函数里算。 */
+    this.tdefStack = [this.typedefs, new Map()];
     this.regions = [];
     this.swStack = [];
     /* 两遍各自从 0 数起，于是同一条语句在两遍里是同一个序号（`block` 那个包装）。 */
@@ -5264,6 +5329,7 @@ export class CGen {  /**
      * `struct rec { … };` 会落在这个函数体那一层里，下一个函数就看不见它了。 */
     this.tagStack = [this.tags];
     this.ecStack = [this.enumConsts];
+    this.tdefStack = [this.typedefs];
     /* tcc 在 `gen_function` 之后把 `funcname` 收回 `""`（`tccgen.c:8610`）：
      * 函数外面的 `__func__` 于是是空串，而不是上一个函数的名字。 */
     this.funcName = '';
