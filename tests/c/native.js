@@ -83,12 +83,31 @@ const CASES = [
   ['变参：整数与 double 混着', 'char b[40]; int n = snprintf(b, 40, "%d %.1f %d", 1, 2.5, 3);'
     + ' return n * 100 + b[2] + b[6];'],
   ['变参：一个变参都没有', 'char b[8]; return snprintf(b, 8, "hi") * 100 + b[0];'],
+  /* 堆：native 上没有线性内存，malloc/free 就是**普通的外部 C 调用**，没有我们自己的堆。 */
+  ['堆：malloc 出来的地方写得进读得出',
+    'int *p = (int *) malloc(4 * sizeof(int)); if (!p) return -1;'
+    + ' for (int i = 0; i < 4; i++) p[i] = i * i + 1;'
+    + ' long long s = 0; for (int i = 0; i < 4; i++) s += p[i];'
+    + ' free(p); return s;'],
+  ['堆：两块互不相干', 'int *a = (int *) malloc(16); int *b = (int *) malloc(16);'
+    + ' if (!a || !b) return -1; *a = 111; *b = 222;'
+    + ' long long r = (long long) *a * 1000 + *b; free(a); free(b); return r;'],
+  ['固定实参过八个（后几个走栈）', 'return ten(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);'],
+  ['固定的 double 实参过八个', 'return (long long) tend(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);'],
 ];
 
 const SUPPORT = `struct P { int x; int y; };
 union U { int i; unsigned char b[4]; };
 extern unsigned long strlen(const char *);
 extern int snprintf(char *, unsigned long, const char *, ...);
+extern void *malloc(unsigned long);
+extern void free(void *);
+long long ten(long long a, long long b, long long c, long long d, long long e,
+  long long f, long long g, long long h, long long i, long long j) {
+  return a + b*2 + c*3 + d*4 + e*5 + f*6 + g*7 + h*8 + i*9 + j*10; }
+double tend(double a, double b, double c, double d, double e,
+  double f, double g, double h, double i, double j) {
+  return a + b*2 + c*3 + d*4 + e*5 + f*6 + g*7 + h*8 + i*9 + j*10; }
 long long helper_addr(int n) { int *p = &n; *p = *p + 1; return n * 2; }
 long long sq(struct P *p) { return (long long) p->x * p->x + (long long) p->y * p->y; }
 void swap(int *a, int *b) { int t = *a; *a = *b; *b = t; }

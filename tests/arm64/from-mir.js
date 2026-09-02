@@ -447,6 +447,17 @@ td('外部的 double 函数（实参走 d0/d1、返回走 d0）', [2.5, 4.0], d2
   (f, x, y) => ret(f, T_F64, f.emit(OP.CCALL, T_F64, mod.cabiNo('omni_ext_scale'),
     f.pushArgs([ld(f, T_F64, x), ld(f, T_F64, y)]), 0)));
 
+/* 十个实参：八个进 x0-x7 / d0-d7，剩下两个得由**调用方**摆到 sp 上去。
+ * 期望值都是 Σ i·i（i = 1..10）= 385 —— 摆错位置就会差在最后那两项上。 */
+t('十个整数实参（后两个走栈）', [0n, 0n], 385n, (f) =>
+  ret(f, T_I64, f.emit(OP.CCALL, T_I64, mod.cabiNo('omni_ext_ten'),
+    f.pushArgs([1n, 2n, 3n, 4n, 5n, 6n, 7n, 8n, 9n, 10n].map((v) => K.int(v))), 0)));
+t('十个 double 实参（后两个走栈）', [0n, 0n], 385n, (f) => {
+  const d = f.emit(OP.CCALL, T_F64, mod.cabiNo('omni_ext_tend'),
+    f.pushArgs(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10'].map((v) => K.real(v))), 0);
+  ret(f, T_I64, f.emit(OP.CVT, T_I64, d, REF_NONE, CVT_F2I));
+});
+
 // ---- 模块级变量（第九刀第九片）。落在 __DATA 里、靠 adrp/add 取址，每个都是真符号。
 {
   const gi = mod.globalNo('omni_g_i64');
@@ -572,9 +583,6 @@ for (const [what, build] of [
   ['槽号越界', (f) => { ret(f, T_I64, ld(f, T_I64, 99)); }],
   ['单个函数里的 CALL 没有落点',
     (f) => { ret(f, T_I64, f.emit(OP.CALL, T_I64, 0, f.pushArgs([]), 0)); }],
-  ['九个实参', (f, s, no) => {
-    ret(f, T_I64, f.emit(OP.CALL, T_I64, no, f.pushArgs(new Array(9).fill(K.int(1n))), 0));
-  }],
   /* 单个函数编不出数据段，于是串常量在那条路上没有落点 —— 必须明着报，
    * 不能悄悄发一条指着 0 的 `adrp`。 */
   ['单个函数里的串常量没有数据段',
@@ -584,8 +592,7 @@ for (const [what, build] of [
   const f = mkFunc(badMod, `omni_bad_${bad}`, 2, build);
   let threw = false;
   try {
-    if (bad === 4) genModule(badMod);   // 九个实参那条要走模块路径才到得了
-    else codeOf(badMod, f);
+    codeOf(badMod, f);
   } catch { threw = true; }
   if (!threw) {
     process.stdout.write(`  FAIL 「${what}」还没做，可是没报错\n`);
@@ -625,7 +632,15 @@ try {
     'static unsigned long long d2b(double d){ unsigned long long b; memcpy(&b,&d,8); return b; }',
     'long long omni_ext_add(long long a, long long b){ return a + b; }',
     'long long omni_ext_same(const char *a, const char *b){ return strcmp(a, b) == 0; }',
-    'double omni_ext_scale(double a, double b){ return a * b + 1.0; }'];
+    'double omni_ext_scale(double a, double b){ return a * b + 1.0; }',
+    /* 十个整数实参：第九、十个走栈（第二十三片）。权重不同，串位一眼看得出来。 */
+    'long long omni_ext_ten(long long a, long long b, long long c, long long d, long long e,'
+      + ' long long f, long long g, long long h, long long i, long long j){'
+      + ' return a + b*2 + c*3 + d*4 + e*5 + f*6 + g*7 + h*8 + i*9 + j*10; }',
+    /* 十个 double：第九、十个走栈。 */
+    'double omni_ext_tend(double a, double b, double c, double d, double e,'
+      + ' double f, double g, double h, double i, double j){'
+      + ' return a + b*2 + c*3 + d*4 + e*5 + f*6 + g*7 + h*8 + i*9 + j*10; }'];
   const calls = [];
   for (const c of cases) {
     main.push(`extern long long ${c.f.name}(long long, long long);`);

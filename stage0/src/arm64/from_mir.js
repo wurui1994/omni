@@ -87,19 +87,55 @@ function widthOf(t) {
 }
 
 /**
+ * 一次调用的实参各自落在哪儿（第二十三片）。
+ *
+ * AAPCS64：整数进 x0-x7、浮点进 v0-v7，两串各自数；放不下的按次序摆在**出参区**
+ * （`sp + 0` 起，一格 8 字节）。变参那几个（`nfixed` 之后）一律进出参区 ——
+ * 苹果的改动，见第二十二片。
+ *
+ * 这个函数是**唯一**一处算「谁在哪儿」的地方：`outArgsBytes`（算帧要多大）与
+ * `callArgs`（真的发指令）都问它。两处各算一遍的话，迟早在某个边角上分家，
+ * 而那种错的症状是「实参串位」——最难查的一类。
+ */
+function argPlaces(mod, f, args, nfixed) {
+  const at = [];
+  let ngrn = 0;
+  let nsrn = 0;
+  let stack = 0;
+  let k = 0;
+  for (const ar of args) {
+    const va = nfixed >= 0 && k >= nfixed;
+    const t = f.typeOf(ar, mod.consts);
+    if (!va && isFloatType(t) && nsrn <= 7) {
+      at.push({ v: nsrn });
+      nsrn++;
+    } else if (!va && !isFloatType(t) && ngrn <= 7) {
+      at.push({ x: ngrn });
+      ngrn++;
+    } else {
+      at.push({ off: stack });
+      stack += 8;
+    }
+    k++;
+  }
+  return { at, stack };
+}
+
+/**
  * 出参区要多大：本函数里最费的那次调用要往栈上摆几个字节（按 16 取整）。
  *
- * 只有变参调用要（苹果的 arm64 把 `...` 后面的实参一律放栈上）。固定实参多过 8 个
- * 也该走栈，那一格还没做（`callArgs` 里明着报），所以这里只数变参那部分。
+ * 三种调用都要数（`CALL`/`CCALL`/`CALLI`，实参池都在 `b` 上）。`CCALL` 的 aux 是
+ * 变参分界（第二十二片），另两种没有变参。
  */
-function outArgsBytes(f) {
+function outArgsBytes(mod, f) {
   let most = 0;
   let i = 0;
   while (i < f.count()) {
-    if (f.op[i] === OP.CCALL && f.aux[i] !== 0) {
-      const n = f.args[f.b[i]];
-      const onStack = n - (f.aux[i] - 1);
-      if (onStack > 0) most = Math.max(most, onStack * 8);
+    const op = f.op[i];
+    if (op === OP.CALL || op === OP.CCALL || op === OP.CALLI) {
+      const nfixed = op === OP.CCALL && f.aux[i] !== 0 ? f.aux[i] - 1 : -1;
+      const p = argPlaces(mod, f, f.argsOf(f.b[i]), nfixed);
+      most = Math.max(most, p.stack);
     }
     i++;
   }
@@ -120,7 +156,7 @@ class FnGen {
      * `...` 后面那些一格 8 字节摆在 `sp` 上。所以帧的最底下要留出这一块，
      * 它的大小是本函数里最费的那次调用要的字节数（按 16 取整）。
      * 槽位与值的栈位都往上让开这一块 —— 它必须**紧贴 `sp`**，被调方按 `sp` 找它。 */
-    this.outArgs = outArgsBytes(f);
+    this.outArgs = outArgsBytes(mod, f);
     /** 帧里 0 号槽位的偏移。出参区在它下面（第二十二片）。 */
     this.slotBase = this.outArgs;
     this.valBase = this.slotBase + f.slots.length * 8;
@@ -246,20 +282,31 @@ class FnGen {
       }
     }
     /* 形参：AAPCS 把整数与浮点**分成两串**数（x0-x7 与 v0-v7 各自从 0 起），
-     * 所以两个计数器。第九个起走栈，这一片还不认。 */
+     * 所以两个计数器。放不下的从**入参区**读（第二十三片）：调用方摆在它自己的
+     * 出参区里，也就是我们这一层 `fp + 16` 起的地方（`fp`/`lr` 那一对占了前 16）。
+     *
+     * 一格按 8 字节读。欠账：i32 的形参按规范形（符号扩展的 64 位）用，而别人（clang）
+     * 摆在栈上的那一格高 32 位是不保证的 —— 与寄存器那一路的同一笔账（那边也直接
+     * 存了整个 x 寄存器），一起还。 */
     let ngrn = 0;
     let nsrn = 0;
+    let inArg = 16;
     for (const p of f.params) {
-      if (isFloatType(p.t)) {
-        if (nsrn > 7) nyi(`第 ${nsrn + 1} 个浮点形参（超过 8 个要走栈）`);
+      const flt = isFloatType(p.t);
+      if (flt && nsrn <= 7) {
         this.fromFp(TMP0, nsrn, typeKind(p.t) === T_F64);
         this.frameStore(TMP0, this.slotOff(p.slot));
         nsrn++;
         continue;
       }
-      if (ngrn > 7) nyi(`第 ${ngrn + 1} 个整数形参（超过 8 个要走栈）`);
-      this.frameStore(ngrn, this.slotOff(p.slot));
-      ngrn++;
+      if (!flt && ngrn <= 7) {
+        this.frameStore(ngrn, this.slotOff(p.slot));
+        ngrn++;
+        continue;
+      }
+      buf.emit(a.ldrU(3, TMP0, 29, inArg));
+      this.frameStore(TMP0, this.slotOff(p.slot));
+      inArg += 8;
     }
 
     for (let i = 0; i < f.count(); i++) this.one(i);
@@ -573,33 +620,23 @@ class FnGen {
 
   /** 实参就位：整数一串（x0-x7）、浮点一串（v0-v7），**各自从 0 起数**（AAPCS）。 */
   callArgs(args, nfixed) {
-    let ngrn = 0;
-    let nsrn = 0;
-    let stack = 0;
+    const p = argPlaces(this.mod, this.f, args, nfixed);
     let k = 0;
     for (const ar of args) {
-      /* 变参那几个走栈（苹果的 arm64）。一格 8 字节，顺序照实参 —— 与 `va_arg` 那边
-       * 「加 8 走到下一个」是同一条规则。浮点也是 8 字节一格（double 正好）。 */
-      if (nfixed >= 0 && k >= nfixed) {
-        this.loadRef(TMP0, ar);
-        this.frameStore(TMP0, stack);
-        stack += 8;
-        k++;
-        continue;
-      }
-      const at = this.typeOfRef(ar);
-      if (isFloatType(at)) {
-        if (nsrn > 7) nyi(`第 ${nsrn + 1} 个浮点实参（超过 8 个要走栈）`);
-        this.loadRef(TMP0, ar);
-        this.toFp(nsrn, TMP0, typeKind(at) === T_F64);
-        nsrn++;
-        k++;
-        continue;
-      }
-      if (ngrn > 7) nyi(`第 ${ngrn + 1} 个整数实参（超过 8 个要走栈）`);
-      this.loadRef(ngrn, ar);
-      ngrn++;
+      const place = p.at[k];
       k++;
+      /* 走栈的（放不下的固定实参、以及变参那几个）：一格 8 字节，摆在出参区里。 */
+      if (place.off !== undefined) {
+        this.loadRef(TMP0, ar);
+        this.frameStore(TMP0, place.off);
+        continue;
+      }
+      if (place.v !== undefined) {
+        this.loadRef(TMP0, ar);
+        this.toFp(place.v, TMP0, typeKind(this.typeOfRef(ar)) === T_F64);
+        continue;
+      }
+      this.loadRef(place.x, ar);
     }
   }
 

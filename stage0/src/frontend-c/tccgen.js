@@ -6901,9 +6901,14 @@ export class CGen {  /**
       /* 用到堆的模块要在入口处把堆的起点交给宿主（见 `lowerC` 末尾）。在这儿问而不是
        * 在调用点问：外部符号的清单正好在这个循环里，而「有没有用到」就是「它是不是
        * 这个单元里的一个外部符号」。 */
-      if (HEAP_FNS.has(name)) this.heapUsed = true;
-      if (name === ERRNO_FN) this.errnoUsed = true;
-      if (name === STRERROR_FN) this.strerrorUsed = true;
+      /* 堆那几个名字只在**线性内存**那条腿上要宿主帮忙（那边 `malloc` 是宿主用一块
+       * 线性内存实现的）。native 上它们就是普通的外部 C 函数 —— 走桩、`CCALL` 到真的
+       * libc，一格都不用留（第九刀第二十三片）。 */
+      if (!this.native) {
+        if (HEAP_FNS.has(name)) this.heapUsed = true;
+        if (name === ERRNO_FN) this.errnoUsed = true;
+        if (name === STRERROR_FN) this.strerrorUsed = true;
+      }
       /* native 上变参函数没有桩（调用点直接 CCALL，见 `funcCall`）—— 发一个反而会
        * 定义一个签名对不上的符号。 */
       if (this.native && info.variadic) continue;

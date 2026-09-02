@@ -163,6 +163,15 @@ t('调 libc 的 llabs', [-5n, 0n], 5n, (f, xs) =>
 t('六个整数实参（SysV 只有六个寄存器）', [1n, 2n], 21n, (f) =>
   ret(f, T_I64, f.emit(OP.CCALL, T_I64, mod.cabiNo('omni_ext_six'),
     f.pushArgs([K.int(1n), K.int(2n), K.int(3n), K.int(4n), K.int(5n), K.int(6n)]), 0)));
+/* 再多一个就得由**调用方**摆到 rsp 上去。两条的期望值都是 Σ i·i（i = 1..10）= 385。 */
+t('十个整数实参（后四个走栈）', [0n, 0n], 385n, (f) =>
+  ret(f, T_I64, f.emit(OP.CCALL, T_I64, mod.cabiNo('omni_ext_ten'),
+    f.pushArgs([1n, 2n, 3n, 4n, 5n, 6n, 7n, 8n, 9n, 10n].map((v) => K.int(v))), 0)));
+t('十个 double 实参（后两个走栈）', [0n, 0n], 385n, (f) => {
+  const d = f.emit(OP.CCALL, T_F64, mod.cabiNo('omni_ext_tend'),
+    f.pushArgs(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10'].map((v) => K.real(v))), 0);
+  ret(f, T_I64, f.emit(OP.CVT, T_I64, d, REF_NONE, CVT_F2I));
+});
 
 // ---- 浮点
 function d2b(v) {
@@ -391,9 +400,6 @@ for (const [what, build] of [
     (f) => { ret(f, T_I64, f.emit(OP.CALL, T_I64, 0, f.pushArgs([]), 0)); }],
   ['单个函数里的串常量没有数据段',
     (f) => { ret(f, T_I64, badMod.consts.str('nope')); }],
-  ['七个整数实参（SysV 只有六个寄存器）', (f, s, n) => {
-    ret(f, T_I64, f.emit(OP.CALL, T_I64, n, f.pushArgs(new Array(7).fill(K.int(1n))), 0));
-  }],
   ['u64 -> 浮点（x86 没有这条指令）', (f) => {
     const d = f.emit(OP.CVT, T_F64, ld(f, T_I64, 0), REF_NONE, CVT_U2F);
     ret(f, T_I64, f.emit(OP.CVT, T_I64, d, REF_NONE, CVT_F2I));
@@ -403,8 +409,7 @@ for (const [what, build] of [
   const f = mkFunc(badMod, `omni_bad_${bad}`, 2, build);
   let threw = false;
   try {
-    if (bad === 5) genModule(badMod);
-    else codeOf(badMod, f);
+    codeOf(badMod, f);
   } catch { threw = true; }
   if (!threw) {
     process.stdout.write(`  FAIL 「${what}」还没做，可是没报错\n`);
@@ -440,7 +445,13 @@ try {
     'long long omni_ext_six(long long a,long long b,long long c,'
       + 'long long d,long long e,long long f){ return a+b+c+d+e+f; }',
     'double omni_ext_vsum(int n, ...){ va_list ap; va_start(ap,n); double s=0;'
-      + ' for(int i=0;i<n;i++) s += va_arg(ap,double); va_end(ap); return s; }'];
+      + ' for(int i=0;i<n;i++) s += va_arg(ap,double); va_end(ap); return s; }',
+    'long long omni_ext_ten(long long a, long long b, long long c, long long d, long long e,'
+      + ' long long f, long long g, long long h, long long i, long long j){'
+      + ' return a + b*2 + c*3 + d*4 + e*5 + f*6 + g*7 + h*8 + i*9 + j*10; }',
+    'double omni_ext_tend(double a, double b, double c, double d, double e,'
+      + ' double f, double g, double h, double i, double j){'
+      + ' return a + b*2 + c*3 + d*4 + e*5 + f*6 + g*7 + h*8 + i*9 + j*10; }'];
   const calls = [];
   for (const c of cases) {
     main.push(`extern long long ${c.f.name}(long long, long long);`);

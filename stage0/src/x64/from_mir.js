@@ -91,6 +91,53 @@ function widthOf(t) {
   return nyi(`类型 ${k}`);
 }
 
+/**
+ * 一次调用的实参各自落在哪儿（第二十三片）。
+ *
+ * SysV：整数进 rdi rsi rdx rcx r8 r9（**六个**）、浮点进 xmm0-7，放不下的按次序摆在
+ * 出参区（`rsp + 0` 起，一格 8 字节）。**变参与固定实参一个待遇** —— 与苹果的 arm64
+ * 不同（那边变参一律走栈），所以这儿不看变参分界，只在末尾用 xmm 的个数去填 `al`。
+ *
+ * 与 arm64 那一份同一个用意：算帧要多大与真的发指令**问同一个函数**。
+ */
+function argPlaces(mod, f, args) {
+  const at = [];
+  let ngrn = 0;
+  let nsse = 0;
+  let stack = 0;
+  for (const ar of args) {
+    const t = f.typeOf(ar, mod.consts);
+    if (isFloatType(t)) {
+      if (nsse < FARG.length) {
+        at.push({ v: nsse });
+        nsse++;
+        continue;
+      }
+    } else if (ngrn < IARG.length) {
+      at.push({ x: ngrn });
+      ngrn++;
+      continue;
+    }
+    at.push({ off: stack });
+    stack += 8;
+  }
+  return { at, stack, nsse };
+}
+
+/** 出参区要多大：本函数里最费的那次调用要往栈上摆几个字节（按 16 取整）。 */
+function outArgsBytes(mod, f) {
+  let most = 0;
+  let i = 0;
+  while (i < f.count()) {
+    const op = f.op[i];
+    if (op === OP.CALL || op === OP.CCALL || op === OP.CALLI) {
+      most = Math.max(most, argPlaces(mod, f, f.argsOf(f.b[i])).stack);
+    }
+    i++;
+  }
+  return most + (most % 16 === 0 ? 0 : 16 - (most % 16));
+}
+
 class FnGen {
   constructor(mod, f, buf, callLabels, strSyms) {
     this.mod = mod;
@@ -113,6 +160,12 @@ class FnGen {
       bytes = depth;
     }
     this.frame = bytes + (bytes % 16 === 0 ? 0 : 16 - (bytes % 16));
+    /* 出参区（第二十三片）：放不下寄存器的实参摆在 `rsp + 0` 起的一块。
+     * 与 arm64 那一份的区别只有方向 —— 这里帧是 `rbp` 往下挖的，所以出参区就是**帧的
+     * 最低那一段**，`rsp = rbp - frame` 之后它正好从 `rsp` 起。
+     * SysV 要求 `call` 那一刻 `rsp` 16 对齐：`frame` 是 16 的整数倍，所以照旧成立。 */
+    this.outArgs = outArgsBytes(mod, f);
+    this.frame += this.outArgs;
     this.regions = [];
     this.retLabel = this.buf.label();
   }
@@ -213,20 +266,29 @@ class FnGen {
     const buf = this.buf;
     buf.emit(x.push(BP), x.movRR(8, BP, REG.rsp));
     if (this.frame > 0) buf.emit(x.aluRI(ALU.sub, 8, REG.rsp, this.frame));
-    /* 形参：整数一串（六个）、浮点一串（八个），各自从 0 起数。 */
+    /* 形参：整数一串（六个）、浮点一串（八个），各自从 0 起数。放不下的从**入参区**
+     * 读（第二十三片）：调用方摆在它自己的出参区里，也就是我们这一层 `rbp + 16` 起 ——
+     * `rbp + 0` 是存起来的 `rbp`、`rbp + 8` 是返回地址。
+     * （与 arm64 那一份的 `fp + 16` 是同一句话，只是两样东西的次序不同。） */
     let ngrn = 0;
     let nsse = 0;
+    let inArg = 16;
     for (const p of f.params) {
-      if (isFloatType(p.t)) {
-        if (nsse >= FARG.length) nyi(`第 ${nsse + 1} 个浮点形参（超过 8 个要走栈）`);
+      const flt = isFloatType(p.t);
+      if (flt && nsse < FARG.length) {
         this.fromFp(TMP0, FARG[nsse]);
         this.frameStore(TMP0, this.slotOff(p.slot));
         nsse++;
         continue;
       }
-      if (ngrn >= IARG.length) nyi(`第 ${ngrn + 1} 个整数形参（超过 6 个要走栈）`);
-      this.frameStore(IARG[ngrn], this.slotOff(p.slot));
-      ngrn++;
+      if (!flt && ngrn < IARG.length) {
+        this.frameStore(IARG[ngrn], this.slotOff(p.slot));
+        ngrn++;
+        continue;
+      }
+      buf.emit(x.movRM(8, TMP0, BP, inArg));
+      this.frameStore(TMP0, this.slotOff(p.slot));
+      inArg += 8;
     }
 
     for (let i = 0; i < f.count(); i++) this.one(i);
@@ -466,24 +528,27 @@ class FnGen {
 
   /** 实参就位：整数一串（六个）、浮点一串（八个）。`variadic` 时还要报 xmm 的个数。 */
   callArgs(args, variadic) {
-    let ngrn = 0;
-    let nsse = 0;
+    const p = argPlaces(this.mod, this.f, args);
+    let k = 0;
     for (const ar of args) {
-      const at = this.typeOfRef(ar);
-      if (isFloatType(at)) {
-        if (nsse >= FARG.length) nyi(`第 ${nsse + 1} 个浮点实参（超过 8 个要走栈）`);
+      const place = p.at[k];
+      k++;
+      /* 走栈的：一格 8 字节，摆在出参区里（`rsp + off`）。 */
+      if (place.off !== undefined) {
         this.loadRef(TMP0, ar);
-        this.toFp(FARG[nsse], TMP0);
-        nsse++;
+        this.buf.emit(x.movMR(8, REG.rsp, place.off, TMP0));
         continue;
       }
-      if (ngrn >= IARG.length) nyi(`第 ${ngrn + 1} 个整数实参（超过 6 个要走栈）`);
-      this.loadRef(IARG[ngrn], ar);
-      ngrn++;
+      if (place.v !== undefined) {
+        this.loadRef(TMP0, ar);
+        this.toFp(FARG[place.v], TMP0);
+        continue;
+      }
+      this.loadRef(IARG[place.x], ar);
     }
     /* SysV：调变参函数之前 `al` 要等于用掉的 xmm 个数。被调的是不是变参这一层不知道，
      * 所以外部调用一律发这一条 —— 对非变参函数完全无害，少了它 `printf` 会崩。 */
-    if (variadic === true) this.buf.emit(x.movRI(1, RES, nsse));
+    if (variadic === true) this.buf.emit(x.movRI(1, RES, p.nsse));
   }
 
   callRet(i, t) {
