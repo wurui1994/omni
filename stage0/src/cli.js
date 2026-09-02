@@ -171,7 +171,7 @@ const C_SYS_INCLUDE = [join(installDir(), '..', '..', 'include')];
  * 默认带 GCC 那种 `# 行号 "文件"` 的行标，`-P` 一族把它换掉或关掉。
  * 文件 IO 在这里，预处理器自己只认一个 `readFile` 回调 —— 于是 REPL 那一路可以把
  * 内存里的几份 `.h` 直接喂进去，测试也不必碰 fs。
- */function cppText(path, incs, defs, dflag, pflag, deps, sysIncs, incls) {
+ */function cppText(path, incs, defs, dflag, pflag, deps, sysIncs, incls, verbose) {
   const cpp = new Cpp({
     readFile: (p) => {
       try {
@@ -188,6 +188,8 @@ const C_SYS_INCLUDE = [join(installDir(), '..', '..', 'include')];
   cpp.installPredefs(path);
   /* `-include`：开工前先读的那几份（压在主文件上面的 `<command line>` 那一层）。 */
   if (incls !== undefined) cpp.cmdlineIncls = incls;
+  /* `-v` 的那一格：2 = 每开一个文件印一行 `->`，3 = 连试不开的也印（`nf`）。 */
+  cpp.verbose = verbose ?? 0;
   /* `-D` 与 `-U` 共用一条顺序（宏体 `null` = `#undef`）。 */
   for (const [name, body] of defs) {
     if (body === null) cpp.undefine(name);
@@ -2110,8 +2112,13 @@ function main(argv) {
       const oi = rest.indexOf('-o');
       const deps = wantDeps
         ? { sys: rest.includes('-M') || rest.includes('-MD') } : undefined;
+      /* `-v` 是数出来的，不是查表：tcc 那边 `do ++verbose; while (*optarg++ == 'v')`
+       * （libtcc.c:2044），于是 `-v` = 1、`-vv` = 2、`-vvv` = 3。2 起才开始印头文件
+       * 的开合（`->` 开成了 / `=>` 有卫哨于是跳过 / `nf` 这一格没有）。 */
+      let verbose = 0;
+      for (const a of rest) if (/^-v+$/.test(a)) verbose = a.length - 1;
       const out = cppText(path, incDirs(rest), defArgs(rest), dflag, pflag, deps,
-        sysIncDirs(rest), inclArgs(rest));
+        sysIncDirs(rest), inclArgs(rest), verbose);
       if (wantDeps) {
         const target = oi >= 0 ? rest[oi + 1] : depTarget(path);
         const text = makedepsText(target, deps.list, rest.includes('-MP'));

@@ -256,6 +256,13 @@ export class Cpp {
     this.targetDeps = [];
     /** `-include 文件`（tcc 的 `cmdline_incl`）：开工前先读的那几份，按命令行次序。 */
     this.cmdlineIncls = [];
+    /** `-v` 的那一格（tcc 的 `verbose`：`-v` 1、`-vv` 2、`-vvv` 3）。
+     *  2 = 每打开一个文件印一行 `-> 路径`，3 = 连试不开的也印（`nf 路径`）。
+     *  被守卫/`#pragma once` 挡掉的那种印 `=> 路径`（2 与 3 都印）。 */
+    this.verbose = 0;
+    /** 攒着的那几行 trace：`preprocessToText` 每读一个记号就把它倒进输出，
+     *  于是与记号流的先后次序和 tcc 一样（那边两边都是 stdout）。 */
+    this.traceOut = '';
     /** `pp_debug_tok` / `pp_debug_symv`：刚过去那一条指示是什么、动的是哪个名字。 */
     this.ppDebugTok = 0;
     this.ppDebugSymv = 0;
@@ -1876,10 +1883,18 @@ export class Cpp {
     for (const t of this.includeTries(name, kind, doNext)) {
       const e = this.cachedInclude(t.path, false);
       if (e !== null && (e.once || (e.ifndefMacro && this.defineFind(e.ifndefMacro) !== null))) {
-        return; // 守卫已经定义过或者 #pragma once：整份跳过，连读都不读
+        /* 守卫已经定义过或者 `#pragma once`：整份跳过，连读都不读。
+         * `-vv[v]` 下印一行 `=>`（`tccpp.c:1398`）—— 这是「省了一次读」的凭据。 */
+        if ((this.verbose | 1) === 3) this.traceLine('=>', t.path);
+        return;
       }
       const text = this.readFile(t.path);
-      if (text === null) continue;
+      if (text === null) {
+        /* `-vvv` 连试不开的也印（`nf` = not found，libtcc.c:784）。 */
+        if (this.verbose === 3) this.traceLine('nf', t.path);
+        continue;
+      }
+      if (this.verbose >= 2) this.traceLine('->', t.path);
       if (this.includeStack.length >= 64) this.err('#include recursion too deep');
       this.includeStack.push(this.file);
       const f = new CFile(t.path, text, this.file);
@@ -1966,7 +1981,13 @@ export class Cpp {
   hasInclude(doNext = false) {
     const { name, kind } = this.parseIncludeName();
     for (const t of this.includeTries(name, kind, doNext)) {
-      if (this.readFile(t.path) !== null) return true;
+      /* tcc 的 test 模式也是真开一次再关掉（`parse_include(…, 1)` -> `tcc_open`），
+       * 所以 `-vv[v]` 的那几行照印。 */
+      if (this.readFile(t.path) !== null) {
+        if (this.verbose >= 2) this.traceLine('->', t.path);
+        return true;
+      }
+      if (this.verbose === 3) this.traceLine('nf', t.path);
     }
     return false;
   }
@@ -2123,6 +2144,23 @@ export class Cpp {
   }
 
   /**
+   * `-vv[v]` 的一行（libtcc.c:785）：`printf("%s %*s%s\n", 记号, 深度, "", 路径)` ——
+   * 记号、一个空格、**按 include 深度补的那几个空格**、路径。深度是压栈**之前**的
+   * （tcc 那边 `_tcc_open` 在 `*include_stack_ptr++` 之前跑），所以主文件与它直接
+   * include 的那几份都是 0 个空格。
+   */
+  traceLine(mark, path) {
+    this.traceOut += `${mark} ${' '.repeat(this.includeStack.length)}${path}\n`;
+  }
+
+  /** 攒着的 trace 倒出来（`preprocessToText` 每读一个记号叫一次）。 */
+  takeTrace() {
+    const s = this.traceOut;
+    this.traceOut = '';
+    return s;
+  }
+
+  /**
    * `pp_line`（`tccpp.c:3796`）：把「现在在哪个文件的哪一行」交代给下游。
    *
    * 四种走法（`Pflag`）：不印、补几个换行、`#line`、`# 行号 "文件"`。
@@ -2153,6 +2191,12 @@ export class Cpp {
   preprocessToText(filename, text) {
     this.ppOnly = true;
     this.installPredefs(filename);
+    /* 主文件那一行 trace。它有**两个**出处，量过 tcc 才看得见：`-v`（verbose 1）
+     * 是 `tcc.c:380` 在开工前对每个命令行上的输入文件印的（`if (1 == s->verbose)
+     * printf("-> %s\n", f->name)`，没有缩进那一格）；`-vv[v]` 那一行则是 `_tcc_open`
+     * 印的，深度 0 —— 两处印出来的字节正好一样，于是这儿一条就够。
+     * 正文由调用方读进来交给我们，所以这一行只能在这儿补。 */
+    if (this.verbose >= 1) this.traceLine('->', filename);
     this.file = new CFile(filename, text, null);
     this.file.ifdefBase = 0;
     this.parseFlags = PF_PREPROCESS | PF_LINEFEED | PF_SPACES | PF_ACCEPT_STRAYS;
@@ -2166,7 +2210,7 @@ export class Cpp {
     this.tokFlags = TOK_FLAG_BOL | TOK_FLAG_BOF;
     this.pushCmdlineIncls();
 
-    let out = '';
+    let out = this.takeTrace();
     /* `-dD`/`-dM` 下预定义与命令行上的 `-D` 也要印出来。tcc 那边是把它们当成一份
      * 内建头文件在**同一个循环里**过掉的，于是印出来的次序就是进表的次序；我们的
      * 预定义是直接 `define()` 装的，所以在这儿按表的次序补印一遍 —— 效果一样，
@@ -2187,6 +2231,8 @@ export class Cpp {
     for (;;) {
       const iptr = this.includeStack.length;
       this.next();
+      /* `-vv[v]` 的那几行在 tcc 那边是 `next()` 里头印的，所以排在行标**前面**。 */
+      if (this.verbose >= 2) out += this.takeTrace();
       if (this.tok === TOK_EOF) break;
       /* 这一个记号是不是把我们带进/带出了一个文件？带进来的话先给**来处**补一行
        * （`pp_line(*iptr, 0)`：`iptr` 那一格里放的正是压栈时的当前文件），再给新文件印

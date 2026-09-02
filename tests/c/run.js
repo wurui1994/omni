@@ -247,7 +247,7 @@ if (pick('gen').includes('01-expr.c')) depsCase('gen', '01-expr.c', [], ['-MM'])
  * stdout，尺子是 `tcc -E -P <开关>`。这些开关改的是「宏表里有什么」与「往哪儿找头」，
  * 不是预处理器自己的状态，所以走 CLI 而不是 `compare()`。
  */
-function optCase(group, file, flags) {
+function optCase(group, file, flags, dropBanner = false) {
   const name = `${group}/${basename(file, '.c')} ${flags.join(' ')}`;
   const path = join(here, group, file);
   if (!hasTcc) {
@@ -259,16 +259,19 @@ function optCase(group, file, flags) {
     bad(name, `    tcc 自己就拒了：\n${(w.stderr ?? '').trim()}`);
     return;
   }
+  /* `-v` 一族下 tcc 的第一行是版本条（也在标准输出上，`tcc version …`）——
+   * Omni 没有对应的东西，掐掉再比。 */
+  const want = dropBanner ? w.stdout.slice(w.stdout.indexOf('\n') + 1) : w.stdout;
   const g = spawnSync(process.execPath, [CLI, 'cpp', path, '-P', ...flags], { encoding: 'utf8' });
   if (g.status !== 0) {
     bad(name, `    我们拒了，tcc 没拒：\n${(g.stderr ?? '').trim()}`);
     return;
   }
-  if (g.stdout !== w.stdout) {
-    bad(name, `    --- tcc ---\n${w.stdout}    --- ours ---\n${g.stdout}`);
+  if (g.stdout !== want) {
+    bad(name, `    --- tcc ---\n${want}    --- ours ---\n${g.stdout}`);
     return;
   }
-  const n = w.stdout === '' ? 0 : w.stdout.replace(/\n$/, '').split('\n').length;
+  const n = want === '' ? 0 : want.replace(/\n$/, '').split('\n').length;
   ok(`${name} [ours == tcc -E -P ${flags.join(' ')}] ${n} lines`);
 }
 
@@ -296,6 +299,19 @@ if (pick('inc').includes('01-include.c')) {
   optCase('inc', '01-include.c', ['-I', incDir, '-include', local, '-include', via]);
   // 依赖清单里也要有它（`<command line>` 那一层是真的 include 层）
   depsCase('inc', '01-include.c', [incDir], ['-MM', '-include', via]);
+}
+/* `-v` / `-vv` / `-vvv`：头文件的开合都印一行（第八十七片）。`-vvv` 那一档连试不开的
+ * 也印，于是会踩到系统头目录 —— 我们只有一个 `stage0/include`，tcc 有两个，所以那一档
+ * 加 `-nostdinc` 把系统那一段整个掐掉再比。 */
+if (pick('inc').includes('01-include.c')) {
+  optCase('inc', '01-include.c', ['-I', incDir, '-v'], true);
+  optCase('inc', '01-include.c', ['-I', incDir, '-vv'], true);
+  optCase('inc', '01-include.c', ['-nostdinc', '-I', incDir, '-vvv'], true);
+}
+if (pick('inc').includes('02-include-next.c')) {
+  optCase('inc', '02-include-next.c', ['-isystem', incDir, '-isystem', incDir2, '-vv'], true);
+  optCase('inc', '02-include-next.c',
+    ['-nostdinc', '-isystem', incDir, '-isystem', incDir2, '-vvv'], true);
 }
 
 // ------------------------------------------------------------ 3. cpp-bad/：该拒的要拒

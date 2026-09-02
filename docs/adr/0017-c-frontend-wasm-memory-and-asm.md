@@ -605,6 +605,13 @@ Bellard 拿它让 tcc 编译自己）也通了。`cpp/` 与 `inc/` 两组各多�
 `#include "…"` 那几行压在主文件上面，读完了才回到主文件。于是 `"..."` 那一格算的是
 当前工作目录，依赖清单里也有它，`# 行号 "文件"` 那套进出层级的行标自动就对。
 
+**`-v` / `-vv` / `-vvv`**（第八十七片）：头文件的开合印在**标准输出**上，与 `-E` 的正文
+交织。三档不是一个开关而是**数出来的**（`do ++verbose; while (*optarg++ == 'v')`）：
+1 只印命令行上那几个输入文件（`tcc.c:380`，开工之前），2 起每开一个文件印一行 `->`、
+被守卫或 `#pragma once` 挡回去的印 `=>`（`tccpp.c:1398`），3 连试不开的那些路径也印 `nf`。
+缩进是 **include 深度**，取的是压栈**之前**的值。这几行在 tcc 那边是 `next()` 里头印的，
+所以排在这一个记号的行标**前面** —— 顺序也是尺子的一部分。
+
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
 地址交给真的 libc（`strlen`/`memcpy`）验过。C 前端现在还把 `&x` 降到影子栈上，
@@ -12041,6 +12048,70 @@ tcc 的里头有 133 行预定义，我们的只有那几行 `#include`，于是
 （`-dM` 已经证明表的次序与源码的次序一致，值也一样）。带 `-P` 的那三条一个字节不差。
 
 <!-- 第九刀第八十六片-END -->
+
+## 落地：第九刀第八十七片
+
+`-v` / `-vv` / `-vvv` —— 头文件的开合，印在正文里。
+
+这一档开关的形状本身就要量：它不是三个开关，而是**数出来的一个计数**
+（`libtcc.c:2044`）——
+
+```c
+case TCC_OPTION_v: do ++s->verbose; while (*optarg++ == 'v'); continue;
+```
+
+`-v` = 1、`-vv` = 2、`-vvv` = 3、`-vvvv` = 4（再往上没人管）。三档各有各的出处，
+这是最容易想错的地方：
+
+- **1** 不在预处理器里，在驱动里（`tcc.c:380`）：`if (1 == s->verbose) printf("-> %s\n",
+  f->name)` —— 对**命令行上每个输入文件**印一行，在 `tcc_add_file` 之前，没有缩进。
+- **2 / 3** 在 `_tcc_open` 里（`libtcc.c:784`）：
+
+  ```c
+  if ((s1->verbose == 2 && fd >= 0) || s1->verbose == 3)
+      printf("%s %*s%s\n", fd < 0 ? "nf" : "->",
+             (int)(s1->include_stack_ptr - s1->include_stack), "", filename);
+  ```
+
+  `->` = 开成了、`nf` = 这一格没有（只有 3 才印）。宽度是 **include 深度**，取的是
+  压栈**之前**的值，于是主文件与它直接 include 的那几份都是 0 个空格。
+- **守卫挡回去的那一次**又是另一处（`tccpp.c:1398`）：`if ((s1->verbose | 1) == 3)
+  printf("=> %*s%s\n", …)` —— `| 1` 是把 2 和 3 一起收进来的写法。这一行是「省了一次读」
+  的凭据：`#ifndef` 守卫或 `#pragma once` 认出来之后连 `open` 都不做。
+
+我们这边主文件那一行只能在 `preprocessToText` 里补（正文是调用方读进来的），好在
+1 那一处与 2 那一处印出来的字节正好一样（深度 0 就是没有缩进），于是一条就够：
+
+```js
+if (this.verbose >= 1) this.traceLine('->', filename);
+```
+
+`traceLine` 只往 `traceOut` 里攒，`preprocessToText` 每读一个记号倒一次 —— 倒的位置
+是尺子的一部分：
+
+```js
+this.next();
+/* `-vv[v]` 的那几行在 tcc 那边是 `next()` 里头印的，所以排在行标**前面**。 */
+if (this.verbose >= 2) out += this.takeTrace();
+```
+
+`__has_include` 那一路也照印：tcc 的 test 模式也是真开一次再关掉
+（`parse_include(s1, …, 1)` 里同一个 `tcc_open`）。
+
+### 门
+
+`optCase` 多了一个参数 `dropBanner`：`-v` 一族下 tcc 的第一行是版本条
+（`tcc version 0.9.28rc … (AArch64 Darwin)`，也在标准输出上），Omni 没有对应的东西，
+掐掉再比。五条：`01-include.c` 的 `-v` / `-vv` / `-vvv`、`02-include-next.c` 的
+`-vv` / `-vvv`，一个字节不差。
+
+**`-vvv` 那两条加了 `-nostdinc`**：3 这一档连试不开的路径都印，于是会一路印到系统头
+目录 —— tcc 有两个（`/usr/local/lib/tcc/include` 与 macOS SDK），我们只有一个
+`stage0/include`。那是第八刀就记下的搜索路径分歧，不是这一片的事，掐掉系统那一段照样
+把 `nf` 的**行数、缩进、次序**都比上了。
+
+<!-- 第九刀第八十七片-END -->
+
 
 
 
