@@ -254,13 +254,16 @@ const FRAME_ALIGN = 8;
 const HEAP_FNS = new Set(['malloc', 'calloc', 'realloc', 'free', 'strdup', 'getenv']);
 
 /**
- * 用到这个名字，就说明这个单元要一格 `errno`（第八刀第八片）。
- * `<errno.h>` 里 `errno` 是宏，展开成 `(*__omni_errno_location())` —— 与 glibc 的
- * `__errno_location` 同一个形状，因为 C 要求 `errno` 是一个**可改的左值**，
- * 而函数回不出左值、只能回一个指针。
+ * 用到这几个名字之一，就说明这个单元要一格 `errno`（第八刀第八片）。
+ * `<errno.h>` 里 `errno` 是宏，展开成一次调用再解引用 —— 因为 C 要求 `errno` 是一个
+ * **可改的左值**，而函数回不出左值、只能回一个指针。名字随头文件走：我们自带那份是
+ * `__omni_errno_location`，macOS SDK 那份是 `(*__error())`，glibc 那份是
+ * `(*__errno_location())`（第八十九片把后两个也算上 —— 用真的系统头的程序走的是它们，
+ * 而那一格必须由前端在版图上留出来：宿主临时去堆上要一格的话，一个没用到 `malloc`
+ * 的程序连堆都没有）。
  * 前端要做的与堆那条一样两件事：data 段里留 4 个字节、在入口处把地址交过去。
  */
-const ERRNO_FN = '__omni_errno_location';
+const ERRNO_FNS = new Set(['__omni_errno_location', '__error', '__errno_location']);
 
 /**
  * `strerror` 要一块地方（第八刀第十三片）：它回一个 `char *`，而那些串必须落在线性
@@ -7244,7 +7247,7 @@ export class CGen {  /**
        * libc，一格都不用留（第九刀第二十三片）。 */
       if (!this.native) {
         if (HEAP_FNS.has(name)) this.heapUsed = true;
-        if (name === ERRNO_FN) this.errnoUsed = true;
+        if (ERRNO_FNS.has(name)) this.errnoUsed = true;
         if (name === STRERROR_FN) this.strerrorUsed = true;
       }
       /* native 上「宿主那几格」（第三十一片）：`errno` 靠改名落到 macOS 的 `__error`

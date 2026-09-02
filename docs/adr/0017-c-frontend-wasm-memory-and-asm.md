@@ -621,7 +621,14 @@ configure 时用 `xcrun --show-sdk-path` 定死编进去的，我们没有 confi
 tcc 没装，它 `{B}` 那一格不存在、一路掉到 SDK 上；拿 `-B` 指一个 `include/` 真在的树，
 它就跟我们一样先用自己那份。
 
-**往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
+**让位**（第八十九片）：自带的那五份 libc 头（`stdio.h`/`stdlib.h`/`string.h`/
+`ctype.h`/`errno.h`，第八刀第三片的最小子集）**删了** —— 它们只会挡着 SDK 里的同名头。
+留下的正是 tcc 也自带的那四份（`stddef.h`/`stdarg.h`/`stdbool.h`/`float.h`）。
+删之前要补一件事：SDK 的 `<errno.h>` 里 `errno` 是 `(*__error())`，前端得认出这个名字
+才会在版图上留那一格 —— 不认的话宿主只能临时去堆上要，而一个不用 `malloc` 的程序
+连堆都没有。整个 `tests/c/`（206）与 native（217）在删掉之后全绿。
+
+（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
 地址交给真的 libc（`strlen`/`memcpy`）验过。C 前端现在还把 `&x` 降到影子栈上，
 把它改成落在 `FRAME` 上是下一片，见下面的第九刀第十八片节。
@@ -12181,6 +12188,55 @@ s.o: \
 是 native 那条腿上的另一片 —— 解释器那条腿没有真的 libc 可转手，让位之前得先补上。
 
 <!-- 第九刀第八十八片-END -->
+
+## 落地：第九刀第八十九片
+
+让位 —— 自带的那五份 libc 头删了。
+
+第八刀第三片给 `stage0/include/` 放了 `stdio.h` / `stdlib.h` / `string.h` / `ctype.h` /
+`errno.h` 的**最小子集**：声明的正好是 `interp/libc.js` 那张表里有的，多一个都没有。
+那时候的理由是「没有真的系统头可用」。上一片把 SDK 那一段接上之后，这个理由消失了 ——
+留着它们只有一个效果：**挡着** SDK 里的同名头（自带那一段排在 SDK 前面）。
+
+`tests/c/sys/05-fdopen` 就是被挡的样子：`fdopen`/`system`/`strpbrk` 只有 SDK 那份里有，
+于是那一组一直得靠 `-I <SDK>` 把 SDK 顶到前面去。这一片直接删掉那五份，留下的正是
+tcc 也自带的那四份 —— `stddef.h` / `stdarg.h` / `stdbool.h` / `float.h`，
+**编译器必须自己给**的那四份（它们的值来自预定义宏，只有编译器知道）。
+
+### 删之前要补的那一件事
+
+SDK 的 `<errno.h>` 里 `errno` 不是 `(*__omni_errno_location())` 而是 `(*__error())`。
+前端认的名字只有前者，于是「这个单元要一格 `errno`」这件事没被认出来 ——
+版图上不留、入口不发 `__omni_errno_init`，宿主的 `__error` 只能临时去堆上要一格，
+而一个不用 `malloc` 的程序**连堆都没有**：
+
+```
+omni: runtime error: __error: libc: malloc 之前堆没有初始化
+```
+
+所以那一格从一个名字变成三个（`tccgen.js`）：
+
+```js
+const ERRNO_FNS = new Set(['__omni_errno_location', '__error', '__errno_location']);
+```
+
+第三个是 glibc 的形状 —— 同一件事在 Linux 上的名字，一起认了。
+
+### 门
+
+不加新用例：这一片改的是「同一份 `.c` 读到的是哪份头」，而 `tests/c/` 的每一条本来就在
+比「与 tcc 跑出来的一不一样」。删掉之后 `tests/c/` 206 条、`tests/c/native.js` 217 条
+全绿 —— 也就是说那五份头里的每一条声明，SDK 那边都有，而且我们的前端读得下来、
+解释器与两个后端都跑得对。
+
+`sys/` 那一组顺手把 `-I <SDK>` 也去掉了：现在两条腿都自己找。
+
+**跟着成了死码的那几个**：`__omni_errno_location`、`__omni_stdin/stdout/stderr`
+（连着 `NATIVE_CNAME` 与 `streamThunk` 那一套）—— 只有被删掉的那几份头会用它们。
+下一片清。
+
+<!-- 第九刀第八十九片-END -->
+
 
 
 

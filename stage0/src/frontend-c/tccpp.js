@@ -32,12 +32,11 @@
 //   自带那一份在前 —— `stage0/include/`，对着 tcc 的 `{B}/include`；本机 SDK 的
 //   `/usr/include` 在后（tcc 那边是 configure 时用 `xcrun --show-sdk-path` 定死的，
 //   我们第一次用的时候找一次记下来，见 cli.js 的 `sdkUsrInclude`）。
-//   自带那一份里两类东西：一是**编译器必须自己给**的那四份
-//   `stddef.h` / `stdarg.h` / `stdbool.h` / `float.h`（与 tcc 自带的一一对应），
-//   二是 `stdio.h` / `stdlib.h` / `string.h` 的**最小子集**（第八刀第三片）——
-//   声明的正好是 `interp/libc.js` 那张表里有的，多一个都没有。后者是刻意的分岔：
-//   tcc 把这三份转手给系统，我们在解释器上没有真的 libc 可转手；也就是说这三个名字
-//   **挡着** SDK 里的同名头（native 那条腿上将来要让它们让位）。
+//   自带那一份里只有**编译器必须自己给**的那四份
+//   `stddef.h` / `stdarg.h` / `stdbool.h` / `float.h`（与 tcc 自带的一一对应）。
+//   `stdio.h` / `stdlib.h` / `string.h` / `ctype.h` / `errno.h` 曾经也在这儿（第八刀
+//   第三片的最小子集，声明的正好是 `interp/libc.js` 那张表里有的），第八十九片**删了**：
+//   SDK 那几份从头到尾都能用，自带的那几份只会挡着它们。
 //   搜索顺序照 tcc：`-isystem` 在这两段前头，`-I` 在最前，`-nostdinc` 把这两段一起掐掉。
 //   都找不到就报 `include file '...' not found`（与 tcc 同一句）。
 //   **预定义的宏也有了**（第八刀第一片，见 tccdefs.js）：`__aarch64__`、

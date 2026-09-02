@@ -20,7 +20,7 @@
 //                    对账范围 —— 一个字节的 oracle 会撞（`s % 251` 曾经让一个真错误躲过
 //                    二分），整条 stdout 宽得多。
 //   5. `sys/`     —— 与 `gen/` 同一口径，只是用**真的系统头**（macOS SDK）。SDK 不在
-//                    就跳过。SDK 那一份当 `-I` 传，好压过我们自带的 `stdio.h` 一族。
+//                    就跳过。第八十九片起两条腿都自己去找，一个 `-I` 都不给。
 //   5.5 `sysinc/` —— 只预处理，不跑：两边都**不给 `-I`**，各自去找系统头，`tcc -E -P`
 //                    与 `-M` 都逐字节比（第八十八片）。搜索表本身就是被量的东西。
 //   6. `gen-bad/` —— 第六刀的阶段边界与真语法错误。同样有 .expected。
@@ -434,17 +434,15 @@ function sdkInclude() {
   return existsSync(p) ? p : null;
 }
 
-/* SDK 那一份仍旧当 `-I` 传进去 —— 不是因为找不到（第八十八片起自己就找得到，
- * 见 `sysinc/`），而是因为要它**压过我们自带的那三份**（`stdio.h`/`stdlib.h`/
- * `string.h` 的最小子集，`-I` 排在系统段前头）：`sys/05-fdopen` 用的
- * `fdopen`/`system`/`strpbrk` 只有 SDK 那份里有。哪天自带的那三份让位，这里就能空着。 */
+/* SDK 在不在只决定「跳还是不跳」—— 第八十九片起**不再当 `-I` 传进去**：
+ * 自带的那几份 libc 头删了，两条腿都自己找到 SDK 那一份（`cli.js` 的 `sdkUsrInclude`）。 */
 const SDK_INC = sdkInclude();
 for (const f of pick('sys')) {
   if (SDK_INC === null) {
     skip++;
     continue;
   }
-  runCase('sys', f, [SDK_INC]);
+  runCase('sys', f);
 }
 
 // ------------------------------------------------------------ 5. gen-bad/：边界与语法错误
