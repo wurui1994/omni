@@ -123,7 +123,7 @@ const C_SYS_INCLUDE = [join(installDir(), '..', '..', 'include')];
  * 默认带 GCC 那种 `# 行号 "文件"` 的行标，`-P` 一族把它换掉或关掉。
  * 文件 IO 在这里，预处理器自己只认一个 `readFile` 回调 —— 于是 REPL 那一路可以把
  * 内存里的几份 `.h` 直接喂进去，测试也不必碰 fs。
- */function cppText(path, incs, defs, dflag, pflag) {
+ */function cppText(path, incs, defs, dflag, pflag, deps) {
   const cpp = new Cpp({
     readFile: (p) => {
       try {
@@ -143,8 +143,48 @@ const C_SYS_INCLUDE = [join(installDir(), '..', '..', 'include')];
   cpp.dflag = dflag ?? 0;
   /* `-P` 那一格（tcc 的 `Pflag`）：0 = `# 行号 "文件"`、1 = 不印、2 = `#line`、11 = `-P10`。 */
   cpp.Pflag = pflag ?? 0;
+  /* `-M` 一族：把读过的头记下来（`genDeps`），`-M`/`-MD` 连系统头一起记。 */
+  if (deps !== undefined) {
+    cpp.genDeps = true;
+    cpp.includeSysDeps = deps.sys === true;
+    cpp.targetDeps.push(path);   // 主文件在最前（tcc 是 `tcc_add_file_internal` 加的）
+  }
   const out = cpp.preprocessToText(path, readText(path));  for (const w of cpp.warnings) stderr(`${w}\n`);
+  if (deps !== undefined) deps.list = cpp.targetDeps;
   return out;
+}
+
+/**
+ * `gen_makedeps`（tcctools.c:599）：一条 make 规则。
+ *
+ * ```
+ * 目标: \
+ *   dep1 \
+ *   dep2
+ * ```
+ * 去重是**印的时候**做的（记的时候重复留着），空白按 `escape_target_dep` 加反斜杠
+ * （`is_space` 那五个字符，不含换行）。`-MP`（`gen_phony_deps`）再给**除主文件之外**
+ * 每个头补一条空规则 —— 头文件被删掉时 make 不会因为「没有规则可做」而停下来。
+ */
+function makedepsText(target, list, phony) {
+  const deps = [];
+  for (const d of list) if (!deps.includes(d)) deps.push(d);
+  const esc = (s) => s.replace(/[ \t\v\f\r]/g, (c) => `\\${c}`);
+  let out = `${target}:`;
+  for (const d of deps) out += ` \\\n  ${esc(d)}`;
+  out += '\n';
+  if (phony) for (let i = 1; i < deps.length; i++) out += `${esc(deps[i])}:\n`;
+  return out;
+}
+
+/**
+ * `default_outputfile`（tcc.c:251）在 `-M` 那一路上算出来的名字：**basename** 的后缀
+ * 换成 `.o`，没有后缀就是 `a.out`。`-M` 印出来的目标就是它（不是 `-o`，除非真给了 `-o`）。
+ */
+function depTarget(file) {
+  const b = basename(file);
+  const i = b.lastIndexOf('.');
+  return i > 0 ? `${b.slice(0, i)}.o` : 'a.out';
 }
 
 /**
@@ -1801,7 +1841,8 @@ function main(argv) {
       || a === '--dylib' || a === '--libtcc1' || a === '--dll'
       || a === '--soname' || a === '--rpath' || a === '--install-name'
       || a === '--subsystem' || a === '--image-base' || a === '--stack'
-      || a === '--file-align' || a === '--section-align' || a === '--dwarf') { i++; continue; }
+      || a === '--file-align' || a === '--section-align' || a === '--dwarf'
+      || a === '-MF') { i++; continue; }
     if (a.startsWith('-')) continue;
     files.push(a);
   }
@@ -2006,10 +2047,27 @@ function main(argv) {
       for (const a of rest) {
         if (a === '-P' || /^-P\d+$/.test(a)) pflag = (Number.parseInt(a.slice(2), 10) || 0) + 1;
       }
-      stdout(cppText(path, incDirs(rest), defArgs(rest), dflag, pflag));
+      /* `-M` 一族（tcc 的 `gen_deps`，libtcc.c:2095）：`-M`/`-MD` 连系统头一起记，
+       * `-M`/`-MM` 只出依赖不出正文（`just_deps`）。`-MF <文件>` 换落脚处（`-` = 标准输出），
+       * 不给的话 `-M`/`-MM` 落标准输出、`-MD`/`-MMD` 落 `目标.d`。`-MP` 补空规则。 */
+      const wantDeps = ['-M', '-MM', '-MD', '-MMD'].some((o) => rest.includes(o));
+      const justDeps = rest.includes('-M') || rest.includes('-MM');
+      const mfi = rest.indexOf('-MF');
+      const oi = rest.indexOf('-o');
+      const deps = wantDeps
+        ? { sys: rest.includes('-M') || rest.includes('-MD') } : undefined;
+      const out = cppText(path, incDirs(rest), defArgs(rest), dflag, pflag, deps);
+      if (wantDeps) {
+        const target = oi >= 0 ? rest[oi + 1] : depTarget(path);
+        const text = makedepsText(target, deps.list, rest.includes('-MP'));
+        let to = mfi >= 0 ? rest[mfi + 1] : (justDeps ? '-' : null);
+        if (to === null) to = `${target.slice(0, target.lastIndexOf('.'))}.d`;
+        if (to === '-') stdout(text);
+        else writeText(to, text);
+      }
+      if (!justDeps) stdout(out);
       return 0;
-    }
-    // C -> MIR（ADR-0017 第六刀）。`c-mir` 印 MIR，`c-run` 跑它 ——
+    }    // C -> MIR（ADR-0017 第六刀）。`c-mir` 印 MIR，`c-run` 跑它 ——
     // **退出码就是 C 的 `main` 的返回值**，与 `tcc -run` 逐条相同，那也是这一刀的 oracle。
     case 'c-mir': {
       const { flags, prog } = cSplitArgs(rest);

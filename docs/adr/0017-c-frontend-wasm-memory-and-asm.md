@@ -583,6 +583,13 @@ tcc 那段不在 EXE 的分支里，所以 dylib 也发。门涨到 `27 条`。
 Bellard 拿它让 tcc 编译自己）也通了。`cpp/` 与 `inc/` 两组各多了两三种走法，
 `24 条` → `51 条`。
 
+**`-M` 一族**（第八十三片）：给 make 的依赖清单。`#include` 成功时记一笔，印的时候
+去重、空白加反斜杠、`-MP` 再给每个头补一条空规则。分「自己的头」与「系统的头」靠的是
+**在搜索表第几格找到的**（`include_next_index`）—— 在 include 它的那份的目录里找到的
+自己算不清，得顺着 `prev` 往上认祖先的身份。目标名是 basename 的后缀换成 `.o`。
+`inc/` 那一份走四种（`-MM`/`-M` 各配 `-MP`），加 `gen/01-expr.c` 一条没有头的，
+`51 条` → `56 条`。
+
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
 地址交给真的 libc（`strlen`/`memcpy`）验过。C 前端现在还把 `&x` 降到影子栈上，
@@ -11822,6 +11829,73 @@ tcc 的预定义是一份叫 `<command line>` 的**源码**，进出主文件都
 四种都与 tcc 逐字节相同。
 
 <!-- 第九刀第八十二片-END -->
+
+## 落地：第九刀第八十三片
+
+`-M` 一族 —— 给 make 的依赖清单。
+
+tinycc 自己的 Makefile 就用 `-MD`：每编一个 `.o` 顺手写一份 `.d`，下一趟 make 靠它
+知道改了哪个头要重编谁。四个开关（libtcc.c:2095）落成三格状态：
+
+- `-M`：`include_sys_deps = 1` + `just_deps = 1` + `gen_deps = 1`，落脚处默认 `-`（标准输出）
+- `-MM`：同上，但不带 `include_sys_deps` —— 系统头不进清单
+- `-MD` / `-MMD`：只 `gen_deps`，正文照出，`.d` 落到 `目标.d`
+- `-MF <文件>` 换落脚处，`-MP` 补空规则
+
+### 哪些头算「自己的」
+
+记一笔的地方在 `#include` 成功之后（tccpp.c:1418）：
+
+```c
+BufferedFile *bf = file;
+while (i == 1 && (bf = bf->prev))
+    i = bf->include_next_index;
+if (s1->include_sys_deps || i - 2 < s1->nb_include_paths)
+    dynarray_add(&s1->target_deps, ..., tcc_strdup(buf));
+```
+
+`i` 是**在搜索表第几格找到的**：0 = 绝对路径、1 = 「跟 include 它的那份同一个目录」、
+`2 + j` = 第 j 个 `-I`、再往后是系统目录。所以 `i - 2 < nb_include_paths` 的意思就是
+「落在 `-I` 里」。
+
+`i === 1` 那一格自己说不清身份 —— 一个系统头旁边的 `"foo.h"` 也是 `i === 1`。
+于是顺着 `prev` 往上找第一个不是 1 的下标，拿祖先的身份当自己的。这一段我们照抄，
+`includeTries` 因此改成回 `{path, i}`：**跳过的格子也占号**（`i` 是照着 `for(;;) ++i`
+数的，绝对路径与「当前目录」两格即使不试也占 0 和 1），不然 `i - 2` 就对不上。
+
+`CFile` 多一格 `includeNextIndex`（主文件是 0 —— tcc 那边是 calloc 出来的）。
+
+### 印出来的样子
+
+```c
+fprintf(depout, "%s:", target);
+for (i = 0; i < num_targets; ++i)
+    fprintf(depout, " \\\n  %s", escaped_targets[i]);
+```
+
+去重是**印的时候**做的（`tcctools.c:625` 的 O(n²) 两重循环，记的时候重复留着）。
+空白按 `escape_target_dep` 加反斜杠 —— `is_space` 那五个字符（空格、`\t`、`\v`、`\f`、
+`\r`），**不含换行**。`-MP` 从第 1 个（跳过主文件）起，每个头一条 `头:` 空规则。
+
+目标名是 `default_outputfile`（tcc.c:251）在 `just_deps` 那一路上算出来的：
+**basename** 的后缀换成 `.o`，没有后缀就是 `a.out`。给了 `-o` 就用 `-o` 的。
+
+### 门
+
+`tests/c/run.js` 多一组 `depsCase`：比的是**两边 CLI 的 stdout**（依赖清单是驱动层的
+产物，不是预处理器的返回值）。`inc/01-include.c` 走 `-MM`、`-MM -MP`、`-M`、`-M -MP`
+四种，再加 `gen/01-expr.c` 一条（一个头都不 include，清单里只有 `.c` 自己）。
+`-MF` 与 `-MMD` 落文件那两路手工量过，同样逐字节相同。
+
+`cpp/` 那八份**不能**进这一组：`-M` 一族不带 `-E`，tcc 会真的把文件编一遍，
+而那几份是预处理器的探针，本来就不是合法的 C（`'REC' undeclared`）。
+
+**带系统头的 `-M` 是另一件事**：我们自带 `stage0/include/stddef.h` 并排在 SDK 前面，
+tcc 在 macOS 上直奔 SDK —— 同一句 `#include <stddef.h>` 两边找到的不是同一份文件，
+清单自然不同。那是搜索表的分歧，不是 `-M` 的分歧，所以门里只盖 `-MM` 与不牵动系统头的
+`-M`。
+
+<!-- 第九刀第八十三片-END -->
 
 
 

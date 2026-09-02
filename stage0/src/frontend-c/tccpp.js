@@ -177,6 +177,10 @@ class CFile {
     /** 「整个文件被一个 #ifndef 包着」的守卫名，0 = 没有（`tccpp.c:1847`） */
     this.ifndefMacro = 0;
     this.ifndefMacroSaved = 0;
+    /** 这份文件是在搜索表的第几格找到的（tcc 的 `include_next_index`）：
+     *  0 = 绝对路径、1 = 「跟 include 它的那份同一个目录」、2+ = `-I` 与系统目录。
+     *  `-M` 那一路靠它分「自己的头」与「系统的头」（`tccpp.c:1419`）。 */
+    this.includeNextIndex = 0;
   }
 }
 
@@ -250,6 +254,13 @@ export class Cpp {
      *  0 = GCC 的 `# 行号 "文件"`（**默认**）、1 = 什么都不印（`-P`）、
      *  2 = `#line 行号 "文件"`（`-P1`）、11 = `-P10`（数字一律十进制，随后当 1 用）。 */
     this.Pflag = 0;
+    /** `-M`/`-MM`/`-MD`/`-MMD`（tcc 的 `gen_deps`）：把读过的头文件记下来给 make 用。
+     *  `includeSysDeps` 是 `-M`/`-MD` 多带的那一下（`include_sys_deps`）—— 连系统头一起记。 */
+    this.genDeps = false;
+    this.includeSysDeps = false;
+    /** `target_deps`：主文件在前（调用方自己 push），随后按读到的次序。重复留着，
+     *  去重是印的时候做的（`gen_makedeps`，tcctools.c:625）。 */
+    this.targetDeps = [];
     /** `pp_debug_tok` / `pp_debug_symv`：刚过去那一条指示是什么、动的是哪个名字。 */
     this.ppDebugTok = 0;
     this.ppDebugSymv = 0;
@@ -1866,18 +1877,28 @@ export class Cpp {
     const { name, kind } = this.parseIncludeName();
     this.skipToEol(true);
 
-    for (const path of this.includeTries(name, kind)) {
-      const e = this.cachedInclude(path, false);
+    for (const t of this.includeTries(name, kind)) {
+      const e = this.cachedInclude(t.path, false);
       if (e !== null && (e.once || (e.ifndefMacro && this.defineFind(e.ifndefMacro) !== null))) {
         return; // 守卫已经定义过或者 #pragma once：整份跳过，连读都不读
       }
-      const text = this.readFile(path);
+      const text = this.readFile(t.path);
       if (text === null) continue;
       if (this.includeStack.length >= 64) this.err('#include recursion too deep');
       this.includeStack.push(this.file);
-      const f = new CFile(path, text, this.file);
+      const f = new CFile(t.path, text, this.file);
       f.ifdefBase = this.ifdefStack.length;
+      f.includeNextIndex = t.i;
       this.file = f;
+      /* `-M` 那一路记一笔（`tccpp.c:1418`）。「在 include 它的那份的目录里找到的」
+       * （`i === 1`）自己算不清是不是系统头 —— 顺着 `prev` 往上找到第一个不是 1 的
+       * 下标，拿祖先的身份当自己的。于是系统头旁边的 `"foo.h"` 也算系统头。 */
+      if (this.genDeps) {
+        let i = t.i;
+        let bf = f;
+        while (i === 1 && (bf = bf.prev) !== null && bf !== undefined) i = bf.includeNextIndex;
+        if (this.includeSysDeps || i - 2 < this.includeDirs.length) this.targetDeps.push(t.path);
+      }
       this.tokFlags = TOK_FLAG_BOL | TOK_FLAG_BOF;
       return;
     }
@@ -1919,13 +1940,20 @@ export class Cpp {
    * （`sysinclude_paths`，第八刀第二片）。系统目录在最后，而且 `"..."` 也会走到那儿 ——
    * tcc 就是这个顺序，于是 `#include "stddef.h"` 与 `#include <stddef.h>` 都能找到
    * 自带的那一份。
+   *
+   * 回的每一格都带上 tcc 的那个下标 `i`：0 = 绝对路径、1 = 当前文件所在目录、
+   * `2 + j` = 第 j 个 `-I`、再往后是系统目录。跳过的格子**也占号**（`i` 是照着
+   * `for(;;) ++i` 数的），因为 `-M` 拿 `i - 2 < nb_include_paths` 分自己的头与系统的头。
    */
   includeTries(name, kind) {
     const tries = [];
-    if (isAbsPath(name)) tries.push(name);
-    if (kind === 34) tries.push(this.joinPath(this.dirnameOf(this.file.trueFilename), name));
-    for (const d of this.includeDirs) tries.push(this.joinPath(d, name));
-    for (const d of this.sysIncludeDirs) tries.push(this.joinPath(d, name));
+    if (isAbsPath(name)) tries.push({ path: name, i: 0 });
+    if (kind === 34) {
+      tries.push({ path: this.joinPath(this.dirnameOf(this.file.trueFilename), name), i: 1 });
+    }
+    let i = 2;
+    for (const d of this.includeDirs) tries.push({ path: this.joinPath(d, name), i: i++ });
+    for (const d of this.sysIncludeDirs) tries.push({ path: this.joinPath(d, name), i: i++ });
     return tries;
   }
 
@@ -1936,8 +1964,8 @@ export class Cpp {
    */
   hasInclude() {
     const { name, kind } = this.parseIncludeName();
-    for (const path of this.includeTries(name, kind)) {
-      if (this.readFile(path) !== null) return true;
+    for (const t of this.includeTries(name, kind)) {
+      if (this.readFile(t.path) !== null) return true;
     }
     return false;
   }

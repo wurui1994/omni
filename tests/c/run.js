@@ -196,6 +196,48 @@ for (const f of pick('inc')) compare('inc', f, [incDir]);
 // 进出文件的行标（` 1` / ` 2`）只有真 include 才试得到。
 for (const f of pick('inc')) for (const m of ['-E', '-P1']) compare('inc', f, [incDir], m);
 
+/**
+ * `-M` 一族：给 make 的依赖清单（`gen_makedeps`）。这一组比的是**两边 CLI 的 stdout** ——
+ * 依赖清单是驱动层的产物，不是预处理器的返回值。
+ *
+ * 只盖 `-MM`（自己的头）与不牵动系统头的 `-M`：`-M` 把系统头也记上，而我们的系统头
+ * 搜索表与 tcc 的本来就不是同一份（我们自带 `stage0/include/stddef.h`，tcc 在 macOS 上
+ * 直奔 SDK）—— 那是另一件事，不该混进这道门。
+ */
+function depsCase(group, file, incDirs, flags) {
+  const name = `${group}/${basename(file, '.c')} ${flags.join(' ')}`;
+  const path = join(here, group, file);
+  if (!hasTcc) {
+    skip++;
+    return;
+  }
+  const args = [...flags];
+  for (const d of incDirs) args.push('-I', d);
+  const w = spawnSync(TCC, [...args, path], { encoding: 'utf8' });
+  if (w.status !== 0) {
+    bad(name, `    tcc 自己就拒了：\n${(w.stderr ?? '').trim()}`);
+    return;
+  }
+  const g = spawnSync(process.execPath, [CLI, 'cpp', path, ...args], { encoding: 'utf8' });
+  if (g.status !== 0) {
+    bad(name, `    我们拒了，tcc 没拒：\n${(g.stderr ?? '').trim()}`);
+    return;
+  }
+  if (g.stdout !== w.stdout) {
+    bad(name, `    --- tcc ---\n${w.stdout}    --- ours ---\n${g.stdout}`);
+    return;
+  }
+  const n = w.stdout.replace(/\n$/, '').split('\n').length;
+  ok(`${name} [ours == tcc ${flags.join(' ')}] ${n} lines`);
+}
+
+for (const f of pick('inc')) {
+  for (const fl of [['-MM'], ['-MM', '-MP'], ['-M'], ['-M', '-MP']]) depsCase('inc', f, [incDir], fl);
+}
+/* 一个头都不 include 的样子（清单里只有 `.c` 自己）。用 `gen/` 里的 —— `-M` 一族不带
+ * `-E`，tcc 会真的把文件编一遍，而 `cpp/` 那几份是预处理器的探针、本来就不是合法的 C。 */
+if (pick('gen').includes('01-expr.c')) depsCase('gen', '01-expr.c', [], ['-MM']);
+
 // ------------------------------------------------------------ 3. cpp-bad/：该拒的要拒
 
 for (const f of pick('cpp-bad')) {
