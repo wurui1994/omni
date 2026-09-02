@@ -541,6 +541,16 @@ i386 的跳板 push 的是**字节**而不是条数，arm 的跳板要四条 `ad
 六道 ELF 门各长出第五个目标，全 0 条不同 —— tcc 支持的九个目标在链接器这一层
 至此全部逐字节对齐）。
 
+**真的 `.dylib` 能当输入了**（第七十七片）：在这以前 Mach-O 那一路只认 `.tbd` 那种
+文本 stub（SDK 里的），自己 `-shared` 出来的库读不进去。补上 `macho_load_dll` 之后
+dylib 对链接器就是**一张名字表**：`LC_ID_DYLIB` 给安装名（进 `LC_LOAD_DYLIB`），
+`LC_SYMTAB` 配 `LC_DYSYMTAB` 的 `iextdefsym`/`nextdefsym` 圈出「它导出了什么」，
+段的内容一眼都不看。`LC_REEXPORT_DYLIB` 顺着名字再开一份、往下钻一层，钻进来的那些
+level 是 1 —— 只贡献名字，不发 `LC_LOAD_DYLIB`。胖二进制那一段也照抄了 tcc 的
+**严格比**：它要求 x86_64 那片的 cpusubtype 正好是 `CPU_SUBTYPE_X86_ALL`，而 `lipo`
+写的是 `CPU_SUBTYPE_X86_ALL | CPU_SUBTYPE_LIB64`，于是 tcc 自己就认不出胖文件里的
+x86_64 —— 我们跟着认不出。门是 `tests/c/macho-dll.js`，`9 条`全 0 条不同。
+
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
 地址交给真的 libc（`strlen`/`memcpy`）验过。C 前端现在还把 `&x` 降到影子栈上，
@@ -11431,6 +11441,67 @@ riscv 自己的八条指令 —— `auipc t2` / `sub t1,t1,t3` / `ld t3` / `addi
 在链接器这一层全部与 tcc 逐字节相同。
 
 <!-- 第九刀第七十六片-END -->
+
+## 落地：第九刀第七十七片
+
+真的 `.dylib` 二进制能当链接输入了（`macho_load_dll`，tccmacho.c:2351）。
+
+在这以前 Mach-O 那一路的 `--dylib` 只认 `.tbd` —— SDK 里那种文本 stub，
+`parseTbd` 撕出 `install-name` 与一串 `symbols: [...]` 就完事（第五十七片）。
+于是「自己刚 `-shared` 出来的那份库」读不进去，ELF 那边早有的 `elf-dll` 那道门
+（第六十片）在 Mach-O 上一直是空的。
+
+**dylib 对链接器来说就是一张名字表。** tcc 只看四条加载命令：
+
+- `LC_SYMTAB`：`symoff`/`nsyms`/`stroff`/`strsize` —— 符号表与字符串表在哪。
+  偏移都是**相对那一片的起点**（`machofs + sc->symoff`），胖文件里不是文件头。
+- `LC_ID_DYLIB`：安装名。这个名字后面进可执行文件的 `LC_LOAD_DYLIB`，
+  所以门里两边的库路径必须是同一个字符串。没有这条就退回命令行上的文件名。
+- `LC_DYSYMTAB`：`iextdefsym` 与 `nextdefsym`。真正登记进 `dynsymtab` 的只有
+  `symtab[iextdef .. iextdef+nextdef)` 这一窗，一律记成 GLOBAL/NOTYPE/UNDEF ——
+  值和节都不看，装载时平坦查找。
+- `LC_REEXPORT_DYLIB`：顺着名字再开一份文件、带 `lev + 1` 递归进去。
+  「重导出连不成环」是 tcc 的假设，它自己没查，我们也不查。
+
+段的内容一个字节都不读。
+
+**level 那一格是有用的。** `macho_output_file` 发 `LC_LOAD_DYLIB` 时有一句
+`if (dllref->level == 0)` —— 命令行上摆的库是 0，重导出钻进来的是 1，后者只贡献
+名字表，不进可执行文件的依赖列表。`tcc_add_dllref`（libtcc.c:1040）还会把已经装过的
+那条的 level **往小的那边收**，去重是按安装名、跨 `.tbd` 与 `.dylib` 全局的。
+`loadInputs` 于是从「一个 `dylibNames` 数组」改成「一张 `{soname, syms, level}` 的表」，
+`dylibNames` 变成 `filter(level === 0)` 的投影。
+
+**胖二进制那一段照抄了 tcc 的严格比。** 头是大端写的，tcc 按本机字序读一遍 magic：
+读出 `FAT_MAGIC` 就不翻，读出 `FAT_CIGAM`（小端机器上就是这个）就每个字段都翻。
+挑片的条件是 cputype **与 cpusubtype 都相等**，而 x86_64 要的是正好
+`CPU_SUBTYPE_X86_ALL`。`lipo` 写出来的 x86_64 那片是
+`CPU_SUBTYPE_X86_ALL | CPU_SUBTYPE_LIB64`（0x80000003），于是 **tcc 自己就认不出
+胖文件里的 x86_64**（`unrecognized file type`）。我们跟着严格比，两边一起认不出 ——
+门里那一路只在 tcc 链得上的时候才比，所以胖文件只在 arm64 上有一条。
+`FAT_MAGIC_64` tcc 明着不管，我们也返回「读不动」。
+
+一处容易踩的：**目标文件是 ELF**。tcc 的 `-c` 在所有目标上都写 ELF，Mach-O 只出现在
+最终产物里。所以「这一趟是哪个架构」得从 `.o` 的 `e_machine`（+18）来，
+再 `targetConf` 换成 cputype —— 头一版从 Mach-O 头 +4 读 cputype，读到的是
+`\x7fELF` 后面那几个字节，胖文件一片都挑不中。
+
+命令行上 `--dylib` 现在自己认字（`isMachoBinary`，就是 tcc 的 `tcc_object_type`
+那一下）：Mach-O 或胖头就当真库读，别的当 `.tbd` 文本。
+
+门是 `tests/c/macho-dll.js`，尺子：
+
+```
+<target>-osx-tcc -shared -nostdlib lib.o -o lib.dylib
+<target>-osx-tcc -nostdlib use.o lib.dylib -o a.out
+```
+
+`9 条`全 0 条不同（x86_64 三条、arm64 三条 + 胖文件三条，共 418600 字节）。
+借的是 `elf-dll/` 里那三对源文件。`macho-libc` `176 条`、`macho-tcc` `4 条`
+（`.tbd` 那一路）没动。命令行上 `omni macho-link --dylib <真库>` 也逐字节对上。
+
+<!-- 第九刀第七十七片-END -->
+
 
 
 

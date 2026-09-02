@@ -31,7 +31,7 @@ import { mergeObjects as mergeElfObjects } from './link/elf_merge.js';
 import { peLoad, PE_GUI } from './link/pe_load.js';
 import { peWrite } from './link/pe_link.js';
 import { elfExe } from './link/elf_exe.js';
-import { machoExe } from './link/macho_exe.js';
+import { machoExe, isMachoBinary } from './link/macho_exe.js';
 import { readSexpr } from './sexpr/read.js';
 import { lowerCoreSexpr } from './sexpr/lower.js';
 import { printSexpr } from './sexpr/print.js';
@@ -2198,8 +2198,13 @@ function main(argv) {
         return b;
       };
       const dylibs = [];
+      /* `--dylib` 认字：Mach-O（或胖二进制）就当真的库读（`macho_load_dll`），
+       * 别的当 `.tbd` 文本（`macho_load_tbd`）。tcc 也是看头四个字节分派的。 */
       for (let k = 0; k < rest.length - 1; k++) {
-        if (rest[k] === '--dylib') dylibs.push(readText(rest[k + 1]));
+        if (rest[k] !== '--dylib') continue;
+        const p = rest[k + 1];
+        const b = bytesOf(p);
+        dylibs.push(isMachoBinary(b) ? { name: p, bytes: b } : readText(p));
       }
       const li = rest.indexOf('--libtcc1');
       const ni = rest.indexOf('--install-name');
@@ -2207,6 +2212,7 @@ function main(argv) {
         objs: files.map(bytesOf),
         entryName,
         dylibs,
+        openDylib: (n) => (exists(n) ? bytesOf(n) : null),
         libtcc1: li >= 0 ? bytesOf(rest[li + 1]) : undefined,
         shared: rest.includes('--shared'),
         outName: out,

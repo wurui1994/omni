@@ -93,6 +93,14 @@ const CPU_SUBTYPE_X86_ALL = 3;
 const CPU_SUBTYPE_LIB64 = 0x80000000;
 const CPU_SUBTYPE_ARM64_ALL = 0;
 
+/* ---- 胖二进制（`.dylib` 里那种一份文件塞两个架构的）。头是大端写的，我们照 tcc
+ * 那样按本机字序读一遍 magic：读出 `FAT_MAGIC` 就不用翻，读出 `FAT_CIGAM` 就每个
+ * 字段都翻一下。 */
+const FAT_MAGIC = 0xcafebabe;
+const FAT_CIGAM = 0xbebafeca;
+const FAT_MAGIC_64 = 0xcafebabf;
+const FAT_CIGAM_64 = 0xbfbafeca;
+
 // ---- 加载命令
 const LC_REQ_DYLD = 0x80000000;
 const LC_SYMTAB = 0x2;
@@ -100,6 +108,7 @@ const LC_DYSYMTAB = 0xb;
 const LC_LOAD_DYLIB = 0xc;
 const LC_ID_DYLIB = 0xd;
 const LC_LOAD_DYLINKER = 0xe;
+const LC_REEXPORT_DYLIB = 0x1f | LC_REQ_DYLD;
 const LC_SEGMENT_64 = 0x19;
 const LC_MAIN = 0x28 | LC_REQ_DYLD;
 const LC_SOURCE_VERSION = 0x2a;
@@ -529,25 +538,168 @@ export function parseTbd(text) {
   return { soname, syms };
 }
 
+/** 认字：这份字节是 Mach-O（或胖二进制）还是 `.tbd` 那样的文本？tcc 也是看头四个字节
+ * 分派的（`tcc_object_type`）。 */
+export function isMachoBinary(bytes) {
+  if (bytes.length < 4) return false;
+  const m = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, true);
+  return m === MH_MAGIC_64 || m === FAT_MAGIC || m === FAT_CIGAM
+    || m === FAT_MAGIC_64 || m === FAT_CIGAM_64;
+}
+
+/**
+ * `macho_load_dll`（tccmacho.c:2351）：从一份**真正的** `.dylib` 二进制里读出安装名与它
+ * 导出的符号。`.tbd` 那条路只认文本 stub，SDK 外头的库（比如自己刚 `-shared` 出来的
+ * 那一份）就得走这里。
+ *
+ * tcc 只看四条加载命令：`LC_SYMTAB` 拿符号表与字符串表，`LC_ID_DYLIB` 拿安装名
+ * （没有就退回命令行上的文件名），`LC_DYSYMTAB` 拿 `iextdefsym`/`nextdefsym`，
+ * `LC_REEXPORT_DYLIB` 顺着名字再开一份、往下钻一层。真正登记进 `dynsymtab` 的只有
+ * `symtab[iextdef .. iextdef+nextdef)` 这一窗，一律记成 GLOBAL/NOTYPE/UNDEF ——
+ * 装载时平坦查找，值和节都不关心。
+ *
+ * 段的内容一眼都不看：dylib 对链接器来说就是一张名字表。
+ *
+ * @param bytes 整份文件
+ * @param filename 命令行上的名字（没有 `LC_ID_DYLIB` 时拿它当安装名）
+ * @param cputype 我们这一趟的目标（胖二进制里挑哪一片）
+ * @param openFile `(name) => bytes | null`，`LC_REEXPORT_DYLIB` 要顺着名字再开一份；
+ *                 没给就把重导出当打不开（tcc 那里是一句 warning）
+ * @param out 已经装过的那些（`s1->loaded_dlls`）—— 去重是全局的，`.tbd` 装进来的也算
+ * @returns `out` 本身，次序就是 tcc 登记它们的次序；不是我们这个架构的 Mach-O 就返回
+ *          null（tcc 那里是 `return -1`，调用方再去试别的格式）
+ */
+export function machoLoadDll(bytes, filename, cputype, openFile, out = []) {
+  return loadOneDll(bytes, filename, cputype, openFile, 0, out) ? out : null;
+}
+
+/** `machoLoadDll` 的一层 —— 重导出会带着 `lev + 1` 再进来一次。 */
+function loadOneDll(bytes, filename, cputype, openFile, lev, out) {
+  if (bytes.length < 32) return false;
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const u32 = (o) => dv.getUint32(o, true);
+  /** 胖头是大端写的：读出 `FAT_CIGAM` 就说明每个字段都要翻。 */
+  const bswap = (x) => (((x >>> 24) | ((x >>> 8) & 0xff00) | ((x << 8) & 0xff0000)
+    | (x << 24)) >>> 0);
+
+  let machofs = 0;
+  const magic = u32(0);
+  if (magic === FAT_MAGIC || magic === FAT_CIGAM) {
+    const swap = magic === FAT_CIGAM;
+    const sw = (x) => (swap ? bswap(x) : x);
+    const n = sw(u32(4));
+    /** x86_64 配 `CPU_SUBTYPE_X86_ALL`，arm64 配 `CPU_SUBTYPE_ARM64_ALL`。 */
+    const want = cputype === CPU_TYPE_ARM64 ? CPU_SUBTYPE_ARM64_ALL : CPU_SUBTYPE_X86_ALL;
+    let hit = -1;
+    for (let i = 0; i < n; i++) {
+      const at = 8 + i * 20;
+      if (at + 20 > bytes.length) break;
+      if (sw(u32(at)) === cputype && sw(u32(at + 4)) === want) { hit = at; break; }
+    }
+    if (hit < 0) return false;
+    machofs = sw(u32(hit + 8));
+  } else if (magic === FAT_MAGIC_64 || magic === FAT_CIGAM_64) {
+    /* tcc 这里只喊一句「fat 64bit files not handled」就走。 */
+    return false;
+  }
+  if (machofs + 32 > bytes.length) return false;
+  if (u32(machofs) !== MH_MAGIC_64) return false;
+
+  const ncmds = u32(machofs + 16);
+  let symoff = 0;
+  let nsyms = 0;
+  let stroff = 0;
+  let strsize = 0;
+  let iextdef = 0;
+  let nextdef = 0;
+  let soname = filename;
+  const cstr = (at) => {
+    let e = at;
+    while (e < bytes.length && bytes[e] !== 0) e++;
+    let s = '';
+    for (let k = at; k < e; k++) s += String.fromCharCode(bytes[k]);
+    return s;
+  };
+
+  let lc = machofs + 32;
+  for (let i = 0; i < ncmds; i++) {
+    if (lc + 8 > bytes.length) return false;
+    const cmd = u32(lc);
+    const cmdsize = u32(lc + 4);
+    if (cmdsize < 8) return false;
+    if (cmd === LC_SYMTAB) {
+      symoff = u32(lc + 8);
+      nsyms = u32(lc + 12);
+      stroff = u32(lc + 16);
+      strsize = u32(lc + 20);
+    } else if (cmd === LC_ID_DYLIB) {
+      soname = cstr(lc + u32(lc + 8));
+    } else if (cmd === LC_REEXPORT_DYLIB) {
+      const name = cstr(lc + u32(lc + 8));
+      const sub = openFile === undefined ? null : openFile(name);
+      /* 「重导出连不成环」是 tcc 的假设，它自己也没查，我们跟着不查。 */
+      if (sub !== null && sub !== undefined) loadOneDll(sub, name, cputype, openFile, lev + 1, out);
+    } else if (cmd === LC_DYSYMTAB) {
+      iextdef = u32(lc + 16);
+      nextdef = u32(lc + 20);
+    }
+    lc += cmdsize;
+  }
+
+  /* `tcc_add_dllref(...)->found`：这个安装名已经装过了，符号就不再登记一遍。 */
+  const old = out.find((d) => d.soname === soname);
+  if (old !== undefined) {
+    if (lev < old.level) old.level = lev;
+    return true;
+  }
+  const syms = [];
+  for (let i = iextdef; i < iextdef + nextdef && i < nsyms; i++) {
+    const at = machofs + symoff + i * 16;
+    if (at + 16 > bytes.length) break;
+    const strx = u32(at);
+    if (strx >= strsize) continue;
+    syms.push(cstr(machofs + stroff + strx));
+  }
+  out.push({ soname, syms, level: lev });
+  return true;
+}
+
 /**
  * `tcc_add_runtime` 那一段：装 dylib（记下安装名与它导出的符号）、按需从 `libtcc1.a`
  * 里取成员。
  *
- * @param inp `{objs, dylibs, libtcc1}`；`dylibs` 每条是一份 `.tbd` 的文本
+ * @param inp `{objs, dylibs, openDylib}`；`dylibs` 每条要么是一份 `.tbd` 的文本
+ *            （字符串），要么是一份真的 `.dylib` 二进制（`{name, bytes}`）
  * @returns `{objs, dylibNames, dynsym, members}`；`objs` 是「命令行上的那些 + 拉进来的
- *          成员」，次序就是 tcc 装它们的次序
+ *          成员」，次序就是 tcc 装它们的次序；`dylibNames` 只有 level 0 那些 ——
+ *          `LC_LOAD_DYLIB` 只给它们发（`macho_output_file` 那句 `if (dllref->level == 0)`），
+ *          重导出进来的（level 1）只贡献名字表
  */
 function loadInputs(inp) {
   const objs = [...inp.objs];
-  const dylibNames = [];
+  /** `s1->loaded_dlls`：`{soname, syms, level}`，去重按安装名。 */
+  const dllrefs = [];
   const dynsym = new Set();
-  for (const text of inp.dylibs === undefined ? [] : inp.dylibs) {
-    const d = parseTbd(text);
-    if (d === null) throw new OmniError('macho: 这份 .tbd 里没有 install-name');
-    if (dylibNames.includes(d.soname)) continue;      // `tcc_add_dllref(...)->found`
-    dylibNames.push(d.soname);
-    for (const s of d.syms) dynsym.add(s);
+  /** 胖二进制里挑哪一片，看的是我们这一趟的目标。目标文件是 **ELF**（tcc 的 `-c`
+   * 在所有目标上都写 ELF），所以架构从 `e_machine`（+18）来，再换成 cputype。 */
+  const cputype = inp.objs.length === 0 ? CPU_TYPE_X86_64
+    : targetConf(new DataView(inp.objs[0].buffer, inp.objs[0].byteOffset,
+      inp.objs[0].byteLength).getUint16(18, true)).cputype;
+  for (const one of inp.dylibs === undefined ? [] : inp.dylibs) {
+    if (typeof one === 'string') {
+      const d = parseTbd(one);
+      if (d === null) throw new OmniError('macho: 这份 .tbd 里没有 install-name');
+      const old = dllrefs.find((x) => x.soname === d.soname);
+      if (old !== undefined) continue;                 // `tcc_add_dllref(...)->found`
+      dllrefs.push({ soname: d.soname, syms: d.syms, level: 0 });
+      continue;
+    }
+    if (machoLoadDll(one.bytes, one.name, cputype, inp.openDylib, dllrefs) === null) {
+      throw new OmniError(`macho: ${one.name} 不是这个架构的 Mach-O dylib`);
+    }
   }
+  for (const d of dllrefs) for (const s of d.syms) dynsym.add(s);
+  const dylibNames = dllrefs.filter((d) => d.level === 0).map((d) => d.soname);
   const members = [];
   if (inp.libtcc1 !== undefined) {
     const tab = new SymTab();
@@ -567,9 +719,10 @@ function loadInputs(inp) {
  * 把几个 Mach-O 目标文件链成一个可执行文件（`macho_output_file` 的 EXE 那一路），
  * 或者一份 dylib（`-shared`，第九刀第六十三片）。
  *
- * @param inp `{objs, entryName, dylibs, libtcc1, shared, outName, installName}`；
- *            `entryName` 默认 `_main`（Mach-O 的名字带下划线），`dylibs` 是几份 `.tbd`
- *            的文本，`libtcc1` 是支持库的字节（按需取用）；`shared` 出 MH_DYLIB，
+ * @param inp `{objs, entryName, dylibs, libtcc1, shared, outName, installName, openDylib}`；
+ *            `entryName` 默认 `_main`（Mach-O 的名字带下划线），`dylibs` 每条要么是一份
+ *            `.tbd` 的文本、要么是一份真的 `.dylib` 二进制（`{name, bytes}`），
+ *            `libtcc1` 是支持库的字节（按需取用）；`shared` 出 MH_DYLIB，
  *            `LC_ID_DYLIB` 里那个名字是 `installName`，没给就用 `outName`
  *            （tcc 拿的是**输出的文件名**）
  * @returns `{bytes, ncmds, nsects, entryoff, members}`；`bytes` 还**没签名** —— 签名是
