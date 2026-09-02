@@ -65,7 +65,9 @@ const R_AARCH64_RELATIVE = 1027;
  * @param weakUndef 这条重定位指的是不是一个**未定义的弱符号** —— PE 上它的地址是 0，
  *        arm64 的 `adrp` 与 `bl` 都编不出那么远的距离，tcc 于是改写成 `movz`/`nop`
  * @param gotSlot 这个符号在 `.got` 里那一格的**虚拟地址**（走 GOT 的那几号要它）
- * @param tls `{start, end}`：PT_TLS 那一段的起止（线程局部那几号要它）
+ * @param tls `{start, end, symSecEnd}`：PT_TLS 那一段的起止（线程局部那几号要它）；
+ *        没有 PT_TLS 的格式（Mach-O）两头都是 0，x86_64 那号退回用 `symSecEnd`
+ *        —— 符号所在那一节的末尾
  */
 export function relocateOne(machine, type, b, at, addr, val, imagebase, weakUndef, gotSlot, tls) {
   const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
@@ -99,8 +101,13 @@ export function relocateOne(machine, type, b, at, addr, val, imagebase, weakUnde
       case R_X86_64_GLOB_DAT:
       case R_X86_64_JUMP_SLOT: return set64(val);
       /* 线程局部：偏移是**相对 PT_TLS 那一段的末尾**（x86_64 的 `fs:` 基址指着
-       * 线程块的末端，所以这几个偏移都是负数）。 */
-      case R_X86_64_TPOFF32: return add32(val - tlsSeg().end);
+       * 线程块的末端，所以这几个偏移都是负数）。Mach-O 上没有 PT_TLS，`tls_end`
+       * 是 0，tcc 于是退回「符号所在那一节的末尾」（`val - sec->sh_addr
+       * - sec->data_offset`）—— 算出来的偏移没什么用，但字节是这么写的。 */
+      case R_X86_64_TPOFF32: {
+        const t = tlsSeg();
+        return add32(t.end !== 0 ? val - t.end : val - t.symSecEnd);
+      }
       default: throw new OmniError(`reloc: x86_64 还不会 ${type} 号`);
     }
   }

@@ -450,7 +450,11 @@ local-exec 这一种模型，静态、动态、共享库三道门各 12 × 2 份
 两个位都在，摆放跟共享库同路、导出跟可执行文件同路）、`-rdynamic`、`-rpath`
 （DT_RPATH / DT_RUNPATH）、`-soname`，五种开关各 12 × 2 份逐字节相同；
 `-pie` 的尺子得另建一份 `CONFIG_TCC_PIE` 的交叉编译器 —— tcc 的命令行上那个
-`-pie` 是个空壳）。
+`-pie` 是个空壳）。**macOS 的 dylib 也出得来了**（第六十三片：MH_DYLIB、没有
+`__PAGEZERO`（`__TEXT` 成了 0 号段、地址从 0 起）、`LC_ID_DYLIB`、不叫
+`tcc_add_linker_symbols`、没定义的符号交给平坦查找，两个目标 15 与 90 份逐字节
+相同；顺手补上 Mach-O 上的 `__thread` —— 那一路没有 PT_TLS，偏移是相对「0」与
+「符号所在那一节的末尾」算的，算出来没用但字节照写）。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -10505,6 +10509,56 @@ PIE 的 `output_type` 是 `TCC_OUTPUT_EXE | TCC_OUTPUT_DYN` —— **两个位�
 这一趟。命令行上是 `omni elf-link --pie / --rdynamic / --soname NAME / --rpath PATH`。
 
 <!-- 第九刀第六十二片-END -->
+
+## 落地：第九刀第六十三片 —— macOS 的 dylib（MH_DYLIB）
+
+门是 `tests/c/macho-dylib.js`，尺子 `<target>-osx-tcc -shared -nostdlib a.o -o a.dylib`。
+
+```
+x86_64-macos: 15 份 dylib 逐字节相同    arm64-macos: 90 份 dylib 逐字节相同
+```
+
+（两边份数差得多是 tcc 自己的脾气：dylib 允许有没定义的符号，arm64 那份于是把要
+libc 的用例也链上了，x86_64 那份链不上就跳过。）
+
+与可执行文件的差别都在「哪些东西是给装载器看的」：
+
+- 没有 `__PAGEZERO`（`used_segment[0] = 0`）—— `__TEXT` 于是成了 0 号段，地址也从
+  0 起。凡是「拿 `__TEXT` 那一段」的地方（摆放的起点、导出前缀树的基址、链式修正里
+  逐段那一趟）都得跟着挪一格，tcc 那句写得干脆：
+  `get_segment(mo, s1->output_type == TCC_OUTPUT_EXE)`。这一句还有个副作用：
+  可执行文件里「`mo->segment[sk]` 是 0」意思是「这一类没落在哪个段里」，dylib 里
+  0 号是正经的 `__TEXT`，那道筛子得撤掉。
+- **`used_segment[0] = 0` 要放在归类之后**：`sk_discard` 归的也是 0 号段，摆在前头
+  会被归类那一趟重新点上。这一处踩过一次 —— 段数多一条，`ncmds` 就差一。
+- 多一条 `LC_ID_DYLIB`（排在段头之后、链式修正之前），名字是**输出的文件名**
+  （`s1->install_name ? install_name : filename`），`timestamp` 是 1 而不是
+  `LC_LOAD_DYLIB` 的 2；少了 `LC_LOAD_DYLINKER` 与 `LC_MAIN`。
+- 文件类型 MH_DYLIB，标志只有 MH_DYLDLINK（没有 MH_PIE）。
+- `tcc_add_linker_symbols` 整趟不叫（跟 ELF 的 `-shared` 一样）—— 少了 `_etext` /
+  `_end` / `__start_*` 那十几条，符号表、字符串表、导出前缀树跟着短一截。这一处是
+  第二个坑：符号多了十几条，`__LINKEDIT` 的长度就不对。
+- 没定义的符号一律标成「来自别处」（`check_symbols` 里那句
+  `|| s1->output_type != TCC_OUTPUT_EXE`），谁来填由装载时的平坦查找决定。
+
+顺手补上了 **Mach-O 上的 `__thread`**：Mach-O 那一路根本不填 `tls_start`/`tls_end`
+（那两格是 ELF 摆程序头时算的），于是 tcc 算出来的偏移相对的是「0」与
+「符号所在那一节的末尾」——
+
+```c
+if (s1->tls_end) x = val - s1->tls_end;
+else { Section *sec = s1->sections[sym->st_shndx];
+       x = val - sec->sh_addr - sec->data_offset; }   /* x86_64 */
+int64_t tp_offset = val - s1->tls_start + 16;         /* arm64，start 是 0 */
+```
+
+算出来的偏移在 macOS 上没有意义（Mach-O 的线程局部走 `__thread_vars` 那一套，
+tcc 不生成），但**字节就是这么写的**，我们照写。第六十一片加的 `16-tls.c` 三道
+macOS 的门也收，所以这一条不补上，`macho-exe` 与 `macho-libc` 就是红的。
+
+命令行上是 `omni macho-link --shared [--install-name NAME]`。
+
+<!-- 第九刀第六十三片-END -->
 
 
 

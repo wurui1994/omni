@@ -1794,7 +1794,7 @@ function main(argv) {
       || a === '-I' || a === '-D' || a === '--rdata'
       || a === '-L' || a === '--target' || a === '-e'
       || a === '--dylib' || a === '--libtcc1' || a === '--dll'
-      || a === '--soname' || a === '--rpath') { i++; continue; }
+      || a === '--soname' || a === '--rpath' || a === '--install-name') { i++; continue; }
     if (a.startsWith('-')) continue;
     files.push(a);
   }
@@ -2130,10 +2130,11 @@ function main(argv) {
         + `入口 0x${r.entry.toString(16)})\n`);
       return 0;
     }
-    /* `macho-link`：几个 `.o` 链成一份 macOS 可执行文件（第九刀第五十五、五十六片）。
-     * 接 libc 就把 `.tbd` 与 `libtcc1.a` 一起给：
+    /* `macho-link`：几个 `.o` 链成一份 macOS 可执行文件（第九刀第五十五、五十六片），
+     * `--shared` 出一份 dylib（第六十三片）。接 libc 就把 `.tbd` 与 `libtcc1.a` 一起给：
      *   omni macho-link a.o [b.o …] -o a.out [-e _main]
      *                   [--dylib <sdk>/usr/lib/libc.tbd] [--libtcc1 libtcc1.a]
+     *                   [--shared] [--install-name libfoo.dylib]
      * 写出来的还没签名 —— arm64 上要自己补一句 `codesign -f -s - <文件>`，
      * tcc 也是这么干的（CONFIG_CODESIGN 只在本机那个目标上开）。 */
     case 'macho-link': {
@@ -2152,11 +2153,15 @@ function main(argv) {
         if (rest[k] === '--dylib') dylibs.push(readText(rest[k + 1]));
       }
       const li = rest.indexOf('--libtcc1');
+      const ni = rest.indexOf('--install-name');
       const r = machoExe({
         objs: files.map(bytesOf),
         entryName,
         dylibs,
         libtcc1: li >= 0 ? bytesOf(rest[li + 1]) : undefined,
+        shared: rest.includes('--shared'),
+        outName: out,
+        installName: ni >= 0 ? rest[ni + 1] : undefined,
       });
       writeBinary(out, r.bytes);
       stdout(`${out} (${r.bytes.length} 字节，${r.ncmds} 条加载命令，${r.nsects} 节，`
@@ -2351,8 +2356,9 @@ commands:
   macho-link
             link .o files into a macOS executable (ADR-0017 cut 9 slices 55-56): segments,
             chained fixups, export trie. Give --dylib <sdk>/usr/lib/libc.tbd and
-            --libtcc1 libtcc1.a to link against libc. The output is unsigned - run
-            codesign -f -s - on it. -o NAME, -e NAME (default _main)
+            --libtcc1 libtcc1.a to link against libc. --shared makes a dylib
+            (slice 63), --install-name NAME sets LC_ID_DYLIB. The output is unsigned -
+            run codesign -f -s - on it. -o NAME, -e NAME (default _main)
   oir       print the OIR as JSON
   mir       print the MIR (ADR-0014 decision 6): SSA values + slots + structured
             control flow, one 8-byte record per instruction (--bytes: sizes and

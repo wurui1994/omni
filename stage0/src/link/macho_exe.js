@@ -84,6 +84,7 @@ const STT_TLS = 6;
 // ---- mach 头
 const MH_MAGIC_64 = 0xfeedfacf;
 const MH_EXECUTE = 2;
+const MH_DYLIB = 6;
 const MH_DYLDLINK = 0x4;
 const MH_PIE = 0x200000;
 const CPU_TYPE_X86_64 = 0x01000007;
@@ -97,6 +98,7 @@ const LC_REQ_DYLD = 0x80000000;
 const LC_SYMTAB = 0x2;
 const LC_DYSYMTAB = 0xb;
 const LC_LOAD_DYLIB = 0xc;
+const LC_ID_DYLIB = 0xd;
 const LC_LOAD_DYLINKER = 0xe;
 const LC_SEGMENT_64 = 0x19;
 const LC_MAIN = 0x28 | LC_REQ_DYLD;
@@ -562,17 +564,26 @@ function loadInputs(inp) {
 }
 
 /**
- * 把几个 Mach-O 目标文件链成一个可执行文件（`macho_output_file` 的 EXE 那一路）。
+ * 把几个 Mach-O 目标文件链成一个可执行文件（`macho_output_file` 的 EXE 那一路），
+ * 或者一份 dylib（`-shared`，第九刀第六十三片）。
  *
- * @param inp `{objs, entryName, dylibs, libtcc1}`；`entryName` 默认 `_main`
- *            （Mach-O 的名字带下划线），`dylibs` 是几份 `.tbd` 的文本，`libtcc1` 是
- *            支持库的字节（按需取用）
+ * @param inp `{objs, entryName, dylibs, libtcc1, shared, outName, installName}`；
+ *            `entryName` 默认 `_main`（Mach-O 的名字带下划线），`dylibs` 是几份 `.tbd`
+ *            的文本，`libtcc1` 是支持库的字节（按需取用）；`shared` 出 MH_DYLIB，
+ *            `LC_ID_DYLIB` 里那个名字是 `installName`，没给就用 `outName`
+ *            （tcc 拿的是**输出的文件名**）
  * @returns `{bytes, ncmds, nsects, entryoff, members}`；`bytes` 还**没签名** —— 签名是
  *          `codesign -f -s -` 干的事，tcc 自己也是 `system()` 出去喊的
  */
 export function machoExe(inp) {
   const loaded = loadInputs(inp);
   const st = linkObjects(loaded.objs, { rdata: '.data.ro', unwind: false });
+  /** `-shared`：MH_DYLIB —— 没有 `__PAGEZERO`，`__TEXT` 从 0 起，多一条 `LC_ID_DYLIB`，
+   * 没有 `LC_LOAD_DYLINKER` 与 `LC_MAIN`，没定义的符号一律当「来自别处」。 */
+  const shared = inp.shared === true;
+  /** `__TEXT` 是第几个段 —— 少了 `__PAGEZERO` 就往前挪一格
+   * （tcc 那句 `get_segment(mo, s1->output_type == TCC_OUTPUT_EXE)`）。 */
+  const TEXTSEG = shared ? 0 : 1;
 
   const {
     machine, secs, syms, relas, byName,
@@ -742,27 +753,32 @@ export function machoExe(inp) {
     }
     if (name.startsWith('_')) setLinkerSym(name.slice(1), sec, true);
   };
-  setLinkerSym('_etext', TEXT, false);
-  setLinkerSym('_edata', DATA, false);
-  setLinkerSym('_end', BSS, false);
-  for (const nm of ['.preinit_array', '.init_array', '.fini_array']) {
-    let i = findSec(nm);
-    let end;
-    if (i < 0 || (secs[i].flags & SHF_ALLOC) === 0) {
-      end = 0;
-      i = TEXT;
-    } else end = secs[i].size;
-    defineSym(`__${nm.slice(1)}_start`, i, 0);
-    defineSym(`__${nm.slice(1)}_end`, i, end);
-  }
-  for (let i = 1; i < secs.length; i++) {
-    const s = secs[i];
-    if ((s.flags & SHF_ALLOC) === 0) continue;
-    if (s.type !== SHT_PROGBITS && s.type !== SHT_NOBITS && s.type !== SHT_STRTAB) continue;
-    const p0 = cName(s.name);
-    if (p0 === null) continue;
-    defineSym(`__start_${p0}`, i, 0);
-    defineSym(`__stop_${p0}`, i, s.size);
+  /* 造 dylib 那一路不叫这一趟（`resolve_common_syms` 末尾那句 `if (s1->output_type
+   * != TCC_OUTPUT_DLL) tcc_add_linker_symbols(s1)`）—— 少了这十几条符号，
+   * 符号表、字符串表与导出的前缀树都跟着短一截。 */
+  if (!shared) {
+    setLinkerSym('_etext', TEXT, false);
+    setLinkerSym('_edata', DATA, false);
+    setLinkerSym('_end', BSS, false);
+    for (const nm of ['.preinit_array', '.init_array', '.fini_array']) {
+      let i = findSec(nm);
+      let end;
+      if (i < 0 || (secs[i].flags & SHF_ALLOC) === 0) {
+        end = 0;
+        i = TEXT;
+      } else end = secs[i].size;
+      defineSym(`__${nm.slice(1)}_start`, i, 0);
+      defineSym(`__${nm.slice(1)}_end`, i, end);
+    }
+    for (let i = 1; i < secs.length; i++) {
+      const s = secs[i];
+      if ((s.flags & SHF_ALLOC) === 0) continue;
+      if (s.type !== SHT_PROGBITS && s.type !== SHT_NOBITS && s.type !== SHT_STRTAB) continue;
+      const p0 = cName(s.name);
+      if (p0 === null) continue;
+      defineSym(`__start_${p0}`, i, 0);
+      defineSym(`__stop_${p0}`, i, s.size);
+    }
   }
 
   /* ---- create_symtab。
@@ -947,8 +963,10 @@ export function machoExe(inp) {
       if (iundef !== -1) throw new OmniError('macho: 有定义的外部符号排到未定义后头了');
     } else {
       if (iundef === -1) iundef = k;
-      /* 弱符号、或者某个 dylib 导出了这个名字 —— 那就不是「没定义」，是「来自 dylib」。 */
-      if (bind !== STB_WEAK && !loaded.dynsym.has(sym.name)) {
+      /* 弱符号、或者某个 dylib 导出了这个名字 —— 那就不是「没定义」，是「来自 dylib」。
+       * 造 dylib 时这道筛子整个撤掉（`|| s1->output_type != TCC_OUTPUT_EXE`）：
+       * 谁来填由装载时的平坦查找决定。 */
+      if (!shared && bind !== STB_WEAK && !loaded.dynsym.has(sym.name)) {
         throw new OmniError(`macho: 符号 '${sym.name}' 没有定义`);
       }
       sym.shndx = SHN_FROMDLL;
@@ -984,6 +1002,9 @@ export function machoExe(inp) {
     skSect[sk].unshift(i);
     usedSegment[SKINFO[sk].seg] = 1;
   }
+  /* 造 dylib 就没有 `__PAGEZERO` —— 这一句在归类**之后**（`sk_discard` 归的也是 0 号段，
+   * 放在前头会被那一趟重新点上）。 */
+  if (shared) usedSegment[0] = 0;
 
   // ---- 段与加载命令
   const segs = [];
@@ -994,7 +1015,8 @@ export function machoExe(inp) {
     const a = ALL_SEGMENT[i];
     const seg = {
       name: a.name,
-      vmaddr: a.vmaddr,
+      /* dylib 里 `__TEXT` 也从 0 起（`if (i == 1 && output_type != EXE) vmaddr = 0`）。 */
+      vmaddr: shared && i === 1 ? 0 : a.vmaddr,
       vmsize: a.vmsize,
       fileoff: 0,
       filesize: 0,
@@ -1017,14 +1039,21 @@ export function machoExe(inp) {
     indirectsymoff: 0, nindirectsyms: 0,
   };
   const mainLc = { entryoff: 4096, stacksize: 0 };
+  /* `LC_ID_DYLIB` 排在段头之后、链式修正之前，名字是**输出的文件名**
+   * （`s1->install_name ? s1->install_name : filename`）。 */
+  if (shared) {
+    const name = inp.installName ?? inp.outName;
+    if (name === undefined) throw new OmniError('macho: 造 dylib 要知道输出的文件名');
+    lcs.push({ kind: 'iddylib', name });
+  }
   lcs.push({ kind: 'le', cmd: LC_DYLD_CHAINED_FIXUPS, obj: chainedLc });
   lcs.push({ kind: 'le', cmd: LC_DYLD_EXPORTS_TRIE, obj: trieLc });
   lcs.push({ kind: 'symtab', obj: symLc });
   lcs.push({ kind: 'dysymtab', obj: dysymLc });
-  lcs.push({ kind: 'dylinker', name: '/usr/lib/dyld' });
+  if (!shared) lcs.push({ kind: 'dylinker', name: '/usr/lib/dyld' });
   lcs.push({ kind: 'buildver' });
   lcs.push({ kind: 'sourcever' });
-  lcs.push({ kind: 'main', obj: mainLc });
+  if (!shared) lcs.push({ kind: 'main', obj: mainLc });
   /* 装了哪些 dylib 就多几条 `LC_LOAD_DYLIB`，排在 `LC_MAIN` 后面。 */
   for (const name of loaded.dylibNames) lcs.push({ kind: 'dylib', name });
 
@@ -1033,7 +1062,7 @@ export function machoExe(inp) {
   const calcFixupSize = () => {
     let size = align(28, 8);                            // dyld_chained_fixups_header
     size += align(8 + (segs.length - 1) * 4, 8);        // dyld_chained_starts_in_image
-    for (let i = 1; i < segs.length - 1; i++) {
+    for (let i = TEXTSEG; i < segs.length - 1; i++) {
       const pages = Math.ceil(segs[i].vmsize / SEG_PAGE_SIZE);
       size += align(24 + (pages - 1) * 2, 8);           // dyld_chained_starts_in_segment
     }
@@ -1046,7 +1075,7 @@ export function machoExe(inp) {
 
   // ---- 摆放：头 4096 字节留给 mach 头与加载命令
   let fileofs = 4096;
-  let curaddr = segs[1].vmaddr + 4096;
+  let curaddr = segs[TEXTSEG].vmaddr + 4096;
   let seg = null;
   let numsec = 0;
   const elfsectomacho = new Array(secs.length).fill(0);
@@ -1058,11 +1087,12 @@ export function machoExe(inp) {
     }
     if (sk === sk_linkedit) {
       calcFixupSize();
-      const tr = exportTrie(syms, secs, segs[1].vmaddr);
+      const tr = exportTrie(syms, secs, segs[TEXTSEG].vmaddr);
       secs[EXPORTS].data = tr;
       secs[EXPORTS].size = tr.length;
     }
-    if (SKINFO[sk].seg === 0 || segOfSk[sk] === 0 || skSect[sk].length === 0) continue;
+    if (SKINFO[sk].seg === 0 || (!shared && segOfSk[sk] === 0)
+      || skSect[sk].length === 0) continue;
     seg = segs[segOfSk[sk]];
     if (SKINFO[sk].name !== null) {
       sec = {
@@ -1159,11 +1189,13 @@ export function machoExe(inp) {
     if (s.shndx !== SHN_UNDEF && s.shndx < SHN_LORESERVE) s.value += secs[s.shndx].addr;
   }
   const entryName = inp.entryName === undefined ? '_main' : inp.entryName;
-  const ei = byName.get(entryName);
-  if (ei === undefined || syms[ei].shndx === SHN_UNDEF) {
-    throw new OmniError(`macho: 找不到入口符号 '${entryName}'`);
+  if (!shared) {
+    const ei = byName.get(entryName);
+    if (ei === undefined || syms[ei].shndx === SHN_UNDEF) {
+      throw new OmniError(`macho: 找不到入口符号 '${entryName}'`);
+    }
+    mainLc.entryoff = syms[ei].value - segs[TEXTSEG].vmaddr;
   }
-  mainLc.entryoff = syms[ei].value - segs[1].vmaddr;
 
   for (let i = 1; i <= secs.length - 1; i++) {
     const s = secs[i];
@@ -1175,6 +1207,15 @@ export function machoExe(inp) {
     if (s.shndx === SHN_UNDEF) throw new OmniError(`macho: 未定义的符号 '${s.name}'`);
     return s.value;
   };
+  /* Mach-O 上没有 PT_TLS —— tcc 的 `s1->tls_start` / `tls_end` 一直是 0（那一段是
+   * `layout_sections` 里摆程序头时才填的，Mach-O 那一路不走）。于是线程局部那几号
+   * 算出来的偏移相对的是「0」与「符号所在那一节的末尾」。 */
+  const TLS_RELOC = new Set([23, 549, 550]);
+  const tlsOf = (idx) => {
+    const s = syms[idx];
+    const ss = s.shndx < SHN_LORESERVE ? secs[s.shndx] : undefined;
+    return { start: 0, end: 0, symSecEnd: ss === undefined ? 0 : ss.addr + ss.size };
+  };
   for (const [si, list] of relas) {
     const tgt = secs[secs[si].relaFor];
     if (tgt === undefined || tgt.bytes.length === 0) continue;
@@ -1182,7 +1223,8 @@ export function machoExe(inp) {
       const a = attrOf.get(r.sym);
       relocateOne(machine, r.type, tgt.bytes, r.at, tgt.addr + r.at,
         symAddr(r.sym) + Number(r.add), 0, false,
-        a === undefined ? undefined : secs[GOT].addr + a.gotOff);
+        a === undefined ? undefined : secs[GOT].addr + a.gotOff,
+        TLS_RELOC.has(r.type) ? tlsOf(r.sym) : undefined);
     }
   }
 
@@ -1219,7 +1261,7 @@ export function machoExe(inp) {
       const s = secs[b.section];
       return new DataView(s.bytes.buffer, s.bytes.byteOffset, s.bytes.byteLength);
     };
-    for (let i = 1; i < segs.length - 1; i++) {
+    for (let i = TEXTSEG; i < segs.length - 1; i++) {
       const sg = segs[i];
       cdv.setUint32(imageOff + 4 + i * 4, p - startsOffset, true);
       const pages = Math.ceil(sg.vmsize / SEG_PAGE_SIZE);
@@ -1346,7 +1388,7 @@ export function machoExe(inp) {
     if (l.kind === 'symtab') return 24;
     if (l.kind === 'dysymtab') return 80;
     if (l.kind === 'dylinker') return align(12 + l.name.length + 1, 8);
-    if (l.kind === 'dylib') return align(24 + l.name.length + 1, 8);
+    if (l.kind === 'dylib' || l.kind === 'iddylib') return align(24 + l.name.length + 1, 8);
     if (l.kind === 'buildver') return 24;
     if (l.kind === 'sourcever') return 16;
     return 24;                                      // main
@@ -1367,10 +1409,10 @@ export function machoExe(inp) {
   dv.setUint32(0, MH_MAGIC_64, true);
   dv.setUint32(4, conf.cputype, true);
   dv.setUint32(8, conf.cpusubtype, true);
-  dv.setUint32(12, MH_EXECUTE, true);
+  dv.setUint32(12, shared ? MH_DYLIB : MH_EXECUTE, true);
   dv.setUint32(16, lcs.length, true);
   dv.setUint32(20, sizeofcmds, true);
-  dv.setUint32(24, (MH_DYLDLINK | MH_PIE) >>> 0, true);
+  dv.setUint32(24, (shared ? MH_DYLDLINK : MH_DYLDLINK | MH_PIE) >>> 0, true);
   dv.setUint32(28, 0, true);
   let o = 32;
   for (const l of lcs) {
@@ -1443,11 +1485,11 @@ export function machoExe(inp) {
       dv.setUint32(o, LC_SOURCE_VERSION, true);
       dv.setUint32(o + 4, sz, true);
       dv.setBigUint64(o + 8, 0n, true);
-    } else if (l.kind === 'dylib') {
-      dv.setUint32(o, LC_LOAD_DYLIB, true);
+    } else if (l.kind === 'dylib' || l.kind === 'iddylib') {
+      dv.setUint32(o, l.kind === 'dylib' ? LC_LOAD_DYLIB : LC_ID_DYLIB, true);
       dv.setUint32(o + 4, sz, true);
       dv.setUint32(o + 8, 24, true);                // name 从结构体末尾起
-      dv.setUint32(o + 12, 2, true);                // timestamp
+      dv.setUint32(o + 12, l.kind === 'dylib' ? 2 : 1, true);   // timestamp
       dv.setUint32(o + 16, 1 << 16, true);          // current_version 1.0.0
       dv.setUint32(o + 20, 1 << 16, true);          // compatibility_version 1.0.0
       for (let k = 0; k < l.name.length; k++) buf[o + 24 + k] = l.name.charCodeAt(k);
@@ -1460,7 +1502,8 @@ export function machoExe(inp) {
     o += sz;
   }
   for (let sk = 0; sk < sk_last; sk++) {
-    if (SKINFO[sk].seg === 0 || segOfSk[sk] === 0 || skSect[sk].length === 0) continue;
+    if (SKINFO[sk].seg === 0 || (!shared && segOfSk[sk] === 0)
+      || skSect[sk].length === 0) continue;
     for (const i of skSect[sk]) {
       const s = secs[i];
       if (s.type === SHT_NOBITS || s.size === 0) continue;
