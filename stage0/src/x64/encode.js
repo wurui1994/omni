@@ -315,6 +315,32 @@ export function movsx(dstSize, srcSize, dst, src) {
   ];
 }
 
+/** `movzx dst, [base + disp]` —— 从内存按窄宽度**零扩展**地加载。 */
+export function movzxM(dstSize, srcSize, dst, base, disp) {
+  if (srcSize !== 1 && srcSize !== 2) throw new OmniError('x64: movzx 的源只有 8/16 位');
+  if (dstSize !== 4 && dstSize !== 8) throw new OmniError('x64: movzx 的目标只有 32/64 位');
+  chkReg(dst);
+  return [
+    ...rex(dstSize === 8, dst > 7, false, base > 7, false),
+    0x0f, srcSize === 1 ? 0xb6 : 0xb7, ...memOperand(dst, base, disp),
+  ];
+}
+
+/** `movsx dst, [base + disp]` —— 按窄宽度**符号扩展**地加载（`i8`/`i16`/`i32`）。 */
+export function movsxM(dstSize, srcSize, dst, base, disp) {
+  if (dstSize !== 4 && dstSize !== 8) throw new OmniError('x64: movsx 的目标只有 32/64 位');
+  chkReg(dst);
+  if (srcSize === 4) {
+    if (dstSize !== 8) throw new OmniError('x64: movsxd 的目标只有 64 位');
+    return [...rex(true, dst > 7, false, base > 7, false), 0x63, ...memOperand(dst, base, disp)];
+  }
+  if (srcSize !== 1 && srcSize !== 2) throw new OmniError('x64: movsx 的源只有 8/16/32 位');
+  return [
+    ...rex(dstSize === 8, dst > 7, false, base > 7, false),
+    0x0f, srcSize === 1 ? 0xbe : 0xbf, ...memOperand(dst, base, disp),
+  ];
+}
+
 /* ---------------------------------------------------------------- 算
  * 这一族的四个入口。`op` 取 `ALU.*` —— 手册里的 `/digit`，也是操作码的步长。 */
 

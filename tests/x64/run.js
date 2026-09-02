@@ -86,6 +86,13 @@ t('movsbq %dil, %rax', x.movsx(8, 1, R.rax, R.rdi));
 t('movswq %ax, %rcx', x.movsx(8, 2, R.rcx, R.rax));
 t('movslq %eax, %rcx', x.movsx(8, 4, R.rcx, R.rax));
 t('movslq %r10d, %r11', x.movsx(8, 4, R.r11, R.r10));
+/* 从内存按窄宽度加载（第九刀第十六片要的：`MLOAD` 的九种宽度） */
+t('movzbq (%rax), %rcx', x.movzxM(8, 1, R.rcx, R.rax, 0));
+t('movzwq 8(%rax), %rcx', x.movzxM(8, 2, R.rcx, R.rax, 8));
+t('movzbl (%rsp), %eax', x.movzxM(4, 1, R.rax, R.rsp, 0));
+t('movsbq (%rax), %rcx', x.movsxM(8, 1, R.rcx, R.rax, 0));
+t('movswq -4(%rbp), %rax', x.movsxM(8, 2, R.rax, R.rbp, -4));
+t('movslq (%r12), %r13', x.movsxM(8, 4, R.r13, R.r12, 0));
 
 // ---- 算：一族八条，各挑几个宽度与几个特例
 t('addq %rcx, %rax', x.aluRR(ALU.add, 8, R.rax, R.rcx));
