@@ -431,7 +431,9 @@ tcc 逐字节相同了**（第五十片，`peWrite`：两个 win32 目标 160 �
 `omni macho-link`）。三个格式于是都是我们自己写出来的了。**macOS 上也接上真的 libc 了**
 （第五十六片：`.tbd` 里的导出符号、`LC_LOAD_DYLIB`、按需取用 `libtcc1.a`、当场生成的
 `___GLOBAL_init_65535`，`tests/c/gen` 里那八十几份要 `printf` 的用例两个目标各 86 份
-逐字节相同）。
+逐字节相同）。**macOS 上也把 tcc 自己链了出来**（第五十七片，`tests/c/macho-tcc.js`：
+`ONE_SOURCE` 与拆开编的十二个 `.o` 两种都逐字节相同，arm64 那份签完名还拿它编了个 hello
+跑起来）。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -10284,6 +10286,29 @@ arm64-macos : 86 份可执行文件逐字节相同   （共 8658712 字节，从
 命令行：`omni macho-link a.o -o a.out --dylib <sdk>/usr/lib/libc.tbd --libtcc1 libtcc1.a`。
 
 <!-- 第九刀第五十六片-END -->
+
+## 落地：第九刀第五十七片 —— 在 macOS 上把 tcc 自己链出来
+
+PE 那一路第五十二片做过一次（`tests/c/pe-tcc.js`），这是 Mach-O 的那一份
+（`tests/c/macho-tcc.js`）：
+
+```
+x86_64-macos one-source: 499576 字节逐字节相同（1 个 .o、14 条加载命令、6 节、2 个库成员）
+x86_64-macos parts     : 506744 字节逐字节相同（12 个 .o）
+arm64-macos  one-source: 590192 字节逐字节相同（1 个 .o）
+arm64-macos  parts     : 597040 字节逐字节相同（12 个 .o）
+我们链出来的 tcc 能编能跑：hi from ours
+```
+
+拆开编的那一份里 `tccmacho.c` 顶掉了 PE 那一路的 `tccpe.c`，代码生成三件套按目标挑。
+最后一行是这一片真正想要的东西：arm64 那份是本机能跑的，于是门里**拿我们链出来的 tcc
+去编一个 hello 再跑一遍** —— 五十六万字节里任何一处摆错、任何一条重定位落错、
+任何一格链式修正串错，它都跑不到 `printf`。
+
+至此三个格式（PE / ELF / Mach-O）都能把真程序链出来，其中 PE 与 Mach-O 都已经把
+**tcc 自己**链了出来。
+
+<!-- 第九刀第五十七片-END -->
 
 
 
