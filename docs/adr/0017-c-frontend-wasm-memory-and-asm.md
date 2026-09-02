@@ -288,7 +288,7 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
 8. **C 的库面**：`libtcc1` 的等价物（软除法/浮点辅助/`alloca`/`setjmp`）与 libc 的接法。
    原先写的是"先转手宿主的 libc，走既有的 extern-C FFI"，第五片证明**转手不成立**
    （指针是自家线性内存里的偏移，宿主 libc 读不到），改成一个读写线性内存的宿主模块，
-   见第五片的落地节。**前三十三片已落地**（预定义的宏 —— 目标的自述，五十条，
+   见第五片的落地节。**前三十四片已落地**（预定义的宏 —— 目标的自述，五十条，
    顺序与值都对着 `tcc -dM -E` 抄；自带的系统头目录 + 编译器必须自己给的那四份头；
    `stdio.h`/`stdlib.h`/`string.h` 的最小子集 —— libc 的自述；
    `strtol` 一族与 `strncpy`/`strchr`/`strstr` 那几条；
@@ -337,8 +337,11 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
    「编号当地址」，顺手把「typedef 名后面跟 `:` 是标签」也补上；
    **typedef 名是普通标识符** —— 它跟变量分同一套作用域、能被同名的变量遮住；
    **长度 0 的数组** —— `double a[0]` 是 size 0 / align 8，「不完整」不能再拿 size 是 0
-   当替身），
-   见下面的第八刀第一到三十三片节。
+   当替身；
+   **`aligned(N)` 与 `packed`** —— 属性从「整块跳过」变成真的分派，而尾置的 `packed`
+   逼出了「收成员」与「排布局」分段；挂在变量上的那一份也做了，不然它是条静悄悄给
+   错答案的边界），
+   见下面的第八刀第一到三十四片节。
 
 最后三步是**后端**：
 
@@ -5157,6 +5160,88 @@ if (!isExtern && isArray(ty.t) && ty.count < 0) this.err(`storage size of '${nam
 之后：`-dM`、路径 A 的 GLR 与路径 B 对账（第七步）、第 9-11 步的后端。
 
 <!-- 第八刀第三十三片-END -->
+
+## 落地：第八刀第三十四片
+
+**`__attribute__((aligned(N)))` 与 `packed`。** tcctest.c 988 起那一段：
+
+```c
+struct __attribute__((aligned(16))) aligntest5 { int i; };   /* tag 之前 */
+struct aligntest6 { int i; } __attribute__((aligned(16)));   /* `}` 之后 */
+struct aligntest7 altest7[2] __attribute__((aligned(16)));   /* 挂在变量上 */
+```
+
+第十六片起 `skipAttrs()` 是「整块跳过」，因为那时**没有一个属性有可观察的效果**。
+这一片起它不再是跳过：`aligned` 与 `packed` 改 struct 的布局，`sizeof` 与成员的 offset
+跟着变，跳过就是给出错的答案。所以那一格换成了 `parseAttrs(ad)` —— 形状照
+`parse_attribute`（`tccgen.c:3914`）：**成对的两层括号**、里面是**逗号分隔的表**、
+末尾 `goto redo` 收连着写的第二个 `__attribute__`。认不出的名字落在最后一支，
+有参数就把括号平衡掉（tcc 的 `skip_param`）。
+
+### 一 边读边排排不了尾置的属性
+
+真正的改动不在解析，在**顺序**。我们原来是边读成员边算 offset，而
+`struct { … } __attribute__((packed));` 的 packed 长在所有成员**后面** —— 读到它的时候
+前面那些成员的位置已经定死了。tcc 不会撞上这个，因为它天然是两段：`struct_decl` 只把
+成员串成 `Sym` 链，`}` 与尾置属性都读完了才叫 `struct_layout(type, &ad)`
+（`tccgen.c:4688`）。
+
+于是 `structDecl` 拆成了两个：收成员的那一段（名字、类型、位域宽度、成员自己的属性
+攒进一个数组）和 `structLayout`（那一整套 PCC 布局规则原封不动搬过去）。这不是为了
+好看 —— 是「后面的记号能改前面的结果」这件事**逼**出来的分段。
+
+### 二 三样东西抢同一个对齐
+
+一个成员的对齐现在有三个来源，优先级照 tcc（`tccgen.c:4215-4235`）：
+
+- `packed`（成员自己的，或者整个 struct 的）—— 按 1 排；
+- `#pragma pack(N)`（第十八片）—— 比它小就按 N，而且在 PCC 模式下**连成员自己写的
+  `aligned` 也一起抹掉**；
+- 成员自己的 `aligned(N)` —— 直接就是 N，比自然对齐小也算（那是压紧）。
+
+宽度 0 的位域整段跳过这三条：PCC 模式下 packing 不动它。位域那边还多一条 ——
+成员写了 `aligned` 就换一个新的存储单元（`tccgen.c:4270`）。
+
+而**整体**的对齐是 `max(ad.aligned, maxalign)`（`tccgen.c:4346`）：`aligned` 只抬不压，
+压是 `packed` 的活。所以 `struct { char c; int i; } __attribute__((packed, aligned(4)))`
+的成员紧排（`c` 在 0、`i` 在 1）而外壳按 4 —— size 8。
+
+属性还能长在**说明符**那一段上（`__attribute__((aligned(8))) int i, j;`），那时它管这
+一行的**所有**声明符 —— tcc 的 `parse_btype` 就是收进同一个 `ad`（`tccgen.c:4919`），
+所以我们也给 `parseBtype` 加了一个可选的收集处，声明符那一份从它起头。
+
+### 三 挂在变量上的那一份
+
+`altest7[2] __attribute__((aligned(16)))` 抬的是**这一个符号**的地址，不是类型的对齐。
+本来打算把它划成边界，但那会是一条**静悄悄给错答案**的边界：程序可以自己
+`(unsigned long)&x & 15` 去看。所以顺手做了 —— 声明符那一路把属性收进 `dad`，
+`declareGlobal` / `declareLocal` 多收一个 `align`，非 0 就用它对齐分配那一步
+（局部量还得强制落到帧上：住在 MIR 槽里的量没有地址，也就没有对齐可言）。
+类型上的对齐还是不带（`typedef unsigned long long __attribute__((aligned(4))) u64;`
+那种降对齐的 typedef 仍然被忽略），下一格 `__alignof__` 会把这件事量出来。
+
+### 量出来的数
+
+- `tests/c/gen/55-attr-align.c`（tag 前 / `}` 后两个位置、`packed` 紧排后真的读写、
+  `packed + aligned(4)` 同时写、成员自己的 `aligned(8)`、说明符段上的 `aligned(8)` 管
+  一行两个成员、`aligned(2 * sizeof(long))` 这样的常量表达式、union、以及挂在全局量
+  与局部量上的 `aligned`）：与 `tcc -run` 一致。量到的：`a5 16 16` / `p1 7: 0 1 5` /
+  `p2 8 4: 0 1` / `m1 16: 0 8 12` / `m2 24: 0 8 16` / `sym 0 0 0`。
+- `tests/c/run.js`：**94 passed, 0 failed**。`tests/run.js`：**96 passed, 0 failed**。
+- 自举那一条重量一遍：`tcc.c` -> 与本机 tcc 编的逐字节 **IDENTICAL**。
+- 我们自己的前端读 tcctest.c 从 988 行走到了 **1094 行**（对齐那一整段过去了）。
+
+### 下一片
+
+第八刀第三十五片：**`__alignof__`**。停在 tcctest.c:1094 ——
+`printf("__alignof__ …", __alignof__(struct aligntest5), …)`。记号早就在表里
+（`tcctok.h` 的四种拼法我们也有），只是 `unary` 里没有那一支：它和 `sizeof` 是同一个
+形状（类型名或者表达式），回的是 `typeSize().align`。它同时是上面第三条那个「类型上的
+对齐还不带」的量尺 —— 做完就知道 `aligned` 的 typedef 还差多少。
+
+之后：`-dM`、路径 A 的 GLR 与路径 B 对账（第七步）、第 9-11 步的后端。
+
+<!-- 第八刀第三十四片-END -->
 
 
 

@@ -18,12 +18,14 @@
 //
 // ## 阶段边界：这张表还不全
 //
-// `tcctok.h` 里 attribute 名（`section`/`aligned`/…）、`__builtin_*`、原子操作、
-// libtcc1 的辅助函数名、以及整个 Tiny Assembler 的指令与伪指令**都还没进来** ——
+// `tcctok.h` 里 attribute 名（`section`/`weak`/…）、`__builtin_*`、原子操作、
+// libtcc1 的辅助函数名、以及整个 Tiny Assembler 的指令与伪指令**大半还没进来** ——
 // 它们的消费者（`tccgen` 的属性一路与 `*-asm`）还不存在。于是从 `TOK___INF__` 之后，
 // 编号是我们的、不是 tcc 的：pragma 那几个名字在 tcc 里排在 builtin 后面。
 // 第六刀补上的只是**语句与类型关键字**那一段（它们在 KEYWORD_NAMES 里本来就有，
 // 只是没导出过），那一段的编号与 tcc 一致；分岔点仍然在 `TOK___INF__` 之后。
+// 第八刀第三十四片按需补了 attribute 名里的 `aligned`/`packed` 两条 —— 有真的消费者
+// （struct 布局）的才进表，别的属性名走「平衡掉参数括号」那一支。
 
 /* ------------------------------------------------- 运算符与带值记号（tcc.h:1114-1192）
  * 这些数值一个都不能动：见文件头「为什么编号本身要照抄」。 */
@@ -166,6 +168,12 @@ const PP_NAMES = [
   // tcctok.h:207-220 的 pragma 名。**这里编号与 tcc 分岔**（见文件头的阶段边界）：
   // tcc 在这之前还有 attribute 与 builtin 两大段。
   'pack', 'push', 'pop', 'comment', 'lib', 'push_macro', 'pop_macro', 'once', 'option',
+  // tcctok.h:106-166 的 attribute 名（第八刀第三十四片）。tcc 那边这一整段排在 builtin
+  // 之前，我们的编号从 `__inf__` 之后就分岔了（见文件头），所以这儿只登记**真的要认**
+  // 的两个：`aligned` 与 `packed`，各带 gcc 的下划线拼法。别的属性名仍然是普通标识符
+  // （`weak`、`section`、`format`…），`parseAttrs` 在 default 那一支把它们的参数括号
+  // 平衡掉 —— 与 tcc 的 `skip_param` 同一支。
+  'aligned', '__aligned__', 'packed', '__packed__',
 ];
 
 /** 全表：下标 i <-> 记号号 `TOK_IDENT + i`。 */
@@ -218,6 +226,13 @@ export const TOK_once = fixed('once');
 export const TOK_pack = fixed('pack');
 export const TOK_push = fixed('push');
 export const TOK_pop = fixed('pop');
+
+/* `__attribute__((aligned(16)))` / `((packed))`（第八刀第三十四片，`tcctok.h:118`/`:120`）。
+ * 两种拼法各占一格 —— 与别的关键字同一条理由：tcc 不做别名折叠。 */
+export const TOK_ALIGNED1 = fixed('aligned');
+export const TOK_ALIGNED2 = fixed('__aligned__');
+export const TOK_PACKED1 = fixed('packed');
+export const TOK_PACKED2 = fixed('__packed__');
 
 /* ------------------------------------------------- tccgen 要用的那些（第六刀）
  * 语句关键字与类型关键字。之前只有预处理器在用这张表，所以只导出了指令名那一段。 */

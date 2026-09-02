@@ -160,6 +160,7 @@ import {
   TOK_INLINE1, TOK_INLINE2, TOK_RESTRICT, TOK_RESTRICT1, TOK_RESTRICT2,
   TOK_EXTENSION, TOK_ATOMIC, TOK_THREAD_LOCAL, TOK_THREAD,
   TOK_ATTRIBUTE1, TOK_ATTRIBUTE2, TOK_ASM1, TOK_ASM2, TOK_ASM3,
+  TOK_ALIGNED1, TOK_ALIGNED2, TOK_PACKED1, TOK_PACKED2,
   TOK_BUILTIN_VA_START, TOK_BUILTIN_VA_ARG, TOK_BUILTIN_VA_END, TOK_BUILTIN_VA_COPY,
   TOK_BUILTIN_EXPECT,
   TOK___FUNCTION__, TOK___FUNC__, TOK_LINENUM,
@@ -781,10 +782,13 @@ export class CGen {  /**
     }
   }
 
-  /** 在当前帧里划一块，回帧内偏移。**不回收**（见 finishFunc 头上「平铺的帧」）。 */
-  frameAlloc(ty) {
+  /**
+   * 在当前帧里划一块，回帧内偏移。**不回收**（见 finishFunc 头上「平铺的帧」）。
+   * `align` 非 0 就用它 —— `__attribute__((aligned(N)))` 写在变量上的那一格。
+   */
+  frameAlloc(ty, align = 0) {
     const s = typeSize(ty);
-    this.frameOff = alignUp(this.frameOff, s.align);
+    this.frameOff = alignUp(this.frameOff, align !== 0 ? align : s.align);
     const off = this.frameOff;
     this.frameOff += s.size === 0 ? 1 : s.size;
     return off;
@@ -794,15 +798,15 @@ export class CGen {  /**
    * 声明一个局部变量。登记进最内层作用域（同名遮蔽是 C 的规矩），回那条登记。
    * 两种落法二选一：帧上的偏移（`off >= 0`）或者 MIR 的槽（`slot >= 0`）。
    */
-  declareLocal(name, ty) {
+  declareLocal(name, ty, align = 0) {
     if (btype(ty.t) === VT_VOID) this.err(`variable '${name}' has void type`);
     this.needComplete(name, ty);
     /* 这个名字要是外面某层的 typedef，从这儿起它是个变量（C11 6.2.1 第 4 段）——
      * `mytype1 mytype2; mytype2 = 2;` 的第二行于是是表达式而不是声明。 */
     this.tdefShadow(name);
     const scope = this.scopes[this.scopes.length - 1];
-    if (this.needsMem(ty) || this.frameNames.has(name)) {
-      const e = { ty, slot: -1, off: this.frameAlloc(ty) };
+    if (this.needsMem(ty) || this.frameNames.has(name) || align !== 0) {
+      const e = { ty, slot: -1, off: this.frameAlloc(ty, align) };
       scope.set(name, e);
       return e;
     }
@@ -1529,7 +1533,7 @@ export class CGen {  /**
    * 线性内存出生时全是 0，而 C 正好规定静态存储期的对象零初始化（C11 6.7.9 第 10 段）。
    * 这一条让「几千个全局量」不多一个字节的 data 段。
    */
-  declareGlobal(name, ty, isExtern) {
+  declareGlobal(name, ty, isExtern, align = 0) {
     const hit = this.gvars.get(name);
     if (hit !== undefined) {
       if (!sameType(hit.ty, ty)) this.err(`conflicting types for '${name}'`);
@@ -1547,7 +1551,7 @@ export class CGen {  /**
     if (!isExtern && isArray(ty.t) && ty.count < 0) {
       this.err(`storage size of '${name}' isn't known`);
     }
-    this.dataOff = alignUp(this.dataOff, s.align);
+    this.dataOff = alignUp(this.dataOff, align !== 0 ? align : s.align);
     const e = { ty, addr: this.dataOff, defined: !isExtern, used: false };
     this.dataOff += s.size;
     this.gvars.set(name, e);
@@ -3803,13 +3807,16 @@ export class CGen {  /**
   /**
    * `struct` / `union`（`struct_decl`，`tccgen.c:4269`）。进来时 `struct` 已经吃掉。
    *
-   * 布局照 System V / arm64 AAPCS 的规则，也就是 tcc 在本机上的规则：成员按声明顺序
-   * 排，每个成员对齐到自己的对齐，整体的对齐是成员里最大的那个，整体大小向上对齐到它。
-   * 这几句是**数据**，`sizeof` 与 oracle 逐位对账靠它 —— 差一格 `sizeof(struct)` 就不同。
-   * union 是同一段代码的另一支：每个成员偏移 0，大小取最大。
+   * 这一层只**收成员**（名字、类型、位域宽度、成员自己的属性），排布交给
+   * `structLayout` —— 分开的理由见下面收成员那一段的注释：尾置的 `packed` 长在
+   * 成员后面。
    */
   structDecl(union) {
     const kind = union ? 'union' : 'struct';
+    /* tag 之前也能挂属性：`struct __attribute__((aligned(16))) S { … };`
+     * （`tccgen.c:4459`，`struct_decl` 一进门就 `parse_attribute`）。 */
+    const ad = { aligned: 0, packed: false };
+    this.parseAttrs(ad);
     const name = this.tok >= TOK_UIDENT ? this.identName() : null;
     const info = this.tagOf(kind, name, this.tok === LBRACE);
     if (this.tok !== LBRACE) {
@@ -3821,15 +3828,17 @@ export class CGen {  /**
     if (info.fields !== null) this.err(`redefinition of '${kind} ${info.name}'`);
     this.next();
 
-    const fields = [];
-    /* 布局的状态就两格，与 `struct_layout`（`tccgen.c:4190`）一样：
-     *   c       —— 已经排到第几个字节
-     *   bitPos  —— 从 c 起，当前这一串位域已经用掉几位（非位域成员一进来就把它冲掉）
-     * 两格而不是一格是位域的全部难点：`int a:3; int b:5;` 两个成员的 `off` 相同，
-     * 差别只在 bitPos。 */
-    let c = 0;
-    let bitPos = 0;
-    let maxalign = 1;
+    /* 成员**先收下来、后排布**（tcc 就是这个形状：`struct_decl` 收 `Sym` 链，
+     * `}` 与尾置属性都读完了才叫 `struct_layout`，`tccgen.c:4688`）。第三十四片必须
+     * 这么分：`struct { … } __attribute__((packed));` 的 packed 长在成员**后面**，
+     * 边读边排的话前面那些成员的 off 已经定死了。 */
+    /** @type {{name:string|null,ty:object,bits:number,anon:boolean,aligned:number,packed:boolean}[]} */
+    const mems = [];
+    const names = new Set();
+    const dup = (n) => {
+      if (names.has(n)) this.err(`duplicate member '${n}'`);
+      names.add(n);
+    };
     while (this.tok !== RBRACE) {
       if (this.tok === TOK_EOF) this.err("'}' expected");
       /* 成员表里认不出类型的那几格（`tccgen.c:4585-4592`）：`_Static_assert` 收下，
@@ -3843,7 +3852,10 @@ export class CGen {  /**
         this.skip(SEMI);
         continue;
       }
-      const spec = this.parseBtype();
+      /* 说明符那一段上的属性（`__attribute__((aligned(8))) int i, j;`）管**这一行的
+       * 所有声明符**（tcc 的 `parse_btype` 收在同一个 `ad` 里，`tccgen.c:4919`）。 */
+      const sad = { aligned: 0, packed: false };
+      const spec = this.parseBtype(sad);
       if ((spec.t & VT_STORAGE) !== 0) {
         this.err(`storage class specified for '${kind}' member`);
       }
@@ -3857,36 +3869,21 @@ export class CGen {  /**
         if (!isStruct(base.t)) this.err('declaration does not declare anything');
         if (base.ref.fields === null) this.err(`field has incomplete type '${typeText(base)}'`);
         if (!base.ref.anon) { this.skip(SEMI); continue; }
-        const { size, align } = typeSize(base);
-        let a = align;
-        const pk = this.cpp.packStack[this.cpp.packStack.length - 1];
-        if (pk !== 0 && pk < a) a = pk;
-        let at;
-        if (union) {
-          at = 0;
-          if (size > c) c = size;
-        } else {
-          c += (bitPos + 7) >> 3;
-          c = alignUp(c, a);
-          at = c;
-          c += size;
-          bitPos = 0;
-        }
-        if (a > maxalign) maxalign = a;
-        for (const f of base.ref.fields) {
-          if (fields.some((x) => x.name === f.name)) this.err(`duplicate member '${f.name}'`);
-          fields.push({ name: f.name, ty: f.ty, off: at + f.off });
-        }
+        for (const f of base.ref.fields) dup(f.name);
+        mems.push({ name: null, ty: base, bits: -1, anon: true, aligned: 0, packed: false });
         this.skip(SEMI);
         continue;
       }
       for (;;) {
+        /* 成员自己也能挂 `aligned`/`packed`（`int i __attribute__((aligned(8)));`）——
+         * 声明符那一路把它们收在 `mad` 里（tcc 的 `ad1`，`tccgen.c:4681`）。 */
+        const mad = { aligned: sad.aligned, packed: sad.packed };
         /* 匿名位域（`int : 3;` 只占位、`int : 0;` 换一个存储单元）没有声明符，
          * 所以「有没有名字」要在进 declarator 之前问。 */
         let fname = null;
         let fty = base;
         if (this.tok !== COLON) {
-          const d = this.declarator(base, 'need');
+          const d = this.declarator(base, 'need', mad);
           fname = /** @type {string} */ (d.name);
           fty = d.ty;
         }
@@ -3905,14 +3902,14 @@ export class CGen {  /**
           if (bits === 0 && fname !== null) {
             this.err("named bit-field with zero width");
           }
+          // 宽度后面还能再挂属性（`int i : 3 __attribute__((packed));`，`tccgen.c:4637`）
+          this.parseAttrs(mad);
         }
         if (fname === null && bits < 0) {
           this.err('declaration does not declare anything');
         }
         if (fname !== null) {
-          if (fields.some((x) => x.name === fname)) {
-            this.err(`duplicate member '${fname}'`);
-          }
+          dup(fname);
           if (isStruct(fty.t) && fty.ref.fields === null) {
             this.err(`field '${fname}' has incomplete type '${typeText(fty)}'`);
           }
@@ -3920,80 +3917,152 @@ export class CGen {  /**
             this.todo('柔性数组成员还没到（`char buf[];`）');
           }
         }
-
-        let { size, align } = typeSize(fty);
-        /* `#pragma pack(N)`（第八刀第十八片，`tccgen.c:4224-4228`）：N 比这个成员自己的
-         * 对齐小就按 N 排。宽度 0 的位域不受影响（PCC 模式下 tcc 也这么留）。
-         * pack 值从预处理器那边问 —— 它是**当前**那一格（`#pragma pack` 有栈）。 */
-        const pack = this.cpp.packStack[this.cpp.packStack.length - 1];
-        if (pack !== 0 && bits !== 0 && pack < align) align = pack;
-        let off;
-        if (union) {
-          /* union 里的位域一律从第 0 位起（tcc 干脆不给它填 bitPos，`tccgen.c:4238`），
-           * 大小按宽度进位到整字节。**位域标记还是要打上** —— 少这一句 `u.a`
-           * 就成了一个普通的 unsigned 成员，读出来是整个容器而不是低 3 位。 */
-          if (bits >= 0) {
-            size = (bits + 7) >> 3;
-            fty = mkBitfield(fty, 0, bits);
-          }
-          off = 0;
-          if (size > c) c = size;
-        } else if (bits < 0) {
-          // 普通成员：先把没排完的那一串位冲成整字节，再按自己的对齐排
-          c += (bitPos + 7) >> 3;
-          c = alignUp(c, align);
-          off = c;
-          if (size > 0) c += size;
-          bitPos = 0;
-        } else {
-          /* PCC（也就是 gcc）的位域布局：紧挨着前一个位域放，除了两种情形要换一个新的
-           * 存储单元 —— 宽度是 0，或者放下去会**越过它自己的基类型容器**。第二种那句
-           * 判断照抄（`tccgen.c:4274`）：它算的是「从当前位置起，这个位域要横跨几个
-           * align 单位」，超过基类型本来占几个单位就得换。 */
-          let newUnit = bits === 0;
-          if (!newUnit) {
-            const a8 = align * 8;
-            const ofs = Math.floor(((c * 8 + bitPos) % a8 + bits + a8 - 1) / a8);
-            if (ofs > size / align) newUnit = true;
-          }
-          if (newUnit) {
-            c = alignUp(c + ((bitPos + 7) >> 3), align);
-            bitPos = 0;
-          }
-          /* PCC 模式下装得下的 `long long` 位域按 `int` 算（`tccgen.c:4280`）——
-           * 这一句直接改成员的**类型**，于是后面读写用的是 4 字节的访问。 */
-          if (size === 8 && bits <= 32) {
-            fty = ctype((fty.t & ~VT_BTYPE) | VT_INT, fty.ref);
-            size = 4;
-          }
-          while (bitPos >= align * 8) {
-            c += align;
-            bitPos -= align * 8;
-          }
-          off = c;
-          /* 匿名位域**不影响**整体的对齐（`tccgen.c:4290`）。少这一句
-           * `struct { char c; int :0; }` 的对齐会从 1 变成 4。 */
-          if (fname === null) align = 1;
-          fty = mkBitfield(fty, bitPos, bits);
-          bitPos += bits;
-        }
-        if (align > maxalign) maxalign = align;
-        if (fname !== null) fields.push({ name: fname, ty: fty, off });
+        mems.push({
+          name: fname, ty: fty, bits, anon: false,
+          aligned: mad.aligned, packed: mad.packed,
+        });
         if (this.tok !== COMMA) break;
         this.next();
       }
       this.skip(SEMI);
     }
     this.next();       // `}`
+    // 尾置属性：`struct S { … } __attribute__((packed));`（`tccgen.c:4689`）
+    this.parseAttrs(ad);
+    this.structLayout(info, union, mems, ad);
+    return mkStruct(info, union);
+  }
+
+  /**
+   * `struct_layout`（`tccgen.c:4190`）：成员表 -> 每个成员的 off + 整体的 size/align。
+   *
+   * 布局照 System V / arm64 AAPCS 的规则，也就是 tcc 在本机上的规则：成员按声明顺序
+   * 排，每个成员对齐到自己的对齐，整体的对齐是成员里最大的那个，整体大小向上对齐到它。
+   * 这几句是**数据**，`sizeof` 与 oracle 逐位对账靠它 —— 差一格 `sizeof(struct)` 就不同。
+   * union 是同一段代码的另一支：每个成员偏移 0，大小取最大。
+   *
+   * 三样东西能改一个成员的对齐，优先级照 tcc（`tccgen.c:4215-4235`）：
+   *   - `packed`（这个成员自己的、或者整个 struct 的）-> 按 1 排；
+   *   - `#pragma pack(N)` -> 比它小就按 N，而且**连带把单个成员的 aligned 也抹掉**；
+   *   - 成员自己的 `aligned(N)` -> 直接就是 N（比自然对齐小也算，那是压紧）。
+   */
+  structLayout(info, union, mems, ad) {
+    const fields = [];
+    /* 布局的状态就两格，与 `struct_layout`（`tccgen.c:4190`）一样：
+     *   c       —— 已经排到第几个字节
+     *   bitPos  —— 从 c 起，当前这一串位域已经用掉几位（非位域成员一进来就把它冲掉）
+     * 两格而不是一格是位域的全部难点：`int a:3; int b:5;` 两个成员的 `off` 相同，
+     * 差别只在 bitPos。 */
+    let c = 0;
+    let bitPos = 0;
+    let maxalign = 1;
+    const pragmaPack = this.cpp.packStack[this.cpp.packStack.length - 1];
+    for (const m of mems) {
+      let fty = m.ty;
+      const bits = m.bits;
+      let { size, align } = typeSize(fty);
+      /* 这个成员自己写的 `aligned(N)`。0 = 没写。 */
+      let a = m.aligned;
+      let packed = false;
+      if (bits === 0) {
+        // PCC 模式下宽度 0 的位域不受 packing 影响（`tccgen.c:4215`）
+      } else {
+        if (m.packed || ad.packed) { align = 1; packed = true; }
+        /* `#pragma pack(N)`（第八刀第十八片，`tccgen.c:4224-4228`）：N 比这个成员自己的
+         * 对齐小就按 N 排，而且在 PCC 模式下**连单个成员的 aligned 也一起抹掉**。
+         * pack 值从预处理器那边问 —— 它是**当前**那一格（`#pragma pack` 有栈）。 */
+        if (pragmaPack !== 0) {
+          packed = true;
+          if (pragmaPack < align) align = pragmaPack;
+          if (pragmaPack < a) a = 0;
+        }
+      }
+      if (a !== 0) align = a;
+
+      if (m.anon) {
+        /* 匿名 struct/union 成员：自己按自己的对齐占一块，字段名摊进外层。 */
+        let at;
+        if (union) {
+          at = 0;
+          if (size > c) c = size;
+        } else {
+          c += (bitPos + 7) >> 3;
+          c = alignUp(c, align);
+          at = c;
+          c += size;
+          bitPos = 0;
+        }
+        if (align > maxalign) maxalign = align;
+        for (const f of fty.ref.fields) fields.push({ name: f.name, ty: f.ty, off: at + f.off });
+        continue;
+      }
+
+      let off;
+      if (union) {
+        /* union 里的位域一律从第 0 位起（tcc 干脆不给它填 bitPos，`tccgen.c:4238`），
+         * 大小按宽度进位到整字节。**位域标记还是要打上** —— 少这一句 `u.a`
+         * 就成了一个普通的 unsigned 成员，读出来是整个容器而不是低 3 位。 */
+        if (bits >= 0) {
+          size = (bits + 7) >> 3;
+          fty = mkBitfield(fty, 0, bits);
+        }
+        off = 0;
+        if (size > c) c = size;
+      } else if (bits < 0) {
+        // 普通成员：先把没排完的那一串位冲成整字节，再按自己的对齐排
+        c += (bitPos + 7) >> 3;
+        c = alignUp(c, align);
+        off = c;
+        if (size > 0) c += size;
+        bitPos = 0;
+      } else {
+        /* PCC（也就是 gcc）的位域布局：紧挨着前一个位域放，除了三种情形要换一个新的
+         * 存储单元 —— 宽度是 0、这个成员自己写了 aligned、或者放下去会**越过它自己的
+         * 基类型容器**（而且没有 packing）。第三种那句判断照抄（`tccgen.c:4274`）：
+         * 它算的是「从当前位置起，这个位域要横跨几个 align 单位」，超过基类型本来占
+         * 几个单位就得换。 */
+        let newUnit = bits === 0 || m.aligned !== 0;
+        if (!newUnit && !packed) {
+          const a8 = align * 8;
+          const ofs = Math.floor(((c * 8 + bitPos) % a8 + bits + a8 - 1) / a8);
+          if (ofs > size / align) newUnit = true;
+        }
+        if (newUnit) {
+          c = alignUp(c + ((bitPos + 7) >> 3), align);
+          bitPos = 0;
+        }
+        /* PCC 模式下装得下的 `long long` 位域按 `int` 算（`tccgen.c:4280`）——
+         * 这一句直接改成员的**类型**，于是后面读写用的是 4 字节的访问。 */
+        if (size === 8 && bits <= 32) {
+          fty = ctype((fty.t & ~VT_BTYPE) | VT_INT, fty.ref);
+          size = 4;
+        }
+        while (bitPos >= align * 8) {
+          c += align;
+          bitPos -= align * 8;
+        }
+        off = c;
+        /* 匿名位域**不影响**整体的对齐（`tccgen.c:4290`）。少这一句
+         * `struct { char c; int :0; }` 的对齐会从 1 变成 4。 */
+        if (m.name === null) align = 1;
+        fty = mkBitfield(fty, bitPos, bits);
+        bitPos += bits;
+      }
+      if (align > maxalign) maxalign = align;
+      if (m.name !== null) fields.push({ name: m.name, ty: fty, off });
+    }
 
     // 末尾那一串没排完的位也要占字节（`tccgen.c:4344`）
     c += (bitPos + 7) >> 3;
 
+    /* 整体的对齐：`aligned(N)` 与成员里最大的那个**取大**（`tccgen.c:4346`）——
+     * 也就是说 `aligned` 只抬不压，压是 `packed` 的事。 */
+    let a = ad.aligned !== 0 ? ad.aligned : 1;
+    if (a < maxalign) a = maxalign;
     info.fields = fields;
-    info.align = maxalign;
-    info.size = alignUp(c, maxalign);
+    info.align = a;
+    info.size = alignUp(c, a);
     this.fixBitfields(fields, info.size);
-    return mkStruct(info, union);
   }
 
   /**
@@ -4119,27 +4188,66 @@ export class CGen {  /**
    * 只为报错消息印得对。
    */
   /**
-   * `__attribute__((…))` / `__attribute((…))` 整块跳过（第八刀第十六片）。
+   * `parse_attribute`（`tccgen.c:3914`）：`__attribute__((…))` 的记号流。
    *
-   * 真的系统头里它无处不在：`__printflike(1,2)`、`__dead2`、`__pure2`、`__DARWIN_ALIAS`
-   * 里的那些。**语义一条都不做** —— 我们要的只是「能读过去」。真要做的那几条
-   * （`packed`、`aligned`、`noreturn`）各自是独立的一格，做的时候这儿会变成一台
-   * 真的分派，而不是「原来漏了」。
+   * 第十六片起这儿是「整块跳过」，因为那时没有一个属性有可观察的效果。第三十四片
+   * 起它是一台**真的分派** —— `aligned` 与 `packed` 改 struct 的布局，`sizeof` 就跟着变。
+   * 别的属性名（`weak`、`section`、`__printflike`、`__dead2`…）落在最后那一支：
+   * 有参数就把括号平衡掉（tcc 的 `skip_param`，`tccgen.c:4119`）。
    *
-   * 括号是**成对的两层**，不过这儿只按平衡数括号：`((a(1),b))` 里面还能再嵌。
+   * 形状照 tcc 那一份，包括三处细节：
+   *   - 括号是**成对的两层**（`skip('(') skip('(')`），不是「平衡数括号」；
+   *   - 里面是**逗号分隔的表**（`aligned(4), packed`）；
+   *   - 收尾 `goto redo` —— `__attribute__((a)) __attribute__((b))` 连着写也算一处。
+   * tcc 对不认识的属性发 `-Wunsupported` 警告，那一档默认是关的，所以我们**不发** ——
+   * 诊断逐字节对账靠这一点。
+   *
+   * @param {{aligned:number,packed:boolean}|null} ad 收结果的地方；null = 只读过去
    */
-  skipAttrs() {
+  parseAttrs(ad = null) {
     while (this.tok === TOK_ATTRIBUTE1 || this.tok === TOK_ATTRIBUTE2) {
       this.next();
       this.skip(LPAR);
-      let depth = 1;
-      while (depth > 0) {
-        if (this.tok === TOK_EOF) this.err("')' expected");
-        if (this.tok === LPAR) depth++;
-        else if (this.tok === RPAR) depth--;
+      this.skip(LPAR);
+      while (this.tok !== RPAR) {
+        if (this.tok < TOK_IDENT) this.expect('attribute name');
+        const t = this.tok;
+        this.next();
+        if (t === TOK_ALIGNED1 || t === TOK_ALIGNED2) {
+          /* `aligned` 不带参数时是这个目标的最大对齐（`MAX_ALIGN`，arm64-gen.c:39 = 16）。
+           * 带参数的必须是**正的 2 的幂** —— tcc 把它存成 log2+1，所以别的值存不下。 */
+          let n = 16;
+          if (this.tok === LPAR) {
+            this.next();
+            n = Number(this.constExpr());
+            if (n <= 0 || (n & (n - 1)) !== 0) {
+              this.err('alignment must be a positive power of two');
+            }
+            this.skip(RPAR);
+          }
+          if (ad !== null) ad.aligned = n;
+        } else if (t === TOK_PACKED1 || t === TOK_PACKED2) {
+          if (ad !== null) ad.packed = true;
+        } else if (this.tok === LPAR) {
+          let depth = 0;
+          do {
+            if (this.tok === TOK_EOF) this.err("')' expected");
+            if (this.tok === LPAR) depth++;
+            else if (this.tok === RPAR) depth--;
+            this.next();
+          } while (depth > 0);
+        }
+        if (this.tok !== COMMA) break;
         this.next();
       }
+      this.skip(RPAR);
+      this.skip(RPAR);
     }
+  }
+
+  /** `parse_attribute(NULL)`：读过去、什么都不收。 */
+  skipAttrs() {
+    this.parseAttrs(null);
   }
 
   /**
@@ -4234,7 +4342,7 @@ export class CGen {  /**
     this.expect('string constant');
   }
 
-  parseBtype() {
+  parseBtype(ad = null) {
     let bt = -1;
     let longs = 0;
     let shorts = 0;
@@ -4291,7 +4399,7 @@ export class CGen {  /**
           || t === TOK_THREAD_LOCAL || t === TOK_THREAD) {
         any = true; this.next(); continue;
       }
-      if (t === TOK_ATTRIBUTE1 || t === TOK_ATTRIBUTE2) { any = true; this.skipAttrs(); continue; }
+      if (t === TOK_ATTRIBUTE1 || t === TOK_ATTRIBUTE2) { any = true; this.parseAttrs(ad); continue; }
       if (t === TOK_SIGNED1 || t === TOK_SIGNED2) {
         if (sign !== 0) this.err('two or more sign specifiers');
         sign = 1; any = true; this.next(); continue;
@@ -4389,9 +4497,10 @@ export class CGen {  /**
    *
    * @param {object} base 基本类型（**存储类已经剥掉**）
    * @param {'need'|'opt'|'none'} want 名字：必须有 / 可省（原型里的形参）/ 不能有
+   * @param {{aligned:number,packed:boolean}|null} ad 声明符上挂的属性收在这儿
    */
-  declarator(base, want) {
-    const d = this.declaratorParts(want);
+  declarator(base, want, ad = null) {
+    const d = this.declaratorParts(want, ad);
     return { ty: d.wrap(base), name: d.name };
   }
 
@@ -4404,9 +4513,9 @@ export class CGen {  /**
    *   - `int (*a)[3]`    外层 posts=[[3]]，里层 pre=1 -> arr3(int) 交给里层 -> ptr
    *   - `int (*f[3])(v)` 外层 posts=[(v)]，里层 pre=1+posts=[[3]] -> 3 个函数指针
    */
-  declaratorParts(want) {
+  declaratorParts(want, ad = null) {
     /* 声明符**前面**也能挂 attribute（`__attribute__((…)) *p`），系统头里有。 */
-    this.skipAttrs();
+    this.parseAttrs(ad);
     let pre = 0;
     while (this.tok === STAR) {
       this.next();
@@ -4421,7 +4530,7 @@ export class CGen {  /**
           this.next();
           continue;
         }
-        if (q === TOK_ATTRIBUTE1 || q === TOK_ATTRIBUTE2) { this.skipAttrs(); continue; }
+        if (q === TOK_ATTRIBUTE1 || q === TOK_ATTRIBUTE2) { this.parseAttrs(ad); continue; }
         break;
       }
       pre++;
@@ -4432,7 +4541,7 @@ export class CGen {  /**
     let name = null;
     if (this.tok === LPAR && this.isGroupParen()) {
       this.next();
-      inner = this.declaratorParts(want);
+      inner = this.declaratorParts(want, ad);
       this.skip(RPAR);
     } else if (this.tok >= TOK_UIDENT) {
       if (want === 'none') this.err('unexpected identifier in type name');
@@ -4458,6 +4567,10 @@ export class CGen {  /**
       }
       break;
     }
+    /* 声明符**后面**的属性（`int i __attribute__((aligned(8)));`，`tccgen.c:5317`
+     * 那一句 `parse_attribute(ad)`）。`decl` 那边还会再吃一轮 —— 那儿要与
+     * `__asm("_name")` 交替，这儿吃的是成员表那一路要收下的那一份。 */
+    this.parseAttrs(ad);
 
     const wrap = (base) => {
       let ty = base;
@@ -4835,7 +4948,8 @@ export class CGen {  /**
         this.tokc = this.cpp.tokc;
         if (isLabel) break;
       }
-      const spec = oldint ? ctype(VT_INT, null) : this.parseBtype();
+      const sad = { aligned: 0, packed: false };
+      const spec = oldint ? ctype(VT_INT, null) : this.parseBtype(sad);
       const isTypedef = (spec.t & VT_TYPEDEF) !== 0;
       const isExtern = (spec.t & VT_EXTERN) !== 0;
       const isInline = (spec.t & VT_INLINE) !== 0;
@@ -4847,7 +4961,8 @@ export class CGen {  /**
       if (this.tok === SEMI) { this.next(); continue; }
       let wasBody = false;
       for (;;) {
-        const d = this.declarator(base, 'need');
+        const dad = { aligned: sad.aligned, packed: sad.packed };
+        const d = this.declarator(base, 'need', dad);
         const name = /** @type {string} */ (d.name);
         /* 声明符后面还能挂两样东西（第八刀第十六片，系统头里全是）：
          *   `__asm("_name")` —— 符号改名，读掉不改名（见 `skipAsmName`）；
@@ -4860,9 +4975,10 @@ export class CGen {  /**
             this.skipAsmName();
             continue;
           }
-          if (t2 === TOK_ATTRIBUTE1 || t2 === TOK_ATTRIBUTE2) { this.skipAttrs(); continue; }
+          if (t2 === TOK_ATTRIBUTE1 || t2 === TOK_ATTRIBUTE2) { this.parseAttrs(dad); continue; }
           break;
         }
+
         if (isTypedef) {
           /* `typedef` 不声明对象，只给一个类型起名。重复的 typedef 是合法的（C11
            * 6.7 第 3 段：同一个类型可以说两遍），不同类型的重名才是错。
@@ -4921,8 +5037,11 @@ export class CGen {  /**
             if (vty.count === 0 && hasInit) this.err(`zero-sized array '${name}'`);
           }
 
-          const e = global ? this.declareGlobal(name, vty, isExtern)
-            : this.declareLocal(name, vty);
+          /* 变量自己写的 `__attribute__((aligned(N)))`（tcctest.c:1007 的
+           * `struct aligntest7 altest7[2] __attribute__((aligned(16)));`）：
+           * 它抬的是**这一个符号**的对齐，不是类型的 —— 所以只喂给分配那一步。 */
+          const e = global ? this.declareGlobal(name, vty, isExtern, dad.aligned)
+            : this.declareLocal(name, vty, dad.aligned);
           if (hasInit) {
             let dest;
             let base;
