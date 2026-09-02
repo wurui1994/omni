@@ -1793,7 +1793,7 @@ function main(argv) {
     if (a === '-o' || a === '--mode' || a === '--work' || a === '--cache'
       || a === '-I' || a === '-D' || a === '--rdata'
       || a === '-L' || a === '--target' || a === '-e'
-      || a === '--dylib' || a === '--libtcc1') { i++; continue; }
+      || a === '--dylib' || a === '--libtcc1' || a === '--dll') { i++; continue; }
     if (a.startsWith('-')) continue;
     files.push(a);
   }
@@ -2087,9 +2087,10 @@ function main(argv) {
     }
     /* `elf-link`：几个 `.o` 链成一份 Linux 可执行文件（第九刀第五十三、五十四片）。
      * 默认动态（跟 tcc 一样，`.interp` / `.dynsym` / `.dynamic` 那一套都摆出来），
-     * `--static` 只摆装载得下的那几条，`--shared` 造共享库（第五十九片）。
-     * 没有 libc，入口自己指：
-     *   omni elf-link a.o [b.o …] -o a.out [-e main] [--static] [--shared] */
+     * `--static` 只摆装载得下的那几条，`--shared` 造共享库（第五十九片），
+     * `--dll` 接一份真的共享库（第六十片）。没有 libc，入口自己指：
+     *   omni elf-link a.o [b.o …] -o a.out [-e main] [--static] [--shared]
+     *                  [--dll libfoo.so] */
     case 'elf-link': {
       const oi = rest.indexOf('-o');
       const out = oi >= 0 ? rest[oi + 1] : 'a.out';
@@ -2101,11 +2102,16 @@ function main(argv) {
         for (let k = 0; k < s.length; k++) b[k] = s.charCodeAt(k);
         return b;
       };
+      const dlls = [];
+      for (let k = 0; k < rest.length - 1; k++) {
+        if (rest[k] === '--dll') dlls.push({ bytes: bytesOf(rest[k + 1]), name: rest[k + 1] });
+      }
       const r = elfExe({
         objs: files.map(bytesOf),
         entryName,
         static: rest.includes('--static'),
         shared: rest.includes('--shared'),
+        dlls,
       });
       writeBinary(out, r.bytes);
       stdout(`${out} (${r.bytes.length} 字节，${r.shnum} 节，${r.phnum} 段，`
@@ -2326,8 +2332,9 @@ commands:
             --target x86_64-win32|arm64-win32
   elf-link  link .o files into a Linux executable (ADR-0017 cut 9 slices 53-54):
             dynamic by default like tcc (.interp/.dynsym/.dynamic/.got), --static for
-            the plain one, --shared for a shared library (slice 59). No libc, so give
-            the entry with -e NAME (default main). -o NAME
+            the plain one, --shared for a shared library (slice 59), --dll libfoo.so to
+            link against one (slice 60). No libc, so give the entry with -e NAME
+            (default main). -o NAME
   macho-link
             link .o files into a macOS executable (ADR-0017 cut 9 slices 55-56): segments,
             chained fixups, export trie. Give --dylib <sdk>/usr/lib/libc.tbd and

@@ -290,6 +290,69 @@ function sectionClass(s, i, named, bss, hasAllocReloc, isLast, isGot, isInterp, 
 }
 
 /**
+ * 读一份共享库（`tcc_load_dll`）。只要两样东西：库的名字（`DT_SONAME`，没有就用文件名）
+ * 与 `.dynsym` 里非局部的那些符号 —— 链的时候「这个名字谁提供」问的就是这张表。
+ *
+ * 库里的节头、程序头、字节一概不管：可执行文件只记「要哪个库、要它的哪些名字」。
+ *
+ * @param bytes 整份 `.so`
+ * @param filename 命令行上给的路径（`DT_SONAME` 缺席时拿它的最后一段当名字）
+ */
+export function parseDll(bytes, filename) {
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const shoff = Number(dv.getBigUint64(0x28, true));
+  const shent = dv.getUint16(0x3a, true);
+  const shnum = dv.getUint16(0x3c, true);
+  const sh = [];
+  for (let i = 0; i < shnum; i++) {
+    const o = shoff + i * shent;
+    sh.push({
+      type: dv.getUint32(o + 4, true),
+      off: Number(dv.getBigUint64(o + 24, true)),
+      size: Number(dv.getBigUint64(o + 32, true)),
+      link: dv.getUint32(o + 40, true),
+    });
+  }
+  const cstr = (at) => {
+    let e = at;
+    while (e < bytes.length && bytes[e] !== 0) e++;
+    let s = '';
+    for (let k = at; k < e; k++) s += String.fromCharCode(bytes[k]);
+    return s;
+  };
+  let dyn = null;
+  let dsym = null;
+  for (const s of sh) {
+    if (s.type === SHT_DYNAMIC) dyn = s;
+    else if (s.type === SHT_DYNSYM) dsym = s;
+  }
+  if (dyn === null || dsym === null) throw new OmniError(`elf: ${filename} 不像一份共享库`);
+  const strOff = sh[dsym.link].off;
+  const parts = filename.split('/');
+  let soname = parts[parts.length - 1];
+  for (let o = dyn.off; o + 16 <= dyn.off + dyn.size; o += 16) {
+    /* DT_SONAME = 14。值是 `.dynstr` 里的偏移。 */
+    if (Number(dv.getBigUint64(o, true)) === 14) {
+      soname = cstr(strOff + Number(dv.getBigUint64(o + 8, true)));
+    }
+  }
+  const syms = [];
+  for (let o = dsym.off + 24; o + 24 <= dsym.off + dsym.size; o += 24) {
+    const info = bytes[o + 4];
+    if (Math.floor(info / 16) === STB_LOCAL) continue;
+    syms.push({
+      name: cstr(strOff + dv.getUint32(o, true)),
+      info,
+      other: bytes[o + 5],
+      shndx: dv.getUint16(o + 6, true),
+      value: Number(dv.getBigUint64(o + 8, true)),
+      size: Number(dv.getBigUint64(o + 16, true)),
+    });
+  }
+  return { soname, syms };
+}
+
+/**
  * 摆好一份 ELF 可执行文件：节的地址、文件偏移、程序头，重定位也落完笔。
  *
  * @param inp `{objs, entryName}`：`objs` 是几个 `ET_REL` 的字节，`entryName` 是
@@ -318,6 +381,33 @@ export function elfExeImage(inp) {
     }
   }
 
+  /* ---- tcc_add_runtime 里那一段：命令行上给的 `.so` 先读进来（`tcc_load_dll`）。
+   *
+   * `dllSyms` 就是 tcc 的 `dynsymtab_section`：一张「谁提供什么名字」的旁表，
+   * **不进**输出的符号表。同名的合并（`set_elf_sym`：先来的占着，除非它没定义）；
+   * 库名重了的第二份整个跳过（`tcc_add_dllref` 的 `found`）。 */
+  const dllNames = [];
+  const dllSyms = [];
+  const dllByName = new Map();
+  for (const d of inp.dlls ?? []) {
+    const lib = parseDll(d.bytes, d.name);
+    if (dllNames.includes(lib.soname)) continue;
+    dllNames.push(lib.soname);
+    for (const s of lib.syms) {
+      const hit = dllByName.get(s.name);
+      if (hit === undefined) {
+        dllSyms.push(s);
+        dllByName.set(s.name, dllSyms.length - 1);
+      } else if (dllSyms[hit].shndx === SHN_UNDEF && s.shndx !== SHN_UNDEF) {
+        dllSyms[hit] = s;
+      }
+    }
+  }
+  const dllSym = (n) => {
+    const i = dllByName.get(n);
+    return i === undefined ? undefined : dllSyms[i];
+  };
+
   /* ---- tcc_add_linker_symbols。
    *
    * 这些是**真的放进符号表**（`set_global_sym`），不是旁边记一张表 —— 这一格有讲究：
@@ -325,7 +415,11 @@ export function elfExeImage(inp) {
    * 「AUTO 且未定义才走 GOT」的筛子会把它们放过去。旁表模型会多造出 GOT 项来。 */
   const defined = (n) => {
     const i = byName.get(n);
-    return i !== undefined && syms[i].shndx !== SHN_UNDEF;
+    if (i !== undefined && syms[i].shndx !== SHN_UNDEF) return true;
+    /* 库里有定义也算数（`set_linker_sym` 里那个 `esym->st_shndx != SHN_UNDEF
+     * && esym->st_size`）。 */
+    const e = dllSym(n);
+    return e !== undefined && e.shndx !== SHN_UNDEF && e.size !== 0;
   };
   const findSec = (n) => {
     for (let i = 1; i < secs.length; i++) if (secs[i].name === n) return i;
@@ -336,9 +430,11 @@ export function elfExeImage(inp) {
     name, value: off, size: 0, info: 1 * 16, other: 0, shndx: sec,
   });
   /** `set_linker_sym`：`needRef` 是那个不带下划线的别名 —— 有人引用才给。 */
+  const linkerSyms = new Set();
   const setLinkerSym = (name, sec, needRef) => {
     if (!defined(name) && !(needRef && !byName.has(name))) {
       defineSym(name, sec, secs[sec].size);
+      linkerSyms.add(name);
     }
     if (name.startsWith('_')) setLinkerSym(name.slice(1), sec, true);
   };
@@ -498,6 +594,70 @@ export function elfExeImage(inp) {
   /* 动态那一路的 `.got` 是**无条件**造的（`elf_output_file` 里那句 `build_got(s1)`）：
    * 一格都不用也照样占 24 字节，头一格还要记 `.dynamic` 的地址。 */
   if (dynamic) buildGot();
+
+  /* ---- bind_exe_dynsyms：没定义的符号去库里找。
+   *
+   * 找着了看类型：函数就在 `.dynsym` 里记一条 STT_FUNC（往下 `build_got_entries`
+   * 见了它就造跳板），数据就**在自己的 `.bss` 里划一块**，再放一条 `R_*_COPY` ——
+   * 装载时由动态链接器把库里那份的内容拷进来。可执行文件里的引用因此全是本地地址，
+   * tcc 不生成位置无关码，这一手是必需的。 */
+  let RELABSS = -1;
+  const copyReloc = machine === EM_X86_64 ? 5 : 1024;
+  if (dynamic && !shared && dllNames.length !== 0) {
+    const bss = secs[BSS];
+    for (let i = 1; i < syms.length; i++) {
+      const s = syms[i];
+      if (s.shndx !== SHN_UNDEF && s.shndx !== SHN_COMMON && s.shndx !== BSS) continue;
+      const esym = dllSym(s.name);
+      if (esym !== undefined && esym.shndx !== SHN_UNDEF) {
+        const type = esym.info % 16;
+        if (type === 2 || type === 10) {                 // STT_FUNC / STT_GNU_IFUNC
+          dynIndex.set(i, dynPutSym(s.name, 0, esym.size, 1 * 16 + 2, 0, SHN_UNDEF));
+        } else if (type === 1) {                         // STT_OBJECT
+          let off;
+          if (s.shndx === BSS) off = s.value;
+          else {
+            off = align(bss.size, 16);                   // tcc 那句 XXX: which alignment ?
+            bss.size = off + esym.size;
+          }
+          st.setSym({
+            name: s.name, value: off, size: esym.size, info: esym.info, other: 0, shndx: BSS,
+          });
+          const di = dynPutSym(s.name, off, esym.size, esym.info, 0, BSS);
+          dynIndex.set(i, di);
+          /* 弱符号的别名也要能被拷到同一块（`Ensure R_COPY works for weak symbol
+           * aliases`）：库里第一条「同地址且是 GLOBAL」的符号一起记进去。 */
+          if (Math.floor(esym.info / 16) === STB_WEAK) {
+            for (const a of dllSyms) {
+              if (a.value === esym.value && Math.floor(a.info / 16) === 1) {
+                dynPutSym(a.name, off, a.size, a.info, 0, BSS);
+                break;
+              }
+            }
+          }
+          if (RELABSS < 0) {
+            RELABSS = st.newSec('.rela.bss', SHT_RELA, SHF_ALLOC, 8, 24);
+            secs[RELABSS].link = DYNSYM;
+            secs[RELABSS].info = BSS;
+            secs[RELABSS].relaFor = BSS;
+            relas.set(RELABSS, []);
+          }
+          const list = relas.get(RELABSS);
+          list.push({
+            at: off, sym: di, type: copyReloc, add: 0n,
+          });
+          secs[RELABSS].size = list.length * 24;
+        }
+      } else if (s.shndx === SHN_UNDEF && Math.floor(s.info / 16) !== STB_WEAK) {
+        throw new OmniError(`elf: 找不到 '${s.name}'`);
+      }
+    }
+    /* `.bss` 长了，`_end` 跟着改（`set_linker_sym(s1, "_end", bss_section, 2)`）。 */
+    for (const nm of ['_end', 'end']) {
+      const i = byName.get(nm);
+      if (i !== undefined && linkerSyms.has(nm)) syms[i].value = bss.size;
+    }
+  }
   const putGotReloc = (at, type, sym, local) => {    if (RELAGOT < 0) {
       RELAGOT = secs.length;
       secs.push({
@@ -687,6 +847,17 @@ export function elfExeImage(inp) {
       if (Math.floor(s.info / 16) === STB_LOCAL) continue;
       dynIndex.set(i, dynSetSym(s.name, s.value, s.size, s.info, s.other, s.shndx));
     }
+  } else if (dynamic && dllNames.length !== 0) {
+    /* ---- bind_libs_dynsyms：**我们**定义的、而库里也提到的那些名字要导出去。
+     * 动态链接器先在可执行文件里找、再去库里找，所以库里对这个名字的引用最后落在
+     * 我们这份定义上。 */
+    for (let i = 1; i < syms.length; i++) {
+      const s = syms[i];
+      if (s.shndx === SHN_UNDEF) continue;
+      if (Math.floor(s.info / 16) === STB_LOCAL) continue;
+      if (!dllByName.has(s.name)) continue;
+      dynIndex.set(i, dynSetSym(s.name, s.value, s.size, s.info, s.other, s.shndx));
+    }
   }
 
   /* ---- prepare_dynamic_rel（`set_sec_sizes` 里那一段）。
@@ -714,6 +885,17 @@ export function elfExeImage(inp) {
       sr.size = count * 24;
       sr.link = DYNSYM;
       dynRel.add(i);
+    }
+  }
+
+  /* ---- 要哪几个库（`DT_NEEDED`）。库名进 `.dynstr` 是在符号名**之后**
+   * （`elf_output_file` 里那一段在 `bind_libs_dynsyms` 后头），所以偏移排在最后。 */
+  const needed = [];
+  if (dynamic && !shared) {
+    for (const nm of dllNames) {
+      needed.push(dstr.length);
+      for (let k = 0; k < nm.length; k++) dstr.push(nm.charCodeAt(k));
+      dstr.push(0);
     }
   }
 
@@ -794,6 +976,7 @@ export function elfExeImage(inp) {
   const dynTagList = (relAddr, relSize) => {
     const at = (i) => (i < 0 ? 0 : secs[i].addr ?? 0);
     const t = [[DT_FLAGS, DF_BIND_NOW], [DT_FLAGS_1, DF_1_NOW]];
+    for (const off of needed) t.unshift([1, off]);      // DT_NEEDED 排在最前
     t.push([DT_HASH, at(HASH)]);
     t.push([DT_GNU_HASH, at(GNUHASH)]);
     t.push([DT_STRTAB, at(DYNSTR)]);
@@ -1338,8 +1521,8 @@ export function elfExeImage(inp) {
       }
       put(EHFH, hdr);
     }
-    // .rela.got / .rela.plt / 变成 alloc 的那几张
-    for (const ri of [RELAGOT, RELAPLT, ...dynRel]) {
+    // .rela.got / .rela.plt / .rela.bss / 变成 alloc 的那几张
+    for (const ri of [RELAGOT, RELAPLT, RELABSS, ...dynRel]) {
       if (ri < 0) continue;
       const list = relas.get(ri);
       const rb = new Uint8Array(list.length * 24);

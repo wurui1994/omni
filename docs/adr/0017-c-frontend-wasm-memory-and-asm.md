@@ -439,7 +439,10 @@ tcc 逐字节相同了**（第五十片，`peWrite`：两个 win32 目标 160 �
 各 11 × 2 份逐字节相同）。**共享库也能造了**（第五十九片：ET_DYN、装载地址从 0 起、
 没有 `.interp`、`export_global_syms` 把所有非局部符号端进 `.dynsym`、
 `prepare_dynamic_rel` 把 `.rela.data` 里那几条改写成装载时的 RELATIVE，两个目标各
-11 份逐字节相同；命令行上是 `omni elf-link --shared`）。
+11 份逐字节相同；命令行上是 `omni elf-link --shared`）。**也能接着真的共享库链了**
+（第六十片：读库的 `DT_SONAME` 与 `.dynsym`、函数走跳板、数据在自己的 `.bss` 里划一块
+加一条 `R_*_COPY`、库里提到的名字反过来导出、`DT_NEEDED`，两个目标各 3 份逐字节相同；
+命令行上是 `omni elf-link --dll libfoo.so`）。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -10380,6 +10383,35 @@ arm64-linux : 11 份共享库逐字节相同
   `char *msg = "hi"` 这样一句就正好走这一路。
 
 <!-- 第九刀第五十九片-END -->
+
+## 落地：第九刀第六十片 —— 接着真的共享库链
+
+上一片能造 `.so` 了，这一片把它用起来（门是 `tests/c/elf-dll.js`）：先
+`-shared -nostdlib lib.o -o lib.so`，再 `-nostdlib -Wl,-e,main use.o lib.so -o a.out`。
+
+```
+x86_64-linux: 3 份可执行文件逐字节相同
+arm64-linux : 3 份可执行文件逐字节相同
+```
+
+命令行上是 `omni elf-link --dll libfoo.so`。四件事：
+
+- **读库**（`tcc_load_dll`）：只要 `DT_SONAME`（没有就用文件名的最后一段）与 `.dynsym`
+  里非局部的那些符号。库的节头、字节一概不看 —— 可执行文件只记「要哪个库、要它的
+  哪些名字」。这张旁表就是 tcc 的 `dynsymtab_section`，**不进**输出。
+- **`bind_exe_dynsyms`**：没定义的名字去旁表里找，按**类型**分两路。函数在 `.dynsym`
+  里记一条 `STT_FUNC`（值 0），往下 `build_got_entries` 见了它就造跳板；数据则在
+  **自己的 `.bss` 里划一块**（起点按 16 对齐，长度取库里那条符号的 `st_size`），
+  同名符号改成「定义在 `.bss`」，再放一条 `R_*_COPY` 到 `.rela.bss` —— 装载时由动态
+  链接器把库里那份的内容拷进来。tcc 不生成位置无关码，所以引用必须是本地地址，
+  这一手是绕不开的。`.bss` 长了之后 `_end` 还要跟着改。
+- **`bind_libs_dynsyms`**：反过来，**我们**定义的、而库里也提到的名字要导出到
+  `.dynsym`。动态链接器先在可执行文件里找、再去库里找，库里对这个名字的引用于是落在
+  我们这份定义上（回调那一路靠的就是它）。顺带一个意外的入选者：`_GLOBAL_OFFSET_TABLE_`
+  —— 库把它导出了，于是我们这份定义也得导出。
+- **`DT_NEEDED`**：库名进 `.dynstr` 是在所有符号名之后，标签排在 `DT_FLAGS` 之前。
+
+<!-- 第九刀第六十片-END -->
 
 
 
