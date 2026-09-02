@@ -26,6 +26,7 @@ import { lowerC, lowerCNative } from './frontend-c/tccgen.js';
 import { genModule as genArm64 } from './arm64/from_mir.js';
 import { genModule as genX64 } from './x64/from_mir.js';
 import { writeObject } from './link/macho.js';
+import { writeObject as writeElfObject } from './link/elf.js';
 import { readSexpr } from './sexpr/read.js';
 import { lowerCoreSexpr } from './sexpr/lower.js';
 import { printSexpr } from './sexpr/print.js';
@@ -169,7 +170,7 @@ function cMir(path, incs, defs, args) {
  *
  * `arch` 给 `x86_64` 就在 Apple Silicon 上交叉出 Rosetta 能跑的码，不给按本机。
  */
-function cObj(path, out, arch, incs, defs) {
+function cObj(path, out, arch, incs, defs, fmt, os) {
   const { mod, warnings } = lowerCNative(path, readText(path), {
     readFile: (p) => {
       try {
@@ -191,7 +192,13 @@ function cObj(path, out, arch, incs, defs) {
   for (let k = 0; k < mod.funcs.length; k++) {
     syms.push({ name: mod.funcs[k].name, off: blob.offsets[k] });
   }
-  writeBinary(out, writeObject(blob.bytes, blob.data,
+  /* 两个写出器同一份入参（第三十八片）：Mach-O 那个喂 clang 那条「真的能跑」的腿，
+   * ELF 那个喂 tcc 那条「字节相同」的腿 —— tcc 的 `-c` 在**所有**目标上都写 ELF。 */
+  const write = fmt === 'elf'
+    ? (t, d, ds, rs, a, al) => writeElfObject(t, d, ds, rs, a, al,
+      { file: basename(path), prefix: os === 'linux' ? '' : '_' })
+    : writeObject;
+  writeBinary(out, write(blob.bytes, blob.data,
     [...syms, ...blob.dataSyms], [...blob.relocs, ...blob.dataRelocs], arch, blob.dataAlign));
   return out;
 }
@@ -1998,7 +2005,13 @@ function main(argv) {
       const out = oi >= 0 ? flags[oi + 1] : `${basename(path, '.c')}.o`;
       const ai = flags.indexOf('--arch');
       const arch = ai >= 0 ? flags[ai + 1] : 'arm64';
-      stdout(`${cObj(path, out, arch, incDirs(flags), defArgs(flags))}\n`);
+      /* `--format elf` 写 tcc 那种 `.o`（`ET_REL`），`--os linux` 去掉符号名前那条
+       * 下划线。默认还是 Mach-O —— 本机的 clang 只吃那一种。 */
+      const fi = flags.indexOf('--format');
+      const fmt = fi >= 0 ? flags[fi + 1] : 'macho';
+      const si = flags.indexOf('--os');
+      const os = si >= 0 ? flags[si + 1] : 'osx';
+      stdout(`${cObj(path, out, arch, incDirs(flags), defArgs(flags), fmt, os)}\n`);
       return 0;
     }
     // 一个源文件一份产物（第七十五刀）：`<名字>.sx` 与 `<名字>.js` 摊在一个目录里，

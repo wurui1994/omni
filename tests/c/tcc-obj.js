@@ -41,14 +41,15 @@ function tccSrc() {
   return m === null ? null : m[1].trim();
 }
 
-/* 目标：名字、交叉编译器、我们这边的 `--arch`。win32 那几个的 `-B` 要指到 `win32/`。 */
+/* 目标：名字、交叉编译器、我们这边的 `--arch` 与 `--os`。win32 那几个的 `-B` 要指到 `win32/`。
+ * `os` 只决定一件事：符号名前面那条下划线 —— osx 与 win32 有，linux 没有。 */
 const TARGETS = [
-  { name: 'arm64-osx', tcc: 'arm64-osx-tcc', arch: 'arm64', win32: false },
-  { name: 'x86_64-osx', tcc: 'x86_64-osx-tcc', arch: 'x86_64', win32: false },
-  { name: 'x86_64-linux', tcc: 'x86_64-tcc', arch: 'x86_64', win32: false },
-  { name: 'arm64-linux', tcc: 'arm64-tcc', arch: 'arm64', win32: false },
-  { name: 'x86_64-win32', tcc: 'x86_64-win32-tcc', arch: 'x86_64', win32: true },
-  { name: 'arm64-win32', tcc: 'arm64-win32-tcc', arch: 'arm64', win32: true },
+  { name: 'arm64-osx', tcc: 'arm64-osx-tcc', arch: 'arm64', os: 'osx', win32: false },
+  { name: 'x86_64-osx', tcc: 'x86_64-osx-tcc', arch: 'x86_64', os: 'osx', win32: false },
+  { name: 'x86_64-linux', tcc: 'x86_64-tcc', arch: 'x86_64', os: 'linux', win32: false },
+  { name: 'arm64-linux', tcc: 'arm64-tcc', arch: 'arm64', os: 'linux', win32: false },
+  { name: 'x86_64-win32', tcc: 'x86_64-win32-tcc', arch: 'x86_64', os: 'win32', win32: true },
+  { name: 'arm64-win32', tcc: 'arm64-win32-tcc', arch: 'arm64', os: 'win32', win32: true },
 ];
 
 const filters = process.argv.slice(2).filter((x) => !x.startsWith('-'));
@@ -84,8 +85,55 @@ function firstDiff(a, b) {
   return a.length === b.length ? -1 : n;
 }
 
+/**
+ * 读一个 ELF 目标文件的节头表 —— 只为了**报账**：容器对上了多少。
+ *
+ * 第三十八片之后我们与 tcc 写的是同一种格式，于是差别可以说得比「第一个不同的字节在
+ * 0x0」细得多：节的名字与形状（类型、旗、对齐、`sh_link`/`sh_info`）是容器的事，
+ * 而 `sh_size` 与节里的字节是**码**的事 —— 后者要等 B 路（一遍过的那条）才对得上。
+ */
+function elfSections(b) {
+  if (formatOf(b) !== 'ELF' || b.length < 64) return null;
+  const shoff = Number(b.readBigUInt64LE(0x28));
+  const shnum = b.readUInt16LE(0x3c);
+  const shstrndx = b.readUInt16LE(0x3e);
+  if (shoff + shnum * 64 > b.length) return null;
+  const at = (i) => shoff + i * 64;
+  const strOff = Number(b.readBigUInt64LE(at(shstrndx) + 24));
+  const nameOf = (n) => {
+    let e = strOff + n;
+    while (e < b.length && b[e] !== 0) e++;
+    return b.toString('latin1', strOff + n, e);
+  };
+  const out = [];
+  for (let i = 1; i < shnum; i++) {
+    const o = at(i);
+    out.push({
+      name: nameOf(b.readUInt32LE(o)),
+      shape: [b.readUInt32LE(o + 4), Number(b.readBigUInt64LE(o + 8)),
+        b.readUInt32LE(o + 40), b.readUInt32LE(o + 44),
+        Number(b.readBigUInt64LE(o + 48)), Number(b.readBigUInt64LE(o + 56))].join('/'),
+      size: Number(b.readBigUInt64LE(o + 32)),
+    });
+  }
+  return out;
+}
+
+/** 容器对上了没有：节的名字与次序一样、每一节的形状也一样。 */
+function sameContainer(got, want) {
+  const a = elfSections(got);
+  const c = elfSections(want);
+  if (a === null || c === null) return false;
+  if (a.length !== c.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].name !== c[i].name || a[i].shape !== c[i].shape) return false;
+  }
+  return true;
+}
+
 const dir = mkdtempSync(join(tmpdir(), 'omni-tccobj-'));
 let same = 0;
+let box = 0;
 let diff = 0;
 let notYet = 0;
 try {
@@ -108,8 +156,8 @@ try {
       }
       const want = readFileSync(refPath);
       const ourPath = join(dir, `our-${t.name}-${basename(c, '.c')}.o`);
-      const our = spawnSync('node', [CLI, 'c-obj', cpath, '-o', ourPath, '--arch', t.arch],
-        { encoding: 'utf8' });
+      const our = spawnSync('node', [CLI, 'c-obj', cpath, '-o', ourPath,
+        '--arch', t.arch, '--format', 'elf', '--os', t.os], { encoding: 'utf8' });
       if (our.status !== 0 || !existsSync(ourPath)) {
         notYet++;
         continue;
@@ -120,12 +168,22 @@ try {
         same++;
         continue;
       }
+      if (sameContainer(got, want)) {
+        box++;
+        continue;
+      }
       diff++;
       if (diff <= 6) {
         process.stdout.write(`  DIFF ${t.name} ${c}\n`
           + `    ours ${got.length} 字节（${formatOf(got)}）`
           + ` / tcc ${want.length} 字节（${formatOf(want)}）`
           + `，第一个不同在 0x${at.toString(16)}\n`);
+        const a = elfSections(got);
+        const w = elfSections(want);
+        if (a !== null && w !== null) {
+          process.stdout.write(`    节 ours [${a.map((s) => s.name).join(' ')}]\n`
+            + `       tcc  [${w.map((s) => s.name).join(' ')}]\n`);
+        }
       }
     }
   }
@@ -133,9 +191,11 @@ try {
   rmSync(dir, { recursive: true, force: true });
 }
 
-process.stdout.write(`\n${same} 字节相同, ${diff} 不同, ${notYet} 我们还编不出\n`);
-/* 还没有一条对得上，所以这一份现在**不当门禁** —— 它是一把尺子。
- * 等 ELF 目标文件写出落地，这儿就该改成「相同的条数不许变少」。 */
-if (same === 0 && diff === 0 && notYet === 0) {
+process.stdout.write(`\n${same} 字节相同, ${box} 容器相同, ${diff} 不同, ${notYet} 我们还编不出\n`);
+/* 「容器相同」的那一栏是这一片新长出来的：节头表、符号表与重定位表的**形状**与 tcc 的
+ * 一样，剩下的差别在节里的字节（码本身）与 `sh_size`。逐字节全同要等 B 路 ——
+ * 一遍过、寄存器分配与 tcc 相同的那条腿。所以这一份仍然不当门禁，是一把尺子；
+ * 真正的门禁在 `tcc-link.js`（我们的 ELF 交给 tcc 的链接器，链出来真的跑）。 */
+if (same === 0 && box === 0 && diff === 0 && notYet === 0) {
   process.stdout.write('c/tcc-obj: 一条都没量到（用例或交叉编译器不全）\n');
 }

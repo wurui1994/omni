@@ -1,0 +1,390 @@
+/* ELF 目标文件的写出 —— ADR-0017 第 11 步，第九刀第三十八片。
+ *
+ * 只写 **ET_REL**（`.o`）。尺子换成了 tcc（第三十七片）之后，这个文件是杠杆最长的
+ * 那一块：**tcc 的 `-c` 在所有目标上写的都是 ELF** —— arm64-osx、x86_64-osx、
+ * x86_64-linux、arm64-linux、x86_64-win32、arm64-win32 六个目标，`.o` 一律
+ * `7f 45 4c 46`。Mach-O（`tccmacho.c`）与 PE（`tccpe.c`）只在**可执行文件**那一步
+ * 才出场。所以「目标文件与 tcc 逐字节相同」只有一种格式要复刻，六个目标共用，
+ * 差别只在三处：`e_machine`、重定位的类型号、符号名要不要那条下划线前缀。
+ *
+ * 照 `tccelf.c` 的 `elf_output_obj` / `alloc_sec_names` / `tcc_output_elf`。
+ * **不抄代码**，只照字段布局与那两条算式（ADR-0017 的规矩）。
+ *
+ * 节的次序是**写死**的，因为 tcc 那边它也是写死的 —— 节是 `tccelf_new` 按固定
+ * 顺序造出来的，序号就是造出来的次序：
+ *
+ *   0 （全 0 的那一条）
+ *   1 .text        PROGBITS  ALLOC|EXECINSTR
+ *   2 .data        PROGBITS  ALLOC|WRITE
+ *   3 .data.ro     PROGBITS  ALLOC          （osx/linux 叫这个名字，PE 那边叫 .rdata）
+ *   4 .bss         NOBITS    ALLOC|WRITE
+ *   5 .symtab      SYMTAB
+ *   6 .strtab      STRTAB
+ *   7.. .rela.*    RELA                     （谁先要重定位谁先造）
+ *   末 .shstrtab   STRTAB                   （`alloc_sec_names` 里最后造，所以在最后）
+ *
+ * 文件里的排布是两条算式（`elf_output_obj`）：
+ *
+ *   file_offset = (64 + 3) & -4 + 节数 * 64        // 节头表紧贴 ELF 头
+ *   每一节：file_offset = (file_offset + 15) & -16 // 一律 16 对齐，空节也占一个位置
+ *
+ * NOBITS 的节（`.bss`）拿到 `sh_offset` 但**不推进**游标。文件末尾**不补齐** ——
+ * 最后一节的末尾就是文件的末尾。
+ */
+
+import { OmniError } from '../source/diag.js';
+import { RELOC } from '../arm64/asm.js';
+
+/* ---------------------------------------------------------------- 常量
+ * 名字与值照 `<elf.h>`。 */
+const ET_REL = 1;
+const EV_CURRENT = 1;
+const ELFCLASS64 = 2;
+const ELFDATA2LSB = 1;
+
+const EM_AARCH64 = 183;
+const EM_X86_64 = 62;
+
+const SHT_PROGBITS = 1;
+const SHT_SYMTAB = 2;
+const SHT_STRTAB = 3;
+const SHT_RELA = 4;
+const SHT_NOBITS = 8;
+
+const SHF_WRITE = 0x1;
+const SHF_ALLOC = 0x2;
+const SHF_EXECINSTR = 0x4;
+
+const SHN_UNDEF = 0;
+const SHN_ABS = 0xfff1;
+
+const STB_LOCAL = 0;
+const STB_GLOBAL = 1;
+const STT_NOTYPE = 0;
+const STT_OBJECT = 1;
+const STT_FUNC = 2;
+const STT_FILE = 4;
+
+const EHDR_SIZE = 64;
+const SHDR_SIZE = 64;
+const SYM_SIZE = 24;
+const RELA_SIZE = 24;
+
+/* aarch64 的那一族（`<elf.h>` 的 `R_AARCH64_*`）。
+ * 值得记一笔：**tcc 在 arm64 上取任何数据的地址都过 GOT**（`ADR_GOT_PAGE` +
+ * `LD64_GOT_LO12_NC`），连自己文件里的 static 也一样 —— 我们第三十一片走到的
+ * 那条路（外部数据只能过 GOT）在 tcc 那边是**所有**数据的默认路。 */
+const R_AARCH64_ABS64 = 257;
+const R_AARCH64_ADR_PREL_PG_HI21 = 275;
+const R_AARCH64_ADD_ABS_LO12_NC = 277;
+const R_AARCH64_CALL26 = 283;
+const R_AARCH64_ADR_GOT_PAGE = 311;
+const R_AARCH64_LD64_GOT_LO12_NC = 312;
+
+/* x86_64 的那一族。 */
+const R_X86_64_64 = 1;
+const R_X86_64_PC32 = 2;
+const R_X86_64_PLT32 = 4;
+const R_X86_64_GOTPCREL = 9;
+
+/**
+ * 我们那几种重定位到 ELF 类型号的对照。
+ *
+ * `pcSub` 是**加数的那一格差**：Mach-O 的 pcrel 是「相对指令末尾」，ELF 的
+ * `RELA` 是 `S + A - P`，`P` 指的是**那四个字节自己的地址**。四字节的坑落在指令
+ * 末尾，所以同一条指令换成 ELF 要把加数写成 `-4`。arm64 那边坑在整条指令里
+ * （21/12 位的位域），`P` 就是指令地址，不用这一格。
+ *
+ * `inPlace` 说的是原地那几个字节算不算加数。Mach-O 把加数藏在原地（数据段里的
+ * 八字节指针就是这么走的），ELF 的 `RELA` 有明写的一格 —— 所以要**搬出来**：
+ * 读走原地的字节当加数，原地清零。tcc 写出来的 `.data` 就是清过零的。
+ */
+const RELOC_TYPE = {};
+RELOC_TYPE[RELOC.BRANCH26] = { arch: 'arm64', type: R_AARCH64_CALL26, pcSub: 0, inPlace: 0 };
+RELOC_TYPE[RELOC.PAGE21] = { arch: 'arm64', type: R_AARCH64_ADR_PREL_PG_HI21, pcSub: 0, inPlace: 0 };
+RELOC_TYPE[RELOC.PAGEOFF12] = { arch: 'arm64', type: R_AARCH64_ADD_ABS_LO12_NC, pcSub: 0, inPlace: 0 };
+RELOC_TYPE[RELOC.GOT_PAGE21] = { arch: 'arm64', type: R_AARCH64_ADR_GOT_PAGE, pcSub: 0, inPlace: 0 };
+RELOC_TYPE[RELOC.GOT_PAGEOFF12] = {
+  arch: 'arm64', type: R_AARCH64_LD64_GOT_LO12_NC, pcSub: 0, inPlace: 0,
+};
+RELOC_TYPE.X86_64_RELOC_BRANCH = { arch: 'x86_64', type: R_X86_64_PLT32, pcSub: 4, inPlace: 0 };
+RELOC_TYPE.X86_64_RELOC_SIGNED = { arch: 'x86_64', type: R_X86_64_PC32, pcSub: 4, inPlace: 0 };
+RELOC_TYPE.X86_64_RELOC_GOT_LOAD = { arch: 'x86_64', type: R_X86_64_GOTPCREL, pcSub: 4, inPlace: 0 };
+RELOC_TYPE.X86_64_RELOC_UNSIGNED = { arch: 'x86_64', type: R_X86_64_64, pcSub: 0, inPlace: 8 };
+/** 数据里的一个八字节绝对地址。两种架构名字不同、语义一样，加数原地躺着。 */
+RELOC_TYPE.POINTER64 = { arch: null, type: null, pcSub: 0, inPlace: 8 };
+
+const ARCH = {
+  arm64: { machine: EM_AARCH64, ptr64: R_AARCH64_ABS64 },
+  x86_64: { machine: EM_X86_64, ptr64: R_X86_64_64 },
+};
+
+/* ---------------------------------------------------------------- 写字节 */
+class Buf {
+  constructor() {
+    this.parts = [];
+    this.len = 0;
+  }
+
+  u8(v) { return this.push(1, (dv) => dv.setUint8(0, v)); }
+  u16(v) { return this.push(2, (dv) => dv.setUint16(0, v, true)); }
+  u32(v) { return this.push(4, (dv) => dv.setUint32(0, v >>> 0, true)); }
+  u64(v) { return this.push(8, (dv) => dv.setBigUint64(0, BigInt(v), true)); }
+  i64(v) { return this.push(8, (dv) => dv.setBigInt64(0, BigInt(v), true)); }
+
+  push(n, fill) {
+    const b = new Uint8Array(n);
+    fill(new DataView(b.buffer));
+    this.parts.push(b);
+    this.len += n;
+    return this;
+  }
+
+  bytes(b) {
+    this.parts.push(b);
+    this.len += b.length;
+    return this;
+  }
+
+  /** 补 0 到某个文件偏移 —— tcc 那边是一个 `fputc(0, f)` 的循环。 */
+  padTo(off) {
+    while (this.len < off) this.u8(0);
+    if (this.len !== off) throw new OmniError(`elf: 已经写过了 ${off}（现在 ${this.len}）`);
+    return this;
+  }
+
+  out() {
+    const all = new Uint8Array(this.len);
+    let at = 0;
+    for (const p of this.parts) {
+      all.set(p, at);
+      at += p.length;
+    }
+    return all;
+  }
+}
+
+/** 字符串表：0 号是空串，所以从一个 0 字节起头（`put_elf_str` 那边同一条）。 */
+class StrTab {
+  constructor() {
+    this.parts = [new Uint8Array(1)];
+    this.at = 1;
+    this.index = new Map();
+  }
+
+  intern(s) {
+    if (s === '') return 0;
+    const hit = this.index.get(s);
+    if (hit !== undefined) return hit;
+    const off = this.at;
+    const b = new Uint8Array(s.length + 1);
+    for (let i = 0; i < s.length; i++) b[i] = s.charCodeAt(i);
+    this.parts.push(b);
+    this.at += b.length;
+    this.index.set(s, off);
+    return off;
+  }
+
+  bytes() {
+    const all = new Uint8Array(this.at);
+    let p = 0;
+    for (const x of this.parts) {
+      all.set(x, p);
+      p += x.length;
+    }
+    return all;
+  }
+}
+
+function align(n, to) {
+  return n % to === 0 ? n : n + (to - (n % to));
+}
+
+/* ---------------------------------------------------------------- 符号表
+ * ELF 的符号表**必须**局部在前、全局在后，`sh_info` 报的就是局部那一段的长度
+ * （`sort_syms` 的注释里写着「TCC 生成的时候排不了，只能事后排」）。我们这儿是
+ * 一次攒齐再写，所以直接按段攒：
+ *
+ *   0        全 0 的那一条
+ *   1        源文件名（STT_FILE，`st_shndx = SHN_ABS`）
+ *   2..      局部的（static 的量、字符串字面量那种没名字的块）
+ *   ..       本文件定义的全局
+ *   末       只被引用、没有定义的（STB_GLOBAL + STT_NOTYPE）
+ *
+ * 最后那一段的类型是 NOTYPE 而不是 FUNC，这是 `tccelf_end_file` 里明写的一条：
+ * 「未定义的 STT_FUNC 会让 gnu ld 在静态链接 STT_GNU_IFUNC 时犯糊涂」。
+ */
+function buildSyms(defs, relocs, strs, prefix) {
+  const syms = [{ strx: 0, info: 0, shndx: SHN_UNDEF, value: 0, size: 0 }];
+  const no = new Map();
+  const put = (d, bind) => {
+    const sect = d.sect === undefined ? 1 : d.sect;
+    no.set(d.name, syms.length);
+    syms.push({
+      strx: strs.intern(prefix + d.name),
+      info: bind * 16 + (sect === 1 ? STT_FUNC : STT_OBJECT),
+      shndx: sect,
+      value: d.off,
+      size: d.size === undefined ? 0 : d.size,
+    });
+  };
+  for (const d of defs) if (d.local === true) put(d, STB_LOCAL);
+  const nlocal = syms.length;
+  for (const d of defs) if (d.local !== true) put(d, STB_GLOBAL);
+  /* 没定义的那些按名字去重，次序按第一次被引用 —— 同一个 `printf` 叫十次只占一条。 */
+  for (const r of relocs) {
+    if (no.has(r.sym)) continue;
+    no.set(r.sym, syms.length);
+    syms.push({
+      strx: strs.intern(prefix + r.sym),
+      info: STB_GLOBAL * 16 + STT_NOTYPE,
+      shndx: SHN_UNDEF,
+      value: 0,
+      size: 0,
+    });
+  }
+  return { syms, no, nlocal };
+}
+
+/**
+ * 写一个 `ET_REL` 的 ELF 目标文件。
+ *
+ * 入参与 `macho.js` 的 `writeObject` **一样** —— 同一份前端产物喂两个写出器，
+ * 一个给 clang 那条「真的能跑」的腿，一个给 tcc 那条「字节相同」的腿。
+ *
+ * @param text  代码字节（`Uint8Array`）
+ * @param data  数据字节（`Uint8Array`）
+ * @param defs  本文件定义的符号：`[{name, off, sect, size?, local?}]`，
+ *              `sect` 1 是 `.text`、2 是 `.data`
+ * @param relocs `[{at, kind, sym, sect}]`，`at` 是**自己那一节里**的偏移
+ * @param arch  `'arm64'` 或 `'x86_64'`
+ * @param dataAlign 这一格 ELF 用不上（tcc 的 `.data` 一律 `sh_addralign = 8`），
+ *              留着是为了与 Mach-O 那个写出器同签名
+ * @param opts  `{file, prefix}`：`file` 是写进 STT_FILE 那一条的源文件名；
+ *              `prefix` 是符号名前缀 —— osx 与 win32 上是 `'_'`，linux 上是 `''`
+ */
+export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
+  const archName = arch === undefined ? 'arm64' : arch;
+  const cpu = ARCH[archName];
+  if (cpu === undefined) throw new OmniError(`elf: 还不认识架构 ${archName}`);
+  const o = opts === undefined ? {} : opts;
+  const prefix = o.prefix === undefined ? '_' : o.prefix;
+  /* 数据字节要能改 —— 原地躺着的加数得搬到 `r_addend` 那一格去，原地清零。 */
+  const dataBytes = new Uint8Array(data === undefined ? 0 : data.length);
+  if (data !== undefined) dataBytes.set(data);
+
+  const strs = new StrTab();
+  const strx = strs.intern(o.file === undefined ? 'a.c' : o.file);
+  const { syms, no, nlocal } = buildSyms(defs, relocs, strs, prefix);
+  /* STT_FILE 那一条插在 1 号位上，所以上面攒出来的号要整体 +1。 */
+  syms.splice(1, 0, { strx, info: STB_LOCAL * 16 + STT_FILE, shndx: SHN_ABS, value: 0, size: 0 });
+  const symIndexOf = (name) => {
+    const hit = no.get(name);
+    if (hit === undefined) throw new OmniError(`elf: 重定位指着一个没登记的符号 ${name}`);
+    return hit + 1;
+  };
+  const strBytes = strs.bytes();
+
+  /* 重定位按节分张表，表内按偏移升序。加数照 `RELOC_TYPE` 的两格算。 */
+  const byAt = (x, y) => x.at - y.at;
+  const relaOf = (sect) => {
+    const rs = relocs.filter((r) => (r.sect === undefined ? 1 : r.sect) === sect).sort(byAt);
+    return rs.map((r) => {
+      const k = RELOC_TYPE[r.kind];
+      if (k === undefined) throw new OmniError(`elf: 还不认识重定位 ${r.kind}`);
+      if (k.arch !== null && k.arch !== archName) {
+        throw new OmniError(`elf: 重定位 ${r.kind} 不是 ${archName} 的`);
+      }
+      const type = k.type === null ? cpu.ptr64 : k.type;
+      let add = -k.pcSub;
+      if (k.inPlace === 8) {
+        if (sect !== 2) throw new OmniError(`elf: ${r.kind} 只能落在数据节里`);
+        const dv = new DataView(dataBytes.buffer, r.at, 8);
+        add = dv.getBigInt64(0, true);
+        dv.setBigInt64(0, 0n, true);
+      }
+      return { at: r.at, sym: symIndexOf(r.sym), type, add };
+    });
+  };
+  const raText = relaOf(1);
+  const raData = relaOf(2);
+
+  /* ---- 节。1..6 是写死的六条，后面接重定位表，最后是 `.shstrtab`。 */
+  const shstr = new StrTab();
+  const secs = [{ name: '', type: 0, flags: 0, off: 0, size: 0, link: 0, info: 0, al: 0, ent: 0 }];
+  const sec = (name, type, flags, size, link, info, al, ent) => {
+    secs.push({ name, type, flags, size, link, info, al, ent });
+    return secs.length - 1;
+  };
+  sec('.text', SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, text.length, 0, 0, 8, 0);
+  sec('.data', SHT_PROGBITS, SHF_ALLOC | SHF_WRITE, dataBytes.length, 0, 0, 8, 0);
+  sec('.data.ro', SHT_PROGBITS, SHF_ALLOC, 0, 0, 0, 8, 0);
+  sec('.bss', SHT_NOBITS, SHF_ALLOC | SHF_WRITE, 0, 0, 0, 8, 0);
+  const symtabNo = secs.length;
+  sec('.symtab', SHT_SYMTAB, 0, syms.length * SYM_SIZE, symtabNo + 1, nlocal + 1, 8, SYM_SIZE);
+  sec('.strtab', SHT_STRTAB, 0, strBytes.length, 0, 0, 1, 0);
+  if (raText.length > 0) {
+    sec('.rela.text', SHT_RELA, 0, raText.length * RELA_SIZE, symtabNo, 1, 8, RELA_SIZE);
+  }
+  if (raData.length > 0) {
+    sec('.rela.data', SHT_RELA, 0, raData.length * RELA_SIZE, symtabNo, 2, 8, RELA_SIZE);
+  }
+  sec('.shstrtab', SHT_STRTAB, 0, 0, 0, 0, 1, 0);
+  for (let i = 1; i < secs.length; i++) secs[i].strx = shstr.intern(secs[i].name);
+  const shstrBytes = shstr.bytes();
+  secs[secs.length - 1].size = shstrBytes.length;
+
+  /* ---- 排布（`elf_output_obj` 的那两条算式）。 */
+  let at = align(EHDR_SIZE, 4) + secs.length * SHDR_SIZE;
+  for (let i = 1; i < secs.length; i++) {
+    at = align(at, 16);
+    secs[i].off = at;
+    if (secs[i].type !== SHT_NOBITS) at += secs[i].size;
+  }
+
+  const b = new Buf();
+  // ---- ELF 头
+  b.u8(0x7f).u8(0x45).u8(0x4c).u8(0x46);
+  b.u8(ELFCLASS64).u8(ELFDATA2LSB).u8(EV_CURRENT).u8(0);
+  b.u64(0);                                     // e_ident 剩下的八格
+  b.u16(ET_REL).u16(cpu.machine).u32(EV_CURRENT);
+  b.u64(0).u64(0).u64(EHDR_SIZE);               // e_entry / e_phoff / e_shoff
+  b.u32(0).u16(EHDR_SIZE).u16(0).u16(0);        // e_flags / e_ehsize / e_phentsize / e_phnum
+  b.u16(SHDR_SIZE).u16(secs.length).u16(secs.length - 1);
+  if (b.len !== EHDR_SIZE) throw new OmniError(`elf: 头写成了 ${b.len} 字节`);
+
+  // ---- 节头表
+  for (const s of secs) {
+    b.u32(s.strx === undefined ? 0 : s.strx).u32(s.type).u64(s.flags);
+    b.u64(0).u64(s.off).u64(s.size);            // sh_addr 在 .o 里一律 0
+    b.u32(s.link).u32(s.info).u64(s.al).u64(s.ent);
+  }
+
+  // ---- 节的内容，一节一节补 0 补到自己的 `sh_offset`
+  const put = (i, fill) => {
+    if (secs[i].type === SHT_NOBITS) return;
+    b.padTo(secs[i].off);
+    fill();
+  };
+  put(1, () => b.bytes(text));
+  put(2, () => b.bytes(dataBytes));
+  put(3, () => {});
+  put(4, () => {});
+  put(5, () => {
+    for (const s of syms) b.u32(s.strx).u8(s.info).u8(0).u16(s.shndx).u64(s.value).u64(s.size);
+  });
+  put(6, () => b.bytes(strBytes));
+  for (let i = 7; i < secs.length; i++) {
+    const rs = secs[i].name === '.rela.text' ? raText : secs[i].name === '.rela.data' ? raData : null;
+    put(i, () => {
+      if (rs === null) {
+        b.bytes(shstrBytes);
+        return;
+      }
+      /* `r_info` 是「符号号 * 2^32 + 类型号」。用乘法而不是移位 ——
+       * JS 的 `<<` 只在 32 位里做（macho.js 那边同一条）。 */
+      for (const r of rs) b.u64(r.at).u64(BigInt(r.sym) * 4294967296n + BigInt(r.type)).i64(r.add);
+    });
+  }
+  return b.out();
+}

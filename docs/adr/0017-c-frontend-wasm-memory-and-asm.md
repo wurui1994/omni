@@ -391,7 +391,10 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
 
 9. **arm64 指令编码器**（对着 `llvm-mc` 验）——**前三片已落地**（第一批 96 条编码、第二批补齐逻辑立即数/位段/浮点/屏障、第三片是带标签回填与符号记账的指令缓冲），见下面的第九刀第一到三片节。
 10. **arm64 代码生成器 + 内存里执行**（`omni run x.c` 在没有 cc 的机器上跑起来）——**前四片已落地**（整数与结构化控制流；调用与递归；浮点与它的调用约定；存取。每个值一个栈位；**native 这条腿上没有线性内存**，地址就是真指针 —— 线性内存只属于 wasm 与解释器那两条腿。用 `.incbin` + clang 链接后在真机上**跑起来**验的），见下面的第九刀第四到七片节。
-11. **x86_64 同两步**——**两步都落地了**（`stage0/src/x64/`：编码器与缓冲对着 `llvm-mc` 验、`from_mir.js` 生成的代码在 Rosetta 上真跑过，见第九刀第十二到十六片节），然后 **Mach-O / ELF 写出**——**Mach-O 两种架构都写了**（`stage0/src/link/macho.js`），然后**内联汇编**——Mach-O 的目标文件写出**已落地前三片**（`MH_OBJECT`、`__TEXT,__text` 与 `__DATA,__data`、`BRANCH26`/`PAGE21`/`PAGEOFF12` 三种重定位；`CCALL` 落成 `bl <符号>`、模块级变量与字符串字面量落成 `adrp`/`add`，clang 能把我们的 `.o` 与 libc 链起来跑，C 那边也读得到我们定义的数据符号），**读入与并合也已落地**（`link.js`：`readObject` 读回自己写出去的东西、`linkObjects` 把几个 `.o` 并成一个并当场填掉跨文件的 `BRANCH26`），见下面的第九刀第八到十一片节。
+11. **x86_64 同两步**——**两步都落地了**（`stage0/src/x64/`：编码器与缓冲对着 `llvm-mc` 验、`from_mir.js` 生成的代码在 Rosetta 上真跑过，见第九刀第十二到十六片节），然后 **Mach-O / ELF 写出**——**Mach-O 两种架构都写了**（`stage0/src/link/macho.js`），然后**内联汇编**——Mach-O 的目标文件写出**已落地前三片**（`MH_OBJECT`、`__TEXT,__text` 与 `__DATA,__data`、`BRANCH26`/`PAGE21`/`PAGEOFF12` 三种重定位；`CCALL` 落成 `bl <符号>`、模块级变量与字符串字面量落成 `adrp`/`add`，clang 能把我们的 `.o` 与 libc 链起来跑，C 那边也读得到我们定义的数据符号），**读入与并合也已落地**（`link.js`：`readObject` 读回自己写出去的东西、`linkObjects` 把几个 `.o` 并成一个并当场填掉跨文件的 `BRANCH26`），见下面的第九刀第八到十一片节。**ELF 目标文件写出也落地了**（第三十八片，
+`stage0/src/link/elf.js`：`ET_REL`，节的次序与 `elf_output_obj` 的排布算式照
+`tccelf.c`；tcc 的 `-c` 在所有目标上都写 ELF，所以这一份写出六个目标共用，
+差别只在 `e_machine`、重定位号与符号名前那条下划线）。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -415,6 +418,9 @@ native 上的堆就是系统的堆 —— `malloc`/`free` 落成普通的外部 
 
 **`gen/` 那一批已经在 native 上整批跑**（第二十六片）：`omni c-obj` 出 `.o`、clang 链、
 真进程跑，83 条里 **80 条**与 `tcc -run` 逐字节相同（`tests/c/native-gen.js`）。
+**同一批还有第二条能跑的路**（第三十八片）：`c-obj --format elf` 出 ELF 目标文件、
+**tcc 自己的链接器**链、真进程跑，同样 **80 条**过（`tests/c/tcc-link.js`）——
+那条路上没有 clang，tcc 会把我们写的节头、符号表与重定位全读一遍再自己重定位。
 **函数指针也通了**（第二十七片：MIR 的 `FADDR` 取函数符号的真地址、`CALLI` 落成
 `blr` / `call *r`），**初值里的地址也通了**（第二十八片：数据节里的 `POINTER64`
 重定位 —— 静态指针表、`char *p = "…"`、`&g`、`&s.f`、函数指针的全局都在这一格上）。
@@ -9329,6 +9335,129 @@ tcc x86_64-win32 7f 45 4c 46  ELF
   两条腿都要绿。
 
 <!-- 第九刀第三十七片-END -->
+
+## 落地：第九刀第三十八片 —— ELF 目标文件写出，而且 tcc 自己的链接器认它
+
+第三十七片说了「一份 ELF 目标写出把六个目标的 `-c` 一起对上」，这一片把它写了：
+`stage0/src/link/elf.js`，写 `ET_REL`。入参与 `link/macho.js` 的 `writeObject`
+**一模一样** —— 同一份前端产物喂两个写出器，一个给 clang 那条腿，一个给 tcc 那条腿。
+
+### 一、`tccelf.c` 里那两条算式
+
+节的次序是**写死**的，因为 tcc 那边它也是写死的：节是 `tccelf_new` 按固定顺序造出来的，
+序号就是造出来的次序，`.shstrtab` 在 `alloc_sec_names` 里最后造，所以永远在最后。
+
+```
+0 （全 0 的那一条）
+1 .text      PROGBITS  ALLOC|EXECINSTR  align 8
+2 .data      PROGBITS  ALLOC|WRITE      align 8
+3 .data.ro   PROGBITS  ALLOC            align 8
+4 .bss       NOBITS    ALLOC|WRITE      align 8
+5 .symtab    SYMTAB    entsize 24, link=6, info=局部符号的条数
+6 .strtab    STRTAB    align 1
+7.. .rela.*  RELA      entsize 24, link=5, info=被修的那一节
+末 .shstrtab STRTAB    align 1
+```
+
+排布是 `elf_output_obj` 的两行：
+
+```
+off = (64 + 3) & -4  +  节数 * 64        // 节头表紧贴 ELF 头，所以 e_shoff = 64
+每一节：off = (off + 15) & -16           // 一律 16 对齐，空节也占一个位置
+```
+
+`SHT_NOBITS`（`.bss`）拿到 `sh_offset` 但**不推进**游标；文件末尾**不补齐**，
+最后一节的末尾就是文件的末尾。`e_shstrndx = 节数 - 1`，`e_phnum = 0`。
+
+### 二、重定位：加数从原地搬到明写的那一格
+
+Mach-O 把加数藏在**原地那几个字节**里（数据段那个八字节指针就是这么走的），
+ELF 的 `RELA` 有明写的 `r_addend`。于是转换要做两件事：
+
+- 数据里的八字节指针（`POINTER64`）：读走原地的八字节当加数，**原地清零**。
+  tcc 写出来的 `.data` 就是清过零的。
+- x86_64 那几种四字节 pcrel（`PC32`/`PLT32`/`GOTPCREL`）：Mach-O 的 pcrel 是
+  「相对指令末尾」，ELF 是 `S + A - P` 而 `P` 指**那四个字节自己**的地址，
+  坑落在指令末尾，所以加数要写 `-4`。arm64 那边坑在整条指令的位域里，`P` 就是
+  指令地址，不用这一格。
+
+类型号对照（`R_AARCH64_*` / `R_X86_64_*`）：
+
+```
+BRANCH26      -> 283 CALL26          BRANCH   -> 4 PLT32
+PAGE21        -> 275 ADR_PREL_PG_HI21 SIGNED  -> 2 PC32
+PAGEOFF12     -> 277 ADD_ABS_LO12_NC  GOT_LOAD-> 9 GOTPCREL
+GOT_PAGE21    -> 311 ADR_GOT_PAGE     UNSIGNED-> 1 X86_64_64
+GOT_PAGEOFF12 -> 312 LD64_GOT_LO12_NC
+POINTER64     -> 257 ABS64 / 1 X86_64_64（按架构）
+```
+
+顺手记一笔勘察出来的事实：**tcc 在 arm64 上取任何数据的地址都过 GOT**
+（`ADR_GOT_PAGE` + `LD64_GOT_LO12_NC`），连自己文件里的 static 也一样。
+我们第三十一片被 `ld` 逼出来的那条路（外部数据只能过 GOT），在 tcc 那边是**所有**
+数据的默认路。
+
+### 三、符号表：局部在前、`STT_FILE` 在 1 号位、未定义的是 `NOTYPE`
+
+```
+0    全 0
+1    源文件名（STT_FILE，st_shndx = SHN_ABS）
+2..  局部的
+..   本文件定义的全局（.text 里的是 STT_FUNC，.data 里的是 STT_OBJECT）
+末   只被引用、没有定义的（STB_GLOBAL + STT_NOTYPE）
+```
+
+`sh_info` 报的就是局部那一段的条数。最后那一段的类型是 `NOTYPE` 而不是 `FUNC`,
+这是 `tccelf_end_file` 里明写的一条：未定义的 `STT_FUNC` 会让 gnu ld 在静态链接
+`STT_GNU_IFUNC` 时犯糊涂。符号名前那条下划线按目标走 —— osx 与 win32 有，linux 没有
+（`c-obj --os linux`）。
+
+### 四、新的门禁：`tests/c/tcc-link.js` —— 一条不经过 clang 的能跑的路
+
+```
+node stage0/src/cli.js c-obj x.c -o x.o --format elf
+arm64-osx-tcc -B<有 libtcc1.a 的目录> x.o -o x
+./x
+```
+
+**83 条 gen 用例，80 过、0 败、1 还没到（`23-vararg-struct`）、2 问不出同一个答案。**
+第一次跑就是这个数 —— ELF 写出没有返工。
+
+这一份的价值不只是多一把尺子：tcc 的 `tcc_load_object_file` 会把我们写的节头、
+符号表、重定位**全读一遍再自己重定位**，一个字段填歪它就会说话，而 clang 那条腿
+根本看不见 ELF。所以它同时验「ELF 写对了」与「码本来就对」两件事。
+`libtcc1.a` 那一格有个坑：交叉编译出来的名字带前缀（`arm64-osx-libtcc1.a`），
+而 tcc 只找 `-B<dir>/libtcc1.a`，所以测试里现搭一个只有那一个文件的目录喂给 `-B`。
+
+三把尺子到这一片的分工：
+
+- `native-gen.js`：我们出 Mach-O `.o` -> **clang** 链 -> 跑，与 `tcc -run` 比输出
+- `tcc-link.js`：我们出 ELF `.o` -> **tcc** 链 -> 跑，与 `tcc -run` 比输出
+- `tcc-obj.js`：我们出 ELF `.o`，与 `<target>-tcc -c` 的目标文件比**字节**
+
+### 五、字节对账走到哪儿了
+
+`tcc-obj.js` 多了一栏「容器相同」：节的名字、次序，以及每一节的形状
+（类型、旗、`sh_link`/`sh_info`、对齐、`sh_entsize`）与 tcc 的完全一样，
+差别只剩节里的字节与 `sh_size`。arm64-osx 目标、83 条用例：
+
+```
+0 字节相同, 2 容器相同, 80 不同, 1 我们还编不出
+```
+
+第一个不同的字节，绝大多数落在 **0xa0** —— 那是 1 号节头里的 `sh_size`，
+也就是说 ELF 头、0 号节头、`.text` 的名字/类型/旗/地址全对上了，第一格差别是
+**代码有多长**。那是 B 路（一遍过、寄存器分配与 tcc 相同）的活，不是容器的活。
+
+结构上还剩两处已知的不同，都记在这儿不藏：
+
+1. `.rela.text` 与 `.rela.data` 的**次序**。tcc 那边是「谁先要重定位谁先造」——
+   全局的初值里带地址而它写在函数之前，`.rela.data` 就在前面。我们这儿是写死的
+   `.rela.text` 在前。要对上得让前端记住「谁先要」，那属于 B 路。
+2. 有些用例我们**没有** `.rela.text` 而 tcc 有：文件内部的调用我们在汇编层就把
+   相对偏移填掉了，tcc 一律发一条重定位让链接器填。同样是 B 路的事。
+
+<!-- 第九刀第三十八片-END -->
 
 
 
