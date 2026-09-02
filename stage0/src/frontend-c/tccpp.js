@@ -168,6 +168,9 @@ class CFile {
     this.text = text;
     this.pos = 0;
     this.lineNum = 1;
+    /** 上一次印过行标时的行号（tcc 的 `line_ref`，`BufferedFile` 是 calloc 出来的所以起手 0）。
+     *  `pp_line` 拿 `lineNum - lineRef` 决定是补几个换行还是印一行行标。 */
+    this.lineRef = 0;
     this.prev = prev;
     /** 进这个文件时 ifdef 栈的深度：`#endif` 少了一个就要在文件末尾报错（`tccpp.c:2580`） */
     this.ifdefBase = 0;
@@ -243,6 +246,10 @@ export class Cpp {
     this.ppCounter = 0;
     /** `-dD`（3）/ `-dM`（7）：`dflag & 7` 开「边定义边印」，`& 4` 再把记号流那一半掐掉。 */
     this.dflag = 0;
+    /** `-P` 的那一格（`LINE_MACRO_OUTPUT_FORMAT`，tcc.h:1372；`Pflag = atoi(optarg) + 1`）：
+     *  0 = GCC 的 `# 行号 "文件"`（**默认**）、1 = 什么都不印（`-P`）、
+     *  2 = `#line 行号 "文件"`（`-P1`）、11 = `-P10`（数字一律十进制，随后当 1 用）。 */
+    this.Pflag = 0;
     /** `pp_debug_tok` / `pp_debug_symv`：刚过去那一条指示是什么、动的是哪个名字。 */
     this.ppDebugTok = 0;
     this.ppDebugSymv = 0;
@@ -2087,12 +2094,47 @@ export class Cpp {
     return '';
   }
 
+  /**
+   * `pp_line`（`tccpp.c:3796`）：把「现在在哪个文件的哪一行」交代给下游。
+   *
+   * 四种走法（`Pflag`）：不印、补几个换行、`#line`、`# 行号 "文件"`。
+   * 要紧的是**第二支在第三四支前面**：只要 `level === 0`（没进出文件）、这个文件先前印过
+   * 行标（`lineRef !== 0`）、而且落后不到 8 行，就**补换行而不是印行标** —— 行号靠数行
+   * 对上，输出比行标干净。差 8 行以上才值得印一行。
+   *
+   * `level`：> 0 = 刚进一个文件（行尾 ` 1`），< 0 = 刚出来（` 2`），0 = 同一个文件里跳。
+   * `-dM`（`dflag & 4`）一进来就返回 —— 那一路连 `lineRef` 都不动。
+   */
+  ppLine(f, level) {
+    if ((this.dflag & 4) !== 0) return '';
+    let out = '';
+    let d = f.lineNum - f.lineRef;
+    if (this.Pflag === 1) {
+      // LINE_MACRO_OUTPUT_FORMAT_NONE：一个字不印
+    } else if (level === 0 && f.lineRef !== 0 && d < 8) {
+      while (d > 0) { out += '\n'; d--; }
+    } else if (this.Pflag === 2) {
+      out = `#line ${f.lineNum} "${f.filename}"\n`;
+    } else {
+      out = `# ${f.lineNum} "${f.filename}"${level > 0 ? ' 1' : ''}${level < 0 ? ' 2' : ''}\n`;
+    }
+    f.lineRef = f.lineNum;
+    return out;
+  }
+
   preprocessToText(filename, text) {
     this.ppOnly = true;
     this.installPredefs(filename);
     this.file = new CFile(filename, text, null);
     this.file.ifdefBase = 0;
     this.parseFlags = PF_PREPROCESS | PF_LINEFEED | PF_SPACES | PF_ACCEPT_STRAYS;
+    /* `-P10`（Pflag 11）：数字当场解成有类型的常量再印回去 —— 于是十六进制与浮点都成了
+     * 十进制。Bellard 当年拿这一路让 tcc 编译自己（`tccpp.c:3904` 那段注释）。
+     * 认过一次之后它就当 1（什么行标都不印）用。 */
+    if (this.Pflag === 11) {
+      this.parseFlags |= PF_TOK_NUM;
+      this.Pflag = 1;
+    }
     this.tokFlags = TOK_FLAG_BOL | TOK_FLAG_BOF;
 
     let out = '';
@@ -2106,9 +2148,25 @@ export class Cpp {
     }
     let tokenSeen = TOK_LINEFEED;
     let white = '';
+    /* 开工先交代一次「现在在哪」。`file.prev` 非空是「主文件本身就是被 include 进来的」
+     * 那一路（tcc 里 `<command line>` 那份预定义源码就是这么挂上去的）。 */
+    let level = 0;
+    if (this.file.prev !== null && this.file.prev !== undefined) {
+      out += this.ppLine(this.file.prev, level++);
+    }
+    out += this.ppLine(this.file, level);
     for (;;) {
+      const iptr = this.includeStack.length;
       this.next();
       if (this.tok === TOK_EOF) break;
+      /* 这一个记号是不是把我们带进/带出了一个文件？带进来的话先给**来处**补一行
+       * （`pp_line(*iptr, 0)`：`iptr` 那一格里放的正是压栈时的当前文件），再给新文件印
+       * 一行带 ` 1`；出来只印一行带 ` 2`。 */
+      level = this.includeStack.length - iptr;
+      if (level !== 0) {
+        if (level > 0) out += this.ppLine(this.includeStack[iptr], 0);
+        out += this.ppLine(this.file, level);
+      }
       /* `-dD`/`-dM`：刚过去那一条 `#define`/`#undef`/`#pragma *_macro` 印成一行。
        * `-dM`（`& 4`）连记号流那一半都不印 —— 输出就只剩这些行。 */
       if ((this.dflag & 7) !== 0) {
@@ -2122,10 +2180,13 @@ export class Cpp {
       if (this.tok === TOK_LINEFEED) {
         white = '';
         if (tokenSeen === TOK_LINEFEED) continue;
+        /* 真印出去的那个换行也要记一笔 —— 否则 `pp_line` 会以为落后了一行。 */
+        this.file.lineRef++;
       } else if (tokenSeen === TOK_LINEFEED) {
-        /* 一行的第一个记号。`-P` 下 pp_line 什么都不印，而攒下来的空白**照印** ——
-         * 量过 tcc：`    int    b;` 出来还是 `    int    b;`，缩进一个字节不差。
+        /* 一行的第一个记号：先交代行号。`-P` 下 `pp_line` 什么都不印，而攒下来的空白
+         * **照印** —— 量过 tcc：`    int    b;` 出来还是 `    int    b;`，缩进一个字节不差。
          * （这里曾经手滑清掉了 white，于是所有缩进都消失 —— 逐字节比对当场抓住。） */
+        out += this.ppLine(this.file, 0);
       } else if (white === '' && ppNeedSpace(tokenSeen, this.tok)) {
         white = ' ';
       }

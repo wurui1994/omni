@@ -119,10 +119,11 @@ function defArgs(argv) {
 const C_SYS_INCLUDE = [join(installDir(), '..', '..', 'include')];
 
 /**
- * 一份 `.c` -> 预处理后的文本。**格式与 `tcc -E -P` 逐字节相同**（ADR-0017 第五刀）。
+ * 一份 `.c` -> 预处理后的文本。**格式与 `tcc -E` 逐字节相同**（ADR-0017 第五刀）：
+ * 默认带 GCC 那种 `# 行号 "文件"` 的行标，`-P` 一族把它换掉或关掉。
  * 文件 IO 在这里，预处理器自己只认一个 `readFile` 回调 —— 于是 REPL 那一路可以把
  * 内存里的几份 `.h` 直接喂进去，测试也不必碰 fs。
- */function cppText(path, incs, defs, dflag) {
+ */function cppText(path, incs, defs, dflag, pflag) {
   const cpp = new Cpp({
     readFile: (p) => {
       try {
@@ -140,6 +141,8 @@ const C_SYS_INCLUDE = [join(installDir(), '..', '..', 'include')];
   for (const [name, body] of defs) cpp.define(name, body);
   /* `-dD` = 3、`-dM` = 7（tcc 的 `dflag`）。 */
   cpp.dflag = dflag ?? 0;
+  /* `-P` 那一格（tcc 的 `Pflag`）：0 = `# 行号 "文件"`、1 = 不印、2 = `#line`、11 = `-P10`。 */
+  cpp.Pflag = pflag ?? 0;
   const out = cpp.preprocessToText(path, readText(path));  for (const w of cpp.warnings) stderr(`${w}\n`);
   return out;
 }
@@ -1990,14 +1993,20 @@ function main(argv) {
       stdout(path.endsWith('.jnc') ? jncText(path, incDirs(rest), false) : asyText(path));
       return 0;
     }
-    // C 的预处理（ADR-0017 第五刀）。**格式与 `tcc -E -P` 逐字节相同** —— 那是它的
+    // C 的预处理（ADR-0017 第五刀）。**格式与 `tcc -E` 逐字节相同** —— 那是它的
     // 测试轴（`tests/c/`）：同一份 `.c` 交给我们和 tcc，两份输出必须一样。
     // `-I <目录>` 与 `.jnc` 那一路共用同一个收集器；`-D 名字[=宏体]` 与 tcc 同形。
     case 'cpp': {
       /* `-dD` / `-dM`：把 `#define`/`#undef`/`#pragma *_macro` 边过边印，
        * `-dM` 再把记号流那一半掐掉（tcc 的 `dflag` = 3 / 7）。 */
       const dflag = rest.includes('-dM') ? 7 : (rest.includes('-dD') ? 3 : 0);
-      stdout(cppText(path, incDirs(rest), defArgs(rest), dflag));
+      /* `-P[n]`：行标那一格。tcc 是 `Pflag = atoi(后面那串) + 1` —— `-P` → 1（什么都不印）、
+       * `-P1` → 2（`#line`）、`-P10` → 11。不给就是 0，GCC 的 `# 行号 "文件"`。 */
+      let pflag = 0;
+      for (const a of rest) {
+        if (a === '-P' || /^-P\d+$/.test(a)) pflag = (Number.parseInt(a.slice(2), 10) || 0) + 1;
+      }
+      stdout(cppText(path, incDirs(rest), defArgs(rest), dflag, pflag));
       return 0;
     }
     // C -> MIR（ADR-0017 第六刀）。`c-mir` 印 MIR，`c-run` 跑它 ——

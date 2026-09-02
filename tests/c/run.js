@@ -6,9 +6,12 @@
 // （`.omni-cache/tcc-build/tcc`，源码树在 /Users/wurui/Documents/Lang/reference/tinycc）。
 //
 // 七组：
-//   1. `cpp/`     —— 预处理输出与 tcc -E -P 逐字节相同。**没有 .expected 文件**：
+//   1. `cpp/`     —— 预处理输出与 tcc 逐字节相同。**没有 .expected 文件**：
 //                    期望值就是 tcc 的输出，写死一份反而会在 tcc 升级时骗人。
+//                    每份文件走六种走法：`-P`（基准）、`-dD`、`-dM`、`-E`（带行标）、
+//                    `-P1`（`#line`）、`-P10`。见 PP_MODES。
 //   2. `inc/`     —— `#include` 的搜索与守卫：同样与 tcc 比，只是多给一个 -I。
+//                    带行标那两种走法也在这儿 —— 进出文件的 ` 1`/` 2` 只有真 include 才试得到。
 //   3. `cpp-bad/` —— 该拒的要拒，而且拒在正确的理由上（阶段边界与真错误各占一半）。
 //                    这一组有 .expected（一行，错误消息的关键片段）。
 //   4. `gen/`     —— 第六刀：编译并跑，**进程退出码与整条 stdout** 都与 `tcc -run` 相同。
@@ -73,12 +76,13 @@ const pick = (d) => {
 };
 
 /** 我们的预处理器跑一份文件，回 {out} 或 {err} */
-function ours(path, incDirs, dflag = 0) {
+function ours(path, incDirs, dflag = 0, pflag = 1) {
   const cpp = new Cpp({
     readFile: (p) => read(p),
     includeDirs: incDirs,
   });
   cpp.dflag = dflag;
+  cpp.Pflag = pflag;
   try {
     return { out: cpp.preprocessToText(path, read(path)), warnings: cpp.warnings };
   } catch (e) {
@@ -86,9 +90,9 @@ function ours(path, incDirs, dflag = 0) {
   }
 }
 
-/** tcc -E -P 跑同一份，回 {out} 或 {err} */
+/** tcc 跑同一份（`-E` + 走法自己那几个开关），回 {out} 或 {err} */
 function oracle(path, incDirs, extra = []) {
-  const args = ['-E', '-P', ...extra];
+  const args = ['-E', ...extra];
   for (const d of incDirs) args.push('-I', d);
   args.push(path);
   const r = spawnSync(TCC, args, { encoding: 'utf8' });
@@ -102,6 +106,31 @@ if (!hasTcc) {
   process.stdout.write('       建它：见 ADR-0017「量出来的基线」那一节的树外构建\n');
 }
 
+/**
+ * `cpp/`、`inc/` 两组的走法。`args` 是给 tcc 的，`pflag`/`dflag` 是给我们的
+ * （`Pflag`：0 = `# 行号 "文件"`、1 = `-P` 什么都不印、2 = `-P1` 的 `#line`）。
+ *
+ * `strip`：带行标比的时候要削掉序幕。tcc 的预定义是一份叫 `<command line>` 的**源码**，
+ * 它进出主文件都会印行标；我们的预定义是三张表，没有这一段。所以把 tcc 那边
+ * 「最后一行提到 `<command line>` 的 + 紧跟着回到主文件那一行」以上全丢掉，
+ * 我们那边丢掉开头那一行 —— 两边都停在「主文件第 1 行」上，往后逐字节比。
+ */
+const PP_MODES = {
+  '': { args: ['-P'], pflag: 1, dflag: 0 },
+  '-dD': { args: ['-P', '-dD'], pflag: 1, dflag: 3 },
+  '-dM': { args: ['-P', '-dM'], pflag: 1, dflag: 7 },
+  '-E': { args: [], pflag: 0, dflag: 0, strip: true },
+  '-P1': { args: ['-P1'], pflag: 2, dflag: 0, strip: true },
+  '-P10': { args: ['-P10'], pflag: 11, dflag: 0, lenient: true },
+};
+
+const dropPrologue = (s) => {
+  const ls = s.split('\n');
+  let last = -1;
+  for (let i = 0; i < ls.length; i++) if (ls[i].includes('"<command line>"')) last = i;
+  return ls.slice(last + 2).join('\n');
+};
+
 /** 一份文件：我们的输出必须与 tcc 的逐字节相同 */
 function compare(group, file, incDirs, mode = '') {
   const name = `${group}/${basename(file, '.c')}${mode === '' ? '' : ` ${mode}`}`;
@@ -110,11 +139,21 @@ function compare(group, file, incDirs, mode = '') {
     skip++;
     return;
   }
-  // `-dD` = dflag 3，`-dM` = dflag 7（libtcc.c:1979）。
-  const dflag = mode === '-dM' ? 7 : (mode === '-dD' ? 3 : 0);
-  const want = oracle(path, incDirs, mode === '' ? [] : [mode]);
-  const got = ours(path, incDirs, dflag);
+  const m = PP_MODES[mode];
+  const want = oracle(path, incDirs, m.args);
+  const got = ours(path, incDirs, m.dflag, m.pflag);
+  if (want.err === undefined && m.strip === true) {
+    want.out = dropPrologue(want.out);
+    if (got.out !== undefined) got.out = got.out.split('\n').slice(1).join('\n');
+  }
   if (want.err !== undefined) {
+    /* `-P10` 把每个 pp-number 都当真数字解一遍，于是「合法的 pp-number 但不是合法的
+     * C 数字」（`1e`、`0x1p`）tcc 自己就拒 —— 那不是我们的错，记 skip。 */
+    if (m.lenient === true) {
+      skip++;
+      process.stdout.write(`  skip ${name}：tcc 自己就拒了（${want.err.split('\n')[0]}）\n`);
+      return;
+    }
     bad(name, `    tcc 自己就拒了这份用例：\n${want.err}`);
     return;
   }
@@ -139,7 +178,7 @@ function compare(group, file, incDirs, mode = '') {
     return;
   }
   const n = want.out === '' ? 0 : want.out.replace(/\n$/, '').split('\n').length;
-  ok(`${name} [ours == tcc -E -P${mode === '' ? '' : ` ${mode}`}] ${n} lines`);
+  ok(`${name} [ours == tcc -E ${m.args.join(' ')}] ${n} lines`);
 }
 
 // ------------------------------------------------------------ 1. cpp/：与 tcc 逐字节相同
@@ -147,12 +186,15 @@ function compare(group, file, incDirs, mode = '') {
 for (const f of pick('cpp')) compare('cpp', f, []);
 
 // 同一批文件再走一遍 `-dD` / `-dM`：宏表本身也要与 tcc 逐行相同（次序 = 定义次序）。
-for (const f of pick('cpp')) for (const m of ['-dD', '-dM']) compare('cpp', f, [], m);
+// 再走一遍 `-E`（不带 `-P`）与 `-P1`：行标那一路 —— `# 行号 "文件"` 与 `#line`。
+for (const f of pick('cpp')) for (const m of ['-dD', '-dM', '-E', '-P1', '-P10']) compare('cpp', f, [], m);
 
 // ------------------------------------------------------------ 2. inc/：#include 的搜索与守卫
 
 const incDir = join(here, 'inc', 'include');
 for (const f of pick('inc')) compare('inc', f, [incDir]);
+// 进出文件的行标（` 1` / ` 2`）只有真 include 才试得到。
+for (const f of pick('inc')) for (const m of ['-E', '-P1']) compare('inc', f, [incDir], m);
 
 // ------------------------------------------------------------ 3. cpp-bad/：该拒的要拒
 
