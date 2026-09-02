@@ -155,6 +155,13 @@ const CASES = [
   ['外部的全局量：取地址', 'return &host_arr[2] - &host_arr[0];'],
   ['外部的全局量：住在 dylib 里的（标准流的那个指针）', 'return __stdoutp != 0;'],
   ['外部的全局量：errno 那一格（macOS 的 __error）', '*__error() = 42; return *__error();'],
+  /* 静态的复合字面量（第三十四片）。 */
+  ['静态复合字面量：数组', 'return g_cl[0] * 100 + g_cl[1] * 10 + g_cl[2];'],
+  ['静态复合字面量：取 struct 的地址', 'return g_clp->x * 100 + g_clp->y;'],
+  ['静态复合字面量：char 数组交给真的 strlen', 'return (long long) strlen(g_cls) * 100 + g_cls[1];'],
+  ['静态复合字面量：标量的那一种（值就是里面那一项）', 'return (long long) g_clv;'],
+  ['静态复合字面量：没写满的那几格是 0', 'return g_clpart[0] * 10 + g_clpart[3];'],
+  ['静态复合字面量：地址加了偏移', 'return g_cloff[0] * 10 + g_cloff[-2];'],
 ];
 
 const SUPPORT = `struct P { int x; int y; };
@@ -306,6 +313,14 @@ char *g_uni = "\\xc3\\xa9!";
 /* 宽串（第三十三片）：一格一个码位。写 int 是因为这个目标上 wchar_t 就是 int。 */
 int *g_wp = L"xy";
 int g_wa[] = L"ab";
+/* 静态的复合字面量（第三十四片）：文件作用域上的 (T){…} 是一块**没有名字**的静态数据，
+ * 于是它在数据段里成了一个编出来名字的符号，指向它的初值是一条重定位。 */
+int *g_cl = (int []){ 3, 2, 1 };
+struct P *g_clp = &(struct P){ 71, 72 };
+char *g_cls = (char []){ 'h', 'i', 0 };
+void *g_clv = (void *){ (void *) 52 };
+int *g_clpart = (int [4]){ 9 };
+int *g_cloff = (int []){ 4, 5, 6 } + 2;
 /* 外部的全局量（第三十一片）：这个 .o 里它们是**未定义符号**，取地址要过 GOT。
  * host_g 与 host_arr 由 main.c 定义（那份是 clang 编的），
  * __stdoutp 与 __error 来自真的 libc —— 后两个正是「住在 dylib 里」那一种。 */

@@ -712,6 +712,13 @@ export class CGen {  /**
      * @type {{off:number,kind:string,no:number,add:bigint}[]}
      */
     this.pendingFix = [];
+    /**
+     * native：文件作用域上那些**没有名字**的静态块（静态的复合字面量，第三十三片之后
+     * 的第三十四片）。前端照旧在暂存区里给它们划地方，这张表让最后那一步把每一块
+     * 切成一个匿名的全局符号，并且让「值恰好是块里某个地址」的初值落成重定位。
+     * @type {{name:string,gno:number,addr:number,size:number,align:number}[]}
+     */
+    this.anonStatics = [];
     /** @type {Map<number,{off:number,bytes:number[]}>} 静态位域按地址找那一条记录（见 `emitBitfield`） */
     this.statBits = new Map();
     /** 这个单元用到堆了吗（`malloc` 那一族）。用到才发那条 `__omni_heap_init` */
@@ -1180,6 +1187,26 @@ export class CGen {  /**
   putSymBytes(addr, fix) {
     this.emitBytes(addr, 8, BigInt.asUintN(64, fix.add));
     this.pendingFix.push({ off: addr, kind: fix.kind, no: fix.no, add: fix.add });
+  }
+
+  /**
+   * native：一个算出来的地址常量落在某个匿名静态块里吗（第三十四片）。
+   *
+   * 静态的复合字面量在这条腿上照旧先摆进暂存区，所以 `&(struct P){71,72}` 与
+   * `(int []){3,2,1}` 算出来的是**暂存区里的一个数**。那个数不能就这么写进目标文件
+   * （它指着 64K 那一带），可它也不是「不是常量」—— 它是「那个匿名符号 + 偏移」。
+   *
+   * 按**地址区间**认而不是在表达式一路上多带一个字段：那一路上地址会经过下标、
+   * 成员、指针算术好几手，每一手都记得捎上「我来自哪一块」是行不通的。
+   */
+  anonFixOf(k) {
+    const at = Number(k);
+    for (const b of this.anonStatics) {
+      if (at >= b.addr && at < b.addr + b.size) {
+        return { kind: 'g', no: b.gno, add: BigInt(at - b.addr) };
+      }
+    }
+    return null;
   }
 
   /**
@@ -2225,6 +2252,9 @@ export class CGen {  /**
           /* native（第二十八片）：算不出数的那一格里可能是「符号 + 加数」——
            * `&g`、`arr + 2`、`&s.f`、一个函数名。那不是「不是常量」，那是一条重定位。 */
           if (k === null && this.native) fix = this.symConstOf(scratch, ref);
+          /* native（第三十四片）：**算出来了**也可能是一条重定位 —— 静态的复合字面量
+           * 落在暂存区里，算出来的是那一块里的一个地址。 */
+          if (k !== null && this.native) fix = this.anonFixOf(k);
         }
       } finally {
         this.f = outer;
@@ -2763,6 +2793,17 @@ export class CGen {  /**
     if (this.scopes.length <= 1) {
       const e = { ty: vty, addr: -1, defined: true, used: true, align: 0 };
       this.allocGlobal(e);
+      /* native（第三十四片）：这一块要成为数据段里一个**匿名的**符号。名字按出现顺序
+       * 编，于是「同一份输入两次编译逐字节相同」照旧成立。地址照旧是暂存区里那个数 ——
+       * 下面 `initializer` 的一整套（含 `staticRead` 把字节读回来那一格）一字不改，
+       * 而「那个数其实是一个符号加偏移」这件事由 `anonFixOf` 在写指针时补上。 */
+      if (this.native) {
+        const s = typeSize(vty);
+        const name = `$cl$${this.anonStatics.length}`;
+        this.anonStatics.push({
+          name, gno: this.mod.globalNo(name), addr: e.addr, size: s.size, align: s.align,
+        });
+      }
       const dest = { stat: true, addr: e.addr };
       if (strBytes !== null) this.initString(dest, 0, vty, strBytes);
       else if (wstrVals !== null) this.initWString(dest, 0, vty, wstrVals);
@@ -7418,13 +7459,30 @@ export function lowerCNative(path, text, host, defs) {
     const no = e.gno === undefined ? mod.globalNo(name) : e.gno;
     mod.setGlobalData(no, size, al, bytes, fixups);
   }
+  /* 匿名的静态块（第三十四片）：静态的复合字面量。与有名字的那些一模一样地切 ——
+   * 差别只在名字是编出来的，而且没有「试探性定义」「外部的」这两种情况。 */
+  for (const b of gen.anonStatics) {
+    const bytes = [];
+    for (let k = 0; k < b.size; k++) {
+      const v = stage.get(b.addr + k);
+      bytes.push(v === undefined ? 0 : v);
+      stage.delete(b.addr + k);
+    }
+    const fixups = [];
+    for (let k = 0; k < b.size; k++) {
+      const fx = fixes.get(b.addr + k);
+      if (fx === undefined) continue;
+      fixups.push({ off: k, kind: fx.kind, no: fx.no, add: fx.add });
+      fixes.delete(b.addr + k);
+    }
+    mod.setGlobalData(b.gno, b.size, b.align, bytes, fixups);
+  }
   /* 暂存区里没人认领的字节：那是还落在线性内存上的东西（`argv`、宿主那几格，
    * 或者哪个初值偷偷要了一块地方）。放过去会得到一个指着 64K 的指针。 */
   if (stage.size !== 0) {
     throw new OmniError(`${path}: error: native 这条腿上有 ${stage.size} 个字节还落在线性内存上`);
   }
-  /* 没人认领的地址：那说明它不在任何全局的字节里（静态复合字面量那种还在线性内存上）。
-   * 放过去会得到一个指着 0 的指针。 */
+  /* 没人认领的地址：那说明它不在任何全局的字节里 —— 放过去会得到一个指着 0 的指针。 */
   if (fixes.size !== 0) {
     throw new OmniError(`${path}: error: native 这条腿上有 ${fixes.size} 个初值里的地址`
       + `不在任何全局量里`);
