@@ -596,6 +596,11 @@ Bellard 拿它让 tcc 编译自己）也通了。`cpp/` 与 `inc/` 两组各多�
 也不会又找回自己。两个阶段边界（`cpp-bad/include-next`、`cpp-bad/has-include-next`）
 换成了 `inc/02-include-next.c` 这份真的用例，`inc/` 那一组从此有两个搜索目录。
 
+**`-U` / `-isystem` / `-nostdinc`**（第八十五片）：`-D` 与 `-U` 在 tcc 那边写进**同一个
+缓冲**，所以共用一条顺序 —— `-DX=1 -UX` 与 `-UX -DX=1` 不是一回事。`-isystem` 给的目录
+排在自带那一份**前面**，`-nostdinc` 只掐掉自带的那一份。门里多了一支 `optCase`：
+拿 `tcc -E -P <开关>` 当尺子比两边 CLI 的 stdout，八种走法。
+
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
 地址交给真的 libc（`strlen`/`memcpy`）验过。C 前端现在还把 `&x` 降到影子栈上，
@@ -11939,6 +11944,52 @@ for (;;) {
 （真的 macOS SDK）也重新验过 —— SDK 里的 `__has_include_next` 从此走真的路子。
 
 <!-- 第九刀第八十四片-END -->
+
+## 落地：第九刀第八十五片
+
+驱动层那三个开关：`-U`、`-isystem`、`-nostdinc`。
+
+### `-D` 与 `-U` 共用一条顺序
+
+两个都不是「设一格状态」—— tcc 把它们**当文本写进同一个缓冲**：
+
+```c
+void tcc_define_symbol(s1, sym, value)
+{ ... cstr_printf(&s1->cmdline_defs, "#define %.*s %s\n", ...); }
+
+void tcc_undefine_symbol(TCCState *s1, const char *sym)
+{ cstr_printf(&s1->cmdline_defs, "#undef %s\n", sym); }
+```
+
+那个缓冲随后当 `<command line>` 这个文件过一遍。所以顺序是命令行上的顺序：
+`-DX=1 -UX` 之后 X 没有，`-UX -DX=1` 之后 X 是 1。我们的 `defArgs` 因此改成回
+一条**混在一起的**表，宏体 `null` 就是 `#undef`；`Cpp` 多一个 `undefine()`，
+与 `define()` 共用那台「假装是 `<command line>` 里的一行」的机器（`cmdlineLine`）。
+
+`-U` 掀一个本来就没有的名字，什么都不该发生 —— 门里有这一条。
+
+### `-isystem` 排在前面
+
+`-isystem` 是在**选项解析里**就 `tcc_add_sysinclude_path` 的，而自带的那一份
+（`CONFIG_TCC_SYSINCLUDEPATHS`）是 `tcc_set_output_type` 里补的（libtcc.c:973）——
+选项在前，所以 `-isystem` 给的目录排在自带那一份前面。`-nostdinc` 只是把补那一步
+跳掉，`-isystem` 给的照留。这两条合起来就是 `sysIncDirs(argv)` 那七行。
+
+### 门：`optCase`
+
+`tests/c/run.js` 多一支 `optCase`：尺子是 `tcc -E -P <开关>`，比两边 CLI 的 stdout。
+新用例 `cpp/09-cmdline.c`（不带开关也过得去 —— 没定义的名字在输出里就是它自己）
+走六种 `-D`/`-U` 组合，`inc/02-include-next.c` 走两种 `-isystem`（一种再加 `-nostdinc`）。
+
+`-DY` 那一条钉的是「没有 `=` 的宏体是 `1` 不是空」：源码里 `#if defined Y && Y > 1`
+于是为假。展开成空的话这一行会变成 `bad preprocessor expression`。
+
+**`-include` 还没做**：它是 `cstr_printf(&s->cmdline_incl, "#include \"%s\"\n", ...)`，
+落在 `<command line>` 那个缓冲的**末尾**（预定义与 `-D` 之后）。我们的预定义是三张表、
+`-D`/`-U` 是一行一行喂进去的，`<command line>` 从来不是一个真的 include 层 ——
+要把它变成真的（主文件压栈、`file->prev` 指回去），那是独立一片。
+
+<!-- 第九刀第八十五片-END -->
 
 
 

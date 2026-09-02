@@ -242,6 +242,52 @@ for (const f of pick('inc')) {
  * `-E`，tcc 会真的把文件编一遍，而 `cpp/` 那几份是预处理器的探针、本来就不是合法的 C。 */
 if (pick('gen').includes('01-expr.c')) depsCase('gen', '01-expr.c', [], ['-MM']);
 
+/**
+ * 驱动层的开关（`-D`/`-U`/`-isystem`/`-nostdinc`，第八十五片）：同样比两边 CLI 的
+ * stdout，尺子是 `tcc -E -P <开关>`。这些开关改的是「宏表里有什么」与「往哪儿找头」，
+ * 不是预处理器自己的状态，所以走 CLI 而不是 `compare()`。
+ */
+function optCase(group, file, flags) {
+  const name = `${group}/${basename(file, '.c')} ${flags.join(' ')}`;
+  const path = join(here, group, file);
+  if (!hasTcc) {
+    skip++;
+    return;
+  }
+  const w = spawnSync(TCC, ['-E', '-P', ...flags, path], { encoding: 'utf8' });
+  if (w.status !== 0) {
+    bad(name, `    tcc 自己就拒了：\n${(w.stderr ?? '').trim()}`);
+    return;
+  }
+  const g = spawnSync(process.execPath, [CLI, 'cpp', path, '-P', ...flags], { encoding: 'utf8' });
+  if (g.status !== 0) {
+    bad(name, `    我们拒了，tcc 没拒：\n${(g.stderr ?? '').trim()}`);
+    return;
+  }
+  if (g.stdout !== w.stdout) {
+    bad(name, `    --- tcc ---\n${w.stdout}    --- ours ---\n${g.stdout}`);
+    return;
+  }
+  const n = w.stdout === '' ? 0 : w.stdout.replace(/\n$/, '').split('\n').length;
+  ok(`${name} [ours == tcc -E -P ${flags.join(' ')}] ${n} lines`);
+}
+
+if (pick('cpp').includes('09-cmdline.c')) {
+  for (const fl of [
+    ['-DX=2'],
+    ['-DX=2', '-DY=7'],
+    ['-DX=2', '-UX'],            // 顺序有意义：这一条 X 是没有的
+    ['-UX', '-DX=2'],            // 这一条 X = 2
+    ['-DY'],                     // 没有 `=` 的宏体是 1，不是空 —— 于是 `Y > 1` 为假
+    ['-UPATH_DOES_NOT_EXIST'],   // 掀一个本来就没有的，什么都不该发生
+  ]) optCase('cpp', '09-cmdline.c', fl);
+}
+/* `-isystem` 与 `-nostdinc`：把 inc/ 那两个目录当系统头目录来找 `<next.h>`。 */
+if (pick('inc').includes('02-include-next.c')) {
+  optCase('inc', '02-include-next.c', ['-isystem', incDir, '-isystem', incDir2]);
+  optCase('inc', '02-include-next.c', ['-nostdinc', '-isystem', incDir, '-isystem', incDir2]);
+}
+
 // ------------------------------------------------------------ 3. cpp-bad/：该拒的要拒
 
 for (const f of pick('cpp-bad')) {

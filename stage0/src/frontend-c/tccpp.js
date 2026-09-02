@@ -38,8 +38,6 @@
 //   找不到就报 `include file '...' not found`（与 tcc 同一句）。
 //   **预定义的宏也有了**（第八刀第一片，见 tccdefs.js）：`__aarch64__`、
 //   `__SIZE_TYPE__`、`_Nonnull` 那五十条，顺序与值都对着 `tcc -dM -E` 抄的。
-// - **`-dM` 不认**：tcc 的 `-dM` 是**边定义边印**（`#undef` 也印、同名重定义印两遍），
-//   要一台挂在 `#define`/`#undef` 上的钩子，独立一片。
 // - **`#if` 里只有整数**：`'a'` 那类字符常量认（值按 signed char 算，量过 tcc 在本机
 //   是这样），字符串与浮点按 tcc 的规矩报 `invalid constant in preprocessor expression`。
 // - **三字母词（trigraph）不认** —— tcc 也不认，这一格不是我们的边界。
@@ -2246,7 +2244,20 @@ export class Cpp {
   }
 
   /** 命令行上的 `-D name[=body]`（tcc 的 `tcc_define_symbol`） */  define(name, body) {
-    const src = `#define ${name}${body === undefined ? '' : ` ${body}`}\n`;
+    this.cmdlineLine(`#define ${name}${body === undefined ? '' : ` ${body}`}\n`);
+  }
+
+  /**
+   * 命令行上的 `-U name`（tcc 的 `tcc_undefine_symbol`，libtcc.c:863）。
+   * tcc 把 `-D` 与 `-U` **写进同一个缓冲**，所以它们共用一条顺序 ——
+   * `-DX=1 -UX` 与 `-UX -DX=1` 结果不同，这一格就是这么来的。
+   */
+  undefine(name) {
+    this.cmdlineLine(`#undef ${name}\n`);
+  }
+
+  /** 一行「假装是 `<command line>` 里的」指示：装上去，读完还原。 */
+  cmdlineLine(src) {
     const saved = this.file;
     this.file = new CFile('<command line>', src, null);
     this.parseFlags = PF_PREPROCESS | PF_LINEFEED;

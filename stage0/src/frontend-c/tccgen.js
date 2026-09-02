@@ -7324,7 +7324,10 @@ function utf8Bytes(s) {
 export function lowerC(path, text, host, defs, args) {
   const cpp = new Cpp(host);
   cpp.installPredefs(path, false);
-  for (const d of defs ?? []) cpp.define(d.name, d.body);
+  for (const d of defs ?? []) {
+    if (d.body === null) cpp.undefine(d.name);   // `-U`
+    else cpp.define(d.name, d.body);
+  }
   const mod = new MirModule('omni_main');
   const gen = new CGen(cpp, mod);
   gen.preamble(COMPILE_PREAMBLE);
@@ -7480,7 +7483,10 @@ export function lowerC(path, text, host, defs, args) {
 export function lowerCNative(path, text, host, defs) {
   const cpp = new Cpp(host);
   cpp.installPredefs(path, false);
-  for (const d of defs ?? []) cpp.define(d.name, d.body);
+  for (const d of defs ?? []) {
+    if (d.body === null) cpp.undefine(d.name);   // `-U`
+    else cpp.define(d.name, d.body);
+  }
   const mod = new MirModule(path);
   mod.setNative();
   const gen = new CGen(cpp, mod, { native: true });

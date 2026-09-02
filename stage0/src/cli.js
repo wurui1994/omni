@@ -82,8 +82,12 @@ function incDirs(argv) {
 }
 
 /**
- * `-D 名字` / `-D 名字=宏体` / `-D名字`（三种都与 tcc 同形）。回 [名字, 宏体] 的表。
- * 顺序有意义：后面的 `-D` 会盖掉前面同名的那个，与 tcc 一样。
+ * `-D 名字` / `-D 名字=宏体` / `-D名字`，以及 `-U 名字` / `-U名字`（都与 tcc 同形）。
+ * 回 [名字, 宏体] 的表，**宏体 `null` = `#undef`**。
+ *
+ * 顺序有意义，而且 `-D` 与 `-U` **共用一条顺序**：tcc 两个都往同一个 `cmdline_defs`
+ * 缓冲里写文本（`#define …` / `#undef …`，libtcc.c:859、865），所以
+ * `-DX=1 -UX` 与 `-UX -DX=1` 是两回事。
  *
  * **没有 `=` 的宏体是 `1`，不是空**（tcc 的 `tcc_define_symbol`：`value = *eq ? eq+1 : "1"`）。
  * 这一条不是细节：`config.h` 里 `#if !(TCC_TARGET_I386 || … || TCC_TARGET_ARM64 || …)`
@@ -95,18 +99,47 @@ function defArgs(argv) {
   let i = 0;
   for (const a of argv) {
     let d = null;
+    let u = null;
     if (a === '-D') {
       d = argv[i + 1];
       if (d === undefined || d.startsWith('-')) throw new OmniError('-D 后面要一个名字');
     } else if (a.startsWith('-D') && a.length > 2) {
       d = a.slice(2);
+    } else if (a === '-U') {
+      u = argv[i + 1];
+      if (u === undefined || u.startsWith('-')) throw new OmniError('-U 后面要一个名字');
+    } else if (a.startsWith('-U') && a.length > 2) {
+      u = a.slice(2);
     }
     if (d !== null) {
       const eq = d.indexOf('=');
       out.push(eq < 0 ? [d, '1'] : [d.slice(0, eq), d.slice(eq + 1)]);
+    } else if (u !== null) {
+      out.push([u, null]);
     }
     i++;
   }
+  return out;
+}
+
+/**
+ * 系统头目录（tcc 的 `sysinclude_paths`）：`-isystem` 给的排在**前面**，
+ * 自带的那一份排后面 —— tcc 的次序（`-isystem` 在选项里就加，
+ * `CONFIG_TCC_SYSINCLUDEPATHS` 是 `tcc_set_output_type` 里补的，libtcc.c:973）。
+ * `-nostdinc` 只掐掉自带的那一份，`-isystem` 给的照留。
+ */
+function sysIncDirs(argv) {
+  const out = [];
+  let i = 0;
+  for (const a of argv) {
+    if (a === '-isystem') {
+      const d = argv[i + 1];
+      if (d === undefined) throw new OmniError('-isystem 后面要一个目录');
+      out.push(d);
+    }
+    i++;
+  }
+  if (!argv.includes('-nostdinc')) out.push(...C_SYS_INCLUDE);
   return out;
 }
 
@@ -123,7 +156,7 @@ const C_SYS_INCLUDE = [join(installDir(), '..', '..', 'include')];
  * 默认带 GCC 那种 `# 行号 "文件"` 的行标，`-P` 一族把它换掉或关掉。
  * 文件 IO 在这里，预处理器自己只认一个 `readFile` 回调 —— 于是 REPL 那一路可以把
  * 内存里的几份 `.h` 直接喂进去，测试也不必碰 fs。
- */function cppText(path, incs, defs, dflag, pflag, deps) {
+ */function cppText(path, incs, defs, dflag, pflag, deps, sysIncs) {
   const cpp = new Cpp({
     readFile: (p) => {
       try {
@@ -133,12 +166,16 @@ const C_SYS_INCLUDE = [join(installDir(), '..', '..', 'include')];
       }
     },
     includeDirs: incs,
-    sysIncludeDirs: C_SYS_INCLUDE,
+    sysIncludeDirs: sysIncs ?? C_SYS_INCLUDE,
     dirname,
     join,
   });
   cpp.installPredefs(path);
-  for (const [name, body] of defs) cpp.define(name, body);
+  /* `-D` 与 `-U` 共用一条顺序（宏体 `null` = `#undef`）。 */
+  for (const [name, body] of defs) {
+    if (body === null) cpp.undefine(name);
+    else cpp.define(name, body);
+  }
   /* `-dD` = 3、`-dM` = 7（tcc 的 `dflag`）。 */
   cpp.dflag = dflag ?? 0;
   /* `-P` 那一格（tcc 的 `Pflag`）：0 = `# 行号 "文件"`、1 = 不印、2 = `#line`、11 = `-P10`。 */
@@ -1842,7 +1879,7 @@ function main(argv) {
       || a === '--soname' || a === '--rpath' || a === '--install-name'
       || a === '--subsystem' || a === '--image-base' || a === '--stack'
       || a === '--file-align' || a === '--section-align' || a === '--dwarf'
-      || a === '-MF') { i++; continue; }
+      || a === '-MF' || a === '-U' || a === '-isystem') { i++; continue; }
     if (a.startsWith('-')) continue;
     files.push(a);
   }
@@ -2056,7 +2093,7 @@ function main(argv) {
       const oi = rest.indexOf('-o');
       const deps = wantDeps
         ? { sys: rest.includes('-M') || rest.includes('-MD') } : undefined;
-      const out = cppText(path, incDirs(rest), defArgs(rest), dflag, pflag, deps);
+      const out = cppText(path, incDirs(rest), defArgs(rest), dflag, pflag, deps, sysIncDirs(rest));
       if (wantDeps) {
         const target = oi >= 0 ? rest[oi + 1] : depTarget(path);
         const text = makedepsText(target, deps.list, rest.includes('-MP'));
