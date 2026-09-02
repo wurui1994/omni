@@ -315,7 +315,24 @@ class FnGen {
       return;
     }
 
-    /* ---- 线性内存（第九刀第七片）。地址是从 0 起的字节偏移，真址 = x28 + 偏移。 */
+    /* ---- 模块级变量（第九刀第九片）。**靠符号寻址**：`adrp` 取页、`add` 取页内偏移。
+     * 这一对是 arm64 上取任何一个全局地址的标准两条，两格都欠链接器一笔重定位
+     * （`ARM64_RELOC_PAGE21` + `PAGEOFF12`）—— 第九刀第一片对账时被 llvm 挡回来的
+     * 那个「adrp 的页号填不出来」，现在从写出去的那一头解释清楚了。 */
+    if (op === OP.GLOAD) {
+      this.symAddr(TMP0, this.globalSym(f.aux[i]));
+      GLOAD_EMIT[widthKey(t)](buf, RES, TMP0);
+      return this.def(i, RES);
+    }
+    if (op === OP.GSTORE) {
+      this.loadRef(TMP1, f.a[i]);
+      buf.emit(a.movReg(1, RES, TMP1));
+      this.symAddr(TMP0, this.globalSym(f.aux[i]));
+      buf.emit(a.strU(STORE_SIZE[widthKey(f.t[i])], RES, TMP0, 0));
+      return;
+    }
+
+    /* ---- 存取（第九刀第七片）。地址就是真指针 —— native 上没有线性内存。 */
     if (op === OP.MLOAD) return this.mload(i);
     if (op === OP.MSTORE) return this.mstore(i);
 
@@ -499,6 +516,19 @@ class FnGen {
     return this.def(i, 0, widthOf(t));
   }
 
+  /** 模块级变量的符号名。MIR 里它就是个名字，落到目标文件上就是一个全局符号。 */
+  globalSym(no) {
+    const name = this.mod.globals[no];
+    if (name === undefined) throw new OmniError(`arm64: 没有 ${no} 号模块级变量`);
+    return name;
+  }
+
+  /** 一个符号的地址算进 `reg`：`adrp` 取页、`add` 取页内偏移。两格都记一笔重定位。 */
+  symAddr(reg, sym) {
+    this.buf.adrpSym(reg, sym);
+    this.buf.addSymOff(reg, reg, sym);
+  }
+
   /** 真址 = 地址本身 + 静态偏移，算进 `reg`。地址就是真指针 —— 见文件上头那段。 */
   memAddr(reg, ref, off) {
     this.loadRef(reg, ref);
@@ -629,6 +659,26 @@ const MLOAD_EMIT = {
 /* 六种写 -> `str` 的宽度对数。 */
 const MSTORE_SIZE = { i8: 0, i16: 1, i32: 2, i64: 3, f32: 2, f64: 3 };
 
+/** 类型 -> 一个宽度的名字。bool 与指针都按 64 位走。 */
+function widthKey(t) {
+  const k = typeKind(t);
+  if (k === T_I32) return 'i32';
+  if (k === T_F32) return 'f32';
+  if (k === T_F64) return 'f64';
+  if (k === T_I64 || k === T_BOOL) return 'i64';
+  return nyi(`模块级变量的类型 ${k}`);
+}
+
+/* 模块级变量的读。i32 走 `ldrsw`（i32 的规范形是符号扩展过的 64 位）；
+ * 两种浮点走整数加载 —— 栈位里躺的是位模式。 */
+const GLOAD_EMIT = {
+  i64: (b, d, p) => b.emit(a.ldrU(3, d, p, 0)),
+  i32: (b, d, p) => b.emit(a.ldrsU(2, d, p, 0)),
+  f64: (b, d, p) => b.emit(a.ldrU(3, d, p, 0)),
+  f32: (b, d, p) => b.emit(a.ldrU(2, d, p, 0)),
+};
+const STORE_SIZE = { i64: 3, i32: 2, f64: 3, f32: 2 };
+
 /** 一个 MIR 函数 -> 一段 arm64 机器码（`CodeBuf`，已回填）。不认 CALL —— 单个函数
  * 里没有别的函数的落点，要发调用得走 `genModule`。 */
 export function genFunc(mod, f) {
@@ -667,5 +717,21 @@ export function genModule(mod) {
   for (let k = 0; k < offsets.length; k++) {
     sizes.push((k + 1 < offsets.length ? offsets[k + 1] : bytes.length) - offsets[k]);
   }
-  return { bytes, offsets, sizes, relocs: buf.relocs };
+  /* 模块级变量落在数据段里，**一个八字节一格**、零初始化。
+   * MIR 没有「全局的初值」这回事（初始化是入口函数里的一串 GSTORE），所以这儿只管留位。
+   * 每个变量都是一个真符号 —— 于是 C 那边 `extern long long x;` 就能看见它。 */
+  const dataSyms = [];
+  let dataAt = 0;
+  for (const g of mod.globals) {
+    dataSyms.push({ name: g, off: dataAt, sect: 2 });
+    dataAt += 8;
+  }
+  return {
+    bytes,
+    offsets,
+    sizes,
+    relocs: buf.relocs,
+    data: new Uint8Array(dataAt),
+    dataSyms,
+  };
 }

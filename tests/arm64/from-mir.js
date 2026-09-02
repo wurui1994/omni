@@ -446,6 +446,44 @@ td('外部的 double 函数（实参走 d0/d1、返回走 d0）', [2.5, 4.0], d2
   (f, x, y) => ret(f, T_F64, f.emit(OP.CCALL, T_F64, mod.cabiNo('omni_ext_scale'),
     f.pushArgs([ld(f, T_F64, x), ld(f, T_F64, y)]), 0)));
 
+// ---- 模块级变量（第九刀第九片）。落在 __DATA 里、靠 adrp/add 取址，每个都是真符号。
+{
+  const gi = mod.globalNo('omni_g_i64');
+  mod.setGlobalTy(gi, T_I64);
+  const gw = mod.globalNo('omni_g_i32');
+  mod.setGlobalTy(gw, T_I32);
+  const gd = mod.globalNo('omni_g_f64');
+  mod.setGlobalTy(gd, T_F64);
+
+  t('全局：写进去再读回来', [-9876543210n, 0n], -9876543210n, (f, x) => {
+    f.emit(OP.GSTORE, T_I64, ld(f, T_I64, x), REF_NONE, gi);
+    ret(f, T_I64, f.emit(OP.GLOAD, T_I64, REF_NONE, REF_NONE, gi));
+  });
+  t('全局：i32 的那格只占四字节、读回来是符号扩展的', [-1n, 0n], -1n, (f, x) => {
+    const v = f.emit(OP.CVT, T_I32, ld(f, T_I64, x), REF_NONE, CVT_TRUNC);
+    f.emit(OP.GSTORE, T_I32, v, REF_NONE, gw);
+    ret(f, T_I64, f.emit(OP.GLOAD, T_I32, REF_NONE, REF_NONE, gw));
+  });
+  t('全局：i32 那格的高四字节不许被踩', [0x7fffffffn, 0n], 0x7fffffffn, (f, x) => {
+    /* 先把整个八字节铺满 1，再只写低四字节 —— 写宽了这条就露。 */
+    f.emit(OP.GSTORE, T_I64, K.int(-1n), REF_NONE, gi);
+    const v = f.emit(OP.CVT, T_I32, ld(f, T_I64, x), REF_NONE, CVT_TRUNC);
+    f.emit(OP.GSTORE, T_I32, v, REF_NONE, gw);
+    ret(f, T_I64, f.emit(OP.GLOAD, T_I32, REF_NONE, REF_NONE, gw));
+  });
+  t('全局：double 过一趟', [0n, 0n], d2b(2.5 * 4), (f) => {
+    f.emit(OP.GSTORE, T_F64, K.real('2.5'), REF_NONE, gd);
+    const v = f.emit(OP.GLOAD, T_F64, REF_NONE, REF_NONE, gd);
+    ret(f, T_I64, f.emit(OP.CVT, T_I64,
+      f.emit(OP.MUL, T_F64, v, K.real('4'), 0), REF_NONE, CVT_BITCAST));
+  });
+  /* C 那边看得见这个符号吗 —— 这条查的是「我们定义的数据符号是真符号」。 */
+  t('全局：C 那边读得到', [12345n, 0n], 12345n, (f, x) => {
+    f.emit(OP.GSTORE, T_I64, ld(f, T_I64, x), REF_NONE, gi);
+    ret(f, T_I64, K.int(12345n));
+  });
+}
+
 // ---------------------------------------------------------------- 边界
 // 还没做的东西必须**明着报**。一个悄悄发错指令的后端比一个报错的后端坏得多。
 // 这些函数不进 `mod` —— 它们发不出来，混进去会把整个模块的生成一起拖倒。
@@ -500,7 +538,8 @@ try {
   for (let k = 0; k < mod.funcs.length; k++) {
     defs.push({ name: mod.funcs[k].name, off: blob.offsets[k] });
   }
-  writeFileSync(objPath, writeObject(blob.bytes, defs, blob.relocs));
+  writeFileSync(objPath, writeObject(blob.bytes, blob.data,
+    [...defs, ...blob.dataSyms], blob.relocs));
   const main = ['#include <stdio.h>', '#include <string.h>',
     'static double b2d(unsigned long long b){ double d; memcpy(&d,&b,8); return d; }',
     'static unsigned long long d2b(double d){ unsigned long long b; memcpy(&b,&d,8); return b; }',
@@ -527,11 +566,16 @@ try {
         + ` ${c.args[1]}LL));`);
     }
   }
+  /* 最后一格不是「调一个函数」，而是**从 C 那边直接读我们定义的数据符号** ——
+   * 上一条用例刚把 12345 存进 `omni_g_i64`。这条查的是「__DATA 里那格是个真符号」。 */
+  main.push('extern long long omni_g_i64;');
+  calls.push('  printf("%lld\\n", omni_g_i64);');
   main.push('int main(void) {', ...calls, '  return 0;', '}');
   writeFileSync(join(dir, 'main.c'), main.join('\n') + '\n');
   execFileSync(CLANG, ['-o', join(dir, 'prog'), join(dir, 'main.c'), objPath]);
   const out = execFileSync(join(dir, 'prog'), { encoding: 'utf8' }).trim().split('\n');
-  const all = [...cases, ...dcases, ...mcases];
+  const all = [...cases, ...dcases, ...mcases,
+    { what: 'C 那边直接读 __DATA 里的符号', want: 12345n }];
   if (out.length !== all.length) {
     process.stdout.write(`arm64/from-mir: 印了 ${out.length} 行，用例 ${all.length} 条\n`);
     process.exit(1);

@@ -163,31 +163,56 @@ RELOC_TYPE[RELOC.PAGEOFF12] = { type: ARM64_RELOC_PAGEOFF12, pcrel: 0 };
  * 写一个 arm64 的 `.o`。
  *
  * @param text  代码字节（`Uint8Array`）
- * @param defs  这个文件**定义**的符号：`[{name, off}]`，`off` 是在代码里的字节偏移
+ * @param data  数据字节（`Uint8Array`，可以是空的 —— 那就不写第二节）
+ * @param defs  这个文件**定义**的符号：`[{name, off, sect}]`，`sect` 1 是代码、2 是数据，
+ *              `off` 是在那一节里的字节偏移
  * @param relocs 要等链接器填的地方：`[{at, kind, sym}]`，`kind` 是 `RELOC.*`，
- *               `sym` 是外部符号名（不带下划线，这儿加）
+ *               `sym` 是符号名（不带下划线，这儿加）。`at` 是**代码节里**的偏移。
  */
-export function writeObject(text, defs, relocs) {
+export function writeObject(text, data, defs, relocs) {
+  const dataBytes = data === undefined ? new Uint8Array(0) : data;
+  const nsects = dataBytes.length === 0 ? 1 : 2;
+  /* 节的地址在段里是**接着排**的：代码从 0 起，数据紧跟着（按 8 对齐）。
+   * 这个数要先算出来 —— 符号的 `n_value` 是**段里的地址**，不是节里的偏移。
+   * 少加这一格的话链接器会说
+   * 「_x symbol is ignored, because its address isn't in its designated section」。 */
+  const dataAddr = align(text.length, 8);
   const strs = new StrTab();
   /* 符号表的次序是**有讲究**的：局部、定义的外部、未定义的外部，三段各自连着 ——
    * LC_DYSYMTAB 里报的就是这三段的起点与长度。乱了链接器会说符号表坏了。 */
   const syms = [];
+  const defNo = new Map();
   for (const d of defs) {
-    syms.push({ strx: strs.intern(macName(d.name)), type: N_SECT | N_EXT, sect: 1, value: d.off });
+    const sect = d.sect === undefined ? 1 : d.sect;
+    defNo.set(d.name, syms.length);
+    syms.push({
+      strx: strs.intern(macName(d.name)),
+      type: N_SECT | N_EXT,
+      sect,
+      value: d.off + (sect === 2 ? dataAddr : 0),
+    });
   }
   const nextdef = defs.length;
-  /* 未定义的那些按名字去重：同一个 `printf` 被叫十次也只占一条符号。 */
+  /* 未定义的那些按名字去重：同一个 `printf` 被叫十次也只占一条符号。
+   * 已经定义过的名字**不许**再进未定义那一段 —— 自家的全局也是靠符号寻址的。 */
   const undefNo = new Map();
   for (const r of relocs) {
-    if (undefNo.has(r.sym)) continue;
+    if (defNo.has(r.sym) || undefNo.has(r.sym)) continue;
     undefNo.set(r.sym, syms.length);
     syms.push({ strx: strs.intern(macName(r.sym)), type: N_UNDF | N_EXT, sect: 0, value: 0 });
   }
   const nundef = syms.length - nextdef;
+  const symIndexOf = (name) => {
+    const hit = defNo.has(name) ? defNo.get(name) : undefNo.get(name);
+    if (hit === undefined) throw new OmniError(`macho: 重定位指着一个没登记的符号 ${name}`);
+    return hit;
+  };
 
-  const HEAD = 32 + (72 + 80) + 24 + 24 + 80;
+  const HEAD = 32 + (72 + 80 * nsects) + 24 + 24 + 80;
   const textOff = HEAD;
-  const relOff = textOff + text.length;
+  /* 数据节在文件里紧跟着代码（地址上的位置是上面那个 `dataAddr`）。 */
+  const dataOff = textOff + dataAddr;
+  const relOff = dataOff + dataBytes.length;
   /* 重定位按地址升序 —— 汇编器出来的就是这个次序，链接器也认它。 */
   const rs = [...relocs].sort((x, y) => x.at - y.at);
   const symOff = relOff + rs.length * 8;
@@ -200,14 +225,21 @@ export function writeObject(text, defs, relocs) {
   b.u32(4).u32(HEAD - 32).u32(MH_SUBSECTIONS_VIA_SYMBOLS).u32(0);
 
   // ---- LC_SEGMENT_64（目标文件里段名是空的，节自己带段名）
-  b.u32(LC_SEGMENT_64).u32(72 + 80).name16('');
-  b.u64(0).u64(text.length).u64(textOff).u64(text.length);
-  b.u32(VM_PROT_ALL).u32(VM_PROT_ALL).u32(1).u32(0);
+  b.u32(LC_SEGMENT_64).u32(72 + 80 * nsects).name16('');
+  b.u64(0).u64(dataAddr + dataBytes.length).u64(textOff).u64(dataAddr + dataBytes.length);
+  b.u32(VM_PROT_ALL).u32(VM_PROT_ALL).u32(nsects).u32(0);
   // ---- section_64：__TEXT,__text
   b.name16('__text').name16('__TEXT');
   b.u64(0).u64(text.length).u32(textOff).u32(2);   // align = 2^2 = 4，指令的对齐
   b.u32(rs.length === 0 ? 0 : relOff).u32(rs.length);
   b.u32(S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS).u32(0).u32(0).u32(0);
+  // ---- section_64：__DATA,__data（没有数据就整节不写）
+  if (nsects === 2) {
+    b.name16('__data').name16('__DATA');
+    b.u64(dataAddr).u64(dataBytes.length).u32(dataOff).u32(3);   // align = 8
+    b.u32(0).u32(0);
+    b.u32(0).u32(0).u32(0).u32(0);
+  }
 
   // ---- LC_BUILD_VERSION。不写的话链接器会嘟囔一句「没有平台信息」。
   b.u32(LC_BUILD_VERSION).u32(24).u32(PLATFORM_MACOS);
@@ -226,18 +258,20 @@ export function writeObject(text, defs, relocs) {
 
   if (b.len !== HEAD) throw new OmniError(`macho: 头算成了 ${b.len}，说好是 ${HEAD}`);
 
-  // ---- 代码
+  // ---- 代码（补到数据节的起点）
   b.bytes(text);
+  while (b.len < dataOff) b.u8(0);
+  b.bytes(dataBytes);
 
   // ---- 重定位。第二个字是位域：
   //      低 24 位符号号、24 位 pcrel、25-26 长度、27 extern、28-31 类型。
   for (const r of rs) {
     const kind = RELOC_TYPE[r.kind];
     if (kind === undefined) throw new OmniError(`macho: 还不认识重定位 ${r.kind}`);
-    const symIdx = undefNo.get(r.sym);
     b.u32(r.at);
     /* 位拼装用乘法，不用 `<<` —— `1 << 31` 在 JS 里是负数（arm64 编码器那边同一条）。 */
-    b.u32(symIdx + kind.pcrel * 2 ** 24 + 2 * 2 ** 25 + 1 * 2 ** 27 + kind.type * 2 ** 28);
+    b.u32(symIndexOf(r.sym) + kind.pcrel * 2 ** 24 + 2 * 2 ** 25 + 1 * 2 ** 27
+      + kind.type * 2 ** 28);
   }
 
   // ---- 符号表（nlist_64）
@@ -248,4 +282,8 @@ export function writeObject(text, defs, relocs) {
   // ---- 字符串表
   b.bytes(strBytes);
   return b.out();
+}
+
+function align(n, to) {
+  return n % to === 0 ? n : n + (to - (n % to));
 }
