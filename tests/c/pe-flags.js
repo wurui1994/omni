@@ -67,9 +67,25 @@ const MODES = [
     args: ['-Wl,--large-address-aware'],
     opt: { peChars: 0x20 },
   },
-  { name: 'nxcompat', args: ['-Wl,--nxcompat'], dllChars: 0x100 },
-  { name: 'tsaware', args: ['-Wl,--tsaware'], dllChars: 0x8000 },
-  { name: 'dynamicbase', args: ['-Wl,--dynamicbase'], dllChars: 0x40 },
+  { name: 'nxcompat', args: ['-Wl,--nxcompat'], dllSet: 0x100 },
+  { name: 'tsaware', args: ['-Wl,--tsaware'], dllSet: 0x8000 },
+  { name: 'dynamicbase', args: ['-Wl,--dynamicbase'], dllSet: 0x40 },
+  /* `--high-entropy-va` 一下带起两位（0x60）—— `SET_OR_CLEAR_2(v, 0x60, 0x20)`。 */
+  { name: 'high-entropy-va', args: ['-Wl,--high-entropy-va'], dllSet: 0x60 },
+  /* 反过来那几个（第九刀第八十片）。`link_option` 里带 `?` 的都能加 `--no-`，
+   * 清的位**不一定是设的那几位**：
+   *
+   *   ?dynamicbase      → 设 0x40、清 **0x60**（连 HIGH_ENTROPY_VA 一起清掉）
+   *   ?high-entropy-va  → 设 0x60、清 **0x20**（DYNAMIC_BASE 留着）
+   *   ?nxcompat         → 设/清 0x100
+   *   ?tsaware          → 设/清 0x8000
+   *
+   * x86_64 的默认值是 0，清什么都看不出来；arm64-win32 默认 0x8160，这四条各清出
+   * 一个不同的值来 —— 清掉 0x40 的那一条还会让它**丢掉 `.reloc` 那一节**。 */
+  { name: 'no-dynamicbase', args: ['-Wl,--no-dynamicbase'], dllClear: 0x60 },
+  { name: 'no-high-entropy-va', args: ['-Wl,--no-high-entropy-va'], dllClear: 0x20 },
+  { name: 'no-nxcompat', args: ['-Wl,--no-nxcompat'], dllClear: 0x100 },
+  { name: 'no-tsaware', args: ['-Wl,--no-tsaware'], dllClear: 0x8000 },
   { name: 'entry', args: ['-Wl,-e,main'], opt: { entry: 'main' } },
 ];
 
@@ -133,9 +149,10 @@ try {
     let ok = 0;
     for (const m of MODES) {
       if (!keep(m.name)) continue;
-      /* `DllCharacteristics` 是「默认值再或上这一位」。 */
+      /* `DllCharacteristics` 是「默认值再或上这一位」，`--no-` 那几条是「再与掉」。 */
       const base = t.name.startsWith('arm64') ? ARM64_DLLCHARS : 0;
-      const opt = m.dllChars === undefined ? m.opt : { dllChars: base | m.dllChars };
+      const opt = m.dllSet === undefined && m.dllClear === undefined ? m.opt
+        : { dllChars: ((base | (m.dllSet ?? 0)) & ~(m.dllClear ?? 0)) >>> 0 };
       for (const c of cases) {
         const stem = `${t.name}-${m.name}-${basename(c, '.c')}`;
         const objPath = join(dir, `${stem}.o`);

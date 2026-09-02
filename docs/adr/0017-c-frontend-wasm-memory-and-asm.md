@@ -562,6 +562,12 @@ tcc 那段不在 EXE 的分支里，所以 dylib 也发。门涨到 `27 条`。
 从 `.o` 里读进来的 `.stab` tcc 是丢掉的（`sk_stab` 认的是本次编译造的那一节），
 所以 stabs 那一路的产物里没有 `__stab`。门是 `tests/c/macho-debug.js`，`40 条`。
 
+**PE 上那几个反过来的开关**（第八十片）：`link_option` 里带 `?` 的都能加 `--no-`，
+清的位不一定是设的那几位 —— `?dynamicbase` 设 0x40 却清 **0x60**，`?high-entropy-va`
+设 0x60 却只清 **0x20**。x86_64 默认值是 0 看不出来，arm64-win32 默认 0x8160，
+四条各清出一个不同的值，清掉 0x40 的那一条还会让它丢掉 `.reloc`。写出的那一层
+一个字没改就对上了，`tests/c/pe-flags.js` 从 `243 条`涨到 `390 条`。
+
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
 地址交给真的 libc（`strlen`/`memcpy`）验过。C 前端现在还把 `&x` 降到影子栈上，
@@ -11598,6 +11604,39 @@ if (is_dwarf && type == R_DATA_32DW
 命令行上是 `omni macho-link -g [--dwarf 2]`。
 
 <!-- 第九刀第七十九片-END -->
+
+## 落地：第九刀第八十片
+
+PE 上那几个反过来的开关（`-Wl,--no-*`）。
+
+`tcc_set_linker` 里 `link_option` 的名字前面带 `?` 的，都能加 `--no-` 前缀
+（libtcc.c:1494）。要紧的是**清的位不一定是设的那几位**：
+
+```c
+#define SET_OR_CLEAR(v,f)      (v = r > 0 ? v | f  : v & ~f)
+#define SET_OR_CLEAR_2(v,f1,f2)(v = r > 0 ? v | f1 : v & ~f2)
+
+?dynamicbase      → SET_OR_CLEAR_2(chars, 0x40, 0x60)
+?high-entropy-va  → SET_OR_CLEAR_2(chars, 0x60, 0x20)
+?nxcompat         → SET_OR_CLEAR  (chars, 0x100)
+?tsaware          → SET_OR_CLEAR  (chars, 0x8000)
+```
+
+也就是：`--no-dynamicbase` 连 `HIGH_ENTROPY_VA`（0x20）一起清掉，
+`--no-high-entropy-va` 却把 `DYNAMIC_BASE`（0x40）留着。`--high-entropy-va` 反过来
+一下带起两位。
+
+x86_64-win32 的 `DllCharacteristics` 默认是 0，`--no-` 什么都看不出来；
+**arm64-win32 默认 0x8160**，四条各清出一个不同的值来 ——
+`--no-dynamicbase` 那一条清掉 0x40 之后，可执行文件连 `.reloc` 那一节都没了
+（`hasReloc = dll || (dllChars & 0x40) !== 0`）。
+
+写出的那一层一个字没改 —— 我们本来就是拿 `dllChars` 这个数字往下走的，这一片补的是
+**门没盖到的那五种走法**：`--high-entropy-va` 与四个 `--no-`。
+`tests/c/pe-flags.js` 的走法从十二种涨到十七种，条数 `243 → 390`，全 0 条不同。
+
+<!-- 第九刀第八十片-END -->
+
 
 
 
