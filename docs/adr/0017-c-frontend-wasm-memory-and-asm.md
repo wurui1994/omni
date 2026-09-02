@@ -551,6 +551,10 @@ level 是 1 —— 只贡献名字，不发 `LC_LOAD_DYLIB`。胖二进制那一
 写的是 `CPU_SUBTYPE_X86_ALL | CPU_SUBTYPE_LIB64`，于是 tcc 自己就认不出胖文件里的
 x86_64 —— 我们跟着认不出。门是 `tests/c/macho-dll.js`，`9 条`全 0 条不同。
 
+**`LC_RPATH`**（第七十八片）：`-Wl,-rpath=` 攒起来的那一串按冒号切开，一段一条
+（`rpath_command` 12 字节 + 路径，八字节对齐），排在 `LC_LOAD_DYLIB` 后面。
+tcc 那段不在 EXE 的分支里，所以 dylib 也发。门涨到 `27 条`。
+
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
 地址交给真的 libc（`strlen`/`memcpy`）验过。C 前端现在还把 `&x` 降到影子栈上，
@@ -11501,6 +11505,36 @@ riscv 自己的八条指令 —— `auipc t2` / `sub t1,t1,t3` / `ld t3` / `addi
 （`.tbd` 那一路）没动。命令行上 `omni macho-link --dylib <真库>` 也逐字节对上。
 
 <!-- 第九刀第七十七片-END -->
+
+## 落地：第九刀第七十八片
+
+`LC_RPATH`（tccmacho.c:1777）。
+
+`-Wl,-rpath=` 给几次，tcc 用 `tcc_concat_str(&s->rpath, o.arg, ':')` 把它们攒成一串
+冒号隔开的（libtcc.c:1478），写出来的时候再按冒号切回去，**一段一条 `LC_RPATH`**：
+
+```
+i = (sizeof(*rpath) + (end - path) + 1 + 7) & -8;   /* 12 + 路径 + '\0'，八字节对齐 */
+rpath->path = sizeof(*rpath);                        /* 路径紧跟在结构体后面 */
+```
+
+`rpath_command` 是 `{cmd, cmdsize, path}` 三个 u32，12 字节。位置在
+`LC_LOAD_DYLIB` 那一串后面。
+
+两处值得记：
+
+- 这段**不在** `if (output_type == TCC_OUTPUT_EXE)` 里，所以 `-shared` 出来的 dylib
+  也发 `LC_RPATH`。
+- 切法是 `do { ... } while (*end)`：切到底，所以末尾那个空段也会发一条空路径的
+  `LC_RPATH`。`split(':')` 正好是这个行为。
+
+命令行上是 `omni macho-link --rpath <路径>`，给几次攒几段。
+
+门还是 `tests/c/macho-dll.js`：每个 case 多三路（一条 rpath 的可执行文件、两条的、
+两条 rpath 的 dylib），`27 条`全 0 条不同（共 1227384 字节）。
+
+<!-- 第九刀第七十八片-END -->
+
 
 
 

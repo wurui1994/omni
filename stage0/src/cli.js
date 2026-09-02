@@ -2183,7 +2183,7 @@ function main(argv) {
      * `--shared` 出一份 dylib（第六十三片）。接 libc 就把 `.tbd` 与 `libtcc1.a` 一起给：
      *   omni macho-link a.o [b.o …] -o a.out [-e _main]
      *                   [--dylib <sdk>/usr/lib/libc.tbd] [--libtcc1 libtcc1.a]
-     *                   [--shared] [--install-name libfoo.dylib]
+     *                   [--shared] [--install-name libfoo.dylib] [--rpath @loader_path]
      * 写出来的还没签名 —— arm64 上要自己补一句 `codesign -f -s - <文件>`，
      * tcc 也是这么干的（CONFIG_CODESIGN 只在本机那个目标上开）。 */
     case 'macho-link': {
@@ -2208,10 +2208,16 @@ function main(argv) {
       }
       const li = rest.indexOf('--libtcc1');
       const ni = rest.indexOf('--install-name');
+      /* `--rpath` 可以给多次，攒成一串冒号隔开的（tcc 的 `tcc_concat_str(..., ':')`）。 */
+      const rp = [];
+      for (let k = 0; k < rest.length - 1; k++) {
+        if (rest[k] === '--rpath') rp.push(rest[k + 1]);
+      }
       const r = machoExe({
         objs: files.map(bytesOf),
         entryName,
         dylibs,
+        rpath: rp.length === 0 ? undefined : rp.join(':'),
         openDylib: (n) => (exists(n) ? bytesOf(n) : null),
         libtcc1: li >= 0 ? bytesOf(rest[li + 1]) : undefined,
         shared: rest.includes('--shared'),

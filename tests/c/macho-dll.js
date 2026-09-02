@@ -11,6 +11,8 @@
  *
  * 库名进 `LC_LOAD_DYLIB`，两边得是同一个路径；arm64 上还要在同名的路径下签名。
  *
+ * `-Wl,-rpath=`（第七十八片）也一起比：`LC_RPATH` 一段一条，可执行文件与 dylib 都发。
+ *
  *   node tests/c/macho-dll.js
  *   node tests/c/macho-dll.js arm64
  */
@@ -95,11 +97,55 @@ try {
           fatPath = p;
         }
       }
-      for (const m of [{ sfx: '', lib: libPath }, { sfx: '-fat', lib: fatPath }]) {
+      /* `LC_RPATH` 在 dylib 上也发（tcc 那段不在 EXE 的分支里）—— 顺手比一份。 */
+      {
+        const rpLib = join(dir, `librp${tag}.dylib`);
+        const wl = ['-Wl,-rpath=@loader_path', '-Wl,-rpath=/opt/omni'];
+        if (run(['-shared', '-nostdlib', ...wl, libObj, '-o', rpLib]).status === 0) {
+          const minePath = join(mine, `librp${tag}.dylib`);
+          let ok2 = true;
+          try {
+            writeFileSync(minePath, machoExe({
+              objs: [readFileSync(libObj)],
+              shared: true,
+              rpath: '@loader_path:/opt/omni',
+              outName: rpLib,
+            }).bytes);
+          } catch (e) {
+            ok2 = false;
+            diff++;
+            if (diff <= 6) process.stdout.write(`  THROW ${tag}-so-rpath：${e.message}\n`);
+          }
+          if (ok2 && t.sign
+            && spawnSync('codesign', ['-f', '-s', '-', minePath]).status !== 0) ok2 = false;
+          if (ok2) {
+            const d2 = firstDiff(readFileSync(minePath), readFileSync(rpLib));
+            if (d2 < 0) { same++; ok++; bytesTotal += readFileSync(minePath).length; } else {
+              diff++;
+              if (diff <= 6) {
+                process.stdout.write(`  DIFF ${tag}-so-rpath：第一个不同在 0x${d2.toString(16)}\n`);
+              }
+            }
+          }
+        }
+      }
+      for (const m of [
+        { sfx: '', lib: libPath, wl: [] },
+        { sfx: '-fat', lib: fatPath, wl: [] },
+        /* `LC_RPATH`（第九刀第七十八片）：一条、两条（`-Wl,-rpath=` 给两次，tcc 用
+         * 冒号把它们攒成一串，再按冒号切回来一段一条）。 */
+        { sfx: '-rpath', lib: libPath, wl: ['-Wl,-rpath=@loader_path'], rpath: '@loader_path' },
+        {
+          sfx: '-rpath2',
+          lib: libPath,
+          wl: ['-Wl,-rpath=@loader_path/../lib', '-Wl,-rpath=/opt/omni'],
+          rpath: '@loader_path/../lib:/opt/omni',
+        },
+      ]) {
         if (m.lib === null) continue;
         const name = `${tag}${m.sfx}`;
         const exePath = join(dir, `${name}.out`);
-        const ln = run(['-nostdlib', useObj, m.lib, '-o', exePath]);
+        const ln = run(['-nostdlib', ...m.wl, useObj, m.lib, '-o', exePath]);
         if (ln.status !== 0 || !existsSync(exePath)) {
           /* 胖文件里没有 tcc 认得的那一片 —— 上面那段注释里的严格比。 */
           if (m.sfx === '-fat') continue;
@@ -113,6 +159,7 @@ try {
             objs: [readFileSync(useObj)],
             entryName: '_main',
             dylibs: [{ name: m.lib, bytes: readFileSync(m.lib) }],
+            rpath: m.rpath,
             outName: exePath,
           }).bytes;
         } catch (e) {

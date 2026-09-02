@@ -109,6 +109,7 @@ const LC_LOAD_DYLIB = 0xc;
 const LC_ID_DYLIB = 0xd;
 const LC_LOAD_DYLINKER = 0xe;
 const LC_REEXPORT_DYLIB = 0x1f | LC_REQ_DYLD;
+const LC_RPATH = 0x1c | LC_REQ_DYLD;
 const LC_SEGMENT_64 = 0x19;
 const LC_MAIN = 0x28 | LC_REQ_DYLD;
 const LC_SOURCE_VERSION = 0x2a;
@@ -719,7 +720,7 @@ function loadInputs(inp) {
  * 把几个 Mach-O 目标文件链成一个可执行文件（`macho_output_file` 的 EXE 那一路），
  * 或者一份 dylib（`-shared`，第九刀第六十三片）。
  *
- * @param inp `{objs, entryName, dylibs, libtcc1, shared, outName, installName, openDylib}`；
+ * @param inp `{objs, entryName, dylibs, libtcc1, shared, outName, installName, openDylib, rpath}`；
  *            `entryName` 默认 `_main`（Mach-O 的名字带下划线），`dylibs` 每条要么是一份
  *            `.tbd` 的文本、要么是一份真的 `.dylib` 二进制（`{name, bytes}`），
  *            `libtcc1` 是支持库的字节（按需取用）；`shared` 出 MH_DYLIB，
@@ -1209,6 +1210,11 @@ export function machoExe(inp) {
   if (!shared) lcs.push({ kind: 'main', obj: mainLc });
   /* 装了哪些 dylib 就多几条 `LC_LOAD_DYLIB`，排在 `LC_MAIN` 后面。 */
   for (const name of loaded.dylibNames) lcs.push({ kind: 'dylib', name });
+  /* `-Wl,-rpath=` 攒起来的那一串按冒号切开，一段一条 `LC_RPATH`，排在 dylib 后面。
+   * tcc 那个 `do { ... } while (*end)` 是「切到底」的写法：末尾的空段也会发一条。 */
+  if (inp.rpath !== undefined && inp.rpath !== '') {
+    for (const p of inp.rpath.split(':')) lcs.push({ kind: 'rpath', name: p });
+  }
 
   /* ---- calc_fixup_size：链式修正那一块有多大，摆放之前就得算出来 —— 它自己
    * 也在 `__LINKEDIT` 里，长度差一个字节后面的偏移全错。 */
@@ -1544,6 +1550,7 @@ export function machoExe(inp) {
     if (l.kind === 'dysymtab') return 80;
     if (l.kind === 'dylinker') return align(12 + l.name.length + 1, 8);
     if (l.kind === 'dylib' || l.kind === 'iddylib') return align(24 + l.name.length + 1, 8);
+    if (l.kind === 'rpath') return align(12 + l.name.length + 1, 8);
     if (l.kind === 'buildver') return 24;
     if (l.kind === 'sourcever') return 16;
     return 24;                                      // main
@@ -1648,6 +1655,11 @@ export function machoExe(inp) {
       dv.setUint32(o + 16, 1 << 16, true);          // current_version 1.0.0
       dv.setUint32(o + 20, 1 << 16, true);          // compatibility_version 1.0.0
       for (let k = 0; k < l.name.length; k++) buf[o + 24 + k] = l.name.charCodeAt(k);
+    } else if (l.kind === 'rpath') {
+      dv.setUint32(o, LC_RPATH, true);
+      dv.setUint32(o + 4, sz, true);
+      dv.setUint32(o + 8, 12, true);                // path 从结构体末尾起
+      for (let k = 0; k < l.name.length; k++) buf[o + 12 + k] = l.name.charCodeAt(k);
     } else {
       dv.setUint32(o, LC_MAIN, true);
       dv.setUint32(o + 4, sz, true);
