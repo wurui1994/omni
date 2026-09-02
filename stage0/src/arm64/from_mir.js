@@ -33,8 +33,10 @@ import { OmniError } from '../source/diag.js';
 import * as a from './encode.js';
 import { CodeBuf } from './asm.js';
 import {
-  OP, REF_NONE, isConstRef, T_I32, T_I64, T_BOOL, T_VOID, typeKind,
-  CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16, OP_NAMES,
+  OP, REF_NONE, isConstRef, T_I32, T_I64, T_BOOL, T_VOID, T_F32, T_F64,
+  typeKind, isFloatType, intBits,
+  CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16,
+  CVT_I2F, CVT_U2F, CVT_F2I, CVT_FCVT, CVT_BITCAST, OP_NAMES,
 } from '../mir/ir.js';
 
 /* 草稿寄存器。x8 是 arm64 的「间接结果」寄存器、x9-x15 是调用者保存的临时 ——
@@ -43,6 +45,22 @@ const TMP0 = 9;
 const TMP1 = 10;
 const RES = 8;
 const SP = 31;
+/* 浮点的草稿。取 v16-v18 是因为 **v8-v15 是被调用者保存的** —— 用它们就得在序言里存、
+ * 收场里取，而这一层根本不需要跨调用留住任何东西。 */
+const FTMP0 = 16;
+const FTMP1 = 17;
+const FRES = 18;
+
+/** 一个 double / float 的 IEEE 754 位模式。与 C 前端的 `floatBits` 同一个写法。 */
+function floatBits(x, size) {
+  const dv = new DataView(new ArrayBuffer(8));
+  if (size === 4) {
+    dv.setFloat32(0, x, true);
+    return BigInt(dv.getUint32(0, true));
+  }
+  dv.setFloat64(0, x, true);
+  return dv.getBigUint64(0, true);
+}
 
 function nyi(what) {
   throw new OmniError(`arm64 后端还不认识 ${what}`);
@@ -109,16 +127,35 @@ class FnGen {
     }
   }
 
-  /** 把一个 ref 的值弄到 `reg` 里。常量当场造，指令的值从栈位取。 */
+  /** 把一个 ref 的值弄到 `reg` 里。常量当场造，指令的值从栈位取。
+   * 浮点也走**整数寄存器**：栈位里躺的是位模式，进 FP 寄存器是 `fmov` 的事。 */
   loadRef(reg, ref) {
     if (ref === REF_NONE) throw new OmniError('arm64: 这条指令少了一个操作数');
     if (isConstRef(ref)) {
       const k = this.mod.consts.get(ref);
       if (k.kind === 'int') return this.movImm(reg, BigInt(k.text));
       if (k.kind === 'bool') return this.movImm(reg, k.text === 'true' ? 1n : 0n);
+      if (k.kind === 'real') {
+        return this.movImm(reg, floatBits(Number(k.text), typeKind(k.t) === T_F32 ? 4 : 8));
+      }
       return nyi(`常量 ${k.kind}`);
     }
     this.frameLoad(reg, this.valOff(this.f.at(ref)));
+  }
+
+  /** 一个 ref 产出的类型（比较的 `t` 是操作数的类型，所以不能直接读 `t`）。 */
+  typeOfRef(ref) {
+    return this.f.typeOf(ref, this.mod.consts);
+  }
+
+  /** 位模式 -> FP 寄存器。`fmov` 的整数那一侧要与浮点宽度同宽（d 配 x、s 配 w）。 */
+  toFp(fdst, greg, dbl) {
+    this.buf.emit(a.fmovFromInt(dbl ? 1 : 0, dbl, fdst, greg));
+  }
+
+  /** FP 寄存器 -> 位模式。 */
+  fromFp(gdst, fsrc, dbl) {
+    this.buf.emit(a.fmovToInt(dbl ? 1 : 0, dbl, gdst, fsrc));
   }
 
   /* -------------------------------------------------------------- 区域 */
@@ -148,12 +185,21 @@ class FnGen {
         buf.emit(a.subReg(1, SP, SP, TMP0));
       }
     }
-    /* 形参：AAPCS 的 x0-x7 进各自的槽位。第九个起走栈，这一片还不认。 */
-    if (f.params.length > 8) nyi(`${f.params.length} 个形参（超过 8 个要走栈）`);
-    let pi = 0;
+    /* 形参：AAPCS 把整数与浮点**分成两串**数（x0-x7 与 v0-v7 各自从 0 起），
+     * 所以两个计数器。第九个起走栈，这一片还不认。 */
+    let ngrn = 0;
+    let nsrn = 0;
     for (const p of f.params) {
-      this.frameStore(pi, this.slotOff(p.slot));
-      pi++;
+      if (isFloatType(p.t)) {
+        if (nsrn > 7) nyi(`第 ${nsrn + 1} 个浮点形参（超过 8 个要走栈）`);
+        this.fromFp(TMP0, nsrn, typeKind(p.t) === T_F64);
+        this.frameStore(TMP0, this.slotOff(p.slot));
+        nsrn++;
+        continue;
+      }
+      if (ngrn > 7) nyi(`第 ${ngrn + 1} 个整数形参（超过 8 个要走栈）`);
+      this.frameStore(ngrn, this.slotOff(p.slot));
+      ngrn++;
     }
 
     for (let i = 0; i < f.count(); i++) this.one(i);
@@ -215,29 +261,45 @@ class FnGen {
     }
     if (op === OP.RET) {
       if (f.a[i] !== REF_NONE) {
-        this.loadRef(0, f.a[i]);
-        /* i32 的规范形是符号扩展过的 64 位，而 AAPCS 只看 w0 —— 两边都对，不用再削。 */
+        this.loadRef(TMP0, f.a[i]);
+        /* 浮点的返回值在 d0，整数在 x0。i32 的规范形是符号扩展过的 64 位，而 AAPCS
+         * 只看 w0 —— 两边都对，不用再削。 */
+        if (isFloatType(t)) this.toFp(0, TMP0, typeKind(t) === T_F64);
+        else buf.emit(a.movReg(1, 0, TMP0));
       }
       buf.b(this.retLabel);
       return;
     }
 
-    /* ---- 调用。实参进 x0-x7，返回值在 x0。
-     * 不用管调用者保存的寄存器：这一片的值全在栈位上，跨调用活着的东西一个也没有 ——
-     * 「全落栈」这个笨办法在这儿一次性省掉了整个调用点的溢出逻辑。 */
+    /* ---- 调用。整数实参进 x0-x7、浮点实参进 v0-v7（两串各自从 0 起数），返回值在
+     * x0 或 d0。不用管调用者保存的寄存器：这一片的值全在栈位上，跨调用活着的东西一个
+     * 也没有 —— 「全落栈」这个笨办法在这儿一次性省掉了整个调用点的溢出逻辑。 */
     if (op === OP.CALL) {
       if (this.callLabels === null) nyi('单个函数里的 CALL（要按整个模块生成才有落点）');
       const args = f.argsOf(f.b[i]);
-      if (args.length > 8) nyi(`${args.length} 个实参（超过 8 个要走栈）`);
-      let r = 0;
+      let ngrn = 0;
+      let nsrn = 0;
       for (const ar of args) {
-        this.loadRef(r, ar);
-        r++;
+        const at = this.typeOfRef(ar);
+        if (isFloatType(at)) {
+          if (nsrn > 7) nyi(`第 ${nsrn + 1} 个浮点实参（超过 8 个要走栈）`);
+          this.loadRef(TMP0, ar);
+          this.toFp(nsrn, TMP0, typeKind(at) === T_F64);
+          nsrn++;
+          continue;
+        }
+        if (ngrn > 7) nyi(`第 ${ngrn + 1} 个整数实参（超过 8 个要走栈）`);
+        this.loadRef(ngrn, ar);
+        ngrn++;
       }
       const label = this.callLabels[f.a[i]];
       if (label === undefined) throw new OmniError(`arm64: 没有 ${f.a[i]} 号函数`);
       buf.bl(label);
       if (typeKind(t) === T_VOID) return;
+      if (isFloatType(t)) {
+        this.fromFp(RES, 0, typeKind(t) === T_F64);
+        return this.def(i, RES);
+      }
       /* i32 的返回值要按规范形符号扩展：AAPCS 只保证 w0 有值，x0 的高 32 位不算数。 */
       return this.def(i, 0, widthOf(t));
     }
@@ -252,6 +314,10 @@ class FnGen {
       this.frameStore(RES, this.slotOff(f.aux[i]));
       return;
     }
+
+    /* ---- 浮点。`t` 是浮点就整条交给 `float()`：算术、取负、比较、以及**结果是浮点的**
+     * 那几种 CVT 都在那儿。结果是整数的 F2I 留在 `cvt()`（那条的 `t` 是整数）。 */
+    if (isFloatType(t)) return this.float(i);
 
     /* ---- 单目 */
     if (op === OP.NEG) {
@@ -299,11 +365,91 @@ class FnGen {
     return nyi(`MIR 指令 ${OP_NAMES[op]}`);
   }
 
+  /**
+   * `t` 是浮点的那些指令。
+   *
+   * 值照旧躺在 8 字节的栈位里（躺的是**位模式**），进 FP 寄存器一条 `fmov`、出来
+   * 再一条。于是取值/回写那一整套一个字都不用改，多出来的只是每条运算两三条 `fmov`。
+   * 这与「全落栈」是同一个取舍：先把「哪条 MIR 对哪条 arm64」钉死，省指令是窥孔的事。
+   */
+  float(i) {
+    const f = this.f;
+    const buf = this.buf;
+    const op = f.op[i];
+    const dbl = typeKind(f.t[i]) === T_F64;
+    if (op === OP.CVT) return this.cvtToFloat(i, dbl);
+    if (op === OP.NEG) {
+      this.loadRef(TMP0, f.a[i]);
+      this.toFp(FTMP0, TMP0, dbl);
+      buf.emit(a.fneg(dbl, FRES, FTMP0));
+      this.fromFp(RES, FRES, dbl);
+      return this.def(i, RES);
+    }
+    const fb = FBIN[op];
+    const fc = FCMP[op];
+    if (fb === undefined && fc === undefined) return nyi(`浮点的 ${OP_NAMES[op]}`);
+    this.loadRef(TMP0, f.a[i]);
+    this.loadRef(TMP1, f.b[i]);
+    this.toFp(FTMP0, TMP0, dbl);
+    this.toFp(FTMP1, TMP1, dbl);
+    if (fb !== undefined) {
+      fb(buf, dbl, FRES, FTMP0, FTMP1);
+      this.fromFp(RES, FRES, dbl);
+      return this.def(i, RES);
+    }
+    buf.emit(a.fcmp(dbl, FTMP0, FTMP1), a.cset(1, RES, fc));
+    return this.def(i, RES);
+  }
+
+  /** 结果是浮点的那几种 CVT。 */
+  cvtToFloat(i, dbl) {
+    const f = this.f;
+    const buf = this.buf;
+    const mode = f.aux[i];
+    const src = this.typeOfRef(f.a[i]);
+    this.loadRef(TMP0, f.a[i]);
+    /* 位重解释在这一层是**一条 mov**：栈位里躺的本来就是位模式。 */
+    if (mode === CVT_BITCAST) {
+      buf.emit(a.movReg(1, RES, TMP0));
+      return this.def(i, RES);
+    }
+    if (mode === CVT_I2F || mode === CVT_U2F) {
+      const sf = intBits(src) === 64 ? 1 : 0;
+      this.buf.emit(mode === CVT_I2F ? a.scvtf(sf, dbl, FRES, TMP0)
+        : a.ucvtf(sf, dbl, FRES, TMP0));
+      this.fromFp(RES, FRES, dbl);
+      return this.def(i, RES);
+    }
+    if (mode === CVT_FCVT) {
+      /* 源的宽度与目标的宽度一定相反（同宽的 fcvt 没有意义，MIR 也不该发）。 */
+      const srcDbl = typeKind(src) === T_F64;
+      if (srcDbl === dbl) return nyi('同宽的 CVT_FCVT');
+      this.toFp(FTMP0, TMP0, srcDbl);
+      buf.emit(dbl ? a.fcvtSD(FRES, FTMP0) : a.fcvtDS(FRES, FTMP0));
+      this.fromFp(RES, FRES, dbl);
+      return this.def(i, RES);
+    }
+    return nyi(`结果是浮点的 CVT 模式 ${mode}`);
+  }
+
   cvt(i) {
     const f = this.f;
     const buf = this.buf;
     const mode = f.aux[i];
     this.loadRef(TMP0, f.a[i]);
+    /* 浮点 -> 整数（向零取整，C 的强制转换就是这一种）。`t` 是整数所以落在这儿。 */
+    if (mode === CVT_F2I) {
+      const srcDbl = typeKind(this.typeOfRef(f.a[i])) === T_F64;
+      const w = widthOf(f.t[i]);
+      this.toFp(FTMP0, TMP0, srcDbl);
+      buf.emit(a.fcvtzs(w === 64 ? 1 : 0, srcDbl, RES, FTMP0));
+      return this.def(i, RES, w);
+    }
+    /* 位重解释：栈位里躺的就是位模式，一条 mov。 */
+    if (mode === CVT_BITCAST) {
+      buf.emit(a.movReg(1, RES, TMP0));
+      return this.def(i, RES);
+    }
     /* i32 的规范形是**符号扩展后的 64 位**，所以：
      *  - SEXT（i32 -> i64）什么都不用做（值本来就是那个样子）；
      *  - ZEXT 要把高 32 位抹掉；
@@ -357,6 +503,31 @@ CMP[OP.ULT] = a.COND.cc;
 CMP[OP.UGE] = a.COND.cs;
 CMP[OP.ULE] = a.COND.ls;
 CMP[OP.UGT] = a.COND.hi;
+
+/* 浮点的二目。`dbl` 直接就是编码器要的那一位。 */
+const FBIN = {};
+FBIN[OP.ADD] = (b, dbl, d, x, y) => b.emit(a.fadd(dbl, d, x, y));
+FBIN[OP.SUB] = (b, dbl, d, x, y) => b.emit(a.fsub(dbl, d, x, y));
+FBIN[OP.MUL] = (b, dbl, d, x, y) => b.emit(a.fmul(dbl, d, x, y));
+FBIN[OP.DIV] = (b, dbl, d, x, y) => b.emit(a.fdiv(dbl, d, x, y));
+
+/**
+ * 浮点比较 -> 条件码。**不能照抄整数那张表**：`fcmp` 遇上 NaN 会把标志位置成
+ * 「无序」（C=1、V=1、Z=0、N=0），而 C/IEEE 要求除了 `!=` 之外**所有**比较对 NaN
+ * 都是假。于是：
+ *   - `<` 用 `mi`（N==1）而不是 `lt`（N!=V）—— 无序时 N=0、V=1，`lt` 会**为真**；
+ *   - `<=` 用 `ls`（C==0 或 Z==1）而不是 `le`，同一个道理；
+ *   - `>`/`>=` 用 `gt`/`ge` 就对（它们都要 N==V，无序时不成立）；
+ *   - `==`/`!=` 用 `eq`/`ne`：无序时 Z=0，于是 `==` 假、`!=` 真，正是 C 要的。
+ * 这一格是「照抄整数表就会错、而且只在 NaN 上错」的地方，所以用例里有 NaN。
+ */
+const FCMP = {};
+FCMP[OP.EQ] = a.COND.eq;
+FCMP[OP.NE] = a.COND.ne;
+FCMP[OP.LT] = a.COND.mi;
+FCMP[OP.LE] = a.COND.ls;
+FCMP[OP.GT] = a.COND.gt;
+FCMP[OP.GE] = a.COND.ge;
 
 /** 一个 MIR 函数 -> 一段 arm64 机器码（`CodeBuf`，已回填）。不认 CALL —— 单个函数
  * 里没有别的函数的落点，要发调用得走 `genModule`。 */

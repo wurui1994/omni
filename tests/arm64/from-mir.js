@@ -17,21 +17,23 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
-  MirModule, MirFunc, OP, REF_NONE, T_I64, T_I32, T_BOOL, T_VOID, T_F64,
+  MirModule, MirFunc, OP, REF_NONE, T_I64, T_I32, T_BOOL, T_VOID, T_F64, T_F32,
   CVT_SEXT8, CVT_SEXT16, CVT_TRUNC, CVT_ZEXT,
+  CVT_I2F, CVT_U2F, CVT_F2I, CVT_FCVT, CVT_BITCAST,
 } from '../../stage0/src/mir/ir.js';
 import { codeOf, genModule } from '../../stage0/src/arm64/from_mir.js';
 
 const mod = new MirModule('main');
 const K = mod.consts;
 
-/** 收 n 个 long long 的函数，登记进模块（CALL 的 a 就是这个下标）。 */
-function mkFunc(m, name, nparams, body) {
-  const f = new MirFunc(name, [], T_I64);
+/** 收 n 个形参的函数，登记进模块（CALL 的 a 就是这个下标）。`pt` 是形参与返回的类型。 */
+function mkFunc(m, name, nparams, body, pt) {
+  const ty = pt === undefined ? T_I64 : pt;
+  const f = new MirFunc(name, [], ty);
   const slots = [];
   for (let i = 0; i < nparams; i++) {
-    const s = f.slot(`p${i}`, T_I64);
-    f.params.push({ name: `p${i}`, t: T_I64, slot: s });
+    const s = f.slot(`p${i}`, ty);
+    f.params.push({ name: `p${i}`, t: ty, slot: s });
     slots.push(s);
   }
   const no = m.addFunc(f);
@@ -269,13 +271,105 @@ t('中途 return', [1n, 2n], 11n, (f) => {
     ret(f, T_I64, f.emit(OP.CALL, T_I32, neg32No, f.pushArgs([ld(f, T_I64, x)]), 0)));
 }
 
+// ---- 浮点（第九刀第六片）
+/** 一个 double 的位模式。用例的期望值一律比**位**，不比十进制文本。 */
+function d2b(x) {
+  const dv = new DataView(new ArrayBuffer(8));
+  dv.setFloat64(0, x, true);
+  return dv.getBigUint64(0, true);
+}
+function f2b(x) {
+  const dv = new DataView(new ArrayBuffer(8));
+  dv.setFloat32(0, Math.fround(x), true);
+  return BigInt(dv.getUint32(0, true));
+}
+
+/* 先用整数那套壳子验「算得对不对」：进出都是位模式，中间是浮点。 */
+t('double 加：0.1 + 0.2', [0n, 0n], d2b(0.1 + 0.2), (f) =>
+  ret(f, T_I64, f.emit(OP.CVT, T_I64,
+    f.emit(OP.ADD, T_F64, K.real('0.1'), K.real('0.2'), 0), REF_NONE, CVT_BITCAST)));
+t('double 除：1/3', [0n, 0n], d2b(1 / 3), (f) =>
+  ret(f, T_I64, f.emit(OP.CVT, T_I64,
+    f.emit(OP.DIV, T_F64, K.real('1'), K.real('3'), 0), REF_NONE, CVT_BITCAST)));
+t('double 取负', [0n, 0n], d2b(-2.5), (f) =>
+  ret(f, T_I64, f.emit(OP.CVT, T_I64,
+    f.emit(OP.NEG, T_F64, K.real('2.5'), REF_NONE, 0), REF_NONE, CVT_BITCAST)));
+/* f32 的舍入与 double 不同 —— 1/3 在两种宽度下是两个不同的数，这条正查它。 */
+t('float 除：1/3 是单精度的那个', [0n, 0n], f2b(1 / 3), (f) =>
+  ret(f, T_I64, f.emit(OP.CVT, T_I64,
+    f.emit(OP.DIV, T_F32, K.f32('1'), K.f32('3'), 0), REF_NONE, CVT_BITCAST)));
+t('整数 -> double -> 整数（向零取整）', [-7n, 2n], -3n, (f, x, y) => {
+  const fx = f.emit(OP.CVT, T_F64, ld(f, T_I64, x), REF_NONE, CVT_I2F);
+  const fy = f.emit(OP.CVT, T_F64, ld(f, T_I64, y), REF_NONE, CVT_I2F);
+  ret(f, T_I64, f.emit(OP.CVT, T_I64, f.emit(OP.DIV, T_F64, fx, fy, 0), REF_NONE, CVT_F2I));
+});
+t('无符号 -> double', [-1n, 0n], d2b(18446744073709551616), (f, x) => {
+  const fx = f.emit(OP.CVT, T_F64, ld(f, T_I64, x), REF_NONE, CVT_U2F);
+  /* (double)(u64)-1 舍到 2^64 —— 转回整数会溢出，所以比位模式。 */
+  ret(f, T_I64, f.emit(OP.CVT, T_I64, fx, REF_NONE, CVT_BITCAST));
+});
+t('double -> float -> double 会掉精度', [0n, 0n], d2b(Math.fround(0.1)), (f) => {
+  const s = f.emit(OP.CVT, T_F32, K.real('0.1'), REF_NONE, CVT_FCVT);
+  const d = f.emit(OP.CVT, T_F64, s, REF_NONE, CVT_FCVT);
+  ret(f, T_I64, f.emit(OP.CVT, T_I64, d, REF_NONE, CVT_BITCAST));
+});
+/* NaN：照抄整数那张条件码表的话 `<` 会为真 —— 这两条是那个错的唯一现场。 */
+const NAN_BITS = 0x7ff8000000000000n;
+t('NaN < 1.0 是假', [0n, 0n], 0n, (f) => {
+  const nan = f.emit(OP.CVT, T_F64, K.int(NAN_BITS), REF_NONE, CVT_BITCAST);
+  ret(f, T_I64, f.emit(OP.LT, T_F64, nan, K.real('1'), 0));
+});
+t('NaN <= 1.0 是假', [0n, 0n], 0n, (f) => {
+  const nan = f.emit(OP.CVT, T_F64, K.int(NAN_BITS), REF_NONE, CVT_BITCAST);
+  ret(f, T_I64, f.emit(OP.LE, T_F64, nan, K.real('1'), 0));
+});
+t('NaN != NaN 是真', [0n, 0n], 1n, (f) => {
+  const nan = f.emit(OP.CVT, T_F64, K.int(NAN_BITS), REF_NONE, CVT_BITCAST);
+  ret(f, T_I64, f.emit(OP.NE, T_F64, nan, nan, 0));
+});
+t('2.5 > 1.5 是真，1.5 >= 2.5 是假', [0n, 0n], 1n, (f) => {
+  const gt = f.emit(OP.GT, T_F64, K.real('2.5'), K.real('1.5'), 0);
+  const ge = f.emit(OP.GE, T_F64, K.real('1.5'), K.real('2.5'), 0);
+  ret(f, T_I64, f.emit(OP.SUB, T_I64, gt, ge, 0));
+});
+
+/* 再验浮点的 ABI：形参在 d0-d7、返回值在 d0，与整数**各自从 0 起数**。 */
+/** @type {{f:MirFunc, args:[number,number], want:bigint, what:string}[]} */
+const dcases = [];
+let dno = 0;
+function td(what, args, want, body) {
+  const f = mkFunc(mod, `omni_d${dno}`, 2, (g, s, n) => body(g, s[0], s[1], n), T_F64);
+  dno++;
+  dcases.push({ f, args, want, what });
+}
+
+td('double 的形参与返回值', [1.5, 0.25], d2b(1.5 * 0.25), (f, x, y) =>
+  ret(f, T_F64, f.emit(OP.MUL, T_F64, ld(f, T_F64, x), ld(f, T_F64, y), 0)));
+td('double 的减法（次序不能反）', [1.5, 0.25], d2b(1.5 - 0.25), (f, x, y) =>
+  ret(f, T_F64, f.emit(OP.SUB, T_F64, ld(f, T_F64, x), ld(f, T_F64, y), 0)));
+{
+  /* 混着传：整数与浮点的实参各占自己那一串寄存器。 */
+  const mix = mkFunc(mod, 'omni_mix', 4, (f, s) => {
+    /* p0/p2 当 double 用，p1/p3 当 i64 用 —— 形参类型是逐个说的，不是一刀切。 */
+    ret(f, T_F64, f.emit(OP.ADD, T_F64, ld(f, T_F64, s[0]), ld(f, T_F64, s[2]), 0));
+  }, T_F64);
+  mix.params[1] = { name: 'p1', t: T_I64, slot: mix.params[1].slot };
+  mix.params[3] = { name: 'p3', t: T_I64, slot: mix.params[3].slot };
+  const mixNo = mod.funcIndex.get(mix.name);
+  td('整数与浮点实参各数一串', [2.5, 0.5], d2b(2.5 + 0.5), (f, x, y) =>
+    ret(f, T_F64, f.emit(OP.CALL, T_F64, mixNo, f.pushArgs([
+      ld(f, T_F64, x), K.int(7n), ld(f, T_F64, y), K.int(9n),
+    ]), 0)));
+}
+
 // ---------------------------------------------------------------- 边界
 // 还没做的东西必须**明着报**。一个悄悄发错指令的后端比一个报错的后端坏得多。
 // 这些函数不进 `mod` —— 它们发不出来，混进去会把整个模块的生成一起拖倒。
 const badMod = new MirModule('bad');
 let bad = 0;
 for (const [what, build] of [
-  ['浮点', (f) => { const l = ld(f, T_I64, 0); ret(f, T_I64, f.emit(OP.ADD, T_F64, l, l, 0)); }],
+  ['浮点的取余（没有单条指令，也还没落到 fmod）',
+    (f) => { const l = ld(f, T_F64, 0); ret(f, T_I64, f.emit(OP.MOD, T_F64, l, l, 0)); }],
   ['线性内存', (f) => { ret(f, T_I64, f.emit(OP.MLOAD, T_I64, ld(f, T_I64, 0), REF_NONE, 6)); }],
   ['槽号越界', (f) => { ret(f, T_I64, ld(f, T_I64, 99)); }],
   ['单个函数里的 CALL 没有落点',
@@ -310,6 +404,7 @@ if (process.arch !== 'arm64') {
 
 const dir = mkdtempSync(join(tmpdir(), 'omni-frommir-'));
 let failed = 0;
+let total = 0;
 try {
   /* 整个模块生成一段连着的字节，函数之间的 `bl` 已经在里头回填好了。
    * 用例要的符号靠 `.incbin 文件, 跳过, 取多少` 在同一段里切出来 —— 切成几个文件的话
@@ -318,7 +413,9 @@ try {
   const binPath = join(dir, 'blob.bin');
   writeFileSync(binPath, blob.bytes);
   const stub = ['.text', '.p2align 2'];
-  const main = ['#include <stdio.h>'];
+  const main = ['#include <stdio.h>', '#include <string.h>',
+    'static double b2d(unsigned long long b){ double d; memcpy(&d,&b,8); return d; }',
+    'static unsigned long long d2b(double d){ unsigned long long b; memcpy(&b,&d,8); return b; }'];
   const calls = [];
   /* **必须按 blob 里的顺序切**：函数之间的 `bl` 是相对跳转，摆乱了就指到别处。 */
   for (let k = 0; k < mod.funcs.length; k++) {
@@ -330,18 +427,27 @@ try {
     main.push(`extern long long ${c.f.name}(long long, long long);`);
     calls.push(`  printf("%lld\\n", ${c.f.name}(${c.args[0]}LL, ${c.args[1]}LL));`);
   }
+  /* 浮点那批：实参与期望值都按**位模式**过手，十进制文本一次都不经过。 */
+  for (const c of dcases) {
+    main.push(`extern double ${c.f.name}(double, double);`);
+    calls.push(`  printf("%llu\\n", d2b(${c.f.name}(b2d(${d2b(c.args[0])}ULL),`
+      + ` b2d(${d2b(c.args[1])}ULL))));`);
+  }
   main.push('int main(void) {', ...calls, '  return 0;', '}');
   writeFileSync(join(dir, 'stub.s'), stub.join('\n') + '\n');
   writeFileSync(join(dir, 'main.c'), main.join('\n') + '\n');
   execFileSync(CLANG, ['-o', join(dir, 'prog'), join(dir, 'main.c'), join(dir, 'stub.s')]);
   const out = execFileSync(join(dir, 'prog'), { encoding: 'utf8' }).trim().split('\n');
-  if (out.length !== cases.length) {
-    process.stdout.write(`arm64/from-mir: 印了 ${out.length} 行，用例 ${cases.length} 条\n`);
+  const all = [...cases, ...dcases];
+  if (out.length !== all.length) {
+    process.stdout.write(`arm64/from-mir: 印了 ${out.length} 行，用例 ${all.length} 条\n`);
     process.exit(1);
   }
-  for (let i = 0; i < cases.length; i++) {
-    const c = cases[i];
-    if (BigInt(out[i]) === c.want) continue;
+  total = all.length;
+  for (let i = 0; i < all.length; i++) {
+    const c = all[i];
+    /* 位模式那几条印出来是**有符号**的十进制（`%lld`），所以两边都按 64 位无符号看齐。 */
+    if (BigInt.asUintN(64, BigInt(out[i])) === BigInt.asUintN(64, c.want)) continue;
     failed++;
     process.stdout.write(`  FAIL ${c.what}\n    ours ${out[i]}\n    want ${c.want}\n`);
   }
@@ -349,5 +455,5 @@ try {
   rmSync(dir, { recursive: true, force: true });
 }
 
-process.stdout.write(`\n${cases.length - failed} passed, ${failed} failed\n`);
+process.stdout.write(`\n${total - failed} passed, ${failed} failed\n`);
 process.exit(failed === 0 ? 0 : 1);
