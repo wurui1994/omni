@@ -288,7 +288,7 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
 8. **C 的库面**：`libtcc1` 的等价物（软除法/浮点辅助/`alloca`/`setjmp`）与 libc 的接法。
    原先写的是"先转手宿主的 libc，走既有的 extern-C FFI"，第五片证明**转手不成立**
    （指针是自家线性内存里的偏移，宿主 libc 读不到），改成一个读写线性内存的宿主模块，
-   见第五片的落地节。**前三十四片已落地**（预定义的宏 —— 目标的自述，五十条，
+   见第五片的落地节。**前三十六片已落地**（预定义的宏 —— 目标的自述，五十条，
    顺序与值都对着 `tcc -dM -E` 抄；自带的系统头目录 + 编译器必须自己给的那四份头；
    `stdio.h`/`stdlib.h`/`string.h` 的最小子集 —— libc 的自述；
    `strtol` 一族与 `strncpy`/`strchr`/`strstr` 那几条；
@@ -340,8 +340,10 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
    当替身；
    **`aligned(N)` 与 `packed`** —— 属性从「整块跳过」变成真的分派，而尾置的 `packed`
    逼出了「收成员」与「排布局」分段；挂在变量上的那一份也做了，不然它是条静悄悄给
-   错答案的边界），
-   见下面的第八刀第一到三十四片节。
+   错答案的边界；
+   **`__alignof__`** —— 与 `sizeof` 同一支，只是问符号时回的是符号那一份对齐；
+   **省掉中间那一项的 `? :`** —— `x ? : y` 里 x 只求值一次，所以先落进一个槽），
+   见下面的第八刀第一到三十六片节。
 
 最后三步是**后端**：
 
@@ -5242,6 +5244,99 @@ struct aligntest7 altest7[2] __attribute__((aligned(16)));   /* 挂在变量上 
 之后：`-dM`、路径 A 的 GLR 与路径 B 对账（第七步）、第 9-11 步的后端。
 
 <!-- 第八刀第三十四片-END -->
+
+## 落地：第八刀第三十五片
+
+**`__alignof__`。** tcctest.c 1093 起那二十来行把上一片做的每一格都问了一遍：
+
+```c
+printf("aligntest5 sizeof=%d alignof=%d\n", sizeof(struct aligntest5), __alignof__(struct aligntest5));
+printf("altest7 sizeof=%d alignof=%d\n", sizeof(altest7), __alignof__(altest7));
+```
+
+解析这一格几乎是白送的：操作数的读法与 `sizeof` **完全一样**（`tccgen.c:5788` 那个
+`case` 就是四个标号连在一起：`TOK_SIZEOF` 与三种 alignof 拼法），连「`(` 后面可能是
+类型名」那个一次性标志都共用。差别只在最后取 `align` 还是 `size`。三种拼法
+（`__alignof` / `__alignof__` / `_Alignof`）本来就在记号表里，只是没导出过。
+
+真正要想清楚的是**第二行**：`__alignof__(altest7)` 是 16，而
+`__alignof__(struct aligntest7)` 是 4 —— 同一个类型，问法不同答案不同。因为
+`aligned` 挂在**符号**上（上一片第三条），类型里没有它。tcc 在这儿的做法是回头去看
+刚压进去的那个 SValue 上挂的 `Sym`（`tccgen.c:5802`，注释里自己写着 hack）。
+
+我们的 SValue 不挂符号，所以记的是「**最后一次引用到的符号**带的对齐」：
+`entryLval` / `gvarLval` 各一行，`alignofExpr` 问之前先清零。同样只在紧接着问的时候
+有意义 —— 这与 tcc 的 hack 是同一个精度，不多也不少。上一片顺手存下来的那个
+`e.align` 到这儿才有了读者。
+
+### 量出来的数
+
+- `tests/c/gen/56-alignof.c`（基本类型与指针、struct/union、`aligned(16)` 的两种写法、
+  `packed` 的 1、空 struct、数组类型、表达式当操作数、局部量、以及三个挂了 `aligned`
+  的符号；再加 `_Alignof` 拼法与 `sizeof / _Alignof` 混算）：与 `tcc -run` 一致。
+  量到的：`t 1 2 4 8` / `s2 16 16 1` / `arr 16 4` / `e 4 8 4` / `sym 16 16 8` / `c11 8 4`。
+- `tests/c/run.js`：**95 passed, 0 failed**。`tests/run.js`：**96 passed, 0 failed**。
+- 自举那一条重量一遍：`tcc.c` -> 与本机 tcc 编的逐字节 **IDENTICAL**。
+- 我们自己的前端读 tcctest.c 从 1094 行走到了 **1304 行**（对齐与位域那一大段全过去了）。
+
+### 下一片
+
+第八刀第三十六片：**省掉中间那一项的 `?:`**（GNU 扩展）。停在 tcctest.c:1304 ——
+`static int v1 = 34 ? : -1;`，以及紧接着的 `a - 30 ? : a * 2`。`x ? : y` 的意思是
+「x 非 0 就是 x，否则 y」，而条件**只求值一次**。常量表达式那一路（`ceCond`）与
+表达式那一路各有一处要认这个空位。
+
+之后：`-dM`、路径 A 的 GLR 与路径 B 对账（第七步）、第 9-11 步的后端。
+
+<!-- 第八刀第三十五片-END -->
+
+## 落地：第八刀第三十六片
+
+**省掉中间那一项的 `? :`。** tcctest.c 1302 起：
+
+```c
+static int v1 = 34 ? : -1;                  /* 常量那一路 */
+printf("%d %d\n", a - 30 ? : a * 2, a + 1 ? : a * 2);
+```
+
+`x ? : y` 是 GNU 的扩展，意思是「x 非 0 就是 x，否则 y」。语法上只是「中间那一项可以
+是空的」，语义上多一条：**x 只求值一次**。所以 `f() ? : 99` 里 f 只调一次 —— 这条要是
+漏了，编出来的程序照样跑，只是副作用多一遍，而那种错最难从输出上看出来。
+
+我们的 `? :` 是「一个 IF 加两个槽」（i64 一个、f64 一个，见第六刀那一节），条件先算
+成一个 ref。这一片就多一步：中间是空的时候，先把 x 落进一个临时槽，**条件与第一支
+读的是同一格**。tcc 那边是 `vdup()` 复制 vtop —— 同一个意思，那个值已经在手上了，
+别再算一遍。
+
+常量表达式那一路（`ceCond`）反而没有这个问题：值已经算出来了，`a = c` 一行完事。
+
+### 量出来的数
+
+- `tests/c/gen/57-cond-omit.c`（静态初始化式里的三格、真/假两侧、`calls` 计数确认
+  只求值一次、double / 指针 / unsigned、嵌套 `0 ? : 0 ? : 3`、整条当 `if` 的条件用）：
+  与 `tcc -run` 一致。量到的：`34 -1 7` / `60 31` / `nz=5 calls=1` / `z=99 calls=1` /
+  `p=null hi` / `nest=3` / `a=7 calls=2`。
+- `tests/c/run.js`：**96 passed, 0 failed**。`tests/run.js`：**96 passed, 0 failed**。
+- 自举那一条重量一遍：`tcc.c` -> 与本机 tcc 编的逐字节 **IDENTICAL**。
+- 我们自己的前端读 tcctest.c 从 1304 行走到了 **1354 行**。
+
+### 下一片
+
+第八刀第三十七片：**`switch` 的体不是花括号**。停在 tcctest.c:1354 ——
+tcctest.c 自己的注释就写着「Following is a switch without {} block intentionally.」：
+
+```c
+switch (j)
+  case 1: break;
+```
+
+`switch` 后面跟的是**一条语句**（C11 6.8.4：`switch (expr) statement`），花括号只是
+最常见的那一种。第六刀把它写成了「必须是复合语句」并钉了边界，现在这条边界要拆 ——
+`case` 标签本来就是「语句上的标签」，与它长在哪一层无关。
+
+之后：`-dM`、路径 A 的 GLR 与路径 B 对账（第七步）、第 9-11 步的后端。
+
+<!-- 第八刀第三十六片-END -->
 
 
 

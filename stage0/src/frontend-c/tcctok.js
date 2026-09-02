@@ -293,6 +293,11 @@ export const TOK_UNION = fixed('union');
 export const TOK_TYPEDEF = fixed('typedef');
 export const TOK_ENUM = fixed('enum');
 export const TOK_SIZEOF = fixed('sizeof');
+/* `__alignof__` / `__alignof` / `_Alignof`（第八刀第三十五片，`tcctok.h:64-66`）。
+ * 三种拼法在 tcc 那边是 `TOK_ALIGNOF1/2/3`，一条 case 三个入口。 */
+export const TOK_ALIGNOF1 = fixed('__alignof');
+export const TOK_ALIGNOF2 = fixed('__alignof__');
+export const TOK_ALIGNOF3 = fixed('_Alignof');
 /* `_Static_assert(sizeof(t) == 12, "…")`（第八刀第十八片）。macOS 的 `<mach/message.h>`
  * 用它把 mach 消息那几个结构体的尺寸钉住 —— 也就是说它同时在考我们的 struct 布局。 */
 export const TOK_STATIC_ASSERT = fixed('_Static_assert');

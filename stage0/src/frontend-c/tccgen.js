@@ -161,6 +161,7 @@ import {
   TOK_EXTENSION, TOK_ATOMIC, TOK_THREAD_LOCAL, TOK_THREAD,
   TOK_ATTRIBUTE1, TOK_ATTRIBUTE2, TOK_ASM1, TOK_ASM2, TOK_ASM3,
   TOK_ALIGNED1, TOK_ALIGNED2, TOK_PACKED1, TOK_PACKED2,
+  TOK_ALIGNOF1, TOK_ALIGNOF2, TOK_ALIGNOF3,
   TOK_BUILTIN_VA_START, TOK_BUILTIN_VA_ARG, TOK_BUILTIN_VA_END, TOK_BUILTIN_VA_COPY,
   TOK_BUILTIN_EXPECT,
   TOK___FUNCTION__, TOK___FUNC__, TOK_LINENUM,
@@ -649,6 +650,8 @@ export class CGen {  /**
      * 占了这个名字」。tcc 那边不需要这一叠，因为它的 typedef 与变量本来就在同一张
      * 符号表里（`VT_TYPEDEF` 只是那条符号上的一个位）。 */
     this.tdefStack = [this.typedefs];
+    /** 最后一次引用到的符号自己写的 `aligned(N)`（0 = 没写）。只有 `alignofExpr` 读它。 */
+    this.symAlign = 0;
     /** @type {Map<string,{ty:object,addr:number,defined:boolean,used:boolean}>} 全局量 */
     this.gvars = new Map();
     /* C 有**四个独立的名字空间**（C11 6.2.3）：普通标识符、struct/union/enum 的 tag、
@@ -806,7 +809,7 @@ export class CGen {  /**
     this.tdefShadow(name);
     const scope = this.scopes[this.scopes.length - 1];
     if (this.needsMem(ty) || this.frameNames.has(name) || align !== 0) {
-      const e = { ty, slot: -1, off: this.frameAlloc(ty, align) };
+      const e = { ty, slot: -1, off: this.frameAlloc(ty, align), align };
       scope.set(name, e);
       return e;
     }
@@ -822,6 +825,11 @@ export class CGen {  /**
 
   /** 一条作用域登记 -> 一个左值。 */
   entryLval(name, e) {
+    /* `__alignof__(x)` 要的是**符号**那一份对齐（第三十五片）。tcc 的做法是回头去看
+     * 刚压进去的那个 SValue 上挂的 Sym（`tccgen.c:5802` 那句注释就写着 hack），
+     * 我们这儿记「最后一次引用到的符号带的对齐」—— 同一个意思，同样只在紧接着问的
+     * 时候才有意义。 */
+    this.symAlign = e.align || 0;
     if (e.off >= 0) return sMem(e.ty, this.fpRef, e.off);
     return sLval(e.ty, e.slot, name);
   }
@@ -1552,7 +1560,7 @@ export class CGen {  /**
       this.err(`storage size of '${name}' isn't known`);
     }
     this.dataOff = alignUp(this.dataOff, align !== 0 ? align : s.align);
-    const e = { ty, addr: this.dataOff, defined: !isExtern, used: false };
+    const e = { ty, addr: this.dataOff, defined: !isExtern, used: false, align };
     this.dataOff += s.size;
     this.gvars.set(name, e);
     return e;
@@ -1561,6 +1569,7 @@ export class CGen {  /**
   /** 一个全局量 -> 左值。地址是常量，静态偏移 0（`p->f` 那种偏移进描述符是后面的事）。 */
   gvarLval(e) {
     e.used = true;
+    this.symAlign = e.align || 0;
     return sMem(e.ty, this.mod.consts.int(BigInt(e.addr)), 0);
   }
 
@@ -2199,6 +2208,12 @@ export class CGen {  /**
       this.next();
       return this.sizeofExpr();
     }
+    /* `__alignof__` / `__alignof` / `_Alignof`（第三十五片，`tccgen.c:5789`）。
+     * 与 `sizeof` 同一支（同一个「类型名或者表达式」的读法），只是回的数不同。 */
+    if (t === TOK_ALIGNOF1 || t === TOK_ALIGNOF2 || t === TOK_ALIGNOF3) {
+      this.next();
+      return this.alignofExpr();
+    }
     /* 变参那四个内建。它们**不是函数**（`va_arg` 的第二个实参是个类型名，函数写不出来），
      * 所以与 tcc 一样在这儿按记号号认出来（`tccgen.c:5943` 一带的 arm64 那一支）。
      * 位置必须在下面那条「标识符」之前 —— 它们的记号号在 `TOK_UIDENT` 之后
@@ -2266,6 +2281,22 @@ export class CGen {  /**
   sizeofExpr() {
     /* `sizeof` 的类型是 `size_t`（LP64 上是 `unsigned long`，8 字节）。 */
     const n = typeSize(this.sizeofType()).size;
+    return sVal(TY_ULLONG, this.konst(TY_ULLONG, n));
+  }
+
+  /**
+   * `__alignof__` 的值（`tccgen.c:5789-5806`）。
+   *
+   * 操作数的读法与 `sizeof` **完全一样**（类型名或者表达式，都不求值），差别只有两处：
+   *   - 取的是 `align` 而不是 `size`；
+   *   - 操作数是一个**符号**且那个符号自己写了 `aligned(N)` 时，回的是**符号**那一份
+   *     （tcc 在这儿回头去看刚压进去的 SValue 上挂的 Sym，注释里自称 hack）。
+   *     所以 `__alignof__(altest7)` 是 16 而 `__alignof__(struct aligntest7)` 是 4。
+   */
+  alignofExpr() {
+    this.symAlign = 0;
+    const ty = this.sizeofType();
+    const n = this.symAlign !== 0 ? this.symAlign : typeSize(ty).align;
     return sVal(TY_ULLONG, this.konst(TY_ULLONG, n));
   }
 
@@ -2736,7 +2767,17 @@ export class CGen {  /**
     if (this.tok !== QUEST) return v;
     this.next();
     const f = this.f;
-    const c = this.gtst(v);
+    /* GNU 的 `x ? : y`（第三十六片，tcctest.c:1304）：中间那一项省掉就是
+     * 「x 非 0 就用 x，否则 y」，而 **x 只求值一次** —— `f() ? : 0` 只调一次 f。
+     * 所以先把它落进一个槽，条件与第一支读的是同一格（tcc 用 `vdup()` 复制 vtop，
+     * 同一个意思：那个值已经在手上了，别再算一遍）。 */
+    let mid = null;
+    if (this.tok === COLON) {
+      const dup = this.temp(mirTypeOf(v.ty), 'dup');
+      f.emit(OP.STORE, T_VOID, this.gv(v), REF_NONE, dup);
+      mid = sLval(v.ty, dup, '$dup');
+    }
+    const c = this.gtst(mid === null ? v : mid);
     const slot = this.temp(T_I64, 'sel');
     const fslot = this.temp(T_F64, 'fsel');
     /** 一支落地：整型/指针进 i64 那个槽，算术类型**另外**再进 f64 那个槽。 */
@@ -2758,7 +2799,7 @@ export class CGen {  /**
       }
     };
     this.open(OP.IF, 'if', c);
-    const a = this.gexpr();
+    const a = mid === null ? this.gexpr() : mid;
     put(a);
     this.elseHalf();
     this.skip(COLON);
@@ -4691,7 +4732,9 @@ export class CGen {  /**
     const c = this.ceInfix(this.ceUnary(), 1);
     if (this.tok !== QUEST) return c;
     this.next();
-    const a = this.ceCond();
+    /* GNU 的 `x ? : y`（第三十六片）：中间那一项省掉就是「x 非 0 就用 x」。
+     * 常量这一路没有求值次数的问题 —— 值已经在手上了，直接当那一支。 */
+    const a = this.tok === COLON ? c : this.ceCond();
     this.skip(COLON);
     const b = this.ceCond();
     return (typeof c === 'bigint' ? c !== 0n : c !== 0) ? a : b;
@@ -4831,6 +4874,14 @@ export class CGen {  /**
        * 位域宽度这些「必须是常量」的位置上也能用（tccdbg.c 的 `N_DEFAULT_DEBUG`）。 */
       this.next();
       return BigInt(typeSize(this.sizeofType()).size);
+    }
+    /* `__alignof__` 也要能出现在「必须是常量」的位置上（`_Alignas`、数组维度、
+     * `_Static_assert` 里都有）。符号那一份对齐同样算进来。 */
+    if (t === TOK_ALIGNOF1 || t === TOK_ALIGNOF2 || t === TOK_ALIGNOF3) {
+      this.next();
+      this.symAlign = 0;
+      const ty = this.sizeofType();
+      return BigInt(this.symAlign !== 0 ? this.symAlign : typeSize(ty).align);
     }
     if (t === AMP) {
       /* `offsetof(T, f)` 展开出来就是这个形状（tccdefs.h 的 `__builtin_offsetof`：
