@@ -458,6 +458,51 @@ t('十个 double 实参（后两个走栈）', [0n, 0n], 385n, (f) => {
   ret(f, T_I64, f.emit(OP.CVT, T_I64, d, REF_NONE, CVT_F2I));
 });
 
+/* ---- 变参函数的**定义**（第二十四片）。调用方是 clang 编的 `main`，所以这一批查的是
+ * 真 ABI：苹果的 arm64 把 `...` 后面的实参一律摆在栈上、一格 8 字节（`ldr w9, [x8], #8`
+ * ——`int` 也占满一格），`va_list` 就是指着第一格的一个指针。 */
+const vcases = [];
+let vno = 0;
+function tv(what, decl, call, want, body) {
+  const name = `omni_v${vno}`;
+  vno++;
+  const f = new MirFunc(name, [], T_I64);
+  const s = f.slot('p0', T_I64);
+  f.params.push({ name: 'p0', t: T_I64, slot: s });
+  f.setVariadic();
+  mod.addFunc(f);
+  body(f, s);
+  vcases.push({ f, decl: decl.replace('$', name), call: call.replace('$', name), want, what });
+}
+/* 1 + 2*10 + 3*100 + 4（4.5 向零截断）*1000 = 4321。权重不同，读串一格就露。 */
+tv('变参的定义：两个 i64 与一个 double', 'extern long long $(long long, ...);',
+  '$(1LL, 2LL, 3LL, 4.5)', 4321n, (f, s) => {
+    const ap = f.emit(OP.FRAME, T_I64, REF_NONE, REF_NONE, f.frame('ap', 8, 8));
+    f.emit(OP.VASTART, T_I64, ap, REF_NONE, 0);
+    const x = f.emit(OP.VAARG, T_I64, ap, REF_NONE, 0);
+    const y = f.emit(OP.VAARG, T_I64, ap, REF_NONE, 0);
+    const d = f.emit(OP.VAARG, T_F64, ap, REF_NONE, 0);
+    let v = f.emit(OP.ADD, T_I64, ld(f, T_I64, s),
+      f.emit(OP.MUL, T_I64, x, K.int(10n), 0), 0);
+    v = f.emit(OP.ADD, T_I64, v, f.emit(OP.MUL, T_I64, y, K.int(100n), 0), 0);
+    v = f.emit(OP.ADD, T_I64, v, f.emit(OP.MUL, T_I64,
+      f.emit(OP.CVT, T_I64, d, REF_NONE, CVT_F2I), K.int(1000n), 0), 0);
+    ret(f, T_I64, v);
+  });
+/* `int` 的变参：默认提升之后还是 int，占一格 8 字节、只有低四字节有意义。
+ * 负数那个查的是「按符号扩展读」——零扩展的话答案会大出 2^32。 */
+tv('变参的定义：i32（负数查符号扩展）', 'extern long long $(long long, ...);',
+  '$(2LL, 7, -9)', -828n, (f, s) => {
+    const ap = f.emit(OP.FRAME, T_I64, REF_NONE, REF_NONE, f.frame('ap', 8, 8));
+    f.emit(OP.VASTART, T_I64, ap, REF_NONE, 0);
+    const x = f.emit(OP.VAARG, T_I32, ap, REF_NONE, 0);
+    const y = f.emit(OP.VAARG, T_I32, ap, REF_NONE, 0);
+    let v = f.emit(OP.ADD, T_I64, ld(f, T_I64, s),
+      f.emit(OP.MUL, T_I64, x, K.int(10n), 0), 0);
+    v = f.emit(OP.ADD, T_I64, v, f.emit(OP.MUL, T_I64, y, K.int(100n), 0), 0);
+    ret(f, T_I64, v);
+  });
+
 // ---- 模块级变量（第九刀第九片）。落在 __DATA 里、靠 adrp/add 取址，每个都是真符号。
 {
   const gi = mod.globalNo('omni_g_i64');
@@ -662,6 +707,11 @@ try {
         + ` ${c.args[1]}LL));`);
     }
   }
+  /* 变参的定义那批：调用点由用例自己写（实参个数与类型各不相同）。 */
+  for (const c of vcases) {
+    main.push(c.decl);
+    calls.push(`  printf("%lld\\n", ${c.call});`);
+  }
   /* 最后一格不是「调一个函数」，而是**从 C 那边直接读我们定义的数据符号** ——
    * 上一条用例刚把 12345 存进 `omni_g_i64`。这条查的是「__DATA 里那格是个真符号」。 */
   main.push('extern long long omni_g_i64;');
@@ -670,7 +720,7 @@ try {
   writeFileSync(join(dir, 'main.c'), main.join('\n') + '\n');
   execFileSync(CLANG, ['-o', join(dir, 'prog'), join(dir, 'main.c'), objPath]);
   const out = execFileSync(join(dir, 'prog'), { encoding: 'utf8' }).trim().split('\n');
-  const all = [...cases, ...dcases, ...mcases,
+  const all = [...cases, ...dcases, ...mcases, ...vcases,
     { what: 'C 那边直接读 __DATA 里的符号', want: 12345n }];
   if (out.length !== all.length) {
     process.stdout.write(`arm64/from-mir: 印了 ${out.length} 行，用例 ${all.length} 条\n`);

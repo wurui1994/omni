@@ -67,6 +67,9 @@ export function funcBytes(f) {
 export function funcDigestText(mod, f) {
   const L = [];
   L.push(`fn ${f.name} -> ${typeText(f.ret)}`);
+  // 变参那一位（第二十四片）：形参表一样、指令一样，可是 `...` 在不在决定了序言要不要
+  // 泼寄存器 —— 两个函数生成的机器码不同，哈希就不能相同。
+  if (f.variadic) L.push('variadic');
   for (const p of f.params) L.push(`param ${typeText(p.t)}`);
   for (const s of f.slots) L.push(`slot ${typeText(s.t)}`);
   // 帧块（第十八片）：大小与对齐都进哈希 —— 「同一个函数，把一个 int 局部量换成 long」

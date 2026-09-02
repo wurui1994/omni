@@ -386,6 +386,64 @@ t('帧块：memcpy 把串常量搬到帧上，再 strlen', [0n, 0n], 5n, (f) => 
     ret(f, T_I64, mld(f, T_I64, K.str(HELLO), 'i8u', 7)));
 }
 
+/* ---- 变参函数的**定义**（第二十四片）。SysV 的 `va_list` 是个 24 字节的结构，
+ * `va_arg` 分两路（寄存器保存区 / 已溢到栈上）—— 所以这一批里两路都要走到：
+ * 前两条只用寄存器那一路，后两条实参多到溢出去。调用方是 clang 编的 `main`。 */
+const vcases = [];
+let vno = 0;
+function tv(what, decl, call, want, body) {
+  const name = `omni_v${vno}`;
+  vno++;
+  const f = new MirFunc(name, [], T_I64);
+  const s = f.slot('p0', T_I64);
+  f.params.push({ name: 'p0', t: T_I64, slot: s });
+  f.setVariadic();
+  mod.addFunc(f);
+  body(f, s);
+  vcases.push({ f, decl: decl.replace('$', name), call: call.replace('$', name), want, what });
+}
+/** 起个头：回 `va_list` 那一格的地址（帧上的 8 字节）。 */
+const vaOpen = (f) => {
+  const ap = f.emit(OP.FRAME, T_I64, REF_NONE, REF_NONE, f.frame('ap', 8, 8));
+  f.emit(OP.VASTART, T_I64, ap, REF_NONE, 0);
+  return ap;
+};
+/** 取 n 个变参、按 1..n 加权求和，再加上固定实参。 */
+const vaSum = (f, s, ap, ty, n) => {
+  let v = ld(f, T_I64, s);
+  for (let k = 1; k <= n; k++) {
+    let a1 = f.emit(OP.VAARG, ty, ap, REF_NONE, 0);
+    if (ty === T_F64) a1 = f.emit(OP.CVT, T_I64, a1, REF_NONE, CVT_F2I);
+    v = f.emit(OP.ADD, T_I64, v, f.emit(OP.MUL, T_I64, a1, K.int(BigInt(k)), 0), 0);
+  }
+  ret(f, T_I64, v);
+};
+/* 1 + 2*1 + 3*2 + 4（4.5 截断）*3 = 21。三个变参都还在寄存器保存区里。 */
+tv('变参的定义：两个 i64 与一个 double（都在寄存器里）',
+  'extern long long $(long long, ...);', '$(1LL, 2LL, 3LL, 4.5)', 21n, (f, s) => {
+    const ap = vaOpen(f);
+    const x1 = f.emit(OP.VAARG, T_I64, ap, REF_NONE, 0);
+    const y1 = f.emit(OP.VAARG, T_I64, ap, REF_NONE, 0);
+    const d = f.emit(OP.VAARG, T_F64, ap, REF_NONE, 0);
+    let v = f.emit(OP.ADD, T_I64, ld(f, T_I64, s), f.emit(OP.MUL, T_I64, x1, K.int(1n), 0), 0);
+    v = f.emit(OP.ADD, T_I64, v, f.emit(OP.MUL, T_I64, y1, K.int(2n), 0), 0);
+    v = f.emit(OP.ADD, T_I64, v, f.emit(OP.MUL, T_I64,
+      f.emit(OP.CVT, T_I64, d, REF_NONE, CVT_F2I), K.int(3n), 0), 0);
+    ret(f, T_I64, v);
+  });
+/* `int` 的变参：负数那个查的是「按符号扩展读」。2 + 7*1 + (-9)*2 = -9。 */
+tv('变参的定义：i32（负数查符号扩展）', 'extern long long $(long long, ...);',
+  '$(2LL, 7, -9)', -9n, (f, s) => vaSum(f, s, vaOpen(f), T_I32, 2));
+/* 八个 i64 的变参：五个进 rsi/rdx/rcx/r8/r9，剩下三个**溢到栈上** ——
+ * 1 + Σ k² (k=1..8) = 205。走的是 `va_arg` 的另一路。 */
+tv('变参的定义：八个 i64（后三个溢到栈上）', 'extern long long $(long long, ...);',
+  '$(1LL, 1LL, 2LL, 3LL, 4LL, 5LL, 6LL, 7LL, 8LL)', 205n,
+  (f, s) => vaSum(f, s, vaOpen(f), T_I64, 8));
+/* 十个 double：八个进 xmm0-7，后两个溢到栈上 —— 1 + Σ k² (k=1..10) = 386。 */
+tv('变参的定义：十个 double（后两个溢到栈上）', 'extern long long $(long long, ...);',
+  '$(1LL, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0)', 386n,
+  (f, s) => vaSum(f, s, vaOpen(f), T_F64, 10));
+
 // ---- 边界：还没做的东西必须明着报
 const badMod = new MirModule('bad');
 let bad = 0;
@@ -472,6 +530,11 @@ try {
     main.push(`extern long long ${c.f.name}(char *, long long);`);
     calls.push(`  printf("%lld\\n", ${c.f.name}(membuf + ${c.args[0]}, ${c.args[1]}LL));`);
   }
+  /* 变参的定义那批：调用点由用例自己写（实参个数与类型各不相同）。 */
+  for (const c of vcases) {
+    main.push(c.decl);
+    calls.push(`  printf("%lld\\n", ${c.call});`);
+  }
   const mainSrc = `${main.join('\n')}\nint main(void){\n${calls.join('\n')}\n  return 0;\n}\n`;
   const mainPath = join(dir, 'main.c');
   writeFileSync(mainPath, mainSrc);
@@ -484,6 +547,7 @@ try {
     ...dcases.map((c) => ({ what: c.what, want: d2b(c.want) })),
     ...bcases.map((c) => ({ what: c.what, want: c.want })),
     ...mcases.map((c) => ({ what: c.what, want: c.want })),
+    ...vcases.map((c) => ({ what: c.what, want: c.want })),
   ];
   if (out.length !== all.length) {
     process.stdout.write(`x64/from-mir: 印出来 ${out.length} 行，用例 ${all.length} 条\n`);

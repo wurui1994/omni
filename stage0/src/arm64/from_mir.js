@@ -142,6 +142,25 @@ function outArgsBytes(mod, f) {
   return most + (most % 16 === 0 ? 0 : 16 - (most % 16));
 }
 
+/**
+ * 固定形参里有几个字节排在**入参区**上（`fp + 16` 起）。
+ *
+ * 序言按它把放不下的形参读回来，`VASTART` 按它算「第一个变参在哪儿」——
+ * 苹果的 arm64 上变参一律走栈，它们就紧跟在这些溢出的固定形参后面。
+ */
+function inArgBytes(f) {
+  let ngrn = 0;
+  let nsrn = 0;
+  let bytes = 0;
+  for (const p of f.params) {
+    const flt = isFloatType(p.t);
+    if (flt && nsrn <= 7) { nsrn++; continue; }
+    if (!flt && ngrn <= 7) { ngrn++; continue; }
+    bytes += 8;
+  }
+  return bytes;
+}
+
 class FnGen {
   /** `buf` 是整个模块共用的一个缓冲，`callLabels` 是「函数号 -> 标签」（没有就不认 CALL），
    * `strSyms` 是「字符串常量的 ref -> 数据段里的符号名」（没有就不认串常量）。 */
@@ -171,6 +190,10 @@ class FnGen {
       bytes = bytes + pad + blk.size;
     }
     this.frame = bytes + (bytes % 16 === 0 ? 0 : 16 - (bytes % 16));
+    /* 第一个变参在哪儿（第二十四片）：苹果的 arm64 把 `...` 后面的实参一律摆在栈上，
+     * 于是它就在入参区里、溢出的固定形参之后。序言什么都不用泼 —— 这是这条 ABI
+     * 比 SysV 省事的地方。 */
+    this.vaBase = 16 + inArgBytes(f);
     /** 区域栈：`{kind, endLabel, contLabel?, elseLabel?, elseDone?}` */
     this.regions = [];
     this.retLabel = this.buf.label();
@@ -461,6 +484,24 @@ class FnGen {
      * C 的全局量都从这儿走 —— 取地址、按成员写、按下标写，后头接 `MLOAD`/`MSTORE`。 */
     if (op === OP.GADDR) {
       this.symAddr(RES, this.globalSym(f.aux[i]));
+      return this.def(i, RES);
+    }
+
+    /* ---- 变参的定义那一侧（第二十四片）。苹果的 arm64 上 `va_list` 就是一个 `char *`：
+     * 变参一律在栈上连着放，一格 8 字节。于是这两条都很短 ——
+     * `va_start` 是「把入参区里第一个变参的地址写进 ap」，
+     * `va_arg` 是「按 ap 读一格、把 ap 推到下一格」。
+     * i32 按符号扩展读（规范形），浮点读的是位模式（栈位里躺的就是位模式）。 */
+    if (op === OP.VASTART) {
+      this.loadRef(TMP0, f.a[i]);
+      buf.emit(a.addImm(1, TMP1, 29, this.vaBase), a.strU(3, TMP1, TMP0, 0));
+      return;
+    }
+    if (op === OP.VAARG) {
+      this.loadRef(TMP0, f.a[i]);
+      buf.emit(a.ldrU(3, TMP1, TMP0, 0));
+      MLOAD_EMIT[typeKind(t) === T_I32 ? 'i32s' : widthKey(t)](buf, RES, TMP1);
+      buf.emit(a.addImm(1, TMP1, TMP1, 8), a.strU(3, TMP1, TMP0, 0));
       return this.def(i, RES);
     }
 

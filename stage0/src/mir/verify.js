@@ -19,7 +19,7 @@
 
 import {
   OP, OP_NAMES, OP_MODES, REF_NONE, REF_BIAS, isConstRef, refText, typeText, typeLanes, T_BOOL,
-  T_I64,
+  T_I64, T_I32, T_F64,
   MLOAD_KINDS, MSTORE_KINDS, memKindNo, memBytes, isFloatType, isIntType, intBits,
 } from './ir.js';
 
@@ -200,6 +200,23 @@ function checkIndex(mod, f, i, op, v, bad, k) {
     // 而 T_I32 的规范形是 -2147483648n，之后每一条比较都会与 LLVM 那条腿分叉。
     if (isLoad && !wantFloat && memBytes(v, isLoad) * 8 === intBits(t) && names[kn].endsWith('u')) {
       bad(i, `${OP_NAMES[op]} 的描述符是 ${names[kn]}，但满宽的读没有无符号变体 —— 用 ${names[kn - 1]}`);
+    }
+    return;
+  }
+  /* 变参的定义那一侧（第二十四片）。三件事：只有 native 有真 ABI 可谈、函数得真是
+   * 变参的（不然 `va_list` 里没有东西可指）、取出来的类型得是 C 的变参能传的那几个。
+   * `float`/`bool` 在 C 里过不来（默认提升成 double/int），放过去只会读到半格。 */
+  if (op === OP.VASTART || op === OP.VAARG) {
+    if (!mod.native) { bad(i, `${OP_NAMES[op]}：只有 native 这条腿有真的 va_list`); return; }
+    if (!f.variadic) { bad(i, `${OP_NAMES[op]}：函数 '${f.name}' 的形参表里没有 ...`); return; }
+    if (v !== 0) { bad(i, `${OP_NAMES[op]} 的 aux 只能是 0`); return; }
+    const t = f.t[i];
+    if (op === OP.VASTART) {
+      if (t !== T_I64) bad(i, `VASTART 的 t 是 ${typeText(t)}，va_list 只能是 i64`);
+      return;
+    }
+    if (t !== T_I64 && t !== T_I32 && t !== T_F64) {
+      bad(i, `VAARG 取的是 ${typeText(t)}，C 的变参只传 i32/i64/f64`);
     }
     return;
   }

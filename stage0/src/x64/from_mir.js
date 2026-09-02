@@ -138,6 +138,25 @@ function outArgsBytes(mod, f) {
   return most + (most % 16 === 0 ? 0 : 16 - (most % 16));
 }
 
+/**
+ * 固定形参占掉了几个寄存器、又有几个字节排在**入参区**上（`rbp + 16` 起）。
+ *
+ * 序言按 `bytes` 把放不下的形参读回来，`VASTART` 三样都要：`gp_offset` 与 `fp_offset`
+ * 就是「固定实参已经用掉的那一段」，`overflow_arg_area` 从溢出的固定形参之后起。
+ */
+function inArgPlaces(f) {
+  let ngrn = 0;
+  let nsse = 0;
+  let bytes = 0;
+  for (const p of f.params) {
+    const flt = isFloatType(p.t);
+    if (flt && nsse < FARG.length) { nsse++; continue; }
+    if (!flt && ngrn < IARG.length) { ngrn++; continue; }
+    bytes += 8;
+  }
+  return { ngrn, nsse, bytes };
+}
+
 class FnGen {
   constructor(mod, f, buf, callLabels, strSyms) {
     this.mod = mod;
@@ -158,6 +177,30 @@ class FnGen {
       if (depth % blk.align !== 0) depth += blk.align - (depth % blk.align);
       this.frameOffs.push(-depth);
       bytes = depth;
+    }
+    /* 变参函数还要两块（第二十四片）：
+     *  - **寄存器保存区**（176 字节）：6 个整数实参寄存器（0-47）+ 8 个 xmm（48 起每 16
+     *    字节一格）。SysV 的变参**先占寄存器**，被调方要把它们泼到栈上才谈得上「下一个」。
+     *  - 每条 `VASTART` 一个 24 字节的 `va_list` 结构
+     *    `{gp_offset, fp_offset, overflow_arg_area, reg_save_area}`。
+     *    前端手里的 `va_list` 是**一个指针**（8 字节），指的就是这个结构 ——
+     *    SysV 里 `va_list` 是 `__va_list_tag[1]`，传给 `vfprintf` 时退化成的正是这个指针，
+     *    所以两边对得上。 */
+    this.regSave = 0;
+    this.vaOffs = new Map();
+    if (f.variadic) {
+      let depth = bytes + 176;
+      if (depth % 16 !== 0) depth += 16 - (depth % 16);
+      this.regSave = -depth;
+      bytes = depth;
+      let k = 0;
+      while (k < f.count()) {
+        if (f.op[k] === OP.VASTART) {
+          bytes += 24;
+          this.vaOffs.set(k, -bytes);
+        }
+        k++;
+      }
     }
     this.frame = bytes + (bytes % 16 === 0 ? 0 : 16 - (bytes % 16));
     /* 出参区（第二十三片）：放不下寄存器的实参摆在 `rsp + 0` 起的一块。
@@ -266,6 +309,24 @@ class FnGen {
     const buf = this.buf;
     buf.emit(x.push(BP), x.movRR(8, BP, REG.rsp));
     if (this.frame > 0) buf.emit(x.aluRI(ALU.sub, 8, REG.rsp, this.frame));
+    /* 变参函数的序言（第二十四片）：把六个整数实参寄存器与八个 xmm **无条件**泼进
+     * 寄存器保存区。clang 会先 `test al, al` 再跳过 xmm 那一段；我们不跳 ——
+     * 那些寄存器总是在的，多写 128 字节换掉一条分支与一个标签。
+     * xmm 借整数草稿过一手（`movq`），省一条「xmm 存内存」的编码。
+     * 只泼低 8 字节：C 的变参里 `double` 只用到这些，`__m128` 不在这条腿的范围内。 */
+    if (f.variadic) {
+      let k = 0;
+      while (k < IARG.length) {
+        buf.emit(x.movMR(8, BP, this.regSave + k * 8, IARG[k]));
+        k++;
+      }
+      k = 0;
+      while (k < FARG.length) {
+        this.fromFp(TMP0, FARG[k]);
+        buf.emit(x.movMR(8, BP, this.regSave + 48 + k * 16, TMP0));
+        k++;
+      }
+    }
     /* 形参：整数一串（六个）、浮点一串（八个），各自从 0 起数。放不下的从**入参区**
      * 读（第二十三片）：调用方摆在它自己的出参区里，也就是我们这一层 `rbp + 16` 起 ——
      * `rbp + 0` 是存起来的 `rbp`、`rbp + 8` 是返回地址。
@@ -410,6 +471,54 @@ class FnGen {
      * 「adrp + add」不同，这里基址就在寄存器里（`rbp`），偏移是 disp32，硬件自己加。 */
     if (op === OP.FRAME) {
       buf.emit(x.lea(8, RES, BP, this.frameOff(f.aux[i])));
+      return this.def(i, RES);
+    }
+
+    /* ---- 变参的定义那一侧（第二十四片）。SysV 的 `va_list` 是个 24 字节的结构，
+     * 于是这两条比 arm64 那边长得多 —— 长出来的全是「这个实参当初进了寄存器还是栈」
+     * 这一笔账。 */
+    if (op === OP.VASTART) {
+      const vl = this.vaOffs.get(i);
+      if (vl === undefined) throw new OmniError('x64: VASTART 没有分到 va_list 的位置');
+      const p = inArgPlaces(f);
+      /* 固定实参用掉的那一段先记上：`va_arg` 从这儿往后数。 */
+      buf.emit(x.movRI(4, TMP1, 8 * p.ngrn), x.movMR(4, BP, vl, TMP1));
+      buf.emit(x.movRI(4, TMP1, 48 + 16 * p.nsse), x.movMR(4, BP, vl + 4, TMP1));
+      /* 溢到栈上的实参从入参区、固定形参之后起。 */
+      buf.emit(x.lea(8, TMP1, BP, 16 + p.bytes), x.movMR(8, BP, vl + 8, TMP1));
+      buf.emit(x.lea(8, TMP1, BP, this.regSave), x.movMR(8, BP, vl + 16, TMP1));
+      /* 前端手里那个 8 字节的 `va_list` 装的是这个结构的地址。 */
+      this.loadRef(TMP0, f.a[i]);
+      buf.emit(x.lea(8, TMP1, BP, vl), x.movMR(8, TMP0, 0, TMP1));
+      return;
+    }
+    if (op === OP.VAARG) {
+      const flt = isFloatType(t);
+      const field = flt ? 4 : 0;          // gp_offset 在 0、fp_offset 在 4
+      const limit = flt ? 176 : 48;       // 越过这条线就说明寄存器那一段用完了
+      const step = flt ? 16 : 8;          // xmm 一格 16 字节，整数一格 8
+      const over = buf.label();
+      const done = buf.label();
+      const ldv = (ptr) => {
+        if (typeKind(t) === T_I32) buf.emit(x.movsxM(8, 4, RES, ptr, 0));
+        else buf.emit(x.movRM(8, RES, ptr, 0));
+      };
+      this.loadRef(TMP0, f.a[i]);
+      buf.emit(x.movRM(8, TMP0, TMP0, 0));            // TMP0 = 结构的地址
+      buf.emit(x.movRM(4, TMP1, TMP0, field));
+      buf.emit(x.aluRI(ALU.cmp, 4, TMP1, limit));
+      buf.jcc(CC.ae, over);
+      /* 还在寄存器保存区里：地址 = reg_save_area + 偏移，偏移随后往前推一格。 */
+      buf.emit(x.movRM(8, RES, TMP0, 16), x.aluRR(ALU.add, 8, RES, TMP1));
+      buf.emit(x.aluRI(ALU.add, 4, TMP1, step), x.movMR(4, TMP0, field, TMP1));
+      ldv(RES);
+      buf.jmp(done);
+      /* 已经溢到栈上：这一路不分整数与浮点，一格一律 8 字节。 */
+      buf.place(over);
+      buf.emit(x.movRM(8, TMP1, TMP0, 8));
+      ldv(TMP1);
+      buf.emit(x.aluRI(ALU.add, 8, TMP1, 8), x.movMR(8, TMP0, 8, TMP1));
+      buf.place(done);
       return this.def(i, RES);
     }
 
