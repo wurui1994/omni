@@ -410,7 +410,9 @@ win32 目标 160 条逐字节相同 —— 三种可执行格式里只有 PE 没
 逐条相同，共拉出 242 个成员）。**节表也摆对了**（第四十八片，
 `stage0/src/link/pe_sections.js`：按类重排、同类并节、导入桩把 `.text` 撑长、导入表接在
 thunk 节后面、arm64 的 `.reloc`，160 张节表的虚拟地址、文件偏移、长度与节名逐条相同 ——
-这一步与重定位无关，所以能单独对准）。
+这一步与重定位无关，所以能单独对准）。**节里的字节也填对了**（第四十九片，
+`stage0/src/link/pe_reloc.js` + `stage0/src/link/pe_link.js`：导入桩、符号地址、链接器自己
+提供的那几个符号、所有重定位落笔，160 份节内容与 tcc 逐字节相同）。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -9913,6 +9915,44 @@ x86_64 上一次就对上了，arm64 上每份都短 64 到 80 字节。差的�
 所有名字都丢了，`.rdata` 一下短了 0x9d 字节。
 
 <!-- 第九刀第四十八片-END -->
+
+## 落地：第九刀第四十九片 —— 节里的字节（160 份逐字节相同）
+
+上一片算「摆在哪」，这一片填「里面是什么」：导入表的字节、导入桩的代码、每个符号的最终
+地址，然后把所有重定位落笔。尺子是 tcc 链出来那份 `.exe` 的每一节，用 `readImage` 读出来
+逐字节比。
+
+```
+两个 win32 目标：160 份节内容逐字节相同（.text / .rdata / .pdata / .reloc）
+```
+
+`stage0/src/link/pe_reloc.js`（`relocateOne`：两条腿一共十几个重定位号）+
+`stage0/src/link/pe_link.js`（`peImage`：导入桩、符号地址、`relocate_sections`）+
+`tests/c/pe-content.js`。
+
+要点：
+
+- 导入函数的符号**不再是未定义的** —— `pe_check_symbols` 把它的 `st_value` 改成 `.text`
+  里那个桩的偏移。于是 `call printf` 那条 `PLT32` 算的是「到桩的距离」。导入**数据**
+  （`__declspec(dllimport)`）绑的是 IAT 那一格的地址。
+- 桩里那一格地址由一条重定位补上：x86_64 是 `R_X86_64_PC32`（`ff 25` 后面那个 rel32，
+  原地先写着 -4），arm64 是 `R_AARCH64_ABS64`（16 字节代码后面那 8 字节）。
+- `R_XXX_RELATIVE` 在 PE 上不是「什么都不做」：`add32le(ptr, val - imagebase)`，也就是
+  往那一格写 RVA。`.pdata` 里指向函数的那些项全靠它。
+
+### 两格又是撞出来的
+
+- **链接器自己提供的符号**（`tcc_add_linker_symbols`）。`__init_array_start` /
+  `__init_array_end` 在没有 `.init_array` 的时候**都等于 `.text` 的开头**（`s =
+  text_section; end_offset = 0`），不是 0。我们按 0 算，80 条全在那一处差了 0x1000。
+  同一族还有 `_etext` / `_edata` / `_end` 与 `__start_节名` / `__stop_节名`。它跑在
+  `pe_check_symbols` **之前**，所以 `_etext` 是导入桩还没接上时的 `.text` 长度。
+- **arm64 上「够不着」要改写指令**。未定义的弱符号在 PE 上地址是 0，而映像基址是
+  0x140000000 —— `adrp` 与 `bl` 都编不出那么远：tcc 把 `adrp` 换成 `movz xN, #0`，
+  把 `bl` 换成 `nop`。第一版照常编码，80 条全在那一处差了字节（tcc 那边是 `1f`，
+  正是 `d503201f` 的头一个字节）。
+
+<!-- 第九刀第四十九片-END -->
 
 
 

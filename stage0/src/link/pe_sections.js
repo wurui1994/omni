@@ -27,6 +27,7 @@ import { readSymbols } from './pe_load.js';
 import { buildImports } from './pe.js';
 
 const SHT_PROGBITS = 1;
+const SHT_STRTAB = 3;
 const SHT_NOBITS = 8;
 const SHT_INIT_ARRAY = 14;
 const SHT_FINI_ARRAY = 15;
@@ -36,6 +37,7 @@ const SHF_EXECINSTR = 0x4;
 const SHF_TLS = 0x400;
 
 const SHN_UNDEF = 0;
+const SHN_COMMON = 0xfff2;
 const STT_NOTYPE = 0;
 const STT_FUNC = 2;
 const ST_PE_IMPORT = 0x20;
@@ -114,8 +116,8 @@ export function collectImports(syms, dyn, opts) {
   const under = (opts ?? {}).leadingUnderscore === true;
   const order = [];                                // dll 名字，按第一次用到的次序
   const byDll = new Map();                         // dll 名字 → [{name, ordinal}]
-  const thunked = new Set();                       // 已经有桩的那些导入符号
-  let nthunks = 0;
+  const thunkIdx = new Map();                      // 导入符号 → 它的桩是第几个
+  const bind = new Map();                          // 并合后的符号名 → 它绑到哪个导入符号
   for (const sym of syms) {
     if (sym.shndx !== SHN_UNDEF || sym.name === '') continue;
     let imp = (sym.other & ST_PE_IMPORT) !== 0;
@@ -147,11 +149,19 @@ export function collectImports(syms, dyn, opts) {
     if (!list.some((x) => x.name === hit.key)) list.push({ name: hit.key, ordinal: hit.ordinal });
     /* 汇编来的符号常常没有类型，所以 `STT_NOTYPE` 也算函数 —— 除非它是
      * `__declspec(dllimport)` 标出来的数据。 */
-    if (sym.type === STT_FUNC || (sym.type === STT_NOTYPE && !imp)) {
-      if (!thunked.has(hit.key)) { thunked.add(hit.key); nthunks++; }
-    }
+    const func = sym.type === STT_FUNC || (sym.type === STT_NOTYPE && !imp);
+    if (func && !thunkIdx.has(hit.key)) thunkIdx.set(hit.key, thunkIdx.size);
+    bind.set(sym.name, { key: hit.key, func });
   }
-  return { dlls: order.map((d) => ({ name: d, syms: byDll.get(d) })), nthunks };
+  const dlls = order.map((d) => ({ name: d, syms: byDll.get(d) }));
+  /* IAT 里那一格是第几个：一个 dll 的符号排完还空一格（结尾那个 0）。 */
+  const slot = new Map();
+  let k = 0;
+  for (const d of dlls) {
+    for (const s of d.syms) slot.set(s.name, k++);
+    k++;
+  }
+  return { dlls, nthunks: thunkIdx.size, thunkIdx, slot, bind };
 }
 
 /** `pe_build_reloc`：把要装载时重定位的地方按 4K 分页摆成一串块。 */
@@ -210,13 +220,56 @@ export function peSections(inp) {
   for (const d of inp.dlls ?? []) {
     for (const s of d.syms) if (!dyn.has(s.name)) dyn.set(s.name, { dll: d.dll, ordinal: s.ordinal });
   }
-  const { dlls, nthunks } = collectImports(syms, dyn, inp);
+  const imps = collectImports(syms, dyn, inp);
+  const { dlls, nthunks } = imps;
 
   /* 节的工作副本。次序就是并合出来的次序 —— 插入排序是稳定的，靠的正是这个。 */
   const secs = mo.secs.map((s) => ({
     name: s.name, type: s.type, flags: s.flags, size: s.size, bytes: s.bytes,
+    link: s.link, info: s.info,
   }));
   const find = (n) => secs.find((s) => s.name === n);
+
+  /* `resolve_common_syms` 里那一半：`SHN_COMMON` 的符号在 `.bss` 里安家。
+   * （`tcc -r` 不做这一步，所以并合出来的表里它们还是 COMMON。） */
+  const bss = find('.bss');
+  const commons = [];
+  for (const sym of syms) {
+    if (sym.shndx !== SHN_COMMON || sym.size === 0) continue;
+    if (bss === undefined) throw new OmniError('pe: 有 COMMON 符号可是没有 .bss');
+    const at = align(bss.size, sym.value || 1);    // COMMON 的 st_value 是对齐要求
+    bss.size = at + sym.size;
+    commons.push({ name: sym.name, sec: bss, off: at });
+  }
+
+  /* `tcc_add_linker_symbols`：几个链接器自己提供的符号。注意它跑在 `pe_check_symbols`
+   * **之前**，所以 `_etext` 是导入桩还没接上去时的 `.text` 长度。 */
+  const linker = new Map();
+  const undefSym = (n) => {
+    const s = syms.find((x) => x.name === n);
+    return s !== undefined && s.shndx === SHN_UNDEF;
+  };
+  const put = (name, sec, off) => { if (sec !== undefined && undefSym(name)) linker.set(name, { sec, off }); };
+  const pair = (name, sec, off) => { put(name, sec, off); put(name.slice(1), sec, off); };
+  pair('_etext', find('.text'), find('.text')?.size ?? 0);
+  pair('_edata', find('.data'), find('.data')?.size ?? 0);
+  pair('_end', bss, bss?.size ?? 0);
+  for (const nm of ['.preinit_array', '.init_array', '.fini_array']) {
+    let s = find(nm);
+    let end;
+    if (s === undefined || (s.flags & SHF_ALLOC) === 0) { end = 0; s = find('.text'); } else { end = s.size; }
+    put(`__${nm.slice(1)}_start`, s, 0);
+    put(`__${nm.slice(1)}_end`, s, end);
+  }
+  for (const s of secs) {
+    if ((s.flags & SHF_ALLOC) === 0) continue;
+    if (s.type !== SHT_PROGBITS && s.type !== SHT_NOBITS && s.type !== SHT_STRTAB) continue;
+    const p0 = s.name.startsWith('.') ? s.name.slice(1) : s.name;
+    if (!/^[A-Za-z_$0-9]*$/.test(p0)) continue;    // 名字能不能写成 C 的标识符
+    put(`__start_${p0}`, s, 0);
+    put(`__stop_${p0}`, s, s.size);
+  }
+  for (const c of commons) linker.set(c.name, { sec: c.sec, off: c.off });
 
   /* `.text` 先对到 8，再一个导入函数一个桩。 */
   const text = find('.text');
@@ -326,7 +379,10 @@ export function peSections(inp) {
     info.rawSize = off - info.ptr;
   }
 
-  return { machine, infos, imp, nthunks, syms, secs, merged, imagebase, fileSize: off };
+  return {
+    machine, infos, imp, nthunks, syms, secs, merged, imagebase, fileSize: off,
+    imports: imps, text, thunkAt, thunkSize: tsz, thunk, linker,
+  };
 }
 
 function peFlags(sec) {
