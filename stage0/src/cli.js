@@ -2106,7 +2106,7 @@ function main(argv) {
         ...opt,
       });
       const r = peWrite({
-        objs: [...objs, ...loaded.members.map((m) => m.bytes)],
+        objs: [...loaded.objs, ...loaded.members.map((m) => m.bytes)],
         dlls: loaded.dlls,
         startName: loaded.entryName,
         gui: loaded.peType === PE_GUI,

@@ -474,6 +474,11 @@ Mach-O 的 dylib 不叫、PE 的 dll **照叫**（`pe_add_runtime` 在
 `--nxcompat` / `--tsaware` / `--dynamicbase`、`-e`，十二种走法各 6 × 2 份逐字节
 相同；头上那两格 `SectionAlignment` / `FileAlignment` **永远是模板里的
 0x1000 / 0x200** —— `pe_write` 从来不把真用的对齐写回去）。
+**Windows 上也能接着真的 `.dll` 链了**（第六十七片：`pe_load_file` 按开头是不是 `MZ`
+认，`get_dllexports` 把数据目录 0 那张导出表的 `AddressOfNames` 读成一张 `.def`
+（序号一律 0），库名取文件名的基名；导入表的次序还是符号表里谁先出现谁先来，与
+导出表那个 `strcmp` 次序无关，两个目标各 2 份逐字节相同）。三种格式的「接着真的
+共享库链」于是都齐了。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -10821,6 +10826,47 @@ x86_64 上也长出 `.reloc` 来，一分钱不用另加。映像基址那个入
 --section-align 2000 --file-align 1000 -e main`。
 
 <!-- 第九刀第六十六片-END -->
+
+## 落地：第九刀第六十七片
+
+接着真的 `.dll` 链一份 `.exe`：`<target>-win32-tcc use.o mylib.dll -o a.exe`，两个目标
+各 2 份逐字节相同（`tests/c/pe-dll-link.js`）。三种格式的「接着真的共享库链」于是都齐了
+（ELF 是第六十片、Mach-O 那一路走的是 `.tbd`/第五十六片）。
+
+要的东西只有一件：**认得一份真的 `.dll`**。`pe_load_file` 按内容认 ——
+
+```c
+if (0 == strcmp(tcc_fileextension(filename), ".def"))   ret = pe_load_def(s1, fd);
+else if (pe_load_res(s1, fd) == 0)                      ret = 0;
+else if (read_mem(fd, 0, buf, 4) && 0 == memcmp(buf, "MZ", 2))
+                                                        ret = pe_load_dll(s1, fd, filename);
+```
+
+`pe_load_dll` → `get_dllexports`：找到数据目录 0 那张导出表落在哪一节
+（`addr >= VirtualAddress && addr < VirtualAddress + SizeOfRawData`），照
+`AddressOfNames` 把 `NumberOfNames` 个名字读出来，一个个交给
+`pe_putimport(s1, ref->index, q, 0)` —— **序号一律 0**，于是导入表里走的是名字那一路，
+跟 `.def` 里不带 `@序号` 的行没有区别。所以我们这边不必新造一条路：把 `.dll` 读成一张
+`.def`（`readDllExports`），后面第四十七片那套原样能用。
+
+两格容易错：
+
+- **库名是文件名的基名**（`tcc_basename(dllref->name)`），命令行上写的路径不进导入表。
+  门里因此把 `.dll` 和 `.exe` 放在同一个临时目录、用同一个文件名。
+- **导入表里那一串的次序与导出表无关**。导出表是按 `strcmp` 排过的（第六十四片），
+  可导入表是 `pe_check_symbols` 扫 `.symtab` 排出来的 —— 谁先在符号表里出现谁先来。
+  `02-order` 那一份就是把两个次序故意错开：导出是 `alpha beta mid table tag zeta`，
+  导入是 `zeta beta alpha mid tag table`。
+
+还有一格是 C 那边的：**从 `.dll` 里取数据要 `__declspec(dllimport)`**，不然 tcc 自己就
+报 `symbol 'gvar' is missing __declspec(dllimport)`。函数不用 —— 它走的是 `.text` 里
+那个跳转桩。
+
+`peLoad` 于是多回一格 `objs`：命令行上给的文件里**真的目标文件**那几份。原来调用方
+是把自己那一份 `objs` 直接交给 `peWrite` 的，现在有 `.dll` 混在里面，得让 `peLoad`
+把它挑出来。命令行上是 `omni pe-link use.o mylib.dll -o a.exe`。
+
+<!-- 第九刀第六十七片-END -->
 
 
 

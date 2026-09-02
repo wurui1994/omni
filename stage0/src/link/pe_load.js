@@ -27,6 +27,7 @@
 import { OmniError } from '../source/diag.js';
 import { readObject } from './elf.js';
 import { readArchive, alacarte } from './ar.js';
+import { readImage } from './pe.js';
 
 const SHT_SYMTAB = 2;
 const SYM_SIZE = 24;
@@ -207,33 +208,71 @@ export function parseDef(text) {
 }
 
 /**
+ * 读一份真的 `.dll`，把它的导出名字当成一张 `.def`（`get_dllexports` +
+ * `pe_load_dll`）。
+ *
+ * 只看数据目录 0 那张导出表的 `AddressOfNames`：一个个名字读出来，序号一律给 0
+ * （`pe_putimport(s1, ref->index, q, 0)`）—— 于是导入表里走的是名字那一路，
+ * 跟 `.def` 里不带 `@序号` 的那些一模一样。
+ *
+ * 库名取的是**文件名的基名**（`tcc_basename(dllref->name)`），命令行上写的路径不算。
+ */
+export function readDllExports(bytes, path) {
+  const img = readImage(bytes);
+  const dir = img.dirs[0];
+  const syms = [];
+  if (dir.size !== 0) {
+    /* tcc 那一句是 `addr >= ish.VirtualAddress && addr < …+ ish.SizeOfRawData` ——
+     * `readImage` 留下的 `bytes` 长度正是 `SizeOfRawData`。 */
+    const sec = img.secs.find((s) => dir.addr >= s.vaddr && dir.addr < s.vaddr + s.bytes.length);
+    if (sec === undefined) throw new OmniError('pe: 导出表不在任何一节里');
+    const b = sec.bytes;
+    const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+    const at = dir.addr - sec.vaddr;
+    const n = dv.getUint32(at + 24, true);            // NumberOfNames
+    const namesAt = dv.getUint32(at + 32, true) - sec.vaddr;
+    for (let i = 0; i < n; i++) {
+      let p = dv.getUint32(namesAt + i * 4, true) - sec.vaddr;
+      let name = '';
+      while (b[p] !== 0) { name += String.fromCharCode(b[p]); p++; }
+      syms.push({ name, ordinal: 0 });
+    }
+  }
+  return { dll: path.split(/[\\/]/).pop(), syms };
+}
+
+/**
  * 按 tcc 的次序把该装的东西装进来，并且把「装了什么」记成一串足迹 ——
  * 那一串正好能与 `tcc -vv` 打出来的 `-> …` 行逐条比。
  *
  * @param inp `{objs, libtcc1, open, subsystem, dll, entry, leadingUnderscore, nostdlib}`
- *        - `objs`：`[{path, bytes}]`，命令行上给的目标文件
+ *        - `objs`：`[{path, bytes}]`，命令行上给的文件。开头是 `MZ` 的当作真的 `.dll`
+ *          （`pe_load_file` 就是这么认的），进 `dlls` 而不进符号表
  *        - `libtcc1`：支持库的文件名（带交叉前缀，如 `x86_64-win32-libtcc1.a`）
  *        - `open(names)`：给一串候选文件名，回 `{path, bytes}` 或 `null`
- * @returns `{trace, tab, start, peType, dlls, members}`；`trace` 每条
- *          `{kind:'file'|'member', path}`
+ * @returns `{trace, tab, start, peType, dlls, members, objs}`；`trace` 每条
+ *          `{kind:'file'|'member', path}`，`objs` 是**真的目标文件**那几份字节
  */
 export function peLoad(inp) {
   const tab = new SymTab();
   const trace = [];
   const members = [];
   const dlls = [];
+  const objs = [];
 
   const loadObject = (bytes) => tab.addObject(readSymbols(readObject(bytes)));
 
   for (const o of inp.objs) {
     trace.push({ kind: 'file', path: o.path });
+    if (o.bytes[0] === 0x4d && o.bytes[1] === 0x5a) { dlls.push(readDllExports(o.bytes, o.path)); continue; }
+    objs.push(o.bytes);
     loadObject(o.bytes);
   }
 
   const { start, entryName, peType } = peStart(tab, inp);
   tab.declare(start);                            // 就是这一句把 crt 拉进来
 
-  if (inp.nostdlib === true) return { trace, tab, start, entryName, peType, dlls, members };
+  if (inp.nostdlib === true) return { trace, tab, start, entryName, peType, dlls, members, objs };
 
   const want = [[inp.libtcc1], ...runtimeLibs(peType).map((l) => libCandidates(l))];
   for (const names of want) {
@@ -256,7 +295,9 @@ export function peLoad(inp) {
     }
     throw new OmniError(`pe: 还不会装 ${f.path}`);
   }
-  return { trace, tab, start, entryName, peType, dlls, members };
+  return {
+    trace, tab, start, entryName, peType, dlls, members, objs,
+  };
 }
 
 function latin1(bytes) {
