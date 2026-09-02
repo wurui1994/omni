@@ -65,9 +65,10 @@ const R_AARCH64_RELATIVE = 1027;
  * @param weakUndef 这条重定位指的是不是一个**未定义的弱符号** —— PE 上它的地址是 0，
  *        arm64 的 `adrp` 与 `bl` 都编不出那么远的距离，tcc 于是改写成 `movz`/`nop`
  * @param gotSlot 这个符号在 `.got` 里那一格的**虚拟地址**（走 GOT 的那几号要它）
- * @param tls `{start, end, symSecEnd}`：PT_TLS 那一段的起止（线程局部那几号要它）；
+ * @param tls `{start, end, symSecEnd, tcb}`：PT_TLS 那一段的起止（线程局部那几号要它）；
  *        没有 PT_TLS 的格式（Mach-O）两头都是 0，x86_64 那号退回用 `symSecEnd`
- *        —— 符号所在那一节的末尾
+ *        —— 符号所在那一节的末尾。`tcb` 是 tp 指着的那个头有多大，arm64 要加上它：
+ *        glibc 的 `tcbhead_t` 是 16 字节，Windows 上 tp 直接指着数据，是 0
  */
 export function relocateOne(machine, type, b, at, addr, val, imagebase, weakUndef, gotSlot, tls) {
   const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
@@ -84,6 +85,7 @@ export function relocateOne(machine, type, b, at, addr, val, imagebase, weakUnde
     if (tls === undefined) throw new OmniError(`reloc: ${type} 号要 PT_TLS，可它还没摆`);
     return tls;
   };
+  const tprel = () => { const t = tlsSeg(); return val - t.start + t.tcb; };
 
   if (machine === EM_X86_64) {
     switch (type) {
@@ -154,13 +156,13 @@ export function relocateOne(machine, type, b, at, addr, val, imagebase, weakUnde
         return put32(0xfff803ff, ((slot() & 0xff8) << 7) >>> 0);
       case R_AARCH64_GLOB_DAT:
       case R_AARCH64_JUMP_SLOT: return set64(val);
-      /* 线程局部：arm64 上 `tpidr_el0` 指着线程控制块（`tcbhead_t`）的**开头**，
-       * 数据接在它后面，所以偏移是「离 PT_TLS 起点的距离 + 16」。 */
+      /* 线程局部：arm64 上偏移是「离 PT_TLS 起点的距离 + tp 指着的那个头」。
+       * glibc 里 `tpidr_el0` 指着线程控制块（`tcbhead_t`）的开头、数据接在它后面，
+       * 那个头是 16 字节；Windows 上 tcc 不加这一段（`#if TCC_TARGET_PE`）。 */
       case R_AARCH64_TLSLE_ADD_TPREL_HI12:
-        return put32(0xffc003ff, ((Math.floor((val - tlsSeg().start + 16) / 4096) & 0xfff) << 10)
-          >>> 0);
+        return put32(0xffc003ff, ((Math.floor(tprel() / 4096) & 0xfff) << 10) >>> 0);
       case R_AARCH64_TLSLE_ADD_TPREL_LO12:
-        return put32(0xffc003ff, (((val - tlsSeg().start + 16) & 0xfff) << 10) >>> 0);
+        return put32(0xffc003ff, ((tprel() & 0xfff) << 10) >>> 0);
       default: throw new OmniError(`reloc: arm64 还不会 ${type} 号`);
     }
   }

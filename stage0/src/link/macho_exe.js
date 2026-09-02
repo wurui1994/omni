@@ -1214,7 +1214,9 @@ export function machoExe(inp) {
   const tlsOf = (idx) => {
     const s = syms[idx];
     const ss = s.shndx < SHN_LORESERVE ? secs[s.shndx] : undefined;
-    return { start: 0, end: 0, symSecEnd: ss === undefined ? 0 : ss.addr + ss.size };
+    return {
+      start: 0, end: 0, tcb: 16, symSecEnd: ss === undefined ? 0 : ss.addr + ss.size,
+    };
   };
   for (const [si, list] of relas) {
     const tgt = secs[secs[si].relaFor];

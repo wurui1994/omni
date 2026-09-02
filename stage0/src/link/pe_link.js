@@ -79,6 +79,17 @@ export function peImage(inp) {
   /* 导出表的字节。函数 RVA 那几格还空着，等重定位落笔（见下）。 */
   if (r.exp !== null) r.thunk.data.set(r.exp.bytes, r.exp.at);
 
+  /* `IMAGE_TLS_DIRECTORY`：四个指针加两个 0。tcc 写的是「相对 `.data` 的偏移」，
+   * 再靠四条 `REL_TYPE_DIRECT` 把 `.data` 的地址加上去 —— 我们直接写终值。 */
+  if (r.tls !== null) {
+    const t = r.tls;
+    const dv = new DataView(r.thunk.data.buffer, r.thunk.data.byteOffset + t.dir, t.size);
+    dv.setBigUint64(0, BigInt(t.start), true);                      // StartAddressOfRawData
+    dv.setBigUint64(8, BigInt(t.end), true);                        // EndAddressOfRawData
+    dv.setBigUint64(16, BigInt(t.dataSec.vaddr + t.data), true);    // AddressOfIndex
+    dv.setBigUint64(24, BigInt(t.dataSec.vaddr + t.data + 8), true); // AddressOfCallBacks
+  }
+
   /* 导入桩的代码。 */
   const code = thunkCode(machine);
   const iatBase = imp === null ? 0
@@ -117,6 +128,13 @@ export function peImage(inp) {
   };
 
   /* 重定位落笔（`relocate_sections`）。 */
+  /* 线程局部那几号要 PT_TLS 的起止。PE 上 `pe_build_tls` 只填了 `tls_start`，
+   * 末尾那一句是 `s1->tls_end = s1->tls_start` —— 两头是同一个地址，所以 x86_64 的
+   * `TPOFF32` 与 arm64 的 `TLSLE_*` 算出来都是「相对 `.tls` 那一段的起点」。
+   * arm64 那两号在 Windows 上**不加** `tcbhead_t` 那 16 个字节（`#if TCC_TARGET_PE`）。 */
+  const TLS_RELOC = new Set([23, 549, 550]);
+  const tlsSeg = r.tls === null ? undefined
+    : { start: r.tls.start, end: r.tls.start, symSecEnd: 0, tcb: 0 };
   for (const rela of secs) {
     if (rela.type !== SHT_RELA) continue;
     const tgt = secs[rela.info - 1];
@@ -132,7 +150,8 @@ export function peImage(inp) {
       const weak = sym.shndx === SHN_UNDEF && sym.bind === STB_WEAK
         && !imports.bind.has(sym.name) && !r.linker.has(sym.name);
       relocateOne(machine, type, tgt.data, off, tgt.vaddr + off,
-        addrOf(sym) + addend, imagebase, weak);
+        addrOf(sym) + addend, imagebase, weak, undefined,
+        TLS_RELOC.has(type) ? tlsSeg : undefined);
     }
   }
 
@@ -201,6 +220,9 @@ export function peWrite(inp) {
   }
   if (r.exp !== null) {
     dirs[0] = { addr: r.thunk.vaddr - base + r.exp.at, size: r.exp.size };   // EXPORT
+  }
+  if (r.tls !== null) {
+    dirs[9] = { addr: r.thunk.vaddr - base + r.tls.dir, size: r.tls.size };  // TLS
   }
   /* `pe->reloc` 只要**建了**就把 `RELOCS_STRIPPED` 抹掉 —— 哪怕它一条都没装、
    * 空得连节表都没进去。 */

@@ -361,6 +361,10 @@ export function peSections(inp) {
     for (let k = 0; k < nthunks; k++) text.extraDirect.push(thunkAt + k * tsz + fixAt);
   }
 
+  const hasTls = secs.some((s) => (s.flags & SHF_TLS) !== 0);
+  /* `sizeof(IMAGE_TLS_DIRECTORY)`：四个指针加两个 DWORD。 */
+  const tlsSize = hasTls ? 4 * 8 + 8 : 0;
+
   const reloc = hasReloc
     ? { name: '.reloc', type: SHT_PROGBITS, flags: 0, size: 0, bytes: new Uint8Array(0) }
     : null;
@@ -380,6 +384,7 @@ export function peSections(inp) {
   let addr = imagebase + 1;
   let imp = null;
   let exp = null;
+  let tls = null;
   let thunk = null;
   for (const { sec, cls } of sorted) {
     if (cls >= CLS.last) continue;
@@ -407,6 +412,21 @@ export function peSections(inp) {
           addr - imagebase, inp.leadingUnderscore === true);
         if (exp !== null) sec.size = exp.at + exp.size;
       }
+      /* `pe_build_tls(pe, NULL)`：导出表后面再留 40 字节的 `IMAGE_TLS_DIRECTORY`，
+       * 顺手在 `.data` 里划 32 字节（`__tls_index` 加三格），四个指针各挂一条
+       * `REL_TYPE_DIRECT` —— 于是它们也要进 `.reloc`。 */
+      if (tlsSize !== 0) {
+        const dataSec = find('.data');
+        if (dataSec === undefined) throw new OmniError('pe: 有线程局部的节，可是没有 .data');
+        const dir = align(sec.size, 16);
+        sec.size = dir + tlsSize;
+        const data = align(dataSec.size, 16);
+        dataSec.size = data + 8 * 4;
+        sec.extraDirect = [];
+        for (let n = 0; n < 4; n++) sec.extraDirect.push(dir + n * 8);
+        linker.set('__tls_index', { sec: dataSec, off: data });
+        tls = { dir, size: tlsSize, data, dataSec, start: 0, end: 0 };
+      }
     }
 
     if (sec === reloc) {
@@ -415,15 +435,15 @@ export function peSections(inp) {
       for (const info of infos) {
         for (const s of info.secs) {
           const rela = find(`.rela${s.name}`);
-          if (rela === undefined) continue;
-          const dv = new DataView(rela.bytes.buffer, rela.bytes.byteOffset, rela.bytes.byteLength);
-          for (let p = 0; p + 24 <= rela.bytes.length; p += 24) {
-            if (dv.getUint32(p + 8, true) !== direct) continue;
-            entries.push(s.vaddr - imagebase + Number(dv.getBigUint64(p, true)));
+          if (rela !== undefined) {
+            const dv = new DataView(rela.bytes.buffer, rela.bytes.byteOffset, rela.bytes.byteLength);
+            for (let p = 0; p + 24 <= rela.bytes.length; p += 24) {
+              if (dv.getUint32(p + 8, true) !== direct) continue;
+              entries.push(s.vaddr - imagebase + Number(dv.getBigUint64(p, true)));
+            }
           }
-        }
-        /* 导入桩那几条重定位是链接时加在 `.rela.text` **末尾**的。 */
-        for (const s of info.secs) {
+          /* 链接时才加的那几条（arm64 的导入桩、TLS 目录里那四个指针）挂在这一节
+           * 自己那张重定位表的**末尾**。 */
           for (const at of s.extraDirect ?? []) entries.push(s.vaddr - imagebase + at);
         }
       }
@@ -449,6 +469,14 @@ export function peSections(inp) {
     addr += sec.size;
     si.vsize = addr - si.vaddr;
     if (sec.type !== SHT_NOBITS) si.dataSize = si.vsize;
+
+    /* `pe_build_tls(pe, s)`：线程局部那一条在节表里**改名叫 `.tls`**（哪怕并进来的
+     * 是 `.tdata` 与 `.tbss` 两节），起点记第一节的地址、终点记最后一节的末尾。 */
+    if ((sec.flags & SHF_TLS) !== 0 && tls !== null) {
+      si.name = '.tls';
+      if (tls.start === 0) tls.start = sec.vaddr;
+      tls.end = sec.vaddr + sec.size;
+    }
   }
 
   /* 文件偏移（`pe_write`）：头之后一节一节按 `FileAlignment` 排下去。没有内容的节
@@ -464,7 +492,7 @@ export function peSections(inp) {
   }
 
   return {
-    machine, infos, imp, exp, nthunks, syms, secs, merged, imagebase, fileSize: off,
+    machine, infos, imp, exp, tls, nthunks, syms, secs, merged, imagebase, fileSize: off,
     imports: imps, text, thunkAt, thunkSize: tsz, thunk, linker, dll, hasReloc,
   };
 }

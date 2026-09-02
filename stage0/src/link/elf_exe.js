@@ -1235,6 +1235,7 @@ export function elfExeImage(inp) {
       tlsSeg = {
         start: ph2.vaddr,
         end: ph2.vaddr + ph2.memsz + ((-ph2.memsz) & (ph2.al - 1)),
+        tcb: 16,
       };
     }
   }

@@ -87,10 +87,13 @@ class Image {
   u32(at, v) { this.dv.setUint32(at, v >>> 0, true); }
   u64(at, v) { this.dv.setBigUint64(at, BigInt(v), true); }
 
-  /** 定长的 8 字节节名，不足补 0；超过 8 字节的长名字要 COFF 字符串表，这儿不做。 */
+  /** 定长的 8 字节节名，不足补 0。超过 8 字节的**就地截断** —— tcc 那一句是
+   * `memcpy(psh->Name, sh_name, umin(strlen(sh_name), sizeof psh->Name))`，只有带
+   * COFF 字符串表（`-g`）的时候才写成 `/<偏移>`。于是 `.init_array` 在节表里就是
+   * `.init_ar`。 */
   name8(at, s) {
-    if (s.length > 8) throw new OmniError(`pe: 节名 '${s}' 超过 8 字节（长名字要 COFF 字符串表）`);
-    for (let i = 0; i < s.length; i++) this.b[at + i] = s.charCodeAt(i);
+    const n = Math.min(s.length, 8);
+    for (let i = 0; i < n; i++) this.b[at + i] = s.charCodeAt(i);
   }
 
   bytes(at, src) {

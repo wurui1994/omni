@@ -463,6 +463,11 @@ local-exec 这一种模型，静态、动态、共享库三道门各 12 × 2 份
 都齐了 —— 而 `tcc_add_linker_symbols` 在这三种格式上是三个答案：ELF 的 DLL 不叫、
 Mach-O 的 dylib 不叫、PE 的 dll **照叫**（`pe_add_runtime` 在
 `resolve_common_syms` 之前就把 `output_type` 改回 `EXE` 了）。
+**Windows 上的 `__thread` 也认了**（第六十五片：`.tls` 那一节、thunk 节里那 40 字节的
+`IMAGE_TLS_DIRECTORY`（四个指针靠 `REL_TYPE_DIRECT` 落笔，所以也要进 `.reloc`）、
+`.data` 里那 32 字节的 `__tls_index`、数据目录 9，以及 arm64 上**不加** `tcbhead_t`
+那 16 个字节 —— 三个格式于是三种 tp；顺手把 `elf-gen/` 那八份接进两道 PE 的门，
+`pe-exe` 172 份、`pe-dll` 180 份逐字节相同）。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -10672,6 +10677,87 @@ win32 上就链不上，可执行文件那一路也一样。
 命令行上是 `omni pe-link --shared`（输出名默认 `a.dll`）。
 
 <!-- 第九刀第六十四片-END -->
+
+## 落地：第九刀第六十五片
+
+Windows 上的 `__thread`：`.tls` 那一节、`IMAGE_TLS_DIRECTORY`、数据目录 9，以及
+arm64 上**不加** `tcbhead_t` 那 16 个字节。顺手把 `elf-gen/` 那八份也接进两道 PE 的门，
+于是 `pe-exe` 是 172 份（两个目标各 86，905216 字节）、`pe-dll` 是 180 份（各 90，
+750080 字节），全部逐字节相同。
+
+### `pe_build_tls` 分两趟
+
+`pe_assign_addresses` 一上来数一遍节的类，见到 `sec_tls` 就把
+`pe->tls_size = sizeof(IMAGE_TLS_DIRECTORY)` 记下（x86_64/arm64 上是 40：四个指针
+加两个 DWORD）。然后：
+
+- **走到 thunk 节的时候**（`pe_build_tls(pe, NULL)`）：在 thunk 节里对到 16 再留
+  40 字节当目录，又在 **`.data`** 里对到 16 留 32 字节（`PTR_SIZE * (1+3)`），
+  给这 32 字节起名 `__tls_index` —— 代码里那条引用就是冲它来的。目录里那四个指针
+  各挂一条 `REL_TYPE_DIRECT`，指向一个「值为 0、节是 `.data`」的匿名符号。
+- **走到 `.tls` 那一节的时候**（`pe_build_tls(pe, s)`）：把目录填上。填的是**相对
+  `.data` 的偏移**，等 `relocate_sections` 把 `.data` 的地址加上去才成真地址：
+
+```c
+d->StartAddressOfRawData = s1->tls_start - data_section->sh_addr;
+d->EndAddressOfRawData   = s->sh_addr + s->data_offset - data_section->sh_addr;
+d->AddressOfIndex        = pe->tls_data;
+d->AddressOfCallBacks    = pe->tls_data + PTR_SIZE;
+```
+
+我们不造那四条重定位，直接把终值写进去 —— 一样的字节。可有一处**不能**省：那四条
+是 `REL_TYPE_DIRECT`，所以它们**要进 `.reloc`**。第四十八片给 arm64 的导入桩留的那个
+`extraDirect` 正好能用；顺手把 `.reloc` 的收集改成「一节一节走，先它自己那张表、
+再它的 `extraDirect`」—— tcc 是把链接时那几条**追加在这一节自己那张重定位表末尾**的，
+原来分两轮走碰上「同一组里有两节都有东西」就会错序。
+
+节表里那一条还要**改名叫 `.tls`**（`strcpy(si->name, ".tls")`），哪怕并进来的是
+`.tdata` 与 `.tbss` 两节。数据目录 9 是 `{tls_dir + thunk 的 RVA, 40}`。
+
+### 三个格式，三种 tp
+
+落笔的时候要的两个数（`s1->tls_start` / `tls_end`）在 PE 上是这么给的：
+
+```c
+if (0 == s1->tls_start) s1->tls_start = s->sh_addr;   /* 第一节的地址 */
+...
+s1->tls_end = s1->tls_start;                          /* “to reuse logic from linux” */
+```
+
+两头是同一个地址。于是 x86_64 的 `TPOFF32`（`val - tls_end`）在 PE 上算的是「离
+`.tls` 起点的距离」，跟 Linux 上「离整块末尾的距离」正好反着 —— 但两边走的是同一句
+代码，因为 `tls_end` 被特意设成了 `tls_start`。
+
+arm64 那两号不一样，`arm64-link.c` 里明写着一个 `#if`：
+
+```c
+#if TCC_TARGET_PE
+    int64_t tp_offset = val - s1->tls_start;
+#else
+    /* glibc arm64: tp points to tcbhead_t (DTV), TLS data starts after it */
+    int64_t tp_offset = val - s1->tls_start + 16;
+#endif
+```
+
+Windows 上 tp 直接指着数据，那 16 个字节不加。这一格是这一片唯一一个「先写错了才
+发现」的地方：头一遍跑出来 arm64 差九个字节，八个在 `.text` 里（`add` 的 imm12 都
+大了 16），第九个是校验和 —— 校验和是算出来的，前八个改对了它自己就对。于是
+`relocateOne` 的 `tls` 参数多一格 `tcb`：ELF 与 Mach-O 传 16，PE 传 0。
+
+### 顺带：八个字节以上的节名
+
+`elf-gen/11-sections.c` 里有 `.init_array`，十一个字节。tcc 那一句是
+
+```c
+memcpy(psh->Name, sh_name, umin(strlen(sh_name), sizeof psh->Name));
+```
+
+—— **就地截断**成 `.init_ar`，只有带 COFF 符号表（`-g`）的时候才写成 `/<偏移>` 去指
+字符串表。我们原来在这儿是抛错的，改成照样截断。（可执行文件那一路碰不上，是因为
+`.init_array` 并在 `.data` 后面、节表里那一条叫 `.data`；DLL 那一路 `.data` 是空的，
+`.init_array` 就成了那一组的头一节。）
+
+<!-- 第九刀第六十五片-END -->
 
 
 

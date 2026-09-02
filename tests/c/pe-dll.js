@@ -54,15 +54,10 @@ if (src === null) {
   process.exit(0);
 }
 
-/** `pe-gen/` 专门造导出表，`gen/` 那一拨顺带把普通的 DLL 也过一遍。 */
-const PEGEN = join(here, 'pe-gen');
-const GEN = join(here, 'gen');
-const cases = [
-  ...readdirSync(PEGEN).filter((f) => f.endsWith('.c')).sort()
-    .map((f) => ({ dir: PEGEN, file: f })),
-  ...readdirSync(GEN).filter((f) => f.endsWith('.c')).sort()
-    .map((f) => ({ dir: GEN, file: f })),
-];
+/** `pe-gen/` 专门造导出表，`gen/` 与 `elf-gen/` 那两拨顺带把普通的 DLL 也过一遍。 */
+const cases = ['pe-gen', 'gen', 'elf-gen'].flatMap((d) => readdirSync(join(here, d))
+  .filter((f) => f.endsWith('.c')).sort()
+  .map((f) => ({ dir: join(here, d), file: f })));
 
 function firstDiff(a, b) {
   const n = Math.min(a.length, b.length);

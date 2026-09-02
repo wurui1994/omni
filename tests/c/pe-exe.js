@@ -44,8 +44,15 @@ if (src === null) {
   process.exit(0);
 }
 
-const SRC = join(here, 'gen');
-const cases = readdirSync(SRC).filter((f) => f.endsWith('.c')).sort();
+/* `gen/` 是要 libc 的那一拨，`elf-gen/` 是专门试链接器的那一拨（弱符号、`.tdata`、
+ * 自己命名的节…）。tcc 在 win32 上链不上的几份（`vsscanf` 不在 `msvcrt.def` 里、
+ * 只有一半的 `14-multi-a`）会被下面那个 `continue` 跳过。 */
+const cases = [
+  ...readdirSync(join(here, 'gen')).filter((f) => f.endsWith('.c')).sort()
+    .map((f) => join(here, 'gen', f)),
+  ...readdirSync(join(here, 'elf-gen')).filter((f) => f.endsWith('.c')).sort()
+    .map((f) => join(here, 'elf-gen', f)),
+];
 
 function firstDiff(a, b) {
   const n = Math.min(a.length, b.length);
@@ -80,7 +87,7 @@ try {
     for (const c of cases) {
       const stem = `${t.name}-${basename(c, '.c')}`;
       const objPath = join(dir, `${stem}.o`);
-      const one = spawnSync(tcc, [...flags, '-c', join(SRC, c), '-o', objPath], { encoding: 'utf8' });
+      const one = spawnSync(tcc, [...flags, '-c', c, '-o', objPath], { encoding: 'utf8' });
       if (one.status !== 0 || !existsSync(objPath)) continue;
       const exePath = join(dir, `${stem}.exe`);
       const link = spawnSync(tcc, [...flags, objPath, '-o', exePath], { encoding: 'utf8' });
