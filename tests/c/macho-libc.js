@@ -122,7 +122,7 @@ try {
         const r = machoExe({
           objs: objs.map((p) => readFileSync(p)),
           dylibs: [tbdText],
-          libtcc1: libBytes,
+          archives: [libBytes],
         });
         got = r.bytes;
         pulled += r.members.length;

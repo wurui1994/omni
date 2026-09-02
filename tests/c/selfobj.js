@@ -169,8 +169,10 @@ objParity(exe, 'omni-tcc -c tinycc/*.c == tcc -c', TINY_ARGS, tinyFiles);
  *
  * 上面那一份是 `clang` 链的。这一段改成**我们自己的链接器**：`c-obj --format elf`
  * 出 tcc 那种 `ET_REL`（tcc 的 `-c` 在所有目标上都写 ELF），`macho-link` 读回来、
- * 定位、写出一个真的 `MH_EXECUTE`。除了 SDK 里那份 `libc.tbd`（从里头只读符号名，
- * 用来回答「这个未定义的名字是不是来自某个 dylib」），整条链上没有别人的东西。 */
+ * 定位、写出一个真的 `MH_EXECUTE`。接 libc 一句 `-lc` 就够（第九十八片）——
+ * 库名往文件的拼法、以及去 SDK 的 `usr/lib` 里找，都照 tcc 的规矩在链接器里了。
+ * 除了 SDK 里那份 `libc.tbd`（从里头只读符号名，用来回答「这个未定义的名字
+ * 是不是来自某个 dylib」），整条链上没有别人的东西。 */
 const SDK = spawnSync('xcrun', ['--show-sdk-path'], { encoding: 'utf8' }).stdout.trim();
 const TBD = join(SDK, 'usr', 'lib', 'libc.tbd');
 if (SDK === '' || !existsSync(TBD)) {
@@ -194,10 +196,13 @@ if (SDK === '' || !existsSync(TBD)) {
   if (elfOk) ok(`c-obj --format elf ×${UNITS.length}（tcc 那种 ET_REL）`);
 
   const own = join(OUT, 'omni-tcc-own');
+  /* `-lc`（第九十八片）：库名往文件的拼法与找的地方都在链接器里了（照
+   * `tcc_add_library` 与 `tcc_add_macos_sdkpath`），这一格不必再把 `.tbd` 的路径
+   * 手工递进去 —— 上一片欠的账。 */
   const lk = elfOk
     ? spawnSync(process.execPath,
       [CLI, 'macho-link', ...UNITS.map((u) => join(elfDir, `${u}.o`)),
-        '-o', own, '--dylib', TBD],
+        '-o', own, '-lc'],
       { encoding: 'utf8', maxBuffer: 1 << 26 })
     : null;
   if (lk === null) { /* 上一步就没成，链接这一步不必报第二遍 */ } else if (lk.status !== 0) {

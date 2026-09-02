@@ -697,6 +697,15 @@ x86 分两路（`d >= 2^63` 时先减掉 2^63 再转、再把第 63 位置回去
 称不出我们的对错，所以 c67 换一套探针（64 位的移位从局部量上走、结构体只留一个 `int`），
 十二副全绿，`known` 那格拆了。
 
+**`-l` 自己找库**（第九十八片）：第九十三片那份「自己编、自己链的 tcc」还得手工把
+`--dylib <SDK>/usr/lib/libc.tbd` 递进去 —— 那是欠的账，这一片还了。`macho-link` 认
+`-lc` 与 `-L 目录`：名字往文件的三种拼法照 `tcc_add_library`（`libtcc.c:1301-1332`，
+MACHO 上是 `lib%s.dylib`、`lib%s.tbd`、`lib%s.a`，**外层循环是拼法**不是路径），
+`:name` 是「就照这个名字找」，路径是 `-L` 给的在前、`/usr/lib`、再到 SDK 里那份
+`usr/lib`（`tcc_add_macos_sdkpath`，`tccmacho.c:2267` —— 今天的 macOS 上 `libc.tbd`
+只在最后那一处）。顺手把 `machoExe` 的 `libtcc1`（一份）换成 `archives`（几份）：
+`-lfoo` 找到的 `.a` 与 `libtcc1.a` 走同一条按需取用的路。
+
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
 地址交给真的 libc（`strlen`/`memcpy`）验过。C 前端现在还把 `&x` 降到影子栈上，
@@ -12829,6 +12838,51 @@ PROBE load: fc=12 t=10 PLOS=0   PROBE load: fc=12 t=10 PLOS=8
 那段注释）。
 
 <!-- 第九刀第九十七片-END -->
+
+## 落地：第九刀第九十八片
+
+第九十三片那份「自己编、自己链的 tcc」链的时候还得手工递一句
+`--dylib <SDK>/usr/lib/libc.tbd`。这一片把找库那一段搬进链接器，`-lc` 就够了。
+
+### 名字往文件怎么拼
+
+照 `tcc_add_library`（`libtcc.c:1301-1332`）。MACHO 上三种拼法：
+
+```c
+"%s/lib%s.dylib", "%s/lib%s.tbd", "%s/lib%s.a"
+```
+
+一处容易写反的地方：**外层循环是拼法，内层才是路径** —— 先拿所有路径试一遍
+`.dylib`，都没有再全试 `.tbd`。所以同一个目录里 `libfoo.a` 与另一个目录里
+`libfoo.dylib` 并存时，赢的是 `.dylib`。名字前面加冒号（`-l:libc.tbd`）是
+「就照这个名字找，不加前缀后缀」；三种拼法都没中，最后再拿名字本身当文件试一次。
+
+### 去哪儿找
+
+- `-L` 给的那些（可以写 `-L 目录` 也可以写 `-L目录`），命令行上的在最前
+- `/usr/lib` —— tcc 的 `CONFIG_TCC_LIBPATHS` 在非 PE 上是 `{B}:<sysroot>/usr/lib`
+- SDK 里那份 `usr/lib` —— `tcc_add_macos_sdkpath`（`tccmacho.c:2267`）。
+  今天的 macOS 上 `libc.tbd` **只在这一处**：`/usr/lib` 里早就没有 `.tbd` 了，
+  真正的 `libSystem.B.dylib` 也只在 dyld 的共享缓存里，文件系统上找不到。
+
+SDK 的根与 `-I` 那一格共用（`SDKROOT` -> 两条写死的路径 -> `xcrun --show-sdk-path`），
+这一片把它抽成了 `sdkRoot()`，`usr/include` 与 `usr/lib` 各挂一个薄壳。
+
+### 顺手改的：一份支持库变几份
+
+`machoExe` 原来只认一个 `libtcc1`。`-lfoo` 找到 `.a` 的时候要能一起进来，于是换成
+`archives`（一串），按给的顺序一份份 alacarte：取完一份重算未定义符号再看下一份，
+所以后一份能补上前一份带出来的洞。`--libtcc1` 还在，只是变成往 `archives` 里塞一份。
+
+### 门
+
+`tests/c/selfobj.js` 那一步的 `--dylib <TBD>` 换成了 `-lc`，24 条照旧全绿；
+`macho-tcc.js`（4 条逐字节相同）与 `macho-libc.js`（180 条）跟着 `archives` 改了入参，
+也全绿。四种写法各手工验过一遍：`-lc`、`-L 目录 -lfoo`（`.tbd`）、`-l:libc.tbd`、
+`-L 目录 -lhelp`（`.a`），链出来的都跑得起来；找不到的名字报
+`library 'nosuchlib' not found`。
+
+<!-- 第九刀第九十八片-END -->
 
 
 

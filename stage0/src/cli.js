@@ -175,9 +175,9 @@ function inclArgs(argv) {
  *
  * 一个都不成（不是 macOS、SDK 没装）就只剩自带那一段，与这一片之前一样。
  */
-let sdkUsrIncludeCache;
-function sdkUsrInclude() {
-  if (sdkUsrIncludeCache !== undefined) return sdkUsrIncludeCache;
+let sdkRootCache;
+function sdkRoot() {
+  if (sdkRootCache !== undefined) return sdkRootCache;
   const roots = [];
   const fromEnv = env('SDKROOT');
   if (fromEnv !== undefined && fromEnv !== '') roots.push(fromEnv);
@@ -185,10 +185,9 @@ function sdkUsrInclude() {
   roots.push('/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform'
     + '/Developer/SDKs/MacOSX.sdk');
   for (const r of roots) {
-    const p = join(r, 'usr', 'include');
-    if (isDir(p)) {
-      sdkUsrIncludeCache = p;
-      return p;
+    if (isDir(join(r, 'usr', 'include'))) {
+      sdkRootCache = r;
+      return r;
     }
   }
   let out = '';
@@ -198,9 +197,21 @@ function sdkUsrInclude() {
   } catch {
     out = '';
   }
-  const p = out === '' ? null : join(out, 'usr', 'include');
-  sdkUsrIncludeCache = p !== null && isDir(p) ? p : null;
-  return sdkUsrIncludeCache;
+  sdkRootCache = out !== '' && isDir(out) ? out : null;
+  return sdkRootCache;
+}
+function sdkUsrInclude() {
+  const r = sdkRoot();
+  if (r === null) return null;
+  const p = join(r, 'usr', 'include');
+  return isDir(p) ? p : null;
+}
+/** SDK 的 `usr/lib` —— `-l` 找库的那一格，与 `tcc_add_macos_sdkpath` 找的同一处。 */
+function sdkUsrLib() {
+  const r = sdkRoot();
+  if (r === null) return null;
+  const p = join(r, 'usr', 'lib');
+  return isDir(p) ? p : null;
 }
 
 /**
@@ -1946,7 +1957,7 @@ function main(argv) {
     const a = rest[i];
     if (a === '-o' || a === '--mode' || a === '--work' || a === '--cache'
       || a === '-I' || a === '-D' || a === '--rdata'
-      || a === '-L' || a === '--target' || a === '-e'
+      || a === '-L' || a === '--target' || a === '-e' || a === '-l'
       || a === '--dylib' || a === '--libtcc1' || a === '--dll'
       || a === '--soname' || a === '--rpath' || a === '--install-name'
       || a === '--subsystem' || a === '--image-base' || a === '--stack'
@@ -2367,9 +2378,11 @@ function main(argv) {
       return 0;
     }
     /* `macho-link`：几个 `.o` 链成一份 macOS 可执行文件（第九刀第五十五、五十六片），
-     * `--shared` 出一份 dylib（第六十三片）。接 libc 就把 `.tbd` 与 `libtcc1.a` 一起给：
+     * `--shared` 出一份 dylib（第六十三片）。接 libc 一句 `-lc` 就够（第九十八片，
+     * 自己按 tcc 的规矩去 SDK 的 `usr/lib` 里找），也可以把文件明着给：
      *   omni macho-link a.o [b.o …] -o a.out [-e _main]
-     *                   [--dylib <sdk>/usr/lib/libc.tbd] [--libtcc1 libtcc1.a]
+     *                   [-lc] [-L 目录] [--dylib <sdk>/usr/lib/libc.tbd]
+     *                   [--libtcc1 libtcc1.a]
      *                   [--shared] [--install-name libfoo.dylib] [--rpath @loader_path]
      *                   [-g [--dwarf 2]]
      * 写出来的还没签名 —— arm64 上要自己补一句 `codesign -f -s - <文件>`，
@@ -2386,15 +2399,64 @@ function main(argv) {
         return b;
       };
       const dylibs = [];
+      const archives = [];
       /* `--dylib` 认字：Mach-O（或胖二进制）就当真的库读（`macho_load_dll`），
        * 别的当 `.tbd` 文本（`macho_load_tbd`）。tcc 也是看头四个字节分派的。 */
-      for (let k = 0; k < rest.length - 1; k++) {
-        if (rest[k] !== '--dylib') continue;
-        const p = rest[k + 1];
+      const takeLib = (p) => {
         const b = bytesOf(p);
-        dylibs.push(isMachoBinary(b) ? { name: p, bytes: b } : readText(p));
+        if (p.endsWith('.a')) archives.push(b);
+        else dylibs.push(isMachoBinary(b) ? { name: p, bytes: b } : readText(p));
+      };
+      for (let k = 0; k < rest.length - 1; k++) {
+        if (rest[k] === '--dylib') takeLib(rest[k + 1]);
       }
       const li = rest.indexOf('--libtcc1');
+      if (li >= 0) archives.push(bytesOf(rest[li + 1]));
+      /* `-l` 找库（第九十八片）：路径是 `-L` 给的那些在前，然后 `/usr/lib`
+       * （tcc 的 `CONFIG_TCC_LIBPATHS` 在非 PE 上是 `{B}:<sysroot>/usr/lib`），
+       * 最后是 SDK 里那份 `usr/lib`（`tcc_add_macos_sdkpath`，`tccmacho.c:2267`）——
+       * 现在的 macOS 上 `libc.tbd` 只在最后那一处。
+       *
+       * 名字往文件的三种拼法照 `tcc_add_library`（`libtcc.c:1301-1332`）：
+       * MACHO 上是 `lib%s.dylib`、`lib%s.tbd`、`lib%s.a`，**外层循环是拼法**
+       * （先拿所有路径试 `.dylib`，再全试一遍 `.tbd`），`:name` 是「就照这个名字找，
+       * 不加前缀后缀」。一个都没找到再拿名字本身当文件试一次，还是没有就报错。 */
+      const libPaths = [];
+      for (let k = 0; k < rest.length - 1; k++) {
+        if (rest[k] === '-L') libPaths.push(rest[k + 1]);
+        else if (rest[k].startsWith('-L') && rest[k].length > 2) libPaths.push(rest[k].slice(2));
+      }
+      libPaths.push('/usr/lib');
+      const sdkLib = sdkUsrLib();
+      if (sdkLib !== null) libPaths.push(sdkLib);
+      const findLib = (name) => {
+        const fmts = name.startsWith(':')
+          ? [(d, n) => join(d, n)]
+          : [(d, n) => join(d, `lib${n}.dylib`), (d, n) => join(d, `lib${n}.tbd`),
+            (d, n) => join(d, `lib${n}.a`)];
+        const bare = name.startsWith(':') ? name.slice(1) : name;
+        for (const f of fmts) {
+          for (const d of libPaths) {
+            const p = f(d, bare);
+            if (exists(p)) return p;
+          }
+        }
+        for (const d of libPaths) {
+          const p = join(d, bare);
+          if (exists(p)) return p;
+        }
+        return null;
+      };
+      for (let k = 0; k < rest.length; k++) {
+        const a = rest[k];
+        let name = null;
+        if (a === '-l' && k + 1 < rest.length) name = rest[k + 1];
+        else if (a.startsWith('-l') && a.length > 2) name = a.slice(2);
+        if (name === null) continue;
+        const p = findLib(name);
+        if (p === null) throw new OmniError(`library '${name}' not found`);
+        takeLib(p);
+      }
       const ni = rest.indexOf('--install-name');
       /* `--rpath` 可以给多次，攒成一串冒号隔开的（tcc 的 `tcc_concat_str(..., ':')`）。 */
       const rp = [];
@@ -2411,7 +2473,7 @@ function main(argv) {
         dwarf: dwi >= 0 ? Number(rest[dwi + 1]) : 0,
         rpath: rp.length === 0 ? undefined : rp.join(':'),
         openDylib: (n) => (exists(n) ? bytesOf(n) : null),
-        libtcc1: li >= 0 ? bytesOf(rest[li + 1]) : undefined,
+        archives,
         shared: rest.includes('--shared'),
         outName: out,
         installName: ni >= 0 ? rest[ni + 1] : undefined,
@@ -2613,8 +2675,9 @@ commands:
             with -e NAME (default main). -o NAME
   macho-link
             link .o files into a macOS executable (ADR-0017 cut 9 slices 55-56): segments,
-            chained fixups, export trie. Give --dylib <sdk>/usr/lib/libc.tbd and
-            --libtcc1 libtcc1.a to link against libc. --shared makes a dylib
+            chained fixups, export trie. -lc finds libc.tbd itself (-L DIR adds a
+            search path; slice 98), or give --dylib <sdk>/usr/lib/libc.tbd and
+            --libtcc1 libtcc1.a explicitly. --shared makes a dylib
             (slice 63), --install-name NAME sets LC_ID_DYLIB. The output is unsigned -
             run codesign -f -s - on it. -o NAME, -e NAME (default _main)
   oir       print the OIR as JSON

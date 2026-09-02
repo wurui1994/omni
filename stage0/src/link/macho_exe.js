@@ -702,14 +702,19 @@ function loadInputs(inp) {
   for (const d of dllrefs) for (const s of d.syms) dynsym.add(s);
   const dylibNames = dllrefs.filter((d) => d.level === 0).map((d) => d.soname);
   const members = [];
-  if (inp.libtcc1 !== undefined) {
+  /* 静态库按需取用（`tcc_load_archive` 的 alacarte 那一路）。可以给多份 ——
+   * `-lfoo` 找到的 `.a` 与 `--libtcc1` 给的那一份走同一条路（第九十八片），
+   * 一份取完再重算未定义符号，所以后一份能补上前一份带出来的洞。 */
+  if (inp.archives !== undefined && inp.archives.length > 0) {
     const tab = new SymTab();
     for (const b of inp.objs) tab.addObject(readSymbols(readObject(b)));
-    alacarte(readArchive(inp.libtcc1), (n) => tab.isUndef(n), (m) => {
-      members.push(m.name);
-      objs.push(m.bytes);
-      tab.addObject(readSymbols(readObject(m.bytes)));
-    });
+    for (const ar of inp.archives) {
+      alacarte(readArchive(ar), (n) => tab.isUndef(n), (m) => {
+        members.push(m.name);
+        objs.push(m.bytes);
+        tab.addObject(readSymbols(readObject(m.bytes)));
+      });
+    }
   }
   return {
     objs, dylibNames, dynsym, members,
@@ -720,10 +725,11 @@ function loadInputs(inp) {
  * 把几个 Mach-O 目标文件链成一个可执行文件（`macho_output_file` 的 EXE 那一路），
  * 或者一份 dylib（`-shared`，第九刀第六十三片）。
  *
- * @param inp `{objs, entryName, dylibs, libtcc1, shared, outName, installName, openDylib, rpath}`；
+ * @param inp `{objs, entryName, dylibs, archives, shared, outName, installName, openDylib, rpath}`；
  *            `entryName` 默认 `_main`（Mach-O 的名字带下划线），`dylibs` 每条要么是一份
  *            `.tbd` 的文本、要么是一份真的 `.dylib` 二进制（`{name, bytes}`），
- *            `libtcc1` 是支持库的字节（按需取用）；`shared` 出 MH_DYLIB，
+ *            `archives` 是几份静态库的字节（按需取用，`libtcc1.a` 与 `-lfoo` 找到的
+ *            `.a` 都走这里）；`shared` 出 MH_DYLIB，
  *            `LC_ID_DYLIB` 里那个名字是 `installName`，没给就用 `outName`
  *            （tcc 拿的是**输出的文件名**）
  * @returns `{bytes, ncmds, nsects, entryoff, members}`；`bytes` 还**没签名** —— 签名是

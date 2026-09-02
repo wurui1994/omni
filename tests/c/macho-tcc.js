@@ -114,7 +114,7 @@ function round(t, tcc, B, one, srcs, label) {
     got = machoExe({
       objs: objPaths.map((p) => readFileSync(p)),
       dylibs: [tbdText],
-      libtcc1: readFileSync(join(CROSS, t.lib)),
+      archives: [readFileSync(join(CROSS, t.lib))],
     });
   } catch (e) {
     diff++;
