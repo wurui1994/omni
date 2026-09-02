@@ -64,7 +64,7 @@ import {
   MACRO_OBJ, MACRO_FUNC, MACRO_JOIN, TOK_TWO_CHARS, IDENT_NAMES,
   TOK_DEFINE, TOK_INCLUDE, TOK_INCLUDE_NEXT, TOK_IFDEF, TOK_IFNDEF, TOK_ELIF,
   TOK_ENDIF, TOK_DEFINED, TOK_UNDEF, TOK_ERROR, TOK_WARNING, TOK_LINE, TOK_PRAGMA,
-  TOK_IF, TOK_ELSE, TOK___LINE__, TOK___FILE__, TOK___DATE__, TOK___TIME__,
+  TOK_IF, TOK_ELSE, TOK_WHILE, TOK_DO, TOK___LINE__, TOK___FILE__, TOK___DATE__, TOK___TIME__,
   TOK___VA_ARGS__, TOK___COUNTER__, TOK___HAS_INCLUDE, TOK___HAS_INCLUDE_NEXT,
   TOK_push_macro, TOK_pop_macro, TOK_once,
   TOK_pack, TOK_push, TOK_pop,
@@ -844,8 +844,45 @@ export class Cpp {
     return str;
   }
 
-  defineFind(v) {
-    const d = this.defines.get(v);
+  /**
+   * `switch` 的体**不是**花括号那一种（第八刀第三十七片）：收一条语句，
+   * 外面**替它补上一对花括号**，于是重放那一路（`scanCases` 与 `block`）一个字都不用改。
+   *
+   * C11 6.8.4 说的是 `switch (expr) statement` —— 花括号只是最常见的那一种语句。
+   * tcctest.c:1352 自己带着注释考这一格：`switch (j) case 1: break;`。
+   *
+   * 「一条语句到哪儿为止」这儿按记号数：配平括号，然后在深度 0 上的 `;` 或者 `}` 收尾。
+   * 两种情形要接着收 —— 后面跟着 `else`（`if (a) b; else c;`），或者深度 0 上还有一个
+   * 没配对的 `do` 而后面跟着 `while`（`case 1: do { n++; } while (n < 3);` —— `do` 不一定
+   * 在这条语句的**开头**，所以这儿数的是个数，不是「第一个记号是不是 do」）。
+   * 别的形状都在这两条之内：标签、`case x:`、复合语句、嵌套的 if/循环都是收到自己
+   * 那个 `;` / `}` 为止。
+   */
+  captureStmtBraced() {
+    if (this.tok === 123) return this.captureBraced();
+    const str = new TokStr();
+    let dos = 0;
+    str.addTok(123, null, this.errLine());
+    let depth = 0;
+    for (;;) {
+      if (this.tok === TOK_EOF) this.err('unexpected end of file');
+      if (this.tok === 40 || this.tok === 91 || this.tok === 123) depth++;
+      else if (this.tok === 41 || this.tok === 93 || this.tok === 125) depth--;
+      else if (depth === 0 && this.tok === TOK_DO) dos++;
+      const t = this.tok;
+      str.addTok(t, this.tokc, this.errLine());
+      this.next();
+      if (depth !== 0 || (t !== 59 && t !== 125)) continue;
+      if (this.tok === TOK_ELSE) continue;
+      if (dos > 0 && this.tok === TOK_WHILE) { dos--; continue; }
+      break;
+    }
+    str.addTok(125, null, this.errLine());
+    str.add2(TOK_EOF, null);
+    return str;
+  }
+
+  defineFind(v) {    const d = this.defines.get(v);
     return d === undefined ? null : d;
   }
 

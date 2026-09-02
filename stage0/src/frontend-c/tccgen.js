@@ -529,7 +529,12 @@ function ceApply(t, a, b, err) {
   if (t === MINUS) return a - b;
   if (t === STAR) return a * b;
   if (t === SLASH || t === PERCENT) {
-    if (b === 0n) err('division by zero in constant expression');
+    /* 除以零在这儿是编译期错误 —— 但**短路掉的那一半**里不是（`2 || 1 / 0` 是合法的，
+     * 见 `ceInfix` 的 dead 那一格）。那时 `err` 不抛，于是这儿得有个回得出去的值。 */
+    if (b === 0n) {
+      err('division by zero in constant expression');
+      return 0n;
+    }
     return t === SLASH ? a / b : a % b;
   }
   if (t === AMP) return a & b;
@@ -569,6 +574,29 @@ function cefApply(t, x, y, err) {
   if (t === TOK_GT) return x > y ? 1n : 0n;
   err('invalid operands to binary operator (floating point)');
   return 0;
+}
+
+/**
+ * 两条同名全局声明的类型能不能合成一条（C11 6.9.2 的**试探性定义**，第三十九片）。
+ * 回合成后的类型，合不了回 null。
+ *
+ * 规则就一条：数组的长度**谁写了算谁的**（`static int t[]; static int t[10];`）。
+ * 别的差异一律是 `conflicting types` —— 我们不做完整的「类型兼容」那一套
+ * （C11 6.2.7：形参表里 `int f()` 与 `int f(int)` 也算兼容），撞上了再说。
+ *
+ * 数组那一格必须**先**判：`sameType` 比数组时只看元素类型，**不看长度**
+ * （ctype.js:267 —— 那是给赋值/形参那些地方用的，C 里 `int[]` 与 `int[10]` 确实
+ * 相容）。所以先问 `sameType(a, b)` 会让 `int t[]; int t[10];` 直接回第一条的
+ * 「没长度」类型，长度就永远补不上了。
+ */
+function mergeTentative(a, b) {
+  if (isArray(a.t) && isArray(b.t) && sameType(a, b)) {
+    if (a.count === b.count || b.count < 0) return a;
+    if (a.count < 0) return b;
+    return null; /* 两条都写了长度，而且不一样 */
+  }
+  if (sameType(a, b)) return a;
+  return null;
 }
 
 export class CGen {  /**
@@ -630,6 +658,8 @@ export class CGen {  /**
     this.wstrs = new Map();
     /** @type {{off:number,bytes:number[]}[]} 攒着的 data 段（内存要等 dataOff 定了才能声明） */
     this.pendingData = [];
+    /** @type {Map<number,{off:number,bytes:number[]}>} 静态位域按地址找那一条记录（见 `emitBitfield`） */
+    this.statBits = new Map();
     /** 这个单元用到堆了吗（`malloc` 那一族）。用到才发那条 `__omni_heap_init` */
     this.heapUsed = false;
     /** 这个单元用到 `errno` 了吗。用到才在 data 段留一格、才发 `__omni_errno_init` */
@@ -650,8 +680,13 @@ export class CGen {  /**
      * 占了这个名字」。tcc 那边不需要这一叠，因为它的 typedef 与变量本来就在同一张
      * 符号表里（`VT_TYPEDEF` 只是那条符号上的一个位）。 */
     this.tdefStack = [this.typedefs];
+    /** 常量表达式里「被短路掉的那一半」有多深（`ceInfix` 的 dead）。非 0 时算子上的
+     *  错（除以零）不报 —— 那一段按 C 根本不求值。 */
+    this.ceDead = 0;
     /** 最后一次引用到的符号自己写的 `aligned(N)`（0 = 没写）。只有 `alignofExpr` 读它。 */
     this.symAlign = 0;
+    /** 正在解析的语句表达式（`({ … })`，第三十七片之后那一片）。栈是因为它能嵌套。 */
+    this.seStack = [];
     /** @type {Map<string,{ty:object,addr:number,defined:boolean,used:boolean}>} 全局量 */
     this.gvars = new Map();
     /* C 有**四个独立的名字空间**（C11 6.2.3）：普通标识符、struct/union/enum 的 tag、
@@ -1014,7 +1049,16 @@ export class CGen {  /**
    * 所以这里没有指令，只有一次 `addrOf`（它本身可能发一条 ADD）。
    */
   decay(v) {
-    if (isArray(v.ty.t)) return sVal(mkPointer(v.ty.ref), this.addrOf(v));
+    if (isArray(v.ty.t)) {
+      /* 数组退化成「指向头一个元素」的指针，也就是它的地址。
+       *
+       * 没有地址的数组值只有一种来源：**返回类型是数组的函数**
+       * （`char f()[] { … }`，tcctest.c:1560，第四十二片）。那个值在寄存器里，
+       * tcc 那边也是这么处理的 —— 它的 `gen_cast` 直接把 VT_ARRAY 位抹掉、
+       * 剩下的就是指针，而寄存器里那个数照原样用。 */
+      if (v.mem === null && v.slot === null) return sVal(mkPointer(v.ty.ref), v.ref);
+      return sVal(mkPointer(v.ty.ref), this.addrOf(v));
+    }
     /* 函数指示符退化成「指向这个函数」的指针（C11 6.3.2.1 第 4 段）。它的地址就是
      * 那个函数指针值本身（第十三片：值是函数表下标 + 1，见 ir.js 的 `CALLI`）。 */
     if (isFunc(v.ty.t)) return sVal(mkPointer(v.ty), this.addrOf(v));
@@ -1033,6 +1077,12 @@ export class CGen {  /**
     if (isBitfield(v.ty.t)) this.err("cannot take address of bit-field");
     if (v.mem !== null) {
       if (v.mem.off === 0) return v.mem.addr;
+      /* 地址本身是常量（全局量、字符串字面量）时把偏移**折进去**：`&st.b` 于是也是一个
+       * 编译期常量，静态初始化式那一路要它（第四十八片）。函数体里这一折省一条 ADD。 */
+      const k = this.kintOf(v.mem.addr);
+      if (k !== null) {
+        return this.mod.consts.int(BigInt.asUintN(64, k + BigInt(v.mem.off)));
+      }
       return this.f.emit(OP.ADD, T_I64, v.mem.addr,
         this.mod.consts.int(BigInt(v.mem.off)), 0);
     }
@@ -1127,6 +1177,15 @@ export class CGen {  /**
     const f = this.f;
     /* 源侧先退化：`char *p = "abc"` 与 `int *q = a`（a 是数组）走的是同一条路。 */
     const v = this.decay(v0);
+    /* **目标侧**是数组的话，去掉「数组」这一层，剩下的是「指向元素的指针」。
+     *
+     * 这不是我们编的规则：tcc 的 `gen_cast` 最后一句就是
+     * `vtop->type.t &= ~(VT_CONSTANT | VT_VOLATILE | VT_ARRAY | VT_TLS)`
+     * （`tccgen.c:3490`），而它的数组是 `VT_PTR | VT_ARRAY` —— 去掉 VT_ARRAY 剩下的
+     * 正好是指针。转成数组类型这件事只在几个边角上出现，`char f()[] { return 0; }`
+     * （tcctest.c:1560，第四十二片）是一个：返回类型是 `char[]`，`return 0` 于是是
+     * 「0 转成 char*」。 */
+    if (isArray(ty.t)) return this.castTo(v, mkPointer(ty.ref));
     const tb = btype(ty.t);
     if (tb === VT_VOID) return sVal(TY_VOID, REF_NONE);
     // 转成 `_Bool`：C 规定「非零就是 1」，不是「截低位」。`(_Bool)256` 是 1，不是 0。
@@ -1423,6 +1482,18 @@ export class CGen {  /**
     const es = typeSize(p.ty.ref).size;
     if (es === 0) this.err('arithmetic on a pointer to an incomplete type');
     let k = this.asI64(n);
+    /* 两边都是常量就**在编译期算完**，一条指令都不发。`int *rel1 = &reltab[1];`
+     * （tcctest.c:2900，第四十八片）要靠这一条：全局量的地址在我们这儿是个编译期常量
+     * （data 段里的偏移），于是「常量 + 常量」折完之后那个静态初始化式就是一个数。
+     * tcc 那边这是一条重定位（`.data` 里写 `reltab + 4`）；我们的「链接」是一个数，
+     * 所以折叠**就是**那条重定位。 */
+    const nk = this.kintOf(k);
+    const pk = p.mem === null && p.slot === null ? this.kintOf(p.ref) : null;
+    if (nk !== null && pk !== null) {
+      const d = nk * BigInt(es);
+      return sVal(p.ty, this.mod.consts.int(
+        BigInt.asUintN(64, op === PLUS ? pk + d : pk - d)));
+    }
     if (es !== 1) k = f.emit(OP.MUL, T_I64, k, this.mod.consts.int(BigInt(es)), 0);
     return sVal(p.ty, f.emit(op === PLUS ? OP.ADD : OP.SUB, T_I64, this.gv(p), k, 0));
   }
@@ -1537,6 +1608,26 @@ export class CGen {  /**
   }
 
   /**
+   * 按位往 data 段里**并**（静态位域的初始化式，第四十五片）。
+   *
+   * 与 `emitBytes` 的区别是它**回头改**同一条记录：一个访问单元里的几个位域来自好几条
+   * 初始化式，后来的不能把先前的盖掉。所以按地址记住那一条 `pendingData`、往它的字节里
+   * 或进去 —— 没写到的位保持 0，正是 C 要的（静态存储期先零初始化）。
+   */
+  emitBitfield(addr, size, value) {
+    let e = this.statBits.get(addr);
+    if (e === undefined || e.bytes.length !== size) {
+      e = { off: addr, bytes: new Array(size).fill(0) };
+      this.statBits.set(addr, e);
+      this.pendingData.push(e);
+    }
+    const v = BigInt.asUintN(size * 8, value);
+    for (let i = 0; i < size; i++) {
+      e.bytes[i] |= Number((v >> BigInt(i * 8)) & 255n);
+    }
+  }
+
+  /**
    * 全局量：住在 data 段里，地址是**编译期常量**。没有初始化式就不写 data ——
    * 线性内存出生时全是 0，而 C 正好规定静态存储期的对象零初始化（C11 6.7.9 第 10 段）。
    * 这一条让「几千个全局量」不多一个字节的 data 段。
@@ -1544,30 +1635,45 @@ export class CGen {  /**
   declareGlobal(name, ty, isExtern, align = 0) {
     const hit = this.gvars.get(name);
     if (hit !== undefined) {
-      if (!sameType(hit.ty, ty)) this.err(`conflicting types for '${name}'`);
+      /* 同一个名字声明好几遍是合法的（C11 6.9.2 的**试探性定义**，第三十九片）——
+       * `int cinit1; int cinit1;`，以及数组「先不写长度、后面补上」那一对。
+       * 合并的规则只有一条：数组的长度谁写了算谁的。 */
+      const m = mergeTentative(hit.ty, ty);
+      if (m === null) this.err(`incompatible types for redefinition of '${name}'`);
+      hit.ty = m;
       if (!isExtern) hit.defined = true;
+      // 长度补上了才划地方（试探性那一条当时没划）
+      if (hit.addr < 0 && !(isArray(m.t) && m.count < 0)) this.allocGlobal(hit);
       return hit;
     }
     if (btype(ty.t) === VT_VOID) this.err(`variable '${name}' has void type`);
-    const s = typeSize(ty);
     /* `extern` 只是「别处有」，尺寸不必现在知道 —— 系统头里满地都是
      * `extern char *sys_errlist[];`。真用起来会在 extern 那一关被拦（没有定义）。
      *
      * 「不完整」要按类型问，不能按「尺寸是 0」问：`int gz[0];` 的尺寸也是 0，
      * 而那是合法的（GNU 的零长数组，tcc 收）。 */
     if (!isExtern) this.needComplete(name, ty);
-    if (!isExtern && isArray(ty.t) && ty.count < 0) {
-      this.err(`storage size of '${name}' isn't known`);
-    }
-    this.dataOff = alignUp(this.dataOff, align !== 0 ? align : s.align);
-    const e = { ty, addr: this.dataOff, defined: !isExtern, used: false, align };
-    this.dataOff += s.size;
+    const e = { ty, addr: -1, defined: !isExtern, used: false, align };
+    /* 没写长度的数组是一条**试探性定义**：现在不划地方，等后面那条同名声明补上长度。
+     * 一直没补上就是错，而那条错在**用**它的地方报（`gvarLval`），与 tcc 一样。 */
+    if (!(isArray(ty.t) && ty.count < 0)) this.allocGlobal(e);
     this.gvars.set(name, e);
     return e;
   }
 
+  /** 给一条全局量的登记在 data 段里划地方。试探性定义要等长度补上才叫。 */
+  allocGlobal(e) {
+    const s = typeSize(e.ty);
+    this.dataOff = alignUp(this.dataOff, e.align !== 0 ? e.align : s.align);
+    e.addr = this.dataOff;
+    this.dataOff += s.size;
+  }
+
   /** 一个全局量 -> 左值。地址是常量，静态偏移 0（`p->f` 那种偏移进描述符是后面的事）。 */
   gvarLval(e) {
+    /* 试探性定义的长度一直没补上：tcc 也是在**用**它的地方报，而且是这句话
+     * （`static int t[]; sizeof(t)` -> `unknown type size`）。 */
+    if (e.addr < 0) this.err('unknown type size');
     e.used = true;
     this.symAlign = e.align || 0;
     return sMem(e.ty, this.mod.consts.int(BigInt(e.addr)), 0);
@@ -1599,6 +1705,24 @@ export class CGen {  /**
     if (isArray(ty.t) && this.tok === TOK_LSTR && btype(ty.ref.t) === VT_INT) {
       this.initWString(dest, off, ty, this.readWStrTok(this.tokc));
       return;
+    }
+    /* `struct S x = (struct S){61,62};`（第八刀第四十片，tcctest.c:1478）：复合字面量
+     * 初始化一个**同类型**的对象时，它与「直接写那对花括号」等价 —— 那个字面量的存储
+     * 谁都看不见（地址没被取），所以不必真的划一块再拷一遍。静态那一侧尤其要这样：
+     * 拷贝要么是一条重定位、要么得把刚写进 data 的字节再读出来，两样都比这一行贵。
+     *
+     * `(` 后面不是类型名就把它放回去 —— 那是 `struct S x = (b);` 那一种。 */
+    if (this.tok === LPAR && (isArray(ty.t) || isStruct(ty.t))) {
+      this.next();
+      if (this.isTypeStart(this.tok)) {
+        const lty = this.typeName();
+        this.skip(RPAR);
+        if (this.tok !== LBRACE || !sameType(lty, ty)) {
+          this.err(`invalid initializer for '${typeText(ty)}'`);
+        }
+        return this.initializer(dest, off, ty);
+      }
+      this.ungetWith(LPAR, null);
     }
     if (this.tok === LBRACE) {
       if (isArray(ty.t) || isStruct(ty.t)) {
@@ -1677,6 +1801,25 @@ export class CGen {  /**
     this.tokc = this.cpp.tokc;
   }
 
+  /**
+   * 从 data 段里**读回**已经写好的字节（小端，回一个 bigint）。
+   *
+   * 静态初始化式里「值住在 data 段里」的那几格要它（第四十八片）：静态的复合字面量、
+   * 拿另一个全局量当初始化式。没写过的字节是 0 —— 线性内存出生就是 0，与静态存储期的
+   * 零初始化是同一件事。`pendingData` 是按追加顺序生效的，所以后写的盖前写的。
+   */
+  staticRead(addr, size) {
+    const raw = new Array(size).fill(0);
+    for (const d of this.pendingData) {
+      const lo = Math.max(d.off, addr);
+      const hi = Math.min(d.off + d.bytes.length, addr + size);
+      for (let i = lo; i < hi; i++) raw[i - addr] = d.bytes[i - d.off];
+    }
+    let v = 0n;
+    for (let i = size - 1; i >= 0; i--) v = (v << 8n) | BigInt(raw[i] & 255);
+    return v;
+  }
+
   /** 最里面那一层：一个标量落地。静态写字节、自动发 store。 */
   initScalar(dest, off, ty) {
     if (dest.slot !== undefined) {
@@ -1689,7 +1832,18 @@ export class CGen {  /**
       this.vstore(sMem(ty, dest.addr, off), this.exprEq());
       return;
     }
-    if (isBitfield(ty.t)) this.todo('静态位域的初始化式还没到（要按位往 data 里并）');
+    if (isBitfield(ty.t)) {
+      /* 静态位域的初始化式（`struct { unsigned bit:1, bits31:31; } x = { .bit = 1 };`，
+       * tcctest.c:1817，第四十五片）：同一个访问单元里的几个位域来自**好几条**初始化式，
+       * 所以不能像别的标量那样「一格覆盖一格」—— 得按位并进同一块字节里去。 */
+      const pos = bitPosOf(ty.t);
+      const bits = bitSizeOf(ty.t);
+      const acc = bfAccess(ty);
+      const mask = (1n << BigInt(bits)) - 1n;
+      const v = (BigInt.asUintN(64, this.constExpr()) & mask) << BigInt(pos);
+      this.emitBitfield(dest.addr + off, typeSize(acc).size, v);
+      return;
+    }
     if (this.tok === TOK_STR) {
       /* `char *s = "abc";` —— 值是那个字面量在 data 段里的地址。真的目标文件里这是
        * 一条重定位；我们的「链接」是一个常量，所以它就是 8 个字节。
@@ -1717,6 +1871,37 @@ export class CGen {  /**
         return;
       }
       this.ungetWith(TOK_LSTR, vals);
+    }
+    if (isPtr(ty.t)) {
+      /* 指针的静态初始化式：值是一个**地址常量**（C11 6.6 第 9 段）——
+       * `int *rel1 = &reltab[1];` / `int *rel3 = reltab + 2;` / `char *p = "abc" + 1;`
+       * （tcctest.c:2900 一带，第四十八片）。
+       *
+       * 这一格**借表达式一路**，而不是教常量求值器认全局量：指针算术要按元素大小缩放、
+       * 数组要退化、`&s.f` 要加成员偏移 —— 这三件事表达式一路都已经会了，而常量求值器
+       * 只认记号、没有类型。在一个用完就丢的函数里解析（与 `sizeof`、`&` 那两格同一
+       * 手法），拿到的 ref 是常量就是那个地址；不是常量就是「初始化式不是常量」。 */
+      const scratch = new MirFunc('$ptr', [], T_VOID);
+      const outer = this.f;
+      this.f = scratch;
+      let k = null;
+      try {
+        const v = this.decay(this.exprEq());
+        const kaddr = v.mem !== null ? this.kintOf(v.mem.addr) : null;
+        if (kaddr !== null) {
+          /* 值**住在 data 段里**、而地址是常量（静态的复合字面量 `(void*){…}`、
+           * 另一个全局量）：把那几个字节读回来。tcc 在这一格也是从 section 里拷
+           * （`init_putv` 的 `VT_LVAL` 那一支），而不是发一条 load。 */
+          k = this.staticRead(Number(kaddr) + v.mem.off, typeSize(v.ty).size);
+        } else {
+          k = this.kintOf(this.gv(this.castTo(v, ty)));
+        }
+      } finally {
+        this.f = outer;
+      }
+      if (k === null) this.err('initializer element is not constant');
+      this.emitBytes(dest.addr + off, 8, k);
+      return;
     }
     if (isFloat(ty.t)) {
       /* 静态的浮点初始化式：**在这儿就把它编码成 IEEE 754 的那几个字节**。
@@ -1994,70 +2179,92 @@ export class CGen {  /**
    * `int a[] = {…}` / `char s[] = "…"` 的长度由初始化式定（C11 6.7.9 第 22 段）。
    *
    * 一遍过时这是个鸡生蛋：要先知道长度才能划地方，而长度写在后面。tcc 的办法是把
-   * 初始化式的记号收下来先跑一遍「只数大小」（`decl_initializer_alloc`）；这里同样收，
-   * 但只数**顶层元素个数** —— 那在记号层面就数完了，不必真的解析一遍表达式。
+   * 初始化式的记号收下来先跑一遍「只数大小」（`decl_initializer_alloc`），这里也一样。
+   *
+   * 数的那一遍**用真的语法分析器**（第四十一片起改的）：把收下来的记号放一遍，走
+   * `initBraced` 那同一套下降栈与指定初始化器，只是每一项的值整段跳掉、什么都不落地。
+   * 原先是生扫记号数逗号 —— 那样数不了 `[3] = 1` 这种指定初始化器（下标是个常量
+   * **表达式**，得真的求值），而指定初始化器恰恰是「长度由初始化式定」的常客
+   * （`char const *const t[] = { [0 ... 1] = "BB" }`，tcctest.c:1474）。
    *
    * 回 `{ ty, body }`：body 非 null 时调用方要用 `replayBraced` 把它放一遍。
    */
   sizeFromInit(ty) {
     if (this.tok !== LBRACE) this.err(`array size missing`);
     const body = this.cpp.captureBraced();
-    /* 分格照 `initBraced` 的下降栈来（第二十三片起）：顶层是一个**长度未知**的数组，
-     * 每一格喂一个「项」，填满就回卷。于是省掉里层花括号的写法也数得对
-     * （`int a[][2] = {1,2,3,4}` 是 2）—— 记号层面数逗号只对元素是标量的那一种。 */
-    const stack = [{ ty: mkArray(ty.ref, -1), off: 0, i: 0 }];
-    for (const head of this.initHeads(body.toks)) {
-      if (head === LBRACK || head === DOT) {
-        this.todo('不定长数组配指定初始化器还没到（`int a[] = {[3]=1}`）');
-      }
-      for (;;) {
-        const el = this.initElem(stack[stack.length - 1]);
-        if (head === LBRACE) break;                             // 花括号写全了
-        if (isArray(el.ty.t) && (head === TOK_STR || head === TOK_LSTR)) break;
-        if (!isArray(el.ty.t) && !isStruct(el.ty.t)) break;      // 标量，到底了
-        if (isStruct(el.ty.t) && el.ty.ref.fields === null) {
-          this.err(`'${typeText(el.ty)}' is an incomplete type`);
-        }
-        stack.push({ ty: el.ty, off: 0, i: 0 });
-      }
-      this.initBump(stack[stack.length - 1]);
-      while (stack.length > 1 && this.initFull(stack[stack.length - 1])) {
-        stack.pop();
-        this.initBump(stack[stack.length - 1]);
-      }
-    }
-    /* 还停在里层就说明顶层那一格填了一半 —— 半格也算一格（`int a[][2] = {1,2,3}` 是 2）。 */
-    const n = stack[0].i + (stack.length > 1 ? 1 : 0);
+    let n = 0;
+    this.replayBraced(body, () => { n = this.countBraced(ty); });
     return { ty: mkArray(ty.ref, n), body };
   }
 
   /**
-   * 一串记号里，**最外层那对花括号里每一项的头一个记号**。
-   * 头一个记号就够了：`{` 与字符串是「整格」，别的都是「往里下降到标量」——
-   * 而这一遍要的只有这个区分。项里面的东西（表达式、里层的花括号）整段跳过。
+   * 数一个 `{…}` 顶层有几格（只数，不落地）。
+   *
+   * 与 `initBraced` 是同一份走法 —— 同一个下降栈、同一个 `initDesignators`、
+   * 同一条回卷规则，差别只有两处：每一项的值用 `skipInitItem` 整段跳掉，
+   * 以及顶层那一层的长度是未知的（`count = -1`，于是它永远填不满）。
+   *
+   * 长度是**见过的最大格号**，不是「格数」：指定初始化器可以往回跳
+   * （`{ [4] = 5, [0] = 1 }` 的长度是 5）。
    */
-  initHeads(toks) {
-    const heads = [];
-    let depth = 0;
-    let fresh = true;
-    for (const t of toks) {
-      if (t === TOK_EOF) break;
-      /* 行号记录不是记号（第八刀第十九片起 `tok_str_add_tok` 会插进来，为的是回放时
-       * 诊断的行号还对）。这一遍是**生扫**记号数组、不走 `next()`，所以得自己跳掉 ——
-       * 不跳的话它会被当成一项的头，`{1,2},\n{3,4}` 就数成三项。 */
-      if (t === TOK_LINENUM) continue;
-      if (t === RBRACE || t === RPAR || t === RBRACK) {
-        depth--;
-        if (depth === 0) break;
-        continue;
+  countBraced(ty) {
+    this.next();      // `{`
+    const stack = [{ ty: mkArray(ty.ref, -1), off: 0, i: 0 }];
+    let n = 0;
+    while (this.tok !== RBRACE) {
+      if (this.tok === TOK_EOF) this.err("'}' expected");
+      let chainAt = -1;
+      let nb = 1;
+      if (this.tok === LBRACK || this.tok === DOT) {
+        while (stack.length > 1) stack.pop();
+        nb = this.initDesignators(stack);
+        if (stack.length > 1) chainAt = stack[0].i;
       }
-      if (depth === 1) {
-        if (t === COMMA) { fresh = true; continue; }
-        if (fresh) { heads.push(t); fresh = false; }
+      for (;;) {
+        const el = this.initElem(stack[stack.length - 1]);
+        if (this.tok === LBRACE) break;
+        if (isArray(el.ty.t) && (this.tok === TOK_STR || this.tok === TOK_LSTR)) break;
+        if (!isArray(el.ty.t) && !isStruct(el.ty.t)) break;
+        if (isStruct(el.ty.t) && el.ty.ref.fields === null) {
+          this.err(`'${typeText(el.ty)}' is an incomplete type`);
+        }
+        stack.push({ ty: el.ty, off: el.off, i: 0 });
       }
-      if (t === LBRACE || t === LPAR || t === LBRACK) depth++;
+      const lv = stack[stack.length - 1];
+      this.initElem(lv);              // 越界那一条检查照旧
+      this.skipInitItem();
+      if (nb > 1) lv.i += nb - 1;
+      this.initBump(lv);
+      while (stack.length > 1 && this.initFull(stack[stack.length - 1])) {
+        stack.pop();
+        this.initBump(stack[stack.length - 1]);
+      }
+      if (chainAt >= 0) {
+        while (stack.length > 1) stack.pop();
+        stack[0].i = chainAt;
+        this.initBump(stack[0]);
+      }
+      /* 还停在里层就说明顶层那一格填了一半 —— 半格也算一格
+       * （`int a[][2] = {1,2,3}` 是 2）。 */
+      const seen = stack[0].i + (stack.length > 1 ? 1 : 0);
+      if (seen > n) n = seen;
+      if (this.tok !== COMMA) break;
+      this.next();
     }
-    return heads;
+    this.skip(RBRACE);
+    return n;
+  }
+
+  /** 数格子那一遍里，把当前这一项的记号整段跳掉（到顶层的 `,` 或 `}` 为止）。 */
+  skipInitItem() {
+    let depth = 0;
+    for (;;) {
+      if (this.tok === TOK_EOF) this.err("'}' expected");
+      if (depth === 0 && (this.tok === COMMA || this.tok === RBRACE)) return;
+      if (this.tok === LPAR || this.tok === LBRACK || this.tok === LBRACE) depth++;
+      else if (this.tok === RPAR || this.tok === RBRACK || this.tok === RBRACE) depth--;
+      this.next();
+    }
   }
 
   /**
@@ -2078,8 +2285,63 @@ export class CGen {  /**
     this.tokc = afterVal;
   }
 
-  /** `unary`（`tccgen.c:5595`）。前缀与后缀都在这儿，与 tcc 一样。 */
-  unary() {
+  /**
+   * 复合字面量 `(T){…}`（C11 6.5.2.5，第八刀第四十片）。回一个**左值** ——
+   * 它是一个真的对象，有地址（`&(struct S){1,2}` 是合法的）。
+   *
+   * 存储期按它写在哪儿分（第 5 段）：函数里是自动的（这一层块结束就没了），
+   * 文件作用域上是静态的。于是这一格与 `decl` 里那一段几乎一样，只差「没有名字」——
+   * 划地方、跑一遍 `initializer`、把那块内存当左值交出去。
+   *
+   * 我们的帧不回收（见 `finishFunc` 头上「平铺的帧」），所以「这一层块结束就没了」
+   * 在我们这儿只体现为「谁都不会再引用它」—— 循环里的复合字面量每一圈是同一块内存，
+   * 而 C 也允许这样（同一个块里那个对象只有一个）。
+   */
+  compoundLiteral(ty) {
+    let vty = ty;
+    let body = null;
+    let strBytes = null;
+    let wstrVals = null;
+    if (isArray(vty.t) && vty.count < 0) {
+      /* `(char []){ "abcd" }` —— 花括号裹着一个字面量，长度是 strlen + 1（**不是**
+       * 「1 个元素」）。与 `char a[] = { "abc" };` 是同一格（第二十八片）。 */
+      if (btype(vty.ref.t) === VT_BYTE && (strBytes = this.tryBracedStr()) !== null) {
+        vty = mkArray(vty.ref, strBytes.length + 1);
+      } else if (btype(vty.ref.t) === VT_INT
+        && (wstrVals = this.tryBracedStr(TOK_LSTR)) !== null) {
+        vty = mkArray(vty.ref, wstrVals.length + 1);
+      } else {
+        /* `(int []){3,2,1}` —— 长度由初始化式定，与 `int a[] = {…}` 同一段代码。 */
+        const r = this.sizeFromInit(vty);
+        vty = r.ty;
+        body = r.body;
+      }
+    }
+    this.needComplete('compound literal', vty);
+    /* 文件作用域：静态存储期，落在 data 段里。这一路没有 `this.f`，也发不出指令 ——
+     * 初始化式里必须全是常量，而 `initializer` 的静态那一侧正是这么要求的。 */
+    if (this.scopes.length <= 1) {
+      const e = { ty: vty, addr: -1, defined: true, used: true, align: 0 };
+      this.allocGlobal(e);
+      const dest = { stat: true, addr: e.addr };
+      if (strBytes !== null) this.initString(dest, 0, vty, strBytes);
+      else if (wstrVals !== null) this.initWString(dest, 0, vty, wstrVals);
+      else if (body !== null) this.replayBraced(body, () => this.initializer(dest, 0, vty));
+      else this.initializer(dest, 0, vty);
+      return sMem(vty, this.mod.consts.int(BigInt(e.addr)), 0);
+    }
+    const off = this.frameAlloc(vty);
+    const dest = { stat: false, addr: this.fpRef };
+    /* 花括号只覆盖写出来的那些，剩下的按 C 要是 0 —— 与 `decl` 里那一格同一条理由。 */
+    this.autoZero(this.fpRef, off, typeSize(vty).size);
+    if (strBytes !== null) this.initString(dest, off, vty, strBytes);
+    else if (wstrVals !== null) this.initWString(dest, off, vty, wstrVals);
+    else if (body !== null) this.replayBraced(body, () => this.initializer(dest, off, vty));
+    else this.initializer(dest, off, vty);
+    return sMem(vty, this.fpRef, off);
+  }
+
+  /** `unary`（`tccgen.c:5595`）。前缀与后缀都在这儿，与 tcc 一样。 */  unary() {
     const t = this.tok;
     /* `sizeof (` 的那一次标记（见 `sizeofType`）。一次性：取下来就清掉，于是里层的
      * 括号是普通括号 —— tcc 那边是「换掉那一个记号」，效果一样。 */
@@ -2143,10 +2405,20 @@ export class CGen {  /**
       if (this.isTypeStart(this.tok)) {
         const ty = this.typeName();
         this.skip(RPAR);
+        /* `(T){…}` 是**复合字面量**，不是强制转换（第八刀第四十片）。两者在语法上只差
+         * `)` 后面跟的是 `{` 还是一个表达式，所以这一问要摆在转换前面 ——
+         * `sizeof((int[]){1,2,3})` 于是也走这一路（12，而不是「int[] 的大小」）。 */
+        if (this.tok === LBRACE) return this.postfix(this.compoundLiteral(ty));
         /* `sizeof (类型名)`：只要类型，**不进后缀循环** —— `sizeof(int)[0]` 不是
          * 「int 数组的第 0 项」，它就是个语法错。 */
         if (soType) return sVal(ty, REF_NONE);
         return this.castTo(this.unary(), ty);
+      }
+      /* GNU 的语句表达式 `({ …; x; })`（`tccgen.c:5715`）。 */
+      if (this.tok === LBRACE) {
+        const v = this.stmtExpr();
+        this.skip(RPAR);
+        return this.postfix(v);
       }
       const v = this.gexpr();
       this.skip(RPAR);
@@ -3444,9 +3716,10 @@ export class CGen {  /**
     }
     if (skipSel) this.close();
     this.skip(RPAR);
-    if (this.tok !== LBRACE) this.todo('switch 的函数体不是花括号还没到');
 
-    const body = this.cpp.captureBraced();
+    /* 体不是花括号也行（C11 6.8.4：`switch (expr) statement`）—— `captureStmtBraced`
+     * 替它补一对花括号，下面这一整套（扫标签、再放一遍）于是一个字都不用改。 */
+    const body = this.cpp.captureStmtBraced();
     const afterTok = this.cpp.tok;
     const afterVal = this.cpp.tokc;
 
@@ -3500,7 +3773,14 @@ export class CGen {  /**
       return;
     }
     this.next();
-    if (t === TOK_CASE) this.constExpr();
+    if (t === TOK_CASE) {
+      this.constExpr();
+      // `case 1 ... 5:` 的上界也要读掉（值在扫那一遍收过了，第四十七片）
+      if (this.tok === TOK_DOTS) {
+        this.next();
+        this.constExpr();
+      }
+    }
     this.skip(COLON);
     /* 直接长在 switch 函数体上的 case = 「关掉一层 block」（上面那个形状）。
      * 长在里层的 `if`/`while`/`do` 里（Duff's device，第十五片）就不行 —— 那一层不是
@@ -3550,7 +3830,12 @@ export class CGen {  /**
       /* 层数默认就是下标（第十片那个形状：一个标签一层）。合流那一路上段界里还夹着
        * 语句标签，层数不再等于下标，于是由调用方填 `lv`（见 `openSegs`）。 */
       if (!labels[i].def) {
-        vals.push({ v: labels[i].val, lv: labels[i].lv === undefined ? i : labels[i].lv });
+        vals.push({
+          v: labels[i].val,
+          /* `case 1 ... 5:` 收成闭区间（第四十七片）；单个值就是 `hi === v`。 */
+          hi: labels[i].hi === undefined ? labels[i].val : labels[i].hi,
+          lv: labels[i].lv === undefined ? i : labels[i].lv,
+        });
       }
     }
     if (vals.length === 0) {
@@ -3558,15 +3843,18 @@ export class CGen {  /**
       return;
     }
     let min = vals[0].v;
-    let max = vals[0].v;
+    let max = vals[0].hi;
+    let covered = 0n;
     for (const c of vals) {
       if (c.v < min) min = c.v;
-      if (c.v > max) max = c.v;
+      if (c.hi > max) max = c.hi;
+      covered += c.hi - c.v + 1n;
     }
     const span = max - min + 1n;
     /* 密集的门槛：表不超过 1024 格，而且平均每格至少有 1/8 个 case。两个数都是取舍，
-     * 写在这儿而不是散在判断里 —— 改门槛只改这两个字面量。 */
-    const dense = span <= 1024n && span <= BigInt(vals.length) * 8n;
+     * 写在这儿而不是散在判断里 —— 改门槛只改这两个字面量。数的是**覆盖到的值**
+     * 而不是标签数：`case 0 ... 99:` 一条标签就把 100 格填满了。 */
+    const dense = span <= 1024n && span <= covered * 8n;
     if (dense) {
       const uty = isUnsigned(ty.t) ? ty : (mt === T_I64 ? TY_ULLONG : TY_UINT);
       let d = selRef;
@@ -3579,15 +3867,25 @@ export class CGen {  /**
       const table = [];
       for (let i = 0n; i < span; i++) {
         let lv = defLevel;
-        for (const c of vals) if (c.v === min + i) lv = c.lv;
+        for (const c of vals) if (c.v <= min + i && min + i <= c.hi) lv = c.lv;
         table.push(lv);
       }
       f.emit(OP.BRTABLE, T_VOID, idx, f.pushLevels(table), defLevel);
       return;
     }
+    const uty = isUnsigned(ty.t) ? ty : (mt === T_I64 ? TY_ULLONG : TY_UINT);
     for (const c of vals) {
-      const eq = f.emit(OP.EQ, mt, selRef, this.konst(ty, c.v), 0);
-      f.emit(OP.BRIF, T_VOID, eq, REF_NONE, c.lv);
+      if (c.v === c.hi) {
+        const eq = f.emit(OP.EQ, mt, selRef, this.konst(ty, c.v), 0);
+        f.emit(OP.BRIF, T_VOID, eq, REF_NONE, c.lv);
+        continue;
+      }
+      /* 稀疏的那一路上一个区间是**一次**无符号比较（`(unsigned)(v - lo) <= hi - lo`），
+       * 不是摊成 hi-lo+1 个相等比较 —— `case 0 ... 1000000:` 真实代码里有。 */
+      let d = selRef;
+      if (c.v !== 0n) d = f.emit(OP.SUB, mt, selRef, this.konst(ty, c.v), 0);
+      const inRange = f.emit(OP.ULE, mt, d, this.konst(uty, c.hi - c.v), 0);
+      f.emit(OP.BRIF, T_VOID, inRange, REF_NONE, c.lv);
     }
     f.emit(OP.BR, T_VOID, REF_NONE, REF_NONE, defLevel);
   }
@@ -3605,7 +3903,7 @@ export class CGen {  /**
     const out = [];
     const bits = intBitsOf(ty);
     const uns = isUnsigned(ty.t);
-    const seen = new Set();
+    const seen = [];
     let hasDef = false;
     this.cpp.pushTokens(body);
     this.next();
@@ -3614,8 +3912,7 @@ export class CGen {  /**
       if (t === TOK_SWITCH) {
         this.next();
         this.skipBalanced(LPAR, RPAR);
-        if (this.tok !== LBRACE) this.todo('switch 的函数体不是花括号还没到');
-        this.skipBalanced(LBRACE, RBRACE);
+        this.skipStmtToks();
         continue;
       }
       if (t === TOK_CASE) {
@@ -3624,10 +3921,21 @@ export class CGen {  /**
          * 不收的话 `switch ((char)x) { case 256: }` 会挑不出重复。 */
         const raw = this.constExpr();
         const v = uns ? BigInt.asUintN(bits, raw) : BigInt.asIntN(bits, raw);
+        /* `case 1 ... 5:` —— GNU 的范围（tcctest.c:1968，第四十七片）。收成一个闭区间，
+         * 单个值就是 `lo === hi` 的那一种，于是分派那一步只有一套代码。 */
+        let hi = v;
+        if (this.tok === TOK_DOTS) {
+          this.next();
+          const raw2 = this.constExpr();
+          hi = uns ? BigInt.asUintN(bits, raw2) : BigInt.asIntN(bits, raw2);
+          if (hi < v) this.err('empty range in case');
+        }
         this.skip(COLON);
-        if (seen.has(v)) this.err(`duplicate case value '${v}'`);
-        seen.add(v);
-        out.push({ def: false, val: v });
+        for (const s of seen) {
+          if (v <= s.hi && s.lo <= hi) this.err(`duplicate case value '${v}'`);
+        }
+        seen.push({ lo: v, hi });
+        out.push({ def: false, val: v, hi });
         continue;
       }
       if (t === TOK_DEFAULT) {
@@ -3657,9 +3965,69 @@ export class CGen {  /**
     }
   }
 
+  /**
+   * 跳过一条语句（只走记号）。里层 switch 的体不是花括号时要它 ——
+   * 规则与 `Cpp.captureStmtBraced` 那一份**同一套**：配平括号，深度 0 上的 `;` 或 `}`
+   * 收尾，除非后面跟着 `else`，或者这条是 `do` 开头而后面跟着 `while`。
+   */
+  skipStmtToks() {
+    if (this.tok === LBRACE) { this.skipBalanced(LBRACE, RBRACE); return; }
+    let dos = 0;
+    let depth = 0;
+    for (;;) {
+      if (this.tok === TOK_EOF) this.err('unexpected end of file');
+      if (this.tok === LPAR || this.tok === LBRACK || this.tok === LBRACE) depth++;
+      else if (this.tok === RPAR || this.tok === RBRACK || this.tok === RBRACE) depth--;
+      else if (depth === 0 && this.tok === TOK_DO) dos++;
+      const t = this.tok;
+      this.next();
+      if (depth !== 0 || (t !== SEMI && t !== RBRACE)) continue;
+      if (this.tok === TOK_ELSE) continue;
+      if (dos > 0 && this.tok === TOK_WHILE) { dos--; continue; }
+      break;
+    }
+  }
+
+  /**
+   * GNU 的**语句表达式** `({ …; x; })`（`tccgen.c:5715`）：一整个复合语句当表达式用，
+   * 值是**最后那条直接长在里面的表达式语句**的值；一条都没有就是 `void`。
+   * 进来时 `(` 已经吃掉、`{` 在手上；出去时 `}` 已经吃掉（`)` 由调用方读）。
+   *
+   * 复合语句本身照原样交给 `stmt` 那一支去解析 —— 于是里面的声明、循环、标签、
+   * 嵌套的 switch 全都免费。这一片要加的只有「把值捞出来」，而那一格在 `exprStmt` 里：
+   * 它看栈顶那一帧记的深度，只有**直接**长在这一层的表达式语句才留值。
+   *
+   * 值能这么直接留下来，是因为没有标签的复合语句**不开 MIR 的 block**（见 `stmt` 的
+   * `LBRACE` 那一支）：里面发的指令就在外面这条指令流上，所以最后那条表达式的 ref
+   * 出了花括号照样能用。里面有标签、于是真开了 block 的那一种在下面钉住边界。
+   *
+   * tcc 在**常量表达式**里见到它是 `expect("constant")`；`sizeof(({…}))` 例外，
+   * 那时不求值。我们的 `sizeof` 走的也是这条路（在一个用完就丢的函数里解析），
+   * 所以这儿不必分辨 —— 常量那一路根本到不了这儿（`ceUnary` 见到 `{` 就报错）。
+   */
+  stmtExpr() {
+    if (this.scopes.length <= 1) this.err('statement expression outside of function');
+    /* `depth + 2`：下面那次 `block()` 把深度加到 +1（复合语句本身），
+     * 它里面的每条子语句再各加一层，于是直接子语句落在 +2 上。 */
+    const frame = { v: sVal(TY_VOID, REF_NONE), depth: this.blockDepth + 2 };
+    this.seStack.push(frame);
+    const labelsBefore = this.labelCount;
+    this.block();
+    this.seStack.pop();
+    if (this.labelCount !== labelsBefore) {
+      this.todo('语句表达式里带语句标签还没到（那时复合语句会开一层 MIR block，值就出不来）');
+    }
+    return frame.v;
+  }
+
   /** 表达式语句：算完把值丢掉（`tccgen.c` 的 `expr: gexpr(); vpop();`）。 */
   exprStmt() {
-    this.gexpr();
+    const v = this.gexpr();
+    /* 语句表达式（`({ …; x; })`）里**直接**长在那一层的表达式语句要把值留下 ——
+     * 最后一条留下的那个就是整条的值（tcc 的做法是 `vpop(); gexpr();`，
+     * `tccgen.c:7511`：先丢掉上一条的，于是最后剩的自然是最后一条的）。 */
+    const se = this.seStack.length === 0 ? null : this.seStack[this.seStack.length - 1];
+    if (se !== null && se.depth === this.blockDepth) se.v = v;
     this.skip(SEMI);
   }
 
@@ -3954,9 +4322,11 @@ export class CGen {  /**
           if (isStruct(fty.t) && fty.ref.fields === null) {
             this.err(`field '${fname}' has incomplete type '${typeText(fty)}'`);
           }
-          if (isArray(fty.t) && fty.count < 0) {
-            this.todo('柔性数组成员还没到（`char buf[];`）');
-          }
+          /* 柔性数组成员（`char buf[];`，C11 6.7.2.1 第 18 段，第四十三片）不必特判：
+           * 它的 `count < 0`，而 `typeSize` 对没写长度的数组回 0 —— 于是它**占 0 个
+           * 字节、照样抬整体的对齐**，正是 tcc 量出来的那几个数
+           * （`struct { char c; double d[]; }` 的 sizeof 是 8）。
+           * `char buf[0]` 那种老写法走的是同一条路（第三十三片的长度 0 数组）。 */
         }
         mems.push({
           name: fname, ty: fty, bits, anon: false,
@@ -4732,12 +5102,22 @@ export class CGen {  /**
     const c = this.ceInfix(this.ceUnary(), 1);
     if (this.tok !== QUEST) return c;
     this.next();
+    /* 没走到的那一支同样**不求值**（C11 6.5.15 第 4 段）：`int a = 1 ? 3 : 1 / 0;`
+     * 是合法的。与 `||` / `&&` 同一个计数器（`ceInfix` 的 dead）。 */
+    const taken = typeof c === 'bigint' ? c !== 0n : c !== 0;
     /* GNU 的 `x ? : y`（第三十六片）：中间那一项省掉就是「x 非 0 就用 x」。
      * 常量这一路没有求值次数的问题 —— 值已经在手上了，直接当那一支。 */
-    const a = this.tok === COLON ? c : this.ceCond();
+    let a = c;
+    if (this.tok !== COLON) {
+      if (!taken) this.ceDead++;
+      a = this.ceCond();
+      if (!taken) this.ceDead--;
+    }
     this.skip(COLON);
+    if (taken) this.ceDead++;
     const b = this.ceCond();
-    return (typeof c === 'bigint' ? c !== 0n : c !== 0) ? a : b;
+    if (taken) this.ceDead--;
+    return taken ? a : b;
   }
 
   /**
@@ -4772,6 +5152,11 @@ export class CGen {  /**
     return isUnsigned(ty.t) ? BigInt.asUintN(bits, bv) : BigInt.asIntN(bits, bv);
   }
 
+  /** 常量表达式的算子报错。被短路掉的那一半里**不报**（见 `ceInfix` 的 dead）。 */
+  ceErr(msg) {
+    if (this.ceDead === 0) this.err(msg);
+  }
+
   ceInfix(left, p) {
     let acc = left;
     let t = this.tok;
@@ -4779,11 +5164,24 @@ export class CGen {  /**
       const p2 = precedence(t);
       if (p2 < p) break;
       this.next();
+      /* `||` / `&&` 在常量表达式里也**短路**（C11 6.5.13/6.5.14：右边那一半不求值）。
+       * 记号照旧要读掉，但那一段里的错不算 —— `int sinit24 = 2 || 1 / 0;`
+       * （tcctest.c:1813，注释原话「exception in constant but unevaluated context」）
+       * 是合法的。tcc 靠 `nocode_wanted` 压掉那条除零，我们靠这个计数器。 */
+      const truthy = typeof acc === 'bigint' ? acc !== 0n : acc !== 0;
+      const dead = (t === TOK_LOR && truthy) || (t === TOK_LAND && !truthy);
+      if (dead) this.ceDead++;
       let right = this.ceUnary();
       if (precedence(this.tok) > p2) right = this.ceInfix(right, p2 + 1);
+      if (dead) {
+        this.ceDead--;
+        acc = t === TOK_LOR ? 1n : 0n;
+        t = this.tok;
+        continue;
+      }
       acc = typeof acc === 'bigint' && typeof right === 'bigint'
-        ? ceApply(t, acc, right, (m) => this.err(m))
-        : cefApply(t, Number(acc), Number(right), (m) => this.err(m));
+        ? ceApply(t, acc, right, (m) => this.ceErr(m))
+        : cefApply(t, Number(acc), Number(right), (m) => this.ceErr(m));
       t = this.tok;
     }
     return acc;
@@ -4816,7 +5214,10 @@ export class CGen {  /**
        * 而且读到的是 data 段里紧跟着的字节 —— 复现它就得连 data 段的排布一起复现。
        * 这一格我们照 C 来（读一个字节），并把这条差别记在这儿。 */
       const bytes = this.readStrTok(this.tokc);
-      if (this.tok !== LBRACK) this.err('constant expression expected');
+      /* 孤零零的一个字面量是个**地址常量**（`uintptr_t cinit3 = (uintptr_t)"AA";`，
+       * tcctest.c:1473）：把它铺进 data 段，值就是那个地址。带下标的那一种（`"ab"[1]`）
+       * 才是整型常量，走下面那一段。 */
+      if (this.tok !== LBRACK) return BigInt(this.strData(bytes));
       this.next();
       const i = Number(this.constExpr());
       this.skip(RBRACK);
@@ -4826,7 +5227,7 @@ export class CGen {  /**
     if (t === TOK_LSTR) {
       // 宽的那一路同理，一格是一个带符号的 `wchar_t`（这个目标上就是 int）。
       const vals = this.readWStrTok(this.tokc);
-      if (this.tok !== LBRACK) this.err('constant expression expected');
+      if (this.tok !== LBRACK) return BigInt(this.wstrData(vals));
       this.next();
       const i = Number(this.constExpr());
       this.skip(RBRACK);
@@ -4860,6 +5261,31 @@ export class CGen {  /**
       if (this.isTypeStart(this.tok)) {
         const ty = this.typeName();
         this.skip(RPAR);
+        /* `(T){…}` —— 静态初始化式里的复合字面量（第八刀第四十片）。
+         *
+         * 标量的那一种**不必真的划地方**：`int cinit4 = (int){44};` 的值就是里面那一项，
+         * 那个对象的地址谁都看不见。取了地址的那一种（`&(void*){(void*)52}`）走的是
+         * 下面 `&` 那一格 —— 它借表达式一路，于是会真的在 data 段里划一块。 */
+        if (this.tok === LBRACE && !isArray(ty.t) && !isStruct(ty.t)) {
+          this.next();
+          const v = this.ceCastTo(ty, this.ceCond());
+          if (this.tok === COMMA) this.next();
+          this.skip(RBRACE);
+          return v;
+        }
+        /* 聚合的那一种（`int *cinit2 = (int []){3,2,1};`）：真的划一块、按常量铺好，
+         * 值是它的地址 —— 数组退化成指针正是这个数。与 `&` 那一格同一手法：
+         * 借表达式一路，拿到的左值地址本身就是常量。 */
+        if (this.tok === LBRACE) {
+          const scratch = new MirFunc('$cl', [], T_VOID);
+          const outer = this.f;
+          this.f = scratch;
+          const v = this.compoundLiteral(ty);
+          this.f = outer;
+          const k = this.mod.consts.get(v.mem.addr);
+          if (k.kind !== 'int') this.err('constant expression expected');
+          return BigInt(k.text) + BigInt(v.mem.off);
+        }
         return this.ceCastTo(ty, this.ceUnary());
       }
       /* 分组：回的是原样值 —— 不在这儿提前截断，否则 `(1.5 + 1) * 2` 会算成 4。
@@ -5045,8 +5471,12 @@ export class CGen {  /**
           /* 局部量与全局量走**同一段**代码：不同的只有「往哪儿落地」（一个 dest 对象），
            * 遍历嵌套结构那套规则在 `initializer` 里只有一份。 */
           const hasInit = this.tok === ASSIGN;
+          /* `extern int x = 1;`（tcctest.c:1827，第四十六片）在**文件作用域**上是一条
+           * 定义 —— `extern` 那个存储类被初始化式压过去了（C11 6.9.2 的脚注；gcc 只警告
+           * 一句，tcc 一声不响地收）。块里那一种 tcc 连那个 `=` 都不认，报的是
+           * `';' expected` —— 所以要在吃掉它之前判。 */
+          if (hasInit && isExtern && !global) this.skip(SEMI);
           if (hasInit) this.next();
-          if (isExtern && hasInit) this.err(`'${name}' has both 'extern' and initializer`);
 
           /* 不定长数组（`int a[] = {…}`）的类型要等初始化式才定得下来 —— 于是这儿
            * 「定类型」与「划地方」的顺序是反的：先看初始化式，再声明。 */
@@ -5060,9 +5490,14 @@ export class CGen {  /**
               /* `extern const char *const sys_errlist[];`（第八刀第十六片）——
                * `extern` 的数组可以是**不完整类型**（C11 6.7.6.2 第 4 段）：大小在别的
                * 翻译单元里。这儿按 0 个元素登记：不占 data 段，`sizeof` 会得到 0
-               * （真的编译器那儿是一条错误 —— 那一格还没到）。 */
-              if (!isExtern) this.err(`array size missing in '${name}'`);
-              vty = mkArray(vty.ref, 0);
+               * （真的编译器那儿是一条错误 —— 那一格还没到）。
+               *
+               * 文件作用域上不带 `extern` 的那一种是**试探性定义**（C11 6.9.2，
+               * 第三十九片）：`static int t[];` 合法，长度由后面同名的那一条补上。
+               * 所以那时**留着** count < 0 交给 `declareGlobal` —— 它登记一条
+               * 「还没划地方」的登记。局部量没有这一说，照旧报错。 */
+              if (!global && !isExtern) this.err(`array size missing in '${name}'`);
+              if (!global || isExtern) vty = mkArray(vty.ref, 0);
             } else if (this.tok === TOK_STR) {
               /* 相邻的字面量要拼起来（`char s[] = "a" "b"`），所以只能真的读一遍；
                * 读完记号已经吃掉，字节留在手上。 */
@@ -5091,7 +5526,7 @@ export class CGen {  /**
           /* 变量自己写的 `__attribute__((aligned(N)))`（tcctest.c:1007 的
            * `struct aligntest7 altest7[2] __attribute__((aligned(16)));`）：
            * 它抬的是**这一个符号**的对齐，不是类型的 —— 所以只喂给分配那一步。 */
-          const e = global ? this.declareGlobal(name, vty, isExtern, dad.aligned)
+          const e = global ? this.declareGlobal(name, vty, isExtern && !hasInit, dad.aligned)
             : this.declareLocal(name, vty, dad.aligned);
           if (hasInit) {
             let dest;
