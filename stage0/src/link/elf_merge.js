@@ -191,7 +191,6 @@ export function linkObjects(objs, opts) {
   if (objs.length === 0) throw new OmniError('elf: 一个目标文件都没有，没什么可并的');
   const o = opts === undefined ? {} : opts;
   const rdata = o.rdata === undefined ? '.data.ro' : o.rdata;
-  const unwind = o.unwind === true;
   const debug = o.debug === true;
   const dwarf = o.dwarf ?? 0;
   const declare = o.declare ?? [];
@@ -199,6 +198,10 @@ export function linkObjects(objs, opts) {
    * 输入都读进来，架构就知道了。 */
   const parsed = objs.map((b) => readObject(b));
   const machine = parsed[0].machine;
+  /* `.eh_frame`：arm 上 tcc 根本不造这一节（`tcc.h:1839` 那个 `#if` 把 `TCC_EH_FRAME`
+   * 关掉了，`defined TCC_TARGET_ARM` 在排除列表里）—— 这是**目标的事实**，不是调用方
+   * 的选择，所以在这儿一并夹掉。 */
+  const unwind = o.unwind === true && machine !== EM_ARM;
   /* 32 位的目标（i386 / arm）：符号短一半，重定位没有加数那一格，而 `new_section`
    * 默认的对齐是 `PTR_SIZE` —— 起手那几条节因此是 4 而不是 8。 */
   const c32 = parsed[0].class32 === true;

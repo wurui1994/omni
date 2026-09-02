@@ -27,6 +27,10 @@ const CROSS = join(root, '.omni-cache', 'tcc-cross');
 const TARGETS = [
   { name: 'x86_64-linux', tcc: 'x86_64-tcc' },
   { name: 'arm64-linux', tcc: 'arm64-tcc' },
+  /* 32 位那两个（第九刀第七十五片）：`.interp` 是 `/lib/ld-linux.so.2` 与
+   * `/lib/ld-linux.so.3`，GOT 一格四字节，`.rel.got` 一条八字节。 */
+  { name: 'i386-linux', tcc: 'i386-tcc' },
+  { name: 'arm-linux', tcc: 'arm-tcc' },
 ];
 
 const filters = process.argv.slice(2).filter((x) => !x.startsWith('-'));

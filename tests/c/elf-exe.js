@@ -28,6 +28,10 @@ const CROSS = join(root, '.omni-cache', 'tcc-cross');
 const TARGETS = [
   { name: 'x86_64-linux', tcc: 'x86_64-tcc' },
   { name: 'arm64-linux', tcc: 'arm64-tcc' },
+  /* 32 位那两个（第九刀第七十五片）：ELF32 的头 52、程序头 32（`p_flags` 挪到末尾）、
+   * 节头 40，装载地址 i386 是 0x08048000、arm 是 0x00010000。 */
+  { name: 'i386-linux', tcc: 'i386-tcc' },
+  { name: 'arm-linux', tcc: 'arm-tcc' },
 ];
 
 const filters = process.argv.slice(2).filter((x) => !x.startsWith('-'));

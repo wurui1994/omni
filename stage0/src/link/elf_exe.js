@@ -41,17 +41,50 @@ import { relocateOne } from './pe_reloc.js';
 const EHDR_SIZE = 64;
 const PHDR_SIZE = 56;
 const SHDR_SIZE = 64;
+/* ELF32 的三张表都短一截，而且程序头里 `p_flags` 挪到了最后一格前面。 */
+const EHDR32_SIZE = 52;
+const PHDR32_SIZE = 32;
+const SHDR32_SIZE = 40;
 
 const ET_EXEC = 2;
 const ET_DYN = 3;
 
 const EM_X86_64 = 62;
+const EM_386 = 3;
+const EM_ARM = 40;
+/** `SHT_LOPROC + 3`：arm 的 `.ARM.attributes`（`elf.h:2339`）。 */
+const SHT_ARM_ATTRIBUTES = 0x70000003;
+/**
+ * `create_arm_attribute_section` 里那块写死的 45 字节（`tccelf.c:2876`）。
+ *
+ * 只有可执行文件与共享库有这一节 —— `elf_output_obj` 那一路根本不叫这个函数，所以
+ * `.o` 里看不见它，`tcc_load_object_file` 的 `sh_type` 筛子也不收（于是输入里的
+ * 同名节一律扔掉，输出里这一份永远是这块常量）。
+ *
+ * `CONFIG_TCC_CPUVER` 默认是 6，浮点默认硬（`float_abi == ARM_HARD_FLOAT`），
+ * 所以后头那两处改写不走。
+ */
+const ARM_ATTR = [
+  0x41, 0x2c, 0x00, 0x00, 0x00,                    // 'A'，长度 0x2c
+  0x61, 0x65, 0x61, 0x62, 0x69, 0x00,              // "aeabi"
+  0x01, 0x22, 0x00, 0x00, 0x00,                    // File Attributes，长度 0x22
+  0x05, 0x36, 0x00,                                // CPU_name "6"
+  0x06, 0x06, 0x08, 0x01, 0x09, 0x01, 0x0a, 0x02,  // CPU_arch v6 / ARM_ISA / THUMB / FP_arch
+  0x12, 0x04, 0x14, 0x01, 0x15, 0x01, 0x17, 0x03,
+  0x18, 0x01, 0x19, 0x01, 0x1a, 0x02, 0x1c, 0x01,
+  0x22, 0x01,                                      // CPU_unaligned_access v6
+];
 const EM_AARCH64 = 183;
 
 const SHT_PROGBITS = 1;
 const SHT_SYMTAB = 2;
 const SHT_STRTAB = 3;
 const SHT_RELA = 4;
+const SHT_REL = 9;
+const RELA_SIZE = 24;
+const REL32_SIZE = 8;
+const SYM_SIZE = 24;
+const SYM32_SIZE = 16;
 const SHT_HASH = 5;
 const SHT_DYNAMIC = 6;
 const SHT_NOTE = 7;
@@ -97,6 +130,9 @@ const DT_STRSZ = 10;
 const DT_SYMENT = 11;
 const DT_SONAME = 14;
 const DT_RPATH = 15;
+const DT_REL = 17;
+const DT_RELSZ = 18;
+const DT_RELENT = 19;
 const DT_TEXTREL = 22;
 const DT_INIT_ARRAY = 25;
 const DT_FINI_ARRAY = 26;
@@ -107,6 +143,7 @@ const DT_FLAGS = 30;
 const DT_PREINIT_ARRAY = 32;
 const DT_PREINIT_ARRAYSZ = 33;
 const DT_RELACOUNT = 0x6ffffff9;
+const DT_RELCOUNT = 0x6ffffffa;
 const DT_GNU_HASH = 0x6ffffef5;
 const DT_FLAGS_1 = 0x6ffffffb;
 const DF_BIND_NOW = 8;
@@ -150,22 +187,43 @@ const R_X86_64_JUMP_SLOT = 7;
 const R_AARCH64_GLOB_DAT = 1025;
 const R_AARCH64_JUMP_SLOT = 1026;
 
+/** `R_RELATIVE` / `R_GLOB_DAT` / `R_JMP_SLOT` / `R_COPY`（`*-link.c` 开头那四个宏）。 */
+const RELOC_KIND = new Map([
+  [EM_X86_64, {
+    relative: R_X86_64_RELATIVE, globDat: R_X86_64_GLOB_DAT, jmpSlot: R_X86_64_JUMP_SLOT, copy: 5,
+  }],
+  [EM_AARCH64, {
+    relative: R_AARCH64_RELATIVE,
+    globDat: R_AARCH64_GLOB_DAT,
+    jmpSlot: R_AARCH64_JUMP_SLOT,
+    copy: 1024,
+  }],
+  [EM_386, { relative: 8, globDat: 6, jmpSlot: 7, copy: 5 }],
+  [EM_ARM, { relative: 23, globDat: 21, jmpSlot: 22, copy: 20 }],
+]);
+
 /* `prepare_dynamic_rel` 认的那几号：绝对地址（要装载时改）与 PC 相对（能顶掉的才要）。 */
 const ABS_RELOC = new Map([
   [EM_X86_64, new Set([1, 10, 11])],          // R_X86_64_64 / _32 / _32S
   [EM_AARCH64, new Set([257, 258])],          // R_AARCH64_ABS64 / ABS32
+  [EM_386, new Set([1])],                     // R_386_32
+  [EM_ARM, new Set([2])],                     // R_ARM_ABS32
 ]);
 /** 这几号里「64 位那一号」要写回加数，32 位那号只写 RELATIVE。 */
 const ABS64_RELOC = new Map([[EM_X86_64, 1], [EM_AARCH64, 257]]);
 const PCREL_RELOC = new Map([
   [EM_X86_64, new Set([2])],                  // R_X86_64_PC32
   [EM_AARCH64, new Set([261])],               // R_AARCH64_PREL32
+  [EM_386, new Set([2])],                     // R_386_PC32
+  [EM_ARM, new Set([3])],                     // R_ARM_REL32
 ]);
 
 /** `code_reloc`：1 是「跳转/调用」，0 是数据（`*-link.c` 开头那张表）。 */
 const CODE_RELOC = new Map([
   [EM_X86_64, new Set([2, 4, 7, 24, 31])],
   [EM_AARCH64, new Set([282, 283, 1026, 280, 279])],
+  [EM_386, new Set([2, 4, 7, 21])],           // PC32 / PLT32 / JMP_SLOT / PC16
+  [EM_ARM, new Set([1, 28, 29, 27, 10, 30, 42, 40, 22])],
 ]);
 
 /** `gotplt_entry_type`：只列 NO 与 ALWAYS/BUILD_GOT_ONLY，剩下的算 AUTO。 */
@@ -182,6 +240,18 @@ const GOTPLT = new Map([
     always: new Set([311, 312]),
     buildOnly: new Set(),
     auto: new Set([257, 258, 282, 283]),
+  }],
+  [EM_386, {
+    no: new Set([8, 20, 6, 7, 5]),            // RELATIVE / 16 / GLOB_DAT / JMP_SLOT / COPY
+    always: new Set([3, 43, 4, 18, 19, 32, 17]),
+    buildOnly: new Set([10, 9]),              // GOTPC / GOTOFF
+    auto: new Set([1, 21, 2]),                // 32 / PC16 / PC32
+  }],
+  [EM_ARM, {
+    no: new Set([0, 20, 21, 22, 108]),        // NONE / COPY / GLOB_DAT / JUMP_SLOT / TLS_LE32
+    always: new Set([26, 96]),                // GOT32 / GOT_PREL
+    buildOnly: new Set([25, 24]),             // GOTPC / GOTOFF
+    auto: new Set([1, 28, 29, 27, 10, 30, 44, 43, 48, 47, 42, 2, 3, 40, 38, 46, 45]),
   }],
 ]);
 
@@ -202,13 +272,22 @@ function align(n, to) {
   return to <= 1 || n % to === 0 ? n : n + (to - (n % to));
 }
 
-/** `ELF_START_ADDR` / `ELF_PAGE_SIZE` / `CONFIG_TCC_ELFINTERP`。 */
+/** `ELF_START_ADDR` / `ELF_PAGE_SIZE` / `CONFIG_TCC_ELFINTERP`，外加位宽。 */
 function targetConf(machine) {
   if (machine === EM_X86_64) {
-    return { start: 0x400000, page: 0x1000, interp: '/lib64/ld-linux-x86-64.so.2' };
+    return { start: 0x400000, page: 0x1000, interp: '/lib64/ld-linux-x86-64.so.2', c32: false };
   }
   if (machine === EM_AARCH64) {
-    return { start: 0x400000, page: 0x10000, interp: '/lib/ld-linux-aarch64.so.1' };
+    return { start: 0x400000, page: 0x10000, interp: '/lib/ld-linux-aarch64.so.1', c32: false };
+  }
+  if (machine === EM_386) {
+    return { start: 0x08048000, page: 0x1000, interp: '/lib/ld-linux.so.2', c32: true };
+  }
+  if (machine === EM_ARM) {
+    /* `TCC_ARM_EABI` 且硬浮点（默认就是）时是 `/lib/ld-linux-armhf.so.3`
+     * （`tccelf.c:117` 那一段的 `#if defined(TCC_ARM_EABI) && !defined(TCC_ARM_VFP)`
+     * 的另一半）—— 交叉编译出来的这一份就是这个名字。 */
+    return { start: 0x00010000, page: 0x10000, interp: '/lib/ld-linux-armhf.so.3', c32: true };
   }
   throw new OmniError(`elf: 还不会给 ${machine} 号架构写可执行文件`);
 }
@@ -269,7 +348,7 @@ function sectionClass(s, i, named, bss, hasAllocReloc, isLast, isGot, isInterp, 
     || s.type === SHT_GNU_versym) k = 0x13;
   /* `.rela.plt` 单独一档 —— 于是它排在别的重定位表**后头**，`update_reloc_sections`
    * 里 DT_RELA 那一段（把余下几张表接成连着的一块）就不会被它插一脚。 */
-  else if (s.type === SHT_RELA) k = isPltReloc ? 0x21 : 0x20;
+  else if (s.type === SHT_RELA || s.type === SHT_REL) k = isPltReloc ? 0x21 : 0x20;
   else if ((s.flags & SHF_EXECINSTR) !== 0) k = 0x60;
   else if ((s.flags & SHF_TLS) !== 0) k = 0x40 + (s.type === SHT_NOBITS ? 1 : 0);
   else if (s.type === SHT_PREINIT_ARRAY) k = 0x42;
@@ -305,17 +384,19 @@ function sectionClass(s, i, named, bss, hasAllocReloc, isLast, isGot, isInterp, 
  */
 export function parseDll(bytes, filename) {
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const shoff = Number(dv.getBigUint64(0x28, true));
-  const shent = dv.getUint16(0x3a, true);
-  const shnum = dv.getUint16(0x3c, true);
+  /* `EI_CLASS`：1 是 ELF32、2 是 ELF64。头、节头、符号、`.dynamic` 一条都跟着变宽窄。 */
+  const c32 = bytes[4] === 1;
+  const shoff = c32 ? dv.getUint32(0x20, true) : Number(dv.getBigUint64(0x28, true));
+  const shent = dv.getUint16(c32 ? 0x2e : 0x3a, true);
+  const shnum = dv.getUint16(c32 ? 0x30 : 0x3c, true);
   const sh = [];
   for (let i = 0; i < shnum; i++) {
     const o = shoff + i * shent;
     sh.push({
       type: dv.getUint32(o + 4, true),
-      off: Number(dv.getBigUint64(o + 24, true)),
-      size: Number(dv.getBigUint64(o + 32, true)),
-      link: dv.getUint32(o + 40, true),
+      off: c32 ? dv.getUint32(o + 16, true) : Number(dv.getBigUint64(o + 24, true)),
+      size: c32 ? dv.getUint32(o + 20, true) : Number(dv.getBigUint64(o + 32, true)),
+      link: dv.getUint32(c32 ? o + 24 : o + 40, true),
     });
   }
   const cstr = (at) => {
@@ -335,23 +416,25 @@ export function parseDll(bytes, filename) {
   const strOff = sh[dsym.link].off;
   const parts = filename.split('/');
   let soname = parts[parts.length - 1];
-  for (let o = dyn.off; o + 16 <= dyn.off + dyn.size; o += 16) {
+  const dstep = c32 ? 8 : 16;
+  const dword = (o) => (c32 ? dv.getUint32(o, true) : Number(dv.getBigUint64(o, true)));
+  for (let o = dyn.off; o + dstep <= dyn.off + dyn.size; o += dstep) {
     /* DT_SONAME = 14。值是 `.dynstr` 里的偏移。 */
-    if (Number(dv.getBigUint64(o, true)) === 14) {
-      soname = cstr(strOff + Number(dv.getBigUint64(o + 8, true)));
-    }
+    if (dword(o) === 14) soname = cstr(strOff + dword(o + dstep / 2));
   }
   const syms = [];
-  for (let o = dsym.off + 24; o + 24 <= dsym.off + dsym.size; o += 24) {
-    const info = bytes[o + 4];
+  const ssz = c32 ? SYM32_SIZE : SYM_SIZE;
+  for (let o = dsym.off + ssz; o + ssz <= dsym.off + dsym.size; o += ssz) {
+    /* `Elf32_Sym` 的次序不一样：name、value、size 在前，info/other/shndx 在后。 */
+    const info = bytes[o + (c32 ? 12 : 4)];
     if (Math.floor(info / 16) === STB_LOCAL) continue;
     syms.push({
       name: cstr(strOff + dv.getUint32(o, true)),
       info,
-      other: bytes[o + 5],
-      shndx: dv.getUint16(o + 6, true),
-      value: Number(dv.getBigUint64(o + 8, true)),
-      size: Number(dv.getBigUint64(o + 16, true)),
+      other: bytes[o + (c32 ? 13 : 5)],
+      shndx: dv.getUint16(o + (c32 ? 14 : 6), true),
+      value: c32 ? dv.getUint32(o + 4, true) : Number(dv.getBigUint64(o + 8, true)),
+      size: c32 ? dv.getUint32(o + 8, true) : Number(dv.getBigUint64(o + 16, true)),
     });
   }
   return { soname, syms };
@@ -370,6 +453,16 @@ export function elfExeImage(inp) {
   } = st;
   const { TEXT, DATA, BSS } = st.idx;
   const conf = targetConf(machine);
+  /* 位宽带来的那几格：指针 4/8、重定位一条 8/24（`Elf32_Rel` 没有加数）、重定位表的
+   * 类型 `SHT_REL`/`SHT_RELA`（名字也跟着从 `.rel.` 变成 `.rela.`）、符号 16/24。 */
+  const c32 = conf.c32;
+  const ptrSize = c32 ? 4 : 8;
+  const relSize = c32 ? REL32_SIZE : RELA_SIZE;
+  const RELT = c32 ? SHT_REL : SHT_RELA;
+  const relPfx = c32 ? '.rel' : '.rela';
+  const symSize = c32 ? SYM32_SIZE : SYM_SIZE;
+  /** `PCRELATIVE_DLLPLT`：i386 上是 0（`CONFIG_TCC_PIC` 没配），另三个是 1。 */
+  const pcrelDllplt = machine !== EM_386;
   /** `-shared`：输出是 ET_DYN，装载地址从 0 起，没有 `.interp`。 */
   const shared = inp.shared === true;
   /* `-pie`：tcc 的 `output_type` 是 `TCC_OUTPUT_EXE | TCC_OUTPUT_DYN` —— 两个位都在，
@@ -385,6 +478,14 @@ export function elfExeImage(inp) {
   const soname = inp.soname;
   const rpath = inp.rpath;
   const newDtags = inp.newDtags === true;
+
+  /* ---- `create_arm_attribute_section`：`elf_output_file` 一进门就造这一条。
+   * 造得比 `.interp`/`.got` 都早，所以节号排在并合出来那几条后头、动态那几条前头。 */
+  if (machine === EM_ARM) {
+    const ai = st.newSec('.ARM.attributes', SHT_ARM_ATTRIBUTES, 0, 1, 0);
+    secs[ai].data = [...ARM_ATTR];
+    secs[ai].size = ARM_ATTR.length;
+  }
 
   // ---- resolve_common_syms：COMMON 的符号在 .bss 里安家
   for (const s of syms) {
@@ -566,13 +667,13 @@ export function elfExeImage(inp) {
       secs[INTERP].data.push(0);
       secs[INTERP].size = secs[INTERP].data.length;
     }
-    DYNSYM = st.newSec('.dynsym', SHT_DYNSYM, SHF_ALLOC, 8, 24);
+    DYNSYM = st.newSec('.dynsym', SHT_DYNSYM, SHF_ALLOC, ptrSize, symSize);
     DYNSTR = st.newSec('.dynstr', SHT_STRTAB, SHF_ALLOC, 1, 0);
-    HASH = st.newSec('.hash', SHT_HASH, SHF_ALLOC, 8, 4);
+    HASH = st.newSec('.hash', SHT_HASH, SHF_ALLOC, ptrSize, 4);
     secs[DYNSYM].link = DYNSTR;
     secs[DYNSYM].info = 1;                 // 局部符号只有 0 号那一条
     secs[HASH].link = DYNSYM;
-    DYNA = st.newSec('.dynamic', SHT_DYNAMIC, SHF_ALLOC | SHF_WRITE, 8, 16);
+    DYNA = st.newSec('.dynamic', SHT_DYNAMIC, SHF_ALLOC | SHF_WRITE, ptrSize, ptrSize * 2);
     secs[DYNA].link = DYNSTR;
   }
 
@@ -585,7 +686,7 @@ export function elfExeImage(inp) {
   const gotOff = new Map();
   /** symtab 的符号号 -> `.dynsym` 里的号（`attr->dyn_index`）。 */
   const dynIndex = new Map();
-  const relative = machine === EM_X86_64 ? R_X86_64_RELATIVE : R_AARCH64_RELATIVE;
+  const relative = RELOC_KIND.get(machine).relative;
   let GOT = -1;
   let RELAGOT = -1;
   /** `_GLOBAL_OFFSET_TABLE_` 在 symtab 里的号（`build_got` 的返回值 `got_sym`）。 */
@@ -596,13 +697,13 @@ export function elfExeImage(inp) {
       name: '.got',
       type: SHT_PROGBITS,
       flags: SHF_ALLOC | SHF_WRITE,
-      al: 8,
+      al: ptrSize,
       ent: 4,
       link: 0,
       info: 0,
-      /* 头三格留给 `_DYNAMIC` 与两条哑项。 */
-      data: new Array(24).fill(0),
-      size: 24,
+      /* 头三格留给 `_DYNAMIC` 与两条哑项（`3 * PTR_SIZE`）。 */
+      data: new Array(ptrSize * 3).fill(0),
+      size: ptrSize * 3,
       relaFor: 0,
     });
     GOTSYM = st.setSym({
@@ -620,7 +721,7 @@ export function elfExeImage(inp) {
    * 装载时由动态链接器把库里那份的内容拷进来。可执行文件里的引用因此全是本地地址，
    * tcc 不生成位置无关码，这一手是必需的。 */
   let RELABSS = -1;
-  const copyReloc = machine === EM_X86_64 ? 5 : 1024;
+  const copyReloc = RELOC_KIND.get(machine).copy;
   if (dynamic && !shared && dllNames.length !== 0) {
     const bss = secs[BSS];
     for (let i = 1; i < syms.length; i++) {
@@ -657,7 +758,7 @@ export function elfExeImage(inp) {
             }
           }
           if (RELABSS < 0) {
-            RELABSS = st.newSec('.rela.bss', SHT_RELA, SHF_ALLOC, 8, 24);
+            RELABSS = st.newSec(`${relPfx}.bss`, RELT, SHF_ALLOC, ptrSize, relSize);
             secs[RELABSS].link = DYNSYM;
             secs[RELABSS].info = BSS;
             secs[RELABSS].relaFor = BSS;
@@ -667,7 +768,7 @@ export function elfExeImage(inp) {
           list.push({
             at: off, sym: di, type: copyReloc, add: 0n,
           });
-          secs[RELABSS].size = list.length * 24;
+          secs[RELABSS].size = list.length * relSize;
         }
       } else if (s.shndx === SHN_UNDEF && Math.floor(s.info / 16) !== STB_WEAK) {
         throw new OmniError(`elf: 找不到 '${s.name}'`);
@@ -682,13 +783,13 @@ export function elfExeImage(inp) {
   const putGotReloc = (at, type, sym, local) => {    if (RELAGOT < 0) {
       RELAGOT = secs.length;
       secs.push({
-        name: '.rela.got',
-        type: SHT_RELA,
+        name: `${relPfx}.got`,
+        type: RELT,
         /* `put_elf_reloca`：重定位表的 flags 跟着**符号表**走 —— 动态那一路的
          * `.rela.got` 于是是 `SHF_ALLOC` 的，要装进内存里给动态链接器看。 */
         flags: DYNSYM >= 0 ? SHF_ALLOC : 0,
-        al: 8,
-        ent: 24,
+        al: ptrSize,
+        ent: relSize,
         link: DYNSYM >= 0 ? DYNSYM : st.idx.SYMTAB,
         info: GOT,
         data: [],
@@ -701,10 +802,10 @@ export function elfExeImage(inp) {
     list.push({
       at, sym, type, add: 0n, local: local === true,
     });
-    secs[RELAGOT].size = list.length * 24;
+    secs[RELAGOT].size = list.length * relSize;
   };
-  const globDat = machine === EM_X86_64 ? R_X86_64_GLOB_DAT : R_AARCH64_GLOB_DAT;
-  const jmpSlot = machine === EM_X86_64 ? R_X86_64_JUMP_SLOT : R_AARCH64_JUMP_SLOT;
+  const globDat = RELOC_KIND.get(machine).globDat;
+  const jmpSlot = RELOC_KIND.get(machine).jmpSlot;
   /** symtab 的符号号 -> `.plt` 里那一格的偏移（`attr->plt_offset`）。 */
   const pltOff = new Map();
   /** symtab 的符号号 -> `name@plt` 那条符号的号（`attr->plt_sym`）。 */
@@ -712,12 +813,12 @@ export function elfExeImage(inp) {
   let PLT = -1;
   let RELAPLT = -1;
   const buildPlt = () => {
-    PLT = st.newSec('.plt', SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, 8, 4);
+    PLT = st.newSec('.plt', SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, ptrSize, 4);
   };
   /** 动态那一路跳板的重定位表（`put_elf_reloc(dynsym, s1->plt, ...)`）。 */
   const putPltReloc = (at, dynIdx) => {
     if (RELAPLT < 0) {
-      RELAPLT = st.newSec('.rela.plt', SHT_RELA, SHF_ALLOC, 8, 24);
+      RELAPLT = st.newSec(`${relPfx}.plt`, RELT, SHF_ALLOC, ptrSize, relSize);
       secs[RELAPLT].link = DYNSYM;
       /* `build_got_entries` 末尾那一句：`.rela.plt` 的 `sh_info` 改指 `.got`
        * —— 表里的 `r_offset` 落的是 GOT 那几格。 */
@@ -727,7 +828,7 @@ export function elfExeImage(inp) {
     }
     const list = relas.get(RELAPLT);
     list.push({ at, sym: dynIdx, type: jmpSlot, add: 0n });
-    secs[RELAPLT].size = list.length * 24;
+    secs[RELAPLT].size = list.length * relSize;
     return list.length;
   };
   /**
@@ -757,6 +858,34 @@ export function elfExeImage(inp) {
       secs[PLT].size = d.length;
       return at;
     }
+    /* i386 与 x86_64 同一个形状，只是指针窄了一半；`modrm` 非 DYN 输出是 0x25。
+     * 要紧的一处不同：push 的那个数在 i386 上是**字节**（`relofs - sizeof(Elf32_Rel)`），
+     * x86_64 上是条数。静态那一路 `relofs` 是 0，于是 -8。 */
+    if (machine === EM_386) {
+      if (d.length === 0) {
+        d.push(0xff, 0x35); w32(4);
+        d.push(0xff, 0x25); w32(8);
+        w32(0);
+      }
+      const at = d.length;
+      d.push(0xff, 0x25); w32(gotOffset);
+      d.push(0x68); w32((nrel - 1) * REL32_SIZE);
+      d.push(0xe9); w32(-(at + 16));
+      secs[PLT].size = d.length;
+      return at;
+    }
+    /* arm：PLT0 二十字节（末四字节留给 `relocate_plt`），每格 16 字节里只在 +4
+     * 写 got 的偏移。`plt_thumb_stub` 那四字节这一路不会有。 */
+    if (machine === EM_ARM) {
+      if (d.length === 0) {
+        w32(0xe52de004); w32(0xe59fe004); w32(0xe08fe00e); w32(0xe5bef008);
+        w32(0);
+      }
+      const at = d.length;
+      w32(0); w32(gotOffset); w32(0); w32(0);
+      secs[PLT].size = d.length;
+      return at;
+    }
     /* arm64：头一格 32 字节先留空，每格 16 字节里只写 got 的偏移（64 位小端），
      * 剩下 8 字节留给 `relocate_plt` 的 adrp/ldr/add/br。 */
     if (d.length === 0) for (let k = 0; k < 32; k++) d.push(0);
@@ -769,7 +898,7 @@ export function elfExeImage(inp) {
   };
   for (let pass = 0; pass < 2; pass++) {
     for (let i = 1; i < secs.length; i++) {
-      if (secs[i].type !== SHT_RELA) continue;
+      if (secs[i].type !== RELT) continue;
       /* 只扫「符号号指着 symtab」的那些表 —— 动态那一路的 `.rela.got` 指着
        * `.dynsym`，那里面的 `R_RELATIVE`/`R_GLOB_DAT` 不该再过一遍这道筛子
        * （`build_got_entries` 里那句 `if (s->link != symtab_section) continue`）。 */
@@ -780,16 +909,43 @@ export function elfExeImage(inp) {
         const g = gotpltEntryType(machine, r.type);
         if (g === NO_GOTPLT) continue;
         const sym = syms[r.sym];
+        /** 那个 `goto jmp_slot` 跳过了下面 x86 的降级与 `code_reloc` 那道岔。 */
+        let forceJmp = false;
         if (g === AUTO_GOTPLT) {
-          /* 未定义的往下走（要一格 GOT），有定义的一律不要。 */
-          if (sym.shndx === SHN_ABS) {
+          /* 未定义的往下走（要一格 GOT），有定义的一律不要 —— 两处例外：
+           *
+           *   - `!PCRELATIVE_DLLPLT && (output_type & TCC_OUTPUT_DYN)`：i386 上
+           *     `PCRELATIVE_DLLPLT` 是 0（没配 `CONFIG_TCC_PIC`），于是造共享库或
+           *     位置无关的可执行文件时，未定义的这一类**一格都不给** —— 跳板得靠
+           *     %ebx 取址，这一路还没有。arm 那边这个宏是 1，照旧要。
+           *   - `SHN_ABS`（`tcc_add_symbol` 放的那种）只有 64 位才过 GOT，
+           *     `#ifndef TCC_TARGET_ARM` 把 arm 排除在这条之外。 */
+          let toJmpSlot = false;
+          if (sym.shndx === SHN_UNDEF) {
+            if (!pcrelDllplt && dyn) continue;
+            /* 那句 `goto jmp_slot`：库里那个名字是函数（或者 `.dynsym` 里记成
+             * NOTYPE、而 symtab 里是 FUNC），就一律当「被调用」办 —— 于是
+             * **第二趟直接跳过**（`jmp_slot:` 头一句是 `if (pass != 0) continue`），
+             * 取地址那一处不再单独要一格 GOT，留给 `.rel.text` 里的装载期重定位。 */
+            if (DYNSYM >= 0) {
+              const di = dynIndex.get(r.sym);
+              if (di !== undefined && di !== 0) {
+                const et = dsyms[di].info % 16;
+                if (et === 2 || (et === 0 && sym.info % 16 === 2)) toJmpSlot = true;
+              }
+            }
+          } else if (sym.shndx === SHN_ABS) {
             if (sym.value === 0) continue;
-          } else if (sym.shndx !== SHN_UNDEF) continue;
+            if (ptrSize !== 8 && machine !== EM_ARM) continue;
+          } else continue;
+          if (toJmpSlot && pass !== 0) continue;
+          if (toJmpSlot) forceJmp = true;
         }
         /* x86_64 上「有定义的 PLT32/PC32」在可执行文件里降成 PC32 —— 不走 PLT。
          * 造共享库时不能这么降：别人可以用自己的定义把库里的这个符号顶掉
          * （`打断` 语义），所以只有局部符号或藏起来的符号才降。 */
-        if (machine === EM_X86_64 && (r.type === R_X86_64_PLT32 || r.type === R_X86_64_PC32)
+        if (machine === EM_X86_64 && !forceJmp
+          && (r.type === R_X86_64_PLT32 || r.type === R_X86_64_PC32)
           && sym.shndx !== SHN_UNDEF
           && (!shared || Math.floor(sym.info / 16) === STB_LOCAL || (sym.other & 3) !== 0)) {
           if (pass !== 0) continue;
@@ -797,7 +953,7 @@ export function elfExeImage(inp) {
           continue;
         }
         let rt;
-        if (codeReloc(machine, r.type) !== 0) {
+        if (forceJmp || codeReloc(machine, r.type) !== 0) {
           if (pass !== 0) continue;
           rt = jmpSlot;
         } else {
@@ -817,8 +973,8 @@ export function elfExeImage(inp) {
           if (PLT < 0) buildPlt();
         } else if (gotOff.has(r.sym)) continue;
         const off = secs[GOT].size;
-        secs[GOT].size = off + 8;
-        for (let k = 0; k < 8; k++) secs[GOT].data.push(0);
+        secs[GOT].size = off + ptrSize;
+        for (let k = 0; k < ptrSize; k++) secs[GOT].data.push(0);
         if (!needPlt) gotOff.set(r.sym, off);
         let nrel = 0;
         if (DYNSYM < 0) {
@@ -895,7 +1051,7 @@ export function elfExeImage(inp) {
   if (dyn) {
     for (let i = 1; i < secs.length; i++) {
       const sr = secs[i];
-      if (sr.type !== SHT_RELA || (sr.flags & SHF_ALLOC) !== 0) continue;
+      if (sr.type !== RELT || (sr.flags & SHF_ALLOC) !== 0) continue;
       const tgt = secs[sr.relaFor];
       if (tgt === undefined || (tgt.flags & SHF_ALLOC) === 0) continue;
       let count = 0;
@@ -907,7 +1063,7 @@ export function elfExeImage(inp) {
       }
       if (count === 0) continue;
       sr.flags |= SHF_ALLOC;
-      sr.size = count * 24;
+      sr.size = count * relSize;
       sr.link = DYNSYM;
       dynRel.add(i);
       if ((tgt.flags & SHF_EXECINSTR) !== 0) textrel += count;
@@ -933,7 +1089,7 @@ export function elfExeImage(inp) {
   }
 
   if (dynamic) {
-    secs[DYNSYM].size = dsyms.length * 24;
+    secs[DYNSYM].size = dsyms.length * symSize;
     secs[DYNSTR].size = dstr.length;
     secs[HASH].size = dhash.length * 4;
   }
@@ -983,13 +1139,13 @@ export function elfExeImage(inp) {
       if (take) nfde++;
       ln += length + 4;
     }
-    EHFH = st.newSec('.eh_frame_hdr', SHT_PROGBITS, SHF_ALLOC, 8, 0);
+    EHFH = st.newSec('.eh_frame_hdr', SHT_PROGBITS, SHF_ALLOC, ptrSize, 0);
     secs[EHFH].size = 12 + nfde * 8;
   }
 
   /* ---- `.gnu.hash`（`create_gnu_hash`）：长度算得出来，内容等地址定了再填。 */
   const gnu = {
-    nbuckets: 0, symoffset: 0, bloomSize: 0, bloomShift: 6, ndef: 0,
+    nbuckets: 0, symoffset: 0, bloomSize: 0, bloomShift: c32 ? 5 : 6, ndef: 0,
   };
   if (dynamic) {
     let ndef = 0;
@@ -999,14 +1155,14 @@ export function elfExeImage(inp) {
     gnu.symoffset = dsyms.length - ndef;
     gnu.bloomSize = 1;
     while (ndef >= gnu.bloomSize * (1 << (gnu.bloomShift - 3))) gnu.bloomSize *= 2;
-    GNUHASH = st.newSec('.gnu.hash', SHT_GNU_HASH, SHF_ALLOC, 8, 0);
+    GNUHASH = st.newSec('.gnu.hash', SHT_GNU_HASH, SHF_ALLOC, ptrSize, 0);
     secs[GNUHASH].link = DYNSYM;
-    secs[GNUHASH].size = 4 * 4 + 8 * gnu.bloomSize + gnu.nbuckets * 4 + ndef * 4;
+    secs[GNUHASH].size = 4 * 4 + ptrSize * gnu.bloomSize + gnu.nbuckets * 4 + ndef * 4;
   }
 
   /* ---- `.dynamic` 的标签（`fill_dynamic`，前面还有 `DT_FLAGS`/`DT_FLAGS_1`）。
    * 条数与地址无关，所以长度现在就定得下来，值等摆好了再算一遍。 */
-  const dynTagList = (relAddr, relSize) => {
+  const dynTagList = (relAddr, relTabSize) => {
     const at = (i) => (i < 0 ? 0 : secs[i].addr ?? 0);
     const t = [];
     for (const off of needed) t.push([1, off]);          // DT_NEEDED 排在最前
@@ -1022,18 +1178,20 @@ export function elfExeImage(inp) {
     t.push([DT_STRTAB, at(DYNSTR)]);
     t.push([DT_SYMTAB, at(DYNSYM)]);
     t.push([DT_STRSZ, dstr.length]);
-    t.push([DT_SYMENT, 24]);
-    t.push([DT_RELA, relAddr]);
-    t.push([DT_RELASZ, relSize]);
-    t.push([DT_RELAENT, 24]);
+    t.push([DT_SYMENT, symSize]);
+    /* 32 位上这几号换成不带加数的那一套：DT_REL/DT_RELSZ/DT_RELENT/DT_RELCOUNT
+     * （`fill_dynamic` 里那个 `#if PTR_SIZE == 8` 的另一半），DT_PLTREL 跟着变。 */
+    t.push([c32 ? DT_REL : DT_RELA, relAddr]);
+    t.push([c32 ? DT_RELSZ : DT_RELASZ, relTabSize]);
+    t.push([c32 ? DT_RELENT : DT_RELAENT, relSize]);
     if (RELAPLT >= 0) {
       /* 跳板那一路的四条：DT_PLTGOT / DT_PLTRELSZ / DT_JMPREL / DT_PLTREL。 */
       t.push([3, at(GOT)]);
       t.push([2, secs[RELAPLT].size]);
       t.push([23, at(RELAPLT)]);
-      t.push([20, DT_RELA]);
+      t.push([20, c32 ? DT_REL : DT_RELA]);
     }
-    t.push([DT_RELACOUNT, 0]);
+    t.push([c32 ? DT_RELCOUNT : DT_RELACOUNT, 0]);
     for (const nm of ['.preinit_array', '.init_array', '.fini_array']) {
       const i = findSec(nm);
       if (i < 0 || secs[i].size === 0) continue;
@@ -1049,7 +1207,7 @@ export function elfExeImage(inp) {
     t.push([DT_NULL, 0]);
     return t;
   };
-  if (DYNA >= 0) secs[DYNA].size = dynTagList(0, 0).length * 16;
+  if (DYNA >= 0) secs[DYNA].size = dynTagList(0, 0).length * ptrSize * 2;
 
   /* ---- set_sec_sizes + alloc_sec_names。
    *
@@ -1068,8 +1226,10 @@ export function elfExeImage(inp) {
     relaFor: 0,
   });
   /* 非 alloc 的节 `sh_size` 一直是 0（`set_sec_sizes` 只填 alloc 的那些）——
-   * 于是它们在可执行文件里连名字都没有，最后被摘掉。 */
-  const shSize = (i) => (i === SHSTR || (secs[i].flags & SHF_ALLOC) !== 0 ? secs[i].size : 0);
+   * 于是它们在可执行文件里连名字都没有，最后被摘掉。`.ARM.attributes` 是那一段里
+   * 单独开口子的一条（`set_sec_sizes` 里那个 `|| s->sh_type == SHT_ARM_ATTRIBUTES`）。 */
+  const shSize = (i) => (i === SHSTR || (secs[i].flags & SHF_ALLOC) !== 0
+    || secs[i].type === SHT_ARM_ATTRIBUTES ? secs[i].size : 0);
   const shstr = [0];
   const nameOff = new Map();
   for (let i = 1; i <= SHSTR; i++) {
@@ -1173,7 +1333,11 @@ export function elfExeImage(inp) {
     return ph;
   };
 
-  let fileOffset = align(EHDR_SIZE + phnum * PHDR_SIZE, 4) + shnum * SHDR_SIZE;
+  /* 三张表的宽度按位宽挑（`sizeof(ElfW(Ehdr))` 那几处）。 */
+  const ehdrSize = conf.c32 ? EHDR32_SIZE : EHDR_SIZE;
+  const phdrSize = conf.c32 ? PHDR32_SIZE : PHDR_SIZE;
+  let fileOffset = align(ehdrSize + phnum * phdrSize, 4)
+    + shnum * (conf.c32 ? SHDR32_SIZE : SHDR_SIZE);
   const sAlign = conf.page;
   /* 共享库与位置无关的可执行文件都从 0 起（`if (s1->output_type & TCC_OUTPUT_DYN) addr = 0`）。 */
   let addr = dyn ? 0 : conf.start;
@@ -1246,9 +1410,9 @@ export function elfExeImage(inp) {
   if (INTERP >= 0) fillPhdr(phdrs[1], PT_INTERP, secs[INTERP]);
   if (phfill !== 0) {
     const p0 = phdrs[0];
-    p0.off = EHDR_SIZE;
-    p0.vaddr = base + EHDR_SIZE;
-    p0.filesz = phnum * PHDR_SIZE;
+    p0.off = ehdrSize;
+    p0.vaddr = base + ehdrSize;
+    p0.filesz = phnum * phdrSize;
     p0.al = 4;
     fillPhdr(p0, PT_PHDR, null);
   }
@@ -1309,6 +1473,38 @@ export function elfExeImage(inp) {
         dvgot.setBigUint64(r.at, BigInt(x2), true);
         x2 += 16;
       }
+    } else if (machine === EM_386) {
+      /* i386 与 x86_64 一个样，只是这儿是**加上** GOT 的绝对地址（32 位上取址不走
+       * 相对寻址）；`i386-link.c` 里那个 `if (!(output_type & TCC_OUTPUT_DYN))` ——
+       * 造共享库时 `modrm` 是 0xa3，靠 %ebx，那几处就不回填。 */
+      if (!dyn) {
+        dvp.setUint32(2, (dvp.getUint32(2, true) + gotAddr) >>> 0, true);
+        dvp.setUint32(8, (dvp.getUint32(8, true) + gotAddr) >>> 0, true);
+        for (let at = 16; at < p.length; at += 16) {
+          dvp.setUint32(at + 2, (dvp.getUint32(at + 2, true) + gotAddr) >>> 0, true);
+        }
+      }
+      let x2 = pltAddr + 16 + 6;
+      for (const r of relas.get(RELAPLT) ?? []) {
+        dvgot.setUint32(r.at, x2 >>> 0, true);
+        x2 += 16;
+      }
+    } else if (machine === EM_ARM) {
+      /* arm：PLT0 末四字节记 GOT 与 `.plt` 的差（减 12 是那句 `add lr,pc,lr` 的 pc
+       * 偏移，再减 4 是 `ldr lr,[pc,#4]` 取数的位置），每一格四条指令把那一格的
+       * GOT 地址凑出来 —— 一条里的立即数只带得动 8 位，所以要四条。 */
+      const x = gotAddr - pltAddr - 12;
+      dvp.setUint32(16, (x - 4) >>> 0, true);
+      for (let at = 20; at < p.length; at += 16) {
+        const off = (x + dvp.getUint32(at + 4, true) - at + 4) >>> 0;
+        dvp.setUint32(at, (0xe28fc200 | ((off >>> 28) & 0xf)) >>> 0, true);
+        dvp.setUint32(at + 4, (0xe28cc600 | ((off >>> 20) & 0xff)) >>> 0, true);
+        dvp.setUint32(at + 8, (0xe28cca00 | ((off >>> 12) & 0xff)) >>> 0, true);
+        dvp.setUint32(at + 12, (0xe5bcf000 | (off & 0xfff)) >>> 0, true);
+      }
+      for (const r of relas.get(RELAPLT) ?? []) {
+        dvgot.setUint32(r.at, pltAddr >>> 0, true);
+      }
     } else {
       const page = (v) => Math.floor(v / 4096);
       const adrp = (off) => ((0x90000000 | 16 | ((off & 0x1ffffc) << 3)
@@ -1362,8 +1558,7 @@ export function elfExeImage(inp) {
     for (const r of list) {
       if (skip) continue;
       /* `R_XXX_RELATIVE` 在 ELF 上什么都不做 —— PE 那一路才往里写 RVA。 */
-      if ((machine === EM_X86_64 && r.type === R_X86_64_RELATIVE)
-        || (machine === EM_AARCH64 && r.type === R_AARCH64_RELATIVE)) continue;
+      if (r.type === relative) continue;
       const val = symAddr(r.sym) + Number(r.add);
       let apply = true;
       if (qrel !== null) {
@@ -1398,31 +1593,39 @@ export function elfExeImage(inp) {
     }
     if (qrel !== null) {
       relas.set(si, qrel);
-      secs[si].size = qrel.length * 24;
+      secs[si].size = qrel.length * relSize;
     }
   }
 
   /* ---- `.rela.*` 是装载的那些：`r_offset` 要换成绝对地址（`relocate_sections` 末尾）。
    * 顺手把 `update_reloc_sections` 要的那两格算出来 —— `.dynamic` 里的 DT_RELA/DT_RELASZ。 */
   let relAddr = 0;
-  let relSize = 0;
+  let relTabSize = 0;
   for (let i = 1; i <= SHSTR; i++) {
-    if (secs[i].type !== SHT_RELA || (secs[i].flags & SHF_ALLOC) === 0) continue;
+    if (secs[i].type !== RELT || (secs[i].flags & SHF_ALLOC) === 0) continue;
     const tgt = secs[secs[i].relaFor];
     for (const r of relas.get(i) ?? []) r.at += tgt.addr;
     /* `update_reloc_sections` 把 `.rela.plt` 摘出去不算 —— DT_RELA 那一段说的是
      * 「剩下那几张接成连着的一块」，跳板那张由 DT_JMPREL 单独说。 */
     if (i === RELAPLT) continue;
-    if (relSize === 0) relAddr = secs[i].addr;
-    relSize += secs[i].size;
+    if (relTabSize === 0) relAddr = secs[i].addr;
+    relTabSize += secs[i].size;
   }
 
   /* ---- fill_local_got_entries：局部符号那几条重定位改成「0 号符号 + 加数」。
    * GOT 那一格**不填**（RELA 的架构上 tcc 只动加数，值留给动态链接器写）。 */
   if (dynamic && GOT >= 0) {
+    const gb = secs[GOT].bytes;
     for (const r of relas.get(RELAGOT) ?? []) {
       if (r.local !== true) continue;
-      r.add = BigInt(symAddr(r.sym));
+      const v = symAddr(r.sym);
+      r.add = BigInt(v);
+      /* REL 那两个目标（i386/arm）没有加数那一格 —— 值只能落在 GOT 里那一格上
+       * （`fill_local_got_entries` 里那句 `write32le(got->data + offset, st_value)`）。 */
+      if (c32) {
+        const off = r.at - secs[GOT].addr;
+        new DataView(gb.buffer, gb.byteOffset, gb.byteLength).setUint32(off, v >>> 0, true);
+      }
       r.sym = 0;
       r.dynSym = 0;
     }
@@ -1462,8 +1665,11 @@ export function elfExeImage(inp) {
         map[cur] = newSyms.length;
         newSyms.push(dsyms[cur]);
         gnuChain.push(hashes[cur] & ~1);
-        gnuBloom[Math.floor(hashes[cur] / 64) % gnu.bloomSize] |= (1n << BigInt(hashes[cur] % 64))
-          | (1n << BigInt((hashes[cur] >>> gnu.bloomShift) % 64));
+        /* `ELFCLASS_BITS`：一格 bloom 是一个 `addr_t` —— 64 位上 64 位，32 位上 32 位。 */
+        const bits = c32 ? 32 : 64;
+        gnuBloom[Math.floor(hashes[cur] / bits) % gnu.bloomSize]
+          |= (1n << BigInt(hashes[cur] % bits))
+          | (1n << BigInt((hashes[cur] >>> gnu.bloomShift) % bits));
       }
       gnuChain[gnuChain.length - 1] |= 1;
     }
@@ -1502,16 +1708,26 @@ export function elfExeImage(inp) {
   if (dynamic) {
     const put = (i, bytes) => { secs[i].bytes = bytes; };
     // .dynsym
-    const ds = new Uint8Array(dsyms.length * 24);
+    const ds = new Uint8Array(dsyms.length * symSize);
     const dvs = new DataView(ds.buffer);
     for (let k = 0; k < dsyms.length; k++) {
       const s = dsyms[k];
-      dvs.setUint32(k * 24, s.strx, true);
-      ds[k * 24 + 4] = s.info;
-      ds[k * 24 + 5] = s.other;
-      dvs.setUint16(k * 24 + 6, s.shndx, true);
-      dvs.setBigUint64(k * 24 + 8, BigInt(s.value), true);
-      dvs.setBigUint64(k * 24 + 16, BigInt(s.size), true);
+      const o = k * symSize;
+      dvs.setUint32(o, s.strx, true);
+      if (c32) {
+        /* `Elf32_Sym` 的次序不一样：name、value、size 在前，info/other/shndx 在后。 */
+        dvs.setUint32(o + 4, s.value >>> 0, true);
+        dvs.setUint32(o + 8, s.size >>> 0, true);
+        ds[o + 12] = s.info;
+        ds[o + 13] = s.other;
+        dvs.setUint16(o + 14, s.shndx, true);
+      } else {
+        ds[o + 4] = s.info;
+        ds[o + 5] = s.other;
+        dvs.setUint16(o + 6, s.shndx, true);
+        dvs.setBigUint64(o + 8, BigInt(s.value), true);
+        dvs.setBigUint64(o + 16, BigInt(s.size), true);
+      }
     }
     put(DYNSYM, ds);
     put(DYNSTR, new Uint8Array(dstr));
@@ -1527,19 +1743,28 @@ export function elfExeImage(inp) {
     dvg.setUint32(4, gnu.symoffset, true);
     dvg.setUint32(8, gnu.bloomSize, true);
     dvg.setUint32(12, gnu.bloomShift, true);
-    for (let k = 0; k < gnu.bloomSize; k++) dvg.setBigUint64(16 + k * 8, gnuBloom[k], true);
-    const bAt = 16 + gnu.bloomSize * 8;
+    for (let k = 0; k < gnu.bloomSize; k++) {
+      if (c32) dvg.setUint32(16 + k * 4, Number(gnuBloom[k] & 0xffffffffn), true);
+      else dvg.setBigUint64(16 + k * 8, gnuBloom[k], true);
+    }
+    const bAt = 16 + gnu.bloomSize * ptrSize;
     for (let k = 0; k < gnu.nbuckets; k++) dvg.setUint32(bAt + k * 4, gnuBuckets[k], true);
     const cAt = bAt + gnu.nbuckets * 4;
     for (let k = 0; k < gnuChain.length; k++) dvg.setUint32(cAt + k * 4, gnuChain[k] >>> 0, true);
     put(GNUHASH, gh);
     // .dynamic
-    const tags = dynTagList(relAddr, relSize);
-    const db = new Uint8Array(tags.length * 16);
+    const tags = dynTagList(relAddr, relTabSize);
+    const db = new Uint8Array(tags.length * ptrSize * 2);
     const dvd = new DataView(db.buffer);
     for (let k = 0; k < tags.length; k++) {
-      dvd.setBigUint64(k * 16, BigInt(tags[k][0]), true);
-      dvd.setBigUint64(k * 16 + 8, BigInt(tags[k][1]), true);
+      const o = k * ptrSize * 2;
+      if (c32) {
+        dvd.setUint32(o, tags[k][0] >>> 0, true);
+        dvd.setUint32(o + 4, tags[k][1] >>> 0, true);
+      } else {
+        dvd.setBigUint64(o, BigInt(tags[k][0]), true);
+        dvd.setBigUint64(o + 8, BigInt(tags[k][1]), true);
+      }
     }
     put(DYNA, db);
     // .eh_frame_hdr
@@ -1574,14 +1799,22 @@ export function elfExeImage(inp) {
     for (const ri of [RELAGOT, RELAPLT, RELABSS, ...dynRel]) {
       if (ri < 0) continue;
       const list = relas.get(ri);
-      const rb = new Uint8Array(list.length * 24);
+      const rb = new Uint8Array(list.length * relSize);
       const dvr = new DataView(rb.buffer);
       for (let k = 0; k < list.length; k++) {
         const r = list[k];
-        dvr.setBigUint64(k * 24, BigInt(r.at), true);
-        dvr.setBigUint64(k * 24 + 8,
-          BigInt(r.dynSym ?? r.sym) * 4294967296n + BigInt(r.type), true);
-        dvr.setBigInt64(k * 24 + 16, r.add, true);
+        const o = k * relSize;
+        if (c32) {
+          /* `Elf32_Rel` 八字节：`r_info` 是「符号 << 8 | 类型」，加数没地方放 ——
+           * 它早在落笔那一趟就加进被改的那几字节里了。 */
+          dvr.setUint32(o, r.at >>> 0, true);
+          dvr.setUint32(o + 4, (((r.dynSym ?? r.sym) << 8) | (r.type & 0xff)) >>> 0, true);
+        } else {
+          dvr.setBigUint64(o, BigInt(r.at), true);
+          dvr.setBigUint64(o + 8,
+            BigInt(r.dynSym ?? r.sym) * 4294967296n + BigInt(r.type), true);
+          dvr.setBigInt64(o + 16, r.add, true);
+        }
       }
       secs[ri].bytes = rb;
     }
@@ -1589,6 +1822,8 @@ export function elfExeImage(inp) {
 
   return {
     machine, secs, out, backmap, phdrs, phnum, shnum, entry, nameOff, fileOffset, dyn,
+    c32: conf.c32,
+    eflags: st.eflags ?? 0,
   };
 }
 
@@ -1598,61 +1833,106 @@ export function elfExe(inp) {
   const {
     secs, out, backmap, phdrs, phnum, shnum,
   } = r;
-  const shoff = align(EHDR_SIZE + phnum * PHDR_SIZE, 4);
+  /* ELF32：头 52、程序头 32、节头 40，而且那几格地址与长度是 4 字节。 */
+  const c32 = r.c32 === true;
+  const ehSize = c32 ? EHDR32_SIZE : EHDR_SIZE;
+  const phSize = c32 ? PHDR32_SIZE : PHDR_SIZE;
+  const shSize = c32 ? SHDR32_SIZE : SHDR_SIZE;
+  const shoff = align(ehSize + phnum * phSize, 4);
 
-  let end = shoff + shnum * SHDR_SIZE;
+  let end = shoff + shnum * shSize;
   for (const i of out) {
     if (secs[i].type === SHT_NOBITS) continue;
     end = Math.max(end, secs[i].off + secs[i].shsize);
   }
   const b = new Uint8Array(end);
   const dv = new DataView(b.buffer);
+  /** 一格「地址那么宽」的数：64 位上 8 字节，32 位上 4 字节。 */
+  const addr = (at, v) => {
+    if (c32) dv.setUint32(at, v >>> 0, true);
+    else dv.setBigUint64(at, BigInt(v), true);
+  };
 
   // ---- ELF 头
   b[0] = 0x7f; b[1] = 0x45; b[2] = 0x4c; b[3] = 0x46;
-  b[4] = 2; b[5] = 1; b[6] = 1;
+  b[4] = c32 ? 1 : 2; b[5] = 1; b[6] = 1;
   dv.setUint16(16, r.dyn ? ET_DYN : ET_EXEC, true);
   dv.setUint16(18, r.machine, true);
   dv.setUint32(20, 1, true);
-  dv.setBigUint64(24, BigInt(r.entry), true);
-  dv.setBigUint64(32, BigInt(phnum > 0 ? EHDR_SIZE : 0), true);
-  dv.setBigUint64(40, BigInt(shoff), true);
-  dv.setUint32(48, 0, true);
-  dv.setUint16(52, EHDR_SIZE, true);
-  dv.setUint16(54, phnum > 0 ? PHDR_SIZE : 0, true);
-  dv.setUint16(56, phnum, true);
-  dv.setUint16(58, SHDR_SIZE, true);
-  dv.setUint16(60, shnum, true);
-  dv.setUint16(62, shnum - 1, true);
+  if (c32) {
+    dv.setUint32(24, r.entry >>> 0, true);
+    dv.setUint32(28, phnum > 0 ? ehSize : 0, true);
+    dv.setUint32(32, shoff, true);
+    dv.setUint32(36, r.eflags ?? 0, true);
+    dv.setUint16(40, ehSize, true);
+    dv.setUint16(42, phnum > 0 ? phSize : 0, true);
+    dv.setUint16(44, phnum, true);
+    dv.setUint16(46, shSize, true);
+    dv.setUint16(48, shnum, true);
+    dv.setUint16(50, shnum - 1, true);
+  } else {
+    dv.setBigUint64(24, BigInt(r.entry), true);
+    dv.setBigUint64(32, BigInt(phnum > 0 ? ehSize : 0), true);
+    dv.setBigUint64(40, BigInt(shoff), true);
+    dv.setUint32(48, 0, true);
+    dv.setUint16(52, ehSize, true);
+    dv.setUint16(54, phnum > 0 ? phSize : 0, true);
+    dv.setUint16(56, phnum, true);
+    dv.setUint16(58, shSize, true);
+    dv.setUint16(60, shnum, true);
+    dv.setUint16(62, shnum - 1, true);
+  }
 
-  // ---- 程序头
+  // ---- 程序头。32 位上的次序是 type/off/vaddr/paddr/filesz/memsz/flags/align，
+  //      64 位上 flags 提到了第二格 —— 这是两种格式唯一次序不同的地方。
   for (let i = 0; i < phnum; i++) {
     const p = phdrs[i];
-    const o = EHDR_SIZE + i * PHDR_SIZE;
+    const o = ehSize + i * phSize;
     dv.setUint32(o, p.type, true);
-    dv.setUint32(o + 4, p.flags, true);
-    dv.setBigUint64(o + 8, BigInt(p.off), true);
-    dv.setBigUint64(o + 16, BigInt(p.vaddr), true);
-    dv.setBigUint64(o + 24, BigInt(p.paddr), true);
-    dv.setBigUint64(o + 32, BigInt(p.filesz), true);
-    dv.setBigUint64(o + 40, BigInt(p.memsz), true);
-    dv.setBigUint64(o + 48, BigInt(p.al), true);
+    if (c32) {
+      dv.setUint32(o + 4, p.off, true);
+      dv.setUint32(o + 8, p.vaddr >>> 0, true);
+      dv.setUint32(o + 12, p.paddr >>> 0, true);
+      dv.setUint32(o + 16, p.filesz, true);
+      dv.setUint32(o + 20, p.memsz, true);
+      dv.setUint32(o + 24, p.flags, true);
+      dv.setUint32(o + 28, p.al, true);
+    } else {
+      dv.setUint32(o + 4, p.flags, true);
+      addr(o + 8, p.off);
+      addr(o + 16, p.vaddr);
+      addr(o + 24, p.paddr);
+      addr(o + 32, p.filesz);
+      addr(o + 40, p.memsz);
+      addr(o + 48, p.al);
+    }
   }
 
   // ---- 节头表（0 号全是 0）
   for (let k = 0; k < out.length; k++) {
     const s = secs[out[k]];
-    const o = shoff + (k + 1) * SHDR_SIZE;
+    const o = shoff + (k + 1) * shSize;
     dv.setUint32(o, r.nameOff.get(out[k]) ?? 0, true);
     dv.setUint32(o + 4, s.type, true);
-    dv.setBigUint64(o + 8, BigInt(s.flags), true);
-    dv.setBigUint64(o + 16, BigInt(s.addr), true);
-    dv.setBigUint64(o + 24, BigInt(s.off), true);
-    dv.setBigUint64(o + 32, BigInt(s.shsize), true);
-    dv.setUint32(o + 40, s.link === 0 ? 0 : backmap[s.link], true);
-    dv.setUint32(o + 44, s.type === SHT_RELA ? backmap[s.info] : s.info, true);
-    dv.setBigUint64(o + 48, BigInt(s.al), true);
-    dv.setBigUint64(o + 56, BigInt(s.ent), true);
+    if (c32) {
+      dv.setUint32(o + 8, s.flags, true);
+      dv.setUint32(o + 12, s.addr >>> 0, true);
+      dv.setUint32(o + 16, s.off, true);
+      dv.setUint32(o + 20, s.shsize, true);
+      dv.setUint32(o + 24, s.link === 0 ? 0 : backmap[s.link], true);
+      dv.setUint32(o + 28, s.type === SHT_REL ? backmap[s.info] : s.info, true);
+      dv.setUint32(o + 32, s.al, true);
+      dv.setUint32(o + 36, s.ent, true);
+    } else {
+      addr(o + 8, s.flags);
+      addr(o + 16, s.addr);
+      addr(o + 24, s.off);
+      addr(o + 32, s.shsize);
+      dv.setUint32(o + 40, s.link === 0 ? 0 : backmap[s.link], true);
+      dv.setUint32(o + 44, s.type === SHT_RELA ? backmap[s.info] : s.info, true);
+      addr(o + 48, s.al);
+      addr(o + 56, s.ent);
+    }
   }
 
   // ---- 节的内容

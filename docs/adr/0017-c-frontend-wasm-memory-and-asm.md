@@ -524,6 +524,15 @@ arm 合在一起回 1，可 `R_ARM_ABS32` 是 2，`.reloc` 于是收了一批 `R
 一条 —— `set_elf_sym` 的「有就改、没有就接在末尾」这一格只有 arm 撞得着。
 `pe-tcc` 于是走到 **四个目标 × 两种编法、八份 tinycc 自己的 `.exe` 逐字节相同**：
 tcc 在 Windows 上支持的目标，链接器这一层全对齐了）。
+**32 位那两个 Linux 目标**（第七十五片：ELF32 的头 52 / 程序头 32 / 节头 40，
+**`p_flags` 在程序头里挪到倒数第二格**；`Elf32_Sym` 换了字段次序，`Elf32_Rel` 没有
+加数那一格（`r_info` 是 `符号 << 8 | 类型`，加数写进被改的字节里），`.dynamic` 一条
+8 字节且换成 `DT_REL` 那一套，`.gnu.hash` 的 bloom 一格 4 字节、`bloom_shift` 是 5。
+i386 的跳板 push 的是**字节**而不是条数，arm 的跳板要四条 `add`/`ldr` 才凑出一个地址。
+三处只有 32 位才踩到的规矩：i386 的 `PCRELATIVE_DLLPLT` 是 0，于是造共享库时未定义
+符号一格 GOT 都不给；`fill_local_got_entries` 在 REL 架构上要把值**写进 GOT 那一格**；
+`.ARM.attributes` 只有可执行文件与共享库有（`elf_output_obj` 不叫那个函数），而且是
+非 alloc 的节里唯一留得住 `sh_size` 的一条。五道 ELF 门各长出两个目标，全 0 条不同）。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -11302,6 +11311,76 @@ TLS 且表里还没有的时候补上这一条。
 415232 字节。tcc 在 Windows 上支持的四个目标，链接器这一层至此全部对齐。
 
 <!-- 第九刀第七十四片-END -->
+
+## 落地：第九刀第七十五片
+
+32 位那两个 Linux 目标（`i386-linux`、`arm-linux`）的可执行文件与共享库。Windows 那
+四个目标齐了之后，ELF 这一路还只有 64 位两个 —— 这一片把 `elf_exe.js` 从「64 位写死」
+改成认位宽的。
+
+位宽带来的格子，一处不能少：
+
+- 头 52 / 程序头 32 / 节头 40，`e_ident[EI_CLASS]` 是 1。**ELF32 的程序头把
+  `p_flags` 挪到倒数第二格**（type, off, vaddr, paddr, filesz, memsz, flags, align），
+  ELF64 是第二格 —— 这一处错了段的权限全歪。
+- `Elf32_Sym` 16 字节，次序也不同：name、value、size 在前，info/other/shndx 在后。
+- `Elf32_Rel` 8 字节，**没有加数那一格**：`r_info` 是 `符号 << 8 | 类型`，加数早在
+  落笔那一趟就加进被改的字节里了。表的类型跟着从 `SHT_RELA` 变成 `SHT_REL`，节名
+  也从 `.rela.` 变成 `.rel.`。
+- `.dynamic` 一条 8 字节，几号也换了一套：`DT_REL`/`DT_RELSZ`/`DT_RELENT`/
+  `DT_RELCOUNT`，`DT_PLTREL` 的值跟着变成 `DT_REL`（`fill_dynamic` 里那个
+  `#if PTR_SIZE == 8` 的另一半）。
+- `.gnu.hash` 的 bloom 一格是一个 `addr_t`：32 位上 4 字节，`bloom_shift` 也从 6
+  变成 5，位掩码取模从 64 变成 32。
+- `.got` 头三格是 `3 * PTR_SIZE` = 12 字节，每格 4 字节；`.dynsym`/`.hash`/
+  `.dynamic` 的 `sh_addralign` 都是 `PTR_SIZE`。
+
+装载地址与解释器：i386 是 `0x08048000` / `0x1000` / `/lib/ld-linux.so.2`，arm 是
+`0x00010000` / `0x10000` / **`/lib/ld-linux-armhf.so.3`** —— 交叉编译出来的 arm-tcc
+是硬浮点的，`tccelf.c:117` 那个 `#if` 走的是 armhf 那一支。这一处一开始写成了
+`/lib/ld-linux.so.3`，于是 arm 的动态可执行文件整份短 8 字节。
+
+跳板与 GOT 那几处按目标各写一遍：
+
+- i386 的 `create_plt_entry` 与 x86_64 同形，只有一处不同：push 的那个数在 i386 上
+  是**字节**（`relofs - sizeof(Elf32_Rel)`），x86_64 上是**条数**。静态那一路
+  `relofs` 是 0，于是 -8。`relocate_plt` 是把 GOT 的绝对地址**加**进那三处
+  （32 位取址不走相对寻址）。
+- arm 的 PLT0 二十字节（`push {lr}` / `ldr lr,[pc,#4]` / `add lr,pc,lr` /
+  `ldr pc,[lr,#8]!`，末四字节留给 `relocate_plt`），每格 16 字节里只在 +4 记 GOT
+  的偏移；`relocate_plt` 用四条 `add`/`ldr` 把地址凑出来 —— 一条里的立即数只带得动
+  8 位。
+- **`.ARM.attributes`**：`create_arm_attribute_section` 是 `elf_output_file` 一进门
+  就叫的，`elf_output_obj` 那一路**不叫** —— 所以 `.o` 里没有这一节，可执行文件与
+  共享库里有，而且 `tcc_load_object_file` 的 `sh_type` 筛子也不收它（输入里的同名节
+  一律扔掉，输出里那一份永远是写死的 45 字节）。它还是非 alloc 的节里唯一能留下
+  `sh_size` 的一条（`set_sec_sizes` 里那个 `|| s->sh_type == SHT_ARM_ATTRIBUTES`），
+  否则会跟 `.symtab` 一样被摘掉。少了它，arm 的可执行文件整份短 101 字节
+  （45 + 名字 16 + 节头 40）。
+
+`build_got_entries` 里两条「只有 32 位才踩到」的规矩，也是这一片才补上的：
+
+- `!PCRELATIVE_DLLPLT && (output_type & TCC_OUTPUT_DYN)`：i386 上这个宏是 0
+  （没配 `CONFIG_TCC_PIC`），于是造共享库或位置无关的可执行文件时，未定义符号那一类
+  **一格 GOT 都不给**。arm 上是 1，照旧要。
+- `SHN_ABS` 那种（`tcc_add_symbol` 放的）只有 64 位才过 GOT，`#ifndef TCC_TARGET_ARM`
+  把 arm 排除在这条之外。
+
+还有一条与位宽无关、可 64 位那边一直没露头的：AUTO 那一类里未定义符号如果在
+`.dynsym` 里是个函数，`goto jmp_slot` 会**连第二趟一起跳过**（`jmp_slot:` 头一句是
+`if (pass != 0) continue`）—— 取地址那一处于是不再单独要一格 GOT，留给 `.rel.text`
+里的装载期重定位。arm 的 `15-plt` 就是这一条：我们本来多造了一格 GOT 加一条
+`.rel.got`。
+
+最后一处是 `fill_local_got_entries`：RELA 的架构上 tcc 只改加数，REL 的架构上没有
+加数那一格，值得**写进 GOT 那一格自己**（`write32le(got->data + offset, st_value)`）。
+i386 的 `16-tls` 卡在这儿 —— 整份只差 GOT 里那两个字节。
+
+五道 ELF 关口现在都是四个目标：`elf-exe` `41 条`、`elf-dyn` `41 条`、`elf-so`
+`48 条`、`elf-dll` `18 条`、`elf-flags` `195 条`，全 0 条不同。命令行上
+`omni elf-link` 的 i386/arm 可执行文件与共享库也都逐字节对上。
+
+<!-- 第九刀第七十五片-END -->
 
 
 

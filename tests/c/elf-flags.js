@@ -42,6 +42,9 @@ const PIE = join(root, '.omni-cache', 'tcc-pie');
 const TARGETS = [
   { name: 'x86_64-linux', tcc: 'x86_64-tcc' },
   { name: 'arm64-linux', tcc: 'arm64-tcc' },
+  /* 32 位那两个（第九刀第七十五片）。`-pie` 那一档要另一份交叉编译器，没建就跳过。 */
+  { name: 'i386-linux', tcc: 'i386-tcc' },
+  { name: 'arm-linux', tcc: 'arm-tcc' },
 ];
 
 const RPATH = '/opt/omni/lib:/usr/local/omni';

@@ -32,6 +32,10 @@ const PIE = join(root, '.omni-cache', 'tcc-pie');
 const TARGETS = [
   { name: 'x86_64-linux', tcc: 'x86_64-tcc' },
   { name: 'arm64-linux', tcc: 'arm64-tcc' },
+  /* 32 位那两个（第九刀第七十五片）：读库那一段的 `Elf32_Sym` 与八字节一条的
+   * `.dynamic`，`R_386_COPY`/`R_ARM_COPY` 那条落在自己的 `.bss` 上。 */
+  { name: 'i386-linux', tcc: 'i386-tcc' },
+  { name: 'arm-linux', tcc: 'arm-tcc' },
 ];
 
 const filters = process.argv.slice(2).filter((x) => !x.startsWith('-'));
