@@ -164,7 +164,7 @@ const PP_NAMES = [
   // `__builtin_expect`（`tcctok.h:169`）是第二十片补的：tinycc 自己的源码里
   // `PROBE_INLINE` 一带在用，而它在 tcc 那边就是「算两边、留左边」的空操作。
   '__builtin_va_start', '__builtin_va_arg', '__builtin_va_end', '__builtin_va_copy',
-  '__builtin_expect',
+  '__builtin_expect', '__builtin_types_compatible_p',
   // tcctok.h:207-220 的 pragma 名。**这里编号与 tcc 分岔**（见文件头的阶段边界）：
   // tcc 在这之前还有 attribute 与 builtin 两大段。
   'pack', 'push', 'pop', 'comment', 'lib', 'push_macro', 'pop_macro', 'once', 'option',
@@ -298,6 +298,13 @@ export const TOK_SIZEOF = fixed('sizeof');
 export const TOK_ALIGNOF1 = fixed('__alignof');
 export const TOK_ALIGNOF2 = fixed('__alignof__');
 export const TOK_ALIGNOF3 = fixed('_Alignof');
+/* GNU 的 `typeof`（第八刀第五十一片，`tcctok.h:67-69`）。三种拼法，一条 case 三个入口；
+ * C23 把它写进了标准（`typeof`），系统头里用的多半是 `__typeof__`。 */
+export const TOK_TYPEOF1 = fixed('typeof');
+export const TOK_TYPEOF2 = fixed('__typeof');
+export const TOK_TYPEOF3 = fixed('__typeof__');
+/* GNU 的块局部标签声明 `__label__ a, b;`（第八刀第五十二片，`tcctok.h:70`）。 */
+export const TOK_LABEL = fixed('__label__');
 /* `_Static_assert(sizeof(t) == 12, "…")`（第八刀第十八片）。macOS 的 `<mach/message.h>`
  * 用它把 mach 消息那几个结构体的尺寸钉住 —— 也就是说它同时在考我们的 struct 布局。 */
 export const TOK_STATIC_ASSERT = fixed('_Static_assert');
@@ -311,6 +318,7 @@ export const TOK_BUILTIN_VA_ARG = fixed('__builtin_va_arg');
 export const TOK_BUILTIN_VA_END = fixed('__builtin_va_end');
 export const TOK_BUILTIN_VA_COPY = fixed('__builtin_va_copy');
 export const TOK_BUILTIN_EXPECT = fixed('__builtin_expect');
+export const TOK_BUILTIN_TYPES_COMPATIBLE_P = fixed('__builtin_types_compatible_p');
 
 /**
  * `TOK_ASSIGN(t)`（`tcc.h:1168`）与 `TOK_ASSIGN_OP(t)`（`tcc.h:1169`）。

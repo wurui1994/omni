@@ -162,8 +162,9 @@ import {
   TOK_ATTRIBUTE1, TOK_ATTRIBUTE2, TOK_ASM1, TOK_ASM2, TOK_ASM3,
   TOK_ALIGNED1, TOK_ALIGNED2, TOK_PACKED1, TOK_PACKED2,
   TOK_ALIGNOF1, TOK_ALIGNOF2, TOK_ALIGNOF3,
+  TOK_TYPEOF1, TOK_TYPEOF2, TOK_TYPEOF3, TOK_LABEL,
   TOK_BUILTIN_VA_START, TOK_BUILTIN_VA_ARG, TOK_BUILTIN_VA_END, TOK_BUILTIN_VA_COPY,
-  TOK_BUILTIN_EXPECT,
+  TOK_BUILTIN_EXPECT, TOK_BUILTIN_TYPES_COMPATIBLE_P,
   TOK___FUNCTION__, TOK___FUNC__, TOK_LINENUM,
   isAssignOp, assignOpOf,
 } from './tcctok.js';
@@ -171,10 +172,10 @@ import {
   VT_VOID, VT_BYTE, VT_SHORT, VT_INT, VT_LLONG, VT_BOOL, VT_PTR, VT_FUNC, VT_STRUCT,
   VT_BTYPE, VT_UNSIGNED, VT_DEFSIGN, VT_LONG, VT_FLOAT, VT_DOUBLE,
   VT_EXTERN, VT_STATIC, VT_TYPEDEF, VT_INLINE, VT_CONSTANT, VT_VOLATILE, VT_STORAGE,
-  btype, isInteger, isFloat, isUnsigned, isPtr, isArray, isFunc, isStruct, isUnion,
+  btype, isInteger, isFloat, isUnsigned, isPtr, isArray, isFunc, isStruct, isUnion, isEnum,
   isBitfield, bitPosOf, bitSizeOf, mkBitfield, bitfieldBase, bfAccess,
   ctype, mkPointer, mkArray, mkStruct, mkEnum, mkFunc, typeSize, typeText, sameType,
-  sameTypeUnqual, mkVla, isVla,
+  sameTypeUnqual, mkVla, isVla, compareTypes,
   TY_VOID, TY_INT, TY_UINT, TY_LLONG, TY_ULLONG, TY_CHAR, TY_SHORT, TY_BOOL,
   TY_FLOAT, TY_DOUBLE, TY_LDOUBLE, VT_LDOUBLE,
 } from './ctype.js';
@@ -705,6 +706,10 @@ export class CGen {  /**
     this.symAlign = 0;
     /** 正在解析的语句表达式（`({ … })`，第三十七片之后那一片）。栈是因为它能嵌套。 */
     this.seStack = [];
+    /** 语句表达式里那台局部状态机在位时，外面那台的标签表（用来把「跳出去」报清楚）。 */
+    this.seOuterIds = null;
+    /** @type {Map<number,Map<string,number>>} 语句序号 -> 那个语句表达式的局部标签表。 */
+    this.seLabels = new Map();
     /** @type {Map<string,{ty:object,addr:number,defined:boolean,used:boolean}>} 全局量 */
     this.gvars = new Map();
     /* C 有**四个独立的名字空间**（C11 6.2.3）：普通标识符、struct/union/enum 的 tag、
@@ -2612,6 +2617,25 @@ export class CGen {  /**
       this.skip(RPAR);
       return this.postfix(v);
     }
+    /* `__builtin_types_compatible_p(T1, T2)`（`tccgen.c:5816`）：一个**编译期**的问句 ——
+     * 两个**类型名**（不是表达式），相容就是 1。tcc 把两边最外层的 `const`/`volatile`
+     * 抹掉再问 `is_compatible_types`，也就是 `compareTypes(a, b, 1)`：与赋值问的是同一句，
+     * 所以这一片不新写「什么算一样」，只是把那一句接出来。值是常量（`vpushi(n)`）。 */
+    if (t === TOK_BUILTIN_TYPES_COMPATIBLE_P) {
+      this.next();
+      this.skip(LPAR);
+      const a = this.typeName();
+      this.skip(COMMA);
+      const b = this.typeName();
+      this.skip(RPAR);
+      /* 只有一边是枚举时 tcc 拿的是**那个枚举的底层类型**，而它是算出来的：全是非负数
+       * 就是 `unsigned int`（`tccgen.c:4556` 一带）。我们的枚举底层永远是 `int`
+       * （见 `mkEnum`），所以这一问会答错 —— 与其静悄悄给个错的数，先在这儿报出来。 */
+      if (isEnum(a.t) !== isEnum(b.t)) {
+        this.err('__builtin_types_compatible_p with one enum side is not supported');
+      }
+      return this.postfix(sVal(TY_INT, this.konst(TY_INT, compareTypes(a, b, 1) ? 1 : 0)));
+    }
 
     if (t >= TOK_UIDENT) {
       const name = this.identName();
@@ -3540,6 +3564,21 @@ export class CGen {  /**
       return;
     }
 
+    /* GNU 的**块局部标签**声明 `__label__ a, b;`（`tccgen.c:7226` 一带）。
+     * 我们的标签是**函数一份**的编号（见 `gotoStmt` 头上那段），所以这儿只把名字读掉。
+     * 可观察的差别只有「同名标签在两个块里各算一个」那一种 —— 那要给标签也摆一层
+     * 作用域，还没到；撞上了会是「重复的标签」，不会静悄悄跳错地方。 */
+    if (t === TOK_LABEL) {
+      this.next();
+      for (;;) {
+        this.identName();
+        if (this.tok !== COMMA) break;
+        this.next();
+      }
+      this.skip(SEMI);
+      return;
+    }
+
     /* `name :` 是语句标签（`tccgen.c:7376`：tcc 也是看下一个记号是不是 `:`）。
      * 猜错了要把名字**交回去**，`ungetTok` 就是为这一格存在的（funcDecl 的 `(void)`
      * 同一手法）。标识符自己没有 tokc，所以推回去不丢信息。 */
@@ -3550,9 +3589,19 @@ export class CGen {  /**
         this.next();
         this.labelStmt(name);
         /* 标签后面**必须**跟一条语句（C11 6.8.1），`}` 之前的 `foo: }` 不合法；
-         * 但 `foo: ;` 合法而且常见，所以这儿只是照常读下一条。 */
+         * 但 `foo: ;` 合法而且常见，所以这儿只是照常读下一条。
+         *
+         * 语句表达式的值靠「深度」认（`exprStmt`），而 `({ lab: q; })` 的值就是 `q` ——
+         * tcc 那边这是自然的（值是「vtop 上剩的那个」，标签不动栈），我们是结构化地数层，
+         * 所以把**那一帧记的深度**往里挪一格，让被标着的那条语句照样算「直接长在这一层」。
+         * 挪的是帧、不是 `blockDepth`：后者还被 `case` 的「是不是 switch 的直接子语句」
+         * （第十五片）与那台 case 预扫描用着，`_default: default:` 那种写法一动就错。 */
         if (this.tok === RBRACE) this.expect('statement');
+        const se = this.seStack.length === 0 ? null : this.seStack[this.seStack.length - 1];
+        const bump = se !== null && se.depth === this.blockDepth;
+        if (bump) se.depth++;
         this.block();
+        if (bump) se.depth--;
         return;
       }
       this.cpp.ungetTok(t);
@@ -3748,6 +3797,10 @@ export class CGen {  /**
     if (this.pass1) return;
     const id = this.labelIds.get(name);
     if (id === undefined) {
+      /* 语句表达式自带一台状态机（见 `stmtExpr`），跳到外面那台上的标签它做不到。 */
+      if (this.seOuterIds !== null && this.seOuterIds.has(name)) {
+        this.err(`goto '${name}' out of a statement expression is not supported`);
+      }
       this.err(`label '${name}' used but not defined`);
       return;
     }
@@ -4132,15 +4185,76 @@ export class CGen {  /**
     if (this.scopes.length <= 1) this.err('statement expression outside of function');
     /* `depth + 2`：下面那次 `block()` 把深度加到 +1（复合语句本身），
      * 它里面的每条子语句再各加一层，于是直接子语句落在 +2 上。 */
-    const frame = { v: sVal(TY_VOID, REF_NONE), depth: this.blockDepth + 2 };
+    const frame = {
+      v: sVal(TY_VOID, REF_NONE), depth: this.blockDepth + 2,
+      slotted: false, slot: -1, ty: TY_VOID, mt: T_VOID,
+    };
+    /* 里面有标签的复合语句要开一层 MIR block 摆那条分派链（第二十四片），而**块里定义的
+     * ref 出了块就不能用**（MIR 是结构化控制流上的 SSA）。所以那一种得让值**落在槽上**：
+     * 块里写、块外读 —— 槽是函数一份的，跨得过 END。
+     *
+     * 「里面有没有标签」第一遍就数好了（`stmtRanges`），第二遍在这儿提前问一次：
+     * `block()` 用的序号正是现在的 `stmtNo`（它自己 `stmtNo++`），所以这一问不动它。 */
+    /* 里面有标签的那一种要**自带一台状态机**（而不是挂在函数那台上），理由有两条：
+     *
+     * 1. 第一遍是 `blockBody` 把「有标签的子语句」push 进**外面那个块**的 `kids` 的，
+     *    于是外面那个块会以为自己多了一条带标签的子语句、要给它切一段（`segCut`）——
+     *    可是语句表达式长在**声明的初始化式**里，第二遍走不到那条语句的分派点上，
+     *    两遍数出来的段数于是不一样。让它自己开一份 `kids`，外面就看不见了。
+     * 2. gcc 明令禁止**跳进**语句表达式，所以里面的标签只可能被里面的 `goto` 用 ——
+     *    一台局部的机器就够，而且它开的 `BLOCK`/`LOOP` 正好嵌在这一层里。
+     *
+     * 反过来「从里面跳到外面的标签」是 gcc 允许的：那要跨出这一层 `LOOP`，我们的
+     * 状态机做不到（状态槽都不是同一个），所以下面把它明确报出来。 */
+    const outerKids = this.kids;
+    const outerIds = this.labelIds;
+    const outerCount = this.labelCount;
+    const outerSlot = this.gotoSlot;
+    /* 「里面有没有标签」第一遍就数好了：`stmtRanges[stmtNo]` 正是下面那次 `block()`
+     * 要用的那一条（它自己 `stmtNo++`），所以提前问一次不动它。
+     * 那张局部标签表也得**跨两遍**活着（编号是第一遍给的、第二遍才用），所以按语句
+     * 序号存在 `seLabels` 里 —— 跟 `stmtRanges` 一样的活法。 */
+    const sn = this.stmtNo;
+    const r = this.pass1 ? undefined : this.stmtRanges[this.stmtNo];
+    const labeled = r !== undefined && r.hi > r.lo;
+    frame.slotted = labeled;
+    this.kids = [];
+    if (this.pass1) {
+      this.labelIds = new Map();
+      this.seLabels.set(sn, this.labelIds);
+    } else {
+      const m = this.seLabels.get(sn);
+      if (m === undefined) this.err('internal: 语句表达式的标签表丢了');
+      this.labelIds = m;
+    }
+    this.labelCount = 0;
+    this.gotoSlot = -1;
+    this.seOuterIds = outerIds;
+    if (labeled) {
+      this.gotoSlot = this.temp(T_I32, 'state');
+      this.f.emit(OP.STORE, T_VOID, this.mod.consts.i32(0), REF_NONE, this.gotoSlot);
+      this.open(OP.BLOCK, 'gotoend', REF_NONE);
+      this.open(OP.LOOP, 'gotoloop', REF_NONE);
+    }
     this.seStack.push(frame);
-    const labelsBefore = this.labelCount;
     this.block();
     this.seStack.pop();
-    if (this.labelCount !== labelsBefore) {
-      this.todo('语句表达式里带语句标签还没到（那时复合语句会开一层 MIR block，值就出不来）');
+    if (labeled) {
+      this.f.emit(OP.BR, T_VOID, REF_NONE, REF_NONE, this.levelOf('gotoend'));
+      this.close();      // gotoloop
+      this.close();      // gotoend
     }
-    return frame.v;
+    this.kids = outerKids;
+    this.labelIds = outerIds;
+    this.labelCount = outerCount;
+    this.gotoSlot = outerSlot;
+    this.seOuterIds = null;
+    if (!frame.slotted) return frame.v;
+    if (frame.slot < 0) return sVal(TY_VOID, REF_NONE);
+    const ld = this.f.emit(OP.LOAD, frame.mt, REF_NONE, REF_NONE, frame.slot);
+    /* 聚合的那一种落在槽上的是**地址**（那块地方在帧上，帧不回收，所以出了块还在）。 */
+    if (isStruct(frame.ty.t) || isArray(frame.ty.t)) return sMem(frame.ty, ld, 0);
+    return sVal(frame.ty, ld);
   }
 
   /** 表达式语句：算完把值丢掉（`tccgen.c` 的 `expr: gexpr(); vpop();`）。 */
@@ -4150,7 +4264,20 @@ export class CGen {  /**
      * 最后一条留下的那个就是整条的值（tcc 的做法是 `vpop(); gexpr();`，
      * `tccgen.c:7511`：先丢掉上一条的，于是最后剩的自然是最后一条的）。 */
     const se = this.seStack.length === 0 ? null : this.seStack[this.seStack.length - 1];
-    if (se !== null && se.depth === this.blockDepth) se.v = v;
+    if (se !== null && se.depth === this.blockDepth) {
+      if (!se.slotted) se.v = v;
+      else if (btype(v.ty.t) !== VT_VOID) {
+        /* 落在槽上的那一种（见 `stmtExpr`）：聚合存**地址**，标量存值。每条都新开一个槽 ——
+         * 类型可以不一样（`({ 1; 1.5; })`），而只有最后一条那个会被读。 */
+        const agg = isStruct(v.ty.t) || isArray(v.ty.t);
+        const mt = agg ? T_I64 : mirTypeOf(v.ty);
+        const slot = this.temp(mt, 'se');
+        this.f.emit(OP.STORE, T_VOID, agg ? this.addrOf(v) : this.gv(v), REF_NONE, slot);
+        se.slot = slot;
+        se.ty = v.ty;
+        se.mt = mt;
+      }
+    }
     this.skip(SEMI);
   }
 
@@ -4250,6 +4377,9 @@ export class CGen {  /**
       || t === TOK_RESTRICT || t === TOK_RESTRICT1 || t === TOK_RESTRICT2
       || t === TOK_EXTENSION || t === TOK_ATOMIC
       || t === TOK_THREAD_LOCAL || t === TOK_THREAD
+      /* `typeof(x) y;` 也是一条声明的开头，而 `(typeof(x))v` 是一次强制转换 ——
+       * 两处都靠这一问（第五十一片）。 */
+      || t === TOK_TYPEOF1 || t === TOK_TYPEOF2 || t === TOK_TYPEOF3
       || t === TOK_ATTRIBUTE1 || t === TOK_ATTRIBUTE2;
   }
 
@@ -4956,7 +5086,18 @@ export class CGen {  /**
         any = true;
         continue;
       }
-      if (t >= TOK_UIDENT) {
+      /* GNU 的 `typeof`（第五十一片，`tccgen.c:4926`）：与 struct/typedef 名一样是
+       * 「一整个类型」，所以走 `tdef` 那一格。 */
+      if (t === TOK_TYPEOF1 || t === TOK_TYPEOF2 || t === TOK_TYPEOF3) {
+        if (bt !== -1 || tdef !== null || sign !== 0 || longs > 0 || shorts > 0) {
+          this.err('two or more data types in declaration specifiers');
+        }
+        this.next();
+        tdef = this.typeofType();
+        any = true;
+        continue;
+      }
+    if (t >= TOK_UIDENT) {
         /* `typedef` 名当基本类型用（tcc 在符号表里找带 `VT_TYPEDEF` 的那条，
          * `tccgen.c:4880` 一带）。**只在还没有基本类型时**才吃它 —— 否则
          * `int x;` 里的 `x` 会被当成类型名（如果恰好有一个同名 typedef 的话）。
@@ -5018,6 +5159,30 @@ export class CGen {  /**
   typeName() {
     const base = this.parseBtype();
     return this.declarator(stripStorage(base), 'none').ty;
+  }
+
+  /**
+   * `typeof(…)` 括号里那一坨的类型（`parse_expr_type`，`tccgen.c:6810`）。
+   * 里面可以是**类型名**也可以是**表达式**，表达式那一种**不求值** —— 与 `sizeof` 是
+   * 同一件事，所以同一个手法：发进一个用完就丢的 MirFunc。
+   *
+   * 存储类要剥掉（tcc 那句 `type1.t &= ~(VT_STORAGE&~VT_TYPEDEF)`）：`typeof(x)` 里的
+   * `x` 可能是个 `static` 的东西，而那说的是**那个对象**，不是它的类型。
+   */
+  typeofType() {
+    this.skip(LPAR);
+    let ty;
+    if (this.isTypeStart(this.tok)) {
+      ty = this.typeName();
+    } else {
+      const scratch = new MirFunc('$typeof', [], T_VOID);
+      const outer = this.f;
+      this.f = scratch;
+      ty = this.gexpr().ty;
+      this.f = outer;
+    }
+    this.skip(RPAR);
+    return stripStorage(ty);
   }
 
   /**
@@ -5334,9 +5499,13 @@ export class CGen {  /**
   funcParamsBody() {
     /** @type {{name:string,ty:object}[]} */
     const params = [];
+    /* `int f()` —— 括号里**什么都没写**：这不是「没有形参」，而是「形参没说」
+     * （C11 6.7.6.3 第 14 段），tcc 记的也是 `FUNC_OLD`（`post_type` 里 `l == 0` 那一支）。
+     * 于是它与任何形参表相容（`compareTypes` 的函数那一支），调用点也不核对个数。
+     * 「真的没有形参」是 `int f(void)`，那一种在下面。 */
     if (this.tok === RPAR) {
       this.next();
-      return { params, variadic: false };
+      return { params, variadic: false, old: true };
     }
     if (this.tok === TOK_VOID) {
       // `(void)` = 没有形参；`(void *p)` 之类要交回去按普通形参走
@@ -6073,6 +6242,7 @@ export class CGen {  /**
     this.stmtRanges = [];
     this.labelIds = new Map();
     this.labelCount = 0;
+    this.seLabels = new Map();
     this.fpRef = this.mod.consts.int(0n);
     this.runBody(body, new MirFunc(`$scan$${name}`, [], mirTypeOf(ret)), ret, name, params,
       info.variadic);

@@ -282,38 +282,84 @@ export function typeText(ty) {
   return `<type ${t}>`;
 }
 
-/** 两个类型「一样吗」（`is_compatible_types` 的这一片）：只比类型位与指向的东西。 */
-export function sameType(a, b) {
-  if ((a.t & ~VT_STORAGE) !== (b.t & ~VT_STORAGE)) return false;
-  if (a.ref === null || b.ref === null) return a.ref === b.ref;
-  if (isPtr(a.t) || isArray(a.t)) return sameType(a.ref, b.ref);
-  /* 函数类型是**结构性**地比的：`int (*)(int)` 每写一次就是一个新的 ref 对象，
-   * 而 C 说这两个类型相同（C11 6.7.6.3 第 15 段）。struct 那边相反 —— 一个 tag
-   * 一个对象，所以比引用就够（见 `mkStruct`）。 */
-  if (isFunc(a.t)) {
+/**
+ * 两个类型「相容吗」—— tcc 的 `compare_types`（`tccgen.c:4130`），整个前端只有这一处。
+ *
+ * `unqualified` 为真时先脱掉**最外层**的 `const`/`volatile`（赋值要的是这一问：C11
+ * 6.5.16.1 说两边必须是去掉限定符之后相容的类型；`const char *` 与 `char *` 那种差别在
+ * 指向的东西上，不在这一层，递归下去时就不脱了 —— tcc 也是这么分的）。
+ *
+ * 三处容易漏掉的、而 tcc 都做了的事：
+ *   1. **枚举**：两边都是枚举就比是不是同一个（`ref` 相等）；只有一边是，那一边就换成
+ *      它的底层整型 —— 所以 `enum E` 与 `int` 是相容的。
+ *   2. **`signed` 写没写只对 `char` 有意义**：`signed int` 与 `int` 是同一个类型，而
+ *      `char` / `signed char` / `unsigned char` 是**三个**（C11 6.2.5 第 15 段）。
+ *      所以基本类型不是 `VT_BYTE` 时先把 `VT_DEFSIGN` 抹掉。
+ *   3. **数组的长度**要比，但**有一边没写长度就算相容**（`int a[]` 与 `int a[10]`）——
+ *      暂定定义与「先声明后补全」全靠这一条。
+ *
+ * 比的是 `t & ~(VT_STORAGE | VT_STRUCT_MASK)`（tcc 的 `VT_TYPE`）：存储类不是类型的一部分，
+ * struct/union/enum 那一段与位域那几位也不比 —— 前者由下面的 `ref` 相等分辨，
+ * 后者（位域的偏移与宽度）是**成员**的事，不是类型的事。
+ */
+export function compareTypes(a, b, unqualified) {
+  if (isEnum(a.t)) {
+    if (isEnum(b.t)) return a.ref === b.ref;
+    /* 只有一边是枚举 -> 换成它的底层整型（我们的枚举底层永远是 `int`，见 `mkEnum`）：
+     * 去掉 `VT_ENUM` 那两位、`ref` 也不要，剩下的就是那个整型。 */
+    a = ctype(a.t & ~VT_STRUCT_MASK, null);
+  } else if (isEnum(b.t)) {
+    b = ctype(b.t & ~VT_STRUCT_MASK, null);
+  }
+  const mask = ~(VT_STORAGE | VT_STRUCT_MASK);
+  let t1 = a.t & mask;
+  let t2 = b.t & mask;
+  if (unqualified) {
+    const q = VT_CONSTANT | VT_VOLATILE;
+    t1 &= ~q;
+    t2 &= ~q;
+  }
+  if (btype(t1) !== VT_BYTE) {
+    t1 &= ~VT_DEFSIGN;
+    t2 &= ~VT_DEFSIGN;
+  }
+  if (t1 !== t2) return false;
+  if (isArray(t1)) {
+    const c1 = a.count === undefined ? -1 : a.count;
+    const c2 = b.count === undefined ? -1 : b.count;
+    if (c1 >= 0 && c2 >= 0 && c1 !== c2) return false;
+  }
+  const bt = btype(t1);
+  if (bt === VT_PTR) {
+    if (a.ref === null || b.ref === null) return a.ref === b.ref;
+    return compareTypes(a.ref, b.ref, 0);
+  }
+  if (bt === VT_STRUCT) return a.ref === b.ref;
+  if (bt === VT_FUNC) {
+    if (a.ref === null || b.ref === null) return a.ref === b.ref;
+    /* 老式声明（`int f();` —— tcc 的 `FUNC_OLD`）**不说**形参是什么，所以只要返回类型
+     * 相容就算相容，形参一概不比（`is_compatible_func`：见到 `FUNC_OLD` 当场回 1）。 */
+    if (a.ref.old === true || b.ref.old === true) return compareTypes(a.ref.ret, b.ref.ret, 1);
+    /* 函数类型是**结构性**地比的：`int (*)(int)` 每写一次就是一个新的 ref 对象，
+     * 而 C 说这两个类型相同（C11 6.7.6.3 第 15 段）。struct 那边相反 —— 一个 tag
+     * 一个对象，所以比引用就够（见 `mkStruct`）。 */
     if (a.ref.variadic !== b.ref.variadic) return false;
     if (a.ref.params.length !== b.ref.params.length) return false;
-    if (!sameType(a.ref.ret, b.ref.ret)) return false;
+    if (!compareTypes(a.ref.ret, b.ref.ret, 1)) return false;
     for (let i = 0; i < a.ref.params.length; i++) {
-      if (!sameType(a.ref.params[i].ty, b.ref.params[i].ty)) return false;
+      if (!compareTypes(a.ref.params[i].ty, b.ref.params[i].ty, 1)) return false;
     }
     return true;
   }
-  return a.ref === b.ref;
+  return true;
 }
 
-/**
- * 两个类型「去掉最外层的 const/volatile 之后一样吗」。
- *
- * 赋值要的是这一问，不是 `sameType`：C11 6.5.16.1 说两边必须是**去掉限定符之后**
- * 相容的类型。`const struct __float2 x = f();`（macOS 的 `<math.h>` 里就有）两侧
- * 只差一个 `const`，比全等就会把对的代码判成错的。
- *
- * 只脱最外层 —— `const char *` 与 `char *` 那种差别在指向的东西上，不在这一层，
- * 那是另一条规则（还没到）。
- */
+/** 两个类型「一样吗」（tcc 的 `is_compatible_types`）。 */
+export function sameType(a, b) {
+  return compareTypes(a, b, 0);
+}
+
+/** 「去掉最外层的 const/volatile 之后一样吗」（tcc 的 `is_compatible_unqualified_types`）。 */
 export function sameTypeUnqual(a, b) {
-  const q = VT_CONSTANT | VT_VOLATILE;
-  if ((a.t & q) === (b.t & q)) return sameType(a, b);
-  return sameType({ t: a.t & ~q, ref: a.ref, count: a.count }, { t: b.t & ~q, ref: b.ref, count: b.count });
+  return compareTypes(a, b, 1);
 }
