@@ -890,6 +890,42 @@ export class CGen {  /**
     return e;
   }
 
+  /**
+   * 块里带 `static` 的变量（第五十七片，tcc 的 `decl_initializer_alloc` 里
+   * `r & VT_SYM` 那一路）：**存储期是整个程序**，所以东西在 data 段上，与全局量走同一路；
+   * 名字只在这一层可见，所以登记还是压在当前作用域里，指向那条全局登记。
+   *
+   * data 段里的名字要**加料**：两个函数里各有一个 `static int n;` 是两个不同的对象。
+   * 料是「函数名 + 这个函数里的第几条 static」—— 序号在两遍里数出来一样（函数体解析
+   * 两遍，偏离 4），于是第二遍找到的是第一遍划的那块地方，不会划两次。
+   */
+  declareStaticLocal(name, ty, align) {
+    if (btype(ty.t) === VT_VOID) this.err(`variable '${name}' has void type`);
+    this.tdefShadow(name);
+    const key = `${this.funcName}.${name}.${this.staticNo++}`;
+    let g = this.gvars.get(key);
+    if (g === undefined) g = this.declareGlobal(key, ty, false, align);
+    /* 第二遍见到的是同一条声明，但**类型对象是新的**（函数体里写的匿名 struct 每遍
+     * 各造一个 tag 对象），所以不能走 `declareGlobal` 那条「合并两条同名声明」的路 ——
+     * 那条路会把它判成 `incompatible types for redefinition`。地址留着、类型换成这一遍的。 */
+    else g.ty = ty;
+    const e = { ty, slot: -1, off: -1, align, gvar: g };
+    this.scopes[this.scopes.length - 1].set(name, e);
+    return e;
+  }
+
+  /**
+   * 块里的 `extern int x;`：说的是**文件作用域**那个对象（C11 6.2.2 第 4 段），
+   * 所以查/建的是同一条全局登记，只是把名字也摆进这一层作用域里。
+   */
+  declareExternLocal(name, ty, hasInit, align) {
+    this.tdefShadow(name);
+    const g = this.declareGlobal(name, ty, !hasInit, align);
+    const e = { ty, slot: -1, off: -1, align, gvar: g };
+    this.scopes[this.scopes.length - 1].set(name, e);
+    return e;
+  }
+
   /** 一条作用域登记 -> 一个左值。 */
   entryLval(name, e) {
     /* `__alignof__(x)` 要的是**符号**那一份对齐（第三十五片）。tcc 的做法是回头去看
@@ -897,6 +933,9 @@ export class CGen {  /**
      * 我们这儿记「最后一次引用到的符号带的对齐」—— 同一个意思，同样只在紧接着问的
      * 时候才有意义。 */
     this.symAlign = e.align || 0;
+    /* 块里带 `static`（或 `extern`）的那一种：名字只在这一层可见，东西却住在 data 段
+     * （第五十七片）。所以这条登记只是一个转手 —— 真的地址在那条全局登记上。 */
+    if (e.gvar !== undefined) return this.gvarLval(e.gvar);
     /* 变长数组：槽里放的是**那块地方的地址**，所以要先读出来再当内存左值的基址。
      * 「读一次」发生在每一次引用上 —— 那个槽从声明之后就不再变，读几次都一样。 */
     if (e.vla === true) {
@@ -6063,14 +6102,22 @@ export class CGen {  /**
 
           /* 变量自己写的 `__attribute__((aligned(N)))`（tcctest.c:1007 的
            * `struct aligntest7 altest7[2] __attribute__((aligned(16)));`）：
-           * 它抬的是**这一个符号**的对齐，不是类型的 —— 所以只喂给分配那一步。 */
-          const e = global ? this.declareGlobal(name, vty, isExtern && !hasInit, dad.aligned)
-            : this.declareLocal(name, vty, dad.aligned);
+           * 它抬的是**这一个符号**的对齐，不是类型的 —— 所以只喂给分配那一步。
+           *
+           * 「往哪儿落地」有四种（第五十七片）：文件作用域、块里的 `static`、块里的
+           * `extern`、真的局部量。前三种都在 data 段上，所以初始化式走的是静态那一路。 */
+          const hasStatic = (spec.t & VT_STATIC) !== 0;
+          const inData = global || hasStatic || isExtern;
+          let e;
+          if (global) e = this.declareGlobal(name, vty, isExtern && !hasInit, dad.aligned);
+          else if (isExtern) e = this.declareExternLocal(name, vty, hasInit, dad.aligned);
+          else if (hasStatic) e = this.declareStaticLocal(name, vty, dad.aligned);
+          else e = this.declareLocal(name, vty, dad.aligned);
           if (hasInit) {
             let dest;
             let base;
-            if (global) {
-              dest = { stat: true, addr: e.addr };
+            if (inData) {
+              dest = { stat: true, addr: e.addr !== undefined ? e.addr : e.gvar.addr };
               base = 0;
             } else if (e.off >= 0) {
               dest = { stat: false, addr: this.fpRef };
@@ -6081,7 +6128,7 @@ export class CGen {  /**
             }
             /* 花括号的初始化式只覆盖写出来的那些，剩下的按 C 要是 0。静态那一侧免费
              * （线性内存出生就是 0），自动这一侧先整块清零。 */
-            if (braced && !global && e.off >= 0) {
+            if (braced && !inData && e.off >= 0) {
               this.autoZero(this.fpRef, e.off, typeSize(vty).size);
             }
             if (strBytes !== null) this.initString(dest, base, vty, strBytes);
@@ -6371,6 +6418,9 @@ export class CGen {  /**
     this.vlaStack = [];
     /* 两遍各自从 0 数起，于是同一条语句在两遍里是同一个序号（`block` 那个包装）。 */
     this.stmtNo = 0;
+    /* 块里那些 `static` 在 data 段上的名字带着这个序号（`declareStaticLocal`）——
+     * 同样是「两遍数出来一样」，于是第二遍找到的是第一遍划的那块地方。 */
+    this.staticNo = 0;
     this.kids = [];
     this.pendingSwitch = null;
 
