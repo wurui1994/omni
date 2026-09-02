@@ -103,6 +103,18 @@ function widthOf(t) {
  * `callArgs`（真的发指令）都问它。两处各算一遍的话，迟早在某个边角上分家，
  * 而那种错的症状是「实参串位」——最难查的一类。
  */
+/**
+ * 这个实参是不是「一整块内容」（`ARGMEM`，第三十九片）—— 是就回它有几个字节，不是回 0。
+ *
+ * 苹果的 arm64 上变参一律走栈，所以一块内容就是**栈上连着的 `align8(n)` 个字节**：
+ * 与标量那一格同一条规则（一格至少 8 字节），只是格子更宽。
+ */
+function argMemBytes(f, ar) {
+  if (isConstRef(ar)) return 0;
+  const i = f.at(ar);
+  return f.op[i] === OP.ARGMEM ? f.aux[i] : 0;
+}
+
 function argPlaces(mod, f, args, nfixed) {
   const at = [];
   let ngrn = 0;
@@ -112,7 +124,14 @@ function argPlaces(mod, f, args, nfixed) {
   for (const ar of args) {
     const va = nfixed >= 0 && k >= nfixed;
     const t = f.typeOf(ar, mod.consts);
-    if (!va && isFloatType(t) && nsrn <= 7) {
+    const n = argMemBytes(f, ar);
+    if (n > 0) {
+      /* 一整块内容只可能出现在变参那一段（前端只在那儿发 `ARGMEM`）—— 真在固定实参
+       * 里撞见，那是上一层错了，不该悄悄按地址传过去。 */
+      if (!va) return nyi('固定实参里的 ARGMEM（那一段传的是地址）');
+      at.push({ off: stack, bytes: n });
+      stack += n + (n % 8 === 0 ? 0 : 8 - (n % 8));
+    } else if (!va && isFloatType(t) && nsrn <= 7) {
       at.push({ v: nsrn });
       nsrn++;
     } else if (!va && !isFloatType(t) && ngrn <= 7) {
@@ -566,8 +585,26 @@ class FnGen {
     if (op === OP.VAARG) {
       this.loadRef(TMP0, f.a[i]);
       buf.emit(a.ldrU(3, TMP1, TMP0, 0));
+      /* aux > 0：这一格里躺着一个 struct（第三十九片）。回的是**这一格的地址**，
+       * 游标往前走 `align8(n)` —— 与写的那一侧（`argPlaces` 里的 `ARGMEM`）同一条规则。
+       * 内容一个字节都不动：拷不拷由前端那边的赋值决定。 */
+      if (f.aux[i] !== 0) {
+        const n = f.aux[i];
+        const step = n + (n % 8 === 0 ? 0 : 8 - (n % 8));
+        if (step > 4095) return nyi(`va_arg 取 ${n} 字节的 struct（一条 add 的立即数装不下）`);
+        buf.emit(a.movReg(1, RES, TMP1));
+        buf.emit(a.addImm(1, TMP1, TMP1, step), a.strU(3, TMP1, TMP0, 0));
+        return this.def(i, RES);
+      }
       MLOAD_EMIT[typeKind(t) === T_I32 ? 'i32s' : widthKey(t)](buf, RES, TMP1);
       buf.emit(a.addImm(1, TMP1, TMP1, 8), a.strU(3, TMP1, TMP0, 0));
+      return this.def(i, RES);
+    }
+    /* 变参里的一整块内容（第三十九片）：这一条本身**不发访存** —— 内容什么时候拷、
+     * 拷到哪儿，是调用那一头的事（`callArgs` 里按 `place.bytes` 拷）。这儿只把地址
+     * 落到自己的栈位上，好让 `callArgs` 拿得到。 */
+    if (op === OP.ARGMEM) {
+      this.loadRef(RES, f.a[i]);
       return this.def(i, RES);
     }
     /* `va_copy`（第三十二片）：苹果 arm64 上 `va_list` 就是那个游标，所以「抄一份」
@@ -779,6 +816,20 @@ class FnGen {
        * 这一条**只能按 `sp` 写**（第三十六片）：出参区的约定是「紧贴 sp」，而会动栈顶的
        * 函数里 `this.base` 是那个钉住的帧基址，与 `sp` 早就不是一回事了。 */
       if (place.off !== undefined) {
+        /* 一整块内容（`ARGMEM`，第三十九片）：把 `bytes` 个字节拷进那一格。
+         * 按 8/4/2/1 递降着拷，**不拷到格子的末尾**（格子补齐到 8，源没有那么长）——
+         * 多读的那几个字节大多无害，可源要是正好贴着一页的末尾就会踩空。 */
+        if (place.bytes !== undefined) {
+          this.loadRef(TMP0, ar);
+          let at = 0;
+          for (const [w, sz] of [[8, 3], [4, 2], [2, 1], [1, 0]]) {
+            while (place.bytes - at >= w) {
+              this.buf.emit(a.ldrU(sz, TMP1, TMP0, at), a.strU(sz, TMP1, SP, place.off + at));
+              at += w;
+            }
+          }
+          continue;
+        }
         this.loadRef(TMP0, ar);
         this.buf.emit(a.strU(3, TMP0, SP, place.off));
         continue;

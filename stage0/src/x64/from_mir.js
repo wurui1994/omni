@@ -514,6 +514,10 @@ class FnGen {
       return;
     }
     if (op === OP.VAARG) {
+      /* struct 那一格（第三十九片）在 SysV 上要走真的分类：每 8 字节一格算
+       * INTEGER/SSE，超过 16 字节整份进 MEMORY，而分类结果决定它躺在寄存器保存区里
+       * 还是溢出区里。那是下一片的活 —— 明着报，别按标量读半格。 */
+      if (f.aux[i] !== 0) return nyi('va_arg 取 struct（SysV 的分类还没到）');
       const flt = isFloatType(t);
       const field = flt ? 4 : 0;          // gp_offset 在 0、fp_offset 在 4
       const limit = flt ? 176 : 48;       // 越过这条线就说明寄存器那一段用完了

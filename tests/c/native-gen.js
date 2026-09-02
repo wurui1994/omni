@@ -33,7 +33,7 @@ const CLANG = ['/usr/bin/clang', '/opt/homebrew/opt/llvm/bin/clang'].find((p) =>
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 
 /** 能编出来并且跑对的最少条数。往上走是好事（那说明又填了一格），往下走是回归。 */
-const MIN_OK = 80;
+const MIN_OK = 81;
 
 /**
  * 这几条**问不出同一个答案**，与对错无关：

@@ -211,7 +211,9 @@ function checkIndex(mod, f, i, op, v, bad, k) {
    * double/int），放过去只会读到半格。 */
   if (op === OP.VASTART || op === OP.VAARG || op === OP.VACOPY) {
     if (!mod.native) { bad(i, `${OP_NAMES[op]}：只有 native 这条腿有真的 va_list`); return; }
-    if (v !== 0) { bad(i, `${OP_NAMES[op]} 的 aux 只能是 0`); return; }
+    /* `VAARG` 的 aux 是「这一格里躺着一个多大的 struct」（第三十九片，0 表示标量）；
+     * 另两条不带这个意思，aux 只能是 0。 */
+    if (v !== 0 && op !== OP.VAARG) { bad(i, `${OP_NAMES[op]} 的 aux 只能是 0`); return; }
     const t = f.t[i];
     if (op === OP.VASTART) {
       if (!f.variadic) { bad(i, `VASTART：函数 '${f.name}' 的形参表里没有 ...`); return; }
@@ -224,9 +226,23 @@ function checkIndex(mod, f, i, op, v, bad, k) {
       if (t !== T_I64) bad(i, `VACOPY 的 t 是 ${typeText(t)}，va_list 只能是 i64`);
       return;
     }
+    /* 取 struct（aux > 0）回的是**那一格的地址**：内容整份躺在变参区里，拷不拷由前端
+     * 那边的赋值决定（与 struct 返回同一个手法）。 */
+    if (v !== 0) {
+      if (t !== T_I64) bad(i, `VAARG 取 ${v} 字节的 struct，回的是地址，t 只能是 i64`);
+      return;
+    }
     if (t !== T_I64 && t !== T_I32 && t !== T_F64) {
       bad(i, `VAARG 取的是 ${typeText(t)}，C 的变参只传 i32/i64/f64`);
     }
+    return;
+  }
+  /* 变参里的一整块内容（第三十九片）：只有 native 有真 ABI 可言 —— 线性内存那条腿上
+   * 变参走的是我们自己摆的那块变参区（`vaBlock`），struct 直接摊进去，不用新 op。 */
+  if (op === OP.ARGMEM) {
+    if (!mod.native) { bad(i, 'ARGMEM：只有 native 这条腿上变参按真 ABI 走'); return; }
+    if (v <= 0) { bad(i, `ARGMEM 的 aux 是 ${v}，那是字节数，只能是正数`); return; }
+    if (f.t[i] !== T_I64) bad(i, `ARGMEM 的 t 是 ${typeText(f.t[i])}，它拿的是地址，只能是 i64`);
     return;
   }
   /* 会动的栈顶（第三十六片）：只有 native 有真的机器栈可动 —— 线性内存那条腿上

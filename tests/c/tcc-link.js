@@ -38,7 +38,7 @@ const CLI = join(root, 'stage0', 'src', 'cli.js');
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 
 /** 能链上并且跑对的最少条数 —— 往下走就是回归（`native-gen.js` 那边同一条防线）。 */
-const MIN_OK = 80;
+const MIN_OK = 81;
 
 /** 与 `native-gen.js` 同一份原因：这两条问不出同一个答案。 */
 const SKIP = new Map([

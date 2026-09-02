@@ -3451,7 +3451,14 @@ export class CGen {  /**
       if (this.native) {
         nfixed = refs.length;
         for (const e of extra) {
-          if (e.val !== undefined) this.todo('native：变参里的 struct（要按真 ABI 摊开）');
+          /* struct 进可变部分（第三十九片）：发一条 `ARGMEM`（内容的地址 + 字节数），
+           * 由后端按 ABI 把那几个字节拷进格子里。前端这一层不知道那一格在哪儿 ——
+           * 苹果 arm64 上一律在栈上，SysV 上还要分类，那都是后端的账。 */
+          if (e.val !== undefined) {
+            const s = typeSize(e.ty);
+            refs.push(this.f.emit(OP.ARGMEM, T_I64, this.addrOf(e.val), REF_NONE, s.size));
+            continue;
+          }
           refs.push(e.ref);
         }
       } else {
@@ -3570,7 +3577,14 @@ export class CGen {  /**
     /* native（第二十五片）：一格在哪儿由后端按真 ABI 找 —— 这儿只发一条 `VAARG`，
      * 实参照旧是**那个 va_list 变量的地址**（后端要就地把它推到下一格）。 */
     if (this.native) {
-      if (isStruct(ty.t)) this.todo('native：va_arg 取 struct 还没到（要真的 ABI 分类）');
+      /* struct 那一格（第三十九片）：内容整份躺在变参区里，所以回的是**指向那一份的
+       * 左值** —— 要拷贝的话由赋值那一步去拷（`structCopy`），取成员就直接读。
+       * 与线性内存那条腿、以及 struct 返回，都是同一个手法。 */
+      if (isStruct(ty.t)) {
+        const s = typeSize(ty);
+        const at = this.f.emit(OP.VAARG, T_I64, this.addrOf(ap), REF_NONE, s.size);
+        return sMem(ty, at, 0);
+      }
       const mt = mirTypeOf(ty);
       if (mt === T_F32) this.todo('va_arg 取 float（C 的默认提升本来就让它过不来）');
       const v = this.f.emit(OP.VAARG, mt, this.addrOf(ap), REF_NONE, 0);
