@@ -11,7 +11,7 @@
 import {
   writeText, readText, exists, readDir, mtimeMs, fileSize, mkdirAll, rename,
   args as procArgs, env, stdout, stderr, setExitCode, spawn, evalJs, hasJsEngine, nowMs,
-  cwd, installDir, isDir, writeBinary,
+  cwd, installDir, isDir, writeBinary, readBinary,
 } from './host/native.js';
 import { join, basename, dirname, isAbsolute, resolve } from './host/path.js';
 import { hash16 } from './host/hash.js';
@@ -27,6 +27,7 @@ import { genModule as genArm64 } from './arm64/from_mir.js';
 import { genModule as genX64 } from './x64/from_mir.js';
 import { writeObject } from './link/macho.js';
 import { writeObject as writeElfObject } from './link/elf.js';
+import { mergeObjects as mergeElfObjects } from './link/elf_merge.js';
 import { readSexpr } from './sexpr/read.js';
 import { lowerCoreSexpr } from './sexpr/lower.js';
 import { printSexpr } from './sexpr/print.js';
@@ -1786,7 +1787,7 @@ function main(argv) {
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a === '-o' || a === '--mode' || a === '--work' || a === '--cache'
-      || a === '-I' || a === '-D') { i++; continue; }
+      || a === '-I' || a === '-D' || a === '--rdata') { i++; continue; }
     if (a.startsWith('-')) continue;
     files.push(a);
   }
@@ -2014,7 +2015,29 @@ function main(argv) {
       stdout(`${cObj(path, out, arch, incDirs(flags), defArgs(flags), fmt, os)}\n`);
       return 0;
     }
+    /* `elf-r`：几个 `.o` 并成一个 `.o`，就是 `tcc -r`（第九刀第四十二片）。
+     * 输入可以是 **tcc 自己出的**目标文件 —— 于是这一步的字节对账不必等代码生成对齐。
+     *   omni elf-r a.o b.o -o m.o [--rdata .rdata] [--unwind] */
+    case 'elf-r': {
+      const oi = rest.indexOf('-o');
+      const out = oi >= 0 ? rest[oi + 1] : 'a.o';
+      const ri = rest.indexOf('--rdata');
+      /* `readBinary` 回的是 latin1 的串（宿主那一层就这么定的），读节头要按字节看。 */
+      const bytesOf = (p) => {
+        const s = readBinary(p);
+        const b = new Uint8Array(s.length);
+        for (let k = 0; k < s.length; k++) b[k] = s.charCodeAt(k);
+        return b;
+      };
+      writeBinary(out, mergeElfObjects(files.map(bytesOf), {
+        rdata: ri >= 0 ? rest[ri + 1] : '.data.ro',
+        unwind: rest.includes('--unwind'),
+      }));
+      stdout(`${out}\n`);
+      return 0;
+    }
     // 一个源文件一份产物（第七十五刀）：`<名字>.sx` 与 `<名字>.js` 摊在一个目录里，
+
     // 名字就是源文件自己的名字。`-o 目录` 指定去处，默认 .omni-cache/asy-mods。
     // 加 `--run` 就直接跑（node 自己按 ESM 的模块图把它们串起来）。
     case 'asy-units': {
@@ -2185,6 +2208,8 @@ commands:
             follows -- becomes the program's own argv (argv[0] is the .c path).
   c-obj     compile a .c file to a real object file (ADR-0017 cut 9: native, no linear
             memory). -o NAME, --arch arm64|x86_64. Link it yourself: clang a.o -o a
+  elf-r     merge several ELF object files into one, i.e. tcc -r (ADR-0017 cut 9 slice
+            42). -o NAME, --rdata NAME (PE calls it .rdata), --unwind (.eh_frame)
   oir       print the OIR as JSON
   mir       print the MIR (ADR-0014 decision 6): SSA values + slots + structured
             control flow, one 8-byte record per instruction (--bytes: sizes and
