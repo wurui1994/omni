@@ -282,3 +282,128 @@ function checksum(bytes) {
   }
   return sum + bytes.length;
 }
+
+/* ------------------------------------------------------------------ 导入表
+ * `pe_build_imports`（第九刀第四十四片）。它整段接在 thunk 那一节（`.rdata`）的
+ * 末尾，一格都不能挪：
+ *
+ *   dll_ptr = 先把 thunk 补齐到 16 之后的长度
+ *   imp_size = (dll 数 + 1) * 20        // 描述符，末尾一条全 0
+ *   iat_size = (符号数 + dll 数) * 8    // 每个 dll 的那一串末尾一条 0
+ *   thk_ptr = dll_ptr + imp_size        // FirstThunk 那一份（运行时被改写成真地址）
+ *   ent_ptr = thk_ptr + iat_size        // OriginalFirstThunk 那一份（原样留着）
+ *   再往后：dll 名字、每个符号的「提示字 + 名字」，按 dll、符号的次序一条条接
+ *
+ * 两份 thunk 数组里填的是同一个值：按名字导入就是「提示字 + 名字」那一处的 RVA，
+ * 按序号导入就是 `序号 | 最高位`。
+ */
+
+const IMP_DESC_SIZE = 20;
+const THUNK_SIZE = 8;
+/** 按序号导入的标志位：`(ADDR3264)1 << 63`。 */
+const ORDINAL_FLAG = 2n ** 63n;
+
+/**
+ * 把一份映像里的导入表读成「哪个 dll、按什么次序导入哪些符号」。
+ *
+ * @param img `readImage` 的结果
+ * @returns `null`（没有导入表）或 `{sec, at, rva, dlls}`：`sec` 是导入表所在节的下标，
+ *          `at` 是它在那一节里的起点（`dll_ptr`），`rva` 是那一节的 RVA
+ */
+export function readImports(img) {
+  const dir = img.dirs[1];
+  if (dir.size === 0) return null;
+  const si = img.secs.findIndex((s) => dir.addr >= s.vaddr && dir.addr < s.vaddr + s.vsize);
+  if (si < 0) throw new OmniError('pe: 导入表不在任何一节里');
+  const sec = img.secs[si];
+  const dv = new DataView(sec.bytes.buffer, sec.bytes.byteOffset, sec.bytes.byteLength);
+  /** RVA -> 这一节字节里的下标。 */
+  const off = (rva) => rva - sec.vaddr;
+  const strAt = (rva) => {
+    let e = off(rva);
+    while (sec.bytes[e] !== 0) e++;
+    let s = '';
+    for (let p = off(rva); p < e; p++) s += String.fromCharCode(sec.bytes[p]);
+    return s;
+  };
+
+  const at = off(dir.addr);
+  const dlls = [];
+  for (let i = 0; i * IMP_DESC_SIZE + IMP_DESC_SIZE <= dir.size; i++) {
+    const p = at + i * IMP_DESC_SIZE;
+    const ent = dv.getUint32(p, true);
+    const name = dv.getUint32(p + 12, true);
+    if (ent === 0 && name === 0) break;                 // 末尾那条全 0
+    const syms = [];
+    for (let k = 0; ; k++) {
+      const v = dv.getBigUint64(off(ent) + k * THUNK_SIZE, true);
+      if (v === 0n) break;
+      if ((v & ORDINAL_FLAG) !== 0n) syms.push({ ordinal: Number(v & 0xffffffffn) });
+      else syms.push({ name: strAt(Number(v) + 2) });    // 前面两个字节是提示字
+    }
+    dlls.push({ name: strAt(name), syms });
+  }
+  return { sec: si, at, rva: sec.vaddr, dlls };
+}
+
+/**
+ * 把导入表写出来。回的是**从 `at` 起**的那一段字节 —— 它整段就是 thunk 那一节的尾巴。
+ *
+ * @param imp `readImports` 那个形状
+ * @returns 从 `at` 到那一节末尾的字节
+ */
+export function buildImports(imp) {
+  const ndlls = imp.dlls.length;
+  let nsyms = 0;
+  for (const d of imp.dlls) nsyms += d.syms.length;
+  const impSize = (ndlls + 1) * IMP_DESC_SIZE;
+  const iatSize = (nsyms + ndlls) * THUNK_SIZE;
+
+  /* 先摆下描述符与两份 thunk 数组，名字接在它们后面（`section_ptr_add` 那一句）。 */
+  const head = new Uint8Array(impSize + 2 * iatSize);
+  const hv = new DataView(head.buffer);
+  const tail = [];
+  /** 名字区里下一个位置的 RVA。 */
+  const nextRva = () => imp.rva + imp.at + head.length + tail.length;
+  const put = (s) => {
+    const rva = nextRva();
+    for (let i = 0; i < s.length; i++) tail.push(s.charCodeAt(i));
+    tail.push(0);
+    return rva;
+  };
+
+  let dllPtr = 0;
+  let thkPtr = impSize;
+  let entPtr = impSize + iatSize;
+  for (const d of imp.dlls) {
+    /* dll 的名字先进去 —— tcc 是先 `put_elf_str` 再填描述符的。 */
+    const nameRva = put(d.name);
+    hv.setUint32(dllPtr, entPtr + imp.rva + imp.at, true);      // OriginalFirstThunk
+    hv.setUint32(dllPtr + 12, nameRva, true);                   // Name
+    hv.setUint32(dllPtr + 16, thkPtr + imp.rva + imp.at, true); // FirstThunk
+    for (let k = 0; k <= d.syms.length; k++) {
+      let v = 0n;
+      if (k < d.syms.length) {
+        const s = d.syms[k];
+        if (s.ordinal !== undefined) {
+          v = BigInt(s.ordinal) | ORDINAL_FLAG;
+        } else {
+          v = BigInt(nextRva());
+          tail.push(0, 0);                                      // 提示字，没人用
+          put(s.name);
+        }
+      }
+      hv.setBigUint64(thkPtr, v, true);
+      hv.setBigUint64(entPtr, v, true);
+      thkPtr += THUNK_SIZE;
+      entPtr += THUNK_SIZE;
+    }
+    dllPtr += IMP_DESC_SIZE;
+  }
+
+  const out = new Uint8Array(head.length + tail.length);
+  out.set(head, 0);
+  out.set(new Uint8Array(tail), head.length);
+  return out;
+}
+
