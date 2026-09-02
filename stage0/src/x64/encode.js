@@ -494,3 +494,151 @@ export function pop(r) {
   chkReg(r);
   return [...rex(false, false, false, r > 7, false), 0x58 + (r % 8)];
 }
+
+/* ---------------------------------------------------------------- SSE（浮点）
+ * 第九刀第十三片。x86_64 上的 `double`/`float` 一律走 SSE 的**标量**那一档
+ * （`movsd`/`addsd`…… 的 `s` 是 scalar），x87 那一整摊不碰 —— 它是栈式的、
+ * 精度还是 80 位，与 C 的 `double` 对不上（tcc 的 x86-64 后端也走 SSE）。
+ *
+ * 编码的形状：一个**强制前缀**（`F2` 是 double、`F3` 是 float、`66` 是打包的双精度）
+ * 加 `0F` 加操作码。次序上强制前缀在 **REX 之前** —— 记反了 llvm 立刻打回来。
+ */
+
+/** xmm 寄存器号 0-15。与整数寄存器是两套，第四位一样藏在 REX 的 R/B 上。 */
+export const XMM = {
+  xmm0: 0, xmm1: 1, xmm2: 2, xmm3: 3, xmm4: 4, xmm5: 5, xmm6: 6, xmm7: 7,
+  xmm8: 8, xmm9: 9, xmm10: 10, xmm11: 11, xmm12: 12, xmm13: 13, xmm14: 14, xmm15: 15,
+};
+
+/** 标量运算的操作码。`sd`/`ss` 只差强制前缀，所以这一张表两边共用。 */
+export const FOP = { add: 0x58, mul: 0x59, sub: 0x5c, min: 0x5d, div: 0x5e, max: 0x5f, sqrt: 0x51 };
+
+function chkXmm(r) {
+  if (!Number.isInteger(r) || r < 0 || r > 15) throw new OmniError(`x64: xmm 号 ${r} 越界`);
+  return r;
+}
+
+/** 前缀 + REX + `0F` + 操作码 + ModRM（寄存器直接形式）。`pre` 是 0 表示没有强制前缀。 */
+function sseRR(pre, op, reg, rm, w) {
+  chkXmm(reg);
+  chkXmm(rm);
+  return [
+    ...(pre === 0 ? [] : [pre]),
+    ...rex(w === true, reg > 7, false, rm > 7, false),
+    0x0f, op, modrm(3, reg, rm),
+  ];
+}
+
+/** 同上，但 r/m 是 `[base + disp]`。 */
+function sseRM(pre, op, reg, base, disp, w) {
+  chkXmm(reg);
+  return [
+    ...(pre === 0 ? [] : [pre]),
+    ...rex(w === true, reg > 7, false, base > 7, false),
+    0x0f, op, ...memOperand(reg, base, disp),
+  ];
+}
+
+/** `dbl` -> 强制前缀：double 是 `F2`、float 是 `F3`。 */
+function fpre(dbl) {
+  if (dbl !== true && dbl !== false) throw new OmniError('x64: 浮点宽度要明说 true/false');
+  return dbl ? 0xf2 : 0xf3;
+}
+
+/** `movsd/movss xmm, xmm`（`0F 10`：目标是 reg 那一格）。 */
+export function fmovRR(dbl, dst, src) {
+  return sseRR(fpre(dbl), 0x10, dst, src);
+}
+
+/** `movsd/movss xmm, [mem]`（加载）。 */
+export function fmovRM(dbl, dst, base, disp) {
+  return sseRM(fpre(dbl), 0x10, dst, base, disp);
+}
+
+/** `movsd/movss [mem], xmm`（存，`0F 11`：方向反过来，xmm 还在 reg 那一格）。 */
+export function fmovMR(dbl, base, disp, src) {
+  return sseRM(fpre(dbl), 0x11, src, base, disp);
+}
+
+/** 标量算术：`addsd`/`subsd`/`mulsd`/`divsd`/`sqrtsd`/`minsd`/`maxsd` 与 `ss` 那一列。 */
+export function fbin(op, dbl, dst, src) {
+  if (!Number.isInteger(op) || op < 0x50 || op > 0x5f) {
+    throw new OmniError(`x64: 不认识浮点操作码 ${op}`);
+  }
+  return sseRR(fpre(dbl), op, dst, src);
+}
+
+/**
+ * `ucomisd`/`ucomiss`：比较，把结果放进**标志位**（ZF/PF/CF），不改操作数。
+ *
+ * 三件事要记住，都是与整数比较不同的地方：
+ *  - 不可比（有 NaN）时 `PF=1`，而 ZF/CF 也都是 1 —— 于是「相等」要 `je` **加** `jnp`
+ *    两条才对，光看 ZF 会把 NaN 当成相等；
+ *  - 它只有「大于」这一侧的条件码好用（`a`/`ae`），所以 `<` 一般靠**换操作数**实现；
+ *  - `ucomi` 与 `comi` 的差别只在「静默 NaN 是否发信号」，C 的比较用 `ucomi`。
+ */
+export function fcmp(dbl, a1, a2) {
+  return sseRR(dbl ? 0x66 : 0, 0x2e, a1, a2);
+}
+
+/** 整数 -> 浮点（`cvtsi2sd`/`cvtsi2ss`）。`size` 是**源**的宽度（4 或 8）。 */
+export function cvtI2F(dbl, size, dst, src) {
+  if (size !== 4 && size !== 8) throw new OmniError('x64: cvtsi2s? 的源只有 32/64 位');
+  chkXmm(dst);
+  chkReg(src);
+  return [
+    fpre(dbl), ...rex(size === 8, dst > 7, false, src > 7, false),
+    0x0f, 0x2a, modrm(3, dst, src),
+  ];
+}
+
+/**
+ * 浮点 -> 整数（`cvttsd2si`/`cvttss2si`）。`size` 是**目标**的宽度。
+ *
+ * 用 `2C`（`cvtt`，两个 t）而不是 `2D`：前者**向零截断**，后者按 MXCSR 里的舍入模式。
+ * C 的 `(int)f` 是截断，所以只有 `2C` 是对的 —— 这两个操作码差一格，错了平时看不出来
+ * （`(int)2.5` 两样都是 2），到 `(int)2.7` 才露。
+ */
+export function cvtF2I(dbl, size, dst, src) {
+  if (size !== 4 && size !== 8) throw new OmniError('x64: cvtts?2si 的目标只有 32/64 位');
+  chkReg(dst);
+  chkXmm(src);
+  return [
+    fpre(dbl), ...rex(size === 8, dst > 7, false, src > 7, false),
+    0x0f, 0x2c, modrm(3, dst, src),
+  ];
+}
+
+/** `cvtsd2ss`（double -> float）与 `cvtss2sd`（float -> double），都是 `0F 5A`。 */
+export function cvtF2F(toFloat, dst, src) {
+  return sseRR(toFloat ? 0xf2 : 0xf3, 0x5a, dst, src);
+}
+
+/** `movq xmm, r64`（`66 REX.W 0F 6E`）：位模式搬进 xmm，不做任何转换。 */
+export function movqToXmm(dst, src) {
+  chkXmm(dst);
+  chkReg(src);
+  return [0x66, ...rex(true, dst > 7, false, src > 7, false), 0x0f, 0x6e, modrm(3, dst, src)];
+}
+
+/** `movq r64, xmm`（`66 REX.W 0F 7E`）：位模式搬出来。 */
+export function movqFromXmm(dst, src) {
+  chkReg(dst);
+  chkXmm(src);
+  return [0x66, ...rex(true, src > 7, false, dst > 7, false), 0x0f, 0x7e, modrm(3, src, dst)];
+}
+
+/** `xorps`（`0F 57`）/ `xorpd`（`66 0F 57`）。取负与清零都靠它。 */
+export function fxor(dbl, dst, src) {
+  return sseRR(dbl ? 0x66 : 0, 0x57, dst, src);
+}
+
+/** `andps`/`andpd`（`0F 54`）。取绝对值靠它（与一个「除了符号位全 1」的掩码）。 */
+export function fand(dbl, dst, src) {
+  return sseRR(dbl ? 0x66 : 0, 0x54, dst, src);
+}
+
+/** `pxor`（`66 0F EF`）。清零一个 xmm 的标准写法。 */
+export function pxor(dst, src) {
+  return sseRR(0x66, 0xef, dst, src);
+}

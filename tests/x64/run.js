@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import * as x from '../../stage0/src/x64/encode.js';
-import { REG as R, ALU, CC, SH } from '../../stage0/src/x64/encode.js';
+import { REG as R, ALU, CC, SH, XMM as XM, FOP } from '../../stage0/src/x64/encode.js';
 
 function findLlvm(name) {
   for (const c of [`/opt/homebrew/opt/llvm/bin/${name}`, `/usr/local/opt/llvm/bin/${name}`,
@@ -166,6 +166,45 @@ t('pushq %r14', x.push(R.r14));
 t('popq %rbp', x.pop(R.rbp));
 t('popq %r14', x.pop(R.r14));
 
+// ---- SSE（第九刀第十三片）。强制前缀在 REX **之前**，几条带 r8-r15 的用例盯着这一点。
+t('movsd %xmm1, %xmm0', x.fmovRR(true, XM.xmm0, XM.xmm1));
+t('movss %xmm1, %xmm0', x.fmovRR(false, XM.xmm0, XM.xmm1));
+t('movsd %xmm9, %xmm10', x.fmovRR(true, XM.xmm10, XM.xmm9));
+t('movsd (%rax), %xmm0', x.fmovRM(true, XM.xmm0, R.rax, 0));
+t('movsd 16(%rsp), %xmm3', x.fmovRM(true, XM.xmm3, R.rsp, 16));
+t('movss -4(%rbp), %xmm1', x.fmovRM(false, XM.xmm1, R.rbp, -4));
+t('movsd %xmm0, (%rax)', x.fmovMR(true, R.rax, 0, XM.xmm0));
+t('movsd %xmm8, 8(%r12)', x.fmovMR(true, R.r12, 8, XM.xmm8));
+t('movss %xmm1, 4(%rsp)', x.fmovMR(false, R.rsp, 4, XM.xmm1));
+t('addsd %xmm1, %xmm0', x.fbin(FOP.add, true, XM.xmm0, XM.xmm1));
+t('subsd %xmm1, %xmm0', x.fbin(FOP.sub, true, XM.xmm0, XM.xmm1));
+t('mulsd %xmm1, %xmm0', x.fbin(FOP.mul, true, XM.xmm0, XM.xmm1));
+t('divsd %xmm1, %xmm0', x.fbin(FOP.div, true, XM.xmm0, XM.xmm1));
+t('sqrtsd %xmm1, %xmm0', x.fbin(FOP.sqrt, true, XM.xmm0, XM.xmm1));
+t('minsd %xmm1, %xmm0', x.fbin(FOP.min, true, XM.xmm0, XM.xmm1));
+t('maxsd %xmm1, %xmm0', x.fbin(FOP.max, true, XM.xmm0, XM.xmm1));
+t('addss %xmm1, %xmm0', x.fbin(FOP.add, false, XM.xmm0, XM.xmm1));
+t('divss %xmm15, %xmm14', x.fbin(FOP.div, false, XM.xmm14, XM.xmm15));
+t('ucomisd %xmm1, %xmm0', x.fcmp(true, XM.xmm0, XM.xmm1));
+t('ucomiss %xmm1, %xmm0', x.fcmp(false, XM.xmm0, XM.xmm1));
+t('cvtsi2sdq %rax, %xmm0', x.cvtI2F(true, 8, XM.xmm0, R.rax));
+t('cvtsi2sdl %eax, %xmm0', x.cvtI2F(true, 4, XM.xmm0, R.rax));
+t('cvtsi2ssq %r10, %xmm3', x.cvtI2F(false, 8, XM.xmm3, R.r10));
+t('cvttsd2si %xmm0, %rax', x.cvtF2I(true, 8, R.rax, XM.xmm0));
+t('cvttsd2si %xmm0, %eax', x.cvtF2I(true, 4, R.rax, XM.xmm0));
+t('cvttss2si %xmm8, %r11', x.cvtF2I(false, 8, R.r11, XM.xmm8));
+t('cvtsd2ss %xmm1, %xmm0', x.cvtF2F(true, XM.xmm0, XM.xmm1));
+t('cvtss2sd %xmm1, %xmm0', x.cvtF2F(false, XM.xmm0, XM.xmm1));
+t('movq %rax, %xmm0', x.movqToXmm(XM.xmm0, R.rax));
+t('movq %r15, %xmm8', x.movqToXmm(XM.xmm8, R.r15));
+t('movq %xmm0, %rax', x.movqFromXmm(R.rax, XM.xmm0));
+t('movq %xmm8, %r15', x.movqFromXmm(R.r15, XM.xmm8));
+t('xorps %xmm1, %xmm0', x.fxor(false, XM.xmm0, XM.xmm1));
+t('xorpd %xmm1, %xmm0', x.fxor(true, XM.xmm0, XM.xmm1));
+t('andpd %xmm1, %xmm0', x.fand(true, XM.xmm0, XM.xmm1));
+t('andps %xmm1, %xmm0', x.fand(false, XM.xmm0, XM.xmm1));
+t('pxor %xmm0, %xmm0', x.pxor(XM.xmm0, XM.xmm0));
+
 // ---- 边界：编不下去的要当场报
 const bounds = [
   { what: '寄存器号越界', fn: () => x.movRR(8, 16, 0) },
@@ -181,6 +220,12 @@ const bounds = [
   { what: '/digit 越界', fn: () => x.aluRR(8, 8, R.rax, R.rcx) },
   { what: '位移不是整数', fn: () => x.movRM(8, R.rax, R.rcx, 1.5) },
   { what: 'imul 没有 8 位', fn: () => x.imulRR(1, R.rax, R.rcx) },
+  /* 第九刀第十三片 */
+  { what: 'xmm 号越界', fn: () => x.fmovRR(true, 16, 0) },
+  { what: '浮点宽度没明说', fn: () => x.fmovRR(1, 0, 1) },
+  { what: '不认识的浮点操作码', fn: () => x.fbin(0x99, true, 0, 1) },
+  { what: 'cvtsi2sd 的源没有 8 位', fn: () => x.cvtI2F(true, 1, 0, R.rax) },
+  { what: 'cvttsd2si 的目标没有 16 位', fn: () => x.cvtF2I(true, 2, R.rax, 0) },
 ];
 
 // ---------------------------------------------------------------- 跑
