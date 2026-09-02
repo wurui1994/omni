@@ -287,32 +287,21 @@ class FnGen {
      * 也没有 —— 「全落栈」这个笨办法在这儿一次性省掉了整个调用点的溢出逻辑。 */
     if (op === OP.CALL) {
       if (this.callLabels === null) nyi('单个函数里的 CALL（要按整个模块生成才有落点）');
-      const args = f.argsOf(f.b[i]);
-      let ngrn = 0;
-      let nsrn = 0;
-      for (const ar of args) {
-        const at = this.typeOfRef(ar);
-        if (isFloatType(at)) {
-          if (nsrn > 7) nyi(`第 ${nsrn + 1} 个浮点实参（超过 8 个要走栈）`);
-          this.loadRef(TMP0, ar);
-          this.toFp(nsrn, TMP0, typeKind(at) === T_F64);
-          nsrn++;
-          continue;
-        }
-        if (ngrn > 7) nyi(`第 ${ngrn + 1} 个整数实参（超过 8 个要走栈）`);
-        this.loadRef(ngrn, ar);
-        ngrn++;
-      }
+      this.callArgs(f.argsOf(f.b[i]));
       const label = this.callLabels[f.a[i]];
       if (label === undefined) throw new OmniError(`arm64: 没有 ${f.a[i]} 号函数`);
       buf.bl(label);
-      if (typeKind(t) === T_VOID) return;
-      if (isFloatType(t)) {
-        this.fromFp(RES, 0, typeKind(t) === T_F64);
-        return this.def(i, RES);
-      }
-      /* i32 的返回值要按规范形符号扩展：AAPCS 只保证 w0 有值，x0 的高 32 位不算数。 */
-      return this.def(i, 0, widthOf(t));
+      return this.callRet(i, t);
+    }
+    /* `CCALL` 是**外部符号**（`printf`、`malloc`）。模块内的调用走标签、跨模块的走符号
+     * ——这一格是欠链接器的第一笔账（`asm.js` 的 `blSym` 记，`macho.js` 写成
+     * `ARM64_RELOC_BRANCH26`）。 */
+    if (op === OP.CCALL) {
+      const name = this.mod.cabi[f.a[i]];
+      if (name === undefined) throw new OmniError(`arm64: 没有 ${f.a[i]} 号 C 入口`);
+      this.callArgs(f.argsOf(f.b[i]));
+      buf.blSym(name);
+      return this.callRet(i, t);
     }
 
     /* ---- 槽位 */
@@ -478,6 +467,36 @@ class FnGen {
     else if (mode === CVT_SEXT16) buf.emit(a.sxth(1, RES, TMP0));
     else return nyi(`CVT 模式 ${mode}`);
     return this.def(i, RES);
+  }
+
+  /** 实参就位：整数一串（x0-x7）、浮点一串（v0-v7），**各自从 0 起数**（AAPCS）。 */
+  callArgs(args) {
+    let ngrn = 0;
+    let nsrn = 0;
+    for (const ar of args) {
+      const at = this.typeOfRef(ar);
+      if (isFloatType(at)) {
+        if (nsrn > 7) nyi(`第 ${nsrn + 1} 个浮点实参（超过 8 个要走栈）`);
+        this.loadRef(TMP0, ar);
+        this.toFp(nsrn, TMP0, typeKind(at) === T_F64);
+        nsrn++;
+        continue;
+      }
+      if (ngrn > 7) nyi(`第 ${ngrn + 1} 个整数实参（超过 8 个要走栈）`);
+      this.loadRef(ngrn, ar);
+      ngrn++;
+    }
+  }
+
+  /** 返回值落回栈位。 */
+  callRet(i, t) {
+    if (typeKind(t) === T_VOID) return;
+    if (isFloatType(t)) {
+      this.fromFp(RES, 0, typeKind(t) === T_F64);
+      return this.def(i, RES);
+    }
+    /* i32 的返回值要按规范形符号扩展：AAPCS 只保证 w0 有值，x0 的高 32 位不算数。 */
+    return this.def(i, 0, widthOf(t));
   }
 
   /** 真址 = 地址本身 + 静态偏移，算进 `reg`。地址就是真指针 —— 见文件上头那段。 */

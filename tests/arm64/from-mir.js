@@ -22,6 +22,7 @@ import {
   CVT_I2F, CVT_U2F, CVT_F2I, CVT_FCVT, CVT_BITCAST, memDesc,
 } from '../../stage0/src/mir/ir.js';
 import { codeOf, genModule } from '../../stage0/src/arm64/from_mir.js';
+import { writeObject } from '../../stage0/src/arm64/macho.js';
 
 const mod = new MirModule('main');
 const K = mod.consts;
@@ -429,6 +430,22 @@ tm('float 过一趟内存（只占四个字节）', [208n, 0n], f2b(0.5), (f, x)
     REF_NONE, CVT_BITCAST));
 });
 
+// ---- 外部符号的调用（第九刀第八片）。CCALL 落成 `bl <符号>`，那一格由链接器填。
+t('调外部的 C 函数', [3n, 4n], 7n, (f, x, y) =>
+  ret(f, T_I64, f.emit(OP.CCALL, T_I64, mod.cabiNo('omni_ext_add'),
+    f.pushArgs([ld(f, T_I64, x), ld(f, T_I64, y)]), 0)));
+t('调 libc 的 llabs', [-5n, 0n], 5n, (f, x) =>
+  ret(f, T_I64, f.emit(OP.CCALL, T_I64, mod.cabiNo('llabs'),
+    f.pushArgs([ld(f, T_I64, x)]), 0)));
+t('同一个外部符号叫两次只占一条重定位符号', [10n, 20n], 60n, (f, x, y) => {
+  const no = mod.cabiNo('omni_ext_add');
+  const a1 = f.emit(OP.CCALL, T_I64, no, f.pushArgs([ld(f, T_I64, x), ld(f, T_I64, y)]), 0);
+  ret(f, T_I64, f.emit(OP.CCALL, T_I64, no, f.pushArgs([a1, a1]), 0));
+});
+td('外部的 double 函数（实参走 d0/d1、返回走 d0）', [2.5, 4.0], d2b(2.5 * 4 + 1),
+  (f, x, y) => ret(f, T_F64, f.emit(OP.CCALL, T_F64, mod.cabiNo('omni_ext_scale'),
+    f.pushArgs([ld(f, T_F64, x), ld(f, T_F64, y)]), 0)));
+
 // ---------------------------------------------------------------- 边界
 // 还没做的东西必须**明着报**。一个悄悄发错指令的后端比一个报错的后端坏得多。
 // 这些函数不进 `mod` —— 它们发不出来，混进去会把整个模块的生成一起拖倒。
@@ -474,23 +491,22 @@ const dir = mkdtempSync(join(tmpdir(), 'omni-frommir-'));
 let failed = 0;
 let total = 0;
 try {
-  /* 整个模块生成一段连着的字节，函数之间的 `bl` 已经在里头回填好了。
-   * 用例要的符号靠 `.incbin 文件, 跳过, 取多少` 在同一段里切出来 —— 切成几个文件的话
-   * 链接器未必把它们摆在一起，函数间的相对跳转就会指到别处。 */
+  /* 整个模块生成一段连着的字节，函数之间的 `bl` 已经在里头回填好了；跨模块的符号
+   * （`CCALL` 记的那些）交给链接器 —— 我们自己写一个 Mach-O 的 `.o` 出去。
+   * 第八片之前这儿是 `.incbin` 的脚手架，现在整段退役了。 */
   const blob = genModule(mod);
-  const binPath = join(dir, 'blob.bin');
-  writeFileSync(binPath, blob.bytes);
-  const stub = ['.text', '.p2align 2'];
+  const objPath = join(dir, 'omni.o');
+  const defs = [];
+  for (let k = 0; k < mod.funcs.length; k++) {
+    defs.push({ name: mod.funcs[k].name, off: blob.offsets[k] });
+  }
+  writeFileSync(objPath, writeObject(blob.bytes, defs, blob.relocs));
   const main = ['#include <stdio.h>', '#include <string.h>',
     'static double b2d(unsigned long long b){ double d; memcpy(&d,&b,8); return d; }',
-    'static unsigned long long d2b(double d){ unsigned long long b; memcpy(&b,&d,8); return b; }'];
+    'static unsigned long long d2b(double d){ unsigned long long b; memcpy(&b,&d,8); return b; }',
+    'long long omni_ext_add(long long a, long long b){ return a + b; }',
+    'double omni_ext_scale(double a, double b){ return a * b + 1.0; }'];
   const calls = [];
-  /* **必须按 blob 里的顺序切**：函数之间的 `bl` 是相对跳转，摆乱了就指到别处。 */
-  for (let k = 0; k < mod.funcs.length; k++) {
-    const nm = mod.funcs[k].name;
-    stub.push(`.global _${nm}`, `_${nm}:`,
-      `.incbin "${binPath}", ${blob.offsets[k]}, ${blob.sizes[k]}`);
-  }
   for (const c of cases) {
     main.push(`extern long long ${c.f.name}(long long, long long);`);
     calls.push(`  printf("%lld\\n", ${c.f.name}(${c.args[0]}LL, ${c.args[1]}LL));`);
@@ -512,9 +528,8 @@ try {
     }
   }
   main.push('int main(void) {', ...calls, '  return 0;', '}');
-  writeFileSync(join(dir, 'stub.s'), stub.join('\n') + '\n');
   writeFileSync(join(dir, 'main.c'), main.join('\n') + '\n');
-  execFileSync(CLANG, ['-o', join(dir, 'prog'), join(dir, 'main.c'), join(dir, 'stub.s')]);
+  execFileSync(CLANG, ['-o', join(dir, 'prog'), join(dir, 'main.c'), objPath]);
   const out = execFileSync(join(dir, 'prog'), { encoding: 'utf8' }).trim().split('\n');
   const all = [...cases, ...dcases, ...mcases];
   if (out.length !== all.length) {
