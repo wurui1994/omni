@@ -447,6 +447,21 @@ class FnGen {
       buf.blSym(name);
       return this.callRet(i, t);
     }
+    /* `CALLI` 是**按指针调用**（第二十七片）。native 上函数指针就是真地址，所以一条
+     * `blr`。次序要紧：先把实参摆好（那一步用 x0-x7 与草稿寄存器），**再**把目标地址
+     * 取进草稿 —— 反过来的话备实参那几条会把目标踩掉。 */
+    if (op === OP.CALLI) {
+      if (!this.mod.native) nyi('CALLI（解释器那条腿上函数指针是「号 + 1」，不是地址）');
+      this.callArgs(f.argsOf(f.b[i]), -1);
+      this.loadRef(TMP0, f.a[i]);
+      buf.emit(a.blr(TMP0));
+      return this.callRet(i, t);
+    }
+    /* 一个函数的**地址**（第二十七片）：与 `GADDR` 同一对指令，只是符号在 `__TEXT` 里。 */
+    if (op === OP.FADDR) {
+      this.symAddr(RES, this.funcSym(f.aux[i]));
+      return this.def(i, RES);
+    }
 
     /* ---- 槽位 */
     if (op === OP.LOAD) {
@@ -696,6 +711,13 @@ class FnGen {
     }
     /* i32 的返回值要按规范形符号扩展：AAPCS 只保证 w0 有值，x0 的高 32 位不算数。 */
     return this.def(i, 0, widthOf(t));
+  }
+
+  /** 一个函数的符号名（`FADDR` 用）。落到目标文件上就是 `__TEXT` 里的一个符号。 */
+  funcSym(no) {
+    const f = this.mod.funcs[no];
+    if (f === undefined) throw new OmniError(`arm64: 没有 ${no} 号函数`);
+    return f.name;
   }
 
   /** 模块级变量的符号名。MIR 里它就是个名字，落到目标文件上就是一个全局符号。 */

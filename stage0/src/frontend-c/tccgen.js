@@ -2833,14 +2833,23 @@ export class CGen {  /**
         const fn = this.funcs.get(name);
         if (fn === undefined || !fn.declared) this.err(`'${name}' undeclared`);
         fn.used = true;
-        /* native（第二十六片）：函数指针的**值**在线性内存那条腿上是「函数号 + 1」——
-         * 一个只有解释器认得的小整数。native 上它必须是那个符号的**真地址**，而
-         * 「取一个函数的地址」与「按寄存器里的地址调用」两条都还没有（要一条 MIR 的
-         * `FADDR` 与 `CALLI` 在两个后端上的实现）。
-         * 不在这儿拦的话，`qsort(a, n, sz, cmp)` 会让 libc 跳到地址 3 上去 ——
-         * 崩在别人家里，堆栈里连我们的名字都没有。 */
-        if (this.native) this.todo('native：函数指针（要符号的真地址与间接调用）');
-        return this.postfix(sMem(funcTypeOf(fn), this.mod.consts.int(fnPtr(fn.no)), 0));
+        /* 函数指针的**值**：线性内存那条腿上是「函数号 + 1」（一个只有解释器认得的小
+         * 整数，`CALLI` 按它查表）；native 上是那个符号的**真地址**，靠一条 `FADDR`
+         * （第二十七片）。两边随后都归一成「函数类型 + 一个指针值」这一个形状，于是
+         * `f`、`&f`、`*f`、`(*f)(x)` 四种写法照旧一条路走完。
+         *
+         * 一个例外要明着拒：**外部的变参函数**（`pf *fp = printf;`）。native 上变参外部
+         * 符号没有桩（桩装不下「实参个数各不相同」的调用点，第二十二片），于是我们的
+         * `.o` 里那个名字只剩一条 `RET` —— 取它的地址会拿到一个什么都不做的函数。
+         * 要做对得让「没有函数体的名字」在目标文件里变成**未定义符号**，那是下一片。 */
+        if (this.native && fn.variadic && !fn.defined) {
+          this.todo(`native：取外部变参函数 '${name}' 的地址（我们的 .o 里它没有函数体）`);
+        }
+        const fptr = this.native
+          ? this.f.emit(OP.FADDR, T_I64, REF_NONE, REF_NONE, fn.no)
+          : this.mod.consts.int(fnPtr(fn.no));
+        return this.postfix(sMem(funcTypeOf(fn), fptr, 0));
+
       }
       return this.postfix(this.funcCall(name));
     }

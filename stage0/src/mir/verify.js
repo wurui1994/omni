@@ -222,6 +222,14 @@ function checkIndex(mod, f, i, op, v, bad, k) {
     }
     return;
   }
+  /* 函数的地址（第二十七片）：号要在表里、`t` 只能是 i64、而且只有 native 有真地址可谈
+   * （解释器那条腿上函数指针是「号 + 1」，不是地址）。 */
+  if (op === OP.FADDR) {
+    if (mod.funcs[v] === undefined) { bad(i, `函数号 ${v} 越界`); return; }
+    if (!mod.native) { bad(i, 'FADDR：只有 native 这条腿上函数有真地址'); return; }
+    if (f.t[i] !== T_I64) bad(i, `FADDR 的 t 是 ${typeText(f.t[i])}，地址只能是 i64`);
+    return;
+  }
   if (op === OP.CALLOP && mod.ops[v] === undefined) bad(i, `op 号 ${v} 越界`);
   if (op === OP.CCALL && mod.cabi[v] === undefined) bad(i, `C 入口号 ${v} 越界`);
   if (op === OP.CLOSURE && mod.closures[v] === undefined) bad(i, `闭包号 ${v} 越界`);

@@ -102,6 +102,17 @@ const CASES = [
   ['变参的定义：类型混着（i64、double、指针）', 'return vmix(3, 7LL, 2.5, "abcd");'],
   ['变参的定义：va_list 传给别人（vprintf 那个形状）', 'return vhead(5, 2, 4, 6, 8, 10);'],
   ['变参的定义：一个变参都没取', 'return vsum(0, 1, 2);'],
+  /* 函数指针（第二十七片）：取地址是真符号地址，调用是间接调用。 */
+  ['函数指针：直接调', 'long long (*f)(long long) = dbl; return f(21);'],
+  ['函数指针：当实参传下去', 'return apply(trip, 7);'],
+  ['函数指针：一张表', 'long long (*t[2])(long long) = {dbl, trip};'
+    + ' return t[0](5) * 100 + t[1](5);'],
+  ['函数指针：改指向', 'long long (*f)(long long) = dbl; long long a = f(3);'
+    + ' f = trip; return a * 100 + f(3);'],
+  ['函数指针：比一比', 'long long (*f)(long long) = trip;'
+    + ' return (f == dbl) * 10 + (f == trip) + (f != 0) * 100;'],
+  ['函数指针：返回 double 的', 'double (*f)(double) = dscale; return (long long) (f(6.0) * 2);'],
+  ['函数指针：不带名字也能调（先转成指针）', 'return (*dbl)(50) + pickAdd(1);'],
 ];
 
 const SUPPORT = `struct P { int x; int y; };
@@ -174,6 +185,12 @@ long long vhead(int n, ...) {
   __builtin_va_end(ap);
   return r;
 }
+/* 函数指针（第二十七片）：值是符号的真地址，调用是 blr / call *r。 */
+long long dbl(long long x) { return x * 2; }
+long long trip(long long x) { return x * 3; }
+long long apply(long long (*f)(long long), long long x) { return f(x); }
+long long pickAdd(int n) { return n == 0 ? dbl(10) : trip(10); }
+double dscale(double x) { return x * 2.5; }
 `;
 
 let src = SUPPORT;

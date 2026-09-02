@@ -121,6 +121,7 @@ function refDigest(mod, ref, ks) {
 function auxDigest(mod, op, v, k) {
   if (op === OP.CCALL) return k === 0 ? `cabi:${mod.cabi[v]}` : `vafix:${v}`;
   if (op === OP.CALL) return `func:${mod.funcs[v].name}`;
+  if (op === OP.FADDR) return `faddr:${mod.funcs[v].name}`;
   if (op === OP.CALLOP) return `op:${mod.ops[v].name}[${JSON.stringify(mod.ops[v].lits)}]`;
   if (op === OP.CLOSURE) return `closure:${mod.closures[v].make}`;
   if (op === OP.GLOAD || op === OP.GSTORE || op === OP.GADDR) return `global:${mod.globals[v]}`;

@@ -455,6 +455,23 @@ class FnGen {
       buf.callSym(name);
       return this.callRet(i, t);
     }
+    /* `CALLI` 是**按指针调用**（第二十七片）：native 上函数指针就是真地址，一条
+     * `call *r`。次序与 arm64 那份一样 —— 先摆实参，再取目标进草稿（r10 不是实参
+     * 寄存器，所以摆好的实参不会被这一步踩掉）。`al` 照旧报 xmm 个数：被调的是不是
+     * 变参这一层不知道，多发一条无害。 */
+    if (op === OP.CALLI) {
+      if (!this.mod.native) nyi('CALLI（解释器那条腿上函数指针是「号 + 1」，不是地址）');
+      this.callArgs(f.argsOf(f.b[i]), true);
+      this.loadRef(TMP0, f.a[i]);
+      buf.emit(x.callR(TMP0));
+      return this.callRet(i, t);
+    }
+    /* 一个函数的**地址**（第二十七片）：与 `GADDR` 一样是一条 RIP 相对的 `lea`，
+     * 只是符号在 `__TEXT` 里。 */
+    if (op === OP.FADDR) {
+      buf.leaSym(RES, this.funcSym(f.aux[i]));
+      return this.def(i, RES);
+    }
 
     /* ---- 槽位 */
     if (op === OP.LOAD) {
@@ -674,6 +691,13 @@ class FnGen {
     const name = this.mod.globals[no];
     if (name === undefined) throw new OmniError(`x64: 没有 ${no} 号模块级变量`);
     return name;
+  }
+
+  /** 一个函数的符号名（`FADDR` 用）。 */
+  funcSym(no) {
+    const fn = this.mod.funcs[no];
+    if (fn === undefined) throw new OmniError(`x64: 没有 ${no} 号函数`);
+    return fn.name;
   }
 
   /** 真址 = 地址本身 + 静态偏移，算进 `reg`。 */
