@@ -288,7 +288,7 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
 8. **C 的库面**：`libtcc1` 的等价物（软除法/浮点辅助/`alloca`/`setjmp`）与 libc 的接法。
    原先写的是"先转手宿主的 libc，走既有的 extern-C FFI"，第五片证明**转手不成立**
    （指针是自家线性内存里的偏移，宿主 libc 读不到），改成一个读写线性内存的宿主模块，
-   见第五片的落地节。**前五十七片已落地**（预定义的宏 —— 目标的自述，五十条，
+   见第五片的落地节。**前六十二片已落地**（预定义的宏 —— 目标的自述，五十条，
    顺序与值都对着 `tcc -dM -E` 抄；自带的系统头目录 + 编译器必须自己给的那四份头；
    `stdio.h`/`stdlib.h`/`string.h` 的最小子集 —— libc 的自述；
    `strtol` 一族与 `strncpy`/`strchr`/`strstr` 那几条；
@@ -374,8 +374,17 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
    到这一片 tcctest.c 整份编得过了；
    **实参里的宏不吃外面的记号流** —— 实参串以 TOK_EOF 收尾；
    **块作用域的 `static`** —— 东西在 data 段上、名字只在这一层，data 段里的键带函数名
-   与「这个函数里的第几条」），
-   见下面的第八刀第一到五十七片节。
+   与「这个函数里的第几条」；
+   **`printf` 的 `%C` / `%S`** —— 宽字符那两格等于 `%lc` / `%ls`，一个 `wchar_t` 摊成
+   UTF-8 的字节，于是 tcctest.c 从第 66 行一路跑到第 843 行；
+   **函数类型的 `sizeof` 是 1** —— 与 `char`/`void`/`_Bool` 同一格，不是指针的 8；
+   **窄返回类型由调用方截一刀** —— tcc 的 PROMOTE_RET，`_Bool` 那一格按无符号 char 截；
+   **枚举的底层整型** —— 全非负就是无符号、装不下就撑到 64 位，而枚举常量自己的类型
+   装得进 int 就还是 int；
+   **typedef 上的 `aligned(N)`** —— 属性跟着名字走，成员自己写的赢，而对齐是覆盖不是取大；
+   **柔性数组成员配初始化式** —— `sizeof` 不变、划的地方变大，于是 tcctest.c 前 842 行
+   与 tcc 逐字节相同），
+   见下面的第八刀第一到六十二片节。
 
 最后三步是**后端**：
 
@@ -6665,6 +6674,401 @@ omni: runtime error: printf: 不认识的转换 '%C'
 第 9-11 步的后端。
 
 <!-- 第八刀第五十七片-END -->
+
+## 落地：第八刀第五十八片
+
+**`printf` 的 `%C` 与 `%S`。**改的是 `stage0/src/interp/libc.js` 一处（`cFormat` 那张
+转换表），加的用例是 `tests/c/gen/78-wide-printf.c`。
+
+### 一、`%C` 就是 `%lc`，`%S` 就是 `%ls`
+
+这两格不在 C 标准里，是旧 Unix 留下来的写法，`tcctest.c` 的 `string_test` 在用。所以
+判断是「`conv` 是大写的那一个」**或者**「长度修饰符里出现过 `l`」——
+
+```js
+if (conv === 'C' || bits === 64) { … }
+```
+
+`bits` 这个量本来只用来选整数宽度（32 还是 64），在这儿被借去当「宽不宽」的旗子：
+`l` 在 `%d` 上是「64 位」，在 `%c`/`%s` 上是「宽的」，同一个字母两个意思，而这一层
+恰好只有这两种用法，所以不必再加一个量。
+
+### 二、一个 `wchar_t` 怎么变成字节
+
+真的 libc 在这儿调 `wcrtomb`，按当前区域设置把宽字符编码出去。我们没有区域设置这一
+套，也不需要 —— 这个目标上宽字符就是 Unicode 码点，所以写死 UTF-8：
+
+```js
+function utf8Of(cp) {
+  if (cp < 0 || cp > 0x10ffff) throw new Error(`printf: 宽字符 ${cp} 不是码点`);
+  if (cp < 0x80) return String.fromCharCode(cp);
+  …
+}
+```
+
+回的是「一个字符一个字节」的 JS 字符串 —— `cFormat` 全程用这个约定攒 `out`
+（`readCStr` 也是这个约定），所以宽的那一支摊完就能直接跟窄的那一支拼起来，
+`padTo` 数的宽度自然也是**字节数**，与宿主 libc 一致（`%5S` 配 `L"ab"` 补三个空格）。
+
+宽字符串那一侧要一个「四个字节一格」的读法：
+
+```js
+const w = Number(memLoad('i32s', p, 0));
+```
+
+`i32s` 而不是 `i32` —— `MEM_LD` 那张表里读的那一半是按「带不带符号」分的
+（`i32s`/`i32u`），只有写的那一半叫 `i32`。第一次写成 `i32` 时报的是
+`printf: memLoadFn: 不认识的访问 i32`，查表查空。
+
+精度那一格照 C11 7.21.6.1 第 8 段：`%.2S` 限的是**字节数**，而且不许把一个字符切成
+两半，所以一个字符一个字符地攒、够不下就停：
+
+```js
+if (limit !== undefined && limit >= 0 && s.length + b.length > limit) break;
+```
+
+### 三、非 ASCII 那一格对不了账，所以用例不碰
+
+`tcctest.c` 里印的宽字符全是 ASCII（`printf("wc=%C 0x%lx %C\n", L'a', L'\x1234', L'c')`
+中间那个 0x1234 被 `%lx` 吃掉了，没走 `%C`）。这不是巧合：宿主 libc 在 `"C"`
+区域设置下把 >127 的宽字符当成非法序列，整个 `printf` 调用直接失败，**一个字节都不印**
+—— macOS 那份实现是先把宽串整个转成多字节缓冲再算长度，转不动就 `goto error`，而那时
+`"wstring="` 还在 iovec 里没冲出去。所以「非 ASCII 的宽字符印成什么」在 oracle 那边
+根本不是「印成 UTF-8」，而是「什么都不印」，那是宿主区域设置的行为、不是 tcc 的行为，
+对账没有意义。用例只印 ASCII。
+
+同一条也解释了 `tcctest.c` 为什么把 `%S` 那两行关在 `#if 0` 里：
+
+```c
+    printf("wstring=%S\n", L"abc" L"def" "ghi");
+```
+
+`L"abc" L"def" "ghi"` 在 tcc 那儿是**按字节接**的，问出来的宽字符是
+`a b c d e f 0x00696867` —— 最后那一格是窄串 `"ghi\0"` 的四个字节被当成一个 wchar
+读了，0x696867 比 0x10FFFF 大，于是那一行整行消失。我们这儿「宽窄字面量混着拼」
+仍是一条明着报错的边界（`readWStrTok`），而 `utf8Of` 对超出码点范围的值也是明着抛
+—— 两处都不会静悄悄给个错答案。
+
+### 四、这一片把 tcctest.c 的对账面从 66 行推到 843 行
+
+上一片停在第 66 行，是因为我们自己的 libc 抛了 `不认识的转换 '%C'`。补上之后整份
+`tcctest.c` 一路跑到 `alloca_test`，我们印出 843 行、tcc 印出 1011 行，中间只有
+六处不一样。这份清单就是接下来几片的地图：
+
+- `sizeof1 = 8` / `sizeof2 = 8`，tcc 是 `1` —— `sizeof` 一个函数（`funcptr_test`
+  是个函数名，不是指针）。tcc 给函数类型的 size 是 1。
+- `enum large: 0`，tcc 是 `263882790666240` —— 枚举的底层类型（第五十四片就欠着的
+  那一笔），值超出 int 时 tcc 把枚举撑到 64 位。
+- `aligntest9 sizeof=16 alignof=8`，tcc 是 `12` / `4` —— `packed` 与
+  `aligned` 撞在一起时谁说了算。
+- `promote char/short funcret` 与 `… VA` 两行 —— 返回 `char`/`short` 的函数，回来那一
+  格没按窄类型截。
+- `cix2: 2 4006` 与 `arrtype3: 4 4005 4006` —— 复合字面量/数组类型那一段的两处。
+- 然后死在 `interp: C ABI call 'alloca' is not supported by the interpreter`。
+
+三条对账链都在：`node tests/c/run.js` 119 过 0 挂（新的 78 那条与 tcc 逐字节一样），
+`node tests/run.js` 96 过 0 挂，自举编译出来的 `tcc2` 与 tcc 自己编的仍然逐字节相同。
+
+**下一片**：`sizeof` 一个函数是 1（清单里最短的一条），顺手把返回 `char`/`short` 的
+函数那两行一起看 —— 它们都在「函数类型这一格上我们比 tcc 多想了一步」这条线上。
+
+再之后：枚举的底层类型、`alloca`、`packed` 撞 `aligned`、`-dM`、路径 A 的 GLR 与
+路径 B 对账（第七步）、第 9-11 步的后端。
+
+<!-- 第八刀第五十八片-END -->
+
+## 落地：第八刀第五十九片
+
+**函数类型的 `sizeof` 是 1，窄返回类型由调用方截一刀。**两处都是「函数这一格上我们比
+tcc 多想了一步」：改的是 `ctype.js` 的 `typeSize` 一行与 `tccgen.js` 的
+`funcCall`/`indirectCall` 收尾，用例是 `tests/c/gen/79-funcsize-retnarrow.c`。
+
+### 一、`sizeof` 一个函数是 1，不是 8
+
+我们原来写的是 `if (b === VT_FUNC) return { size: 8, align: 8 };`，注释是「函数指针」——
+那句注释就是错处：`VT_FUNC` 是**函数**，指针是 `VT_PTR`。tcc 的 `type_size`
+（`tccgen.c:3494`）最后那一支把四种东西归成一格，注释原话是
+`/* char, void, function, _Bool */`，`*a = 1; return 1;`。gcc 也是 1。
+
+平时看不出来，因为函数名在表达式里立刻退化成指针；只有「不求值」的地方能问到函数类型
+本身 —— `sizeof f`、`sizeof(fn_t)`、`sizeof(*fp)`、`__alignof__`。tcctest.c 的
+`funcptr_test` 恰好逐个问了一遍。
+
+### 二、`char`/`short`/`_Bool` 的返回值，**调用方**再截一刀
+
+tcc 在调用点这么写（`tccgen.c:6372-6379`）：
+
+```c
+    t = s->type.t & VT_BTYPE;
+    if (t == VT_BYTE || t == VT_SHORT || t == VT_BOOL) {
+#ifdef PROMOTE_RET
+        vtop->r |= BFVAL(VT_MUSTCAST, 1);
+```
+
+`PROMOTE_RET` 在 arm64/x86_64/i386/riscv64 上全开着。兑现在 `force_charshort_cast`
+（`tccgen.c:3236`）：把源类型当 `int`、往声明的窄类型上转一次。
+
+被调的那一侧如果也是它编的，`return` 那一步早就截过了，这一刀白挨。露出来的是**函数
+指针的类型与真实函数不符**那一种，tcctest.c 拿 `csf` 专门造了这个局面：
+
+```c
+static int __csf(int x) { return x; }
+static void *_csf = __csf;
+#define csf(t,n) ((t(*)(int))_csf)(n)
+```
+
+`__csf` 老老实实回一个 `int`，调用点却说「这个函数回 `unsigned char`」。寄存器里躺着
+32 位，谁负责截由 ABI 说了算 —— tcc 说调用方，所以 `csf(unsigned char, 0x89898989)`
+是 **137**。我们原来直接把那个 ref 贴上 `unsigned char` 的类型牌子就走，于是印出
+`-1987475063`（就是 0x89898989 当 int 看）。
+
+我们这一侧只加了一个 `retNarrow`：
+
+```js
+  retNarrow(ret, r) {
+    const b = btype(ret.t);
+    if (b !== VT_BYTE && b !== VT_SHORT && b !== VT_BOOL) return sVal(ret, r);
+    const nt = b === VT_BOOL ? TY_UCHAR
+      : ctype(ret.t & (VT_BTYPE | VT_UNSIGNED | VT_DEFSIGN), null);
+    return sVal(ret, this.gv(this.castTo(sVal(TY_INT, r), nt)));
+  }
+```
+
+关键是 `sVal(TY_INT, r)`：**先把回来的那一格当 int**，再往窄类型转 —— 直接
+`castTo(sVal(ret, r), ret)` 是个空操作，什么都不会发生。
+
+`_Bool` 那一格照 `force_charshort_cast` 里那句
+`gen_cast_s(dbt == VT_BOOL ? VT_BYTE|VT_UNSIGNED : dbt)`：按**无符号 char** 截，
+不是「非零就是 1」。所以 `csf(_Bool, 0x33221100)` 是 0、`csf(_Bool, 0x33221101)` 是 1
+—— 按 `!= 0` 算的话两个都会是 1，而 tcc 印的是 `0 1`。这一格是这一片里唯一一处
+「看着该用现成的 `_Bool` 转换、其实不能用」的地方。
+
+`tests/c/run.js` 120 过 0 挂，`tests/run.js` 96 过 0 挂，tcctest.c 的差异清单从六处
+减到四处（`sizeof1`/`sizeof2` 与 `promote char/short funcret` 那两行同时没了）。
+
+<!-- 第八刀第五十九片-END -->
+
+## 落地：第八刀第六十片
+
+**枚举的底层整型。**这是第五十四片欠下的那一笔：那时 `__builtin_types_compatible_p`
+上钉了一条「只有一边是枚举就报错」的边界，理由是「我们的枚举底层永远是 int」。现在
+它是算出来的，那条边界跟着拆了。改的是 `ctype.js` 的 `enumBase`/`mkEnum` 与
+`tccgen.js` 的 `enumDecl`，用例是 `tests/c/gen/80-enum-base.c`。
+
+### 一、三句话（`tccgen.c:4555-4562`）
+
+```c
+    t.t = VT_INT;
+    if (nl >= 0) {
+        if (pl != (unsigned)pl)
+            t.t = (LONG_SIZE==8 ? VT_LLONG|VT_LONG : VT_LLONG);
+        t.t |= VT_UNSIGNED;
+    } else if (pl != (int)pl || nl != (int)nl)
+        t.t = (LONG_SIZE==8 ? VT_LLONG|VT_LONG : VT_LLONG);
+```
+
+`nl` 是最小值、`pl` 是最大值，两个都**从 0 起算**。于是：
+
+- 没有负的枚举值 —— 整个枚举是**无符号**的。C11 6.7.2.2 只说「能装下全部值的某个
+  整型」，谁来定没写，所以这是 tcc（跟 gcc）的选择，不是标准的要求；
+- 全非负而最大的装不进 `unsigned int` —— `unsigned long long`；
+- 有负的、而两头有一个装不进 `int` —— `long long`。
+
+`enum { EL_large = ((unsigned long)0xf000 << 31) << 1 }` 于是是 8 个字节，
+`printf("%ld", EL_large)` 印 263882790666240。我们原来在读枚举值时就
+`BigInt.asIntN(32, val)`，那个数被截成 0 —— tcctest.c 里 `enum large: 0` 就是这么来的。
+现在收成 64 位（tcc 的 `expr_const64`），宽度由 `enumBase` 一处定。
+
+### 二、枚举常量**自己**的类型与枚举的底层类型不是一回事
+
+`tccgen.c:4564-4576` 单独走了一遍那条链：
+
+```c
+    for (ss = s->next; ss; ss = ss->next) {
+        ll = ss->enum_val;
+        if (ll == (int)ll) continue;          /* 装得进 int 就是 int */
+        if (t.t & VT_UNSIGNED) {
+            ss->type.t |= VT_UNSIGNED;
+            if (ll == (unsigned)ll) continue;
+        }
+        ss->type.t = (ss->type.t & ~VT_BTYPE) | VT_LLONG|VT_LONG;
+    }
+```
+
+也就是说：`enum EA { A0, A1 = 3 }` 整体是 `unsigned int`，但 `A1` 这个常量的类型是
+**`int`**（装得进 int 就不动它），哪怕枚举是无符号的。这一条不是可有可无的细节 ——
+`printf("%d", A1)` 与 `A1 < 0` 都要靠它。
+
+结构上的代价是：枚举常量的类型**要等读完 `}` 才定得下来**，而枚举常量在 `}` 之前就得
+可见（`enum {A, B = A + 2}`）。tcc 的办法是先按 int 登记、读完回头改整条链，我们照做：
+`this.ecScope().set(en, { ty, val })` 先放，`}` 之后再遍历 `names` 把每条的 `ty` 换掉。
+
+### 三、底层类型挂在 tag 上，不挂在类型对象上
+
+`enum ELong` 这个名字后面还会被再写一次（`enum ELong x;`），那时走的是 `mkEnum(info)`
+另造一个类型对象。所以算出来的那几位必须存在**共享的那一头**（`info.bt`），
+`mkEnum` 从它取：
+
+```js
+export function mkEnum(info) {
+  return ctype((info.bt === undefined ? VT_INT : info.bt) | VT_ENUM, info);
+}
+```
+
+`compareTypes` 那一侧一个字都不用改 —— 它第一段就把枚举换成 `a.t & ~VT_STRUCT_MASK`，
+而那份位里现在带着 `VT_UNSIGNED` 与真的宽度，于是「全非负的枚举」与 `unsigned int`
+自然相容、与 `int` 自然不相容。第五十四片那条边界因此可以直接删掉。
+
+`tests/c/run.js` 121 过 0 挂，`tests/run.js` 96 过 0 挂。tcctest.c 只剩三处不一样：
+
+- `aligntest9 sizeof=16 alignof=8`，tcc 是 `12` / `4` —— `packed` 与 `aligned` 撞在
+  一起时谁说了算；
+- `cix2: 2 4006`，tcc 是 `3003 4006`；
+- `arrtype3: 4 4005 4006`，tcc 是 `4 0 0`。
+
+然后死在 `alloca`。
+
+**下一片**：`aligntest9` 那一格（`packed` 撞 `aligned`）。再之后：`cix2` / `arrtype3`
+那两处、`alloca`、`-dM`、路径 A 的 GLR 与路径 B 对账（第七步）、第 9-11 步的后端。
+
+<!-- 第八刀第六十片-END -->
+
+## 落地：第八刀第六十一片
+
+**typedef 上的 `aligned(N)`。**`tcctest.c` 的 `aligntest9` 就一句：
+
+```c
+typedef unsigned long long __attribute__((aligned(4))) unaligned_u64;
+struct aligntest9 { unsigned int buf_nr; unaligned_u64 start_lba; };
+```
+
+sizeof 是 12、alignof 是 4（不是 16 / 8）—— 那个 `aligned(4)` 把 `unsigned long long`
+的对齐**降**到了 4。我们原来把它读掉就扔了。改的是 `tccgen.js` 两处，用例是
+`tests/c/gen/81-typedef-aligned.c`。
+
+### 一、属性跟着**名字**走，不跟着类型走
+
+tcc 在登记 typedef 那一步 `sym->a = ad.a`（`tccgen.c:8926`），用到这个名字时
+`sym_to_attr(ad, s)`（`tccgen.c:4970`）把它并回当前这一份 `ad`。并的规则是
+`merge_symattr`（`tccgen.c:1177`）：
+
+```c
+    if (sa1->aligned && !sa->aligned)
+      sa->aligned = sa1->aligned;
+```
+
+**当前没写才用 typedef 那一份** —— 所以 `unaligned_u64 v __attribute__((aligned(8)));`
+是 8，成员自己写的赢。
+
+我们的 typedef 表存的是类型对象，所以那个数就挂在类型对象上（`talign`），与 `count`
+同一个位置、同一种带法（`count` 也是「在 `t` 那串位里放不下、只能挂在对象上」的东西）。
+`parseBtype` 用到 typedef 名时照 `merge_symattr` 那一句并进 `ad`，并且把 `talign`
+继续往下带 —— 于是 `typedef unaligned_u64 chained_u64;` 接一层也还在（tcc 那边是因为
+新 typedef 的 `ad` 已经从旧的那条并到了这个值，同一个效果）。
+
+### 二、成员的对齐是**覆盖**，不是取大
+
+`structLayout` 里那一句早就写对了：
+
+```js
+      if (a !== 0) align = a;
+```
+
+照的是 `tccgen.c:4235` 的 `if (a) align = a;`。这一格要是写成 `Math.max` ——
+一个看着更「安全」的写法 —— `aligned(4)` 就永远降不下来，而 gcc/tcc 都允许降。
+第三十四片当时抄对了，这一片只是把那个数真的送到它手上。
+
+顺带量了 `aligned(16)` 加在 `int` 的 typedef 上（`struct D { char c; overaligned_int i; }`
+的 sizeof 是 32、alignof 是 16）与全局量上的那一份，都与 oracle 逐字节一样。
+
+`tests/c/run.js` 122 过 0 挂，`tests/run.js` 96 过 0 挂，tcctest.c 只剩两处不一样。
+
+<!-- 第八刀第六十一片-END -->
+
+## 落地：第八刀第六十二片
+
+**柔性数组成员配初始化式：`sizeof` 不变，但那块地方要真的够大。**这一片修的是一个
+**静悄悄踩别人内存**的错，症状离原因很远：
+
+```
+cix2: 2 4006          （tcc: 3003 4006）
+arrtype3: 4 4005 4006 （tcc: 4 0 0）
+```
+
+`arrtype3` 那一行印的 `4005 4006` 是 `cix22` 的初始化式 —— 也就是说 `sinit21` 与
+`cix22` 压在同一段字节上。`cix22` 是这个：
+
+```c
+struct complexinit2 { int a; int b[]; };
+struct complexinit2 cix22 = { .a = 4000, .b = { 4001, 4002, 4003, 4004, 4005, 4006 } };
+```
+
+`sizeof(struct complexinit2)` 是 4（柔性成员占 0 个字节，第四十三片量过），我们照 4
+个字节划地方，然后初始化式往后写了 24 个字节 —— 邻居的地盘。
+
+### 一、tcc 怎么分这两件事
+
+`decl_initializer_alloc`（`tccgen.c:8290-8340`）：struct 的最后一个成员是柔性数组时把
+`size` 置成 -1，逼出「先干跑一遍」那条路（那条路本来是给 `int a[] = {…}` 的）；干跑
+完了：
+
+```c
+        if (flexible_array && flexible_array->type.ref->c > 0)
+            size += flexible_array->type.ref->c
+                    * pointed_size(&flexible_array->type);
+```
+
+`size` 变大，但**类型没变** —— `sizeof` 还是 4。跑完还要把那个格数改回 -1
+（`tccgen.c:8503`），好让下一条同样的声明重新算。
+
+### 二、我们量的是「碰到的最大字节偏移」
+
+`flexInit` 收下那一对花括号、`measureBraced` 放一遍，记的是 `at.off + span` 的最大值，
+减去 `sizeof` 就是要多划的字节数。走法与 `countBraced` 是同一份（同一个下降栈、同一个
+`initDesignators`、同一条回卷规则），差别只在记什么。这样就不必在类型里存一个「柔性
+成员这次有几格」再改回去 —— 少一处会忘记复位的状态。
+
+到底那一格如果是**没写长度的数组**（也就是柔性成员本身），`typeSize` 回 0，量不出东西，
+所以那一格自己数：
+
+```js
+      if (isArray(at.ty.t) && at.ty.count < 0) {
+        const es = typeSize(at.ty.ref).size;
+        if (this.tok === LBRACE) span = this.countBraced(at.ty) * es;
+        else if (this.tok === TOK_STR) span = (this.readStrTok(this.tokc).length + 1) * es;
+        …
+```
+
+字符串那一支不是凑数的：`struct T { char c; char s[]; }; struct T t1 = { 'x', "abcdef" };`
+在 tcc 那边划 8 个字节，我们量出来也是 8。
+
+### 三、多出来的那几个字节走 `extra`，不进类型
+
+`declareGlobal` / `declareStaticLocal` / `declareLocal` 各多一个 `extra`，落到
+`allocGlobal` 与 `frameAlloc` 那两处加法上。**不**去改类型的 count —— 改了 `sizeof`
+就跟着变，而 tcc 的 `sizeof cix21` 是 4。自动那一侧的整块清零也要按 `size + extra`
+来（不然柔性那一段是上一轮的垃圾）。
+
+局部量那一种也顺手做了（`struct S l = { .a = 1, .b = {11,12,13,14} };`），因为
+`frameAlloc` 与 `allocGlobal` 是同一个形状，多一个参数而已。
+
+### 四、tcctest.c 的输出到此**全对**
+
+`tests/c/run.js` 123 过 0 挂，`tests/run.js` 96 过 0 挂。tcctest.c 我们印出来的 842 行
+与 tcc 印的**逐字节相同**，第 843 行停在同一个地方：
+
+```
+omni: runtime error: interp: C ABI call 'alloca' is not supported by the interpreter
+```
+
+**下一片**：`alloca`。它在我们这儿不是「一个没实现的 libc 函数」—— 变长数组那一片
+（第四十九片）已经把「在 `$sp` 上切一刀」这件事做好了，`alloca` 就是把那一刀交给
+一个函数调用，难点在**它切出来的那一块什么时候还**（tcc 的 `alloca` 是「函数返回才还」，
+而 VLA 是「出作用域就还」）。
+
+再之后：`-dM`、路径 A 的 GLR 与路径 B 对账（第七步）、第 9-11 步的后端。
+
+<!-- 第八刀第六十二片-END -->
 
 
 

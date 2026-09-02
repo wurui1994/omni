@@ -60,6 +60,36 @@ export function readCStr(addr) {
   return s;
 }
 
+/** 一个码点变 UTF-8：回一个「一个字符一个字节」的 JS 字符串（与 `out` 那条链一致）。 */
+function utf8Of(cp) {
+  if (cp < 0 || cp > 0x10ffff) throw new Error(`printf: 宽字符 ${cp} 不是码点`);
+  if (cp < 0x80) return String.fromCharCode(cp);
+  if (cp < 0x800) {
+    return String.fromCharCode(0xc0 | (cp >> 6), 0x80 | (cp & 0x3f));
+  }
+  if (cp < 0x10000) {
+    return String.fromCharCode(0xe0 | (cp >> 12), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
+  }
+  return String.fromCharCode(0xf0 | (cp >> 18), 0x80 | ((cp >> 12) & 0x3f),
+    0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
+}
+
+/** 从线性内存里读一个宽字符串（`wchar_t` 是 4 字节的 int），回 UTF-8 的字节串。
+ * `limit >= 0` 时最多回这么多字节，而且不切开一个字符。 */
+function readWStr(addr, limit) {
+  let s = '';
+  let p = BigInt(addr);
+  for (;;) {
+    const w = Number(memLoad('i32s', p, 0));
+    if (w === 0) break;
+    const b = utf8Of(w);
+    if (limit !== undefined && limit >= 0 && s.length + b.length > limit) break;
+    s += b;
+    p += 4n;
+  }
+  return s;
+}
+
 /** 把一个 JS 字符串（每个字符一个字节）写进线性内存，补一个 0。回写了多少字节（不含 0）。 */
 function writeCStr(addr, s) {
   let p = BigInt(addr);
@@ -338,15 +368,29 @@ export function cFormat(fmt, va) {
       out += padTo(body, '', spec);
       continue;
     }
-    if (conv === 'c') {
+    if (conv === 'c' || conv === 'C') {
       spec.numeric = false;
+      /* `%C` 就是 `%lc`（旧 Unix 留下来的写法，tcc 的测试里在用）。宽的那一支读
+       * 4 个字节（我们的 `wchar_t` 是 int），再按 UTF-8 摊成字节；窄的那一支只
+       * 取低 8 位。宽度算的是**字节数**，与宿主 libc 一致。 */
+      if (conv === 'C' || bits === 64) {
+        out += padTo(utf8Of(Number(BigInt.asIntN(32, ap.int(32)))), '', spec);
+        continue;
+      }
       out += padTo(String.fromCharCode(Number(BigInt.asUintN(8, ap.int(32)))), '', spec);
       continue;
     }
-    if (conv === 's') {
+    if (conv === 's' || conv === 'S') {
       spec.numeric = false;
-      let s = readCStr(ap.ptr());
-      if (spec.prec >= 0 && s.length > spec.prec) s = s.slice(0, spec.prec);
+      let s;
+      if (conv === 'S' || bits === 64) {
+        /* `%S` 就是 `%ls`。精度限的是**字节数**，而且不许把一个字符切两半
+         * （C11 7.21.6.1 第 8 段），所以一个字符一个字符地攒。 */
+        s = readWStr(ap.ptr(), spec.prec);
+      } else {
+        s = readCStr(ap.ptr());
+        if (spec.prec >= 0 && s.length > spec.prec) s = s.slice(0, spec.prec);
+      }
       out += padTo(s, '', spec);
       continue;
     }

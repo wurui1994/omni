@@ -165,9 +165,29 @@ export function mkStruct(info, union) {
   return ctype(union ? VT_UNION : VT_STRUCT, info);
 }
 
-/** `enum`：底层就是 `int`（tcc 也是），`VT_ENUM` 那一位只用来记住「它本来是个枚举」。 */
+/**
+ * `enum` 的**底层整型**（`tccgen.c:4555-4562`）。`info.bt` 是这几位；`mkEnum` 拿它当
+ * 基本类型，于是 `sizeof(enum E)` 与「无符号性」都跟着走。
+ *
+ * 三句话：
+ *   1. 没有负的枚举值（`nl >= 0`）—— 它是**无符号**的。这一条是 tcc（与 gcc）的选择，
+ *      C11 6.7.2.2 只说「能装下全部值的某个整型」，谁来定没写；
+ *   2. 全非负而最大的那个装不进 `unsigned int` —— 撑到 `unsigned long long`；
+ *   3. 有负的、而两头有一个装不进 `int` —— 撑到 `long long`。
+ * 落在别处就是 `int`。
+ */
+export function enumBase(nl, pl) {
+  if (nl >= 0n) {
+    const wide = pl !== BigInt.asUintN(32, pl);
+    return (wide ? VT_LLONG | VT_LONG : VT_INT) | VT_UNSIGNED;
+  }
+  if (pl !== BigInt.asIntN(32, pl) || nl !== BigInt.asIntN(32, nl)) return VT_LLONG | VT_LONG;
+  return VT_INT;
+}
+
+/** `enum`：底层整型由 `enumBase` 定（读完 `}` 才知道），`VT_ENUM` 那一位记住「它本来是个枚举」。 */
 export function mkEnum(info) {
-  const ty = ctype(VT_INT | VT_ENUM, info);
+  const ty = ctype((info.bt === undefined ? VT_INT : info.bt) | VT_ENUM, info);
   return ty;
 }
 
@@ -249,7 +269,11 @@ export function typeSize(ty) {
   if (b === VT_LDOUBLE) return { size: 8, align: 8 };
   if (b === VT_STRUCT) return { size: ty.ref.size, align: ty.ref.align };
   if (b === VT_VOID) return { size: 1, align: 1 };  // gcc 的 `sizeof(void)`，tcc 跟着
-  if (b === VT_FUNC) return { size: 8, align: 8 };  // 函数指针
+  /* **函数类型的 size 是 1**，不是指针的 8：`type_size` 最后那一支把 char/void/函数/
+   * _Bool 归成一格（原注释 "char, void, function, _Bool"），gcc 也是 1。函数名在表达式
+   * 里会退化成指针，所以这一格只在 `sizeof f` / `__alignof__ f` 这种「不求值」的地方
+   * 露出来 —— 写成 8 的话 `sizeof(funcptr_test)` 就答错。 */
+  if (b === VT_FUNC) return { size: 1, align: 1 };
   return { size: 0, align: 1 };
 }
 

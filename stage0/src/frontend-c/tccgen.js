@@ -171,12 +171,12 @@ import {
 import {
   VT_VOID, VT_BYTE, VT_SHORT, VT_INT, VT_LLONG, VT_BOOL, VT_PTR, VT_FUNC, VT_STRUCT,
   VT_BTYPE, VT_UNSIGNED, VT_DEFSIGN, VT_LONG, VT_FLOAT, VT_DOUBLE,
-  VT_EXTERN, VT_STATIC, VT_TYPEDEF, VT_INLINE, VT_CONSTANT, VT_VOLATILE, VT_STORAGE,
+  VT_EXTERN, VT_STATIC, VT_TYPEDEF, VT_INLINE, VT_CONSTANT, VT_VOLATILE, VT_STORAGE, VT_ENUM,
   btype, isInteger, isFloat, isUnsigned, isPtr, isArray, isFunc, isStruct, isUnion, isEnum,
   isBitfield, bitPosOf, bitSizeOf, mkBitfield, bitfieldBase, bfAccess,
-  ctype, mkPointer, mkArray, mkStruct, mkEnum, mkFunc, typeSize, typeText, sameType,
+  ctype, mkPointer, mkArray, mkStruct, mkEnum, enumBase, mkFunc, typeSize, typeText, sameType,
   sameTypeUnqual, mkVla, isVla, compareTypes,
-  TY_VOID, TY_INT, TY_UINT, TY_LLONG, TY_ULLONG, TY_CHAR, TY_SHORT, TY_BOOL,
+  TY_VOID, TY_INT, TY_UINT, TY_LLONG, TY_ULLONG, TY_CHAR, TY_UCHAR, TY_SHORT, TY_BOOL,
   TY_FLOAT, TY_DOUBLE, TY_LDOUBLE, VT_LDOUBLE,
 } from './ctype.js';
 import {
@@ -847,11 +847,12 @@ export class CGen {  /**
    * 在当前帧里划一块，回帧内偏移。**不回收**（见 finishFunc 头上「平铺的帧」）。
    * `align` 非 0 就用它 —— `__attribute__((aligned(N)))` 写在变量上的那一格。
    */
-  frameAlloc(ty, align = 0) {
+  frameAlloc(ty, align = 0, extra = 0) {
     const s = typeSize(ty);
     this.frameOff = alignUp(this.frameOff, align !== 0 ? align : s.align);
     const off = this.frameOff;
-    this.frameOff += s.size === 0 ? 1 : s.size;
+    const total = s.size + extra;
+    this.frameOff += total === 0 ? 1 : total;
     return off;
   }
 
@@ -859,7 +860,7 @@ export class CGen {  /**
    * 声明一个局部变量。登记进最内层作用域（同名遮蔽是 C 的规矩），回那条登记。
    * 两种落法二选一：帧上的偏移（`off >= 0`）或者 MIR 的槽（`slot >= 0`）。
    */
-  declareLocal(name, ty, align = 0) {
+  declareLocal(name, ty, align = 0, extra = 0) {
     if (btype(ty.t) === VT_VOID) this.err(`variable '${name}' has void type`);
     this.needComplete(name, ty);
     /* 这个名字要是外面某层的 typedef，从这儿起它是个变量（C11 6.2.1 第 4 段）——
@@ -876,7 +877,7 @@ export class CGen {  /**
       return e;
     }
     if (this.needsMem(ty) || this.frameNames.has(name) || align !== 0) {
-      const e = { ty, slot: -1, off: this.frameAlloc(ty, align), align };
+      const e = { ty, slot: -1, off: this.frameAlloc(ty, align, extra), align };
       scope.set(name, e);
       return e;
     }
@@ -899,15 +900,12 @@ export class CGen {  /**
    * 料是「函数名 + 这个函数里的第几条 static」—— 序号在两遍里数出来一样（函数体解析
    * 两遍，偏离 4），于是第二遍找到的是第一遍划的那块地方，不会划两次。
    */
-  declareStaticLocal(name, ty, align) {
+  declareStaticLocal(name, ty, align, extra = 0) {
     if (btype(ty.t) === VT_VOID) this.err(`variable '${name}' has void type`);
     this.tdefShadow(name);
     const key = `${this.funcName}.${name}.${this.staticNo++}`;
     let g = this.gvars.get(key);
-    if (g === undefined) g = this.declareGlobal(key, ty, false, align);
-    /* 第二遍见到的是同一条声明，但**类型对象是新的**（函数体里写的匿名 struct 每遍
-     * 各造一个 tag 对象），所以不能走 `declareGlobal` 那条「合并两条同名声明」的路 ——
-     * 那条路会把它判成 `incompatible types for redefinition`。地址留着、类型换成这一遍的。 */
+    if (g === undefined) g = this.declareGlobal(key, ty, false, align, extra);
     else g.ty = ty;
     const e = { ty, slot: -1, off: -1, align, gvar: g };
     this.scopes[this.scopes.length - 1].set(name, e);
@@ -1782,7 +1780,7 @@ export class CGen {  /**
    * 线性内存出生时全是 0，而 C 正好规定静态存储期的对象零初始化（C11 6.7.9 第 10 段）。
    * 这一条让「几千个全局量」不多一个字节的 data 段。
    */
-  declareGlobal(name, ty, isExtern, align = 0) {
+  declareGlobal(name, ty, isExtern, align = 0, extra = 0) {
     const hit = this.gvars.get(name);
     if (hit !== undefined) {
       /* 同一个名字声明好几遍是合法的（C11 6.9.2 的**试探性定义**，第三十九片）——
@@ -1792,6 +1790,7 @@ export class CGen {  /**
       if (m === null) this.err(`incompatible types for redefinition of '${name}'`);
       hit.ty = m;
       if (!isExtern) hit.defined = true;
+      if (extra > 0) hit.extra = extra;
       // 长度补上了才划地方（试探性那一条当时没划）
       if (hit.addr < 0 && !(isArray(m.t) && m.count < 0)) this.allocGlobal(hit);
       return hit;
@@ -1803,7 +1802,7 @@ export class CGen {  /**
      * 「不完整」要按类型问，不能按「尺寸是 0」问：`int gz[0];` 的尺寸也是 0，
      * 而那是合法的（GNU 的零长数组，tcc 收）。 */
     if (!isExtern) this.needComplete(name, ty);
-    const e = { ty, addr: -1, defined: !isExtern, used: false, align };
+    const e = { ty, addr: -1, defined: !isExtern, used: false, align, extra };
     /* 没写长度的数组是一条**试探性定义**：现在不划地方，等后面那条同名声明补上长度。
      * 一直没补上就是错，而那条错在**用**它的地方报（`gvarLval`），与 tcc 一样。 */
     if (!(isArray(ty.t) && ty.count < 0)) this.allocGlobal(e);
@@ -1811,12 +1810,13 @@ export class CGen {  /**
     return e;
   }
 
-  /** 给一条全局量的登记在 data 段里划地方。试探性定义要等长度补上才叫。 */
+  /** 给一条全局量的登记在 data 段里划地方。试探性定义要等长度补上才叫。
+   * `extra` 是柔性数组成员的初始化式多要的那几个字节（第六十二片）—— 它不进 `sizeof`。 */
   allocGlobal(e) {
     const s = typeSize(e.ty);
     this.dataOff = alignUp(this.dataOff, e.align !== 0 ? e.align : s.align);
     e.addr = this.dataOff;
-    this.dataOff += s.size;
+    this.dataOff += s.size + (e.extra === undefined ? 0 : e.extra);
   }
 
   /** 一个全局量 -> 左值。地址是常量，静态偏移 0（`p->f` 那种偏移进描述符是后面的事）。 */
@@ -2348,6 +2348,105 @@ export class CGen {  /**
   }
 
   /**
+   * struct 的最后一个成员是不是**柔性数组**（`int b[];`，count < 0）。回那个成员，
+   * 不是就回 null。union 不算（tcc 的 `u == VT_STRUCT` 那个条件）。
+   */
+  flexField(ty) {
+    if (!isStruct(ty.t) || isUnion(ty.t)) return null;
+    const fs = ty.ref === null ? null : ty.ref.fields;
+    if (fs === null || fs.length === 0) return null;
+    const f = fs[fs.length - 1];
+    if (!isArray(f.ty.t) || !(f.ty.count < 0)) return null;
+    return f;
+  }
+
+  /**
+   * 柔性数组成员配初始化式时**要多划几个字节**（第六十二片）。
+   *
+   * `sizeof` 不变（还是不含柔性成员的那个数），但那块地方得真的够大 —— 否则后面那个
+   * 全局量就被压在同一段字节上。tcc 在 `decl_initializer_alloc` 里也是分两步：
+   * 先 `DIF_SIZE_ONLY` 干跑一遍把柔性成员的格数算出来，再
+   * `size += flexible_array->type.ref->c * pointed_size(...)`（`tccgen.c:8336-8340`），
+   * 跑完还把那个格数改回 -1，好让后面同样的声明重新算。
+   *
+   * 我们这儿量的是「初始化式碰到的最大字节偏移」，同一个数、少一处状态。
+   * 回 `{ extra, body }` —— body 要由调用方 `replayBraced` 放一遍。
+   */
+  flexInit(ty) {
+    const body = this.cpp.captureBraced();
+    let end = 0;
+    this.replayBraced(body, () => { end = this.measureBraced(ty); });
+    const size = typeSize(ty).size;
+    return { extra: end > size ? end - size : 0, body };
+  }
+
+  /**
+   * 量一个 `{…}` 碰到的最大字节偏移（只量，不落地）。走法与 `countBraced` 同一份，
+   * 差别是记的东西：那边记「顶层第几格」，这边记「到哪个字节为止」。
+   */
+  measureBraced(ty) {
+    this.next();      // `{`
+    const stack = [{ ty, off: 0, i: 0 }];
+    let end = 0;
+    while (this.tok !== RBRACE) {
+      if (this.tok === TOK_EOF) this.err("'}' expected");
+      let chainAt = -1;
+      let nb = 1;
+      if (this.tok === LBRACK || this.tok === DOT) {
+        while (stack.length > 1) stack.pop();
+        nb = this.initDesignators(stack);
+        if (stack.length > 1) chainAt = stack[0].i;
+      }
+      for (;;) {
+        const el = this.initElem(stack[stack.length - 1]);
+        if (this.tok === LBRACE) break;
+        if (isArray(el.ty.t) && (this.tok === TOK_STR || this.tok === TOK_LSTR)) break;
+        if (!isArray(el.ty.t) && !isStruct(el.ty.t)) break;
+        if (isStruct(el.ty.t) && el.ty.ref.fields === null) {
+          this.err(`'${typeText(el.ty)}' is an incomplete type`);
+        }
+        stack.push({ ty: el.ty, off: el.off, i: 0 });
+      }
+      const lv = stack[stack.length - 1];
+      const at = this.initElem(lv);
+      /* 到底的那一格是**没写长度的数组**（也就是那个柔性成员）时，`typeSize` 回 0，
+       * 量不出东西来 —— 所以这一格自己数：花括号那一种交给 `countBraced`，
+       * 字符串那一种就是「字节数 + 1」。别的照 `typeSize` 算。 */
+      let span = typeSize(at.ty).size;
+      if (isArray(at.ty.t) && at.ty.count < 0) {
+        const es = typeSize(at.ty.ref).size;
+        if (this.tok === LBRACE) {
+          span = this.countBraced(at.ty) * es;
+        } else if (this.tok === TOK_STR) {
+          span = (this.readStrTok(this.tokc).length + 1) * es;
+        } else if (this.tok === TOK_LSTR) {
+          span = (this.readWStrTok(this.tokc).length + 1) * es;
+        } else {
+          this.skipInitItem();
+        }
+      } else {
+        this.skipInitItem();
+      }
+      if (at.off + span > end) end = at.off + span;
+      if (nb > 1) lv.i += nb - 1;
+      this.initBump(lv);
+      while (stack.length > 1 && this.initFull(stack[stack.length - 1])) {
+        stack.pop();
+        this.initBump(stack[stack.length - 1]);
+      }
+      if (chainAt >= 0) {
+        while (stack.length > 1) stack.pop();
+        stack[0].i = chainAt;
+        this.initBump(stack[0]);
+      }
+      if (this.tok !== COMMA) break;
+      this.next();
+    }
+    this.skip(RBRACE);
+    return end;
+  }
+
+  /**
    * 数一个 `{…}` 顶层有几格（只数，不落地）。
    *
    * 与 `initBraced` 是同一份走法 —— 同一个下降栈、同一个 `initDesignators`、
@@ -2667,12 +2766,9 @@ export class CGen {  /**
       this.skip(COMMA);
       const b = this.typeName();
       this.skip(RPAR);
-      /* 只有一边是枚举时 tcc 拿的是**那个枚举的底层类型**，而它是算出来的：全是非负数
-       * 就是 `unsigned int`（`tccgen.c:4556` 一带）。我们的枚举底层永远是 `int`
-       * （见 `mkEnum`），所以这一问会答错 —— 与其静悄悄给个错的数，先在这儿报出来。 */
-      if (isEnum(a.t) !== isEnum(b.t)) {
-        this.err('__builtin_types_compatible_p with one enum side is not supported');
-      }
+      /* 只有一边是枚举时问的是**那个枚举的底层类型**（`compareTypes` 第一段就把枚举
+       * 换成它的底层位）—— 第五十九片把底层类型真的算出来之后，这一问不再需要那条
+       * 「只有一边是枚举就报错」的边界：全非负的枚举与 `unsigned int` 相容。 */
       return this.postfix(sVal(TY_INT, this.konst(TY_INT, compareTypes(a, b, 1) ? 1 : 0)));
     }
 
@@ -2887,7 +2983,30 @@ export class CGen {  /**
     /* 回的是那块地方的地址（SysV 的 rax 也是这么回的）。用**回来的**那个 ref 而不是
      * 手上的 `sret`：两者一定相等，而用回来的那个把「返回值在哪儿」这件事记在数据流里。 */
     if (a.sret !== null) return sMem(info.ret, r, 0);
-    return sVal(info.ret, r);
+    return this.retNarrow(info.ret, r);
+  }
+
+  /**
+   * PROMOTE_RET（`tccgen.c:6372-6379` 立旗、`force_charshort_cast`（`tccgen.c:3236`）
+   * 兑现，`arm64-gen.c:47` / `x86_64-gen.c:109` 都开着它）：声明的返回类型是
+   * `char`/`short`/`_Bool` 时，**调用方**把回来的那一格按窄类型截一刀。
+   *
+   * 被调的那一侧如果也是我们编的，它 `return` 那一步已经截过了，这一刀于是白挨一下。
+   * 露出来的是**函数指针的类型与真实函数不符**那一种（tcctest.c 的 `csf`：`__csf` 回
+   * `int`，却按「回 `unsigned char` 的函数」调），那时寄存器里全是 32 位，谁截由 ABI
+   * 说了算 —— tcc 说调用方截，所以 `csf(unsigned char, 0x89898989)` 是 137 而不是
+   * 0x89898989。
+   *
+   * `_Bool` 那一格照 `force_charshort_cast` 里那句 `dbt == VT_BOOL ? VT_BYTE|VT_UNSIGNED`：
+   * 按**无符号 char** 截，不是「非零就是 1」—— 所以 `csf(_Bool, 0x33221100)` 是 0、
+   * `0x33221101` 是 1，而按 `!= 0` 算两个都会是 1。
+   */
+  retNarrow(ret, r) {
+    const b = btype(ret.t);
+    if (b !== VT_BYTE && b !== VT_SHORT && b !== VT_BOOL) return sVal(ret, r);
+    const nt = b === VT_BOOL ? TY_UCHAR
+      : ctype(ret.t & (VT_BTYPE | VT_UNSIGNED | VT_DEFSIGN), null);
+    return sVal(ret, this.gv(this.castTo(sVal(TY_INT, r), nt)));
   }
 
   /**
@@ -2905,7 +3024,7 @@ export class CGen {  /**
       fi.old === true);
     const r = this.f.emit(OP.CALLI, mirTypeOf(fi.ret), callee, this.f.pushArgs(a.refs), 0);
     if (a.sret !== null) return sMem(fi.ret, r, 0);
-    return sVal(fi.ret, r);
+    return this.retNarrow(fi.ret, r);
   }
 
   /**
@@ -4894,7 +5013,9 @@ export class CGen {  /**
    * 包着这个 enum 的作用域 —— 不是「enum 内部」。所以 `enum {A, B = A + 2}` 里
    * 的 `A` 要立刻可见：一边登记一边求值，共用 `constExpr`。
    *
-   * 底层类型就是 `int`（tcc 也是这么选的），`VT_ENUM` 那一位只用来印错误消息。
+   * 底层类型**不一定是 int**（第五十九片）：见 `enumBase`。所以枚举常量的类型要等
+   * 读完 `}` 才定得下来 —— 与 tcc 一样，先按 int 登记，读完再回头改那一条链
+   * （`tccgen.c:4564-4576` 的 `for (ss = s->next; ss; ss = ss->next)`）。
    */
   enumDecl() {
     const name = this.tok >= TOK_UIDENT ? this.identName() : null;
@@ -4910,6 +5031,10 @@ export class CGen {  /**
 
     const names = [];
     let val = 0n;
+    /* 最小的与最大的枚举值（tcc 的 `nl` / `pl`，都从 0 起算 —— 也就是说
+     * 「有没有负的」问的是 `nl < 0`，空枚举与全非负的枚举一样）。 */
+    let nl = 0n;
+    let pl = 0n;
     while (this.tok !== RBRACE) {
       if (this.tok === TOK_EOF) this.err("'}' expected");
       const en = this.identName();
@@ -4918,20 +5043,39 @@ export class CGen {  /**
         this.next();
         val = this.constExpr();
       }
-      /* 收成 32 位有符号：枚举常量的类型是 `int`，而 `konst` 要的是规范形。
-       * 不收的话 `enum {BIG = 0x80000000}` 会带着一个 33 位的数走下去。 */
-      val = BigInt.asIntN(32, val);
+      /* 收成 **64 位**有符号（tcc 的 `expr_const64`）：枚举值先按 long long 存着，
+       * 到底是 int / unsigned / long long 由下面 `enumBase` 一处说了算。 */
+      val = BigInt.asIntN(64, val);
       this.ecScope().set(en, { ty, val });
       names.push(en);
+      if (val < nl) nl = val;
+      if (val > pl) pl = val;
       val = val + 1n;
       if (this.tok !== COMMA) break;
       this.next();
     }
     this.skip(RBRACE);
     info.fields = names;
-    info.size = 4;
-    info.align = 4;
-    return ty;
+    info.bt = enumBase(nl, pl);
+    const sz = typeSize(mkEnum(info));
+    info.size = sz.size;
+    info.align = sz.align;
+    /* 每个枚举常量**自己**的类型（`tccgen.c:4564-4576`）：装得进 int 的就是 int，
+     * 哪怕整个枚举是无符号的；装不进就跟着枚举走一格。 */
+    for (const en of names) {
+      const e = this.ecScope().get(en);
+      let bits = VT_INT;
+      if (e.val !== BigInt.asIntN(32, e.val)) {
+        if ((info.bt & VT_UNSIGNED) !== 0) {
+          bits = VT_INT | VT_UNSIGNED;
+          if (e.val !== BigInt.asUintN(32, e.val)) bits = VT_LLONG | VT_LONG | VT_UNSIGNED;
+        } else {
+          bits = VT_LLONG | VT_LONG;
+        }
+      }
+      e.ty = ctype(bits | VT_ENUM, info);
+    }
+    return mkEnum(info);
   }
 
   /**
@@ -5210,6 +5354,14 @@ export class CGen {  /**
        * 所以 `typedef int V[4];` 少了这一句就变成 `int *`，`sizeof(V)` 从 16 变 8。 */
       const r = ctype(tdef.t | quals | storage, tdef.ref);
       if (tdef.count !== undefined) r.count = tdef.count;
+      /* typedef 上的 `aligned(N)`（第六十一片）：tcc 把属性存在那条 typedef 的 `Sym`
+       * 上，用到它时 `sym_to_attr` 并进当前这一份 `ad`（`tccgen.c:4970`），而并的规则是
+       * `merge_symattr`：**当前没写才用 typedef 那一份**。`talign` 顺着带下去，
+       * 于是 `typedef unaligned_u64 X;` 这样接一层也还在。 */
+      if (tdef.talign !== undefined) {
+        r.talign = tdef.talign;
+        if (ad !== null && !(ad.aligned > 0)) ad.aligned = tdef.talign;
+      }
       return r;
     }
 
@@ -6039,6 +6191,11 @@ export class CGen {  /**
             this.err(`typedef '${name}' redefined with a different type`);
           }
           this.tdefScope().set(name, d.ty);
+          /* `typedef unsigned long long __attribute__((aligned(4))) T;`（第六十一片）：
+           * 属性跟着**名字**走（tcc 的 `sym->a = ad.a`，`tccgen.c:8926`），下次用到这个
+           * 名字时再并进那一份 `ad`。挂在类型对象上是因为我们的 typedef 表存的就是类型
+           * —— 与 `count` 同一个位置、同一种带法。 */
+          if (dad.aligned > 0) d.ty.talign = dad.aligned;
         } else if (isFunc(d.ty.t)) {
           if (this.funcDecl(global, name, d.ty, isInline)) { wasBody = true; break; }
         } else {
@@ -6100,6 +6257,16 @@ export class CGen {  /**
             if (vty.count === 0 && hasInit) this.err(`zero-sized array '${name}'`);
           }
 
+          /* 柔性数组成员配初始化式（第六十二片）：`sizeof` 不变，但这块地方要真的够大 ——
+           * 不然后面那个全局量就压在同一段字节上（tcctest.c 的 `cix2` / `arrtype3`
+           * 两行错的就是这个）。 */
+          let extra = 0;
+          if (braced && this.flexField(vty) !== null) {
+            const r = this.flexInit(vty);
+            extra = r.extra;
+            body = r.body;
+          }
+
           /* 变量自己写的 `__attribute__((aligned(N)))`（tcctest.c:1007 的
            * `struct aligntest7 altest7[2] __attribute__((aligned(16)));`）：
            * 它抬的是**这一个符号**的对齐，不是类型的 —— 所以只喂给分配那一步。
@@ -6109,10 +6276,10 @@ export class CGen {  /**
           const hasStatic = (spec.t & VT_STATIC) !== 0;
           const inData = global || hasStatic || isExtern;
           let e;
-          if (global) e = this.declareGlobal(name, vty, isExtern && !hasInit, dad.aligned);
+          if (global) e = this.declareGlobal(name, vty, isExtern && !hasInit, dad.aligned, extra);
           else if (isExtern) e = this.declareExternLocal(name, vty, hasInit, dad.aligned);
-          else if (hasStatic) e = this.declareStaticLocal(name, vty, dad.aligned);
-          else e = this.declareLocal(name, vty, dad.aligned);
+          else if (hasStatic) e = this.declareStaticLocal(name, vty, dad.aligned, extra);
+          else e = this.declareLocal(name, vty, dad.aligned, extra);
           if (hasInit) {
             let dest;
             let base;
@@ -6129,7 +6296,7 @@ export class CGen {  /**
             /* 花括号的初始化式只覆盖写出来的那些，剩下的按 C 要是 0。静态那一侧免费
              * （线性内存出生就是 0），自动这一侧先整块清零。 */
             if (braced && !inData && e.off >= 0) {
-              this.autoZero(this.fpRef, e.off, typeSize(vty).size);
+              this.autoZero(this.fpRef, e.off, typeSize(vty).size + extra);
             }
             if (strBytes !== null) this.initString(dest, base, vty, strBytes);
             else if (wstrVals !== null) this.initWString(dest, base, vty, wstrVals);
