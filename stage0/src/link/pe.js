@@ -207,7 +207,7 @@ export function writeImage(img) {
     else sizeOfData += size;
   }
 
-  const out = new Image(at);
+  const out = new Image(at + (img.tail === undefined ? 0 : img.tail.length));
   /* ---- DOS 头 + stub。 */
   for (let i = 0; i < DOS_WORDS.length; i++) out.u16(i * 2, DOS_WORDS[i]);
   out.u32(60, NT_SIG_OFF);
@@ -217,6 +217,10 @@ export function writeImage(img) {
   out.u32(NT_SIG_OFF, NT_SIGNATURE);
   out.u16(FILEHDR_OFF, img.machine);
   out.u16(FILEHDR_OFF + 2, nsec);
+  if (img.symtab !== undefined) {
+    out.u32(FILEHDR_OFF + 8, at);                 // PointerToSymbolTable
+    out.u32(FILEHDR_OFF + 12, img.symtab.count);  // NumberOfSymbols
+  }
   out.u16(FILEHDR_OFF + 16, OPTHDR_SIZE);
   out.u16(FILEHDR_OFF + 18, img.chars);
 
@@ -261,7 +265,8 @@ export function writeImage(img) {
     const s = img.secs[i];
     const p = place[i];
     const h = HDR_SIZE + i * SECHDR_SIZE;
-    out.name8(h, s.name);
+    if (typeof s.name === 'string') out.name8(h, s.name);
+    else out.bytes(h, s.name);                    // `-g` 时换成 `/<偏移>` 的那 8 字节
     out.u32(h + 8, s.vsize);
     out.u32(h + 12, s.vaddr);
     out.u32(h + 16, p.size);
@@ -269,6 +274,10 @@ export function writeImage(img) {
     out.u32(h + 36, s.chars);
     if (p.size !== 0) out.bytes(p.ptr, s.bytes);
   }
+  /* `-g` 时那张 COFF 符号表与字符串表接在最后一节补齐之后，不再补齐 —— 于是整份
+   * 文件的长度不是 `FileAlignment` 的整数倍。校验和里那个「加上文件长度」自然
+   * 也就把它们算进去了。 */
+  if (img.tail !== undefined) out.bytes(at, img.tail);
   out.u32(o + 64, checksum(out.b));
   return out.b;
 }

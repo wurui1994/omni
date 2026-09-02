@@ -53,6 +53,8 @@ const STB_WEAK = 2;
 
 const SYM_SIZE = 24;
 const RELA_SIZE = 24;
+/** `sizeof(Stab_Sym)`：`n_strx`、`n_type`、`n_other`、`n_desc`、`n_value`。 */
+const STAB_SIZE = 12;
 
 const EM_AARCH64 = 183;
 
@@ -96,8 +98,10 @@ class StrTab {
 }
 
 /** 这一节的内容要不要跟着并（`tcc_load_object_file` 里那一串 `sh_type` 的筛子）。 */
-function mergeable(type, name, unwind) {
-  if (name.startsWith('.debug_') || name.startsWith('.stab')) return false;
+function mergeable(type, name, unwind, debug) {
+  /* `.stab*` 与 `.debug_*` 只在 `-g` 的时候才装，而且它们**绕过**下面那个
+   * `sh_type` 的筛子 —— 所以 `.stabstr`（`SHT_STRTAB`）也进得来。 */
+  if (name.startsWith('.debug_') || name.startsWith('.stab')) return debug;
   /* `.eh_frame`：节都没造的目标上（macOS、Windows）连输入里的也不要。 */
   if (name.startsWith('.eh_frame')) return unwind;
   return type === SHT_PROGBITS || type === SHT_NOTE || type === SHT_NOBITS
@@ -146,11 +150,12 @@ function ehFrameCie(machine) {
  * 接着往下走 —— 那两步的前半段本来就是同一件事，只是最后写出的形状不同。
  *
  * @param objs 每个都是一个 `ET_REL` 的字节
- * @param opts `{rdata, unwind}`：`rdata` 是只读数据那一节的名字 —— PE 目标上 tcc 叫它
+ * @param opts `{rdata, unwind, debug}`：`rdata` 是只读数据那一节的名字 —— PE 目标上 tcc 叫它
  *             `.rdata`，别的目标叫 `.data.ro`（`tccelf.c` 开头那个 `#ifdef`）；`unwind`
  *             是要不要 `.eh_frame` —— tcc 只在**最终格式是 ELF** 的目标上开
  *             （`tccelf.c:93`：格式不是 ELF 就把 `unwind_tables` 清掉），于是 macOS
- *             与 Windows 上连节都没有，输入里的 `.eh_frame` 也一并丢掉
+ *             与 Windows 上连节都没有，输入里的 `.eh_frame` 也一并丢掉；`debug` 是
+ *             `-g`：`.stab*` 与 `.debug_*` 只在它为真时才装进来
  * @returns `{machine, secs, syms, relas, strs, byName, idx, setSym, newSec}`；`secs` 是
  *          1 号起的（0 号留空），`idx` 记着起手那几条的号
  */
@@ -159,6 +164,8 @@ export function linkObjects(objs, opts) {
   const o = opts === undefined ? {} : opts;
   const rdata = o.rdata === undefined ? '.data.ro' : o.rdata;
   const unwind = o.unwind === true;
+  const debug = o.debug === true;
+  const declare = o.declare ?? [];
   /* 起手那几条节要按 `tccelf_new` 的次序造，而 `.eh_frame` 的 CIE 认架构 —— 先把
    * 输入都读进来，架构就知道了。 */
   const parsed = objs.map((b) => readObject(b));
@@ -182,6 +189,19 @@ export function linkObjects(objs, opts) {
   const SYMTAB = newSec('.symtab', SHT_SYMTAB, 0, 8, SYM_SIZE);
   const STRTAB = newSec('.strtab', SHT_STRTAB, 0, 1, 0);
   secs[SYMTAB].link = STRTAB;
+  /* `-g`（不带 dwarf）的时候 `tccelf_new` 就把 `.stab` 与 `.stabstr` 造好了
+   * （`tcc_debug_new`），并且**先放一条全 0 的 `Stab_Sym`**（`put_stabs(s1, "", …)`）——
+   * 那一条的名字是 `put_elf_str(stabstr, "")`，于是 `.stabstr` 起手也有一个 `\0`。
+   * 并出来的 `.stab` 因此比几份输入加起来长 12 字节、`.stabstr` 长 1 字节。 */
+  if (debug) {
+    const stab = newSec('.stab', SHT_PROGBITS, 0, 4, STAB_SIZE);
+    const stabstr = newSec('.stabstr', SHT_STRTAB, 0, 1, 0);
+    secs[stab].link = stabstr;
+    for (let i = 0; i < STAB_SIZE; i++) secs[stab].data.push(0);
+    secs[stab].size = STAB_SIZE;
+    secs[stabstr].data.push(0);
+    secs[stabstr].size = 1;
+  }
   if (unwind) {
     const eh = newSec('.eh_frame', SHT_PROGBITS, SHF_ALLOC, 8, 0);
     secs[eh].data = ehFrameCie(machine);
@@ -234,7 +254,18 @@ export function linkObjects(objs, opts) {
     return no;
   };
 
-  for (const obj of parsed) {
+  for (let oi = 0; oi < parsed.length; oi++) {
+    const obj = parsed[oi];
+    /* `set_global_sym(s1, start_symbol, NULL, 0)`：入口符号是在命令行上那几个目标
+     * 文件都装完、库还没扫的**那一刻**加进符号表的（`pe_add_runtime`），于是它在表里
+     * 的位置在它们后面、库成员前面。这一格只有 `-g` 时看得见（COFF 符号表照表里的
+     * 次序写），可它确实是链接过程的一部分。 */
+    for (const d of declare) if (d.after === oi) {
+      setSym({
+        name: d.name, info: STB_GLOBAL * 16, other: 0,
+        shndx: SHN_UNDEF, value: 0, size: 0,
+      });
+    }
     /* `obj.secs` 是 1 号起的，这儿按 ELF 的序号（1 起）来记账。 */
     const n = obj.secs.length + 1;
     const at = (i) => obj.secs[i - 1];
@@ -251,10 +282,13 @@ export function linkObjects(objs, opts) {
         map.set(i, { no: SYMTAB, off: 0 });
         continue;
       }
-      if (sh.type === SHT_STRTAB) continue;               // .strtab 跟着符号一条条并
+      /* `.strtab` 跟着符号一条条并 —— 可 `.stabstr` 也是 `SHT_STRTAB`，它走
+       * 调试那一路，整块接。 */
+      const dbg = sh.name.startsWith('.stab') || sh.name.startsWith('.debug_');
+      if (sh.type === SHT_STRTAB && !dbg) continue;
       /* 重定位表：能不能并要看**它修的那一节**（`sh = &shdr[sh->sh_info]`）。 */
       const probe = sh.type === SHT_RELA ? at(sh.info) : sh;
-      if (!mergeable(probe.type, probe.name, unwind)) continue;
+      if (!mergeable(probe.type, probe.name, unwind, debug)) continue;
       const al = sh.al < 1 ? 1 : sh.al;
       let no = -1;
       for (let j = 1; j < secs.length; j++) if (secs[j].name === sh.name) { no = j; break; }
@@ -279,8 +313,30 @@ export function linkObjects(objs, opts) {
       }
     }
 
-    /* ---- 二、新造的节的 `sh_link` / `sh_info`。 */
-    for (let i = 1; i < n; i++) {
+    /* ---- 一点五、`gr relocate stab strings`：这一份的 `.stab` 里那些字符串偏移
+     * 要加上它的 `.stabstr` 落在并出来那一节里的起点。`n_strx` 是 0 的那几条不动。 */
+    if (debug) {
+      let si = -1;
+      let ssi = -1;
+      for (let i = 1; i < n; i++) {
+        if (at(i).name === '.stab') si = i;
+        if (at(i).name === '.stabstr') ssi = i;
+      }
+      const ms = map.get(si);
+      const mss = map.get(ssi);
+      if (ms !== undefined && mss !== undefined && mss.off !== 0) {
+        const d = secs[ms.no].data;
+        for (let p = ms.off; p + STAB_SIZE <= d.length; p += STAB_SIZE) {
+          const v = (d[p] | (d[p + 1] << 8) | (d[p + 2] << 16) | (d[p + 3] << 24)) >>> 0;
+          if (v === 0) continue;
+          const w = (v + mss.off) >>> 0;
+          d[p] = w & 255; d[p + 1] = (w >>> 8) & 255;
+          d[p + 2] = (w >>> 16) & 255; d[p + 3] = (w >>> 24) & 255;
+        }
+      }
+    }
+
+    /* ---- 二、新造的节的 `sh_link` / `sh_info`。 */    for (let i = 1; i < n; i++) {
       const m = map.get(i);
       if (m === undefined) continue;
       const sh = at(i);

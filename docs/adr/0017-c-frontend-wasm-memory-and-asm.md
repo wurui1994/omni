@@ -485,6 +485,15 @@ Mach-O 的 dylib 不叫、PE 的 dll **照叫**（`pe_add_runtime` 在
 改挂成 `R_XXX_RELATIVE` —— 资源目录里 `OffsetToData` 那一格于是得到「原地那个节内偏移
 + 这一节的 RVA」，而 `RELATIVE` 不算 `REL_TYPE_DIRECT`，所以**不进** `.reloc`；六种
 形状各 6 × 2 份逐字节相同，尺子自己拼，因为交叉环境里没有 windres）。
+**PE 上的 `-g` 也认了**（第六十九片：Windows 上 tcc 的 `-g` 出的是 **stabs**；`.stab` 与
+`.stabstr` 只在 `-g` 时装（那一条分支绕过 `sh_type` 的白名单，所以 `SHT_STRTAB` 的
+`.stabstr` 也进得来）、`tccelf_new` 就给它们各放了一条全 0 的起手（12 与 1 字节）、
+每份输入的 `n_strx` 要加上它 `.stabstr` 的起点、调试那一类从不并条，末尾再接一张 COFF
+符号表（一条 18 字节，只收 `STB_GLOBAL`，`n_value` 是节内偏移、`n_scnum` 是节表里第几
+条；长节名换成 `/<偏移>`，而 `snprintf` 只覆盖前几个字节，后面还是原名字剩下的）；
+九种走法各 2 份逐字节相同。真正难的一格不是这些 —— 是**符号表里的次序**：
+`tcc_add_linker_symbols` 那一批「表里没有也要建」，入口符号则是在「命令行上那几份装完、
+库还没扫」的缝里加的，这两处以前都能偷懒，`-g` 一开就看得见了）。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -10926,6 +10935,101 @@ COFF：一棵「类型 → 名字 → 语言 → 数据项」的资源树，`Off
 （474624 字节）。同一份 `.res` 交给 tcc 与交给我们，写出来的映像一个字节不差。
 
 <!-- 第九刀第六十八片-END -->
+
+## 落地：第九刀第六十九片
+
+**PE 上的 `-g`。** Windows 上 tcc 的 `-g` 出的是 **stabs**，不是 dwarf（`tcc_debug_new`
+里那个 `if (s1->dwarf) … else …`）。于是这一片要的东西看起来只有三样：把 `.stab` 与
+`.stabstr` 带进来、给它们摆地址、在文件末尾接一张 COFF 符号表。真做下来，牵出的是
+**「链接过程里谁在什么时候进符号表」**这件一直被绕过去的事。
+
+先说三样明面上的。
+
+**一、`.stab` 与 `.stabstr` 是「只有 `-g` 才装」的节。** `tcc_load_object_file` 开头那个
+筛子里，`.debug_*` 与 `.stab*` 单独一条分支：`if (!s1->do_debug || seencompressed)
+continue;`。要紧的是这一条分支**绕过**了后面那个 `sh_type` 的白名单 —— 所以
+`.stabstr`（`SHT_STRTAB`）也进得来。我们那个 `mergeable` 原来无条件把这两族丢掉，现在
+认一个 `debug` 开关；`.stabstr` 那一格还得在「`SHT_STRTAB` 一律跳过」之前先放行。
+
+**二、并出来的两节天生比几份输入加起来长。** `tccelf_new` 在 `-g` 时就调
+`tcc_debug_new`，那儿把 `.stab`（`entsize` 12、对齐 4）与 `.stabstr` 建好，**并且先放
+一条全 0 的 `Stab_Sym`**（`put_stabs(s1, "", 0, 0, 0, 0)`）。那一条的名字是
+`put_elf_str(stabstr, "")`，于是 `.stabstr` 起手也有一个 `\0`。两节因此各长 12 与 1
+字节 —— 与 `.eh_frame` 起手那条 CIE（第四十二片）是同一种事：节是**造的时候就带内容**
+的，不是从输入里并出来的。
+
+而 `stab_section` 这个全局量从此非空，于是 `tcc_load_object_file` 末尾那段
+`gr relocate stab strings` 真的会跑：每份目标文件的 `.stab` 接进来之后，里面每条
+`n_strx`（非 0 的）都要加上它那份 `.stabstr` 落在并出来那一节里的起点。一份输入时看不
+出来，两份就全错 —— 用例里 `01-a` / `01-b` 就是冲这一格。
+
+**三、调试那一类从不并条。** `pe_assign_addresses` 里合并相邻同类节的条件是
+`si && c == si->cls && c != sec_debug` —— 那个 `c != sec_debug` 我们第四十八片就照抄了，
+这一片才第一次有节落到那一档：`.stab` 与 `.stabstr` 各占一条节表项，各自对到
+`SectionAlignment`。
+
+**四、COFF 符号表。** `pe_write` 开头 `if (s1->do_debug) pe_add_coffsym(pe)` —— 第一次调
+只是把 `.coffsym` / `.coffstr` 两节建出来（`SHF_PRIVATE`，所以进不了节表），并在
+`.coffstr` 头上留 4 字节给它自己的长度。第二次调（写完节表头之后）才真填：走一遍
+`.symtab`，**只收 `STB_GLOBAL`**，一条 18 字节：
+
+- `n_name` 不超过 8 字节就写在原地，否则 `n_zeroes` 留 0、`n_offset` 记进 `.coffstr`；
+- `n_value` 是 `st_value - s->sh_addr` —— 那时 `st_value` 已经是绝对地址了，减回去就是
+  **这一节里的偏移**，不是 RVA；
+- `n_scnum` 是 `s->sh_info`，也就是摆地址那一步记下的「落在节表里第几条」（并进同一条
+  的几节记的是同一个号）；未定义的符号是 0，`SHN_ABS` 那种照原样写（短整数，成了负数）；
+- `n_sclass` 一律 2（`C_EXT`），`n_type` 与 `n_numaux` 都是 0。
+
+两段在 `.coffstr` 里的**次序不能反**：节表头那个循环里 `if (pe->coffstr &&
+strlen(sh_name) > 8)` 会把超过 8 字节的节名也接进去、把节名换成 `/<偏移>`，那一步在填
+符号之前。于是长节名先、符号名后。
+
+顺手记一个 `snprintf` 的边角：那两句是先 `memcpy(psh->Name, sh_name, umin(strlen, 8))`，
+**再** `snprintf((char*)psh->Name, 8, "/%d", off)`。`snprintf` 只覆盖前面那几个字节加一个
+`\0`，**后面几个字节还是原名字剩下的那几个**。`.init_array` 于是成了 `/24\0ay` 之类
+——装载器读到 `\0` 就停，可文件里那几个字节不是 0。第六十五片我们发现「节名超过 8 字节
+就地截断」，那是**没有** `.coffstr` 的时候；有了它就换成 `/<偏移>`，两条路都得走。
+
+那张表与字符串表接在最后一节补齐之后，**不再补齐** —— 于是带 `-g` 的 `.exe` 长度不是
+`FileAlignment` 的整数倍。校验和那一句 `pe->sum += file_offset` 自然把它们算进去了。
+
+### 真正难的那一格：符号表里的次序
+
+前面那些照着写就对了，可第一次跑出来 `NumberOfSymbols` 是 22，tcc 是 37。差的 15 条
+全是**链接器自己造的符号**。
+
+`tcc_add_linker_symbols` 里 `_etext` / `_edata` / `_end` 走 `set_linker_sym(…, 0)`，
+`__preinit_array_start` 那六个与 `__start_<节>` / `__stop_<节>` 走 `set_global_sym` ——
+**这两个都是「表里没有就新建一条」**。我们原来只在「表里已经有、而且还没定义」时才记一
+笔（因为没人引用的符号不影响任何字节）。这个偷懒到 `-g` 才露出来：COFF 符号表照 `.symtab`
+的次序一条条写，「建了没有」是看得见的。
+
+只有一处确实是有条件的：`set_linker_sym` 末尾那句
+`if (name[0] == '_') set_linker_sym(s1, name + 1, sec, f + 1)` —— 不带下划线的
+`etext` / `edata` / `end` 走 `f == 1` 那一路，`if (!(sym_index || esym_index) || defined)
+break;`，也就是「表里压根没有就不建」。所以 tcc 的表里有 `_etext` 没有 `etext`。
+
+还差一条：**入口符号**。tcc 的表里 `_start` 排在 `g` / `add` / `main` 之后、crt 那一堆之
+前 —— 因为 `pe_add_runtime` 里 `set_global_sym(s1, start_symbol, NULL, 0)` 是在**命令行
+上那几个目标文件都装完、库还没开始扫**的那一刻加的。我们那边 `peLoad` 早就在同一个位置
+做了同一件事（`tab.declare(start)`），可那是链接器自己那张查询表，没进并合出来的
+`.symtab`；于是 `_start` 要等 `crt1.o` 里的定义才第一次出现，位置就晚了十几条。
+
+`mergeObjects` 因此多收一个 `declare: [{name, after}]`：装完第 `after` 份输入之前，先
+`setSym` 一条未定义的全局符号。调用方给的是
+`[{name: loaded.start, after: loaded.objs.length}]` —— 「命令行上那几份」与「从库里拉出
+来的成员」之间那条缝，本来是 `peLoad` 才知道的。
+
+这一格值得记：**符号表里的次序是链接过程的一部分**，不是并合的副产品。前面二十几片都没
+碰上，是因为一直没有哪个字节依赖它。
+
+尺子：`<target>-win32-tcc -g …`。九种走法（四份单目标的 C 案例、`.init_array` 那份长节
+名的、弱符号、线程局部、两份都带 stabs 的，以及 `-shared` 的两种）乘两个目标，
+**18 份逐字节相同**（180010 字节）。`-gdwarf` 那一路（`.debug_*` 一堆节、
+`pe_build_reloc` 里 `dwlo`/`dwhi` 那个「dwarf 指向 dwarf 的不进 `.reloc`」的例外）
+还没做。
+
+<!-- 第九刀第六十九片-END -->
 
 
 

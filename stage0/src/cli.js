@@ -2053,8 +2053,9 @@ function main(argv) {
      * `--stack`（十进制）、`--section-align` / `--file-align`（十六进制）、`-e` 换入口。
      * 命令行上的文件按内容认：只有一节且那一节叫 `.rsrc` 的是资源（第六十八片），
      * 开头是 `MZ` 的是真的 `.dll`（第六十七片），剩下的才是目标文件。
+     * `-g` 把 `.stab` / `.stabstr` 带进来，并在文件末尾接一张 COFF 符号表（第六十九片）。
      *   omni pe-link a.o [a.res] [foo.dll] -o a.exe -L dir [-L dir …]
-     *                 [--target x86_64-win32] [--shared]
+     *                 [--target x86_64-win32] [--shared] [-g]
      *                 [--subsystem gui] [--image-base 1000000] [--stack 2097152]
      *                 [--section-align 2000] [--file-align 1000] [-e main] */
     case 'pe-link': {
@@ -2080,6 +2081,7 @@ function main(argv) {
         fileAlign: hex('--file-align'),
         stack: stackArg === undefined ? undefined : parseInt(stackArg, 10),
         entry: valOf('-e'),
+        debug: rest.includes('-g'),
       };
       const bytesOf = (p) => {
         const s = readBinary(p);
@@ -2113,6 +2115,7 @@ function main(argv) {
         dlls: loaded.dlls,
         res: loaded.res,
         startName: loaded.entryName,
+        declare: [{ name: loaded.start, after: loaded.objs.length }],
         gui: loaded.peType === PE_GUI,
         outName: out,
         ...opt,
@@ -2385,7 +2388,8 @@ commands:
             --subsystem NAME, --image-base HEX, --stack N, --section-align HEX,
             --file-align HEX, -e NAME (slice 66). Inputs are told apart by content:
             a one-section COFF named .rsrc is a resource file (slice 68), one starting
-            with MZ is a real .dll (slice 67)
+            with MZ is a real .dll (slice 67). -g keeps .stab/.stabstr and appends a
+            COFF symbol table (slice 69)
   elf-link  link .o files into a Linux executable (ADR-0017 cut 9 slices 53-54):
             dynamic by default like tcc (.interp/.dynsym/.dynamic/.got), --static for
             the plain one, --shared for a shared library (slice 59), --dll libfoo.so to

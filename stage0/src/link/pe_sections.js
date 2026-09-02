@@ -45,6 +45,7 @@ const SHN_UNDEF = 0;
 const SHN_COMMON = 0xfff2;
 const STT_NOTYPE = 0;
 const STT_FUNC = 2;
+const STB_GLOBAL = 1;
 const ST_PE_EXPORT = 0x10;
 const ST_PE_IMPORT = 0x20;
 const ST_PE_STDCALL = 0x40;
@@ -275,6 +276,8 @@ export function buildReloc(entries) {
  *        - `objs`：命令行上那些 `.o` 加上从库里拉出来的成员，字节数组
  *        - `dlls`：`peLoad` 装出来的那几个 `.def`
  *        - `res`：`peLoad` 读出来的那几份资源（`{bytes, relocs}`），一份一节 `.rsrc`
+ *        - `debug`：`-g`。输入里的 `.stab` / `.stabstr` 跟着并进来（各自独占一条节表项，
+ *          调试那一类**从不与前一节并条**），写文件时再接一张 COFF 符号表
  *        - `dll`：造 DLL（`-shared`）。映像基址换成 `IMAGE_BASE_DLL`、一定有 `.reloc`、
  *          thunk 节里多一张导出表；`outName` 的基名就写进导出表里当 dll 名
  *        - `imagebase` / `subsystem` / `sectionAlign` / `fileAlign` / `dllChars`：
@@ -284,7 +287,9 @@ export function buildReloc(entries) {
  *          `{name, cls, vaddr, vsize, dataSize, ptr, rawSize, flags}`
  */
 export function peSections(inp) {
-  const merged = mergeObjects(inp.objs, { rdata: '.rdata' });
+  const merged = mergeObjects(inp.objs, {
+    rdata: '.rdata', debug: inp.debug === true, declare: inp.declare,
+  });
   const mo = readObject(merged);
   const machine = mo.machine;
   const syms = readSymbols(mo);
@@ -368,14 +373,32 @@ export function peSections(inp) {
   }
 
   /* `tcc_add_linker_symbols`：几个链接器自己提供的符号。注意它跑在 `pe_check_symbols`
-   * **之前**，所以 `_etext` 是导入桩还没接上去时的 `.text` 长度。 */
+   * **之前**，所以 `_etext` 是导入桩还没接上去时的 `.text` 长度。
+   *
+   * 这些符号是 `set_global_sym` 加的 —— 表里**没有也要新建一条**。以前这一格无所谓
+   * （没人引用的符号不影响任何字节），可 `-g` 的时候它们会出现在 COFF 符号表里，
+   * 于是「建了没有」看得见了。只有 `set_linker_sym` 那三个的**不带下划线**那一版
+   * 是「表里已经有才建」（`f == 1` 那一路）。 */
   const linker = new Map();
-  const undefSym = (n) => {
-    const s = syms.find((x) => x.name === n);
-    return s !== undefined && s.shndx === SHN_UNDEF;
+  const symOf = (n) => syms.find((x) => x.name === n);
+  const define = (name, sec, off) => {
+    if (sec === undefined) return;
+    const s = symOf(name);
+    if (s === undefined) {
+      syms.push({
+        name, info: STB_GLOBAL * 16, bind: STB_GLOBAL, type: STT_NOTYPE,
+        other: 0, shndx: SHN_UNDEF, value: 0, size: 0,
+      });
+    } else if (s.shndx !== SHN_UNDEF) {
+      return;                                      // 已经有定义：tcc 只警告一句就走
+    }
+    linker.set(name, { sec, off });
   };
-  const put = (name, sec, off) => { if (sec !== undefined && undefSym(name)) linker.set(name, { sec, off }); };
-  const pair = (name, sec, off) => { put(name, sec, off); put(name.slice(1), sec, off); };
+  const pair = (name, sec, off) => {
+    define(name, sec, off);
+    const bare = symOf(name.slice(1));
+    if (bare !== undefined && bare.shndx === SHN_UNDEF) define(name.slice(1), sec, off);
+  };
   pair('_etext', find('.text'), find('.text')?.size ?? 0);
   pair('_edata', find('.data'), find('.data')?.size ?? 0);
   pair('_end', bss, bss?.size ?? 0);
@@ -383,16 +406,16 @@ export function peSections(inp) {
     let s = find(nm);
     let end;
     if (s === undefined || (s.flags & SHF_ALLOC) === 0) { end = 0; s = find('.text'); } else { end = s.size; }
-    put(`__${nm.slice(1)}_start`, s, 0);
-    put(`__${nm.slice(1)}_end`, s, end);
+    define(`__${nm.slice(1)}_start`, s, 0);
+    define(`__${nm.slice(1)}_end`, s, end);
   }
   for (const s of secs) {
     if ((s.flags & SHF_ALLOC) === 0) continue;
     if (s.type !== SHT_PROGBITS && s.type !== SHT_NOBITS && s.type !== SHT_STRTAB) continue;
     const p0 = s.name.startsWith('.') ? s.name.slice(1) : s.name;
     if (!/^[A-Za-z_$0-9]*$/.test(p0)) continue;    // 名字能不能写成 C 的标识符
-    put(`__start_${p0}`, s, 0);
-    put(`__stop_${p0}`, s, s.size);
+    define(`__start_${p0}`, s, 0);
+    define(`__stop_${p0}`, s, s.size);
   }
   for (const c of commons) linker.set(c.name, { sec: c.sec, off: c.off });
 
@@ -515,6 +538,9 @@ export function peSections(inp) {
       infos.push(si);
     }
     si.secs.push(sec);
+    /* `s->sh_info = pe->sec_count`：这一节落在节表里第几条（1 起）。COFF 符号表里
+     * 那个 `n_scnum` 要它 —— 并进同一条的几节记的是**同一个**号。 */
+    sec.peIndex = infos.length;
     addr += sec.size;
     si.vsize = addr - si.vaddr;
     if (sec.type !== SHT_NOBITS) si.dataSize = si.vsize;
@@ -543,7 +569,7 @@ export function peSections(inp) {
   return {
     machine, infos, imp, exp, tls, nthunks, syms, secs, merged, imagebase, fileSize: off,
     imports: imps, text, thunkAt, thunkSize: tsz, thunk, linker, dll, hasReloc,
-    dllChars, subsystem, sectionAlign, fileAlign,
+    dllChars, subsystem, sectionAlign, fileAlign, debug: inp.debug === true,
   };
 }
 

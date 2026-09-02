@@ -24,6 +24,7 @@ import { relocateOne } from './pe_reloc.js';
 const SHT_NOBITS = 8;
 const SHT_RELA = 4;
 const SHN_UNDEF = 0;
+const STB_GLOBAL = 1;
 const STB_WEAK = 2;
 const SHN_COMMON = 0xfff2;
 const SHN_LORESERVE = 0xff00;
@@ -31,6 +32,8 @@ const SHN_ABS = 0xfff1;
 const RELA_SIZE = 24;
 const IMP_DESC_SIZE = 20;
 const THUNK_SIZE = 8;
+/** `sizeof(struct syment)` —— 紧排的 18 字节。 */
+const SYMENT_SIZE = 18;
 
 const EM_X86_64 = 62;
 const EM_AARCH64 = 183;
@@ -127,6 +130,24 @@ export function peImage(inp) {
     return s.vaddr + sym.value;
   };
 
+  /* 每个符号最后落在**哪一节的哪个偏移**上。COFF 符号表里那两格
+   * （`n_scnum` / `n_value`）要的正是这个：`pe_add_coffsym` 拿到的是
+   * `relocate_syms` 之后的绝对地址，再减回 `s->sh_addr`。 */
+  const placeOf = (sym) => {
+    const b = imports.bind.get(sym.name);
+    if (b !== undefined && sym.shndx === SHN_UNDEF) {
+      return b.func
+        ? { sec: r.text, off: r.thunkAt + imports.thunkIdx.get(b.key) * r.thunkSize }
+        : { sec: r.thunk, off: iatAddr(b.key) - r.thunk.vaddr };
+    }
+    const l = r.linker.get(sym.name);
+    if (l !== undefined && (sym.shndx === SHN_UNDEF || sym.shndx === SHN_COMMON)) return l;
+    /* 未定义（弱符号）与 `SHN_ABS` 那一路：`n_scnum` 照原样写，`n_value` 就是
+     * `st_value` —— `relocate_syms` 对这两种都没加节的地址。 */
+    if (sym.shndx === SHN_UNDEF || sym.shndx >= SHN_LORESERVE) return null;
+    return { sec: secs[sym.shndx - 1], off: sym.value };
+  };
+
   /* 重定位落笔（`relocate_sections`）。 */
   /* 线程局部那几号要 PT_TLS 的起止。PE 上 `pe_build_tls` 只填了 `tls_start`，
    * 末尾那一句是 `s1->tls_end = s1->tls_start` —— 两头是同一个地址，所以 x86_64 的
@@ -180,7 +201,51 @@ export function peImage(inp) {
   const start = syms.find((s) => s.name === (inp.startName ?? '_start'));
   r.entry = start === undefined ? 0 : addrOf(start) - imagebase;
   r.addrOf = addrOf;
+  r.placeOf = placeOf;
   return r;
+}
+
+/**
+ * `-g` 时接在所有节后面的那张 COFF 符号表（`pe_add_coffsym`）。
+ *
+ * 一条 18 字节：名字（不超过 8 字节就写在原地，否则 `n_zeroes` 留 0、`n_offset` 记
+ * 到字符串表里的偏移）、`n_value`、`n_scnum`、`n_type`、`n_sclass`、`n_numaux`。
+ * 只收 `STB_GLOBAL` 的符号 —— 局部与弱符号都不进。`n_sclass` 一律 2（`C_EXT`）。
+ *
+ * `n_value` 是**这一节里的偏移**，不是 RVA：tcc 写的是 `st_value - s->sh_addr`，
+ * 而那时 `st_value` 已经是绝对地址了。`n_scnum` 是 `s->sh_info` —— 摆地址那一步
+ * 记下的「落在节表里第几条」，并进同一条的几节记的是同一个号。
+ *
+ * @param putStr 往 `.coffstr` 里接一个字符串，回它的偏移
+ * @returns `{bytes, count}`
+ */
+function buildCoffSyms(r, putStr) {
+  const list = [];
+  for (let i = 1; i < r.syms.length; i++) {
+    const sym = r.syms[i];
+    if (sym === undefined || sym.bind !== STB_GLOBAL) continue;
+    const p = r.placeOf(sym);
+    list.push({
+      name: sym.name,
+      value: p === null ? sym.value : p.off,
+      scnum: p === null ? (sym.shndx >= SHN_LORESERVE ? sym.shndx : 0) : (p.sec.peIndex ?? 0),
+    });
+  }
+  const bytes = new Uint8Array(list.length * SYMENT_SIZE);
+  const dv = new DataView(bytes.buffer);
+  for (let i = 0; i < list.length; i++) {
+    const e = list[i];
+    const at = i * SYMENT_SIZE;
+    if (e.name.length <= 8) {
+      for (let k = 0; k < e.name.length; k++) bytes[at + k] = e.name.charCodeAt(k) & 0xff;
+    } else {
+      dv.setUint32(at + 4, putStr(e.name), true);   // n_zeroes 留 0，n_offset 记偏移
+    }
+    dv.setInt32(at + 8, e.value, true);
+    dv.setInt16(at + 12, e.scnum, true);
+    bytes[at + 16] = 2;                             // n_sclass = C_EXT
+  }
+  return { bytes, count: list.length };
 }
 
 /** ELF 的 `e_machine` → PE 的机器号与 `Characteristics`（`CHARACTERISTICS_EXE/DLL`）。 */
@@ -228,6 +293,32 @@ export function peWrite(inp) {
    * 空得连节表都没进去。`-Wl,--large-address-aware` 加的那 0x20 在这之前先或上去。 */
   let chars = ((r.dll ? cpu.charsDll : cpu.chars) | (inp.peChars ?? 0)) >>> 0;
   if (r.hasReloc) chars &= ~0x1;
+  /* `-g`：`.coffstr` 的头 4 字节留给它自己的长度，接着**先**是节表里那些超过 8 字节
+   * 的节名（`pe_write` 的节头循环就在这儿把它们换成 `/<偏移>`），**再**是符号名。
+   * 两段的次序不能反 —— 偏移都写进文件了。 */
+  const coffstr = r.debug ? [0, 0, 0, 0] : null;
+  const putStr = (s) => {
+    const off = coffstr.length;
+    for (let i = 0; i < s.length; i++) coffstr.push(s.charCodeAt(i) & 0xff);
+    coffstr.push(0);
+    return off;
+  };
+  const secs = r.infos.map((i) => ({
+    name: i.name, vsize: i.vsize, vaddr: i.vaddr - base, chars: i.flags, bytes: i.bytes,
+  }));
+  if (r.debug) for (const s of secs) if (s.name.length > 8) s.name = longName(s.name, putStr);
+  let tail;
+  let symtab;
+  if (r.debug) {
+    const cs = buildCoffSyms(r, putStr);
+    const dv = new DataView(new ArrayBuffer(4));
+    dv.setUint32(0, coffstr.length, true);
+    for (let i = 0; i < 4; i++) coffstr[i] = dv.getUint8(i);
+    tail = new Uint8Array(cs.bytes.length + coffstr.length);
+    tail.set(cs.bytes, 0);
+    tail.set(new Uint8Array(coffstr), cs.bytes.length);
+    symtab = { count: cs.count, size: cs.bytes.length };
+  }
   const img = {
     machine: cpu.machine,
     chars,
@@ -239,11 +330,29 @@ export function peWrite(inp) {
     entry: r.entry,
     stack: inp.stack ?? 0x100000,
     dirs,
-    secs: r.infos.map((i) => ({
-      name: i.name, vsize: i.vsize, vaddr: i.vaddr - base, chars: i.flags, bytes: i.bytes,
-    })),
+    secs,
+    tail,
+    symtab,
   };
   r.img = img;
   r.bytes = writeImage(img);
   return r;
+}
+
+/**
+ * 超过 8 字节的节名（`.debug_info`、`.init_array` …）在 `-g` 时写成 `/<偏移>`。
+ *
+ * tcc 那两句是先 `memcpy(psh->Name, sh_name, umin(strlen, 8))`，**再**
+ * `snprintf((char*)psh->Name, 8, "/%d", off)` —— `snprintf` 只覆盖前面那几个字节
+ * 加一个结尾的 `\0`，**后面几个字节还是原名字剩下的那几个**。装载器读到 `\0` 就停，
+ * 可文件里那几个字节不是 0。
+ */
+function longName(name, putStr) {
+  const b = new Uint8Array(8);
+  for (let i = 0; i < 8; i++) b[i] = name.charCodeAt(i) & 0xff;
+  const tag = `/${putStr(name)}`;
+  const n = Math.min(tag.length, 7);
+  for (let i = 0; i < n; i++) b[i] = tag.charCodeAt(i);
+  b[n] = 0;
+  return b;
 }
