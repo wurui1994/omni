@@ -242,6 +242,47 @@ export function lea(size, dst, base, disp) {
   ];
 }
 
+/* ---------------------------------------------------------------- RIP 相对
+ * `mod=00, rm=101` 这一格在 32 位上是「绝对地址」，在 64 位上被改成了
+ * **RIP 相对**（Intel Vol.2 的 `Table 2-7` 那一脚注）。x86_64 上取一个全局的地址
+ * 就靠它，与 arm64 的 `adrp`+`add` 是同一件事的两种长相 —— 差别是这里**一条就够**，
+ * 而且偏移是从**下一条指令**算起的（所以链接器填的时候要把本条剩下的长度减掉）。 */
+
+function ripOperand(reg, disp) {
+  return [modrm(0, reg, 5), ...imm32Of(disp)];
+}
+
+/** `lea reg, [rip + disp]`。取符号地址的标准一条。 */
+export function leaRip(size, dst, disp) {
+  if (size !== 4 && size !== 8) throw new OmniError('x64: lea 只有 32/64 位');
+  chkReg(dst);
+  return [...rex(size === 8, dst > 7, false, false, false), 0x8d, ...ripOperand(dst, disp)];
+}
+
+/** `mov reg, [rip + disp]`（加载一个全局）。 */
+export function movRRip(size, dst, disp) {
+  chkSize(size);
+  chkReg(dst);
+  const op = size === 1 ? 0x8a : 0x8b;
+  const force = size === 1 && dst >= 4 && dst <= 7;
+  return [
+    ...sizePrefix(size), ...rex(size === 8, dst > 7, false, false, force),
+    op, ...ripOperand(dst, disp),
+  ];
+}
+
+/** `mov [rip + disp], reg`（写一个全局）。 */
+export function movRipR(size, disp, src) {
+  chkSize(size);
+  chkReg(src);
+  const op = size === 1 ? 0x88 : 0x89;
+  const force = size === 1 && src >= 4 && src <= 7;
+  return [
+    ...sizePrefix(size), ...rex(size === 8, src > 7, false, false, force),
+    op, ...ripOperand(src, disp),
+  ];
+}
+
 /* ---------------------------------------------------------------- 宽度转换 */
 
 /** `movzx dst, r/m8|16`（`0F B6`/`0F B7`）。目标是 32 位就够 —— 高 32 位天然清零。 */

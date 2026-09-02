@@ -16,6 +16,7 @@ import { join } from 'node:path';
 
 import * as x from '../../stage0/src/x64/encode.js';
 import { REG as R, ALU, CC, SH, XMM as XM, FOP } from '../../stage0/src/x64/encode.js';
+import { CodeBuf, RELOC as XRELOC } from '../../stage0/src/x64/asm.js';
 
 function findLlvm(name) {
   for (const c of [`/opt/homebrew/opt/llvm/bin/${name}`, `/usr/local/opt/llvm/bin/${name}`,
@@ -205,6 +206,103 @@ t('andpd %xmm1, %xmm0', x.fand(true, XM.xmm0, XM.xmm1));
 t('andps %xmm1, %xmm0', x.fand(false, XM.xmm0, XM.xmm1));
 t('pxor %xmm0, %xmm0', x.pxor(XM.xmm0, XM.xmm0));
 
+// ---- RIP 相对（第九刀第十四片）。x86_64 上取全局地址就这一条，与 arm64 的 adrp+add 对应。
+t('leaq 16(%rip), %rax', x.leaRip(8, R.rax, 16));
+t('leaq -1(%rip), %r11', x.leaRip(8, R.r11, -1));
+t('movq 32(%rip), %rax', x.movRRip(8, R.rax, 32));
+t('movl 8(%rip), %ecx', x.movRRip(4, R.rcx, 8));
+t('movb (%rip), %al', x.movRRip(1, R.rax, 0));
+t('movq %rax, 64(%rip)', x.movRipR(8, 64, R.rax));
+t('movl %r8d, (%rip)', x.movRipR(4, 0, R.r8));
+
+/* ---- 指令缓冲（第九刀第十四片）。
+ * 这一批**不进 llvm 那一批**：里头全是相对跳转，而 llvm 会把够近的缩成两字节
+ * （见上面「跳、调、栈」那段）。缓冲要验的是**记账**：偏移从哪算起、四个字节落在哪、
+ * 重定位记在哪一格 —— 这些对着手算的字节验更清楚。 */
+const bufs = [];
+{
+  /* 往前跳：`jmp L` 五个字节，L 落在第 6 个字节上（中间一条 nop），
+   * 偏移从**下一条指令**算起，所以是 6 - 5 = 1。 */
+  const b = new CodeBuf();
+  const l = b.label();
+  b.jmp(l);
+  b.emit(x.nop());
+  b.place(l);
+  b.finish();
+  bufs.push({ what: '往前跳（偏移从下一条算起）', got: [...b.bytes()], want: [0xe9, 1, 0, 0, 0, 0x90] });
+}
+{
+  /* 往后跳：L 在 0，`jmp` 从第 1 个字节起、末尾在 6，所以偏移是 0 - 6 = -6。 */
+  const b = new CodeBuf();
+  const l = b.label();
+  b.place(l);
+  b.emit(x.nop());
+  b.jmp(l);
+  b.finish();
+  bufs.push({
+    what: '往后跳（标签已经落过，当场就算）',
+    got: [...b.bytes()],
+    want: [0x90, 0xe9, 0xfa, 0xff, 0xff, 0xff],
+  });
+}
+{
+  const b = new CodeBuf();
+  const l = b.label();
+  b.jcc(CC.e, l);
+  b.emit(x.ret());
+  b.place(l);
+  b.finish();
+  bufs.push({
+    what: '条件跳转（0F 8x 加四字节）',
+    got: [...b.bytes()],
+    want: [0x0f, 0x84, 1, 0, 0, 0, 0xc3],
+  });
+}
+{
+  const b = new CodeBuf();
+  b.callSym('printf');
+  b.leaSym(R.rax, 'msg');
+  b.loadSym(8, R.rcx, 'g');
+  b.storeSym(4, 'g', R.rdx);
+  bufs.push({
+    what: '符号：字节里留 0',
+    got: [...b.bytes()],
+    want: [
+      0xe8, 0, 0, 0, 0,                     // call rel32 = 0
+      0x48, 0x8d, 0x05, 0, 0, 0, 0,         // leaq 0(%rip), %rax
+      0x48, 0x8b, 0x0d, 0, 0, 0, 0,         // movq 0(%rip), %rcx
+      0x89, 0x15, 0, 0, 0, 0,               // movl %edx, 0(%rip)
+    ],
+  });
+  bufs.push({
+    what: '符号：记账记在四字节偏移那一格上',
+    got: b.relocs.map((r) => `${r.at}:${r.kind}:${r.sym}`),
+    want: [
+      `1:${XRELOC.BRANCH}:printf`,
+      `8:${XRELOC.SIGNED}:msg`,
+      `15:${XRELOC.SIGNED}:g`,
+      `21:${XRELOC.SIGNED}:g`,
+    ],
+  });
+}
+
+const bufBounds = [
+  {
+    what: '标签从没落地',
+    fn: () => { const b = new CodeBuf(); b.jmp(b.label()); b.finish(); },
+  },
+  {
+    what: '同一个标签落两次',
+    fn: () => { const b = new CodeBuf(); const l = b.label(); b.place(l); b.place(l); },
+  },
+  { what: '跳到不存在的标签', fn: () => new CodeBuf().jmp(7) },
+  {
+    what: '还没回填就要字节',
+    fn: () => { const b = new CodeBuf(); b.jmp(b.label()); b.bytes(); },
+  },
+  { what: '往缓冲里塞不是字节的东西', fn: () => new CodeBuf().emit([256]) },
+];
+
 // ---- 边界：编不下去的要当场报
 const bounds = [
   { what: '寄存器号越界', fn: () => x.movRR(8, 16, 0) },
@@ -264,7 +362,14 @@ try {
     failed++;
     process.stdout.write(`  FAIL ${r.what}\n    ours   ${hex(r.bytes)}\n    手册   ${hex(r.want)}\n`);
   }
-  for (const b of bounds) {
+  for (const b of bufs) {
+    const same = JSON.stringify(b.got) === JSON.stringify(b.want);
+    if (same) { passed++; continue; }
+    failed++;
+    process.stdout.write(`  FAIL 缓冲「${b.what}」\n    ours   ${JSON.stringify(b.got)}`
+      + `\n    手算   ${JSON.stringify(b.want)}\n`);
+  }
+  for (const b of [...bufBounds, ...bounds]) {
     let threw = false;
     try { b.fn(); } catch { threw = true; }
     if (threw) { passed++; continue; }
