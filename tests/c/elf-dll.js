@@ -24,6 +24,10 @@ import { elfExe } from '../../stage0/src/link/elf_exe.js';
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
 const CROSS = join(root, '.omni-cache', 'tcc-cross');
+/* 位置无关那一路的尺子是另一份交叉编译器（见 `tests/c/elf-flags.js` 的说明）：
+ * `bind_exe_dynsyms` 头一句 `if (is_PIE) continue` —— 库里那些名字既不走跳板，
+ * 也不往自己的 `.bss` 里拷，全交给 GOT。 */
+const PIE = join(root, '.omni-cache', 'tcc-pie');
 
 const TARGETS = [
   { name: 'x86_64-linux', tcc: 'x86_64-tcc' },
@@ -69,36 +73,45 @@ try {
       const useObj = join(dir, `${tag}-use.o`);
       /* 库名进 `DT_NEEDED`，所以两边必须是同一个文件名。 */
       const soPath = join(dir, `lib${tag}.so`);
-      const exePath = join(dir, `${tag}.out`);
       if (run(['-c', join(SRC, `${stem}-lib.c`), '-o', libObj]).status !== 0) continue;
       if (run(['-c', join(SRC, `${stem}-use.c`), '-o', useObj]).status !== 0) continue;
       if (run(['-shared', '-nostdlib', libObj, '-o', soPath]).status !== 0) continue;
-      const ln = run(['-nostdlib', '-Wl,-e,main', useObj, soPath, '-o', exePath]);
-      if (ln.status !== 0 || !existsSync(exePath)) {
+      /* 两路：普通可执行文件，与位置无关的那一份（尺子换成 tcc-pie 那一份）。 */
+      for (const m of [{ name: '', ruler: tcc, opt: {} }, { name: '-pie', ruler: join(PIE, t.tcc), opt: { pie: true } }]) {
+        if (!existsSync(m.ruler)) continue;
+        const exePath = join(dir, `${tag}${m.name}.out`);
+        const ln = spawnSync(
+          m.ruler,
+          ['-nostdlib', '-Wl,-e,main', useObj, soPath, '-o', exePath],
+          { encoding: 'utf8' },
+        );
+        if (ln.status !== 0 || !existsSync(exePath)) {
+          diff++;
+          if (diff <= 6) process.stdout.write(`  tcc 自己就链不上 ${tag}${m.name}：${ln.stderr}\n`);
+          continue;
+        }
+        let got;
+        try {
+          got = elfExe({
+            objs: [readFileSync(useObj)],
+            entryName: 'main',
+            dlls: [{ bytes: readFileSync(soPath), name: soPath }],
+            ...m.opt,
+          }).bytes;
+        } catch (e) {
+          diff++;
+          if (diff <= 6) process.stdout.write(`  THROW ${tag}${m.name}：${e.message}\n`);
+          continue;
+        }
+        const want = readFileSync(exePath);
+        const d = firstDiff(got, want);
+        if (d < 0) { same++; ok++; bytesTotal += got.length; continue; }
         diff++;
-        if (diff <= 6) process.stdout.write(`  tcc 自己就链不上 ${tag}：${ln.stderr}\n`);
-        continue;
-      }
-      let got;
-      try {
-        got = elfExe({
-          objs: [readFileSync(useObj)],
-          entryName: 'main',
-          dlls: [{ bytes: readFileSync(soPath), name: soPath }],
-        }).bytes;
-      } catch (e) {
-        diff++;
-        if (diff <= 6) process.stdout.write(`  THROW ${tag}：${e.message}\n`);
-        continue;
-      }
-      const want = readFileSync(exePath);
-      const d = firstDiff(got, want);
-      if (d < 0) { same++; ok++; bytesTotal += got.length; continue; }
-      diff++;
-      if (diff <= 6) {
-        process.stdout.write(`  DIFF ${tag}：第一个不同在 0x${d.toString(16)}`
-          + `（我们 ${got[d]?.toString(16)}，tcc ${want[d]?.toString(16)}；`
-          + `${got.length}/${want.length} 字节）\n`);
+        if (diff <= 6) {
+          process.stdout.write(`  DIFF ${tag}${m.name}：第一个不同在 0x${d.toString(16)}`
+            + `（我们 ${got[d]?.toString(16)}，tcc ${want[d]?.toString(16)}；`
+            + `${got.length}/${want.length} 字节）\n`);
+        }
       }
     }
     process.stdout.write(`  ${t.name}: ${ok} 份可执行文件逐字节相同\n`);

@@ -446,6 +446,11 @@ tcc 逐字节相同了**（第五十片，`peWrite`：两个 win32 目标 160 �
 那一段的起止穿到重定位里，x86_64 的 `TPOFF32` 相对整块的**末尾**算、arm64 的
 `TLSLE_ADD_TPREL_HI12`/`LO12` 相对起点加 16 个字节的 `tcbhead_t` 算 —— tcc 只出
 local-exec 这一种模型，静态、动态、共享库三道门各 12 × 2 份逐字节相同）。
+**链接器那几个开关也认了**（第六十二片：`-pie`（`output_type` 里 EXE 与 DYN
+两个位都在，摆放跟共享库同路、导出跟可执行文件同路）、`-rdynamic`、`-rpath`
+（DT_RPATH / DT_RUNPATH）、`-soname`，五种开关各 12 × 2 份逐字节相同；
+`-pie` 的尺子得另建一份 `CONFIG_TCC_PIE` 的交叉编译器 —— tcc 的命令行上那个
+`-pie` 是个空壳）。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -9354,6 +9359,14 @@ mkdir .omni-cache/tcc-cross && cd .omni-cache/tcc-cross
 调它们要带 `-B<tinycc 源码目录>`（win32 目标带 `-B<源码>/win32`）——
 否则找不到 `libtcc1.a` 与 `include/`。
 
+位置无关那一路要再来一份（`-pie` 在 tcc 的命令行上是个空壳，见第六十二片）：
+
+```
+mkdir .omni-cache/tcc-pie && cd .omni-cache/tcc-pie
+<tinycc>/configure --enable-cross
+make x86_64-tcc arm64-tcc EXTRA-DEFS=-DCONFIG_TCC_PIE=1
+```
+
 ### 三、意外的那条：**tcc 的 `-c` 在所有目标上都写 ELF**
 
 拿一行 C（`int f(int x){return x+1;}`）在四个目标上各出一个 `.o`，头四个字节：
@@ -10439,6 +10452,59 @@ elf-exe: 12 × 2 逐字节相同    elf-dyn: 12 × 2    elf-so: 12 × 2
 （PT_TLS 的 `p_vaddr`/`p_memsz`），所以要从布局那里穿过来 —— 没摆就用，只能报错。
 
 <!-- 第九刀第六十一片-END -->
+
+## 落地：第九刀第六十二片 —— 链接器那几个开关（PIE / rdynamic / rpath / soname）
+
+门是 `tests/c/elf-flags.js`：一份用例按五种开关各链一遍。
+
+```
+x86_64-linux: 60 份逐字节相同    arm64-linux: 60 份逐字节相同
+```
+
+`-pie` 这一路先卡了一下：**tcc 的命令行上没有 `-pie`**，选项表里那条是
+`{ "pie", 0, 0 }` —— 收下就丢。位置无关的可执行文件是**编译期**配出来的：
+
+```c
+LIBTCCAPI int tcc_set_output_type(TCCState *s, int output_type) {
+#ifdef CONFIG_TCC_PIE
+    if (output_type == TCC_OUTPUT_EXE) output_type |= TCC_OUTPUT_DYN;
+#endif
+```
+
+所以尺子得另建一份（`--config-pie` 还不够 —— configure 把那一整块塞在
+`#if !(TCC_TARGET_…)` 里，交叉编译的目标是在命令行上给的，整块被跳过）：
+
+```
+mkdir .omni-cache/tcc-pie && cd .omni-cache/tcc-pie
+<tinycc>/configure --enable-cross
+make x86_64-tcc arm64-tcc EXTRA-DEFS=-DCONFIG_TCC_PIE=1
+```
+
+PIE 的 `output_type` 是 `TCC_OUTPUT_EXE | TCC_OUTPUT_DYN` —— **两个位都在**，
+于是代码里凡是分岔的地方都要问清楚看的是哪一个位：
+
+- 看 `DYN`（跟共享库同一路）：`e_type = ET_DYN`、装载地址从 0 起、
+  `prepare_dynamic_rel` 把非 alloc 的重定位表提上来。
+- 看 `EXE`（跟普通可执行文件同一路）：`.interp` 与 PT_PHDR/PT_INTERP、
+  `tcc_add_linker_symbols`、`bind_exe_dynsyms` + `bind_libs_dynsyms`
+  （不是 `export_global_syms`）、x86_64 上「有定义的 PLT32/PC32 降成 PC32」
+  照降（那条筛子问的就是 `output_type & TCC_OUTPUT_EXE`）。
+- 只看 `DLL`（PIE **不算**）：PC 相对那几号留给装载时算。绝对地址那几号
+  （`R_X86_64_64/32/32S`、`R_AARCH64_ABS64/32`）问的是 `DYN`，PC32/PREL32 问的是
+  `output_type == TCC_OUTPUT_DLL` —— 位置无关的可执行文件里自家的定义不会被谁顶掉。
+- `bind_exe_dynsyms(s1, is_PIE)` 头一句 `if (is_PIE) continue`：库里那些名字既不走
+  跳板也不往自己的 `.bss` 里拷 `R_*_COPY`，全交给 GOT（`tests/c/elf-dll.js` 也跟着
+  多了一路，6 × 2 份逐字节相同）。
+- `DT_FLAGS_1` 多一位 `DF_1_PIE`；代码节上还留着重定位就再加一条 `DT_TEXTREL`。
+
+另外三个开关都在 `.dynamic` 与 `.dynstr` 上：`-rpath` 默认写 DT_RPATH、
+`--enable-new-dtags` 改写 DT_RUNPATH，`-soname` 只在 `DYN` 那一路写 DT_SONAME，
+串进 `.dynstr` 的次序是「库名、rpath、soname」（`put_elf_str` 的次序）；
+标签排在 DT_NEEDED 之后、DT_FLAGS 之前。`-rdynamic` 是把 `bind_libs_dynsyms`
+那道「库里也提到」的筛子撤掉 —— 所有有定义的非局部符号都导出，于是没接库时也要跑
+这一趟。命令行上是 `omni elf-link --pie / --rdynamic / --soname NAME / --rpath PATH`。
+
+<!-- 第九刀第六十二片-END -->
 
 
 

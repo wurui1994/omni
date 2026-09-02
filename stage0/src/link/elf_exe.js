@@ -95,10 +95,14 @@ const DT_RELASZ = 8;
 const DT_RELAENT = 9;
 const DT_STRSZ = 10;
 const DT_SYMENT = 11;
+const DT_SONAME = 14;
+const DT_RPATH = 15;
+const DT_TEXTREL = 22;
 const DT_INIT_ARRAY = 25;
 const DT_FINI_ARRAY = 26;
 const DT_INIT_ARRAYSZ = 27;
 const DT_FINI_ARRAYSZ = 28;
+const DT_RUNPATH = 29;
 const DT_FLAGS = 30;
 const DT_PREINIT_ARRAY = 32;
 const DT_PREINIT_ARRAYSZ = 33;
@@ -107,6 +111,7 @@ const DT_GNU_HASH = 0x6ffffef5;
 const DT_FLAGS_1 = 0x6ffffffb;
 const DF_BIND_NOW = 8;
 const DF_1_NOW = 1;
+const DF_1_PIE = 0x08000000;
 
 const DT_INIT_TAGS = new Map([
   ['.preinit_array', [DT_PREINIT_ARRAY, DT_PREINIT_ARRAYSZ]],
@@ -367,6 +372,19 @@ export function elfExeImage(inp) {
   const conf = targetConf(machine);
   /** `-shared`：输出是 ET_DYN，装载地址从 0 起，没有 `.interp`。 */
   const shared = inp.shared === true;
+  /* `-pie`：tcc 的 `output_type` 是 `TCC_OUTPUT_EXE | TCC_OUTPUT_DYN` —— 两个位都在，
+   * 于是「按 ET_DYN 摆」（地址从 0 起、`.rela.data` 留到装载时）与「还是个可执行文件」
+   * （`.interp`、PT_PHDR、链接器符号、`bind_exe_dynsyms`）两边的规矩都要守。
+   * 下面凡是分不清的地方，看的就是这两个位里的哪一个：`dyn` 还是 `!shared`。 */
+  const pie = inp.pie === true;
+  /** `output_type & TCC_OUTPUT_DYN`：`-shared` 与 `-pie` 都算。 */
+  const dyn = shared || pie;
+  /** `-rdynamic`：把**所有**有定义的非局部符号都导出到 `.dynsym`。 */
+  const rdynamic = inp.rdynamic === true;
+  /** `-Wl,-soname=` / `-Wl,-rpath=` / `-Wl,--enable-new-dtags`。 */
+  const soname = inp.soname;
+  const rpath = inp.rpath;
+  const newDtags = inp.newDtags === true;
 
   // ---- resolve_common_syms：COMMON 的符号在 .bss 里安家
   for (const s of syms) {
@@ -610,6 +628,9 @@ export function elfExeImage(inp) {
       if (s.shndx !== SHN_UNDEF && s.shndx !== SHN_COMMON && s.shndx !== BSS) continue;
       const esym = dllSym(s.name);
       if (esym !== undefined && esym.shndx !== SHN_UNDEF) {
+        /* `bind_exe_dynsyms(s1, is_PIE)` 头一句：位置无关的可执行文件不来这一套 ——
+         * 引用可以绕 GOT 走，用不着跳板，也用不着把库里那份数据拷进自己的 `.bss`。 */
+        if (pie) continue;
         const type = esym.info % 16;
         if (type === 2 || type === 10) {                 // STT_FUNC / STT_GNU_IFUNC
           dynIndex.set(i, dynPutSym(s.name, 0, esym.size, 1 * 16 + 2, 0, SHN_UNDEF));
@@ -847,15 +868,15 @@ export function elfExeImage(inp) {
       if (Math.floor(s.info / 16) === STB_LOCAL) continue;
       dynIndex.set(i, dynSetSym(s.name, s.value, s.size, s.info, s.other, s.shndx));
     }
-  } else if (dynamic && dllNames.length !== 0) {
+  } else if (dynamic && (dllNames.length !== 0 || rdynamic)) {
     /* ---- bind_libs_dynsyms：**我们**定义的、而库里也提到的那些名字要导出去。
      * 动态链接器先在可执行文件里找、再去库里找，所以库里对这个名字的引用最后落在
-     * 我们这份定义上。 */
+     * 我们这份定义上。`-rdynamic` 是把「库里也提到」这道筛子撤掉 —— 全导出。 */
     for (let i = 1; i < syms.length; i++) {
       const s = syms[i];
       if (s.shndx === SHN_UNDEF) continue;
       if (Math.floor(s.info / 16) === STB_LOCAL) continue;
-      if (!dllByName.has(s.name)) continue;
+      if (!dllByName.has(s.name) && !rdynamic) continue;
       dynIndex.set(i, dynSetSym(s.name, s.value, s.size, s.info, s.other, s.shndx));
     }
   }
@@ -869,7 +890,9 @@ export function elfExeImage(inp) {
   const dynRel = new Set();
   const absSet = ABS_RELOC.get(machine);
   const pcSet = PCREL_RELOC.get(machine);
-  if (shared) {
+  /** 留在代码节上的那些条目要在 `.dynamic` 里报一条 DT_TEXTREL。 */
+  let textrel = 0;
+  if (dyn) {
     for (let i = 1; i < secs.length; i++) {
       const sr = secs[i];
       if (sr.type !== SHT_RELA || (sr.flags & SHF_ALLOC) !== 0) continue;
@@ -878,25 +901,35 @@ export function elfExeImage(inp) {
       let count = 0;
       for (const r of relas.get(i) ?? []) {
         if (absSet.has(r.type)) count++;
-        else if (pcSet.has(r.type) && dynIndex.has(r.sym)) count++;
+        /* PC 相对那号只有造共享库时才留（`if (s1->output_type != TCC_OUTPUT_DLL) break;`）
+         * —— 位置无关的可执行文件里自家的定义不会被谁顶掉，本地算就行。 */
+        else if (shared && pcSet.has(r.type) && dynIndex.has(r.sym)) count++;
       }
       if (count === 0) continue;
       sr.flags |= SHF_ALLOC;
       sr.size = count * 24;
       sr.link = DYNSYM;
       dynRel.add(i);
+      if ((tgt.flags & SHF_EXECINSTR) !== 0) textrel += count;
     }
   }
 
   /* ---- 要哪几个库（`DT_NEEDED`）。库名进 `.dynstr` 是在符号名**之后**
-   * （`elf_output_file` 里那一段在 `bind_libs_dynsyms` 后头），所以偏移排在最后。 */
+   * （`elf_output_file` 里那一段在 `bind_libs_dynsyms` 后头），所以偏移排在最后。
+   * `-rpath` 与 `-soname` 那两个串跟在库名后头，次序就是 `put_elf_str` 的次序。 */
   const needed = [];
-  if (dynamic && !shared) {
-    for (const nm of dllNames) {
-      needed.push(dstr.length);
-      for (let k = 0; k < nm.length; k++) dstr.push(nm.charCodeAt(k));
-      dstr.push(0);
-    }
+  let rpathOff = -1;
+  let sonameOff = -1;
+  const putDynStr = (s) => {
+    const off = dstr.length;
+    for (let k = 0; k < s.length; k++) dstr.push(s.charCodeAt(k));
+    dstr.push(0);
+    return off;
+  };
+  if (dynamic) {
+    for (const nm of dllNames) needed.push(putDynStr(nm));
+    if (rpath !== undefined) rpathOff = putDynStr(rpath);
+    if (dyn && soname !== undefined) sonameOff = putDynStr(soname);
   }
 
   if (dynamic) {
@@ -975,8 +1008,15 @@ export function elfExeImage(inp) {
    * 条数与地址无关，所以长度现在就定得下来，值等摆好了再算一遍。 */
   const dynTagList = (relAddr, relSize) => {
     const at = (i) => (i < 0 ? 0 : secs[i].addr ?? 0);
-    const t = [[DT_FLAGS, DF_BIND_NOW], [DT_FLAGS_1, DF_1_NOW]];
-    for (const off of needed) t.unshift([1, off]);      // DT_NEEDED 排在最前
+    const t = [];
+    for (const off of needed) t.push([1, off]);          // DT_NEEDED 排在最前
+    /* `-rpath`：默认写老的 DT_RPATH，`--enable-new-dtags` 才写 DT_RUNPATH。 */
+    if (rpathOff >= 0) t.push([newDtags ? DT_RUNPATH : DT_RPATH, rpathOff]);
+    if (sonameOff >= 0) t.push([DT_SONAME, sonameOff]);
+    /* 代码节上还留着装载时的重定位 —— 装载器得先把那一段改成可写的。 */
+    if (dyn && textrel !== 0) t.push([DT_TEXTREL, 0]);
+    t.push([DT_FLAGS, DF_BIND_NOW]);
+    t.push([DT_FLAGS_1, pie ? DF_1_NOW | DF_1_PIE : DF_1_NOW]);
     t.push([DT_HASH, at(HASH)]);
     t.push([DT_GNU_HASH, at(GNUHASH)]);
     t.push([DT_STRTAB, at(DYNSTR)]);
@@ -1135,8 +1175,8 @@ export function elfExeImage(inp) {
 
   let fileOffset = align(EHDR_SIZE + phnum * PHDR_SIZE, 4) + shnum * SHDR_SIZE;
   const sAlign = conf.page;
-  /* 共享库从 0 起（`if (s1->output_type & TCC_OUTPUT_DYN) addr = 0`）。 */
-  let addr = shared ? 0 : conf.start;
+  /* 共享库与位置无关的可执行文件都从 0 起（`if (s1->output_type & TCC_OUTPUT_DYN) addr = 0`）。 */
+  let addr = dyn ? 0 : conf.start;
   const base = addr;
   addr += fileOffset;
 
@@ -1342,7 +1382,7 @@ export function elfExeImage(inp) {
               at: r.at, sym: 0, type: relative, add: BigInt(old + val),
             });
           }
-        } else if (pcSet.has(r.type) && esym !== 0) {
+        } else if (shared && pcSet.has(r.type) && esym !== 0) {
           qrel.push({
             at: r.at, sym: esym, type: r.type, add: BigInt(dvt.getInt32(r.at, true)) + r.add,
           });
@@ -1547,7 +1587,7 @@ export function elfExeImage(inp) {
   }
 
   return {
-    machine, secs, out, backmap, phdrs, phnum, shnum, entry, nameOff, fileOffset, shared,
+    machine, secs, out, backmap, phdrs, phnum, shnum, entry, nameOff, fileOffset, dyn,
   };
 }
 
@@ -1570,7 +1610,7 @@ export function elfExe(inp) {
   // ---- ELF 头
   b[0] = 0x7f; b[1] = 0x45; b[2] = 0x4c; b[3] = 0x46;
   b[4] = 2; b[5] = 1; b[6] = 1;
-  dv.setUint16(16, r.shared ? ET_DYN : ET_EXEC, true);
+  dv.setUint16(16, r.dyn ? ET_DYN : ET_EXEC, true);
   dv.setUint16(18, r.machine, true);
   dv.setUint32(20, 1, true);
   dv.setBigUint64(24, BigInt(r.entry), true);

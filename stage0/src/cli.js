@@ -1793,7 +1793,8 @@ function main(argv) {
     if (a === '-o' || a === '--mode' || a === '--work' || a === '--cache'
       || a === '-I' || a === '-D' || a === '--rdata'
       || a === '-L' || a === '--target' || a === '-e'
-      || a === '--dylib' || a === '--libtcc1' || a === '--dll') { i++; continue; }
+      || a === '--dylib' || a === '--libtcc1' || a === '--dll'
+      || a === '--soname' || a === '--rpath') { i++; continue; }
     if (a.startsWith('-')) continue;
     files.push(a);
   }
@@ -2088,14 +2089,20 @@ function main(argv) {
     /* `elf-link`：几个 `.o` 链成一份 Linux 可执行文件（第九刀第五十三、五十四片）。
      * 默认动态（跟 tcc 一样，`.interp` / `.dynsym` / `.dynamic` 那一套都摆出来），
      * `--static` 只摆装载得下的那几条，`--shared` 造共享库（第五十九片），
-     * `--dll` 接一份真的共享库（第六十片）。没有 libc，入口自己指：
+     * `--dll` 接一份真的共享库（第六十片），`--pie` 位置无关、`--rdynamic` 全导出、
+     * `--soname` / `--rpath` 是 `.dynamic` 里那两条（第六十二片）。没有 libc，入口自己指：
      *   omni elf-link a.o [b.o …] -o a.out [-e main] [--static] [--shared]
-     *                  [--dll libfoo.so] */
+     *                  [--dll libfoo.so] [--pie] [--rdynamic]
+     *                  [--soname libfoo.so.1] [--rpath /opt/lib] [--enable-new-dtags] */
     case 'elf-link': {
       const oi = rest.indexOf('-o');
       const out = oi >= 0 ? rest[oi + 1] : 'a.out';
       const ei = rest.indexOf('-e');
       const entryName = ei >= 0 ? rest[ei + 1] : 'main';
+      const valOf = (flag) => {
+        const i = rest.indexOf(flag);
+        return i >= 0 ? rest[i + 1] : undefined;
+      };
       const bytesOf = (p) => {
         const s = readBinary(p);
         const b = new Uint8Array(s.length);
@@ -2111,6 +2118,11 @@ function main(argv) {
         entryName,
         static: rest.includes('--static'),
         shared: rest.includes('--shared'),
+        pie: rest.includes('--pie'),
+        rdynamic: rest.includes('--rdynamic'),
+        soname: valOf('--soname'),
+        rpath: valOf('--rpath'),
+        newDtags: rest.includes('--enable-new-dtags'),
         dlls,
       });
       writeBinary(out, r.bytes);
@@ -2333,8 +2345,9 @@ commands:
   elf-link  link .o files into a Linux executable (ADR-0017 cut 9 slices 53-54):
             dynamic by default like tcc (.interp/.dynsym/.dynamic/.got), --static for
             the plain one, --shared for a shared library (slice 59), --dll libfoo.so to
-            link against one (slice 60). No libc, so give the entry with -e NAME
-            (default main). -o NAME
+            link against one (slice 60). --pie, --rdynamic, --soname NAME,
+            --rpath PATH, --enable-new-dtags (slice 62). No libc, so give the entry
+            with -e NAME (default main). -o NAME
   macho-link
             link .o files into a macOS executable (ADR-0017 cut 9 slices 55-56): segments,
             chained fixups, export trie. Give --dylib <sdk>/usr/lib/libc.tbd and
