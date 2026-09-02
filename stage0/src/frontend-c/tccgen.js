@@ -604,9 +604,13 @@ export class CGen {  /**
    * @param {Cpp} cpp 记号源（已经 startParse 过）
    * @param {MirModule} mod 往里发指令的模块
    */
-  constructor(cpp, mod) {
+  constructor(cpp, mod, opts) {
     this.cpp = cpp;
     this.mod = mod;
+    /* native 这条腿（第九刀第十九片）：**没有线性内存**，局部量的地址是 `FRAME` 回来的
+     * 真地址。除此之外整个前端一字不改 —— 帧的布局、`&x` 是 `fp + 偏移`、聚合体怎么摆，
+     * 两条腿共用同一段代码，差的只有「`fp` 从哪来」这一处。 */
+    this.native = opts === undefined ? false : opts.native === true;
     /** 当前记号（tcc 的全局 `tok` / `tokc`）。镜像一份是为了代码读起来像 tccgen。 */
     this.tok = TOK_EOF;
     this.tokc = null;
@@ -6631,16 +6635,26 @@ export class CGen {  /**
       this.spSave = REF_NONE;
       this.fpRef = REF_NONE;
       if (this.frameSize > 0) {
-        /* 序言：`$sp -= frameSize`。`$sp` 是一个往下长的 i64 全局（ADR-0017 第三刀：
-         * MIR 没有 `ADDR`，取地址靠影子栈）。帧基址就是减完那条指令的 ref —— MIR 是
-         * SSA，函数顶层发的指令在整个函数体里都可用，不必再存进一个槽。 */
-        const spNo = this.spGlobal();
-        const sp0 = f.emit(OP.GLOAD, T_I64, REF_NONE, REF_NONE, spNo);
-        const nsp = f.emit(OP.SUB, T_I64, sp0,
-          this.mod.consts.int(BigInt(this.frameSize)), 0);
-        f.emit(OP.GSTORE, T_VOID, nsp, REF_NONE, spNo);
-        this.spSave = sp0;
-        this.fpRef = nsp;
+        /* native（第十九片）：一条 `FRAME` 就是整个帧 —— 前端算出来的 `frameSize` 原样
+         * 交给 MIR，后端把它摆在自己的帧里（arm64 `add x, sp, #off`、x86_64
+         * `lea r, [rbp - off]`）。**没有收场**：帧跟着函数走，`ret` 一收全收。
+         * 帧的对齐要 16：里头可能摆 `long double`/`double` 与聚合体，而前端算偏移时
+         * 假定基址至少 16 对齐（`FRAME_ALIGN` 是 8，但聚合体的对齐可以是 16）。 */
+        if (this.native) {
+          this.fpRef = f.emit(OP.FRAME, T_I64, REF_NONE, REF_NONE,
+            f.frame('$frame', this.frameSize, 16));
+        } else {
+          /* 序言：`$sp -= frameSize`。`$sp` 是一个往下长的 i64 全局（ADR-0017 第三刀：
+           * MIR 没有 `ADDR`，取地址靠影子栈）。帧基址就是减完那条指令的 ref —— MIR 是
+           * SSA，函数顶层发的指令在整个函数体里都可用，不必再存进一个槽。 */
+          const spNo = this.spGlobal();
+          const sp0 = f.emit(OP.GLOAD, T_I64, REF_NONE, REF_NONE, spNo);
+          const nsp = f.emit(OP.SUB, T_I64, sp0,
+            this.mod.consts.int(BigInt(this.frameSize)), 0);
+          f.emit(OP.GSTORE, T_VOID, nsp, REF_NONE, spNo);
+          this.spSave = sp0;
+          this.fpRef = nsp;
+        }
       }
     }
 
@@ -6746,8 +6760,12 @@ export class CGen {  /**
     this.funcName = '';
   }
 
-  /** `$sp` 的全局号。第一次用到才登记 —— 没有函数要帧的模块于是不多一个全局。 */
+  /** `$sp` 的全局号。第一次用到才登记 —— 没有函数要帧的模块于是不多一个全局。
+   *
+   * native 上**一格都不能有**：那条腿没有线性内存，影子栈无从谈起。到这儿来的只剩
+   * 变长数组与 `alloca`（它们在运行期切栈顶）—— 那是往后的一片，现在明着报。 */
   spGlobal() {
+    if (this.native) this.todo('native：变长数组与 alloca 还要动栈顶（影子栈那套在这条腿上不成立）');
     if (this.spNo < 0) {
       this.spNo = this.mod.globalNo('$sp');
       this.mod.setGlobalTy(this.spNo, T_I64);
@@ -6755,9 +6773,10 @@ export class CGen {  /**
     return this.spNo;
   }
 
-  /** 收场：把 `$sp` 还回去。**每条 RET 之前都要**，所以单独一个函数。 */
+  /** 收场：把 `$sp` 还回去。**每条 RET 之前都要**，所以单独一个函数。
+   * native 上没有这一步 —— 帧是 `FRAME` 要的一块，`ret` 一收全收。 */
   emitEpilogue() {
-    if (this.pass1 || this.frameSize === 0) return;
+    if (this.pass1 || this.native || this.frameSize === 0) return;
     this.f.emit(OP.GSTORE, T_VOID, this.spSave, REF_NONE, this.spNo);
   }
 
@@ -6987,6 +7006,49 @@ export function lowerC(path, text, host, defs, args) {
     // `main` 声明成 long 之类时把它收到 i32（退出码只有 8 位，但入口的类型要对得上）
     if (rt === T_I64) v = entry.emit(OP.CVT, T_I32, v, REF_NONE, CVT_TRUNC);
     entry.emit(OP.RET, T_I32, v, REF_NONE, 0);
+  }
+  return { mod, warnings: cpp.warnings };
+}
+
+/**
+ * C -> MIR，**native 口径**（ADR-0017 第九刀第十九片）。
+ *
+ * 与 `lowerC` 的差别只有一件事，但它是整条腿的分水岭：**没有线性内存**。
+ *   - 局部量的帧是一条 `FRAME`（真地址），不是 `$sp` 上切出来的偏移；
+ *   - 于是没有版图、没有影子栈、没有堆、没有 `argv` 那一摊，`mod.mem` 是 null；
+ *   - 也**没有 `omni_main` 包装**：这条路的产物是一个 `.o`，谁链它谁写 `main`
+ *     （`tests/c/native.js` 就是这么验的）。`main` 不必存在。
+ *
+ * 还没落到这条腿上的东西（字符串字面量、全局量、变长数组、`alloca`、堆、`errno`）
+ * 一律**明着报**：它们现在都要线性内存，悄悄发出去会得到一个指着 64K 的指针。
+ * 一片片往下接就是把这些逐个搬到「符号」上。
+ *
+ * @param {string} path
+ * @param {string} text
+ * @param {{readFile: (p: string) => (string|null), includeDirs?: string[],
+ *          dirname?: (p: string) => string, join?: (a: string, b: string) => string}} host
+ * @param {{name: string, body?: string}[]} [defs] 命令行上的 `-D`
+ */
+export function lowerCNative(path, text, host, defs) {
+  const cpp = new Cpp(host);
+  cpp.installPredefs(path, false);
+  for (const d of defs ?? []) cpp.define(d.name, d.body);
+  const mod = new MirModule(path);
+  mod.setNative();
+  const gen = new CGen(cpp, mod, { native: true });
+  gen.preamble(COMPILE_PREAMBLE);
+  cpp.startParse(path, text);
+  gen.unit();
+
+  /* data 段一个字节都不该有 —— 有就是字符串字面量或带初值的全局量落进来了。
+   * `dataOff` 出生在 `MEM_PAGE`（页 0 留空），动过就是有人要了线性内存里的地方。 */
+  if (gen.dataOff !== MEM_PAGE || gen.pendingData.length !== 0) {
+    throw new OmniError(`${path}: error: 第九刀第十九片：native 这条腿还不认字符串字面量与`
+      + `全局量（它们要落到数据段的符号上，是下一片）`);
+  }
+  if (gen.heapUsed) throw new OmniError(`${path}: error: native 这条腿还没有堆（malloc 那一摊）`);
+  if (gen.errnoUsed || gen.strerrorUsed || gen.streamGvars.length !== 0) {
+    throw new OmniError(`${path}: error: native 这条腿还没有宿主那几格（errno/strerror/标准流）`);
   }
   return { mod, warnings: cpp.warnings };
 }

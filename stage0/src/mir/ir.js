@@ -622,11 +622,27 @@ export class MirModule {
     // `[{off, bytes:[…]}]`，编译期算好、运行期一次拷进内存。**一个模块一块**（wasm 的
     // MVP 就是这样），所以不用池、不用下标。
     this.mem = null;
+    /* 地址模型（第九刀第十九片）。`false` = 地址是**线性内存里的偏移**（wasm 与解释器
+     * 那两条腿）；`true` = 地址是**真地址**（native 那两条腿：`FRAME` 回来的、libc
+     * 给的、数据符号的，都在同一个地址空间里）。
+     *
+     * 为什么要在模块上立这一格：`MLOAD`/`MSTORE` 两种模型下**同一条指令**、不同解释。
+     * 不立的话，「这个模块没有线性内存」既可能是「用不着内存」也可能是「地址是真的」——
+     * verify 于是既不能骂也不能不骂。立了，两种都能查：线性内存那边必须有 `mem`，
+     * native 那边必须**没有** `mem`。 */
+    this.native = false;
+  }
+
+  /** 认真地址（native 两条腿）。与线性内存互斥 —— 一个模块只能是一种地址模型。 */
+  setNative() {
+    if (this.mem !== null) throw new Error('mir: 已经声明了线性内存，不能再改成真地址');
+    this.native = true;
   }
 
   /** 声明线性内存。重复声明是降级器的 bug（一个模块只有一块）。 */
   setMem(min, max) {
     if (this.mem !== null) throw new Error('mir: 线性内存已经声明过了');
+    if (this.native) throw new Error('mir: 这个模块认真地址，不该再要线性内存');
     this.mem = { min, max, data: [] };
   }
 

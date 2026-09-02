@@ -292,6 +292,24 @@ class FnGen {
       buf.cbnz(1, TMP0, this.brTarget(f.aux[i]));
       return;
     }
+    /* `BRTABLE`（第十九片，C 的 `switch` 落在这儿）：**比较链**，不是跳表。
+     * 一张真跳表要在数据段里摆一串地址、再靠重定位填进去；比较链一条指令都不欠链接器，
+     * 而 n 小的时候（C 里绝大多数 switch）两者差不了几个周期。密集化已经在前端做过了
+     * （`0 <= a < n` 的那一段），所以这里只是「等于 k 就跳第 k 项」。
+     * 下标按**无符号**读：负数与 >= n 都落到兜底那一支。 */
+    if (op === OP.BRTABLE) {
+      this.loadRef(TMP0, f.a[i]);
+      const levels = f.levelsOf(f.b[i]);
+      let k = 0;
+      for (const lv of levels) {
+        if (k >= 4096) nyi('BRTABLE 的表超过 4096 项（cmp 的立即数装不下）');
+        buf.emit(a.cmpImm(1, TMP0, k));
+        buf.bcond(a.COND.eq, this.brTarget(lv));
+        k++;
+      }
+      buf.b(this.brTarget(f.aux[i]));
+      return;
+    }
     if (op === OP.RET) {
       if (f.a[i] !== REF_NONE) {
         this.loadRef(TMP0, f.a[i]);

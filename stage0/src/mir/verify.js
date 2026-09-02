@@ -150,7 +150,14 @@ function checkIndex(mod, f, i, op, v, bad) {
     const isLoad = op === OP.MLOAD;
     const kn = memKindNo(v);
     const names = isLoad ? MLOAD_KINDS : MSTORE_KINDS;
-    if (mod.mem === null) { bad(i, `${OP_NAMES[op]}：这个模块没有声明线性内存`); return; }
+    /* 地址模型（第十九片）：线性内存那条腿必须**有** `mem`，native 那条腿必须**没有**。
+     * 同一条 `MLOAD` 在两种模型下解释不同（偏移 vs 真地址），所以两边各查一句。 */
+    if (mod.native) {
+      if (mod.mem !== null) { bad(i, `${OP_NAMES[op]}：这个模块认真地址，不该有线性内存`); return; }
+    } else if (mod.mem === null) {
+      bad(i, `${OP_NAMES[op]}：这个模块没有声明线性内存`);
+      return;
+    }
     if (names[kn] === undefined) { bad(i, `内存访问号 ${kn} 越界`); return; }
     const t = f.t[i];
     const wantFloat = names[kn].charCodeAt(0) === 102;   // 'f'

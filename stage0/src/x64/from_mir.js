@@ -287,6 +287,20 @@ class FnGen {
       buf.jcc(CC.ne, this.brTarget(f.aux[i]));
       return;
     }
+    /* `BRTABLE`（第十九片）：与 arm64 同一个办法 —— **比较链**。真跳表要在数据段里摆
+     * 一串地址（x86 上还得走 `SIGNED` 重定位），比较链一笔重定位都不欠。 */
+    if (op === OP.BRTABLE) {
+      this.loadRef(TMP0, f.a[i]);
+      const levels = f.levelsOf(f.b[i]);
+      let k = 0;
+      for (const lv of levels) {
+        buf.emit(x.aluRI(ALU.cmp, 8, TMP0, k));
+        buf.jcc(CC.e, this.brTarget(lv));
+        k++;
+      }
+      buf.jmp(this.brTarget(f.aux[i]));
+      return;
+    }
     if (op === OP.RET) {
       if (f.a[i] !== REF_NONE) {
         this.loadRef(TMP0, f.a[i]);
