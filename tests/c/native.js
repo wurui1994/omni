@@ -44,6 +44,14 @@ const CASES = [
   ['递归：每一层一个帧', 'return fib(20);'],
   ['递归里取地址', 'return depth(6);'],
   ['double 落在帧上', 'double d = 2.5; double *p = &d; *p = *p * 4; return (long long) d;'],
+  /* 无符号 64 位 -> 浮点（第九十四片）：x86 没有这条指令，那一路要分两半，
+   * 而分法必须正确舍入 —— 2^63 之后的值才走那一半。 */
+  ['u64 -> double：2^63 那一边',
+    'unsigned long long v = (1ULL << 63) + 1024; double d = (double) v; return (long long)(d / 512.0);'],
+  ['u64 -> float：全一',
+    'unsigned long long v = 0xffffffffffffffffULL; float g = (float) v; return (long long)(g / 65536.0f);'],
+  ['u64 -> double：小的那一边（走的是有符号那条）',
+    'unsigned long long v = 3ULL; double d = (double) v; return (long long)(d * 1000);'],
   ['char 数组：自己数长度', 'char s[8]; int i; s[0] = 104; s[1] = 105; s[2] = 33; s[3] = 0;'
     + ' for (i = 0; s[i] != 0; i++) ; return i;'],
   ['switch 与嵌套块', 'int i; long long s = 0;'

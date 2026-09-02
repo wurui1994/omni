@@ -18,6 +18,10 @@
 // 我们自己的 `macho-link` 读回来链成 `MH_EXECUTE`，那一份同样跑得起来、同样逐字节相同。
 // 于是整条链上除了 SDK 的头与 `libc.tbd`，没有别人的东西。
 //
+// 9~11 步（第九十四片）换架构：同一份源码编成 **x86_64** 的 tcc，在 Rosetta 上跑，
+// 尺子是交叉编出来的 `x86_64-osx-tcc`。83 份里 80 份逐字节相同，差的那两份是
+// `long double`（我们在 x86_64 上还是 8 字节）—— 明着列出来，多一份少一份都算失败。
+//
 // 尺子（`.omni-cache/tcc-build/tcc`）、源码树、或者不是 arm64 的 macOS —— 整组跳过。
 //
 //   node tests/c/selfobj.js
@@ -215,6 +219,94 @@ if (SDK === '' || !existsSync(TBD)) {
 }
 
 rmSync(OUT, { recursive: true, force: true });
+
+/* ---- 9~11. 换一副架构（第九十四片）
+ *
+ * 同一份源码编成 **x86_64** 的 tcc，在 Rosetta 上跑。尺子换成交叉编出来的那一份
+ * （`.omni-cache/tcc-cross/x86_64-osx-tcc`）—— 它自己的 git 戳与本机那份不同，
+ * 所以 `-DTCC_GITHASH` 要从**它**的版本行里读。
+ *
+ * 交叉编出来的 tcc **没有**系统头那一格（`configure` 只给本机那份烤了 SDK 的路径），
+ * 所以两边都要手工给 `-I <SDK>/usr/include` —— 尺子自己也是这样才编得动 `<stdio.h>`。
+ *
+ * `long double` 那两份是**已知不同**：这一格盯的是「差的正好是这两份」，
+ * 多一份少一份都算失败。 */
+const X64_UNITS = ['tcc', 'libtcc', 'tccpp', 'tccgen', 'tccdbg', 'tccelf', 'tccasm', 'tccrun',
+  'x86_64-gen', 'x86_64-link', 'i386-asm', 'tccmacho'];
+/* 我们的 `long double` 在 x86_64 上还是 8 字节（该是 16 字节的 x87 80 位）——
+ * 于是我们编出来的 tcc 存不住 `1.5L`，这两份用例里那十个字节写成了零。 */
+const X64_KNOWN_DIFF = ['15-float.c', '21-ldouble.c'];
+const XTCC = join(root, '.omni-cache', 'tcc-cross', 'x86_64-osx-tcc');
+const SDK_INC = SDK === '' ? '' : join(SDK, 'usr', 'include');
+
+if (!existsSync(XTCC) || SDK_INC === '') {
+  process.stdout.write(`  skip x86_64 那一段：找不到 ${XTCC}\n`);
+} else {
+  mkdirSync(OUT, { recursive: true });
+  const xDir = join(OUT, 'x64');
+  mkdirSync(xDir, { recursive: true });
+  const xBanner = spawnSync(XTCC, ['-v'], { encoding: 'utf8' }).stdout;
+  const xm = /^tcc version \S+ (.*) \(/.exec(xBanner);
+  const xGit = xm === null ? [] : [`-DTCC_GITHASH="${xm[1]}"`];
+  let xOk = true;
+  for (const u of X64_UNITS) {
+    const r = spawnSync(process.execPath,
+      [CLI, 'c-obj', join(SRC, `${u}.c`), '-I', TCC_DIR, '-DONE_SOURCE=0',
+        '-DTCC_TARGET_X86_64', '-DTCC_TARGET_MACHO', '--arch', 'x86_64',
+        ...(u === 'tcc' ? xGit : []),
+        '-o', join(xDir, `${u}.o`)],
+      { encoding: 'utf8', maxBuffer: 1 << 26 });
+    if (r.status !== 0) {
+      bad(`c-obj --arch x86_64 ${u}.c`,
+        `    ${(r.stderr ?? '').trim().split('\n').slice(0, 3).join('\n    ')}`);
+      xOk = false;
+    }
+  }
+  if (xOk) {
+    ok(`c-obj --arch x86_64 ×${X64_UNITS.length}（x86_64-osx 那一套源码）`);
+    const xExe = join(OUT, 'x64-tcc');
+    const xln = spawnSync('clang',
+      ['-arch', 'x86_64', '-o', xExe, ...X64_UNITS.map((u) => join(xDir, `${u}.o`))],
+      { encoding: 'utf8', maxBuffer: 1 << 26 });
+    if (xln.status !== 0) {
+      const msg = (xln.stderr ?? '').trim().split('\n');
+      bad('clang -arch x86_64 -o x64-tcc *.o',
+        `    ${msg.length} 行，前三条：\n    ${msg.slice(0, 3).join('\n    ')}`);
+    } else {
+      const v = spawnSync('arch', ['-x86_64', xExe, '-v'], { encoding: 'utf8' });
+      if (v.stdout !== xBanner) {
+        bad('x64-tcc -v', `    tcc : ${xBanner.trim()}\n    ours: ${(v.stdout ?? '').trim()}`);
+      } else {
+        ok(`x64-tcc -v == x86_64-osx-tcc -v（${xBanner.trim()}，在 Rosetta 上）`);
+        const args = ['-B', TCC_DIR, '-I', SDK_INC];
+        const diffs = [];
+        let same = 0;
+        for (const f of genFiles) {
+          const ro = join(OUT, 'xref.o');
+          const mo = join(OUT, 'xmine.o');
+          if (spawnSync(XTCC, [...args, '-c', f, '-o', ro],
+            { encoding: 'utf8' }).status !== 0) continue;   // 尺子自己就拒了
+          const a = spawnSync('arch', ['-x86_64', xExe, ...args, '-c', f, '-o', mo],
+            { encoding: 'utf8' });
+          const base = f.slice(f.lastIndexOf('/') + 1);
+          const eq = a.status === 0
+            && Buffer.compare(readFileSync(mo), readFileSync(ro)) === 0;
+          if (eq) same++;
+          if (eq === X64_KNOWN_DIFF.includes(base)) {
+            diffs.push(`    ${base}：${eq ? '相同了 —— 把它从已知不同里去掉' : '字节不同'}`);
+          }
+        }
+        if (diffs.length > 0) {
+          bad('x64-tcc -c tests/c/gen/*.c == x86_64-osx-tcc -c', diffs.slice(0, 6).join('\n'));
+        } else {
+          ok(`x64-tcc -c tests/c/gen/*.c == x86_64-osx-tcc -c（${same} 份相同，`
+            + `已知不同 ${X64_KNOWN_DIFF.length} 份：long double 还是 8 字节）`);
+        }
+      }
+    }
+  }
+  rmSync(OUT, { recursive: true, force: true });
+}
 
 if (failures.length > 0) {
   process.stdout.write('\n');

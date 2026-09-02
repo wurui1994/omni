@@ -659,6 +659,14 @@ tcc 判的是 `sym->type.t & (VT_STATIC | VT_INLINE)`（`tccgen.c:478`），而 
 与 tinycc 自己那 12 份，出来的目标文件与尺子 tcc **逐字节相同**。从源码到能跑的 tcc，
 整条链上除了 SDK 的头与那份 `libc.tbd`（只从里头读符号名），没有别人的东西。
 
+**换一副架构**（第九十四片）：同一份源码编成 **x86_64** 的 tcc，在 Rosetta 上跑，
+`-c` 编 `tests/c/gen/` 那 83 份，**81 份**与交叉尺子（`x86_64-osx-tcc`）逐字节相同。
+挡在门口的是 `u64 -> 浮点`：`cvtsi2sd` 认有符号，v >= 2^63 会算成负数，所以分两路 ——
+第二路 `(v >> 1) | (v & 1)` 之后转、再自己加自己，那个 `or` 是把右移丢掉的最低位接回来
+当粘位，于是也是正确舍入的（tcc 那边这件事交给 `__floatundidf`，我们不带 libtcc1，
+就地发指令；尺子是 clang）。差的两份是 `long double`：x86_64 上它是 x87 的 80 位、
+占 16 字节，我们还当 8 字节的 double。
+
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
 地址交给真的 libc（`strlen`/`memcpy`）验过。C 前端现在还把 `&x` 降到影子栈上，
@@ -12515,6 +12523,85 @@ omni macho-link *.o -o omni-tcc-own --dylib <SDK>/usr/lib/libc.tbd
   那一套，而且得在 Rosetta 上跑。
 
 <!-- 第九刀第九十三片-END -->
+
+## 落地：第九刀第九十四片
+
+换一副架构 —— x86_64 的 tcc，在 Rosetta 上跑，83 份里 81 份逐字节相同。
+
+前两片走通的是 arm64。这一片把同一份源码编成 **x86_64**（`x86_64-osx_FILES`：
+`CORE_FILES` + `x86_64-gen.c x86_64-link.c i386-asm.c` + `tccmacho.c`，
+`-DTCC_TARGET_X86_64 -DTCC_TARGET_MACHO`），尺子换成交叉编出来的 `x86_64-osx-tcc`。
+
+### 挡在门口的一条指令：`u64 -> 浮点`
+
+十二份源码里有八份直接撞在同一句上：
+
+```
+x64 后端还不认识 u64 -> 浮点（x86 没有这条指令，要拆两半）
+```
+
+`cvtsi2sd` 认的是**有符号**的 64 位，v >= 2^63 会被算成负数。分两路：
+
+- v >= 0：直接转，硬件自己按最近偶数舍入；
+- v < 0：`(v >> 1) | (v & 1)` 之后转，再自己加自己。
+
+第二路的关键是那个 `or`：右移丢掉的最低位用它接回来当**粘位**。值 >= 2^63 时有效位
+至少 64 位，最低位只影响「往哪边舍」，粘位留住它 —— 于是这一路也是正确舍入的，
+float 与 double 同一套（gcc/clang 发的就是这个序列）。
+
+尺子那边的答案不一样，但不冲突：tcc 在 x86_64 上把这件事交给运行时的
+`__floatundidf`/`__floatundisf`（`tccgen.c:3184` 的 `gen_cvt_itof1`；`x86_64-gen.c`
+里那句「unsigned case is handled generically」说的就是它）。我们这条腿不带 libtcc1，
+就地发指令。正确性的尺子是 clang：12 个值（2^63 前后、末位带信息的、2^24 与 2^53
+两个有效位边界、全一）打印到 17 位有效数字，一个字符不差。
+
+### x86_64 的 tcc
+
+改完这一条，十二份全编得出来，`clang -arch x86_64` 链得上，`arch -x86_64` 跑起来印
+
+```
+tcc version 0.9.28rc 2026-09-02 main@4fb21a4 (x86_64 Darwin)
+```
+
+它 `-c` 编 `tests/c/gen/` 那 83 份：**81 份与交叉尺子逐字节相同**。
+
+量的时候先撞了一次：两边都报「`stdio.h` not found」。这不是我们的毛病 ——
+**交叉编出来的 tcc 没有系统头那一格**（`configure` 只给本机那一份烤了 SDK 的路径），
+尺子自己也一样。所以两边都手工给 `-I <SDK>/usr/include`。
+
+### 差的那两份：`long double`
+
+`15-float.c` 与 `21-ldouble.c`。量到根上：
+
+```
+clang -arch x86_64:  sizeof(long double) = 16, _Alignof = 16
+我们 --arch x86_64:  sizeof(long double) = 8,  _Alignof = 8
+```
+
+x86_64 上 `long double` 是 x87 的 **80 位**（占 16 字节），我们还当成 double。
+于是我们编出来的 tcc 存不住 `1.5L`：尺子写出 `00…00 c0 ff 3f` 那十个字节，
+我们写成了零。修它要在 x64 后端上开 x87 那一路（10 字节的读写、`fld`/`fstp`），
+是另一片的事。这一片明着把这两份列进「已知不同」—— 多一份少一份都算门失败。
+
+### 顺手量到的下一片
+
+给 `84-u64-float.c` 加反方向那一句（`(unsigned long long)(double)(1ULL << 63)`）
+之后，**arm64** 那条腿也开始不同了。追下去不是浮点转整数发错了指令，而是 MIR 里
+**只有「浮点 -> 有符号整数」一种** `CVT_F2I`：2^63 以上的 double 转 `unsigned long long`
+走的是 `fcvtzs`/`cvttsd2si`，饱和成 `0x7fff…`。tcc 自己的常量折叠里就有这一句
+（`(unsigned long long)vtop->c.d`），所以它编出来的目标文件当场就差。
+那是第九十五片的题目，这一片的用例先不带它。
+
+### 门
+
+`tests/c/selfobj.js` 21 -> 24 条（新增：12 份 x86_64 `.o`、一次 `clang -arch x86_64`、
+版本行、一组字节比），跑完 21 秒。
+
+`tests/c/gen/84-u64-float.c` 新增（`run.js` 从 206 到 207）；`native.js` 加了三条
+u64 -> 浮点的（两条腿各一份，217 -> 223）。`native-gen.js`（81）不变。
+
+<!-- 第九刀第九十四片-END -->
+
 
 
 

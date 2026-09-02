@@ -1043,8 +1043,8 @@ class FnGen {
     }
     if (mode === CVT_U2F) {
       /* x86 没有「无符号 -> 浮点」的指令。32 位的够办：零扩展成 64 位再走**有符号**那条
-       * （零扩展之后的值一定是正的）。64 位的无符号要拆成两半加起来，那是另一片的事。 */
-      if (intBits(src) === 64) return nyi('u64 -> 浮点（x86 没有这条指令，要拆两半）');
+       * （零扩展之后的值一定是正的）。 */
+      if (intBits(src) === 64) return this.u64ToFloat(i, dbl);
       buf.emit(x.movRR(4, TMP0, TMP0));
       buf.emit(x.cvtI2F(dbl, 8, FTMP0, TMP0));
       this.fromFp(RES, FTMP0);
@@ -1059,6 +1059,42 @@ class FnGen {
       return this.def(i, RES);
     }
     return nyi(`结果是浮点的 CVT 模式 ${mode}`);
+  }
+
+  /**
+   * `unsigned long long` -> float/double（第九刀第九十四片）。
+   *
+   * `cvtsi2sd` 认的是**有符号**的 64 位，所以 v >= 2^63 时它会算成负数。分两路：
+   *
+   *   v >= 0（符号位是 0）：直接 `cvtsi2sd`，硬件自己按最近偶数舍入。
+   *   v <  0：`(v >> 1) | (v & 1)` 之后转，再自己加自己。右移一位丢掉的那一位用 `or`
+   *           接回最低位当**粘位**（sticky）—— 这是这一手的关键：值 >= 2^63 时有效位
+   *           至少 64 位，最低位的信息只影响「往哪边舍」，粘位留住它，于是这一路的结果
+   *           与直接转一样是正确舍入的。float 与 double 同一套（gcc/clang 也是这个序列）。
+   *
+   * 尺子那边的答案不一样但不冲突：tcc 在 x86_64 上把这件事交给运行时的
+   * `__floatundidf`/`__floatundisf`（`tccgen.c:3184` 的 `gen_cvt_itof1`，后端里
+   * 那句注释「unsigned case is handled generically」说的就是它）。我们这条腿不带
+   * libtcc1，就地发指令；正确性的尺子是 clang（`tests/c/native.js`）。
+   */
+  u64ToFloat(i, dbl) {
+    const buf = this.buf;
+    const big = buf.label();
+    const done = buf.label();
+    buf.emit(x.testRR(8, TMP0, TMP0));
+    buf.jcc(CC.s, big);
+    buf.emit(x.cvtI2F(dbl, 8, FTMP0, TMP0));
+    buf.jmp(done);
+    buf.place(big);
+    buf.emit(x.movRR(8, TMP1, TMP0));
+    buf.emit(x.shiftRI(SH.shr, 8, TMP1, 1));
+    buf.emit(x.aluRI(ALU.and, 8, TMP0, 1));
+    buf.emit(x.aluRR(ALU.or, 8, TMP1, TMP0));
+    buf.emit(x.cvtI2F(dbl, 8, FTMP0, TMP1));
+    buf.emit(x.fbin(FOP.add, dbl, FTMP0, FTMP0));
+    buf.place(done);
+    this.fromFp(RES, FTMP0);
+    return this.def(i, RES);
   }
 
   cvt(i) {
