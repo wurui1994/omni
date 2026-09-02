@@ -28,14 +28,18 @@
 //
 // - **`__DATE__` / `__TIME__` 不认**：它们的值随时钟走，进不了逐字节比对的测试轴。
 //   `__LINE__` / `__FILE__` / `__COUNTER__` 都认。
-// - **只有自带的那个系统头目录，没接本机的**：`sysIncludeDirs`（第八刀第二片）指向
-//   `stage0/include/`。里头两类东西：一是**编译器必须自己给**的那四份
+// - **系统头目录有两段**（第八十八片，与 tcc 的 `sysinclude_paths` 同一形状）：
+//   自带那一份在前 —— `stage0/include/`，对着 tcc 的 `{B}/include`；本机 SDK 的
+//   `/usr/include` 在后（tcc 那边是 configure 时用 `xcrun --show-sdk-path` 定死的，
+//   我们第一次用的时候找一次记下来，见 cli.js 的 `sdkUsrInclude`）。
+//   自带那一份里两类东西：一是**编译器必须自己给**的那四份
 //   `stddef.h` / `stdarg.h` / `stdbool.h` / `float.h`（与 tcc 自带的一一对应），
 //   二是 `stdio.h` / `stdlib.h` / `string.h` 的**最小子集**（第八刀第三片）——
 //   声明的正好是 `interp/libc.js` 那张表里有的，多一个都没有。后者是刻意的分岔：
-//   tcc 把这三份转手给系统，我们在解释器上没有真的 libc 可转手。
-//   搜索顺序照 tcc：`-I` 之后才试它。再往外（`/usr/include`、SDK 里的那些）还没接，
-//   找不到就报 `include file '...' not found`（与 tcc 同一句）。
+//   tcc 把这三份转手给系统，我们在解释器上没有真的 libc 可转手；也就是说这三个名字
+//   **挡着** SDK 里的同名头（native 那条腿上将来要让它们让位）。
+//   搜索顺序照 tcc：`-isystem` 在这两段前头，`-I` 在最前，`-nostdinc` 把这两段一起掐掉。
+//   都找不到就报 `include file '...' not found`（与 tcc 同一句）。
 //   **预定义的宏也有了**（第八刀第一片，见 tccdefs.js）：`__aarch64__`、
 //   `__SIZE_TYPE__`、`_Nonnull` 那五十条，顺序与值都对着 `tcc -dM -E` 抄的。
 // - **`#if` 里只有整数**：`'a'` 那类字符常量认（值按 signed char 算，量过 tcc 在本机

@@ -612,6 +612,15 @@ Bellard 拿它让 tcc 编译自己）也通了。`cpp/` 与 `inc/` 两组各多�
 缩进是 **include 深度**，取的是压栈**之前**的值。这几行在 tcc 那边是 `next()` 里头印的，
 所以排在这一个记号的行标**前面** —— 顺序也是尺子的一部分。
 
+**真的系统头**（第八十八片）：系统头目录成了**两段** —— 自带的 `stage0/include`
+（对着 tcc 的 `{B}/include`）在前，本机 SDK 的 `/usr/include` 在后。tcc 那一段是
+configure 时用 `xcrun --show-sdk-path` 定死编进去的，我们没有 configure，于是第一次用
+的时候找一次记下来。新的一组门 `sysinc/`：两边都**不给 `-I`**，各自去找
+`<stdint.h>` / `<unistd.h>` / `<math.h>`，`-E -P` 与 `-M` 都逐字节相同（最长那份
+五百多行正文、一百多条依赖）。**「先自带、后系统」这个顺序也是量出来的**：做尺子的
+tcc 没装，它 `{B}` 那一格不存在、一路掉到 SDK 上；拿 `-B` 指一个 `include/` 真在的树，
+它就跟我们一样先用自己那份。
+
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
 地址交给真的 libc（`strlen`/`memcpy`）验过。C 前端现在还把 `&x` 降到影子栈上，
@@ -12111,6 +12120,68 @@ if (this.verbose >= 2) out += this.takeTrace();
 把 `nf` 的**行数、缩进、次序**都比上了。
 
 <!-- 第九刀第八十七片-END -->
+
+## 落地：第九刀第八十八片
+
+真的系统头 —— 系统头目录的第二段。
+
+到上一片为止，`sysIncludeDirs` 只有一格：`stage0/include`。`<stdint.h>`、`<unistd.h>`、
+`<math.h>` 这些从来没找过 —— 谁要用就得自己 `-I` 一份 SDK 进来（`tests/c/run.js` 的
+`sys/` 组就是这么干的）。这一片把第二段接上。
+
+**tcc 那边这一段是 configure 时定死的**，不是运行时找的（`configure:370`）：
+
+```sh
+tcc_usrinclude="`xcrun --show-sdk-path`/usr/include"
+default tcc_sysincludepaths "{B}/include:$tcc_usrinclude"
+```
+
+编成 `-DCONFIG_TCC_SYSINCLUDEPATHS=…`，运行时只剩一句
+`tcc_add_sysinclude_path(s, CONFIG_TCC_SYSINCLUDEPATHS)`（libtcc.c:976）把它按 `:` 拆开。
+`{B}` 是 `CONFIG_TCCDIR`（`-B` 能换）。
+
+Omni 没有 configure 那一步，于是同一件事挪到**第一次用的时候**做一次记下来
+（`cli.js` 的 `sdkUsrInclude`），按代价从小到大试：`SDKROOT` -> 写死的那两条路径
+（CommandLineTools 与 Xcode.app，与 tcc 找库时的退路同一份，`tccmacho.c:2287`）->
+`xcrun --show-sdk-path`。一个都不成就只剩自带那一段，与这一片之前一样。
+
+### 「先自带、后系统」这个顺序也是量出来的
+
+做尺子的那个 tcc **没装**：它的 `{B}` 是 `/usr/local/lib/tcc`，那个目录不存在。于是
+它第一格落空、一路掉到 SDK 上 —— `tcc -M` 拿 `<stddef.h>` 会给你 SDK 那份连带
+二十几个 `sys/_types/*.h`，而我们给的是 `stage0/include/stddef.h` 一份。
+
+这看着像分歧，其实是「装没装」。拿 `-B` 指一个 `include/` 真在的树，它立刻跟我们一样：
+
+```
+$ tcc -B <tinycc 源码树> -M s.c
+s.o: \
+  s.c \
+  <tinycc 源码树>/include/stddef.h
+```
+
+也就是说两边的搜索顺序是同一个：`-I` -> `-isystem` -> 自带 -> SDK。
+
+### 门
+
+新的一组 `tests/c/sysinc/`，三份，两边都**不给 `-I`**：
+
+- `01-stdint.c` —— `<stdint.h>`，131 行正文、22 条依赖
+- `02-posix.c` —— `<sys/types.h>` + `<unistd.h>` + `<fcntl.h>`，561 行正文、104 条依赖
+  （那一堆 `sys/_types/*.h` 是一层套一层的守卫，守卫认不准立刻多印几百行）
+- `03-probe.c` —— `<inttypes.h>` + `<math.h>` + `<time.h>`，486 行正文
+  （`__has_include`、`__builtin_*`、`_Float16` 那些编译器探针最密的地方）
+
+每份三条：`-E -P`、`-M`、`-MM`，九条全逐字节相同。刻意只用 SDK 里独有的头 ——
+我们自带的 `stdio.h`/`stdlib.h`/`string.h` 是**最小子集**（第八刀第三片），它们
+**挡着** SDK 里的同名头，那是第八刀就记下的刻意分岔。
+
+`sys/` 组仍旧把 SDK 当 `-I` 传进去，理由从「不然找不到」变成了「要它压过自带的那三份」：
+`sys/05-fdopen` 用的 `fdopen`/`system`/`strpbrk` 只有 SDK 那份里有。把这三份让位给 SDK
+是 native 那条腿上的另一片 —— 解释器那条腿没有真的 libc 可转手，让位之前得先补上。
+
+<!-- 第九刀第八十八片-END -->
+
 
 
 

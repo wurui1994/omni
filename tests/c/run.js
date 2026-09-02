@@ -20,7 +20,9 @@
 //                    对账范围 —— 一个字节的 oracle 会撞（`s % 251` 曾经让一个真错误躲过
 //                    二分），整条 stdout 宽得多。
 //   5. `sys/`     —— 与 `gen/` 同一口径，只是用**真的系统头**（macOS SDK）。SDK 不在
-//                    就跳过。
+//                    就跳过。SDK 那一份当 `-I` 传，好压过我们自带的 `stdio.h` 一族。
+//   5.5 `sysinc/` —— 只预处理，不跑：两边都**不给 `-I`**，各自去找系统头，`tcc -E -P`
+//                    与 `-M` 都逐字节比（第八十八片）。搜索表本身就是被量的东西。
 //   6. `gen-bad/` —— 第六刀的阶段边界与真语法错误。同样有 .expected。
 //   7. `diag/`    —— 第八刀第十九片：**诊断本身**与 tcc 逐字节相同（同一个行号、同一句
 //                    话）。同样没有 .expected —— 期望值就是 tcc 的那一行。
@@ -204,9 +206,12 @@ for (const f of pick('inc')) for (const m of ['-E', '-P1']) compare('inc', f, in
  * `-M` 一族：给 make 的依赖清单（`gen_makedeps`）。这一组比的是**两边 CLI 的 stdout** ——
  * 依赖清单是驱动层的产物，不是预处理器的返回值。
  *
- * 只盖 `-MM`（自己的头）与不牵动系统头的 `-M`：`-M` 把系统头也记上，而我们的系统头
- * 搜索表与 tcc 的本来就不是同一份（我们自带 `stage0/include/stddef.h`，tcc 在 macOS 上
- * 直奔 SDK）—— 那是另一件事，不该混进这道门。
+ * `inc/` 那几条只盖 `-MM`（自己的头）与不牵动系统头的 `-M`。真的系统头有自己一组
+ * （`sysinc/`，第八十八片）—— 那一组两边都不给 `-I`，连 `-M` 摊出来的几十份
+ * `sys/_types/*.h` 都逐字节对。唯一对不上的是**我们自带的那几份**（`stage0/include/`
+ * 里的 `stddef.h` 一族）：做尺子的 tcc 没装，它那一格（`/usr/local/lib/tcc/include`）
+ * 不存在，于是掉到 SDK 上；拿 `-B` 指一个 `include/` 真在的树，它就跟我们一样先用自己
+ * 那份。差的是「装没装」，不是搜索顺序。
  */
 function depsCase(group, file, incDirs, flags) {
   const name = `${group}/${basename(file, '.c')} ${flags.join(' ')}`;
@@ -312,6 +317,14 @@ if (pick('inc').includes('02-include-next.c')) {
   optCase('inc', '02-include-next.c', ['-isystem', incDir, '-isystem', incDir2, '-vv'], true);
   optCase('inc', '02-include-next.c',
     ['-nostdinc', '-isystem', incDir, '-isystem', incDir2, '-vvv'], true);
+}
+/* `sysinc/`：真的系统头（第八十八片）。两边都**不给 `-I`**，各自去找 —— 找到的是不是
+ * 同一份文件、读出来的宏与 `#if` 分支是不是同一支，`-E -P` 逐字节比就见分晓；`-M`
+ * 再把整条 include 链（几十份 `sys/_types/*.h`）摊开对一遍。 */
+for (const f of pick('sysinc')) {
+  optCase('sysinc', f, []);
+  depsCase('sysinc', f, [], ['-M']);
+  depsCase('sysinc', f, [], ['-MM']);
 }
 
 // ------------------------------------------------------------ 3. cpp-bad/：该拒的要拒
@@ -421,6 +434,10 @@ function sdkInclude() {
   return existsSync(p) ? p : null;
 }
 
+/* SDK 那一份仍旧当 `-I` 传进去 —— 不是因为找不到（第八十八片起自己就找得到，
+ * 见 `sysinc/`），而是因为要它**压过我们自带的那三份**（`stdio.h`/`stdlib.h`/
+ * `string.h` 的最小子集，`-I` 排在系统段前头）：`sys/05-fdopen` 用的
+ * `fdopen`/`system`/`strpbrk` 只有 SDK 那份里有。哪天自带的那三份让位，这里就能空着。 */
 const SDK_INC = sdkInclude();
 for (const f of pick('sys')) {
   if (SDK_INC === null) {

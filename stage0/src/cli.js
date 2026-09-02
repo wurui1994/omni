@@ -139,7 +139,7 @@ function sysIncDirs(argv) {
     }
     i++;
   }
-  if (!argv.includes('-nostdinc')) out.push(...C_SYS_INCLUDE);
+  if (!argv.includes('-nostdinc')) out.push(...cSysInclude());
   return out;
 }
 
@@ -159,12 +159,63 @@ function inclArgs(argv) {
 }
 
 /**
- * C 前端自带的系统头目录（tcc 的 `sysinclude_paths` 里那个 `$tccdir/include`）。
- * `#include <stddef.h>` 一族从这儿来 —— 位置与 `RUNTIME_DIR` 同一手法：相对
- * 程序镜像固定两级上去，于是不依赖当前工作目录。**真正的系统头（macOS 那一摊）
- * 还没接**，见 ADR-0017 第八刀第二片。
+ * 本机 SDK 的 `/usr/include`（tcc 的 `CONFIG_TCC_SYSINCLUDEPATHS` 里第二段）。
+ *
+ * tcc 那边这一段是 **configure 时**定死的 —— `configure:370` 就一句
+ * `tcc_usrinclude="$(xcrun --show-sdk-path)/usr/include"`，接着
+ * `default tcc_sysincludepaths "{B}/include:$tcc_usrinclude"`，编成
+ * `-DCONFIG_TCC_SYSINCLUDEPATHS=…`，运行时只是 `tcc_add_sysinclude_path`
+ * 把它按 `:` 拆开（libtcc.c:976）。Omni 没有 configure 那一步，于是同一件事
+ * 挪到第一次用的时候做，按代价从小到大试：
+ *
+ *   1. `SDKROOT`（clang 的老规矩，交叉/CI 上常设）
+ *   2. 那两条写死的路径 —— 与 tcc 找库时的退路同一份
+ *      （`tccmacho.c:2287`：CommandLineTools 与 Xcode.app）
+ *   3. `xcrun --show-sdk-path` —— 真要开子进程才走这一步
+ *
+ * 一个都不成（不是 macOS、SDK 没装）就只剩自带那一段，与这一片之前一样。
  */
-const C_SYS_INCLUDE = [join(installDir(), '..', '..', 'include')];
+let sdkUsrIncludeCache;
+function sdkUsrInclude() {
+  if (sdkUsrIncludeCache !== undefined) return sdkUsrIncludeCache;
+  const roots = [];
+  const fromEnv = env('SDKROOT');
+  if (fromEnv !== undefined && fromEnv !== '') roots.push(fromEnv);
+  roots.push('/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk');
+  roots.push('/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform'
+    + '/Developer/SDKs/MacOSX.sdk');
+  for (const r of roots) {
+    const p = join(r, 'usr', 'include');
+    if (isDir(p)) {
+      sdkUsrIncludeCache = p;
+      return p;
+    }
+  }
+  let out = '';
+  try {
+    const [code, so] = spawn('xcrun', ['--show-sdk-path'], 'c');
+    if (code === 0) out = so.trim();
+  } catch {
+    out = '';
+  }
+  const p = out === '' ? null : join(out, 'usr', 'include');
+  sdkUsrIncludeCache = p !== null && isDir(p) ? p : null;
+  return sdkUsrIncludeCache;
+}
+
+/**
+ * C 前端的系统头目录，与 tcc 的 `sysinclude_paths` 同一形状：**自带那一份在前**
+ * （tcc 的 `{B}/include`，我们是 `stage0/include` —— 位置与 `RUNTIME_DIR` 同一手法：
+ * 相对程序镜像固定两级上去，于是不依赖当前工作目录），**本机 SDK 的
+ * `/usr/include` 在后**（第八十八片）。`-isystem` 给的排在这两段前头，
+ * `-nostdinc` 把这两段一起掐掉。
+ */
+function cSysInclude() {
+  const out = [join(installDir(), '..', '..', 'include')];
+  const sdk = sdkUsrInclude();
+  if (sdk !== null) out.push(sdk);
+  return out;
+}
 
 /**
  * 一份 `.c` -> 预处理后的文本。**格式与 `tcc -E` 逐字节相同**（ADR-0017 第五刀）：
@@ -181,7 +232,7 @@ const C_SYS_INCLUDE = [join(installDir(), '..', '..', 'include')];
       }
     },
     includeDirs: incs,
-    sysIncludeDirs: sysIncs ?? C_SYS_INCLUDE,
+    sysIncludeDirs: sysIncs ?? cSysInclude(),
     dirname,
     join,
   });
@@ -257,7 +308,7 @@ function cMir(path, incs, defs, args) {
       }
     },
     includeDirs: incs,
-    sysIncludeDirs: C_SYS_INCLUDE,
+    sysIncludeDirs: cSysInclude(),
     dirname,
     join,
   }, defs.map(([name, body]) => ({ name, body })), args);
@@ -286,7 +337,7 @@ function cObj(path, out, arch, incs, defs, fmt, os) {
       }
     },
     includeDirs: incs,
-    sysIncludeDirs: C_SYS_INCLUDE,
+    sysIncludeDirs: cSysInclude(),
     dirname,
     join,
   }, defs.map(([name, body]) => ({ name, body })));
