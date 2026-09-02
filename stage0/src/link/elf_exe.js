@@ -43,6 +43,7 @@ const PHDR_SIZE = 56;
 const SHDR_SIZE = 64;
 
 const ET_EXEC = 2;
+const ET_DYN = 3;
 
 const EM_X86_64 = 62;
 const EM_AARCH64 = 183;
@@ -143,6 +144,18 @@ const R_X86_64_JUMP_SLOT = 7;
 
 const R_AARCH64_GLOB_DAT = 1025;
 const R_AARCH64_JUMP_SLOT = 1026;
+
+/* `prepare_dynamic_rel` 认的那几号：绝对地址（要装载时改）与 PC 相对（能顶掉的才要）。 */
+const ABS_RELOC = new Map([
+  [EM_X86_64, new Set([1, 10, 11])],          // R_X86_64_64 / _32 / _32S
+  [EM_AARCH64, new Set([257, 258])],          // R_AARCH64_ABS64 / ABS32
+]);
+/** 这几号里「64 位那一号」要写回加数，32 位那号只写 RELATIVE。 */
+const ABS64_RELOC = new Map([[EM_X86_64, 1], [EM_AARCH64, 257]]);
+const PCREL_RELOC = new Map([
+  [EM_X86_64, new Set([2])],                  // R_X86_64_PC32
+  [EM_AARCH64, new Set([261])],               // R_AARCH64_PREL32
+]);
 
 /** `code_reloc`：1 是「跳转/调用」，0 是数据（`*-link.c` 开头那张表）。 */
 const CODE_RELOC = new Map([
@@ -289,6 +302,8 @@ export function elfExeImage(inp) {
   } = st;
   const { TEXT, DATA, BSS } = st.idx;
   const conf = targetConf(machine);
+  /** `-shared`：输出是 ET_DYN，装载地址从 0 起，没有 `.interp`。 */
+  const shared = inp.shared === true;
 
   // ---- resolve_common_syms：COMMON 的符号在 .bss 里安家
   for (const s of syms) {
@@ -327,27 +342,31 @@ export function elfExeImage(inp) {
     }
     if (name.startsWith('_')) setLinkerSym(name.slice(1), sec, true);
   };
-  setLinkerSym('_etext', TEXT, false);
-  setLinkerSym('_edata', DATA, false);
-  setLinkerSym('_end', BSS, false);
-  for (const nm of ['.preinit_array', '.init_array', '.fini_array']) {
-    let i = findSec(nm);
-    let end;
-    if (i < 0 || (secs[i].flags & SHF_ALLOC) === 0) {
-      end = 0;
-      i = TEXT;
-    } else end = secs[i].size;
-    defineSym(`__${nm.slice(1)}_start`, i, 0);
-    defineSym(`__${nm.slice(1)}_end`, i, end);
-  }
-  for (let i = 1; i < secs.length; i++) {
-    const s = secs[i];
-    if ((s.flags & SHF_ALLOC) === 0) continue;
-    if (s.type !== SHT_PROGBITS && s.type !== SHT_NOBITS && s.type !== SHT_STRTAB) continue;
-    const p0 = cName(s.name);
-    if (p0 === null) continue;
-    defineSym(`__start_${p0}`, i, 0);
-    defineSym(`__stop_${p0}`, i, s.size);
+  /* 造共享库那一路不叫这一趟（`resolve_common_syms` 末尾那句是
+   * `if (s1->output_type != TCC_OUTPUT_DLL) tcc_add_linker_symbols(s1)`）。 */
+  if (!shared) {
+    setLinkerSym('_etext', TEXT, false);
+    setLinkerSym('_edata', DATA, false);
+    setLinkerSym('_end', BSS, false);
+    for (const nm of ['.preinit_array', '.init_array', '.fini_array']) {
+      let i = findSec(nm);
+      let end;
+      if (i < 0 || (secs[i].flags & SHF_ALLOC) === 0) {
+        end = 0;
+        i = TEXT;
+      } else end = secs[i].size;
+      defineSym(`__${nm.slice(1)}_start`, i, 0);
+      defineSym(`__${nm.slice(1)}_end`, i, end);
+    }
+    for (let i = 1; i < secs.length; i++) {
+      const s = secs[i];
+      if ((s.flags & SHF_ALLOC) === 0) continue;
+      if (s.type !== SHT_PROGBITS && s.type !== SHT_NOBITS && s.type !== SHT_STRTAB) continue;
+      const p0 = cName(s.name);
+      if (p0 === null) continue;
+      defineSym(`__start_${p0}`, i, 0);
+      defineSym(`__stop_${p0}`, i, s.size);
+    }
   }
 
   /* ---- 动态那一套（`!static_link`，也就是 tcc 的默认）。
@@ -368,6 +387,8 @@ export function elfExeImage(inp) {
     name: '', strx: 0, value: 0, size: 0, info: 0, other: 0, shndx: SHN_UNDEF,
   }];
   const dstr = [0];
+  /** `.dynsym` 里的名字 -> 号（`find_elf_sym` 那张表）。 */
+  const dynByName = new Map();
   let dhash = [1, 1, 0, 0];
   let dhashed = 0;
   const rebuildDynHash = (nb) => {
@@ -406,15 +427,31 @@ export function elfExeImage(inp) {
       dhashed++;
       if (dhashed > 2 * nb) rebuildDynHash(2 * nb);
     } else dhash[1]++;
+    dynByName.set(name, idx);
     return idx;
   };
-  if (dynamic) {
-    INTERP = st.newSec('.interp', SHT_PROGBITS, SHF_ALLOC, 1, 0);
-    for (let k = 0; k < conf.interp.length; k++) {
-      secs[INTERP].data.push(conf.interp.charCodeAt(k));
+  /** `set_elf_sym(s1->dynsym, …)`：同名的那条改写，不再添一条。 */
+  const dynSetSym = (name, value, size, info, other, shndx) => {
+    const hit = dynByName.get(name);
+    if (hit === undefined) return dynPutSym(name, value, size, info, other, shndx);
+    const old = dsyms[hit];
+    /* 老的没定义、新的有定义 —— 补上（`set_elf_sym` 里那一支）。 */
+    if (old.shndx === SHN_UNDEF && shndx !== SHN_UNDEF) {
+      dsyms[hit] = {
+        ...old, value, size, info, other, shndx,
+      };
     }
-    secs[INTERP].data.push(0);
-    secs[INTERP].size = secs[INTERP].data.length;
+    return hit;
+  };
+  if (dynamic) {
+    if (!shared) {
+      INTERP = st.newSec('.interp', SHT_PROGBITS, SHF_ALLOC, 1, 0);
+      for (let k = 0; k < conf.interp.length; k++) {
+        secs[INTERP].data.push(conf.interp.charCodeAt(k));
+      }
+      secs[INTERP].data.push(0);
+      secs[INTERP].size = secs[INTERP].data.length;
+    }
     DYNSYM = st.newSec('.dynsym', SHT_DYNSYM, SHF_ALLOC, 8, 24);
     DYNSTR = st.newSec('.dynstr', SHT_STRTAB, SHF_ALLOC, 1, 0);
     HASH = st.newSec('.hash', SHT_HASH, SHF_ALLOC, 8, 4);
@@ -437,6 +474,8 @@ export function elfExeImage(inp) {
   const relative = machine === EM_X86_64 ? R_X86_64_RELATIVE : R_AARCH64_RELATIVE;
   let GOT = -1;
   let RELAGOT = -1;
+  /** `_GLOBAL_OFFSET_TABLE_` 在 symtab 里的号（`build_got` 的返回值 `got_sym`）。 */
+  let GOTSYM = 0;
   const buildGot = () => {
     GOT = secs.length;
     secs.push({
@@ -452,7 +491,7 @@ export function elfExeImage(inp) {
       size: 24,
       relaFor: 0,
     });
-    st.setSym({
+    GOTSYM = st.setSym({
       name: '_GLOBAL_OFFSET_TABLE_', value: 0, size: 0, info: 1 * 16 + 1, other: 0, shndx: GOT,
     });
   };
@@ -566,9 +605,12 @@ export function elfExeImage(inp) {
             if (sym.value === 0) continue;
           } else if (sym.shndx !== SHN_UNDEF) continue;
         }
-        /* x86_64 上「有定义的 PLT32/PC32」在可执行文件里降成 PC32 —— 不走 PLT。 */
+        /* x86_64 上「有定义的 PLT32/PC32」在可执行文件里降成 PC32 —— 不走 PLT。
+         * 造共享库时不能这么降：别人可以用自己的定义把库里的这个符号顶掉
+         * （`打断` 语义），所以只有局部符号或藏起来的符号才降。 */
         if (machine === EM_X86_64 && (r.type === R_X86_64_PLT32 || r.type === R_X86_64_PC32)
-          && sym.shndx !== SHN_UNDEF) {
+          && sym.shndx !== SHN_UNDEF
+          && (!shared || Math.floor(sym.info / 16) === STB_LOCAL || (sym.other & 3) !== 0)) {
           if (pass !== 0) continue;
           r.type = R_X86_64_PC32;
           continue;
@@ -630,6 +672,48 @@ export function elfExeImage(inp) {
           r.sym = ps;
         }
       }
+    }
+  }
+
+  /* `build_got_entries` 末尾那句：`_GLOBAL_OFFSET_TABLE_` 的 `st_size` 记 GOT 的长度。
+   * 可执行文件里看不出来（symtab 不写进去），共享库里这条符号是导出的，就看得出来了。 */
+  if (GOTSYM !== 0) syms[GOTSYM].size = secs[GOT].size;
+
+  /* ---- export_global_syms：造共享库就把**所有**非局部符号原样端进 `.dynsym`。
+   * 连 `_GLOBAL_OFFSET_TABLE_` 与 `xxx@plt` 都在里头 —— 它们在 symtab 里是 GLOBAL 的。 */
+  if (shared) {
+    for (let i = 1; i < syms.length; i++) {
+      const s = syms[i];
+      if (Math.floor(s.info / 16) === STB_LOCAL) continue;
+      dynIndex.set(i, dynSetSym(s.name, s.value, s.size, s.info, s.other, s.shndx));
+    }
+  }
+
+  /* ---- prepare_dynamic_rel（`set_sec_sizes` 里那一段）。
+   *
+   * 造共享库时，本来只给自己用的重定位表（`.rela.text`/`.rela.data`，非 alloc）里
+   * 有些条目要留到装载时才算得出来 —— 绝对地址那几号一律留，PC 相对那号只在符号
+   * 能被别人顶掉（进了 `.dynsym`）时留。数出几条，这张表就跟着变成 alloc 的，
+   * 长度按数出来的条数定；至于留下哪几条、写成什么样，是落笔那一趟的事。 */
+  const dynRel = new Set();
+  const absSet = ABS_RELOC.get(machine);
+  const pcSet = PCREL_RELOC.get(machine);
+  if (shared) {
+    for (let i = 1; i < secs.length; i++) {
+      const sr = secs[i];
+      if (sr.type !== SHT_RELA || (sr.flags & SHF_ALLOC) !== 0) continue;
+      const tgt = secs[sr.relaFor];
+      if (tgt === undefined || (tgt.flags & SHF_ALLOC) === 0) continue;
+      let count = 0;
+      for (const r of relas.get(i) ?? []) {
+        if (absSet.has(r.type)) count++;
+        else if (pcSet.has(r.type) && dynIndex.has(r.sym)) count++;
+      }
+      if (count === 0) continue;
+      sr.flags |= SHF_ALLOC;
+      sr.size = count * 24;
+      sr.link = DYNSYM;
+      dynRel.add(i);
     }
   }
 
@@ -868,7 +952,8 @@ export function elfExeImage(inp) {
 
   let fileOffset = align(EHDR_SIZE + phnum * PHDR_SIZE, 4) + shnum * SHDR_SIZE;
   const sAlign = conf.page;
-  let addr = conf.start;
+  /* 共享库从 0 起（`if (s1->output_type & TCC_OUTPUT_DYN) addr = 0`）。 */
+  let addr = shared ? 0 : conf.start;
   const base = addr;
   addr += fileOffset;
 
@@ -947,6 +1032,9 @@ export function elfExeImage(inp) {
     const s = syms[idx];
     if (s.shndx === SHN_UNDEF) {
       if (Math.floor(s.info / 16) === STB_WEAK) return 0;
+      /* `.dynsym` 里有这个名字就认（`relocate_syms` 里那句 `find_elf_sym`）——
+       * 造共享库时未定义的全局符号都进了 `.dynsym`，留给装载时解析。 */
+      if (dynamic && dynByName.has(s.name)) return 0;
       throw new OmniError(`elf: 未定义的符号 '${s.name}'`);
     }
     if (s.shndx === SHN_ABS) return s.value;
@@ -1027,21 +1115,58 @@ export function elfExeImage(inp) {
     if (s.shndx !== SHN_UNDEF && s.shndx < SHN_LORESERVE) s.value += secs[s.shndx].addr;
   }
 
+  const abs64 = ABS64_RELOC.get(machine);
   for (const [si, list] of relas) {
     const tgt = secs[secs[si].relaFor];
     if (tgt === undefined || tgt.bytes.length === 0) continue;
     /* 动态那一路的 `.got` 不在这儿落笔（`relocate_sections` 里那个 `s != s1->got`）：
      * GLOB_DAT 那几格留给动态链接器，RELATIVE 那几格由 `fill_local_got_entries` 填。 */
     const skip = dynamic && secs[si].relaFor === GOT;
+    /* 变成 alloc 的那几张表要**原地改写**：留下的条目往前挤（tcc 里那个 `qrel`），
+     * 符号号换成 `.dynsym` 的号，加数按落笔前的内容算。 */
+    const qrel = dynRel.has(si) ? [] : null;
+    const dvt = qrel === null ? null
+      : new DataView(tgt.bytes.buffer, tgt.bytes.byteOffset, tgt.bytes.byteLength);
     for (const r of list) {
       if (skip) continue;
       /* `R_XXX_RELATIVE` 在 ELF 上什么都不做 —— PE 那一路才往里写 RVA。 */
       if ((machine === EM_X86_64 && r.type === R_X86_64_RELATIVE)
         || (machine === EM_AARCH64 && r.type === R_AARCH64_RELATIVE)) continue;
+      const val = symAddr(r.sym) + Number(r.add);
+      let apply = true;
+      if (qrel !== null) {
+        const esym = dynIndex.get(r.sym) ?? 0;
+        if (absSet.has(r.type)) {
+          if (esym !== 0) {
+            /* 别人能顶掉的符号：这一条原样留给装载器（本地**不**落笔）。 */
+            qrel.push({
+              at: r.at, sym: esym, type: r.type, add: r.add,
+            });
+            apply = false;
+          } else {
+            /* 局部符号：装载时按基址挪一挪就行 —— RELATIVE，加数是落笔后的值。 */
+            const old = r.type === abs64
+              ? Number(dvt.getBigInt64(r.at, true)) : dvt.getInt32(r.at, true);
+            qrel.push({
+              at: r.at, sym: 0, type: relative, add: BigInt(old + val),
+            });
+          }
+        } else if (pcSet.has(r.type) && esym !== 0) {
+          qrel.push({
+            at: r.at, sym: esym, type: r.type, add: BigInt(dvt.getInt32(r.at, true)) + r.add,
+          });
+          apply = false;
+        }
+      }
+      if (!apply) continue;
       const g = gotOff.get(r.sym);
       relocateOne(machine, r.type, tgt.bytes, r.at, tgt.addr + r.at,
-        symAddr(r.sym) + Number(r.add), 0, false,
+        val, 0, false,
         g === undefined ? undefined : secs[GOT].addr + g);
+    }
+    if (qrel !== null) {
+      relas.set(si, qrel);
+      secs[si].size = qrel.length * 24;
     }
   }
 
@@ -1213,8 +1338,8 @@ export function elfExeImage(inp) {
       }
       put(EHFH, hdr);
     }
-    // .rela.got / .rela.plt
-    for (const ri of [RELAGOT, RELAPLT]) {
+    // .rela.got / .rela.plt / 变成 alloc 的那几张
+    for (const ri of [RELAGOT, RELAPLT, ...dynRel]) {
       if (ri < 0) continue;
       const list = relas.get(ri);
       const rb = new Uint8Array(list.length * 24);
@@ -1231,7 +1356,7 @@ export function elfExeImage(inp) {
   }
 
   return {
-    machine, secs, out, backmap, phdrs, phnum, shnum, entry, nameOff, fileOffset,
+    machine, secs, out, backmap, phdrs, phnum, shnum, entry, nameOff, fileOffset, shared,
   };
 }
 
@@ -1254,7 +1379,7 @@ export function elfExe(inp) {
   // ---- ELF 头
   b[0] = 0x7f; b[1] = 0x45; b[2] = 0x4c; b[3] = 0x46;
   b[4] = 2; b[5] = 1; b[6] = 1;
-  dv.setUint16(16, ET_EXEC, true);
+  dv.setUint16(16, r.shared ? ET_DYN : ET_EXEC, true);
   dv.setUint16(18, r.machine, true);
   dv.setUint32(20, 1, true);
   dv.setBigUint64(24, BigInt(r.entry), true);

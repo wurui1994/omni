@@ -436,7 +436,10 @@ tcc 逐字节相同了**（第五十片，`peWrite`：两个 win32 目标 160 �
 跑起来）。**ELF 的 `.plt` 也补上了**（第五十八片：未定义的弱函数既取地址又调用 ——
 两格 GOT、调用点改指 `name@plt`、静态那一路故意「没修完」的跳板、动态那一路的
 `.rela.plt` 与 `DT_JMPREL` 四条标签外加现场编出来的 adrp/ldr/add/br，静态与动态
-各 11 × 2 份逐字节相同）。
+各 11 × 2 份逐字节相同）。**共享库也能造了**（第五十九片：ET_DYN、装载地址从 0 起、
+没有 `.interp`、`export_global_syms` 把所有非局部符号端进 `.dynsym`、
+`prepare_dynamic_rel` 把 `.rela.data` 里那几条改写成装载时的 RELATIVE，两个目标各
+11 份逐字节相同；命令行上是 `omni elf-link --shared`）。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -10345,6 +10348,38 @@ x86_64 是往三处 `add32le` 补地址差，arm64 是把整段 adrp/ldr/add/br 
 （`DT_RELASZ` 因此只算 `.rela.got` 那 24 字节）。
 
 <!-- 第九刀第五十八片-END -->
+
+## 落地：第九刀第五十九片 —— 共享库（ET_DYN）
+
+第三种输出：`<target>-tcc -shared -nostdlib a.o -o a.so`（门是 `tests/c/elf-so.js`）。
+
+```
+x86_64-linux: 11 份共享库逐字节相同
+arm64-linux : 11 份共享库逐字节相同
+```
+
+命令行上是 `omni elf-link --shared`。与可执行文件那两路的差别不多，但每一处都在别处：
+
+- **没有 `.interp`，没有 PT_PHDR/PT_INTERP**，装载地址从 0 起（`if (s1->output_type &
+  TCC_OUTPUT_DYN) addr = 0`）—— 头一个 PT_LOAD 于是从文件偏移 0、虚址 0 开始。
+- **`tcc_add_linker_symbols` 不叫**（`resolve_common_syms` 末尾那句认
+  `output_type != TCC_OUTPUT_DLL`）：库里没有 `_etext`/`_edata`/`__start_X`。
+- **`export_global_syms`**：所有非局部符号原样端进 `.dynsym` —— 连
+  `_GLOBAL_OFFSET_TABLE_` 与 `xxx@plt` 都在里头，因为它们在 symtab 里是 GLOBAL 的。
+  也正因为这张表是导出的，`build_got_entries` 末尾那句
+  `sym[got_sym].st_size = got->data_offset` 第一次显出来 —— 可执行文件里 symtab 不写进
+  文件，这个 24 看不见；共享库里它就是第一处不同。
+- **x86_64 上的 PLT32/PC32 不再降成 PC32**：库里的全局函数可以被别人的定义顶掉，
+  所以除了局部符号与藏起来的符号，一律走跳板。arm64 没这回事（`AUTO_GOTPLT_ENTRY`
+  本来就只管未定义的），于是同一份源码 x86_64 多一格 `.plt`。
+- **`prepare_dynamic_rel`**：本来只给自己用的 `.rela.data`/`.rela.text` 里，绝对地址那
+  几号（`R_X86_64_64`/`_32`/`_32S`、`R_AARCH64_ABS64`/`ABS32`）一律要留到装载时，
+  PC 相对那号只在符号进了 `.dynsym` 时留。数出几条，这张表就变成 `SHF_ALLOC` 的，
+  长度按条数定；落笔那一趟再**原地挤**（tcc 里那个 `qrel`）：局部符号那条写成
+  `R_*_RELATIVE` + 「落笔后的值」当加数，能被顶掉的那条原样留着而**本地不落笔**。
+  `char *msg = "hi"` 这样一句就正好走这一路。
+
+<!-- 第九刀第五十九片-END -->
 
 
 
