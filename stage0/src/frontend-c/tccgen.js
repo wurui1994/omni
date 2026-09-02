@@ -664,6 +664,10 @@ export class CGen {  /**
     this.vlaStack = [];
     /** 这个函数里有变长数组吗 —— 有的话序言/收场那一对必须发（不然 `$sp` 收不回来） */
     this.vlaSeen = false;
+    /** @type {object|null} 当前**函数体**那个 MirFunc。`sizeof` 会把 `this.f` 换成一个
+     * 用完就丢的函数（操作数不求值），可是变长数组的长度**必须真的算**
+     * （`sizeof(char[1+2*a])`，tcctext.c:3162）—— 那几条指令要落在这儿。 */
+    this.bodyF = null;
     /** data 段的下一个空位。页 0 整页留空，于是 C 的 `NULL` 一定访问不到 */
     this.dataOff = MEM_PAGE;
     /** @type {Map<string,number>} 字符串字面量去重（同一份文本一份 data） */
@@ -2697,9 +2701,15 @@ export class CGen {  /**
     const scratch = new MirFunc('$sizeof', [], T_VOID);
     const outer = this.f;
     this.f = scratch;
+    /* `sizeof(char[1+2*a])` —— 类型名里也能有变长数组，而且那个长度**要真的算**
+     * （tcctest.c:3160 那句注释）。`arrayPost` 会把那几条指令发到 `bodyF` 上，
+     * 所以这儿只管把「这儿允许变长」这一格打开。 */
+    const saveVla = this.vlaMode;
+    if (this.scopes.length > 0) this.vlaMode = 2;
     if (this.tok === LPAR) this.soType = true;
     const ty = this.unary().ty;
     this.soType = false;
+    this.vlaMode = saveVla;
     this.f = outer;
     return ty;
   }
@@ -5083,10 +5093,11 @@ export class CGen {  /**
     const posts = [];
     for (;;) {
       if (this.tok === LBRACK) {
+        const top = posts.length === 0;
         this.next();
         if (this.tok === RBRACK) {
           this.next();
-          posts.push({ k: 'arr', n: -1 });
+          posts.push({ k: 'arr', n: -1, top });
           continue;
         }
         /* 函数体里的声明才可能是**变长数组**（`int a[n]`，第四十九片）。那儿的读法是
@@ -5096,18 +5107,19 @@ export class CGen {  /**
          * tcc 那边不必试：它的表达式解析器自己就折常量，所以局部量的维度一律走
          * `gexpr()`，折完看 `vtop` 上还是不是 `VT_CONST`（`tccgen.c:5167-5188`）。
          * 我们主路上不折（文件头偏离 3），于是「是不是常量」只有常量求值器答得出来。 */
-        if (this.scopes.length > 0
-          && (this.vlaMode === 2 || (this.vlaMode === 1 && (pre > 0 || inner !== null)))) {
+        if (this.vlaMode === 3
+          || (this.scopes.length > 0
+            && (this.vlaMode === 2 || (this.vlaMode === 1 && (pre > 0 || inner !== null))))) {
           const dim = this.cpp.captureTokens(RBRACK);
           // captureTokens 停在 `]` 上，它动的是 Cpp 的 tok —— 同步一下
           this.tok = this.cpp.tok;
           this.tokc = this.cpp.tokc;
           this.skip(RBRACK);
           const n = this.tryConstDim(dim);
-          posts.push(n === null ? { k: 'arr', n: -1, dim } : { k: 'arr', n });
+          posts.push(n === null ? { k: 'arr', n: -1, dim, top } : { k: 'arr', n, top });
           continue;
         }
-        posts.push({ k: 'arr', n: Number(this.constExpr()) });
+        posts.push({ k: 'arr', n: Number(this.constExpr()), top });
         this.skip(RBRACK);
         continue;
       }
@@ -5161,8 +5173,26 @@ export class CGen {  /**
       return mkArray(elem, p.n);
     }
     /* `int a[][n]` —— 外面那一维省了、里面是变长的：谁都算不出「一格多大」。
-     * tcc 报的就是这一句（`tccgen.c:5205`）。 */
-    if (p.dim === undefined && p.n < 0) this.err('need explicit inner array size in VLAs');
+     * tcc 报的就是这一句（`tccgen.c:5205`），而且**只在里层**报（`td & TYPE_NEST`）——
+     * 最外面那一维在形参上本来就要退化成指针，谁也不问它多大（`int arr[][3][--s]`，
+     * tcctest.c:3091）。 */
+    if (p.dim === undefined && p.n < 0) {
+      if (p.top !== true) this.err('need explicit inner array size in VLAs');
+      if (this.vlaMode !== 3) this.err('array size missing');
+    }
+    /* 形参上的那一种（第五十片）：这时候形参**还没有值**，长度只能留到函数体的开头
+     * 才算 —— 所以这儿只把那段记号挂在类型上，`vlaParamCode` 进函数时再放一遍。
+     * tcc 挂在 Sym 的 `vla_array_str` 上（`tccgen.c:5232`），同一件事。 */
+    if (this.vlaMode === 3) {
+      const ty = mkVla(elem, -1);
+      ty.vlaToks = p.dim === undefined ? null : p.dim;
+      ty.vlaCount = p.n < 0 ? 0 : p.n;
+      return ty;
+    }
+    /* 这几条指令要落在**函数体**那个 MirFunc 上，哪怕我们正在 `sizeof` 的那个用完就丢的
+     * 函数里：`sizeof(char[1+2*a])` 的长度是真的要算的（tcctest.c:3162 那句注释）。 */
+    const outerF = this.f;
+    if (this.bodyF !== null) this.f = this.bodyF;
     const f = this.f;
     const esz = vlaElem
       ? f.emit(OP.LOAD, T_I64, REF_NONE, REF_NONE, elem.vla)
@@ -5177,6 +5207,7 @@ export class CGen {  /**
     const slot = this.temp(T_I64, 'vlasz');
     f.emit(OP.STORE, T_VOID, f.emit(OP.MUL, T_I64, cnt, esz, 0), REF_NONE, slot);
     this.vlaSeen = true;
+    this.f = outerF;
     return mkVla(elem, slot);
   }
 
@@ -5230,6 +5261,40 @@ export class CGen {  /**
   }
 
   /**
+   * 形参上那些变长的维度，进函数时算一遍（tcc 的 `func_vla_arg_code`，`tccgen.c:8518`）。
+   *
+   * 位置必须在形参**绑好之后**：长度里写的就是别的形参（`int arr[s][3][4]` 里的 `s`）。
+   * 顺序是**由里往外**：外面那一层的「一格多大」等于里面那一层的字节数，所以先递归
+   * 到底再往回算 —— 与 `arrayPost` 在声明符里的顺序是同一个道理。
+   *
+   * 那段记号是**真的求值**，不是抄一个数：`int arr[][3][--s]`（tcctest.c:3091）会真的
+   * 把 `s` 减一。
+   */
+  vlaParamCode(ty) {
+    if (ty === null || ty === undefined) return;
+    if (!isPtr(ty.t) && !isArray(ty.t)) return;
+    this.vlaParamCode(ty.ref);
+    /* `vlaToks` 在不在，才是「这一层是形参上待算的」的判据 —— **不能**看 `ty.vla` 是不是
+     * 还等于 -1：函数体解析两遍（见 finishFunc），而类型对象只有一份，第一遍算完留在
+     * 上面的槽号是**第一遍那个函数**的槽。两遍各算一次，各自的槽号才对得上。 */
+    if (!isArray(ty.t) || ty.vlaToks === undefined) return;
+    const elem = ty.ref;
+    const esz = isVla(elem)
+      ? this.vlaSizeRef(elem)
+      : this.mod.consts.int(BigInt(typeSize(elem).size));
+    let cnt;
+    if (ty.vlaToks === null) cnt = this.mod.consts.int(BigInt(ty.vlaCount));
+    else {
+      const v = this.replayDim(ty.vlaToks);
+      if (!isInteger(v.ty.t)) this.err('size of variable length array should be an integer');
+      cnt = this.gv(this.castTo(v, TY_LLONG));
+    }
+    const slot = this.temp(T_I64, 'vlasz');
+    this.f.emit(OP.STORE, T_VOID, this.f.emit(OP.MUL, T_I64, cnt, esz, 0), REF_NONE, slot);
+    ty.vla = slot;
+  }
+
+  /**
    * 当前的 `(` 是**分组**还是形参表。
    *
    * 位置本来就能分开这两件事：形参表只会跟在名字（或者里层那一组）**后面**，而这儿是
@@ -5253,12 +5318,12 @@ export class CGen {  /**
    */
   funcParams() {
     this.skip(LPAR);
-    /* 形参上的 `[n]`（`void f(int n, int a[n])`）是**另一件事**：C 把它当指针，而那个
-     * 长度要留到函数体的开头才求值（tcc 为此把那段记号存在 `vla_array_str` 上，
-     * `tccgen.c:5155`）。这一片还没到，所以形参表里一律要常量 —— 撞上了报的是
-     * 「要一个常量表达式」，而不是静悄悄按 0 长度走。 */
+    /* 形参上的 `[n]`（`void f(int n, int a[n])`）是**另一件事**：最外面那一维按 C 的
+     * 规矩变成指针（`paramList` 那一句 `mkPointer`），里面那些维度的长度要留到函数体的
+     * 开头才求值 —— 那时形参才有值。所以形参表里是第三种模式：照样先试常量，试不成就
+     * 把那段记号挂在类型上（tcc 的 `vla_array_str`），不当场发指令。 */
     const saveVla = this.vlaMode;
-    this.vlaMode = 0;
+    this.vlaMode = 3;
     try {
       return this.funcParamsBody();
     } finally {
@@ -6067,6 +6132,7 @@ export class CGen {  /**
   runBody(body, f, ret, name, params, variadic) {
     const outer = this.f;
     this.f = f;
+    this.bodyF = f;
     this.funcRet = ret;
     this.funcName = name;
     this.scopes = [new Map()];
@@ -6158,6 +6224,10 @@ export class CGen {  /**
       this.vaRef = f.emit(OP.LOAD, T_I64, REF_NONE, REF_NONE, slot);
     }
 
+    /* 形参上那些变长的维度在这儿算（第五十片，tcc 的 `func_vla_arg`，`tccgen.c:8627`）：
+     * 必须在形参都绑好之后 —— 长度里写的就是别的形参。 */
+    for (const p of params) this.vlaParamCode(p.ty);
+
     /* 这个函数里有标签 -> 摆那台**唯一**的状态机（第二十四片，见 `gotoStmt` 头上那段）：
      * 一个状态槽、一圈 `LOOP`。`goto` = 「写状态、`BR` 回这圈 LOOP 的开头」，
      * 剩下的由函数体那条分派链把控制送到位。走完函数体要**出去**而不是掉回循环开头。 */
@@ -6190,6 +6260,7 @@ export class CGen {  /**
     else if (isStruct(ret.t)) f.emit(OP.RET, T_I64, this.sretRef, REF_NONE, 0);
     else f.emit(OP.RET, f.ret, this.konst(ret, 0), REF_NONE, 0);
     this.f = outer;
+    this.bodyF = null;
     /* 回到文件作用域：tag 与枚举常量的栈要收回去，不然函数**之后**的
      * `struct rec { … };` 会落在这个函数体那一层里，下一个函数就看不见它了。 */
     this.tagStack = [this.tags];
