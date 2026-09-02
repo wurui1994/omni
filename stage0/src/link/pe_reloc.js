@@ -31,6 +31,8 @@ const R_AARCH64_PREL32 = 261;
 const R_AARCH64_ADR_PREL_PG_HI21 = 275;
 const R_AARCH64_ADD_ABS_LO12_NC = 277;
 const R_AARCH64_LDST8_ABS_LO12_NC = 278;
+const R_AARCH64_TSTBR14 = 279;
+const R_AARCH64_CONDBR19 = 280;
 const R_AARCH64_JUMP26 = 282;
 const R_AARCH64_CALL26 = 283;
 const R_AARCH64_LDST16_ABS_LO12_NC = 284;
@@ -91,6 +93,10 @@ export function relocateOne(machine, type, b, at, addr, val, imagebase, weakUnde
       case R_AARCH64_LDST32_ABS_LO12_NC: return put32(0xffc003ff, ((val & 0xffc) << 8) >>> 0);
       case R_AARCH64_LDST64_ABS_LO12_NC: return put32(0xffc003ff, ((val & 0xff8) << 7) >>> 0);
       case R_AARCH64_LDST128_ABS_LO12_NC: return put32(0xffc003ff, ((val & 0xff0) << 6) >>> 0);
+      case R_AARCH64_TSTBR14:                         // tbz/tbnz：14 位，摆在 5..18
+        return put32(0xfff8001f, (((val - addr) / 4 & 0x3fff) << 5) >>> 0);
+      case R_AARCH64_CONDBR19:                        // b.cond/cbz：19 位，摆在 5..23
+        return put32(0xff00001f, (((val - addr) / 4 & 0x7ffff) << 5) >>> 0);
       case R_AARCH64_JUMP26:
       case R_AARCH64_CALL26: {
         const d = (val - addr) / 4;

@@ -133,13 +133,14 @@ export function peImage(inp) {
     }
   }
 
-  /* 一条节表项里可能并了好几节，按地址摆到一块去。 */
+  /* 一条节表项里可能并了好几节，按地址摆到一块去。**长度取 `dataSize` 而不是
+   * `vsize`** —— `.bss` 并进 `.data` 那一条的时候，虚拟长度里有一大截是不写进文件的
+   * （`pe_write` 里写的是 `si->data_size`）。 */
   for (const info of r.infos) {
-    if (info.dataSize === 0) { info.bytes = new Uint8Array(0); continue; }
-    const b = new Uint8Array(info.vsize);
+    const b = new Uint8Array(info.dataSize);
     for (const s of info.secs) {
       if (s.data === null) continue;
-      b.set(s.data, s.vaddr - info.vaddr);
+      b.set(s.data.subarray(0, Math.max(0, b.length - (s.vaddr - info.vaddr))), s.vaddr - info.vaddr);
     }
     info.bytes = b;
   }
