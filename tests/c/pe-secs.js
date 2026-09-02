@@ -28,10 +28,10 @@ const root = join(here, '..', '..');
 const CROSS = join(root, '.omni-cache', 'tcc-cross');
 
 const TARGETS = [
-  { name: 'x86_64-win32', tcc: 'x86_64-win32-tcc', imagebase: 0x400000, dynamicBase: false },
+  { name: 'x86_64-win32', tcc: 'x86_64-win32-tcc' },
   /* arm64-win32 的映像基址是 0x140000000，`DllCharacteristics` 还带 `DYNAMIC_BASE`，
-   * 于是多一节 `.reloc`。 */
-  { name: 'arm64-win32', tcc: 'arm64-win32-tcc', imagebase: 0x140000000, dynamicBase: true },
+   * 于是多一节 `.reloc` —— 这两件事 `peSections` 自己按目标定，不用告诉它。 */
+  { name: 'arm64-win32', tcc: 'arm64-win32-tcc' },
 ];
 
 const filters = process.argv.slice(2).filter((x) => !x.startsWith('-'));
@@ -104,8 +104,6 @@ try {
         const r = peSections({
           objs: [obj, ...loaded.members.map((m) => m.bytes)],
           dlls: loaded.dlls,
-          imagebase: t.imagebase,
-          dynamicBase: t.dynamicBase,
         });
         got = r.infos.map((i) => ({ name: i.name, virt: i.vaddr - r.imagebase, file: i.filePos, size: i.vsize }));
       } catch (e) {

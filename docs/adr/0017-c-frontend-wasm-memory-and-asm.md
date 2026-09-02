@@ -468,6 +468,12 @@ Mach-O 的 dylib 不叫、PE 的 dll **照叫**（`pe_add_runtime` 在
 `.data` 里那 32 字节的 `__tls_index`、数据目录 9，以及 arm64 上**不加** `tcbhead_t`
 那 16 个字节 —— 三个格式于是三种 tp；顺手把 `elf-gen/` 那八份接进两道 PE 的门，
 `pe-exe` 172 份、`pe-dll` 180 份逐字节相同）。
+**PE 那一路的链接器开关也认了**（第六十六片：`--stack`、`-subsystem=`（`native`
+那一种**两个对齐都变 0x20**、EFI 那三种映像基址变 0）、`--image-base`、
+`--section-alignment` / `--file-alignment`、`--large-address-aware`、
+`--nxcompat` / `--tsaware` / `--dynamicbase`、`-e`，十二种走法各 6 × 2 份逐字节
+相同；头上那两格 `SectionAlignment` / `FileAlignment` **永远是模板里的
+0x1000 / 0x200** —— `pe_write` 从来不把真用的对齐写回去）。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -10758,6 +10764,63 @@ memcpy(psh->Name, sh_name, umin(strlen(sh_name), sizeof psh->Name));
 `.init_array` 就成了那一组的头一节。）
 
 <!-- 第九刀第六十五片-END -->
+
+## 落地：第九刀第六十六片
+
+PE 那一路的链接器开关，十二种走法各 6 × 2 份逐字节相同（`tests/c/pe-flags.js`，
+144 份、948192 字节）：
+
+- `-Wl,--stack=N`（**十进制**）→ `SizeOfStackReserve`
+- `-Wl,-subsystem=gui|native|console|efiapp|…`（`pe_setsubsy` 那张表）
+- `-Wl,--image-base=HEX`（也叫 `-Ttext=`）
+- `-Wl,--section-alignment=HEX` / `--file-alignment=HEX`
+- `-Wl,--large-address-aware` → `Characteristics |= 0x20`
+- `-Wl,--nxcompat` / `--tsaware` / `--dynamicbase` → `DllCharacteristics`
+- `-Wl,-e,NAME` → 入口符号换人
+
+### `pe_set_options` 那几句的次序
+
+```c
+imagebase = (PE_DLL == pe->type) ? IMAGE_BASE_DLL : IMAGE_BASE_EXE;
+subsystem = (PE_DLL == pe->type || PE_GUI == pe->type) ? 2 : 3;
+if (s1->pe_subsystem) subsystem = s1->pe_subsystem;      /* 开关一律盖过 */
+if (subsystem == 1) section_align = file_align = 0x20;   /* native */
+else                section_align = 0x1000, file_align = 0x200;
+if (s1->section_align)  section_align = s1->section_align;
+if (s1->pe_file_align)  file_align = s1->pe_file_align;
+if (subsystem >= 10 && subsystem <= 12) imagebase = 0;   /* EFI */
+if (s1->has_text_addr)  imagebase = s1->text_addr;       /* 最后说话 */
+```
+
+两处容易看漏：**subsystem 1 那一种两个对齐都是 0x20**（`.text` 于是从
+`imagebase + 0x20` 起，文件也按 0x20 补），以及 **EFI 那三种映像基址是 0**。
+
+### 头上那两格永远是 0x1000 / 0x200
+
+`pe_write` 往头里写的只有这几格：`NumberOfSections`、`AddressOfEntryPoint`、
+`SizeOfHeaders`、`ImageBase`、`Subsystem`、`DllCharacteristics`、
+`SizeOfStackReserve`、`Characteristics`。**`SectionAlignment` 与 `FileAlignment`
+不在里面** —— 它们是 `pe_template` 里的常量，从头到尾没人改。于是
+`-Wl,-subsystem=native` 出来的文件：节确实是按 0x20 摆的（`.text` 在 0x20、
+`SizeOfHeaders` 是 0x240、整个文件 2976 字节不是 0x200 的倍数），可头上那两格
+写的还是 0x1000 与 0x200。这一片头一遍跑出来的 36 条不同全是这一格
+（`native`、`--section-alignment`、`--file-alignment` 三种走法），改法是让
+`writeImage` 摆放用传进来的对齐、**写头用模板那两个常量**。
+
+### 顺带清掉一个多余的入参
+
+`.reloc` 到底建不建，tcc 问的是
+`PE_DLL == pe->type || (s1->pe_dll_characteristics & IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE)`。
+arm64-win32 的 `DllCharacteristics` 默认值 0x8160 里正好带着 0x40，这才是「arm64
+默认多一节 `.reloc`」的**原因**。原来我们是拿一个 `dynamicBase` 布尔入参糊过去的，
+这一片把它删了，改成从 `dllChars` 里读那一位 —— 于是 `-Wl,--dynamicbase` 在
+x86_64 上也长出 `.reloc` 来，一分钱不用另加。映像基址那个入参留着，它现在的角色
+正好是 `has_text_addr`。
+
+命令行上是 `omni pe-link --subsystem gui --image-base 1000000 --stack 2097152
+--section-align 2000 --file-align 1000 -e main`。
+
+<!-- 第九刀第六十六片-END -->
 
 
 

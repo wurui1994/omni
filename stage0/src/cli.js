@@ -28,7 +28,7 @@ import { genModule as genX64 } from './x64/from_mir.js';
 import { writeObject } from './link/macho.js';
 import { writeObject as writeElfObject } from './link/elf.js';
 import { mergeObjects as mergeElfObjects } from './link/elf_merge.js';
-import { peLoad } from './link/pe_load.js';
+import { peLoad, PE_GUI } from './link/pe_load.js';
 import { peWrite } from './link/pe_link.js';
 import { elfExe } from './link/elf_exe.js';
 import { machoExe } from './link/macho_exe.js';
@@ -1794,7 +1794,9 @@ function main(argv) {
       || a === '-I' || a === '-D' || a === '--rdata'
       || a === '-L' || a === '--target' || a === '-e'
       || a === '--dylib' || a === '--libtcc1' || a === '--dll'
-      || a === '--soname' || a === '--rpath' || a === '--install-name') { i++; continue; }
+      || a === '--soname' || a === '--rpath' || a === '--install-name'
+      || a === '--subsystem' || a === '--image-base' || a === '--stack'
+      || a === '--file-align' || a === '--section-align') { i++; continue; }
     if (a.startsWith('-')) continue;
     files.push(a);
   }
@@ -2047,13 +2049,35 @@ function main(argv) {
      * 目录里找：`<目标>-libtcc1.a` 与 `msvcrt.def` / `kernel32.def`。
      * `--shared` 造 DLL（第六十四片）：映像基址、`subsystem`、`Characteristics` 都换，
      * thunk 节里多一张导出表，入口是 `_dllstart`。
-     *   omni pe-link a.o -o a.exe -L dir [-L dir …] [--target x86_64-win32] [--shared] */
+     * 第六十六片那几个开关：`--subsystem`（名字或数字）、`--image-base`（十六进制）、
+     * `--stack`（十进制）、`--section-align` / `--file-align`（十六进制）、`-e` 换入口。
+     *   omni pe-link a.o -o a.exe -L dir [-L dir …] [--target x86_64-win32] [--shared]
+     *                 [--subsystem gui] [--image-base 1000000] [--stack 2097152]
+     *                 [--section-align 2000] [--file-align 1000] [-e main] */
     case 'pe-link': {
       const shared = rest.includes('--shared');
       const oi = rest.indexOf('-o');
       const out = oi >= 0 ? rest[oi + 1] : (shared ? 'a.dll' : 'a.exe');
       const ti = rest.indexOf('--target');
       const target = ti >= 0 ? rest[ti + 1] : 'x86_64-win32';
+      const valOf = (n) => { const i = rest.indexOf(n); return i < 0 ? undefined : rest[i + 1]; };
+      const hex = (n) => { const v = valOf(n); return v === undefined ? undefined : parseInt(v, 16); };
+      /* `pe_setsubsy` 那张表。 */
+      const SUBSY = new Map([['native', 1], ['gui', 2], ['windows', 2], ['console', 3],
+        ['posix', 7], ['efiapp', 10], ['efiboot', 11], ['efiruntime', 12], ['efirom', 13]]);
+      const sub = valOf('--subsystem');
+      const subsystem = sub === undefined ? undefined
+        : (SUBSY.get(sub) ?? parseInt(sub, 10));
+      const stackArg = valOf('--stack');
+      const opt = {
+        dll: shared,
+        subsystem,
+        imagebase: hex('--image-base'),
+        sectionAlign: hex('--section-align'),
+        fileAlign: hex('--file-align'),
+        stack: stackArg === undefined ? undefined : parseInt(stackArg, 10),
+        entry: valOf('-e'),
+      };
       const bytesOf = (p) => {
         const s = readBinary(p);
         const b = new Uint8Array(s.length);
@@ -2079,14 +2103,15 @@ function main(argv) {
         objs: files.map((p, i) => ({ path: p, bytes: objs[i] })),
         libtcc1: `${target}-libtcc1.a`,
         open,
-        dll: shared,
+        ...opt,
       });
       const r = peWrite({
         objs: [...objs, ...loaded.members.map((m) => m.bytes)],
         dlls: loaded.dlls,
         startName: loaded.entryName,
-        dll: shared,
+        gui: loaded.peType === PE_GUI,
         outName: out,
+        ...opt,
       });
       writeBinary(out, r.bytes);
       stdout(`${out} (${r.bytes.length} 字节，${r.infos.length} 节，${r.nthunks} 个导入桩)\n`);
@@ -2352,7 +2377,9 @@ commands:
   pe-link   link .o files into a Windows .exe (ADR-0017 cut 9 slices 47-50): reads
             libtcc1.a on demand and the .def import libraries from -L DIR, builds the
             import table and thunks, applies every relocation. -o NAME,
-            --target x86_64-win32|arm64-win32, --shared (build a .dll: slice 64)
+            --target x86_64-win32|arm64-win32, --shared (build a .dll: slice 64),
+            --subsystem NAME, --image-base HEX, --stack N, --section-align HEX,
+            --file-align HEX, -e NAME (slice 66)
   elf-link  link .o files into a Linux executable (ADR-0017 cut 9 slices 53-54):
             dynamic by default like tcc (.interp/.dynsym/.dynamic/.got), --static for
             the plain one, --shared for a shared library (slice 59), --dll libfoo.so to

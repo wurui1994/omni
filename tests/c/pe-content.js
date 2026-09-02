@@ -24,8 +24,8 @@ const root = join(here, '..', '..');
 const CROSS = join(root, '.omni-cache', 'tcc-cross');
 
 const TARGETS = [
-  { name: 'x86_64-win32', tcc: 'x86_64-win32-tcc', imagebase: 0x400000, dynamicBase: false },
-  { name: 'arm64-win32', tcc: 'arm64-win32-tcc', imagebase: 0x140000000, dynamicBase: true },
+  { name: 'x86_64-win32', tcc: 'x86_64-win32-tcc' },
+  { name: 'arm64-win32', tcc: 'arm64-win32-tcc' },
 ];
 
 const filters = process.argv.slice(2).filter((x) => !x.startsWith('-'));
@@ -92,8 +92,6 @@ try {
           objs: [obj, ...loaded.members.map((m) => m.bytes)],
           dlls: loaded.dlls,
           startName: loaded.entryName,
-          imagebase: t.imagebase,
-          dynamicBase: t.dynamicBase,
         });
         const img = readImage(readFileSync(exePath));
         for (const info of r.infos) {

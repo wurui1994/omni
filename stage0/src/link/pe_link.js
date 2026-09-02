@@ -185,8 +185,8 @@ export function peImage(inp) {
 
 /** ELF 的 `e_machine` → PE 的机器号与 `Characteristics`（`CHARACTERISTICS_EXE/DLL`）。 */
 const PE_MACHINE = new Map([
-  [EM_X86_64, { machine: 0x8664, chars: 0x022f, dllChars: 0x222e }],
-  [EM_AARCH64, { machine: 0xaa64, chars: 0x0022, dllChars: 0x2022 }],
+  [EM_X86_64, { machine: 0x8664, chars: 0x022f, charsDll: 0x222e }],
+  [EM_AARCH64, { machine: 0xaa64, chars: 0x0022, charsDll: 0x2022 }],
 ]);
 
 /**
@@ -225,13 +225,16 @@ export function peWrite(inp) {
     dirs[9] = { addr: r.thunk.vaddr - base + r.tls.dir, size: r.tls.size };  // TLS
   }
   /* `pe->reloc` 只要**建了**就把 `RELOCS_STRIPPED` 抹掉 —— 哪怕它一条都没装、
-   * 空得连节表都没进去。 */
-  let chars = r.dll ? cpu.dllChars : cpu.chars;
+   * 空得连节表都没进去。`-Wl,--large-address-aware` 加的那 0x20 在这之前先或上去。 */
+  let chars = ((r.dll ? cpu.charsDll : cpu.chars) | (inp.peChars ?? 0)) >>> 0;
   if (r.hasReloc) chars &= ~0x1;
   const img = {
     machine: cpu.machine,
     chars,
-    subsystem: inp.subsystem ?? (r.dll ? 2 : 3),
+    subsystem: r.subsystem,
+    dllChars: r.dllChars,
+    sectionAlign: r.sectionAlign,
+    fileAlign: r.fileAlign,
     imagebase: base,
     entry: r.entry,
     stack: inp.stack ?? 0x100000,

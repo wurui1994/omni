@@ -45,15 +45,18 @@ const PE_MAGIC64 = 0x020b;
 /** 节里头是代码（`IMAGE_SCN_CNT_CODE`）—— `SizeOfCode` 只数这一类。 */
 const SCN_CNT_CODE = 0x00000020;
 
-const SECTION_ALIGN = 0x1000;
-const FILE_ALIGN = 0x200;
+/** 头里那两格 `SectionAlignment` / `FileAlignment`：**永远是模板里这两个数**。
+ * `pe_write` 从来不把 `pe->section_align` / `pe->file_align` 写回头里 —— 于是
+ * `-Wl,-subsystem=native`（真按 0x20 摆）出来的文件，头上写的还是 0x1000 / 0x200。 */
+const HDR_SECTION_ALIGN = 0x1000;
+const HDR_FILE_ALIGN = 0x200;
 
-/** 每个目标的三格常量（`tccpe.c` 开头那一串 `#if`）。 */
+/** 每个目标的操作系统版本号（`tccpe.c` 开头那一串 `#if`）。 */
 const MACHINES = new Map([
-  [0x8664, { name: 'x86_64', osVer: 0x0400, dllChars: 0 }],
-  [0xaa64, { name: 'arm64', osVer: 0x0602, dllChars: 0x8160 }],
-  [0x014c, { name: 'i386', osVer: 0x0400, dllChars: 0 }],
-  [0x01c0, { name: 'arm', osVer: 0x0400, dllChars: 0 }],
+  [0x8664, { name: 'x86_64', osVer: 0x0400 }],
+  [0xaa64, { name: 'arm64', osVer: 0x0602 }],
+  [0x014c, { name: 'i386', osVer: 0x0400 }],
+  [0x01c0, { name: 'arm', osVer: 0x0400 }],
 ]);
 
 /* DOS 头那 64 字节：`pe_template` 里一格一格写死的。 */
@@ -153,6 +156,9 @@ export function readImage(bytes) {
     machine,
     chars: dv.getUint16(FILEHDR_OFF + 18, true),
     subsystem: dv.getUint16(OPTHDR_OFF + 68, true),
+    dllChars: dv.getUint16(OPTHDR_OFF + 70, true),
+    sectionAlign: dv.getUint32(OPTHDR_OFF + 32, true),
+    fileAlign: dv.getUint32(OPTHDR_OFF + 36, true),
     imagebase: Number(dv.getBigUint64(OPTHDR_OFF + 24, true)),
     entry: dv.getUint32(OPTHDR_OFF + 16, true),
     stack: Number(dv.getBigUint64(OPTHDR_OFF + 72, true)),
@@ -174,7 +180,9 @@ export function writeImage(img) {
   const cpu = MACHINES.get(img.machine);
   if (cpu === undefined) throw new OmniError(`pe: 不认识的机器号 0x${img.machine.toString(16)}`);
   const nsec = img.secs.length;
-  const headers = align(HDR_SIZE + nsec * SECHDR_SIZE, FILE_ALIGN);
+  const secAlign = img.sectionAlign;
+  const filAlign = img.fileAlign;
+  const headers = align(HDR_SIZE + nsec * SECHDR_SIZE, filAlign);
 
   /* 先把每节在文件里的位置算出来 —— 没数据的节（`.bss`）不占文件，两格都留 0。 */
   const place = [];
@@ -186,13 +194,13 @@ export function writeImage(img) {
   for (const s of img.secs) {
     const code = (s.chars & SCN_CNT_CODE) !== 0;
     if (code && baseOfCode === 0) baseOfCode = s.vaddr;
-    sizeOfImage = Math.max(sizeOfImage, align(s.vaddr + s.vsize, SECTION_ALIGN));
+    sizeOfImage = Math.max(sizeOfImage, align(s.vaddr + s.vsize, secAlign));
     if (s.bytes.length === 0) {
       place.push({ ptr: 0, size: 0 });
       continue;
     }
     const ptr = at;
-    at = align(at + s.bytes.length, FILE_ALIGN);
+    at = align(at + s.bytes.length, filAlign);
     const size = at - ptr;
     place.push({ ptr, size });
     if (code) sizeOfCode += size;
@@ -223,8 +231,8 @@ export function writeImage(img) {
   out.u32(o + 16, img.entry);
   out.u32(o + 20, baseOfCode);
   out.u64(o + 24, img.imagebase);
-  out.u32(o + 32, SECTION_ALIGN);
-  out.u32(o + 36, FILE_ALIGN);
+  out.u32(o + 32, HDR_SECTION_ALIGN);
+  out.u32(o + 36, HDR_FILE_ALIGN);
   out.u16(o + 40, cpu.osVer >> 8);       // MajorOperatingSystemVersion
   out.u16(o + 42, cpu.osVer & 255);
   out.u16(o + 44, 0);                    // MajorImageVersion
@@ -236,7 +244,7 @@ export function writeImage(img) {
   out.u32(o + 60, headers);
   out.u32(o + 64, 0);                    // CheckSum
   out.u16(o + 68, img.subsystem);
-  out.u16(o + 70, cpu.dllChars);
+  out.u16(o + 70, img.dllChars);
   out.u64(o + 72, img.stack);            // SizeOfStackReserve
   out.u64(o + 80, 0x1000);               // SizeOfStackCommit
   out.u64(o + 88, 0x100000);             // SizeOfHeapReserve

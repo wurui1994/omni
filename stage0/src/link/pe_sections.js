@@ -266,11 +266,15 @@ export function buildReloc(entries) {
 /**
  * 把并合好的节摆成 PE 的节表。
  *
- * @param inp `{objs, dlls, imagebase, dynamicBase, leadingUnderscore, dll, outName}`
+ * @param inp `{objs, dlls, imagebase, dllChars, leadingUnderscore, dll, outName,
+ *        subsystem, gui, sectionAlign, fileAlign}`
  *        - `objs`：命令行上那些 `.o` 加上从库里拉出来的成员，字节数组
  *        - `dlls`：`peLoad` 装出来的那几个 `.def`
  *        - `dll`：造 DLL（`-shared`）。映像基址换成 `IMAGE_BASE_DLL`、一定有 `.reloc`、
  *          thunk 节里多一张导出表；`outName` 的基名就写进导出表里当 dll 名
+ *        - `imagebase` / `subsystem` / `sectionAlign` / `fileAlign` / `dllChars`：
+ *          `-Wl,--image-base=` / `-subsystem=` / `--section-alignment=` /
+ *          `--file-alignment=` / `--dynamicbase` 那几个开关，不给就按目标取默认值
  * @returns `{machine, infos, entrySecs, imp, exp, nthunks}`；`infos` 每条
  *          `{name, cls, vaddr, vsize, dataSize, ptr, rawSize, flags}`
  */
@@ -284,11 +288,24 @@ export function peSections(inp) {
    * arm64 是 0x140000000 且带。 */
   const arm64 = machine === EM_AARCH64;
   const dll = inp.dll === true;
-  const imagebase = inp.imagebase
-    ?? (dll ? (arm64 ? 0x180000000 : 0x10000000) : (arm64 ? 0x140000000 : 0x400000));
-  /* `.reloc` 那一节：DLL 一定有，EXE 只在 `DYNAMIC_BASE` 时才有。 */
-  const dynamicBase = inp.dynamicBase ?? arm64;
-  const hasReloc = dll || dynamicBase;
+  /* `DllCharacteristics`：arm64-win32 的默认值是 0x8160（`libtcc.c` 里那个
+   * `#if defined TCC_TARGET_ARM64 && defined TCC_TARGET_PE`），别的目标是 0。
+   * `-Wl,--dynamicbase` / `--nxcompat` / `--tsaware` / `--high-entropy-va` 改的就是它。 */
+  const dllChars = inp.dllChars ?? (arm64 ? 0x8160 : 0);
+  /* `.reloc` 那一节：DLL 一定有，可执行文件只在带 `DYNAMIC_BASE`（0x40）时才有 ——
+   * arm64 默认就带，所以它默认有；x86_64 要 `-Wl,--dynamicbase` 才有。 */
+  const hasReloc = dll || (dllChars & 0x40) !== 0;
+  /* `pe_set_options`：DLL 与 GUI 是 2、别的是 3，`-Wl,-subsystem=` 一律盖过。 */
+  const subsystem = inp.subsystem ?? (dll || inp.gui === true ? 2 : 3);
+  /* subsystem 1（native）那两个对齐都是 0x20，别的是 0x1000 / 0x200。 */
+  const sectionAlign = inp.sectionAlign ?? (subsystem === 1 ? 0x20 : SECTION_ALIGN);
+  const fileAlign = inp.fileAlign ?? (subsystem === 1 ? 0x20 : FILE_ALIGN);
+  let imagebase = dll
+    ? (arm64 ? 0x180000000 : 0x10000000)
+    : (arm64 ? 0x140000000 : 0x400000);
+  if (subsystem >= 10 && subsystem <= 12) imagebase = 0;   // EFI 那三种从 0 起
+  /* `-Wl,--image-base=` / `-Wl,-Ttext=`（`s1->has_text_addr`）最后说话。 */
+  if (inp.imagebase !== undefined) imagebase = inp.imagebase;
 
   /* `.def` 那张表：名字 → dll 与序号。同名先到先得（`set_elf_sym` 里未定义的那一条
    * 不会被后来的未定义符号顶掉）。 */
@@ -393,7 +410,7 @@ export function peSections(inp) {
       addr = align(addr, 16);                       // 与上一节并成一条
     } else {
       si = null;
-      addr = align(addr, SECTION_ALIGN);
+      addr = align(addr, sectionAlign);
     }
     sec.vaddr = addr;
 
@@ -482,18 +499,19 @@ export function peSections(inp) {
   /* 文件偏移（`pe_write`）：头之后一节一节按 `FileAlignment` 排下去。没有内容的节
    * （`.bss`）不占文件，可 `-vv` 打出来的那一格是**当时的游标**，不是它的
    * `PointerToRawData`（那一格是 0）—— 打印那一句在 `if (si->data_size)` 之前。 */
-  let off = align(HDR_SIZE + infos.length * SECHDR_SIZE, FILE_ALIGN);
+  let off = align(HDR_SIZE + infos.length * SECHDR_SIZE, fileAlign);
   for (const info of infos) {
     info.filePos = off;
     if (info.dataSize === 0) { info.ptr = 0; info.rawSize = 0; continue; }
     info.ptr = off;
-    off = align(off + info.dataSize, FILE_ALIGN);
+    off = align(off + info.dataSize, fileAlign);
     info.rawSize = off - info.ptr;
   }
 
   return {
     machine, infos, imp, exp, tls, nthunks, syms, secs, merged, imagebase, fileSize: off,
     imports: imps, text, thunkAt, thunkSize: tsz, thunk, linker, dll, hasReloc,
+    dllChars, subsystem, sectionAlign, fileAlign,
   };
 }
 
