@@ -896,11 +896,11 @@ function cScan(fmt, input, va) {
  * `errno`（第八刀第八片）。C 要求它是一个**可改的左值**（`errno = 0` 得能写），
  * 所以宿主这边放一个 JS 变量是不行的 —— 函数回不出左值。
  *
- * 走的是 glibc 的形状：`errno` 是宏，展开成 `(*__omni_errno_location())`，
- * 那个函数回一个指进**线性内存**的 `int *`。那一格由**前端**在 data 段里留
- * （版图是前端定的，见 tccgen.js 末尾那张表），开跑前用一条 `__omni_errno_init`
- * 把地址交过来 —— 与第十五片的 `__omni_heap_init` 完全同一个形状：
- * 宿主不猜版图，没用到的模块连那条 CCALL 都不发。
+ * 走的是系统 libc 的形状：`errno` 是宏，展开成 `(*__error())`（macOS）或
+ * `(*__errno_location())`（glibc），那个函数回一个指进**线性内存**的 `int *`。
+ * 那一格由**前端**在 data 段里留（版图是前端定的，见 tccgen.js 末尾那张表），
+ * 开跑前用一条 `__omni_errno_init` 把地址交过来 —— 与第十五片的 `__omni_heap_init`
+ * 完全同一个形状：宿主不猜版图，没用到的模块连那条 CCALL 都不发。
  *
  * 出生时是 0：线性内存出生全是 0，而 C 正好要求「程序启动时 errno 是 0」
  * （C11 7.5 第 3 段）。所以那一格不写一个字节 data。
@@ -1101,9 +1101,10 @@ function swapBytes(p, q, n) {
  * （版图的第一条，见 tccgen.js），于是这几个句柄不可能与任何真的指针撞上。
  * `NULL` 是 0，所以 `f == NULL` 也照旧对。
  *
- * `stdout` / `stderr` 在头文件里是宏，展开成 `__omni_stdout()` —— C 只要求它们是
- * **`FILE *` 类型的表达式**（C11 7.21.1），不要求是可改的左值，所以函数调用够了。
- * 这与 `errno` 那一片不同：那个必须是左值，所以只能是内存。
+ * SDK 的 `<stdio.h>` 里 `stdout` / `stderr` 是宏，展开成三个**外部全局量**
+ * （`extern FILE *__stdoutp`）—— 那一格由前端在 data 段里留，入口处一条
+ * `__omni_stream_init` 把句柄写进去（见下面那条）。这与 `errno` 那一片方向相反：
+ * 那一格是宿主写、程序读，这一格是宿主写、宿主自己读。
  *
  * stdout 走解释器自己那个缓冲（`printBytes`，与 `printf` 同一个 —— 它按**字节**
  * 落盘，见第十二片），stderr **直写**
@@ -1231,23 +1232,18 @@ const LIBC = {
     errnoAddr = BigInt(a[0]);
     return undefined;
   },
-  __omni_errno_location: () => {
+  /* 宿主 libc 自己那两个名字（第八刀第二十四片）。macOS 的 `<errno.h>` 把 `errno`
+   * 定义成 `(*__error())`，glibc 那边是 `__errno_location()` —— 第八十九片删掉自带的
+   * 那份 `<errno.h>` 之后，**只剩这两条路**（前端认得这两个名字，于是那一格照旧由
+   * 前端在版图上留、入口处交过来）。
+   *
+   * 回的是同一格：于是 `open` 失败时 libc 写下的那个号，程序那边读得到。 */
+  __error: () => {
     if (errnoAddr === 0n) throw new Error('libc: errno 那一格没交过来（__omni_errno_init 没发？）');
     return errnoAddr;
   },
-  /* 宿主 libc 自己那两个名字（第八刀第二十四片）。macOS 的 `<errno.h>` 把 `errno`
-   * 定义成 `(*__error())`，glibc 那边是 `__errno_location()` —— 用**真的系统头**的
-   * 程序（编出来的 tinycc 就是）走的是这条，而不是我们自带那份 `<errno.h>`。
-   *
-   * 回的是同一格：于是 `open` 失败时 libc 写下的那个号，tinycc 那边读得到。
-   * 前端没留过（没引用我们那份 `<errno.h>`）就在堆上要一格 —— 出生是 0，
-   * 正好是 C 要求的「启动时 errno 为 0」（C11 7.5 第 3 段）。 */
-  __error: () => {
-    if (errnoAddr === 0n) errnoAddr = heapAlloc(8n);
-    return errnoAddr;
-  },
   __errno_location: () => {
-    if (errnoAddr === 0n) errnoAddr = heapAlloc(8n);
+    if (errnoAddr === 0n) throw new Error('libc: errno 那一格没交过来（__omni_errno_init 没发？）');
     return errnoAddr;
   },
   /* `strerror` 那块共用的缓冲，与 errno 那一格同一个形状（第八刀第十三片）。
@@ -1383,14 +1379,9 @@ const LIBC = {
     return BigInt(s.length);
   },
 
-  /* 三条标准流（第八刀第九片）。头文件里 `stdout` / `stderr` 是宏，展开成这几个调用 ——
-   * C 只要求它们是 `FILE *` 类型的**表达式**，不要求是左值。 */
-  __omni_stdin: () => F_STDIN,
-  __omni_stdout: () => F_STDOUT,
-  __omni_stderr: () => F_STDERR,
   /* SDK 的 `<stdio.h>` 里三条流是**外部全局量**（`extern FILE *__stdoutp`），不是
    * 函数调用（第八刀第十七片）。前端在 data 段里给那一格留位置、把地址与序号交过来，
-   * 我们把自己的句柄写进去 —— 于是同一份 libc 同时接得住两种头文件的写法。 */
+   * 我们把自己的句柄写进去 —— 句柄长什么样是宿主的事，版图长什么样是前端的事。 */
   __omni_stream_init: (a) => {
     const h = [F_STDIN, F_STDOUT, F_STDERR][Number(BigInt(a[1]))];
     if (h === undefined) throw new Error(`libc: __omni_stream_init: 不认识的流 ${a[1]}`);

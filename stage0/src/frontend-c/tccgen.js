@@ -254,16 +254,15 @@ const FRAME_ALIGN = 8;
 const HEAP_FNS = new Set(['malloc', 'calloc', 'realloc', 'free', 'strdup', 'getenv']);
 
 /**
- * 用到这几个名字之一，就说明这个单元要一格 `errno`（第八刀第八片）。
+ * 用到这两个名字之一，就说明这个单元要一格 `errno`（第八刀第八片）。
  * `<errno.h>` 里 `errno` 是宏，展开成一次调用再解引用 —— 因为 C 要求 `errno` 是一个
- * **可改的左值**，而函数回不出左值、只能回一个指针。名字随头文件走：我们自带那份是
- * `__omni_errno_location`，macOS SDK 那份是 `(*__error())`，glibc 那份是
- * `(*__errno_location())`（第八十九片把后两个也算上 —— 用真的系统头的程序走的是它们，
- * 而那一格必须由前端在版图上留出来：宿主临时去堆上要一格的话，一个没用到 `malloc`
- * 的程序连堆都没有）。
+ * **可改的左值**，而函数回不出左值、只能回一个指针。名字随系统走：macOS SDK 那份是
+ * `(*__error())`，glibc 那份是 `(*__errno_location())`。
+ * 那一格**必须由前端在版图上留**：宿主临时去堆上要一格的话，一个没用到 `malloc`
+ * 的程序连堆都没有（第八十九片踩过）。
  * 前端要做的与堆那条一样两件事：data 段里留 4 个字节、在入口处把地址交过去。
  */
-const ERRNO_FNS = new Set(['__omni_errno_location', '__error', '__errno_location']);
+const ERRNO_FNS = new Set(['__error', '__errno_location']);
 
 /**
  * `strerror` 要一块地方（第八刀第十三片）：它回一个 `char *`，而那些串必须落在线性
@@ -283,39 +282,16 @@ const STRERROR_BYTES = 109 * 48;
  * #define stdout __stdoutp
  * ```
  *
- * 也就是说它们不是函数调用（我们自带那份头文件里是 `__omni_stdout()`），而是三个
- * **外部全局量**。所以这一片要的是「一个 extern 的全局量由宿主填」：data 段里那一格
- * 照旧由前端留（`declareGlobal` 已经留了，`FILE *` 是 8 个字节），入口处一条
- * `__omni_stream_init(地址, 第几条)` 让宿主把自己那个句柄写进去 —— 与 `errno`
- * 那一格同一个形状，方向相反（那一格是宿主写别人读，这一格是宿主写自己读）。
+ * 也就是说它们不是函数调用，而是三个**外部全局量**。所以这一片要的是「一个 extern 的
+ * 全局量由宿主填」：data 段里那一格照旧由前端留（`declareGlobal` 已经留了，
+ * `FILE *` 是 8 个字节），入口处一条 `__omni_stream_init(地址, 第几条)` 让宿主把自己
+ * 那个句柄写进去 —— 与 `errno` 那一格同一个形状，方向相反（那一格是宿主写别人读，
+ * 这一格是宿主写自己读）。
  *
  * 值是几由**宿主**说（`interp/libc.js` 的 `F_STDIN`/`F_STDOUT`/`F_STDERR`），
  * 前端只交地址与序号 —— 前端不该知道句柄长什么样。
  */
 const STREAM_GVARS = new Map([['__stdinp', 0], ['__stdoutp', 1], ['__stderrp', 2]]);
-
-/**
- * native 上「宿主那几格」落到真 libc 上（第九刀第三十一片）。
- *
- * 我们自带那份头文件里 `errno` 展开成 `(*__omni_errno_location())` —— 形状照 glibc。
- * macOS 的 libc 里那个函数叫 `__error`，形状一模一样（回一个 `int *`），
- * 所以这一格只是**换个名字**：CCALL 的目标名在 native 上映过去就行。
- *
- * 为什么不改头文件：那份头文件两条腿共用，而线性内存那条腿上 `__omni_errno_location`
- * 是宿主的接口、真的存在。映射放在「发 CCALL 那一步」，两边各得其所。
- */
-const NATIVE_CNAME = new Map([['__omni_errno_location', '__error']]);
-
-/**
- * native 上三条标准流（第三十一片）。SDK 里它们是三个**外部全局量**
- * （`extern FILE *__stdinp, *__stdoutp, *__stderrp;`），而我们的头文件里是三次调用。
- *
- * 所以这一格不能靠改名收口 —— 一个函数名映不到一个变量名。做法是**给它一个真的函数体**：
- * `__omni_stdout()` 编成「读那个外部全局量、返回它」。一条 `GLOAD` 加一条 `RET`。
- */
-const NATIVE_STREAM_SYMS = new Map([
-  ['__omni_stdin', '__stdinp'], ['__omni_stdout', '__stdoutp'], ['__omni_stderr', '__stderrp'],
-]);
 
 /**
  * 影子栈的大小。1 MiB —— 与 tcc 在本机上的默认线程栈同一个量级，而递归深度超出它时
@@ -3665,27 +3641,9 @@ export class CGen {  /**
       refs.push(f.emit(OP.LOAD, T_I64, REF_NONE, REF_NONE, slot));
     }
     const rt = mirTypeOf(info.ret);
-    const cname = this.native ? NATIVE_CNAME.get(name) ?? name : name;
-    const r = f.emit(OP.CCALL, rt, this.mod.cabiNo(cname), f.pushArgs(refs), 0);
+    const r = f.emit(OP.CCALL, rt, this.mod.cabiNo(name), f.pushArgs(refs), 0);
     if (rt === T_VOID) f.emit(OP.RET, T_VOID, REF_NONE, REF_NONE, 0);
     else f.emit(OP.RET, rt, r, REF_NONE, 0);
-  }
-
-  /**
-   * native：`__omni_stdout()` 那三个的函数体（第三十一片）——「读那个外部全局量、返回它」。
-   *
-   * 与 `externThunk` 并列而不是特例化它：那一条是「转发给同名的外部函数」，
-   * 这一条是「读一个外部**变量**」，中间没有共用的部分。三条流都没有形参，
-   * 所以这个函数比那个短得多。
-   */
-  streamThunk(name, info) {
-    const sym = NATIVE_STREAM_SYMS.get(name);
-    this.mod.renameFunc(info.no, `$ext$${name}`);
-    const gno = this.mod.globalNo(sym);
-    this.mod.setGlobalExtern(gno, 8, 8);
-    const f = info.f;
-    const v = f.emit(OP.GLOAD, T_I64, REF_NONE, REF_NONE, gno);
-    f.emit(OP.RET, T_I64, v, REF_NONE, 0);
   }
 
   /**
@@ -7250,15 +7208,11 @@ export class CGen {  /**
         if (ERRNO_FNS.has(name)) this.errnoUsed = true;
         if (name === STRERROR_FN) this.strerrorUsed = true;
       }
-      /* native 上「宿主那几格」（第三十一片）：`errno` 靠改名落到 macOS 的 `__error`
-       * （见 `NATIVE_CNAME`），三条标准流靠一个真的函数体落到 `__stdoutp` 那三个外部
-       * 全局量上（见 `streamThunk`）。剩下的 `__omni_*` 还是明着报 —— 真的 libc 里
-       * 没有那些符号，放过去只会得到一条 `ld: symbol not found`，那时线索只剩一个名字。 */
-      if (this.native && NATIVE_STREAM_SYMS.has(name)) {
-        this.streamThunk(name, info);
-        continue;
-      }
-      if (this.native && name.startsWith('__omni_') && !NATIVE_CNAME.has(name)) {
+      /* native 上 `__omni_*` 一律明着报（第三十一片）：那几个名字是**线性内存那条腿的
+       * 宿主接口**，真的 libc 里没有；放过去只会得到一条 `ld: symbol not found`，
+       * 那时线索只剩一个名字。第八十九片删掉自带的那几份 libc 头之后，程序拿到的是
+       * SDK 的写法（`__error`、`__stdoutp`），这条路上一个都不该再出现。 */
+      if (this.native && name.startsWith('__omni_')) {
         this.todo(`native：宿主那几格（${name}）—— 还没落到真 libc 上`);
       }
       /* native 上变参函数没有桩（调用点直接 CCALL，见 `funcCall`）—— 发一个反而会

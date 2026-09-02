@@ -627,6 +627,10 @@ tcc 没装，它 `{B}` 那一格不存在、一路掉到 SDK 上；拿 `-B` 指�
 删之前要补一件事：SDK 的 `<errno.h>` 里 `errno` 是 `(*__error())`，前端得认出这个名字
 才会在版图上留那一格 —— 不认的话宿主只能临时去堆上要，而一个不用 `malloc` 的程序
 连堆都没有。整个 `tests/c/`（206）与 native（217）在删掉之后全绿。
+跟着成了死码的那几个（第九十片清掉）：`__omni_errno_location`、
+`__omni_stdin/stdout/stderr`，以及 native 上给它们收口的 `NATIVE_CNAME`（改名）与
+`streamThunk`（给函数名配一个读外部全局量的函数体）—— 头文件没了，这两条收口也就没了
+用处，`__stdoutp`/`__error` 本来就是真 libc 里的名字，直接落过去。
 
 （帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -12236,6 +12240,35 @@ const ERRNO_FNS = new Set(['__omni_errno_location', '__error', '__errno_location
 下一片清。
 
 <!-- 第九刀第八十九片-END -->
+
+## 落地：第九刀第九十片
+
+上一片留下的死码清掉。
+
+自带的那五份 libc 头一删，为它们搭的那几处收口就没有输入了 —— 一个名字都不会再出现。
+清掉的是：
+
+- `interp/libc.js`：`__omni_errno_location`、`__omni_stdin` / `__omni_stdout` /
+  `__omni_stderr` 四个宿主入口。`errno` 那一格现在只从 `__error`（macOS）与
+  `__errno_location`（glibc）进 —— 而且**不再有堆上要一格的退路**：那一格必须由前端
+  在版图上留，退路只会把「前端没认出来」这个真问题藏起来（上一片正是被它藏了一次）。
+- `frontend-c/tccgen.js`：`NATIVE_CNAME`（native 上把 `__omni_errno_location` 改名成
+  `__error`）与 `NATIVE_STREAM_SYMS` + `streamThunk`（给 `__omni_stdout()` 配一个
+  「读那个外部全局量、返回它」的函数体）。SDK 的写法本来就是真 libc 里的名字：
+  `__error` 是函数、`__stdoutp` 是外部全局量，两条都直接落过去，中间不需要谁转手。
+  于是 `externThunk` 里那句 `const cname = this.native ? NATIVE_CNAME.get(name) ?? name
+  : name;` 也回到一个 `name`。
+
+`native` 上 `__omni_*` 的那条 `todo` 留着，含义反而更干净了：**任何**
+`__omni_` 开头的名字走到 native 都是错，一个例外都没有。
+
+### 门
+
+同上一片：`tests/c/` 206 条、`tests/c/native.js` 217 条全绿。删死码不该改任何行为，
+这两个数一个字都没动就是证据。
+
+<!-- 第九刀第九十片-END -->
+
 
 
 
