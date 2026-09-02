@@ -306,6 +306,46 @@ tm('double 过一趟内存再加 1', [160n, 0n], d2b(2.5 + 1), (f, xs) => {
     f.emit(OP.ADD, T_F64, v, K.real('1'), 0), REF_NONE, CVT_BITCAST));
 });
 
+// ---- 帧上的一块（第十八片）：`&x` 在 native 上的落脚点。一条 `lea rax, [rbp - off]`。
+t('帧块：存进去再读回来', [-12345678901n, 0n], -12345678901n, (f, xs) => {
+  const p = f.emit(OP.FRAME, T_I64, REF_NONE, REF_NONE, f.frame('a', 8));
+  mst(f, T_I64, p, ld(f, T_I64, xs), 'i64');
+  ret(f, T_I64, mld(f, T_I64, p, 'i64'));
+});
+t('帧块：两块互不重叠', [111n, 222n], 111n, (f, xs, ys) => {
+  const p = f.emit(OP.FRAME, T_I64, REF_NONE, REF_NONE, f.frame('a', 8));
+  const q = f.emit(OP.FRAME, T_I64, REF_NONE, REF_NONE, f.frame('b', 8));
+  mst(f, T_I64, p, ld(f, T_I64, xs), 'i64');
+  mst(f, T_I64, q, ld(f, T_I64, ys), 'i64');
+  ret(f, T_I64, mld(f, T_I64, p, 'i64'));
+});
+/* 一字节的块之后，八字节的块还得是八对齐 —— 这一条查的是布局，不是指令。 */
+t('帧块：一字节的块不会把后面的块挤歪', [0n, 0n], 0n, (f) => {
+  f.frame('c', 1);
+  const q = f.emit(OP.FRAME, T_I64, REF_NONE, REF_NONE, f.frame('q', 8));
+  ret(f, T_I64, f.emit(OP.BAND, T_I64, q, K.int(7n), 0));
+});
+t('帧块：要 16 对齐就给 16 对齐', [0n, 0n], 0n, (f) => {
+  f.frame('c', 3);
+  const v = f.emit(OP.FRAME, T_I64, REF_NONE, REF_NONE, f.frame('v', 16, 16));
+  ret(f, T_I64, f.emit(OP.BAND, T_I64, v, K.int(15n), 0));
+});
+/* **交给真的 libc**：只有真地址才过得了这两关（线性内存里的偏移过不了）。 */
+t('帧块：地址交给 strlen', [0n, 0n], 3n, (f) => {
+  const p = f.emit(OP.FRAME, T_I64, REF_NONE, REF_NONE, f.frame('buf', 8));
+  mst(f, T_I64, p, K.int(97n), 'i8', 0);
+  mst(f, T_I64, p, K.int(98n), 'i8', 1);
+  mst(f, T_I64, p, K.int(99n), 'i8', 2);
+  mst(f, T_I64, p, K.int(0n), 'i8', 3);
+  ret(f, T_I64, f.emit(OP.CCALL, T_I64, mod.cabiNo('strlen'), f.pushArgs([p]), 0));
+});
+t('帧块：memcpy 把串常量搬到帧上，再 strlen', [0n, 0n], 5n, (f) => {
+  const p = f.emit(OP.FRAME, T_I64, REF_NONE, REF_NONE, f.frame('buf', 8));
+  f.emit(OP.CCALL, T_I64, mod.cabiNo('memcpy'),
+    f.pushArgs([p, K.str('hello'), K.int(6n)]), 0);
+  ret(f, T_I64, f.emit(OP.CCALL, T_I64, mod.cabiNo('strlen'), f.pushArgs([p]), 0));
+});
+
 // ---- 模块级变量与串常量
 {
   const gi = mod.globalNo('omni_xg_i64');
@@ -358,6 +398,7 @@ for (const [what, build] of [
     const d = f.emit(OP.CVT, T_F64, ld(f, T_I64, 0), REF_NONE, CVT_U2F);
     ret(f, T_I64, f.emit(OP.CVT, T_I64, d, REF_NONE, CVT_F2I));
   }],
+  ['帧块号越界', (f) => { ret(f, T_I64, f.emit(OP.FRAME, T_I64, REF_NONE, REF_NONE, 3)); }],
 ]) {
   const f = mkFunc(badMod, `omni_bad_${bad}`, 2, build);
   let threw = false;

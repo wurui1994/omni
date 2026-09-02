@@ -100,7 +100,18 @@ class FnGen {
     this.strSyms = strSyms === undefined ? null : strSyms;
     this.valBase = f.slots.length;
     const cells = this.valBase + f.count();
-    const bytes = cells * 8;
+    let bytes = cells * 8;
+    /* 帧块（第十八片）：`rbp` 往下继续挖。**`rbp` 是 16 对齐的** —— 进函数时 `rsp ≡ 8`
+     * （返回地址占了 8），`push rbp` 之后回到 16 的整数倍，`mov rbp, rsp` 于是搬来一个
+     * 16 对齐的基址。所以「块的偏移是 align 的整数倍」就等于「地址是 align 对齐的」。
+     * 注意方向与 arm64 相反：偏移是负的，所以要把**深度**往上取整，再取负。 */
+    this.frameOffs = [];
+    for (const blk of f.frames) {
+      let depth = bytes + blk.size;
+      if (depth % blk.align !== 0) depth += blk.align - (depth % blk.align);
+      this.frameOffs.push(-depth);
+      bytes = depth;
+    }
     this.frame = bytes + (bytes % 16 === 0 ? 0 : 16 - (bytes % 16));
     this.regions = [];
     this.retLabel = this.buf.label();
@@ -117,6 +128,13 @@ class FnGen {
 
   valOff(i) {
     return -8 * (this.valBase + i + 1);
+  }
+
+  /** 第 no 块帧存储的偏移（`FRAME` 的落脚点）。 */
+  frameOff(no) {
+    const off = this.frameOffs[no];
+    if (off === undefined) throw new OmniError(`x64: 帧块号 ${no} 越界`);
+    return off;
   }
 
   frameLoad(reg, off) {
@@ -307,6 +325,13 @@ class FnGen {
       this.loadRef(RES, f.a[i]);
       this.frameStore(RES, this.slotOff(f.aux[i]));
       return;
+    }
+
+    /* ---- 帧上的一块（第十八片）。x86_64 上是**一条** `lea` —— 与 arm64 的
+     * 「adrp + add」不同，这里基址就在寄存器里（`rbp`），偏移是 disp32，硬件自己加。 */
+    if (op === OP.FRAME) {
+      buf.emit(x.lea(8, RES, BP, this.frameOff(f.aux[i])));
+      return this.def(i, RES);
     }
 
     /* ---- 模块级变量。x86_64 上一条 RIP 相对的 `mov` 就够 —— 不必先取址

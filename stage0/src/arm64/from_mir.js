@@ -97,7 +97,16 @@ class FnGen {
     this.strSyms = strSyms === undefined ? null : strSyms;
     /** 帧里 0 号槽位的偏移是 0，值的栈位接在槽位后面。 */
     this.valBase = f.slots.length * 8;
-    const bytes = this.valBase + f.count() * 8;
+    let bytes = this.valBase + f.count() * 8;
+    /* 帧块（第十八片）：接在值的栈位后面，每块按自己的 `align` 对齐。**能这么算是因为
+     * `sp` 本身 16 对齐**（AAPCS64 要求，序言里的 `sub sp` 也按 16 取整），于是
+     * 「sp + off」的对齐就等于 off 的对齐 —— 块内不用再留余地。 */
+    this.frameOffs = [];
+    for (const blk of f.frames) {
+      const pad = bytes % blk.align === 0 ? 0 : blk.align - (bytes % blk.align);
+      this.frameOffs.push(bytes + pad);
+      bytes = bytes + pad + blk.size;
+    }
     this.frame = bytes + (bytes % 16 === 0 ? 0 : 16 - (bytes % 16));
     /** 区域栈：`{kind, endLabel, contLabel?, elseLabel?, elseDone?}` */
     this.regions = [];
@@ -115,6 +124,13 @@ class FnGen {
 
   valOff(i) {
     return this.valBase + i * 8;
+  }
+
+  /** 第 no 块帧存储在帧里的偏移（`FRAME` 的落脚点）。 */
+  frameOff(no) {
+    const off = this.frameOffs[no];
+    if (off === undefined) throw new OmniError(`arm64: 帧块号 ${no} 越界`);
+    return off;
   }
 
   /** 帧里的一个 8 字节格子的读写。偏移超过 `ldr` 能表示的范围就明着报。 */
@@ -319,6 +335,17 @@ class FnGen {
       this.loadRef(RES, f.a[i]);
       this.frameStore(RES, this.slotOff(f.aux[i]));
       return;
+    }
+
+    /* ---- 帧上的一块（第十八片）。**`&x` 在 native 上就落在这里**：不是线性内存里的
+     * 一个偏移，而是 `sp` 加一个常数得到的真地址 —— 交给 libc 也认。
+     * 一条 `add` 就够，前提是偏移进得了 12 位；进不去要先造立即数再 `add` 扩展寄存器形式，
+     * 那一格与 `frameLoad` 的 32760 是同一笔账，一起还。 */
+    if (op === OP.FRAME) {
+      const off = this.frameOff(f.aux[i]);
+      if (off >= 4096) throw new OmniError(`arm64: 帧偏移 ${off} 太大（这一片还不搬基址）`);
+      buf.emit(a.addImm(1, RES, SP, off));
+      return this.def(i, RES);
     }
 
     /* ---- 模块级变量（第九刀第九片）。**靠符号寻址**：`adrp` 取页、`add` 取页内偏移。

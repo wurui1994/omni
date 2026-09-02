@@ -516,6 +516,49 @@ td('外部的 double 函数（实参走 d0/d1、返回走 d0）', [2.5, 4.0], d2
       f.pushArgs([K.str('abcd'), K.str('abcd')]), 0)));
 }
 
+// ---- 帧上的一块（第九刀第十八片）。**`&x` 在 native 上的落脚点**：`add x0, sp, #off`，
+// 得到的是真地址 —— 交给 libc 也认（线性内存里的那个偏移不认）。
+{
+  const fr = (f, name, size, align) =>
+    f.emit(OP.FRAME, T_I64, REF_NONE, REF_NONE, f.frame(name, size, align));
+  t('帧块：存进去再读回来', [-12345678901n, 0n], -12345678901n, (f, x) => {
+    const p = fr(f, 'a', 8);
+    mst(f, T_I64, p, ld(f, T_I64, x), 'i64');
+    ret(f, T_I64, mld(f, T_I64, p, 'i64'));
+  });
+  t('帧块：两块互不重叠', [111n, 222n], 111n, (f, x, y) => {
+    const p = fr(f, 'a', 8);
+    const q = fr(f, 'b', 8);
+    mst(f, T_I64, p, ld(f, T_I64, x), 'i64');
+    mst(f, T_I64, q, ld(f, T_I64, y), 'i64');
+    ret(f, T_I64, mld(f, T_I64, p, 'i64'));
+  });
+  /* 布局，不是指令：一字节的块之后，八字节的块还得八对齐。`sp` 本身 16 对齐，
+   * 所以「偏移是 8 的倍数」就等于「地址是 8 对齐的」。 */
+  t('帧块：一字节的块不会把后面的块挤歪', [0n, 0n], 0n, (f) => {
+    f.frame('c', 1);
+    ret(f, T_I64, f.emit(OP.BAND, T_I64, fr(f, 'q', 8), K.int(7n), 0));
+  });
+  t('帧块：要 16 对齐就给 16 对齐', [0n, 0n], 0n, (f) => {
+    f.frame('c', 3);
+    ret(f, T_I64, f.emit(OP.BAND, T_I64, fr(f, 'v', 16, 16), K.int(15n), 0));
+  });
+  t('帧块：地址交给 strlen', [0n, 0n], 3n, (f) => {
+    const p = fr(f, 'buf', 8);
+    mst(f, T_I64, p, K.int(97n), 'i8', 0);
+    mst(f, T_I64, p, K.int(98n), 'i8', 1);
+    mst(f, T_I64, p, K.int(99n), 'i8', 2);
+    mst(f, T_I64, p, K.int(0n), 'i8', 3);
+    ret(f, T_I64, f.emit(OP.CCALL, T_I64, mod.cabiNo('strlen'), f.pushArgs([p]), 0));
+  });
+  t('帧块：memcpy 把串常量搬到帧上，再 strlen', [0n, 0n], 5n, (f) => {
+    const p = fr(f, 'buf', 8);
+    f.emit(OP.CCALL, T_I64, mod.cabiNo('memcpy'),
+      f.pushArgs([p, K.str('hello'), K.int(6n)]), 0);
+    ret(f, T_I64, f.emit(OP.CCALL, T_I64, mod.cabiNo('strlen'), f.pushArgs([p]), 0));
+  });
+}
+
 // ---------------------------------------------------------------- 边界
 // 还没做的东西必须**明着报**。一个悄悄发错指令的后端比一个报错的后端坏得多。
 // 这些函数不进 `mod` —— 它们发不出来，混进去会把整个模块的生成一起拖倒。
@@ -536,6 +579,7 @@ for (const [what, build] of [
    * 不能悄悄发一条指着 0 的 `adrp`。 */
   ['单个函数里的串常量没有数据段',
     (f) => { ret(f, T_I64, badMod.consts.str('nope')); }],
+  ['帧块号越界', (f) => { ret(f, T_I64, f.emit(OP.FRAME, T_I64, REF_NONE, REF_NONE, 3)); }],
 ]) {
   const f = mkFunc(badMod, `omni_bad_${bad}`, 2, build);
   let threw = false;

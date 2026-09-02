@@ -69,6 +69,9 @@ export function funcDigestText(mod, f) {
   L.push(`fn ${f.name} -> ${typeText(f.ret)}`);
   for (const p of f.params) L.push(`param ${typeText(p.t)}`);
   for (const s of f.slots) L.push(`slot ${typeText(s.t)}`);
+  // 帧块（第十八片）：大小与对齐都进哈希 —— 「同一个函数，把一个 int 局部量换成 long」
+  // 生成的指令可以一模一样（都是 FRAME %0），差别全在这张表上。
+  for (const b of f.frames) L.push(`frame ${b.size} ${b.align}`);
   const ks = new Map();   // 常量 ref -> 本函数内的序号（键是数字，所以是 Map）
   let i = 0;
   while (i < f.count()) {

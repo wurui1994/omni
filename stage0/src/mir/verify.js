@@ -19,6 +19,7 @@
 
 import {
   OP, OP_NAMES, OP_MODES, REF_NONE, REF_BIAS, isConstRef, refText, typeText, typeLanes, T_BOOL,
+  T_I64,
   MLOAD_KINDS, MSTORE_KINDS, memKindNo, memBytes, isFloatType, isIntType, intBits,
 } from './ir.js';
 
@@ -135,6 +136,13 @@ function checkIndex(mod, f, i, op, v, bad) {
     return;
   }
   if (op === OP.CALL && mod.funcs[v] === undefined) bad(i, `函数号 ${v} 越界`);
+  // 帧块号（第十八片）。越界的块号在 native 上是「拿到一个帧外的地址」—— 写进去就把
+  // 调用者的保存寄存器或返回地址改了，而症状要到 `ret` 才出现，离现场已经很远。
+  if (op === OP.FRAME) {
+    if (f.frames[v] === undefined) { bad(i, `帧块号 ${v} 越界（共 ${f.frames.length} 块）`); return; }
+    if (f.t[i] !== T_I64) bad(i, `FRAME 的 t 是 ${typeText(f.t[i])}，地址只能是 i64`);
+    return;
+  }
   // 线性内存（ADR-0017 第二刀）。三件事都在这儿查：有没有内存、描述符号在不在表里、
   // **宽度与 `t` 配不配**。第三条是关键：`(mload i64 …)` 落到 t=T_F64 上，两条腿会
   // 各自猜一个（DataView 那边读出整数、memcpy 那边读出位模式当浮点），错得还不一样。
