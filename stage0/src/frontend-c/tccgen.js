@@ -174,7 +174,7 @@ import {
   btype, isInteger, isFloat, isUnsigned, isPtr, isArray, isFunc, isStruct, isUnion,
   isBitfield, bitPosOf, bitSizeOf, mkBitfield, bitfieldBase, bfAccess,
   ctype, mkPointer, mkArray, mkStruct, mkEnum, mkFunc, typeSize, typeText, sameType,
-  sameTypeUnqual,
+  sameTypeUnqual, mkVla, isVla,
   TY_VOID, TY_INT, TY_UINT, TY_LLONG, TY_ULLONG, TY_CHAR, TY_SHORT, TY_BOOL,
   TY_FLOAT, TY_DOUBLE, TY_LDOUBLE, VT_LDOUBLE,
 } from './ctype.js';
@@ -650,6 +650,20 @@ export class CGen {  /**
     this.declScalars = [];
     /** @type {Set<string>} 第二遍要落在内存上的名字（= 第一遍的 addrTaken） */
     this.frameNames = new Set();
+    /** 现在这一处声明符里，`[…]` 里可以是**运行期**的长度吗（变长数组，第四十九片）。
+     * 0 = 不行（文件作用域、形参表、以及一切不是声明的地方）；
+     * 2 = 行（函数体里、没有存储类的那一种）；
+     * 1 = 只有**穿过一层指针**才行 —— `static int (*p)[h]` 合法而 `static int a[h]` 不合法，
+     *     因为存储类说的是「那个对象」，而 `[h]` 说的是它**指向**的东西。tcc 的那一句
+     *     `post_type(post, ad, post != ret ? 0 : storage, …)`（`tccgen.c:5313`）就是这条规矩：
+     *     声明符里有指针链的话，存储类在后缀这一步被丢掉。 */
+    this.vlaMode = 0;
+    /** @type {{sp:number,regionLen:number}[]} 每层作用域一格：这一层里第一个变长数组
+     * 之前的 `$sp` 存在哪个槽上（-1 = 这一层没有变长数组），以及它开在第几层 MIR 区域里
+     * （`break`/`continue` 跳出去时要知道自己越过了哪些层，见 `vlaLeave`）。 */
+    this.vlaStack = [];
+    /** 这个函数里有变长数组吗 —— 有的话序言/收场那一对必须发（不然 `$sp` 收不回来） */
+    this.vlaSeen = false;
     /** data 段的下一个空位。页 0 整页留空，于是 C 的 `NULL` 一定访问不到 */
     this.dataOff = MEM_PAGE;
     /** @type {Map<string,number>} 字符串字面量去重（同一份文本一份 data） */
@@ -843,6 +857,15 @@ export class CGen {  /**
      * `mytype1 mytype2; mytype2 = 2;` 的第二行于是是表达式而不是声明。 */
     this.tdefShadow(name);
     const scope = this.scopes[this.scopes.length - 1];
+    /* 变长数组：帧上划不出来（长度是运行期的数），所以这个名字本身是一个**指针槽**，
+     * 那块地方在运行期从 `$sp` 上切（tcc 用 `alloca`，同一件事）。于是它是唯一一种
+     * 「既在内存上、又不占帧」的局部量 —— `entryLval` 那儿多一格就是为了它。 */
+    if (isVla(ty)) {
+      const e = { ty, slot: this.f.slot(name, T_I64), off: -1, vla: true };
+      scope.set(name, e);
+      this.vlaAlloc(e);
+      return e;
+    }
     if (this.needsMem(ty) || this.frameNames.has(name) || align !== 0) {
       const e = { ty, slot: -1, off: this.frameAlloc(ty, align), align };
       scope.set(name, e);
@@ -865,8 +888,76 @@ export class CGen {  /**
      * 我们这儿记「最后一次引用到的符号带的对齐」—— 同一个意思，同样只在紧接着问的
      * 时候才有意义。 */
     this.symAlign = e.align || 0;
+    /* 变长数组：槽里放的是**那块地方的地址**，所以要先读出来再当内存左值的基址。
+     * 「读一次」发生在每一次引用上 —— 那个槽从声明之后就不再变，读几次都一样。 */
+    if (e.vla === true) {
+      return sMem(e.ty, this.f.emit(OP.LOAD, T_I64, REF_NONE, REF_NONE, e.slot), 0);
+    }
     if (e.off >= 0) return sMem(e.ty, this.fpRef, e.off);
     return sLval(e.ty, e.slot, name);
+  }
+
+  /** 变长数组的字节数：那个槽读出来。`-1` 是「形参上的，还没算」（见 `vlaParamCode`）。 */
+  vlaSizeRef(ty) {
+    if (ty.vla < 0) this.err('internal: 变长形参的长度还没算');
+    return this.f.emit(OP.LOAD, T_I64, REF_NONE, REF_NONE, ty.vla);
+  }
+
+  /**
+   * 变长数组的那块地方：在运行期从 `$sp` 上切下来（tcc 的 `gen_vla_alloc`，也就是
+   * `alloca`）。`$sp` 往下长，切完还要对回 16 —— 帧的对齐是 16（`genFuncBody` 里
+   * `alignUp(est, 16)`），切一刀之后不对回去的话后面所有 8 字节访问都可能骑在边界上。
+   *
+   * 这一层还负责「这一层作用域退出时把 `$sp` 收回去」的**存**那一半：第一个变长数组
+   * 之前的 `$sp` 存进一个槽，`popScope` 拿它写回（tcc 的 `cur_scope->vla.locorig`）。
+   * 存在**第一个**变长数组之前而不是作用域开头：作用域开头还不知道里面有没有 VLA，
+   * 而 MIR 不能回填（文件头偏离 4）。
+   */
+  vlaAlloc(e) {
+    const f = this.f;
+    const spNo = this.spGlobal();
+    const cur = this.vlaStack[this.vlaStack.length - 1];
+    if (cur !== undefined && cur.sp < 0) {
+      cur.sp = this.temp(T_I64, 'vlasp');
+      f.emit(OP.STORE, T_VOID, f.emit(OP.GLOAD, T_I64, REF_NONE, REF_NONE, spNo),
+        REF_NONE, cur.sp);
+    }
+    const sp = f.emit(OP.GLOAD, T_I64, REF_NONE, REF_NONE, spNo);
+    const sz = this.vlaSizeRef(e.ty);
+    const base = f.emit(OP.BAND, T_I64, f.emit(OP.SUB, T_I64, sp, sz, 0),
+      this.mod.consts.int(-16n), 0);
+    f.emit(OP.GSTORE, T_VOID, base, REF_NONE, spNo);
+    f.emit(OP.STORE, T_VOID, base, REF_NONE, e.slot);
+  }
+
+  /** 把一个存着的 `$sp` 写回去（tcc 的 `gen_vla_sp_restore`）。 */
+  spRestore(slot) {
+    const f = this.f;
+    f.emit(OP.GSTORE, T_VOID, f.emit(OP.LOAD, T_I64, REF_NONE, REF_NONE, slot),
+      REF_NONE, this.spGlobal());
+  }
+
+  /**
+   * `break` / `continue` 跳出去时把 `$sp` 收回来（tcc 的 `vla_leave`，`tccgen.c:7065`）。
+   * 作用域退出那一路是 `popScope` 发的一条 GSTORE，而 `BR` 会**跳过**它 —— 所以跳之前
+   * 得自己发一条。少了这一格，`for(…){ int a[n]; continue; }` 每一圈都往下切一块，
+   * `$sp` 一路掉到内存外面去。
+   *
+   * 收的是**被跳出去的那些层里最外面那一层**存的值：`$sp` 只往下走，所以恢复最外面
+   * 那一格就把里面所有的都一起收回来了。
+   */
+  vlaLeave(lv) {
+    const ti = this.regions.length - 1 - lv;
+    for (const s of this.vlaStack) {
+      if (s.sp >= 0 && s.regionLen > ti) { this.spRestore(s.sp); return; }
+    }
+  }
+
+  /** `goto` 那一路：跳到哪儿说不清，所以收到函数里最外面那一格（tcc 也是 locorig）。 */
+  vlaLeaveAll() {
+    for (const s of this.vlaStack) {
+      if (s.sp >= 0) { this.spRestore(s.sp); return; }
+    }
   }
 
   /** 查一个名字（由内往外）。查不到回 null —— 调用方要区分「函数名」与「未声明」。 */
@@ -1468,6 +1559,12 @@ export class CGen {  /**
     }
     if (pa && pb) {
       if (op !== MINUS) this.err("invalid operands to binary '+' (two pointers)");
+      /* 元素是变长的（`int (*)[n]`，也就是 `int a[2][n]` 退化出来的那个）：一格多大
+       * 要在运行期读（tcc 的 `vpush_type_size` 就是这一格）。 */
+      if (isVla(a.ty.ref)) {
+        const d0 = f.emit(OP.SUB, T_I64, this.gv(a), this.gv(b), 0);
+        return sVal(TY_LLONG, f.emit(OP.DIV, T_I64, d0, this.vlaSizeRef(a.ty.ref), 0));
+      }
       const es = typeSize(a.ty.ref).size;
       if (es === 0) this.err('arithmetic on a pointer to an incomplete type');
       const d = f.emit(OP.SUB, T_I64, this.gv(a), this.gv(b), 0);
@@ -1479,6 +1576,11 @@ export class CGen {  /**
     const p = pa ? a : b;
     const n = pa ? b : a;
     if (!isInteger(n.ty.t)) this.err("invalid operands to binary '+'");
+    /* 同上：`a[i]` 里那一步「加 i 格」在元素变长时是一次乘法而不是一个常量。 */
+    if (isVla(p.ty.ref)) {
+      const step = f.emit(OP.MUL, T_I64, this.asI64(n), this.vlaSizeRef(p.ty.ref), 0);
+      return sVal(p.ty, f.emit(op === PLUS ? OP.ADD : OP.SUB, T_I64, this.gv(p), step, 0));
+    }
     const es = typeSize(p.ty.ref).size;
     if (es === 0) this.err('arithmetic on a pointer to an incomplete type');
     let k = this.asI64(n);
@@ -2551,8 +2653,15 @@ export class CGen {  /**
    * 而那个函数马上被丢掉，所以不涨真的。
    */
   sizeofExpr() {
+    const ty = this.sizeofType();
+    /* 变长数组的 `sizeof` 是**运行期**的一次读（tcc 的 `vpush_type_size` 在 VT_VLA 上
+     * 压的正是那个存着字节数的位置，`tccgen.c:3551`）。长度在声明那一刻就定住了 ——
+     * 所以 `int a[n]; n = n - 1; sizeof a` 还是原来那个数。 */
+    if (isVla(ty)) {
+      return sVal(TY_ULLONG, this.vlaSizeRef(ty));
+    }
     /* `sizeof` 的类型是 `size_t`（LP64 上是 `unsigned long`，8 字节）。 */
-    const n = typeSize(this.sizeofType()).size;
+    const n = typeSize(ty).size;
     return sVal(TY_ULLONG, this.konst(TY_ULLONG, n));
   }
 
@@ -3340,6 +3449,7 @@ export class CGen {  /**
       this.next();
       const lv = this.levelOf('break');
       if (lv < 0) this.err('cannot break');
+      this.vlaLeave(lv);
       this.f.emit(OP.BR, T_VOID, REF_NONE, REF_NONE, lv);
       this.skip(SEMI);
       return;
@@ -3349,6 +3459,7 @@ export class CGen {  /**
       this.next();
       const lv = this.levelOf('continue');
       if (lv < 0) this.err('cannot continue');
+      this.vlaLeave(lv);
       this.f.emit(OP.BR, T_VOID, REF_NONE, REF_NONE, lv);
       this.skip(SEMI);
       return;
@@ -3630,6 +3741,7 @@ export class CGen {  /**
       this.err(`label '${name}' used but not defined`);
       return;
     }
+    this.vlaLeaveAll();
     this.f.emit(OP.STORE, T_VOID, this.mod.consts.i32(id), REF_NONE, this.gotoSlot);
     this.f.emit(OP.BR, T_VOID, REF_NONE, REF_NONE, this.levelOf('gotoloop'));
   }
@@ -3639,6 +3751,7 @@ export class CGen {  /**
     if (this.pass1) return;
     if (this.gotoSlot < 0) this.err('internal: 计算跳转却没摆状态机');
     const st = this.gv(this.castTo(v, TY_INT));
+    this.vlaLeaveAll();
     this.f.emit(OP.STORE, T_VOID, st, REF_NONE, this.gotoSlot);
     this.f.emit(OP.BR, T_VOID, REF_NONE, REF_NONE, this.levelOf('gotoloop'));
   }
@@ -4167,10 +4280,13 @@ export class CGen {  /**
     this.tagStack.push(new Map());
     this.ecStack.push(new Map());
     this.tdefStack.push(new Map());
+    this.vlaStack.push({ sp: -1, regionLen: this.regions.length });
   }
 
-  /** 出一层块。 */
+  /** 出一层块。这一层里划过变长数组的话，`$sp` 在这儿收回去。 */
   popScope() {
+    const v = this.vlaStack.pop();
+    if (v !== undefined && v.sp >= 0) this.spRestore(v.sp);
     this.scopes.pop();
     this.tagStack.pop();
     this.ecStack.pop();
@@ -4968,7 +5084,30 @@ export class CGen {  /**
     for (;;) {
       if (this.tok === LBRACK) {
         this.next();
-        posts.push({ k: 'arr', n: this.tok === RBRACK ? -1 : Number(this.constExpr()) });
+        if (this.tok === RBRACK) {
+          this.next();
+          posts.push({ k: 'arr', n: -1 });
+          continue;
+        }
+        /* 函数体里的声明才可能是**变长数组**（`int a[n]`，第四十九片）。那儿的读法是
+         * 「先收下这一段记号，用常量求值器试一遍」：试成了就是普通数组（与从前一个字
+         * 都不差），试不成才当变长的、把这段记号留到 `wrap` 里当运行期表达式再读一遍。
+         *
+         * tcc 那边不必试：它的表达式解析器自己就折常量，所以局部量的维度一律走
+         * `gexpr()`，折完看 `vtop` 上还是不是 `VT_CONST`（`tccgen.c:5167-5188`）。
+         * 我们主路上不折（文件头偏离 3），于是「是不是常量」只有常量求值器答得出来。 */
+        if (this.scopes.length > 0
+          && (this.vlaMode === 2 || (this.vlaMode === 1 && (pre > 0 || inner !== null)))) {
+          const dim = this.cpp.captureTokens(RBRACK);
+          // captureTokens 停在 `]` 上，它动的是 Cpp 的 tok —— 同步一下
+          this.tok = this.cpp.tok;
+          this.tokc = this.cpp.tokc;
+          this.skip(RBRACK);
+          const n = this.tryConstDim(dim);
+          posts.push(n === null ? { k: 'arr', n: -1, dim } : { k: 'arr', n });
+          continue;
+        }
+        posts.push({ k: 'arr', n: Number(this.constExpr()) });
         this.skip(RBRACK);
         continue;
       }
@@ -4998,12 +5137,96 @@ export class CGen {  /**
         /* 长度 0 的数组是 GNU 扩展，tcc 照收（`post_type` 那儿对 0 没有任何检查）：
          * `struct S { double a[0]; }` 的 sizeof 是 0、对齐还是 8 —— 老代码拿它当
          * 「只要对齐、不要空间」的垫片，tinycc 自己的 tcctest.c 也考这一格（985 行）。 */
-        if (p.n < -1) this.err('array size must not be negative');
-        ty = mkArray(ty, p.n);
+        ty = this.arrayPost(ty, p);
       }
       return inner === null ? ty : inner.wrap(ty);
     };
     return { name: inner === null ? name : inner.name, wrap };
+  }
+
+  /**
+   * 声明符里的一维 `[…]` -> 一个数组类型。三种：
+   *   - 长度是常量、元素也是定长的：一个普通数组，一条指令都不发；
+   *   - 长度是运行期的（`int a[n]`）：那段记号在这儿当表达式读一遍，字节数存进一个槽；
+   *   - 长度是常量但**元素是变长的**（`int a[2][n]`）：外面这一层也得是变长的 ——
+   *     字节数 = 2 × 里层那个槽（tcc 的 `t1 |= type->t & VT_VLA`，`tccgen.c:5200`）。
+   *
+   * 「长度在声明那一刻就定住了」正是这一步的意思：算出来的字节数**存进槽**，之后改
+   * `n` 不会动那个槽。tcc 存的是「元素个数 × 元素大小」同一个数（`tccgen.c:5208-5216`）。
+   */
+  arrayPost(elem, p) {
+    const vlaElem = isVla(elem);
+    if (p.dim === undefined && !vlaElem) {
+      if (p.n < -1) this.err('array size must not be negative');
+      return mkArray(elem, p.n);
+    }
+    /* `int a[][n]` —— 外面那一维省了、里面是变长的：谁都算不出「一格多大」。
+     * tcc 报的就是这一句（`tccgen.c:5205`）。 */
+    if (p.dim === undefined && p.n < 0) this.err('need explicit inner array size in VLAs');
+    const f = this.f;
+    const esz = vlaElem
+      ? f.emit(OP.LOAD, T_I64, REF_NONE, REF_NONE, elem.vla)
+      : this.mod.consts.int(BigInt(typeSize(elem).size));
+    let cnt;
+    if (p.dim === undefined) cnt = this.mod.consts.int(BigInt(p.n));
+    else {
+      const v = this.replayDim(p.dim);
+      if (!isInteger(v.ty.t)) this.err('size of variable length array should be an integer');
+      cnt = this.gv(this.castTo(v, TY_LLONG));
+    }
+    const slot = this.temp(T_I64, 'vlasz');
+    f.emit(OP.STORE, T_VOID, f.emit(OP.MUL, T_I64, cnt, esz, 0), REF_NONE, slot);
+    this.vlaSeen = true;
+    return mkVla(elem, slot);
+  }
+
+  /**
+   * `[…]` 里那段记号用常量求值器**试**一遍：是常量就回那个数，不是就回 null。
+   *
+   * 试不成的那一路要求「什么都没发生」—— 记号流拨回原处（宏栈连帧一起还原，
+   * 报错是从中间抛出来的，`endMacro` 那一条路走不到），于是调用方可以当作没读过。
+   */
+  tryConstDim(dim) {
+    const cpp = this.cpp;
+    const afterTok = cpp.tok;
+    const afterVal = cpp.tokc;
+    const frame = cpp.macroFrame;
+    const depth = cpp.macroFrames.length;
+    const line = cpp.file === null ? 0 : cpp.file.lineNum;
+    cpp.pushTokens(dim);
+    this.next();
+    let n = null;
+    try {
+      const v = this.constExpr();
+      if (this.tok === TOK_EOF) n = Number(v);
+    } catch (e) {
+      if (!(e instanceof OmniError)) throw e;
+      n = null;
+    }
+    cpp.macroFrames.length = depth;
+    cpp.macroFrame = frame;
+    if (cpp.file !== null) cpp.file.lineNum = line;
+    cpp.tok = afterTok;
+    cpp.tokc = afterVal;
+    this.tok = afterTok;
+    this.tokc = afterVal;
+    return n;
+  }
+
+  /** 收着的那段维度记号放回来当表达式读一遍（与 `replayStep` 同一手法）。 */
+  replayDim(dim) {
+    const savedTok = this.tok;
+    const savedVal = this.tokc;
+    this.cpp.pushTokens(dim);
+    this.next();
+    const v = this.gexpr();
+    if (this.tok !== TOK_EOF) this.err('internal: 数组维度没读完');
+    this.cpp.endMacro();
+    this.cpp.tok = savedTok;
+    this.cpp.tokc = savedVal;
+    this.tok = savedTok;
+    this.tokc = savedVal;
+    return v;
   }
 
   /**
@@ -5030,6 +5253,20 @@ export class CGen {  /**
    */
   funcParams() {
     this.skip(LPAR);
+    /* 形参上的 `[n]`（`void f(int n, int a[n])`）是**另一件事**：C 把它当指针，而那个
+     * 长度要留到函数体的开头才求值（tcc 为此把那段记号存在 `vla_array_str` 上，
+     * `tccgen.c:5155`）。这一片还没到，所以形参表里一律要常量 —— 撞上了报的是
+     * 「要一个常量表达式」，而不是静悄悄按 0 长度走。 */
+    const saveVla = this.vlaMode;
+    this.vlaMode = 0;
+    try {
+      return this.funcParamsBody();
+    } finally {
+      this.vlaMode = saveVla;
+    }
+  }
+
+  funcParamsBody() {
     /** @type {{name:string,ty:object}[]} */
     const params = [];
     if (this.tok === RPAR) {
@@ -5299,7 +5536,12 @@ export class CGen {  /**
        * `sizeof(表)/sizeof(表[0])` 这种数组长度算式于是在数组维度、`case` 标签、
        * 位域宽度这些「必须是常量」的位置上也能用（tccdbg.c 的 `N_DEFAULT_DEBUG`）。 */
       this.next();
-      return BigInt(typeSize(this.sizeofType()).size);
+      const sty = this.sizeofType();
+      /* 变长数组的 `sizeof` 不是常量（那个数在运行期才有）。这一句报出来之后，数组维度
+       * 那一路（`tryConstDim`）会接着把它当变长的读一遍 —— `int b[sizeof a]` 于是也是
+       * 一个变长数组，正是 C 说的那样。 */
+      if (isVla(sty)) this.err('constant expression expected');
+      return BigInt(typeSize(sty).size);
     }
     /* `__alignof__` 也要能出现在「必须是常量」的位置上（`_Alignas`、数组维度、
      * `_Static_assert` 里都有）。符号那一份对齐同样算进来。 */
@@ -5434,12 +5676,19 @@ export class CGen {  /**
        * 必须在套数组之前 —— 套完再剥就得重建一个 CType，而 `count` 挂在对象上
        * （ctype.js:129），重建时最容易掉的正是它。 */
       const base = stripStorage(spec);
+      /* 变长数组只在**函数体里**成立（tcc 的判据是 `local_stack`，`tccgen.c:5168`）。
+       * 带存储类的那一种降一级：`static int a[n]` 要常量，而 `static int (*p)[n]` 不要 ——
+       * 见 `vlaMode` 头上那段。 */
+      const canVla = !isTypedef && !isExtern && (spec.t & VT_STATIC) === 0;
+      const vlaMode = global ? 0 : (canVla ? 2 : 1);
       any = true;
       if (this.tok === SEMI) { this.next(); continue; }
       let wasBody = false;
       for (;;) {
         const dad = { aligned: sad.aligned, packed: sad.packed };
+        this.vlaMode = vlaMode;
         const d = this.declarator(base, 'need', dad);
+        this.vlaMode = 0;
         const name = /** @type {string} */ (d.name);
         /* 声明符后面还能挂两样东西（第八刀第十六片，系统头里全是）：
          *   `__asm("_name")` —— 符号改名，读掉不改名（见 `skipAsmName`）；
@@ -5477,6 +5726,9 @@ export class CGen {  /**
            * `';' expected` —— 所以要在吃掉它之前判。 */
           if (hasInit && isExtern && !global) this.skip(SEMI);
           if (hasInit) this.next();
+          /* 变长数组不能有初始化式（C11 6.7.9 第 3 段；tcc 的
+           * `variable length array cannot be initialized`）—— 铺初始化式要先知道有几格。 */
+          if (hasInit && isVla(d.ty)) this.err('variable length array cannot be initialized');
 
           /* 不定长数组（`int a[] = {…}`）的类型要等初始化式才定得下来 —— 于是这儿
            * 「定类型」与「划地方」的顺序是反的：先看初始化式，再声明。 */
@@ -5485,7 +5737,7 @@ export class CGen {  /**
           let strBytes = null;
           let wstrVals = null;
           const braced = hasInit && this.tok === LBRACE;
-          if (isArray(vty.t) && vty.count < 0) {
+          if (isArray(vty.t) && vty.count < 0 && !isVla(vty)) {
             if (!hasInit) {
               /* `extern const char *const sys_errlist[];`（第八刀第十六片）——
                * `extern` 的数组可以是**不完整类型**（C11 6.7.6.2 第 4 段）：大小在别的
@@ -5752,6 +6004,7 @@ export class CGen {  /**
     this.frameNames = new Set();
     this.frameSize = 0;
     this.frameOff = 0;
+    this.vlaSeen = false;
     this.stmtRanges = [];
     this.labelIds = new Map();
     this.labelCount = 0;
@@ -5763,6 +6016,10 @@ export class CGen {  /**
     for (const d of this.declScalars) {
       if (this.addrTaken.has(d.name)) est += alignUp(d.size, FRAME_ALIGN);
     }
+    /* 有变长数组的函数**必须**有序言与收场那一对：那块地方是运行期从 `$sp` 上切的，
+     * 不把 `$sp` 在返回前还回去，递归调用一圈就把栈走穿了。帧本身一格都不用，
+     * 所以只要让 `frameSize` 非 0（`runBody` 与 `emitEpilogue` 都以它为准）。 */
+    if (this.vlaSeen && est === 0) est = FRAME_ALIGN;
     this.pass1 = false;
     this.frameNames = this.addrTaken;
 
@@ -5821,6 +6078,9 @@ export class CGen {  /**
     this.tdefStack = [this.typedefs, new Map()];
     this.regions = [];
     this.swStack = [];
+    /* 变长数组的那本账跟着函数走：形参那一层（`scopes[0]`）不经过 `pushScope`，
+     * 而函数体的 `{` 会自己推一层 —— 所以这儿是空的。 */
+    this.vlaStack = [];
     /* 两遍各自从 0 数起，于是同一条语句在两遍里是同一个序号（`block` 那个包装）。 */
     this.stmtNo = 0;
     this.kids = [];

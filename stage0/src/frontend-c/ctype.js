@@ -132,6 +132,28 @@ export function mkArray(elem, n) {
 }
 
 /**
+ * 变长数组（C99 的 VLA，`int a[n]`）：长度在**运行期**才知道，所以类型上带的不是一个数，
+ * 而是「那个数在哪儿」—— `vla` 是一个 MIR 槽号，槽里放着**整个数组的字节数**。
+ *
+ * tcc 那边是另一位（`VT_VLA`，`tcc.h:1063`），而且 VLA **不带** `VT_ARRAY`，于是它到处
+ * 要写 `t & (VT_ARRAY|VT_VLA)`。这里反过来：VLA 就是一种数组（`isArray` 成立），
+ * 「长度未定」照旧是 `count < 0`。这么选是因为退化成指针、下标、`&`、转换那几条路
+ * 一个字都不用改 —— 差别只在「多大」这一问上，而那一问只有 `sizeof` 与划地方在问。
+ * 代价是每一处**必须是常量大小**的位置都要单独挡一次（见 `isVla` 的用处）。
+ */
+export function mkVla(elem, szSlot) {
+  const ty = ctype(VT_PTR | VT_ARRAY, elem);
+  ty.count = -1;
+  ty.vla = szSlot;
+  return ty;
+}
+
+/** 这个类型是不是变长数组。 */
+export function isVla(ty) {
+  return isArray(ty.t) && ty.vla !== undefined;
+}
+
+/**
  * struct / union。`ref` 是那张成员表 `{name, fields, size, align, done}`，
  * **一个 tag 只有一个这样的对象**（在 `tags` 里 intern）—— 于是：
  *   - `sameType` 比一次引用相等就够（tcc 那边是同一个 `Sym` 指针，同一件事）；
