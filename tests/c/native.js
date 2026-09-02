@@ -59,6 +59,14 @@ const CASES = [
   ['串常量：sizeof 是数组的大小', 'return sizeof("abcd");'],
   ['串常量：地址交给真的 strlen', 'return (long long) strlen("hello, world");'],
   ['串常量：指针算术', 'char *p = "abcdef"; return *(p + 3) - *p;'],
+  /* 宽串常量（第三十三片）：一格四字节，与窄串同一个办法（一个 __DATA 符号）。
+   * 这儿一律写 int 而不是 wchar_t —— 这个目标上它就是 int，而 SUPPORT 里没有 stddef.h。 */
+  ['宽串：按格读', 'int *p = L"hi!"; return p[0] * 100 + p[2];'],
+  ['宽串：sizeof 是格数乘四', 'return sizeof(L"abcd");'],
+  ['宽串：末尾那一格是 0', 'int *p = L"abcd"; int n = 0; while (p[n] != 0) n++; return n;'],
+  ['宽串：非 ASCII 的一格是一个码位', 'int *p = L"\\u00e9!"; return p[0] * 100 + p[1];'],
+  ['宽串：全局的初值里的宽串', 'return g_wp[0] * 100 + g_wp[1];'],
+  ['宽串：铺进全局数组', 'return g_wa[0] * 1000 + g_wa[1] * 10 + g_wa[2];'],
   /* 全局量（第二十一片）：一块字节 + 一个符号，地址靠 `GADDR`。 */
   ['全局：写进去再读回来', 'g_i = 1234567; return g_i;'],
   ['全局：带初值', 'return g_init;'],
@@ -295,6 +303,9 @@ int g_al16 __attribute__((aligned(16))) = 5;
 int g_al32 __attribute__((aligned(32))) = 6;
 /* 非 ASCII 的串常量（第三十片）：常量池里是一串**字节**，不是一串字符。 */
 char *g_uni = "\\xc3\\xa9!";
+/* 宽串（第三十三片）：一格一个码位。写 int 是因为这个目标上 wchar_t 就是 int。 */
+int *g_wp = L"xy";
+int g_wa[] = L"ab";
 /* 外部的全局量（第三十一片）：这个 .o 里它们是**未定义符号**，取地址要过 GOT。
  * host_g 与 host_arr 由 main.c 定义（那份是 clang 编的），
  * __stdoutp 与 __error 来自真的 libc —— 后两个正是「住在 dylib 里」那一种。 */

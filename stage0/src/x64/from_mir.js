@@ -1049,6 +1049,9 @@ export function genModule(mod) {
     if (kind !== 'str' && kind !== 'bytes') continue;
     const name = `omni_str_${r}`;
     strSyms.set(r, name);
+    /* 串常量的符号一律 8 对齐（第三十三片，与 arm64 那一份同一个理由：宽串的地址
+     * 会被交给按 `int` 读的代码）。 */
+    while (dataBytes.length % 8 !== 0) dataBytes.push(0);
     dataSyms.push({ name, off: dataBytes.length, sect: 2 });
     const raw = kind === 'bytes' ? hexBytes(items[r].text) : utf8Bytes(items[r].text);
     for (const byte of raw) dataBytes.push(byte);

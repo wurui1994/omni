@@ -1808,6 +1808,10 @@ export class CGen {  /**
 
   /** 宽字符串字面量的那一块 data：一格四字节小端，末尾补一个 0。 */
   wstrData(vals) {
+    /* native（第三十三片）：宽串照旧不走线性内存 —— 还能到这儿的只有「把它的地址当成
+     * 整型常量」那一种（`(uintptr_t)L"ab"`），那要在编译期知道地址，而 native 上
+     * 地址要等链接。窄串那一路的 `strData` 同理。 */
+    if (this.native) this.todo('native：宽串字面量的地址当整型常量用（地址要等链接）');
     const key = vals.join(',');
     const hit = this.wstrs.get(key);
     if (hit !== undefined) return hit;
@@ -1829,8 +1833,23 @@ export class CGen {  /**
    * `sizeof(L"ab")` 是 12。
    */
   wstrLit(vals) {
+    /* native（第三十三片）：与窄串同一个办法 —— 字节进 `__DATA` 的一个符号，值是那个
+     * 符号的地址。一格四字节小端、末尾一格 0，与线性内存那边 `wstrData` 铺的一样。 */
+    if (this.native) {
+      return sMem(mkArray(TY_INT, vals.length + 1), this.wstrConst(vals), 0);
+    }
     return sMem(mkArray(TY_INT, vals.length + 1),
       this.mod.consts.int(BigInt(this.wstrData(vals))), 0);
+  }
+
+  /** native：一个宽串字面量在 MIR 常量池里的那一条（第三十三片）。一律 `bytes`。 */
+  wstrConst(vals) {
+    const raw = [];
+    for (const v of [...vals, 0]) {
+      const u = v >>> 0;
+      raw.push(u & 255, (u >>> 8) & 255, (u >>> 16) & 255, (u >>> 24) & 255);
+    }
+    return this.mod.consts.bytes(raw);
   }
 
   /**
@@ -2168,6 +2187,11 @@ export class CGen {  /**
       const vals = this.readWStrTok(this.tokc);
       if (this.tok === COMMA || this.tok === RBRACE || this.tok === SEMI) {
         if (!isPtr(ty.t)) this.err(`invalid initializer for '${typeText(ty)}'`);
+        /* native（第三十三片）：那一块的地址要等链接，所以落成一笔重定位。 */
+        if (this.native) {
+          this.putSymBytes(dest.addr + off, { kind: 's', no: this.wstrConst(vals), add: 0n });
+          return;
+        }
         this.emitBytes(dest.addr + off, 8, BigInt(this.wstrData(vals)));
         return;
       }
