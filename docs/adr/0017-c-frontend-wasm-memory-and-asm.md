@@ -632,7 +632,14 @@ tcc 没装，它 `{B}` 那一格不存在、一路掉到 SDK 上；拿 `-B` 指�
 `streamThunk`（给函数名配一个读外部全局量的函数体）—— 头文件没了，这两条收口也就没了
 用处，`__stdoutp`/`__error` 本来就是真 libc 里的名字，直接落过去。
 
-（帧上要一块，回它的**真地址**），这是 native 这条腿上
+**拿 tinycc 自己的源码当尺子**（第九十一片）：`tests/c/selfpp.js` —— tinycc 那 30 份
+`.c`，两边各自去找头（只给 `-I <构建目录>`），`-E -P` 出来的字节必须一样。**29 份全同**，
+剩下一份是 tcc 自己就拒的旧文件（`il-gen.c`），加起来约 23 万行展开后的正文。
+为此把 `stage0/include/stddef.h` 对着 tcc 那一份逐行对齐了 —— 头文件的内容直接就是
+输出的一部分：typedef 的条数与次序、`offsetof` 展开成 `__builtin_offsetof` 还是就地
+展开、那句 `void *alloca(size_t size);` 在不在，都在输出里看得见。
+
+**往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
 地址交给真的 libc（`strlen`/`memcpy`）验过。C 前端现在还把 `&x` 降到影子栈上，
 把它改成落在 `FRAME` 上是下一片，见下面的第九刀第十八片节。
@@ -12268,6 +12275,67 @@ const ERRNO_FNS = new Set(['__omni_errno_location', '__error', '__errno_location
 这两个数一个字都没动就是证据。
 
 <!-- 第九刀第九十片-END -->
+
+## 落地：第九刀第九十一片
+
+拿 tinycc 自己的源码当尺子 —— 23 万行展开后的正文，一个字节不差。
+
+到这一片为止，`-E` 那一路的每个细节都是用**我们写的探针**称的：一个宏、一个 `#if`、
+一处记号粘连，一份文件十几行。探针的好处是「差在哪儿」一眼看得见，坏处是**它们是我们
+想到的那些情况**。真实的 C 不是这样：一份 `tcc.c` 展开出来两万九千行，中间是 macOS SDK
+那几百份头、`__has_include`、`__builtin_*`、层层守卫、`#pragma once`、行号拼接。
+
+所以这一片把尺子换成 tinycc 自己：
+
+```
+tcc:  tcc -B <构建目录> -I <构建目录> -E -P x.c
+我们: omni cpp x.c -P -I <构建目录>
+```
+
+两边都**自己去找头文件**（`-I` 只给 `config.h` 所在的那个目录）。`-B` 是给 tcc 指它
+自己那份 `include/` —— 那个 tcc 没装，不给 `-B` 的话它第一格落空（见第八十八片）。
+于是两边的搜索表形状相同：自带的一份在前（我们是 `stage0/include/`）、SDK 的在后。
+
+结果：**30 份 `.c` 里 29 份逐字节相同**，剩下那份 `il-gen.c` 是 tcc 自己就拒的旧文件
+（不在它的构建里），没有尺子、跳过。最长的 `tcc.c` 29009 行、`libtcc.c` 28387 行、
+`tccgen.c` 11752 行，加起来约 23 万行。
+
+### 唯一要改的东西：`stddef.h`
+
+第一次跑下来只差 17 行，全在一处 —— 我们自带的 `stddef.h` 与 tcc 那一份内容不同。
+头文件的**文本本身就是输出的一部分**，所以这件事不能靠「语义相同」蒙过去：
+
+- typedef 的**条数与次序**：tcc 那份有 `ssize_t` / `intptr_t` / `uintptr_t`，我们只有
+  三条，而且次序不同（它是 `size_t`、`ssize_t`、`wchar_t`、`ptrdiff_t`、`intptr_t`、
+  `uintptr_t`）。
+- `offsetof`：tcc 定成 `__builtin_offsetof(type, field)`，而 `__builtin_offsetof`
+  **只在编译那一路上是宏**（tccdefs.h 的 `#ifndef __TCC_PP__` 里头）—— 于是 `-E` 出来
+  是 `__builtin_offsetof(...)` 原样。我们那份是就地展开成 `((size_t)&((T*)0)->f)`，
+  于是每一处 `offsetof` 都差一行。我们的 `COMPILE_DEFS` 里本来就有
+  `__builtin_offsetof`，改的只是头文件这一句。
+- 那句 `void *alloca(size_t size);`：我们那份没有。有意思的是它在输出里长这样 ——
+  `void *__builtin_alloca(size_t size);`：SDK 的 `<alloca.h>` 把 `alloca` 定成了
+  `__builtin_alloca`，先包过 `<stdlib.h>` 的程序看到的就是展开后的样子。
+  两边的文本一样，展开出来自然也一样。
+- `max_align_t` 那一条藏在 `#if __STDC_VERSION__ >= 201112L` 里，而 tcc 的
+  `__STDC_VERSION__` 是 `199901L`（量过 `-dM`）—— 抄进来也不会印出来，但要抄对，
+  哪天把版本号提到 C11 两边才会同时多出这一行。
+
+新的 `ssize_t` / `intptr_t` / `uintptr_t` 与 SDK 头里的同名 typedef 重复 —— 底层类型
+相同，C11 6.7 允许，两条腿的测试全绿就是它接得住的证据。
+
+### 门
+
+`tests/c/selfpp.js`，29 条，跑完 6.8 秒。跳过的那条明着印出「tcc 自己就拒了」。
+源码树的位置默认与 ADR 里记的一样，`TINYCC_SRC` 可以指到别处；树或构建不在就整组跳过。
+
+`tests/c/run.js`（206）与 `tests/c/native.js`（217）在改完 `stddef.h` 之后照旧全绿。
+
+**这不是「能编 tinycc」**：这一片称的只有预处理器。真编还差语法与代码生成那一路 ——
+不过从这儿起，喂给它们的记号流已经是与 tcc 一模一样的那一份了。
+
+<!-- 第九刀第九十一片-END -->
+
 
 
 
