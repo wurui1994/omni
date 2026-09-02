@@ -41,7 +41,7 @@
  */
 
 import { OmniError } from '../source/diag.js';
-import { linkObjects } from './elf_merge.js';
+import { linkObjects, DWARF_SECTIONS } from './elf_merge.js';
 import { relocateOne } from './pe_reloc.js';
 import { readObject } from './elf.js';
 import { readArchive, alacarte } from './ar.js';
@@ -731,7 +731,15 @@ function loadInputs(inp) {
  */
 export function machoExe(inp) {
   const loaded = loadInputs(inp);
-  const st = linkObjects(loaded.objs, { rdata: '.data.ro', unwind: false });
+  /* `-g`（第九刀第七十九片）：调试那几节要跟着并进来。stabs 那一路（`dwarf === 0`）
+   * 造 `.stab`/`.stabstr`，dwarf 那一路造十来节 —— macOS 上 `-gdwarf` 的默认版本是 2
+   * （`DEFAULT_DWARF_VERSION`，别的目标是 5）。 */
+  const st = linkObjects(loaded.objs, {
+    rdata: '.data.ro',
+    unwind: false,
+    debug: inp.debug === true,
+    dwarf: inp.dwarf ?? 0,
+  });
   /** `-shared`：MH_DYLIB —— 没有 `__PAGEZERO`，`__TEXT` 从 0 起，多一条 `LC_ID_DYLIB`，
    * 没有 `LC_LOAD_DYLINKER` 与 `LC_MAIN`，没定义的符号一律当「来自别处」。 */
   const shared = inp.shared === true;
@@ -1148,6 +1156,15 @@ export function machoExe(inp) {
         else if (i === RDATA) sk = sk_ro_data;
         else if (i === GOT) sk = sk_nl_ptr;
         else if (s.name === '.stab') sk = sk_stab;
+        /* DWARF 的那六节各自一类（`__DWARF` 段里的 `__debug_*`）。tcc 比的是节的指针，
+         * 所以名字要**全等**：`.debug_line_str` 不能被 `.debug_line` 抢走。别的
+         * `.debug_*`（`.debug_ranges` 之类）落到下面的 `sk_ro_data`，跟 tcc 一样。 */
+        else if (s.name === '.debug_info') sk = sk_debug_info;
+        else if (s.name === '.debug_abbrev') sk = sk_debug_abbrev;
+        else if (s.name === '.debug_line') sk = sk_debug_line;
+        else if (s.name === '.debug_aranges') sk = sk_debug_aranges;
+        else if (s.name === '.debug_str') sk = sk_debug_str;
+        else if (s.name === '.debug_line_str') sk = sk_debug_line_str;
         else if ((s.flags & SHF_EXECINSTR) !== 0) sk = sk_text;
         else if ((s.flags & SHF_WRITE) !== 0) sk = sk_rw_data;
         else sk = sk_ro_data;
@@ -1377,11 +1394,24 @@ export function machoExe(inp) {
       start: 0, end: 0, tcb: 16, symSecEnd: ss === undefined ? 0 : ss.addr + ss.size,
     };
   };
+  /* `relocate_section` 里那个 dwarf 的例外（tccelf.c:1159）：调试节里 `R_DATA_32DW`
+   * 指到**另一个调试节**时，落笔的是 `tgt - 那一节的地址`，也就是**节内偏移** ——
+   * 调试信息内部互相指的就该是偏移。x86_64 上这一号是 `R_X86_64_32`（10）、
+   * arm64 上是 `R_AARCH64_ABS32`（258）。 */
+  const DW = new Set(DWARF_SECTIONS);
+  const dw32 = machine === EM_AARCH64 ? 258 : 10;
   for (const [si, list] of relas) {
     const tgt = secs[secs[si].relaFor];
     if (tgt === undefined || tgt.bytes.length === 0) continue;
     for (const r of list) {
       const a = attrOf.get(r.sym);
+      const ssx = syms[r.sym].shndx;
+      if (r.type === dw32 && DW.has(tgt.name) && ssx > 0 && ssx < SHN_LORESERVE
+        && DW.has(secs[ssx]?.name)) {
+        relocateOne(machine, r.type, tgt.bytes, r.at, tgt.addr + r.at,
+          symAddr(r.sym) + Number(r.add) - secs[ssx].addr, 0, false);
+        continue;
+      }
       relocateOne(machine, r.type, tgt.bytes, r.at, tgt.addr + r.at,
         symAddr(r.sym) + Number(r.add), 0, false,
         a === undefined ? undefined : secs[GOT].addr + a.gotOff,

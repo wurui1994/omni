@@ -555,6 +555,13 @@ x86_64 —— 我们跟着认不出。门是 `tests/c/macho-dll.js`，`9 条`全
 （`rpath_command` 12 字节 + 路径，八字节对齐），排在 `LC_LOAD_DYLIB` 后面。
 tcc 那段不在 EXE 的分支里，所以 dylib 也发。门涨到 `27 条`。
 
+**macOS 上的 `-g`**（第七十九片）：stabs 与 dwarf 两路都对上了。要的是三件事 ——
+调试那几节跟着并进来（`linkObjects` 的 `debug`/`dwarf`；macOS 上 `-gdwarf` 的默认版本
+是 **2**，别的目标是 5，所以没有 `.debug_line_str`）、`collect_sections` 里 DWARF 的
+六节各自一类落进 `__DWARF` 段、调试节里指向调试节的 `R_DATA_32DW` 写**节内偏移**。
+从 `.o` 里读进来的 `.stab` tcc 是丢掉的（`sk_stab` 认的是本次编译造的那一节），
+所以 stabs 那一路的产物里没有 `__stab`。门是 `tests/c/macho-debug.js`，`40 条`。
+
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
 地址交给真的 libc（`strlen`/`memcpy`）验过。C 前端现在还把 `&x` 降到影子栈上，
@@ -11534,6 +11541,64 @@ rpath->path = sizeof(*rpath);                        /* 路径紧跟在结构体
 两条 rpath 的 dylib），`27 条`全 0 条不同（共 1227384 字节）。
 
 <!-- 第九刀第七十八片-END -->
+
+## 落地：第九刀第七十九片
+
+macOS 上的 `-g`：stabs 与 dwarf 两路都与 tcc 逐字节相同。
+
+三处要补：
+
+**一、调试那几节要跟着并进来。** `linkObjects` 早就认 `{debug, dwarf}`（PE 那边
+第五十片就用上了），Mach-O 这一路一直没往下传，于是输入 `.o` 里的 `.debug_*` 在并的
+那一步就被 `mergeable` 拦掉了 —— 产物里连 `__DWARF` 段都没有。
+
+`dwarf` 那个数字有个坑：`-gdwarf` 的默认版本**分目标**（tcc.h:1909）——
+
+```c
+#ifdef TCC_TARGET_MACHO
+# define DEFAULT_DWARF_VERSION 2
+#else
+# define DEFAULT_DWARF_VERSION 5
+#endif
+```
+
+版本 2 就没有 `.debug_line_str`（那一节是 dwarf 5 才加的），所以 macOS 上并出来的
+调试节比 PE 上少一条。
+
+**二、`collect_sections` 里 DWARF 的六节各自一类**（tccmacho.c:1677）。tcc 比的是
+节的指针（`s == dwarf_info_section` …），我们按名字**全等**比 —— `.debug_line_str`
+不能被 `.debug_line` 抢走。这六类的 `seg_initial` 都是 3，也就是 `__DWARF` 段，
+标志 `S_REGULAR | S_ATTR_DEBUG`。别的 `.debug_*`（`.debug_macro`、`.debug_ranges`、
+`.debug_loclists`、`.debug_str_offsets`、`.debug_addr` …）落到 `sk_ro_data` ——
+它们本来就是空的，落哪儿都不影响字节。
+
+**三、调试节里指向调试节的重定位写节内偏移**（tccelf.c:1159）：
+
+```c
+if (is_dwarf && type == R_DATA_32DW
+    && sym->st_shndx >= s1->dwlo && sym->st_shndx < s1->dwhi) {
+    add32le(ptr, tgt - s1->sections[sym->st_shndx]->sh_addr);
+    continue;
+}
+```
+
+`R_DATA_32DW` 在 x86_64 上是 `R_X86_64_32`（10）、arm64 上是 `R_AARCH64_ABS32`（258）。
+最先露出来的就是它：`__debug_info` 里 CU 头 +6 那一格 `abbrev_offset`，tcc 写 0，
+我们写的是 `__debug_abbrev` 的虚地址。PE 那一路（`pe_link.js:216`）早有同一道岔，
+照抄过来即可。
+
+还有一条不用补但要知道的：**从 `.o` 里读进来的 `.stab` 是丢掉的**。`sk_stab` 认的是
+`s == stab_section`，也就是本次编译自己造的那一节；从输入并进来的那一条既没有
+`SHF_ALLOC` 也不叫 `.debug_*`，归 `sk_discard`。所以 `-gstabs` 的产物里没有 `__stab`
+段，只是符号表里多了几条 —— 我们本来就是这个行为，一个字没改就对上了。
+
+门是 `tests/c/macho-debug.js`，尺子 `<target>-osx-tcc -gstabs|-gdwarf -nostdlib`，
+十个 case（末一条是 `-shared`）× 两路 × 两个目标，`40 条`全 0 条不同（共 2396880 字节）。
+挑 case 时避开了要 libc 的那些 —— `-nostdlib` 下 tcc 自己也链不上。
+命令行上是 `omni macho-link -g [--dwarf 2]`。
+
+<!-- 第九刀第七十九片-END -->
+
 
 
 

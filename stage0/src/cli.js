@@ -1796,7 +1796,7 @@ function main(argv) {
       || a === '--dylib' || a === '--libtcc1' || a === '--dll'
       || a === '--soname' || a === '--rpath' || a === '--install-name'
       || a === '--subsystem' || a === '--image-base' || a === '--stack'
-      || a === '--file-align' || a === '--section-align') { i++; continue; }
+      || a === '--file-align' || a === '--section-align' || a === '--dwarf') { i++; continue; }
     if (a.startsWith('-')) continue;
     files.push(a);
   }
@@ -2184,6 +2184,7 @@ function main(argv) {
      *   omni macho-link a.o [b.o …] -o a.out [-e _main]
      *                   [--dylib <sdk>/usr/lib/libc.tbd] [--libtcc1 libtcc1.a]
      *                   [--shared] [--install-name libfoo.dylib] [--rpath @loader_path]
+     *                   [-g [--dwarf 2]]
      * 写出来的还没签名 —— arm64 上要自己补一句 `codesign -f -s - <文件>`，
      * tcc 也是这么干的（CONFIG_CODESIGN 只在本机那个目标上开）。 */
     case 'macho-link': {
@@ -2213,10 +2214,14 @@ function main(argv) {
       for (let k = 0; k < rest.length - 1; k++) {
         if (rest[k] === '--rpath') rp.push(rest[k + 1]);
       }
+      const dwi = rest.indexOf('--dwarf');
       const r = machoExe({
         objs: files.map(bytesOf),
         entryName,
         dylibs,
+        /* `-g`：stabs 那一路（`--dwarf` 没给）或者 dwarf 那一路。 */
+        debug: rest.includes('-g'),
+        dwarf: dwi >= 0 ? Number(rest[dwi + 1]) : 0,
         rpath: rp.length === 0 ? undefined : rp.join(':'),
         openDylib: (n) => (exists(n) ? bytesOf(n) : null),
         libtcc1: li >= 0 ? bytesOf(rest[li + 1]) : undefined,
