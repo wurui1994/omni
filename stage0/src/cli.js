@@ -192,7 +192,7 @@ function cObj(path, out, arch, incs, defs) {
     syms.push({ name: mod.funcs[k].name, off: blob.offsets[k] });
   }
   writeBinary(out, writeObject(blob.bytes, blob.data,
-    [...syms, ...blob.dataSyms], [...blob.relocs, ...blob.dataRelocs], arch));
+    [...syms, ...blob.dataSyms], [...blob.relocs, ...blob.dataRelocs], arch, blob.dataAlign));
   return out;
 }
 /**

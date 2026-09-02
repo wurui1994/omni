@@ -210,18 +210,25 @@ const ARCH = {
  *               或 `'POINTER64'`，`sym` 是符号名（不带下划线，这儿加）。
  *               `at` 是**自己那一节里**的偏移，`sect` 1 是代码（默认）、2 是数据。
  * @param arch  `'arm64'`（默认）或 `'x86_64'`
+ * @param dataAlign `__data` 那一节要的对齐（字节，2 的幂，默认 8）。
+ *                  里面有 16 字节对齐的全局量就得给 16 —— 见第九刀第二十九片。
  */
-export function writeObject(text, data, defs, relocs, arch) {
+export function writeObject(text, data, defs, relocs, arch, dataAlign) {
   const archName = arch === undefined ? 'arm64' : arch;
   const cpu = ARCH[archName];
   if (cpu === undefined) throw new OmniError(`macho: 还不认识架构 ${archName}`);
   const dataBytes = data === undefined ? new Uint8Array(0) : data;
   const nsects = dataBytes.length === 0 ? 1 : 2;
-  /* 节的地址在段里是**接着排**的：代码从 0 起，数据紧跟着（按 8 对齐）。
+  const dal = dataAlign === undefined ? 8 : dataAlign;
+  /* 节头里写的是**对齐的指数**（2^n），所以这儿要算 log2，而且只认 2 的幂。 */
+  let dalLog = 0;
+  while (2 ** dalLog < dal) dalLog++;
+  if (2 ** dalLog !== dal) throw new OmniError(`macho: 数据节的对齐 ${dal} 不是 2 的幂`);
+  /* 节的地址在段里是**接着排**的：代码从 0 起，数据紧跟着（按数据节自己的对齐）。
    * 这个数要先算出来 —— 符号的 `n_value` 是**段里的地址**，不是节里的偏移。
    * 少加这一格的话链接器会说
    * 「_x symbol is ignored, because its address isn't in its designated section」。 */
-  const dataAddr = align(text.length, 8);
+  const dataAddr = align(text.length, dal);
   const strs = new StrTab();
   /* 符号表的次序是**有讲究**的：局部、定义的外部、未定义的外部，三段各自连着 ——
    * LC_DYSYMTAB 里报的就是这三段的起点与长度。乱了链接器会说符号表坏了。 */
@@ -289,7 +296,7 @@ export function writeObject(text, data, defs, relocs, arch) {
   // ---- section_64：__DATA,__data（没有数据就整节不写）
   if (nsects === 2) {
     b.name16('__data').name16('__DATA');
-    b.u64(dataAddr).u64(dataBytes.length).u32(dataOff).u32(3);   // align = 8
+    b.u64(dataAddr).u64(dataBytes.length).u32(dataOff).u32(dalLog);
     b.u32(rsData.length === 0 ? 0 : dataRelOff).u32(rsData.length);
     b.u32(0).u32(0).u32(0).u32(0);
   }

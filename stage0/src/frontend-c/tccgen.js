@@ -7306,9 +7306,9 @@ export function lowerCNative(path, text, host, defs) {
     const s = typeSize(e.ty);
     const size = s.size + (e.extra === undefined ? 0 : e.extra);
     const al = e.align !== 0 ? e.align : s.align;
-    if (al > 8) {
+    if (al > 4096) {
       throw new OmniError(`${path}: error: 全局量 '${name}' 要 ${al} 字节对齐`
-        + `（__data 这一节只保证 8）`);
+        + `（__data 这一节最多 4096）`);
     }
     const bytes = [];
     for (let k = 0; k < size; k++) {

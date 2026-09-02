@@ -977,12 +977,14 @@ export function genModule(mod) {
     return `omni_str_${fx.no}`;
   };
   /* 模块级变量（第二十一片起两种）：说过大小的按它的大小与对齐摆（C 的全局量），
-   * 没说过的还是「一格」八个零字节。对齐只到 8，与 arm64 那一份同一个理由。 */
+   * 没说过的还是「一格」八个零字节。对齐最多 4096，与 arm64 那一份同一条（第二十九片）。 */
+  let dataAlign = 8;
   for (let gi = 0; gi < mod.globals.length; gi++) {
     const blob = mod.globalBlob[gi];
     const size = blob === null ? 8 : blob.size;
     const al = blob === null ? 8 : blob.align;
-    if (al > 8) nyi(`全局 '${mod.globals[gi]}' 要 ${al} 字节对齐（__data 这一节只保证 8）`);
+    if (al > 4096) nyi(`全局 '${mod.globals[gi]}' 要 ${al} 字节对齐（__data 这一节最多 4096）`);
+    if (al > dataAlign) dataAlign = al;
     while (dataBytes.length % al !== 0) dataBytes.push(0);
     const base = dataBytes.length;
     dataSyms.push({ name: mod.globals[gi], off: base, sect: 2 });
@@ -1030,5 +1032,6 @@ export function genModule(mod) {
     data: new Uint8Array(dataBytes),
     dataSyms,
     dataRelocs,
+    dataAlign,
   };
 }

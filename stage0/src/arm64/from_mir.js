@@ -476,12 +476,21 @@ class FnGen {
 
     /* ---- 帧上的一块（第十八片）。**`&x` 在 native 上就落在这里**：不是线性内存里的
      * 一个偏移，而是 `sp` 加一个常数得到的真地址 —— 交给 libc 也认。
-     * 一条 `add` 就够，前提是偏移进得了 12 位；进不去要先造立即数再 `add` 扩展寄存器形式，
-     * 那一格与 `frameLoad` 的 32760 是同一笔账，一起还。 */
+     * 一条 `add` 就够，前提是偏移进得了 12 位；进不去就分两条（第二十九片）——
+     * 高位那条带 `lsl #12`，与序言里降 `sp` 那两条是同一个办法。
+     * **不能**走「造立即数再 add 移位寄存器形式」：那个形式里 31 号是 `xzr` 不是 `sp`
+     * （第二十六片那个真错误）。 */
     if (op === OP.FRAME) {
       const off = this.frameOff(f.aux[i]);
-      if (off >= 4096) throw new OmniError(`arm64: 帧偏移 ${off} 太大（这一片还不搬基址）`);
-      buf.emit(a.addImm(1, RES, SP, off));
+      const hi = Math.floor(off / 4096);
+      const lo = off % 4096;
+      if (hi > 4095) nyi(`帧偏移 ${off}（两条 add 也装不下）`);
+      if (hi === 0) {
+        buf.emit(a.addImm(1, RES, SP, lo));
+      } else {
+        buf.emit(a.addImm(1, RES, SP, hi, 1));
+        if (lo > 0) buf.emit(a.addImm(1, RES, RES, lo));
+      }
       return this.def(i, RES);
     }
 
@@ -938,13 +947,15 @@ export function genModule(mod) {
   };
   /* 模块级变量（第二十一片起两种）：说过大小的按它的大小与对齐摆（C 的全局量），
    * 没说过的还是「一格」八个零字节（wasm 的 `(global …)` 与 JS 前端那批）。
-   * 对齐只到 8 —— `__data` 那一节的对齐字段写的就是 8（`macho.js`），
-   * 要 16 得先把那一格改成按内容算。 */
+   * 对齐最多到 4096（第二十九片：`__data` 那一节的对齐字段现在按内容算，
+   * 不再是写死的 8）—— 上界取一页，再往上就该问「你到底在摆什么」了。 */
+  let dataAlign = 8;
   for (let gi = 0; gi < mod.globals.length; gi++) {
     const blob = mod.globalBlob[gi];
     const size = blob === null ? 8 : blob.size;
     const al = blob === null ? 8 : blob.align;
-    if (al > 8) nyi(`全局 '${mod.globals[gi]}' 要 ${al} 字节对齐（__data 这一节只保证 8）`);
+    if (al > 4096) nyi(`全局 '${mod.globals[gi]}' 要 ${al} 字节对齐（__data 这一节最多 4096）`);
+    if (al > dataAlign) dataAlign = al;
     while (dataBytes.length % al !== 0) dataBytes.push(0);
     const base = dataBytes.length;
     dataSyms.push({ name: mod.globals[gi], off: base, sect: 2 });
@@ -991,5 +1002,6 @@ export function genModule(mod) {
     data: new Uint8Array(dataBytes),
     dataSyms,
     dataRelocs,
+    dataAlign,
   };
 }

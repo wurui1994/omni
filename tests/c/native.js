@@ -123,6 +123,11 @@ const CASES = [
   ['初值里的地址：一张串的表',
     'return g_tab[0][0] + g_tab[1][0] * 10 + g_tab[2][0] * 100;'],
   ['初值里的地址：一个函数', 'return g_fp(11);'],
+  /* 上界那两格（第二十九片）。 */
+  ['帧偏移过 4096（&b 要两条 add）', 'return bigframe();'],
+  ['全局要 16/32 字节对齐',
+    'return ((long long) &g_al16 % 16) * 1000 + ((long long) &g_al32 % 32) * 100'
+    + ' + g_al16 * 10 + g_al32;'],
 ];
 
 const SUPPORT = `struct P { int x; int y; };
@@ -214,6 +219,16 @@ struct P g_pp = {12, 34};
 int *g_pb = &g_pp.y;
 long long (*g_fp)(long long) = dbl;
 char *g_tab[3] = {"aa", "bb", "cc"};
+/* 上界那两格（第二十九片）：帧偏移过 4096（取 b 的地址要两条 add），
+ * 以及要 16/32 字节对齐的全局（__data 那一节的对齐字段按内容算）。 */
+long long bigframe(void) {
+  char a[5000]; char b[16]; int i;
+  for (i = 0; i < 5000; i++) a[i] = (char) (i % 5);
+  b[0] = 9; b[15] = 3;
+  return a[4999] * 100 + b[0] * 10 + b[15];
+}
+int g_al16 __attribute__((aligned(16))) = 5;
+int g_al32 __attribute__((aligned(32))) = 6;
 `;
 
 let src = SUPPORT;
@@ -281,7 +296,8 @@ try {
     }
     const objPath = join(dir, `probe-${leg.arch}.o`);
     writeFileSync(objPath, writeObject(blob.bytes, blob.data,
-      [...defs, ...blob.dataSyms], [...blob.relocs, ...blob.dataRelocs], leg.arch));
+      [...defs, ...blob.dataSyms], [...blob.relocs, ...blob.dataRelocs],
+      leg.arch, blob.dataAlign));
     const progPath = join(dir, `prog-${leg.arch}`);
     execFileSync(CLANG, [...leg.cc, mainPath, objPath, '-o', progPath], { stdio: 'pipe' });
     const out = execFileSync(progPath, [], { encoding: 'utf8' }).trim().split('\n');

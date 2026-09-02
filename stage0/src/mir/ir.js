@@ -773,8 +773,8 @@ export class MirModule {
   setGlobalData(i, size, align, bytes, fixups) {
     if (this.globals[i] === undefined) throw new Error(`mir: 没有 ${i} 号模块级变量`);
     if (!Number.isInteger(size) || size < 0) throw new Error(`mir: 全局的大小 ${size} 不合法`);
-    if (align !== 1 && align !== 2 && align !== 4 && align !== 8 && align !== 16) {
-      throw new Error(`mir: 全局的对齐 ${align} 不是 1/2/4/8/16`);
+    if (align < 1 || align > 4096 || (align & (align - 1)) !== 0) {
+      throw new Error(`mir: 全局的对齐 ${align} 不是 1 到 4096 之间的 2 的幂`);
     }
     const bs = bytes === undefined ? [] : bytes;
     if (bs.length > size) throw new Error(`mir: 全局的初值 ${bs.length} 字节装不进 ${size} 字节`);
