@@ -418,6 +418,10 @@ tcc 逐字节相同了**（第五十片，`peWrite`：两个 win32 目标 160 �
 造导入表与导入桩、落重定位、算校验和、写文件；欠的是另一端，`.o` 里的字节还是 tcc 出的）。
 **这条链子已经能把 tcc 自己链出来**（第五十二片，`tests/c/pe-tcc.js`：`tcc.c` 一份
 `ONE_SOURCE` 的 `.o`，x86_64 400896 字节、arm64 476160 字节，与 tcc 自己链的逐字节相同）。
+**换个格式也走通了**（第五十三片，`stage0/src/link/elf_exe.js`：Linux 的 ELF 可执行文件，
+尺子是 `<target>-tcc -static -nostdlib -Wl,-e,main`，两个目标 20 份逐字节相同 —— 节的
+两级排序、程序头、静态链接下照样要造的 `.got` 与 PT_GNU_RELRO 都在里面；命令行上是
+`omni elf-link`）。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -10041,6 +10045,72 @@ arm64-win32  一份: 476160 字节（1 个 .o）    拆开: 480768 字节（12 �
 这一路走通，说明并合那一片（第四十二片）与链接这几片接得上。
 
 <!-- 第九刀第五十二片-END -->
+
+## 落地：第九刀第五十三片 —— 换个格式：ELF 可执行文件
+
+前面六片走的是 PE。这一片把同一条路在 **Linux 的 ELF** 上再走一遍，为的是验一句话：
+我们照的是 tcc 的**算式**，不是照着一个输出反推出来的。尺子换成
+
+```
+<target>-tcc -static -nostdlib -Wl,-e,main a.o [b.o …] -o a.out
+```
+
+`stage0/src/link/elf_exe.js`，对账在 `tests/c/elf-exe.js`：
+
+```
+x86_64-linux: 10 份可执行文件逐字节相同
+arm64-linux : 10 份可执行文件逐字节相同        （共 35676 字节）
+```
+
+三个开关都是被逼出来的：交叉编译的 Linux 目标在 macOS 上没有 libc 可装，所以
+`-nostdlib`；动态那一整套（`.interp` / `.dynsym` / `.hash` / `.dynamic` / `.got` 的
+运行期部分）还没写，所以 `-static`；没有 crt 也就没有 `_start`，入口只能自己指。剩下的
+正好是「摆放 + 写出」这一段 —— 而那一段是三个格式共用的骨架。
+
+### 这一片新学到的几格
+
+- **符号表根本不写**。`set_sec_sizes` 只给 `SHF_ALLOC` 的节填 `sh_size`（`tccelf.c:2217`），
+  `.symtab` / `.strtab` / `.rela.*` 的 `sh_size` 一直是 0；`alloc_sec_names` 于是不给它们
+  名字，`sort_sections` 把没名字的归到 0x900 那一类，`reorder_sections` 再把它们摘掉。
+  可执行文件里只剩 `SHF_ALLOC` 的节加一条 `.shstrtab`。
+- **次序是两级键**：`j` 认 alloc/write（0x100/0x200/0x700/0x900），`k` 认「是什么节」
+  （符号表 0x10、重定位 0x20、可执行 0x60、bss 0x70、`.got` 0x47、别的数据 0x50），然后
+  `if (s->sh_num <= bss_section->sh_num) ++k` —— 起手那几条标准节要排在**同类的后面**，
+  `_etext` / `_edata` 才是对的值。排法是插入排序，同键保持原次序。
+- **头占的地方要先算**：`file_offset = (Ehdr + phnum*Phdr + 3) & -4`，再加 `shnum * Shdr`，
+  然后 `addr = ELF_START_ADDR + file_offset`；第一个 PT_LOAD 最后又把 `p_offset` 按回 0、
+  `p_vaddr` 按回 base，好让 strip 一类的工具高兴。
+- **空节不换段**：`f != f0 && s->sh_size` 才开新的 PT_LOAD。`.data`/`.bss` 是空的时候它们
+  跟着 `.text` 那一段走，段的 `p_filesz` 是按对齐推过去的游标算出来的（0x279 -> 0x280）。
+- **静态链接照样有 `.got`**。tcc 的代码生成对 extern 符号用的是 `R_X86_64_GOTPCREL` /
+  `R_AARCH64_ADR_GOT_PAGE`，而那几号是 `ALWAYS_GOTPLT_ENTRY` —— 于是 `build_got_entries`
+  两趟走完就造出了 `.got`（头三格留给 `_DYNAMIC` 与两条哑项）。`.got` 归 0x47 那一档，
+  一出现就牵出一个 PT_GNU_RELRO 段头。GOT 那一格的值不是 `fill_got` 写的（那一句在 arm64
+  上比的是 x86_64 的号，等于没写），是 `.rela.got` 里那条 `R_GLOB_DAT` 在
+  `relocate_sections` 落笔时写进去的。
+- **`R_XXX_RELATIVE` 在 ELF 上什么都不做**，arm64 那两条「弱未定义符号改写成 `movz`/`nop`」
+  也是 PE 才有的 —— 同一个 `relocate()`，两个格式两套边角（`x86_64-link.c:398`、
+  `arm64-link.c:250` 那两个 `#ifdef TCC_TARGET_PE`）。
+- **链接器给的符号要真的放进符号表**。一开始我拿一张「名字 -> 节 + 偏移」的旁表记
+  `_etext` / `__start_xxx`，字节也对上了；但那样它们在 `build_got_entries` 眼里仍是**未定义**，
+  「AUTO 且未定义才走 GOT」那道筛子会漏进来，多造出 GOT 项。改成 `set_global_sym` 那样
+  直接改写符号表里那一条才是对的。
+
+### 顺手把尺子加宽
+
+`gen/` 里 83 个用例只有 5 个不用 libc 的头就能编。于是 `tests/c/elf-gen/` 添了五份专门
+戳这一片的自由站立源码：`.bss` 与 `_etext`/`_edata`/`_end`（10）、自己起名的节加
+`__attribute__((constructor))`（11，牵出 `.init_array` 与 PT_GNU_RELRO）、未定义的弱符号
+（12，走 GOT）、只读常量表（13）、两个目标文件一起链（14）。摊出来的形状：
+
+```
+11-sections: 8 节 + .shstrtab，4 段（3 个 PT_LOAD + PT_GNU_RELRO）
+             .eh_frame .data.ro .text .init_array .got mysec .data .bss
+```
+
+命令行上是 `omni elf-link a.o b.o -o a.out -e main`。
+
+<!-- 第九刀第五十三片-END -->
 
 
 

@@ -139,7 +139,11 @@ function ehFrameCie(machine) {
 }
 
 /**
- * 几个 ELF 目标文件并成一个。
+ * 把几个 ELF 目标文件装进**一份内存里的节表**。
+ *
+ * 这是 `tcc_load_object_file` 走完一圈之后 `TCCState` 的样子：节一条条接好、符号并好、
+ * 重定位的符号号改好。写 `.o`（`mergeObjects`）与写可执行文件（`elf_exe.js`）都从这里
+ * 接着往下走 —— 那两步的前半段本来就是同一件事，只是最后写出的形状不同。
  *
  * @param objs 每个都是一个 `ET_REL` 的字节
  * @param opts `{rdata, unwind}`：`rdata` 是只读数据那一节的名字 —— PE 目标上 tcc 叫它
@@ -147,9 +151,10 @@ function ehFrameCie(machine) {
  *             是要不要 `.eh_frame` —— tcc 只在**最终格式是 ELF** 的目标上开
  *             （`tccelf.c:93`：格式不是 ELF 就把 `unwind_tables` 清掉），于是 macOS
  *             与 Windows 上连节都没有，输入里的 `.eh_frame` 也一并丢掉
- * @returns 并出来的 `.o` 的字节
+ * @returns `{machine, secs, syms, relas, strs, byName, idx, setSym, newSec}`；`secs` 是
+ *          1 号起的（0 号留空），`idx` 记着起手那几条的号
  */
-export function mergeObjects(objs, opts) {
+export function linkObjects(objs, opts) {
   if (objs.length === 0) throw new OmniError('elf: 一个目标文件都没有，没什么可并的');
   const o = opts === undefined ? {} : opts;
   const rdata = o.rdata === undefined ? '.data.ro' : o.rdata;
@@ -171,8 +176,8 @@ export function mergeObjects(objs, opts) {
     return secs.length - 1;
   };
   const TEXT = newSec('.text', SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, 8, 0);
-  newSec('.data', SHT_PROGBITS, SHF_ALLOC | SHF_WRITE, 8, 0);
-  newSec(rdata, SHT_PROGBITS, SHF_ALLOC, 8, 0);
+  const DATA = newSec('.data', SHT_PROGBITS, SHF_ALLOC | SHF_WRITE, 8, 0);
+  const RDATA = newSec(rdata, SHT_PROGBITS, SHF_ALLOC, 8, 0);
   const BSS = newSec('.bss', SHT_NOBITS, SHF_ALLOC | SHF_WRITE, 8, 0);
   const SYMTAB = newSec('.symtab', SHT_SYMTAB, 0, 8, SYM_SIZE);
   const STRTAB = newSec('.strtab', SHT_STRTAB, 0, 1, 0);
@@ -354,6 +359,37 @@ export function mergeObjects(objs, opts) {
     }
   }
 
+  if (machine < 0) throw new OmniError('elf: 并合之后不知道是什么架构');
+  /* `.text` 一直在 1 号上（起手那几条写死），这一条是给读代码的人的锚，不参与计算。 */
+  if (secs[TEXT].name !== '.text') throw new OmniError('elf: 1 号节不是 .text');
+  return {
+    machine,
+    secs,
+    syms,
+    relas,
+    strs,
+    byName,
+    setSym,
+    newSec,
+    idx: {
+      TEXT, DATA, RDATA, BSS, SYMTAB, STRTAB,
+    },
+  };
+}
+
+/**
+ * 几个 ELF 目标文件并成一个 `.o`（`tcc -r`）。
+ *
+ * @param objs 每个都是一个 `ET_REL` 的字节
+ * @param opts 同 `linkObjects`
+ * @returns 并出来的 `.o` 的字节
+ */
+export function mergeObjects(objs, opts) {
+  const st = linkObjects(objs, opts);
+  const {
+    machine, secs, syms, relas, strs,
+  } = st;
+  const { SYMTAB, STRTAB } = st.idx;
   /* ---- 排符号（`sort_syms`）：局部在前、全局在后，重定位里的号跟着改。 */
   const order = [];
   for (let i = 0; i < syms.length; i++) if (Math.floor(syms[i].info / 16) === STB_LOCAL) order.push(i);
@@ -417,8 +453,5 @@ export function mergeObjects(objs, opts) {
   for (const s of out) s.strx = shstr.intern(s.name);
   out[out.length - 1].bytes = shstr.out();
   out[out.length - 1].size = out[out.length - 1].bytes.length;
-  if (machine < 0) throw new OmniError('elf: 并合之后不知道是什么架构');
-  /* `.text` 一直在 1 号上（起手那几条写死），这一条是给读代码的人的锚，不参与计算。 */
-  if (secs[TEXT].name !== '.text') throw new OmniError('elf: 1 号节不是 .text');
   return writeSections(machine, out);
 }

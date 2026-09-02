@@ -20,9 +20,14 @@ const EM_AARCH64 = 183;
 const R_X86_64_64 = 1;
 const R_X86_64_PC32 = 2;
 const R_X86_64_PLT32 = 4;
+const R_X86_64_GLOB_DAT = 6;
+const R_X86_64_JUMP_SLOT = 7;
 const R_X86_64_RELATIVE = 8;
+const R_X86_64_GOTPCREL = 9;
 const R_X86_64_32 = 10;
 const R_X86_64_32S = 11;
+const R_X86_64_GOTPCRELX = 41;
+const R_X86_64_REX_GOTPCRELX = 42;
 
 /* arm64 */
 const R_AARCH64_ABS64 = 257;
@@ -39,6 +44,10 @@ const R_AARCH64_LDST16_ABS_LO12_NC = 284;
 const R_AARCH64_LDST32_ABS_LO12_NC = 285;
 const R_AARCH64_LDST64_ABS_LO12_NC = 286;
 const R_AARCH64_LDST128_ABS_LO12_NC = 299;
+const R_AARCH64_ADR_GOT_PAGE = 311;
+const R_AARCH64_LD64_GOT_LO12_NC = 312;
+const R_AARCH64_GLOB_DAT = 1025;
+const R_AARCH64_JUMP_SLOT = 1026;
 const R_AARCH64_RELATIVE = 1027;
 
 /**
@@ -53,13 +62,19 @@ const R_AARCH64_RELATIVE = 1027;
  * @param imagebase 映像基址（`R_XXX_RELATIVE` 要它来算 RVA）
  * @param weakUndef 这条重定位指的是不是一个**未定义的弱符号** —— PE 上它的地址是 0，
  *        arm64 的 `adrp` 与 `bl` 都编不出那么远的距离，tcc 于是改写成 `movz`/`nop`
+ * @param gotSlot 这个符号在 `.got` 里那一格的**虚拟地址**（走 GOT 的那几号要它）
  */
-export function relocateOne(machine, type, b, at, addr, val, imagebase, weakUndef) {
+export function relocateOne(machine, type, b, at, addr, val, imagebase, weakUndef, gotSlot) {
   const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
   const add32 = (v) => dv.setUint32(at, (dv.getUint32(at, true) + v) >>> 0, true);
   const add64 = (v) => dv.setBigUint64(at, dv.getBigUint64(at, true) + BigInt(v), true);
+  const set64 = (v) => dv.setBigUint64(at, BigInt(v), true);
   const put32 = (keep, or) => dv.setUint32(at, ((dv.getUint32(at, true) & keep) | or) >>> 0, true);
   const insn = () => dv.getUint32(at, true);
+  const slot = () => {
+    if (gotSlot === undefined) throw new OmniError(`reloc: ${type} 号要 .got，可它还没造`);
+    return gotSlot;
+  };
 
   if (machine === EM_X86_64) {
     switch (type) {
@@ -69,6 +84,13 @@ export function relocateOne(machine, type, b, at, addr, val, imagebase, weakUnde
       case R_X86_64_PC32:
       case R_X86_64_PLT32: return add32(val - addr);
       case R_X86_64_RELATIVE: return add32(val - imagebase);
+      /* GOT 里那一格的地址 - 这一处 - 4（`- 4` 是 `rip` 相对里指令末尾那一段）。 */
+      case R_X86_64_GOTPCREL:
+      case R_X86_64_GOTPCRELX:
+      case R_X86_64_REX_GOTPCRELX: return add32(slot() - addr - 4);
+      /* 往 GOT 那一格里**写**符号的地址（不是加）—— tcc 那两句是 `write64le`。 */
+      case R_X86_64_GLOB_DAT:
+      case R_X86_64_JUMP_SLOT: return set64(val);
       default: throw new OmniError(`reloc: x86_64 还不会 ${type} 号`);
     }
   }
@@ -106,6 +128,15 @@ export function relocateOne(machine, type, b, at, addr, val, imagebase, weakUnde
         const link = type === R_AARCH64_CALL26 ? 0x80000000 : 0;
         return dv.setUint32(at, (0x14000000 | link | (d & 0x3ffffff)) >>> 0, true);
       }
+      case R_AARCH64_ADR_GOT_PAGE: {
+        /* 与上面那条一样的编码，只是指的是 `.got` 里那一格。 */
+        const off = Math.floor(slot() / 4096) - Math.floor(addr / 4096);
+        return put32(0x9f00001f, ((off & 0x1ffffc) << 3 | (off & 3) << 29) >>> 0);
+      }
+      case R_AARCH64_LD64_GOT_LO12_NC:
+        return put32(0xfff803ff, ((slot() & 0xff8) << 7) >>> 0);
+      case R_AARCH64_GLOB_DAT:
+      case R_AARCH64_JUMP_SLOT: return set64(val);
       default: throw new OmniError(`reloc: arm64 还不会 ${type} 号`);
     }
   }

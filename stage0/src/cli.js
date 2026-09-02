@@ -30,6 +30,7 @@ import { writeObject as writeElfObject } from './link/elf.js';
 import { mergeObjects as mergeElfObjects } from './link/elf_merge.js';
 import { peLoad } from './link/pe_load.js';
 import { peWrite } from './link/pe_link.js';
+import { elfExe } from './link/elf_exe.js';
 import { readSexpr } from './sexpr/read.js';
 import { lowerCoreSexpr } from './sexpr/lower.js';
 import { printSexpr } from './sexpr/print.js';
@@ -1790,7 +1791,7 @@ function main(argv) {
     const a = rest[i];
     if (a === '-o' || a === '--mode' || a === '--work' || a === '--cache'
       || a === '-I' || a === '-D' || a === '--rdata'
-      || a === '-L' || a === '--target') { i++; continue; }
+      || a === '-L' || a === '--target' || a === '-e') { i++; continue; }
     if (a.startsWith('-')) continue;
     files.push(a);
   }
@@ -2082,6 +2083,26 @@ function main(argv) {
       stdout(`${out} (${r.bytes.length} 字节，${r.infos.length} 节，${r.nthunks} 个导入桩)\n`);
       return 0;
     }
+    /* `elf-link`：几个 `.o` 链成一份静态的 Linux 可执行文件（第九刀第五十三片）。
+     * 没有 libc，入口自己指：
+     *   omni elf-link a.o [b.o …] -o a.out [-e main] */
+    case 'elf-link': {
+      const oi = rest.indexOf('-o');
+      const out = oi >= 0 ? rest[oi + 1] : 'a.out';
+      const ei = rest.indexOf('-e');
+      const entryName = ei >= 0 ? rest[ei + 1] : 'main';
+      const bytesOf = (p) => {
+        const s = readBinary(p);
+        const b = new Uint8Array(s.length);
+        for (let k = 0; k < s.length; k++) b[k] = s.charCodeAt(k);
+        return b;
+      };
+      const r = elfExe({ objs: files.map(bytesOf), entryName });
+      writeBinary(out, r.bytes);
+      stdout(`${out} (${r.bytes.length} 字节，${r.shnum} 节，${r.phnum} 段，`
+        + `入口 0x${r.entry.toString(16)})\n`);
+      return 0;
+    }
     // 一个源文件一份产物（第七十五刀）：`<名字>.sx` 与 `<名字>.js` 摊在一个目录里，
 
     // 名字就是源文件自己的名字。`-o 目录` 指定去处，默认 .omni-cache/asy-mods。
@@ -2260,6 +2281,8 @@ commands:
             libtcc1.a on demand and the .def import libraries from -L DIR, builds the
             import table and thunks, applies every relocation. -o NAME,
             --target x86_64-win32|arm64-win32
+  elf-link  link .o files into a static Linux executable (ADR-0017 cut 9 slice 53):
+            no libc, so give the entry with -e NAME (default main). -o NAME
   oir       print the OIR as JSON
   mir       print the MIR (ADR-0014 decision 6): SSA values + slots + structured
             control flow, one 8-byte record per instruction (--bytes: sizes and
