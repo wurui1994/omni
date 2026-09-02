@@ -177,12 +177,12 @@ import {
   ctype, mkPointer, mkArray, mkStruct, mkEnum, enumBase, mkFunc, typeSize, typeText, sameType,
   sameTypeUnqual, mkVla, isVla, compareTypes,
   TY_VOID, TY_INT, TY_UINT, TY_LLONG, TY_ULLONG, TY_CHAR, TY_UCHAR, TY_SHORT, TY_BOOL,
-  TY_FLOAT, TY_DOUBLE, TY_LDOUBLE, VT_LDOUBLE,
+  TY_FLOAT, TY_DOUBLE, TY_LDOUBLE, VT_LDOUBLE, sseEightbytes,
 } from './ctype.js';
 import {
   MirModule, MirFunc, OP, T_VOID, T_I32, T_I64, T_BOOL, T_F32, T_F64, REF_NONE,
   CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16, CVT_I2F, CVT_U2F, CVT_F2I,
-  CVT_FCVT, memDesc, MEM_PAGE, fnPtr, isConstRef,
+  CVT_FCVT, memDesc, MEM_PAGE, fnPtr, isConstRef, memArgAux,
 } from '../mir/ir.js';
 
 /* 线性内存的访问描述符号（`MLOAD_KINDS` / `MSTORE_KINDS` 的下标，ir.js:383）。
@@ -3455,8 +3455,8 @@ export class CGen {  /**
            * 由后端按 ABI 把那几个字节拷进格子里。前端这一层不知道那一格在哪儿 ——
            * 苹果 arm64 上一律在栈上，SysV 上还要分类，那都是后端的账。 */
           if (e.val !== undefined) {
-            const s = typeSize(e.ty);
-            refs.push(this.f.emit(OP.ARGMEM, T_I64, this.addrOf(e.val), REF_NONE, s.size));
+            refs.push(this.f.emit(OP.ARGMEM, T_I64, this.addrOf(e.val), REF_NONE,
+              this.memArgAuxOf(e.ty)));
             continue;
           }
           refs.push(e.ref);
@@ -3564,6 +3564,18 @@ export class CGen {  /**
   }
 
   /**
+   * 一块内容（变参里的 struct）的 aux：字节数 + SSE 位图（第四十片）。
+   *
+   * 位图是一条**类型事实**（"前两个八字节里哪几整格只装浮点"），不是 ABI 决定 ——
+   * 可是要它的只有 SysV（分类要它），而 MIR 不分架构，所以只能在这儿算好带下去。
+   * 超过 16 字节的一律进内存，位图没有意义，填 0。
+   */
+  memArgAuxOf(ty) {
+    const s = typeSize(ty);
+    return memArgAux(s.size, s.size > 16 ? 0 : sseEightbytes(ty));
+  }
+
+  /**
    * `va_arg(ap, T)`：读走一格、把 ap 推到下一格。
    *
    * **先读后推**，而且读的宽度按 T（一格 8 字节里只有 T 那几个字节有效，见 `vaBlock`）。
@@ -3581,8 +3593,8 @@ export class CGen {  /**
        * 左值** —— 要拷贝的话由赋值那一步去拷（`structCopy`），取成员就直接读。
        * 与线性内存那条腿、以及 struct 返回，都是同一个手法。 */
       if (isStruct(ty.t)) {
-        const s = typeSize(ty);
-        const at = this.f.emit(OP.VAARG, T_I64, this.addrOf(ap), REF_NONE, s.size);
+        const at = this.f.emit(OP.VAARG, T_I64, this.addrOf(ap), REF_NONE,
+          this.memArgAuxOf(ty));
         return sMem(ty, at, 0);
       }
       const mt = mirTypeOf(ty);

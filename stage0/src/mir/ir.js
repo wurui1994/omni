@@ -418,11 +418,31 @@ const OPS = [
   // 内容」这条额外信息，所以内容必须**直接躺在格子里**，而 ABI 说那是几个字节、
   // 摆在哪儿，只有后端知道。
   //
-  // 于是这一条：a = 那一份内容的地址，aux = 字节数，t = T_I64。它产的"值"**只能**当
-  // 一次变参调用的实参用，而且只能落在分界之后 —— 后端见到它就把 aux 个字节拷进那一格，
-  // 而不是把地址写进去。
-  ['ARGMEM', 'r', '-', 'n'],    // a = 内容的地址，aux = 字节数
+  // 于是这一条：a = 那一份内容的地址，aux = `memArgAux(字节数, SSE 位图)`，t = T_I64。
+  // 它产的"值"**只能**当一次变参调用的实参用，而且只能落在分界之后 —— 后端见到它就把
+  // 那几个字节拷进那一格，而不是把地址写进去。
+  ['ARGMEM', 'r', '-', 'n'],    // a = 内容的地址，aux = 字节数 + SSE 位图
 ];
+
+/* ---------------------------------------------------------------- 一块内容的 aux
+ * `ARGMEM` 与「取 struct 的 `VAARG`」的 aux 里塞着两样东西：
+ *
+ *   低 20 位   字节数（`sizeof`）
+ *   再两位     **SSE 位图** —— 第 0 位说 `[0,8)` 那一整格只装浮点，第 1 位说 `[8,16)`
+ *
+ * 为什么位图也得跟着走：SysV 的聚合分类要它（一格里全是 float/double 就进 xmm，
+ * 掺进一个整型就进整数寄存器），而 MIR 是**不分架构**的 —— 同一份 MIR 喂 arm64 与
+ * x86_64 两个后端，所以「这一格里是不是全浮点」这条**类型事实**只能由前端算好带下来
+ * （算在 `ctype.js` 的 `sseEightbytes`）。苹果的 arm64 用不着它：那边变参一律走栈。
+ *
+ * 超过 16 字节的聚合在 SysV 里一律进 MEMORY，位图没有意义，前端填 0。 */
+const MEMARG_SHIFT = 2 ** 20;
+export function memArgAux(size, sseMask) {
+  if (size <= 0 || size >= MEMARG_SHIFT) throw new Error(`mir: ARGMEM 的字节数 ${size} 出界`);
+  return size + sseMask * MEMARG_SHIFT;
+}
+export function memArgSize(aux) { return aux % MEMARG_SHIFT; }
+export function memArgSse(aux) { return Math.floor(aux / MEMARG_SHIFT); }
 
 /** 函数号 -> 函数指针值。0 留给空指针，所以偏一格（见 `CALLI`）。 */
 export function fnPtr(no) { return BigInt(no + 1); }

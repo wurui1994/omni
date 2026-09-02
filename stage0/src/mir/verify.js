@@ -21,6 +21,7 @@ import {
   OP, OP_NAMES, OP_MODES, REF_NONE, REF_BIAS, isConstRef, refText, typeText, typeLanes, T_BOOL,
   T_I64, T_I32, T_F64, T_VOID,
   MLOAD_KINDS, MSTORE_KINDS, memKindNo, memBytes, isFloatType, isIntType, intBits,
+  memArgSize, memArgSse,
 } from './ir.js';
 
 export function verifyMir(mod) {
@@ -229,7 +230,7 @@ function checkIndex(mod, f, i, op, v, bad, k) {
     /* 取 struct（aux > 0）回的是**那一格的地址**：内容整份躺在变参区里，拷不拷由前端
      * 那边的赋值决定（与 struct 返回同一个手法）。 */
     if (v !== 0) {
-      if (t !== T_I64) bad(i, `VAARG 取 ${v} 字节的 struct，回的是地址，t 只能是 i64`);
+      if (t !== T_I64) bad(i, `VAARG 取 ${memArgSize(v)} 字节的 struct，回的是地址，t 只能是 i64`);
       return;
     }
     if (t !== T_I64 && t !== T_I32 && t !== T_F64) {
@@ -241,7 +242,11 @@ function checkIndex(mod, f, i, op, v, bad, k) {
    * 变参走的是我们自己摆的那块变参区（`vaBlock`），struct 直接摊进去，不用新 op。 */
   if (op === OP.ARGMEM) {
     if (!mod.native) { bad(i, 'ARGMEM：只有 native 这条腿上变参按真 ABI 走'); return; }
-    if (v <= 0) { bad(i, `ARGMEM 的 aux 是 ${v}，那是字节数，只能是正数`); return; }
+    if (memArgSize(v) <= 0) { bad(i, `ARGMEM 的字节数是 ${memArgSize(v)}，只能是正数`); return; }
+    if (memArgSize(v) > 16 && memArgSse(v) !== 0) {
+      bad(i, `ARGMEM 有 ${memArgSize(v)} 字节，超过 16 的一律进内存，SSE 位图该是 0`);
+      return;
+    }
     if (f.t[i] !== T_I64) bad(i, `ARGMEM 的 t 是 ${typeText(f.t[i])}，它拿的是地址，只能是 i64`);
     return;
   }

@@ -49,6 +49,7 @@ import {
   typeKind, isFloatType, intBits, memKindNo, memOff, MLOAD_KINDS, MSTORE_KINDS,
   CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16,
   CVT_I2F, CVT_U2F, CVT_F2I, CVT_FCVT, CVT_BITCAST, OP_NAMES, hexBytes,
+  memArgSize, memArgSse,
 } from '../mir/ir.js';
 
 /* 草稿寄存器。挑 r10/r11 是因为它们**既不是实参寄存器、也不是被调用者保存的** ——
@@ -100,12 +101,67 @@ function widthOf(t) {
  *
  * 与 arm64 那一份同一个用意：算帧要多大与真的发指令**问同一个函数**。
  */
+/**
+ * 一整块内容的实参（`ARGMEM`，第四十片）：回 `{size, sse}`，不是这一条就回 null。
+ */
+function argMemOf(f, ar) {
+  if (isConstRef(ar)) return null;
+  const i = f.at(ar);
+  if (f.op[i] !== OP.ARGMEM) return null;
+  return { size: memArgSize(f.aux[i]), sse: memArgSse(f.aux[i]) };
+}
+
+/**
+ * SysV 的聚合分类（第四十片）：**超过 16 字节整份进 MEMORY**（栈上一格 `align8(n)`），
+ * 16 字节以内按八字节一格分 INTEGER / SSE，寄存器**够不够两串一起看** ——
+ * 差一个就整份改走栈（规范 3.2.3 第 5 步：任一格分不到寄存器，整个实参进 MEMORY）。
+ *
+ * 回 `{regs}`（每格一个 `{x}` 或 `{v}`）或 null（走栈）。`ngrn`/`nsse` 由调用方推进。
+ */
+function classifyMem(mem, ngrn, nsse) {
+  if (mem.size > 16) return null;
+  const words = Math.ceil(mem.size / 8);
+  let needInt = 0;
+  let needSse = 0;
+  for (let e = 0; e < words; e++) {
+    if ((mem.sse & (e === 0 ? 1 : 2)) !== 0) needSse++;
+    else needInt++;
+  }
+  if (ngrn + needInt > IARG.length || nsse + needSse > FARG.length) return null;
+  const regs = [];
+  let gi = ngrn;
+  let si = nsse;
+  for (let e = 0; e < words; e++) {
+    if ((mem.sse & (e === 0 ? 1 : 2)) !== 0) {
+      regs.push({ v: si });
+      si++;
+    } else {
+      regs.push({ x: gi });
+      gi++;
+    }
+  }
+  return { regs, ngrn: gi, nsse: si };
+}
+
 function argPlaces(mod, f, args) {
   const at = [];
   let ngrn = 0;
   let nsse = 0;
   let stack = 0;
   for (const ar of args) {
+    const mem = argMemOf(f, ar);
+    if (mem !== null) {
+      const c = classifyMem(mem, ngrn, nsse);
+      if (c !== null) {
+        at.push({ regs: c.regs, size: mem.size });
+        ngrn = c.ngrn;
+        nsse = c.nsse;
+        continue;
+      }
+      at.push({ off: stack, bytes: mem.size });
+      stack += mem.size + (mem.size % 8 === 0 ? 0 : 8 - (mem.size % 8));
+      continue;
+    }
     const t = f.typeOf(ar, mod.consts);
     if (isFloatType(t)) {
       if (nsse < FARG.length) {
@@ -202,6 +258,13 @@ class FnGen {
     while (k < f.count()) {
       if (f.op[k] === OP.VASTART || f.op[k] === OP.VACOPY) {
         bytes += 24;
+        this.vaOffs.set(k, -bytes);
+      }
+      /* 取 struct 的 `VAARG` 也要一块（第四十片，16 字节）：分到寄存器上的那种聚合，
+       * 两个八字节在寄存器保存区里**不连着**（整数格在 0-47、xmm 格在 48 起，一格 16），
+       * 而 `va_arg` 回的必须是一份连着的内容。所以抄进这一块再把它的地址给出去。 */
+      if (f.op[k] === OP.VAARG && f.aux[k] !== 0) {
+        bytes += 16;
         this.vaOffs.set(k, -bytes);
       }
       k++;
@@ -514,10 +577,67 @@ class FnGen {
       return;
     }
     if (op === OP.VAARG) {
-      /* struct 那一格（第三十九片）在 SysV 上要走真的分类：每 8 字节一格算
-       * INTEGER/SSE，超过 16 字节整份进 MEMORY，而分类结果决定它躺在寄存器保存区里
-       * 还是溢出区里。那是下一片的活 —— 明着报，别按标量读半格。 */
-      if (f.aux[i] !== 0) return nyi('va_arg 取 struct（SysV 的分类还没到）');
+      /* 取 struct（aux > 0）：SysV 的分类在这儿真的要算一遍（第四十片）。
+       *
+       *  - 超过 16 字节：整份进 MEMORY，只在**溢出区**里躺着 —— 取它的地址、游标往前推
+       *    `align8(n)`，一条访存都不用发。
+       *  - 16 字节以内：按八字节分 INTEGER / SSE。两串寄存器**够不够一起看**，够就从
+       *    寄存器保存区里取。可那两格在保存区里**不连着**（整数格在 0-47、xmm 格在 48 起
+       *    一格 16 字节），而 `va_arg` 回的必须是连着的一份 —— 所以抄进帧里那 16 字节
+       *    （见 `vaOffs`）再把它的地址给出去。不够就整份从溢出区取。
+       *
+       * 「够不够」要在运行时判：同一条 `va_arg` 在循环里会被走多次，而游标是变的。 */
+      if (f.aux[i] !== 0) {
+        const n = memArgSize(f.aux[i]);
+        const sseMask = memArgSse(f.aux[i]);
+        const step = n + (n % 8 === 0 ? 0 : 8 - (n % 8));
+        this.loadRef(TMP0, f.a[i]);
+        buf.emit(x.movRM(8, TMP0, TMP0, 0));            // TMP0 = 那个 24 字节结构的地址
+        /* 从溢出区取一份：地址就是 `overflow_arg_area`，之后往前推一格。 */
+        const fromStack = () => {
+          buf.emit(x.movRM(8, RES, TMP0, 8));
+          buf.emit(x.movRR(8, TMP1, RES), x.aluRI(ALU.add, 8, TMP1, step));
+          buf.emit(x.movMR(8, TMP0, 8, TMP1));
+        };
+        if (n > 16) {
+          fromStack();
+          return this.def(i, RES);
+        }
+        const words = Math.ceil(n / 8);
+        const isSse = (e) => (sseMask & (e === 0 ? 1 : 2)) !== 0;
+        let needInt = 0;
+        let needSse = 0;
+        for (let e = 0; e < words; e++) if (isSse(e)) needSse++; else needInt++;
+        const dst = this.vaOffs.get(i);
+        if (dst === undefined) throw new OmniError('x64: 取 struct 的 VAARG 没有分到那一块');
+        const over = buf.label();
+        const done = buf.label();
+        /* 两串各自的余量：`gp_offset <= 48 - 8*needInt`、`fp_offset <= 176 - 16*needSse`。
+         * 任一串不够就整份走溢出区（规范 3.2.3 第 5 步）。 */
+        if (needInt > 0) {
+          buf.emit(x.movRM(4, TMP1, TMP0, 0), x.aluRI(ALU.cmp, 4, TMP1, 48 - 8 * needInt));
+          buf.jcc(CC.a, over);
+        }
+        if (needSse > 0) {
+          buf.emit(x.movRM(4, TMP1, TMP0, 4), x.aluRI(ALU.cmp, 4, TMP1, 176 - 16 * needSse));
+          buf.jcc(CC.a, over);
+        }
+        for (let e = 0; e < words; e++) {
+          const field = isSse(e) ? 4 : 0;
+          const grow = isSse(e) ? 16 : 8;
+          buf.emit(x.movRM(4, TMP1, TMP0, field), x.movRM(8, RES, TMP0, 16));
+          buf.emit(x.aluRR(ALU.add, 8, RES, TMP1));     // RES = reg_save_area + 偏移
+          buf.emit(x.movRM(8, TMP1, RES, 0), x.movMR(8, BP, dst + e * 8, TMP1));
+          buf.emit(x.movRM(4, TMP1, TMP0, field), x.aluRI(ALU.add, 4, TMP1, grow));
+          buf.emit(x.movMR(4, TMP0, field, TMP1));
+        }
+        buf.emit(x.lea(8, RES, BP, dst));
+        buf.jmp(done);
+        buf.place(over);
+        fromStack();
+        buf.place(done);
+        return this.def(i, RES);
+      }
       const flt = isFloatType(t);
       const field = flt ? 4 : 0;          // gp_offset 在 0、fp_offset 在 4
       const limit = flt ? 176 : 48;       // 越过这条线就说明寄存器那一段用完了
@@ -577,6 +697,13 @@ class FnGen {
       this.loadRef(TMP0, f.a[i]);
       buf.emit(x.movRR(8, REG.rsp, TMP0));
       return;
+    }
+    /* 变参里的一整块内容（第三十九片）：这一条本身**不发访存** —— 内容什么时候拷、
+     * 拷到哪儿（寄存器还是溢出区），是调用那一头按分类决定的（`callArgs`）。
+     * 这儿只把地址落到自己的栈位上。 */
+    if (op === OP.ARGMEM) {
+      this.loadRef(RES, f.a[i]);
+      return this.def(i, RES);
     }
     if (op === OP.SPALLOC) {
       this.loadRef(TMP0, f.a[i]);
@@ -725,8 +852,38 @@ class FnGen {
       k++;
       /* 走栈的：一格 8 字节，摆在出参区里（`rsp + off`）。 */
       if (place.off !== undefined) {
+        /* 一整块内容进 MEMORY（`ARGMEM`，第四十片）：按 8/4/2/1 递降着拷，
+         * **不拷到格子末尾** —— 格子补齐到 8，源没有那么长（arm64 那边同一条）。 */
+        if (place.bytes !== undefined) {
+          this.loadRef(TMP0, ar);
+          let at = 0;
+          for (const w of [8, 4, 2, 1]) {
+            while (place.bytes - at >= w) {
+              this.buf.emit(x.movRM(w, TMP1, TMP0, at), x.movMR(w, REG.rsp, place.off + at, TMP1));
+              at += w;
+            }
+          }
+          continue;
+        }
         this.loadRef(TMP0, ar);
         this.buf.emit(x.movMR(8, REG.rsp, place.off, TMP0));
+        continue;
+      }
+      /* 一整块内容分到了寄存器上：一格一个，整数格进 IARG、浮点格进 xmm。
+       * **整格读满 8 字节**，末格不满也一样 —— 寄存器里的高位无所谓（SysV 明说），
+       * 而 tcc 那边（`gfunc_call` 的 x86_64 那一支）也是按 8 字节一格读的。
+       * 能这么读是因为进寄存器的聚合最多 16 字节，而它的对齐把那一格垫满了。 */
+      if (place.regs !== undefined) {
+        this.loadRef(TMP0, ar);
+        let e = 0;
+        for (const r of place.regs) {
+          if (r.x !== undefined) this.buf.emit(x.movRM(8, IARG[r.x], TMP0, e * 8));
+          else {
+            this.buf.emit(x.movRM(8, TMP1, TMP0, e * 8));
+            this.toFp(FARG[r.v], TMP1);
+          }
+          e++;
+        }
         continue;
       }
       if (place.v !== undefined) {

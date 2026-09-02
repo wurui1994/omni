@@ -253,6 +253,53 @@ export function bfAccess(ty) {
  * Linux 都是它）：`long` 与指针都是 8 字节。这个选择要与 tcc 在本机上的选择一致，
  * 否则 `sizeof` 与 struct 布局会与 oracle 分岔。
  */
+/**
+ * 一个类型的**前两个八字节里，哪几个整格只装浮点**（第四十片）。回一张两位的位图：
+ * 第 0 位是 `[0,8)`、第 1 位是 `[8,16)`。
+ *
+ * 这不是 ABI 决定，是一条**类型事实** —— 所以它住在这儿而不是某个后端里。SysV 的
+ * 聚合分类要它：一格里全是 float/double 就归 SSE（进 xmm），只要掺进一个整型或指针
+ * 就归 INTEGER。苹果的 arm64 用不着这一格（那边变参一律走栈）。
+ *
+ * 逐字节标记而不是逐成员判断：`struct { float a; int b; }` 与
+ * `struct { float a, b; }` 的成员数一样多，差别只在某几个字节上。空洞（对齐补的那些
+ * 字节）不表态 —— SysV 也是这么算的。
+ */
+export function sseEightbytes(ty) {
+  const NONE = 0;
+  const FLT = 1;
+  const OTHER = 2;
+  const marks = [NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE,
+    NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE];
+  const walk = (t, base) => {
+    if (base >= 16) return;
+    if (isArray(t.t)) {
+      const es = typeSize(t.ref);
+      for (let k = 0; k < t.count && base + k * es.size < 16; k++) walk(t.ref, base + k * es.size);
+      return;
+    }
+    if (isStruct(t.t) && t.ref !== null && t.ref.fields !== undefined) {
+      for (const fd of t.ref.fields) walk(fd.ty, base + fd.off);
+      return;
+    }
+    const b = btype(t.t);
+    const what = b === VT_FLOAT || b === VT_DOUBLE ? FLT : OTHER;
+    const s = typeSize(t);
+    for (let k = 0; k < s.size && base + k < 16; k++) marks[base + k] = what;
+  };
+  walk(ty, 0);
+  let mask = 0;
+  for (let e = 0; e < 2; e++) {
+    let sse = false;
+    for (let k = e * 8; k < e * 8 + 8; k++) {
+      if (marks[k] === OTHER) { sse = false; break; }
+      if (marks[k] === FLT) sse = true;
+    }
+    if (sse) mask += e === 0 ? 1 : 2;
+  }
+  return mask;
+}
+
 export function typeSize(ty) {
   const b = btype(ty.t);
   if (isArray(ty.t)) {

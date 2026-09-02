@@ -115,6 +115,17 @@ const CASES = [
   ['va_copy：十个 int（跨过寄存器那条线）', 'return vtwice(10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10);'],
   ['va_copy：走了一格之后再抄', 'return vskip(3, 7, 8, 9);'],
   ['va_copy：在收 va_list 的那种函数里抄', 'return vhead2(4, 1, 2, 3, 4);'],
+  /* struct 进变参（第三十九、四十片）：内容整份摊在格子里。 */
+  ['struct 进变参：一个', 'struct vp p; p.x = 1; p.y = 2; return svsum(1, p);'],
+  ['struct 进变参：两个', 'struct vp a; struct vp b; a.x = 1; a.y = 2; b.x = 3; b.y = 4;'
+    + ' return svsum(2, a, b);'],
+  ['struct 进变参：两格都是浮点', 'struct vd v; v.a = 1.5; v.b = 2.5; return vdbl(1, v);'],
+  ['struct 进变参：va_arg 回的是左值', 'struct vp p; p.x = 7; p.y = 9; return vfirst(1, p);'],
+  ['struct 进变参：混着标量、小的与大的', 'struct vp p; struct vbig b;'
+    + ' p.x = 3; p.y = 4; b.a = 5; b.d = 0.5; b.s[0] = 6;'
+    + ' return vmixs(5, 1, p, 2.0, b, 7);'],
+  ['struct 进变参：同一个 struct 传两遍', 'struct vp p; p.x = 2; p.y = 3;'
+    + ' return svsum(2, p, p) + vfirst(1, p);'],
   /* 函数指针（第二十七片）：取地址是真符号地址，调用是间接调用。 */
   ['函数指针：直接调', 'long long (*f)(long long) = dbl; return f(21);'],
   ['函数指针：当实参传下去', 'return apply(trip, 7);'],
@@ -315,6 +326,55 @@ long long vhead2(int n, ...) {
   long long r = vrelay2(n, ap);
   __builtin_va_end(ap);
   return r;
+}
+/* struct 进变参（第三十九、四十片）：内容**整份摊在格子里**，不是一个地址 ——
+ * 两条腿各按自己的 ABI 摆：苹果 arm64 一律走栈，SysV 要按八字节分 INTEGER/SSE，
+ * 超过 16 字节的整份进内存。下面四个形状正好把那几种走法都占上。 */
+struct vp { int x, y; };            /* 8 字节，SysV 上一整格 INTEGER */
+struct vd { double a, b; };         /* 16 字节，两格都是 SSE */
+struct vbig { int a; double d; char s[8]; };   /* 24 字节，SysV 上进内存 */
+long long svsum(int n, ...) {
+  __builtin_va_list ap;
+  long long s = 0;
+  int i;
+  __builtin_va_start(ap, n);
+  for (i = 0; i < n; i++) {
+    struct vp p = __builtin_va_arg(ap, struct vp);
+    s += p.x * 10 + p.y;
+  }
+  __builtin_va_end(ap);
+  return s;
+}
+long long vdbl(int n, ...) {
+  __builtin_va_list ap;
+  struct vd v;
+  __builtin_va_start(ap, n);
+  v = __builtin_va_arg(ap, struct vd);
+  __builtin_va_end(ap);
+  return (long long) (v.a * 100 + v.b);
+}
+long long vfirst(int n, ...) {
+  __builtin_va_list ap;
+  long long y;
+  __builtin_va_start(ap, n);
+  y = __builtin_va_arg(ap, struct vp).y;
+  __builtin_va_end(ap);
+  return y;
+}
+long long vmixs(int n, ...) {
+  __builtin_va_list ap;
+  long long s;
+  __builtin_va_start(ap, n);
+  {
+    int a = __builtin_va_arg(ap, int);
+    struct vp p = __builtin_va_arg(ap, struct vp);
+    double d = __builtin_va_arg(ap, double);
+    struct vbig b = __builtin_va_arg(ap, struct vbig);
+    int t = __builtin_va_arg(ap, int);
+    s = a * 100000 + p.x * 10000 + p.y * 1000 + (long long) d * 100 + b.a * 10 + b.s[0] + t;
+  }
+  __builtin_va_end(ap);
+  return s;
 }
 /* 函数指针（第二十七片）：值是符号的真地址，调用是 blr / call *r。 */
 long long dbl(long long x) { return x * 2; }

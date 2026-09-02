@@ -37,7 +37,7 @@ import {
   OP, REF_NONE, isConstRef, T_I32, T_I64, T_BOOL, T_VOID, T_F32, T_F64,
   typeKind, isFloatType, intBits, memKindNo, memOff, MLOAD_KINDS, MSTORE_KINDS,
   CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16,
-  CVT_I2F, CVT_U2F, CVT_F2I, CVT_FCVT, CVT_BITCAST, OP_NAMES, hexBytes,
+  CVT_I2F, CVT_U2F, CVT_F2I, CVT_FCVT, CVT_BITCAST, OP_NAMES, hexBytes, memArgSize,
 } from '../mir/ir.js';
 
 /* 草稿寄存器。x8 是 arm64 的「间接结果」寄存器、x9-x15 是调用者保存的临时 ——
@@ -112,7 +112,7 @@ function widthOf(t) {
 function argMemBytes(f, ar) {
   if (isConstRef(ar)) return 0;
   const i = f.at(ar);
-  return f.op[i] === OP.ARGMEM ? f.aux[i] : 0;
+  return f.op[i] === OP.ARGMEM ? memArgSize(f.aux[i]) : 0;
 }
 
 function argPlaces(mod, f, args, nfixed) {
@@ -589,7 +589,7 @@ class FnGen {
        * 游标往前走 `align8(n)` —— 与写的那一侧（`argPlaces` 里的 `ARGMEM`）同一条规则。
        * 内容一个字节都不动：拷不拷由前端那边的赋值决定。 */
       if (f.aux[i] !== 0) {
-        const n = f.aux[i];
+        const n = memArgSize(f.aux[i]);
         const step = n + (n % 8 === 0 ? 0 : 8 - (n % 8));
         if (step > 4095) return nyi(`va_arg 取 ${n} 字节的 struct（一条 add 的立即数装不下）`);
         buf.emit(a.movReg(1, RES, TMP1));
