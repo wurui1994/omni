@@ -143,6 +143,17 @@ function checkIndex(mod, f, i, op, v, bad) {
     if (f.t[i] !== T_I64) bad(i, `FRAME 的 t 是 ${typeText(f.t[i])}，地址只能是 i64`);
     return;
   }
+  /* 全局的地址（第二十一片）：号要在表里，`t` 只能是 i64。**还要求它是一块字节** ——
+   * 「一格」的全局（wasm 的 `(global …)`）没有地址可谈，取它的址是降级器的 bug。 */
+  if (op === OP.GADDR) {
+    if (mod.globals[v] === undefined) { bad(i, `全局号 ${v} 越界`); return; }
+    if (mod.globalBlob[v] === null) {
+      bad(i, `GADDR 取的是 '${mod.globals[v]}' 的地址，可是它只是一格（没说大小与对齐）`);
+      return;
+    }
+    if (f.t[i] !== T_I64) bad(i, `GADDR 的 t 是 ${typeText(f.t[i])}，地址只能是 i64`);
+    return;
+  }
   // 线性内存（ADR-0017 第二刀）。三件事都在这儿查：有没有内存、描述符号在不在表里、
   // **宽度与 `t` 配不配**。第三条是关键：`(mload i64 …)` 落到 t=T_F64 上，两条腿会
   // 各自猜一个（DataView 那边读出整数、memcpy 那边读出位模式当浮点），错得还不一样。

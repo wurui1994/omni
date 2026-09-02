@@ -59,6 +59,19 @@ const CASES = [
   ['串常量：sizeof 是数组的大小', 'return sizeof("abcd");'],
   ['串常量：地址交给真的 strlen', 'return (long long) strlen("hello, world");'],
   ['串常量：指针算术', 'char *p = "abcdef"; return *(p + 3) - *p;'],
+  /* 全局量（第二十一片）：一块字节 + 一个符号，地址靠 `GADDR`。 */
+  ['全局：写进去再读回来', 'g_i = 1234567; return g_i;'],
+  ['全局：带初值', 'return g_init;'],
+  ['全局：数组按下标写', 'int i; long long s = 0; for (i = 0; i < 8; i++) g_arr[i] = i * i;'
+    + ' for (i = 0; i < 8; i++) s += g_arr[i]; return s;'],
+  ['全局：数组的初值', 'return g_ai[0] + g_ai[1] * 10 + g_ai[2] * 100 + g_ai[3] * 1000;'],
+  ['全局：struct 的成员', 'g_p.x = 3; g_p.y = 4; return sq(&g_p);'],
+  ['全局：struct 的初值', 'return g_ps.x * 100 + g_ps.y;'],
+  ['全局：取地址交给别人', 'int *p = &g_i; *p = 99; return g_i;'],
+  ['全局：char 数组当串用', 'g_buf[0] = 111; g_buf[1] = 107; g_buf[2] = 0;'
+    + ' return (long long) strlen(g_buf);'],
+  ['全局：double', 'g_d = 1.5; return (long long) (g_d * 8);'],
+  ['全局：static 局部量记着上次', 'return bump() * 100 + bump() * 10 + bump();'],
 ];
 
 const SUPPORT = `struct P { int x; int y; };
@@ -70,6 +83,15 @@ void swap(int *a, int *b) { int t = *a; *a = *b; *b = t; }
 long long fib(int n) { if (n < 2) return n; return fib(n - 1) + fib(n - 2); }
 long long depth(int n) { long long here = n; long long *p = &here;
   if (n == 0) return 0; return *p + depth(n - 1); }
+int g_i;
+int g_init = 4242;
+int g_arr[8];
+int g_ai[4] = {7, 6, 5, 4};
+struct P g_p;
+struct P g_ps = {12, 34};
+char g_buf[8];
+double g_d;
+long long bump(void) { static int n = 1; n = n * 2; return n; }
 `;
 
 let src = SUPPORT;
@@ -155,9 +177,11 @@ try {
 /* 还要线性内存的那些东西必须**明着报**。悄悄发出去会得到一个指着 64K 的指针 ——
  * 那种错在解释器上看不出来，在真机器上是段错误，而且现场离原因很远。 */
 for (const [what, code] of [
-  ['带初值的全局量', 'int g = 7;\nlong long f(void) { return g; }'],
   ['变长数组', 'int n = 4; int a[n]; a[0] = 1; return a[0];'],
   ['非 ASCII 的串常量', 'char *p = "\\xe4\\xb8\\x96"; return p[0];'],
+  ['全局的初值里的串常量', 'char *p = "x";\nlong long f(void) { return p[0]; }'],
+  ['全局的初值里的地址', 'int g;\nint *p = &g;\nlong long f(void) { return *p; }'],
+  ['外部的全局量', 'extern int nope;\nlong long f(void) { return nope; }'],
 ]) {
   total++;
   const body = code.indexOf('\n') >= 0 ? code : `long long f(void) { ${code} }`;

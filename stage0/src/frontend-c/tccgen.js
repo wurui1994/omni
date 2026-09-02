@@ -1657,6 +1657,10 @@ export class CGen {  /**
    * 函数体解析两遍（见 finishFunc），所以这个去重同时也保证第二遍不再多占 data。
    */
   strData(bytes) {
+    /* native 上串常量不走 data 段（第二十片走的是 MIR 的串常量）。还能到这儿的只有
+     * **全局的初值**里那种（`char *p = "x";` 在文件作用域）—— 那要在数据段里放一笔
+     * 指向另一个符号的重定位，我们的目标文件写出还没有这一格。 */
+    if (this.native) this.todo('native：全局的初值里的字符串字面量（要数据段里的重定位）');
     const hit = this.strs.get(bytes);
     if (hit !== undefined) return hit;
     const addr = this.dataOff;
@@ -1822,7 +1826,7 @@ export class CGen {  /**
      * 「不完整」要按类型问，不能按「尺寸是 0」问：`int gz[0];` 的尺寸也是 0，
      * 而那是合法的（GNU 的零长数组，tcc 收）。 */
     if (!isExtern) this.needComplete(name, ty);
-    const e = { ty, addr: -1, defined: !isExtern, used: false, align, extra };
+    const e = { name, ty, addr: -1, defined: !isExtern, used: false, align, extra };
     /* 没写长度的数组是一条**试探性定义**：现在不划地方，等后面那条同名声明补上长度。
      * 一直没补上就是错，而那条错在**用**它的地方报（`gvarLval`），与 tcc 一样。 */
     if (!(isArray(ty.t) && ty.count < 0)) this.allocGlobal(e);
@@ -1846,7 +1850,21 @@ export class CGen {  /**
     if (e.addr < 0) this.err('unknown type size');
     e.used = true;
     this.symAlign = e.align || 0;
+    /* native（第二十一片）：全局量的地址是一个**符号的地址**，编译期算不出来 ——
+     * 一条 `GADDR`。往下一切照旧（成员、下标、`&g` 都是「基址 + 偏移」）。
+     * 每次用都发一条：这一层的两个后端把每个值都落在栈位上，多一条 `adrp`/`lea`
+     * 不改语义，而「把它缓存起来」要先有支配关系的账本，那是窥孔那一片的事。 */
+    if (this.native) return sMem(e.ty, this.gaddr(e), 0);
     return sMem(e.ty, this.mod.consts.int(BigInt(e.addr)), 0);
+  }
+
+  /** native：一个全局量的地址（`GADDR`）。MIR 的全局号第一次用到才登记。 */
+  gaddr(e) {
+    if (this.f === null) {
+      this.todo('native：全局的初值里出现了地址（要数据段里的重定位）');
+    }
+    if (e.gno === undefined) e.gno = this.mod.globalNo(e.name);
+    return this.f.emit(OP.GADDR, T_I64, REF_NONE, REF_NONE, e.gno);
   }
 
   /**
@@ -7061,11 +7079,39 @@ export function lowerCNative(path, text, host, defs) {
   cpp.startParse(path, text);
   gen.unit();
 
-  /* data 段一个字节都不该有 —— 有就是字符串字面量或带初值的全局量落进来了。
-   * `dataOff` 出生在 `MEM_PAGE`（页 0 留空），动过就是有人要了线性内存里的地方。 */
-  if (gen.dataOff !== MEM_PAGE || gen.pendingData.length !== 0) {
-    throw new OmniError(`${path}: error: 第九刀第十九片：native 这条腿还不认字符串字面量与`
-      + `全局量（它们要落到数据段的符号上，是下一片）`);
+  /* 全局量（第二十一片）：前端照旧在**一块暂存的线性地址**上摆它们（`allocGlobal` 与
+   * 整套初值代码一字不改），这里再把每一块切出来交给 MIR 的全局。于是「初值怎么算」
+   * 那几百行两条腿共用，差别只在最后这一步：一边是 data 段里的偏移，一边是一个符号。 */
+  const stage = new Map();   // 暂存区：绝对偏移 -> 字节
+  for (const d of gen.pendingData) {
+    for (let k = 0; k < d.bytes.length; k++) stage.set(d.off + k, d.bytes[k]);
+  }
+  for (const [name, e] of gen.gvars) {
+    if (e.addr < 0) continue;   // 试探性定义没补上长度：用它的地方已经报过了
+    if (!e.defined) {
+      throw new OmniError(`${path}: error: native 这条腿还不认外部的全局量 '${name}'`
+        + `（要目标文件里的未定义符号）`);
+    }
+    const s = typeSize(e.ty);
+    const size = s.size + (e.extra === undefined ? 0 : e.extra);
+    const al = e.align !== 0 ? e.align : s.align;
+    if (al > 8) {
+      throw new OmniError(`${path}: error: 全局量 '${name}' 要 ${al} 字节对齐`
+        + `（__data 这一节只保证 8）`);
+    }
+    const bytes = [];
+    for (let k = 0; k < size; k++) {
+      const b = stage.get(e.addr + k);
+      bytes.push(b === undefined ? 0 : b);
+      stage.delete(e.addr + k);
+    }
+    const no = e.gno === undefined ? mod.globalNo(name) : e.gno;
+    mod.setGlobalData(no, size, al, bytes);
+  }
+  /* 暂存区里没人认领的字节：那是还落在线性内存上的东西（`argv`、宿主那几格，
+   * 或者哪个初值偷偷要了一块地方）。放过去会得到一个指着 64K 的指针。 */
+  if (stage.size !== 0) {
+    throw new OmniError(`${path}: error: native 这条腿上有 ${stage.size} 个字节还落在线性内存上`);
   }
   if (gen.heapUsed) throw new OmniError(`${path}: error: native 这条腿还没有堆（malloc 那一摊）`);
   if (gen.errnoUsed || gen.strerrorUsed || gen.streamGvars.length !== 0) {

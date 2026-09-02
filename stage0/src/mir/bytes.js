@@ -118,7 +118,7 @@ function auxDigest(mod, op, v) {
   if (op === OP.CALLOP) return `op:${mod.ops[v].name}[${JSON.stringify(mod.ops[v].lits)}]`;
   if (op === OP.CCALL) return `cabi:${mod.cabi[v]}`;
   if (op === OP.CLOSURE) return `closure:${mod.closures[v].make}`;
-  if (op === OP.GLOAD || op === OP.GSTORE) return `global:${mod.globals[v]}`;
+  if (op === OP.GLOAD || op === OP.GSTORE || op === OP.GADDR) return `global:${mod.globals[v]}`;
   if (op === OP.FLD || op === OP.FLDSET) {
     const acc = mod.accs[v];
     return `field:${mod.types[acc.type].name}.${acc.field}`;

@@ -336,6 +336,17 @@ const OPS = [
   // （`sp` 在函数体里一动不动）。动态大小要么搬栈顶、要么另开一套，那是变长数组
   // 那一片的事。先把静态的这一格钉死。
   ['FRAME', '-', '-', 'n'],     // aux = 帧块号，t = T_I64（地址）
+
+  // ---- 一个模块级变量的**地址**（ADR-0017 第九刀第二十一片）。
+  //
+  // `GLOAD`/`GSTORE` 读写「一格」，够 wasm 的 `(global …)` 用；C 的全局量不是一格 ——
+  // 它是一块地方，会被取地址（`&g`）、按成员写（`s.x = 1`）、按下标写（`a[i]`）。
+  // 这一条回那块地方的**地址**（t = T_I64），后头照旧接 `MLOAD`/`MSTORE`。
+  //
+  // 为什么不让 `GLOAD` 兼职「取址」：那会让同一条 op 的 `t` 有两种意思（值的类型 /
+  // 地址），而两条腿各自要猜一个。分开之后 native 上它是「符号的地址」
+  // （arm64 `adrp`+`add`、x86_64 一条 `lea`），线性内存那条腿上是「data 段里的偏移」。
+  ['GADDR', '-', '-', 'n'],     // aux = 全局号，t = T_I64（地址）
 ];
 
 /** 函数号 -> 函数指针值。0 留给空指针，所以偏一格（见 `CALLI`）。 */
@@ -610,6 +621,10 @@ export class MirModule {
     // 字符串这件事被 bytes.js 的哈希与 print.js 的清单直接用着，换成对象会静悄悄
     // 改掉「同一份输入两次编译逐字节相同」。
     this.globalTy = [];
+    /* 与 globals 同下标的**字节块**（第二十一片）：`null` = 「一格」（后端 8 个零字节，
+     * `GLOAD`/`GSTORE` 按类型读写），`{size, align, bytes}` = C 的全局量那种一块地方，
+     * 能被 `GADDR` 取地址。 */
+    this.globalBlob = [];
     this.ops = [];                // {name, lits}：运行时 op，CALLOP 的 a
     this.opIndex = new Map();
     this.accs = [];               // {type, field}：字段访问描述符，FLD/FLDSET 的 aux
@@ -695,8 +710,29 @@ export class MirModule {
     const i = this.globals.length;
     this.globals.push(name);
     this.globalTy.push(T_DYN);
+    this.globalBlob.push(null);
     this.globalIndex.set(name, i);
     return i;
+  }
+
+  /**
+   * 把一个全局说成**一块字节**（第九刀第二十一片）：大小、对齐、初值。
+   *
+   * 不说的话它就是「一格」——后端给 8 个零字节、`GLOAD`/`GSTORE` 按类型读写，
+   * 那是 wasm 的 `(global …)` 与 JS 前端要的东西。说了它才能是 C 的全局量：
+   * `int a[100]`、`struct S s = {…}`，而且能被 `GADDR` 取地址。
+   *
+   * `bytes` 短于 `size` 的部分是 0（C11 6.7.9 第 10 段：静态存储期零初始化）。
+   */
+  setGlobalData(i, size, align, bytes) {
+    if (this.globals[i] === undefined) throw new Error(`mir: 没有 ${i} 号模块级变量`);
+    if (!Number.isInteger(size) || size < 0) throw new Error(`mir: 全局的大小 ${size} 不合法`);
+    if (align !== 1 && align !== 2 && align !== 4 && align !== 8 && align !== 16) {
+      throw new Error(`mir: 全局的对齐 ${align} 不是 1/2/4/8/16`);
+    }
+    const bs = bytes === undefined ? [] : bytes;
+    if (bs.length > size) throw new Error(`mir: 全局的初值 ${bs.length} 字节装不进 ${size} 字节`);
+    this.globalBlob[i] = { size, align, bytes: bs };
   }
 
   /** 给一个已登记的全局钉上类型（核心方言的 `(global …)`；不叫就还是 T_DYN）。 */

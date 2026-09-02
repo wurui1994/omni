@@ -382,6 +382,12 @@ class FnGen {
       buf.emit(a.strU(STORE_SIZE[widthKey(f.t[i])], RES, TMP0, 0));
       return;
     }
+    /* 全局的**地址**（第二十一片）：`GLOAD` 里那两条的前半截，只是不接 `ldr`。
+     * C 的全局量都从这儿走 —— 取地址、按成员写、按下标写，后头接 `MLOAD`/`MSTORE`。 */
+    if (op === OP.GADDR) {
+      this.symAddr(RES, this.globalSym(f.aux[i]));
+      return this.def(i, RES);
+    }
 
     /* ---- 存取（第九刀第七片）。地址就是真指针 —— native 上没有线性内存。 */
     if (op === OP.MLOAD) return this.mload(i);
@@ -775,9 +781,21 @@ export function genModule(mod) {
    * 各有一个 `omni_str_0` 就会撞。真正的办法是局部符号 + 按节的重定位，等自己的链接器。 */
   const dataSyms = [];
   const dataBytes = [];
-  for (const g of mod.globals) {
-    dataSyms.push({ name: g, off: dataBytes.length, sect: 2 });
-    for (let k = 0; k < 8; k++) dataBytes.push(0);
+  /* 模块级变量（第二十一片起两种）：说过大小的按它的大小与对齐摆（C 的全局量），
+   * 没说过的还是「一格」八个零字节（wasm 的 `(global …)` 与 JS 前端那批）。
+   * 对齐只到 8 —— `__data` 那一节的对齐字段写的就是 8（`macho.js`），
+   * 要 16 得先把那一格改成按内容算。 */
+  for (let gi = 0; gi < mod.globals.length; gi++) {
+    const blob = mod.globalBlob[gi];
+    const size = blob === null ? 8 : blob.size;
+    const al = blob === null ? 8 : blob.align;
+    if (al > 8) nyi(`全局 '${mod.globals[gi]}' 要 ${al} 字节对齐（__data 这一节只保证 8）`);
+    while (dataBytes.length % al !== 0) dataBytes.push(0);
+    dataSyms.push({ name: mod.globals[gi], off: dataBytes.length, sect: 2 });
+    for (let k = 0; k < size; k++) {
+      const b = blob === null ? 0 : blob.bytes[k];
+      dataBytes.push(b === undefined ? 0 : b);
+    }
   }
   const strSyms = new Map();
   const items = mod.consts.items;
