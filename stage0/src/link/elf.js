@@ -334,12 +334,72 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
   const shstrBytes = shstr.bytes();
   secs[secs.length - 1].size = shstrBytes.length;
 
-  /* ---- 排布（`elf_output_obj` 的那两条算式）。 */
-  let at = align(EHDR_SIZE, 4) + secs.length * SHDR_SIZE;
+  /* 每一节的字节先备齐，排布与写出交给下一层（`writeSections`）—— 那一层不认得
+   * 「哪一节是什么」，只管两条算式，所以读回来的东西也能原样写回去。 */
+  const symBuf = new Buf();
+  for (const s of syms) {
+    symBuf.u32(s.strx).u8(s.info).u8(0).u16(s.shndx).u64(s.value).u64(s.size);
+  }
+  const relaBuf = (rs) => {
+    const rb = new Buf();
+    /* `r_info` 是「符号号 * 2^32 + 类型号」。用乘法而不是移位 ——
+     * JS 的 `<<` 只在 32 位里做（macho.js 那边同一条）。 */
+    for (const r of rs) rb.u64(r.at).u64(BigInt(r.sym) * 4294967296n + BigInt(r.type)).i64(r.add);
+    return rb.out();
+  };
+  const bodyOf = (name) => {
+    if (name === '.text') return text;
+    if (name === '.data') return dataBytes;
+    if (name === '.symtab') return symBuf.out();
+    if (name === '.strtab') return strBytes;
+    if (name === '.rela.text') return relaBuf(raText);
+    if (name === '.rela.data') return relaBuf(raData);
+    if (name === '.shstrtab') return shstrBytes;
+    return new Uint8Array(0);
+  };
+  const out = [];
   for (let i = 1; i < secs.length; i++) {
+    out.push({
+      name: secs[i].name,
+      strx: secs[i].strx,
+      type: secs[i].type,
+      flags: secs[i].flags,
+      link: secs[i].link,
+      info: secs[i].info,
+      al: secs[i].al,
+      ent: secs[i].ent,
+      bytes: bodyOf(secs[i].name),
+    });
+  }
+  return writeSections(cpu.machine, out);
+}
+
+/**
+ * 低一层的写出：节都已经是字节了，这儿只管**排布**与**写字节**。
+ *
+ * 排布是 `elf_output_obj` 的两条算式，写出是 `tcc_output_elf`：
+ *
+ *   off = (64 + 3) & -4 + 节数 * 64        // 节头表紧贴 ELF 头，所以 e_shoff = 64
+ *   每一节：off = (off + 15) & -16         // 空节也占一个位置；NOBITS 不推进游标
+ *
+ * 这一层不认得「哪一节是什么」—— 于是**读回来的一份能原样写回去**，
+ * 那条往返正好是「我们的 ELF 模型完整不完整」的证据（`tests/c/elf-roundtrip.js`）。
+ *
+ * @param machine `e_machine`
+ * @param secs 1 号起的那些节：`[{strx, type, flags, link, info, al, ent, bytes}]`，
+ *             `.shstrtab` 要在**最后**一条（`e_shstrndx = 节数 - 1`）
+ */
+export function writeSections(machine, secs) {
+  const shnum = secs.length + 1;
+  /* `sh_size` 与「文件里有多少字节」不是一回事：NOBITS（`.bss`）有大小、没字节。
+   * 所以这一层认 `size` 那一格（不给就按字节数算）。 */
+  const sizeOf = (s) => (s.size === undefined ? s.bytes.length : s.size);
+  const off = [0];
+  let at = align(EHDR_SIZE, 4) + shnum * SHDR_SIZE;
+  for (const s of secs) {
     at = align(at, 16);
-    secs[i].off = at;
-    if (secs[i].type !== SHT_NOBITS) at += secs[i].size;
+    off.push(at);
+    if (s.type !== SHT_NOBITS) at += s.bytes.length;
   }
 
   const b = new Buf();
@@ -347,44 +407,96 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
   b.u8(0x7f).u8(0x45).u8(0x4c).u8(0x46);
   b.u8(ELFCLASS64).u8(ELFDATA2LSB).u8(EV_CURRENT).u8(0);
   b.u64(0);                                     // e_ident 剩下的八格
-  b.u16(ET_REL).u16(cpu.machine).u32(EV_CURRENT);
+  b.u16(ET_REL).u16(machine).u32(EV_CURRENT);
   b.u64(0).u64(0).u64(EHDR_SIZE);               // e_entry / e_phoff / e_shoff
   b.u32(0).u16(EHDR_SIZE).u16(0).u16(0);        // e_flags / e_ehsize / e_phentsize / e_phnum
-  b.u16(SHDR_SIZE).u16(secs.length).u16(secs.length - 1);
+  b.u16(SHDR_SIZE).u16(shnum).u16(shnum - 1);
   if (b.len !== EHDR_SIZE) throw new OmniError(`elf: 头写成了 ${b.len} 字节`);
 
-  // ---- 节头表
-  for (const s of secs) {
-    b.u32(s.strx === undefined ? 0 : s.strx).u32(s.type).u64(s.flags);
-    b.u64(0).u64(s.off).u64(s.size);            // sh_addr 在 .o 里一律 0
+  // ---- 节头表。0 号那一条全是 0。
+  for (let k = 0; k < SHDR_SIZE; k++) b.u8(0);
+  for (let i = 0; i < secs.length; i++) {
+    const s = secs[i];
+    b.u32(s.strx).u32(s.type).u64(s.flags);
+    b.u64(0).u64(off[i + 1]).u64(sizeOf(s));         // sh_addr 在 .o 里一律 0
     b.u32(s.link).u32(s.info).u64(s.al).u64(s.ent);
   }
 
   // ---- 节的内容，一节一节补 0 补到自己的 `sh_offset`
-  const put = (i, fill) => {
-    if (secs[i].type === SHT_NOBITS) return;
-    b.padTo(secs[i].off);
-    fill();
-  };
-  put(1, () => b.bytes(text));
-  put(2, () => b.bytes(dataBytes));
-  put(3, () => {});
-  put(4, () => {});
-  put(5, () => {
-    for (const s of syms) b.u32(s.strx).u8(s.info).u8(0).u16(s.shndx).u64(s.value).u64(s.size);
-  });
-  put(6, () => b.bytes(strBytes));
-  for (let i = 7; i < secs.length; i++) {
-    const rs = secs[i].name === '.rela.text' ? raText : secs[i].name === '.rela.data' ? raData : null;
-    put(i, () => {
-      if (rs === null) {
-        b.bytes(shstrBytes);
-        return;
-      }
-      /* `r_info` 是「符号号 * 2^32 + 类型号」。用乘法而不是移位 ——
-       * JS 的 `<<` 只在 32 位里做（macho.js 那边同一条）。 */
-      for (const r of rs) b.u64(r.at).u64(BigInt(r.sym) * 4294967296n + BigInt(r.type)).i64(r.add);
-    });
+  for (let i = 0; i < secs.length; i++) {
+    if (secs[i].type === SHT_NOBITS) continue;
+    b.padTo(off[i + 1]);
+    b.bytes(secs[i].bytes);
   }
   return b.out();
+}
+
+/**
+ * 读一个 `ET_REL` 的 ELF：回 `{machine, secs}`，形状与 `writeSections` 的入参一样。
+ *
+ * 只读节头表与节的字节 —— 符号与重定位**不解释**。链接器要的正是这个粒度：
+ * 并合是「把同名的节接起来、把符号表并起来、把重定位的偏移与符号号改一遍」，
+ * 而那三件事各自都在字节上做（tcc 的 `tcc_load_object_file` 也是这个粒度）。
+ */
+export function readObject(bytes) {
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (bytes.length < EHDR_SIZE || bytes[0] !== 0x7f || bytes[1] !== 0x45
+    || bytes[2] !== 0x4c || bytes[3] !== 0x46) {
+    throw new OmniError('elf: 这不是一个 ELF 文件');
+  }
+  if (bytes[4] !== ELFCLASS64 || bytes[5] !== ELFDATA2LSB) {
+    throw new OmniError('elf: 只认 64 位小端');
+  }
+  if (dv.getUint16(16, true) !== ET_REL) throw new OmniError('elf: 只认 ET_REL（目标文件）');
+  const machine = dv.getUint16(18, true);
+  const shoff = Number(dv.getBigUint64(40, true));
+  const shnum = dv.getUint16(60, true);
+  const shstrndx = dv.getUint16(62, true);
+  if (shoff + shnum * SHDR_SIZE > bytes.length) throw new OmniError('elf: 节头表越出了文件');
+  const shdr = (i) => {
+    const o = shoff + i * SHDR_SIZE;
+    return {
+      strx: dv.getUint32(o, true),
+      type: dv.getUint32(o + 4, true),
+      flags: Number(dv.getBigUint64(o + 8, true)),
+      off: Number(dv.getBigUint64(o + 24, true)),
+      size: Number(dv.getBigUint64(o + 32, true)),
+      link: dv.getUint32(o + 40, true),
+      info: dv.getUint32(o + 44, true),
+      al: Number(dv.getBigUint64(o + 48, true)),
+      ent: Number(dv.getBigUint64(o + 56, true)),
+    };
+  };
+  const strs = shdr(shstrndx);
+  const nameOf = (n) => {
+    let e = strs.off + n;
+    while (e < bytes.length && bytes[e] !== 0) e++;
+    let s = '';
+    for (let k = strs.off + n; k < e; k++) s += String.fromCharCode(bytes[k]);
+    return s;
+  };
+  const secs = [];
+  for (let i = 1; i < shnum; i++) {
+    const s = shdr(i);
+    /* NOBITS 的节在文件里没有字节（`.bss`），可它的 `sh_size` 不是 0 ——
+     * 这一层留一个空数组，长度那一格由 `type` 决定该不该写（`writeSections`）。
+     * 于是往返写回去时 `.bss` 的 `sh_size` 会变成 0。真正要并合 `.bss` 的时候
+     * 这一格要单独带上，那属于链接器那一片。 */
+    const body = s.type === SHT_NOBITS
+      ? new Uint8Array(0)
+      : bytes.subarray(s.off, s.off + s.size);
+    secs.push({
+      name: nameOf(s.strx),
+      strx: s.strx,
+      type: s.type,
+      flags: s.flags,
+      link: s.link,
+      info: s.info,
+      al: s.al,
+      ent: s.ent,
+      size: s.size,
+      bytes: body,
+    });
+  }
+  return { machine, secs };
 }
