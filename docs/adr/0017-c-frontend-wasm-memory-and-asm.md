@@ -11635,6 +11635,14 @@ x86_64-win32 的 `DllCharacteristics` 默认是 0，`--no-` 什么都看不出�
 **门没盖到的那五种走法**：`--high-entropy-va` 与四个 `--no-`。
 `tests/c/pe-flags.js` 的走法从十二种涨到十七种，条数 `243 → 390`，全 0 条不同。
 
+**`-fleading-underscore` 这一支没有尺子**（试过，退回来了）。它牵动三处：目标文件里
+每个符号前多一个 `_`、`pe_export_name` 导出时又把那个 `_` 削掉（带 `@n` 的 stdcall
+不削）、起手符号 `__start` 前面那个 `_` 留不留。写出的那一层我们早就照抄了
+（`pe_sections.js:182`、`pe_load.js:141`）。可**尺子跑不起来**：交叉编译出来的
+`libtcc1.a` 与 `msvcrt`/`kernel32` 的导入库里全是不带下划线的名字，
+`-fleading-underscore` 一开 tcc 自己就一条都链不上。要盖到它得把整套运行库重新
+配一遍，跟 `-pie` 在 32 位那几个目标上一样 —— 等有那份交叉编译器再说。
+
 <!-- 第九刀第八十片-END -->
 
 
