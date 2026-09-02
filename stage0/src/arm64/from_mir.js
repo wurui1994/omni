@@ -37,7 +37,7 @@ import {
   OP, REF_NONE, isConstRef, T_I32, T_I64, T_BOOL, T_VOID, T_F32, T_F64,
   typeKind, isFloatType, intBits, memKindNo, memOff, MLOAD_KINDS, MSTORE_KINDS,
   CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16,
-  CVT_I2F, CVT_U2F, CVT_F2I, CVT_FCVT, CVT_BITCAST, OP_NAMES, hexBytes, memArgSize,
+  CVT_I2F, CVT_U2F, CVT_F2I, CVT_F2U, CVT_FCVT, CVT_BITCAST, OP_NAMES, hexBytes, memArgSize,
 } from '../mir/ir.js';
 
 /* 草稿寄存器。x8 是 arm64 的「间接结果」寄存器、x9-x15 是调用者保存的临时 ——
@@ -778,11 +778,16 @@ class FnGen {
     const mode = f.aux[i];
     this.loadRef(TMP0, f.a[i]);
     /* 浮点 -> 整数（向零取整，C 的强制转换就是这一种）。`t` 是整数所以落在这儿。 */
-    if (mode === CVT_F2I) {
+    if (mode === CVT_F2I || mode === CVT_F2U) {
       const srcDbl = typeKind(this.typeOfRef(f.a[i])) === T_F64;
       const w = widthOf(f.t[i]);
       this.toFp(FTMP0, TMP0, srcDbl);
-      buf.emit(a.fcvtzs(w === 64 ? 1 : 0, srcDbl, RES, FTMP0));
+      /* 无符号那条是 `fcvtzu`（第九十五片）：`fcvtzs` 在越界处饱和到有符号上界，
+       * 于是 `(unsigned long long)9223372036854775808.0` 会少一位。arm64 上两条指令
+       * 只差一个位域，所以这一格只是挑一条。 */
+      buf.emit(mode === CVT_F2U
+        ? a.fcvtzu(w === 64 ? 1 : 0, srcDbl, RES, FTMP0)
+        : a.fcvtzs(w === 64 ? 1 : 0, srcDbl, RES, FTMP0));
       return this.def(i, RES, w);
     }
     /* 位重解释：栈位里躺的就是位模式，一条 mov。 */

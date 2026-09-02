@@ -510,8 +510,13 @@ export const CVT_TRUNC = 8;   // 整数变窄，回绕（i64 -> i32；结果是�
 export const CVT_SEXT8 = 9;
 export const CVT_SEXT16 = 10;
 export const CVT_FCVT = 11;   // 浮点之间（f32 <-> f64，方向由 `t` 定）
+/* 浮点 -> **无符号**整数（第九刀第九十五片）。为什么非要单独一条：`F2I` 落成的是
+ * 硬件的「转成有符号」（`fcvtzs` / `cvttsd2si`），而那两条在值越过有符号上界时是
+ * **饱和**的 —— `(unsigned long long)9223372036854775808.0` 会得 `0x7fff…`，
+ * 不是 `0x8000…`。tcc 与 clang 都发无符号那条指令，所以模式上得分得开。 */
+export const CVT_F2U = 12;
 export const CVT_NAMES = ['i2f', 'f2i', 'box', 'unbox', 'bitcast', 'u2f',
-  'sext', 'zext', 'trunc', 'sext8', 'sext16', 'fcvt'];
+  'sext', 'zext', 'trunc', 'sext8', 'sext16', 'fcvt', 'f2u'];
 
 /* -------------------------------------------- 线性内存的访问描述符（第二刀）
  * wasm 的 `i32.load8_s` / `i64.load32_u` / `f32.store` 那一族，在这里是

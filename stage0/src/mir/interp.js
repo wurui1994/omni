@@ -38,7 +38,7 @@ import {
   OP, OP_NAMES, REF_NONE, REF_BIAS, isConstRef, typeKind, typeLanes,
   T_VOID, T_I64, T_F64, T_STR, T_DYN, T_PTR, T_TPTR, T_I32, T_F32,
   MLOAD_KINDS, MSTORE_KINDS, memKindNo, memOff,
-  CVT_I2F, CVT_F2I, CVT_BOX, CVT_U2F, CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16, CVT_FCVT,
+  CVT_I2F, CVT_F2I, CVT_F2U, CVT_BOX, CVT_U2F, CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16, CVT_FCVT,
   fnPtrNo,
 } from './ir.js';
 
@@ -556,6 +556,18 @@ class MirInterp {
           return (F) => {
             const d = Math.trunc(v(F));
             F.v[i] = Number.isFinite(d) ? BigInt.asIntN(bits, BigInt(d)) : 0n;
+            return next;
+          };
+        }
+        /* 浮点 -> **无符号**整数（第九十五片）。与 `F2I` 差的只有「按几位读」：
+         * 位模式仍旧存成两补的 i64（MIR 里没有无符号类型码），所以 2^63 那一带
+         * 落成负数 —— 与 `fcvtzu` 出来的位一样。 */
+        if (x === CVT_F2U) {
+          return (F) => {
+            const d = Math.trunc(v(F));
+            F.v[i] = Number.isFinite(d) && d >= 0
+              ? BigInt.asIntN(64, BigInt.asUintN(64, BigInt(d)))
+              : 0n;
             return next;
           };
         }

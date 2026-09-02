@@ -181,7 +181,7 @@ import {
 } from './ctype.js';
 import {
   MirModule, MirFunc, OP, T_VOID, T_I32, T_I64, T_BOOL, T_F32, T_F64, REF_NONE,
-  CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16, CVT_I2F, CVT_U2F, CVT_F2I,
+  CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16, CVT_I2F, CVT_U2F, CVT_F2I, CVT_F2U,
   CVT_FCVT, memDesc, MEM_PAGE, fnPtr, isConstRef, memArgAux,
 } from '../mir/ir.js';
 
@@ -1523,8 +1523,8 @@ export class CGen {  /**
    *     `(double)(unsigned)-1` 会算成 1.8446744073709552e19 而不是 4294967295。
    *     扩宽走整型那条 `castTo`，于是符号性那一格只在一处判。
    *   - 浮点 -> 整型：一条 `CVT_F2I`（朝零截尾，C11 6.3.1.4 第 1 段）再收口窄宽度。
-   *     无符号目标也走同一条：`F2I` 出来的是两补的位，而无符号在 MIR 里挂在算子上，
-   *     不挂在位上（第六十一刀）。
+   *     无符号目标**不走**同一条（第九十五片）：硬件那两条转有符号的指令在越界处饱和，
+   *     所以 64 位的走 `CVT_F2U`、32 位及以下的先转 i64 再截 —— 见下面那段注释。
    *   - 浮点 <-> 指针：C 里不存在，报错。静悄悄按位走会让 `(void*)1.5` 编过。
    *
    * `_Bool` 与 `void` 不到这儿 —— `castTo` 在前面就分岔了，所以「非零就是 1」
@@ -1551,6 +1551,19 @@ export class CGen {  /**
         isUnsigned(from.t) ? CVT_U2F : CVT_I2F));
     }
     if (!isInteger(ty.t)) this.err(`cannot convert '${typeText(from)}' to '${typeText(ty)}'`);
+    /* 目标是**无符号**的话，硬件那条「转成有符号」不能直接用：它在越界处**饱和**
+     * （`(unsigned long long)9223372036854775808.0` 会得 `0x7fff…`）。两种宽度两种办法
+     * （第九十五片）：
+     *   64 位 -> 一条 `CVT_F2U`（`fcvtzu` / x86 上分两路）；
+     *   32 位及以下 -> 先转成 **i64**（u32 的每个值都装得进有符号 64 位），再截到 32 位。
+     *     `(unsigned)3000000000.0` 直接走 32 位那条会饱和成 `0x7fffffff`。 */
+    if (isUnsigned(ty.t)) {
+      if (dstMir === T_I64) {
+        return sVal(ty, f.emit(OP.CVT, T_I64, this.gv(v), REF_NONE, CVT_F2U));
+      }
+      const wide = f.emit(OP.CVT, T_I64, this.gv(v), REF_NONE, CVT_F2I);
+      return sVal(ty, this.narrow(f.emit(OP.CVT, T_I32, wide, REF_NONE, CVT_TRUNC), ty));
+    }
     const r = f.emit(OP.CVT, dstMir, this.gv(v), REF_NONE, CVT_F2I);
     return sVal(ty, this.narrow(r, ty));
   }

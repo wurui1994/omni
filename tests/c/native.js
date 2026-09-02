@@ -52,6 +52,12 @@ const CASES = [
     'unsigned long long v = 0xffffffffffffffffULL; float g = (float) v; return (long long)(g / 65536.0f);'],
   ['u64 -> double：小的那一边（走的是有符号那条）',
     'unsigned long long v = 3ULL; double d = (double) v; return (long long)(d * 1000);'],
+  /* 反方向（第九十五片）：硬件那条转有符号的在越界处饱和，所以无符号目标要另一条。 */
+  ['double -> u64：正好 2^63',
+    'double d = 9223372036854775808.0; unsigned long long v = (unsigned long long) d;'
+    + ' return (long long)(v >> 32);'],
+  ['double -> u32：装得进 u32、装不进 i32',
+    'double d = 3000000000.0; unsigned u = (unsigned) d; return (long long)(u / 3);'],
   ['char 数组：自己数长度', 'char s[8]; int i; s[0] = 104; s[1] = 105; s[2] = 33; s[3] = 0;'
     + ' for (i = 0; s[i] != 0; i++) ; return i;'],
   ['switch 与嵌套块', 'int i; long long s = 0;'

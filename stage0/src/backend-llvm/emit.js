@@ -34,7 +34,7 @@ import { utf8Bytes } from '../host/utf8.js';
 import {
   OP, OP_NAMES, REF_NONE, REF_BIAS, isConstRef, isCmp, typeText, typeKind, typeLanes,
   T_VOID, T_I64, T_F64, T_BOOL, T_STR, T_AGG, T_BUF, T_ARR, T_PTR, T_TPTR, T_I32, T_F32,
-  isFloatType, CVT_I2F, CVT_F2I, CVT_U2F,
+  isFloatType, CVT_I2F, CVT_F2I, CVT_F2U, CVT_U2F,
   CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16, CVT_FCVT,
   MLOAD_KINDS, MSTORE_KINDS, memKindNo, memOff, memBytes,
 } from '../mir/ir.js';
@@ -880,6 +880,9 @@ class LlvmEmitter {
       // 位当无符号读再转（第六十一刀）：sitofp 换 uitofp，一条指令的差别
       if (mode === CVT_U2F) { this.line(`  ${dst} = uitofp ${st} ${this.val(f.a[i])} to ${rt}`); return; }
       if (mode === CVT_F2I) { this.line(`  ${dst} = fptosi ${st} ${this.val(f.a[i])} to ${rt}`); return; }
+      /* 浮点 -> 无符号（第九十五片）：`fptoui`。与 `fptosi` 差的是越界那一带 ——
+       * 2^63 以上只有 `fptoui` 给得出正确的位。 */
+      if (mode === CVT_F2U) { this.line(`  ${dst} = fptoui ${st} ${this.val(f.a[i])} to ${rt}`); return; }
       // ---- 宽度转换（ADR-0017 第一刀）
       if (mode === CVT_SEXT) { this.line(`  ${dst} = sext ${st} ${this.val(f.a[i])} to ${rt}`); return; }
       if (mode === CVT_ZEXT) { this.line(`  ${dst} = zext ${st} ${this.val(f.a[i])} to ${rt}`); return; }

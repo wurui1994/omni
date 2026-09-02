@@ -48,7 +48,7 @@ import {
   OP, REF_NONE, isConstRef, T_I32, T_I64, T_BOOL, T_VOID, T_F32, T_F64,
   typeKind, isFloatType, intBits, memKindNo, memOff, MLOAD_KINDS, MSTORE_KINDS,
   CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16,
-  CVT_I2F, CVT_U2F, CVT_F2I, CVT_FCVT, CVT_BITCAST, OP_NAMES, hexBytes,
+  CVT_I2F, CVT_U2F, CVT_F2I, CVT_F2U, CVT_FCVT, CVT_BITCAST, OP_NAMES, hexBytes,
   memArgSize, memArgSse,
 } from '../mir/ir.js';
 
@@ -1108,6 +1108,35 @@ class FnGen {
       this.toFp(FTMP0, TMP0);
       buf.emit(x.cvtF2I(srcDbl, w, RES, FTMP0));
       return this.def(i, RES, w);
+    }
+    /* 浮点 -> **无符号** 64 位（第九刀第九十五片）。x86 又没有这条指令，而
+     * `cvttsd2si` 在越界处不是回绕、是**饱和**（给 `0x8000000000000000`）。分两路：
+     *
+     *   d < 2^63：直接 `cvttsd2si`，值落在有符号范围里，位就是对的；
+     *   d >= 2^63：先减掉 2^63 再转（差一定 < 2^63），再把第 63 位置回去。
+     *              减法是**精确**的（两个数的指数差不超过 IEEE 的有效位数），
+     *              所以这一路不引入第二次舍入。
+     *
+     * arm64 那边一条 `fcvtzu` 就完事 —— 这是两副架构真正不一样的地方之一。 */
+    if (mode === CVT_F2U) {
+      const srcDbl = typeKind(this.typeOfRef(f.a[i])) === T_F64;
+      const big = buf.label();
+      const done = buf.label();
+      this.toFp(FTMP0, TMP0);
+      // 2^63 的位模式：double 是 0x43e0…、float 是 0x5f000000
+      this.movImm(TMP1, srcDbl ? 0x43e0000000000000n : 0x5f000000n);
+      this.toFp(FTMP1, TMP1);
+      buf.emit(x.fcmp(srcDbl, FTMP0, FTMP1));
+      buf.jcc(CC.ae, big);
+      buf.emit(x.cvtF2I(srcDbl, 8, RES, FTMP0));
+      buf.jmp(done);
+      buf.place(big);
+      buf.emit(x.fbin(FOP.sub, srcDbl, FTMP0, FTMP1));
+      buf.emit(x.cvtF2I(srcDbl, 8, RES, FTMP0));
+      this.movImm(TMP1, 1n << 63n);
+      buf.emit(x.aluRR(ALU.xor, 8, RES, TMP1));
+      buf.place(done);
+      return this.def(i, RES, 64);
     }
     /* i32 的规范形是符号扩展后的 64 位，所以：
      *  - SEXT（i32 -> i64）什么都不用做；
