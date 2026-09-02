@@ -33,6 +33,12 @@ const SHT_SYMTAB = 2;
 const SYM_SIZE = 24;
 const SHN_UNDEF = 0;
 const STB_LOCAL = 0;
+/* `struct pe_rsrc_header`：COFF 的文件头加一条节表项。 */
+const RES_HDR_SIZE = 20 + 40;
+/* `struct pe_rsrc_reloc`：偏移、符号号、类型 —— 紧排，10 字节。 */
+const RES_RELOC_SIZE = 10;
+/* `RSRC_RELTYPE`：x86_64 与 arm64 都是 3（`ADDR32NB`），i386/arm 是 7。 */
+const RSRC_RELTYPE = 3;
 
 /** `pe_add_runtime` 里那四种映像类型。 */
 export const PE_EXE = 1;
@@ -242,15 +248,55 @@ export function readDllExports(bytes, path) {
 }
 
 /**
+ * 读一份 `windres -O coff` 造出来的资源文件（`pe_load_res`）。
+ *
+ * 它是一份**只有一节的 COFF**：20 字节的文件头 + 40 字节的节表项，那一节叫 `.rsrc`。
+ * tcc 认它的三个条件是「机器号对得上、只有一节、节名正好是 `.rsrc`」—— 连魔数都没有，
+ * 所以这一步必须在认 `MZ` 之前，而且 ELF 那 `\x7fELF` 落在机器号那两字节上，撞不着。
+ *
+ * 装进来的东西就两样：那一节的原始字节，以及它自己那张重定位表。COFF 里每条重定位
+ * 是 10 字节（偏移、符号号、类型），类型必须是 `RSRC_RELTYPE`（x86_64 与 arm64 都是
+ * 3，也就是 `ADDR32NB`）。符号号一律不看 —— tcc 把每一条都改挂到自己新加的那个
+ * `.rsrc` 符号上，落笔时成了 `R_XXX_RELATIVE`，也就是「原地那个节内偏移 + 这一节的
+ * RVA」。资源目录里指向数据的那几格正是这么补上的。
+ *
+ * @returns `null`（不是资源文件）或 `{bytes, relocs}`
+ */
+export function readRes(bytes) {
+  if (bytes.length < RES_HDR_SIZE) return null;
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (dv.getUint16(2, true) !== 1) return null;             // NumberOfSections
+  let name = '';
+  for (let i = 0; i < 8 && bytes[20 + i] !== 0; i++) name += String.fromCharCode(bytes[20 + i]);
+  if (name !== '.rsrc') return null;
+  const size = dv.getUint32(20 + 16, true);                 // SizeOfRawData
+  const ptr = dv.getUint32(20 + 20, true);                  // PointerToRawData
+  const relPtr = dv.getUint32(20 + 24, true);               // PointerToRelocations
+  const nrel = dv.getUint16(20 + 32, true);                 // NumberOfRelocations
+  if (ptr + size > bytes.length) throw new OmniError('res: .rsrc 的字节超出文件');
+  const relocs = [];
+  for (let i = 0; i < nrel; i++) {
+    const p = relPtr + i * RES_RELOC_SIZE;
+    if (p + RES_RELOC_SIZE > bytes.length) throw new OmniError('res: 重定位表超出文件');
+    if (dv.getUint16(p + 8, true) !== RSRC_RELTYPE) {
+      throw new OmniError(`res: 不认识的重定位类型 ${dv.getUint16(p + 8, true)}`);
+    }
+    relocs.push(dv.getUint32(p, true));
+  }
+  return { bytes: bytes.subarray(ptr, ptr + size), relocs };
+}
+
+/**
  * 按 tcc 的次序把该装的东西装进来，并且把「装了什么」记成一串足迹 ——
  * 那一串正好能与 `tcc -vv` 打出来的 `-> …` 行逐条比。
  *
  * @param inp `{objs, libtcc1, open, subsystem, dll, entry, leadingUnderscore, nostdlib}`
- *        - `objs`：`[{path, bytes}]`，命令行上给的文件。开头是 `MZ` 的当作真的 `.dll`
- *          （`pe_load_file` 就是这么认的），进 `dlls` 而不进符号表
+ *        - `objs`：`[{path, bytes}]`，命令行上给的文件。只有一节且那一节叫 `.rsrc` 的
+ *          当作资源文件（进 `res`），开头是 `MZ` 的当作真的 `.dll`（进 `dlls`），
+ *          剩下的才是目标文件 —— `pe_load_file` 就是这个次序
  *        - `libtcc1`：支持库的文件名（带交叉前缀，如 `x86_64-win32-libtcc1.a`）
  *        - `open(names)`：给一串候选文件名，回 `{path, bytes}` 或 `null`
- * @returns `{trace, tab, start, peType, dlls, members, objs}`；`trace` 每条
+ * @returns `{trace, tab, start, peType, dlls, members, objs, res}`；`trace` 每条
  *          `{kind:'file'|'member', path}`，`objs` 是**真的目标文件**那几份字节
  */
 export function peLoad(inp) {
@@ -259,11 +305,15 @@ export function peLoad(inp) {
   const members = [];
   const dlls = [];
   const objs = [];
+  const res = [];
 
   const loadObject = (bytes) => tab.addObject(readSymbols(readObject(bytes)));
 
   for (const o of inp.objs) {
     trace.push({ kind: 'file', path: o.path });
+    /* `pe_load_file` 的次序：先试资源文件，再看是不是 `MZ`，剩下的当目标文件。 */
+    const rs = readRes(o.bytes);
+    if (rs !== null) { res.push(rs); continue; }
     if (o.bytes[0] === 0x4d && o.bytes[1] === 0x5a) { dlls.push(readDllExports(o.bytes, o.path)); continue; }
     objs.push(o.bytes);
     loadObject(o.bytes);
@@ -272,7 +322,9 @@ export function peLoad(inp) {
   const { start, entryName, peType } = peStart(tab, inp);
   tab.declare(start);                            // 就是这一句把 crt 拉进来
 
-  if (inp.nostdlib === true) return { trace, tab, start, entryName, peType, dlls, members, objs };
+  if (inp.nostdlib === true) {
+    return { trace, tab, start, entryName, peType, dlls, members, objs, res };
+  }
 
   const want = [[inp.libtcc1], ...runtimeLibs(peType).map((l) => libCandidates(l))];
   for (const names of want) {
@@ -296,7 +348,7 @@ export function peLoad(inp) {
     throw new OmniError(`pe: 还不会装 ${f.path}`);
   }
   return {
-    trace, tab, start, entryName, peType, dlls, members, objs,
+    trace, tab, start, entryName, peType, dlls, members, objs, res,
   };
 }
 

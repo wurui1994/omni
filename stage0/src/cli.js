@@ -2051,7 +2051,10 @@ function main(argv) {
      * thunk 节里多一张导出表，入口是 `_dllstart`。
      * 第六十六片那几个开关：`--subsystem`（名字或数字）、`--image-base`（十六进制）、
      * `--stack`（十进制）、`--section-align` / `--file-align`（十六进制）、`-e` 换入口。
-     *   omni pe-link a.o -o a.exe -L dir [-L dir …] [--target x86_64-win32] [--shared]
+     * 命令行上的文件按内容认：只有一节且那一节叫 `.rsrc` 的是资源（第六十八片），
+     * 开头是 `MZ` 的是真的 `.dll`（第六十七片），剩下的才是目标文件。
+     *   omni pe-link a.o [a.res] [foo.dll] -o a.exe -L dir [-L dir …]
+     *                 [--target x86_64-win32] [--shared]
      *                 [--subsystem gui] [--image-base 1000000] [--stack 2097152]
      *                 [--section-align 2000] [--file-align 1000] [-e main] */
     case 'pe-link': {
@@ -2108,6 +2111,7 @@ function main(argv) {
       const r = peWrite({
         objs: [...loaded.objs, ...loaded.members.map((m) => m.bytes)],
         dlls: loaded.dlls,
+        res: loaded.res,
         startName: loaded.entryName,
         gui: loaded.peType === PE_GUI,
         outName: out,
@@ -2379,7 +2383,9 @@ commands:
             import table and thunks, applies every relocation. -o NAME,
             --target x86_64-win32|arm64-win32, --shared (build a .dll: slice 64),
             --subsystem NAME, --image-base HEX, --stack N, --section-align HEX,
-            --file-align HEX, -e NAME (slice 66)
+            --file-align HEX, -e NAME (slice 66). Inputs are told apart by content:
+            a one-section COFF named .rsrc is a resource file (slice 68), one starting
+            with MZ is a real .dll (slice 67)
   elf-link  link .o files into a Linux executable (ADR-0017 cut 9 slices 53-54):
             dynamic by default like tcc (.interp/.dynsym/.dynamic/.got), --static for
             the plain one, --shared for a shared library (slice 59), --dll libfoo.so to

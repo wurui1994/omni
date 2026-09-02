@@ -479,6 +479,12 @@ Mach-O 的 dylib 不叫、PE 的 dll **照叫**（`pe_add_runtime` 在
 （序号一律 0），库名取文件名的基名；导入表的次序还是符号表里谁先出现谁先来，与
 导出表那个 `strcmp` 次序无关，两个目标各 2 份逐字节相同）。三种格式的「接着真的
 共享库链」于是都齐了。
+**资源那一节 `.rsrc` 也进得来了**（第六十八片：`windres -O coff` 那种文件是一份
+**只有一节的 COFF**、没有魔数，`pe_load_res` 靠「机器号对得上、只有一节、名字正好是
+`.rsrc`」认它；字节整块搬成一节 `.rsrc`、加一个同名的局部符号、COFF 那张重定位表整条
+改挂成 `R_XXX_RELATIVE` —— 资源目录里 `OffsetToData` 那一格于是得到「原地那个节内偏移
++ 这一节的 RVA」，而 `RELATIVE` 不算 `REL_TYPE_DIRECT`，所以**不进** `.reloc`；六种
+形状各 6 × 2 份逐字节相同，尺子自己拼，因为交叉环境里没有 windres）。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -10867,6 +10873,59 @@ else if (read_mem(fd, 0, buf, 4) && 0 == memcmp(buf, "MZ", 2))
 把它挑出来。命令行上是 `omni pe-link use.o mylib.dll -o a.exe`。
 
 <!-- 第九刀第六十七片-END -->
+
+## 落地：第九刀第六十八片
+
+**资源那一节 `.rsrc`。** Windows 上图标、版本号、对话框那些东西不在 C 里，在 `.rc` 里；
+`windres -O coff` 把它编成一份文件，链接器整块搬进映像的 `.rsrc` 节。tcc 收这种文件的
+那一段叫 `pe_load_res`，它短得出奇 —— 三十行，可有几格挺意外。
+
+**它没有魔数。** `pe_load_file` 认文件的次序是：扩展名是 `.def` 就当导入库，否则先试
+`pe_load_res`，再看开头是不是 `MZ`，剩下的才当目标文件。`pe_load_res` 拿什么认？三个
+条件：`filehdr.Machine` 与本目标对得上、`NumberOfSections` 正好是 1、那一节的名字正好
+是 `.rsrc`。也就是说这种文件就是一份**只有一节的 COFF**：20 字节的文件头加 40 字节的
+节表项，后面跟着那一节的字节与它自己那张重定位表。ELF 的 `\x7fELF` 落在机器号那两个
+字节上（`0x457f`），撞不着，所以这个次序是安全的。
+
+搬进来的东西就三样：
+
+- 那一节的原始字节整块变成一节新的 `.rsrc`（`new_section(s1, ".rsrc", SHT_PROGBITS,
+  SHF_ALLOC)`）—— 内容一个字节都不动，链接器根本不看资源树长什么样。
+- 一个**局部符号** `.rsrc`，`st_value` 是 0、`st_shndx` 指着那一节。
+- COFF 那张重定位表一条条改挂到这个符号上，类型统一换成 `R_XXX_RELATIVE`。COFF 的
+  一条重定位是 10 字节（偏移、符号号、类型）；原来的符号号 tcc **一律不看**，因为
+  `windres` 生成的每一条指的都是那唯一一节。类型必须是 `RSRC_RELTYPE`，x86_64 与
+  arm64 都是 3（`ADDR32NB`），i386 与 arm 是 7。
+
+第三条是这一片的关键。资源树里 `IMAGE_RESOURCE_DATA_ENTRY.OffsetToData` 那一格要的是
+**RVA**，而 `windres` 只知道节内偏移，就把偏移写在那里、挂一条重定位。落笔时
+`R_X86_64_RELATIVE` 是 `add32le(ptr, val - imagebase)` —— `add`，不是 `write`。原地那个
+节内偏移是要算进去的，加上 `.rsrc` 的 RVA 正好成了终值。第五十片起我们一直照着「原地
+的值也算」在做，这一格于是白捡。
+
+还有一格反过来：`R_XXX_RELATIVE` **不是** `REL_TYPE_DIRECT`（那是 `R_X86_64_64` /
+`R_AARCH64_ABS64`），所以这几条**不进** `.reloc`。想想也对 —— 资源目录里那些字段本来
+就存 RVA，装载器搬动映像时不需要改它们。导出表里那几格函数 RVA（第六十四片）走的是
+同一条路。
+
+摆地址那边几乎不用动：`pe_section_class` 里 `.rsrc` 已经排在 `sec_rsrc`（8）那一档，
+在 `.pdata` 之后、`.debug` / `.reloc` 之前；`pe_assign_addresses` 顺手把它填进数据
+目录 2。这两处第四十八与五十片就照抄过了，这一片只是第一次真的有节落到那一档。
+
+我们这边的形状：`peLoad` 多回一格 `res`（`{bytes, relocs}` 的数组），`peSections` 拿到
+它就往 `secs` 里补一节 `.rsrc`、往 `syms` 里补一个同名局部符号、再造一张合成的
+`.rela.rsrc` —— 24 字节一条的 ELF 形状，类型填 `R_X86_64_RELATIVE` / `R_AARCH64_RELATIVE`，
+符号号指着刚补的那个。补完就什么都不用管了：`peImage` 的重定位循环扫的是 `secs` 里所有
+`SHT_RELA` 的节，合成的这一张与真的一样走。这是这一片写得最省的地方 —— 把新东西翻译成
+已有的形状，而不是给它开一条新路。
+
+尺子这次得自己造。交叉环境里没有 `windres`，所以 `tests/c/pe-rsrc.js` 自己拼那份单节
+COFF：一棵「类型 → 名字 → 语言 → 数据项」的资源树，`OffsetToData` 写节内偏移、各挂一条
+重定位。六种形状（一份资源、三份资源、空树、长度 19 字节的、跨过一个 0x1000 页的、
+以及 `-shared` 造 DLL 时带资源的）乘六份 C 案例乘两个目标，**72 份逐字节相同**
+（474624 字节）。同一份 `.res` 交给 tcc 与交给我们，写出来的映像一个字节不差。
+
+<!-- 第九刀第六十八片-END -->
 
 
 

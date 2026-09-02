@@ -28,6 +28,7 @@ import { readSymbols } from './pe_load.js';
 import { buildImports } from './pe.js';
 
 const SHT_PROGBITS = 1;
+const SHT_RELA = 4;
 const SHT_STRTAB = 3;
 const SHT_NOBITS = 8;
 const SHT_INIT_ARRAY = 14;
@@ -36,6 +37,9 @@ const SHF_WRITE = 0x1;
 const SHF_ALLOC = 0x2;
 const SHF_EXECINSTR = 0x4;
 const SHF_TLS = 0x400;
+const RELA_SIZE = 24;
+const R_X86_64_RELATIVE = 8;
+const R_AARCH64_RELATIVE = 1027;
 
 const SHN_UNDEF = 0;
 const SHN_COMMON = 0xfff2;
@@ -266,10 +270,11 @@ export function buildReloc(entries) {
 /**
  * 把并合好的节摆成 PE 的节表。
  *
- * @param inp `{objs, dlls, imagebase, dllChars, leadingUnderscore, dll, outName,
+ * @param inp `{objs, dlls, res, imagebase, dllChars, leadingUnderscore, dll, outName,
  *        subsystem, gui, sectionAlign, fileAlign}`
  *        - `objs`：命令行上那些 `.o` 加上从库里拉出来的成员，字节数组
  *        - `dlls`：`peLoad` 装出来的那几个 `.def`
+ *        - `res`：`peLoad` 读出来的那几份资源（`{bytes, relocs}`），一份一节 `.rsrc`
  *        - `dll`：造 DLL（`-shared`）。映像基址换成 `IMAGE_BASE_DLL`、一定有 `.reloc`、
  *          thunk 节里多一张导出表；`outName` 的基名就写进导出表里当 dll 名
  *        - `imagebase` / `subsystem` / `sectionAlign` / `fileAlign` / `dllChars`：
@@ -322,6 +327,33 @@ export function peSections(inp) {
     link: s.link, info: s.info,
   }));
   const find = (n) => secs.find((s) => s.name === n);
+
+  /* `pe_load_res`：每份资源文件加一节 `.rsrc`（`SHT_PROGBITS | SHF_ALLOC`）、一个
+   * 同名的局部符号，再把 COFF 那张重定位表整条改挂成 `R_XXX_RELATIVE` 指向那个符号。
+   * 于是资源目录里指向数据的那几格落笔时得到「原地那个节内偏移 + 这一节的 RVA」。
+   * `RELATIVE` 不是 `REL_TYPE_DIRECT`，所以这几条**不进** `.reloc`。 */
+  for (const rs of inp.res ?? []) {
+    const sec = {
+      name: '.rsrc', type: SHT_PROGBITS, flags: SHF_ALLOC,
+      size: rs.bytes.length, bytes: rs.bytes,
+    };
+    secs.push(sec);
+    const shndx = secs.length;                   // `secs` 是从 1 号节开始摆的
+    const symx = syms.length;
+    syms.push({ name: '.rsrc', info: 0, bind: 0, type: 0, other: 0, shndx, value: 0, size: 0 });
+    const rela = new Uint8Array(rs.relocs.length * RELA_SIZE);
+    const dv = new DataView(rela.buffer);
+    const rel = machine === EM_AARCH64 ? R_AARCH64_RELATIVE : R_X86_64_RELATIVE;
+    for (let i = 0; i < rs.relocs.length; i++) {
+      dv.setBigUint64(i * RELA_SIZE, BigInt(rs.relocs[i]), true);
+      dv.setUint32(i * RELA_SIZE + 8, rel, true);
+      dv.setUint32(i * RELA_SIZE + 12, symx, true);
+    }
+    secs.push({
+      name: '.rela.rsrc', type: SHT_RELA, flags: 0,
+      size: rela.length, bytes: rela, info: shndx,
+    });
+  }
 
   /* `resolve_common_syms` 里那一半：`SHN_COMMON` 的符号在 `.bss` 里安家。
    * （`tcc -r` 不做这一步，所以并合出来的表里它们还是 COMMON。） */
