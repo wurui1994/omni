@@ -652,6 +652,13 @@ tcc 判的是 `sym->type.t & (VT_STATIC | VT_INLINE)`（`tccgen.c:478`），而 
 的三对下标跟着走。ELF 那一侧不用改：`link/elf.js` 的 `buildSyms` 本来就按 `d.local`
 分段（第三十八片建的时候就照 tcc 的 `sort_syms` 办了），两个写出器同一份入参。
 
+**连 clang 也换掉**（第九十三片）：上一片那个 `omni-tcc` 是 `clang` 链的。这一片把
+链接那一步也换成自己的 —— `c-obj --format elf` 出 tcc 那种 `ET_REL`，`macho-link`
+（`link/macho_exe.js`，第五十几片建的那套「读 ELF、写 `MH_EXECUTE`」）把十二份读回来
+链成一个 2.2 MB 的可执行文件。它跑得起来（不用 `codesign`），编 `tests/c/gen/` 那 83 份
+与 tinycc 自己那 12 份，出来的目标文件与尺子 tcc **逐字节相同**。从源码到能跑的 tcc，
+整条链上除了 SDK 的头与那份 `libc.tbd`（只从里头读符号名），没有别人的东西。
+
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
 地址交给真的 libc（`strlen`/`memcpy`）验过。C 前端现在还把 `&x` 降到影子栈上，
@@ -12454,6 +12461,61 @@ Makefile 做的是同一件事。
   代码生成），与这一片无关。
 
 <!-- 第九刀第九十二片-END -->
+
+## 落地：第九刀第九十三片
+
+把 clang 也换掉 —— 自己编、自己链的 tcc，编出来的字节还是与尺子相同。
+
+上一片的 `omni-tcc` 是 `clang -o omni-tcc *.o` 链的。链接那一步用别人的，等于这条链上
+还留着一个没被称过的环节。这一片把它换成自己的：
+
+```
+omni c-obj x.c --format elf -o x.o     # tcc 那种 ET_REL
+omni macho-link *.o -o omni-tcc-own --dylib <SDK>/usr/lib/libc.tbd
+```
+
+两件事本来就都在手里，这一片只是**第一次把它们接起来**：
+
+- `--format elf` 是第三十八片建的那个写出器。为什么链接器要吃 ELF 而不是 Mach-O：
+  tcc 的 `-c` 在**所有**目标上都写 ELF（`tccelf.c` 是它唯一的目标文件写出器），
+  Mach-O 只在链接那一步才出现 —— `macho_exe.js` 照的就是 `tccmacho.c`，入口是
+  「一堆 ELF 的 `.o` 进来，一个 `MH_EXECUTE` 出去」。
+- `libc.tbd` 只当**名单**用（`macho_load_tbd`）：从里头读出安装名
+  `/usr/lib/libSystem.B.dylib` 与它导出的符号名，用来回答「这个未定义的名字是不是
+  来自某个 dylib」。一个字节都不从里头拷。
+
+第一次跑只差一个符号：`__NSGetEnviron` 没定义 —— 那正是「没给 `--dylib`」的样子
+（`tcc_add_library(s1, "c")` 那一步我们是手工递的）。给上就过了。
+
+结果：2241432 字节、14 条加载命令、6 节。它
+
+- **跑得起来，而且不用 `codesign`**（`./omni-tcc-own -v` 印出与尺子一样的版本行）；
+- `-c` 编 `tests/c/gen/` 那 83 份、编 tinycc 自己那 12 份，出来的目标文件与尺子 tcc
+  **逐字节相同**；
+- `-run` 也走得通。
+
+到这儿，从 C 源码到一个能干活的 tcc，整条链上除了 macOS SDK 的头与那份 `libc.tbd`，
+没有别人的东西：预处理、语法、代码生成、目标文件、链接，全是自己的。
+
+### 门
+
+`tests/c/selfobj.js` 从 16 条长到 21 条（新增：12 份 ELF `.o`、一次自己链、版本行、
+两组字节比），跑完 14 秒。尺子编出来的那些 `.o` 现在按「文件 + 参数」记着 ——
+两条腿比的是同一份，不必让尺子编两遍。
+
+`tests/c/run.js`（206）与 `tests/c/native.js`（217）不受影响（这一片没动前端）。
+
+### 还欠着的
+
+- 那份可执行文件与 tcc 自己链出来的**不比字节**：tcc 写出的可执行文件里带临时名，
+  它自己跑两遍都不一样（第九十二片量过）。要比得先有一个「可重现」的口径。
+- `--dylib` 还得手工递。tcc 是 `tcc_add_library` 按 `-l` 去找 `libc.tbd` 的，
+  那一段（库搜索路径）还没搬。
+- x86_64 那一侧没试：`macho_exe.js` 两种架构都写得出，但十二份源码要换成 `x86_64-gen.c`
+  那一套，而且得在 Rosetta 上跑。
+
+<!-- 第九刀第九十三片-END -->
+
 
 
 

@@ -14,11 +14,15 @@
 //
 // 第 5 步是这一路的收口：我们编出来的 tcc 与真的 tcc，对二十三万行输入写出同一串字节。
 //
+// 6~8 步（第九十三片）把 `clang` 也换掉：`--format elf` 出 tcc 那种 `ET_REL`，
+// 我们自己的 `macho-link` 读回来链成 `MH_EXECUTE`，那一份同样跑得起来、同样逐字节相同。
+// 于是整条链上除了 SDK 的头与 `libc.tbd`，没有别人的东西。
+//
 // 尺子（`.omni-cache/tcc-build/tcc`）、源码树、或者不是 arm64 的 macOS —— 整组跳过。
 //
 //   node tests/c/selfobj.js
 
-import { readdirSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { readdirSync, existsSync, mkdirSync, readFileSync, rmSync, chmodSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -111,37 +115,104 @@ if (mineV.status !== 0) {
   bad('omni-tcc -v', `    tcc : ${refBanner.trim()}\n    ours: ${mineV.stdout.trim()}`);
 } else ok(`omni-tcc -v == tcc -v（${refBanner.trim()}）`);
 
+/** 尺子编出来的那一份，按「文件 + 参数」记着 —— 两条腿比的是同一份，不必编两遍。 */
+const refCache = new Map();
+function refObj(f, args) {
+  const key = `${args.join(' ')}|${f}`;
+  const hit = refCache.get(key);
+  if (hit !== undefined) return hit;
+  const ro = join(OUT, 'ref.o');
+  const b = spawnSync(TCC, ['-B', TCC_DIR, ...args, '-c', f, '-o', ro],
+    { encoding: 'utf8', maxBuffer: 1 << 26 });
+  const v = b.status === 0 ? readFileSync(ro) : null;   // null = 尺子自己就拒了
+  refCache.set(key, v);
+  return v;
+}
+
 /** 两个 tcc 编同一份 `.c`，目标文件必须逐字节相同。 */
-function objParity(label, args, files) {
+function objParity(tcc, label, args, files) {
   let same = 0;
   const diffs = [];
   for (const f of files) {
+    const want = refObj(f, args);
+    if (want === null) continue;             // 没有尺子，不比
     const mo = join(OUT, 'mine.o');
-    const ro = join(OUT, 'ref.o');
-    const a = spawnSync(exe, ['-B', TCC_DIR, ...args, '-c', f, '-o', mo],
+    const a = spawnSync(tcc, ['-B', TCC_DIR, ...args, '-c', f, '-o', mo],
       { encoding: 'utf8', maxBuffer: 1 << 26 });
-    const b = spawnSync(TCC, ['-B', TCC_DIR, ...args, '-c', f, '-o', ro],
-      { encoding: 'utf8', maxBuffer: 1 << 26 });
-    if (b.status !== 0) continue;            // 尺子自己就拒了：没有可比的
     if (a.status !== 0) {
       diffs.push(`    ${f}：我们拒了 —— ${(a.stderr ?? '').trim().split('\n')[0]}`);
       continue;
     }
-    if (Buffer.compare(readFileSync(mo), readFileSync(ro)) === 0) same++;
+    if (Buffer.compare(readFileSync(mo), want) === 0) same++;
     else diffs.push(`    ${f}：字节不同`);
   }
   if (diffs.length > 0) bad(label, diffs.slice(0, 6).join('\n'));
   else ok(`${label}（${same} 份，逐字节相同）`);
 }
 
+const genFiles = readdirSync(join(here, 'gen')).filter((f) => f.endsWith('.c')).sort()
+  .map((f) => join(here, 'gen', f));
+const tinyFiles = UNITS.map((u) => join(SRC, `${u}.c`));
+const TINY_ARGS = ['-I', TCC_DIR, '-DONE_SOURCE=0'];
+
 // ---- 4. 我们编出来的 tcc 去编测试用例：与尺子写出同一串字节
-const genDir = join(here, 'gen');
-objParity('omni-tcc -c tests/c/gen/*.c == tcc -c', [],
-  readdirSync(genDir).filter((f) => f.endsWith('.c')).sort().map((f) => join(genDir, f)));
+objParity(exe, 'omni-tcc -c tests/c/gen/*.c == tcc -c', [], genFiles);
 
 // ---- 5. 收口：我们编出来的 tcc 去编 tinycc 自己
-objParity('omni-tcc -c tinycc/*.c == tcc -c', ['-I', TCC_DIR, '-DONE_SOURCE=0'],
-  UNITS.map((u) => join(SRC, `${u}.c`)));
+objParity(exe, 'omni-tcc -c tinycc/*.c == tcc -c', TINY_ARGS, tinyFiles);
+
+/* ---- 6~8. 再把 clang 也换掉（第九十三片）
+ *
+ * 上面那一份是 `clang` 链的。这一段改成**我们自己的链接器**：`c-obj --format elf`
+ * 出 tcc 那种 `ET_REL`（tcc 的 `-c` 在所有目标上都写 ELF），`macho-link` 读回来、
+ * 定位、写出一个真的 `MH_EXECUTE`。除了 SDK 里那份 `libc.tbd`（从里头只读符号名，
+ * 用来回答「这个未定义的名字是不是来自某个 dylib」），整条链上没有别人的东西。 */
+const SDK = spawnSync('xcrun', ['--show-sdk-path'], { encoding: 'utf8' }).stdout.trim();
+const TBD = join(SDK, 'usr', 'lib', 'libc.tbd');
+if (SDK === '' || !existsSync(TBD)) {
+  process.stdout.write(`  skip 自己链那一段：找不到 ${TBD}\n`);
+} else {
+  const elfDir = join(OUT, 'elf');
+  mkdirSync(elfDir, { recursive: true });
+  let elfOk = true;
+  for (const u of UNITS) {
+    const r = spawnSync(process.execPath,
+      [CLI, 'c-obj', join(SRC, `${u}.c`), '-I', TCC_DIR, '-DONE_SOURCE=0',
+        ...(u === 'tcc' ? gitDefs : []),
+        '--format', 'elf', '-o', join(elfDir, `${u}.o`)],
+      { encoding: 'utf8', maxBuffer: 1 << 26 });
+    if (r.status !== 0) {
+      bad(`c-obj --format elf ${u}.c`,
+        `    ${(r.stderr ?? '').trim().split('\n').slice(0, 3).join('\n    ')}`);
+      elfOk = false;
+    }
+  }
+  if (elfOk) ok(`c-obj --format elf ×${UNITS.length}（tcc 那种 ET_REL）`);
+
+  const own = join(OUT, 'omni-tcc-own');
+  const lk = elfOk
+    ? spawnSync(process.execPath,
+      [CLI, 'macho-link', ...UNITS.map((u) => join(elfDir, `${u}.o`)),
+        '-o', own, '--dylib', TBD],
+      { encoding: 'utf8', maxBuffer: 1 << 26 })
+    : null;
+  if (lk === null) { /* 上一步就没成，链接这一步不必报第二遍 */ } else if (lk.status !== 0) {
+    bad('macho-link *.o -o omni-tcc-own',
+      `    ${(lk.stderr ?? '').trim().split('\n').slice(0, 3).join('\n    ')}`);
+  } else {
+    ok(`macho-link *.o -o omni-tcc-own（${(lk.stdout ?? '').trim()}）`);
+    chmodSync(own, 0o755);
+    const v = spawnSync(own, ['-v'], { encoding: 'utf8' });
+    if (v.stdout !== refBanner) {
+      bad('omni-tcc-own -v', `    tcc : ${refBanner.trim()}\n    ours: ${(v.stdout ?? '').trim()}`
+        + `\n    退出码 ${v.status}${v.signal === null ? '' : `，信号 ${v.signal}`}`);
+    } else {
+      ok('omni-tcc-own -v == tcc -v（自己编的、自己链的，跑起来了）');
+      objParity(own, 'omni-tcc-own -c tests/c/gen/*.c == tcc -c', [], genFiles);
+      objParity(own, 'omni-tcc-own -c tinycc/*.c == tcc -c', TINY_ARGS, tinyFiles);
+    }
+  }
+}
 
 rmSync(OUT, { recursive: true, force: true });
 
