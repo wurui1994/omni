@@ -22,11 +22,17 @@ import * as x from './encode.js';
 /**
  * 要等链接器填的那几种。名字与值照 `<mach-o/reloc.h>` 的 x86_64 那一族：
  *  - `BRANCH`：`call`/`jmp` 的四字节相对偏移（`X86_64_RELOC_BRANCH = 2`）；
- *  - `SIGNED`：RIP 相对的取址与访存（`X86_64_RELOC_SIGNED = 1`）。
+ *  - `SIGNED`：RIP 相对的取址与访存（`X86_64_RELOC_SIGNED = 1`）；
+ *  - `UNSIGNED`：数据里的一个八字节绝对地址（`X86_64_RELOC_UNSIGNED = 0`）——
+ *    这一层还不发它，读入器认得（`link.js`）。
  *
  * 这一层只**记账**，不填 —— 填是链接器的事（arm64 那边同一条）。
  */
-export const RELOC = { BRANCH: 'X86_64_RELOC_BRANCH', SIGNED: 'X86_64_RELOC_SIGNED' };
+export const RELOC = {
+  BRANCH: 'X86_64_RELOC_BRANCH',
+  SIGNED: 'X86_64_RELOC_SIGNED',
+  UNSIGNED: 'X86_64_RELOC_UNSIGNED',
+};
 
 export class CodeBuf {
   constructor() {

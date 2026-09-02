@@ -1,29 +1,34 @@
-/* Mach-O 的读入与**把几个 .o 并成一个** —— ADR-0017 第 11 步，第九刀第十一片。
+/* Mach-O 的读入与**把几个 .o 并成一个** —— ADR-0017 第 11 步，第九刀第十一片；
+ * 第十七片起两种架构都认。
  *
- * 到上一片为止我们只会**写** `.o`，写完交给 clang。这一片开始自己**读**：
+ * 到第十片为止我们只会**写** `.o`，写完交给 clang。这一片开始自己**读**：
  * 一个能读回自己写出去的东西的读入器，本身就是写出器的一道对账（写错的字段，读的时候
  * 对不上）。然后是链接器的第一件事 —— 几个目标文件并成一个，把**够得着的**重定位当场
  * 填掉，填不了的原样转出去。
  *
  * 为什么这一片不出可执行文件
  * --------------------------
- * 因为有一格是**算不出来**的：`adrp` 要的是「目标所在的页」减「PC 所在的页」，
- * 而页号取决于最终的**绝对地址**。目标文件里 `__text` 只保证按 4 对齐，段将来落在哪个
- * 4096 边界上这一层不知道，于是 `PAGE21`/`PAGEOFF12` 只能原样转出去。
+ * 因为有一格是**算不出来**的。arm64 这边 `adrp` 要的是「目标所在的页」减「PC 所在的页」，
+ * 而页号取决于最终的**绝对地址**；x86_64 这边 RIP 相对要的是「数据与代码的距离」，
+ * 而最终链接会把各个文件的 `__text` 与 `__data` 分别拼到一起，那个距离也会变。
+ * 所以两边的「取数据的地址」这一类重定位都只能原样转出去。
  *
- * `BRANCH26` 不一样：它是**同一节内的相对偏移**，两头都在合并后的 `__text` 里，差值
- * 就定下来了。所以这一片能填的正好是「自家函数之间的调用」—— 也正是 `ld -r` 会填的那些。
+ * 能填的是**同一节内的相对跳转**：两头都在合并后的 `__text` 里，差值就定下来了 ——
+ * 也正是 `ld -r` 会填的那些。arm64 是 `BRANCH26`（26 位、单位 4 字节、从本条开头算），
+ * x86_64 是 `BRANCH`（四字节、从**下一条**开头算）。
  *
  * 于是这一片的形状是诚实的：读、并、填得了的填掉、填不了的记着。可执行文件是后面的事
  * （dyld 那一整摊、代码签名，与「指令对不对」无关，见 `macho.js` 头上那段）。
  */
 
 import { OmniError } from '../source/diag.js';
-import { RELOC } from './asm.js';
+import { RELOC } from '../arm64/asm.js';
+import { RELOC as XRELOC } from '../x64/asm.js';
 
 const MH_MAGIC_64 = 0xfeedfacf;
 const MH_OBJECT = 1;
 const CPU_TYPE_ARM64 = 0x0100000c;
+const CPU_TYPE_X86_64 = 0x01000007;
 const LC_SEGMENT_64 = 0x19;
 const LC_SYMTAB = 0x02;
 
@@ -34,11 +39,33 @@ const ARM64_RELOC_BRANCH26 = 2;
 const ARM64_RELOC_PAGE21 = 3;
 const ARM64_RELOC_PAGEOFF12 = 4;
 
-/** 文件里的重定位类型 -> 我们这一侧的名字。写出那一头的表反过来。 */
-const KIND_OF_TYPE = {};
-KIND_OF_TYPE[ARM64_RELOC_BRANCH26] = RELOC.BRANCH26;
-KIND_OF_TYPE[ARM64_RELOC_PAGE21] = RELOC.PAGE21;
-KIND_OF_TYPE[ARM64_RELOC_PAGEOFF12] = RELOC.PAGEOFF12;
+const X86_64_RELOC_UNSIGNED = 0;
+const X86_64_RELOC_SIGNED = 1;
+const X86_64_RELOC_BRANCH = 2;
+
+/**
+ * 文件里的重定位类型 -> 我们这一侧的名字。写出那一头的表反过来，**分架构** ——
+ * 两族的类型号同号不同义（`2` 在 arm64 是 `BRANCH26`、在 x86_64 是 `BRANCH`），
+ * 所以读之前必须先认 cputype。按错的表往下读会得到一个「看上去合理」的结果，
+ * 那种错最难查。
+ */
+const KIND_OF_TYPE = {
+  arm64: {
+    [ARM64_RELOC_BRANCH26]: RELOC.BRANCH26,
+    [ARM64_RELOC_PAGE21]: RELOC.PAGE21,
+    [ARM64_RELOC_PAGEOFF12]: RELOC.PAGEOFF12,
+  },
+  x86_64: {
+    [X86_64_RELOC_UNSIGNED]: XRELOC.UNSIGNED,
+    [X86_64_RELOC_SIGNED]: XRELOC.SIGNED,
+    [X86_64_RELOC_BRANCH]: XRELOC.BRANCH,
+  },
+};
+
+/** cputype -> 架构名。 */
+const ARCH_OF_CPU = {};
+ARCH_OF_CPU[CPU_TYPE_ARM64] = 'arm64';
+ARCH_OF_CPU[CPU_TYPE_X86_64] = 'x86_64';
 
 /** 读字节。位域一律用除法与取模拆 —— 32 位的最高位用 `>>` 会拆出负数。 */
 class Rd {
@@ -94,8 +121,10 @@ export function readObject(bytes) {
   if (r.u32(0) !== MH_MAGIC_64) throw new OmniError('macho: 不是 64 位的 Mach-O');
   if (r.u32(12) !== MH_OBJECT) throw new OmniError('macho: 只读 MH_OBJECT（.o）');
   /* 重定位的类型号是**分架构**的（`ARM64_RELOC_*` 与 `X86_64_RELOC_*` 同号不同义），
-   * 而这个文件只有 arm64 的那张表。所以先认架构 —— 不认就报，别按错的表往下读。 */
-  if (r.u32(4) !== CPU_TYPE_ARM64) throw new OmniError('link: 这一层只读 arm64 的 .o');
+   * 所以先认架构 —— 按错的表往下读会得到一个「看上去合理」的结果。 */
+  const arch = ARCH_OF_CPU[r.u32(4)];
+  if (arch === undefined) throw new OmniError(`link: 还不认识 cputype ${r.u32(4)}`);
+  const kinds = KIND_OF_TYPE[arch];
   const ncmds = r.u32(16);
 
   /** 节按文件里的次序排，`n_sect` 是**从 1 起**的下标。 */
@@ -163,14 +192,14 @@ export function readObject(bytes) {
       const ext = Math.floor(w / 2 ** 27) % 2;
       const type = Math.floor(w / 2 ** 28);
       if (ext !== 1) throw new OmniError('macho: 还不认按节的重定位（r_extern=0）');
-      const kind = KIND_OF_TYPE[type];
-      if (kind === undefined) throw new OmniError(`macho: 还不认重定位类型 ${type}`);
+      const kind = kinds[type];
+      if (kind === undefined) throw new OmniError(`macho: ${arch} 还不认重定位类型 ${type}`);
       const sym = symNames[symnum];
       if (sym === undefined) throw new OmniError(`macho: 重定位指着第 ${symnum} 条符号，没这条`);
       relocs.push({ at: site, kind, sym });
     }
   }
-  return { text, data, defs, relocs };
+  return { arch, text, data, defs, relocs };
 }
 
 function align(n, to) {
@@ -178,30 +207,53 @@ function align(n, to) {
 }
 
 /** 一条 `bl`/`b` 的低 26 位换成新的偏移。高六位（是 `bl` 还是 `b`）原样留着。 */
-function patchBranch26(words, wordIdx, delta) {
+function patchBranch26(text, site, delta) {
   if (delta % 4 !== 0) throw new OmniError(`link: 跳转的偏移 ${delta} 不是 4 的倍数`);
   const imm = delta / 4;
   if (imm < -(2 ** 25) || imm >= 2 ** 25) {
     throw new OmniError(`link: 跳转的偏移 ${delta} 超过 ±128MB`);
   }
-  const w = words[wordIdx];
+  const dv = new DataView(text.buffer, text.byteOffset, text.byteLength);
+  const w = dv.getUint32(site, true);
   const top = Math.floor(w / 2 ** 26);
   const imm26 = imm < 0 ? imm + 2 ** 26 : imm;
-  words[wordIdx] = (top * 2 ** 26 + imm26) >>> 0;
+  dv.setUint32(site, (top * 2 ** 26 + imm26) >>> 0, true);
+}
+
+/**
+ * x86_64 的 `call`/`jmp`：把四个字节换成新的偏移。
+ *
+ * 偏移是从**下一条指令**算起的，而 `site` 指着那四个字节 —— 四字节偏移格总在指令的
+ * 最后，所以「下一条」就是 `site + 4`。这一格与 arm64 差一个「本条指令的长度」，
+ * 记错的话跳到的地方**照样是合法指令**，只是跑错。
+ */
+function patchRel32(text, site, target) {
+  const delta = target - (site + 4);
+  if (delta < -(2 ** 31) || delta >= 2 ** 31) {
+    throw new OmniError(`link: 跳转的偏移 ${delta} 超过 ±2GB`);
+  }
+  const dv = new DataView(text.buffer, text.byteOffset, text.byteLength);
+  dv.setInt32(site, delta, true);
 }
 
 /**
  * 几个目标文件并成一个。
  *
- * @param objs `readObject` 出来的那种（`{text, data, defs, relocs}`）
- * @returns `{text, data, defs, relocs, filled}` —— `filled` 是当场填掉的重定位条数
+ * @param objs `readObject` 出来的那种（`{arch, text, data, defs, relocs}`）
+ * @returns `{arch, text, data, defs, relocs, filled}` —— `filled` 是当场填掉的条数
  *
  * 规矩：
+ *  - 所有文件的架构必须一样（混着并出来的东西没有意义）；
  *  - `__text` 按 4 拼、`__data` 按 8 拼，符号的偏移跟着挪；
  *  - 同一个名字被定义两次**直接报错**（`ld` 说 duplicate symbol，我们也说）；
- *  - `BRANCH26` 指着已经并进来的符号就当场填掉，别的原样转出去。
+ *  - **同一节内的相对跳转**指着已经并进来的符号就当场填掉，别的原样转出去。
  */
 export function linkObjects(objs) {
+  if (objs.length === 0) throw new OmniError('link: 没有文件可并');
+  const arch = objs[0].arch;
+  for (const o of objs) {
+    if (o.arch !== arch) throw new OmniError(`link: ${arch} 与 ${o.arch} 不能并在一起`);
+  }
   const textParts = [];
   const dataParts = [];
   let textLen = 0;
@@ -211,7 +263,7 @@ export function linkObjects(objs) {
   const shifted = [];   // [{relocs, textBase}]
 
   for (const o of objs) {
-    /* 每个文件的代码从一个 4 的边界起 —— 指令必须对齐，而且这样 `at` 的换算是加法。 */
+    /* 每个文件的代码从一个 4 的边界起 —— arm64 的指令必须对齐，x86 的不必但也无害。 */
     textLen = align(textLen, 4);
     while (textParts.length < textLen) textParts.push(0);
     const textBase = textLen;
@@ -234,22 +286,24 @@ export function linkObjects(objs) {
   }
 
   const text = new Uint8Array(textParts);
-  const words = new Uint32Array(text.buffer, 0, Math.floor(text.length / 4));
+  /** 这一族是「同一节内的相对跳转」—— 各架构一条。 */
+  const BRANCH = arch === 'arm64' ? RELOC.BRANCH26 : XRELOC.BRANCH;
   const relocs = [];
   let filled = 0;
   for (const part of shifted) {
     for (const rl of part.relocs) {
       const site = rl.at + part.textBase;
       const hit = defAt.get(rl.sym);
-      /* 够得着的只有「同在 `__text` 里的相对跳转」。`PAGE21`/`PAGEOFF12` 要绝对地址，
-       * 这一层还不知道，原样转出去（文件头上那段说了为什么）。 */
-      if (rl.kind === RELOC.BRANCH26 && hit !== undefined && hit.sect === 1) {
-        patchBranch26(words, site / 4, hit.off - site);
+      /* 够得着的只有「同在 `__text` 里的相对跳转」。取数据地址的那几种要等最终地址
+       * （arm64 的 `PAGE21` 要页号、x86_64 的 `SIGNED` 要代码与数据的距离），原样转出去。 */
+      if (rl.kind === BRANCH && hit !== undefined && hit.sect === 1) {
+        if (arch === 'arm64') patchBranch26(text, site, hit.off - site);
+        else patchRel32(text, site, hit.off);
         filled++;
         continue;
       }
       relocs.push({ at: site, kind: rl.kind, sym: rl.sym });
     }
   }
-  return { text, data: new Uint8Array(dataParts), defs, relocs, filled };
+  return { arch, text, data: new Uint8Array(dataParts), defs, relocs, filled };
 }
