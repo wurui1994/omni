@@ -1138,6 +1138,12 @@ export class Cpp {
           else str.add2Spc(t, this.tokc);
           t = this.nextArgstream(nested, null);
         }
+        /* 每个实参的记号串以 **TOK_EOF** 收尾（tcc 也是：`macro_arg_subst` 里到处是
+         * `while (*st != TOK_EOF)`）。这不是装饰 —— 它是「实参里的宏不许吃外面的记号流」
+         * 那条规矩的实现：展开实参时如果末尾是个函数式宏名，`nextArgstream` 预看到的是
+         * 这个 TOK_EOF 而不是外面那个 `(`，于是那个名字原样留下。tcctest.c:262
+         * 的 `qq(qq)(2)` 考的正是这一格（少了它，`qq(qq)` 会把后面的 `(2)` 吃进来）。 */
+        str.add(TOK_EOF);
         args.push({ v: p.v, vaargs: p.vaargs, str, expanded: null });
         pi++;
         if (t !== 41) break;
@@ -1289,7 +1295,7 @@ export class Cpp {
                 out.toks.pop();
                 out.vals.pop();
               }
-              if (a.str.len() === 0) {
+              if (argEmpty(a)) {
                 out.toks.pop();
                 out.vals.pop();
                 t0 = t1;
@@ -1298,7 +1304,7 @@ export class Cpp {
               }
               if (lastTok === SPC) out.add(SPC);
               raw = false;
-            } else if (a.str.len() === 0) {
+            } else if (argEmpty(a)) {
               out.add(TOK_PLCHLDR); // 空实参在 `##` 两侧要留一个占位（C99）
             }
           } else {
@@ -1308,6 +1314,7 @@ export class Cpp {
             if (a.expanded === null) {
               const e = new TokStr();
               this.macroSubst(e, nested, a.str, 0);
+              e.add(TOK_EOF);   // 展开过的那一份也以 TOK_EOF 收尾（`tccpp.c:3078`）
               a.expanded = e;
             }
             src = a.expanded;
@@ -2140,6 +2147,11 @@ function ppCheckHe0xE(t, s) {
 function findArg(args, v) {
   for (const a of args) if (a.v === v) return a;
   return null;
+}
+
+/** 这个实参是不是空的。串以 TOK_EOF 收尾（见 `readMacroArgs`），所以「空」不是长度 0。 */
+function argEmpty(a) {
+  return a.str.len() === 0 || a.str.toks[0] === TOK_EOF;
 }
 
 function isAbsPath(p) {
