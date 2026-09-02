@@ -2055,6 +2055,8 @@ function main(argv) {
      * 开头是 `MZ` 的是真的 `.dll`（第六十七片），剩下的才是目标文件。
      * `-g` 把 `.stab` / `.stabstr` 带进来，`-gdwarf` 换成 dwarf 那十来节；两种都在文件
      * 末尾接一张 COFF 符号表（第六十九、七十片）。
+     * 导出表不看是不是 DLL —— `.exe` 里的 `__declspec(dllexport)` 一样进表，而且只要
+     * 表非空就顺手往 `<输出>.def` 写一份清单（第七十一片）。
      *   omni pe-link a.o [a.res] [foo.dll] -o a.exe -L dir [-L dir …]
      *                 [--target x86_64-win32] [--shared] [-g | -gdwarf]
      *                 [--subsystem gui] [--image-base 1000000] [--stack 2097152]
@@ -2127,6 +2129,8 @@ function main(argv) {
         ...opt,
       });
       writeBinary(out, r.bytes);
+      /* 有导出的符号时 tcc 还顺手写一份 `<输出>.def`（`pe_build_exports` 里那段 `#if 1`）。 */
+      if (r.def !== undefined) writeText(r.def.path, r.def.text);
       stdout(`${out} (${r.bytes.length} 字节，${r.infos.length} 节，${r.nthunks} 个导入桩)\n`);
       return 0;
     }

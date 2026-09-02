@@ -177,7 +177,11 @@ function exportName(sym, under) {
 }
 
 /**
- * `pe_build_exports`：DLL 的导出目录，接在导入表后面（对到 16）。
+ * `pe_build_exports`：导出目录，接在导入表后面（对到 16）。
+ *
+ * 它**不问**是不是 DLL —— `pe_assign_addresses` 走到 thunk 那一节就无条件调它一次，
+ * 所以一份普通的 `.exe` 里只要有 `__declspec(dllexport)` 的符号，一样会摆出这张表，
+ * 一样会顺手写出那份 `<输出>.def`。
  *
  * 布局是四张表连着：40 字节的 `IMAGE_EXPORT_DIRECTORY`、每个符号 4 字节的函数 RVA、
  * 每个符号 4 字节的名字 RVA、每个符号 2 字节的序号，然后是 dll 自己的名字与各个符号名
@@ -187,12 +191,12 @@ function exportName(sym, under) {
  * 把要挂的地方记在 `slots` 里，交给 `peImage`。
  *
  * @param syms 并合后的 `.symtab`（下标要与重定位里的符号号对得上）
- * @param dllName 输出文件的**基名**（`tcc_basename(pe->filename)`）
+ * @param outName 输出文件的路径（`pe->filename`）；表里写的是它的**基名**
  * @param baseO 这一段在 thunk 节里的偏移（已经对到 16）
  * @param rvaBase thunk 节的 RVA
- * @returns `null`（没有导出符号）或 `{at, size, bytes, slots}`
+ * @returns `null`（没有导出符号）或 `{at, size, bytes, slots, def}`
  */
-export function buildExports(syms, dllName, baseO, rvaBase, under) {
+export function buildExports(syms, outName, baseO, rvaBase, under) {
   const list = [];
   for (let i = 1; i < syms.length; i++) {
     const s = syms[i];
@@ -201,6 +205,8 @@ export function buildExports(syms, dllName, baseO, rvaBase, under) {
   }
   if (list.length === 0) return null;
   list.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  if (outName === undefined) throw new OmniError('pe: 有导出的符号，要知道输出的文件名');
+  const dllName = outName.split(/[\\/]/).pop();
 
   const n = list.length;
   const funcO = baseO + 40;
@@ -231,7 +237,10 @@ export function buildExports(syms, dllName, baseO, rvaBase, under) {
   const bytes = new Uint8Array(head.length + tail.length);
   bytes.set(head, 0);
   bytes.set(new Uint8Array(tail), head.length);
-  return { at: baseO, size: bytes.length, bytes, slots };
+  /* `fprintf(op, "LIBRARY %s\n\nEXPORTS\n", dllname)` 然后一行一个名字 —— 文件是
+   * `"wb"` 开的，所以换行就是一个 `\n`，末尾也有一个。 */
+  const def = `LIBRARY ${dllName}\n\nEXPORTS\n${list.map((x) => `${x.name}\n`).join('')}`;
+  return { at: baseO, size: bytes.length, bytes, slots, def };
 }
 
 /** `pe_build_reloc`：把要装载时重定位的地方按 4K 分页摆成一串块。 */
@@ -477,13 +486,11 @@ export function peSections(inp) {
         imp = { rva: addr - imagebase, at, dlls };
         sec.size = at + buildImports(imp).length;
       }
-      if (dll) {
-        const nm = inp.outName;
-        if (nm === undefined) throw new OmniError('pe: 造 DLL 要知道输出的文件名');
-        exp = buildExports(syms, nm.split(/[\\/]/).pop(), align(sec.size, 16),
-          addr - imagebase, inp.leadingUnderscore === true);
-        if (exp !== null) sec.size = exp.at + exp.size;
-      }
+      /* `pe_build_exports` 是无条件调的 —— 可执行文件里带 `__declspec(dllexport)`
+       * 的符号一样进这张表。没有这样的符号时它自己回 `null`。 */
+      exp = buildExports(syms, inp.outName, align(sec.size, 16),
+        addr - imagebase, inp.leadingUnderscore === true);
+      if (exp !== null) sec.size = exp.at + exp.size;
       /* `pe_build_tls(pe, NULL)`：导出表后面再留 40 字节的 `IMAGE_TLS_DIRECTORY`，
        * 顺手在 `.data` 里划 32 字节（`__tls_index` 加三格），四个指针各挂一条
        * `REL_TYPE_DIRECT` —— 于是它们也要进 `.reloc`。 */

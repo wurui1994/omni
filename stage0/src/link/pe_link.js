@@ -348,7 +348,22 @@ export function peWrite(inp) {
   };
   r.img = img;
   r.bytes = writeImage(img);
+  /* `pe_build_exports` 里那段 `#if 1`：只要真有导出的符号，就顺手往
+   * `<输出>.def` 写一份导出清单。落盘的事交给调用方（我们不碰文件系统）。 */
+  if (r.exp !== null) r.def = { path: defPath(inp.outName), text: r.exp.def };
   return r;
+}
+
+/**
+ * `pstrcpy(buf, pe->filename); strcpy(tcc_fileextension(buf), ".def")`。
+ *
+ * `tcc_fileextension` 找的是**基名**里最后一个点；基名里没有点就回字符串末尾，
+ * 于是 `.def` 直接接在后面。目录名里的点不算 —— `out.d/foo` 出来的是 `out.d/foo.def`。
+ */
+export function defPath(out) {
+  const i = Math.max(out.lastIndexOf('/'), out.lastIndexOf('\\'));
+  const dot = out.lastIndexOf('.');
+  return `${dot > i ? out.slice(0, dot) : out}.def`;
 }
 
 /**

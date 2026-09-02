@@ -499,7 +499,12 @@ Mach-O 的 dylib 不叫、PE 的 dll **照叫**（`pe_add_runtime` 在
 碰上「已经对齐就不再推」）；两处例外都在问「目标节与符号所在的节是不是都在 `dwlo`
 到 `dwhi` 里」：`relocate_section` 里那种要写**节内偏移**而不是绝对地址，
 `pe_build_reloc` 里那种**不进** `.reloc`。`pe-debug` 那道门长到十七种走法、34 份逐字节
-相同）。PE 那一路 tcc 自己会走的每条路于是都对上了。
+相同）。
+**顺手写出的那份 `.def`**（第七十一片：`pe_build_exports` 是无条件调的 ——「导出表是 DLL
+的东西」这个想当然一直挡着一条真路：带 `__declspec(dllexport)` 的 `.exe` 里一样有导出目录。
+`.def` 本身只有三行 `fprintf`，难的是换扩展名那一步认的是**基名里最后一个点**
+（`my.lib.dll` → `my.lib.def`），`LIBRARY` 后面写的是带扩展名的基名。8 种 × 2 个目标，
+映像与 `.def` 都逐字节相同）。PE 那一路 tcc 自己会走的每条路于是都对上了。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -11078,9 +11083,68 @@ pe_virtual_align(pe, addr)` 是在 `continue` **之前**做的。第一节把地
 至此 PE 那一路 tcc 自己会走的每条路都对上了：可执行文件、dll、接着 `.def` / 真 `.dll` /
 资源文件链、十二个链接器开关、`__thread`、`-g` 与 `-gdwarf`。剩下的是 tcc 自己也不常走
 的几处（`-Wl,--no-*` 那几个反开关、i386/arm 那两个目标的 stdcall 修饰、造 dll 时顺手写
-的那份 `<输出>.def`）。
+的那份 `<输出>.def` —— 最后这个是下一片）。
 
 <!-- 第九刀第七十片-END -->
+
+## 落地：第九刀第七十一片
+
+顺手写出的那份 `<输出>.def`，还有它背后那件一直漏着的事：**导出表不问是不是 DLL。**
+
+`pe_build_exports`（`tccpe.c:1025`）是 `pe_assign_addresses` 走到 thunk 那一节时无条件
+调的一次 —— 跟 `pe_build_imports` 并排：
+
+```c
+if (s == pe->thunk) {
+    pe_build_imports(pe);
+    pe_build_exports(pe);
+    if (pe->tls_size)
+        pe_build_tls(pe, NULL);
+}
+```
+
+我们原先拿 `if (dll)` 把它挡住了，因为「导出表是 DLL 的东西」听起来天经地义。可拿一份
+带 `__declspec(dllexport)` 的 `main` 链成 `.exe` 就看得见：数据目录第 0 条指着一张
+80 字节的导出目录。挡不得。改法只有一句 —— 把那个 `if` 去掉，让 `buildExports` 自己在
+「一个导出符号都没有」时回 `null`（它本来就这么写的，`if (list.length === 0) return null`）。
+
+`.def` 那一段是 `pe_build_exports` 里那段 `#if 1`，就三行：
+
+```c
+pstrcpy(buf, sizeof buf, pe->filename);
+strcpy(tcc_fileextension(buf), ".def");
+op = fopen(buf, "wb");
+fprintf(op, "LIBRARY %s\n\nEXPORTS\n", dllname);
+...
+    if (op) fprintf(op, "%s\n", name);      /* 摆表的那个循环里顺路写 */
+```
+
+三处细节：
+
+- **换扩展名换的是基名里最后一个点**。`tcc_fileextension` 先 `tcc_basename`，再
+  `strrchr(b, '.')`，找不到就回字符串末尾 —— 于是 `my.lib.dll` 出来的是 `my.lib.def`
+  （不是 `my.def`），而 `out.d/foo` 出来的是 `out.d/foo.def`（目录名里的点不算）。
+- **`LIBRARY` 后面是基名，连扩展名一起**：`LIBRARY p.q.exe`。跟导出目录里那个
+  `hdr->Name` 指着的字符串是同一个 `dllname`。
+- 名字的次序跟表里一样 —— 已经按 `strcmp` 排过。`_` 是 0x5f、小写字母从 0x61 起，所以
+  `_mid` 排在 `alpha` 前面。文件是 `"wb"` 开的，换行就是一个 `\n`，末尾也有一个。
+
+落地上 `buildExports` 多回一个 `def` 字符串，`peWrite` 把它连同算好的路径挂成
+`r.def = {path, text}`；真往磁盘写的是 `cli.js`（链接器这一层不碰文件系统）。`defPath`
+就是上面那条换名规则。
+
+新门 `tests/c/pe-def.js` 两样都比：映像自己的字节，和旁边那份 `.def` 的字节。案例是
+`pe-def/`（带 `main`，链 `.exe`）加 `pe-gen/`（带 `_dllstart`，链 `.dll`，而且同一份
+`.o` 再链一遍 `<名字>.two.dll` 专门看换扩展名认的是哪个点）—— 8 种 × 2 个目标，
+`32 条相同, 0 条不同`（69252 字节）。CLI 也对：`pe-link e.o -o a/p.q.exe` 出来的
+`p.q.exe` 与 `p.q.def` 都与 tcc 的逐字节相同。
+
+至此 PE 那一路只剩两处 tcc 自己也不常走的：`-Wl,--no-*` 那几个反开关，和 i386/arm 那
+两个目标的 stdcall 修饰（`leading_underscore` 一开，`pe_export_name` 那个削下划线的分支
+才有活干）。
+
+<!-- 第九刀第七十一片-END -->
+
 
 
 
