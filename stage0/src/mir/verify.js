@@ -19,7 +19,7 @@
 
 import {
   OP, OP_NAMES, OP_MODES, REF_NONE, REF_BIAS, isConstRef, refText, typeText, typeLanes, T_BOOL,
-  T_I64, T_I32, T_F64,
+  T_I64, T_I32, T_F64, T_VOID,
   MLOAD_KINDS, MSTORE_KINDS, memKindNo, memBytes, isFloatType, isIntType, intBits,
 } from './ir.js';
 
@@ -229,8 +229,19 @@ function checkIndex(mod, f, i, op, v, bad, k) {
     }
     return;
   }
-  /* 函数的地址（第二十七片）：号要在表里、`t` 只能是 i64、而且只有 native 有真地址可谈
-   * （解释器那条腿上函数指针是「号 + 1」，不是地址）。 */
+  /* 会动的栈顶（第三十六片）：只有 native 有真的机器栈可动 —— 线性内存那条腿上
+   * 「栈」是 `$sp` 那个全局，动它是普通的 GLOAD/GSTORE，不该走这三条。 */
+  if (op === OP.SPGET || op === OP.SPSET || op === OP.SPALLOC) {
+    if (!mod.native) { bad(i, `${OP_NAMES[op]}：只有 native 这条腿上栈顶是机器的 sp`); return; }
+    const t = f.t[i];
+    if (op === OP.SPSET) {
+      if (t !== T_VOID) bad(i, `SPSET 的 t 是 ${typeText(t)}，它不产值`);
+      return;
+    }
+    if (t !== T_I64) bad(i, `${OP_NAMES[op]} 的 t 是 ${typeText(t)}，栈顶只能是 i64`);
+    return;
+  }
+  /* 函数的地址（第二十七片）：号要在表里、`t` 只能是 i64、而且只有 native 有真地址可谈   * （解释器那条腿上函数指针是「号 + 1」，不是地址）。 */
   if (op === OP.FADDR) {
     if (mod.funcs[v] === undefined) { bad(i, `函数号 ${v} 越界`); return; }
     if (!mod.native) { bad(i, 'FADDR：只有 native 这条腿上函数有真地址'); return; }

@@ -46,6 +46,12 @@ const TMP0 = 9;
 const TMP1 = 10;
 const RES = 8;
 const SP = 31;
+/* 帧基址（第三十六片）：**只有会动栈顶的函数里才用**（变长数组、`alloca`）。
+ * 那种函数里 `sp` 会往下跑，而槽位与值的栈位都是「基址 + 正偏移」—— 所以序言里把
+ * 降完的 `sp` 抄进这一个寄存器，往后一律按它寻址。x28 是**被调用者保存的**，
+ * 所以要在帧里留一格把调用者的那份存起来。不会动栈顶的函数一条指令都不变，
+ * 于是那 88 条编码对账的用例照旧成立。 */
+const FB = 28;
 /* 浮点的草稿。取 v16-v18 是因为 **v8-v15 是被调用者保存的** —— 用它们就得在序言里存、
  * 收场里取，而这一层根本不需要跨调用留住任何东西。 */
 const FTMP0 = 16;
@@ -148,8 +154,18 @@ function outArgsBytes(mod, f) {
  * 序言按它把放不下的形参读回来，`VASTART` 按它算「第一个变参在哪儿」——
  * 苹果的 arm64 上变参一律走栈，它们就紧跟在这些溢出的固定形参后面。
  */
-function inArgBytes(f) {
-  let ngrn = 0;
+/** 这个函数会动栈顶吗（第三十六片）：有变长数组或 `alloca` 就会。 */
+function hasDynStack(f) {
+  let i = 0;
+  while (i < f.count()) {
+    const op = f.op[i];
+    if (op === OP.SPALLOC || op === OP.SPSET || op === OP.SPGET) return true;
+    i++;
+  }
+  return false;
+}
+
+function inArgBytes(f) {  let ngrn = 0;
   let nsrn = 0;
   let bytes = 0;
   for (const p of f.params) {
@@ -190,6 +206,17 @@ class FnGen {
       bytes = bytes + pad + blk.size;
     }
     this.frame = bytes + (bytes % 16 === 0 ? 0 : 16 - (bytes % 16));
+    /* 会动栈顶的函数（第三十六片）：帧最上面留一格存调用者的 x28，往后一律按 `FB`
+     * 寻址。留在**最上面**是为了让下面所有偏移都不变 —— 那样「不会动栈顶」的那一路
+     * 一条指令都不改。 */
+    this.dynStack = hasDynStack(f);
+    this.fbSave = -1;
+    if (this.dynStack) {
+      this.fbSave = this.frame;
+      this.frame += 16;
+    }
+    /** 槽位与值的栈位按谁寻址。会动栈顶时是 `FB`，否则就是 `sp`（一条指令都不多）。 */
+    this.base = this.dynStack ? FB : SP;
     /* 第一个变参在哪儿（第二十四片）：苹果的 arm64 把 `...` 后面的实参一律摆在栈上，
      * 于是它就在入参区里、溢出的固定形参之后。序言什么都不用泼 —— 这是这条 ABI
      * 比 SysV 省事的地方。 */
@@ -222,12 +249,12 @@ class FnGen {
   /** 帧里的一个 8 字节格子的读写。偏移超过 `ldr` 能表示的范围就明着报。 */
   frameLoad(reg, off) {
     if (off > 32760) throw new OmniError(`arm64: 帧偏移 ${off} 太大（这一片还不搬基址）`);
-    this.buf.emit(a.ldrU(3, reg, SP, off));
+    this.buf.emit(a.ldrU(3, reg, this.base, off));
   }
 
   frameStore(reg, off) {
     if (off > 32760) throw new OmniError(`arm64: 帧偏移 ${off} 太大（这一片还不搬基址）`);
-    this.buf.emit(a.strU(3, reg, SP, off));
+    this.buf.emit(a.strU(3, reg, this.base, off));
   }
 
   /* -------------------------------------------------------------- 立即数
@@ -310,6 +337,11 @@ class FnGen {
       if (hi > 0) buf.emit(a.subImm(1, SP, SP, hi, 1));
       if (lo > 0) buf.emit(a.subImm(1, SP, SP, lo));
     }
+    /* 会动栈顶的函数（第三十六片）：存下调用者的 x28，再把降完的 `sp` 抄进它。
+     * 这两条只能按 `sp` 写 —— `FB` 还没成立。 */
+    if (this.dynStack) {
+      buf.emit(a.strU(3, FB, SP, this.fbSave), a.movSp(1, FB, SP));
+    }
     /* 形参：AAPCS 把整数与浮点**分成两串**数（x0-x7 与 v0-v7 各自从 0 起），
      * 所以两个计数器。放不下的从**入参区**读（第二十三片）：调用方摆在它自己的
      * 出参区里，也就是我们这一层 `fp + 16` 起的地方（`fp`/`lr` 那一对占了前 16）。
@@ -341,6 +373,9 @@ class FnGen {
     for (let i = 0; i < f.count(); i++) this.one(i);
 
     buf.place(this.retLabel);
+    /* 会动栈顶的函数：先把调用者的 x28 取回来（这一条得在 `FB` 还有效的时候发），
+     * 再按 `x29` 把 `sp` 收回去 —— `sp` 这会儿可能停在某个变长数组下面。 */
+    if (this.dynStack) buf.emit(a.ldrU(3, FB, FB, this.fbSave));
     if (this.frame > 0) buf.emit(a.movSp(1, SP, 29));
     buf.emit(a.ldpPost(1, 29, 30, SP, 16), a.ret());
     return buf;
@@ -487,9 +522,9 @@ class FnGen {
       const lo = off % 4096;
       if (hi > 4095) nyi(`帧偏移 ${off}（两条 add 也装不下）`);
       if (hi === 0) {
-        buf.emit(a.addImm(1, RES, SP, lo));
+        buf.emit(a.addImm(1, RES, this.base, lo));
       } else {
-        buf.emit(a.addImm(1, RES, SP, hi, 1));
+        buf.emit(a.addImm(1, RES, this.base, hi, 1));
         if (lo > 0) buf.emit(a.addImm(1, RES, RES, lo));
       }
       return this.def(i, RES);
@@ -544,6 +579,39 @@ class FnGen {
       this.loadRef(TMP0, f.a[i]);
       buf.emit(a.strU(3, RES, TMP0, 0));
       return;
+    }
+
+    /* ---- 会动的栈顶（第三十六片）：变长数组与 `alloca`。
+     *
+     * `sp` 只能用**立即数形式**或经过一个普通寄存器中转来动 —— 移位寄存器形式里 31 号
+     * 是 `xzr`（第二十六片那个真错误）。所以一律「抄进 TMP1、算、再抄回 sp」。
+     *
+     * 切下来那一块要**让开出参区**：被调方按 `sp` 找走栈的实参，所以 `sp + 0` 起那一段
+     * 得一直是出参区。于是降 `sp` 时多降 `outArgs` 个字节，而块的基址取降之前那个位置
+     * 减去 n —— 也就是出参区的上沿。 */
+    if (op === OP.SPGET) {
+      buf.emit(a.movSp(1, RES, SP));
+      return this.def(i, RES);
+    }
+    if (op === OP.SPSET) {
+      this.loadRef(TMP0, f.a[i]);
+      buf.emit(a.movSp(1, SP, TMP0));
+      return;
+    }
+    if (op === OP.SPALLOC) {
+      this.loadRef(TMP0, f.a[i]);
+      buf.emit(a.movSp(1, TMP1, SP), a.subReg(1, TMP1, TMP1, TMP0));
+      buf.emit(a.movReg(1, RES, TMP1));
+      const oa = this.outArgs;
+      if (oa > 0) {
+        const hi = Math.floor(oa / 4096);
+        const lo = oa % 4096;
+        if (hi > 4095) nyi(`出参区 ${oa} 字节（一次 sub 装不下）`);
+        if (hi > 0) buf.emit(a.subImm(1, TMP1, TMP1, hi, 1));
+        if (lo > 0) buf.emit(a.subImm(1, TMP1, TMP1, lo));
+      }
+      buf.emit(a.movSp(1, SP, TMP1));
+      return this.def(i, RES);
     }
 
     /* ---- 存取（第九刀第七片）。地址就是真指针 —— native 上没有线性内存。 */
@@ -707,10 +775,12 @@ class FnGen {
     for (const ar of args) {
       const place = p.at[k];
       k++;
-      /* 走栈的（放不下的固定实参、以及变参那几个）：一格 8 字节，摆在出参区里。 */
+      /* 走栈的（放不下的固定实参、以及变参那几个）：一格 8 字节，摆在出参区里。
+       * 这一条**只能按 `sp` 写**（第三十六片）：出参区的约定是「紧贴 sp」，而会动栈顶的
+       * 函数里 `this.base` 是那个钉住的帧基址，与 `sp` 早就不是一回事了。 */
       if (place.off !== undefined) {
         this.loadRef(TMP0, ar);
-        this.frameStore(TMP0, place.off);
+        this.buf.emit(a.strU(3, TMP0, SP, place.off));
         continue;
       }
       if (place.v !== undefined) {

@@ -1003,6 +1003,18 @@ export class CGen {  /**
    */
   vlaAlloc(e) {
     const f = this.f;
+    /* native（第三十六片）：栈顶是**机器的** `sp`，动它要走 `SPGET`/`SPALLOC`。
+     * 形状与下面线性内存那一路一模一样 —— 存一次旧栈顶、切一块、把基址写进槽。 */
+    if (this.native) {
+      const cur0 = this.vlaStack[this.vlaStack.length - 1];
+      if (cur0 !== undefined && cur0.sp < 0) {
+        cur0.sp = this.temp(T_I64, 'vlasp');
+        f.emit(OP.STORE, T_VOID, f.emit(OP.SPGET, T_I64, REF_NONE, REF_NONE, 0),
+          REF_NONE, cur0.sp);
+      }
+      f.emit(OP.STORE, T_VOID, this.nativeAlloca(this.vlaSizeRef(e.ty)), REF_NONE, e.slot);
+      return;
+    }
     const spNo = this.spGlobal();
     const cur = this.vlaStack[this.vlaStack.length - 1];
     if (cur !== undefined && cur.sp < 0) {
@@ -1021,8 +1033,26 @@ export class CGen {  /**
   /** 把一个存着的 `$sp` 写回去（tcc 的 `gen_vla_sp_restore`）。 */
   spRestore(slot) {
     const f = this.f;
+    if (this.native) {
+      f.emit(OP.SPSET, T_VOID, f.emit(OP.LOAD, T_I64, REF_NONE, REF_NONE, slot), REF_NONE, 0);
+      return;
+    }
     f.emit(OP.GSTORE, T_VOID, f.emit(OP.LOAD, T_I64, REF_NONE, REF_NONE, slot),
       REF_NONE, this.spGlobal());
+  }
+
+  /**
+   * native：切一块栈下来，回它的基址（第三十六片）。
+   *
+   * 凑成 16 的倍数这一步放在**前端**：两条腿要的是同一个数，而 `SPALLOC` 的约定就是
+   * 「实参已经是 16 的倍数」。让开出参区那一步反过来留给后端 —— 那笔账两条 ABI 不同，
+   * 而且只有后端知道本函数最费的那次调用要几个字节。
+   */
+  nativeAlloca(nRef) {
+    const f = this.f;
+    const up = f.emit(OP.ADD, T_I64, nRef, this.mod.consts.int(15n), 0);
+    const n16 = f.emit(OP.BAND, T_I64, up, this.mod.consts.int(-16n), 0);
+    return f.emit(OP.SPALLOC, T_I64, n16, REF_NONE, 0);
   }
 
   /**
@@ -3278,8 +3308,13 @@ export class CGen {  /**
     const n = this.castTo(this.exprEq(), TY_ULLONG);
     this.skip(RPAR);
     const f = this.f;
-    const spNo = this.spGlobal();
     this.vlaSeen = true;
+    /* native（第三十六片）：与 `vlaAlloc` 同一条路，少的是「存一次旧栈顶」——
+     * 没人要把它还回来（还回来的只有作用域退出与函数收场）。 */
+    if (this.native) {
+      return this.postfix(sVal(mkPointer(TY_VOID), this.nativeAlloca(this.gv(n))));
+    }
+    const spNo = this.spGlobal();
     const sp = f.emit(OP.GLOAD, T_I64, REF_NONE, REF_NONE, spNo);
     const base = f.emit(OP.BAND, T_I64, f.emit(OP.SUB, T_I64, sp, this.gv(n), 0),
       this.mod.consts.int(-16n), 0);

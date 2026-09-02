@@ -559,6 +559,29 @@ class FnGen {
       return;
     }
 
+    /* ---- 会动的栈顶（第三十六片）：变长数组与 `alloca`。x86_64 上比 arm64 省事 ——
+     * `rsp` 是一个普通可编码的寄存器（`sub rsp, r10` 就是它本来的意思），而槽位与值的
+     * 栈位一直是 `rbp` 相对的，所以帧基址那一摊完全不用动。
+     *
+     * 要让开的只有出参区：被调方按 `rsp` 找走栈的实参，所以块的基址取第一次 `sub` 之后
+     * 那个位置，再往下降 `outArgs` 个字节当新的 `rsp`。 */
+    if (op === OP.SPGET) {
+      buf.emit(x.movRR(8, RES, REG.rsp));
+      return this.def(i, RES);
+    }
+    if (op === OP.SPSET) {
+      this.loadRef(TMP0, f.a[i]);
+      buf.emit(x.movRR(8, REG.rsp, TMP0));
+      return;
+    }
+    if (op === OP.SPALLOC) {
+      this.loadRef(TMP0, f.a[i]);
+      buf.emit(x.aluRR(ALU.sub, 8, REG.rsp, TMP0));
+      buf.emit(x.movRR(8, RES, REG.rsp));
+      if (this.outArgs > 0) buf.emit(x.aluRI(ALU.sub, 8, REG.rsp, this.outArgs));
+      return this.def(i, RES);
+    }
+
     /* ---- 模块级变量。x86_64 上一条 RIP 相对的 `mov` 就够 —— 不必先取址
      * （arm64 那边 `ldr` 的立即数格装不下符号，所以要 `adrp`+`add` 两条）。 */
     if (op === OP.GLOAD) {

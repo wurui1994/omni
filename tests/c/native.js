@@ -180,6 +180,25 @@ const CASES = [
     + ' char b[8]; return fp(b, 8, "hi") * 100 + b[0];'],
   ['变参函数指针：与直接用那个名字是同一个地址',
     'int (*fp)(char *, unsigned long, const char *, ...) = snprintf; return fp == snprintf;'],
+  /* 变长数组与 alloca（第三十六片）：栈顶真的会动。 */
+  ['变长数组：按下标读写', 'int n = 5; int a[n]; int i; long long s = 0;'
+    + ' for (i = 0; i < n; i++) a[i] = i * i; for (i = 0; i < n; i++) s += a[i]; return s;'],
+  ['变长数组：sizeof 是运行期的', 'int n = 7; int a[n]; return sizeof a;'],
+  ['变长数组：地址交给别人', 'int n = 2; int a[n]; a[0] = 3; a[1] = 4;'
+    + ' return sq((struct P *) a);'],
+  ['变长数组：循环里每一圈收回来', 'int i; long long s = 0;'
+    + ' for (i = 1; i <= 200; i++) { int a[i]; a[0] = i; a[i - 1] = i; s += a[0] + a[i - 1]; }'
+    + ' return s;'],
+  ['变长数组：两个套着', 'int n = 3; int a[n]; { int b[n * 2]; b[5] = 9; a[0] = b[5]; }'
+    + ' return a[0];'],
+  ['变长数组：中间还调了变参的', 'int n = 4; int a[n]; char b[32]; a[3] = 7;'
+    + ' snprintf(b, 32, "%d-%d-%d", 1, 2, 3); return a[3] * 100 + b[0] + b[4];'],
+  ['alloca：写进去再读回来', 'char *p = __builtin_alloca(16); p[0] = 3; p[15] = 4;'
+    + ' return p[0] * 100 + p[15];'],
+  ['alloca：两块不串味', 'char *p = __builtin_alloca(32); char *q = __builtin_alloca(32);'
+    + ' p[0] = 1; q[0] = 2; return p[0] * 10 + q[0];'],
+  ['alloca：地址交给真的 snprintf', 'char *p = __builtin_alloca(32);'
+    + ' snprintf(p, 32, "%d", 4242); return (long long) strlen(p) * 10000 + 4242 - 4242;'],
 ];
 
 const SUPPORT = `struct P { int x; int y; };
@@ -432,19 +451,9 @@ try {
 }
 
 // ---------------------------------------------------------------- 边界
-/* 还要线性内存的那些东西必须**明着报**。悄悄发出去会得到一个指着 64K 的指针 ——
- * 那种错在解释器上看不出来，在真机器上是段错误，而且现场离原因很远。 */
-for (const [what, code] of [
-  ['变长数组', 'int n = 4; int a[n]; a[0] = 1; return a[0];'],
-]) {
-  total++;
-  const body = code.indexOf('\n') >= 0 ? code : `long long f(void) { ${code} }`;
-  let threw = false;
-  try {
-    lowerCNative('bad.c', body, HOST);
-  } catch { threw = true; }
-  if (!threw) fail(`「${what}」还要线性内存，可是没报错`, '没报', '报');
-}
+/* 这一节曾经列着「还要线性内存的那些东西必须明着报」。第三十六片之后它**空了** ——
+ * native 这条腿上再没有哪一格偷偷落回偏移上去，所以那一栏一条都不剩。
+ * 唯一的守卫留在前端里：`mod.mem !== null` 那一条（见上面）。 */
 
 process.stdout.write(`\n${total - failed} passed, ${failed} failed\n`);
 if (failed !== 0) process.exitCode = 1;
