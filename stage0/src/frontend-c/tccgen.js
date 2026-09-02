@@ -3261,6 +3261,10 @@ export class CGen {  /**
     if (t === TOK_BUILTIN_VA_COPY) {
       const src = this.exprEq();
       this.skip(RPAR);
+      /* native（第二十五片）：`va_list` 在这条腿上是「指向后端那个 va_list 的指针」，
+       * 直接赋值只复制指针 —— SysV 上两个 ap 于是**互相牵动**（arm64 上恰好是对的）。
+       * 与其静默地错，明着报：要做对得让后端再出一条 `VACOPY`。 */
+      if (this.native) this.todo('native：va_copy（要后端复制 va_list 本身）');
       this.vstore(ap, src);
       return sVal(TY_VOID, REF_NONE);
     }
@@ -3269,10 +3273,20 @@ export class CGen {  /**
      * 否则括号对不上。 */
     this.exprEq();
     this.skip(RPAR);
+    if (!isPtr(ap.ty.t)) this.err('__builtin_va_start expects a va_list');
+    /* native（第二十五片）：`va_list` 的形状归后端 —— 这儿只发一条 `VASTART`，
+     * 实参是**那个 va_list 变量的地址**（后端要就地写它）。取地址这一下顺带让
+     * 两遍过的机制把它落到内存上（第一遍记名字、第二遍它就在帧上了）。 */
+    if (this.native) {
+      if (!this.f.variadic) {
+        this.err('__builtin_va_start used in a function with fixed arguments');
+      }
+      this.f.emit(OP.VASTART, T_I64, this.addrOf(ap), REF_NONE, 0);
+      return sVal(TY_VOID, REF_NONE);
+    }
     if (this.vaRef === REF_NONE) {
       this.err('__builtin_va_start used in a function with fixed arguments');
     }
-    if (!isPtr(ap.ty.t)) this.err('__builtin_va_start expects a va_list');
     this.vstore(ap, sVal(mkPointer(TY_VOID), this.vaRef));
     return sVal(TY_VOID, REF_NONE);
   }
@@ -3287,6 +3301,19 @@ export class CGen {  /**
   vaArg(ap, ty) {
     if (isArray(ty.t) || isFunc(ty.t)) {
       this.err(`'${typeText(ty)}' cannot be an argument type`);
+    }
+    /* native（第二十五片）：一格在哪儿由后端按真 ABI 找 —— 这儿只发一条 `VAARG`，
+     * 实参照旧是**那个 va_list 变量的地址**（后端要就地把它推到下一格）。 */
+    if (this.native) {
+      if (isStruct(ty.t)) this.todo('native：va_arg 取 struct 还没到（要真的 ABI 分类）');
+      const mt = mirTypeOf(ty);
+      if (mt === T_F32) this.todo('va_arg 取 float（C 的默认提升本来就让它过不来）');
+      const v = this.f.emit(OP.VAARG, mt, this.addrOf(ap), REF_NONE, 0);
+      /* 后端只按 i32/i64/f64 三种宽度取。比 int 窄的类型（`va_arg(ap, char)`）取回来的是
+       * **提升之后**那个 int，所以再削一刀回到 C 说的类型上 —— 削与不削的差别在
+       * 「取回来的值当 char 用」时才现形。 */
+      if (mt === T_I32 && intBitsOf(ty) < 32) return this.castTo(sVal(TY_INT, v), ty);
+      return sVal(ty, v);
     }
     const f = this.f;
     const cur = this.gv(ap);
@@ -6768,13 +6795,15 @@ export class CGen {  /**
      * 与调用点那一侧（`callArgs` 末尾那条 push）是同一个顺序。 */
     this.vaRef = REF_NONE;
     if (variadic === true) {
-      /* native 上**定义**一个变参函数还没到：`va_start` 要按真 ABI 把寄存器里那几个
-       * 实参先泼到栈上（SysV 的 register save area、AAPCS 的 va_list 三段），
-       * 那是另一片。调用一个变参函数是好的（第二十二片）。 */
-      if (this.native) this.todo('native：变参函数的定义（va_start 要真 ABI）');
-      const slot = f.slot('$va', T_I64);
-      f.params.push({ name: '$va', t: T_I64, slot });
-      this.vaRef = f.emit(OP.LOAD, T_I64, REF_NONE, REF_NONE, slot);
+      /* native（第二十五片）：这一侧什么都不加 —— 实参在寄存器里还是栈上由**后端**按真
+       * ABI 说（`VASTART`/`VAARG`，见 MIR 那两条）。前端只在函数上按一位「我是变参的」，
+       * 后端照它决定序言要不要泼寄存器。 */
+      if (this.native) f.setVariadic();
+      else {
+        const slot = f.slot('$va', T_I64);
+        f.params.push({ name: '$va', t: T_I64, slot });
+        this.vaRef = f.emit(OP.LOAD, T_I64, REF_NONE, REF_NONE, slot);
+      }
     }
 
     /* 形参上那些变长的维度在这儿算（第五十片，tcc 的 `func_vla_arg`，`tccgen.c:8627`）：

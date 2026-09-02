@@ -203,15 +203,17 @@ function checkIndex(mod, f, i, op, v, bad, k) {
     }
     return;
   }
-  /* 变参的定义那一侧（第二十四片）。三件事：只有 native 有真 ABI 可谈、函数得真是
-   * 变参的（不然 `va_list` 里没有东西可指）、取出来的类型得是 C 的变参能传的那几个。
-   * `float`/`bool` 在 C 里过不来（默认提升成 double/int），放过去只会读到半格。 */
+  /* 变参的定义那一侧（第二十四片）。只有 native 有真 ABI 可谈；`VASTART` 还要求函数
+   * **自己**是变参的（不然 va_list 里没有东西可指）—— 而 `VAARG` 不要求：C 里
+   * 「收一个 va_list 形参、替别人取实参」是合法的（`vfprintf` 就是那个形状）。
+   * 取出来的类型限于 C 的变参能传的那几个：`float`/`bool` 过不来（默认提升成
+   * double/int），放过去只会读到半格。 */
   if (op === OP.VASTART || op === OP.VAARG) {
     if (!mod.native) { bad(i, `${OP_NAMES[op]}：只有 native 这条腿有真的 va_list`); return; }
-    if (!f.variadic) { bad(i, `${OP_NAMES[op]}：函数 '${f.name}' 的形参表里没有 ...`); return; }
     if (v !== 0) { bad(i, `${OP_NAMES[op]} 的 aux 只能是 0`); return; }
     const t = f.t[i];
     if (op === OP.VASTART) {
+      if (!f.variadic) { bad(i, `VASTART：函数 '${f.name}' 的形参表里没有 ...`); return; }
       if (t !== T_I64) bad(i, `VASTART 的 t 是 ${typeText(t)}，va_list 只能是 i64`);
       return;
     }

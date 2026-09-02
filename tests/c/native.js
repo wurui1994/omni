@@ -94,6 +94,14 @@ const CASES = [
     + ' long long r = (long long) *a * 1000 + *b; free(a); free(b); return r;'],
   ['固定实参过八个（后几个走栈）', 'return ten(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);'],
   ['固定的 double 实参过八个', 'return (long long) tend(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);'],
+  /* 变参函数的**定义**（第二十五片）。个数刻意跨过「寄存器装得下」那条线。 */
+  ['变参的定义：四个 int', 'return vsum(4, 1, 2, 3, 4);'],
+  ['变参的定义：十个 int（要溢到栈上）', 'return vsum(10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10);'],
+  ['变参的定义：十个 double（要溢到栈上）',
+    'return (long long) vdsum(10, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0);'],
+  ['变参的定义：类型混着（i64、double、指针）', 'return vmix(3, 7LL, 2.5, "abcd");'],
+  ['变参的定义：va_list 传给别人（vprintf 那个形状）', 'return vhead(5, 2, 4, 6, 8, 10);'],
+  ['变参的定义：一个变参都没取', 'return vsum(0, 1, 2);'],
 ];
 
 const SUPPORT = `struct P { int x; int y; };
@@ -123,6 +131,49 @@ struct P g_ps = {12, 34};
 char g_buf[8];
 double g_d;
 long long bump(void) { static int n = 1; n = n * 2; return n; }
+/* 变参函数的定义（第二十五片）。用 __builtin_* 而不是 stdarg.h 的宏：
+ * 这一套源码要**同时**喂给 clang（oracle）与我们自己，而 clang 也认这几个内建。 */
+long long vsum(int n, ...) {
+  __builtin_va_list ap;
+  long long s = 0;
+  int i;
+  __builtin_va_start(ap, n);
+  for (i = 0; i < n; i++) s += __builtin_va_arg(ap, int);
+  __builtin_va_end(ap);
+  return s;
+}
+double vdsum(int n, ...) {
+  __builtin_va_list ap;
+  double s = 0;
+  int i;
+  __builtin_va_start(ap, n);
+  for (i = 0; i < n; i++) s += __builtin_va_arg(ap, double);
+  __builtin_va_end(ap);
+  return s;
+}
+long long vmix(int n, ...) {
+  __builtin_va_list ap;
+  __builtin_va_start(ap, n);
+  long long a = __builtin_va_arg(ap, long long);
+  double d = __builtin_va_arg(ap, double);
+  char *p = __builtin_va_arg(ap, char *);
+  __builtin_va_end(ap);
+  return a + (long long) d * 10 + (long long) strlen(p) * 100;
+}
+/* va_list 当形参传给别人 —— vprintf 那一族就是这个形状。 */
+long long vrelay(int n, __builtin_va_list ap) {
+  long long s = 0;
+  int i;
+  for (i = 0; i < n; i++) s += __builtin_va_arg(ap, int);
+  return s;
+}
+long long vhead(int n, ...) {
+  __builtin_va_list ap;
+  __builtin_va_start(ap, n);
+  long long r = vrelay(n, ap);
+  __builtin_va_end(ap);
+  return r;
+}
 `;
 
 let src = SUPPORT;
