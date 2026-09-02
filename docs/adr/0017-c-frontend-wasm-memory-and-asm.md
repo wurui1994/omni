@@ -423,7 +423,12 @@ tcc 逐字节相同了**（第五十片，`peWrite`：两个 win32 目标 160 �
 两级排序、程序头、静态链接下照样要造的 `.got` 与 PT_GNU_RELRO 都在里面；命令行上是
 `omni elf-link`）。**动态链接那一整套也对上了**（第五十四片：`.interp`、`.dynsym`/`.dynstr`
 与两张哈希表、`.dynamic` 的十五条标签、`.rela.got`、`.eh_frame_hdr`，十六条节八个段头，
-两个目标又是 20 份逐字节相同）。
+两个目标又是 20 份逐字节相同）。**第三个格式也补齐了**（第五十五片，
+`stage0/src/link/macho_exe.js`：macOS 的 Mach-O 可执行文件，尺子是
+`<target>-osx-tcc -nostdlib`，两个目标 22 份逐字节相同 —— 段套节、按用途归类的
+`enum skind`、链式修正（`LC_DYLD_CHAINED_FIXUPS` 的 bind/rebase 链）、导出符号的前缀树
+（`LC_DYLD_EXPORTS_TRIE`）、`__stubs` 桩子；arm64 那一份签完名能跑，命令行上是
+`omni macho-link`）。三个格式于是都是我们自己写出来的了。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -10168,6 +10173,73 @@ PT_PHDR  PT_INTERP  PT_LOAD×3  PT_DYNAMIC  PT_GNU_EH_FRAME  PT_GNU_RELRO
 命令行上默认就是动态：`omni elf-link a.o -o a.out -e main`，要上一片那种就加 `--static`。
 
 <!-- 第九刀第五十四片-END -->
+
+## 落地：第九刀第五十五片 —— 第三个格式：Mach-O 可执行文件
+
+PE（四十七到五十二片）、ELF（五十三、五十四片），这一片把最后一个格式补上：
+
+```
+<target>-osx-tcc -nostdlib a.o -o a.out
+```
+
+`tests/c/macho-exe.js`（`stage0/src/link/macho_exe.js`，`omni macho-link`）：
+
+```
+x86_64-macos: 11 份可执行文件逐字节相同
+arm64-macos : 11 份可执行文件逐字节相同        （共 1054920 字节）
+```
+
+摊出来是十三条加载命令、六节、五个段：
+
+```
+__PAGEZERO  __TEXT(__text __stubs)  __DATA_CONST(__rodata __got)
+__DATA(__data __bss)  __LINKEDIT
+LC_DYLD_CHAINED_FIXUPS  LC_DYLD_EXPORTS_TRIE  LC_SYMTAB  LC_DYSYMTAB
+LC_LOAD_DYLINKER  LC_BUILD_VERSION  LC_SOURCE_VERSION  LC_MAIN
+```
+
+跟前两个格式差得最远的三处：**没有节头表**（段套节，节头跟在段头后面，ELF 的节号只活在
+内存里，最后靠 `elfsectomacho` 换成 1 起的连续编号）；**节按用途归类**（`enum skind`，
+每一类写死落在哪个段里，于是三个段的内容是类决定的，不是 flags 决定的）；**动态链接不用
+符号表**，用「链式修正」—— 要改的那些 8 字节格子自己串成一条链，每格里记着「下一格离我
+几个 4 字节」，导出的符号则摊成一棵前缀树（`export_trie`）。
+
+### 又是几格照着读代码想不到的
+
+- **`resolve_common_syms` 末尾就调了 `tcc_add_linker_symbols`**。第一版我照
+  `macho_output_file` 的调用序写，符号表只有 4 条，tcc 有 21 条 —— 少的正好是
+  `_etext`/`_edata`/`_end`、三个数组的 start/end、以及八条 `__start_X`/`__stop_X`。
+  换句话说这一段不是 ELF 专属的，是「解 COMMON」顺手带的。
+- **`.fini_array` 是被 `find_section` 顺手造出来的**。`tcc_macho_add_destructor` 一进门
+  就 `find_section(s1, ".fini_array")`，那个函数**找不到就造**（ALLOC 的 PROGBITS），
+  于是一个没有析构函数的程序里也凭空多一条空节 —— 也就多了
+  `__start_fini_array`/`__stop_fini_array` 两个符号。旁边 `add_init_array_defines` 用的是
+  `have_section`（不造），所以 `.init_array`/`.preinit_array` 那两对退回 `.text` 的地址。
+- **`check_relocs` 的循环会扫到自己刚造出来的表**。C 那边 `for (i = 1; i < s1->nb_sections; i++)`
+  的上界每轮重读，`.rela.got`（刚 `put_elf_reloc` 造的）于是在同一趟里被扫到，末尾那句
+  `if (type == R_DATA_PTR || type == R_JMP_SLOT)` 就给**每个 GOT 格子**记上一条 bind 或
+  rebase。整套链式修正的来源就是这一句。
+- **一个符号不能既走 GOT 又走桩子**。`attr->plt_offset = -n_bind_rebase - 2` 是拿负数当
+  「我先记了一条 bind，编号在这儿」的凭据；等发现这个符号还被**调用**，就把那条 bind
+  改成 `bind = 2`（作废）再造桩子。反过来（先调用后取地址）tcc 自己会喊
+  `Overlap bind/bind .got:_xxx` —— 门里那份 `20-fixups.c` 于是分成两个弱符号写。
+- **类型不对就先记下 `plt_offset` 再走**：`if (type != R_AARCH64_CALL26) continue;` 在
+  `attr->plt_offset = mo->stubs->data_offset;` **之后**，桩子并没造出来，可同一个符号的
+  下一条重定位会照着这个偏移改写 `r_info`。照着抄，别顺手「修正」。
+- **只有本机那个目标签名**。`CONFIG_CODESIGN` 在 `config.h` 里裹在「没指定目标时」的
+  `#if` 里头，所以 `arm64-osx-tcc` 写完文件会 `system("codesign -f -s - …")`，交叉出来的
+  `x86_64-osx-tcc` 不签。而 ad-hoc 签名里的 identifier 取的是**文件名** —— 同名两次签名
+  逐字节相同，改个名字第 849 字节起就不同。门里于是把我们的字节写到另一个目录、**同一个
+  名字**下再签。
+- 段页是 16384 不是 4096（`SEG_PAGE_SIZE`），链式修正的「页」也是这个；而头上留给
+  mach 头与加载命令的是 4096，于是 `__TEXT` 的 `vmaddr` 是 `0x100000000`、`__text` 从
+  `0x100001000` 起，`LC_MAIN` 的 `entryoff` 就是 `main` 的地址减段基址 —— 没有 crt 也照样跑。
+- `__mh_execute_header` 是当场造的符号，`st_value` 写 `-4096`：等 `relocate_syms` 给它加上
+  `.text` 的地址，正好落回 mach 头那儿。
+
+自己写出来的 arm64 文件签完名能跑：`22-bss.c` 返回 15，`./a.out; echo $?` 就是 15。
+
+<!-- 第九刀第五十五片-END -->
 
 
 

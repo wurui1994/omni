@@ -31,6 +31,7 @@ import { mergeObjects as mergeElfObjects } from './link/elf_merge.js';
 import { peLoad } from './link/pe_load.js';
 import { peWrite } from './link/pe_link.js';
 import { elfExe } from './link/elf_exe.js';
+import { machoExe } from './link/macho_exe.js';
 import { readSexpr } from './sexpr/read.js';
 import { lowerCoreSexpr } from './sexpr/lower.js';
 import { printSexpr } from './sexpr/print.js';
@@ -2108,6 +2109,27 @@ function main(argv) {
         + `入口 0x${r.entry.toString(16)})\n`);
       return 0;
     }
+    /* `macho-link`：几个 `.o` 链成一份 macOS 可执行文件（第九刀第五十五片）。
+     * 写出来的还没签名 —— arm64 上要自己补一句 `codesign -f -s - <文件>`，
+     * tcc 也是这么干的（`CONFIG_CODESIGN` 只在本机那个目标上开）：
+     *   omni macho-link a.o [b.o …] -o a.out [-e _main] */
+    case 'macho-link': {
+      const oi = rest.indexOf('-o');
+      const out = oi >= 0 ? rest[oi + 1] : 'a.out';
+      const ei = rest.indexOf('-e');
+      const entryName = ei >= 0 ? rest[ei + 1] : '_main';
+      const bytesOf = (p) => {
+        const s = readBinary(p);
+        const b = new Uint8Array(s.length);
+        for (let k = 0; k < s.length; k++) b[k] = s.charCodeAt(k);
+        return b;
+      };
+      const r = machoExe({ objs: files.map(bytesOf), entryName });
+      writeBinary(out, r.bytes);
+      stdout(`${out} (${r.bytes.length} 字节，${r.ncmds} 条加载命令，${r.nsects} 节，`
+        + `入口偏移 0x${r.entryoff.toString(16)})\n`);
+      return 0;
+    }
     // 一个源文件一份产物（第七十五刀）：`<名字>.sx` 与 `<名字>.js` 摊在一个目录里，
 
     // 名字就是源文件自己的名字。`-o 目录` 指定去处，默认 .omni-cache/asy-mods。
@@ -2290,6 +2312,10 @@ commands:
             dynamic by default like tcc (.interp/.dynsym/.dynamic/.got), --static for
             the plain one. No libc, so give the entry with -e NAME (default main).
             -o NAME
+  macho-link
+            link .o files into a macOS executable (ADR-0017 cut 9 slice 55): segments,
+            chained fixups, export trie. The output is unsigned - run
+            codesign -f -s - on it. -o NAME, -e NAME (default _main)
   oir       print the OIR as JSON
   mir       print the MIR (ADR-0014 decision 6): SSA values + slots + structured
             control flow, one 8-byte record per instruction (--bytes: sizes and
