@@ -2045,10 +2045,13 @@ function main(argv) {
     }
     /* `pe-link`：几个 `.o` 链成一份 `.exe`（第九刀第四十七到五十片）。库从 `-L` 那几个
      * 目录里找：`<目标>-libtcc1.a` 与 `msvcrt.def` / `kernel32.def`。
-     *   omni pe-link a.o -o a.exe -L dir [-L dir …] [--target x86_64-win32] */
+     * `--shared` 造 DLL（第六十四片）：映像基址、`subsystem`、`Characteristics` 都换，
+     * thunk 节里多一张导出表，入口是 `_dllstart`。
+     *   omni pe-link a.o -o a.exe -L dir [-L dir …] [--target x86_64-win32] [--shared] */
     case 'pe-link': {
+      const shared = rest.includes('--shared');
       const oi = rest.indexOf('-o');
-      const out = oi >= 0 ? rest[oi + 1] : 'a.exe';
+      const out = oi >= 0 ? rest[oi + 1] : (shared ? 'a.dll' : 'a.exe');
       const ti = rest.indexOf('--target');
       const target = ti >= 0 ? rest[ti + 1] : 'x86_64-win32';
       const bytesOf = (p) => {
@@ -2076,11 +2079,14 @@ function main(argv) {
         objs: files.map((p, i) => ({ path: p, bytes: objs[i] })),
         libtcc1: `${target}-libtcc1.a`,
         open,
+        dll: shared,
       });
       const r = peWrite({
         objs: [...objs, ...loaded.members.map((m) => m.bytes)],
         dlls: loaded.dlls,
         startName: loaded.entryName,
+        dll: shared,
+        outName: out,
       });
       writeBinary(out, r.bytes);
       stdout(`${out} (${r.bytes.length} 字节，${r.infos.length} 节，${r.nthunks} 个导入桩)\n`);
@@ -2346,7 +2352,7 @@ commands:
   pe-link   link .o files into a Windows .exe (ADR-0017 cut 9 slices 47-50): reads
             libtcc1.a on demand and the .def import libraries from -L DIR, builds the
             import table and thunks, applies every relocation. -o NAME,
-            --target x86_64-win32|arm64-win32
+            --target x86_64-win32|arm64-win32, --shared (build a .dll: slice 64)
   elf-link  link .o files into a Linux executable (ADR-0017 cut 9 slices 53-54):
             dynamic by default like tcc (.interp/.dynsym/.dynamic/.got), --static for
             the plain one, --shared for a shared library (slice 59), --dll libfoo.so to

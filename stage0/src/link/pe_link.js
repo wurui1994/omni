@@ -76,6 +76,9 @@ export function peImage(inp) {
     r.thunk.data.set(bytes, imp.at);
   }
 
+  /* 导出表的字节。函数 RVA 那几格还空着，等重定位落笔（见下）。 */
+  if (r.exp !== null) r.thunk.data.set(r.exp.bytes, r.exp.at);
+
   /* 导入桩的代码。 */
   const code = thunkCode(machine);
   const iatBase = imp === null ? 0
@@ -133,6 +136,16 @@ export function peImage(inp) {
     }
   }
 
+  /* 导出表里那几格函数 RVA：tcc 给它们挂的是 `R_XXX_RELATIVE`，也就是
+   * `add32(val - imagebase)` —— 原地是 0，于是写进去的正是符号的 RVA。 */
+  if (r.exp !== null) {
+    const rel = machine === EM_AARCH64 ? 1027 : 8;
+    for (const sl of r.exp.slots) {
+      relocateOne(machine, rel, r.thunk.data, sl.at,
+        r.thunk.vaddr + sl.at, addrOf(syms[sl.sym]), imagebase);
+    }
+  }
+
   /* 一条节表项里可能并了好几节，按地址摆到一块去。**长度取 `dataSize` 而不是
    * `vsize`** —— `.bss` 并进 `.data` 那一条的时候，虚拟长度里有一大截是不写进文件的
    * （`pe_write` 里写的是 `si->data_size`）。 */
@@ -151,17 +164,19 @@ export function peImage(inp) {
   return r;
 }
 
-/** ELF 的 `e_machine` → PE 的机器号与 `Characteristics`（`CHARACTERISTICS_EXE`）。 */
+/** ELF 的 `e_machine` → PE 的机器号与 `Characteristics`（`CHARACTERISTICS_EXE/DLL`）。 */
 const PE_MACHINE = new Map([
-  [EM_X86_64, { machine: 0x8664, chars: 0x022f }],
-  [EM_AARCH64, { machine: 0xaa64, chars: 0x0022 }],
+  [EM_X86_64, { machine: 0x8664, chars: 0x022f, dllChars: 0x222e }],
+  [EM_AARCH64, { machine: 0xaa64, chars: 0x0022, dllChars: 0x2022 }],
 ]);
 
 /**
  * 链一份 PE 并把整个文件写出来。
  *
- * 头部那三十几个字段照 `pe_write`：`subsystem` 默认 3（console），栈默认 0x100000，
- * 数据目录里填导入表、IAT、异常表（`.pdata`）与重定位表（`.reloc`）。
+ * 头部那三十几个字段照 `pe_write`：`subsystem` 默认 3（console，DLL 是 2），栈默认
+ * 0x100000，数据目录里填导出表（DLL）、导入表、IAT、异常表（`.pdata`）与重定位表
+ * （`.reloc`）。`Characteristics` 分 EXE 与 DLL 两个值，`.reloc` 只要**建过**就把
+ * `RELOCS_STRIPPED` 抹掉 —— 哪怕它空得没进节表。
  */
 export function peWrite(inp) {
   const r = peImage(inp);
@@ -184,10 +199,17 @@ export function peWrite(inp) {
     dirs[1] = { addr: at, size: impSize };                                  // IMPORT
     dirs[12] = { addr: at + impSize, size: (nsyms + r.imp.dlls.length) * THUNK_SIZE }; // IAT
   }
+  if (r.exp !== null) {
+    dirs[0] = { addr: r.thunk.vaddr - base + r.exp.at, size: r.exp.size };   // EXPORT
+  }
+  /* `pe->reloc` 只要**建了**就把 `RELOCS_STRIPPED` 抹掉 —— 哪怕它一条都没装、
+   * 空得连节表都没进去。 */
+  let chars = r.dll ? cpu.dllChars : cpu.chars;
+  if (r.hasReloc) chars &= ~0x1;
   const img = {
     machine: cpu.machine,
-    chars: cpu.chars,
-    subsystem: inp.subsystem ?? 3,
+    chars,
+    subsystem: inp.subsystem ?? (r.dll ? 2 : 3),
     imagebase: base,
     entry: r.entry,
     stack: inp.stack ?? 0x100000,

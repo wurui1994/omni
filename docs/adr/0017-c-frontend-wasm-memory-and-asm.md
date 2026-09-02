@@ -455,6 +455,14 @@ local-exec 这一种模型，静态、动态、共享库三道门各 12 × 2 份
 `tcc_add_linker_symbols`、没定义的符号交给平坦查找，两个目标 15 与 90 份逐字节
 相同；顺手补上 Mach-O 上的 `__thread` —— 那一路没有 PT_TLS，偏移是相对「0」与
 「符号所在那一节的末尾」算的，算出来没用但字节照写）。
+**Windows 的 dll 也出得来了**（第六十四片：映像基址换成 `IMAGE_BASE_DLL`、
+`subsystem` 2、`CHARACTERISTICS_DLL`、`.reloc` 一定建（哪怕空着也要把
+`RELOCS_STRIPPED` 抹掉）、thunk 节里接一张按 `strcmp` 排过的导出表（函数 RVA 那几格
+靠 `R_XXX_RELATIVE` 落笔）、入口是 `libtcc1.a` 里 `dllcrt1.o` 的 `_dllstart`，两个目标
+各 83 份逐字节相同；命令行上是 `omni pe-link --shared`）。三种格式的「共享库」于是
+都齐了 —— 而 `tcc_add_linker_symbols` 在这三种格式上是三个答案：ELF 的 DLL 不叫、
+Mach-O 的 dylib 不叫、PE 的 dll **照叫**（`pe_add_runtime` 在
+`resolve_common_syms` 之前就把 `output_type` 改回 `EXE` 了）。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -10559,6 +10567,111 @@ macOS 的门也收，所以这一条不补上，`macho-exe` 与 `macho-libc` 就
 命令行上是 `omni macho-link --shared [--install-name NAME]`。
 
 <!-- 第九刀第六十三片-END -->
+
+## 落地：第九刀第六十四片
+
+Windows 的 `.dll`：`x86_64-win32-tcc -shared a.o -o a.dll` 与 `arm64-win32-tcc` 写出来的
+那份，整份文件逐字节相同。门是 `tests/c/pe-dll.js`，166 份（两个目标各 83 份，704512
+字节）。
+
+`.exe` 那一路是第四十七到五十片，这一片只补 DLL 与它差的地方。差的地方全在 `tccpe.c`
+里问「是不是 `PE_DLL`」的那五处：
+
+- `pe_set_options`：映像基址换成 `IMAGE_BASE_DLL`（x86_64 `0x10000000`、arm64
+  `0x180000000`），`subsystem` 换成 2。
+- `pe_assign_addresses` 第一句：`.reloc` **一定建**（EXE 只在 `DYNAMIC_BASE` 时才建）。
+- `pe_build_exports`：thunk 节里，导入表后面再接一张导出表。
+- `pe_write`：`Characteristics` 换成 `CHARACTERISTICS_DLL`（x86_64 `0x222E`、arm64
+  `0x2022`）。
+- `pe_add_runtime`：入口符号换成 `PE_STDSYM("__dllstart","@12")`。
+
+### 导出表的布局
+
+`pe_build_exports` 先把 thunk 节对到 16，从那里起是四张连着的表：
+
+```
+IMAGE_EXPORT_DIRECTORY     40 字节
+函数 RVA                   每个符号 4 字节
+名字 RVA                   每个符号 4 字节
+序号                       每个符号 2 字节
+dll 自己的名字             \0 结尾
+各个符号名                 \0 结尾，一个接一个
+```
+
+要留意的三格：
+
+1. **次序是按名字 `strcmp` 排的**，不是符号表里的次序 —— `sorted` 那个数组先按
+   `st_other & ST_PE_EXPORT` 收一遍，再 `qsort(sym_cmp)`。名字取的是
+   `pe_export_name`（带前导下划线的目标才削一个 `_`，`@` 结尾的 stdcall 不削）。
+2. **函数 RVA 那几格是空着的**：tcc 给每一格挂一条 `R_XXX_RELATIVE` 指向那个符号，
+   等 `relocate_sections` 落笔。在 PE 上 `R_XXX_RELATIVE` 是 `add32(val - imagebase)`，
+   原地是 0，所以写进去的正是符号的 RVA。我们不造这条重定位，直接在
+   `peImage` 里把 `addrOf(sym) - imagebase` 写进去 —— 一样的字节。
+   顺带一句：这几条**不进 `.reloc`**，`pe_build_reloc` 只收 `REL_TYPE_DIRECT`
+   （x86_64 是 `R_X86_64_64`，arm64 是 `R_AARCH64_ABS64`），`RELATIVE` 不是那个号。
+3. **dll 的名字取的是输出文件的基名**（`tcc_basename(pe->filename)`），所以门里两边
+   必须写到同一个文件名。数据目录 0 是 `{base_o + rva_base, thunk 的新长度 - base_o}`。
+
+`pe_build_exports` 还会顺手写一份 `<输出名>.def` 出来。那是给别人链的时候用的，不进
+`.dll`，与逐字节无关，我们不写。
+
+### `RELOCS_STRIPPED` 与「建过但空着」
+
+`pe_write` 那一句是
+
+```c
+if (pe->reloc)
+    pe_header.filehdr.Characteristics &= ~IMAGE_FILE_RELOCS_STRIPPED;
+```
+
+问的是这一节**建过没有**，不是它里面有没有东西。DLL 一定建，可我们那三份导出案例里
+一条 `REL_TYPE_DIRECT` 都没有 —— `.reloc` 长度 0，连节表都没进去（空节不进节表那一条
+是第四十八片的事），可 `Characteristics` 里那一位照样抹掉了。所以 `peSections` 要把
+`hasReloc` 传出来，`peWrite` 看的是它，不是节表里有没有 `.reloc`。
+（x86_64 的 `CHARACTERISTICS_DLL = 0x222E` 里那一位本来就是 0，这一句在这两个目标上看
+不出来；留着是为了 i386 那一天。）
+
+### `_dllstart` 与那个下划线
+
+`pe_add_runtime` 里 DLL 的入口是 `PE_STDSYM("__dllstart","@12")`，而 x86_64/arm64 上
+`PE_STDSYM(n,s)` 就是 `n`，于是 `start_symbol = "__dllstart"` —— 两个下划线。接着：
+
+```c
+pe->start_symbol = start_symbol + 1;                       /* "_dllstart" */
+if (!s1->leading_underscore || strchr(start_symbol, '@'))
+    ++start_symbol;                                        /* 也变 "_dllstart" */
+```
+
+win32 的 x86_64/arm64 上 `leading_underscore` 是 0，所以**两个名字都是 `_dllstart`**：
+要找的符号是它，写进 `AddressOfEntryPoint` 的也是它。它的定义在 `libtcc1.a` 的
+`dllcrt1.o` 里，`peLoad({dll: true})` 已经会挑（`peStart` 早就有 `PE_DLL` 那一支了）。
+
+还有一处**不**变：`tcc_add_linker_symbols`。`resolve_common_syms` 里那一句是
+`if (s1->output_type != TCC_OUTPUT_DLL) tcc_add_linker_symbols(s1)`，看着是 DLL 就跳过；
+可 `pe_output_file` 的调用次序是 `pe_add_runtime` 在前、`resolve_common_syms` 在后，而
+`pe_add_runtime` 最后一句正是
+
+```c
+if (TCC_OUTPUT_DLL == s1->output_type)
+    s1->output_type = TCC_OUTPUT_EXE;   /* “need this for relocate_sections()” */
+```
+
+等 `resolve_common_syms` 跑到的时候 `output_type` 已经是 `EXE` 了 —— 于是 PE 的 DLL
+**照样**有 `_etext` / `__init_array_start` 那一套。ELF 那边（第五十九片）不是这样，
+Mach-O 那边（第六十三片）也不是。三种格式在这一格上三个答案。
+
+### 案例
+
+`tests/c/pe-gen/` 三份专门造导出表：名字故意不按字母序写（`Zeta`、`alpha`、`_under`、
+`Mid`、`beta`，`strcmp` 下 `M` < `_` < `a` < `b` < `z`）、导出表与导入表挨在一块、
+三十个函数加一张函数指针表。`gen/` 那八十来份也整个过一遍 —— 它们不导出任何东西，
+看的是头、入口与那张空 `.reloc`。`gen/40-sscanf.c` 与 `gen/83-alloca.c` 跳过：
+`vsscanf` 不在 `msvcrt.def` 里、`__builtin_alloca` 不在 `libtcc1.a` 里，tcc 自己在
+win32 上就链不上，可执行文件那一路也一样。
+
+命令行上是 `omni pe-link --shared`（输出名默认 `a.dll`）。
+
+<!-- 第九刀第六十四片-END -->
 
 
 

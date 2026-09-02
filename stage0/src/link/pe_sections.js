@@ -15,7 +15,8 @@
  *    `s->sh_addr = addr = pe_virtual_align(...)` 在 `continue` 之前就做了。
  *  - `.text` 在链接时会长：先对到 8（`pe_align_section(text_section, 8)`），然后每个
  *    「用作函数的导入符号」加一个跳转桩（x86_64 是 `ff 25` 那 8 字节，arm64 是 24 字节）。
- *  - 第一个 rdata 类的节就是 thunk 节，导入表接在它后面（对到 16）。
+ *  - 第一个 rdata 类的节就是 thunk 节，导入表接在它后面（对到 16），造 DLL 的时候
+ *    导出表再接在导入表后面（也对到 16）。
  *  - `.reloc` 只在 DLL 或者 `DYNAMIC_BASE` 时才有（arm64-win32 默认有，x86_64 没有）。
  *    里面是按 4K 分页的块：8 字节的头 + 每条 2 字节，块尾对到 4 字节。
  */
@@ -40,6 +41,7 @@ const SHN_UNDEF = 0;
 const SHN_COMMON = 0xfff2;
 const STT_NOTYPE = 0;
 const STT_FUNC = 2;
+const ST_PE_EXPORT = 0x10;
 const ST_PE_IMPORT = 0x20;
 const ST_PE_STDCALL = 0x40;
 
@@ -124,8 +126,7 @@ export function collectImports(syms, dyn, opts) {
     let hit = null;
     for (let n = 0; n < 2; n++) {
       /* `pe_export_name`：只有带前导下划线的目标才削那一个 `_`。 */
-      let s = under && sym.name.startsWith('_') && (sym.other & ST_PE_STDCALL) === 0
-        ? sym.name.slice(1) : sym.name;
+      let s = exportName(sym, under);
       if (n === 1) {
         if ((sym.other & ST_PE_STDCALL) !== 0) {
           const p = s.lastIndexOf('@');
@@ -162,6 +163,70 @@ export function collectImports(syms, dyn, opts) {
     k++;
   }
   return { dlls, nthunks: thunkIdx.size, thunkIdx, slot, bind };
+}
+
+/** `pe_export_name`：只有带前导下划线的目标才削那一个 `_`，`@` 结尾的 stdcall 不削。 */
+function exportName(sym, under) {
+  return under && sym.name.startsWith('_') && (sym.other & ST_PE_STDCALL) === 0
+    ? sym.name.slice(1) : sym.name;
+}
+
+/**
+ * `pe_build_exports`：DLL 的导出目录，接在导入表后面（对到 16）。
+ *
+ * 布局是四张表连着：40 字节的 `IMAGE_EXPORT_DIRECTORY`、每个符号 4 字节的函数 RVA、
+ * 每个符号 4 字节的名字 RVA、每个符号 2 字节的序号，然后是 dll 自己的名字与各个符号名
+ * （一串 `\0` 结尾的字符串）。次序按名字 `strcmp` 排 —— 不是符号表里的次序。
+ *
+ * 函数 RVA 那一格是**空着**的：tcc 给它挂一条 `R_XXX_RELATIVE`，落笔时才写进去。我们
+ * 把要挂的地方记在 `slots` 里，交给 `peImage`。
+ *
+ * @param syms 并合后的 `.symtab`（下标要与重定位里的符号号对得上）
+ * @param dllName 输出文件的**基名**（`tcc_basename(pe->filename)`）
+ * @param baseO 这一段在 thunk 节里的偏移（已经对到 16）
+ * @param rvaBase thunk 节的 RVA
+ * @returns `null`（没有导出符号）或 `{at, size, bytes, slots}`
+ */
+export function buildExports(syms, dllName, baseO, rvaBase, under) {
+  const list = [];
+  for (let i = 1; i < syms.length; i++) {
+    const s = syms[i];
+    if (s === undefined || (s.other & ST_PE_EXPORT) === 0) continue;
+    list.push({ index: i, name: exportName(s, under) });
+  }
+  if (list.length === 0) return null;
+  list.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+
+  const n = list.length;
+  const funcO = baseO + 40;
+  const nameO = funcO + n * 4;
+  const ordO = nameO + n * 4;
+  const strO = ordO + n * 2;
+  const head = new Uint8Array(strO - baseO);
+  const dv = new DataView(head.buffer);
+  dv.setUint32(12, strO + rvaBase, true);           // Name
+  dv.setUint32(16, 1, true);                        // Base
+  dv.setUint32(20, n, true);                        // NumberOfFunctions
+  dv.setUint32(24, n, true);                        // NumberOfNames
+  dv.setUint32(28, funcO + rvaBase, true);          // AddressOfFunctions
+  dv.setUint32(32, nameO + rvaBase, true);          // AddressOfNames
+  dv.setUint32(36, ordO + rvaBase, true);           // AddressOfNameOrdinals
+
+  const tail = [];
+  const putStr = (s) => { for (let i = 0; i < s.length; i++) tail.push(s.charCodeAt(i) & 0xff); tail.push(0); };
+  putStr(dllName);
+  const slots = [];
+  for (let ord = 0; ord < n; ord++) {
+    dv.setUint32(nameO - baseO + ord * 4, strO + tail.length + rvaBase, true);
+    dv.setUint16(ordO - baseO + ord * 2, ord, true);
+    putStr(list[ord].name);
+    slots.push({ at: funcO + ord * 4, sym: list[ord].index });
+  }
+
+  const bytes = new Uint8Array(head.length + tail.length);
+  bytes.set(head, 0);
+  bytes.set(new Uint8Array(tail), head.length);
+  return { at: baseO, size: bytes.length, bytes, slots };
 }
 
 /** `pe_build_reloc`：把要装载时重定位的地方按 4K 分页摆成一串块。 */
@@ -201,10 +266,12 @@ export function buildReloc(entries) {
 /**
  * 把并合好的节摆成 PE 的节表。
  *
- * @param inp `{objs, dlls, imagebase, dynamicBase, leadingUnderscore}`
+ * @param inp `{objs, dlls, imagebase, dynamicBase, leadingUnderscore, dll, outName}`
  *        - `objs`：命令行上那些 `.o` 加上从库里拉出来的成员，字节数组
  *        - `dlls`：`peLoad` 装出来的那几个 `.def`
- * @returns `{machine, infos, entrySecs, imp, nthunks}`；`infos` 每条
+ *        - `dll`：造 DLL（`-shared`）。映像基址换成 `IMAGE_BASE_DLL`、一定有 `.reloc`、
+ *          thunk 节里多一张导出表；`outName` 的基名就写进导出表里当 dll 名
+ * @returns `{machine, infos, entrySecs, imp, exp, nthunks}`；`infos` 每条
  *          `{name, cls, vaddr, vsize, dataSize, ptr, rawSize, flags}`
  */
 export function peSections(inp) {
@@ -216,8 +283,12 @@ export function peSections(inp) {
    * `DLLCHARACTERISTICS`）：x86_64 是 0x400000 且不带 `DYNAMIC_BASE`，
    * arm64 是 0x140000000 且带。 */
   const arm64 = machine === EM_AARCH64;
-  const imagebase = inp.imagebase ?? (arm64 ? 0x140000000 : 0x400000);
+  const dll = inp.dll === true;
+  const imagebase = inp.imagebase
+    ?? (dll ? (arm64 ? 0x180000000 : 0x10000000) : (arm64 ? 0x140000000 : 0x400000));
+  /* `.reloc` 那一节：DLL 一定有，EXE 只在 `DYNAMIC_BASE` 时才有。 */
   const dynamicBase = inp.dynamicBase ?? arm64;
+  const hasReloc = dll || dynamicBase;
 
   /* `.def` 那张表：名字 → dll 与序号。同名先到先得（`set_elf_sym` 里未定义的那一条
    * 不会被后来的未定义符号顶掉）。 */
@@ -290,7 +361,7 @@ export function peSections(inp) {
     for (let k = 0; k < nthunks; k++) text.extraDirect.push(thunkAt + k * tsz + fixAt);
   }
 
-  const reloc = dynamicBase === true
+  const reloc = hasReloc
     ? { name: '.reloc', type: SHT_PROGBITS, flags: 0, size: 0, bytes: new Uint8Array(0) }
     : null;
   if (reloc !== null) secs.push(reloc);
@@ -308,6 +379,7 @@ export function peSections(inp) {
   let si = null;
   let addr = imagebase + 1;
   let imp = null;
+  let exp = null;
   let thunk = null;
   for (const { sec, cls } of sorted) {
     if (cls >= CLS.last) continue;
@@ -320,13 +392,20 @@ export function peSections(inp) {
     }
     sec.vaddr = addr;
 
-    /* 第一个 rdata 类的节就是 thunk 节，导入表接在它屁股后面。 */
+    /* 第一个 rdata 类的节就是 thunk 节，导入表接在它屁股后面，导出表再接在导入表后面。 */
     if (thunk === null && c === CLS.rdata) {
       thunk = sec;
       if (dlls.length !== 0) {
         const at = align(sec.size, 16);
         imp = { rva: addr - imagebase, at, dlls };
         sec.size = at + buildImports(imp).length;
+      }
+      if (dll) {
+        const nm = inp.outName;
+        if (nm === undefined) throw new OmniError('pe: 造 DLL 要知道输出的文件名');
+        exp = buildExports(syms, nm.split(/[\\/]/).pop(), align(sec.size, 16),
+          addr - imagebase, inp.leadingUnderscore === true);
+        if (exp !== null) sec.size = exp.at + exp.size;
       }
     }
 
@@ -385,8 +464,8 @@ export function peSections(inp) {
   }
 
   return {
-    machine, infos, imp, nthunks, syms, secs, merged, imagebase, fileSize: off,
-    imports: imps, text, thunkAt, thunkSize: tsz, thunk, linker,
+    machine, infos, imp, exp, nthunks, syms, secs, merged, imagebase, fileSize: off,
+    imports: imps, text, thunkAt, thunkSize: tsz, thunk, linker, dll, hasReloc,
   };
 }
 
