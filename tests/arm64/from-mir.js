@@ -362,7 +362,8 @@ td('double 的减法（次序不能反）', [1.5, 0.25], d2b(1.5 - 0.25), (f, x,
     ]), 0)));
 }
 
-// ---- 线性内存（第九刀第七片）。基址钉在 x28 上，测里用一段手写的蹦床把它设好。
+// ---- 真指针的存取（第九刀第七片）。**native 这条腿上没有线性内存**：MLOAD/MSTORE 的
+// 地址就是真地址，所以测里第一个实参直接是 `membuf + 偏移`。
 /** @type {{f:MirFunc, args:[bigint,bigint], want:bigint, what:string}[]} */
 const mcases = [];
 let mno = 0;
@@ -500,30 +501,14 @@ try {
     calls.push(`  printf("%llu\\n", d2b(${c.f.name}(b2d(${d2b(c.args[0])}ULL),`
       + ` b2d(${d2b(c.args[1])}ULL))));`);
   }
-  /* 线性内存那批要先把基址钉进 x28 —— 那是**驱动**的活，测里用这一段手写的蹦床代劳。
-   * 它同时也是这一层调用约定的说明书：进模块的代码之前 x28 = 内存基址。 */
+  /* 存取那批：**地址就是真指针**（native 这条腿上没有线性内存），所以第一个实参直接传
+   * `membuf + 偏移`，不需要任何基址寄存器、也不需要蹦床。 */
   if (mcases.length > 0) {
-    stub.push(
-      '.global _omni_thunk',
-      '_omni_thunk:',                    // (fn, base, a, b) -> long long
-      '  stp x29, x30, [sp, #-32]!',
-      '  mov x29, sp',
-      '  str x28, [sp, #16]',
-      '  mov x28, x1',
-      '  mov x9, x0',
-      '  mov x0, x2',
-      '  mov x1, x3',
-      '  blr x9',
-      '  ldr x28, [sp, #16]',
-      '  ldp x29, x30, [sp], #32',
-      '  ret',
-    );
-    main.push('extern long long omni_thunk(void*, void*, long long, long long);',
-      'static char membuf[65536];');
+    main.push('static char membuf[65536];');
     for (const c of mcases) {
       main.push(`extern long long ${c.f.name}(long long, long long);`);
-      calls.push(`  printf("%lld\\n", omni_thunk((void*)${c.f.name}, membuf,`
-        + ` ${c.args[0]}LL, ${c.args[1]}LL));`);
+      calls.push(`  printf("%lld\\n", ${c.f.name}((long long)(membuf + ${c.args[0]}),`
+        + ` ${c.args[1]}LL));`);
     }
   }
   main.push('int main(void) {', ...calls, '  return 0;', '}');
