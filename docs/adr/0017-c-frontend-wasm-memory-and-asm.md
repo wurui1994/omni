@@ -817,6 +817,17 @@ arm64 与线性内存那两条腿一个字没改：它们的 `long double` 就�
 写出来的十个字节与 `f80Bytes(1.5)` 逐个相同。顺手清掉那份门里一条过期的**反面**用例
 （`u64 -> 浮点` 早就做了，反面用例还在说「该报错」）—— 换成两条正面的。
 
+**x86_64 上 `long double` 真的是 16 字节了**（第一百一十一片）：`typeSize` 那一格按目标走
+（`setLdoubleTarget`，`lowerC`/`lowerCNative` 每次进来拨一次 —— tcc 那边它是编译期常量），
+`loadKindOf`/`storeKindOf` 在 x86_64 上给它派 `f80`，静态初始化式走 `floatBits(x, 16)`
+（也就是 `f80Bytes`）。于是 `sizeof(long double)` 是 16、`struct { char c; long double d; }`
+是 32、`.data` 里那十六个字节与尺子称过的那一份逐个相同、局部量存进帧再读回来算术全对
+（门 `tests/c/ldouble-x64.js`，Rosetta 上真跑；这一条的尺子是 `clang -arch x86_64` ——
+交叉编出来的 `x86_64-osx-tcc` **链不动**自己的目标，没有 x86_64 那一档的 libc 与
+`libtcc1.a`）。**还差 SysV 的那一半**：`long double` 是 MEMORY 类，传参走栈上 16 字节的
+格子、返回在 `st0`。`selfobj` 那两份已知不同因此还在，但原因换了 —— 不再是宽度，
+而是 `tokc.ld = strtold(...)`（`tccpp.c:2427`）的返回值我们还按 xmm0 读。
+
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
 地址交给真的 libc（`strlen`/`memcpy`）验过。C 前端现在还把 `&x` 降到影子栈上，
@@ -13601,6 +13612,55 @@ x86_64 上给 `long double` 派 `f80`、静态初始化式走 `f80Bytes`，再�
 （栈上 16 字节的格子）与返回（`st0`）。做到那儿，`selfobj` 上最后两份已知不同才会消失。
 
 <!-- 第九刀第一百一十片-END -->
+
+## 落地：第九刀第一百一十一片
+
+前两片一片称位模式、一片让机器认它。这一片把**前端**那一头接上：x86_64 上
+`long double` 从此真的是 16 字节。
+
+### 一格模块级状态，因为 tcc 那边是编译期常量
+
+`typeSize` 是 ctype.js 里的一个纯函数，四十来处在叫它。tcc 那边宽度是编译期常量
+（`x86_64-gen.c:102-103` 的 `LDOUBLE_SIZE`/`LDOUBLE_ALIGN` 都是 16），我们的目标是运行时的
+一个开关，于是这儿也只能是一格模块级状态：
+
+```js
+let LDOUBLE_SIZE = 8;
+export function setLdoubleTarget(arch) { LDOUBLE_SIZE = arch === 'x86_64' ? 16 : 8; }
+```
+
+`lowerCNative` 按 `host.arch` 拨、`lowerC`（线性内存那条腿）明着拨回 8 —— **每次进来都拨**，
+这样同一个进程里先编 x86_64 再编 arm64 不会串。
+
+### 三处跟着走
+
+* `loadKindOf` / `storeKindOf`：`VT_LDOUBLE` 在 16 字节那一档派 `f80`（上一片那个描述符），
+  8 字节那一档照旧 `f64`。局部量、结构成员、数组元素的读写全都走这两个函数，所以
+  这一处一改，整条链就是 x87 的十个字节了。
+* `floatBits(x, 16)`：静态初始化式的字节走 `f80Bytes`（第一百〇九片）。
+* 布局：`struct { char c; long double d; }` 于是是 32 字节（16 对齐），`long double[3]` 是 48。
+
+### 门
+
+`tests/c/ldouble-x64.js`，3 条：sizeof/布局（16 / 32 / 48）、帧上那十六个字节存读算转
+（`2.5*2 + 0.75 + 1.5` -> `(int) 7`）、`.data` 里四个静态量的字节与 `f80Bytes` 逐个相同。
+
+前两条的尺子是 **`clang -arch x86_64`**，不是 tcc —— 量过才知道：交叉编出来的那份
+`x86_64-osx-tcc` **链不动**自己的目标（`configure` 只给本机那份烤了 SDK 的路径），
+`-o 可执行文件` 直接报 `library 'c' not found`。字节这一层的尺子仍然是 tcc
+（第 3 条的期望值来自第一百〇九片称过的 `f80Bytes`，以及 `selfobj` 那一整段）。
+
+### 还差 SysV 的那一半
+
+`selfobj` 那两份已知不同还在，**原因换了**：不再是宽度，而是 ABI。
+`long double` 在 SysV 里是 MEMORY 类 —— 传参走栈上 16 字节的格子、返回在 `st0`。
+我们编出来的 tcc 里 `tokc.ld = strtold(...)`（`tccpp.c:2427`）的返回值还按 xmm0 读，
+于是它认不准 `1.5L` 这种字面量。同一个洞也让 `printf("%Lf", x)` 在 x86_64 上印不对
+（第一百一十一片之前也一样不对 —— 那时 `sizeof` 还是 8）。`selfobj.js` 里那条注释
+按这个改了：说清楚现在差的是哪一半。
+
+<!-- 第九刀第一百一十一片-END -->
+
 
 
 

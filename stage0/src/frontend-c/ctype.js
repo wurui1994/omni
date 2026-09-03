@@ -300,6 +300,21 @@ export function sseEightbytes(ty) {
   return mask;
 }
 
+/* `long double` 的宽度按**目标**走（第一百一十一片）。tcc 那边这是个编译期常量
+ * （`x86_64-gen.c:102-103` 的 LDOUBLE_SIZE/ALIGN 是 16/16；MACHO+ARM64 与 PE 开
+ * `TCC_USING_DOUBLE_FOR_LDOUBLE`，于是 8/8）；我们的目标是运行时的一个开关，
+ * 所以这儿也只能是一格模块级的状态 —— 一个进程编一个翻译单元，`lowerC`/`lowerCNative`
+ * 每次进来都先拨一次，忘了拨就是默认的 8（arm64/PE 那一档）。 */
+let LDOUBLE_SIZE = 8;
+
+/** 这个目标上 `long double` 有多宽（也就是对齐）。 */
+export function ldoubleSize() { return LDOUBLE_SIZE; }
+
+/** 拨那一格。`x86_64` 是 16 字节的 x87 80 位，别的按 double。 */
+export function setLdoubleTarget(arch) {
+  LDOUBLE_SIZE = arch === 'x86_64' ? 16 : 8;
+}
+
 export function typeSize(ty) {
   const b = btype(ty.t);
   if (isArray(ty.t)) {
@@ -310,10 +325,11 @@ export function typeSize(ty) {
   if (b === VT_INT || b === VT_FLOAT) return { size: 4, align: 4 };
   if (b === VT_SHORT) return { size: 2, align: 2 };
   if (b === VT_BYTE || b === VT_BOOL) return { size: 1, align: 1 };
-  /* `long double` 在这个目标上**就是 double**：`tcc.h:237-241` 对 MACHO+ARM64 与 PE
-   * 开 `TCC_USING_DOUBLE_FOR_LDOUBLE`（注释原话：window 与 macos 上没有十字节的
-   * long double）。x86_64/i386/riscv64 是 16/12/16，跟着那几条后端一起来。 */
-  if (b === VT_LDOUBLE) return { size: 8, align: 8 };
+  /* `long double`：arm64-macho 与 PE 上**就是 double**（`tcc.h:237-241` 的
+   * `TCC_USING_DOUBLE_FOR_LDOUBLE`，注释原话：window 与 macos 上没有十字节的
+   * long double）；x86_64 上是 x87 的 80 位，值十个字节、格子十六个（`x86_64-gen.c:102`）。
+   * 哪一档由 `setLdoubleTarget` 拨（第一百一十一片）。 */
+  if (b === VT_LDOUBLE) return { size: LDOUBLE_SIZE, align: LDOUBLE_SIZE };
   if (b === VT_STRUCT) return { size: ty.ref.size, align: ty.ref.align };
   if (b === VT_VOID) return { size: 1, align: 1 };  // gcc 的 `sizeof(void)`，tcc 跟着
   /* **函数类型的 size 是 1**，不是指针的 8：`type_size` 最后那一支把 char/void/函数/

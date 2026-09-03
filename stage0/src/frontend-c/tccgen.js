@@ -178,13 +178,13 @@ import {
   ctype, mkPointer, mkArray, mkStruct, mkEnum, enumBase, mkFunc, typeSize, typeText, sameType,
   sameTypeUnqual, mkVla, isVla, compareTypes,
   TY_VOID, TY_INT, TY_UINT, TY_LLONG, TY_ULLONG, TY_CHAR, TY_UCHAR, TY_SHORT, TY_BOOL,
-  TY_FLOAT, TY_DOUBLE, TY_LDOUBLE, VT_LDOUBLE, sseEightbytes,
+  TY_FLOAT, TY_DOUBLE, TY_LDOUBLE, VT_LDOUBLE, sseEightbytes, ldoubleSize, setLdoubleTarget,
 } from './ctype.js';
 import {
-  MirModule, MirFunc, OP, T_VOID, T_I32, T_I64, T_BOOL, T_F32, T_F64, REF_NONE,
-  CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16, CVT_I2F, CVT_U2F, CVT_F2I, CVT_F2U,
+  MirModule, MirFunc, OP, T_VOID, T_I32, T_I64, T_BOOL, T_F32, T_F64, REF_NONE,  CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16, CVT_I2F, CVT_U2F, CVT_F2I, CVT_F2U,
   CVT_FCVT, memDesc, MEM_PAGE, fnPtr, isConstRef, memArgAux,
 } from '../mir/ir.js';
+import { f80Bytes } from './f80.js';
 
 /* 线性内存的访问描述符号（`MLOAD_KINDS` / `MSTORE_KINDS` 的下标，ir.js:383）。
  * 写成常量是为了 `loadKindOf` 读起来像一张表 —— 下标写字面量的话改一次表就全错。 */
@@ -196,12 +196,16 @@ const MK_I32S = 4;
 const MK_I64 = 6;
 const MK_F32 = 7;
 const MK_F64 = 8;
+/* `f80`（第一百一十一片）：x86_64 的 `long double`。值仍是 f64 —— 这一格只说
+ * 「内存里那十个字节的形状」，读写各由 x87 一条指令收/摊（见 ir.js 的那张表）。 */
+const MK_F80 = 9;
 const SK_I8 = 0;
 const SK_I16 = 1;
 const SK_I32 = 2;
 const SK_I64 = 3;
 const SK_F32 = 4;
 const SK_F64 = 5;
+const SK_F80 = 6;
 
 /* 逐字节拷贝（struct 赋值）用的宽度表。读一律用**无符号/满宽**的那格：搬字节的时候
  * 符号扩展是有害的 —— 8 位那格若用 `i8s`，0x80 会被扩成 0xffffff80，存回去时低 8 位
@@ -223,7 +227,8 @@ function loadKindOf(ty) {
   if (b === VT_SHORT) return isUnsigned(ty.t) ? MK_I16U : MK_I16S;
   if (b === VT_INT) return MK_I32S;
   if (b === VT_FLOAT) return MK_F32;
-  if (b === VT_DOUBLE || b === VT_LDOUBLE) return MK_F64;
+  if (b === VT_LDOUBLE) return ldoubleSize() === 16 ? MK_F80 : MK_F64;
+  if (b === VT_DOUBLE) return MK_F64;
   return MK_I64;   // long / long long / 指针
 }
 
@@ -234,7 +239,8 @@ function storeKindOf(ty) {
   if (b === VT_SHORT) return SK_I16;
   if (b === VT_INT) return SK_I32;
   if (b === VT_FLOAT) return SK_F32;
-  if (b === VT_DOUBLE || b === VT_LDOUBLE) return SK_F64;
+  if (b === VT_LDOUBLE) return ldoubleSize() === 16 ? SK_F80 : SK_F64;
+  if (b === VT_DOUBLE) return SK_F64;
   return SK_I64;
 }
 
@@ -389,6 +395,14 @@ function floatRankOf(ty) {
 
 /** 一个 double / float 的 IEEE 754 位模式（小端，与线性内存同一个字节序）。 */
 function floatBits(x, size) {
+  /* 16 字节 = x86_64 的 `long double`：x87 的 80 位，后六个字节零填充
+   * （第一百一十一片；那十个字节的形状在 f80.js 里，尺子称过）。 */
+  if (size === 16) {
+    const b = f80Bytes(x, 16);
+    let v = 0n;
+    for (let i = 15; i >= 0; i--) v = (v << 8n) | BigInt(b[i]);
+    return v;
+  }
   const buf = new DataView(new ArrayBuffer(8));
   if (size === 4) {
     buf.setFloat32(0, x, true);
@@ -7415,6 +7429,9 @@ function utf8Bytes(s) {
  * @param {string[]} [args] 被跑的程序自己的命令行实参（`argv[1]` 起；`argv[0]` 是 `path`）
  */
 export function lowerC(path, text, host, defs, args) {
+  /* 线性内存那条腿上 `long double` 就是 double（那儿没有 x87 可谈）—— 明着拨一次，
+   * 免得同一个进程里先编过 x86_64 之后串了（第一百一十一片）。 */
+  setLdoubleTarget('arm64');
   const cpp = new Cpp(host);
   cpp.installPredefs(path, false);
   for (const d of defs ?? []) {
@@ -7574,6 +7591,10 @@ export function lowerC(path, text, host, defs, args) {
  * @param {{name: string, body?: string}[]} [defs] 命令行上的 `-D`
  */
 export function lowerCNative(path, text, host, defs) {
+  /* `long double` 的宽度按目标拨（第一百一十一片）：x86_64 是 16 字节的 x87 80 位，
+   * arm64-macho 与 PE 是 8。它是 ctype.js 里一格模块级状态（tcc 那边是编译期常量），
+   * 所以每次进来都拨一次 —— 同一个进程里先编 x86_64 再编 arm64 也不会串。 */
+  setLdoubleTarget(host === undefined ? 'arm64' : host.arch);
   const cpp = new Cpp(host);
   cpp.installPredefs(path, false);
   for (const d of defs ?? []) {
