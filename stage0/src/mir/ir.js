@@ -866,6 +866,11 @@ export class MirModule {
     /* 与 globals 同下标的「这一块是第几个领到字节的」（第九刀第一百二十五片）：
      * 见 `strSeq`。 */
     this.globalSeq = [];
+    /* 与 funcs 同下标的「这个名字是第几个被提到的」（第九刀第一百二十六片）：也在
+     * `strSeq` 那个轴上。tcc 的符号表就是**建符号的次序**，按绑定分成局部/非局部两段
+     * 之后各自保持原序（`tccelf.c:866` 的 `sort_syms`）—— 所以函数也得有个号。
+     * 同样是标注：只有写目标文件那一步排符号的时候看它。 */
+    this.funcSeq = [];
     /* 别名（第九刀第一百〇五片，`__attribute__((alias("目标")))`）：一个名字与目标
      * **同址**，符号表里两条、代码一份。`{name, kind:'f'|'g', no, weak}` —— `no` 是目标
      * 的函数号或全局号。同样是标注：写目标文件那一步照目标的落点再发一条符号。 */
@@ -981,10 +986,15 @@ export class MirModule {
     this.globalVis[no] = vis;
   }
 
-  /** 这个全局是只读的（`const`）。见 `globalRo` 头上那段。`seq` 见 `globalSeq`。 */
-  markGlobalRo(no, seq) {
+  /** 这个全局是只读的（`const`）。见 `globalRo` 头上那段。 */
+  markGlobalRo(no) {
     if (this.globals[no] === undefined) throw new Error(`mir: 没有 ${no} 号模块级变量`);
     this.globalRo[no] = true;
+  }
+
+  /** 这一块是第几个领到字节的。见 `globalSeq` 头上那段。 */
+  markGlobalSeq(no, seq) {
+    if (this.globals[no] === undefined) throw new Error(`mir: 没有 ${no} 号模块级变量`);
     if (seq !== undefined) this.globalSeq[no] = seq;
   }
 
@@ -992,6 +1002,12 @@ export class MirModule {
   markStrSeq(ref, seq) {
     if (this.consts.items[ref] === undefined) throw new Error(`mir: 没有 ${ref} 号常量`);
     this.strSeq[ref] = seq;
+  }
+
+  /** 这个函数的名字是第几个被提到的。见 `funcSeq` 头上那段。 */
+  markFuncSeq(no, seq) {
+    if (this.funcs[no] === undefined) throw new Error(`mir: 没有 ${no} 号函数`);
+    this.funcSeq[no] = seq;
   }
 
   /**

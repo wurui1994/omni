@@ -1147,6 +1147,8 @@ export function genModule(mod) {
       local: mod.globalLocal[gi] === true,
       weak: mod.globalWeak[gi] === true,
       vis: mod.globalVis[gi] ?? 0,
+      /* 符号表里排第几（第一百二十六片）：与函数、串常量同一个轴上的号。 */
+      seq: mod.globalSeq[gi],
     });
     for (let k = 0; k < size; k++) {
       const b = blob === null ? 0 : blob.bytes[k];
@@ -1193,7 +1195,7 @@ export function genModule(mod) {
     /* `local: true`（第九十二片）：串常量的编号是**这个模块里**的序号，两个 `.o` 各有
      * 一个 `omni_str_0` —— 当外部符号的话一链就撞。局部符号里各归各家。
      * `size` 是带那个 0 的长度（第一百二十片那一格）。 */
-    dataSyms.push({ name, off, sect: 3, size: raw.length + sal, local: true });
+    dataSyms.push({ name, off, sect: 3, size: raw.length + sal, local: true, seq: mod.strSeq[r] });
     for (let k = 0; k < raw.length; k++) roBytes[off + k] = raw[k];
     /* 结尾那一格是**一个元素宽**的零（`wstrConst` 不加它）—— 整块预置成 0，不用再补。 */
   }

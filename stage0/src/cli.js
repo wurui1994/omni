@@ -427,6 +427,8 @@ function cObj(path, out, arch, incs, defs, fmt, os) {
       weak: mod.funcs[k].weak === true,
       /* `visibility`（第一百〇六片）：ELF 的 `st_other`。 */
       vis: mod.funcs[k].vis ?? 0,
+      /* 符号表里排第几（第一百二十六片）：第一次见到这个名字的那一刻。 */
+      seq: mod.funcSeq[k],
     });
   }
   /* 函数的别名（第一百〇五片）：与目标同一个偏移 —— 代码一份、符号两条。 */
@@ -459,9 +461,25 @@ function cObj(path, out, arch, incs, defs, fmt, os) {
     /* Mach-O 那一头只有两节，只读那一段折进 `__data` 的尾巴（`macho.js` 的 `foldRo`）。 */
     : (t, d, ds, rs, a, al) => writeObject(t, d, ds, rs, a, al, { rodata: blob.rodata });
   writeBinary(out, write(blob.bytes, blob.data,
-    [...syms, ...blob.dataSyms],
+    orderSyms([...syms, ...blob.dataSyms]),
     [...blob.relocs, ...blob.dataRelocs, ...blob.roRelocs], arch, blob.dataAlign));
   return out;
+}
+
+/**
+ * 符号表里的次序（第九刀第一百二十六片）：**建符号的次序**。
+ *
+ * 量过 tcc（`const char *const q="S"; const int c; char *p="P"; static int sv; int gv;`
+ * 加一个 `static` 函数与 `main`）：局部那一段是 `L.3 L.4 sv helper`、非局部那一段是
+ * `q c p gv main` —— 两段各自就是源码里被提到的次序。tcc 自己不排（`tccelf.c:862` 那段
+ * 注释：「TCC cannot sort it while generating the code」），只在写出去之前按绑定分成
+ * 局部/非局部两段（`sort_syms`），段里保持原序；分段那一步我们的写出器已经在做。
+ *
+ * 我们这儿是三堆分开攒的（函数、全局量、串常量），所以要按那个共用的号重排一遍。
+ * 没有号的（别的前端、别名）当 `Infinity` —— 稳定排序把它们留在原处。
+ */
+function orderSyms(defs) {
+  return defs.slice().sort((x, y) => (x.seq ?? Infinity) - (y.seq ?? Infinity));
 }
 /**
  * `c-mir` / `c-run` 的命令行切一刀：`--` 之后的都是**被跑的程序自己的**实参。

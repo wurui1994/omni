@@ -865,6 +865,9 @@ export class CGen {  /**
     if (hit !== undefined) return hit;
     const f = new MirFunc(name, [], T_I32);
     const no = this.mod.addFunc(f);
+    /* 第一百二十六片：符号表按**建符号的次序**排（tcc 的 `sort_syms` 只按绑定分段，
+     * 段里各自保持原序）—— 第一次见到这个名字就是它建符号的那一刻。 */
+    this.mod.markFuncSeq(no, this.dataSeq++);
     const info = {
       no, f, params: null, ret: TY_INT,
       defined: false,     // 这个单元里有函数体
@@ -7829,13 +7832,16 @@ export function lowerCNative(path, text, host, defs) {
       fixes.delete(e.addr + k);
     }
     const no = e.gno === undefined ? mod.globalNo(name) : e.gno;
+    /* 第一百二十五、一百二十六片：这一块是第几个领到字节的 —— 只读节按它排，
+     * 符号表也按它排（所以**每一块**都要给，不只是 `const` 那些）。 */
+    mod.markGlobalSeq(no, e.dseq);
     if (e.isStatic === true) mod.markGlobalLocal(no);
     if (e.weak === true) mod.markGlobalWeak(no);
     if (e.vis !== undefined && e.vis !== 0) mod.markGlobalVis(no, e.vis);
     /* 只读的那些进只读那一节（第一百二十二片）：`tccgen.c:8401-8413` 那条规矩 ——
      * 把数组那几层剥掉，剩下的带 `const` 就算。所以 `const char s[]` 算、
      * `const char *const cp` 算（哪怕它的初值还要一条重定位），`char *p` 不算。 */
-    if (isRoType(e.ty)) mod.markGlobalRo(no, e.dseq);
+    if (isRoType(e.ty)) mod.markGlobalRo(no);
     mod.setGlobalData(no, size, al, bytes, fixups);
   }
   /* 匿名的静态块（第三十四片）：静态的复合字面量。与有名字的那些一模一样地切 ——

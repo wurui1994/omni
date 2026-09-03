@@ -913,6 +913,12 @@ tcc 叫 `L.N`（`tccpp.c:626`，`N` 是匿名符号计数器），我们叫 `omn
 前端多一格共用的计数（`allocGlobal` 与新建串常量各领一个号），新的 `mir/rodata.js`
 按号排好落点，两个后端只查不推。门 69/0/1 —— `.data.ro` 的字节与落点全对，只读节里
 剩下的差别只有名字（`L.N`）与符号表那几条的次序。
+**符号表按建符号的次序排**（第一百二十六片）：tcc 自己不排（`tccelf.c:862` 那段注释），
+`sort_syms` 只按绑定分成局部/非局部两段、段里保持原序，而原序就是一个名字**第一次被
+提到**的次序。我们从前是三堆分开攒的（函数、全局量、串常量），现在函数也在那个共用的
+轴上领号（`funcSym` 第一次见到就领），每一块全局量都领（不只 `const` 那些），
+`cli.js` 的 `orderSyms` 按号稳定排一遍再交给写出器。新门 `tests/c/sym-order.js` 18/0 ——
+整张 `.symtab` 逐条与 `sh_info` 都对得上，只读节剩下的差别只有名字。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -14574,6 +14580,70 @@ tcc `L.N`，压在「每个目标自己的预定义」那笔欠账上，见一�
 那笔欠账的一格，与这一片同一个轴上的号正好能用。
 
 <!-- 第九刀第一百二十五片-END -->
+
+## 落地：第九刀第一百二十六片
+
+**符号表的次序就是建符号的次序。**
+
+上一片收尾时量到只读节还差两样，其中一样是符号表里那几条的次序。`tccelf.c:862` 上
+tcc 自己写着为什么：
+
+> In an ELF file symbol table, the local symbols must appear below the global and weak
+> ones. Since TCC cannot sort it while generating the code, we must do it after.
+
+也就是说 tcc 压根不排 —— `sort_syms` 只做一件事：按绑定分成局部/非局部两段，**段里
+保持原序**（两趟 for，各自顺着抄）。原序就是 `put_elf_sym` 被调用的次序，也就是源码里
+一个名字**第一次被提到**的次序。
+
+量一遍（x86_64-linux，`const char *const q="S"; const int c; char *p="P"; static int sv;
+int gv;` 加一个 `static` 函数和 `main`）：
+
+```
+局部：  L.3  L.4  sv  helper          非局部： q  c  p  gv  main
+```
+
+我们那一版是三堆分开攒的 —— 函数（`cli.js` 照 `mod.funcs` 发）、全局量、串常量
+（两个后端的那两段循环）—— 于是局部段是 `omni_str_0 omni_str_1 helper sv`、
+非局部段是 `main c q p gv`。分段那一刀我们的写出器早就在切（`sh_info` 一直是对的），
+差的只是段里的次序。
+
+上一片那个「谁先领到字节」的号正好是这件事要的东西，只差两处：
+
+* 函数也要号：`funcSym` 第一次见到一个名字就 `markFuncSeq(no, dataSeq++)`
+  （`mir/ir.js` 多一张 `funcSeq` 标注表）
+* **每一块**全局量都要号，不只是 `const` 那些：`markGlobalSeq(no, e.dseq)` 从
+  `markGlobalRo` 里拆出来单独叫 —— 上一片只给了 `const` 的，于是这一片第一版里
+  `p`/`gv`/`sv` 的号是 `undefined`，排到了 `main` 后面（局部段成了
+  `str str helper sv`，非局部段成了 `q c main p gv`）。那个错正好说明这两片是一个轴。
+
+排的地方在 `cli.js` 的 `orderSyms`：把 `[...函数, ...数据]` 按号**稳定排序**一遍再交给
+写出器。没有号的（别的前端、别名）当 `Infinity` 留在原处。
+
+### 门
+
+新的 `tests/c/sym-order.js`：三个目标 × 三个探针 × 两问 —— 整张 `.symtab` 逐条
+（每条比「名字/绑定/类型/节号」，串常量的名字换成 `<str>`：tcc 叫 `L.N`、我们叫
+`omni_str_N`，那是另一片的事）、`sh_info`（前面有几条局部的）。18/0。
+
+探针里有一格是**先调用后定义**（`main` 里先调 `later`，`later` 定义在后面的全局量
+之后）—— 盯的是「第一次被提到」而不是「第几个被定义」，两边都是前者。
+
+顺手量到一格：osx 上那个串常量符号叫 **`_L.1`**（带下划线，起点 1）—— 与第一百二十三片
+量的匿名计数器起点对得上。
+
+回归：`native` 227/0、`run` 207/0/1、`str-rodata` 69/0/1、`rodata-sec` 27/0、
+`native-gen` 83/0、`selfobj` 25/0、`tcc-link` 83/0、`sym-size` 6/0、`rela-order` 6/0、
+`eh-frame-x64` 8/0、`pdata-x64` 11/0、`x64/from-mir` 90/0、`arm64/from-mir` 88/0、
+`elf-roundtrip` 268、`elf-merge` 451、`pe-content` 328、`pe-exe` 352、`elf-exe` 53、
+`elf-dyn` 53、`macho-exe` 26、`macho-dylib` 107。`tcc-obj` 的容器相同还是 12。
+
+### 只读节里剩下的那一样
+
+字节、落点、符号表的次序都对上了，`.data.ro` 与 `.symtab` 上剩下的差别只有**名字**：
+`L.N` 的那个 N 是匿名符号计数器，起点每个目标不同（linux 3、win32 0、osx 1），
+压在「每个目标自己的头与预定义」那笔欠账后面。
+
+<!-- 第九刀第一百二十六片-END -->
 
 
 
