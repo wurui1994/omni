@@ -66,6 +66,8 @@ const STB_WEAK = 2;
 const STT_NOTYPE = 0;
 const STT_OBJECT = 1;
 const STT_FUNC = 2;
+/** 「这条符号代表某一节」（第一百一十九片）：`.eh_frame` 的 PC Begin 挂在它上头。 */
+const STT_SECTION = 3;
 const STT_FILE = 4;
 
 const EHDR_SIZE = 64;
@@ -228,7 +230,7 @@ function align(n, to) {
  * 最后那一段的类型是 NOTYPE 而不是 FUNC，这是 `tccelf_end_file` 里明写的一条：
  * 「未定义的 STT_FUNC 会让 gnu ld 在静态链接 STT_GNU_IFUNC 时犯糊涂」。
  */
-function buildSyms(defs, relocs, strs, prefix, uw) {
+function buildSyms(defs, relocs, strs, prefix, uw, ehn) {
   const syms = [{ strx: 0, info: 0, shndx: SHN_UNDEF, value: 0, size: 0 }];
   const no = new Map();
   const put = (d, bind) => {
@@ -258,6 +260,19 @@ function buildSyms(defs, relocs, strs, prefix, uw) {
       size: 0,
     });
   }
+  /* 每个 FDE 一条「节符号」（第一百一十九片）：`.eh_frame` 里那个 PC Begin 挂在
+   * 一条**没有名字**的 STT_SECTION 上（`dwarf_get_section_sym`）。tcc 每个函数收尾时
+   * 都新叫一次 `put_elf_sym`，那个函数不查重 —— 所以 n 个函数就有 n 条一模一样的。 */
+  const ehBase = syms.length;
+  for (let k = 0; k < (ehn === undefined ? 0 : ehn); k++) {
+    syms.push({
+      strx: 0,
+      info: STB_LOCAL * 16 + STT_SECTION,
+      shndx: 1,
+      value: 0,
+      size: 0,
+    });
+  }
   const nlocal = syms.length;
   /* 弱定义（第九刀第一百〇四片）：`__attribute__((weak))` 的名字绑定是 STB_WEAK，
    * 与全局的排在同一段里（`sh_info` 只切「局部/非局部」这一刀）。 */
@@ -274,7 +289,57 @@ function buildSyms(defs, relocs, strs, prefix, uw) {
       size: 0,
     });
   }
-  return { syms, no, nlocal };
+  return { syms, no, nlocal, ehBase };
+}
+
+/**
+ * `.eh_frame` 的字节（第九刀第一百一十九片）—— x86_64 的那一份。
+ *
+ * ELF 这个输出格式上 tcc 默认带展开表（`unwind_tables`，`libtcc.c:887`；
+ * `tccelf.c:92-94` 里非 ELF 的输出格式又把它关掉），于是 linux 目标的 `.o` 里多这一节。
+ * 与 win32 的 `.pdata` 是同一件事的两种写法：那边是查表，这边是 DWARF 的 CFI。
+ *
+ * 结构（`tccdbg.c` 的 `tcc_eh_frame_start` / `tcc_debug_frame_end` / `tcc_eh_frame_end`）：
+ *
+ *   CIE           24 字节，一份，`z`/`R` 两个增广、FDE 的编码是 `0x1b`（pcrel|sdata4）
+ *   FDE * n       每个函数 36 字节 —— 长度都一样，因为每一格都是定长的
+ *   0x00000000    收尾那四个零字节
+ *
+ * 一个 FDE 里只有三个数跟函数走：`PC Begin`（挂重定位）、`PC Range`（函数多大）、
+ * 还有 `DW_CFA_advance_loc4` 那一格的 `size - 5`。**那几条 CFA 指令是写死的** ——
+ * tcc 编出来的函数序言都是 `push rbp`（1 字节）+ `mov rsp,rbp`（3 字节），所以
+ * `advance_loc+1` / `advance_loc+3` 这两步与真的字节数对得上；`size - 5` 也不看
+ * 收尾那几条指令到底多长，就是这么算的。
+ *
+ * @param funcs `[{start, size}]`
+ * @returns `{bytes, relocs: [{at}]}` —— `at` 是要挂 PC32 的那四个字节在这一节里的偏移
+ */
+function ehFrameX64(funcs) {
+  const b = new Buf();
+  /* CIE：这 24 个字节一个不差地照 `tcc_eh_frame_start` 的 x86_64 那一支。 */
+  b.u32(20).u32(0).u8(1);
+  b.u8(0x7a).u8(0x52).u8(0);            // 'z' 'R' 0
+  b.u8(1).u8(0x78).u8(16).u8(1);        // code_align 1 / data_align -8 / ra 列 16 / 增广长 1
+  b.u8(0x1b);                           // FDE 的编码：DW_EH_PE_pcrel | sdata4
+  b.u8(0x0c).u8(7).u8(8);               // DW_CFA_def_cfa r7(rsp) ofs 8
+  b.u8(0x90).u8(1);                     // DW_CFA_offset+16(rip) cfa-8
+  b.u8(0).u8(0);                        // 补到 4 的倍数
+  const relocs = [];
+  for (const f of funcs) {
+    const start = b.len;
+    b.u32(32).u32(start + 4);           // 长度 / CIE 指针（= 这条离 CIE 起点多远 + 4）
+    relocs.push({ at: b.len });
+    b.u32(f.start).u32(f.size).u8(0);   // PC Begin（挂重定位）/ PC Range / 增广长 0
+    b.u8(0x41).u8(0x0e).u8(16);         // advance_loc+1；def_cfa_offset 16
+    b.u8(0x86).u8(2);                   // DW_CFA_offset+6(rbp) cfa-16
+    b.u8(0x43).u8(0x0d).u8(6);          // advance_loc+3；def_cfa_register rbp
+    b.u8(0x04).u32(f.size - 5);         // advance_loc4 size-5
+    b.u8(0x0c).u8(7).u8(8);             // def_cfa r7(rsp) ofs 8
+    b.u8(0).u8(0).u8(0);                // 补到 4 的倍数
+    if (b.len - start !== 36) throw new OmniError(`elf: FDE 写成了 ${b.len - start} 字节`);
+  }
+  b.u32(0);                             // `tcc_eh_frame_end`：一条长度为 0 的记录
+  return { bytes: b.out(), relocs };
 }
 
 /**
@@ -313,13 +378,17 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
    * `offs` 是那一份共用的 `UNWIND_INFO` 在 `.text` 里的偏移（后端摆的），
    * `funcs` 是每个函数在 `.text` 里的 `[start, end)`。不给这一格就一节也不多。 */
   const uw = o.unwind === undefined ? null : o.unwind;
+  /* 展开表的另一种写法（第一百一十九片）：ELF 这个输出格式上是 `.eh_frame`（DWARF 的
+   * CFI），`opts.ehFrame` 是 `[{start, size}]`。win32 那边是 `.pdata`，两者不同时有。 */
+  const ehFuncs = o.ehFrame === undefined ? null : o.ehFrame;
   /* 数据字节要能改 —— 原地躺着的加数得搬到 `r_addend` 那一格去，原地清零。 */
   const dataBytes = new Uint8Array(data === undefined ? 0 : data.length);
   if (data !== undefined) dataBytes.set(data);
 
   const strs = new StrTab();
   const strx = strs.intern(o.file === undefined ? 'a.c' : o.file);
-  const { syms, no, nlocal } = buildSyms(defs, relocs, strs, prefix, uw);
+  const { syms, no, nlocal, ehBase } = buildSyms(defs, relocs, strs, prefix, uw,
+    ehFuncs === null ? 0 : ehFuncs.length);
   /* STT_FILE 那一条插在 1 号位上，所以上面攒出来的号要整体 +1。 */
   syms.splice(1, 0, { strx, info: STB_LOCAL * 16 + STT_FILE, shndx: SHN_ABS, value: 0, size: 0 });
   const symIndexOf = (name) => {
@@ -369,6 +438,19 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
   }
   const pdBytes = pdBuf.out();
 
+  /* `.eh_frame` 与它那张重定位表（第一百一十九片）：每个 FDE 的 PC Begin 一条
+   * PC32，挂在第 i 条节符号上（`ehBase + i`，STT_FILE 那一条已经把号顶了一位）。 */
+  let ehBytes = new Uint8Array(0);
+  const raEh = [];
+  if (ehFuncs !== null) {
+    if (archName !== 'x86_64') throw new OmniError(`elf: .eh_frame 还只写了 x86_64 的（${archName}）`);
+    const eh = ehFrameX64(ehFuncs);
+    ehBytes = eh.bytes;
+    for (let k = 0; k < eh.relocs.length; k++) {
+      raEh.push({ at: eh.relocs[k].at, sym: ehBase + 1 + k, type: R_X86_64_PC32, add: 0 });
+    }
+  }
+
   /* ---- 节。1..6 是写死的六条，后面接重定位表，最后是 `.shstrtab`。 */
   const shstr = new StrTab();
   const secs = [{ name: '', type: 0, flags: 0, off: 0, size: 0, link: 0, info: 0, al: 0, ent: 0 }];
@@ -389,6 +471,21 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
    * 换算到「第几个函数」那把尺子上（`opts.seq`），这儿只管按位置排。 */
   const seq = o.seq === undefined ? {} : o.seq;
   const later = [];
+  if (ehFuncs !== null) {
+    /* `.eh_frame` 在**一遍过刚开头**就造（`tcc_eh_frame_start` 在翻译单元的开头），
+     * 所以它排在这一段的最前；`.rela.eh_frame` 要等第一个函数收尾发第一条 PC32。 */
+    later.push({
+      pos: seq.eh ?? -1,
+      add: () => sec('.eh_frame', SHT_PROGBITS, SHF_ALLOC, ehBytes.length, 0, 0, 8, 0),
+    });
+    later.push({
+      pos: seq.relaEh ?? 0.8,
+      add: () => {
+        const ehNo = secs.findIndex((s) => s.name === '.eh_frame');
+        sec('.rela.eh_frame', SHT_RELA, 0, raEh.length * RELA_SIZE, symtabNo, ehNo, 8, RELA_SIZE);
+      },
+    });
+  }
   if (raText.length > 0) {
     later.push({
       pos: seq.text ?? 0,
@@ -442,6 +539,8 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
     if (name === '.rela.data') return relaBuf(raData);
     if (name === '.pdata') return pdBytes;
     if (name === '.rela.pdata') return relaBuf(raPdata);
+    if (name === '.eh_frame') return ehBytes;
+    if (name === '.rela.eh_frame') return relaBuf(raEh);
     if (name === '.shstrtab') return shstrBytes;
     return new Uint8Array(0);
   };

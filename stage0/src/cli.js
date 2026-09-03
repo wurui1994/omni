@@ -362,6 +362,17 @@ function relaSeq(blob) {
 }
 
 /**
+ * `.eh_frame` 要的那张表（第九刀第一百一十九片）：每个函数在 `.text` 里的
+ * `[start, size]`。只有 ELF 这个输出格式带展开表（tcc 的 `unwind_tables` 默认开，
+ * 非 ELF 的输出格式又把它关掉），所以只有 linux 目标要 —— osx 走 Mach-O、
+ * win32 走 PE，那两边一个 `.eh_frame` 也没有（win32 是 `.pdata`，第一百一十七片）。
+ */
+function ehFrameOf(blob, arch, os) {
+  if (os !== 'linux' || arch !== 'x86_64') return undefined;
+  return blob.offsets.map((start, k) => ({ start, size: blob.sizes[k] }));
+}
+
+/**
  * `c-obj`：把一个 `.c` 编成一个**真的目标文件**（第九刀第二十六片）。
  *
  * 与 `cMir` 的差别只有一个：走 `lowerCNative` —— 出来的 MIR 没有线性内存，地址就是真
@@ -425,6 +436,7 @@ function cObj(path, out, arch, incs, defs, fmt, os) {
         prefix: os === 'linux' ? '' : '_',
         rdata: os === 'win32' ? '.rdata' : '.data.ro',
         unwind: blob.unwind ?? undefined,
+        ehFrame: ehFrameOf(blob, arch, os),
         seq: relaSeq(blob),
       })
     : writeObject;

@@ -875,7 +875,14 @@ win32 的容器还差三样，量过了记在这：`.pdata` 与 `.rela.pdata`（
 它是第一条数据重定位落的时候造的，而带地址的初值常常在所有函数之前 —— 于是它常常排最前。
 时刻要在**发生的那一刻**记（`putSymBytes` 里的 `after`，因为全局的字节是一遍过走完才切的），
 三件事再换算到「第几个函数」那一把尺子上排（`cli.js` 的 `relaSeq`）。
-门 `tests/c/rela-order.js` 6/0。
+门 `tests/c/rela-order.js` 6/0。**linux 上那张展开表是 `.eh_frame`**（第一百一十九片）：
+同一件事的另一种写法 —— DWARF 的 CFI，而且它跟着**输出格式**走而不是 CPU
+（`tccelf.c:92-94`：非 ELF 的输出格式把 `unwind_tables` 关掉），所以 osx 与 win32 一节也没有。
+CIE 24 字节、每个函数一条 36 字节的 FDE、收尾四个零字节；一条 FDE 里只有
+「`PC Begin`（挂 PC32，指着一条没名字的 STT_SECTION）/ `PC Range` / `size - 5`」这三个数
+跟函数走，那几条 CFA 指令是写死的 —— 序言前四个字节我们与 tcc 一样，所以照抄成立。
+门 `tests/c/eh-frame-x64.js` 8/0（把那三个数挖成零之后与尺子逐字节相同），
+`tcc-obj.js x86_64-linux` 从「0 容器相同、5 不同」走到「3 容器相同、2 不同」。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -14092,6 +14099,67 @@ tcc 一律发。那是 Path B 那条轴上的债。
 五份用例的节名单全差在这两节上。下一片就这个。
 
 <!-- 第九刀第一百一十八片-END -->
+
+## 落地：第九刀第一百一十九片
+
+上一片量到的那笔债：linux 目标的 `.o` 里 tcc 还多写 **`.eh_frame`** 与
+**`.rela.eh_frame`**。这与 win32 的 `.pdata` 是同一件事的两种写法 —— 那边是查表
+（`RUNTIME_FUNCTION`），这边是 DWARF 的 CFI。
+
+### 它跟着**输出格式**走，不跟着 CPU 走
+
+`unwind_tables` 默认是开的（`libtcc.c:887`），可 `tccelf.c:92-94` 又把它按输出格式关掉：
+
+```c
+if (s->output_format != TCC_OUTPUT_FORMAT_ELF)
+    s->unwind_tables = 0;
+```
+
+于是 osx（Mach-O）与 win32（PE）一节也没有，只有 linux 有。这是第三条「目标的事实」
+（前两条是符号名那条下划线、只读数据那一节的名字），门里两条反面的用例就钉这一格。
+
+### 三个数跟函数走，别的都是写死的
+
+`.eh_frame` 的形状是「CIE 24 字节 + 每个函数一条 36 字节的 FDE + 收尾四个零字节」——
+每一格都定长，所以 FDE 的长度不看函数。一条 FDE 里只有三个数跟函数走：
+
+* `PC Begin` —— 挂一条 `R_X86_64_PC32`，指着一条**没有名字**的 STT_SECTION 符号
+* `PC Range` —— 这个函数多大
+* `DW_CFA_advance_loc4` 那一格 —— `size - 5`
+
+那几条 CFA 指令是**写死**的（`advance_loc+1` / `def_cfa_offset 16` /
+`offset rbp cfa-16` / `advance_loc+3` / `def_cfa_register rbp`）：tcc 编出来的序言
+一律 `push rbp`（1 字节）+ `mov rsp,rbp`（3 字节），那两步正好对得上，而 `size - 5`
+根本不看收尾那几条指令有多长 —— 就是这么算的。**我们的序言前四个字节与 tcc 一样**
+（`55 48 89 e5`），所以同一套 CFA 指令在我们的码上也对。
+
+### 每个 FDE 一条节符号 —— 而且不查重
+
+`dwarf_get_section_sym` 每次都直接 `put_elf_sym(…, NULL)`，不查重。所以 n 个函数就有
+n 条一模一样的 STT_SECTION 局部符号，`sh_info` 跟着往后挪。量过的两函数那份：
+`· a.c ·(SECTION) ·(SECTION) f main`，`sh_info = 4` —— 我们写出来的一样。
+
+### 门 `tests/c/eh-frame-x64.js` 8/0
+
+六条正面加两条反面。第三条是这一门的骨头：把每条 FDE 里那三个数**挖成零**，
+剩下的与尺子**逐字节相同** —— 我们的代码比 tcc 的长，那三个数不可能一样，
+别的一个字节都不该差。第四条反过来查那三个数与我们自己的函数对得上
+（FDE 把 `.text` 铺满、`advance_loc4` 都是 `size - 5`）。
+
+### 量出来的进展与还欠的
+
+`tcc-obj.js x86_64-linux`：**0 容器相同, 5 不同** → **3 容器相同, 2 不同**，
+`05-global.c` 的节名单从此与尺子逐字相同（`.eh_frame .rela.data .rela.eh_frame
+.rela.text` —— 三条造出来的次序一条不差）。
+
+还欠的两笔，都在同一条轴上：
+
+* `03-inttypes.c` 差的还是那条 `.rela.text` —— 模块内的直接调用我们走标签、不发重定位。
+* **arm64-linux 的 FDE 另算**：那边 `code_alignment_factor` 是 4、返回地址列是 30，
+  而且 `def_cfa_offset` 里带着**帧有多大**（`tccdbg.c:958` 的 `224 + ((-loc + 15) & ~15)`）
+  —— 那个数得从后端捞出来，所以这一片只写了 x86_64 的，arm64-linux 上还一节不写。
+
+<!-- 第九刀第一百一十九片-END -->
 
 
 
