@@ -40,7 +40,7 @@ import {
   CVT_I2F, CVT_U2F, CVT_F2I, CVT_F2U, CVT_FCVT, CVT_BITCAST, OP_NAMES, hexBytes, memArgSize,
   callVaFixed,
 } from '../mir/ir.js';
-import { planRodata } from '../mir/rodata.js';
+import { planRodata, planData } from '../mir/rodata.js';
 
 /* 草稿寄存器。x8 是 arm64 的「间接结果」寄存器、x9-x15 是调用者保存的临时 ——
  * 这一层不跨调用活，所以随便用哪三个都行，取这三个只为读起来一致。 */
@@ -1097,7 +1097,6 @@ export function genModule(mod) {
    * 欠账：这些符号现在是**外部**符号（`macho.js` 里 defs 一律 `N_EXT`），于是两个模块
    * 各有一个 `omni_str_0` 就会撞。真正的办法是局部符号 + 按节的重定位，等自己的链接器。 */
   const dataSyms = [];
-  const dataBytes = [];
   /* 初值里的地址（第二十八片）：一条 `POINTER64`，原地那八个字节是加数。
    * 这些坑落在**数据节**里，所以 `sect: 2` —— 节头里各有一张重定位表。 */
   const dataRelocs = [];
@@ -1118,6 +1117,10 @@ export function genModule(mod) {
   const roPlan = planRodata(mod);
   const roBytes = new Array(roPlan.size).fill(0);
   const roRelocs = [];
+  /* 可写那一节的落点也一样排（第一百三十一片）：从前是照 MIR 的全局号一块接一块推，
+   * 而号是「第一次被提到」的次序 —— `sizeof(*p)` 这种会让后声明的先领到号。 */
+  const dataPlan = planData(mod);
+  const dataBytes = new Array(dataPlan.size).fill(0);
   /* 别名要照目标的落点发符号（第一百〇五片），所以边排边记每个全局的起点与它在哪一段。 */
   const gBase = new Map();
   for (let gi = 0; gi < mod.globals.length; gi++) {
@@ -1132,13 +1135,8 @@ export function genModule(mod) {
     const ro = mod.globalRo[gi] === true;
     const rel = ro ? roRelocs : dataRelocs;
     const sect = ro ? 3 : 2;
-    /* 只读那一节的落点是排好的，可写那一段照旧一块接一块推。 */
-    let base;
-    if (ro) base = roPlan.gOff.get(gi);
-    else {
-      while (dataBytes.length % al !== 0) dataBytes.push(0);
-      base = dataBytes.length;
-    }
+    /* 两段的落点都是排好的（第一百二十五、一百三十一片）：这儿只查，不推游标。 */
+    const base = (ro ? roPlan.gOff : dataPlan.gOff).get(gi);
     gBase.set(gi, { base, sect });
     dataSyms.push({
       name: mod.globals[gi],
@@ -1156,7 +1154,7 @@ export function genModule(mod) {
       const b = blob === null ? 0 : blob.bytes[k];
       const v = b === undefined ? 0 : b;
       if (ro) roBytes[base + k] = v;
-      else dataBytes.push(v);
+      else dataBytes[base + k] = v;
     }
     for (const fx of blob === null ? [] : blob.fixups ?? []) {
       /* `after`（第一百一十八片，与 x64 那一份同一条）：这一条数据重定位是在第几个

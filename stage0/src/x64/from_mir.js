@@ -54,7 +54,7 @@ import {
   CVT_I2F, CVT_U2F, CVT_F2I, CVT_F2U, CVT_FCVT, CVT_BITCAST, OP_NAMES, hexBytes,
   memArgSize, memArgSse, memArgIsF80, callLdRet,
 } from '../mir/ir.js';
-import { planRodata } from '../mir/rodata.js';
+import { planRodata, planData } from '../mir/rodata.js';
 
 /* 草稿寄存器。挑 r10/r11 是因为它们**既不是实参寄存器、也不是被调用者保存的** ——
  * 于是备实参的时候不会先把自己的草稿踩掉。`rax` 当结果（也是返回值寄存器）。 */
@@ -1384,7 +1384,6 @@ export function codeOf(mod, f) {
  */
 export function genModule(mod, opts) {
   const dataSyms = [];
-  const dataBytes = [];
   /* 初值里的地址（第二十八片）：与 arm64 那一份同一条 —— `POINTER64`、加数在原地。 */
   const dataRelocs = [];
   const fixSym = (fx) => {
@@ -1403,6 +1402,10 @@ export function genModule(mod, opts) {
   const roPlan = planRodata(mod);
   const roBytes = new Array(roPlan.size).fill(0);
   const roRelocs = [];
+  /* 可写那一节的落点也一样排（第一百三十一片）：从前是照 MIR 的全局号一块接一块推，
+   * 而号是「第一次被提到」的次序 —— `sizeof(*p)` 这种会让后声明的先领到号。 */
+  const dataPlan = planData(mod);
+  const dataBytes = new Array(dataPlan.size).fill(0);
   /* 别名要照目标的落点发符号（第一百〇五片），与 arm64 那一份同一条。
    * 目标可能落在两段里的任何一段，所以这一格记 `{base, sect}`。 */
   const gBase = new Map();
@@ -1417,13 +1420,8 @@ export function genModule(mod, opts) {
     const ro = mod.globalRo[gi] === true;
     const rel = ro ? roRelocs : dataRelocs;
     const sect = ro ? 3 : 2;
-    /* 只读那一节的落点是排好的，可写那一段照旧一块接一块推。 */
-    let base;
-    if (ro) base = roPlan.gOff.get(gi);
-    else {
-      while (dataBytes.length % al !== 0) dataBytes.push(0);
-      base = dataBytes.length;
-    }
+    /* 两段的落点都是排好的（第一百二十五、一百三十一片）：这儿只查，不推游标。 */
+    const base = (ro ? roPlan.gOff : dataPlan.gOff).get(gi);
     gBase.set(gi, { base, sect });
     dataSyms.push({
       name: mod.globals[gi],
@@ -1442,7 +1440,7 @@ export function genModule(mod, opts) {
       const b = blob === null ? 0 : blob.bytes[k];
       const v = b === undefined ? 0 : b;
       if (ro) roBytes[base + k] = v;
-      else dataBytes.push(v);
+      else dataBytes[base + k] = v;
     }
     for (const fx of blob === null ? [] : blob.fixups ?? []) {
       /* `after`（第一百一十八片）：这一条数据重定位是在第几个函数之前落的 ——

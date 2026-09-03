@@ -113,14 +113,11 @@ const PROBES = [
   {
     /* 指针指着只读节里那一块：那一块的对齐与大小按 `wchar_t` 走。
      *
-     * `sizeof(*p)` 顺带量出**另一笔**：它借表达式那一路解析（在一个用完就丢的函数里），
-     * 于是 `p` 在 `n` 之前就领到了 MIR 的全局号 —— 而 `.data` 的字节是按**全局号**铺的，
-     * 不是按声明的次序。tcc 那边 `.data` 与只读节一样是一个按声明次序推进的游标
-     * （量过：tcc `n@0 p@8 m@16`、我们 `p@0 n@8 m@16`）。第一百二十五片给只读节立的
-     * 那根轴（`globalSeq`）现在只管只读节，`.data` 还没接上 —— 记在这儿，不是绕过去。 */
+     * `sizeof(*p)` 顺带量出**另一笔**（第一百三十一片补的）：它借表达式那一路解析，
+     * 于是 `p` 在 `n` 之前就领到了 MIR 的全局号 —— 而从前 `.data` 的字节是按**全局号**
+     * 铺的，不是按声明的次序（tcc `n@0 p@8 m@16`，我们那时是 `p@0 n@8 m@16`）。 */
     name: '指向宽串的指针（只读节里那一块）',
     src: 'char *n = "z";\n__WCHAR_TYPE__ *p = L"ab";\nint m = sizeof(*p);\n',
-    notYetSyms: '.data 还按全局号铺、不按声明的次序（`sizeof(*p)` 让 p 先领到号）',
   },
 ];
 
@@ -129,7 +126,6 @@ const keep = (s) => filters.length === 0 || filters.some((f) => s.includes(f));
 
 let pass = 0;
 let fail = 0;
-let notYet = 0;
 const ok = (name) => { pass++; process.stdout.write(`  ok   ${name}\n`); };
 const bad = (name, detail) => { fail++; process.stdout.write(`  FAIL ${name}\n${detail}\n`); };
 
@@ -180,13 +176,6 @@ for (const t of TARGETS) {
         continue;
       }
       if (want.syms !== got.syms) {
-        /* 量过、还没做的那一格报 `not yet`（带上量到的理由），不装作过了。 */
-        if (p.notYetSyms !== undefined && sec === '.data') {
-          notYet++;
-          process.stdout.write(`  ~    ${label}: ${sec} 里那几条符号的次序 —— ${p.notYetSyms}\n`
-            + `         tcc : ${want.syms}\n         ours: ${got.syms}\n`);
-          continue;
-        }
         bad(`${label}: ${sec} 里那几条符号的落点与大小`,
           `    tcc : ${want.syms}\n    ours: ${got.syms}`);
         continue;
@@ -197,5 +186,5 @@ for (const t of TARGETS) {
 }
 
 rmSync(OUT, { recursive: true, force: true });
-process.stdout.write(`\n${pass} passed, ${fail} failed, ${notYet} not yet\n`);
+process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail > 0 ? 1 : 0);

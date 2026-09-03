@@ -949,6 +949,13 @@ win32 41、arm64-win32 40）。`tccdefs.js` 于是从一张静态表改成顺着
 量过：win32 上 `sizeof(L"ab")` 是 6、`sizeof(L'x')` 是 **2**、`unsigned short a[] = L"ab"`
 收得下而 `int a[] = L"ab"` 只是「指针赋给整数」。新门 `tests/c/wchar.js` 27/0/3，
 `str-rodata` 那个 `not yet` 消掉，从 69/0/1 变 72/0。
+**`.data` 也按声明的次序摆**（第一百三十一片）：上一片的探针顺带量出来的 —— 从前两个
+后端铺 `.data` 是照 MIR 的**全局号**一块接一块推，而号是「第一次被提到」的次序。
+`sizeof(*p)` 这种（借表达式那一路解析）会让后声明的先领到号，于是
+`char *n; int *p; int m = sizeof(*p);` 我们摆成 `p@0 n@8 m@16`、tcc 是 `n@0 p@8 m@16`。
+`mir/rodata.js` 里那个规划器抽出一个共用的 `layout(items)`，多一个 `planData(mod)`，
+两个后端的 `dataBytes` 从「一路 push」改成「先按落点开好、只往里填」。`wchar` 那门
+27/0/3 变 **30/0**。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -15039,6 +15046,80 @@ ours: p@0+8 n@8+8 m@16+4
 只读节与 `.data` 各调一次）。`.bss` 同理要看。
 
 <!-- 第九刀第一百三十片-END -->
+
+## 落地：第九刀第一百三十一片
+
+**`.data` 也按声明的次序摆。**
+
+上一片那三个 `not yet` 是同一笔，尺子已经量在那儿了：
+
+```c
+char *n = "z";   __WCHAR_TYPE__ *p = L"ab";   int m = sizeof(*p);
+```
+
+```
+tcc : n@0+8 p@8+8 m@16+4
+ours: p@0+8 n@8+8 m@16+4
+```
+
+`sizeof(*p)` 借表达式那一路解析（在一个用完就丢的函数里，与 `&` 那一格同一个办法），
+于是 `p` 在 `n` 之前就领到了 MIR 的**全局号**；而两个后端铺 `.data` 是照全局号
+一块接一块推的（`for (let gi = 0; …) { while (dataBytes.length % al) …; base = dataBytes.length; }`）。
+平时看不出差别 —— 全局号一般就是声明的次序；要有「先被提到、后被定义」的东西才露出来。
+
+### 改法：只读节那个规划器再用一次
+
+第一百二十五片给只读节立过那根轴（`globalSeq`，前端在 `allocGlobal` 领号）。这一片把
+`mir/rodata.js` 里的排布抽成一个共用的 `layout(items)`，再加一个出口：
+
+```js
+export function planData(mod) { … 非只读、非外部的全局量 … return layout(items); }
+```
+
+两个后端于是对称了：`dataBytes` 从「一路 push」改成 `new Array(dataPlan.size).fill(0)`，
+落点 `const base = (ro ? roPlan.gOff : dataPlan.gOff).get(gi)` —— 一句话，两段都只查不推。
+对齐的空档由规划器留（原来是 `while (…% al) push(0)`）。
+
+没有 `globalSeq` 的（手搭的 MIR、别的前端）照旧排在后面、次序不变，所以
+`x64/from-mir` 90/0、`arm64/from-mir` 88/0 一条没动。
+
+### 门
+
+`wchar` 那门从 27/0/3 变 **30/0** —— 那三格就是这一笔。回归都绿：`native` 227/0、
+`run` 207/0/1、`native-gen` 83/0、`selfobj` 25/0、`tcc-link` 83/0、`predefs` 12/0、
+`str-rodata` 72/0、`rodata-sec` 27/0、`sym-order` 18/0、`sym-size` 6/0、
+`rela-order` 6/0、`rela-text` 22/0/1、`eh-frame-x64` 8/0、`pdata-x64` 11/0、
+`selfsrc` 13/0、`selfcross` 12/0、`dm-order` 7/0、`selfpp` 29/0/1、
+`elf-roundtrip` 268、`elf-merge` 451、`macho-exe` 26、`elf-exe` 53、`elf-dyn` 53、
+`macho-dylib` 107、`pe-content` 328、`pe-exe` 352。`tcc-obj` 的「容器相同」还是 21。
+
+### 量：没有初值的全局量该进 `.bss`（下一片的尺子）
+
+顺手想把 `sym-size` 那门的「全局量的落点也一个数不差」打开，结果它红了 —— 而红的
+不是这一片，是**另一笔**。那份探针里有两块没有初值的：
+
+```c
+char tab[40];   struct P { int a; char b; } p;
+```
+
+量 x86_64-linux：
+
+```
+tcc  .data 44 字节  .data.ro 3  .bss 48    g@0 big@8 arr@16 | tab@0 p@40（在 .bss 里）
+ours .data 92 字节  .data.ro 3  .bss 0     g@0 big@8 tab@16 p@56 arr@64（全在 .data）
+```
+
+也就是说 tcc 把「没有初值」的那些摆进 `.bss`（那一节不占文件字节，只占 `sh_size`），
+我们全摆在 `.data` 里 —— 于是它们后面每一块的偏移都跟着差。我们的 `.bss` 节头是有的，
+只是一直空着。
+
+所以下一片：`planData` 分成两个游标（`.data` 与 `.bss`），判据是「这一块的字节是不是
+全零、而且它是不是**试探性定义**」—— 得先照 tcc 那边量准（`tccgen.c` 里
+`has_init` 与 `sec` 的那几支，别拿「字节碰巧全零」当判据，`int z = 0;` 也许照旧进
+`.data`）。落点对上之后 `sym-size` 那门就能多称一格「全局量的落点」。
+
+<!-- 第九刀第一百三十一片-END -->
+
 
 
 
