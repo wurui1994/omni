@@ -14702,6 +14702,45 @@ tcc 是 `4/one 2/L.0 4/strlen`、我们是 `4/strlen 4/one 2/omni_str_N 4/$ext$s
 
 <!-- 第九刀第一百二十七片-END -->
 
+## 量：外部函数的桩要怎么去掉（下一片的尺子）
+
+上一片剩下的三个 `not yet` 都是同一格。量到的差别（x86_64-linux，
+`static int one(void); … one() + (int)strlen("ab")`）：
+
+```
+tcc : 4/one/-4   2/L.0/-4          4/strlen/-4
+ours: 4/strlen/-4  4/one/-4  2/omni_str_N/-4  4/$ext$strlen/-4
+```
+
+多出来的两条来自 `externThunk`（`tccgen.js:3764`）：这个单元里没有函数体的名字被改成
+`$ext$strlen`、发成一个**真的局部函数**，桩里一条 `CCALL strlen`（那就是排在最前面的
+`4/strlen`），调用点则 `CALL $ext$strlen`（最后那条）。把桩去掉，次序就是
+`4/one 2/串 4/strlen` —— 与尺子只差名字。
+
+桩当初是为了两件事：
+
+1. **一遍过**：调用点可能在「知道这个名字最后有没有函数体」之前。桩把这件事推到读完
+   整个单元之后，于是调用点一条都不用改。
+2. **线性内存那两条腿**：那边的 `CCALL` 落到宿主的 JS 实现上，桩是唯一的落点。
+
+第一百二十七片把路清了一半：`CALL` 现在按**符号名**发，位移交给链接器 —— 也就是说
+一个没有函数体的被调者**压根不需要代码**。所以 native 这条腿上桩可以换成：
+
+* MIR 的函数多一格「没有函数体」（像 `setGlobalExtern` 那样），`sealExternSymbols`
+  在 native 上打这一格而不是改名 + 发 `RET`
+* 两个后端跳过这种函数（不出代码、不发符号），`funcSym(no)` 回**真名**
+* 名字靠那条重定位进「未定义的外部符号」那一段 —— 两个写出器早就这么扫了
+
+还得接住桩顺手在做的三件 ABI 事（都在 `externThunk` 里，第一百一十三片那几行）：
+
+* x86_64 的 `long double` 实参是 X87 类：要 `ARGMEM` + `MEMARG_F80`，不能按 xmm 传
+* `st0` 返回（`ldRet`）：`callRet` 现在问的是被调者的 `f.ldRet`，外部函数得从声明里拨
+* SysV 的 `al`（xmm 个数）：`CCALL` 一律报，`CALL` 现在不报 —— 外部符号那条要报
+
+变参的外部函数不在这一片里：它的调用点早就直接发 `CCALL`（`funcCall`），没有桩。
+
+<!-- 量：外部函数的桩-END -->
+
 
 
 
