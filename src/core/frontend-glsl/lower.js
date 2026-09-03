@@ -151,15 +151,24 @@ class GlslLowerer {
     if (e.k === 'splat') {
       const of = this.expr(e.of)[0];
       const n = glslNComp(e.ty);
-      if (e.ty.k === 'mat') glslNyi('矩阵');
-      /* 铺开：同一个值填 N 格。先绑一个 let，免得算 N 遍。 */
       const v = this.let_(glslCompTy(e.ty), of);
       const out = [];
+      if (e.ty.k === 'mat') {
+        /* `matN(x)` 是**对角线**填 x、其余 0（规范 5.4.2），不是每格都填 x。
+         * 这一格填错的话 `mat2(1.0)` 会变成「四个 1」——那不是单位阵。 */
+        const m = e.ty.n;
+        for (let col = 0; col < m; col++) {
+          for (let row = 0; row < m; row++) out.push(col === row ? v : '(real 0.0)');
+        }
+        return out;
+      }
+      /* 向量：同一个值填 N 格。先绑一个 let，免得算 N 遍。 */
       for (let i = 0; i < n; i++) out.push(v);
       return out;
     }
     if (e.k === 'construct') {
-      if (e.ty.k === 'mat') glslNyi('矩阵构造');
+      /* 矩阵与向量同一条路：分量按**源码次序**摊平，而矩阵是列优先，
+       * 所以 `mat2(a,b,c,d)` 出来正好是「第 0 列 (a,b)、第 1 列 (c,d)」。 */
       const out = [];
       for (const a of e.args) for (const c of this.expr(a)) out.push(c);
       return out;
@@ -180,14 +189,14 @@ class GlslLowerer {
     if (e.k === 'bin') return this.bin(e);
     if (e.k === 'builtin') return this.builtin(e);
     if (e.k === 'call') return this.call(e);
-    if (e.k === 'sel') glslNyi('三元 ? :');
+    if (e.k === 'sel') return this.sel(e);
     if (e.k === 'assign') return this.assign(e);
     if (e.k === 'incdec') return this.incdec(e);
     throw new OmniError(`glsl: 降不了的表达式 ${e.k}`);
   }
 
   bin(e) {
-    if (e.a.ty.k === 'mat' || e.b.ty.k === 'mat') glslNyi('矩阵乘');
+    if (e.a.ty.k === 'mat' || e.b.ty.k === 'mat') return this.matBin(e);
     const a = this.expr(e.a);
     const b = this.expr(e.b);
     const ct = glslCompTy(e.ty);
@@ -210,6 +219,110 @@ class GlslLowerer {
       out.push(this.let_(ct, `(bin "${e.op}" ${x} ${y})`));
     }
     return out;
+  }
+
+  /** `min`/`max`：方言没有表达式级的条件，所以落成一个 let + 一条 if。 */
+  /**
+   * 三元 `c ? a : b`。**两支各自的中间量要留在自己那一支里** ——
+   * GLSL 的 `? :` 只算一支（规范 5.9），把两支的 `let` 都提到 if 外面就变成两支都算了。
+   * 那不只是慢：`1.0/x` 那种在不该走的那一支里可能是除零。
+   */
+  sel(e) {
+    const c = this.expr(e.c)[0];
+    const n = glslNComp(e.ty);
+    const ct = glslCompTy(e.ty);
+    /* 先摆 N 个空格子，两支各往里写。 */
+    const names = [];
+    for (let i = 0; i < n; i++) {
+      const nm = this.fresh('q');
+      this.stmts.push(`(let ${nm} ${ct} ${glslZero(ct)})`);
+      names.push(nm);
+    }
+    const branch = (sub) => {
+      const save = this.stmts;
+      this.stmts = [];
+      const vals = this.expr(sub);
+      for (let i = 0; i < n; i++) {
+        this.stmts.push(`(set ${names[i]} ${vals.length === 1 ? vals[0] : vals[i]})`);
+      }
+      const body = this.stmts;
+      this.stmts = save;
+      return body;
+    };
+    const a = branch(e.a);
+    const b = branch(e.b);
+    this.stmts.push(`(if ${c} (do ${a.join(' ')}) (do ${b.join(' ')}))`);
+    return names.map((nm) => `(var ${nm})`);
+  }
+
+  /**
+   * 矩阵那几种乘法。**列优先**（GLSL 规范 5.6）：`mat2(a,b,c,d)` 的第 0 列是 `(a,b)`、
+   * 第 1 列是 `(c,d)`，所以第 `col` 列第 `row` 行那一格的下标是 `col*N + row`。
+   *
+   * 记错这一格的后果是**转置**：`rot(a)` 变成转过来那个旋转，图往反方向转，
+   * 而且一个数都不会 NaN —— 那种错只有对着图才看得出来。
+   */
+  matBin(e) {
+    if (e.op !== '*') throw new OmniError(`glsl: 矩阵只支持 *（给的是 ${e.op}）`);
+    const a = this.expr(e.a);
+    const b = this.expr(e.b);
+    const ta = e.a.ty;
+    const tb = e.b.ty;
+    const ct = 'real';
+    const dot = (xs, ys) => {
+      let sum = null;
+      for (let i = 0; i < xs.length; i++) {
+        const p = this.let_(ct, `(bin "*" ${xs[i]} ${ys[i]})`);
+        sum = sum === null ? p : this.let_(ct, `(bin "+" ${sum} ${p})`);
+      }
+      return sum;
+    };
+    if (ta.k === 'mat' && (tb.k === 'float' || tb.k === 'int')) {
+      return a.map((c) => this.let_(ct, `(bin "*" ${c} ${b[0]})`));
+    }
+    if (tb.k === 'mat' && (ta.k === 'float' || ta.k === 'int')) {
+      return b.map((c) => this.let_(ct, `(bin "*" ${a[0]} ${c})`));
+    }
+    /* `matN * vecN`：结果第 row 格 = Σ_col m[col][row] * v[col]。 */
+    if (ta.k === 'mat' && tb.k === 'vec') {
+      const n = ta.n;
+      const out = [];
+      for (let row = 0; row < n; row++) {
+        const xs = [];
+        for (let col = 0; col < n; col++) xs.push(a[col * n + row]);
+        out.push(dot(xs, b));
+      }
+      return out;
+    }
+    /* `vecN * matN`：结果第 col 格 = dot(v, 第 col 列)。 */
+    if (ta.k === 'vec' && tb.k === 'mat') {
+      const n = tb.n;
+      const out = [];
+      for (let col = 0; col < n; col++) {
+        const ys = [];
+        for (let row = 0; row < n; row++) ys.push(b[col * n + row]);
+        out.push(dot(a, ys));
+      }
+      return out;
+    }
+    /* `matN * matN`：结果第 col 列 = a × (b 的第 col 列)。 */
+    if (ta.k === 'mat' && tb.k === 'mat') {
+      const n = ta.n;
+      const out = [];
+      for (let col = 0; col < n; col++) {
+        for (let row = 0; row < n; row++) {
+          const xs = [];
+          const ys = [];
+          for (let k = 0; k < n; k++) {
+            xs.push(a[k * n + row]);
+            ys.push(b[col * n + k]);
+          }
+          out.push(dot(xs, ys));
+        }
+      }
+      return out;
+    }
+    throw new OmniError(`glsl: 降不了的矩阵乘（${glslTyText(ta)} * ${glslTyText(tb)}）`);
   }
 
   /** `min`/`max`：方言没有表达式级的条件，所以落成一个 let + 一条 if。 */
@@ -273,11 +386,109 @@ class GlslLowerer {
       }
       return out;
     }
-    if (name === 'sign' || name === 'inversesqrt' || name === 'radians'
-      || name === 'degrees' || name === 'fract') {
-      /* 这几条都是几行算术，但第一档一份尺子都没用到（`fract` 是第二档的）——
-       * 不写比写了没人测好。 */
-      glslNyi(`内建 ${name}`);
+    /* ---- 第二档那几个（`pretty_render.py` 要的）。都是规范 8.x 里的几行算术，
+     * 所以**不进 rmath**，在这儿展开 —— 展开的形状与规范逐字对着写，见每一条的注释。 */
+    if (name === 'fract') {
+      /* 8.3：`x - floor(x)`。 */
+      return args[0].map((c) => {
+        const f = this.let_(ct, `(rmath "floor" ${c})`);
+        return this.let_(ct, `(bin "-" ${c} ${f})`);
+      });
+    }
+    if (name === 'inversesqrt') {
+      return args[0].map((c) => {
+        const s = this.let_(ct, `(rmath "sqrt" ${c})`);
+        return this.let_(ct, `(bin "/" (real 1.0) ${s})`);
+      });
+    }
+    if (name === 'radians' || name === 'degrees') {
+      /* 8.1：`radians(d) = d * pi/180`、`degrees(r) = r * 180/pi`。 */
+      const k = name === 'radians' ? '0.017453292519943295' : '57.29577951308232';
+      return args[0].map((c) => this.let_(ct, `(bin "*" ${c} (real ${k}))`));
+    }
+    if (name === 'sign') {
+      /* 8.3。`(x > 0) - (x < 0)` 那种整数把戏在方言里不成立（bool 不能减），
+       * 所以老实用两条 if。 */
+      const out = [];
+      for (const c of args[0]) {
+        const nm = this.fresh('sg');
+        this.stmts.push(`(let ${nm} real (real 0.0))`);
+        this.stmts.push(`(if (bin ">" ${c} (real 0.0)) (do (set ${nm} (real 1.0))))`);
+        this.stmts.push(`(if (bin "<" ${c} (real 0.0)) (do (set ${nm} (un "-" (real 1.0)))))`);
+        out.push(`(var ${nm})`);
+      }
+      return out;
+    }
+    if (name === 'step') {
+      /* 8.3：`x < edge ? 0 : 1`。 */
+      const out = [];
+      for (let i = 0; i < wide; i++) {
+        const nm = this.fresh('st');
+        this.stmts.push(`(let ${nm} real (real 1.0))`);
+        this.stmts.push(`(if (bin "<" ${at(1, i)} ${at(0, i)}) (do (set ${nm} (real 0.0))))`);
+        out.push(`(var ${nm})`);
+      }
+      return out;
+    }
+    if (name === 'clamp') {
+      /* 8.3：`min(max(x, minVal), maxVal)`。 */
+      const out = [];
+      for (let i = 0; i < wide; i++) {
+        const lo = this.minmax('max', at(0, i), at(1, i), ct);
+        out.push(this.minmax('min', lo, at(2, i), ct));
+      }
+      return out;
+    }
+    if (name === 'mix') {
+      /* 8.3：`x*(1-a) + y*a`。**照规范这个形状写**，不写成 `x + (y-x)*a` ——
+       * 两者在浮点下不等价（`a == 1` 时前者精确回 y，后者不一定）。 */
+      const out = [];
+      for (let i = 0; i < wide; i++) {
+        const a0 = at(2, i);
+        const one = this.let_(ct, `(bin "-" (real 1.0) ${a0})`);
+        const l = this.let_(ct, `(bin "*" ${at(0, i)} ${one})`);
+        const r = this.let_(ct, `(bin "*" ${at(1, i)} ${a0})`);
+        out.push(this.let_(ct, `(bin "+" ${l} ${r})`));
+      }
+      return out;
+    }
+    if (name === 'dot') {
+      let sum = null;
+      for (let i = 0; i < args[0].length; i++) {
+        const p = this.let_(ct, `(bin "*" ${args[0][i]} ${args[1][i]})`);
+        sum = sum === null ? p : this.let_(ct, `(bin "+" ${sum} ${p})`);
+      }
+      return [sum];
+    }
+    if (name === 'distance') {
+      let sum = null;
+      for (let i = 0; i < args[0].length; i++) {
+        const d = this.let_(ct, `(bin "-" ${args[0][i]} ${args[1][i]})`);
+        const p = this.let_(ct, `(bin "*" ${d} ${d})`);
+        sum = sum === null ? p : this.let_(ct, `(bin "+" ${sum} ${p})`);
+      }
+      return [this.let_(ct, `(rmath "sqrt" ${sum})`)];
+    }
+    if (name === 'normalize') {
+      /* 8.5：`v / length(v)`。长度算一次（绑 let），不是每格算一遍。 */
+      let sum = null;
+      for (const c of args[0]) {
+        const sq = this.let_(ct, `(bin "*" ${c} ${c})`);
+        sum = sum === null ? sq : this.let_(ct, `(bin "+" ${sum} ${sq})`);
+      }
+      const len = this.let_(ct, `(rmath "sqrt" ${sum})`);
+      return args[0].map((c) => this.let_(ct, `(bin "/" ${c} ${len})`));
+    }
+    if (name === 'cross') {
+      const a = args[0];
+      const b = args[1];
+      const mul = (x, y) => this.let_(ct, `(bin "*" ${x} ${y})`);
+      const sub = (x, y) => this.let_(ct, `(bin "-" ${x} ${y})`);
+      return [
+        sub(mul(a[1], b[2]), mul(a[2], b[1])),
+        sub(mul(a[2], b[0]), mul(a[0], b[2])),
+        sub(mul(a[0], b[1]), mul(a[1], b[0])),
+      ];
     }
     glslNyi(`内建 ${name}`);
     return [];
@@ -287,7 +498,8 @@ class GlslLowerer {
     const args = [];
     for (const a of e.args) for (const c of this.expr(a)) args.push(c);
     const n = glslNComp(e.ty);
-    if (e.ty.k === 'mat') glslNyi('回矩阵的函数');
+    /* 回矩阵与回向量走同一条路：`(struct glsl_vN …)` 里 N = 分量个数
+     * （`mat2` 是 4 格，正好与 `vec4` 用同一个结构体 —— 它俩在这一层就是「四个 real」）。 */
     const callTxt = `(call glsl_${e.name} ${args.join(' ')})`;
     if (n === 1) return [this.let_(glslCompTy(e.ty), callTxt)];
     /* 回向量的函数：方言里回一个结构体（值语义），这儿当场拆成 N 格。
@@ -348,7 +560,6 @@ class GlslLowerer {
     if (s.k === 'expr') { this.expr(s.e); return; }
     if (s.k === 'decl') {
       const n = glslNComp(s.ty);
-      if (s.ty.k === 'mat') glslNyi('矩阵局部量');
       const ct = glslCompTy(s.ty);
       const vals = s.init === null ? null : this.expr(s.init);
       const comps = [];
@@ -396,8 +607,36 @@ class GlslLowerer {
     if (s.k === 'continue') {
       glslNyi('continue（`for` 展成 while 之后它会跳过步进那一格）');
     }
-    if (s.k === 'if' || s.k === 'while') glslNyi(s.k === 'if' ? 'if' : 'while');
+    if (s.k === 'if') {
+      /* 条件的中间量提到 `if` **外面**是对的 —— 条件本来就要算一次。
+       * （三元不一样：那两支只算一支，见 `sel`。） */
+      const c = this.expr(s.c)[0];
+      const then = this.sub(() => this.stmt(s.then));
+      if (s.else === null) {
+        this.stmts.push(`(if ${c} (do ${then.join(' ')}))`);
+      } else {
+        const other = this.sub(() => this.stmt(s.else));
+        this.stmts.push(`(if ${c} (do ${then.join(' ')}) (do ${other.join(' ')}))`);
+      }
+      return;
+    }
+    if (s.k === 'while') {
+      /* 条件每一轮都要重算，所以走 `condIn`（要求它降出来是一条表达式）。 */
+      const body = this.sub(() => this.stmt(s.body));
+      this.stmts.push(`(while ${this.condIn(s.c)} (do ${body.join(' ')}))`);
+      return;
+    }
     throw new OmniError(`glsl: 降不了的语句 ${s.k}`);
+  }
+
+  /** 攒一段子语句：`f()` 往一个新的 `stmts` 里写，回那一段。 */
+  sub(f) {
+    const save = this.stmts;
+    this.stmts = [];
+    f();
+    const body = this.stmts;
+    this.stmts = save;
+    return body;
   }
 
   /**
@@ -431,7 +670,6 @@ class GlslLowerer {
     this.push();
     for (const p of f.params) {
       if (p.dir !== 'in') glslNyi('out/inout 形参');
-      if (p.ty.k === 'mat') glslNyi('矩阵形参');
       const n = glslNComp(p.ty);
       const ct = glslCompTy(p.ty);
       const comps = [];
@@ -474,7 +712,6 @@ class GlslLowerer {
     this.push();
     this.bind('gl_FragCoord', ['(var frag_x)', '(var frag_y)', '(real 0.0)', '(real 1.0)']);
     for (const u of m.uniforms) {
-      if (u.ty.k === 'mat') glslNyi('矩阵 uniform');
       const n = glslNComp(u.ty);
       const ct = glslCompTy(u.ty);
       const comps = [];

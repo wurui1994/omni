@@ -141,14 +141,90 @@ if (js.lines !== undefined) {
   else ok(`${want.length} 个数与门自己算的同一个公式相同（降级没有把公式改掉）`);
 }
 
-/* ---- 三、第二档那些要明着骂。 */
+/* ---- 三、第二档那些：**接上了的要算对，没接的要明着骂**。 */
+
+/** 一段片元着色器，取一个像素的四格（原始 real），回四个数。 */
+function shade(body, uni = '', x = 1.5, y = 2.5) {
+  const src = `#version 330 core\n${uni}out vec4 fragColor;\n${body}`;
+  const libx = lower(src, 'frag');
+  const p = join(OUT, `probe${Math.abs(hashOf(body))}.sx`);
+  writeFileSync(p, `${libx.trimEnd().slice(0, -1)}\n  (main\n`
+    + `    (let q glsl_v4 (call glsl_frag (real ${x}) (real ${y})))\n`
+    + '    (print (fld (var q) c0))\n    (print (fld (var q) c1))\n'
+    + '    (print (fld (var q) c2))\n    (print (fld (var q) c3)))\n)\n');
+  const r = spawnSync(process.execPath, [CLI, 'run', p], { encoding: 'utf8', maxBuffer: 1 << 26 });
+  if (r.status !== 0) return { err: (r.stderr ?? '').trim().split('\n').slice(0, 4).join('\n    ') };
+  return { v: r.stdout.trim().split('\n').map(Number) };
+}
+function hashOf(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return h;
+}
+
+/* 第二档那几件事，每一条给一个能手算的答案。挑的数都让答案有区分度
+ * （比如 `mix` 那条：0.25 与 0.75 混出来是 0.375，写错成 `x+(y-x)*a` 也会得同一个数，
+ * 所以另加一条 `a=1` —— 那一条能分开两种写法：规范那个形状精确回 y）。 */
+const T2 = [
+  ['mat2 * vec2（列优先，写成转置会往反方向转）',
+    'mat2 rot(float a) { return mat2(0.0, 1.0, -1.0, 0.0); }\n'
+    + 'void main() { vec2 p = rot(0.0) * vec2(1.0, 0.0); fragColor = vec4(p, 0.0, 1.0); }\n',
+    /* 列优先：第 0 列 (0,1)、第 1 列 (-1,0)。m * (1,0) = 第 0 列 = (0,1)。
+     * 记成行优先会得 (0,-1) —— 差一个符号，正是「转过来」。 */
+    [0, 1, 0, 1]],
+  ['vec2 * mat2',
+    'void main() { vec2 p = vec2(1.0, 0.0) * mat2(0.0, 1.0, -1.0, 0.0); fragColor = vec4(p, 0.0, 1.0); }\n',
+    /* 行向量乘：第 col 格 = dot(v, 第 col 列) = (0, -1)。 */
+    [0, -1, 0, 1]],
+  ['mat2 * mat2 与 mat2(scalar) 是对角',
+    'void main() { mat2 m = mat2(2.0) * mat2(3.0, 0.0, 0.0, 4.0); fragColor = vec4(m[0], 0.0, 1.0); }\n',
+    null],
+  ['mix 照规范的形状（a=1 时精确回 y）',
+    'void main() { float a = mix(0.25, 0.75, 0.5); float b = mix(1.0, 3.0, 1.0);'
+    + ' fragColor = vec4(a, b, 0.0, 1.0); }\n',
+    /* 0.25*(1-0.5) + 0.75*0.5 = 0.5；第二格是 a=1 那一格（规范那个形状精确回 y）。 */
+    [0.5, 3, 0, 1]],
+  ['clamp / step / sign',
+    'void main() { fragColor = vec4(clamp(2.0, 0.0, 1.0), step(1.0, 0.5), sign(-3.0), 1.0); }\n',
+    [1, 0, -1, 1]],
+  ['fract / dot / normalize',
+    'void main() { float f = fract(2.75); float d = dot(vec2(1.0, 2.0), vec2(3.0, 4.0));'
+    + ' vec2 n = normalize(vec2(3.0, 4.0)); fragColor = vec4(f, d, n.x, 1.0); }\n',
+    [0.75, 11, 0.6, 1]],
+  ['三元只算一支（不该走的那支里是除零）',
+    'void main() { float z = 0.0; float v = z > 0.0 ? 1.0 / z : 7.0;'
+    + ' fragColor = vec4(v, 0.0, 0.0, 1.0); }\n',
+    [7, 0, 0, 1]],
+  ['if / else',
+    'void main() { float v = 0.0; if (2.0 > 1.0) { v = 5.0; } else { v = 9.0; }'
+    + ' fragColor = vec4(v, 0.0, 0.0, 1.0); }\n',
+    [5, 0, 0, 1]],
+  ['pow / sqrt / exp / log',
+    'void main() { fragColor = vec4(pow(2.0, 10.0), sqrt(9.0), exp(0.0), 1.0); }\n',
+    [1024, 3, 1, 1]],
+];
+for (const [name, body, want] of T2) {
+  if (want === null) continue;   // 下标那条在下面单列（这一刀不收 `m[0]`）
+  const r = shade(body);
+  if (r.err !== undefined) bad(`第二档：${name}`, `    ${r.err}`);
+  else {
+    const off = [];
+    for (let i = 0; i < 4; i++) {
+      if (Math.abs(r.v[i] - want[i]) > Math.max(1e-6, Math.abs(want[i]) * 1e-5)) {
+        off.push(`第 ${i} 格：要 ${want[i]}，得 ${r.v[i]}`);
+      }
+    }
+    if (off.length > 0) bad(`第二档：${name}`, `    ${off.join('\n    ')}`);
+    else ok(`第二档：${name}`);
+  }
+}
+
 const NYI = [
-  ['矩阵', 'uniform float u_t;\nout vec4 c;\nmat2 rot(float a) { return mat2(cos(a), -sin(a), sin(a), cos(a)); }\nvoid main() { vec2 p = vec2(1.0); p *= rot(u_t); c = vec4(p, 0.0, 1.0); }\n', '矩阵'],
-  ['三元', 'uniform float u_t;\nout vec4 c;\nvoid main() { float f = u_t < 1.0 ? 2.0 : 3.0; c = vec4(f); }\n', '三元'],
   ['varying', 'in vec2 v_uv;\nout vec4 c;\nvoid main() { c = vec4(v_uv, 0.0, 1.0); }\n', 'varying'],
-  ['mix', 'uniform float u_t;\nout vec4 c;\nvoid main() { c = vec4(mix(0.0, 1.0, u_t)); }\n', '内建 mix'],
-  ['if', 'uniform float u_t;\nout vec4 c;\nvoid main() { float f = 0.0; if (u_t < 1.0) { f = 1.0; } c = vec4(f); }\n', 'if'],
   ['顶点着色器', 'void main() { gl_Position = vec4(float(gl_VertexID)); }\n', '顶点着色器'],
+  ['矩阵下标 m[0]', 'out vec4 c;\nvoid main() { mat2 m = mat2(1.0); c = vec4(m[0], 0.0, 1.0); }\n', '下标'],
+  ['continue', 'out vec4 c;\nvoid main() { float d = 0.0;'
+    + ' for (int i = 0; i < 3; i++) { continue; } c = vec4(d); }\n', 'continue'],
 ];
 for (const [name, body, want] of NYI) {
   const stage = name === '顶点着色器' ? 'vert' : 'frag';
