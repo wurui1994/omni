@@ -858,6 +858,14 @@ export class MirModule {
     /* 与常量池同下标的「这条串常量要几字节对齐」（第九刀第一百二十三片）：缺省 1，
      * 宽串 4。也是标注 —— 只有写目标文件那一步看它，进不了摘要的哈希。 */
     this.strAlign = [];
+    /* 与常量池同下标的「这条串常量是第几个领到字节的」（第九刀第一百二十五片）：
+     * 只读那一节里 tcc 按**声明的次序**摆 —— 一个 const 全局与一条串常量谁先谁后，
+     * 靠的是同一格计数，所以这一格与 `globalSeq` 是**同一个轴**上的号。缺省
+     * `undefined`：没有号的排在有号的后面（旧的次序，别的前端不受影响）。 */
+    this.strSeq = [];
+    /* 与 globals 同下标的「这一块是第几个领到字节的」（第九刀第一百二十五片）：
+     * 见 `strSeq`。 */
+    this.globalSeq = [];
     /* 别名（第九刀第一百〇五片，`__attribute__((alias("目标")))`）：一个名字与目标
      * **同址**，符号表里两条、代码一份。`{name, kind:'f'|'g', no, weak}` —— `no` 是目标
      * 的函数号或全局号。同样是标注：写目标文件那一步照目标的落点再发一条符号。 */
@@ -973,10 +981,17 @@ export class MirModule {
     this.globalVis[no] = vis;
   }
 
-  /** 这个全局是只读的（`const`）。见 `globalRo` 头上那段。 */
-  markGlobalRo(no) {
+  /** 这个全局是只读的（`const`）。见 `globalRo` 头上那段。`seq` 见 `globalSeq`。 */
+  markGlobalRo(no, seq) {
     if (this.globals[no] === undefined) throw new Error(`mir: 没有 ${no} 号模块级变量`);
     this.globalRo[no] = true;
+    if (seq !== undefined) this.globalSeq[no] = seq;
+  }
+
+  /** 这条串常量是第几个领到字节的。见 `strSeq` 头上那段。 */
+  markStrSeq(ref, seq) {
+    if (this.consts.items[ref] === undefined) throw new Error(`mir: 没有 ${ref} 号常量`);
+    this.strSeq[ref] = seq;
   }
 
   /**

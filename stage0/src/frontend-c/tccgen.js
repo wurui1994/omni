@@ -716,6 +716,9 @@ export class CGen {  /**
     this.strNo = 0;
     /** 文件作用域上第几条串常量 —— 只增不减，函数体那两遍不碰它。 */
     this.strTopNo = 0;
+    /** 谁先领到只读节里的字节（第一百二十五片）：全局量与串常量共用这一格计数，
+     * 于是只读节能按**声明的次序**摆（见 mir/rodata.js）。 */
+    this.dataSeq = 0;
     /** @type {{off:number,bytes:number[]}[]} 攒着的 data 段（内存要等 dataOff 定了才能声明） */
     this.pendingData = [];
     /**
@@ -1885,6 +1888,7 @@ export class CGen {  /**
     const bs = [];
     for (let i = 0; i < bytes.length; i++) bs.push(bytes.charCodeAt(i) % 256);
     const ref = ascii ? this.mod.consts.strOnce(bytes) : this.mod.consts.bytesOnce(bs);
+    this.mod.markStrSeq(ref, this.dataSeq++);
     this.strRefs.set(key, ref);
     return ref;
   }
@@ -1975,6 +1979,7 @@ export class CGen {  /**
      * 常量池里宽串与「就这几个字节」的窄串是同一个种类，分不出来 —— 所以这一格
      * 记在 MIR 的 `strAlign` 上，由造它的人说。 */
     this.mod.markStrAlign(ref, 4);
+    this.mod.markStrSeq(ref, this.dataSeq++);
     this.strRefs.set(key, ref);
     return ref;
   }
@@ -2094,6 +2099,10 @@ export class CGen {  /**
     this.dataOff = alignUp(this.dataOff, e.align !== 0 ? e.align : s.align);
     e.addr = this.dataOff;
     this.dataOff += s.size + (e.extra === undefined ? 0 : e.extra);
+    /* 第一百二十五片：这一块是第几个领到字节的 —— 只读节按这个号排（见
+     * mir/rodata.js）。tcc 那边这一步就是在只读/可写那一节上推游标，所以「领字节」
+     * 这一刻的次序正是节里的次序。 */
+    e.dseq = this.dataSeq++;
   }
 
   /** 一个全局量 -> 左值。地址是常量，静态偏移 0（`p->f` 那种偏移进描述符是后面的事）。 */
@@ -7826,7 +7835,7 @@ export function lowerCNative(path, text, host, defs) {
     /* 只读的那些进只读那一节（第一百二十二片）：`tccgen.c:8401-8413` 那条规矩 ——
      * 把数组那几层剥掉，剩下的带 `const` 就算。所以 `const char s[]` 算、
      * `const char *const cp` 算（哪怕它的初值还要一条重定位），`char *p` 不算。 */
-    if (isRoType(e.ty)) mod.markGlobalRo(no);
+    if (isRoType(e.ty)) mod.markGlobalRo(no, e.dseq);
     mod.setGlobalData(no, size, al, bytes, fixups);
   }
   /* 匿名的静态块（第三十四片）：静态的复合字面量。与有名字的那些一模一样地切 ——

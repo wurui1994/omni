@@ -40,6 +40,7 @@ import {
   CVT_I2F, CVT_U2F, CVT_F2I, CVT_F2U, CVT_FCVT, CVT_BITCAST, OP_NAMES, hexBytes, memArgSize,
   callVaFixed,
 } from '../mir/ir.js';
+import { planRodata } from '../mir/rodata.js';
 
 /* 草稿寄存器。x8 是 arm64 的「间接结果」寄存器、x9-x15 是调用者保存的临时 ——
  * 这一层不跨调用活，所以随便用哪三个都行，取这三个只为读起来一致。 */
@@ -1109,8 +1110,11 @@ export function genModule(mod) {
    * 不再是写死的 8）—— 上界取一页，再往上就该问「你到底在摆什么」了。 */
   let dataAlign = 8;
   /* 只读的那些摆进第三节（第一百二十二片，与 x64 那一份同一条）：`const` 的全局量
-   * 在 tcc 那边落在 `.data.ro`。两段字节各自从 0 数偏移，符号与重定位按 `sect` 分。 */
-  const roBytes = [];
+   * 在 tcc 那边落在 `.data.ro`。两段字节各自从 0 数偏移，符号与重定位按 `sect` 分。
+   * 只读那一节的落点由 `planRodata` 一次排好（第一百二十五片）—— 里头 `const` 全局与
+   * 串常量**按声明的次序交替**，所以这儿不能再一段接一段地推游标。 */
+  const roPlan = planRodata(mod);
+  const roBytes = new Array(roPlan.size).fill(0);
   const roRelocs = [];
   /* 别名要照目标的落点发符号（第一百〇五片），所以边排边记每个全局的起点与它在哪一段。 */
   const gBase = new Map();
@@ -1124,11 +1128,15 @@ export function genModule(mod) {
     if (al > 4096) nyi(`全局 '${mod.globals[gi]}' 要 ${al} 字节对齐（__data 这一节最多 4096）`);
     if (al > dataAlign) dataAlign = al;
     const ro = mod.globalRo[gi] === true;
-    const bytes = ro ? roBytes : dataBytes;
     const rel = ro ? roRelocs : dataRelocs;
     const sect = ro ? 3 : 2;
-    while (bytes.length % al !== 0) bytes.push(0);
-    const base = bytes.length;
+    /* 只读那一节的落点是排好的，可写那一段照旧一块接一块推。 */
+    let base;
+    if (ro) base = roPlan.gOff.get(gi);
+    else {
+      while (dataBytes.length % al !== 0) dataBytes.push(0);
+      base = dataBytes.length;
+    }
     gBase.set(gi, { base, sect });
     dataSyms.push({
       name: mod.globals[gi],
@@ -1142,7 +1150,9 @@ export function genModule(mod) {
     });
     for (let k = 0; k < size; k++) {
       const b = blob === null ? 0 : blob.bytes[k];
-      bytes.push(b === undefined ? 0 : b);
+      const v = b === undefined ? 0 : b;
+      if (ro) roBytes[base + k] = v;
+      else dataBytes.push(v);
     }
     for (const fx of blob === null ? [] : blob.fixups ?? []) {
       /* `after`（第一百一十八片，与 x64 那一份同一条）：这一条数据重定位是在第几个
@@ -1178,15 +1188,14 @@ export function genModule(mod) {
      * 宽度对齐 —— 窄串 1、宽串 4（`mod.strAlign`，宽串的地址会被交给按 `int` 读的
      * 代码）。从前一律 8 对齐摆在 `.data` 里，那是没有只读节可摆时的将就。 */
     const sal = mod.strAlign[r] ?? 1;
-    while (roBytes.length % sal !== 0) roBytes.push(0);
+    const off = roPlan.sOff.get(r);
     const raw = kind === 'bytes' ? hexBytes(items[r].text) : utf8Bytes(items[r].text);
     /* `local: true`（第九十二片）：串常量的编号是**这个模块里**的序号，两个 `.o` 各有
      * 一个 `omni_str_0` —— 当外部符号的话一链就撞。局部符号里各归各家。
      * `size` 是带那个 0 的长度（第一百二十片那一格）。 */
-    dataSyms.push({ name, off: roBytes.length, sect: 3, size: raw.length + sal, local: true });
-    for (const byte of raw) roBytes.push(byte);
-    /* 结尾那一格是**一个元素宽**的零：窄串一个字节、宽串四个（`wstrConst` 不加它）。 */
-    for (let k = 0; k < sal; k++) roBytes.push(0);
+    dataSyms.push({ name, off, sect: 3, size: raw.length + sal, local: true });
+    for (let k = 0; k < raw.length; k++) roBytes[off + k] = raw[k];
+    /* 结尾那一格是**一个元素宽**的零（`wstrConst` 不加它）—— 整块预置成 0，不用再补。 */
   }
 
   const buf = new CodeBuf();

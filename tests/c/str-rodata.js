@@ -17,6 +17,11 @@
 // 的 `char *a="A"; char *b="A"; … char *c="A";`：`.data.ro` 是 `65 0 65 0 65 0`，
 // `L.3`@0+2、`L.4`@2+2、`L.5`@4+2）。串常量的身份是**它在源码里的那一处**，不是它的字节。
 //
+// 第一百二十五片补上「次序」这一格：只读节里 `const` 全局与串常量**按声明的次序交替**
+// 摆（量过 `const int c1=11; char *a="A"; const int c2=22; char *b="B";`：
+// `11 0 0 0 | 65 0 | 0 0 | 22 0 0 0 | 66 0`）。tcc 那边只读节就是一个按序推进的游标，
+// 没有「先摆哪一类」这回事。
+//
 //   node tests/c/str-rodata.js
 
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -131,6 +136,21 @@ const PROBES = [
     name: '两个函数体各一条串',
     src: 'char *f(void) { return "fx"; }\nchar *g(void) { return "gy"; }\n'
       + 'int main(void) { return f()[0] + g()[0]; }\n',
+  },
+  {
+    /* 第一百二十五片：只读节里 `const` 全局与串常量**按声明的次序交替**摆。
+     * 量过 tcc：`11 0 0 0 | 65 0 | 0 0 | 22 0 0 0 | 66 0` —— `c2` 让到 8 是因为
+     * `L.3` 之后游标在 6，`int` 要 4 对齐。 */
+    name: 'const 全局与串常量交替（按声明的次序）',
+    src: 'const int c1 = 11;\nchar *a = "A";\nconst int c2 = 22;\nchar *b = "B";\n'
+      + 'int main(void) { return c1 + c2 + a[0] + b[0]; }\n',
+  },
+  {
+    /* 带初值的 `const` 指针：那一块在**解析初值之前**就领了字节，所以它排在自己初值
+     * 里那条串的前面（量过 tcc：`q`@0+8、`L.3`@8+2）。 */
+    name: 'const 指针的初值里那条串排在它后面',
+    src: 'const char *const q = "S";\nconst int c = 7;\nchar *p = "P";\n'
+      + 'int main(void) { return c + q[0] + p[0]; }\n',
   },
 ];
 
