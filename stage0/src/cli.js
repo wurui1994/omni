@@ -15,6 +15,8 @@ import {
 } from './host/native.js';
 import { join, basename, dirname, isAbsolute, resolve } from './host/path.js';
 import { hash16 } from './host/hash.js';
+import { findCmd, splitArgv, canonicalize, ownsVerbose, renderHelp, renderLegacy } from './cli/tree.js';
+import { ROOT, LEGACY } from './cli/cmds.js';
 import { linkJs } from './frontend-js/link.js';
 import { lowerJs } from './frontend-js/lower.js';import { lowerWat } from './frontend-wat/lower.js';
 import { lowerAsy } from './frontend-asy/lower.js';
@@ -2078,31 +2080,91 @@ function runViaJit(mod, argv, srcPath) {
 
 
 function main(argv) {
-  const [cmd, ...rest] = argv;
+  /* 分派走命令树（ADR-0018 决策四）：走到哪个节点、那个节点认识哪些带值开关，都由
+   * `cli/cmds.js` 那份数据说 —— 顶层不再认识 `--image-base` / `-isystem` 这种语言与格式
+   * 特有的东西。从前这儿有一坨 26 个 `||` 在列举全程序每一个带值开关，那就是耦合的
+   * 物理形式（见 `cli/tree.js` 头上那段）。 */
+  const { node, path: cpath, rest: raw } = findCmd(ROOT, argv);
+  /* 别名铺平成规范名（`-f` -> `--format`）：底下那 28 段实现是自己在 `rest` 上找开关的，
+   * 不认识新加的短写法 —— 量到过 `c obj -f elf` 出来是 Mach-O。见 `canonicalize`。 */
+  const rest = canonicalize(node, raw);
+  // --verbose 要在做任何事之前生效，否则第一步的耗时就丢了。
+  // `-v` 只有在**这个节点没把它当别的意思**时才算 --verbose（`omni c cpp -v` 是 tcc 的 -v）。
+  VERBOSE = rest.includes('--verbose') || (!ownsVerbose(node) && raw.includes('-v'));
   // --verbose 要在做任何事之前生效，否则第一步的耗时就丢了
   VERBOSE = rest.includes('--verbose') || rest.includes('-v');
   vMark = nowMs();
-  // 带值的开关（-o NAME / --mode M / -I 目录 / -D 宏）的值不能被当成源文件。
-  // `-I` 与 `-D` 是补上的（第五刀）：少了它们，`cpp -I dir x.c` 会把 `dir` 当成源文件 ——
-  // 而 `.jnc` 那一路的 `-I` 本来就有同一个毛病，一并修掉。
-  const files = [];
-  for (let i = 0; i < rest.length; i++) {
-    const a = rest[i];
-    if (a === '-o' || a === '--mode' || a === '--work' || a === '--cache'
-      || a === '-I' || a === '-D' || a === '--rdata'
-      || a === '-L' || a === '--target' || a === '-e' || a === '-l'
-      || a === '--dylib' || a === '--libtcc1' || a === '--dll'
-      || a === '--soname' || a === '--rpath' || a === '--install-name'
-      || a === '--subsystem' || a === '--image-base' || a === '--stack'
-      || a === '--file-align' || a === '--section-align' || a === '--dwarf'
-      || a === '-MF' || a === '-U' || a === '-isystem' || a === '-include') { i++; continue; }
-    if (a.startsWith('-')) continue;
-    files.push(a);
-  }
-  const path = files[0];
-  if (!cmd || cmd === '--help' || cmd === '-h') {
-    stdout(USAGE);
+  /* `--help` 在**任何一级**都由同一个函数处理：`findCmd` 走到第一个不是子命令名的记号就停，
+   * 所以 `omni c --help` 落在 `c` 上、`omni c link --help` 落在 `link` 上，不必特判。 */
+  if (argv.length === 0 || rest.includes('--help') || rest.includes('-h')) {
+    stdout(renderHelp(node, cpath));
     return 0;
+  }
+  if (cpath.length === 0) {
+    throw new OmniError(`unknown command '${argv[0]}'\n${renderHelp(ROOT, [])}`);
+  }
+  /* 组节点（`omni c`、`omni glr`）少了子命令就印它的清单。`glr` 那一组自己也带 `key`
+   * （旧的扁平写法 `omni glr FILE.grammar FILE...`），所以判据是「有子命令可选、可一个
+   * 位置参数都没给」，不是「有没有 key」。 */
+  if ((node.children ?? []).length > 0 && rest.filter((a) => !a.startsWith('-')).length === 0) {
+    stdout(renderHelp(node, cpath));
+    return rest.length === 0 ? 0 : 1;
+  }
+  if (node.key === undefined) {
+    stdout(renderHelp(node, cpath));
+    return 1;
+  }
+  const { args } = splitArgv(node, rest, (m) => new OmniError(m));
+  /* 位置参数就是「文件」：链接器与 `glr` 要一整串，别的只看第一个。 */
+  const files = args;
+  let cmd = node.key;
+  let path = args[0];
+
+  if (cmd === 'help') {
+    stdout(args[0] === 'legacy' ? renderLegacy(LEGACY) : renderHelp(ROOT, []));
+    return 0;
+  }
+  /* `emit FORM FILE`（决策一）：把那 9 条 `emit-*`/`ast`/`oir`/`mir`/`sx` 收成一个动词
+   * 加一个枚举。这一片只做**翻译**——底下还是原来那几段实现。 */
+  if (cmd === 'emit') {
+    const FORMS = {
+      js: 'emit-js', c: 'emit-c', llvm: 'emit-llvm', spirv: 'emit-spirv',
+      asy: 'emit-asy', ast: 'ast', oir: 'oir', mir: 'mir', sx: 'sx',
+    };
+    const form = args[0];
+    cmd = FORMS[form];
+    if (cmd === undefined) {
+      throw new OmniError(`emit: 不认识形态 '${form}'；有 ${Object.keys(FORMS).join(' ')}`);
+    }
+    path = args[1];
+  }
+  /* `run`/`build --backend B`（决策一）：同样先只做翻译。 */
+  if (cmd === 'run' || cmd === 'build') {
+    const bi = rest.indexOf('--backend');
+    const b = bi >= 0 ? rest[bi + 1] : null;
+    const MAP = {
+      run: { c: 'run-c', llvm: 'run-llvm', jit: 'run-jit', interp: 'interp', js: 'run' },
+      build: { llvm: 'build-llvm', c: 'build', native: 'build' },
+    };
+    if (b !== null) {
+      const t = MAP[cmd][b];
+      if (t === undefined) throw new OmniError(`${cmd}: 还没有 --backend ${b} 这一条`);
+      cmd = t;
+    }
+  }
+  /* `c link -f FMT`（决策二）：格式是**目标的一个属性**，不是命令的一级。这一片先翻译到
+   * 原来那四条实现上，四合一是分片 4 的事。 */
+  if (cmd === 'c-link') {
+    const fi = rest.indexOf('--format') >= 0 ? rest.indexOf('--format') : rest.indexOf('-f');
+    const f = fi >= 0 ? rest[fi + 1] : null;
+    if (f === null) throw new OmniError('c link: 要给 -f elf|macho|pe');
+    if (f === 'elf') cmd = rest.includes('-r') ? 'elf-r' : 'elf-link';
+    else if (f === 'macho') cmd = 'macho-link';
+    else if (f === 'pe') cmd = 'pe-link';
+    else throw new OmniError(`c link: 不认识格式 '${f}'；有 elf macho pe`);
+  }
+  if (cmd === 'check') {
+    throw new OmniError('check 还没到（ADR-0018 分片 4）；现在用 omni emit oir FILE');
   }
   // repl 没有源文件；默认模式是 ADR-0008 第 3 节的 dynamic（沿革见 repl.js 文件头）。
   // `--lang` 选前端：驱动是与语言无关的，omni 走检查器的增量会话，sx/asy 走核心方言的，
@@ -2711,7 +2773,7 @@ function main(argv) {
       return 0;
     }
     default:
-      throw new OmniError(`unknown command '${cmd}'\n${USAGE}`);
+      throw new OmniError(`unknown command '${cmd}'\n${renderHelp(ROOT, [])}`);
   }
 }
 
@@ -2764,100 +2826,6 @@ function replacer(key, value) {
   if (typeof value === 'bigint') return `${value}n`;
   return value;
 }
-
-const USAGE = `omni — stage0 bootstrap compiler
-
-usage: omni <command> <file.omni>
-
-commands:
-  repl      interactive session (no file; defaults to --mode dynamic; --lang omni|sx|asy|js)
-            --engine interp|js  which runtime runs each batch (both incremental)
-  run       parse and execute (node host: in-process JS; native build: via the C path)
-  run-c     compile to C, build with cc, execute
-  build     compile to a native executable  (-o NAME; --work DIR keeps the generated C there)
-  emit-js   print generated JavaScript
-  emit-c    print generated C  (--amalgamate: inline the whole runtime into one file)
-  emit-llvm print generated LLVM IR (ADR-0014 decision 3; scalars only so far)
-  run-llvm  compile through LLVM IR with clang and execute
-  build-llvm  same, but keep the executable  (-o NAME; --work DIR keeps the .ll)
-  run-jit   compile through LLVM IR and execute it with the ORC JIT (no cc at run time)
-  emit-spirv print SPIR-V assembly for one kernel (ADR-0014 gate 7; --kernel NAME)
-  ast       print the AST as JSON
-  sx        print the core-dialect text an .asy file lowers to (the *.asy.sx that
-            core-dialect diagnostics cite; line numbers line up exactly)
-  cpp       preprocess a .c file (ADR-0017 cut 5). The output is byte-identical to
-            tcc -E -P; that equality is the test axis (tests/c/). Takes -I and -D.
-  c-mir     compile a .c file straight to MIR (ADR-0017 cut 6, path B: the tccgen
-            equivalent -- one pass, no AST). Takes -I and -D.
-  c-run     the same, then run it. The exit status is C main's return value, so
-            tcc -run is the oracle (tests/c/gen/). Takes -I and -D; whatever
-            follows -- becomes the program's own argv (argv[0] is the .c path).
-  c-obj     compile a .c file to a real object file (ADR-0017 cut 9: native, no linear
-            memory). -o NAME, --arch arm64|x86_64. Link it yourself: clang a.o -o a
-  elf-r     merge several ELF object files into one, i.e. tcc -r (ADR-0017 cut 9 slice
-            42). -o NAME, --rdata NAME (PE calls it .rdata), --unwind (.eh_frame)
-  pe-link   link .o files into a Windows .exe (ADR-0017 cut 9 slices 47-50): reads
-            libtcc1.a on demand and the .def import libraries from -L DIR, builds the
-            import table and thunks, applies every relocation. -o NAME,
-            --target x86_64-win32|arm64-win32|i386-win32|arm-wince, --shared (a .dll),
-            --subsystem NAME, --image-base HEX, --stack N, --section-align HEX,
-            --file-align HEX, -e NAME (slice 66). Inputs are told apart by content:
-            a one-section COFF named .rsrc is a resource file (slice 68), one starting
-            with MZ is a real .dll (slice 67). -g keeps .stab/.stabstr, -gdwarf keeps the
-            dwarf sections; both append a COFF symbol table (slices 69-70)
-  elf-link  link .o files into a Linux executable (ADR-0017 cut 9 slices 53-54):
-            dynamic by default like tcc (.interp/.dynsym/.dynamic/.got), --static for
-            the plain one, --shared for a shared library (slice 59), --dll libfoo.so to
-            link against one (slice 60). --pie, --rdynamic, --soname NAME,
-            --rpath PATH, --enable-new-dtags (slice 62). No libc, so give the entry
-            with -e NAME (default main). -o NAME
-  macho-link
-            link .o files into a macOS executable (ADR-0017 cut 9 slices 55-56): segments,
-            chained fixups, export trie. -lc finds libc.tbd itself (-L DIR adds a
-            search path; slice 98), or give --dylib <sdk>/usr/lib/libc.tbd and
-            --libtcc1 libtcc1.a explicitly. --shared makes a dylib
-            (slice 63), --install-name NAME sets LC_ID_DYLIB. The output is unsigned -
-            run codesign -f -s - on it. -o NAME, -e NAME (default _main)
-  oir       print the OIR as JSON
-  mir       print the MIR (ADR-0014 decision 6): SSA values + slots + structured
-            control flow, one 8-byte record per instruction (--bytes: sizes and
-            per-function content hashes instead of the listing)
-  incr      compile function by function through the content-addressed cache
-            (ADR-0014 decision 5) and print hit/miss counts
-            (--cache DIR, default .omni-cache/incr; --list: one line per unit)
-  glr-table print the parsing table for a .grammar file (ADR-0014 decision 2)
-            (--brief: rules and remaining conflicts only, no per-state dump)
-  glr       parse a source file with a .grammar and print the resulting s-expr
-            (usage: omni glr FILE.grammar FILE...; 多个输入只建一次表)
-            (--count: one summary line per input instead of the tree)
-  bootstrap build the whole chain into a tree and check the four fixpoints
-            (no file = the compiler itself; -o DIR, default ./dist; -q skips the C path)
-
-flags:
-  -v, --verbose  trace every internal step to stderr with its wall-clock time
-                 (front end, check, backend, runtime .o cache, cc, exec)
-  -I <dir>       .jnc and .c: a directory to look in for an import / #include, tried
-                 after the importing file's own directory. Repeatable; tried in the
-                 given order. Same meaning as jancy's and tcc's own -I.
-  -D name[=body] cpp only: predefine a macro, same spelling as tcc's -D.
-
-type modes (ADR-0008) — chosen by extension, overridable with --mode:
-  .omni     mixed   omitted type is inferred from the initializer, else dynamic
-  .omnid    dynamic omitted type is always dynamic
-  .omnis    static  omitted type is inferred; implicit dynamic is an error
-
-other front ends — chosen by extension, no --mode:
-  .js       the JS subset (ADR-0011), the language the compiler itself is written in
-  .wat      WebAssembly text format, a subset (ADR-0014); see frontend-wat/lower.js
-
-a .js entry goes through the JS front end instead (ADR-0011): the import tree is
-linked into one program and lowered to OIR. That is how omni compiles itself.
-
-env:
-  OMNI_CC   C compiler to use (default: first of tcc, clang, gcc, cc)
-  OMNI_CLANG  compiler for the llvm path (.ll input; default: clang)
-  OMNI_LLVM_CONFIG  llvm-config used to locate LLVM headers/libs for run-jit
-`;
 
 try {
   setExitCode(main(procArgs()));

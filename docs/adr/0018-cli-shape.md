@@ -242,3 +242,38 @@ stage0/src/cli/cmd-{run,emit,c,tcc,link,jnc,glr}.js
 - **代价**：一次跨 48 处门的改名；`cli.js` 拆成七个文件（自举那条链要跟着验）；
   `--explain` 要求驱动先建列表再执行 —— 有几条路现在是边走边决定的（`run` 那条按缓存命中
   分叉），它们得把「要走哪条」提前算出来。那不是坏事：现在也没人能在跑之前说清它会走哪条。
+
+## 落地：分片 1 —— 命令树、每一级的 `--help`、静默别名
+
+新增两份：`stage0/src/cli/tree.js`（机制：走树、分开关、别名铺平、help 渲染，**不碰宿主**，
+能单独测）与 `stage0/src/cli/cmds.js`（数据：整棵树长什么样）。`cli.js` 里那个 `switch`
+一段没动 —— 每个叶子带一格 `key`，那就是 `switch` 认的标签，于是新名与旧名指向同一份实现。
+
+**背景那一坨 26 个 `||` 删掉了**，连同那份两百行的 `USAGE` 常量（93 行）。
+
+三处不止是搬家：
+
+1. **顺带修了一个靠运气的地方。** `--arch`/`--os`/`--format`/`--lang`/`--engine`/`--kernel`
+   从前**不在**顶层那张带值开关表里，所以 `omni c-obj --arch x86_64 x.c` 会把 `x86_64`
+   当成源文件。现有的门都是 `x.c` 写在前面，所以一直没露。
+2. **别名要铺平成规范名。** 底下那 28 段实现是自己在 `rest` 上找开关的
+   （`rest.indexOf('--format')` 那种），不认识新加的短写法 —— 量到过：`c obj -f elf`
+   出来是 Mach-O，因为那一段找不到 `--format` 就走了默认。所以 `canonicalize` 在交给
+   实现之前先把别名换掉。
+3. **节点级压过全局级。** `omni c cpp -v` 里那个 `-v` 是 **tcc 的 `-v`**（印版本条与头文件
+   搜索路径），不是 omni 的 `--verbose`——铺平之后 `tests/c/run.js` 的
+   `inc/01-include -v` 那一条直接红了。所以 `canonicalize` 先看这个节点自己声明了什么名字，
+   声明过的不动；`ownsVerbose(node)` 同理决定 `-v` 要不要点亮 `VERBOSE`。这也正是
+   决策三里「`omni c tcc` 要自己一套解析器」的同一条道理，只是它在 `cpp` 上就已经发生了。
+
+`glr` 那一组要带 `key`：`omni glr FILE.grammar FILE...` 是旧的扁平写法，而 `table`/`parse`
+都不会撞上一个 `.grammar` 路径 —— 于是「下一个记号不是子命令名」就落回组自己
+（`git stash` = `git stash push` 那个套路）。这一条是新门逮出来的。
+
+自举那条链也逮了一个：`tree.js` 里的 `pad` 与 `mir/print.js` 里的 `pad` 撞 —— JS 前端把
+import 树链成一份程序，模块作用域的名字在整份程序里必须唯一。改名 `padCell`。
+
+新门 `tests/cli/tree.js` 27/0，只查机制（走树、开关、别名、每一级 help、每个叶子都有
+`key`、`LEGACY` 那张表两栏都真的走得通），进了 `tests/all.js`。行为那一侧靠既有的门：
+`tests/run.js` 96/0、C 那一族全绿、`tcc-obj` 还是 0 字节相同 / 21 容器相同 / 89 不同。
+

@@ -20,7 +20,7 @@ const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 
 // 顺序照旧（快的在前、自举在最后）—— 有些套件会用到前面套件落下的缓存目录。
 const SUITES = [
-  'run.js', 'oracle/run.js', 'js-roundtrip/run.js', 'oir/run.js', 'js-exec/run.js',
+  'run.js', 'cli/tree.js', 'oracle/run.js', 'js-roundtrip/run.js', 'oir/run.js', 'js-exec/run.js',
   'cabi/run.js', 'wat/run.js', 'glr/run.js', 'mir/run.js', 'incr/run.js',
   'c/run.js',
   'llvm/run.js', 'sexpr/run.js', 'asy/run.js', 'jnc/run.js', 'jit/run.js',
