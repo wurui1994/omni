@@ -61,13 +61,24 @@ function check(path, stage) {
 rmSync(OUT, { recursive: true, force: true });
 mkdirSync(OUT, { recursive: true });
 
-/** 跑一趟，回毫秒（失败回 null）。 */
-function runMs(path, args) {
-  const t0 = Date.now();
-  const r = spawnSync(process.execPath, [CLI, 'run', path, ...args],
-    { encoding: 'utf8', maxBuffer: 1 << 26 });
-  if (r.status !== 0) return null;
-  return { ms: Date.now() - t0, out: r.stdout.trim() };
+/** 跑 `reps` 趟取**最小**毫秒。
+ *
+ * 为什么取最小而不是平均：噪声是**单向**的（别的进程、GC、频率调节只会让某一趟变慢，
+ * 不会让它变快），所以最小值最接近「没被打扰时的那一趟」。取平均会把噪声算进斜率 ——
+ * 第十三片那处「超线性」就是这么来的（见 ADR-0019 第十四片）。 */
+function runMs(path, args, reps = 3) {
+  let best = null;
+  let out = null;
+  for (let i = 0; i < reps; i++) {
+    const t0 = Date.now();
+    const r = spawnSync(process.execPath, [CLI, 'run', path, ...args],
+      { encoding: 'utf8', maxBuffer: 1 << 26 });
+    if (r.status !== 0) return null;
+    const ms = Date.now() - t0;
+    if (best === null || ms < best) best = ms;
+    out = r.stdout.trim();
+  }
+  return { ms: best, out };
 }
 
 /** 两趟差值：回「一帧多少毫秒」。 */
@@ -96,8 +107,14 @@ process.stdout.write('  尺寸      我们(JS)        我们(C)         真 GL\n
 for (const s of sizes) {
   const uni = { u_resolution: [s, s] };
   /* 帧数按尺寸缩：小画布多跑几帧，大画布少跑 —— 与 benchmark.py 那张
-   * 50/30/15/8/4 的表同一个道理。 */
-  const n = s <= 128 ? 8 : s <= 256 ? 3 : 1;
+   * 50/30/15/8/4 的表同一个道理。
+   *
+   * `OMNI_GLSL_N` 可以把它**钉成同一个数** —— 查「不同尺寸用了不同帧数会不会
+   * 把噪声算进斜率」时要这个（ADR-0019 待办里那处超线性）。 */
+  const fixed = Number(process.env.OMNI_GLSL_N ?? '0');
+  /* 帧数要让**净时间远大于固定开销的抖动**（进程启动几十毫秒，而 128² 一帧才十几毫秒）——
+   * 第十三片那一版 128² 用 N=8 就不够，量出来的斜率是噪声。现在小画布跑得多得多。 */
+  const n = fixed > 0 ? fixed : (s <= 128 ? 24 : s <= 256 ? 8 : 2);
   const js = frameMs(fm, s, s, uni, [], n);
   const c = frameMs(fm, s, s, uni, ['--backend', 'c'], n);
 
