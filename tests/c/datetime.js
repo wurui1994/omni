@@ -102,16 +102,9 @@ if (ref.status !== 0) {
     ok(`时间与 tcc 差 ${drift} 秒（两次进程启动之间的间隔，容差 5 秒）`);
   }
 
-  /* 把时间那一串抹成占位符，剩下的必须逐字节相同。序幕要削：tcc 的预定义是一份叫
-   * `<command line>` 的源码，进出主文件都印行标，我们的预定义是三张表 —— 与
-   * `tests/c/run.js` 的 `dropPrologue` 同一套削法，两边都停在「主文件第 1 行」上。 */
-  const dropPrologue = (s) => {
-    const ls = s.split('\n');
-    let last = -1;
-    for (let i = 0; i < ls.length; i++) if (ls[i].includes('"<command line>"')) last = i;
-    return ls.slice(last + 2).join('\n');
-  };
-  const mask = (t) => dropPrologue(t).replace(TIME_G, 'HH:MM:SS');
+  /* 把时间那一串抹成占位符，剩下的必须逐字节相同 —— 从**第一个字节**起。
+   * （第一百〇七片起 `<command line>` 那一层我们也开着，序幕不必再削。） */
+  const mask = (t) => t.replace(TIME_G, 'HH:MM:SS');
   if (mask(mine.stdout) !== mask(ref.stdout)) {
     bad('抹掉时间之后整份输出与 tcc 逐字节相同',
       `    tcc :\n${mask(ref.stdout).trimEnd().split('\n').map((l) => `      ${l}`).join('\n')}\n`

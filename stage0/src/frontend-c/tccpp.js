@@ -2235,7 +2235,7 @@ export class Cpp {
       this.Pflag = 1;
     }
     this.tokFlags = TOK_FLAG_BOL | TOK_FLAG_BOF;
-    this.pushCmdlineIncls();
+    this.pushCmdlineFile();
 
     let out = this.takeTrace();
     /* `-dD`/`-dM` 下预定义与命令行上的 `-D` 也要印出来。tcc 那边是把它们当成一份
@@ -2317,7 +2317,7 @@ export class Cpp {
     this.file.ifdefBase = 0;
     this.parseFlags = PF_PREPROCESS | PF_TOK_NUM | PF_TOK_STR;
     this.tokFlags = TOK_FLAG_BOL | TOK_FLAG_BOF;
-    this.pushCmdlineIncls();
+    this.pushCmdlineFile();
   }
 
   /** 命令行上的 `-D name[=body]`（tcc 的 `tcc_define_symbol`） */  define(name, body) {
@@ -2334,15 +2334,18 @@ export class Cpp {
   }
 
   /**
-   * `-include 文件`（tcc 的 `cmdline_incl`，libtcc.c:2019）：`#include "文件"` 那几行
-   * 压在主文件**上面**成为一个真的 include 层 —— tcc 那边 `<command line>` 一直是这么
-   * 一层（预定义、`-D`、`-include` 都在里头，读完了才回到主文件）。
+   * `<command line>` 那一层（tcc 的 `preprocess_start`，`tccpp.c:3653-3666`）。
+   *
+   * tcc 把**预定义 + `-D`/`-U` + `-include`** 拼成一份源码，压在主文件上面开出来
+   * ——「命令行」在 tcc 那儿是一个真的 include 层，读完了才回到主文件。我们的预定义与
+   * `-D` 是直接进宏表的（见 `installPredefs`/`define`），可这一层的**存在**是能观察到的：
+   * `-E` 的行标里它占两行（`# 1 "<command line>" 1` 与回到主文件的 ` 2`）。
+   * 所以这一层照旧开 —— 里头只放 `-include` 那几行，可能是空的（第一百〇七片）。
    *
    * 于是 `"..."` 那一格（下标 1）算的是 `<command line>` 的目录 = 当前工作目录，
    * 再往后才是 `-I`。找不到就报错，与 `#include` 同一句话。
    */
-  pushCmdlineIncls() {
-    if (this.cmdlineIncls.length === 0) return;
+  pushCmdlineFile() {
     const src = this.cmdlineIncls.map((n) => `#include "${n}"\n`).join('');
     this.includeStack.push(this.file);
     const f = new CFile('<command line>', src, this.file);

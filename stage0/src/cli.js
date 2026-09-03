@@ -381,8 +381,10 @@ function cObj(path, out, arch, incs, defs, fmt, os) {
   /* 两个写出器同一份入参（第三十八片）：Mach-O 那个喂 clang 那条「真的能跑」的腿，
    * ELF 那个喂 tcc 那条「字节相同」的腿 —— tcc 的 `-c` 在**所有**目标上都写 ELF。 */
   const write = fmt === 'elf'
+    /* STT_FILE 那一条印的是**命令行上给的那一串**（第一百〇七片量的：`tcc -c s.c` 写
+     * `s.c`、`tcc -c ./s.c` 写 `./s.c`、给绝对路径就写绝对路径）—— 不是基名。 */
     ? (t, d, ds, rs, a, al) => writeElfObject(t, d, ds, rs, a, al,
-      { file: basename(path), prefix: os === 'linux' ? '' : '_' })
+      { file: path, prefix: os === 'linux' ? '' : '_' })
     : writeObject;
   writeBinary(out, write(blob.bytes, blob.data,
     [...syms, ...blob.dataSyms], [...blob.relocs, ...blob.dataRelocs], arch, blob.dataAlign));

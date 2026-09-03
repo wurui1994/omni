@@ -772,6 +772,15 @@ Mach-O 那边**不写** —— tcc 自己的 `tccmacho.c` 根本不消费可见�
 `-fvisibility=` 这个命令行开关 tcc 没有（量过：整个 tinycc 里只有属性那一处），
 所以那一格不是账。至此那条「`-fvisibility`、`weak`、别名都还没有一格」的欠账清了。
 
+**`-E` 从第一个字节起就一样了**（第一百〇七片）：以前门里有一段「削序幕」的削法 ——
+tcc 的预定义是一份叫 `<command line>` 的**源码**（`tccpp.c:3653-3666`：预定义 + `-D` +
+`-include` 拼成一个缓冲，压在主文件上面开出来），进出主文件各印一行行标，而我们的预定义
+是三张宏表、没有这一层。现在这一层照旧开着（里头只放 `-include` 那几行，常常是空的）——
+`# 1 "x.c"` / `# 1 "<command line>" 1` / `# 1 "x.c" 2` 三行自然长出来，`-E` 与 `-P1`
+两个模式的 `strip` 都撤了，207 条从第一个字节起逐字节比。顺手清掉另一处同类的账：
+ELF 的 STT_FILE 那一条印的是**命令行上给的那一串**（量出来的：`tcc -c s.c` 写 `s.c`、
+`-c ./s.c` 写 `./s.c`、给绝对路径就写绝对路径），我们从前写基名。
+
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
 地址交给真的 libc（`strlen`/`memcpy`）验过。C 前端现在还把 `&x` 降到影子栈上，
@@ -13306,6 +13315,53 @@ tcc 的 `merge_symattr`（`tccgen.c:1182-1187`）落到的规则就是「非 0 �
 （`visibility("default|hidden|internal|protected") expected`，同一行同一句）。
 
 <!-- 第九刀第一百〇六片-END -->
+
+## 落地：第九刀第一百〇七片
+
+`-E` 的门里一直有一段道歉：削序幕。tcc 的输出开头是三行
+
+```
+# 1 "x.c"
+# 1 "<command line>" 1
+# 1 "x.c" 2
+```
+
+我们只有第一行，所以两边都从「主文件第 1 行」往后比 —— 也就是说**头几十个字节从来没有
+称过**。这不是格式差异，是结构差异：`tccpp.c:3653-3666` 把预定义、`-D`/`-U`、`-include`
+拼成一份源码，`tcc_open_bf(s1, "<command line>", …)` 压在主文件上面开出来，于是「命令行」
+在 tcc 那儿是一个**真的 include 层**，读完了才回到主文件。我们的预定义是三张宏表，
+`-D` 是 `define()`，这一层从来没建。
+
+### 一行都不用改行标的逻辑
+
+有意思的是我们的行标逻辑早就照 tcc 抄好了（`tcc_preprocess` 的 `if (file->prev)
+pp_line(file->prev, level++)`，以及循环里按 `include_stack_ptr` 的差值印 1/2 那一段）——
+缺的只是那一层的**存在**。所以这一片改的是一件事：`pushCmdlineIncls` 从「有 `-include`
+才压一层」变成 `pushCmdlineFile`：**总是**压一层，里头是 `-include` 那几行，常常是空的。
+空的层立刻 EOF、弹回主文件，于是那三行自然长出来。
+
+### 门收紧
+
+`tests/c/run.js` 的 `-E` 与 `-P1` 两个模式的 `strip` 撤了，`dropPrologue` 删了 ——
+207 条现在从**第一个字节**起逐字节比（`-P1` 的 `#line` 那一路同理）。
+`tests/c/datetime.js` 里那份同样的削法也跟着删。
+
+### 顺手：STT_FILE 印的是命令行上那一串
+
+同一类账还有一处，是写 vis-sym 那个门时露出来的：ELF 符号表第一条 STT_FILE，tcc 写的是
+**命令行上给的那一串**，不是基名。量了三遍：
+
+```
+tcc -c s.c        -> "s.c"
+tcc -c ./s.c      -> "./s.c"
+tcc -c /tmp/x/s.c -> "/tmp/x/s.c"
+```
+
+`cli.js` 里那一格于是从 `basename(path)` 改成 `path`。`vis-sym.js` 不必再把 STT_FILE
+那一条滤掉。`tcc-obj.js` 的账不变（0 字节相同 / 6 容器相同 / 104 不同）—— 那 104 份差在
+码本身，等 B 路；`selfboot` 的定点也不动（597104 字节）。
+
+<!-- 第九刀第一百〇七片-END -->
 
 
 

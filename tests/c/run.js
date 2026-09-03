@@ -112,25 +112,18 @@ if (!hasTcc) {
  * `cpp/`、`inc/` 两组的走法。`args` 是给 tcc 的，`pflag`/`dflag` 是给我们的
  * （`Pflag`：0 = `# 行号 "文件"`、1 = `-P` 什么都不印、2 = `-P1` 的 `#line`）。
  *
- * `strip`：带行标比的时候要削掉序幕。tcc 的预定义是一份叫 `<command line>` 的**源码**，
- * 它进出主文件都会印行标；我们的预定义是三张表，没有这一段。所以把 tcc 那边
- * 「最后一行提到 `<command line>` 的 + 紧跟着回到主文件那一行」以上全丢掉，
- * 我们那边丢掉开头那一行 —— 两边都停在「主文件第 1 行」上，往后逐字节比。
+ * `strip`：第一百〇七片之前带行标比要削掉序幕 —— tcc 的预定义是一份叫 `<command line>`
+ * 的**源码**，它进出主文件都印行标，而我们的预定义是三张表、没有这一段。现在这一层
+ * 照旧开着（里头可能是空的，见 `pushCmdlineFile`），于是**从第一个字节起**就能比，
+ * 两个 `strip` 都撤了。
  */
 const PP_MODES = {
   '': { args: ['-P'], pflag: 1, dflag: 0 },
   '-dD': { args: ['-P', '-dD'], pflag: 1, dflag: 3 },
   '-dM': { args: ['-P', '-dM'], pflag: 1, dflag: 7 },
-  '-E': { args: [], pflag: 0, dflag: 0, strip: true },
-  '-P1': { args: ['-P1'], pflag: 2, dflag: 0, strip: true },
+  '-E': { args: [], pflag: 0, dflag: 0 },
+  '-P1': { args: ['-P1'], pflag: 2, dflag: 0 },
   '-P10': { args: ['-P10'], pflag: 11, dflag: 0, lenient: true },
-};
-
-const dropPrologue = (s) => {
-  const ls = s.split('\n');
-  let last = -1;
-  for (let i = 0; i < ls.length; i++) if (ls[i].includes('"<command line>"')) last = i;
-  return ls.slice(last + 2).join('\n');
 };
 
 /** 一份文件：我们的输出必须与 tcc 的逐字节相同 */
@@ -144,10 +137,6 @@ function compare(group, file, incDirs, mode = '') {
   const m = PP_MODES[mode];
   const want = oracle(path, incDirs, m.args);
   const got = ours(path, incDirs, m.dflag, m.pflag);
-  if (want.err === undefined && m.strip === true) {
-    want.out = dropPrologue(want.out);
-    if (got.out !== undefined) got.out = got.out.split('\n').slice(1).join('\n');
-  }
   if (want.err !== undefined) {
     /* `-P10` 把每个 pp-number 都当真数字解一遍，于是「合法的 pp-number 但不是合法的
      * C 数字」（`1e`、`0x1p`）tcc 自己就拒 —— 那不是我们的错，记 skip。 */

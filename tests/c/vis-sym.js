@@ -76,9 +76,6 @@ function elfSyms(path) {
     let n = '';
     for (let q = str + d.getUint32(s, true); b[q] !== 0; q++) n += String.fromCharCode(b[q]);
     if (n === '') continue;
-    /* STT_FILE 那一条不算：它印的是源文件名，tcc 写命令行上给的那一串、我们写基名 ——
-     * 与可见性无关的一格账（两边都编同一份文件时不成问题，这个门用的是绝对路径）。 */
-    if (d.getUint8(s + 4) === 4) continue;
     out.push(`${n} info=${d.getUint8(s + 4)} other=${d.getUint8(s + 5)}`);
   }
   return out.sort().join('\n');
