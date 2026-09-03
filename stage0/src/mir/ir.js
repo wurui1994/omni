@@ -822,6 +822,11 @@ export class MirModule {
      * 时候**造的，节的次序就是造出来的次序，所以「第一条数据重定位比第一个函数早还是
      * 晚」决定了 `.rela.data` 排在 `.rela.text`/`.pdata` 的前面还是后面。 */
     this.globalAfter = [];
+    /* 与 globals 同下标的「这一块是**只读**的吗」（第九刀第一百二十二片）：`const` 的
+     * 全局量。tcc 在 `tccgen.c:8403-8413` 上按类型定：把数组那几层剥掉之后带
+     * `VT_CONSTANT` 就摆进只读那一节（osx/linux 的 `.data.ro`、PE 的 `.rdata`）。
+     * 与 `globalLocal` 同一种性质：标注，不是语义 —— 只有写目标文件那一步看它。 */
+    this.globalRo = [];
     /* 别名（第九刀第一百〇五片，`__attribute__((alias("目标")))`）：一个名字与目标
      * **同址**，符号表里两条、代码一份。`{name, kind:'f'|'g', no, weak}` —— `no` 是目标
      * 的函数号或全局号。同样是标注：写目标文件那一步照目标的落点再发一条符号。 */
@@ -935,6 +940,12 @@ export class MirModule {
   markGlobalVis(no, vis) {
     if (this.globals[no] === undefined) throw new Error(`mir: 没有 ${no} 号模块级变量`);
     this.globalVis[no] = vis;
+  }
+
+  /** 这个全局是只读的（`const`）。见 `globalRo` 头上那段。 */
+  markGlobalRo(no) {
+    if (this.globals[no] === undefined) throw new Error(`mir: 没有 ${no} 号模块级变量`);
+    this.globalRo[no] = true;
   }
 
   /**

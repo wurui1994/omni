@@ -356,12 +356,13 @@ function ehFrameX64(funcs) {
  * @param arch  `'arm64'` 或 `'x86_64'`
  * @param dataAlign 这一格 ELF 用不上（tcc 的 `.data` 一律 `sh_addralign = 8`），
  *              留着是为了与 Mach-O 那个写出器同签名
- * @param opts  `{file, prefix, rdata, unwind, seq}`：`file` 是写进 STT_FILE 那一条的
+ * @param opts  `{file, prefix, rdata, rodata, unwind, seq}`：`file` 是写进 STT_FILE 那一条的
  *              源文件名；`prefix` 是符号名前缀 —— **只有 osx 是 `'_'`**，linux 与 win32
  *              都是 `''`（`libtcc.c:895-898`：`leading_underscore` 只在 MACHO 上开）；
- *              `rdata` 是只读数据那一节的名字；`unwind` 是 win32 x86_64 的展开表
+ *              `rdata` 是只读数据那一节的名字，`rodata` 是它的字节（第一百二十二片）；
+ *              `unwind` 是 win32 x86_64 的展开表
  *              `{offs, funcs: [{start, end}]}`（第一百一十七片）；`seq` 是
- *              `{text, data, pdata}` 三节**造出来的次序**上的位置（第一百一十八片）
+ *              `{text, data, rodata, pdata}` 几节**造出来的次序**上的位置（第一百一十八片）
  */
 export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
   const archName = arch === undefined ? 'arm64' : arch;
@@ -385,6 +386,11 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
   /* 数据字节要能改 —— 原地躺着的加数得搬到 `r_addend` 那一格去，原地清零。 */
   const dataBytes = new Uint8Array(data === undefined ? 0 : data.length);
   if (data !== undefined) dataBytes.set(data);
+  /* 只读那一节的字节（第一百二十二片）：`const` 的全局量落在这儿，哪怕初值要重定位
+   * （`tccgen.c:8397-8413`：剥掉 `VT_PTR|VT_ARRAY` 之后看 `VT_CONSTANT`）。
+   * 与 `.data` 同一个待遇 —— 原地的加数也要搬到 `r_addend` 去，所以这一份也得能改。 */
+  const roBytes = new Uint8Array(o.rodata === undefined ? 0 : o.rodata.length);
+  if (o.rodata !== undefined) roBytes.set(o.rodata);
 
   const strs = new StrTab();
   const strx = strs.intern(o.file === undefined ? 'a.c' : o.file);
@@ -412,8 +418,10 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
       const type = k.type === null ? cpu.ptr64 : k.type;
       let add = -k.pcSub;
       if (k.inPlace === 8) {
-        if (sect !== 2) throw new OmniError(`elf: ${r.kind} 只能落在数据节里`);
-        const dv = new DataView(dataBytes.buffer, r.at, 8);
+        /* 原地的加数在哪一段里就从那一段捞（第一百二十二片：只读那一节也会有）。 */
+        const host = sect === 2 ? dataBytes : sect === 3 ? roBytes : null;
+        if (host === null) throw new OmniError(`elf: ${r.kind} 只能落在数据节里`);
+        const dv = new DataView(host.buffer, r.at, 8);
         add = dv.getBigInt64(0, true);
         dv.setBigInt64(0, 0n, true);
       }
@@ -422,6 +430,7 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
   };
   const raText = relaOf(1);
   const raData = relaOf(2);
+  const raRo = relaOf(3);
 
   /* `.pdata` 的字节与它那张重定位表。一条 `RUNTIME_FUNCTION` 是三个 DWORD
    * （`BeginAddress`/`EndAddress`/`UnwindData`），三个都挂一条指着 `.uw_base`
@@ -461,7 +470,7 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
   };
   sec('.text', SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, text.length, 0, 0, 8, 0);
   sec('.data', SHT_PROGBITS, SHF_ALLOC | SHF_WRITE, dataBytes.length, 0, 0, 8, 0);
-  sec(rdata, SHT_PROGBITS, SHF_ALLOC, 0, 0, 0, 8, 0);
+  sec(rdata, SHT_PROGBITS, SHF_ALLOC, roBytes.length, 0, 0, 8, 0);
   sec('.bss', SHT_NOBITS, SHF_ALLOC | SHF_WRITE, 0, 0, 0, 8, 0);
   const symtabNo = secs.length;
   sec('.symtab', SHT_SYMTAB, 0, syms.length * SYM_SIZE, symtabNo + 1, nlocal + 1, 8, SYM_SIZE);
@@ -509,6 +518,15 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
       add: () => sec('.rela.data', SHT_RELA, 0, raData.length * RELA_SIZE, symtabNo, 2, 8, RELA_SIZE),
     });
   }
+  /* 只读那一节也会有重定位（第一百二十二片）：`const char *cp = "cst"` 的初值要一条
+   * POINTER64，而 `const` 的东西哪怕初值要重定位也照样进只读节 —— 于是多一张
+   * `.rela.data.ro`（PE 上是 `.rela.rdata`），落点还是那把「第几个函数」的尺子。 */
+  if (raRo.length > 0) {
+    later.push({
+      pos: seq.rodata ?? 2,
+      add: () => sec(`.rela${rdata}`, SHT_RELA, 0, raRo.length * RELA_SIZE, symtabNo, 3, 8, RELA_SIZE),
+    });
+  }
   later.sort((a, b) => a.pos - b.pos);
   for (const x of later) x.add();
   sec('.shstrtab', SHT_STRTAB, 0, 0, 0, 0, 1, 0);
@@ -534,6 +552,8 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
   const bodyOf = (name) => {
     if (name === '.text') return text;
     if (name === '.data') return dataBytes;
+    if (name === rdata) return roBytes;
+    if (name === `.rela${rdata}`) return relaBuf(raRo);
     if (name === '.symtab') return symBuf.out();
     if (name === '.strtab') return strBytes;
     if (name === '.rela.text') return relaBuf(raText);

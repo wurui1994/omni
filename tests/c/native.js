@@ -509,8 +509,8 @@ try {
     }
     const objPath = join(dir, `probe-${leg.arch}.o`);
     writeFileSync(objPath, writeObject(blob.bytes, blob.data,
-      [...defs, ...blob.dataSyms], [...blob.relocs, ...blob.dataRelocs],
-      leg.arch, blob.dataAlign));
+      [...defs, ...blob.dataSyms], [...blob.relocs, ...blob.dataRelocs, ...blob.roRelocs],
+      leg.arch, blob.dataAlign, { rodata: blob.rodata }));
     const progPath = join(dir, `prog-${leg.arch}`);
     execFileSync(CLANG, [...leg.cc, mainPath, objPath, '-o', progPath], { stdio: 'pipe' });
     const out = execFileSync(progPath, [], { encoding: 'utf8' }).trim().split('\n');

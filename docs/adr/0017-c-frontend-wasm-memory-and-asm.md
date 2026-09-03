@@ -889,6 +889,15 @@ CIE 24 字节、每个函数一条 36 字节的 FDE、收尾四个零字节；�
 **那条下划线只有 osx 加**（第一百二十一片改对）：`libtcc.c:895-898` 里 PE 那一支是
 注释掉的，所以 win32 的符号名与 linux 一样是**光的**；我们自己的 PE 链接器一直知道
 这一格，是写 `.o` 那一头记错了。改完 `sym-size` 那门从 4/0 变 6/0。
+**只读的全局量落进 3 号节**（第一百二十二片）：`tccgen.c:8401-8403` 只剥**数组**那几层，
+剥完剩下的类型带 `const` 就进 `.data.ro`（PE 上是 `.rdata`）—— 于是
+`const char s[]`、`const int ci` 进只读节，`const char *const cq` 也进（它是**只读的
+指针**，哪怕初值要一条重定位，于是多一张 `.rela.data.ro`），而 `const char *cp` 不进。
+为这一条，指针自己的 `const`/`volatile` 从「吃掉」改成记在那一层指针的类型上 ——
+从前确实没有可观察的效果，现在有了。门 `tests/c/rodata-sec.js` 27/0（三个目标 × 三个
+探针 × 三问：节号、只读节里那几样的字节、`.rela.<只读节>` 有没有与排在第几），
+`tcc-obj.js` 的「容器相同」从 6 走到 12。Mach-O 那个写出器只有两节，只读那一段折进
+`__data` 的尾巴（`foldRo`）—— `__DATA,__const` 是笔欠账。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -14258,6 +14267,92 @@ const char *const cp = "cst";` 量 x86_64-linux 的尺子：
 它现在只写 `__text` 与 `__data` 两节，而 clang 那条「真的能跑」的腿正压在它上面。
 
 <!-- 第九刀第一百二十一片-END -->
+
+## 落地：第九刀第一百二十二片
+
+上一片量下的尺子里有五样，这一片摆进去**三样半**：`const` 的全局量。串常量那两样
+（`L.3`/`L.4`）留给下一片 —— 它要的是 tcc 那个匿名符号计数器，是另一件事。
+
+### 谁算只读的：只剥数组
+
+`tccgen.c:8401-8403`
+
+```c
+while ((tp->t & (VT_BTYPE|VT_ARRAY)) == (VT_PTR|VT_ARRAY))
+    tp = &tp->ref->type;
+is_const = tp->t & VT_CONSTANT;
+```
+
+那个 while 的条件是 `VT_PTR|VT_ARRAY` —— 在 tcc 里数组就是「带 `VT_ARRAY` 的指针」，
+所以这一圈**只剥数组**，剥到第一个不是数组的类型就停下，看它的 `VT_CONSTANT`。
+量过的四种（x86_64-linux）：
+
+* `const char s[] = "hi"` → 剥掉数组剩 `const char` → 只读节
+* `const int ci = 7` → 只读节
+* `const char *const cq = "q"` → 不是数组，直接看：这一层**指针**带 const → 只读节
+* `const char *cp = "cst"` → 不是数组，这一层指针**不**带 const（const 在被指的
+  `char` 上）→ `.data`
+
+第三条与第四条只差一个 `const` 的位置，落点却不同一节 —— 这正是「读的是**这个对象**
+能不能改」，而不是「这行里有没有 const」。
+
+### 于是指针自己的限定词不能再吃掉了
+
+`declaratorParts` 里那一段从前把 `*` 后面的 `const`/`volatile`/`__restrict` 一律吃掉，
+注释还写着「这一片没有可观察的效果」。从第一百一十六片起那句话就不成立了：
+`const char *const cq` 与 `const char *cp` 全靠这一位分家。这一片把 `const` 与
+`volatile` 记在**那一层指针**的类型上（`preQ[i]`，一颗 `*` 一格），`__restrict` 与
+`_Atomic` 照旧吃掉 —— 它们真的还没有可观察的效果。
+
+改完跑一遍怕它溢出去的那几处（`compareTypes` 有 `unqualified` 这一格、
+指针算术那两条合并限定词的路）：`run.js` 207/0、`native.js` 227/0、
+`elf-exe`/`macho-exe`/`pe-content` 一个字节没动。
+
+### 字节走的路
+
+前端 `isRoType` → `mod.markGlobalRo(no)` → 两个后端的全局那一圈按这一位分两段
+（`dataBytes` / `roBytes`，各自从 0 数偏移，符号带 `sect: 2` 或 `3`，重定位分两张表）
+→ ELF 写出器 `opts.rodata` 摆进 3 号节、`raRo` 出一张 `.rela<只读节名>`。
+
+两处细节：
+
+* **原地的加数**要从只读那一段里捞（`relaOf` 从前只认 `.data`）—— `cq` 的那八个字节
+  躺着的是加数，搬到 `r_addend` 去、原地清零，与 `.data` 同一个待遇。
+* **`.rela.data.ro` 的位置**还是「造出来的次序」那条规矩（第一百一十八片）：只读那一段里
+  第一条重定位落在第几个函数之前。与 `.rela.data` 撞在同一格时只读那一节的号大、排后面
+  （`relaSeq` 里那个 `+ 0.01`）。量过的三个目标都对上了。
+
+Mach-O 那个写出器只有 `__text`/`__data` 两节，所以只读那一段**折进 `__data` 的尾巴**
+（`foldRo`：按 `dataAlign` 对齐之后接上去，`sect: 3` 的符号与重定位跟着挪）。
+真正的 `__DATA,__const` 是笔欠账，可 clang 那条「真的能跑」的腿压在这个写出器上，
+折过来至少不掉字节 —— `native.js` 227/0 是它的凭据。
+
+### 门
+
+`tests/c/rodata-sec.js` 27/0 —— 三个目标（x86_64-linux / x86_64-win32 / arm64-osx）
+× 三个探针（常量与可写混着摆、只读的指针、一个 const 也没有）× 三问：
+
+* 那几个名字各在第几节（尺子怎么说就怎么算，节号不写死）
+* 只读节里**那几样的字节**（位置各家自己排 —— 我们还没摆串常量，所以比的是
+  「这个符号那一段的内容」）
+* `.rela<只读节名>` 有没有、在 7 号往后那一段的第几位
+
+门里踩过一格值得记：第一版查符号表用的是光名字，arm64-osx 上两边都查不到（那边有
+`_` 前缀），于是三条「节号」比的是 `undefined:undefined` —— **假绿**。现在查不到就当场报。
+
+`tcc-obj.js` 的「容器相同」从 6 走到 12。回归：`native` 227/0、`run` 207/0、
+`selfobj` 25/0、`tcc-link` 83/0、`elf-merge` 451、`pe-exe` 352、`elf-roundtrip` 268、
+`rela-order` 6/0、`sym-size` 6/0、`eh-frame-x64` 8/0、`pdata-x64` 11/0。
+
+### 下一片：串常量进只读节，名字叫 `L.N`
+
+上一片的尺子里剩下的那两样。量过的形态（x86_64-linux）：`L.3`/`L.4` 是**有名字的局部**
+符号（STT_OBJECT、`shndx = 3`、`st_size` 是带 `\0` 的长度）、1 对齐、紧挨着摆。
+难的不是摆字节，是那个 `N`：它是 tcc 的匿名符号计数器（`anon_sym`）走到那儿的值，
+所以要先把「这个计数器在哪几处 ++」量清楚 —— 它同时给匿名 struct、静态块、
+串常量发号，编号对不上则一个字节也对不上。
+
+<!-- 第九刀第一百二十二片-END -->
 
 
 

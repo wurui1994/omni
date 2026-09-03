@@ -6015,22 +6015,36 @@ export class CGen {  /**
     /* 声明符**前面**也能挂 attribute（`__attribute__((…)) *p`），系统头里有。 */
     this.parseAttrs(ad);
     let pre = 0;
+    /** 每一颗 `*` 自己带的限定词（`char * const p`）—— 与 `pre` 一一对应。 */
+    const preQ = [];
     while (this.tok === STAR) {
       this.next();
-      /* 指针自己的限定词（`char * const p`、`char * __restrict p`）：吃掉，
-       * 这一片没有可观察的效果。系统头里 `__restrict` 几乎每个 `char *` 后面都有。 */
+      /* 指针自己的限定词（`char * const p`、`char * __restrict p`）：`const` 与
+       * `volatile` 记在**这一层指针**的类型上（tcc 那边就是 `type.t |= quals`，
+       * `tccgen.c` 的 `parse_btype`/`type_decl` 一路带着），`__restrict` 与
+       * `_Atomic` 这一片还是吃掉。
+       *
+       * 从前这几个字全吃掉 —— 那时确实没有可观察的效果，可第一百二十二片起有了：
+       * `const char *const cq` 是一个**只读的指针**，tcc 把它摆进 `.data.ro`
+       * （`tccgen.c:8401-8403` 剥掉数组之后看的就是这一位）。 */
+      let q = 0;
       for (;;) {
-        const q = this.tok;
-        if (q === TOK_CONST || q === TOK_CONST1 || q === TOK_CONST2
-            || q === TOK_VOLATILE || q === TOK_VOLATILE1 || q === TOK_VOLATILE2
-            || q === TOK_RESTRICT || q === TOK_RESTRICT1 || q === TOK_RESTRICT2
-            || q === TOK_ATOMIC) {
+        const t2 = this.tok;
+        if (t2 === TOK_CONST || t2 === TOK_CONST1 || t2 === TOK_CONST2) {
+          q = q | VT_CONSTANT; this.next(); continue;
+        }
+        if (t2 === TOK_VOLATILE || t2 === TOK_VOLATILE1 || t2 === TOK_VOLATILE2) {
+          q = q | VT_VOLATILE; this.next(); continue;
+        }
+        if (t2 === TOK_RESTRICT || t2 === TOK_RESTRICT1 || t2 === TOK_RESTRICT2
+            || t2 === TOK_ATOMIC) {
           this.next();
           continue;
         }
-        if (q === TOK_ATTRIBUTE1 || q === TOK_ATTRIBUTE2) { this.parseAttrs(ad); continue; }
+        if (t2 === TOK_ATTRIBUTE1 || t2 === TOK_ATTRIBUTE2) { this.parseAttrs(ad); continue; }
         break;
       }
+      preQ.push(q);
       pre++;
     }
 
@@ -6097,7 +6111,11 @@ export class CGen {  /**
 
     const wrap = (base) => {
       let ty = base;
-      for (let i = 0; i < pre; i++) ty = mkPointer(ty);
+      for (let i = 0; i < pre; i++) {
+        ty = mkPointer(ty);
+        /* 这一层指针自己的 `const`/`volatile`（第一百二十二片）。 */
+        if (preQ[i] !== 0) ty = ctype(ty.t | preQ[i], ty.ref);
+      }
       for (let i = posts.length - 1; i >= 0; i--) {
         const p = posts[i];
         if (p.k === 'fn') {
@@ -7676,6 +7694,20 @@ export function lowerC(path, text, host, defs, args) {
  *          dirname?: (p: string) => string, join?: (a: string, b: string) => string}} host
  * @param {{name: string, body?: string}[]} [defs] 命令行上的 `-D`
  */
+/**
+ * 这一块该摆进**只读**那一节吗（第九刀第一百二十二片）。
+ *
+ * 照 `tccgen.c:8401-8403`：把数组那几层剥掉（tcc 那边是
+ * `while ((tp->t & (VT_BTYPE|VT_ARRAY)) == (VT_PTR|VT_ARRAY)) tp = &tp->ref->type;`），
+ * 剩下的类型带 `VT_CONSTANT` 就算。于是 `const char s[]` 算、`const char *const cp` 也算
+ * （它是「只读的指针」，哪怕初值里还有一条要链接器填的地址），而 `char *p` 不算。
+ */
+function isRoType(ty) {
+  let t = ty;
+  while (isArray(t.t) && t.ref !== undefined) t = t.ref;
+  return (t.t & VT_CONSTANT) !== 0;
+}
+
 export function lowerCNative(path, text, host, defs) {
   /* `long double` 的宽度按目标拨（第一百一十一片）：x86_64 是 16 字节的 x87 80 位，
    * arm64-macho 与 PE 是 8。它是 ctype.js 里一格模块级状态（tcc 那边是编译期常量），
@@ -7747,6 +7779,10 @@ export function lowerCNative(path, text, host, defs) {
     if (e.isStatic === true) mod.markGlobalLocal(no);
     if (e.weak === true) mod.markGlobalWeak(no);
     if (e.vis !== undefined && e.vis !== 0) mod.markGlobalVis(no, e.vis);
+    /* 只读的那些进只读那一节（第一百二十二片）：`tccgen.c:8401-8413` 那条规矩 ——
+     * 把数组那几层剥掉，剩下的带 `const` 就算。所以 `const char s[]` 算、
+     * `const char *const cp` 算（哪怕它的初值还要一条重定位），`char *p` 不算。 */
+    if (isRoType(e.ty)) mod.markGlobalRo(no);
     mod.setGlobalData(no, size, al, bytes, fixups);
   }
   /* 匿名的静态块（第三十四片）：静态的复合字面量。与有名字的那些一模一样地切 ——

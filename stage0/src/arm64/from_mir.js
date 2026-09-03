@@ -1108,7 +1108,11 @@ export function genModule(mod) {
    * 对齐最多到 4096（第二十九片：`__data` 那一节的对齐字段现在按内容算，
    * 不再是写死的 8）—— 上界取一页，再往上就该问「你到底在摆什么」了。 */
   let dataAlign = 8;
-  /* 别名要照目标的落点发符号（第一百〇五片），所以边排边记每个全局的起点。 */
+  /* 只读的那些摆进第三节（第一百二十二片，与 x64 那一份同一条）：`const` 的全局量
+   * 在 tcc 那边落在 `.data.ro`。两段字节各自从 0 数偏移，符号与重定位按 `sect` 分。 */
+  const roBytes = [];
+  const roRelocs = [];
+  /* 别名要照目标的落点发符号（第一百〇五片），所以边排边记每个全局的起点与它在哪一段。 */
   const gBase = new Map();
   for (let gi = 0; gi < mod.globals.length; gi++) {
     const blob = mod.globalBlob[gi];
@@ -1119,13 +1123,17 @@ export function genModule(mod) {
     const al = blob === null ? 8 : blob.align;
     if (al > 4096) nyi(`全局 '${mod.globals[gi]}' 要 ${al} 字节对齐（__data 这一节最多 4096）`);
     if (al > dataAlign) dataAlign = al;
-    while (dataBytes.length % al !== 0) dataBytes.push(0);
-    const base = dataBytes.length;
-    gBase.set(gi, base);
+    const ro = mod.globalRo[gi] === true;
+    const bytes = ro ? roBytes : dataBytes;
+    const rel = ro ? roRelocs : dataRelocs;
+    const sect = ro ? 3 : 2;
+    while (bytes.length % al !== 0) bytes.push(0);
+    const base = bytes.length;
+    gBase.set(gi, { base, sect });
     dataSyms.push({
       name: mod.globals[gi],
       off: base,
-      sect: 2,
+      sect,
       /* `st_size`（第一百二十片，与 x64 那一份同一条）：这一块有多少字节。 */
       size,
       local: mod.globalLocal[gi] === true,
@@ -1134,16 +1142,16 @@ export function genModule(mod) {
     });
     for (let k = 0; k < size; k++) {
       const b = blob === null ? 0 : blob.bytes[k];
-      dataBytes.push(b === undefined ? 0 : b);
+      bytes.push(b === undefined ? 0 : b);
     }
     for (const fx of blob === null ? [] : blob.fixups ?? []) {
       /* `after`（第一百一十八片，与 x64 那一份同一条）：这一条数据重定位是在第几个
        * 函数之前落的 —— `.rela.data` 那一节的造出来的次序全靠它。 */
-      dataRelocs.push({
+      rel.push({
         at: base + fx.off,
         kind: 'POINTER64',
         sym: fixSym(fx),
-        sect: 2,
+        sect,
         after: mod.globalAfter[gi] ?? 0,
       });
     }
@@ -1151,9 +1159,11 @@ export function genModule(mod) {
   /* 数据的别名（第一百〇五片）：与目标同一个偏移，符号表里多一条。 */
   for (const a of mod.aliases) {
     if (a.kind !== 'g') continue;
-    const base = gBase.get(a.no);
-    if (base === undefined) nyi(`别名 '${a.name}' 的目标不在数据段里`);
-    dataSyms.push({ name: a.name, off: base, sect: 2, local: false, weak: a.weak === true });
+    const at = gBase.get(a.no);
+    if (at === undefined) nyi(`别名 '${a.name}' 的目标不在数据段里`);
+    dataSyms.push({
+      name: a.name, off: at.base, sect: at.sect, local: false, weak: a.weak === true,
+    });
   }
   const strSyms = new Map();
   const items = mod.consts.items;
@@ -1198,8 +1208,12 @@ export function genModule(mod) {
     sizes,
     relocs: buf.relocs,
     data: new Uint8Array(dataBytes),
+    /* 只读那一段（第一百二十二片，与 x64 那一份同一条）：写 ELF 的那一头摆进 3 号节，
+     * Mach-O 那一头现在只有两节，由 `macho.js` 折进 `__data` 的尾巴上。 */
+    rodata: new Uint8Array(roBytes),
     dataSyms,
     dataRelocs,
+    roRelocs,
     dataAlign,
   };
 }

@@ -209,6 +209,30 @@ const ARCH = {
 };
 
 /**
+ * 只读那一段折进 `__data` 的尾巴（第一百二十二片）。
+ *
+ * 写 ELF 那一头把 `const` 的全局量摆进 3 号节（`.data.ro` / `.rdata`），可这个写出器
+ * 到现在只有 `__text` 与 `__data` 两节 —— 于是这儿把那一段接在数据字节后头（按 `dal`
+ * 对齐，保证里头每一样的对齐都还成立），`sect: 3` 的符号与重定位一律改成 `sect: 2`
+ * 并把偏移加上那个基址。真正的 `__DATA,__const` 是笔欠账；折过来至少不掉字节。
+ */
+function foldRo(data, defs, relocs, opts, dal) {
+  const base0 = data === undefined ? new Uint8Array(0) : data;
+  const ro = opts === undefined || opts.rodata === undefined ? null : opts.rodata;
+  if (ro === null || ro.length === 0) return { bytes: base0, defs, relocs };
+  const at = align(base0.length, dal);
+  const bytes = new Uint8Array(at + ro.length);
+  bytes.set(base0);
+  bytes.set(ro, at);
+  const move = (x) => (x.sect === 3 ? { ...x, sect: 2 } : x);
+  return {
+    bytes,
+    defs: defs.map((d) => (d.sect === 3 ? { ...move(d), off: d.off + at } : d)),
+    relocs: relocs.map((r) => (r.sect === 3 ? { ...move(r), at: r.at + at } : r)),
+  };
+}
+
+/**
  * 写一个 arm64 的 `.o`。
  *
  * @param text  代码字节（`Uint8Array`）
@@ -221,14 +245,18 @@ const ARCH = {
  * @param arch  `'arm64'`（默认）或 `'x86_64'`
  * @param dataAlign `__data` 那一节要的对齐（字节，2 的幂，默认 8）。
  *                  里面有 16 字节对齐的全局量就得给 16 —— 见第九刀第二十九片。
+ * @param opts  `{rodata}`（第一百二十二片）：只读那一段的字节。这个写出器只有
+ *              `__text`/`__data` 两节，所以这一段**折进 `__data` 的尾巴**上 ——
+ *              `sect: 3` 的符号与重定位跟着挪。真正的 `__DATA,__const` 是笔欠账，
+ *              这儿只保证 clang 那条「真的能跑」的腿不掉字节。
  */
-export function writeObject(text, data, defs, relocs, arch, dataAlign) {
+export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
   const archName = arch === undefined ? 'arm64' : arch;
   const cpu = ARCH[archName];
   if (cpu === undefined) throw new OmniError(`macho: 还不认识架构 ${archName}`);
-  const dataBytes = data === undefined ? new Uint8Array(0) : data;
-  const nsects = dataBytes.length === 0 ? 1 : 2;
   const dal = dataAlign === undefined ? 8 : dataAlign;
+  const { bytes: dataBytes, defs: defsIn, relocs: relocsIn } = foldRo(data, defs, relocs, opts, dal);
+  const nsects = dataBytes.length === 0 ? 1 : 2;
   /* 节头里写的是**对齐的指数**（2^n），所以这儿要算 log2，而且只认 2 的幂。 */
   let dalLog = 0;
   while (2 ** dalLog < dal) dalLog++;
@@ -248,8 +276,8 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign) {
    * `duplicate symbol`。 */
   const syms = [];
   const defNo = new Map();
-  const locals = defs.filter((d) => d.local === true);
-  const globals = defs.filter((d) => d.local !== true);
+  const locals = defsIn.filter((d) => d.local === true);
+  const globals = defsIn.filter((d) => d.local !== true);
   for (const d of [...locals, ...globals]) {
     const sect = d.sect === undefined ? 1 : d.sect;
     defNo.set(d.name, syms.length);
@@ -268,7 +296,7 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign) {
   /* 未定义的那些按名字去重：同一个 `printf` 被叫十次也只占一条符号。
    * 已经定义过的名字**不许**再进未定义那一段 —— 自家的全局也是靠符号寻址的。 */
   const undefNo = new Map();
-  for (const r of relocs) {
+  for (const r of relocsIn) {
     if (defNo.has(r.sym) || undefNo.has(r.sym)) continue;
     undefNo.set(r.sym, syms.length);
     syms.push({ strx: strs.intern(macName(r.sym)), type: N_UNDF | N_EXT, sect: 0, value: 0 });
@@ -289,8 +317,8 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign) {
    * **一节一张表**：节头里的 `reloff`/`nreloc` 是那一节自己的，而 `r_address` 是
    * 节里的偏移。混成一张（代码的 0x10 与数据的 0x10 撞在一起）链接器会往代码里填数据的坑。 */
   const byAt = (x, y) => x.at - y.at;
-  const rsText = relocs.filter((r) => (r.sect === undefined ? 1 : r.sect) === 1).sort(byAt);
-  const rsData = relocs.filter((r) => r.sect === 2).sort(byAt);
+  const rsText = relocsIn.filter((r) => (r.sect === undefined ? 1 : r.sect) === 1).sort(byAt);
+  const rsData = relocsIn.filter((r) => r.sect === 2).sort(byAt);
   if (rsData.length !== 0 && nsects !== 2) {
     throw new OmniError('macho: 有数据节的重定位，可是数据节是空的');
   }

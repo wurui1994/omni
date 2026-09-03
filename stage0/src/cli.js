@@ -351,6 +351,11 @@ function relaSeq(blob) {
   if (blob.dataRelocs.length > 0) {
     seq.data = Math.min(...blob.dataRelocs.map((r) => r.after ?? 0));
   }
+  /* `.rela.data.ro` 同一把尺子（第一百二十二片）：只读那一段里第一条重定位落在
+   * 第几个函数之前。与 `.rela.data` 撞在同一格时，只读那一节的号大，排后面。 */
+  if (blob.roRelocs !== undefined && blob.roRelocs.length > 0) {
+    seq.rodata = Math.min(...blob.roRelocs.map((r) => r.after ?? 0)) + 0.01;
+  }
   if (blob.relocs.length > 0) {
     const at = Math.min(...blob.relocs.map((r) => r.at));
     let j = 0;
@@ -445,13 +450,17 @@ function cObj(path, out, arch, incs, defs, fmt, os) {
          * 一个下划线也没有。我们自己的 PE 链接器早就知道这一格（`pe_load.js`：PE 上默认 0）。 */
         prefix: os === 'osx' ? '_' : '',
         rdata: os === 'win32' ? '.rdata' : '.data.ro',
+        /* 只读那一段（第一百二十二片）：`const` 的全局量的字节。 */
+        rodata: blob.rodata,
         unwind: blob.unwind ?? undefined,
         ehFrame: ehFrameOf(blob, arch, os),
         seq: relaSeq(blob),
       })
-    : writeObject;
+    /* Mach-O 那一头只有两节，只读那一段折进 `__data` 的尾巴（`macho.js` 的 `foldRo`）。 */
+    : (t, d, ds, rs, a, al) => writeObject(t, d, ds, rs, a, al, { rodata: blob.rodata });
   writeBinary(out, write(blob.bytes, blob.data,
-    [...syms, ...blob.dataSyms], [...blob.relocs, ...blob.dataRelocs], arch, blob.dataAlign));
+    [...syms, ...blob.dataSyms],
+    [...blob.relocs, ...blob.dataRelocs, ...blob.roRelocs], arch, blob.dataAlign));
   return out;
 }
 /**
