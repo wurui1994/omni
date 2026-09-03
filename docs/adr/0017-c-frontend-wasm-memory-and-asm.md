@@ -15321,6 +15321,61 @@ ours  .data:f.n.0@0/L  .bss:f.b.1@0/L  .data:g.n.0@4/L  .data.ro:g.s.1@0/L
 
 <!-- 第九刀第一百三十三片-END -->
 
+## 量：串常量的符号名是 `L.N`，N 是一根**匿名符号**的共用游标（下一片的尺子）
+
+上一片把函数静态量的名字对上了，符号表里还剩一种名字不同：串常量。我们叫
+`omni_str_<常量池下标>`，tcc 叫 `L.N`。量过三个目标（探针
+`char *a = "x"; char *b = "yy";`，不带任何 `#include`）：
+
+```
+linux    .data.ro:L.3@0   .data.ro:L.4@2
+osx      .data.ro:_L.1@0  .data.ro:_L.2@2
+win32    .rdata:L.0@0     .rdata:L.1@2
+```
+
+名字的规矩在 `tccpp.c:624-626`：`v >= SYM_FIRST_ANOM` 的符号印成 `L.%u`，数是
+`v - SYM_FIRST_ANOM`。而 `anon_sym` 这根游标（`tccgen.c:32`，`tccgen.c:404` 起手置成
+`SYM_FIRST_ANOM`）被**三处**共用：
+
+- `tccgen.c:1129` `get_sym_ref` —— 每一条指着某一节的静态符号（串常量、静态复合字面量）
+- `tccgen.c:4490` —— 没名字的 `struct`/`union`/`enum` **标签**
+- `tccgen.c:4675` —— 没名字的**成员**（嵌进去的匿名 struct/union，或者无名位域）
+
+所以起手那个数不是玄学，是**这个目标的 `tccdefs.h` 里有几样匿名的东西**，一个一个数得出来
+（`include/tccdefs.h:188-238`）：
+
+- x86_64-linux：`typedef struct { unsigned gp_offset, fp_offset; union { … }; char *reg_save_area; } __builtin_va_list[1];`
+  —— 外头那个匿名 struct 标签 1 个，里头那个匿名 `union` 既是标签又是成员，2 个 ——
+  一共 **3**，于是第一条串是 `L.3` ✓
+- arm64-osx：`typedef struct { void *__stack; } __builtin_va_list;` —— 1 个匿名标签，
+  于是 `L.1` ✓
+- x86_64-win32：`typedef char *__builtin_va_list;` —— 一样匿名的都没有，于是 `L.0` ✓
+
+三个都对得上，所以这一格**不该写死**每个目标的起点：照 tcc 那样立一根共用游标，
+起点自然从我们自己那份 `tccdefs.h` 里长出来。
+
+所以下一片的活：
+
+1. 前端：一根 `anonSym` 游标（从 0 起），三处 `++`——匿名的 struct/union/enum 标签、
+   匿名的成员（含无名位域）、每一条领到符号的静态块（串常量与静态复合字面量）
+2. MIR：常量池那边要一格「写进符号表的名字」（`strSym[ref]`，与第一百三十三片的
+   `globalSym` 同一种性质）；`$cl$N` 那些匿名静态块也在同一根游标上，名字一样是 `L.N`
+3. 两个后端把 `strSym` 传给 `dataSyms`，两个写出器已经认 `sym` 那一格（一百三十三片
+   铺好了）—— 这一步是零改动
+
+「匿名的成员」那一条也量准了（x86_64-win32，起点是 0，所以数就是号）：
+
+```c
+struct C { int x; };                              /* 有名字的标签   -> L.0，0 个号 */
+struct A { int x; int :3; int y; };               /* 无名位域       -> L.1，1 个号 */
+struct B { int x; struct { int u; }; int y; };     /* 匿名 struct 成员 -> L.2，2 个号 */
+```
+
+也就是：无名位域**一个**号（它只是成员，没有标签），匿名 struct/union 成员**两个**号
+（`tccgen.c:4490` 那个标签一个、`:4675` 那个成员一个）—— 与上头 linux 那个 3 对得上。
+
+<!-- 量：L.N 的游标-END -->
+
 
 
 
