@@ -29,11 +29,15 @@ import { OmniError } from '../source/diag.js';
 /* ------------------------------------------------------------------ 类型 */
 
 /**
- * 类型的形状，一律是 `{k, n, base}`：
+ * 类型的形状：
  *
  *   `{k:'void'}` `{k:'bool'}` `{k:'int'}` `{k:'float'}`
  *   `{k:'vec', n:2|3|4, base:'float'|'int'|'bool'}`
- *   `{k:'mat', n:2|3|4}`（只有 float 矩阵 —— GLSL 里没有整数矩阵）
+ *   `{k:'mat', cols:2|3|4, rows:2|3|4}`（只有 float 矩阵 —— GLSL 里没有整数矩阵）
+ *
+ * 矩阵记的是**列数与行数**，不是一个 `n`：`mat2x3` 是 2 列 3 行（规范 5.6），
+ * 而 `mat2` 就是 `mat2x2`。摊平的次序始终是**列优先**，第 c 列占
+ * `c*rows .. c*rows+rows-1`。
  */
 export const GLSL_VOID = { k: 'void' };
 export const GLSL_BOOL = { k: 'bool' };
@@ -41,7 +45,7 @@ export const GLSL_INT = { k: 'int' };
 export const GLSL_FLOAT = { k: 'float' };
 
 const glslVec = (n, base) => ({ k: 'vec', n, base });
-const glslMat = (n) => ({ k: 'mat', n });
+const glslMat = (cols, rows) => ({ k: 'mat', cols, rows });
 
 /** 打印出来给报错用。 */
 export function glslTyText(t) {
@@ -49,7 +53,7 @@ export function glslTyText(t) {
     const p = t.base === 'float' ? 'vec' : t.base === 'int' ? 'ivec' : 'bvec';
     return `${p}${t.n}`;
   }
-  if (t.k === 'mat') return `mat${t.n}`;
+  if (t.k === 'mat') return t.cols === t.rows ? `mat${t.cols}` : `mat${t.cols}x${t.rows}`;
   return t.k;
 }
 
@@ -69,10 +73,10 @@ function glslElem(t) {
   return t;
 }
 
-/** 有几格：标量 1、`vecN` N、`matN` N*N。 */
+/** 有几格：标量 1、`vecN` N、`matCxR` C*R。 */
 function glslCount(t) {
   if (t.k === 'vec') return t.n;
-  if (t.k === 'mat') return t.n * t.n;
+  if (t.k === 'mat') return t.cols * t.rows;
   return 1;
 }
 
@@ -88,7 +92,8 @@ function glslTyOf(node, err) {
   if (h === 'ty-vec') return glslVec(n, 'float');
   if (h === 'ty-ivec') return glslVec(n, 'int');
   if (h === 'ty-bvec') return glslVec(n, 'bool');
-  if (h === 'ty-mat') return glslMat(n);
+  /* `(ty-mat C R)`：C 列 R 行。`mat3` 在语法那侧就摊成了 `(ty-mat 3 3)`。 */
+  if (h === 'ty-mat') return glslMat(n, Number(node.items[2].value));
   throw err(node, `认不出的类型 ${h}`);
 }
 
@@ -612,10 +617,11 @@ class GlslChecker {
     }
     const k = at.v;
     if (subj.ty.k === 'mat') {
-      if (k < 0 || k >= subj.ty.n) {
-        throw this.err(node, `${glslTyText(subj.ty)} 只有 ${subj.ty.n} 列，取不到第 ${k} 列`);
+      if (k < 0 || k >= subj.ty.cols) {
+        throw this.err(node, `${glslTyText(subj.ty)} 只有 ${subj.ty.cols} 列，取不到第 ${k} 列`);
       }
-      return { k: 'matcol', ty: glslVec(subj.ty.n, 'float'), of: subj, col: k };
+      /* 取出来的是一**列**，长度是**行数** —— `mat2x3[0]` 是 vec3，不是 vec2。 */
+      return { k: 'matcol', ty: glslVec(subj.ty.rows, 'float'), of: subj, col: k };
     }
     if (subj.ty.k === 'vec') {
       if (k < 0 || k >= subj.ty.n) {
@@ -818,18 +824,30 @@ class GlslChecker {
       }
       return GLSL_INT;
     }
-    /* 算术。矩阵那几格只有 `*` 有意义。 */
+    /* 算术。矩阵那几格只有 `*` 有意义。尺寸规矩照规范 5.10：
+     *
+     *   `matAxB * matCxD` 要 A == D，出 `matCxB`（左边的列数 = 右边的行数）
+     *   `matCxR * vecC`   出 `vecR`；`vecR * matCxR` 出 `vecC`
+     *   `matCxR * float`  出同型
+     */
     if (a.k === 'mat' || b.k === 'mat') {
       if (op !== '*') throw this.err(node, `矩阵只支持 *（给的是 ${op}）`);
       if (a.k === 'mat' && b.k === 'mat') {
-        if (a.n !== b.n) throw this.err(node, `mat${a.n} * mat${b.n} 尺寸不对`);
-        return a;
+        if (a.cols !== b.rows) {
+          throw this.err(node, `${glslTyText(a)} * ${glslTyText(b)} 尺寸不对`
+            + `（左边 ${a.cols} 列要等于右边 ${b.rows} 行）`);
+        }
+        return glslMat(b.cols, a.rows);
       }
       const m = a.k === 'mat' ? a : b;
       const v = a.k === 'mat' ? b : a;
       if (v.k === 'float' || v.k === 'int') return m;
-      if (v.k === 'vec' && v.base === 'float' && v.n === m.n) return v;
-      throw this.err(node, `mat${m.n} * ${glslTyText(v)} 尺寸不对`);
+      if (v.k === 'vec' && v.base === 'float') {
+        /* `m * v` 要 v 的长度 = 列数，出行数那么长；`v * m` 反过来。 */
+        if (a.k === 'mat' && v.n === m.cols) return glslVec(m.rows, 'float');
+        if (b.k === 'mat' && v.n === m.rows) return glslVec(m.cols, 'float');
+      }
+      throw this.err(node, `${glslTyText(a)} * ${glslTyText(b)} 尺寸不对`);
     }
     if (glslSame(a, b)) {
       if (a.k === 'bool' || (a.k === 'vec' && a.base === 'bool')) {

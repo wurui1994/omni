@@ -46,10 +46,10 @@ function glslCompTy(t) {
   throw new OmniError(`glsl: 降不了的分量类型 ${b}`);
 }
 
-/** 有几格。 */
+/** 有几格。矩阵是 `cols * rows`（列优先摊平，第 c 列占 c*rows 起那 rows 格）。 */
 function glslNComp(t) {
   if (t.k === 'vec') return t.n;
-  if (t.k === 'mat') return t.n * t.n;
+  if (t.k === 'mat') return t.cols * t.rows;
   return 1;
 }
 
@@ -197,10 +197,10 @@ class GlslLowerer {
       const out = [];
       if (e.ty.k === 'mat') {
         /* `matN(x)` 是**对角线**填 x、其余 0（规范 5.4.2），不是每格都填 x。
-         * 这一格填错的话 `mat2(1.0)` 会变成「四个 1」——那不是单位阵。 */
-        const m = e.ty.n;
-        for (let col = 0; col < m; col++) {
-          for (let row = 0; row < m; row++) out.push(col === row ? v : '(real 0.0)');
+         * 这一格填错的话 `mat2(1.0)` 会变成「四个 1」——那不是单位阵。
+         * 非方阵也是同一条：`mat2x3(1.0)` 的对角是 (0,0) 与 (1,1)，第三行全 0。 */
+        for (let col = 0; col < e.ty.cols; col++) {
+          for (let row = 0; row < e.ty.rows; row++) out.push(col === row ? v : '(real 0.0)');
         }
         return out;
       }
@@ -222,11 +222,11 @@ class GlslLowerer {
     }
     if (e.k === 'matcol') {
       /* `m[col]`：矩阵是**列优先**摊平的（`mat2(a,b,c,d)` = 第 0 列 (a,b)、第 1 列 (c,d)），
-       * 所以第 col 列就是分量表里连着的那 N 个 —— 下标 `col*N .. col*N+N-1`。
-       * 与 `matBin` 里那条 `col*N + row` 是同一个公式（规范 5.6）。 */
-      const of = this.expr(e.of);
-      const n = e.of.ty.n;
-      return of.slice(e.col * n, e.col * n + n);
+       * 所以第 col 列就是分量表里连着的那 `rows` 格 —— 下标 `col*rows .. +rows-1`。
+       * 与 `matBin` 里那条 `col*rows + row` 是同一个公式（规范 5.6）。 */
+      const subj = this.expr(e.of);
+      const rows = e.of.ty.rows;
+      return subj.slice(e.col * rows, e.col * rows + rows);
     }
     if (e.k === 'neg') {
       const a = this.expr(e.a);
@@ -350,39 +350,36 @@ class GlslLowerer {
     if (tb.k === 'mat' && (ta.k === 'float' || ta.k === 'int')) {
       return b.map((c) => this.let_(ct, `(bin "*" ${a[0]} ${c})`));
     }
-    /* `matN * vecN`：结果第 row 格 = Σ_col m[col][row] * v[col]。 */
+    /* `matCxR * vecC`：结果第 row 格 = Σ_col m[col][row] * v[col]，长度是**行数**。 */
     if (ta.k === 'mat' && tb.k === 'vec') {
-      const n = ta.n;
       const out = [];
-      for (let row = 0; row < n; row++) {
+      for (let row = 0; row < ta.rows; row++) {
         const xs = [];
-        for (let col = 0; col < n; col++) xs.push(a[col * n + row]);
+        for (let col = 0; col < ta.cols; col++) xs.push(a[col * ta.rows + row]);
         out.push(dot(xs, b));
       }
       return out;
     }
-    /* `vecN * matN`：结果第 col 格 = dot(v, 第 col 列)。 */
+    /* `vecR * matCxR`：结果第 col 格 = dot(v, 第 col 列)，长度是**列数**。 */
     if (ta.k === 'vec' && tb.k === 'mat') {
-      const n = tb.n;
       const out = [];
-      for (let col = 0; col < n; col++) {
+      for (let col = 0; col < tb.cols; col++) {
         const ys = [];
-        for (let row = 0; row < n; row++) ys.push(b[col * n + row]);
+        for (let row = 0; row < tb.rows; row++) ys.push(b[col * tb.rows + row]);
         out.push(dot(a, ys));
       }
       return out;
     }
-    /* `matN * matN`：结果第 col 列 = a × (b 的第 col 列)。 */
+    /* `matAxB * matCxD`（要 A == D）：出 `matCxB`，第 col 列 = a × (b 的第 col 列)。 */
     if (ta.k === 'mat' && tb.k === 'mat') {
-      const n = ta.n;
       const out = [];
-      for (let col = 0; col < n; col++) {
-        for (let row = 0; row < n; row++) {
+      for (let col = 0; col < tb.cols; col++) {
+        for (let row = 0; row < ta.rows; row++) {
           const xs = [];
           const ys = [];
-          for (let k = 0; k < n; k++) {
-            xs.push(a[k * n + row]);
-            ys.push(b[col * n + k]);
+          for (let k = 0; k < ta.cols; k++) {
+            xs.push(a[k * ta.rows + row]);
+            ys.push(b[col * tb.rows + k]);
           }
           out.push(dot(xs, ys));
         }

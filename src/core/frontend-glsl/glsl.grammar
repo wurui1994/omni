@@ -88,6 +88,7 @@
       "void" "bool" "int" "uint" "float"
       "vec2" "vec3" "vec4" "ivec2" "ivec3" "ivec4" "bvec2" "bvec3" "bvec4"
       "mat2" "mat3" "mat4"
+      "mat2x2" "mat2x3" "mat2x4" "mat3x2" "mat3x3" "mat3x4" "mat4x2" "mat4x3" "mat4x4"
       ;; `layout` **不在这儿**：关键字表里的每个词都得是某条规则用到的终结符（不然构表
       ;; 就骂），而 `layout(location = N)` 这一刀不收。收了却不用，等于留一个哑符号。
       "uniform" "in" "out" "inout" "const" "flat" "smooth" "noperspective"
@@ -163,9 +164,20 @@
     (-> ("bvec2") (ty-bvec 2))
     (-> ("bvec3") (ty-bvec 3))
     (-> ("bvec4") (ty-bvec 4))
-    (-> ("mat2") (ty-mat 2))
-    (-> ("mat3") (ty-mat 3))
-    (-> ("mat4") (ty-mat 4)))
+    (-> ("mat2") (ty-mat 2 2))
+    (-> ("mat3") (ty-mat 3 3))
+    (-> ("mat4") (ty-mat 4 4))
+    ;; 非方阵（规范 5.6）：`matCxR` 是 **C 列 R 行**。九个都收 —— 方阵那三个写成
+    ;; `mat2x2` 也合法，与 `mat2` 是同一个类型。
+    (-> ("mat2x2") (ty-mat 2 2))
+    (-> ("mat2x3") (ty-mat 2 3))
+    (-> ("mat2x4") (ty-mat 2 4))
+    (-> ("mat3x2") (ty-mat 3 2))
+    (-> ("mat3x3") (ty-mat 3 3))
+    (-> ("mat3x4") (ty-mat 3 4))
+    (-> ("mat4x2") (ty-mat 4 2))
+    (-> ("mat4x3") (ty-mat 4 3))
+    (-> ("mat4x4") (ty-mat 4 4)))
 
   (rule params
     (-> () (params))
