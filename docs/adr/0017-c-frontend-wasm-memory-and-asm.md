@@ -853,6 +853,15 @@ X87 类从来不进寄存器，所以那一路只有「游标对齐到 16、`fld
 去编 tinycc 自己的十二份几千行的源码，与交叉编那份逐字节相同 —— arm64 那条腿上这一格
 第九十四片就有了，x86_64 这边一直缺着，缺的正是 `long double`。
 
+**只读数据那一节的名字跟着目标走**（第一百一十六片）：PE 上叫 **`.rdata`**，别处叫
+`.data.ro`（`tccelf.c:50-56` 一个 `#ifdef TCC_TARGET_PE` 定的）。这与符号前缀那个 `_`
+同一种性质 —— 目标的事实，不是选项，所以写 `.o` 的那一头收一格 `opts.rdata`
+（缺省 `.data.ro`），由 `cli.js` 按 `--os` 给。门 `tests/c/rdata-name.js` 3/0，
+三个目标的期望都是从交叉 tcc 自己的 `.o` 里读出来的，一个字都不写死。
+win32 的容器还差三样，量过了记在这：`.pdata` 与 `.rela.pdata`（每个函数 12 字节的
+`RUNTIME_FUNCTION` 加三条重定位）、它们指的那条局部符号 `.uw_base`、以及 `.symtab`
+的 `sh_info` —— 最后这个被我们 `$ext$` 那些桩的局部符号顶偏了，得等那门手法退役。
+
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
 地址交给真的 libc（`strlen`/`memcpy`）验过。C 前端现在还把 `&x` 降到影子栈上，
@@ -13917,6 +13926,49 @@ const tinyArgs = ['-B', TCC_DIR, '-I', SDK_INC, '-I', TCC_DIR, '-DONE_SOURCE=0',
 因为这一格与上一格都要真的把 x86_64 那份 tcc 跑起来。
 
 <!-- 第九刀第一百一十五片-END -->
+
+## 落地：第九刀第一百一十六片
+
+PE 目标上只读数据那一节叫 **`.rdata`**，不叫 `.data.ro`。
+
+tcc 里这是文件开头的一个 `#ifdef`（`tccelf.c:50-56`）：
+
+```c
+#ifdef TCC_TARGET_PE
+static const char rdata[] = ".rdata";
+#else
+static const char rdata[] = ".data.ro";
+#endif
+```
+
+我们的 ELF 写出器六个目标共用一份，差别本来只记着两处（`e_machine`、符号名前那条
+下划线）。这是第三处 —— 而且我们的**链接器**早就有这一格（`elf_merge.js` 的
+`opts.rdata`，`peSections` 传的正是 `.rdata`），写 `.o` 这一头一直欠着，于是我们出的
+win32 `.o` 里那一节叫 `.data.ro`，并合的时候成了另一节。
+
+`writeObject` 于是多一个 `opts.rdata`，`cli.js` 按 `--os` 给：`win32` 是 `.rdata`，
+别的是 `.data.ro`。
+
+### 门
+
+`tests/c/rdata-name.js` 3/0。期望值**不写死**：拿交叉编译器写出来的 `.o` 问它 3 号节
+叫什么，再问我们的。三个目标各一遍（x86_64-win32 / x86_64-linux / arm64-osx）。
+
+### win32 的容器还差什么（量过的）
+
+`tcc-obj.js` 的 win32 那一栏仍然是「0 容器相同」，剩下的差别有三处，都不是这一片能补的：
+
+* **`.pdata` 与 `.rela.pdata`**：x86_64-win32 上 tcc 每编完一个函数就往 `.pdata` 里加
+  一条 12 字节的 `RUNTIME_FUNCTION`（`tccpe.c:1981` 的 `pe_add_unwind_data`，由
+  `x86_64-gen.c:1016` 的 `gfunc_epilog` 叫），三个 dword 各带一条重定位；那 8 字节的
+  `UNWIND_INFO` 是**共享的一份**，躺在 `.text` 里（对齐到 4）。我们的写出器还没有这一节
+  —— 有意思的是链接器那一头早就会读会摆（第四十五片的 `buildUnwind`/`unwindInfoX64`），
+  所以这一片是把同一件事补到写 `.o` 那一头。
+* **`.uw_base` 那条符号**：`.pdata` 的重定位指着它（一条 `shndx = .text` 的局部符号）。
+* **`.symtab` 的 `sh_info`**：我们多几条局部符号（外部函数的桩 `$ext$printf`），
+  于是「第一个全局符号的下标」与 tcc 不同 —— 这一条要等桩那个手法本身换掉。
+
+<!-- 第九刀第一百一十六片-END -->
 
 
 

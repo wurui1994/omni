@@ -387,7 +387,7 @@ function cObj(path, out, arch, incs, defs, fmt, os) {
     /* STT_FILE 那一条印的是**命令行上给的那一串**（第一百〇七片量的：`tcc -c s.c` 写
      * `s.c`、`tcc -c ./s.c` 写 `./s.c`、给绝对路径就写绝对路径）—— 不是基名。 */
     ? (t, d, ds, rs, a, al) => writeElfObject(t, d, ds, rs, a, al,
-      { file: path, prefix: os === 'linux' ? '' : '_' })
+      { file: path, prefix: os === 'linux' ? '' : '_', rdata: os === 'win32' ? '.rdata' : '.data.ro' })
     : writeObject;
   writeBinary(out, write(blob.bytes, blob.data,
     [...syms, ...blob.dataSyms], [...blob.relocs, ...blob.dataRelocs], arch, blob.dataAlign));

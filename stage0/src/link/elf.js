@@ -16,7 +16,7 @@
  *   0 （全 0 的那一条）
  *   1 .text        PROGBITS  ALLOC|EXECINSTR
  *   2 .data        PROGBITS  ALLOC|WRITE
- *   3 .data.ro     PROGBITS  ALLOC          （osx/linux 叫这个名字，PE 那边叫 .rdata）
+ *   3 .data.ro     PROGBITS  ALLOC          （osx/linux 叫这个名字，PE 那边叫 .rdata —— 见 `opts.rdata`）
  *   4 .bss         NOBITS    ALLOC|WRITE
  *   5 .symtab      SYMTAB
  *   6 .strtab      STRTAB
@@ -283,6 +283,11 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
   if (cpu === undefined) throw new OmniError(`elf: 还不认识架构 ${archName}`);
   const o = opts === undefined ? {} : opts;
   const prefix = o.prefix === undefined ? '_' : o.prefix;
+  /* 只读数据那一节的名字（第一百一十六片）：PE 目标上 tcc 叫它 `.rdata`，别的目标叫
+   * `.data.ro`（`tccelf.c:50-56` 那个 `#ifdef TCC_TARGET_PE`）。这是**目标的事实**，
+   * 与符号名那条下划线并列 —— 六个目标共用一个写出器，差别就这么几处。
+   * 我们的链接器早就有同一格（`elf_merge.js` 的 `opts.rdata`），写 `.o` 这一头之前欠着。 */
+  const rdata = o.rdata === undefined ? '.data.ro' : o.rdata;
   /* 数据字节要能改 —— 原地躺着的加数得搬到 `r_addend` 那一格去，原地清零。 */
   const dataBytes = new Uint8Array(data === undefined ? 0 : data.length);
   if (data !== undefined) dataBytes.set(data);
@@ -332,7 +337,7 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
   };
   sec('.text', SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, text.length, 0, 0, 8, 0);
   sec('.data', SHT_PROGBITS, SHF_ALLOC | SHF_WRITE, dataBytes.length, 0, 0, 8, 0);
-  sec('.data.ro', SHT_PROGBITS, SHF_ALLOC, 0, 0, 0, 8, 0);
+  sec(rdata, SHT_PROGBITS, SHF_ALLOC, 0, 0, 0, 8, 0);
   sec('.bss', SHT_NOBITS, SHF_ALLOC | SHF_WRITE, 0, 0, 0, 8, 0);
   const symtabNo = secs.length;
   sec('.symtab', SHT_SYMTAB, 0, syms.length * SYM_SIZE, symtabNo + 1, nlocal + 1, 8, SYM_SIZE);
