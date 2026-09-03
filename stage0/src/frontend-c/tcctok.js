@@ -170,10 +170,10 @@ const PP_NAMES = [
   'pack', 'push', 'pop', 'comment', 'lib', 'push_macro', 'pop_macro', 'once', 'option',
   // tcctok.h:106-166 的 attribute 名（第八刀第三十四片）。tcc 那边这一整段排在 builtin
   // 之前，我们的编号从 `__inf__` 之后就分岔了（见文件头），所以这儿只登记**真的要认**
-  // 的两个：`aligned` 与 `packed`，各带 gcc 的下划线拼法。别的属性名仍然是普通标识符
-  // （`weak`、`section`、`format`…），`parseAttrs` 在 default 那一支把它们的参数括号
-  // 平衡掉 —— 与 tcc 的 `skip_param` 同一支。
-  'aligned', '__aligned__', 'packed', '__packed__',
+  // 的那几个：`aligned` / `packed`（改布局）与 `weak`（改符号绑定，第一百〇四片），
+  // 各带 gcc 的下划线拼法。别的属性名仍然是普通标识符（`section`、`format`…），
+  // `parseAttrs` 在 default 那一支把它们的参数括号平衡掉 —— 与 tcc 的 `skip_param` 同一支。
+  'aligned', '__aligned__', 'packed', '__packed__', 'weak', '__weak__',
 ];
 
 /** 全表：下标 i <-> 记号号 `TOK_IDENT + i`。 */
@@ -233,6 +233,10 @@ export const TOK_ALIGNED1 = fixed('aligned');
 export const TOK_ALIGNED2 = fixed('__aligned__');
 export const TOK_PACKED1 = fixed('packed');
 export const TOK_PACKED2 = fixed('__packed__');
+/* `__attribute__((weak))`（第一百〇四片，`tcctok.h:114-115`）：改的是符号的**绑定**
+ * —— ELF 里 STB_WEAK、Mach-O 里 N_WEAK_DEF。 */
+export const TOK_WEAK1 = fixed('weak');
+export const TOK_WEAK2 = fixed('__weak__');
 
 /* ------------------------------------------------- tccgen 要用的那些（第六刀）
  * 语句关键字与类型关键字。之前只有预处理器在用这张表，所以只导出了指令名那一段。 */

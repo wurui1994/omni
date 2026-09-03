@@ -61,6 +61,7 @@ const SHN_ABS = 0xfff1;
 
 const STB_LOCAL = 0;
 const STB_GLOBAL = 1;
+const STB_WEAK = 2;
 const STT_NOTYPE = 0;
 const STT_OBJECT = 1;
 const STT_FUNC = 2;
@@ -240,7 +241,9 @@ function buildSyms(defs, relocs, strs, prefix) {
   };
   for (const d of defs) if (d.local === true) put(d, STB_LOCAL);
   const nlocal = syms.length;
-  for (const d of defs) if (d.local !== true) put(d, STB_GLOBAL);
+  /* 弱定义（第九刀第一百〇四片）：`__attribute__((weak))` 的名字绑定是 STB_WEAK，
+   * 与全局的排在同一段里（`sh_info` 只切「局部/非局部」这一刀）。 */
+  for (const d of defs) if (d.local !== true) put(d, d.weak === true ? STB_WEAK : STB_GLOBAL);
   /* 没定义的那些按名字去重，次序按第一次被引用 —— 同一个 `printf` 叫十次只占一条。 */
   for (const r of relocs) {
     if (no.has(r.sym)) continue;

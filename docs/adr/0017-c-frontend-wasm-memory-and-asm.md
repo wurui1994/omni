@@ -747,6 +747,16 @@ identifier，所以两份输出得同名不同目录才比得。
 日期那一串与 tcc 逐字符相同、时间差在容差内、把 `hh:mm:ss` 抹成占位符之后整份 `-E`
 输出与 tcc 逐字节相同。`cpp-bad/date` 那个「该拒」的用例跟着删了。
 
+**`weak` 是符号的绑定**（第一百〇四片）：`__attribute__((weak))` 以前落在 `parseAttrs`
+的「不认识的属性」那一支上 —— 括号平衡掉、什么都不改。编得过，符号表里那个名字却仍旧是
+**强**定义。现在它是一格真的标注：`ad.weak` 一路带到 `MirFunc.weak` 与
+`MirModule.globalWeak`，写目标文件那一步变成 ELF 的 `STB_WEAK`（`elf.js` 的 `buildSyms`）
+与 Mach-O 的 `N_WEAK_DEF`（`macho.js`，它不在 `n_type` 上而是 `n_desc` 的那一位）。
+门是 `tests/c/weak-sym.js`：与 `tcc -c` 出的 ELF 比 `nm` 的每一行 —— 弱的函数是 `W`、
+弱的数据是 `V`、强的是 `T`/`D`、`static` 的是 `t`/`d`，再链起来跑一遍。
+`__attribute__((alias("目标")))` 还欠着：我们现在给它一个转发桩（`$ext$别名`），
+tcc 给的是**与目标同址的一条符号**，那是下一片。
+
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
 地址交给真的 libc（`strlen`/`memcpy`）验过。C 前端现在还把 `&x` 降到影子栈上，
@@ -13133,6 +13143,57 @@ reproducible`。理由不是不会做，是**不想让它们进逐字节比对�
 207 条全绿。
 
 <!-- 第九刀第一百〇三片-END -->
+
+## 落地：第九刀第一百〇四片
+
+`__attribute__((weak))` 一直落在 `parseAttrs` 的最后一支上：认出是个属性、把参数括号
+平衡掉、什么都不改。这种「读过去」对 `format`、`__printflike`、`__dead2` 是对的
+（它们只影响诊断），对 `weak` 是错的 —— 它改的是**符号表**。
+
+### 量出来的差
+
+一个探针（弱函数 + 弱数据 + 强的一对 + 一个 `static`），`tcc -c` 与我们的
+`c-obj --format elf` 各出一份，`nm` 一比：
+
+```
+tcc :  _wfn W      _wvar V      _strong T   _svar D   _hidden d
+ours:  _wfn T      _wvar D      _strong T   _svar D   _hidden d
+```
+
+那个字母就是 ELF `st_info` 的高四位：`W`/`V` = `STB_WEAK`（2），`T`/`D` = `STB_GLOBAL`。
+后果不是学术的：弱定义的用处正是「可以被盖掉的默认实现」，当成强的发出去，两份 `.o`
+一链就是 `duplicate symbol`。
+
+### 一格标注，三处消费
+
+`weak` 与 `static` 是同一种东西 —— 不改语义，只改符号怎么写：
+
+- 前端：`parseAttrs` 认 `TOK_WEAK1`/`TOK_WEAK2`（`tcctok.h:114-115`；tcc 那边是
+  `ad->a.weak = 1`，`tccgen.c:4017-4019`），`dad.weak` 一路进 `funcDecl`
+  （`MirFunc.weak`）与全局量的登记（封盘那步 `mod.markGlobalWeak`）。
+  属性写在原型上、写在定义上、写在类型说明符前头都算 —— 只往上加不往下抹，
+  对应 tcc 的 `merge_symattr`。
+- MIR：多一格与 `globals` 同下标的 `globalWeak`，与 `globalLocal` 并排。
+- 写目标文件：ELF 是 `buildSyms` 里的 `STB_WEAK`（与全局的排在同一段，`sh_info`
+  只切「局部/非局部」那一刀）；Mach-O 里它**不在 `n_type` 上** —— 是 `n_desc` 的
+  `N_WEAK_DEF`（0x0080），所以 `macho.js` 的符号写出那一行从写死的 `u16(0)` 变成
+  `u16(s.desc ?? 0)`。
+
+### 门
+
+`tests/c/weak-sym.js`，2 条：符号表的每一行与 `tcc -c` 相同（地址无关，只比名字与那个
+字母），再用我们自己的 `macho-link` 链起来跑一遍 —— 弱定义在没人盖它的时候就是普通定义。
+`selfboot` 的定点不动（597104 字节），因为没有 `weak` 的地方那一格是 `false`。
+
+### 还欠
+
+`__attribute__((alias("目标")))`。tcc 的做法是把别名**当成目标那条符号的一个副本**发出去
+（`tccgen.c:8972-8983`：`esym = elfsym(sym_find(ad.alias_target))`，再
+`put_extern_sym2` 同一个节、同一个 value、同一个 size；目标还没定义就报
+`unsupported forward __alias__ attribute`）。我们现在把那条没有函数体的声明当外部函数，
+给了它一个转发桩 `$ext$别名` —— 名字与绑定都不对。下一片。
+
+<!-- 第九刀第一百〇四片-END -->
 
 
 

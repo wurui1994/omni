@@ -77,6 +77,7 @@ const X86_64_RELOC_GOT_LOAD = 3;
 /* <mach-o/nlist.h>：n_type 的位。 */
 const N_EXT = 0x01;
 const N_SECT = 0x0e;
+const N_WEAK_DEF = 0x0080;   // n_desc 里的那一位（第一百〇四片）
 const N_UNDF = 0x00;
 
 /* ---------------------------------------------------------------- 写字节
@@ -256,6 +257,9 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign) {
       strx: strs.intern(macName(d.name)),
       type: d.local === true ? N_SECT : (N_SECT | N_EXT),
       sect,
+      /* 弱定义（第九刀第一百〇四片）：Mach-O 里它不在 `n_type` 上，而是 `n_desc` 的
+       * `N_WEAK_DEF` 那一位 —— 与 ELF 的 STB_WEAK 对应的那一格。 */
+      desc: d.local !== true && d.weak === true ? N_WEAK_DEF : 0,
       value: d.off + (sect === 2 ? dataAddr : 0),
     });
   }
@@ -355,7 +359,7 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign) {
 
   // ---- 符号表（nlist_64）
   for (const s of syms) {
-    b.u32(s.strx).u8(s.type).u8(s.sect).u16(0).u64(s.value);
+    b.u32(s.strx).u8(s.type).u8(s.sect).u16(s.desc ?? 0).u64(s.value);
   }
 
   // ---- 字符串表

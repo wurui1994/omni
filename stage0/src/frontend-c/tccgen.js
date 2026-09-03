@@ -160,7 +160,7 @@ import {
   TOK_INLINE1, TOK_INLINE2, TOK_RESTRICT, TOK_RESTRICT1, TOK_RESTRICT2,
   TOK_EXTENSION, TOK_ATOMIC, TOK_THREAD_LOCAL, TOK_THREAD,
   TOK_ATTRIBUTE1, TOK_ATTRIBUTE2, TOK_ASM1, TOK_ASM2, TOK_ASM3,
-  TOK_ALIGNED1, TOK_ALIGNED2, TOK_PACKED1, TOK_PACKED2,
+  TOK_ALIGNED1, TOK_ALIGNED2, TOK_PACKED1, TOK_PACKED2, TOK_WEAK1, TOK_WEAK2,
   TOK_ALIGNOF1, TOK_ALIGNOF2, TOK_ALIGNOF3,
   TOK_TYPEOF1, TOK_TYPEOF2, TOK_TYPEOF3, TOK_LABEL,
   TOK_BUILTIN_VA_START, TOK_BUILTIN_VA_ARG, TOK_BUILTIN_VA_END, TOK_BUILTIN_VA_COPY,
@@ -5548,6 +5548,11 @@ export class CGen {  /**
           if (ad !== null) ad.aligned = n;
         } else if (t === TOK_PACKED1 || t === TOK_PACKED2) {
           if (ad !== null) ad.packed = true;
+        } else if (t === TOK_WEAK1 || t === TOK_WEAK2) {
+          /* `weak`（第一百〇四片）：不带参数，改的是这个名字在符号表里的**绑定**。
+           * tcc 那边是 `ad->a.weak = 1`（`tccgen.c:4017-4019`），一路带到
+           * `put_extern_sym` 的 `STB_WEAK`。 */
+          if (ad !== null) ad.weak = true;
         } else if (this.tok === LPAR) {
           let depth = 0;
           do {
@@ -6562,7 +6567,7 @@ export class CGen {  /**
         this.tokc = this.cpp.tokc;
         if (isLabel) break;
       }
-      const sad = { aligned: 0, packed: false };
+      const sad = { aligned: 0, packed: false, weak: false };
       const spec = oldint ? ctype(VT_INT, null) : this.parseBtype(sad);
       const isTypedef = (spec.t & VT_TYPEDEF) !== 0;
       const isExtern = (spec.t & VT_EXTERN) !== 0;
@@ -6580,7 +6585,7 @@ export class CGen {  /**
       if (this.tok === SEMI) { this.next(); continue; }
       let wasBody = false;
       for (;;) {
-        const dad = { aligned: sad.aligned, packed: sad.packed };
+        const dad = { aligned: sad.aligned, packed: sad.packed, weak: sad.weak === true };
         this.vlaMode = vlaMode;
         const d = this.declarator(base, 'need', dad);
         this.vlaMode = 0;
@@ -6615,7 +6620,8 @@ export class CGen {  /**
            * —— 与 `count` 同一个位置、同一种带法。 */
           if (dad.aligned > 0) d.ty.talign = dad.aligned;
         } else if (isFunc(d.ty.t)) {
-          if (this.funcDecl(global, name, d.ty, isInline, (spec.t & VT_STATIC) !== 0)) {
+          if (this.funcDecl(global, name, d.ty, isInline, (spec.t & VT_STATIC) !== 0,
+            dad.weak === true)) {
             wasBody = true; break;
           }
         } else {
@@ -6701,6 +6707,10 @@ export class CGen {  /**
             /* `static` 的全局量是内部链接（第九十二片）。记在登记上、封盘那一步才用 ——
              * 与函数那一侧同一个道理：先写 `static int x;` 后写 `int x = 1;` 是合法的。 */
             if (hasStatic) e.isStatic = true;
+            /* `weak`（第一百〇四片）：与 `static` 同一种带法 —— 记在登记上，封盘那一步
+             * 才变成符号的绑定。属性写在哪一条声明上都算（`__attribute__((weak)) int x;`
+             * 与 `int x __attribute__((weak));` 都有人写），所以只往上加不往下抹。 */
+            if (dad.weak === true) e.weak = true;
           } else if (isExtern) e = this.declareExternLocal(name, vty, hasInit, dad.aligned);
           else if (hasStatic) e = this.declareStaticLocal(name, vty, dad.aligned, extra);
           else e = this.declareLocal(name, vty, dad.aligned, extra);
@@ -6740,8 +6750,11 @@ export class CGen {  /**
   }
 
   /** 函数声明或定义。当前记号是 `(`。回 true 表示读掉了一个**函数体**。 */
-  funcDecl(global, name, fnTy, isInline, isStatic) {
+  funcDecl(global, name, fnTy, isInline, isStatic, isWeak = false) {
     const info = this.funcSym(name);
+    /* `weak`（第一百〇四片）：写在原型上算，写在定义上也算 —— 与 `static` 同一种带法。
+     * tcc 那边是 `merge_symattr` 把两条声明的属性并起来。 */
+    if (isWeak === true) info.f.weak = true;
     /* `static` 的函数是**内部链接**（C11 6.2.2）：符号只在这个翻译单元里有效。
      * 记在 `info` 上而不是当场用 —— 原型上写了 `static`、定义时省掉的写法是合法的，
      * 内部链接跟着第一次那个声明（第九十二片）。 */
@@ -7539,6 +7552,7 @@ export function lowerCNative(path, text, host, defs) {
     }
     const no = e.gno === undefined ? mod.globalNo(name) : e.gno;
     if (e.isStatic === true) mod.markGlobalLocal(no);
+    if (e.weak === true) mod.markGlobalWeak(no);
     mod.setGlobalData(no, size, al, bytes, fixups);
   }
   /* 匿名的静态块（第三十四片）：静态的复合字面量。与有名字的那些一模一样地切 ——

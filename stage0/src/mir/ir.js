@@ -763,6 +763,10 @@ export class MirModule {
      * `static` 的全局量就在这一格上：C11 6.2.2 的内部链接，两个翻译单元里各有一个
      * `static int nb_syms` 不该撞。 */
     this.globalLocal = [];
+    /* 与 globals 同下标的「这个符号是**弱**的吗」（第九刀第一百〇四片，
+     * `__attribute__((weak))`）。同样只有写目标文件那一步看它：ELF 里是 STB_WEAK，
+     * Mach-O 里是 N_WEAK_DEF —— 语义在链接器那边（弱的定义被强的盖掉、找不到不算错）。 */
+    this.globalWeak = [];
     this.ops = [];                // {name, lits}：运行时 op，CALLOP 的 a
     this.opIndex = new Map();
     this.accs = [];               // {type, field}：字段访问描述符，FLD/FLDSET 的 aux
@@ -850,6 +854,7 @@ export class MirModule {
     this.globalTy.push(T_DYN);
     this.globalBlob.push(null);
     this.globalLocal.push(false);
+    this.globalWeak.push(false);
     this.globalIndex.set(name, i);
     return i;
   }
@@ -858,6 +863,12 @@ export class MirModule {
   markGlobalLocal(no) {
     if (this.globals[no] === undefined) throw new Error(`mir: 没有 ${no} 号模块级变量`);
     this.globalLocal[no] = true;
+  }
+
+  /** 这个全局的符号是弱的（`__attribute__((weak))`）。见 `globalWeak` 头上那段。 */
+  markGlobalWeak(no) {
+    if (this.globals[no] === undefined) throw new Error(`mir: 没有 ${no} 号模块级变量`);
+    this.globalWeak[no] = true;
   }
 
   /**

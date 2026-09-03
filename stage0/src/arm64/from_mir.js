@@ -1118,7 +1118,11 @@ export function genModule(mod) {
     while (dataBytes.length % al !== 0) dataBytes.push(0);
     const base = dataBytes.length;
     dataSyms.push({
-      name: mod.globals[gi], off: base, sect: 2, local: mod.globalLocal[gi] === true,
+      name: mod.globals[gi],
+      off: base,
+      sect: 2,
+      local: mod.globalLocal[gi] === true,
+      weak: mod.globalWeak[gi] === true,
     });
     for (let k = 0; k < size; k++) {
       const b = blob === null ? 0 : blob.bytes[k];
