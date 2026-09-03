@@ -107,8 +107,11 @@ const CASES_LIST = [
   },
 ];
 
-const W = 16;
-const H = 16;
+/* 64×64 = 4096 个像素、12288 个通道。比 16×16 宽得多（SDF 的边界、hex 网格的格线
+ * 这些「只在某些像素上不同」的东西要够大的画布才踩得到），而我们这一侧一个像素五个
+ * `print`，再大就是在量 `print` 而不是量像素了。128×128 那一档在下面单独跑一份。 */
+const W = 64;
+const H = 64;
 
 for (const c of CASES_LIST) {
   const uni = {};
@@ -151,6 +154,7 @@ for (const c of CASES_LIST) {
   let worst = 0;
   let worstAt = '';
   let over = 0;
+  let atTol = 0;
   for (const [k, b] of got) {
     const a = want.get(k);
     if (a === undefined) {
@@ -162,6 +166,7 @@ for (const c of CASES_LIST) {
       const d = Math.abs(a[i] - b[i]);
       if (d > worst) { worst = d; worstAt = `${k} 通道${i}：尺子 ${a[i]} / 我们 ${b[i]}`; }
       if (d > TOL) over++;
+      else if (d > 0) atTol++;
     }
   }
   if (over < 0) continue;
@@ -181,7 +186,48 @@ for (const c of CASES_LIST) {
     bad(`${c.name}：与真 GL 差得超过容差 ${TOL}`,
       `    超差 ${over} 个通道（共 ${got.size * 3} 个），最大差 ${worst}\n    最坏那一处 ${worstAt}`);
   } else {
-    ok(`${c.name}：${got.size} 个像素与真 GL 对上（最大逐通道差 ${worst}，容差 ${TOL}）`);
+    ok(`${c.name}：${got.size} 个像素与真 GL 对上（最大差 ${worst}、差 1 的通道 ${atTol} 个，容差 ${TOL}）`);
+  }
+}
+
+/* ---- 大画布那一档：128×128 只跑第一份（一个像素五个 `print`，再往上就是在量 print）。
+ * 挑 `bench-complex` 是因为它有 30 个 SDF 与 `smoothstep`，边界上最容易出「差 1」。 */
+{
+  const W2 = 128;
+  const uni = { u_resolution: [W2, W2] };
+  const vp = join(CASES, 'bench-vert.vert');
+  const fp = join(CASES, 'bench-complex.frag');
+  const spec = join(OUT, 'spec-big.json');
+  writeFileSync(spec, JSON.stringify({ vert: vp, frag: fp, w: W2, h: W2, uniforms: uni }));
+  const ref = spawnSync('python3', [REF, spec], { encoding: 'utf8', maxBuffer: 1 << 28 });
+  const prog = join(OUT, 'ours-big.sx');
+  writeFileSync(prog, glslTriProgram(check(vp, 'vert'), check(fp, 'frag'), W2, W2, uni));
+  const mine = spawnSync(process.execPath, [CLI, 'run', prog], { encoding: 'utf8', maxBuffer: 1 << 28 });
+  if (ref.status !== 0 || mine.status !== 0) {
+    bad('128×128 那一档跑不动',
+      `    ${(ref.stderr ?? '').trim().split('\n').slice(-2).join(' ')} | `
+      + `${(mine.stderr ?? '').trim().split('\n').slice(0, 2).join(' ')}`);
+  } else {
+    const want = refMap(ref.stdout);
+    const got = oursMap(mine.stdout);
+    let worst = 0;
+    let over = 0;
+    let atTol = 0;
+    for (const [k, b] of got) {
+      const a = want.get(k);
+      for (let i = 0; i < 3; i++) {
+        const d = Math.abs(a[i] - b[i]);
+        if (d > worst) worst = d;
+        if (d > TOL) over++;
+        else if (d > 0) atTol++;
+      }
+    }
+    if (got.size !== W2 * W2) bad('128×128：像素个数不对', `    ${got.size}`);
+    else if (over > 0) bad(`128×128：超差 ${over} 个通道`, `    最大差 ${worst}`);
+    else {
+      ok(`128×128 bench-complex：${got.size} 个像素与真 GL 对上`
+        + `（最大差 ${worst}、差 1 的通道 ${atTol}/${got.size * 3}）`);
+    }
   }
 }
 
