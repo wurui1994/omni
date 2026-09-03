@@ -754,8 +754,14 @@ identifier，所以两份输出得同名不同目录才比得。
 与 Mach-O 的 `N_WEAK_DEF`（`macho.js`，它不在 `n_type` 上而是 `n_desc` 的那一位）。
 门是 `tests/c/weak-sym.js`：与 `tcc -c` 出的 ELF 比 `nm` 的每一行 —— 弱的函数是 `W`、
 弱的数据是 `V`、强的是 `T`/`D`、`static` 的是 `t`/`d`，再链起来跑一遍。
-`__attribute__((alias("目标")))` 还欠着：我们现在给它一个转发桩（`$ext$别名`），
-tcc 给的是**与目标同址的一条符号**，那是下一片。
+`__attribute__((alias("目标")))` 也做了（第一百〇五片）：它不是一条外部声明，而是
+**同一个地址的第二个名字** —— 代码一份、符号两条。前端在 `funcSym` 之前就拦下来
+（不建 MirFunc、不发桩），把名字接到目标那一格上，再往 `MirModule.aliases` 记一条；
+写目标文件那步照目标的落点（函数是 `blob.offsets[目标号]`、数据是那一格的 `base`）
+多发一条符号。数据的别名同理：登记复制目标那份、`gno` 写成目标的号，于是同一个单元里
+用别名取的就是目标的地址。目标还没定义就用它（前向别名）明着拒 ——
+`unsupported forward __alias__ attribute`，与 tcc 同一句同一行
+（`tests/c/alias-sym.js`，4 条）。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -13194,6 +13200,53 @@ ours:  _wfn T      _wvar D      _strong T   _svar D   _hidden d
 给了它一个转发桩 `$ext$别名` —— 名字与绑定都不对。下一片。
 
 <!-- 第九刀第一百〇四片-END -->
+
+## 落地：第九刀第一百〇五片
+
+`__attribute__((alias("目标")))` 以前被当成「外部函数的声明」：没有函数体的那条声明落进
+`sealExternSymbols`，得到一个改名成 `$ext$别名` 的转发桩。三处都不对 —— 名字不对
+（符号表里根本没有那个别名）、绑定不对（桩是局部符号）、还白发了一份代码。
+
+### tcc 的做法
+
+`tccgen.c:8972-8983`：
+
+```c
+if (ad.alias_target && l == VT_CONST) {
+    esym = elfsym(sym_find(ad.alias_target));
+    if (!esym)
+        tcc_error("unsupported forward __alias__ attribute");
+    put_extern_sym2(sym_find(v), esym->st_shndx, esym->st_value, esym->st_size, 1);
+}
+```
+
+别名不是一份代码，是**目标那条符号的一个副本**：同一个节、同一个 value、同一个 size。
+「目标必须已经定义」是这条实现的直接后果 —— 一遍过的编译器在目标出现之前不知道它会落在
+哪儿，所以前向别名当场报错（注释里写得明白：否则要把别名攒到编译单元末尾再发）。
+量过：我们与它同一句、同一行。
+
+### 我们这一格
+
+- 前端：`parseAttrs` 认 `TOK_ALIAS1`/`TOK_ALIAS2`，参数是字符串字面量（相邻的要拼 ——
+  tcc 走 `parse_mult_str`，我们走 `readStrTok`），存进 `ad.aliasTarget`。
+- 函数：在 `funcSym` **之前**拦下来 —— 不建 MirFunc、不进 `sealExternSymbols`。
+  `this.funcs.set(别名, 目标的登记)`（于是同一个单元里 `别名(1)` 就是调目标）
+  加 `mod.addAlias(名, 'f', 目标号, 弱不弱)`。
+- 数据：登记复制目标那份，`gno` 明着写成**目标的**号（否则 `GADDR` 会照别名的名字
+  再登记一个空全局 —— 第一版就撞在这儿：`GADDR 取的是 'gvar_alias' 的地址，
+  可是它只是一格`），另记 `aliasOf` 让封盘那步别再切一块数据。
+- 写目标文件：两个后端在排完数据之后按 `mod.aliases` 补符号（数据用那一格的 `base`），
+  函数那一半在 `cli.js` 里用 `blob.offsets[目标号]`。`weak` 与 `alias` 能同时写
+  （`__attribute__((weak, alias("real")))`），两格互不干扰。
+
+### 门
+
+`tests/c/alias-sym.js`，4 条：符号表与 `tcc -c` 逐行相同（名字 + `nm` 那个字母）、
+别名与目标**同址**（地址是我们自己排的，但这个等式必须成立）、链起来跑一遍
+（调别名 == 调目标、读别名的变量 == 读目标）、前向别名拒得与 tcc 一字不差。
+`selfboot` 的定点不动（597104 字节）。
+
+<!-- 第九刀第一百〇五片-END -->
 
 
 

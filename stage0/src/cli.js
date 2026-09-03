@@ -371,6 +371,11 @@ function cObj(path, out, arch, incs, defs, fmt, os) {
       weak: mod.funcs[k].weak === true,
     });
   }
+  /* 函数的别名（第一百〇五片）：与目标同一个偏移 —— 代码一份、符号两条。 */
+  for (const a of mod.aliases) {
+    if (a.kind !== 'f') continue;
+    syms.push({ name: a.name, off: blob.offsets[a.no], local: false, weak: a.weak === true });
+  }
   /* 两个写出器同一份入参（第三十八片）：Mach-O 那个喂 clang 那条「真的能跑」的腿，
    * ELF 那个喂 tcc 那条「字节相同」的腿 —— tcc 的 `-c` 在**所有**目标上都写 ELF。 */
   const write = fmt === 'elf'

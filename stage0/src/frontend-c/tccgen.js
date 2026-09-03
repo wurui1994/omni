@@ -161,6 +161,7 @@ import {
   TOK_EXTENSION, TOK_ATOMIC, TOK_THREAD_LOCAL, TOK_THREAD,
   TOK_ATTRIBUTE1, TOK_ATTRIBUTE2, TOK_ASM1, TOK_ASM2, TOK_ASM3,
   TOK_ALIGNED1, TOK_ALIGNED2, TOK_PACKED1, TOK_PACKED2, TOK_WEAK1, TOK_WEAK2,
+  TOK_ALIAS1, TOK_ALIAS2,
   TOK_ALIGNOF1, TOK_ALIGNOF2, TOK_ALIGNOF3,
   TOK_TYPEOF1, TOK_TYPEOF2, TOK_TYPEOF3, TOK_LABEL,
   TOK_BUILTIN_VA_START, TOK_BUILTIN_VA_ARG, TOK_BUILTIN_VA_END, TOK_BUILTIN_VA_COPY,
@@ -5553,6 +5554,14 @@ export class CGen {  /**
            * tcc 那边是 `ad->a.weak = 1`（`tccgen.c:4017-4019`），一路带到
            * `put_extern_sym` 的 `STB_WEAK`。 */
           if (ad !== null) ad.weak = true;
+        } else if (t === TOK_ALIAS1 || t === TOK_ALIAS2) {
+          /* `alias("目标")`（第一百〇五片，`tccgen.c:3974-3981`）：参数是一个字符串
+           * 字面量（相邻的要拼起来 —— tcc 走的是 `parse_mult_str`）。 */
+          this.skip(LPAR);
+          if (this.tok !== TOK_STR) this.expect('alias("target")');
+          const target = this.readStrTok(this.tokc);
+          this.skip(RPAR);
+          if (ad !== null) ad.aliasTarget = target;
         } else if (this.tok === LPAR) {
           let depth = 0;
           do {
@@ -6621,7 +6630,7 @@ export class CGen {  /**
           if (dad.aligned > 0) d.ty.talign = dad.aligned;
         } else if (isFunc(d.ty.t)) {
           if (this.funcDecl(global, name, d.ty, isInline, (spec.t & VT_STATIC) !== 0,
-            dad.weak === true)) {
+            dad.weak === true, dad.aliasTarget)) {
             wasBody = true; break;
           }
         } else {
@@ -6702,7 +6711,22 @@ export class CGen {  /**
           const hasStatic = (spec.t & VT_STATIC) !== 0;
           const inData = global || hasStatic || isExtern;
           let e;
-          if (global) {
+          if (global && dad.aliasTarget !== undefined) {
+            /* 数据的别名（第一百〇五片）：`extern int b __attribute__((alias("a")));`
+             * 不占新的字节 —— 它是 `a` 那块地方的第二个名字。登记复制一份目标的
+             * （地址、类型都跟着目标），另记一条 `aliasOf` 让封盘那步别再切一块数据出来。 */
+            const tgt = this.gvars.get(dad.aliasTarget);
+            if (tgt === undefined || tgt.defined !== true || tgt.addr < 0) {
+              this.err('unsupported forward __alias__ attribute');
+            }
+            const tno = tgt.gno === undefined
+              ? this.mod.globalNo(dad.aliasTarget) : tgt.gno;
+            this.mod.addAlias(name, 'g', tno, dad.weak === true);
+            /* `gno` 明着写成**目标的**号：同一个单元里用这个别名（`GADDR`）取的就是目标
+             * 那一格的地址，不会另外登记一个空的全局。 */
+            e = { ...tgt, name, gno: tno, aliasOf: dad.aliasTarget };
+            this.gvars.set(name, e);
+          } else if (global) {
             e = this.declareGlobal(name, vty, isExtern && !hasInit, dad.aligned, extra);
             /* `static` 的全局量是内部链接（第九十二片）。记在登记上、封盘那一步才用 ——
              * 与函数那一侧同一个道理：先写 `static int x;` 后写 `int x = 1;` 是合法的。 */
@@ -6750,7 +6774,25 @@ export class CGen {  /**
   }
 
   /** 函数声明或定义。当前记号是 `(`。回 true 表示读掉了一个**函数体**。 */
-  funcDecl(global, name, fnTy, isInline, isStatic, isWeak = false) {
+  funcDecl(global, name, fnTy, isInline, isStatic, isWeak = false, aliasTarget = undefined) {
+    /* 别名（第一百〇五片）：`int f2(int) __attribute__((alias("f1")));` 不是一条外部声明
+     * —— 它是**同一个地址的第二个名字**。所以在 `funcSym` 之前拦下来：不建 MirFunc、
+     * 不发桩，只把名字接到目标那一格上，再记一条别名让写目标文件那步发符号。
+     *
+     * 目标必须**已经定义**（tcc 也是这一条：`tccgen.c:8978-8980` 找不到 elfsym 就报
+     * `unsupported forward __alias__ attribute` —— 别名得跟着目标一起发出去，而一遍过的
+     * 编译器在目标出现之前不知道它落在哪儿）。 */
+    if (aliasTarget !== undefined) {
+      const tgt = this.funcs.get(aliasTarget);
+      if (tgt === undefined || !tgt.defined) {
+        this.err('unsupported forward __alias__ attribute');
+      }
+      const prev = this.funcs.get(name);
+      if (prev !== undefined && prev.defined) this.err(`redefinition of '${name}'`);
+      this.funcs.set(name, tgt);
+      this.mod.addAlias(name, 'f', tgt.no, isWeak === true);
+      return false;
+    }
     const info = this.funcSym(name);
     /* `weak`（第一百〇四片）：写在原型上算，写在定义上也算 —— 与 `static` 同一种带法。
      * tcc 那边是 `merge_symattr` 把两条声明的属性并起来。 */
@@ -7518,6 +7560,9 @@ export function lowerCNative(path, text, host, defs) {
   const fixes = new Map();   // 绝对偏移 -> {kind, no, add}
   for (const fx of gen.pendingFix) fixes.set(fx.off, fx);
   for (const [name, e] of gen.gvars) {
+    /* 别名（第一百〇五片）：它与目标同址，数据由目标那一格切 —— 这儿跳过，
+     * 符号由 `mod.aliases` 那张表在后端发。 */
+    if (e.aliasOf !== undefined) continue;
     if (e.addr < 0) continue;   // 试探性定义没补上长度：用它的地方已经报过了
     const s0 = typeSize(e.ty);
     if (!e.defined) {

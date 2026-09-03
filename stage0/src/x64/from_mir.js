@@ -1271,6 +1271,8 @@ export function genModule(mod) {
   /* 模块级变量（第二十一片起两种）：说过大小的按它的大小与对齐摆（C 的全局量），
    * 没说过的还是「一格」八个零字节。对齐最多 4096，与 arm64 那一份同一条（第二十九片）。 */
   let dataAlign = 8;
+  /* 别名要照目标的落点发符号（第一百〇五片），与 arm64 那一份同一条。 */
+  const gBase = new Map();
   for (let gi = 0; gi < mod.globals.length; gi++) {
     const blob = mod.globalBlob[gi];
     /* 外部的全局量（第三十一片）：不占字节、不定义符号，与 arm64 那一份同一条。 */
@@ -1281,6 +1283,7 @@ export function genModule(mod) {
     if (al > dataAlign) dataAlign = al;
     while (dataBytes.length % al !== 0) dataBytes.push(0);
     const base = dataBytes.length;
+    gBase.set(gi, base);
     dataSyms.push({
       name: mod.globals[gi],
       off: base,
@@ -1295,6 +1298,13 @@ export function genModule(mod) {
     for (const fx of blob === null ? [] : blob.fixups ?? []) {
       dataRelocs.push({ at: base + fx.off, kind: 'POINTER64', sym: fixSym(fx), sect: 2 });
     }
+  }
+  /* 数据的别名（第一百〇五片）：与目标同一个偏移，符号表里多一条。 */
+  for (const a of mod.aliases) {
+    if (a.kind !== 'g') continue;
+    const base = gBase.get(a.no);
+    if (base === undefined) nyi(`别名 '${a.name}' 的目标不在数据段里`);
+    dataSyms.push({ name: a.name, off: base, sect: 2, local: false, weak: a.weak === true });
   }
   const strSyms = new Map();
   const items = mod.consts.items;

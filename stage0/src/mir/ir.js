@@ -767,6 +767,10 @@ export class MirModule {
      * `__attribute__((weak))`）。同样只有写目标文件那一步看它：ELF 里是 STB_WEAK，
      * Mach-O 里是 N_WEAK_DEF —— 语义在链接器那边（弱的定义被强的盖掉、找不到不算错）。 */
     this.globalWeak = [];
+    /* 别名（第九刀第一百〇五片，`__attribute__((alias("目标")))`）：一个名字与目标
+     * **同址**，符号表里两条、代码一份。`{name, kind:'f'|'g', no, weak}` —— `no` 是目标
+     * 的函数号或全局号。同样是标注：写目标文件那一步照目标的落点再发一条符号。 */
+    this.aliases = [];
     this.ops = [];                // {name, lits}：运行时 op，CALLOP 的 a
     this.opIndex = new Map();
     this.accs = [];               // {type, field}：字段访问描述符，FLD/FLDSET 的 aux
@@ -869,6 +873,21 @@ export class MirModule {
   markGlobalWeak(no) {
     if (this.globals[no] === undefined) throw new Error(`mir: 没有 ${no} 号模块级变量`);
     this.globalWeak[no] = true;
+  }
+
+  /**
+   * 一条别名（第九刀第一百〇五片）。`kind` 是 `'f'`（函数）或 `'g'`（模块级变量），
+   * `no` 是目标的号。函数别名顺手把名字接到目标那一格上 —— 于是同一个单元里
+   * `别名(1)` 就是调目标，不必再发一份代码。
+   */
+  addAlias(name, kind, no, weak = false) {
+    if (kind === 'f') {
+      if (this.funcs[no] === undefined) throw new Error(`mir: 没有 ${no} 号函数`);
+      if (!this.funcIndex.has(name)) this.funcIndex.set(name, no);
+    } else if (this.globals[no] === undefined) {
+      throw new Error(`mir: 没有 ${no} 号模块级变量`);
+    }
+    this.aliases.push({ name, kind, no, weak });
   }
 
   /**

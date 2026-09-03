@@ -1106,6 +1106,8 @@ export function genModule(mod) {
    * 对齐最多到 4096（第二十九片：`__data` 那一节的对齐字段现在按内容算，
    * 不再是写死的 8）—— 上界取一页，再往上就该问「你到底在摆什么」了。 */
   let dataAlign = 8;
+  /* 别名要照目标的落点发符号（第一百〇五片），所以边排边记每个全局的起点。 */
+  const gBase = new Map();
   for (let gi = 0; gi < mod.globals.length; gi++) {
     const blob = mod.globalBlob[gi];
     /* 外部的全局量（第三十一片）：不占字节、不定义符号 —— 它落进「未定义的外部符号」
@@ -1117,6 +1119,7 @@ export function genModule(mod) {
     if (al > dataAlign) dataAlign = al;
     while (dataBytes.length % al !== 0) dataBytes.push(0);
     const base = dataBytes.length;
+    gBase.set(gi, base);
     dataSyms.push({
       name: mod.globals[gi],
       off: base,
@@ -1131,6 +1134,13 @@ export function genModule(mod) {
     for (const fx of blob === null ? [] : blob.fixups ?? []) {
       dataRelocs.push({ at: base + fx.off, kind: 'POINTER64', sym: fixSym(fx), sect: 2 });
     }
+  }
+  /* 数据的别名（第一百〇五片）：与目标同一个偏移，符号表里多一条。 */
+  for (const a of mod.aliases) {
+    if (a.kind !== 'g') continue;
+    const base = gBase.get(a.no);
+    if (base === undefined) nyi(`别名 '${a.name}' 的目标不在数据段里`);
+    dataSyms.push({ name: a.name, off: base, sect: 2, local: false, weak: a.weak === true });
   }
   const strSyms = new Map();
   const items = mod.consts.items;
