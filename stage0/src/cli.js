@@ -17,6 +17,8 @@ import { join, basename, dirname, isAbsolute, resolve } from './host/path.js';
 import { hash16 } from './host/hash.js';
 import { findCmd, splitArgv, canonicalize, ownsVerbose, renderHelp, renderLegacy } from './cli/tree.js';
 import { ROOT, LEGACY } from './cli/cmds.js';
+import { renderPlan } from './cli/stages.js';
+import { planForC } from './cli/plan-c.js';
 import { linkJs } from './frontend-js/link.js';
 import { lowerJs } from './frontend-js/lower.js';import { lowerWat } from './frontend-wat/lower.js';
 import { lowerAsy } from './frontend-asy/lower.js';
@@ -2202,6 +2204,18 @@ function main(argv) {
   }
   if (!path) throw new OmniError(`command '${cmd}' needs a source file`);
   if (!exists(path)) throw new OmniError(`no such file: ${path}`);
+
+  /* `--explain`（ADR-0018 决策五）：印出将要走的管线然后停 —— **一个字节都不写盘、不执行**。
+   * 它看的是与实现同一批开关，所以说得准；表在动手之前就齐，这也是 `-v` 能与它共用同一份
+   * 渲染的前提。分片 2 先覆盖 C 那一条腿（管线最长、也是逐字节对着 tcc 量的那条）。 */
+  if (rest.includes('--explain')) {
+    const plan = planForC(cmd, path, files, rest);
+    if (plan === null) {
+      throw new OmniError(`--explain 还没覆盖 '${cmd}'（ADR-0018 分片 2 先做 C 那一条腿）`);
+    }
+    stdout(renderPlan(plan));
+    return 0;
+  }
 
   switch (cmd) {
     case 'run': {

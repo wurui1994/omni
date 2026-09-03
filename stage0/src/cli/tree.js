@@ -32,6 +32,7 @@
 /** 每一级都认的那几个（`-h` 在任何一级都要能用，不然多级 `--help` 就是空话）。 */
 export const GLOBAL_FLAGS = [
   { name: '--verbose', alias: '-v', arity: 0, brief: '把每一步与它的耗时打到 stderr' },
+  { name: '--explain', arity: 0, brief: '印出将要走的管线，然后停（不写盘、不执行）' },
   { name: '--help', alias: '-h', arity: 0, brief: '印这一级的用法' },
 ];
 

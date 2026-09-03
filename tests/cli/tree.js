@@ -1,12 +1,15 @@
-// tests/cli/tree.js —— 命令树（ADR-0018 决策四）
+// tests/cli/tree.js —— 命令树与管线表（ADR-0018 决策四、五）
 //
-// 这一份只查**机制**：走树、分开关、别名铺平、每一级的 --help。真正跑起来的行为由各语言
-// 那几组门管（tests/c/*、tests/run.js）。
+// 这一份只查**机制**：走树、分开关、别名铺平、每一级的 --help，以及管线表那两个渲染
+// （`--explain` 与 `-v` 是同一份数据的两种印法）。真正跑起来的行为由各语言那几组门管
+// （tests/c/*、tests/run.js）。
 //
 //   node tests/cli/tree.js
 
 import { findCmd, splitArgv, canonicalize, ownsVerbose, renderHelp } from '../../stage0/src/cli/tree.js';
 import { ROOT, LEGACY } from '../../stage0/src/cli/cmds.js';
+import { newPlan, addStage, renderPlan, renderStage } from '../../stage0/src/cli/stages.js';
+import { planForC } from '../../stage0/src/cli/plan-c.js';
 
 let pass = 0;
 let fail = 0;
@@ -143,6 +146,56 @@ const err = (m) => new Error(m);
   }
   eq('LEGACY 里每个旧名都还走得通', bads, []);
 }
+
+/* ---- 管线表（决策五）：`--explain` 与 `-v` 是同一份数据的两个渲染。 */
+{
+  const p = newPlan('c obj', 'c → cpp → MIR → x86_64 → ELF(.o)');
+  addStage(p, { phase: 'front', verb: 'cpp', in: 't.c', out: 'tokens' });
+  addStage(p, { phase: 'exec', verb: 'exec', in: 'MIR', note: '解释器' });
+  eq('摘要行在最前', renderPlan(p).split('\n')[0], 'pipeline  c → cpp → MIR → x86_64 → ELF(.o)');
+  eq('有 out 才印箭头（exec 那一格没有产物形态）',
+    [renderStage(p, 0).includes('->'), renderStage(p, 1).includes('->')], [true, false]);
+  eq('-v 那一路就是同一行加耗时', renderStage(p, 0, 12), `${renderStage(p, 0)}  +12ms`);
+}
+{
+  /* 汉字占两列 —— 不算这一格，带中文的注释会把后面的列顶歪。
+   * 注意**不能**拿 `indexOf` 比：那是 UTF-16 码元的位置，汉字算一个 —— 正确的两行在
+   * `indexOf` 上本来就差 4（那四个汉字）。要比的是「印出来在第几列」。 */
+  const colsOf = (s) => {
+    let n = 0;
+    for (const ch of s) {
+      const c = ch.codePointAt(0);
+      n += (c >= 0x2e80 && c <= 0xa4cf) || (c >= 0xff00 && c <= 0xff60) ? 2 : 1;
+    }
+    return n;
+  };
+  const p = newPlan('x', 's');
+  addStage(p, { phase: 'back', verb: 'write', in: 'x86_64 + 数据三段', out: 'ELF' });
+  addStage(p, { phase: 'back', verb: 'read', in: 'abc', out: 'ELF' });
+  const at = (i) => { const l = renderStage(p, i); return colsOf(l.slice(0, l.indexOf('->'))); };
+  eq('两行的 -> 落在同一个显示列上', at(0), at(1));
+}
+{
+  const p = planForC('c-obj', 't.c', ['t.c'], ['--arch', 'x86_64', '--os', 'win32', '--format', 'elf']);
+  eq('win32 目标 + ELF 容器（tcc 的 -c 在所有目标上都写 ELF）',
+    [p.summary, renderPlan(p).includes('.rdata')],
+    ['c → cpp → MIR → x86_64 → ELF(.o)', true]);
+}
+{
+  const p = planForC('c-obj', 't.c', ['t.c'], ['--arch', 'arm64', '--os', 'osx']);
+  eq('osx 上没给 -f 就是 Mach-O', p.summary, 'c → cpp → MIR → arm64 → MACHO(.o)');
+}
+{
+  const p = planForC('c-run', 't.c', ['t.c'], []);
+  const last = p.stages[p.stages.length - 1];
+  eq('c run 的最后一格是 exec、没有 out', [last.phase, last.out], ['exec', undefined]);
+}
+{
+  const p = planForC('pe-link', 'a.o', ['a.o', 'b.o'], ['--shared']);
+  eq('pe-link --shared 是 .dll，且要解导入表', [p.summary, renderPlan(p).includes('idata')],
+    ['2×.o → merge → PE（.dll）', true]);
+}
+eq('还没覆盖的命令回 null', planForC('emit-js', 'a.omni', ['a.omni'], []), null);
 {
   const bads = [];
   for (const [, now] of LEGACY) {

@@ -277,3 +277,41 @@ import 树链成一份程序，模块作用域的名字在整份程序里必须�
 `key`、`LEGACY` 那张表两栏都真的走得通），进了 `tests/all.js`。行为那一侧靠既有的门：
 `tests/run.js` 96/0、C 那一族全绿、`tcc-obj` 还是 0 字节相同 / 21 容器相同 / 89 不同。
 
+## 落地：分片 2（前半）—— 管线表与 `--explain`
+
+新增两份：`cli/stages.js`（管线表 + 两个渲染）与 `cli/plan-c.js`（C 那条腿的表怎么造）。
+`--explain` 进了 `GLOBAL_FLAGS`，`cli.js` 里多一段「造表、印、返回 0」。
+
+`--explain` 先覆盖 **C 那条腿**：管线最长（`c → cpp → MIR → x86_64 → ELF .o → 链接 →
+PE .exe`），也是这个工程逐字节对着 tcc 量的那条 —— 「走了哪一路」在这儿最要紧。样子：
+
+```
+$ omni c obj t.c -o t.o --arch x86_64 --os win32 -f elf --explain
+pipeline  c → cpp → MIR → x86_64 → ELF(.o)
+  1  front  read     t.c
+  2  front  cpp      text               -> tokens
+  3  mid    lower    tokens             -> MIR         native：没有线性内存，地址就是真地址
+  4  back   codegen  MIR                -> x86_64      代码节里还多一份共用的展开信息
+  5  back   write    x86_64 + 数据三段  -> ELF ET_REL  .text/.data/.rdata/.bss  t.o
+```
+
+三条规矩落在代码里：
+
+- `plan-c.js` **只造表、不干活**，看的是与实现同一批开关 —— 所以 `--explain` 能做到
+  「一个字节都不写盘、不执行」而说得准。
+- `->` 只在真的有 `out` 时印：`exec` 那一格没有产物形态，硬印一个箭头就是在骗人
+  （`c run` 的最后一格）。
+- 列宽按**显示列**算，不按 `.length`：汉字占两列，不算这一格带中文的注释会把后面的列
+  顶歪（`x86_64 + 数据三段` 那一行）。测试里那一条也不能拿 `indexOf` 比 —— 那是 UTF-16
+  码元的位置，正确的两行在它上面本来就差 4。
+
+自举那条链又逮了一个同名：`stages.js` 的 `padTo` 与 `interp/libc.js` 的撞，改名 `padCol`。
+（分片 1 是 `pad` 与 `mir/print.js` 撞。新写模块级小工具函数时这一格要先查。）
+
+`tests/cli/tree.js` 长到 **36/0**（多了管线表那 9 条）。C 那一族与 `tests/run.js` 照旧全绿。
+
+**还没做的**：`-v` 还是老的 `vlog`——把那些调用点改成「把这一格标成完成」是分片 2 的后半；
+`--explain` 还没覆盖我们自己那门语言那几条（`run`/`build`/`emit`），那要先把
+「按缓存命中分叉」那一路的决定提前算出来。
+
+
