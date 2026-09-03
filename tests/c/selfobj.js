@@ -310,6 +310,45 @@ if (!existsSync(XTCC) || SDK_INC === '') {
           ok(`x64-tcc -c tests/c/gen/*.c == x86_64-osx-tcc -c（${same} 份逐字节相同，`
             + '一份不差)');
         }
+        /* ---- 12. x86_64 的**第二级**（第一百一十五片）：我们编出来的那份 x86_64 tcc
+         * 去编 tinycc 自己的十二份源码，与交叉编那份写出来的字节逐个相同。
+         *
+         * 与上面那 84 份的差别在**规模**：那些是几十行的用例，这十二份是几千行的真代码
+         * （`tccgen.c` 九千行），里头有 tcc 全部的语言特性、全部的 `#include`、
+         * 以及它自己那些位域与联合。arm64 那条腿上这一格是「收口」（第 5 步），
+         * x86_64 这边到这一片才补齐。
+         *
+         * 两边的参数一模一样 —— 目标宏明着给，不靠「编译器自己是什么架构」那一层默认，
+         * 这样两边读到的是同一份源码。 */
+        const tinyArgs = ['-B', TCC_DIR, '-I', SDK_INC, '-I', TCC_DIR, '-DONE_SOURCE=0',
+          '-DTCC_TARGET_X86_64', '-DTCC_TARGET_MACHO'];
+        const tdiffs = [];
+        let tsame = 0;
+        for (const u of X64_UNITS) {
+          const src = join(SRC, `${u}.c`);
+          const as = [...tinyArgs, ...(u === 'tcc' ? xGit : [])];
+          const ro = join(OUT, 'xtref.o');
+          const mo = join(OUT, 'xtmine.o');
+          const r = spawnSync(XTCC, [...as, '-c', src, '-o', ro],
+            { encoding: 'utf8', maxBuffer: 1 << 26 });
+          if (r.status !== 0) {
+            tdiffs.push(`    ${u}.c：尺子自己就拒了 —— ${(r.stderr ?? '').trim().split('\n')[0]}`);
+            continue;
+          }
+          const a = spawnSync('arch', ['-x86_64', xExe, ...as, '-c', src, '-o', mo],
+            { encoding: 'utf8', maxBuffer: 1 << 26 });
+          if (a.status !== 0) {
+            tdiffs.push(`    ${u}.c：我们拒了 —— ${(a.stderr ?? '').trim().split('\n')[0]}`);
+            continue;
+          }
+          if (Buffer.compare(readFileSync(mo), readFileSync(ro)) === 0) tsame++;
+          else tdiffs.push(`    ${u}.c：字节不同`);
+        }
+        if (tdiffs.length > 0) {
+          bad('x64-tcc -c tinycc/*.c == x86_64-osx-tcc -c', tdiffs.slice(0, 6).join('\n'));
+        } else {
+          ok(`x64-tcc -c tinycc/*.c == x86_64-osx-tcc -c（${tsame} 份，逐字节相同）`);
+        }
       }
     }
   }
