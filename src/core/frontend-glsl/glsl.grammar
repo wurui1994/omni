@@ -81,7 +81,8 @@
       ;; `layout` **不在这儿**：关键字表里的每个词都得是某条规则用到的终结符（不然构表
       ;; 就骂），而 `layout(location = N)` 这一刀不收。收了却不用，等于留一个哑符号。
       "uniform" "in" "out" "inout" "const" "flat" "smooth" "noperspective"
-      "if" "else" "for" "while" "return" "break" "continue" "discard" "true" "false")
+      "if" "else" "for" "while" "do" "switch" "case" "default"
+      "return" "break" "continue" "discard" "true" "false")
     (punct INC "++")
     (punct DEC "--")
     (punct LE "<=")
@@ -188,7 +189,21 @@
     (-> ("if" "(" expr ")" stmt "else" stmt) (if-else $3 $5 $7))
     (-> ("while" "(" expr ")" stmt) (while $3 $5))
     ;; `for (int i = 0; i < N; i++)`。三格各自可空 —— 尺子里三格都满，但空格一条规则的事。
-    (-> ("for" "(" for-init opt-expr ";" opt-expr ")" stmt) (for $3 $4 $6 $8)))
+    (-> ("for" "(" for-init opt-expr ";" opt-expr ")" stmt) (for $3 $4 $6 $8))
+    ;; `do BODY while (COND);` —— 体先走一趟，然后才判条件。
+    (-> ("do" stmt "while" "(" expr ")" ";") (do-while $2 $5))
+    ;; `switch`。体里那一串是「标签 + 语句」混着来的（穿落是 GLSL 的语义，不是笔误），
+    ;; 所以标签与语句同一条 `sw-item` 规则，谁在前谁在后由降级那一侧按次序分组。
+    (-> ("switch" "(" expr ")" "{" sw-items "}") (switch $3 $6)))
+
+  (rule sw-items
+    (-> () (sw-items))
+    (-> (sw-items sw-item) (sw-items-add $1 $2)))
+
+  (rule sw-item
+    (-> ("case" expr ":") (sw-case $2))
+    (-> ("default" ":") (sw-default))
+    (-> (stmt) $1))
 
   (rule local-decl
     (-> (type ID) (local $1 $2))

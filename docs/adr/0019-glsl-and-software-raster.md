@@ -1083,6 +1083,109 @@ while：白付的代价，而且一串门的字节对账会无谓地动。
 
 <!-- 落地：第一刀第十八片-END -->
 
+## 量：离「完整的 GLSL 330 core」还差哪几格（第十九片开工前的施工图）
+
+目标改了：不再是「两份尺子用到的子集」，是**llvmpipe 收的那一整套**（GLSL 330 core）。
+所以先把差距量出来，一格一格记 —— 编出来的清单没有用。
+
+现在手上有的（量法：`glsl.grammar` 的规则表 + `check.js` 的类型表 + `lower.js` 的分派）：
+
+- 类型：`void`/`bool`/`int`/`uint`(只有标量)/`float`、`vecN`/`ivecN`/`bvecN`、**方阵** `mat2/3/4`
+- 语句：`if`/`else`、`while`、`for`（含 `continue` 那一圈只走一趟的 while）、`break`、`return`
+- 表达式：全套算术与比较、`&&`/`||`/`!`、三元、`++`/`--`（前后缀）、四种复合赋值、
+  swizzle（三套字母表）、`m[常量]` 取列、构造与标量铺开
+- 内建：**30 条**（`GLSL_BUILTINS` 那张表，按 `gen1`/`gen2`/`gen3`/`len`/`dot2`/`cross` 六种形状）
+- `gl_`：`gl_VertexID`、`gl_Position`、`gl_FragCoord`、`gl_FragDepth`
+
+差的这些，按**依赖**排（不是按好写不好写）：
+
+**A. 纯前端，方言一格都不用动**
+
+1. `do … while`、`switch`/`case`/`default`（含穿落）
+2. `discard`（语法收了、降级明着拒；真做要光栅器那一头认一格「这个像素不写回」）
+3. 位运算与移位：`& | ^ ~ << >>`，以及 `%=`/`&=`/`|=`/`^=`/`<<=`/`>>=`
+4. 逗号表达式（GLSL 有，`for` 的更新格里最常见）
+5. `uvec2/3/4` 与 `uint` 的无符号语义（除法、移位、比较、溢出回绕）
+6. **非方阵** `mat2x3`/`mat3x2`/…（列优先那一格已经量清，剩下是尺寸不再等于 `n`）
+7. 内建全表（330 那份约 150 条）：`transpose`/`inverse`/`determinant`/`matrixCompMult`/
+   `outerProduct`、`reflect`/`refract`/`faceforward`、`all`/`any`/`not` 与
+   `lessThan` 那六条向量比较、`isnan`/`isinf`、`round`/`roundEven`/`trunc`/`modf`、
+   `atan(y,x)` 两参形、`ldexp`/`frexp`
+8. `layout(location = N)` 的括号形式、`precision`、`invariant`、`centroid`/`sample`
+9. 函数重载（GLSL 按实参类型选）与 `out`/`inout` 形参的真语义
+10. 剩下的 `gl_`：`gl_FrontFacing`、`gl_PointCoord`、`gl_PointSize`、`gl_InstanceID`
+11. GLSL 自己那套预处理：`#define`/`#if`/`#ifdef`/`#else`/`#endif`/`#line`/`#extension`
+    （**不是** C 的那一套，要单独一刀）
+
+**B. 要方言先长出东西**
+
+12. 向量比较（掩码）与 `select` —— 原第 18 条待办。`bvecN` 的语义补全卡在这儿，
+    而 `all`/`any`/`lessThan` 那一族又卡在 `bvecN` 上。
+13. 结构体：方言有 `(struct …)`，但 GLSL 的 `struct S { … };` + 构造 + 成员访问要一整套
+14. **定长数组**（`float a[4]`、`.length()`）：静态下标可以摊成 N 个标量；
+    动态下标要方言里有真数组 —— 这是第 15 条的前置
+15. 动态下标（`a[i]`、`m[i]`、`v[i]`）
+16. 采样器与 `texture()`：要纹理内存 + 过滤 + wrap，而且**口径要照 llvmpipe 量**
+    （过滤是不是同一个舍入，规范没规定到位）
+
+依赖链只有三条，写下来省得日后绕：`bvecN` 掩码 -> 向量比较内建 -> `all`/`any`；
+定长数组 -> 动态下标 -> `texture()` 的 LOD 那一族；结构体独立，但 uniform block 要它。
+
+于是**第十九片起按 A 的顺序走**，一片一门；B 那四条每条自己一刀（要动六条腿的那种）。
+
+## 落地：第一刀第十九片 —— `do while` 与 `switch`（穿落、中间的 default 都对）
+
+方言里这两条**都没有**，所以是「落成什么」的问题，不是「转发一下」的问题。
+
+`do while` 落成永真的 while + 体尾判条件：
+
+```
+(while (bool true) (do BODY <C 的中间量> (if (un "!" C) (do (brk)))))
+```
+
+条件摆在**体尾**，于是它可以带中间量 —— 比 `while` 那条宽松（那条得挤成一条表达式，
+见 `condIn`）。体里有 `continue` 时照 `for` 的办法套一圈只走一趟的 while：
+`continue` 要跳到**判条件之前**，不是跳过判条件。这一格错了 `k=2` 那条用例会死循环。
+
+`switch` 落成「只走一趟的 while + 一个匹配标志位」：
+
+```
+(while (bool true) (do
+  <选择子>
+  (let none bool (un "!" <任一标签命中>))       ;; 只有带 default 时才要
+  (let m bool (bool false))
+  (if (bin "||" (var m) <本组标签命中>) (do (set m (bool true)) <本组的体>))
+  …
+  (brk)))
+```
+
+三件事一次落清：**穿落**靠 `m`（一组匹配上就置真，后面每组的条件都带 `(var m)`）；
+**`break`** 就是那一圈的 `(brk)`；**`default` 摆在中间**也对 —— 它的条件是
+「一个标签都没命中」，那一格在进任何组**之前**先算（`none`），不受 `m` 影响。
+
+### 顺手把 break/continue 的落点改成「数层」
+
+从前那一格是 `{ wrapped }` 一个布尔，只够表达「for 套了一圈」。`switch` 一进来就不够了：
+`switch` 里的 `break` 归 switch，`continue` 归外面那层循环。所以改成记**方言循环的层**：
+
+- `loop` 一层真循环、`wrap` 给 `continue` 套的那一圈、`switch` 给 `break` 套的那一圈
+- `break` 往外找最近的 `loop`/`switch`，`continue` 往外找最近的 `loop`/`wrap`
+- 数出来第几层就是 `(brk N)` / `(cont N)`；第 1 层不写号，**从前那些门降出来的方言一个字没动**
+
+`glslOwnContinue` 也跟着补一格：**要进 `switch`**（里头的 continue 不是它的），
+但仍然不进 `for`/`while`/`do while`。
+
+### 门：`tests/glsl/stmt.js` 20/0
+
+单开一门而不是塞进 `lower.js`：那一门查「一份真着色器的像素对不对」，这一门查**语义**。
+每条用例的期望值由门**自己独立算一遍**（JS 写的参照实现），不是把降出来的数抄下来 ——
+抄下来的话降级错了门也绿。三条腿（JS / C / LLVM）逐字节相同。
+
+五条正面：穿落 + 中间的 default + 负标签、`do while` 至少走一趟（`k <= 0` 也走一趟）、
+`do while` 里的 `continue`、`switch` 在 `for` 里（`break` 归 switch、`continue` 归 for，
+i=2 那轮 step 照走）、`switch` 套 `switch`。五条反面：选择子不是 `int`、标签重复、
+`default` 重复、第一个标签之前有语句、标签不是常量。
+
 ## 还没定的（下一步按这个顺序）
 
 1. ~~摸 mesa 那边的边界~~ —— 「量：读 llvmpipe」那一节。

@@ -414,6 +414,12 @@ class GlslChecker {
     if (h === 'while') {
       return { k: 'while', c: this.cond(node.items[1], node), body: this.stmt(node.items[2]) };
     }
+    if (h === 'do-while') {
+      /* 体先走一趟才判条件 —— 与 `while` 的差别只在这一格，但语义上是「至少一趟」。 */
+      const body = this.stmt(node.items[1]);
+      return { k: 'dowhile', c: this.cond(node.items[2], node), body };
+    }
+    if (h === 'switch') return this.switchStmt(node);
     if (h === 'for') {
       /* `for` 自己一层作用域：`for (int i = ...)` 里的 `i` 出了循环就没了。 */
       this.push();
@@ -435,6 +441,59 @@ class GlslChecker {
         + '（GLSL 不像 C，整数不能当条件）');
     }
     return e;
+  }
+
+  /**
+   * `switch`。规范 6.4：选择子是 `int`（或 `uint`），标签是**常量表达式**，
+   * 穿落照 C 的规矩，`default` 可以摆在中间。
+   *
+   * 这儿把体拆成**按次序的组**：连着的标签算同一组，后面跟到下一个标签之前的语句就是
+   * 那一组的体。分组之后穿落与 `default` 的位置都由降级那一侧一次算清（那儿有个
+   * 「匹配过了」的标志位）—— 检查这一侧只管三条：选择子类型、标签重不重、
+   * 第一个标签之前有没有语句。
+   */
+  switchStmt(node) {
+    const sel = this.expr(node.items[1]);
+    if (sel.ty.k !== 'int') {
+      throw this.err(node, `switch 的选择子要是 int，这儿是 ${glslTyText(sel.ty)}`);
+    }
+    const items = glslFlatten(node.items[2], 'sw-items-add', 'sw-items');
+    const groups = [];
+    const seen = new Set();
+    let hasDefault = false;
+    this.push();
+    for (const it of items) {
+      const ih = glslHead(it);
+      if (ih === 'sw-case' || ih === 'sw-default') {
+        const label = ih === 'sw-default' ? null : this.caseLabel(it.items[1], it);
+        if (label === null) {
+          if (hasDefault) throw this.err(it, 'switch 里 default 出现了两次');
+          hasDefault = true;
+        } else {
+          if (seen.has(label)) throw this.err(it, `switch 里 case ${label} 出现了两次`);
+          seen.add(label);
+        }
+        /* 上一组已经开始收语句了，就另起一组；否则并进去（连着的标签共用一个体）。 */
+        const last = groups[groups.length - 1];
+        if (last === undefined || last.body.length > 0) groups.push({ labels: [label], body: [] });
+        else last.labels.push(label);
+        continue;
+      }
+      if (groups.length === 0) {
+        throw this.err(it, 'switch 的第一个 case/default 之前不能有语句（规范 6.4）');
+      }
+      groups[groups.length - 1].body.push(this.stmt(it));
+    }
+    this.pop();
+    return { k: 'switch', sel, groups, hasDefault };
+  }
+
+  /** case 的标签：常量整数。`-1` 那种一元负号在这儿折掉，别的常量表达式暂不收。 */
+  caseLabel(node, at) {
+    const e = this.expr(node);
+    if (e.k === 'lit' && e.ty.k === 'int') return e.v;
+    if (e.k === 'neg' && e.a.k === 'lit' && e.a.ty.k === 'int') return -e.a.v;
+    throw this.err(at, 'case 的标签要是整数常量（这一刀只折字面量与它的负号）');
   }
 
   /* ---------------------------------------------------------- 表达式 */

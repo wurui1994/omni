@@ -79,7 +79,9 @@ function glslOwnContinue(s) {
   if (s.k === 'continue') return true;
   if (s.k === 'block') return s.body.some((x) => glslOwnContinue(x));
   if (s.k === 'if') return glslOwnContinue(s.then) || glslOwnContinue(s.else);
-  /* `for`/`while` 不进去 —— 里头的 continue 是它们自己的。别的语句里不会有语句。 */
+  /* `switch` **要进去**：它接的是 `break`，不接 `continue` —— 里头的 continue 属于
+   * 外面这一层循环。（`for`/`while`/`do while` 不进去：那些 continue 是它们自己的。） */
+  if (s.k === 'switch') return s.groups.some((g) => g.body.some((x) => glslOwnContinue(x)));
   return false;
 }
 
@@ -96,10 +98,23 @@ class GlslLowerer {
     this.tmp = 0;
     this.names = new Map(); // 局部量名字的重名计数（见 uniq）
     this.scopes = [];       // 名字 -> 分量名数组
-    /** 正在里头的那几层 GLSL 循环，最里的在最后。一项是 `{ wrapped }` ——
-     * `wrapped` 为真表示这一层 `for` 的体外套了一圈「只走一趟的 while」，
-     * 于是 `continue` 是那一圈的 `(brk)`、`break` 要往外数两层（见 `stmt` 里 for 那一段）。 */
+    /** 正在里头的那几层**方言循环**，最里的在最后。一项是 `{ kind }`：
+     *
+     *   `loop`    一层真的 GLSL 循环（`while` / `for` / `do while`）
+     *   `wrap`    `for`/`do while` 给体外套的那一圈「只走一趟的 while」（`continue` 的落点）
+     *   `switch`  `switch` 用来接 `break` 的那一圈（也是只走一趟）
+     *
+     * `break` 往外找最近的 `loop` 或 `switch`，`continue` 往外找最近的 `loop` 或 `wrap` ——
+     * 数出来第几层就是方言的 `(brk N)` / `(cont N)`（第 40 刀那两条）。 */
     this.loops = [];
+  }
+
+  /** 往外数第几层（1 起）能碰到 `kinds` 里的一种；碰不到回 0。 */
+  levelOf(kinds) {
+    for (let i = this.loops.length - 1; i >= 0; i--) {
+      if (kinds.includes(this.loops[i].kind)) return this.loops.length - i;
+    }
+    return 0;
   }
 
   fresh(prefix) { this.tmp++; return `${prefix}${this.tmp}`; }
@@ -641,9 +656,11 @@ class GlslLowerer {
       const body = [];
       const outer = this.stmts;
       this.stmts = body;
-      this.loops.push({ wrapped });
+      this.loops.push({ kind: 'loop' });
       if (wrapped) {
+        this.loops.push({ kind: 'wrap' });
         const inner = this.sub(() => this.stmt(s.body));
+        this.loops.pop();
         inner.push('(brk)');
         this.stmts.push(`(while (bool true) (do ${inner.join(' ')}))`);
       } else {
@@ -658,11 +675,15 @@ class GlslLowerer {
       return;
     }
     if (s.k === 'break' || s.k === 'continue') {
-      const cur = this.loops[this.loops.length - 1];
-      if (cur === undefined) throw new OmniError(`glsl: '${s.k}' 不在循环里`);
-      /* 套了一圈的那种：`continue` 是内圈的 `(brk)`，`break` 要跨过内圈。 */
-      if (s.k === 'continue') this.stmts.push(cur.wrapped ? '(brk)' : '(cont)');
-      else this.stmts.push(cur.wrapped ? '(brk 2)' : '(brk)');
+      /* `break` 认最近的 `loop`/`switch`，`continue` 认最近的 `loop`/`wrap` ——
+       * 数出来的层号直接就是方言的 `(brk N)` / `(cont N)`。第 1 层不写号，
+       * 是为了让从前那些门降出来的方言一个字都不动。 */
+      const n = s.k === 'break' ? this.levelOf(['loop', 'switch']) : this.levelOf(['loop', 'wrap']);
+      if (n === 0) throw new OmniError(`glsl: '${s.k}' 不在循环里`);
+      const inner = this.loops[this.loops.length - n];
+      /* `continue` 落到套的那一圈上时是 `(brk)`：跳出内圈 = 跳到 step 前面。 */
+      const head = s.k === 'break' || inner.kind === 'wrap' ? 'brk' : 'cont';
+      this.stmts.push(n === 1 ? `(${head})` : `(${head} ${n})`);
       return;
     }
     if (s.k === 'if') {
@@ -681,13 +702,103 @@ class GlslLowerer {
     if (s.k === 'while') {
       /* 条件每一轮都要重算，所以走 `condIn`（要求它降出来是一条表达式）。
        * `while` 不用套那一圈 —— 它没有 step，`continue` 直接是方言的 `(cont)`。 */
-      this.loops.push({ wrapped: false });
+      this.loops.push({ kind: 'loop' });
       const body = this.sub(() => this.stmt(s.body));
       this.loops.pop();
       this.stmts.push(`(while ${this.condIn(s.c)} (do ${body.join(' ')}))`);
       return;
     }
+    if (s.k === 'dowhile') {
+      /* `do BODY while (C);` —— 方言里没有它，落成「永真的 while + 体尾判条件」：
+       *
+       *   (while (bool true) (do BODY  <C 的中间量>  (if (un "!" C) (do (brk)))))
+       *
+       * 条件那一段**摆在体尾**，所以它可以有中间量（不像 `while` 那条得挤成一条表达式）。
+       * 体里有 `continue` 时照 `for` 那个办法套一圈只走一趟的 while：`continue` 要跳到
+       * **判条件之前**，不是跳过判条件。 */
+      const wrapped = glslOwnContinue(s.body);
+      const body = [];
+      const outer = this.stmts;
+      this.stmts = body;
+      this.loops.push({ kind: 'loop' });
+      if (wrapped) {
+        this.loops.push({ kind: 'wrap' });
+        const inner = this.sub(() => this.stmt(s.body));
+        this.loops.pop();
+        inner.push('(brk)');
+        this.stmts.push(`(while (bool true) (do ${inner.join(' ')}))`);
+      } else {
+        this.stmt(s.body);
+      }
+      const c = this.expr(s.c);
+      if (c.length !== 1) throw new OmniError('glsl: do while 的条件不是一格');
+      this.stmts.push(`(if (un "!" ${c[0]}) (do (brk)))`);
+      this.loops.pop();
+      this.stmts = outer;
+      this.stmts.push(`(while (bool true) (do ${body.join(' ')}))`);
+      return;
+    }
+    if (s.k === 'switch') return this.switchStmt(s);
     throw new OmniError(`glsl: 降不了的语句 ${s.k}`);
+  }
+
+  /**
+   * `switch` -> 「只走一趟的 while + 一个匹配标志位」。
+   *
+   *   (while (bool true) (do
+   *     <选择子>
+   *     (let none bool (un "!" <任一标签命中>))    ;; 只有带 default 时才要
+   *     (let m bool (bool false))
+   *     (if (bin "||" (var m) <本组的标签命中>) (do (set m (bool true)) <本组的体>))
+   *     …
+   *     (brk)))
+   *
+   * 三件事一次落清：
+   *
+   *   - **穿落**靠 `m`：一组匹配上就置真，后面每组的条件都带一个 `(var m)`，
+   *     于是从匹配的那一组起一直往下走 —— 与 C 的规矩一样。
+   *   - **`break`** 就是那一圈的 `(brk)`（`loops` 里记的是 `switch` 那一层）。
+   *   - **`default` 摆在中间**也对：它的条件是「一个标签都没命中」，那一格
+   *     在进入任何组**之前**先算出来（`none`），不受 `m` 影响。
+   *
+   * 为什么不落成 if/else 链：穿落落不出来。为什么不用跳转表：方言里没有 switch，
+   * 而这一层的目的是语义对，不是快 —— 真要快该在 MIR 那一层认这个形状。
+   */
+  switchStmt(s) {
+    const sel = this.expr(s.sel);
+    if (sel.length !== 1) throw new OmniError('glsl: switch 的选择子不是一格');
+    const body = [];
+    const outer = this.stmts;
+    this.stmts = body;
+    this.push();
+    this.loops.push({ kind: 'switch' });
+    const hit = (l) => `(bin "==" ${sel[0]} ${l < 0 ? `(un "-" (int ${-l}))` : `(int ${l})`})`;
+    let none = null;
+    if (s.hasDefault) {
+      let any = null;
+      for (const g of s.groups) {
+        for (const l of g.labels) {
+          if (l === null) continue;
+          any = any === null ? hit(l) : `(bin "||" ${any} ${hit(l)})`;
+        }
+      }
+      none = any === null ? '(bool true)' : this.let_('bool', `(un "!" ${any})`);
+    }
+    const m = this.fresh('sw');
+    this.stmts.push(`(let ${m} bool (bool false))`);
+    for (const g of s.groups) {
+      let guard = `(var ${m})`;
+      for (const l of g.labels) guard = `(bin "||" ${guard} ${l === null ? none : hit(l)})`;
+      const inner = this.sub(() => {
+        this.stmts.push(`(set ${m} (bool true))`);
+        for (const x of g.body) this.stmt(x);
+      });
+      this.stmts.push(`(if ${guard} (do ${inner.join(' ')}))`);
+    }
+    this.loops.pop();
+    this.pop();
+    this.stmts = outer;
+    this.stmts.push(`(while (bool true) (do ${body.join(' ')} (brk)))`);
   }
 
   /** 攒一段子语句：`f()` 往一个新的 `stmts` 里写，回那一段。 */
