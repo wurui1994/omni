@@ -19,12 +19,14 @@ const here = dirname(fileURLToPath(import.meta.url));
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 
 // 顺序照旧（快的在前、自举在最后）—— 有些套件会用到前面套件落下的缓存目录。
+// `bootstrap/ratchet.js` 排在 `bootstrap/run.js` 前面：它是那条链的**棘轮**（半秒），
+// 而 `run.js` 是整条自举门（现在红着）。棘轮红了说明**新长了债**，那比旧债要紧。
 const SUITES = [
   'run.js', 'cli/tree.js', 'glsl/run.js', 'oracle/run.js', 'js-roundtrip/run.js', 'oir/run.js', 'js-exec/run.js',
   'cabi/run.js', 'wat/run.js', 'glr/run.js', 'mir/run.js', 'incr/run.js',
   'c/run.js',
   'llvm/run.js', 'sexpr/run.js', 'asy/run.js', 'jnc/run.js', 'jit/run.js',
-  'gpu/run.js', 'bootstrap/run.js',
+  'gpu/run.js', 'bootstrap/ratchet.js', 'bootstrap/run.js',
 ];
 
 const results = [];
