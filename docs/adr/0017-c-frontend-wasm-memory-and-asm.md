@@ -931,6 +931,16 @@ tcc 叫 `L.N`（`tccpp.c:626`，`N` 是匿名符号计数器），我们叫 `omn
 带 x87 `long double` 的，以及**取过地址的**（`adrp+add` 指不着未定义符号，那得过 GOT）。
 顺手修了「第几个函数」那根轴 —— 没有函数体的不占落点，`relaSeq` 得只数出过代码的。
 `rela-text` 22/0/1，`tcc-obj` 的容器相同从 16 走到 21。
+**预定义宏按目标分**（第一百二十九片）：从前只有目标 CPU 那三条跟着 `--arch` 走，
+剩下的四十几条照 macho 写死 —— 六个 64 位目标一 diff，条数就不一样（osx 51、linux 44、
+win32 41、arm64-win32 40）。`tccdefs.js` 于是从一张静态表改成顺着攒（照 tcc 的
+`tcc_predefs` 那一串 `putdef`），`(arch, os)` 两个轴：OS 那一段（`__linux__`/`__APPLE__`/
+`_WIN32`）、模型（LP64 与 win32 的 LLP64）、`wchar_t` 那两条、OS 自己那一段
+（osx 的 `__GNUC__ 4` 一族、win32 的 `__declspec`/`__cdecl`）、glibc 的 `__REDIRECT`
+一族（PE 上没有）。量出来两条从前不知道的：`__arm64__` **只有 Mach-O 才有**
+（`arm64-gen.c:57`），`__CHAR_UNSIGNED__` **只有 arm64-linux**（`arm64-gen.c:41`：
+非 MACHO 非 PE）。`cpp` 那一路也接上了 `--arch`/`--os` —— 从前它连目标都说不出来。
+新门 `tests/c/predefs.js` 12/0（六个目标 × `-dM` 整张表与 `-dD` 那一路，逐行比）。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -14841,6 +14851,99 @@ int main(void) { return g + s[0]; }
 那一对。**别反着来** —— 反过来会让 `native`（clang 链）绿着而 `tcc-link` 全红。
 
 <!-- 量：arm64 的 GOT-END -->
+
+## 落地：第九刀第一百二十九片
+
+**预定义宏那一整张表按目标分。**
+
+起因是量 `-dD` 那道门：`#define A 1` / `#undef A` 一份三行的源码，我们与
+`x86_64-tcc` 的输出差 **40 行**。看了才知道差的不是 `-dD` —— 是**预定义**。
+`cpp` 那个命令根本没有 `--arch`/`--os` 这两格，而 `tccdefs.js` 里除了目标 CPU
+那三条（第一百〇二片接上的），剩下的四十几条照 macho 写死。
+
+### 尺子：六个目标的整张表
+
+`tcc -dM -E` 挨个量。条数就不一样：
+
+```
+arm64-osx 51   x86_64-osx 51   x86_64-linux 44
+arm64-linux 44   x86_64-win32 41   arm64-win32 40
+```
+
+拿三份并排看，差别分得开：
+
+* **OS 那一段**（`tccpp.c:3545` 的 `target_os_defs`）：linux 是
+  `__linux__`/`__linux`/`__unix__`/`__unix`，osx 是 `__APPLE__` + 那两条 `__unix`，
+  win32 只有 `_WIN32`/`_WIN64` —— PE 那一支在 `#ifdef` 的另一半，`__unix` 走不到
+* **模型**：win32 是 LLP64（`__SIZEOF_LONG__ 4`、`__LLP64__`、
+  `__SIZE_TYPE__ unsigned long long`、`__LONG_MAX__ 0x7fffffffL`），别的是 LP64。
+  tccdefs.h 是**按 `__SIZEOF_LONG__` 分岔**的，不是按 OS
+* **`__INT64_TYPE__`**：linux `long`，osx/win32 `long long`（`tccdefs.h:41-45`）——
+  同一个宽度，两个名字，而 `%lld` 的格式检查看的是名字
+* **`wchar_t` 那两条**：win32 `unsigned short`/`unsigned short`，linux
+  `int`/`unsigned int`，osx `int`/`int` —— 三个目标三个样
+* **OS 自己那一段**（`tccdefs.h:81-134`）：osx 有 `__GNUC__ 4`/`__APPLE_CC__`/
+  `__LITTLE_ENDIAN__`/`_DONT_USE_CTYPE_INLINE_`/`__FINITE_MATH_ONLY__`/
+  `_FORTIFY_SOURCE 0`/`_Float16` 七条，win32 有 `__declspec`/`__cdecl` 两条，
+  **linux 那一支是空的** —— 也就是说 `__GNUC__` 在 linux 上一条都不定
+* **glibc 的 `__REDIRECT` 一族**：`#if !defined _WIN32`，所以 linux 与 osx 有、PE 没有
+
+还量出两条原来不知道的：
+
+* **`__arm64__` 只有 Mach-O 才有** —— `arm64-gen.c:55-61` 那张
+  `target_machine_defs` 里它压在 `#if defined(TCC_TARGET_MACHO)` 里面。
+  于是「CPU 那三条」这个说法本身是错的：arm64-linux 与 arm64-win32 只有两条。
+* **`__CHAR_UNSIGNED__` 只有 arm64-linux** —— `arm64-gen.c:41` 那道
+  `#if !defined(TCC_TARGET_MACHO) && !defined(TCC_TARGET_PE)` 给出
+  `CHAR_IS_UNSIGNED`，`libtcc.c:889` 于是把 `s1->char_is_unsigned` 拨上，
+  `tccpp.c:3609` 印出这个宏。这就是 arm64-win32 比 arm64-linux 少的那一条。
+
+### 改法：静态表改成顺着攒
+
+tcc 那边 `tcc_predefs`（`tccpp.c:3585`）是一串顺着写的 `putdef`，不是一张表 ——
+`__TCC_PP__`、`__CHAR_UNSIGNED__`、`__leading_underscore` 都在中间那一串
+`if (…) putdef(…)` 里，位置固定在 OS 那一段之后、`__SIZEOF_POINTER__` 之前。
+所以 `predefs(arch, os, forPP)` 也照这个形状攒，几张小表按 OS 取：
+`OS_DEFS`、`MODEL`、`WCHAR_DEFS`、`OS_EXTRA`、`REDIRECT_DEFS`。
+
+`PP_ONLY_AFTER = '__unix'` 那个按名字找位置的做法**没了** —— win32 上没有 `__unix`
+这条，按名字就插不进去。改成按位置（OS 那一段之后），`installPredefs` 于是只剩
+一个循环。`CPU_DEFS` 的每一行多一格可选的第三项 =「只有这个 OS 才有」，`__arm64__`
+就住在那儿。
+
+`Cpp` 多收一格 `host.os`（默认 `osx`），`cli.js` 的 `cpp` 那一路认 `--arch`/`--os`
+（与 `c-obj` 同名同值）。
+
+### 门
+
+新门 `tests/c/predefs.js` **12/0**：六个 64 位目标 × 两组探针（`-dM` 的整张表、
+`-dD` 带源码里 `#define`/`#undef` 的那一路），逐行比，头一处不同就印出行号与两边。
+比的是逐行不是集合 —— `-dD`/`-dM` 印的是定义**经过**的次序（第一百〇八片），
+差一格就得报出来。
+
+回归都绿：`native` 227/0、`run` 207/0/1、`native-gen` 83/0、`selfobj` 25/0、
+`tcc-link` 83/0、`selfpp` 29/0/1、`dm-order` 7/0、`arch-defs` 2/0、`selfsrc` 13/0、
+`selfcross` 12/0、`rela-text` 22/0/1、`sym-order` 18/0、`str-rodata` 69/0/1、
+`rodata-sec` 27/0、`sym-size` 6/0、`rela-order` 6/0、`eh-frame-x64` 8/0、
+`pdata-x64` 11/0。`tcc-obj` 的「容器相同」还是 21（这一片不碰字节）。
+
+### 这一片解开的与没解开的
+
+解开的是**根**：`L.N` 的起点（`__builtin_va_list` 在每个目标上占几个匿名符号号）
+与 win32 的 `wchar_t` 两字节，从前都记着「压在 `tccdefs.js` 照 macho 写死那笔欠账
+后面」—— 现在那笔还了。
+
+没解开的还有两笔，都是「宏对了、语言还没跟着走」：
+
+* **`__CHAR_UNSIGNED__` 同时是语言**：tcc 那边这一条一拨，`char` 就是无符号的。
+  我们现在只把宏摆对，`char` 的符号性还照 signed 走 —— arm64-linux 那条腿上的一笔。
+* **`wchar_t` 的宽度**：win32 上 `__WCHAR_TYPE__` 现在是 `unsigned short` 了，
+  可我们的宽串常量还按 4 字节铺（`str-rodata` 那个 `not yet`）。宏与字节要一起改。
+* **头文件那一半**：预定义对了不等于头对了 —— `stage0/include/` 那几份还是照
+  macOS 写的，`--os linux` 编一份 `#include <stdio.h>` 仍然走的是本机那一支。
+
+<!-- 第九刀第一百二十九片-END -->
+
 
 
 

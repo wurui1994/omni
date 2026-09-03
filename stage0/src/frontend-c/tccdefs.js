@@ -30,18 +30,22 @@
 // `substSpecial` 每次展开现算的，见第一百〇三片。）
 
 /**
- * 目标 CPU 那三条（tcc 的 `tcc_new`：`TCC_TARGET_ARM64` / `TCC_TARGET_X86_64`
- * 各定各的）。量出来的（`tcc -dM -E /dev/null` 两边一 diff）：**整张表就差这三行**，
- * 别的四十七条一模一样 —— LP64、macOS、C99 那些两边同形（第一百〇二片）。
+ * 目标 CPU 那几条（各后端自己的 `target_machine_defs`：`x86_64-gen.c:121`、
+ * `arm64-gen.c:55`）。量出来的（`tcc -dM -E` 两边一 diff）：**整张表就差这三行**，
+ * 别的四十几条按 OS 分（第一百〇二片量的是 CPU 这一格，第一百二十九片补上 OS）。
  *
  * 三条一变，tcc 自己的源码就跟着走另一支：`tcc.h` 没给 `TCC_TARGET_*` 时按
  * `__x86_64__` / `__aarch64__` 选目标，所以「编 x86_64 的 tcc」不必手工递
  * `-DTCC_TARGET_X86_64`。
+ *
+ * 第三格是「只有这个 OS 才有」：`__arm64__` 压在 `arm64-gen.c:57` 那道
+ * `#if defined(TCC_TARGET_MACHO)` 里 —— 也就是说 arm64-linux 与 arm64-win32
+ * **没有**这一条。这张表于是不只按架构分，还得看 OS。
  */
 export const CPU_DEFS = {
   arm64: [
     ['__aarch64__', '1'],
-    ['__arm64__', '1'],
+    ['__arm64__', '1', 'osx'],
     ['__AARCH64EL__', '1'],
   ],
   x86_64: [
@@ -51,94 +55,180 @@ export const CPU_DEFS = {
   ],
 };
 
-/** `predefs()` 里那一格占位：目标 CPU 那三条按架构换。 */
-const CPU_SLOT = Symbol('cpu');
+/**
+ * `char` 默认无符号的目标（各后端的 `CHAR_IS_UNSIGNED` -> `s1->char_is_unsigned`
+ * -> `putdef("__CHAR_UNSIGNED__")`）。arm64 上是 `arm64-gen.c:41` 那道
+ * `#if !defined(TCC_TARGET_MACHO) && !defined(TCC_TARGET_PE)` —— 只有 arm64-linux。
+ *
+ * 这一条不光是个宏：tcc 那边它同时改**语言**（`char` 的符号性）。我们现在只把宏
+ * 摆对，`char` 的符号性还照 signed 走 —— 那是 arm64-linux 那条腿上的一笔欠账。
+ */
+const CHAR_UNSIGNED = (arch, os) => arch === 'arm64' && os !== 'osx' && os !== 'win32';
+
+/**
+ * 目标 OS 那一段（tccpp.c 的 `target_os_defs`，`tccpp.c:3545-3572`）。整段**照原次序**，
+ * 因为 `-dD`/`-dM` 印出来的次序就是这个次序 —— 差一格就对不上。
+ *
+ * win32 那一支是 `TCC_TARGET_PE`：只有 `_WIN32`/`_WIN64`，**没有** `__unix`
+ * 那两条（那两条在 `#else` 里，PE 走不到）。
+ */
+export const OS_DEFS = {
+  linux: [
+    ['__linux__', '1'],
+    ['__linux', '1'],
+    ['__unix__', '1'],
+    ['__unix', '1'],
+  ],
+  osx: [
+    ['__APPLE__', '1'],
+    ['__unix__', '1'],
+    ['__unix', '1'],
+  ],
+  win32: [
+    ['_WIN32', '1'],
+    ['_WIN64', '1'],
+  ],
+};
+
+/**
+ * 名字前那条下划线（`s1->leading_underscore`，`tccpp.c:3615`）。Mach-O 上开着，
+ * ELF/PE 上不开。位置在 **`__TCC_PP__` 之后** —— 两条都是 tcc_predefs 里那一串
+ * `if (…) putdef(…)`，`-dM` 逐行量出来的。
+ */
+const LEADING_UNDERSCORE = { linux: false, osx: true, win32: false };
+
+/**
+ * 数据模型。tccdefs.h 是按 **`__SIZEOF_LONG__`** 分岔的（`tccdefs.h:22-46`）：
+ * `long` 4 字节 = 64 位 Windows（LLP64），否则是别的 64 位系统（LP64）。
+ * `__INT64_TYPE__` 在 LP64 里还要再分一次：linux 上是 `long`，APPLE/BSD 上是
+ * `long long`（`tccdefs.h:41-45`）—— 同一个宽度，两个名字。
+ */
+const MODEL = {
+  linux: { longSize: 8, sizeT: 'unsigned long', ptrdiffT: 'long', name: '__LP64__', int64T: 'long', longMax: '0x7fffffffffffffffL' },
+  osx: { longSize: 8, sizeT: 'unsigned long', ptrdiffT: 'long', name: '__LP64__', int64T: 'long long', longMax: '0x7fffffffffffffffL' },
+  win32: { longSize: 4, sizeT: 'unsigned long long', ptrdiffT: 'long long', name: '__LLP64__', int64T: 'long long', longMax: '0x7fffffffL' },
+};
+
+/** `__WCHAR_TYPE__` / `__WINT_TYPE__`（`tccdefs.h:60-69` 那三支，三个目标三个样）。 */
+const WCHAR_DEFS = {
+  linux: { wchar: 'int', wint: 'unsigned int' },
+  osx: { wchar: 'int', wint: 'int' },
+  win32: { wchar: 'unsigned short', wint: 'unsigned short' },
+};
+
+/**
+ * OS 自己要的那一段（`tccdefs.h:81-134` 那道大 `#if`）。位置在 `__WINT_TYPE__`
+ * 之后、`__UINTPTR_TYPE__` 之前。**linux 那一支是空的** —— 也就是说
+ * `__GNUC__` 只有 APPLE（与几个 BSD）才有，linux 上一条都不定。
+ */
+const OS_EXTRA = {
+  linux: [],
+  osx: [
+    // 装成 APPLE-GCC，libc 的头才编得过（`__GNUC__ >= 4` 那些分支要它）
+    ['__GNUC__', '4'],
+    ['__APPLE_CC__', '1'],
+    ['__LITTLE_ENDIAN__', '1'],
+    ['_DONT_USE_CTYPE_INLINE_', '1'],
+    ['__FINITE_MATH_ONLY__', '1'],
+    ['_FORTIFY_SOURCE', '0'],
+    ['_Float16', 'short unsigned int'],
+  ],
+  win32: [
+    ['__declspec(x)', '__attribute__((x))'],
+    ['__cdecl', undefined],
+  ],
+};
+
+/**
+ * glibc 的 `__REDIRECT` 一族（`tccdefs.h:143-148`，`#if !defined _WIN32`）。
+ * macOS 上用不到，tcc 照定，我们照抄；PE 上没有。
+ */
+const REDIRECT_DEFS = [
+  ['__REDIRECT(name,proto,alias)', 'name proto __asm__(#alias)'],
+  ['__REDIRECT_NTH(name,proto,alias)', 'name proto __asm__(#alias)__THROW'],
+  ['__REDIRECT_NTHNL(name,proto,alias)', 'name proto __asm__(#alias)__THROWNL'],
+];
 
 /**
  * 这个目标上的预定义宏，**按定义顺序**。`[名字, 宏体]`，宏体 `undefined` = 空展开。
  * 函数宏把形参写在名字里（`define()` 就是拼一行 `#define`，所以形状与源码一致）。
  *
- * `__BASE_FILE__` 不在表里 —— 它是「主输入文件」，由 `installPredefs` 补在最后，
+ * 攒法照着 tcc 的 `tcc_predefs`（`tccpp.c:3585`）一段一段来 —— 那是一串顺着写的
+ * `putdef`，不是一张静态表，所以这儿也写成顺着攒。三个目标的整张表都量过
+ * （`tcc -dM -E /dev/null` 逐行 diff）：linux 44 条、win32 41 条、osx 51 条。
+ *
+ * `__BASE_FILE__` 不在里面 —— 它是「主输入文件」，由 `installPredefs` 补在最后，
  * 与 tcc 同一个位置。
+ *
+ * @param {string} arch `arm64` | `x86_64`
+ * @param {string} os `linux` | `osx` | `win32`
+ * @param {boolean} forPP 只预处理那一路（多一条 `__TCC_PP__`，见 `PP_ONLY_DEFS`）
  */
-export function predefs(arch = 'arm64') {
+export function predefs(arch = 'arm64', os = 'osx', forPP = false) {
   const cpu = CPU_DEFS[arch];
   if (cpu === undefined) throw new Error(`tccdefs: 不认识的架构 ${arch}`);
-  return PREDEFS.map((e) => (e === CPU_SLOT ? cpu : [e])).flat();
+  const osDefs = OS_DEFS[os];
+  if (osDefs === undefined) throw new Error(`tccdefs: 不认识的 OS ${os}`);
+  const m = MODEL[os];
+  const w = WCHAR_DEFS[os];
+  /** @type {Array<[string, (string|undefined)]>} */
+  const out = [
+    // ---- tcc 自己（`tcc_predefs` 头一行）
+    ['__TINYC__', '928'],
+    // ---- 目标 CPU（`target_machine_defs`，见 `CPU_DEFS`；第三格是「只有这个 OS 才有」）
+    ...cpu.filter((e) => e.length < 3 || e[2] === os).map((e) => [e[0], e[1]]),
+    // ---- 目标 OS（`target_os_defs`，见 `OS_DEFS`）
+    ...osDefs,
+  ];
+  // ---- 那一串条件 putdef（`tccpp.c:3595-3616`，照它的次序）
+  if (forPP) out.push(...PP_ONLY_DEFS);
+  if (CHAR_UNSIGNED(arch, os)) out.push(['__CHAR_UNSIGNED__', '1']);
+  if (LEADING_UNDERSCORE[os]) out.push(['__leading_underscore', '1']);
+  out.push(
+    // ---- 模型（PTR_SIZE / LONG_SIZE，tcc 是两行 cstr_printf）
+    ['__SIZEOF_POINTER__', '8'],
+    ['__SIZEOF_LONG__', String(m.longSize)],
+    // ---- C 标准（tcc 报 C99）
+    ['__STDC__', '1'],
+    ['__STDC_HOSTED__', '1'],
+    ['__STDC_VERSION__', '199901L'],
+    // ---- 标准类型的底子（这儿起是 `tccdefs.h`）
+    ['__SIZE_TYPE__', m.sizeT],
+    ['__PTRDIFF_TYPE__', m.ptrdiffT],
+    [m.name, '1'],
+    ['__INT64_TYPE__', m.int64T],
+    ['__SIZEOF_INT__', '4'],
+    ['__INT_MAX__', '0x7fffffff'],
+    ['__LONG_MAX__', m.longMax],
+    ['__SIZEOF_LONG_LONG__', '8'],
+    ['__LONG_LONG_MAX__', '0x7fffffffffffffffLL'],
+    ['__CHAR_BIT__', '8'],
+    ['__ORDER_LITTLE_ENDIAN__', '1234'],
+    ['__ORDER_BIG_ENDIAN__', '4321'],
+    ['__BYTE_ORDER__', '__ORDER_LITTLE_ENDIAN__'],
+    ['__WCHAR_TYPE__', w.wchar],
+    ['__WINT_TYPE__', w.wint],
+    // ---- OS 自己那一段（见 `OS_EXTRA`）
+    ...OS_EXTRA[os],
+    // ---- 指针类型（放在 __PTRDIFF_TYPE__ 之后，宏体里引它）
+    ['__UINTPTR_TYPE__', 'unsigned __PTRDIFF_TYPE__'],
+    ['__INTPTR_TYPE__', '__PTRDIFF_TYPE__'],
+    ['__INT32_TYPE__', 'int'],
+    // ---- glibc 的 __REDIRECT 一族（PE 上没有）
+    ...(os === 'win32' ? [] : REDIRECT_DEFS),
+    ['__PRETTY_FUNCTION__', '__FUNCTION__'],
+    // ---- clang 的那三个探测宏：一律回 0 = 「这编译器什么都没有」
+    ['__has_builtin(x)', '0'],
+    ['__has_feature(x)', '0'],
+    ['__has_attribute(x)', '0'],
+    // ---- clang 的 nullability 标注：抹掉
+    ['_Nonnull', undefined],
+    ['_Nullable', undefined],
+    ['_Nullable_result', undefined],
+    ['_Null_unspecified', undefined],
+  );
+  return out;
 }
-
-const PREDEFS = [
-  // ---- tcc 自己（`libtcc.c` 的 tcc_new -> tcc_define_symbol）
-  ['__TINYC__', '928'],
-
-  // ---- 目标 CPU（按架构换，见 `CPU_DEFS`）
-  CPU_SLOT,
-
-  // ---- 目标 OS（`TCC_TARGET_MACHO`）
-  ['__APPLE__', '1'],
-  ['__unix__', '1'],
-  ['__unix', '1'],
-  ['__leading_underscore', '1'],
-
-  // ---- 模型（LP64）
-  ['__SIZEOF_POINTER__', '8'],
-  ['__SIZEOF_LONG__', '8'],
-
-  // ---- C 标准（tcc 报 C99）
-  ['__STDC__', '1'],
-  ['__STDC_HOSTED__', '1'],
-  ['__STDC_VERSION__', '199901L'],
-
-  // ---- 标准类型的底子（`tccdefs.h`）
-  ['__SIZE_TYPE__', 'unsigned long'],
-  ['__PTRDIFF_TYPE__', 'long'],
-  ['__LP64__', '1'],
-  ['__INT64_TYPE__', 'long long'],
-  ['__SIZEOF_INT__', '4'],
-  ['__INT_MAX__', '0x7fffffff'],
-  ['__LONG_MAX__', '0x7fffffffffffffffL'],
-  ['__SIZEOF_LONG_LONG__', '8'],
-  ['__LONG_LONG_MAX__', '0x7fffffffffffffffLL'],
-  ['__CHAR_BIT__', '8'],
-  ['__ORDER_LITTLE_ENDIAN__', '1234'],
-  ['__ORDER_BIG_ENDIAN__', '4321'],
-  ['__BYTE_ORDER__', '__ORDER_LITTLE_ENDIAN__'],
-  ['__WCHAR_TYPE__', 'int'],
-  ['__WINT_TYPE__', 'int'],
-
-  // ---- 装成 GCC 4（头文件里那些 `__GNUC__ >= 4` 的分支要它）
-  ['__GNUC__', '4'],
-
-  // ---- macOS 的头文件要的那几条
-  ['__APPLE_CC__', '1'],
-  ['__LITTLE_ENDIAN__', '1'],
-  ['_DONT_USE_CTYPE_INLINE_', '1'],
-  ['__FINITE_MATH_ONLY__', '1'],
-  ['_FORTIFY_SOURCE', '0'],
-  ['_Float16', 'short unsigned int'],
-
-  // ---- 指针类型（放在 __PTRDIFF_TYPE__ 之后，宏体里引它）
-  ['__UINTPTR_TYPE__', 'unsigned __PTRDIFF_TYPE__'],
-  ['__INTPTR_TYPE__', '__PTRDIFF_TYPE__'],
-  ['__INT32_TYPE__', 'int'],
-
-  // ---- glibc 的 __REDIRECT 一族（macOS 上用不到，tcc 照定，我们照抄）
-  ['__REDIRECT(name,proto,alias)', 'name proto __asm__(#alias)'],
-  ['__REDIRECT_NTH(name,proto,alias)', 'name proto __asm__(#alias)__THROW'],
-  ['__REDIRECT_NTHNL(name,proto,alias)', 'name proto __asm__(#alias)__THROWNL'],
-  ['__PRETTY_FUNCTION__', '__FUNCTION__'],
-
-  // ---- clang 的那三个探测宏：一律回 0 = 「这编译器什么都没有」
-  ['__has_builtin(x)', '0'],
-  ['__has_feature(x)', '0'],
-  ['__has_attribute(x)', '0'],
-
-  // ---- clang 的 nullability 标注：抹掉
-  ['_Nonnull', undefined],
-  ['_Nullable', undefined],
-  ['_Nullable_result', undefined],
-  ['_Null_unspecified', undefined],
-];
 
 /**
  * 只在 **`-E`**（只预处理）那一路上定义的（tcc 的 `tcc_predefs`：
@@ -152,11 +242,6 @@ const PREDEFS = [
 export const PP_ONLY_DEFS = [
   ['__TCC_PP__', '1'],
 ];
-
-/** `__TCC_PP__` 那一条**不在表尾**：tcc 是在目标/OS 那一段之后就 `putdef` 的
- * （`tccpp.c:3597`，紧跟 `__unix`）。`-dM` 的逐行输出把这个位置量出来了 ——
- * 表里的次序就是印出来的次序，差一格就对不上。 */
-export const PP_ONLY_AFTER = '__unix';
 
 /**
  * 只在**编译**那一路上定义的宏（tccdefs.h 那道 `#ifndef __TCC_PP__` 里面的宏部分，

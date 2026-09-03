@@ -233,7 +233,7 @@ function cSysInclude() {
  * 默认带 GCC 那种 `# 行号 "文件"` 的行标，`-P` 一族把它换掉或关掉。
  * 文件 IO 在这里，预处理器自己只认一个 `readFile` 回调 —— 于是 REPL 那一路可以把
  * 内存里的几份 `.h` 直接喂进去，测试也不必碰 fs。
- */function cppText(path, incs, defs, dflag, pflag, deps, sysIncs, incls, verbose) {
+ */function cppText(path, incs, defs, dflag, pflag, deps, sysIncs, incls, verbose, tgt) {
   const cpp = new Cpp({
     readFile: (p) => {
       try {
@@ -246,6 +246,11 @@ function cSysInclude() {
     sysIncludeDirs: sysIncs ?? cSysInclude(),
     dirname,
     join,
+    /* 目标（`--arch` / `--os`）：预定义宏那一整张表按它分（第一百二十九片）。
+     * `__x86_64__` 与 `__linux__` 一变，头文件就走另一支 —— 于是「拿哪个 tcc 当尺子」
+     * 这件事在命令行上说得出来。 */
+    arch: tgt?.arch,
+    os: tgt?.os,
   });
   /* `-dD` = 3、`-dM` = 7（tcc 的 `dflag`）。拨在装预定义**之前** —— `-dD`/`-dM` 要印的
    * 头一批就是预定义那几行，攒行的开关得先开（见 tccpp.js 的 `cmdlineDump`）。
@@ -2301,8 +2306,13 @@ function main(argv) {
        * 的开合（`->` 开成了 / `=>` 有卫哨于是跳过 / `nf` 这一格没有）。 */
       let verbose = 0;
       for (const a of rest) if (/^-v+$/.test(a)) verbose = a.length - 1;
+      /* `--arch` / `--os`：拿哪个目标的预定义（第一百二十九片）。与 `c-obj` 同名同值，
+       * 默认 arm64+osx —— 本机那一支。 */
+      const cai = rest.indexOf('--arch');
+      const csi = rest.indexOf('--os');
+      const tgt = { arch: cai >= 0 ? rest[cai + 1] : 'arm64', os: csi >= 0 ? rest[csi + 1] : 'osx' };
       const out = cppText(path, incDirs(rest), defArgs(rest), dflag, pflag, deps,
-        sysIncDirs(rest), inclArgs(rest), verbose);
+        sysIncDirs(rest), inclArgs(rest), verbose, tgt);
       if (wantDeps) {
         const target = oi >= 0 ? rest[oi + 1] : depTarget(path);
         const text = makedepsText(target, deps.list, rest.includes('-MP'));
