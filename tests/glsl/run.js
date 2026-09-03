@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // Omni — GLSL 前端的测试轴（ADR-0019）
 //
-// 两组，一条红了也继续往下跑（与 tests/all.js 同一个理由：短路会掩住后面的红）：
+// 三组，一条红了也继续往下跑（与 tests/all.js 同一个理由：短路会掩住后面的红）：
 //
 //   parse.js —— 语法表与五份尺子源码（第一片）
 //   check.js —— 类型检查与名字解析（第二片）
+//   lower.js —— 降到核心方言，JS 腿与 C 腿都跑（第三片）
 //
 //   node tests/glsl/run.js
 
@@ -13,7 +14,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const PARTS = ['parse.js', 'check.js'];
+const PARTS = ['parse.js', 'check.js', 'lower.js'];
 
 let bad = 0;
 for (const p of PARTS) {
