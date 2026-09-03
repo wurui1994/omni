@@ -234,6 +234,7 @@ function buildSyms(defs, relocs, strs, prefix) {
     syms.push({
       strx: strs.intern(prefix + d.name),
       info: bind * 16 + (sect === 1 ? STT_FUNC : STT_OBJECT),
+      other: d.vis === undefined ? 0 : d.vis,
       shndx: sect,
       value: d.off,
       size: d.size === undefined ? 0 : d.size,
@@ -351,7 +352,9 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
    * 「哪一节是什么」，只管两条算式，所以读回来的东西也能原样写回去。 */
   const symBuf = new Buf();
   for (const s of syms) {
-    symBuf.u32(s.strx).u8(s.info).u8(0).u16(s.shndx).u64(s.value).u64(s.size);
+    /* `st_other` 就是可见性那一格（第九刀第一百〇六片）：低两位是 STV_*，
+     * `__attribute__((visibility("hidden")))` 落在这儿。 */
+    symBuf.u32(s.strx).u8(s.info).u8(s.other ?? 0).u16(s.shndx).u64(s.value).u64(s.size);
   }
   const relaBuf = (rs) => {
     const rb = new Buf();

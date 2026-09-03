@@ -369,6 +369,8 @@ function cObj(path, out, arch, incs, defs, fmt, os) {
       local: mod.funcs[k].local,
       /* `weak`（第一百〇四片）：`__attribute__((weak))` 的函数在符号表里是弱定义。 */
       weak: mod.funcs[k].weak === true,
+      /* `visibility`（第一百〇六片）：ELF 的 `st_other`。 */
+      vis: mod.funcs[k].vis ?? 0,
     });
   }
   /* 函数的别名（第一百〇五片）：与目标同一个偏移 —— 代码一份、符号两条。 */

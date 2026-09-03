@@ -1290,6 +1290,7 @@ export function genModule(mod) {
       sect: 2,
       local: mod.globalLocal[gi] === true,
       weak: mod.globalWeak[gi] === true,
+      vis: mod.globalVis[gi] ?? 0,
     });
     for (let k = 0; k < size; k++) {
       const b = blob === null ? 0 : blob.bytes[k];

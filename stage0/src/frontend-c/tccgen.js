@@ -161,7 +161,7 @@ import {
   TOK_EXTENSION, TOK_ATOMIC, TOK_THREAD_LOCAL, TOK_THREAD,
   TOK_ATTRIBUTE1, TOK_ATTRIBUTE2, TOK_ASM1, TOK_ASM2, TOK_ASM3,
   TOK_ALIGNED1, TOK_ALIGNED2, TOK_PACKED1, TOK_PACKED2, TOK_WEAK1, TOK_WEAK2,
-  TOK_ALIAS1, TOK_ALIAS2,
+  TOK_ALIAS1, TOK_ALIAS2, TOK_VISIBILITY1, TOK_VISIBILITY2,
   TOK_ALIGNOF1, TOK_ALIGNOF2, TOK_ALIGNOF3,
   TOK_TYPEOF1, TOK_TYPEOF2, TOK_TYPEOF3, TOK_LABEL,
   TOK_BUILTIN_VA_START, TOK_BUILTIN_VA_ARG, TOK_BUILTIN_VA_END, TOK_BUILTIN_VA_COPY,
@@ -242,6 +242,19 @@ function storeKindOf(ty) {
 function alignUp(n, a) {
   const r = n % a;
   return r === 0 ? n : n + (a - r);
+}
+
+/**
+ * 两处 `visibility` 撞在一起时取**更严**的那个（第一百〇六片）。
+ * 严的次序不是数值序：`DEFAULT(0) < PROTECTED(3) < HIDDEN(2) < INTERNAL(1)`
+ * （`tccelf.c:722` 的注释，tcc 的 `merge_symattr` 就按这个挑，`tccgen.c:1182-1187`）——
+ * 所以「非 0 里取小的」正好是它，0 谁都让。
+ */
+function mergeVis(a, b) {
+  const x = a === undefined ? 0 : a;
+  if (b === 0 || b === undefined) return x;
+  if (x === 0) return b;
+  return Math.min(x, b);
 }
 
 /** 影子栈的对齐：一律 8（arm64 的 ABI 要 16，但我们只在内存里放标量与小聚合）。 */
@@ -5554,6 +5567,22 @@ export class CGen {  /**
            * tcc 那边是 `ad->a.weak = 1`（`tccgen.c:4017-4019`），一路带到
            * `put_extern_sym` 的 `STB_WEAK`。 */
           if (ad !== null) ad.weak = true;
+        } else if (t === TOK_VISIBILITY1 || t === TOK_VISIBILITY2) {
+          /* `visibility("hidden")`（第一百〇六片，`tccgen.c:3982-3996`）：四个名字对着
+           * ELF 的 STV_*。约束的强弱不是按数值排的（`tccelf.c:722` 那句注释：
+           * DEFAULT(0) < PROTECTED(3) < HIDDEN(2) < INTERNAL(1)）—— 合并两条声明时
+           * 取更严的那个，见 `mergeVis`。 */
+          this.skip(LPAR);
+          if (this.tok !== TOK_STR) {
+            this.expect('visibility("default|hidden|internal|protected")');
+          }
+          const which = this.readStrTok(this.tokc);
+          const v = { default: 0, internal: 1, hidden: 2, protected: 3 }[which];
+          if (v === undefined) {
+            this.expect('visibility("default|hidden|internal|protected")');
+          }
+          this.skip(RPAR);
+          if (ad !== null) ad.visibility = mergeVis(ad.visibility, v);
         } else if (t === TOK_ALIAS1 || t === TOK_ALIAS2) {
           /* `alias("目标")`（第一百〇五片，`tccgen.c:3974-3981`）：参数是一个字符串
            * 字面量（相邻的要拼起来 —— tcc 走的是 `parse_mult_str`）。 */
@@ -6576,7 +6605,7 @@ export class CGen {  /**
         this.tokc = this.cpp.tokc;
         if (isLabel) break;
       }
-      const sad = { aligned: 0, packed: false, weak: false };
+      const sad = { aligned: 0, packed: false, weak: false, visibility: 0 };
       const spec = oldint ? ctype(VT_INT, null) : this.parseBtype(sad);
       const isTypedef = (spec.t & VT_TYPEDEF) !== 0;
       const isExtern = (spec.t & VT_EXTERN) !== 0;
@@ -6594,7 +6623,12 @@ export class CGen {  /**
       if (this.tok === SEMI) { this.next(); continue; }
       let wasBody = false;
       for (;;) {
-        const dad = { aligned: sad.aligned, packed: sad.packed, weak: sad.weak === true };
+        const dad = {
+          aligned: sad.aligned,
+          packed: sad.packed,
+          weak: sad.weak === true,
+          visibility: sad.visibility ?? 0,
+        };
         this.vlaMode = vlaMode;
         const d = this.declarator(base, 'need', dad);
         this.vlaMode = 0;
@@ -6630,7 +6664,7 @@ export class CGen {  /**
           if (dad.aligned > 0) d.ty.talign = dad.aligned;
         } else if (isFunc(d.ty.t)) {
           if (this.funcDecl(global, name, d.ty, isInline, (spec.t & VT_STATIC) !== 0,
-            dad.weak === true, dad.aliasTarget)) {
+            dad.weak === true, dad.aliasTarget, dad.visibility ?? 0)) {
             wasBody = true; break;
           }
         } else {
@@ -6735,6 +6769,8 @@ export class CGen {  /**
              * 才变成符号的绑定。属性写在哪一条声明上都算（`__attribute__((weak)) int x;`
              * 与 `int x __attribute__((weak));` 都有人写），所以只往上加不往下抹。 */
             if (dad.weak === true) e.weak = true;
+            /* `visibility` 同理（第一百〇六片）：记在登记上，封盘那步进符号。 */
+            if ((dad.visibility ?? 0) !== 0) e.vis = mergeVis(e.vis, dad.visibility);
           } else if (isExtern) e = this.declareExternLocal(name, vty, hasInit, dad.aligned);
           else if (hasStatic) e = this.declareStaticLocal(name, vty, dad.aligned, extra);
           else e = this.declareLocal(name, vty, dad.aligned, extra);
@@ -6774,7 +6810,8 @@ export class CGen {  /**
   }
 
   /** 函数声明或定义。当前记号是 `(`。回 true 表示读掉了一个**函数体**。 */
-  funcDecl(global, name, fnTy, isInline, isStatic, isWeak = false, aliasTarget = undefined) {
+  funcDecl(global, name, fnTy, isInline, isStatic, isWeak = false, aliasTarget = undefined,
+    vis = 0) {
     /* 别名（第一百〇五片）：`int f2(int) __attribute__((alias("f1")));` 不是一条外部声明
      * —— 它是**同一个地址的第二个名字**。所以在 `funcSym` 之前拦下来：不建 MirFunc、
      * 不发桩，只把名字接到目标那一格上，再记一条别名让写目标文件那步发符号。
@@ -6797,6 +6834,8 @@ export class CGen {  /**
     /* `weak`（第一百〇四片）：写在原型上算，写在定义上也算 —— 与 `static` 同一种带法。
      * tcc 那边是 `merge_symattr` 把两条声明的属性并起来。 */
     if (isWeak === true) info.f.weak = true;
+    /* `visibility`（第一百〇六片）：与 `weak` 同一种带法，合并时取更严的那个。 */
+    if (vis !== 0) info.f.vis = mergeVis(info.f.vis, vis);
     /* `static` 的函数是**内部链接**（C11 6.2.2）：符号只在这个翻译单元里有效。
      * 记在 `info` 上而不是当场用 —— 原型上写了 `static`、定义时省掉的写法是合法的，
      * 内部链接跟着第一次那个声明（第九十二片）。 */
@@ -7598,6 +7637,7 @@ export function lowerCNative(path, text, host, defs) {
     const no = e.gno === undefined ? mod.globalNo(name) : e.gno;
     if (e.isStatic === true) mod.markGlobalLocal(no);
     if (e.weak === true) mod.markGlobalWeak(no);
+    if (e.vis !== undefined && e.vis !== 0) mod.markGlobalVis(no, e.vis);
     mod.setGlobalData(no, size, al, bytes, fixups);
   }
   /* 匿名的静态块（第三十四片）：静态的复合字面量。与有名字的那些一模一样地切 ——

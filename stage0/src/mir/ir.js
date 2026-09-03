@@ -767,6 +767,10 @@ export class MirModule {
      * `__attribute__((weak))`）。同样只有写目标文件那一步看它：ELF 里是 STB_WEAK，
      * Mach-O 里是 N_WEAK_DEF —— 语义在链接器那边（弱的定义被强的盖掉、找不到不算错）。 */
     this.globalWeak = [];
+    /* 与 globals 同下标的可见性（第九刀第一百〇六片，`__attribute__((visibility(…)))`）：
+     * ELF `st_other` 的那个数（DEFAULT 0 / INTERNAL 1 / HIDDEN 2 / PROTECTED 3）。
+     * Mach-O 上不落 —— tcc 自己的 `tccmacho.c` 也不消费它。 */
+    this.globalVis = [];
     /* 别名（第九刀第一百〇五片，`__attribute__((alias("目标")))`）：一个名字与目标
      * **同址**，符号表里两条、代码一份。`{name, kind:'f'|'g', no, weak}` —— `no` 是目标
      * 的函数号或全局号。同样是标注：写目标文件那一步照目标的落点再发一条符号。 */
@@ -859,6 +863,7 @@ export class MirModule {
     this.globalBlob.push(null);
     this.globalLocal.push(false);
     this.globalWeak.push(false);
+    this.globalVis.push(0);
     this.globalIndex.set(name, i);
     return i;
   }
@@ -873,6 +878,12 @@ export class MirModule {
   markGlobalWeak(no) {
     if (this.globals[no] === undefined) throw new Error(`mir: 没有 ${no} 号模块级变量`);
     this.globalWeak[no] = true;
+  }
+
+  /** 这个全局的可见性（`__attribute__((visibility(…)))`）。见 `globalVis` 头上那段。 */
+  markGlobalVis(no, vis) {
+    if (this.globals[no] === undefined) throw new Error(`mir: 没有 ${no} 号模块级变量`);
+    this.globalVis[no] = vis;
   }
 
   /**

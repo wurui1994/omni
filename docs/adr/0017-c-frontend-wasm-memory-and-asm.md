@@ -763,6 +763,15 @@ identifier，所以两份输出得同名不同目录才比得。
 `unsupported forward __alias__ attribute`，与 tcc 同一句同一行
 （`tests/c/alias-sym.js`，4 条）。
 
+**可见性也齐了**（第一百〇六片）：`__attribute__((visibility("hidden")))` 落在 ELF 符号那
+24 个字节里的第 6 个（`st_other`，DEFAULT 0 / INTERNAL 1 / HIDDEN 2 / PROTECTED 3）。
+`nm` 不印这一格，所以 `tests/c/vis-sym.js` 自己解 symtab，与 `tcc -c` 比每条符号的
+`(名字, st_info, st_other)`；两条声明各写一个可见性时取**更严**的那个
+（严的次序不是数值序：`DEFAULT < PROTECTED < HIDDEN < INTERNAL`，`tccelf.c:722`）。
+Mach-O 那边**不写** —— tcc 自己的 `tccmacho.c` 根本不消费可见性，尺子是 tcc 不是 clang。
+`-fvisibility=` 这个命令行开关 tcc 没有（量过：整个 tinycc 里只有属性那一处），
+所以那一格不是账。至此那条「`-fvisibility`、`weak`、别名都还没有一格」的欠账清了。
+
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
 地址交给真的 libc（`strlen`/`memcpy`）验过。C 前端现在还把 `&x` 降到影子栈上，
@@ -12560,7 +12569,9 @@ Makefile 做的是同一件事。
   插在 1 号那一格），两个写出器吃的是同一份 `defs` —— 这一片新打的那些标记它自动就
   用上了。量法：`c-obj a.c --format elf --os linux --arch x86_64`，85 条局部符号，
   `main` 是唯一的 `T`。
-- `-fvisibility`、`weak`、别名（`__attribute__((alias))`）这些还没有一格。
+- `weak`、别名（`__attribute__((alias))`）、可见性都有了（第一百〇四到一百〇六片）：
+  `STB_WEAK` / 与目标同址的第二条符号 / `st_other`，各有一个门。`-fvisibility=` 那个
+  命令行开关 tcc 本身没有，所以不是账。
 - `tcc-obj.js` 依旧是「6 容器相同、99 不同」：那要的是 B 路（与 tcc 同构的一遍过
   代码生成），与这一片无关。
 
@@ -13247,6 +13258,54 @@ if (ad.alias_target && l == VT_CONST) {
 `selfboot` 的定点不动（597104 字节）。
 
 <!-- 第九刀第一百〇五片-END -->
+
+## 落地：第九刀第一百〇六片
+
+可见性是符号属性里最容易漏的一格：它不改绑定、不改地址、不改一个字节的代码，只改符号表
+那 24 个字节里的**第 6 个**（`st_other`）。`nm` 不印它，所以「看着一样」正是它的陷阱 ——
+第一百〇四片写完 `weak`、第一百〇五片写完 `alias` 之后，`__attribute__((visibility(…)))`
+仍旧落在「不认识的属性」那一支上，而符号表看起来毫无异样。
+
+### 量出来的
+
+自己解 symtab 才看得见（`tcc -c` 那份对我们那份）：
+
+```
+       tcc                 ours（改之前）
+_h     info=18 other=2     info=18 other=0     hidden
+_i     info=18 other=1     info=18 other=0     internal
+_p     info=18 other=3     info=18 other=0     protected
+_d     info=18 other=0     info=18 other=0     default
+_hv    info=17 other=2     info=17 other=0     hidden 的数据
+```
+
+四个名字对着 ELF 的 `STV_DEFAULT 0 / STV_INTERNAL 1 / STV_HIDDEN 2 / STV_PROTECTED 3`
+（`tccgen.c:3982-3996`）。
+
+### 严的次序不是数值序
+
+两条声明各写一个可见性时取更严的那个，而「严」的排法是
+`DEFAULT(0) < PROTECTED(3) < HIDDEN(2) < INTERNAL(1)`（`tccelf.c:722` 的注释原话）。
+tcc 的 `merge_symattr`（`tccgen.c:1182-1187`）落到的规则就是「非 0 里取小的、0 谁都让」，
+我们的 `mergeVis` 一模一样。写成「取大的」或者「后面那个赢」在四个值里三种情形都还对，
+只有 `protected` 撞 `hidden` 那一格露馅 —— 门里专门有这一对。
+
+### 落点
+
+`ad.visibility` -> `MirFunc.vis` / `MirModule.globalVis` -> `elf.js` 的 `st_other`
+（那一行从写死的 `u8(0)` 变成 `u8(s.other ?? 0)`）。**Mach-O 那边不写**：tcc 自己的
+`tccmacho.c` 根本不消费可见性（`N_PEXT` 它没有用），我们的尺子是 tcc 不是 clang。
+`-fvisibility=` 那个命令行开关 tcc 也没有 —— 量过，整个 tinycc 里 `visibility` 只在属性
+那一处出现，所以「命令行的默认可见性」不是一笔欠账。
+
+### 门
+
+`tests/c/vis-sym.js`，2 条：每条符号的 `(名字, st_info, st_other)` 与 `tcc -c` 相同
+（STT_FILE 那一条不算 —— 它印的源文件名 tcc 写命令行给的整串、我们写基名，是另一笔账），
+以及认不出的可见性名拒得与 tcc 一字不差
+（`visibility("default|hidden|internal|protected") expected`，同一行同一句）。
+
+<!-- 第九刀第一百〇六片-END -->
 
 
 
