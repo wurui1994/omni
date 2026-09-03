@@ -5,9 +5,10 @@
 //
 //   parse.js  —— 语法表与五份尺子源码（第一片）
 //   check.js  —— 类型检查与名字解析（第二片）
-//   lower.js  —— 降到核心方言，JS 腿与 C 腿都跑（第三片）
+//   lower.js  —— 降到核心方言，JS 腿与 C 腿都跑（第三、六片）
 //   render.js —— 把画布按 quad 扫一遍（第四片）
 //   bench.js  —— 量性能那一段（第五片；不判快慢，判「量的是同一件事」）
+//   interp.js —— 顶点着色器与插值（第七片）
 //
 //   node tests/glsl/run.js
 
@@ -16,7 +17,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const PARTS = ['parse.js', 'check.js', 'lower.js', 'render.js', 'bench.js'];
+const PARTS = ['parse.js', 'check.js', 'lower.js', 'render.js', 'bench.js', 'interp.js'];
 
 let bad = 0;
 for (const p of PARTS) {

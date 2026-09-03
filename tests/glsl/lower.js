@@ -219,17 +219,16 @@ for (const [name, body, want] of T2) {
   }
 }
 
+/* varying 与顶点着色器**已经接上了**（第七片），它们的门在 `tests/glsl/interp.js`。
+ * 这儿只留还没接的那两条。 */
 const NYI = [
-  ['varying', 'in vec2 v_uv;\nout vec4 c;\nvoid main() { c = vec4(v_uv, 0.0, 1.0); }\n', 'varying'],
-  ['顶点着色器', 'void main() { gl_Position = vec4(float(gl_VertexID)); }\n', '顶点着色器'],
   ['矩阵下标 m[0]', 'out vec4 c;\nvoid main() { mat2 m = mat2(1.0); c = vec4(m[0], 0.0, 1.0); }\n', '下标'],
   ['continue', 'out vec4 c;\nvoid main() { float d = 0.0;'
     + ' for (int i = 0; i < 3; i++) { continue; } c = vec4(d); }\n', 'continue'],
 ];
 for (const [name, body, want] of NYI) {
-  const stage = name === '顶点着色器' ? 'vert' : 'frag';
   let msg = null;
-  try { lower(`#version 330 core\n${body}`, stage); } catch (e) { msg = e.message; }
+  try { lower(`#version 330 core\n${body}`, 'frag'); } catch (e) { msg = e.message; }
   if (msg === null) bad(`该骂却降了：${name}`, '    一声没响');
   else if (!msg.includes(want)) bad(`骂得不对：${name}`, `    要含「${want}」\n    实际：${msg.split('\n')[0]}`);
   else ok(`还没接的明着骂：${name}`);

@@ -68,8 +68,12 @@ function glslNyi(what) {
 }
 
 class GlslLowerer {
-  constructor(mod) {
-    this.mod = mod;
+  constructor() {
+    this.mod = null;
+    /** 函数名前缀。**顶点与片元是两份源码，里头的辅助函数可以同名**
+     * （两边各有一个 `sdCircle` 是很正常的事），并到一个方言模块里就撞了。
+     * 于是顶点那一侧加一个前缀，片元那一侧不加（片元是主角，名字好看一点）。 */
+    this.prefix = '';
     this.out = [];          // 顶层那几行
     this.structs = new Set();
     this.stmts = [];        // 当前正在攒的语句
@@ -133,11 +137,14 @@ class GlslLowerer {
       return [`(bool ${e.v ? 'true' : 'false'})`];
     }
     if (e.k === 'ref') {
+      /* 每一类名字在这一层都已经绑成「分量数组」了：局部量与形参是 `let`/参数，
+       * uniform 与 varying（`in`）是入口的参数，`out` 是入口里摆的格子，
+       * 内建的 `gl_FragCoord`/`gl_VertexID`/`gl_Position` 也一样。所以这儿只查一遍。 */
       if (e.kind === 'uniform' || e.kind === 'local' || e.kind === 'const'
-        || e.kind === 'builtin-in' || e.kind === 'out' || e.kind === 'builtin-out') {
+        || e.kind === 'in' || e.kind === 'out'
+        || e.kind === 'builtin-in' || e.kind === 'builtin-out') {
         return this.find(e.name);
       }
-      if (e.kind === 'in') glslNyi('varying（in）');
       throw new OmniError(`glsl: 降不了的名字类别 ${e.kind}`);
     }
     if (e.k === 'convert' || e.k === 'cast') {
@@ -500,7 +507,7 @@ class GlslLowerer {
     const n = glslNComp(e.ty);
     /* 回矩阵与回向量走同一条路：`(struct glsl_vN …)` 里 N = 分量个数
      * （`mat2` 是 4 格，正好与 `vec4` 用同一个结构体 —— 它俩在这一层就是「四个 real」）。 */
-    const callTxt = `(call glsl_${e.name} ${args.join(' ')})`;
+    const callTxt = `(call glsl_${this.prefix}${e.name} ${args.join(' ')})`;
     if (n === 1) return [this.let_(glslCompTy(e.ty), callTxt)];
     /* 回向量的函数：方言里回一个结构体（值语义），这儿当场拆成 N 格。
      * 一次调用一个 `(new)` —— 将来嫌它慢，办法是把这类函数内联，不是改这一层的形状。 */
@@ -688,7 +695,7 @@ class GlslLowerer {
     const body = this.stmts;
     this.stmts = [];
     this.pop();
-    this.out.push(`  (fn glsl_${f.name} (${ps.join(' ')}) ${ret}\n    ${body.join('\n    ')})`);
+    this.out.push(`  (fn glsl_${this.prefix}${f.name} (${ps.join(' ')}) ${ret}\n    ${body.join('\n    ')})`);
   }
 
   /**
@@ -701,16 +708,28 @@ class GlslLowerer {
    */
   entry() {
     const m = this.mod;
-    if (m.stage !== 'frag') glslNyi('顶点着色器');
+    if (m.stage === 'vert') return this.vertEntry();
     if (m.outs.length !== 1) glslNyi(`${m.outs.length} 个 out（这一刀只收一个）`);
     const o = m.outs[0];
     if (!(o.ty.k === 'vec' && o.ty.n === 4)) {
       throw new OmniError(`glsl: out 得是 vec4，这儿是 ${glslTyText(o.ty)}`);
     }
-    if (m.ins.length !== 0) glslNyi('varying（in）');
     const ps = ['(frag_x real)', '(frag_y real)'];
     this.push();
     this.bind('gl_FragCoord', ['(var frag_x)', '(var frag_y)', '(real 0.0)', '(real 1.0)']);
+    /* varying（`in`）：**插值好的值当参数递进来**。插的那一步不在这个函数里 ——
+     * 它是「一个三角形一次」的事（`a0`/`dadx`/`dady`），而这个函数是「一个片元一次」。
+     * 这条分界与 llvmpipe 一样：`lp_bld_interp.c` 是独立的一块。 */
+    for (const v of m.ins) {
+      const n = glslNComp(v.ty);
+      const ct = glslCompTy(v.ty);
+      const comps = [];
+      for (let i = 0; i < n; i++) {
+        ps.push(`(in_${v.name}_${i} ${ct})`);
+        comps.push(`(var in_${v.name}_${i})`);
+      }
+      this.bind(v.name, comps);
+    }
     for (const u of m.uniforms) {
       const n = glslNComp(u.ty);
       const ct = glslCompTy(u.ty);
@@ -753,15 +772,94 @@ class GlslLowerer {
     this.out.push(`  (fn glsl_frag (${ps.join(' ')}) ${glslStructName(4)}\n    ${body.join('\n    ')})`);
   }
 
-  run() {
-    for (const f of this.mod.funcs) this.func(f);
+  /**
+   * 顶点的入口：`(fn glsl_v_vert ((vid int) (<uniform…>)) glsl_vN)`。
+   *
+   * 回的那一个结构体是**位置四格 + 每个 varying 的分量**（按声明序）——
+   * 一个顶点算一次，插值那一步在外面（`glslTriProgram` 造的 setup 段）。
+   */
+  vertEntry() {
+    const m = this.mod;
+    const ps = ['(vid int)'];
+    this.push();
+    this.bind('gl_VertexID', ['(var vid)']);
+    for (const u of m.uniforms) {
+      const n = glslNComp(u.ty);
+      const ct = glslCompTy(u.ty);
+      const comps = [];
+      for (let i = 0; i < n; i++) {
+        ps.push(`(${u.name}_${i} ${ct})`);
+        comps.push(`(var ${u.name}_${i})`);
+      }
+      this.bind(u.name, comps);
+    }
+    this.stmts = [];
+    for (const c of m.consts) {
+      const n = glslNComp(c.ty);
+      const ct = glslCompTy(c.ty);
+      const vals = this.expr(c.init);
+      const comps = [];
+      for (let i = 0; i < n; i++) {
+        this.stmts.push(`(let ${c.name}_${i} ${ct} ${vals.length === 1 ? vals[0] : vals[i]})`);
+        comps.push(`(var ${c.name}_${i})`);
+      }
+      this.bind(c.name, comps);
+    }
+    /* `gl_Position` 是内建的 out（四格）。 */
+    const flat = [];
+    for (let i = 0; i < 4; i++) {
+      this.stmts.push(`(let gl_Position_${i} real (real 0.0))`);
+      flat.push(`(var gl_Position_${i})`);
+    }
+    this.bind('gl_Position', flat.slice());
+    /* varying（顶点这一侧的 `out`）。 */
+    for (const v of m.outs) {
+      const n = glslNComp(v.ty);
+      const ct = glslCompTy(v.ty);
+      const comps = [];
+      for (let i = 0; i < n; i++) {
+        this.stmts.push(`(let out_${v.name}_${i} ${ct} ${glslZero(ct)})`);
+        comps.push(`(var out_${v.name}_${i})`);
+      }
+      this.bind(v.name, comps);
+      for (const c of comps) flat.push(c);
+    }
+    const main = m.funcs.find((f) => f.name === 'main');
+    this.stmt(main.body);
+    const n = flat.length;
+    this.need(n);
+    this.stmts.push(`(let outv ${glslStructName(n)} (new ${glslStructName(n)}))`);
+    for (let i = 0; i < n; i++) this.stmts.push(`(fldset (var outv) c${i} ${flat[i]})`);
+    this.stmts.push('(ret (var outv))');
+    const body = this.stmts;
+    this.stmts = [];
+    this.pop();
+    this.out.push(`  (fn glsl_${this.prefix}vert (${ps.join(' ')}) ${glslStructName(n)}\n    ${body.join('\n    ')})`);
+  }
+
+  /** 一个模块（顶点或片元）的全部函数 + 入口。名字加 `prefix`。 */
+  emitModule(mod, prefix) {
+    this.mod = mod;
+    this.prefix = prefix;
+    this.names = new Map();
+    for (const f of mod.funcs) this.func(f);
     this.entry();
-    const decls = [...this.structs].sort().map((n) => {
+  }
+
+  /** 拼成方言文本。`mainTxt` 是要接在后面的那一段（可以是空串）。 */
+  finish(mainTxt) {
+    const decls = [...this.structs].sort((a, b) => a - b).map((n) => {
       const fs = [];
       for (let i = 0; i < n; i++) fs.push(`(c${i} real)`);
       return `  (struct ${glslStructName(n)} ${fs.join(' ')})`;
     });
-    return `(module\n${[...decls, ...this.out].join('\n\n')}\n)\n`;
+    const body = [...decls, ...this.out].join('\n\n');
+    return `(module\n${body}${mainTxt === '' ? '' : `\n\n${mainTxt}`}\n)\n`;
+  }
+
+  run() {
+    this.emitModule(this.mod, '');
+    return this.finish('');
   }
 }
 
@@ -789,7 +887,169 @@ function glslNum(v) {
  * `glsl_v4`。跑它的那一头是 `glslRenderMain`。
  */
 export function glslLower(mod) {
-  return new GlslLowerer(mod).run();
+  const L = new GlslLowerer();
+  L.emitModule(mod, '');
+  return L.finish('');
+}
+
+/** 三点定平面的那三个系数（`a0`/`dadx`/`dady`），一条方言函数。 */
+const GLSL_PLANE_FN = `  (fn glsl_plane ((q0 real) (q1 real) (q2 real)
+      (x0 real) (y0 real) (x1 real) (y1 real) (x2 real) (y2 real)) glsl_v3
+    ;; 三点定平面：q = a0 + dadx*x + dady*y。llvmpipe 的 setup 算的就是这三个数
+    ;; （\`lp_setup_tri.c\` 的 \`setup_tri_coefficients\`），片元那一侧只做一次仿射求值。
+    (let dx1 real (bin "-" (var x1) (var x0)))
+    (let dy1 real (bin "-" (var y1) (var y0)))
+    (let dx2 real (bin "-" (var x2) (var x0)))
+    (let dy2 real (bin "-" (var y2) (var y0)))
+    (let det real (bin "-" (bin "*" (var dx1) (var dy2)) (bin "*" (var dx2) (var dy1))))
+    (let q1d real (bin "-" (var q1) (var q0)))
+    (let q2d real (bin "-" (var q2) (var q0)))
+    (let dadx real (bin "/" (bin "-" (bin "*" (var q1d) (var dy2)) (bin "*" (var q2d) (var dy1))) (var det)))
+    (let dady real (bin "/" (bin "-" (bin "*" (var q2d) (var dx1)) (bin "*" (var q1d) (var dx2))) (var det)))
+    (let a0 real (bin "-" (bin "-" (var q0) (bin "*" (var dadx) (var x0))) (bin "*" (var dady) (var y0))))
+    (let r glsl_v3 (new glsl_v3))
+    (fldset (var r) c0 (var a0))
+    (fldset (var r) c1 (var dadx))
+    (fldset (var r) c2 (var dady))
+    (ret (var r)))`;
+
+/** 8 位那一步：`round(clamp(v,0,1)*255)`。 */
+const GLSL_TO8_FN = `  (fn glsl_to8 ((v real)) int
+    (let x real (var v))
+    (if (bin "<" (var x) (real 0.0)) (do (set x (real 0.0))))
+    (if (bin ">" (var x) (real 1.0)) (do (set x (real 1.0))))
+    (ret (toint (rmath "round" (bin "*" (var x) (real 255.0))))))`;
+
+/**
+ * 顶点 + 片元 + 插值，一整条：**一个三角形铺满画布**那一路。
+ *
+ * ## 插值照 llvmpipe 的形状（决策一、ADR-0019「量：读 llvmpipe」第三条）
+ *
+ * 一个三角形一次的 setup 算 `a0`/`dadx`/`dady`，一个片元一次的求值是
+ * `a = a0 + x*dadx + y*dady`。**透视校正**照标准做法：插 `a/w` 与 `1/w`，
+ * 片元处相除 —— `w` 全是 1 时它精确退化成线性插值，所以两份尺子（全屏三角形，
+ * `gl_Position.w = 1.0`）走哪条都一样，而别的三角形也不会错。
+ *
+ * `flat` 那一档取**第三个顶点**（GL 4.x 默认的 provoking vertex 是 last），
+ * `noperspective` 走线性（不除 `oow`）。这三档是编译期定死的，与 llvmpipe 的
+ * `enum lp_interp` 一样 —— 运行期没有分支。
+ *
+ * ## 这一段**不做覆盖判定**
+ *
+ * 两份尺子都是「一个三角形铺满整个视口」，所以每个像素都在里头。真正的边函数掩码
+ * （llvmpipe 的 `do_block_16`/`do_block_4`，ADR-0019 那一节量过）是下一片的事 ——
+ * 写在明处：现在这一段**假设三角形覆盖全画布**，喂一个不覆盖全画布的三角形，
+ * 它会把外面也画上。
+ */
+export function glslTriProgram(vertMod, fragMod, w, h, uni) {
+  const L = new GlslLowerer();
+  L.emitModule(vertMod, 'v_');
+  L.emitModule(fragMod, '');
+  L.need(3);
+  /* 顶点那一侧的 uniform 与片元那一侧的各自取值。 */
+  const uniArgs = (mod) => {
+    const out = [];
+    for (const u of mod.uniforms) {
+      const vals = uni[u.name];
+      if (vals === undefined) throw new OmniError(`glsl: uniform '${u.name}' 没给值`);
+      const n = glslNComp(u.ty);
+      if (vals.length !== n) {
+        throw new OmniError(`glsl: uniform '${u.name}' 要 ${n} 格，给了 ${vals.length}`);
+      }
+      for (const v of vals) {
+        out.push(glslCompTy(u.ty) === 'int' ? `(int ${Math.trunc(v)})` : `(real ${glslNum(v)})`);
+      }
+    }
+    return out;
+  };
+  const vUni = uniArgs(vertMod).join(' ');
+  const vN = 4 + vertMod.outs.reduce((s, v) => s + glslNComp(v.ty), 0);
+  /* 片元那一侧要的 varying，按**片元的声明序**去顶点那一侧找同名的。 */
+  const attrs = [];
+  let at = 4;
+  const posOf = new Map();
+  for (const v of vertMod.outs) {
+    posOf.set(v.name, at);
+    at += glslNComp(v.ty);
+  }
+  for (const v of fragMod.ins) {
+    const base = posOf.get(v.name);
+    if (base === undefined) {
+      throw new OmniError(`glsl: 片元要的 varying '${v.name}' 顶点那边没有`);
+    }
+    const n = glslNComp(v.ty);
+    for (let i = 0; i < n; i++) attrs.push({ name: v.name, comp: i, fld: base + i, interp: v.interp });
+  }
+  const s = [];
+  s.push('  (main');
+  /* 三个顶点。 */
+  for (let k = 0; k < 3; k++) {
+    s.push(`    (let v${k} ${glslStructName(vN)} (call glsl_v_vert (int ${k})${vUni === '' ? '' : ` ${vUni}`}))`);
+  }
+  /* 裁剪空间 -> 窗口坐标。y 往上长（`gl_FragCoord` 原点在左下，见 ADR-0019 那一节）。 */
+  for (let k = 0; k < 3; k++) {
+    s.push(`    (let w${k} real (fld (var v${k}) c3))`);
+    s.push(`    (let oow${k} real (bin "/" (real 1.0) (var w${k})))`);
+    s.push(`    (let x${k} real (bin "*" (bin "+" (bin "*" (bin "*" (fld (var v${k}) c0) (var oow${k})) (real 0.5)) (real 0.5)) (real ${glslNum(w)})))`);
+    s.push(`    (let y${k} real (bin "*" (bin "+" (bin "*" (bin "*" (fld (var v${k}) c1) (var oow${k})) (real 0.5)) (real 0.5)) (real ${glslNum(h)})))`);
+  }
+  const XY = '(var x0) (var y0) (var x1) (var y1) (var x2) (var y2)';
+  /* `1/w` 的平面（透视校正要它）。 */
+  s.push(`    (let pw glsl_v3 (call glsl_plane (var oow0) (var oow1) (var oow2) ${XY}))`);
+  /* 每个属性分量一份平面。`smooth` 插的是 `a/w`，`noperspective` 插 `a` 本身。 */
+  for (let i = 0; i < attrs.length; i++) {
+    const a = attrs[i];
+    if (a.interp === 'flat') continue;
+    for (let k = 0; k < 3; k++) {
+      const q = `(fld (var v${k}) c${a.fld})`;
+      s.push(`    (let q${i}_${k} real ${a.interp === 'smooth' ? `(bin "*" ${q} (var oow${k}))` : q})`);
+    }
+    s.push(`    (let p${i} glsl_v3 (call glsl_plane (var q${i}_0) (var q${i}_1) (var q${i}_2) ${XY}))`);
+  }
+  s.push('    (let px real (real 0.0))');
+  s.push('    (let py real (real 0.0))');
+  s.push(`    (let c ${glslStructName(4)} (new ${glslStructName(4)}))`);
+  L.need(4);
+  /* quad 扫描（次序与第四片一样）。 */
+  const QX = [0, 1, 0, 1];
+  const QY = [0, 0, 1, 1];
+  const evalAt = (i) => {
+    const a = attrs[i];
+    if (a.interp === 'flat') return `(fld (var v2) c${a.fld})`;
+    const lin = `(bin "+" (bin "+" (fld (var p${i}) c0) (bin "*" (fld (var p${i}) c1) (var px)))`
+      + ` (bin "*" (fld (var p${i}) c2) (var py)))`;
+    if (a.interp !== 'smooth') return lin;
+    const oow = '(bin "+" (bin "+" (fld (var pw) c0) (bin "*" (fld (var pw) c1) (var px)))'
+      + ' (bin "*" (fld (var pw) c2) (var py)))';
+    return `(bin "/" ${lin} ${oow})`;
+  };
+  const inner = [];
+  for (let k = 0; k < 4; k++) {
+    inner.push(`(set px (bin "+" (toreal (var qx)) (real ${QX[k] + 0.5})))`);
+    inner.push(`(set py (bin "+" (toreal (var qy)) (real ${QY[k] + 0.5})))`);
+    const args = ['(var px)', '(var py)'];
+    for (let i = 0; i < attrs.length; i++) args.push(evalAt(i));
+    for (const x of uniArgs(fragMod)) args.push(x);
+    inner.push(`(set c (call glsl_frag ${args.join(' ')}))`);
+    inner.push(`(if (bin "&&" (bin "<" (var px) (real ${glslNum(w)}))`
+      + ` (bin "<" (var py) (real ${glslNum(h)})))`
+      + ' (do'
+      + ' (print (toint (bin "-" (var px) (real 0.5))))'
+      + ' (print (toint (bin "-" (var py) (real 0.5))))'
+      + ' (print (call glsl_to8 (fld (var c) c0)))'
+      + ' (print (call glsl_to8 (fld (var c) c1)))'
+      + ' (print (call glsl_to8 (fld (var c) c2)))))');
+  }
+  s.push('    (let qy int (int 0))');
+  s.push(`    (while (bin "<" (var qy) (int ${Math.ceil(h / 2) * 2}))`);
+  s.push('      (do');
+  s.push('        (let qx int (int 0))');
+  s.push(`        (while (bin "<" (var qx) (int ${Math.ceil(w / 2) * 2}))`);
+  s.push('          (do');
+  s.push(`            ${inner.join('\n            ')}`);
+  s.push('            (set qx (bin "+" (var qx) (int 2)))))');
+  s.push('        (set qy (bin "+" (var qy) (int 2))))))');
+  return L.finish(`${GLSL_PLANE_FN}\n\n${GLSL_TO8_FN}\n\n${s.join('\n')}`);
 }
 
 /**
