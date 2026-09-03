@@ -179,7 +179,65 @@ float probe(int k) {
   return m[0] + m[1] * 4 + s[0] * 16 + s[1] * 256;
 });
 
-/* ---- 七、该骂的明着骂 ------------------------------------------------------ */
+/* ---- 七、向量比较那一族 + all/any/not（规范 8.6，第二十二片） ------------------
+ *
+ * 这一族**不需要方言有掩码类型**：GLSL 这一层的向量是摊成分量的，逐格比出来就是一串
+ * bool。方言掩码（待办 18）要的是 LLVM 腿上的原生 `<N x i1>` —— 那是性能，不是前提。 */
+
+probe('lessThan / equal / all / any / not', `
+float probe(int k) {
+  vec3 a = vec3(1.0, 2.0, 3.0);
+  vec3 b = vec3(3.0, 2.0, 1.0);
+  bvec3 lt = lessThan(a, b);
+  bvec3 eq = equal(a, b);
+  bvec3 n = not(lt);
+  float r = 0.0;
+  if (lt.x) r += 1.0;
+  if (lt.y) r += 2.0;
+  if (lt.z) r += 4.0;
+  if (any(eq)) r += 8.0;
+  if (all(eq)) r += 16.0;
+  if (n.z) r += 32.0;
+  return r;
+}`, [0], () => {
+  const a = [1, 2, 3];
+  const b = [3, 2, 1];
+  const lt = a.map((x, i) => x < b[i]);
+  const eq = a.map((x, i) => x === b[i]);
+  const n = lt.map((x) => !x);
+  let r = 0;
+  if (lt[0]) r += 1;
+  if (lt[1]) r += 2;
+  if (lt[2]) r += 4;
+  if (eq.some((x) => x)) r += 8;
+  if (eq.every((x) => x)) r += 16;
+  if (n[2]) r += 32;
+  return r;
+});
+
+probe('整个向量比（== 是每格都等、!= 是有一格不等）', `
+float probe(int k) {
+  ivec2 a = ivec2(k, 2);
+  ivec2 b = ivec2(1, 2);
+  float r = 0.0;
+  if (a == b) r += 1.0;
+  if (a != b) r += 2.0;
+  bvec2 le = lessThanEqual(a, ivec2(1, 1));
+  if (le.x) r += 4.0;
+  if (le.y) r += 8.0;
+  return r;
+}`, [0, 1, 5], (k) => {
+  const a = [k, 2];
+  const b = [1, 2];
+  let r = 0;
+  if (a[0] === b[0] && a[1] === b[1]) r += 1;
+  else r += 2;
+  if (a[0] <= 1) r += 4;
+  if (a[1] <= 1) r += 8;
+  return r;
+});
+
+/* ---- 八、该骂的明着骂 ------------------------------------------------------ */
 
 function rejects(name, glsl, want) {
   let msg = null;
@@ -209,6 +267,22 @@ float probe(int k) { ivec2 a = ivec2(1, 2); ivec3 b = ivec3(1, 2, 3); return flo
 
 rejects('^^ 只对 bool', `
 float probe(int k) { return float(k ^^ 1); }`, '两边要是 bool');
+
+rejects('lessThan 不收标量', `
+float probe(int k) { return lessThan(1.0, 2.0) ? 1.0 : 0.0; }`,
+'要是同型的向量');
+
+rejects('lessThan 不收 bvec', `
+float probe(int k) { bvec2 a = bvec2(true, false); return all(lessThan(a, a)) ? 1.0 : 0.0; }`,
+'不能作用在 bvec 上');
+
+rejects('all 要 bvec', `
+float probe(int k) { return all(vec2(1.0, 2.0)) ? 1.0 : 0.0; }`,
+'要是 bvecN');
+
+rejects('not 不收标量（标量写 !x）', `
+float probe(int k) { return not(true) ? 1.0 : 0.0; }`,
+'not 的实参要是 bvecN');
 
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail > 0 ? 1 : 0);

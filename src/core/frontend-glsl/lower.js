@@ -54,12 +54,18 @@ function glslNComp(t) {
 }
 
 /** `rmath` 直接转手的那些：GLSL 的名字 -> 方言的名字。 */
-const GLSL_RMATH = new Map([
-  ['sin', 'sin'], ['cos', 'cos'], ['tan', 'tan'],
+const GLSL_RMATH = new Map([['sin', 'sin'], ['cos', 'cos'], ['tan', 'tan'],
   ['asin', 'asin'], ['acos', 'acos'], ['atan', 'atan'],
   ['exp', 'exp'], ['log', 'log'], ['sqrt', 'sqrt'],
   ['abs', 'fabs'], ['floor', 'floor'], ['ceil', 'ceil'],
   ['pow', 'pow'], ['mod', 'fmod'],
+]);
+
+/** 向量比较那一族（规范 8.6）：GLSL 的名字 -> 方言的算符。逐格比，出一串 bool。 */
+const GLSL_VEC_CMP_OP = new Map([
+  ['lessThan', '<'], ['lessThanEqual', '<='],
+  ['greaterThan', '>'], ['greaterThanEqual', '>='],
+  ['equal', '=='], ['notEqual', '!='],
 ]);
 
 /** 这一片还没接的（第二档）。**报错而不是绕过去** —— 绕过去的结果是一张不一样的图。 */
@@ -267,8 +273,21 @@ class GlslLowerer {
     }
     if (e.op === '==' || e.op === '!=' || e.op === '<' || e.op === '>'
       || e.op === '<=' || e.op === '>=') {
-      if (a.length !== 1 || b.length !== 1) glslNyi('向量的比较');
-      return [this.let_('bool', `(bin "${e.op}" ${a[0]} ${b[0]})`)];
+      if (a.length === 1 && b.length === 1) {
+        return [this.let_('bool', `(bin "${e.op}" ${a[0]} ${b[0]})`)];
+      }
+      /* 整个向量比：`==` 是「每一格都等」、`!=` 是「有一格不等」（规范 5.9 —— 回的是
+       * **一个** bool，不是掩码；逐格出掩码的是 `equal`/`notEqual` 那一族）。
+       * 折起来用 `&&`/`||`：两边都是算好的 `(var …)`，短路与否看不出差别。 */
+      if (e.op !== '==' && e.op !== '!=') glslNyi('向量上的大小比较（要用 lessThan 那一族）');
+      if (a.length !== b.length) throw new OmniError('glsl: 比较的两个向量宽度不一样');
+      const fold = e.op === '==' ? '&&' : '||';
+      let acc = null;
+      for (let i = 0; i < a.length; i++) {
+        const one = this.let_('bool', `(bin "${e.op}" ${a[i]} ${b[i]})`);
+        acc = acc === null ? one : this.let_('bool', `(bin "${fold}" ${acc} ${one})`);
+      }
+      return [acc];
     }
     /* 算术与位运算：同型逐格、标量铺开。`%` 在 GLSL 里只对 int，方言的 `%` 也是。
      *
@@ -404,6 +423,25 @@ class GlslLowerer {
     const args = e.args.map((a) => this.expr(a));
     const wide = Math.max(...args.map((a) => a.length));
     const at = (k, i) => (args[k].length === 1 ? args[k][0] : args[k][i]);
+    /* 向量比较那一族（规范 8.6）。这一层的向量是**摊成分量**的，所以「逐格比出一串 bool」
+     * 就是它 —— 不需要方言有掩码类型。`all`/`any` 用 `&&`/`||` 把那串折起来：
+     * 两边都是已经算好的 `(var …)`，短路与否看不出差别（GLSL 那两个算符在这一层
+     * 仍然是明着骂的，因为源码里的右边可能带副作用）。 */
+    const cmp = GLSL_VEC_CMP_OP.get(name);
+    if (cmp !== undefined) {
+      const out = [];
+      for (let i = 0; i < wide; i++) out.push(this.let_('bool', `(bin "${cmp}" ${at(0, i)} ${at(1, i)})`));
+      return out;
+    }
+    if (name === 'all' || name === 'any') {
+      const op = name === 'all' ? '&&' : '||';
+      let acc = null;
+      for (const c of args[0]) acc = acc === null ? c : this.let_('bool', `(bin "${op}" ${acc} ${c})`);
+      return [acc === null ? '(bool true)' : acc];
+    }
+    if (name === 'not') {
+      return args[0].map((c) => this.let_('bool', `(un "!" ${c})`));
+    }
     const rm = GLSL_RMATH.get(name);
     if (rm !== undefined) {
       const out = [];

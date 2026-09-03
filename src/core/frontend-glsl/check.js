@@ -195,6 +195,59 @@ function glslGenType(name, tys, node, err) {
   return gen;
 }
 
+/**
+ * 向量比较那一族（规范 8.6）与 `bvecN` 上的归约。它们与上面那张泛型表分开写，
+ * 因为**结果类型换了一族**：比较出 `bvecN`、`all`/`any` 出 `bool`。
+ *
+ *   `lessThan(vecN, vecN)` -> `bvecN`（`ivecN` 也行；`equal`/`notEqual` 还收 `bvecN`）
+ *   `all(bvecN)` / `any(bvecN)` -> `bool`
+ *   `not(bvecN)` -> `bvecN`
+ *
+ * **为什么这一族现在做得了**：GLSL 这一层的向量是**摊成分量**的，一格一个方言标量，
+ * 所以「逐格比较出一串 bool」不需要方言有掩码类型。方言的掩码（ADR-0019 待办 18）
+ * 要的是 LLVM 腿上的原生 `<N x i1>`，那是**性能**，不是这一族的前提。
+ */
+const GLSL_VEC_CMP = new Map([
+  ['lessThan', '<'], ['lessThanEqual', '<='],
+  ['greaterThan', '>'], ['greaterThanEqual', '>='],
+  ['equal', '=='], ['notEqual', '!='],
+]);
+
+const GLSL_VEC_RED = new Set(['all', 'any']);
+
+/** 这一族的类型规则。回 `null` 表示「这个名字不属于这一族」。 */
+function glslVecCmpType(name, tys, node, err) {
+  const op = GLSL_VEC_CMP.get(name);
+  if (op !== undefined) {
+    if (tys.length !== 2) throw err(node, `${name} 要 2 个实参，给了 ${tys.length}`);
+    const [a, b] = tys;
+    if (a.k !== 'vec' || b.k !== 'vec' || a.n !== b.n || a.base !== b.base) {
+      throw err(node, `${name} 的两个实参要是同型的向量（${glslTyText(a)} 与 ${glslTyText(b)}）`);
+    }
+    /* `<` 那四条只对数字向量；`equal`/`notEqual` 连 `bvecN` 一起收（规范 8.6）。 */
+    if (a.base === 'bool' && op !== '==' && op !== '!=') {
+      throw err(node, `${name} 不能作用在 bvec 上（只有 equal/notEqual 可以）`);
+    }
+    return glslVec(a.n, 'bool');
+  }
+  if (GLSL_VEC_RED.has(name)) {
+    if (tys.length !== 1) throw err(node, `${name} 要 1 个实参，给了 ${tys.length}`);
+    if (!(tys[0].k === 'vec' && tys[0].base === 'bool')) {
+      throw err(node, `${name} 的实参要是 bvecN，给了 ${glslTyText(tys[0])}`);
+    }
+    return GLSL_BOOL;
+  }
+  if (name === 'not') {
+    if (tys.length !== 1) throw err(node, `not 要 1 个实参，给了 ${tys.length}`);
+    if (!(tys[0].k === 'vec' && tys[0].base === 'bool')) {
+      throw err(node, `not 的实参要是 bvecN，给了 ${glslTyText(tys[0])}`
+        + '（标量的逻辑非写 `!x`）');
+    }
+    return tys[0];
+  }
+  return null;
+}
+
 /* ---------------------------------------------------------- 内建变量 */
 
 /**
@@ -361,7 +414,11 @@ class GlslChecker {
         if (!this.funcs.has(name)) this.funcs.set(name, { name, ret, params, body: null });
         return;
       }
-      if (GLSL_BUILTINS.has(name)) throw this.err(node, `'${name}' 是内建函数，不能重定义`);
+      if (GLSL_BUILTINS.has(name) || GLSL_VEC_CMP.has(name) || GLSL_VEC_RED.has(name)
+        || name === 'not') {
+        throw this.err(node, `'${name}' 是内建函数，不能重定义`);
+      }
+
       const had = this.funcs.get(name);
       if (had !== undefined && had.body !== null) throw this.err(node, `'${name}' 定义了两次`);
       const f = { name, ret, params, body: null };
@@ -725,6 +782,12 @@ class GlslChecker {
   call(node) {
     const name = glslAtom(node.items[1]);
     const args = glslFlatten(node.items[2], 'args-add', 'args').map((a) => this.expr(a));
+    const vty = glslVecCmpType(name, args.map((a) => a.ty), node, (n, m) => this.err(n, m));
+    if (vty !== null) {
+      /* 这一族**不提升实参**：`lessThan(ivec2, ivec2)` 是整数比较，
+       * 悄悄提成 float 会把 `-1 < 0` 这种在极端值上算错。 */
+      return { k: 'builtin', ty: vty, name, args };
+    }
     if (GLSL_BUILTINS.has(name)) {
       const ty = glslGenType(name, args.map((a) => a.ty), node, (n, m) => this.err(n, m));
       /* 内建里 `int` 实参一律先提成 `float`（`sin(1)` 在 GLSL 里合法）。 */
