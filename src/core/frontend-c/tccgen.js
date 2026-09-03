@@ -175,7 +175,7 @@ import {
   VT_EXTERN, VT_STATIC, VT_TYPEDEF, VT_INLINE, VT_CONSTANT, VT_VOLATILE, VT_STORAGE, VT_ENUM,
   btype, isInteger, isFloat, isUnsigned, isPtr, isArray, isFunc, isStruct, isUnion, isEnum,
   isBitfield, bitPosOf, bitSizeOf, mkBitfield, bitfieldBase, bfAccess,
-  ctype, mkPointer, mkArray, mkStruct, mkEnum, enumBase, mkFunc, typeSize, typeText, sameType,
+  ctype, mkPointer, mkArray, mkStruct, mkEnum, enumBase, mkFunc, typeSize, cTypeText, sameType,
   sameTypeUnqual, mkVla, isVla, compareTypes,
   TY_VOID, TY_INT, TY_UINT, TY_LLONG, TY_ULLONG, TY_CHAR, TY_UCHAR, TY_SHORT, TY_BOOL,
   TY_FLOAT, TY_DOUBLE, TY_LDOUBLE, VT_LDOUBLE, sseEightbytes, ldoubleSize, setLdoubleTarget,
@@ -927,7 +927,7 @@ export class CGen {  /**
     let t = ty;
     while (isArray(t.t)) t = t.ref;
     if (isStruct(t.t) && t.ref.fields === null) {
-      this.err(`'${name}' has incomplete type '${typeText(t)}'`);
+      this.err(`'${name}' has incomplete type '${cTypeText(t)}'`);
     }
   }
 
@@ -1561,10 +1561,10 @@ export class CGen {  /**
        * 不是转换 —— 报「还没到」而不是「转不了」，否则报错文本会写成
        * `cannot convert 'struct P' to 'struct P'`，看着像 bug 而不是进度。 */
       if (sameType(from, ty)) this.todo('struct 当值用还没到（传参、返回、比较）');
-      this.err(`cannot convert '${typeText(from)}' to '${typeText(ty)}'`);
+      this.err(`cannot convert '${cTypeText(from)}' to '${cTypeText(ty)}'`);
     }
     if (!isInteger(from.t) && !isPtr(from.t)) {
-      this.err(`cannot convert '${typeText(from)}' to '${typeText(ty)}'`);
+      this.err(`cannot convert '${cTypeText(from)}' to '${cTypeText(ty)}'`);
     }
 
     let r = this.gv(v);
@@ -1612,7 +1612,7 @@ export class CGen {  /**
     const f = this.f;
     const from = v.ty;
     if (isPtr(from.t) || isPtr(ty.t) || isStruct(from.t) || isStruct(ty.t)) {
-      this.err(`cannot convert '${typeText(from)}' to '${typeText(ty)}'`);
+      this.err(`cannot convert '${cTypeText(from)}' to '${cTypeText(ty)}'`);
     }
     const srcMir = mirTypeOf(from);
     const dstMir = mirTypeOf(ty);
@@ -1622,13 +1622,13 @@ export class CGen {  /**
       return sVal(ty, f.emit(OP.CVT, dstMir, r, REF_NONE, CVT_FCVT));
     }
     if (isFloat(ty.t)) {
-      if (!isInteger(from.t)) this.err(`cannot convert '${typeText(from)}' to '${typeText(ty)}'`);
+      if (!isInteger(from.t)) this.err(`cannot convert '${cTypeText(from)}' to '${cTypeText(ty)}'`);
       const w = isUnsigned(from.t) ? TY_ULLONG : TY_LLONG;
       const r = this.gv(this.castTo(v, w));
       return sVal(ty, f.emit(OP.CVT, dstMir, r, REF_NONE,
         isUnsigned(from.t) ? CVT_U2F : CVT_I2F));
     }
-    if (!isInteger(ty.t)) this.err(`cannot convert '${typeText(from)}' to '${typeText(ty)}'`);
+    if (!isInteger(ty.t)) this.err(`cannot convert '${cTypeText(from)}' to '${cTypeText(ty)}'`);
     /* 目标是**无符号**的话，硬件那条「转成有符号」不能直接用：它在越界处**饱和**
      * （`(unsigned long long)9223372036854775808.0` 会得 `0x7fff…`）。两种宽度两种办法
      * （第九十五片）：
@@ -1700,7 +1700,7 @@ export class CGen {  /**
    */
   structCopy(target, v) {
     if (!sameTypeUnqual(target.ty, v.ty)) {
-      this.err(`cannot assign '${typeText(v.ty)}' to '${typeText(target.ty)}'`);
+      this.err(`cannot assign '${cTypeText(v.ty)}' to '${cTypeText(target.ty)}'`);
     }
     if (target.mem === null || v.mem === null) {
       this.err('internal: struct 赋值的两侧都该是内存左值');
@@ -2224,7 +2224,7 @@ export class CGen {  /**
         const lty = this.typeName();
         this.skip(RPAR);
         if (this.tok !== LBRACE || !sameType(lty, ty)) {
-          this.err(`invalid initializer for '${typeText(ty)}'`);
+          this.err(`invalid initializer for '${cTypeText(ty)}'`);
         }
         return this.initializer(dest, off, ty);
       }
@@ -2260,7 +2260,7 @@ export class CGen {  /**
       this.skip(RBRACE);
       return;
     }
-    if (isArray(ty.t)) this.err(`invalid initializer for '${typeText(ty)}'`);
+    if (isArray(ty.t)) this.err(`invalid initializer for '${cTypeText(ty)}'`);
     if (isStruct(ty.t)) {
       /* `struct P a = b;` —— 这不是聚合初始化器，是一次整块拷贝。 */
       if (dest.stat) this.err('initializer element is not constant');
@@ -2359,7 +2359,7 @@ export class CGen {  /**
        * 并完相邻的字面量之后看下一格。 */
       const bytes = this.readStrTok(this.tokc);
       if (this.tok === COMMA || this.tok === RBRACE || this.tok === SEMI) {
-        if (!isPtr(ty.t)) this.err(`invalid initializer for '${typeText(ty)}'`);
+        if (!isPtr(ty.t)) this.err(`invalid initializer for '${cTypeText(ty)}'`);
         /* native（第二十八片）：这个字面量是 MIR 常量池里的一条，后端给它一个符号
          * （`omni_str_<ref>`），这儿只留一条「指着它」的记录。 */
         if (this.native) {
@@ -2378,7 +2378,7 @@ export class CGen {  /**
        * `L"ab"[1]` 那种（下标）留给常量求值器。 */
       const vals = this.readWStrTok(this.tokc);
       if (this.tok === COMMA || this.tok === RBRACE || this.tok === SEMI) {
-        if (!isPtr(ty.t)) this.err(`invalid initializer for '${typeText(ty)}'`);
+        if (!isPtr(ty.t)) this.err(`invalid initializer for '${cTypeText(ty)}'`);
         /* native（第三十三片）：那一块的地址要等链接，所以落成一笔重定位。 */
         if (this.native) {
           this.putSymBytes(dest.addr + off, { kind: 's', no: this.wstrConst(vals), add: 0n });
@@ -2450,7 +2450,7 @@ export class CGen {  /**
    */
   initString(dest, off, ty, bytes) {
     if (btype(ty.ref.t) !== VT_BYTE) {
-      this.err(`array of '${typeText(ty.ref)}' cannot be initialized from a string`);
+      this.err(`array of '${cTypeText(ty.ref)}' cannot be initialized from a string`);
     }
     const n = ty.count < 0 ? bytes.length + 1 : ty.count;
     if (bytes.length > n) this.err('initializer-string is too long');
@@ -2477,7 +2477,7 @@ export class CGen {  /**
    */
   initWString(dest, off, ty, vals) {
     if (!isWcharType(ty.ref)) {
-      this.err(`array of '${typeText(ty.ref)}' cannot be initialized from a wide string`);
+      this.err(`array of '${cTypeText(ty.ref)}' cannot be initialized from a wide string`);
     }
     const w = wcharSize();
     const n = ty.count < 0 ? vals.length + 1 : ty.count;
@@ -2531,7 +2531,7 @@ export class CGen {  /**
         if (isArray(el.ty.t) && (this.tok === TOK_STR || this.tok === TOK_LSTR)) break;
         if (!isArray(el.ty.t) && !isStruct(el.ty.t)) break;       // 标量，到底了
         if (isStruct(el.ty.t) && el.ty.ref.fields === null) {
-          this.err(`'${typeText(el.ty)}' is an incomplete type`);
+          this.err(`'${cTypeText(el.ty)}' is an incomplete type`);
         }
         stack.push({ ty: el.ty, off: el.off, i: 0 });
       }
@@ -2633,7 +2633,7 @@ export class CGen {  /**
       return { ty: lv.ty.ref, off: lv.off + lv.i * typeSize(lv.ty.ref).size };
     }
     const fields = lv.ty.ref.fields;
-    if (fields === null) this.err(`'${typeText(lv.ty)}' is an incomplete type`);
+    if (fields === null) this.err(`'${cTypeText(lv.ty)}' is an incomplete type`);
     if (lv.i >= fields.length) {
       this.err(`excess elements in ${isUnion(lv.ty.t) ? 'union' : 'struct'} initializer`);
     }
@@ -2681,7 +2681,7 @@ export class CGen {  /**
         this.next();
         const nm = this.identName();
         const k = lv.ty.ref.fields.findIndex((x) => x.name === nm);
-        if (k < 0) this.err(`'${typeText(lv.ty)}' has no member named '${nm}'`);
+        if (k < 0) this.err(`'${cTypeText(lv.ty)}' has no member named '${nm}'`);
         lv.i = k;
       } else {
         this.skip(ASSIGN);
@@ -2690,7 +2690,7 @@ export class CGen {  /**
       if (this.tok !== LBRACK && this.tok !== DOT) continue;
       const el = this.initElem(lv);
       if (!isArray(el.ty.t) && !isStruct(el.ty.t)) {
-        this.err(`cannot designate into '${typeText(el.ty)}'`);
+        this.err(`cannot designate into '${cTypeText(el.ty)}'`);
       }
       stack.push({ ty: el.ty, off: el.off, i: 0 });
     }
@@ -2793,7 +2793,7 @@ export class CGen {  /**
         if (isArray(el.ty.t) && (this.tok === TOK_STR || this.tok === TOK_LSTR)) break;
         if (!isArray(el.ty.t) && !isStruct(el.ty.t)) break;
         if (isStruct(el.ty.t) && el.ty.ref.fields === null) {
-          this.err(`'${typeText(el.ty)}' is an incomplete type`);
+          this.err(`'${cTypeText(el.ty)}' is an incomplete type`);
         }
         stack.push({ ty: el.ty, off: el.off, i: 0 });
       }
@@ -2865,7 +2865,7 @@ export class CGen {  /**
         if (isArray(el.ty.t) && (this.tok === TOK_STR || this.tok === TOK_LSTR)) break;
         if (!isArray(el.ty.t) && !isStruct(el.ty.t)) break;
         if (isStruct(el.ty.t) && el.ty.ref.fields === null) {
-          this.err(`'${typeText(el.ty)}' is an incomplete type`);
+          this.err(`'${cTypeText(el.ty)}' is an incomplete type`);
         }
         stack.push({ ty: el.ty, off: el.off, i: 0 });
       }
@@ -3105,7 +3105,7 @@ export class CGen {  /**
       const v = this.promote(this.unary());
       // `~` 的操作数必须是整型（C11 6.5.3.3 第 4 段）；浮点在这儿拦，
       // 否则 `BNOT` 拿到一个 f64 会变成 verifier 的内部错
-      if (!isInteger(v.ty.t)) this.err(`invalid type argument of unary '~' ('${typeText(v.ty)}')`);
+      if (!isInteger(v.ty.t)) this.err(`invalid type argument of unary '~' ('${cTypeText(v.ty)}')`);
       return sVal(v.ty, this.f.emit(OP.BNOT, mirTypeOf(v.ty), this.gv(v), REF_NONE, 0));
     }
     if (t === BANG) {
@@ -3134,7 +3134,7 @@ export class CGen {  /**
     if (t === STAR) {
       this.next();
       const v = this.decay(this.unary());
-      if (!isPtr(v.ty.t)) this.err(`invalid type argument of unary '*' ('${typeText(v.ty)}')`);
+      if (!isPtr(v.ty.t)) this.err(`invalid type argument of unary '*' ('${cTypeText(v.ty)}')`);
       const et = v.ty.ref;
       if (btype(et.t) === VT_VOID) this.err("dereferencing 'void *'");
       /* `*p` 是一个**内存左值**：地址是 p 的值，静态偏移 0。于是 `*p = 5` 与 `p[0] = 5`
@@ -3347,7 +3347,7 @@ export class CGen {  /**
           continue;
         }
         this.err(`called object is not a function or function pointer`
-          + ` ('${typeText(cur.ty)}')`);
+          + ` ('${cTypeText(cur.ty)}')`);
       }
       if (t === LBRACK) {
         /* `a[i]` **就是** `*(a + i)`（C11 6.5.2.1 第 2 段）。照这一句写而不是另开一条
@@ -3369,22 +3369,22 @@ export class CGen {  /**
         if (t === GEN_TOK_ARROW) {
           const p = this.decay(base);
           if (!isPtr(p.ty.t)) {
-            this.err(`invalid type argument of '->' ('${typeText(base.ty)}')`);
+            this.err(`invalid type argument of '->' ('${cTypeText(base.ty)}')`);
           }
           base = sMem(p.ty.ref, this.gv(p), 0);
         }
         if (!isStruct(base.ty.t)) {
           this.err(`request for member in something not a structure or union`
-            + ` ('${typeText(base.ty)}')`);
+            + ` ('${cTypeText(base.ty)}')`);
         }
         const info = base.ty.ref;
         if (info.fields === null) {
-          this.err(`'${typeText(base.ty)}' is an incomplete type`);
+          this.err(`'${cTypeText(base.ty)}' is an incomplete type`);
         }
         const fname = this.identName();
         const fld = info.fields.find((x) => x.name === fname);
         if (fld === undefined) {
-          this.err(`'${typeText(base.ty)}' has no member named '${fname}'`);
+          this.err(`'${cTypeText(base.ty)}' has no member named '${fname}'`);
           return cur;
         }
         if (base.mem === null) this.err('internal: struct 左值不在内存上');
@@ -3583,7 +3583,7 @@ export class CGen {  /**
        * （形参是实参的一份可改的拷贝，C11 6.9.1 第 10 段）。 */
       if (isStruct(want.t)) {
         if (!sameType(want, vals[i].ty)) {
-          this.err(`cannot pass '${typeText(vals[i].ty)}' as '${typeText(want)}'`);
+          this.err(`cannot pass '${cTypeText(vals[i].ty)}' as '${cTypeText(want)}'`);
         }
         if (fixed) {
           refs.push(this.addrOf(vals[i]));
@@ -3780,7 +3780,7 @@ export class CGen {  /**
    */
   vaArg(ap, ty) {
     if (isArray(ty.t) || isFunc(ty.t)) {
-      this.err(`'${typeText(ty)}' cannot be an argument type`);
+      this.err(`'${cTypeText(ty)}' cannot be an argument type`);
     }
     /* native（第二十五片）：一格在哪儿由后端按真 ABI 找 —— 这儿只发一条 `VAARG`，
      * 实参照旧是**那个 va_list 变量的地址**（后端要就地把它推到下一格）。 */
@@ -4074,7 +4074,7 @@ export class CGen {  /**
     const vb = btype(b.ty.t) === VT_VOID;
     if (va && vb) return sVal(TY_VOID, REF_NONE);
     if (va || vb) {
-      this.err(`cannot convert 'void' to '${typeText(va ? b.ty : a.ty)}'`);
+      this.err(`cannot convert 'void' to '${cTypeText(va ? b.ty : a.ty)}'`);
     }
     /* 有一支是浮点：公共类型是两支里等级高的那个浮点（C11 6.5.15 第 5 段走的是
      * 常规算术转换），值从 f64 那个槽里读。 */
@@ -4780,7 +4780,7 @@ export class CGen {  /**
      * 在开 block **之前**求值：它只在分派里用一次，而放在外面读起来就是 tcc 的顺序。 */
     const sel = this.promote(this.gexpr());
     if (!isInteger(sel.ty.t)) {
-      this.err(`switch quantity is not an integer ('${typeText(sel.ty)}')`);
+      this.err(`switch quantity is not an integer ('${cTypeText(sel.ty)}')`);
     }
     const selRef = this.gv(sel);
     let selSlot = -1;
@@ -5433,7 +5433,7 @@ export class CGen {  /**
        *     `SValue`（tcc.h:488）就是这么写的，所以这一格是「编 tinycc」的必经之路。 */
       if (this.tok === SEMI) {
         if (!isStruct(base.t)) this.err('declaration does not declare anything');
-        if (base.ref.fields === null) this.err(`field has incomplete type '${typeText(base)}'`);
+        if (base.ref.fields === null) this.err(`field has incomplete type '${cTypeText(base)}'`);
         if (!base.ref.anon) { this.skip(SEMI); continue; }
         for (const f of base.ref.fields) dup(f.name);
         /* 匿名成员再领一个号（第一百三十四片，`tccgen.c:4675`）—— 于是一个匿名 struct
@@ -5463,7 +5463,7 @@ export class CGen {  /**
           this.next();
           bits = Number(this.constExpr());
           if (!isInteger(fty.t)) {
-            this.err(`bit-field has non-integral type '${typeText(fty)}'`);
+            this.err(`bit-field has non-integral type '${cTypeText(fty)}'`);
           }
           if (bits < 0) this.err('negative width in bit-field');
           const w = typeSize(fty).size * 8;
@@ -5485,7 +5485,7 @@ export class CGen {  /**
         if (fname !== null) {
           dup(fname);
           if (isStruct(fty.t) && fty.ref.fields === null) {
-            this.err(`field '${fname}' has incomplete type '${typeText(fty)}'`);
+            this.err(`field '${fname}' has incomplete type '${cTypeText(fty)}'`);
           }
           /* 柔性数组成员（`char buf[];`，C11 6.7.2.1 第 18 段，第四十三片）不必特判：
            * 它的 `count < 0`，而 `typeSize` 对没写长度的数组回 0 —— 于是它**占 0 个
@@ -6099,17 +6099,17 @@ export class CGen {  /**
     if (bt === -1) bt = VT_INT;   // `unsigned` / `long` 单独出现就是 int 系
     /* `long double`：在**这个目标**上它就是 `double`（`tcc.h:237-241`：MACHO+ARM64 与
      * PE 都开 `TCC_USING_DOUBLE_FOR_LDOUBLE`）。类型码仍然分开 —— `sizeof` 与
-     * `typeText` 看的是类型，而 x86_64（80 位）与 riscv64（128 位）那两条后端上
+     * `cTypeText` 看的是类型，而 x86_64（80 位）与 riscv64（128 位）那两条后端上
      * 表示会不一样，那时改的只有 `typeSize` 与 `mirTypeOf` 两处。
      * `long` 那一票**在这儿就用掉**（`longs = 0`）—— 否则下面「short/long 只能配 int」
      * 与「longs>0 就是 long long」两条会把它按整型处理。 */
     if (longs > 0 && bt === VT_DOUBLE) { bt = VT_LDOUBLE; longs = 0; }
 
     if ((bt === VT_FLOAT || bt === VT_DOUBLE) && (sign !== 0 || shorts > 0 || longs > 0)) {
-      this.err(`'${typeText(ctype(bt))}' cannot be signed or sized`);
+      this.err(`'${cTypeText(ctype(bt))}' cannot be signed or sized`);
     }
     if ((shorts > 0 || longs > 0) && bt !== VT_INT) {
-      this.err(`'short'/'long' cannot be used with '${typeText(ctype(bt))}'`);
+      this.err(`'short'/'long' cannot be used with '${cTypeText(ctype(bt))}'`);
     }
     if (bt === VT_VOID && (sign !== 0 || shorts > 0 || longs > 0)) {
       this.err("'void' cannot be signed or sized");

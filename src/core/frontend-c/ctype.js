@@ -390,14 +390,14 @@ export function typeSize(ty) {
  * 印一个类型（报错消息用）。形状照 `type_to_str`（`tccgen.c:3600` 一带）的输出，
  * 但不追求逐字节相同 —— 错误消息的**关键片段**才是测试比的东西。
  */
-export function typeText(ty) {
+export function cTypeText(ty) {
   const t = ty.t;
-  if (isArray(t)) return `${typeText(ty.ref)}[${ty.count < 0 ? '' : ty.count}]`;
-  if (isPtr(t)) return `${typeText(ty.ref)} *`;
+  if (isArray(t)) return `${cTypeText(ty.ref)}[${ty.count < 0 ? '' : ty.count}]`;
+  if (isPtr(t)) return `${cTypeText(ty.ref)} *`;
   if (isFunc(t)) {
-    const ps = ty.ref.params.map((p) => typeText(p.ty));
+    const ps = ty.ref.params.map((p) => cTypeText(p.ty));
     if (ty.ref.variadic) ps.push('...');
-    return `${typeText(ty.ref.ret)} (${ps.length === 0 ? 'void' : ps.join(', ')})`;
+    return `${cTypeText(ty.ref.ret)} (${ps.length === 0 ? 'void' : ps.join(', ')})`;
   }
   if (isStruct(t)) return `${isUnion(t) ? 'union' : 'struct'} ${ty.ref.name}`;
   if (isEnum(t)) return `enum ${ty.ref === null ? '<anonymous>' : ty.ref.name}`;

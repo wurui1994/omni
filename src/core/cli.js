@@ -32,7 +32,7 @@ import { lowerC, lowerCNative } from './frontend-c/tccgen.js';
 import { genModule as genArm64 } from './arm64/from_mir.js';
 import { genModule as genX64 } from './x64/from_mir.js';
 import { writeObject } from './link/macho.js';
-import { writeObject as writeElfObject } from './link/elf.js';
+import { writeElfObject } from './link/elf.js';
 import { mergeObjects as mergeElfObjects } from './link/elf_merge.js';
 import { peLoad, PE_GUI } from './link/pe_load.js';
 import { peWrite } from './link/pe_link.js';

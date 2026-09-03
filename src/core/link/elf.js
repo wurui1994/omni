@@ -371,7 +371,7 @@ function ehFrameX64(funcs) {
  *              `{offs, funcs: [{start, end}]}`（第一百一十七片）；`seq` 是
  *              `{text, data, rodata, pdata}` 几节**造出来的次序**上的位置（第一百一十八片）
  */
-export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
+export function writeElfObject(text, data, defs, relocs, arch, dataAlign, opts) {
   const archName = arch === undefined ? 'arm64' : arch;
   const cpu = ARCH[archName];
   if (cpu === undefined) throw new OmniError(`elf: 还不认识架构 ${archName}`);

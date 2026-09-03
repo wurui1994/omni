@@ -30,12 +30,18 @@ const CLI = join(root, 'src', 'core', 'cli.js');
 
 /** 基线：量出来的那两个数。**只许往下调**。
  *
- *   243 -> 22（`dedup.js` 扫了十一个文件）-> 10（守卫改成「只看要改的这一边导没导出」，
- *   又扫掉 12 条）。剩下这 10 条**两边都导出**（`ret`/`nop`/`fcmp`、`RELOC`/`CodeBuf`、
- *   `genModule`/`genFunc`/`codeOf`、`writeObject`、`typeText`），要改导出名 + 改调用方
- *   （连门里的 import 一起，共 37 处），得一处一处看。
+ *   243 -> 22（`dedup.js` 扫了十一个文件）-> 10（守卫改成「只看要改的这一边导没导出」）
+ *   -> 8（`elf.js` 的 `writeObject` 改成 `writeElfObject`、`ctype.js` 的 `typeText` 改成
+ *   `cTypeText`，两处都只动了**一个**调用方）。
+ *
+ *   剩下这 8 条**两边都导出、而且调用方不止一处**：`ret`/`nop`/`fcmp`（arm64|x64 的
+ *   `encode.js`，走的是 `import * as`，所以改的是 `a.ret` 这种属性名）、
+ *   `RELOC`/`CodeBuf`（`asm.js`）、`genModule`/`genFunc`/`codeOf`（`from_mir.js`）。
+ *   门里也有引用，而且 `tests/arm64/run.js` 里 `'ret'` 还是**期望的反汇编文本** ——
+ *   一把梭的词边界改名会把那些字符串一起改坏，得只改属性访问。
+ *
  *   4：`import * as`，四处全是 `from './encode.js'`，改名解决不了（见 ADR-0001 那一节）。 */
-const BASE_DUP = 10;
+const BASE_DUP = 8;
 const BASE_NS = 4;
 
 let pass = 0;
