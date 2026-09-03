@@ -1,0 +1,31 @@
+;; tests/glsl/shape_tax_a.sx —— 形状税：**每像素一次调用 + 一个 `(new glsl_v4)`**
+;; 与 `shape_tax_b.sx` 做同样的算术，差别只在形状。两个程序各自计时，差值就是形状税。
+;; 方言里没有时钟，所以计时在外面（`time` 量整个进程；两边的固定开销一样，减掉就没了）。
+(module
+  (struct glsl_v4 (c0 real) (c1 real) (c2 real) (c3 real))
+
+  (fn shade ((x real) (y real)) glsl_v4
+    (let r real (bin "*" (var x) (real 0.001)))
+    (let g real (bin "*" (var y) (real 0.002)))
+    (let b real (bin "+" (var r) (var g)))
+    (let o glsl_v4 (new glsl_v4))
+    (fldset (var o) c0 (var r))
+    (fldset (var o) c1 (var g))
+    (fldset (var o) c2 (var b))
+    (fldset (var o) c3 (real 1.0))
+    (ret (var o)))
+
+  (main
+    (let n int (int 8388608))
+    (let s real (real 0.0))
+    (let i int (int 0))
+    (while (bin "<" (var i) (var n)) (do
+      (let px real (toreal (var i)))
+      (let p glsl_v4 (call shade (var px) (var px)))
+      (set s (bin "+" (var s) (fld (var p) c0)))
+      (set s (bin "+" (var s) (fld (var p) c1)))
+      (set s (bin "+" (var s) (fld (var p) c2)))
+      (set s (bin "+" (var s) (fld (var p) c3)))
+      (set i (bin "+" (var i) (int 1)))))
+    (print (var s)))
+)

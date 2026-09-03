@@ -1,0 +1,19 @@
+;; tests/glsl/shape_tax_b.sx —— 形状税的对照：**同样的算术，内联，不调用、不 new**
+;; 与 `shape_tax_a.sx` 逐行对着写。校验和必须相同 —— 不同就说明两边算的不是同一件事。
+(module
+  (main
+    (let n int (int 8388608))
+    (let s real (real 0.0))
+    (let i int (int 0))
+    (while (bin "<" (var i) (var n)) (do
+      (let px real (toreal (var i)))
+      (let r real (bin "*" (var px) (real 0.001)))
+      (let g real (bin "*" (var px) (real 0.002)))
+      (let b real (bin "+" (var r) (var g)))
+      (set s (bin "+" (var s) (var r)))
+      (set s (bin "+" (var s) (var g)))
+      (set s (bin "+" (var s) (var b)))
+      (set s (bin "+" (var s) (real 1.0)))
+      (set i (bin "+" (var i) (int 1)))))
+    (print (var s)))
+)
