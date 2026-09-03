@@ -21,7 +21,7 @@ import {
   OP, OP_NAMES, OP_MODES, REF_NONE, REF_BIAS, isConstRef, refText, typeText, typeLanes, T_BOOL,
   T_I64, T_I32, T_F64, T_VOID,
   MLOAD_KINDS, MSTORE_KINDS, memKindNo, memBytes, isFloatType, isIntType, intBits,
-  memArgSize, memArgSse,
+  memArgSize, memArgSse, callVaFixed,
 } from './ir.js';
 
 export function verifyMir(mod) {
@@ -132,15 +132,18 @@ function checkIndex(mod, f, i, op, v, bad, k) {
   /* CCALL 的两个数字字段（第二十二片）：a 是 C 入口号，aux 是变参分界。
    * 分界要么是 0（不是变参调用），要么在 1..实参数+1 里 —— 「固定实参比实参还多」
    * 会让后端把一个不存在的实参往寄存器里放。
-   * `CALLI` 的 aux 是同一个编码（第三十五片），所以同一段查。 */
+   * `CALLI` 的 aux 是同一个编码（第三十五片），所以同一段查。
+   * aux 上还挤着「返回值在 st0 里」那一位（第一百一十二片），所以要按 `callVaFixed`
+   * 取分界 —— 拿整个 aux 去比的话，点了那一位就一律「分界超过实参个数」。 */
   if (op === OP.CCALL || op === OP.CALLI) {
     if (op === OP.CCALL && k === 0) {
       if (mod.cabi[v] === undefined) bad(i, `C 入口号 ${v} 越界`);
       return;
     }
     const n = f.args[f.b[i]];
-    if (v !== 0 && (n === undefined || v > n + 1)) {
-      bad(i, `变参分界 ${v}（固定实参 ${v - 1} 个）超过实参个数 ${n}`);
+    const nf = callVaFixed(v);
+    if (nf >= 0 && (n === undefined || nf > n)) {
+      bad(i, `变参分界 ${nf + 1}（固定实参 ${nf} 个）超过实参个数 ${n}`);
     }
     return;
   }

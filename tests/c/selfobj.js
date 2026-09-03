@@ -234,16 +234,16 @@ rmSync(OUT, { recursive: true, force: true });
  * 交叉编出来的 tcc **没有**系统头那一格（`configure` 只给本机那份烤了 SDK 的路径），
  * 所以两边都要手工给 `-I <SDK>/usr/include` —— 尺子自己也是这样才编得动 `<stdio.h>`。
  *
- * `long double` 那两份是**已知不同**：这一格盯的是「差的正好是这两份」，
+ * `long double` 那一份是**已知不同**：这一格盯的是「差的正好是那一份」，
  * 多一份少一份都算失败。 */
 const X64_UNITS = ['tcc', 'libtcc', 'tccpp', 'tccgen', 'tccdbg', 'tccelf', 'tccasm', 'tccrun',
   'x86_64-gen', 'x86_64-link', 'i386-asm', 'tccmacho'];
-/* 这两份还不同（第一百一十一片之后）：`long double` 的**宽度**已经对了（x86_64 上是
- * 16 字节的 x87 80 位，静态初始化式的那十个字节也对了），差的是 SysV 的那一半 ——
- * `tokc.ld = strtold(...)`（`tccpp.c:2427`）的返回值在 `st0`，我们还按 xmm0 读；
- * 传参也该走内存（MEMORY 类，栈上 16 字节的格子）。于是我们编出来的 tcc 认不准
- * `1.5L` 这种字面量，这两份用例里那十个字节仍然写错。 */
-const X64_KNOWN_DIFF = ['15-float.c', '21-ldouble.c'];
+/* 只剩这一份（第一百一十二片之后）。`21-ldouble.c` 相同了 —— 宽度（16 字节的 x87
+ * 80 位）、静态初始化式的那十个字节、以及 `tokc.ld = strtold(...)`（`tccpp.c:2427`）
+ * 的返回值从 `st0` 里取，这三件凑齐，我们编出来的 tcc 才认得准 `1.5L`。
+ * 还差的是 SysV 的**传参**那一半（MEMORY 类，栈上 16 字节的格子），所以
+ * `printf("%Lf")` 那一路仍然不对 —— `15-float.c` 正是印它的那一份。 */
+const X64_KNOWN_DIFF = ['15-float.c'];
 const XTCC = join(root, '.omni-cache', 'tcc-cross', 'x86_64-osx-tcc');
 const SDK_INC = SDK === '' ? '' : join(SDK, 'usr', 'include');
 
@@ -308,7 +308,7 @@ if (!existsSync(XTCC) || SDK_INC === '') {
           bad('x64-tcc -c tests/c/gen/*.c == x86_64-osx-tcc -c', diffs.slice(0, 6).join('\n'));
         } else {
           ok(`x64-tcc -c tests/c/gen/*.c == x86_64-osx-tcc -c（${same} 份相同，`
-            + `已知不同 ${X64_KNOWN_DIFF.length} 份：long double 的 SysV 传参与 st0 返回还没做）`);
+            + `已知不同 ${X64_KNOWN_DIFF.length} 份：long double 的 SysV 传参还没做）`);
         }
       }
     }

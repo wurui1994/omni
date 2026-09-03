@@ -182,7 +182,7 @@ import {
 } from './ctype.js';
 import {
   MirModule, MirFunc, OP, T_VOID, T_I32, T_I64, T_BOOL, T_F32, T_F64, REF_NONE,  CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16, CVT_I2F, CVT_U2F, CVT_F2I, CVT_F2U,
-  CVT_FCVT, memDesc, MEM_PAGE, fnPtr, isConstRef, memArgAux,
+  CVT_FCVT, memDesc, MEM_PAGE, fnPtr, isConstRef, memArgAux, CALL_LDRET,
 } from '../mir/ir.js';
 import { f80Bytes } from './f80.js';
 
@@ -3304,10 +3304,11 @@ export class CGen {  /**
     const rt = mirTypeOf(info.ret);
     /* native 上的变参调用**不走桩**：一个桩装不下「实参个数各不相同」的调用点，
      * 而真的 ABI 要求实参就在寄存器与栈上（第二十二片）。所以这儿直接发 CCALL，
-     * 分界记在 aux 上。 */
+     * 分界记在 aux 上 —— 与「返回值在 st0 里」那一位挤同一格（第一百一十二片）。
+     * 走桩那一路的 CALL 不带这一位：被调的是谁看得见，标注在**那个 MirFunc** 上。 */
     const r = this.native && info.variadic
       ? this.f.emit(OP.CCALL, rt, this.mod.cabiNo(name),
-        this.f.pushArgs(a.refs), a.nfixed + 1)
+        this.f.pushArgs(a.refs), a.nfixed + 1 + this.ldRetAux(info.ret))
       : this.f.emit(OP.CALL, rt, info.no, this.f.pushArgs(a.refs), 0);
     /* 回的是那块地方的地址（SysV 的 rax 也是这么回的）。用**回来的**那个 ref 而不是
      * 手上的 `sret`：两者一定相等，而用回来的那个把「返回值在哪儿」这件事记在数据流里。 */
@@ -3385,7 +3386,7 @@ export class CGen {  /**
      * 按指针调 `printf` 与直接调它必须摆成同一个样子。解释器那条腿不看这一格。 */
     const vafix = this.native && fi.variadic ? a.nfixed + 1 : 0;
     const r = this.f.emit(OP.CALLI, mirTypeOf(fi.ret), callee,
-      this.f.pushArgs(a.refs), vafix);
+      this.f.pushArgs(a.refs), vafix + this.ldRetAux(fi.ret));
     if (a.sret !== null) return sMem(fi.ret, r, 0);
     return this.retNarrow(fi.ret, r);
   }
@@ -3599,6 +3600,18 @@ export class CGen {  /**
   }
 
   /**
+   * 这个调用点的返回值回在 `st0` 里吗（第九刀第一百一十二片）。
+   *
+   * x86_64 的 `long double` 是 x87 的类型，返回值在 `st0` 而不是 `xmm0`。这是
+   * **调用点的**一条事实：被调的是谁我们未必看得见（`strtold` 是外部函数），
+   * 能看见的只有它的返回类型，所以只能按类型判。别的目标上 `long double` 就是
+   * `double`（`ldoubleSize() === 8`），一个字不改。
+   */
+  ldRetAux(retTy) {
+    return btype(retTy.t) === VT_LDOUBLE && ldoubleSize() === 16 ? CALL_LDRET : 0;
+  }
+
+  /**
    * `va_arg(ap, T)`：读走一格、把 ap 推到下一格。
    *
    * **先读后推**，而且读的宽度按 T（一格 8 字节里只有 T 那几个字节有效，见 `vaBlock`）。
@@ -3690,7 +3703,12 @@ export class CGen {  /**
       refs.push(f.emit(OP.LOAD, T_I64, REF_NONE, REF_NONE, slot));
     }
     const rt = mirTypeOf(info.ret);
-    const r = f.emit(OP.CCALL, rt, this.mod.cabiNo(name), f.pushArgs(refs), 0);
+    /* x86_64 的 `long double`（第一百一十二片）：桩两头都在 x87 上 —— CCALL 的结果
+     * 从 `st0` 里取（`ldRetAux`），桩自己的返回值也要**回到 `st0`**（`setLdRet`）。
+     * 只做一头的话，`strtold` 的值会在桩里从 x87 转到 xmm0 就再也回不去了。 */
+    const ldr = this.ldRetAux(info.ret);
+    if (ldr !== 0) f.setLdRet();
+    const r = f.emit(OP.CCALL, rt, this.mod.cabiNo(name), f.pushArgs(refs), ldr);
     if (rt === T_VOID) f.emit(OP.RET, T_VOID, REF_NONE, REF_NONE, 0);
     else f.emit(OP.RET, rt, r, REF_NONE, 0);
   }
@@ -7042,6 +7060,9 @@ export class CGen {  /**
    * 普通函数在 `finishFunc` 里当场走这儿，`inline` 的等到 `genInlineFuncs`。
    */
   genFuncBody(body, info, name, ret, params) {
+    /* 返回 `long double` 的函数，值要留在 `st0` 里（第一百一十二片）—— 这是**这个
+     * 函数**的一条事实，所以打在 MirFunc 上，由 x86_64 那条腿在 `RET` 上看它。 */
+    if (this.ldRetAux(ret) !== 0) info.f.setLdRet();
     // ---- 第一遍：只为了知道谁要落在内存上、帧要多大。输出丢掉
     this.pass1 = true;
     this.addrTaken = new Set();

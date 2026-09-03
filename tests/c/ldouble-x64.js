@@ -1,14 +1,15 @@
 // tests/c/ldouble-x64.js —— x86_64 上 `long double` 是 16 字节的 x87 80 位
-// （ADR-0017 第九刀第一百一十一片）
+// （ADR-0017 第九刀第一百一十一、一百一十二片）
 //
-// 这一组称**已经做到**的三件事，一件不多：
+// 这一组称**已经做到**的四件事，一件不多：
 //
 //   1. **宽度与布局** —— `sizeof(long double)` 是 16、`struct { char c; long double d; }` 是 32、
 //      `long double[3]` 是 48。
 //   2. **算得对** —— 局部量存进帧上那十六个字节、读回来、算术、转成 int：这一路全程
 //      f80 的读写（`fld/fstp tbyte`）。
+//   4. **返回值在 `st0` 里**（第一百一十二片）—— 直接调用、按指针调用、外部符号三条路。
 //
-//   这两条的尺子是 `clang -arch x86_64`（Rosetta 上跑）。为什么不是 tcc：交叉编出来的那份
+//   这三条的尺子是 `clang -arch x86_64`（Rosetta 上跑）。为什么不是 tcc：交叉编出来的那份
 //   `x86_64-osx-tcc` **链不动** —— 它没有 x86_64 那一档的 libc 路径与 `libtcc1.a`
 //   （`configure` 只给本机那份烤了 SDK 的路径），`-o 可执行文件` 直接报
 //   `library 'c' not found`。字节这一层的尺子仍是 tcc（下面第 3 条与 `selfobj`）。
@@ -16,9 +17,8 @@
 //   3. **静态初始化式的字节** —— `.data` 里那十六个字节与 `f80Bytes`（第一百〇九片，
 //      拿 `x86_64-osx-tcc -c` 写出来的字节称过的那一份）逐个相同。
 //
-// **还没做到**（下一片）：SysV 的 long double 传参（MEMORY 类，栈上 16 字节的格子）
-// 与返回（`st0`）。所以 `printf("%Lf", x)` 在 x86_64 上仍然印不对 —— 这一格在第一百一十一片
-// 之前也一样不对（那时 `sizeof` 还是 8），不是这一片带来的。
+// **还没做到**（下一片）：SysV 的 long double **传参**（MEMORY 类，栈上 16 字节的格子）。
+// 所以 `printf("%Lf", x)` 在 x86_64 上仍然印不对，`long double f(long double)` 也还收不对。
 //
 //   node tests/c/ldouble-x64.js
 
@@ -149,6 +149,25 @@ sameExit('帧上的十六个字节：存、读、算、转 int', 'calc',
     }
   }
 }
+
+/* 4. 返回值在 `st0` 里（第一百一十二片）：三条路各走一遍 —— 直接调我们自己定义的
+ *    （`CALL` 问被调那个函数的标注）、按指针调（`CALLI` 的 `CALL_LDRET`）、
+ *    调外部符号（`strtold` 走桩，桩两头都在 x87 上）。
+ *    少了这一片的话三条都错在同一处：值在 st0 而我们从 xmm0 读，取回来是上一次留下的垃圾。 */
+sameExit('返回值在 st0：直接调用', 'ret-direct',
+  'long double one(void) { return 1.5L; }\n'
+  + 'int main(void) { long double a = one() + 2.5L; return (int)a; }\n', 4);
+
+sameExit('返回值在 st0：按指针调用', 'ret-ptr',
+  'long double one(void) { return 1.5L; }\n'
+  + 'int main(void) {\n'
+  + '  long double (*p)(void) = one;\n'
+  + '  return (int)(p() + 2.5L) * 2;\n'
+  + '}\n', 8);
+
+sameExit('返回值在 st0：外部符号（strtold 走桩）', 'ret-extern',
+  '#include <stdlib.h>\n'
+  + 'int main(void) { long double a = strtold("2.5", 0); return (int)(a * 2); }\n', 5);
 
 rmSync(OUT, { recursive: true, force: true });
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);

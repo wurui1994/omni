@@ -444,6 +444,29 @@ export function memArgAux(size, sseMask) {
 export function memArgSize(aux) { return aux % MEMARG_SHIFT; }
 export function memArgSse(aux) { return Math.floor(aux / MEMARG_SHIFT); }
 
+/* -------------------------------------------- `CCALL`/`CALLI` 的 aux
+ * 两件事挤在一格里（第九刀第一百一十二片给它加了第二件）：
+ *
+ *   低 16 位：**变参分界**。0 = 这个调用点不是变参的，否则「固定实参个数 + 1」
+ *             （第二十二片：native 上变参跟着固定实参一起传，分界得记下来）。
+ *   bit 16：  **浮点返回值在 x87 的 st0 里** —— x86_64 上 `long double` 就是这么回来的。
+ *             只有 x86_64 那条腿看它；arm64 的 `long double` 是 double，前端不会点这一位。
+ *
+ * 挤在一格而不是另开一列，是因为 aux 已经是「这条指令的那一格额外信息」，
+ * 而这两件事都只在**调用点**有意义 —— 加一列会让每条指令都多背一个字。
+ *
+ * `CALL` 不带这一位：直接调用看得见被调的是谁，「返回值在 st0 里」于是问那个
+ * MirFunc（`ldRet`）。同一件事只记一处 —— 两处记同一件事迟早会不一致。
+ */
+export const CALL_LDRET = 0x10000;
+/** 变参分界：-1 = 不是变参调用，否则固定实参个数。 */
+export function callVaFixed(aux) {
+  const n = aux % CALL_LDRET;
+  return n === 0 ? -1 : n - 1;
+}
+/** 这个调用点的浮点返回值在 st0 里吗。 */
+export function callLdRet(aux) { return Math.floor(aux / CALL_LDRET) % 2 === 1; }
+
 /** 函数号 -> 函数指针值。0 留给空指针，所以偏一格（见 `CALLI`）。 */
 export function fnPtr(no) { return BigInt(no + 1); }
 /** 函数指针值 -> 函数号；空指针（0）回 -1。 */
@@ -651,7 +674,16 @@ export class MirFunc {
      * 不打的话多份 `.o` 一链就是 `duplicate symbol`。
      */
     this.local = false;
+    /**
+     * 浮点返回值走 x87 的 `st0`（第九刀第一百一十二片）。x86_64 的 `long double`
+     * 是这么回来的 —— 值在 MIR 里仍是 f64，回哪儿是 ABI 的事，所以是**标注**：
+     * 只有 x86_64 那条腿看它，别的腿一个字不改。
+     */
+    this.ldRet = false;
   }
+
+  /** 声明「这个函数的浮点返回值在 st0 里」（x86_64 的 long double）。 */
+  setLdRet() { this.ldRet = true; }
 
   /** 声明「这个函数是变参的」。固定形参就是 `params` 里那些。 */
   setVariadic() { this.variadic = true; }

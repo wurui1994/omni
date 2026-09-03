@@ -19,7 +19,7 @@
  */
 
 import { hash16 } from '../host/hash.js';
-import { OP, OP_NAMES, OP_MODES, REF_BIAS, REF_NONE, isConstRef, typeText, CVT_NAMES, memDescText } from './ir.js';
+import { OP, OP_NAMES, OP_MODES, REF_BIAS, REF_NONE, isConstRef, typeText, CVT_NAMES, memDescText, callLdRet, CALL_LDRET } from './ir.js';
 
 /** 一条指令 -> 8 个字节。 */
 function insnBytes(f, i, out) {
@@ -115,11 +115,19 @@ function refDigest(mod, ref, ks) {
   return `k#${ks.get(ref)}:${typeText(c.t)}:${c.kind}:${c.text}`;
 }
 
+/** 调用点 aux 的摘要：`vafix:3`，点了 st0 那一位再加个后缀（第一百一十二片）。
+ * 没点那一位时的写法与从前一字不差 —— 既有的哈希不能因为多了一件事就全变。 */
+function callAuxDigest(v) {
+  const vafix = `vafix:${v % CALL_LDRET}`;
+  return callLdRet(v) ? `${vafix}+ldret` : vafix;
+}
+
 /** `aux` 里的整数：是池下标的换成名字，是层数/kind 的原样留着。 */
 /** aux（或 a）上那个数字。`k` 是它是第几个字段 —— CCALL 的 a 与 aux **都是数字、
  * 意思不同**（入口号 / 变参分界），少了 `k` 会把「固定实参 2 个」印成一个 C 入口名。 */
 function auxDigest(mod, op, v, k) {
-  if (op === OP.CCALL) return k === 0 ? `cabi:${mod.cabi[v]}` : `vafix:${v}`;
+  if (op === OP.CCALL) return k === 0 ? `cabi:${mod.cabi[v]}` : callAuxDigest(v);
+  if (op === OP.CALLI) return callAuxDigest(v);
   if (op === OP.CALL) return `func:${mod.funcs[v].name}`;
   if (op === OP.FADDR) return `faddr:${mod.funcs[v].name}`;
   if (op === OP.CALLOP) return `op:${mod.ops[v].name}[${JSON.stringify(mod.ops[v].lits)}]`;

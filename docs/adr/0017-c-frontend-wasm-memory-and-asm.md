@@ -825,8 +825,20 @@ arm64 与线性内存那两条腿一个字没改：它们的 `long double` 就�
 （门 `tests/c/ldouble-x64.js`，Rosetta 上真跑；这一条的尺子是 `clang -arch x86_64` ——
 交叉编出来的 `x86_64-osx-tcc` **链不动**自己的目标，没有 x86_64 那一档的 libc 与
 `libtcc1.a`）。**还差 SysV 的那一半**：`long double` 是 MEMORY 类，传参走栈上 16 字节的
-格子、返回在 `st0`。`selfobj` 那两份已知不同因此还在，但原因换了 —— 不再是宽度，
-而是 `tokc.ld = strtold(...)`（`tccpp.c:2427`）的返回值我们还按 xmm0 读。
+格子、返回在 `st0`。
+
+**返回值在 `st0` 里**（第一百一十二片）：`long double` 的返回值 SysV 说在 **x87 的栈顶**，
+不是 xmm0。这一位记在两个地方，各有各的理由 —— 直接调用（`CALL`）看得见被调的是谁，
+所以标注在**那个 MirFunc** 上（`ldRet`，与 `local`/`kernel` 同一种性质：标注，不是语义）；
+外部符号与按指针调用看不见，只能由调用点带着（`CCALL`/`CALLI` 的 aux 挤进 bit 16，
+`CALL_LDRET`）。同一件事只记一处，两处记同一件事迟早会不一致。取回来的手法与上一片
+一样是**借栈**：`push` 腾八个字节、`fstp qword` 把栈顶收成 double 写进去（顺手弹干净 x87
+栈，不弹的话连着几次调用就把八格填满了）、`pop` 回来；发出去是反过来的 `fld qword`。
+外部函数那个桩（`$ext$strtold`）两头都要点：CCALL 从 `st0` 取，桩自己的 `RET` 再写回
+`st0` —— 只做一头的话值在桩里从 x87 转到 xmm0 就再也回不去了。**这一片把 `21-ldouble.c`
+拿下了**：`tokc.ld = strtold(...)`（`tccpp.c:2427`）的返回值从此取得对，于是我们编出来的
+x86_64 tcc 认得准 `1.5L`，写出来的 `.o` 与交叉编那份逐字节相同。`selfobj` 的已知不同
+从两份减到一份，剩下的 `15-float.c` 差的是**传参**（`printf("%Lf", x)`）。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -13660,6 +13672,86 @@ export function setLdoubleTarget(arch) { LDOUBLE_SIZE = arch === 'x86_64' ? 16 :
 按这个改了：说清楚现在差的是哪一半。
 
 <!-- 第九刀第一百一十一片-END -->
+
+## 落地：第九刀第一百一十二片
+
+上一片留了一句「还差 SysV 的那一半」。这一片做掉其中的**返回**：x86_64 上
+`long double` 的返回值在 **x87 的 `st0`** 里，不是 xmm0。
+
+### 这一位记在哪儿：两处，各有各的理由
+
+一开始想的是「调用点带一位就完了」。写完发现 `CALL` 那一路根本不需要 ——
+直接调用**看得见被调的是谁**，返回值回在哪儿是那个函数自己的事：
+
+```js
+// tccgen.js，genFuncBody
+if (this.ldRetAux(ret) !== 0) info.f.setLdRet();
+```
+
+```js
+// x64/from_mir.js，OP.CALL
+return this.callRet(i, t, this.mod.funcs[f.a[i]].ldRet === true);
+```
+
+`ldRet` 与 `local`/`kernel` 同一种性质：**标注，不是语义** —— 只有 x86_64 那条腿看它，
+别的腿一个字不改。而外部符号（`CCALL`）与按指针调用（`CALLI`）看不见被调的是谁，
+只有前端知道那个 C 的返回类型，所以这两条只能由**调用点**带着：aux 的 bit 16
+（`CALL_LDRET = 0x10000`），与低 16 位的变参分界挤同一格。
+
+同一件事只记一处 —— 两处记同一件事迟早会不一致。所以 `CALL` 的 aux 一位都不点。
+
+### 取值与发值：还是借栈
+
+与上一片的 `f80` 读写同一个手法，因为 x87 与 SSE 之间没有直接的路：
+
+```js
+buf.emit(x.push(RES));            // 腾八个字节
+buf.emit(x.fstpM64(REG.rsp, 0));  // st0 -> double，顺手弹干净 x87 栈
+buf.emit(x.pop(RES));             // 拿回来
+```
+
+`fstp` 而不是 `fst`：不弹的话连着几次调用就把 x87 那八格填满，第九次是 NaN。
+发出去（`OP.RET`，被调那一头）是反过来的 `fld qword`。
+
+### 桩要点两头
+
+非变参的外部函数走桩（`$ext$strtold`），于是桩里有两次跨界：
+
+```js
+const ldr = this.ldRetAux(info.ret);
+if (ldr !== 0) f.setLdRet();
+const r = f.emit(OP.CCALL, rt, this.mod.cabiNo(name), f.pushArgs(refs), ldr);
+```
+
+只做一头的话值在桩里从 x87 转到 xmm0 就再也回不去了 —— 症状是「`strtold` 回来的数
+像上一次调用留下的垃圾」，现场离原因很远。
+
+### 挤一格的代价：两处读它的人要改
+
+aux 从「一个数」变成「两件事挤在一格」，于是所有**按数读它**的地方都得过 `callVaFixed`：
+
+* `arm64/from_mir.js` 三处（帧大小、`CCALL`、`CALLI`）—— 它只关心变参分界。
+* `mir/verify.js` 的「分界不能超过实参个数」：拿整个 aux 去比的话，点了那一位就一律报错。
+* `mir/bytes.js` 的摘要：`vafix:3+ldret`。没点那一位时的写法与从前**一字不差** ——
+  既有的哈希不能因为多了一件事就全变。
+
+### 门
+
+`tests/c/ldouble-x64.js` 加 3 条，三条路各一遍：直接调用（`1.5 + 2.5` -> `(int) 4`）、
+按指针调用（`CALLI` 那一位）、外部符号（`strtold("2.5") * 2` -> 5）。尺子照旧是
+`clang -arch x86_64`。
+
+### 拿下 `21-ldouble.c`
+
+`selfobj` 的已知不同从两份减到一份。凑齐的是三件：宽度（第一百一十一片）、静态初始化式
+的那十个字节（第一百〇九片）、返回值从 `st0` 里取（这一片）—— `tokc.ld = strtold(...)`
+（`tccpp.c:2427`）取得对，我们编出来的 x86_64 tcc 才认得准 `1.5L`，写出来的 `.o` 与
+交叉编那份逐字节相同。
+
+剩下的 `15-float.c` 差的是**传参**：`long double` 是 MEMORY 类，实参要摆进栈上 16 字节的
+格子（`printf("%Lf", x)` 那一路），下一片。
+
+<!-- 第九刀第一百一十二片-END -->
 
 
 

@@ -38,6 +38,7 @@ import {
   typeKind, isFloatType, intBits, memKindNo, memOff, MLOAD_KINDS, MSTORE_KINDS,
   CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16,
   CVT_I2F, CVT_U2F, CVT_F2I, CVT_F2U, CVT_FCVT, CVT_BITCAST, OP_NAMES, hexBytes, memArgSize,
+  callVaFixed,
 } from '../mir/ir.js';
 
 /* 草稿寄存器。x8 是 arm64 的「间接结果」寄存器、x9-x15 是调用者保存的临时 ——
@@ -158,7 +159,7 @@ function outArgsBytes(mod, f) {
   while (i < f.count()) {
     const op = f.op[i];
     if (op === OP.CALL || op === OP.CCALL || op === OP.CALLI) {
-      const nfixed = op !== OP.CALL && f.aux[i] !== 0 ? f.aux[i] - 1 : -1;
+      const nfixed = op !== OP.CALL ? callVaFixed(f.aux[i]) : -1;
       const p = argPlaces(mod, f, f.argsOf(f.b[i]), nfixed);
       most = Math.max(most, p.stack);
     }
@@ -496,8 +497,9 @@ class FnGen {
     if (op === OP.CCALL) {
       const name = this.mod.cabi[f.a[i]];
       if (name === undefined) throw new OmniError(`arm64: 没有 ${f.a[i]} 号 C 入口`);
-      /* aux 是变参分界（第二十二片）：0 = 不是变参调用，否则固定实参个数 + 1。 */
-      this.callArgs(f.argsOf(f.b[i]), f.aux[i] === 0 ? -1 : f.aux[i] - 1);
+      /* aux 是变参分界（第二十二片）：0 = 不是变参调用，否则固定实参个数 + 1。
+       * 高位那一格（`CALL_LDRET`）是 x86_64 的事，这条腿上前端不会点它。 */
+      this.callArgs(f.argsOf(f.b[i]), callVaFixed(f.aux[i]));
       buf.blSym(name);
       return this.callRet(i, t);
     }
@@ -507,7 +509,7 @@ class FnGen {
     if (op === OP.CALLI) {
       if (!this.mod.native) nyi('CALLI（解释器那条腿上函数指针是「号 + 1」，不是地址）');
       /* aux 是变参分界（第三十五片），与 `CCALL` 同一个编码。 */
-      this.callArgs(f.argsOf(f.b[i]), f.aux[i] === 0 ? -1 : f.aux[i] - 1);
+      this.callArgs(f.argsOf(f.b[i]), callVaFixed(f.aux[i]));
       this.loadRef(TMP0, f.a[i]);
       buf.emit(a.blr(TMP0));
       return this.callRet(i, t);

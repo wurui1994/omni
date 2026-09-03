@@ -49,7 +49,7 @@ import {
   typeKind, isFloatType, intBits, memKindNo, memOff, MLOAD_KINDS, MSTORE_KINDS,
   CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16,
   CVT_I2F, CVT_U2F, CVT_F2I, CVT_F2U, CVT_FCVT, CVT_BITCAST, OP_NAMES, hexBytes,
-  memArgSize, memArgSse,
+  memArgSize, memArgSse, callLdRet,
 } from '../mir/ir.js';
 
 /* 草稿寄存器。挑 r10/r11 是因为它们**既不是实参寄存器、也不是被调用者保存的** ——
@@ -495,8 +495,14 @@ class FnGen {
       if (f.a[i] !== REF_NONE) {
         this.loadRef(TMP0, f.a[i]);
         /* 浮点的返回值在 xmm0，整数在 rax。i32 的规范形是符号扩展过的 64 位，
-         * 而 SysV 只看 eax —— 两边都对，不用再削。 */
-        if (isFloatType(t)) this.toFp(FARG[0], TMP0);
+         * 而 SysV 只看 eax —— 两边都对，不用再削。
+         * `long double` 例外（第一百一十二片）：它回在 **x87 的 st0** 里 —— 把 double
+         * 的位模式借栈喂给 `fld qword`，留在栈顶就走（`pop` 只为还原 rsp）。 */
+        if (isFloatType(t) && f.ldRet === true) {
+          buf.emit(x.push(TMP0));
+          buf.emit(x.fldM64(REG.rsp, 0));
+          buf.emit(x.pop(TMP0));
+        } else if (isFloatType(t)) this.toFp(FARG[0], TMP0);
         else buf.emit(x.movRR(8, RES, TMP0));
       }
       buf.jmp(this.retLabel);
@@ -510,7 +516,9 @@ class FnGen {
       const label = this.callLabels[f.a[i]];
       if (label === undefined) throw new OmniError(`x64: 没有 ${f.a[i]} 号函数`);
       buf.call(label);
-      return this.callRet(i, t);
+      /* 直接调用：被调的是谁看得见，所以「返回值在 st0 里」问**那个函数**
+       * （第一百一十二片）—— 调用点不用带这一位。 */
+      return this.callRet(i, t, this.mod.funcs[f.a[i]].ldRet === true);
     }
     if (op === OP.CCALL) {
       const name = this.mod.cabi[f.a[i]];
@@ -520,7 +528,7 @@ class FnGen {
        * 所以一律发。苹果的 arm64 不一样（变参走栈），那一边才要看 aux。 */
       this.callArgs(f.argsOf(f.b[i]), true);
       buf.callSym(name);
-      return this.callRet(i, t);
+      return this.callRet(i, t, callLdRet(f.aux[i]));
     }
     /* `CALLI` 是**按指针调用**（第二十七片）：native 上函数指针就是真地址，一条
      * `call *r`。次序与 arm64 那份一样 —— 先摆实参，再取目标进草稿（r10 不是实参
@@ -531,7 +539,7 @@ class FnGen {
       this.callArgs(f.argsOf(f.b[i]), true);
       this.loadRef(TMP0, f.a[i]);
       buf.emit(x.callR(TMP0));
-      return this.callRet(i, t);
+      return this.callRet(i, t, callLdRet(f.aux[i]));
     }
     /* 一个函数的**地址**（第二十七片）：与 `GADDR` 一样是一条 RIP 相对的 `lea`，
      * 只是符号在 `__TEXT` 里。 */
@@ -898,9 +906,24 @@ class FnGen {
     if (variadic === true) this.buf.emit(x.movRI(1, RES, p.nsse));
   }
 
-  callRet(i, t) {
+  /**
+   * 调用回来之后，返回值从 ABI 说的地方搬到我们的落点上。
+   *
+   * `ldret` = 这次调用的浮点返回值在 **x87 的 st0** 里（x86_64 的 `long double`）。
+   * 直接调用看被调那个 MirFunc 的标注，间接/外部调用看调用点的 `CALL_LDRET`。
+   */
+  callRet(i, t, ldret) {
     if (typeKind(t) === T_VOID) return;
     if (isFloatType(t)) {
+      /* `long double`（第一百一十二片）：SysV 说它回在 **x87 的 st0** 里，不是 xmm0。
+       * `fstp qword` 把栈顶收成 double 写进借来的那八个字节，顺手把 x87 栈弹干净
+       * （不弹的话连着几次调用就把那八格填满了）。 */
+      if (ldret === true) {
+        this.buf.emit(x.push(RES));
+        this.buf.emit(x.fstpM64(REG.rsp, 0));
+        this.buf.emit(x.pop(RES));
+        return this.def(i, RES);
+      }
       this.fromFp(RES, FARG[0]);
       return this.def(i, RES);
     }
