@@ -105,9 +105,12 @@ for (const [what, obj] of [['甲', objA], ['乙', objB]]) {
     !back.relocs.some((r) => r.sym === 'omni_lk_triple'));
   ok('甲：strlen 是未定义的外部符号，留着一笔 BRANCH26',
     back.relocs.some((r) => r.sym === 'strlen' && r.kind === RELOC.BRANCH26));
-  ok('甲：串常量的地址是 adrp+add 两笔',
-    back.relocs.filter((r) => r.kind === RELOC.PAGE21).length === 1
-    && back.relocs.filter((r) => r.kind === RELOC.PAGEOFF12).length === 1);
+  /* 取地址那一对现在是**过 GOT** 的（`adrp @GOTPAGE` + `ldr @GOTPAGEOFF`）——
+   * 量过尺子：arm64 上取任何符号的地址都走这一对，连自家文件里的也一样。
+   * 从前这儿写的是 `adrp` + `add`（`PAGE21`/`PAGEOFF12`）。 */
+  ok('甲：串常量的地址是过 GOT 的两笔',
+    back.relocs.filter((r) => r.kind === RELOC.GOT_PAGE21).length === 1
+    && back.relocs.filter((r) => r.kind === RELOC.GOT_PAGEOFF12).length === 1);
 }
 
 // ---------------------------------------------------------------- 二、并合的账
@@ -129,9 +132,9 @@ const merged = linkObjects([readObject(objA), readObject(objB)]);
   ok('并合：libc 的符号原样转出去',
     merged.relocs.filter((r) => r.sym === 'strlen').length === 2
     && merged.relocs.some((r) => r.sym === 'llabs'));
-  ok('并合：adrp/add 那两对也原样转出去（页号要等绝对地址）',
-    merged.relocs.filter((r) => r.kind === RELOC.PAGE21).length === 2
-    && merged.relocs.filter((r) => r.kind === RELOC.PAGEOFF12).length === 2);
+  ok('并合：过 GOT 那两对也原样转出去（GOT 那一格要等绝对地址）',
+    merged.relocs.filter((r) => r.kind === RELOC.GOT_PAGE21).length === 2
+    && merged.relocs.filter((r) => r.kind === RELOC.GOT_PAGEOFF12).length === 2);
 }
 /* 同一个名字定义两次要报错 —— `ld` 说 duplicate symbol，我们也说。 */
 {

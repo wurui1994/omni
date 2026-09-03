@@ -128,11 +128,9 @@ const PROBES = [
     src: 'unsigned long strlen(const char *s);\n'
       + 'static int one(void) { return 1; }\n'
       + 'int main(void) { return one() + (int)strlen("ab"); }\n',
-    /* arm64 上串常量的地址还不是同一条序列：tcc 是 `adrp` + **`ldr`**
-     * （`311/312` = `ADR_PREL_PG_HI21`/`ADD_ABS_LO12_NC`，第三条指令是 `f9400000`），
-     * 我们是 `adrp` + `add`（`275/277`，`91000000`）。那是「取数据地址那条序列」的事，
-     * 不是调用这一片的 —— 量在这儿。 */
-    notYet: { osx: 'arm64 上串常量的地址是 adrp+ldr，我们还发 adrp+add' },
+    /* 这一格从第一百二十八片起是 `not yet`：arm64 上串常量的地址 tcc 发 `adrp` + `ldr`
+     * （`311`/`312`，过 GOT），我们发 `adrp` + `add`（`275`/`277`）。取符号地址一律过
+     * GOT 那一片把它接上了，于是这一行 `notYet` 去掉 —— 三条重定位现在逐条对得上。 */
   },
 ];
 

@@ -887,28 +887,30 @@ class FnGen {
     return sym;
   }
 
-  /** 一个符号的地址算进 `reg`：`adrp` 取页、`add` 取页内偏移。两格都记一笔重定位。 */
-  symAddr(reg, sym) {
-    this.buf.adrpSym(reg, sym);
-    this.buf.addSymOff(reg, reg, sym);
-  }
-
   /**
-   * **外部**符号的地址算进 `reg`：过 GOT（`adrp @GOTPAGE` + `ldr @GOTPAGEOFF`）。
+   * 一个符号的**地址**算进 `reg`：`adrp Rd, sym@GOTPAGE` + `ldr Rd, [Rd, sym@GOTPAGEOFF]`。
    *
-   * 为什么不能与自家符号走同一条路：外部的数据符号可能住在一个 dylib 里，
-   * 那时链接期没有「它的页」可谈 —— 链接器会说 `target does not have address`
-   * （第三十一片上 `__stdoutp` 就是这么挡回来的）。
+   * **arm64 上取任何符号的地址都过 GOT** —— 量过尺子（ADR-0017 的「量：arm64 上取符号
+   * 地址一律过 GOT」那一节）：数据、函数、自家文件里的 `static`，一律是 `311`/`312`
+   * 那一对，addend 一律 0。只有**直接调用**留着 `bl`（`283`）。
+   *
+   * 从前这儿分两条路：自家的走 `adrp` + `add`（`275`/`277`）、外部的才过 GOT
+   * （第三十一片上 `__stdoutp` 那次）。分岔本身是个假设 —— 尺子那边没有这个分岔。
+   *
+   * 两头都验过收得下「GOT 指向局部符号」这件事：
+   *
+   *   - 我们自己的链接器：`elf_exe.js`/`macho_exe.js` 里 `311`/`312` 是 `ALWAYS_GOTPLT`，
+   *     局部符号那一支走 `R_RELATIVE` + 加数（`fill_local_got_entries`）
+   *   - ld64（`native` 那条腿）：量过一份手写 `.s`，局部符号的 `@GOTPAGE` 真落成
+   *     `ARM64_RELOC_GOT_LOAD_PAGE21`（没被汇编器悄悄降级），链完跑得动
    */
-  symAddrGot(reg, sym) {
+  symAddr(reg, sym) {
     this.buf.adrpSymGot(reg, sym);
     this.buf.ldrSymGot(reg, reg, sym);
   }
 
-  /** 一个模块级变量的地址算进 `reg`：自家的直接算，外部的过 GOT。 */
+  /** 一个模块级变量的地址算进 `reg`。自家的与外部的**同一条路** —— 见 `symAddr`。 */
   globalAddr(reg, no) {
-    const blob = this.mod.globalBlob[no];
-    if (blob !== null && blob.extern) return this.symAddrGot(reg, this.globalSym(no));
     return this.symAddr(reg, this.globalSym(no));
   }
 

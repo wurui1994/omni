@@ -15567,6 +15567,110 @@ x86_64-tcc（linux） b=-56  sgn=1  mx=-1
 <!-- 第九刀第一百三十六片-END -->
 
 
+## 量：函数的地址在 arm64 上也过 GOT（把上一节那把尺子量全）
+
+上面那节量的是**数据**（`g`、`static const char s[]`）。接着量函数 —— 因为「取地址」这件事
+在后端是三个落点（串常量、函数、全局量），只量了一个就接，另两个是猜。arm64-osx 与
+arm64-linux 同一份探针：
+
+```c
+int g = 5;
+static const char s[] = "ab";
+static int helper(int x) { return x + 1; }
+extern int outer(int);
+int main(void) {
+  int (*p)(int) = helper;
+  int (*q)(int) = outer;
+  return g + s[0] + p(1) + q(2) + helper(3);
+}
+```
+
+`.rela.text`（两个目标一字不差，linux 那边只多 `.rela.eh_frame`）：
+
+```
+@88  type311 sym=helper  add=0  90000000   adrp x0, :got:helper
+@92  type312 sym=helper  add=0  f9400000   ldr  x0, [x0, :got_lo12:helper]
+@100 type311 sym=outer   add=0  90000000   同一对
+@104 type312 sym=outer   add=0  f9400000
+@112 type311 sym=s       add=0  9000001e
+@116 type312 sym=s       add=0  f94003de
+@124 type311 sym=g       add=0  9000001e
+@128 type312 sym=g       add=0  f94003de
+@196 type283 sym=helper  add=0  94000000   bl helper —— 直接调用还是 bl
+```
+
+三条新事实：
+
+1. **函数的地址也过 GOT**，连**同一个文件里的 `static` 函数**（`helper`）也是 —— 也就是说
+   「局部/外部」这个分岔在尺子那边根本不存在，取地址就是那一对。
+2. **直接调用不过 GOT**：`helper(3)` 还是一条 `bl` + `283`（`R_AARCH64_CALL26`）。
+   「取地址」与「调用」是两码事，这一格分得很清楚。
+3. 加数**一律 0**。GOT 那一格里放的是符号的地址，`sym+8` 那种写法在 GOT 上没有意义。
+
+还量了另一头：**ld64 收不收「GOT 指向局部符号」**。这一问必须问，因为 `native` 那条腿是
+clang 链的，而 clang 自己从不为局部符号发 GOT 重定位。手写一份 `.s`：
+
+```asm
+_main:
+	adrp x0, _s@GOTPAGE
+	ldr  x0, [x0, _s@GOTPAGEOFF]
+	ldrb w0, [x0]
+	ret
+	.section __DATA,__data
+_s:	.byte 42
+```
+
+`_s` 没有 `.globl`。`objdump -r` 看进 `.o` 的是真的 `ARM64_RELOC_GOT_LOAD_PAGE21` +
+`GOT_LOAD_PAGEOFF12`（汇编器**没有**悄悄降级成 `PAGE21`/`PAGEOFF12`），`clang` 链完跑得动。
+所以两条腿都收得下。
+
+<!-- 量：arm64 函数地址也过 GOT-END -->
+
+## 落地：第九刀第一百三十七片
+
+**arm64 上取符号地址一律过 GOT。** 上面两节的尺子照着做完。
+
+改动一共三处，都在一个咽喉上：
+
+- `arm64/from_mir.js` 的 `symAddr(reg, sym)` 从 `adrp` + `add`（`275`/`277`）改成
+  `adrp @GOTPAGE` + `ldr @GOTPAGEOFF`（`311`/`312`）。三个落点（串常量、`FADDR`、
+  `globalAddr`）都从它走，所以**只改这一处**。
+- `symAddrGot` 删掉，`globalAddr` 里「自家的直接算、外部的过 GOT」那道岔跟着删 ——
+  那道岔本身是个假设（第三十一片上 `__stdoutp` 挡回来时立的），尺子那边没有它。
+- `link/link.js`（第十一片那个 `ld -r` 式的并合器）的读入表多认 `5`/`6` 两号，
+  与 `PAGE21` 同一类待遇：填不了，原样转出去。不加这两号它会当场骂
+  「还不认重定位类型 5」—— 那个报错是对的，它只是还没被教过。
+
+**没动**的两处，值得写下来：
+
+- 我们自己那两个出可执行文件的链接器（`elf_exe.js`/`macho_exe.js`）**本来就会**：
+  `311`/`312` 在两边的 `GOTPLT` 表里都是 `ALWAYS_GOTPLT`，局部符号那一支走
+  `R_RELATIVE` + 加数（`fill_local_got_entries`）。所以「先从链接器起手」这条规矩
+  这一次没有额外的活 —— 前几片已经把它铺好了。
+- `PAGE21`/`PAGEOFF12` 那两号**留着**：`asm.js` 里那三条（`adrpSym`/`addSymOff`/
+  `ldrSymOff`）现在没有调用者，但两个链接器都还要认这两号（别人写的 `.o` 会有）。
+
+### 门
+
+- `tests/c/rela-text.js` 从 22/0/**1 not yet** 变成 **24/0/0** —— 那个 `not yet`
+  正是这一格（「arm64 上串常量的地址是 adrp+ldr，我们还发 adrp+add」）。三条重定位
+  现在类型、符号、加数、落点上的位移**逐条**对得上。
+- `tests/arm64/link.js` 里两条写着旧形状的断言改成新的（`GOT_PAGE21`/`GOT_PAGEOFF12`）。
+  这门原本 17/4，改完还是 17/4 —— 那 4 条是先前就红的（往返字节、`bl` 那两条），
+  与这一片无关：改前改后各跑一遍对过。它末尾那 5 条**真跑**（并出来的 `.o` 交给
+  clang 链、跑、对数）全绿，这是「过 GOT 这一对算得对」最硬的一条证据。
+- 其余全绿：`native` 227/0、`native-gen` 83/0、`tcc-link` 83/0、`selfobj` 25/0、
+  `selfsrc` 13/0、`selfcross` 12/0、`arm64/from-mir` 88/0、`tests/run.js` 96/0。
+  `tcc-obj` 还是 0 字节相同 / **21 容器相同** / 89 不同 —— 这一片改的是指令与重定位，
+  离「整份字节相同」还差别的账。
+
+顺带解掉的一笔：第一百二十八片留下的第 4 类桩（取过地址的外部函数还留一个转发桩）
+现在**没有技术理由**了 —— 过 GOT 的地址天生够得着未定义符号。桩本身还在前端那一头，
+拆它是另一片。
+
+<!-- 第九刀第一百三十七片-END -->
+
+
 
 
 
