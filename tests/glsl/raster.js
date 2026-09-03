@@ -219,6 +219,40 @@ const HALF = [[-1, -1], [1, -1], [-1, 1]];
   }
 }
 
+/* ---- 六、同一个三角形在三条腿上**逐字节相同**（覆盖集合 + 像素值一起）。
+ *
+ * render.js 那一门只查了「扫整块画布」的那条路，光栅化这条路没查过腿间一致 ——
+ * 而这条路上有 `e > 0` 这样的**比较**，浮点比较是「差一位就翻一格覆盖」的放大器：
+ * 一个像素的边函数算出 `+1e-16` 还是 `-1e-16`，覆盖集合就差一个像素，而不是差一个色阶。
+ * 8 位量化救不了这种差（第十片那条「8 位把腿间差抹掉」只对**值**成立，对**覆盖**不成立）。
+ *
+ * LLVM 腿在这里单列，理由见 ADR-0019「量：向量在五条腿上分别落成什么」：
+ * 它是唯一一条向量原生的腿，SoA 那一刀会先改它 —— 这一条就是那一刀的基线。 */
+{
+  const p = join(OUT, 'legs.sx');
+  writeFileSync(p, glslTriProgram(check(vertOf(HALF), 'vert', 'v'), check(FRAG_RED, 'frag', 'f'), W, H, {}));
+  const base = spawnSync(process.execPath, [CLI, 'run', p], { encoding: 'utf8', maxBuffer: 1 << 26 });
+  if (base.status !== 0) {
+    bad('腿间一致：JS 腿跑不动', `    ${(base.stderr ?? '').trim().split('\n').slice(0, 4).join('\n    ')}`);
+  } else {
+    const a = base.stdout.trim().split('\n');
+    for (const [tag, extra] of [['C', ['--backend', 'c']], ['LLVM', ['--backend', 'llvm']]]) {
+      const r = spawnSync(process.execPath, [CLI, 'run', p, ...extra], { encoding: 'utf8', maxBuffer: 1 << 26 });
+      if (r.status !== 0) {
+        bad(`腿间一致：${tag} 腿跑不动`, `    ${(r.stderr ?? '').trim().split('\n').slice(0, 4).join('\n    ')}`);
+      } else if (r.stdout.trim() !== base.stdout.trim()) {
+        const b = r.stdout.trim().split('\n');
+        let i = 0;
+        while (i < a.length && a[i] === b[i]) i++;
+        bad(`腿间一致：${tag} 腿与 JS 腿不同`,
+          `    印了 ${a.length} / ${b.length} 个数，第 ${i} 个起：js ${a[i]} / ${tag} ${b[i]}`);
+      } else {
+        ok(`${tag} 腿与 JS 腿的光栅化输出逐字节相同（覆盖集合与像素值一起，${a.length} 个数）`);
+      }
+    }
+  }
+}
+
 rmSync(OUT, { recursive: true, force: true });
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail > 0 ? 1 : 0);

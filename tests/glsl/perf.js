@@ -110,7 +110,7 @@ process.stdout.write('口径：我们这一侧用「t(2N) - t(N)」把进程启�
 for (const FRAG of FRAGS) {
   const fm = check(join(CASES, FRAG), 'frag');
   process.stdout.write(`  ${FRAG}\n`);
-  process.stdout.write('  尺寸      我们(JS)                我们(C)                 真 GL\n');
+  process.stdout.write('  尺寸      我们(JS)                我们(C)                 我们(LLVM)              真 GL\n');
   for (const s of sizes) {
     const uni = { u_resolution: [s, s] };
     const fixed = Number(process.env.OMNI_GLSL_N ?? '0');
@@ -119,6 +119,9 @@ for (const FRAG of FRAGS) {
     const n = fixed > 0 ? fixed : (s <= 128 ? 24 : s <= 256 ? 8 : 2);
     const js = frameMs(fm, s, s, uni, [], n);
     const c = frameMs(fm, s, s, uni, ['--backend', 'c'], n);
+    /* LLVM 腿：唯一一条向量原生的腿，所以 SoA 那一刀先在它上面兑现 ——
+     * 这一列就是那一刀的基线（见 ADR-0019「量：向量在五条腿上分别落成什么」）。 */
+    const ll = frameMs(fm, s, s, uni, ['--backend', 'llvm'], n);
 
     const spec = join(OUT, 'spec.json');
     writeFileSync(spec, JSON.stringify({
@@ -129,7 +132,7 @@ for (const FRAG of FRAGS) {
 
     const cell = (ms) => (ms === null ? '      ——           '
       : `${ms.toFixed(1).padStart(8)}ms (${((s * s) / (ms * 1000)).toFixed(2).padStart(5)} MPix/s)`);
-    process.stdout.write(`  ${String(s).padStart(4)}²  ${cell(js)}  ${cell(c)}  `
+    process.stdout.write(`  ${String(s).padStart(4)}²  ${cell(js)}  ${cell(c)}  ${cell(ll)}  `
       + `${glTxt === null ? '   ——' : `${Number(glTxt[0]).toFixed(3)}ms (${glTxt[1]} MPix/s)`}\n`);
   }
   process.stdout.write('\n');

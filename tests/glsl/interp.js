@@ -176,9 +176,18 @@ const H = 4;
     + 'void main() { fragColor = vec4(sin(v_uv.x * 3.0), v_uv.y, 0.0, 1.0); }\n';
   const js = draw(vert, frag, 8, 8);
   const c = draw(vert, frag, 8, 8, {}, ['--backend', 'c']);
-  if (js.err !== undefined || c.err !== undefined) bad('两条腿那一趟跑不动', `    ${js.err ?? c.err}`);
-  else if (js.out !== c.out) bad('两条腿的 8 位像素不一样', '    （8 位那一层本该把最后一位的差抹掉）');
-  else ok('C 腿与 JS 腿的 8 位像素相同（含 sin 与插值）');
+  /* LLVM 腿一起查：它是唯一一条向量原生的腿（ADR-0019「量：向量在五条腿上分别落成什么」），
+   * 而 `sin` 在它那边走的是同一个 `omni_rmath` 调用 —— 所以这一条查的是**插值那一段**。 */
+  const ll = draw(vert, frag, 8, 8, {}, ['--backend', 'llvm']);
+  if (js.err !== undefined || c.err !== undefined || ll.err !== undefined) {
+    bad('三条腿那一趟跑不动', `    ${js.err ?? c.err ?? ll.err}`);
+  } else if (js.out !== c.out) {
+    bad('C 腿与 JS 腿的 8 位像素不一样', '    （8 位那一层本该把最后一位的差抹掉）');
+  } else if (js.out !== ll.out) {
+    bad('LLVM 腿与 JS 腿的 8 位像素不一样', '    （8 位那一层本该把最后一位的差抹掉）');
+  } else {
+    ok('C 腿、LLVM 腿与 JS 腿的 8 位像素相同（含 sin 与插值）');
+  }
 }
 
 /* ---- 五、第二档那份完整的着色器。 */

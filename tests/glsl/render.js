@@ -1,12 +1,13 @@
 // tests/glsl/render.js —— 把画布扫一遍（按 quad）（ADR-0019 第一刀第四片）
 //
-// 查四件事：
+// 查五件事：
 //
 //   一、`w*h` 个像素**一个不少、一个不多**，每个正好印一次
 //   二、印出来的**次序就是 quad 次序**（llvmpipe 的 `quad_offset_x/y`：左上 右上 左下 右下），
 //      这是决策一第二条 —— 现在虽然一次只算一个片元，顺序也要定死
 //   三、宽高不是 2 的倍数时边上那些多算的格子**不印**（6×5 是故意挑的奇数）
 //   四、8 位的值与门自己独立算的一致（`round(clamp(v,0,1)*255)`）
+//   五、C 腿与 LLVM 腿印出来的与 JS 腿逐字节相同
 //
 //   node tests/glsl/render.js
 
@@ -136,21 +137,26 @@ for (let i = 0; i + 4 < nums.length; i += 5) {
   else ok(`${pix.length} 个像素的 8 位值与门自己算的相同（round(clamp(v,0,1)*255)）`);
 }
 
-/* 五、C 腿印出来的与 JS 腿**逐字节相同**。8 位那一步把最后一位的差抹掉了 ——
- * 于是「超越函数只到容差」这件事在**像素**这一层反而是逐字节的。这一条值得单列。 */
-{
-  const rc = spawnSync(process.execPath, [CLI, 'run', path, '--backend', 'c'],
+/* 五、另外两条腿印出来的与 JS 腿**逐字节相同**。8 位那一步把最后一位的差抹掉了 ——
+ * 于是「超越函数只到容差」这件事在**像素**这一层反而是逐字节的。这一条值得单列。
+ *
+ * LLVM 腿在这里与 C 腿同级（`tests/sexpr/run.js` 那五条腿里它就是 `run-llvm`）。
+ * 它值得单查，因为它是唯一一条**向量是原生 `<N x T>`** 的腿 ——
+ * 见 ADR-0019「量：向量在五条腿上分别落成什么」。以后 SoA 那一刀先在这条腿上兑现，
+ * 这一条就是它的基线：换了表示，像素还得逐字节相同。 */
+for (const [tag, extra] of [['C', ['--backend', 'c']], ['LLVM', ['--backend', 'llvm']]]) {
+  const rc = spawnSync(process.execPath, [CLI, 'run', path, ...extra],
     { encoding: 'utf8', maxBuffer: 1 << 26 });
   if (rc.status !== 0) {
-    bad('C 腿跑不动', `    ${(rc.stderr ?? '').trim().split('\n').slice(0, 4).join('\n    ')}`);
+    bad(`${tag} 腿跑不动`, `    ${(rc.stderr ?? '').trim().split('\n').slice(0, 4).join('\n    ')}`);
   } else if (rc.stdout.trim() !== r.stdout.trim()) {
     const a = r.stdout.trim().split('\n');
     const b = rc.stdout.trim().split('\n');
     let i = 0;
     while (i < a.length && a[i] === b[i]) i++;
-    bad('两条腿的 8 位像素不一样', `    第 ${i} 个数起：js ${a[i]} / c ${b[i]}`);
+    bad(`${tag} 腿与 JS 腿的 8 位像素不一样`, `    第 ${i} 个数起：js ${a[i]} / ${tag} ${b[i]}`);
   } else {
-    ok('C 腿与 JS 腿的 8 位像素逐字节相同（8 位那一步把最后一位的差抹掉了）');
+    ok(`${tag} 腿与 JS 腿的 8 位像素逐字节相同（8 位那一步把最后一位的差抹掉了）`);
   }
 }
 
