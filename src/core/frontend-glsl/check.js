@@ -902,7 +902,32 @@ class GlslChecker {
     if (f.params.length !== args.length) {
       throw this.err(node, `${name} 要 ${f.params.length} 个实参，给了 ${args.length}`);
     }
-    const fixed = args.map((a, i) => this.coerce(a, f.params[i].ty, node));
+    const fixed = args.map((a, i) => {
+      const p = f.params[i];
+      if (p.dir === 'in') return this.coerce(a, p.ty, node);
+      /* `out`/`inout` 的实参：**必须同型**（要写回去，隐式转换没法反着来），
+       * 而且必须是能写的左值 —— `f(1.0)` 那种「写回哪儿去」的问题得当场拦。 */
+      if (!glslSame(a.ty, p.ty)) {
+        throw this.err(node, `${name} 的第 ${i + 1} 个实参是 ${p.dir}，要正好是 `
+          + `${glslTyText(p.ty)}，给的是 ${glslTyText(a.ty)}`);
+      }
+      if (a.k === 'ref') {
+        if (a.kind === 'uniform' || a.kind === 'in' || a.kind === 'const'
+          || a.kind === 'builtin-in') {
+          throw this.err(node, `${name} 的第 ${i + 1} 个实参是 ${p.dir}，`
+            + `但 '${a.name}' 是 ${a.kind}，写不进去`);
+        }
+        return a;
+      }
+      if (a.k === 'swizzle') {
+        const seen = new Set(a.idx);
+        if (seen.size !== a.idx.length) {
+          throw this.err(node, `${name} 的第 ${i + 1} 个实参里 swizzle 同一格出现两次，写不进去`);
+        }
+        return a;
+      }
+      throw this.err(node, `${name} 的第 ${i + 1} 个实参是 ${p.dir}，要给一个能写的左值`);
+    });
     return { k: 'call', ty: f.ret, name, args: fixed };
   }
 

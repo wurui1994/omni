@@ -102,6 +102,13 @@ class GlslLowerer {
     this.prefix = '';
     this.out = [];          // 顶层那几行
     this.structs = new Set();
+    /** `out`/`inout` 形参那一族要的**专用返回结构体**（第二十五片）：字段类型不都是 real，
+     * 所以不能借 `glsl_vN` 那几个（那几个每格都是 real）。一函数一个。 */
+    this.outStructs = [];
+    /** 正在降的这个函数的 out 上下文：`{ struct, retN, outs }`，没有 out 形参时是 null。 */
+    this.outCtx = null;
+    /** 名字 -> 函数信息（调用点要知道形参的方向）。 */
+    this.fnByName = new Map();
     this.stmts = [];        // 当前正在攒的语句
     this.tmp = 0;
     this.names = new Map(); // 局部量名字的重名计数（见 uniq）
@@ -785,6 +792,9 @@ class GlslLowerer {
   }
 
   call(e) {
+    const f = this.fnByName.get(e.name);
+    const hasOut = f !== undefined && f.params.some((p) => p.dir !== 'in');
+    if (hasOut) return this.callWithOut(e, f);
     const args = [];
     for (const a of e.args) for (const c of this.expr(a)) args.push(c);
     const n = glslNComp(e.ty);
@@ -799,6 +809,45 @@ class GlslLowerer {
     this.stmts.push(`(let ${s} ${glslStructName(n)} ${callTxt})`);
     const out = [];
     for (let i = 0; i < n; i++) out.push(this.let_('real', `(fld (var ${s}) c${i})`));
+    return out;
+  }
+
+  /**
+   * 调一个带 `out`/`inout` 形参的函数（第二十五片）。三步：
+   *
+   *   1. 递进去的只有 `in` 与 `inout` 那些格（`out` 不递 —— 它在被调那头从零起）
+   *   2. 接住那个专用结构体
+   *   3. **写回去**：out 那几格按声明次序对上实参的分量，逐格 `set`
+   *
+   * 写回发生在**调用返回之后**，所以 `f(x, x)` 那种「同一个变量递给两个 out」的次序
+   * 与 GLSL 的 copy-out 一致（后写的赢）。实参必须是左值 —— 那一条在检查那侧拦。
+   */
+  callWithOut(e, f) {
+    const args = [];
+    const backs = [];
+    e.args.forEach((a, i) => {
+      const p = f.params[i];
+      const comps = this.expr(a);
+      if (p.dir === 'in' || p.dir === 'inout') for (const c of comps) args.push(c);
+      if (p.dir !== 'in') {
+        /* 写回的落点：`ref` 就是那几个变量名，`swizzle` 是挑出来的那几格。 */
+        const target = a.k === 'ref' ? this.find(a.name)
+          : a.k === 'swizzle' ? this.swizzleTarget(a) : null;
+        if (target === null) throw new OmniError(`glsl: ${e.name} 的第 ${i + 1} 个实参不是左值`);
+        for (const t of target) backs.push(t);
+      }
+    });
+    const retN = e.ty.k === 'void' ? 0 : glslNComp(e.ty);
+    const sn = `glsl_r_${this.prefix}${e.name}`;
+    const s = this.fresh('ro');
+    this.stmts.push(`(let ${s} ${sn} (call glsl_${this.prefix}${e.name} ${args.join(' ')}))`);
+    const out = [];
+    for (let i = 0; i < retN; i++) {
+      out.push(this.let_(glslCompTy(e.ty), `(fld (var ${s}) c${i})`));
+    }
+    backs.forEach((t, k) => {
+      this.stmts.push(`(set ${glslVarName(t)} (fld (var ${s}) c${retN + k}))`);
+    });
     return out;
   }
 
@@ -864,6 +913,11 @@ class GlslLowerer {
       return;
     }
     if (s.k === 'ret') {
+      /* 带 out 形参的函数：返回值与 out 一起装进专用结构体（第二十五片）。 */
+      if (this.outCtx !== null) {
+        this.packRet(s.e === null ? null : this.expr(s.e));
+        return;
+      }
       if (s.e === null) { this.stmts.push('(ret)'); return; }
       const vals = this.expr(s.e);
       if (vals.length === 1) { this.stmts.push(`(ret ${vals[0]})`); return; }
@@ -1075,32 +1129,89 @@ class GlslLowerer {
 
   /* ------------------------------------------------------------ 顶层 */
 
-  /** 一个 GLSL 函数 -> 一条方言 `fn`。参数摊平成 N 个 real，返回值是标量或结构体。 */
+  /** 一个 GLSL 函数 -> 一条方言 `fn`。参数摊平成 N 个标量，返回值是标量或结构体。
+   *
+   * `out`/`inout` 形参（第二十五片）：方言里没有引用参数，所以**从返回值那一头回来**。
+   * 一个带 out 形参的函数落成「返回一个专用结构体」：字段是「返回值那几格 + 每个
+   * out/inout 形参那几格」，按声明次序。调用点拆开、写回去（见 `call`）。
+   *
+   *   - `out`   形参：**不是**方言参数，函数里是一个从零起的局部量
+   *   - `inout` 形参：是方言参数，进来先抄成局部量（抄一份是为了「写回去」这件事只发生
+   *     在返回那一刻 —— 与 GLSL 的 copy-in/copy-out 语义一样，不是引用语义）
+   */
   func(f) {
     if (f.name === 'main') return;
     const ps = [];
+    const pre = [];
+    const outs = [];
     this.push();
     for (const p of f.params) {
-      if (p.dir !== 'in') glslNyi('out/inout 形参');
       const n = glslNComp(p.ty);
       const ct = glslCompTy(p.ty);
       const comps = [];
       for (let i = 0; i < n; i++) {
-        ps.push(`(${p.name}_${i} ${ct})`);
-        comps.push(`(var ${p.name}_${i})`);
+        const local = `${p.name}_${i}`;
+        if (p.dir === 'in') {
+          ps.push(`(${local} ${ct})`);
+        } else {
+          if (p.dir === 'inout') {
+            ps.push(`(${p.name}_in_${i} ${ct})`);
+            pre.push(`(let ${local} ${ct} (var ${p.name}_in_${i}))`);
+          } else {
+            pre.push(`(let ${local} ${ct} ${glslZero(ct)})`);
+          }
+          outs.push({ name: local, ct });
+        }
+        comps.push(`(var ${local})`);
       }
       this.bind(p.name, comps);
     }
-    const rn = glslNComp(f.ret);
-    const ret = f.ret.k === 'void' ? 'void'
-      : rn === 1 ? glslCompTy(f.ret) : glslStructName(rn);
-    if (rn > 1) this.need(rn);
+    const retN = f.ret.k === 'void' ? 0 : glslNComp(f.ret);
+    let ret;
+    if (outs.length === 0) {
+      ret = retN === 0 ? 'void' : retN === 1 ? glslCompTy(f.ret) : glslStructName(retN);
+      if (retN > 1) this.need(retN);
+      this.outCtx = null;
+    } else {
+      /* 专用结构体：字段类型逐格写清（返回值那几格 + out 那几格）。 */
+      const fs = [];
+      const rct = retN === 0 ? null : glslCompTy(f.ret);
+      for (let i = 0; i < retN; i++) fs.push(`(c${i} ${rct})`);
+      outs.forEach((o, k) => fs.push(`(c${retN + k} ${o.ct})`));
+      const sn = `glsl_r_${this.prefix}${f.name}`;
+      this.outStructs.push(`  (struct ${sn} ${fs.join(' ')})`);
+      ret = sn;
+      this.outCtx = { struct: sn, retN, outs };
+    }
     this.stmts = [];
+    for (const s of pre) this.stmts.push(s);
     this.stmt(f.body);
+    if (this.outCtx !== null) {
+      /* 掉出函数尾的那一路也得把 out 带回去（void 函数最常见）。
+       * 前面已经 `return` 过的话这一条是死代码 —— 无害，而少了它就是「out 丢了」。 */
+      this.packRet(null);
+    }
     const body = this.stmts;
     this.stmts = [];
+    this.outCtx = null;
     this.pop();
     this.out.push(`  (fn glsl_${this.prefix}${f.name} (${ps.join(' ')}) ${ret}\n    ${body.join('\n    ')})`);
+  }
+
+  /** 带 out 形参的函数里的 `return`：把「返回值那几格 + out 那几格」装进专用结构体。 */
+  packRet(vals) {
+    const cx = this.outCtx;
+    const sn = this.fresh('rv');
+    this.stmts.push(`(let ${sn} ${cx.struct} (new ${cx.struct}))`);
+    for (let i = 0; i < cx.retN; i++) {
+      /* `return;` 出现在**非** void 函数里是检查那一步的事，这儿只管有值就装。 */
+      const v = vals === null ? null : vals[i];
+      if (v !== null) this.stmts.push(`(fldset (var ${sn}) c${i} ${v})`);
+    }
+    cx.outs.forEach((o, k) => {
+      this.stmts.push(`(fldset (var ${sn}) c${cx.retN + k} (var ${o.name}))`);
+    });
+    this.stmts.push(`(ret (var ${sn}))`);
   }
 
   /**
@@ -1247,6 +1358,8 @@ class GlslLowerer {
     this.mod = mod;
     this.prefix = prefix;
     this.names = new Map();
+    this.fnByName = new Map();
+    for (const f of mod.funcs) this.fnByName.set(f.name, f);
     for (const f of mod.funcs) this.func(f);
     this.entry();
   }
@@ -1258,7 +1371,7 @@ class GlslLowerer {
       for (let i = 0; i < n; i++) fs.push(`(c${i} real)`);
       return `  (struct ${glslStructName(n)} ${fs.join(' ')})`;
     });
-    const body = [...decls, ...this.out].join('\n\n');
+    const body = [...decls, ...this.outStructs, ...this.out].join('\n\n');
     return `(module\n${body}${mainTxt === '' ? '' : `\n\n${mainTxt}`}\n)\n`;
   }
 

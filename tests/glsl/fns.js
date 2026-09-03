@@ -186,7 +186,51 @@ float probe(int k) {
   return 16 + 36 * 2 + 1 * 4 + 4 * 8 + 6 * 16 + 3 * 32 + 8 * 64;
 });
 
-/* ---- 七、该骂的明着骂 ---------------------------------------------------------- */
+/* ---- 七、`out` / `inout` 形参（第二十五片） -------------------------------------
+ *
+ * 方言里没有引用参数，所以这一族**从返回值那一头回来**：带 out 形参的函数落成
+ * 「返回一个专用结构体」（返回值那几格 + 每个 out/inout 那几格），调用点拆开写回去。
+ * 门查的正是「写回去了」以及「写回发生在返回之后」（copy-in/copy-out，不是引用）。 */
+
+probe('inout / out / out+返回值 一起用', `
+void addOne(inout float x) { x += 1.0; }
+float split(vec2 v, out float lo, out float hi) {
+  lo = min(v.x, v.y);
+  hi = max(v.x, v.y);
+  return hi - lo;
+}
+void twice(out vec2 p, in float s) { p = vec2(s, s + s); }
+float probe(int k) {
+  float a = 5.0;
+  addOne(a);
+  float lo = 0.0;
+  float hi = 0.0;
+  float d = split(vec2(3.0, 8.0), lo, hi);
+  vec2 p = vec2(0.0);
+  twice(p, 2.0);
+  return a + lo * 10.0 + hi * 100.0 + d * 1000.0 + p.x * 10000.0 + p.y * 100000.0;
+}`, [0], () => 6 + 3 * 10 + 8 * 100 + 5 * 1000 + 2 * 10000 + 4 * 100000);
+
+probe('out 写回到 swizzle 的那几格', `
+void fill(out float x, out float y) { x = 1.0; y = 2.0; }
+float probe(int k) {
+  vec3 v = vec3(9.0, 9.0, 9.0);
+  fill(v.z, v.x);
+  return v.x + v.y * 10.0 + v.z * 100.0;
+}`, [0], () => 2 + 9 * 10 + 1 * 100);
+
+probe('inout 是 copy-in/copy-out：写回只发生在返回那一刻', `
+float bump(inout float x) {
+  x = 9.0;
+  return x * 2.0;
+}
+float probe(int k) {
+  float a = 1.0;
+  float r = bump(a);
+  return a + r * 10.0;
+}`, [0], () => 9 + 18 * 10);
+
+/* ---- 八、该骂的明着骂 ---------------------------------------------------------- */
 
 function rejects(name, glsl, want) {
   let msg = null;
@@ -217,6 +261,19 @@ float probe(int k) { return refract(vec2(1.0), vec2(0.0, 1.0), vec2(1.0)).x; }`,
 
 rejects('outerProduct 要两个向量', `
 float probe(int k) { return outerProduct(mat2(1.0), vec2(1.0))[0].x; }`, '要是 vecN');
+
+rejects('out 形参的实参不能是字面量', `
+void fill(out float x) { x = 1.0; }
+float probe(int k) { fill(1.0); return 0.0; }`, '要给一个能写的左值');
+
+rejects('out 形参的实参不能是 const', `
+const float C = 1.0;
+void fill(out float x) { x = 1.0; }
+float probe(int k) { fill(C); return 0.0; }`, '写不进去');
+
+rejects('out 形参不做隐式转换', `
+void fill(out float x) { x = 1.0; }
+float probe(int k) { vec2 v = vec2(0.0); fill(v); return 0.0; }`, '要正好是 float');
 
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail > 0 ? 1 : 0);
