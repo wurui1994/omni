@@ -90,8 +90,10 @@ for (const [what, obj] of [['甲', objA], ['乙', objB]]) {
 }
 {
   const back = readObject(objA);
-  ok('甲：内部调用不留重定位（同一个 .o 里 call 已经填好）',
-    !back.relocs.some((r) => r.sym === 'omni_xl_triple'));
+  /* 模块内的调用**也留一笔重定位**（第九刀第一百二十七片起，与 arm64 那一份同一条）。
+   * 量过尺子：tcc 哪怕被调的就在同一个 `.o` 里也发那一条。 */
+  ok('甲：内部调用也留一笔 BRANCH（与 tcc 同：同一个 .o 里也走符号）',
+    back.relocs.some((r) => r.sym === 'omni_xl_triple' && r.kind === RELOC.BRANCH));
   ok('甲：strlen 留着一笔 BRANCH',
     back.relocs.some((r) => r.sym === 'strlen' && r.kind === RELOC.BRANCH));
   ok('甲：串常量的地址是一笔 SIGNED（x86 一条 lea 就够，不像 arm64 要两条）',
@@ -108,7 +110,9 @@ const merged = linkObjects([readObject(objA), readObject(objB)]);
   const find = (n) => merged.defs.find((d) => d.name === n);
   ok('并合：甲的符号偏移不变', find('omni_xl_triple').off === 0);
   ok('并合：乙的符号往后挪了甲的长度', find('omni_xl_main').off === aBack.text.length);
-  ok('并合：跨文件的 call 当场填掉了一笔', merged.filled === 1);
+  /* 填掉的是**两笔**：甲自己那笔内部的 `call` 与乙跨文件调甲那一笔 ——
+   * 「同一个 .o 里」与「跨文件」在这一层同一条路。 */
+  ok('并合：内部与跨文件的 call 一共填掉两笔', merged.filled === 2);
   ok('并合：omni_xl_add3 不再是未定义的符号',
     !merged.relocs.some((r) => r.sym === 'omni_xl_add3'));
   ok('并合：libc 的符号原样转出去',

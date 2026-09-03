@@ -101,8 +101,11 @@ for (const [what, obj] of [['甲', objA], ['乙', objB]]) {
     ['omni_lk_triple', 'omni_lk_add3', 'omni_lk_len'].every(
       (n) => back.defs.some((d) => d.name === n && d.sect === 1)));
   ok('甲：串常量的符号在数据节里', back.defs.some((d) => d.sect === 2));
-  ok('甲：内部调用不留重定位（同一个 .o 里 `bl` 已经填好）',
-    !back.relocs.some((r) => r.sym === 'omni_lk_triple'));
+  /* 模块内的调用**也留一笔重定位**（第九刀第一百二十七片起）。量过尺子：tcc 哪怕
+   * 被调的就在同一个 `.o` 里、哪怕它是局部符号，`.rela.text` 里也有那一条。
+   * 从前这儿写的是「不留重定位」—— 那是实现改了而门没跟上，红对了。 */
+  ok('甲：内部调用也留一笔 BRANCH26（与 tcc 同：同一个 .o 里也走符号）',
+    back.relocs.some((r) => r.sym === 'omni_lk_triple' && r.kind === RELOC.BRANCH26));
   ok('甲：strlen 是未定义的外部符号，留着一笔 BRANCH26',
     back.relocs.some((r) => r.sym === 'strlen' && r.kind === RELOC.BRANCH26));
   /* 取地址那一对现在是**过 GOT** 的（`adrp @GOTPAGE` + `ldr @GOTPAGEOFF`）——
@@ -126,7 +129,9 @@ const merged = linkObjects([readObject(objA), readObject(objB)]);
   ok('并合：甲的符号偏移不变', find('omni_lk_triple').off === 0);
   ok('并合：乙的符号往后挪了甲的长度',
     find('omni_lk_main').off === aBack.text.length);
-  ok('并合：跨文件的 bl 当场填掉了一笔', merged.filled === 1);
+  /* 填掉的是**两笔**：甲自己那笔内部的 `bl`（第一百二十七片起它也走符号）与乙跨文件
+   * 调甲那一笔。两笔都在并合这一步落地 —— 「同一个 .o 里」与「跨文件」在这一层同一条路。 */
+  ok('并合：内部与跨文件的 bl 一共填掉两笔', merged.filled === 2);
   ok('并合：omni_lk_add3 不再是未定义的符号',
     !merged.relocs.some((r) => r.sym === 'omni_lk_add3'));
   ok('并合：libc 的符号原样转出去',

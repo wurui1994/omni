@@ -34,6 +34,8 @@ const LC_SYMTAB = 0x02;
 
 const N_TYPE = 0x0e;   // n_type 里「是哪一类」的那三位
 const N_SECT = 0x0e;
+const N_EXT = 0x01;         // n_type 的最低位：是不是外部可见
+const N_WEAK_DEF = 0x0080;  // n_desc 里的弱定义那一位（写出侧是 macho.js 同名常量）
 
 const ARM64_RELOC_BRANCH26 = 2;
 const ARM64_RELOC_PAGE21 = 3;
@@ -179,12 +181,21 @@ export function readObject(bytes) {
     const name = plainName(r.cstr(symtab.stroff + r.u32(p)));
     const type = r.u8(p + 4);
     const sect = r.u8(p + 5);
+    const desc = r.u16(p + 6);
     const value = r.u64(p + 8);
     symNames.push(name);
     if ((type & N_TYPE) !== N_SECT) continue;
     const s = sects[sect - 1];
     if (s === undefined) throw new OmniError(`macho: 符号 ${name} 说它在第 ${sect} 节，没这一节`);
-    defs.push({ name, off: value - s.addr, sect });
+    /* `local` 与 `weak` 也得读回来 —— 它们不是装饰：`local` 决定符号进不进
+     * `LC_DYSYMTAB` 的第一段（串常量、`static` 的函数、转发桩都靠它，不然两个 `.o`
+     * 一链就是 duplicate symbol），`weak` 决定重复定义算不算冲突。
+     * 少读这两格的表现就是「往返不掉字节」这一条门红 —— 它红过一阵，红对了。
+     * 形状与 `writeObject` 的入参对齐：只在**真是**那一格时才带上这个键。 */
+    const d = { name, off: value - s.addr, sect };
+    if ((type & N_EXT) === 0) d.local = true;
+    else if ((desc & N_WEAK_DEF) !== 0) d.weak = true;
+    defs.push(d);
   }
 
   /* 重定位只读代码节的。数据节里也可能有（第二十八片：初值里的地址）—— 那种我们自己的
