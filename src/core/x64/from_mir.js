@@ -41,7 +41,12 @@
 
 import { OmniError } from '../source/diag.js';
 import { utf8Bytes } from '../host/utf8.js';
-import * as x from './encode.js';
+import {
+  aluRI, aluRR, callR, cdq, cqo, cvtF2F, cvtF2I, cvtI2F, divR, fbin, fcmp, fldM64, fldM80,
+  fstpM64, fstpM80, fxor, idivR, imulRR, lea, movAbs, movMR, movRI, movRM, movRR, movqFromXmm,
+  movqToXmm, movsx, movsxM, movzx, movzxM, negR, notR, pop, push, ret, setcc, shiftRCl, shiftRI,
+  testRR
+} from './encode.js';
 import { REG, ALU, CC, SH, FOP, XMM } from './encode.js';
 import { CodeBuf } from './asm.js';
 /* 那一份共用的 8 字节 `UNWIND_INFO`（第一百一十七片）：链接器那边早就有一格
@@ -327,11 +332,11 @@ class x64FnGen {
   }
 
   frameLoad(reg, off) {
-    this.buf.emit(x.movRM(8, reg, BP, off));
+    this.buf.emit(movRM(8, reg, BP, off));
   }
 
   frameStore(reg, off) {
-    this.buf.emit(x.movMR(8, BP, off, reg));
+    this.buf.emit(movMR(8, BP, off, reg));
   }
 
   /* -------------------------------------------------------------- 立即数
@@ -339,10 +344,10 @@ class x64FnGen {
   movImm(reg, value) {
     const v = BigInt.asIntN(64, BigInt(value));
     if (v >= -(2n ** 31n) && v < 2n ** 31n) {
-      this.buf.emit(x.movRI(8, reg, Number(v)));
+      this.buf.emit(movRI(8, reg, Number(v)));
       return;
     }
-    this.buf.emit(x.movAbs(reg, v));
+    this.buf.emit(movAbs(reg, v));
   }
 
   loadRef(reg, ref) {
@@ -366,12 +371,12 @@ class x64FnGen {
 
   /** 位模式 -> xmm。`movq` 一条，与 arm64 的 `fmov` 对应。 */
   toFp(fdst, greg) {
-    this.buf.emit(x.movqToXmm(fdst, greg));
+    this.buf.emit(movqToXmm(fdst, greg));
   }
 
   /** xmm -> 位模式。 */
   fromFp(gdst, fsrc) {
-    this.buf.emit(x.movqFromXmm(gdst, fsrc));
+    this.buf.emit(movqFromXmm(gdst, fsrc));
   }
 
   strSym(ref) {
@@ -400,8 +405,8 @@ class x64FnGen {
   gen() {
     const f = this.f;
     const buf = this.buf;
-    buf.emit(x.push(BP), x.movRR(8, BP, REG.rsp));
-    if (this.frame > 0) buf.emit(x.aluRI(ALU.sub, 8, REG.rsp, this.frame));
+    buf.emit(push(BP), movRR(8, BP, REG.rsp));
+    if (this.frame > 0) buf.emit(aluRI(ALU.sub, 8, REG.rsp, this.frame));
     /* 变参函数的序言（第二十四片）：把六个整数实参寄存器与八个 xmm **无条件**泼进
      * 寄存器保存区。clang 会先 `test al, al` 再跳过 xmm 那一段；我们不跳 ——
      * 那些寄存器总是在的，多写 128 字节换掉一条分支与一个标签。
@@ -410,13 +415,13 @@ class x64FnGen {
     if (f.variadic) {
       let k = 0;
       while (k < IARG.length) {
-        buf.emit(x.movMR(8, BP, this.regSave + k * 8, IARG[k]));
+        buf.emit(movMR(8, BP, this.regSave + k * 8, IARG[k]));
         k++;
       }
       k = 0;
       while (k < FARG.length) {
         this.fromFp(X64_TMP0, FARG[k]);
-        buf.emit(x.movMR(8, BP, this.regSave + 48 + k * 16, X64_TMP0));
+        buf.emit(movMR(8, BP, this.regSave + 48 + k * 16, X64_TMP0));
         k++;
       }
     }
@@ -433,10 +438,10 @@ class x64FnGen {
        * 再 `fstp qword` 收成 double 落进槽里（值在 MIR 里是 f64，形状只活在内存里）。 */
       if (p.ld === true) {
         inArg += inArg % 16 === 0 ? 0 : 16 - (inArg % 16);
-        buf.emit(x.fldM80(BP, inArg));
-        buf.emit(x.push(X64_RES));
-        buf.emit(x.fstpM64(REG.rsp, 0));
-        buf.emit(x.pop(X64_TMP0));
+        buf.emit(fldM80(BP, inArg));
+        buf.emit(push(X64_RES));
+        buf.emit(fstpM64(REG.rsp, 0));
+        buf.emit(pop(X64_TMP0));
         this.frameStore(X64_TMP0, this.slotOff(p.slot));
         inArg += 16;
         continue;
@@ -453,7 +458,7 @@ class x64FnGen {
         ngrn++;
         continue;
       }
-      buf.emit(x.movRM(8, X64_TMP0, BP, inArg));
+      buf.emit(movRM(8, X64_TMP0, BP, inArg));
       this.frameStore(X64_TMP0, this.slotOff(p.slot));
       inArg += 8;
     }
@@ -461,7 +466,7 @@ class x64FnGen {
     for (let i = 0; i < f.count(); i++) this.one(i);
 
     buf.place(this.retLabel);
-    buf.emit(x.movRR(8, REG.rsp, BP), x.pop(BP), x.ret());
+    buf.emit(movRR(8, REG.rsp, BP), pop(BP), ret());
     return buf;
   }
 
@@ -486,7 +491,7 @@ class x64FnGen {
     if (op === OP.IF) {
       this.loadRef(X64_TMP0, f.a[i]);
       const elseLabel = buf.label();
-      buf.emit(x.testRR(8, X64_TMP0, X64_TMP0));
+      buf.emit(testRR(8, X64_TMP0, X64_TMP0));
       buf.jcc(CC.e, elseLabel);
       this.regions.push({ kind: 'if', endLabel: buf.label(), elseLabel, elseDone: false });
       return;
@@ -512,7 +517,7 @@ class x64FnGen {
     }
     if (op === OP.BRIF) {
       this.loadRef(X64_TMP0, f.a[i]);
-      buf.emit(x.testRR(8, X64_TMP0, X64_TMP0));
+      buf.emit(testRR(8, X64_TMP0, X64_TMP0));
       buf.jcc(CC.ne, this.brTarget(f.aux[i]));
       return;
     }
@@ -523,7 +528,7 @@ class x64FnGen {
       const levels = f.levelsOf(f.b[i]);
       let k = 0;
       for (const lv of levels) {
-        buf.emit(x.aluRI(ALU.cmp, 8, X64_TMP0, k));
+        buf.emit(aluRI(ALU.cmp, 8, X64_TMP0, k));
         buf.jcc(CC.e, this.brTarget(lv));
         k++;
       }
@@ -538,11 +543,11 @@ class x64FnGen {
          * `long double` 例外（第一百一十二片）：它回在 **x87 的 st0** 里 —— 把 double
          * 的位模式借栈喂给 `fld qword`，留在栈顶就走（`pop` 只为还原 rsp）。 */
         if (isFloatType(t) && f.ldRet === true) {
-          buf.emit(x.push(X64_TMP0));
-          buf.emit(x.fldM64(REG.rsp, 0));
-          buf.emit(x.pop(X64_TMP0));
+          buf.emit(push(X64_TMP0));
+          buf.emit(fldM64(REG.rsp, 0));
+          buf.emit(pop(X64_TMP0));
         } else if (isFloatType(t)) this.toFp(FARG[0], X64_TMP0);
-        else buf.emit(x.movRR(8, X64_RES, X64_TMP0));
+        else buf.emit(movRR(8, X64_RES, X64_TMP0));
       }
       buf.jmp(this.retLabel);
       return;
@@ -580,7 +585,7 @@ class x64FnGen {
       if (!this.mod.native) nyi('CALLI（解释器那条腿上函数指针是「号 + 1」，不是地址）');
       this.callArgs(f.argsOf(f.b[i]), true);
       this.loadRef(X64_TMP0, f.a[i]);
-      buf.emit(x.callR(X64_TMP0));
+      buf.emit(callR(X64_TMP0));
       return this.callRet(i, t, callLdRet(f.aux[i]));
     }
     /* 一个函数的**地址**（第二十七片）：与 `GADDR` 一样是一条 RIP 相对的 `lea`，
@@ -604,7 +609,7 @@ class x64FnGen {
     /* ---- 帧上的一块（第十八片）。x86_64 上是**一条** `lea` —— 与 arm64 的
      * 「adrp + add」不同，这里基址就在寄存器里（`rbp`），偏移是 disp32，硬件自己加。 */
     if (op === OP.FRAME) {
-      buf.emit(x.lea(8, X64_RES, BP, this.frameOff(f.aux[i])));
+      buf.emit(lea(8, X64_RES, BP, this.frameOff(f.aux[i])));
       return this.def(i, X64_RES);
     }
 
@@ -616,14 +621,14 @@ class x64FnGen {
       if (vl === undefined) throw new OmniError('x64: VASTART 没有分到 va_list 的位置');
       const p = inArgPlaces(f);
       /* 固定实参用掉的那一段先记上：`va_arg` 从这儿往后数。 */
-      buf.emit(x.movRI(4, X64_TMP1, 8 * p.ngrn), x.movMR(4, BP, vl, X64_TMP1));
-      buf.emit(x.movRI(4, X64_TMP1, 48 + 16 * p.nsse), x.movMR(4, BP, vl + 4, X64_TMP1));
+      buf.emit(movRI(4, X64_TMP1, 8 * p.ngrn), movMR(4, BP, vl, X64_TMP1));
+      buf.emit(movRI(4, X64_TMP1, 48 + 16 * p.nsse), movMR(4, BP, vl + 4, X64_TMP1));
       /* 溢到栈上的实参从入参区、固定形参之后起。 */
-      buf.emit(x.lea(8, X64_TMP1, BP, 16 + p.bytes), x.movMR(8, BP, vl + 8, X64_TMP1));
-      buf.emit(x.lea(8, X64_TMP1, BP, this.regSave), x.movMR(8, BP, vl + 16, X64_TMP1));
+      buf.emit(lea(8, X64_TMP1, BP, 16 + p.bytes), movMR(8, BP, vl + 8, X64_TMP1));
+      buf.emit(lea(8, X64_TMP1, BP, this.regSave), movMR(8, BP, vl + 16, X64_TMP1));
       /* 前端手里那个 8 字节的 `va_list` 装的是这个结构的地址。 */
       this.loadRef(X64_TMP0, f.a[i]);
-      buf.emit(x.lea(8, X64_TMP1, BP, vl), x.movMR(8, X64_TMP0, 0, X64_TMP1));
+      buf.emit(lea(8, X64_TMP1, BP, vl), movMR(8, X64_TMP0, 0, X64_TMP1));
       return;
     }
     if (op === OP.VAARG) {
@@ -634,14 +639,14 @@ class x64FnGen {
        * 取值与别处一样借栈：`fld tbyte` 进 x87、`fstp qword` 收成 double。 */
       if (memArgIsF80(f.aux[i])) {
         this.loadRef(X64_TMP0, f.a[i]);
-        buf.emit(x.movRM(8, X64_TMP0, X64_TMP0, 0));           // X64_TMP0 = 那个 24 字节结构的地址
-        buf.emit(x.movRM(8, X64_TMP1, X64_TMP0, 8));           // X64_TMP1 = overflow_arg_area
-        buf.emit(x.aluRI(ALU.add, 8, X64_TMP1, 15), x.aluRI(ALU.and, 8, X64_TMP1, -16));
-        buf.emit(x.fldM80(X64_TMP1, 0));
-        buf.emit(x.aluRI(ALU.add, 8, X64_TMP1, 16), x.movMR(8, X64_TMP0, 8, X64_TMP1));
-        buf.emit(x.push(X64_RES));
-        buf.emit(x.fstpM64(REG.rsp, 0));
-        buf.emit(x.pop(X64_RES));
+        buf.emit(movRM(8, X64_TMP0, X64_TMP0, 0));           // X64_TMP0 = 那个 24 字节结构的地址
+        buf.emit(movRM(8, X64_TMP1, X64_TMP0, 8));           // X64_TMP1 = overflow_arg_area
+        buf.emit(aluRI(ALU.add, 8, X64_TMP1, 15), aluRI(ALU.and, 8, X64_TMP1, -16));
+        buf.emit(fldM80(X64_TMP1, 0));
+        buf.emit(aluRI(ALU.add, 8, X64_TMP1, 16), movMR(8, X64_TMP0, 8, X64_TMP1));
+        buf.emit(push(X64_RES));
+        buf.emit(fstpM64(REG.rsp, 0));
+        buf.emit(pop(X64_RES));
         return this.def(i, X64_RES);
       }
       /* 取 struct（aux > 0）：SysV 的分类在这儿真的要算一遍（第四十片）。
@@ -659,12 +664,12 @@ class x64FnGen {
         const sseMask = memArgSse(f.aux[i]);
         const step = n + (n % 8 === 0 ? 0 : 8 - (n % 8));
         this.loadRef(X64_TMP0, f.a[i]);
-        buf.emit(x.movRM(8, X64_TMP0, X64_TMP0, 0));            // X64_TMP0 = 那个 24 字节结构的地址
+        buf.emit(movRM(8, X64_TMP0, X64_TMP0, 0));            // X64_TMP0 = 那个 24 字节结构的地址
         /* 从溢出区取一份：地址就是 `overflow_arg_area`，之后往前推一格。 */
         const fromStack = () => {
-          buf.emit(x.movRM(8, X64_RES, X64_TMP0, 8));
-          buf.emit(x.movRR(8, X64_TMP1, X64_RES), x.aluRI(ALU.add, 8, X64_TMP1, step));
-          buf.emit(x.movMR(8, X64_TMP0, 8, X64_TMP1));
+          buf.emit(movRM(8, X64_RES, X64_TMP0, 8));
+          buf.emit(movRR(8, X64_TMP1, X64_RES), aluRI(ALU.add, 8, X64_TMP1, step));
+          buf.emit(movMR(8, X64_TMP0, 8, X64_TMP1));
         };
         if (n > 16) {
           fromStack();
@@ -682,23 +687,23 @@ class x64FnGen {
         /* 两串各自的余量：`gp_offset <= 48 - 8*needInt`、`fp_offset <= 176 - 16*needSse`。
          * 任一串不够就整份走溢出区（规范 3.2.3 第 5 步）。 */
         if (needInt > 0) {
-          buf.emit(x.movRM(4, X64_TMP1, X64_TMP0, 0), x.aluRI(ALU.cmp, 4, X64_TMP1, 48 - 8 * needInt));
+          buf.emit(movRM(4, X64_TMP1, X64_TMP0, 0), aluRI(ALU.cmp, 4, X64_TMP1, 48 - 8 * needInt));
           buf.jcc(CC.a, over);
         }
         if (needSse > 0) {
-          buf.emit(x.movRM(4, X64_TMP1, X64_TMP0, 4), x.aluRI(ALU.cmp, 4, X64_TMP1, 176 - 16 * needSse));
+          buf.emit(movRM(4, X64_TMP1, X64_TMP0, 4), aluRI(ALU.cmp, 4, X64_TMP1, 176 - 16 * needSse));
           buf.jcc(CC.a, over);
         }
         for (let e = 0; e < words; e++) {
           const field = isSse(e) ? 4 : 0;
           const grow = isSse(e) ? 16 : 8;
-          buf.emit(x.movRM(4, X64_TMP1, X64_TMP0, field), x.movRM(8, X64_RES, X64_TMP0, 16));
-          buf.emit(x.aluRR(ALU.add, 8, X64_RES, X64_TMP1));     // X64_RES = reg_save_area + 偏移
-          buf.emit(x.movRM(8, X64_TMP1, X64_RES, 0), x.movMR(8, BP, dst + e * 8, X64_TMP1));
-          buf.emit(x.movRM(4, X64_TMP1, X64_TMP0, field), x.aluRI(ALU.add, 4, X64_TMP1, grow));
-          buf.emit(x.movMR(4, X64_TMP0, field, X64_TMP1));
+          buf.emit(movRM(4, X64_TMP1, X64_TMP0, field), movRM(8, X64_RES, X64_TMP0, 16));
+          buf.emit(aluRR(ALU.add, 8, X64_RES, X64_TMP1));     // X64_RES = reg_save_area + 偏移
+          buf.emit(movRM(8, X64_TMP1, X64_RES, 0), movMR(8, BP, dst + e * 8, X64_TMP1));
+          buf.emit(movRM(4, X64_TMP1, X64_TMP0, field), aluRI(ALU.add, 4, X64_TMP1, grow));
+          buf.emit(movMR(4, X64_TMP0, field, X64_TMP1));
         }
-        buf.emit(x.lea(8, X64_RES, BP, dst));
+        buf.emit(lea(8, X64_RES, BP, dst));
         buf.jmp(done);
         buf.place(over);
         fromStack();
@@ -712,24 +717,24 @@ class x64FnGen {
       const over = buf.label();
       const done = buf.label();
       const ldv = (ptr) => {
-        if (typeKind(t) === T_I32) buf.emit(x.movsxM(8, 4, X64_RES, ptr, 0));
-        else buf.emit(x.movRM(8, X64_RES, ptr, 0));
+        if (typeKind(t) === T_I32) buf.emit(movsxM(8, 4, X64_RES, ptr, 0));
+        else buf.emit(movRM(8, X64_RES, ptr, 0));
       };
       this.loadRef(X64_TMP0, f.a[i]);
-      buf.emit(x.movRM(8, X64_TMP0, X64_TMP0, 0));            // X64_TMP0 = 结构的地址
-      buf.emit(x.movRM(4, X64_TMP1, X64_TMP0, field));
-      buf.emit(x.aluRI(ALU.cmp, 4, X64_TMP1, limit));
+      buf.emit(movRM(8, X64_TMP0, X64_TMP0, 0));            // X64_TMP0 = 结构的地址
+      buf.emit(movRM(4, X64_TMP1, X64_TMP0, field));
+      buf.emit(aluRI(ALU.cmp, 4, X64_TMP1, limit));
       buf.jcc(CC.ae, over);
       /* 还在寄存器保存区里：地址 = reg_save_area + 偏移，偏移随后往前推一格。 */
-      buf.emit(x.movRM(8, X64_RES, X64_TMP0, 16), x.aluRR(ALU.add, 8, X64_RES, X64_TMP1));
-      buf.emit(x.aluRI(ALU.add, 4, X64_TMP1, step), x.movMR(4, X64_TMP0, field, X64_TMP1));
+      buf.emit(movRM(8, X64_RES, X64_TMP0, 16), aluRR(ALU.add, 8, X64_RES, X64_TMP1));
+      buf.emit(aluRI(ALU.add, 4, X64_TMP1, step), movMR(4, X64_TMP0, field, X64_TMP1));
       ldv(X64_RES);
       buf.jmp(done);
       /* 已经溢到栈上：这一路不分整数与浮点，一格一律 8 字节。 */
       buf.place(over);
-      buf.emit(x.movRM(8, X64_TMP1, X64_TMP0, 8));
+      buf.emit(movRM(8, X64_TMP1, X64_TMP0, 8));
       ldv(X64_TMP1);
-      buf.emit(x.aluRI(ALU.add, 8, X64_TMP1, 8), x.movMR(8, X64_TMP0, 8, X64_TMP1));
+      buf.emit(aluRI(ALU.add, 8, X64_TMP1, 8), movMR(8, X64_TMP0, 8, X64_TMP1));
       buf.place(done);
       return this.def(i, X64_RES);
     }
@@ -741,12 +746,12 @@ class x64FnGen {
       const vl = this.vaOffs.get(i);
       if (vl === undefined) throw new OmniError('x64: VACOPY 没有分到 va_list 的位置');
       this.loadRef(X64_TMP0, f.b[i]);
-      buf.emit(x.movRM(8, X64_TMP0, X64_TMP0, 0));            // X64_TMP0 = 源结构的地址
+      buf.emit(movRM(8, X64_TMP0, X64_TMP0, 0));            // X64_TMP0 = 源结构的地址
       for (let o = 0; o < 24; o += 8) {
-        buf.emit(x.movRM(8, X64_TMP1, X64_TMP0, o), x.movMR(8, BP, vl + o, X64_TMP1));
+        buf.emit(movRM(8, X64_TMP1, X64_TMP0, o), movMR(8, BP, vl + o, X64_TMP1));
       }
       this.loadRef(X64_TMP0, f.a[i]);
-      buf.emit(x.lea(8, X64_TMP1, BP, vl), x.movMR(8, X64_TMP0, 0, X64_TMP1));
+      buf.emit(lea(8, X64_TMP1, BP, vl), movMR(8, X64_TMP0, 0, X64_TMP1));
       return;
     }
 
@@ -757,12 +762,12 @@ class x64FnGen {
      * 要让开的只有出参区：被调方按 `rsp` 找走栈的实参，所以块的基址取第一次 `sub` 之后
      * 那个位置，再往下降 `outArgs` 个字节当新的 `rsp`。 */
     if (op === OP.SPGET) {
-      buf.emit(x.movRR(8, X64_RES, REG.rsp));
+      buf.emit(movRR(8, X64_RES, REG.rsp));
       return this.def(i, X64_RES);
     }
     if (op === OP.SPSET) {
       this.loadRef(X64_TMP0, f.a[i]);
-      buf.emit(x.movRR(8, REG.rsp, X64_TMP0));
+      buf.emit(movRR(8, REG.rsp, X64_TMP0));
       return;
     }
     /* 变参里的一整块内容（第三十九片）：这一条本身**不发访存** —— 内容什么时候拷、
@@ -774,9 +779,9 @@ class x64FnGen {
     }
     if (op === OP.SPALLOC) {
       this.loadRef(X64_TMP0, f.a[i]);
-      buf.emit(x.aluRR(ALU.sub, 8, REG.rsp, X64_TMP0));
-      buf.emit(x.movRR(8, X64_RES, REG.rsp));
-      if (this.outArgs > 0) buf.emit(x.aluRI(ALU.sub, 8, REG.rsp, this.outArgs));
+      buf.emit(aluRR(ALU.sub, 8, REG.rsp, X64_TMP0));
+      buf.emit(movRR(8, X64_RES, REG.rsp));
+      if (this.outArgs > 0) buf.emit(aluRI(ALU.sub, 8, REG.rsp, this.outArgs));
       return this.def(i, X64_RES);
     }
 
@@ -797,7 +802,7 @@ class x64FnGen {
         /* i32 的规范形是符号扩展过的 64 位，而 `movslq sym(%rip)` 我们没有 ——
          * 先读四字节（零扩展），再一条 `movslq` 扩成规范形。 */
         buf.loadSym(4, X64_RES, sym);
-        buf.emit(x.movsx(8, 4, X64_RES, X64_RES));
+        buf.emit(movsx(8, 4, X64_RES, X64_RES));
       } else if (key === 'f32') {
         /* f32 的栈位里躺的是**四字节的位模式**，高位清零 —— 读四字节正好。 */
         buf.loadSym(4, X64_RES, sym);
@@ -812,7 +817,7 @@ class x64FnGen {
       const size = X64_STORE_SIZE[widthKey(f.t[i])];
       if (this.isExternGlobal(gno)) {
         buf.loadSymGot(X64_TMP0, this.globalSym(gno));
-        buf.emit(x.movMR(size, X64_TMP0, 0, X64_RES));
+        buf.emit(movMR(size, X64_TMP0, 0, X64_RES));
         return;
       }
       buf.storeSym(size, this.globalSym(gno), X64_RES);
@@ -837,18 +842,18 @@ class x64FnGen {
     if (op === OP.NEG) {
       const w = widthOf(t);
       this.loadRef(X64_RES, f.a[i]);
-      buf.emit(x.negR(w, X64_RES));
+      buf.emit(negR(w, X64_RES));
       return this.def(i, X64_RES, w);
     }
     if (op === OP.BNOT) {
       const w = widthOf(t);
       this.loadRef(X64_RES, f.a[i]);
-      buf.emit(x.notR(w, X64_RES));
+      buf.emit(notR(w, X64_RES));
       return this.def(i, X64_RES, w);
     }
     if (op === OP.NOT) {
       this.loadRef(X64_RES, f.a[i]);
-      buf.emit(x.aluRI(ALU.xor, 8, X64_RES, 1));
+      buf.emit(aluRI(ALU.xor, 8, X64_RES, 1));
       return this.def(i, X64_RES);
     }
 
@@ -863,8 +868,8 @@ class x64FnGen {
       const w = widthOf(t);
       this.loadRef(X64_TMP0, f.a[i]);
       this.loadRef(X64_TMP1, f.b[i]);
-      buf.emit(x.aluRR(ALU.cmp, w, X64_TMP0, X64_TMP1));
-      buf.emit(x.setcc(cond, X64_RES), x.movzx(8, 1, X64_RES, X64_RES));
+      buf.emit(aluRR(ALU.cmp, w, X64_TMP0, X64_TMP1));
+      buf.emit(setcc(cond, X64_RES), movzx(8, 1, X64_RES, X64_RES));
       return this.def(i, X64_RES);
     }
 
@@ -889,18 +894,18 @@ class x64FnGen {
       const d = DIVLIKE[op];
       this.loadRef(X64_RES, f.a[i]);
       this.loadRef(X64_TMP1, f.b[i]);
-      if (d.signed) buf.emit(w === 8 ? x.cqo() : x.cdq());
+      if (d.signed) buf.emit(w === 8 ? cqo() : cdq());
       /* 无符号除法要把 rdx 清零（`div` 用的是 rdx:rax 这个双字）。 */
-      else buf.emit(x.aluRR(ALU.xor, 8, REG.rdx, REG.rdx));
-      buf.emit(d.signed ? x.idivR(w, X64_TMP1) : x.divR(w, X64_TMP1));
-      if (d.rem) buf.emit(x.movRR(8, X64_RES, REG.rdx));
+      else buf.emit(aluRR(ALU.xor, 8, REG.rdx, REG.rdx));
+      buf.emit(d.signed ? idivR(w, X64_TMP1) : divR(w, X64_TMP1));
+      if (d.rem) buf.emit(movRR(8, X64_RES, REG.rdx));
       return this.def(i, X64_RES, w);
     }
 
     if (SHIFT[op] !== undefined) {
       this.loadRef(X64_RES, f.a[i]);
       this.loadRef(REG.rcx, f.b[i]);
-      buf.emit(x.shiftRCl(SHIFT[op], w, X64_RES));
+      buf.emit(shiftRCl(SHIFT[op], w, X64_RES));
       return this.def(i, X64_RES, w);
     }
 
@@ -926,14 +931,14 @@ class x64FnGen {
           let at = 0;
           for (const w of [8, 4, 2, 1]) {
             while (place.bytes - at >= w) {
-              this.buf.emit(x.movRM(w, X64_TMP1, X64_TMP0, at), x.movMR(w, REG.rsp, place.off + at, X64_TMP1));
+              this.buf.emit(movRM(w, X64_TMP1, X64_TMP0, at), movMR(w, REG.rsp, place.off + at, X64_TMP1));
               at += w;
             }
           }
           continue;
         }
         this.loadRef(X64_TMP0, ar);
-        this.buf.emit(x.movMR(8, REG.rsp, place.off, X64_TMP0));
+        this.buf.emit(movMR(8, REG.rsp, place.off, X64_TMP0));
         continue;
       }
       /* 一整块内容分到了寄存器上：一格一个，整数格进 IARG、浮点格进 xmm。
@@ -944,9 +949,9 @@ class x64FnGen {
         this.loadRef(X64_TMP0, ar);
         let e = 0;
         for (const r of place.regs) {
-          if (r.x !== undefined) this.buf.emit(x.movRM(8, IARG[r.x], X64_TMP0, e * 8));
+          if (r.x !== undefined) this.buf.emit(movRM(8, IARG[r.x], X64_TMP0, e * 8));
           else {
-            this.buf.emit(x.movRM(8, X64_TMP1, X64_TMP0, e * 8));
+            this.buf.emit(movRM(8, X64_TMP1, X64_TMP0, e * 8));
             this.toFp(FARG[r.v], X64_TMP1);
           }
           e++;
@@ -962,7 +967,7 @@ class x64FnGen {
     }
     /* SysV：调变参函数之前 `al` 要等于用掉的 xmm 个数。被调的是不是变参这一层不知道，
      * 所以外部调用一律发这一条 —— 对非变参函数完全无害，少了它 `printf` 会崩。 */
-    if (variadic === true) this.buf.emit(x.movRI(1, X64_RES, p.nsse));
+    if (variadic === true) this.buf.emit(movRI(1, X64_RES, p.nsse));
   }
 
   /**
@@ -978,9 +983,9 @@ class x64FnGen {
        * `fstp qword` 把栈顶收成 double 写进借来的那八个字节，顺手把 x87 栈弹干净
        * （不弹的话连着几次调用就把那八格填满了）。 */
       if (ldret === true) {
-        this.buf.emit(x.push(X64_RES));
-        this.buf.emit(x.fstpM64(REG.rsp, 0));
-        this.buf.emit(x.pop(X64_RES));
+        this.buf.emit(push(X64_RES));
+        this.buf.emit(fstpM64(REG.rsp, 0));
+        this.buf.emit(pop(X64_RES));
         return this.def(i, X64_RES);
       }
       this.fromFp(X64_RES, FARG[0]);
@@ -1013,7 +1018,7 @@ class x64FnGen {
   memAddr(reg, ref, off) {
     this.loadRef(reg, ref);
     if (off === 0) return;
-    this.buf.emit(x.aluRI(ALU.add, 8, reg, off));
+    this.buf.emit(aluRI(ALU.add, 8, reg, off));
   }
 
   /**
@@ -1049,10 +1054,10 @@ class x64FnGen {
     const f = this.f;
     const buf = this.buf;
     this.memAddr(X64_TMP0, f.a[i], memOff(f.aux[i]));
-    buf.emit(x.fldM80(X64_TMP0, 0));
-    buf.emit(x.push(X64_RES));
-    buf.emit(x.fstpM64(REG.rsp, 0));
-    buf.emit(x.pop(X64_RES));
+    buf.emit(fldM80(X64_TMP0, 0));
+    buf.emit(push(X64_RES));
+    buf.emit(fstpM64(REG.rsp, 0));
+    buf.emit(pop(X64_RES));
     return this.def(i, X64_RES);
   }
 
@@ -1065,7 +1070,7 @@ class x64FnGen {
     if (size === undefined) return nyi(`MSTORE 的宽度 ${kind}`);
     this.loadRef(X64_RES, f.b[i]);
     this.memAddr(X64_TMP0, f.a[i], memOff(f.aux[i]));
-    this.buf.emit(x.movMR(size, X64_TMP0, 0, X64_RES));
+    this.buf.emit(movMR(size, X64_TMP0, 0, X64_RES));
   }
 
   /**
@@ -1077,11 +1082,11 @@ class x64FnGen {
     const f = this.f;
     const buf = this.buf;
     this.loadRef(X64_RES, f.b[i]);
-    buf.emit(x.push(X64_RES));
+    buf.emit(push(X64_RES));
     this.memAddr(X64_TMP0, f.a[i], memOff(f.aux[i]));
-    buf.emit(x.fldM64(REG.rsp, 0));
-    buf.emit(x.fstpM80(X64_TMP0, 0));
-    buf.emit(x.pop(X64_RES));
+    buf.emit(fldM64(REG.rsp, 0));
+    buf.emit(fstpM80(X64_TMP0, 0));
+    buf.emit(pop(X64_RES));
   }
 
   /**
@@ -1100,7 +1105,7 @@ class x64FnGen {
       this.toFp(X64_FTMP0, X64_TMP0);
       this.movImm(X64_TMP1, dbl ? -(2n ** 63n) : BigInt(2 ** 31));
       this.toFp(X64_FTMP1, X64_TMP1);
-      buf.emit(x.fxor(dbl, X64_FTMP0, X64_FTMP1));
+      buf.emit(fxor(dbl, X64_FTMP0, X64_FTMP1));
       this.fromFp(X64_RES, X64_FTMP0);
       return this.def(i, X64_RES);
     }
@@ -1112,7 +1117,7 @@ class x64FnGen {
     this.toFp(X64_FTMP0, X64_TMP0);
     this.toFp(X64_FTMP1, X64_TMP1);
     if (fb !== undefined) {
-      buf.emit(x.fbin(fb, dbl, X64_FTMP0, X64_FTMP1));
+      buf.emit(fbin(fb, dbl, X64_FTMP0, X64_FTMP1));
       this.fromFp(X64_RES, X64_FTMP0);
       return this.def(i, X64_RES);
     }
@@ -1132,15 +1137,15 @@ class x64FnGen {
   fcmp(i, dbl, fc) {
     const buf = this.buf;
     /* `swap` 的那两条：比的是 (b, a) 而不是 (a, b)。 */
-    buf.emit(x.fcmp(dbl, fc.swap ? X64_FTMP1 : X64_FTMP0, fc.swap ? X64_FTMP0 : X64_FTMP1));
+    buf.emit(fcmp(dbl, fc.swap ? X64_FTMP1 : X64_FTMP0, fc.swap ? X64_FTMP0 : X64_FTMP1));
     if (fc.pf === undefined) {
-      buf.emit(x.setcc(fc.cc, X64_RES), x.movzx(8, 1, X64_RES, X64_RES));
+      buf.emit(setcc(fc.cc, X64_RES), movzx(8, 1, X64_RES, X64_RES));
       return this.def(i, X64_RES);
     }
     /* `==`/`!=`：两个条件合起来。用 r10/r11 的低字节 —— 这时它们的旧值已经不要了。 */
-    buf.emit(x.setcc(fc.cc, X64_TMP0), x.setcc(fc.pf, X64_TMP1));
-    buf.emit(x.aluRR(fc.join, 1, X64_TMP0, X64_TMP1));
-    buf.emit(x.movzx(8, 1, X64_RES, X64_TMP0));
+    buf.emit(setcc(fc.cc, X64_TMP0), setcc(fc.pf, X64_TMP1));
+    buf.emit(aluRR(fc.join, 1, X64_TMP0, X64_TMP1));
+    buf.emit(movzx(8, 1, X64_RES, X64_TMP0));
     return this.def(i, X64_RES);
   }
 
@@ -1152,11 +1157,11 @@ class x64FnGen {
     const src = this.typeOfRef(f.a[i]);
     this.loadRef(X64_TMP0, f.a[i]);
     if (mode === CVT_BITCAST) {
-      buf.emit(x.movRR(8, X64_RES, X64_TMP0));
+      buf.emit(movRR(8, X64_RES, X64_TMP0));
       return this.def(i, X64_RES);
     }
     if (mode === CVT_I2F) {
-      buf.emit(x.cvtI2F(dbl, intBits(src) === 64 ? 8 : 4, X64_FTMP0, X64_TMP0));
+      buf.emit(cvtI2F(dbl, intBits(src) === 64 ? 8 : 4, X64_FTMP0, X64_TMP0));
       this.fromFp(X64_RES, X64_FTMP0);
       return this.def(i, X64_RES);
     }
@@ -1164,8 +1169,8 @@ class x64FnGen {
       /* x86 没有「无符号 -> 浮点」的指令。32 位的够办：零扩展成 64 位再走**有符号**那条
        * （零扩展之后的值一定是正的）。 */
       if (intBits(src) === 64) return this.u64ToFloat(i, dbl);
-      buf.emit(x.movRR(4, X64_TMP0, X64_TMP0));
-      buf.emit(x.cvtI2F(dbl, 8, X64_FTMP0, X64_TMP0));
+      buf.emit(movRR(4, X64_TMP0, X64_TMP0));
+      buf.emit(cvtI2F(dbl, 8, X64_FTMP0, X64_TMP0));
       this.fromFp(X64_RES, X64_FTMP0);
       return this.def(i, X64_RES);
     }
@@ -1173,7 +1178,7 @@ class x64FnGen {
       const srcDbl = typeKind(src) === T_F64;
       if (srcDbl === dbl) return nyi('同宽的 CVT_FCVT');
       this.toFp(X64_FTMP0, X64_TMP0);
-      buf.emit(x.cvtF2F(srcDbl, X64_FTMP1, X64_FTMP0));
+      buf.emit(cvtF2F(srcDbl, X64_FTMP1, X64_FTMP0));
       this.fromFp(X64_RES, X64_FTMP1);
       return this.def(i, X64_RES);
     }
@@ -1200,17 +1205,17 @@ class x64FnGen {
     const buf = this.buf;
     const big = buf.label();
     const done = buf.label();
-    buf.emit(x.testRR(8, X64_TMP0, X64_TMP0));
+    buf.emit(testRR(8, X64_TMP0, X64_TMP0));
     buf.jcc(CC.s, big);
-    buf.emit(x.cvtI2F(dbl, 8, X64_FTMP0, X64_TMP0));
+    buf.emit(cvtI2F(dbl, 8, X64_FTMP0, X64_TMP0));
     buf.jmp(done);
     buf.place(big);
-    buf.emit(x.movRR(8, X64_TMP1, X64_TMP0));
-    buf.emit(x.shiftRI(SH.shr, 8, X64_TMP1, 1));
-    buf.emit(x.aluRI(ALU.and, 8, X64_TMP0, 1));
-    buf.emit(x.aluRR(ALU.or, 8, X64_TMP1, X64_TMP0));
-    buf.emit(x.cvtI2F(dbl, 8, X64_FTMP0, X64_TMP1));
-    buf.emit(x.fbin(FOP.add, dbl, X64_FTMP0, X64_FTMP0));
+    buf.emit(movRR(8, X64_TMP1, X64_TMP0));
+    buf.emit(shiftRI(SH.shr, 8, X64_TMP1, 1));
+    buf.emit(aluRI(ALU.and, 8, X64_TMP0, 1));
+    buf.emit(aluRR(ALU.or, 8, X64_TMP1, X64_TMP0));
+    buf.emit(cvtI2F(dbl, 8, X64_FTMP0, X64_TMP1));
+    buf.emit(fbin(FOP.add, dbl, X64_FTMP0, X64_FTMP0));
     buf.place(done);
     this.fromFp(X64_RES, X64_FTMP0);
     return this.def(i, X64_RES);
@@ -1225,7 +1230,7 @@ class x64FnGen {
       const srcDbl = typeKind(this.typeOfRef(f.a[i])) === T_F64;
       const w = widthOf(f.t[i]);
       this.toFp(X64_FTMP0, X64_TMP0);
-      buf.emit(x.cvtF2I(srcDbl, w, X64_RES, X64_FTMP0));
+      buf.emit(cvtF2I(srcDbl, w, X64_RES, X64_FTMP0));
       return this.def(i, X64_RES, w);
     }
     /* 浮点 -> **无符号** 64 位（第九刀第九十五片）。x86 又没有这条指令，而
@@ -1245,15 +1250,15 @@ class x64FnGen {
       // 2^63 的位模式：double 是 0x43e0…、float 是 0x5f000000
       this.movImm(X64_TMP1, srcDbl ? 0x43e0000000000000n : 0x5f000000n);
       this.toFp(X64_FTMP1, X64_TMP1);
-      buf.emit(x.fcmp(srcDbl, X64_FTMP0, X64_FTMP1));
+      buf.emit(fcmp(srcDbl, X64_FTMP0, X64_FTMP1));
       buf.jcc(CC.ae, big);
-      buf.emit(x.cvtF2I(srcDbl, 8, X64_RES, X64_FTMP0));
+      buf.emit(cvtF2I(srcDbl, 8, X64_RES, X64_FTMP0));
       buf.jmp(done);
       buf.place(big);
-      buf.emit(x.fbin(FOP.sub, srcDbl, X64_FTMP0, X64_FTMP1));
-      buf.emit(x.cvtF2I(srcDbl, 8, X64_RES, X64_FTMP0));
+      buf.emit(fbin(FOP.sub, srcDbl, X64_FTMP0, X64_FTMP1));
+      buf.emit(cvtF2I(srcDbl, 8, X64_RES, X64_FTMP0));
       this.movImm(X64_TMP1, 1n << 63n);
-      buf.emit(x.aluRR(ALU.xor, 8, X64_RES, X64_TMP1));
+      buf.emit(aluRR(ALU.xor, 8, X64_RES, X64_TMP1));
       buf.place(done);
       return this.def(i, X64_RES, 64);
     }
@@ -1262,31 +1267,31 @@ class x64FnGen {
      *  - ZEXT 要抹掉高 32 位 —— 一条 32 位的 `mov` 就够（x86 的 32 位写入天然清高位）。
      *    不用 `and rax, 0xffffffff`：那条的立即数是**符号扩展**的，0xffffffff 会变成 -1；
      *  - TRUNC（i64 -> i32）要重新按 32 位符号扩展一遍（`movslq`）。 */
-    if (mode === CVT_SEXT) buf.emit(x.movRR(8, X64_RES, X64_TMP0));
-    else if (mode === CVT_ZEXT) buf.emit(x.movRR(4, X64_RES, X64_TMP0));
-    else if (mode === CVT_TRUNC) buf.emit(x.movsx(8, 4, X64_RES, X64_TMP0));
-    else if (mode === CVT_SEXT8) buf.emit(x.movsx(8, 1, X64_RES, X64_TMP0));
-    else if (mode === CVT_SEXT16) buf.emit(x.movsx(8, 2, X64_RES, X64_TMP0));
-    else if (mode === CVT_BITCAST) buf.emit(x.movRR(8, X64_RES, X64_TMP0));
+    if (mode === CVT_SEXT) buf.emit(movRR(8, X64_RES, X64_TMP0));
+    else if (mode === CVT_ZEXT) buf.emit(movRR(4, X64_RES, X64_TMP0));
+    else if (mode === CVT_TRUNC) buf.emit(movsx(8, 4, X64_RES, X64_TMP0));
+    else if (mode === CVT_SEXT8) buf.emit(movsx(8, 1, X64_RES, X64_TMP0));
+    else if (mode === CVT_SEXT16) buf.emit(movsx(8, 2, X64_RES, X64_TMP0));
+    else if (mode === CVT_BITCAST) buf.emit(movRR(8, X64_RES, X64_TMP0));
     else return nyi(`CVT 模式 ${mode}`);
     return this.def(i, X64_RES);
   }
 
   /** 把结果写回这条指令的栈位。32 位的结果先按 i32 的规范形符号扩展。 */
   def(i, reg, w) {
-    if (w === 4) this.buf.emit(x.movsx(8, 4, reg, reg));
+    if (w === 4) this.buf.emit(movsx(8, 4, reg, reg));
     this.frameStore(reg, this.valOff(i));
   }
 }
 
 /* 一般的二目：一条指令，结果在 `d`。除、取余、移位不在这张表里（形状不同，见 `bin`）。 */
 const X64_BIN = {};
-X64_BIN[OP.ADD] = (b, w, d, y) => b.emit(x.aluRR(ALU.add, w, d, y));
-X64_BIN[OP.SUB] = (b, w, d, y) => b.emit(x.aluRR(ALU.sub, w, d, y));
-X64_BIN[OP.MUL] = (b, w, d, y) => b.emit(x.imulRR(w, d, y));
-X64_BIN[OP.BAND] = (b, w, d, y) => b.emit(x.aluRR(ALU.and, w, d, y));
-X64_BIN[OP.BOR] = (b, w, d, y) => b.emit(x.aluRR(ALU.or, w, d, y));
-X64_BIN[OP.BXOR] = (b, w, d, y) => b.emit(x.aluRR(ALU.xor, w, d, y));
+X64_BIN[OP.ADD] = (b, w, d, y) => b.emit(aluRR(ALU.add, w, d, y));
+X64_BIN[OP.SUB] = (b, w, d, y) => b.emit(aluRR(ALU.sub, w, d, y));
+X64_BIN[OP.MUL] = (b, w, d, y) => b.emit(imulRR(w, d, y));
+X64_BIN[OP.BAND] = (b, w, d, y) => b.emit(aluRR(ALU.and, w, d, y));
+X64_BIN[OP.BOR] = (b, w, d, y) => b.emit(aluRR(ALU.or, w, d, y));
+X64_BIN[OP.BXOR] = (b, w, d, y) => b.emit(aluRR(ALU.xor, w, d, y));
 
 /** 除与取余：`signed` 决定 `idiv`/`div` 与铺符号的方式，`rem` 决定取商还是取余。 */
 const DIVLIKE = {};
@@ -1335,15 +1340,15 @@ X64_FCMP[OP.GE] = { cc: CC.ae };
 
 /* 线性内存的九种读。 */
 const X64_MLOAD_EMIT = {
-  i8s: (b, d, p) => b.emit(x.movsxM(8, 1, d, p, 0)),
-  i8u: (b, d, p) => b.emit(x.movzxM(8, 1, d, p, 0)),
-  i16s: (b, d, p) => b.emit(x.movsxM(8, 2, d, p, 0)),
-  i16u: (b, d, p) => b.emit(x.movzxM(8, 2, d, p, 0)),
-  i32s: (b, d, p) => b.emit(x.movsxM(8, 4, d, p, 0)),
-  i32u: (b, d, p) => b.emit(x.movRM(4, d, p, 0)),
-  i64: (b, d, p) => b.emit(x.movRM(8, d, p, 0)),
-  f32: (b, d, p) => b.emit(x.movRM(4, d, p, 0)),
-  f64: (b, d, p) => b.emit(x.movRM(8, d, p, 0)),
+  i8s: (b, d, p) => b.emit(movsxM(8, 1, d, p, 0)),
+  i8u: (b, d, p) => b.emit(movzxM(8, 1, d, p, 0)),
+  i16s: (b, d, p) => b.emit(movsxM(8, 2, d, p, 0)),
+  i16u: (b, d, p) => b.emit(movzxM(8, 2, d, p, 0)),
+  i32s: (b, d, p) => b.emit(movsxM(8, 4, d, p, 0)),
+  i32u: (b, d, p) => b.emit(movRM(4, d, p, 0)),
+  i64: (b, d, p) => b.emit(movRM(8, d, p, 0)),
+  f32: (b, d, p) => b.emit(movRM(4, d, p, 0)),
+  f64: (b, d, p) => b.emit(movRM(8, d, p, 0)),
 };
 
 /* 六种写 -> `mov` 的字节宽度。 */

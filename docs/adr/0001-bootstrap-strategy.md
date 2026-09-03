@@ -346,14 +346,70 @@ import 的别名摊成一句模块级的 `const 本地名 = 导出名`（`link.j
 它是**子集定义的边界**：自编译现在就剩这一格挡着，它一开，
 `bootstrap`/`mir`/`incr`/`js-exec`/`js-roundtrip` 那五组红才有机会一起转绿。
 
-每一批都跑了门：`arm64/run` 207/0（含反汇编逐条）、`arm64/from-mir` 88/0、
-`arm64/link` 21/0、`x64/run` 188/0、`x64/link` 21/0、`c/run` 207/0、`c/native` 227/0、
-`tcc-link` 83/0、`macho-libc`/`pe-exe`/`elf-merge`/`elf-roundtrip` 全 0 不同、
-`rela-text` 24/0、`core` 133/0。
+每一批都跑了门：`ratchet` 3/0、`arm64/run` 207/0（含反汇编逐条）、`arm64/from-mir` 88/0、
+`arm64/link` 21/0、`x64/run` 188/0、`x64/from-mir` 90/0、`x64/link` 21/0、`c/run` 207/0、
+`c/native` 227/0、`tcc-link` 83/0、`macho-tcc` 4/0、`macho-libc` 180/0、
+`pe-exe`/`elf-merge`/`elf-roundtrip` 全 0 不同、`rela-text` 24/0、`core` 133/0、`sexpr` 78/0。
 
-每一批改完都跑了对应的门：`arm64/from-mir` 88/0、`arm64/link` 21/0、`x64/from-mir` 90/0、
-`x64/link` 21/0、`elf-merge`/`elf-roundtrip`/`pe-*` 八门全 0 不同、`macho-tcc` 4/0、
-`macho-libc` 180/0、`tcc-link` 83/0、`c/run` 207/0、`run` 133/0、`sexpr` 78/0。
+#### 量：`import * as` 那 4 处该怎么开（第二类的全部）
+
+先把它量清。四处全是 `from './encode.js'`，用到的成员与引用数：
+
+- `arm64/asm.js`（`e`）：9 个成员、12 处引用
+- `arm64/from_mir.js`（`a`）：50 个成员、126 处引用
+- `x64/asm.js`（`x`）：6 个成员、9 处引用
+- `x64/from_mir.js`（`x`）：39 个成员、172 处引用
+
+两条路都能走，这里的分歧不是"能不能"，是**代价落在哪儿**：
+
+- **让链接器支持它**：`import * as ns` 摊成 `const ns = { a, b, … }`。子集**确实**表达得出来
+  —— `lower.js:1276` 的 `objectLit` 走 `js_obj_new` / `js_obj_set`。但摊出来之后
+  `ns.f(x)` 就从"直接调一个函数"变成"属性查一次 + 通过函数值间接调"，而这 319 处引用
+  全在两个后端**最热**的路径上。为了 4 行 import 把 `wrapFn` 拖进汇编器内环，不划算。
+- **改成具名导入**：`e.addImm(…)` -> `addImm(…)`。
+
+选后者。挡在前面的只有一个问题："裸名会不会被同名的局部东西遮住？"量法是**先剥掉字符串
+和注释**再找裸用（`'push'`、`'lea'`、`'b'` 这些助记符文本一大把，不剥就是 16 处假警报），
+剩下 7 处：`arm64/asm.js` 的 `adr`/`b`/`bcond`/`bl`/`cbnz`/`cbz` 与 `x64/from_mir.js`
+的 `fcmp`。逐条看过去，**7 处全是类方法名**：
+
+```js
+adr(rd, l) { return this.toLabel(l, (off) => e.adr(rd, off)); }   // asm.js:116
+```
+
+方法名不在模块作用域里绑名字，所以它遮不住导入 —— `e.adr` 换成裸 `adr` 之后，方法体里
+那个 `adr` 仍然指导入的那一个。也就是说：**真正的遮蔽，一处都没有**。
+
+另有 4 处 `a.kind` / `a.name` / `a.no` / `a.weak` 不能一起改：`encode.js` 没有这四个导出，
+那个 `a` 是别的局部对象。判据因此是"**这个名字在 encode.js 的导出表里**"，不是"`a.` 打头"
+—— 与上面收重名时同一个教训：判据错一格，就会改坏一批。
+
+#### 第二类也清了：4 -> 0，然后第三类露出来了（而且先露出来一个假的）
+
+四处按上面的判据改完，319 处引用全变成裸名，`x64`/`arm64` 六支门原样绿：
+`x64/run` 188/0、`x64/from-mir` 90/0、`x64/link` 21/0、`arm64/run` 207/0（含反汇编逐条）、
+`arm64/from-mir` 88/0、`arm64/link` 21/0。
+
+**两类一清，第三类当场就露出来了 —— 266 条。** 而它是**假的**：
+
+```js
+const NATIVE_SUFFIX = 'src/host/native.js';       // link.js:25，真路径是 src/core/host/native.js
+```
+
+`endsWith` 一直不成立，于是"这个文件不拼进程序、只登记名字 -> op"那一段**从来没走过** ——
+node 宿主那份实现（`process.getBuiltinModule`、`Buffer`、`process.env`…）被当成普通模块
+拼进去降级，报了两百多条。`CABI_SUFFIX` 同一个毛病，`cabi` 那组红大概就是它。
+
+这条 bug 能活这么久，是因为**它躲在旧债后面**：链子在更早一步就断了，这一段的死活没人量得到。
+换句话说，棘轮把 243 条重名收到 0 的真实收益不是"少了 243 条错"，是**让下一格的错误可见**。
+
+改成 `core/host/native.js` 之后剩 **8 处 / 5 个名字**，这是真债：
+`readBinary`、`writeBinary`、`removeFile`、`stdoutBytes`、`stderrBytes` 在
+`host/native.js` 里有 node 实现，但封闭 ABI（决策 2）的 op 表里没有对应项 —— 也就没有
+运行时那一头。要开这一格，得三条腿一起加：C 运行时、JS prelude、解释器。
+
+棘轮因此从三条断言变成四条：`BASE_DUP = 0`、`BASE_NS = 0`、`BASE_ABI = 8`，外加"不许出现
+第四类"。
 
 ## 落地顺序
 

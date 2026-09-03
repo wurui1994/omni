@@ -530,26 +530,29 @@ class GlslChecker {
    * 记成行就是转置，而转置在图上看不出「错」，只看得出「转过来了」。
    */
   index(node) {
-    const of = this.expr(node.items[1]);
+    /* 局部叫 `subj` 而不是 `of`：`of` 在自举子集的词法里是关键字
+     * （`docs/js-bootstrap-subset.md`），当变量名会让 `tests/js-roundtrip` 红。
+     * 节点上的**属性**仍然叫 `of` —— 属性名不受那条限制。 */
+    const subj = this.expr(node.items[1]);
     const at = this.expr(node.items[2]);
     if (at.k !== 'lit' || at.ty.k !== 'int') {
       throw this.err(node, '下标必须是整数字面量（动态下标要方言里有真数组，这一刀没有）');
     }
     const k = at.v;
-    if (of.ty.k === 'mat') {
-      if (k < 0 || k >= of.ty.n) {
-        throw this.err(node, `${glslTyText(of.ty)} 只有 ${of.ty.n} 列，取不到第 ${k} 列`);
+    if (subj.ty.k === 'mat') {
+      if (k < 0 || k >= subj.ty.n) {
+        throw this.err(node, `${glslTyText(subj.ty)} 只有 ${subj.ty.n} 列，取不到第 ${k} 列`);
       }
-      return { k: 'matcol', ty: glslVec(of.ty.n, 'float'), of, col: k };
+      return { k: 'matcol', ty: glslVec(subj.ty.n, 'float'), of: subj, col: k };
     }
-    if (of.ty.k === 'vec') {
-      if (k < 0 || k >= of.ty.n) {
-        throw this.err(node, `${glslTyText(of.ty)} 只有 ${of.ty.n} 格，取不到第 ${k} 格`);
+    if (subj.ty.k === 'vec') {
+      if (k < 0 || k >= subj.ty.n) {
+        throw this.err(node, `${glslTyText(subj.ty)} 只有 ${subj.ty.n} 格，取不到第 ${k} 格`);
       }
       /* 向量那一侧就是 swizzle 的一格 —— 降级那边不必多认一种节点。 */
-      return { k: 'swizzle', ty: glslElem(of.ty), of, idx: [k] };
+      return { k: 'swizzle', ty: glslElem(subj.ty), of: subj, idx: [k] };
     }
-    throw this.err(node, `${glslTyText(of.ty)} 不能取下标`);
+    throw this.err(node, `${glslTyText(subj.ty)} 不能取下标`);
   }
 
   /** 能不能赋值。`uniform`/`in`/内建的输入都不能写 —— 那是 GLSL 的规矩，不是我们的选择。 */

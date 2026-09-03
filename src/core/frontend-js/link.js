@@ -22,14 +22,14 @@ import { C_ABI } from '../hir/c_abi.js';
  * 这个文件**不会**被拼进程序 —— 它在 node 上是真实现，降级之后就是那个 op。
  * 表在这里而不在 lower.js：只有链接器知道"这个名字是从哪个文件导入来的"。
  */
-const NATIVE_SUFFIX = 'src/host/native.js';
+const NATIVE_SUFFIX = 'core/host/native.js';
 
 /**
  * 外部 C 符号（ADR-0014 决策 4）：`src/host/native_c.js` 里的每个导出对应 `C_ABI` 里
  * 一条。和上面那条同一个套路，区别只在另一端是**别人的**共享库而不是我们的运行时。
  * node 宿主上那份实现是抛错的 —— C-ABI 只存在于原生构建。
  */
-const CABI_SUFFIX = 'src/host/native_c.js';
+const CABI_SUFFIX = 'core/host/native_c.js';
 
 const NATIVE_OPS = {
   readText: 'js_fs_read_text',

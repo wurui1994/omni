@@ -16,7 +16,7 @@
  */
 
 import { OmniError } from '../source/diag.js';
-import * as e from './encode.js';
+import { addImm, adr, adrp, b, bcond, bl, cbnz, cbz, ldrU } from './encode.js';
 
 /** 重定位的种类。名字照 Mach-O 的 `ARM64_RELOC_*`（ELF 那边一一对得上）。 */
 export const RELOC_ARM64 = {
@@ -108,12 +108,12 @@ export class Arm64CodeBuf {
     return this;
   }
 
-  b(l) { return this.toLabel(l, (off) => e.b(off)); }
-  bl(l) { return this.toLabel(l, (off) => e.bl(off)); }
-  bcond(cond, l) { return this.toLabel(l, (off) => e.bcond(cond, off)); }
-  cbz(sf, rt, l) { return this.toLabel(l, (off) => e.cbz(sf, rt, off)); }
-  cbnz(sf, rt, l) { return this.toLabel(l, (off) => e.cbnz(sf, rt, off)); }
-  adr(rd, l) { return this.toLabel(l, (off) => e.adr(rd, off)); }
+  b(l) { return this.toLabel(l, (off) => b(off)); }
+  bl(l) { return this.toLabel(l, (off) => bl(off)); }
+  bcond(cond, l) { return this.toLabel(l, (off) => bcond(cond, off)); }
+  cbz(sf, rt, l) { return this.toLabel(l, (off) => cbz(sf, rt, off)); }
+  cbnz(sf, rt, l) { return this.toLabel(l, (off) => cbnz(sf, rt, off)); }
+  adr(rd, l) { return this.toLabel(l, (off) => adr(rd, off)); }
 
   /* ---------------------------------------------------------------- 符号
    * 字里留 0（`bl` 的 0 偏移就是「跳到自己」，链接器不填就死循环 —— 这正是我们要的：
@@ -122,37 +122,37 @@ export class Arm64CodeBuf {
   /** `bl <sym>`。 */
   blSym(sym, addend = 0) {
     this.relocs.push({ at: this.pos, kind: RELOC_ARM64.BRANCH26, sym, addend });
-    return this.word(e.bl(0));
+    return this.word(bl(0));
   }
 
   /** `adrp Rd, <sym>@PAGE`。 */
   adrpSym(rd, sym, addend = 0) {
     this.relocs.push({ at: this.pos, kind: RELOC_ARM64.PAGE21, sym, addend });
-    return this.word(e.adrp(rd, 0));
+    return this.word(adrp(rd, 0));
   }
 
   /** `add Rd, Rn, <sym>@PAGEOFF`。 */
   addSymOff(rd, rn, sym, addend = 0) {
     this.relocs.push({ at: this.pos, kind: RELOC_ARM64.PAGEOFF12, sym, addend });
-    return this.word(e.addImm(1, rd, rn, 0));
+    return this.word(addImm(1, rd, rn, 0));
   }
 
   /** `ldr Rt, [Rn, <sym>@PAGEOFF]`。`size` 照 `encode.js` 的口径是宽度的对数。 */
   ldrSymOff(size, rt, rn, sym, addend = 0) {
     this.relocs.push({ at: this.pos, kind: RELOC_ARM64.PAGEOFF12, sym, addend });
-    return this.word(e.ldrU(size, rt, rn, 0));
+    return this.word(ldrU(size, rt, rn, 0));
   }
 
   /** `adrp Rd, <sym>@GOTPAGE`（外部数据符号那一对的头一条，见 `RELOC_ARM64.GOT_PAGE21`）。 */
   adrpSymGot(rd, sym) {
     this.relocs.push({ at: this.pos, kind: RELOC_ARM64.GOT_PAGE21, sym, addend: 0 });
-    return this.word(e.adrp(rd, 0));
+    return this.word(adrp(rd, 0));
   }
 
   /** `ldr Rt, [Rn, <sym>@GOTPAGEOFF]`。取出来的就是那个符号的真地址。 */
   ldrSymGot(rt, rn, sym) {
     this.relocs.push({ at: this.pos, kind: RELOC_ARM64.GOT_PAGEOFF12, sym, addend: 0 });
-    return this.word(e.ldrU(3, rt, rn, 0));
+    return this.word(ldrU(3, rt, rn, 0));
   }
 
   /* ---------------------------------------------------------------- 收工 */

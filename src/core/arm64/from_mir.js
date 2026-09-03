@@ -31,7 +31,12 @@
 
 import { OmniError } from '../source/diag.js';
 import { utf8Bytes } from '../host/utf8.js';
-import * as a from './encode.js';
+import {
+  COND, addImm, addReg, andImm, andReg, asrv, blr, cmpImm, cmpReg, cset, eorImm, eorReg, fadd,
+  fcmpArm64, fcvtDS, fcvtSD, fcvtzs, fcvtzu, fdiv, fmovFromInt, fmovToInt, fmul, fneg, fsub,
+  ldpPost, ldrU, ldrsU, lslv, lsrv, movReg, movSp, movk, movz, msub, mul, mvn, neg, orrReg,
+  retArm64, scvtf, sdiv, stpPre, strU, subImm, subReg, sxtb, sxth, sxtw, ucvtf, udiv
+} from './encode.js';
 import { Arm64CodeBuf as CodeBuf } from './asm.js';
 import {
   OP, REF_NONE, isConstRef, T_I32, T_I64, T_BOOL, T_VOID, T_F32, T_F64,
@@ -270,12 +275,12 @@ class FnGen {
   /** 帧里的一个 8 字节格子的读写。偏移超过 `ldr` 能表示的范围就明着报。 */
   frameLoad(reg, off) {
     if (off > 32760) throw new OmniError(`arm64: 帧偏移 ${off} 太大（这一片还不搬基址）`);
-    this.buf.emit(a.ldrU(3, reg, this.base, off));
+    this.buf.emit(ldrU(3, reg, this.base, off));
   }
 
   frameStore(reg, off) {
     if (off > 32760) throw new OmniError(`arm64: 帧偏移 ${off} 太大（这一片还不搬基址）`);
-    this.buf.emit(a.strU(3, reg, this.base, off));
+    this.buf.emit(strU(3, reg, this.base, off));
   }
 
   /* -------------------------------------------------------------- 立即数
@@ -283,11 +288,11 @@ class FnGen {
    * 省的那两条要靠「哪几个 16 位段是 0xffff」来判，属于下一片的窥孔。 */
   movImm(reg, value) {
     let v = BigInt.asUintN(64, BigInt(value));
-    this.buf.emit(a.movz(1, reg, Number(v % 65536n), 0));
+    this.buf.emit(movz(1, reg, Number(v % 65536n), 0));
     for (let hw = 1; hw < 4; hw++) {
       v /= 65536n;
       const part = Number(v % 65536n);
-      if (part !== 0) this.buf.emit(a.movk(1, reg, part, hw));
+      if (part !== 0) this.buf.emit(movk(1, reg, part, hw));
     }
   }
 
@@ -317,12 +322,12 @@ class FnGen {
 
   /** 位模式 -> FP 寄存器。`fmov` 的整数那一侧要与浮点宽度同宽（d 配 x、s 配 w）。 */
   toFp(fdst, greg, dbl) {
-    this.buf.emit(a.fmovFromInt(dbl ? 1 : 0, dbl, fdst, greg));
+    this.buf.emit(fmovFromInt(dbl ? 1 : 0, dbl, fdst, greg));
   }
 
   /** FP 寄存器 -> 位模式。 */
   fromFp(gdst, fsrc, dbl) {
-    this.buf.emit(a.fmovToInt(dbl ? 1 : 0, dbl, gdst, fsrc));
+    this.buf.emit(fmovToInt(dbl ? 1 : 0, dbl, gdst, fsrc));
   }
 
   /* -------------------------------------------------------------- 区域 */
@@ -344,7 +349,7 @@ class FnGen {
   gen() {
     const f = this.f;
     const buf = this.buf;
-    buf.emit(a.stpPre(1, 29, 30, SP, -16), a.movSp(1, 29, SP));
+    buf.emit(stpPre(1, 29, 30, SP, -16), movSp(1, 29, SP));
     /* 帧超过 4096 时**不能**用「造立即数 + sub 寄存器形式」（第二十六片改掉的一个真错误）：
      * add/sub 的**移位寄存器形式**里 31 号是 `xzr`、不是 `sp` —— `sub sp, sp, x9` 那条
      * 于是编成 `sub xzr, xzr, x9`，一条空指令。`sp` 没降下来，随后的 `str [sp, #off]`
@@ -355,13 +360,13 @@ class FnGen {
       const hi = Math.floor(this.frame / 4096);
       const lo = this.frame % 4096;
       if (hi > 4095) arm64Nyi(`帧 ${this.frame} 字节（一次 sub 装不下）`);
-      if (hi > 0) buf.emit(a.subImm(1, SP, SP, hi, 1));
-      if (lo > 0) buf.emit(a.subImm(1, SP, SP, lo));
+      if (hi > 0) buf.emit(subImm(1, SP, SP, hi, 1));
+      if (lo > 0) buf.emit(subImm(1, SP, SP, lo));
     }
     /* 会动栈顶的函数（第三十六片）：存下调用者的 x28，再把降完的 `sp` 抄进它。
      * 这两条只能按 `sp` 写 —— `FB` 还没成立。 */
     if (this.dynStack) {
-      buf.emit(a.strU(3, FB, SP, this.fbSave), a.movSp(1, FB, SP));
+      buf.emit(strU(3, FB, SP, this.fbSave), movSp(1, FB, SP));
     }
     /* 形参：AAPCS 把整数与浮点**分成两串**数（x0-x7 与 v0-v7 各自从 0 起），
      * 所以两个计数器。放不下的从**入参区**读（第二十三片）：调用方摆在它自己的
@@ -386,7 +391,7 @@ class FnGen {
         ngrn++;
         continue;
       }
-      buf.emit(a.ldrU(3, TMP0, 29, inArg));
+      buf.emit(ldrU(3, TMP0, 29, inArg));
       this.frameStore(TMP0, this.slotOff(p.slot));
       inArg += 8;
     }
@@ -396,9 +401,9 @@ class FnGen {
     buf.place(this.retLabel);
     /* 会动栈顶的函数：先把调用者的 x28 取回来（这一条得在 `FB` 还有效的时候发），
      * 再按 `x29` 把 `sp` 收回去 —— `sp` 这会儿可能停在某个变长数组下面。 */
-    if (this.dynStack) buf.emit(a.ldrU(3, FB, FB, this.fbSave));
-    if (this.frame > 0) buf.emit(a.movSp(1, SP, 29));
-    buf.emit(a.ldpPost(1, 29, 30, SP, 16), a.retArm64());
+    if (this.dynStack) buf.emit(ldrU(3, FB, FB, this.fbSave));
+    if (this.frame > 0) buf.emit(movSp(1, SP, 29));
+    buf.emit(ldpPost(1, 29, 30, SP, 16), retArm64());
     return buf;
   }
 
@@ -462,8 +467,8 @@ class FnGen {
       let k = 0;
       for (const lv of levels) {
         if (k >= 4096) arm64Nyi('BRTABLE 的表超过 4096 项（cmp 的立即数装不下）');
-        buf.emit(a.cmpImm(1, TMP0, k));
-        buf.bcond(a.COND.eq, this.brTarget(lv));
+        buf.emit(cmpImm(1, TMP0, k));
+        buf.bcond(COND.eq, this.brTarget(lv));
         k++;
       }
       buf.b(this.brTarget(f.aux[i]));
@@ -475,7 +480,7 @@ class FnGen {
         /* 浮点的返回值在 d0，整数在 x0。i32 的规范形是符号扩展过的 64 位，而 AAPCS
          * 只看 w0 —— 两边都对，不用再削。 */
         if (isFloatType(t)) this.toFp(0, TMP0, typeKind(t) === T_F64);
-        else buf.emit(a.movReg(1, 0, TMP0));
+        else buf.emit(movReg(1, 0, TMP0));
       }
       buf.b(this.retLabel);
       return;
@@ -514,7 +519,7 @@ class FnGen {
       /* aux 是变参分界（第三十五片），与 `CCALL` 同一个编码。 */
       this.callArgs(f.argsOf(f.b[i]), callVaFixed(f.aux[i]));
       this.loadRef(TMP0, f.a[i]);
-      buf.emit(a.blr(TMP0));
+      buf.emit(blr(TMP0));
       return this.callRet(i, t);
     }
     /* 一个函数的**地址**（第二十七片）：与 `GADDR` 同一对指令，只是符号在 `__TEXT` 里。 */
@@ -546,10 +551,10 @@ class FnGen {
       const lo = off % 4096;
       if (hi > 4095) arm64Nyi(`帧偏移 ${off}（两条 add 也装不下）`);
       if (hi === 0) {
-        buf.emit(a.addImm(1, RES, this.base, lo));
+        buf.emit(addImm(1, RES, this.base, lo));
       } else {
-        buf.emit(a.addImm(1, RES, this.base, hi, 1));
-        if (lo > 0) buf.emit(a.addImm(1, RES, RES, lo));
+        buf.emit(addImm(1, RES, this.base, hi, 1));
+        if (lo > 0) buf.emit(addImm(1, RES, RES, lo));
       }
       return this.def(i, RES);
     }
@@ -565,9 +570,9 @@ class FnGen {
     }
     if (op === OP.GSTORE) {
       this.loadRef(TMP1, f.a[i]);
-      buf.emit(a.movReg(1, RES, TMP1));
+      buf.emit(movReg(1, RES, TMP1));
       this.globalAddr(TMP0, f.aux[i]);
-      buf.emit(a.strU(STORE_SIZE[arm64WidthKey(f.t[i])], RES, TMP0, 0));
+      buf.emit(strU(STORE_SIZE[arm64WidthKey(f.t[i])], RES, TMP0, 0));
       return;
     }
     /* 全局的**地址**（第二十一片）：`GLOAD` 里那两条的前半截，只是不接 `ldr`。
@@ -584,12 +589,12 @@ class FnGen {
      * i32 按符号扩展读（规范形），浮点读的是位模式（栈位里躺的就是位模式）。 */
     if (op === OP.VASTART) {
       this.loadRef(TMP0, f.a[i]);
-      buf.emit(a.addImm(1, TMP1, 29, this.vaBase), a.strU(3, TMP1, TMP0, 0));
+      buf.emit(addImm(1, TMP1, 29, this.vaBase), strU(3, TMP1, TMP0, 0));
       return;
     }
     if (op === OP.VAARG) {
       this.loadRef(TMP0, f.a[i]);
-      buf.emit(a.ldrU(3, TMP1, TMP0, 0));
+      buf.emit(ldrU(3, TMP1, TMP0, 0));
       /* aux > 0：这一格里躺着一个 struct（第三十九片）。回的是**这一格的地址**，
        * 游标往前走 `align8(n)` —— 与写的那一侧（`argPlaces` 里的 `ARGMEM`）同一条规则。
        * 内容一个字节都不动：拷不拷由前端那边的赋值决定。 */
@@ -597,12 +602,12 @@ class FnGen {
         const n = memArgSize(f.aux[i]);
         const step = n + (n % 8 === 0 ? 0 : 8 - (n % 8));
         if (step > 4095) return arm64Nyi(`va_arg 取 ${n} 字节的 struct（一条 add 的立即数装不下）`);
-        buf.emit(a.movReg(1, RES, TMP1));
-        buf.emit(a.addImm(1, TMP1, TMP1, step), a.strU(3, TMP1, TMP0, 0));
+        buf.emit(movReg(1, RES, TMP1));
+        buf.emit(addImm(1, TMP1, TMP1, step), strU(3, TMP1, TMP0, 0));
         return this.def(i, RES);
       }
       MLOAD_EMIT[typeKind(t) === T_I32 ? 'i32s' : arm64WidthKey(t)](buf, RES, TMP1);
-      buf.emit(a.addImm(1, TMP1, TMP1, 8), a.strU(3, TMP1, TMP0, 0));
+      buf.emit(addImm(1, TMP1, TMP1, 8), strU(3, TMP1, TMP0, 0));
       return this.def(i, RES);
     }
     /* 变参里的一整块内容（第三十九片）：这一条本身**不发访存** —— 内容什么时候拷、
@@ -617,9 +622,9 @@ class FnGen {
      * `loadRef` 会再要一个寄存器；这一条不产值，RES 正好闲着。 */
     if (op === OP.VACOPY) {
       this.loadRef(TMP0, f.b[i]);
-      buf.emit(a.ldrU(3, RES, TMP0, 0));
+      buf.emit(ldrU(3, RES, TMP0, 0));
       this.loadRef(TMP0, f.a[i]);
-      buf.emit(a.strU(3, RES, TMP0, 0));
+      buf.emit(strU(3, RES, TMP0, 0));
       return;
     }
 
@@ -632,27 +637,27 @@ class FnGen {
      * 得一直是出参区。于是降 `sp` 时多降 `outArgs` 个字节，而块的基址取降之前那个位置
      * 减去 n —— 也就是出参区的上沿。 */
     if (op === OP.SPGET) {
-      buf.emit(a.movSp(1, RES, SP));
+      buf.emit(movSp(1, RES, SP));
       return this.def(i, RES);
     }
     if (op === OP.SPSET) {
       this.loadRef(TMP0, f.a[i]);
-      buf.emit(a.movSp(1, SP, TMP0));
+      buf.emit(movSp(1, SP, TMP0));
       return;
     }
     if (op === OP.SPALLOC) {
       this.loadRef(TMP0, f.a[i]);
-      buf.emit(a.movSp(1, TMP1, SP), a.subReg(1, TMP1, TMP1, TMP0));
-      buf.emit(a.movReg(1, RES, TMP1));
+      buf.emit(movSp(1, TMP1, SP), subReg(1, TMP1, TMP1, TMP0));
+      buf.emit(movReg(1, RES, TMP1));
       const oa = this.outArgs;
       if (oa > 0) {
         const hi = Math.floor(oa / 4096);
         const lo = oa % 4096;
         if (hi > 4095) arm64Nyi(`出参区 ${oa} 字节（一次 sub 装不下）`);
-        if (hi > 0) buf.emit(a.subImm(1, TMP1, TMP1, hi, 1));
-        if (lo > 0) buf.emit(a.subImm(1, TMP1, TMP1, lo));
+        if (hi > 0) buf.emit(subImm(1, TMP1, TMP1, hi, 1));
+        if (lo > 0) buf.emit(subImm(1, TMP1, TMP1, lo));
       }
-      buf.emit(a.movSp(1, SP, TMP1));
+      buf.emit(movSp(1, SP, TMP1));
       return this.def(i, RES);
     }
 
@@ -668,18 +673,18 @@ class FnGen {
     if (op === OP.NEG) {
       const w = arm64WidthOf(t);
       this.loadRef(TMP0, f.a[i]);
-      buf.emit(a.neg(w === 64 ? 1 : 0, RES, TMP0));
+      buf.emit(neg(w === 64 ? 1 : 0, RES, TMP0));
       return this.def(i, RES, w);
     }
     if (op === OP.BNOT) {
       const w = arm64WidthOf(t);
       this.loadRef(TMP0, f.a[i]);
-      buf.emit(a.mvn(w === 64 ? 1 : 0, RES, TMP0));
+      buf.emit(mvn(w === 64 ? 1 : 0, RES, TMP0));
       return this.def(i, RES, w);
     }
     if (op === OP.NOT) {
       this.loadRef(TMP0, f.a[i]);
-      buf.emit(a.eorImm(1, RES, TMP0, 1));
+      buf.emit(eorImm(1, RES, TMP0, 1));
       return this.def(i, RES);
     }
 
@@ -700,7 +705,7 @@ class FnGen {
       const sf = arm64WidthOf(t) === 64 ? 1 : 0;
       this.loadRef(TMP0, f.a[i]);
       this.loadRef(TMP1, f.b[i]);
-      buf.emit(a.cmpReg(sf, TMP0, TMP1), a.cset(1, RES, cond));
+      buf.emit(cmpReg(sf, TMP0, TMP1), cset(1, RES, cond));
       return this.def(i, RES);
     }
 
@@ -726,7 +731,7 @@ class FnGen {
     if (op === OP.NEG) {
       this.loadRef(TMP0, f.a[i]);
       this.toFp(FTMP0, TMP0, dbl);
-      buf.emit(a.fneg(dbl, FRES, FTMP0));
+      buf.emit(fneg(dbl, FRES, FTMP0));
       this.fromFp(RES, FRES, dbl);
       return this.def(i, RES);
     }
@@ -742,7 +747,7 @@ class FnGen {
       this.fromFp(RES, FRES, dbl);
       return this.def(i, RES);
     }
-    buf.emit(a.fcmpArm64(dbl, FTMP0, FTMP1), a.cset(1, RES, fc));
+    buf.emit(fcmpArm64(dbl, FTMP0, FTMP1), cset(1, RES, fc));
     return this.def(i, RES);
   }
 
@@ -755,13 +760,13 @@ class FnGen {
     this.loadRef(TMP0, f.a[i]);
     /* 位重解释在这一层是**一条 mov**：栈位里躺的本来就是位模式。 */
     if (mode === CVT_BITCAST) {
-      buf.emit(a.movReg(1, RES, TMP0));
+      buf.emit(movReg(1, RES, TMP0));
       return this.def(i, RES);
     }
     if (mode === CVT_I2F || mode === CVT_U2F) {
       const sf = intBits(src) === 64 ? 1 : 0;
-      this.buf.emit(mode === CVT_I2F ? a.scvtf(sf, dbl, FRES, TMP0)
-        : a.ucvtf(sf, dbl, FRES, TMP0));
+      this.buf.emit(mode === CVT_I2F ? scvtf(sf, dbl, FRES, TMP0)
+        : ucvtf(sf, dbl, FRES, TMP0));
       this.fromFp(RES, FRES, dbl);
       return this.def(i, RES);
     }
@@ -770,7 +775,7 @@ class FnGen {
       const srcDbl = typeKind(src) === T_F64;
       if (srcDbl === dbl) return arm64Nyi('同宽的 CVT_FCVT');
       this.toFp(FTMP0, TMP0, srcDbl);
-      buf.emit(dbl ? a.fcvtSD(FRES, FTMP0) : a.fcvtDS(FRES, FTMP0));
+      buf.emit(dbl ? fcvtSD(FRES, FTMP0) : fcvtDS(FRES, FTMP0));
       this.fromFp(RES, FRES, dbl);
       return this.def(i, RES);
     }
@@ -791,26 +796,26 @@ class FnGen {
        * 于是 `(unsigned long long)9223372036854775808.0` 会少一位。arm64 上两条指令
        * 只差一个位域，所以这一格只是挑一条。 */
       buf.emit(mode === CVT_F2U
-        ? a.fcvtzu(w === 64 ? 1 : 0, srcDbl, RES, FTMP0)
-        : a.fcvtzs(w === 64 ? 1 : 0, srcDbl, RES, FTMP0));
+        ? fcvtzu(w === 64 ? 1 : 0, srcDbl, RES, FTMP0)
+        : fcvtzs(w === 64 ? 1 : 0, srcDbl, RES, FTMP0));
       return this.def(i, RES, w);
     }
     /* 位重解释：栈位里躺的就是位模式，一条 mov。 */
     if (mode === CVT_BITCAST) {
-      buf.emit(a.movReg(1, RES, TMP0));
+      buf.emit(movReg(1, RES, TMP0));
       return this.def(i, RES);
     }
     /* i32 的规范形是**符号扩展后的 64 位**，所以：
      *  - SEXT（i32 -> i64）什么都不用做（值本来就是那个样子）；
      *  - ZEXT 要把高 32 位抹掉；
      *  - TRUNC（i64 -> i32）要重新按 32 位符号扩展一遍。 */
-    if (mode === CVT_SEXT) buf.emit(a.movReg(1, RES, TMP0));
-    else if (mode === CVT_ZEXT) buf.emit(a.andImm(1, RES, TMP0, 0xffffffffn));
-    else if (mode === CVT_TRUNC) buf.emit(a.sxtw(RES, TMP0));
+    if (mode === CVT_SEXT) buf.emit(movReg(1, RES, TMP0));
+    else if (mode === CVT_ZEXT) buf.emit(andImm(1, RES, TMP0, 0xffffffffn));
+    else if (mode === CVT_TRUNC) buf.emit(sxtw(RES, TMP0));
     /* `sxtb x8, w9` 一条就把 64 位都符号扩展好了 —— i32 与 i64 的规范形在这儿是同一个值，
      * 所以不按结果类型分 w/x 系（分了反而要给 i32 再补一条 `sxtw`）。 */
-    else if (mode === CVT_SEXT8) buf.emit(a.sxtb(1, RES, TMP0));
-    else if (mode === CVT_SEXT16) buf.emit(a.sxth(1, RES, TMP0));
+    else if (mode === CVT_SEXT8) buf.emit(sxtb(1, RES, TMP0));
+    else if (mode === CVT_SEXT16) buf.emit(sxth(1, RES, TMP0));
     else return arm64Nyi(`CVT 模式 ${mode}`);
     return this.def(i, RES);
   }
@@ -834,14 +839,14 @@ class FnGen {
           let at = 0;
           for (const [w, sz] of [[8, 3], [4, 2], [2, 1], [1, 0]]) {
             while (place.bytes - at >= w) {
-              this.buf.emit(a.ldrU(sz, TMP1, TMP0, at), a.strU(sz, TMP1, SP, place.off + at));
+              this.buf.emit(ldrU(sz, TMP1, TMP0, at), strU(sz, TMP1, SP, place.off + at));
               at += w;
             }
           }
           continue;
         }
         this.loadRef(TMP0, ar);
-        this.buf.emit(a.strU(3, TMP0, SP, place.off));
+        this.buf.emit(strU(3, TMP0, SP, place.off));
         continue;
       }
       if (place.v !== undefined) {
@@ -919,12 +924,12 @@ class FnGen {
     this.loadRef(reg, ref);
     if (off === 0) return;
     if (off < 4096) {
-      this.buf.emit(a.addImm(1, reg, reg, off));
+      this.buf.emit(addImm(1, reg, reg, off));
       return;
     }
     /* 静态偏移大过一格立即数就先造出来 —— 用 TMP1 当中转（这两条路上它都还没被占）。 */
     this.movImm(TMP1, BigInt(off));
-    this.buf.emit(a.addReg(1, reg, reg, TMP1));
+    this.buf.emit(addReg(1, reg, reg, TMP1));
   }
 
   /**
@@ -958,14 +963,14 @@ class FnGen {
     if (size === undefined) return arm64Nyi(`MSTORE 的宽度 ${kind}`);
     this.loadRef(TMP1, f.b[i]);
     /* 先取值再算地址：`memAddr` 在偏移大的时候要借 TMP1，所以值得换个落脚点。 */
-    this.buf.emit(a.movReg(1, RES, TMP1));
+    this.buf.emit(movReg(1, RES, TMP1));
     this.memAddr(TMP0, f.a[i], memOff(f.aux[i]));
-    this.buf.emit(a.strU(size, RES, TMP0, 0));
+    this.buf.emit(strU(size, RES, TMP0, 0));
   }
 
   /** 把结果写回这条指令的栈位。32 位的结果先按 i32 的规范形符号扩展。 */
   def(i, reg, w) {
-    if (w === 32) this.buf.emit(a.sxtw(reg, reg));
+    if (w === 32) this.buf.emit(sxtw(reg, reg));
     this.frameStore(reg, this.valOff(i));
   }
 }
@@ -974,40 +979,40 @@ class FnGen {
  * 无符号那三条（UDIV/UMOD/USHR）在 w 系上天然对：`udiv w` 只看低 32 位、
  * 结果零扩展，而随后的 `sxtw` 把它变回规范形。 */
 const BIN = {};
-BIN[OP.ADD] = (b, sf, d, x, y) => b.emit(a.addReg(sf, d, x, y));
-BIN[OP.SUB] = (b, sf, d, x, y) => b.emit(a.subReg(sf, d, x, y));
-BIN[OP.MUL] = (b, sf, d, x, y) => b.emit(a.mul(sf, d, x, y));
-BIN[OP.DIV] = (b, sf, d, x, y) => b.emit(a.sdiv(sf, d, x, y));
-BIN[OP.UDIV] = (b, sf, d, x, y) => b.emit(a.udiv(sf, d, x, y));
+BIN[OP.ADD] = (b, sf, d, x, y) => b.emit(addReg(sf, d, x, y));
+BIN[OP.SUB] = (b, sf, d, x, y) => b.emit(subReg(sf, d, x, y));
+BIN[OP.MUL] = (b, sf, d, x, y) => b.emit(mul(sf, d, x, y));
+BIN[OP.DIV] = (b, sf, d, x, y) => b.emit(sdiv(sf, d, x, y));
+BIN[OP.UDIV] = (b, sf, d, x, y) => b.emit(udiv(sf, d, x, y));
 /* 取余没有单条指令：先除、再 `msub`（d = x - (x/y)*y）。 */
-BIN[OP.MOD] = (b, sf, d, x, y) => b.emit(a.sdiv(sf, d, x, y), a.msub(sf, d, d, y, x));
-BIN[OP.UMOD] = (b, sf, d, x, y) => b.emit(a.udiv(sf, d, x, y), a.msub(sf, d, d, y, x));
-BIN[OP.SHL] = (b, sf, d, x, y) => b.emit(a.lslv(sf, d, x, y));
-BIN[OP.SHR] = (b, sf, d, x, y) => b.emit(a.asrv(sf, d, x, y));
-BIN[OP.USHR] = (b, sf, d, x, y) => b.emit(a.lsrv(sf, d, x, y));
-BIN[OP.BAND] = (b, sf, d, x, y) => b.emit(a.andReg(sf, d, x, y));
-BIN[OP.BOR] = (b, sf, d, x, y) => b.emit(a.orrReg(sf, d, x, y));
-BIN[OP.BXOR] = (b, sf, d, x, y) => b.emit(a.eorReg(sf, d, x, y));
+BIN[OP.MOD] = (b, sf, d, x, y) => b.emit(sdiv(sf, d, x, y), msub(sf, d, d, y, x));
+BIN[OP.UMOD] = (b, sf, d, x, y) => b.emit(udiv(sf, d, x, y), msub(sf, d, d, y, x));
+BIN[OP.SHL] = (b, sf, d, x, y) => b.emit(lslv(sf, d, x, y));
+BIN[OP.SHR] = (b, sf, d, x, y) => b.emit(asrv(sf, d, x, y));
+BIN[OP.USHR] = (b, sf, d, x, y) => b.emit(lsrv(sf, d, x, y));
+BIN[OP.BAND] = (b, sf, d, x, y) => b.emit(andReg(sf, d, x, y));
+BIN[OP.BOR] = (b, sf, d, x, y) => b.emit(orrReg(sf, d, x, y));
+BIN[OP.BXOR] = (b, sf, d, x, y) => b.emit(eorReg(sf, d, x, y));
 
 /* 比较 -> 条件码。`cs`/`cc` 就是手册里的 `hs`/`lo`（无符号的 >= 与 <）。 */
 const CMP = {};
-CMP[OP.EQ] = a.COND.eq;
-CMP[OP.NE] = a.COND.ne;
-CMP[OP.LT] = a.COND.lt;
-CMP[OP.GE] = a.COND.ge;
-CMP[OP.LE] = a.COND.le;
-CMP[OP.GT] = a.COND.gt;
-CMP[OP.ULT] = a.COND.cc;
-CMP[OP.UGE] = a.COND.cs;
-CMP[OP.ULE] = a.COND.ls;
-CMP[OP.UGT] = a.COND.hi;
+CMP[OP.EQ] = COND.eq;
+CMP[OP.NE] = COND.ne;
+CMP[OP.LT] = COND.lt;
+CMP[OP.GE] = COND.ge;
+CMP[OP.LE] = COND.le;
+CMP[OP.GT] = COND.gt;
+CMP[OP.ULT] = COND.cc;
+CMP[OP.UGE] = COND.cs;
+CMP[OP.ULE] = COND.ls;
+CMP[OP.UGT] = COND.hi;
 
 /* 浮点的二目。`dbl` 直接就是编码器要的那一位。 */
 const FBIN = {};
-FBIN[OP.ADD] = (b, dbl, d, x, y) => b.emit(a.fadd(dbl, d, x, y));
-FBIN[OP.SUB] = (b, dbl, d, x, y) => b.emit(a.fsub(dbl, d, x, y));
-FBIN[OP.MUL] = (b, dbl, d, x, y) => b.emit(a.fmul(dbl, d, x, y));
-FBIN[OP.DIV] = (b, dbl, d, x, y) => b.emit(a.fdiv(dbl, d, x, y));
+FBIN[OP.ADD] = (b, dbl, d, x, y) => b.emit(fadd(dbl, d, x, y));
+FBIN[OP.SUB] = (b, dbl, d, x, y) => b.emit(fsub(dbl, d, x, y));
+FBIN[OP.MUL] = (b, dbl, d, x, y) => b.emit(fmul(dbl, d, x, y));
+FBIN[OP.DIV] = (b, dbl, d, x, y) => b.emit(fdiv(dbl, d, x, y));
 
 /**
  * 浮点比较 -> 条件码。**不能照抄整数那张表**：`fcmp` 遇上 NaN 会把标志位置成
@@ -1020,25 +1025,25 @@ FBIN[OP.DIV] = (b, dbl, d, x, y) => b.emit(a.fdiv(dbl, d, x, y));
  * 这一格是「照抄整数表就会错、而且只在 NaN 上错」的地方，所以用例里有 NaN。
  */
 const ARM64_FCMP = {};
-ARM64_FCMP[OP.EQ] = a.COND.eq;
-ARM64_FCMP[OP.NE] = a.COND.ne;
-ARM64_FCMP[OP.LT] = a.COND.mi;
-ARM64_FCMP[OP.LE] = a.COND.ls;
-ARM64_FCMP[OP.GT] = a.COND.gt;
-ARM64_FCMP[OP.GE] = a.COND.ge;
+ARM64_FCMP[OP.EQ] = COND.eq;
+ARM64_FCMP[OP.NE] = COND.ne;
+ARM64_FCMP[OP.LT] = COND.mi;
+ARM64_FCMP[OP.LE] = COND.ls;
+ARM64_FCMP[OP.GT] = COND.gt;
+ARM64_FCMP[OP.GE] = COND.ge;
 
 /* 线性内存的九种读。`ldrs*` 一律扩到 64 位（i32 的规范形就是那个样子），
  * 零扩展的三种与两种浮点都走整数加载 —— 栈位里躺的是位模式。 */
 const MLOAD_EMIT = {
-  i8s: (b, d, p) => b.emit(a.ldrsU(0, d, p, 0)),
-  i8u: (b, d, p) => b.emit(a.ldrU(0, d, p, 0)),
-  i16s: (b, d, p) => b.emit(a.ldrsU(1, d, p, 0)),
-  i16u: (b, d, p) => b.emit(a.ldrU(1, d, p, 0)),
-  i32s: (b, d, p) => b.emit(a.ldrsU(2, d, p, 0)),
-  i32u: (b, d, p) => b.emit(a.ldrU(2, d, p, 0)),
-  i64: (b, d, p) => b.emit(a.ldrU(3, d, p, 0)),
-  f32: (b, d, p) => b.emit(a.ldrU(2, d, p, 0)),
-  f64: (b, d, p) => b.emit(a.ldrU(3, d, p, 0)),
+  i8s: (b, d, p) => b.emit(ldrsU(0, d, p, 0)),
+  i8u: (b, d, p) => b.emit(ldrU(0, d, p, 0)),
+  i16s: (b, d, p) => b.emit(ldrsU(1, d, p, 0)),
+  i16u: (b, d, p) => b.emit(ldrU(1, d, p, 0)),
+  i32s: (b, d, p) => b.emit(ldrsU(2, d, p, 0)),
+  i32u: (b, d, p) => b.emit(ldrU(2, d, p, 0)),
+  i64: (b, d, p) => b.emit(ldrU(3, d, p, 0)),
+  f32: (b, d, p) => b.emit(ldrU(2, d, p, 0)),
+  f64: (b, d, p) => b.emit(ldrU(3, d, p, 0)),
 };
 
 /* 六种写 -> `str` 的宽度对数。 */
@@ -1057,10 +1062,10 @@ function arm64WidthKey(t) {
 /* 模块级变量的读。i32 走 `ldrsw`（i32 的规范形是符号扩展过的 64 位）；
  * 两种浮点走整数加载 —— 栈位里躺的是位模式。 */
 const GLOAD_EMIT = {
-  i64: (b, d, p) => b.emit(a.ldrU(3, d, p, 0)),
-  i32: (b, d, p) => b.emit(a.ldrsU(2, d, p, 0)),
-  f64: (b, d, p) => b.emit(a.ldrU(3, d, p, 0)),
-  f32: (b, d, p) => b.emit(a.ldrU(2, d, p, 0)),
+  i64: (b, d, p) => b.emit(ldrU(3, d, p, 0)),
+  i32: (b, d, p) => b.emit(ldrsU(2, d, p, 0)),
+  f64: (b, d, p) => b.emit(ldrU(3, d, p, 0)),
+  f32: (b, d, p) => b.emit(ldrU(2, d, p, 0)),
 };
 const STORE_SIZE = { i64: 3, i32: 2, f64: 3, f32: 2 };
 

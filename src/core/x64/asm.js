@@ -17,7 +17,7 @@
  */
 
 import { OmniError } from '../source/diag.js';
-import * as x from './encode.js';
+import { callRel, jccRel, jmpRel, leaRip, movRRip, movRipR } from './encode.js';
 
 /**
  * 要等链接器填的那几种。名字与值照 `<mach-o/reloc.h>` 的 x86_64 那一族：
@@ -115,9 +115,9 @@ export class CodeBuf {
     return this;
   }
 
-  jmp(l) { return this.toLabel(l, (rel) => x.jmpRel(rel)); }
-  jcc(cc, l) { return this.toLabel(l, (rel) => x.jccRel(cc, rel)); }
-  call(l) { return this.toLabel(l, (rel) => x.callRel(rel)); }
+  jmp(l) { return this.toLabel(l, (rel) => jmpRel(rel)); }
+  jcc(cc, l) { return this.toLabel(l, (rel) => jccRel(cc, rel)); }
+  call(l) { return this.toLabel(l, (rel) => callRel(rel)); }
 
   /**
    * `call <符号>`。偏移留 0，记一笔 `BRANCH`。
@@ -127,7 +127,7 @@ export class CodeBuf {
    * 所以这里靠**记账**保证，不靠字节的形状 —— `writeObject` 那一头会把没登记的符号报出来。
    */
   callSym(name) {
-    const bytes = x.callRel(0);
+    const bytes = callRel(0);
     this.emit(bytes);
     this.relocs.push({ at: this.pos - 4, kind: RELOC.BRANCH, sym: name });
     return this;
@@ -135,35 +135,35 @@ export class CodeBuf {
 
   /** `jmp <符号>`（尾调用用得上）。 */
   jmpSym(name) {
-    this.emit(x.jmpRel(0));
+    this.emit(jmpRel(0));
     this.relocs.push({ at: this.pos - 4, kind: RELOC.BRANCH, sym: name });
     return this;
   }
 
   /** `lea reg, [rip + <符号>]` —— x86_64 上取一个全局地址的那一条。 */
   leaSym(reg, name) {
-    this.emit(x.leaRip(8, reg, 0));
+    this.emit(leaRip(8, reg, 0));
     this.relocs.push({ at: this.pos - 4, kind: RELOC.SIGNED, sym: name });
     return this;
   }
 
   /** `mov reg, [rip + <符号>]`：直接读一个全局，不先取址。 */
   loadSym(size, reg, name) {
-    this.emit(x.movRRip(size, reg, 0));
+    this.emit(movRRip(size, reg, 0));
     this.relocs.push({ at: this.pos - 4, kind: RELOC.SIGNED, sym: name });
     return this;
   }
 
   /** `mov [rip + <符号>], reg`。 */
   storeSym(size, name, reg) {
-    this.emit(x.movRipR(size, 0, reg));
+    this.emit(movRipR(size, 0, reg));
     this.relocs.push({ at: this.pos - 4, kind: RELOC.SIGNED, sym: name });
     return this;
   }
 
   /** `mov reg, [rip + <符号>@GOTPCREL]`：取出来的是那个**外部**符号的真地址。 */
   loadSymGot(reg, name) {
-    this.emit(x.movRRip(8, reg, 0));
+    this.emit(movRRip(8, reg, 0));
     this.relocs.push({ at: this.pos - 4, kind: RELOC.GOT_LOAD, sym: name });
     return this;
   }

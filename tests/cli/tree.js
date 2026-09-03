@@ -300,13 +300,13 @@ eq('run/build 还没覆盖（边走边决定）', planForOmni('run', 'a.omni', [
 {
   /* `-D` 与 `-U` 按**命令行次序**走 —— 攒成「先所有 -D 再所有 -U」就把
    * `-DA=1 -UA` 与 `-UA -DA=1` 弄成一回事了（`tests/c/dm-order.js` 称的那一格）。 */
-  const of = (a) => {
+  const head = (a) => {
     const v = tccTranslate([...a, '-E', 'x.c'], err).argv;
     const i = v.findIndex((t) => t.startsWith('--'));
     return i < 0 ? v : v.slice(0, i);
   };
-  eq('-D/-U 保住命令行次序（正）', of(['-DA=1', '-UA']), ['x.c', '-D', 'A=1', '-U', 'A']);
-  eq('-D/-U 保住命令行次序（反）', of(['-UA', '-DA=1']), ['x.c', '-U', 'A', '-D', 'A=1']);
+  eq('-D/-U 保住命令行次序（正）', head(['-DA=1', '-UA']), ['x.c', '-D', 'A=1', '-U', 'A']);
+  eq('-D/-U 保住命令行次序（反）', head(['-UA', '-DA=1']), ['x.c', '-U', 'A', '-D', 'A=1']);
 }
 {
   let msg = '';

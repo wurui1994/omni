@@ -168,12 +168,12 @@ class GlslLowerer {
       throw new OmniError(`glsl: 降不了的名字类别 ${e.kind}`);
     }
     if (e.k === 'convert' || e.k === 'cast') {
-      const of = this.expr(e.of);
+      const subj = this.expr(e.of);
       const to = glslCompTy(e.ty);
       const from = glslCompTy(e.of.ty);
-      if (to === from) return of;
+      if (to === from) return subj;
       const op = to === 'real' ? 'toreal' : 'toint';
-      return of.map((c) => this.let_(to, `(${op} ${c})`));
+      return subj.map((c) => this.let_(to, `(${op} ${c})`));
     }
     if (e.k === 'splat') {
       const of = this.expr(e.of)[0];
