@@ -10,6 +10,7 @@ import { findCmd, splitArgv, canonicalize, ownsVerbose, renderHelp } from '../..
 import { ROOT, LEGACY } from '../../src/core/cli/cmds.js';
 import { newPlan, addStage, renderPlan, renderStage } from '../../src/core/cli/stages.js';
 import { planForC } from '../../src/core/cli/plan-c.js';
+import { tccTranslate } from '../../src/core/cli/cmd-tcc.js';
 
 let pass = 0;
 let fail = 0;
@@ -205,6 +206,37 @@ eq('还没覆盖的命令回 null', planForC('emit-js', 'a.omni', ['a.omni'], []
     if (r.path.length === 0) bads.push(now);
   }
   eq('LEGACY 里每个新名的头一段都在树上', bads, []);
+}
+
+/* ---- tcc 那一层翻译（ADR-0018 决策三）。门拿**同一串 argv** 喂两边，靠的就是它，
+ *      所以它自己也得有人称。 */
+{
+  const r = tccTranslate(['-B', '/t', '-c', 'x.c', '-o', 'x.o'], err);
+  eq('-c 翻成 c-obj，-B 化成 DIR/include 的 -isystem（排在最后）',
+    [r.key, r.argv],
+    ['c-obj', ['x.c', '-o', 'x.o', '-isystem', '/t/include',
+      '--arch', 'arm64', '--os', 'osx', '--format', 'elf']]);
+}
+{
+  /* `-D` 与 `-U` 按**命令行次序**走 —— 攒成「先所有 -D 再所有 -U」就把
+   * `-DA=1 -UA` 与 `-UA -DA=1` 弄成一回事了（`tests/c/dm-order.js` 称的那一格）。 */
+  const of = (a) => {
+    const v = tccTranslate([...a, '-E', 'x.c'], err).argv;
+    const i = v.findIndex((t) => t.startsWith('--'));
+    return i < 0 ? v : v.slice(0, i);
+  };
+  eq('-D/-U 保住命令行次序（正）', of(['-DA=1', '-UA']), ['x.c', '-D', 'A=1', '-U', 'A']);
+  eq('-D/-U 保住命令行次序（反）', of(['-UA', '-DA=1']), ['x.c', '-U', 'A', '-D', 'A=1']);
+}
+{
+  let msg = '';
+  try { tccTranslate(['-c', 'x.c', '-zzz'], err); } catch (e) { msg = e.message; }
+  eq('不认识的开关直接骂（不像别处那样放过）', msg.includes("不认识的开关 '-zzz'"), true);
+}
+{
+  /* `-v` 是数出来的（tcc 的 `do ++verbose; while (*optarg++ == 'v')`），不是查表。 */
+  const r = tccTranslate(['-E', 'x.c', '-vv'], err);
+  eq('-vv 数成两个 -v', r.argv.filter((t) => t === '-v').length, 2);
 }
 
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);

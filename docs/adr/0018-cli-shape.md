@@ -431,4 +431,41 @@ pipeline  c → cpp → MIR → x86_64 → ELF(.o)
 `tcc-obj` 0 字节相同 / 21 容器相同 / 89 不同。
 
 
+## 落地：门迁移（分片 3 的收益）—— 迁到第九处就抓到一个真错
+
+把门从手拼 `c-obj --arch … --os … --format elf` 改成与尺子**同一串 argv**。已迁十二处：
+
+`sym-size`（12/0）、`sym-order`（18/0）、`rela-order`（6/0）、`char-sign`（6/0）、
+`rodata-sec`（27/0）、`str-rodata`（72/0）、`rdata-name`（3/0）、`weak-sym`（2/0）、
+`vis-sym`（2/0）、`alias-sym`（4/0）、`dm-order`（7/0）、`datetime`（4/0）。
+
+形状两种：
+
+- **交叉那一族**：`const ARGS = [B, '-c', c]`，尺子吃 `[...ARGS, '-o', ro]`，
+  我们吃 `['c','tcc','-b',`${arch}-${os}`, ...ARGS, '-o', mo]` —— 只差一个 `-b`。
+- **本机那一族**（`weak-sym`/`vis-sym`/`alias-sym`/`dm-order`/`datetime`）：
+  `['-B', TCC_DIR, '-c', src]`，连 `-b` 都不用给（默认就是本机那一支）。
+
+迁移本身就是**加强**：从前我们这一侧不吃 `-B`，读的是自带的头；现在两边读的是同一份
+tinycc 头。
+
+**它当场抓到一个真错。** `dm-order` 一迁就从 7/0 变成 6/1：
+
+```
+tcc :  #undef __TINYC__ / #undef __APPLE__ / #undef NEVER / #define FOO 2
+ours:  #define FOO 2 / #undef __TINYC__ / #undef __APPLE__ / #undef NEVER
+```
+
+`tccTranslate` 的 `passIncs()` 是「先所有 `-D` 再所有 `-U`」攒出来的，把**命令行次序**
+弄丢了 —— 而 `-DA=1 -UA` 与 `-UA -DA=1` 结果相反，这不是排版问题。改成按次序攒一串
+`defs`（`-I`/`-isystem` 仍按类分堆：tcc 那边这两类是两张表，类内次序才是有意义的那一格）。
+
+这正是分片 3 要的东西：**中间那层翻译是我们自己写的，它错了门也未必红**。从前门绕开
+翻译层直接喂 `cpp -E -DA=1 -UA`，次序自然对；换成同一串 argv，翻译层的错就露出来了。
+于是 `tests/cli/tree.js` 也补了四格称翻译本身的（36/0 → 41/0），包括正反两串 `-D`/`-U`。
+
+还剩 19 处调用（`grep -c "'c-obj'" tests/c/*.js`），其中两处是我们单侧的
+（`alias-sym`/`weak-sym` 里编 `main.c` 那一步，尺子那边没有对应的一趟），不在这条线上。
+
+
 

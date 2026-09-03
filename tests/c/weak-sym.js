@@ -73,8 +73,10 @@ const symLines = (obj) => {
 
 const refObj = join(OUT, 'ref.o');
 const mineObj = join(OUT, 'mine.o');
-const rc = spawnSync(TCC, ['-B', TCC_DIR, '-c', src, '-o', refObj], { encoding: 'utf8' });
-const mc = spawnSync(process.execPath, [CLI, 'c-obj', src, '--format', 'elf', '-o', mineObj],
+/* 两边**同一串 argv**（ADR-0018 决策三）：本机那一支，连 `-b` 都不用给。 */
+const ARGS = ['-B', TCC_DIR, '-c', src];
+const rc = spawnSync(TCC, [...ARGS, '-o', refObj], { encoding: 'utf8' });
+const mc = spawnSync(process.execPath, [CLI, 'c', 'tcc', ...ARGS, '-o', mineObj],
   { encoding: 'utf8', maxBuffer: 1 << 26 });
 
 if (rc.status !== 0) {

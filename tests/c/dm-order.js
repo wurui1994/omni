@@ -54,10 +54,12 @@ writeFileSync(redef, '#define B 1\n#define B 2\n#define T  2\n#define T 2\nint y
 const multi = join(OUT, 'multi.c');
 writeFileSync(multi, '#if \'ab\' == 24930\nint z = 1;\n#endif\n');
 
+/* 两边**同一串 argv**（ADR-0018 决策三）：本机那一支，连 `-b` 都不用给。 */
+const argvOf = (args, src) => ['-B', TCC_DIR, '-E', ...args, src];
 const runTcc = (args, src) =>
-  spawnSync(TCC, ['-B', TCC_DIR, '-E', ...args, src], { encoding: 'utf8', maxBuffer: 1 << 26 });
+  spawnSync(TCC, argvOf(args, src), { encoding: 'utf8', maxBuffer: 1 << 26 });
 const runOurs = (args, src) =>
-  spawnSync(process.execPath, [CLI, 'cpp', '-E', ...args, src],
+  spawnSync(process.execPath, [CLI, 'c', 'tcc', ...argvOf(args, src)],
     { encoding: 'utf8', maxBuffer: 1 << 26 });
 
 const lines = (t) => t.trimEnd().split('\n').map((l) => `      ${l}`).join('\n');

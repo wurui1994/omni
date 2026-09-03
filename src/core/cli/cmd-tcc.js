@@ -50,6 +50,8 @@ function targetOf(b) {
 export function tccTranslate(argv, err) {
   /** @type {Map<string, string[]>} */
   const opts = new Map();
+  /** `-D`/`-U` **按命令行次序**攒的一串 —— 见下面 `passIncs` 里那段。 */
+  const defs = [];
   const files = [];
   let verbose = 0;
   for (let i = 0; i < argv.length; i++) {
@@ -79,6 +81,7 @@ export function tccTranslate(argv, err) {
       const cur = opts.get(name) ?? [];
       cur.push(val === null ? true : val);
       opts.set(name, cur);
+      if (name === '-D' || name === '-U') defs.push([name, val]);
       continue;
     }
     files.push(a);
@@ -114,8 +117,10 @@ export function tccTranslate(argv, err) {
     for (const d of all('-I')) push('-I', d);
     for (const d of all('-isystem')) push('-isystem', d);
     for (const f of all('-include')) push('-include', f);
-    for (const m of all('-D')) push('-D', m);
-    for (const m of all('-U')) push('-U', m);
+    /* `-D` 与 `-U` **按命令行次序**，不是「先所有 -D 再所有 -U」：tcc 那边
+     * `-DA=1 -UA` 与 `-UA -DA=1` 结果相反，`-dM` 也照命令行次序印出来
+     * （量过，`dm-order` 那道门称的就是这一格）。攒成两堆就把这件事弄丢了。 */
+    for (const [n, v] of defs) push(n, v);
     /* `-B` 化出来的那一个排在**最后**：量过 tcc，`-I` 与 `-isystem` 都压过 `{B}/include`。 */
     if (passB !== null) push('-isystem', passB);
     if (has('-nostdinc')) push('-nostdinc');

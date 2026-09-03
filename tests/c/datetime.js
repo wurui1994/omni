@@ -61,14 +61,16 @@ const secs = (s) => {
   return h * 3600 + m * 60 + sec;
 };
 
-const ref = spawnSync(TCC, ['-B', TCC_DIR, '-E', src], { encoding: 'utf8' });
-const mine = spawnSync(process.execPath, [CLI, 'cpp', src],
+/* 两边**同一串 argv**（ADR-0018 决策三）：本机那一支，连 `-b` 都不用给。 */
+const ARGS = ['-B', TCC_DIR, '-E', src];
+const ref = spawnSync(TCC, ARGS, { encoding: 'utf8' });
+const mine = spawnSync(process.execPath, [CLI, 'c', 'tcc', ...ARGS],
   { encoding: 'utf8', maxBuffer: 1 << 26 });
 
 if (ref.status !== 0) {
   bad('尺子 tcc -E', `    ${(ref.stderr ?? '').trim().split('\n')[0]}`);
 } else if (mine.status !== 0) {
-  bad('我们的 cpp', `    ${(mine.stderr ?? '').trim().split('\n').slice(0, 3).join('\n    ')}`);
+  bad('我们的 c tcc -E', `    ${(mine.stderr ?? '').trim().split('\n').slice(0, 3).join('\n    ')}`);
 } else {
   /* 摘出来的顺序：日期、时间、日期、空格、时间、时间（`STAMP` 那行是三段拼接）。 */
   const R = strs(ref.stdout);

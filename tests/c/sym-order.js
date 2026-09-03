@@ -135,14 +135,17 @@ for (const t of CASES) {
     const c = join(OUT, `p${i}.c`);
     writeFileSync(c, pr.src);
     const ro = join(OUT, `ref-${t.name}-${i}.o`);
-    const r = spawnSync(tcc, [B, '-c', c, '-o', ro], { encoding: 'utf8' });
+    /* 两边**同一串 argv**（ADR-0018 决策三）：只差一个 `-b` —— tcc 那边是一个目标
+     * 一个可执行文件，我们只有一个，得把目标说出来。 */
+    const ARGS = [B, '-c', c];
+    const r = spawnSync(tcc, [...ARGS, '-o', ro], { encoding: 'utf8' });
     if (r.status !== 0) {
       bad(tag, `    尺子自己就拒了：${(r.stderr ?? '').trim().split('\n')[0]}`);
       continue;
     }
     const mo = join(OUT, `our-${t.name}-${i}.o`);
     const a = spawnSync(process.execPath,
-      [CLI, 'c-obj', c, '--arch', t.arch, '--os', t.os, '--format', 'elf', '-o', mo],
+      [CLI, 'c', 'tcc', '-b', `${t.arch}-${t.os}`, ...ARGS, '-o', mo],
       { encoding: 'utf8', maxBuffer: 1 << 26 });
     if (a.status !== 0) {
       bad(tag, `    我们编不动：${(a.stderr ?? '').trim().split('\n')[0]}`);

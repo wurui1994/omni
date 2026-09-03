@@ -78,14 +78,16 @@ const shape = (ss) => ss.map((s) => `${s.name} ${s.kind}`).join('\n');
 
 const refObj = join(OUT, 'ref.o');
 const mineObj = join(OUT, 'mine.o');
-const rc = spawnSync(TCC, ['-B', TCC_DIR, '-c', src, '-o', refObj], { encoding: 'utf8' });
-const mc = spawnSync(process.execPath, [CLI, 'c-obj', src, '--format', 'elf', '-o', mineObj],
+/* 两边**同一串 argv**（ADR-0018 决策三）：本机那一支，连 `-b` 都不用给。 */
+const ARGS = ['-B', TCC_DIR, '-c', src];
+const rc = spawnSync(TCC, [...ARGS, '-o', refObj], { encoding: 'utf8' });
+const mc = spawnSync(process.execPath, [CLI, 'c', 'tcc', ...ARGS, '-o', mineObj],
   { encoding: 'utf8', maxBuffer: 1 << 26 });
 
 if (rc.status !== 0) {
   bad('尺子 tcc -c', `    ${(rc.stderr ?? '').trim().split('\n')[0]}`);
 } else if (mc.status !== 0) {
-  bad('我们的 c-obj', `    ${(mc.stderr ?? '').trim().split('\n').slice(0, 3).join('\n    ')}`);
+  bad('我们的 c tcc -c', `    ${(mc.stderr ?? '').trim().split('\n').slice(0, 3).join('\n    ')}`);
 } else {
   const want = syms(refObj);
   const got = syms(mineObj);
@@ -139,10 +141,11 @@ if (co.status !== 0) {
 }
 
 /* 前向别名：该拒，而且拒得与 tcc 一字不差。 */
-const rf = spawnSync(TCC, ['-B', TCC_DIR, '-c', fwdSrc, '-o', join(OUT, 'fwd-ref.o')],
+const FWD_ARGS = ['-B', TCC_DIR, '-c', fwdSrc];
+const rf = spawnSync(TCC, [...FWD_ARGS, '-o', join(OUT, 'fwd-ref.o')],
   { encoding: 'utf8' });
 const mf = spawnSync(process.execPath,
-  [CLI, 'c-obj', fwdSrc, '--format', 'elf', '-o', join(OUT, 'fwd-mine.o')],
+  [CLI, 'c', 'tcc', ...FWD_ARGS, '-o', join(OUT, 'fwd-mine.o')],
   { encoding: 'utf8', maxBuffer: 1 << 26 });
 const line = (s) => (s ?? '').trim().split('\n')[0].replace(/^.*?fwd\.c/, `${basename(fwdSrc)}`);
 if (rf.status === 0 || mf.status === 0) {
