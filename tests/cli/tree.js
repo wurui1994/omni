@@ -81,6 +81,38 @@ const err = (m) => new Error(m);
   try { splitArgv(node, ['t.c', '-o'], err); } catch (e) { msg = e.message; }
   eq('带值的开关缺值要骂', msg, '-o 后面缺一个值');
 }
+/* ---- 不认识的开关**直接骂**（分片 4）。从前是「先放过、当 arity 0」，两层代价：
+ *      打错名字会悄悄按默认走；带值的不认识时那个**值会被当成一个源文件**。 */
+{
+  const { node } = findCmd(ROOT, ['c', 'obj']);
+  let msg = null;
+  try { splitArgv(node, ['t.c', '--bogus'], err); } catch (e) { msg = e.message; }
+  eq('不认识的开关要骂，且把认识的列出来',
+    msg !== null && msg.startsWith("不认识的开关 '--bogus'；'obj' 认识的是：") && msg.includes('--arch'),
+    true);
+}
+{
+  /* 从前这一串会把 `/t` 当成第二个源文件。 */
+  const { node } = findCmd(ROOT, ['c', 'obj']);
+  let threw = false;
+  try { splitArgv(node, ['t.c', '--unknown-with-value', '/t'], err); } catch { threw = true; }
+  eq('不认识的带值开关不会把值悄悄变成源文件（骂了）', threw, true);
+}
+{
+  /* 值粘在名字后头 —— tcc 两种写法都收（`-Ifoo`、`-DM=1`、`-UX`），所以我们也收。 */
+  const { node } = findCmd(ROOT, ['c', 'cpp']);
+  const { args, opts } = splitArgv(node, ['-Ia', '-DM=1', '-UX', 'x.c'], err);
+  eq('-I 粘着写', opts.get('-I'), ['a']);
+  eq('-D 粘着写', opts.get('-D'), ['M=1']);
+  eq('-U 粘着写', opts.get('-U'), ['X']);
+  eq('粘着写的值不会变成源文件', args, ['x.c']);
+}
+{
+  /* tcc 的 `-v` 是**数出来**的（`-vvv` 也合法），而表里只列到 `-vv`。 */
+  const { node } = findCmd(ROOT, ['c', 'cpp']);
+  const { args } = splitArgv(node, ['-vvv', 'x.c'], err);
+  eq('-vvv 在 cpp 上认得（tcc 的 -v 是数出来的）', args, ['x.c']);
+}
 
 /* ---- 别名铺平。 */
 {

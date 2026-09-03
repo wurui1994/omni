@@ -2155,9 +2155,11 @@ function main(argv) {
   const rest = canonicalize(node, raw);
   // --verbose 要在做任何事之前生效，否则第一步的耗时就丢了。
   // `-v` 只有在**这个节点没把它当别的意思**时才算 --verbose（`omni c cpp -v` 是 tcc 的 -v）。
+  //
+  // 这儿曾经紧跟着一行 `VERBOSE = rest.includes('--verbose') || rest.includes('-v')` ——
+  // 上一片加 `ownsVerbose` 时旧的那行没删掉，而它在后面，于是**把这一行整个盖掉了**。
+  // 没门抓到它：`omni c cpp -v` 的那些门只比 stdout，而 `--verbose` 写 stderr。
   VERBOSE = rest.includes('--verbose') || (!ownsVerbose(node) && raw.includes('-v'));
-  // --verbose 要在做任何事之前生效，否则第一步的耗时就丢了
-  VERBOSE = rest.includes('--verbose') || rest.includes('-v');
   vMark = nowMs();
   /* `--help` 在**任何一级**都由同一个函数处理：`findCmd` 走到第一个不是子命令名的记号就停，
    * 所以 `omni c --help` 落在 `c` 上、`omni c link --help` 落在 `link` 上，不必特判。 */
@@ -2179,6 +2181,23 @@ function main(argv) {
     stdout(renderHelp(node, cpath));
     return 1;
   }
+  /* `omni c tcc`（决策三）：它自己一套解析器（tcc 的 `-v`/`-r`/`-f` 与 omni 的不同义），
+   * 翻成「哪一条 omni 命令 + 那条命令的 argv」之后**原路再走一遍** —— 实现一份都不复制，
+   * 而且别处的规矩（别名铺平、`splitArgv`、`--explain`、`-v` 那张表）自动都适用。
+   *
+   * 这一段**必须在 `splitArgv` 之前**：`c tcc` 这个节点故意不声明 flags（声明了反而会被
+   * 按 omni 的规矩动手），而 `splitArgv` 现在见到不认识的开关就骂 —— 排在后面的话
+   * `c tcc -B … -c …` 会被自己这一层挡下来。 */
+  if (node.key === 'c-tcc') {
+    const t = tccTranslate(raw, (m) => new OmniError(m));
+    const AT = {
+      cpp: ['c', 'cpp'], 'c-obj': ['c', 'obj'], 'c-run': ['c', 'run'],
+      'elf-r': ['c', 'elf-r'], 'elf-link': ['c', 'elf-link'],
+      'macho-link': ['c', 'macho-link'], 'pe-link': ['c', 'pe-link'],
+    };
+    if (AT[t.key] === undefined) throw new OmniError(`c tcc: 还翻不到 '${t.key}'`);
+    return main([...AT[t.key], ...t.argv]);
+  }
   const { args } = splitArgv(node, rest, (m) => new OmniError(m));
   /* 位置参数就是「文件」：链接器与 `glr` 要一整串，别的只看第一个。 */
   const files = args;
@@ -2188,19 +2207,6 @@ function main(argv) {
   if (cmd === 'help') {
     stdout(args[0] === 'legacy' ? renderLegacy(LEGACY) : renderHelp(ROOT, []));
     return 0;
-  }
-  /* `omni c tcc`（决策三）：它自己一套解析器（tcc 的 `-v`/`-r`/`-f` 与 omni 的不同义），
-   * 翻成「哪一条 omni 命令 + 那条命令的 argv」之后**原路再走一遍** —— 实现一份都不复制，
-   * 而且别处的规矩（别名铺平、`splitArgv`、`--explain`、`-v` 那张表）自动都适用。 */
-  if (cmd === 'c-tcc') {
-    const t = tccTranslate(raw, (m) => new OmniError(m));
-    const AT = {
-      cpp: ['c', 'cpp'], 'c-obj': ['c', 'obj'], 'c-run': ['c', 'run'],
-      'elf-r': ['c', 'elf-r'], 'elf-link': ['c', 'elf-link'],
-      'macho-link': ['c', 'macho-link'], 'pe-link': ['c', 'pe-link'],
-    };
-    if (AT[t.key] === undefined) throw new OmniError(`c tcc: 还翻不到 '${t.key}'`);
-    return main([...AT[t.key], ...t.argv]);
   }
   /* `emit FORM FILE`（决策一）：把那 9 条 `emit-*`/`ast`/`oir`/`mir`/`sx` 收成一个动词
    * 加一个枚举。这一片只做**翻译**——底下还是原来那几段实现。 */

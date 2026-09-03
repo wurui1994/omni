@@ -36,12 +36,35 @@ export const GLOBAL_FLAGS = [
   { name: '--help', alias: '-h', arity: 0, brief: '印这一级的用法' },
 ];
 
-/** `-o` 这种带一个值的开关，`--verbose` 这种不带。查的是**这个节点**声明的那张表。 */
-function arityOf(node, tok) {
-  for (const f of [...(node.flags ?? []), ...GLOBAL_FLAGS]) {
-    if (f.name === tok || f.alias === tok) return f.arity;
+/**
+ * 一个记号在**这个节点**上是哪一格开关。
+ *
+ * 回 `{ key, arity, glued }`：`key` 是规范名（`-o` 与 `--output` 归到 `flags` 里那个
+ * `name`），`glued` 是「值粘在名字后面」时的那个值（`-Ifoo` 的 `foo`），没粘就是 `null`。
+ * 不认识回 `null`。
+ */
+function matchFlag(node, tok) {
+  const table = [...(node.flags ?? []), ...GLOBAL_FLAGS];
+  for (const f of table) {
+    if (f.name === tok || f.alias === tok) return { key: f.name, arity: f.arity, glued: null };
   }
-  return -1;   // 这个节点不认识 —— 见 splitArgv 里那段
+  /* 一个节点把 `-v` 当 **tcc 的 `-v`** 用时（`omni c cpp`），那一格是**数出来**的：
+   * tcc 里 `do ++verbose; while (*optarg++ == 'v')`，于是 `-vvv` 也合法、而且要能一直往上。
+   * 表里只列到 `-vv`（`--help` 印两行就够），所以这条规则在这儿，不在表里。 */
+  if (/^-v+$/.test(tok) && table.some((f) => f.name === '-v')) {
+    return { key: '-v', arity: 0, glued: null };
+  }
+  /* 值**粘在名字后面**（`-Ifoo`、`-DM=1`、`-UX`）—— tcc 两种写法都收，所以我们也收
+   * （`cli.js` 的 `incDirs`/`defArgs` 本来就在拆这种）。只有带值的那些能这么写；
+   * 长名字优先，免得将来加了 `-I` 与 `-Ifoo` 这种前缀关系时挑错。 */
+  let best = null;
+  for (const f of table) {
+    if (f.arity !== 1) continue;
+    if (!tok.startsWith(f.name) || tok.length === f.name.length) continue;
+    if (best === null || f.name.length > best.name.length) best = f;
+  }
+  if (best !== null) return { key: best.name, arity: 1, glued: tok.slice(best.name.length) };
+  return null;
 }
 
 /**
@@ -74,9 +97,16 @@ export function findCmd(root, argv) {
  * `opts` 是 `Map<规范名, 值数组>`——`-o` 与 `--output` 归到同一个键（`flags` 里的 `name`），
  * 重复给的（`-I a -I b`）按顺序攒着，不带值的攒 `true`。
  *
- * **不认识的开关先放过**（当 arity 0）：这一片的承诺是「行为零变化」，而从前顶层那段
- * `if (a.startsWith('-')) continue;` 就是放过。等这棵树上每个节点都把自己的开关声明齐了
- * （分片 4），再把这儿改成报错，那时候才能给出「你是不是想在 `omni c cpp` 上用 `-I`」。
+ * **不认识的开关直接骂**（ADR-0018 分片 4）。从前是「先放过、当 arity 0」，那是分片 1
+ * 「行为零变化」的过渡态，代价有两层：
+ *
+ *   - 打错一个开关名会**悄悄按默认走**。量到过一次：`c obj -f elf` 出来是 Mach-O
+ *     （那次是别名没铺平）。门这时候比的是「我们两趟自己」，两趟都错得一样，于是绿。
+ *   - 带值的开关不认识时，它那个**值会被当成位置参数**（= 一个源文件/输入 `.o`）。
+ *     这一格在链接器上尤其毒：多一个输入文件，符号表就多一份。
+ *
+ * `c tcc` 那个节点故意不声明 flags（tcc 的 `-v`/`-r`/`-f` 与 omni 的不同义，它自己一套
+ * 解析器），所以 `cli.js` 在调这一步**之前**就把它岔开了。
  *
  * `--` 之后的一律是位置参数（`omni c run t.c -- argv1 argv2`），原样留在 `args` 里，
  * 前面那个 `--` 也留着 —— 现有那几条实现自己在找它。
@@ -90,19 +120,20 @@ export function splitArgv(node, rest, err) {
     if (passthrough) { args.push(a); continue; }
     if (a === '--') { passthrough = true; args.push(a); continue; }
     if (a.length > 1 && a.startsWith('-')) {
-      const n = arityOf(node, a);
-      /* 规范名：`-o` 与 `--output` 都记在 `flags` 里那个 `name` 上。 */
-      let key = a;
-      for (const f of [...(node.flags ?? []), ...GLOBAL_FLAGS]) {
-        if (f.name === a || f.alias === a) { key = f.name; break; }
+      const m = matchFlag(node, a);
+      if (m === null) {
+        /* 骂的时候把这一条认识的都列出来 —— 打错名字最常见的下一步就是「那它叫什么」。 */
+        const known = [...(node.flags ?? []), ...GLOBAL_FLAGS].map((f) => f.name).join(' ');
+        throw err(`不认识的开关 '${a}'；'${node.name}' 认识的是：${known}`);
       }
-      const cur = opts.get(key) ?? [];
-      if (n === 1) {
+      const cur = opts.get(m.key) ?? [];
+      if (m.glued !== null) cur.push(m.glued);
+      else if (m.arity === 1) {
         if (i + 1 >= rest.length) throw err(`${a} 后面缺一个值`);
         cur.push(rest[i + 1]);
         i++;
       } else cur.push(true);
-      opts.set(key, cur);
+      opts.set(m.key, cur);
       continue;
     }
     args.push(a);

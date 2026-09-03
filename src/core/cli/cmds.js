@@ -21,6 +21,11 @@ const F_BACKEND = {
   name: '--backend', arity: 1, value: 'B',
   brief: 'interp|js|c|llvm|jit|native|spirv',
 };
+/* `-I` **不只是 C 的事**：jancy 的 `import` 也按它找（第六十二刀），而 jnc 走的是
+ * 与语言无关的 `run`/`build`/`emit`/`check` —— 所以这一格在顶层那几条上也得声明。
+ * 量出来的：`tests/jnc` 里那条「找不着 import」的门在「不认识的开关直接骂」之后
+ * 报的是「不认识 '-I'」而不是它该报的那句话。 */
+const F_INC = { name: '-I', arity: 1, value: 'DIR', brief: '找 import / #include 的目录，可重复' };
 
 /* ---- C 前端那几格（`-I` 这种只在这儿出现，不在顶层）。 */
 const C_CPP_FLAGS = [
@@ -30,6 +35,10 @@ const C_CPP_FLAGS = [
   { name: '-isystem', arity: 1, value: 'DIR', brief: '系统头的搜索目录' },
   { name: '-include', arity: 1, value: 'FILE', brief: '开头先吃一份头文件' },
   { name: '-MF', arity: 1, value: 'FILE', brief: '依赖表写到这儿' },
+  /* tcc 的 `-B`（`tcc_lib_path`）：**换掉**自带的那一份系统头（`{B}/include`），
+   * 不是多一条 `-isystem`。`omni c tcc` 把 `-B` 递成这个（ADR-0017 第一百三十九片）。
+   * 得在这张表里声明 —— 不然带的那个目录会被当成一个**位置参数**（源文件）。 */
+  { name: '--tcc-lib-dir', arity: 1, value: 'DIR', brief: 'tcc 的 -B：换掉自带的系统头目录' },
 ];
 const C_TARGET_FLAGS = [
   { name: '--arch', arity: 1, value: 'A', brief: 'arm64|x86_64' },
@@ -78,11 +87,20 @@ const LINK_PE_ONLY = [
   { name: '--file-align', arity: 1, value: 'HEX', brief: '（-f pe）' },
 ];
 
+/* ---- 「哪条腿」那两格。`--backend` 之外还留着的两个旧写法，实现里现在还在读它们
+ * （`cli.js` 的 `rest.includes('--interp')` 与 `'--mir'`）—— 声明在这儿才不会被
+ * 「不认识的开关直接骂」挡下来。它们该在分片 4 收尾时并进 `--backend`。 */
+const F_LEG_INTERP = { name: '--interp', arity: 0, brief: '走解释器（= --backend interp）' };
+const F_LEG_MIR = { name: '--mir', arity: 0, brief: '走 MIR 解释器，不是 OIR 那一条' };
+
 /* ---- C 那一组。 */
 const C_GROUP = {  name: 'c',
   brief: 'C 前端（ADR-0017）：预处理、到 MIR、到目标文件、链接、tcc 兼容驱动',
-  help: `-I / -D / -U / -isystem / -include 这些**只在这一组里**——它们是 C 的事实，
-不该出现在与语言无关的顶层。`,
+  help: `-D / -U / -isystem / -include 这些**只在这一组里**——它们是 C 的事实，
+不该出现在与语言无关的顶层。
+
+-I 是个例外，它在顶层也有：jancy 的 import 也按它找（第六十二刀），
+而 jnc 走的是与语言无关的 run/build/emit —— 「上哪儿找源文件」不是某一门语言的事。`,
   children: [
     {
       name: 'cpp', key: 'cpp', usage: 'FILE.c',
@@ -96,6 +114,12 @@ const C_GROUP = {  name: 'c',
         { name: '-v', arity: 0, brief: 'tcc 的 -v：印版本条与头文件搜索路径' },
         { name: '-vv', arity: 0, brief: '同上，更细' },
         { name: '-nostdinc', arity: 0, brief: '不找系统头' },
+        /* 给 make 的依赖清单那一族（tcc 的 `-M` 一家）。`-MF` 在 `C_CPP_FLAGS` 里。 */
+        { name: '-M', arity: 0, brief: '只出依赖清单（含系统头）' },
+        { name: '-MM', arity: 0, brief: '只出依赖清单（不含系统头）' },
+        { name: '-MD', arity: 0, brief: '照常预处理，另写一份依赖清单（含系统头）' },
+        { name: '-MMD', arity: 0, brief: '同上，不含系统头' },
+        { name: '-MP', arity: 0, brief: '给每个头再补一条空规则' },
         { name: '--arch', arity: 1, value: 'A', brief: '预定义宏跟着它走' },
         { name: '--os', arity: 1, value: 'O', brief: '同上' }],
     },
@@ -153,22 +177,25 @@ env: OMNI_CC、OMNI_CLANG、OMNI_LLVM_CONFIG`,
     {
       name: 'run', key: 'run', usage: 'FILE [-- args...]',
       brief: '编译并执行',
-      flags: [F_MODE, F_WORK, F_BACKEND],
+      flags: [F_MODE, F_WORK, F_BACKEND, F_INC, F_LEG_INTERP, F_LEG_MIR],
     },
     {
       name: 'build', key: 'build', usage: 'FILE -o NAME',
       brief: '编译成产物',
-      flags: [F_OUT, F_MODE, F_WORK, F_BACKEND],
+      flags: [F_OUT, F_MODE, F_WORK, F_BACKEND, F_INC],
     },
     {
       name: 'emit', key: 'emit', usage: 'FORM FILE',
       brief: '印某个中间/目标形态：ast|oir|mir|sx|asy|js|c|llvm|spirv',
-      flags: [F_MODE, F_WORK,
+      flags: [F_MODE, F_WORK, F_INC,
         { name: '--amalgamate', arity: 0, brief: '（c）把整份运行时内联进一个文件' },
         { name: '--bytes', arity: 0, brief: '（mir）印大小与每个函数的内容哈希' },
         { name: '--kernel', arity: 1, value: 'NAME', brief: '（spirv）哪一个 kernel' }],
     },
-    { name: 'check', key: 'check', usage: 'FILE', brief: '只走前端与检查器，不出产物', flags: [F_MODE] },
+    {
+      name: 'check', key: 'check', usage: 'FILE',
+      brief: '只走前端与检查器，不出产物', flags: [F_MODE, F_INC],
+    },
     C_GROUP,
     {
       name: 'glr',
@@ -211,21 +238,29 @@ env: OMNI_CC、OMNI_CLANG、OMNI_LLVM_CONFIG`,
     },
     { name: 'help', key: 'help', usage: '[legacy]', brief: '印用法；omni help legacy 是旧名对照表' },
 
-    /* ---- 旧的扁平名：静默别名（决策六）。 */
-    { name: 'run-c', key: 'run-c', hidden: true, flags: [F_MODE, F_WORK] },
-    { name: 'run-llvm', key: 'run-llvm', hidden: true, flags: [F_MODE, F_WORK] },
-    { name: 'run-jit', key: 'run-jit', hidden: true, flags: [F_MODE, F_WORK] },
-    { name: 'build-llvm', key: 'build-llvm', hidden: true, flags: [F_OUT, F_MODE, F_WORK] },
-    { name: 'emit-js', key: 'emit-js', hidden: true, flags: [F_MODE] },
-    { name: 'emit-c', key: 'emit-c', hidden: true, flags: [F_MODE, { name: '--amalgamate', arity: 0 }] },
-    { name: 'emit-llvm', key: 'emit-llvm', hidden: true, flags: [F_MODE] },
-    { name: 'emit-spirv', key: 'emit-spirv', hidden: true, flags: [F_MODE, { name: '--kernel', arity: 1 }] },
-    { name: 'emit-asy', key: 'emit-asy', hidden: true, flags: [F_MODE] },
-    { name: 'ast', key: 'ast', hidden: true, flags: [F_MODE] },
-    { name: 'oir', key: 'oir', hidden: true, flags: [F_MODE] },
-    { name: 'mir', key: 'mir', hidden: true, flags: [F_MODE, { name: '--bytes', arity: 0 }] },
-    { name: 'sx', key: 'sx', hidden: true, flags: [F_MODE] },
-    { name: 'interp', key: 'interp', hidden: true, flags: [F_MODE] },
+    /* ---- 旧的扁平名：静默别名（决策六）。
+     * 这些与新名走**同一段实现**，所以认识的开关也得一样 —— `-I`（jnc 的 import 目录）
+     * 少在哪一条上，那一条就会把目录当成源文件。 */
+    { name: 'run-c', key: 'run-c', hidden: true, flags: [F_MODE, F_WORK, F_INC] },
+    { name: 'run-llvm', key: 'run-llvm', hidden: true, flags: [F_MODE, F_WORK, F_INC] },
+    { name: 'run-jit', key: 'run-jit', hidden: true, flags: [F_MODE, F_WORK, F_INC] },
+    { name: 'build-llvm', key: 'build-llvm', hidden: true, flags: [F_OUT, F_MODE, F_WORK, F_INC] },
+    { name: 'emit-js', key: 'emit-js', hidden: true, flags: [F_MODE, F_INC] },
+    {
+      name: 'emit-c', key: 'emit-c', hidden: true,
+      flags: [F_MODE, F_INC, { name: '--amalgamate', arity: 0 }],
+    },
+    { name: 'emit-llvm', key: 'emit-llvm', hidden: true, flags: [F_MODE, F_INC] },
+    {
+      name: 'emit-spirv', key: 'emit-spirv', hidden: true,
+      flags: [F_MODE, F_INC, { name: '--kernel', arity: 1 }],
+    },
+    { name: 'emit-asy', key: 'emit-asy', hidden: true, flags: [F_MODE, F_INC] },
+    { name: 'ast', key: 'ast', hidden: true, flags: [F_MODE, F_INC] },
+    { name: 'oir', key: 'oir', hidden: true, flags: [F_MODE, F_INC] },
+    { name: 'mir', key: 'mir', hidden: true, flags: [F_MODE, F_INC, { name: '--bytes', arity: 0 }] },
+    { name: 'sx', key: 'sx', hidden: true, flags: [F_MODE, F_INC] },
+    { name: 'interp', key: 'interp', hidden: true, flags: [F_MODE, F_INC, F_LEG_MIR, F_LEG_INTERP] },
     { name: 'asy-units', key: 'asy-units', hidden: true, flags: [] },
     { name: 'glr-table', key: 'glr-table', hidden: true, flags: [{ name: '--brief', arity: 0 }] },
     { name: 'cpp', key: 'cpp', hidden: true, flags: C_GROUP.children[0].flags },
