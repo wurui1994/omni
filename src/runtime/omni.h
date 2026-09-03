@@ -468,7 +468,7 @@ omni_dyn omni_js_num_to_string(omni_dyn v, omni_dyn radix);
 
 /* omni_js_host.c —— node 宿主面（ADR-0011 落地顺序第 4 步）。
    只有"真的要问操作系统"的东西：path 那一套是纯字符串计算，写在编译器源码里
-   （stage0/src/host/path.js）两个后端一起用，不进 ABI。
+   （src/core/host/path.js）两个后端一起用，不进 ABI。
    结果是数组的三个（readdir / argv / spawnSync）在 omni_js_host.h 的宏里。 */
 void omni_host_init(int argc, char **argv);
 int omni_host_exit_code(void);

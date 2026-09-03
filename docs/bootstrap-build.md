@@ -4,10 +4,10 @@
 把产物摆成一棵可安装的目录树。
 
 ```bash
-npm run build:self          # = node stage0/src/cli.js bootstrap -o dist
-node stage0/src/cli.js bootstrap -q        # 只跑 JS 侧不动点（秒级），跳过 C 路径
-node stage0/src/cli.js bootstrap -o out/x  # 换个产物目录
-dist/src/host/omni bootstrap stage0/src/cli.js   # 原生编译器也能执行同一条链
+npm run build:self          # = node src/core/cli.js bootstrap -o dist
+node src/core/cli.js bootstrap -q        # 只跑 JS 侧不动点（秒级），跳过 C 路径
+node src/core/cli.js bootstrap -o out/x  # 换个产物目录
+dist/src/host/omni bootstrap src/core/cli.js   # 原生编译器也能执行同一条链
 ```
 
 每一步都报墙上时间（`[12.4s]`），末尾报总时长。自举是分钟级的操作，"卡在哪一步"必须一眼
@@ -44,8 +44,8 @@ dist/build/              中间产物：omni.c、c2.mjs、omni-n2、omni-n2.c
 **布局不能改。** `installDir()` 是"运行中的程序镜像所在目录"（JS 侧是脚本所在目录，
 C 侧是可执行文件所在目录），而 std 与 runtime 都相对它**固定两级上去**：
 
-- `stage0/src/module/load.js`：`LIB_DIR = installDir()/../../lib`
-- `stage0/src/runtime/c_runtime.js`：`RUNTIME_DIR = installDir()/../../runtime`
+- `src/core/module/load.js`：`LIB_DIR = installDir()/../../lib`
+- `src/core/runtime/c_runtime.js`：`RUNTIME_DIR = installDir()/../../runtime`
 
 所以编译器必须待在 `<根>/src/host/` 下。把它直接扔在 `dist/` 里，它会去 `/lib` 和
 `/runtime` 找东西，报的是 `no such module: 'std/json.omni'` 或
@@ -101,7 +101,7 @@ JS 语法前端），`.omni` 入口显示 `front end` + `check -> OIR`。运行�
 ## 还没有的：进程内的 JS 执行
 
 原生构建里"执行"必须过一次 C 编译器。要做到**不带 cc 也能执行**，正确的做法是给 OIR 写一个
-解释器，而且写在编译器自己的源码里（`stage0/src/`）——这样它会被一起降级，每一代都自带，
+解释器，而且写在编译器自己的源码里（`src/core/`）——这样它会被一起降级，每一代都自带，
 不需要第三方引擎：
 
 - 嵌 mujs 走不通：mujs 是 ES5（ISC 许可没问题），而生成的 JS 用了 BigInt 字面量（int64
@@ -136,7 +136,7 @@ JS 语法前端），`.omni` 入口显示 `front end` + `check -> OIR`。运行�
 ## 链条的形状
 
 ```
-C0 = node stage0/src/cli.js          手写的 JS 编译器（唯一的信任根）
+C0 = node src/core/cli.js          手写的 JS 编译器（唯一的信任根）
   ├─ emit-js 自己 ──▶ C1 ──emit-js 自己──▶ C2      要求 C1 == C2
   └─ emit-c  自己 ──cc──▶ N1 ──build 自己──▶ N2     要求 N1 与 N2 的产出相同
 ```
@@ -148,7 +148,7 @@ C0 = node stage0/src/cli.js          手写的 JS 编译器（唯一的信任根
 
 - 决策与理由：`docs/adr/0001-bootstrap-strategy.md`
 - JS → OIR 的降级：`docs/adr/0011-js-lowering.md`
-- 实现：`stage0/src/bootstrap.js`（命令）、`stage0/src/cli.js`（`bootstrap` 分支）
+- 实现：`src/core/bootstrap.js`（命令）、`src/core/cli.js`（`bootstrap` 分支）
 - 测试轴：`tests/bootstrap/run.js`（逐用例 `C0 == C1` 之外，第 5 阶段直接调这个命令）
 - C 编译器：默认按 tcc → clang → gcc → cc 找第一个可用的，`OMNI_CC` 可覆盖。
   开发期想要毫秒级编译就装 tcc；本机没有 bottle，实测走的是 clang `-O2`。

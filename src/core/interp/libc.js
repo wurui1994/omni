@@ -1969,7 +1969,7 @@ const LIBC = {
    * 选插入排序而不是快排：C 只要求「排好」，不要求稳定也不要求 O(n log n)
    * （C11 7.22.5.2）。**相等元素之间的次序是未规定的**，宿主的 libc 与我们大概率
    * 不同 —— 所以拿 tcc 对账的用例里不能有比较相等的元素。这一格记在
-   * stage0/include/stdlib.h 上。 */
+   * src/include/stdlib.h 上。 */
   qsort: (a) => {
     const base = BigInt(a[0]);
     const n = Number(BigInt(a[1]));

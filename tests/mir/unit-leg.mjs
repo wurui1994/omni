@@ -12,9 +12,9 @@
 
 import { dirname, join, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { verifyMir } from '../../stage0/src/mir/verify.js';
-import { runMirModule } from '../../stage0/src/mir/interp.js';
-import { emitLlvm } from '../../stage0/src/backend-llvm/emit.js';
+import { verifyMir } from '../../src/core/mir/verify.js';
+import { runMirModule } from '../../src/core/mir/interp.js';
+import { emitLlvm } from '../../src/core/backend-llvm/emit.js';
 import { OIR_STUB } from './mirkit.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));

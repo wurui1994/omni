@@ -1,4 +1,4 @@
-// asy 在 C++ 里带的一批非绘图内建（写在 stage0/lib/asy/asy_builtins.asy 里）。
+// asy 在 C++ 里带的一批非绘图内建（写在 src/lib/asy/asy_builtins.asy 里）。
 // 量出来的理由：`import graph;` 那 193 条诊断里「缺的内建函数」占 33 条，这几个是
 // 现在就写得起的（不需要方言加东西）。每一行的期望都是 `asy -noV` 出来的。
 write(pi);

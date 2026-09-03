@@ -6,7 +6,7 @@
 // 用户定的是「只借用 jancy 的完整语法和形式」。所以这边每一条期望输出都由我们自己写，
 // 而**每一条都要在源文件的注释里注明出处**（引哪一份文档、哪一条 `.llk` 规则、哪一份语料）。
 //
-// 语法那一半不在这里：`stage0/src/frontend-jnc/jnc.grammar` 在 tests/glr/run.js 的
+// 语法那一半不在这里：`src/core/frontend-jnc/jnc.grammar` 在 tests/glr/run.js 的
 // `cases/jnc` 那一组里量（526/528 份真实 `.jnc` 唯一成树）。这里量的是**降级**。
 //
 // 四件事：
@@ -141,7 +141,7 @@ import { spawnSync } from 'node:child_process';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '../..');
-const cli = join(root, 'stage0', 'src', 'cli.js');
+const cli = join(root, 'src', 'core', 'cli.js');
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 
 const cmd = (args) => {

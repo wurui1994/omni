@@ -14,7 +14,7 @@
 import {
   MirModule, MirFunc, OP, T_VOID, T_I64, T_F64, T_I32, T_F32, T_STR,
   CVT_SEXT, CVT_ZEXT, CVT_FCVT, REF_NONE,
-} from '../../stage0/src/mir/ir.js';
+} from '../../src/core/mir/ir.js';
 
 /** MirInterp 要一个 OIR 模块拿 struct/enum/class 的定义 —— 这些用例里一个都没有。 */
 export const OIR_STUB = { structs: [], enums: [], classes: [], js: false };

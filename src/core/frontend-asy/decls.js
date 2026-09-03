@@ -1185,7 +1185,7 @@ export function asyFnSlotOf(L, n) {
  * runpath.in / runpen.in / runpicture.in 里那些函数）在真 asy 里是运行时自带的，
  * 每个文件、每个模块里都看得见 —— 它不是 `base/plain.asy` 的一部分。
  *
- * 我们把它做成**一个模块**（`stage0/lib/asy/asy_builtins.asy`，名字从 opts.prelude 来），
+ * 我们把它做成**一个模块**（`src/lib/asy/asy_builtins.asy`，名字从 opts.prelude 来），
  * 在每个单元的声明遍开头隐式 import 一次：
  *   - struct 只声明一份（核心方言的 class 名是全局唯一的，摊进每个单元会撞名）；
  *   - 类型名与函数通过 modMerge 进到这个单元里，可见位置是 0（比所有顶层项都早）；
@@ -1249,7 +1249,7 @@ export function asyAutoPlainIn(L, u, off) {
 /**
  * 隐式的 `access settings;`（第四十七刀）。真 asy 那边 `settings` 是**内建模块**
  * （settings.cc 那一串 addOption），任何文件里 `settings.outformat="pdf";` 直接就能写 ——
- * 不用 import。这一层的 settings 是 stage0/lib/asy/settings.asy，从前只有 base 里那些
+ * 不用 import。这一层的 settings 是 src/lib/asy/settings.asy，从前只有 base 里那些
  * `access settings;` 的文件看得见它，于是 examples 里 7 个（annotation / layers / spectrum /
  * worksheet / functionshading / contextfonts / floatingdisk）第一句就报"赋值给不是普通变量"。
  *

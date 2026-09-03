@@ -15,7 +15,7 @@
 //   3. **形状快照**：描述符布局、push constant 偏移、merge 块的接法都在这份文本里，
 //      改了就该有人看见。
 //   4. **设备比对**：cases/ 里的 case 在 dispatch 前后各印一遍整个缓冲，于是一份源同时
-//      给出「设备该拿什么当输入」和「设备该算出什么」；宿主 stage0/gpu/omni_vk.c 把同一个
+//      给出「设备该拿什么当输入」和「设备该算出什么」；宿主 src/gpu/omni_vk.c 把同一个
 //      kernel 在真设备上跑一遍，两边按数值比。设备缺特性时 skip，理由是宿主量出来的。
 //
 //   node tests/gpu/run.js
@@ -33,7 +33,7 @@ import { KERNELS, NO_KERNEL, DEVICE } from './kernels.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '../..');
-const cli = join(root, 'stage0', 'src', 'cli.js');
+const cli = join(root, 'src', 'core', 'cli.js');
 const update = process.argv.includes('--update');
 const dir = workDir('gpu');
 
@@ -139,7 +139,7 @@ if (got.code !== 0) {
 //
 // 门槛 7 的前半句：「`kernel` 的 SPIR-V 输出与同一份 MIR 在 CPU 上的结果一致」。
 // 一份 case 同时给出输入与 CPU 答案（dispatch 前后各印一遍整个缓冲），宿主
-// stage0/gpu/omni_vk.c 把同一个 kernel 在真设备上跑一遍，两边按数值比。
+// src/gpu/omni_vk.c 把同一个 kernel 在真设备上跑一遍，两边按数值比。
 //
 // 三处会 skip 而不是 fail，每处的理由都是**量出来的**，不是"大概不行"：
 //   - 没有 clang / 没有 vulkan 的 pkg-config：这台机器上没法建宿主。
@@ -221,7 +221,7 @@ function buildVkHost() {
   const cf = cmd('pkg-config', ['--cflags', 'vulkan']);
   const lf = cmd('pkg-config', ['--libs', 'vulkan']);
   if (cf.code !== 0 || lf.code !== 0) return null;
-  const src = join(root, 'stage0', 'gpu', 'omni_vk.c');
+  const src = join(root, 'src', 'gpu', 'omni_vk.c');
   const exe = join(dir, 'omni_vk');
   const args = ['-O2', '-w', src, ...cf.out.trim().split(/\s+/), ...lf.out.trim().split(/\s+/), '-o', exe];
   const r = cmd(cc, args.filter((x) => x !== ''));

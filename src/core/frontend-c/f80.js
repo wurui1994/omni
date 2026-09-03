@@ -1,4 +1,4 @@
-// stage0/src/frontend-c/f80.js —— x87 的 80 位扩展精度：位模式与 double 的来回
+// src/core/frontend-c/f80.js —— x87 的 80 位扩展精度：位模式与 double 的来回
 // （ADR-0017 第九刀第一百〇九片）
 //
 // # 为什么这一格单独一个文件

@@ -3,7 +3,7 @@
 // 真 asy 那边是写文件，所以判分时比的是 EPS 正文，见 run.js 的 draw 那一节）。
 //
 // 这一份是**纯 asy 源码**：`pen`/`path`/`frame` 那一族在真 asy 里是运行时自带的
-// C++ 内建面，在我们这边是 stage0/lib/asy/asy_builtins.asy，靠 OMNI_ASY_BUILTINS=1
+// C++ 内建面，在我们这边是 src/lib/asy/asy_builtins.asy，靠 OMNI_ASY_BUILTINS=1
 // 隐式引进来。于是同一个文件两边都能跑，判分的人还是真 asy。
 //
 // 对上的都是量出来的：

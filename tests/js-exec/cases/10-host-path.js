@@ -1,6 +1,6 @@
 // 宿主的路径计算是纯 JS（ADR-0011 决策 2）：这条用例保证它**降级之后**也一样。
 // 与宿主 node:path 的逐项对照是另一回事（那个在开发时比过，41 项全同）。
-import { join, dirname, basename, isAbsolute, resolve, relative } from '../../../stage0/src/host/path.js';
+import { join, dirname, basename, isAbsolute, resolve, relative } from '../../../src/core/host/path.js';
 
 console.log(join("a", "b"));
 console.log(join("/a", "b"));

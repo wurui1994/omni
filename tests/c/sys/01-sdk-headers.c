@@ -1,6 +1,6 @@
 /* 真的 macOS 系统头（第八刀第十六片）。
  *
- * 到这一片之前，`#include <stdio.h>` 拿到的是 `stage0/include/` 里我们自己那份最小
+ * 到这一片之前，`#include <stdio.h>` 拿到的是 `src/include/` 里我们自己那份最小
  * 子集。这一份用例不给我们任何优待：`-I <SDK>/usr/include`，两条腿读的是**同一份**
  * `/usr/include`（tcc 自己就默认读那儿）。
  *

@@ -20,11 +20,11 @@ import { writeFileSync, mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { lowerCNative } from '../../stage0/src/frontend-c/tccgen.js';
-import { verifyMir } from '../../stage0/src/mir/verify.js';
-import { genModule as genArm64 } from '../../stage0/src/arm64/from_mir.js';
-import { genModule as genX64 } from '../../stage0/src/x64/from_mir.js';
-import { writeObject } from '../../stage0/src/link/macho.js';
+import { lowerCNative } from '../../src/core/frontend-c/tccgen.js';
+import { verifyMir } from '../../src/core/mir/verify.js';
+import { genModule as genArm64 } from '../../src/core/arm64/from_mir.js';
+import { genModule as genX64 } from '../../src/core/x64/from_mir.js';
+import { writeObject } from '../../src/core/link/macho.js';
 
 const HOST = { readFile: () => null, includeDirs: [], dirname: () => '.', join: (a, b) => `${a}/${b}` };
 

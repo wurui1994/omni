@@ -6,10 +6,10 @@
 //
 //   node tests/cli/tree.js
 
-import { findCmd, splitArgv, canonicalize, ownsVerbose, renderHelp } from '../../stage0/src/cli/tree.js';
-import { ROOT, LEGACY } from '../../stage0/src/cli/cmds.js';
-import { newPlan, addStage, renderPlan, renderStage } from '../../stage0/src/cli/stages.js';
-import { planForC } from '../../stage0/src/cli/plan-c.js';
+import { findCmd, splitArgv, canonicalize, ownsVerbose, renderHelp } from '../../src/core/cli/tree.js';
+import { ROOT, LEGACY } from '../../src/core/cli/cmds.js';
+import { newPlan, addStage, renderPlan, renderStage } from '../../src/core/cli/stages.js';
+import { planForC } from '../../src/core/cli/plan-c.js';
 
 let pass = 0;
 let fail = 0;

@@ -22,13 +22,13 @@ import { readdirSync, readFileSync, writeFileSync, mkdirSync, rmSync, statSync }
 import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { SourceFile, Diagnostics } from '../../stage0/src/source/diag.js';
-import { parseJs } from '../../stage0/src/frontend-js/parser.js';
-import { genJs } from '../../stage0/src/frontend-js/gen.js';
+import { SourceFile, Diagnostics } from '../../src/core/source/diag.js';
+import { parseJs } from '../../src/core/frontend-js/parser.js';
+import { genJs } from '../../src/core/frontend-js/gen.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
-const SRC = join(root, 'stage0', 'src');
+const SRC = join(root, 'src', 'core');
 const OUT = join(root, '.omni-build', 'js-roundtrip');
 const quick = process.argv.includes('--quick');
 
@@ -66,9 +66,9 @@ function regen(path, text) {
 process.stdout.write('idempotence (gen∘parse 的第二轮必须不动)\n');
 // 闸门覆盖**仓库里所有自己写的 js**，不只是编译器：测试脚本和 bench 也是我们写的 JS，
 // 它们用到的语法同样必须被前端支持，否则"支持的子集"就是靠"没去解析"撑起来的。
-const TREES = ['stage0/src', 'tests', 'bench'];
+const TREES = ['src/core', 'tests', 'bench'];
 const files = TREES.flatMap((t) => walk(join(root, t)).filter((f) => f.endsWith('.js')).map((f) => join(t, f)));
-/** @type {Map<string, string>} stage0/src 下的相对路径 -> 第一轮生成的文本，第 2 步直接复用 */
+/** @type {Map<string, string>} src/core 下的相对路径 -> 第一轮生成的文本，第 2 步直接复用 */
 const generated = new Map();
 
 for (const f of files) {
@@ -80,7 +80,7 @@ for (const f of files) {
     record(`${f} [parse]`, false, indent(e.message));
     continue;
   }
-  if (f.startsWith('stage0/src/')) generated.set(relative('stage0/src', f), g1);
+  if (f.startsWith('src/core/')) generated.set(relative('src/core', f), g1);
   let g2;
   try {
     g2 = regen(`${f} (generated)`, g1);
@@ -108,30 +108,32 @@ function indent(s) {
 
 // ------------------------------------------------- 2) 语义一致：用生成出来的编译器跑全套
 
-/** 把 stage0 树重建到 OUT 下：src 用生成的文本，runtime / lib 原样拷（它们不是 js） */
+/** 把编译器那棵树重建到 OUT 下：`src/core` 用生成的文本，runtime / lib 原样拷（它们不是 js） */
 function buildTree() {
   rmSync(OUT, { recursive: true, force: true });
   for (const [rel, text] of generated) {
-    const dest = join(OUT, 'stage0', 'src', rel);
+    const dest = join(OUT, 'src', 'core', rel);
     mkdirSync(dirname(dest), { recursive: true });
     writeFileSync(dest, text);
   }
-  // src 下的非 js 文件（现在没有，但别默默漏掉）
+  // src/core 下的非 js 文件（现在没有，但别默默漏掉）
   for (const rel of walk(SRC)) {
     if (rel.endsWith('.js')) continue;
-    const dest = join(OUT, 'stage0', 'src', rel);
+    const dest = join(OUT, 'src', 'core', rel);
     mkdirSync(dirname(dest), { recursive: true });
     writeFileSync(dest, readFileSync(join(SRC, rel)));
   }
+  /* runtime / lib 与 `src/core` **同一级**（`installDir()` 从 `core/host/native.js` 往上
+   * 数两层就到它们），所以重建出来的树也得是 `src/runtime`、`src/lib`。 */
   for (const sub of ['runtime', 'lib']) {
-    const from = join(root, 'stage0', sub);
+    const from = join(root, 'src', sub);
     for (const rel of walk(from)) {
-      const dest = join(OUT, 'stage0', sub, rel);
+      const dest = join(OUT, 'src', sub, rel);
       mkdirSync(dirname(dest), { recursive: true });
       writeFileSync(dest, readFileSync(join(from, rel)));
     }
   }
-  return join(OUT, 'stage0', 'src', 'cli.js');
+  return join(OUT, 'src', 'core', 'cli.js');
 }
 
 function runSuite(script, cli) {

@@ -20,8 +20,8 @@ import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
-import { peLoad } from '../../stage0/src/link/pe_load.js';
-import { peSections } from '../../stage0/src/link/pe_sections.js';
+import { peLoad } from '../../src/core/link/pe_load.js';
+import { peSections } from '../../src/core/link/pe_sections.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');

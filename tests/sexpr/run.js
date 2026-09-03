@@ -13,7 +13,7 @@
 //   2. **grammar 出来的树也能跑**：mini/*.mini 经 `omni glr` 得到核心方言文本，
 //      再喂给同样五个执行器，同样对上 .expected。这中间没有一行为 mini 写的代码。
 //   3. **硬指标**：编译器源码里不存在 'mini' 这个词。这条断言是决策 1 的验收本体 ——
-//      哪天有人为了让 mini 跑通去 stage0/src 里加个特例，这条会红。
+//      哪天有人为了让 mini 跑通去 src/core 里加个特例，这条会红。
 //   4. **bad/ 里的必须被拒绝，且拒在正确的理由上**：类型不推导只检查、条件不真值化、
 //      缺入口 —— 这些是刻意划的边界，不是没做完。
 //   5. **rt/ 里的必须在五条腿上报同一句话**：运行期错误的消息在五条腿上各有一份实现，
@@ -30,7 +30,7 @@ import { spawnSync } from 'node:child_process';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '../..');
-const cli = join(root, 'stage0', 'src', 'cli.js');
+const cli = join(root, 'src', 'core', 'cli.js');
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 const dir = workDir('sexpr');
 
@@ -126,13 +126,13 @@ for (const f of readdirSync(join(here, 'mini')).filter((x) => x.endsWith('.mini'
 // 而任何特例都得提到这门语言的名字。
 
 const hits = [];
-walk(join(root, 'stage0', 'src'), (p) => {
+walk(join(root, 'src', 'core'), (p) => {
   if (!p.endsWith('.js')) return;
   const text = read(p);
   if (text !== null && /\bmini\b/i.test(text)) hits.push(p.slice(root.length + 1));
 });
 if (hits.length > 0) no('no-per-language-code', `    编译器源码里出现了 mini —— 决策 1 的门槛就是"不许有"：\n${hits.map((h) => `      ${h}`).join('\n')}`);
-else ok('no-per-language-code [stage0/src 里没有一处 mini：这门语言只有 grammar]');
+else ok('no-per-language-code [src/core 里没有一处 mini：这门语言只有 grammar]');
 
 function walk(d, fn) {
   for (const e of readdirSync(d, { withFileTypes: true })) {

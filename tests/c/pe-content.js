@@ -15,9 +15,9 @@ import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
-import { peLoad } from '../../stage0/src/link/pe_load.js';
-import { peImage } from '../../stage0/src/link/pe_link.js';
-import { readImage } from '../../stage0/src/link/pe.js';
+import { peLoad } from '../../src/core/link/pe_load.js';
+import { peImage } from '../../src/core/link/pe_link.js';
+import { readImage } from '../../src/core/link/pe.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');

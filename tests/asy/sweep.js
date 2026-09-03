@@ -21,19 +21,19 @@ import { fileURLToPath } from 'node:url';
 // （tests/js-roundtrip 把仓库里的每个 .js 都喂给我们自己的 JS 前端），而 async/await
 // 不在那个子集里 —— 这曾是那条轴上唯一的一条红。路径本来就是固定的，动态 import
 // 一样东西也没多给。
-import { lexText } from '../../stage0/src/glr/lex.js';
-import { glrParse } from '../../stage0/src/glr/driver.js';
-import { readGrammar } from '../../stage0/src/glr/grammar.js';
-import { buildTable } from '../../stage0/src/glr/table.js';
-import { readSexpr } from '../../stage0/src/sexpr/read.js';
-import { Diagnostics, SourceFile } from '../../stage0/src/source/diag.js';
-import { AsySession } from '../../stage0/src/frontend-asy/lower.js';
-import { parseAsyBuiltins } from '../../stage0/src/frontend-asy/types.js';
+import { lexText } from '../../src/core/glr/lex.js';
+import { glrParse } from '../../src/core/glr/driver.js';
+import { readGrammar } from '../../src/core/glr/grammar.js';
+import { buildTable } from '../../src/core/glr/table.js';
+import { readSexpr } from '../../src/core/sexpr/read.js';
+import { Diagnostics, SourceFile } from '../../src/core/source/diag.js';
+import { AsySession } from '../../src/core/frontend-asy/lower.js';
+import { parseAsyBuiltins } from '../../src/core/frontend-asy/types.js';
 // 核心方言那一层的检查（只在 OMNI_SWEEP_SX=1 时用，见下面 SXCHK 那一段话）
-import { lowerCoreSexpr } from '../../stage0/src/sexpr/lower.js';
+import { lowerCoreSexpr } from '../../src/core/sexpr/lower.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const S = join(HERE, '..', '..', 'stage0', 'src');
+const S = join(HERE, '..', '..', 'src', 'core');
 
 const gpath = join(S, 'frontend-asy/asy.grammar');
 const gdiag = new Diagnostics();
@@ -66,7 +66,7 @@ const lc = (sp) => {
 
 const dirs = [];
 if (process.env.ASYMPTOTE_DIR) for (const d of process.env.ASYMPTOTE_DIR.split(':')) if (d) dirs.push(d);
-dirs.push(join(HERE, '..', '..', 'stage0', 'lib', 'asy'));
+dirs.push(join(HERE, '..', '..', 'src', 'lib', 'asy'));
 const exDir = process.argv[2];
 const SXCHK = process.env.OMNI_SWEEP_SX === '1';
 /**

@@ -29,7 +29,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const cli = join(here, '../../stage0/src/cli.js');
+const cli = join(here, '../../src/core/cli.js');
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 const update = process.env.UPDATE === '1';
 const dir = workDir('glr');
@@ -57,12 +57,12 @@ const ok = (msg) => { pass++; process.stdout.write(`  ok   ${msg}\n`); };
 const no = (name, why) => { fail++; failures.push(`${name}\n${why}`); process.stdout.write(`  FAIL ${name}\n`); };
 
 // asy 与 jnc 两份语法**不在** grammars/ 下：它们是前端的一部分
-// （stage0/src/frontend-asy/asy.grammar、stage0/src/frontend-jnc/jnc.grammar），
+// （src/core/frontend-asy/asy.grammar、src/core/frontend-jnc/jnc.grammar），
 // 因为 `omni run x.asy` / `x.jnc` 要读同一份文件 —— 语法是那门语言的前端，不是这条轴的
 // 测试夹具。这条轴照旧管它们（表快照、cases、语料覆盖三节都算在内）。
 const FRONTEND_GRAMMARS = new Map([
-  ['asy.grammar', join(here, '..', '..', 'stage0', 'src', 'frontend-asy', 'asy.grammar')],
-  ['jnc.grammar', join(here, '..', '..', 'stage0', 'src', 'frontend-jnc', 'jnc.grammar')],
+  ['asy.grammar', join(here, '..', '..', 'src', 'core', 'frontend-asy', 'asy.grammar')],
+  ['jnc.grammar', join(here, '..', '..', 'src', 'core', 'frontend-jnc', 'jnc.grammar')],
 ]);
 const gpathOf = (file) => FRONTEND_GRAMMARS.get(file) ?? join(here, 'grammars', file);
 

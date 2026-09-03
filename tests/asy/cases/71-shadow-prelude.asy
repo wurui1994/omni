@@ -1,6 +1,6 @@
 // 第三十八刀：**遮住外面来的那个类型名**。
 //
-// 我们的 prelude（`stage0/lib/asy/asy_builtins.asy`）里有一份替补的 `struct picture`，
+// 我们的 prelude（`src/lib/asy/asy_builtins.asy`）里有一份替补的 `struct picture`，
 // 真 asy 那边 `picture` 是 `base/plain_picture.asy` 里的 struct（不是 C++ 内建面）。
 // 用户文件里再写一个 `struct picture`，asy 收 —— 后一份遮住前一份（量过，见下）。
 // 以前我们报"重复定义的 struct 'picture'"，那正是 `import plain;` 那面墙上的第三块砖：

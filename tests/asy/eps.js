@@ -95,7 +95,7 @@ function h16(s) {
 }
 
 /**
- * 编译器自己那一份的印记：stage0/src 与 stage0/lib 底下每个文件的「名字 + 改动时间 + 字节数」。
+ * 编译器自己那一份的印记：src/core 与 src/lib 底下每个文件的「名字 + 改动时间 + 字节数」。
  * 结果缓存的键里带它 —— 改了前端或后端，这一轴的结论全部作废。
  */
 let stampMemo = '';
@@ -112,8 +112,8 @@ function srcStamp() {
       }
     }
   };
-  walk(join(ROOT, 'stage0', 'src'));
-  walk(join(ROOT, 'stage0', 'lib'));
+  walk(join(ROOT, 'src', 'core'));
+  walk(join(ROOT, 'src', 'lib'));
   stampMemo = h16(parts.join('|'));
   return stampMemo;
 }
@@ -181,7 +181,7 @@ function oracle(n, p) {
 
 /** 我们那一份：`omni run <例子>`，图在 stdout 上。 */
 function mine(p) {
-  const r = spawnSync('node', [join(ROOT, 'stage0', 'src', 'cli.js'), 'run', p],
+  const r = spawnSync('node', [join(ROOT, 'src', 'core', 'cli.js'), 'run', p],
     { cwd: ROOT, env, encoding: 'utf8', timeout: LIMIT, maxBuffer: 1 << 28 });
   // 超时被打死的那种：`signal` 是 SIGTERM。这一格要与"跑完了但没出图"分开 ——
   // 一趟全量 194 个例子，只要有几个卡住整轴就没法反复问，所以默认一个例子最多 LIMIT 毫秒，

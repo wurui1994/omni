@@ -3,7 +3,7 @@
 // 为什么手写：`JSON.parse` 不在封闭 ABI 里（ADR-0011 决策 2 —— C 那一侧的
 // omni_js_json.h 只有 stringify）。asy 的 AST 磁盘缓存（cli.js 的 parseText）要把树读
 // 回来，原先直接用 JSON.parse，于是自举那条腿当场红：
-//   stage0/src/cli.js:175:17: 'JSON.parse' is not in the closed ABI
+//   src/core/cli.js:175:17: 'JSON.parse' is not in the closed ABI
 // 编译器自己能读的东西不能超出它自己能编的子集 —— 所以读那一半写在这里。
 //
 // 只认 `JSON.stringify` 会吐出来的那一份（对象 / 数组 / 字符串 / 数 / true / false / null）：

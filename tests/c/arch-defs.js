@@ -27,7 +27,7 @@ const root = join(here, '..', '..');
 const TCC_DIR = join(root, '.omni-cache', 'tcc-build');
 const TCC = join(TCC_DIR, 'tcc');
 const XTCC = join(root, '.omni-cache', 'tcc-cross', 'x86_64-osx-tcc');
-const CLI = join(root, 'stage0', 'src', 'cli.js');
+const CLI = join(root, 'src', 'core', 'cli.js');
 const OUT = join(tmpdir(), 'omni-archdefs');
 
 const MACROS = ['__aarch64__', '__arm64__', '__AARCH64EL__', '__x86_64__', '__x86_64', '__amd64__'];

@@ -38,7 +38,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
 const TCC_DIR = join(root, '.omni-cache', 'tcc-build');
 const CROSS = join(root, '.omni-cache', 'tcc-cross');
-const CLI = join(root, 'stage0', 'src', 'cli.js');
+const CLI = join(root, 'src', 'core', 'cli.js');
 const SRC = process.env.TINYCC_SRC ?? '/Users/wurui/Documents/Lang/reference/tinycc';
 const OUT = join(tmpdir(), 'omni-selfcross');
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));

@@ -19,16 +19,16 @@ import { workDir } from '../work.js';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { Diagnostics } from '../../stage0/src/source/diag.js';
-import { linkJs } from '../../stage0/src/frontend-js/link.js';
-import { lowerJs } from '../../stage0/src/frontend-js/lower.js';
-import { emitJs } from '../../stage0/src/backend-js/emit.js';
-import { emitC } from '../../stage0/src/backend-c/emit.js';
-import { runtimeSources, RUNTIME_DIR } from '../../stage0/src/runtime/c_runtime.js';
-import { cAbiLibs } from '../../stage0/src/hir/c_abi.js';
+import { Diagnostics } from '../../src/core/source/diag.js';
+import { linkJs } from '../../src/core/frontend-js/link.js';
+import { lowerJs } from '../../src/core/frontend-js/lower.js';
+import { emitJs } from '../../src/core/backend-js/emit.js';
+import { emitC } from '../../src/core/backend-c/emit.js';
+import { runtimeSources, RUNTIME_DIR } from '../../src/core/runtime/c_runtime.js';
+import { cAbiLibs } from '../../src/core/hir/c_abi.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const cli = join(here, '../../stage0/src/cli.js');
+const cli = join(here, '../../src/core/cli.js');
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 const run = (cmd, args) => {
   const r = spawnSync(cmd, args, { encoding: 'utf8' });

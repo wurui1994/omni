@@ -19,7 +19,7 @@ import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
-import { elfExe } from '../../stage0/src/link/elf_exe.js';
+import { elfExe } from '../../src/core/link/elf_exe.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');

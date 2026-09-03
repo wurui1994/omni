@@ -6,7 +6,7 @@
 //
 // 用例只挑可移植、无副作用、结果可断言的 libc 条目：量的是**机制**（marshal 的七种类型、
 // 参数个数检查、extern 原型、链接），不是 libc 本身。
-import { c_abs, c_strlen, c_malloc, c_free, c_memset, c_memcmp, c_getenv, c_getpid } from '../../../stage0/src/host/native_c.js';
+import { c_abs, c_strlen, c_malloc, c_free, c_memset, c_memcmp, c_getenv, c_getpid } from '../../../src/core/host/native_c.js';
 
 // 标量一进一出：i32 -> i32
 console.log(String(c_abs(-7)));

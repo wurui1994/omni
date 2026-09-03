@@ -22,17 +22,17 @@ import { mkdtempSync, writeFileSync, readdirSync, existsSync, readFileSync } fro
 import { workDir } from '../work.js';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Diagnostics } from '../../stage0/src/source/diag.js';
-import { loadProgram, MODE_BY_EXT } from '../../stage0/src/module/load.js';
-import { check } from '../../stage0/src/hir/check.js';
-import { lowerToMir } from '../../stage0/src/mir/from_oir.js';
-import { moduleHashes } from '../../stage0/src/mir/bytes.js';
-import { emitJs, emitJsFunc } from '../../stage0/src/backend-js/emit.js';
-import { IncrCache, compileIncremental, unitKey, calleesOf } from '../../stage0/src/incr/cache.js';
+import { Diagnostics } from '../../src/core/source/diag.js';
+import { loadProgram, MODE_BY_EXT } from '../../src/core/module/load.js';
+import { check } from '../../src/core/hir/check.js';
+import { lowerToMir } from '../../src/core/mir/from_oir.js';
+import { moduleHashes } from '../../src/core/mir/bytes.js';
+import { emitJs, emitJsFunc } from '../../src/core/backend-js/emit.js';
+import { IncrCache, compileIncremental, unitKey, calleesOf } from '../../src/core/incr/cache.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '../..');
-const cli = join(root, 'stage0', 'src', 'cli.js');
+const cli = join(root, 'src', 'core', 'cli.js');
 
 let pass = 0;
 let fail = 0;
@@ -181,8 +181,8 @@ if (ins.miss !== 2 || ins.hit !== 3) {
 
 {
   const cacheSelf = join(dir, 'cache-self');
-  const c1 = incr(join(root, 'stage0', 'src', 'cli.js'), cacheSelf);
-  const c2 = incr(join(root, 'stage0', 'src', 'cli.js'), cacheSelf);
+  const c1 = incr(join(root, 'src', 'core', 'cli.js'), cacheSelf);
+  const c2 = incr(join(root, 'src', 'core', 'cli.js'), cacheSelf);
   if (c1.miss !== c1.units || c2.hit !== c2.units) {
     bad('self', `    编译器自己：第一遍 miss=${c1.miss}/${c1.units}，第二遍 hit=${c2.hit}/${c2.units}`);
   } else {

@@ -1,8 +1,8 @@
 // 宿主原生面（ADR-0011 决策 17）：从 host/native.js 导入的名字，降级之后就是 ABI op。
 // node 直接跑 native.js 的实现，两个后端跑运行时里的那份 —— 这条用例保证三份一致。
 // 刻意不打印任何路径：临时目录名与"程序镜像在哪"三方本来就不同。
-import { mkdTemp, writeText, readText, exists, readDir, fileSize, rename, realPath, tmpDir, cwd, env } from '../../../stage0/src/host/native.js';
-import { join, basename } from '../../../stage0/src/host/path.js';
+import { mkdTemp, writeText, readText, exists, readDir, fileSize, rename, realPath, tmpDir, cwd, env } from '../../../src/core/host/native.js';
+import { join, basename } from '../../../src/core/host/path.js';
 
 const dir = mkdTemp(join(tmpDir(), "omni-native-"));
 console.log(String(exists(dir)));

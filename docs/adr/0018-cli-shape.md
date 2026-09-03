@@ -4,7 +4,7 @@
 
 ## 背景
 
-`stage0/src/cli.js` 现在是 2870 行，里头 28 条**扁平**的命令，一个 `switch` 分派。
+`src/core/cli.js` 现在是 2870 行，里头 28 条**扁平**的命令，一个 `switch` 分派。
 它不是「风格不好」，是三处结构性的病：
 
 **1. 顶层预解析必须认识全程序每一个带值开关。** `cli.js:2091-2098` 那一坨：
@@ -226,10 +226,10 @@ pipeline  2×ELF(.o) + libtcc1.a → merge → PE(.exe)
 ## 代码摆放
 
 ```
-stage0/src/cli.js            只剩：建树、dispatch、错误处理
-stage0/src/cli/tree.js       节点类型、argv 解析、help 渲染
-stage0/src/cli/stages.js     stage 列表 + --explain/-v 渲染
-stage0/src/cli/cmd-{run,emit,c,tcc,link,jnc,glr}.js
+src/core/cli.js            只剩：建树、dispatch、错误处理
+src/core/cli/tree.js       节点类型、argv 解析、help 渲染
+src/core/cli/stages.js     stage 列表 + --explain/-v 渲染
+src/core/cli/cmd-{run,emit,c,tcc,link,jnc,glr}.js
 ```
 
 约束：新文件都要留在 JS 自举子集里 —— `bootstrap.js` 拿 `cli.js` 当入口把 import 树链成
@@ -245,8 +245,8 @@ stage0/src/cli/cmd-{run,emit,c,tcc,link,jnc,glr}.js
 
 ## 落地：分片 1 —— 命令树、每一级的 `--help`、静默别名
 
-新增两份：`stage0/src/cli/tree.js`（机制：走树、分开关、别名铺平、help 渲染，**不碰宿主**，
-能单独测）与 `stage0/src/cli/cmds.js`（数据：整棵树长什么样）。`cli.js` 里那个 `switch`
+新增两份：`src/core/cli/tree.js`（机制：走树、分开关、别名铺平、help 渲染，**不碰宿主**，
+能单独测）与 `src/core/cli/cmds.js`（数据：整棵树长什么样）。`cli.js` 里那个 `switch`
 一段没动 —— 每个叶子带一格 `key`，那就是 `switch` 认的标签，于是新名与旧名指向同一份实现。
 
 **背景那一坨 26 个 `||` 删掉了**，连同那份两百行的 `USAGE` 常量（93 行）。
@@ -312,6 +312,38 @@ pipeline  c → cpp → MIR → x86_64 → ELF(.o)
 
 **还没做的**：`--explain` 还没覆盖我们自己那门语言那几条（`run`/`build`/`emit`），那要先把
 「按缓存命中分叉」那一路的决定提前算出来。
+
+## 落地：目录改名与薄层入口
+
+```
+stage0/src/…                          ->  src/core/…     编译器那一整棵树
+stage0/{lib,include,runtime,gpu,jit}  ->  src/{…}
+（新）src/cli.js                                          命令行入口
+```
+
+改名为什么是安全的，值得写下来：`installDir()`（`host/native.js`）是从**它自己的
+`import.meta.url`** 算的，不是从进程入口算的，而 `stage0/src/host` 与 `src/core/host`
+**深度相同** —— 于是那七处 `join(installDir(), '..', …)`（`include`、`lib/asy`、
+`.omni-cache`、两份 `.grammar`、`builtins.tab`、自举的源）一处都不用动。新加的
+`src/cli.js` 在第一层，也不影响它 —— 因为它压根不参与那个计算。
+
+`src/cli.js` 现在只有一句 `import './core/cli.js'`。薄得有意，但它**不该永远这么薄**：
+`core/cli.js` 眼下既是驱动又是入口（末尾自己 `setExitCode(main(procArgs()))`），所以它
+**不能被 import 而不执行**。把「取 argv、定退出码、印错误」这几件进程级的事挪上来，
+`core/cli.js` 就能当普通模块用 —— 门里直接 `main([...])` 在进程内跑一趟，不必 spawn。
+那一步要连着把 62 处门的 `cli` 常量指过来，所以与这一片分开做。
+
+145 个文件的路径引用跟着改；`package.json` 的 `bin` 与 `scripts` 指向新入口。
+
+门：C 那一族全绿（`run` 207/0、`native` 227/0、`native-gen` 83/0、`tcc-link` 83/0、
+`sym-size` 12/0、`selfsrc` 13/0、`selfcross` 12/0、`tcc-obj` 21 容器相同）、
+`tests/run.js` 96/0、`js-roundtrip` 200/0、`oir` 607/0、`glr` 20/0、`wat` 15/0、
+`cli/tree` 36/0。
+
+`mir`/`incr`/`bootstrap` 这三条**改名之前就是红的**，而且红在同一处：编译器自己那棵树里
+有 JS 子集不收的东西（`arm64/asm.js` 与 `from_mir.js` 的 `import * as`、`errText` 与
+`isSpace` 各在两个模块里同名）。改名之前那几条报的是同样的话，只是路径写着 `stage0/src`。
+那是另一笔账。
 
 ## 落地：分片 2（后半）—— `-v` 接上同一张表
 

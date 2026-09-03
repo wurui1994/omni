@@ -20,10 +20,10 @@ import {
   MirModule, MirFunc, OP, REF_NONE, T_I64, T_I32, T_BOOL, T_VOID, T_F64, T_F32,
   CVT_SEXT8, CVT_SEXT16, CVT_TRUNC, CVT_ZEXT,
   CVT_I2F, CVT_U2F, CVT_F2I, CVT_FCVT, CVT_BITCAST, memDesc,
-} from '../../stage0/src/mir/ir.js';
-import { codeOf, genModule } from '../../stage0/src/arm64/from_mir.js';
-import { writeObject } from '../../stage0/src/link/macho.js';
-import { utf8Bytes } from '../../stage0/src/host/utf8.js';
+} from '../../src/core/mir/ir.js';
+import { codeOf, genModule } from '../../src/core/arm64/from_mir.js';
+import { writeObject } from '../../src/core/link/macho.js';
+import { utf8Bytes } from '../../src/core/host/utf8.js';
 
 const mod = new MirModule('main');
 const K = mod.consts;

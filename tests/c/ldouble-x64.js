@@ -29,11 +29,11 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 
-import { f80Bytes } from '../../stage0/src/frontend-c/f80.js';
+import { f80Bytes } from '../../src/core/frontend-c/f80.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
-const CLI = join(root, 'stage0', 'src', 'cli.js');
+const CLI = join(root, 'src', 'core', 'cli.js');
 const XTCC = join(root, '.omni-cache', 'tcc-cross', 'x86_64-osx-tcc');
 const OUT = join(tmpdir(), 'omni-ldouble-x64');
 

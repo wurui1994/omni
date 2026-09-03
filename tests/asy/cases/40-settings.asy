@@ -1,5 +1,5 @@
 // `access settings;` —— asy 的 `settings` 在真 asy 那边是 **C++ 模块**（settings.cc 里
-// `addOption(new …Setting(…))` 那一串）。我们这一侧是 stage0/lib/asy/settings.asy，
+// `addOption(new …Setting(…))` 那一串）。我们这一侧是 src/lib/asy/settings.asy，
 // 用 asy 写的一批模块级变量，类型与默认值逐个照那边抄。判分的人是真 asy：下面这五行
 // 两边逐字节相同（量出来的，不是照文档抄的）。
 //

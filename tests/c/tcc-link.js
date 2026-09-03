@@ -34,7 +34,7 @@ const root = join(here, '..', '..');
 const CROSS = join(root, '.omni-cache', 'tcc-cross');
 const TCC_DIR = join(root, '.omni-cache', 'tcc-build');
 const TCC = join(TCC_DIR, 'tcc');
-const CLI = join(root, 'stage0', 'src', 'cli.js');
+const CLI = join(root, 'src', 'core', 'cli.js');
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 
 /** 能链上并且跑对的最少条数 —— 往下走就是回归（`native-gen.js` 那边同一条防线）。 */

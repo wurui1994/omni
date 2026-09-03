@@ -22,16 +22,16 @@ import { spawnSync } from 'node:child_process';
 import { workDir } from '../work.js';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Diagnostics, SourceFile } from '../../stage0/src/source/diag.js';
-import { loadProgram, MODE_BY_EXT } from '../../stage0/src/module/load.js';
-import { check } from '../../stage0/src/hir/check.js';
-import { linkJs } from '../../stage0/src/frontend-js/link.js';
-import { lowerJs } from '../../stage0/src/frontend-js/lower.js';
-import { lowerWat } from '../../stage0/src/frontend-wat/lower.js';
-import { lowerToMir } from '../../stage0/src/mir/from_oir.js';
-import { verifyMir } from '../../stage0/src/mir/verify.js';
-import { printMir } from '../../stage0/src/mir/print.js';
-import { funcBytes, funcHash, moduleHashes } from '../../stage0/src/mir/bytes.js';
+import { Diagnostics, SourceFile } from '../../src/core/source/diag.js';
+import { loadProgram, MODE_BY_EXT } from '../../src/core/module/load.js';
+import { check } from '../../src/core/hir/check.js';
+import { linkJs } from '../../src/core/frontend-js/link.js';
+import { lowerJs } from '../../src/core/frontend-js/lower.js';
+import { lowerWat } from '../../src/core/frontend-wat/lower.js';
+import { lowerToMir } from '../../src/core/mir/from_oir.js';
+import { verifyMir } from '../../src/core/mir/verify.js';
+import { printMir } from '../../src/core/mir/print.js';
+import { funcBytes, funcHash, moduleHashes } from '../../src/core/mir/bytes.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '../..');
@@ -88,7 +88,7 @@ for (const f of readdirSync(join(root, 'tests', 'wat', 'cases')).sort()) {
 }
 // 编译器自己：这一份的价值等于其余全部加起来 —— 只有它会走到闭包、模块级变量、
 // 138 条封闭 ABI op、深层容器这些路径上
-cases.push(join(root, 'stage0', 'src', 'cli.js'));
+cases.push(join(root, 'src', 'core', 'cli.js'));
 
 let insns = 0;
 let funcs = 0;
@@ -191,7 +191,7 @@ if (keep('hash')) {
 // fround 在它里头是显式写出来的）与 LLVM 后端（`add i32` / `fadd float` 由 LLVM 与硬件定）。
 // 期望值写在用例里、按 IEEE-754 与 wasm 规范算出来的，不是从任何一条腿抄回来的。
 //
-// LLVM 那条腿在这里**自己链**：`clang 用例.ll stage0/runtime/*.c`。不走 cli.js 的
+// LLVM 那条腿在这里**自己链**：`clang 用例.ll src/runtime/*.c`。不走 cli.js 的
 // buildLlvm 是因为那条路要一个源文件当输入，而这一组的输入就是 MIR 本身。
 {
   const units = readdirSync(join(here, 'units')).filter((x) => x.endsWith('.mjs')).sort();
@@ -219,9 +219,9 @@ if (keep('hash')) {
     const exePath = join(legDir, `${name}.out`);
     writeFileSync(llPath, rl.stdout);
     const rc = spawnSync('clang', ['-O0', '-w', '-ffp-contract=off', '-pthread',
-      '-I', join(root, 'stage0', 'runtime'), llPath,
-      ...readdirSync(join(root, 'stage0', 'runtime')).filter((x) => x.endsWith('.c'))
-        .map((x) => join(root, 'stage0', 'runtime', x)),
+      '-I', join(root, 'src', 'runtime'), llPath,
+      ...readdirSync(join(root, 'src', 'runtime')).filter((x) => x.endsWith('.c'))
+        .map((x) => join(root, 'src', 'runtime', x)),
       '-o', exePath, '-lm'], { encoding: 'utf8' });
     if (rc.status !== 0) {
       bad(`unit/${name} llvm-link`, `    clang 拒收（IR 留在 ${llPath}）\n    ${rc.stderr.trim().split('\n').slice(0, 6).join('\n    ')}`);

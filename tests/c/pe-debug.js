@@ -31,8 +31,8 @@ import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
-import { peLoad, PE_GUI } from '../../stage0/src/link/pe_load.js';
-import { peWrite } from '../../stage0/src/link/pe_link.js';
+import { peLoad, PE_GUI } from '../../src/core/link/pe_load.js';
+import { peWrite } from '../../src/core/link/pe_link.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');

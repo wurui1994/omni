@@ -16,10 +16,10 @@ import { workDir } from '../work.js';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { emitJs } from '../../stage0/src/backend-js/emit.js';
-import { emitC } from '../../stage0/src/backend-c/emit.js';
-import { runtimeSources, RUNTIME_DIR } from '../../stage0/src/runtime/c_runtime.js';
-import { listType, dictType } from '../../stage0/src/hir/types.js';
+import { emitJs } from '../../src/core/backend-js/emit.js';
+import { emitC } from '../../src/core/backend-c/emit.js';
+import { runtimeSources, RUNTIME_DIR } from '../../src/core/runtime/c_runtime.js';
+import { listType, dictType } from '../../src/core/hir/types.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
@@ -786,12 +786,12 @@ c('host/renamed-read', J(js('js_fs_read_text', [PATH2])),
   `JSON.stringify(${REF_FS}.readFileSync(${P2}, "utf8"))`);
 
 // 读一个满是中文注释的真文件：码元口径的长度对上，说明 UTF-8 -> UTF-16 两侧一致
-c('host/read-len', js('js_str_len', [js('js_fs_read_text', [str('stage0/runtime/omni.h')])]),
-  `${REF_FS}.readFileSync("stage0/runtime/omni.h", "utf8").length`);
-c('host/readdir', J(js('js_arr_sort', [js('js_fs_readdir', [str('stage0/runtime')]), undef])),
-  `JSON.stringify(${REF_FS}.readdirSync("stage0/runtime").sort())`);
-c('host/realpath', js('js_fs_realpath', [str('stage0/runtime')]),
-  `${REF_FS}.realpathSync("stage0/runtime")`);
+c('host/read-len', js('js_str_len', [js('js_fs_read_text', [str('src/runtime/omni.h')])]),
+  `${REF_FS}.readFileSync("src/runtime/omni.h", "utf8").length`);
+c('host/readdir', J(js('js_arr_sort', [js('js_fs_readdir', [str('src/runtime')]), undef])),
+  `JSON.stringify(${REF_FS}.readdirSync("src/runtime").sort())`);
+c('host/realpath', js('js_fs_realpath', [str('src/runtime')]),
+  `${REF_FS}.realpathSync("src/runtime")`);
 // mkdtemp 的结果是随机的，能对照的是长度（前缀相同 + 六个随机字符）
 c('host/mkdtemp-len', js('js_str_len', [js('js_fs_mkdtemp', [js('js_add', [TMP, str('/omni-oir-')])])]),
   `${REF_FS}.mkdtempSync(${REF_OS} + "/omni-oir-").length`);

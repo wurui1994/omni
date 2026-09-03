@@ -21,7 +21,7 @@ import { SUPPORTED } from './supported.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '../..');
-const cli = join(root, 'stage0', 'src', 'cli.js');
+const cli = join(root, 'src', 'core', 'cli.js');
 const update = process.argv.includes('--update');
 
 let pass = 0;

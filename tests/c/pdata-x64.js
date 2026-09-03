@@ -29,7 +29,7 @@ import { spawnSync } from 'node:child_process';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
-const CLI = join(root, 'stage0', 'src', 'cli.js');
+const CLI = join(root, 'src', 'core', 'cli.js');
 const CROSS = join(root, '.omni-cache', 'tcc-cross');
 const OUT = join(tmpdir(), 'omni-pdata-x64');
 

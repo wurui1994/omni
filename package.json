@@ -5,11 +5,11 @@
   "type": "module",
   "description": "Omni: cross-language parsing / multi-backend compilation architecture (stage0 bootstrap compiler, plain JS)",
   "bin": {
-    "omni": "./stage0/src/cli.js"
+    "omni": "./src/cli.js"
   },
   "scripts": {
-    "omni": "node stage0/src/cli.js",
-    "build:self": "node stage0/src/cli.js bootstrap -o dist",
+    "omni": "node src/cli.js",
+    "build:self": "node src/cli.js bootstrap -o dist",
     "test": "node tests/run.js",
     "test:oracle": "node tests/oracle/run.js",
     "test:js": "node tests/js-roundtrip/run.js",

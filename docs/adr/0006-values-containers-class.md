@@ -125,7 +125,7 @@ V8 的路子：稀疏索引表 + 紧凑 entries 数组，迭代顺序 = 插入�
 
 1. ✅ `list<T>` + 索引/边界检查 + **迭代协议**
 2. ✅ `dict<K,V>`（插入序）+ `string` API（长度、切片、按**字节**索引 —— 码点 API 见 ADR-0005 已知偏差）
-3. ✅ `dynamic` 值表示 + `json` 解析/序列化（复用 1、2；实现在 `stage0/lib/json.omni`，
+3. ✅ `dynamic` 值表示 + `json` 解析/序列化（复用 1、2；实现在 `src/lib/json.omni`，
    用 Omni 自己写，于是两个后端共享同一份实现）
 4. ✅ `class`（引用）+ 方法降级为自由函数 + UFCS 合并重载集 —— **ARC 未做**，
    当前只分配不释放，等 ADR-0007 的 unwind 表落地

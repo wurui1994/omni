@@ -120,7 +120,7 @@ function run(p, n, fmt) {
     file = join(WORK, `${n}.asy`);
     writeFileSync(file, `asy__defaultformat = "svg";\n${readFileSync(p, 'utf8')}`);
   }
-  const r = spawnSync('node', [join(ROOT, 'stage0', 'src', 'cli.js'), 'run', file],
+  const r = spawnSync('node', [join(ROOT, 'src', 'core', 'cli.js'), 'run', file],
     { cwd: exDir, env, encoding: 'utf8', timeout: LIMIT, maxBuffer: 1 << 28 });
   const slow = r.signal === 'SIGTERM' || (r.error !== undefined && r.error !== null);
   if (slow) {

@@ -4,7 +4,7 @@
 // **免费 oracle**（幂等 + 语义一致），而且它让 C 路径自举不需要先用 Omni 语法重写编译器。
 // 这个前端是永久设施，不是自举脚手架。
 //
-// 支持的子集由 `stage0/src` 里实际写过的 JS 决定（见 docs/js-bootstrap-subset.md）：
+// 支持的子集由 `src/core` 里实际写过的 JS 决定（见 docs/js-bootstrap-subset.md）：
 // 没有 async/await、没有生成器、没有 do-while、没有标签、没有 delete、没有 with/eval。
 // **不支持的语法必须报错**，绝不静默跳过 —— 静默跳过会让 bug 变成几万行生成 C 里的段错误。
 //

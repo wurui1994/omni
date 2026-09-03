@@ -6,7 +6,7 @@
 import {
   unit, printI32, printU32, printBool, OP, T_I32, T_VOID, REF_NONE,
 } from '../mirkit.mjs';
-import { CVT_SEXT8, CVT_SEXT16 } from '../../../stage0/src/mir/ir.js';
+import { CVT_SEXT8, CVT_SEXT16 } from '../../../src/core/mir/ir.js';
 
 export const expected = [
   '-2147483648',  //  1. 2147483647 + 1 回绕

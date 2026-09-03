@@ -23,7 +23,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
 const TCC_DIR = join(root, '.omni-cache', 'tcc-build');
 const TCC = join(TCC_DIR, 'tcc');
-const CLI = join(root, 'stage0', 'src', 'cli.js');
+const CLI = join(root, 'src', 'core', 'cli.js');
 const OUT = join(tmpdir(), 'omni-aliassym');
 
 const PROBE = 'int real(int x) { return x + 1; }\n'

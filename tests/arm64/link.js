@@ -15,11 +15,11 @@ import { writeFileSync, mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { MirModule, MirFunc, OP, REF_NONE, T_I64 } from '../../stage0/src/mir/ir.js';
-import { genModule } from '../../stage0/src/arm64/from_mir.js';
-import { writeObject } from '../../stage0/src/link/macho.js';
-import { readObject, linkObjects } from '../../stage0/src/link/link.js';
-import { RELOC } from '../../stage0/src/arm64/asm.js';
+import { MirModule, MirFunc, OP, REF_NONE, T_I64 } from '../../src/core/mir/ir.js';
+import { genModule } from '../../src/core/arm64/from_mir.js';
+import { writeObject } from '../../src/core/link/macho.js';
+import { readObject, linkObjects } from '../../src/core/link/link.js';
+import { RELOC } from '../../src/core/arm64/asm.js';
 
 let failed = 0;
 let total = 0;

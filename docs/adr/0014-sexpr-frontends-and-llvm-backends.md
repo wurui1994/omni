@@ -123,7 +123,7 @@ WAT 前端证的是「s-expr 能当前端汇聚点」，但它降的是**别人�
 
 于是验收门槛 1 那句「新增代码里不含任何 lowering/emit，这条要在评审里当硬指标查」
 第一次变成了**自动断言**而不是评审纪律：`tests/sexpr/run.js` 里有一条 case 直接 grep
-`stage0/src` 全树，出现 `mini` 这个词就红。哪天有人为了让 mini 跑通去编译器里加个特例，
+`src/core` 全树，出现 `mini` 这个词就红。哪天有人为了让 mini 跑通去编译器里加个特例，
 那个特例必须提到语言的名字，所以拦得住。
 
 这条轴另外三件事：cases/*.sx 四方逐字节相同（方言本身能跑）、mini/*.mini 经 grammar
@@ -164,7 +164,7 @@ WAT 前端证的是「s-expr 能当前端汇聚点」，但它降的是**别人�
 
 ### 已落地的形状：语法即数据
 
-四个文件，都在 `stage0/src/glr/`：
+四个文件，都在 `src/core/glr/`：
 
 - `grammar.js` —— 语法文件本身写成 S 表达式，读它用的就是 `sexpr/read.js`，不另起一个
   词法层。`(tokens ...)` / `(prec left ...)` / `(start N)` / `(lex ...)` / `(rule N (-> (RHS...) 模板))`。
@@ -294,7 +294,7 @@ bison **隐式**的选择写成**显式**的优先级声明 —— 悬垂 else�
 第 3、4 道一个都没开始。语法覆盖率不等于「等效实现」。
 
 **语法文件搬了家**：`asy.grammar` 从 `tests/glr/grammars/` 移到
-`stage0/src/frontend-asy/`。理由是它不再只是这条轴的夹具 —— 第 2 道门槛要的
+`src/core/frontend-asy/`。理由是它不再只是这条轴的夹具 —— 第 2 道门槛要的
 `omni run x.asy` 得读同一份文件，语法就是那门语言前端的一部分。`tests/glr` 照旧管它
 （表快照 / cases / 语料覆盖三节），只是路径过一层 `gpathOf`。
 
@@ -380,7 +380,7 @@ bison **隐式**的选择写成**显式**的优先级声明 —— 悬垂 else�
 **走过的弯路（记下来，因为它看起来很有道理）**：上面这条结论一开始推出的是另一个形状 ——
 「自己出一份可移植实现，于是六条腿彼此逐字节一致」。照这条做了三批：`exp`（Cody-Waite +
 13 项泰勒）、`sin`/`cos`（Dekker double-double 归约）、`log`（二分缩放 + `2*atanh`），
-每一批都量过 ULP，都进了 `stage0/lib/math.sx`。**然后被推翻了**，理由一句话：
+每一批都量过 ULP，都进了 `src/lib/math.sx`。**然后被推翻了**，理由一句话：
 这些是标准库的东西（C99 的 math.h、ECMA-262 的 Math），自己写就是重造轮子 ——
 造出来的还更差（自己那份 `sin`/`cos` 2 ULP、`atan` 4 ULP，libm 一般 ≤1 ULP），
 而且每加一个函数都是两百行 .sx 加一轮测量，与「支持一门语言的成本应该是读它的表」正好相反。
@@ -413,7 +413,7 @@ addRealFunc(sin,SYM(sin));   addRealFunc(exp,SYM(exp));   addRealFunc(log,SYM(lo
   exp/expm1/log/log10/log1p/cbrt/hypot）。C 与 LLVM 两条腿 call `omni_r_*`（`omni_math.c`
   里一层薄包装转手 libm），JS 那条腿走 prelude 的 `$r_*`，解释器走 `js_math` 的同名 op ——
   三条路都只是转手，没有一份我们自己写的算法。
-- **绑定表**：`stage0/src/frontend-asy/builtins.tab`，一张数据表（名字 / 实参个数 /
+- **绑定表**：`src/core/frontend-asy/builtins.tab`，一张数据表（名字 / 实参个数 /
   返回类型 / 实现在哪 / 符号），两种去处：`rmath`（上面那个白名单）与
   `nope`（宿主没有、要用就得自己实现，报错里说清是哪一个 —— `gamma`/`erf`/`Jn` 那一族）。
   它是**生成的** —— `gen-builtins.js` 读 asy 自己的两份数据：`runmath.in` 里带签名的声明
@@ -518,7 +518,7 @@ N 次"是同一个问题的另一半。眼下没有"就地改一道"的操作，
 值语义拷贝规则一整套；更关键的是 **LLVM 那条腿根本没实现过 list**（`backend-llvm/emit.js`
 里 grep 不到一处）。数组收成六条，五条腿就都能实现。
 
-**实现只有一份，这是刻意的**：七个符号在 `stage0/runtime/omni_arr.c` 里按元素单态化成四份
+**实现只有一份，这是刻意的**：七个符号在 `src/runtime/omni_arr.c` 里按元素单态化成四份
 （X 宏展开，源码一份），`run-c` 与 `run-llvm` 调的是**同一个符号的同一份机器码** ——
 越界检查、倍增策略、错误消息都不存在"两条腿各写一份"的可能。buf 那边是"逐形状生成的
 static inline C + 另写一份 IR 助手"，是两份实现；这次不重复那个决定。两个解释器共用
@@ -532,7 +532,7 @@ static inline C + 另写一份 IR 助手"，是两份实现；这次不重复那
 
 ### 已落地的形状：asy 前端第一刀（第十五条测试轴 `tests/asy/`，28 条）
 
-`stage0/src/frontend-asy/lower.js`（约 1340 行）把 asy 语法树降成核心方言的**文本**，
+`src/core/frontend-asy/lower.js`（约 1340 行）把 asy 语法树降成核心方言的**文本**，
 `omni emit-asy x.asy` 印出那份文本，`omni run/run-c/interp/interp --mir/run-llvm x.asy`
 直接跑它。为什么这里有一份手写的降级、而只靠 grammar 的那门玩具语言没有：语法那一半
 确实一行代码都没写（asy.grammar 是从 camp.y 转写的），但 asy 的**语义**要类型 ——
@@ -872,7 +872,7 @@ span，于是报错会指到 `jnc.grammar:339` 那种地方去。
   第二稿里我自己写的那个合法化 pass 只剩「C 备选路径标量化」这一个用途）、
   以及**SPIR-V 后端**（近几个版本转正，落地前需核对本机 LLVM 22 的支持范围）。
 
-### 已落地（`stage0/src/backend-llvm/emit.js`，`omni emit-llvm / run-llvm / build-llvm`）
+### 已落地（`src/core/backend-llvm/emit.js`，`omni emit-llvm / run-llvm / build-llvm`）
 
 第一阶段是 **MIR → 文本 IR → clang**，只降标量 i64 / f64 / bool / void。
 
@@ -898,7 +898,7 @@ span，于是报错会指到 `jnc.grammar:339` 那种地方去。
 不能让它悄悄漂移。另有一份 IR 快照钉控制流的形状（层数算错、汇合点接错、死块漏标签
 这三类错都只在 IR 文本里看得见）。
 
-### 已落地（第二阶段：ORC JIT，`stage0/jit/omni_jit.c` + `omni run-jit`）
+### 已落地（第二阶段：ORC JIT，`src/jit/omni_jit.c` + `omni run-jit`）
 
 「运行期不需要 cc」兑现了：文本 IR 直接进 `LLVMParseIRInContext`，ORC 惰性物化，
 查到地址就跳进去 —— 磁盘上不落目标文件、不链接、不 exec 新二进制。第十四条测试轴
@@ -1538,7 +1538,7 @@ node / omni-js / interp 三条腿按设计都抛错，只有 omni-c 真调到了
   也不需要 jancy 那份手工 libcall 清单（`:94..143`）—— 我们不用 bare JITDylib，
   挂进程符号解析生成器即可。
 
-### 已落地（`stage0/src/incr/cache.js`，`omni incr`）
+### 已落地（`src/core/incr/cache.js`，`omni incr`）
 
 缓存层与后端解耦：`compileIncremental(mir, tag, cache, emitFunc)`，`emitFunc` **只在
 未命中时**被调用。命中数、未命中数、真正发出的次数都数出来，`omni incr` 印成一行 ——
@@ -1577,7 +1577,7 @@ GLOAD 的全局下标、AGGLIT 的类型下标，还有落在 `REF_BIAS` 以下�
 - 不写 pass 管线、不写寄存器分配、不写指令选择。唯一的合法化是「C 备选路径上把
   向量标量化」。
 
-### 已落地的形状（`stage0/src/mir/`，四个文件 + 第九条测试轴）
+### 已落地的形状（`src/core/mir/`，四个文件 + 第九条测试轴）
 
 写下来的时候有三处与上面那几条不同，都是落地量出来的，理由记在这里：
 
@@ -1706,7 +1706,7 @@ GLOAD 的全局下标、AGGLIT 的类型下标，还有落在 `REF_BIAS` 以下�
 
 `tests/sexpr/cases/04-buffers.sx` 六条腿逐字节相同。
 
-### 已落地（SPIR-V：门槛 7 的 GPU 那一半，`stage0/src/backend-spirv/emit.js`）
+### 已落地（SPIR-V：门槛 7 的 GPU 那一半，`src/core/backend-spirv/emit.js`）
 
 `omni emit-spirv FILE [--kernel NAME]`：一个 kernel 一份 SPIR-V **汇编文本**。
 
@@ -1747,7 +1747,7 @@ GLOAD 的全局下标、AGGLIT 的类型下标，还有落在 `REF_BIAS` 以下�
 
 还差的只剩「有设备时真跑一遍」—— 下一小节就是它。
 
-### 已落地（真设备上跑一遍：`stage0/gpu/omni_vk.c`）
+### 已落地（真设备上跑一遍：`src/gpu/omni_vk.c`）
 
 `omni_vk MODULE.spv ENTRY --grid N [--buf i64:v,...] [--push i64:v]`：把一份模块在设备上
 跑一遍，把缓冲的内容印出来。**它是测试轴的工具，不是后端的一部分** —— `dispatch` 在
@@ -1789,7 +1789,7 @@ CPU 那五条腿上是降级期展开的循环，main 本来就在 CPU 上跑，
   `src/fiber.zig:543..559`）。这条同时缓解现在整个自编译被 OOM 杀掉的问题。
 - **它是唯一不涉及机器码的执行路径，所以所有后端的正确性都对着它比。**
 
-### 已落地（`stage0/src/mir/interp.js`，`omni interp --mir`）
+### 已落地（`src/core/mir/interp.js`，`omni interp --mir`）
 
 - 装载期把每条指令编成一个闭包，运行期是 `prog[pc](F)`，返回**下一个 pc**。区域配对与
   每条 `BR` 的层数在装载期一次扫描就解析成具体 pc —— 于是运行期**没有区域栈、也没有
@@ -1894,7 +1894,7 @@ asy 的绘图层是**两层**，这一刀先把界划清：
 
 - **C++ 那一面**（19 个 primitive 类型 + `run*.in` 里那些函数）在真 asy 里是运行时自带的，
   每个文件、每个模块里都看得见，`base/` 里一行都没有它的声明。我们这一侧是
-  `stage0/lib/asy/asy_builtins.asy` —— **用 asy 写的**，不是前端里的特例：
+  `src/lib/asy/asy_builtins.asy` —— **用 asy 写的**，不是前端里的特例：
   `path` 是一个 struct（`knot[] nodes` + `cyclic`，照 `path.h` 的 solvedKnot 摆），
   `--` 是 `operator --`，EPS 是拼出来的字符串。每个单元在声明遍开头隐式 import 它一次
   （`builtinsIn`）：struct 只声明一份（核心方言的 class 名全局唯一，摊进每个单元会撞名），
@@ -1942,7 +1942,7 @@ EPS 那一头与真 asy 逐字节对过（`asy -noV -f eps`，只差 `%%Creator`
 `plain_strings.asy:260`）、struct 体里的 `using` 类型别名（`plain_filldraw.asy:93`）、
 `guide` 与 `..` 的 Hobby 求解（`knot.cc` 的三对角）、`transform`、Label（要 TeX）、clip。
 `access settings` / `access version`（asy 那边是 C++ 模块）这一刀做了：
-`stage0/lib/asy/settings.asy` 与 `version.asy`，字段的类型逐个照 `settings.cc` 的
+`src/lib/asy/settings.asy` 与 `version.asy`，字段的类型逐个照 `settings.cc` 的
 `addOption(new …Setting)` 抄，只放 `base/plain*.asy` 真的读到的那些（量出来的 20 个）。
 于是 `import plain;` 从"第 9 行就停"推到了上面那两条 —— 这一段是引真的 base，
 `plain_constants` / `plain_strings` / `plain_pens` / `plain_paths` 这些 include 都进去了。
@@ -2107,7 +2107,7 @@ asy 收，而且方法取出来是绑住接收者的闭包，那要 `vardec` 走
 - 未声明的变量 15（`infinity` 等）、`new`（匿名函数）15、`picture` 缺字段 12 + 缺方法 4。
 
 这张表把下一步排明白了：**大头是内建面还没写够**（类型 3 个 + 函数 20 个 + 全局量若干，
-全是 `stage0/lib/asy/` 里用 asy 写的活，前端一行不用改），其次是**匿名函数带捕获**
+全是 `src/lib/asy/` 里用 asy 写的活，前端一行不用改），其次是**匿名函数带捕获**
 （15 处，方言的 `(cfn …)`/`(mkclo …)` 早就齐了），`Label` 那 30 处要 TeX、排最后。
 
 顺着这张表当场做掉两件小的：
@@ -2129,7 +2129,7 @@ asy 收，而且方法取出来是绑住接收者的闭包，那要 `vardec` 走
 
 `builtins.tab` 那张表只管**实数数学函数**（68 行，转手 libm / `Math.*`）；缺的那 20 个
 名字里只有 `sgn` 在表上、还标着 `nope`，其余一个都不在 —— 它们不是数学函数，该去
-`stage0/lib/asy/asy_builtins.asy` 用 asy 写。按"写得起 / 写不起"分开之后，第一批补的是
+`src/lib/asy/asy_builtins.asy` 用 asy 写。按"写得起 / 写不起"分开之后，第一批补的是
 `pi`、`sgn`、`degrees`（real 与 pair 两个重载）、`radians`、`copy`（real[]/int[]/bool[]）、
 `search`、`sequence`（`(n)` 与 `(a,b)` 两个重载）。
 
@@ -3238,7 +3238,7 @@ asy 的 struct 体其实就是一个 **block**。量出来的四条：
 `plain_picture.asy:203` 那句"重复定义的 struct 'picture'"，查下来根本不是 `include`
 把项摊了两遍 —— 源码里 `struct picture` 只有一处。撞的是**我们自己的 prelude**：
 `picture` 在真 asy 那边是 `base/plain_picture.asy` 里的 struct（不是 C++ 内建面），而
-`stage0/lib/asy/asy_builtins.asy` 里有一份替补，好让不写 `import plain;` 的画图程序能跑。
+`src/lib/asy/asy_builtins.asy` 里有一份替补，好让不写 `import plain;` 的画图程序能跑。
 两份同名，于是 `import plain;` 撞在第二十五刀那条"struct 名是全局共享的"上。
 
 量过的三条（真 asy 全收、全退 0）：
@@ -4095,7 +4095,7 @@ int/real 扩到 int/real/pair/triple）。量过 `(string)((1/3,2/7))` 与 `writ
 后四条是 `castop.h:48` 的 `castString<T>`，走 `lexical.h:14` 的 `lexical::cast`：
 `istringstream >> value`，之后要 `(is >> ws).eof()` —— 前后的空白可以有，别的字符一个
 都不许剩。这一格**没有**做成核心方言的新算符，而是把解析器用 asy 写在
-`stage0/lib/asy/asy_builtins.asy` 里（`real operator ecast(string)` 那一族）。理由：
+`src/lib/asy/asy_builtins.asy` 里（`real operator ecast(string)` 那一族）。理由：
 加一条 `(sreal E)` 要动 OIR 加四个消费方（interp / js / c / llvm 各一份宿主符号），
 而 `strtod` 这件事**能在这一层做到位**——
 
@@ -4336,7 +4336,7 @@ tests/asy 183 条、tests/run.js 91 条全绿。新用例 `cases/107-reverse-pat
 
 ### 两个从 base 掉出来的名字：`settings.v3d` 与 `newframe`
 
-`plain_shipout.asy:36/130` 读 `settings.v3d`，我们那份 `stage0/lib/asy/settings.asy` 里没有
+`plain_shipout.asy:36/130` 读 `settings.v3d`，我们那份 `src/lib/asy/settings.asy` 里没有
 它。补一行（`settings.cc:1664` 的 boolSetting，默认关）—— 那个文件的规矩是「只放
 `base/plain*.asy` 真的读到的那些」，这就是又读到了一个。
 
@@ -5076,7 +5076,7 @@ tests/run.js 91 条全绿。graph 剩下那 47 条里成堆的是：可变形参
 formals 前面就完了 —— 71 → 24。
 
 第二条是**内建面那一份是弱的**。asy 的内建表（builtin.cc）与 `base/plain.asy` 是两拨东西，
-而我们把"内建"写成了一份 asy 源码（`stage0/lib/asy/asy_builtins.asy`），里面难免混进本该由
+而我们把"内建"写成了一份 asy 源码（`src/lib/asy/asy_builtins.asy`），里面难免混进本该由
 plain 提供的那几个 —— `int[] sequence(int,int)` 就是（asy 那边只有 plain.asy:151 一份）。
 两份同签名的都可见时我们判"有多个同样合适的重载"，而 asy 压根只有一份。`asyVisible` 末尾
 加一档 `asyBiWeak`：真库里出现**同签名**的一份时，内建面那一份退场。
@@ -5370,7 +5370,7 @@ asyFit 的头注释早写着"任何非可变的候选都比可变的合适"，�
 
 **2. `settings` 是内建模块**（新的 `asySettingsIn`）。真 asy 那边它是 settings.cc 那一串
 addOption，任何文件里 `settings.outformat="pdf";` 直接就能写。这一层从前只有 base 里
-`access settings;` 过的文件看得见 stage0/lib/asy/settings.asy。补在 `asyAutoPlainIn`
+`access settings;` 过的文件看得见 src/lib/asy/settings.asy。补在 `asyAutoPlainIn`
 **后面** —— settings.asy 自己也会拿到 autoplain，先加载会让 plain 里那句 `access settings;`
 撞上"循环 import"；内建面正在加载时整条跳过（不然 plain_constants.asy:73 的 `void(file)`
 在 `struct file` 并进来之前就炸，量过）。7 个例子等它。
@@ -6010,7 +6010,7 @@ genusthree.asy **110ms**（没有并行；口径与前几批同）。
 ### 一批：asy 那一侧的 `struct file`（真的读文件，例子面 198 -> 203）
 
 上一批只加了原语 `(readtext E)`；这一批把 asy 的读文件那一族搭在它上面，全在
-`stage0/lib/asy/asy_builtins.asy` 里（前端只多一个口子）。这样例子面从 **198 干净 / 22 有诊断**
+`src/lib/asy/asy_builtins.asy` 里（前端只多一个口子）。这样例子面从 **198 干净 / 22 有诊断**
 到 **203 / 17**，降级那一层（`OMNI_SWEEP_SX=1`）从 196 到 **201**。
 
 搭法：`struct file` 里存**整份内容按 '\n' 切开的行**加一个 `(li, ci)` 位置，`input()` 用新的
@@ -6731,7 +6731,7 @@ splitpatch（`.initialized`）。
 
 `AiryDisk.asy:2` 的 `import gsl;`，要的只有一个 `J(1,r)`。asy 那边 `gsl` 不是 .asy 文件，
 是 gsl.cc 注册的一个内建模块：`J` 是 `addGSLRealRealFunc<gsl_sf_bessel_Jnu>`，也就是
-**实数阶** Bessel Jν。模块这一头这边现成 —— 模块搜索路径里已经有 `stage0/lib/asy`
+**实数阶** Bessel Jν。模块这一头这边现成 —— 模块搜索路径里已经有 `src/lib/asy`
 （cli.js:196），摆一份 `gsl.asy` 就能 import 上。卡的是**精度**：
 
 - 宿主数学库的**交集**里没有 Bessel。libm 有 `j0/j1/jn`（POSIX 扩展），V8 没有 ——
@@ -6764,7 +6764,7 @@ Dekker 拆分，只要 `+ - *`，不要 FMA，所以两个宿主都写得出来�
   asy/GSL `-0.00468282348234585`。`J(0,21)` 也一样，这边对、那边末位差 1。
 - `J(5,10)`、`J(20,21)` 与 asy **逐字节一样**。
 
-`stage0/lib/asy/gsl.asy`（新文件，模块搜索路径里已经有这个目录，见 cli.js:196）。
+`src/lib/asy/gsl.asy`（新文件，模块搜索路径里已经有这个目录，见 cli.js:196）。
 只给 `J`，别的（Y、I、K、Ai、Bi、椭圆积分、ζ…）没给 —— 220 个例子里只有
 AiryDisk.asy:2 用 gsl，用的就是 `J(1,r)`。阶只做**整数**（含负整数，
 J_{-n} = (-1)^n J_n）：非整数阶要 Γ(k+ν+1) 那条路（量过 asy 给
@@ -6812,7 +6812,7 @@ three_surface.asy:460 `S.P=new triple[s.P.length][]`，紧接着 :463 `triple[] 
 铺空引用时那一读就是 `null reference`，于是 three / graph3 那一族**一个都跑不起来**
 （`import three; write(1);` 都死）。降级那一头一直是干净的，所以快扫看不见它。
 
-改法（`stage0/src/frontend-asy/exprs.js` 的 `asyNewArray`）：把判据从"给了几个长度"
+改法（`src/core/frontend-asy/exprs.js` 的 `asyNewArray`）：把判据从"给了几个长度"
 换成"**这个数组的元素自己是不是数组**"——
 
     let cell = t; let dims = 0;
@@ -7039,7 +7039,7 @@ record 正文语句 rec.stmts        44 条            recNew 要按 mat 与字�
 **接口索引**：函数 / 全局量 / record 可见性 / 类型别名 / 转换 / 运算初值全是**标量表**
 （名字、签名、符号、槽位），只有四处存打包过的 AST 片段：默认实参、record 字段的
 `def`/`fnbody`、struct 正文语句、以及默认实参里出现 `new-function` 时那个被调方的正文。
-`stage0/src/frontend-asy/iface.js` 是这一格的全部（`asyIfaceDump` / `asyIfaceLoad`），
+`src/core/frontend-asy/iface.js` 是这一格的全部（`asyIfaceDump` / `asyIfaceLoad`），
 读回时由 `lower.js` 的新 `unitStub` 造一个**没有正文**的单元。
 
 两个把索引撑爆的坑，都是量出来才知道：
@@ -7346,11 +7346,11 @@ asySlotAssign 与 asyAssign 的那三条落点），写着 `guide` 的记一条�
 **七圈一句颜色都不印**（削完全都一样，psfile 省掉了），我们印 `1 -0.0310078 0` 一路下去。
 gray/rgb/cmyk 三个构造都补上"负的当 0、饱和度超 1 按 1/sat 整组缩"。
 
-**又一个跑错程序的缓存**（与第七十九刀同一类）。`cli.js` 的 `srcStamp()` 注释写着"stage0/src
-底下每个文件"，代码走的却是 `installDir()` —— 那是 `stage0/src/host`。于是改了 frontend-asy
+**又一个跑错程序的缓存**（与第七十九刀同一类）。`cli.js` 的 `srcStamp()` 注释写着"src/core
+底下每个文件"，代码走的却是 `installDir()` —— 那是 `src/core/host`。于是改了 frontend-asy
 底下任何一处降级器，产物缓存的键都不动：同一份探针在改完前端之后**仍然出旧图**，
-`rm -rf .omni-cache/asy-js` 之后才对。往上走一级走全 `stage0/src`，键里存整条路径而不是基名。
-（`tests/asy/eps.js` 自己那份 `srcStamp` 一直是对的 —— 它走 `stage0/src` 与 `stage0/lib`。）
+`rm -rf .omni-cache/asy-js` 之后才对。往上走一级走全 `src/core`，键里存整条路径而不是基名。
+（`tests/asy/eps.js` 自己那份 `srcStamp` 一直是对的 —— 它走 `src/core` 与 `src/lib`。）
 
 **摇骰子的那七个不计分**：random.cc:10 用 `std::random_device` 播种 `std::mt19937_64`，
 真 asy 自己两趟都不一样（量过：polardatagraph 连跑两趟，`%%BoundingBox` 从
@@ -8711,7 +8711,7 @@ bootstrap 60/0 不动点，外加原生二进制上那三种失效的手工核�
 asy_builtins/settings 里从没被引到的东西 —— 所有前端都是"把库整份降下来"，而这条管线
 一直没有摇树。
 
-`stage0/src/hir/prune.js`：从入口做一遍可达性，`mod.funcs` 里不可达的一个都不发。
+`src/core/hir/prune.js`：从入口做一遍可达性，`mod.funcs` 里不可达的一个都不发。
 放在 `compile()` 的出口（五个前端共用那一处），所以五条腿、六个后端一次都有。
 
 按**字符串**找引用，不按节点种类。OIR 里"提到一个函数"的形式不止一种（`Call.func`、
@@ -8725,7 +8725,7 @@ containers/boxDeeps/closures/fnTypes）里提到的一切，方法表与闭包�
 （走 12705 个对象）。`emit-c` 端到端 1.15s -> 1.05s。`OMNI_PRUNE=0` 关掉。
 
 摇的收益**只在"用库的小程序"上**，这一点要说清：同一趟摇编译器自己
-（`emit-c stage0/src/cli.js`）是 **2151 -> 2142**，只摇掉 9 个 —— 编译器几乎把自己全用上了。
+（`emit-c src/core/cli.js`）是 **2151 -> 2142**，只摇掉 9 个 —— 编译器几乎把自己全用上了。
 所以这一刀不是"普遍省 5 倍"，它省的是 asy/jnc 那种"44 行代码 + 一整个库"的形状，
 而那正是测试轴上几百个例子的形状。
 

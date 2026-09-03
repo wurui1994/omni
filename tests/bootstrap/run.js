@@ -1,17 +1,17 @@
 #!/usr/bin/env node
 // Omni — 自举测试（第六条测试轴）
 //
-// 前五条轴测的都是"编译器 C0（node 直接跑 stage0/src）输出对不对"。这一条测的是**编译器
+// 前五条轴测的都是"编译器 C0（node 直接跑 src/core）输出对不对"。这一条测的是**编译器
 // 自己**：让 C0 编译自己得到 C1，再让 C1 编译自己得到 C2。
 //
-//   C0 = node stage0/src/cli.js
-//   C1 = node <C0 emit-js stage0/src/cli.js>
-//   C2 = node <C1 emit-js stage0/src/cli.js>
+//   C0 = node src/core/cli.js
+//   C1 = node <C0 emit-js src/core/cli.js>
+//   C2 = node <C1 emit-js src/core/cli.js>
 //
 // 要求：
 //   1. C1 == C2 逐字节相同（不动点 —— 说明 C1 是个和 C0 语义等价的编译器）
 //   2. 每个 js-exec / omni 用例，C1 的产物和 C0 的产物逐字节相同
-//   3. C 路径与 stage2：交给编译器的内置命令 `omni bootstrap`（stage0/src/bootstrap.js）——
+//   3. C 路径与 stage2：交给编译器的内置命令 `omni bootstrap`（src/core/bootstrap.js）——
 //      它摆出可安装的产物树、验证 N1 的产出等于 C0、并让 N1 编译出 N2 再比对两代的产出
 //
 //   node tests/bootstrap/run.js
@@ -26,7 +26,7 @@ import { spawnSync } from 'node:child_process';
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
 const quick = process.argv.includes('-q');
-const cli = join(root, 'stage0', 'src', 'cli.js');
+const cli = join(root, 'src', 'core', 'cli.js');
 const dir = workDir('boot');
 
 // 自举这条路上的 C **必须带优化**，与 cli.js 的默认档（-O0，为了迭代速度）分开。
@@ -41,7 +41,7 @@ if (process.env.OMNI_OPT === undefined || process.env.OMNI_OPT === '') process.e
 // 就找不到 —— 那是布局问题，不是编译器问题。
 const binDir = join(dir, 'src', 'host');
 mkdirSync(binDir, { recursive: true });
-symlinkSync(join(root, 'stage0', 'lib'), join(dir, 'lib'));
+symlinkSync(join(root, 'src', 'lib'), join(dir, 'lib'));
 
 const node = (args) => {
   const r = spawnSync(process.execPath, args, { encoding: 'utf8', maxBuffer: 1 << 28 });
@@ -63,7 +63,7 @@ const bad = (msg, detail) => {
 
 // ---- 阶段 1/2：C0 -> C1 -> C2 -------------------------------------------------
 const stages = [];
-let prev = ['node', cli]; // C0 的调用方式：node stage0/src/cli.js
+let prev = ['node', cli]; // C0 的调用方式：node src/core/cli.js
 for (const gen of [1, 2]) {
   const t0 = Date.now();
   const r = node([...prev.slice(1), 'emit-js', cli]);
@@ -132,7 +132,7 @@ if (c1 && !quick) {
 }
 
 // ---- 阶段 5：C 路径 + stage2 -----------------------------------------------
-// 这一段**不再自己实现**：自举是编译器的内置命令（`omni bootstrap`，见 stage0/src/bootstrap.js），
+// 这一段**不再自己实现**：自举是编译器的内置命令（`omni bootstrap`，见 src/core/bootstrap.js），
 // 测试只负责调用它并检查退出码。它比这里原来那段多做两件事 —— 摆出可安装的产物树、
 // 让 N1 编译出 N2 并比对两代原生编译器的产出（真正的 stage2）。
 if (c1 && !quick) {
@@ -218,7 +218,7 @@ if (c1 && !quick) {
     //
     // 这一条要 14s（node 1.8s + 原生 9s，另有 clang 那边的常数）：原生构表比 node 慢 5 倍，
     // 慢在 Map 上。这个比值本身是要记住的数 —— C 后端的 Map/Set 是待优化项，不是这条门槛的问题。
-    const gJnc = join(root, 'stage0', 'src', 'frontend-jnc', 'jnc.grammar');
+    const gJnc = join(root, 'src', 'core', 'frontend-jnc', 'jnc.grammar');
     const inJnc = join(dir, 'glr-jnc.in');
     writeFileSync(inJnc, 'class C1 { int m_x; }\nC1* c;\nint f(int a) { return a * 2; }\n');
     both('glr jnc (prefer)', ['glr', gJnc, inJnc], false);
@@ -227,7 +227,7 @@ if (c1 && !quick) {
     // 于是 matchFuse 在原生构建里一次都没被碰过 —— 那段全是 startsWith / charCodeAt /
     // 模板串拼接，正是封闭 ABI 最容易漏的一类。输入里三样东西各占一条：算符重载的声明、
     // 把算符当值传、`new T[]{...}` 那处靠优先级消掉的歧义。
-    const gAsy = join(root, 'stage0', 'src', 'frontend-asy', 'asy.grammar');
+    const gAsy = join(root, 'src', 'core', 'frontend-asy', 'asy.grammar');
     const inAsy = join(dir, 'glr-asy.in');
     writeFileSync(inAsy, 'real operator +(real a, real b) { return a; }\nx = fold(operator ^^, a);\nreal[] d = new real[] {1, 2};\n');
     both('glr asy (fuse)', ['glr', gAsy, inAsy], false);

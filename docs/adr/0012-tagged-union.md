@@ -71,7 +71,7 @@ match (s) {
 
 ### 4. `match` 在检查器里就降级成 `if / else if` 链
 
-后端完全不认识 `match`：`stage0/src/hir/check.js` 的 `matchStmt()` 直接产出
+后端完全不认识 `match`：`src/core/hir/check.js` 的 `matchStmt()` 直接产出
 `Local`（主语只求值一次）+ 一串 `If`，两个后端只多认三个表达式节点
 （`MakeEnum` / `EnumTag` / `EnumPayload`）与一个零值节点（`ZeroEnum`）。
 
@@ -126,16 +126,16 @@ match (s) {
 
 ## 落地情况
 
-- `stage0/src/parse/lexer.js`：关键字 `enum` / `match` / `case` / `default`。
-- `stage0/src/parse/parser.js`：`parseEnum()` / `parseMatch()` / `parseCaseBody()`；
+- `src/core/parse/lexer.js`：关键字 `enum` / `match` / `case` / `default`。
+- `src/core/parse/parser.js`：`parseEnum()` / `parseMatch()` / `parseCaseBody()`；
   `enum` 名进预扫描表（前向引用的类型也能识别）；`private enum` 进 `CAN_HIDE`。
-- `stage0/src/hir/types.js`：`enumType()`、`typeKey` 用 `E<名>`、`cTypeName` 用
+- `src/core/hir/types.js`：`enumType()`、`typeKey` 用 `E<名>`、`cTypeName` 用
   `e_<名>`、零值 `ZeroEnum`。
-- `stage0/src/hir/check.js`：变体与载荷解析、按值环检测（`valueCycle`）、
+- `src/core/hir/check.js`：变体与载荷解析、按值环检测（`valueCycle`）、
   `enumRef()` / `makeEnum()`（构造）、`matchStmt()`（降级成 if 链 + 穷尽性检查）。
-- `stage0/src/backend-js/emit.js`：`$new_E*` / `$cp_E*`，`MakeEnum` / `EnumTag` /
+- `src/core/backend-js/emit.js`：`$new_E*` / `$cp_E*`，`MakeEnum` / `EnumTag` /
   `EnumPayload`，形参与左值的按值拷贝。
-- `stage0/src/backend-c/emit.js`：`sortAggregates()`（struct 与 enum 同一张拓扑序）、
+- `src/core/backend-c/emit.js`：`sortAggregates()`（struct 与 enum 同一张拓扑序）、
   `enumBody()` / `enumNew()` / `enumMakers()`。
 - 测试：`tests/cases/25_enum.omni`（js==c 差分：载荷含 struct/容器/另一个 enum、
   值语义、零值、`break` 不被 match 吃掉、变体里的容器仍是引用语义）、

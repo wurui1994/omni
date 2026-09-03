@@ -239,7 +239,7 @@ export const JS_ABI = {
 
   // ---------------------------------------------------------------- node 宿主面
   // 只收"真的要问操作系统"的东西。path 的 join/dirname/basename/resolve/relative/
-  // isAbsolute 是纯字符串计算，写在 stage0/src/host/path.js 里两个后端一起用 ——
+  // isAbsolute 是纯字符串计算，写在 src/core/host/path.js 里两个后端一起用 ——
   // 进 ABI 只会多出一处"宿主实现与我的实现是否逐字符一致"的分叉点。crypto 的
   // sha256 同理，不进 ABI。
   // 失败一律抛（和 node 的同步 API 一致），到 try/catch 落地时接进 pending-error 槽。

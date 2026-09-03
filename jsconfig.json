@@ -11,5 +11,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["stage0/src/**/*.js", "tests/**/*.js", "bench/**/*.js"]
+  "include": ["src/core/**/*.js", "tests/**/*.js", "bench/**/*.js"]
 }

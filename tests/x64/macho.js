@@ -19,11 +19,11 @@ import { writeFileSync, mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import * as x from '../../stage0/src/x64/encode.js';
-import { REG as R, ALU, CC, FOP, XMM } from '../../stage0/src/x64/encode.js';
-import { CodeBuf } from '../../stage0/src/x64/asm.js';
-import { writeObject } from '../../stage0/src/link/macho.js';
-import { utf8Bytes } from '../../stage0/src/host/utf8.js';
+import * as x from '../../src/core/x64/encode.js';
+import { REG as R, ALU, CC, FOP, XMM } from '../../src/core/x64/encode.js';
+import { CodeBuf } from '../../src/core/x64/asm.js';
+import { writeObject } from '../../src/core/link/macho.js';
+import { utf8Bytes } from '../../src/core/host/utf8.js';
 
 let failed = 0;
 let total = 0;

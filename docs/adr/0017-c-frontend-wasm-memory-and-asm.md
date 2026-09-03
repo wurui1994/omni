@@ -30,7 +30,7 @@ tcc 的源码树在 `/Users/wurui/Documents/Lang/reference/tinycc`，构建在
   同一份源码 `clang -O2` 编 0.33s、跑 **0.034s**。也就是 tcc 的码比 clang -O2 慢约 **3.3x**，
   而它的编译快约 **10x**。这两个数字就是这一路的档位：**编译要快到 tcc 那一档，
   生成代码只要求"不比 tcc 差"**。
-- **我们现在的吞吐（对照）**：`emit-c stage0/src/cli.js`，47866 行 JS -> 214007 行 C，
+- **我们现在的吞吐（对照）**：`emit-c src/core/cli.js`，47866 行 JS -> 214007 行 C，
   **1.91s** ≈ **25k 行/秒**。比 tcc 慢一个数量级 —— 差距在哪儿要按刀量，不先猜。
 
 ## 借什么、不借什么
@@ -62,7 +62,7 @@ tcc 的源码树在 `/Users/wurui/Documents/Lang/reference/tinycc`，构建在
 
 `.c` 进来有两条路，**同一份输入必须产出逐字节相同的核心方言 / MIR**：
 
-- **路径 A（GLR）**：`stage0/src/glr/` 加一份 C 的 grammar，走与 asy / jnc 相同的形状
+- **路径 A（GLR）**：`src/core/glr/` 加一份 C 的 grammar，走与 asy / jnc 相同的形状
   （grammar -> 解析树 -> `frontend-c/lower.js`）。它的价值是错误信息、编辑器、以后的
   重构工具 —— 一棵真的树在手上。
 - **路径 B（tcc 忠实路径）**：`frontend-c/tccpp.js` + `frontend-c/tccgen.js`，**一遍过、
@@ -102,7 +102,7 @@ typedef 表，这与 tcc 的做法（`tccgen.c` 的 `Sym` 链）是同一件事�
 
 ## 决策三：MIR 要长出的五格
 
-现在的 MIR 差这些（`stage0/src/mir/ir.js`）：
+现在的 MIR 差这些（`src/core/mir/ir.js`）：
 
 1. **`T_I32` 与 `T_F32`。**类型码只用到 10（`T_TPTR`），低 5 位还有 21 个空位，加两个码不动
    任何位布局。为什么不沿用 WAT 前端那招"i32 存成符号扩展的 i64、每次运算后 `<<32 >>32`"
@@ -196,7 +196,7 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
 
 三层，从下往上：
 
-1. **指令编码器**（`stage0/src/backend-native/arm64/encode.js`、`x86_64/encode.js`）。
+1. **指令编码器**（`src/core/backend-native/arm64/encode.js`、`x86_64/encode.js`）。
    纯函数：指令 + 操作数 -> 字节。这一层是可以逐条对着 `llvm-mc` 反汇编验的 —— 每条编码
    一个用例，`llvm-mc -disassemble` 印出来的文本就是期望值。**这是整件事里最枯燥也最容易
    做对的一层，先做它。**
@@ -391,40 +391,40 @@ C **直发 MIR**；wasm 是 MIR 的一个**出口**和一个**入口**，不是 
 
 9. **arm64 指令编码器**（对着 `llvm-mc` 验）——**前三片已落地**（第一批 96 条编码、第二批补齐逻辑立即数/位段/浮点/屏障、第三片是带标签回填与符号记账的指令缓冲），见下面的第九刀第一到三片节。
 10. **arm64 代码生成器 + 内存里执行**（`omni run x.c` 在没有 cc 的机器上跑起来）——**前四片已落地**（整数与结构化控制流；调用与递归；浮点与它的调用约定；存取。每个值一个栈位；**native 这条腿上没有线性内存**，地址就是真指针 —— 线性内存只属于 wasm 与解释器那两条腿。用 `.incbin` + clang 链接后在真机上**跑起来**验的），见下面的第九刀第四到七片节。
-11. **x86_64 同两步**——**两步都落地了**（`stage0/src/x64/`：编码器与缓冲对着 `llvm-mc` 验、`from_mir.js` 生成的代码在 Rosetta 上真跑过，见第九刀第十二到十六片节），然后 **Mach-O / ELF 写出**——**Mach-O 两种架构都写了**（`stage0/src/link/macho.js`），然后**内联汇编**——Mach-O 的目标文件写出**已落地前三片**（`MH_OBJECT`、`__TEXT,__text` 与 `__DATA,__data`、`BRANCH26`/`PAGE21`/`PAGEOFF12` 三种重定位；`CCALL` 落成 `bl <符号>`、模块级变量与字符串字面量落成 `adrp`/`add`，clang 能把我们的 `.o` 与 libc 链起来跑，C 那边也读得到我们定义的数据符号），**读入与并合也已落地**（`link.js`：`readObject` 读回自己写出去的东西、`linkObjects` 把几个 `.o` 并成一个并当场填掉跨文件的 `BRANCH26`），见下面的第九刀第八到十一片节。**ELF 目标文件写出也落地了**（第三十八片，
-`stage0/src/link/elf.js`：`ET_REL`，节的次序与 `elf_output_obj` 的排布算式照
+11. **x86_64 同两步**——**两步都落地了**（`src/core/x64/`：编码器与缓冲对着 `llvm-mc` 验、`from_mir.js` 生成的代码在 Rosetta 上真跑过，见第九刀第十二到十六片节），然后 **Mach-O / ELF 写出**——**Mach-O 两种架构都写了**（`src/core/link/macho.js`），然后**内联汇编**——Mach-O 的目标文件写出**已落地前三片**（`MH_OBJECT`、`__TEXT,__text` 与 `__DATA,__data`、`BRANCH26`/`PAGE21`/`PAGEOFF12` 三种重定位；`CCALL` 落成 `bl <符号>`、模块级变量与字符串字面量落成 `adrp`/`add`，clang 能把我们的 `.o` 与 libc 链起来跑，C 那边也读得到我们定义的数据符号），**读入与并合也已落地**（`link.js`：`readObject` 读回自己写出去的东西、`linkObjects` 把几个 `.o` 并成一个并当场填掉跨文件的 `BRANCH26`），见下面的第九刀第八到十一片节。**ELF 目标文件写出也落地了**（第三十八片，
+`src/core/link/elf.js`：`ET_REL`，节的次序与 `elf_output_obj` 的排布算式照
 `tccelf.c`；tcc 的 `-c` 在所有目标上都写 ELF，所以这一份写出六个目标共用，
 差别只在 `e_machine`、重定位号与符号名前那条下划线）。**读回来能原样写回去**（第四十一片，
 六个目标 108 条逐字节相同），**并合与 `tcc -r` 也对上了字节**（第四十二片，
-`stage0/src/link/elf_merge.js`，命令行 `omni elf-r`：六个目标 108 条逐字节相同 ——
+`src/core/link/elf_merge.js`，命令行 `omni elf-r`：六个目标 108 条逐字节相同 ——
 输入是 tcc 自己出的 `.o`，所以这一步的对账不必等代码生成对齐）。**可执行文件从 PE 起手**
-（第四十三片，`stage0/src/link/pe.js`：读一份 PE 映像再从 `pe_template` 写回去，两个
+（第四十三片，`src/core/link/pe.js`：读一份 PE 映像再从 `pe_template` 写回去，两个
 win32 目标 160 条逐字节相同 —— 三种可执行格式里只有 PE 没有代码签名、没有 dyld 那一摊，
 而且在 macOS 上就链得出来）。**导入表也照原样重建了**（第四十四片：两个 win32 目标
 160 条逐字节相同，320 个 dll、1990 个导入符号）。**异常展开表也重建了**（第四十五片：
 `.pdata` 与 arm64 的 `.xdata`，160 条逐字节相同，1426 个函数）。**静态库也读得进来了**
-（第四十六片，`stage0/src/link/ar.js`：成员、符号索引与「按需取用要转圈」那条规矩，
+（第四十六片，`src/core/link/ar.js`：成员、符号索引与「按需取用要转圈」那条规矩，
 7 个库、65 个成员、825 条索引）。**「该读哪些字节」也与 tcc 一致了**（第四十七片，
-`stage0/src/link/pe_load.js`：入口符号的挑法、要接哪几个库、`.def` 导入库与按需取用，
+`src/core/link/pe_load.js`：入口符号的挑法、要接哪几个库、`.def` 导入库与按需取用，
 用 `tcc -vv` 打出来的那串 `-> 文件` / `   -> 成员` 当尺子，两个 win32 目标 160 条足迹
 逐条相同，共拉出 242 个成员）。**节表也摆对了**（第四十八片，
-`stage0/src/link/pe_sections.js`：按类重排、同类并节、导入桩把 `.text` 撑长、导入表接在
+`src/core/link/pe_sections.js`：按类重排、同类并节、导入桩把 `.text` 撑长、导入表接在
 thunk 节后面、arm64 的 `.reloc`，160 张节表的虚拟地址、文件偏移、长度与节名逐条相同 ——
 这一步与重定位无关，所以能单独对准）。**节里的字节也填对了**（第四十九片，
-`stage0/src/link/pe_reloc.js` + `stage0/src/link/pe_link.js`：导入桩、符号地址、链接器自己
+`src/core/link/pe_reloc.js` + `src/core/link/pe_link.js`：导入桩、符号地址、链接器自己
 提供的那几个符号、所有重定位落笔，160 份节内容与 tcc 逐字节相同）。**整份 `.exe` 也与
 tcc 逐字节相同了**（第五十片，`peWrite`：两个 win32 目标 160 份、853504 字节全同 ——
 从 `.o` 到 `.exe` 这一整条路是我们自己的了，读库、按需取用、装 `.def`、并合、分类摆地址、
 造导入表与导入桩、落重定位、算校验和、写文件；欠的是另一端，`.o` 里的字节还是 tcc 出的）。
 **这条链子已经能把 tcc 自己链出来**（第五十二片，`tests/c/pe-tcc.js`：`tcc.c` 一份
 `ONE_SOURCE` 的 `.o`，x86_64 400896 字节、arm64 476160 字节，与 tcc 自己链的逐字节相同）。
-**换个格式也走通了**（第五十三片，`stage0/src/link/elf_exe.js`：Linux 的 ELF 可执行文件，
+**换个格式也走通了**（第五十三片，`src/core/link/elf_exe.js`：Linux 的 ELF 可执行文件，
 尺子是 `<target>-tcc -static -nostdlib -Wl,-e,main`，两个目标 20 份逐字节相同 —— 节的
 两级排序、程序头、静态链接下照样要造的 `.got` 与 PT_GNU_RELRO 都在里面；命令行上是
 `omni elf-link`）。**动态链接那一整套也对上了**（第五十四片：`.interp`、`.dynsym`/`.dynstr`
 与两张哈希表、`.dynamic` 的十五条标签、`.rela.got`、`.eh_frame_hdr`，十六条节八个段头，
 两个目标又是 20 份逐字节相同）。**第三个格式也补齐了**（第五十五片，
-`stage0/src/link/macho_exe.js`：macOS 的 Mach-O 可执行文件，尺子是
+`src/core/link/macho_exe.js`：macOS 的 Mach-O 可执行文件，尺子是
 `<target>-osx-tcc -nostdlib`，两个目标 22 份逐字节相同 —— 段套节、按用途归类的
 `enum skind`、链式修正（`LC_DYLD_CHAINED_FIXUPS` 的 bind/rebase 链）、导出符号的前缀树
 （`LC_DYLD_EXPORTS_TRIE`）、`__stubs` 桩子；arm64 那一份签完名能跑，命令行上是
@@ -612,7 +612,7 @@ Bellard 拿它让 tcc 编译自己）也通了。`cpp/` 与 `inc/` 两组各多�
 缩进是 **include 深度**，取的是压栈**之前**的值。这几行在 tcc 那边是 `next()` 里头印的，
 所以排在这一个记号的行标**前面** —— 顺序也是尺子的一部分。
 
-**真的系统头**（第八十八片）：系统头目录成了**两段** —— 自带的 `stage0/include`
+**真的系统头**（第八十八片）：系统头目录成了**两段** —— 自带的 `src/include`
 （对着 tcc 的 `{B}/include`）在前，本机 SDK 的 `/usr/include` 在后。tcc 那一段是
 configure 时用 `xcrun --show-sdk-path` 定死编进去的，我们没有 configure，于是第一次用
 的时候找一次记下来。新的一组门 `sysinc/`：两边都**不给 `-I`**，各自去找
@@ -635,7 +635,7 @@ tcc 没装，它 `{B}` 那一格不存在、一路掉到 SDK 上；拿 `-B` 指�
 **拿 tinycc 自己的源码当尺子**（第九十一片）：`tests/c/selfpp.js` —— tinycc 那 30 份
 `.c`，两边各自去找头（只给 `-I <构建目录>`），`-E -P` 出来的字节必须一样。**29 份全同**，
 剩下一份是 tcc 自己就拒的旧文件（`il-gen.c`），加起来约 23 万行展开后的正文。
-为此把 `stage0/include/stddef.h` 对着 tcc 那一份逐行对齐了 —— 头文件的内容直接就是
+为此把 `src/include/stddef.h` 对着 tcc 那一份逐行对齐了 —— 头文件的内容直接就是
 输出的一部分：typedef 的条数与次序、`offsetof` 展开成 `__builtin_offsetof` 还是就地
 展开、那句 `void *alloca(size_t size);` 在不在，都在输出里看得见。
 
@@ -1104,7 +1104,7 @@ GPU 那边 f32 其实比 f64 更自然，留成后面单独一刀。
 ABI 里（ADR-0011 决策二会当场报错）。按「jancy 支持不可向方言妥协」那条，**长 ABI，不绕路**：
 op 字母 `'F'`，四个落点 —— `frontend-js/lower.js` 的 `'Math.x'` 表、`hir/js_abi.js` 的 op
 表与注释、`backend-js/prelude.js`（在那个 `String.raw` 模板里，不能有反引号）、
-`stage0/runtime/omni_js_num.c`（`(float)x` 再回 double）。
+`src/runtime/omni_js_num.c`（`(float)x` 再回 double）。
 `tests/js-exec/cases/01-expr.js` 加了四行断言（`fround(0.1+0.2)` / `fround(1/3)` /
 `fround(16777217)` / `fround(-0.5)`），**参照是 node** ——
 `node == omni-js == omni-c == interp == interp-mir` 五方逐字节相同才算过。
@@ -1497,7 +1497,7 @@ intmax_t，字符串与浮点都要报错（`tccpp.c:1449`）。两条容易漏�
 ### 一遍过、没有 AST
 
 `tccgen.c` 与 `tccpp.c` 是同一遍：语法分析器一边从 `next()` 取记号，一边发目标码，
-中间没有树。`stage0/src/frontend-c/tccgen.js` 照这个结构：`Cpp` 是记号源，`CGen` 一边
+中间没有树。`src/core/frontend-c/tccgen.js` 照这个结构：`Cpp` 是记号源，`CGen` 一边
 解析一边 `f.emit(...)`。优先级表（`tccgen.c:6506-6524`）、`expr_infix`（6536）、
 `expr_landor`（6570）、`expr_cond`（6608）、`expr_eq`（6738）、`gexpr`（6757）、
 `block`（7177）、`decl`（8747）逐个对应，出处注在实现旁边。
@@ -1869,7 +1869,7 @@ puts:  load $p0 -> ccall "puts"($p0) -> ret
 `65536` 会去读它自己进程的第 64K 字节。指针一进 libc，两个地址空间就对不上了。
 
 所以 libc 必须是一个**读写我们线性内存**的宿主模块 —— 也就是 wasm 那边的
-`(import "env" "puts" …)`，一模一样的结构。`stage0/src/interp/libc.js` 就是它：
+`(import "env" "puts" …)`，一模一样的结构。`src/core/interp/libc.js` 就是它：
 `readCStr(addr)` / `writeCStr` 走 `mem` 的字节，`callLibc(name, args)` 是唯一入口。
 放在 `interp/` 而不是 `frontend-c/` —— 一开始放错了，那会让 `mir/interp.js` 依赖前端，
 方向是反的：libc 属于**执行侧**，跟哪个前端产生的 MIR 无关。
@@ -3330,7 +3330,7 @@ libc 头文件那一摊 —— 那是「拿自己编译 tinycc」路上下一堵
 const C_SYS_INCLUDE = [join(installDir(), '..', '..', 'include')];
 ```
 
-即 `stage0/include/`。
+即 `src/include/`。
 
 ### 装哪几份：与 tcc 自带的**一一对应**
 
@@ -3381,7 +3381,7 @@ ldbl 113 8 1 1          /* LDBL_MANT_DIG, sizeof(long double),
 **我们照抄这处矛盾**，理由还是那一条：tcc 的二进制是 oracle，一份逐字节对账的测试轴
 不能一边说"以 tcc 为准"一边挑着改。它进了「将来 `-std=` 严格档」的候选表，
 成为**第二**条（第一条是第二十三片那处链式指定初始化器的分岔）。
-`stage0/include/float.h` 头上有一节写着这些量出来的数，免得将来有人"顺手修好它"。
+`src/include/float.h` 头上有一节写着这些量出来的数，免得将来有人"顺手修好它"。
 
 `gen/28-headers.c` 里 `float.h` 那一段因此**不比十进制字面量，只比形状与关系**：
 
@@ -3414,7 +3414,7 @@ C99 要求它，tcc 不给。测试里先写了它，tcc 报 `'FLT_EVAL_METHOD' 
 
 ### 量出来的数
 
-- `stage0/include/` 四份头，共 138 行（`float.h` 69 行，一半是那节说明）。
+- `src/include/` 四份头，共 138 行（`float.h` 69 行，一半是那节说明）。
 - `tests/c/gen/28-headers.c`：退出码 67 + 209B stdout，与 `tcc -run` 逐字节相同。
   它一份文件里同时用上四份头：`offsetof`、`size_t` 的宽度与无符号回绕、
   `va_list` 转接一层、`bool` 的宽度与"真值只有 0/1"、`float.h` 的形状与那处矛盾。
@@ -3504,7 +3504,7 @@ tcc 把 `<stdio.h>` / `<stdlib.h>` / `<string.h>` 转手给系统，链接期再
 
 ### 量出来的数
 
-- `stage0/include/` 从 4 份 138 行长到 7 份 235 行。
+- `src/include/` 从 4 份 138 行长到 7 份 235 行。
 - `tests/c/gen/29-libc-headers.c`：退出码 24 + 210B stdout，与 `tcc -run` 逐字节相同。
   **一行手写声明都没有**，三行 `#include` 就够。oracle 那一侧 tcc 用的是 macOS 真正的
   头（量过：`#include <stdio.h>` 那三份 tcc 编得过），我们用自带的三份 ——
@@ -3578,7 +3578,7 @@ return typeof v === 'bigint' ? BigInt.asIntN(64, v) : v;
 C 说溢出时回端点值（`LONG_MAX` / `LONG_MIN` / `ULONG_MAX`）并把 `errno` 设成
 `ERANGE`。我们回同样的值，但**没有 `errno`** —— 那要一份 `<errno.h>` 与一个
 每线程的变量，独立一格。tcc 那边有真的 libc，所以溢出的输入两边会分岔，
-用例避开它。这一格记在 `stage0/include/stdlib.h` 头上。
+用例避开它。这一格记在 `src/include/stdlib.h` 头上。
 
 ### 量出来的数
 
@@ -3644,7 +3644,7 @@ C 只要求「排好」（C11 7.22.5.2），不要求稳定、也不要求 O(n l
 
 代价写在明处：**相等元素之间的次序是未规定的**，宿主的 libc 与我们不是同一个算法。
 所以要逐字节对账的用例里不能有比较相等的元素，也不能把「比较器被调了几次」
-算进输出 —— `gen/31` 只问 `calls > 0`。这一格记在 `stage0/include/stdlib.h` 上。
+算进输出 —— `gen/31` 只问 `calls > 0`。这一格记在 `src/include/stdlib.h` 上。
 
 `bsearch` 那边有一处次序容易写反：比较器的两个实参是 **key 在前**、数组元素在后
 （C11 7.22.5.1）。
@@ -3751,7 +3751,7 @@ C 只要求「排好」（C11 7.22.5.2），不要求稳定、也不要求 O(n l
 
 ### 量出来的数
 
-- `stage0/include/ctype.h`：30 行，13 条声明。
+- `src/include/ctype.h`：30 行，13 条声明。
 - `tests/c/gen/33-ctype.c`：退出码 10 + 14 行 stdout，与 `tcc -run` 逐字节相同。
   11 条谓词各在 8 个代表性字符加 3 个边角（`EOF` / `0` / `127`）上量一遍。
 - `tests/c/run.js`：**60 passed, 0 failed**。`tests/js-roundtrip/run.js`：110 passed。
@@ -3848,7 +3848,7 @@ fine 123 0
 
 ### 量出来的数
 
-- `stage0/include/errno.h`：36 行。前端那边一共 12 行（一个字段、一个常量、
+- `src/include/errno.h`：36 行。前端那边一共 12 行（一个字段、一个常量、
   留格子的四行、发 CCALL 的四行）。
 - `tests/c/gen/34-errno.c`：退出码 10 + 11 行 stdout，与 `tcc -run` 逐字节相同。
   钉了五格：出生是 0、读写与清零、那几个数、`strtol`/`strtoul` 的溢出与边界、
@@ -4058,7 +4058,7 @@ tcc 不需要这一刀：`-run` 是个**开关**，它后面第一个非选项�
 `cli.js` 的 `cSplitArgs`：**`--` 之后的都是被跑的程序的**。
 
 ```
-node stage0/src/cli.js c-run x.c -I dir -- aa bb
+node src/core/cli.js c-run x.c -I dir -- aa bb
 tcc -B … -run x.c aa bb                # 同一件事，tcc 的摆法
 ```
 
@@ -4406,7 +4406,7 @@ END t0   → state = id0; BR gotoloop
 ### 下一片
 
 第八刀第十六片：**真的 macOS 系统头**。到现在为止 `#include <stdio.h>` 拿到的是
-`stage0/include/` 里我们自己那份最小子集；要编 tinycc 自己的源码就得能读
+`src/include/` 里我们自己那份最小子集；要编 tinycc 自己的源码就得能读
 `/usr/include`（准确地说是 SDK 里那份），而那需要三样东西：`#include_next`、
 `__asm("_name")`（符号改名）、以及一整套 `__attribute__` 的**吃掉**（不必实现语义，
 但要能读过去）。它是「编 tinycc 自己的源码」这条路上最大的一块。
@@ -4554,7 +4554,7 @@ fd 级 IO）；`getc`/`putc` 在 macOS 上是真的函数（宏那一套是 `__s
 
 第十七片末尾的预判是「预期是 `setjmp`/`longjmp`、`struct` 传值、`__attribute__`」。
 量下来一个都不是 —— 拦路的六格全在**更前面**，而且每一格都是先在 macOS 的系统头里
-撞到的（`node stage0/src/cli.js c-mir libtcc.c -I …`，一次一格往前推）：
+撞到的（`node src/core/cli.js c-mir libtcc.c -I …`，一次一格往前推）：
 
 1. **`-D 名字` 的宏体是 `1`，不是空**（`tcc_define_symbol`：`value = *eq ? eq+1 : "1"`）。
    `config.h` 第一行就是 `#if !(TCC_TARGET_I386 || … || TCC_TARGET_ARM64 || …)`，
@@ -4720,7 +4720,7 @@ macOS SDK 里这一条有三个名字（`dispatch_compiler_barrier`、`os_compil
 **tinycc 自己那一整份源码编过了。**
 
 ```
-node stage0/src/cli.js c-mir -I"$SDK/usr/include" -I.omni-cache/tcc-build \
+node src/core/cli.js c-mir -I"$SDK/usr/include" -I.omni-cache/tcc-build \
   -I"$TCCSRC" -DONE_SOURCE=1 -DTCC_TARGET_ARM64 "$TCCSRC/tcc.c"
 exit=0     98200 行 MIR，零错误零警告
 ```
@@ -4881,7 +4881,7 @@ tcc 编得过，正是因为它连体都还没读。
 **整份 tinycc 的预处理输出与 `tcc -E -P` 逐字节相同。**
 
 ```
-node stage0/src/cli.js cpp -I"$SDK/usr/include" -I.omni-cache/tcc-build \
+node src/core/cli.js cpp -I"$SDK/usr/include" -I.omni-cache/tcc-build \
   -I"$TCCSRC" -DONE_SOURCE=1 -DTCC_TARGET_ARM64 "$TCCSRC/tcc.c"
 cmp 出来 IDENTICAL —— 27825 行
 ```
@@ -4966,7 +4966,7 @@ macOS 的 `<_stdio.h>` 也认这个名字）与 `#define _VA_LIST_DEFINED`，我
 **编出来的 tinycc 真的在预处理文件了**，而且输出与 tcc 自己逐字节相同：
 
 ```
-node stage0/src/cli.js c-run "$TCCSRC/tcc.c" -I"$SDK/usr/include" \
+node src/core/cli.js c-run "$TCCSRC/tcc.c" -I"$SDK/usr/include" \
   -I.omni-cache/tcc-build -I"$TCCSRC" -DONE_SOURCE=1 -DTCC_TARGET_ARM64 \
   -- -E -P .omni-cache/tiny.c
 cmp 我们跑出来的与 tcc 跑出来的 —— IDENTICAL
@@ -5087,7 +5087,7 @@ tccmacho.c:2142: error: internal: 位域跨过了它的容器（要 packed 那�
 **编出来的 tinycc 在预处理 tinycc 自己那一整份源码了**，而且逐字节相同：
 
 ```
-node stage0/src/cli.js c-run "$TCCSRC/tcc.c" -I"$SDK/usr/include" \
+node src/core/cli.js c-run "$TCCSRC/tcc.c" -I"$SDK/usr/include" \
   -I.omni-cache/tcc-build -I"$TCCSRC" -DONE_SOURCE=1 \
   -- -E -P -B.omni-cache/tcc-build -I.omni-cache/tcc-build -I"$TCCSRC" \
      -DONE_SOURCE=1 "$TCCSRC/tcc.c"
@@ -5188,7 +5188,7 @@ if ((vtop->type.t & VT_BTYPE) == VT_LLONG) type.t |= VT_LLONG; else type.t |= VT
 **编出来的 tinycc 在产可执行文件了**，而且与本机 tcc 产的**逐字节相同**：
 
 ```
-node stage0/src/cli.js c-run "$TCCSRC/tcc.c" … -DONE_SOURCE=1 \
+node src/core/cli.js c-run "$TCCSRC/tcc.c" … -DONE_SOURCE=1 \
   -- -B.omni-cache/tcc-build -o .omni-cache/ours/a.out .omni-cache/tiny.c
 .omni-cache/ours/a.out            # 真的跑起来，退出码 3（f(2) = 3）
 cmp 我们产的与本机 tcc 产的 —— IDENTICAL（36112 字节，0755，已签名）
@@ -5271,7 +5271,7 @@ arm64 的 macOS 上没签名的可执行文件跑不起来，所以 tinycc 写�
 源码产出的逐字节相同；拿那份 `tcc2` 再编一遍自己，产物与它自己**又**逐字节相同：
 
 ```
-node stage0/src/cli.js c-run "$TCCSRC/tcc.c" … -DONE_SOURCE=1 \
+node src/core/cli.js c-run "$TCCSRC/tcc.c" … -DONE_SOURCE=1 \
   -- -B.omni-cache/tcc-build -o .omni-cache/ours/tcc2 … "$TCCSRC/tcc.c"
 cmp ours/tcc2 theirs/tcc2                  # IDENTICAL，590272 字节，1m17s
 .omni-cache/ours/tcc2 -v                   # tcc version 0.9.28rc (AArch64 Darwin)
@@ -5303,7 +5303,7 @@ MIR，在**我们的解释器**上跑；跑起来的那个 tinycc 读它自己�
   round-to-nearest-even，所以这一格不需要自己写。
 
 `strtof` 在结果上再 `Math.fround`；`strtold` 与 `strtod` 同一格 —— 这个目标上
-`long double == double`（`stage0/include/float.h` 头上那节写了量出来的数）。
+`long double == double`（`src/include/float.h` 头上那节写了量出来的数）。
 
 `atof` 是 `strtod(s, NULL)`，不是另写一份。
 
@@ -5342,7 +5342,7 @@ MIR，在**我们的解释器**上跑；跑起来的那个 tinycc 读它自己�
 tinycc 去编它：
 
 ```
-node stage0/src/cli.js c-run "$T/tcc.c" … -- -w -I$T/tests -I$B -I$T \
+node src/core/cli.js c-run "$T/tcc.c" … -- -w -I$T/tests -I$B -I$T \
   -o .omni-cache/t26/ours/tcctest1 "$T/tests/tcctest.c"
 cmp ours/tcctest1 theirs/tcctest1        # IDENTICAL，206256 字节，1m11s
 ./tcctest1 > out.txt                     # 1011 行，与本机 tcc 编出来那份**逐行相同**
@@ -7319,7 +7319,7 @@ omni: runtime error: printf: 不认识的转换 '%C'
 
 ## 落地：第八刀第五十八片
 
-**`printf` 的 `%C` 与 `%S`。**改的是 `stage0/src/interp/libc.js` 一处（`cFormat` 那张
+**`printf` 的 `%C` 与 `%S`。**改的是 `src/core/interp/libc.js` 一处（`cFormat` 那张
 转换表），加的用例是 `tests/c/gen/78-wide-printf.c`。
 
 ### 一、`%C` 就是 `%lc`，`%S` 就是 `%ls`
@@ -7775,7 +7775,7 @@ alloca 直接借这一条（`this.vlaSeen = true`）—— 理由一字不改：
 
 ## 落地：第九刀第一片
 
-**arm64 指令编码器的第一批。**新文件两个：`stage0/src/arm64/encode.js`（编码）与
+**arm64 指令编码器的第一批。**新文件两个：`src/core/arm64/encode.js`（编码）与
 `tests/arm64/run.js`（对账）。96 条用例，与 llvm 逐条相同。
 
 到这一刀为止，前八刀做的是**前端**（C 源码 -> MIR -> 解释执行），借 tinycc 自举那件事
@@ -7847,7 +7847,7 @@ export const addImm = (sf, rd, rn, imm12, sh = 0) => addSubImm(sf, 0, 0, sh, imm
 ## 落地：第九刀第二片
 
 **arm64 编码器的第二批：逻辑立即数、位段、单目位运算、浮点、单向屏障。**
-`stage0/src/arm64/encode.js` 从 40 个导出长到 90 个，`tests/arm64/run.js` 从 96 条
+`src/core/arm64/encode.js` 从 40 个导出长到 90 个，`tests/arm64/run.js` 从 96 条
 用例长到 200 条（含 17 条「必须报错」的边界）。全部与 llvm 逐条相同。
 
 ### 一、逻辑立即数：arm64 最绕的一格
@@ -7934,7 +7934,7 @@ C 的强制转换只用 `fcvtzs`/`fcvtzu`（**向零取整**），别的取整�
 
 ## 落地：第九刀第三片
 
-**指令缓冲：标签、往前跳的回填、符号记账。**新文件 `stage0/src/arm64/asm.js`
+**指令缓冲：标签、往前跳的回填、符号记账。**新文件 `src/core/arm64/asm.js`
 （`CodeBuf` 与 `RELOC`）。`tests/arm64/run.js` 到 207 条。
 
 ### 一、为什么非要这一层
@@ -8001,7 +8001,7 @@ Mach-O 目标文件与自己的链接器（第 11 步）。
 ## 落地：第九刀第四片
 
 **MIR -> arm64 的第一版发射，而且是真跑起来验的。**新文件两个：
-`stage0/src/arm64/from_mir.js`（发射）与 `tests/arm64/from-mir.js`（对账）。
+`src/core/arm64/from_mir.js`（发射）与 `tests/arm64/from-mir.js`（对账）。
 32 条用例在真机上跑出来的返回值，与 JS 里用 BigInt 算的期望值逐条相同。
 
 这是第 10 步的第一片 —— 到这里为止，「C 源码 -> 会跑的机器码」这条路第一次通了半程
@@ -8273,7 +8273,7 @@ x28 上，每次访问发一条 `add x9, x28, x9`。**那是错的方向。**
 
 ## 落地：第九刀第八片
 
-**Mach-O 目标文件的写出，与外部符号的调用。**新文件 `stage0/src/arm64/macho.js`；
+**Mach-O 目标文件的写出，与外部符号的调用。**新文件 `src/core/arm64/macho.js`；
 `from_mir.js` 认了 `CCALL`。`tests/arm64/from-mir.js` 到 65 条，而且**整套 `.incbin`
 脚手架退役了** —— 现在是真的 `.o`，交给 clang 链接。
 
@@ -8428,7 +8428,7 @@ ref**（那是为哈希稳定性做的，ADR-0014 决策 5）。于是「同一�
 
 ### 三、串的字节是 UTF-8，一格不多
 
-`utf8Bytes`（`stage0/src/host/utf8.js`，C 后端与 LLVM 后端共用的那一份）直接拿来用。
+`utf8Bytes`（`src/core/host/utf8.js`，C 后端与 LLVM 后端共用的那一份）直接拿来用。
 用例查的是 `strlen("hello, 世界")` 等于 UTF-8 的**字节数**（13，不是 9 个字符），
 外加读第 7 个字节等于 `0xe4`（「世」= U+4E16 -> `e4 b8 96` 的第一节）—— 后一条顺手
 把 `MLOAD` 的静态偏移也压在串上了。
@@ -8456,7 +8456,7 @@ ref**（那是为哈希稳定性做的，ADR-0014 决策 5）。于是「同一�
 
 ## 落地：第九刀第十一片
 
-**Mach-O 的读入，与「几个 `.o` 并成一个」。**`stage0/src/arm64/link.js`：`readObject`
+**Mach-O 的读入，与「几个 `.o` 并成一个」。**`src/core/arm64/link.js`：`readObject`
 把一个 `MH_OBJECT` 读回 `writeObject` 的那四样（`text`/`data`/`defs`/`relocs`），
 `linkObjects` 把几个并起来、把够得着的重定位当场填掉。`tests/arm64/link.js` 21 条。
 
@@ -8510,7 +8510,7 @@ x86_64 的编码器（第 11 步的前半）。
 
 ## 落地：第九刀第十二片
 
-**x86_64 的编码器（整数那一档）。**`stage0/src/x64/encode.js`，对着
+**x86_64 的编码器（整数那一档）。**`src/core/x64/encode.js`，对着
 `llvm-mc -triple=x86_64` 验，`tests/x64/run.js` 123 条。搬、算、比、跳、调、存取、
 宽度转换都在了；SSE（浮点）是下一片。
 
@@ -8610,7 +8610,7 @@ SysV 的传参（整数六个 `rdi/rsi/rdx/rcx/r8/r9`、浮点八个 `xmm0-7`，
 
 ## 落地：第九刀第十四片
 
-**x86_64 的指令缓冲，与 RIP 相对寻址。**`stage0/src/x64/asm.js`：标签、回填、
+**x86_64 的指令缓冲，与 RIP 相对寻址。**`src/core/x64/asm.js`：标签、回填、
 `callSym`/`leaSym`/`loadSym`/`storeSym` 的记账。`tests/x64/run.js` 到 182 条。
 
 ### 一、相对跳转一律发四字节的形式
@@ -8659,8 +8659,8 @@ arm64 那边做不到（`ldr` 的立即数格装不下一个符号）。这是�
 
 ## 落地：第九刀第十五片
 
-**x86_64 的目标文件写出。**`macho.js` 认两种架构了，并从 `stage0/src/arm64/` 挪到
-`stage0/src/link/`（它早就不只是 arm64 的东西了，而 ADR 上头的清单里本来就写着
+**x86_64 的目标文件写出。**`macho.js` 认两种架构了，并从 `src/core/arm64/` 挪到
+`src/core/link/`（它早就不只是 arm64 的东西了，而 ADR 上头的清单里本来就写着
 `link/macho.js`）。`tests/x64/macho.js` 15 条，**在真机器上跑过** ——
 Apple Silicon 上靠 `clang -arch x86_64` 加 Rosetta。
 
@@ -8705,7 +8705,7 @@ x86_64 那条腿上第 10 步（`from_mir`）还没做，而目标文件这一�
 
 ## 落地：第九刀第十六片
 
-**MIR -> x86_64。**`stage0/src/x64/from_mir.js`。`tests/x64/from-mir.js` 73 条，
+**MIR -> x86_64。**`src/core/x64/from_mir.js`。`tests/x64/from-mir.js` 73 条，
 **在真机器上跑过**（`clang -arch x86_64` + Rosetta）。第 10 步现在两条腿都有了。
 
 ### 一、骨架照搬，不重写
@@ -8770,7 +8770,7 @@ x86 没有「无符号整数转浮点」的指令。32 位的够办（先零扩�
 
 ## 落地：第九刀第十七片
 
-**读入与并合也认两种架构了。**`link.js` 从 `stage0/src/arm64/` 挪到 `stage0/src/link/`
+**读入与并合也认两种架构了。**`link.js` 从 `src/core/arm64/` 挪到 `src/core/link/`
 （与 `macho.js` 并排），按 cputype 选重定位表、按架构选回填的算法。
 `tests/x64/link.js` 21 条（与 arm64 那一份一一对应），真跑过。
 
@@ -9931,7 +9931,7 @@ tcc x86_64-win32 7f 45 4c 46  ELF
 1. **"目标文件对齐"只有一种格式要复刻**，四个目标共用同一段代码，
    差别只在 `e_machine` 与重定位号。那是一个杠杆很长的活 —— 一份 ELF 目标写出
    同时把 arm64/x86_64/i386/win32 四条腿的 `-c` 都对上。
-2. 我们现在的 `stage0/src/link/macho.js` 写的 Mach-O `.o` **不在对齐路径上** ——
+2. 我们现在的 `src/core/link/macho.js` 写的 Mach-O `.o` **不在对齐路径上** ——
    它属于 clang oracle 那条腿（clang 只吃 Mach-O）。所以它不用改、也不该拿它去对账。
    曾经以为"下一步是把 macho.js 写得和 tcc 一样"，那是个错的方向。
 
@@ -9951,7 +9951,7 @@ tcc x86_64-win32 7f 45 4c 46  ELF
 ## 落地：第九刀第三十八片 —— ELF 目标文件写出，而且 tcc 自己的链接器认它
 
 第三十七片说了「一份 ELF 目标写出把六个目标的 `-c` 一起对上」，这一片把它写了：
-`stage0/src/link/elf.js`，写 `ET_REL`。入参与 `link/macho.js` 的 `writeObject`
+`src/core/link/elf.js`，写 `ET_REL`。入参与 `link/macho.js` 的 `writeObject`
 **一模一样** —— 同一份前端产物喂两个写出器，一个给 clang 那条腿，一个给 tcc 那条腿。
 
 ### 一、`tccelf.c` 里那两条算式
@@ -10027,7 +10027,7 @@ POINTER64     -> 257 ABS64 / 1 X86_64_64（按架构）
 ### 四、新的门禁：`tests/c/tcc-link.js` —— 一条不经过 clang 的能跑的路
 
 ```
-node stage0/src/cli.js c-obj x.c -o x.o --format elf
+node src/core/cli.js c-obj x.c -o x.o --format elf
 arm64-osx-tcc -B<有 libtcc1.a 的目录> x.o -o x
 ./x
 ```
@@ -10234,7 +10234,7 @@ mergeObjects([a.o, mate.o])   ← 我们
 六个目标：108 条，全部逐字节相同，0 条不同
 ```
 
-`stage0/src/link/elf_merge.js` + `tests/c/elf-merge.js`，命令行上是 `omni elf-r`。
+`src/core/link/elf_merge.js` + `tests/c/elf-merge.js`，命令行上是 `omni elf-r`。
 陪衬那个 `mate.c` 是现造的：几个全局、一个只读数组、一段 bss、两个静态（局部符号）、
 一个未定义的外部符号 —— 好把 `set_elf_sym` 的几条岔路都走到。
 
@@ -10295,7 +10295,7 @@ readImage -> writeImage           （头部除了算出来的那几格全部来�
 两个目标：160 条，全部逐字节相同，0 条不同
 ```
 
-`stage0/src/link/pe.js` + `tests/c/pe-roundtrip.js`。算出来的那几格是：`NumberOfSections`、
+`src/core/link/pe.js` + `tests/c/pe-roundtrip.js`。算出来的那几格是：`NumberOfSections`、
 `SizeOfHeaders`、`SizeOfImage`、`SizeOfCode`、`SizeOfInitializedData`、`BaseOfCode`，
 以及每节的 `PointerToRawData` / `SizeOfRawData`：
 
@@ -10337,7 +10337,7 @@ sizeofheaders = fileAlign(392 + 节数 * 40)     // 392 = DOS 头 128 + "PE\0\0"
 两个目标：160 条，全部逐字节相同（320 个 dll、1990 个导入符号）
 ```
 
-`stage0/src/link/pe.js` 的 `readImports` / `buildImports` + `tests/c/pe-imports.js`。
+`src/core/link/pe.js` 的 `readImports` / `buildImports` + `tests/c/pe-imports.js`。
 
 ### 一、整段的形状
 
@@ -10379,7 +10379,7 @@ x86_64 上一次就对上了，arm64 上每份都短 64 到 80 字节。差的�
 两个目标：160 条，全部逐字节相同（共 1426 个函数）
 ```
 
-`stage0/src/link/pe.js` 的 `readUnwind` / `buildUnwind` + `tests/c/pe-unwind.js`。
+`src/core/link/pe.js` 的 `readUnwind` / `buildUnwind` + `tests/c/pe-unwind.js`。
 
 ### 一格又是撞出来的：x86_64 上展开信息**不是一份，是一个目标文件一份**
 
@@ -10393,7 +10393,7 @@ x86_64 上一次就对上了，arm64 上每份都短 64 到 80 字节。差的�
 
 链可执行文件必须先能读库：`libtcc1.a` 里住着 `__va_start` 那一族、`_start`、长除法那些
 辅助函数，少一个都链不出东西来。这一片照 `tccelf.c` 的 `read_ar_header` /
-`tcc_load_archive` / `tcc_load_alacarte`：`stage0/src/link/ar.js` + `tests/c/ar-read.js`。
+`tcc_load_archive` / `tcc_load_alacarte`：`src/core/link/ar.js` + `tests/c/ar-read.js`。
 
 两格值得记，都是「tcc 就这么简单」：
 
@@ -10430,7 +10430,7 @@ x86_64 上一次就对上了，arm64 上每份都短 64 到 80 字节。差的�
 两个 win32 目标：160 条足迹与 tcc 逐条相同（共拉出 242 个成员）
 ```
 
-`stage0/src/link/pe_load.js`（`readSymbols` / `SymTab` / `peStart` / `runtimeLibs` /
+`src/core/link/pe_load.js`（`readSymbols` / `SymTab` / `peStart` / `runtimeLibs` /
 `libCandidates` / `parseDef` / `peLoad`）+ `tests/c/pe-load.js`，照的是 `tccpe.c` 的
 `pe_add_runtime` 与 `pe_load_def`，加上第四十六片的 `alacarte`。
 
@@ -10470,7 +10470,7 @@ x86_64 上一次就对上了，arm64 上每份都短 64 到 80 字节。差的�
 两个 win32 目标：160 张节表与 tcc 逐条相同（虚拟地址、文件偏移、长度、节名）
 ```
 
-`stage0/src/link/pe_sections.js`（`sectionClass` / `collectImports` / `buildReloc` /
+`src/core/link/pe_sections.js`（`sectionClass` / `collectImports` / `buildReloc` /
 `peSections`）+ `tests/c/pe-secs.js`，照的是 `pe_section_class` /
 `pe_assign_addresses` / `pe_check_symbols` / `pe_build_reloc`。
 
@@ -10516,8 +10516,8 @@ x86_64 上一次就对上了，arm64 上每份都短 64 到 80 字节。差的�
 两个 win32 目标：160 份节内容逐字节相同（.text / .rdata / .pdata / .reloc）
 ```
 
-`stage0/src/link/pe_reloc.js`（`relocateOne`：两条腿一共十几个重定位号）+
-`stage0/src/link/pe_link.js`（`peImage`：导入桩、符号地址、`relocate_sections`）+
+`src/core/link/pe_reloc.js`（`relocateOne`：两条腿一共十几个重定位号）+
+`src/core/link/pe_link.js`（`peImage`：导入桩、符号地址、`relocate_sections`）+
 `tests/c/pe-content.js`。
 
 要点：
@@ -10555,7 +10555,7 @@ arm64-win32 : 80 份 .exe 逐字节相同
 共 853504 字节
 ```
 
-`stage0/src/link/pe_link.js` 的 `peWrite` + `tests/c/pe-exe.js`。头部那三十几个字段照
+`src/core/link/pe_link.js` 的 `peWrite` + `tests/c/pe-exe.js`。头部那三十几个字段照
 `pe_write`：`Characteristics` 是 `CHARACTERISTICS_EXE`（x86_64 是 0x022f，arm64 是
 0x0022），子系统默认 3（console），栈 0x100000，数据目录里填导入表、IAT、异常表
 （`.pdata`）与重定位表（`.reloc`）。写文件那一层直接用第四十三片的 `writeImage` ——
@@ -10636,7 +10636,7 @@ arm64-win32  一份: 476160 字节（1 个 .o）    拆开: 480768 字节（12 �
 <target>-tcc -static -nostdlib -Wl,-e,main a.o [b.o …] -o a.out
 ```
 
-`stage0/src/link/elf_exe.js`，对账在 `tests/c/elf-exe.js`：
+`src/core/link/elf_exe.js`，对账在 `tests/c/elf-exe.js`：
 
 ```
 x86_64-linux: 10 份可执行文件逐字节相同
@@ -10756,7 +10756,7 @@ PE（四十七到五十二片）、ELF（五十三、五十四片），这一片
 <target>-osx-tcc -nostdlib a.o -o a.out
 ```
 
-`tests/c/macho-exe.js`（`stage0/src/link/macho_exe.js`，`omni macho-link`）：
+`tests/c/macho-exe.js`（`src/core/link/macho_exe.js`，`omni macho-link`）：
 
 ```
 x86_64-macos: 11 份可执行文件逐字节相同
@@ -12296,7 +12296,7 @@ for (i = 0; i < num_targets; ++i)
 `cpp/` 那八份**不能**进这一组：`-M` 一族不带 `-E`，tcc 会真的把文件编一遍，
 而那几份是预处理器的探针，本来就不是合法的 C（`'REC' undeclared`）。
 
-**带系统头的 `-M` 是另一件事**：我们自带 `stage0/include/stddef.h` 并排在 SDK 前面，
+**带系统头的 `-M` 是另一件事**：我们自带 `src/include/stddef.h` 并排在 SDK 前面，
 tcc 在 macOS 上直奔 SDK —— 同一句 `#include <stddef.h>` 两边找到的不是同一份文件，
 清单自然不同。那是搜索表的分歧，不是 `-M` 的分歧，所以门里只盖 `-MM` 与不牵动系统头的
 `-M`。
@@ -12491,7 +12491,7 @@ if (this.verbose >= 2) out += this.takeTrace();
 
 **`-vvv` 那两条加了 `-nostdinc`**：3 这一档连试不开的路径都印，于是会一路印到系统头
 目录 —— tcc 有两个（`/usr/local/lib/tcc/include` 与 macOS SDK），我们只有一个
-`stage0/include`。那是第八刀就记下的搜索路径分歧，不是这一片的事，掐掉系统那一段照样
+`src/include`。那是第八刀就记下的搜索路径分歧，不是这一片的事，掐掉系统那一段照样
 把 `nf` 的**行数、缩进、次序**都比上了。
 
 <!-- 第九刀第八十七片-END -->
@@ -12500,7 +12500,7 @@ if (this.verbose >= 2) out += this.takeTrace();
 
 真的系统头 —— 系统头目录的第二段。
 
-到上一片为止，`sysIncludeDirs` 只有一格：`stage0/include`。`<stdint.h>`、`<unistd.h>`、
+到上一片为止，`sysIncludeDirs` 只有一格：`src/include`。`<stdint.h>`、`<unistd.h>`、
 `<math.h>` 这些从来没找过 —— 谁要用就得自己 `-I` 一份 SDK 进来（`tests/c/run.js` 的
 `sys/` 组就是这么干的）。这一片把第二段接上。
 
@@ -12524,7 +12524,7 @@ Omni 没有 configure 那一步，于是同一件事挪到**第一次用的时�
 
 做尺子的那个 tcc **没装**：它的 `{B}` 是 `/usr/local/lib/tcc`，那个目录不存在。于是
 它第一格落空、一路掉到 SDK 上 —— `tcc -M` 拿 `<stddef.h>` 会给你 SDK 那份连带
-二十几个 `sys/_types/*.h`，而我们给的是 `stage0/include/stddef.h` 一份。
+二十几个 `sys/_types/*.h`，而我们给的是 `src/include/stddef.h` 一份。
 
 这看着像分歧，其实是「装没装」。拿 `-B` 指一个 `include/` 真在的树，它立刻跟我们一样：
 
@@ -12561,7 +12561,7 @@ s.o: \
 
 让位 —— 自带的那五份 libc 头删了。
 
-第八刀第三片给 `stage0/include/` 放了 `stdio.h` / `stdlib.h` / `string.h` / `ctype.h` /
+第八刀第三片给 `src/include/` 放了 `stdio.h` / `stdlib.h` / `string.h` / `ctype.h` /
 `errno.h` 的**最小子集**：声明的正好是 `interp/libc.js` 那张表里有的，多一个都没有。
 那时候的理由是「没有真的系统头可用」。上一片把 SDK 那一段接上之后，这个理由消失了 ——
 留着它们只有一个效果：**挡着** SDK 里的同名头（自带那一段排在 SDK 前面）。
@@ -12651,7 +12651,7 @@ tcc:  tcc -B <构建目录> -I <构建目录> -E -P x.c
 
 两边都**自己去找头文件**（`-I` 只给 `config.h` 所在的那个目录）。`-B` 是给 tcc 指它
 自己那份 `include/` —— 那个 tcc 没装，不给 `-B` 的话它第一格落空（见第八十八片）。
-于是两边的搜索表形状相同：自带的一份在前（我们是 `stage0/include/`）、SDK 的在后。
+于是两边的搜索表形状相同：自带的一份在前（我们是 `src/include/`）、SDK 的在后。
 
 结果：**30 份 `.c` 里 29 份逐字节相同**，剩下那份 `il-gen.c` 是 tcc 自己就拒的旧文件
 （不在它的构建里），没有尺子、跳过。最长的 `tcc.c` 29009 行、`libtcc.c` 28387 行、
@@ -13675,7 +13675,7 @@ x87 的加载/存储/传参/返回都得有。这一片先做最下面那一格 
 
 ### 形状
 
-`stage0/src/frontend-c/f80.js`：`f80Bytes(x, slot)` 与 `f80ToDouble(bytes)`。
+`src/core/frontend-c/f80.js`：`f80Bytes(x, slot)` 与 `f80ToDouble(bytes)`。
 80 位与 IEEE double 最大的不同是**整数位是显式的**：1.5 的尾数是 `0xC000000000000000`，
 不是 `0x8000…`。四支：零（含 -0）、Inf/NaN（指数全一，整数位照置，double 的安静位挪到
 次高位）、double 的非规格化数（80 位指数范围宽得多，所以它们在这儿是**规格化的**，
@@ -13729,7 +13729,7 @@ x87 的加载/存储/传参/返回都得有。这一片先做最下面那一格 
 
 ### x87 那四条
 
-`stage0/src/x64/encode.js` 多了四条，是 x87 在这条腿上唯一的用处：
+`src/core/x64/encode.js` 多了四条，是 x87 在这条腿上唯一的用处：
 
 ```
 fld  tbyte [m] = DB /5      fstp tbyte [m] = DB /7
@@ -14993,7 +14993,7 @@ tcc 那边 `tcc_predefs`（`tccpp.c:3585`）是一串顺着写的 `putdef`，不
   我们现在只把宏摆对，`char` 的符号性还照 signed 走 —— arm64-linux 那条腿上的一笔。
 * **`wchar_t` 的宽度**：win32 上 `__WCHAR_TYPE__` 现在是 `unsigned short` 了，
   可我们的宽串常量还按 4 字节铺（`str-rodata` 那个 `not yet`）。宏与字节要一起改。
-* **头文件那一半**：预定义对了不等于头对了 —— `stage0/include/` 那几份还是照
+* **头文件那一半**：预定义对了不等于头对了 —— `src/include/` 那几份还是照
   macOS 写的，`--os linux` 编一份 `#include <stdio.h>` 仍然走的是本机那一支。
 
 <!-- 第九刀第一百二十九片-END -->

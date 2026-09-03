@@ -237,7 +237,7 @@ omni/
   C 侧是宏模板单态化（`OMNI_LIST_*` / `OMNI_DICT_*` / `OMNI_SET_*`）：条目数组保插入序 +
   开放寻址索引表，删除打墓碑 —— 这样 JS `Map`/`Set` 的迭代顺序语义在 C 上逐位成立。
 - `dynamic` + 原生 json：C 侧是带标签的胖值 `omni_dyn`；**json 解析/序列化用 Omni 自己写**
-  （`stage0/lib/json.omni`），两个后端因此共享同一份实现，不存在"两边各写一遍"的漂移风险。
+  （`src/lib/json.omni`），两个后端因此共享同一份实现，不存在"两边各写一遍"的漂移风险。
 - `class`（引用语义 + 显式空检查）+ 方法降级为「第一参数为 this 的自由函数」+ UFCS 合并重载集。
   ARC 仍是欠账。
 - `tests/cases/01..16` 全绿（含 5 个运行期错误用例）；C 侧另过 ASan/UBSan 无报告。
@@ -269,7 +269,7 @@ omni/
 - `tests/run.js` 加了 host crash 检测：prelude 里一个语法错会让两个后端**一起崩**，
   差分因此"一致通过"、快照还把崩溃回溯原样存下来 —— 这个洞已经堵上。
 
-**已完成（REPL，2026-08-25）**：`omni repl`，`stage0/src/repl.js`。
+**已完成（REPL，2026-08-25）**：`omni repl`，`src/core/repl.js`。
 - ~~**重放整个会话**而不是增量编译~~ **（已于 2026-08-27 换成真增量，见下面「REPL 增量化 +
   前端无关」）**：当时是整体编译 → 整体执行 → 只打增量 stdout。重放在当前语言下语义精确
   （可观察副作用只有 `print`）。副产品是失败的那一块直接不进会话，状态自动回到上次成功的
@@ -327,7 +327,7 @@ omni/
   正则只有 4 个字符类（不是拦路虎），真正要支持的是模板字符串、Map/Set、数组方法、解构、展开。
 
 **已完成（运行时出 JS，2026-08-25）**：ADR-0001 第 5 节。
-- `stage0/runtime/`：`omni.h` + 8 个 `.c` + 2 个宏头，都是真的 C 文件（clang 能查、ASan 能扫、
+- `src/runtime/`：`omni.h` + 8 个 `.c` + 2 个宏头，都是真的 C 文件（clang 能查、ASan 能扫、
   能贴 godbolt、能单独编）。每个 TU 单独过 `-Wall -Wextra` 零警告。
 - 热叶子函数（i64 回绕算术、`byte_at`、dict 的 hash/eq）是 `omni.h` 里的 `static inline`：
   拆成多 TU 后跨 TU 调用没有 LTO 就不内联，而 tcc 不支持 `-flto`。
@@ -336,7 +336,7 @@ omni/
   注意这个数字随机器状态漂移很大：同一份代码在忙的机器上量到 250–560ms。判断有没有回归要在
   同一次会话里 A/B（`git worktree add` 一份 HEAD 并排量），不要拿隔天的绝对值比。
 
-**已完成（模块系统 / import，2026-08-25）**：ADR-0009，`stage0/src/module/load.js`。
+**已完成（模块系统 / import，2026-08-25）**：ADR-0009，`src/core/module/load.js`。
 - `import "./util.omni";` / `import "std/json.omni";` —— **只有两类 specifier**，判别只看第一个字符，
   没有回退。`libsFor`（"源码里提到 json 就整体拼库"）已删除。
 - 刻意不做：隐式相对导入（Python 2）、向上逐级查找（node_modules）、猜后缀与目录索引（node）、
@@ -354,7 +354,7 @@ omni/
 - 已知局限（记在 ADR-0009）：类型名与顶层变量仍在一张全局表里，两个模块各有一个同名
   `private class` / 顶层 `var` 会撞；没有 `access` / `unravel`；清单只硬编码了一条 `std`。
 
-**已完成（JS 语法前端 + 第三条测试轴，2026-08-25）**：`stage0/src/frontend-js/`、
+**已完成（JS 语法前端 + 第三条测试轴，2026-08-25）**：`src/core/frontend-js/`、
 `tests/js-roundtrip/`、`docs/js-bootstrap-subset.md`。
 - 词法器（`lexer.js`）：`/` 是除号还是正则只能看前一个有意义的 token；模板字符串的 `${}`
   可以嵌套模板，所以词法器自己维护一个栈；每个 token 记"前面有没有换行"，ASI 全靠它；
@@ -364,7 +364,7 @@ omni/
   一起回滚，容易漏。**未覆盖的语法一律报错，绝不静默跳过。**
 - 生成器（`gen.js`）：括号不照抄源码，一律按优先级重算。照抄的话 `(a)` 会永远留着那层括号，
   幂等就失去意义；重算之后输出是规范形式，幂等成为一个真断言。
-- 闸门 1（幂等）：`stage0/src` + `tests` + `bench` 三棵树里的 19 个 `.js`、约 52000 token，
+- 闸门 1（幂等）：`src/core` + `tests` + `bench` 三棵树里的 19 个 `.js`、约 52000 token，
   `gen(parse(x))` 第二轮逐字节不动。把测试脚本和 bench 也纳进来不是凑数：它们也是我们写的
   JS，不去解析它们，"支持的子集"就是靠"没去解析"撑起来的。
 - 闸门 2（语义一致）：整棵 `stage0/` 树重新生成到 `.omni-build/js-roundtrip/`，用**生成出来的
@@ -402,7 +402,7 @@ omni/
   正是两种捕获语义的差别本身）。
 
 **已完成（自举，2026-08-26）**：ADR-0011 落地顺序第 7 步。`tests/bootstrap/run.js`，第六条测试轴。
-- 不动点成立：C0（`node stage0/src/cli.js`）→ C1（C0 emit-js 自己）→ C2（C1 emit-js 自己），
+- 不动点成立：C0（`node src/core/cli.js`）→ C1（C0 emit-js 自己）→ C2（C1 emit-js 自己），
   C1 与 C2 **逐字节相同**（36648 行）。逐用例还核对了"C1 的产物 == C0 的产物"
   （11 个 js-exec + 21 个 `.omni`），并让 C1 真跑一个 `.omni` 程序。
 - 六条轴：`tests/run.js` 33 / `oracle` 7 / `js-roundtrip` 43 / `oir` 451 / `js-exec` 11 / `bootstrap` 37。
@@ -466,7 +466,7 @@ A 也可能是 B"只有两条路：塞进 `dynamic`（丢掉静态类型，值�
 - 自举顺带逮到一件事：检查器那个方法本来叫 `match`，而 JS 子集里 `x.match(...)` 是字符串的
   正则匹配（`frontend-js` 只认正则字面量实参），于是 C1 生成不出来 —— 第三条轴的正常作用。
 
-**已完成（自举变成内置命令，2026-08-26）**：`omni bootstrap`，`stage0/src/bootstrap.js`，
+**已完成（自举变成内置命令，2026-08-26）**：`omni bootstrap`，`src/core/bootstrap.js`，
 `docs/bootstrap-build.md`。之前自举只存在于**测试**里：产物写进 mkdtemp 跑完就扔，
 第 12 节承诺的 `dist/` 从来没有东西，"怎么跑自举"也没有任何说明。
 - **一条命令跑完整条链**：`npm run build:self`（= `omni bootstrap -o dist`）。

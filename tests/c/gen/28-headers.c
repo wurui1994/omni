@@ -1,6 +1,6 @@
 /* 第八刀第二片：自带的那几份头文件。
  *
- * `#include <stddef.h>` 一族从内建的系统头目录来（`stage0/include/`），
+ * `#include <stddef.h>` 一族从内建的系统头目录来（`src/include/`），
  * tcc 那边用它自己 `include/` 里的同名文件 —— 两份文本不同，**行为必须一样**，
  * 所以这一份的 oracle 还是 `tcc -run` 的退出码加 stdout 逐字节。 */
 
@@ -96,7 +96,7 @@ int main(void) {
   printf("range %d %d\n", DBL_MAX > 1e307, DBL_MIN < 1e-307);
   /* tcc 的 float.h 按 binary128 写 LDBL_*，而这个目标上 long double 就是 double ——
    * 于是 MAX 溢出成 inf、MIN 下溢成 0，而 MANT_DIG 说 113。这三条钉住那处矛盾
-   * （见 stage0/include/float.h 头上那一节）。 */
+   * （见 src/include/float.h 头上那一节）。 */
   printf("ldbl %d %d %d %d\n",
     LDBL_MANT_DIG, (int)sizeof(long double),
     LDBL_MAX > DBL_MAX, LDBL_MIN == 0.0);

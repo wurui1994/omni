@@ -1,7 +1,7 @@
 // Omni stage0 — C 后端：OIR -> C99
 //
 // C 后端是自举的必经之路，因此它的正确性优先于一切。输出要求：
-//   1) 只 #include "omni.h"，运行时是 stage0/runtime/ 下真正的 C 文件（不再内联进来）；
+//   1) 只 #include "omni.h"，运行时是 src/runtime/ 下真正的 C 文件（不再内联进来）；
 //      需要单文件时走 `emit-c --amalgamate`
 //   2) 可读、可 gdb —— 生成的 C 是给人看的第一手调试材料
 //   3) 无编译器扩展（computed goto 等留到 VM 阶段再作为可选开关）

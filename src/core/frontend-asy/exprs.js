@@ -1905,7 +1905,7 @@ export function asyStrCall(L, n, nm) {
  * bool / pair / string 都**不收**（量过：`string(true)`、`string((1,2))`、`string("a")`
  * 那边全是 no matching function），所以这里也不收 —— 多收就是比 asy 多接受一门语言。
  * 印出来的形状与 `write` 是同一份，所以借 fmtStr（real 那一档正好是 %.15g）。
- * 绘图层（stage0/lib/asy/）要拼 PostScript 文本，它缺的就是这一个。
+ * 绘图层（src/lib/asy/）要拼 PostScript 文本，它缺的就是这一个。
  */
 export function asyStrConvCall(L, n) {
   const args = asyArgs(L, n.items[2]);

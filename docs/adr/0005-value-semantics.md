@@ -1,6 +1,6 @@
 # ADR-0005：值语义与打印格式规范
 
-状态：已接受（2026-08-25）· 实现：`stage0/src/backend-js/prelude.js`、`stage0/src/runtime/c_runtime.js`
+状态：已接受（2026-08-25）· 实现：`src/core/backend-js/prelude.js`、`src/core/runtime/c_runtime.js`
 
 ## 背景
 
@@ -70,7 +70,7 @@ LLVM 走 `omni_str_realg`。加它的理由是别的语言有别的默认位数�
   代码，不受它约束。（这条是 `tests/oracle/json_floats` 逼出来的：原先两个后端一起错，差分测试看不见。）
 - 非有限值不可序列化：`omni: runtime error: cannot represent non-finite real`。
 
-**json 数字的反向规则**（`stage0/lib/json.omni` 的 `jsonNumber`）：文本带 `.`/`e` 的读成 `real`；
+**json 数字的反向规则**（`src/lib/json.omni` 的 `jsonNumber`）：文本带 `.`/`e` 的读成 `real`；
 否则按十进制位数定——≤18 位必然放得进 i64，读成 `int`；19 位时与 `"9223372036854775807"`
 （负数 `"9223372036854775808"`）做**等长字典序**比较，放得下才是 `int`；≥20 位读成 `real`。
 不能简单地"超过 18 位就当 real"：19 位正好是 snowflake ID 的长度，那样会静默丢精度。
@@ -99,7 +99,7 @@ list 是 `.omni` 那门语言的容器，而数组是给"从语法长出来的�
 六条操作 new/len/get/set/push/pop，五条腿都实现得起（LLVM 那条腿没有 list）。
 - 零值是**长度 0 的空数组**，不是空引用：`alen` 在任何数组上都得能答。
 - 新建的元素是**零值填充**的（int 0 / real 0.0 / bool false / string ""）。
-- 越界 / 空 pop / 负长度都是运行时错误，消息只有一份（`stage0/runtime/omni_arr.c`）：
+- 越界 / 空 pop / 负长度都是运行时错误，消息只有一份（`src/runtime/omni_arr.c`）：
   `array index out of range: I (length N)`、`pop from empty array`、
   `array length cannot be negative: N`。量过五条腿逐字节相同。
 - 没有负下标、没有切片、没有 `==`、`print` 不接受数组（要看就 `(aget a i)` 逐个印）。

@@ -21,12 +21,12 @@ import { workDir } from '../work.js';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { Diagnostics, SourceFile } from '../../stage0/src/source/diag.js';
-import { readSexpr } from '../../stage0/src/sexpr/read.js';
-import { printSexpr } from '../../stage0/src/sexpr/print.js';
+import { Diagnostics, SourceFile } from '../../src/core/source/diag.js';
+import { readSexpr } from '../../src/core/sexpr/read.js';
+import { printSexpr } from '../../src/core/sexpr/print.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const cli = join(here, '../../stage0/src/cli.js');
+const cli = join(here, '../../src/core/cli.js');
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 const run = (cmd, args) => {
   const r = spawnSync(cmd, args, { encoding: 'utf8' });

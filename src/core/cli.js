@@ -220,7 +220,7 @@ function sdkUsrLib() {
 
 /**
  * C 前端的系统头目录，与 tcc 的 `sysinclude_paths` 同一形状：**自带那一份在前**
- * （tcc 的 `{B}/include`，我们是 `stage0/include` —— 位置与 `RUNTIME_DIR` 同一手法：
+ * （tcc 的 `{B}/include`，我们是 `src/include` —— 位置与 `RUNTIME_DIR` 同一手法：
  * 相对程序镜像固定两级上去，于是不依赖当前工作目录），**本机 SDK 的
  * `/usr/include` 在后**（第八十八片）。`-isystem` 给的排在这两段前头，
  * `-nostdinc` 把这两段一起掐掉。
@@ -857,7 +857,7 @@ function asyFrontEnd() {
   // 模块的找法是量出来的 —— asy 按**当前目录**找，不是按引它的那个文件所在的目录
   // （量过：`asy -noV sub/user.asy` 里的 `import mm;` 找不到 sub/mm.asy）。
   // 当前目录之后按 `ASYMPTOTE_DIR`（asy 自己的那个环境变量，冒号分隔）找，最后是
-  // 我们自己的 stage0/lib/asy。**base/*.asy 不抄一份**：plain/graph 那一堆是 asy
+  // 我们自己的 src/lib/asy。**base/*.asy 不抄一份**：plain/graph 那一堆是 asy
   // 源码，要引的就是真的那些；我们只补 C++ 那一侧的内建面（lib/asy 里那一份）。
   const libDir = join(installDir(), '..', '..', 'lib', 'asy');
   const searchDirs = [];
@@ -915,19 +915,19 @@ function asyFrontEnd() {
 let lastAsyDeps = [];
 
 /**
- * 编译器自己那一份的印记：stage0/src 底下每个文件的「路径 + 改动时间 + 字节数」。
+ * 编译器自己那一份的印记：src/core 底下每个文件的「路径 + 改动时间 + 字节数」。
  * 产物缓存的键里带它 —— 改了降级器或后端，缓存整片失效。
  * 目录与文件**问文件系统**（isDir），不按名字猜。原先按"名字里有没有点"分
- * —— 在 stage0/src 底下确实成立（目录都没有后缀，文件都有），但装好的那份里
+ * —— 在 src/core 底下确实成立（目录都没有后缀，文件都有），但装好的那份里
  * 编译器自己就叫 `dist/src/host/omni`、没有后缀，于是它被当成目录走进去，
  * readdir 一个普通文件：`ENOTDIR: not a directory, scandir '…/dist/src/host/omni'`。
  * 一条"在源码树里恰好成立"的命名约定不能当成布局的判据。
  *
- * **这里原先只走了 `installDir()`**（那是 `stage0/src/host`），于是改了
+ * **这里原先只走了 `installDir()`**（那是 `src/core/host`），于是改了
  * frontend-asy/ 底下任何一处降级器，印记都不动、产物缓存整片误命中 —— 量到过：
  * 同一份 `path r=(0,0); r=r--(10,0); r=r..(20,10);` 在改完前端之后仍然出旧图
  * （直线而不是曲线），`rm -rf .omni-cache/asy-js` 之后才对。这与第七十九刀那次
- * "产物名只取基名"是同一类错：一个会跑错程序的缓存。所以往上走一级，走全 stage0/src；
+ * "产物名只取基名"是同一类错：一个会跑错程序的缓存。所以往上走一级，走全 src/core；
  * 键里存**整条路径**而不是基名（两个目录里同名的文件不能互相冒充）。
  * lib/ 底下的 .asy 不在这里：它们逐个进了产物缓存的依赖清单（见 jsCachePut）。
  */
@@ -1946,7 +1946,7 @@ function buildNative(mod, outPath, workDir) {
   writeText(cPath, cText);
   vStep(`backend c  ${cText.length} bytes -> ${cPath}`);
   const cc = findCC();
-  // 运行时是 stage0/runtime/ 下真正的 C 文件，预编成 .o 缓存起来；热的叶子函数是
+  // 运行时是 src/runtime/ 下真正的 C 文件，预编成 .o 缓存起来；热的叶子函数是
   // omni.h 里的 static inline，所以不靠 LTO 也能内联（tcc 没有 -flto）
   // 外部 C 符号用到的库跟在后面（ADR-0014 决策 4）；libc 的那些 lib 是 null，不产生 -l
   const libs = cAbiLibs(mod.cabi ?? []).map((l) => `-l${l}`);
@@ -2057,7 +2057,7 @@ function runViaLlvm(mod, argv, srcPath) {
  * 文本 IR 直接进 `LLVMParseIRInContext`，ORC 惰性物化，查到地址就跳进去。
  * 与 AOT 共用**同一个发射器**，这正是当初选文本 IR 而不是 C API 建 IR 的回报。
  *
- * 还有一层间接没去掉：ORC 那一段在 `stage0/jit/omni_jit.c` 里，node 这一侧是 spawn 它。
+ * 还有一层间接没去掉：ORC 那一段在 `src/jit/omni_jit.c` 里，node 这一侧是 spawn 它。
  * 原因写在那个文件的头上 —— 封闭的 C_ABI 没有「按 ptr 间接调用」，而 JIT 的最后一步
  * 就是它。补上等于给 JS 域一把任意函数指针，那要另开一条 ADR。所以这条边界是划的，
  * 不是忘了：**编译**这一半已经不需要 cc 了，**宿主**那一半还是一个 C 程序。

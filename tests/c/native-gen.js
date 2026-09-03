@@ -28,7 +28,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
 const TCC_DIR = join(root, '.omni-cache', 'tcc-build');
 const TCC = join(TCC_DIR, 'tcc');
-const CLI = join(root, 'stage0', 'src', 'cli.js');
+const CLI = join(root, 'src', 'core', 'cli.js');
 const CLANG = ['/usr/bin/clang', '/opt/homebrew/opt/llvm/bin/clang'].find((p) => existsSync(p));
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 

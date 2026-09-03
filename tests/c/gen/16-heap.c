@@ -1,6 +1,6 @@
 /* 第六刀第十五片：堆（`malloc` / `calloc` / `realloc` / `free` / `strdup`）。
  *
- * 分配器在 `stage0/src/interp/libc.js` 里，**簿记全在线性内存上**（16 字节块头 +
+ * 分配器在 `src/core/interp/libc.js` 里，**簿记全在线性内存上**（16 字节块头 +
  * 隐式空闲链表 + 首次适配 + free 之后合并），宿主那边一个字节的状态都不留。
  * 版图上堆从影子栈之上的下一个页边界起，不够就 `MGROW`；起点由入口函数在 `main`
  * 之前用一条 `__omni_heap_init` 交过去 —— 用到堆才发那条。

@@ -25,7 +25,7 @@ import { spawnSync } from 'node:child_process';
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
 const CROSS = join(root, '.omni-cache', 'tcc-cross');
-const CLI = join(root, 'stage0', 'src', 'cli.js');
+const CLI = join(root, 'src', 'core', 'cli.js');
 const OUT = join(tmpdir(), 'omni-wchar');
 
 /** tinycc 的源码在哪儿：从交叉编译目录的 `config.mak` 里读（`-B` 要用它）。 */

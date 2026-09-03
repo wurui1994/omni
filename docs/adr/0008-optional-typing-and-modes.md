@@ -1,6 +1,6 @@
 # ADR-0008：可选类型、三种模式与文件后缀
 
-状态：已接受（2026-08-25）· 实现：`stage0/src/parse/parser.js`、`stage0/src/hir/check.js`、`stage0/src/cli.js`
+状态：已接受（2026-08-25）· 实现：`src/core/parse/parser.js`、`src/core/hir/check.js`、`src/core/cli.js`
 
 ## 背景
 
@@ -93,7 +93,7 @@
    `--mode` / `:mode` 两边随时可切。
 
 **REPL 属于哪一层：驱动与语言无关**（2026-08-27）。读行、续行、回显、命令、失败回滚都在
-`stage0/src/repl.js` 的驱动里，一门语言只要给出这套口子就有 REPL：
+`src/core/repl.js` 的驱动里，一门语言只要给出这套口子就有 REPL：
 `getMode/setMode`、`blank`、`complete`、`echo`、`asStmt`、`snapshot/restore`、
 `add(text, diags) -> OIR delta`、`full(chunks) -> 整程序 OIR`。
 `omni repl --lang omni|sx|asy` 现在是同一份驱动的三个实例，`tests/repl/` 里三门语言各一份快照。
@@ -107,7 +107,7 @@
 所以整份文件的输出逐字节没变。asy 的回显包成它自己的 `write(...)`。
 **jancy 还没有 REPL**，而理由不在 REPL 这一层：它连降级器都还没有（只有语法与解析用例）。
 
-REPL 的输入解释规则（`stage0/src/repl.js`）：括号未闭合就续行；表达式单独一行会回显
+REPL 的输入解释规则（`src/core/repl.js`）：括号未闭合就续行；表达式单独一行会回显
 （`1 + 2` 打印 `3`），但以 `;`/`}` 收尾、以语句关键字开头、或顶层带赋值/自增的输入算语句，
 不回显。回显是靠把输入包成 `print(...)` 再编译实现的，所以包不过就退回当语句 —— 只有
 「以 `)` 收尾」（可能是要副作用不要值的调用）才静默退回，其余情况报错，
@@ -155,7 +155,7 @@ REPL 的输入解释规则（`stage0/src/repl.js`）：括号未闭合就续行�
 - `print(dynamic)` / `string(dynamic)`：**标签是 `string` 取原文，其余取 JSON 文本**
   —— 与 Python 的 `print`/`str` 一致（`print("a")` → `a`，`print(["a"])` → 引号在里面）。
   实现上降级为对 stdlib `dynToText` 的调用，**不在两个运行时里各写一份序列化器**
-  （json 的唯一实现仍在 `stage0/lib/json.omni`）。
+  （json 的唯一实现仍在 `src/lib/json.omni`）。
 - **`print(容器)` / `string(容器)` 走同一条路**：容器先**深装箱**成 `list<dynamic>` /
   `dict<string,dynamic>`（一个显式 op `boxDeep`），再交给 `dynToText`。
   - JS 侧这个 op 是**恒等** —— 那边的 dynamic 无标签，`list<int>` 本来就是个数组。

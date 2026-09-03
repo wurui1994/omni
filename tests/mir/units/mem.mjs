@@ -9,7 +9,7 @@
 import {
   unit, printI64, printF32, OP, T_I64, T_F64, T_F32, T_VOID, REF_NONE,
 } from '../mirkit.mjs';
-import { memDesc, MLOAD_KINDS, MSTORE_KINDS } from '../../../stage0/src/mir/ir.js';
+import { memDesc, MLOAD_KINDS, MSTORE_KINDS } from '../../../src/core/mir/ir.js';
 
 const ld = (kind, off) => memDesc(MLOAD_KINDS.indexOf(kind), off === undefined ? 0 : off);
 const st = (kind, off) => memDesc(MSTORE_KINDS.indexOf(kind), off === undefined ? 0 : off);

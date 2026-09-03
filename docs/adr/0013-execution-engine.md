@@ -42,7 +42,7 @@ REPL 只能活在 node 宿主上；"直接解析执行"这条架构主线（ADR-
 
 ## 决策 2：解释器写在编译器自己的源码里
 
-`stage0/src/interp/` 是普通的 JS 源码，和编译器其余部分一样，会被 JS 前端降级、被 C 后端
+`src/core/interp/` 是普通的 JS 源码，和编译器其余部分一样，会被 JS 前端降级、被 C 后端
 编译。于是：
 
 - **node 宿主上**它是 JS，直接跑。
@@ -78,7 +78,7 @@ GC 语义，跨界就要搬值，正好违反约束 1。两者都读了、都值
 
 ### 阶段 1：OIR 树遍历解释器
 
-- 形态：`stage0/src/interp/` 直接走 OIR 的节点。环境是"名字 -> 值"的表，函数值是本语言的
+- 形态：`src/core/interp/` 直接走 OIR 的节点。环境是"名字 -> 值"的表，函数值是本语言的
   lambda（于是自动满足决策 3 的推论）。
 - 入口：`omni run --interp f`、`omni interp f`；原生构建上的 `run` 在门槛过了之后改成默认
   走解释器，`--via-c` 是逃生口。
@@ -170,7 +170,7 @@ JS 域的函数只有一个签名 `fn(list<dynamic>) -> dynamic`，形参**是�
 
 REPL 的驱动（读行、续行、回显、命令、失败回滚）与"哪个运行期跑这一批"是两件事，接缝就是
 两个方法：`install(delta)` 把一批新增的 OIR 并进常驻状态，`runEntry(name)` 跑这一批的入口
-并把运行期失败收成 `{failed, err}`。`--engine` 选的就是这一格（`stage0/src/repl.js` 的
+并把运行期失败收成 `{failed, err}`。`--engine` 选的就是这一格（`src/core/repl.js` 的
 `newEngine`）：
 
 - `interp`（默认）：`interp/eval.js` 的 `InterpSession`。函数表/全局量/**顶层 Env** 常驻，
@@ -211,7 +211,7 @@ JS 这条腿上有三件事必须专门解决，它们都是"一批一段、装�
 
 其余方向（`mir` / `c` / `jit`）在原生与 node 上都成立，待做：`mir` 要给 `mir/interp.js`
 一个会话（今天只有整程序的 `interpretMir`），`c` 是常驻宿主 + 每批 dlopen 一个增量模块，
-`jit` 是把 `stage0/jit/omni_jit.c` 改成能收多份 `.ll` 的常驻宿主。
+`jit` 是把 `src/jit/omni_jit.c` 改成能收多份 `.ll` 的常驻宿主。
 
 ## 借鉴与对照
 

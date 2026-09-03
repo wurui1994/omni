@@ -13,7 +13,7 @@
 //
 // `-B` 是给 tcc 指它自己那份 `include/`（那个 tcc **没装**，`/usr/local/lib/tcc`
 // 不存在）—— 于是两边的系统头搜索表形状相同：自带的一份在前、SDK 的 `/usr/include`
-// 在后。我们自带的那份是 `stage0/include/`。
+// 在后。我们自带的那份是 `src/include/`。
 //
 // 源码树或构建不在就整组跳过（印 skip 并说明），不假过。
 //
@@ -29,7 +29,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
 const TCC_DIR = join(root, '.omni-cache', 'tcc-build');
 const TCC = join(TCC_DIR, 'tcc');
-const CLI = join(root, 'stage0', 'src', 'cli.js');
+const CLI = join(root, 'src', 'core', 'cli.js');
 /* 源码树的位置与 ADR-0017 里记的一致；`TINYCC_SRC` 可以指到别处。 */
 const SRC = process.env.TINYCC_SRC ?? '/Users/wurui/Documents/Lang/reference/tinycc';
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));

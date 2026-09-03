@@ -16,12 +16,12 @@ import { workDir } from '../work.js';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { Diagnostics } from '../../stage0/src/source/diag.js';
-import { linkJs } from '../../stage0/src/frontend-js/link.js';
-import { lowerJs } from '../../stage0/src/frontend-js/lower.js';
-import { emitJs } from '../../stage0/src/backend-js/emit.js';
-import { emitC } from '../../stage0/src/backend-c/emit.js';
-import { runtimeSources, RUNTIME_DIR } from '../../stage0/src/runtime/c_runtime.js';
+import { Diagnostics } from '../../src/core/source/diag.js';
+import { linkJs } from '../../src/core/frontend-js/link.js';
+import { lowerJs } from '../../src/core/frontend-js/lower.js';
+import { emitJs } from '../../src/core/backend-js/emit.js';
+import { emitC } from '../../src/core/backend-c/emit.js';
+import { runtimeSources, RUNTIME_DIR } from '../../src/core/runtime/c_runtime.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
@@ -81,11 +81,11 @@ for (const file of cases) {
 
   // 第三条腿：自己的执行器（ADR-0013）。同一段 JS，同一棵 OIR，解释一遍 —— 参照还是 node。
   // 走 CLI 而不是在进程内 new Interp：解释器的输出缓冲、退出码、uncaught 都在那条路上。
-  const viaI = run(process.execPath, [join(here, '../../stage0/src/cli.js'), 'interp', path]);
+  const viaI = run(process.execPath, [join(here, '../../src/core/cli.js'), 'interp', path]);
   // 第四条腿：MIR 上的闭包编译解释器（ADR-0014 决策 7）。同一棵 OIR 再往下降一层。
   // 它与上一条的差别不是"换个写法"：求值顺序、短路的落法、循环层数都在 MIR 里被钉死了，
   // 而槽位取代了作用域链 —— 两条给出同一串字节，才说明那一层降级没有偷偷改语义。
-  const viaM = run(process.execPath, [join(here, '../../stage0/src/cli.js'), 'interp', path, '--mir']);
+  const viaM = run(process.execPath, [join(here, '../../src/core/cli.js'), 'interp', path, '--mir']);
 
   const okJs = viaJs.code === 0 && viaJs.out === ref.out;
   const okC = viaC.code === 0 && viaC.out === ref.out;

@@ -9,7 +9,7 @@
  * 写法用 `__builtin_va_*` 而**不**用 `<stdarg.h>`：这一份验的正是那几个内建本身。
  * tcc 在 arm64 上 `va_start`/`va_arg` 就是内建，`va_list` 是 tccdefs.h 里的 typedef，
  * `va_end`/`va_copy` 是那儿的两个宏 —— 标准的那层名字在
- * `stage0/include/stdarg.h`（第八刀第二片），gen/28 那一份验它。
+ * `src/include/stdarg.h`（第八刀第二片），gen/28 那一份验它。
  *
  * printf 一定要有声明：arm64 的变参走栈，没声明时 **tcc 自己**会编错。 */
 

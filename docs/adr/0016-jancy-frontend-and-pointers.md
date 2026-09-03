@@ -72,13 +72,13 @@ thin 指针的解引用与算术、以及 fat 指针**跳过范围检查**的那
 
 1. **方言的指针类型与八条形式**（`(ptr T)` / `(tptr T)`；`addr` / `taddr` / `pload` /
    `pstore` / `padd` / `psub` / `pnull` / `pthin`），加上 `(unsafe …)`。落在
-   `stage0/src/hir/types.js`、`stage0/src/sexpr/lower.js`、`stage0/src/hir/check.js`。
+   `src/core/hir/types.js`、`src/core/sexpr/lower.js`、`src/core/hir/check.js`。
 2. **JS 后端的 arena**：`$mem` / `$mem_alloc` / `$pload_*` / `$pstore_*` 与范围检查。
 3. **C 后端的真指针**：fat 三字段结构体。
 4. **两个解释器**：照 JS 那一套 arena（`run` 与 `interp` 必须逐字节一样）。
 5. **LLVM 后端**：真指针，跟在 C 后面。
 6. **`tests/sexpr/` 的指针那一组**：五条腿输出一致，越界与 null 解引用各有一条拒绝用例。
-7. **`stage0/src/frontend-jnc/` 与 `jnc.grammar`**：从八份 `.llk` 转写，一处改动一条理由
+7. **`src/core/frontend-jnc/` 与 `jnc.grammar`**：从八份 `.llk` 转写，一处改动一条理由
    （与 asy.grammar 文件头同一个写法）。
 8. **`tests/jnc/`**：语料从 `test/jnc/*.jnc` 挑，期望输出自己写、注明出处。
 
@@ -174,7 +174,7 @@ EPS 全量、`sweep.js`、`svg.js`、自举。这一刀一行 asy 的代码都�
 
 ### 第三刀：前端接上，与一条新纪律 —— **jancy 不向方言妥协**
 
-分步 7 与 8 一起落地：`stage0/src/frontend-jnc/lower.js`（jnc 树 -> 核心方言）、`.jnc`
+分步 7 与 8 一起落地：`src/core/frontend-jnc/lower.js`（jnc 树 -> 核心方言）、`.jnc`
 接进 `cli.js`（`compileJnc` / `jncText` / `omni sx x.jnc`）、新轴 `tests/jnc/`。
 语法那一半原先就在（`jnc.grammar`，526/528 份真实源码唯一成树，由 `tests/glr` 的
 `cases/jnc` 那一组量），这一刀只补降级。
@@ -1022,7 +1022,7 @@ type_ptr_data.rst。刻意不印任何裸地址。
 
 **跑过的轴**：`tests/jnc`（29/0，新增 `cases/18-array2d`，五条腿逐字节相同）。
 **没跑的**：`tests/sexpr` / `tests/glr` / `tests/asy` —— 这一刀只动了
-`stage0/src/frontend-jnc/lower.js` 一个文件，共享面一个字没碰。
+`src/core/frontend-jnc/lower.js` 一个文件，共享面一个字没碰。
 自举、`tests/jit`、`tests/mir`、`tests/llvm` 照旧没跑；`npm run lint` 这台机器上没有 typescript。
 
 ### 第二十刀：数组的地址 —— 一个字都不用发，与一个 jancy 自己说不出的名字
@@ -1054,7 +1054,7 @@ type_ptr_data.rst。刻意不印任何裸地址。
 
 **跑过的轴**：`tests/jnc`（30/0，新增 `cases/19-addr-array`，五条腿逐字节相同）。
 **没跑的**：`tests/sexpr` / `tests/glr` / `tests/asy` —— 这一刀又只动了
-`stage0/src/frontend-jnc/lower.js` 一个文件，共享面一个字没碰。
+`src/core/frontend-jnc/lower.js` 一个文件，共享面一个字没碰。
 自举、`tests/jit`、`tests/mir`、`tests/llvm` 照旧没跑；`npm run lint` 这台机器上没有 typescript。
 
 ### 第二十一刀：数组是**按值**的一整块 —— 并纠正前两刀记错的一条边界
@@ -1103,7 +1103,7 @@ type_ptr_data.rst。刻意不印任何裸地址。
 **跑过的轴**：`tests/jnc`（32/0 —— 新增 `cases/20-array-value` 与两条 bad，删掉
 `bad/array-copy`，五条腿逐字节相同）。
 **没跑的**：`tests/sexpr` / `tests/glr` / `tests/asy` —— 这一刀第三次只动了
-`stage0/src/frontend-jnc/lower.js` 一个文件，共享面一个字没碰。
+`src/core/frontend-jnc/lower.js` 一个文件，共享面一个字没碰。
 自举、`tests/jit`、`tests/mir`、`tests/llvm` 照旧没跑；`npm run lint` 这台机器上没有 typescript。
 
 ### 第二十二刀：数组字段 —— 两处闸门里的第一处，与"这一块不是一个值"

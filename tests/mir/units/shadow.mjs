@@ -12,7 +12,7 @@
 // LLVM 那边 $sp 是 `@g_sp`、内存是 omni_lin_at 回来的真指针。输出必须逐字节相同。
 
 import { unit, printI64, OP, T_I64, T_VOID, REF_NONE } from '../mirkit.mjs';
-import { MirFunc, memDesc, MLOAD_KINDS, MSTORE_KINDS } from '../../../stage0/src/mir/ir.js';
+import { MirFunc, memDesc, MLOAD_KINDS, MSTORE_KINDS } from '../../../src/core/mir/ir.js';
 
 const LD64 = memDesc(MLOAD_KINDS.indexOf('i64'), 0);
 const ST64 = memDesc(MSTORE_KINDS.indexOf('i64'), 0);

@@ -17,7 +17,7 @@ import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
-import { readImage, readImports, buildImports } from '../../stage0/src/link/pe.js';
+import { readImage, readImports, buildImports } from '../../src/core/link/pe.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');

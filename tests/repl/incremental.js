@@ -6,19 +6,19 @@
 //
 // 顺带钉住跨批可见性：第 k 批调第 1 批定义的函数、读第 1 批声明的变量，都必须能过。
 
-import { CheckSession } from '../../stage0/src/hir/check.js';
-import { CoreSession } from '../../stage0/src/sexpr/lower.js';
-import { InterpSession } from '../../stage0/src/interp/eval.js';
-import { JsSession } from '../../stage0/src/repl.js';
-import { loadProgram, newLoadState } from '../../stage0/src/module/load.js';
-import { Diagnostics, SourceFile } from '../../stage0/src/source/diag.js';
-import { AsySession } from '../../stage0/src/frontend-asy/lower.js';
-import { parseAsyBuiltins } from '../../stage0/src/frontend-asy/types.js';
-import { readSexpr } from '../../stage0/src/sexpr/read.js';
-import { readGrammar } from '../../stage0/src/glr/grammar.js';
-import { buildTable } from '../../stage0/src/glr/table.js';
-import { lexText } from '../../stage0/src/glr/lex.js';
-import { glrParse } from '../../stage0/src/glr/driver.js';
+import { CheckSession } from '../../src/core/hir/check.js';
+import { CoreSession } from '../../src/core/sexpr/lower.js';
+import { InterpSession } from '../../src/core/interp/eval.js';
+import { JsSession } from '../../src/core/repl.js';
+import { loadProgram, newLoadState } from '../../src/core/module/load.js';
+import { Diagnostics, SourceFile } from '../../src/core/source/diag.js';
+import { AsySession } from '../../src/core/frontend-asy/lower.js';
+import { parseAsyBuiltins } from '../../src/core/frontend-asy/types.js';
+import { readSexpr } from '../../src/core/sexpr/read.js';
+import { readGrammar } from '../../src/core/glr/grammar.js';
+import { buildTable } from '../../src/core/glr/table.js';
+import { lexText } from '../../src/core/glr/lex.js';
+import { glrParse } from '../../src/core/glr/driver.js';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -92,7 +92,7 @@ const ok = (msg) => process.stdout.write(`  ok   ${msg}\n`);
 
 {
   const here = dirname(fileURLToPath(import.meta.url));
-  const src = join(here, '..', '..', 'stage0', 'src', 'frontend-asy');
+  const src = join(here, '..', '..', 'src', 'core', 'frontend-asy');
   const d0 = new Diagnostics();
   const gtext = readFileSync(join(src, 'asy.grammar'), 'utf8');
   const g = readGrammar(readSexpr(new SourceFile('asy.grammar', gtext), d0), d0);

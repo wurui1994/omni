@@ -14,9 +14,9 @@ import { writeFileSync, mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import * as x from '../../stage0/src/x64/encode.js';
-import { REG as R, ALU, CC, SH, XMM as XM, FOP } from '../../stage0/src/x64/encode.js';
-import { CodeBuf, RELOC as XRELOC } from '../../stage0/src/x64/asm.js';
+import * as x from '../../src/core/x64/encode.js';
+import { REG as R, ALU, CC, SH, XMM as XM, FOP } from '../../src/core/x64/encode.js';
+import { CodeBuf, RELOC as XRELOC } from '../../src/core/x64/asm.js';
 
 function findLlvm(name) {
   for (const c of [`/opt/homebrew/opt/llvm/bin/${name}`, `/usr/local/opt/llvm/bin/${name}`,

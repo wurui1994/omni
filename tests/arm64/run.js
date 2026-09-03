@@ -13,8 +13,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 
-import * as a from '../../stage0/src/arm64/encode.js';
-import { CodeBuf, RELOC } from '../../stage0/src/arm64/asm.js';
+import * as a from '../../src/core/arm64/encode.js';
+import { CodeBuf, RELOC } from '../../src/core/arm64/asm.js';
 
 /** llvm-mc 在哪。没有就整份跳过 —— 这条链是「有 llvm 的机器上必须过」。 */
 function findLlvm(name) {

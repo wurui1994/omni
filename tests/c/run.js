@@ -37,13 +37,13 @@ import { readdirSync, readFileSync, existsSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { Cpp } from '../../stage0/src/frontend-c/tccpp.js';
+import { Cpp } from '../../src/core/frontend-c/tccpp.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
 const TCC_DIR = join(root, '.omni-cache', 'tcc-build');
 const TCC = join(TCC_DIR, 'tcc');
-const CLI = join(root, 'stage0', 'src', 'cli.js');
+const CLI = join(root, 'src', 'core', 'cli.js');
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 
 
@@ -197,7 +197,7 @@ for (const f of pick('inc')) for (const m of ['-E', '-P1']) compare('inc', f, in
  *
  * `inc/` 那几条只盖 `-MM`（自己的头）与不牵动系统头的 `-M`。真的系统头有自己一组
  * （`sysinc/`，第八十八片）—— 那一组两边都不给 `-I`，连 `-M` 摊出来的几十份
- * `sys/_types/*.h` 都逐字节对。唯一对不上的是**我们自带的那几份**（`stage0/include/`
+ * `sys/_types/*.h` 都逐字节对。唯一对不上的是**我们自带的那几份**（`src/include/`
  * 里的 `stddef.h` 一族）：做尺子的 tcc 没装，它那一格（`/usr/local/lib/tcc/include`）
  * 不存在，于是掉到 SDK 上；拿 `-B` 指一个 `include/` 真在的树，它就跟我们一样先用自己
  * 那份。差的是「装没装」，不是搜索顺序。
@@ -295,7 +295,7 @@ if (pick('inc').includes('01-include.c')) {
   depsCase('inc', '01-include.c', [incDir], ['-MM', '-include', via]);
 }
 /* `-v` / `-vv` / `-vvv`：头文件的开合都印一行（第八十七片）。`-vvv` 那一档连试不开的
- * 也印，于是会踩到系统头目录 —— 我们只有一个 `stage0/include`，tcc 有两个，所以那一档
+ * 也印，于是会踩到系统头目录 —— 我们只有一个 `src/include`，tcc 有两个，所以那一档
  * 加 `-nostdinc` 把系统那一段整个掐掉再比。 */
 if (pick('inc').includes('01-include.c')) {
   optCase('inc', '01-include.c', ['-I', incDir, '-v'], true);

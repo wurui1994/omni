@@ -5,7 +5,7 @@
  * `strchr(s, 0)` 回哪儿、`strtol` 的 endptr 在一位有效数字都没有时指哪儿。
  *
  * 溢出的输入不出现在这儿：C 说那时要设 `errno = ERANGE`，而我们还没有 errno
- * （见 stage0/include/stdlib.h 头上那一节）。
+ * （见 src/include/stdlib.h 头上那一节）。
  */
 #include <stdio.h>
 #include <stdlib.h>

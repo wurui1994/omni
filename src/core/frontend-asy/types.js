@@ -102,7 +102,7 @@ export const ASY_OPBAD = new Set(['&&', '||']);
  */
 export const ASY_OPNOBI = new Set(['^^', '@']);
 
-/** `cycle` 那个字面量落到哪个名字上（见 lit）：绘图层 stage0/lib/asy/plain.asy 里
+/** `cycle` 那个字面量落到哪个名字上（见 lit）：绘图层 src/lib/asy/plain.asy 里
  *  的 `path cyclepath;`。前端与绘图层之间**只有这一个**约定的名字。 */
 export const ASY_CYCLE = 'cyclepath';
 

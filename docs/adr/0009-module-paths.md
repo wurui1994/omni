@@ -1,7 +1,7 @@
 # ADR-0009：模块与导入路径
 
-状态：已接受（2026-08-25）· 实现：`stage0/src/module/load.js`、`stage0/src/parse/parser.js`、
-`stage0/src/hir/check.js`
+状态：已接受（2026-08-25）· 实现：`src/core/module/load.js`、`src/core/parse/parser.js`、
+`src/core/hir/check.js`
 
 ## 背景
 
@@ -66,7 +66,7 @@ private int jsonCur(JsonParser p) { ... }   // 只在本模块可见
 
 1. 不以 `./` 或 `../` 开头的路径**一定**是包名。缺 `./` 不会"退化成相对"，直接报错并给出改法。
 2. 包名 ⇒ 根目录的映射来自**清单**，一层间接，没有搜索。stage0 的内置清单只有一条：
-   `std` → `stage0/lib/`。将来换成真正的项目清单文件，形态不变。
+   `std` → `src/lib/`。将来换成真正的项目清单文件，形态不变。
 3. 路径必须写全后缀（`.omni` / `.omnid` / `.omnis`），只解析成一个候选，永不 stat 第二次。
 4. 含 `://` 的路径直接拒；绝对路径直接拒；`\` 直接拒（只认 `/`）。
 5. `.` 与 `..` 只允许出现在路径开头的连续段里；`./a/./b`、`./a/../b` 都是错误 ——

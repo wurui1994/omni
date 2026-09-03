@@ -9,7 +9,7 @@ ADR-0001 定的自举路线是：C0（node 上的 JS 编译器）用**自己的 
 后端产出 C1，C1 再产出 C2，判据是 C1 与 C2 的 C 逐字节相同。前端（词法/语法/生成）已经落地
 并被第三条测试轴钉住；缺的是**降级**：把 JS AST 变成 OIR。
 
-先把工作量数清楚，不靠感觉。用我们自己的前端解析 `stage0/src` 全部 15 个文件，AST 里出现的
+先把工作量数清楚，不靠感觉。用我们自己的前端解析 `src/core` 全部 15 个文件，AST 里出现的
 节点种类与数量：
 
 - 表达式主体：`Ident` 8653、`Member` 5222、`Call` 2576、`Str` 2481、`This` 2022、`Binary` 781、
@@ -465,7 +465,7 @@ Break / Continue / Return，所以形状是定下来的：
 
 - **`path` 与 `crypto` 不进 ABI**。`join`/`dirname`/`basename`/`resolve`/`relative`/
   `isAbsolute` 是纯字符串计算，sha256 也是纯计算；写在编译器自己的源码里
-  （`stage0/src/host/path.js`）两个后端一起用，进 ABI 反而多出一处"宿主实现与我的实现
+  （`src/core/host/path.js`）两个后端一起用，进 ABI 反而多出一处"宿主实现与我的实现
   是否逐字符一致"的分叉点。ABI 里只留真的要问操作系统的 `cwd`。
 - **`readline` 换成阻塞读**。`rl.on('line')` 是全编译器唯一的事件驱动 API，C 侧没有
   对应物；`js_proc_read_line()` 读一行、EOF 返回 `undefined`，两侧都成立，REPL 的驱动
@@ -475,7 +475,7 @@ Break / Continue / Return，所以形状是定下来的：
 - **`import.meta.url` 换成 `js_install_dir()`**："运行中的程序镜像所在目录"，JS 侧是
   `dirname(process.argv[1])`，C 侧是 `dirname(argv[0])`（刻意不过 realpath —— node 不解
   符号链接，解了就会在 `/var` 与 `/private/var` 上分叉）。从这个目录怎么走到 `runtime/`
-  与 `lib/` 是调用方的事：C0 是 `stage0/src` 下的脚本，C1 是一个可执行文件，两代的布局
+  与 `lib/` 是调用方的事：C0 是 `src/core` 下的脚本，C1 是一个可执行文件，两代的布局
   本来就不同，得靠往上找 `runtime/omni.h` 来定位，不能写死相对层数。
 - **`new Function(code)()` 没有 C 侧对应物**（`omni run` 的 JS 快路径）。原生编译器上的
   `omni run` 只能走"编成 C 再执行"那条路，这条快路径要挂在能力检查后面。

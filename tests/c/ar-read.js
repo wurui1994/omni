@@ -17,8 +17,8 @@ import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { readArchive, alacarte } from '../../stage0/src/link/ar.js';
-import { readObject } from '../../stage0/src/link/elf.js';
+import { readArchive, alacarte } from '../../src/core/link/ar.js';
+import { readObject } from '../../src/core/link/elf.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');

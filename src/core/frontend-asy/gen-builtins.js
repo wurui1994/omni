@@ -7,7 +7,7 @@
 // 手抄一份就等于把别人的表复制进我们的代码里，下次 asy 升级没人知道差了什么。
 // 支持一门语言的成本应该是「读它的表」，不是「在降级器里写一堆分支」。
 //
-//   node stage0/src/frontend-asy/gen-builtins.js [asymptote 源码目录] > builtins.tab
+//   node src/core/frontend-asy/gen-builtins.js [asymptote 源码目录] > builtins.tab
 //
 // 默认源码目录：$ASY_SRC，或 /Users/wurui/Documents/Lang/reference/asymptote。
 // 「实现在哪」那一列是**我们的**策略（这个文件里的 POLICY），不是从 asy 抄的：
@@ -28,7 +28,7 @@ const POLICY = new Map([
   ['round', ['rmath', 'round']],
   ['fmod', ['rmath', 'fmod']],
   // 超越函数也是 rmath：C 那条腿转手 libm，JS 那条腿转手 Math.*。标准库有的东西
-  // 不自己写；代价是这一族只保证容差（见 stage0/runtime/omni_math.c 的头注）。
+  // 不自己写；代价是这一族只保证容差（见 src/runtime/omni_math.c 的头注）。
   ['sin', ['rmath', 'sin']],
   ['cos', ['rmath', 'cos']],
   ['tan', ['rmath', 'tan']],
@@ -110,7 +110,7 @@ for (const m of bc.matchAll(/addRealIntFunc<[A-Za-z_][A-Za-z0-9_]*>\(ve,\s*SYM\(
 const names = [...rows.keys()].sort();
 const out = [];
 out.push('# asy 的内建实数函数 —— **绑定表**，不是代码。这个文件是**生成的**：');
-out.push('#   node stage0/src/frontend-asy/gen-builtins.js [asymptote 源码目录] > builtins.tab');
+out.push('#   node src/core/frontend-asy/gen-builtins.js [asymptote 源码目录] > builtins.tab');
 out.push('# 来源是 asy 自己的两份数据：runmath.in 里带签名的声明，与 builtin.cc 里');
 out.push('# `addRealFunc(sin,SYM(sin))` 那一族（直通 libm 的那些）。asy 也是一张表，不是语法。');
 out.push('#');

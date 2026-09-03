@@ -2,7 +2,7 @@
  *
  * 这一层只放**真的要问操作系统**的东西。path 那一套（join / dirname / basename /
  * resolve / relative / isAbsolute）不在这里 —— 它是纯字符串计算，写在编译器自己的
- * 源码里（stage0/src/host/path.js）就能两个后端一起用，塞进 ABI 只会多出一处
+ * 源码里（src/core/host/path.js）就能两个后端一起用，塞进 ABI 只会多出一处
  * "宿主实现与我的实现是否逐字符一致"的分叉点。同理 crypto 的 sha256 也不进 ABI。
  *
  * 收发一律是 dynamic：路径与内容是 JS 域的字符串（UTF-16 码元），落到 libc 之前
@@ -274,7 +274,7 @@ omni_dyn omni_js_now_ms(void) {
 
 /* "运行中的程序镜像所在目录"。JS 侧是 dirname(process.argv[1])，C 侧是
    dirname(argv[0])。从这里怎么走到 runtime/ 与 lib/ 是调用方的事 —— 两代的布局
-   本来就不同（C0 是 stage0/src 下的脚本，C1 是一个可执行文件）。
+   本来就不同（C0 是 src/core 下的脚本，C1 是一个可执行文件）。
    刻意**不**过 realpath：node 不解符号链接，这边解了两侧就会在 /var 与 /private/var
    这种地方分叉。相对路径按 cwd 补成绝对，因为 node 给的 argv[1] 总是绝对的。 */
 omni_dyn omni_js_install_dir(void) {

@@ -31,7 +31,7 @@
 //   有它们 —— 与 tcc 比的是「日期那一串相同、时间差在几秒内」（`tests/c/datetime.js`）。
 //   `__LINE__` / `__FILE__` / `__COUNTER__` 也都认。
 // - **系统头目录有两段**（第八十八片，与 tcc 的 `sysinclude_paths` 同一形状）：
-//   自带那一份在前 —— `stage0/include/`，对着 tcc 的 `{B}/include`；本机 SDK 的
+//   自带那一份在前 —— `src/include/`，对着 tcc 的 `{B}/include`；本机 SDK 的
 //   `/usr/include` 在后（tcc 那边是 configure 时用 `xcrun --show-sdk-path` 定死的，
 //   我们第一次用的时候找一次记下来，见 cli.js 的 `sdkUsrInclude`）。
 //   自带那一份里只有**编译器必须自己给**的那四份

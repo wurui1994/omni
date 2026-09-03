@@ -48,11 +48,11 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { workDir } from '../work.js';
 
-import { ASY_NOPE } from '../../stage0/src/frontend-asy/types.js';
+import { ASY_NOPE } from '../../src/core/frontend-asy/types.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '../..');
-const cli = join(root, 'stage0', 'src', 'cli.js');
+const cli = join(root, 'src', 'core', 'cli.js');
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 
 // 每一次外部调用都有**上限 30s**：卡住的用例要报成失败，不能把整轴拖死。

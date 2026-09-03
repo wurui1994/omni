@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 
-import { f80Bytes, f80Parts, f80ToDouble } from '../../stage0/src/frontend-c/f80.js';
+import { f80Bytes, f80Parts, f80ToDouble } from '../../src/core/frontend-c/f80.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
