@@ -54,17 +54,46 @@ surfaceless EGL + llvmpipe（`EGL_PLATFORM=surfaceless`，不要 X），再不�
 所以第一刀的门可以就是「跑通 `FRAG_SIMPLE`」，第二刀「跑通 `FRAG_COMPLEX`」——
 两个门都有像素级的尺子（llvmpipe 的输出）与三个性能数。
 
+## 尺子的第二档：`pretty_render.py`
+
+也读了。它与 `benchmark.py` 是**同一套上下文取法**（默认 → surfaceless EGL → Xvfb），
+但量的东西不同：800×800、36 帧动画（`u_time` 推进），存 `pretty.png` 与一份 GIF，
+另报每帧耗时。所以它是**像素正确性**那一路的门（有图可比），`benchmark.py` 是性能那一路。
+
+它把子集往上扩了一档，逐条列出来（这一档是第二刀的门）：
+
+- **varying**：顶点里 `out vec2 v_uv;`、片元里 `in vec2 v_uv;`——于是要有**插值**，
+  不再是只读 `gl_FragCoord`。这是这一档里最重的一条：llvmpipe 那边插值是
+  `lp_bld_interp.c` 独立的一块。
+- **矩阵**：`mat2 rot(float a) { return mat2(cos(a), -sin(a), sin(a), cos(a)); }`，
+  然后 `p = rot(a) * p` 那种矩阵乘向量。第一档一个矩阵都没有。
+- 标量 uniform：`uniform float u_time`
+- 模块级 `const float PI = 3.14159265359;`
+- 三元 `? :`（顶点里 `(gl_VertexID == 1) ? 3.0 : -1.0`），函数里的 `return`
+- 多出来的内建：`dot`、`normalize`、`fract`、`mix`、`clamp`
+- swizzle 重复分量：`c.xxx`
+
+**仍然没有**：纹理／采样器、结构体、数组、`if`/`else`（全用三元与 `min/max` 代替）、
+`discard`、多渲染目标。
+
+于是两档门是清楚的：
+
+- 第一刀：`benchmark.py` 的 `FRAG_SIMPLE`、`FRAG_COMPLEX`——`gl_FragCoord` + 标量/向量 +
+  那七个内建 + `for` + 函数。**没有插值、没有矩阵。**
+- 第二刀：`pretty_render.py`——加插值、`mat2`、三元、五个内建。
+
 ## 还没定的（下一步按这个顺序）
 
-1. **读 `pretty_render.py`**：它大概会把子集扩到纹理 / 更多内建，得先知道边界在哪。
-2. **摸 mesa 那边的边界**：llvmpipe 里哪些算「复刻目标」——`lp_state_fs.c` 那条片元管线、
-   tile（4×4 / 64×64）光栅化、LLVM JIT 出的 shader 变体、`lp_rast.c`；哪些明确不借。
-   要像 ADR-0016 对 jancy 那样写清「借什么、不借什么」。
-3. **GLSL 接到哪一层 IR**：MIR 已经有线性内存、SIMD 还没有。llvmpipe 的快靠的是
+1. **摸 mesa 那边的边界**：llvmpipe 里哪些算「复刻目标」——`lp_state_fs.c` 那条片元管线、
+   `lp_bld_interp.c` 的插值、tile（4×4 / 64×64）光栅化、LLVM JIT 出的 shader 变体、
+   `lp_rast.c`；哪些明确不借。要像 ADR-0016 对 jancy 那样写清「借什么、不借什么」。
+2. **GLSL 接到哪一层 IR**：MIR 已经有线性内存、SIMD 还没有。llvmpipe 的快靠的是
    **一次算 4 或 8 个片元**（SoA + LLVM 的向量类型），所以这一条八成要让 MIR 长出
    向量那一格 —— 那是这条线上最大的一个决定，不能顺手做。
-4. **像素比对的口径**：逐字节？还是容差？llvmpipe 自己与硬件就不逐字节相同（`sin`/`cos`
+3. **像素比对的口径**：逐字节？还是容差？llvmpipe 自己与硬件就不逐字节相同（`sin`/`cos`
    的实现不同），所以尺子该是 **llvmpipe**、口径大概是「每通道差 ≤ 1」——但要量过再定。
+   `pretty_render.py` 存的那张 PNG 正好是现成的比对物。
+
 
 ## 为什么先记这一份
 
