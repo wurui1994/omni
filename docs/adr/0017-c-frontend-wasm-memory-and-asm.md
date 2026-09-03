@@ -738,6 +738,15 @@ identifier，所以两份输出得同名不同目录才比得。
 门是 `tests/c/arch-defs.js`：两条腿各自与自己那把 tcc 比六个宏的在与不在
 （x86_64 那份在 Rosetta 上跑）。
 
+**`__DATE__` / `__TIME__` 不再是边界**（第一百〇三片）：这两条以前明着报
+「its value is not reproducible」—— 值随时钟走，进不了「逐字节相同」那根轴。
+第一百〇三片把它们做了，照 `tccpp.c:3378-3393`：**每次展开现读一次时钟**（tcc 也是在
+这儿 `time()`/`localtime()` 的，不是启动时算一次存着），格式是那两句 `snprintf` 的原样
+—— `"%s %2d %d"`（月份缩写、日**空格**右对齐到两位，所以 9 月 3 日是 `Sep  3 2026`，
+两个空格）与 `"%02d:%02d:%02d"`。尺子换一种称法（`tests/c/datetime.js`，4 条）：
+日期那一串与 tcc 逐字符相同、时间差在容差内、把 `hh:mm:ss` 抹成占位符之后整份 `-E`
+输出与 tcc 逐字节相同。`cpp-bad/date` 那个「该拒」的用例跟着删了。
+
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
 地址交给真的 libc（`strlen`/`memcpy`）验过。C 前端现在还把 `&x` 降到影子栈上，
@@ -13064,6 +13073,66 @@ c67 与 arm64-win32）。
 因为交叉那份没烤系统路径），出来的可执行文件在 Rosetta 上跑。两边 stdout 逐字节比。
 
 <!-- 第九刀第一百〇二片-END -->
+
+## 落地：第九刀第一百〇三片
+
+`__DATE__` 与 `__TIME__` 从第八刀起就明着报 `is not supported yet: its value is not
+reproducible`。理由不是不会做，是**不想让它们进逐字节比对的轴** —— 一个值随时钟走的宏，
+昨天编出来的 `.o` 与今天编出来的不同，`cpp-bad/date` 那个用例就是把这条边界钉在门上的。
+
+但这条边界的成本在涨。`__DATE__`/`__TIME__` 是 C90 就规定的、每个实现都必须给的预定义宏，
+真实源码里到处是「版本横幅印一行编译时间」这种用法（tinycc 自己的源码不用它们 —— 量过，
+`tccpp.c` 之外零处 —— 但我们的终点不止 tinycc）。把「不认」挂在那儿，等于说凡是印编译
+时间的源码都编不了，而做它只要照抄两句 `snprintf`。真正需要想清楚的只有一件事：门怎么称。
+
+### tcc 是怎么做的
+
+`tccpp.c:3378-3393`，就在 `__LINE__`/`__FILE__` 旁边的同一个 `else if` 链上：
+
+```c
+} else if (v == TOK___DATE__ || v == TOK___TIME__) {
+    time_t ti; struct tm *tm;
+    time(&ti); tm = localtime(&ti);
+    if (v == TOK___DATE__) {
+        static char const ab_month_name[12][4] = { "Jan", … , "Dec" };
+        snprintf(buf, sizeof(buf), "%s %2d %d",
+            ab_month_name[tm->tm_mon], tm->tm_mday, tm->tm_year + 1900);
+    } else {
+        snprintf(buf, sizeof(buf), "%02d:%02d:%02d", tm->tm_hour, tm->tm_min, tm->tm_sec);
+    }
+```
+
+三件值得记下来的：
+
+1. **每次展开都现读一次时钟** —— 不是启动时算一次存起来。所以一份文件里 `__TIME__`
+   出现两次，理论上可以印出两个不同的秒数（tcc 编得慢的时候真会）。C 标准说
+   `__TIME__` 在一个翻译单元里应当是「翻译的时间」，tcc 这一手是它的取舍，我们照抄。
+2. **日是 `%2d`，空格右对齐** —— 不是 `%02d`。9 月 3 日是 `Sep  3 2026`，中间两个空格。
+   这一格最容易写成 `padStart(2, '0')`，一写就与 tcc 差一个字节，而且一个月里只有九天
+   看得出来。
+3. **`localtime`，不是 `gmtime`** —— 跟着本机时区走。
+
+我们那边是 `substSpecial` 里的一格，`MONTH_ABBR` 抄的是 `ab_month_name`，
+`String(d.getDate()).padStart(2, ' ')` 对着 `%2d`。
+
+### 门怎么称
+
+值随时钟走，就不能拿「两份输出逐字节相同」当唯一的尺。`tests/c/datetime.js` 拆成四条：
+
+- **格式**：两处 `__DATE__` 与三处 `__TIME__`（探针里有一处是 `#define STAMP __DATE__ " "
+  __TIME__` 的间接展开）都得合 `/^[A-Z][a-z]{2} [ \d]\d \d{4}$/` 与 `/^\d{2}:\d{2}:\d{2}$/`。
+- **日期逐字符相同**：同一天里两台编译器印出的 `__DATE__` 必须一模一样，连那个空格都算。
+- **时间差在容差内**：两次进程启动之间隔着几十毫秒，容差 5 秒。
+- **抹掉时间之后整份 `-E` 输出与 tcc 逐字节相同**：把 `hh:mm:ss` 换成 `HH:MM:SS` 再比。
+  这一格才是「与 tcc 同形」的真身 —— 空白、字符串的拼接形状（`"Sep  3 2026" " " "…"`
+  是三个相邻的字面量，tcc 不合并）全在里面。序幕要削，与 `tests/c/run.js` 的
+  `dropPrologue` 同一套：tcc 的预定义是一份叫 `<command line>` 的**源码**，进出主文件都印
+  行标，我们的预定义是三张表，没有这一段。
+
+`cpp-bad/date`（`.c` 与 `.expected`）删了 —— 该拒的事不再该拒。`tests/c/run.js`
+207 条全绿。
+
+<!-- 第九刀第一百〇三片-END -->
 
 
 

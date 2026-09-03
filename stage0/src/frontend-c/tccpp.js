@@ -26,8 +26,10 @@
 //
 // ## 阶段边界（刻意的，全部报错而不是给错答案）
 //
-// - **`__DATE__` / `__TIME__` 不认**：它们的值随时钟走，进不了逐字节比对的测试轴。
-//   `__LINE__` / `__FILE__` / `__COUNTER__` 都认。
+// - **`__DATE__` / `__TIME__` 也认了**（第一百〇三片，`tccpp.c:3378-3393`）：每次展开现读
+//   一次时钟，格式是 tcc 那两句 `snprintf` 的原样。值随时钟走，所以逐字节比对的门里不能
+//   有它们 —— 与 tcc 比的是「日期那一串相同、时间差在几秒内」（`tests/c/datetime.js`）。
+//   `__LINE__` / `__FILE__` / `__COUNTER__` 也都认。
 // - **系统头目录有两段**（第八十八片，与 tcc 的 `sysinclude_paths` 同一形状）：
 //   自带那一份在前 —— `stage0/include/`，对着 tcc 的 `{B}/include`；本机 SDK 的
 //   `/usr/include` 在后（tcc 那边是 configure 时用 `xcrun --show-sdk-path` 定死的，
@@ -73,6 +75,12 @@ const CH_EOF = -1;
 const SPC = 32; // ' '
 const TAB = 9;
 const LF = 10;
+
+/** `__DATE__` 里的月份缩写，抄 `tccpp.c:3384` 那张 `ab_month_name`。 */
+const MONTH_ABBR = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+];
 
 /* ------------------------------------------------- 字符分类
  * tcc 建了一张 `isidnum_table`（`tccpp.c:3693-3702`）：CH_EOF..127 按 is_space/isid/isnum
@@ -1125,8 +1133,22 @@ export class Cpp {
       out.add2Spc(TOK_STR, this.file.filename);
       return;
     }
-    // __DATE__ / __TIME__：见文件头的阶段边界 —— 值随时钟走，进不了逐字节比对的轴
-    this.err(`'${this.tokStr(v, null)}' is not supported yet: its value is not reproducible`);
+    /* `__DATE__` / `__TIME__`（`tccpp.c:3378-3393`）：**每次展开都现读一次时钟**
+     * （tcc 也是在这儿 `time()` 的，不是启动时算一次存着）。格式是 tcc 那两句
+     * `snprintf` 的原样：`"%s %2d %d"`（月份缩写、日**空格**右对齐到两位、四位年）
+     * 与 `"%02d:%02d:%02d"`，取的是**本地时间**（`localtime`）。
+     *
+     * 它们的值随时钟走，所以逐字节比对的那些门不能用它们 —— 与 tcc 比的是「日期这一
+     * 串相同、时间差在几秒内」（`tests/c/datetime.js`）。 */
+    if (v === TOK___DATE__ || v === TOK___TIME__) {
+      const d = new Date();
+      const p2 = (n) => String(n).padStart(2, '0');
+      out.add2Spc(TOK_STR, v === TOK___DATE__
+        ? `${MONTH_ABBR[d.getMonth()]} ${String(d.getDate()).padStart(2, ' ')} ${d.getFullYear()}`
+        : `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`);
+      return;
+    }
+    this.err(`'${this.tokStr(v, null)}' is not supported yet`);
   }
 
   /**
