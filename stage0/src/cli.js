@@ -413,6 +413,10 @@ function cObj(path, out, arch, incs, defs, fmt, os) {
     syms.push({
       name: mod.funcs[k].name,
       off: blob.offsets[k],
+      /* `st_size`（第一百二十片）：函数在 `.text` 里占多长。tcc 记的是「这个函数的
+       * 落点到下一个函数的落点」那一段 —— win32 上第一个函数后面那八字节的
+       * `UNWIND_INFO` 也算在里头（量过：`f` 的代码 23 字节、`st_size` 32）。 */
+      size: blob.sizes[k],
       local: mod.funcs[k].local,
       /* `weak`（第一百〇四片）：`__attribute__((weak))` 的函数在符号表里是弱定义。 */
       weak: mod.funcs[k].weak === true,
@@ -423,7 +427,9 @@ function cObj(path, out, arch, incs, defs, fmt, os) {
   /* 函数的别名（第一百〇五片）：与目标同一个偏移 —— 代码一份、符号两条。 */
   for (const a of mod.aliases) {
     if (a.kind !== 'f') continue;
-    syms.push({ name: a.name, off: blob.offsets[a.no], local: false, weak: a.weak === true });
+    syms.push({
+      name: a.name, off: blob.offsets[a.no], size: blob.sizes[a.no], local: false, weak: a.weak === true,
+    });
   }
   /* 两个写出器同一份入参（第三十八片）：Mach-O 那个喂 clang 那条「真的能跑」的腿，
    * ELF 那个喂 tcc 那条「字节相同」的腿 —— tcc 的 `-c` 在**所有**目标上都写 ELF。 */

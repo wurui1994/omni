@@ -1126,6 +1126,8 @@ export function genModule(mod) {
       name: mod.globals[gi],
       off: base,
       sect: 2,
+      /* `st_size`（第一百二十片，与 x64 那一份同一条）：这一块有多少字节。 */
+      size,
       local: mod.globalLocal[gi] === true,
       weak: mod.globalWeak[gi] === true,
       vis: mod.globalVis[gi] ?? 0,

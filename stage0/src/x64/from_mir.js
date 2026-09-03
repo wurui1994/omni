@@ -1408,6 +1408,9 @@ export function genModule(mod, opts) {
       name: mod.globals[gi],
       off: base,
       sect: 2,
+      /* `st_size`（第一百二十片）：这一块有多少字节。tcc 的全局量符号带着这一格
+       * （量过：`static const char s[] = "hi"` 的 `st_size` 是 3）。 */
+      size,
       local: mod.globalLocal[gi] === true,
       weak: mod.globalWeak[gi] === true,
       vis: mod.globalVis[gi] ?? 0,
