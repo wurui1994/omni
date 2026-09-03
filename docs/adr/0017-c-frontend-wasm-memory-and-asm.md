@@ -15120,6 +15120,67 @@ ours .data 92 字节  .data.ro 3  .bss 0     g@0 big@8 tab@16 p@56 arr@64（全�
 
 <!-- 第九刀第一百三十一片-END -->
 
+## 量：`.bss` 的判据是「源码里有没有初始化式」（下一片的尺子）
+
+上一片末尾那笔量细了。tcc 的判据在 `tccgen.c:8405-8438`，一串 `if`：
+
+```c
+if (is_const)        sec = rodata_section;    /* 剥掉指针数组那几层之后带 const */
+else if (has_init)   sec = data_section;
+else if (nocommon)   sec = bss_section;
+else                 sec = common_section;    /* SHN_COMMON，st_value 是对齐要求 */
+```
+
+`nocommon` 在 `libtcc.c:881` 是**默认开着**的（`s->nocommon = 1`），所以最后那一支
+走不到 —— 我们不必管 COMMON 符号。
+
+关键是 `has_init` 是**源码里有没有那个 `=`**，不是「字节是不是全零」。拿
+x86_64-linux 量这一份：
+
+```c
+int a;            int b = 0;        int c = 5;
+static int d;     static int e = 0;
+char f[10];       char g[10] = "";
+const int h = 0;  const int i;
+struct S { int x; } j;   int k[3] = {0, 0, 0};
+int fn(void) { static int m; static int n = 0; … }
+```
+
+```
+.bss (28, NOBITS)   a@0  d@4  f@8  j@20  m@24
+.data (40)          b@0  c@4  e@8  g@12  k@24  n@36
+.data.ro (8)        h@0  i@4
+```
+
+三条读得出来的规矩：
+
+* **`int b = 0;` 进 `.data`** —— 字节全零也照进，因为它有初始化式。
+  「按字节全零判」是错的判据，会把 `b` 摆错。
+* **`const int i;` 进 `.data.ro`** —— `const` 那一支在 `has_init` **之前**，
+  所以没有初始化式的 `const` 也不进 `.bss`。
+* **两段各自一个游标，都按声明的次序**：`.bss` 是 a、d、f、j、m，`.data` 是
+  b、c、e、g、k、n —— 也就是第一百二十五/一百三十一片那根 `globalSeq` 轴再分一次流，
+  规划器多一个出口就够（`planBss`）。函数体里的 `static` 也在同一根轴上
+  （`m` 排在 `j` 之后、`n` 排在 `k` 之后）。
+
+我们现在全摆在 `.data` 里，`.bss` 的节头一直空着（`link/elf.js:474` 那一行
+`sh_size` 写死 0）。所以下一片的活分三处：
+
+1. 前端：MIR 上给每一块记「有没有初始化式」（`globalBss` 那样一格标注），
+   判据从 C 前端来 —— **不能**在后端按字节猜
+2. 规划器：`planData` 分成 `planData` 与 `planBss`，两个游标
+3. 三个写出器：ELF 的 `.bss` 要真的带 `sh_size`（NOBITS，不占文件字节）、
+   符号要能落在 4 号节；Mach-O 那边是 `__bss`（`S_ZEROFILL`，
+   `macho_exe.js` 里链接那一头已经认它，写 `.o` 那一头还只有两节）；
+   PE 那边 `.bss` 归 data 那一类（`pe_sections.js:117`）
+
+第 3 步是这一片的大头 —— 三个写出器现在都只知道「代码 + 数据 + 只读数据」这三段。
+顺带：静态局部量的**名字**也还差着（tcc 叫 `m`/`n`，我们叫 `fn.m.0`/`fn.n.1`），
+那是另一笔。
+
+<!-- 量：.bss 的判据-END -->
+
+
 
 
 
