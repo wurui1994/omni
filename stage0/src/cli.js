@@ -361,7 +361,11 @@ function cObj(path, out, arch, incs, defs, fmt, os) {
   for (const w of warnings) stderr(`${w}\n`);
   const errs = verifyMir(mod);
   if (errs.length > 0) throw new OmniError(`mir is not well-formed:\n  ${errs.join('\n  ')}`);
-  const blob = arch === 'x86_64' ? genX64(mod) : genArm64(mod);
+  /* win32 的 x86_64 上代码节里还多一份共用的展开信息（第一百一十七片）——
+   * 摆在第一个函数之后，所以这一格得在生成代码的时候就给。 */
+  const blob = arch === 'x86_64'
+    ? genX64(mod, { unwind: fmt === 'elf' && os === 'win32' })
+    : genArm64(mod);
   const syms = [];
   for (let k = 0; k < mod.funcs.length; k++) {
     /* `local`（第九十二片）：`static` 的函数与外部函数的转发桩不进外部符号表 ——
@@ -387,7 +391,12 @@ function cObj(path, out, arch, incs, defs, fmt, os) {
     /* STT_FILE 那一条印的是**命令行上给的那一串**（第一百〇七片量的：`tcc -c s.c` 写
      * `s.c`、`tcc -c ./s.c` 写 `./s.c`、给绝对路径就写绝对路径）—— 不是基名。 */
     ? (t, d, ds, rs, a, al) => writeElfObject(t, d, ds, rs, a, al,
-      { file: path, prefix: os === 'linux' ? '' : '_', rdata: os === 'win32' ? '.rdata' : '.data.ro' })
+      {
+        file: path,
+        prefix: os === 'linux' ? '' : '_',
+        rdata: os === 'win32' ? '.rdata' : '.data.ro',
+        unwind: blob.unwind ?? undefined,
+      })
     : writeObject;
   writeBinary(out, write(blob.bytes, blob.data,
     [...syms, ...blob.dataSyms], [...blob.relocs, ...blob.dataRelocs], arch, blob.dataAlign));

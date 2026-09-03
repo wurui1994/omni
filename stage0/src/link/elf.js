@@ -21,6 +21,7 @@
  *   5 .symtab      SYMTAB
  *   6 .strtab      STRTAB
  *   7.. .rela.*    RELA                     （谁先要重定位谁先造）
+ *       .pdata     PROGBITS                 （win32 的 x86_64 才有 —— 第一个函数收尾时造）
  *   末 .shstrtab   STRTAB                   （`alloc_sec_names` 里最后造，所以在最后）
  *
  * 文件里的排布是两条算式（`elf_output_obj`）：
@@ -97,6 +98,8 @@ const R_X86_64_64 = 1;
 const R_X86_64_PC32 = 2;
 const R_X86_64_PLT32 = 4;
 const R_X86_64_GOTPCREL = 9;
+/** win32 的 `.pdata` 里那三个 DWORD 都靠这一号修（`tccpe.c` 的 `R_XXX_RELATIVE`）。 */
+const R_X86_64_RELATIVE = 8;
 
 /**
  * 我们那几种重定位到 ELF 类型号的对照。
@@ -225,7 +228,7 @@ function align(n, to) {
  * 最后那一段的类型是 NOTYPE 而不是 FUNC，这是 `tccelf_end_file` 里明写的一条：
  * 「未定义的 STT_FUNC 会让 gnu ld 在静态链接 STT_GNU_IFUNC 时犯糊涂」。
  */
-function buildSyms(defs, relocs, strs, prefix) {
+function buildSyms(defs, relocs, strs, prefix, uw) {
   const syms = [{ strx: 0, info: 0, shndx: SHN_UNDEF, value: 0, size: 0 }];
   const no = new Map();
   const put = (d, bind) => {
@@ -241,6 +244,20 @@ function buildSyms(defs, relocs, strs, prefix) {
     });
   };
   for (const d of defs) if (d.local === true) put(d, STB_LOCAL);
+  /* `.uw_base`（第一百一十七片）：win32 的 `.pdata` 里那三个字段都是**相对代码节起点**的
+   * 偏移，于是要有一条指着 `.text` 起点的符号让重定位挂上去（`tccpe.c:1955`）。
+   * 名字上**不加**那条下划线前缀 —— 它不是 C 里的名字，是 tcc 自己造的一条局部符号；
+   * 类型也不是 FUNC 而是 NOTYPE（`put_elf_sym(symtab_section, 0, 0, 0, 0, ...)`）。 */
+  if (uw !== undefined && uw !== null) {
+    no.set('.uw_base', syms.length);
+    syms.push({
+      strx: strs.intern('.uw_base'),
+      info: STB_LOCAL * 16 + STT_NOTYPE,
+      shndx: 1,
+      value: 0,
+      size: 0,
+    });
+  }
   const nlocal = syms.length;
   /* 弱定义（第九刀第一百〇四片）：`__attribute__((weak))` 的名字绑定是 STB_WEAK，
    * 与全局的排在同一段里（`sh_info` 只切「局部/非局部」这一刀）。 */
@@ -274,8 +291,10 @@ function buildSyms(defs, relocs, strs, prefix) {
  * @param arch  `'arm64'` 或 `'x86_64'`
  * @param dataAlign 这一格 ELF 用不上（tcc 的 `.data` 一律 `sh_addralign = 8`），
  *              留着是为了与 Mach-O 那个写出器同签名
- * @param opts  `{file, prefix}`：`file` 是写进 STT_FILE 那一条的源文件名；
- *              `prefix` 是符号名前缀 —— osx 与 win32 上是 `'_'`，linux 上是 `''`
+ * @param opts  `{file, prefix, rdata, unwind}`：`file` 是写进 STT_FILE 那一条的源文件名；
+ *              `prefix` 是符号名前缀 —— osx 与 win32 上是 `'_'`，linux 上是 `''`；
+ *              `rdata` 是只读数据那一节的名字；`unwind` 是 win32 x86_64 的展开表
+ *              `{offs, funcs: [{start, end}]}`（第一百一十七片）
  */
 export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
   const archName = arch === undefined ? 'arm64' : arch;
@@ -288,13 +307,18 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
    * 与符号名那条下划线并列 —— 六个目标共用一个写出器，差别就这么几处。
    * 我们的链接器早就有同一格（`elf_merge.js` 的 `opts.rdata`），写 `.o` 这一头之前欠着。 */
   const rdata = o.rdata === undefined ? '.data.ro' : o.rdata;
+  /* 展开表（第一百一十七片）：win32 的 x86_64 上每个函数都要在 `.pdata` 里占
+   * 一条 12 字节的 `RUNTIME_FUNCTION`。`opts.unwind` 是 `{offs, funcs}` ——
+   * `offs` 是那一份共用的 `UNWIND_INFO` 在 `.text` 里的偏移（后端摆的），
+   * `funcs` 是每个函数在 `.text` 里的 `[start, end)`。不给这一格就一节也不多。 */
+  const uw = o.unwind === undefined ? null : o.unwind;
   /* 数据字节要能改 —— 原地躺着的加数得搬到 `r_addend` 那一格去，原地清零。 */
   const dataBytes = new Uint8Array(data === undefined ? 0 : data.length);
   if (data !== undefined) dataBytes.set(data);
 
   const strs = new StrTab();
   const strx = strs.intern(o.file === undefined ? 'a.c' : o.file);
-  const { syms, no, nlocal } = buildSyms(defs, relocs, strs, prefix);
+  const { syms, no, nlocal } = buildSyms(defs, relocs, strs, prefix, uw);
   /* STT_FILE 那一条插在 1 号位上，所以上面攒出来的号要整体 +1。 */
   syms.splice(1, 0, { strx, info: STB_LOCAL * 16 + STT_FILE, shndx: SHN_ABS, value: 0, size: 0 });
   const symIndexOf = (name) => {
@@ -328,6 +352,22 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
   const raText = relaOf(1);
   const raData = relaOf(2);
 
+  /* `.pdata` 的字节与它那张重定位表。一条 `RUNTIME_FUNCTION` 是三个 DWORD
+   * （`BeginAddress`/`EndAddress`/`UnwindData`），三个都挂一条指着 `.uw_base`
+   * 的 RELATIVE —— 于是链接时整节一挪，三个数跟着挪（`tccpe.c:1997-2005`）。 */
+  const pdBuf = new Buf();
+  const raPdata = [];
+  if (uw !== null) {
+    for (const fn of uw.funcs) {
+      const o = pdBuf.len;
+      pdBuf.u32(fn.start).u32(fn.end).u32(uw.offs);
+      for (let k = 0; k < 12; k += 4) {
+        raPdata.push({ at: o + k, sym: symIndexOf('.uw_base'), type: R_X86_64_RELATIVE, add: 0 });
+      }
+    }
+  }
+  const pdBytes = pdBuf.out();
+
   /* ---- 节。1..6 是写死的六条，后面接重定位表，最后是 `.shstrtab`。 */
   const shstr = new StrTab();
   const secs = [{ name: '', type: 0, flags: 0, off: 0, size: 0, link: 0, info: 0, al: 0, ent: 0 }];
@@ -342,9 +382,23 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
   const symtabNo = secs.length;
   sec('.symtab', SHT_SYMTAB, 0, syms.length * SYM_SIZE, symtabNo + 1, nlocal + 1, 8, SYM_SIZE);
   sec('.strtab', SHT_STRTAB, 0, strBytes.length, 0, 0, 1, 0);
+  /* 7 号往后是**造出来的次序**，所以这一刀得照 tcc 什么时候造它们：
+   * `.rela.text` 在第一条代码重定位发出来的时候造，`.pdata` 在**第一个函数的收尾**
+   * 那一步造（`gfunc_epilog` 叫 `pe_add_unwind_data`）。于是第一个函数里有没有
+   * 重定位决定了两节谁在前 —— 量过：有就是 `.rela.text` 先，没有就是 `.pdata` 先。 */
+  const pdataSec = () => {
+    if (uw === null) return;
+    sec('.pdata', SHT_PROGBITS, SHF_ALLOC, pdBytes.length, 0, 0, 4, 0);
+    const pdNo = secs.length - 1;
+    sec('.rela.pdata', SHT_RELA, 0, raPdata.length * RELA_SIZE, symtabNo, pdNo, 8, RELA_SIZE);
+  };
+  const pdataFirst = uw !== null
+    && (raText.length === 0 || raText[0].at >= uw.funcs[0].end);
+  if (pdataFirst) pdataSec();
   if (raText.length > 0) {
     sec('.rela.text', SHT_RELA, 0, raText.length * RELA_SIZE, symtabNo, 1, 8, RELA_SIZE);
   }
+  if (!pdataFirst) pdataSec();
   if (raData.length > 0) {
     sec('.rela.data', SHT_RELA, 0, raData.length * RELA_SIZE, symtabNo, 2, 8, RELA_SIZE);
   }
@@ -375,6 +429,8 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
     if (name === '.strtab') return strBytes;
     if (name === '.rela.text') return relaBuf(raText);
     if (name === '.rela.data') return relaBuf(raData);
+    if (name === '.pdata') return pdBytes;
+    if (name === '.rela.pdata') return relaBuf(raPdata);
     if (name === '.shstrtab') return shstrBytes;
     return new Uint8Array(0);
   };

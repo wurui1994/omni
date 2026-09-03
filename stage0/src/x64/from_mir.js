@@ -44,6 +44,9 @@ import { utf8Bytes } from '../host/utf8.js';
 import * as x from './encode.js';
 import { REG, ALU, CC, SH, FOP, XMM } from './encode.js';
 import { CodeBuf } from './asm.js';
+/* 那一份共用的 8 字节 `UNWIND_INFO`（第一百一十七片）：链接器那边早就有一格
+ * （`pe.js` 的 `unwindInfoX64`），写 `.o` 这一头借同一份 —— 同一件事只记一处。 */
+import { unwindInfoX64 } from '../link/pe.js';
 import {
   OP, REF_NONE, isConstRef, T_I32, T_I64, T_BOOL, T_VOID, T_F32, T_F64,
   typeKind, isFloatType, intBits, memKindNo, memOff, MLOAD_KINDS, MSTORE_KINDS,
@@ -1369,8 +1372,13 @@ export function codeOf(mod, f) {
 /**
  * 整个模块 -> 一段连着的机器码 + 数据段。与 arm64 那一份的 `genModule` 一一对应
  * （函数之间走标签、跨模块走符号、串常量与模块级变量进数据段）。
+ *
+ * `opts.unwind` 为真就顺手摆好 win32 要的展开表（第一百一十七片）：那一份共用的
+ * 八字节 `UNWIND_INFO` 住在 `.text` 里 —— 摆在**第一个函数收完之后**，对齐到 4，
+ * 因为 tcc 就是在第一个函数的 `gfunc_epilog` 里把它塞进代码节的（`tccpe.c:1966-1976`）。
+ * 回一格 `unwind = {offs, funcs: [{start, end}]}`，`.pdata` 那一节由写出器照它排。
  */
-export function genModule(mod) {
+export function genModule(mod, opts) {
   const dataSyms = [];
   const dataBytes = [];
   /* 初值里的地址（第二十八片）：与 arm64 那一份同一条 —— `POINTER64`、加数在原地。 */
@@ -1443,10 +1451,23 @@ export function genModule(mod) {
   for (let i = 0; i < mod.funcs.length; i++) labels.push(buf.label());
   const offsets = [];
   let i = 0;
+  /* win32 的展开表（第一百一十七片）：每个函数的 `[start, end)` 一路记着，
+   * 第一个函数收完就对齐到 4、塞那八个字节。 */
+  const wantUw = opts !== undefined && opts.unwind === true;
+  const uwFuncs = [];
+  let uwOffs = 0;
   for (const f of mod.funcs) {
     offsets.push(buf.pos);
     buf.place(labels[i]);
     new FnGen(mod, f, buf, labels, strSyms).gen();
+    if (wantUw) {
+      uwFuncs.push({ start: offsets[i], end: buf.pos });
+      if (i === 0) {
+        buf.emit(new Array((-buf.pos) & 3).fill(0));
+        uwOffs = buf.pos;
+        buf.emit(unwindInfoX64());
+      }
+    }
     i++;
   }
   buf.finish();
@@ -1464,5 +1485,6 @@ export function genModule(mod) {
     dataSyms,
     dataRelocs,
     dataAlign,
+    unwind: wantUw ? { offs: uwOffs, funcs: uwFuncs } : null,
   };
 }
