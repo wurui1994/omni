@@ -19,6 +19,7 @@ import { findCmd, splitArgv, canonicalize, ownsVerbose, renderHelp, renderLegacy
 import { ROOT, LEGACY } from './cli/cmds.js';
 import { renderPlan, renderSummary, renderStage } from './cli/stages.js';
 import { planForC } from './cli/plan-c.js';
+import { tccTranslate } from './cli/cmd-tcc.js';
 import { linkJs } from './frontend-js/link.js';
 import { lowerJs } from './frontend-js/lower.js';import { lowerWat } from './frontend-wat/lower.js';
 import { lowerAsy } from './frontend-asy/lower.js';
@@ -2175,6 +2176,19 @@ function main(argv) {
   if (cmd === 'help') {
     stdout(args[0] === 'legacy' ? renderLegacy(LEGACY) : renderHelp(ROOT, []));
     return 0;
+  }
+  /* `omni c tcc`（决策三）：它自己一套解析器（tcc 的 `-v`/`-r`/`-f` 与 omni 的不同义），
+   * 翻成「哪一条 omni 命令 + 那条命令的 argv」之后**原路再走一遍** —— 实现一份都不复制，
+   * 而且别处的规矩（别名铺平、`splitArgv`、`--explain`、`-v` 那张表）自动都适用。 */
+  if (cmd === 'c-tcc') {
+    const t = tccTranslate(raw, (m) => new OmniError(m));
+    const AT = {
+      cpp: ['c', 'cpp'], 'c-obj': ['c', 'obj'], 'c-run': ['c', 'run'],
+      'elf-r': ['c', 'elf-r'], 'elf-link': ['c', 'elf-link'],
+      'macho-link': ['c', 'macho-link'], 'pe-link': ['c', 'pe-link'],
+    };
+    if (AT[t.key] === undefined) throw new OmniError(`c tcc: 还翻不到 '${t.key}'`);
+    return main([...AT[t.key], ...t.argv]);
   }
   /* `emit FORM FILE`（决策一）：把那 9 条 `emit-*`/`ast`/`oir`/`mir`/`sx` 收成一个动词
    * 加一个枚举。这一片只做**翻译**——底下还是原来那几段实现。 */

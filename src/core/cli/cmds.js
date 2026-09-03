@@ -11,6 +11,8 @@
  * 现有的门都是 `x.c` 写在前面，所以一直没露。
  */
 
+import { TCC_HELP } from './cmd-tcc.js';
+
 /* ---- 与语言无关的那几格开关，好几条命令共用。 */
 const F_OUT = { name: '-o', arity: 1, value: 'NAME', brief: '产物落在哪儿' };
 const F_MODE = { name: '--mode', arity: 1, value: 'M', brief: 'mixed|dynamic|static（ADR-0008）' };
@@ -77,8 +79,7 @@ const LINK_PE_ONLY = [
 ];
 
 /* ---- C 那一组。 */
-const C_GROUP = {
-  name: 'c',
+const C_GROUP = {  name: 'c',
   brief: 'C 前端（ADR-0017）：预处理、到 MIR、到目标文件、链接、tcc 兼容驱动',
   help: `-I / -D / -U / -isystem / -include 这些**只在这一组里**——它们是 C 的事实，
 不该出现在与语言无关的顶层。`,
@@ -121,6 +122,13 @@ const C_GROUP = {
 
 只对某一个格式有意义的开关在下面标了「（-f …）」。`,
       flags: [...LINK_COMMON, ...LINK_ELF_ONLY, ...LINK_MACHO_ONLY, ...LINK_PE_ONLY],
+    },
+    /* tcc 兼容驱动（决策三）。**这儿不列 flags** —— 列了反而会被 `canonicalize`/`splitArgv`
+     * 按 omni 的规矩动手，而 `-v`、`-r`、`-f` 在 tcc 那边是别的意思。它自己一套解析器。 */
+    {
+      name: 'tcc', key: 'c-tcc', usage: '[tcc 的开关…] FILE…',
+      brief: '与 tcc 同一套开关的驱动 —— 门可以拿同一串 argv 喂两边比字节',
+      help: TCC_HELP,
     },
     /* 旧的四条：静默别名，指向各自原来的实现。 */
     { name: 'elf-r', key: 'elf-r', hidden: true, flags: [...LINK_COMMON] },
