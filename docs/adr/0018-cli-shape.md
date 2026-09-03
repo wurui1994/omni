@@ -363,10 +363,31 @@ stage0/{lib,include,runtime,gpu,jit}  ->  src/{…}
 `/tmp/omni-B` 底下压根没有同名的头，所以那个探针**证不出**谁压过谁 —— 要接上 `-B`
 就得先补一个探针：两边都放一份同名头，看 `-vv` 打出来走的是哪一个。
 
-`-vv` 只在**真的去找头**的时候才打搜索行（不带 `#include` 的探针一行都不印），
-这一点顺手记下 —— 上一趟就是这么白跑了一次。
+### 补上了：`-I` 与 `-isystem` 都压过 `{B}/include`
+
+探针：`/tmp/omni-P/mine/stdarg.h` 里 `#define WHO "from_-I"`，源码
+`#include <stdarg.h>` 之后 `char *w = WHO;`——`$TOPSRC/include/stdarg.h` 里没有 `WHO`，
+所以谁赢一眼看得出。
+
+```
+tcc -B$TOPSRC -I /tmp/omni-P/mine -vv -E -P
+  -> /tmp/omni-P/mine/stdarg.h        <- 走的是 -I 那一份
+  char *w = "from_-I";
+
+tcc -B$TOPSRC -isystem /tmp/omni-P/mine -E -P
+  char *w = "from_-I";                 <- -isystem 也一样赢
+```
+
+所以搜索序是 **`-I` / `-isystem` 在前，`{B}/include` 在后**。接 `-B` 就是把
+`DIR/include` 追加到那两批**之后**。
+
+**顺带露出来的下一个问题**：我们自己那份自带头（`join(installDir(), '..', '..', 'include')`，
+`cli.js:229`）现在是排在 `-isystem` 那批**之前**的 —— 与刚量到的 tcc 把 `{B}/include`
+排在后面**方向相反**。这一格是不是也该翻过来，得单独量（探针同上，只是把 `-B` 换成
+不给、看我们自带的那份与 `-isystem` 谁赢）。没量之前不动它。
 
 ## 落地：分片 2（后半）—— `-v` 接上同一张表
+
 
 `-v` 从前是 56 处散着的 `vStep(自由文本)`。这一片让它**接过 `--explain` 造的那张表**：
 
