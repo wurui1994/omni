@@ -88,20 +88,22 @@ export function tccTranslate(argv, err) {
   const one = (n) => (opts.has(n) ? opts.get(n)[0] : undefined);
   const all = (n) => opts.get(n) ?? [];
   const tgt = targetOf(one('-b'));
+  /** `-B DIR` 化出来的那一个系统头目录（`DIR/include`），没给就是 `null`。 */
+  let passB = null;
 
-  /* `-B DIR`：tcc 拿它当「tcc 自己那一套住在哪儿」（`{B}/include`、`{B}/libtcc1.a`）。
-   * 我们**还没接上它** —— 我们的自带头在 `src/include`，由 `installDir()` 找。
+  /* `-B DIR`：tcc 拿它当「tcc 自己那一套住在哪儿」——`{B}/include` 与 `{B}/libtcc1.a`。
    *
-   * 那就明着骂，不要悄悄吞掉。收下再扔是这一条命令最不该干的事：它存在的理由就是
-   * 「拿同一串 argv 喂两边比字节」，而门那边给尺子的 `-B$TOPSRC` 是让 tcc 去读
-   * **tinycc 自己那套头**的 —— 我们这边悄悄用了别的一套头，比出来的「相同」就是假的。
+   * 量过搜索序（ADR-0018 那一节）：`-I` 与 `-isystem` 都**压过** `{B}/include`。而我们
+   * 这边 `-isystem` 同样压过自带的 `src/include`（`cli.js` 的 `cSysInclude` 头上写着）——
+   * 两边方向一致，所以 `-B DIR` 转成 `-isystem DIR/include` 就落在对的位置上。
    *
-   * 接上它之前要先量准一件事：tcc 把 `{B}/include` 插在搜索序的**第几位**
-   * （`tccpp.c` 那一段：自带的在前、`-I` 在中、系统的在后）。没量过就别猜。 */
-  if (has('-B')) {
-    throw err(`c tcc: -B 还没接上（tcc 拿它当 {B}/include 与 {B}/libtcc1.a 的根）。`
-      + '悄悄吞掉它会让门比出假的「相同」—— 我们会用自带的 src/include，'
-      + '而尺子那边读的是 -B 指的那一套。接上它要先量准 {B}/include 在搜索序里的位置。');
+   * 留着的一处差别，写在明处：tcc 那边 `{B}/include` **就是**它自带的那一份，给了 `-B`
+   * 就没有别的了；我们这边 `src/include` 还在搜索序的尾巴上。于是「两边都有的头」走
+   * `-B` 那一份（对），「只有我们有的头」我们还找得到、tcc 找不到（差别）。要抹掉这一格
+   * 得让 `cSysInclude()` 能被换掉，那是 cli.js 那一侧的事，不在这一份里。 */
+  if (one('-B') !== undefined) {
+    const b = one('-B');
+    passB = `${b.endsWith('/') ? b.slice(0, -1) : b}/include`;
   }
 
   /* 出来的 argv 用 omni 的规范拼法（`--arch`/`--os`/`--format`），因为底下那几段实现
@@ -114,6 +116,8 @@ export function tccTranslate(argv, err) {
     for (const f of all('-include')) push('-include', f);
     for (const m of all('-D')) push('-D', m);
     for (const m of all('-U')) push('-U', m);
+    /* `-B` 化出来的那一个排在**最后**：量过 tcc，`-I` 与 `-isystem` 都压过 `{B}/include`。 */
+    if (passB !== null) push('-isystem', passB);
     if (has('-nostdinc')) push('-nostdinc');
   };
   const passTarget = () => {
