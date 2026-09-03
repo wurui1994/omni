@@ -154,16 +154,18 @@ for (const t of TARGETS) {
     const refObj = join(OUT, `ref-${t.name}-${pi}.o`);
     const myObj = join(OUT, `my-${t.name}-${pi}.o`);
 
-    const rl = spawnSync(tcc, [`-B${B}`, '-c', src, '-o', refObj], { encoding: 'utf8' });
+    /* 两边**同一串 argv**（ADR-0018 决策三）：只差一个 `-b`。 */
+    const ARGS = [`-B${B}`, '-c', src];
+    const rl = spawnSync(tcc, [...ARGS, '-o', refObj], { encoding: 'utf8' });
     if (rl.status !== 0) {
       bad(`${label}: 尺子编不出来`, `    ${(rl.stderr ?? '').trim().split('\n')[0]}`);
       continue;
     }
     const co = spawnSync(process.execPath,
-      [CLI, 'c-obj', src, '--arch', t.arch, '--os', t.os, '--format', 'elf', '-o', myObj],
+      [CLI, 'c', 'tcc', '-b', `${t.arch}-${t.os}`, ...ARGS, '-o', myObj],
       { encoding: 'utf8', maxBuffer: 1 << 26 });
     if (co.status !== 0) {
-      bad(`${label}: c-obj`,
+      bad(`${label}: c tcc -c`,
         `    ${(co.stderr ?? '').trim().split('\n').slice(0, 3).join('\n    ')}`);
       continue;
     }

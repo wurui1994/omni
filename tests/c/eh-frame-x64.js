@@ -119,13 +119,15 @@ const c = join(OUT, 'a.c');
 writeFileSync(c, PROBE);
 
 const ro = join(OUT, 'ref.o');
-const r = spawnSync(LTCC, [`-B${SRC}`, '-c', c, '-o', ro], { encoding: 'utf8' });
+/* 两边**同一串 argv**（ADR-0018 决策三）：只差一个 `-b`。 */
+const ARGS = [`-B${SRC}`, '-c', c];
+const r = spawnSync(LTCC, [...ARGS, '-o', ro], { encoding: 'utf8' });
 if (r.status !== 0) {
   bad('尺子', `    自己就拒了：${(r.stderr ?? '').trim().split('\n')[0]}`);
 } else {
   const mo = join(OUT, 'our.o');
   const a = spawnSync(process.execPath,
-    [CLI, 'c-obj', c, '--arch', 'x86_64', '--os', 'linux', '--format', 'elf', '-o', mo],
+    [CLI, 'c', 'tcc', '-b', 'x86_64-linux', ...ARGS, '-o', mo],
     { encoding: 'utf8', maxBuffer: 1 << 26 });
   if (a.status !== 0) {
     bad('我们', `    编不动：${(a.stderr ?? '').trim().split('\n')[0]}`);

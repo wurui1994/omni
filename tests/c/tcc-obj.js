@@ -149,15 +149,20 @@ try {
       if (!keep(c) && filters.length > 0 && !keep(t.name)) continue;
       const cpath = join(SRC, c);
       const refPath = join(dir, `ref-${t.name}-${basename(c, '.c')}.o`);
-      const ref = spawnSync(tcc, [B, '-c', cpath, '-o', refPath], { encoding: 'utf8' });
+      /* 两边**同一串 argv**（ADR-0018 决策三）：只差一个 `-b`。这一道门称的是字节，
+       * 从前我们这一侧是手拼 `c-obj --arch … --os … --format elf`，与尺子那边是两串
+       * 不同的东西 —— 翻译层错了这里也未必红。 */
+      const ARGS = [B, '-c', cpath];
+      const ref = spawnSync(tcc, [...ARGS, '-o', refPath], { encoding: 'utf8' });
       if (ref.status !== 0 || !existsSync(refPath)) {
         /* tcc 自己都编不过：那不是我们的账（有些用例要它自己没有的头文件）。 */
         continue;
       }
       const want = readFileSync(refPath);
       const ourPath = join(dir, `our-${t.name}-${basename(c, '.c')}.o`);
-      const our = spawnSync('node', [CLI, 'c-obj', cpath, '-o', ourPath,
-        '--arch', t.arch, '--format', 'elf', '--os', t.os], { encoding: 'utf8' });
+      const our = spawnSync('node',
+        [CLI, 'c', 'tcc', '-b', `${t.arch}-${t.os}`, ...ARGS, '-o', ourPath],
+        { encoding: 'utf8' });
       if (our.status !== 0 || !existsSync(ourPath)) {
         notYet++;
         continue;

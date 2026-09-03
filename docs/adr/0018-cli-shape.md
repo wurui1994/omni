@@ -468,4 +468,28 @@ ours:  #define FOO 2 / #undef __TINYC__ / #undef __APPLE__ / #undef NEVER
 （`alias-sym`/`weak-sym` 里编 `main.c` 那一步，尺子那边没有对应的一趟），不在这条线上。
 
 
+## 落地：门迁移收尾 —— 对着比的那些全迁完了
+
+又迁六处，其中最要紧的是**称字节那一道**：
+
+- `wchar`（30/0）、`rela-text`（22/0/1）、`pdata-x64`（11/0）、`eh-frame-x64`（8/0）
+- `tcc-obj` —— 工程终点那道门。从前它这一侧手拼 `c-obj --arch … --format elf --os …`，
+  与尺子那边的 `-B… -c … -o …` 是两串不同的东西。**称字节的门自己不同源，这件事最不该留。**
+  迁完数字不动：0 字节相同 / 21 容器相同 / 89 不同 / 0 我们还编不出 —— 说明这一路的
+  翻译本来是对的（`dm-order` 那一处不是）。
+
+**剩下的 `c-obj` 调用一处都不迁**，它们是**我们单侧**的，不存在「同一串 argv」这回事：
+
+- `selfobj`/`selfsrc`/`selfcross`/`selfboot` —— 编 tinycc 的源码出我们的 `.o`，
+  参照物是**事先建好的** tcc 可执行文件，不是同一时刻的一趟 `tcc -c`
+- `tcc-link` —— 先出我们的 `.o` 再链起来跑，比的是**跑出来的结果**
+- `arch-defs`/`native-gen`/`ldouble-x64` —— clang 那一条腿（称的是前端与 ABI）
+- `eh-frame-x64`/`pdata-x64` 各有一格「这个目标上**不该**有这一节」——尺子那边没有对应的一趟
+- `alias-sym`/`weak-sym` 里编 `main.c` 那一步
+
+硬要给它们套上 `c tcc` 反而会引进假东西：`c tcc -c` 一律写 ELF（量过的事实），
+而 `selfobj` 第一段要的是 Mach-O，得额外补一个 `-f macho` —— 那是为了形式一致去改
+一串本来对的 argv，收益是零。
+
+
 
