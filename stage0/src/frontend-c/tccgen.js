@@ -2970,7 +2970,20 @@ export class CGen {  /**
         const s = typeSize(vty);
         const name = `$cl$${this.anonStatics.length}`;
         this.anonStatics.push({
-          name, gno: this.mod.globalNo(name), addr: e.addr, size: s.size, align: s.align,
+          name,
+          gno: this.mod.globalNo(name),
+          addr: e.addr,
+          size: s.size,
+          align: s.align,
+          /* 这一块也在那根「谁先领到字节」的轴上（第一百三十五片）：从前它不给这一格，
+           * 于是排在所有有号的后面。量过 tcc（`int *p = (int[]){1,2,3}; char *s = "x";`）：
+           * `.data` 是 `p`@0、那一块@8、`s`@24 —— 它是在解析 `p` 的初值那一刻领的字节，
+           * 所以夹在 `p` 与 `s` 中间。 */
+          dseq: e.dseq,
+          /* 名字也是 `L.N`（第一百三十五片）：tcc 那边它与串常量同一条路
+           * （`get_sym_ref`），共用 `anonSym` 那根游标 —— 上面那个探针里它是 `L.0`、
+           * 后面那条串才是 `L.1`。`$cl$N` 还留着当**身份**（重定位按它找）。 */
+          sym: `L.${this.anonSym++}`,
         });
       }
       const dest = { stat: true, addr: e.addr };
@@ -8005,6 +8018,9 @@ export function lowerCNative(path, text, host, defs) {
     /* 匿名块的名字（`$cl$3`）是**按出现顺序编**的，于是每个翻译单元里都有一个
      * `$cl$0` —— 局部符号（第九十二片）。 */
     mod.markGlobalLocal(b.gno);
+    /* 与有名字的那些一样在那根轴上、名字也一样是 `L.N`（第一百三十五片）。 */
+    mod.markGlobalSeq(b.gno, b.dseq);
+    mod.markGlobalSym(b.gno, b.sym);
     mod.setGlobalData(b.gno, b.size, b.align, bytes, fixups);
   }
   /* 暂存区里没人认领的字节：那是还落在线性内存上的东西（`argv`、宿主那几格，
