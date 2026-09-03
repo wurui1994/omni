@@ -642,3 +642,76 @@ export function glslProgram(mod, w, h, uni) {
   return `${lib.slice(0, -1)}\n${glslRenderMain(mod, w, h, uni)})\n`;
 }
 
+/**
+ * 量性能那一段：**一个字节都不印**（只在最后印一个校验和）。
+ *
+ * 为什么不能拿 `glslRenderMain` 量：那一段一个像素五个 `print`，量出来的是 `print`
+ * 的耗时不是着色器的（小画布上前者就盖过后者）。
+ *
+ * 为什么要有校验和：不攒一个用得到的结果，整个循环会被后端当死代码扔掉 ——
+ * 那时量出来的是「什么都不做要多久」。攒的是**每个像素三格 8 位值的和**，
+ * 与 `glslRenderMain` 印出来的那些数一一对应，所以这两条路算的是同一件事
+ * （门里对过：同一尺寸下校验和 == 印出来那些数的和）。
+ *
+ * 迭代 `iters` 遍，为的是把一次进程启动的固定开销摊薄 —— 与 `benchmark.py` 那边
+ * 「先 warmup 一帧再量 N 帧」同一个道理。
+ */
+export function glslBenchMain(mod, w, h, uni, iters) {
+  const args = ['(var px)', '(var py)'];
+  for (const u of mod.uniforms) {
+    const vals = uni[u.name];
+    if (vals === undefined) throw new OmniError(`glsl: uniform '${u.name}' 没给值`);
+    for (const v of vals) {
+      args.push(glslCompTy(u.ty) === 'int' ? `(int ${Math.trunc(v)})` : `(real ${glslNum(v)})`);
+    }
+  }
+  const call = `(call glsl_frag ${args.join(' ')})`;
+  const QX = [0, 1, 0, 1];
+  const QY = [0, 0, 1, 1];
+  const inner = [];
+  for (let k = 0; k < 4; k++) {
+    inner.push(`(set px (bin "+" (toreal (var qx)) (real ${QX[k] + 0.5})))`);
+    inner.push(`(set py (bin "+" (toreal (var qy)) (real ${QY[k] + 0.5})))`);
+    inner.push(`(set c ${call})`);
+    inner.push(`(if (bin "&&" (bin "<" (var px) (real ${glslNum(w)}))`
+      + ` (bin "<" (var py) (real ${glslNum(h)})))`
+      + ' (do'
+      + ' (set acc (bin "+" (var acc) (call glsl_to8 (fld (var c) c0))))'
+      + ' (set acc (bin "+" (var acc) (call glsl_to8 (fld (var c) c1))))'
+      + ' (set acc (bin "+" (var acc) (call glsl_to8 (fld (var c) c2))))))');
+  }
+  return `  (fn glsl_to8 ((v real)) int
+    (let x real (var v))
+    (if (bin "<" (var x) (real 0.0)) (do (set x (real 0.0))))
+    (if (bin ">" (var x) (real 1.0)) (do (set x (real 1.0))))
+    (ret (toint (rmath "round" (bin "*" (var x) (real 255.0))))))
+
+  (main
+    (let c ${glslStructName(4)} (new ${glslStructName(4)}))
+    (let px real (real 0.0))
+    (let py real (real 0.0))
+    (let acc int (int 0))
+    (let it int (int 0))
+    (while (bin "<" (var it) (int ${iters}))
+      (do
+        (let qy int (int 0))
+        (while (bin "<" (var qy) (int ${Math.ceil(h / 2) * 2}))
+          (do
+            (let qx int (int 0))
+            (while (bin "<" (var qx) (int ${Math.ceil(w / 2) * 2}))
+              (do
+                ${inner.join('\n                ')}
+                (set qx (bin "+" (var qx) (int 2)))))
+            (set qy (bin "+" (var qy) (int 2)))))
+        (set it (bin "+" (var it) (int 1)))))
+    (print (var acc)))
+`;
+}
+
+/** 库 + 量性能那一段。 */
+export function glslBenchProgram(mod, w, h, uni, iters) {
+  const lib = glslLower(mod).trimEnd();
+  return `${lib.slice(0, -1)}\n${glslBenchMain(mod, w, h, uni, iters)})\n`;
+}
+
+
