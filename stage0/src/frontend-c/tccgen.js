@@ -970,6 +970,10 @@ export class CGen {  /**
     let g = this.gvars.get(key);
     if (g === undefined) g = this.declareGlobal(key, ty, false, align, extra);
     else g.ty = ty;
+    /* 写进符号表的名字是**声明时那个名字**（第一百三十三片）：`key` 里那点料
+     * （函数名 + 序号）只是这一遍里的身份 —— 量过 tcc，`.o` 里那条局部符号叫 `n`，
+     * 而且两个函数各有一个 `static int n;` 就是两条都叫 `n` 的局部符号。 */
+    g.symName = name;
     /* 块里的 `static` 也是内部链接（第九十二片）—— 名字里带了函数名，可两个翻译单元
      * 里各有一个 `f.buf.0` 还是会撞，所以照 `static` 全局那样标成局部符号。 */
     g.isStatic = true;
@@ -7909,6 +7913,8 @@ export function lowerCNative(path, text, host, defs) {
     /* 第一百二十五、一百二十六片：这一块是第几个领到字节的 —— 只读节按它排，
      * 符号表也按它排（所以**每一块**都要给，不只是 `const` 那些）。 */
     mod.markGlobalSeq(no, e.dseq);
+    /* 写进符号表的名字（第一百三十三片）：只有函数体里的 `static` 有这一格。 */
+    mod.markGlobalSym(no, e.symName);
     if (e.isStatic === true) mod.markGlobalLocal(no);
     if (e.weak === true) mod.markGlobalWeak(no);
     if (e.vis !== undefined && e.vis !== 0) mod.markGlobalVis(no, e.vis);

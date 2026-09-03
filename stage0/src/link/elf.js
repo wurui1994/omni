@@ -235,9 +235,13 @@ function buildSyms(defs, relocs, strs, prefix, uw, ehn) {
   const no = new Map();
   const put = (d, bind) => {
     const sect = d.sect === undefined ? 1 : d.sect;
+    /* `name` 是**这一条在这份 `.o` 里的身份**（重定位按它找符号），`sym` 是真正写进
+     * 字符串表的那个名字（第九刀第一百三十三片）。两者不同的只有一种东西：函数体里的
+     * `static` —— tcc 写的是**声明时那个名字**（`n`），而同一份 `.o` 里两个函数各有一个
+     * `static int n;` 就是两条都叫 `n` 的局部符号。身份还得唯一，所以分成两格。 */
     no.set(d.name, syms.length);
     syms.push({
-      strx: strs.intern(prefix + d.name),
+      strx: strs.intern(prefix + (d.sym === undefined ? d.name : d.sym)),
       info: bind * 16 + (sect === 1 ? STT_FUNC : STT_OBJECT),
       other: d.vis === undefined ? 0 : d.vis,
       shndx: sect,

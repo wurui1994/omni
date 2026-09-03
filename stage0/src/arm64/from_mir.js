@@ -1146,6 +1146,9 @@ export function genModule(mod) {
     gBase.set(gi, { base, sect });
     dataSyms.push({
       name: mod.globals[gi],
+      /* 写进符号表的名字（第一百三十三片）：函数体里的 `static` 那一种与身份不同 ——
+       * 身份是我们编的 `f.n.0`，名字是 tcc 写的 `n`。 */
+      sym: mod.globalSym[gi],
       off: base,
       sect,
       /* `st_size`（第一百二十片，与 x64 那一份同一条）：这一块有多少字节。 */

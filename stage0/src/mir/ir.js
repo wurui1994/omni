@@ -874,6 +874,12 @@ export class MirModule {
      * `.data` 里、`int a;` 在 `.bss` 里，两者的字节一模一样 —— 后端**不能**按字节猜，
      * 这一格只能由 C 前端填。与 `globalRo` 同一种性质：标注，不是语义。 */
     this.globalBss = [];
+    /* 与 globals 同下标的「写进符号表的那个名字」（第九刀第一百三十三片）：不给就用
+     * `globals[gi]` 自己。两者不同的只有函数体里的 `static` —— MIR 里那一块的身份得
+     * 唯一（我们编的是 `f.n.0`），可 tcc 写进 `.o` 的是**声明时那个名字**（`n`），
+     * 而且同一份 `.o` 里两个函数各有一个 `static int n;` 就是两条都叫 `n` 的局部符号。
+     * 所以「身份」与「名字」得分成两格 —— 重定位按身份找，字符串表里放名字。 */
+    this.globalSym = [];
     /* 与常量池同下标的「这条串常量要几字节对齐」（第九刀第一百二十三片）：缺省 1，
      * 宽串 4。也是标注 —— 只有写目标文件那一步看它，进不了摘要的哈希。 */
     this.strAlign = [];
@@ -1015,6 +1021,12 @@ export class MirModule {
   markGlobalBss(no) {
     if (this.globals[no] === undefined) throw new Error(`mir: 没有 ${no} 号模块级变量`);
     this.globalBss[no] = true;
+  }
+
+  /** 这个全局写进符号表的名字。见 `globalSym` 头上那段。 */
+  markGlobalSym(no, name) {
+    if (this.globals[no] === undefined) throw new Error(`mir: 没有 ${no} 号模块级变量`);
+    if (name !== undefined) this.globalSym[no] = name;
   }
 
   /** 这一块是第几个领到字节的。见 `globalSeq` 头上那段。 */

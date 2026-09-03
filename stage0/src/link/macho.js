@@ -298,9 +298,11 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
   const globals = defsIn.filter((d) => d.local !== true);
   for (const d of [...locals, ...globals]) {
     const sect = d.sect === undefined ? 1 : d.sect;
+    /* `name` 是身份（重定位按它找），`sym` 是写进字符串表的名字 —— 见 `elf.js` 的
+     * `buildSyms`（第九刀第一百三十三片）。 */
     defNo.set(d.name, syms.length);
     syms.push({
-      strx: strs.intern(macName(d.name)),
+      strx: strs.intern(macName(d.sym === undefined ? d.name : d.sym)),
       type: d.local === true ? N_SECT : (N_SECT | N_EXT),
       sect,
       /* 弱定义（第九刀第一百〇四片）：Mach-O 里它不在 `n_type` 上，而是 `n_desc` 的

@@ -13,7 +13,9 @@
 //      与代码长短无关，所以必须相同
 //   2. 全局量的**落点**也一个数不差：哪一节（`.data` / `.data.ro`（win32 `.rdata`）/
 //      `.bss`）、节里第几个字节。第一百三十一片把 `.data` 的次序摆对，第一百三十二片
-//      把没有初值的那些挪进 `.bss` —— 两笔都齐了这一条才能开
+//      把没有初值的那些挪进 `.bss`，第一百三十三片把函数体里 `static` 的名字改成
+//      tcc 写的那个（`n`，不是 `f.n.0`）—— 三笔都齐了这一条才能开。同名的局部符号
+//      可以有两条（两个函数各一个 `static int n;`），所以按名字攒成多重集来比
 //   3. 函数那些的 `st_size` 把 `.text` **铺满**（第 k 个的 `val + size` 正好是第 k+1 个的
 //      `val`，最后一个到节尾）—— 我们的代码比 tcc 的长，所以只能查这条不变量
 //
@@ -108,8 +110,8 @@ char tab[40];
 struct P { int a; char b; } p;
 int arr[7] = {1};
 struct Q { int x; } wide[2] __attribute__((aligned(16)));
-int f(int a){return a+1;}
-static int q(int a){return a-1;}
+int f(int a){ static int n = 5; static char pad[3]; return a+1+n+pad[0]; }
+static int q(int a){ static int n; return a-1+n; }
 int main(void){return s[0]+f(g)+q(arr[0])+tab[0]+p.a+(int)big+wide[0].x;}
 `;
 
@@ -148,34 +150,41 @@ for (const t of CASES) {
   const ref = readSyms(ro);
   const our = readSyms(mo);
 
-  // 1. 全局量的大小：一个数不差
-  const want = new Map();
-  for (const s of ref.syms) if (s.type === 1) want.set(s.name, s);
-  const diffs = [];
-  let n = 0;
-  for (const s of our.syms) {
-    if (s.type !== 1) continue;
-    const w = want.get(s.name);
-    if (w === undefined) continue;   // 串常量那些符号 tcc 那边根本没有
-    n++;
-    if (w.size !== s.size) diffs.push(`${s.name}: tcc ${w.size} / ours ${s.size}`);
-  }
-  if (n === 0) bad(`${t.name} 全局量的 st_size`, '    一个对得上名字的都没有');
-  else if (diffs.length > 0) bad(`${t.name} 全局量的 st_size`, `    ${diffs.join('\n    ')}`);
-  else ok(`${t.name}：${n} 个全局量的 st_size 与尺子一个数不差`);
-
-  /* 2. 全局量的落点：哪一节、节里第几个字节（第一百三十一、一百三十二片）。 */
-  const atDiffs = [];
-  for (const s of our.syms) {
-    if (s.type !== 1) continue;
-    const w = want.get(s.name);
-    if (w === undefined) continue;
-    if (w.sec !== s.sec || w.value !== s.value) {
-      atDiffs.push(`${s.name}: tcc ${w.sec}@${w.value} / ours ${s.sec}@${s.value}`);
+  /* 按名字攒成**多重集**：同一份 `.o` 里可以有两条同名的局部符号（两个函数各有一个
+   * `static int n;`，第一百三十三片），所以一个名字底下是一串，比的时候两边各自排序。 */
+  const group = (e, f) => {
+    const m = new Map();
+    for (const s of e.syms) {
+      if (s.type !== 1) continue;
+      if (!m.has(s.name)) m.set(s.name, []);
+      m.get(s.name).push(f(s));
     }
-  }
-  if (atDiffs.length > 0) bad(`${t.name} 全局量的落点`, `    ${atDiffs.join('\n    ')}`);
-  else ok(`${t.name}：${n} 个全局量落在与尺子同一节的同一个字节上`);
+    for (const v of m.values()) v.sort();
+    return m;
+  };
+  const cmp = (what, f) => {
+    const w = group(ref, f);
+    const o = group(our, f);
+    const ds = [];
+    let cnt = 0;
+    for (const [nm, want] of w) {
+      const got = o.get(nm);
+      /* tcc 那边有、我们那边没有的名字**是差错**；反过来不是（串常量那些符号
+       * `L.3`/`omni_str_0` tcc 与我们各有各的名字）。 */
+      if (got === undefined) { ds.push(`${nm}: tcc ${want.join(',')} / ours 没这个符号`); continue; }
+      cnt += want.length;
+      if (want.join('|') !== got.join('|')) {
+        ds.push(`${nm}: tcc ${want.join(',')} / ours ${got.join(',')}`);
+      }
+    }
+    if (cnt === 0) bad(`${t.name} ${what}`, '    一个对得上名字的都没有');
+    else if (ds.length > 0) bad(`${t.name} ${what}`, `    ${ds.join('\n    ')}`);
+    else ok(`${t.name}：${cnt} 个全局量的 ${what} 与尺子一个数不差`);
+  };
+  // 1. 全局量的大小
+  cmp('st_size', (s) => `${s.size}`);
+  /* 2. 全局量的落点：哪一节、节里第几个字节（第一百三十一、一百三十二片）。 */
+  cmp('落点（哪一节、第几个字节）', (s) => `${s.sec}@${s.value}`);
 
   /* 3. 三节自己的两格（第一百三十二片）：多长、按几对齐。`.bss` 是 NOBITS ——
    * 有 `sh_size`、在文件里不占字节；三节的 `sh_addralign` 都是「里头对齐要求最大的
