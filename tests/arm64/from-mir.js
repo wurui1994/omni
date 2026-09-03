@@ -21,7 +21,7 @@ import {
   CVT_SEXT8, CVT_SEXT16, CVT_TRUNC, CVT_ZEXT,
   CVT_I2F, CVT_U2F, CVT_F2I, CVT_FCVT, CVT_BITCAST, memDesc,
 } from '../../src/core/mir/ir.js';
-import { codeOf, genModule } from '../../src/core/arm64/from_mir.js';
+import { codeOfArm64 as codeOf, genArm64Module as genModule } from '../../src/core/arm64/from_mir.js';
 import { writeObject } from '../../src/core/link/macho.js';
 import { utf8Bytes } from '../../src/core/host/utf8.js';
 

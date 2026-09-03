@@ -19,7 +19,7 @@ import { OmniError } from '../source/diag.js';
 import * as e from './encode.js';
 
 /** 重定位的种类。名字照 Mach-O 的 `ARM64_RELOC_*`（ELF 那边一一对得上）。 */
-export const RELOC = {
+export const RELOC_ARM64 = {
   /** `bl`/`b` 到一个符号：26 位、单位 4 字节。 */
   BRANCH26: 'BRANCH26',
   /** `adrp` 取符号所在页：21 位、单位 4096。 */
@@ -39,7 +39,7 @@ export const RELOC = {
   ABS64: 'ABS64',
 };
 
-export class CodeBuf {
+export class Arm64CodeBuf {
   constructor() {
     /** 已发的字，按顺序。@type {number[]} */
     this.words = [];
@@ -121,37 +121,37 @@ export class CodeBuf {
 
   /** `bl <sym>`。 */
   blSym(sym, addend = 0) {
-    this.relocs.push({ at: this.pos, kind: RELOC.BRANCH26, sym, addend });
+    this.relocs.push({ at: this.pos, kind: RELOC_ARM64.BRANCH26, sym, addend });
     return this.word(e.bl(0));
   }
 
   /** `adrp Rd, <sym>@PAGE`。 */
   adrpSym(rd, sym, addend = 0) {
-    this.relocs.push({ at: this.pos, kind: RELOC.PAGE21, sym, addend });
+    this.relocs.push({ at: this.pos, kind: RELOC_ARM64.PAGE21, sym, addend });
     return this.word(e.adrp(rd, 0));
   }
 
   /** `add Rd, Rn, <sym>@PAGEOFF`。 */
   addSymOff(rd, rn, sym, addend = 0) {
-    this.relocs.push({ at: this.pos, kind: RELOC.PAGEOFF12, sym, addend });
+    this.relocs.push({ at: this.pos, kind: RELOC_ARM64.PAGEOFF12, sym, addend });
     return this.word(e.addImm(1, rd, rn, 0));
   }
 
   /** `ldr Rt, [Rn, <sym>@PAGEOFF]`。`size` 照 `encode.js` 的口径是宽度的对数。 */
   ldrSymOff(size, rt, rn, sym, addend = 0) {
-    this.relocs.push({ at: this.pos, kind: RELOC.PAGEOFF12, sym, addend });
+    this.relocs.push({ at: this.pos, kind: RELOC_ARM64.PAGEOFF12, sym, addend });
     return this.word(e.ldrU(size, rt, rn, 0));
   }
 
-  /** `adrp Rd, <sym>@GOTPAGE`（外部数据符号那一对的头一条，见 `RELOC.GOT_PAGE21`）。 */
+  /** `adrp Rd, <sym>@GOTPAGE`（外部数据符号那一对的头一条，见 `RELOC_ARM64.GOT_PAGE21`）。 */
   adrpSymGot(rd, sym) {
-    this.relocs.push({ at: this.pos, kind: RELOC.GOT_PAGE21, sym, addend: 0 });
+    this.relocs.push({ at: this.pos, kind: RELOC_ARM64.GOT_PAGE21, sym, addend: 0 });
     return this.word(e.adrp(rd, 0));
   }
 
   /** `ldr Rt, [Rn, <sym>@GOTPAGEOFF]`。取出来的就是那个符号的真地址。 */
   ldrSymGot(rt, rn, sym) {
-    this.relocs.push({ at: this.pos, kind: RELOC.GOT_PAGEOFF12, sym, addend: 0 });
+    this.relocs.push({ at: this.pos, kind: RELOC_ARM64.GOT_PAGEOFF12, sym, addend: 0 });
     return this.word(e.ldrU(3, rt, rn, 0));
   }
 

@@ -22,7 +22,7 @@ import { join } from 'node:path';
 
 import { lowerCNative } from '../../src/core/frontend-c/tccgen.js';
 import { verifyMir } from '../../src/core/mir/verify.js';
-import { genModule as genArm64 } from '../../src/core/arm64/from_mir.js';
+import { genArm64Module as genArm64 } from '../../src/core/arm64/from_mir.js';
 import { genModule as genX64 } from '../../src/core/x64/from_mir.js';
 import { writeObject } from '../../src/core/link/macho.js';
 

@@ -16,10 +16,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { MirModule, MirFunc, OP, REF_NONE, T_I64 } from '../../src/core/mir/ir.js';
-import { genModule } from '../../src/core/arm64/from_mir.js';
+import { genArm64Module as genModule } from '../../src/core/arm64/from_mir.js';
 import { writeObject } from '../../src/core/link/macho.js';
 import { readObject, linkObjects } from '../../src/core/link/link.js';
-import { RELOC } from '../../src/core/arm64/asm.js';
+import { RELOC_ARM64 as RELOC } from '../../src/core/arm64/asm.js';
 
 let failed = 0;
 let total = 0;

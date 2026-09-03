@@ -29,7 +29,7 @@ import { parseAsyBuiltins } from './frontend-asy/types.js';
 import { lowerJnc } from './frontend-jnc/lower.js';
 import { Cpp } from './frontend-c/tccpp.js';
 import { lowerC, lowerCNative } from './frontend-c/tccgen.js';
-import { genModule as genArm64 } from './arm64/from_mir.js';
+import { genArm64Module as genArm64 } from './arm64/from_mir.js';
 import { genModule as genX64 } from './x64/from_mir.js';
 import { writeObject } from './link/macho.js';
 import { writeElfObject } from './link/elf.js';

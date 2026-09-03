@@ -304,11 +304,11 @@ function branchReg(opc, rn) {
 
 export const br = (rn) => branchReg(0, rn);
 export const blr = (rn) => branchReg(1, rn);
-/** `ret` 默认回 x30（C6.2.219：不写寄存器就是 x30）。 */
-export const ret = (rn = 30) => branchReg(2, rn);
+/** `retArm64` 默认回 x30（C6.2.219：不写寄存器就是 x30）。 */
+export const retArm64 = (rn = 30) => branchReg(2, rn);
 
-/** `nop` 是 hint #0（C6.2.203）。 */
-export const nop = () => 0xd503201f;
+/** `nopArm64` 是 hint #0（C6.2.203）。 */
+export const nopArm64 = () => 0xd503201f;
 
 /* ================================================================ 第九刀第二片
  * 逻辑立即数、位段、单目位运算、浮点、单向屏障的存取。 */
@@ -537,7 +537,7 @@ function fcmpRaw(dbl, rm, op, opcode2, rn) {
     + op * 2 ** 14 + 2 ** 13 + arm64ChkReg(rn) * 2 ** 5 + chkU(opcode2, 5, 'opcode2'));
 }
 
-export const fcmp = (dbl, rn, rm) => fcmpRaw(dbl, arm64ChkReg(rm), 0, 0x00, rn);
+export const fcmpArm64 = (dbl, rn, rm) => fcmpRaw(dbl, arm64ChkReg(rm), 0, 0x00, rn);
 export const fcmpZero = (dbl, rn) => fcmpRaw(dbl, 0, 0, 0x08, rn);
 export const fcmpe = (dbl, rn, rm) => fcmpRaw(dbl, arm64ChkReg(rm), 0, 0x10, rn);
 

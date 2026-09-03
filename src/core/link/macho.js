@@ -33,7 +33,7 @@
  */
 
 import { OmniError } from '../source/diag.js';
-import { RELOC } from '../arm64/asm.js';
+import { RELOC_ARM64 as RELOC } from '../arm64/asm.js';
 
 /* ---------------------------------------------------------------- 常量
  * 名字与值都照 <mach-o/loader.h>。 */

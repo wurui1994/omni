@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 
 import * as a from '../../src/core/arm64/encode.js';
-import { CodeBuf, RELOC } from '../../src/core/arm64/asm.js';
+import { Arm64CodeBuf as CodeBuf, RELOC_ARM64 as RELOC } from '../../src/core/arm64/asm.js';
 
 /** llvm-mc 在哪。没有就整份跳过 —— 这条链是「有 llvm 的机器上必须过」。 */
 function findLlvm(name) {
@@ -152,9 +152,9 @@ t('cbz x0, . + 16', a.cbz(X, 0, 16));
 t('cbnz w1, . - 16', a.cbnz(W, 1, -16));
 t('br x2', a.br(2));
 t('blr x3', a.blr(3));
-t('ret', a.ret());
-t('ret x4', a.ret(4));
-t('nop', a.nop());
+t('ret', a.retArm64());
+t('ret x4', a.retArm64(4));
+t('nop', a.nopArm64());
 
 // ================================================================ 第九刀第二片
 
@@ -236,8 +236,8 @@ t('fcvt d8, s9', a.fcvtSD(8, 9));
 t('fcvt s10, d11', a.fcvtDS(10, 11));
 
 // ---- 浮点：比较
-t('fcmp d0, d1', a.fcmp(true, 0, 1));
-t('fcmp s2, s3', a.fcmp(false, 2, 3));
+t('fcmp d0, d1', a.fcmpArm64(true, 0, 1));
+t('fcmp s2, s3', a.fcmpArm64(false, 2, 3));
 t('fcmp d4, #0.0', a.fcmpZero(true, 4));
 t('fcmpe d5, d6', a.fcmpe(true, 5, 6));
 
@@ -298,7 +298,7 @@ const wordsOf = (buf) => [...new Uint32Array(buf.bytes().buffer)];
   buf.emit(a.movz(X, 0, 0));
   buf.adr(2, L3);
   buf.place(L3);
-  buf.emit(a.ret());
+  buf.emit(a.retArm64());
   programs.push({
     name: '阶乘的循环',
     asm: [
@@ -327,7 +327,7 @@ const wordsOf = (buf) => [...new Uint32Array(buf.bytes().buffer)];
   buf.bcond(a.COND.eq, out);
   buf.cbnz(X, 0, top);
   buf.place(out);
-  buf.emit(a.ldpPost(X, 29, 30, SP, 16), a.ret());
+  buf.emit(a.ldpPost(X, 29, 30, SP, 16), a.retArm64());
   programs.push({
     name: '序言收场夹一个循环',
     asm: [

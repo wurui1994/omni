@@ -22,7 +22,7 @@
  */
 
 import { OmniError } from '../source/diag.js';
-import { RELOC } from '../arm64/asm.js';
+import { RELOC_ARM64 as RELOC } from '../arm64/asm.js';
 import { RELOC as XRELOC } from '../x64/asm.js';
 
 const MH_MAGIC_64 = 0xfeedfacf;

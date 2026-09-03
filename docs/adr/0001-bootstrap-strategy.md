@@ -324,6 +324,33 @@ import 的别名摊成一句模块级的 `const 本地名 = 导出名`（`link.j
 > 这一格的教训与「量而不是猜」是同一条：我把「有一边导出」当成了「不能改」，
 > 于是自己给自己少算了 12 条。判据写错一格，剩下的活就凭空多了一半。
 
+#### 第一类清了：10 -> 0
+
+剩下那 10 条两边都导出的，用**同一个手法**一批批收掉：**改导出名 + 只改调用方
+`import` 那一行的导出名那一半**，别名照旧（`import { genArm64Module as genArm64 }`），
+于是调用方的**正文一个字都不动**。
+
+- `elf.js` 的 `writeObject` -> `writeElfObject`（只有 `cli.js` 引它，而且那行本来就
+  写着 `as writeElfObject` —— 改完更短）
+- `ctype.js` 的 `typeText` -> `cTypeText`（只有 `tccgen.js` 引，44 处引用。另一边
+  `mir/ir.js` 的 `typeText` 被七八个后端引，动它贵得多）
+- arm64 那三个：`genModule`/`genFunc`/`codeOf` -> `genArm64Module`/`genArm64Func`/
+  `codeOfArm64`（`cli.js`、`tests/c/native.js`、`tests/arm64/{from-mir,link}.js` 各一行）
+- `asm.js` 的 `RELOC`/`CodeBuf` -> `RELOC_ARM64`/`Arm64CodeBuf`
+  （`link/{macho,link,elf}.js` 与两支 arm64 门各一行）
+- `encode.js` 的 `ret`/`nop`/`fcmp` -> `retArm64`/`nopArm64`/`fcmpArm64`。这三个走
+  `import * as`，所以改的是 **`a.ret` 这种属性访问**——`tests/arm64/run.js` 里 `'ret'`
+  是**期望的反汇编文本**，一把梭的词边界改名会把那些字符串一起改坏。
+
+**重名 243 -> 0。** 剩下的只有 `import * as` 那 4 处（全是 `from './encode.js'`），
+它是**子集定义的边界**：自编译现在就剩这一格挡着，它一开，
+`bootstrap`/`mir`/`incr`/`js-exec`/`js-roundtrip` 那五组红才有机会一起转绿。
+
+每一批都跑了门：`arm64/run` 207/0（含反汇编逐条）、`arm64/from-mir` 88/0、
+`arm64/link` 21/0、`x64/run` 188/0、`x64/link` 21/0、`c/run` 207/0、`c/native` 227/0、
+`tcc-link` 83/0、`macho-libc`/`pe-exe`/`elf-merge`/`elf-roundtrip` 全 0 不同、
+`rela-text` 24/0、`core` 133/0。
+
 每一批改完都跑了对应的门：`arm64/from-mir` 88/0、`arm64/link` 21/0、`x64/from-mir` 90/0、
 `x64/link` 21/0、`elf-merge`/`elf-roundtrip`/`pe-*` 八门全 0 不同、`macho-tcc` 4/0、
 `macho-libc` 180/0、`tcc-link` 83/0、`c/run` 207/0、`run` 133/0、`sexpr` 78/0。

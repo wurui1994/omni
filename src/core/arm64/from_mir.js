@@ -32,7 +32,7 @@
 import { OmniError } from '../source/diag.js';
 import { utf8Bytes } from '../host/utf8.js';
 import * as a from './encode.js';
-import { CodeBuf } from './asm.js';
+import { Arm64CodeBuf as CodeBuf } from './asm.js';
 import {
   OP, REF_NONE, isConstRef, T_I32, T_I64, T_BOOL, T_VOID, T_F32, T_F64,
   typeKind, isFloatType, intBits, memKindNo, memOff, MLOAD_KINDS, MSTORE_KINDS,
@@ -398,7 +398,7 @@ class FnGen {
      * 再按 `x29` 把 `sp` 收回去 —— `sp` 这会儿可能停在某个变长数组下面。 */
     if (this.dynStack) buf.emit(a.ldrU(3, FB, FB, this.fbSave));
     if (this.frame > 0) buf.emit(a.movSp(1, SP, 29));
-    buf.emit(a.ldpPost(1, 29, 30, SP, 16), a.ret());
+    buf.emit(a.ldpPost(1, 29, 30, SP, 16), a.retArm64());
     return buf;
   }
 
@@ -742,7 +742,7 @@ class FnGen {
       this.fromFp(RES, FRES, dbl);
       return this.def(i, RES);
     }
-    buf.emit(a.fcmp(dbl, FTMP0, FTMP1), a.cset(1, RES, fc));
+    buf.emit(a.fcmpArm64(dbl, FTMP0, FTMP1), a.cset(1, RES, fc));
     return this.def(i, RES);
   }
 
@@ -878,11 +878,11 @@ class FnGen {
     return name;
   }
 
-  /** 串常量的符号名。名字是 `genModule` 分的 —— 单个函数编不出数据段，所以那儿明着报。 */
+  /** 串常量的符号名。名字是 `genArm64Module` 分的 —— 单个函数编不出数据段，所以那儿明着报。 */
   strSym(ref) {
     const sym = this.strSyms === null ? undefined : this.strSyms.get(ref);
     if (sym === undefined) {
-      throw new OmniError('arm64: 字符串常量的字节要落在数据段里，得走 genModule');
+      throw new OmniError('arm64: 字符串常量的字节要落在数据段里，得走 genArm64Module');
     }
     return sym;
   }
@@ -1065,8 +1065,8 @@ const GLOAD_EMIT = {
 const STORE_SIZE = { i64: 3, i32: 2, f64: 3, f32: 2 };
 
 /** 一个 MIR 函数 -> 一段 arm64 机器码（`CodeBuf`，已回填）。不认 CALL —— 单个函数
- * 里没有别的函数的落点，要发调用得走 `genModule`。 */
-export function genFunc(mod, f) {
+ * 里没有别的函数的落点，要发调用得走 `genArm64Module`。 */
+export function genArm64Func(mod, f) {
   const g = new FnGen(mod, f);
   g.gen();
   g.buf.finish();
@@ -1074,8 +1074,8 @@ export function genFunc(mod, f) {
 }
 
 /** 图省事的入口：直接要字节。 */
-export function codeOf(mod, f) {
-  return genFunc(mod, f).bytes();
+export function codeOfArm64(mod, f) {
+  return genArm64Func(mod, f).bytes();
 }
 
 /**
@@ -1085,7 +1085,7 @@ export function codeOf(mod, f) {
  * ±128MB 够得着，于是这一层不欠链接器任何账（跨模块的符号才欠，见 `asm.js` 的
  * `blSym`）。`offsets[i]` 是第 i 个函数在这段字节里的起点。
  */
-export function genModule(mod) {
+export function genArm64Module(mod) {
   /* 数据段先排出来 —— 函数体里 `loadRef` 要拿串常量的符号名，所以这一步得在生成之前。
    *
    * 布局：模块级变量**一个八字节一格**、零初始化，串常量接在后面（UTF-8 + 一个 0）。

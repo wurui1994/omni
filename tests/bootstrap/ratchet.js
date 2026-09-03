@@ -30,18 +30,18 @@ const CLI = join(root, 'src', 'core', 'cli.js');
 
 /** 基线：量出来的那两个数。**只许往下调**。
  *
- *   243 -> 22（`dedup.js` 扫了十一个文件）-> 10（守卫改成「只看要改的这一边导没导出」）
- *   -> 8（`elf.js` 的 `writeObject` 改成 `writeElfObject`、`ctype.js` 的 `typeText` 改成
- *   `cTypeText`，两处都只动了**一个**调用方）。
+ *   重名：243 -> 22 -> 10 -> 8 -> 5 -> 3 -> **0**。第一类债清了。
+ *   最后那几批是「改导出名 + 只改调用方的 import 那一行」（别名照旧，正文一个字不动）：
+ *   `writeElfObject`、`cTypeText`、`genArm64Module`/`genArm64Func`/`codeOfArm64`、
+ *   `RELOC_ARM64`/`Arm64CodeBuf`、`retArm64`/`nopArm64`/`fcmpArm64`。
+ *   最后那三个走 `import * as`，所以改的是 `a.ret` 这种**属性访问** ——
+ *   `tests/arm64/run.js` 里 `'ret'` 是期望的反汇编文本，一把梭的词边界改名会把它改坏。
  *
- *   剩下这 8 条**两边都导出、而且调用方不止一处**：`ret`/`nop`/`fcmp`（arm64|x64 的
- *   `encode.js`，走的是 `import * as`，所以改的是 `a.ret` 这种属性名）、
- *   `RELOC`/`CodeBuf`（`asm.js`）、`genModule`/`genFunc`/`codeOf`（`from_mir.js`）。
- *   门里也有引用，而且 `tests/arm64/run.js` 里 `'ret'` 还是**期望的反汇编文本** ——
- *   一把梭的词边界改名会把那些字符串一起改坏，得只改属性访问。
- *
- *   4：`import * as`，四处全是 `from './encode.js'`，改名解决不了（见 ADR-0001 那一节）。 */
-const BASE_DUP = 8;
+ *   `import * as` 那 4 处**还在**（全是 `from './encode.js'`）：它是**子集定义的边界**，
+ *   改名解决不了（见 ADR-0001「量：`export { 新名 as 老名 }` 不是捷径」那一节）。
+ *   现在自编译就剩这一格挡着 —— 它一开，`bootstrap`/`mir`/`incr`/`js-exec`/`js-roundtrip`
+ *   那五组红才有机会一起转绿。 */
+const BASE_DUP = 0;
 const BASE_NS = 4;
 
 let pass = 0;
