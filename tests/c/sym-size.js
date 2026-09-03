@@ -102,12 +102,12 @@ int main(void){return s[0]+f(g)+q(arr[0])+tab[0]+p.a+(int)big;}
 const c = join(OUT, 'a.c');
 writeFileSync(c, PROBE);
 
-/* win32 这一格暂时不进这门：量出来那边的符号名与我们的对不上 —— tcc 在 PE 上
- * **不加**那条下划线前缀（`libtcc.c:895-898`，PE 那一支是注释掉的），我们却加了。
- * 那是下一片的事，改完再把 x86_64-win32 加回这张表。 */
+/* 三个目标一起量。符号名的前缀跟着目标走：只有 osx 加那条下划线
+ * （第一百二十一片量过 —— `libtcc.c:895-898` 里 PE 那一支是注释掉的）。 */
 const CASES = [
   { name: 'x86_64-linux', tcc: 'x86_64-tcc', arch: 'x86_64', os: 'linux', win32: false },
   { name: 'arm64-osx', tcc: 'arm64-osx-tcc', arch: 'arm64', os: 'osx', win32: false },
+  { name: 'x86_64-win32', tcc: 'x86_64-win32-tcc', arch: 'x86_64', os: 'win32', win32: true },
 ];
 
 for (const t of CASES) {

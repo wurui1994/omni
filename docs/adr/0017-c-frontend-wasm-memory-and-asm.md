@@ -886,6 +886,9 @@ CIE 24 字节、每个函数一条 36 字节的 FDE、收尾四个零字节；�
 **符号表那一格 `st_size` 也填上了**（第一百二十片）：函数记「这个落点到下一个落点」
 （win32 上第一个函数后面那八字节的 `UNWIND_INFO` 也算在里头），全局量记 C 类型的大小。
 门 `tests/c/sym-size.js` 4/0 —— 全局量的大小与尺子一个数不差，函数的把 `.text` 铺满。
+**那条下划线只有 osx 加**（第一百二十一片改对）：`libtcc.c:895-898` 里 PE 那一支是
+注释掉的，所以 win32 的符号名与 linux 一样是**光的**；我们自己的 PE 链接器一直知道
+这一格，是写 `.o` 那一头记错了。改完 `sym-size` 那门从 4/0 变 6/0。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -14202,6 +14205,39 @@ n 条一模一样的 STT_SECTION 局部符号，`sh_info` 跟着往后挪。量�
   可还没有一个字节落进去。
 
 <!-- 第九刀第一百二十片-END -->
+
+## 落地：第九刀第一百二十一片
+
+上一片量出来的那笔：**win32 上没有那条下划线前缀**。`libtcc.c:895-898`
+
+```c
+/* enable this if you want symbols with leading underscore on windows: */
+#if defined TCC_TARGET_MACHO /* || defined TCC_TARGET_PE */
+    s->leading_underscore = 1;
+#endif
+```
+
+—— PE 那一支被注释掉了，只有 MACHO 开着。所以「加不加 `_`」不是「ELF 之外都加」，
+而是**只有 osx 加**。第一百〇七片写下的 `os === 'linux' ? '' : '_'` 把 win32 也捎上了，
+这一片改成 `os === 'osx' ? '_' : ''`。
+
+有意思的是我们自己的 PE 链接器一直是对的（`pe_load.js`：「PE 上默认是 0，
+只有 `-fleading-underscore` 才开」）—— 一头知道、另一头不知道，是同一件事记了两处的
+老毛病；这回把写 `.o` 那一头对齐到同一个说法。
+
+### 门
+
+`tests/c/sym-size.js` 从 4/0 变 6/0：x86_64-win32 加回表里，六个全局量的 `st_size`
+与尺子一个数不差 —— 上一片这一格根本比不了，因为名字全对不上。
+`pe-exe`（352 条相同）与 `tcc-link`（83/0）都没动，正说明链接那一头本来就不指望前缀。
+
+### 顺手记下的一笔
+
+`tccdefs.js` 那张预定义表还是**照 macho 写死**的（`__APPLE__`、`__unix__`、
+`__leading_underscore` 都在里头，只有 CPU 那三条跟着 `--arch` 走）。编给 linux 或
+win32 的时候那几条都是错的 —— 比这一片大得多的一笔，单独一片。
+
+<!-- 第九刀第一百二十一片-END -->
 
 
 

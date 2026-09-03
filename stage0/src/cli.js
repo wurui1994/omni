@@ -439,7 +439,11 @@ function cObj(path, out, arch, incs, defs, fmt, os) {
     ? (t, d, ds, rs, a, al) => writeElfObject(t, d, ds, rs, a, al,
       {
         file: path,
-        prefix: os === 'linux' ? '' : '_',
+        /* 符号名前缀（第一百二十一片改对）：**只有 osx 加那条下划线**。
+         * `libtcc.c:895-898` 里只有 MACHO 那一支开着 `leading_underscore`，PE 那一支
+         * 被注释掉了 —— 量过 x86_64-win32 写出来的 `.o`，符号是 `main`/`g`/`tab`，
+         * 一个下划线也没有。我们自己的 PE 链接器早就知道这一格（`pe_load.js`：PE 上默认 0）。 */
+        prefix: os === 'osx' ? '_' : '',
         rdata: os === 'win32' ? '.rdata' : '.data.ro',
         unwind: blob.unwind ?? undefined,
         ehFrame: ehFrameOf(blob, arch, os),

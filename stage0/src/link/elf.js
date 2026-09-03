@@ -357,7 +357,8 @@ function ehFrameX64(funcs) {
  * @param dataAlign 这一格 ELF 用不上（tcc 的 `.data` 一律 `sh_addralign = 8`），
  *              留着是为了与 Mach-O 那个写出器同签名
  * @param opts  `{file, prefix, rdata, unwind, seq}`：`file` 是写进 STT_FILE 那一条的
- *              源文件名；`prefix` 是符号名前缀 —— osx 与 win32 上是 `'_'`，linux 上是 `''`；
+ *              源文件名；`prefix` 是符号名前缀 —— **只有 osx 是 `'_'`**，linux 与 win32
+ *              都是 `''`（`libtcc.c:895-898`：`leading_underscore` 只在 MACHO 上开）；
  *              `rdata` 是只读数据那一节的名字；`unwind` 是 win32 x86_64 的展开表
  *              `{offs, funcs: [{start, end}]}`（第一百一十七片）；`seq` 是
  *              `{text, data, pdata}` 三节**造出来的次序**上的位置（第一百一十八片）
