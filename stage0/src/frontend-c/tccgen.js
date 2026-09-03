@@ -1932,11 +1932,19 @@ export class CGen {  /**
   /** native：一个宽串字面量在 MIR 常量池里的那一条（第三十三片）。一律 `bytes`。 */
   wstrConst(vals) {
     const raw = [];
-    for (const v of [...vals, 0]) {
+    /* 结尾那一格**不在这儿加**（第一百二十三片）：摆字节的那一步一律补「一个元素宽」
+     * 的零（窄串 1 字节、宽串 4 字节），于是两种串共用同一条收尾。从前这儿加了一格
+     * 四个零、后端又补一个字节，`st_size` 就比 tcc 多 1。 */
+    for (const v of vals) {
       const u = v >>> 0;
       raw.push(u & 255, (u >>> 8) & 255, (u >>> 16) & 255, (u >>> 24) & 255);
     }
-    return this.mod.consts.bytes(raw);
+    const ref = this.mod.consts.bytes(raw);
+    /* 宽串一格四字节，所以摆下来要 4 对齐、结尾那一格也是四个零（量过 tcc 的只读节）。
+     * 常量池里宽串与「就这几个字节」的窄串是同一个种类，分不出来 —— 所以这一格
+     * 记在 MIR 的 `strAlign` 上，由造它的人说。 */
+    this.mod.markStrAlign(ref, 4);
+    return ref;
   }
 
   /**

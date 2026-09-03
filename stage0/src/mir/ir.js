@@ -827,6 +827,9 @@ export class MirModule {
      * `VT_CONSTANT` 就摆进只读那一节（osx/linux 的 `.data.ro`、PE 的 `.rdata`）。
      * 与 `globalLocal` 同一种性质：标注，不是语义 —— 只有写目标文件那一步看它。 */
     this.globalRo = [];
+    /* 与常量池同下标的「这条串常量要几字节对齐」（第九刀第一百二十三片）：缺省 1，
+     * 宽串 4。也是标注 —— 只有写目标文件那一步看它，进不了摘要的哈希。 */
+    this.strAlign = [];
     /* 别名（第九刀第一百〇五片，`__attribute__((alias("目标")))`）：一个名字与目标
      * **同址**，符号表里两条、代码一份。`{name, kind:'f'|'g', no, weak}` —— `no` 是目标
      * 的函数号或全局号。同样是标注：写目标文件那一步照目标的落点再发一条符号。 */
@@ -946,6 +949,17 @@ export class MirModule {
   markGlobalRo(no) {
     if (this.globals[no] === undefined) throw new Error(`mir: 没有 ${no} 号模块级变量`);
     this.globalRo[no] = true;
+  }
+
+  /**
+   * 这条串常量摆下来要几字节对齐（第九刀第一百二十三片）。缺省 1 —— 窄串就是一串
+   * 字节；宽串（`L"ab"`，一格四字节）要 4，否则它的地址会被交给按 `int` 读的代码。
+   * 量过 tcc：只读节里每条串按**元素的宽度**对齐，节自己的 `sh_addralign` 还是 8
+   * （`L.3` 在 0、宽串 `L.4` 在 4、后面那条窄串 `L.5` 紧跟在 16）。
+   */
+  markStrAlign(ref, al) {
+    if (this.consts.items[ref] === undefined) throw new Error(`mir: 没有 ${ref} 号常量`);
+    this.strAlign[ref] = al;
   }
 
   /**

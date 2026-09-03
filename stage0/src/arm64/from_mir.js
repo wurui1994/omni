@@ -1174,16 +1174,19 @@ export function genModule(mod) {
     if (kind !== 'str' && kind !== 'bytes') continue;
     const name = `omni_str_${r}`;
     strSyms.set(r, name);
-    /* 串常量的符号一律 8 对齐（第三十三片）。从前是紧挨着摆的 —— 窄串无所谓，可宽串
-     * （`L"ab"`，一格四字节）的地址会被交给按 `int` 读的代码。按内容算每一条的对齐
-     * 要在常量池里多记一个字段，而 8 是所有 C 标量的上界，一条 while 就够。 */
-    while (dataBytes.length % 8 !== 0) dataBytes.push(0);
-    /* `local: true`（第九十二片）：串常量的编号是**这个模块里**的序号，两个 `.o` 各有
-     * 一个 `omni_str_0` —— 当外部符号的话一链就撞。局部符号里各归各家。 */
-    dataSyms.push({ name, off: dataBytes.length, sect: 2, local: true });
+    /* 串常量摆进**只读那一节**（第一百二十三片，与 x64 那一份同一条）：每条按元素的
+     * 宽度对齐 —— 窄串 1、宽串 4（`mod.strAlign`，宽串的地址会被交给按 `int` 读的
+     * 代码）。从前一律 8 对齐摆在 `.data` 里，那是没有只读节可摆时的将就。 */
+    const sal = mod.strAlign[r] ?? 1;
+    while (roBytes.length % sal !== 0) roBytes.push(0);
     const raw = kind === 'bytes' ? hexBytes(items[r].text) : utf8Bytes(items[r].text);
-    for (const byte of raw) dataBytes.push(byte);
-    dataBytes.push(0);
+    /* `local: true`（第九十二片）：串常量的编号是**这个模块里**的序号，两个 `.o` 各有
+     * 一个 `omni_str_0` —— 当外部符号的话一链就撞。局部符号里各归各家。
+     * `size` 是带那个 0 的长度（第一百二十片那一格）。 */
+    dataSyms.push({ name, off: roBytes.length, sect: 3, size: raw.length + sal, local: true });
+    for (const byte of raw) roBytes.push(byte);
+    /* 结尾那一格是**一个元素宽**的零：窄串一个字节、宽串四个（`wstrConst` 不加它）。 */
+    for (let k = 0; k < sal; k++) roBytes.push(0);
   }
 
   const buf = new CodeBuf();

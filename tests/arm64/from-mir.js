@@ -671,7 +671,8 @@ try {
     defs.push({ name: mod.funcs[k].name, off: blob.offsets[k] });
   }
   writeFileSync(objPath, writeObject(blob.bytes, blob.data,
-    [...defs, ...blob.dataSyms], blob.relocs));
+    [...defs, ...blob.dataSyms], blob.relocs, 'arm64', blob.dataAlign,
+    { rodata: blob.rodata }));
   const main = ['#include <stdio.h>', '#include <string.h>',
     'static double b2d(unsigned long long b){ double d; memcpy(&d,&b,8); return d; }',
     'static unsigned long long d2b(double d){ unsigned long long b; memcpy(&b,&d,8); return b; }',
