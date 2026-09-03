@@ -1008,6 +1008,36 @@ export function glslTriProgram(vertMod, fragMod, w, h, uni) {
   }
   s.push('    (let px real (real 0.0))');
   s.push('    (let py real (real 0.0))');
+  /* 覆盖判定的三条边函数（llvmpipe 的 `lp_rast_plane`）。
+   *
+   * 边 j 从 `(xa,ya)` 到 `(xb,yb)`，用**叉积**：
+   *
+   *   `e_j(p) = cross(b-a, p-a) = (xb-xa)*(py-ya) - (yb-ya)*(px-xa)`
+   *
+   * 也就是 `dedx = -(yb-ya)`、`dedy = (xb-xa)`。三条都 `>= 0` 就在三角形里。
+   *
+   * **符号约定必须与 `area` 那个公式同源**：`area = cross(v1-v0, v2-v0)`，
+   * 与上面那个 `e` 是同一个叉积。第一版我把 `e` 写成了 `(x-xa)*(yb-ya) - …`
+   * （反的），于是全屏三角形上三条边函数**全为负**，一个像素都没画出来 ——
+   * 门当场全红。反过来说，如果那时候只测「全屏三角形能画」这一条，
+   * 我可能会把 `>=` 改成 `<=` 蒙过去，而那在别的绕向上又是错的。
+   *
+   * `sgn` 是绕向：面积为负（顺时针）时三条整体取反，于是「在内」永远是 `>= 0`。
+   * llvmpipe 那边是在 setup 里把三角形拧成固定绕向（`lp_setup_tri.c`），一回事。
+   *
+   * **边上的归属规则还没照 GL 的 top-left 做**（现在是 `>= 0`，含边）。
+   * 只有两个三角形共享一条边时才看得出来 —— 那时候那条边上的像素会画两遍。 */
+  s.push('    (let area real (bin "-" (bin "*" (bin "-" (var x1) (var x0)) (bin "-" (var y2) (var y0)))'
+    + ' (bin "*" (bin "-" (var x2) (var x0)) (bin "-" (var y1) (var y0)))))');
+  s.push('    (let sgn real (real 1.0))');
+  s.push('    (if (bin "<" (var area) (real 0.0)) (do (set sgn (un "-" (real 1.0)))))');
+  const EDGES = [[0, 1], [1, 2], [2, 0]];
+  for (let j = 0; j < 3; j++) {
+    const [a2, b2] = EDGES[j];
+    s.push(`    (let e${j}dx real (bin "*" (var sgn) (bin "-" (var y${a2}) (var y${b2}))))`);
+    s.push(`    (let e${j}dy real (bin "*" (var sgn) (bin "-" (var x${b2}) (var x${a2}))))`);
+    s.push(`    (let e${j} real (real 0.0))`);
+  }
   s.push(`    (let c ${glslStructName(4)} (new ${glslStructName(4)}))`);
   L.need(4);
   /* quad 扫描（次序与第四片一样）。 */
@@ -1027,13 +1057,22 @@ export function glslTriProgram(vertMod, fragMod, w, h, uni) {
   for (let k = 0; k < 4; k++) {
     inner.push(`(set px (bin "+" (toreal (var qx)) (real ${QX[k] + 0.5})))`);
     inner.push(`(set py (bin "+" (toreal (var qy)) (real ${QY[k] + 0.5})))`);
+    for (let j = 0; j < 3; j++) {
+      const base = EDGES[j][0];
+      inner.push(`(set e${j} (bin "+" (bin "*" (var e${j}dx) (bin "-" (var px) (var x${base})))`
+        + ` (bin "*" (var e${j}dy) (bin "-" (var py) (var y${base})))))`);
+    }
     const args = ['(var px)', '(var py)'];
     for (let i = 0; i < attrs.length; i++) args.push(evalAt(i));
     for (const x of uniArgs(fragMod)) args.push(x);
-    inner.push(`(set c (call glsl_frag ${args.join(' ')}))`);
-    inner.push(`(if (bin "&&" (bin "<" (var px) (real ${glslNum(w)}))`
-      + ` (bin "<" (var py) (real ${glslNum(h)})))`
+    /* 覆盖 **且** 在画布里才算 —— 不覆盖的像素**连片元都不调**（真的光栅化就该这样，
+     * 也正好省掉那一次着色）。 */
+    const cov = '(bin "&&" (bin "&&" (bin ">=" (var e0) (real 0.0)) (bin ">=" (var e1) (real 0.0)))'
+      + ' (bin ">=" (var e2) (real 0.0)))';
+    inner.push(`(if (bin "&&" ${cov} (bin "&&" (bin "<" (var px) (real ${glslNum(w)}))`
+      + ` (bin "<" (var py) (real ${glslNum(h)}))))`
       + ' (do'
+      + ` (set c (call glsl_frag ${args.join(' ')}))`
       + ' (print (toint (bin "-" (var px) (real 0.5))))'
       + ' (print (toint (bin "-" (var py) (real 0.5))))'
       + ' (print (call glsl_to8 (fld (var c) c0)))'
