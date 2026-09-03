@@ -1,0 +1,222 @@
+// tests/glsl/fns.js —— 内建函数补全：8.1/8.3 剩下的标量几条 + 8.4 几何三条 + 8.5 矩阵五条
+// （ADR-0019 第二十三片）
+//
+// 三条腿都跑，期望值由这门自己独立算一遍。**用得出准确值的输入**：
+// 方言印 real 走 `%g`（6 位有效），所以取样点一律挑「结果在二进制下是精确的」那些
+// （整数、二分之一、二的幂），不精确的（`atan2`、`sinh`）先乘 1e6 再 `floor` ——
+// 比的是同一个数，不是同一种排版。
+//
+//   node tests/glsl/fns.js
+
+import { readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
+
+import { readSexpr } from '../../src/core/sexpr/read.js';
+import { readGrammar } from '../../src/core/glr/grammar.js';
+import { buildTable } from '../../src/core/glr/table.js';
+import { lexText } from '../../src/core/glr/lex.js';
+import { glrParse } from '../../src/core/glr/driver.js';
+import { Diagnostics, SourceFile } from '../../src/core/source/diag.js';
+import { glslCheck } from '../../src/core/frontend-glsl/check.js';
+import { glslLower } from '../../src/core/frontend-glsl/lower.js';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const root = join(here, '..', '..');
+const CLI = join(root, 'src', 'core', 'cli.js');
+const GRAMMAR = join(root, 'src', 'core', 'frontend-glsl', 'glsl.grammar');
+const OUT = join(tmpdir(), 'omni-glsl-fns');
+
+let pass = 0;
+let fail = 0;
+const ok = (name) => { pass++; process.stdout.write(`  ok   ${name}\n`); };
+const bad = (name, detail) => { fail++; process.stdout.write(`  FAIL ${name}\n${detail}\n`); };
+
+const gdiags = new Diagnostics();
+const g = readGrammar(readSexpr(new SourceFile(GRAMMAR, readFileSync(GRAMMAR, 'utf8')), gdiags), gdiags);
+gdiags.throwIfErrors();
+const tb = buildTable(g);
+
+rmSync(OUT, { recursive: true, force: true });
+mkdirSync(OUT, { recursive: true });
+
+function lower(src) {
+  const diags = new Diagnostics();
+  const file = new SourceFile('probe.frag', src);
+  const toks = lexText(g.lex, file, diags);
+  diags.throwIfErrors();
+  const tree = glrParse(tb, toks, diags);
+  diags.throwIfErrors();
+  return glslLower(glslCheck(tree, 'frag'));
+}
+
+const SHELL = (body) => `#version 330 core
+out vec4 fragColor;
+${body}
+void main() { fragColor = vec4(probe(0), 0.0, 0.0, 1.0); }
+`;
+
+function runLeg(name, glsl, ks, extra) {
+  const lib = lower(SHELL(glsl)).trimEnd();
+  const driver = ks.map((k) => `    (print (call glsl_probe (int ${k})))`).join('\n');
+  const sx = `${lib.slice(0, -1)}\n  (main\n${driver})\n)\n`;
+  const p = join(OUT, `${name}.sx`);
+  writeFileSync(p, sx);
+  const r = spawnSync(process.execPath, [CLI, 'run', p, ...extra], { encoding: 'utf8', maxBuffer: 1 << 26 });
+  if (r.status !== 0) return { err: (r.stderr ?? '').trim().split('\n').slice(0, 4).join('\n    ') };
+  return { lines: r.stdout.trim().split('\n') };
+}
+
+function probe(name, glsl, ks, ref) {
+  const want = ks.map((k) => String(ref(k)));
+  for (const [tag, extra] of [['JS', []], ['C', ['--backend', 'c']], ['LLVM', ['--backend', 'llvm']]]) {
+    const r = runLeg(`${name.replace(/[^\w]/g, '_')}-${tag}`, glsl, ks, extra);
+    if (r.err !== undefined) { bad(`${name}［${tag} 腿］跑不动`, `    ${r.err}`); continue; }
+    const diff = [];
+    for (let i = 0; i < want.length; i++) {
+      if (r.lines[i] !== want[i]) diff.push(`k=${ks[i]}：要 ${want[i]}，得 ${r.lines[i]}`);
+    }
+    if (diff.length > 0) bad(`${name}［${tag} 腿］`, diff.map((d) => `    ${d}`).join('\n'));
+    else ok(`${name}［${tag} 腿］${want.length} 个数逐字节相同`);
+  }
+}
+
+/* ---- 一、`atan(y, x)`：从前它是**坏的**（发出去的是一参的 atan，方言当场骂） ------ */
+
+probe('atan(y, x) 走 atan2', `
+float probe(int k) {
+  return floor(atan(1.0, 2.0) * 1000000.0);
+}`, [0], () => Math.floor(Math.atan2(1, 2) * 1e6));
+
+/* ---- 二、`exp2` / `log2`：rmath 里没有，展开成 pow / log ------------------------ */
+
+probe('exp2 与 log2', `
+float probe(int k) {
+  return exp2(3.0) + log2(1024.0) * 100.0;
+}`, [0], () => 2 ** 3 + Math.log2(1024) * 100);
+
+/* ---- 三、双曲那六条（rmath 有，从前只是没进表） --------------------------------- */
+
+probe('sinh / cosh / tanh / asinh / acosh / atanh', `
+float probe(int k) {
+  return sinh(0.0) + cosh(0.0) * 2.0 + tanh(0.0) * 4.0
+    + asinh(0.0) * 8.0 + acosh(1.0) * 16.0 + atanh(0.0) * 32.0
+    + floor(sinh(1.0) * 1000.0);
+}`, [0], () => 0 + 1 * 2 + 0 + 0 + 0 + 0 + Math.floor(Math.sinh(1) * 1e3));
+
+/* ---- 四、`trunc` / `round` / `roundEven`（三个的「一半」规则各不同） ------------- */
+
+probe('trunc / round / roundEven', `
+float probe(int k) {
+  return trunc(-2.7) + trunc(2.7) * 2.0
+    + round(2.5) * 4.0 + round(-2.5) * 8.0
+    + roundEven(2.5) * 16.0 + roundEven(3.5) * 32.0 + roundEven(-2.5) * 64.0;
+}`, [0], () => {
+  /* `trunc` 往零、`round` 一半往远离零（C 的 round）、`roundEven` 一半取偶。
+   * 这三条的差别正好在 ±2.5 那两个点上现形。 */
+  const trunc = (x) => Math.trunc(x);
+  const round = (x) => Math.sign(x) * Math.round(Math.abs(x));
+  return trunc(-2.7) + trunc(2.7) * 2 + round(2.5) * 4 + round(-2.5) * 8
+    + 2 * 16 + 4 * 32 + (-2) * 64;
+});
+
+/* ---- 五、几何那三条（8.4） ------------------------------------------------------ */
+
+probe('reflect / faceforward', `
+float probe(int k) {
+  vec2 I = vec2(1.0, -1.0);
+  vec2 N = vec2(0.0, 1.0);
+  vec2 rf = reflect(I, N);
+  vec2 ff = faceforward(N, I, N);
+  return rf.x + rf.y * 2.0 + ff.x * 4.0 + ff.y * 8.0;
+}`, [0], () => {
+  /* d = dot(N,I) = -1；reflect = I - 2d·N = (1, 1)。
+   * faceforward：dot(Nref,I) < 0 -> N，也就是 (0,1)。 */
+  return 1 + 1 * 2 + 0 * 4 + 1 * 8;
+});
+
+probe('refract（含 k < 0 那一支回全 0）', `
+float probe(int k) {
+  vec2 N = vec2(0.0, 1.0);
+  vec2 a = refract(vec2(0.0, -1.0), N, 1.0);
+  vec2 b = refract(vec2(0.6, -0.8), N, 2.0);
+  return a.x + a.y * 2.0 + b.x * 4.0 + b.y * 8.0;
+}`, [0], () => {
+  /* a：eta=1、d=-1 -> k=1 -> I - 0·N = (0,-1)。
+   * b：d=-0.8、k = 1 - 4(1-0.64) = -0.44 < 0 -> 全 0（规范 8.4 明写的）。 */
+  return 0 + (-1) * 2 + 0 + 0;
+});
+
+/* ---- 六、矩阵那五条（8.5） ------------------------------------------------------ */
+
+probe('determinant / inverse（m * inverse(m) 是单位阵）', `
+float probe(int k) {
+  mat2 m = mat2(1.0, 0.0,   1.0, 1.0);
+  mat2 im = inverse(m);
+  mat2 id = m * im;
+  mat3 p = mat3(2.0, 0.0, 0.0,   0.0, 4.0, 0.0,   0.0, 0.0, 8.0);
+  mat3 ip = inverse(p);
+  mat3 id3 = p * ip;
+  return determinant(m) + determinant(p) * 2.0
+    + (id[0].x + id[1].y) * 4.0 + (id[0].y + id[1].x) * 8.0
+    + (id3[0].x + id3[1].y + id3[2].z) * 16.0
+    + (id3[0].y + id3[1].z + id3[2].x) * 32.0;
+}`, [0], () => {
+  /* 取样点全挑**二进制下精确**的：错切阵（det 1、逆是整数）与 2/4/8 的对角阵
+   * （逆是 0.5/0.25/0.125）。这样「单位阵」是逐位的 1 与 0，不是「约等于」。 */
+  return 1 + 2 * 4 * 8 * 2 + 2 * 4 + 0 + 3 * 16 + 0;
+});
+
+probe('matrixCompMult / transpose / outerProduct', `
+float probe(int k) {
+  mat2 m = mat2(4.0, 2.0,   7.0, 6.0);
+  mat2 cm = matrixCompMult(m, m);
+  mat3x2 t = transpose(mat2x3(1.0, 2.0, 3.0,   4.0, 5.0, 6.0));
+  mat2 op = outerProduct(vec2(1.0, 2.0), vec2(3.0, 4.0));
+  return cm[0].x + cm[1].y * 2.0
+    + t[0].x * 4.0 + t[0].y * 8.0 + t[2].y * 16.0
+    + op[0].x * 32.0 + op[1].y * 64.0;
+}`, [0], () => {
+  /* cm 逐格乘：16 与 36。
+   * transpose(mat2x3(1..6))：原来第 0 列 (1,2,3)、第 1 列 (4,5,6)；
+   *   转完是 3 列 2 行，第 0 列 = 原来第 0 行 = (1,4)，第 2 列 = 原来第 2 行 = (3,6)。
+   * outerProduct(c=(1,2), r=(3,4))：第 col 列 = c * r[col] -> 第 0 列 (3,6)、第 1 列 (4,8)。 */
+  return 16 + 36 * 2 + 1 * 4 + 4 * 8 + 6 * 16 + 3 * 32 + 8 * 64;
+});
+
+/* ---- 七、该骂的明着骂 ---------------------------------------------------------- */
+
+function rejects(name, glsl, want) {
+  let msg = null;
+  try {
+    lower(SHELL(glsl));
+  } catch (e) {
+    msg = String(e.message ?? e);
+  }
+  if (msg === null) bad(name, '    一声没骂就收下了');
+  else if (!msg.includes(want)) bad(name, `    骂的是别的：${msg.split('\n')[0]}`);
+  else ok(`${name}［${want}］`);
+}
+
+rejects('determinant 不收非方阵', `
+float probe(int k) { return determinant(mat2x3(1.0)); }`, '只对方阵');
+
+rejects('inverse 不收非方阵', `
+float probe(int k) { return inverse(mat3x2(1.0))[0].x; }`, '只对方阵');
+
+rejects('matrixCompMult 两个矩阵要同型', `
+float probe(int k) { return matrixCompMult(mat2(1.0), mat3(1.0))[0].x; }`, '要同型');
+
+rejects('reflect 的实参要同型', `
+float probe(int k) { return reflect(vec2(1.0, 2.0), vec3(1.0, 2.0, 3.0)).x; }`, '宽度不一样');
+
+rejects('refract 的 eta 要是标量', `
+float probe(int k) { return refract(vec2(1.0), vec2(0.0, 1.0), vec2(1.0)).x; }`, 'eta 要是标量');
+
+rejects('outerProduct 要两个向量', `
+float probe(int k) { return outerProduct(mat2(1.0), vec2(1.0))[0].x; }`, '要是 vecN');
+
+process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
+process.exit(fail > 0 ? 1 : 0);

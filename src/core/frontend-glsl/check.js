@@ -140,21 +140,28 @@ const glslAtom = (n) => (n.kind === 'atom' || n.kind === 'string' ? n.value : nu
 const GLSL_BUILTINS = new Map([
   ['sin', 'gen1'], ['cos', 'gen1'], ['tan', 'gen1'],
   ['asin', 'gen1'], ['acos', 'gen1'], ['atan', 'gen2'],
+  ['sinh', 'gen1'], ['cosh', 'gen1'], ['tanh', 'gen1'],
+  ['asinh', 'gen1'], ['acosh', 'gen1'], ['atanh', 'gen1'],
   ['exp', 'gen1'], ['log', 'gen1'], ['exp2', 'gen1'], ['log2', 'gen1'],
   ['sqrt', 'gen1'], ['inversesqrt', 'gen1'],
   ['abs', 'gen1'], ['sign', 'gen1'], ['floor', 'gen1'], ['ceil', 'gen1'],
+  ['trunc', 'gen1'], ['round', 'gen1'], ['roundEven', 'gen1'],
   ['fract', 'gen1'], ['normalize', 'gen1'], ['radians', 'gen1'], ['degrees', 'gen1'],
   ['pow', 'gen2'], ['mod', 'gen2'], ['min', 'gen2'], ['max', 'gen2'], ['step', 'gen2'],
   ['clamp', 'gen3'], ['mix', 'gen3'], ['smoothstep', 'gen3'],
   ['length', 'len'],
   ['dot', 'dot2'], ['distance', 'dot2'],
   ['cross', 'cross'],
+  /* 几何那三条（规范 8.4）：形状与 `gen1`/`gen3` 不同 —— 都要求实参**同型**，
+   * `refract` 的第三个是标量。 */
+  ['reflect', 'geo2'], ['faceforward', 'geo3'], ['refract', 'refr'],
 ]);
 
 /** `atan` 与 `step` 的第一个参数也可以是标量而第二个是向量吗 —— GLSL 里可以，这儿也收。 */
 function glslGenType(name, tys, node, err) {
   const kind = GLSL_BUILTINS.get(name);
-  const want = kind === 'gen1' || kind === 'len' ? 1 : kind === 'gen3' ? 3 : 2;
+  const want = kind === 'gen1' || kind === 'len' ? 1
+    : kind === 'gen3' || kind === 'geo3' || kind === 'refr' ? 3 : 2;
   if (tys.length !== want) {
     throw err(node, `${name} 要 ${want} 个实参，给了 ${tys.length}`);
   }
@@ -188,6 +195,20 @@ function glslGenType(name, tys, node, err) {
     }
     return glslVec(3, 'float');
   }
+  if (kind === 'geo2' || kind === 'geo3' || kind === 'refr') {
+    /* 8.4：`reflect(I,N)`、`faceforward(N,I,Nref)`、`refract(I,N,eta)`。
+     * 前两个的实参**全部同型**（float 或 vecN，都不铺开）；`refract` 的 `eta` 是标量。 */
+    const many = kind === 'refr' ? tys.slice(0, 2) : tys;
+    for (const t of many) {
+      if (!glslSame(t, many[0])) {
+        throw err(node, `${name} 的实参要同型（${glslTyText(many[0])} 与 ${glslTyText(t)}）`);
+      }
+    }
+    if (kind === 'refr' && tys[2].k !== 'float' && tys[2].k !== 'int') {
+      throw err(node, `refract 的 eta 要是标量，给了 ${glslTyText(tys[2])}`);
+    }
+    return many[0];
+  }
   /* `gen1` 的那一个参数是标量时回标量；`gen2`/`gen3` 的第一个参数定形状。 */
   if (kind === 'gen1') return gen;
   const first = tys[0];
@@ -214,6 +235,46 @@ const GLSL_VEC_CMP = new Map([
 ]);
 
 const GLSL_VEC_RED = new Set(['all', 'any']);
+
+/**
+ * 矩阵那一族（规范 8.5）。也单开一张表：它们的实参与结果都是**矩阵**，
+ * 而上面那张泛型表只认 float 与 vecN。
+ *
+ *   `matrixCompMult(m, m)` -> 同型（逐格乘，**不是**矩阵乘）
+ *   `outerProduct(c, r)`   -> `c` 长 R、`r` 长 C，出 `matCxR`
+ *   `transpose(matCxR)`    -> `matRxC`
+ *   `determinant(matN)` / `inverse(matN)` -> 只对**方阵**
+ */
+const GLSL_MAT_FNS = new Set(['matrixCompMult', 'outerProduct', 'transpose',
+  'determinant', 'inverse']);
+
+/** 这一族的类型规则。回 `null` 表示「这个名字不属于这一族」。 */
+function glslMatFnType(name, tys, node, err) {
+  if (!GLSL_MAT_FNS.has(name)) return null;
+  const want = name === 'matrixCompMult' || name === 'outerProduct' ? 2 : 1;
+  if (tys.length !== want) throw err(node, `${name} 要 ${want} 个实参，给了 ${tys.length}`);
+  if (name === 'outerProduct') {
+    const [c, r] = tys;
+    if (!(c.k === 'vec' && c.base === 'float') || !(r.k === 'vec' && r.base === 'float')) {
+      throw err(node, `outerProduct 的实参要是 vecN（${glslTyText(c)} 与 ${glslTyText(r)}）`);
+    }
+    return glslMat(r.n, c.n);
+  }
+  for (const t of tys) {
+    if (t.k !== 'mat') throw err(node, `${name} 的实参要是矩阵，给了 ${glslTyText(t)}`);
+  }
+  if (name === 'matrixCompMult') {
+    if (!glslSame(tys[0], tys[1])) {
+      throw err(node, `matrixCompMult 的两个矩阵要同型（${glslTyText(tys[0])} 与 ${glslTyText(tys[1])}）`);
+    }
+    return tys[0];
+  }
+  const m = tys[0];
+  if (name === 'transpose') return glslMat(m.rows, m.cols);
+  if (m.cols !== m.rows) throw err(node, `${name} 只对方阵，给了 ${glslTyText(m)}`);
+  return name === 'determinant' ? GLSL_FLOAT : m;
+}
+
 
 /** 这一族的类型规则。回 `null` 表示「这个名字不属于这一族」。 */
 function glslVecCmpType(name, tys, node, err) {
@@ -415,7 +476,7 @@ class GlslChecker {
         return;
       }
       if (GLSL_BUILTINS.has(name) || GLSL_VEC_CMP.has(name) || GLSL_VEC_RED.has(name)
-        || name === 'not') {
+        || GLSL_MAT_FNS.has(name) || name === 'not') {
         throw this.err(node, `'${name}' 是内建函数，不能重定义`);
       }
 
@@ -788,6 +849,8 @@ class GlslChecker {
        * 悄悄提成 float 会把 `-1 < 0` 这种在极端值上算错。 */
       return { k: 'builtin', ty: vty, name, args };
     }
+    const mty = glslMatFnType(name, args.map((a) => a.ty), node, (n, m) => this.err(n, m));
+    if (mty !== null) return { k: 'builtin', ty: mty, name, args };
     if (GLSL_BUILTINS.has(name)) {
       const ty = glslGenType(name, args.map((a) => a.ty), node, (n, m) => this.err(n, m));
       /* 内建里 `int` 实参一律先提成 `float`（`sin(1)` 在 GLSL 里合法）。 */

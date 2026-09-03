@@ -56,8 +56,10 @@ function glslNComp(t) {
 /** `rmath` 直接转手的那些：GLSL 的名字 -> 方言的名字。 */
 const GLSL_RMATH = new Map([['sin', 'sin'], ['cos', 'cos'], ['tan', 'tan'],
   ['asin', 'asin'], ['acos', 'acos'], ['atan', 'atan'],
+  ['sinh', 'sinh'], ['cosh', 'cosh'], ['tanh', 'tanh'],
+  ['asinh', 'asinh'], ['acosh', 'acosh'], ['atanh', 'atanh'],
   ['exp', 'exp'], ['log', 'log'], ['sqrt', 'sqrt'],
-  ['abs', 'fabs'], ['floor', 'floor'], ['ceil', 'ceil'],
+  ['abs', 'fabs'], ['floor', 'floor'], ['ceil', 'ceil'], ['round', 'round'],
   ['pow', 'pow'], ['mod', 'fmod'],
 ]);
 
@@ -307,7 +309,6 @@ class GlslLowerer {
     return out;
   }
 
-  /** `min`/`max`：方言没有表达式级的条件，所以落成一个 let + 一条 if。 */
   /**
    * 三元 `c ? a : b`。**两支各自的中间量要留在自己那一支里** ——
    * GLSL 的 `? :` 只算一支（规范 5.9），把两支的 `let` 都提到 if 外面就变成两支都算了。
@@ -417,6 +418,48 @@ class GlslLowerer {
     return `(var ${n})`;
   }
 
+  /**
+   * `determinant` 与 `inverse`（规范 8.5，只对方阵）。两个共用一段：
+   * 都是**按余子式展开**，2/3/4 阶不写三份公式。
+   *
+   * 摊平是列优先，所以 `A(row, col) = m[col*n + row]`。
+   *
+   *   det(A)      = Σ_col (-1)^col · A(0,col) · det(去掉第 0 行与第 col 列)
+   *   A⁻¹(row,col) = (-1)^(row+col) · det(去掉第 col 行与第 row 列) / det(A)
+   *
+   * 第二条是「伴随矩阵的转置除以行列式」那一句话的下标形式 —— 转置那一格容易写反，
+   * 所以门里查的是 `m * inverse(m) == 单位阵`，不是某个数（写反了单位阵就不对）。
+   */
+  matDetInv(name, m, n) {
+    const ct = 'real';
+    const A = (row, col) => m[col * n + row];
+    /* 递归的余子式行列式：`rows`/`cols` 是还留着的下标。 */
+    const det = (rows, cols) => {
+      if (rows.length === 1) return A(rows[0], cols[0]);
+      let sum = null;
+      for (let i = 0; i < cols.length; i++) {
+        const sub = det(rows.slice(1), cols.filter((_, j) => j !== i));
+        const p = this.let_(ct, `(bin "*" ${A(rows[0], cols[i])} ${sub})`);
+        const signed = i % 2 === 0 ? p : this.let_(ct, `(un "-" ${p})`);
+        sum = sum === null ? signed : this.let_(ct, `(bin "+" ${sum} ${signed})`);
+      }
+      return sum;
+    };
+    const all = [];
+    for (let i = 0; i < n; i++) all.push(i);
+    const d = det(all, all);
+    if (name === 'determinant') return [d];
+    const out = [];
+    for (let col = 0; col < n; col++) {
+      for (let row = 0; row < n; row++) {
+        const minor = det(all.filter((r) => r !== col), all.filter((c) => c !== row));
+        const signed = (row + col) % 2 === 0 ? minor : this.let_(ct, `(un "-" ${minor})`);
+        out.push(this.let_(ct, `(bin "/" ${signed} ${d})`));
+      }
+    }
+    return out;
+  }
+
   builtin(e) {
     const name = e.name;
     const ct = 'real';
@@ -443,7 +486,7 @@ class GlslLowerer {
       return args[0].map((c) => this.let_('bool', `(un "!" ${c})`));
     }
     const rm = GLSL_RMATH.get(name);
-    if (rm !== undefined) {
+    if (rm !== undefined && !(name === 'atan' && args.length === 2)) {
       const out = [];
       for (let i = 0; i < wide; i++) {
         const xs = args.map((_, k) => at(k, i)).join(' ');
@@ -591,6 +634,145 @@ class GlslLowerer {
         sub(mul(a[2], b[0]), mul(a[0], b[2])),
         sub(mul(a[0], b[1]), mul(a[1], b[0])),
       ];
+    }
+    /* ---- 第二十三片：8.1/8.3 剩下的标量几条 + 8.4 几何三条 + 8.5 矩阵五条 ---- */
+    if (name === 'atan' && args.length === 2) {
+      /* `atan(y, x)` 是**两参**那一支（规范 8.1），落到 `atan2`。
+       * 从前这儿把它当一参的 `atan` 发出去，方言当场骂「要 1 个参数」——
+       * 也就是说 `atan(y,x)` 一直是坏的，这一片才修上。 */
+      const out = [];
+      for (let i = 0; i < wide; i++) out.push(this.let_(ct, `(rmath "atan2" ${at(0, i)} ${at(1, i)})`));
+      return out;
+    }
+    if (name === 'exp2' || name === 'log2') {
+      /* 方言的 rmath 没有这两个（名单是「libm 与 Math.* 的交集里必然一致的那些」）。
+       * `exp2(x) = pow(2, x)`；`log2(x) = log(x) * (1/ln2)` —— 后者是各家 GLSL
+       * 实现常见的落法，不是我们自己发明的近似。 */
+      return args[0].map((c) => (name === 'exp2'
+        ? this.let_(ct, `(rmath "pow" (real 2.0) ${c})`)
+        : this.let_(ct, `(bin "*" (rmath "log" ${c}) (real 1.4426950408889634))`)));
+    }
+    if (name === 'trunc') {
+      /* 8.3：往**零**的方向截。`floor` 对负数是往下取，所以要分符号。 */
+      const out = [];
+      for (const c of args[0]) {
+        const nm = this.fresh('tr');
+        this.stmts.push(`(let ${nm} real (rmath "floor" ${c}))`);
+        this.stmts.push(`(if (bin "<" ${c} (real 0.0)) (do (set ${nm} (rmath "ceil" ${c}))))`);
+        out.push(`(var ${nm})`);
+      }
+      return out;
+    }
+    if (name === 'roundEven') {
+      /* 8.3：`roundEven` 是「一半的时候取偶」，与 C 的 `round`（一半往远离零）**不同**。
+       * 落法：f = x - floor(x)；f > 0.5 进位、f < 0.5 舍去、正好 0.5 时取偶。 */
+      const out = [];
+      for (const c of args[0]) {
+        const fl = this.let_(ct, `(rmath "floor" ${c})`);
+        const f = this.let_(ct, `(bin "-" ${c} ${fl})`);
+        const nm = this.fresh('re');
+        this.stmts.push(`(let ${nm} real ${fl})`);
+        this.stmts.push(`(if (bin ">" ${f} (real 0.5)) (do (set ${nm} (bin "+" ${fl} (real 1.0)))))`);
+        /* 正好 0.5：`floor` 是奇数就再进一格（`fmod(floor, 2) != 0`）。 */
+        const half = this.let_('bool', `(bin "==" ${f} (real 0.5))`);
+        const odd = this.let_('bool', `(bin "!=" (rmath "fmod" ${fl} (real 2.0)) (real 0.0))`);
+        this.stmts.push(`(if (bin "&&" ${half} ${odd}) (do (set ${nm} (bin "+" ${fl} (real 1.0)))))`);
+        out.push(`(var ${nm})`);
+      }
+      return out;
+    }
+    if (name === 'reflect') {
+      /* 8.4：`I - 2 * dot(N, I) * N`。 */
+      const I = args[0];
+      const N = args[1];
+      let d = null;
+      for (let i = 0; i < I.length; i++) {
+        const p = this.let_(ct, `(bin "*" ${N[i]} ${I[i]})`);
+        d = d === null ? p : this.let_(ct, `(bin "+" ${d} ${p})`);
+      }
+      const two = this.let_(ct, `(bin "*" (real 2.0) ${d})`);
+      return I.map((c, i) => {
+        const s = this.let_(ct, `(bin "*" ${two} ${N[i]})`);
+        return this.let_(ct, `(bin "-" ${c} ${s})`);
+      });
+    }
+    if (name === 'refract') {
+      /* 8.4 逐字：k = 1 - eta² (1 - dot(N,I)²)；k < 0 回全 0，否则
+       * `eta * I - (eta * dot(N,I) + sqrt(k)) * N`。 */
+      const I = args[0];
+      const N = args[1];
+      const eta = args[2][0];
+      let d = null;
+      for (let i = 0; i < I.length; i++) {
+        const p = this.let_(ct, `(bin "*" ${N[i]} ${I[i]})`);
+        d = d === null ? p : this.let_(ct, `(bin "+" ${d} ${p})`);
+      }
+      const dd = this.let_(ct, `(bin "*" ${d} ${d})`);
+      const one = this.let_(ct, `(bin "-" (real 1.0) ${dd})`);
+      const e2 = this.let_(ct, `(bin "*" ${eta} ${eta})`);
+      const k = this.let_(ct, `(bin "-" (real 1.0) (bin "*" ${e2} ${one}))`);
+      const neg = this.let_('bool', `(bin "<" ${k} (real 0.0))`);
+      const out = [];
+      for (let i = 0; i < I.length; i++) {
+        const nm = this.fresh('rf');
+        const ei = this.let_(ct, `(bin "*" ${eta} ${I[i]})`);
+        const ed = this.let_(ct, `(bin "*" ${eta} ${d})`);
+        const sk = this.let_(ct, `(rmath "sqrt" ${k})`);
+        const coef = this.let_(ct, `(bin "+" ${ed} ${sk})`);
+        const sub = this.let_(ct, `(bin "*" ${coef} ${N[i]})`);
+        this.stmts.push(`(let ${nm} real (bin "-" ${ei} ${sub}))`);
+        this.stmts.push(`(if ${neg} (do (set ${nm} (real 0.0))))`);
+        out.push(`(var ${nm})`);
+      }
+      return out;
+    }
+    if (name === 'faceforward') {
+      /* 8.4：`dot(Nref, I) < 0 ? N : -N`。 */
+      const N = args[0];
+      const I = args[1];
+      const Nref = args[2];
+      let d = null;
+      for (let i = 0; i < I.length; i++) {
+        const p = this.let_(ct, `(bin "*" ${Nref[i]} ${I[i]})`);
+        d = d === null ? p : this.let_(ct, `(bin "+" ${d} ${p})`);
+      }
+      const lt = this.let_('bool', `(bin "<" ${d} (real 0.0))`);
+      const out = [];
+      for (let i = 0; i < N.length; i++) {
+        const nm = this.fresh('ff');
+        this.stmts.push(`(let ${nm} real (un "-" ${N[i]}))`);
+        this.stmts.push(`(if ${lt} (do (set ${nm} ${N[i]})))`);
+        out.push(`(var ${nm})`);
+      }
+      return out;
+    }
+    if (name === 'matrixCompMult') {
+      /* 8.5：**逐格**乘，不是矩阵乘。摊平之后就是两串一格一格乘起来。 */
+      return args[0].map((c, i) => this.let_(ct, `(bin "*" ${c} ${args[1][i]})`));
+    }
+    if (name === 'outerProduct') {
+      /* 8.5：`c` 长 R、`r` 长 C，结果是 `matCxR`，第 col 列 = c * r[col]（列优先摊平）。 */
+      const c = args[0];
+      const r = args[1];
+      const out = [];
+      for (let col = 0; col < r.length; col++) {
+        for (let row = 0; row < c.length; row++) out.push(this.let_(ct, `(bin "*" ${c[row]} ${r[col]})`));
+      }
+      return out;
+    }
+    if (name === 'transpose') {
+      /* 8.5：`matCxR` -> `matRxC`。摊平之后就是换一个下标次序，一次乘法都不用。 */
+      const m = args[0];
+      const cols = e.args[0].ty.cols;
+      const rows = e.args[0].ty.rows;
+      const out = [];
+      for (let col = 0; col < rows; col++) {
+        for (let row = 0; row < cols; row++) out.push(m[row * rows + col]);
+      }
+      return out;
+    }
+    if (name === 'determinant' || name === 'inverse') {
+      return this.matDetInv(name, args[0], e.args[0].ty.cols);
     }
     glslNyi(`内建 ${name}`);
     return [];

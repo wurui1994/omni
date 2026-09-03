@@ -13,6 +13,7 @@
 //   stmt.js   —— 语句那一层的补全：`do while` 与 `switch`（第十九片）
 //   ops.js    —— 运算符补全：位运算、移位、`^^`、六种复合赋值（第二十片）
 //   mat.js    —— 非方阵 `matCxR`（第二十一片）
+//   fns.js    —— 内建补全：8.1/8.3 剩下几条 + 8.4 几何三条 + 8.5 矩阵五条（第二十三片）
 //   oracle.js —— 与**真 GL** 比像素（第十片；没有 python3+moderngl 就跳过）
 //
 //   node tests/glsl/run.js
@@ -23,7 +24,7 @@ import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const PARTS = ['parse.js', 'check.js', 'lower.js', 'render.js', 'bench.js',
-  'interp.js', 'raster.js', 'stmt.js', 'ops.js', 'mat.js', 'oracle.js'];
+  'interp.js', 'raster.js', 'stmt.js', 'ops.js', 'mat.js', 'fns.js', 'oracle.js'];
 
 let bad = 0;
 for (const p of PARTS) {
