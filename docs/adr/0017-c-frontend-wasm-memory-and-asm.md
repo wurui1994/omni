@@ -15493,6 +15493,42 @@ ours  .rdata:L.0@0+2  .data:$cl$0@16  .data:p@0+8  .data:s@8+8
 
 <!-- 第九刀第一百三十五片-END -->
 
+## 量：arm64-linux 上 `char` 是无符号的（下一片的尺子）
+
+第一百二十九片把 `__CHAR_UNSIGNED__` 这个宏摆对了，可那一格在 tcc 那边**同时是一条语言
+规矩**：`char` 真的变成无符号的。量过（探针不带任何 `#include`）：
+
+```c
+int b   = (int)(char)200;
+int sgn = ((char)-1) < 0;
+int mx  = (int)(char)127 + (int)(char)128;
+```
+
+```
+arm64-tcc（linux）  b=200  sgn=0  mx=255      <- char 是无符号的
+arm64-osx-tcc       b=-56  sgn=1  mx=-1
+arm64-win32-tcc     b=-56  sgn=1  mx=-1
+x86_64-tcc（linux） b=-56  sgn=1  mx=-1
+我们（arm64-linux） b=-56  sgn=1  mx=-1      <- 错在这儿
+```
+
+**只有 arm64-linux 一个目标**：`arm64-gen.c:41` 那个
+`#if !defined(TCC_TARGET_MACHO) && !defined(TCC_TARGET_PE)` 开出 `CHAR_IS_UNSIGNED`，
+`libtcc.c:889` 把它变成 `s1->char_is_unsigned`，然后 tcc 在定基本类型那一步照它给
+`VT_UNSIGNED`——**没有**写 `signed`/`unsigned` 的那种 `char` 才受影响
+（`VT_DEFSIGN` 那一位就是「显式写过」的意思，我们这边同名同义）。
+
+所以下一片的活：
+
+1. `ctype.js` 里再立一格目标旋钮，与 `LDOUBLE_SIZE`/`WCHAR_IS_SHORT` 同一个办法
+   （`lowerC`/`lowerCNative` 进门时钉一次）：`CHAR_IS_UNSIGNED = arch === 'arm64' && os === 'linux'`
+2. 落点是**定基本类型那一步**（`parseBtype` 里 `VT_BYTE` 那一支）：没有 `VT_DEFSIGN`
+   就补 `VT_UNSIGNED`。`TY_CHAR` 那个常量不能就地改 —— 它被一堆地方 import 着，而且
+   串字面量的元素类型、`char *` 那几个内建也用它，得先一处一处看清哪些该跟着变
+3. 门：三个目标各量上面那三个数（`sgn`/`b`/`mx`），期望值从尺子读，不写死
+
+<!-- 量：arm64-linux 的 char-END -->
+
 
 
 
