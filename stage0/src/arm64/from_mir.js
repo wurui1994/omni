@@ -1206,7 +1206,16 @@ export function genModule(mod) {
     /* `local: true`（第九十二片）：串常量的编号是**这个模块里**的序号，两个 `.o` 各有
      * 一个 `omni_str_0` —— 当外部符号的话一链就撞。局部符号里各归各家。
      * `size` 是带那个 0 的长度（第一百二十片那一格）。 */
-    dataSyms.push({ name, off, sect: 3, size: raw.length + sal, local: true, seq: mod.strSeq[r] });
+    dataSyms.push({
+      name,
+      /* 符号表里的名字是 `L.N`（第一百三十四片，与 x64 那一份同一条）。 */
+      sym: mod.strSym[r],
+      off,
+      sect: 3,
+      size: raw.length + sal,
+      local: true,
+      seq: mod.strSeq[r],
+    });
     for (let k = 0; k < raw.length; k++) roBytes[off + k] = raw[k];
     /* 结尾那一格是**一个元素宽**的零（`wstrConst` 不加它）—— 整块预置成 0，不用再补。 */
   }

@@ -888,6 +888,11 @@ export class MirModule {
      * 靠的是同一格计数，所以这一格与 `globalSeq` 是**同一个轴**上的号。缺省
      * `undefined`：没有号的排在有号的后面（旧的次序，别的前端不受影响）。 */
     this.strSeq = [];
+    /* 与常量池同下标的「写进符号表的那个名字」（第九刀第一百三十四片）：不给就用
+     * `omni_str_<下标>`。tcc 那边这些是**匿名符号**，名字是 `L.N`（`tccpp.c:624-626`），
+     * N 是一根与匿名 struct 标签、匿名成员共用的游标 —— 见 C 前端的 `anonSym`。
+     * 与 `globalSym` 同一种性质：身份归下标，名字归这一格。 */
+    this.strSym = [];
     /* 与 globals 同下标的「这一块是第几个领到字节的」（第九刀第一百二十五片）：
      * 见 `strSeq`。 */
     this.globalSeq = [];
@@ -1039,6 +1044,12 @@ export class MirModule {
   markStrSeq(ref, seq) {
     if (this.consts.items[ref] === undefined) throw new Error(`mir: 没有 ${ref} 号常量`);
     this.strSeq[ref] = seq;
+  }
+
+  /** 这条串常量写进符号表的名字。见 `strSym` 头上那段。 */
+  markStrSym(ref, name) {
+    if (this.consts.items[ref] === undefined) throw new Error(`mir: 没有 ${ref} 号常量`);
+    if (name !== undefined) this.strSym[ref] = name;
   }
 
   /** 这个函数的名字是第几个被提到的。见 `funcSeq` 头上那段。 */

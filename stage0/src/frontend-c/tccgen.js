@@ -720,6 +720,17 @@ export class CGen {  /**
     /** 谁先领到只读节里的字节（第一百二十五片）：全局量与串常量共用这一格计数，
      * 于是只读节能按**声明的次序**摆（见 mir/rodata.js）。 */
     this.dataSeq = 0;
+    /** 匿名符号那根游标（第一百三十四片，tcc 的 `anon_sym`）：串常量在符号表里的名字是
+     * `L.N`，N 就是这一格。三处 `++`——没名字的 struct/union/enum **标签**、没名字的
+     * **成员**（嵌进去的匿名 struct/union，或者无名位域）、每一条领到符号的静态块
+     * （串常量与静态复合字面量）。起点是 0，于是每个目标的第一条串是几号完全由它自己
+     * 那份 `tccdefs.h` 里有几样匿名的东西决定（量过：linux 3 / osx 1 / win32 0）。
+     *
+     * **只在 `!pass1` 的时候数**：函数体走两遍，两遍紧挨着跑，所以第二遍那一趟数出来
+     * 正好是源码次序。文件作用域上 `pass1` 一直是 `false`。
+     *
+     * 起点**不在这儿给** —— 见下面 `__builtin_va_list` 那条 typedef 旁边那段。 */
+    this.anonSym = 0;
     /** @type {{off:number,bytes:number[]}[]} 攒着的 data 段（内存要等 dataOff 定了才能声明） */
     this.pendingData = [];
     /**
@@ -753,6 +764,20 @@ export class CGen {  /**
      * typedef —— 但形态取 `void *`：程序只把它当不透明的东西传给那几个内建，
      * 而我们的变参区就是一串 8 字节的格子，一个指针足够走完它（见 `vaBlock`）。 */
     this.typedefs.set('__builtin_va_list', mkPointer(TY_VOID));
+    /* 这条 typedef 的形态**要花掉几个匿名号**（第一百三十四片）。tcc 那份
+     * `__builtin_va_list` 是真的在 tccdefs.h 里解析的，里头的匿名 struct/union 各领一个
+     * `anon_sym`——于是同一个单元里第一条串常量的名字（`L.N`）跟着它走。量过
+     * （`include/tccdefs.h:188-238`，探针 `char *a = "x";`）：
+     *
+     *   x86_64 非 win32  `struct { …; union { … }; … } [1]`  匿名标签 1 + 匿名 union 2 = 3 -> `L.3`
+     *   arm64 osx/linux  `struct { … }`                      匿名标签 1                 -> `L.1`
+     *   win32（两种架构）`char *`                            一样匿名的都没有            -> `L.0`
+     *
+     * 我们这一份是 `void *`，一个匿名的都没有 —— 所以这儿照那份声明**该花的个数**把游标
+     * 推过去。这不是一张写死的表，是「我们这条 typedef 与 tcc 那条形态不同」这笔账的
+     * 另一面：等哪天 `__builtin_va_list` 真的按目标解析出来了，这三行就该删掉。 */
+    this.anonSym = (cpp.os ?? 'osx') === 'win32' ? 0
+      : (cpp.arch ?? 'arm64') === 'x86_64' ? 3 : 1;
     /* typedef 名是**普通标识符**（C11 6.2.3），所以它跟变量一样分作用域、而且能被
      * 同名的变量遮住（`mytype1 mytype2; mytype2 = 2;` —— tcctest.c:655 那两行）。
      * 于是这张表也是一叠：一层一个 Map，值是 `null` 表示「这一层有个普通标识符
@@ -1886,7 +1911,10 @@ export class CGen {  /**
   strConst(bytes) {
     const key = this.strKey();
     const hit = this.strRefs.get(key);
-    if (hit !== undefined) return hit;
+    if (hit !== undefined) {
+      this.anonStrName(hit);
+      return hit;
+    }
     let ascii = true;
     for (let i = 0; i < bytes.length; i++) {
       if (bytes.charCodeAt(i) > 127) { ascii = false; break; }
@@ -1897,8 +1925,22 @@ export class CGen {  /**
     for (let i = 0; i < bytes.length; i++) bs.push(bytes.charCodeAt(i) % 256);
     const ref = ascii ? this.mod.consts.strOnce(bytes) : this.mod.consts.bytesOnce(bs);
     this.mod.markStrSeq(ref, this.dataSeq++);
+    this.anonStrName(ref);
     this.strRefs.set(key, ref);
     return ref;
+  }
+
+  /**
+   * 一条串常量在符号表里的名字（第一百三十四片）：`L.N`，N 是 `anonSym` 那根游标。
+   *
+   * **只在 `!pass1` 的时候给**：函数体走两遍，第一遍摊字节、第二遍靠 `strRefs` 认回
+   * 同一个 `ref` —— 而匿名 struct 标签那几处也是只在第二遍数，两者要在同一趟里才排得
+   * 对。文件作用域上 `pass1` 一直是 `false`，所以那儿创建的当下就给。
+   */
+  anonStrName(ref) {
+    if (this.pass1) return;
+    if (this.mod.strSym[ref] !== undefined) return;
+    this.mod.markStrSym(ref, `L.${this.anonSym++}`);
   }
 
   /**
@@ -1974,7 +2016,10 @@ export class CGen {  /**
   wstrConst(vals) {
     const key = this.strKey();
     const hit = this.strRefs.get(key);
-    if (hit !== undefined) return hit;
+    if (hit !== undefined) {
+      this.anonStrName(hit);
+      return hit;
+    }
     const w = wcharSize();
     const raw = [];
     /* 结尾那一格**不在这儿加**（第一百二十三片）：摆字节的那一步一律补「一个元素宽」
@@ -1990,6 +2035,7 @@ export class CGen {  /**
      * 分不出来 —— 所以这一格记在 MIR 的 `strAlign` 上，由造它的人说。 */
     this.mod.markStrAlign(ref, w);
     this.mod.markStrSeq(ref, this.dataSeq++);
+    this.anonStrName(ref);
     this.strRefs.set(key, ref);
     return ref;
   }
@@ -5249,6 +5295,9 @@ export class CGen {  /**
       anon: name === null,   // 没有 tag —— 「匿名成员」那一条要问它
       fields: null, size: 0, align: 1,
     };
+    /* 没名字的标签领一个匿名号（第一百三十四片，`tccgen.c:4490`）—— 串常量的 `L.N`
+     * 与它共用这根游标，所以这一格数错了、名字就全错一位。 */
+    if (name === null && !this.pass1) this.anonSym++;
     if (name !== null) this.tagStack[this.tagStack.length - 1].set(name, info);
     return info;
   }
@@ -5374,6 +5423,10 @@ export class CGen {  /**
         if (base.ref.fields === null) this.err(`field has incomplete type '${typeText(base)}'`);
         if (!base.ref.anon) { this.skip(SEMI); continue; }
         for (const f of base.ref.fields) dup(f.name);
+        /* 匿名成员再领一个号（第一百三十四片，`tccgen.c:4675`）—— 于是一个匿名 struct
+         * 成员一共吃**两个**号：标签一个（上面 `tagOf`）、成员一个。量过 win32：
+         * `struct B { int x; struct { int u; }; int y; };` 之后第一条串是 `L.2`。 */
+        if (!this.pass1) this.anonSym++;
         mems.push({ name: null, ty: base, bits: -1, anon: true, aligned: 0, packed: false });
         this.skip(SEMI);
         continue;
@@ -5412,6 +5465,10 @@ export class CGen {  /**
         if (fname === null && bits < 0) {
           this.err('declaration does not declare anything');
         }
+        /* 无名位域（`int : 3;`）也是一个匿名成员，领**一个**号（第一百三十四片，
+         * `tccgen.c:4672-4676` 那个 `bit_size >= 0`）—— 它没有标签，所以只有一个。
+         * 量过 win32：`struct A { int x; int :3; int y; };` 之后第一条串是 `L.1`。 */
+        if (fname === null && !this.pass1) this.anonSym++;
         if (fname !== null) {
           dup(fname);
           if (isStruct(fty.t) && fty.ref.fields === null) {

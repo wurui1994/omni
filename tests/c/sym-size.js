@@ -110,9 +110,10 @@ char tab[40];
 struct P { int a; char b; } p;
 int arr[7] = {1};
 struct Q { int x; } wide[2] __attribute__((aligned(16)));
+char *lit = "hi";
 int f(int a){ static int n = 5; static char pad[3]; return a+1+n+pad[0]; }
 static int q(int a){ static int n; return a-1+n; }
-int main(void){return s[0]+f(g)+q(arr[0])+tab[0]+p.a+(int)big+wide[0].x;}
+int main(void){return s[0]+f(g)+q(arr[0])+tab[0]+p.a+(int)big+wide[0].x+lit[0];}
 `;
 
 const c = join(OUT, 'a.c');

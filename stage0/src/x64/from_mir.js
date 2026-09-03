@@ -1487,7 +1487,18 @@ export function genModule(mod, opts) {
     /* `local: true`（第九十二片，与 arm64 那一份同一条）：编号是模块内的序号，
      * 当外部符号的话两个 `.o` 各有一个 `omni_str_0`，一链就撞。
      * `size` 是带那个 0 的长度（第一百二十片那一格，tcc 的 `L.N` 也这么记）。 */
-    dataSyms.push({ name, off, sect: 3, size: raw.length + sal, local: true, seq: mod.strSeq[r] });
+    dataSyms.push({
+      name,
+      /* 符号表里的名字是 `L.N`（第一百三十四片）：tcc 那边串常量是**匿名符号**，
+       * N 是一根与匿名 struct 标签共用的游标。身份还是 `omni_str_<下标>` —— 重定位
+       * 按它找，而 `L.N` 在同一份 `.o` 里也不保证唯一（两个单元各有一个 `L.0`）。 */
+      sym: mod.strSym[r],
+      off,
+      sect: 3,
+      size: raw.length + sal,
+      local: true,
+      seq: mod.strSeq[r],
+    });
     for (let k = 0; k < raw.length; k++) roBytes[off + k] = raw[k];
     /* 结尾那一格是**一个元素宽**的零（`wstrConst` 不加它）—— 整块预置成 0，不用再补。 */
   }
