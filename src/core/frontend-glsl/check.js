@@ -155,12 +155,17 @@ const GLSL_BUILTINS = new Map([
   /* 几何那三条（规范 8.4）：形状与 `gen1`/`gen3` 不同 —— 都要求实参**同型**，
    * `refract` 的第三个是标量。 */
   ['reflect', 'geo2'], ['faceforward', 'geo3'], ['refract', 'refr'],
+  /* `isnan`/`isinf`（规范 8.3）：一个泛型参数，回**同宽的 bool** —— `float -> bool`、
+   * `vecN -> bvecN`。所以单开一格 `gen1b`，不能混进 `gen1`（那一格回的是原型）。
+   * 从 `grapheq.glsl` 那 772 行里量出来的：`isnan` 7 次、`isinf` 5 次，是那份真实
+   * 着色器最要紧的缺口。 */
+  ['isnan', 'gen1b'], ['isinf', 'gen1b'],
 ]);
 
 /** `atan` 与 `step` 的第一个参数也可以是标量而第二个是向量吗 —— GLSL 里可以，这儿也收。 */
 function glslGenType(name, tys, node, err) {
   const kind = GLSL_BUILTINS.get(name);
-  const want = kind === 'gen1' || kind === 'len' ? 1
+  const want = kind === 'gen1' || kind === 'gen1b' || kind === 'len' ? 1
     : kind === 'gen3' || kind === 'geo3' || kind === 'refr' ? 3 : 2;
   if (tys.length !== want) {
     throw err(node, `${name} 要 ${want} 个实参，给了 ${tys.length}`);
@@ -211,6 +216,8 @@ function glslGenType(name, tys, node, err) {
   }
   /* `gen1` 的那一个参数是标量时回标量；`gen2`/`gen3` 的第一个参数定形状。 */
   if (kind === 'gen1') return gen;
+  /* `gen1b`：形状照旧，底类型换成 bool（`float -> bool`、`vecN -> bvecN`）。 */
+  if (kind === 'gen1b') return gen.k === 'vec' ? glslVec(gen.n, 'bool') : GLSL_BOOL;
   const first = tys[0];
   if (first.k === 'vec') return first;
   return gen;

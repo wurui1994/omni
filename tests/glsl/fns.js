@@ -275,5 +275,28 @@ rejects('out 形参不做隐式转换', `
 void fill(out float x) { x = 1.0; }
 float probe(int k) { vec2 v = vec2(0.0); fill(v); return 0.0; }`, '要正好是 float');
 
+/* ---- 九、`isnan` / `isinf`（8.3）—— `grapheq.glsl` 那 772 行最要紧的缺口 ---------
+ *
+ * NaN/Inf 从哪来：**方言不提供造它们的办法**（除法对 0 是报错的），所以从函数值里来 ——
+ * `sqrt(-1.0)` 出 NaN、`-log(0.0)` 出 +Inf。三条腿都得同意这两个入口。
+ *
+ * 落法只用已有算符：`isnan(x)` = `x != x`、`isinf(x)` = `x == x && (x-x) != 0`。
+ * 后一条**没有**写成「|x| > 最大有限值」—— 方言的 real 是 f64、GLSL 的 highp float 是
+ * f32，那个阈值在两种宽度下不是同一个数。 */
+
+probe('isnan / isinf（标量与向量）', `
+float probe(int k) {
+  float nan = sqrt(-1.0);
+  float inf = -log(0.0);
+  bvec2 v = isnan(vec2(nan, 1.0));
+  return (isnan(nan) ? 1.0 : 0.0) + (isnan(1.0) ? 2.0 : 0.0)
+    + (isinf(inf) ? 4.0 : 0.0) + (isinf(1.0) ? 8.0 : 0.0)
+    + (isinf(nan) ? 16.0 : 0.0) + (isnan(inf) ? 32.0 : 0.0)
+    + (any(v) ? 64.0 : 0.0) + (all(v) ? 128.0 : 0.0);
+}`, [0], () => 1 + 4 + 64);
+
+rejects('isnan 要 1 个实参', `
+float probe(int k) { return isnan(1.0, 2.0) ? 1.0 : 0.0; }`, '要 1 个实参');
+
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail > 0 ? 1 : 0);

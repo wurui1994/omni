@@ -498,6 +498,28 @@ class GlslLowerer {
     if (name === 'not') {
       return args[0].map((c) => this.let_('bool', `(un "!" ${c})`));
     }
+    /* `isnan`/`isinf`（规范 8.3）。两条都只用**已有的算符**，方言一个新算子都不加：
+     *
+     *   isnan(x) = x != x
+     *   isinf(x) = x == x && (x - x) != 0
+     *
+     * 第二条的读法：有限数减自己是 0；±Inf 减自己是 NaN（`!= 0` 成立）；NaN 被前一半
+     * 挡掉。**特意不写成 `|x| > 最大有限值`** —— 方言的 `real` 是 f64、GLSL 的 highp
+     * float 是 f32，那个阈值在两种宽度下不是同一个数，而上面这两条在任何宽度上都成立。
+     *
+     * 造 NaN/Inf 的办法这一层不提供（方言的除法对 0 是报错的，见 `04_div_zero`）——
+     * 它们从外面（uniform、越界的 `log`/`sqrt` 之类）进来。 */
+    if (name === 'isnan') {
+      return args[0].map((c) => this.let_('bool', `(bin "!=" ${c} ${c})`));
+    }
+    if (name === 'isinf') {
+      return args[0].map((c) => {
+        const d = this.let_(ct, `(bin "-" ${c} ${c})`);
+        const ord = this.let_('bool', `(bin "==" ${c} ${c})`);
+        const nz = this.let_('bool', `(bin "!=" ${d} (real 0.0))`);
+        return this.let_('bool', `(bin "&&" ${ord} ${nz})`);
+      });
+    }
     const rm = GLSL_RMATH.get(name);
     if (rm !== undefined && !(name === 'atan' && args.length === 2)) {
       const out = [];
