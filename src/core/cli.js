@@ -132,6 +132,11 @@ function defArgs(argv) {
  * 自带的那一份排后面 —— tcc 的次序（`-isystem` 在选项里就加，
  * `CONFIG_TCC_SYSINCLUDEPATHS` 是 `tcc_set_output_type` 里补的，libtcc.c:973）。
  * `-nostdinc` 只掐掉自带的那一份，`-isystem` 给的照留。
+ *
+ * `--tcc-lib-dir DIR` 是 tcc 的 `-B` 那一格（tcc 里叫 `tcc_lib_path`）：它**换掉**
+ * 自带那一份，而不是排在它前面。这一格要紧 —— tcc 那边 `{B}/include` 就是它自带的
+ * 那一份，给了 `-B` 就没有别的了；我们从前把 `-B` 翻成 `-isystem DIR/include`，
+ * 于是 `src/include` 还赖在搜索序的尾巴上，「只有我们有的头」我们找得到而 tcc 找不到。
  */
 function sysIncDirs(argv) {
   const out = [];
@@ -144,7 +149,9 @@ function sysIncDirs(argv) {
     }
     i++;
   }
-  if (!argv.includes('-nostdinc')) out.push(...cSysInclude());
+  const bi = argv.indexOf('--tcc-lib-dir');
+  if (bi >= 0 && argv[bi + 1] === undefined) throw new OmniError('--tcc-lib-dir 后面要一个目录');
+  if (!argv.includes('-nostdinc')) out.push(...cSysInclude(bi >= 0 ? argv[bi + 1] : undefined));
   return out;
 }
 
@@ -225,9 +232,14 @@ function sdkUsrLib() {
  * 相对程序镜像固定两级上去，于是不依赖当前工作目录），**本机 SDK 的
  * `/usr/include` 在后**（第八十八片）。`-isystem` 给的排在这两段前头，
  * `-nostdinc` 把这两段一起掐掉。
+ *
+ * `libDir` 给了就**换掉**自带那一份（`libDir/include`）—— 那是 tcc 的 `-B`
+ * （`tcc_lib_path`）：tcc 里 `{B}/include` 就是自带那一份的位置，不是多一条。
+ * SDK 那一段照留（tcc 的 `CONFIG_TCC_SYSINCLUDEPATHS` 也不受 `-B` 影响）。
  */
-function cSysInclude() {
-  const out = [join(installDir(), '..', '..', 'include')];
+function cSysInclude(libDir) {
+  const out = [libDir === undefined ? join(installDir(), '..', '..', 'include')
+    : join(libDir, 'include')];
   const sdk = sdkUsrInclude();
   if (sdk !== null) out.push(sdk);
   return out;
@@ -322,7 +334,7 @@ function depTarget(file) {
  * 一份 `.c` -> MIR（ADR-0017 第六刀）。宿主回调与 `cppText` 同一套。
  * 良构检查在这里做完 —— 前端刚长出来，让 verifier 先骂比让解释器崩掉好查。
  */
-function cMir(path, incs, defs, args) {
+function cMir(path, incs, defs, args, sysIncs) {
   const { mod, warnings } = lowerC(path, readText(path), {
     readFile: (p) => {
       try {
@@ -332,7 +344,7 @@ function cMir(path, incs, defs, args) {
       }
     },
     includeDirs: incs,
-    sysIncludeDirs: cSysInclude(),
+    sysIncludeDirs: sysIncs ?? cSysInclude(),
     dirname,
     join,
   }, defs.map(([name, body]) => ({ name, body })), args);
@@ -404,7 +416,7 @@ function ehFrameOf(blob, arch, os) {
  *
  * `arch` 给 `x86_64` 就在 Apple Silicon 上交叉出 Rosetta 能跑的码，不给按本机。
  */
-function cObj(path, out, arch, incs, defs, fmt, os) {
+function cObj(path, out, arch, incs, defs, fmt, os, sysIncs) {
   const { mod, warnings } = lowerCNative(path, readText(path), {
     readFile: (p) => {
       try {
@@ -414,7 +426,7 @@ function cObj(path, out, arch, incs, defs, fmt, os) {
       }
     },
     includeDirs: incs,
-    sysIncludeDirs: cSysInclude(),
+    sysIncludeDirs: sysIncs ?? cSysInclude(),
     dirname,
     join,
     /* 预定义宏里目标 CPU 那三条跟着 `--arch` 走（第一百〇二片）：`__x86_64__` 一变，
@@ -2478,12 +2490,12 @@ function main(argv) {
     // **退出码就是 C 的 `main` 的返回值**，与 `tcc -run` 逐条相同，那也是这一刀的 oracle。
     case 'c-mir': {
       const { flags, prog } = cSplitArgs(rest);
-      stdout(printMir(cMir(path, incDirs(flags), defArgs(flags), prog)));
+      stdout(printMir(cMir(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags))));
       return 0;
     }
     case 'c-run': {
       const { flags, prog } = cSplitArgs(rest);
-      const mod = cMir(path, incDirs(flags), defArgs(flags), prog);
+      const mod = cMir(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags));
       return runMirModule({ structs: [], enums: [], classes: [], js: false }, mod);
     }
     /* `c-obj`：C -> 真机器码 -> 一个 `.o`（第九刀第二十六片）。
@@ -2500,7 +2512,7 @@ function main(argv) {
       const fmt = fi >= 0 ? flags[fi + 1] : 'macho';
       const si = flags.indexOf('--os');
       const os = si >= 0 ? flags[si + 1] : 'osx';
-      stdout(`${cObj(path, out, arch, incDirs(flags), defArgs(flags), fmt, os)}\n`);
+      stdout(`${cObj(path, out, arch, incDirs(flags), defArgs(flags), fmt, os, sysIncDirs(flags))}\n`);
       return 0;
     }
     /* `elf-r`：几个 `.o` 并成一个 `.o`，就是 `tcc -r`（第九刀第四十二片）。

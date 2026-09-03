@@ -15712,6 +15712,61 @@ x64 那一份是同一条（`BRANCH`），一起改。
 
 <!-- 第九刀第一百三十八片-END -->
 
+## 落地：第九刀第一百三十九片
+
+**`-B` 在 `-c` 那条路上整个丢了。** 本来是去收一笔小账（第一百三十七片记的
+「`src/include` 还赖在搜索序尾巴上」），一查发现底下压着一件大的。
+
+### 量出来的
+
+```
+$ node src/core/cli.js cpp  /tmp/isys/m.c -isystem /tmp/isys/inc   # -E 那条路
+# 1 "/tmp/isys/inc/only.h" 1
+int main(void){return 42;}
+$ node src/core/cli.js c mir /tmp/isys/m.c -isystem /tmp/isys/inc   # 编译那条路
+/tmp/isys/m.c:1: error: include file 'only.h' not found
+```
+
+`cli.js` 里 `cppText` 收一个 `sysIncs` 参数（`c cpp` 那一路递 `sysIncDirs(rest)`），
+可 `cMir`/`cObj` **没有**这个参数 —— 它们的 `sysIncludeDirs` 是写死的 `cSysInclude()`，
+只认 `-I`。而 `omni c tcc` 把 `-B DIR` 翻成 `-isystem DIR/include`，
+于是 `-B` 在 `-c`/`-run` 上**一格都没落下**。
+
+`-B` 正是十几处门给尺子指 tinycc 源码树用的那一格。它们没红，因为
+`tests/c/run.js` 那一组只称 `-E`；而 `-c` 那些门比的是我们自己两次运行的字节，
+两边都少了同一个目录，于是一致。**「同一串 argv 喂两边」还不够 —— 那串 argv
+里的每一格都得有人称它到没到。**
+
+### 改的三处
+
+- `cMir(path, incs, defs, args, sysIncs)` 与 `cObj(…, sysIncs)` 多收一格，
+  三个调用点递 `sysIncDirs(flags)`。于是 `-isystem`/`-nostdinc` 在编译那条路上
+  与 `-E` 那条路**同一套**。
+- `cSysInclude(libDir)` 收一个可选的目录：给了就**换掉**自带那一份
+  （`libDir/include`），SDK 那一段照留 —— 那正是 tcc 的形状（`{B}/include`
+  就是自带那一份的位置，`CONFIG_TCC_SYSINCLUDEPATHS` 不受 `-B` 影响）。
+  `sysIncDirs` 认一格新开关 `--tcc-lib-dir DIR` 来递它。
+- `cmd-tcc.js`：`-B DIR` 递 `--tcc-lib-dir DIR`，不再是 `-isystem DIR/include`。
+  这**同时**收掉第一百三十七片那笔小账 —— `src/include` 不再赖在尾巴上。
+
+### 门
+
+新的一门 `tests/c/inc-path.js`（**4/0**），四条，两边喂同一串 argv：
+
+- `-isystem` 在 `-run`（编译并跑）上生效 —— 退出码与 stdout 都与尺子相同
+- `-I` 在 `-run` 上生效（**对照**：它一直是通的，所以问题在「系统头」这一格）
+- `-B DIR` 在 `-c` 上生效（`{B}/include` 里的头找得到）
+- 一个头目录都不给，**两边都得找不到** —— 没有这一条，前三条可能只是「我们到处乱找」
+
+把 `cli.js` 与 `cmd-tcc.js` 那两处改动 `git stash` 掉再跑这一门：**2/2 红**，
+红在头两条对应的那两格上。这就是它该有的样子。
+
+其余：`tests/cli/tree.js` 里那条写着旧形状的断言改成新的（**41/0**）。
+`tests/c/run.js` 207/0/1 skip、`rela-text` 24/0/0、`native-gen` 83/0、
+`selfobj` 25/0、`selfsrc` 13/0、`tcc-obj` 照旧 0 字节相同 / 21 容器相同 / 89 不同。
+
+<!-- 第九刀第一百三十九片-END -->
+
 
 
 

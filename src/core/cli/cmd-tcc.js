@@ -91,22 +91,23 @@ export function tccTranslate(argv, err) {
   const one = (n) => (opts.has(n) ? opts.get(n)[0] : undefined);
   const all = (n) => opts.get(n) ?? [];
   const tgt = targetOf(one('-b'));
-  /** `-B DIR` 化出来的那一个系统头目录（`DIR/include`），没给就是 `null`。 */
+  /** `-B DIR` 那一格（tcc 里叫 `tcc_lib_path`），没给就是 `null`。 */
   let passB = null;
 
   /* `-B DIR`：tcc 拿它当「tcc 自己那一套住在哪儿」——`{B}/include` 与 `{B}/libtcc1.a`。
    *
-   * 量过搜索序（ADR-0018 那一节）：`-I` 与 `-isystem` 都**压过** `{B}/include`。而我们
-   * 这边 `-isystem` 同样压过自带的 `src/include`（`cli.js` 的 `cSysInclude` 头上写着）——
-   * 两边方向一致，所以 `-B DIR` 转成 `-isystem DIR/include` 就落在对的位置上。
+   * 量过搜索序（ADR-0018 那一节）：`-I` 与 `-isystem` 都**压过** `{B}/include`，
+   * 而 `{B}/include` **就是** tcc 自带那一份的位置 —— 给了 `-B` 就没有别的自带头了。
+   * 所以它对应的不是「多一条 `-isystem`」，而是「把自带那一份换掉」：
+   * 递 `--tcc-lib-dir DIR`，由 `cli.js` 的 `cSysInclude(DIR)` 落地。
    *
-   * 留着的一处差别，写在明处：tcc 那边 `{B}/include` **就是**它自带的那一份，给了 `-B`
-   * 就没有别的了；我们这边 `src/include` 还在搜索序的尾巴上。于是「两边都有的头」走
-   * `-B` 那一份（对），「只有我们有的头」我们还找得到、tcc 找不到（差别）。要抹掉这一格
-   * 得让 `cSysInclude()` 能被换掉，那是 cli.js 那一侧的事，不在这一份里。 */
+   * 从前这儿翻成 `-isystem DIR/include`，两处错：一、`src/include` 还赖在搜索序尾巴上
+   * （「只有我们有的头」我们找得到而 tcc 找不到）；二、`-c` 那一路**根本不读 `-isystem`**
+   * （`c-obj` 只收 `-I`），于是 `-B` 在最要紧的那条路上整个丢了 —— 量出来了，见 ADR-0017
+   * 第一百三十九片。 */
   if (one('-B') !== undefined) {
     const b = one('-B');
-    passB = `${b.endsWith('/') ? b.slice(0, -1) : b}/include`;
+    passB = b.endsWith('/') ? b.slice(0, -1) : b;
   }
 
   /* 出来的 argv 用 omni 的规范拼法（`--arch`/`--os`/`--format`），因为底下那几段实现
@@ -121,8 +122,9 @@ export function tccTranslate(argv, err) {
      * `-DA=1 -UA` 与 `-UA -DA=1` 结果相反，`-dM` 也照命令行次序印出来
      * （量过，`dm-order` 那道门称的就是这一格）。攒成两堆就把这件事弄丢了。 */
     for (const [n, v] of defs) push(n, v);
-    /* `-B` 化出来的那一个排在**最后**：量过 tcc，`-I` 与 `-isystem` 都压过 `{B}/include`。 */
-    if (passB !== null) push('-isystem', passB);
+    /* `-B` 那一格**换掉**自带的系统头目录，所以它不是一条 `-isystem`
+     * （`-I`/`-isystem` 照旧压过它，那由 `cli.js` 的次序保证）。 */
+    if (passB !== null) push('--tcc-lib-dir', passB);
     if (has('-nostdinc')) push('-nostdinc');
   };
   const passTarget = () => {

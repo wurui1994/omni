@@ -212,9 +212,14 @@ eq('还没覆盖的命令回 null', planForC('emit-js', 'a.omni', ['a.omni'], []
  *      所以它自己也得有人称。 */
 {
   const r = tccTranslate(['-B', '/t', '-c', 'x.c', '-o', 'x.o'], err);
-  eq('-c 翻成 c-obj，-B 化成 DIR/include 的 -isystem（排在最后）',
+  /* `-B DIR` 递的是 `--tcc-lib-dir DIR`，**不是** `-isystem DIR/include`：
+   * tcc 那边 `{B}/include` 就是自带那一份的位置，给了 `-B` 就没有别的自带头了，
+   * 所以它是「换掉」而不是「多一条」。从前翻成 `-isystem` 还有第二个毛病 ——
+   * `c-obj` 那条路根本不读 `-isystem`，于是 `-B` 在 `-c` 上整个丢了
+   * （ADR-0017 第一百三十九片量的就是这一格）。 */
+  eq('-c 翻成 c-obj，-B 递成 --tcc-lib-dir（换掉自带的系统头，不是多一条 -isystem）',
     [r.key, r.argv],
-    ['c-obj', ['x.c', '-o', 'x.o', '-isystem', '/t/include',
+    ['c-obj', ['x.c', '-o', 'x.o', '--tcc-lib-dir', '/t',
       '--arch', 'arm64', '--os', 'osx', '--format', 'elf']]);
 }
 {
