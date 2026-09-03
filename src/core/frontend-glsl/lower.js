@@ -1043,18 +1043,21 @@ export function glslTriProgram(vertMod, fragMod, w, h, uni) {
      *
      * 判据要**对边的方向是奇的**：方向反过来结论就反过来。这样两个共享边的三角形
      * （绕向都归一之后，那条边在两边的方向正好相反）里恰好一个认领它 —— 不重不漏。
-     * 用的是常见的那一套：`sdy > 0`，或者 `sdy == 0 && sdx < 0`。
      *
-     * **哪一侧归谁与 GL 是否一致，还没量**（要一台有 GL 的机器）。能保证的是
-     * 「不重不漏」——那是填充规则的定义性性质，不用 GL 也验得了（门里那条方块用例）。
-     * 与 GL 差一个整体翻转的可能性留着，写在明处。
+     * 方向是**量出来的**（ADR-0019 第十一片）：拿一个斜边穿过画布的三角形与真 GL 比，
+     * 斜边上那 16 个像素中心 GL 判**在外**。所以判据是
+     * `sdy < 0`，或者 `sdy == 0 && sdx > 0` —— 与第九片写的正好反一个方向。
+     * 第九片当时明写着「差一个整体翻转的可能性留着」，这一片把它量掉了。
+     *
+     * 注意这一格对齐的是**本机那台 GL**（Apple M1）。GL 规范只要求「边上的样本
+     * 恰好归一个三角形」，没规定归哪个 —— 所以 llvmpipe 那边要再量一次。
      *
      * `sdx`/`sdy` 乘了 `sgn`：绕向归一化只改了 `e` 的符号，边的方向没改 ——
      * 不跟着乘的话，同一片像素在两种绕向下会得到不同的归属。 */
     s.push(`    (let s${j}dx real (bin "*" (var sgn) (bin "-" (var x${b2}) (var x${a2}))))`);
     s.push(`    (let s${j}dy real (bin "*" (var sgn) (bin "-" (var y${b2}) (var y${a2}))))`);
-    s.push(`    (let tl${j} bool (bin ">" (var s${j}dy) (real 0.0)))`);
-    s.push(`    (if (bin "&&" (bin "==" (var s${j}dy) (real 0.0)) (bin "<" (var s${j}dx) (real 0.0)))`
+    s.push(`    (let tl${j} bool (bin "<" (var s${j}dy) (real 0.0)))`);
+    s.push(`    (if (bin "&&" (bin "==" (var s${j}dy) (real 0.0)) (bin ">" (var s${j}dx) (real 0.0)))`
       + ` (do (set tl${j} (bool true))))`);
   }
   s.push(`    (let c ${glslStructName(4)} (new ${glslStructName(4)}))`);

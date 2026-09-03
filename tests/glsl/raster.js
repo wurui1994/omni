@@ -103,7 +103,7 @@ function coverOf(pts, w, h) {
           px - win[a][0], py - win[a][1]);
         const sdx = sgn * (win[b][0] - win[a][0]);
         const sdy = sgn * (win[b][1] - win[a][1]);
-        const tl = sdy > 0 || (sdy === 0 && sdx < 0);
+        const tl = sdy < 0 || (sdy === 0 && sdx > 0);
         if (!(e > 0 || (tl && e === 0))) inside = false;
       }
       if (inside) set.add(`${x},${y}`);
