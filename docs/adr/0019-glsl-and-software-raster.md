@@ -884,6 +884,21 @@ SIMD（一次 8 个像素），框架占比高得多；在我们这个**标量**
 决策一当时写的「SoA 化就是把这个循环的内核换掉」——现在能说得更准：**换内核之前，
 方言得先有掩码与 select**。这一句是量出来的，不是估的。
 
+### 那一刀要动哪几处（量过的施工图）
+
+`VecSplat`/`VecLit`/`VecLane`/`VecHSum` 与 `Bin(vec)` 的**消费者一共七处**
+（`grep -c 'VecSplat|VecLane|VecLit|VecHSum'`）：
+
+- `sexpr/lower.js` —— 造（方言 → OIR），也是「挡住比较与 select」那两句的所在
+- `hir/types.js` —— 类型与零值（`vec` 的零值是 `VecSplat(elem 的零)`）
+- `mir/from_oir.js` —— OIR → MIR，下游是 x64 / arm64 / wasm / `interp --mir`
+- `backend-c/emit.js`、`backend-js/emit.js`、`backend-llvm/emit.js`（后者 23 处提到 vec）
+- `interp/eval.js` + `interp/builtin.js`
+
+所以「动六条腿」这句话量准了：**七个文件**，而且每一处都要为 `vec<bool,N>` 这个新类型
+决定表示（C 那边大概是整数掩码、LLVM 那边是 `<N x i1>`、JS 那边是数组）。
+这正是那两句注释说的「要先在六个执行器上定好语义」——不是随手能加的一格。
+
 <!-- 量：SoA 要方言长出什么-END -->
 
 ## 还没定的（下一步按这个顺序）
