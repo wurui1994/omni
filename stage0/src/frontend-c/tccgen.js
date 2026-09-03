@@ -3163,6 +3163,13 @@ export class CGen {  /**
           if (this.mod.globalBlob[gno] === null) this.mod.setGlobalExtern(gno, 8, 8);
           fptr = this.f.emit(OP.GADDR, T_I64, REF_NONE, REF_NONE, gno);
         } else {
+          /* 取过地址这件事要记下来（第一百二十八片）：外部函数没有函数体的时候，
+           * 「调它」与「取它的地址」是两回事 —— 调用点那条 `PLT32`/`BRANCH26` 指着
+           * 未定义符号没问题，而 `adrp+add`/`lea` 指着未定义符号 Mach-O 不收
+           * （`fixup error (kind=arm64_adrp_lo12) … does not have address`，量过
+           * `33-ctype` 里的 `isalpha`）—— 那得过 GOT。所以取过地址的外部函数
+           * **还留着桩**（桩是本文件里定义的，`adrp` 够得着）。 */
+          if (this.native && !fn.defined) fn.addrTaken = true;
           fptr = this.native
             ? this.f.emit(OP.FADDR, T_I64, REF_NONE, REF_NONE, fn.no)
             : this.mod.consts.int(fnPtr(fn.no));
@@ -3761,8 +3768,43 @@ export class CGen {  /**
    * 一个变参区指针），所以一个桩装得下所有调用点。宿主那边的变参函数因此也从
    * 那块变参区里读实参 —— 与真的 ABI 是同一件事（见 `interp/libc.js` 的 `vaCursor`）。
    */
+  /**
+   * 这个外部函数**不用桩也能调**吗（第一百二十八片）。
+   *
+   * 桩除了转发，还顺手在做三件调用点现在不做的 ABI 事，所以这三类还得留着它：
+   *
+   * * 变参的 —— 其实它的调用点早就直接发 `CCALL`（`funcCall`），走到这儿只是收尾
+   * * 按值收发 struct 的 —— 桩里那两条 `todo` 是边界，得留在那儿报
+   * * 带 x87 `long double`（x86_64 的 16 字节那种）的实参或返回值 —— 要
+   *   `ARGMEM`+`MEMARG_F80` 与 `st0` 那一格
+   */
+  externSimple(info) {
+    if (info.variadic) return false;
+    /* 取过地址的留着桩 —— `adrp+add` 指不着未定义符号（见 `funcCall` 那一段）。 */
+    if (info.addrTaken === true) return false;
+    if (isStruct(info.ret.t)) return false;
+    if (this.ldRetAux(info.ret) !== 0) return false;
+    for (const p of info.params === null ? [] : info.params) {
+      if (isStruct(p.ty.t)) return false;
+      if (btype(p.ty.t) === VT_LDOUBLE && ldoubleSize() === 16) return false;
+    }
+    return true;
+  }
+
   externThunk(name, info) {
     const f = info.f;
+    /* native 上**没有桩这一说**（第一百二十八片）：调用点那条 `CALL` 现在按符号名发
+     * （第一百二十七片），所以没有函数体的被调者压根不需要代码 —— 打上「这个模块里
+     * 没有它」，两个后端跳过它，名字靠那条重定位进「未定义的外部符号」那一段。
+     * 量过 tcc 就是这样：`.rela.text` 里那条直接指着 `strlen`。
+     *
+     * 还留着桩的三类（`externSimple` 说的就是它们）：变参的、按值收发 struct 的、
+     * 带 x87 `long double` 的 —— 桩顺手在做那几件 ABI 事（`ARGMEM`+`MEMARG_F80`、
+     * `st0` 那一格、SysV 的 `al`），搬到调用点上是另一片。 */
+    if (this.native && this.externSimple(info)) {
+      f.setExtern();
+      return;
+    }
     /* native（第二十片）：桩**不能与它转发的符号同名** —— `_strlen` 里 `call _strlen`
      * 是无穷递归，症状是段错误，而现场（栈满）离原因（同名）很远。改名成 `$ext$strlen`，
      * 调用点照旧按函数号 CALL 它，它再 CCALL 真的 `strlen`。
@@ -7481,6 +7523,13 @@ export class CGen {  /**
       if (info.defined) continue;
       const f = info.f;
       if (f.count() !== 0) continue;
+      /* native 上不必改名、也不必发那条 `RET`（第一百二十八片）：打上「这个模块里没有
+       * 它」就行 —— 两个后端跳过它，一个字节的代码、一条符号都不出。声明了却没用过的
+       * 那些于此彻底消失，与 tcc 一样（它压根不为没引用过的声明发符号）。 */
+      if (this.native) {
+        f.setExtern();
+        continue;
+      }
       if (f.name === name) this.mod.renameFunc(info.no, `$ext$${name}`);
       /* 与 `externThunk` 那一条同一个理由（第九十二片）：这个名字每份 `.o` 里都有。 */
       f.local = true;

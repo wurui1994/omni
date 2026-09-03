@@ -1208,6 +1208,13 @@ export function genModule(mod) {
   const offsets = [];
   let i = 0;
   for (const f of mod.funcs) {
+    /* 这个模块里没有函数体（第一百二十八片，与 x64 那一份同一条）：一个字节都不出、
+     * 也不发符号。落点记 −1，调用它的那条重定位把名字带进「未定义的外部符号」那一段。 */
+    if (f.extern) {
+      offsets.push(-1);
+      i++;
+      continue;
+    }
     offsets.push(buf.pos);
     buf.place(labels[i]);
     new FnGen(mod, f, buf, labels, strSyms).gen();
@@ -1216,7 +1223,16 @@ export function genModule(mod) {
   const bytes = buf.bytes();
   const sizes = [];
   for (let k = 0; k < offsets.length; k++) {
-    sizes.push((k + 1 < offsets.length ? offsets[k + 1] : bytes.length) - offsets[k]);
+    if (offsets[k] < 0) {
+      sizes.push(0);
+      continue;
+    }
+    /* 「到下一个函数的落点」那一段（第一百二十片）—— 中间那些没有函数体的要跳过。 */
+    let end = bytes.length;
+    for (let m = k + 1; m < offsets.length; m++) {
+      if (offsets[m] >= 0) { end = offsets[m]; break; }
+    }
+    sizes.push(end - offsets[k]);
   }
   return {
     bytes,

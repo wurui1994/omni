@@ -348,18 +348,26 @@ function cMir(path, incs, defs, args) {
  */
 function relaSeq(blob) {
   const seq = {};
+  /* 「第几个函数」这根轴上只数**出过代码**的函数（第一百二十八片）：没有函数体的那些
+   * 落点记 −1，一个字节也不占，也不进 `.eh_frame`/`.pdata`。而 `after` 数的是初值落下
+   * 那一刻 `funcs` 有多长（里头可能有后来发现没函数体的），所以要折一下。 */
+  const nf = blob.offsets.length;
+  const emitted = [0];
+  for (let k = 0; k < nf; k++) emitted.push(emitted[k] + (blob.offsets[k] >= 0 ? 1 : 0));
+  const fold = (n) => emitted[Math.max(0, Math.min(n, nf))];
   if (blob.dataRelocs.length > 0) {
-    seq.data = Math.min(...blob.dataRelocs.map((r) => r.after ?? 0));
+    seq.data = fold(Math.min(...blob.dataRelocs.map((r) => r.after ?? 0)));
   }
   /* `.rela.data.ro` 同一把尺子（第一百二十二片）：只读那一段里第一条重定位落在
    * 第几个函数之前。与 `.rela.data` 撞在同一格时，只读那一节的号大，排后面。 */
   if (blob.roRelocs !== undefined && blob.roRelocs.length > 0) {
-    seq.rodata = Math.min(...blob.roRelocs.map((r) => r.after ?? 0)) + 0.01;
+    seq.rodata = fold(Math.min(...blob.roRelocs.map((r) => r.after ?? 0))) + 0.01;
   }
   if (blob.relocs.length > 0) {
     const at = Math.min(...blob.relocs.map((r) => r.at));
+    const starts = blob.offsets.filter((o) => o >= 0);
     let j = 0;
-    while (j + 1 < blob.offsets.length && blob.offsets[j + 1] <= at) j++;
+    while (j + 1 < starts.length && starts[j + 1] <= at) j++;
     seq.text = j + 0.5;
   }
   if (blob.unwind !== null && blob.unwind !== undefined) seq.pdata = 0.8;
@@ -413,6 +421,9 @@ function cObj(path, out, arch, incs, defs, fmt, os) {
     : genArm64(mod);
   const syms = [];
   for (let k = 0; k < mod.funcs.length; k++) {
+    /* 这个模块里没有函数体（第一百二十八片）：后端一个字节都没出，符号也不发 ——
+     * 调用它的那条重定位会把名字带进「未定义的外部符号」那一段。 */
+    if (mod.funcs[k].extern) continue;
     /* `local`（第九十二片）：`static` 的函数与外部函数的转发桩不进外部符号表 ——
      * 多份 `.o` 一起链的时候（编 tinycc 自己就是十二份）它们每份都有一个同名的。 */
     syms.push({

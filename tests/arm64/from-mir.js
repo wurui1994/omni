@@ -668,6 +668,8 @@ try {
   const objPath = join(dir, 'omni.o');
   const defs = [];
   for (let k = 0; k < mod.funcs.length; k++) {
+    /* 没有函数体的（第一百二十八片）：后端一个字节都没出，符号也不发。 */
+    if (mod.funcs[k].extern) continue;
     defs.push({ name: mod.funcs[k].name, off: blob.offsets[k] });
   }
   writeFileSync(objPath, writeObject(blob.bytes, blob.data,

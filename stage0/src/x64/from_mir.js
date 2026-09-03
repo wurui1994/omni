@@ -1493,25 +1493,45 @@ export function genModule(mod, opts) {
   const wantUw = opts !== undefined && opts.unwind === true;
   const uwFuncs = [];
   let uwOffs = 0;
+  /* 已经出过代码的函数有几个 —— win32 那张展开表要认「第一个」，而第一个函数号
+   * 可能是个没有函数体的（第一百二十八片）。 */
+  let nEmit = 0;
   for (const f of mod.funcs) {
+    /* 这个模块里没有函数体（第一百二十八片）：一个字节都不出、也不发符号。落点记 −1，
+     * 调用它的那条重定位把名字带进「未定义的外部符号」那一段。 */
+    if (f.extern) {
+      offsets.push(-1);
+      i++;
+      continue;
+    }
     offsets.push(buf.pos);
     buf.place(labels[i]);
     new FnGen(mod, f, buf, labels, strSyms).gen();
     if (wantUw) {
       uwFuncs.push({ start: offsets[i], end: buf.pos });
-      if (i === 0) {
+      if (nEmit === 0) {
         buf.emit(new Array((-buf.pos) & 3).fill(0));
         uwOffs = buf.pos;
         buf.emit(unwindInfoX64());
       }
     }
+    nEmit++;
     i++;
   }
   buf.finish();
   const bytes = buf.bytes();
   const sizes = [];
   for (let k = 0; k < offsets.length; k++) {
-    sizes.push((k + 1 < offsets.length ? offsets[k + 1] : bytes.length) - offsets[k]);
+    if (offsets[k] < 0) {
+      sizes.push(0);
+      continue;
+    }
+    /* 「到下一个函数的落点」那一段（第一百二十片）—— 中间那些没有函数体的要跳过。 */
+    let end = bytes.length;
+    for (let m = k + 1; m < offsets.length; m++) {
+      if (offsets[m] >= 0) { end = offsets[m]; break; }
+    }
+    sizes.push(end - offsets[k]);
   }
   return {
     bytes,

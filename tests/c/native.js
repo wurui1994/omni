@@ -505,6 +505,9 @@ try {
     const blob = leg.gen(mod);
     const defs = [];
     for (let k = 0; k < mod.funcs.length; k++) {
+      /* 这个模块里没有函数体的（第一百二十八片）：后端一个字节都没出 —— 符号也别发，
+       * 名字靠调用点那条重定位进「未定义的外部符号」那一段（与 `cli.js` 同一条）。 */
+      if (mod.funcs[k].extern) continue;
       defs.push({ name: mod.funcs[k].name, off: blob.offsets[k] });
     }
     const objPath = join(dir, `probe-${leg.arch}.o`);

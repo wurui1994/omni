@@ -925,6 +925,12 @@ tcc 叫 `L.N`（`tccpp.c:626`，`N` 是匿名符号计数器），我们叫 `omn
 `.o` 比 tcc 少一整节。改动是两个后端各一行（`buf.call(label)` → `buf.callSym(名字)`），
 写出器与链接器都不用动。新门 `tests/c/rela-text.js` 18/0/3（那三格是外部函数的转发桩
 还是一个真函数），`tcc-obj` 的容器相同从 12 走到 16。
+**没有函数体的名字不再是一个函数**（第一百二十八片）：native 上外部函数不发桩了 ——
+`MirFunc` 多一格 `extern`，两个后端跳过它、一个字节都不出、也不发符号，名字靠调用点
+那条重定位进「未定义的外部符号」那一段。还留着桩的四类：变参的、按值收发 struct 的、
+带 x87 `long double` 的，以及**取过地址的**（`adrp+add` 指不着未定义符号，那得过 GOT）。
+顺手修了「第几个函数」那根轴 —— 没有函数体的不占落点，`relaSeq` 得只数出过代码的。
+`rela-text` 22/0/1，`tcc-obj` 的容器相同从 16 走到 21。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -14740,6 +14746,63 @@ ours: 4/strlen/-4  4/one/-4  2/omni_str_N/-4  4/$ext$strlen/-4
 变参的外部函数不在这一片里：它的调用点早就直接发 `CCALL`（`funcCall`），没有桩。
 
 <!-- 量：外部函数的桩-END -->
+
+## 落地：第九刀第一百二十八片
+
+**没有函数体的名字不该是一个函数。**
+
+上一节把尺子记好了，这一片照着做。native 这条腿上外部函数不再发桩：
+
+* `MirFunc` 多一格 `extern`（`setExtern()`）—— 与 `setGlobalExtern` 同一件事，落在函数上
+* `externThunk` 开头：native 上「简单」的外部函数直接打这一格就回（不改名、不发
+  `CCALL`、一条指令都不出）
+* `sealExternSymbols`：native 上一律打这一格 —— 声明了却没用过的那些于此彻底消失，
+  与 tcc 一样（它压根不为没引用过的声明发符号）
+* 两个后端的那个「一个函数一段」的循环跳过它们，落点记 **−1**
+* `cli.js` 与三个自己攒 `defs` 的门跳过它们的符号
+
+名字靠调用点那条重定位进「未定义的外部符号」那一段 —— 两个写出器早就这么扫了，
+一行都没改。
+
+### 还留着桩的四类（`externSimple` 说的就是它们）
+
+1. **变参的** —— 它的调用点早就直接发 `CCALL`
+2. **按值收发 struct 的** —— 桩里那两条 `todo` 是边界，得留在那儿报
+3. **带 x87 `long double`（16 字节那种）实参或返回值的** —— 桩顺手在做
+   `ARGMEM`+`MEMARG_F80` 与 `st0` 那两件事
+4. **取过地址的**（新量到的一格）—— `int (*f)(int) = isalpha;`
+
+第 4 类是这一片踩的坑：`33-ctype` 链不上，
+`ld: fixup error (kind=arm64_adrp_lo12) at '_main'+0x14 … target '_isalpha' does not have
+address`。**调它**与**取它的地址**是两回事 —— 调用点那条 `PLT32`/`BRANCH26` 指着未定义
+符号没问题（链接器会给它搭 stub），而 `adrp+add`/`lea` 指着未定义符号 Mach-O 不收，
+那得过 GOT。变参那一格早就走 GOT 了（第三十一片那条「外部全局量」的路，
+`funcCall` 里那几行），把它推广到所有外部函数是另一片；这一片先老实记下
+`fn.addrTaken`，取过地址的留着桩（桩是本文件里定义的，`adrp` 够得着）。
+
+### 顺手修的一格：那根「第几个函数」的轴
+
+`.rela.text`/`.rela.data` 排在第几，靠的是「这条重定位落在第几个函数」。没有函数体的
+函数落点是 −1，于是 `relaSeq` 里那个 `while (offsets[j+1] <= at) j++` 一路走过头 ——
+`pdata-x64` 当场红了一格（`.rela.text` 排到 `.pdata` 后面）。修法是这根轴上**只数
+出过代码的函数**：`starts` 先滤掉 −1，而 `after`（初值落下那一刻 `funcs` 有多长）折成
+「前面有几个出过代码的」。
+
+### 门
+
+`tests/c/rela-text.js` 里那个「模块内一条、模块外一条」的探针从 `not yet` 转绿：
+三条重定位与尺子同数、同序（`4/one 2/<str> 4/strlen`）。串常量的名字这道门不比。
+22/0/1 —— 剩的那一格是 arm64 上取串常量地址的序列（tcc `adrp`+**`ldr`**、我们
+`adrp`+`add`），量在探针的注释里。
+
+`tcc-obj` 的「容器相同」从 16 走到 **21**。回归：`native` 227/0、`run` 207/0/1、
+`native-gen` 83/0、`selfobj` 25/0、`tcc-link` 83/0、`sym-order` 18/0、
+`str-rodata` 69/0/1、`rodata-sec` 27/0、`sym-size` 6/0、`rela-order` 6/0、
+`eh-frame-x64` 8/0、`pdata-x64` 11/0、`x64/from-mir` 90/0、`arm64/from-mir` 88/0、
+`elf-roundtrip` 268、`elf-merge` 451、`pe-content` 328、`pe-exe` 352、`elf-exe` 53、
+`elf-dyn` 53、`macho-exe` 26、`macho-dylib` 107。
+
+<!-- 第九刀第一百二十八片-END -->
 
 
 

@@ -716,7 +716,19 @@ export class MirFunc {
      * 只有 x86_64 那条腿看它，别的腿一个字不改。
      */
     this.ldRet = false;
+    /**
+     * **这个模块里没有函数体**（第九刀第一百二十八片）。与 `setGlobalExtern` 同一件事，
+     * 只是落在函数上：写目标文件那一步既不出代码也不发符号，调用点那条重定位把名字带进
+     * 「未定义的外部符号」那一段，由链接器去找。
+     *
+     * 只有 native 那条腿用得上 —— 线性内存那两条腿上「外部函数」是宿主的 JS 实现，
+     * 落点是 `CCALL`，得有一个真的桩（见 `externThunk`）。
+     */
+    this.extern = false;
   }
+
+  /** 声明「这个模块里没有它的函数体」。见 `extern` 头上那段。 */
+  setExtern() { this.extern = true; }
 
   /** 声明「这个函数的浮点返回值在 st0 里」（x86_64 的 long double）。 */
   setLdRet() { this.ldRet = true; }

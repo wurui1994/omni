@@ -12,6 +12,10 @@
 //
 // 这道门比的是**那几条重定位本身**（类型、指着谁、加数）与「位移那几个字节是零」，
 // 不比 `r_offset` —— 我们出的代码比 tcc 长，落点对不上是另一回事（窥孔那几片）。
+// 串常量的名字也不比：tcc 叫 `L.N`、我们叫 `omni_str_N`（第一百二十三片量过为什么）。
+//
+// 第一百二十八片起「模块内一条、模块外一条」那个探针也在这儿：外部函数不再发桩，
+// 于是那三条重定位与尺子同数、同序（`4/one 2/<str> 4/strlen`）。
 //
 //   node tests/c/rela-text.js
 
@@ -88,6 +92,9 @@ function readRelaText(path, pre) {
     let sym = nameAt(str.off, b.readUInt32LE(st.off + Number(info >> 32n) * 24));
     /* osx 上符号名前面有一个下划线 —— 比之前剥掉。 */
     if (pre !== '' && sym.startsWith(pre)) sym = sym.slice(pre.length);
+    /* 串常量的名字不比：tcc 叫 `L.N`、我们叫 `omni_str_N`（那个编号是匿名符号计数器，
+     * 压在「每个目标自己的预定义」那笔欠账后面，见第一百二十三片的测量）。 */
+    if (/^L\.\d+$/.test(sym) || /^omni_str_\d+$/.test(sym)) sym = '<str>';
     rows.push(`${type}/${sym}/${add}`);
     disp.push([...b.subarray(tx.off + off, tx.off + off + 4)].join(' '));
   }
@@ -114,15 +121,18 @@ const PROBES = [
       + 'int main(void) { return one() + two(); }\n',
   },
   {
-    /* 打进模块外的那一条还对不上，量在这儿：tcc 是 `4/one 2/L.0 4/strlen`，我们是
-     * `4/strlen 4/one 2/omni_str_N 4/$ext$strlen` —— 多出来的两条是**外部函数的
-     * 转发桩**（`$ext$strlen` 现在是一个真的函数，桩里那条 `call strlen` 就是第一条），
-     * 于是次序也跟着错位。那是「桩不该是函数」那笔欠账，不是这一片的事。 */
+    /* 两条调用，一条打进同一个单元、一条打进外面（`strlen`）—— 比的是两条的次序。
+     * 第一百二十八片之前这一格是 `not yet`：外部函数的转发桩是个真函数，桩里那条
+     * `call strlen` 反而排在最前，`.rela.text` 里多两条。桩去掉之后就是尺子那三条。 */
     name: '模块内一条、模块外一条',
     src: 'unsigned long strlen(const char *s);\n'
       + 'static int one(void) { return 1; }\n'
       + 'int main(void) { return one() + (int)strlen("ab"); }\n',
-    notYet: '外部函数的转发桩现在是一个真的函数，`.rela.text` 里多两条、次序也错位',
+    /* arm64 上串常量的地址还不是同一条序列：tcc 是 `adrp` + **`ldr`**
+     * （`311/312` = `ADR_PREL_PG_HI21`/`ADD_ABS_LO12_NC`，第三条指令是 `f9400000`），
+     * 我们是 `adrp` + `add`（`275/277`，`91000000`）。那是「取数据地址那条序列」的事，
+     * 不是调用这一片的 —— 量在这儿。 */
+    notYet: { osx: 'arm64 上串常量的地址是 adrp+ldr，我们还发 adrp+add' },
   },
 ];
 
@@ -146,9 +156,10 @@ for (const t of CASES) {
     const pr = PROBES[i];
     const tag = `${t.name} / ${pr.name}`;
     /* 已经量过、还压在别的欠账后面的那一格照实报出来（不是绿的，也不是坏的）。 */
-    if (pr.notYet !== undefined) {
+    const why = pr.notYet === undefined ? undefined : pr.notYet[t.os];
+    if (why !== undefined) {
       notYet++;
-      process.stdout.write(`  todo ${tag}：${pr.notYet}\n`);
+      process.stdout.write(`  todo ${tag}：${why}\n`);
       continue;
     }
     const c = join(OUT, `p${i}.c`);
