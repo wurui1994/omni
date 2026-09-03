@@ -81,7 +81,11 @@ function vertOf(pts) {
     + '  gl_Position = vec4(x, y, 0.0, 1.0);\n}\n';
 }
 
-/** 这一门**自己**算覆盖：clip -> 窗口，再逐像素三次叉积。与降级那一侧无关。 */
+/** 这一门**自己**算覆盖：clip -> 窗口，再逐像素三次叉积 + 同一套边上归属规则。
+ *
+ * 规则与降级那一侧**同一套**（`e > 0`，或者 `e == 0` 且那条边是 top-left），
+ * 但实现是独立写的 —— 这一条查的是「实现符合设计」。「设计本身对不对」由下面
+ * 那条方块用例查（不重不漏是填充规则的定义性性质，不用 GL 也验得了）。 */
 function coverOf(pts, w, h) {
   const win = pts.map(([x, y]) => [(x * 0.5 + 0.5) * w, (y * 0.5 + 0.5) * h]);
   const cross = (ax, ay, bx, by) => ax * by - ay * bx;
@@ -97,7 +101,10 @@ function coverOf(pts, w, h) {
       for (const [a, b] of [[0, 1], [1, 2], [2, 0]]) {
         const e = sgn * cross(win[b][0] - win[a][0], win[b][1] - win[a][1],
           px - win[a][0], py - win[a][1]);
-        if (e < 0) inside = false;
+        const sdx = sgn * (win[b][0] - win[a][0]);
+        const sdy = sgn * (win[b][1] - win[a][1]);
+        const tl = sdy > 0 || (sdy === 0 && sdx < 0);
+        if (!(e > 0 || (tl && e === 0))) inside = false;
       }
       if (inside) set.add(`${x},${y}`);
     }
@@ -176,6 +183,38 @@ const HALF = [[-1, -1], [1, -1], [-1, 1]];
       bad('印出来的像素数与覆盖数不等', `    覆盖 ${want.size}，印了 ${r.pix.length}`);
     } else {
       ok(`不覆盖的像素连片元都不调（覆盖 ${want.size} 个，印 ${r.pix.length} 个）`);
+    }
+  }
+}
+
+/* ---- 五、两个三角形拼一个方块：每个像素**正好一次**（不重不漏）。
+ *
+ * 这是填充规则的**定义性性质**，而且不用 GL 就验得了 —— 第八片那时候边上是 `>= 0`，
+ * 共享的那条斜边会被两个三角形各画一遍，这条门就是来压它的。
+ *
+ * 「哪一侧归谁与 GL 是否一致」这一门**验不了**（要一台有 GL 的机器）。所以这里查的是
+ * 不重不漏，而 ADR-0019 里明写着「与 GL 差一个整体翻转的可能性还没排除」。 */
+{
+  const T1 = [[-1, -1], [1, -1], [-1, 1]];
+  const T2 = [[1, -1], [1, 1], [-1, 1]];
+  const a = draw(vertOf(T1), FRAG_RED, W, H);
+  const b = draw(vertOf(T2), FRAG_RED, W, H);
+  if (a.err !== undefined || b.err !== undefined) bad('方块那两趟跑不动', `    ${a.err ?? b.err}`);
+  else {
+    const ka = a.pix.map((p) => `${p.x},${p.y}`);
+    const kb = b.pix.map((p) => `${p.x},${p.y}`);
+    const both = ka.filter((k) => kb.includes(k));
+    const all = new Set([...ka, ...kb]);
+    const missing = [];
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) if (!all.has(`${x},${y}`)) missing.push(`${x},${y}`);
+    }
+    if (both.length > 0) {
+      bad('两个三角形把共享边上的像素画了两遍', `    重了 ${both.length} 个：${both.slice(0, 8).join(' ')}`);
+    } else if (missing.length > 0) {
+      bad('两个三角形拼起来漏了像素', `    漏 ${missing.length} 个：${missing.slice(0, 8).join(' ')}`);
+    } else {
+      ok(`方块拼接：${ka.length} + ${kb.length} = ${W * H}，不重不漏（边上的归属只算一次）`);
     }
   }
 }

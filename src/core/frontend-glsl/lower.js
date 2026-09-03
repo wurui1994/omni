@@ -1037,6 +1037,25 @@ export function glslTriProgram(vertMod, fragMod, w, h, uni) {
     s.push(`    (let e${j}dx real (bin "*" (var sgn) (bin "-" (var y${a2}) (var y${b2}))))`);
     s.push(`    (let e${j}dy real (bin "*" (var sgn) (bin "-" (var x${b2}) (var x${a2}))))`);
     s.push(`    (let e${j} real (real 0.0))`);
+    s.push(`    (let in${j} bool (bool false))`);
+    /* 落在边**上**（`e == 0`）那些样本归谁：一条边只能归**一个**三角形，
+     * 不然两个共享它的三角形会把那条线画两遍（第八片就是那样）。
+     *
+     * 判据要**对边的方向是奇的**：方向反过来结论就反过来。这样两个共享边的三角形
+     * （绕向都归一之后，那条边在两边的方向正好相反）里恰好一个认领它 —— 不重不漏。
+     * 用的是常见的那一套：`sdy > 0`，或者 `sdy == 0 && sdx < 0`。
+     *
+     * **哪一侧归谁与 GL 是否一致，还没量**（要一台有 GL 的机器）。能保证的是
+     * 「不重不漏」——那是填充规则的定义性性质，不用 GL 也验得了（门里那条方块用例）。
+     * 与 GL 差一个整体翻转的可能性留着，写在明处。
+     *
+     * `sdx`/`sdy` 乘了 `sgn`：绕向归一化只改了 `e` 的符号，边的方向没改 ——
+     * 不跟着乘的话，同一片像素在两种绕向下会得到不同的归属。 */
+    s.push(`    (let s${j}dx real (bin "*" (var sgn) (bin "-" (var x${b2}) (var x${a2}))))`);
+    s.push(`    (let s${j}dy real (bin "*" (var sgn) (bin "-" (var y${b2}) (var y${a2}))))`);
+    s.push(`    (let tl${j} bool (bin ">" (var s${j}dy) (real 0.0)))`);
+    s.push(`    (if (bin "&&" (bin "==" (var s${j}dy) (real 0.0)) (bin "<" (var s${j}dx) (real 0.0)))`
+      + ` (do (set tl${j} (bool true))))`);
   }
   s.push(`    (let c ${glslStructName(4)} (new ${glslStructName(4)}))`);
   L.need(4);
@@ -1061,14 +1080,17 @@ export function glslTriProgram(vertMod, fragMod, w, h, uni) {
       const base = EDGES[j][0];
       inner.push(`(set e${j} (bin "+" (bin "*" (var e${j}dx) (bin "-" (var px) (var x${base})))`
         + ` (bin "*" (var e${j}dy) (bin "-" (var py) (var y${base})))))`);
+      /* `in_j = (e_j > 0) || (tl_j && e_j == 0)` —— 边上那些样本按 `tl_j` 归属。 */
+      inner.push(`(set in${j} (bin ">" (var e${j}) (real 0.0)))`);
+      inner.push(`(if (bin "&&" (var tl${j}) (bin "==" (var e${j}) (real 0.0)))`
+        + ` (do (set in${j} (bool true))))`);
     }
     const args = ['(var px)', '(var py)'];
     for (let i = 0; i < attrs.length; i++) args.push(evalAt(i));
     for (const x of uniArgs(fragMod)) args.push(x);
     /* 覆盖 **且** 在画布里才算 —— 不覆盖的像素**连片元都不调**（真的光栅化就该这样，
      * 也正好省掉那一次着色）。 */
-    const cov = '(bin "&&" (bin "&&" (bin ">=" (var e0) (real 0.0)) (bin ">=" (var e1) (real 0.0)))'
-      + ' (bin ">=" (var e2) (real 0.0)))';
+    const cov = '(bin "&&" (bin "&&" (var in0) (var in1)) (var in2))';
     inner.push(`(if (bin "&&" ${cov} (bin "&&" (bin "<" (var px) (real ${glslNum(w)}))`
       + ` (bin "<" (var py) (real ${glslNum(h)}))))`
       + ' (do'
