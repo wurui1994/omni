@@ -2247,8 +2247,26 @@ function main(argv) {
     else if (f === 'pe') cmd = 'pe-link';
     else throw new OmniError(`c link: 不认识格式 '${f}'；有 elf macho pe`);
   }
+  /* `check`（决策一）：只走**前端与检查器**，不出产物、不执行。
+   *
+   * 它不是「少一步的 build」——它是**唯一**一条「我只想知道这份源码有没有错」的路。
+   * 从前这儿是一句「还没到，用 omni emit oir」，而那句话让人把一份 12MB 的 JSON
+   * 印到终端上去看有没有报错。
+   *
+   * 前端由扩展名选，与别处同一条规矩（`compileFront`）。`.c` 走 C 那一路的
+   * 一遍过（`cMir` 里就带 `verifyMir`）—— C 没有 OIR 这一层。
+   * 印一行摘要，**错误照旧由抛出来的 `OmniError` 负责**（退出码 1）。 */
   if (cmd === 'check') {
-    throw new OmniError('check 还没到（ADR-0018 分片 4）；现在用 omni emit oir FILE');
+    if (path === undefined) throw new OmniError('check 要一个源文件');
+    if (path.endsWith('.c')) {
+      const mod = cMir(path, incDirs(rest), defArgs(rest), [], sysIncDirs(rest));
+      stdout(`ok  ${path}：${mod.funcs.length} 个函数（C 一遍过 + MIR 自检）\n`);
+      return 0;
+    }
+    const { mod } = compile(path, rest);
+    const nf = mod.funcs === undefined ? 0 : mod.funcs.length;
+    stdout(`ok  ${path}：${nf} 个函数（前端 + 检查器，没出产物）\n`);
+    return 0;
   }
   // repl 没有源文件；默认模式是 ADR-0008 第 3 节的 dynamic（沿革见 repl.js 文件头）。
   // `--lang` 选前端：驱动是与语言无关的，omni 走检查器的增量会话，sx/asy 走核心方言的，

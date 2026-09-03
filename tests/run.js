@@ -142,6 +142,37 @@ if (existsSync(errorsDir)) {
   }
 }
 
+// ------------------------------------------------------------ check：只走前端与检查器
+//
+// `omni check FILE`（ADR-0018 决策一）从前是一句「还没到」。它的口径能靠**已有的两批
+// 用例**钉死，不必新写夹具：
+//
+//   * `cases/` 里的都编得过 -> `check` 必须回 0、必须印一行 `ok `
+//   * `errors/` 里的都是**编译期**错误（上面那一段就是拿 `run` 的非零退出码钉的）
+//     -> `check` 也必须非零。它要是回 0，就说明 `check` 走的路比编译那条**短**，
+//     那它就不是「只走前端与检查器」，而是「少查了几样」。
+
+{
+  process.stdout.write('check (前端 + 检查器)\n');
+  const pick = (dir) => (existsSync(dir)
+    ? readdirSync(dir).filter((f) => SRC_EXT.test(f)).sort()
+      .filter((f) => !filters.length || filters.some((x) => f.includes(x)))
+    : []);
+  for (const f of pick(casesDir)) {
+    const r = run('check', join(casesDir, f));
+    if (r.code !== 0) record(`${f} [check]`, false, show('check', r));
+    else if (!r.stdout.startsWith('ok ')) {
+      record(`${f} [check]`, false, `  没印 ok 那一行：${JSON.stringify(r.stdout.slice(0, 60))}`);
+    } else record(`${f} [check]`, true, '');
+  }
+  for (const f of pick(errorsDir)) {
+    const r = run('check', join(errorsDir, f));
+    if (r.code === 0) {
+      record(`${f} [check 该红]`, false, '  check 回了 0，可这份用例是编译期错误 —— check 少查了几样');
+    } else record(`${f} [check 该红]`, true, '');
+  }
+}
+
 // ------------------------------------------------------------ REPL：脚本化会话 + 快照
 //
 // 文件名 `session-LANG.in` 里的 LANG 就是 `--lang`（没有后缀就是 omni）：REPL 的驱动是
