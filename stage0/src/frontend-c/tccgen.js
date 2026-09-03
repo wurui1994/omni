@@ -709,6 +709,13 @@ export class CGen {  /**
     this.strs = new Map();
     /** @type {Map<string,number>} 宽字符串字面量去重（键是那串 wchar 的值） */
     this.wstrs = new Map();
+    /** @type {Map<string,number>} 串常量的**出现**（`函数名#序号`）-> 常量池那一条。
+     *  第一百二十四片：不去重之后，靠这张表让函数体那两遍认回同一份字节。 */
+    this.strRefs = new Map();
+    /** 当前函数里第几条串常量（两遍各自从 0 数起，见 `runBody`）。 */
+    this.strNo = 0;
+    /** 文件作用域上第几条串常量 —— 只增不减，函数体那两遍不碰它。 */
+    this.strTopNo = 0;
     /** @type {{off:number,bytes:number[]}[]} 攒着的 data 段（内存要等 dataOff 定了才能声明） */
     this.pendingData = [];
     /**
@@ -1866,14 +1873,35 @@ export class CGen {  /**
    * 也在用的那一种，印出来也是可读的。挑法只看字节内容，所以去重照旧成立。
    */
   strConst(bytes) {
+    const key = this.strKey();
+    const hit = this.strRefs.get(key);
+    if (hit !== undefined) return hit;
     let ascii = true;
     for (let i = 0; i < bytes.length; i++) {
       if (bytes.charCodeAt(i) > 127) { ascii = false; break; }
     }
-    if (ascii) return this.mod.consts.str(bytes);
+    /* **不去重**（第一百二十四片）：一条串常量的身份是它在源码里的**那一次出现** ——
+     * 量过 tcc，`"A"` 写两遍就是只读节里两份字节、两条 `L.N`。 */
     const bs = [];
     for (let i = 0; i < bytes.length; i++) bs.push(bytes.charCodeAt(i) % 256);
-    return this.mod.consts.bytes(bs);
+    const ref = ascii ? this.mod.consts.strOnce(bytes) : this.mod.consts.bytesOnce(bs);
+    this.strRefs.set(key, ref);
+    return ref;
+  }
+
+  /**
+   * 一次串常量出现的身份（第一百二十四片）：`函数名 + 这个函数里的第几条`。
+   *
+   * 与块里那些 `static` 的名字用的是同一个手法（`declareStaticLocal`）：函数体解析
+   * 两遍（偏离 4），而两遍走的是同一串记号，所以序号数出来一样 —— 第二遍据此认回
+   * 第一遍摊的那一份字节，不会摊两次。文件作用域只走一遍，`funcName` 是空的。
+   */
+  strKey() {
+    /* 文件作用域（`funcName` 是空的）用一格**只增不减**的计数：函数体那两遍会把
+     * `strNo` 归零，所以两个函数之间的两条文件级串常量会领到同一个号 —— 那正是这道
+     * 门第一版踩的坑（`g_wp` 指到了别人的字节上）。函数体里才按「函数名 + 第几条」认。 */
+    if (this.funcName === '') return `@${this.strTopNo++}`;
+    return `${this.funcName}#${this.strNo++}`;
   }
 
   /**
@@ -1931,6 +1959,9 @@ export class CGen {  /**
 
   /** native：一个宽串字面量在 MIR 常量池里的那一条（第三十三片）。一律 `bytes`。 */
   wstrConst(vals) {
+    const key = this.strKey();
+    const hit = this.strRefs.get(key);
+    if (hit !== undefined) return hit;
     const raw = [];
     /* 结尾那一格**不在这儿加**（第一百二十三片）：摆字节的那一步一律补「一个元素宽」
      * 的零（窄串 1 字节、宽串 4 字节），于是两种串共用同一条收尾。从前这儿加了一格
@@ -1939,11 +1970,12 @@ export class CGen {  /**
       const u = v >>> 0;
       raw.push(u & 255, (u >>> 8) & 255, (u >>> 16) & 255, (u >>> 24) & 255);
     }
-    const ref = this.mod.consts.bytes(raw);
+    const ref = this.mod.consts.bytesOnce(raw);
     /* 宽串一格四字节，所以摆下来要 4 对齐、结尾那一格也是四个零（量过 tcc 的只读节）。
      * 常量池里宽串与「就这几个字节」的窄串是同一个种类，分不出来 —— 所以这一格
      * 记在 MIR 的 `strAlign` 上，由造它的人说。 */
     this.mod.markStrAlign(ref, 4);
+    this.strRefs.set(key, ref);
     return ref;
   }
 
@@ -7240,6 +7272,10 @@ export class CGen {  /**
     /* 块里那些 `static` 在 data 段上的名字带着这个序号（`declareStaticLocal`）——
      * 同样是「两遍数出来一样」，于是第二遍找到的是第一遍划的那块地方。 */
     this.staticNo = 0;
+    /* 串常量也按「函数名 + 这个函数里的第几条」认身份（第一百二十四片，与上面那格
+     * 同一个手法）：不去重之后，两遍走同一串记号会各摊一份字节 —— 序号在两遍里数出来
+     * 一样，于是第二遍认回第一遍那一条。 */
+    this.strNo = 0;
     this.kids = [];
     this.pendingSwitch = null;
 

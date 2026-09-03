@@ -613,6 +613,23 @@ export class ConstPool {
     return ref;
   }
 
+  /**
+   * 不去重的那一路（第九刀第一百二十四片）：**每次调用都是新的一条**。
+   *
+   * 串常量要它 —— 量过 tcc：同一份源码里 `"A"` 写两遍，只读节里就是两份字节、
+   * 两条符号（`get_sym_ref` 每次都从匿名计数器取一个新号）。「一条串常量的身份」
+   * 是它在源码里的**那一次出现**，不是它的文本。
+   *
+   * 摘要还是稳的：同一份输入走同一条路，摊出来的条数与次序都一样（ADR-0014 决策 5
+   * 要的是「同一个输入两次编译得到同一串字节」，不是「文本相同就共用一条」）。
+   */
+  fresh(t, kind, text) {
+    const ref = this.items.length;
+    if (ref >= REF_BIAS) throw new Error('mir: 常量池超过 32768 条');
+    this.items.push({ t, kind, text });
+    return ref;
+  }
+
   int(v) { return this.intern(T_I64, 'int', String(v)); }
   // i32 的常量也存**符号扩展后的十进制**（规范形，见 T_I32）：常量池是按 (类型码, 文本)
   // 去重的，所以 `i32 -1` 与 `i64 -1` 是两条，不会互相顶掉。
@@ -633,12 +650,23 @@ export class ConstPool {
    * 并且摘要（`bytes.js`）里印出来还是可打印的。
    */
   bytes(bs) {
-    let hex = '';
-    for (const b of bs) hex += (b % 256).toString(16).padStart(2, '0');
-    return this.intern(T_STR, 'bytes', hex);
+    return this.intern(T_STR, 'bytes', hexOf(bs));
   }
+  /**
+   * 串常量那两条**不去重**的入口（第九刀第一百二十四片）：每一次出现一条。
+   * 只有 C 的 native 那条腿用它们 —— 线性内存那边靠 `strData`/`wstrData` 自己那张表。
+   */
+  strOnce(s) { return this.fresh(T_STR, 'str', s); }
+  bytesOnce(bs) { return this.fresh(T_STR, 'bytes', hexOf(bs)); }
   nul(t) { return this.intern(t, 'null', 'null'); }
   get(ref) { return this.items[ref]; }
+}
+
+/** 一串字节 -> 十六进制（`bytes` 那两条入口共用）。 */
+function hexOf(bs) {
+  let hex = '';
+  for (const b of bs) hex += (b % 256).toString(16).padStart(2, '0');
+  return hex;
 }
 
 /** `bytes` 种类的常量 -> 字节数组（`text` 是十六进制，见 `ConstPool.bytes`）。 */
