@@ -291,10 +291,11 @@ function buildSyms(defs, relocs, strs, prefix, uw) {
  * @param arch  `'arm64'` 或 `'x86_64'`
  * @param dataAlign 这一格 ELF 用不上（tcc 的 `.data` 一律 `sh_addralign = 8`），
  *              留着是为了与 Mach-O 那个写出器同签名
- * @param opts  `{file, prefix, rdata, unwind}`：`file` 是写进 STT_FILE 那一条的源文件名；
- *              `prefix` 是符号名前缀 —— osx 与 win32 上是 `'_'`，linux 上是 `''`；
+ * @param opts  `{file, prefix, rdata, unwind, seq}`：`file` 是写进 STT_FILE 那一条的
+ *              源文件名；`prefix` 是符号名前缀 —— osx 与 win32 上是 `'_'`，linux 上是 `''`；
  *              `rdata` 是只读数据那一节的名字；`unwind` 是 win32 x86_64 的展开表
- *              `{offs, funcs: [{start, end}]}`（第一百一十七片）
+ *              `{offs, funcs: [{start, end}]}`（第一百一十七片）；`seq` 是
+ *              `{text, data, pdata}` 三节**造出来的次序**上的位置（第一百一十八片）
  */
 export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
   const archName = arch === undefined ? 'arm64' : arch;
@@ -382,26 +383,36 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
   const symtabNo = secs.length;
   sec('.symtab', SHT_SYMTAB, 0, syms.length * SYM_SIZE, symtabNo + 1, nlocal + 1, 8, SYM_SIZE);
   sec('.strtab', SHT_STRTAB, 0, strBytes.length, 0, 0, 1, 0);
-  /* 7 号往后是**造出来的次序**，所以这一刀得照 tcc 什么时候造它们：
-   * `.rela.text` 在第一条代码重定位发出来的时候造，`.pdata` 在**第一个函数的收尾**
-   * 那一步造（`gfunc_epilog` 叫 `pe_add_unwind_data`）。于是第一个函数里有没有
-   * 重定位决定了两节谁在前 —— 量过：有就是 `.rela.text` 先，没有就是 `.pdata` 先。 */
-  const pdataSec = () => {
-    if (uw === null) return;
-    sec('.pdata', SHT_PROGBITS, SHF_ALLOC, pdBytes.length, 0, 0, 4, 0);
-    const pdNo = secs.length - 1;
-    sec('.rela.pdata', SHT_RELA, 0, raPdata.length * RELA_SIZE, symtabNo, pdNo, 8, RELA_SIZE);
-  };
-  const pdataFirst = uw !== null
-    && (raText.length === 0 || raText[0].at >= uw.funcs[0].end);
-  if (pdataFirst) pdataSec();
+  /* 7 号往后是**造出来的次序**（第一百一十七、一百一十八片）：tcc 那边这几节不排序，
+   * 谁先造谁在前 —— `.rela.text` 在第一条代码重定位发出来的时候造、`.rela.data` 在第一条
+   * 数据重定位落的时候造、`.pdata` 在**第一个函数收尾**那一步造。三件事的位置由上一层
+   * 换算到「第几个函数」那把尺子上（`opts.seq`），这儿只管按位置排。 */
+  const seq = o.seq === undefined ? {} : o.seq;
+  const later = [];
   if (raText.length > 0) {
-    sec('.rela.text', SHT_RELA, 0, raText.length * RELA_SIZE, symtabNo, 1, 8, RELA_SIZE);
+    later.push({
+      pos: seq.text ?? 0,
+      add: () => sec('.rela.text', SHT_RELA, 0, raText.length * RELA_SIZE, symtabNo, 1, 8, RELA_SIZE),
+    });
   }
-  if (!pdataFirst) pdataSec();
+  if (uw !== null) {
+    later.push({
+      pos: seq.pdata ?? 1,
+      add: () => {
+        sec('.pdata', SHT_PROGBITS, SHF_ALLOC, pdBytes.length, 0, 0, 4, 0);
+        const pdNo = secs.length - 1;
+        sec('.rela.pdata', SHT_RELA, 0, raPdata.length * RELA_SIZE, symtabNo, pdNo, 8, RELA_SIZE);
+      },
+    });
+  }
   if (raData.length > 0) {
-    sec('.rela.data', SHT_RELA, 0, raData.length * RELA_SIZE, symtabNo, 2, 8, RELA_SIZE);
+    later.push({
+      pos: seq.data ?? 2,
+      add: () => sec('.rela.data', SHT_RELA, 0, raData.length * RELA_SIZE, symtabNo, 2, 8, RELA_SIZE),
+    });
   }
+  later.sort((a, b) => a.pos - b.pos);
+  for (const x of later) x.add();
   sec('.shstrtab', SHT_STRTAB, 0, 0, 0, 0, 1, 0);
   for (let i = 1; i < secs.length; i++) secs[i].strx = shstr.intern(secs[i].name);
   const shstrBytes = shstr.bytes();

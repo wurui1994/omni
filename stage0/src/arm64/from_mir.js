@@ -1135,7 +1135,15 @@ export function genModule(mod) {
       dataBytes.push(b === undefined ? 0 : b);
     }
     for (const fx of blob === null ? [] : blob.fixups ?? []) {
-      dataRelocs.push({ at: base + fx.off, kind: 'POINTER64', sym: fixSym(fx), sect: 2 });
+      /* `after`（第一百一十八片，与 x64 那一份同一条）：这一条数据重定位是在第几个
+       * 函数之前落的 —— `.rela.data` 那一节的造出来的次序全靠它。 */
+      dataRelocs.push({
+        at: base + fx.off,
+        kind: 'POINTER64',
+        sym: fixSym(fx),
+        sect: 2,
+        after: mod.globalAfter[gi] ?? 0,
+      });
     }
   }
   /* 数据的别名（第一百〇五片）：与目标同一个偏移，符号表里多一条。 */

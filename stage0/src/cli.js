@@ -333,7 +333,36 @@ function cMir(path, incs, defs, args) {
 }
 
 /**
- * 一份 `.c` -> 一个**目标文件**（ADR-0017 第九刀第二十六片）。
+ * 7 号往后那几节**造出来的次序**上的位置（第九刀第一百一十八片）。
+ *
+ * tcc 那边这几节不排序，谁先造谁在前，而「什么时候造」是编译走到哪儿决定的。
+ * 把三件事都换算到「第几个函数」这一把尺子上：
+ *
+ *   `.rela.data` —— 第一条数据重定位落在第 k 个函数之前 → `k`
+ *   `.rela.text` —— 第一条代码重定位在第 j 个函数的**体里**发 → `j + 0.5`
+ *   `.pdata`     —— 第 0 个函数**收尾**时造 → `0.8`（比它的体晚、比下一个函数早）
+ *
+ * 量过的三种源码次序都对得上：初值在函数之前 → `.rela.data` 最前；在两个函数之间 →
+ * 夹在 `.pdata` 与后面那个函数的 `.rela.text` 之间；第一个函数里就有调用 →
+ * `.rela.text` 最前。
+ */
+function relaSeq(blob) {
+  const seq = {};
+  if (blob.dataRelocs.length > 0) {
+    seq.data = Math.min(...blob.dataRelocs.map((r) => r.after ?? 0));
+  }
+  if (blob.relocs.length > 0) {
+    const at = Math.min(...blob.relocs.map((r) => r.at));
+    let j = 0;
+    while (j + 1 < blob.offsets.length && blob.offsets[j + 1] <= at) j++;
+    seq.text = j + 0.5;
+  }
+  if (blob.unwind !== null && blob.unwind !== undefined) seq.pdata = 0.8;
+  return seq;
+}
+
+/**
+ * `c-obj`：把一个 `.c` 编成一个**真的目标文件**（第九刀第二十六片）。
  *
  * 与 `cMir` 的差别只有一个：走 `lowerCNative` —— 出来的 MIR 没有线性内存，地址就是真
  * 地址，全局与串常量是数据段里的真符号，libc 直接调。生成之后写一个 Mach-O 的
@@ -396,6 +425,7 @@ function cObj(path, out, arch, incs, defs, fmt, os) {
         prefix: os === 'linux' ? '' : '_',
         rdata: os === 'win32' ? '.rdata' : '.data.ro',
         unwind: blob.unwind ?? undefined,
+        seq: relaSeq(blob),
       })
     : writeObject;
   writeBinary(out, write(blob.bytes, blob.data,

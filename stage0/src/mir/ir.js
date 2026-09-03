@@ -816,6 +816,12 @@ export class MirModule {
      * ELF `st_other` 的那个数（DEFAULT 0 / INTERNAL 1 / HIDDEN 2 / PROTECTED 3）。
      * Mach-O 上不落 —— tcc 自己的 `tccmacho.c` 也不消费它。 */
     this.globalVis = [];
+    /* 与 globals 同下标的「初值是在第几个函数之后落的」（第九刀第一百一十八片）：
+     * `setGlobalData` 那一刻 `funcs` 有多长。只有写目标文件那一步看它，而且只看
+     * 带地址的初值那一条 —— ELF 里 `.rela.data` 这一节是**第一条数据重定位发出来的
+     * 时候**造的，节的次序就是造出来的次序，所以「第一条数据重定位比第一个函数早还是
+     * 晚」决定了 `.rela.data` 排在 `.rela.text`/`.pdata` 的前面还是后面。 */
+    this.globalAfter = [];
     /* 别名（第九刀第一百〇五片，`__attribute__((alias("目标")))`）：一个名字与目标
      * **同址**，符号表里两条、代码一份。`{name, kind:'f'|'g', no, weak}` —— `no` 是目标
      * 的函数号或全局号。同样是标注：写目标文件那一步照目标的落点再发一条符号。 */
@@ -991,6 +997,12 @@ export class MirModule {
       }
     }
     this.globalBlob[i] = { size, align, bytes: bs, fixups: fs };
+    /* 「这一块的初值里第一条地址落得比第几个函数早」（第一百一十八片）。前端在
+     * `putSymBytes` 那一刻记的 `after`，这儿取最小的那一个 —— 一块字节里好几条地址，
+     * 造 `.rela.data` 的是最早那一条。前端不给这一格就按「所有函数之后」算。 */
+    let after = this.funcs.length;
+    for (const fx of fs) if (fx.after !== undefined && fx.after < after) after = fx.after;
+    this.globalAfter[i] = after;
   }
 
   /**

@@ -1223,10 +1223,17 @@ export class CGen {  /**
    * native：往暂存区的 `addr` 上放一个「符号 + 加数」的八字节（第二十八片）。
    * 加数走 `emitBytes` 进那八个字节，符号进 `pendingFix` —— 两半在目标文件里
    * 由一条 `POINTER64` 合起来。
+   *
+   * `after`（第一百一十八片）：**这一刻**已经出了几个函数。ELF 里 `.rela.data` 这一节
+   * 是第一条数据重定位落的时候造的，节的次序就是造出来的次序 —— 这一格记的就是
+   * 「这一条落得比第几个函数早」。全局的字节要等一遍过走完才切得出来（下面那个
+   * 后处理），到那时 `funcs` 早就满了，所以时刻只能在这儿记。
    */
   putSymBytes(addr, fix) {
     this.emitBytes(addr, 8, BigInt.asUintN(64, fix.add));
-    this.pendingFix.push({ off: addr, kind: fix.kind, no: fix.no, add: fix.add });
+    this.pendingFix.push({
+      off: addr, kind: fix.kind, no: fix.no, add: fix.add, after: this.mod.funcs.length,
+    });
   }
 
   /**
@@ -2475,7 +2482,9 @@ export class CGen {  /**
           this.pendingData.push({ off: d.off + k * size, bytes: d.bytes });
         }
         for (const x of freshFix) {
-          this.pendingFix.push({ off: x.off + k * size, kind: x.kind, no: x.no, add: x.add });
+          this.pendingFix.push({
+            off: x.off + k * size, kind: x.kind, no: x.no, add: x.add, after: x.after,
+          });
         }
       }
       return;
@@ -7729,7 +7738,9 @@ export function lowerCNative(path, text, host, defs) {
     for (let k = 0; k < size; k++) {
       const fx = fixes.get(e.addr + k);
       if (fx === undefined) continue;
-      fixups.push({ off: k, kind: fx.kind, no: fx.no, add: fx.add });
+      fixups.push({
+        off: k, kind: fx.kind, no: fx.no, add: fx.add, after: fx.after,
+      });
       fixes.delete(e.addr + k);
     }
     const no = e.gno === undefined ? mod.globalNo(name) : e.gno;
@@ -7751,7 +7762,9 @@ export function lowerCNative(path, text, host, defs) {
     for (let k = 0; k < b.size; k++) {
       const fx = fixes.get(b.addr + k);
       if (fx === undefined) continue;
-      fixups.push({ off: k, kind: fx.kind, no: fx.no, add: fx.add });
+      fixups.push({
+        off: k, kind: fx.kind, no: fx.no, add: fx.add, after: fx.after,
+      });
       fixes.delete(b.addr + k);
     }
     /* 匿名块的名字（`$cl$3`）是**按出现顺序编**的，于是每个翻译单元里都有一个
