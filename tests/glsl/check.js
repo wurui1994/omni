@@ -230,5 +230,45 @@ for (const [name, src, stage, want] of [
   else bad('该拒却收了：没有 main', `    ${msg === null ? '一声没响' : msg.split('\n')[0]}`);
 }
 
+/* 限定符那一族（第二十四片）：`layout(location=N)`、`precision`、`invariant`、
+ * `centroid`/`sample`。**正面**只查一件事 —— 收下来之后接口的形状与不写限定符时**一样**
+ * （位置号这一刀只用来查冲突，不改变布局）。 */
+{
+  const src = `#version 330 core
+precision highp float;
+layout(location = 0) out vec4 fragColor;
+layout(location = 3) uniform float uK;
+invariant gl_FragDepth;
+centroid in vec2 vUv;
+sample in float vW;
+void main() { fragColor = vec4(uK + vUv.x + vW, 0.0, 0.0, 1.0); }
+`;
+  const m = mod(src, 'frag');
+  eq('限定符：uniform 摸出来还是那一个', m.uniforms.map((u) => `${u.name}:${glslTyText(u.ty)}`), ['uK:float']);
+  eq('限定符：in 摸出来两个，插值都当 smooth',
+    m.ins.map((v) => `${v.name}:${glslTyText(v.ty)}:${v.interp}`), ['vUv:vec2:smooth', 'vW:float:smooth']);
+  eq('限定符：out 摸出来还是那一个', m.outs.map((v) => `${v.name}:${glslTyText(v.ty)}`), ['fragColor:vec4']);
+}
+
+for (const [name, src, want] of [
+  ['location 抢同一个号', `#version 330 core
+layout(location = 2) uniform float a;
+layout(location = 2) uniform float b;
+out vec4 c;
+void main() { c = vec4(a + b); }
+`, '被 \'a\' 与 \'b\' 抢了两次'],
+  ['layout 里不认的键', `#version 330 core
+layout(binding = 0) uniform float a;
+out vec4 c;
+void main() { c = vec4(a); }
+`, '只认 location'],
+]) {
+  let msg = null;
+  try { mod(src, 'frag'); } catch (e) { msg = e.message; }
+  if (msg === null) bad(`该拒却收了：${name}`, '    一声没响');
+  else if (!msg.includes(want)) bad(`拒得不对：${name}`, `    要含「${want}」\n    实际：${msg.split('\n')[0]}`);
+  else ok(`拒：${name}`);
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail > 0 ? 1 : 0);

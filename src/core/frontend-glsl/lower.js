@@ -251,6 +251,12 @@ class GlslLowerer {
       return a.map((c) => this.let_('int', `(bin "^" ${c} (un "-" (int 1)))`));
     }
     if (e.k === 'bin') return this.bin(e);
+    if (e.k === 'comma') {
+      /* 逗号：左边**照样降**（副作用要留下：`i++, j` 里的自增是要发生的），值丢掉。 */
+      this.expr(e.a);
+      return this.expr(e.b);
+    }
+
     if (e.k === 'builtin') return this.builtin(e);
     if (e.k === 'call') return this.call(e);
     if (e.k === 'sel') return this.sel(e);

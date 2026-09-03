@@ -40,7 +40,9 @@
     THEN UNARY)
 
   ;; ---- 优先级：照 GLSL 规范 5.1 那张表，从低到高 -------------------------------
-  ;; 赋值最低、右结合（`a = b = c` 是 `a = (b = c)`）。
+  ;; 逗号最低（规范 5.9 那条 `expression: expression , assignment_expression`）。
+  (prec left ",")
+  ;; 赋值次低、右结合（`a = b = c` 是 `a = (b = c)`）。
   (prec right "=" ADDASSIGN SUBASSIGN MULASSIGN DIVASSIGN
     MODASSIGN ANDASSIGN ORASSIGN XORASSIGN SHLASSIGN SHRASSIGN)
   ;; 三元右结合，比赋值高、比 `||` 低。
@@ -92,6 +94,7 @@
       ;; `layout` **不在这儿**：关键字表里的每个词都得是某条规则用到的终结符（不然构表
       ;; 就骂），而 `layout(location = N)` 这一刀不收。收了却不用，等于留一个哑符号。
       "uniform" "in" "out" "inout" "const" "flat" "smooth" "noperspective"
+      "layout" "precision" "highp" "mediump" "lowp" "invariant" "centroid" "sample"
       "if" "else" "for" "while" "do" "switch" "case" "default"
       "return" "break" "continue" "discard" "true" "false")
     (punct INC "++")
@@ -135,6 +138,16 @@
     (-> ("out" type ID ";") (out-var () $2 $3))
     (-> (interp "in" type ID ";") (in-var $1 $3 $4))
     (-> (interp "out" type ID ";") (out-var $1 $3 $4))
+    ;; `layout(location = N)` 那一族（第二十四片）。位置号收下来交给检查那一侧记账 ——
+    ;; 这一刀的驱动是自己排 uniform 与 varying 的，所以位置号目前只**核对不冲突**。
+    (-> (layout "uniform" type ID ";") (uniform-at $1 $3 $4))
+    (-> (layout "in" type ID ";") (in-at $1 $3 $4))
+    (-> (layout "out" type ID ";") (out-at $1 $3 $4))
+    ;; `precision highp float;` —— 语法收下，语义**明着忽略**：这一层的 float 就是
+    ;; 一种精度（方言的 real）。收下来是为了别让整份着色器因为一行 precision 而解析失败。
+    (-> ("precision" prec type ";") (precision))
+    ;; `invariant gl_Position;` —— 同上：收下、不改变任何计算。
+    (-> ("invariant" ID ";") (invariant $2))
     ;; 模块级 `const float PI = 3.14159;`（第二档要）
     (-> ("const" type ID "=" expr ";") (const-decl $2 $3 $5))
     ;; 函数定义与原型。原型收了是因为 GLSL 里「先声明后定义」合法，尺子里虽然没有，
@@ -144,10 +157,25 @@
     ;; 模块级变量（不带限定符）。GLSL 里这是「全局，各调用共享」，尺子没用。
     (-> (type ID ";") (global $1 $2)))
 
+  ;; `layout(location = N)`。这一刀只认 `location` 这一个键 —— 别的（`std140`、`binding`…）
+  ;; 要连着 uniform block 一起做，那是另一片。
+  (rule layout
+    (-> ("layout" "(" ID "=" INTLIT ")") (loc $3 $5)))
+
+  (rule prec
+    (-> ("highp") (prec-high))
+    (-> ("mediump") (prec-medium))
+    (-> ("lowp") (prec-low)))
+
   (rule interp
     (-> ("flat") (interp-flat))
     (-> ("smooth") (interp-smooth))
-    (-> ("noperspective") (interp-linear)))
+    (-> ("noperspective") (interp-linear))
+    ;; `centroid`/`sample` 在规范里是**辅助**存储限定（可以与插值限定叠着写）。
+    ;; 这一刀把它们当成插值限定的一档收下 —— 叠写（`centroid smooth in …`）不收，
+    ;; 那要把限定符做成一个集合，等做多重限定那一片。
+    (-> ("centroid") (interp-centroid))
+    (-> ("sample") (interp-sample)))
 
   (rule type
     (-> ("void") (ty-void))
@@ -206,9 +234,9 @@
   (rule stmt
     (-> (";") (empty))
     (-> (block) $1)
-    (-> (expr ";") (expr-stmt $1))
+    (-> (cexpr ";") (expr-stmt $1))
     (-> (local-decl ";") $1)
-    (-> ("return" expr ";") (ret $2))
+    (-> ("return" cexpr ";") (ret $2))
     (-> ("return" ";") (ret-void))
     (-> ("break" ";") (brk))
     (-> ("continue" ";") (cont))
@@ -218,16 +246,16 @@
     (-> ("discard" ";") (discard))
     ;; `(prec THEN)` 必须**紧跟在 RHS 之后**（`grammar.js:133` 那个 while 只在动作之前扫），
     ;; 写在动作后面等于没写 —— 量过：`-a * b` 会分成 `(neg (mul a b))`。
-    (-> ("if" "(" expr ")" stmt) (prec THEN) (if $3 $5))
-    (-> ("if" "(" expr ")" stmt "else" stmt) (if-else $3 $5 $7))
-    (-> ("while" "(" expr ")" stmt) (while $3 $5))
+    (-> ("if" "(" cexpr ")" stmt) (prec THEN) (if $3 $5))
+    (-> ("if" "(" cexpr ")" stmt "else" stmt) (if-else $3 $5 $7))
+    (-> ("while" "(" cexpr ")" stmt) (while $3 $5))
     ;; `for (int i = 0; i < N; i++)`。三格各自可空 —— 尺子里三格都满，但空格一条规则的事。
     (-> ("for" "(" for-init opt-expr ";" opt-expr ")" stmt) (for $3 $4 $6 $8))
     ;; `do BODY while (COND);` —— 体先走一趟，然后才判条件。
-    (-> ("do" stmt "while" "(" expr ")" ";") (do-while $2 $5))
+    (-> ("do" stmt "while" "(" cexpr ")" ";") (do-while $2 $5))
     ;; `switch`。体里那一串是「标签 + 语句」混着来的（穿落是 GLSL 的语义，不是笔误），
     ;; 所以标签与语句同一条 `sw-item` 规则，谁在前谁在后由降级那一侧按次序分组。
-    (-> ("switch" "(" expr ")" "{" sw-items "}") (switch $3 $6)))
+    (-> ("switch" "(" cexpr ")" "{" sw-items "}") (switch $3 $6)))
 
   (rule sw-items
     (-> () (sw-items))
@@ -245,14 +273,22 @@
 
   (rule for-init
     (-> (";") (empty))
-    (-> (expr ";") (expr-stmt $1))
+    (-> (cexpr ";") (expr-stmt $1))
     (-> (local-decl ";") $1))
 
   (rule opt-expr
     (-> () (none))
-    (-> (expr) $1))
+    (-> (cexpr) $1))
 
   ;; ---- 表达式 ------------------------------------------------------------------
+  ;; 逗号表达式单独一层（`cexpr`），而不是塞进 `expr` 里：**实参表也用逗号**，
+  ;; 塞进去 `f(a, b)` 就成了「一个逗号表达式」还是「两个实参」的真歧义。
+  ;; 规范也是这么分的（`expression` 有逗号、`assignment_expression` 没有），
+  ;; 实参用的正是后者。于是逗号只在这些地方出现：语句、条件、`return`、`( )` 里、下标里。
+  (rule cexpr
+    (-> (expr) $1)
+    (-> (cexpr "," expr) (comma $1 $3)))
+
   ;; 一个 `expr` 加一块优先级声明，不照抄规范里那十四层级联 —— 与 jnc 那份同一个理由：
   ;; 接受的语言相同，级联在 LR 表里白多十几个只做单产生式归约的状态。
   (rule expr
@@ -261,7 +297,7 @@
     (-> ("true") (bool-lit 1))
     (-> ("false") (bool-lit 0))
     (-> (ID) (name $1))
-    (-> ("(" expr ")") (paren $2))
+    (-> ("(" cexpr ")") (paren $2))
     ;; 构造：`vec3(a,b,c)`、`vec3(0.02)`（标量铺开）、`float(i)`、`mat2(a,b,c,d)`。
     ;; 与函数调用是**两条不同的规则**，因为目标一个是类型一个是名字。
     (-> (type "(" args ")") (construct $1 $3))
@@ -270,7 +306,7 @@
     ;; 成员与 swizzle：`d.x`、`uv.xyx`、`c.xxx`。语法这一层不查那串字母合不合法
     ;; （`uv.xyzw` 对 `vec2` 是错的）—— 那要知道类型，是降级那一侧的事。
     (-> (expr "." ID) (member $1 $3))
-    (-> (expr "[" expr "]") (index $1 $3))
+    (-> (expr "[" cexpr "]") (index $1 $3))
     ;; 一元那五条：`(prec UNARY)` **紧跟 RHS**，见 `stmt` 里 `if` 那条上的注释。
     (-> ("-" expr) (prec UNARY) (neg $2))
     (-> ("+" expr) (prec UNARY) $2)

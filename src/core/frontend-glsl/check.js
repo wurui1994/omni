@@ -347,6 +347,7 @@ class GlslChecker {
     this.outs = new Map();
     this.consts = new Map();
     this.funcs = new Map();
+    this.locs = new Map();
     this.scopes = [];
     this.curFunc = null;
     this.builtinIn = stage === 'vert' ? GLSL_VERT_IN : GLSL_FRAG_IN;
@@ -371,6 +372,24 @@ class GlslChecker {
   }
 
   push() { this.scopes.push(new Map()); }
+
+  /**
+   * `layout(location = N)` 记账。这一刀的驱动**自己排** uniform 与 varying 的次序
+   * （见 `lower.js` 那一头），所以位置号目前只做一件事：**同一类里不许两个名字抢同一个号**。
+   * 不做「按号排布局」是因为那要等 uniform block 那一片 —— 但号冲突是源码的错，
+   * 现在就该拦，不然它会一直藏着。
+   */
+  claimLoc(kind, name, node, at) {
+    const key = glslAtom(node.items[1]);
+    if (key !== 'location') throw this.err(at, `layout 里这一刀只认 location，给的是 '${key}'`);
+    const n = Number(glslAtom(node.items[2]));
+    if (!Number.isInteger(n) || n < 0) throw this.err(at, `location 要是非负整数，给的是 ${n}`);
+    const prev = this.locs.get(`${kind}:${n}`);
+    if (prev !== undefined) {
+      throw this.err(at, `${kind} 的 location ${n} 被 '${prev}' 与 '${name}' 抢了两次`);
+    }
+    this.locs.set(`${kind}:${n}`, name);
+  }
 
   pop() { this.scopes.pop(); }
 
@@ -434,22 +453,35 @@ class GlslChecker {
       this.version = v;
       return;
     }
-    if (h === 'uniform') {
-      const name = glslAtom(node.items[2]);
+    if (h === 'uniform' || h === 'uniform-at') {
+      const at = h === 'uniform-at';
+      const name = glslAtom(node.items[at ? 3 : 2]);
       this.claim(name, node);
-      this.uniforms.set(name, glslTyOf(node.items[1], (n, m) => this.err(n, m)));
+      this.uniforms.set(name, glslTyOf(node.items[at ? 2 : 1], (n, m) => this.err(n, m)));
+      if (at) this.claimLoc('uniform', name, node.items[1], node);
       return;
     }
-    if (h === 'in-var' || h === 'out-var') {
+    if (h === 'in-var' || h === 'out-var' || h === 'in-at' || h === 'out-at') {
+      const at = h === 'in-at' || h === 'out-at';
+      const isIn = h === 'in-var' || h === 'in-at';
       const name = glslAtom(node.items[3]);
       this.claim(name, node);
       const ty = glslTyOf(node.items[2], (n, m) => this.err(n, m));
       /* 插值方式：`flat`/`smooth`/`noperspective`，没写就是 `smooth`（GLSL 的默认）。
-       * llvmpipe 那边这一格是 `enum lp_interp`，是编 shader 变体时定死的常量。 */
+       * llvmpipe 那边这一格是 `enum lp_interp`，是编 shader 变体时定死的常量。
+       * `centroid`/`sample` 在规范里是**取样位置**而不是插值方式 —— 我们只有一个取样点
+       * （像素中心），所以它们与 `smooth` 落到同一格，这是刻意的，不是漏掉。 */
       const q = glslHead(node.items[1]);
       const interp = q === 'interp-flat' ? 'flat'
         : q === 'interp-linear' ? 'linear' : 'smooth';
-      (h === 'in-var' ? this.ins : this.outs).set(name, { ty, interp });
+      (isIn ? this.ins : this.outs).set(name, { ty, interp });
+      if (at) this.claimLoc(isIn ? 'in' : 'out', name, node.items[1], node);
+      return;
+    }
+    if (h === 'precision' || h === 'invariant') {
+      /* 两条都**收下不改变任何计算**：这一层的 `float` 只有一种精度（方言的 real），
+       * `invariant` 说的是「两次编译要出同样的值」——我们本来就是同一份降级。
+       * 收下来的理由是别让一整份着色器因为这一行而解析失败。 */
       return;
     }
     if (h === 'const-decl') {
@@ -669,6 +701,14 @@ class GlslChecker {
     if (h === 'construct') return this.construct(node);
     if (h === 'call') return this.call(node);
     if (h === 'neg' || h === 'lnot' || h === 'bnot') return this.unary(node, h);
+    if (h === 'comma') {
+      /* 逗号：左边算了就丢，整个表达式的类型是**右边**那个（规范 5.9）。
+       * 左边照样要查 —— `f(), 1` 里的 `f()` 写错了得当场报，不能因为「反正要丢」就不看。 */
+      const a = this.expr(node.items[1]);
+      const b = this.expr(node.items[2]);
+      return { k: 'comma', ty: b.ty, a, b };
+    }
+
     if (h === 'pre-inc' || h === 'pre-dec' || h === 'post-inc' || h === 'post-dec') {
       const a = this.lvalue(node.items[1], node);
       if (a.ty.k !== 'int' && a.ty.k !== 'float') {
