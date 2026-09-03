@@ -29,58 +29,58 @@
 import { OmniError } from '../source/diag.js';
 import { readObject, writeSections } from './elf.js';
 
-const SHT_PROGBITS = 1;
-const SHT_SYMTAB = 2;
-const SHT_STRTAB = 3;
-const SHT_RELA = 4;
-const SHT_NOBITS = 8;
-const SHT_NOTE = 7;
-const SHT_INIT_ARRAY = 14;
-const SHT_FINI_ARRAY = 15;
-const SHT_PREINIT_ARRAY = 16;
+const MG_SHT_PROGBITS = 1;
+const MG_SHT_SYMTAB = 2;
+const MG_SHT_STRTAB = 3;
+const MG_SHT_RELA = 4;
+const MG_SHT_NOBITS = 8;
+const MG_SHT_NOTE = 7;
+const MG_SHT_INIT_ARRAY = 14;
+const MG_SHT_FINI_ARRAY = 15;
+const MG_SHT_PREINIT_ARRAY = 16;
 
-const SHF_WRITE = 0x1;
-const SHF_ALLOC = 0x2;
-const SHF_EXECINSTR = 0x4;
+const MG_SHF_WRITE = 0x1;
+const MG_SHF_ALLOC = 0x2;
+const MG_SHF_EXECINSTR = 0x4;
 const SHF_MERGE = 0x10;
 const SHF_STRINGS = 0x20;
 
-const SHN_UNDEF = 0;
-const SHN_LORESERVE = 0xff00;
-const SHN_COMMON = 0xfff2;
+const MG_SHN_UNDEF = 0;
+const MG_SHN_LORESERVE = 0xff00;
+const MG_SHN_COMMON = 0xfff2;
 
-const STB_LOCAL = 0;
-const STB_GLOBAL = 1;
-const STB_WEAK = 2;
+const MG_STB_LOCAL = 0;
+const MG_STB_GLOBAL = 1;
+const MG_STB_WEAK = 2;
 
-const SYM_SIZE = 24;
-const RELA_SIZE = 24;
+const MG_SYM_SIZE = 24;
+const MG_RELA_SIZE = 24;
 /** 32 位那一套：符号 16 字节，重定位是 `Elf32_Rel`（8 字节，**没有加数**那一格）。 */
-const SYM32_SIZE = 16;
-const REL32_SIZE = 8;
-const SHT_REL = 9;
+const MG_SYM32_SIZE = 16;
+const MG_REL32_SIZE = 8;
+const MG_SHT_REL = 9;
 /** `sizeof(Stab_Sym)`：`n_strx`、`n_type`、`n_other`、`n_desc`、`n_value`。 */
 const STAB_SIZE = 12;
 
-const EM_386 = 3;
-const EM_ARM = 40;
-const EM_X86_64 = 62;
-const EM_AARCH64 = 183;
-const EM_RISCV = 243;
+const MG_EM_386 = 3;
+const MG_EM_ARM = 40;
+const MG_EM_X86_64 = 62;
+const MG_EM_AARCH64 = 183;
+const MG_EM_RISCV = 243;
 
 /* `.eh_frame` 那一条 CIE 用到的几个 DWARF 常量（`dwarf.h` / `tccdbg.c:431`）。 */
 const DW_CFA_nop = 0x00;
 const DW_CFA_def_cfa = 0x0c;
 const DW_CFA_offset = 0x80;
 /** `DW_EH_PE_udata4 | DW_EH_PE_signed | DW_EH_PE_pcrel` */
-const FDE_ENCODING = 0x1b;
+const MG_FDE_ENCODING = 0x1b;
 
-function align(n, to) {
+function mgAlign(n, to) {
   return to <= 1 || n % to === 0 ? n : n + (to - (n % to));
 }
 
 /** 字符串表：0 号是空串。与 `elf.js` 里那一份同一个形状。 */
-class StrTab {
+class mgStrTab {
   constructor() {
     this.bytes = [0];
     this.index = new Map([['', 0]]);
@@ -121,12 +121,12 @@ export const DWARF_SECTIONS = ['.debug_info', '.debug_abbrev', '.debug_line', '.
 /** 这一节的内容要不要跟着并（`tcc_load_object_file` 里那一串 `sh_type` 的筛子）。 */
 function mergeable(type, name, unwind, debug) {
   /* `.stab*` 与 `.debug_*` 只在 `-g` 的时候才装，而且它们**绕过**下面那个
-   * `sh_type` 的筛子 —— 所以 `.stabstr`（`SHT_STRTAB`）也进得来。 */
+   * `sh_type` 的筛子 —— 所以 `.stabstr`（`MG_SHT_STRTAB`）也进得来。 */
   if (name.startsWith('.debug_') || name.startsWith('.stab')) return debug;
   /* `.eh_frame`：节都没造的目标上（macOS、Windows）连输入里的也不要。 */
   if (name.startsWith('.eh_frame')) return unwind;
-  return type === SHT_PROGBITS || type === SHT_NOTE || type === SHT_NOBITS
-    || type === SHT_INIT_ARRAY || type === SHT_FINI_ARRAY || type === SHT_PREINIT_ARRAY;
+  return type === MG_SHT_PROGBITS || type === MG_SHT_NOTE || type === MG_SHT_NOBITS
+    || type === MG_SHT_INIT_ARRAY || type === MG_SHT_FINI_ARRAY || type === MG_SHT_PREINIT_ARRAY;
 }
 
 /**
@@ -146,10 +146,10 @@ function ehFrameCie(machine) {
    * riscv64 是唯一把**版本写成 3** 的（`tccdbg.c:864` 那句
    * `data[eh_start + 8] = 3`），返回地址列是 1（ra），CFA 寄存器是 2（sp）。 */
   const K = new Map([
-    [EM_386, { code: 1, data: 0x7c, ra: 8, cfaReg: 4, cfaOff: 4, ret: [DW_CFA_offset + 8, 1] }],
-    [EM_X86_64, { code: 1, data: 0x78, ra: 16, cfaReg: 7, cfaOff: 8, ret: [DW_CFA_offset + 16, 1] }],
-    [EM_AARCH64, { code: 4, data: 0x78, ra: 30, cfaReg: 31, cfaOff: 0, ret: [] }],
-    [EM_RISCV, { code: 1, data: 0x7c, ra: 1, cfaReg: 2, cfaOff: 0, ret: [], ver: 3 }],
+    [MG_EM_386, { code: 1, data: 0x7c, ra: 8, cfaReg: 4, cfaOff: 4, ret: [DW_CFA_offset + 8, 1] }],
+    [MG_EM_X86_64, { code: 1, data: 0x78, ra: 16, cfaReg: 7, cfaOff: 8, ret: [DW_CFA_offset + 16, 1] }],
+    [MG_EM_AARCH64, { code: 4, data: 0x78, ra: 30, cfaReg: 31, cfaOff: 0, ret: [] }],
+    [MG_EM_RISCV, { code: 1, data: 0x7c, ra: 1, cfaReg: 2, cfaOff: 0, ret: [], ver: 3 }],
   ]);
   const k = K.get(machine);
   if (k === undefined) throw new OmniError(`elf: 不知道 0x${machine.toString(16)} 的 .eh_frame CIE`);
@@ -162,7 +162,7 @@ function ehFrameCie(machine) {
     k.data,                     // sleb data_alignment_factor
     k.ra,                       // uleb 返回地址列
     1,                          // uleb 增补数据长度
-    FDE_ENCODING,
+    MG_FDE_ENCODING,
     DW_CFA_def_cfa,
     k.cfaReg,
     k.cfaOff,
@@ -206,16 +206,16 @@ export function linkObjects(objs, opts) {
   /* `.eh_frame`：arm 上 tcc 根本不造这一节（`tcc.h:1839` 那个 `#if` 把 `TCC_EH_FRAME`
    * 关掉了，`defined TCC_TARGET_ARM` 在排除列表里）—— 这是**目标的事实**，不是调用方
    * 的选择，所以在这儿一并夹掉。 */
-  const unwind = o.unwind === true && machine !== EM_ARM;
+  const unwind = o.unwind === true && machine !== MG_EM_ARM;
   /* 32 位的目标（i386 / arm）：符号短一半，重定位没有加数那一格，而 `new_section`
    * 默认的对齐是 `PTR_SIZE` —— 起手那几条节因此是 4 而不是 8。 */
   const c32 = parsed[0].class32 === true;
   /* `e_flags`：arm 那一路是 `EF_ARM_EABI_VER5 | EF_ARM_VFP_FLOAT`。tcc 是按自己的
    * 配置写的，我们照输入里那份抄 —— 并合的输入本来就是同一个 tcc 出的。 */
   const eflags = parsed[0].flags ?? 0;
-  const symSize = c32 ? SYM32_SIZE : SYM_SIZE;
-  const relSize = c32 ? REL32_SIZE : RELA_SIZE;
-  const relType = c32 ? SHT_REL : SHT_RELA;
+  const symSize = c32 ? MG_SYM32_SIZE : MG_SYM_SIZE;
+  const relSize = c32 ? MG_REL32_SIZE : MG_RELA_SIZE;
+  const relType = c32 ? MG_SHT_REL : MG_SHT_RELA;
   const ptrSize = c32 ? 4 : 8;
   for (const p of parsed) {
     if (p.machine !== machine) throw new OmniError('elf: 这几个目标文件不是一个架构的');
@@ -230,12 +230,12 @@ export function linkObjects(objs, opts) {
     });
     return secs.length - 1;
   };
-  const TEXT = newSec('.text', SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, ptrSize, 0);
-  const DATA = newSec('.data', SHT_PROGBITS, SHF_ALLOC | SHF_WRITE, ptrSize, 0);
-  const RDATA = newSec(rdata, SHT_PROGBITS, SHF_ALLOC, ptrSize, 0);
-  const BSS = newSec('.bss', SHT_NOBITS, SHF_ALLOC | SHF_WRITE, ptrSize, 0);
-  const SYMTAB = newSec('.symtab', SHT_SYMTAB, 0, ptrSize, symSize);
-  const STRTAB = newSec('.strtab', SHT_STRTAB, 0, 1, 0);
+  const TEXT = newSec('.text', MG_SHT_PROGBITS, MG_SHF_ALLOC | MG_SHF_EXECINSTR, ptrSize, 0);
+  const DATA = newSec('.data', MG_SHT_PROGBITS, MG_SHF_ALLOC | MG_SHF_WRITE, ptrSize, 0);
+  const RDATA = newSec(rdata, MG_SHT_PROGBITS, MG_SHF_ALLOC, ptrSize, 0);
+  const BSS = newSec('.bss', MG_SHT_NOBITS, MG_SHF_ALLOC | MG_SHF_WRITE, ptrSize, 0);
+  const SYMTAB = newSec('.symtab', MG_SHT_SYMTAB, 0, ptrSize, symSize);
+  const STRTAB = newSec('.strtab', MG_SHT_STRTAB, 0, 1, 0);
   secs[SYMTAB].link = STRTAB;
   /* `-g` 的时候 `tccelf_new` 就把调试那几节造好了（`tcc_debug_new`）。
    *
@@ -253,11 +253,11 @@ export function linkObjects(objs, opts) {
     for (const nm of DWARF_SECTIONS) {
       if (nm === '.debug_line_str' && dwarf < 5) continue;
       const str = nm === '.debug_str' || nm === '.debug_line_str';
-      dwarfSecs.push(newSec(nm, SHT_PROGBITS, str ? SHF_MERGE | SHF_STRINGS : 0, 1, str ? 1 : 0));
+      dwarfSecs.push(newSec(nm, MG_SHT_PROGBITS, str ? SHF_MERGE | SHF_STRINGS : 0, 1, str ? 1 : 0));
     }
   } else if (debug) {
-    const stab = newSec('.stab', SHT_PROGBITS, 0, 4, STAB_SIZE);
-    const stabstr = newSec('.stabstr', SHT_STRTAB, 0, 1, 0);
+    const stab = newSec('.stab', MG_SHT_PROGBITS, 0, 4, STAB_SIZE);
+    const stabstr = newSec('.stabstr', MG_SHT_STRTAB, 0, 1, 0);
     secs[stab].link = stabstr;
     for (let i = 0; i < STAB_SIZE; i++) secs[stab].data.push(0);
     secs[stab].size = STAB_SIZE;
@@ -265,14 +265,14 @@ export function linkObjects(objs, opts) {
     secs[stabstr].size = 1;
   }
   if (unwind) {
-    const eh = newSec('.eh_frame', SHT_PROGBITS, SHF_ALLOC, ptrSize, 0);
+    const eh = newSec('.eh_frame', MG_SHT_PROGBITS, MG_SHF_ALLOC, ptrSize, 0);
     secs[eh].data = ehFrameCie(machine);
     secs[eh].size = secs[eh].data.length;
   }
 
   /* ---- 符号表。0 号是全 0 的那一条（`init_symtab`）。 */
-  const strs = new StrTab();
-  const syms = [{ name: '', strx: 0, value: 0, size: 0, info: 0, other: 0, shndx: SHN_UNDEF }];
+  const strs = new mgStrTab();
+  const syms = [{ name: '', strx: 0, value: 0, size: 0, info: 0, other: 0, shndx: MG_SHN_UNDEF }];
   /** 非局部符号的名字 -> 号（`find_elf_sym` 那张哈希表）。局部的不进这张表。 */
   const byName = new Map();
   /** 重定位：一条一条攒着，最后按所属节写出去。 */
@@ -280,23 +280,23 @@ export function linkObjects(objs, opts) {
 
   const setSym = (s) => {
     const bind = Math.floor(s.info / 16);
-    if (bind !== STB_LOCAL) {
+    if (bind !== MG_STB_LOCAL) {
       const hit = byName.get(s.name);
       if (hit !== undefined) {
         const old = syms[hit];
         if (old.value === s.value && old.size === s.size && old.info === s.info
           && old.other === s.other && old.shndx === s.shndx) return hit;
-        if (old.shndx !== SHN_UNDEF) {
+        if (old.shndx !== MG_SHN_UNDEF) {
           const oldBind = Math.floor(old.info / 16);
-          if (s.shndx === SHN_UNDEF) return hit;          // 老的有定义，新的没有：不管
-          if (bind === STB_GLOBAL && oldBind === STB_WEAK) {
+          if (s.shndx === MG_SHN_UNDEF) return hit;          // 老的有定义，新的没有：不管
+          if (bind === MG_STB_GLOBAL && oldBind === MG_STB_WEAK) {
             syms[hit] = { ...old, info: s.info, shndx: s.shndx, value: s.value, size: s.size };
             return hit;
           }
-          if (bind === STB_WEAK) return hit;               // 弱的让路
-          const oldCommon = old.shndx === SHN_COMMON || old.shndx === BSS;
-          const newCommon = s.shndx === SHN_COMMON || s.shndx === BSS;
-          if (oldCommon && !newCommon && s.shndx < SHN_LORESERVE) {
+          if (bind === MG_STB_WEAK) return hit;               // 弱的让路
+          const oldCommon = old.shndx === MG_SHN_COMMON || old.shndx === BSS;
+          const newCommon = s.shndx === MG_SHN_COMMON || s.shndx === BSS;
+          if (oldCommon && !newCommon && s.shndx < MG_SHN_LORESERVE) {
             syms[hit] = { ...old, info: s.info, shndx: s.shndx, value: s.value, size: s.size };
             return hit;
           }
@@ -312,7 +312,7 @@ export function linkObjects(objs, opts) {
      * 于是表里的次序是加符号的次序，不是最后排完的次序 —— 这一格错了字节就对不上。 */
     syms.push({ ...s, strx: strs.append(s.name) });
     const no = syms.length - 1;
-    if (bind !== STB_LOCAL) byName.set(s.name, no);
+    if (bind !== MG_STB_LOCAL) byName.set(s.name, no);
     return no;
   };
 
@@ -324,8 +324,8 @@ export function linkObjects(objs, opts) {
      * 次序写），可它确实是链接过程的一部分。 */
     for (const d of declare) if (d.after === oi) {
       setSym({
-        name: d.name, info: STB_GLOBAL * 16, other: 0,
-        shndx: SHN_UNDEF, value: 0, size: 0,
+        name: d.name, info: MG_STB_GLOBAL * 16, other: 0,
+        shndx: MG_SHN_UNDEF, value: 0, size: 0,
       });
     }
     /* `obj.secs` 是 1 号起的，这儿按 ELF 的序号（1 起）来记账。 */
@@ -334,20 +334,20 @@ export function linkObjects(objs, opts) {
     /** 老节号 -> {no（新节号）, off（这一段在新节里的起点）}。 */
     const map = new Map();
     let symtabIdx = -1;
-    for (let i = 1; i < n; i++) if (at(i).type === SHT_SYMTAB) symtabIdx = i;
+    for (let i = 1; i < n; i++) if (at(i).type === MG_SHT_SYMTAB) symtabIdx = i;
 
     /* ---- 一、按自己节头表的次序接节。`.shstrtab` 不并（每份自己重建）。 */
     for (let i = 1; i < n; i++) {
       const sh = at(i);
-      if (sh.type === SHT_STRTAB && sh.name === '.shstrtab') continue;
-      if (sh.type === SHT_SYMTAB) {
+      if (sh.type === MG_SHT_STRTAB && sh.name === '.shstrtab') continue;
+      if (sh.type === MG_SHT_SYMTAB) {
         map.set(i, { no: SYMTAB, off: 0 });
         continue;
       }
-      /* `.strtab` 跟着符号一条条并 —— 可 `.stabstr` 也是 `SHT_STRTAB`，它走
+      /* `.strtab` 跟着符号一条条并 —— 可 `.stabstr` 也是 `MG_SHT_STRTAB`，它走
        * 调试那一路，整块接。 */
       const dbg = sh.name.startsWith('.stab') || sh.name.startsWith('.debug_');
-      if (sh.type === SHT_STRTAB && !dbg) continue;
+      if (sh.type === MG_SHT_STRTAB && !dbg) continue;
       /* 重定位表：能不能并要看**它修的那一节**（`sh = &shdr[sh->sh_info]`）。 */
       const probe = sh.type === relType ? at(sh.info) : sh;
       if (!mergeable(probe.type, probe.name, unwind, debug)) continue;
@@ -359,18 +359,18 @@ export function linkObjects(objs, opts) {
       }
       const s = secs[no];
       /* `section_add`：先把已有的长度补齐到 incoming 的对齐上，再接。 */
-      s.size = align(s.size, al);
+      s.size = mgAlign(s.size, al);
       while (s.data.length < s.size) s.data.push(0);
       const off = s.size;
       if (al > s.al) s.al = al;
-      const sz = sh.type === SHT_NOBITS ? sh.size : sh.bytes.length;
-      if (sh.type !== SHT_NOBITS) for (const b of sh.bytes) s.data.push(b);
+      const sz = sh.type === MG_SHT_NOBITS ? sh.size : sh.bytes.length;
+      if (sh.type !== MG_SHT_NOBITS) for (const b of sh.bytes) s.data.push(b);
       s.size = off + sz;
       map.set(i, { no, off });
       /* arm64/arm/riscv：代码节接完补齐到 4 —— 后面还可能接别的东西，
        * 而指令必须落在 4 的整数倍上（`tcc_load_object_file` 里那个 `#if`）。 */
-      if ((machine === EM_AARCH64 || machine === EM_ARM) && (s.flags & SHF_EXECINSTR) !== 0) {
-        s.size = align(s.size, 4);
+      if ((machine === MG_EM_AARCH64 || machine === MG_EM_ARM) && (s.flags & MG_SHF_EXECINSTR) !== 0) {
+        s.size = mgAlign(s.size, 4);
         while (s.data.length < s.size) s.data.push(0);
       }
     }
@@ -446,7 +446,7 @@ export function linkObjects(objs, opts) {
           value: Number(dv.getBigUint64(p + 8, true)),
           size: Number(dv.getBigUint64(p + 16, true)),
         };
-        if (sym.shndx !== SHN_UNDEF && sym.shndx < SHN_LORESERVE) {
+        if (sym.shndx !== MG_SHN_UNDEF && sym.shndx < MG_SHN_LORESERVE) {
           const m = map.get(sym.shndx);
           if (m === undefined) {                 // 那一节没并进来，这个符号就不要
             trans.push(0);
@@ -527,9 +527,9 @@ export function mergeObjects(objs, opts) {
   const { SYMTAB, STRTAB } = st.idx;
   /* ---- 排符号（`sort_syms`）：局部在前、全局在后，重定位里的号跟着改。 */
   const order = [];
-  for (let i = 0; i < syms.length; i++) if (Math.floor(syms[i].info / 16) === STB_LOCAL) order.push(i);
+  for (let i = 0; i < syms.length; i++) if (Math.floor(syms[i].info / 16) === MG_STB_LOCAL) order.push(i);
   const nlocal = order.length;
-  for (let i = 0; i < syms.length; i++) if (Math.floor(syms[i].info / 16) !== STB_LOCAL) order.push(i);
+  for (let i = 0; i < syms.length; i++) if (Math.floor(syms[i].info / 16) !== MG_STB_LOCAL) order.push(i);
   const newNo = new Array(syms.length).fill(0);
   for (let k = 0; k < order.length; k++) newNo[order[k]] = k;
   const sorted = order.map((i) => syms[i]);
@@ -557,7 +557,7 @@ export function mergeObjects(objs, opts) {
   }
   secs[SYMTAB].info = nlocal;
 
-  const shstr = new StrTab();
+  const shstr = new mgStrTab();
   const out = [];
   for (let i = 1; i < secs.length; i++) {
     const s = secs[i];
@@ -579,7 +579,7 @@ export function mergeObjects(objs, opts) {
         dv.setBigUint64(k * relSize + 8, BigInt(newNo[r.sym]) * 4294967296n + BigInt(r.type), true);
         dv.setBigInt64(k * relSize + 16, r.add, true);
       }
-    } else if (s.type === SHT_NOBITS) body = new Uint8Array(0);
+    } else if (s.type === MG_SHT_NOBITS) body = new Uint8Array(0);
     else body = new Uint8Array(s.data);
     out.push({
       name: s.name,
@@ -590,12 +590,12 @@ export function mergeObjects(objs, opts) {
       info: s.info,
       al: s.al,
       ent: s.ent,
-      size: s.type === SHT_NOBITS ? s.size : body.length,
+      size: s.type === MG_SHT_NOBITS ? s.size : body.length,
       bytes: body,
     });
   }
   out.push({
-    name: '.shstrtab', strx: 0, type: SHT_STRTAB, flags: 0, link: 0, info: 0, al: 1, ent: 0,
+    name: '.shstrtab', strx: 0, type: MG_SHT_STRTAB, flags: 0, link: 0, info: 0, al: 1, ent: 0,
     bytes: new Uint8Array(0),
   });
   for (const s of out) s.strx = shstr.intern(s.name);

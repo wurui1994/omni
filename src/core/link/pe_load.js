@@ -29,12 +29,12 @@ import { readObject } from './elf.js';
 import { readArchive, alacarte } from './ar.js';
 import { readImage } from './pe.js';
 
-const SHT_SYMTAB = 2;
-const SYM_SIZE = 24;
+const PLOAD_SHT_SYMTAB = 2;
+const PLOAD_SYM_SIZE = 24;
 const EM_386 = 3;
 const EM_ARM = 40;
-const SHN_UNDEF = 0;
-const STB_LOCAL = 0;
+const PLOAD_SHN_UNDEF = 0;
+const PLOAD_STB_LOCAL = 0;
 /* `struct pe_rsrc_header`：COFF 的文件头加一条节表项。 */
 const RES_HDR_SIZE = 20 + 40;
 /* `struct pe_rsrc_reloc`：偏移、符号号、类型 —— 紧排，10 字节。 */
@@ -51,10 +51,10 @@ export const PE_GUI = 3;
  * 把一个目标文件的符号表读出来。
  *
  * `readObject` 只到「节的字节」那一层（并合用不着解释符号），这里往下走一层：
- * 找到 `SHT_SYMTAB`，按它的 `sh_link` 找到自己的字符串表，一条 24 字节地读。
+ * 找到 `PLOAD_SHT_SYMTAB`，按它的 `sh_link` 找到自己的字符串表，一条 24 字节地读。
  */
 export function readSymbols(obj) {
-  const st = obj.secs.find((s) => s.type === SHT_SYMTAB);
+  const st = obj.secs.find((s) => s.type === PLOAD_SHT_SYMTAB);
   if (st === undefined) return [];
   /* `sh_link` 是**节号**（连 0 号空节一起数），`secs` 是从 1 号开始摆的。 */
   const strs = obj.secs[st.link - 1];
@@ -71,7 +71,7 @@ export function readSymbols(obj) {
   /* 32 位的 `Elf32_Sym` 是 16 字节，而且字段次序不一样：名字、值、大小在前，
    * `st_info` / `st_other` / `st_shndx` 在后。 */
   const c32 = obj.class32 === true;
-  const size = c32 ? 16 : SYM_SIZE;
+  const size = c32 ? 16 : PLOAD_SYM_SIZE;
   for (let p = 0; p + size <= st.bytes.length; p += size) {
     const info = st.bytes[p + (c32 ? 12 : 4)];
     out.push({
@@ -100,9 +100,9 @@ export class SymTab {
   /** 一个目标文件的符号并进来（局部符号不参与解析，跳过）。 */
   addObject(syms) {
     for (const s of syms) {
-      if (s.bind === STB_LOCAL || s.name === '') continue;
+      if (s.bind === PLOAD_STB_LOCAL || s.name === '') continue;
       const old = this.byName.get(s.name);
-      if (old === undefined || (old === SHN_UNDEF && s.shndx !== SHN_UNDEF)) {
+      if (old === undefined || (old === PLOAD_SHN_UNDEF && s.shndx !== PLOAD_SHN_UNDEF)) {
         this.byName.set(s.name, s.shndx);
       }
     }
@@ -110,18 +110,18 @@ export class SymTab {
 
   /** `set_global_sym(s1, name, NULL, 0)`：加一条未定义的全局符号。 */
   declare(name) {
-    if (!this.byName.has(name)) this.byName.set(name, SHN_UNDEF);
+    if (!this.byName.has(name)) this.byName.set(name, PLOAD_SHN_UNDEF);
   }
 
   has(name) { return this.byName.has(name); }
 
   /** `tcc_load_alacarte` 问的正是这一句：在表里、且还没有定义。 */
-  isUndef(name) { return this.byName.get(name) === SHN_UNDEF; }
+  isUndef(name) { return this.byName.get(name) === PLOAD_SHN_UNDEF; }
 
   /** 还欠着的符号，按进表的次序。 */
   undefined() {
     const out = [];
-    for (const [n, sh] of this.byName) if (sh === SHN_UNDEF) out.push(n);
+    for (const [n, sh] of this.byName) if (sh === PLOAD_SHN_UNDEF) out.push(n);
     return out;
   }
 }

@@ -135,7 +135,7 @@
 //     剩下的四条：没写初值的那一格（方言的函数值没有空值，跟着 `if (p)` 也立不住）、
 //     函数指针的**字段**（方言的结构体字段放不下函数值 —— 第五十七刀的虚派发因此换成了
 //     一格整数标签）、`function**` 与它的数组、`~()` 的部分应用。
-//   - 异常里 `errorcode` 那一半是第五十八刀（自动传播 + `try`：见 propagate 与 errText），
+//   - 异常里 `errorcode` 那一半是第五十八刀（自动传播 + `try`：见 propagate 与 jncErrText），
 //     `try { … }` 与 `catch:` 是第五十九刀（出错那一跳落成一圈一次性循环的 `brk`：见 escape
 //     与 catchBlock）；剩下的是 `finally:`（要一张路由表，连 `return` 也得先绕过去）、`throw`，
 //     加传播插不进去的那两个位置（惰性那几支与循环的条件，见 EC_HOIST 与 ecLazy）。
@@ -696,14 +696,14 @@ function zeroText(t) {
  * 无符号整数上的 -1 就是那一格全 1（这一层的整数一律以回卷后的样子存着，所以这儿直接写
  * 那个数）。别的类型（void / real / 结构体 / 数组 / 函数指针）jancy 没给默认值，回 null。
  */
-function errText(t) {
+function jncErrText(t) {
   if (t.k === 'bool') return '(bool false)';
   if (t.k === 'int') return `(int ${t.u ? (1n << BigInt(t.w)) - 1n : -1n})`;
   if (t.k === 'ptr' || t.k === 'tptr') return `(pnull ${tyText(t)})`;
   if (t.k === 'class') return `(pnull (ptr ${clsRoot(t.name)}))`;
   // 枚举在 jancy 的那张表里带 Integer 位（jnc_Type.cpp:107-111），所以它的出错值走整数那一条
   // —— 按基整数那一格的 -1。方言里枚举本来就发成 int（tyText 那处），于是文本一模一样。
-  if (t.k === 'enum' && t.base !== undefined && t.base !== null) return errText(t.base);
+  if (t.k === 'enum' && t.base !== undefined && t.base !== null) return jncErrText(t.base);
   return null;
 }
 
@@ -716,7 +716,7 @@ function errText(t) {
 function errTest(code, t) {
   if (t.k === 'bool') return `(un "!" ${code})`;
   if (t.k === 'ptr' || t.k === 'tptr' || t.k === 'class') return `(pisnull ${code})`;
-  const ev = errText(t);
+  const ev = jncErrText(t);
   return ev === null ? null : `(bin "==" ${code} ${ev})`;
 }
 
@@ -2366,7 +2366,7 @@ class JncLower {
    * 指针）是"还不收"，jancy 自己就不认的（void / real / 结构体 / 数组）是一条硬错。
    */
   errcReg(node, full, ty) {
-    const ev = errText(ty);
+    const ev = jncErrText(ty);
     if (ev === null) {
       if (errCodeOk(ty)) {
         return this.nope(node, `errorcode 的函数回 ${tyName(ty)}（jancy 那儿它算错误码，`

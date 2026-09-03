@@ -13,13 +13,13 @@
 
 import { OmniError } from '../source/diag.js';
 
-const EM_386 = 3;
-const EM_ARM = 40;
-const EM_X86_64 = 62;
-const EM_AARCH64 = 183;
+const PREL_EM_386 = 3;
+const PREL_EM_ARM = 40;
+const PREL_EM_X86_64 = 62;
+const PREL_EM_AARCH64 = 183;
 
 /* i386（`i386-link.c` 的 `relocate`）。32 位上一格就是 4 字节，所以「直接」那一号
- * （`REL_TYPE_DIRECT`）也是 `R_386_32` —— 与 x86_64 上的 `R_X86_64_64` 对应。 */
+ * （`REL_TYPE_DIRECT`）也是 `R_386_32` —— 与 x86_64 上的 `PREL_R_X86_64_64` 对应。 */
 const R_386_32 = 1;
 const R_386_PC32 = 2;
 const R_386_GOT32 = 3;
@@ -51,7 +51,7 @@ const R_ARM_PREL31 = 42;
 const R_ARM_TLS_LE32 = 108;
 
 /* riscv64（`riscv64-link.c`）。`R_GLOB_DAT` 与 `R_DATA_PTR` 都是 `R_RISCV_64`。 */
-const EM_RISCV = 243;
+const PREL_EM_RISCV = 243;
 const R_RISCV_NONE = 0; const R_RISCV_32 = 1; const R_RISCV_64 = 2;
 const R_RISCV_RELATIVE = 3; const R_RISCV_COPY = 4; const R_RISCV_JUMP_SLOT = 5;
 const R_RISCV_BRANCH = 16; const R_RISCV_JAL = 17; const R_RISCV_CALL = 18;
@@ -68,13 +68,13 @@ const R_RISCV_SET16 = 55; const R_RISCV_32_PCREL = 57;
 const R_RISCV_SET_ULEB128 = 60; const R_RISCV_SUB_ULEB128 = 61;
 
 /* x86_64 */
-const R_X86_64_64 = 1;
-const R_X86_64_PC32 = 2;
-const R_X86_64_PLT32 = 4;
-const R_X86_64_GLOB_DAT = 6;
-const R_X86_64_JUMP_SLOT = 7;
-const R_X86_64_RELATIVE = 8;
-const R_X86_64_GOTPCREL = 9;
+const PREL_R_X86_64_64 = 1;
+const PREL_R_X86_64_PC32 = 2;
+const PREL_R_X86_64_PLT32 = 4;
+const PREL_R_X86_64_GLOB_DAT = 6;
+const PREL_R_X86_64_JUMP_SLOT = 7;
+const PREL_R_X86_64_RELATIVE = 8;
+const PREL_R_X86_64_GOTPCREL = 9;
 const R_X86_64_32 = 10;
 const R_X86_64_32S = 11;
 const R_X86_64_TPOFF32 = 23;
@@ -82,26 +82,26 @@ const R_X86_64_GOTPCRELX = 41;
 const R_X86_64_REX_GOTPCRELX = 42;
 
 /* arm64 */
-const R_AARCH64_ABS64 = 257;
+const PREL_R_AARCH64_ABS64 = 257;
 const R_AARCH64_ABS32 = 258;
 const R_AARCH64_PREL32 = 261;
-const R_AARCH64_ADR_PREL_PG_HI21 = 275;
-const R_AARCH64_ADD_ABS_LO12_NC = 277;
-const R_AARCH64_LDST8_ABS_LO12_NC = 278;
+const PREL_R_AARCH64_ADR_PREL_PG_HI21 = 275;
+const PREL_R_AARCH64_ADD_ABS_LO12_NC = 277;
+const PREL_R_AARCH64_LDST8_ABS_LO12_NC = 278;
 const R_AARCH64_TSTBR14 = 279;
 const R_AARCH64_CONDBR19 = 280;
 const R_AARCH64_JUMP26 = 282;
-const R_AARCH64_CALL26 = 283;
+const PREL_R_AARCH64_CALL26 = 283;
 const R_AARCH64_LDST16_ABS_LO12_NC = 284;
 const R_AARCH64_LDST32_ABS_LO12_NC = 285;
 const R_AARCH64_LDST64_ABS_LO12_NC = 286;
 const R_AARCH64_LDST128_ABS_LO12_NC = 299;
-const R_AARCH64_ADR_GOT_PAGE = 311;
-const R_AARCH64_LD64_GOT_LO12_NC = 312;
+const PREL_R_AARCH64_ADR_GOT_PAGE = 311;
+const PREL_R_AARCH64_LD64_GOT_LO12_NC = 312;
 const R_AARCH64_TLSLE_ADD_TPREL_HI12 = 549;
 const R_AARCH64_TLSLE_ADD_TPREL_LO12 = 550;
-const R_AARCH64_GLOB_DAT = 1025;const R_AARCH64_JUMP_SLOT = 1026;
-const R_AARCH64_RELATIVE = 1027;
+const PREL_R_AARCH64_GLOB_DAT = 1025;const PREL_R_AARCH64_JUMP_SLOT = 1026;
+const PREL_R_AARCH64_RELATIVE = 1027;
 
 /**
  * 落一条重定位。
@@ -139,21 +139,21 @@ export function relocateOne(machine, type, b, at, addr, val, imagebase, weakUnde
   };
   const tprel = () => { const t = tlsSeg(); return val - t.start + t.tcb; };
 
-  if (machine === EM_X86_64) {
+  if (machine === PREL_EM_X86_64) {
     switch (type) {
-      case R_X86_64_64: return add64(val);
+      case PREL_R_X86_64_64: return add64(val);
       case R_X86_64_32:
       case R_X86_64_32S: return add32(val);
-      case R_X86_64_PC32:
-      case R_X86_64_PLT32: return add32(val - addr);
-      case R_X86_64_RELATIVE: return add32(val - imagebase);
+      case PREL_R_X86_64_PC32:
+      case PREL_R_X86_64_PLT32: return add32(val - addr);
+      case PREL_R_X86_64_RELATIVE: return add32(val - imagebase);
       /* GOT 里那一格的地址 - 这一处 - 4（`- 4` 是 `rip` 相对里指令末尾那一段）。 */
-      case R_X86_64_GOTPCREL:
+      case PREL_R_X86_64_GOTPCREL:
       case R_X86_64_GOTPCRELX:
       case R_X86_64_REX_GOTPCRELX: return add32(slot() - addr - 4);
       /* 往 GOT 那一格里**写**符号的地址（不是加）—— tcc 那两句是 `write64le`。 */
-      case R_X86_64_GLOB_DAT:
-      case R_X86_64_JUMP_SLOT: return set64(val);
+      case PREL_R_X86_64_GLOB_DAT:
+      case PREL_R_X86_64_JUMP_SLOT: return set64(val);
       /* 线程局部：偏移是**相对 PT_TLS 那一段的末尾**（x86_64 的 `fs:` 基址指着
        * 线程块的末端，所以这几个偏移都是负数）。Mach-O 上没有 PT_TLS，`tls_end`
        * 是 0，tcc 于是退回「符号所在那一节的末尾」（`val - sec->sh_addr
@@ -165,7 +165,7 @@ export function relocateOne(machine, type, b, at, addr, val, imagebase, weakUnde
       default: throw new OmniError(`reloc: x86_64 还不会 ${type} 号`);
     }
   }
-  if (machine === EM_386) {
+  if (machine === PREL_EM_386) {
     switch (type) {
       case R_386_32: return add32(val);
       case R_386_PC32:
@@ -188,13 +188,13 @@ export function relocateOne(machine, type, b, at, addr, val, imagebase, weakUnde
       default: throw new OmniError(`reloc: i386 还不会 ${type} 号`);
     }
   }
-  if (machine === EM_AARCH64) {
+  if (machine === PREL_EM_AARCH64) {
     switch (type) {
-      case R_AARCH64_ABS64: return add64(val);
+      case PREL_R_AARCH64_ABS64: return add64(val);
       case R_AARCH64_ABS32: return add32(val);
       case R_AARCH64_PREL32: return add32(val - addr);
-      case R_AARCH64_RELATIVE: return add32(val - imagebase);
-      case R_AARCH64_ADR_PREL_PG_HI21: {
+      case PREL_R_AARCH64_RELATIVE: return add32(val - imagebase);
+      case PREL_R_AARCH64_ADR_PREL_PG_HI21: {
         /* 页与页之差，21 位；高 19 位摆在 5..23，低 2 位摆在 29..30。 */
         const off = Math.floor(val / 4096) - Math.floor(addr / 4096);
         if (weakUndef === true && (off < -(1 << 20) || off >= (1 << 20))) {
@@ -203,8 +203,8 @@ export function relocateOne(machine, type, b, at, addr, val, imagebase, weakUnde
         }
         return put32(0x9f00001f, ((off & 0x1ffffc) << 3 | (off & 3) << 29) >>> 0);
       }
-      case R_AARCH64_ADD_ABS_LO12_NC:
-      case R_AARCH64_LDST8_ABS_LO12_NC: return put32(0xffc003ff, ((val & 0xfff) << 10) >>> 0);
+      case PREL_R_AARCH64_ADD_ABS_LO12_NC:
+      case PREL_R_AARCH64_LDST8_ABS_LO12_NC: return put32(0xffc003ff, ((val & 0xfff) << 10) >>> 0);
       case R_AARCH64_LDST16_ABS_LO12_NC: return put32(0xffc003ff, ((val & 0xffe) << 9) >>> 0);
       case R_AARCH64_LDST32_ABS_LO12_NC: return put32(0xffc003ff, ((val & 0xffc) << 8) >>> 0);
       case R_AARCH64_LDST64_ABS_LO12_NC: return put32(0xffc003ff, ((val & 0xff8) << 7) >>> 0);
@@ -214,23 +214,23 @@ export function relocateOne(machine, type, b, at, addr, val, imagebase, weakUnde
       case R_AARCH64_CONDBR19:                        // b.cond/cbz：19 位，摆在 5..23
         return put32(0xff00001f, (((val - addr) / 4 & 0x7ffff) << 5) >>> 0);
       case R_AARCH64_JUMP26:
-      case R_AARCH64_CALL26: {
+      case PREL_R_AARCH64_CALL26: {
         const d = (val - addr) / 4;
         if (weakUndef === true && (d < -(1 << 25) || d >= (1 << 25))) {
           return dv.setUint32(at, 0xd503201f, true);   // 够不着，写个 nop
         }
-        const link = type === R_AARCH64_CALL26 ? 0x80000000 : 0;
+        const link = type === PREL_R_AARCH64_CALL26 ? 0x80000000 : 0;
         return dv.setUint32(at, (0x14000000 | link | (d & 0x3ffffff)) >>> 0, true);
       }
-      case R_AARCH64_ADR_GOT_PAGE: {
+      case PREL_R_AARCH64_ADR_GOT_PAGE: {
         /* 与上面那条一样的编码，只是指的是 `.got` 里那一格。 */
         const off = Math.floor(slot() / 4096) - Math.floor(addr / 4096);
         return put32(0x9f00001f, ((off & 0x1ffffc) << 3 | (off & 3) << 29) >>> 0);
       }
-      case R_AARCH64_LD64_GOT_LO12_NC:
+      case PREL_R_AARCH64_LD64_GOT_LO12_NC:
         return put32(0xfff803ff, ((slot() & 0xff8) << 7) >>> 0);
-      case R_AARCH64_GLOB_DAT:
-      case R_AARCH64_JUMP_SLOT: return set64(val);
+      case PREL_R_AARCH64_GLOB_DAT:
+      case PREL_R_AARCH64_JUMP_SLOT: return set64(val);
       /* 线程局部：arm64 上偏移是「离 PT_TLS 起点的距离 + tp 指着的那个头」。
        * glibc 里 `tpidr_el0` 指着线程控制块（`tcbhead_t`）的开头、数据接在它后面，
        * 那个头是 16 字节；Windows 上 tcc 不加这一段（`#if TCC_TARGET_PE`）。 */
@@ -241,7 +241,7 @@ export function relocateOne(machine, type, b, at, addr, val, imagebase, weakUnde
       default: throw new OmniError(`reloc: arm64 还不会 ${type} 号`);
     }
   }
-  if (machine === EM_ARM) {
+  if (machine === PREL_EM_ARM) {
     switch (type) {
       case R_ARM_NONE: return undefined;
       /* `bl` / `b` 那一族：26 位（存的是右移 2 位的字数），原地那 24 位是加数。
@@ -286,7 +286,7 @@ export function relocateOne(machine, type, b, at, addr, val, imagebase, weakUnde
       default: throw new OmniError(`reloc: arm 还不会 ${type} 号`);
     }
   }
-  if (machine === EM_RISCV) {
+  if (machine === PREL_EM_RISCV) {
     const hiMap = () => {
       if (pcrelHi === undefined) throw new OmniError('reloc: riscv 的 hi/lo 配对要一张表');
       return pcrelHi;

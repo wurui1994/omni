@@ -251,6 +251,30 @@ pthread 就在 libSystem 里、这个开关等于空操作；glibc 2.34 起也�
 `重名多了：243 -> 244` 并把最后几条打出来。它排在 `bootstrap/run.js` **前面**
 （`tests/all.js`）—— 棘轮红了说明新长了债，那比旧债要紧。
 
+### 然后还了第一类的大头：243 -> 22
+
+`tests/bootstrap/dedup.js` 是配套的还债工具。它只做**能证明安全**的那一部分：
+
+- 只改**一个文件**里的名字，而且那个名字**两边都没有 `export`** ——
+  别的文件引不到它，所以词边界改名不会漏改任何引用
+- 同一个文件里的**局部遮蔽照旧成立**：声明与它的引用是一起改的
+- 还剩哪些重名，问的是**前端自己**（`emit-js` 的报错），不另写一份规则
+
+`UPPER_SNAKE` 前面加 `前缀_`，别的加 `前缀` + 首字母大写 —— 读起来还是原来那个词
+（`ALWAYS_GOTPLT` -> `MO_ALWAYS_GOTPLT`、`targetConf` -> `moTargetConf`）。
+
+扫了十一个文件（`link/` 那八个 + `arm64|x64/from_mir.js` + `interp/libc.js` +
+`frontend-jnc/lower.js`），**243 -> 22**。撞的确实都是「两边各写一份同名小工具」：
+ELF/Mach-O/PE 三份写出器各有一套 `SHT_*`/`ARCH`/`sectionClass`，
+arm64 与 x64 各有一套 `widthOf`/`nyi`/`outArgsBytes`。
+
+**剩下的 22 条是导出的名字**（`writeObject`、`typeText`、`utf8Bytes`……），
+改它们要动调用方，得一处一处看 —— 不在 `dedup.js` 的范围里，也不该由一支脚本代劳。
+
+每一批改完都跑了对应的门：`arm64/from-mir` 88/0、`arm64/link` 21/0、`x64/from-mir` 90/0、
+`x64/link` 21/0、`elf-merge`/`elf-roundtrip`/`pe-*` 八门全 0 不同、`macho-tcc` 4/0、
+`macho-libc` 180/0、`tcc-link` 83/0、`c/run` 207/0、`run` 133/0、`sexpr` 78/0。
+
 ## 落地顺序
 
 1. ✅ 运行时出 JS，变成真的 C 文件树 + `.o` 缓存 + `--amalgamate`

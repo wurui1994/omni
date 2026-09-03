@@ -28,8 +28,12 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
 const CLI = join(root, 'src', 'core', 'cli.js');
 
-/** 基线：量出来的那两个数（2026-09-04）。**只许往下调**。 */
-const BASE_DUP = 243;
+/** 基线：量出来的那两个数。**只许往下调**。
+ *
+ *   243 -> 22（2026-09-04，`dedup.js` 扫了十一个文件）：剩下这 22 条都是**导出**的名字，
+ *   改它们要动调用方，得一处一处看，不在 `dedup.js` 的范围里。
+ *   4：`import * as`，四处全是 `from './encode.js'`，改名解决不了（见 ADR-0001 那一节）。 */
+const BASE_DUP = 22;
 const BASE_NS = 4;
 
 let pass = 0;

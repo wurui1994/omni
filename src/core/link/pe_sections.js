@@ -27,48 +27,48 @@ import { mergeObjects, DWARF_SECTIONS } from './elf_merge.js';
 import { readSymbols } from './pe_load.js';
 import { buildImports } from './pe.js';
 
-const SHT_PROGBITS = 1;
-const SHT_RELA = 4;
-const SHT_STRTAB = 3;
-const SHT_NOBITS = 8;
-const SHT_INIT_ARRAY = 14;
-const SHT_FINI_ARRAY = 15;
-const SHF_WRITE = 0x1;
-const SHF_ALLOC = 0x2;
-const SHF_EXECINSTR = 0x4;
-const SHF_TLS = 0x400;
-const RELA_SIZE = 24;
-/** 32 位那一路：`SHT_REL`，一条 8 字节，`r_info` 是「高 24 位符号号 + 低 8 位类型」。 */
-const SHT_REL = 9;
-const REL32_SIZE = 8;
-const R_X86_64_RELATIVE = 8;
-const R_AARCH64_RELATIVE = 1027;
-const R_386_RELATIVE = 8;
-const R_ARM_RELATIVE = 23;
+const PSEC_SHT_PROGBITS = 1;
+const PSEC_SHT_RELA = 4;
+const PSEC_SHT_STRTAB = 3;
+const PSEC_SHT_NOBITS = 8;
+const PSEC_SHT_INIT_ARRAY = 14;
+const PSEC_SHT_FINI_ARRAY = 15;
+const PSEC_SHF_WRITE = 0x1;
+const PSEC_SHF_ALLOC = 0x2;
+const PSEC_SHF_EXECINSTR = 0x4;
+const PSEC_SHF_TLS = 0x400;
+const PSEC_RELA_SIZE = 24;
+/** 32 位那一路：`PSEC_SHT_REL`，一条 8 字节，`r_info` 是「高 24 位符号号 + 低 8 位类型」。 */
+const PSEC_SHT_REL = 9;
+const PSEC_REL32_SIZE = 8;
+const PSEC_R_X86_64_RELATIVE = 8;
+const PSEC_R_AARCH64_RELATIVE = 1027;
+const PSEC_R_386_RELATIVE = 8;
+const PSEC_R_ARM_RELATIVE = 23;
 /** `pe_build_reloc` 里那个 `PE_IMAGE_REL`：64 位是 `DIR64`，32 位是 `HIGHLOW`。 */
 const IMAGE_REL_BASED_HIGHLOW = 3;
 const IMAGE_REL_BASED_DIR64 = 10;
 
-const SHN_UNDEF = 0;
-const SHN_COMMON = 0xfff2;
-const STT_NOTYPE = 0;
-const STT_FUNC = 2;
-const STB_GLOBAL = 1;
+const PSEC_SHN_UNDEF = 0;
+const PSEC_SHN_COMMON = 0xfff2;
+const PSEC_STT_NOTYPE = 0;
+const PSEC_STT_FUNC = 2;
+const PSEC_STB_GLOBAL = 1;
 const ST_PE_EXPORT = 0x10;
 const ST_PE_IMPORT = 0x20;
 const ST_PE_STDCALL = 0x40;
 
-const EM_386 = 3;
-const EM_X86_64 = 62;
-const EM_ARM = 40;
-const EM_AARCH64 = 183;
+const PSEC_EM_386 = 3;
+const PSEC_EM_X86_64 = 62;
+const PSEC_EM_ARM = 40;
+const PSEC_EM_AARCH64 = 183;
 
 const SECTION_ALIGN = 0x1000;
 const FILE_ALIGN = 0x200;
-const HDR_SIZE = 392;
-const SECHDR_SIZE = 40;
+const PSEC_HDR_SIZE = 392;
+const PSEC_SECHDR_SIZE = 40;
 
-const SCN_CNT_CODE = 0x00000020;
+const PSEC_SCN_CNT_CODE = 0x00000020;
 const SCN_CNT_INITIALIZED_DATA = 0x00000040;
 const SCN_CNT_UNINITIALIZED_DATA = 0x00000080;
 const SCN_MEM_DISCARDABLE = 0x02000000;
@@ -84,37 +84,37 @@ export const CLS = {
 
 /** 一个导入函数的跳转桩占多少字节（`pe_check_symbols`）。 */
 function thunkSize(machine) {
-  if (machine === EM_AARCH64) return 24;
-  if (machine === EM_ARM) return 12;
-  if (machine === EM_X86_64 || machine === EM_386) return 8;
+  if (machine === PSEC_EM_AARCH64) return 24;
+  if (machine === PSEC_EM_ARM) return 12;
+  if (machine === PSEC_EM_X86_64 || machine === PSEC_EM_386) return 8;
   throw new OmniError(`pe: 不认识的架构 0x${machine.toString(16)}`);
 }
 
 /** 需要在装载时重定位的那种重定位号（`REL_TYPE_DIRECT`）。 */
 function directRelocType(machine) {
-  if (machine === EM_AARCH64) return 257;                // R_AARCH64_ABS64
-  if (machine === EM_X86_64) return 1;                   // R_X86_64_64
-  if (machine === EM_386) return 1;                      // R_386_32
-  if (machine === EM_ARM) return 2;                      // R_ARM_ABS32
+  if (machine === PSEC_EM_AARCH64) return 257;                // R_AARCH64_ABS64
+  if (machine === PSEC_EM_X86_64) return 1;                   // R_X86_64_64
+  if (machine === PSEC_EM_386) return 1;                      // R_386_32
+  if (machine === PSEC_EM_ARM) return 2;                      // R_ARM_ABS32
   throw new OmniError(`pe: 不认识的架构 0x${machine.toString(16)}`);
 }
 
-const align = (n, to) => Math.ceil(n / to) * to;
+const psecAlign = (n, to) => Math.ceil(n / to) * to;
 
 /** `pe_section_class`。 */
 export function sectionClass(s) {
   if (s.name.startsWith('.stab') || s.name.startsWith('.debug_')) return CLS.debug;
-  if ((s.flags & SHF_ALLOC) !== 0) {
-    if ((s.flags & SHF_TLS) !== 0) return CLS.tls;
-    if (s.type === SHT_PROGBITS || s.type === SHT_INIT_ARRAY || s.type === SHT_FINI_ARRAY) {
-      if ((s.flags & SHF_EXECINSTR) !== 0) return CLS.text;
-      if ((s.flags & SHF_WRITE) !== 0) return CLS.data;
+  if ((s.flags & PSEC_SHF_ALLOC) !== 0) {
+    if ((s.flags & PSEC_SHF_TLS) !== 0) return CLS.tls;
+    if (s.type === PSEC_SHT_PROGBITS || s.type === PSEC_SHT_INIT_ARRAY || s.type === PSEC_SHT_FINI_ARRAY) {
+      if ((s.flags & PSEC_SHF_EXECINSTR) !== 0) return CLS.text;
+      if ((s.flags & PSEC_SHF_WRITE) !== 0) return CLS.data;
       if (s.name === '.rsrc') return CLS.rsrc;
       if (s.name === '.iedat') return CLS.idata;
       if (s.name === '.pdata') return CLS.pdata;
       return CLS.rdata;
     }
-    if (s.type === SHT_NOBITS) return CLS.bss;
+    if (s.type === PSEC_SHT_NOBITS) return CLS.bss;
     return CLS.other;
   }
   return s.name === '.reloc' ? CLS.reloc : CLS.last;
@@ -135,7 +135,7 @@ export function collectImports(syms, dyn, opts) {
   const thunkIdx = new Map();                      // 导入符号 → 它的桩是第几个
   const bind = new Map();                          // 并合后的符号名 → 它绑到哪个导入符号
   for (const sym of syms) {
-    if (sym.shndx !== SHN_UNDEF || sym.name === '') continue;
+    if (sym.shndx !== PSEC_SHN_UNDEF || sym.name === '') continue;
     let imp = (sym.other & ST_PE_IMPORT) !== 0;
     let hit = null;
     for (let n = 0; n < 2; n++) {
@@ -162,9 +162,9 @@ export function collectImports(syms, dyn, opts) {
     if (!byDll.has(hit.dll)) { byDll.set(hit.dll, []); order.push(hit.dll); }
     const list = byDll.get(hit.dll);
     if (!list.some((x) => x.name === hit.key)) list.push({ name: hit.key, ordinal: hit.ordinal });
-    /* 汇编来的符号常常没有类型，所以 `STT_NOTYPE` 也算函数 —— 除非它是
+    /* 汇编来的符号常常没有类型，所以 `PSEC_STT_NOTYPE` 也算函数 —— 除非它是
      * `__declspec(dllimport)` 标出来的数据。 */
-    const func = sym.type === STT_FUNC || (sym.type === STT_NOTYPE && !imp);
+    const func = sym.type === PSEC_STT_FUNC || (sym.type === PSEC_STT_NOTYPE && !imp);
     if (func && !thunkIdx.has(hit.key)) thunkIdx.set(hit.key, thunkIdx.size);
     bind.set(sym.name, { key: hit.key, func });
   }
@@ -314,14 +314,14 @@ export function peSections(inp) {
   /* 32 位的目标（i386 / arm-wince）：符号 16 字节、重定位表叫 `.rel.X` 而不是
    * `.rela.X`、一条 8 字节没有加数，装载时重定位那张表里的类型是 `HIGHLOW`。 */
   const c32 = mo.class32 === true;
-  const relSize = c32 ? REL32_SIZE : RELA_SIZE;
-  const relType = c32 ? SHT_REL : SHT_RELA;
+  const relSize = c32 ? PSEC_REL32_SIZE : PSEC_RELA_SIZE;
+  const relType = c32 ? PSEC_SHT_REL : PSEC_SHT_RELA;
   const relPfx = c32 ? '.rel' : '.rela';
   const syms = readSymbols(mo);
   /* 映像基址与「要不要 `.reloc`」都是按目标定的（`IMAGE_BASE_EXE` 与
    * `DLLCHARACTERISTICS`）：x86_64 是 0x400000 且不带 `DYNAMIC_BASE`，
    * arm64 是 0x140000000 且带。 */
-  const arm64 = machine === EM_AARCH64;
+  const arm64 = machine === PSEC_EM_AARCH64;
   const dll = inp.dll === true;
   /* `DllCharacteristics`：arm64-win32 的默认值是 0x8160（`libtcc.c` 里那个
    * `#if defined TCC_TARGET_ARM64 && defined TCC_TARGET_PE`），别的目标是 0。
@@ -333,14 +333,14 @@ export function peSections(inp) {
   /* `pe_set_options`：DLL 与 GUI 是 2、别的是 3，`-Wl,-subsystem=` 一律盖过。
    * arm（wince）那一支整个 `#if` 掉了 —— 一律 9，连 DLL 也是。 */
   const subsystem = inp.subsystem
-    ?? (machine === EM_ARM ? 9 : (dll || inp.gui === true ? 2 : 3));
+    ?? (machine === PSEC_EM_ARM ? 9 : (dll || inp.gui === true ? 2 : 3));
   /* subsystem 1（native）那两个对齐都是 0x20，别的是 0x1000 / 0x200。 */
   const sectionAlign = inp.sectionAlign ?? (subsystem === 1 ? 0x20 : SECTION_ALIGN);
   const fileAlign = inp.fileAlign ?? (subsystem === 1 ? 0x20 : FILE_ALIGN);
   /* `IMAGE_BASE_EXE` / `IMAGE_BASE_DLL`：DLL 那一路除了 arm64 都是 0x10000000，
    * 可执行文件那一路 x86_64 与 i386 是 0x400000、arm64 是 0x140000000、arm 是 0x100000。 */
-  const BASE_EXE = new Map([[EM_X86_64, 0x400000], [EM_386, 0x400000],
-    [EM_AARCH64, 0x140000000], [EM_ARM, 0x100000]]);
+  const BASE_EXE = new Map([[PSEC_EM_X86_64, 0x400000], [PSEC_EM_386, 0x400000],
+    [PSEC_EM_AARCH64, 0x140000000], [PSEC_EM_ARM, 0x100000]]);
   let imagebase = dll
     ? (arm64 ? 0x180000000 : 0x10000000)
     : (BASE_EXE.get(machine) ?? 0x400000);
@@ -364,13 +364,13 @@ export function peSections(inp) {
   }));
   const find = (n) => secs.find((s) => s.name === n);
 
-  /* `pe_load_res`：每份资源文件加一节 `.rsrc`（`SHT_PROGBITS | SHF_ALLOC`）、一个
+  /* `pe_load_res`：每份资源文件加一节 `.rsrc`（`PSEC_SHT_PROGBITS | PSEC_SHF_ALLOC`）、一个
    * 同名的局部符号，再把 COFF 那张重定位表整条改挂成 `R_XXX_RELATIVE` 指向那个符号。
    * 于是资源目录里指向数据的那几格落笔时得到「原地那个节内偏移 + 这一节的 RVA」。
    * `RELATIVE` 不是 `REL_TYPE_DIRECT`，所以这几条**不进** `.reloc`。 */
   for (const rs of inp.res ?? []) {
     const sec = {
-      name: '.rsrc', type: SHT_PROGBITS, flags: SHF_ALLOC,
+      name: '.rsrc', type: PSEC_SHT_PROGBITS, flags: PSEC_SHF_ALLOC,
       size: rs.bytes.length, bytes: rs.bytes,
     };
     secs.push(sec);
@@ -379,8 +379,8 @@ export function peSections(inp) {
     syms.push({ name: '.rsrc', info: 0, bind: 0, type: 0, other: 0, shndx, value: 0, size: 0 });
     const rela = new Uint8Array(rs.relocs.length * relSize);
     const dv = new DataView(rela.buffer);
-    const REL = new Map([[EM_AARCH64, R_AARCH64_RELATIVE], [EM_X86_64, R_X86_64_RELATIVE],
-      [EM_386, R_386_RELATIVE], [EM_ARM, R_ARM_RELATIVE]]);
+    const REL = new Map([[PSEC_EM_AARCH64, PSEC_R_AARCH64_RELATIVE], [PSEC_EM_X86_64, PSEC_R_X86_64_RELATIVE],
+      [PSEC_EM_386, PSEC_R_386_RELATIVE], [PSEC_EM_ARM, PSEC_R_ARM_RELATIVE]]);
     const rel = REL.get(machine);
     if (rel === undefined) throw new OmniError(`pe: 不认识的架构 0x${machine.toString(16)}`);
     for (let i = 0; i < rs.relocs.length; i++) {
@@ -399,14 +399,14 @@ export function peSections(inp) {
     });
   }
 
-  /* `resolve_common_syms` 里那一半：`SHN_COMMON` 的符号在 `.bss` 里安家。
+  /* `resolve_common_syms` 里那一半：`PSEC_SHN_COMMON` 的符号在 `.bss` 里安家。
    * （`tcc -r` 不做这一步，所以并合出来的表里它们还是 COMMON。） */
   const bss = find('.bss');
   const commons = [];
   for (const sym of syms) {
-    if (sym.shndx !== SHN_COMMON || sym.size === 0) continue;
+    if (sym.shndx !== PSEC_SHN_COMMON || sym.size === 0) continue;
     if (bss === undefined) throw new OmniError('pe: 有 COMMON 符号可是没有 .bss');
-    const at = align(bss.size, sym.value || 1);    // COMMON 的 st_value 是对齐要求
+    const at = psecAlign(bss.size, sym.value || 1);    // COMMON 的 st_value 是对齐要求
     bss.size = at + sym.size;
     commons.push({ name: sym.name, sec: bss, off: at });
   }
@@ -425,10 +425,10 @@ export function peSections(inp) {
     const s = symOf(name);
     if (s === undefined) {
       syms.push({
-        name, info: STB_GLOBAL * 16, bind: STB_GLOBAL, type: STT_NOTYPE,
-        other: 0, shndx: SHN_UNDEF, value: 0, size: 0,
+        name, info: PSEC_STB_GLOBAL * 16, bind: PSEC_STB_GLOBAL, type: PSEC_STT_NOTYPE,
+        other: 0, shndx: PSEC_SHN_UNDEF, value: 0, size: 0,
       });
-    } else if (s.shndx !== SHN_UNDEF) {
+    } else if (s.shndx !== PSEC_SHN_UNDEF) {
       return;                                      // 已经有定义：tcc 只警告一句就走
     }
     linker.set(name, { sec, off });
@@ -436,7 +436,7 @@ export function peSections(inp) {
   const pair = (name, sec, off) => {
     define(name, sec, off);
     const bare = symOf(name.slice(1));
-    if (bare !== undefined && bare.shndx === SHN_UNDEF) define(name.slice(1), sec, off);
+    if (bare !== undefined && bare.shndx === PSEC_SHN_UNDEF) define(name.slice(1), sec, off);
   };
   pair('_etext', find('.text'), find('.text')?.size ?? 0);
   pair('_edata', find('.data'), find('.data')?.size ?? 0);
@@ -444,13 +444,13 @@ export function peSections(inp) {
   for (const nm of ['.preinit_array', '.init_array', '.fini_array']) {
     let s = find(nm);
     let end;
-    if (s === undefined || (s.flags & SHF_ALLOC) === 0) { end = 0; s = find('.text'); } else { end = s.size; }
+    if (s === undefined || (s.flags & PSEC_SHF_ALLOC) === 0) { end = 0; s = find('.text'); } else { end = s.size; }
     define(`__${nm.slice(1)}_start`, s, 0);
     define(`__${nm.slice(1)}_end`, s, end);
   }
   for (const s of secs) {
-    if ((s.flags & SHF_ALLOC) === 0) continue;
-    if (s.type !== SHT_PROGBITS && s.type !== SHT_NOBITS && s.type !== SHT_STRTAB) continue;
+    if ((s.flags & PSEC_SHF_ALLOC) === 0) continue;
+    if (s.type !== PSEC_SHT_PROGBITS && s.type !== PSEC_SHT_NOBITS && s.type !== PSEC_SHT_STRTAB) continue;
     const p0 = s.name.startsWith('.') ? s.name.slice(1) : s.name;
     if (!/^[A-Za-z_$0-9]*$/.test(p0)) continue;    // 名字能不能写成 C 的标识符
     define(`__start_${p0}`, s, 0);
@@ -462,24 +462,24 @@ export function peSections(inp) {
   const text = find('.text');
   if (text === undefined) throw new OmniError('pe: 没有 .text');
   const tsz = thunkSize(machine);
-  const thunkAt = align(text.size, 8);
+  const thunkAt = psecAlign(text.size, 8);
   text.size = thunkAt + nthunks * tsz;
   /* arm64、arm 与 i386 上 `R_XXX_THUNKFIX` 正好**就是** `REL_TYPE_DIRECT` —— 于是每个桩
    * 里指向 IAT 那一格也要进 `.reloc`。只有 x86_64 上它是 PC32，不算。 */
-  const THUNKFIX_AT = new Map([[EM_AARCH64, 16], [EM_ARM, 8], [EM_386, 2]]);
+  const THUNKFIX_AT = new Map([[PSEC_EM_AARCH64, 16], [PSEC_EM_ARM, 8], [PSEC_EM_386, 2]]);
   const fixAt = THUNKFIX_AT.get(machine);
   if (fixAt !== undefined) {
     text.extraDirect = [];
     for (let k = 0; k < nthunks; k++) text.extraDirect.push(thunkAt + k * tsz + fixAt);
   }
 
-  const hasTls = secs.some((s) => (s.flags & SHF_TLS) !== 0);
+  const hasTls = secs.some((s) => (s.flags & PSEC_SHF_TLS) !== 0);
   /* `sizeof(IMAGE_TLS_DIRECTORY)`：四个指针加两个 DWORD —— 32 位上是 24 字节。 */
   const ptrSize = c32 ? 4 : 8;
   const tlsSize = hasTls ? 4 * ptrSize + 8 : 0;
 
   const reloc = hasReloc
-    ? { name: '.reloc', type: SHT_PROGBITS, flags: 0, size: 0, bytes: new Uint8Array(0) }
+    ? { name: '.reloc', type: PSEC_SHT_PROGBITS, flags: 0, size: 0, bytes: new Uint8Array(0) }
     : null;
   if (reloc !== null) secs.push(reloc);
 
@@ -503,10 +503,10 @@ export function peSections(inp) {
     if (cls >= CLS.last) continue;
     const c = cls === CLS.bss ? CLS.data : cls;     // PE_MERGE_DATA
     if (si !== null && c === si.cls && c !== CLS.debug) {
-      addr = align(addr, 16);                       // 与上一节并成一条
+      addr = psecAlign(addr, 16);                       // 与上一节并成一条
     } else {
       si = null;
-      addr = align(addr, sectionAlign);
+      addr = psecAlign(addr, sectionAlign);
     }
     sec.vaddr = addr;
 
@@ -514,13 +514,13 @@ export function peSections(inp) {
     if (thunk === null && c === CLS.rdata) {
       thunk = sec;
       if (dlls.length !== 0) {
-        const at = align(sec.size, 16);
+        const at = psecAlign(sec.size, 16);
         imp = { rva: addr - imagebase, at, dlls, ptr: c32 ? 4 : 8 };
         sec.size = at + buildImports(imp).length;
       }
       /* `pe_build_exports` 是无条件调的 —— 可执行文件里带 `__declspec(dllexport)`
        * 的符号一样进这张表。没有这样的符号时它自己回 `null`。 */
-      exp = buildExports(syms, inp.outName, align(sec.size, 16),
+      exp = buildExports(syms, inp.outName, psecAlign(sec.size, 16),
         addr - imagebase, inp.leadingUnderscore === true);
       if (exp !== null) sec.size = exp.at + exp.size;
       /* `pe_build_tls(pe, NULL)`：导出表后面再留一份 `IMAGE_TLS_DIRECTORY`（64 位
@@ -530,9 +530,9 @@ export function peSections(inp) {
       if (tlsSize !== 0) {
         const dataSec = find('.data');
         if (dataSec === undefined) throw new OmniError('pe: 有线程局部的节，可是没有 .data');
-        const dir = align(sec.size, 16);
+        const dir = psecAlign(sec.size, 16);
         sec.size = dir + tlsSize;
-        const data = align(dataSec.size, 16);
+        const data = psecAlign(dataSec.size, 16);
         dataSec.size = data + ptrSize * 4;
         sec.extraDirect = [];
         for (let n = 0; n < 4; n++) sec.extraDirect.push(dir + n * ptrSize);
@@ -597,11 +597,11 @@ export function peSections(inp) {
     sec.peIndex = infos.length;
     addr += sec.size;
     si.vsize = addr - si.vaddr;
-    if (sec.type !== SHT_NOBITS) si.dataSize = si.vsize;
+    if (sec.type !== PSEC_SHT_NOBITS) si.dataSize = si.vsize;
 
     /* `pe_build_tls(pe, s)`：线程局部那一条在节表里**改名叫 `.tls`**（哪怕并进来的
      * 是 `.tdata` 与 `.tbss` 两节），起点记第一节的地址、终点记最后一节的末尾。 */
-    if ((sec.flags & SHF_TLS) !== 0 && tls !== null) {
+    if ((sec.flags & PSEC_SHF_TLS) !== 0 && tls !== null) {
       si.name = '.tls';
       if (tls.start === 0) tls.start = sec.vaddr;
       tls.end = sec.vaddr + sec.size;
@@ -611,12 +611,12 @@ export function peSections(inp) {
   /* 文件偏移（`pe_write`）：头之后一节一节按 `FileAlignment` 排下去。没有内容的节
    * （`.bss`）不占文件，可 `-vv` 打出来的那一格是**当时的游标**，不是它的
    * `PointerToRawData`（那一格是 0）—— 打印那一句在 `if (si->data_size)` 之前。 */
-  let off = align(HDR_SIZE + infos.length * SECHDR_SIZE, fileAlign);
+  let off = psecAlign(PSEC_HDR_SIZE + infos.length * PSEC_SECHDR_SIZE, fileAlign);
   for (const info of infos) {
     info.filePos = off;
     if (info.dataSize === 0) { info.ptr = 0; info.rawSize = 0; continue; }
     info.ptr = off;
-    off = align(off + info.dataSize, fileAlign);
+    off = psecAlign(off + info.dataSize, fileAlign);
     info.rawSize = off - info.ptr;
   }
 
@@ -630,10 +630,10 @@ export function peSections(inp) {
 
 function peFlags(sec) {
   let f = SCN_MEM_READ;
-  if ((sec.flags & SHF_EXECINSTR) !== 0) f |= SCN_MEM_EXECUTE | SCN_CNT_CODE;
-  else if (sec.type === SHT_NOBITS && (sec.flags & SHF_TLS) === 0) f |= SCN_CNT_UNINITIALIZED_DATA;
+  if ((sec.flags & PSEC_SHF_EXECINSTR) !== 0) f |= SCN_MEM_EXECUTE | PSEC_SCN_CNT_CODE;
+  else if (sec.type === PSEC_SHT_NOBITS && (sec.flags & PSEC_SHF_TLS) === 0) f |= SCN_CNT_UNINITIALIZED_DATA;
   else f |= SCN_CNT_INITIALIZED_DATA;
-  if ((sec.flags & SHF_WRITE) !== 0) f |= SCN_MEM_WRITE;
-  if ((sec.flags & SHF_ALLOC) === 0) f |= SCN_MEM_DISCARDABLE;
+  if ((sec.flags & PSEC_SHF_WRITE) !== 0) f |= SCN_MEM_WRITE;
+  if ((sec.flags & PSEC_SHF_ALLOC) === 0) f |= SCN_MEM_DISCARDABLE;
   return f >>> 0;
 }

@@ -47,38 +47,38 @@ import { readObject } from './elf.js';
 import { readArchive, alacarte } from './ar.js';
 import { readSymbols, SymTab } from './pe_load.js';
 
-const EM_X86_64 = 62;
-const EM_AARCH64 = 183;
+const MO_EM_X86_64 = 62;
+const MO_EM_AARCH64 = 183;
 
-const SHT_PROGBITS = 1;
-const SHT_SYMTAB = 2;
-const SHT_STRTAB = 3;
-const SHT_RELA = 4;
-const SHT_NOBITS = 8;
-const SHT_INIT_ARRAY = 14;
-const SHT_FINI_ARRAY = 15;
+const MO_SHT_PROGBITS = 1;
+const MO_SHT_SYMTAB = 2;
+const MO_SHT_STRTAB = 3;
+const MO_SHT_RELA = 4;
+const MO_SHT_NOBITS = 8;
+const MO_SHT_INIT_ARRAY = 14;
+const MO_SHT_FINI_ARRAY = 15;
 /** `SHT_LOOS + 42` —— tcc 拿它标「只活在 `__LINKEDIT` 里」的那几条节。 */
 const SHT_LINKEDIT = 0x60000000 + 42;
 
-const SHF_WRITE = 0x1;
-const SHF_ALLOC = 0x2;
-const SHF_EXECINSTR = 0x4;
+const MO_SHF_WRITE = 0x1;
+const MO_SHF_ALLOC = 0x2;
+const MO_SHF_EXECINSTR = 0x4;
 
-const SHN_UNDEF = 0;
-const SHN_ABS = 0xfff1;
-const SHN_COMMON = 0xfff2;
-const SHN_LORESERVE = 0xff00;
+const MO_SHN_UNDEF = 0;
+const MO_SHN_ABS = 0xfff1;
+const MO_SHN_COMMON = 0xfff2;
+const MO_SHN_LORESERVE = 0xff00;
 /** `SHN_LOOS + 2`：未定义，但来自某个 dylib —— `relocate_syms` 于是不喊。 */
 const SHN_FROMDLL = 0xff20 + 2;
 
-const STB_LOCAL = 0;
-const STB_GLOBAL = 1;
-const STB_WEAK = 2;
-const STT_NOTYPE = 0;
-const STT_OBJECT = 1;
-const STT_FUNC = 2;
-const STT_SECTION = 3;
-const STT_FILE = 4;
+const MO_STB_LOCAL = 0;
+const MO_STB_GLOBAL = 1;
+const MO_STB_WEAK = 2;
+const MO_STT_NOTYPE = 0;
+const MO_STT_OBJECT = 1;
+const MO_STT_FUNC = 2;
+const MO_STT_SECTION = 3;
+const MO_STT_FILE = 4;
 const STT_TLS = 6;
 
 // ---- mach 头
@@ -228,39 +228,39 @@ const ALL_SEGMENT = [
 ];
 
 // ---- 重定位号：只认这两个架构
-const R_X86_64_64 = 1;
-const R_X86_64_PC32 = 2;
-const R_X86_64_PLT32 = 4;
-const R_X86_64_GOTPCREL = 9;
-const R_X86_64_JUMP_SLOT = 7;
-const R_AARCH64_ABS64 = 257;
-const R_AARCH64_ADR_PREL_PG_HI21 = 275;
+const MO_R_X86_64_64 = 1;
+const MO_R_X86_64_PC32 = 2;
+const MO_R_X86_64_PLT32 = 4;
+const MO_R_X86_64_GOTPCREL = 9;
+const MO_R_X86_64_JUMP_SLOT = 7;
+const MO_R_AARCH64_ABS64 = 257;
+const MO_R_AARCH64_ADR_PREL_PG_HI21 = 275;
 const R_AARCH64_LDST8_ABS_LO12_NC = 278;
-const R_AARCH64_JUMP_SLOT = 1026;
-const R_AARCH64_CALL26 = 283;
-const R_AARCH64_ADR_GOT_PAGE = 311;
-const R_AARCH64_LD64_GOT_LO12_NC = 312;
+const MO_R_AARCH64_JUMP_SLOT = 1026;
+const MO_R_AARCH64_CALL26 = 283;
+const MO_R_AARCH64_ADR_GOT_PAGE = 311;
+const MO_R_AARCH64_LD64_GOT_LO12_NC = 312;
 
-const NO_GOTPLT = 0;
-const BUILD_GOT_ONLY = 1;
-const AUTO_GOTPLT = 2;
-const ALWAYS_GOTPLT = 3;
+const MO_NO_GOTPLT = 0;
+const MO_BUILD_GOT_ONLY = 1;
+const MO_AUTO_GOTPLT = 2;
+const MO_ALWAYS_GOTPLT = 3;
 
 /** `code_reloc()`：这一条是不是「代码里的跳转」——要 PLT 的那种。 */
-const CODE_RELOC = new Map([
-  [EM_X86_64, new Set([R_X86_64_PC32, R_X86_64_PLT32, R_X86_64_JUMP_SLOT, 24, 31])],
-  [EM_AARCH64, new Set([282, R_AARCH64_CALL26, R_AARCH64_JUMP_SLOT, 280, 279])],
+const MO_CODE_RELOC = new Map([
+  [MO_EM_X86_64, new Set([MO_R_X86_64_PC32, MO_R_X86_64_PLT32, MO_R_X86_64_JUMP_SLOT, 24, 31])],
+  [MO_EM_AARCH64, new Set([282, MO_R_AARCH64_CALL26, MO_R_AARCH64_JUMP_SLOT, 280, 279])],
 ]);
 
 /** `gotplt_entry_type()`：抄 `x86_64-link.c` / `arm64-link.c` 里那两张表。 */
-const GOTPLT = new Map([
-  [EM_X86_64, {
+const MO_GOTPLT = new Map([
+  [MO_EM_X86_64, {
     no: new Set([5, 6, 7, 8, 18, 23]),
     always: new Set([3, 4, 9, 17, 19, 20, 21, 25, 26, 27, 29, 31, 41, 42]),
     buildOnly: new Set([22]),
     auto: new Set([1, 2, 10, 11, 24]),
   }],
-  [EM_AARCH64, {
+  [MO_EM_AARCH64, {
     no: new Set([261, 263, 264, 265, 266, 275, 277, 278, 279, 280, 284, 285, 286,
       299, 549, 550, 1025, 1026, 1024]),
     always: new Set([311, 312]),
@@ -269,22 +269,22 @@ const GOTPLT = new Map([
   }],
 ]);
 
-function gotpltEntryType(machine, type) {
-  const t = GOTPLT.get(machine);
+function moGotpltEntryType(machine, type) {
+  const t = MO_GOTPLT.get(machine);
   if (t === undefined) throw new OmniError(`macho: 还不会 ${machine} 号架构`);
-  if (t.no.has(type)) return NO_GOTPLT;
-  if (t.always.has(type)) return ALWAYS_GOTPLT;
-  if (t.buildOnly.has(type)) return BUILD_GOT_ONLY;
-  if (t.auto.has(type)) return AUTO_GOTPLT;
+  if (t.no.has(type)) return MO_NO_GOTPLT;
+  if (t.always.has(type)) return MO_ALWAYS_GOTPLT;
+  if (t.buildOnly.has(type)) return MO_BUILD_GOT_ONLY;
+  if (t.auto.has(type)) return MO_AUTO_GOTPLT;
   throw new OmniError(`macho: ${type} 号该不该走 GOT，还没写`);
 }
 
-function codeReloc(machine, type) {
-  const s = CODE_RELOC.get(machine);
+function moCodeReloc(machine, type) {
+  const s = MO_CODE_RELOC.get(machine);
   return s !== undefined && s.has(type) ? 1 : 0;
 }
 
-function align(n, to) {
+function moAlign(n, to) {
   return Math.ceil(n / to) * to;
 }
 
@@ -312,27 +312,27 @@ function ulebPush(out, v) {
   } while (x !== 0);
 }
 
-function targetConf(machine) {
-  if (machine === EM_X86_64) {
+function moTargetConf(machine) {
+  if (machine === MO_EM_X86_64) {
     return {
       cputype: CPU_TYPE_X86_64,
       cpusubtype: (CPU_SUBTYPE_LIB64 | CPU_SUBTYPE_X86_ALL) >>> 0,
       stubSize: 6,
-      dataPtr: R_X86_64_64,
-      jmpSlot: R_X86_64_JUMP_SLOT,
-      gotReloc: R_X86_64_GOTPCREL,
-      callReloc: R_X86_64_PLT32,
+      dataPtr: MO_R_X86_64_64,
+      jmpSlot: MO_R_X86_64_JUMP_SLOT,
+      gotReloc: MO_R_X86_64_GOTPCREL,
+      callReloc: MO_R_X86_64_PLT32,
     };
   }
-  if (machine === EM_AARCH64) {
+  if (machine === MO_EM_AARCH64) {
     return {
       cputype: CPU_TYPE_ARM64,
       cpusubtype: CPU_SUBTYPE_ARM64_ALL,
       stubSize: 12,
-      dataPtr: R_AARCH64_ABS64,
-      jmpSlot: R_AARCH64_JUMP_SLOT,
-      gotReloc: R_AARCH64_ADR_GOT_PAGE,
-      callReloc: R_AARCH64_CALL26,
+      dataPtr: MO_R_AARCH64_ABS64,
+      jmpSlot: MO_R_AARCH64_JUMP_SLOT,
+      gotReloc: MO_R_AARCH64_ADR_GOT_PAGE,
+      callReloc: MO_R_AARCH64_CALL26,
     };
   }
   throw new OmniError(`macho: 还不会给 ${machine} 号架构写可执行文件`);
@@ -344,7 +344,7 @@ function chAt(s, i) {
 }
 
 /** 节名能不能写成 C 的标识符（`__start_X` / `__stop_X` 认这个）。 */
-function cName(name) {
+function moCName(name) {
   const p0 = name.startsWith('.') ? name.slice(1) : name;
   for (let i = 0; i < p0.length; i++) {
     const c = p0[i];
@@ -433,10 +433,10 @@ function exportTrie(syms, secs, vmaddr) {
   for (let i = 1; i < syms.length; i++) {
     const s = syms[i];
     const bind = Math.floor(s.info / 16);
-    if (s.shndx === SHN_UNDEF || s.shndx >= SHN_LORESERVE) continue;
-    if (bind !== STB_GLOBAL && bind !== STB_WEAK) continue;
+    if (s.shndx === MO_SHN_UNDEF || s.shndx >= MO_SHN_LORESERVE) continue;
+    if (bind !== MO_STB_GLOBAL && bind !== MO_STB_WEAK) continue;
     let flag = EXPORT_SYMBOL_FLAGS_KIND_REGULAR;
-    if (bind === STB_WEAK) flag |= EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION;
+    if (bind === MO_STB_WEAK) flag |= EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION;
     const addr = s.value + secs[s.shndx].addr - vmaddr;
     trie.push({
       name: s.name,
@@ -684,7 +684,7 @@ function loadInputs(inp) {
   /** 胖二进制里挑哪一片，看的是我们这一趟的目标。目标文件是 **ELF**（tcc 的 `-c`
    * 在所有目标上都写 ELF），所以架构从 `e_machine`（+18）来，再换成 cputype。 */
   const cputype = inp.objs.length === 0 ? CPU_TYPE_X86_64
-    : targetConf(new DataView(inp.objs[0].buffer, inp.objs[0].byteOffset,
+    : moTargetConf(new DataView(inp.objs[0].buffer, inp.objs[0].byteOffset,
       inp.objs[0].byteLength).getUint16(18, true)).cputype;
   for (const one of inp.dylibs === undefined ? [] : inp.dylibs) {
     if (typeof one === 'string') {
@@ -757,7 +757,7 @@ export function machoExe(inp) {
     machine, secs, syms, relas, byName,
   } = st;
   const { TEXT, DATA, RDATA, BSS, SYMTAB } = st.idx;
-  const conf = targetConf(machine);
+  const conf = moTargetConf(machine);
   const findSec = (n) => {
     for (let i = 1; i < secs.length; i++) if (secs[i].name === n) return i;
     return -1;
@@ -767,12 +767,12 @@ export function machoExe(inp) {
    * 造析构函数那一段、造 GOT 与桩子都要用它。 */
   const relocSec = new Map();
   for (let i = 1; i < secs.length; i++) {
-    if (secs[i].type === SHT_RELA) relocSec.set(secs[i].relaFor, i);
+    if (secs[i].type === MO_SHT_RELA) relocSec.set(secs[i].relaFor, i);
   }
   const putReloc = (target, at, type, sym, add) => {
     let ri = relocSec.get(target);
     if (ri === undefined) {
-      ri = st.newSec(`.rela${secs[target].name}`, SHT_RELA, 0, 8, 24);
+      ri = st.newSec(`.rela${secs[target].name}`, MO_SHT_RELA, 0, 8, 24);
       secs[ri].link = SYMTAB;
       secs[ri].info = target;
       secs[ri].relaFor = target;
@@ -794,24 +794,24 @@ export function machoExe(inp) {
     name: '__mh_execute_header',
     value: -4096,
     size: 0,
-    info: STB_GLOBAL * 16 + STT_OBJECT,
+    info: MO_STB_GLOBAL * 16 + MO_STT_OBJECT,
     other: 0,
     shndx: TEXT,
   });
   const mhSym = byName.get('__mh_execute_header');
   const FINI = findSec('.fini_array') < 0
-    ? st.newSec('.fini_array', SHT_PROGBITS, SHF_ALLOC, 8, 0)
+    ? st.newSec('.fini_array', MO_SHT_PROGBITS, MO_SHF_ALLOC, 8, 0)
     : findSec('.fini_array');
   if (secs[FINI].size !== 0) {
     /* Mach-O 上没有 `.fini_array` 这回事：tcc **当场生成一段代码** ——
      * 一个 `___GLOBAL_init_65535`，里头对每个析构函数调一次 `___cxa_atexit(f, 0,
      * &__mh_execute_header)`，然后把这个函数自己挂到 `.init_array` 上，
-     * 再把 `.fini_array` 清空、摘掉 `SHF_ALLOC`。 */
+     * 再把 `.fini_array` 清空、摘掉 `MO_SHF_ALLOC`。 */
     const initSym = st.setSym({
       name: '___GLOBAL_init_65535',
       value: secs[TEXT].size,
       size: 0,
-      info: STB_LOCAL * 16 + STT_FUNC,
+      info: MO_STB_LOCAL * 16 + MO_STT_FUNC,
       other: 0,
       shndx: TEXT,
     });
@@ -819,9 +819,9 @@ export function machoExe(inp) {
       name: '___cxa_atexit',
       value: 0,
       size: 0,
-      info: STB_GLOBAL * 16 + STT_FUNC,
+      info: MO_STB_GLOBAL * 16 + MO_STT_FUNC,
       other: 0,
-      shndx: SHN_UNDEF,
+      shndx: MO_SHN_UNDEF,
     });
     const t = secs[TEXT];
     const push32 = (v) => {
@@ -834,21 +834,21 @@ export function machoExe(inp) {
     };
     const fr = relocSec.get(FINI);
     const dtors = fr === undefined ? [] : (relas.get(fr) ?? []);
-    if (machine === EM_AARCH64) {
+    if (machine === MO_EM_AARCH64) {
       push32(0xa9bf7bfd);                          // stp x29, x30, [sp, #-16]!
       push32(0x910003fd);                          // mov x29, sp
       for (const rel of dtors) {
         const base = t.size;
-        putReloc(TEXT, base, R_AARCH64_ADR_PREL_PG_HI21, rel.sym, 0);
+        putReloc(TEXT, base, MO_R_AARCH64_ADR_PREL_PG_HI21, rel.sym, 0);
         push32(0x90000000);                        // adrp x0, dtor@page
         putReloc(TEXT, base + 4, R_AARCH64_LDST8_ABS_LO12_NC, rel.sym, 0);
         push32(0x91000000);                        // add x0, x0, dtor@pageoff
         push32(0xd2800001);                        // mov x1, #0
-        putReloc(TEXT, base + 12, R_AARCH64_ADR_PREL_PG_HI21, mhSym, 0);
+        putReloc(TEXT, base + 12, MO_R_AARCH64_ADR_PREL_PG_HI21, mhSym, 0);
         push32(0x90000002);                        // adrp x2, mh@page
         putReloc(TEXT, base + 16, R_AARCH64_LDST8_ABS_LO12_NC, mhSym, 0);
         push32(0x91000042);                        // add x2, x2, mh@pageoff
-        putReloc(TEXT, base + 20, R_AARCH64_CALL26, atExit, 0);
+        putReloc(TEXT, base + 20, MO_R_AARCH64_CALL26, atExit, 0);
         push32(0x94000000);                        // bl ___cxa_atexit
       }
       push32(0xa8c17bfd);                          // ldp x29, x30, [sp], #16
@@ -865,9 +865,9 @@ export function machoExe(inp) {
           0x48, 0x8d, 0x15, 0, 0, 0, 0,            // lea mh(%rip),%rdx
           0xe8, 0, 0, 0, 0,                        // call ___cxa_atexit
         ]);
-        putReloc(TEXT, base + 3, R_X86_64_PC32, rel.sym, -4);
-        putReloc(TEXT, base + 17, R_X86_64_PC32, mhSym, -4);
-        putReloc(TEXT, base + 22, R_X86_64_PLT32, atExit, -4);
+        putReloc(TEXT, base + 3, MO_R_X86_64_PC32, rel.sym, -4);
+        putReloc(TEXT, base + 17, MO_R_X86_64_PC32, mhSym, -4);
+        putReloc(TEXT, base + 22, MO_R_X86_64_PLT32, atExit, -4);
       }
       pushB([0x5d, 0xc3]);                         // pop %rbp; ret
     }
@@ -877,13 +877,13 @@ export function machoExe(inp) {
     }
     secs[FINI].data = [];
     secs[FINI].size = 0;
-    secs[FINI].flags &= ~SHF_ALLOC;
-    /* `add_array(s1, ".init_array", init_sym)`：`shf_RELRO` 在非 PE 上就是 `SHF_ALLOC`。 */
+    secs[FINI].flags &= ~MO_SHF_ALLOC;
+    /* `add_array(s1, ".init_array", init_sym)`：`shf_RELRO` 在非 PE 上就是 `MO_SHF_ALLOC`。 */
     const IA = findSec('.init_array') < 0
-      ? st.newSec('.init_array', SHT_PROGBITS, SHF_ALLOC, 8, 0)
+      ? st.newSec('.init_array', MO_SHT_PROGBITS, MO_SHF_ALLOC, 8, 0)
       : findSec('.init_array');
-    secs[IA].flags = SHF_ALLOC;
-    secs[IA].type = SHT_INIT_ARRAY;
+    secs[IA].flags = MO_SHF_ALLOC;
+    secs[IA].type = MO_SHT_INIT_ARRAY;
     secs[IA].al = 8;
     putReloc(IA, secs[IA].size, conf.dataPtr, initSym, 0);
     for (let k = 0; k < 8; k++) secs[IA].data.push(0);
@@ -892,10 +892,10 @@ export function machoExe(inp) {
 
   // ---- resolve_common_syms
   for (const s of syms) {
-    if (s.shndx === SHN_COMMON && s.size !== 0) {
+    if (s.shndx === MO_SHN_COMMON && s.size !== 0) {
       const bss = secs[BSS];
       const al = s.value < 1 ? 1 : s.value;
-      const off = align(bss.size, al);
+      const off = moAlign(bss.size, al);
       bss.size = off + s.size;
       if (al > bss.al) bss.al = al;
       s.value = off;
@@ -910,10 +910,10 @@ export function machoExe(inp) {
    * 少了它们，Mach-O 的符号表就短一截（也就少了那 17 条），后面所有偏移全错。 */
   const defined = (n) => {
     const i = byName.get(n);
-    return i !== undefined && syms[i].shndx !== SHN_UNDEF;
+    return i !== undefined && syms[i].shndx !== MO_SHN_UNDEF;
   };
   const defineSym = (name, sec, off) => st.setSym({
-    name, value: off, size: 0, info: STB_GLOBAL * 16 + STT_NOTYPE, other: 0, shndx: sec,
+    name, value: off, size: 0, info: MO_STB_GLOBAL * 16 + MO_STT_NOTYPE, other: 0, shndx: sec,
   });
   const setLinkerSym = (name, sec, needRef) => {
     if (!defined(name) && !(needRef && !byName.has(name))) {
@@ -931,7 +931,7 @@ export function machoExe(inp) {
     for (const nm of ['.preinit_array', '.init_array', '.fini_array']) {
       let i = findSec(nm);
       let end;
-      if (i < 0 || (secs[i].flags & SHF_ALLOC) === 0) {
+      if (i < 0 || (secs[i].flags & MO_SHF_ALLOC) === 0) {
         end = 0;
         i = TEXT;
       } else end = secs[i].size;
@@ -940,9 +940,9 @@ export function machoExe(inp) {
     }
     for (let i = 1; i < secs.length; i++) {
       const s = secs[i];
-      if ((s.flags & SHF_ALLOC) === 0) continue;
-      if (s.type !== SHT_PROGBITS && s.type !== SHT_NOBITS && s.type !== SHT_STRTAB) continue;
-      const p0 = cName(s.name);
+      if ((s.flags & MO_SHF_ALLOC) === 0) continue;
+      if (s.type !== MO_SHT_PROGBITS && s.type !== MO_SHT_NOBITS && s.type !== MO_SHT_STRTAB) continue;
+      const p0 = moCName(s.name);
       if (p0 === null) continue;
       defineSym(`__start_${p0}`, i, 0);
       defineSym(`__stop_${p0}`, i, s.size);
@@ -953,12 +953,12 @@ export function machoExe(inp) {
    *
    * 造节的次序是写死的：`__stubs`、`.got`、`CHAINED_FIXUPS`、`EXPORT`、`LEINDIR`、
    * `LESYMTAB`、`LESTRTAB` —— 后五条落在 `__LINKEDIT` 里，摆放的次序就是这个次序。 */
-  const STUBS = st.newSec('__stubs', SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, 8, 0);
-  const GOT = st.newSec('.got', SHT_PROGBITS, SHF_ALLOC | SHF_WRITE, 8, 0);
+  const STUBS = st.newSec('__stubs', MO_SHT_PROGBITS, MO_SHF_ALLOC | MO_SHF_EXECINSTR, 8, 0);
+  const GOT = st.newSec('.got', MO_SHT_PROGBITS, MO_SHF_ALLOC | MO_SHF_WRITE, 8, 0);
   const stubsym = st.setSym({
-    name: '.__stubs', value: 0, size: 0, info: STB_LOCAL * 16 + STT_SECTION, other: 0, shndx: STUBS,
+    name: '.__stubs', value: 0, size: 0, info: MO_STB_LOCAL * 16 + MO_STT_SECTION, other: 0, shndx: STUBS,
   });
-  const LE = (name) => st.newSec(name, SHT_LINKEDIT, SHF_ALLOC | SHF_WRITE, 8, 0);
+  const LE = (name) => st.newSec(name, SHT_LINKEDIT, MO_SHF_ALLOC | MO_SHF_WRITE, 8, 0);
   const CHAINED = LE('CHAINED_FIXUPS');
   const EXPORTS = LE('EXPORT');
   const INDIR = LE('LEINDIR');
@@ -985,12 +985,12 @@ export function machoExe(inp) {
   nlist.sort((a, b) => {
     const sa = syms[a.elf];
     const sb = syms[b.elf];
-    let r = (Math.floor(sb.info / 16) === STB_LOCAL ? 1 : 0)
-      - (Math.floor(sa.info / 16) === STB_LOCAL ? 1 : 0);
+    let r = (Math.floor(sb.info / 16) === MO_STB_LOCAL ? 1 : 0)
+      - (Math.floor(sa.info / 16) === MO_STB_LOCAL ? 1 : 0);
     if (r !== 0) return r;
-    r = (sa.shndx === SHN_UNDEF ? 1 : 0) - (sb.shndx === SHN_UNDEF ? 1 : 0);
+    r = (sa.shndx === MO_SHN_UNDEF ? 1 : 0) - (sb.shndx === MO_SHN_UNDEF ? 1 : 0);
     if (r !== 0) return r;
-    if (Math.floor(sa.info / 16) !== STB_LOCAL && sa.name !== sb.name) {
+    if (Math.floor(sa.info / 16) !== MO_STB_LOCAL && sa.name !== sb.name) {
       return sa.name < sb.name ? -1 : 1;
     }
     return a.elf - b.elf;
@@ -1028,7 +1028,7 @@ export function machoExe(inp) {
   };
   for (let i = 1; i < secs.length; i++) {
     const sr = secs[i];
-    if (sr.type !== SHT_RELA) continue;
+    if (sr.type !== MO_SHT_RELA) continue;
     const tgt = sr.relaFor;
     if (secs[tgt].name.startsWith('.debug_')) continue;
     const list = relas.get(i);
@@ -1036,10 +1036,10 @@ export function machoExe(inp) {
     for (const rel of list) {
       const save = { ...rel };
       const { type } = rel;
-      const g = gotpltEntryType(machine, type);
-      const forCode = codeReloc(machine, type) !== 0;
+      const g = moGotpltEntryType(machine, type);
+      const forCode = moCodeReloc(machine, type) !== 0;
       const sym = syms[rel.sym];
-      if (sym.shndx === SHN_UNDEF || g === ALWAYS_GOTPLT) {
+      if (sym.shndx === MO_SHN_UNDEF || g === MO_ALWAYS_GOTPLT) {
         let a = attrOf.get(rel.sym);
         if (a === undefined) {
           a = { gotOff: 0, pltOff: -1, dynIndex: 0 };
@@ -1052,22 +1052,22 @@ export function machoExe(inp) {
           for (let k = 0; k < 8; k++) secs[GOT].data.push(0);
           secs[GOT].size += 8;
           putReloc(GOT, a.gotOff, conf.jmpSlot, rel.sym, 0);
-          if (Math.floor(sym.info / 16) === STB_LOCAL) {
-            if (sym.shndx === SHN_UNDEF) {
+          if (Math.floor(sym.info / 16) === MO_STB_LOCAL) {
+            if (sym.shndx === MO_SHN_UNDEF) {
               throw new OmniError(`macho: 局部符号 '${sym.name}' 没有定义`);
             }
             goti.push(INDIRECT_SYMBOL_LOCAL);
           } else {
             goti.push(e2msym[rel.sym]);
-            if (sym.shndx === SHN_UNDEF && type === conf.gotReloc) {
+            if (sym.shndx === MO_SHN_UNDEF && type === conf.gotReloc) {
               a.pltOff = -bindRebase.length - 2;
               bindRebaseAdd(1, GOT, save, a);
               dropGotReloc();
             }
-            if (forCode && sym.shndx === SHN_UNDEF) dropGotReloc();
+            if (forCode && sym.shndx === MO_SHN_UNDEF) dropGotReloc();
           }
         }
-        if (forCode && sym.shndx === SHN_UNDEF) {
+        if (forCode && sym.shndx === MO_SHN_UNDEF) {
           if (a.pltOff < -1) {
             /* 上面那条 bind 作废 —— 这个符号要走 `__stubs`，不是直接绑 GOT。 */
             bindRebase[-a.pltOff - 2].bind = 2;
@@ -1079,17 +1079,17 @@ export function machoExe(inp) {
              * 桩子并没造出来；同一个符号下一条重定位于是照着这个偏移改写。 */
             if (type !== conf.callReloc) continue;
             const d = secs[STUBS].data;
-            if (machine === EM_X86_64) {
+            if (machine === MO_EM_X86_64) {
               d.push(0xff, 0x25, 0, 0, 0, 0);              // jmpq *ofs(%rip)
               secs[STUBS].size += 6;
-              putReloc(STUBS, a.pltOff + 2, R_X86_64_GOTPCREL, rel.sym, 0);
+              putReloc(STUBS, a.pltOff + 2, MO_R_X86_64_GOTPCREL, rel.sym, 0);
             } else {
               const w32 = (v) => {
                 d.push(v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >>> 24) & 0xff);
               };
-              putReloc(STUBS, a.pltOff, R_AARCH64_ADR_GOT_PAGE, rel.sym, 0);
+              putReloc(STUBS, a.pltOff, MO_R_AARCH64_ADR_GOT_PAGE, rel.sym, 0);
               w32(0x90000010);                             // adrp x16, #sym
-              putReloc(STUBS, a.pltOff + 4, R_AARCH64_LD64_GOT_LO12_NC, rel.sym, 0);
+              putReloc(STUBS, a.pltOff + 4, MO_R_AARCH64_LD64_GOT_LO12_NC, rel.sym, 0);
               w32(0xf9400210);                             // ldr x16,[x16, #sym]
               w32(0xd61f0200);                             // br x16
               secs[STUBS].size += 12;
@@ -1103,7 +1103,7 @@ export function machoExe(inp) {
         }
       }
       if (type === conf.dataPtr || type === conf.jmpSlot) {
-        bindRebaseAdd(sym.shndx === SHN_UNDEF ? 1 : 0, tgt, save, null);
+        bindRebaseAdd(sym.shndx === MO_SHN_UNDEF ? 1 : 0, tgt, save, null);
       }
     }
   }
@@ -1123,10 +1123,10 @@ export function machoExe(inp) {
   for (let k = 0; k < nlist.length; k++) {
     const sym = syms[nlist[k].elf];
     const bind = Math.floor(sym.info / 16);
-    if (bind === STB_LOCAL) {
+    if (bind === MO_STB_LOCAL) {
       if (ilocal === -1) ilocal = k;
       if (iextdef !== -1 || iundef !== -1) throw new OmniError('macho: 局部符号排到全局后头了');
-    } else if (sym.shndx !== SHN_UNDEF) {
+    } else if (sym.shndx !== MO_SHN_UNDEF) {
       if (iextdef === -1) iextdef = k;
       if (iundef !== -1) throw new OmniError('macho: 有定义的外部符号排到未定义后头了');
     } else {
@@ -1134,7 +1134,7 @@ export function machoExe(inp) {
       /* 弱符号、或者某个 dylib 导出了这个名字 —— 那就不是「没定义」，是「来自 dylib」。
        * 造 dylib 时这道筛子整个撤掉（`|| s1->output_type != TCC_OUTPUT_EXE`）：
        * 谁来填由装载时的平坦查找决定。 */
-      if (!shared && bind !== STB_WEAK && !loaded.dynsym.has(sym.name)) {
+      if (!shared && bind !== MO_STB_WEAK && !loaded.dynsym.has(sym.name)) {
         throw new OmniError(`macho: 符号 '${sym.name}' 没有定义`);
       }
       sym.shndx = SHN_FROMDLL;
@@ -1149,15 +1149,15 @@ export function machoExe(inp) {
   for (let i = secs.length - 1; i >= 1; i--) {
     const s = secs[i];
     let sk = sk_unknown;
-    if ((s.flags & SHF_ALLOC) !== 0 || s.name.startsWith('.debug_')) {
-      if (s.type === SHT_INIT_ARRAY) sk = sk_init;
-      else if (s.type === SHT_FINI_ARRAY) sk = sk_fini;
-      else if (s.type === SHT_NOBITS) sk = sk_bss;
-      else if (s.type === SHT_SYMTAB) sk = sk_discard;
-      else if (s.type === SHT_STRTAB) sk = s.name === '.stabstr' ? sk_stab_str : sk_discard;
-      else if (s.type === SHT_RELA) sk = sk_discard;
+    if ((s.flags & MO_SHF_ALLOC) !== 0 || s.name.startsWith('.debug_')) {
+      if (s.type === MO_SHT_INIT_ARRAY) sk = sk_init;
+      else if (s.type === MO_SHT_FINI_ARRAY) sk = sk_fini;
+      else if (s.type === MO_SHT_NOBITS) sk = sk_bss;
+      else if (s.type === MO_SHT_SYMTAB) sk = sk_discard;
+      else if (s.type === MO_SHT_STRTAB) sk = s.name === '.stabstr' ? sk_stab_str : sk_discard;
+      else if (s.type === MO_SHT_RELA) sk = sk_discard;
       else if (s.type === SHT_LINKEDIT) sk = sk_linkedit;
-      else if (s.type === SHT_PROGBITS) {
+      else if (s.type === MO_SHT_PROGBITS) {
         if (i === STUBS) sk = sk_stubs;
         else if (i === RDATA) sk = sk_ro_data;
         else if (i === GOT) sk = sk_nl_ptr;
@@ -1171,8 +1171,8 @@ export function machoExe(inp) {
         else if (s.name === '.debug_aranges') sk = sk_debug_aranges;
         else if (s.name === '.debug_str') sk = sk_debug_str;
         else if (s.name === '.debug_line_str') sk = sk_debug_line_str;
-        else if ((s.flags & SHF_EXECINSTR) !== 0) sk = sk_text;
-        else if ((s.flags & SHF_WRITE) !== 0) sk = sk_rw_data;
+        else if ((s.flags & MO_SHF_EXECINSTR) !== 0) sk = sk_text;
+        else if ((s.flags & MO_SHF_WRITE) !== 0) sk = sk_rw_data;
         else sk = sk_ro_data;
       }
     } else sk = sk_discard;
@@ -1242,15 +1242,15 @@ export function machoExe(inp) {
   /* ---- calc_fixup_size：链式修正那一块有多大，摆放之前就得算出来 —— 它自己
    * 也在 `__LINKEDIT` 里，长度差一个字节后面的偏移全错。 */
   const calcFixupSize = () => {
-    let size = align(28, 8);                            // dyld_chained_fixups_header
-    size += align(8 + (segs.length - 1) * 4, 8);        // dyld_chained_starts_in_image
+    let size = moAlign(28, 8);                            // dyld_chained_fixups_header
+    size += moAlign(8 + (segs.length - 1) * 4, 8);        // dyld_chained_starts_in_image
     for (let i = TEXTSEG; i < segs.length - 1; i++) {
       const pages = Math.ceil(segs[i].vmsize / SEG_PAGE_SIZE);
-      size += align(24 + (pages - 1) * 2, 8);           // dyld_chained_starts_in_segment
+      size += moAlign(24 + (pages - 1) * 2, 8);           // dyld_chained_starts_in_segment
     }
     size += nBind * 4 + 1;                              // dyld_chained_import[] + 一个 0
     for (const b of bindRebase) if (b.bind !== 0) size += syms[b.rel.sym].name.length + 1;
-    size = align(size, 8);
+    size = moAlign(size, 8);
     secs[CHAINED].size = size;
     secs[CHAINED].data = new Array(size).fill(0);
   };
@@ -1283,7 +1283,7 @@ export function machoExe(inp) {
         addr: 0,
         size: 0,
         offset: 0,
-        align: 0,
+        moAlign: 0,
         flags: SKINFO[sk].flags,
         r1: 0,
         r2: 0,
@@ -1294,9 +1294,9 @@ export function machoExe(inp) {
       if (sk === sk_nl_ptr) sec.r1 = nrPlt;
     }
     if (seg.vmaddr === -1) {
-      curaddr = align(curaddr, SEG_PAGE_SIZE);
+      curaddr = moAlign(curaddr, SEG_PAGE_SIZE);
       seg.vmaddr = curaddr;
-      fileofs = align(fileofs, SEG_PAGE_SIZE);
+      fileofs = moAlign(fileofs, SEG_PAGE_SIZE);
       seg.fileoff = fileofs;
     }
     let al = 0;
@@ -1304,25 +1304,25 @@ export function machoExe(inp) {
       const a = log2of(secs[i].al);
       if (secs[i].al !== 0 && al < a) al = a;
     }
-    if (sec !== null) sec.align = al;
+    if (sec !== null) sec.moAlign = al;
     let alv = 2 ** al;
     if (alv > 4096) {
-      if (sec !== null) sec.align = 12;
+      if (sec !== null) sec.moAlign = 12;
       alv = 4096;
     }
-    curaddr = align(curaddr, alv);
-    fileofs = align(fileofs, alv);
+    curaddr = moAlign(curaddr, alv);
+    fileofs = moAlign(fileofs, alv);
     if (sec !== null) {
       sec.addr = curaddr;
       sec.offset = fileofs;
     }
     for (const i of skSect[sk]) {
       const s = secs[i];
-      curaddr = align(curaddr, s.al);
+      curaddr = moAlign(curaddr, s.al);
       s.addr = curaddr;
       curaddr += s.size;
-      if (s.type !== SHT_NOBITS) {
-        fileofs = align(fileofs, s.al);
+      if (s.type !== MO_SHT_NOBITS) {
+        fileofs = moAlign(fileofs, s.al);
         s.off = fileofs;
         fileofs += s.size;
       }
@@ -1368,12 +1368,12 @@ export function machoExe(inp) {
 
   // ---- relocate_syms + relocate_sections
   for (const s of syms) {
-    if (s.shndx !== SHN_UNDEF && s.shndx < SHN_LORESERVE) s.value += secs[s.shndx].addr;
+    if (s.shndx !== MO_SHN_UNDEF && s.shndx < MO_SHN_LORESERVE) s.value += secs[s.shndx].addr;
   }
   const entryName = inp.entryName === undefined ? '_main' : inp.entryName;
   if (!shared) {
     const ei = byName.get(entryName);
-    if (ei === undefined || syms[ei].shndx === SHN_UNDEF) {
+    if (ei === undefined || syms[ei].shndx === MO_SHN_UNDEF) {
       throw new OmniError(`macho: 找不到入口符号 '${entryName}'`);
     }
     mainLc.entryoff = syms[ei].value - segs[TEXTSEG].vmaddr;
@@ -1382,11 +1382,11 @@ export function machoExe(inp) {
   for (let i = 1; i <= secs.length - 1; i++) {
     const s = secs[i];
     if (s.bytes !== undefined) continue;
-    s.bytes = s.type === SHT_NOBITS ? new Uint8Array(0) : new Uint8Array(s.data);
+    s.bytes = s.type === MO_SHT_NOBITS ? new Uint8Array(0) : new Uint8Array(s.data);
   }
   const symAddr = (idx) => {
     const s = syms[idx];
-    if (s.shndx === SHN_UNDEF) throw new OmniError(`macho: 未定义的符号 '${s.name}'`);
+    if (s.shndx === MO_SHN_UNDEF) throw new OmniError(`macho: 未定义的符号 '${s.name}'`);
     return s.value;
   };
   /* Mach-O 上没有 PT_TLS —— tcc 的 `s1->tls_start` / `tls_end` 一直是 0（那一段是
@@ -1395,7 +1395,7 @@ export function machoExe(inp) {
   const TLS_RELOC = new Set([23, 549, 550]);
   const tlsOf = (idx) => {
     const s = syms[idx];
-    const ss = s.shndx < SHN_LORESERVE ? secs[s.shndx] : undefined;
+    const ss = s.shndx < MO_SHN_LORESERVE ? secs[s.shndx] : undefined;
     return {
       start: 0, end: 0, tcb: 16, symSecEnd: ss === undefined ? 0 : ss.addr + ss.size,
     };
@@ -1405,14 +1405,14 @@ export function machoExe(inp) {
    * 调试信息内部互相指的就该是偏移。x86_64 上这一号是 `R_X86_64_32`（10）、
    * arm64 上是 `R_AARCH64_ABS32`（258）。 */
   const DW = new Set(DWARF_SECTIONS);
-  const dw32 = machine === EM_AARCH64 ? 258 : 10;
+  const dw32 = machine === MO_EM_AARCH64 ? 258 : 10;
   for (const [si, list] of relas) {
     const tgt = secs[secs[si].relaFor];
     if (tgt === undefined || tgt.bytes.length === 0) continue;
     for (const r of list) {
       const a = attrOf.get(r.sym);
       const ssx = syms[r.sym].shndx;
-      if (r.type === dw32 && DW.has(tgt.name) && ssx > 0 && ssx < SHN_LORESERVE
+      if (r.type === dw32 && DW.has(tgt.name) && ssx > 0 && ssx < MO_SHN_LORESERVE
         && DW.has(secs[ssx]?.name)) {
         relocateOne(machine, r.type, tgt.bytes, r.at, tgt.addr + r.at,
           symAddr(r.sym) + Number(r.add) - secs[ssx].addr, 0, false);
@@ -1445,7 +1445,7 @@ export function machoExe(inp) {
         throw new OmniError(`macho: ${secs[bindRebase[i].section].name} 上两条修正撞在一起了`);
       }
     }
-    const startsOffset = align(28, 8);
+    const startsOffset = moAlign(28, 8);
     cdv.setUint32(4, startsOffset, true);
     cdv.setUint32(16, nBind, true);
     cdv.setUint32(20, DYLD_CHAINED_IMPORT, true);
@@ -1453,7 +1453,7 @@ export function machoExe(inp) {
     let p = startsOffset;
     const imageOff = p;
     cdv.setUint32(imageOff, segs.length, true);
-    p += align(8 + (segs.length - 1) * 4, 8);
+    p += moAlign(8 + (segs.length - 1) * 4, 8);
     const getSlot = (b) => {
       const s = secs[b.section];
       return new DataView(s.bytes.buffer, s.bytes.byteOffset, s.bytes.byteLength);
@@ -1464,7 +1464,7 @@ export function machoExe(inp) {
       const pages = Math.ceil(sg.vmsize / SEG_PAGE_SIZE);
       const size = 24 + (pages - 1) * 2;
       const so = p;
-      p += align(size, 8);
+      p += moAlign(size, 8);
       cdv.setUint32(so, size, true);
       cdv.setUint16(so + 4, SEG_PAGE_SIZE, true);
       cdv.setUint16(so + 6, DYLD_CHAINED_PTR_64, true);
@@ -1529,7 +1529,7 @@ export function machoExe(inp) {
     for (const b of bindRebase) {
       if (b.bind === 0) continue;
       const sym = syms[b.rel.sym];
-      const weak = Math.floor(sym.info / 16) === STB_WEAK ? 1 : 0;
+      const weak = Math.floor(sym.info / 16) === MO_STB_WEAK ? 1 : 0;
       const nameOffset = p - symbolsOff;
       cdv.setUint32(importsOff + bi * 4,
         (((BIND_SPECIAL_DYLIB_FLAT_LOOKUP & 0xff) | (weak << 8)) + nameOffset * 512) >>> 0, true);
@@ -1540,7 +1540,7 @@ export function machoExe(inp) {
   }
 
   /* ---- convert_symbols：ELF 的符号换成 Mach-O 的 `nlist_64`。
-   * 注意只有 `STB_GLOBAL` 才打 `N_EXT` —— 弱符号靠 `n_desc` 里的两位表示。 */
+   * 注意只有 `MO_STB_GLOBAL` 才打 `N_EXT` —— 弱符号靠 `n_desc` 里的两位表示。 */
   {
     const sb = new Uint8Array(nlist.length * 16);
     const sdv = new DataView(sb.buffer);
@@ -1549,26 +1549,26 @@ export function machoExe(inp) {
       const sym = syms[n.elf];
       const stt = sym.info % 16;
       let type;
-      if (stt === STT_NOTYPE || stt === STT_OBJECT || stt === STT_FUNC
-        || stt === STT_TLS || stt === STT_SECTION) type = N_SECT;
-      else if (stt === STT_FILE) type = N_ABS;
+      if (stt === MO_STT_NOTYPE || stt === MO_STT_OBJECT || stt === MO_STT_FUNC
+        || stt === STT_TLS || stt === MO_STT_SECTION) type = N_SECT;
+      else if (stt === MO_STT_FILE) type = N_ABS;
       else throw new OmniError(`macho: 还不会 ${stt} 号符号类型（${sym.name}）`);
       let sect = 0;
       let desc = 0;
-      if (sym.shndx === SHN_UNDEF) {
+      if (sym.shndx === MO_SHN_UNDEF) {
         throw new OmniError(`macho: 符号 '${sym.name}' 该早就标成来自 dylib 了`);
       } else if (sym.shndx === SHN_FROMDLL) {
         type = N_UNDF;
-      } else if (sym.shndx === SHN_ABS) {
+      } else if (sym.shndx === MO_SHN_ABS) {
         type = N_ABS;
-      } else if (sym.shndx >= SHN_LORESERVE) {
+      } else if (sym.shndx >= MO_SHN_LORESERVE) {
         throw new OmniError(`macho: 符号 '${sym.name}' 落在 ${sym.shndx} 号节，还不会`);
       } else if (elfsectomacho[sym.shndx] === 0) {
         throw new OmniError(`macho: ${secs[sym.shndx].name} 没进 Mach-O，可 '${sym.name}' 在里头`);
       } else sect = elfsectomacho[sym.shndx];
       const bind = Math.floor(sym.info / 16);
-      if (bind === STB_GLOBAL) type |= N_EXT;
-      else if (bind === STB_WEAK) desc |= N_WEAK_REF | (type !== N_UNDF ? N_WEAK_DEF : 0);
+      if (bind === MO_STB_GLOBAL) type |= N_EXT;
+      else if (bind === MO_STB_WEAK) desc |= N_WEAK_REF | (type !== N_UNDF ? N_WEAK_DEF : 0);
       sdv.setUint32(k * 16, n.strx, true);
       sb[k * 16 + 4] = type;
       sb[k * 16 + 5] = sect;
@@ -1584,9 +1584,9 @@ export function machoExe(inp) {
     if (l.kind === 'le') return 16;
     if (l.kind === 'symtab') return 24;
     if (l.kind === 'dysymtab') return 80;
-    if (l.kind === 'dylinker') return align(12 + l.name.length + 1, 8);
-    if (l.kind === 'dylib' || l.kind === 'iddylib') return align(24 + l.name.length + 1, 8);
-    if (l.kind === 'rpath') return align(12 + l.name.length + 1, 8);
+    if (l.kind === 'dylinker') return moAlign(12 + l.name.length + 1, 8);
+    if (l.kind === 'dylib' || l.kind === 'iddylib') return moAlign(24 + l.name.length + 1, 8);
+    if (l.kind === 'rpath') return moAlign(12 + l.name.length + 1, 8);
     if (l.kind === 'buildver') return 24;
     if (l.kind === 'sourcever') return 16;
     return 24;                                      // main
@@ -1596,7 +1596,7 @@ export function machoExe(inp) {
   let total = 32 + sizeofcmds;
   for (let i = 1; i < secs.length; i++) {
     const s = secs[i];
-    if (s.off === undefined || s.type === SHT_NOBITS) continue;
+    if (s.off === undefined || s.type === MO_SHT_NOBITS) continue;
     if (s.off + s.bytes.length > total) total = s.off + s.bytes.length;
   }
   const buf = new Uint8Array(total);
@@ -1635,7 +1635,7 @@ export function machoExe(inp) {
         dv.setBigUint64(so + 32, BigInt(sec.addr), true);
         dv.setBigUint64(so + 40, BigInt(sec.size), true);
         dv.setUint32(so + 48, sec.offset, true);
-        dv.setUint32(so + 52, sec.align, true);
+        dv.setUint32(so + 52, sec.moAlign, true);
         dv.setUint32(so + 56, 0, true);
         dv.setUint32(so + 60, 0, true);
         dv.setUint32(so + 64, sec.flags, true);
@@ -1709,7 +1709,7 @@ export function machoExe(inp) {
       || skSect[sk].length === 0) continue;
     for (const i of skSect[sk]) {
       const s = secs[i];
-      if (s.type === SHT_NOBITS || s.size === 0) continue;
+      if (s.type === MO_SHT_NOBITS || s.size === 0) continue;
       buf.set(s.bytes.subarray(0, s.size), s.off);
     }
   }

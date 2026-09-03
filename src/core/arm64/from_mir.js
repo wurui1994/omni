@@ -82,16 +82,16 @@ function floatBits(x, size) {
   return dv.getBigUint64(0, true);
 }
 
-function nyi(what) {
+function arm64Nyi(what) {
   throw new OmniError(`arm64 后端还不认识 ${what}`);
 }
 
 /** 这一片认的类型。bool 在栈位上是 0/1 的 64 位。 */
-function widthOf(t) {
+function arm64WidthOf(t) {
   const k = typeKind(t);
   if (k === T_I64 || k === T_BOOL) return 64;
   if (k === T_I32) return 32;
-  return nyi(`类型 ${k}`);
+  return arm64Nyi(`类型 ${k}`);
 }
 
 /**
@@ -101,7 +101,7 @@ function widthOf(t) {
  * （`sp + 0` 起，一格 8 字节）。变参那几个（`nfixed` 之后）一律进出参区 ——
  * 苹果的改动，见第二十二片。
  *
- * 这个函数是**唯一**一处算「谁在哪儿」的地方：`outArgsBytes`（算帧要多大）与
+ * 这个函数是**唯一**一处算「谁在哪儿」的地方：`arm64OutArgsBytes`（算帧要多大）与
  * `callArgs`（真的发指令）都问它。两处各算一遍的话，迟早在某个边角上分家，
  * 而那种错的症状是「实参串位」——最难查的一类。
  */
@@ -130,7 +130,7 @@ function argPlaces(mod, f, args, nfixed) {
     if (n > 0) {
       /* 一整块内容只可能出现在变参那一段（前端只在那儿发 `ARGMEM`）—— 真在固定实参
        * 里撞见，那是上一层错了，不该悄悄按地址传过去。 */
-      if (!va) return nyi('固定实参里的 ARGMEM（那一段传的是地址）');
+      if (!va) return arm64Nyi('固定实参里的 ARGMEM（那一段传的是地址）');
       at.push({ off: stack, bytes: n });
       stack += n + (n % 8 === 0 ? 0 : 8 - (n % 8));
     } else if (!va && isFloatType(t) && nsrn <= 7) {
@@ -154,7 +154,7 @@ function argPlaces(mod, f, args, nfixed) {
  * 三种调用都要数（`CALL`/`CCALL`/`CALLI`，实参池都在 `b` 上）。`CCALL` 的 aux 是
  * 变参分界（第二十二片），另两种没有变参。
  */
-function outArgsBytes(mod, f) {
+function arm64OutArgsBytes(mod, f) {
   let most = 0;
   let i = 0;
   while (i < f.count()) {
@@ -212,7 +212,7 @@ class FnGen {
      * `...` 后面那些一格 8 字节摆在 `sp` 上。所以帧的最底下要留出这一块，
      * 它的大小是本函数里最费的那次调用要的字节数（按 16 取整）。
      * 槽位与值的栈位都往上让开这一块 —— 它必须**紧贴 `sp`**，被调方按 `sp` 找它。 */
-    this.outArgs = outArgsBytes(mod, f);
+    this.outArgs = arm64OutArgsBytes(mod, f);
     /** 帧里 0 号槽位的偏移。出参区在它下面（第二十二片）。 */
     this.slotBase = this.outArgs;
     this.valBase = this.slotBase + f.slots.length * 8;
@@ -305,7 +305,7 @@ class FnGen {
       /* 串常量取的是**地址**：字节躺在数据段里，这一格只要把那个符号的地址算出来。
        * 于是 `f("hi")` 在这一层与 `f(&g)` 是同一件事 —— 都是 adrp+add。 */
       if (k.kind === 'str' || k.kind === 'bytes') return this.symAddr(reg, this.strSym(ref));
-      return nyi(`常量 ${k.kind}`);
+      return arm64Nyi(`常量 ${k.kind}`);
     }
     this.frameLoad(reg, this.valOff(this.f.at(ref)));
   }
@@ -354,7 +354,7 @@ class FnGen {
     if (this.frame > 0) {
       const hi = Math.floor(this.frame / 4096);
       const lo = this.frame % 4096;
-      if (hi > 4095) nyi(`帧 ${this.frame} 字节（一次 sub 装不下）`);
+      if (hi > 4095) arm64Nyi(`帧 ${this.frame} 字节（一次 sub 装不下）`);
       if (hi > 0) buf.emit(a.subImm(1, SP, SP, hi, 1));
       if (lo > 0) buf.emit(a.subImm(1, SP, SP, lo));
     }
@@ -461,7 +461,7 @@ class FnGen {
       const levels = f.levelsOf(f.b[i]);
       let k = 0;
       for (const lv of levels) {
-        if (k >= 4096) nyi('BRTABLE 的表超过 4096 项（cmp 的立即数装不下）');
+        if (k >= 4096) arm64Nyi('BRTABLE 的表超过 4096 项（cmp 的立即数装不下）');
         buf.emit(a.cmpImm(1, TMP0, k));
         buf.bcond(a.COND.eq, this.brTarget(lv));
         k++;
@@ -485,7 +485,7 @@ class FnGen {
      * x0 或 d0。不用管调用者保存的寄存器：这一片的值全在栈位上，跨调用活着的东西一个
      * 也没有 —— 「全落栈」这个笨办法在这儿一次性省掉了整个调用点的溢出逻辑。 */
     if (op === OP.CALL) {
-      if (this.callLabels === null) nyi('单个函数里的 CALL（要按整个模块生成才有落点）');
+      if (this.callLabels === null) arm64Nyi('单个函数里的 CALL（要按整个模块生成才有落点）');
       this.callArgs(f.argsOf(f.b[i]), -1);
       /* 模块内的直接调用也走**符号**（第一百二十七片，与 x64 那一份同一条）：位移留 0、
        * 发一条重定位。量过 tcc：哪怕被调的就在同一个 `.o` 里、哪怕它是局部符号，
@@ -510,7 +510,7 @@ class FnGen {
      * `blr`。次序要紧：先把实参摆好（那一步用 x0-x7 与草稿寄存器），**再**把目标地址
      * 取进草稿 —— 反过来的话备实参那几条会把目标踩掉。 */
     if (op === OP.CALLI) {
-      if (!this.mod.native) nyi('CALLI（解释器那条腿上函数指针是「号 + 1」，不是地址）');
+      if (!this.mod.native) arm64Nyi('CALLI（解释器那条腿上函数指针是「号 + 1」，不是地址）');
       /* aux 是变参分界（第三十五片），与 `CCALL` 同一个编码。 */
       this.callArgs(f.argsOf(f.b[i]), callVaFixed(f.aux[i]));
       this.loadRef(TMP0, f.a[i]);
@@ -544,7 +544,7 @@ class FnGen {
       const off = this.frameOff(f.aux[i]);
       const hi = Math.floor(off / 4096);
       const lo = off % 4096;
-      if (hi > 4095) nyi(`帧偏移 ${off}（两条 add 也装不下）`);
+      if (hi > 4095) arm64Nyi(`帧偏移 ${off}（两条 add 也装不下）`);
       if (hi === 0) {
         buf.emit(a.addImm(1, RES, this.base, lo));
       } else {
@@ -560,14 +560,14 @@ class FnGen {
      * 那个「adrp 的页号填不出来」，现在从写出去的那一头解释清楚了。 */
     if (op === OP.GLOAD) {
       this.globalAddr(TMP0, f.aux[i]);
-      GLOAD_EMIT[widthKey(t)](buf, RES, TMP0);
+      GLOAD_EMIT[arm64WidthKey(t)](buf, RES, TMP0);
       return this.def(i, RES);
     }
     if (op === OP.GSTORE) {
       this.loadRef(TMP1, f.a[i]);
       buf.emit(a.movReg(1, RES, TMP1));
       this.globalAddr(TMP0, f.aux[i]);
-      buf.emit(a.strU(STORE_SIZE[widthKey(f.t[i])], RES, TMP0, 0));
+      buf.emit(a.strU(STORE_SIZE[arm64WidthKey(f.t[i])], RES, TMP0, 0));
       return;
     }
     /* 全局的**地址**（第二十一片）：`GLOAD` 里那两条的前半截，只是不接 `ldr`。
@@ -596,12 +596,12 @@ class FnGen {
       if (f.aux[i] !== 0) {
         const n = memArgSize(f.aux[i]);
         const step = n + (n % 8 === 0 ? 0 : 8 - (n % 8));
-        if (step > 4095) return nyi(`va_arg 取 ${n} 字节的 struct（一条 add 的立即数装不下）`);
+        if (step > 4095) return arm64Nyi(`va_arg 取 ${n} 字节的 struct（一条 add 的立即数装不下）`);
         buf.emit(a.movReg(1, RES, TMP1));
         buf.emit(a.addImm(1, TMP1, TMP1, step), a.strU(3, TMP1, TMP0, 0));
         return this.def(i, RES);
       }
-      MLOAD_EMIT[typeKind(t) === T_I32 ? 'i32s' : widthKey(t)](buf, RES, TMP1);
+      MLOAD_EMIT[typeKind(t) === T_I32 ? 'i32s' : arm64WidthKey(t)](buf, RES, TMP1);
       buf.emit(a.addImm(1, TMP1, TMP1, 8), a.strU(3, TMP1, TMP0, 0));
       return this.def(i, RES);
     }
@@ -648,7 +648,7 @@ class FnGen {
       if (oa > 0) {
         const hi = Math.floor(oa / 4096);
         const lo = oa % 4096;
-        if (hi > 4095) nyi(`出参区 ${oa} 字节（一次 sub 装不下）`);
+        if (hi > 4095) arm64Nyi(`出参区 ${oa} 字节（一次 sub 装不下）`);
         if (hi > 0) buf.emit(a.subImm(1, TMP1, TMP1, hi, 1));
         if (lo > 0) buf.emit(a.subImm(1, TMP1, TMP1, lo));
       }
@@ -666,13 +666,13 @@ class FnGen {
 
     /* ---- 单目 */
     if (op === OP.NEG) {
-      const w = widthOf(t);
+      const w = arm64WidthOf(t);
       this.loadRef(TMP0, f.a[i]);
       buf.emit(a.neg(w === 64 ? 1 : 0, RES, TMP0));
       return this.def(i, RES, w);
     }
     if (op === OP.BNOT) {
-      const w = widthOf(t);
+      const w = arm64WidthOf(t);
       this.loadRef(TMP0, f.a[i]);
       buf.emit(a.mvn(w === 64 ? 1 : 0, RES, TMP0));
       return this.def(i, RES, w);
@@ -686,7 +686,7 @@ class FnGen {
     /* ---- 二目 */
     const bin = BIN[op];
     if (bin !== undefined) {
-      const w = widthOf(t);
+      const w = arm64WidthOf(t);
       const sf = w === 64 ? 1 : 0;
       this.loadRef(TMP0, f.a[i]);
       this.loadRef(TMP1, f.b[i]);
@@ -697,7 +697,7 @@ class FnGen {
     /* ---- 比较：`t` 是操作数的类型，产出永远是 0/1 的 bool */
     const cond = CMP[op];
     if (cond !== undefined) {
-      const sf = widthOf(t) === 64 ? 1 : 0;
+      const sf = arm64WidthOf(t) === 64 ? 1 : 0;
       this.loadRef(TMP0, f.a[i]);
       this.loadRef(TMP1, f.b[i]);
       buf.emit(a.cmpReg(sf, TMP0, TMP1), a.cset(1, RES, cond));
@@ -707,7 +707,7 @@ class FnGen {
     /* ---- 宽度转换 */
     if (op === OP.CVT) return this.cvt(i);
 
-    return nyi(`MIR 指令 ${OP_NAMES[op]}`);
+    return arm64Nyi(`MIR 指令 ${OP_NAMES[op]}`);
   }
 
   /**
@@ -732,7 +732,7 @@ class FnGen {
     }
     const fb = FBIN[op];
     const fc = FCMP[op];
-    if (fb === undefined && fc === undefined) return nyi(`浮点的 ${OP_NAMES[op]}`);
+    if (fb === undefined && fc === undefined) return arm64Nyi(`浮点的 ${OP_NAMES[op]}`);
     this.loadRef(TMP0, f.a[i]);
     this.loadRef(TMP1, f.b[i]);
     this.toFp(FTMP0, TMP0, dbl);
@@ -768,13 +768,13 @@ class FnGen {
     if (mode === CVT_FCVT) {
       /* 源的宽度与目标的宽度一定相反（同宽的 fcvt 没有意义，MIR 也不该发）。 */
       const srcDbl = typeKind(src) === T_F64;
-      if (srcDbl === dbl) return nyi('同宽的 CVT_FCVT');
+      if (srcDbl === dbl) return arm64Nyi('同宽的 CVT_FCVT');
       this.toFp(FTMP0, TMP0, srcDbl);
       buf.emit(dbl ? a.fcvtSD(FRES, FTMP0) : a.fcvtDS(FRES, FTMP0));
       this.fromFp(RES, FRES, dbl);
       return this.def(i, RES);
     }
-    return nyi(`结果是浮点的 CVT 模式 ${mode}`);
+    return arm64Nyi(`结果是浮点的 CVT 模式 ${mode}`);
   }
 
   cvt(i) {
@@ -785,7 +785,7 @@ class FnGen {
     /* 浮点 -> 整数（向零取整，C 的强制转换就是这一种）。`t` 是整数所以落在这儿。 */
     if (mode === CVT_F2I || mode === CVT_F2U) {
       const srcDbl = typeKind(this.typeOfRef(f.a[i])) === T_F64;
-      const w = widthOf(f.t[i]);
+      const w = arm64WidthOf(f.t[i]);
       this.toFp(FTMP0, TMP0, srcDbl);
       /* 无符号那条是 `fcvtzu`（第九十五片）：`fcvtzs` 在越界处饱和到有符号上界，
        * 于是 `(unsigned long long)9223372036854775808.0` 会少一位。arm64 上两条指令
@@ -811,7 +811,7 @@ class FnGen {
      * 所以不按结果类型分 w/x 系（分了反而要给 i32 再补一条 `sxtw`）。 */
     else if (mode === CVT_SEXT8) buf.emit(a.sxtb(1, RES, TMP0));
     else if (mode === CVT_SEXT16) buf.emit(a.sxth(1, RES, TMP0));
-    else return nyi(`CVT 模式 ${mode}`);
+    else return arm64Nyi(`CVT 模式 ${mode}`);
     return this.def(i, RES);
   }
 
@@ -861,7 +861,7 @@ class FnGen {
       return this.def(i, RES);
     }
     /* i32 的返回值要按规范形符号扩展：AAPCS 只保证 w0 有值，x0 的高 32 位不算数。 */
-    return this.def(i, 0, widthOf(t));
+    return this.def(i, 0, arm64WidthOf(t));
   }
 
   /** 一个函数的符号名（`FADDR` 用）。落到目标文件上就是 `__TEXT` 里的一个符号。 */
@@ -945,7 +945,7 @@ class FnGen {
     const kind = MLOAD_KINDS[memKindNo(f.aux[i])];
     this.memAddr(TMP0, f.a[i], memOff(f.aux[i]));
     const ld = MLOAD_EMIT[kind];
-    if (ld === undefined) return nyi(`MLOAD 的宽度 ${kind}`);
+    if (ld === undefined) return arm64Nyi(`MLOAD 的宽度 ${kind}`);
     ld(this.buf, RES, TMP0);
     return this.def(i, RES);
   }
@@ -955,7 +955,7 @@ class FnGen {
     const f = this.f;
     const kind = MSTORE_KINDS[memKindNo(f.aux[i])];
     const size = MSTORE_SIZE[kind];
-    if (size === undefined) return nyi(`MSTORE 的宽度 ${kind}`);
+    if (size === undefined) return arm64Nyi(`MSTORE 的宽度 ${kind}`);
     this.loadRef(TMP1, f.b[i]);
     /* 先取值再算地址：`memAddr` 在偏移大的时候要借 TMP1，所以值得换个落脚点。 */
     this.buf.emit(a.movReg(1, RES, TMP1));
@@ -1045,13 +1045,13 @@ const MLOAD_EMIT = {
 const MSTORE_SIZE = { i8: 0, i16: 1, i32: 2, i64: 3, f32: 2, f64: 3 };
 
 /** 类型 -> 一个宽度的名字。bool 与指针都按 64 位走。 */
-function widthKey(t) {
+function arm64WidthKey(t) {
   const k = typeKind(t);
   if (k === T_I32) return 'i32';
   if (k === T_F32) return 'f32';
   if (k === T_F64) return 'f64';
   if (k === T_I64 || k === T_BOOL) return 'i64';
-  return nyi(`模块级变量的类型 ${k}`);
+  return arm64Nyi(`模块级变量的类型 ${k}`);
 }
 
 /* 模块级变量的读。i32 走 `ldrsw`（i32 的规范形是符号扩展过的 64 位）；
@@ -1135,7 +1135,7 @@ export function genModule(mod) {
     if (blob !== null && blob.extern) continue;
     const size = blob === null ? 8 : blob.size;
     const al = blob === null ? 8 : blob.align;
-    if (al > 4096) nyi(`全局 '${mod.globals[gi]}' 要 ${al} 字节对齐（__data 这一节最多 4096）`);
+    if (al > 4096) arm64Nyi(`全局 '${mod.globals[gi]}' 要 ${al} 字节对齐（__data 这一节最多 4096）`);
     if (al > dataAlign) dataAlign = al;
     const ro = mod.globalRo[gi] === true;
     /* 三段（第一百三十二片）：只读、可写、`.bss`。次序是**有讲究**的 —— `const` 先问，
@@ -1185,7 +1185,7 @@ export function genModule(mod) {
   for (const a of mod.aliases) {
     if (a.kind !== 'g') continue;
     const at = gBase.get(a.no);
-    if (at === undefined) nyi(`别名 '${a.name}' 的目标不在数据段里`);
+    if (at === undefined) arm64Nyi(`别名 '${a.name}' 的目标不在数据段里`);
     dataSyms.push({
       name: a.name, off: at.base, sect: at.sect, local: false, weak: a.weak === true,
     });

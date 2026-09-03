@@ -61,7 +61,7 @@ export function readCStr(addr) {
 }
 
 /** 一个码点变 UTF-8：回一个「一个字符一个字节」的 JS 字符串（与 `out` 那条链一致）。 */
-function utf8Of(cp) {
+function lcUtf8Of(cp) {
   if (cp < 0 || cp > 0x10ffff) throw new Error(`printf: 宽字符 ${cp} 不是码点`);
   if (cp < 0x80) return String.fromCharCode(cp);
   if (cp < 0x800) {
@@ -82,7 +82,7 @@ function readWStr(addr, limit) {
   for (;;) {
     const w = Number(memLoad('i32s', p, 0));
     if (w === 0) break;
-    const b = utf8Of(w);
+    const b = lcUtf8Of(w);
     if (limit !== undefined && limit >= 0 && s.length + b.length > limit) break;
     s += b;
     p += 4n;
@@ -374,7 +374,7 @@ export function cFormat(fmt, va) {
        * 4 个字节（我们的 `wchar_t` 是 int），再按 UTF-8 摊成字节；窄的那一支只
        * 取低 8 位。宽度算的是**字节数**，与宿主 libc 一致。 */
       if (conv === 'C' || bits === 64) {
-        out += padTo(utf8Of(Number(BigInt.asIntN(32, ap.int(32)))), '', spec);
+        out += padTo(lcUtf8Of(Number(BigInt.asIntN(32, ap.int(32)))), '', spec);
         continue;
       }
       out += padTo(String.fromCharCode(Number(BigInt.asUintN(8, ap.int(32)))), '', spec);
@@ -642,7 +642,7 @@ function scanReal(s) {
     let digits = 0;
     let frac = 0;
     while (j < s.length) {
-      const d = hexVal(s[j]);
+      const d = lcHexVal(s[j]);
       if (d < 0) break;
       mant = mant * 16n + BigInt(d);
       digits++;
@@ -651,7 +651,7 @@ function scanReal(s) {
     if (s[j] === '.') {
       j++;
       while (j < s.length) {
-        const d = hexVal(s[j]);
+        const d = lcHexVal(s[j]);
         if (d < 0) break;
         mant = mant * 16n + BigInt(d);
         digits++;
@@ -710,7 +710,7 @@ function ldexpReal(x, e) {
   return x * 2 ** e;
 }
 
-/** 一个十六进制数字的值，不是就回 -1。 */function hexVal(ch) {
+/** 一个十六进制数字的值，不是就回 -1。 */function lcHexVal(ch) {
   if (ch === undefined) return -1;
   const c = ch.charCodeAt(0);
   if (c >= 48 && c <= 57) return c - 48;
@@ -1191,7 +1191,7 @@ const isDigit = (c) => c >= 48 && c <= 57;
 const isUpper = (c) => c >= 65 && c <= 90;
 const isLower = (c) => c >= 97 && c <= 122;
 const isAlpha = (c) => isUpper(c) || isLower(c);
-const isSpace = (c) => c === 32 || (c >= 9 && c <= 13);
+const lcIsSpace = (c) => c === 32 || (c >= 9 && c <= 13);
 const isXdigit = (c) => isDigit(c) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70);
 /** 可打印且不是空格也不是字母数字（C11 7.4.1.10）。 */
 const isPunct = (c) => c >= 33 && c <= 126 && !isDigit(c) && !isAlpha(c);
@@ -1944,7 +1944,7 @@ const LIBC = {
   isalpha: ctypeFn(isAlpha),
   isdigit: ctypeFn(isDigit),
   isalnum: ctypeFn((c) => isAlpha(c) || isDigit(c)),
-  isspace: ctypeFn(isSpace),
+  isspace: ctypeFn(lcIsSpace),
   isupper: ctypeFn(isUpper),
   islower: ctypeFn(isLower),
   isxdigit: ctypeFn(isXdigit),

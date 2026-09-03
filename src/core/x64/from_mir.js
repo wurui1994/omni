@@ -58,15 +58,15 @@ import { planRodata, planData, planBss } from '../mir/rodata.js';
 
 /* 草稿寄存器。挑 r10/r11 是因为它们**既不是实参寄存器、也不是被调用者保存的** ——
  * 于是备实参的时候不会先把自己的草稿踩掉。`rax` 当结果（也是返回值寄存器）。 */
-const TMP0 = REG.r10;
-const TMP1 = REG.r11;
-const RES = REG.rax;
+const X64_TMP0 = REG.r10;
+const X64_TMP1 = REG.r11;
+const X64_RES = REG.rax;
 const BP = REG.rbp;
 /* 浮点的草稿取 xmm8/xmm9：xmm0-7 是实参寄存器。SysV 里所有 xmm 都是调用者保存的，
  * 所以不必像 arm64 那样避开被调用者保存的那一段（v8-v15）。 */
-const FTMP0 = XMM.xmm8;
-const FTMP1 = XMM.xmm9;
-const FRES = XMM.xmm10;
+const X64_FTMP0 = XMM.xmm8;
+const X64_FTMP1 = XMM.xmm9;
+const X64_FRES = XMM.xmm10;
 
 /** SysV 的整数实参寄存器，**只有六个**（arm64 有八个）。 */
 const IARG = [REG.rdi, REG.rsi, REG.rdx, REG.rcx, REG.r8, REG.r9];
@@ -74,7 +74,7 @@ const IARG = [REG.rdi, REG.rsi, REG.rdx, REG.rcx, REG.r8, REG.r9];
 const FARG = [XMM.xmm0, XMM.xmm1, XMM.xmm2, XMM.xmm3, XMM.xmm4, XMM.xmm5, XMM.xmm6, XMM.xmm7];
 
 /** 一个 double / float 的 IEEE 754 位模式。与 arm64 那一份同一个写法。 */
-function floatBits(v, size) {
+function x64FloatBits(v, size) {
   const dv = new DataView(new ArrayBuffer(8));
   if (size === 4) {
     dv.setFloat32(0, v, true);
@@ -151,7 +151,7 @@ function classifyMem(mem, ngrn, nsse) {
   return { regs, ngrn: gi, nsse: si };
 }
 
-function argPlaces(mod, f, args) {
+function x64ArgPlaces(mod, f, args) {
   const at = [];
   let ngrn = 0;
   let nsse = 0;
@@ -204,7 +204,7 @@ function outArgsBytes(mod, f) {
   while (i < f.count()) {
     const op = f.op[i];
     if (op === OP.CALL || op === OP.CCALL || op === OP.CALLI) {
-      most = Math.max(most, argPlaces(mod, f, f.argsOf(f.b[i])).stack);
+      most = Math.max(most, x64ArgPlaces(mod, f, f.argsOf(f.b[i])).stack);
     }
     i++;
   }
@@ -239,7 +239,7 @@ function inArgPlaces(f) {
   return { ngrn, nsse, bytes };
 }
 
-class FnGen {
+class x64FnGen {
   constructor(mod, f, buf, callLabels, strSyms) {
     this.mod = mod;
     this.f = f;
@@ -352,7 +352,7 @@ class FnGen {
       if (k.kind === 'int') return this.movImm(reg, BigInt(k.text));
       if (k.kind === 'bool') return this.movImm(reg, k.text === 'true' ? 1n : 0n);
       if (k.kind === 'real') {
-        return this.movImm(reg, floatBits(Number(k.text), typeKind(k.t) === T_F32 ? 4 : 8));
+        return this.movImm(reg, x64FloatBits(Number(k.text), typeKind(k.t) === T_F32 ? 4 : 8));
       }
       if (k.kind === 'str' || k.kind === 'bytes') return this.buf.leaSym(reg, this.strSym(ref));
       return nyi(`常量 ${k.kind}`);
@@ -415,8 +415,8 @@ class FnGen {
       }
       k = 0;
       while (k < FARG.length) {
-        this.fromFp(TMP0, FARG[k]);
-        buf.emit(x.movMR(8, BP, this.regSave + 48 + k * 16, TMP0));
+        this.fromFp(X64_TMP0, FARG[k]);
+        buf.emit(x.movMR(8, BP, this.regSave + 48 + k * 16, X64_TMP0));
         k++;
       }
     }
@@ -434,17 +434,17 @@ class FnGen {
       if (p.ld === true) {
         inArg += inArg % 16 === 0 ? 0 : 16 - (inArg % 16);
         buf.emit(x.fldM80(BP, inArg));
-        buf.emit(x.push(RES));
+        buf.emit(x.push(X64_RES));
         buf.emit(x.fstpM64(REG.rsp, 0));
-        buf.emit(x.pop(TMP0));
-        this.frameStore(TMP0, this.slotOff(p.slot));
+        buf.emit(x.pop(X64_TMP0));
+        this.frameStore(X64_TMP0, this.slotOff(p.slot));
         inArg += 16;
         continue;
       }
       const flt = isFloatType(p.t);
       if (flt && nsse < FARG.length) {
-        this.fromFp(TMP0, FARG[nsse]);
-        this.frameStore(TMP0, this.slotOff(p.slot));
+        this.fromFp(X64_TMP0, FARG[nsse]);
+        this.frameStore(X64_TMP0, this.slotOff(p.slot));
         nsse++;
         continue;
       }
@@ -453,8 +453,8 @@ class FnGen {
         ngrn++;
         continue;
       }
-      buf.emit(x.movRM(8, TMP0, BP, inArg));
-      this.frameStore(TMP0, this.slotOff(p.slot));
+      buf.emit(x.movRM(8, X64_TMP0, BP, inArg));
+      this.frameStore(X64_TMP0, this.slotOff(p.slot));
       inArg += 8;
     }
 
@@ -484,9 +484,9 @@ class FnGen {
       return;
     }
     if (op === OP.IF) {
-      this.loadRef(TMP0, f.a[i]);
+      this.loadRef(X64_TMP0, f.a[i]);
       const elseLabel = buf.label();
-      buf.emit(x.testRR(8, TMP0, TMP0));
+      buf.emit(x.testRR(8, X64_TMP0, X64_TMP0));
       buf.jcc(CC.e, elseLabel);
       this.regions.push({ kind: 'if', endLabel: buf.label(), elseLabel, elseDone: false });
       return;
@@ -511,19 +511,19 @@ class FnGen {
       return;
     }
     if (op === OP.BRIF) {
-      this.loadRef(TMP0, f.a[i]);
-      buf.emit(x.testRR(8, TMP0, TMP0));
+      this.loadRef(X64_TMP0, f.a[i]);
+      buf.emit(x.testRR(8, X64_TMP0, X64_TMP0));
       buf.jcc(CC.ne, this.brTarget(f.aux[i]));
       return;
     }
     /* `BRTABLE`（第十九片）：与 arm64 同一个办法 —— **比较链**。真跳表要在数据段里摆
      * 一串地址（x86 上还得走 `SIGNED` 重定位），比较链一笔重定位都不欠。 */
     if (op === OP.BRTABLE) {
-      this.loadRef(TMP0, f.a[i]);
+      this.loadRef(X64_TMP0, f.a[i]);
       const levels = f.levelsOf(f.b[i]);
       let k = 0;
       for (const lv of levels) {
-        buf.emit(x.aluRI(ALU.cmp, 8, TMP0, k));
+        buf.emit(x.aluRI(ALU.cmp, 8, X64_TMP0, k));
         buf.jcc(CC.e, this.brTarget(lv));
         k++;
       }
@@ -532,17 +532,17 @@ class FnGen {
     }
     if (op === OP.RET) {
       if (f.a[i] !== REF_NONE) {
-        this.loadRef(TMP0, f.a[i]);
+        this.loadRef(X64_TMP0, f.a[i]);
         /* 浮点的返回值在 xmm0，整数在 rax。i32 的规范形是符号扩展过的 64 位，
          * 而 SysV 只看 eax —— 两边都对，不用再削。
          * `long double` 例外（第一百一十二片）：它回在 **x87 的 st0** 里 —— 把 double
          * 的位模式借栈喂给 `fld qword`，留在栈顶就走（`pop` 只为还原 rsp）。 */
         if (isFloatType(t) && f.ldRet === true) {
-          buf.emit(x.push(TMP0));
+          buf.emit(x.push(X64_TMP0));
           buf.emit(x.fldM64(REG.rsp, 0));
-          buf.emit(x.pop(TMP0));
-        } else if (isFloatType(t)) this.toFp(FARG[0], TMP0);
-        else buf.emit(x.movRR(8, RES, TMP0));
+          buf.emit(x.pop(X64_TMP0));
+        } else if (isFloatType(t)) this.toFp(FARG[0], X64_TMP0);
+        else buf.emit(x.movRR(8, X64_RES, X64_TMP0));
       }
       buf.jmp(this.retLabel);
       return;
@@ -579,33 +579,33 @@ class FnGen {
     if (op === OP.CALLI) {
       if (!this.mod.native) nyi('CALLI（解释器那条腿上函数指针是「号 + 1」，不是地址）');
       this.callArgs(f.argsOf(f.b[i]), true);
-      this.loadRef(TMP0, f.a[i]);
-      buf.emit(x.callR(TMP0));
+      this.loadRef(X64_TMP0, f.a[i]);
+      buf.emit(x.callR(X64_TMP0));
       return this.callRet(i, t, callLdRet(f.aux[i]));
     }
     /* 一个函数的**地址**（第二十七片）：与 `GADDR` 一样是一条 RIP 相对的 `lea`，
      * 只是符号在 `__TEXT` 里。 */
     if (op === OP.FADDR) {
-      buf.leaSym(RES, this.funcSym(f.aux[i]));
-      return this.def(i, RES);
+      buf.leaSym(X64_RES, this.funcSym(f.aux[i]));
+      return this.def(i, X64_RES);
     }
 
     /* ---- 槽位 */
     if (op === OP.LOAD) {
-      this.frameLoad(RES, this.slotOff(f.aux[i]));
-      return this.def(i, RES);
+      this.frameLoad(X64_RES, this.slotOff(f.aux[i]));
+      return this.def(i, X64_RES);
     }
     if (op === OP.STORE) {
-      this.loadRef(RES, f.a[i]);
-      this.frameStore(RES, this.slotOff(f.aux[i]));
+      this.loadRef(X64_RES, f.a[i]);
+      this.frameStore(X64_RES, this.slotOff(f.aux[i]));
       return;
     }
 
     /* ---- 帧上的一块（第十八片）。x86_64 上是**一条** `lea` —— 与 arm64 的
      * 「adrp + add」不同，这里基址就在寄存器里（`rbp`），偏移是 disp32，硬件自己加。 */
     if (op === OP.FRAME) {
-      buf.emit(x.lea(8, RES, BP, this.frameOff(f.aux[i])));
-      return this.def(i, RES);
+      buf.emit(x.lea(8, X64_RES, BP, this.frameOff(f.aux[i])));
+      return this.def(i, X64_RES);
     }
 
     /* ---- 变参的定义那一侧（第二十四片）。SysV 的 `va_list` 是个 24 字节的结构，
@@ -616,14 +616,14 @@ class FnGen {
       if (vl === undefined) throw new OmniError('x64: VASTART 没有分到 va_list 的位置');
       const p = inArgPlaces(f);
       /* 固定实参用掉的那一段先记上：`va_arg` 从这儿往后数。 */
-      buf.emit(x.movRI(4, TMP1, 8 * p.ngrn), x.movMR(4, BP, vl, TMP1));
-      buf.emit(x.movRI(4, TMP1, 48 + 16 * p.nsse), x.movMR(4, BP, vl + 4, TMP1));
+      buf.emit(x.movRI(4, X64_TMP1, 8 * p.ngrn), x.movMR(4, BP, vl, X64_TMP1));
+      buf.emit(x.movRI(4, X64_TMP1, 48 + 16 * p.nsse), x.movMR(4, BP, vl + 4, X64_TMP1));
       /* 溢到栈上的实参从入参区、固定形参之后起。 */
-      buf.emit(x.lea(8, TMP1, BP, 16 + p.bytes), x.movMR(8, BP, vl + 8, TMP1));
-      buf.emit(x.lea(8, TMP1, BP, this.regSave), x.movMR(8, BP, vl + 16, TMP1));
+      buf.emit(x.lea(8, X64_TMP1, BP, 16 + p.bytes), x.movMR(8, BP, vl + 8, X64_TMP1));
+      buf.emit(x.lea(8, X64_TMP1, BP, this.regSave), x.movMR(8, BP, vl + 16, X64_TMP1));
       /* 前端手里那个 8 字节的 `va_list` 装的是这个结构的地址。 */
-      this.loadRef(TMP0, f.a[i]);
-      buf.emit(x.lea(8, TMP1, BP, vl), x.movMR(8, TMP0, 0, TMP1));
+      this.loadRef(X64_TMP0, f.a[i]);
+      buf.emit(x.lea(8, X64_TMP1, BP, vl), x.movMR(8, X64_TMP0, 0, X64_TMP1));
       return;
     }
     if (op === OP.VAARG) {
@@ -633,16 +633,16 @@ class FnGen {
        * 在循环里会被走多次，游标是变的。
        * 取值与别处一样借栈：`fld tbyte` 进 x87、`fstp qword` 收成 double。 */
       if (memArgIsF80(f.aux[i])) {
-        this.loadRef(TMP0, f.a[i]);
-        buf.emit(x.movRM(8, TMP0, TMP0, 0));           // TMP0 = 那个 24 字节结构的地址
-        buf.emit(x.movRM(8, TMP1, TMP0, 8));           // TMP1 = overflow_arg_area
-        buf.emit(x.aluRI(ALU.add, 8, TMP1, 15), x.aluRI(ALU.and, 8, TMP1, -16));
-        buf.emit(x.fldM80(TMP1, 0));
-        buf.emit(x.aluRI(ALU.add, 8, TMP1, 16), x.movMR(8, TMP0, 8, TMP1));
-        buf.emit(x.push(RES));
+        this.loadRef(X64_TMP0, f.a[i]);
+        buf.emit(x.movRM(8, X64_TMP0, X64_TMP0, 0));           // X64_TMP0 = 那个 24 字节结构的地址
+        buf.emit(x.movRM(8, X64_TMP1, X64_TMP0, 8));           // X64_TMP1 = overflow_arg_area
+        buf.emit(x.aluRI(ALU.add, 8, X64_TMP1, 15), x.aluRI(ALU.and, 8, X64_TMP1, -16));
+        buf.emit(x.fldM80(X64_TMP1, 0));
+        buf.emit(x.aluRI(ALU.add, 8, X64_TMP1, 16), x.movMR(8, X64_TMP0, 8, X64_TMP1));
+        buf.emit(x.push(X64_RES));
         buf.emit(x.fstpM64(REG.rsp, 0));
-        buf.emit(x.pop(RES));
-        return this.def(i, RES);
+        buf.emit(x.pop(X64_RES));
+        return this.def(i, X64_RES);
       }
       /* 取 struct（aux > 0）：SysV 的分类在这儿真的要算一遍（第四十片）。
        *
@@ -658,17 +658,17 @@ class FnGen {
         const n = memArgSize(f.aux[i]);
         const sseMask = memArgSse(f.aux[i]);
         const step = n + (n % 8 === 0 ? 0 : 8 - (n % 8));
-        this.loadRef(TMP0, f.a[i]);
-        buf.emit(x.movRM(8, TMP0, TMP0, 0));            // TMP0 = 那个 24 字节结构的地址
+        this.loadRef(X64_TMP0, f.a[i]);
+        buf.emit(x.movRM(8, X64_TMP0, X64_TMP0, 0));            // X64_TMP0 = 那个 24 字节结构的地址
         /* 从溢出区取一份：地址就是 `overflow_arg_area`，之后往前推一格。 */
         const fromStack = () => {
-          buf.emit(x.movRM(8, RES, TMP0, 8));
-          buf.emit(x.movRR(8, TMP1, RES), x.aluRI(ALU.add, 8, TMP1, step));
-          buf.emit(x.movMR(8, TMP0, 8, TMP1));
+          buf.emit(x.movRM(8, X64_RES, X64_TMP0, 8));
+          buf.emit(x.movRR(8, X64_TMP1, X64_RES), x.aluRI(ALU.add, 8, X64_TMP1, step));
+          buf.emit(x.movMR(8, X64_TMP0, 8, X64_TMP1));
         };
         if (n > 16) {
           fromStack();
-          return this.def(i, RES);
+          return this.def(i, X64_RES);
         }
         const words = Math.ceil(n / 8);
         const isSse = (e) => (sseMask & (e === 0 ? 1 : 2)) !== 0;
@@ -682,28 +682,28 @@ class FnGen {
         /* 两串各自的余量：`gp_offset <= 48 - 8*needInt`、`fp_offset <= 176 - 16*needSse`。
          * 任一串不够就整份走溢出区（规范 3.2.3 第 5 步）。 */
         if (needInt > 0) {
-          buf.emit(x.movRM(4, TMP1, TMP0, 0), x.aluRI(ALU.cmp, 4, TMP1, 48 - 8 * needInt));
+          buf.emit(x.movRM(4, X64_TMP1, X64_TMP0, 0), x.aluRI(ALU.cmp, 4, X64_TMP1, 48 - 8 * needInt));
           buf.jcc(CC.a, over);
         }
         if (needSse > 0) {
-          buf.emit(x.movRM(4, TMP1, TMP0, 4), x.aluRI(ALU.cmp, 4, TMP1, 176 - 16 * needSse));
+          buf.emit(x.movRM(4, X64_TMP1, X64_TMP0, 4), x.aluRI(ALU.cmp, 4, X64_TMP1, 176 - 16 * needSse));
           buf.jcc(CC.a, over);
         }
         for (let e = 0; e < words; e++) {
           const field = isSse(e) ? 4 : 0;
           const grow = isSse(e) ? 16 : 8;
-          buf.emit(x.movRM(4, TMP1, TMP0, field), x.movRM(8, RES, TMP0, 16));
-          buf.emit(x.aluRR(ALU.add, 8, RES, TMP1));     // RES = reg_save_area + 偏移
-          buf.emit(x.movRM(8, TMP1, RES, 0), x.movMR(8, BP, dst + e * 8, TMP1));
-          buf.emit(x.movRM(4, TMP1, TMP0, field), x.aluRI(ALU.add, 4, TMP1, grow));
-          buf.emit(x.movMR(4, TMP0, field, TMP1));
+          buf.emit(x.movRM(4, X64_TMP1, X64_TMP0, field), x.movRM(8, X64_RES, X64_TMP0, 16));
+          buf.emit(x.aluRR(ALU.add, 8, X64_RES, X64_TMP1));     // X64_RES = reg_save_area + 偏移
+          buf.emit(x.movRM(8, X64_TMP1, X64_RES, 0), x.movMR(8, BP, dst + e * 8, X64_TMP1));
+          buf.emit(x.movRM(4, X64_TMP1, X64_TMP0, field), x.aluRI(ALU.add, 4, X64_TMP1, grow));
+          buf.emit(x.movMR(4, X64_TMP0, field, X64_TMP1));
         }
-        buf.emit(x.lea(8, RES, BP, dst));
+        buf.emit(x.lea(8, X64_RES, BP, dst));
         buf.jmp(done);
         buf.place(over);
         fromStack();
         buf.place(done);
-        return this.def(i, RES);
+        return this.def(i, X64_RES);
       }
       const flt = isFloatType(t);
       const field = flt ? 4 : 0;          // gp_offset 在 0、fp_offset 在 4
@@ -712,26 +712,26 @@ class FnGen {
       const over = buf.label();
       const done = buf.label();
       const ldv = (ptr) => {
-        if (typeKind(t) === T_I32) buf.emit(x.movsxM(8, 4, RES, ptr, 0));
-        else buf.emit(x.movRM(8, RES, ptr, 0));
+        if (typeKind(t) === T_I32) buf.emit(x.movsxM(8, 4, X64_RES, ptr, 0));
+        else buf.emit(x.movRM(8, X64_RES, ptr, 0));
       };
-      this.loadRef(TMP0, f.a[i]);
-      buf.emit(x.movRM(8, TMP0, TMP0, 0));            // TMP0 = 结构的地址
-      buf.emit(x.movRM(4, TMP1, TMP0, field));
-      buf.emit(x.aluRI(ALU.cmp, 4, TMP1, limit));
+      this.loadRef(X64_TMP0, f.a[i]);
+      buf.emit(x.movRM(8, X64_TMP0, X64_TMP0, 0));            // X64_TMP0 = 结构的地址
+      buf.emit(x.movRM(4, X64_TMP1, X64_TMP0, field));
+      buf.emit(x.aluRI(ALU.cmp, 4, X64_TMP1, limit));
       buf.jcc(CC.ae, over);
       /* 还在寄存器保存区里：地址 = reg_save_area + 偏移，偏移随后往前推一格。 */
-      buf.emit(x.movRM(8, RES, TMP0, 16), x.aluRR(ALU.add, 8, RES, TMP1));
-      buf.emit(x.aluRI(ALU.add, 4, TMP1, step), x.movMR(4, TMP0, field, TMP1));
-      ldv(RES);
+      buf.emit(x.movRM(8, X64_RES, X64_TMP0, 16), x.aluRR(ALU.add, 8, X64_RES, X64_TMP1));
+      buf.emit(x.aluRI(ALU.add, 4, X64_TMP1, step), x.movMR(4, X64_TMP0, field, X64_TMP1));
+      ldv(X64_RES);
       buf.jmp(done);
       /* 已经溢到栈上：这一路不分整数与浮点，一格一律 8 字节。 */
       buf.place(over);
-      buf.emit(x.movRM(8, TMP1, TMP0, 8));
-      ldv(TMP1);
-      buf.emit(x.aluRI(ALU.add, 8, TMP1, 8), x.movMR(8, TMP0, 8, TMP1));
+      buf.emit(x.movRM(8, X64_TMP1, X64_TMP0, 8));
+      ldv(X64_TMP1);
+      buf.emit(x.aluRI(ALU.add, 8, X64_TMP1, 8), x.movMR(8, X64_TMP0, 8, X64_TMP1));
       buf.place(done);
-      return this.def(i, RES);
+      return this.def(i, X64_RES);
     }
     /* `va_copy`（第三十二片）：SysV 上要抄的是那个 24 字节的结构**本身**，不是指向它的
      * 指针 —— 抄指针会让两个 ap 共用一个游标，`va_arg(ap2)` 于是把 ap 也推了一格。
@@ -740,13 +740,13 @@ class FnGen {
     if (op === OP.VACOPY) {
       const vl = this.vaOffs.get(i);
       if (vl === undefined) throw new OmniError('x64: VACOPY 没有分到 va_list 的位置');
-      this.loadRef(TMP0, f.b[i]);
-      buf.emit(x.movRM(8, TMP0, TMP0, 0));            // TMP0 = 源结构的地址
+      this.loadRef(X64_TMP0, f.b[i]);
+      buf.emit(x.movRM(8, X64_TMP0, X64_TMP0, 0));            // X64_TMP0 = 源结构的地址
       for (let o = 0; o < 24; o += 8) {
-        buf.emit(x.movRM(8, TMP1, TMP0, o), x.movMR(8, BP, vl + o, TMP1));
+        buf.emit(x.movRM(8, X64_TMP1, X64_TMP0, o), x.movMR(8, BP, vl + o, X64_TMP1));
       }
-      this.loadRef(TMP0, f.a[i]);
-      buf.emit(x.lea(8, TMP1, BP, vl), x.movMR(8, TMP0, 0, TMP1));
+      this.loadRef(X64_TMP0, f.a[i]);
+      buf.emit(x.lea(8, X64_TMP1, BP, vl), x.movMR(8, X64_TMP0, 0, X64_TMP1));
       return;
     }
 
@@ -757,27 +757,27 @@ class FnGen {
      * 要让开的只有出参区：被调方按 `rsp` 找走栈的实参，所以块的基址取第一次 `sub` 之后
      * 那个位置，再往下降 `outArgs` 个字节当新的 `rsp`。 */
     if (op === OP.SPGET) {
-      buf.emit(x.movRR(8, RES, REG.rsp));
-      return this.def(i, RES);
+      buf.emit(x.movRR(8, X64_RES, REG.rsp));
+      return this.def(i, X64_RES);
     }
     if (op === OP.SPSET) {
-      this.loadRef(TMP0, f.a[i]);
-      buf.emit(x.movRR(8, REG.rsp, TMP0));
+      this.loadRef(X64_TMP0, f.a[i]);
+      buf.emit(x.movRR(8, REG.rsp, X64_TMP0));
       return;
     }
     /* 变参里的一整块内容（第三十九片）：这一条本身**不发访存** —— 内容什么时候拷、
      * 拷到哪儿（寄存器还是溢出区），是调用那一头按分类决定的（`callArgs`）。
      * 这儿只把地址落到自己的栈位上。 */
     if (op === OP.ARGMEM) {
-      this.loadRef(RES, f.a[i]);
-      return this.def(i, RES);
+      this.loadRef(X64_RES, f.a[i]);
+      return this.def(i, X64_RES);
     }
     if (op === OP.SPALLOC) {
-      this.loadRef(TMP0, f.a[i]);
-      buf.emit(x.aluRR(ALU.sub, 8, REG.rsp, TMP0));
-      buf.emit(x.movRR(8, RES, REG.rsp));
+      this.loadRef(X64_TMP0, f.a[i]);
+      buf.emit(x.aluRR(ALU.sub, 8, REG.rsp, X64_TMP0));
+      buf.emit(x.movRR(8, X64_RES, REG.rsp));
       if (this.outArgs > 0) buf.emit(x.aluRI(ALU.sub, 8, REG.rsp, this.outArgs));
-      return this.def(i, RES);
+      return this.def(i, X64_RES);
     }
 
     /* ---- 模块级变量。x86_64 上一条 RIP 相对的 `mov` 就够 —— 不必先取址
@@ -786,44 +786,44 @@ class FnGen {
       const key = widthKey(t);
       const gno = f.aux[i];
       /* 外部的全局量（第三十一片）：地址得先过 GOT 取出来，再从那个地址读 ——
-       * `mov RES, sym(%rip)` 这条路走不通（链接期没有它的地址）。 */
+       * `mov X64_RES, sym(%rip)` 这条路走不通（链接期没有它的地址）。 */
       if (this.isExternGlobal(gno)) {
-        buf.loadSymGot(TMP0, this.globalSym(gno));
-        MLOAD_EMIT[key === 'i32' ? 'i32s' : key](buf, RES, TMP0);
-        return this.def(i, RES);
+        buf.loadSymGot(X64_TMP0, this.globalSym(gno));
+        X64_MLOAD_EMIT[key === 'i32' ? 'i32s' : key](buf, X64_RES, X64_TMP0);
+        return this.def(i, X64_RES);
       }
       const sym = this.globalSym(gno);
       if (key === 'i32') {
         /* i32 的规范形是符号扩展过的 64 位，而 `movslq sym(%rip)` 我们没有 ——
          * 先读四字节（零扩展），再一条 `movslq` 扩成规范形。 */
-        buf.loadSym(4, RES, sym);
-        buf.emit(x.movsx(8, 4, RES, RES));
+        buf.loadSym(4, X64_RES, sym);
+        buf.emit(x.movsx(8, 4, X64_RES, X64_RES));
       } else if (key === 'f32') {
         /* f32 的栈位里躺的是**四字节的位模式**，高位清零 —— 读四字节正好。 */
-        buf.loadSym(4, RES, sym);
+        buf.loadSym(4, X64_RES, sym);
       } else {
-        buf.loadSym(8, RES, sym);
+        buf.loadSym(8, X64_RES, sym);
       }
-      return this.def(i, RES);
+      return this.def(i, X64_RES);
     }
     if (op === OP.GSTORE) {
-      this.loadRef(RES, f.a[i]);
+      this.loadRef(X64_RES, f.a[i]);
       const gno = f.aux[i];
-      const size = STORE_SIZE[widthKey(f.t[i])];
+      const size = X64_STORE_SIZE[widthKey(f.t[i])];
       if (this.isExternGlobal(gno)) {
-        buf.loadSymGot(TMP0, this.globalSym(gno));
-        buf.emit(x.movMR(size, TMP0, 0, RES));
+        buf.loadSymGot(X64_TMP0, this.globalSym(gno));
+        buf.emit(x.movMR(size, X64_TMP0, 0, X64_RES));
         return;
       }
-      buf.storeSym(size, this.globalSym(gno), RES);
+      buf.storeSym(size, this.globalSym(gno), X64_RES);
       return;
     }
     /* 全局的**地址**（第二十一片）：x86_64 上就是一条 `leaq sym(%rip)`。 */
     if (op === OP.GADDR) {
       const gno = f.aux[i];
-      if (this.isExternGlobal(gno)) buf.loadSymGot(RES, this.globalSym(gno));
-      else buf.leaSym(RES, this.globalSym(gno));
-      return this.def(i, RES);
+      if (this.isExternGlobal(gno)) buf.loadSymGot(X64_RES, this.globalSym(gno));
+      else buf.leaSym(X64_RES, this.globalSym(gno));
+      return this.def(i, X64_RES);
     }
 
     /* ---- 存取。地址就是真指针 —— native 上没有线性内存（arm64 那份头上那段）。 */
@@ -836,36 +836,36 @@ class FnGen {
     /* ---- 单目 */
     if (op === OP.NEG) {
       const w = widthOf(t);
-      this.loadRef(RES, f.a[i]);
-      buf.emit(x.negR(w, RES));
-      return this.def(i, RES, w);
+      this.loadRef(X64_RES, f.a[i]);
+      buf.emit(x.negR(w, X64_RES));
+      return this.def(i, X64_RES, w);
     }
     if (op === OP.BNOT) {
       const w = widthOf(t);
-      this.loadRef(RES, f.a[i]);
-      buf.emit(x.notR(w, RES));
-      return this.def(i, RES, w);
+      this.loadRef(X64_RES, f.a[i]);
+      buf.emit(x.notR(w, X64_RES));
+      return this.def(i, X64_RES, w);
     }
     if (op === OP.NOT) {
-      this.loadRef(RES, f.a[i]);
-      buf.emit(x.aluRI(ALU.xor, 8, RES, 1));
-      return this.def(i, RES);
+      this.loadRef(X64_RES, f.a[i]);
+      buf.emit(x.aluRI(ALU.xor, 8, X64_RES, 1));
+      return this.def(i, X64_RES);
     }
 
     /* ---- 二目。三类形状（一般的、除/取余、移位）在 `bin` 里分流。 */
-    if (BIN[op] !== undefined || DIVLIKE[op] !== undefined || SHIFT[op] !== undefined) {
+    if (X64_BIN[op] !== undefined || DIVLIKE[op] !== undefined || SHIFT[op] !== undefined) {
       return this.bin(i);
     }
 
     /* ---- 比较：`t` 是操作数的类型，产出永远是 0/1 的 bool */
-    const cond = CMP[op];
+    const cond = X64_CMP[op];
     if (cond !== undefined) {
       const w = widthOf(t);
-      this.loadRef(TMP0, f.a[i]);
-      this.loadRef(TMP1, f.b[i]);
-      buf.emit(x.aluRR(ALU.cmp, w, TMP0, TMP1));
-      buf.emit(x.setcc(cond, RES), x.movzx(8, 1, RES, RES));
-      return this.def(i, RES);
+      this.loadRef(X64_TMP0, f.a[i]);
+      this.loadRef(X64_TMP1, f.b[i]);
+      buf.emit(x.aluRR(ALU.cmp, w, X64_TMP0, X64_TMP1));
+      buf.emit(x.setcc(cond, X64_RES), x.movzx(8, 1, X64_RES, X64_RES));
+      return this.def(i, X64_RES);
     }
 
     if (op === OP.CVT) return this.cvt(i);
@@ -887,32 +887,32 @@ class FnGen {
 
     if (DIVLIKE[op] !== undefined) {
       const d = DIVLIKE[op];
-      this.loadRef(RES, f.a[i]);
-      this.loadRef(TMP1, f.b[i]);
+      this.loadRef(X64_RES, f.a[i]);
+      this.loadRef(X64_TMP1, f.b[i]);
       if (d.signed) buf.emit(w === 8 ? x.cqo() : x.cdq());
       /* 无符号除法要把 rdx 清零（`div` 用的是 rdx:rax 这个双字）。 */
       else buf.emit(x.aluRR(ALU.xor, 8, REG.rdx, REG.rdx));
-      buf.emit(d.signed ? x.idivR(w, TMP1) : x.divR(w, TMP1));
-      if (d.rem) buf.emit(x.movRR(8, RES, REG.rdx));
-      return this.def(i, RES, w);
+      buf.emit(d.signed ? x.idivR(w, X64_TMP1) : x.divR(w, X64_TMP1));
+      if (d.rem) buf.emit(x.movRR(8, X64_RES, REG.rdx));
+      return this.def(i, X64_RES, w);
     }
 
     if (SHIFT[op] !== undefined) {
-      this.loadRef(RES, f.a[i]);
+      this.loadRef(X64_RES, f.a[i]);
       this.loadRef(REG.rcx, f.b[i]);
-      buf.emit(x.shiftRCl(SHIFT[op], w, RES));
-      return this.def(i, RES, w);
+      buf.emit(x.shiftRCl(SHIFT[op], w, X64_RES));
+      return this.def(i, X64_RES, w);
     }
 
-    this.loadRef(RES, f.a[i]);
-    this.loadRef(TMP1, f.b[i]);
-    BIN[op](buf, w, RES, TMP1);
-    return this.def(i, RES, w);
+    this.loadRef(X64_RES, f.a[i]);
+    this.loadRef(X64_TMP1, f.b[i]);
+    X64_BIN[op](buf, w, X64_RES, X64_TMP1);
+    return this.def(i, X64_RES, w);
   }
 
   /** 实参就位：整数一串（六个）、浮点一串（八个）。`variadic` 时还要报 xmm 的个数。 */
   callArgs(args, variadic) {
-    const p = argPlaces(this.mod, this.f, args);
+    const p = x64ArgPlaces(this.mod, this.f, args);
     let k = 0;
     for (const ar of args) {
       const place = p.at[k];
@@ -922,18 +922,18 @@ class FnGen {
         /* 一整块内容进 MEMORY（`ARGMEM`，第四十片）：按 8/4/2/1 递降着拷，
          * **不拷到格子末尾** —— 格子补齐到 8，源没有那么长（arm64 那边同一条）。 */
         if (place.bytes !== undefined) {
-          this.loadRef(TMP0, ar);
+          this.loadRef(X64_TMP0, ar);
           let at = 0;
           for (const w of [8, 4, 2, 1]) {
             while (place.bytes - at >= w) {
-              this.buf.emit(x.movRM(w, TMP1, TMP0, at), x.movMR(w, REG.rsp, place.off + at, TMP1));
+              this.buf.emit(x.movRM(w, X64_TMP1, X64_TMP0, at), x.movMR(w, REG.rsp, place.off + at, X64_TMP1));
               at += w;
             }
           }
           continue;
         }
-        this.loadRef(TMP0, ar);
-        this.buf.emit(x.movMR(8, REG.rsp, place.off, TMP0));
+        this.loadRef(X64_TMP0, ar);
+        this.buf.emit(x.movMR(8, REG.rsp, place.off, X64_TMP0));
         continue;
       }
       /* 一整块内容分到了寄存器上：一格一个，整数格进 IARG、浮点格进 xmm。
@@ -941,28 +941,28 @@ class FnGen {
        * 而 tcc 那边（`gfunc_call` 的 x86_64 那一支）也是按 8 字节一格读的。
        * 能这么读是因为进寄存器的聚合最多 16 字节，而它的对齐把那一格垫满了。 */
       if (place.regs !== undefined) {
-        this.loadRef(TMP0, ar);
+        this.loadRef(X64_TMP0, ar);
         let e = 0;
         for (const r of place.regs) {
-          if (r.x !== undefined) this.buf.emit(x.movRM(8, IARG[r.x], TMP0, e * 8));
+          if (r.x !== undefined) this.buf.emit(x.movRM(8, IARG[r.x], X64_TMP0, e * 8));
           else {
-            this.buf.emit(x.movRM(8, TMP1, TMP0, e * 8));
-            this.toFp(FARG[r.v], TMP1);
+            this.buf.emit(x.movRM(8, X64_TMP1, X64_TMP0, e * 8));
+            this.toFp(FARG[r.v], X64_TMP1);
           }
           e++;
         }
         continue;
       }
       if (place.v !== undefined) {
-        this.loadRef(TMP0, ar);
-        this.toFp(FARG[place.v], TMP0);
+        this.loadRef(X64_TMP0, ar);
+        this.toFp(FARG[place.v], X64_TMP0);
         continue;
       }
       this.loadRef(IARG[place.x], ar);
     }
     /* SysV：调变参函数之前 `al` 要等于用掉的 xmm 个数。被调的是不是变参这一层不知道，
      * 所以外部调用一律发这一条 —— 对非变参函数完全无害，少了它 `printf` 会崩。 */
-    if (variadic === true) this.buf.emit(x.movRI(1, RES, p.nsse));
+    if (variadic === true) this.buf.emit(x.movRI(1, X64_RES, p.nsse));
   }
 
   /**
@@ -978,16 +978,16 @@ class FnGen {
        * `fstp qword` 把栈顶收成 double 写进借来的那八个字节，顺手把 x87 栈弹干净
        * （不弹的话连着几次调用就把那八格填满了）。 */
       if (ldret === true) {
-        this.buf.emit(x.push(RES));
+        this.buf.emit(x.push(X64_RES));
         this.buf.emit(x.fstpM64(REG.rsp, 0));
-        this.buf.emit(x.pop(RES));
-        return this.def(i, RES);
+        this.buf.emit(x.pop(X64_RES));
+        return this.def(i, X64_RES);
       }
-      this.fromFp(RES, FARG[0]);
-      return this.def(i, RES);
+      this.fromFp(X64_RES, FARG[0]);
+      return this.def(i, X64_RES);
     }
     /* i32 的返回值要按规范形符号扩展：SysV 只保证 eax 有值。 */
-    return this.def(i, RES, widthOf(t));
+    return this.def(i, X64_RES, widthOf(t));
   }
 
   globalSym(no) {
@@ -1030,17 +1030,17 @@ class FnGen {
     const f = this.f;
     const kind = MLOAD_KINDS[memKindNo(f.aux[i])];
     if (kind === 'f80') return this.mloadF80(i);
-    const ld = MLOAD_EMIT[kind];
+    const ld = X64_MLOAD_EMIT[kind];
     if (ld === undefined) return nyi(`MLOAD 的宽度 ${kind}`);
-    this.memAddr(TMP0, f.a[i], memOff(f.aux[i]));
-    ld(this.buf, RES, TMP0);
-    return this.def(i, RES);
+    this.memAddr(X64_TMP0, f.a[i], memOff(f.aux[i]));
+    ld(this.buf, X64_RES, X64_TMP0);
+    return this.def(i, X64_RES);
   }
 
   /**
    * 80 位那一格的读（第一百一十片）：`fld tbyte` 进 x87 栈，`fstp qword` 收成 double
    * 出来。中间要一块八字节的地方 —— 借栈：`push` 一下腾出格子（推什么都行，
-   * 推 `RES` 省一条指令），`fstp` 写进去，再 `pop` 回 `RES`。
+   * 推 `X64_RES` 省一条指令），`fstp` 写进去，再 `pop` 回 `X64_RES`。
    *
    * 帧是 rbp 基的（`push BP; mov BP, rsp`），所以动 rsp 不影响任何一个槽的地址；
    * 两条一进一出配对，中间没有 call。
@@ -1048,12 +1048,12 @@ class FnGen {
   mloadF80(i) {
     const f = this.f;
     const buf = this.buf;
-    this.memAddr(TMP0, f.a[i], memOff(f.aux[i]));
-    buf.emit(x.fldM80(TMP0, 0));
-    buf.emit(x.push(RES));
+    this.memAddr(X64_TMP0, f.a[i], memOff(f.aux[i]));
+    buf.emit(x.fldM80(X64_TMP0, 0));
+    buf.emit(x.push(X64_RES));
     buf.emit(x.fstpM64(REG.rsp, 0));
-    buf.emit(x.pop(RES));
-    return this.def(i, RES);
+    buf.emit(x.pop(X64_RES));
+    return this.def(i, X64_RES);
   }
 
   /** `MSTORE`。六种宽度只管「把低若干位拍进内存」；80 位那一格走 x87（见下）。 */
@@ -1061,27 +1061,27 @@ class FnGen {
     const f = this.f;
     const kind = MSTORE_KINDS[memKindNo(f.aux[i])];
     if (kind === 'f80') return this.mstoreF80(i);
-    const size = MSTORE_SIZE[kind];
+    const size = X64_MSTORE_SIZE[kind];
     if (size === undefined) return nyi(`MSTORE 的宽度 ${kind}`);
-    this.loadRef(RES, f.b[i]);
-    this.memAddr(TMP0, f.a[i], memOff(f.aux[i]));
-    this.buf.emit(x.movMR(size, TMP0, 0, RES));
+    this.loadRef(X64_RES, f.b[i]);
+    this.memAddr(X64_TMP0, f.a[i], memOff(f.aux[i]));
+    this.buf.emit(x.movMR(size, X64_TMP0, 0, X64_RES));
   }
 
   /**
-   * 80 位那一格的写：double 的位模式在 `RES` 里，先 `push` 到栈上让 x87 能寻址，
+   * 80 位那一格的写：double 的位模式在 `X64_RES` 里，先 `push` 到栈上让 x87 能寻址，
    * `fld qword` 读进来（硬件顺手摊成 80 位），`fstp tbyte` 写出那十个字节。
-   * 收尾 `pop` 只为把栈还原（值不再有人要，落进 `RES`）。
+   * 收尾 `pop` 只为把栈还原（值不再有人要，落进 `X64_RES`）。
    */
   mstoreF80(i) {
     const f = this.f;
     const buf = this.buf;
-    this.loadRef(RES, f.b[i]);
-    buf.emit(x.push(RES));
-    this.memAddr(TMP0, f.a[i], memOff(f.aux[i]));
+    this.loadRef(X64_RES, f.b[i]);
+    buf.emit(x.push(X64_RES));
+    this.memAddr(X64_TMP0, f.a[i], memOff(f.aux[i]));
     buf.emit(x.fldM64(REG.rsp, 0));
-    buf.emit(x.fstpM80(TMP0, 0));
-    buf.emit(x.pop(RES));
+    buf.emit(x.fstpM80(X64_TMP0, 0));
+    buf.emit(x.pop(X64_RES));
   }
 
   /**
@@ -1096,25 +1096,25 @@ class FnGen {
     if (op === OP.CVT) return this.cvtToFloat(i, dbl);
     if (op === OP.NEG) {
       /* x86 没有 `fneg`：把符号位**异或**掉。掩码只有一位是 1，走整数寄存器造。 */
-      this.loadRef(TMP0, f.a[i]);
-      this.toFp(FTMP0, TMP0);
-      this.movImm(TMP1, dbl ? -(2n ** 63n) : BigInt(2 ** 31));
-      this.toFp(FTMP1, TMP1);
-      buf.emit(x.fxor(dbl, FTMP0, FTMP1));
-      this.fromFp(RES, FTMP0);
-      return this.def(i, RES);
+      this.loadRef(X64_TMP0, f.a[i]);
+      this.toFp(X64_FTMP0, X64_TMP0);
+      this.movImm(X64_TMP1, dbl ? -(2n ** 63n) : BigInt(2 ** 31));
+      this.toFp(X64_FTMP1, X64_TMP1);
+      buf.emit(x.fxor(dbl, X64_FTMP0, X64_FTMP1));
+      this.fromFp(X64_RES, X64_FTMP0);
+      return this.def(i, X64_RES);
     }
-    const fb = FBIN[op];
-    const fc = FCMP[op];
+    const fb = X64_FBIN[op];
+    const fc = X64_FCMP[op];
     if (fb === undefined && fc === undefined) return nyi(`浮点的 ${OP_NAMES[op]}`);
-    this.loadRef(TMP0, f.a[i]);
-    this.loadRef(TMP1, f.b[i]);
-    this.toFp(FTMP0, TMP0);
-    this.toFp(FTMP1, TMP1);
+    this.loadRef(X64_TMP0, f.a[i]);
+    this.loadRef(X64_TMP1, f.b[i]);
+    this.toFp(X64_FTMP0, X64_TMP0);
+    this.toFp(X64_FTMP1, X64_TMP1);
     if (fb !== undefined) {
-      buf.emit(x.fbin(fb, dbl, FTMP0, FTMP1));
-      this.fromFp(RES, FTMP0);
-      return this.def(i, RES);
+      buf.emit(x.fbin(fb, dbl, X64_FTMP0, X64_FTMP1));
+      this.fromFp(X64_RES, X64_FTMP0);
+      return this.def(i, X64_RES);
     }
     return this.fcmp(i, dbl, fc);
   }
@@ -1132,16 +1132,16 @@ class FnGen {
   fcmp(i, dbl, fc) {
     const buf = this.buf;
     /* `swap` 的那两条：比的是 (b, a) 而不是 (a, b)。 */
-    buf.emit(x.fcmp(dbl, fc.swap ? FTMP1 : FTMP0, fc.swap ? FTMP0 : FTMP1));
+    buf.emit(x.fcmp(dbl, fc.swap ? X64_FTMP1 : X64_FTMP0, fc.swap ? X64_FTMP0 : X64_FTMP1));
     if (fc.pf === undefined) {
-      buf.emit(x.setcc(fc.cc, RES), x.movzx(8, 1, RES, RES));
-      return this.def(i, RES);
+      buf.emit(x.setcc(fc.cc, X64_RES), x.movzx(8, 1, X64_RES, X64_RES));
+      return this.def(i, X64_RES);
     }
     /* `==`/`!=`：两个条件合起来。用 r10/r11 的低字节 —— 这时它们的旧值已经不要了。 */
-    buf.emit(x.setcc(fc.cc, TMP0), x.setcc(fc.pf, TMP1));
-    buf.emit(x.aluRR(fc.join, 1, TMP0, TMP1));
-    buf.emit(x.movzx(8, 1, RES, TMP0));
-    return this.def(i, RES);
+    buf.emit(x.setcc(fc.cc, X64_TMP0), x.setcc(fc.pf, X64_TMP1));
+    buf.emit(x.aluRR(fc.join, 1, X64_TMP0, X64_TMP1));
+    buf.emit(x.movzx(8, 1, X64_RES, X64_TMP0));
+    return this.def(i, X64_RES);
   }
 
   /** 结果是浮点的那几种 CVT。 */
@@ -1150,32 +1150,32 @@ class FnGen {
     const buf = this.buf;
     const mode = f.aux[i];
     const src = this.typeOfRef(f.a[i]);
-    this.loadRef(TMP0, f.a[i]);
+    this.loadRef(X64_TMP0, f.a[i]);
     if (mode === CVT_BITCAST) {
-      buf.emit(x.movRR(8, RES, TMP0));
-      return this.def(i, RES);
+      buf.emit(x.movRR(8, X64_RES, X64_TMP0));
+      return this.def(i, X64_RES);
     }
     if (mode === CVT_I2F) {
-      buf.emit(x.cvtI2F(dbl, intBits(src) === 64 ? 8 : 4, FTMP0, TMP0));
-      this.fromFp(RES, FTMP0);
-      return this.def(i, RES);
+      buf.emit(x.cvtI2F(dbl, intBits(src) === 64 ? 8 : 4, X64_FTMP0, X64_TMP0));
+      this.fromFp(X64_RES, X64_FTMP0);
+      return this.def(i, X64_RES);
     }
     if (mode === CVT_U2F) {
       /* x86 没有「无符号 -> 浮点」的指令。32 位的够办：零扩展成 64 位再走**有符号**那条
        * （零扩展之后的值一定是正的）。 */
       if (intBits(src) === 64) return this.u64ToFloat(i, dbl);
-      buf.emit(x.movRR(4, TMP0, TMP0));
-      buf.emit(x.cvtI2F(dbl, 8, FTMP0, TMP0));
-      this.fromFp(RES, FTMP0);
-      return this.def(i, RES);
+      buf.emit(x.movRR(4, X64_TMP0, X64_TMP0));
+      buf.emit(x.cvtI2F(dbl, 8, X64_FTMP0, X64_TMP0));
+      this.fromFp(X64_RES, X64_FTMP0);
+      return this.def(i, X64_RES);
     }
     if (mode === CVT_FCVT) {
       const srcDbl = typeKind(src) === T_F64;
       if (srcDbl === dbl) return nyi('同宽的 CVT_FCVT');
-      this.toFp(FTMP0, TMP0);
-      buf.emit(x.cvtF2F(srcDbl, FTMP1, FTMP0));
-      this.fromFp(RES, FTMP1);
-      return this.def(i, RES);
+      this.toFp(X64_FTMP0, X64_TMP0);
+      buf.emit(x.cvtF2F(srcDbl, X64_FTMP1, X64_FTMP0));
+      this.fromFp(X64_RES, X64_FTMP1);
+      return this.def(i, X64_RES);
     }
     return nyi(`结果是浮点的 CVT 模式 ${mode}`);
   }
@@ -1200,33 +1200,33 @@ class FnGen {
     const buf = this.buf;
     const big = buf.label();
     const done = buf.label();
-    buf.emit(x.testRR(8, TMP0, TMP0));
+    buf.emit(x.testRR(8, X64_TMP0, X64_TMP0));
     buf.jcc(CC.s, big);
-    buf.emit(x.cvtI2F(dbl, 8, FTMP0, TMP0));
+    buf.emit(x.cvtI2F(dbl, 8, X64_FTMP0, X64_TMP0));
     buf.jmp(done);
     buf.place(big);
-    buf.emit(x.movRR(8, TMP1, TMP0));
-    buf.emit(x.shiftRI(SH.shr, 8, TMP1, 1));
-    buf.emit(x.aluRI(ALU.and, 8, TMP0, 1));
-    buf.emit(x.aluRR(ALU.or, 8, TMP1, TMP0));
-    buf.emit(x.cvtI2F(dbl, 8, FTMP0, TMP1));
-    buf.emit(x.fbin(FOP.add, dbl, FTMP0, FTMP0));
+    buf.emit(x.movRR(8, X64_TMP1, X64_TMP0));
+    buf.emit(x.shiftRI(SH.shr, 8, X64_TMP1, 1));
+    buf.emit(x.aluRI(ALU.and, 8, X64_TMP0, 1));
+    buf.emit(x.aluRR(ALU.or, 8, X64_TMP1, X64_TMP0));
+    buf.emit(x.cvtI2F(dbl, 8, X64_FTMP0, X64_TMP1));
+    buf.emit(x.fbin(FOP.add, dbl, X64_FTMP0, X64_FTMP0));
     buf.place(done);
-    this.fromFp(RES, FTMP0);
-    return this.def(i, RES);
+    this.fromFp(X64_RES, X64_FTMP0);
+    return this.def(i, X64_RES);
   }
 
   cvt(i) {
     const f = this.f;
     const buf = this.buf;
     const mode = f.aux[i];
-    this.loadRef(TMP0, f.a[i]);
+    this.loadRef(X64_TMP0, f.a[i]);
     if (mode === CVT_F2I) {
       const srcDbl = typeKind(this.typeOfRef(f.a[i])) === T_F64;
       const w = widthOf(f.t[i]);
-      this.toFp(FTMP0, TMP0);
-      buf.emit(x.cvtF2I(srcDbl, w, RES, FTMP0));
-      return this.def(i, RES, w);
+      this.toFp(X64_FTMP0, X64_TMP0);
+      buf.emit(x.cvtF2I(srcDbl, w, X64_RES, X64_FTMP0));
+      return this.def(i, X64_RES, w);
     }
     /* 浮点 -> **无符号** 64 位（第九刀第九十五片）。x86 又没有这条指令，而
      * `cvttsd2si` 在越界处不是回绕、是**饱和**（给 `0x8000000000000000`）。分两路：
@@ -1241,35 +1241,35 @@ class FnGen {
       const srcDbl = typeKind(this.typeOfRef(f.a[i])) === T_F64;
       const big = buf.label();
       const done = buf.label();
-      this.toFp(FTMP0, TMP0);
+      this.toFp(X64_FTMP0, X64_TMP0);
       // 2^63 的位模式：double 是 0x43e0…、float 是 0x5f000000
-      this.movImm(TMP1, srcDbl ? 0x43e0000000000000n : 0x5f000000n);
-      this.toFp(FTMP1, TMP1);
-      buf.emit(x.fcmp(srcDbl, FTMP0, FTMP1));
+      this.movImm(X64_TMP1, srcDbl ? 0x43e0000000000000n : 0x5f000000n);
+      this.toFp(X64_FTMP1, X64_TMP1);
+      buf.emit(x.fcmp(srcDbl, X64_FTMP0, X64_FTMP1));
       buf.jcc(CC.ae, big);
-      buf.emit(x.cvtF2I(srcDbl, 8, RES, FTMP0));
+      buf.emit(x.cvtF2I(srcDbl, 8, X64_RES, X64_FTMP0));
       buf.jmp(done);
       buf.place(big);
-      buf.emit(x.fbin(FOP.sub, srcDbl, FTMP0, FTMP1));
-      buf.emit(x.cvtF2I(srcDbl, 8, RES, FTMP0));
-      this.movImm(TMP1, 1n << 63n);
-      buf.emit(x.aluRR(ALU.xor, 8, RES, TMP1));
+      buf.emit(x.fbin(FOP.sub, srcDbl, X64_FTMP0, X64_FTMP1));
+      buf.emit(x.cvtF2I(srcDbl, 8, X64_RES, X64_FTMP0));
+      this.movImm(X64_TMP1, 1n << 63n);
+      buf.emit(x.aluRR(ALU.xor, 8, X64_RES, X64_TMP1));
       buf.place(done);
-      return this.def(i, RES, 64);
+      return this.def(i, X64_RES, 64);
     }
     /* i32 的规范形是符号扩展后的 64 位，所以：
      *  - SEXT（i32 -> i64）什么都不用做；
      *  - ZEXT 要抹掉高 32 位 —— 一条 32 位的 `mov` 就够（x86 的 32 位写入天然清高位）。
      *    不用 `and rax, 0xffffffff`：那条的立即数是**符号扩展**的，0xffffffff 会变成 -1；
      *  - TRUNC（i64 -> i32）要重新按 32 位符号扩展一遍（`movslq`）。 */
-    if (mode === CVT_SEXT) buf.emit(x.movRR(8, RES, TMP0));
-    else if (mode === CVT_ZEXT) buf.emit(x.movRR(4, RES, TMP0));
-    else if (mode === CVT_TRUNC) buf.emit(x.movsx(8, 4, RES, TMP0));
-    else if (mode === CVT_SEXT8) buf.emit(x.movsx(8, 1, RES, TMP0));
-    else if (mode === CVT_SEXT16) buf.emit(x.movsx(8, 2, RES, TMP0));
-    else if (mode === CVT_BITCAST) buf.emit(x.movRR(8, RES, TMP0));
+    if (mode === CVT_SEXT) buf.emit(x.movRR(8, X64_RES, X64_TMP0));
+    else if (mode === CVT_ZEXT) buf.emit(x.movRR(4, X64_RES, X64_TMP0));
+    else if (mode === CVT_TRUNC) buf.emit(x.movsx(8, 4, X64_RES, X64_TMP0));
+    else if (mode === CVT_SEXT8) buf.emit(x.movsx(8, 1, X64_RES, X64_TMP0));
+    else if (mode === CVT_SEXT16) buf.emit(x.movsx(8, 2, X64_RES, X64_TMP0));
+    else if (mode === CVT_BITCAST) buf.emit(x.movRR(8, X64_RES, X64_TMP0));
     else return nyi(`CVT 模式 ${mode}`);
-    return this.def(i, RES);
+    return this.def(i, X64_RES);
   }
 
   /** 把结果写回这条指令的栈位。32 位的结果先按 i32 的规范形符号扩展。 */
@@ -1280,13 +1280,13 @@ class FnGen {
 }
 
 /* 一般的二目：一条指令，结果在 `d`。除、取余、移位不在这张表里（形状不同，见 `bin`）。 */
-const BIN = {};
-BIN[OP.ADD] = (b, w, d, y) => b.emit(x.aluRR(ALU.add, w, d, y));
-BIN[OP.SUB] = (b, w, d, y) => b.emit(x.aluRR(ALU.sub, w, d, y));
-BIN[OP.MUL] = (b, w, d, y) => b.emit(x.imulRR(w, d, y));
-BIN[OP.BAND] = (b, w, d, y) => b.emit(x.aluRR(ALU.and, w, d, y));
-BIN[OP.BOR] = (b, w, d, y) => b.emit(x.aluRR(ALU.or, w, d, y));
-BIN[OP.BXOR] = (b, w, d, y) => b.emit(x.aluRR(ALU.xor, w, d, y));
+const X64_BIN = {};
+X64_BIN[OP.ADD] = (b, w, d, y) => b.emit(x.aluRR(ALU.add, w, d, y));
+X64_BIN[OP.SUB] = (b, w, d, y) => b.emit(x.aluRR(ALU.sub, w, d, y));
+X64_BIN[OP.MUL] = (b, w, d, y) => b.emit(x.imulRR(w, d, y));
+X64_BIN[OP.BAND] = (b, w, d, y) => b.emit(x.aluRR(ALU.and, w, d, y));
+X64_BIN[OP.BOR] = (b, w, d, y) => b.emit(x.aluRR(ALU.or, w, d, y));
+X64_BIN[OP.BXOR] = (b, w, d, y) => b.emit(x.aluRR(ALU.xor, w, d, y));
 
 /** 除与取余：`signed` 决定 `idiv`/`div` 与铺符号的方式，`rem` 决定取商还是取余。 */
 const DIVLIKE = {};
@@ -1302,39 +1302,39 @@ SHIFT[OP.SHR] = SH.sar;
 SHIFT[OP.USHR] = SH.shr;
 
 /* 整数比较 -> 条件码。`b`/`ae`/`be`/`a` 是无符号那一套。 */
-const CMP = {};
-CMP[OP.EQ] = CC.e;
-CMP[OP.NE] = CC.ne;
-CMP[OP.LT] = CC.l;
-CMP[OP.GE] = CC.ge;
-CMP[OP.LE] = CC.le;
-CMP[OP.GT] = CC.g;
-CMP[OP.ULT] = CC.b;
-CMP[OP.UGE] = CC.ae;
-CMP[OP.ULE] = CC.be;
-CMP[OP.UGT] = CC.a;
+const X64_CMP = {};
+X64_CMP[OP.EQ] = CC.e;
+X64_CMP[OP.NE] = CC.ne;
+X64_CMP[OP.LT] = CC.l;
+X64_CMP[OP.GE] = CC.ge;
+X64_CMP[OP.LE] = CC.le;
+X64_CMP[OP.GT] = CC.g;
+X64_CMP[OP.ULT] = CC.b;
+X64_CMP[OP.UGE] = CC.ae;
+X64_CMP[OP.ULE] = CC.be;
+X64_CMP[OP.UGT] = CC.a;
 
 /* 浮点的二目 -> SSE 的操作码。 */
-const FBIN = {};
-FBIN[OP.ADD] = FOP.add;
-FBIN[OP.SUB] = FOP.sub;
-FBIN[OP.MUL] = FOP.mul;
-FBIN[OP.DIV] = FOP.div;
+const X64_FBIN = {};
+X64_FBIN[OP.ADD] = FOP.add;
+X64_FBIN[OP.SUB] = FOP.sub;
+X64_FBIN[OP.MUL] = FOP.mul;
+X64_FBIN[OP.DIV] = FOP.div;
 
 /**
  * 浮点比较 -> 「怎么取」。`swap` 是「换操作数」，`pf`/`join` 是「两个条件合起来」。
- * 为什么不能照抄整数表，见 `FnGen.fcmp` 上面那段。
+ * 为什么不能照抄整数表，见 `x64FnGen.fcmp` 上面那段。
  */
-const FCMP = {};
-FCMP[OP.EQ] = { cc: CC.e, pf: CC.np, join: ALU.and };
-FCMP[OP.NE] = { cc: CC.ne, pf: CC.p, join: ALU.or };
-FCMP[OP.LT] = { cc: CC.a, swap: true };
-FCMP[OP.LE] = { cc: CC.ae, swap: true };
-FCMP[OP.GT] = { cc: CC.a };
-FCMP[OP.GE] = { cc: CC.ae };
+const X64_FCMP = {};
+X64_FCMP[OP.EQ] = { cc: CC.e, pf: CC.np, join: ALU.and };
+X64_FCMP[OP.NE] = { cc: CC.ne, pf: CC.p, join: ALU.or };
+X64_FCMP[OP.LT] = { cc: CC.a, swap: true };
+X64_FCMP[OP.LE] = { cc: CC.ae, swap: true };
+X64_FCMP[OP.GT] = { cc: CC.a };
+X64_FCMP[OP.GE] = { cc: CC.ae };
 
 /* 线性内存的九种读。 */
-const MLOAD_EMIT = {
+const X64_MLOAD_EMIT = {
   i8s: (b, d, p) => b.emit(x.movsxM(8, 1, d, p, 0)),
   i8u: (b, d, p) => b.emit(x.movzxM(8, 1, d, p, 0)),
   i16s: (b, d, p) => b.emit(x.movsxM(8, 2, d, p, 0)),
@@ -1347,10 +1347,10 @@ const MLOAD_EMIT = {
 };
 
 /* 六种写 -> `mov` 的字节宽度。 */
-const MSTORE_SIZE = { i8: 1, i16: 2, i32: 4, i64: 8, f32: 4, f64: 8 };
+const X64_MSTORE_SIZE = { i8: 1, i16: 2, i32: 4, i64: 8, f32: 4, f64: 8 };
 
 /** 模块级变量的宽度：写多少字节。 */
-const STORE_SIZE = { i64: 8, i32: 4, f64: 8, f32: 4 };
+const X64_STORE_SIZE = { i64: 8, i32: 4, f64: 8, f32: 4 };
 
 /** 类型 -> 一个宽度的名字。bool 与指针都按 64 位走。 */
 function widthKey(t) {
@@ -1363,7 +1363,7 @@ function widthKey(t) {
 
 /** 一个 MIR 函数 -> 一段 x86_64 机器码。不认 CALL 与串常量（那两样要整个模块）。 */
 export function genFunc(mod, f) {
-  const g = new FnGen(mod, f);
+  const g = new x64FnGen(mod, f);
   g.gen();
   g.buf.finish();
   return g.buf;
@@ -1526,7 +1526,7 @@ export function genModule(mod, opts) {
     }
     offsets.push(buf.pos);
     buf.place(labels[i]);
-    new FnGen(mod, f, buf, labels, strSyms).gen();
+    new x64FnGen(mod, f, buf, labels, strSyms).gen();
     if (wantUw) {
       uwFuncs.push({ start: offsets[i], end: buf.pos });
       if (nEmit === 0) {

@@ -22,38 +22,38 @@ import { DWARF_SECTIONS } from './elf_merge.js';
 import { buildImports, writeImage } from './pe.js';
 import { relocateOne } from './pe_reloc.js';
 
-const SHT_NOBITS = 8;
-const SHT_RELA = 4;
-const SHN_UNDEF = 0;
-const STB_GLOBAL = 1;
-const STB_WEAK = 2;
-const SHN_COMMON = 0xfff2;
-const SHN_LORESERVE = 0xff00;
-const SHN_ABS = 0xfff1;
-const RELA_SIZE = 24;
-const IMP_DESC_SIZE = 20;
-const THUNK_SIZE = 8;
+const PLINK_SHT_NOBITS = 8;
+const PLINK_SHT_RELA = 4;
+const PLINK_SHN_UNDEF = 0;
+const PLINK_STB_GLOBAL = 1;
+const PLINK_STB_WEAK = 2;
+const PLINK_SHN_COMMON = 0xfff2;
+const PLINK_SHN_LORESERVE = 0xff00;
+const PLINK_SHN_ABS = 0xfff1;
+const PLINK_RELA_SIZE = 24;
+const PLINK_IMP_DESC_SIZE = 20;
+const PLINK_THUNK_SIZE = 8;
 /** `sizeof(struct syment)` —— 紧排的 18 字节。 */
 const SYMENT_SIZE = 18;
 
-const EM_386 = 3;
-const EM_ARM = 40;
-const EM_X86_64 = 62;
-const EM_AARCH64 = 183;
+const PLINK_EM_386 = 3;
+const PLINK_EM_ARM = 40;
+const PLINK_EM_X86_64 = 62;
+const PLINK_EM_AARCH64 = 183;
 
 /** 一个导入桩的代码（地址那一格留空，由重定位补）。 */
 function thunkCode(machine) {
-  if (machine === EM_X86_64) {
+  if (machine === PLINK_EM_X86_64) {
     /* `ff 25 <rel32>`：跳到 IAT 那一格里存的地址。rel32 原地先写 -4。 */
     return new Uint8Array([0xff, 0x25, 0xfc, 0xff, 0xff, 0xff, 0, 0]);
   }
-  if (machine === EM_386) {
+  if (machine === PLINK_EM_386) {
     /* 同一句 `ff 25`，可 32 位上后面那 4 字节是**绝对地址**（`R_386_32`），
      * 不是 rel32 —— tcc 那个 `write32le(p + 2, -4)` 在 `#ifdef TCC_TARGET_X86_64`
      * 里面。原地留 0。 */
     return new Uint8Array([0xff, 0x25, 0, 0, 0, 0, 0, 0]);
   }
-  if (machine === EM_ARM) {
+  if (machine === PLINK_EM_ARM) {
     /* 12 字节：`ldr ip, [pc]`（pc+8 正好是后面那 4 字节）、`ldr pc, [ip]`，
      * 再跟一格 IAT 的**绝对地址**（`R_ARM_ABS32`，也就是 `R_XXX_THUNKFIX`）。 */
     const b = new Uint8Array(12);
@@ -62,7 +62,7 @@ function thunkCode(machine) {
     dv.setUint32(4, 0xe59cf000, true);            // ldr pc, [ip]
     return b;
   }
-  if (machine === EM_AARCH64) {
+  if (machine === PLINK_EM_AARCH64) {
     const b = new Uint8Array(24);
     const dv = new DataView(b.buffer);
     dv.setUint32(0, 0x58000090, true);            // ldr x16, [pc, #16]
@@ -86,7 +86,7 @@ export function peImage(inp) {
 
   /* 每一节一块正好那么长的缓冲区，原来的内容照抄进去。 */
   for (const s of secs) {
-    if (s.type === SHT_NOBITS) { s.data = null; continue; }
+    if (s.type === PLINK_SHT_NOBITS) { s.data = null; continue; }
     s.data = new Uint8Array(s.size);
     s.data.set(s.bytes.subarray(0, Math.min(s.bytes.length, s.size)), 0);
   }
@@ -117,9 +117,9 @@ export function peImage(inp) {
 
   /* 导入桩的代码。 */
   const code = thunkCode(machine);
-  const thk = r.class32 === true ? 4 : THUNK_SIZE;
+  const thk = r.class32 === true ? 4 : PLINK_THUNK_SIZE;
   const iatBase = imp === null ? 0
-    : r.thunk.vaddr + imp.at + (imp.dlls.length + 1) * IMP_DESC_SIZE;
+    : r.thunk.vaddr + imp.at + (imp.dlls.length + 1) * PLINK_IMP_DESC_SIZE;
   const iatAddr = (key) => iatBase + imports.slot.get(key) * thk;
   const thunkAddr = (key) => r.text.vaddr + r.thunkAt + imports.thunkIdx.get(key) * r.thunkSize;
   for (const [key, i] of imports.thunkIdx) {
@@ -128,11 +128,11 @@ export function peImage(inp) {
     /* 桩里指向 IAT 那一格的那条重定位，就地落笔。x86_64 是 `R_X86_64_PC32`、
      * i386 是 `R_386_32`（绝对地址）、arm 是 `R_ARM_ABS32`（在 +8）、
      * arm64 是 `R_AARCH64_ABS64`（在 +16）。 */
-    if (machine === EM_X86_64) {
+    if (machine === PLINK_EM_X86_64) {
       relocateOne(machine, 2, r.text.data, at + 2, r.text.vaddr + at + 2, iatAddr(key), imagebase);
-    } else if (machine === EM_386) {
+    } else if (machine === PLINK_EM_386) {
       relocateOne(machine, 1, r.text.data, at + 2, r.text.vaddr + at + 2, iatAddr(key), imagebase);
-    } else if (machine === EM_ARM) {
+    } else if (machine === PLINK_EM_ARM) {
       relocateOne(machine, 2, r.text.data, at + 8, r.text.vaddr + at + 8, iatAddr(key), imagebase);
     } else {
       relocateOne(machine, 257, r.text.data, at + 16, r.text.vaddr + at + 16, iatAddr(key), imagebase);
@@ -142,18 +142,18 @@ export function peImage(inp) {
   /* 每个符号的最终地址。 */
   const addrOf = (sym) => {
     const b = imports.bind.get(sym.name);
-    if (b !== undefined && sym.shndx === SHN_UNDEF) {
+    if (b !== undefined && sym.shndx === PLINK_SHN_UNDEF) {
       return b.func ? thunkAddr(b.key) : iatAddr(b.key);
     }
     /* 链接器自己提供的那几个（`_etext`、`__init_array_start` …）与安家到 `.bss` 的
      * COMMON 符号，值不在符号表里，在这张表里。 */
     const l = r.linker.get(sym.name);
-    if (l !== undefined && (sym.shndx === SHN_UNDEF || sym.shndx === SHN_COMMON)) {
+    if (l !== undefined && (sym.shndx === PLINK_SHN_UNDEF || sym.shndx === PLINK_SHN_COMMON)) {
       return l.sec.vaddr + l.off;
     }
-    if (sym.shndx === SHN_UNDEF) return 0;         // 弱的未定义符号在 PE 上就是 0
-    if (sym.shndx === SHN_ABS) return sym.value;
-    if (sym.shndx >= SHN_LORESERVE) return 0;
+    if (sym.shndx === PLINK_SHN_UNDEF) return 0;         // 弱的未定义符号在 PE 上就是 0
+    if (sym.shndx === PLINK_SHN_ABS) return sym.value;
+    if (sym.shndx >= PLINK_SHN_LORESERVE) return 0;
     const s = secs[sym.shndx - 1];
     if (s === undefined) throw new OmniError(`pe: 符号 '${sym.name}' 指的节不存在`);
     return s.vaddr + sym.value;
@@ -164,16 +164,16 @@ export function peImage(inp) {
    * `relocate_syms` 之后的绝对地址，再减回 `s->sh_addr`。 */
   const placeOf = (sym) => {
     const b = imports.bind.get(sym.name);
-    if (b !== undefined && sym.shndx === SHN_UNDEF) {
+    if (b !== undefined && sym.shndx === PLINK_SHN_UNDEF) {
       return b.func
         ? { sec: r.text, off: r.thunkAt + imports.thunkIdx.get(b.key) * r.thunkSize }
         : { sec: r.thunk, off: iatAddr(b.key) - r.thunk.vaddr };
     }
     const l = r.linker.get(sym.name);
-    if (l !== undefined && (sym.shndx === SHN_UNDEF || sym.shndx === SHN_COMMON)) return l;
-    /* 未定义（弱符号）与 `SHN_ABS` 那一路：`n_scnum` 照原样写，`n_value` 就是
+    if (l !== undefined && (sym.shndx === PLINK_SHN_UNDEF || sym.shndx === PLINK_SHN_COMMON)) return l;
+    /* 未定义（弱符号）与 `PLINK_SHN_ABS` 那一路：`n_scnum` 照原样写，`n_value` 就是
      * `st_value` —— `relocate_syms` 对这两种都没加节的地址。 */
-    if (sym.shndx === SHN_UNDEF || sym.shndx >= SHN_LORESERVE) return null;
+    if (sym.shndx === PLINK_SHN_UNDEF || sym.shndx >= PLINK_SHN_LORESERVE) return null;
     return { sec: secs[sym.shndx - 1], off: sym.value };
   };
 
@@ -192,7 +192,7 @@ export function peImage(inp) {
   const DW = new Set(DWARF_SECTIONS);
   /* `R_DATA_32DW`：x86_64 是 `R_X86_64_32`（10）、arm64 是 `R_AARCH64_ABS32`（258）、
    * i386 是 `R_386_32`（1）、arm 是 `R_ARM_ABS32`（2）。 */
-  const DW32 = new Map([[EM_X86_64, 10], [EM_AARCH64, 258], [EM_386, 1], [EM_ARM, 2]]);
+  const DW32 = new Map([[PLINK_EM_X86_64, 10], [PLINK_EM_AARCH64, 258], [PLINK_EM_386, 1], [PLINK_EM_ARM, 2]]);
   const dw32 = DW32.get(machine);
   const c32 = r.class32 === true;
   const relSize = r.relSize;
@@ -211,10 +211,10 @@ export function peImage(inp) {
       const addend = c32 ? 0 : Number(dv.getBigInt64(p + 16, true));
       const sym = syms[symx];
       if (sym === undefined) throw new OmniError('pe: 重定位指的符号不存在');
-      const weak = sym.shndx === SHN_UNDEF && sym.bind === STB_WEAK
+      const weak = sym.shndx === PLINK_SHN_UNDEF && sym.bind === PLINK_STB_WEAK
         && !imports.bind.has(sym.name) && !r.linker.has(sym.name);
-      if (type === dw32 && DW.has(tgt.name) && sym.shndx !== SHN_UNDEF
-        && sym.shndx < SHN_LORESERVE && DW.has(secs[sym.shndx - 1]?.name)) {
+      if (type === dw32 && DW.has(tgt.name) && sym.shndx !== PLINK_SHN_UNDEF
+        && sym.shndx < PLINK_SHN_LORESERVE && DW.has(secs[sym.shndx - 1]?.name)) {
         relocateOne(machine, type, tgt.data, off, tgt.vaddr + off, sym.value + addend, imagebase);
         continue;
       }
@@ -227,7 +227,7 @@ export function peImage(inp) {
   /* 导出表里那几格函数 RVA：tcc 给它们挂的是 `R_XXX_RELATIVE`，也就是
    * `add32(val - imagebase)` —— 原地是 0，于是写进去的正是符号的 RVA。 */
   if (r.exp !== null) {
-    const REL = new Map([[EM_AARCH64, 1027], [EM_X86_64, 8], [EM_386, 8], [EM_ARM, 23]]);
+    const REL = new Map([[PLINK_EM_AARCH64, 1027], [PLINK_EM_X86_64, 8], [PLINK_EM_386, 8], [PLINK_EM_ARM, 23]]);
     const rel = REL.get(machine);
     for (const sl of r.exp.slots) {
       relocateOne(machine, rel, r.thunk.data, sl.at,
@@ -259,7 +259,7 @@ export function peImage(inp) {
  *
  * 一条 18 字节：名字（不超过 8 字节就写在原地，否则 `n_zeroes` 留 0、`n_offset` 记
  * 到字符串表里的偏移）、`n_value`、`n_scnum`、`n_type`、`n_sclass`、`n_numaux`。
- * 只收 `STB_GLOBAL` 的符号 —— 局部与弱符号都不进。`n_sclass` 一律 2（`C_EXT`）。
+ * 只收 `PLINK_STB_GLOBAL` 的符号 —— 局部与弱符号都不进。`n_sclass` 一律 2（`C_EXT`）。
  *
  * `n_value` 是**这一节里的偏移**，不是 RVA：tcc 写的是 `st_value - s->sh_addr`，
  * 而那时 `st_value` 已经是绝对地址了。`n_scnum` 是 `s->sh_info` —— 摆地址那一步
@@ -272,12 +272,12 @@ function buildCoffSyms(r, putStr) {
   const list = [];
   for (let i = 1; i < r.syms.length; i++) {
     const sym = r.syms[i];
-    if (sym === undefined || sym.bind !== STB_GLOBAL) continue;
+    if (sym === undefined || sym.bind !== PLINK_STB_GLOBAL) continue;
     const p = r.placeOf(sym);
     list.push({
       name: sym.name,
       value: p === null ? sym.value : p.off,
-      scnum: p === null ? (sym.shndx >= SHN_LORESERVE ? sym.shndx : 0) : (p.sec.peIndex ?? 0),
+      scnum: p === null ? (sym.shndx >= PLINK_SHN_LORESERVE ? sym.shndx : 0) : (p.sec.peIndex ?? 0),
     });
   }
   /* `pe_build_tls` 那句 `set_elf_sym(…, "__tls_index")`：符号表里本来有就原地改，
@@ -306,10 +306,10 @@ function buildCoffSyms(r, putStr) {
 
 /** ELF 的 `e_machine` → PE 的机器号与 `Characteristics`（`CHARACTERISTICS_EXE/DLL`）。 */
 const PE_MACHINE = new Map([
-  [EM_X86_64, { machine: 0x8664, chars: 0x022f, charsDll: 0x222e }],
-  [EM_AARCH64, { machine: 0xaa64, chars: 0x0022, charsDll: 0x2022 }],
-  [EM_386, { machine: 0x014c, chars: 0x030f, charsDll: 0x230e }],
-  [EM_ARM, { machine: 0x01c0, chars: 0x010f, charsDll: 0x230f }],
+  [PLINK_EM_X86_64, { machine: 0x8664, chars: 0x022f, charsDll: 0x222e }],
+  [PLINK_EM_AARCH64, { machine: 0xaa64, chars: 0x0022, charsDll: 0x2022 }],
+  [PLINK_EM_386, { machine: 0x014c, chars: 0x030f, charsDll: 0x230e }],
+  [PLINK_EM_ARM, { machine: 0x01c0, chars: 0x010f, charsDll: 0x230f }],
 ]);
 
 /**
@@ -336,8 +336,8 @@ export function peWrite(inp) {
   if (r.imp !== null) {
     let nsyms = 0;
     for (const d of r.imp.dlls) nsyms += d.syms.length;
-    const impSize = (r.imp.dlls.length + 1) * IMP_DESC_SIZE;
-    const thk = r.class32 === true ? 4 : THUNK_SIZE;
+    const impSize = (r.imp.dlls.length + 1) * PLINK_IMP_DESC_SIZE;
+    const thk = r.class32 === true ? 4 : PLINK_THUNK_SIZE;
     const at = r.thunk.vaddr - base + r.imp.at;
     dirs[1] = { addr: at, size: impSize };                                  // IMPORT
     dirs[12] = { addr: at + impSize, size: (nsyms + r.imp.dlls.length) * thk }; // IAT
