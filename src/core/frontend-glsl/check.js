@@ -58,6 +58,10 @@ const glslSame = (a, b) => glslTyText(a) === glslTyText(b);
 /** 标量吗（`float`/`int`/`bool`）。 */
 const glslIsScalar = (t) => t.k === 'float' || t.k === 'int' || t.k === 'bool';
 
+/** 整数那一族：`int` 与 `ivecN`。位运算与移位只认它们（规范 5.9）。 */
+const glslIsIntish = (t) => t.k === 'int' || (t.k === 'vec' && t.base === 'int');
+
+
 /** 这个类型的**元素**类型：`vec3` -> `float`、`ivec2` -> `int`、标量 -> 自己。 */
 function glslElem(t) {
   if (t.k === 'vec') return t.base === 'float' ? GLSL_FLOAT : t.base === 'int' ? GLSL_INT : GLSL_BOOL;
@@ -200,6 +204,15 @@ const GLSL_FRAG_OUT = new Map([['gl_FragDepth', GLSL_FLOAT]]);
 /* ------------------------------------------------------------ 检查器 */
 
 const GLSL_SWIZZLE_SETS = ['xyzw', 'rgba', 'stpq'];
+
+/** 赋值那一族：语法头 -> 二元算符（`assign` 自己是纯赋值，值是 `=`）。 */
+const GLSL_ASSIGN_OPS = {
+  assign: '=',
+  'add-assign': '+', 'sub-assign': '-', 'mul-assign': '*', 'div-assign': '/',
+  'mod-assign': '%', 'band-assign': '&', 'bor-assign': '|', 'bxor-assign': '^',
+  'shl-assign': '<<', 'shr-assign': '>>',
+};
+
 
 class GlslChecker {
   /**
@@ -532,7 +545,7 @@ class GlslChecker {
     if (h === 'member') return this.swizzle(node);
     if (h === 'construct') return this.construct(node);
     if (h === 'call') return this.call(node);
-    if (h === 'neg' || h === 'lnot') return this.unary(node, h);
+    if (h === 'neg' || h === 'lnot' || h === 'bnot') return this.unary(node, h);
     if (h === 'pre-inc' || h === 'pre-dec' || h === 'post-inc' || h === 'post-dec') {
       const a = this.lvalue(node.items[1], node);
       if (a.ty.k !== 'int' && a.ty.k !== 'float') {
@@ -554,14 +567,12 @@ class GlslChecker {
       }
       throw this.err(node, `? : 两支的类型对不齐（${glslTyText(a.ty)} 与 ${glslTyText(b.ty)}）`);
     }
-    if (h === 'assign' || h === 'add-assign' || h === 'sub-assign'
-      || h === 'mul-assign' || h === 'div-assign') {
+    if (GLSL_ASSIGN_OPS[h] !== undefined) {
       const lhs = this.lvalue(node.items[1], node);
       if (h === 'assign') {
         return { k: 'assign', ty: lhs.ty, op: '=', lhs, rhs: this.coerce(this.expr(node.items[2]), lhs.ty, node) };
       }
-      const op = h === 'add-assign' ? '+' : h === 'sub-assign' ? '-'
-        : h === 'mul-assign' ? '*' : '/';
+      const op = GLSL_ASSIGN_OPS[h];
       /* `col *= rot(a)` 这种（`vec2 *= mat2`）合法，所以复合赋值先按二元算类型，
        * 再要求算出来的类型**就是**左边那个 —— 与 GLSL 规范 5.8 同一句话。 */
       const b = this.binTy(op, lhs.ty, this.expr(node.items[2]).ty, node);
@@ -572,7 +583,9 @@ class GlslChecker {
     }
     const BIN = {
       add: '+', sub: '-', mul: '*', div: '/', mod: '%',
-      lt: '<', gt: '>', le: '<=', ge: '>=', eq: '==', ne: '!=', land: '&&', lor: '||',
+      band: '&', bor: '|', bxor: '^', shl: '<<', shr: '>>',
+      lt: '<', gt: '>', le: '<=', ge: '>=', eq: '==', ne: '!=',
+      land: '&&', lor: '||', lxor: '^^',
     };
     if (BIN[h] !== undefined) return this.binary(node, BIN[h]);
     if (h === 'index') return this.index(node);
@@ -727,6 +740,13 @@ class GlslChecker {
       if (a.ty.k !== 'bool') throw this.err(node, `! 要一个 bool，这儿是 ${glslTyText(a.ty)}`);
       return { k: 'not', ty: GLSL_BOOL, a };
     }
+    if (h === 'bnot') {
+      /* `~` 只对整数（规范 5.9）。`ivecN` 逐格取反也合法。 */
+      if (!glslIsIntish(a.ty)) {
+        throw this.err(node, `~ 只对 int 或 ivecN，这儿是 ${glslTyText(a.ty)}`);
+      }
+      return { k: 'bnot', ty: a.ty, a };
+    }
     if (a.ty.k === 'bool' || (a.ty.k === 'vec' && a.ty.base === 'bool')) {
       throw this.err(node, '负号不能作用在 bool 上');
     }
@@ -746,11 +766,35 @@ class GlslChecker {
    *   - `&& ||` 只对 `bool`
    */
   binTy(op, a, b, node) {
-    if (op === '&&' || op === '||') {
+    if (op === '&&' || op === '||' || op === '^^') {
       if (a.k !== 'bool' || b.k !== 'bool') {
         throw this.err(node, `${op} 两边要是 bool（${glslTyText(a)} 与 ${glslTyText(b)}）`);
       }
       return GLSL_BOOL;
+    }
+    if (op === '&' || op === '|' || op === '^') {
+      /* 位运算只对整数（规范 5.9）。两边同型，或者一边是标量铺开。 */
+      if (!glslIsIntish(a) || !glslIsIntish(b)) {
+        throw this.err(node, `${op} 只对 int 或 ivecN（${glslTyText(a)} 与 ${glslTyText(b)}）`);
+      }
+      if (a.k === 'vec' && b.k === 'vec' && a.n !== b.n) {
+        throw this.err(node, `${op} 两边的宽度不一样（${glslTyText(a)} 与 ${glslTyText(b)}）`);
+      }
+      return a.k === 'vec' ? a : b;
+    }
+    if (op === '<<' || op === '>>') {
+      /* 移位的**结果类型由左边定**（规范 5.9）：右边只说移几位。
+       * 左边是标量时右边也必须是标量 —— 不然「一个数移出一个向量」没有意思。 */
+      if (!glslIsIntish(a) || !glslIsIntish(b)) {
+        throw this.err(node, `${op} 只对 int 或 ivecN（${glslTyText(a)} 与 ${glslTyText(b)}）`);
+      }
+      if (a.k === 'int' && b.k === 'vec') {
+        throw this.err(node, `${op} 左边是标量时右边也要是标量（右边是 ${glslTyText(b)}）`);
+      }
+      if (a.k === 'vec' && b.k === 'vec' && a.n !== b.n) {
+        throw this.err(node, `${op} 两边的宽度不一样（${glslTyText(a)} 与 ${glslTyText(b)}）`);
+      }
+      return a;
     }
     if (op === '==' || op === '!=') {
       if (!glslSame(a, b) && !(glslIsScalar(a) && glslIsScalar(b))) {

@@ -11,6 +11,7 @@
 //   interp.js —— 顶点着色器与插值（第七片）
 //   raster.js —— 覆盖判定与边上的归属（第八、九片）
 //   stmt.js   —— 语句那一层的补全：`do while` 与 `switch`（第十九片）
+//   ops.js    —— 运算符补全：位运算、移位、`^^`、六种复合赋值（第二十片）
 //   oracle.js —— 与**真 GL** 比像素（第十片；没有 python3+moderngl 就跳过）
 //
 //   node tests/glsl/run.js
@@ -21,7 +22,7 @@ import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const PARTS = ['parse.js', 'check.js', 'lower.js', 'render.js', 'bench.js',
-  'interp.js', 'raster.js', 'stmt.js', 'oracle.js'];
+  'interp.js', 'raster.js', 'stmt.js', 'ops.js', 'oracle.js'];
 
 let bad = 0;
 for (const p of PARTS) {

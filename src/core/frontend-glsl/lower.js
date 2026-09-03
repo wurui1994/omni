@@ -236,6 +236,12 @@ class GlslLowerer {
       const a = this.expr(e.a);
       return [this.let_('bool', `(un "!" ${a[0]})`)];
     }
+    if (e.k === 'bnot') {
+      /* 方言里没有一元 `~`，用 `x ^ -1` —— 二补数下两者逐位相同。
+       * 不必再截 32 位：`~x = -x-1`，x 在 int32 范围里时结果也在范围里。 */
+      const a = this.expr(e.a);
+      return a.map((c) => this.let_('int', `(bin "^" ${c} (un "-" (int 1)))`));
+    }
     if (e.k === 'bin') return this.bin(e);
     if (e.k === 'builtin') return this.builtin(e);
     if (e.k === 'call') return this.call(e);
@@ -255,18 +261,29 @@ class GlslLowerer {
        * 而比较本身会绑 let —— 于是这一条会撞上。撞上就骂，不悄悄改成非短路的。 */
       glslNyi('&& 与 ||（短路语义要把右边整段搬进 if，这一片没做）');
     }
+    if (e.op === '^^') {
+      /* 逻辑异或（GLSL 有，C 没有）。bool 上 `a != b` 就是它，而且不涉及短路。 */
+      return [this.let_('bool', `(bin "!=" ${a[0]} ${b[0]})`)];
+    }
     if (e.op === '==' || e.op === '!=' || e.op === '<' || e.op === '>'
       || e.op === '<=' || e.op === '>=') {
       if (a.length !== 1 || b.length !== 1) glslNyi('向量的比较');
       return [this.let_('bool', `(bin "${e.op}" ${a[0]} ${b[0]})`)];
     }
-    /* 算术：同型逐格、标量铺开。`%` 在 GLSL 里只对 int，方言的 `%` 也是。 */
+    /* 算术与位运算：同型逐格、标量铺开。`%` 在 GLSL 里只对 int，方言的 `%` 也是。
+     *
+     * **`<<` 要截回 32 位**：GLSL 的 `int` 是 32 位二补数，方言的 `int` 是 64 位 ——
+     * `1 << 31` 在方言里是 2147483648，在 GL 上是 -2147483648。`(x << 32) >> 32`
+     * 那一手在三条腿上量过，都是算术右移（JS 的 BigInt、C 的 int64_t、LLVM 的 ashr）。
+     * `& | ^ >>` 不必截：它们在 int32 范围里是闭的。`+ - *` 的溢出回绕**还没做** ——
+     * 那一格在 ADR-0019 的施工图里单列（要连着 `uint` 一起做）。 */
     const n = Math.max(a.length, b.length);
     const out = [];
     for (let i = 0; i < n; i++) {
       const x = a.length === 1 ? a[0] : a[i];
       const y = b.length === 1 ? b[0] : b[i];
-      out.push(this.let_(ct, `(bin "${e.op}" ${x} ${y})`));
+      const v = `(bin "${e.op}" ${x} ${y})`;
+      out.push(this.let_(ct, e.op === '<<' ? `(bin ">>" (bin "<<" ${v} (int 32)) (int 32))` : v));
     }
     return out;
   }

@@ -33,20 +33,30 @@
 (grammar glsl
   (tokens
     ID INTLIT FLOATLIT VERSION
-    INC DEC LE GE EQ NE LOGAND LOGOR
+    INC DEC LE GE EQ NE LOGAND LOGOR LOGXOR SHL SHR
     ADDASSIGN SUBASSIGN MULASSIGN DIVASSIGN
+    MODASSIGN ANDASSIGN ORASSIGN XORASSIGN SHLASSIGN SHRASSIGN
     ;; 只用来标 %prec 的伪终结符
     THEN UNARY)
 
   ;; ---- 优先级：照 GLSL 规范 5.1 那张表，从低到高 -------------------------------
   ;; 赋值最低、右结合（`a = b = c` 是 `a = (b = c)`）。
-  (prec right "=" ADDASSIGN SUBASSIGN MULASSIGN DIVASSIGN)
+  (prec right "=" ADDASSIGN SUBASSIGN MULASSIGN DIVASSIGN
+    MODASSIGN ANDASSIGN ORASSIGN XORASSIGN SHLASSIGN SHRASSIGN)
   ;; 三元右结合，比赋值高、比 `||` 低。
   (prec right "?" ":")
   (prec left LOGOR)
+  ;; `^^` 是**逻辑**异或（GLSL 有，C 没有），比 `||` 高、比 `&&` 低。
+  (prec left LOGXOR)
   (prec left LOGAND)
+  ;; 位运算那三层各自一档，而且都比 `==` 低 —— 与 C 同（所以 `a & b == c` 是
+  ;; `a & (b == c)`，写代码得加括号；这里照规范，不替人纠错）。
+  (prec left "|")
+  (prec left "^")
+  (prec left "&")
   (prec left EQ NE)
   (prec left "<" ">" LE GE)
+  (prec left SHL SHR)
   (prec left "+" "-")
   (prec left "*" "/" "%")
   (prec right UNARY)
@@ -91,11 +101,22 @@
     (punct NE "!=")
     (punct LOGAND "&&")
     (punct LOGOR "||")
+    (punct LOGXOR "^^")
+    (punct SHL "<<")
+    (punct SHR ">>")
     (punct ADDASSIGN "+=")
     (punct SUBASSIGN "-=")
     (punct MULASSIGN "*=")
     (punct DIVASSIGN "/=")
-    (op "+" "-" "*" "/" "%" "!" "<" ">" "?" ":" "="
+    (punct MODASSIGN "%=")
+    (punct ANDASSIGN "&=")
+    (punct ORASSIGN "|=")
+    (punct XORASSIGN "^=")
+    (punct SHLASSIGN "<<=")
+    (punct SHRASSIGN ">>=")
+    ;; 词法器取**最长匹配**（`lex.js:380` 那个 `end > bestEnd`），所以 `<<=` 与 `<<` 与 `<=`
+    ;; 与 `<` 摆在一起不会互相盖住，声明次序也不要紧。
+    (op "+" "-" "*" "/" "%" "!" "~" "&" "|" "^" "<" ">" "?" ":" "="
         "(" ")" "[" "]" "{" "}" "," ";" "."))
 
   ;; ---- 顶层 --------------------------------------------------------------------
@@ -242,6 +263,8 @@
     (-> ("-" expr) (prec UNARY) (neg $2))
     (-> ("+" expr) (prec UNARY) $2)
     (-> ("!" expr) (prec UNARY) (lnot $2))
+    ;; `~` 按位取反（只对整数）。方言里没有一元 `~`，降级那侧落成 `x ^ -1`。
+    (-> ("~" expr) (prec UNARY) (bnot $2))
     (-> (INC expr) (prec UNARY) (pre-inc $2))
     (-> (DEC expr) (prec UNARY) (pre-dec $2))
     (-> (expr INC) (post-inc $1))
@@ -251,6 +274,11 @@
     (-> (expr "*" expr) (mul $1 $3))
     (-> (expr "/" expr) (div $1 $3))
     (-> (expr "%" expr) (mod $1 $3))
+    (-> (expr "&" expr) (band $1 $3))
+    (-> (expr "|" expr) (bor $1 $3))
+    (-> (expr "^" expr) (bxor $1 $3))
+    (-> (expr SHL expr) (shl $1 $3))
+    (-> (expr SHR expr) (shr $1 $3))
     (-> (expr "<" expr) (lt $1 $3))
     (-> (expr ">" expr) (gt $1 $3))
     (-> (expr LE expr) (le $1 $3))
@@ -259,12 +287,19 @@
     (-> (expr NE expr) (ne $1 $3))
     (-> (expr LOGAND expr) (land $1 $3))
     (-> (expr LOGOR expr) (lor $1 $3))
+    (-> (expr LOGXOR expr) (lxor $1 $3))
     (-> (expr "?" expr ":" expr) (cond $1 $3 $5))
     (-> (expr "=" expr) (assign $1 $3))
     (-> (expr ADDASSIGN expr) (add-assign $1 $3))
     (-> (expr SUBASSIGN expr) (sub-assign $1 $3))
     (-> (expr MULASSIGN expr) (mul-assign $1 $3))
-    (-> (expr DIVASSIGN expr) (div-assign $1 $3)))
+    (-> (expr DIVASSIGN expr) (div-assign $1 $3))
+    (-> (expr MODASSIGN expr) (mod-assign $1 $3))
+    (-> (expr ANDASSIGN expr) (band-assign $1 $3))
+    (-> (expr ORASSIGN expr) (bor-assign $1 $3))
+    (-> (expr XORASSIGN expr) (bxor-assign $1 $3))
+    (-> (expr SHLASSIGN expr) (shl-assign $1 $3))
+    (-> (expr SHRASSIGN expr) (shr-assign $1 $3)))
 
   (rule args
     (-> () (args))
