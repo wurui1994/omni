@@ -620,6 +620,23 @@ class FnGen {
       return;
     }
     if (op === OP.VAARG) {
+      /* `va_arg(ap, long double)`（第一百一十四片）：X87 类在 SysV 里**从来不进寄存器**，
+       * 所以这一路不必判「寄存器那一段还有没有余量」—— 一律在溢出区里，而且那一格
+       * 对齐到 16。对齐要在运行时算：固定形参用掉多少字节是编译期知道的，可 `va_arg`
+       * 在循环里会被走多次，游标是变的。
+       * 取值与别处一样借栈：`fld tbyte` 进 x87、`fstp qword` 收成 double。 */
+      if (memArgIsF80(f.aux[i])) {
+        this.loadRef(TMP0, f.a[i]);
+        buf.emit(x.movRM(8, TMP0, TMP0, 0));           // TMP0 = 那个 24 字节结构的地址
+        buf.emit(x.movRM(8, TMP1, TMP0, 8));           // TMP1 = overflow_arg_area
+        buf.emit(x.aluRI(ALU.add, 8, TMP1, 15), x.aluRI(ALU.and, 8, TMP1, -16));
+        buf.emit(x.fldM80(TMP1, 0));
+        buf.emit(x.aluRI(ALU.add, 8, TMP1, 16), x.movMR(8, TMP0, 8, TMP1));
+        buf.emit(x.push(RES));
+        buf.emit(x.fstpM64(REG.rsp, 0));
+        buf.emit(x.pop(RES));
+        return this.def(i, RES);
+      }
       /* 取 struct（aux > 0）：SysV 的分类在这儿真的要算一遍（第四十片）。
        *
        *  - 超过 16 字节：整份进 MEMORY，只在**溢出区**里躺着 —— 取它的地址、游标往前推

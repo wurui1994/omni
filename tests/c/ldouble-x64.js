@@ -1,15 +1,17 @@
 // tests/c/ldouble-x64.js —— x86_64 上 `long double` 是 16 字节的 x87 80 位
-// （ADR-0017 第九刀第一百一十一、一百一十二片）
+// （ADR-0017 第九刀第一百一十一 ~ 一百一十四片）
 //
-// 这一组称**已经做到**的四件事，一件不多：
+// 这一组称**已经做到**的五件事，一件不多：
 //
 //   1. **宽度与布局** —— `sizeof(long double)` 是 16、`struct { char c; long double d; }` 是 32、
 //      `long double[3]` 是 48。
 //   2. **算得对** —— 局部量存进帧上那十六个字节、读回来、算术、转成 int：这一路全程
 //      f80 的读写（`fld/fstp tbyte`）。
 //   4. **返回值在 `st0` 里**（第一百一十二片）—— 直接调用、按指针调用、外部符号三条路。
+//   5. **传参走栈上 16 字节的格子**（第一百一十三、一百一十四片）—— 变参（`printf("%Lf")`）、
+//      固定形参、走桩的外部符号（`ldexpl`）、以及 `va_arg(ap, long double)`。
 //
-//   这三条的尺子是 `clang -arch x86_64`（Rosetta 上跑）。为什么不是 tcc：交叉编出来的那份
+//   这四条的尺子是 `clang -arch x86_64`（Rosetta 上跑）。为什么不是 tcc：交叉编出来的那份
 //   `x86_64-osx-tcc` **链不动** —— 它没有 x86_64 那一档的 libc 路径与 `libtcc1.a`
 //   （`configure` 只给本机那份烤了 SDK 的路径），`-o 可执行文件` 直接报
 //   `library 'c' not found`。字节这一层的尺子仍是 tcc（下面第 3 条与 `selfobj`）。
@@ -17,8 +19,7 @@
 //   3. **静态初始化式的字节** —— `.data` 里那十六个字节与 `f80Bytes`（第一百〇九片，
 //      拿 `x86_64-osx-tcc -c` 写出来的字节称过的那一份）逐个相同。
 //
-// **还没做到**（下一片）：SysV 的 long double **传参**（MEMORY 类，栈上 16 字节的格子）。
-// 所以 `printf("%Lf", x)` 在 x86_64 上仍然印不对，`long double f(long double)` 也还收不对。
+// 这五条凑齐之后，`selfobj` 的 x86_64 那一段**一份不差**（84 份用例逐字节相同）。
 //
 //   node tests/c/ldouble-x64.js
 
@@ -208,6 +209,34 @@ sameOut('外部符号按值收 long double（ldexpl 走桩）', 'arg-extern',
   '#include <stdio.h>\n'
   + '#include <math.h>\n'
   + 'int main(void) { printf("%.4Lf\\n", ldexpl(1.5L, 3)); return 0; }\n');
+
+/* 6. `va_arg(ap, long double)`（第一百一十四片）：X87 类在 SysV 的变参里**从来不进
+ *    寄存器** —— 一律在溢出区里，那一格 16 字节、16 对齐。掺着 int 与 double 各取一次，
+ *    称的是「游标推得对」：推错一格后面全错，而错出来的是一个像模像样的数。 */
+sameOut('va_arg(ap, long double)（掺着 int 与 double）', 'vaarg-ld',
+  '#include <stdio.h>\n'
+  + '#include <stdarg.h>\n'
+  + 'static long double sum(int n, ...) {\n'
+  + '  va_list ap; long double t = 0; int i;\n'
+  + '  va_start(ap, n);\n'
+  + '  for (i = 0; i < n; i++) t += va_arg(ap, long double);\n'
+  + '  va_end(ap);\n'
+  + '  return t;\n'
+  + '}\n'
+  + 'static long double mixed(int n, ...) {\n'
+  + '  va_list ap; long double t = 0;\n'
+  + '  va_start(ap, n);\n'
+  + '  t += va_arg(ap, int);\n'
+  + '  t += va_arg(ap, long double);\n'
+  + '  t += va_arg(ap, double);\n'
+  + '  t += va_arg(ap, long double);\n'
+  + '  va_end(ap);\n'
+  + '  return t;\n'
+  + '}\n'
+  + 'int main(void) {\n'
+  + '  printf("%.4Lf %.4Lf\\n", sum(3, 1.5L, 2.25L, 0.75L), mixed(4, 2, 0.5L, 0.25, 1.75L));\n'
+  + '  return 0;\n'
+  + '}\n');
 
 rmSync(OUT, { recursive: true, force: true });
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);

@@ -21,7 +21,7 @@ import {
   OP, OP_NAMES, OP_MODES, REF_NONE, REF_BIAS, isConstRef, refText, typeText, typeLanes, T_BOOL,
   T_I64, T_I32, T_F64, T_VOID,
   MLOAD_KINDS, MSTORE_KINDS, memKindNo, memBytes, isFloatType, isIntType, intBits,
-  memArgSize, memArgSse, callVaFixed,
+  memArgSize, memArgSse, memArgIsF80, callVaFixed,
 } from './ir.js';
 
 export function verifyMir(mod) {
@@ -228,6 +228,12 @@ function checkIndex(mod, f, i, op, v, bad, k) {
      * 正是「收一个 va_list 形参、抄一份自己用」那种函数（第三十二片）。 */
     if (op === OP.VACOPY) {
       if (t !== T_I64) bad(i, `VACOPY 的 t 是 ${typeText(t)}，va_list 只能是 i64`);
+      return;
+    }
+    /* X87 类那一格（第一百一十四片）：aux 上点着 `MEMARG_F80`，回的是**值**不是地址 ——
+     * 80 位只活在内存里，MIR 里 `long double` 仍是一个 f64。 */
+    if (memArgIsF80(v)) {
+      if (t !== T_F64) bad(i, `VAARG 取 long double，回的是 f64 的值，t 不能是 ${typeText(t)}`);
       return;
     }
     /* 取 struct（aux > 0）回的是**那一格的地址**：内容整份躺在变参区里，拷不拷由前端

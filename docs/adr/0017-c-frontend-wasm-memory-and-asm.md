@@ -845,7 +845,9 @@ x86_64 tcc 认得准 `1.5L`，写出来的 `.o` 与交叉编那份逐字节相�
 开一个 16 字节的格子，往里拷十个字节（余下六个字节 clang 也不写）。被调那一头对称：
 形参表上那一格按一位 `ld`，序言 `fld tbyte [rbp+off]` 读进 x87 再 `fstp qword` 落进槽里。
 桩也要转发（`ldexpl`，`tccpp.c:3961` 真有这一处）：桩自己划一块 16 字节，收到的值写成
-80 位再 `ARGMEM` 转出去。**于是 x86_64 那一套一份不差**：`selfobj` 的
+80 位再 `ARGMEM` 转出去。变参里取它（`va_arg(ap, long double)`）是第一百一十四片：
+X87 类从来不进寄存器，所以那一路只有「游标对齐到 16、`fld tbyte`、推 16」三件事。
+**于是 x86_64 那一套一份不差**：`selfobj` 的
 `X64_KNOWN_DIFF` 空了 —— 84 份用例、12 份 tinycc 自己的源码，我们编出来的 x86_64 tcc
 与交叉编那份写出来的字节处处相同。
 
@@ -13827,9 +13829,51 @@ ok   x64-tcc -c tests/c/gen/*.c == x86_64-osx-tcc -c（84 份逐字节相同，�
 ### 还没做
 
 `va_arg(ap, long double)`：X87 类在 SysV 的变参里要从溢出区取 16 字节的格子，
-`VAARG` 那一条还没认这一位。tcc 自己的源码里没有这一处，所以留着。
+`VAARG` 那一条还没认这一位 —— 下一片补上。
 
 <!-- 第九刀第一百一十三片-END -->
+
+## 落地：第九刀第一百一十四片
+
+`va_arg(ap, long double)` —— `long double` 那一摊的最后一格。
+
+### 这一路比别的都短
+
+X87 类在 SysV 的变参里**从来不进寄存器**（它是 MEMORY），所以这一条不用像标量那样
+判「寄存器保存区还有没有余量、不够再走溢出区」那一对分支：一律在溢出区里。要做的
+只有三件 —— 游标对齐到 16、`fld tbyte` 取那十个字节、游标推 16。
+
+```js
+buf.emit(x.movRM(8, TMP1, TMP0, 8));           // TMP1 = overflow_arg_area
+buf.emit(x.aluRI(ALU.add, 8, TMP1, 15), x.aluRI(ALU.and, 8, TMP1, -16));
+buf.emit(x.fldM80(TMP1, 0));
+buf.emit(x.aluRI(ALU.add, 8, TMP1, 16), x.movMR(8, TMP0, 8, TMP1));
+```
+
+对齐**要在运行时算**：固定形参用掉多少字节是编译期知道的，可同一条 `va_arg` 在循环里
+会被走多次，游标是变的。
+
+### 同一位，第三个读它的人
+
+`MEMARG_F80`（第一百一十三片）这一位现在有三个消费者：`ARGMEM` 的调用点、序言里的
+形参、以及这一条 `VAARG`。前两个回的是「一块内存」，这一条回的是**值**（f64）——
+所以 `verify.js` 里那句「aux 非 0 就是取 struct，t 只能是 i64」要先让它过：
+
+```js
+if (memArgIsF80(v)) {
+  if (t !== T_F64) bad(i, `VAARG 取 long double，回的是 f64 的值，t 不能是 ${typeText(t)}`);
+  return;
+}
+```
+
+### 门
+
+`tests/c/ldouble-x64.js` 10/0。新增那一条有两个变参函数：一个循环里取三个
+`long double`（称「游标推得对」—— 推错一格后面全错，而错出来的是一个像模像样的数），
+一个掺着 `int`/`double`/`long double` 各取一次（称「三种格子的宽度各不相同」）。
+尺子照旧 `clang -arch x86_64`。
+
+<!-- 第九刀第一百一十四片-END -->
 
 
 

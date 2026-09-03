@@ -3655,6 +3655,14 @@ export class CGen {  /**
           this.memArgAuxOf(ty));
         return sMem(ty, at, 0);
       }
+      /* `va_arg(ap, long double)`（第一百一十四片）：x86_64 上它是 X87 类 —— 那一格是
+       * 溢出区里 16 字节、16 对齐的一块，而不是「一格 8 字节的标量」。带下去的是同一位
+       * `MEMARG_F80`（与调用点那一侧的 `ldArgMem` 对着），回的是**值**（f64）不是地址。 */
+      if (btype(ty.t) === VT_LDOUBLE && ldoubleSize() === 16) {
+        const v = this.f.emit(OP.VAARG, T_F64, this.addrOf(ap), REF_NONE,
+          memArgAux(ldoubleSize(), MEMARG_F80));
+        return sVal(ty, v);
+      }
       const mt = mirTypeOf(ty);
       if (mt === T_F32) this.todo('va_arg 取 float（C 的默认提升本来就让它过不来）');
       const v = this.f.emit(OP.VAARG, mt, this.addrOf(ap), REF_NONE, 0);
