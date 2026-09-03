@@ -867,6 +867,13 @@ export class MirModule {
      * `VT_CONSTANT` 就摆进只读那一节（osx/linux 的 `.data.ro`、PE 的 `.rdata`）。
      * 与 `globalLocal` 同一种性质：标注，不是语义 —— 只有写目标文件那一步看它。 */
     this.globalRo = [];
+    /* 与 globals 同下标的「这一块进 `.bss` 吗」（第九刀第一百三十二片）：判据是
+     * **源码里有没有那个 `=`**，不是「字节是不是全零」。tcc 在 `tccgen.c:8405-8438`
+     * 上按三步问：`is_const` 进只读那一节，否则 `has_init` 进 `.data`，否则进 `.bss`
+     * （`nocommon` 缺省是 1，所以 COMMON 那一路不会走到）。于是 `int b = 0;` 在
+     * `.data` 里、`int a;` 在 `.bss` 里，两者的字节一模一样 —— 后端**不能**按字节猜，
+     * 这一格只能由 C 前端填。与 `globalRo` 同一种性质：标注，不是语义。 */
+    this.globalBss = [];
     /* 与常量池同下标的「这条串常量要几字节对齐」（第九刀第一百二十三片）：缺省 1，
      * 宽串 4。也是标注 —— 只有写目标文件那一步看它，进不了摘要的哈希。 */
     this.strAlign = [];
@@ -1002,6 +1009,12 @@ export class MirModule {
   markGlobalRo(no) {
     if (this.globals[no] === undefined) throw new Error(`mir: 没有 ${no} 号模块级变量`);
     this.globalRo[no] = true;
+  }
+
+  /** 这个全局没有初始化式，进 `.bss`。见 `globalBss` 头上那段。 */
+  markGlobalBss(no) {
+    if (this.globals[no] === undefined) throw new Error(`mir: 没有 ${no} 号模块级变量`);
+    this.globalBss[no] = true;
   }
 
   /** 这一块是第几个领到字节的。见 `globalSeq` 头上那段。 */

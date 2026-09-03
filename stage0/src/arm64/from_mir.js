@@ -40,7 +40,7 @@ import {
   CVT_I2F, CVT_U2F, CVT_F2I, CVT_F2U, CVT_FCVT, CVT_BITCAST, OP_NAMES, hexBytes, memArgSize,
   callVaFixed,
 } from '../mir/ir.js';
-import { planRodata, planData } from '../mir/rodata.js';
+import { planRodata, planData, planBss } from '../mir/rodata.js';
 
 /* 草稿寄存器。x8 是 arm64 的「间接结果」寄存器、x9-x15 是调用者保存的临时 ——
  * 这一层不跨调用活，所以随便用哪三个都行，取这三个只为读起来一致。 */
@@ -1121,6 +1121,9 @@ export function genModule(mod) {
    * 而号是「第一次被提到」的次序 —— `sizeof(*p)` 这种会让后声明的先领到号。 */
   const dataPlan = planData(mod);
   const dataBytes = new Array(dataPlan.size).fill(0);
+  /* 没有初始化式的那些进 `.bss`（第一百三十二片）：又一个各自独立的游标。这一节
+   * **不占文件字节**，所以只有落点、没有字节数组 —— `bssSize` 交给写出器当 `sh_size`。 */
+  const bssPlan = planBss(mod);
   /* 别名要照目标的落点发符号（第一百〇五片），所以边排边记每个全局的起点与它在哪一段。 */
   const gBase = new Map();
   for (let gi = 0; gi < mod.globals.length; gi++) {
@@ -1133,10 +1136,13 @@ export function genModule(mod) {
     if (al > 4096) nyi(`全局 '${mod.globals[gi]}' 要 ${al} 字节对齐（__data 这一节最多 4096）`);
     if (al > dataAlign) dataAlign = al;
     const ro = mod.globalRo[gi] === true;
+    /* 三段（第一百三十二片）：只读、可写、`.bss`。次序是**有讲究**的 —— `const` 先问，
+     * 所以 `const int i;`（没有初值）还是进只读那一节。 */
+    const bss = !ro && mod.globalBss[gi] === true;
     const rel = ro ? roRelocs : dataRelocs;
-    const sect = ro ? 3 : 2;
-    /* 两段的落点都是排好的（第一百二十五、一百三十一片）：这儿只查，不推游标。 */
-    const base = (ro ? roPlan.gOff : dataPlan.gOff).get(gi);
+    const sect = ro ? 3 : bss ? 4 : 2;
+    /* 三段的落点都是排好的（第一百二十五、一百三十一、一百三十二片）：这儿只查，不推游标。 */
+    const base = (ro ? roPlan.gOff : bss ? bssPlan.gOff : dataPlan.gOff).get(gi);
     gBase.set(gi, { base, sect });
     dataSyms.push({
       name: mod.globals[gi],
@@ -1154,7 +1160,9 @@ export function genModule(mod) {
       const b = blob === null ? 0 : blob.bytes[k];
       const v = b === undefined ? 0 : b;
       if (ro) roBytes[base + k] = v;
-      else dataBytes[base + k] = v;
+      /* `.bss` 一个字节也不写（第一百三十二片）：这一节在文件里没有内容，
+       * 而没有初始化式的那些字节本来就全是零。 */
+      else if (!bss) dataBytes[base + k] = v;
     }
     for (const fx of blob === null ? [] : blob.fixups ?? []) {
       /* `after`（第一百一十八片，与 x64 那一份同一条）：这一条数据重定位是在第几个
@@ -1241,6 +1249,12 @@ export function genModule(mod) {
     /* 只读那一段（第一百二十二片，与 x64 那一份同一条）：写 ELF 的那一头摆进 3 号节，
      * Mach-O 那一头现在只有两节，由 `macho.js` 折进 `__data` 的尾巴上。 */
     rodata: new Uint8Array(roBytes),
+    /* `.bss` 只有长度（第一百三十二片）：ELF 那一头当 4 号节的 `sh_size`（NOBITS，
+     * 不占文件字节），Mach-O 那一头由 `macho.js` 折进 `__data` 的尾巴上。 */
+    bssSize: bssPlan.size,
+    /* 每一节自己的 `sh_addralign`（第一百三十二片）：「里头对齐要求最大的那一块」，
+     * 下界 8 —— 见 `mir/rodata.js` 的 `layout`。 */
+    secAlign: { data: dataPlan.al, rodata: roPlan.al, bss: bssPlan.al },
     dataSyms,
     dataRelocs,
     roRelocs,

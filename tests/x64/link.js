@@ -46,7 +46,7 @@ function objOf(mod) {
     defs.push({ name: mod.funcs[k].name, off: blob.offsets[k] });
   }
   return writeObject(blob.bytes, blob.data, [...defs, ...blob.dataSyms], blob.relocs,
-    'x86_64', blob.dataAlign, { rodata: blob.rodata });
+    'x86_64', blob.dataAlign, { rodata: blob.rodata, bssSize: blob.bssSize });
 }
 
 /* ---- 甲：被调的那一边（内部调用一条、串常量一条）。 */

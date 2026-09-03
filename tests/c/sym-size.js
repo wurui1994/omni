@@ -7,17 +7,15 @@
 //           第一个函数后面那八字节的 `UNWIND_INFO` 也算在里头，量过 `f` 是 23+9=32）
 //   全局量 —— 那个 C 类型有多少字节（`static const char s[] = "hi"` 是 3）
 //
-// 门比两件事：
+// 门比三件事：
 //
 //   1. 全局量那些名字的 `st_size` 与尺子**一个数不差** —— 那是 C 类型的大小，
 //      与代码长短无关，所以必须相同
-//   2. 函数那些的 `st_size` 把 `.text` **铺满**（第 k 个的 `val + size` 正好是第 k+1 个的
+//   2. 全局量的**落点**也一个数不差：哪一节（`.data` / `.data.ro`（win32 `.rdata`）/
+//      `.bss`）、节里第几个字节。第一百三十一片把 `.data` 的次序摆对，第一百三十二片
+//      把没有初值的那些挪进 `.bss` —— 两笔都齐了这一条才能开
+//   3. 函数那些的 `st_size` 把 `.text` **铺满**（第 k 个的 `val + size` 正好是第 k+1 个的
 //      `val`，最后一个到节尾）—— 我们的代码比 tcc 的长，所以只能查这条不变量
-//
-// 全局量的**落点**这儿还不比：`.data` 的次序第一百三十一片对上了，可**没有初值的**那些
-// （`char tab[40];`、`struct P p;`）tcc 摆进 `.bss`、我们还摆在 `.data` 里，于是它们
-// 后面每一块的偏移都差。量过（x86_64-linux，这份探针）：tcc `.data` 44 字节 + `.bss`
-// 48 字节（`tab`@0 `p`@40），我们 `.data` 92 字节 + 空的 `.bss`。那是下一笔。
 //
 //   node tests/c/sym-size.js
 
@@ -75,6 +73,7 @@ function readSyms(path) {
       off: Number(b.readBigUInt64LE(o + 24)),
       size: Number(b.readBigUInt64LE(o + 32)),
       link: b.readUInt32LE(o + 40),
+      al: Number(b.readBigUInt64LE(o + 48)),
     });
   }
   const st = secs.find((s) => s.name === '.symtab');
@@ -86,11 +85,20 @@ function readSyms(path) {
       name: nameAt(strtab.off, b.readUInt32LE(o)),
       type: b[o + 4] % 16,
       shndx: b.readUInt16LE(o + 6),
+      /* 落点要比「哪一节」而不是节号 —— 节的次序两边不必相同（`.rela.*` 是按造出来的
+       * 次序插的）。号越界（`SHN_ABS` 那种）就记 `''`。 */
+      sec: secs[b.readUInt16LE(o + 6)] === undefined ? '' : secs[b.readUInt16LE(o + 6)].name,
       value: Number(b.readBigUInt64LE(o + 8)),
       size: Number(b.readBigUInt64LE(o + 16)),
     });
   }
-  return { syms, text: secs.find((s) => s.name === '.text').size };
+  return {
+    syms,
+    text: secs.find((s) => s.name === '.text').size,
+    /* 节自己的两格（第一百三十二片）：多长、按几对齐。`sh_addralign` 是「里头对齐要求
+     * 最大的那一块」，下界 8 —— 从前我们三节都写死 8。 */
+    secs: new Map(secs.map((s) => [s.name, { size: s.size, al: s.al }])),
+  };
 }
 
 const PROBE = `static const char s[] = "hi";
@@ -99,9 +107,10 @@ long long big = 1;
 char tab[40];
 struct P { int a; char b; } p;
 int arr[7] = {1};
+struct Q { int x; } wide[2] __attribute__((aligned(16)));
 int f(int a){return a+1;}
 static int q(int a){return a-1;}
-int main(void){return s[0]+f(g)+q(arr[0])+tab[0]+p.a+(int)big;}
+int main(void){return s[0]+f(g)+q(arr[0])+tab[0]+p.a+(int)big+wide[0].x;}
 `;
 
 const c = join(OUT, 'a.c');
@@ -141,7 +150,7 @@ for (const t of CASES) {
 
   // 1. 全局量的大小：一个数不差
   const want = new Map();
-  for (const s of ref.syms) if (s.type === 1) want.set(s.name, s.size);
+  for (const s of ref.syms) if (s.type === 1) want.set(s.name, s);
   const diffs = [];
   let n = 0;
   for (const s of our.syms) {
@@ -149,13 +158,42 @@ for (const t of CASES) {
     const w = want.get(s.name);
     if (w === undefined) continue;   // 串常量那些符号 tcc 那边根本没有
     n++;
-    if (w !== s.size) diffs.push(`${s.name}: tcc ${w} / ours ${s.size}`);
+    if (w.size !== s.size) diffs.push(`${s.name}: tcc ${w.size} / ours ${s.size}`);
   }
   if (n === 0) bad(`${t.name} 全局量的 st_size`, '    一个对得上名字的都没有');
   else if (diffs.length > 0) bad(`${t.name} 全局量的 st_size`, `    ${diffs.join('\n    ')}`);
   else ok(`${t.name}：${n} 个全局量的 st_size 与尺子一个数不差`);
 
-  // 2. 函数的大小：把 `.text` 铺满
+  /* 2. 全局量的落点：哪一节、节里第几个字节（第一百三十一、一百三十二片）。 */
+  const atDiffs = [];
+  for (const s of our.syms) {
+    if (s.type !== 1) continue;
+    const w = want.get(s.name);
+    if (w === undefined) continue;
+    if (w.sec !== s.sec || w.value !== s.value) {
+      atDiffs.push(`${s.name}: tcc ${w.sec}@${w.value} / ours ${s.sec}@${s.value}`);
+    }
+  }
+  if (atDiffs.length > 0) bad(`${t.name} 全局量的落点`, `    ${atDiffs.join('\n    ')}`);
+  else ok(`${t.name}：${n} 个全局量落在与尺子同一节的同一个字节上`);
+
+  /* 3. 三节自己的两格（第一百三十二片）：多长、按几对齐。`.bss` 是 NOBITS ——
+   * 有 `sh_size`、在文件里不占字节；三节的 `sh_addralign` 都是「里头对齐要求最大的
+   * 那一块」，下界 8（`wide` 那个 `aligned(16)` 就是来顶这一格的）。 */
+  const ROD = t.win32 ? '.rdata' : '.data.ro';
+  const secDiffs = [];
+  for (const nm of ['.data', ROD, '.bss']) {
+    const w = ref.secs.get(nm);
+    const o = our.secs.get(nm);
+    if (w === undefined || o === undefined) { secDiffs.push(`${nm}: 有一边没有这一节`); continue; }
+    if (w.size !== o.size || w.al !== o.al) {
+      secDiffs.push(`${nm}: tcc ${w.size}/al${w.al} / ours ${o.size}/al${o.al}`);
+    }
+  }
+  if (secDiffs.length > 0) bad(`${t.name} 数据三节的长度与对齐`, `    ${secDiffs.join('\n    ')}`);
+  else ok(`${t.name}：.data / ${ROD} / .bss 三节的 sh_size 与 sh_addralign 都与尺子相同`);
+
+  // 4. 函数的大小：把 `.text` 铺满
   const check = (e, who) => {
     const fs2 = e.syms.filter((s) => s.type === 2).sort((x, y) => x.value - y.value);
     if (fs2.length === 0) return `${who} 一个函数符号都没有`;

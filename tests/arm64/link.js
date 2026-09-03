@@ -52,7 +52,7 @@ function objOf(mod) {
     defs.push({ name: mod.funcs[k].name, off: blob.offsets[k] });
   }
   return writeObject(blob.bytes, blob.data, [...defs, ...blob.dataSyms], blob.relocs,
-    'arm64', blob.dataAlign, { rodata: blob.rodata });
+    'arm64', blob.dataAlign, { rodata: blob.rodata, bssSize: blob.bssSize });
 }
 
 /* ---- 甲：被调的那一边。三个函数，其中两个是自家内部的调用（同一个 .o 里已经填好了）。 */

@@ -354,12 +354,15 @@ function ehFrameX64(funcs) {
  *              `sect` 1 是 `.text`、2 是 `.data`
  * @param relocs `[{at, kind, sym, sect}]`，`at` 是**自己那一节里**的偏移
  * @param arch  `'arm64'` 或 `'x86_64'`
- * @param dataAlign 这一格 ELF 用不上（tcc 的 `.data` 一律 `sh_addralign = 8`），
+ * @param dataAlign 这一格 ELF 用不上（每一节自己的 `sh_addralign` 走 `opts.secAlign`），
  *              留着是为了与 Mach-O 那个写出器同签名
  * @param opts  `{file, prefix, rdata, rodata, unwind, seq}`：`file` 是写进 STT_FILE 那一条的
  *              源文件名；`prefix` 是符号名前缀 —— **只有 osx 是 `'_'`**，linux 与 win32
  *              都是 `''`（`libtcc.c:895-898`：`leading_underscore` 只在 MACHO 上开）；
  *              `rdata` 是只读数据那一节的名字，`rodata` 是它的字节（第一百二十二片）；
+ *              `bssSize` 是 `.bss` 那一节的 `sh_size`（第一百三十二片）—— NOBITS，
+ *              有大小、在文件里没有字节；`secAlign` 是 `{data, rodata, bss}` 三节各自的
+ *              `sh_addralign`（里头对齐最大的那一块，下界 8）；
  *              `unwind` 是 win32 x86_64 的展开表
  *              `{offs, funcs: [{start, end}]}`（第一百一十七片）；`seq` 是
  *              `{text, data, rodata, pdata}` 几节**造出来的次序**上的位置（第一百一十八片）
@@ -468,10 +471,16 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
     secs.push({ name, type, flags, size, link, info, al, ent });
     return secs.length - 1;
   };
+  /* 每一节自己的 `sh_addralign`（第一百三十二片）：tcc 写的是「里头对齐要求最大的那一块」，
+   * 下界 8 —— 量过 x86_64-linux 上 `int g32 __attribute__((aligned(32))) = 9;` 的 `.data`
+   * 是 32、`struct a7 g7[2] __attribute__((aligned(16)));` 的 `.bss` 是 16。从前这三节都
+   * 写死 8（`dataAlign` 那一格明着说「ELF 用不上」），那只是先前的探针里最大的对齐正好都是 8。 */
+  const sal = o.secAlign === undefined ? {} : o.secAlign;
   sec('.text', SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, text.length, 0, 0, 8, 0);
-  sec('.data', SHT_PROGBITS, SHF_ALLOC | SHF_WRITE, dataBytes.length, 0, 0, 8, 0);
-  sec(rdata, SHT_PROGBITS, SHF_ALLOC, roBytes.length, 0, 0, 8, 0);
-  sec('.bss', SHT_NOBITS, SHF_ALLOC | SHF_WRITE, 0, 0, 0, 8, 0);
+  sec('.data', SHT_PROGBITS, SHF_ALLOC | SHF_WRITE, dataBytes.length, 0, 0, sal.data ?? 8, 0);
+  sec(rdata, SHT_PROGBITS, SHF_ALLOC, roBytes.length, 0, 0, sal.rodata ?? 8, 0);
+  sec('.bss', SHT_NOBITS, SHF_ALLOC | SHF_WRITE, o.bssSize === undefined ? 0 : o.bssSize,
+    0, 0, sal.bss ?? 8, 0);
   const symtabNo = secs.length;
   sec('.symtab', SHT_SYMTAB, 0, syms.length * SYM_SIZE, symtabNo + 1, nlocal + 1, 8, SYM_SIZE);
   sec('.strtab', SHT_STRTAB, 0, strBytes.length, 0, 0, 1, 0);
@@ -576,6 +585,9 @@ export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
       info: secs[i].info,
       al: secs[i].al,
       ent: secs[i].ent,
+      /* NOBITS 的节（`.bss`）有大小、没字节（第一百三十二片）—— 下一层认这一格，
+       * 不给的话它按字节数算，`sh_size` 就成了 0。 */
+      size: secs[i].type === SHT_NOBITS ? secs[i].size : undefined,
       bytes: bodyOf(secs[i].name),
     });
   }

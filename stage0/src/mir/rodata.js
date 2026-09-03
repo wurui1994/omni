@@ -38,18 +38,26 @@ import { utf8Bytes } from '../host/utf8.js';
  *
  * 稳定排序（JS 的 `sort` 是稳定的）：没有号的当 `Infinity`，于是它们保持进来的次序 ——
  * 这一格对别的前端（手搭的 MIR）是零改动。
+ *
+ * 回的 `al` 是**这一节自己的对齐**（第一百三十二片量到的）：tcc 的 `sh_addralign` 是
+ * 「里头对齐要求最大的那一块」，下界 8 —— 量过 x86_64-linux 上
+ * `struct a7 g7[2] __attribute__((aligned(16)));  int g32 __attribute__((aligned(32))) = 9;`：
+ * `.bss` 的 `sh_addralign` 是 16、`.data` 是 32。从前两个写出器都写死 8，那只是先前
+ * 每个探针里最大的对齐正好都是 8 —— 少了这一格，`g7` 的地址低四位就不是 0。
  */
 function layout(items) {
   items.sort((x, y) => (x.seq ?? Infinity) - (y.seq ?? Infinity));
   const gOff = new Map();
   const sOff = new Map();
   let at = 0;
+  let al = 8;
   for (const it of items) {
     while (at % it.al !== 0) at++;
     (it.str ? sOff : gOff).set(it.no, at);
     at += it.size;
+    if (it.al > al) al = it.al;
   }
-  return { size: at, gOff, sOff };
+  return { size: at, al, gOff, sOff };
 }
 
 /** 一块全局量占几个字节、按几对齐（没有 blob 的是「试探性定义」，八字节八对齐）。 */
@@ -94,10 +102,35 @@ export function planRodata(mod) {
 /**
  * 可写那一节（`.data` / Mach-O 的 `__data`）要多少字节，以及每一块落在哪儿。
  * 只有 `gOff` 有内容 —— 串常量一律进只读节。
+ *
+ * 没有初始化式的那些不在这儿（第一百三十二片）：它们进 `.bss`，见 `planBss`。
  */
 export function planData(mod) {
   const items = [];
   for (let gi = 0; gi < mod.globals.length; gi++) {
+    if (mod.globalRo[gi] === true) continue;
+    if (mod.globalBss[gi] === true) continue;
+    const blob = mod.globalBlob[gi];
+    if (blob !== null && blob.extern) continue;
+    items.push(globalItem(mod, gi));
+  }
+  return layout(items);
+}
+
+/**
+ * `.bss` 那一节（第一百三十二片）：源码里**没有那个 `=`** 的全局量。
+ *
+ * 与 `.data` 是**两个各自独立的游标**，都按声明的次序 —— 量过 tcc（x86_64-linux）：
+ * `int a; int b = 0; int c = 5; static int d; static int e = 0;` 出来是
+ * `.bss` `a@0 d@4`、`.data` `b@0 c@4 e@8`。函数体里的 `static` 也在同一根轴上。
+ *
+ * 只有 `gOff` 有内容，而且这一节**在文件里不占字节**（ELF 的 NOBITS）—— 回的
+ * `size` 是它的 `sh_size`。
+ */
+export function planBss(mod) {
+  const items = [];
+  for (let gi = 0; gi < mod.globals.length; gi++) {
+    if (mod.globalBss[gi] !== true) continue;
     if (mod.globalRo[gi] === true) continue;
     const blob = mod.globalBlob[gi];
     if (blob !== null && blob.extern) continue;

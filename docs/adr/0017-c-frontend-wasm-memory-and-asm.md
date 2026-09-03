@@ -956,6 +956,18 @@ win32 41、arm64-win32 40）。`tccdefs.js` 于是从一张静态表改成顺着
 `mir/rodata.js` 里那个规划器抽出一个共用的 `layout(items)`，多一个 `planData(mod)`，
 两个后端的 `dataBytes` 从「一路 push」改成「先按落点开好、只往里填」。`wchar` 那门
 27/0/3 变 **30/0**。
+**没有初值的全局量进 `.bss`**（第一百三十二片）：判据是**源码里有没有那个 `=`**，不是
+「字节是不是全零」—— tcc 在 `tccgen.c:8405-8438` 上按序问三步（`is_const` 进只读那一节、
+否则 `has_init` 进 `.data`、否则进 `.bss`；`nocommon` 缺省 1 所以 COMMON 那一路不走），
+于是 `int b = 0;` 在 `.data` 里、`int a;` 在 `.bss` 里，两者的字节一模一样。所以这一格
+只能由 C 前端记（MIR 的 `globalBss`），后端**不能**按字节猜。`planData` 旁边多一个
+`planBss`，两个各自独立的游标；ELF 那一头 `.bss` 终于带上真的 `sh_size`（NOBITS，
+文件里不占字节），Mach-O 那一头折进 `__data` 的尾巴。顺带被尺子逮到一笔旧账：每一节的
+`sh_addralign` 是「里头对齐要求最大的那一块」（下界 8），从前三节都写死 8 ——
+量过 `int g32 __attribute__((aligned(32))) = 9;` 的 `.data` 是 32、
+`struct a7 g7[2] __attribute__((aligned(16)));` 的 `.bss` 是 16。`sym-size` 那门从
+6/0 长到 **12/0**：全局量的 `st_size`、**落点（哪一节、第几个字节）**、三节的
+`sh_size` 与 `sh_addralign`、函数把 `.text` 铺满，四条都与尺子一个数不差。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -15179,6 +15191,81 @@ int fn(void) { static int m; static int n = 0; … }
 那是另一笔。
 
 <!-- 量：.bss 的判据-END -->
+
+## 落地：第九刀第一百三十二片
+
+上一片末尾那把尺子照着做完了：**没有初始化式的全局量进 `.bss`**。
+
+### 判据只能从前端来
+
+`tccgen.c:8405-8438` 那三步是**有次序**的：
+
+```c
+if (is_const)        sec = rodata_section;
+else if (has_init)   sec = data_section;
+else if (nocommon)   sec = bss_section;      /* nocommon 缺省 1（libtcc.c:881） */
+else                 /* SHN_COMMON */;
+```
+
+关键那一条：`has_init` 是**源码里有没有那个 `=`**，不是「这一块的字节是不是全零」。
+`int b = 0;` 与 `int a;` 出来的字节一模一样，前者在 `.data`、后者在 `.bss` ——
+所以后端**没有**任何办法从字节上把这两种分开，这一格必须由 C 前端记下来。
+
+而且次序要照着来：`const` 先问，于是 `const int i;`（没有初值）落的是**只读那一节**，
+不是 `.bss`。
+
+### 三处改动
+
+1. **前端**：`decl` 里那个 `hasInit`（`this.tok === ASSIGN`）往登记上记一笔
+   （`gv.hasInit = true`，块里的 `static`/`extern` 那两种是转手，标在 `e.gvar` 上）。
+   同一个名字可以声明好几遍（试探性定义），所以只往上加不往下抹 ——
+   `int a; int a = 1;` 是**有**初始化式的那一个。封盘那一步：
+   `if (isRoType) markGlobalRo; else if (!hasInit) markGlobalBss;`
+2. **规划器**：`mir/rodata.js` 里 `planData` 旁边多一个 `planBss`，两个各自独立的
+   游标，都按声明的次序（`globalSeq` 那根轴）。函数体里的 `static` 也在同一根轴上。
+3. **写出器**：两个后端的全局量循环从「只读 / 可写」两段变三段（`sect` 4 是 `.bss`），
+   `.bss` 那一段**一个字节也不写**。ELF 那一头 `.bss` 终于带上真的 `sh_size`——
+   `writeSections` 早就认 `size` 那一格（NOBITS 有大小、没字节），只是上一层没往下递。
+   Mach-O 那一头这个写出器还只有 `__text`/`__data` 两节，所以 `foldRo` 顺手把 `sect: 4`
+   也折进 `__data` 的尾巴（那一段本来全是零，占着文件里的零字节只是胖一点）——
+   真正的 `__bss`（`S_ZEROFILL`）与 `__DATA,__const` 还是欠账。忘了递 `bssSize` 的
+   症状是 SIGSEGV（符号指到 `__data` 之外），所以那儿明着骂一句。
+
+链接那三头本来就都认 NOBITS 的输入节（`elf_merge.js:366`、`macho_exe.js:1155`、
+`pe_sections.js:117`），所以第 3 步比预想的小 —— 大头只在写 `.o` 这一头。
+
+### 顺带被尺子逮到的旧账：节自己的对齐
+
+`tcc-link` 的 `55-attr-align` 一红就露出来了：`g7` 的地址低四位是 8，该是 0。
+
+```c
+struct a7 g7[2] __attribute__((aligned(16)));   /* 没有初值 -> .bss */
+int g32 __attribute__((aligned(32))) = 9;       /* 有初值   -> .data */
+```
+
+量过 x86_64-linux：tcc 的 `.bss` `sh_addralign` 是 **16**、`.data` 是 **32**。
+也就是每一节的对齐是「里头对齐要求最大的那一块」，下界 8 —— 我们三节一直写死 8
+（`elf.js` 里 `dataAlign` 那一格还写着「ELF 用不上，tcc 的 `.data` 一律 8」，
+那句话是错的，只是先前每个探针里最大的对齐正好都是 8，`.data` 从 0 起也就没露）。
+`layout()` 顺手回一格 `al`，两个后端回 `secAlign: {data, rodata, bss}`。
+
+### 门
+
+`sym-size` 从 6/0 长到 **12/0**，四条：全局量的 `st_size`、**落点（哪一节、节里第几个
+字节）**、`.data`/`.data.ro`（win32 `.rdata`）/`.bss` 三节的 `sh_size` 与 `sh_addralign`、
+函数把 `.text` 铺满 —— 三个目标各四条，都与尺子一个数不差。探针里添了
+`struct Q { int x; } wide[2] __attribute__((aligned(16)));` 专门顶对齐那一格。
+上一片留的那句「落点这儿还不比」删掉了。
+
+`tcc-link` 82/1 变 **83/0**；`native` 227/0（Mach-O 那一头的 `bssSize` 补齐之前它是
+SIGSEGV）；其余照旧全绿，`tcc-obj` 还是 0 字节相同 / **21 容器相同** / 89 不同。
+
+### 还差什么
+
+静态局部量的**名字**（tcc 叫 `m`/`n`，我们叫 `fn.m.0`/`fn.n.1`）——`sym-size` 这门
+是按名字对的，所以那些名字现在被跳过，落点没被称到。那是另一笔。
+
+<!-- 第九刀第一百三十二片-END -->
 
 
 

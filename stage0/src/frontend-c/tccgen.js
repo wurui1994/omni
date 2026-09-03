@@ -6988,6 +6988,15 @@ export class CGen {  /**
           } else if (isExtern) e = this.declareExternLocal(name, vty, hasInit, dad.aligned);
           else if (hasStatic) e = this.declareStaticLocal(name, vty, dad.aligned, extra);
           else e = this.declareLocal(name, vty, dad.aligned, extra);
+          /* 源码里有没有那个 `=`（第一百三十二片）：`.bss` 的判据就是这一格
+           * （`tccgen.c:8405-8438` 的 `has_init`）—— **不是**「字节是不是全零」，
+           * `int b = 0;` 也在 `.data` 里。同一个名字可以声明好几遍（试探性定义），
+           * 所以只往上加不往下抹：`int a; int a = 1;` 是有初始化式的那一个。
+           * 块里的 `static`/`extern` 那两种登记是转手（`e.gvar`），标要标在那条上。 */
+          if (hasInit && inData) {
+            const gv = e.gvar === undefined ? e : e.gvar;
+            gv.hasInit = true;
+          }
           if (hasInit) {
             let dest;
             let base;
@@ -7907,6 +7916,9 @@ export function lowerCNative(path, text, host, defs) {
      * 把数组那几层剥掉，剩下的带 `const` 就算。所以 `const char s[]` 算、
      * `const char *const cp` 算（哪怕它的初值还要一条重定位），`char *p` 不算。 */
     if (isRoType(e.ty)) mod.markGlobalRo(no);
+    /* 没有初始化式的进 `.bss`（第一百三十二片）：三步是**有次序**的 —— `const` 先问，
+     * 所以 `const int i;`（没有初值）还是落在只读那一节里，不进 `.bss`。 */
+    else if (e.hasInit !== true) mod.markGlobalBss(no);
     mod.setGlobalData(no, size, al, bytes, fixups);
   }
   /* 匿名的静态块（第三十四片）：静态的复合字面量。与有名字的那些一模一样地切 ——

@@ -209,26 +209,43 @@ const ARCH = {
 };
 
 /**
- * 只读那一段折进 `__data` 的尾巴（第一百二十二片）。
+ * 只读那一段与 `.bss` 都折进 `__data` 的尾巴（第一百二十二、一百三十二片）。
  *
- * 写 ELF 那一头把 `const` 的全局量摆进 3 号节（`.data.ro` / `.rdata`），可这个写出器
- * 到现在只有 `__text` 与 `__data` 两节 —— 于是这儿把那一段接在数据字节后头（按 `dal`
- * 对齐，保证里头每一样的对齐都还成立），`sect: 3` 的符号与重定位一律改成 `sect: 2`
- * 并把偏移加上那个基址。真正的 `__DATA,__const` 是笔欠账；折过来至少不掉字节。
+ * 写 ELF 那一头把 `const` 的全局量摆进 3 号节（`.data.ro` / `.rdata`）、没有初始化式的
+ * 摆进 4 号节（`.bss`），可这个写出器到现在只有 `__text` 与 `__data` 两节 —— 于是这儿
+ * 把那两段依次接在数据字节后头（各按 `dal` 对齐，保证里头每一样的对齐都还成立），
+ * `sect: 3`/`sect: 4` 的符号与重定位一律改成 `sect: 2` 并把偏移加上各自的基址。
+ * 真正的 `__DATA,__const` 与 `__bss`（`S_ZEROFILL`）是笔欠账；折过来至少不掉字节 ——
+ * `.bss` 那一段本来就全是零，占着文件里的零字节只是胖一点，语义一样。
  */
 function foldRo(data, defs, relocs, opts, dal) {
   const base0 = data === undefined ? new Uint8Array(0) : data;
   const ro = opts === undefined || opts.rodata === undefined ? null : opts.rodata;
-  if (ro === null || ro.length === 0) return { bytes: base0, defs, relocs };
-  const at = align(base0.length, dal);
-  const bytes = new Uint8Array(at + ro.length);
+  const bssSize = opts === undefined || opts.bssSize === undefined ? 0 : opts.bssSize;
+  const roLen = ro === null ? 0 : ro.length;
+  if (roLen === 0 && bssSize === 0) {
+    /* 忘了递 `bssSize` 是段错误级的 bug（符号指到 `__data` 之外），所以明着骂一句 ——
+     * 不骂的话症状是「跑起来 SIGSEGV」，离原因十万八千里。 */
+    const stray = defs.find((d) => d.sect === 4);
+    if (stray !== undefined) {
+      throw new OmniError(`macho: 符号 '${stray.name}' 在 .bss 里，可没给 bssSize`);
+    }
+    return { bytes: base0, defs, relocs };
+  }
+  const at = roLen === 0 ? 0 : align(base0.length, dal);
+  const bssAt = bssSize === 0 ? 0 : align(roLen === 0 ? base0.length : at + roLen, dal);
+  const bytes = new Uint8Array(bssSize === 0 ? at + roLen : bssAt + bssSize);
   bytes.set(base0);
-  bytes.set(ro, at);
-  const move = (x) => (x.sect === 3 ? { ...x, sect: 2 } : x);
+  if (roLen !== 0) bytes.set(ro, at);
+  const baseOf = (s) => (s === 3 ? at : bssAt);
+  const move = (x) => (x.sect === 3 || x.sect === 4
+    ? { ...x, sect: 2, off: x.off === undefined ? undefined : x.off + baseOf(x.sect) }
+    : x);
   return {
     bytes,
-    defs: defs.map((d) => (d.sect === 3 ? { ...move(d), off: d.off + at } : d)),
-    relocs: relocs.map((r) => (r.sect === 3 ? { ...move(r), at: r.at + at } : r)),
+    defs: defs.map(move),
+    relocs: relocs.map((r) => (r.sect === 3 || r.sect === 4
+      ? { ...r, sect: 2, at: r.at + baseOf(r.sect) } : r)),
   };
 }
 
@@ -245,10 +262,11 @@ function foldRo(data, defs, relocs, opts, dal) {
  * @param arch  `'arm64'`（默认）或 `'x86_64'`
  * @param dataAlign `__data` 那一节要的对齐（字节，2 的幂，默认 8）。
  *                  里面有 16 字节对齐的全局量就得给 16 —— 见第九刀第二十九片。
- * @param opts  `{rodata}`（第一百二十二片）：只读那一段的字节。这个写出器只有
- *              `__text`/`__data` 两节，所以这一段**折进 `__data` 的尾巴**上 ——
- *              `sect: 3` 的符号与重定位跟着挪。真正的 `__DATA,__const` 是笔欠账，
- *              这儿只保证 clang 那条「真的能跑」的腿不掉字节。
+ * @param opts  `{rodata, bssSize}`（第一百二十二、一百三十二片）：只读那一段的字节与
+ *              `.bss` 的长度。这个写出器只有 `__text`/`__data` 两节，所以那两段都
+ *              **折进 `__data` 的尾巴**上 —— `sect: 3`/`sect: 4` 的符号与重定位跟着挪。
+ *              真正的 `__DATA,__const` 与 `__bss` 是笔欠账，这儿只保证 clang 那条
+ *              「真的能跑」的腿不掉字节。
  */
 export function writeObject(text, data, defs, relocs, arch, dataAlign, opts) {
   const archName = arch === undefined ? 'arm64' : arch;

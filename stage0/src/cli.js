@@ -472,12 +472,18 @@ function cObj(path, out, arch, incs, defs, fmt, os) {
         rdata: os === 'win32' ? '.rdata' : '.data.ro',
         /* 只读那一段（第一百二十二片）：`const` 的全局量的字节。 */
         rodata: blob.rodata,
+        /* `.bss`（第一百三十二片）：没有初始化式的全局量在这一节里，NOBITS —— 只有
+         * `sh_size`，文件里不占字节。 */
+        bssSize: blob.bssSize,
+        /* 三节各自的 `sh_addralign`（第一百三十二片）：里头对齐最大的那一块，下界 8。 */
+        secAlign: blob.secAlign,
         unwind: blob.unwind ?? undefined,
         ehFrame: ehFrameOf(blob, arch, os),
         seq: relaSeq(blob),
       })
-    /* Mach-O 那一头只有两节，只读那一段折进 `__data` 的尾巴（`macho.js` 的 `foldRo`）。 */
-    : (t, d, ds, rs, a, al) => writeObject(t, d, ds, rs, a, al, { rodata: blob.rodata });
+    /* Mach-O 那一头只有两节，只读那一段与 `.bss` 都折进 `__data` 的尾巴（`macho.js` 的 `foldRo`）。 */
+    : (t, d, ds, rs, a, al) => writeObject(t, d, ds, rs, a, al,
+      { rodata: blob.rodata, bssSize: blob.bssSize });
   writeBinary(out, write(blob.bytes, blob.data,
     orderSyms([...syms, ...blob.dataSyms]),
     [...blob.relocs, ...blob.dataRelocs, ...blob.roRelocs], arch, blob.dataAlign));
