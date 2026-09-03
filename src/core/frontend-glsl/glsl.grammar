@@ -1,0 +1,260 @@
+;; GLSL 330 core 的一个**子集** —— ADR-0019 第一刀。
+;;
+;; 为什么是子集，而且是这个子集
+;; --------------------------
+;; 尺子是两份 python 脚本（`benchmark.py` 与 `pretty_render.py`，见 ADR-0019）。它们用到的
+;; GLSL 已经**逐条列过**，这份语法就照那两档写，不多也不少：
+;;
+;;   第一档（`benchmark.py`）：`float`/`int`/`vec2..4`、构造与 swizzle、向量与标量混算、
+;;     `length/abs/min/max/smoothstep/sin/cos/float()`、`for`、函数定义、`uniform vec2`、
+;;     `out vec4`、`gl_FragCoord`、`gl_VertexID`
+;;   第二档（`pretty_render.py`）：varying（`out vec2 v_uv` / `in vec2 v_uv`）、`mat2`、
+;;     标量 uniform、模块级 `const`、三元 `? :`、`dot/normalize/fract/mix/clamp`
+;;
+;; **语法这一层把两档一起收了**：`mat2`、三元、`in`/`out` 在语法上几乎不要钱，分档的成本
+;; 都在类型检查与降级那一侧（插值、矩阵乘）。收在这儿的好处是第二刀不必再动语法。
+;;
+;; 与 jnc/asy 那两份的差别：**一处偏好都没有**（`prefer`）。GLSL 在这个子集里没有
+;; 「要先知道名字是不是类型」那种真歧义 —— 类型全是关键字。所以这张表是干净的 LR，
+;; 有歧义就是我写错了，不该靠偏好压。
+;;
+;; 内建函数**不在语法里**：`sin(x)` 与 `sdBox(p, b)` 走同一条 `ID "(" args ")"`，
+;; 认哪些名字是内建是降级那一侧的事（有符号表）。这一条与 jnc 那份「类型定向的一半在
+;; lower.js」同一个道理。
+;;
+;; 第一刀刻意**不收**的（都是尺子里没有的，不是忘了）：
+;;   - 纹理与采样器（`sampler2D`、`texture()`）
+;;   - 结构体、数组、`switch`、`do`、`discard`
+;;   - `layout(location = N)` 里那个括号（关键字收了，括号形式没收 —— 两份尺子都没用）
+;;   - 预处理：`#version` 整行当**一个 token** 原样收下，`#define`/`#if` 一律不收。
+;;     GLSL 的预处理是另一套（不是 C 的那一套），要接就该单独一刀。
+;;   - 精度限定（`precision highp float;`）、`invariant`、`interpolation` 里的
+;;     `centroid`/`sample`
+(grammar glsl
+  (tokens
+    ID INTLIT FLOATLIT VERSION
+    INC DEC LE GE EQ NE LOGAND LOGOR
+    ADDASSIGN SUBASSIGN MULASSIGN DIVASSIGN
+    ;; 只用来标 %prec 的伪终结符
+    THEN UNARY)
+
+  ;; ---- 优先级：照 GLSL 规范 5.1 那张表，从低到高 -------------------------------
+  ;; 赋值最低、右结合（`a = b = c` 是 `a = (b = c)`）。
+  (prec right "=" ADDASSIGN SUBASSIGN MULASSIGN DIVASSIGN)
+  ;; 三元右结合，比赋值高、比 `||` 低。
+  (prec right "?" ":")
+  (prec left LOGOR)
+  (prec left LOGAND)
+  (prec left EQ NE)
+  (prec left "<" ">" LE GE)
+  (prec left "+" "-")
+  (prec left "*" "/" "%")
+  (prec right UNARY)
+  ;; 悬垂 else：`if (a) if (b) s else t` 里 `else` 归内层 —— 与 C 同。
+  (prec nonassoc THEN)
+  (prec nonassoc "else")
+  (prec left "(" ")" "[" "]" "." INC DEC)
+
+  (start unit)
+
+  ;; ---- 词法 --------------------------------------------------------------------
+  (lex
+    (skip space)
+    (comment "//" (* (not "\n")))
+    (block-comment "/*" "*/")
+    ;; `#version 330 core` —— 整行一个 token。这一刀不解析它的内容，只在降级那一侧
+    ;; 核对一下版本号（认不出的版本要骂，不然「悄悄按 330 编」就是在骗人）。
+    (token VERSION "#" (* (not "\n")))
+    ;; 浮点：`1.0`、`.5`、`1e3`、`2.5e-4`。GLSL 还有 `1.0f` 后缀（130 起），一并收。
+    (token FLOATLIT (+ digit) "." (* digit) (? (or "e" "E") (? (set "+-")) (+ digit)) (? (set "fF")))
+    (token FLOATLIT "." (+ digit) (? (or "e" "E") (? (set "+-")) (+ digit)) (? (set "fF")))
+    (token FLOATLIT (+ digit) (or "e" "E") (? (set "+-")) (+ digit) (? (set "fF")))
+    (token INTLIT "0" (or "x" "X") (+ hex))
+    (token INTLIT (+ digit))
+    (token ID (or alpha "_") (* (or alnum "_")))
+    ;; 类型名是**关键字**，不是标识符 —— 这就是 GLSL 这个子集里没有 C 那种
+    ;; 「`A * b` 是声明还是乘法」歧义的原因。
+    (keyword ID
+      "void" "bool" "int" "uint" "float"
+      "vec2" "vec3" "vec4" "ivec2" "ivec3" "ivec4" "bvec2" "bvec3" "bvec4"
+      "mat2" "mat3" "mat4"
+      ;; `layout` **不在这儿**：关键字表里的每个词都得是某条规则用到的终结符（不然构表
+      ;; 就骂），而 `layout(location = N)` 这一刀不收。收了却不用，等于留一个哑符号。
+      "uniform" "in" "out" "inout" "const" "flat" "smooth" "noperspective"
+      "if" "else" "for" "while" "return" "break" "continue" "discard" "true" "false")
+    (punct INC "++")
+    (punct DEC "--")
+    (punct LE "<=")
+    (punct GE ">=")
+    (punct EQ "==")
+    (punct NE "!=")
+    (punct LOGAND "&&")
+    (punct LOGOR "||")
+    (punct ADDASSIGN "+=")
+    (punct SUBASSIGN "-=")
+    (punct MULASSIGN "*=")
+    (punct DIVASSIGN "/=")
+    (op "+" "-" "*" "/" "%" "!" "<" ">" "?" ":" "="
+        "(" ")" "[" "]" "{" "}" "," ";" "."))
+
+  ;; ---- 顶层 --------------------------------------------------------------------
+  (rule unit
+    (-> () (unit))
+    (-> (unit decl) (unit-add $1 $2)))
+
+  (rule decl
+    (-> (VERSION) (version $1))
+    ;; 接口那三种。`uniform`/`in`/`out` 后面可以带插值限定（`flat` 等），
+    ;; 收下来但语法这一层不区分 —— 那是插值方式，降级那一侧要（llvmpipe 的
+    ;; `enum lp_interp` 就是它）。
+    (-> ("uniform" type ID ";") (uniform $2 $3))
+    (-> ("in" type ID ";") (in-var () $2 $3))
+    (-> ("out" type ID ";") (out-var () $2 $3))
+    (-> (interp "in" type ID ";") (in-var $1 $3 $4))
+    (-> (interp "out" type ID ";") (out-var $1 $3 $4))
+    ;; 模块级 `const float PI = 3.14159;`（第二档要）
+    (-> ("const" type ID "=" expr ";") (const-decl $2 $3 $5))
+    ;; 函数定义与原型。原型收了是因为 GLSL 里「先声明后定义」合法，尺子里虽然没有，
+    ;; 但一条规则的事。
+    (-> (type ID "(" params ")" block) (func $1 $2 $4 $6))
+    (-> (type ID "(" params ")" ";") (func-proto $1 $2 $4))
+    ;; 模块级变量（不带限定符）。GLSL 里这是「全局，各调用共享」，尺子没用。
+    (-> (type ID ";") (global $1 $2)))
+
+  (rule interp
+    (-> ("flat") (interp-flat))
+    (-> ("smooth") (interp-smooth))
+    (-> ("noperspective") (interp-linear)))
+
+  (rule type
+    (-> ("void") (ty-void))
+    (-> ("bool") (ty-bool))
+    (-> ("int") (ty-int))
+    (-> ("uint") (ty-uint))
+    (-> ("float") (ty-float))
+    (-> ("vec2") (ty-vec 2))
+    (-> ("vec3") (ty-vec 3))
+    (-> ("vec4") (ty-vec 4))
+    (-> ("ivec2") (ty-ivec 2))
+    (-> ("ivec3") (ty-ivec 3))
+    (-> ("ivec4") (ty-ivec 4))
+    (-> ("bvec2") (ty-bvec 2))
+    (-> ("bvec3") (ty-bvec 3))
+    (-> ("bvec4") (ty-bvec 4))
+    (-> ("mat2") (ty-mat 2))
+    (-> ("mat3") (ty-mat 3))
+    (-> ("mat4") (ty-mat 4)))
+
+  (rule params
+    (-> () (params))
+    (-> ("void") (params))
+    (-> (plist) $1))
+
+  (rule plist
+    (-> (param) (params-add (params) $1))
+    (-> (plist "," param) (params-add $1 $3)))
+
+  ;; `in`/`out`/`inout` 的形参限定：GLSL 的默认是 `in`。
+  (rule param
+    (-> (type ID) (param (dir-in) $1 $2))
+    (-> ("in" type ID) (param (dir-in) $2 $3))
+    (-> ("out" type ID) (param (dir-out) $2 $3))
+    (-> ("inout" type ID) (param (dir-inout) $2 $3)))
+
+  ;; ---- 语句 --------------------------------------------------------------------
+  (rule block
+    (-> ("{" stmts "}") (block $2)))
+
+  (rule stmts
+    (-> () (stmts))
+    (-> (stmts stmt) (stmts-add $1 $2)))
+
+  (rule stmt
+    (-> (";") (empty))
+    (-> (block) $1)
+    (-> (expr ";") (expr-stmt $1))
+    (-> (local-decl ";") $1)
+    (-> ("return" expr ";") (ret $2))
+    (-> ("return" ";") (ret-void))
+    (-> ("break" ";") (brk))
+    (-> ("continue" ";") (cont))
+    ;; `discard` 这一刀**不实现**，但它在语法里有一条 —— 不然 `discard;` 会被当成
+    ;; 「一个叫 discard 的变量」悄悄收下（量过：出来是 `(expr-stmt (name discard))`）。
+    ;; 有了这一条，「不收」这句话由降级那一侧明着说，而不是靠语法碰巧不认。
+    (-> ("discard" ";") (discard))
+    ;; `(prec THEN)` 必须**紧跟在 RHS 之后**（`grammar.js:133` 那个 while 只在动作之前扫），
+    ;; 写在动作后面等于没写 —— 量过：`-a * b` 会分成 `(neg (mul a b))`。
+    (-> ("if" "(" expr ")" stmt) (prec THEN) (if $3 $5))
+    (-> ("if" "(" expr ")" stmt "else" stmt) (if-else $3 $5 $7))
+    (-> ("while" "(" expr ")" stmt) (while $3 $5))
+    ;; `for (int i = 0; i < N; i++)`。三格各自可空 —— 尺子里三格都满，但空格一条规则的事。
+    (-> ("for" "(" for-init opt-expr ";" opt-expr ")" stmt) (for $3 $4 $6 $8)))
+
+  (rule local-decl
+    (-> (type ID) (local $1 $2))
+    (-> (type ID "=" expr) (local-init $1 $2 $4))
+    (-> ("const" type ID "=" expr) (local-const $2 $3 $5)))
+
+  (rule for-init
+    (-> (";") (empty))
+    (-> (expr ";") (expr-stmt $1))
+    (-> (local-decl ";") $1))
+
+  (rule opt-expr
+    (-> () (none))
+    (-> (expr) $1))
+
+  ;; ---- 表达式 ------------------------------------------------------------------
+  ;; 一个 `expr` 加一块优先级声明，不照抄规范里那十四层级联 —— 与 jnc 那份同一个理由：
+  ;; 接受的语言相同，级联在 LR 表里白多十几个只做单产生式归约的状态。
+  (rule expr
+    (-> (INTLIT) (int-lit $1))
+    (-> (FLOATLIT) (float-lit $1))
+    (-> ("true") (bool-lit 1))
+    (-> ("false") (bool-lit 0))
+    (-> (ID) (name $1))
+    (-> ("(" expr ")") (paren $2))
+    ;; 构造：`vec3(a,b,c)`、`vec3(0.02)`（标量铺开）、`float(i)`、`mat2(a,b,c,d)`。
+    ;; 与函数调用是**两条不同的规则**，因为目标一个是类型一个是名字。
+    (-> (type "(" args ")") (construct $1 $3))
+    ;; 调用。内建与自定义走同一条 —— 见文件头。
+    (-> (ID "(" args ")") (call $1 $3))
+    ;; 成员与 swizzle：`d.x`、`uv.xyx`、`c.xxx`。语法这一层不查那串字母合不合法
+    ;; （`uv.xyzw` 对 `vec2` 是错的）—— 那要知道类型，是降级那一侧的事。
+    (-> (expr "." ID) (member $1 $3))
+    (-> (expr "[" expr "]") (index $1 $3))
+    ;; 一元那五条：`(prec UNARY)` **紧跟 RHS**，见 `stmt` 里 `if` 那条上的注释。
+    (-> ("-" expr) (prec UNARY) (neg $2))
+    (-> ("+" expr) (prec UNARY) $2)
+    (-> ("!" expr) (prec UNARY) (lnot $2))
+    (-> (INC expr) (prec UNARY) (pre-inc $2))
+    (-> (DEC expr) (prec UNARY) (pre-dec $2))
+    (-> (expr INC) (post-inc $1))
+    (-> (expr DEC) (post-dec $1))
+    (-> (expr "+" expr) (add $1 $3))
+    (-> (expr "-" expr) (sub $1 $3))
+    (-> (expr "*" expr) (mul $1 $3))
+    (-> (expr "/" expr) (div $1 $3))
+    (-> (expr "%" expr) (mod $1 $3))
+    (-> (expr "<" expr) (lt $1 $3))
+    (-> (expr ">" expr) (gt $1 $3))
+    (-> (expr LE expr) (le $1 $3))
+    (-> (expr GE expr) (ge $1 $3))
+    (-> (expr EQ expr) (eq $1 $3))
+    (-> (expr NE expr) (ne $1 $3))
+    (-> (expr LOGAND expr) (land $1 $3))
+    (-> (expr LOGOR expr) (lor $1 $3))
+    (-> (expr "?" expr ":" expr) (cond $1 $3 $5))
+    (-> (expr "=" expr) (assign $1 $3))
+    (-> (expr ADDASSIGN expr) (add-assign $1 $3))
+    (-> (expr SUBASSIGN expr) (sub-assign $1 $3))
+    (-> (expr MULASSIGN expr) (mul-assign $1 $3))
+    (-> (expr DIVASSIGN expr) (div-assign $1 $3)))
+
+  (rule args
+    (-> () (args))
+    (-> (alist) $1))
+
+  (rule alist
+    (-> (expr) (args-add (args) $1))
+    (-> (alist "," expr) (args-add $1 $3))))
