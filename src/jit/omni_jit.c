@@ -13,16 +13,18 @@
  * 与 AOT 共用同一个发射器是文本 IR 那个选择的全部回报：这里读的 .ll 和
  * `omni emit-llvm` 印出来的是同一份字节。
  *
- *   omni-jit FILE.ll [SYMBOL]
+ *   omni-jit FILE.ll [SYMBOL] [-- ARG...]
  *
  * 默认 SYMBOL 是 `main` —— 发射器已经发了一个和 AOT 一样的 main（omni_host_init ->
  * omni_main -> omni_js_check_uncaught -> fflush -> omni_host_exit_code），所以
  * 直接调它，退出码、未捕获异常、刷缓冲这些语义一个字都不用在这里重写。
  *
- * 运行时符号（omni_print_int 之类）不逐个注册：运行时的 .o 就链在本进程里，
- * 交给 ORC 的「进程符号搜索生成器」去找。这条正好是 ADR-0013 那个 C-FFI 主张的
- * 现场证明 —— JIT 出来的代码直接 call 到 C，中间没有一层胶水、没有一次装箱。
+ * `--` 之后的东西是**给被调那个 main 的命令行参数**。没有它的时候，第二个位置参数
+ * 就只能是 SYMBOL —— 于是 `omni-jit x.ll samples 1024` 会去找一个叫 `samples` 的符号，
+ * 报 `Symbols not found: [ _samples ]`。这一层原本是含糊的：函数签名摆明了要把 argv
+ * 传进去（`main(argc-1, argv+1)`），但任何一个参数都会被当成符号名截走。
  */
+
 
 #include <llvm-c/Core.h>
 #include <llvm-c/Error.h>
@@ -33,6 +35,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 /* LLVMInitializeNativeTarget 一族是 Target.h 里的 static inline，展开成
    当前架构那几个真符号。这里照 LLVM 自己的宏来，别的架构加一条 #elif 就行。 */
@@ -65,11 +68,24 @@ static char *omni_jit_slurp(const char *path, size_t *len) {
 
 int main(int argc, char **argv) {
   if (argc < 2) {
-    fprintf(stderr, "usage: omni-jit FILE.ll [SYMBOL]\n");
+    fprintf(stderr, "usage: omni-jit FILE.ll [SYMBOL] [-- ARG...]\n");
     return 64;
   }
   const char *path = argv[1];
-  const char *sym = argc > 2 ? argv[2] : "main";
+  int i = 2;
+  const char *sym = "main";
+  if (i < argc && strcmp(argv[i], "--") != 0) sym = argv[i++];
+
+  /* 被调那个 main 看到的 argv：第 0 格照旧是 `.ll` 的路径（没有 `--` 时的老行为就是
+     `argv+1`，一个字节都不变），`--` 之后的原样接在后面。argv 本身可写，所以把 `--`
+     那一格改写成路径就够了 —— 不用另分配一个数组。 */
+  char **eargv = argv + 1;
+  int eargc = argc - 1;
+  if (i < argc && strcmp(argv[i], "--") == 0) {
+    argv[i] = (char *)path;
+    eargv = argv + i;
+    eargc = argc - i;
+  }
 
   size_t len = 0;
   char *text = omni_jit_slurp(path, &len);
@@ -112,7 +128,7 @@ int main(int argc, char **argv) {
   err = LLVMOrcLLJITLookup(jit, &addr, sym);
   if (err != NULL) return omni_jit_fail(err, "cannot materialize");
 
-  int code = ((int (*)(int, char **))addr)(argc - 1, argv + 1);
+  int code = ((int (*)(int, char **))addr)(eargc, eargv);
 
   /* 故意不 DisposeLLJIT：被 JIT 的代码可能还持有运行时里的东西，而这个进程马上就退。
      卸载要等到「同一进程内解释与 JIT 混合执行」那一步，那时才有真正的生命周期问题。 */
