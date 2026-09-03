@@ -279,6 +279,19 @@ export class Cpp {
     /** `pp_debug_tok` / `pp_debug_symv`：刚过去那一条指示是什么、动的是哪个名字。 */
     this.ppDebugTok = 0;
     this.ppDebugSymv = 0;
+    /** `<command line>` 那一层里过掉的 `#define`/`#undef` 印出来的那几行（第一百〇八片）。
+     *  tcc 把预定义与 `-D`/`-U` 拼成一份源码在**同一个循环里**过，`-dD`/`-dM` 的那几行
+     *  就是它们经过时印的 —— 于是「后来被 `-U` 掉的预定义照印」「从没定义过的名字
+     *  也印 `#undef`」这两件事都是顺带的。我们的这一层是 `cmdlineLine` 一行一行过的，
+     *  所以在那儿把行攒起来，到 `preprocessToText` 一次倒出去。 */
+    this.cmdlineDump = '';
+    /** `-E` 那一路每出一条诊断，stdout 上先落一个**空行**（`error1`，libtcc.c:683：
+     *  `if (output_type == PREPROCESS && ppfp == stdout) printf("\n")`）。
+     *  诊断本身走 stderr，这个换行走 stdout，于是逐字节比 `-E` 输出时它是能看见的。
+     *  攒在这儿，由印输出的那一头（`preprocessToText` / `cmdlineLine`）就地倒出去。 */
+    this.ppNl = '';
+    /** `-Wall`（tcc 的 `warn_all`，默认 0）：见 `warnAllMsg`。 */
+    this.warnAll = false;
     /** `#if` 的求值途中（`pp_expr`）：GCC 允许宏展开出 `defined`，靠这一格放行。
      *  求值那一段里它换成 `#if`/`#elif` 本身（>1），于是又兼作 `pp_error` 的开关 */
     this.ppExpr = 0;
@@ -338,6 +351,24 @@ export class Cpp {
   warn(msg) {
     const where = this.file ? `${this.file.filename}:${this.errLine()}: ` : '';
     this.warnings.push(`${where}warning: ${msg}`);
+    if (this.ppOnly) this.ppNl += '\n';
+  }
+
+  /**
+   * `tcc_warning_c(warn_all)`：只有 `-Wall` 才响的那一类（tcc 里 `warn_all` 默认 0）。
+   * 两处用得上：`multi-character character constant`（`tccpp.c:2197`）与
+   * `#pragma X ignored`（`tccpp.c:1759`）。这不是可有可无的一格 —— 无条件响的话
+   * `-E` 输出里会多出一个空行（诊断前那个换行），逐字节比对当场抓住。
+   */
+  warnAllMsg(msg) {
+    if (this.warnAll) this.warn(msg);
+  }
+
+  /** 攒着的那几个诊断空行倒出来（见 `ppNl`）。 */
+  takePpNl() {
+    const s = this.ppNl;
+    this.ppNl = '';
+    return s;
   }
 
   /** `tok_alloc`（`tccpp.c:498`）：名字 -> 记号号，没见过就登记一个新的。 */
@@ -1006,7 +1037,7 @@ export class Cpp {
     const body = parseEscapeString(s.slice(1, s.length - 1), (m) => this.err(m), isLong);
     if (sep === 39) { // 字符常量
       if (body.length < 1) this.err('empty character constant');
-      if (body.length > 1) this.warn('multi-character character constant');
+      if (body.length > 1) this.warnAllMsg('multi-character character constant');
       if (isLong) {
         /* `L'ab'` 的值是**最后**那个（`tccpp.c:2198-2203` 的循环对宽的是直接赋值，
          * 不像窄的那样左移八位再或）。`wchar_t` 在这个目标上是 `int`，所以按 32 位
@@ -1802,7 +1833,15 @@ export class Cpp {
       this.nextNomacro();
     }
     if (t0 === TOK_PPJOIN) this.err("'##' cannot appear at either end of macro");
+    /* `define_push`（`tccpp.c:1252`）：**先**看有没有旧的，装上去之后再决定要不要抱怨。
+     * 「一样」的判断（`macro_is_equal`）不比记号号，比的是**印出来的字符串**。量过：
+     * `#define T  2` 与 `#define T 2` 不响（宏名后头那几个空格不进宏体），
+     * `#define A 0x10` 与 `#define A 16` 响（`TOK_PPNUM` 存的是原文）。 */
+    const o = this.defineFind(v);
     this.defines.set(v, { type, str, args, special: false });
+    if (o !== null && o !== undefined && !macroIsEqual(this, o.str, str)) {
+      this.warn(`${IDENT_NAMES[v] ?? this.tokStr(v, null)} redefined`);
+    }
   }
 
   /** `#pragma pack(N)` 里那个 N：1/2/4/8/16 之一（tcc 的 `val < 1 || val > 16 || 非 2 的幂`）。 */
@@ -1897,8 +1936,8 @@ export class Cpp {
     }
     /* 编译那一路上，认不出的 pragma **警告一句然后整行丢掉**
      * （`tccpp.c:1758-1760`）。不能原样印回 —— 那些记号会漏进语法分析器，
-     * 而 `#pragma GCC diagnostic …` 不是一个声明。 */
-    this.warn(`#pragma ${this.tokStr(this.tok, this.tokc)} ignored`);
+     * 而 `#pragma GCC diagnostic …` 不是一个声明。那一句是 `-Wall` 才响的。 */
+    this.warnAllMsg(`#pragma ${this.tokStr(this.tok, this.tokc)} ignored`);
     return false;
   }
 
@@ -2238,14 +2277,6 @@ export class Cpp {
     this.pushCmdlineFile();
 
     let out = this.takeTrace();
-    /* `-dD`/`-dM` 下预定义与命令行上的 `-D` 也要印出来。tcc 那边是把它们当成一份
-     * 内建头文件在**同一个循环里**过掉的，于是印出来的次序就是进表的次序；我们的
-     * 预定义是直接 `define()` 装的，所以在这儿按表的次序补印一遍 —— 效果一样，
-     * 量过 tcc：预定义、`__BASE_FILE__`、命令行的 `-D`、源文件里的，正是这个次序。 */
-    if ((this.dflag & 7) !== 0) {
-      for (const v of this.defines.keys()) out += this.definePrint(v);
-      this.ppDebugTok = 0;
-    }
     let tokenSeen = TOK_LINEFEED;
     let white = '';
     /* 开工先交代一次「现在在哪」。`file.prev` 非空是「主文件本身就是被 include 进来的」
@@ -2255,11 +2286,23 @@ export class Cpp {
       out += this.ppLine(this.file.prev, level++);
     }
     out += this.ppLine(this.file, level);
+    /* `<command line>` 那一层过掉时攒下的行：`-dD`/`-dM` 的 `#define`/`#undef`，以及
+     * 诊断前那个换行。tcc 是在**循环里**读那份缓冲时印的，所以它们排在上面两行行标
+     * 之后 —— 量过 `tcc -E -D__TINYC__=1`：那个空行正落在 `<command line>" 1` 与
+     * 回到主文件的 `" 2` 之间。
+     *
+     * `-dD`/`-dM` 印出来的次序就是**命令行次序**：预定义、`__BASE_FILE__`、再按次序
+     * 一条条 `-D`/`-U`。两处能看见差别：被 `-U` 掉的预定义照印一遍 `#define`（它确实
+     * 定义过），从没定义过的名字也照印 `#undef`（那一条指示确实过去了）。 */
+    out += this.cmdlineDump;
+    this.ppDebugTok = 0;
     for (;;) {
       const iptr = this.includeStack.length;
       this.next();
       /* `-vv[v]` 的那几行在 tcc 那边是 `next()` 里头印的，所以排在行标**前面**。 */
       if (this.verbose >= 2) out += this.takeTrace();
+      /* 诊断前那个空行也是 `next()` 里头落的（`error1`），同样排在行标前面。 */
+      out += this.takePpNl();
       if (this.tok === TOK_EOF) break;
       /* 这一个记号是不是把我们带进/带出了一个文件？带进来的话先给**来处**补一行
        * （`pp_line(*iptr, 0)`：`iptr` 那一格里放的正是压栈时的当前文件），再给新文件印
@@ -2361,6 +2404,12 @@ export class Cpp {
     this.tokFlags = TOK_FLAG_BOL | TOK_FLAG_BOF;
     this.nextNomacro(); // 行首的 `#` 会把 preprocess() 叫起来
     this.file = saved;
+    /* 这一条过去时攒下的输出：诊断前那个空行（`-E` 才有），以及 `-dD`/`-dM` 要的那一行。
+     * 次序照 tcc：警告是 `parse_define` 里当场出的，`pp_debug_defines` 在它之后印。
+     * `-dD` 的开关必须在装预定义**之前**拨好 —— 否则预定义那一段就漏了
+     * （cli.js 里 `dflag` 排在 `installPredefs` 前面）。 */
+    this.cmdlineDump += this.takePpNl();
+    if ((this.dflag & 7) !== 0) this.cmdlineDump += this.ppDebugDefines();
   }
 
   /**
@@ -2391,6 +2440,24 @@ export class Cpp {
 }
 
 /* ------------------------------------------------- 模块级零件 */
+
+/**
+ * `macro_is_equal`（`tccpp.c:1232`）：两个宏体一样不一样。
+ *
+ * 比的不是记号号，是**逐个记号印出来的字符串** —— tcc 那边一个 `cstr_cat(get_tok_str(…))`
+ * 一个 `strcmp`。这个写法有个能看见的后果：数在宏体里存的是值，`#define A 0x10` 与
+ * `#define A 16` 印出来仍是 `0x10` 与 `16`（`TOK_PPNUM` 存的是原文），所以照样不一样。
+ * 哪一边没有宏体（`__LINE__` 那一族，`s->d == NULL`）就算一样，一句不响。
+ */
+function macroIsEqual(cpp, a, b) {
+  if (a === null || a === undefined || b === null || b === undefined) return true;
+  const live = (str, i) => i < str.toks.length && str.toks[i] !== 0 && str.toks[i] !== TOK_EOF;
+  let i = 0;
+  for (; live(a, i) && live(b, i); i++) {
+    if (cpp.tokStr(a.toks[i], a.vals[i]) !== cpp.tokStr(b.toks[i], b.vals[i])) return false;
+  }
+  return !(live(a, i) || live(b, i));
+}
 
 /**
  * `add_char`（`tccpp.c:441`）：把一个字节印成 C 源码里的写法。

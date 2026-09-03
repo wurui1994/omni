@@ -247,6 +247,11 @@ function cSysInclude() {
     dirname,
     join,
   });
+  /* `-dD` = 3、`-dM` = 7（tcc 的 `dflag`）。拨在装预定义**之前** —— `-dD`/`-dM` 要印的
+   * 头一批就是预定义那几行，攒行的开关得先开（见 tccpp.js 的 `cmdlineDump`）。
+   * `ppOnly` 同理：命令行那一层出的警告，前头那个空行也得算进输出里。 */
+  cpp.dflag = dflag ?? 0;
+  cpp.ppOnly = true;
   cpp.installPredefs(path);
   /* `-include`：开工前先读的那几份（压在主文件上面的 `<command line>` 那一层）。 */
   if (incls !== undefined) cpp.cmdlineIncls = incls;
@@ -257,8 +262,6 @@ function cSysInclude() {
     if (body === null) cpp.undefine(name);
     else cpp.define(name, body);
   }
-  /* `-dD` = 3、`-dM` = 7（tcc 的 `dflag`）。 */
-  cpp.dflag = dflag ?? 0;
   /* `-P` 那一格（tcc 的 `Pflag`）：0 = `# 行号 "文件"`、1 = 不印、2 = `#line`、11 = `-P10`。 */
   cpp.Pflag = pflag ?? 0;
   /* `-M` 一族：把读过的头记下来（`genDeps`），`-M`/`-MD` 连系统头一起记。 */

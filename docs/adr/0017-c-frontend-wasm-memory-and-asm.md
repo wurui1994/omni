@@ -781,6 +781,21 @@ tcc 的预定义是一份叫 `<command line>` 的**源码**（`tccpp.c:3653-3666
 ELF 的 STT_FILE 那一条印的是**命令行上给的那一串**（量出来的：`tcc -c s.c` 写 `s.c`、
 `-c ./s.c` 写 `./s.c`、给绝对路径就写绝对路径），我们从前写基名。
 
+**`-dD`/`-dM` 印的是经过，不是宏表**（第一百〇八片）：接着上一片那一层往下称。既然
+`<command line>` 是一份**源码**，`-dD`/`-dM` 的那几行就不是「把宏表倒出来」，而是这些指示
+**经过时**一条条印的（`pp_debug_defines`，`tccpp.c:3843`）。两件从「印宏表」绝对得不到的事：
+后来被 `-U` 掉的预定义**照印**一遍 `#define`（它确实定义过），从没定义过的名字
+`-UNEVER` 也**照印**一行 `#undef NEVER`（那一条指示确实过去了）；次序就是命令行次序，
+`-DA=1 -UA` 与 `-UA -DA=1` 出来不一样。我们的这一层是一行行过的（`cmdlineLine`），
+于是改成边过边攒（`cmdlineDump`），到门口一次倒出去。同一层还量出两件小事：`-E` 那一路
+**每出一条诊断，stdout 上先落一个空行**（`error1`，libtcc.c:683 —— 诊断走 stderr，这个换行
+走 stdout），于是「该不该响」也进了逐字节这根轴 —— `X redefined` 补上了
+（`define_push`，`tccpp.c:1262`，比的是宏体**印出来的字符串**），而
+`multi-character character constant` 与 `#pragma X ignored` 反过来得**收**回去：
+它们在 tcc 那儿挂在 `warn_all` 上，默认不响，我们从前无条件响 —— 多响一句就多一个空行。
+门是 `tests/c/dm-order.js`（7 条）。还差一格：`-dD` **不带** `-P` 时 tcc 那份缓冲的空行与
+`# 132 "<command line>"` 那样的行标，得等预定义变成真的源码文本才能对上。
+
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
 地址交给真的 libc（`strlen`/`memcpy`）验过。C 前端现在还把 `&x` 降到影子栈上，
@@ -13362,6 +13377,88 @@ tcc -c /tmp/x/s.c -> "/tmp/x/s.c"
 码本身，等 B 路；`selfboot` 的定点也不动（597104 字节）。
 
 <!-- 第九刀第一百〇七片-END -->
+
+## 落地：第九刀第一百〇八片
+
+上一片把 `<command line>` 那一层开出来了，这一片称那一层里**发生过什么**。
+
+`-dM` 这个开关的名字容易骗人：它看着像「把宏表倒出来」。量一遍就知道不是：
+
+```
+$ tcc -E -P -dM -U__TINYC__ -U__APPLE__ -DFOO=2 t.c
+…
+#define __TINYC__ 928        <- 后来被 -U 掉了，照印
+#define __APPLE__ 1          <- 同上
+…
+#undef __TINYC__
+#undef __APPLE__
+#define FOO 2
+```
+
+被 `-U` 掉的两条**照印**，而且 `#undef` 排在后面 —— 因为这几行不是宏表的快照，是
+`pp_debug_defines`（`tccpp.c:3843`）在每一条指示**经过时**印的一行。同一个道理：
+
+```
+$ tcc -E -P -dM -UNEVER t.c
+…
+#undef NEVER                 <- NEVER 从来没定义过，那一条指示还是过去了
+```
+
+我们从前的做法正好是被骗的那一种：`for (const v of this.defines.keys()) out += definePrint(v)`
+—— 倒宏表。表里没有被 `-U` 掉的，也没有 `#undef` 这件事本身，于是上面两处一处都印不出来。
+
+### 改法：边过边攒
+
+预定义与 `-D`/`-U` 在我们这儿都走 `cmdlineLine(src)`（装一行、读完还原），所以攒行的地方
+就在那儿：读完那一行之后叫一次 `ppDebugDefines()`，把印出来的行接到 `cmdlineDump` 上。
+次序于是天然是**命令行次序** —— 预定义、`__BASE_FILE__`、再一条条 `-D`/`-U`。
+`preprocessToText` 那一头把倒出来的位置从「循环前」挪到**两行行标之后**（tcc 那边这些行是
+循环里读那份缓冲时印的），`cli.js` 里 `cpp.dflag = …` 也得挪到 `installPredefs` **之前**
+—— 否则预定义那一段还没开攒就过去了。
+
+### 顺带量出来的：诊断前那个空行
+
+写第三个用例时冒出来一个对不上的空行，追到 `error1`（libtcc.c:681-687）：
+
+```c
+if (s1->output_type == TCC_OUTPUT_PREPROCESS && s1->ppfp == stdout)
+    printf("\n"); /* print a newline during tcc -E */
+fprintf(stderr, "%s\n", cs.data);
+```
+
+`-E` 那一路每出一条诊断，**stdout 上先落一个空行**。诊断本身走 stderr，这个换行走 stdout
+—— 也就是说「有没有响过一句」在逐字节比对里是**看得见的**。攒的地方是 `ppNl`，倒的地方
+两处：命令行那一层里出的（接到 `cmdlineDump`，排在同一条的 `#define` 行之前），
+和循环里出的（跟 `-vv` 的 trace 一样，排在行标之前）。
+
+### 于是「该不该响」进了这根轴
+
+这个空行把三处以前看不见的账翻出来了：
+
+* `X redefined` **补上**（`define_push`，`tccpp.c:1262`）：`macro_is_equal` 比的不是记号号，
+  是逐个记号**印出来的字符串**。量过：`#define T  2` 与 `#define T 2` 不响（宏名后头那几个
+  空格不进宏体），`#define A 0x10` 与 `#define A 16` 响（`TOK_PPNUM` 存的是原文）。
+* `multi-character character constant` **收回**（`tccpp.c:2197`）：tcc 那句挂在
+  `tcc_warning_c(warn_all)` 上，`-Wall` 才响。我们从前无条件响 —— 于是
+  `cpp/05-cond.c` 里 `#if 'ab' == 24930` 那一行会多出一个空行，`run.js` 当场抓住。
+* `#pragma X ignored` 同上（`tccpp.c:1759`）。新的一格是 `warnAll`，默认 false。
+
+### 门
+
+`tests/c/dm-order.js`，7 条：`-U` 掉的预定义照印 + 没定义过的名字照印 `#undef`、
+`-DA=1 -UA` 的次序、源文件里重定义时那个空行的落点（带 `-dD` 与不带各一条）、
+重定义警告在 stderr 上一字不差（且宏体相同的那一对不响）、`-Wall` 那两句默认不响。
+`run.js` 仍 207/0/1skip，`native.js` 227/0，`selfobj` 24/0，`selfboot` 定点不动（597104）。
+
+### 还差一格
+
+`-dD` **不带** `-P` 时还对不上：tcc 那份缓冲里的空行（预定义源码里非 `#define` 的那几行）
+与 `# 132 "<command line>"` 这样的行标，要求预定义在我们这儿也是一份**逐行相同的源码文本**
+才能长出来。同一格还欠 `<command line>:133: warning: __TINYC__ redefined` 里那个行号
+——现在我们只能说 `<command line>:1`。这一格记在账上，不在这一片。
+
+<!-- 第九刀第一百〇八片-END -->
+
 
 
 
