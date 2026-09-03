@@ -21,6 +21,7 @@ import {
   CVT_I2F, CVT_U2F, CVT_F2I, CVT_FCVT, CVT_BITCAST, memDesc,
 } from '../../stage0/src/mir/ir.js';
 import { codeOf, genModule } from '../../stage0/src/x64/from_mir.js';
+import { f80Bytes } from '../../stage0/src/frontend-c/f80.js';
 import { writeObject } from '../../stage0/src/link/macho.js';
 import { utf8Bytes } from '../../stage0/src/host/utf8.js';
 
@@ -253,6 +254,14 @@ t('double -> float -> double（精度会掉）', [0n, 0n], d2b(Math.fround(0.1))
   const d = f.emit(OP.CVT, T_F64, s, REF_NONE, CVT_FCVT);
   ret(f, T_I64, f.emit(OP.CVT, T_I64, d, REF_NONE, CVT_BITCAST));
 });
+/* u64 -> double：x86 只有「有符号 -> 浮点」，64 位那一档得自己拼（`u64ToFloat`）。
+ * 两条各查一头：最高位是 1 的那种（0xFFFF…F 收到 2^64），以及正好 2^63（精确）。 */
+t('u64 -> double（最高位是 1，舍到 2^64）', [-1n, 0n], d2b(18446744073709551616), (f, xs) =>
+  ret(f, T_I64, f.emit(OP.CVT, T_I64,
+    f.emit(OP.CVT, T_F64, ld(f, T_I64, xs), REF_NONE, CVT_U2F), REF_NONE, CVT_BITCAST)));
+t('u64 -> double（2^63 是精确的）', [-(2n ** 63n), 0n], d2b(9223372036854775808), (f, xs) =>
+  ret(f, T_I64, f.emit(OP.CVT, T_I64,
+    f.emit(OP.CVT, T_F64, ld(f, T_I64, xs), REF_NONE, CVT_U2F), REF_NONE, CVT_BITCAST)));
 t('float 的算术只有单精度', [0n, 0n], f2b(Math.fround(0.1) + Math.fround(0.2)), (f) =>
   ret(f, T_I64, f.emit(OP.CVT, T_I64,
     f.emit(OP.ADD, T_F32, K.f32(String(Math.fround(0.1))), K.f32(String(Math.fround(0.2))), 0),
@@ -273,8 +282,8 @@ function tm(what, args, want, body) {
   mno++;
   mcases.push({ f, args, want, what });
 }
-const LDK = { i8s: 0, i8u: 1, i16s: 2, i16u: 3, i32s: 4, i32u: 5, i64: 6, f32: 7, f64: 8 };
-const STK = { i8: 0, i16: 1, i32: 2, i64: 3, f32: 4, f64: 5 };
+const LDK = { i8s: 0, i8u: 1, i16s: 2, i16u: 3, i32s: 4, i32u: 5, i64: 6, f32: 7, f64: 8, f80: 9 };
+const STK = { i8: 0, i16: 1, i32: 2, i64: 3, f32: 4, f64: 5, f80: 6 };
 const mst = (f, t2, addr, v, kind, off) =>
   f.emit(OP.MSTORE, t2, addr, v, memDesc(STK[kind], off === undefined ? 0 : off));
 const mld = (f, t2, addr, kind, off) =>
@@ -353,6 +362,36 @@ t('帧块：memcpy 把串常量搬到帧上，再 strlen', [0n, 0n], 5n, (f) => 
   f.emit(OP.CCALL, T_I64, mod.cabiNo('memcpy'),
     f.pushArgs([p, K.str('hello'), K.int(6n)]), 0);
   ret(f, T_I64, f.emit(OP.CCALL, T_I64, mod.cabiNo('strlen'), f.pushArgs([p]), 0));
+});
+
+// ---- 80 位那一格（第一百一十片）：x86_64 的 `long double` 是 x87 的十个字节。
+// 值本身仍是 double —— `f80` 这个描述符只管「内存里那十个字节的形状」，
+// 读的时候硬件收成 double、写的时候摊成 80 位。地址得是**真地址**，所以用帧上的块。
+t('f80：2.5 存成十个字节再读回来', [0n, 0n], d2b(2.5), (f) => {
+  const p = f.emit(OP.FRAME, T_I64, REF_NONE, REF_NONE, f.frame('ld', 16, 16));
+  mst(f, T_F64, p, K.real('2.5'), 'f80');
+  ret(f, T_I64, f.emit(OP.CVT, T_I64, mld(f, T_F64, p, 'f80'), REF_NONE, CVT_BITCAST));
+});
+/* 0.1 这一条要紧：80 位的尾数比 double 宽 11 位，所以来回一趟必须**一位不掉**
+ * （反过来若走了 float 那一档，这一条立刻答成 fround(0.1)）。 */
+t('f80：0.1 来回一趟一位不掉', [0n, 0n], d2b(0.1), (f) => {
+  const p = f.emit(OP.FRAME, T_I64, REF_NONE, REF_NONE, f.frame('ld', 16, 16));
+  mst(f, T_F64, p, K.real('0.1'), 'f80');
+  ret(f, T_I64, f.emit(OP.CVT, T_I64, mld(f, T_F64, p, 'f80'), REF_NONE, CVT_BITCAST));
+});
+/* 写出来的**字节**与 `f80Bytes`（第一百〇九片，尺子称过的那一份）逐个相同 ——
+ * 十个字节各读一遍、与期望值异或、全 or 起来，答 0 才算过。 */
+t('f80：写出来的十个字节与 f80Bytes(1.5) 逐个相同', [0n, 0n], 0n, (f) => {
+  const p = f.emit(OP.FRAME, T_I64, REF_NONE, REF_NONE, f.frame('ld', 16, 16));
+  mst(f, T_F64, p, K.real('1.5'), 'f80');
+  const want = f80Bytes(1.5, 10);
+  let acc = K.int(0n);
+  for (let k = 0; k < 10; k++) {
+    const b = mld(f, T_I64, p, 'i8u', k);
+    acc = f.emit(OP.BOR, T_I64, acc,
+      f.emit(OP.BXOR, T_I64, b, K.int(BigInt(want[k])), 0), 0);
+  }
+  ret(f, T_I64, acc);
 });
 
 // ---- 模块级变量与串常量
@@ -458,10 +497,6 @@ for (const [what, build] of [
     (f) => { ret(f, T_I64, f.emit(OP.CALL, T_I64, 0, f.pushArgs([]), 0)); }],
   ['单个函数里的串常量没有数据段',
     (f) => { ret(f, T_I64, badMod.consts.str('nope')); }],
-  ['u64 -> 浮点（x86 没有这条指令）', (f) => {
-    const d = f.emit(OP.CVT, T_F64, ld(f, T_I64, 0), REF_NONE, CVT_U2F);
-    ret(f, T_I64, f.emit(OP.CVT, T_I64, d, REF_NONE, CVT_F2I));
-  }],
   ['帧块号越界', (f) => { ret(f, T_I64, f.emit(OP.FRAME, T_I64, REF_NONE, REF_NONE, 3)); }],
 ]) {
   const f = mkFunc(badMod, `omni_bad_${bad}`, 2, build);

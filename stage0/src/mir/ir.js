@@ -530,10 +530,15 @@ export const CVT_NAMES = ['i2f', 'f2i', 'box', 'unbox', 'bitcast', 'u2f',
  * 对齐提示**刻意不进描述符**：wasm 里它只是给引擎的优化提示，不改语义，而我们两套
  * 实现（DataView 与 memcpy）都不要求对齐。留着不做比留一格没人读的字段好。
  */
-export const MLOAD_KINDS = ['i8s', 'i8u', 'i16s', 'i16u', 'i32s', 'i32u', 'i64', 'f32', 'f64'];
-export const MLOAD_BYTES = [1, 1, 2, 2, 4, 4, 8, 4, 8];
-export const MSTORE_KINDS = ['i8', 'i16', 'i32', 'i64', 'f32', 'f64'];
-export const MSTORE_BYTES = [1, 2, 4, 8, 4, 8];
+/* `f80`（第一百一十片）：x86_64 的 `long double`，十个字节的 x87 扩展精度。
+ * **值本身仍是 f64** —— 读的时候硬件把 80 位收成 double，写的时候把 double 摊成
+ * 80 位。也就是说这一格只管「内存里那十个字节的形状」，MIR 里的值类型一格没多。
+ * 这样定的理由在 f80.js 的头注里：尺子（交叉编出来的 tcc）自己也只有 53 位有效位，
+ * 所以「值从 double 来、按 80 位存」与它逐字节相同。只有 x86_64 那条腿发得出它。 */
+export const MLOAD_KINDS = ['i8s', 'i8u', 'i16s', 'i16u', 'i32s', 'i32u', 'i64', 'f32', 'f64', 'f80'];
+export const MLOAD_BYTES = [1, 1, 2, 2, 4, 4, 8, 4, 8, 10];
+export const MSTORE_KINDS = ['i8', 'i16', 'i32', 'i64', 'f32', 'f64', 'f80'];
+export const MSTORE_BYTES = [1, 2, 4, 8, 4, 8, 10];
 
 /** 描述符打包。低 4 位是宽度符号号（两张表都不到 16 项），其余是静态偏移。 */
 export function memDesc(kindNo, off) {

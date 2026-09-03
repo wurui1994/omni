@@ -562,6 +562,40 @@ export function pop(r) {
   return [...rex(false, false, false, r > 7, false), 0x58 + (r % 8)];
 }
 
+/* ------------------------------------------------------------- x87（80 位那四条）
+ * 第九刀第一百一十片。SSE 那一摊管 `double`/`float`，x87 只在一个地方非它不可：
+ * **x86_64 的 `long double` 是 80 位**（`x86_64-gen.c:102-103`），而只有 x87 认得
+ * 那十个字节的形状。所以这儿只要四条指令 —— 把 80 位读进 x87 栈、把 x87 栈顶
+ * 写成 80 位，加上 64 位的一进一出当桥：
+ *
+ *   fld  m80  = DB /5      fstp m80 = DB /7
+ *   fld  m64  = DD /0      fstp m64 = DD /3
+ *
+ * 「/n」是 ModRM 的 reg 那三位当操作码扩展用（没有寄存器操作数），所以直接把 n
+ * 递给 `memOperand`。`fstp` 的 p 是 pop：写完把 x87 栈弹掉 —— 成对使用才不会
+ * 把那八格慢慢填满（填满了下一条 `fld` 就得到 NaN，而且不报错）。
+ */
+
+/** `fld tbyte [base + disp]`：80 位读进 x87 栈顶。 */
+export function fldM80(base, disp) {
+  return [...rex(false, false, false, base > 7, false), 0xdb, ...memOperand(5, base, disp)];
+}
+
+/** `fstp tbyte [base + disp]`：x87 栈顶写成 80 位，并弹栈。 */
+export function fstpM80(base, disp) {
+  return [...rex(false, false, false, base > 7, false), 0xdb, ...memOperand(7, base, disp)];
+}
+
+/** `fld qword [base + disp]`：一个 double 读进 x87 栈顶（转成 80 位是硬件做的）。 */
+export function fldM64(base, disp) {
+  return [...rex(false, false, false, base > 7, false), 0xdd, ...memOperand(0, base, disp)];
+}
+
+/** `fstp qword [base + disp]`：x87 栈顶按 double 写出（就近偶数舍入），并弹栈。 */
+export function fstpM64(base, disp) {
+  return [...rex(false, false, false, base > 7, false), 0xdd, ...memOperand(3, base, disp)];
+}
+
 /* ---------------------------------------------------------------- SSE（浮点）
  * 第九刀第十三片。x86_64 上的 `double`/`float` 一律走 SSE 的**标量**那一档
  * （`movsd`/`addsd`…… 的 `s` 是 scalar），x87 那一整摊不碰 —— 它是栈式的、

@@ -947,6 +947,7 @@ class FnGen {
   mload(i) {
     const f = this.f;
     const kind = MLOAD_KINDS[memKindNo(f.aux[i])];
+    if (kind === 'f80') return this.mloadF80(i);
     const ld = MLOAD_EMIT[kind];
     if (ld === undefined) return nyi(`MLOAD 的宽度 ${kind}`);
     this.memAddr(TMP0, f.a[i], memOff(f.aux[i]));
@@ -954,15 +955,51 @@ class FnGen {
     return this.def(i, RES);
   }
 
-  /** `MSTORE`。六种宽度只管「把低若干位拍进内存」。 */
+  /**
+   * 80 位那一格的读（第一百一十片）：`fld tbyte` 进 x87 栈，`fstp qword` 收成 double
+   * 出来。中间要一块八字节的地方 —— 借栈：`push` 一下腾出格子（推什么都行，
+   * 推 `RES` 省一条指令），`fstp` 写进去，再 `pop` 回 `RES`。
+   *
+   * 帧是 rbp 基的（`push BP; mov BP, rsp`），所以动 rsp 不影响任何一个槽的地址；
+   * 两条一进一出配对，中间没有 call。
+   */
+  mloadF80(i) {
+    const f = this.f;
+    const buf = this.buf;
+    this.memAddr(TMP0, f.a[i], memOff(f.aux[i]));
+    buf.emit(x.fldM80(TMP0, 0));
+    buf.emit(x.push(RES));
+    buf.emit(x.fstpM64(REG.rsp, 0));
+    buf.emit(x.pop(RES));
+    return this.def(i, RES);
+  }
+
+  /** `MSTORE`。六种宽度只管「把低若干位拍进内存」；80 位那一格走 x87（见下）。 */
   mstore(i) {
     const f = this.f;
     const kind = MSTORE_KINDS[memKindNo(f.aux[i])];
+    if (kind === 'f80') return this.mstoreF80(i);
     const size = MSTORE_SIZE[kind];
     if (size === undefined) return nyi(`MSTORE 的宽度 ${kind}`);
     this.loadRef(RES, f.b[i]);
     this.memAddr(TMP0, f.a[i], memOff(f.aux[i]));
     this.buf.emit(x.movMR(size, TMP0, 0, RES));
+  }
+
+  /**
+   * 80 位那一格的写：double 的位模式在 `RES` 里，先 `push` 到栈上让 x87 能寻址，
+   * `fld qword` 读进来（硬件顺手摊成 80 位），`fstp tbyte` 写出那十个字节。
+   * 收尾 `pop` 只为把栈还原（值不再有人要，落进 `RES`）。
+   */
+  mstoreF80(i) {
+    const f = this.f;
+    const buf = this.buf;
+    this.loadRef(RES, f.b[i]);
+    buf.emit(x.push(RES));
+    this.memAddr(TMP0, f.a[i], memOff(f.aux[i]));
+    buf.emit(x.fldM64(REG.rsp, 0));
+    buf.emit(x.fstpM80(TMP0, 0));
+    buf.emit(x.pop(RES));
   }
 
   /**
