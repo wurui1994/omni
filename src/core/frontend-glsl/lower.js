@@ -549,8 +549,96 @@ function glslNum(v) {
  * 一个（已检查过的）GLSL 模块 -> 核心方言文本。
  *
  * 出来的模块里**没有 `main`** —— 它是一个库：`glsl_frag(x, y, uniforms…)` 回一个
- * `glsl_v4`。跑它的那一头（把画布扫一遍、按 quad 走、写 PNG）是第四片。
+ * `glsl_v4`。跑它的那一头是 `glslRenderMain`。
  */
 export function glslLower(mod) {
   return new GlslLowerer(mod).run();
 }
+
+/**
+ * 把画布扫一遍的那一段：`glslLower` 出来的库 + 这一段 = 一个能跑的方言程序。
+ *
+ * ## 按 quad 走，不按扫描线（决策一第二条）
+ *
+ * 顺序是 llvmpipe 那一套的最内两层（`lp_bld_interp.c:53-87`）：一个 2×2 的 quad 里
+ * 四个像素按 `左上、右上、左下、右下`，quad 之间按行。为什么第一刀就要这个顺序，
+ * 哪怕现在一次只算一个片元：`dFdx`/`dFdy` 与纹理 LOD 天生要 quad，而 SoA 化就是
+ * 把这个循环的内核换掉 —— 顺序现在定死，将来换内核时图不会变。
+ *
+ * 宽高不是 2 的倍数时**多算的那些像素照样算、但不印**（llvmpipe 也是这样：
+ * 边上的 quad 用掩码丢掉几个像素，而不是缩小 quad）。
+ *
+ * ## 印的是文本，不是 PNG
+ *
+ * 方言这一层没有文件 IO（只有 `print`），而这是**故意**的 —— 一门中间语言不该长出
+ * 文件系统。于是这一段每个像素印一行 `x y r g b`，PNG 由外面那一层（门、或者将来的
+ * 驱动命令）拼。代价写在明处：`print` 的开销在小画布上就盖过着色器本身，所以
+ * **性能对照不能用这条路**（那要另一个不印东西的 main，见 ADR-0019 第五片）。
+ *
+ * @param mod 检查过的 GLSL 模块（要拿 uniform 的名字与格数）
+ * @param w 画布宽
+ * @param h 画布高
+ * @param uni `{名字: [每一格的数]}`——uniform 的值，由调用方给
+ */
+export function glslRenderMain(mod, w, h, uni) {
+  const args = ['(var px)', '(var py)'];
+  for (const u of mod.uniforms) {
+    const vals = uni[u.name];
+    if (vals === undefined) throw new OmniError(`glsl: uniform '${u.name}' 没给值`);
+    const n = glslNComp(u.ty);
+    if (vals.length !== n) {
+      throw new OmniError(`glsl: uniform '${u.name}' 要 ${n} 格，给了 ${vals.length}`);
+    }
+    for (const v of vals) {
+      args.push(glslCompTy(u.ty) === 'int' ? `(int ${Math.trunc(v)})` : `(real ${glslNum(v)})`);
+    }
+  }
+  const call = `(call glsl_frag ${args.join(' ')})`;
+  /* quad 里那四格的偏移，顺序照 llvmpipe 的 `quad_offset_x/y`。 */
+  const QX = [0, 1, 0, 1];
+  const QY = [0, 0, 1, 1];
+  const inner = [];
+  for (let k = 0; k < 4; k++) {
+    inner.push(`(set px (bin "+" (toreal (var qx)) (real ${QX[k] + 0.5})))`);
+    inner.push(`(set py (bin "+" (toreal (var qy)) (real ${QY[k] + 0.5})))`);
+    inner.push(`(set c ${call})`);
+    /* 出了画布的那几格照样算（上面那三句），只是不印 —— 见函数头。
+     * 一格一个 `print`，不拼成一行：方言的 `+` 是「同型相加」，`int + string`
+     * 不在它的规矩里，而绕过去（先 `toreal` 再拼）只会让这段更难看。 */
+    inner.push(`(if (bin "&&" (bin "<" (var px) (real ${glslNum(w)}))`
+      + ` (bin "<" (var py) (real ${glslNum(h)})))`
+      + ' (do'
+      + ' (print (toint (bin "-" (var px) (real 0.5))))'
+      + ' (print (toint (bin "-" (var py) (real 0.5))))'
+      + ' (print (call glsl_to8 (fld (var c) c0)))'
+      + ' (print (call glsl_to8 (fld (var c) c1)))'
+      + ' (print (call glsl_to8 (fld (var c) c2)))))');
+  }
+  return `  (fn glsl_to8 ((v real)) int
+    (let x real (var v))
+    (if (bin "<" (var x) (real 0.0)) (do (set x (real 0.0))))
+    (if (bin ">" (var x) (real 1.0)) (do (set x (real 1.0))))
+    (ret (toint (rmath "round" (bin "*" (var x) (real 255.0))))))
+
+  (main
+    (let c ${glslStructName(4)} (new ${glslStructName(4)}))
+    (let px real (real 0.0))
+    (let py real (real 0.0))
+    (let qy int (int 0))
+    (while (bin "<" (var qy) (int ${Math.ceil(h / 2) * 2}))
+      (do
+        (let qx int (int 0))
+        (while (bin "<" (var qx) (int ${Math.ceil(w / 2) * 2}))
+          (do
+            ${inner.join('\n            ')}
+            (set qx (bin "+" (var qx) (int 2)))))
+        (set qy (bin "+" (var qy) (int 2))))))
+`;
+}
+
+/** 库 + 扫描那一段，拼成一个完整的方言程序。 */
+export function glslProgram(mod, w, h, uni) {
+  const lib = glslLower(mod).trimEnd();
+  return `${lib.slice(0, -1)}\n${glslRenderMain(mod, w, h, uni)})\n`;
+}
+
