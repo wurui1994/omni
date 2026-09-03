@@ -176,9 +176,19 @@ const T2 = [
     'void main() { vec2 p = vec2(1.0, 0.0) * mat2(0.0, 1.0, -1.0, 0.0); fragColor = vec4(p, 0.0, 1.0); }\n',
     /* 行向量乘：第 col 格 = dot(v, 第 col 列) = (0, -1)。 */
     [0, -1, 0, 1]],
-  ['mat2 * mat2 与 mat2(scalar) 是对角',
+  ['mat2 * mat2 与 mat2(scalar) 是对角（m[0] 取第 0 列）',
     'void main() { mat2 m = mat2(2.0) * mat2(3.0, 0.0, 0.0, 4.0); fragColor = vec4(m[0], 0.0, 1.0); }\n',
-    null],
+    /* mat2(2.0) 是 diag(2)（规范 5.4.2），乘 [[3,0],[0,4]] 得 [[6,0],[0,8]]；
+     * 第 0 列 = (6,0)。取成行的话是 (6,0) 也一样 —— 所以下一条挑了个非对称的。 */
+    [6, 0, 0, 1]],
+  ['m[1] 取第 1 列（非对称的阵：取成行会得另一组数）',
+    'void main() { mat2 m = mat2(1.0, 2.0, 3.0, 4.0); fragColor = vec4(m[1], m[0].y, 1.0); }\n',
+    /* 列优先：第 0 列 (1,2)、第 1 列 (3,4)。所以 m[1] = (3,4)、m[0].y = 2。
+     * 记成行优先的话 m[1] 会是 (2,4)、m[0].y 会是 3 —— 三格里两格不同。 */
+    [3, 4, 2, 1]],
+  ['v[K] 取一格（与 swizzle 同一条路）',
+    'void main() { vec3 v = vec3(7.0, 8.0, 9.0); fragColor = vec4(v[0], v[2], v[1], 1.0); }\n',
+    [7, 9, 8, 1]],
   ['mix 照规范的形状（a=1 时精确回 y）',
     'void main() { float a = mix(0.25, 0.75, 0.5); float b = mix(1.0, 3.0, 1.0);'
     + ' fragColor = vec4(a, b, 0.0, 1.0); }\n',
@@ -255,9 +265,11 @@ for (const [name, body, want] of T2) {
 }
 
 /* varying 与顶点着色器**已经接上了**（第七片），它们的门在 `tests/glsl/interp.js`。
- * `continue` 也接上了（第十七片，上面 T2 里四条）。这儿只剩还没接的那一条。 */
+ * `continue`（第十七片）与 `m[0]`（第十八片）也接上了 —— 上面 T2 里各有几条。
+ * 这儿只留下标那一格里**还挡着**的那一种：动态下标。 */
 const NYI = [
-  ['矩阵下标 m[0]', 'out vec4 c;\nvoid main() { mat2 m = mat2(1.0); c = vec4(m[0], 0.0, 1.0); }\n', '下标'],
+  ['动态下标 m[i]', 'out vec4 c;\nvoid main() { mat2 m = mat2(1.0); int i = 0;'
+    + ' c = vec4(m[i], 0.0, 1.0); }\n', '字面量'],
 ];
 for (const [name, body, want] of NYI) {
   let msg = null;

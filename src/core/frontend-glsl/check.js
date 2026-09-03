@@ -516,8 +516,40 @@ class GlslChecker {
       lt: '<', gt: '>', le: '<=', ge: '>=', eq: '==', ne: '!=', land: '&&', lor: '||',
     };
     if (BIN[h] !== undefined) return this.binary(node, BIN[h]);
-    if (h === 'index') throw this.err(node, '下标这一刀不收（尺子里没有数组，矩阵取列也没有）');
+    if (h === 'index') return this.index(node);
     throw this.err(node, `认不出的表达式 ${h}`);
+  }
+
+  /**
+   * `m[K]`（矩阵取**列**）与 `v[K]`（向量取一格）。
+   *
+   * 下标**必须是整数字面量**：动态下标要方言里有真数组才做得对，这一刀没有 ——
+   * 不挡住的话它只会在某个下标上悄悄取错一格。
+   *
+   * 矩阵是**列优先**（规范 5.6）：`m[0]` 是第 0 列，也就是 `mat2(a,b,c,d)` 里的 `(a,b)`。
+   * 记成行就是转置，而转置在图上看不出「错」，只看得出「转过来了」。
+   */
+  index(node) {
+    const of = this.expr(node.items[1]);
+    const at = this.expr(node.items[2]);
+    if (at.k !== 'lit' || at.ty.k !== 'int') {
+      throw this.err(node, '下标必须是整数字面量（动态下标要方言里有真数组，这一刀没有）');
+    }
+    const k = at.v;
+    if (of.ty.k === 'mat') {
+      if (k < 0 || k >= of.ty.n) {
+        throw this.err(node, `${glslTyText(of.ty)} 只有 ${of.ty.n} 列，取不到第 ${k} 列`);
+      }
+      return { k: 'matcol', ty: glslVec(of.ty.n, 'float'), of, col: k };
+    }
+    if (of.ty.k === 'vec') {
+      if (k < 0 || k >= of.ty.n) {
+        throw this.err(node, `${glslTyText(of.ty)} 只有 ${of.ty.n} 格，取不到第 ${k} 格`);
+      }
+      /* 向量那一侧就是 swizzle 的一格 —— 降级那边不必多认一种节点。 */
+      return { k: 'swizzle', ty: glslElem(of.ty), of, idx: [k] };
+    }
+    throw this.err(node, `${glslTyText(of.ty)} 不能取下标`);
   }
 
   /** 能不能赋值。`uniform`/`in`/内建的输入都不能写 —— 那是 GLSL 的规矩，不是我们的选择。 */

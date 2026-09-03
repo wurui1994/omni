@@ -37,9 +37,9 @@ import { glslTyText } from './check.js';
 /** 方言里那几个结构体的名字：`vecN` 当返回值时用它（参数是摊平的 N 个 real）。 */
 const glslStructName = (n) => `glsl_v${n}`;
 
-/** 分量的方言类型。 */
+/** 分量的方言类型。矩阵的分量一律是 `float`（GLSL 里没有整数矩阵）。 */
 function glslCompTy(t) {
-  const b = t.k === 'vec' ? t.base : t.k;
+  const b = t.k === 'vec' ? t.base : t.k === 'mat' ? 'float' : t.k;
   if (b === 'float') return 'real';
   if (b === 'int') return 'int';
   if (b === 'bool') return 'bool';
@@ -204,6 +204,14 @@ class GlslLowerer {
       const of = this.expr(e.of);
       /* 分量已经各自是一个 `(var tN)`，所以重排不必再绑。 */
       return e.idx.map((i) => of[i]);
+    }
+    if (e.k === 'matcol') {
+      /* `m[col]`：矩阵是**列优先**摊平的（`mat2(a,b,c,d)` = 第 0 列 (a,b)、第 1 列 (c,d)），
+       * 所以第 col 列就是分量表里连着的那 N 个 —— 下标 `col*N .. col*N+N-1`。
+       * 与 `matBin` 里那条 `col*N + row` 是同一个公式（规范 5.6）。 */
+      const of = this.expr(e.of);
+      const n = e.of.ty.n;
+      return of.slice(e.col * n, e.col * n + n);
     }
     if (e.k === 'neg') {
       const a = this.expr(e.a);
