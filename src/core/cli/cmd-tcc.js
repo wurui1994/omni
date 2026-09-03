@@ -89,6 +89,21 @@ export function tccTranslate(argv, err) {
   const all = (n) => opts.get(n) ?? [];
   const tgt = targetOf(one('-b'));
 
+  /* `-B DIR`：tcc 拿它当「tcc 自己那一套住在哪儿」（`{B}/include`、`{B}/libtcc1.a`）。
+   * 我们**还没接上它** —— 我们的自带头在 `src/include`，由 `installDir()` 找。
+   *
+   * 那就明着骂，不要悄悄吞掉。收下再扔是这一条命令最不该干的事：它存在的理由就是
+   * 「拿同一串 argv 喂两边比字节」，而门那边给尺子的 `-B$TOPSRC` 是让 tcc 去读
+   * **tinycc 自己那套头**的 —— 我们这边悄悄用了别的一套头，比出来的「相同」就是假的。
+   *
+   * 接上它之前要先量准一件事：tcc 把 `{B}/include` 插在搜索序的**第几位**
+   * （`tccpp.c` 那一段：自带的在前、`-I` 在中、系统的在后）。没量过就别猜。 */
+  if (has('-B')) {
+    throw err(`c tcc: -B 还没接上（tcc 拿它当 {B}/include 与 {B}/libtcc1.a 的根）。`
+      + '悄悄吞掉它会让门比出假的「相同」—— 我们会用自带的 src/include，'
+      + '而尺子那边读的是 -B 指的那一套。接上它要先量准 {B}/include 在搜索序里的位置。');
+  }
+
   /* 出来的 argv 用 omni 的规范拼法（`--arch`/`--os`/`--format`），因为底下那几段实现
    * 就是自己在 argv 上找这些名字的。 */
   const out = [];
