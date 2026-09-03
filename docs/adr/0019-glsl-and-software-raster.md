@@ -490,7 +490,8 @@ C 腿比 JS 腿慢**不是**「C 生成的代码慢」——这一趟里 C 那�
   要 `a0`/`dadx`/`dady` 那一套（llvmpipe 的 `lp_bld_interp.c`），而那要先有
   「三角形 setup」这一步。它值一片。
 - **顶点着色器**：同上，插值的另一半。
-- `m[0]`（矩阵取列）与 `continue`：两句 `glslNyi`，位置写在 `lower.js` 里。
+- `m[0]`（矩阵取列）：一句 `glslNyi`，位置写在 `lower.js` 里。
+  （`continue` 从前也在这一行上，第十七片接上了。）
 
 ### 门：`tests/glsl/lower.js` 17/0
 
@@ -1005,6 +1006,47 @@ C 腿那个负数还是第十三片记过的老毛病（clang 把不依赖像素
 换成了「差不多」。
 
 <!-- 落地：第一刀第十六片-END -->
+
+## 落地：第一刀第十七片 —— `continue` 接上了（那一圈只走一趟的 while）
+
+`for` 落成方言的「init + while + 体尾 step」，而 **`continue` 在这种展开里会跳过 step**。
+第三片起这一格是明着骂的（`glslNyi`），理由写着「这一档一份尺子都没用到 `continue`」。
+现在把它接上，形状是：
+
+```
+(while COND (do (while (bool true) (do BODY (brk)))
+                STEP))
+```
+
+体外套一圈**只走一趟**的 while，于是
+
+- 体里的 `continue` = 那一圈的 `(brk)` —— 跳到 step **前面**，step 照走
+- 体里的 `break` 要跨过那一圈：`(brk 2)`（方言的 `(brk N)` 是往外数第 N 层，第四十刀）
+
+**只在这一层的体里真有 `continue` 时才套**（`glslOwnContinue`：扫语句但不进嵌套的
+`for`/`while` —— GLSL 的 `continue` 永远指最里那一层）。不这么挑的话每个 `for` 都多一层
+while：白付的代价，而且一串门的字节对账会无谓地动。
+
+`while` 那一侧不用套：它没有 step，`continue` 直接是方言的 `(cont)`。
+
+### 门：每一条都带逃生阀
+
+`tests/glsl/lower.js` 的 T2 加了四条，都是能手算的数：
+
+- `for + continue`：`k < 3` 时 continue，累加 3+4+5 = **12**，循环转 **6** 轮
+- `for + break` 跨过那一圈：i=0 加 0、i=1 continue、i=2 加 2、i=3 break -> **2**，转 4 轮
+- `while + continue`：1+2+4+5+6 = **18**
+- 嵌套（里外两层都有 continue）：i∈{0,2} × j∈{0,2} = **4** 次
+
+每一条都塞了一个**逃生阀**（`if (g > 100) break;`）。理由：「continue 跳过 step」这个错
+在 `for` 上的表现是**死循环**，没有逃生阀这道门会**挂住**而不是红 ——
+挂住的门比红的门难查得多。有了它，坏实现给出的是一组明显不同的数
+（第一条会是 `s=0, i=101`），而不是一次超时。
+
+`tests/glsl/run.js` 8/8 组绿，`oracle` 与真 GL 的最大差仍是 0/1。
+`NYI` 那张表里 `continue` 那一条删了 —— 它现在该绿，留着就是在钉一个已经不成立的事实。
+
+<!-- 落地：第一刀第十七片-END -->
 
 ## 还没定的（下一步按这个顺序）
 

@@ -202,6 +202,41 @@ const T2 = [
   ['pow / sqrt / exp / log',
     'void main() { fragColor = vec4(pow(2.0, 10.0), sqrt(9.0), exp(0.0), 1.0); }\n',
     [1024, 3, 1, 1]],
+  /* ---- `continue`：`for` 落成「init + while + 体尾 step」之后它会**跳过 step**，
+   * 所以降级要给体外套一圈「只走一趟的 while」（见 lower.js 里 for 那一段）。
+   *
+   * 每一条都带**逃生阀**（`if (i > 100) break;`）：坏实现在这儿是死循环，
+   * 没有逃生阀这道门会挂住而不是红。挂住的门比红的门难查得多。 */
+  ['for + continue：step 照走（坏实现会卡在同一轮）',
+    'void main() {\n  int i = 0;\n  float s = 0.0;\n'
+    + '  for (int k = 0; k < 6; k++) {\n    i++;\n    if (i > 100) { break; }\n'
+    + '    if (k < 3) { continue; }\n    s += float(k);\n  }\n'
+    + '  fragColor = vec4(s, float(i), 0.0, 1.0);\n}\n',
+    /* k = 3,4,5 累加 -> 12；循环转 6 轮 -> i = 6。
+     * 「continue 跳过 step」的实现：k 永远是 0，i 一直涨到 101 才被逃生阀截住，s = 0。 */
+    [12, 6, 0, 1]],
+  ['for + break 跨过那一圈（不是只跳出内圈）',
+    'void main() {\n  float s = 0.0;\n  int g = 0;\n'
+    + '  for (int i = 0; i < 10; i++) {\n    g++;\n    if (g > 100) { break; }\n'
+    + '    if (i == 3) { break; }\n    if (i == 1) { continue; }\n    s += float(i);\n  }\n'
+    + '  fragColor = vec4(s, float(g), 0.0, 1.0);\n}\n',
+    /* i=0 加 0、i=1 continue、i=2 加 2、i=3 break -> s = 2、转了 4 轮。
+     * `break` 只跳出内圈那一层的话会接着转到 i=9，s = 2+4+5+6+7+8+9 = 41。 */
+    [2, 4, 0, 1]],
+  ['while + continue（没有 step，直接是方言的 cont）',
+    'void main() {\n  int i = 0;\n  float s = 0.0;\n'
+    + '  while (i < 6) {\n    i++;\n    if (i == 3) { continue; }\n    s += float(i);\n  }\n'
+    + '  fragColor = vec4(s, float(i), 0.0, 1.0);\n}\n',
+    /* 1+2+4+5+6 = 18。 */
+    [18, 6, 0, 1]],
+  ['嵌套：里外两层都有 continue（层号别数错）',
+    'void main() {\n  float s = 0.0;\n  int g = 0;\n'
+    + '  for (int i = 0; i < 3; i++) {\n    g++;\n    if (g > 100) { break; }\n'
+    + '    if (i == 1) { continue; }\n'
+    + '    for (int j = 0; j < 3; j++) {\n      if (j == 1) { continue; }\n      s += 1.0;\n    }\n  }\n'
+    + '  fragColor = vec4(s, float(g), 0.0, 1.0);\n}\n',
+    /* i ∈ {0,2} 各配 j ∈ {0,2} -> 4 次；外层转 3 轮。 */
+    [4, 3, 0, 1]],
 ];
 for (const [name, body, want] of T2) {
   if (want === null) continue;   // 下标那条在下面单列（这一刀不收 `m[0]`）
@@ -220,11 +255,9 @@ for (const [name, body, want] of T2) {
 }
 
 /* varying 与顶点着色器**已经接上了**（第七片），它们的门在 `tests/glsl/interp.js`。
- * 这儿只留还没接的那两条。 */
+ * `continue` 也接上了（第十七片，上面 T2 里四条）。这儿只剩还没接的那一条。 */
 const NYI = [
   ['矩阵下标 m[0]', 'out vec4 c;\nvoid main() { mat2 m = mat2(1.0); c = vec4(m[0], 0.0, 1.0); }\n', '下标'],
-  ['continue', 'out vec4 c;\nvoid main() { float d = 0.0;'
-    + ' for (int i = 0; i < 3; i++) { continue; } c = vec4(d); }\n', 'continue'],
 ];
 for (const [name, body, want] of NYI) {
   let msg = null;

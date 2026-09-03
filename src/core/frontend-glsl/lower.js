@@ -67,6 +67,22 @@ function glslNyi(what) {
   throw new OmniError(`glsl: ${what} 这一片还没接（ADR-0019 第一刀只做第一档，第二档是下一刀）`);
 }
 
+/**
+ * 这一段语句里有**属于当前这一层循环**的 `continue` 吗。
+ *
+ * 「属于当前这一层」= 不进嵌套的 `for`/`while` 去看：GLSL 的 `continue` 永远指最里那一层，
+ * 所以嵌套循环里的那些与外面这一层无关。判它是为了决定 `for` 要不要套那一圈
+ * 「只走一趟的 while」（见 `stmt` 里 for 那一段）—— 不需要时不套，降出来的方言与从前一样。
+ */
+function glslOwnContinue(s) {
+  if (s === null || s === undefined) return false;
+  if (s.k === 'continue') return true;
+  if (s.k === 'block') return s.body.some((x) => glslOwnContinue(x));
+  if (s.k === 'if') return glslOwnContinue(s.then) || glslOwnContinue(s.else);
+  /* `for`/`while` 不进去 —— 里头的 continue 是它们自己的。别的语句里不会有语句。 */
+  return false;
+}
+
 class GlslLowerer {
   constructor() {
     this.mod = null;
@@ -80,6 +96,10 @@ class GlslLowerer {
     this.tmp = 0;
     this.names = new Map(); // 局部量名字的重名计数（见 uniq）
     this.scopes = [];       // 名字 -> 分量名数组
+    /** 正在里头的那几层 GLSL 循环，最里的在最后。一项是 `{ wrapped }` ——
+     * `wrapped` 为真表示这一层 `for` 的体外套了一圈「只走一趟的 while」，
+     * 于是 `continue` 是那一圈的 `(brk)`、`break` 要往外数两层（见 `stmt` 里 for 那一段）。 */
+    this.loops = [];
   }
 
   fresh(prefix) { this.tmp++; return `${prefix}${this.tmp}`; }
@@ -595,14 +615,33 @@ class GlslLowerer {
     }
     if (s.k === 'for') {
       /* `for` 落成方言的 `while`：init 在前、step 在体尾。
-       * **`continue` 会跳过 step** —— 这是 C 与 GLSL 的 `for` 与这种展开的差别。
-       * 这一档里 `continue` 一份尺子都没用，所以撞上就骂（见 `cont`）。 */
+       *
+       * **`continue` 在这种展开里会跳过 step** —— 那是 C/GLSL 的 `for` 与
+       * 「init + while + 体尾 step」之间真实存在的差别，直接落就是错的。
+       * 办法是给体外套一圈**只走一趟**的 while：
+       *
+       *   (while COND (do (while (bool true) (do BODY (brk)))
+       *                   STEP))
+       *
+       * 于是体里的 `continue` = 那一圈的 `(brk)`（跳到 step 前面，**step 照走**），
+       * 体里的 `break` 要往外数两层 `(brk 2)`。只在**这一层的体里真有 continue** 时才套
+       * （`glslOwnContinue`）—— 没有的话多一层 while 是白付的代价，而且降出来的方言
+       * 会与从前不同（那会让一串门的字节对账无谓地动）。 */
+      const wrapped = glslOwnContinue(s.body);
       this.push();
       this.stmt(s.init);
       const body = [];
       const outer = this.stmts;
       this.stmts = body;
-      this.stmt(s.body);
+      this.loops.push({ wrapped });
+      if (wrapped) {
+        const inner = this.sub(() => this.stmt(s.body));
+        inner.push('(brk)');
+        this.stmts.push(`(while (bool true) (do ${inner.join(' ')}))`);
+      } else {
+        this.stmt(s.body);
+      }
+      this.loops.pop();
       if (s.step !== null) this.expr(s.step);
       this.stmts = outer;
       const cond = s.c === null ? '(bool true)' : this.condIn(s.c, body);
@@ -610,9 +649,13 @@ class GlslLowerer {
       this.pop();
       return;
     }
-    if (s.k === 'break') { this.stmts.push('(brk)'); return; }
-    if (s.k === 'continue') {
-      glslNyi('continue（`for` 展成 while 之后它会跳过步进那一格）');
+    if (s.k === 'break' || s.k === 'continue') {
+      const cur = this.loops[this.loops.length - 1];
+      if (cur === undefined) throw new OmniError(`glsl: '${s.k}' 不在循环里`);
+      /* 套了一圈的那种：`continue` 是内圈的 `(brk)`，`break` 要跨过内圈。 */
+      if (s.k === 'continue') this.stmts.push(cur.wrapped ? '(brk)' : '(cont)');
+      else this.stmts.push(cur.wrapped ? '(brk 2)' : '(brk)');
+      return;
     }
     if (s.k === 'if') {
       /* 条件的中间量提到 `if` **外面**是对的 —— 条件本来就要算一次。
@@ -628,8 +671,11 @@ class GlslLowerer {
       return;
     }
     if (s.k === 'while') {
-      /* 条件每一轮都要重算，所以走 `condIn`（要求它降出来是一条表达式）。 */
+      /* 条件每一轮都要重算，所以走 `condIn`（要求它降出来是一条表达式）。
+       * `while` 不用套那一圈 —— 它没有 step，`continue` 直接是方言的 `(cont)`。 */
+      this.loops.push({ wrapped: false });
       const body = this.sub(() => this.stmt(s.body));
+      this.loops.pop();
       this.stmts.push(`(while ${this.condIn(s.c)} (do ${body.join(' ')}))`);
       return;
     }
