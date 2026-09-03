@@ -300,6 +300,30 @@ import 的别名摊成一句模块级的 `const 本地名 = 导出名`（`link.j
 而且门里也有引用（`tests/arm64/link.js` 这类直接 import `genModule` 的）。
 机械但要一处一处过，不是脚本活。
 
+#### 再收 12 条：判据错了一格（22 -> 10）
+
+上一段说「那 22 条都是导出的名字」——**不准**。`dedup.js` 第一版的守卫是
+「**两边**有没有一边导出」，太粗。正确的判据是「**要改的这一边**导没导出」：
+另一边导不导出与这一次改名无关，我们改的是这个文件里的声明与它自己的引用。
+
+按这个判据分开数，22 条里 **12 条只有一边导出**，改**没导出**那一边、
+调用方一处都不用动：
+
+- `frontend-jnc/lower.js`：`isPtr`/`isStruct`/`isEnum`（`frontend-c/ctype.js` 导出它们）
+- `frontend-c/tccgen.js`：`TOK_ARROW`/`utf8Bytes`/`floatBits`（`tcctok.js`/`host/utf8.js`/
+  `arm64/from_mir.js` 导出）
+- `arm64/encode.js`：`chkReg`；`arm64/from_mir.js`：`FCMP`
+- `link/pe.js`：`align`/`HDR_SIZE`；`link/elf_exe.js`：`sectionClass`
+- `interp/builtin.js`：`udiv`
+
+扫完 **22 -> 10**（166 处引用）。剩下的 10 条**两边都导出**：
+`ret`/`nop`/`fcmp`（arm64|x64 的 `encode.js`）、`RELOC`/`CodeBuf`（`asm.js`）、
+`genModule`/`genFunc`/`codeOf`（`from_mir.js`）、`writeObject`（`macho.js`|`elf.js`）、
+`typeText`（`ctype.js`|`mir/ir.js`）—— 共 **37 处 import** 要跟着改，其中有门里的。
+
+> 这一格的教训与「量而不是猜」是同一条：我把「有一边导出」当成了「不能改」，
+> 于是自己给自己少算了 12 条。判据写错一格，剩下的活就凭空多了一半。
+
 每一批改完都跑了对应的门：`arm64/from-mir` 88/0、`arm64/link` 21/0、`x64/from-mir` 90/0、
 `x64/link` 21/0、`elf-merge`/`elf-roundtrip`/`pe-*` 八门全 0 不同、`macho-tcc` 4/0、
 `macho-libc` 180/0、`tcc-link` 83/0、`c/run` 207/0、`run` 133/0、`sexpr` 78/0。

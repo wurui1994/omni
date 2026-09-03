@@ -354,7 +354,7 @@ function cName(name) {
  * @param isLast 是不是节表里最后一条（`.shstrtab` 认这个，`k` 直接按成 0xff）
  * @param isGot 是不是那条 `.got`（它单独一档 0x47，为的是进 PT_GNU_RELRO）
  */
-function sectionClass(s, i, named, bss, hasAllocReloc, isLast, isGot, isInterp, isPltReloc) {
+function eeSectionClass(s, i, named, bss, hasAllocReloc, isLast, isGot, isInterp, isPltReloc) {
   let j;
   if (!named) j = 0x900;
   else if ((s.flags & EE_SHF_ALLOC) !== 0) {
@@ -1276,7 +1276,7 @@ export function elfExeImage(inp) {
       if (secs[r].relaFor === i && (secs[r].flags & EE_SHF_ALLOC) !== 0) hasAllocReloc = true;
     }
     /* `.shstrtab` 是最后一条 —— `sort_sections` 把它的 `k` 直接按成 0xff。 */
-    const k = sectionClass(s, i, named, BSS, hasAllocReloc, i === SHSTR, i === GOT,
+    const k = eeSectionClass(s, i, named, BSS, hasAllocReloc, i === SHSTR, i === GOT,
       i === INTERP, i === RELAPLT);
     let n = ord.length;
     ord.push(i);

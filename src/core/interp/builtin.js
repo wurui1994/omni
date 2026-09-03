@@ -62,7 +62,7 @@ export function U(x) {
   return BigInt.asUintN(64, x);
 }
 
-function udiv(a, b) {
+function biUdiv(a, b) {
   if (b === 0n) rtError('division by zero');
   return W(U(a) / U(b));
 }
@@ -859,7 +859,7 @@ export function binOp(op, kind, a, b) {
       case '<<': return W(a << (b & 63n));
       case '>>': return a >> (b & 63n);
       // 无符号那三个（第六十一刀）
-      case 'u/': return udiv(a, b);
+      case 'u/': return biUdiv(a, b);
       case 'u%': return umod(a, b);
       case 'u>>': return W(U(a) >> (b & 63n));
       case '&': return a & b;

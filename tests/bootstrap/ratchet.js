@@ -30,10 +30,12 @@ const CLI = join(root, 'src', 'core', 'cli.js');
 
 /** 基线：量出来的那两个数。**只许往下调**。
  *
- *   243 -> 22（2026-09-04，`dedup.js` 扫了十一个文件）：剩下这 22 条都是**导出**的名字，
- *   改它们要动调用方，得一处一处看，不在 `dedup.js` 的范围里。
+ *   243 -> 22（`dedup.js` 扫了十一个文件）-> 10（守卫改成「只看要改的这一边导没导出」，
+ *   又扫掉 12 条）。剩下这 10 条**两边都导出**（`ret`/`nop`/`fcmp`、`RELOC`/`CodeBuf`、
+ *   `genModule`/`genFunc`/`codeOf`、`writeObject`、`typeText`），要改导出名 + 改调用方
+ *   （连门里的 import 一起，共 37 处），得一处一处看。
  *   4：`import * as`，四处全是 `from './encode.js'`，改名解决不了（见 ADR-0001 那一节）。 */
-const BASE_DUP = 22;
+const BASE_DUP = 10;
 const BASE_NS = 4;
 
 let pass = 0;

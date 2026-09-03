@@ -345,7 +345,7 @@ const PIPE = 124;
 const CARET = 94;
 const PERCENT = 37;
 const SLASH = 47;
-const TOK_ARROW = 0xa0;
+const GEN_TOK_ARROW = 0xa0;
 
 /** 带值的记号（`TOK_HAS_VALUE`，`tcc.h:1189`）：`TOK_CCHAR <= t <= TOK_LINENUM`。 */
 function tokHasValue(t) {
@@ -395,7 +395,7 @@ function floatRankOf(ty) {
 }
 
 /** 一个 double / float 的 IEEE 754 位模式（小端，与线性内存同一个字节序）。 */
-function floatBits(x, size) {
+function genFloatBits(x, size) {
   /* 16 字节 = x86_64 的 `long double`：x87 的 80 位，后六个字节零填充
    * （第一百一十一片；那十个字节的形状在 f80.js 里，尺子称过）。 */
   if (size === 16) {
@@ -2435,9 +2435,9 @@ export class CGen {  /**
     if (isFloat(ty.t)) {
       /* 静态的浮点初始化式：**在这儿就把它编码成 IEEE 754 的那几个字节**。
        * 整型那一侧写的是数值，这儿写的是位模式 —— 因为 data 段就是字节，
-       * 而「浮点数怎么变成字节」是一张定死的表（`floatBits`），不是一次转换。 */
+       * 而「浮点数怎么变成字节」是一张定死的表（`genFloatBits`），不是一次转换。 */
       const size = typeSize(ty).size;
-      this.emitBytes(dest.addr + off, size, floatBits(this.constFloatExpr(), size));
+      this.emitBytes(dest.addr + off, size, genFloatBits(this.constFloatExpr(), size));
       return;
     }
     this.emitBytes(dest.addr + off, typeSize(ty).size, this.constExpr());
@@ -3361,12 +3361,12 @@ export class CGen {  /**
         cur = sMem(p.ty.ref, this.gv(p), 0);
         continue;
       }
-      if (t === DOT || t === TOK_ARROW) {
+      if (t === DOT || t === GEN_TOK_ARROW) {
         /* `s.f` 与 `p->f` 是**同一段代码**：C11 6.5.2.3 第 4 段说 `p->f` 就是 `(*p).f`，
          * 所以只在开头把箭头那一侧先解引用，剩下的一模一样。 */
         this.next();
         let base = cur;
-        if (t === TOK_ARROW) {
+        if (t === GEN_TOK_ARROW) {
           const p = this.decay(base);
           if (!isPtr(p.ty.t)) {
             this.err(`invalid type argument of '->' ('${typeText(base.ty)}')`);
@@ -7704,7 +7704,7 @@ export class CGen {  /**
  * 就已经是「一个字符一个字节」了，那儿不需要再编码。命令行上的串不一样：它是 node
  * 解码过的 JS 串，要还原成字节才能写进线性内存。
  */
-function utf8Bytes(s) {
+function genUtf8Bytes(s) {
   const out = [];
   for (const ch of s) {
     const c = ch.codePointAt(0);
@@ -7795,7 +7795,7 @@ export function lowerC(path, text, host, defs, args) {
     const ptrs = [];
     for (const s of argvStrs) {
       const at = gen.dataOff;
-      const raw = utf8Bytes(s);
+      const raw = genUtf8Bytes(s);
       raw.push(0);
       gen.pendingData.push({ off: at, bytes: raw });
       gen.dataOff = at + raw.length;

@@ -257,7 +257,7 @@ const isFn = (t) => t.k === 'fnptr';
 
 const isInt = (t) => t.k === 'int';
 const isArr = (t) => t.k === 'arr';
-const isStruct = (t) => t.k === 'struct';
+const jncIsStruct = (t) => t.k === 'struct';
 /**
  * 类（第五十二刀）。**一格类类型就是一条引用** —— jancy 的类"只能经引用到达"
  * （type_class.rst:19），而 `C*` 在它那边不是"再套一层数据指针"：`calcPtrType` 对
@@ -274,7 +274,7 @@ const isStruct = (t) => t.k === 'struct';
 const isClass = (t) => t.k === 'class';
 const tClass = (name, own) => ({ k: 'class', name, own });
 /** 一格枚举（第三十九刀）。`base` 是它的基整数类型，值按那一格的规范形存。 */
-const isEnum = (t) => t.k === 'enum';
+const jncIsEnum = (t) => t.k === 'enum';
 
 /** 报错里显示的名字（第五十一刀）：内部用 `$` 连命名空间，源码里写的是点。 */
 const shown = (n) => n.replace(/\$/g, '.');
@@ -324,7 +324,7 @@ function fmtDefault(t) {
   if (t === J_REAL) return 'f';
   if (t === J_STR) return 's';
   if (t === J_BOOL) return 'd';
-  const b = isEnum(t) ? t.base : t;
+  const b = jncIsEnum(t) ? t.base : t;
   if (isInt(b)) return b.w <= 32 ? (b.u ? 'u' : 'd') : (b.u ? 'llu' : 'lld');
   return null;
 }
@@ -637,17 +637,17 @@ function intConv(v, to) {
   return { code: wrapTo(v.code, to.w, to.u), type: to };
 }
 
-const isPtr = (t) => t.k === 'ptr' || t.k === 'tptr';
+const jncIsPtr = (t) => t.k === 'ptr' || t.k === 'tptr';
 
 /** `.` 的左边落在哪个结构体上。jancy 里 `.` 与 `->` 是同一个算符（第二十五刀，
  *  samples/jnc/84_CurlyInitializers.jnc:66 那句 `point2.m_x` 的 point2 是 `Point*`），
  *  所以结构体那一格与"指到结构体的指针"都算 —— 两者的 code 都是那一段内存的地址。 */
 function structBehind(t) {
-  if (isStruct(t)) return t;
+  if (jncIsStruct(t)) return t;
   // 类那一格里放的**就是**对象那段内存的地址（第五十二刀），与"指到结构体的指针"同一档 ——
   // 所以 `c.m_x` 与 `p.m_x` 落在同一句 `pfield` 上，字段表也是同一张（this.structs）。
   if (isClass(t)) return { k: 'struct', name: t.name };
-  if (isPtr(t) && isStruct(t.target)) return t.target;
+  if (jncIsPtr(t) && jncIsStruct(t.target)) return t.target;
   return null;
 }
 
@@ -1080,7 +1080,7 @@ class JncLower {
    * （长度不一样、或元素是同宽的另一种整数）。
    */
   copyVal(dstCode, srcCode, type, pad, out) {
-    if (isStruct(type)) return this.copyAgg(dstCode, srcCode, type.name, pad, out);
+    if (jncIsStruct(type)) return this.copyAgg(dstCode, srcCode, type.name, pad, out);
     if (isArr(type)) return this.copyArr(dstCode, srcCode, type, pad, out);
     out.push(`${pad}(pstore ${dstCode} (pload ${srcCode}))`);
     return out;
@@ -1150,7 +1150,7 @@ class JncLower {
       const val = named ? it.items[2] : it;
       const sub = steps.concat([m.step]);
       if (isList(val) && head(val) === 'curly') {
-        if (!isStruct(m.type) && !isArr(m.type)) {
+        if (!jncIsStruct(m.type) && !isArr(m.type)) {
           this.err(val, `这一项是一对花括号，而它对着的是 ${tyName(m.type)}`);
           return null;
         }
@@ -1162,7 +1162,7 @@ class JncLower {
       if (code === null) return null;
       count++;
       // 这一项本身是一整格聚合（结构体，或者一整块数组）时它是"抄一份"，所以源头先钉住。
-      if (isStruct(m.type) || isArr(m.type)) {
+      if (jncIsStruct(m.type) || isArr(m.type)) {
         plan.push({ steps: sub, code: this.aggSource(code, slotText(m.type), pad, out), agg: m.type });
         continue;
       }
@@ -1174,7 +1174,7 @@ class JncLower {
 
   /** 游标（或名字）落在哪一格：回一步"怎么走到它"与那一格的类型。 */
   curlyMember(node, type, idx, name) {
-    if (isStruct(type)) {
+    if (jncIsStruct(type)) {
       const fs = this.structs.get(type.name);
       if (fs === undefined) return this.err(node, `内部错误：没有结构体 '${type.name}'`);
       const f = name === null ? fs[idx] : fs.find((x) => x.name === name);
@@ -1240,7 +1240,7 @@ class JncLower {
       if (len < 1) return this.err(n, `'${info.name}[]' 的花括号初值里没有非空项，数不出长度`);
       return tArr(info.type.el, len);
     }
-    if (isStruct(info.type)) return info.type;
+    if (jncIsStruct(info.type)) return info.type;
     return this.nope(n, `${tyName(info.type)} 的花括号初始化（只有数组与结构体是一段能按格子写的内存）`);
   }
 
@@ -1259,7 +1259,7 @@ class JncLower {
    * （第十二刀：那一格名字里放的就是地址，`&s` 不发一个字），所以走这一条的是三种标量
    * 加两种指针 —— `&p` 于是与 `&x` 同一条路：把 p 提到一格 `(pnew (ptr (ptr int)) …)` 上。
    */
-  liftable(t) { return isInt(t) || t === J_REAL || t === J_BOOL || isPtr(t) || isEnum(t) || isClass(t); }
+  liftable(t) { return isInt(t) || t === J_REAL || t === J_BOOL || jncIsPtr(t) || jncIsEnum(t) || isClass(t); }
 
   /**
    * `namespace a { … }` 摊平（第五十一刀）。命名空间在 jancy 那边只是**名字的作用域** ——
@@ -1646,7 +1646,7 @@ class JncLower {
     // 生成的那一格是"一格存储"，所以它落得进内存才行：结构体与数组要抄一份才能读写（那时
     // 合成的取值器不是一句 `ret`）、类**值**在 jancy 那边是内嵌的对象、函数值方言的结构体
     // 字段放不下（见 typeDecl 里字段那三条同样的话）。这几种明说不收。
-    if (isStruct(t) || isArr(t) || isFn(t) || (isClass(t) && t.own === true)) {
+    if (jncIsStruct(t) || isArr(t) || isFn(t) || (isClass(t) && t.own === true)) {
       return this.nope(d, `类型是 ${tyName(t)} 的 autoget 属性 —— 编译器要生成的那一格存储`
         + '得是能一句读完的一格');
     }
@@ -1747,7 +1747,7 @@ class JncLower {
         continue;
       }
       // 结构体的模块级变量：与局部量一样先开一格自己的内存，再（有初值的话）逐字段抄。
-      if (isStruct(info.type)) {
+      if (jncIsStruct(info.type)) {
         const st = slotText(info.type);
         this.globalCells.push(`    (set ${info.name} (pnew ${st} (int 1)))`);
         if (initNode !== null) {
@@ -1900,7 +1900,7 @@ class JncLower {
     const nm = this.qname(ob);
     if (nm === null) return undefined;
     const r = this.lookupRef(nm);
-    if (r === null || !isEnum(r.type)) return undefined;
+    if (r === null || !jncIsEnum(r.type)) return undefined;
     const info = this.enums.get(r.type.name);
     if (info === undefined) return undefined;
     const mn = isAtom(mem) ? mem.value : this.qname(mem);
@@ -1977,7 +1977,7 @@ class JncLower {
       // `m_baseType->getTypeKind() != TypeKind_Enum` 的快速退出（jnc_ct_EnumType.cpp:106-121），
       // 而"到基枚举"是那一族里唯一的**隐式**转换（jnc_ct_CastOp_Int.cpp:307）。这一层没做，
       // 所以这里得说"还不收"而不是"你写错了"（第五十刀改的）。
-      if (isEnum(sp.type)) {
+      if (jncIsEnum(sp.type)) {
         this.nope(bn, `枚举的底类型是另一个枚举（${tyName(sp.type)}）—— 要枚举之间的基类链`);
         return null;
       }
@@ -2898,7 +2898,7 @@ class JncLower {
         }
         // 枚举也进得来（第三十九刀）：它的 `tyText` 就是 `int`，一个字的标量，与 `int`
         // 的元素同一格；不同的只是名字与它带的成员表。
-        if (t.k !== 'int' && t !== J_REAL && t !== J_BOOL && !isStruct(t) && !isEnum(t)) {
+        if (t.k !== 'int' && t !== J_REAL && t !== J_BOOL && !jncIsStruct(t) && !jncIsEnum(t)) {
           return this.nope(s, `${tyName(t)} 的数组 —— 要方言能把多个字的值当元素搬（与 &p 同一格）`);
         }
         const cnt = s.items[1];
@@ -3168,7 +3168,7 @@ class JncLower {
    *  普通那条解引用的路接着走。没声明下标又不是指针的那些照旧报"不是索引属性"。 */
   propSubOnValue(pn) {
     const pi = this.props.get(pn);
-    return pi !== undefined && pi.idx.length === 0 && isPtr(pi.type);
+    return pi !== undefined && pi.idx.length === 0 && jncIsPtr(pi.type);
   }
 
   /** `p[i…]` 的读（第七十刀）：索引属性那几格下标就是取值器的实参。不是属性回 undefined
@@ -3613,7 +3613,7 @@ class JncLower {
       // 先开一格自己的、把它抄进来，之后这个名字一律指那一格。改形参因此不动调用方 ——
       // 与上面"被取地址的标量形参提一份拷贝"是同一个道理，只是抄的东西大一点。
       // 数组形参走同一条路（第二十一刀）：jancy 那边它也是按值的一整块，不是 C 的 `T*`。
-      if (isStruct(p.type) || isArr(p.type)) {
+      if (jncIsStruct(p.type) || isArr(p.type)) {
         const v = `${p.name}$v`;
         const st = slotText(p.type);
         pre.push(`    (let ${v} ${st} (pnew ${st} (int 1)))`);
@@ -4026,7 +4026,7 @@ class JncLower {
       }
       // 结构体（第十二刀）：`S s;` 是一格自己的零内存，`S t = s;` 逐字段抄一份。
       // `&s` 免费 —— 那一格的名字里放的**就是**地址。
-      if (isStruct(info.type)) {
+      if (jncIsStruct(info.type)) {
         let srcCode = null;
         if (initNode !== null) {
           const v = this.expr(initNode, info.type);
@@ -4125,7 +4125,7 @@ class JncLower {
     if (isArr(t) && t.n === null) {
       return this.err(dcl, `'${info.name}[]' 的长度得从花括号初值数出来`);
     }
-    if (isStruct(t) || isArr(t)) {
+    if (jncIsStruct(t) || isArr(t)) {
       const st = slotText(t);
       this.decls.push(`  (global ${dn} ${st})`);
       this.globalCells.push(`    (set ${dn} (pnew ${st} (int 1)))`);
@@ -4159,7 +4159,7 @@ class JncLower {
 
   /** `static` 那一格的初值写进去：标量一句，聚合逐字段/逐格抄（与局部量同一份 copyVal）。 */
   staticInitTo(dcl, dn, t, lift, initNode, pad, out) {
-    if (isStruct(t) || isArr(t)) {
+    if (jncIsStruct(t) || isArr(t)) {
       const v = this.expr(initNode, t);
       if (v === null) return null;
       if (!this.assignOk(v.type, t)) {
@@ -4273,7 +4273,7 @@ class JncLower {
         const f = this.selfField(nm);
         if (f !== null) {
           return {
-            kind: isStruct(f.type) || isArr(f.type) ? 'agg' : 'ptr',
+            kind: jncIsStruct(f.type) || isArr(f.type) ? 'agg' : 'ptr',
             code: `(pfield (var $this) ${f.name})`,
             type: f.type,
           };
@@ -4296,7 +4296,7 @@ class JncLower {
       // 结构体与数组那一格里放的是地址，所以它们是 `agg`：读就是那个地址，写要抄一份
       //（结构体逐字段、数组逐格 —— 第十二刀与第二十一刀，见 copyVal）。
       // 这一条要在 lifted 之前 —— 它们本来就是一段内存，`&s` / `&a` 不用再提一次。
-      if (isStruct(t) || isArr(t)) return { kind: 'agg', code: `(var ${dn})`, type: t };
+      if (jncIsStruct(t) || isArr(t)) return { kind: 'agg', code: `(var ${dn})`, type: t };
       // 提到堆上的那些名字本身就是一格内存，所以它是 `ptr` 而不是 `var` ——
       // 于是读写自动走 pload / pstore，而 `&x` 就是它的 code（见 expr0 的 addr）。
       // 模块级的那一半是第二十四刀：那一格就是全局自己（发成了 `(ptr T)`）。
@@ -4313,16 +4313,16 @@ class JncLower {
     if (h === 'indirect') {
       const p = this.expr(n.items[1], null);
       if (p === null) return null;
-      if (!isPtr(p.type)) return this.err(n, `'*' 要一个指针，这里是 ${tyName(p.type)}`);
+      if (!jncIsPtr(p.type)) return this.err(n, `'*' 要一个指针，这里是 ${tyName(p.type)}`);
       const tt = p.type.target;
-      return { kind: isStruct(tt) || isArr(tt) ? 'agg' : 'ptr', code: p.code, type: tt };
+      return { kind: jncIsStruct(tt) || isArr(tt) ? 'agg' : 'ptr', code: p.code, type: tt };
     }
     // `p[i] = v`。jancy 的下标就是 `*(p + i)`，范围检查在解引用那一步
     // （type_ptr_data.rst：Range is checked on both array accesses and pointer dereferences）
     if (h === 'index') {
       const a = this.expr(n.items[1], null);
       if (a === null) return null;
-      if (!isPtr(a.type)) return this.err(n, `下标要一个指针，这里是 ${tyName(a.type)}`);
+      if (!jncIsPtr(a.type)) return this.err(n, `下标要一个指针，这里是 ${tyName(a.type)}`);
       const i = this.expr(n.items[2], J_I64);
       if (i === null) return null;
       if (!isInt(i.type)) return this.err(n, `下标要整数，这里是 ${tyName(i.type)}`);
@@ -4330,7 +4330,7 @@ class JncLower {
       // 一格里躺的是数组时（多维，第十九刀）那一格**就是地址** —— 与结构体同一档：
       // 读它不发 pload（那一块不是一个值），退化那一步由 decay 的 `(pelem …)` 做。
       return {
-        kind: isStruct(tt) || isArr(tt) ? 'agg' : 'ptr',
+        kind: jncIsStruct(tt) || isArr(tt) ? 'agg' : 'ptr',
         code: `(padd ${a.code} ${i.code})`,
         type: tt,
       };
@@ -4376,7 +4376,7 @@ class JncLower {
       // 枚举走到这儿说明左边不是**一个名字**（那一条在 expr0 的 field 支上，enumValueMember）。
       // jancy 那边 `pick().A` 是合法的：`getEnumTypeMember` 只要一格值。这一层还不收 ——
       // 收它要先求一次值再决定发 `&` 还是 `==`，而这一族里"先求值"的形状要一格临时量。
-      if (st === null && isEnum(bt)) {
+      if (st === null && jncIsEnum(bt)) {
         return this.nope(n, `从一个要先求值的东西上问 ${tyName(bt)} 的成员（只收左边是一个名字的）`);
       }
       if (st === null) return this.err(n, `'.' 的左边不是结构体：${tyName(bt)}`);
@@ -4388,8 +4388,8 @@ class JncLower {
   fieldLv(n, ptrNode, memNode) {
     const p = this.expr(ptrNode, null);
     if (p === null) return null;
-    if (!isPtr(p.type)) return this.err(n, `'->' 要一个指针，这里是 ${tyName(p.type)}`);
-    if (!isStruct(p.type.target)) return this.err(n, `'->' 的目标不是结构体：${tyName(p.type.target)}`);
+    if (!jncIsPtr(p.type)) return this.err(n, `'->' 要一个指针，这里是 ${tyName(p.type)}`);
+    if (!jncIsStruct(p.type.target)) return this.err(n, `'->' 的目标不是结构体：${tyName(p.type.target)}`);
     return this.memberOf(n, p.code, p.type.target.name, memNode);
   }
 
@@ -4409,7 +4409,7 @@ class JncLower {
       return this.err(n, `${structName} 没有字段 '${nm}'`);
     }
     return {
-      kind: isStruct(f.type) || isArr(f.type) ? 'agg' : 'ptr',
+      kind: jncIsStruct(f.type) || isArr(f.type) ? 'agg' : 'ptr',
       code: `(pfield ${baseCode} ${nm})`,
       type: f.type,
     };
@@ -4527,7 +4527,7 @@ class JncLower {
         return null;
       }
       // 指针上的 `p += i` 是**指针算术**，不是加法（type_ptr_data.rst 那段就是它）
-      if (isPtr(lv.type)) {
+      if (jncIsPtr(lv.type)) {
         if (bin !== '+' && bin !== '-') { this.nope(n, `指针上的 '${op}'`); return null; }
         if (!isInt(v.type)) { this.err(n, `指针上的 '${op}' 右边要整数，这里是 ${tyName(v.type)}`); return null; }
         const d = bin === '+' ? v.code : `(un "-" ${v.code})`;
@@ -4538,8 +4538,8 @@ class JncLower {
       // 同型 bitflag 枚举时结果就是那个枚举（jnc_ct_BinOp_Arithmetic.cpp:356-388），
       // 于是回赋进 lv 不用再转一次。语料与文档里的写法就是 `flags &= ~OpenFlags.Exclusive`
       //（type_enum.rst:87）。值照基整数算，`& | ^` 在规范形上不出范围，所以不回卷。
-      if ((bin === '&' || bin === '|' || bin === '^') && isEnum(lv.type) && lv.type.bits === true) {
-        const vt = isEnum(v.type) ? v.type : null;
+      if ((bin === '&' || bin === '|' || bin === '^') && jncIsEnum(lv.type) && lv.type.bits === true) {
+        const vt = jncIsEnum(v.type) ? v.type : null;
         const ok = bin === '&'
           ? (vt === null ? isInt(v.type) : sameTy(vt, lv.type))
           : (vt !== null && sameTy(vt, lv.type));
@@ -4584,7 +4584,7 @@ class JncLower {
       const lv = this.lvalue(n.items[1]);
       if (lv === null) return null;
       const up = h === 'pre-inc' || h === 'post-inc';
-      if (isPtr(lv.type)) {
+      if (jncIsPtr(lv.type)) {
         return [`${pad}${this.store(lv, `(padd ${this.read(lv)} (int ${up ? '1' : '-1'}))`)}`];
       }
       if (isInt(lv.type)) {
@@ -4844,7 +4844,7 @@ class JncLower {
       if (ai >= vals.length) { this.err(n, 'printf 的实参比格式串里的转换少'); return null; }
       // 枚举在这儿就落到基整数上（第三十九刀）：printf 是变参，jancy 那边这一次转换也是隐式的，
       // 于是 `%d` / `%u` / `%x` 那几条一个字都不用改。
-      const v = isEnum(vals[ai].type) ? { code: vals[ai].code, type: vals[ai].type.base } : vals[ai];
+      const v = jncIsEnum(vals[ai].type) ? { code: vals[ai].code, type: vals[ai].type.base } : vals[ai];
       // 这条转换对应的**实参节点**（诊断要指着它）。
       const argNode = nodes[ai];
       ai++;
@@ -5094,7 +5094,7 @@ class JncLower {
       if (d === null) {
         // char* / char[] 在 jancy 那边**是**印得出来的（appendFmtLiteral_p 按 NUL 读一段
         // 内存，CoreLib.cpp:790-810）；这一层的 `%s` 只认 string，所以那一格另有出处。
-        this.nope(node, isPtr(v.type)
+        this.nope(node, jncIsPtr(v.type)
           ? `格式化字面量里的 ${tyName(v.type)}（jancy 走 appendFmtLiteral_p 按 NUL 读一段内存，`
             + '这一层的 %s 只认 string）'
           : `格式化字面量里印不出 ${tyName(v.type)}（jancy 那边这也是一句 `
@@ -5109,7 +5109,7 @@ class JncLower {
         return;
       }
       cfmt += fmtMergeSpec(spec, d);
-      vals.push(isEnum(v.type) ? { code: v.code, type: v.type.base } : v);
+      vals.push(jncIsEnum(v.type) ? { code: v.code, type: v.type.base } : v);
       nodes.push(nd);
     };
     // `$(…)` / `$id` 里那一段源码 -> 一格值。位置按原文算，所以里头报错指的是真地方。
@@ -5349,7 +5349,7 @@ class JncLower {
     if (v.type === J_BOOL) return v;
     if (isInt(v.type)) return { code: `(bin "!=" ${v.code} (int 0))`, type: J_BOOL };
     if (v.type === J_REAL) return { code: `(bin "!=" ${v.code} (real 0.0))`, type: J_BOOL };
-    if (isPtr(v.type)) return { code: `(un "!" (pisnull ${v.code}))`, type: J_BOOL };
+    if (jncIsPtr(v.type)) return { code: `(un "!" (pisnull ${v.code}))`, type: J_BOOL };
     // 类引用当条件用（第五十二刀）：`Cast_Bool` 对 `TypeKind_ClassPtr` 走的也是"跟零比"
     // （jnc_ct_CastOp_Bool.cpp 那张表里 ClassPtr 与 DataPtr 同一支），而类指针的有效性
     // 就是一次空检查（type_ptr_class.rst）—— 所以与指针同一句 pisnull。
@@ -5359,7 +5359,7 @@ class JncLower {
     // 与整数同一条"跟 0 比"。逼出这一条的是 `if (flags & OpenFlags.ReadOnly)`：
     // bitflag 的 `&` 结果是那个枚举，直接就落在条件位置上。普通枚举也一样收 —— 它在
     // jancy 那边就是同一个 case。
-    if (isEnum(v.type)) return { code: `(bin "!=" ${v.code} (int 0))`, type: J_BOOL };
+    if (jncIsEnum(v.type)) return { code: `(bin "!=" ${v.code} (int 0))`, type: J_BOOL };
     return this.err(node, `${tyName(v.type)} 不能当条件用`);
   }
 
@@ -5475,7 +5475,7 @@ class JncLower {
     const v = this.expr(conds[0]);
     if (v === null) return null;
     // 枚举当条件：落到基整数上（第三十九刀）。case 的标签那一边同理，见 constInt。
-    const cv = isEnum(v.type) ? { code: v.code, type: v.type.base } : v;
+    const cv = jncIsEnum(v.type) ? { code: v.code, type: v.type.base } : v;
     if (!isInt(cv.type)) {
       this.err(n, `switch 的条件要整数，这里是 ${tyName(v.type)}`);
       return null;
@@ -5871,7 +5871,7 @@ class JncLower {
     // 枚举 -> 整数是**隐式**的（第三十九刀）：getArithmeticOperatorResultType 见到
     // TypeKind_Enum 会递归到基类型（jnc_ct_UnOp_Arithmetic.cpp:39）。反过来要**显式**
     //（type_enum.rst:60 那句 "cast int->enum must be explicit"），所以这儿只有一个方向。
-    if (want !== undefined && want !== null && isInt(want) && isEnum(v.type)) {
+    if (want !== undefined && want !== null && isInt(want) && jncIsEnum(v.type)) {
       return intConv({ code: v.code, type: v.type.base }, want);
     }
     // **0 可以隐式赋进 bitflag 枚举**（第四十七刀）。jancy 那边这一条写在 int -> enum 的
@@ -5879,7 +5879,7 @@ class JncLower {
     // `CastKind_Implicit`（jnc_ct_CastOp_Int.cpp:306-311）。注意它问的是 `opValue.isZero()`
     // —— **编译期常量零**，不是"运行期恰好是 0"。所以这儿也只认常量：`flags = 0` 收，
     // `flags = x` 不收（哪怕 x 这一趟正好是 0）。别的整数值还是要显式强制转换。
-    if (want !== undefined && want !== null && isEnum(want) && want.bits === true && isInt(v.type)) {
+    if (want !== undefined && want !== null && jncIsEnum(want) && want.bits === true && isInt(v.type)) {
       const k = this.constInt(n);
       if (k === 0n) return { code: '(int 0)', type: want };
     }
@@ -5952,7 +5952,7 @@ class JncLower {
         if (want !== null && want !== undefined && isClass(want)) {
           return { code: `(pnull (ptr ${clsRoot(want.name)}))`, type: want };
         }
-        if (want === null || want === undefined || !isPtr(want)) {
+        if (want === null || want === undefined || !jncIsPtr(want)) {
           return this.err(n, 'null 得从左边知道自己是哪种指针（这里问不出来）');
         }
         return { code: `(pnull ${tyText(want)})`, type: want };
@@ -5978,7 +5978,7 @@ class JncLower {
         const dn = r.dname === nm ? this.dialectName(nm) : r.dname;
         // 结构体那一格里放的就是地址（第十二刀），所以它不走 lifted 那条路。
         // 数组同理（第二十刀）：那一格里放的是**一整块**的地址，`&a` 就是它自己。
-        if (isStruct(r.type) || isArr(r.type)) {
+        if (jncIsStruct(r.type) || isArr(r.type)) {
           return { code: `(var ${dn})`, type: r.type };
         }
         // 提到堆上的那些名字要 pload 一次（第九刀）。模块级的那一半是第二十四刀，
@@ -6194,7 +6194,7 @@ class JncLower {
     } else {
       a = this.expr(n.items[2], null);
       if (a === null) return null;
-      b = rhs((isPtr(a.type) || isClass(a.type)) && rNull ? a.type : null);
+      b = rhs((jncIsPtr(a.type) || isClass(a.type)) && rNull ? a.type : null);
     }
     if (a === null || b === null) return null;
     // `&&` / `||` 两边各自真值化（jancy 与 C 同：`p && n` 是合法的）。方言的
@@ -6219,31 +6219,31 @@ class JncLower {
       } else t = `(peq ${a.code} ${b.code})`;
       return { code: op === '==' ? t : `(un "!" ${t})`, type: J_BOOL };
     }
-    if (isPtr(a.type) || isPtr(b.type)) {
+    if (jncIsPtr(a.type) || jncIsPtr(b.type)) {
       if (op === '==' || op === '!=') {
         // 跟 null 比走 `pisnull`（一条指令），两个指针互比走方言新长出来的 `peq`。
         // 两条都是**有定义**的：arena 偏移与真地址都是标量，比相等在两套实现下一致。
         let t = null;
         if (lNull !== rNull) t = `(pisnull ${lNull ? b.code : a.code})`;
-        else if (!isPtr(a.type) || !isPtr(b.type)) {
-          return this.err(n, `'${op}' 一边是指针一边是 ${tyName(isPtr(a.type) ? b.type : a.type)}`);
+        else if (!jncIsPtr(a.type) || !jncIsPtr(b.type)) {
+          return this.err(n, `'${op}' 一边是指针一边是 ${tyName(jncIsPtr(a.type) ? b.type : a.type)}`);
         } else if (!sameTy(a.type, b.type)) {
           return this.err(n, `'${op}' 两个指针不同型：左是 ${tyName(a.type)}，右是 ${tyName(b.type)}`);
         } else t = `(peq ${a.code} ${b.code})`;
         return { code: op === '==' ? t : `(un "!" ${t})`, type: J_BOOL };
       }
-      if (op === '-' && isPtr(a.type) && isPtr(b.type)) {
+      if (op === '-' && jncIsPtr(a.type) && jncIsPtr(b.type)) {
         if (!sameTy(a.type, b.type)) {
           return this.err(n, `指针差要同型：左是 ${tyName(a.type)}，右是 ${tyName(b.type)}`);
         }
         return { code: `(psub ${a.code} ${b.code})`, type: J_I64 };
       }
-      if ((op === '+' || op === '-') && isPtr(a.type) && isInt(b.type)) {
+      if ((op === '+' || op === '-') && jncIsPtr(a.type) && isInt(b.type)) {
         const d = op === '+' ? b.code : `(un "-" ${b.code})`;
         return { code: `(padd ${a.code} ${d})`, type: a.type };
       }
       // `i + p` 也成立（C 的规矩），但 `i - p` 不成立
-      if (op === '+' && isInt(a.type) && isPtr(b.type)) {
+      if (op === '+' && isInt(a.type) && jncIsPtr(b.type)) {
         return { code: `(padd ${b.code} ${a.code})`, type: b.type };
       }
       // 指针比大小（第四十六刀）。jancy 那边它就是"两个指针都转成 intptr 再比"
@@ -6258,7 +6258,7 @@ class JncLower {
       //   - 跨块：psub 当场报运行期错 —— C 那边这是未定义行为（C99 6.5.8p5），
       //     我们把它变成一句能看见的错，比 UB 强。
       if ((op === '<' || op === '<=' || op === '>' || op === '>=')
-        && isPtr(a.type) && isPtr(b.type)) {
+        && jncIsPtr(a.type) && jncIsPtr(b.type)) {
         if (!sameTy(a.type, b.type)) {
           return this.err(n, `指针比大小要同型：左是 ${tyName(a.type)}，右是 ${tyName(b.type)}`);
         }
@@ -6274,16 +6274,16 @@ class JncLower {
     //     （`getBitFlagEnumBwOrXorResultType`；不同型就回 NULL，于是落回整数那条路）。
     // 值本身照基整数算：两边都是规范形，`& | ^` 在规范形上不会出范围，所以不用回卷。
     if (op === '&' || op === '|' || op === '^') {
-      const ba = isEnum(a.type) && a.type.bits === true;
-      const bb = isEnum(b.type) && b.type.bits === true;
+      const ba = jncIsEnum(a.type) && a.type.bits === true;
+      const bb = jncIsEnum(b.type) && b.type.bits === true;
       let et = null;
       if (op === '&') et = ba ? a.type : (bb ? b.type : null);
       else if (ba && bb && sameTy(a.type, b.type)) et = a.type;
       if (et !== null) {
-        const x = intConv({ code: a.code, type: isEnum(a.type) ? a.type.base : a.type }, et.base);
-        const y = intConv({ code: b.code, type: isEnum(b.type) ? b.type.base : b.type }, et.base);
+        const x = intConv({ code: a.code, type: jncIsEnum(a.type) ? a.type.base : a.type }, et.base);
+        const y = intConv({ code: b.code, type: jncIsEnum(b.type) ? b.type.base : b.type }, et.base);
         if (!isInt(x.type) || !isInt(y.type)) {
-          return this.err(n, `'${op}' 的另一边要整数，这里是 ${tyName(isInt(a.type) || isEnum(a.type) ? b.type : a.type)}`);
+          return this.err(n, `'${op}' 的另一边要整数，这里是 ${tyName(isInt(a.type) || jncIsEnum(a.type) ? b.type : a.type)}`);
         }
         return { code: `(bin "${op}" ${x.code} ${y.code})`, type: et };
       }
@@ -6291,12 +6291,12 @@ class JncLower {
     const cmp = op === '==' || op === '!=' || op === '<' || op === '<=' || op === '>' || op === '>=';
     // 两个同型枚举比大小 / 相等：在基整数那一格上比（第三十九刀）。两边都是规范形，直接比就对。
     // 不同型的两个枚举、或枚举与整数混算，都先落到基整数上 —— 枚举 -> 整数是隐式的。
-    if (isEnum(a.type) || isEnum(b.type)) {
-      if (isEnum(a.type) && isEnum(b.type) && sameTy(a.type, b.type) && cmp) {
+    if (jncIsEnum(a.type) || jncIsEnum(b.type)) {
+      if (jncIsEnum(a.type) && jncIsEnum(b.type) && sameTy(a.type, b.type) && cmp) {
         return { code: `(bin "${op}" ${a.code} ${b.code})`, type: J_BOOL };
       }
-      if (isEnum(a.type)) a = { code: a.code, type: a.type.base };
-      if (isEnum(b.type)) b = { code: b.code, type: b.type.base };
+      if (jncIsEnum(a.type)) a = { code: a.code, type: a.type.base };
+      if (jncIsEnum(b.type)) b = { code: b.code, type: b.type.base };
     }
     // bool 参与整数运算（第三十七刀）。jancy 的提升表里 Bool1 与 Bool8 都落到 Int32
     //（jnc_ct_UnOp_Arithmetic.cpp:23 那张表的头两行），所以 `(a > 0) + 1` 是 int 上的加法。
@@ -6350,7 +6350,7 @@ class JncLower {
     // 已经这么做了，一元这一侧漏了。逼出它的是 `flags &= ~OpenFlags.Exclusive`
     //（type_enum.rst:87）：`~` 的操作数是个枚举成员。`!` 不走这儿（它要的是 bool，
     // truthy 那一处管）。
-    const a = isEnum(a0.type) && op !== '!' ? { code: a0.code, type: a0.type.base } : a0;
+    const a = jncIsEnum(a0.type) && op !== '!' ? { code: a0.code, type: a0.type.base } : a0;
     if (op === '+') {
       // 一元加是恒等，但**带整型提升**（`char c; +c` 是 int）。提升在规范形里不发一个字。
       if (isInt(a.type)) return { code: a.code, type: arith(a.type) };
@@ -6767,7 +6767,7 @@ class JncLower {
     // （`initializeObject` 之后才 `parseCurlyInitializer`）。构造第五十三刀收了，可"构造完
     // 再逐格写"要把 curlyEmit 那一套接到抬出来的那个函数里去 —— 那是另一格，先明说不收。
     if (isClass(t)) return this.nope(n, `new ${tyName(t)} { … }（花括号初值要接在构造之后）`);
-    if (!isStruct(t) && !isArr(t)) {
+    if (!jncIsStruct(t) && !isArr(t)) {
       return this.err(n, `new ${tyName(t)} { … }：花括号初值要一格聚合`);
     }
     if (isArr(t) && t.n === null) return this.err(n, `new ${tyName(t)} { … } 的长度得写出来`);
@@ -6888,9 +6888,9 @@ class JncLower {
     // （`getRootType()`，:323），再原样拷过去（StdCast_Int + StdCast_Copy，:330-332）。
     // 第一个算子是 `StdCast_Int`，也就是 `Cast_Int` —— 它的源不止整数，实数与 bool
     // 都收，所以 `(Color)3.9` 与 `(Color)true` 照 jancy 也是能写的。
-    if (isEnum(to)) {
+    if (jncIsEnum(to)) {
       let src = v;
-      if (isEnum(src.type)) src = { code: src.code, type: src.type.base };
+      if (jncIsEnum(src.type)) src = { code: src.code, type: src.type.base };
       else if (src.type === J_BOOL) src = { code: `(sel ${src.code} (int 1) (int 0))`, type: J_I64 };
       else if (src.type === J_REAL) src = { code: `(toint ${src.code})`, type: J_I64 };
       if (isInt(src.type)) {

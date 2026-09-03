@@ -39,7 +39,7 @@ const OPTHDR_OFF = FILEHDR_OFF + FILEHDR_SIZE;
 const OPTHDR_SIZE = 0xf0;
 /** PE32 的可选头：多一格 `BaseOfData`，可四个 `ADDR3264` 各短 4 字节 —— 净短 16。 */
 const OPTHDR32_SIZE = 0xe0;
-const HDR_SIZE = OPTHDR_OFF + OPTHDR_SIZE;    // 392
+const PE_HDR_SIZE = OPTHDR_OFF + OPTHDR_SIZE;    // 392
 const HDR32_SIZE = OPTHDR_OFF + OPTHDR32_SIZE; // 376
 const SECHDR_SIZE = 40;
 const NDIRS = 16;
@@ -79,7 +79,7 @@ const STUB = [
   0x6d, 0x6f, 0x64, 0x65, 0x2e, 0x0d, 0x0d, 0x0a, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
-function align(n, to) {
+function peAlign(n, to) {
   return n % to === 0 ? n : n + (to - (n % to));
 }
 
@@ -131,7 +131,7 @@ export function readImage(bytes) {
     throw new OmniError('pe: 带 COFF 符号表（-g 出来的），这一片不认');
   }
   const optSize = c32 ? OPTHDR32_SIZE : OPTHDR_SIZE;
-  const hdrSize = c32 ? HDR32_SIZE : HDR_SIZE;
+  const hdrSize = c32 ? HDR32_SIZE : PE_HDR_SIZE;
   if (dv.getUint16(FILEHDR_OFF + 16, true) !== optSize) {
     throw new OmniError(`pe: 可选头不是 0x${optSize.toString(16)} 字节`);
   }
@@ -196,11 +196,11 @@ export function writeImage(img) {
   if (cpu === undefined) throw new OmniError(`pe: 不认识的机器号 0x${img.machine.toString(16)}`);
   const c32 = cpu.ptr === 4;
   const optSize = c32 ? OPTHDR32_SIZE : OPTHDR_SIZE;
-  const hdrSize = c32 ? HDR32_SIZE : HDR_SIZE;
+  const hdrSize = c32 ? HDR32_SIZE : PE_HDR_SIZE;
   const nsec = img.secs.length;
   const secAlign = img.sectionAlign;
   const filAlign = img.fileAlign;
-  const headers = align(hdrSize + nsec * SECHDR_SIZE, filAlign);
+  const headers = peAlign(hdrSize + nsec * SECHDR_SIZE, filAlign);
 
   /* 先把每节在文件里的位置算出来 —— 没数据的节（`.bss`）不占文件，两格都留 0。 */
   const place = [];
@@ -217,13 +217,13 @@ export function writeImage(img) {
     const code = (s.chars & SCN_CNT_CODE) !== 0;
     if (code && baseOfCode === 0) baseOfCode = s.vaddr;
     if (s.data === true && baseOfData === 0) baseOfData = s.vaddr;
-    sizeOfImage = Math.max(sizeOfImage, align(s.vaddr + s.vsize, secAlign));
+    sizeOfImage = Math.max(sizeOfImage, peAlign(s.vaddr + s.vsize, secAlign));
     if (s.bytes.length === 0) {
       place.push({ ptr: 0, size: 0 });
       continue;
     }
     const ptr = at;
-    at = align(at + s.bytes.length, filAlign);
+    at = peAlign(at + s.bytes.length, filAlign);
     const size = at - ptr;
     place.push({ ptr, size });
     if (code) sizeOfCode += size;

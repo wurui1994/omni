@@ -32,7 +32,7 @@ function u32(x) {
   return x >>> 0;
 }
 
-function chkReg(r) {
+function arm64ChkReg(r) {
   if (!Number.isInteger(r) || r < 0 || r > 31) bad(`寄存器号 ${r} 不在 0-31`);
   return r;
 }
@@ -69,7 +69,7 @@ export function condNo(name) {
 function addSubImm(sf, op, S, sh, imm12, rn, rd) {
   return u32(sf * 2 ** 31 + op * 2 ** 30 + S * 2 ** 29 + 0x11 * 2 ** 24
     + sh * 2 ** 22 + chkU(imm12, 12, 'imm12') * 2 ** 10
-    + chkReg(rn) * 2 ** 5 + chkReg(rd));
+    + arm64ChkReg(rn) * 2 ** 5 + arm64ChkReg(rd));
 }
 
 export const addImm = (sf, rd, rn, imm12, sh = 0) => addSubImm(sf, 0, 0, sh, imm12, rn, rd);
@@ -90,7 +90,7 @@ export const movSp = (sf, rd, rn) => addImm(sf, rd, rn, 0);
 function movWide(sf, opc, hw, imm16, rd) {
   if (sf === 0 && hw > 1) bad(`movz/movk 的 w 系只有 hw=0/1，给了 ${hw}`);
   return u32(sf * 2 ** 31 + opc * 2 ** 29 + 0x25 * 2 ** 23 + chkU(hw, 2, 'hw') * 2 ** 21
-    + chkU(imm16, 16, 'imm16') * 2 ** 5 + chkReg(rd));
+    + chkU(imm16, 16, 'imm16') * 2 ** 5 + arm64ChkReg(rd));
 }
 
 export const movz = (sf, rd, imm16, hw = 0) => movWide(sf, 2, hw, imm16, rd);
@@ -103,8 +103,8 @@ export const movn = (sf, rd, imm16, hw = 0) => movWide(sf, 0, hw, imm16, rd);
  * shift: 00 lsl, 01 lsr, 10 asr。 */
 function addSubReg(sf, op, S, shift, rm, imm6, rn, rd) {
   return u32(sf * 2 ** 31 + op * 2 ** 30 + S * 2 ** 29 + 0x0b * 2 ** 24
-    + shift * 2 ** 22 + chkReg(rm) * 2 ** 16 + chkU(imm6, 6, 'imm6') * 2 ** 10
-    + chkReg(rn) * 2 ** 5 + chkReg(rd));
+    + shift * 2 ** 22 + arm64ChkReg(rm) * 2 ** 16 + chkU(imm6, 6, 'imm6') * 2 ** 10
+    + arm64ChkReg(rn) * 2 ** 5 + arm64ChkReg(rd));
 }
 
 export const addReg = (sf, rd, rn, rm, shift = 0, amt = 0) =>
@@ -124,8 +124,8 @@ export const neg = (sf, rd, rm) => subReg(sf, rd, 31, rm);
  * opc: 00 and, 01 orr, 10 eor, 11 ands；N=1 时是 bic/orn/eon/bics。 */
 function logicReg(sf, opc, N, shift, rm, imm6, rn, rd) {
   return u32(sf * 2 ** 31 + opc * 2 ** 29 + 0x0a * 2 ** 24 + shift * 2 ** 22 + N * 2 ** 21
-    + chkReg(rm) * 2 ** 16 + chkU(imm6, 6, 'imm6') * 2 ** 10
-    + chkReg(rn) * 2 ** 5 + chkReg(rd));
+    + arm64ChkReg(rm) * 2 ** 16 + chkU(imm6, 6, 'imm6') * 2 ** 10
+    + arm64ChkReg(rn) * 2 ** 5 + arm64ChkReg(rd));
 }
 
 export const andReg = (sf, rd, rn, rm, shift = 0, amt = 0) =>
@@ -148,18 +148,18 @@ export const mvn = (sf, rd, rm) => logicReg(sf, 1, 1, 0, rm, 0, 31, rd);
 /* ---------------------------------------------------------------- 乘除与变位
  * C4.1.5 Data-processing (3 source)：sf 00 11011 000 Rm o0 Ra Rn Rd */
 export const madd = (sf, rd, rn, rm, ra) =>
-  u32(sf * 2 ** 31 + 0x1b * 2 ** 24 + chkReg(rm) * 2 ** 16 + chkReg(ra) * 2 ** 10
-    + chkReg(rn) * 2 ** 5 + chkReg(rd));
+  u32(sf * 2 ** 31 + 0x1b * 2 ** 24 + arm64ChkReg(rm) * 2 ** 16 + arm64ChkReg(ra) * 2 ** 10
+    + arm64ChkReg(rn) * 2 ** 5 + arm64ChkReg(rd));
 export const msub = (sf, rd, rn, rm, ra) =>
-  u32(sf * 2 ** 31 + 0x1b * 2 ** 24 + chkReg(rm) * 2 ** 16 + 2 ** 15 + chkReg(ra) * 2 ** 10
-    + chkReg(rn) * 2 ** 5 + chkReg(rd));
+  u32(sf * 2 ** 31 + 0x1b * 2 ** 24 + arm64ChkReg(rm) * 2 ** 16 + 2 ** 15 + arm64ChkReg(ra) * 2 ** 10
+    + arm64ChkReg(rn) * 2 ** 5 + arm64ChkReg(rd));
 /** `mul Rd, Rn, Rm` = `madd Rd, Rn, Rm, xzr`。 */
 export const mul = (sf, rd, rn, rm) => madd(sf, rd, rn, rm, 31);
 
 /* C4.1.5 Data-processing (2 source)：sf 0 0 1 1 0 1 0 1 1 0 Rm opcode Rn Rd */
 function dp2(sf, opcode, rm, rn, rd) {
-  return u32(sf * 2 ** 31 + 0xd6 * 2 ** 21 + chkReg(rm) * 2 ** 16
-    + chkU(opcode, 6, 'opcode') * 2 ** 10 + chkReg(rn) * 2 ** 5 + chkReg(rd));
+  return u32(sf * 2 ** 31 + 0xd6 * 2 ** 21 + arm64ChkReg(rm) * 2 ** 16
+    + chkU(opcode, 6, 'opcode') * 2 ** 10 + arm64ChkReg(rn) * 2 ** 5 + arm64ChkReg(rd));
 }
 
 export const udiv = (sf, rd, rn, rm) => dp2(sf, 0x02, rm, rn, rd);
@@ -171,8 +171,8 @@ export const asrv = (sf, rd, rn, rm) => dp2(sf, 0x0a, rm, rn, rd);
 /* ---------------------------------------------------------------- 条件选择
  * C4.1.5 Conditional select：sf op 0 1 1 0 1 0 1 0 0 Rm cond op2 Rn Rd */
 function csel4(sf, op, op2, rm, cond, rn, rd) {
-  return u32(sf * 2 ** 31 + op * 2 ** 30 + 0xd4 * 2 ** 21 + chkReg(rm) * 2 ** 16
-    + chkU(cond, 4, 'cond') * 2 ** 12 + op2 * 2 ** 10 + chkReg(rn) * 2 ** 5 + chkReg(rd));
+  return u32(sf * 2 ** 31 + op * 2 ** 30 + 0xd4 * 2 ** 21 + arm64ChkReg(rm) * 2 ** 16
+    + chkU(cond, 4, 'cond') * 2 ** 12 + op2 * 2 ** 10 + arm64ChkReg(rn) * 2 ** 5 + arm64ChkReg(rd));
 }
 
 export const csel = (sf, rd, rn, rm, cond) => csel4(sf, 0, 0, rm, cond, rn, rd);
@@ -188,7 +188,7 @@ function pcRel(op, imm21, rd) {
   const v = chkS(imm21, 21, 'imm21');
   const lo = v % 4;
   const hi = (v - lo) / 4;
-  return u32(op * 2 ** 31 + lo * 2 ** 29 + 0x10 * 2 ** 24 + hi * 2 ** 5 + chkReg(rd));
+  return u32(op * 2 ** 31 + lo * 2 ** 29 + 0x10 * 2 ** 24 + hi * 2 ** 5 + arm64ChkReg(rd));
 }
 
 export const adr = (rd, off) => pcRel(0, off, rd);
@@ -202,7 +202,7 @@ export const adrp = (rd, pages) => pcRel(1, pages, rd);
  * opc: 00 = str, 01 = ldr（零扩展），10 = ldrs 到 64 位，11 = ldrs 到 32 位。 */
 function ldstUimm(size, opc, imm12, rn, rt) {
   return u32(size * 2 ** 30 + 0x39 * 2 ** 24 + opc * 2 ** 22
-    + chkU(imm12, 12, 'imm12') * 2 ** 10 + chkReg(rn) * 2 ** 5 + chkReg(rt));
+    + chkU(imm12, 12, 'imm12') * 2 ** 10 + arm64ChkReg(rn) * 2 ** 5 + arm64ChkReg(rt));
 }
 
 function scaled(off, size) {
@@ -224,7 +224,7 @@ export const ldrsU = (size, rt, rn, off, to64 = true) =>
  * 帧的开合（`stp`/`ldp` 之外）与 `str x, [sp, #-16]!` 靠这一族。 */
 function ldstImm9(size, opc, imm9, idx, rn, rt) {
   return u32(size * 2 ** 30 + 0x38 * 2 ** 24 + opc * 2 ** 22
-    + chkS(imm9, 9, 'imm9') * 2 ** 12 + idx * 2 ** 10 + chkReg(rn) * 2 ** 5 + chkReg(rt));
+    + chkS(imm9, 9, 'imm9') * 2 ** 12 + idx * 2 ** 10 + arm64ChkReg(rn) * 2 ** 5 + arm64ChkReg(rt));
 }
 
 export const strPre = (size, rt, rn, off) => ldstImm9(size, 0, off, 3, rn, rt);
@@ -240,8 +240,8 @@ export const ldur = (size, rt, rn, off) => ldstImm9(size, 1, off, 0, rn, rt);
  * option: 011 = lsl（Rm 当 64 位用），010 = uxtw，110 = sxtw，111 = sxtx。 */
 function ldstReg(size, opc, rm, option, S, rn, rt) {
   return u32(size * 2 ** 30 + 0x38 * 2 ** 24 + opc * 2 ** 22 + 2 ** 21
-    + chkReg(rm) * 2 ** 16 + option * 2 ** 13 + S * 2 ** 12 + 2 ** 11
-    + chkReg(rn) * 2 ** 5 + chkReg(rt));
+    + arm64ChkReg(rm) * 2 ** 16 + option * 2 ** 13 + S * 2 ** 12 + 2 ** 11
+    + arm64ChkReg(rn) * 2 ** 5 + arm64ChkReg(rt));
 }
 
 export const strRegOff = (size, rt, rn, rm, option = 3, S = 0) =>
@@ -254,8 +254,8 @@ export const ldrRegOff = (size, rt, rn, rm, option = 3, S = 0) =>
  * imm7 是**按宽度缩放**的 7 位有符号。 */
 function ldstPair(opc, idx, L, imm7, rt2, rn, rt) {
   return u32(opc * 2 ** 30 + 0x14 * 2 ** 25 + idx * 2 ** 23 + L * 2 ** 22
-    + chkS(imm7, 7, 'imm7') * 2 ** 15 + chkReg(rt2) * 2 ** 10
-    + chkReg(rn) * 2 ** 5 + chkReg(rt));
+    + chkS(imm7, 7, 'imm7') * 2 ** 15 + arm64ChkReg(rt2) * 2 ** 10
+    + arm64ChkReg(rn) * 2 ** 5 + arm64ChkReg(rt));
 }
 
 /** `sf` 为真是 x 系（缩放 8），假是 w 系（缩放 4）。 */
@@ -291,7 +291,7 @@ export function bcond(cond, off) {
 function cmpBranch(sf, op, off, rt) {
   if (off % 4 !== 0) bad(`cbz/cbnz 偏移 ${off} 不是 4 的倍数`);
   return u32(sf * 2 ** 31 + 0x1a * 2 ** 25 + op * 2 ** 24
-    + chkS(off / 4, 19, 'imm19') * 2 ** 5 + chkReg(rt));
+    + chkS(off / 4, 19, 'imm19') * 2 ** 5 + arm64ChkReg(rt));
 }
 
 export const cbz = (sf, rt, off) => cmpBranch(sf, 0, off, rt);
@@ -299,7 +299,7 @@ export const cbnz = (sf, rt, off) => cmpBranch(sf, 1, off, rt);
 
 /* C4.1.6 Unconditional branch (register)：1 1 0 1 0 1 1 0 opc 1 1 1 1 1 0 0 0 0 0 0 Rn 0 0 0 0 0 */
 function branchReg(opc, rn) {
-  return u32(0xd6 * 2 ** 24 + opc * 2 ** 21 + 0x1f * 2 ** 16 + chkReg(rn) * 2 ** 5);
+  return u32(0xd6 * 2 ** 24 + opc * 2 ** 21 + 0x1f * 2 ** 16 + arm64ChkReg(rn) * 2 ** 5);
 }
 
 export const br = (rn) => branchReg(0, rn);
@@ -386,7 +386,7 @@ export function bitmaskImm(sf, value) {
 function logicImmRaw(sf, opc, N, immr, imms, rn, rd) {
   return u32(sf * 2 ** 31 + opc * 2 ** 29 + 0x24 * 2 ** 23 + N * 2 ** 22
     + chkU(immr, 6, 'immr') * 2 ** 16 + chkU(imms, 6, 'imms') * 2 ** 10
-    + chkReg(rn) * 2 ** 5 + chkReg(rd));
+    + arm64ChkReg(rn) * 2 ** 5 + arm64ChkReg(rd));
 }
 
 function logicImm(sf, opc, rd, rn, value) {
@@ -411,7 +411,7 @@ export const tstImm = (sf, rn, v) => andsImm(sf, 31, rn, v);
 function bfm(sf, opc, immr, imms, rn, rd) {
   return u32(sf * 2 ** 31 + opc * 2 ** 29 + 0x26 * 2 ** 23 + sf * 2 ** 22
     + chkU(immr, 6, 'immr') * 2 ** 16 + chkU(imms, 6, 'imms') * 2 ** 10
-    + chkReg(rn) * 2 ** 5 + chkReg(rd));
+    + arm64ChkReg(rn) * 2 ** 5 + arm64ChkReg(rd));
 }
 
 export const sbfm = (sf, rd, rn, immr, imms) => bfm(sf, 0, immr, imms, rn, rd);
@@ -476,8 +476,8 @@ export const uxth = (rd, rn) => ubfm(0, rd, rn, 0, 15);
 /** `extr Rd, Rn, Rm, #lsb`（C4.1.4 Extract）：两个寄存器接起来取一段，
  * `ror Rd, Rn, #n` 就是它的 Rn===Rm 那一种。 */
 export function extr(sf, rd, rn, rm, lsb) {
-  return u32(sf * 2 ** 31 + 0x27 * 2 ** 23 + sf * 2 ** 22 + chkReg(rm) * 2 ** 16
-    + chkU(lsb, 6, 'lsb') * 2 ** 10 + chkReg(rn) * 2 ** 5 + chkReg(rd));
+  return u32(sf * 2 ** 31 + 0x27 * 2 ** 23 + sf * 2 ** 22 + arm64ChkReg(rm) * 2 ** 16
+    + chkU(lsb, 6, 'lsb') * 2 ** 10 + arm64ChkReg(rn) * 2 ** 5 + arm64ChkReg(rd));
 }
 export const rorImm = (sf, rd, rn, n) => extr(sf, rd, rn, rn, n);
 
@@ -485,7 +485,7 @@ export const rorImm = (sf, rd, rn, n) => extr(sf, rd, rn, rn, n);
  * C4.1.5 Data-processing (1 source)：sf 1 0 1 1 0 1 0 1 1 0 0 0 0 0 opcode(6) Rn Rd */
 function dp1(sf, opcode, rn, rd) {
   return u32(sf * 2 ** 31 + 0x2d6 * 2 ** 21 + chkU(opcode, 6, 'opcode') * 2 ** 10
-    + chkReg(rn) * 2 ** 5 + chkReg(rd));
+    + arm64ChkReg(rn) * 2 ** 5 + arm64ChkReg(rd));
 }
 
 export const rbit = (sf, rd, rn) => dp1(sf, 0x00, rn, rd);
@@ -503,8 +503,8 @@ export const cls = (sf, rd, rn) => dp1(sf, 0x05, rn, rd);
  * C4.1.9 Floating-point data-processing (2 source)：
  *   0 0 0 1 1 1 1 0 type 1 Rm opcode(4) 1 0 Rn Rd */
 function fp2(dbl, opcode, rm, rn, rd) {
-  return u32(0x1e * 2 ** 24 + (dbl ? 1 : 0) * 2 ** 22 + 2 ** 21 + chkReg(rm) * 2 ** 16
-    + chkU(opcode, 4, 'opcode') * 2 ** 12 + 2 ** 11 + chkReg(rn) * 2 ** 5 + chkReg(rd));
+  return u32(0x1e * 2 ** 24 + (dbl ? 1 : 0) * 2 ** 22 + 2 ** 21 + arm64ChkReg(rm) * 2 ** 16
+    + chkU(opcode, 4, 'opcode') * 2 ** 12 + 2 ** 11 + arm64ChkReg(rn) * 2 ** 5 + arm64ChkReg(rd));
 }
 
 export const fmul = (dbl, rd, rn, rm) => fp2(dbl, 0x0, rm, rn, rd);
@@ -520,7 +520,7 @@ export const fnmul = (dbl, rd, rn, rm) => fp2(dbl, 0x8, rm, rn, rd);
 function fp1(dbl, opcode, rn, rd) {
   return u32(0x1e * 2 ** 24 + (dbl ? 1 : 0) * 2 ** 22 + 2 ** 21
     + chkU(opcode, 6, 'opcode') * 2 ** 15 + 0x10 * 2 ** 10
-    + chkReg(rn) * 2 ** 5 + chkReg(rd));
+    + arm64ChkReg(rn) * 2 ** 5 + arm64ChkReg(rd));
 }
 
 export const fmovFp = (dbl, rd, rn) => fp1(dbl, 0x00, rn, rd);
@@ -534,18 +534,18 @@ export const fcvtDS = (rd, rn) => fp1(true, 0x04, rn, rd);    // d -> s
 /* Floating-point compare：0 0 0 1 1 1 1 0 type 1 Rm op(2) 1 0 0 0 Rn opcode2(5) */
 function fcmpRaw(dbl, rm, op, opcode2, rn) {
   return u32(0x1e * 2 ** 24 + (dbl ? 1 : 0) * 2 ** 22 + 2 ** 21 + rm * 2 ** 16
-    + op * 2 ** 14 + 2 ** 13 + chkReg(rn) * 2 ** 5 + chkU(opcode2, 5, 'opcode2'));
+    + op * 2 ** 14 + 2 ** 13 + arm64ChkReg(rn) * 2 ** 5 + chkU(opcode2, 5, 'opcode2'));
 }
 
-export const fcmp = (dbl, rn, rm) => fcmpRaw(dbl, chkReg(rm), 0, 0x00, rn);
+export const fcmp = (dbl, rn, rm) => fcmpRaw(dbl, arm64ChkReg(rm), 0, 0x00, rn);
 export const fcmpZero = (dbl, rn) => fcmpRaw(dbl, 0, 0, 0x08, rn);
-export const fcmpe = (dbl, rn, rm) => fcmpRaw(dbl, chkReg(rm), 0, 0x10, rn);
+export const fcmpe = (dbl, rn, rm) => fcmpRaw(dbl, arm64ChkReg(rm), 0, 0x10, rn);
 
 /* Conversion between floating-point and integer：
  *   sf 0 0 1 1 1 1 0 type 1 rmode(2) opcode(3) 0 0 0 0 0 0 Rn Rd */
 function fpInt(sf, dbl, rmode, opcode, rn, rd) {
   return u32(sf * 2 ** 31 + 0x1e * 2 ** 24 + (dbl ? 1 : 0) * 2 ** 22 + 2 ** 21
-    + rmode * 2 ** 19 + opcode * 2 ** 16 + chkReg(rn) * 2 ** 5 + chkReg(rd));
+    + rmode * 2 ** 19 + opcode * 2 ** 16 + arm64ChkReg(rn) * 2 ** 5 + arm64ChkReg(rd));
 }
 
 /** 有符号整数 -> 浮点。`sf` 是**源**（整数）那一头的宽度。 */
@@ -562,7 +562,7 @@ export const fmovFromInt = (sf, dbl, rd, rn) => fpInt(sf, dbl, 0, 7, rn, rd);
  * `size` 照旧是宽度的对数（2 = s、3 = d）。 */
 function ldstFpUimm(size, opc, imm12, rn, rt) {
   return u32(size * 2 ** 30 + 0x3d * 2 ** 24 + opc * 2 ** 22
-    + chkU(imm12, 12, 'imm12') * 2 ** 10 + chkReg(rn) * 2 ** 5 + chkReg(rt));
+    + chkU(imm12, 12, 'imm12') * 2 ** 10 + arm64ChkReg(rn) * 2 ** 5 + arm64ChkReg(rt));
 }
 
 export const strFpU = (size, rt, rn, off) => ldstFpUimm(size, 0, scaled(off, size), rn, rt);
@@ -576,7 +576,7 @@ export const ldrFpU = (size, rt, rn, off) => ldstFpUimm(size, 1, scaled(off, siz
  * `_Atomic` 的读写要靠它们（第八刀还没走到原子那一片，但编码先备好）。 */
 function ldstAcqRel(size, L, rn, rt) {
   return u32(size * 2 ** 30 + 0x08 * 2 ** 24 + 2 ** 23 + L * 2 ** 22 + 0x1f * 2 ** 16
-    + 2 ** 15 + 0x1f * 2 ** 10 + chkReg(rn) * 2 ** 5 + chkReg(rt));
+    + 2 ** 15 + 0x1f * 2 ** 10 + arm64ChkReg(rn) * 2 ** 5 + arm64ChkReg(rt));
 }
 
 export const ldar = (size, rt, rn) => ldstAcqRel(size, 1, rn, rt);

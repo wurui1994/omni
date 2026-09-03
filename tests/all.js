@@ -31,7 +31,12 @@ const SUITES = [
 
 const results = [];
 for (const s of SUITES) {
-  const name = s === 'run.js' ? 'core' : s.slice(0, s.indexOf('/'));
+  /* 名字取目录（`run.js` 是 core）。同一个目录里两支门的话，把文件名也带上 ——
+   * 不然汇总里会出现两行同名的 `bootstrap`，一行 ok 一行 FAIL，看不出哪个是哪个。 */
+  const dir = s.slice(0, s.indexOf('/'));
+  const base = s.slice(s.indexOf('/') + 1, s.length - 3);
+  const name = s === 'run.js' ? 'core'
+    : SUITES.filter((x) => x.startsWith(`${dir}/`)).length > 1 ? `${dir}/${base}` : dir;
   if (filters.length > 0 && !filters.some((f) => name.includes(f))) continue;
   process.stdout.write(`\n=== ${name} ===\n`);
   const t0 = Date.now();

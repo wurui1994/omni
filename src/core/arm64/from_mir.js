@@ -731,7 +731,7 @@ class FnGen {
       return this.def(i, RES);
     }
     const fb = FBIN[op];
-    const fc = FCMP[op];
+    const fc = ARM64_FCMP[op];
     if (fb === undefined && fc === undefined) return arm64Nyi(`浮点的 ${OP_NAMES[op]}`);
     this.loadRef(TMP0, f.a[i]);
     this.loadRef(TMP1, f.b[i]);
@@ -1019,13 +1019,13 @@ FBIN[OP.DIV] = (b, dbl, d, x, y) => b.emit(a.fdiv(dbl, d, x, y));
  *   - `==`/`!=` 用 `eq`/`ne`：无序时 Z=0，于是 `==` 假、`!=` 真，正是 C 要的。
  * 这一格是「照抄整数表就会错、而且只在 NaN 上错」的地方，所以用例里有 NaN。
  */
-const FCMP = {};
-FCMP[OP.EQ] = a.COND.eq;
-FCMP[OP.NE] = a.COND.ne;
-FCMP[OP.LT] = a.COND.mi;
-FCMP[OP.LE] = a.COND.ls;
-FCMP[OP.GT] = a.COND.gt;
-FCMP[OP.GE] = a.COND.ge;
+const ARM64_FCMP = {};
+ARM64_FCMP[OP.EQ] = a.COND.eq;
+ARM64_FCMP[OP.NE] = a.COND.ne;
+ARM64_FCMP[OP.LT] = a.COND.mi;
+ARM64_FCMP[OP.LE] = a.COND.ls;
+ARM64_FCMP[OP.GT] = a.COND.gt;
+ARM64_FCMP[OP.GE] = a.COND.ge;
 
 /* 线性内存的九种读。`ldrs*` 一律扩到 64 位（i32 的规范形就是那个样子），
  * 零扩展的三种与两种浮点都走整数加载 —— 栈位里躺的是位模式。 */

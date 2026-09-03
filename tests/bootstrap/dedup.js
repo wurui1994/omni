@@ -6,11 +6,16 @@
 //
 // 这一支只做**能证明安全**的那一部分：
 //
-//   * 只改**一个文件**里的名字，而且那个名字在**两边都没有 export**
+//   * 只改**一个文件**里的名字，而且那个名字在**要改的这个文件里没有 export**
 //     -> 别的文件引不到它，所以词边界改名不会漏改任何引用
 //   * 同一个文件里的局部遮蔽照旧成立：声明与它的引用是**一起**改的
 //
-// 导出的那 17 个不在这一支的范围里 —— 那要改调用方，得一处一处看。
+// 判据是「**要改的这一边**导没导出」，不是「两边有没有一边导出」。第一版写成了后者，
+// 于是 12 条本来能零成本收掉的被跳过了 —— `utf8Bytes` 那种：`host/utf8.js` 导出它，
+// 而 `frontend-c/tccgen.js` 里那一份是**局部**的，改后者一处调用方都不用动。
+//
+// 两边都导出的（`ret`/`genModule`/`writeObject` 那 10 条）不在这一支的范围里：
+// 那要改导出名 + 改调用方（连门里的 import 一起），得一处一处看。
 //
 //   node tests/bootstrap/dedup.js src/core/link/elf_merge.js mg      # 改，然后印结果
 //   node tests/bootstrap/dedup.js --list                             # 只印还剩哪些文件对
@@ -73,9 +78,10 @@ let s = srcOf(target);
 const done = [];
 let sites = 0;
 for (const [name, a, b] of dups) {
-  const otherFile = a === target ? b : a === target ? b : b === target ? a : null;
-  if (otherFile === null) continue;
-  if (isExported(s, name) || isExported(srcOf(otherFile), name)) continue;
+  if (a !== target && b !== target) continue;
+  /* 判据是**要改的这一边**导没导出。另一边导不导出与这一次改名无关 ——
+   * 我们改的是这个文件里的声明与它自己的引用。 */
+  if (isExported(s, name)) continue;
   /* UPPER_SNAKE 前面加 `前缀_`（大写），别的加 `前缀` + 首字母大写 —— 读起来还是原来那个词。 */
   const renamed = /^[A-Z0-9_]+$/.test(name)
     ? `${prefix.toUpperCase()}_${name}`
