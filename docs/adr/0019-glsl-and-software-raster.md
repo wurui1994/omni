@@ -1101,32 +1101,36 @@ while：白付的代价，而且一串门的字节对账会无谓地动。
 
 **A. 纯前端，方言一格都不用动**
 
-1. `do … while`、`switch`/`case`/`default`（含穿落）
+1. ~~`do … while`、`switch`/`case`/`default`（含穿落）~~ —— 第十九片
 2. `discard`（语法收了、降级明着拒；真做要光栅器那一头认一格「这个像素不写回」）
-3. 位运算与移位：`& | ^ ~ << >>`，以及 `%=`/`&=`/`|=`/`^=`/`<<=`/`>>=`
-4. 逗号表达式（GLSL 有，`for` 的更新格里最常见）
-5. `uvec2/3/4` 与 `uint` 的无符号语义（除法、移位、比较、溢出回绕）
-6. **非方阵** `mat2x3`/`mat3x2`/…（列优先那一格已经量清，剩下是尺寸不再等于 `n`）
-7. 内建全表（330 那份约 150 条）：`transpose`/`inverse`/`determinant`/`matrixCompMult`/
-   `outerProduct`、`reflect`/`refract`/`faceforward`、`all`/`any`/`not` 与
-   `lessThan` 那六条向量比较、`isnan`/`isinf`、`round`/`roundEven`/`trunc`/`modf`、
-   `atan(y,x)` 两参形、`ldexp`/`frexp`
-8. `layout(location = N)` 的括号形式、`precision`、`invariant`、`centroid`/`sample`
-9. 函数重载（GLSL 按实参类型选）与 `out`/`inout` 形参的真语义
+3. ~~位运算与移位：`& | ^ ~ << >>`，以及六种复合赋值~~ —— 第二十片（含 `1 << 31` 截回 32 位）
+4. ~~逗号表达式~~ —— 第二十四片（单独一层 `cexpr`，不塞进 `expr`）
+5. `uvec2/3/4` 与 `uint` 的无符号语义（除法、移位、比较、溢出回绕）。
+   **`+ - *` 的 32 位回绕也在这一格**（第二十片明着留下的那笔）
+6. ~~**非方阵** `mat2x3`/`mat3x2`/…~~ —— 第二十一片（类型从 `{n}` 改成 `{cols, rows}`）
+7. 内建全表：~~双曲六条、`exp2`/`log2`、`trunc`/`round`/`roundEven`、
+   `reflect`/`refract`/`faceforward`、矩阵五条~~（第二十三片）、
+   ~~`lessThan` 那一族与 `all`/`any`/`not`~~（第二十二片）。**还差**：`isnan`/`isinf`
+   （要先有造 NaN/Inf 的办法）、`modf`/`frexp`（要 out 形参 —— 现在有了）、
+   `ldexp`、`mix(genType, genType, bvecN)`
+8. ~~`layout(location = N)`、`precision`、`invariant`、`centroid`/`sample`~~ —— 第二十四片
+9. 函数重载（GLSL 按实参类型选）与 ~~`out`/`inout` 形参的真语义~~（第二十五片）
 10. 剩下的 `gl_`：`gl_FrontFacing`、`gl_PointCoord`、`gl_PointSize`、`gl_InstanceID`
+    （要光栅器那一头供值，不只是前端认名字）
 11. GLSL 自己那套预处理：`#define`/`#if`/`#ifdef`/`#else`/`#endif`/`#line`/`#extension`
     （**不是** C 的那一套，要单独一刀）
 
 **B. 要方言先长出东西**
 
-12. 向量比较（掩码）与 `select` —— 原第 18 条待办。`bvecN` 的语义补全卡在这儿，
-    而 `all`/`any`/`lessThan` 那一族又卡在 `bvecN` 上。
-13. 结构体：方言有 `(struct …)`，但 GLSL 的 `struct S { … };` + 构造 + 成员访问要一整套
+12. ~~向量比较（掩码）与 `select`~~ —— 第二十二片量出来：**语义那一半不用等方言**
+    （这一层的向量是摊成分量的）。掩码剩下的是 LLVM 腿上的性能项。
+13. 结构体 —— 「量：结构体的第一关不在降级，在语法」那一节：卡在「这个名字是不是类型」
 14. **定长数组**（`float a[4]`、`.length()`）：静态下标可以摊成 N 个标量；
     动态下标要方言里有真数组 —— 这是第 15 条的前置
 15. 动态下标（`a[i]`、`m[i]`、`v[i]`）
 16. 采样器与 `texture()`：要纹理内存 + 过滤 + wrap，而且**口径要照 llvmpipe 量**
     （过滤是不是同一个舍入，规范没规定到位）
+
 
 依赖链只有三条，写下来省得日后绕：`bvecN` 掩码 -> 向量比较内建 -> `all`/`any`；
 定长数组 -> 动态下标 -> `texture()` 的 LOD 那一族；结构体独立，但 uniform block 要它。
