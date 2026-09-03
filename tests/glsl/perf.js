@@ -95,41 +95,44 @@ function frameMs(mod, w, h, uni, backend, n) {
   return (b.ms - a.ms) / n;
 }
 
-const FRAG = 'bench-complex.frag';
+/** 要量的那几份片元。`trivial` 那一份是**为了把框架开销单独量出来**：
+ *
+ * 它一行算术都没有，所以它的时间就是「扫画布 + 覆盖判定 + 插值 + 8 位量化 + 调用」——
+ * 也就是**框架**。`bench-complex` 减掉它就是**着色器**那一半。
+ * 这两个数决定下一步优化该投哪儿（分层加速省的是框架那一半，SoA 省的是两半）。 */
+const FRAGS = ['trivial.frag', 'bench-complex.frag'];
 const VERT = 'bench-vert.vert';
-const fm = check(join(CASES, FRAG), 'frag');
 
-process.stdout.write(`GLSL 性能对照 —— ${FRAG}（30 个 SDF）\n`);
-process.stdout.write('口径：我们这一侧用「t(2N) - t(N)」把进程启动与编译摊掉；'
+process.stdout.write('GLSL 性能对照\n');
+process.stdout.write('口径：我们这一侧用「t(2N) - t(N)」把进程启动与编译摊掉、每趟取 3 次的最小值；'
   + 'GL 那一侧照 benchmark.py（每帧含 fbo.read()）\n\n');
-process.stdout.write('  尺寸      我们(JS)        我们(C)         真 GL\n');
 
-for (const s of sizes) {
-  const uni = { u_resolution: [s, s] };
-  /* 帧数按尺寸缩：小画布多跑几帧，大画布少跑 —— 与 benchmark.py 那张
-   * 50/30/15/8/4 的表同一个道理。
-   *
-   * `OMNI_GLSL_N` 可以把它**钉成同一个数** —— 查「不同尺寸用了不同帧数会不会
-   * 把噪声算进斜率」时要这个（ADR-0019 待办里那处超线性）。 */
-  const fixed = Number(process.env.OMNI_GLSL_N ?? '0');
-  /* 帧数要让**净时间远大于固定开销的抖动**（进程启动几十毫秒，而 128² 一帧才十几毫秒）——
-   * 第十三片那一版 128² 用 N=8 就不够，量出来的斜率是噪声。现在小画布跑得多得多。 */
-  const n = fixed > 0 ? fixed : (s <= 128 ? 24 : s <= 256 ? 8 : 2);
-  const js = frameMs(fm, s, s, uni, [], n);
-  const c = frameMs(fm, s, s, uni, ['--backend', 'c'], n);
+for (const FRAG of FRAGS) {
+  const fm = check(join(CASES, FRAG), 'frag');
+  process.stdout.write(`  ${FRAG}\n`);
+  process.stdout.write('  尺寸      我们(JS)                我们(C)                 真 GL\n');
+  for (const s of sizes) {
+    const uni = { u_resolution: [s, s] };
+    const fixed = Number(process.env.OMNI_GLSL_N ?? '0');
+    /* 帧数要让**净时间远大于固定开销的抖动**（进程启动几十毫秒，而 128² 一帧才十几毫秒）——
+     * 第十三片那一版 128² 用 N=8 就不够，量出来的斜率是噪声（第十四片）。 */
+    const n = fixed > 0 ? fixed : (s <= 128 ? 24 : s <= 256 ? 8 : 2);
+    const js = frameMs(fm, s, s, uni, [], n);
+    const c = frameMs(fm, s, s, uni, ['--backend', 'c'], n);
 
-  const spec = join(OUT, 'spec.json');
-  writeFileSync(spec, JSON.stringify({
-    vert: join(CASES, VERT), frag: join(CASES, FRAG), w: s, h: s, iters: 20, uniforms: uni,
-  }));
-  const gl = spawnSync('python3', [GLB, spec], { encoding: 'utf8' });
-  const glTxt = gl.status === 0 ? gl.stdout.trim().split(/\s+/) : null;
+    const spec = join(OUT, 'spec.json');
+    writeFileSync(spec, JSON.stringify({
+      vert: join(CASES, VERT), frag: join(CASES, FRAG), w: s, h: s, iters: 20, uniforms: uni,
+    }));
+    const gl = spawnSync('python3', [GLB, spec], { encoding: 'utf8' });
+    const glTxt = gl.status === 0 ? gl.stdout.trim().split(/\s+/) : null;
 
-  const fmt = (ms) => (ms === null ? '   ——     '
-    : `${ms.toFixed(1).padStart(8)}ms`);
-  const mpix = (ms) => (ms === null ? '' : ` (${((s * s) / (ms * 1000)).toFixed(1)} MPix/s)`);
-  process.stdout.write(`  ${String(s).padStart(4)}²  ${fmt(js)}${mpix(js)}  ${fmt(c)}${mpix(c)}  `
-    + `${glTxt === null ? '   ——' : `${Number(glTxt[0]).toFixed(3)}ms (${glTxt[1]} MPix/s)`}\n`);
+    const cell = (ms) => (ms === null ? '      ——           '
+      : `${ms.toFixed(1).padStart(8)}ms (${((s * s) / (ms * 1000)).toFixed(2).padStart(5)} MPix/s)`);
+    process.stdout.write(`  ${String(s).padStart(4)}²  ${cell(js)}  ${cell(c)}  `
+      + `${glTxt === null ? '   ——' : `${Number(glTxt[0]).toFixed(3)}ms (${glTxt[1]} MPix/s)`}\n`);
+  }
+  process.stdout.write('\n');
 }
 
 process.stdout.write('\n注：我们这一侧是**标量、一次一个片元**（ADR-0019 决策一）。'
