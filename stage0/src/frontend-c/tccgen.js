@@ -179,7 +179,7 @@ import {
   sameTypeUnqual, mkVla, isVla, compareTypes,
   TY_VOID, TY_INT, TY_UINT, TY_LLONG, TY_ULLONG, TY_CHAR, TY_UCHAR, TY_SHORT, TY_BOOL,
   TY_FLOAT, TY_DOUBLE, TY_LDOUBLE, VT_LDOUBLE, sseEightbytes, ldoubleSize, setLdoubleTarget,
-  wcharType, wcharSize, isWcharType, setWcharTarget,
+  wcharType, wcharSize, isWcharType, setWcharTarget, charIsUnsigned, setCharTarget,
 } from './ctype.js';
 import {
   MirModule, MirFunc, OP, T_VOID, T_I32, T_I64, T_BOOL, T_F32, T_F64, REF_NONE,  CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16, CVT_I2F, CVT_U2F, CVT_F2I, CVT_F2U,
@@ -6120,6 +6120,10 @@ export class CGen {  /**
     else if (longs > 0) t = VT_LLONG;
     if (sign === 2) t = t | VT_UNSIGNED | VT_DEFSIGN;
     else if (sign === 1) t = t | VT_DEFSIGN;
+    /* 光秃秃的 `char` 在 arm64-linux 上是**无符号**的（第一百三十六片）：没写
+     * `signed`/`unsigned`（`VT_DEFSIGN` 就是「写过」那一位）才受影响。tcc 也是在定基本
+     * 类型这一步补的（`libtcc.c:889` 的 `char_is_unsigned`）。 */
+    else if (t === VT_BYTE && charIsUnsigned()) t = t | VT_UNSIGNED;
     if (longs === 1) t = t | VT_LONG;
     return ctype(t | quals | storage);
   }
@@ -7736,6 +7740,8 @@ export function lowerC(path, text, host, defs, args) {
   setLdoubleTarget('arm64');
   /* 线性内存那条腿上 `wchar_t` 就是 int（那儿没有 PE 可谈）—— 同样明着拨一次。 */
   setWcharTarget('osx');
+  /* 线性内存那条腿上 `char` 是有符号的（那儿只有 arm64-osx 那一套规矩）。 */
+  setCharTarget('arm64', 'osx');
   const cpp = new Cpp(host);
   cpp.installPredefs(path, false);
   for (const d of defs ?? []) {
@@ -7917,6 +7923,10 @@ export function lowerCNative(path, text, host, defs) {
    * 别的目标是 `int`。宽串一格几个字节、`sizeof(L'x')`、`wchar_t s[] = L"ab"` 认不认
    * 都跟着它走。 */
   setWcharTarget(host === undefined ? 'osx' : host.os);
+  /* 光秃秃的 `char` 在 arm64-linux 上是无符号的（第一百三十六片）——`__CHAR_UNSIGNED__`
+   * 那个宏第一百二十九片就对了，这一格是它的语言那一半。 */
+  setCharTarget(host === undefined ? 'arm64' : host.arch,
+    host === undefined ? 'osx' : host.os);
   const cpp = new Cpp(host);
   cpp.installPredefs(path, false);
   for (const d of defs ?? []) {

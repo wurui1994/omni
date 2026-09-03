@@ -340,6 +340,27 @@ export function setWcharTarget(os) {
   WCHAR_IS_SHORT = os === 'win32';
 }
 
+/**
+ * 光秃秃的 `char` 是无符号的吗（第九刀第一百三十六片）。
+ *
+ * **只有 arm64-linux 一个目标**：`arm64-gen.c:41` 那个
+ * `#if !defined(TCC_TARGET_MACHO) && !defined(TCC_TARGET_PE)` 开出 `CHAR_IS_UNSIGNED`，
+ * `libtcc.c:889` 把它变成 `s1->char_is_unsigned`。第一百二十九片已经把
+ * `__CHAR_UNSIGNED__` 那个宏摆对了，可那一格在 tcc 那边**同时是一条语言规矩** ——
+ * 量过（`arm64-tcc`）：`(int)(char)200` 是 200、`((char)-1) < 0` 是 0，别的目标都反过来。
+ *
+ * 与 `LDOUBLE_SIZE`/`WCHAR_IS_SHORT` 同一个办法：一格模块状态，进门钉一次。
+ */
+let CHAR_IS_UNSIGNED = false;
+
+/** 光秃秃的 `char`（没写 `signed`/`unsigned`）要不要补上 `VT_UNSIGNED`。 */
+export function charIsUnsigned() { return CHAR_IS_UNSIGNED; }
+
+/** 拨那一格。见 `CHAR_IS_UNSIGNED` 头上那段。 */
+export function setCharTarget(arch, os) {
+  CHAR_IS_UNSIGNED = arch === 'arm64' && os !== 'osx' && os !== 'win32';
+}
+
 export function typeSize(ty) {
   const b = btype(ty.t);
   if (isArray(ty.t)) {

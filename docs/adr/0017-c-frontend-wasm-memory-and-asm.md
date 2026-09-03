@@ -988,6 +988,13 @@ typedef，所以在装它的地方把游标推过去 —— 那三行是「我�
 tcc 是那一块 `L.0`@8、串 `L.1`，而且那一块摆在 `p` 与 `s` **中间**（它是解析 `p` 的初值
 那一刻领的字节）—— 我们从前既不给它号、也不给它 `dseq`，于是串顶成了 `L.0`、那一块被
 排到最后。补上两格之后那个探针的数据段与 tcc 一字不差。
+**arm64-linux 上 `char` 是无符号的**（第一百三十六片）：第一百二十九片把
+`__CHAR_UNSIGNED__` 那个宏摆对了，可那一格在 tcc 那边**同时是一条语言规矩**
+（`arm64-gen.c:41` -> `libtcc.c:889` 的 `char_is_unsigned`），六个目标里只有它一个。
+落点只有一处 —— `parseBtype` 定基本类型那一步，没写 `signed`/`unsigned` 的 `char` 补上
+`VT_UNSIGNED`；`ctype.js` 多一格旋钮（与 `LDOUBLE_SIZE`/`WCHAR_IS_SHORT` 同一个办法）。
+新门 `tests/c/char-sign.js` 六个目标 6/0，期望值从尺子读，里头带两条显式
+`signed char`/`unsigned char` 的对照与一条「至少量到一个无符号目标」的元检查。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -15528,6 +15535,36 @@ x86_64-tcc（linux） b=-56  sgn=1  mx=-1
 3. 门：三个目标各量上面那三个数（`sgn`/`b`/`mx`），期望值从尺子读，不写死
 
 <!-- 量：arm64-linux 的 char-END -->
+
+## 落地：第九刀第一百三十六片
+
+上一片的尺子照着做完了：**arm64-linux 上光秃秃的 `char` 是无符号的**。
+
+改动一共三处，都很小 —— 因为这件事在 tcc 那边也只有一个落点：
+
+- `ctype.js` 多一格模块状态 `CHAR_IS_UNSIGNED` 与 `charIsUnsigned()`/`setCharTarget(arch, os)`，
+  与 `LDOUBLE_SIZE`/`WCHAR_IS_SHORT` 同一个办法（进门钉一次）
+- `parseBtype` 收尾那三行 `sign` 判断后面多一支：`else if (t === VT_BYTE && charIsUnsigned())`
+  —— **只有没写 `signed`/`unsigned` 的那种才受影响**（`VT_DEFSIGN` 那一位就是「写过」），
+  tcc 也是在定基本类型这一步补的
+- `lowerC`（线性内存那条腿，只有 arm64-osx 那一套规矩）与 `lowerCNative` 各拨一次
+
+`TY_CHAR` 那个常量**没动** —— 它被一堆地方 import 着，而且串字面量的元素类型也用它。
+不动是对的：tcc 那边 `char_is_unsigned` 也只作用在「解析 `char` 这个关键字」那一步，
+串字面量的元素类型是另一回事。
+
+### 门
+
+新的一门 `tests/c/char-sign.js`，**六个 64 位目标**各一条，6/0。探针把答案算成五个 `int`
+全局量摆进 `.data`，两边各编一个 `.o`、把那一节的字节读回来比 —— 期望值从尺子读，
+不写死「arm64-linux 上该是 200」这种数。里头有两条**对照**（`(signed char)200` 与
+`(unsigned char)200`）：显式写过符号的三个目标上都该是同一个数，用来证明这一片没有
+把符号性整个拨歪。还有一条元检查：六个目标里**至少**要量到一个「`char` 是无符号的」，
+不然这门比的是空气。
+
+其余全绿，`tcc-obj` 还是 0 字节相同 / **21 容器相同** / 89 不同。
+
+<!-- 第九刀第一百三十六片-END -->
 
 
 
