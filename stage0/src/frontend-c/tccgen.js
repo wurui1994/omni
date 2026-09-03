@@ -179,6 +179,7 @@ import {
   sameTypeUnqual, mkVla, isVla, compareTypes,
   TY_VOID, TY_INT, TY_UINT, TY_LLONG, TY_ULLONG, TY_CHAR, TY_UCHAR, TY_SHORT, TY_BOOL,
   TY_FLOAT, TY_DOUBLE, TY_LDOUBLE, VT_LDOUBLE, sseEightbytes, ldoubleSize, setLdoubleTarget,
+  wcharType, wcharSize, isWcharType, setWcharTarget,
 } from './ctype.js';
 import {
   MirModule, MirFunc, OP, T_VOID, T_I32, T_I64, T_BOOL, T_F32, T_F64, REF_NONE,  CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16, CVT_I2F, CVT_U2F, CVT_F2I, CVT_F2U,
@@ -1950,17 +1951,18 @@ export class CGen {  /**
   }
 
   /**
-   * 一个宽字符串字面量当表达式用。类型是 `wchar_t[N+1]` —— 而 `wchar_t` 在这个目标上
-   * 就是 `int`（tcc 那边是 `nwchar_t`，非 PE 目标上 `typedef int`），所以
-   * `sizeof(L"ab")` 是 12。
+   * 一个宽字符串字面量当表达式用。类型是 `wchar_t[N+1]` —— 而 `wchar_t` 按**目标**走
+   * （tcc 那边是 `nwchar_t` 与 `tccgen.c:5667` 那道 `#ifdef TCC_TARGET_PE`：PE 上
+   * `unsigned short`，别处 `int`），所以 `sizeof(L"ab")` 在 linux/osx 上是 12、
+   * win32 上是 6。
    */
   wstrLit(vals) {
     /* native（第三十三片）：与窄串同一个办法 —— 字节进 `__DATA` 的一个符号，值是那个
-     * 符号的地址。一格四字节小端、末尾一格 0，与线性内存那边 `wstrData` 铺的一样。 */
+     * 符号的地址。一格 `wcharSize()` 字节小端、末尾一格 0，与线性内存那边铺的一样。 */
     if (this.native) {
-      return sMem(mkArray(TY_INT, vals.length + 1), this.wstrConst(vals), 0);
+      return sMem(mkArray(wcharType(), vals.length + 1), this.wstrConst(vals), 0);
     }
-    return sMem(mkArray(TY_INT, vals.length + 1),
+    return sMem(mkArray(wcharType(), vals.length + 1),
       this.mod.consts.int(BigInt(this.wstrData(vals))), 0);
   }
 
@@ -1969,19 +1971,20 @@ export class CGen {  /**
     const key = this.strKey();
     const hit = this.strRefs.get(key);
     if (hit !== undefined) return hit;
+    const w = wcharSize();
     const raw = [];
     /* 结尾那一格**不在这儿加**（第一百二十三片）：摆字节的那一步一律补「一个元素宽」
-     * 的零（窄串 1 字节、宽串 4 字节），于是两种串共用同一条收尾。从前这儿加了一格
-     * 四个零、后端又补一个字节，`st_size` 就比 tcc 多 1。 */
+     * 的零（窄串 1 字节、宽串 `wcharSize()`），于是两种串共用同一条收尾。从前这儿加了
+     * 一格零、后端又补一个字节，`st_size` 就比 tcc 多 1。 */
     for (const v of vals) {
       const u = v >>> 0;
-      raw.push(u & 255, (u >>> 8) & 255, (u >>> 16) & 255, (u >>> 24) & 255);
+      for (let k = 0; k < w; k++) raw.push((u >>> (k * 8)) & 255);
     }
     const ref = this.mod.consts.bytesOnce(raw);
-    /* 宽串一格四字节，所以摆下来要 4 对齐、结尾那一格也是四个零（量过 tcc 的只读节）。
-     * 常量池里宽串与「就这几个字节」的窄串是同一个种类，分不出来 —— 所以这一格
-     * 记在 MIR 的 `strAlign` 上，由造它的人说。 */
-    this.mod.markStrAlign(ref, 4);
+    /* 宽串一格 `wcharSize()` 字节，所以摆下来要按它对齐、结尾那一格也是那么多个零
+     * （量过 tcc 的只读节）。常量池里宽串与「就这几个字节」的窄串是同一个种类，
+     * 分不出来 —— 所以这一格记在 MIR 的 `strAlign` 上，由造它的人说。 */
+    this.mod.markStrAlign(ref, w);
     this.mod.markStrSeq(ref, this.dataSeq++);
     this.strRefs.set(key, ref);
     return ref;
@@ -2155,7 +2158,7 @@ export class CGen {  /**
     /* `wchar_t s[4] = L"ab"` 同理。类型不对（`char s[] = L"ab"`）就**不**走这一路 ——
      * tcc 那儿的条件也是「元素类型是 wchar_t 才当字符串铺，否则当 (w)char* 表达式」
      * （`tccgen.c:8064-8070` 那个 if 的注释）。 */
-    if (isArray(ty.t) && this.tok === TOK_LSTR && btype(ty.ref.t) === VT_INT) {
+    if (isArray(ty.t) && this.tok === TOK_LSTR && isWcharType(ty.ref)) {
       this.initWString(dest, off, ty, this.readWStrTok(this.tokc));
       return;
     }
@@ -2190,7 +2193,7 @@ export class CGen {  /**
             return;
           }
         }
-        if (isArray(ty.t) && btype(ty.ref.t) === VT_INT) {
+        if (isArray(ty.t) && isWcharType(ty.ref)) {
           // `wchar_t w[3] = { L"ab" };` —— 同一条规则的宽版本。
           const vals = this.tryBracedStr(TOK_LSTR);
           if (vals !== null) {
@@ -2419,20 +2422,22 @@ export class CGen {  /**
 
   /**
    * 宽字符串铺进 `wchar_t` 数组（`wchar_t s[] = L"ab"`）。与 `initString` 同一条规则，
-   * 只是一格四字节：装不下的那个结尾 0 照样可以丢（`wchar_t s[2] = L"ab"`）。
+   * 只是一格 `wcharSize()` 字节（linux/osx 4、win32 2）：装不下的那个结尾 0 照样
+   * 可以丢（`wchar_t s[2] = L"ab"`）。
    */
   initWString(dest, off, ty, vals) {
-    if (btype(ty.ref.t) !== VT_INT) {
+    if (!isWcharType(ty.ref)) {
       this.err(`array of '${typeText(ty.ref)}' cannot be initialized from a wide string`);
     }
+    const w = wcharSize();
     const n = ty.count < 0 ? vals.length + 1 : ty.count;
     if (vals.length > n) this.err('initializer-string is too long');
     for (let i = 0; i < n; i++) {
       const v = BigInt(i < vals.length ? vals[i] >>> 0 : 0);
-      if (dest.stat) this.emitBytes(dest.addr + off + i * 4, 4, v);
+      if (dest.stat) this.emitBytes(dest.addr + off + i * w, w, v);
       else {
         this.f.emit(OP.MSTORE, T_I32, dest.addr, this.mod.consts.i32(v),
-          memDesc(SK_I32, off + i * 4));
+          memDesc(COPY_SK[w], off + i * w));
       }
     }
   }
@@ -2982,9 +2987,11 @@ export class CGen {  /**
       this.next();
       /* 字面量的类型由后缀定（`parseNumber` 已经按 tcc 的规则挑好了记号号）。
        * `'a'` 在 C 里是 **int**，不是 char —— 这一格错了 `sizeof('a')` 就是 1 而不是 4。
-       * `L'a'` 也是 int（`tccgen.c:5614` 那一支在非 PE 目标上就落到 `t = VT_INT`）。 */
+       * `L'a'` 是 `wchar_t`（`tccgen.c:5614-5618`：PE 上 `unsigned short`，别处落到
+       * `t = VT_INT`）—— 量过，win32 上 `sizeof(L'x')` 是 **2**。 */
       let ty = TY_INT;
-      if (t === TOK_CUINT) ty = TY_UINT;
+      if (t === TOK_LCHAR) ty = wcharType();
+      else if (t === TOK_CUINT) ty = TY_UINT;
       else if (t === TOK_CLLONG || t === TOK_CLONG) ty = TY_LLONG;
       else if (t === TOK_CULLONG || t === TOK_CULONG) ty = TY_ULLONG;
       const bits = intBitsOf(ty);
@@ -6604,14 +6611,17 @@ export class CGen {  /**
       return BigInt.asIntN(8, BigInt(i === bytes.length ? 0 : bytes.charCodeAt(i) % 256));
     }
     if (t === TOK_LSTR) {
-      // 宽的那一路同理，一格是一个带符号的 `wchar_t`（这个目标上就是 int）。
+      /* 宽的那一路同理，一格是一个 `wchar_t` —— linux/osx 上带符号的 int、
+       * win32 上无符号的 short（`wcharType`）。 */
       const vals = this.readWStrTok(this.tokc);
       if (this.tok !== LBRACK) return BigInt(this.wstrData(vals));
       this.next();
       const i = Number(this.constExpr());
       this.skip(RBRACK);
       if (i < 0 || i > vals.length) this.err('string literal index out of range');
-      return BigInt.asIntN(32, BigInt(i === vals.length ? 0 : vals[i]));
+      const v = BigInt(i === vals.length ? 0 : vals[i]);
+      const w = wcharSize();
+      return w === 4 ? BigInt.asIntN(32, v) : BigInt.asUintN(16, v);
     }
     if (t === TOK_LAND) {
       /* `static void *t[] = { &&l1 };` —— 标签的编号就是那个「地址」，是个常量。 */
@@ -6910,8 +6920,8 @@ export class CGen {  /**
                * 读完记号已经吃掉，字节留在手上。 */
               strBytes = this.readStrTok(this.tokc);
               vty = mkArray(vty.ref, strBytes.length + 1);
-            } else if (this.tok === TOK_LSTR && btype(vty.ref.t) === VT_INT) {
-              /* `wchar_t s[] = L"ab"` —— 同一件事，一格四字节。 */
+            } else if (this.tok === TOK_LSTR && isWcharType(vty.ref)) {
+              /* `wchar_t s[] = L"ab"` —— 同一件事，一格 `wcharSize()` 字节。 */
               wstrVals = this.readWStrTok(this.tokc);
               vty = mkArray(vty.ref, wstrVals.length + 1);
             } else if (btype(vty.ref.t) === VT_BYTE
@@ -6919,7 +6929,7 @@ export class CGen {  /**
               /* `char a[] = { "abc" };`（第八刀第二十八片）—— 与上一格同一件事，
                * 只是外面多一对花括号。大小照样是 strlen + 1，而**不是**「1 个元素」。 */
               vty = mkArray(vty.ref, strBytes.length + 1);
-            } else if (btype(vty.ref.t) === VT_INT
+            } else if (isWcharType(vty.ref)
               && (wstrVals = this.tryBracedStr(TOK_LSTR)) !== null) {
               vty = mkArray(vty.ref, wstrVals.length + 1);
             } else {
@@ -7641,6 +7651,8 @@ export function lowerC(path, text, host, defs, args) {
   /* 线性内存那条腿上 `long double` 就是 double（那儿没有 x87 可谈）—— 明着拨一次，
    * 免得同一个进程里先编过 x86_64 之后串了（第一百一十一片）。 */
   setLdoubleTarget('arm64');
+  /* 线性内存那条腿上 `wchar_t` 就是 int（那儿没有 PE 可谈）—— 同样明着拨一次。 */
+  setWcharTarget('osx');
   const cpp = new Cpp(host);
   cpp.installPredefs(path, false);
   for (const d of defs ?? []) {
@@ -7818,6 +7830,10 @@ export function lowerCNative(path, text, host, defs) {
    * arm64-macho 与 PE 是 8。它是 ctype.js 里一格模块级状态（tcc 那边是编译期常量），
    * 所以每次进来都拨一次 —— 同一个进程里先编 x86_64 再编 arm64 也不会串。 */
   setLdoubleTarget(host === undefined ? 'arm64' : host.arch);
+  /* `wchar_t` 同理按目标拨（第一百三十片）：win32 上是两字节的 `unsigned short`，
+   * 别的目标是 `int`。宽串一格几个字节、`sizeof(L'x')`、`wchar_t s[] = L"ab"` 认不认
+   * 都跟着它走。 */
+  setWcharTarget(host === undefined ? 'osx' : host.os);
   const cpp = new Cpp(host);
   cpp.installPredefs(path, false);
   for (const d of defs ?? []) {

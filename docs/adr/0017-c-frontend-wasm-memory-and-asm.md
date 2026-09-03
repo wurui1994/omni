@@ -941,6 +941,14 @@ win32 41、arm64-win32 40）。`tccdefs.js` 于是从一张静态表改成顺着
 （`arm64-gen.c:57`），`__CHAR_UNSIGNED__` **只有 arm64-linux**（`arm64-gen.c:41`：
 非 MACHO 非 PE）。`cpp` 那一路也接上了 `--arch`/`--os` —— 从前它连目标都说不出来。
 新门 `tests/c/predefs.js` 12/0（六个目标 × `-dM` 整张表与 `-dD` 那一路，逐行比）。
+**win32 的 `wchar_t` 是两字节**（第一百三十片）：上一片把 `__WCHAR_TYPE__` 摆对之后，
+这一格就只剩「让语言跟着宏走」。tcc 那边是编译期的两条、其实是一件事 ——
+`tcc.h:447` 的 `nwchar_t` 定字节宽度，`tccgen.c:5667`/`:5614` 那两道 `#ifdef TCC_TARGET_PE`
+定宽串与 `L'x'` 的**类型**。ctype.js 于是多一格模块级状态（与 `LDOUBLE_SIZE` 同一个
+办法）：`wcharType()` / `wcharSize()` / `isWcharType()`，`lowerCNative` 按 `host.os` 拨。
+量过：win32 上 `sizeof(L"ab")` 是 6、`sizeof(L'x')` 是 **2**、`unsigned short a[] = L"ab"`
+收得下而 `int a[] = L"ab"` 只是「指针赋给整数」。新门 `tests/c/wchar.js` 27/0/3，
+`str-rodata` 那个 `not yet` 消掉，从 69/0/1 变 72/0。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -14943,6 +14951,95 @@ tcc 那边 `tcc_predefs`（`tccpp.c:3585`）是一串顺着写的 `putdef`，不
   macOS 写的，`--os linux` 编一份 `#include <stdio.h>` 仍然走的是本机那一支。
 
 <!-- 第九刀第一百二十九片-END -->
+
+## 落地：第九刀第一百三十片
+
+**win32 的 `wchar_t` 是两字节。**
+
+上一片把 `__WCHAR_TYPE__` 摆对了（win32 `unsigned short`、linux `int`+`unsigned int`、
+osx `int`+`int`），可宏对了不等于语言跟着走 —— 我们的宽串一律四字节铺。这一片把
+那笔补上。
+
+### tcc 的形状：一件事，两处写
+
+* `tcc.h:447-451` 的 `nwchar_t`：PE 上 `unsigned short`，别处 `int` —— 定的是
+  **一格几个字节**（`cstr_wccat` 往它里头赋值，`sizeof(nwchar_t)` 到处在用）
+* `tccgen.c:5667-5672`（宽串）与 `:5614-5618`（`L'x'`）那两道
+  `#ifdef TCC_TARGET_PE`：定的是**类型** —— `VT_SHORT|VT_UNSIGNED` 还是 `VT_INT`
+
+两处其实是同一件事，所以我们这边只留一格状态，与 `LDOUBLE_SIZE` 同一个办法
+（ctype.js，`lowerC`/`lowerCNative` 每次进来拨一次）：
+
+```js
+let WCHAR_IS_SHORT = false;
+export function wcharType() { return WCHAR_IS_SHORT ? TY_USHORT : TY_INT; }
+export function wcharSize() { return WCHAR_IS_SHORT ? 2 : 4; }
+export function isWcharType(ty) { … }
+export function setWcharTarget(os) { WCHAR_IS_SHORT = os === 'win32'; }
+```
+
+`isWcharType` 是第三个出口，也是最容易漏的那个：`wchar_t s[] = L"ab"` 到底走
+「字符串铺开」还是「把指针赋给整数」，tcc 看的就是元素类型对不对得上
+（`tccgen.c:8064-8070` 那个 if）。原来五处写的是 `btype(ty.ref.t) === VT_INT`。
+
+### 量出来的
+
+```
+win32 : sizeof(L"ab") = 6   sizeof(L'x') = 2   sizeof(L"ab"[0]) = 2
+别的  : sizeof(L"ab") = 12  sizeof(L'x') = 4   sizeof(L"ab"[0]) = 4
+```
+
+`sizeof(L'x')` 那一格是个惊喜 —— **`L'x'` 在 PE 上不是 int**，是
+`unsigned short`（`tccgen.c:5615-5617` 那个 `goto push_tokc` 跳过了 `TOK_CINT`
+那一支）。顺带 tccpp 里 `L'…'` 的收口也换了：非 PE 上 32 位有符号，win32 上
+16 位无符号。
+
+`L'\xffff'` **没进探针**：量过，tcc 自己在静态初始化式里就报
+`constant expression expected`（linux 与 win32 都报），那不是这一格的事。
+
+### 门
+
+新门 `tests/c/wchar.js` **27/0/3**：三个目标 × 五个探针（`sizeof` 那三个数、
+从初值定长的数组、定长数组、相邻宽串拼起来、指向宽串的指针），比 `.data`
+与只读节的字节，加上落在它们里头的符号的落点与大小。探针里元素类型写
+`__WCHAR_TYPE__` —— 上一片刚接对的预定义，于是一份源码在三个目标上各说各的类型。
+
+`str-rodata` 那个 `not yet`（win32 的宽串）消掉了，69/0/1 变 **72/0**。
+
+回归都绿：`native` 227/0、`run` 207/0/1、`native-gen` 83/0、`selfobj` 25/0、
+`tcc-link` 83/0、`predefs` 12/0、`rela-text` 22/0/1、`sym-order` 18/0、
+`rodata-sec` 27/0、`sym-size` 6/0、`rela-order` 6/0、`eh-frame-x64` 8/0、
+`pdata-x64` 11/0、`dm-order` 7/0、`selfpp` 29/0/1、`f80` 5/0、`ldouble-x64` 10/0、
+`x64/from-mir` 90/0、`arm64/from-mir` 88/0。`tcc-obj` 的「容器相同」还是 21。
+
+### 量：`.data` 也该按声明的次序摆（下一片的尺子）
+
+新门那三个 `not yet` 是**同一笔**，而且与 `wchar_t` 无关 —— 是这个探针顺带量出来的：
+
+```c
+char *n = "z";
+__WCHAR_TYPE__ *p = L"ab";
+int m = sizeof(*p);
+```
+
+```
+tcc : n@0+8 p@8+8 m@16+4
+ours: p@0+8 n@8+8 m@16+4
+```
+
+`sizeof(*p)` 借表达式那一路解析（在一个用完就丢的函数里，见 `sizeof`/`&` 那两格），
+于是 `p` 在 `n` 之前就领到了 MIR 的全局号；而两个后端铺 `.data` 的字节是按
+**全局号**走的（`for (let gi = 0; gi < mod.globals.length; gi++)`），不是按声明的次序。
+把那一行换成 `int m = 4;` 就对得上 —— 也就是说这一笔平时藏着，得有「先被提到、
+后被定义」的东西才露出来。
+
+第一百二十五片给只读节立过那根轴（`globalSeq`，`mir/rodata.js` 按它排落点），
+`.data` 还没接上。所以下一片就是把 `.data` 也交给一个按 `globalSeq` 排的规划器 ——
+`planRodata` 那个形状原样再来一遍（或者干脆合成一个「按声明次序摆一节」的零件，
+只读节与 `.data` 各调一次）。`.bss` 同理要看。
+
+<!-- 第九刀第一百三十片-END -->
+
 
 
 

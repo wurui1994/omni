@@ -315,6 +315,31 @@ export function setLdoubleTarget(arch) {
   LDOUBLE_SIZE = arch === 'x86_64' ? 16 : 8;
 }
 
+/* `wchar_t` 也按**目标**走（第一百三十片）。tcc 那边是编译期的两条，其实是一件事：
+ * `tcc.h:447-451` 的 `nwchar_t`（PE 上 `unsigned short`，别处 `int`）定字节宽度，
+ * `tccgen.c:5667-5672` 那道 `#ifdef TCC_TARGET_PE` 定宽串常量的**元素类型**。
+ * 所以这儿也只留一格状态，与 `LDOUBLE_SIZE` 同一个办法：`lowerC`/`lowerCNative`
+ * 每次进来拨一次，忘了拨就是 `int`（非 PE 那一档）。 */
+let WCHAR_IS_SHORT = false;
+
+/** 这个目标上 `wchar_t` 的类型（win32 上 `unsigned short`，别处 `int`）。 */
+export function wcharType() { return WCHAR_IS_SHORT ? TY_USHORT : TY_INT; }
+
+/** 这个目标上 `wchar_t` 有多宽 —— 也就是宽串一格几个字节、按几对齐。 */
+export function wcharSize() { return WCHAR_IS_SHORT ? 2 : 4; }
+
+/** 一个类型是不是这个目标的 `wchar_t`（宽串能不能往它里头铺，看的就是这个）。 */
+export function isWcharType(ty) {
+  return WCHAR_IS_SHORT
+    ? btype(ty.t) === VT_SHORT && (ty.t & VT_UNSIGNED) !== 0
+    : btype(ty.t) === VT_INT;
+}
+
+/** 拨那一格。win32（PE）上 `wchar_t` 是两字节的 `unsigned short`，别的目标是 `int`。 */
+export function setWcharTarget(os) {
+  WCHAR_IS_SHORT = os === 'win32';
+}
+
 export function typeSize(ty) {
   const b = btype(ty.t);
   if (isArray(ty.t)) {

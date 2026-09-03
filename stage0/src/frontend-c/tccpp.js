@@ -1043,10 +1043,12 @@ export class Cpp {
       if (body.length > 1) this.warnAllMsg('multi-character character constant');
       if (isLong) {
         /* `L'ab'` 的值是**最后**那个（`tccpp.c:2198-2203` 的循环对宽的是直接赋值，
-         * 不像窄的那样左移八位再或）。`wchar_t` 在这个目标上是 `int`，所以按 32 位
-         * 有符号收口：`L'\xffffffff'` 是 -1。 */
+         * 不像窄的那样左移八位再或）。收口按这个目标的 `wchar_t`（tcc 那边是
+         * `nwchar_t`，`tcc.h:447-451`）：非 PE 上 32 位有符号（`L'\xffffffff'` 是 -1），
+         * win32 上 16 位无符号。 */
         this.tok = TOK_LCHAR;
-        this.tokc = BigInt.asIntN(32, BigInt(body[body.length - 1]));
+        const last = BigInt(body[body.length - 1]);
+        this.tokc = this.os === 'win32' ? BigInt.asUintN(16, last) : BigInt.asIntN(32, last);
         return;
       }
       /* `c = (c << 8) | (char)byte`（`tccpp.c:2202`）—— `char` 在本机（arm64 Darwin）
@@ -2521,9 +2523,10 @@ function defaultJoin(a, b) {
  * `\u` 要四位、`\U` 要八位（少一位就是错，不是「有几位算几位」）。
  *
  * `isLong`（`L'…'` / `L"…"`）改的是**一格装什么**：窄的一格是一个字节，宽的一格是一个
- * `wchar_t`（这个目标上 4 字节、带符号）。于是宽的那一路不截到 8 位，源码里的非 ASCII
- * 字符也不按 UTF-8 铺开、而是一个码位一格；`\u`/`\U` 反过来 —— 窄的要按 UTF-8 编码，
- * 宽的直接就是那个值（tcc 的 `add_hex_or_ucn` 与 `cstr_u8cat` 那两条岔路）。
+ * `wchar_t`（非 PE 上 4 字节带符号、win32 上 2 字节无符号）。于是宽的那一路不截到 8 位，
+ * 源码里的非 ASCII 字符也不按 UTF-8 铺开、而是一个码位一格；`\u`/`\U` 反过来 ——
+ * 窄的要按 UTF-8 编码，宽的直接就是那个值（tcc 的 `add_hex_or_ucn` 与 `cstr_u8cat`
+ * 那两条岔路）。装不下的高位在**摆字节**那一步才掉（tcc 那边就是往 `nwchar_t` 里赋值）。
  */
 function parseEscapeString(s, fail, isLong = false) {
   const out = [];

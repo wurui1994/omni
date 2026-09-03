@@ -413,8 +413,10 @@ function cObj(path, out, arch, incs, defs, fmt, os) {
     dirname,
     join,
     /* 预定义宏里目标 CPU 那三条跟着 `--arch` 走（第一百〇二片）：`__x86_64__` 一变，
-     * tinycc 自己的源码就走 x86_64 那一支，不必手工递 `-DTCC_TARGET_X86_64`。 */
+     * tinycc 自己的源码就走 x86_64 那一支，不必手工递 `-DTCC_TARGET_X86_64`。
+     * 剩下那四十几条跟着 `--os` 走（第一百二十九片），`wchar_t` 的宽度也是（第一百三十片）。 */
     arch: arch === 'x86_64' ? 'x86_64' : 'arm64',
+    os,
   }, defs.map(([name, body]) => ({ name, body })));
   for (const w of warnings) stderr(`${w}\n`);
   const errs = verifyMir(mod);

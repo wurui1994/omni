@@ -112,8 +112,7 @@ const PROBES = [
     src: 'char *a = "A";\nchar *b = "B";\n'
       + 'int main(void) { const int *w = L"ab"; return a[0] + b[0] + w[0]; }\n',
     /* win32 的 `wchar_t` 是**两字节**（tcc 那边 `L"ab"` 在 `.rdata` 里占 6 字节），
-     * 我们的宽串一律四字节 —— 那是另一笔目标事实，还没做。记在这儿，不是绕过去。 */
-    notYet: { win32: 'win32 的 wchar_t 是 2 字节，我们的宽串还一律 4 字节' },
+     * 第一百三十片把这一格接到 `--os` 上了 —— 三个目标现在都真比。 */
   },
   {
     name: '带转义字节的串',
