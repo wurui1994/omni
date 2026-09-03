@@ -72,7 +72,7 @@ function runProbe(name, src, by) {
     if (l.status !== 0) return { err: (l.stderr ?? '').trim().split('\n')[0] };
   }
   const run = spawnSync(exe, [], { encoding: 'utf8' });
-  return { code: run.status };
+  return { code: run.status, out: run.stdout };
 }
 
 /** 同一份源码两边各跑一遍，退出码必须一样（也必须等于期望值）。 */
@@ -86,6 +86,19 @@ function sameExit(what, name, src, want) {
     return;
   }
   ok(`${what}（两边都退 ${want}）`);
+}
+
+/** 同一份源码两边各跑一遍，**印出来的字节**必须一样（`%Lf` 那一路只有这样才称得出来）。 */
+function sameOut(what, name, src) {
+  const a = runProbe(name, src, 'clang');
+  const b = runProbe(name, src, 'ours');
+  if (a.err !== undefined) { bad(what, `    尺子编不动：${a.err}`); return; }
+  if (b.err !== undefined) { bad(what, `    我们编不动：${b.err}`); return; }
+  if (a.out !== b.out) {
+    bad(what, `    尺子：${JSON.stringify(a.out)}\n    我们：${JSON.stringify(b.out)}`);
+    return;
+  }
+  ok(`${what}（两边印的是 ${JSON.stringify(a.out)}）`);
 }
 
 /* 1. 宽度与布局：16 + 32 + 48 = 96。 */
@@ -168,6 +181,33 @@ sameExit('返回值在 st0：按指针调用', 'ret-ptr',
 sameExit('返回值在 st0：外部符号（strtold 走桩）', 'ret-extern',
   '#include <stdlib.h>\n'
   + 'int main(void) { long double a = strtold("2.5", 0); return (int)(a * 2); }\n', 5);
+
+/* 5. 传参走栈上 16 字节的格子（第一百一十三片）：X87 类一律 MEMORY。
+ *    变参那一路（`printf("%Lf")`）与固定形参那一路（我们自己定义的函数）各一遍，
+ *    再加一条「形参被取了地址」—— 那一格要落到帧上的十六个字节里去。 */
+sameOut('变参里的 long double：printf("%Lf")', 'arg-printf',
+  '#include <stdio.h>\n'
+  + 'int main(void) {\n'
+  + '  long double a = 2.5L;\n'
+  + '  printf("%.4Lf %.4Lf %d %.4Lf\\n", a, a * 2, 7, 1.5L);\n'
+  + '  return 0;\n'
+  + '}\n');
+
+sameOut('固定形参里的 long double（掺着 int 与 double）', 'arg-mix',
+  '#include <stdio.h>\n'
+  + 'long double mix(int a, long double x, double y, long double z, int b) {\n'
+  + '  return x * 2 + y + z + a + b;\n'
+  + '}\n'
+  + 'long double addr(long double x) { long double *p = &x; *p += 1; return x; }\n'
+  + 'int main(void) {\n'
+  + '  printf("%.4Lf %.4Lf\\n", mix(1, 2.5L, 0.25, 0.75L, 2), addr(3.5L));\n'
+  + '  return 0;\n'
+  + '}\n');
+
+sameOut('外部符号按值收 long double（ldexpl 走桩）', 'arg-extern',
+  '#include <stdio.h>\n'
+  + '#include <math.h>\n'
+  + 'int main(void) { printf("%.4Lf\\n", ldexpl(1.5L, 3)); return 0; }\n');
 
 rmSync(OUT, { recursive: true, force: true });
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);

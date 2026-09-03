@@ -425,24 +425,32 @@ const OPS = [
 ];
 
 /* ---------------------------------------------------------------- 一块内容的 aux
- * `ARGMEM` 与「取 struct 的 `VAARG`」的 aux 里塞着两样东西：
+ * `ARGMEM` 与「取 struct 的 `VAARG`」的 aux 里塞着三样东西：
  *
  *   低 20 位   字节数（`sizeof`）
  *   再两位     **SSE 位图** —— 第 0 位说 `[0,8)` 那一整格只装浮点，第 1 位说 `[8,16)`
+ *   再一位     **x87 的 80 位**（`MEMARG_F80`，第九刀第一百一十三片）
  *
  * 为什么位图也得跟着走：SysV 的聚合分类要它（一格里全是 float/double 就进 xmm，
  * 掺进一个整型就进整数寄存器），而 MIR 是**不分架构**的 —— 同一份 MIR 喂 arm64 与
  * x86_64 两个后端，所以「这一格里是不是全浮点」这条**类型事实**只能由前端算好带下来
  * （算在 `ctype.js` 的 `sseEightbytes`）。苹果的 arm64 用不着它：那边变参一律走栈。
  *
- * 超过 16 字节的聚合在 SysV 里一律进 MEMORY，位图没有意义，前端填 0。 */
+ * 超过 16 字节的聚合在 SysV 里一律进 MEMORY，位图没有意义，前端填 0。
+ *
+ * `MEMARG_F80` 是同一个道理的第三样：x86_64 的 `long double` 是 X87 类 —— **不看大小**
+ * 一律 MEMORY，格子 16 字节、16 对齐，而里头只有前十个字节有效。按字节数猜不出来
+ * （16 字节的聚合是能进两个寄存器的），所以只能明说。 */
 const MEMARG_SHIFT = 2 ** 20;
+/** 这一块是 x87 的 80 位（一律 MEMORY，16 字节的格子）。按在 SSE 位图之上那一位。 */
+export const MEMARG_F80 = 4;
 export function memArgAux(size, sseMask) {
   if (size <= 0 || size >= MEMARG_SHIFT) throw new Error(`mir: ARGMEM 的字节数 ${size} 出界`);
   return size + sseMask * MEMARG_SHIFT;
 }
 export function memArgSize(aux) { return aux % MEMARG_SHIFT; }
-export function memArgSse(aux) { return Math.floor(aux / MEMARG_SHIFT); }
+export function memArgSse(aux) { return Math.floor(aux / MEMARG_SHIFT) % MEMARG_F80; }
+export function memArgIsF80(aux) { return Math.floor(aux / MEMARG_SHIFT) >= MEMARG_F80; }
 
 /* -------------------------------------------- `CCALL`/`CALLI` 的 aux
  * 两件事挤在一格里（第九刀第一百一十二片给它加了第二件）：

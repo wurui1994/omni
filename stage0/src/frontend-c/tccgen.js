@@ -182,7 +182,7 @@ import {
 } from './ctype.js';
 import {
   MirModule, MirFunc, OP, T_VOID, T_I32, T_I64, T_BOOL, T_F32, T_F64, REF_NONE,  CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16, CVT_I2F, CVT_U2F, CVT_F2I, CVT_F2U,
-  CVT_FCVT, memDesc, MEM_PAGE, fnPtr, isConstRef, memArgAux, CALL_LDRET,
+  CVT_FCVT, memDesc, MEM_PAGE, fnPtr, isConstRef, memArgAux, CALL_LDRET, MEMARG_F80,
 } from '../mir/ir.js';
 import { f80Bytes } from './f80.js';
 
@@ -3459,8 +3459,11 @@ export class CGen {  /**
         continue;
       }
       const r = this.gv(this.castTo(vals[i], want));
-      if (fixed) refs.push(r);
-      else if (!drop) extra.push({ ty: want, ref: r });
+      /* x86_64 的 `long double`（第一百一十三片）：值落进帧上十六个字节，传的是那一块。
+       * 别的目标上这一步什么都不做。 */
+      const rr = this.ldArgMem(want, r);
+      if (fixed) refs.push(rr);
+      else if (!drop) extra.push({ ty: want, ref: rr });
     }
     /* 变参：`...` 后面的实参不进实参表，进帧上的一块「变参区」，地址当**最后一个**
      * 实参传进去（第十六片的 ABI）。于是变参函数的 MIR 签名是**定死的**
@@ -3612,6 +3615,25 @@ export class CGen {  /**
   }
 
   /**
+   * x86_64 的 `long double` 实参（第一百一十三片）：SysV 说它是 X87 类 —— **一律走内存**，
+   * 栈上一个 16 字节、16 对齐的格子。所以传的不是那个值，是「帧上这十六个字节」。
+   *
+   * 别的目标上（`ldoubleSize() === 8`）原样回那个 ref，一个字节都不多发。
+   *
+   * 为什么落在帧上而不是让后端就地腾：后端见到的是一个 f64 的值（80 位这件事只活在
+   * 内存里，第一百一十片），要它自己变出十个字节就得知道 C 的类型 —— 那是前端的账。
+   * 格子的地址交给 `ARGMEM`，摆到哪儿仍然由后端按 ABI 定。
+   */
+  ldArgMem(ty, ref) {
+    if (btype(ty.t) !== VT_LDOUBLE || ldoubleSize() !== 16) return ref;
+    const off = this.frameAlloc(ty);
+    this.f.emit(OP.MSTORE, T_F64, this.fpRef, ref, memDesc(SK_F80, off));
+    const addr = this.addrOf(sMem(ty, this.fpRef, off));
+    return this.f.emit(OP.ARGMEM, T_I64, addr, REF_NONE,
+      memArgAux(ldoubleSize(), MEMARG_F80));
+  }
+
+  /**
    * `va_arg(ap, T)`：读走一格、把 ap 推到下一格。
    *
    * **先读后推**，而且读的宽度按 T（一格 8 字节里只有 T 那几个字节有效，见 `vaBlock`）。
@@ -3690,10 +3712,31 @@ export class CGen {  /**
     if (isStruct(info.ret.t)) {
       this.todo(`外部函数 '${name}' 返回 struct 还没到（要真的 ABI）`);
     }
+    /* x86_64 的 `long double` 实参是 X87 类（第一百一十三片）：进来是入参区里一个 16
+     * 字节的格子，转出去也得是。桩自己没有帧，所以给它划一块 —— 每个这样的形参 16 字节。
+     * `ldexpl(x, e)`（`tccpp.c:3961`）是真有的一处：少了这一段它悄悄按 xmm 传出去。 */
+    const isLd = (ty) => btype(ty.t) === VT_LDOUBLE && ldoubleSize() === 16;
+    let ldn = 0;
+    for (const p of params) if (isLd(p.ty)) ldn++;
+    const ldBase = ldn === 0 ? REF_NONE
+      : f.emit(OP.FRAME, T_I64, REF_NONE, REF_NONE, f.frame('$ld', 16 * ldn, 16));
+    let ldk = 0;
     for (const p of params) {
       if (isStruct(p.ty.t)) this.todo('外部函数按值收 struct 还没到（要真的 ABI）');
       const mt = mirTypeOf(p.ty);
       const slot = f.slot(p.name, mt);
+      if (isLd(p.ty)) {
+        f.params.push({ name: p.name, t: mt, slot, ld: true });
+        const off = 16 * ldk;
+        ldk++;
+        f.emit(OP.MSTORE, T_F64, ldBase,
+          f.emit(OP.LOAD, mt, REF_NONE, REF_NONE, slot), memDesc(SK_F80, off));
+        const addr = off === 0 ? ldBase
+          : f.emit(OP.ADD, T_I64, ldBase, this.mod.consts.int(BigInt(off)), 0);
+        refs.push(f.emit(OP.ARGMEM, T_I64, addr, REF_NONE,
+          memArgAux(ldoubleSize(), MEMARG_F80)));
+        continue;
+      }
       f.params.push({ name: p.name, t: mt, slot });
       refs.push(f.emit(OP.LOAD, mt, REF_NONE, REF_NONE, slot));
     }
@@ -7200,7 +7243,12 @@ export class CGen {  /**
     for (const p of params) {
       const mt = mirTypeOf(p.ty);
       const slot = f.slot(p.name, mt);
-      f.params.push({ name: p.name, t: mt, slot });
+      /* x86_64 的 `long double` 形参（第一百一十三片）：它不在 xmm 里，而是在入参区里
+       * 一个 16 字节的格子里（X87 类，与调用点那一侧的 `ldArgMem` 对着）。这是**这个
+       * 形参**的一条事实，所以按在形参表那一格上，由 x86_64 的序言看它。 */
+      const ld = btype(p.ty.t) === VT_LDOUBLE && ldoubleSize() === 16;
+      if (ld) f.params.push({ name: p.name, t: mt, slot, ld: true });
+      else f.params.push({ name: p.name, t: mt, slot });
       if (isStruct(p.ty.t)) {
         /* 传值的 struct：进来的是**调用方那个对象的地址**，而形参是它的一份可改的拷贝
          * （C11 6.9.1 第 10 段）。所以拷贝落在**被调方**这一侧 —— 一次调用于是只有

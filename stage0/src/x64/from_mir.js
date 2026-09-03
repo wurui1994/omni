@@ -49,7 +49,7 @@ import {
   typeKind, isFloatType, intBits, memKindNo, memOff, MLOAD_KINDS, MSTORE_KINDS,
   CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16,
   CVT_I2F, CVT_U2F, CVT_F2I, CVT_F2U, CVT_FCVT, CVT_BITCAST, OP_NAMES, hexBytes,
-  memArgSize, memArgSse, callLdRet,
+  memArgSize, memArgSse, memArgIsF80, callLdRet,
 } from '../mir/ir.js';
 
 /* 草稿寄存器。挑 r10/r11 是因为它们**既不是实参寄存器、也不是被调用者保存的** ——
@@ -108,7 +108,11 @@ function argMemOf(f, ar) {
   if (isConstRef(ar)) return null;
   const i = f.at(ar);
   if (f.op[i] !== OP.ARGMEM) return null;
-  return { size: memArgSize(f.aux[i]), sse: memArgSse(f.aux[i]) };
+  return {
+    size: memArgSize(f.aux[i]),
+    sse: memArgSse(f.aux[i]),
+    f80: memArgIsF80(f.aux[i]),
+  };
 }
 
 /**
@@ -151,6 +155,15 @@ function argPlaces(mod, f, args) {
   for (const ar of args) {
     const mem = argMemOf(f, ar);
     if (mem !== null) {
+      /* X87 类（第一百一十三片）：`long double` **不看大小**一律 MEMORY —— 栈上一个
+       * 16 字节、16 对齐的格子，里头只有前十个字节有效（余下六个字节 clang 也不写）。
+       * 16 对齐这一格靠出参区本身是 16 对齐的（`outArgsBytes` 按 16 取整）。 */
+      if (mem.f80) {
+        stack += stack % 16 === 0 ? 0 : 16 - (stack % 16);
+        at.push({ off: stack, bytes: 10 });
+        stack += 16;
+        continue;
+      }
       const c = classifyMem(mem, ngrn, nsse);
       if (c !== null) {
         at.push({ regs: c.regs, size: mem.size });
@@ -199,12 +212,21 @@ function outArgsBytes(mod, f) {
  *
  * 序言按 `bytes` 把放不下的形参读回来，`VASTART` 三样都要：`gp_offset` 与 `fp_offset`
  * 就是「固定实参已经用掉的那一段」，`overflow_arg_area` 从溢出的固定形参之后起。
+ *
+ * `p.ld`（第一百一十三片）是 x86_64 的 `long double`：X87 类，**不占寄存器**，
+ * 在入参区里占一个 16 字节、16 对齐的格子。入参区从 `rbp + 16` 起，16 本身是 16 的
+ * 整数倍，所以「偏移对齐到 16」就等于「地址对齐到 16」。
  */
 function inArgPlaces(f) {
   let ngrn = 0;
   let nsse = 0;
   let bytes = 0;
   for (const p of f.params) {
+    if (p.ld === true) {
+      bytes += bytes % 16 === 0 ? 0 : 16 - (bytes % 16);
+      bytes += 16;
+      continue;
+    }
     const flt = isFloatType(p.t);
     if (flt && nsse < FARG.length) { nsse++; continue; }
     if (!flt && ngrn < IARG.length) { ngrn++; continue; }
@@ -402,6 +424,19 @@ class FnGen {
     let nsse = 0;
     let inArg = 16;
     for (const p of f.params) {
+      /* x86_64 的 `long double` 形参（第一百一十三片）：X87 类，**不占寄存器** ——
+       * 它在入参区里是一个 16 字节、16 对齐的格子。`fld tbyte` 把那十个字节读进 x87，
+       * 再 `fstp qword` 收成 double 落进槽里（值在 MIR 里是 f64，形状只活在内存里）。 */
+      if (p.ld === true) {
+        inArg += inArg % 16 === 0 ? 0 : 16 - (inArg % 16);
+        buf.emit(x.fldM80(BP, inArg));
+        buf.emit(x.push(RES));
+        buf.emit(x.fstpM64(REG.rsp, 0));
+        buf.emit(x.pop(TMP0));
+        this.frameStore(TMP0, this.slotOff(p.slot));
+        inArg += 16;
+        continue;
+      }
       const flt = isFloatType(p.t);
       if (flt && nsse < FARG.length) {
         this.fromFp(TMP0, FARG[nsse]);
