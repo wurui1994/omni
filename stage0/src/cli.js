@@ -351,6 +351,9 @@ function cObj(path, out, arch, incs, defs, fmt, os) {
     sysIncludeDirs: cSysInclude(),
     dirname,
     join,
+    /* 预定义宏里目标 CPU 那三条跟着 `--arch` 走（第一百〇二片）：`__x86_64__` 一变，
+     * tinycc 自己的源码就走 x86_64 那一支，不必手工递 `-DTCC_TARGET_X86_64`。 */
+    arch: arch === 'x86_64' ? 'x86_64' : 'arm64',
   }, defs.map(([name, body]) => ({ name, body })));
   for (const w of warnings) stderr(`${w}\n`);
   const errs = verifyMir(mod);

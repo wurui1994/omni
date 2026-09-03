@@ -66,7 +66,7 @@ import {
   TOK_pack, TOK_push, TOK_pop,
 } from './tcctok.js';
 import {
-  PREDEFS, PP_ONLY_DEFS, PP_ONLY_AFTER, COMPILE_DEFS,
+  predefs, PP_ONLY_DEFS, PP_ONLY_AFTER, COMPILE_DEFS,
 } from './tccdefs.js';
 
 const CH_EOF = -1;
@@ -212,6 +212,8 @@ export class Cpp {
     this.sysIncludeDirs = host.sysIncludeDirs ?? [];
     this.dirnameOf = host.dirname ?? defaultDirname;
     this.joinPath = host.join ?? defaultJoin;
+    /** 目标架构（`--arch`）。预定义宏里目标 CPU 那三条按它换，见 tccdefs 的 `CPU_DEFS` */
+    this.arch = host.arch ?? 'arm64';
 
     /* 标识符表（tcc 的 `table_ident` + `hash_ident`，`tccpp.c:463-521`）。
      * tcc 用一张 16384 桶的手写哈希表；这里用 Map —— 引擎的哈希表就是那件事，
@@ -2351,7 +2353,7 @@ export class Cpp {
   installPredefs(baseFile, forPP = true) {
     if (this.predefsDone) return;
     this.predefsDone = true;
-    for (const [name, body] of PREDEFS) {
+    for (const [name, body] of predefs(this.arch)) {
       this.define(name, body);
       // `__TCC_PP__` 不在表尾：tcc 在目标/OS 那一段之后就 putdef 了（见 tccdefs.js）。
       if (forPP && name === PP_ONLY_AFTER) {

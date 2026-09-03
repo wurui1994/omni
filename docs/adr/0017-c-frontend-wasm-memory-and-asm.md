@@ -729,6 +729,15 @@ MACHO 上是 `lib%s.dylib`、`lib%s.tbd`、`lib%s.a`，**外层循环是拼法**
 tcc 链完自己喊 `codesign -f -s -`，而 `codesign` 不给 `-i` 时拿**文件基名**当
 identifier，所以两份输出得同名不同目录才比得。
 
+**`--arch` 也换预定义宏**（第一百〇二片）：以前 `--arch x86_64` 只换后端，预定义宏还是
+`__aarch64__` 那一套 —— 编出来的是「按 arm64 那一支展开、按 x86_64 生成」的四不像。
+量出来的差别正好三条（`tcc -dM -E /dev/null` 与 `x86_64-osx-tcc -dM -E /dev/null` 一 diff，
+五十条里只差这三行）：arm64 是 `__aarch64__`/`__arm64__`/`__AARCH64EL__`，x86_64 是
+`__x86_64__`/`__x86_64`/`__amd64__`，别的（LP64、macOS、C99 那些）两边同形。
+`tccdefs.js` 里那一格于是按架构换（`CPU_DEFS`），`Cpp` 从 host 上收 `arch`。
+门是 `tests/c/arch-defs.js`：两条腿各自与自己那把 tcc 比六个宏的在与不在
+（x86_64 那份在 Rosetta 上跑）。
+
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
 地址交给真的 libc（`strlen`/`memcpy`）验过。C 前端现在还把 `&x` 降到影子栈上，
@@ -13004,6 +13013,57 @@ c67 与 arm64-win32）。
 定点比的是最终文件，`.o` 那一格在这里是「差出来时先看是编译器还是链接器」的分水岭。
 
 <!-- 第九刀第一百〇一片-END -->
+
+## 落地：第九刀第一百〇二片
+
+`--arch x86_64` 以前只换后端 —— 预定义宏还是 `__aarch64__` 那一套。也就是说系统头与
+被编的源码都按 arm64 那一支展开，代码却按 x86_64 生成。这种四不像编得过，
+错要到几千行之后以「声明与调用约定对不上」的样子冒出来。
+
+### 差的正好三条
+
+尺子摆在一起一 diff（`tcc -dM -E /dev/null` 对 `x86_64-osx-tcc -dM -E /dev/null`）：
+
+```
+< #define __aarch64__ 1        > #define __x86_64__ 1
+< #define __arm64__ 1          > #define __x86_64 1
+< #define __AARCH64EL__ 1      > #define __amd64__ 1
+```
+
+五十条里只差这三行。别的 —— LP64（`__SIZEOF_LONG__ 8`）、macOS（`__APPLE__`、
+`__leading_underscore`）、C99、那一堆装成 GCC 4 的 —— 两边同形，因为这两个目标在
+这台机器上除了 CPU 就没别的分歧。
+
+`tccdefs.js` 里于是留一格占位（`CPU_SLOT`），`predefs(arch)` 把 `CPU_DEFS[arch]`
+那三条填进去；`Cpp` 从 host 上收 `arch`（cli 的 `c-obj` 按 `--arch` 递）。
+
+### 顺手量到的一件事
+
+这三条一变，tinycc 自己的源码本该跟着走另一支 —— `tcc.h:163-186` 在没有
+`TCC_TARGET_*` 的时候就是照 `__x86_64__`/`__aarch64__` 选目标的。但
+`selfobj.js` 的 x86_64 那一腿仍旧要手工递 `-DTCC_TARGET_X86_64 -DTCC_TARGET_MACHO`，
+原因不在我们这边：`.omni-cache/tcc-build/config.h`（本机那次 `configure` 生成的）里
+写死了
+
+```c
+#if !(TCC_TARGET_I386 || TCC_TARGET_X86_64 || …)
+#define TCC_TARGET_ARM64 1
+#define TCC_TARGET_MACHO 1
+#endif
+```
+
+`-I` 指着那份 config.h 编，目标就已经被它钉成 arm64 了，`tcc.h` 那段默认选择根本不会
+执行。tinycc 的 Makefile 交叉编时也是明着给 `-DTCC_TARGET_*` 的（`Makefile:100-120`），
+所以这一格照旧。
+
+### 门
+
+`tests/c/arch-defs.js`，2 条。探针把六个 CPU 宏的在与不在、以及 `sizeof(void *)`
+与 `sizeof(long)` 印出来；尺子是 tcc 自己 —— arm64 那条腿用本机那份，x86_64 那条腿用
+`x86_64-osx-tcc`（它需要手工的 `-B <交叉目录> -I <SDK>/usr/include -L <SDK>/usr/lib`，
+因为交叉那份没烤系统路径），出来的可执行文件在 Rosetta 上跑。两边 stdout 逐字节比。
+
+<!-- 第九刀第一百〇二片-END -->
 
 
 

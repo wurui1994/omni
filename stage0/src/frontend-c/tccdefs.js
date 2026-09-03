@@ -28,20 +28,49 @@
 // `-dM` 的逐行输出（那要一台「边定义边印」的钩子，独立一片）。
 
 /**
+ * 目标 CPU 那三条（tcc 的 `tcc_new`：`TCC_TARGET_ARM64` / `TCC_TARGET_X86_64`
+ * 各定各的）。量出来的（`tcc -dM -E /dev/null` 两边一 diff）：**整张表就差这三行**，
+ * 别的四十七条一模一样 —— LP64、macOS、C99 那些两边同形（第一百〇二片）。
+ *
+ * 三条一变，tcc 自己的源码就跟着走另一支：`tcc.h` 没给 `TCC_TARGET_*` 时按
+ * `__x86_64__` / `__aarch64__` 选目标，所以「编 x86_64 的 tcc」不必手工递
+ * `-DTCC_TARGET_X86_64`。
+ */
+export const CPU_DEFS = {
+  arm64: [
+    ['__aarch64__', '1'],
+    ['__arm64__', '1'],
+    ['__AARCH64EL__', '1'],
+  ],
+  x86_64: [
+    ['__x86_64__', '1'],
+    ['__x86_64', '1'],
+    ['__amd64__', '1'],
+  ],
+};
+
+/** `predefs()` 里那一格占位：目标 CPU 那三条按架构换。 */
+const CPU_SLOT = Symbol('cpu');
+
+/**
  * 这个目标上的预定义宏，**按定义顺序**。`[名字, 宏体]`，宏体 `undefined` = 空展开。
  * 函数宏把形参写在名字里（`define()` 就是拼一行 `#define`，所以形状与源码一致）。
  *
  * `__BASE_FILE__` 不在表里 —— 它是「主输入文件」，由 `installPredefs` 补在最后，
  * 与 tcc 同一个位置。
  */
-export const PREDEFS = [
+export function predefs(arch = 'arm64') {
+  const cpu = CPU_DEFS[arch];
+  if (cpu === undefined) throw new Error(`tccdefs: 不认识的架构 ${arch}`);
+  return PREDEFS.map((e) => (e === CPU_SLOT ? cpu : [e])).flat();
+}
+
+const PREDEFS = [
   // ---- tcc 自己（`libtcc.c` 的 tcc_new -> tcc_define_symbol）
   ['__TINYC__', '928'],
 
-  // ---- 目标 CPU（`TCC_TARGET_ARM64`）
-  ['__aarch64__', '1'],
-  ['__arm64__', '1'],
-  ['__AARCH64EL__', '1'],
+  // ---- 目标 CPU（按架构换，见 `CPU_DEFS`）
+  CPU_SLOT,
 
   // ---- 目标 OS（`TCC_TARGET_MACHO`）
   ['__APPLE__', '1'],
