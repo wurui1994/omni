@@ -271,6 +271,35 @@ arm64 与 x64 各有一套 `widthOf`/`nyi`/`outArgsBytes`。
 **剩下的 22 条是导出的名字**（`writeObject`、`typeText`、`utf8Bytes`……），
 改它们要动调用方，得一处一处看 —— 不在 `dedup.js` 的范围里，也不该由一支脚本代劳。
 
+#### 量：`export { 新名 as 老名 }` **不是**一条捷径
+
+看到那 22 条时，第一个想法是「把声明改名、导出名不动」，这样一处调用方都不用动：
+
+```js
+function arm64Ret() { … }
+export { arm64Ret as ret };     // 调用方照旧 import { ret }
+```
+
+读了链接器（`frontend-js/link.js`）之后知道这条路走不通，而且理由正是这个链接器的
+**核心设计**：它**一个名字都不重命名**。整棵 import 树的模块体**原样接起来**成一份程序，
+import 的别名摊成一句模块级的 `const 本地名 = 导出名`（`link.js:291-302`，
+注释写着「不重命名，也就不需要作用域分析」）。
+
+于是：
+
+- 导出名在拼出来的那份程序里**根本不是一个绑定** —— 只有声明的那个名字是。
+  `import { ret }` 会引到一个不存在的 `ret`。
+- 就算给导出别名也补一句 `const ret = arm64Ret;`，那个 `ret` **立刻又是一个模块作用域
+  的名字**，与 x64 那个 `ret` 照旧撞 —— 一步都没往前走。
+
+`link.js:194-196` 现在明着拒 `export { a as b }`（「renaming an export is not supported」），
+那句拒绝不是没写完，**是对的**：在「不重命名」这个模型里它没有正确的实现。
+
+所以那 22 条只有一条路：**改导出名 + 改调用方**（`cli.js` 里那几处已经是
+`import { genModule as genArm64 }` 的形状，所以改的是 `imported` 那一半），
+而且门里也有引用（`tests/arm64/link.js` 这类直接 import `genModule` 的）。
+机械但要一处一处过，不是脚本活。
+
 每一批改完都跑了对应的门：`arm64/from-mir` 88/0、`arm64/link` 21/0、`x64/from-mir` 90/0、
 `x64/link` 21/0、`elf-merge`/`elf-roundtrip`/`pe-*` 八门全 0 不同、`macho-tcc` 4/0、
 `macho-libc` 180/0、`tcc-link` 83/0、`c/run` 207/0、`run` 133/0、`sexpr` 78/0。
