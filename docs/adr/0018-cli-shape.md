@@ -546,7 +546,8 @@ ours:  #define FOO 2 / #undef __TINYC__ / #undef __APPLE__ / #undef NEVER
 
 **还没做的**（分片 4 剩下的）：`emit`/`run`/`build` 那 12 条隐藏别名还在；`--explain`
 只覆盖 C 那一条腿（`omni run --explain` 现在明着说「还没覆盖」——那句话是对的，
-它没装作能行）。（`check` 在下一片里接上了。）
+它没装作能行）。（`check` 在第二片里接上了，`--explain` 在第三片里铺开到
+`emit`/`check`/`interp`。）
 
 <!-- 分片 4 第一片-END -->
 
@@ -573,6 +574,49 @@ ours:  #define FOO 2 / #undef __TINYC__ / #undef __APPLE__ / #undef NEVER
 一条「少查了几样」的 `check` 比没有 `check` 更坏：它会让人以为查过了。
 
 <!-- 分片 4 第二片-END -->
+
+## 落地：分片 4（第三片）—— `--explain` 覆盖 `emit`/`check`/`interp`
+
+分片 2 只做了 C 那一条腿。这一片加 `src/core/cli/plan-omni.js`，与 `plan-c.js` 同一条
+规矩：**只造表、不干活**，看的是与实现同一批开关。
+
+前端由**扩展名**选（`compileFront` 那一条规矩），所以表里前端那几格也照扩展名分：
+
+- `.omni` 一族：`parse -> AST`（`--mode` 压过扩展名）
+- `.asy` / `.jnc`：多两格 —— `AST -> 核心方言文本 -> s-expr`（`omni emit sx` 印的就是中间那一格）
+- `.sx`：`read -> s-expr`（**没有 AST**）
+- 之后都一样：`check -> OIR`、`prune -> OIR`（摇树在 `compile` 里，所以它属于这一段）
+
+### 三处「宁可回 null」
+
+造不出表就回 `null`，调用方明着说没覆盖 —— **编一条看起来合理的管线出来比明说没有更坏**：
+
+- `run`/`build`：那两条**边走边决定**（`.asy` 那一路先问「上一趟的清单还成立吗」，
+  命中就一步前端都不走）。要造表得先把「走哪条」提前算出来，那是另一片的事。
+- `emit sx` 在 `.omni` 上：那一路没有「前端 -> 核心方言」这一步。
+- `emit ast` 在 `.sx` 上：那一路没有 AST。
+
+报错也分开说：`run`/`build` 报「边走边决定」，别的报「这一条在这个文件上说不通」。
+混成一句会把人往错的方向指。
+
+### 两处量出来的
+
+- **`check --explain` 会真去编一遍**。第一版把 `check` 那一段摆在 `--explain` **前面**，
+  于是 `omni check x.omni --explain` 印的是 `ok x.omni：6 个函数` —— 它把活干了。
+  `--explain` 的承诺是「一个字节都不写盘、不执行」，摆错位置就等于把那句承诺撤了。
+  挪到 `--explain` 之后。
+- **`.c` 上的 `check` 不是 omni 那一路**。第一版 `planForOmni` 不认 `.c`，于是
+  `check t.c --explain` 印出「omni（mixed） → AST」——**编的**。`.c` 走的是 C 那一路的
+  一遍过（`cpp -> MIR` + `verifyMir`），没有 OIR 这一层，得单出一条。
+
+### 门
+
+`tests/cli/tree.js` **58/0**（原 48）：新十条 —— `omni → JS` 的形态串与那五格动词、
+`--mode` 压过扩展名、asy 那一路的形态串、`--amalgamate` 印在哪一格、`interp --mir`
+多一格 `lower`、`.c` 上的 `check` 是 C 那一路，以及三条「该回 null」。
+`tests/run.js` 133/0 照旧。
+
+<!-- 分片 4 第三片-END -->
 
 
 

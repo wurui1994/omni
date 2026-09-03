@@ -19,6 +19,7 @@ import { findCmd, splitArgv, canonicalize, ownsVerbose, renderHelp, renderLegacy
 import { ROOT, LEGACY } from './cli/cmds.js';
 import { renderPlan, renderSummary, renderStage } from './cli/stages.js';
 import { planForC } from './cli/plan-c.js';
+import { planForOmni } from './cli/plan-omni.js';
 import { tccTranslate } from './cli/cmd-tcc.js';
 import { linkJs } from './frontend-js/link.js';
 import { lowerJs } from './frontend-js/lower.js';import { lowerWat } from './frontend-wat/lower.js';
@@ -2247,27 +2248,6 @@ function main(argv) {
     else if (f === 'pe') cmd = 'pe-link';
     else throw new OmniError(`c link: 不认识格式 '${f}'；有 elf macho pe`);
   }
-  /* `check`（决策一）：只走**前端与检查器**，不出产物、不执行。
-   *
-   * 它不是「少一步的 build」——它是**唯一**一条「我只想知道这份源码有没有错」的路。
-   * 从前这儿是一句「还没到，用 omni emit oir」，而那句话让人把一份 12MB 的 JSON
-   * 印到终端上去看有没有报错。
-   *
-   * 前端由扩展名选，与别处同一条规矩（`compileFront`）。`.c` 走 C 那一路的
-   * 一遍过（`cMir` 里就带 `verifyMir`）—— C 没有 OIR 这一层。
-   * 印一行摘要，**错误照旧由抛出来的 `OmniError` 负责**（退出码 1）。 */
-  if (cmd === 'check') {
-    if (path === undefined) throw new OmniError('check 要一个源文件');
-    if (path.endsWith('.c')) {
-      const mod = cMir(path, incDirs(rest), defArgs(rest), [], sysIncDirs(rest));
-      stdout(`ok  ${path}：${mod.funcs.length} 个函数（C 一遍过 + MIR 自检）\n`);
-      return 0;
-    }
-    const { mod } = compile(path, rest);
-    const nf = mod.funcs === undefined ? 0 : mod.funcs.length;
-    stdout(`ok  ${path}：${nf} 个函数（前端 + 检查器，没出产物）\n`);
-    return 0;
-  }
   // repl 没有源文件；默认模式是 ADR-0008 第 3 节的 dynamic（沿革见 repl.js 文件头）。
   // `--lang` 选前端：驱动是与语言无关的，omni 走检查器的增量会话，sx/asy 走核心方言的，
   // js 走 frontend-js 的增量会话（原生二进制上一样有交互式 JS —— 那是前端，不需要
@@ -2307,18 +2287,54 @@ function main(argv) {
 
   /* `--explain`（ADR-0018 决策五）：印出将要走的管线然后停 —— **一个字节都不写盘、不执行**。
    * 它看的是与实现同一批开关，所以说得准；表在动手之前就齐，这也是 `-v` 能与它共用同一份
-   * 渲染的前提。分片 2 先覆盖 C 那一条腿（管线最长、也是逐字节对着 tcc 量的那条）。 */
+   * 渲染的前提。C 那一条腿在分片 2（管线最长、也是逐字节对着 tcc 量的那条），
+   * `emit`/`check`/`interp` 在分片 4（`plan-omni.js`）。
+   *
+   * **`run`/`build` 还是没覆盖**，而且那句「还没覆盖」是诚实的：那两条**边走边决定**
+   * （`.asy` 那一路先问「上一趟的清单还成立吗」，命中就一步前端都不走），要造表得先把
+   * 「要走哪条」提前算出来。编一条看起来合理的管线出来比明说没有更坏。 */
   if (rest.includes('--explain')) {
-    const plan = planForC(cmd, path, files, rest);
-    if (plan === null) {
-      throw new OmniError(`--explain 还没覆盖 '${cmd}'（ADR-0018 分片 2 先做 C 那一条腿）`);
+    const plan = planForC(cmd, path, files, rest) ?? planForOmni(cmd, path, files, rest);
+    if (plan === null || plan === undefined) {
+      /* 骂的时候把**为什么没覆盖**分开说：`run`/`build` 是边走边决定的（要先把「走哪条」
+       * 提前算出来），而 `emit sx` 这种是「这一条在这个文件上说不通」（`.omni` 没有
+       * 「前端 -> 核心方言」那一步）。混成一句话会把人往错的方向指。 */
+      const why = cmd === 'run' || cmd === 'build'
+        ? '这两条是边走边决定的（.asy 那一路命中缓存就一步前端都不走），'
+          + '要造表得先把「走哪条」提前算出来 —— ADR-0018 分片 4'
+        : `'${cmd}' 在 ${path} 上说不通，或者这一条还没造表`;
+      throw new OmniError(`--explain 还没覆盖 '${cmd}'：${why}`);
     }
     stdout(renderPlan(plan));
     return 0;
   }
   /* `-v` 也走那张表（分片 2 后半）：先接过来，再由实现一格一格标完成。造不出表的命令
    * （还没覆盖的那些）`LIVE` 就是 `null`，那些路上照旧走老的 `vStep`。 */
-  if (VERBOSE) vBegin(planForC(cmd, path, files, rest));
+  if (VERBOSE) vBegin(planForC(cmd, path, files, rest) ?? planForOmni(cmd, path, files, rest));
+
+  /* `check`（决策一）：只走**前端与检查器**，不出产物、不执行。
+   *
+   * 它不是「少一步的 build」——它是**唯一**一条「我只想知道这份源码有没有错」的路。
+   * 从前这儿是一句「还没到，用 omni emit oir」，而那句话让人把一份十几 MB 的 JSON
+   * 印到终端上去看有没有报错。
+   *
+   * 前端由扩展名选，与别处同一条规矩（`compileFront`）。`.c` 走 C 那一路的
+   * 一遍过（`cMir` 里就带 `verifyMir`）—— C 没有 OIR 这一层。
+   * 印一行摘要，**错误照旧由抛出来的 `OmniError` 负责**（退出码 1）。
+   *
+   * 位置要紧：这一段在 `--explain` **之后** —— 不然 `check --explain` 会真去编一遍，
+   * 而 `--explain` 的承诺是「一个字节都不写盘、不执行」。（第一版就摆错了，量出来了。） */
+  if (cmd === 'check') {
+    if (path.endsWith('.c')) {
+      const mod = cMir(path, incDirs(rest), defArgs(rest), [], sysIncDirs(rest));
+      stdout(`ok  ${path}：${mod.funcs.length} 个函数（C 一遍过 + MIR 自检）\n`);
+      return 0;
+    }
+    const { mod } = compile(path, rest);
+    const nf = mod.funcs === undefined ? 0 : mod.funcs.length;
+    stdout(`ok  ${path}：${nf} 个函数（前端 + 检查器，没出产物）\n`);
+    return 0;
+  }
 
   switch (cmd) {
     case 'run': {

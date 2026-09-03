@@ -10,6 +10,7 @@ import { findCmd, splitArgv, canonicalize, ownsVerbose, renderHelp } from '../..
 import { ROOT, LEGACY } from '../../src/core/cli/cmds.js';
 import { newPlan, addStage, renderPlan, renderStage } from '../../src/core/cli/stages.js';
 import { planForC } from '../../src/core/cli/plan-c.js';
+import { planForOmni } from '../../src/core/cli/plan-omni.js';
 import { tccTranslate } from '../../src/core/cli/cmd-tcc.js';
 
 let pass = 0;
@@ -228,7 +229,49 @@ const err = (m) => new Error(m);
   eq('pe-link --shared 是 .dll，且要解导入表', [p.summary, renderPlan(p).includes('idata')],
     ['2×.o → merge → PE（.dll）', true]);
 }
-eq('还没覆盖的命令回 null', planForC('emit-js', 'a.omni', ['a.omni'], []), null);
+eq('C 那张表不认与语言无关的那几条（回 null，由 planForOmni 接）',
+  planForC('emit-js', 'a.omni', ['a.omni'], []), null);
+
+/* ---- 与语言无关那几条动词的管线表（分片 4，`plan-omni.js`）。 */
+{
+  const p = planForOmni('emit-js', 'a.omni', ['a.omni'], []);
+  eq('omni → JS', p.summary, 'omni（mixed） → JS');
+  const verbs = p.stages.map((s) => s.verb);
+  eq('前端 + 检查器 + 摇树都在表上', verbs, ['read', 'parse', 'check', 'prune', 'emit']);
+}
+{
+  /* `--mode` 覆盖扩展名（`.omnid` 本来是 dynamic）。 */
+  const p = planForOmni('oir', 'a.omnid', ['a.omnid'], ['--mode', 'static']);
+  eq('--mode 压过扩展名', p.summary, 'omni（static） → OIR');
+}
+{
+  /* asy/jnc 多两格：`AST -> 核心方言文本 -> s-expr`。 */
+  const p = planForOmni('emit-c', 'a.asy', ['a.asy'], ['--amalgamate']);
+  eq('asy 那一路先落到核心方言文本',
+    [p.summary, p.stages.map((s) => s.out)],
+    ['asy → C', [undefined, 'AST', '核心方言文本', 's-expr', 'OIR', 'OIR', 'C']]);
+  eq('--amalgamate 印在那一格上', renderPlan(p).includes('--amalgamate'), true);
+}
+{
+  const p = planForOmni('interp', 'a.omni', ['a.omni'], ['--mir']);
+  const last = p.stages[p.stages.length - 1];
+  eq('interp --mir 多一格 lower，最后一格是 exec',
+    [p.summary, last.phase, last.in], ['omni（mixed） → OIR → MIR → interp', 'exec', 'MIR']);
+}
+{
+  /* `.c` 上的 `check` 走的是 C 那一路（cpp -> MIR + 自检），**没有 OIR 这一层** ——
+   * 拿 omni 那一套形态串描述它就是编的。 */
+  const p = planForOmni('check', 't.c', ['t.c'], []);
+  eq('check 在 .c 上是 C 那一路', [p.summary, p.stages.map((s) => s.verb)],
+    ['c → cpp → MIR（自检，不出产物）', ['read', 'cpp', 'lower', 'verify', 'print']]);
+}
+/* 说不通的那几格宁可回 null 让调用方明说，也不编一条看起来合理的管线出来。 */
+eq('emit sx 在 .omni 上说不通（没有「前端 -> 核心方言」那一步）',
+  planForOmni('sx', 'a.omni', ['a.omni'], []), null);
+eq('emit ast 在 .sx 上说不通（那一路没有 AST）',
+  planForOmni('ast', 'a.sx', ['a.sx'], []), null);
+eq('run/build 还没覆盖（边走边决定）', planForOmni('run', 'a.omni', ['a.omni'], []), null);
+
 {
   const bads = [];
   for (const [, now] of LEGACY) {
