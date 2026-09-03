@@ -61,20 +61,22 @@ static void bench(int size, int reps) {
     double t0 = now_ms();
     for (int py = 0; py < size; py++) {
       f8 in[4], out[4];
+      f8 rowacc = (f8)0.0f;          /* 一行的校验和整条向量地攒 */
       in[1] = (f8)((float)py + 0.5f);
       in[2] = (f8)(float)size;
       in[3] = (f8)(float)size;
       for (int px = 0; px < size; px += 8) {
         in[0] = (f8)((float)px + 0.5f) + lane;   /* 整条向量地生成 x */
         glsl_frag8(in, out);
+        /* 量化也**整批**做（第 3 步的那一格）：clamp 到 [0,1]、×255、截断，
+         * 全是向量指令 —— 从前这儿是每格 8 次标量循环，那把向量化的收益吐回去了。 */
         for (int c = 0; c < 4; c++) {
-          f8 v = out[c];
-          for (int l = 0; l < 8; l++) {
-            float f = v[l] < 0.0f ? 0.0f : (v[l] > 1.0f ? 1.0f : v[l]);
-            sum += (unsigned long long)(f * 255.0f + 0.5f);
-          }
+          f8 v = __builtin_elementwise_max(out[c], (f8)0.0f);
+          v = __builtin_elementwise_min(v, (f8)1.0f);
+          rowacc += __builtin_elementwise_trunc(v * 255.0f + 0.5f);
         }
       }
+      for (int l = 0; l < 8; l++) sum += (unsigned long long)rowacc[l];
     }
     double dt = now_ms() - t0;
     if (dt < best) best = dt;

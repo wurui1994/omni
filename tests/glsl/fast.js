@@ -88,6 +88,12 @@ const llPath = join(OUT, 'frag.ll');
 writeFileSync(llPath, glslEmitLlvm(mod));
 const exe = join(OUT, 'fast');
 const cc = process.env.OMNI_CLANG ?? 'clang';
+/* 没有 clang 就**跳过整门**（`OMNI_CLANG` 可指一个）。快路本来就是 LLVM 那条路，
+ * 没有 clang 谈不上 —— 但那不该让别的门连带红。 */
+if (spawnSync(cc, ['--version'], { encoding: 'utf8' }).status !== 0) {
+  process.stdout.write(`  skip 没有 ${cc}（快路要它；OMNI_CLANG 可指一个）\n\n0 passed, 0 failed\n`);
+  process.exit(0);
+}
 const build = spawnSync(cc, ['-O2', '-w', DRIVER, llPath, '-lm', '-o', exe], { encoding: 'utf8' });
 if (build.status !== 0) {
   bad('快路编不过', `    ${(build.stderr ?? '').trim().split('\n').slice(0, 6).join('\n    ')}`);
@@ -116,14 +122,27 @@ if (sam.status !== 0) {
   }
 }
 
-/* ---- 三、印一行数（不是断言 —— 下限门等框架那一半做完再立） ------------------ */
-
+/* ---- 三、下限门（决策六：没有下限的性能表只是记录，不是验收） ------------------
+ *
+ * `100` 是这么来的：同一类算术、同一台机、`clang -O2` 手写 8 道 f32 量到的天花板是
+ * 178 MPix/s（`soa_ceiling.c`），留 40% 余量。llvmpipe 单核 Simple 是 160～315，
+ * 所以这一档只是「进了同一个量级」，不是终点。
+ *
+ * **这道门是在对账门绿了之后才立的**（开工单第 4 步那句话）：反过来的话，
+ * 输出全 0 那一版会以 277 MPix/s 通过 —— 那一版 clang 把大半计算删了。 */
+const FLOOR = Number(process.env.OMNI_GLSL_FLOOR ?? 100);
 const bench = spawnSync(exe, ['bench', String(RES), '3'], { encoding: 'utf8' });
 if (bench.status === 0) {
   const mp = /MPix\/s (\S+)/.exec(bench.stdout);
   const ms = /ms (\S+)/.exec(bench.stdout);
-  process.stdout.write(`  --   快路 ${RES}²：${ms === null ? '?' : ms[1]} ms、${mp === null ? '?' : mp[1]} MPix/s`
-    + `（参照实现 bench-complex 是 0.70；天花板量到 178，见 ADR 决策六）\n`);
+  const got = mp === null ? 0 : Number(mp[1]);
+  const line = `快路 ${RES}²：${ms === null ? '?' : ms[1]} ms、${got} MPix/s`;
+  if (got >= FLOOR) ok(`${line} ≥ 下限 ${FLOOR}（天花板 178；参照实现那条路的框架上限是 32.77）`);
+  else {
+    bad(`${line} < 下限 ${FLOOR}`,
+      '    快路的意义就是这个数。低于下限说明形状还不对 —— 别调下限，去查形状\n'
+      + '    （ADR-0019 决策六：着色器那一半 SoA、框架那一半每 quad 一个掩码）。');
+  }
 } else {
   bad('快路的 bench 跑不动', `    ${(bench.stderr ?? '').trim().slice(0, 200)}`);
 }
