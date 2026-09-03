@@ -14804,6 +14804,44 @@ address`。**调它**与**取它的地址**是两回事 —— 调用点那条 `
 
 <!-- 第九刀第一百二十八片-END -->
 
+## 量：arm64 上取符号地址一律过 GOT（下一片的尺子）
+
+上一片剩的那个 `not yet` 顺出一条**目标事实**，比原来以为的大。量 arm64-osx（尺子）：
+
+```c
+int g = 5;
+static const char s[] = "ab";
+int main(void) { return g + s[0]; }
+```
+
+`.rela.text` 四条，两两成对：
+
+```
+@32 type311 sym=_s add=0 insn=9000001e   adrp x30, :got:_s
+@36 type312 sym=_s add=0 insn=f94003de   ldr  x30, [x30, :got_lo12:_s]
+@44 type311 sym=_g ...                   同一对，换成 _g
+@48 type312 sym=_g ...
+```
+
+`311` = `R_AARCH64_ADR_GOT_PAGE`、`312` = `R_AARCH64_LD64_GOT_LO12_NC`。也就是说
+**arm64 上 tcc 取任何符号的地址都过 GOT** —— 连 `static const char s[]`（同一个 `.o`
+里的局部符号）也是。我们发的是 `adrp` + `add`（`275` = `ADR_PREL_PG_HI21`、
+`277` = `ADD_ABS_LO12_NC`），一条 `ldr` 都没有。
+
+这条事实牵着好几笔：
+
+* arm64 的 `.rela.text` 要对上，得改成那一对 —— 数量、类型、指令三样一起变
+* 第一百二十八片那第 4 类（取过地址的外部函数还留着桩）**正好被它解掉**：
+  过 GOT 的地址天生够得着未定义符号
+* 我们自己的链接器要会**建 GOT**（tcc 那边是 `tccelf.c` 的 `build_got`/`put_got_entry`）——
+  `tcc-link`/`macho-exe` 那几条腿现在解的是 `PAGE21`/`LO12`，多一节 `.got` 是新东西
+* x86_64 上不是这样：那边取地址是一条 `lea` + `R_X86_64_PC32`（量过，我们已经一样）
+
+所以这一片得从链接器那头起：先有 `.got` 与那两条重定位的解法，再让 arm64 后端改发
+那一对。**别反着来** —— 反过来会让 `native`（clang 链）绿着而 `tcc-link` 全红。
+
+<!-- 量：arm64 的 GOT-END -->
+
 
 
 
