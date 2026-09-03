@@ -310,8 +310,40 @@ pipeline  c → cpp → MIR → x86_64 → ELF(.o)
 
 `tests/cli/tree.js` 长到 **36/0**（多了管线表那 9 条）。C 那一族与 `tests/run.js` 照旧全绿。
 
-**还没做的**：`-v` 还是老的 `vlog`——把那些调用点改成「把这一格标成完成」是分片 2 的后半；
-`--explain` 还没覆盖我们自己那门语言那几条（`run`/`build`/`emit`），那要先把
+**还没做的**：`--explain` 还没覆盖我们自己那门语言那几条（`run`/`build`/`emit`），那要先把
 「按缓存命中分叉」那一路的决定提前算出来。
+
+## 落地：分片 2（后半）—— `-v` 接上同一张表
+
+`-v` 从前是 56 处散着的 `vStep(自由文本)`。这一片让它**接过 `--explain` 造的那张表**：
+
+```
+$ omni c obj t.c -o t.o --arch x86_64 --os linux -f elf -v
+pipeline  c → cpp → MIR → x86_64 → ELF(.o)
+  1  front  read     t.c  ⋯
+  2  front  cpp      text               -> tokens  ⋯
+  3  mid    lower    tokens             -> MIR         native：没有线性内存…  +13ms（这 3 格一起量）
+  4  back   codegen  MIR                -> x86_64  +7ms
+  5  back   write    x86_64 + 数据三段  -> ELF ET_REL  .text/.data/.data.ro/.bss  t.o  +3ms
+```
+
+与上面 `--explain` 印的**逐字相同**（列宽也一样，因为是同一份 plan），只多了耗时。三处设计：
+
+- `vBegin(plan)` 接表、`vNext(verb)` 标完成。表是 `plan-c.js` 造的、叫的是实现 ——
+  **`vNext` 要核对 `verb`**：两边各改一处就会错位，而错位之后印出来的每一行都在骗人。
+  对不上就直接骂（只在 `-v` 上；不开 `-v` 那条路上一个字节都不多）。
+- 好几格只能一起量的情形：`lowerCNative` 一趟就把读文件、预处理、降级全做了，拆不开。
+  那就 `vNext('read','cpp','lower')`——**耗时只挂在最后一格上**并注明「这 3 格一起量」，
+  前面两格印 `⋯` 而不是编一个数出来。这是这一片唯一一处「显示与实现的粒度不一致」，
+  写在明处比悄悄平摊诚实。
+- 造不出表的命令（还没覆盖的那些）`LIVE` 是 `null`，照旧走老的 `vStep` —— 一次改 56 处
+  才是真的危险。
+
+这一片只接了 `c obj` 那一条（32 处门在用它，也是管线最长的）。`cpp`/`c mir`/`c run` 与
+四条链接器还是老的 `vStep`，是下一片。
+
+门照旧：`tests/cli/tree.js` 36/0、C 那一族全绿、`tests/run.js` 96/0、
+`tcc-obj` 0 字节相同 / 21 容器相同 / 89 不同。
+
 
 

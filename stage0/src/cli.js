@@ -17,7 +17,7 @@ import { join, basename, dirname, isAbsolute, resolve } from './host/path.js';
 import { hash16 } from './host/hash.js';
 import { findCmd, splitArgv, canonicalize, ownsVerbose, renderHelp, renderLegacy } from './cli/tree.js';
 import { ROOT, LEGACY } from './cli/cmds.js';
-import { renderPlan } from './cli/stages.js';
+import { renderPlan, renderSummary, renderStage } from './cli/stages.js';
 import { planForC } from './cli/plan-c.js';
 import { linkJs } from './frontend-js/link.js';
 import { lowerJs } from './frontend-js/lower.js';import { lowerWat } from './frontend-wat/lower.js';
@@ -425,11 +425,15 @@ function cObj(path, out, arch, incs, defs, fmt, os) {
   for (const w of warnings) stderr(`${w}\n`);
   const errs = verifyMir(mod);
   if (errs.length > 0) throw new OmniError(`mir is not well-formed:\n  ${errs.join('\n  ')}`);
+  /* 前三格（读、预处理、降级）报在一起：`lowerCNative` 一趟就把它们做完了，拆不开
+   * （ADR-0018 分片 2 后半，见 `vNext` 头上那段）。 */
+  vNext('read', 'cpp', 'lower');
   /* win32 的 x86_64 上代码节里还多一份共用的展开信息（第一百一十七片）——
    * 摆在第一个函数之后，所以这一格得在生成代码的时候就给。 */
   const blob = arch === 'x86_64'
     ? genX64(mod, { unwind: fmt === 'elf' && os === 'win32' })
     : genArm64(mod);
+  vNext('codegen');
   const syms = [];
   for (let k = 0; k < mod.funcs.length; k++) {
     /* 这个模块里没有函数体（第一百二十八片）：后端一个字节都没出，符号也不发 ——
@@ -491,6 +495,7 @@ function cObj(path, out, arch, incs, defs, fmt, os) {
   writeBinary(out, write(blob.bytes, blob.data,
     orderSyms([...syms, ...blob.dataSyms]),
     [...blob.relocs, ...blob.dataRelocs, ...blob.roRelocs], arch, blob.dataAlign));
+  vNext('write');
   return out;
 }
 
@@ -551,6 +556,51 @@ function vStep(msg) {
   const d = Math.trunc(now - vMark);
   vMark = now;
   stderr(`omni: ${msg}  [${d}ms]\n`);
+}
+
+/* `-v` 走管线表那一份渲染（ADR-0018 决策五，分片 2 后半）。
+ *
+ * `--explain` 与 `-v` 必须是**同一份数据的两种印法**，不然它们迟早对不上。做法：`vBegin`
+ * 把 `--explain` 造的那张表接过来（列宽于是与 `--explain` 印的完全一样），实现每做完一格
+ * 叫一次 `vNext(verb)`，那一行就带着耗时落到 stderr 上。
+ *
+ * `vNext` 要**核对 verb**：表是 `plan-c.js` 造的、叫的是实现，两边各改一处就会错位 ——
+ * 错位之后印出来的每一行都在骗人。所以对不上就直接骂，而且骂在 `-v` 上（不开 `-v` 不受
+ * 影响，那条路上一个字节都不多）。 */
+let LIVE = null;
+
+function vBegin(plan) {
+  if (!VERBOSE || plan === null) return;
+  LIVE = { plan, i: 0 };
+  stderr(renderSummary(plan));
+  vMark = nowMs();
+}
+
+function vNext(...verbs) {
+  if (LIVE === null) return;
+  /* 好几格一起报的情形（`vNext('read', 'cpp', 'lower')`）：实现那一侧只有一次调用能量
+   * （`lowerCNative` 一趟就把读文件、预处理、降级全做了），拆不开。那就**只把耗时挂在
+   * 最后一格上**、并且注明是一起量的 —— 前面几格印一个 `⋯` 而不是编一个数出来。 */
+  for (let k = 0; k < verbs.length; k++) {
+    const s = LIVE.plan.stages[LIVE.i];
+    if (s === undefined || s.verb !== verbs[k]) {
+      throw new OmniError(`internal: 管线表与实现错位 —— 第 ${LIVE.i + 1} 格表里是`
+        + ` '${s === undefined ? '（没有了）' : s.verb}'，实现叫的是 '${verbs[k]}'`
+        + '（改了 cli/plan-c.js 或实现里的 vNext，两边要一起改）');
+    }
+    const last = k === verbs.length - 1;
+    if (!last) {
+      stderr(`${renderStage(LIVE.plan, LIVE.i)}  ⋯\n`);
+      LIVE.i++;
+      continue;
+    }
+    const now = nowMs();
+    const d = Math.trunc(now - vMark);
+    vMark = now;
+    const line = renderStage(LIVE.plan, LIVE.i, d);
+    stderr(`${line}${verbs.length > 1 ? `（这 ${verbs.length} 格一起量）` : ''}\n`);
+    LIVE.i++;
+  }
 }
 
 /**
@@ -2216,6 +2266,9 @@ function main(argv) {
     stdout(renderPlan(plan));
     return 0;
   }
+  /* `-v` 也走那张表（分片 2 后半）：先接过来，再由实现一格一格标完成。造不出表的命令
+   * （还没覆盖的那些）`LIVE` 就是 `null`，那些路上照旧走老的 `vStep`。 */
+  if (VERBOSE) vBegin(planForC(cmd, path, files, rest));
 
   switch (cmd) {
     case 'run': {
