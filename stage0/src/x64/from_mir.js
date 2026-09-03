@@ -552,9 +552,12 @@ class FnGen {
     if (op === OP.CALL) {
       if (this.callLabels === null) nyi('单个函数里的 CALL（要按整个模块生成才有落点）');
       this.callArgs(f.argsOf(f.b[i]));
-      const label = this.callLabels[f.a[i]];
-      if (label === undefined) throw new OmniError(`x64: 没有 ${f.a[i]} 号函数`);
-      buf.call(label);
+      /* 模块内的直接调用也走**符号**（第一百二十七片）：位移留 0，发一条重定位。
+       * 量过 tcc：`static int a(); … a();` 那一条 `e8` 后面是四个零，`.rela.text` 里
+       * 一条 `R_X86_64_PLT32`（加数 −4）指着 `a` —— 哪怕 `a` 就在同一个 `.o` 里、
+       * 哪怕它是局部符号。从前我们在汇编那一层就把位移算掉了，于是 `.rela.text`
+       * 一条也没有。`callLabels` 还留着 —— 那一格是「这个模块里有没有落点」的判据。 */
+      buf.callSym(this.funcSym(f.a[i]));
       /* 直接调用：被调的是谁看得见，所以「返回值在 st0 里」问**那个函数**
        * （第一百一十二片）—— 调用点不用带这一位。 */
       return this.callRet(i, t, this.mod.funcs[f.a[i]].ldRet === true);

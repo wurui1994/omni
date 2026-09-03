@@ -919,6 +919,12 @@ tcc 叫 `L.N`（`tccpp.c:626`，`N` 是匿名符号计数器），我们叫 `omn
 轴上领号（`funcSym` 第一次见到就领），每一块全局量都领（不只 `const` 那些），
 `cli.js` 的 `orderSyms` 按号稳定排一遍再交给写出器。新门 `tests/c/sym-order.js` 18/0 ——
 整张 `.symtab` 逐条与 `sh_info` 都对得上，只读节剩下的差别只有名字。
+**模块内的直接调用也发重定位**（第一百二十七片）：量过 tcc —— `static` 的被调者、
+同一个 `.o` 里，那条 `e8` 后面照样是四个零，`.rela.text` 里一条 `PLT32`（加数 −4）
+指着它（arm64 是 `bl` 全零 + `BRANCH26`）。我们从前在汇编那一层就把位移算掉了，于是
+`.o` 比 tcc 少一整节。改动是两个后端各一行（`buf.call(label)` → `buf.callSym(名字)`），
+写出器与链接器都不用动。新门 `tests/c/rela-text.js` 18/0/3（那三格是外部函数的转发桩
+还是一个真函数），`tcc-obj` 的容器相同从 12 走到 16。
 
 **往上接回前端**：MIR 多了一条 `FRAME`（帧上要一块，回它的**真地址**），这是 native 这条腿上
 「取地址」的落脚点 —— 两条腿各一条指令（`add xd, sp, #off` / `lea rd, [rbp - off]`），
@@ -14644,6 +14650,57 @@ int gv;` 加一个 `static` 函数和 `main`）：
 压在「每个目标自己的头与预定义」那笔欠账后面。
 
 <!-- 第九刀第一百二十六片-END -->
+
+## 落地：第九刀第一百二十七片
+
+**模块内的直接调用也走符号 —— 位移留给链接器。**
+
+`.o` 的节表上一直缺一节：`.rela.text`。量一遍最小的那种：
+
+```c
+static int a(void) { return 1; }
+int main(void) { return a(); }
+```
+
+tcc 出的 `.text` 里那条 `e8` 后面是**四个零**，`.rela.text` 里一条
+`R_X86_64_PLT32`（加数 −4）指着 `a` —— 哪怕 `a` 就在同一个 `.o` 里、哪怕它是**局部
+符号**，tcc 也不在汇编那一层把位移算掉。arm64 上同一回事：`bl` 的编码是
+`0x94000000`（偏移全零），一条 `ARM64_RELOC_BRANCH26`。
+
+我们从前分两路走：跨模块（`CCALL`）发符号、模块内（`CALL`）走 `CodeBuf` 的标签，在
+汇编那一层就把位移算出来了。结果是 `.rela.text` 一条也没有，`.o` 比 tcc 少一节 ——
+连 `.shstrtab` 的长度都因此差 11 个字节。
+
+改动是两处各一行：`x64/from_mir.js` 的 `buf.call(label)` 换成
+`buf.callSym(this.funcSym(f.a[i]))`、`arm64/from_mir.js` 的 `buf.bl(label)` 换成
+`buf.blSym(…)`。`callLabels` 那一格留着 —— 它现在只当「这个模块里有没有落点」的判据
+（单个函数生成时 `CALL` 照旧报 nyi，`from-mir` 里那条负例还盯着）。
+
+不用改的地方比改的地方多，值得记一笔：两个写出器早就会写这种重定位（跨模块调用一直
+走它），Mach-O 那边一律 `r_extern=1` + 符号号 —— 指着一个**本文件里已定义**的符号
+也合法；我们自己的链接器解 `PLT32`/`BRANCH26` 时也不问「符号是不是同一个 `.o` 的」。
+
+### 门
+
+新的 `tests/c/rela-text.js`：三个目标 × 四个探针 × 两问 —— 那几条重定位本身
+（类型/指着谁/加数，按表里的次序）与「落点上那几个字节是零」。18/0/3。
+
+`r_offset` **不比**：我们出的代码比 tcc 长（`main` 里那条调用在 tcc 是 30、我们是 52），
+落点对不上是窥孔那几片的事，不是这一片的。
+
+那三个 `not yet` 是同一格：`static int one(); … one() + strlen("ab")` 这个探针上
+tcc 是 `4/one 2/L.0 4/strlen`、我们是 `4/strlen 4/one 2/omni_str_N 4/$ext$strlen` ——
+多出来的两条来自**外部函数的转发桩**（`$ext$strlen` 现在是一个真的函数，桩里那条
+`call strlen` 反而排在最前），于是次序也错位。那是「桩不该是函数」那笔欠账。
+
+`tcc-obj` 的「容器相同」从 12 走到 **16**。回归：`native` 227/0、`run` 207/0/1、
+`native-gen` 83/0、`str-rodata` 69/0/1、`rodata-sec` 27/0、`sym-order` 18/0、
+`sym-size` 6/0、`rela-order` 6/0、`eh-frame-x64` 8/0、`pdata-x64` 11/0、
+`x64/from-mir` 90/0、`arm64/from-mir` 88/0、`selfobj` 25/0、`tcc-link` 83/0、
+`elf-roundtrip` 268、`elf-merge` 451、`pe-content` 328、`pe-exe` 352、`elf-exe` 53、
+`elf-dyn` 53、`macho-exe` 26、`macho-dylib` 107。
+
+<!-- 第九刀第一百二十七片-END -->
 
 
 

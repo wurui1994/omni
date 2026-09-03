@@ -487,9 +487,11 @@ class FnGen {
     if (op === OP.CALL) {
       if (this.callLabels === null) nyi('单个函数里的 CALL（要按整个模块生成才有落点）');
       this.callArgs(f.argsOf(f.b[i]), -1);
-      const label = this.callLabels[f.a[i]];
-      if (label === undefined) throw new OmniError(`arm64: 没有 ${f.a[i]} 号函数`);
-      buf.bl(label);
+      /* 模块内的直接调用也走**符号**（第一百二十七片，与 x64 那一份同一条）：位移留 0、
+       * 发一条重定位。量过 tcc：哪怕被调的就在同一个 `.o` 里、哪怕它是局部符号，
+       * `.rela.text` 里也有那一条。`callLabels` 还留着 —— 那一格是「这个模块里有没有
+       * 落点」的判据。 */
+      buf.blSym(this.funcSym(f.a[i]));
       return this.callRet(i, t);
     }
     /* `CCALL` 是**外部符号**（`printf`、`malloc`）。模块内的调用走标签、跨模块的走符号
