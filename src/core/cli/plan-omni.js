@@ -13,7 +13,7 @@
 import { newPlan, addStage } from './stages.js';
 
 /** 从 `rest` 里捞一个带值开关（与实现那一侧同一个捞法）。 */
-function opt(rest, name, dflt) {
+function planOpt(rest, name, dflt) {
   const i = rest.indexOf(name);
   return i >= 0 ? rest[i + 1] : dflt;
 }
@@ -25,7 +25,7 @@ function opt(rest, name, dflt) {
  * （`emit ast` 只在有 AST 的那几路上说得通），`steps` 是前端那几格。
  */
 function frontOf(path, rest) {
-  const mode = opt(rest, '--mode', null);
+  const mode = planOpt(rest, '--mode', null);
   if (path.endsWith('.js')) {
     return { lang: 'js', ast: true, steps: [{ verb: 'parse', in: 'text', out: 'AST' }] };
   }
@@ -101,7 +101,7 @@ const KEY_TO_FORM = {
 export function planForOmni(cmd, path, files, rest) {
   if (path === undefined) return null;
   const front = frontOf(path, rest);
-  const out = opt(rest, '-o', undefined);
+  const out = planOpt(rest, '-o', undefined);
 
   if (cmd === 'check') {
     /* `.c` 走的是 C 那一路的一遍过（cpp -> MIR + 自检），**没有 OIR 这一层** ——
@@ -167,7 +167,7 @@ export function planForOmni(cmd, path, files, rest) {
   }
   const NOTE = {
     c: rest.includes('--amalgamate') ? '整份运行时内联进一个文件（--amalgamate）' : '外挂运行时',
-    spirv: `kernel = ${opt(rest, '--kernel', '（默认那一个）')}`,
+    spirv: `kernel = ${planOpt(rest, '--kernel', '（默认那一个）')}`,
   };
   addStage(p, {
     phase: 'back', verb: f.verb, in: f.from, out: f.name, note: NOTE[form], artifact: out ?? 'stdout',

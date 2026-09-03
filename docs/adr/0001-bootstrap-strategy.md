@@ -207,6 +207,34 @@ pthread 就在 libSystem 里、这个开关等于空操作；glibc 2.34 起也�
 **画出来的边界**：`dist/` 的完整性只由 layout 那一格与"装好的那份跑一遍 asy"守着，
 还没有一格"把 dist 挪到别的路径再跑"——路径无关性没被量过。
 
+## 量：自编译现在拦在哪儿（248 条红是两类，不是一片）
+
+`tests/all.js` 里有 6 组红（`bootstrap`、`mir`、`incr`、`js-exec`、`js-roundtrip`、`cabi`），
+前五组都从**同一处**来：JS 前端把 `src/core` 的 import 树链成一份程序时报 **248 条**错误。
+数一遍，它们只有**两类**：
+
+- **244 条是模块作用域重名**（去重后 **136 个名字**）。JS 前端把整棵 import 树链成一份
+  程序，于是模块作用域的名字在**整份程序里**必须唯一。撞的都是「两边各写了一份同名小工具」：
+  `arm64/from_mir.js` 与 `x64/from_mir.js` 的 `widthOf`/`widthKey`/`nyi`/`outArgsBytes`、
+  `arm64/encode.js` 与 `x64/encode.js` 的 `ret`/`nop`、`link/macho.js` 与 `link/elf.js`
+  的 `writeObject`、`interp/libc.js` 与 `frontend-c/tccpp.js` 的 `utf8Of`/`hexVal`……
+  **每一条都是纯改名**，不动语义。
+- **4 条是 `import * as`**（`arm64/asm.js`、`arm64/from_mir.js`、`x64/asm.js`、
+  `x64/from_mir.js` 全都是 `import * as … from './encode.js'`）。这一类**改不动名字**
+  就解决：要么前端支持命名空间导入，要么这四处改成具名导入
+  （`encode.js` 的导出面很宽，具名列表会很长）。
+
+**这两类的性质不同，所以该分开决定：**
+
+- 重名那 136 个是**机械的**，可以一次扫过去（也可以顺手立一条门：新加的模块作用域名字
+  不许与已有的撞 —— 现在这一格是靠自编译那条链**间接**发现的，所以每次都是一大把）。
+- `import * as` 那 4 处是**语言子集的边界**（`docs/js-bootstrap-subset.md` 冻结的那一份），
+  动它等于动子集的定义。
+
+顺带记一笔：写这一节的同一天我自己**新造了一个**（`cli/plan-c.js` 与 `cli/plan-omni.js`
+各有一个 `opt`）—— 当场改成 `planOpt`。这说明「没有门」的代价不是「有一笔旧债」，
+而是**债会持续长出来**：只要自编译那条链是红的，新的重名就没人当场拦。
+
 ## 落地顺序
 
 1. ✅ 运行时出 JS，变成真的 C 文件树 + `.o` 缓存 + `--amalgamate`
