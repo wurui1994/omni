@@ -843,10 +843,12 @@ class GlslChecker {
    * 同一套字母（`xyzw` / `rgba` / `stpq` 不能混用 —— 规范 5.5 的原话）。
    */
   swizzle(node) {
-    const of = this.expr(node.items[1]);
+    /* 局部量**不能叫 `of`** —— 那是自编译子集词法里的关键字（`for … of`）。
+     * 出来的节点属性还叫 `of`（受限的只有绑定名）。 */
+    const subj = this.expr(node.items[1]);
     const s = glslAtom(node.items[2]);
-    if (of.ty.k !== 'vec') {
-      throw this.err(node, `'.${s}' 只能取向量的分量，这儿是 ${glslTyText(of.ty)}`);
+    if (subj.ty.k !== 'vec') {
+      throw this.err(node, `'.${s}' 只能取向量的分量，这儿是 ${glslTyText(subj.ty)}`);
     }
     if (s.length < 1 || s.length > 4) throw this.err(node, `'.${s}' 长度只能是 1..4`);
     const set = GLSL_SWIZZLE_SETS.find((z) => [...s].every((c) => z.includes(c)));
@@ -854,12 +856,12 @@ class GlslChecker {
       throw this.err(node, `'.${s}' 里的字母不是同一套（xyzw / rgba / stpq 不能混用）`);
     }
     const idx = [...s].map((c) => set.indexOf(c));
-    const over = idx.find((i) => i >= of.ty.n);
+    const over = idx.find((i) => i >= subj.ty.n);
     if (over !== undefined) {
-      throw this.err(node, `${glslTyText(of.ty)} 没有第 ${over + 1} 格（'.${s}'）`);
+      throw this.err(node, `${glslTyText(subj.ty)} 没有第 ${over + 1} 格（'.${s}'）`);
     }
-    const ty = idx.length === 1 ? glslElem(of.ty) : glslVec(idx.length, of.ty.base);
-    return { k: 'swizzle', ty, of, idx };
+    const ty = idx.length === 1 ? glslElem(subj.ty) : glslVec(idx.length, subj.ty.base);
+    return { k: 'swizzle', ty, of: subj, idx };
   }
 
   /**

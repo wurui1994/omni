@@ -144,8 +144,10 @@ class GlslLlvmEmitter {
     }
     if (e.k === 'ref') return this.find(e.name);
     if (e.k === 'swizzle') {
-      const of = this.expr(e.of);
-      return e.idx.map((i) => of[i]);
+      /* 局部量**不能叫 `of`** —— 那是自编译子集词法里的关键字（`for … of`）。
+       * 节点属性叫 `e.of` 没关系，受限的只有绑定名。 */
+      const subj = this.expr(e.of);
+      return e.idx.map((i) => subj[i]);
     }
     if (e.k === 'splat') {
       const v = this.expr(e.of)[0];

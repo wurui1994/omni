@@ -206,9 +206,11 @@ class GlslLowerer {
       return subj.map((c) => this.let_(to, `(${op} ${c})`));
     }
     if (e.k === 'splat') {
-      const of = this.expr(e.of)[0];
+      /* 局部量**不能叫 `of`** —— 那是自编译子集词法里的关键字（`for … of`）。
+       * 节点属性叫 `e.of` 没关系，受限的只有绑定名。 */
+      const subj = this.expr(e.of)[0];
       const n = glslNComp(e.ty);
-      const v = this.let_(glslCompTy(e.ty), of);
+      const v = this.let_(glslCompTy(e.ty), subj);
       const out = [];
       if (e.ty.k === 'mat') {
         /* `matN(x)` 是**对角线**填 x、其余 0（规范 5.4.2），不是每格都填 x。
@@ -231,9 +233,9 @@ class GlslLowerer {
       return out;
     }
     if (e.k === 'swizzle') {
-      const of = this.expr(e.of);
+      const subj = this.expr(e.of);
       /* 分量已经各自是一个 `(var tN)`，所以重排不必再绑。 */
-      return e.idx.map((i) => of[i]);
+      return e.idx.map((i) => subj[i]);
     }
     if (e.k === 'matcol') {
       /* `m[col]`：矩阵是**列优先**摊平的（`mat2(a,b,c,d)` = 第 0 列 (a,b)、第 1 列 (c,d)），

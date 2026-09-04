@@ -2138,6 +2138,38 @@ llvmpipe 那一侧：**1～20 ms**，同一个进程、一个字节都不落盘�
 
 <!-- ADR-0019 决策八第1步-END -->
 
+## 量：GLSL 前端离「能进原生宿主」有多远 —— **两类机械债，40 处**
+
+决策八的 (b) 要求前端在原生进程里，也就是说 `src/core/frontend-glsl/*.js` 得过得去
+**自编译那个子集**。拿 `omni check` 逐个量了一遍（这是最便宜的探针：只走前端与检查器，
+不出产物）：
+
+- `pp.js`：**0**
+- `check.js`：**0**
+- `emit_llvm.js`：闭包捕获循环变量 **13**、`Math.max(...)` 展开 **1**
+- `lower.js`：闭包捕获循环变量 **25**、`Math.max(...)` 展开 **1**
+
+**没有第三类。** 也就是说这一格不是「重写前端」，是四十处机械替换：
+
+1. `'i' is a for-loop variable captured by a closure; copy it into a body-local const first`
+   —— 循环体里先 `const k = i;` 再捕获。这条不是刁难：JS 的 `let` 每轮一个新绑定，
+   C 那边不是，闭包捕到的会是最后一轮的值。
+2. `spread is not supported in a 'Math.max' call` —— `Math.max(...xs.map(f))` 要展开成
+   一个显式的循环取最大。
+
+顺带**已经清掉的一类**：局部量取名 `of`（子集词法里 `for … of` 的关键字），
+`check.js` / `emit_llvm.js` / `lower.js` 四处。这一条与 js-roundtrip 那次是同一个债 ——
+「节点属性叫 `of` 没关系，受限的只有绑定名」，两处都在注释里写死了免得再犯。
+
+### 这条量法本身值得记
+
+「离目标有多远」用**门**去量，而不是估。`omni check` 一条命令就把「重写一个前端」
+缩成了「四十处替换 + 零个新类别」。与 grapheq 那两次（数真实源码用了什么、而不是照
+规范列清单）是同一个手法。
+
+<!-- ADR-0019 前端自编译债-END -->
+
+
 
 
 
