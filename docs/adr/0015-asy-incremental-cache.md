@@ -173,3 +173,38 @@ export function omni_init_plain() { … }   // 只有这一份是按单元生成
   13 份里 7 份走索引，改一个字符 932ms -> 787–851ms。接口索引版本号升到 2。
 - 快路不命中时说清原因（`asy mods 不命中 weak 那一份被别的入口盖掉了` 之类）——
   从前它悄悄失效，日志上看不出来。
+
+### `-f svg` 卡在哪儿：**`_shipout` 住错了地方**（设计缺陷，不是缺一个开关）
+
+现状：`omni run x.asy` 出 SVG 的唯一办法是在源文件头上贴一句 `asy__defaultformat = "svg";`
+（`tests/asy/svg.js` 就是这么做的）。这不是「少一个 CLI 开关」，是三处结构错了：
+
+1. **格式是编译器的开关，不是用户源码里的一句话。** 真 asy 的 `-f` 是 `settings.cc`
+   从 argv 填 `settings::outformat`，程序跑之前就定好了；我们把它塞进源码，等于让
+   「输出成什么」变成程序的一部分。
+2. **`_shipout` 在内建面里（`asy_builtins.asy`），而它去猜格式。** 真 asy 的 C++ 侧
+   `_shipout` 只管「按给定格式写字节」，决定格式的是 `base/plain_shipout.asy`（asy 源码），
+   它读 `settings.outformat`。我们让内建面自己猜，于是发明了 `asy__defaultformat` ——
+   那个变量存在的唯一理由是「内建面看不见 settings」，而这个前提**是错的**：
+   `asyDeclPass` 里 `asySettingsIn(L, u, off)` 对**每个单元**都跑（decls.js:1281），
+   `settings` 本来就并进来了。
+3. **产物缓存的键里没有格式。** 一旦格式进编译期，`-f svg` 与不带 `-f` 会命中同一份
+   产物 —— cli.js 里那句「这不是慢，是**跑错程序**」警告的正是这种。
+
+改法（四处，顺序固定，先键后行为）：
+
+- `jsCacheStamp()` 加一格格式（那儿已经有 `ASYMPTOTE_DIR`/`OMNI_ASY_BUILTINS` 两个先例）。
+- `lowerAsy` 的选项加 `outformat`，在降 `settings` 那个模块时作为 `outformat` 的**初值**
+  （这是编译期选项，与 `prelude`/`load` 同类，不是往源码里插句子）。
+- `asy_builtins.asy`：删掉 `asy__defaultformat`，`_shipout` 读 `settings.outformat`。
+- `cmds.js` 加 `-f FMT`；`-o x.svg` 在没给 `-f` 时按扩展名推断（写明这是我们多给的方便，
+  真 asy 的 `-o` 只定名字）；`tests/asy/svg.js` 改用 `-f svg`，删掉那句头部注入。
+
+**试过并否掉的三条**（记下来免得再走）：往源码头上贴（就是要改掉的那条）；合成一个入口
+单元 `settings.outformat=…; import "x";`（会改掉 `_mainname()`，等于跑另一个程序）；
+每种格式一个一行的库模块 `asy_fmt_svg.asy`（还是「插入」，而且把 CLI 开关伪装成库）。
+另外查明：asy 那条腿**没有运行期从宿主读字符串的原语**（`builtins.tab` 只有实数数学函数，
+方言对外只有 `(print …)` 一个出口），所以「运行期读环境变量」这条路要先加一条封闭 ABI 的
+原语才谈得上 —— 那比编译期选项贵，而且格式本来就该在编译期定。
+
+<!-- ADR-0015 -f svg 卡在 _shipout 住错地方-END -->
