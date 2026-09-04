@@ -50,8 +50,12 @@ const glslMat = (cols, rows) => ({ k: 'mat', cols, rows });
 const glslStruct = (name, fields) => ({ k: 'struct', name, fields });
 
 /** 数组（B14）。`of` 是元素类型、`n` 是常量大小。**结构性**类型（不像结构体那样名义）——
- * `vec2[4]` 与 `vec2[4]` 是同一个类型，`glslTyText` 出的字符串就是身份。 */
-const glslArray = (of, n) => ({ k: 'array', of, n });
+ * `vec2[4]` 与 `vec2[4]` 是同一个类型，`glslTyText` 出的字符串就是身份。
+ *
+ * 形参**不能叫 `of`** —— 那是自编译子集词法里的关键字（`for … of`）。属性名叫 `of`
+ * 没关系，受限的只有绑定名。（这一条 `emit_llvm.js` 里写过，我在这儿又栽了一次：
+ * `tests/glsl/*` 全绿而 `tests/js-roundtrip` 红了三个提交 —— 那条门才是管这个的。） */
+const glslArray = (elem, n) => ({ k: 'array', of: elem, n });
 
 /** 摊平后最多几格。`grapheq.glsl` 那 3 处都是 `vec2[4]` = 8 格，32 留了四倍余量。
  * 这个数不是保守起见随手写的：它是「变量下标落成 select 链」那条决策的代价上限。 */
@@ -686,13 +690,14 @@ class GlslChecker {
      * 只剩三条 —— 加上那条**上限**，它是决策：变量下标落成 select 链，格数一大就线性
      * 劣化，所以宁可当场骂 NYI，也不悄悄生出上千路 select。 */
     if (h === 'local-arr') {
-      const of = this.tyOf(node.items[1]);
+      /* 局部量**不能叫 `of`**（自编译子集的关键字）——同上。 */
+      const elem = this.tyOf(node.items[1]);
       const name = glslAtom(node.items[2]);
       const n = Number(glslAtom(node.items[3]));
-      if (of.k === 'void') throw this.err(node, `'${name}' 不能是 void 的数组`);
-      if (of.k === 'array') throw this.err(node, `'${name}'：元素是数组这一档不收`);
+      if (elem.k === 'void') throw this.err(node, `'${name}' 不能是 void 的数组`);
+      if (elem.k === 'array') throw this.err(node, `'${name}'：元素是数组这一档不收`);
       if (!Number.isInteger(n) || n < 1) throw this.err(node, `数组 '${name}' 的大小要是正整数`);
-      const ty = glslArray(of, n);
+      const ty = glslArray(elem, n);
       const cells = glslCount(ty);
       if (cells > GLSL_ARR_MAX_CELLS) {
         throw this.err(node, `数组 '${name}' 摊平后 ${cells} 格，超过 ${GLSL_ARR_MAX_CELLS}`
