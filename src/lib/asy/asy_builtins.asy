@@ -2943,14 +2943,21 @@ void emitshade(drawop o, real s) {
  * 第一条扫描线落在 `ImageMatrix` 的 y=0 上，也就是**下**边那一行：`data[0]` 先发
  * （asy 的 `image(real[][] f, …)` 里 f[0] 也是最下面那一行，palette.asy 不翻转）。
  */
+// 85 个字符（33 '!' 到 117 'u'）。**反斜杠只写一个** —— asy 的字符串字面量里 `\` 不是
+// 转义引导（量过：`"[\\]"` 的 length 是 3，真 asy 与我们都一样），写两个的话这张表就是
+// 86 个字符、`\` 之后所有下标偏一位。那个错法很能骗人：图的尺寸、朝向、摆放全对，
+// 逐字节比也有 45.8% 相同（平坦的地方偏一位还是同一个颜色），只有颜色变化处冒出
+// **不在色板里的颜色**（量出来的：像素 0 我们 (11,246,144)，色板里根本没有这一格）。
 private string asy__a85tab =
-  "!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstu";
+  "!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstu";
 
+// 0..1 -> 一个字节，照 pen.h:143 的 `byte()` 逐字抄：**截断 `r*256`、夹到 255**，
+// 不是 `round(r*255)`。量出来的差别：`round(255v)` 那一版逐字节只有 84% 相同（差都是 ±1），
+// 换成这一条之后 100% 相同（laserlattice 四块图）。
 private int asy__b255(real v) {
-  int k = round(v * 255);
-  if (k < 0) return 0;
-  if (k > 255) return 255;
-  return k;
+  real r = v < 0 ? 0 : v;
+  int c = (int) (r * 256);
+  return c < 255 ? c : 255;
 }
 
 // 一格 pen -> 三个字节（DeviceRGB）。灰与 cmyk 先换成 rgb：那块图的色空间是
@@ -8987,7 +8994,9 @@ void _image(frame f, real[][] data, pair initial, pair final,
     for (int j = 0; j < w; ++j) {
       real u = (data[i][j] - mn) * sp;
       if (n == 0) { px[i][j] = gray(u); continue; }
-      int k = (int) u;
+      // 下标是 `(size_t)((val-min)*step+0.5)`（psfile.cc:611）——**四舍五入，不是截断**。
+      // 量出来的：截断那一版与参考逐字节比只有 45.8% 的字节相同（laserlattice 第一块图）。
+      int k = (int) (u + 0.5);
       if (k < 0) k = 0;
       if (k >= n) k = n - 1;
       px[i][j] = palette[k];
