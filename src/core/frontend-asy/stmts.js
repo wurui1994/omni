@@ -742,7 +742,15 @@ export function asyVardec(L, n, statik) {
         if (v === null) return null;
         init = v.code;
       }
-      const need = d.items[2] !== undefined || L.isRec(t) || asyIsArr(t);
+      // 没写初值时也要发那一句的三种：记录（要 `new`）、数组（要 `anew`），
+      // 以及**函数类型上有文件级 `operator init` 的那一格**（这一刀）。
+      // 后一种量出来的形状（4 行）：`import three; guide3 gh; gh=gh--(0,0,0); gh=gh--(1,0,0);`
+      // 真 asy 印 1，我们报 `call of a null function value` —— three.asy:704 的
+      // `guide3 operator init() {return nullpath3;}` 算出来的那一格没被发出去，
+      // 全局零初始化成了空引用。局部量那一支早就走对了（上面 asyIsFn 那一档），
+      // 差的只有文件级这一格。galleon.asy 出不了图就是它（obj.asy:28 的 `guide3 gh;`）。
+      const need = d.items[2] !== undefined || L.isRec(t) || asyIsArr(t)
+        || (asyIsFn(t) && L.oinitFor(t) !== null);
       if (need) out.push(`(set ${g.sym} ${init})`);
       continue;
     }

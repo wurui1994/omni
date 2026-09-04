@@ -694,10 +694,17 @@ export function asyCall(L, n) {
     const raw = asyCallArgs(L, n);
     if (raw === null) return null;
     if (raw.length !== 0) return L.err(n, `'_searchpath' 不要实参，给了 ${raw.length} 个`);
-    const dirs = ['.'];
-    const ad = process.env.ASYMPTOTE_DIR;
-    if (ad !== undefined && ad !== '') for (const d of ad.split(':')) if (d !== '') dirs.push(d);
-    return { code: `(str ${JSON.stringify(dirs.join(':'))})`, type: 'string' };
+    // **运行期读**（这一刀），不再编译期印成字面量。
+    //
+    // 从前印字面量，于是这条路径被**烙进 asy_builtins 那份产物**（`asy__locate` 就在它里面），
+    // 而单元那一级的印记里没有 ASYMPTOTE_DIR —— 换个搜索路径再跑，命中的还是上一趟那份产物，
+    // 里面的路径是上一次的。量出来的形状：先在 tests/asy/examples 里跑一趟（路径含 `.`），
+    // 再回仓库根跑 `input("galleon.obj")`，报 `cannot read 'galleon.obj': ENOENT` ——
+    // 而同一趟里用户文件自己算的 `_searchpath()` 印的是对的（它这一趟才编）。
+    // 这与 `_mainname()` 那一格是同一类账（ADR-0014）：**环境不该进产物**。
+    // 真 asy 那边也是运行期的（settings.cc 从 argv/环境填 searchPath，locateFile 当场读）。
+    // 空的 ASYMPTOTE_DIR 出来是 `".:"`，尾巴那一格空目录 asy__locate 自己会跳过。
+    return { code: '(bin "+" (str ".:") (getenv (str "ASYMPTOTE_DIR")))', type: 'string' };
   }
   // `_readtext(name)`：不切行的那一份（`_readlines` 是它加一层 asy__lines）。TeX 那一段
   // 要在一份 latex 的 .log 里按次序捞 `>dim(…pt)dim`，切行反而多一道。

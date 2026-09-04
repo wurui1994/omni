@@ -9306,3 +9306,45 @@ export function s_asy__m9f39b3e5_asy__ov6_label(v_pic, v_L, v_g, v_align, v_p, v
 还没查）。
 
 <!-- ADR-0014 guide塌成一份时留旧漏了一档-END -->
+
+### 第十刀：galleon 那个 `call of a null function value` —— 两处，都是"环境/名字没跟着 import 走"
+
+错因分类修好之后 galleon 的真错露出来了：`omni: runtime error: call of a null function value`
+（`OMNI_RT_TRACE=1` 给的栈里全是 three.asy 的 `operator --` 那个匿名闭包）。往下挖是两处：
+
+**（1）`guide3 gh;` 的零值没走文件级 `operator init`。** 缩到 4 行就能复现：
+
+```asy
+import three;
+guide3 gh;
+gh=gh--(0,0,0);
+gh=gh--(1,0,0);
+write(length((path3) gh));      // 真 asy 印 1，我们报 call of a null function value
+```
+
+`guide3` 是 `void(flatguide3)`（three.asy:700），而 three.asy:704 有
+`guide3 operator init() {return nullpath3;}` —— asy 用它当"这个类型的变量不带初值时拿什么"。
+我们这一侧**两处漏了**：
+
+- `L.oinits` 是**每个单元自己一张**（`unitIn` 换的就是它），而 `asyModMerge` 从来没并过它 ——
+  于是那份 `operator init` 只在 three 自己那个单元里作数，谁 import 它谁看不见。
+  现在按类型文本并（`from m access X;` 那种挑名字的写法不并 —— 那一路带的是名字，
+  而这一格挂在类型上）；`private`（autoplain）进来的照旧不外导。
+- 并进来之后还要能**发**出来：文件级变量那一支的 `need` 只认"写了初值 / 记录 / 数组"三种，
+  函数类型那一格没写初值就什么都不发（全局零初始化 = 空引用）。局部量那一支早就对了
+  （stmts.js 里 `asyIsFn` 那一档），差的只有文件级这一格。
+- 顺带一条：`asyOinitFor` 按 `c.at <= L.at` 裁位置，而 `at` 是**每个单元自己从 0 数的** ——
+  跨单元比就成了"看谁的行号大"（three.asy:704 对主文件的第 1 句）。别的单元来的那份
+  一律算可见（`import` 把整份模块一次带过来，位置不参与，与 `recInit` 里那一段同一条）。
+
+**（2）`_searchpath()` 是编译期字面量，被烙进了 asy_builtins 那份产物。** `input()` 找文件
+走的是 asy_builtins 里的 `asy__locate`，它调 `_searchpath()`；那一格从前在**降级时**就印成
+字面量，而单元一级的印记里没有 ASYMPTOTE_DIR —— 换个搜索路径再跑，命中的产物里还是
+上一次那条路径。量出来的形状：先在 `tests/asy/examples` 里跑一趟（路径含 `.`），再回仓库根
+跑 `input("galleon.obj")`，报 ENOENT；而同一趟里**用户文件自己**算的 `_searchpath()` 印的是
+对的（它这一趟才编）。改成运行期读（`(bin "+" (str ".:") (getenv (str "ASYMPTOTE_DIR")))`）——
+与 `_getsetting` 同一条规矩，**环境不进产物**。真 asy 那边也是运行期的（locateFile 当场读）。
+
+galleon 于是从仓库根也出图了（2246563 字节）。
+
+<!-- ADR-0014 galleon那两处-END -->

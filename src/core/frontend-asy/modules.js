@@ -261,6 +261,32 @@ export function asyModMerge(L, node, u, at, only, priv) {
     }
     L.globals.set(key, dst);
   }
+  // 文件级的 `T operator init()` 也跟着 import 进来（这一刀）。
+  //
+  // 从前这张表**没并**：`L.oinits` 是每个单元自己一张（unitIn 换的就是它），于是
+  // three.asy:704 的 `guide3 operator init() {return nullpath3;}` 只在 three 自己那个
+  // 单元里作数 —— 谁 import 它谁看不见。量出来的形状（4 行就够）：
+  //   import three; guide3 gh; gh=gh--(0,0,0); gh=gh--(1,0,0); write(length((path3) gh));
+  // 真 asy 印 1，我们报 `call of a null function value`：`guide3 gh;` 的零值退成了空引用，
+  // 而 `--` 的正文第一件事就是调它。galleon.asy 出不了图就是这一格（obj.asy:28 的
+  // `guide3 gh; … gh=gh--vert[…]`）。
+  //
+  // 键是**类型文本**（与登记时同一个键），所以 `from m access X;` 那种挑名字的写法不并 ——
+  // 那一路带的是名字，而这一格挂在类型上。`private`（autoplain）进来的照旧不外导。
+  if (only === null) {
+    for (const [ty, list] of u.oinits) {
+      const dst = L.oinits.has(ty) ? L.oinits.get(ty) : [];
+      for (const c of list) {
+        if (c.ap === true) continue;
+        let dup = false;
+        for (const d of dst) if (d.sym === c.sym) dup = true;
+        if (dup) continue;
+        dst.push({ ret: c.ret, params: [], ps: [], node: c.node, at: at, sym: c.sym,
+          unit: c.unit, ap: priv === true ? true : undefined });
+      }
+      L.oinits.set(ty, dst);
+    }
+  }
   for (const [nm, e] of u.recVis) {
     const key = only === null ? nm : only.get(nm);
     if (key === undefined) continue;

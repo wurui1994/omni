@@ -270,7 +270,7 @@ export function asyOinitSig(L, n, at) {
   // 编号用**这个单元自己**的计数器（第七十五刀）：`list` 是跨模块攒的，拿它的长度做名字
   // 就是顺序依赖 —— plain 先注册还是 graph 先注册会换出两个名字来。
   const sym = `${L.pfx}asy__oi${L.unit.nsym++}_${tag}`;
-  const cand = { ret, params: [], ps: [], node: n, at, sym };
+  const cand = { ret, params: [], ps: [], node: n, at, sym, unit: L.unit.id };
   list.push(cand);
   L.oinits.set(ret, list);
   L.oiByNode.set(n, list);
@@ -281,7 +281,18 @@ export function asyOinitFor(L, t) {
   const list = L.oinits.get(t);
   if (list === undefined) return null;
   let cur = null;
-  for (const c of list) if (c.at <= L.at) cur = c;
+  for (const c of list) {
+    // **别的单元来的那份不按位置裁**（这一刀）：`import` 把整份模块的名字一次带过来，
+    // 位置不参与（与 recInit 里那一段同一条规矩）。而这张表是跨单元共用的，`at` 又是
+    // 每个单元自己从 0 数的 —— 拿它跨单元比就成了"看谁的行号大"。
+    // 量出来的形状（4 行就够）：`import three; guide3 gh; gh=gh--(0,0,0); gh=gh--(1,0,0);`
+    // 真 asy 印 1，我们报 `call of a null function value` —— three.asy:704 的
+    // `guide3 operator init() {return nullpath3;}` 的 at 是 704 上下，而主文件那一句是 1，
+    // 于是那份 oinit 永远轮不上，零值退成空引用。galleon.asy 出不了图就是这一格
+    // （obj.asy:28 起 `guide3 gh; … gh=gh--vert[…]`）。
+    if (c.unit !== undefined && c.unit !== L.unit.id) { cur = c; continue; }
+    if (c.at <= L.at) cur = c;
+  }
   return cur;
 }
 
