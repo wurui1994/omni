@@ -236,6 +236,18 @@ mkdirSync(RES, { recursive: true });
 const names = process.argv.length > 3 ? process.argv.slice(3)
   : readdirSync(exDir).filter((f) => f.endsWith('.asy')).map((f) => f.slice(0, -4)).sort();
 
+// **全量重跑先把产物缓存清掉**（ADR-0014 那一格"记录名依赖这一趟谁先被降"）。
+// 为什么必须：库里两个同名的 struct（contour.asy 与 geometry.asy 都有 `segment`）现在
+// 谁先被降谁拿裸名字，而名字会被写进接口索引与共用的 weak 那一份 —— 于是**上一个例子留下的
+// 产物会让下一个例子编不过**。量出来的样子：先跑 Pythagoras（geometry）再跑 impact
+// （contour），后者报 `类 segment 没有字段 'A'`；一趟全量里这么冤枉掉了 7 个例子
+// （"结构不同"变"没出图"）。根因还没改（试过两种改法都退回来了，见 ADR-0014），
+// 所以这一轴自己先把这个噪声源掐掉：报出来的数只能是干净缓存上跑出来的。
+// 只在"全量 + 不认缓存"这一档清 —— 单独追几个例子时不清（那时要的是快）。
+if (process.env.OMNI_EPS_FRESH === '1' && process.argv.length <= 3) {
+  rmSync(join(ROOT, '.omni-cache', 'asy-mods'), { recursive: true, force: true });
+}
+
 /** 这个例子上一趟的结论还作数吗（编译器没变、例子没变） */
 function cached(n, p) {
   if (process.env.OMNI_EPS_FRESH === '1') return null;
