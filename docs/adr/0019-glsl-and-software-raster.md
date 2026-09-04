@@ -4297,3 +4297,49 @@ hair                  41.819    41.187   1.799   23.24x
 按这个项目一贯的做法（第九刀那一百多片都是这样）：**量到的事实先写下来，再动手**。
 现在手上确凿的只有 `benchmark.py` 那一份口径与它蕴含的 GLSL 子集，那就只写这些。
 mesa 那边一行都还没读 —— 在读之前写任何「决策」都是编的。
+
+## 量：拿 vispy 的 140 份着色器当尺子 —— GLSL 那一侧还差什么
+
+`uv pip show vispy` -> 0.16.2（`~/.venv/.../site-packages/vispy`）。它的 `glsl/` 下面
+有 **140 份** `.glsl`/`.frag`/`.vert`，按目录分：transforms 26、collections 26、
+markers 24、colormaps 18、antialias 11、arrows 13、arrowheads 9、math 8…
+
+整份过一遍我们的**预处理 + 语法 + 检查**，把第一条错按种类归堆：
+
+```
+解析过 39 / 140，检查过 0 / 140
+
+  73  #include                     ← 一半以上都卡在这一格
+  24  没有 main                    ← 它们是**函数库**，vispy 自己拼成整份着色器
+  11  `$` 开头的名字               ← vispy 自己的模板语法，不是 GLSL
+  10  transforms/* 的检查错（要逐条看）
+  10  认不出的类型名（attribute / varying / sampler2D 那一族）
+   5  #ifdef / #ifndef
+   1  `float a, b;`（一条声明多个变量、**不带初值**）
+   1  空实参表那一处（translate.glsl）
+```
+
+### 读法
+
+- **`#include` 是最大的一格（73 份）**。GLSL 本身有 `ARB_shading_language_include`，
+  而离线工具链（glslviewer、vispy、shadertoy 的多 buffer）几乎都在用它。我们的 `pp.js`
+  现在只收 `#version` 与对象宏。
+- **「没有 main」不是错，是我们的检查器只会查整份着色器**。vispy 的 `glsl/math/*.glsl`
+  是**函数库**（`#include` 进来用）。要在这个语料上说得出话，检查器得有一档
+  「库模式」：不要求 main，只查每个函数自己。
+- **`$transform` 那 11 份是 vispy 自己的模板**（它的 `ShaderObject` 在运行时替换），
+  不是 GLSL。**拒得对** —— 这一格不该收。
+- **`attribute`/`varying`** 说明 vispy 面向的是 GLSL 1.20/ES 1.0，我们面向 330 core。
+  收不收是个决策（多一个版本档），不是一个补丁。
+- **`float a, b;`** 是真缺口：B15 那一片只做了「带初值」的多声明（`float a = 1.0, b = 2.0;`），
+  不带初值的没做。GraphEq 那 31 份里正好没有，vispy 里有。
+
+### 下一步的顺序（按「一格能解多少份」排）
+
+1. `#include`（73）+ 检查器的库模式（24）—— 这两格一起，才能把 vispy 的 math/transforms
+   真正编起来
+2. `#ifdef`/`#ifndef`/`#if`/`#else`/`#endif`（5）
+3. `float a, b;`（不带初值的多声明）
+4. `attribute`/`varying`：先记着，等有第二把尺子要它再说
+
+<!-- ADR-0019 vispy量特性缺口-END -->
