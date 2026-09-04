@@ -323,7 +323,7 @@ if (typeof host === 'string' && emitDrv.status === 0) {
       }
       if (want.length !== got.length) bad('bool：两边的数不一样多', `    参照 ${want.length} 个、快路 ${got.length} 个`);
       else if (bads.length > 0) bad('bool：v1 与参照实现对账', bads.slice(0, 6).map((s) => `    ${s}`).join('\n'));
-      else ok('bool：v1 与参照实现逐取样点对账（比较 / && || ! / ?: / isnan / isinf / lessThan / all any / if else / struct）');
+      else ok('bool：v1 与参照实现逐取样点对账（比较 / && || ! / ?: / isnan / isinf / lessThan / all any / if else / struct / 数组 / 循环 / switch）');
     }
     if (c2 !== 0) bad('bool：v2（ORC）跑不动', `    exit=${c2}\n    ${e2.trim().split('\n').slice(0, 4).join('\n    ')}`);
     else if (b1.status === 0 && o2.trim() !== b1.stdout.trim()) {

@@ -3594,7 +3594,7 @@ inside = 4175   outside = 3948   frontier = 69
 
 ### 还差什么才能出图
 
-1. `switch`（快路还没接；`grapheq.glsl` 里没有，但 GLSL 有）
+1. ~~`switch`（快路还没接；`grapheq.glsl` 里没有，但 GLSL 有）~~ —— 做完了（`switch_mask`）
 2. `discard`
 3. ~~`lp_build_skip_branch`（整块没人活着就跳过）~~ —— 做完了，见那一节（中位 3.2x -> 2.38x）
 4. ~~**PNG + `omni run x.frag -o out.png`**（决策九）~~ —— 做完了
@@ -4160,6 +4160,38 @@ hair                  41.819    41.187   1.799   23.24x
 `fast.js` 15/0（1024² 130.34 MPix/s）、`js-roundtrip` 229/0。
 
 <!-- ADR-0019 skip-branch-END -->
+
+## 落地：`switch` 进快路 —— 又一层掩码（gallivm 的 `switch_mask`）
+
+形状：一个**「已经中过」**的落点 + 一个 `break` 落点。按次序过每一组：
+
+```
+已中 |= (选择子 == 这一组的哪个标签)     ← default 的匹配集是「一个标签都没中」
+这一组的体在「已中 且 没 break」下走
+```
+
+三件事因此**是免费的**：
+
+- **穿落**：`已中` 是累积的，中过 `case 0` 的道在 `case 1` 那一组里照旧活着 ——
+  直到某个 `break` 把它们并进 break 掩码。
+- **中间的 `default`**：它只是「匹配集不同」的一组，位置不特殊。
+- **`break` 归 switch、`continue` 归外面那层循环**：这儿只换 `brkPtr`，`contPtr` 不动
+  （与参照腿同一条规矩，见「第十九片」）。
+
+`brk` 的初值照 `lp_exec_bgnloop` 那条：从**进来时已经不活的那些道**起算，不是 0 ——
+与循环那一格是同一个坑（少这一格，外面掩掉的道一进 switch 就又活了）。
+
+顺带给 `pushMask` 补了个兄弟 `pushRawMask`：收的是**已经是掩码**的那一份
+（`<8 x i32>`），因为「已经中过」是几条 `icmp` 或起来的，不是一个 GLSL 表达式。
+
+门：`bench-bool.frag` 里加了一段 switch —— **选择子由像素位置决定**（八道各选一支），
+穿落、中间的 default、`break` 之后 switch 外面那句照走，都压上了。
+`fast.js` 15/0（v1 与参照腿逐取样点相对差 ≤ 1e-5，v2 与 v1 逐字节相同）。
+
+快路现在只差 `discard`（要光栅器那一头认一格「这个像素不写回」）。
+
+<!-- ADR-0019 switch进快路-END -->
+
 
 
 

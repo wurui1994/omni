@@ -118,7 +118,31 @@ void main() {
     float dv = 0.0;
     do { dv = dv + 2.0; d = d + 1; } while (d < lim);
 
+    // switch：**每道选到的分支不一样**（选择子由像素位置决定），压三件事 ——
+    // 穿落（case 0 掉进 case 1）、**中间的** default、以及「break 归 switch 不归外面」。
+    // 快路那一侧的形状是又一层掩码（gallivm 的 switch_mask）：一个「已经中过」的落点
+    // 累积匹配集，default 的匹配集是它的反。
+    int sw = int(uv.x * 5.0);
+    float swv = 0.0;
+    for (int t = 0; t < 2; t++) {
+        switch (sw) {
+            case 0:
+                swv = swv + 1.0;
+                // 故意不 break：穿落到 case 1
+            case 1:
+                swv = swv + 2.0;
+                break;
+            default:
+                swv = swv + 4.0;
+                break;
+            case 3:
+                swv = swv + 8.0;
+                break;
+        }
+        swv = swv + 16.0;   // switch 里的 break 不该把这一句也掩掉
+    }
+
     fragColor = vec4(checker, min(safe, 1.0), flags + band,
         sv + av * 0.5 + cv * 0.25 + ivv * 0.03125 + rt
-        + sortv * 0.001 + accv * 0.01 + wv * 0.1 + dv * 0.05);
+        + sortv * 0.001 + accv * 0.01 + wv * 0.1 + dv * 0.05 + swv * 0.002);
 }

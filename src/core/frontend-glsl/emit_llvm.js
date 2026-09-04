@@ -356,6 +356,17 @@ class GlslLlvmEmitter {
     this.update();
   }
 
+  /**
+   * 同上，但收的是**已经是掩码**的那一份（`<8 x i32>` 全 1 / 全 0），不是一个 bool。
+   * `switch` 的「已经中过」就是这种：它是几条 `icmp` 或起来的，不是一个 GLSL 表达式。
+   */
+  pushRawMask(m) {
+    this.condStack.push({ cond: m, outer: this.condMask });
+    this.condMask = this.condMask === null ? m
+      : this.emit(`and ${LL_I} ${this.condMask.v}, ${m.v}`, 'm');
+    this.update();
+  }
+
   /** 进 `else`：把最内那一层的条件取反再与外层合。 */
   invertMask() {
     const top = this.condStack[this.condStack.length - 1];
@@ -876,7 +887,68 @@ class GlslLlvmEmitter {
     if (s.k === 'while') { this.loopStmt(s, 'while'); return; }
     if (s.k === 'dowhile') { this.loopStmt(s, 'do'); return; }
     if (s.k === 'for') { this.loopStmt(s, 'for'); return; }
+    if (s.k === 'switch') { this.switchStmt(s); return; }
     throw new OmniError(`glsl/llvm: 这一片收不了的语句 ${s.k}`);
+  }
+
+  /**
+   * `switch` —— 又一层掩码（gallivm 的 `switch_mask`，`lp_bld_ir_common.h:50-103`）。
+   *
+   * 形状：一个**「已经中过」**的落点 + 一个 `break` 落点。按次序过每一组：
+   *
+   *   已中 |= (选择子 == 这一组的哪个标签)      ← `default` 的匹配集是「一个标签都没中」
+   *   这一组的体在「已中 且 没 break」下走
+   *
+   * **穿落是免费的**：`已中` 是累积的，所以中过 `case 1` 的道在 `case 2` 那一组里照旧
+   * 活着 —— 直到某个 `break` 把它们并进 `break` 掩码。这也是为什么 `default` 在中间
+   * 一样对：它只是「匹配集不同」的一组，位置不特殊。
+   *
+   * `break` 归 switch、`continue` 归外面那层循环：所以这儿只换 `brkPtr`，`contPtr` 不动
+   * （与参照腿那一侧同一条规矩，见「第十九片」那一节）。
+   *
+   * `brk` 的初值照 `lp_exec_bgnloop` 那条：从**进来时已经不活的那些道**起算，不是 0。
+   */
+  switchStmt(s) {
+    const sel = this.toI(this.expr(s.sel)[0]);
+    /* 「一个标签都没中」要先知道所有标签 —— `default` 的匹配集就是它的反。 */
+    let anyLabel = null;
+    for (const g of s.groups) {
+      for (const l of g.labels) {
+        if (l === null) continue;
+        const one = this.labelHit(sel, l);
+        anyLabel = anyLabel === null ? one : this.emit(`or ${LL_I} ${anyLabel.v}, ${one.v}`, 'm');
+      }
+    }
+    const outerBrk = this.brkPtr;
+    const brk = this.loopBrkPtr();
+    this.brkPtr = brk;
+    this.update();
+    const hit = this.maskPtr('swhit');
+    for (const g of s.groups) {
+      let m = null;
+      for (const l of g.labels) {
+        const one = l === null
+          ? this.maskNot(anyLabel === null ? llI(0) : anyLabel)
+          : this.labelHit(sel, l);
+        m = m === null ? one : this.emit(`or ${LL_I} ${m.v}, ${one.v}`, 'm');
+      }
+      const cur = this.emit(`load ${LL_I}, ptr ${hit}, align 32`, 'm');
+      const next = m === null ? cur : this.emit(`or ${LL_I} ${cur.v}, ${m.v}`, 'm');
+      this.body.push(`  store ${LL_I} ${next.v}, ptr ${hit}, align 32`);
+      this.pushRawMask(next);
+      this.scopes.push(new Map());
+      for (const st of g.body) this.stmt(st);
+      this.scopes.pop();
+      this.popMask();
+    }
+    this.brkPtr = outerBrk;
+    this.update();
+  }
+
+  /** 「选择子等于这个标签」的那一份掩码。 */
+  labelHit(sel, label) {
+    const c = this.emit(`icmp eq ${LL_I} ${sel.v}, ${llI(label).v}`, 'b');
+    return this.i1ToMask(c);
   }
 
   /**
