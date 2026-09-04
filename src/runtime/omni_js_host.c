@@ -87,6 +87,27 @@ static omni_dyn s16_of_bytes(const char *p, int64_t n) {
   return omni_dyn_of_s16(omni_s16_of_utf8(s));
 }
 
+/* ---- **字节串**那一档（ADR-0017 第八刀：C 的 libc 要按字节读写文件与 stdout）。
+ *
+ * 与上面 `s16_of_bytes` 的区别是**不解码**：一个字节一个码元（0..255），也就是 node
+ * 侧那四个 op 用的 `latin1`。两条口径必须分得清 —— 拿 UTF-8 解码去读一个 `.o`
+ * 会把非法序列换成 U+FFFD，字节就回不来了（而这一条腿是要写出可执行文件的）。 */
+static omni_dyn s16_of_raw(const unsigned char *p, int64_t n) {
+  uint16_t *u = (uint16_t *)omni_alloc_bytes((n + 1) * (int64_t)sizeof(uint16_t));
+  for (int64_t i = 0; i < n; i++) u[i] = (uint16_t)p[i];
+  return omni_dyn_of_s16(omni_s16_of_units(u, n));
+}
+
+/** 反过来：每个码元取低 8 位。回的缓冲由调用方用完即弃（GC 管）。 */
+static unsigned char *raw_of_s16(omni_dyn v, int64_t *outLen) {
+  omni_s16 s = omni_js_as_s16(v);
+  unsigned char *b = (unsigned char *)omni_alloc_bytes(s.len + 1);
+  for (int64_t i = 0; i < s.len; i++) b[i] = (unsigned char)(s.p[i] & 0xff);
+  b[s.len] = 0;
+  *outLen = s.len;
+  return b;
+}
+
 /* ---------------------------------------------------------------- fs */
 
 /* readFileSync(path, 'utf8')。一次读完：编译器读的是源文件，尺寸已知且不大。 */
@@ -115,6 +136,39 @@ omni_dyn omni_js_fs_write_text(omni_dyn path, omni_dyn text) {
     omni_errorf("short write on '%s'", p);
   }
   if (fclose(f) != 0) omni_errorf("cannot close '%s'", p);
+  return omni_dyn_undef();
+}
+
+/* 读一份**字节**（node 侧 `readBinary`：`readFileSync(p, 'latin1')`）。
+ * 与 `read_text` 的区别只在不解码 —— 见 `s16_of_raw` 那一段。 */
+omni_dyn omni_js_fs_read_bytes(omni_dyn path) {
+  char *p = cpath(path);
+  FILE *f = fopen(p, "rb");
+  if (!f) omni_errorf("ENOENT: cannot read '%s': %s", p, strerror(errno));
+  if (fseek(f, 0, SEEK_END) != 0) { fclose(f); omni_errorf("cannot seek '%s'", p); }
+  long n = ftell(f);
+  if (n < 0) { fclose(f); omni_errorf("cannot size '%s'", p); }
+  rewind(f);
+  unsigned char *buf = (unsigned char *)omni_alloc_bytes(n + 1);
+  size_t got = n > 0 ? fread(buf, 1, (size_t)n, f) : 0;
+  fclose(f);
+  return s16_of_raw(buf, (int64_t)got);
+}
+
+/* 写一份字节。`mode` 只在**新建**那一刻生效，而且照旧过 umask —— 与
+ * `open(…, O_CREAT, mode)` 一样（tinycc 写可执行文件给的是 0777，落下来是 0755）。 */
+omni_dyn omni_js_fs_write_bytes(omni_dyn path, omni_dyn body, omni_dyn mode) {
+  char *p = cpath(path);
+  int64_t n = 0;
+  unsigned char *b = raw_of_s16(body, &n);
+  int m = mode.tag == OMNI_DYN_UNDEF ? 0666 : (int)omni_dyn_as_real(mode);
+  int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, m);
+  if (fd < 0) omni_errorf("cannot write '%s': %s", p, strerror(errno));
+  if (n > 0 && write(fd, b, (size_t)n) != (ssize_t)n) {
+    close(fd);
+    omni_errorf("short write on '%s'", p);
+  }
+  if (close(fd) != 0) omni_errorf("cannot close '%s'", p);
   return omni_dyn_undef();
 }
 
@@ -190,6 +244,13 @@ omni_dyn omni_js_fs_realpath(omni_dyn path) {
   return s16_of_cstr(buf);
 }
 
+/* 删一个文件。不在就是错 —— 与 `unlink(2)`、与 JS 侧的 `unlinkSync` 同一个立场。 */
+omni_dyn omni_js_fs_remove(omni_dyn path) {
+  char *p = cpath(path);
+  if (remove(p) != 0) omni_errorf("cannot remove '%s': %s", p, strerror(errno));
+  return omni_dyn_undef();
+}
+
 /* ---------------------------------------------------------------- process */
 
 omni_dyn omni_js_proc_cwd(void) {
@@ -215,6 +276,25 @@ omni_dyn omni_js_proc_stderr_write(omni_dyn s) {
   /* stdout 先冲干净：诊断和正常输出的相对次序在快照测试里是要对上的 */
   fflush(stdout);
   if (u.len) fwrite(u.p, 1, (size_t)u.len, stderr);
+  fflush(stderr);
+  return omni_dyn_undef();
+}
+
+/* stdout / stderr 的**字节**口径（C 的 libc 那一路：一个字符一个字节）。
+ * 与上面那两条的区别同样只在不编码 —— `printf("%c", 0xff)` 要落一个 0xff 字节，
+ * 过一次 UTF-8 编码就成了两个。 */
+omni_dyn omni_js_proc_stdout_bytes(omni_dyn s) {
+  int64_t n = 0;
+  unsigned char *b = raw_of_s16(s, &n);
+  if (n > 0) fwrite(b, 1, (size_t)n, stdout);
+  return omni_dyn_undef();
+}
+
+omni_dyn omni_js_proc_stderr_bytes(omni_dyn s) {
+  int64_t n = 0;
+  unsigned char *b = raw_of_s16(s, &n);
+  fflush(stdout);
+  if (n > 0) fwrite(b, 1, (size_t)n, stderr);
   fflush(stderr);
   return omni_dyn_undef();
 }

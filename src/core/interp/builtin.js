@@ -582,16 +582,20 @@ const MEM_LD_N = {
   i16s: (a, o) => linDv.getInt16(memChk(a, o, 2), true),
   i16u: (a, o) => linDv.getUint16(memChk(a, o, 2), true),
   i32s: (a, o) => linDv.getInt32(memChk(a, o, 4), true),
-  /* `i32u` 的结果类型是 i32（规范形是符号扩展过的），所以 `| 0` 回到那个形 ——
-   * 与 BigInt 那张表里 `asIntN(32)` 收尾是同一件事。 */
-  i32u: (a, o) => linDv.getUint32(memChk(a, o, 4), true) | 0,
+  /* `i32u` 的结果类型是 i32（规范形是符号扩展过的），所以读回来要折成有符号 ——
+   * 与 BigInt 那张表里 `asIntN(32)` 收尾是同一件事。**不用 `| 0` / `>>> 0`**：
+   * 那两个运算符不在封闭子集里（编译器自己的源码要能被自己编译），而算术等价。 */
+  i32u: (a, o) => {
+    const x = linDv.getUint32(memChk(a, o, 4), true);
+    return x > 2147483647 ? x - 4294967296 : x;
+  },
 };
 const MEM_ST_N = {
   i8: (a, o, v) => { linDv.setUint8(memChk(a, o, 1), v & 0xff); },
   i16: (a, o, v) => { linDv.setUint16(memChk(a, o, 2), v & 0xffff, true); },
-  /* `setUint32` 收的是无符号，而 i32 的规范形是有符号 —— `>>> 0` 是那一次换算
-   * （与 BigInt 那张的 `asUintN(32)` 对应）。 */
-  i32: (a, o, v) => { linDv.setUint32(memChk(a, o, 4), v >>> 0, true); },
+  /* `setUint32` 收的是无符号，而 i32 的规范形是有符号 —— 这一句是那次换算
+   * （与 BigInt 那张的 `asUintN(32)` 对应）。同样不用 `>>> 0`。 */
+  i32: (a, o, v) => { linDv.setUint32(memChk(a, o, 4), v < 0 ? v + 4294967296 : v, true); },
 };
 
 /** number 口径的读；不在这一组里（i64/f32/f64/f80）回 null，让调用方退回 BigInt 那张。 */

@@ -118,7 +118,7 @@ const JS_CMP = new Map([
  */
 const JS_PROLOGUE = `'use strict';
 const { memInit, memData, memSize, memGrow, memLoadFn, memStoreFn, memLoadFnN, memStoreFnN,
-  callLibc, hasLibc, ExitCall, failRt, flushOut, libcAtExit, setFnPtrCaller } = $rt;
+  callLibc, hasLibc, isExitCall, failRt, flushOut, libcAtExit, setFnPtrCaller } = $rt;
 const $W = (x) => BigInt.asIntN(64, x);
 const $U = (x) => BigInt.asUintN(64, x);
 const $INT_MIN = -9223372036854775808n;
@@ -159,7 +159,7 @@ const $ccall = (name, args) => {
   try {
     return callLibc(name, args);
   } catch (e) {
-    if (e instanceof ExitCall) throw e;
+    if (isExitCall(e)) throw e;
     failRt(name + ': ' + (e instanceof Error ? e.message : String(e)));
   }
   return undefined;
@@ -558,7 +558,7 @@ const $callFromLibc = (fp, args) => {
     else if (ret === T_I32) L.push('    code = r === undefined || r === null ? 0 : (r & 255);');
     else L.push('    code = r === undefined || r === null ? 0 : Number(BigInt.asUintN(8, BigInt(r)));');
     L.push('  } catch (e) {');
-    L.push('    if (e instanceof ExitCall) { libcAtExit(); flushOut(); return e.code; }');
+    L.push('    if (isExitCall(e)) { libcAtExit(); flushOut(); return e.code; }');
     L.push('    throw e;');
     L.push('  }');
     L.push('  libcAtExit();');

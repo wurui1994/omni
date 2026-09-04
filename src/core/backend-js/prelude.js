@@ -1700,6 +1700,33 @@ function $js_fs_rename(a, b) {
   $node("node:fs").renameSync($js_asS16(a), $js_asS16(b));
   return undefined;
 }
+/* 删一个文件。不在就抛 —— 与 unlink(2) 一样，「不在」是错，不是成功
+ * （C 侧 omni_js_fs_remove 同一个立场，消息也对齐）。 */
+function $js_fs_remove(p) {
+  $node("node:fs").unlinkSync($js_asS16(p));
+  return undefined;
+}
+/* 字节口径那四条（ADR-0017 第八刀）：一个字符一个字节，也就是 node 的 latin1。
+ * 与 read_text/write_text/stdout_write 的区别只在**不编解码** —— 这条腿要写出
+ * 可执行文件，也要让 printf("%c", 0xff) 落一个 0xff 字节而不是两个。 */
+function $js_fs_read_bytes(p) {
+  return $node("node:fs").readFileSync($js_asS16(p), "latin1");
+}
+function $js_fs_write_bytes(p, body, mode) {
+  const opts = mode === undefined ? undefined : { mode: Number(mode) };
+  $node("node:fs").writeFileSync($js_asS16(p), Buffer.from($js_asS16(body), "latin1"), opts);
+  return undefined;
+}
+function $js_proc_stdout_bytes(s) {
+  $flush();
+  process.stdout.write(Buffer.from($js_asS16(s), "latin1"));
+  return undefined;
+}
+function $js_proc_stderr_bytes(s) {
+  $flush();
+  process.stderr.write(Buffer.from($js_asS16(s), "latin1"));
+  return undefined;
+}
 function $js_fs_realpath(p) { return $node("node:fs").realpathSync($js_asS16(p)); }
 function $js_proc_args() { return process.argv.slice(2); }
 function $js_proc_cwd() { return process.cwd(); }

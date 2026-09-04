@@ -15882,3 +15882,29 @@ macho: 还不会给 34460 号架构写可执行文件
 
 `run` 的 stdout 归**被跑的程序**（与 `.asy` 那条路同一条规矩），而 `runCFile` 内部要链
 一次。所以给三条链接命令加了 `-q`（不印产物摘要），只有内部调用用它。
+
+### 补账：宿主面上有**四个名字从没登记进封闭 ABI**（`tests/mir` 抓的）
+
+第八刀给 libc 加文件流与 stdout 的字节口径、ADR-0019 给 GLSL 加「IR 走 stdin」时，
+`src/core/host/native.js` 上直接多了几个导出，但**封闭 ABI 那张表没跟上**：
+
+- `readBinary` / `writeBinary` / `stdoutBytes` / `stderrBytes` —— 字节口径那四条
+  （一个字符一个字节，node 侧是 latin1）。它们与 `read_text`/`write_text`/`stdout_write`
+  的区别只在**不编解码**：这条腿要写出可执行文件，也要让 `printf("%c", 0xff)`
+  落一个 0xff 字节而不是两个。
+- `removeFile`（libc 的 `remove`/`unlink`）、`spawnIn`（op 那侧早就有，缺的是名字表）。
+
+在 node 上跑不出问题 —— 那份 `native.js` 就是真实现。**只有 `tests/mir` 那条轴会红**：
+它拿 JS 前端把编译器自己降一遍，而 `frontend-js/link.js` 的 `NATIVE_OPS` 是白名单。
+这正是 `docs/js-bootstrap-subset.md` 那句「表里没有的成员不会在 node 上报错」说的洞，
+只是这次洞在**宿主面**上而不是宿主库上。
+
+顺带清掉的两条同类：`Math.round`（不在封闭 ABI，换成 `Math.floor`）、
+以及 `builtin.js` 里我刚写的 `>>>`/`| 0`（**编译器自己的源码**不能用这两个运算符，
+换成等价的算术；发出来的 JS 里可以用 —— 那是数据，不是这棵树的源码）。
+
+留着的一条红，明说：`arm64/from_mir.js` 的 `import { Arm64CodeBuf as CodeBuf }` ——
+类不许改名导入（降级器按名字认类）。改法是把那个文件里的 `CodeBuf` 全部改回原名，
+与这一刀无关，单独一刀。
+
+<!-- ADR-0017 宿主面四个名字没登记-END -->

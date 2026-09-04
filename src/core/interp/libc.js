@@ -1575,7 +1575,7 @@ const LIBC = {
    *
    * 这两条**没法与 tcc 逐字节对账**（每跑一次都不同），与 `%p` 是同一类 —— 那份清单
    * 在文件头上。 */
-  clock: () => BigInt(Math.round(nowMs() * 1000)),
+  clock: () => BigInt(Math.floor(nowMs() * 1000)),
   time: (a) => {
     const secs = BigInt(Math.floor(nowMs() / 1000));
     const p = BigInt(a[0]);

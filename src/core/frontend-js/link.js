@@ -42,6 +42,13 @@ const NATIVE_OPS = {
   mkdTemp: 'js_fs_mkdtemp',
   mkdirAll: 'js_fs_mkdir_all',
   rename: 'js_fs_rename',
+  removeFile: 'js_fs_remove',
+  /* 字节口径那四条（ADR-0017 第八刀）：一个字符一个字节。C 的 libc 走这一组 ——
+   * 文本那一组会过 UTF-8 编解码，而这条腿要写出可执行文件。 */
+  readBinary: 'js_fs_read_bytes',
+  writeBinary: 'js_fs_write_bytes',
+  stdoutBytes: 'js_proc_stdout_bytes',
+  stderrBytes: 'js_proc_stderr_bytes',
   realPath: 'js_fs_realpath',
   args: 'js_proc_args',
   cwd: 'js_proc_cwd',
@@ -52,6 +59,9 @@ const NATIVE_OPS = {
   stdinIsTty: 'js_proc_stdin_is_tty',
   readLine: 'js_proc_read_line',
   spawn: 'js_proc_spawn',
+  /* 与 `spawn` 只差一格：把一段文本喂进子进程的 stdin（ADR-0019 决策八）。
+   * op 那一侧（`js_abi.js` 的 `js_proc_spawn_in`）早就有，缺的一直是这张表里的名字。 */
+  spawnIn: 'js_proc_spawn_in',
   tmpDir: 'js_os_tmpdir',
   nowMs: 'js_now_ms',
   installDir: 'js_install_dir',

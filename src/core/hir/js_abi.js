@@ -258,6 +258,14 @@ export const JS_ABI = {
   js_fs_mkdtemp: { js: '$js_fs_mkdtemp', c: 'omni_js_fs_mkdtemp', arity: 1 },
   js_fs_mkdir_all: { js: '$js_fs_mkdir_all', c: 'omni_js_fs_mkdir_all', arity: 1 },
   js_fs_rename: { js: '$js_fs_rename', c: 'omni_js_fs_rename', arity: 2 },
+  js_fs_remove: { js: '$js_fs_remove', c: 'omni_js_fs_remove', arity: 1 },
+  /* 字节口径那四条（ADR-0017 第八刀）：一个字符一个字节（node 侧是 latin1）。
+   * 与 read_text/write_text/stdout_write 的区别只在**不编解码** —— 这条腿要写出
+   * 可执行文件、要让 printf("%c", 0xff) 落一个 0xff 字节。 */
+  js_fs_read_bytes: { js: '$js_fs_read_bytes', c: 'omni_js_fs_read_bytes', arity: 1 },
+  js_fs_write_bytes: { js: '$js_fs_write_bytes', c: 'omni_js_fs_write_bytes', arity: 3 },
+  js_proc_stdout_bytes: { js: '$js_proc_stdout_bytes', c: 'omni_js_proc_stdout_bytes', arity: 1 },
+  js_proc_stderr_bytes: { js: '$js_proc_stderr_bytes', c: 'omni_js_proc_stderr_bytes', arity: 1 },
   js_fs_realpath: { js: '$js_fs_realpath', c: 'omni_js_fs_realpath', arity: 1 },
   js_proc_args: { js: '$js_proc_args', c: 'omni_js_proc_args', arity: 0 },
   js_proc_cwd: { js: '$js_proc_cwd', c: 'omni_js_proc_cwd', arity: 0 },

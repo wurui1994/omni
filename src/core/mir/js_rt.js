@@ -29,7 +29,10 @@ export const RT = {
   memStoreFnN,
   callLibc,
   hasLibc,
-  ExitCall,
+  /* `exit` 抛的那个信号**用谓词而不是类**过去：类在封闭子集里只能出现在
+   * `new C(...)` 里（ADR-0011），塞进对象字面量当值当场被拒。
+   * 发出来的 JS 于是问 `isExitCall(e)`，不问 `e instanceof ExitCall`。 */
+  isExitCall: (e) => e instanceof ExitCall,
   failRt,
   flushOut,
   libcAtExit,
