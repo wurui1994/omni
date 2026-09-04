@@ -2246,6 +2246,34 @@ function runCFile(path, argv) {
   return st;
 }
 
+/**
+ * `omni build x.c` —— 编 + 链，出一个可执行文件，**不跑**。
+ *
+ * 与 `runCFile` 是同一条腿，差别只有两处：产物落在 `-o` 给的地方（默认是当前目录下的
+ * 同名文件，与 `omni build x.omni` 一个规矩），以及印一行产物摘要（`build` 的契约是
+ * 「出产物」，那一行是它的输出）。
+ */
+function buildCFile(path, rest) {
+  const ai = rest.indexOf('--arch');
+  const si = rest.indexOf('--os');
+  const arch = ai >= 0 ? rest[ai + 1] : 'arm64';
+  const os = si >= 0 ? rest[si + 1] : 'osx';
+  const fmt = os === 'osx' ? 'macho' : os === 'win32' ? 'pe' : 'elf';
+  const oi = rest.indexOf('-o');
+  const out = oi >= 0 ? rest[oi + 1] : basename(path, '.c');
+  const { flags } = cSplitArgs(rest);
+  const obj = join(workDirFor('build-c', hash16(path)), `${basename(path, '.c')}.o`);
+  mkdirAll(dirname(obj));
+  cObj(path, obj, arch, incDirs(flags), defArgs(flags), 'elf', os, sysIncDirs(flags));
+  vStep(`c front end + codegen  ${path} -> ${obj}`);
+  const rc = main(['c', 'link', obj, '-o', out, '-f', fmt, '--arch', arch, '--os', os,
+    ...cDefaultLibs(os), '-q']);
+  if (rc !== 0) return rc;
+  if (os !== 'win32') spawn('chmod', ['+x', out], 'c');
+  stderr(`omni: built ${out} via 自带的 C 前端 + ${fmt} 链接器\n`);
+  return 0;
+}
+
 function main(argv) {
   /* 分派走命令树（ADR-0018 决策四）：走到哪个节点、那个节点认识哪些带值开关，都由
    * `cli/cmds.js` 那份数据说 —— 顶层不再认识 `--image-base` / `-isystem` 这种语言与格式
@@ -2335,13 +2363,49 @@ function main(argv) {
   if (cmd === 'run' || cmd === 'build') {
     const bi = rest.indexOf('--backend');
     const b = bi >= 0 ? rest[bi + 1] : null;
+    /**
+     * **`.c` 先由扩展名说话，再谈 backend。**
+     *
+     * C 的终点是 **MIR**，不是 OIR —— 所以它那几条腿与 omni 的不是一套：
+     *   - `native`（默认）：自带 C 前端 + 自带代码生成 + 自带链接器，编 + 链（+ 跑）
+     *   - `interp`：C -> MIR -> MIR 解释器（那是 oracle，慢一个数量级）
+     *   - `js`/`llvm`/`jit`：**没有**这条路（`backend-js` 吃的是 OIR）
+     *
+     * 从前这一格漏了：`--backend interp` 把 `cmd` 换成 `'interp'`，`.c` 就绕过了
+     * `case 'run'` 里那条按扩展名分派的规矩，一路掉到 omni 的前端上 ——
+     * 报的是 `unexpected character: "#"`。分派**必须在 backend 翻译之前**。
+     */
+    if (path !== null && path !== undefined && path.endsWith('.c')) {
+      const native = b === null || b === 'native' || b === 'c';
+      if (cmd === 'run') {
+        if (native) return runCFile(path, rest);
+        if (b === 'interp') cmd = 'c-run';
+        else {
+          throw new OmniError(`run x.c: 没有 --backend ${b} 这一条 —— C 的终点是 MIR，`
+            + '只有 native（默认：编 + 链 + 跑）与 interp（MIR 解释器，oracle）两条');
+        }
+      } else if (native) {
+        return buildCFile(path, rest);
+      } else {
+        throw new OmniError(`build x.c: 没有 --backend ${b} 这一条 —— C 只有 native 一条`
+          + '（要 IR 用 `omni emit mir x.c`，要解释执行用 `omni run x.c --backend interp`）');
+      }
+    }
     const MAP = {
       run: { c: 'run-c', llvm: 'run-llvm', jit: 'run-jit', interp: 'interp', js: 'run' },
-      build: { llvm: 'build-llvm', c: 'build', native: 'build' },
+      build: { llvm: 'build-llvm', c: 'build', native: 'build', js: 'build-js' },
     };
-    if (b !== null) {
+    if (b !== null && cmd !== 'c-run') {
       const t = MAP[cmd][b];
-      if (t === undefined) throw new OmniError(`${cmd}: 还没有 --backend ${b} 这一条`);
+      if (t === undefined) {
+        /* `interp` 是**执行器**，不是代码生成器 —— `build` 的契约是「出产物」，
+         * 而解释执行没有产物。指路而不是只说「没有这一条」。 */
+        if (b === 'interp') {
+          throw new OmniError('build: interp 是执行器，不出产物 —— 要 IR 用 '
+            + '`omni emit oir FILE` / `omni emit mir FILE`，要跑用 `omni run FILE --backend interp`');
+        }
+        throw new OmniError(`${cmd}: 还没有 --backend ${b} 这一条`);
+      }
       cmd = t;
     }
   }
@@ -2534,6 +2598,25 @@ function main(argv) {
       const wi = rest.indexOf('--work');
       const { cc } = buildNative(mod, out, wi >= 0 ? rest[wi + 1] : undefined);
       stderr(`omni: built ${out} via ${cc}\n`);
+      return 0;
+    }
+    case 'build-js': {
+      /**
+       * `omni build x.omni --backend js` —— 出一份**能直接 `node` 跑**的 JS。
+       *
+       * JS 从来不是「不支持」：`omni emit js` 早就有（`emitJs`），自举那条门
+       * （`tests/js-roundtrip`）就是靠它把整个编译器重新生成一遍的。缺的只是
+       * 「落盘成一个产物」这一格 —— 而 `build` 的契约正是出产物。
+       *
+       * 与 `build`（native）同一个规矩：`-o` 没给就用源文件名，只是后缀换成 `.js`。
+       */
+      const { mod } = compile(path, rest);
+      const oi = rest.indexOf('-o');
+      const stem = basename(path).replace(/\.(omni|omnis|omnid|js|sx|asy)$/, '');
+      const out = oi >= 0 ? rest[oi + 1] : `${stem}.js`;
+      const js = emitJs(mod);
+      writeText(out, js);
+      stderr(`omni: built ${out} (${js.length} 字节，node ${basename(out)} 就能跑)\n`);
       return 0;
     }
     case 'run-c': {
