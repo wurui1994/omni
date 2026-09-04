@@ -49,6 +49,11 @@ const NATIVE_OPS = {
   writeBinary: 'js_fs_write_bytes',
   stdoutBytes: 'js_proc_stdout_bytes',
   stderrBytes: 'js_proc_stderr_bytes',
+  /* i32 的运算三条（ADR-0013 第三刀）：方言里没有 32 位整数这一格，而解释器要它 ——
+   * 理由与 `js_eval`/`js_type_tag` 同类（方言表达不出、两代产物各有一份实现）。 */
+  i32Op: 'js_i32_op',
+  i32ToU: 'js_i32_tou',
+  i32Wrap: 'js_i32_wrap',
   realPath: 'js_fs_realpath',
   args: 'js_proc_args',
   cwd: 'js_proc_cwd',

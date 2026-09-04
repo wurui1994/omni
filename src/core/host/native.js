@@ -124,6 +124,54 @@ export function stderr(s) {
   return undefined;
 }
 
+/* ---------------------------------------------------------------- i32 的运算
+ * ADR-0013 第三刀：**解释器要 32 位整数运算，而方言里没有这一格**。
+ *
+ * 方言只有 `int`（i64，宿主表示是 BigInt）与 `real`（f64）。于是 MIR 解释器里
+ * 每一次 i32 加法都是一次 BigInt 分配 —— 量出来那是它最大的一笔成本（BBP 上 23.6 s）。
+ * 而 JS 引擎对 32 位整数是有快路的（Smi + `| 0` + `Math.imul`），只是那三个算符
+ * **不在封闭子集里**（编译器自己的源码要能被自己编译）。
+ *
+ * 所以把它们收成宿主 op —— 这正是 `native.js` 存在的理由（`js_eval`、`js_type_tag`、
+ * `js_fmt_real` 都是同一类：方言表达不出、而两代产物各有一份实现的东西）。
+ * 量过一把：过一次函数调用与直接写算符**一样快**（20 M 次 24 ms vs 25 ms，V8 会内联），
+ * 而 BigInt 那一版是 360 ms —— 15 倍，这一刀的全部收益就在这儿。
+ *
+ * 值的口径：进出都是**规范形的 int32**（-2^31 .. 2^31-1 的整数，JS 的 number）。
+ * 除零**不在这里查** —— 调用方（解释器）要先报那条运行期错误，两条腿的消息才一致。
+ */
+export function i32Op(op, a, b) {
+  switch (op) {
+    case '+': return (a + b) | 0;
+    case '-': return (a - b) | 0;
+    // 32 位乘法只有 Math.imul 是对的：`a * b` 先在 double 里丢精度，再 `| 0` 已经错了
+    case '*': return Math.imul(a, b);
+    case '/': return (a / b) | 0;
+    case '%': return (a % b) | 0;
+    case 'u/': return ((a >>> 0) / (b >>> 0)) | 0;
+    case 'u%': return ((a >>> 0) % (b >>> 0)) | 0;
+    case '&': return a & b;
+    case '|': return a | b;
+    case '^': return a ^ b;
+    // 移位的计数掩码 31（wasm 的 i32.shl 就是 count mod 32，tcc 那边同样掩码）
+    case '<<': return a << (b & 31);
+    case '>>': return a >> (b & 31);
+    case 'u>>': return (a >>> (b & 31)) | 0;
+    default: throw new Error(`i32Op: 不认识的运算 ${op}`);
+  }
+}
+
+/** 位当**无符号** 32 位读：回一个 [0, 2^32) 的 number。无符号比较与除法都过它。 */
+export function i32ToU(x) {
+  return x >>> 0;
+}
+
+/** 一个 double 折成 int32（ECMAScript 的 ToInt32）。浮点 -> i32 的转换过它 ——
+ *  NaN 与无穷落成 0，与解释器从前那句 `Number.isFinite(…) ? asIntN(32, …) : 0` 同值。 */
+export function i32Wrap(x) {
+  return x | 0;
+}
+
 /* C 那条腿的输出是**字节**，不是字符（ADR-0017 第八刀第十二片）。
  * 上面那两条把一个 JS 串按 UTF-8 编出去 —— 对 asy/jancy 是对的（那儿的串是真的
  * JS 串），对 C 是错的：C 的「串」已经是一串字节了（一个字符一个字节，latin1），

@@ -22,13 +22,13 @@
  */
 
 import { OmniError } from '../source/diag.js';
-import { stderr, wrapFn, callFnValue } from '../host/native.js';
+import { stderr, wrapFn, callFnValue, i32Op, i32ToU, i32Wrap } from '../host/native.js';
 import {
   applyBuiltin, zeroOf, newInstance, flushOut, failRt, jsCallFn,
   InterpFail, InterpUncaught, binOp, cmpOp, vecBinOp, bufNew, bufGet, bufSet,
   arrNew, arrLen, arrGet, arrSet, arrPush, arrPop, listGet, listSet, dictGet, dynTag, W,
   ptrNew, ptrChk, ptrTChk, ptrLoad, ptrStore, ptrAdd, ptrSub,
-  memInit, memData, memSize, memGrow, memLoadFn, memStoreFn,
+  memInit, memData, memSize, memGrow, memLoadFn, memStoreFn, memLoadFnN, memStoreFnN,
 } from '../interp/builtin.js';
 import { JS_ALL } from '../hir/js_abi.js';
 import { hasLibc, callLibc, ExitCall, setFnPtrCaller, libcAtExit } from '../interp/libc.js';
@@ -42,9 +42,12 @@ import {
   fnPtrNo,
 } from './ir.js';
 
-/** 常量池条目 -> 宿主值。int 是 BigInt（ADR-0005 的 i64），real 是 number。 */
+/** 常量池条目 -> 宿主值。i64 是 BigInt（ADR-0005），**i32 是 number**（第三刀），
+ *  real 是 number。 */
 function constVal(c) {
-  if (c.kind === 'int') return BigInt(c.text);
+  if (c.kind === 'int') {
+    return c.t === T_I32 ? Number(BigInt.asIntN(32, BigInt(c.text))) : BigInt(c.text);
+  }
   if (c.kind === 'real') {
     if (c.text === 'inf') return Infinity;
     if (c.text === '-inf') return -Infinity;
@@ -111,56 +114,30 @@ function kindOf(t) {
   return 'other';
 }
 
-/* ------------------------------------------- 32 位那一族（ADR-0017 第一刀）
- * 不复用 `interp/builtin.js` 的 `binOp('int', …)`：那一份的回绕是 64 位、移位掩码是 63，
- * 而 i32 要的是 32 位回绕与掩码 31（wasm 的 `i32.shl` 就是 count mod 32，C 那边 tcc 同样掩码）。
- * i32 的规范形是**符号扩展后的值**（见 ir.js 的 T_I32），所以每条运算之后 asIntN(32)；
- * 无符号那一族先 asUintN(32) 再算 —— 拿 64 位的 U() 去读一个符号扩展过的 32 位负数
- * 会得到 1.8e19 那个数，无符号比较当场就错。
+/* ------------------------------------------- 32 位那一族（ADR-0017 第一刀 / ADR-0013 第三刀）
+ * **i32 的宿主表示是 number**，不是 BigInt。为什么：量出来 BigInt 的分配是这条腿最大的
+ * 一笔成本（同一个形状上 360 ms 对 24 ms，15 倍），而 JS 引擎对 32 位整数有快路。
+ * 那三个算符（`| 0` / `>>>` / `Math.imul`）不在封闭子集里，所以走宿主 op：
+ * `i32Op` / `i32ToU` / `i32Wrap`（见 host/native.js 那一段的理由）。
+ *
+ * 规范形仍旧是**符号扩展后的值**（见 ir.js 的 T_I32），只是装在 number 里；
+ * 无符号那一族先 `i32ToU` 折成 [0, 2^32) 再比 —— 拿负数直接比就错了。
+ * 除零在这一层查（op 里不查），消息与 64 位那份逐字相同。
  */
-const W32 = (x) => BigInt.asIntN(32, x);
-const U32 = (x) => BigInt.asUintN(32, x);
-
 function bin32(op, a, b) {
-  switch (op) {
-    case '+': return W32(a + b);
-    case '-': return W32(a - b);
-    case '*': return W32(a * b);
-    // 除零与 INT32_MIN / -1 两条边角与 64 位那份同一个立场（idiv/imod）：
-    // 除零是运行期错误，溢出回绕而不是陷入。
-    case '/': {
-      if (b === 0n) failRt('division by zero');
-      return W32(a / b);
-    }
-    case '%': {
-      if (b === 0n) failRt('division by zero');
-      return W32(a % b);
-    }
-    case '<<': return W32(a << (b & 31n));
-    case '>>': return W32(a >> (b & 31n));
-    case 'u/': {
-      if (b === 0n) failRt('division by zero');
-      return W32(U32(a) / U32(b));
-    }
-    case 'u%': {
-      if (b === 0n) failRt('division by zero');
-      return W32(U32(a) % U32(b));
-    }
-    case 'u>>': return W32(U32(a) >> (b & 31n));
-    case '&': return W32(a & b);
-    case '|': return W32(a | b);
-    case '^': return W32(a ^ b);
-    default: throw new OmniError(`mir.interp.bin i32: ${op}`);
+  if (op === '/' || op === '%' || op === 'u/' || op === 'u%') {
+    if (b === 0) failRt('division by zero');
   }
+  return i32Op(op, a, b);
 }
 
-/** i32 的比较。有符号那六条在规范形上直接成立，无符号四条要先零扩展到 32 位。 */
+/** i32 的比较。有符号那六条在规范形上直接成立，无符号四条要先折成无符号。 */
 function cmp32(op, a, b) {
   switch (op) {
-    case 'u<': return U32(a) < U32(b);
-    case 'u<=': return U32(a) <= U32(b);
-    case 'u>': return U32(a) > U32(b);
-    case 'u>=': return U32(a) >= U32(b);
+    case 'u<': return i32ToU(a) < i32ToU(b);
+    case 'u<=': return i32ToU(a) <= i32ToU(b);
+    case 'u>': return i32ToU(a) > i32ToU(b);
+    case 'u>=': return i32ToU(a) >= i32ToU(b);
     default: return cmpOp(op, a, b);
   }
 }
@@ -191,11 +168,12 @@ function memKind(t) {
   return 'bool';
 }
 
-/** 缺席实参的零值。这里只有类型码，所以按码给 —— 真正带类型的零值走 zeroOf。 */
+/** 缺席实参的零值。这里只有类型码，所以按码给 —— 真正带类型的零值走 zeroOf。
+ *  i32 的零是 **number** 的 0（第三刀）。 */
 function zeroOfCode(t) {
   if (t === T_I64) return 0n;
   if (t === T_F64) return 0;
-  if (t === T_I32) return 0n;
+  if (t === T_I32) return 0;
   if (t === T_F32) return 0;
   if (t === T_STR) return '';
   return null;
@@ -259,6 +237,30 @@ class MirInterp {
     /* 这个模块里有没有 setjmp。有才给每一帧套上 try —— 没有的话那五条既有的轴
      * 连一个 try 都不多付。 */
     this.usesSetjmp = mir.cabi.some((e) => SETJMP_NAMES.has(e));
+    /* ---- 帧的**对象池**（ADR-0013 第三刀，js_interp.md 的第 7 条）。
+     *
+     * 从前每次调用都要：两个 `[]`、一个 `while push` 铺满槽、再一个 `while push`
+     * 铺满**值窗口**（长度 = 指令条数！）。后一个是纯浪费：一个 300 条指令的函数
+     * 每次进来都要 push 300 个 `undefined`，而其中大半这一趟根本不会被写。
+     *
+     * 池化之后：数组按函数号复用（递归各持一份，返回时还回来）。
+     *   - 值窗口**不清**：MIR 是 SSA，每个 ref 先写后读（verifier 保证支配关系），
+     *     所以上一趟留下的值不可能被读到。这一条是池化能成立的全部理由。
+     *   - 槽**要清**：局部量可以先读后写（C 里那是未定义行为，我们给零值），
+     *     所以每次进来从零值模板拷一遍 —— 那是 O(槽数)，通常十几个。 */
+    this.vpool = mir.funcs.map(() => []);
+    this.spool = mir.funcs.map(() => []);
+    this.szero = mir.funcs.map(() => null);
+  }
+
+  /** 一个函数的槽位零值模板（第一次调用时算一次）。 */
+  slotZeros(no) {
+    let z = this.szero[no];
+    if (z === null) {
+      z = this.mir.funcs[no].slots.map((s) => zeroOfCode(s.t));
+      this.szero[no] = z;
+    }
+    return z;
   }
 
 
@@ -297,6 +299,50 @@ class MirInterp {
     return f.t[ref - REF_BIAS] === T_TPTR;
   }
 
+  /** 一条 ref 的类型码。转换那几条要它：i32 是 number、i64 是 BigInt，
+   *  方向必须由「源 + 结果」两头定（第三刀）。 */
+  refT(f, ref) {
+    if (ref === REF_NONE) return T_VOID;
+    if (isConstRef(ref)) return this.mir.consts.items[ref].t;
+    return f.t[ref - REF_BIAS];
+  }
+
+  /**
+   * 二元运算的**特化闭包**（ADR-0013 第三刀第二段，js_interp.md 的"部分求值"那一条）。
+   *
+   * 从前每条二元指令要付三次调用：一次 `prog[pc](F)`，加两次操作数读取器 `l(F)`/`r(F)`。
+   * 那两次是纯粹的间接层 —— 操作数是常量还是某个 ref **在装载期就知道**，所以把取值
+   * 直接编进闭包里：常量成为捕获的值，ref 成为一次 `F.v[j]`。四种组合各发一份，
+   * 于是运行期只剩「一次调用 + 两次数组下标 + 一次算」。
+   *
+   * 这比"特化 dispatch"（量过是 0 收益）不同：省掉的不是 switch，是**函数调用**。
+   */
+  bin2(f, i, fn) {
+    const next = i + 1;
+    const a = f.a[i];
+    const b = f.b[i];
+    const ac = isConstRef(a);
+    const bc = isConstRef(b);
+    if (ac && bc) {
+      const x = this.kvals[a];
+      const y = this.kvals[b];
+      return (F) => { F.v[i] = fn(x, y); return next; };
+    }
+    if (ac) {
+      const x = this.kvals[a];
+      const k = b - REF_BIAS;
+      return (F) => { F.v[i] = fn(x, F.v[k]); return next; };
+    }
+    if (bc) {
+      const y = this.kvals[b];
+      const j = a - REF_BIAS;
+      return (F) => { F.v[i] = fn(F.v[j], y); return next; };
+    }
+    const j = a - REF_BIAS;
+    const k = b - REF_BIAS;
+    return (F) => { F.v[i] = fn(F.v[j], F.v[k]); return next; };
+  }
+
   /** struct / enum 是值类型，深拷贝；其余（含 class）是引用。与 eval.js 的 copyOf 同一套。 */
   copyOf(t, v) {
     if (t === undefined || v === null || v === undefined) return v;
@@ -323,15 +369,24 @@ class MirInterp {
     if (this.depth > 4000) throw new OmniError('mir.interp: call stack too deep');
     // 帧 = 值窗口 + 槽位窗口（ADR-0013 决策 3）。形参就是前几个槽 —— 降级器是这么分的，
     // 值语义要的拷贝由函数体入口那几条 COPY 负责，不在这里重复。
-    const F = { v: [], s: [], captures, ret: undefined, up: this.cur };
+    // 两个窗口都从**池**里拿（见构造函数那一段）：递归各持一份，返回时还回来。
+    const vp = this.vpool[no];
+    const sp = this.spool[no];
+    const zeros = this.slotZeros(no);
+    const nv = f.count();
+    /* 值窗口铺满一次就够：封闭 ABI 里 list 的下标写入必须落在长度之内（越界在原生构建里
+     * 是运行期错误，不是自动扩张）。池里那份**已经**是满的，所以只有第一次付这一笔。
+     * 不清它是因为 MIR 是 SSA：每个 ref 先写后读。 */
+    const v = vp.length > 0 ? vp.pop() : new Array(nv).fill(undefined);
+    const s = sp.length > 0 ? sp.pop() : zeros.slice();
+    const F = { v, s, captures, ret: undefined, up: this.cur };
     this.cur = F;
     const myDepth = this.depth;
+    /* 槽要清：局部量可以先读后写（C 里那是未定义行为，我们给零值）。 */
     let i = 0;
-    while (i < f.slots.length) { F.s.push(i < args.length ? args[i] : zeroOfCode(f.slots[i].t)); i++; }
-    // 值窗口要**先铺满**：封闭 ABI 里 list 的下标写入必须落在长度之内（越界在原生构建里
-    // 是运行期错误，不是自动扩张）。代价是每次调用一次线性初始化 —— oracle 路径认这个代价。
-    i = 0;
-    while (i < f.count()) { F.v.push(undefined); i++; }
+    const ns = zeros.length;
+    const na = args.length;
+    while (i < ns) { s[i] = i < na ? args[i] : zeros[i]; i++; }
     let pc = 0;
     const n = prog.length;
     if (this.usesSetjmp) {
@@ -360,6 +415,10 @@ class MirInterp {
     const out = F.ret;
     this.depth = this.depth - 1;
     this.cur = F.up;
+    /* 两个窗口还回池子。**正常返回才还** —— longjmp / exit 那两条路上这一帧的数组
+     * 就让 GC 收，不然还得判"它是不是还在某条异常路径上被引用"。 */
+    vp.push(v);
+    sp.push(s);
     return out;
   }
 
@@ -433,12 +492,21 @@ class MirInterp {
         const idx = rd(a);
         const starts = tabTarget[i];
         const pcs = starts.map((s) => (f.op[s] === OP.LOOP ? s + 1 : endOf[s] + 1));
-        const n = BigInt(pcs.length - 1);   // 最后一项是兜底
-        const def = pcs[pcs.length - 1];
+        const def = pcs[pcs.length - 1];   // 最后一项是兜底
+        // 下标按无符号读（wasm）。规范形是符号扩展过的，所以负数就是"很大的无符号数"
+        // —— 一律走兜底，与 `v u>= n` 等价（n 不会大到 2^31）。
+        // i32 的下标现在是 number（第三刀），i64 的仍是 BigInt，两条各走各的比较。
+        if (this.refT(f, a) === T_I32) {
+          const n = pcs.length - 1;
+          return (F) => {
+            const v = idx(F);
+            if (v < 0 || v >= n) return def;
+            return pcs[v];
+          };
+        }
+        const n = BigInt(pcs.length - 1);
         return (F) => {
           const v = idx(F);
-          // 下标按无符号读（wasm）。规范形是符号扩展过的，所以负数就是"很大的无符号数"
-          // —— 一律走兜底，与 `v u>= n` 等价（n 不会大到 2^31）。
           if (v < 0n || v >= n) return def;
           return pcs[Number(v)];
         };
@@ -485,52 +553,49 @@ class MirInterp {
     if (BIN_STR.has(op)) {
       const o = BIN_STR.get(op);
       const kind = kindOf(t);
-      const l = rd(f.a[i]);
-      const r = rd(f.b[i]);
       // 向量：宿主表示是一条长度 = 宽度的数组，逐道走 **同一份** binOp（vecBinOp 就在
       // interp/builtin.js 里，OIR 解释器用的也是它）—— 两个解释器不会在道上分叉。
       if (typeLanes(t) > 1) {
+        const l = rd(f.a[i]);
+        const r = rd(f.b[i]);
         const vt = { lanes: typeLanes(t), elem: { k: kindOf(typeKind(t)) } };
         return (F) => { F.v[i] = vecBinOp(o, vt, l(F), r(F)); return next; };
       }
       // 32 位那两格走各自的一份（ADR-0017 第一刀）：回绕宽度与移位掩码都不一样
-      if (t === T_I32) return (F) => { F.v[i] = bin32(o, l(F), r(F)); return next; };
-      if (t === T_F32) return (F) => { F.v[i] = bin32f(o, l(F), r(F)); return next; };
-      return (F) => { F.v[i] = binOp(o, kind, l(F), r(F)); return next; };
+      if (t === T_I32) return this.bin2(f, i, (a, b) => bin32(o, a, b));
+      if (t === T_F32) return this.bin2(f, i, (a, b) => bin32f(o, a, b));
+      return this.bin2(f, i, (a, b) => binOp(o, kind, a, b));
     }
     if (CMP_STR.has(op)) {
       const o = CMP_STR.get(op);
-      const l = rd(f.a[i]);
-      const r = rd(f.b[i]);
       // dynamic 的相等：标签相同**且**值相同（ADR-0006）。`t` 是操作数类型，所以这里
       // 认得出来 —— 结果类型是 bool，看它就分不出这一支了。
       if (t === T_DYN) {
         const isEq = op === OP.EQ;
-        return (F) => {
-          const av = l(F);
-          const bv = r(F);
-          const eq = dynTag(av) === dynTag(bv) && av === bv;
-          F.v[i] = isEq ? eq : !eq;
-          return next;
-        };
+        return this.bin2(f, i, (a, b) => {
+          const eq = dynTag(a) === dynTag(b) && a === b;
+          return isEq ? eq : !eq;
+        });
       }
       // i32 的无符号比较要先零扩展到 32 位（见 cmp32 的注释）；有符号那六条在规范形上
       // 直接成立，所以这一支只在 t 是 i32 时接手。
-      if (t === T_I32) return (F) => { F.v[i] = cmp32(o, l(F), r(F)); return next; };
-      return (F) => { F.v[i] = cmpOp(o, l(F), r(F)); return next; };
+      if (t === T_I32) return this.bin2(f, i, (a, b) => cmp32(o, a, b));
+      return this.bin2(f, i, (a, b) => cmpOp(o, a, b));
     }
     switch (op) {
       case OP.NEG: {
         const v = rd(f.a[i]);
         // 一元负号也会溢出：-INT64_MIN == INT64_MIN，必须回绕
         if (t === T_I64) return (F) => { F.v[i] = W(-v(F)); return next; };
-        if (t === T_I32) return (F) => { F.v[i] = W32(-v(F)); return next; };
+        // i32 是 number：过 op 走「0 - x」，回绕与溢出都在那一份里
+        if (t === T_I32) return (F) => { F.v[i] = i32Op('-', 0, v(F)); return next; };
         if (t === T_F32) return (F) => { F.v[i] = Math.fround(-v(F)); return next; };
         return (F) => { F.v[i] = -v(F); return next; };
       }
       case OP.BNOT: {
         const v = rd(f.a[i]);
-        if (t === T_I32) return (F) => { F.v[i] = W32(~v(F)); return next; };
+        // `~x` 就是 `x ^ -1`（i32 上过 op；i64 仍是 BigInt）
+        if (t === T_I32) return (F) => { F.v[i] = i32Op('^', v(F), -1); return next; };
         return (F) => { F.v[i] = W(~v(F)); return next; };
       }
       case OP.NOT: {
@@ -539,17 +604,25 @@ class MirInterp {
       }
       case OP.CVT: {
         const v = rd(f.a[i]);
+        // 源类型：整数之间那几条的方向由「源 + 结果」两头定（i32 是 number、i64 是 BigInt）
+        const st = this.refT(f, f.a[i]);
         /* 整数 -> 浮点。目标是 f32 就要**真的舍到单精度** —— 少这一次 fround，
-         * `(float)16777217` 在解释器里会保住那个 1，而在真的 f32 上它舍成 16777216。 */
+         * `(float)16777217` 在解释器里会保住那个 1，而在真的 f32 上它舍成 16777216。
+         * 源是 i32 时它已经是 number，`Number()` 那一步都不用付。 */
         if (x === CVT_I2F) {
+          if (st === T_I32) {
+            if (t === T_F32) return (F) => { F.v[i] = Math.fround(v(F)); return next; };
+            return (F) => { F.v[i] = v(F); return next; };
+          }
           if (t === T_F32) return (F) => { F.v[i] = Math.fround(Number(v(F))); return next; };
           return (F) => { F.v[i] = Number(v(F)); return next; };
         }
-        // 位当无符号 64 位读再转（第六十一刀）。`BigInt.asUintN` 现在在闭 ABI 里了
-        // （ADR-0011 决策 19），所以直接用它。从前那句 `u < 0 ? u + 2^64 : u` 靠的是
-        // **无界** BigInt，而这个值域里 int 就是 int64 —— 那个字面量连落点都没有，
-        // C 后端会发出一个 int64 装不下的整数常量，clang 当场拒收。
+        // 位当无符号读再转（第六十一刀）。i32 那半边过 `i32ToU`，i64 那半边过 asUintN(64)。
         if (x === CVT_U2F) {
+          if (st === T_I32) {
+            if (t === T_F32) return (F) => { F.v[i] = Math.fround(i32ToU(v(F))); return next; };
+            return (F) => { F.v[i] = i32ToU(v(F)); return next; };
+          }
           if (t === T_F32) {
             return (F) => { F.v[i] = Math.fround(Number(BigInt.asUintN(64, v(F)))); return next; };
           }
@@ -559,17 +632,25 @@ class MirInterp {
          * 是未定义行为，这里收成 0 而不是抛错 —— 抛错会让「UB」变成「一定崩」，
          * 那是另一种语义，而且两条腿不可能一致（原生那边是随便一个值）。 */
         if (x === CVT_F2I) {
-          const bits = t === T_I32 ? 32 : 64;
+          // i32：`i32Wrap` 就是 ToInt32（对 2^32 取模再看符号），NaN/无穷落成 0
+          if (t === T_I32) return (F) => { F.v[i] = i32Wrap(Math.trunc(v(F))); return next; };
           return (F) => {
             const d = Math.trunc(v(F));
-            F.v[i] = Number.isFinite(d) ? BigInt.asIntN(bits, BigInt(d)) : 0n;
+            F.v[i] = Number.isFinite(d) ? BigInt.asIntN(64, BigInt(d)) : 0n;
             return next;
           };
         }
         /* 浮点 -> **无符号**整数（第九十五片）。与 `F2I` 差的只有「按几位读」：
-         * 位模式仍旧存成两补的 i64（MIR 里没有无符号类型码），所以 2^63 那一带
-         * 落成负数 —— 与 `fcvtzu` 出来的位一样。 */
+         * 位模式仍旧存成两补（MIR 里没有无符号类型码），所以上半区落成负数 ——
+         * 与 `fcvtzu` 出来的位一样。 */
         if (x === CVT_F2U) {
+          if (t === T_I32) {
+            return (F) => {
+              const d = Math.trunc(v(F));
+              F.v[i] = Number.isFinite(d) && d >= 0 ? i32Wrap(d) : 0;
+              return next;
+            };
+          }
           return (F) => {
             const d = Math.trunc(v(F));
             F.v[i] = Number.isFinite(d) && d >= 0
@@ -581,15 +662,33 @@ class MirInterp {
         // 装箱是恒等：dynamic 就是原生值（ADR-0006 第 2 节）。C 后端那边它是打标签，
         // 所以指令留着 —— 「哪里发生装箱」是后端要知道的事实。
         if (x === CVT_BOX) return (F) => { F.v[i] = v(F); return next; };
-        // ---- 宽度转换（ADR-0017 第一刀）。`t` 是**结果**类型，方向由它定。
-        // 整数扩宽：i32 的规范形本来就是符号扩展过的，所以 sext 是恒等；
-        // zext 要把那 32 位当无符号读回来。**恒等也要留着这条指令** —— LLVM 那边它是
-        // 真的 sext/zext，两条腿看到的是同一份 MIR。
-        if (x === CVT_SEXT) return (F) => { F.v[i] = v(F); return next; };
-        if (x === CVT_ZEXT) return (F) => { F.v[i] = U32(v(F)); return next; };
-        if (x === CVT_TRUNC) return (F) => { F.v[i] = W32(v(F)); return next; };
-        if (x === CVT_SEXT8) return (F) => { F.v[i] = BigInt.asIntN(8, v(F)); return next; };
-        if (x === CVT_SEXT16) return (F) => { F.v[i] = BigInt.asIntN(16, v(F)); return next; };
+        /* ---- 宽度转换（ADR-0017 第一刀 / ADR-0013 第三刀）。`t` 是**结果**类型。
+         * i32 是 number、i64 是 BigInt，所以扩宽/变窄这几条现在**真的要换表示**：
+         * 从前 sext 是恒等（两边都是 BigInt），现在它是一次装箱。 */
+        if (x === CVT_SEXT) {
+          if (st === T_I32 && t === T_I64) return (F) => { F.v[i] = BigInt(v(F)); return next; };
+          return (F) => { F.v[i] = v(F); return next; };
+        }
+        if (x === CVT_ZEXT) {
+          if (st === T_I32) return (F) => { F.v[i] = BigInt(i32ToU(v(F))); return next; };
+          return (F) => { F.v[i] = BigInt.asUintN(64, v(F)); return next; };
+        }
+        if (x === CVT_TRUNC) {
+          return (F) => { F.v[i] = Number(BigInt.asIntN(32, v(F))); return next; };
+        }
+        // 低 8/16 位的符号扩展。i32 上是两次移位（C 的 `(signed char)x`），i64 上仍是 BigInt
+        if (x === CVT_SEXT8) {
+          if (t === T_I32) {
+            return (F) => { F.v[i] = i32Op('>>', i32Op('<<', v(F), 24), 24); return next; };
+          }
+          return (F) => { F.v[i] = BigInt.asIntN(8, v(F)); return next; };
+        }
+        if (x === CVT_SEXT16) {
+          if (t === T_I32) {
+            return (F) => { F.v[i] = i32Op('>>', i32Op('<<', v(F), 16), 16); return next; };
+          }
+          return (F) => { F.v[i] = BigInt.asIntN(16, v(F)); return next; };
+        }
         // 浮点宽度：变窄要真的舍到单精度，变宽是恒等（single 的每个值都是 double 的值）
         if (x === CVT_FCVT) {
           if (t === T_F32) return (F) => { F.v[i] = Math.fround(v(F)); return next; };
@@ -732,14 +831,18 @@ class MirInterp {
       }
       case OP.MLOAD: {
         const p = rd(f.a[i]);
-        const ld = memLoadFn(MLOAD_KINDS[memKindNo(x)]);
+        const kind = MLOAD_KINDS[memKindNo(x)];
+        /* 结果是 i32 就用 **number 口径**那一组（第三刀）：读出来直接是 number，
+         * 不经过一次 BigInt。选口径在装载期做完，运行期只是一次调用。 */
+        const ld = t === T_I32 ? (memLoadFnN(kind) ?? memLoadFn(kind)) : memLoadFn(kind);
         const off = memOff(x);
         return (F) => { F.v[i] = ld(p(F), off); return next; };
       }
       case OP.MSTORE: {
         const p = rd(f.a[i]);
         const v = rd(f.b[i]);
-        const st = memStoreFn(MSTORE_KINDS[memKindNo(x)]);
+        const kind = MSTORE_KINDS[memKindNo(x)];
+        const st = t === T_I32 ? (memStoreFnN(kind) ?? memStoreFn(kind)) : memStoreFn(kind);
         const off = memOff(x);
         return (F) => { const w = v(F); st(p(F), off, w); F.v[i] = w; return next; };
       }
@@ -898,7 +1001,18 @@ class MirInterp {
             return next;
           };
         }
-        return (F) => { F.v[i] = I.callFunc(no, undefined, readAll(args, F)); return next; };
+        /* 实参表用**这条调用点自己的**一块草稿，不每次新建（第三刀第三段）。
+         * 递归也安全：`callFunc` 进门第一件事就是把实参拷进被调者的槽，拷完这块草稿就死了，
+         * 而里层的调用发生在那之后 —— 所以同一条 CALL 递归下去也不会互相踩。
+         * profile 上这一格（连同 callFunc 里那两笔）占 BBP 的四成，所以值得这么写。 */
+        const scratch = new Array(args.length);
+        const na = args.length;
+        return (F) => {
+          let k = 0;
+          while (k < na) { scratch[k] = args[k](F); k++; }
+          F.v[i] = I.callFunc(no, undefined, scratch);
+          return next;
+        };
       }
       case OP.CALLFN: {
         const fv = rd(f.a[i]);
@@ -971,21 +1085,33 @@ class MirInterp {
        * 而那张表里的函数只认实参（整段理由见 `LongJmp` 那一节）。 */
       if (SETJMP_NAMES.has(entry)) {
         const args = rdArgs(f.b[i]);
+        /* `setjmp` 的回值类型是 C 的 `int`，也就是 i32 —— 而 i32 现在是 number
+         * （第三刀）。这一格从前写死 `0n`，换表示之后那就是「一个 BigInt 落进 i32 的位置」，
+         * 后面第一条把它存进内存的指令当场炸（tests/c/sys/04-setjmp 抓到的就是这个）。 */
+        const zero = f.t[i] === T_I32 ? 0 : 0n;
         return (F) => {
           /* 记的是 `F.up` —— 外部符号是经桩函数调的，`F` 是桩自己的帧，
            * 一返回就没了；要回去的是 C 那边的调用者，落点是它那条 CALL。 */
           const up = F.up;
           jmpTargets.set(args[0](F), { f: up, pc: up.pc });
-          F.v[i] = 0n;
+          F.v[i] = zero;
           return next;
         };
       }
       if (LONGJMP_NAMES.has(entry)) {
         const args = rdArgs(f.b[i]);
+        /* `val` 的类型也是 C 的 `int`（i32 -> number，第三刀），所以那条
+         * 「0 换成 1」要在**同一种表示**上判，不然 setjmp 那边收到的是另一种数。 */
+        const refs = f.argsOf(f.b[i]);
+        const num = refs.length > 1 ? this.refT(f, refs[1]) === T_I32 : true;
         return (F) => {
           const rec = jmpTargets.get(args[0](F));
           if (rec === undefined) failRt('longjmp: 这个 jmp_buf 没有被 setjmp 装过');
           /* C11 7.13.2.1：`val` 是 0 的话 `setjmp` 那边回 1。 */
+          if (num) {
+            const v = args.length > 1 ? Number(args[1](F)) : 0;
+            throw new LongJmp(rec.f, rec.pc, v === 0 ? 1 : v);
+          }
           const v = args.length > 1 ? args[1](F) : 0n;
           throw new LongJmp(rec.f, rec.pc, v === 0n ? 1n : v);
         };
@@ -995,11 +1121,22 @@ class MirInterp {
        * 其余的 C_ABI 入口**照旧拒绝**：那些是 ADR-0014 的封闭表，每条签名各不相同，
        * 而解释执行是 oracle，它不该假装能做 FFI（eval.js 的 CCall 分支同一个立场）。 */
       if (hasLibc(entry)) {
-        const args = rdArgs(f.b[i]);
+        /* **libc 的边界要换一次口径**（第三刀）：那一份收发的整数一律 BigInt
+         * （它是照着「方言只有 i64 一格整数」写的），而 i32 现在是 number。
+         * 装/卸都在这儿，一次也不上推 —— 「语义只有一份」比「少一次 BigInt」重要，
+         * 而 libc 调用不在内层循环里。转换**编在读取器里**，运行期不再判类型。 */
+        const refs = f.argsOf(f.b[i]);
+        const args = refs.map((r) => {
+          const g = rd(r);
+          if (this.refT(f, r) !== T_I32) return g;
+          return (F) => BigInt(g(F));
+        });
+        const retI32 = f.t[i] === T_I32;
         return (F) => {
           const vals = readAll(args, F);
           try {
-            F.v[i] = callLibc(entry, vals);
+            const r = callLibc(entry, vals);
+            F.v[i] = retI32 ? Number(BigInt.asIntN(32, BigInt(r))) : r;
           } catch (e) {
             /* `exit` 抛的信号要原样穿过去：它不是「程序错了」，而是程序要求的退出码。
              * `longjmp`（从 libc 回调进去的那种，比如比较器里报错）同理。 */
@@ -1082,7 +1219,20 @@ export function runMirModule(oir, mir) {
     const no = fnPtrNo(ptr);
     if (no < 0) failRt('call of a null function pointer');
     if (I.mir.funcs[no] === undefined) failRt(`function pointer index ${no} out of range`);
-    return I.callFunc(no, undefined, args);
+    /* libc 手里的整数一律 BigInt，而被调函数的 i32 形参要的是 number（第三刀）——
+     * 按**被调者的签名**装/卸一次。回值同理：i32 回去要变回 BigInt，不然 libc 那边
+     * 拿它去算会当场抛（BigInt 与 number 不能混着做算术）。 */
+    const ps = I.mir.funcs[no].params;
+    const as = [];
+    let k = 0;
+    while (k < args.length) {
+      const v = args[k];
+      const wantI32 = ps[k] !== undefined && ps[k].t === T_I32;
+      as.push(wantI32 && typeof v === 'bigint' ? Number(BigInt.asIntN(32, v)) : v);
+      k++;
+    }
+    const r = I.callFunc(no, undefined, as);
+    return I.mir.funcs[no].ret === T_I32 && typeof r === 'number' ? BigInt(r) : r;
   });
   let code = 0;
   try {

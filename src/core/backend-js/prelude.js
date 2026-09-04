@@ -1722,6 +1722,29 @@ function $js_proc_stdout_bytes(s) {
   process.stdout.write(Buffer.from($js_asS16(s), "latin1"));
   return undefined;
 }
+/* i32 的运算三条（ADR-0013 第三刀）。与 host/native.js 那一份逐条相同 ——
+ * 它们是同一个 op 的两代实现，分叉了就是两套语义。 */
+function $js_i32_op(op, a, b) {
+  switch ($js_asS16(op)) {
+    case "+": return (a + b) | 0;
+    case "-": return (a - b) | 0;
+    case "*": return Math.imul(a, b);
+    case "/": return (a / b) | 0;
+    case "%": return (a % b) | 0;
+    case "u/": return ((a >>> 0) / (b >>> 0)) | 0;
+    case "u%": return ((a >>> 0) % (b >>> 0)) | 0;
+    case "&": return a & b;
+    case "|": return a | b;
+    case "^": return a ^ b;
+    case "<<": return a << (b & 31);
+    case ">>": return a >> (b & 31);
+    case "u>>": return (a >>> (b & 31)) | 0;
+    default: $rt_error("i32Op: 不认识的运算 " + $js_asS16(op));
+  }
+  return 0;
+}
+function $js_i32_tou(x) { return x >>> 0; }
+function $js_i32_wrap(x) { return x | 0; }
 function $js_proc_stderr_bytes(s) {
   $flush();
   process.stderr.write(Buffer.from($js_asS16(s), "latin1"));

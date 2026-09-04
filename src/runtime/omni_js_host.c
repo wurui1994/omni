@@ -16,6 +16,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -297,6 +298,60 @@ omni_dyn omni_js_proc_stderr_bytes(omni_dyn s) {
   if (n > 0) fwrite(b, 1, (size_t)n, stderr);
   fflush(stderr);
   return omni_dyn_undef();
+}
+
+/* ------------------------------------------------- i32 的运算（ADR-0013 第三刀）
+ * 与 `host/native.js` / `backend-js/prelude.js` 那两份是同一个 op 的三代实现，
+ * 逐条对齐（分叉了就是三套语义）。值的口径：进出都是规范形的 int32，装在 real 里。
+ *
+ * 两处 C 特有的坑，都要显式绕开：
+ *   - `INT32_MIN / -1` 与 `INT32_MIN % -1` 在 C 里是**未定义行为**（x86 上会陷入），
+ *     而 JS 的 `(a/b)|0` 回的是 INT32_MIN / 0。所以这两格单列。
+ *   - 有符号溢出也是 UB，所以加减乘一律在 `uint32_t` 上算完再折回来。
+ */
+static int32_t dyn_i32(omni_dyn v) { return (int32_t)omni_dyn_as_real(v); }
+
+/** ECMAScript 的 ToInt32：非有限回 0，其余对 2^32 取模再看符号。 */
+static int32_t to_int32(double d) {
+  if (!isfinite(d)) return 0;
+  double m = fmod(trunc(d), 4294967296.0);
+  if (m < 0) m += 4294967296.0;
+  if (m >= 2147483648.0) m -= 4294967296.0;
+  return (int32_t)m;
+}
+
+omni_dyn omni_js_i32_op(omni_dyn op, omni_dyn a, omni_dyn b) {
+  omni_s16 s = omni_js_as_s16(op);
+  int32_t x = dyn_i32(a);
+  int32_t y = dyn_i32(b);
+  uint32_t ux = (uint32_t)x;
+  uint32_t uy = (uint32_t)y;
+  uint16_t c0 = s.len > 0 ? s.p[0] : 0;
+  uint16_t c1 = s.len > 1 ? s.p[1] : 0;
+  int32_t r = 0;
+  if (c0 == 'u' && c1 == '/') r = (int32_t)(ux / uy);
+  else if (c0 == 'u' && c1 == '%') r = (int32_t)(ux % uy);
+  else if (c0 == 'u' && c1 == '>') r = (int32_t)(ux >> (uy & 31));
+  else if (c0 == '+') r = (int32_t)(ux + uy);
+  else if (c0 == '-') r = (int32_t)(ux - uy);
+  else if (c0 == '*') r = (int32_t)(ux * uy);
+  else if (c0 == '/') r = (x == INT32_MIN && y == -1) ? INT32_MIN : x / y;
+  else if (c0 == '%') r = (x == INT32_MIN && y == -1) ? 0 : x % y;
+  else if (c0 == '&') r = x & y;
+  else if (c0 == '|') r = x | y;
+  else if (c0 == '^') r = x ^ y;
+  else if (c0 == '<') r = (int32_t)(ux << (uy & 31));
+  else if (c0 == '>') r = x >> (uy & 31);
+  else omni_errorf("i32Op: 不认识的运算");
+  return omni_dyn_of_real((double)r);
+}
+
+omni_dyn omni_js_i32_tou(omni_dyn v) {
+  return omni_dyn_of_real((double)(uint32_t)dyn_i32(v));
+}
+
+omni_dyn omni_js_i32_wrap(omni_dyn v) {
+  return omni_dyn_of_real((double)to_int32(omni_dyn_as_real(v)));
 }
 
 /* process.exitCode = n。真正的退出码由生成的 main 返回（见 backend-c 的 emit）。 */

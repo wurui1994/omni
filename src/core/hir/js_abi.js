@@ -266,6 +266,13 @@ export const JS_ABI = {
   js_fs_write_bytes: { js: '$js_fs_write_bytes', c: 'omni_js_fs_write_bytes', arity: 3 },
   js_proc_stdout_bytes: { js: '$js_proc_stdout_bytes', c: 'omni_js_proc_stdout_bytes', arity: 1 },
   js_proc_stderr_bytes: { js: '$js_proc_stderr_bytes', c: 'omni_js_proc_stderr_bytes', arity: 1 },
+  /* i32 的运算三条（ADR-0013 第三刀）。进出都是**规范形的 int32**（一个 number）。
+   * `op` 是运算符文本，与 `interp/builtin.js` 的 `binOp` 用的那一套字符串相同
+   * （`+ - * / % u/ u% & | ^ << >> u>>`）—— 两处对不上就是两套语义。
+   * 除零**不在 op 里查**：调用方先报那条运行期错误，两条腿的消息才逐字相同。 */
+  js_i32_op: { js: '$js_i32_op', c: 'omni_js_i32_op', arity: 3 },
+  js_i32_tou: { js: '$js_i32_tou', c: 'omni_js_i32_tou', arity: 1 },
+  js_i32_wrap: { js: '$js_i32_wrap', c: 'omni_js_i32_wrap', arity: 1 },
   js_fs_realpath: { js: '$js_fs_realpath', c: 'omni_js_fs_realpath', arity: 1 },
   js_proc_args: { js: '$js_proc_args', c: 'omni_js_proc_args', arity: 0 },
   js_proc_cwd: { js: '$js_proc_cwd', c: 'omni_js_proc_cwd', arity: 0 },
