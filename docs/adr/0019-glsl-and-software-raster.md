@@ -3686,6 +3686,95 @@ PNG）、按指针调用。`render_ms 2.322` 对 256² 是 28 MPix/s（含全部
 
 <!-- ADR-0019 量：omni run 缺一个宿主 op-END -->
 
+## 落地：`spawnIn` + `render.js` —— 决策九的最后一薄层（还差接进 CLI）
+
+### 宿主面加的是**一条新 op**，不是改 `spawn` 的形状
+
+`spawn` 有二十来个调用点，而它在**封闭 ABI** 上：改签名要二十处一起动，多一条只是多一条。
+五处改动（`native.js` / `prelude.js` / `js_abi.js` / `omni_js_host.h` / `omni_js_host.c`+`omni.h`），
+两个入口共用一段核心（JS 那侧 `spawnRun`、C 那侧 `omni_js_spawn_core`）。
+
+第 4 个参数**总是字符串**，空串 = 不喂。刻意不收 `undefined` —— C 那侧要一个「这个 dyn
+是不是 undefined」的判据，收空串就把这一格变成纯数据。
+
+**棘轮的「缺 op」还是 8**：`native.js` 那侧同时加了，所以没有产生新的欠债。这一点当初
+担心过（ADR 上一节写"那个数要有意识地改"），结果不用改 —— 因为那个计数量的是
+"原生宿主面缺的"，不是"ABI 上有几条"。
+
+写完 input 再读 stdout 这个次序有个前提：被调那侧要先把 stdin 读干（`glsl_host.c` 的
+`slurp_stdin` 正是这样）。不满足、而且两个方向都超过一个管道缓冲（64 KB）时会死锁 ——
+这一条写在三处注释里。量过：300 KB 过管道给 `wc -c` 回 300001，没死锁。
+
+### `render.js`（121 行）
+
+前端 -> IR -> `spawnIn` -> PNG。uniform 由这一层按**声明次序**摊成一串数递过去；
+宿主二进制按「两份 C 源码的正文」做键缓存。还没接进 CLI —— 那是下一步。
+
+### 顺带修了一个**红了三个提交**的东西
+
+`tests/js-roundtrip` 报 `check.js` 两处把 `of` 当绑定名（自编译子集的关键字）：
+
+```js
+const glslArray = (of, n) => …          // -> (elem, n)
+const of = this.tyOf(node.items[1])     // -> const elem = …
+```
+
+从「数组第 1–3 步」那个提交起就红着。`emit_llvm.js` 里为这条写过一整段注释
+（"局部量不能叫 `of`"），我在 `check.js` 里又栽了同一次。
+
+**为什么三个提交都没发现**：我一直在跑 `tests/glsl/*`（85/0、97/0、15/0，全绿），
+而管这件事的是 `tests/js-roundtrip` —— glsl 那几支门只验"编出来的答案对不对"，
+不验"这个文件本身在自编译子集里合不合法"。
+
+教训具体到能照做：**改完 `frontend-glsl/*` 要跑的是 `js-roundtrip`**。
+写进那两处注释里了。
+
+<!-- ADR-0019 落地：spawnIn + render.js-END -->
+
+## 落地：`omni run x.frag -o out.png` —— 决策九齐了
+
+三处改动，都很薄：
+
+- `render.js` 的 `llvm-config` 探测：从前用 `which`，而 **brew 装的 llvm 是 keg-only，
+  不在 PATH 上**，于是在这台机器上一次都没成功过。改成两类候选分开探 —— 带 `/` 的直接
+  `exists`，裸名字走 `which`。**不能**统一用「拿候选去跑 `--version`」：`native.js` 的
+  `spawn` 在 ENOENT 上是**抛**而不是回非零（`tests/glsl/fast.js` 能那么写是因为它直接
+  用 node 的 `spawnSync`，看的是 `status`）。
+- `cmds.js`：`run` 那个节点多三格开关（`-o` / `--size` / `--set`），并在 `help` 里写明
+  `.frag` 走另一条腿。不声明不行 —— 「不认识的开关直接骂」那一格会把 `256` 当成源文件。
+- `cli.js`：`runGlslFrag`（27 行）只做参数翻译，`case 'run'` 开头一行分流。
+
+前端仍**由扩展名选**，与别处同一条规矩；变的只是「执行」在这门语言里是什么意思 ——
+片元着色器没有 `main` 可跑，它的「跑一遍」就是把每个像素算出来。
+
+`-o` 是必给的：PNG 是二进制，没有「印到 stdout」这个说法。
+
+### 量
+
+```
+$ omni run /tmp/p1.frag -o /tmp/p2.png --size 256 \
+    --set u_resolution=256,256 --set u_viewport=-6.283…,6.283…,-2,2 \
+    --set u_colInside=0.11,0.42,0.94 --set u_colOutside=1,1,1 --set u_colFrontier=0.6,0.75,0.98
+/tmp/p2.png  256x256  uniform 5 个  ir 2202 行
+
+整趟 1.44 s（宿主已缓存）：其中 JIT 编译 107 ms、渲染 2.2 ms —— 剩下的都是前端。
+```
+
+出来的图与直接调 `glslRenderToPng` 那张**逐字节相同**（262488 字节）。解码数颜色：
+白 49.41%、蓝 49.41%、边界色 1.18%，**只有 3 种颜色** —— `y < sin(x)` 恰好半分，
+边界是那条曲线。
+
+`tests/cli/tree.js` 58/0，`tests/js-roundtrip` 全绿（97 个文件重新生成后跑全套）。
+
+### 一句留在明处的话
+
+`--set` 是**可重复**的开关，所以要扫一遍 `rest` 而不是 `indexOf` 一次。这类「同一个开关
+出现多次」在这棵命令树上已经有先例（`-I`、`-D`/`-U`），但那几处是 `splitArgv` 收的；
+`--set` 的语义（谁覆盖谁）归这一层，所以自己扫。
+
+<!-- ADR-0019 落地：omni run frag-END -->
+
+
 ## 还没定的（下一步按这个顺序）
 
 1. ~~摸 mesa 那边的边界~~ —— 「量：读 llvmpipe」那一节。
@@ -3723,6 +3812,7 @@ PNG）、按指针调用。`render_ms 2.322` 对 256² 是 28 MPix/s（含全部
 22. **`omni run x.frag -o out.png`** —— 决策九。要三样东西：宿主里 `--render W H`、
     `png.c`（stored zlib，约 120 行）、CLI 那一支。**先做 21 再做 22**：没有数组，
     真实着色器进不来，PNG 只能拿 `bench-*.frag` 压，那就少了最有价值的那个对照物。
+    ~~做完了~~ —— 三样齐了，见「落地：`omni run x.frag -o out.png`」。
 23. **动画（`u_time`）** —— shadertoy / glslviewer 那一路。用户提到了，但现在**不开**：
     一帧还没出来。真要走，它落在宿主里是「同一个函数指针调 N 次，每次换一个 uniform」——
     与决策八那三条约束天然一致，不需要新决策。

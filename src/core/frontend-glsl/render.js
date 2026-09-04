@@ -34,12 +34,25 @@ function glslRenderNComp(t) {
   return 1;
 }
 
-/** 找 `llvm-config`。`OMNI_LLVM_CONFIG` 优先，其次 PATH 里那几个常见名字。 */
+/**
+ * 找 `llvm-config`。`OMNI_LLVM_CONFIG` 优先，其次 PATH 里那几个常见名字，最后是 homebrew
+ * 那两个固定位置 —— **brew 装的 llvm 是 keg-only，不在 PATH 上**，只查 PATH 会找不到
+ * （`tests/glsl/fast.js` 早就在探这两条路径了，这儿照抄）。
+ *
+ * 两种候选分开探：带 `/` 的直接 `exists`，裸名字走 `which`。不能统一用 `spawn(候选)`
+ * 试 `--version`：`native.js` 的 `spawn` 在 ENOENT 上是**抛**而不是回非零。
+ */
 function glslRenderFindLlvmConfig(envGet) {
   const pick = envGet('OMNI_LLVM_CONFIG');
   if (pick !== undefined && pick !== '') return pick;
-  for (const n of ['llvm-config', 'llvm-config-19', 'llvm-config-18', 'llvm-config-17']) {
-    if (spawn('which', [n], 'c')[0] === 0) return n;
+  const cands = ['llvm-config', 'llvm-config-19', 'llvm-config-18', 'llvm-config-17',
+    '/opt/homebrew/opt/llvm/bin/llvm-config', '/usr/local/opt/llvm/bin/llvm-config'];
+  for (const n of cands) {
+    if (n.indexOf('/') >= 0) {
+      if (exists(n)) return n;
+    } else if (spawn('which', [n], 'c')[0] === 0) {
+      return n;
+    }
   }
   return null;
 }

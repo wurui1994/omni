@@ -28,6 +28,7 @@ import { lowerAsy } from './frontend-asy/lower.js';
 import { asyUnitModules } from './frontend-asy/link.js';
 import { parseAsyBuiltins } from './frontend-asy/types.js';
 import { lowerJnc } from './frontend-jnc/lower.js';
+import { glslRenderToPng } from './frontend-glsl/render.js';
 import { Cpp } from './frontend-c/tccpp.js';
 import { lowerC, lowerCNative } from './frontend-c/tccgen.js';
 import { genArm64Module as genArm64 } from './arm64/from_mir.js';
@@ -2135,6 +2136,37 @@ function runViaJit(mod, argv, srcPath) {
 }
 
 
+/**
+ * `omni run x.frag -o out.png`（ADR-0019 决策九）。这一层只做**参数**：把 `--size`
+ * 与那一串 `--set` 翻成 `render.js` 要的形状，别的都在那一份里。
+ *
+ * `-o` 是必给的：一帧一张图，没有「印到 stdout」这个说法（PNG 是二进制）。
+ */
+function runGlslFrag(path, rest) {
+  const oi = rest.indexOf('-o');
+  if (oi < 0) throw new OmniError(`run ${basename(path)}: 要给 -o OUT.png（一帧一张图）`);
+  const out = rest[oi + 1];
+  const si = rest.indexOf('--size');
+  const sz = si >= 0 ? rest[si + 1] : '256';
+  const xy = sz.split('x');
+  const w = Number(xy[0]);
+  const h = xy.length > 1 ? Number(xy[1]) : w;
+  if (!(w > 0) || !(h > 0)) throw new OmniError(`run: --size ${sz} 说不通（要 N 或 NxM）`);
+  /* `--set` 可重复，所以扫一遍而不是 `indexOf`。 */
+  const set = {};
+  for (let i = 0; i < rest.length; i++) {
+    if (rest[i] !== '--set') continue;
+    const kv = rest[i + 1] === undefined ? '' : rest[i + 1];
+    const eq = kv.indexOf('=');
+    if (eq <= 0) throw new OmniError(`run: --set 要 NAME=v[,v…]，给的是 '${kv}'`);
+    set[kv.slice(0, eq)] = kv.slice(eq + 1).split(',').map((s) => Number(s));
+  }
+  const root = join(installDir(), '..', '..', '..');
+  const r = glslRenderToPng(root, path, out, w, h, set, findCC(), env);
+  stdout(`${r.out}  ${w}x${h}  uniform ${r.uniforms.length} 个  ir ${r.irLines} 行\n`);
+  return 0;
+}
+
 function main(argv) {
   /* 分派走命令树（ADR-0018 决策四）：走到哪个节点、那个节点认识哪些带值开关，都由
    * `cli/cmds.js` 那份数据说 —— 顶层不再认识 `--image-base` / `-isystem` 这种语言与格式
@@ -2328,6 +2360,10 @@ function main(argv) {
 
   switch (cmd) {
     case 'run': {
+      /* `.frag`/`.glsl` 走另一条腿（ADR-0019 决策九）：**渲一帧、写一张 PNG**。
+       * 前端由扩展名选，与别处同一条规矩 —— 变的只是「执行」在这一门语言里是什么意思：
+       * 片元着色器没有 main 可跑，它的「跑一遍」就是把每个像素算出来。 */
+      if (path.endsWith('.frag') || path.endsWith('.glsl')) return runGlslFrag(path, rest);
       // 一个源文件一份产物那条路（第七十五刀）：产物按源文件名躺在一个**共用目录**里，
       // 跑的是 node 自己的 ESM 模块图 —— 复用与增量都在那个目录上，不在这一趟里。
       // **这是默认**（第一百〇四刀）：它是唯一一条"改一个文件只重编一份"的路，

@@ -177,7 +177,13 @@ env: OMNI_CC、OMNI_CLANG、OMNI_LLVM_CONFIG`,
     {
       name: 'run', key: 'run', usage: 'FILE [-- args...]',
       brief: '编译并执行',
-      flags: [F_MODE, F_WORK, F_BACKEND, F_INC, F_LEG_INTERP, F_LEG_MIR],
+      help: `.frag/.glsl 走另一条腿（ADR-0019 决策九）：一帧一张 PNG，要 -o。
+uniform 由 --set 给，没给的按 0；一个名字对一串数，逗号分开。
+
+  omni run x.frag -o out.png --size 512 --set u_resolution=512,512`,
+      flags: [F_MODE, F_WORK, F_BACKEND, F_INC, F_LEG_INTERP, F_LEG_MIR, F_OUT,
+        { name: '--size', arity: 1, value: 'N[xM]', brief: '（glsl）画布大小，默认 256' },
+        { name: '--set', arity: 1, value: 'NAME=v,…', brief: '（glsl）给一个 uniform 赋值，可重复' }],
     },
     {
       name: 'build', key: 'build', usage: 'FILE -o NAME',
