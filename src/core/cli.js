@@ -14,6 +14,7 @@ import {
   cwd, installDir, isDir, writeBinary, readBinary,
 } from './host/native.js';
 import { join, basename, dirname, isAbsolute, resolve } from './host/path.js';
+import { cacheRoot } from './host/cache.js';
 import { hash16 } from './host/hash.js';
 import { findCmd, splitArgv, canonicalize, ownsVerbose, renderHelp, renderLegacy } from './cli/tree.js';
 import { ROOT, LEGACY } from './cli/cmds.js';
@@ -976,21 +977,9 @@ function srcStamp() {
  * 与后端/解释器那几条腿无关。`OMNI_NO_JSCACHE=1` 关掉（对照用）。
  */
 /**
- * 一切中间文件与缓存的根：**仓库里的 `.omni-cache`**，不再用系统临时目录（第一百〇五刀）。
- *
- * 为什么不用 `/tmp` / `/var/folders`：
- *   - 系统会清它。EPS 参考那 192 份就是这么丢的（一趟 5 分钟的真 asy 重跑），
- *     而 glr 表、运行时 `.o`、链好的可执行文件都是"重算很贵、内容只由输入决定"的东西。
- *   - 看不见。`omni-l2pb0k/a.out.c` 这种名字在 `/var/folders/x6/dw0k…` 底下，
- *     出了问题连"上一趟到底编了什么"都翻不出来。
- *   - 一台机器上两个 checkout 的印记里带的是路径与 mtime，撞不撞全靠运气。
- * `OMNI_CACHE_DIR` 可以把整棵搬走（CI 上想放到 workspace 之外时用）。
+ * 一切中间文件与缓存的根搬到了 `host/cache.js` —— `glr/load.js` 也要它，而模块作用域的
+ * 名字必须全程序唯一（两处各写一个 `cacheRoot()` 会被链接器骂）。
  */
-function cacheRoot() {
-  const e = env('OMNI_CACHE_DIR');
-  if (e !== undefined && e !== '') return e;
-  return join(installDir(), '..', '..', '..', '.omni-cache');
-}
 
 /**
  * 一次性的工作目录（生成的 `.c`、链出来的 `a.out`、写缓存前的暂存…）。

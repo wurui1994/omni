@@ -14,20 +14,14 @@
 // 这一处从 `cli.js` 的 `loadGrammar()` 里搬出来：那一份只有 CLI 自己用，而十四支
 // GLSL 的门各自 `buildTable()` 一遍 —— 跑一趟全套等于白花 14 × 559 ms。
 
-import { writeText, readText, exists, mkdirAll, rename, env, installDir } from '../host/native.js';
+import { writeText, readText, exists, mkdirAll, rename } from '../host/native.js';
+import { cacheRoot } from '../host/cache.js';
 import { join } from '../host/path.js';
 import { hash16 } from '../host/hash.js';
 import { readSexpr } from '../sexpr/read.js';
 import { Diagnostics, SourceFile } from '../source/diag.js';
 import { readGrammar } from './grammar.js';
 import { buildTable, tableText, tableFromText, TABLE_FORMAT } from './table.js';
-
-/** 与 `cli.js` 的 `cacheRoot()` 同一处：`OMNI_CACHE_DIR` 能把整棵搬走。 */
-function cacheRoot() {
-  const e = env('OMNI_CACHE_DIR');
-  if (e !== undefined && e !== '') return e;
-  return join(installDir(), '..', '..', '..', '.omni-cache');
-}
 
 /**
  * 一份语法文件 -> `{ g, tb, hit }`。
