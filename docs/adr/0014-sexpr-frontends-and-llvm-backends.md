@@ -9691,4 +9691,82 @@ moveto          92     995
   **picture 那一路**（`shipout(picture)`，asy_builtins.asy:3155 一带），不是 `_shipout(frame)`。
   prefix 要在那一路上也接住 —— 两条路都得改，不然只是多写了几个空文件。
 
+### 第十九刀：`shipout("名字")` 真落盘了 —— 而真凶是 dvips 那段字节**绕过了开关**
+
+上一格那两条猜错了一条。补齐之后（`asy__ext` 把空格式兜成 `eps`；只有
+`prefix != _mainname() && prefix != asy__outname()` 才分流，隐式那一次照旧走 `-o`/stdout）
+再跑，落盘的七份**全是 0 字节**、stdout 还是七张叠着。也就是说"分流"这一步生效了，
+字节却没进缓冲 —— 真凶在别处：
+
+`asy__texship` 把 dvips 出来的那份 `.ps` 逐行印出去时用的是 **`write(...)`，不是 `asy__out(...)`**
+（asy_builtins.asy:7214-7226）。`write` 直奔 stdout，`asy__tobuf` 那个开关管不着它。
+这不只是这一刀的事：**`-o 文件` 时带标签的图早就落的是空文件**、字节全跑去了 stdout
+（那一格的注释还写着"整份图先攒起来再落盘"，实际没走到）。四处 `write` 换成 `asy__out`。
+
+验（interpolate1.asy，七次 `shipout("runge1..7")` + 退出时那一次）：
+
+```
+              真 asy          我们
+runge1.eps    140395         140368
+runge2.eps    138107         138070
+…
+runge7.eps    113602         113625
+主输出        113632         113658      <- 差的那二十几字节是 dvi 名与日期那几行
+stdout 的笔数    71             71
+stdout 的界   %%BoundingBox: 178 274 433 517   （逐字相同）
+```
+
 <!-- ADR-0014 interpolate1把折线拆成几百笔-END -->
+
+### 第二十刀：**照源码批量补**四个缺口 —— 没出图 4 -> 1
+
+改法不再一个例子一个例子量，直接照 `/Users/wurui/Documents/Lang/reference/asymptote` 里
+那几份实现搬：
+
+- **`textpath(string[], pen[])`**（runlabel.in:243 的 `_texpath`）：机制这一层**早就有**了
+  （第 6700 行那一片：写一份每条标签一页的 .tex、`\special{ps:}` 把 `show` 换成
+  `charpath + pathforall`、latex -> dvips -> gs 读回 `M/L/C/c`），只是公开名字那一格还是
+  abort。一行接上。
+- **`_strokepath(path, pen)`**（runlabel.in:423）：同一条路子，但不经 TeX —— 自己写一份 .ps：
+  `ASYx/ASYy` 两个打印宏、`/stroke {ASYinit pathforall} bind def`、`setpen`、路径、
+  `strokepath`（PostScript 的真算符，把当前路径换成笔的外轮廓）、`stroke`（就是上面那个
+  打印宏）、最后补一句 `(M) print currentpoint …`；跑 gs 读回来。笔形（线帽、连接、虚线）
+  那一堆规则于是不用自己写一遍 —— 真 asy 也是这么绕的。
+  readpath 的默认缩放是 `hscale=1, vsign=1`（那边 :451 没给参数）。
+- **`postscript(frame, string)` / `(…, min, max)`**（runpicture.in:331/346）：drawop 多一格
+  `kind == 6` 与一个 `psraw` 字段，出图时**逐字照发**（那边是 drawVerbatim）。带 min/max 的
+  那一份把矩形放进 `g`，界那一段照旧从它取 —— 逐字那一段自己不会说它有多大。
+- `_eval` 留着 abort：它要"把一段源码在当前环境里再编一遍"，是把编译器搬到运行期，
+  与前三个不是一档的事（tvgen 一个例子卡在这儿）。
+
+量（干净产物缓存，OMNI_EPS_T=5000；同一趟里还带上了上一刀的 `shipout(prefix)`）：
+
+```
+              一样  只有数值差  结构不同  没出图  超 5s
+  改前          78       0         88       4      19
+  改后          79       0         91       1      18
+```
+
+`tests/asy/run.js` 259 passed / 0 failed。四个例子的字节数（我们 / 参考）：
+strokepath 70983/73225、textpath 31328/17925、tiling 863/1607、tvgen 77/125768（还是 abort）。
+
+### 下一批（recipe 已抄好）：TeX 那条路的**分层**
+
+矢量档剩下的四份（alignedaxis / cardioid / gamma / lmfit1）首处差都是
+`gsave` + `[ 1 0 0 1 0 0] concat` + `grestore` 这一坨。查到底了：**它不是笔的变换**
+（`drawelement.h:322` 与 `psfile.h:330` 两处都挡单位），是 **dvips 给每一份
+`\includegraphics` 套的壳**。asy 那边一张图里"画—标签—再画"会切成**多层**：
+`texfile.cc:153-180` 的 `beginlayer` 每层发一句
+
+```tex
+{\catcode`"=12%
+\includegraphics[bb=<l> <b> <r> <t>]{<前缀>_<N>.eps}%
+}%
+\kern <(l-r)*ps2tex>pt%
+```
+
+也就是 `<前缀>_0.eps`、`_1.eps`… 一层一份底图，标签夹在层与层之间。我们现在只发
+`_0.eps` 一层，所以第二层开始整条流就错开了。这一批要做的就是按标签的先后把 ops 切层、
+每层出一份 `_N.eps`、.tex 里照上面那三行发。
+
+<!-- ADR-0014 批量补四个缺口-END -->

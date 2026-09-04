@@ -1792,6 +1792,9 @@ struct drawop {
   // 位图（kind == 5，`_image`）：像素按行存，**行 0 是下边那一行**（PostScript 的 image
   // 第一条扫描线落在 ImageMatrix 的 y=0 上）。目标平行四边形躺在 `g` 的四个结点上。
   pen[][] img;
+  // 逐字照发的一段 PostScript（kind == 6，`postscript(frame, string)`）。带 min/max 的那一份
+  // 把界放在 `g` 上（一条矩形），不带的那一份 `g` 是空的 —— 界不参与。
+  string psraw = "";
 }
 
 struct picture {
@@ -2494,8 +2497,14 @@ string asy__outformat() { return _getsetting("OMNI_ASY_OUTFORMAT"); }
 typedef void asy__svgfn(drawop[], labelrec[], box, real, real, real);
 asy__svgfn asy__svgcorefn = null;
 // 一份图的前后各一句。回的是那个名字（空串就是"直接印"，两句都是空动作）。
-string asy__shipbegin() {
-  string on = asy__outname();
+//
+// `want` 是**这一张图自己要去的地方**（`shipout("名字")` 那一路，见 `_shipout`）：asy 的规矩是
+// `shipout(prefix)` 写 `prefix.<格式>`，主输出只留退出时那次隐式 shipout。不给就照旧用
+// `-o` 那个名字（空串 = stdout）。量出来的形状：interpolate1.asy 里有七次
+// `shipout("runge1"…"runge7")`，真 asy 落了 8 份（runge1..7.eps 各一张 + interpolate1.eps
+// 是退出时那张，也就是第 7 张的副本）；我们从前把 prefix 丢了，七张顺着同一个流叠出来。
+string asy__shipbegin(string want = "") {
+  string on = want == "" ? asy__outname() : want;
   if (on != "") {
     asy__tobuf = true;
     asy__bufs = "";
@@ -3074,6 +3083,9 @@ private void asy__emitimg(drawop o, real s) {
 void emitop(drawop o, real s, bool cont = false, bool last = true) {
   if (o.kind == 2) { emitshade(o, s); return; }
   if (o.kind == 5) { asy__emitimg(o, s); return; }
+  // 逐字照发（kind == 6）：`postscript(frame, string)` 那一路。asy 那边也是原样进产物
+  // （drawVerbatim），所以这儿一个字都不动。
+  if (o.kind == 6) { asy__out(o.psraw); return; }
   // 裁剪的两格（drawclipbegin.h:52 / drawclipend.h:45）：`gsave` + 超路径 + clip，
   // 配对的那一格只发 `grestore`。空路径时只有 gsave / grestore（那份 C++ 的 `empty()` 那一支）。
   if (o.kind == 3) {
@@ -5239,8 +5251,24 @@ void beginclip(frame f, path[] g, bool stroke=false, pen fillrule=currentpen,
 void endclip(frame f) { abort("endclip 还没做"); }
 void layer(frame f) { abort("layer 还没做"); }
 void newpage(frame f) { abort("newpage 还没做"); }
-void postscript(frame f, string s) { abort("postscript 还没做"); }
-void postscript(frame f, string s, pair min, pair max) { abort("postscript 还没做"); }
+// runpicture.in:331/346 的两份 `postscript`：把一段 PostScript **逐字**塞进产物
+// （那边是 drawVerbatim）。带 min/max 的那一份还报一个界 —— 它是给 `size()` 定标用的，
+// 逐字那一段自己不会告诉别人它有多大。
+void postscript(frame f, string s) {
+  drawop o;
+  o.kind = 6;
+  o.psraw = s;
+  o.p = currentpen;
+  f.ops.push(o);
+}
+void postscript(frame f, string s, pair min, pair max) {
+  drawop o;
+  o.kind = 6;
+  o.psraw = s;
+  o.p = currentpen;
+  o.g = min--(max.x, min.y)--max--(min.x, max.y)--cycle;
+  f.ops.push(o);
+}
 void tex(frame f, string s) { abort("tex 还没做"); }
 void tex(frame f, string s, pair min, pair max) { abort("tex 还没做"); }
 void javascript(frame f, string s) { abort("javascript 还没做"); }
@@ -6001,6 +6029,8 @@ frame operator *(transform t, frame f) {
     // 位图（kind == 5）：像素**不跟着变**，变的只有那四个角（`g`）—— concat 的矩阵是从
     // 变换后的四个角算出来的（见 asy__emitimg），所以旋转/翻转跟着白捡。
     q.img = o.img;
+    // 逐字照发那一段（kind == 6）不跟着变 —— 它是原样的 PostScript，asy 那边也不动它
+    q.psraw = o.psraw;
     // 笔只吃**去掉平移**的那一半（drawelement.h:302 `transformed(shiftless(t),pentype)`）——
     // 量过：`min(shift(3,4)*f)` 是路径搬过去再 ±0.25，笔那一格没有跟着平移。
     // 渐变那一档例外：drawfill.cc 的几个 `transformed` 传 pentype 原件，不过一遍 transpen。
@@ -6306,8 +6336,16 @@ bool inside(path[] g, pair z, pen fillrule=currentpen) {
   if (fillrule.evenodd) return c % 2 != 0;
   return c != 0;
 }
+// runlabel.in:423 的 `_strokepath`：**让 PostScript 自己算笔的外轮廓**（`strokepath` 那个
+// 算符），再靠 `pathforall` 把结果打印出来、拿 gs 跑一趟读回来。真 asy 也是这么绕的 ——
+// 笔形（线帽、连接、虚线）那一堆规则不用自己写一遍。
+// 机制那一半（写 .ps、跑 gs、把 `M/L/C/c` 解析成 path）与 `_texpath` 共用，而那一份定义在
+// 这一行**之后**（这一层的名字解析是顺序的），所以这儿留一格函数变量，后面装进来。
+typedef path[] asy__spfn(path, pen);
+asy__spfn asy__strokepathfn = null;
 path[] _strokepath(path g, pen p=currentpen) {
-  abort("_strokepath 还没做（真 asy 是绕 gs 走一趟）"); return new path[];
+  if (asy__strokepathfn == null) abort("_strokepath：这一趟没装上（内部错）");
+  return asy__strokepathfn(g, p);
 }
 // ---------------- graph/math 那一批余量（第六十七刀）
 // 答得出的照 run*.in 的定义写出来，算法重而 import 时又用不到的体是 abort（签名在，
@@ -6875,8 +6913,66 @@ path[][] _texpath(string[] s, pen[] p) {
   }
   return out;
 }
+// runlabel.in:423 的 `_strokepath`，机制与 `_texpath` 同一条（写一份 .ps、跑 gs、把打印出来的
+// `M/L/C/c` 解析回 path），只是这一份不经 TeX：直接把路径与笔写进 .ps，让 PostScript 的
+// `strokepath` 算外轮廓。照那边的次序摆：
+//   ASYx / ASYy 两个打印宏 -> `/stroke {ASYinit pathforall} bind def`（把 stroke 换成"打印"）
+//   -> setpen -> 路径 -> `strokepath`（真算符，把当前路径换成外轮廓）-> `stroke`（打印它）
+//   -> `(M) print currentpoint …`（最后补一格，与那边的 endpath 一致）
+// readpath 的默认缩放是 hscale=1、vsign=1（runlabel.in:451 没给参数），所以这儿是 (1, 1)。
+private path[] asy__strokepathgs(path g, pen p) {
+  path[] out;
+  if (g.nodes.length == 0) return out;
+  string dir = "/tmp/omni-asytex";
+  string nl = '\n';
+  string ASYx = "/ASYx {( ) print ASYX sub 12 string cvs print} bind def";
+  string ASYy = "/ASYy {( ) print ASYY sub 12 string cvs print} bind def";
+  string forall = "{(M) print ASYy ASYx} {(L) print ASYy ASYx}"
+    + " {(C) print ASYy ASYx ASYy ASYx ASYy ASYx} {(c) print} pathforall";
+  string ASYinit = "/ASYX currentpoint pop def /ASYY currentpoint exch pop def ";
+  // 路径与笔那两段要**字符串**，而 emitpath/setpen 是往 asy__out 去的 —— 借 asy__baseeps
+  // 那个存旧再改的办法把它们接下来。
+  bool save = asy__tobuf;
+  string keep = asy__bufs;
+  asy__tobuf = true;
+  asy__bufs = "";
+  setpen(p);
+  emitpath(g, 1, true);
+  string body = asy__bufs;
+  asy__tobuf = save;
+  asy__bufs = keep;
+  string t = "%!PS-Adobe-3.0 EPSF-3.0" + nl
+    + "%%BoundingBox: 0 0 612 792" + nl
+    + ASYx + nl + ASYy + nl
+    + "/stroke {" + ASYinit + forall + "} bind def" + nl
+    + body
+    + "strokepath" + nl
+    + "stroke" + nl
+    + "(M) print currentpoint ASYy ASYx" + nl
+    + "showpage" + nl + "%%EOF" + nl;
+  if (_runproc("mkdir -p " + dir + " && rm -f " + dir + "/sp.*") != 0) return out;
+  _writetext(dir + "/sp.ps", t);
+  if (_runproc("cd " + dir + " && gs -q -dBATCH -P -sDEVICE=ps2write"
+      + " -sOutputFile=/dev/null sp.ps > sp.out 2>/dev/null") != 0) return out;
+  string o = _readtext(dir + "/sp.out");
+  int i = 0;
+  int len = length(o);
+  while (i < len) {
+    int e = find(o, nl, i);
+    if (e < 0) e = len;
+    string ln = substr(o, i, e - i);
+    i = e + 1;
+    if (length(ln) == 0) continue;
+    return asy__tpparse(ln, 1, 1);
+  }
+  return out;
+}
+asy__strokepathfn = asy__strokepathgs;
+
+// runlabel.in:243 那份 `_texpath` 的公开名字（plain_Label.asy 的 `textpath` 就是它）。
+// 机制在上面那一份里，这儿只是把名字接上 —— 从前这一格是 abort，`textpath.asy` 因此出不了图。
 path[][] textpath(string[] s, pen[] p) {
-  abort("textpath 还没做（读字体文件那一路不在这一层）"); return new path[][];
+  return _texpath(s, p);
 }
 // runpicture.in 的 `_shipout`：**真 plain 那条出口**。plain_shipout.asy:117 走到这儿，
 // 手上的 frame 坐标已经是最终的（`pic.fit()` 已经按 size(…) 缩过），所以这里的缩放固定为 1。
@@ -7205,19 +7301,23 @@ private bool asy__texship(string prefix, frame f, box bx, real ox, real oy, real
     if (length(s) > 0 && substr(s, 0, 1) == "%") {
       if (find(s, "%%DocumentPaperSizes:", 0) == 0) continue;
       if (find(s, "%!PS-Adobe-", 0) == 0) {
-        write("%!PS-Adobe-3.0 EPSF-3.0");
+        asy__out("%!PS-Adobe-3.0 EPSF-3.0");
         continue;
       }
       if (firstbb && find(s, "%%BoundingBox:", 0) == 0) {
-        write("%%BoundingBox: " + string(floor(ox)) + " " + string(floor(oy)) + " "
+        asy__out("%%BoundingBox: " + string(floor(ox)) + " " + string(floor(oy)) + " "
               + string(ceil(ox + w)) + " " + string(ceil(oy + h)));
-        write("%%HiResBoundingBox: " + ps9(ox) + " " + ps9(oy) + " "
+        asy__out("%%HiResBoundingBox: " + ps9(ox) + " " + ps9(oy) + " "
               + ps9(ox + w) + " " + ps9(oy + h));
         firstbb = false;
         continue;
       }
     }
-    write(s);
+    // **走 asy__out，不是 write**（这一刀）：dvips 那份字节也得听"这一张要去哪儿"那个开关。
+    // 从前这一段直接 write 到 stdout，于是 `-o 文件` 时带标签的图落下来是一份**空文件**、
+    // 字节全跑去了 stdout；`shipout("名字")` 那一路同理（量出来的：interpolate1 的
+    // runge1..7.eps 全是 0 字节，七张图都叠在 stdout 上）。
+    asy__out(s);
   }
   return true;
 }
@@ -7442,10 +7542,17 @@ void _shipout(string prefix="", frame f, frame preamble=null, string format="",
   box bx = framebox(f);
   real w = bx.r - bx.l;
   real h = bx.t - bx.b;
-  string asy__on = asy__shipbegin();
+  // `shipout("名字")` 那一路自己落盘：`名字.<格式>`（plain_shipout.asy 把 prefix 递到这儿）。
+  // **只有名字与主输出不同的时候才分流**：plain 的隐式那一次传的是 defaultfilename
+  // （也就是主输出那个名字），它照旧走 `-o`/stdout 那条路 —— 不然这一轴每个例子的
+  // stdout 都会空掉。格式为空时兜成 eps（隐式那一趟的 asy__outformat() 回的是空串）。
+  string asy__fmt = format == "" ? asy__outformat() : format;
+  string asy__ext = asy__fmt == "" ? "eps" : asy__fmt;
+  bool asy__own = prefix != "" && prefix != _mainname() && prefix != asy__outname();
+  string asy__on = asy__shipbegin(asy__own ? prefix + "." + asy__ext : "");
   // SVG 那一路：framebox 已经把标签量过了，尺寸与 EPS 那一路是同一份数。
   // 不套纸（612x792）—— SVG 的画布就是图本身，没有"摆在信纸中间"这回事。
-  if ((format == "" ? asy__outformat() : format) == "svg") {
+  if (asy__fmt == "svg") {
     asy__svgship(f, bx, w, h);
     asy__shipend(asy__on);
     return;
