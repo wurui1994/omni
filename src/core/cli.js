@@ -2358,6 +2358,22 @@ function main(argv) {
       throw new OmniError(`emit: 不认识形态 '${form}'；有 ${Object.keys(FORMS).join(' ')}`);
     }
     path = args[1];
+    /**
+     * **`.c` 的形态不是同一套**：C 的终点是 MIR，它**不经过 OIR**（`case 'c-mir'` 那条腿
+     * 是 `cMir`：预处理 -> C 前端 -> MIR，中间没有 OIR 这一层）。
+     *
+     * 从前这一格漏了，`emit mir x.c` 一路掉到 omni 的前端上报
+     * `unexpected character: "#"` —— 与 `run`/`build` 那两处是**同一个 bug**：
+     * 「前端由扩展名选」这条规矩得在每一个入口都写一遍，漏一个就是一个假象。
+     */
+    if (path !== undefined && path !== null && path.endsWith('.c')) {
+      if (form === 'mir') cmd = 'c-mir';
+      else {
+        throw new OmniError(`emit ${form} x.c: 没有这一条 —— C 的终点是 MIR，`
+          + '不经过 OIR，所以 `.c` 只有 `omni emit mir`（要目标文件用 `omni c obj`，'
+          + '要可执行文件用 `omni build`）');
+      }
+    }
   }
   /* `run`/`build --backend B`（决策一）：同样先只做翻译。 */
   if (cmd === 'run' || cmd === 'build') {
@@ -2386,23 +2402,48 @@ function main(argv) {
         }
       } else if (native) {
         return buildCFile(path, rest);
+      } else if (b === 'interp') {
+        /* `.c` 那条腿的解释器吃 **MIR**（不经过 OIR），所以 `--backend interp` 的产物
+         * 就是那份 MIR。**声明了就得能用** —— `build --help` 里列了它，那它就得落一个文件，
+         * 而不是回一句「没有这一条」。 */
+        const oi = rest.indexOf('-o');
+        const out = oi >= 0 ? rest[oi + 1] : `${basename(path, '.c')}.mir`;
+        const { flags, prog } = cSplitArgs(rest);
+        const text = printMir(cMir(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags)));
+        writeText(out, text);
+        stderr(`omni: built ${out} (${text.length} 字节，MIR —— 解释器吃的就是这一层；`
+          + '喂回去跑还差「可回读的 IR」那一格，见 ADR-0018)\n');
+        return 0;
       } else {
-        throw new OmniError(`build x.c: 没有 --backend ${b} 这一条 —— C 只有 native 一条`
-          + '（要 IR 用 `omni emit mir x.c`，要解释执行用 `omni run x.c --backend interp`）');
+        throw new OmniError(`build x.c: 没有 --backend ${b} 这一条 —— C 只有 native`
+          + '（编 + 链）与 interp（出 MIR）两条');
       }
     }
     const MAP = {
       run: { c: 'run-c', llvm: 'run-llvm', jit: 'run-jit', interp: 'interp', js: 'run' },
-      build: { llvm: 'build-llvm', c: 'build', native: 'build', js: 'build-js' },
+      build: { llvm: 'build-llvm', c: 'build', native: 'build', js: 'build-js', interp: 'build-interp' },
     };
     if (b !== null && cmd !== 'c-run') {
       const t = MAP[cmd][b];
       if (t === undefined) {
-        /* `interp` 是**执行器**，不是代码生成器 —— `build` 的契约是「出产物」，
-         * 而解释执行没有产物。指路而不是只说「没有这一条」。 */
+        /**
+         * `--backend interp` 该出什么？**「解释器能吃的那份 IR 文件」** —— 这是对的，
+         * 与 native 出可执行文件、js 出 `.js` 是同一条契约。
+         *
+         * 缺的不是一个开关，是 **IR 的可回读形态**：现在两个 IR 落地的形式都**只写不读** ——
+         *   - `emit oir` 的 JSON 是**有损**的：`replacer` 丢掉 `span`/`ast`，`i64` 变成
+         *     `"2n"` 这样的字符串。它的身份是快照与给人看，不是序列化。
+         *   - `mir/bytes.js` 是**摘要**（`funcHash`/`moduleHashes`，增量编译的 key），
+         *     不是一份能读回来的字节形式。
+         * 所以先有「可回读的 IR」，才有这个产物 —— 不然出来的是个**假产物**
+         * （落了盘却喂不回去）。这一格记在 ADR-0018。
+         */
         if (b === 'interp') {
-          throw new OmniError('build: interp 是执行器，不出产物 —— 要 IR 用 '
-            + '`omni emit oir FILE` / `omni emit mir FILE`，要跑用 `omni run FILE --backend interp`');
+          throw new OmniError('build: --backend interp 该出「解释器能吃的那份 IR 文件」，'
+            + '而两个 IR 现在都只写不读（emit oir 的 JSON 有损、mir/bytes.js 是摘要）——'
+            + '缺的是 IR 的可回读形态，不是一个开关（见 ADR-0018）。'
+            + '现在：`omni emit oir FILE` / `omni emit mir FILE` 看，'
+            + '`omni run FILE --backend interp` 跑');
         }
         throw new OmniError(`${cmd}: 还没有 --backend ${b} 这一条`);
       }
@@ -2617,6 +2658,29 @@ function main(argv) {
       const js = emitJs(mod);
       writeText(out, js);
       stderr(`omni: built ${out} (${js.length} 字节，node ${basename(out)} 就能跑)\n`);
+      return 0;
+    }
+    case 'build-interp': {
+      /**
+       * `omni build FILE --backend interp` —— 出**解释器吃的那份 IR**。
+       *
+       * 与 native 出可执行文件、js 出 `.js` 是同一条契约：**`--backend B` 的产物就是
+       * B 吃的那份东西**。这条腿（omni/sx/asy/js -> OIR）的解释器吃 **OIR**，所以产物是
+       * OIR；`.c` 那条吃 MIR，产物就是 MIR（在上面那个分派里）。
+       *
+       * 还差一格 —— **喂回去**：`emit oir` 的 JSON 是有损的（`replacer` 丢 span/ast，
+       * i64 变 `"2n"`），所以现在这份文件是「读得懂、还喂不回去」。那一格与
+       * 「哪一个 IR 是可回读的那一个」是同一个决定，记在 ADR-0018；产物行里明说，
+       * 不假装。
+       */
+      const { mod } = compile(path, rest);
+      const oi = rest.indexOf('-o');
+      const stem = basename(path).replace(/\.(omni|omnis|omnid|js|sx|asy)$/, '');
+      const out = oi >= 0 ? rest[oi + 1] : `${stem}.oir.json`;
+      const text = `${JSON.stringify(mod, replacer, 2)}\n`;
+      writeText(out, text);
+      stderr(`omni: built ${out} (${text.length} 字节，OIR —— 解释器吃的就是这一层；`
+        + '喂回去跑还差「可回读的 IR」那一格，见 ADR-0018)\n');
       return 0;
     }
     case 'run-c': {

@@ -21,6 +21,15 @@ const F_BACKEND = {
   name: '--backend', arity: 1, value: 'B',
   brief: 'interp|js|c|llvm|jit|native|spirv',
 };
+/**
+ * `build` 那一份**不一样**：`jit` 是「就地编就地跑」（只在 `run` 上有意义），
+ * `spirv` 现在只有 `omni emit spirv` 那一档。**声明了就得能用** —— 所以这儿列的
+ * 正好是 `build` 真有产物的那几条。
+ */
+const F_BACKEND_BUILD = {
+  name: '--backend', arity: 1, value: 'B',
+  brief: 'native|c|js|llvm|interp（interp 出的是 IR 文件）',
+};
 /* `-I` **不只是 C 的事**：jancy 的 `import` 也按它找（第六十二刀），而 jnc 走的是
  * 与语言无关的 `run`/`build`/`emit`/`check` —— 所以这一格在顶层那几条上也得声明。
  * 量出来的：`tests/jnc` 里那条「找不着 import」的门在「不认识的开关直接骂」之后
@@ -191,7 +200,7 @@ uniform 由 --set 给，没给的按 0；一个名字对一串数，逗号分开
     {
       name: 'build', key: 'build', usage: 'FILE -o NAME',
       brief: '编译成产物',
-      flags: [F_OUT, F_MODE, F_WORK, F_BACKEND, F_INC],
+      flags: [F_OUT, F_MODE, F_WORK, F_BACKEND_BUILD, F_INC],
     },
     {
       name: 'emit', key: 'emit', usage: 'FORM FILE',
