@@ -435,5 +435,41 @@ float probe(int k) {
 rejects('一条声明里两个变量类型不合', `
 float probe(int k) { float a = 1.0, b = vec2(1.0); return a + b; }`, '要一个 float');
 
+/* ---- 十三、位转换（规范 8.4）—— GraphEq 的 nextUp/nextDown 的地基 -------------------
+ *
+ * `floatBitsToInt` / `intBitsToFloat` 落到方言的 `realbits` / `bitsreal`（ADR-0019 路 1）。
+ * **这一层是 64 位的**（参照腿的 `real` 是 f64），不是规范说的 32 位 —— 理由与「两张
+ * 参考图对着两种宽度」一起写在 `check.js` 那处调用上。所以用例只压**与宽度无关**的性质：
+ * 来回一趟原样回来、位模式加一之后确实变大了。 */
+
+probe('位转换：来回一趟原样回来', `
+float probe(int k) {
+  float x = 2.5;
+  return intBitsToFloat(floatBitsToInt(x)) - x + 1.0;
+}`, [0], () => 1);
+
+/* `grapheq.glsl` 第 141–147 行逐字搬过来。它是那份着色器「区间是真超集」的地基。 */
+probe('位转换：nextUp（grapheq 的第 141–147 行）', `
+float nextUp(float x) {
+  if (isnan(x) || isinf(x)) return x;
+  if (x == 0.0) return intBitsToFloat(1);
+  int i = floatBitsToInt(x);
+  i = (x > 0.0) ? (i + 1) : (i - 1);
+  return intBitsToFloat(i);
+}
+float probe(int k) {
+  float a = nextUp(1.0);
+  float b = nextUp(0.0);
+  float c = nextUp(-1.0);
+  return (a > 1.0 ? 1.0 : 0.0) + (a == 1.0 ? 2.0 : 0.0)
+    + (b > 0.0 ? 4.0 : 0.0) + (c > -1.0 ? 8.0 : 0.0);
+}`, [0], () => 1 + 4 + 8);
+
+rejects('floatBitsToInt 的实参要是浮点', `
+float probe(int k) { int i = floatBitsToInt(3); return float(i); }`, '实参要是 float 或 vecN');
+
+rejects('intBitsToFloat 的实参要是整数', `
+float probe(int k) { return intBitsToFloat(1.5); }`, '实参要是 int 或 ivecN');
+
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail > 0 ? 1 : 0);

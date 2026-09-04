@@ -273,6 +273,14 @@ class GlslLlvmEmitter {
       return out;
     }
     if (e.k === 'builtin') return this.builtin(e);
+    if (e.k === 'bits') {
+      /* 位转换（规范 8.4）在快路上还没接（ADR-0019 路 3）：这一层每格是 `<8 x float>`，
+       * 而 `int` 在这条路上是「值恰好是整数的 float」—— 位模式那一步要的是真
+       * `<8 x i32>`，所以要先给分量带一个类型标记。**明着骂**而不是悄悄当恒等：
+       * 悄悄过去的结果是一张安静地不一样的图（与 `int(x)` 那个旧 bug 同一个形状）。 */
+      throw new OmniError(`glsl/llvm: ${e.name} 还没接（ADR-0019 路 3：快路的分量要先带`
+        + ' float / i32 的类型标记，才能落成 bitcast）');
+    }
     /* 赋值是**表达式**（`fragColor = …` 出来是 `{k:'expr', e:{k:'assign'}}`）。 */
     if (e.k === 'assign') return this.assign(e);
 

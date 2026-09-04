@@ -324,6 +324,16 @@ class GlslLowerer {
     }
 
     if (e.k === 'builtin') return this.builtin(e);
+    if (e.k === 'bits') {
+      /* 位转换（规范 8.4）：逐格走方言的位重解释（ADR-0019 路 1）。
+       *
+       * **这一层是 64 位的**，不是规范说的 32 位 —— 参照腿的 `real` 是 f64。理由与
+       * 「两张参考图对着两种宽度」那一条一起写在 `check.js` 的调用处。 */
+      const a = this.expr(e.args[0]);
+      const op = e.name === 'floatBitsToInt' ? 'realbits' : 'bitsreal';
+      const ct = e.name === 'floatBitsToInt' ? 'int' : 'real';
+      return a.map((c) => this.let_(ct, `(${op} ${c})`));
+    }
     if (e.k === 'call') return this.call(e);
     if (e.k === 'sel') return this.sel(e);
     if (e.k === 'assign') return this.assign(e);

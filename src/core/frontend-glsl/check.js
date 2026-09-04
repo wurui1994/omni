@@ -169,7 +169,7 @@ const glslAtom = (n) => (n.kind === 'atom' || n.kind === 'string' ? n.value : nu
  */
 const GLSL_BUILTINS = new Map([
   ['sin', 'gen1'], ['cos', 'gen1'], ['tan', 'gen1'],
-  ['asin', 'gen1'], ['acos', 'gen1'], ['atan', 'gen2'],
+  ['asin', 'gen1'], ['acos', 'gen1'], ['atan', 'gen12'],
   ['sinh', 'gen1'], ['cosh', 'gen1'], ['tanh', 'gen1'],
   ['asinh', 'gen1'], ['acosh', 'gen1'], ['atanh', 'gen1'],
   ['exp', 'gen1'], ['log', 'gen1'], ['exp2', 'gen1'], ['log2', 'gen1'],
@@ -190,6 +190,7 @@ const GLSL_BUILTINS = new Map([
    * 从 `grapheq.glsl` 那 772 行里量出来的：`isnan` 7 次、`isinf` 5 次，是那份真实
    * 着色器最要紧的缺口。 */
   ['isnan', 'gen1b'], ['isinf', 'gen1b'],
+
 ]);
 
 /** `atan` 与 `step` 的第一个参数也可以是标量而第二个是向量吗 —— GLSL 里可以，这儿也收。 */
@@ -197,7 +198,14 @@ function glslGenType(name, tys, node, err) {
   const kind = GLSL_BUILTINS.get(name);
   const want = kind === 'gen1' || kind === 'gen1b' || kind === 'len' ? 1
     : kind === 'gen3' || kind === 'geo3' || kind === 'refr' ? 3 : 2;
-  if (tys.length !== want) {
+  /* `atan` 是**重载**的（规范 8.1）：`atan(y_over_x)` 与 `atan(y, x)` 都合法，
+   * 而 `grapheq.glsl` 两种都用。降级那一侧本来就分开处理（1 个走 `rmath "atan"`、
+   * 2 个走 `rmath "atan2"`），是这张表把它钉成了 2 个 —— 那是这张表的错，不是别处。 */
+  if (kind === 'gen12') {
+    if (tys.length !== 1 && tys.length !== 2) {
+      throw err(node, `${name} 要 1 个或 2 个实参，给了 ${tys.length}`);
+    }
+  } else if (tys.length !== want) {
     throw err(node, `${name} 要 ${want} 个实参，给了 ${tys.length}`);
   }
   /* 泛型那一格：参数里最宽的那个（标量算最窄）。所有非标量的必须同型。 */
@@ -272,6 +280,15 @@ const GLSL_VEC_CMP = new Map([
 ]);
 
 const GLSL_VEC_RED = new Set(['all', 'any']);
+
+/**
+ * 位转换那两个（规范 8.4）。单开一张表的理由与矩阵那一族一样：泛型表只认 float 与 vecN，
+ * 而 `intBitsToFloat` 的实参是 int/ivecN。
+ *
+ * `grapheq.glsl` 用它们拼 `nextUp`/`nextDown`（第 141–154 行，6 处）——「区间是真超集」
+ * 这个性质的地基。宽度那一格与规范不同（规范是 32 位），理由在调用处的注释里。
+ */
+const GLSL_BITS = new Set(['floatBitsToInt', 'intBitsToFloat']);
 
 /**
  * 矩阵那一族（规范 8.5）。也单开一张表：它们的实参与结果都是**矩阵**，
@@ -603,7 +620,7 @@ class GlslChecker {
         return;
       }
       if (GLSL_BUILTINS.has(name) || GLSL_VEC_CMP.has(name) || GLSL_VEC_RED.has(name)
-        || GLSL_MAT_FNS.has(name) || name === 'not') {
+        || GLSL_MAT_FNS.has(name) || GLSL_BITS.has(name) || name === 'not') {
         throw this.err(node, `'${name}' 是内建函数，不能重定义`);
       }
 
@@ -1064,6 +1081,28 @@ class GlslChecker {
     }
     const mty = glslMatFnType(name, args.map((a) => a.ty), node, (n, m) => this.err(n, m));
     if (mty !== null) return { k: 'builtin', ty: mty, name, args };
+    /* 位转换那两个（规范 8.4）。**不走 `glslGenType`** —— 那一族只收 `float`/`vecN`，
+     * 而 `intBitsToFloat` 的实参是 `int`/`ivecN`；而且它们是逐格的，宽度原样传过去。
+     *
+     * **宽度这一格与规范不一样，是故意的**：规范说这两个是 32 位的，因为它假定 `float`
+     * 是 f32。参照腿上我们的 `real` 是 f64，所以这两个在那儿是 **64 位**的
+     * （方言的 `realbits`/`bitsreal`）。那不是抄错 —— GraphEq 的两张参考图正好对着
+     * 两种宽度：`_cpu.png` 是 f64 引擎出的，`_glsl.png` 是 f32 着色器出的（ADR-0019）。
+     * 快路那一层是 f32，落成一条 `bitcast`，那边才是规范的 32 位语义。 */
+    if (GLSL_BITS.has(name)) {
+      if (args.length !== 1) throw this.err(node, `${name} 要 1 个实参，给了 ${args.length}`);
+      const at = args[0].ty;
+      const from = name === 'floatBitsToInt' ? 'float' : 'int';
+      const isScalar = at.k === from;
+      const isVec = at.k === 'vec' && at.base === from;
+      if (!isScalar && !isVec) {
+        const want = from === 'float' ? 'float 或 vecN' : 'int 或 ivecN';
+        throw this.err(node, `${name} 的实参要是 ${want}，给了 ${glslTyText(at)}`);
+      }
+      const to = from === 'float' ? 'int' : 'float';
+      const ty = isScalar ? (to === 'int' ? GLSL_INT : GLSL_FLOAT) : glslVec(at.n, to);
+      return { k: 'bits', ty, name, args };
+    }
     if (GLSL_BUILTINS.has(name)) {
       const ty = glslGenType(name, args.map((a) => a.ty), node, (n, m) => this.err(n, m));
       /* 内建里 `int` 实参一律先提成 `float`（`sin(1)` 在 GLSL 里合法）。 */
