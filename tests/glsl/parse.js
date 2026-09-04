@@ -236,6 +236,21 @@ const SHAPES = [
       && s.includes('(one b (float-lit 2.0))')
       && s.includes('(one c (float-lit 3.0))'),
   },
+  /* 都不带初值那一档（vispy 的 `math/double.glsl:42` 是 `float t1, t2, e;`）：
+   * 头一个走 `local-multi0`，每一格是 `(one 名字)`（没有第二个子项）。 */
+  {
+    name: '一条声明里三个变量、都不带初值',
+    src: 'void main() { float t1, t2, e; }\n',
+    want: (s) => s.includes('(local-multi0 (ty-float) t1')
+      && s.includes('(one t2)') && s.includes('(one e)'),
+  },
+  /* 混着来：带初值与不带初值在同一条里。 */
+  {
+    name: '一条声明里带初值与不带初值混着',
+    src: 'void main() { float a, b = 2.0, c; }\n',
+    want: (s) => s.includes('(local-multi0 (ty-float) a')
+      && s.includes('(one b (float-lit 2.0))') && s.includes('(one c)'),
+  },
 ];
 
 for (const c of SHAPES) {

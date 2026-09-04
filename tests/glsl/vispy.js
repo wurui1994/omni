@@ -66,13 +66,13 @@ const BUDGET = new Map([
    * `lenght(vec2(dx,dy))`。任何 GL 编译器都会拒它（那一份显然没被真编过），
    * 所以这一行**永远留着** —— 它是"照实拒"的证据，不是待办。 */
   ['antialias/cap-round.glsl', 'vispy 自己拼错了函数名（第 27 行 `lenght`）—— 真 GL 编译器一样拒'],
+  /* 同一档：`transforms/translate.glsl:14` 与 `:29` 是 `vec3(x,y,z) + translate_translate);`
+   * —— **多一个右括号**。也是 vispy 自己的笔误，不是我们缺特性。 */
+  ['transforms/translate.glsl', 'vispy 自己多写了一个 `)`（第 14、29 行）—— 真 GL 编译器一样拒'],
   /* 采样器那一族（`sampler1D`/`sampler2D` + `texture()`）。llvmpipe 那边是
    * `lp_bld_sample*` 一整块（软件纹理取样、双线性、mip），这一刀还没到那儿。 */
   ['colormaps/user.glsl', '纹理：`uniform sampler1D` 与 texture() 还没接（llvmpipe 的 lp_bld_sample*）'],
-  /* GLSL 1.20 的老写法与几处语法：都是「照着 llvmpipe 补齐」剩下的零头。 */
-  ['colormaps/colormaps.glsl', '语法：`uniform sampler2D` / 老式限定符那一族还没接'],
-  ['math/double.glsl', '语法：一条声明里多个变量（`float a, b;`）还没接'],
-  ['transforms/translate.glsl', '语法：空实参表的函数声明（`f()` 与 `f(void)`）'],
+  ['colormaps/colormaps.glsl', '纹理：同上（`uniform sampler2D`）'],
 ]);
 
 const dir = vispyDir();

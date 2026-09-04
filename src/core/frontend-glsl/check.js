@@ -775,19 +775,22 @@ class GlslChecker {
       this.declare(name, ty, node);
       return { k: 'decl', name, ty, init: null, isConst: false };
     }
-    /* 一条声明里多个变量（B15）：`float lo = m[0].x, hi = m[cnt - 1].y;`。
+    /* 一条声明里多个变量（B15）：`float lo = m[0].x, hi = m[cnt - 1].y;`、`float t1, t2, e;`。
      * 摊成一串 `decl` —— 次序要紧：前一个的名字对后一个**是可见的**（GLSL 与 C 同规矩），
-     * 所以一边 `declare` 一边往下走，不是先收齐名字再算初值。 */
-    if (h === 'local-multi') {
+     * 所以一边 `declare` 一边往下走，不是先收齐名字再算初值。
+     * `local-multi0` 是第一个变量不带初值那一档（`(one 名字)` 与 `(one 名字 初值)`
+     * 两种形状按 `items.length` 分）。 */
+    if (h === 'local-multi' || h === 'local-multi0') {
+      const withInit = h === 'local-multi';
       const ty = this.tyOf(node.items[1]);
       const first = glslAtom(node.items[2]);
       const list = [];
-      const init0 = this.coerce(this.expr(node.items[3]), ty, node);
+      const init0 = withInit ? this.coerce(this.expr(node.items[3]), ty, node) : null;
       this.declare(first, ty, node);
       list.push({ k: 'decl', name: first, ty, init: init0, isConst: false });
-      for (const m of glslFlatten(node.items[4], 'more-add', 'more')) {
+      for (const m of glslFlatten(node.items[withInit ? 4 : 3], 'more-add', 'more')) {
         const nm = glslAtom(m.items[1]);
-        const init = this.coerce(this.expr(m.items[2]), ty, m);
+        const init = m.items.length > 2 ? this.coerce(this.expr(m.items[2]), ty, m) : null;
         this.declare(nm, ty, m);
         list.push({ k: 'decl', name: nm, ty, init, isConst: false });
       }

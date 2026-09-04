@@ -435,6 +435,22 @@ float probe(int k) {
 rejects('一条声明里两个变量类型不合', `
 float probe(int k) { float a = 1.0, b = vec2(1.0); return a + b; }`, '要一个 float');
 
+/* 都不带初值那一档（vispy 的 `math/double.glsl:42` 是 `float t1, t2, e;`）。
+ * 不带初值的变量**先赋值再用** —— 这一份就是照那个用法写的。 */
+probe('一条声明里三个变量、都不带初值', `
+float probe(int k) {
+  float t1, t2, e;
+  t1 = 1.0; t2 = 2.0; e = 4.0;
+  return t1 + t2 * 10.0 + e * 100.0;
+}`, [0], () => 1 + 20 + 400);
+
+probe('带初值与不带初值混在一条里', `
+float probe(int k) {
+  float a = 1.0, b, c = 4.0;
+  b = a + c;
+  return a + b * 10.0 + c * 100.0;
+}`, [0], () => 1 + 50 + 400);
+
 /* ---- 十三、位转换（规范 8.4）—— GraphEq 的 nextUp/nextDown 的地基 -------------------
  *
  * `floatBitsToInt` / `intBitsToFloat` 落到方言的 `realbits` / `bitsreal`（ADR-0019 路 1）。
