@@ -50,7 +50,36 @@ function glslCompTy(t) {
 function glslNComp(t) {
   if (t.k === 'vec') return t.n;
   if (t.k === 'mat') return t.cols * t.rows;
+  /* 结构体是各成员之和 —— 与 `check.js` 的 `glslCount` 同一个公式（施工图 B13）。 */
+  if (t.k === 'struct') {
+    let n = 0;
+    for (const f of t.fields) n += glslNComp(f.ty);
+    return n;
+  }
   return 1;
+}
+
+/**
+ * **每一格**的方言类型。
+ *
+ * 为什么要它：结构体的分量类型**不是一种** —— `struct Segs { vec2 s0; vec2 s1; int n; }`
+ * 前四格是 `real`、第五格是 `int`。别的类型就是同一个重复 N 遍，所以在非结构体上
+ * 它与 `glslCompTy` 一字不差。
+ *
+ * `glslCompTy` 刻意**没有**收结构体：算术那一片（`+ - * /`、比较、内建）一个都不收
+ * 结构体，走到那儿就该骂。要按格取类型的只有「声明 / 赋值 / 构造 / 成员 / 形参与返回」
+ * 那几处，它们走这一个。
+ */
+function glslCompTys(t) {
+  if (t.k === 'struct') {
+    const out = [];
+    for (const f of t.fields) for (const x of glslCompTys(f.ty)) out.push(x);
+    return out;
+  }
+  const ct = glslCompTy(t);
+  const out = [];
+  for (let i = 0; i < glslNComp(t); i++) out.push(ct);
+  return out;
 }
 
 /** `rmath` 直接转手的那些：GLSL 的名字 -> 方言的名字。 */
@@ -236,6 +265,16 @@ class GlslLowerer {
       const subj = this.expr(e.of);
       /* 分量已经各自是一个 `(var tN)`，所以重排不必再绑。 */
       return e.idx.map((ix) => subj[ix]);
+    }
+    if (e.k === 'field') {
+      /* 结构体的成员（施工图 B13）：分量表里连着的那一段 —— 起始格号由检查那一侧算好
+       * 放在 `at` 上（`glslCount` 与这边的 `glslNComp` 是同一个公式）。
+       * 与 `matcol` 是同一个套路：切片，不必再绑。
+       *
+       * 构造那一条不用改：它本来就是「按源码次序把实参的分量摊平接起来」，
+       * 而结构体的构造正好是一个实参对一个成员。 */
+      const subj = this.expr(e.of);
+      return subj.slice(e.at, e.at + glslNComp(e.ty));
     }
     if (e.k === 'matcol') {
       /* `m[col]`：矩阵是**列优先**摊平的（`mat2(a,b,c,d)` = 第 0 列 (a,b)、第 1 列 (c,d)），
@@ -963,14 +1002,15 @@ class GlslLowerer {
     if (s.k === 'expr') { this.expr(s.e); return; }
     if (s.k === 'decl') {
       const n = glslNComp(s.ty);
-      const ct = glslCompTy(s.ty);
+      /* 按格取类型：结构体的分量类型不是一种（`glslCompTys` 上面那段）。 */
+      const cts = glslCompTys(s.ty);
       const vals = s.init === null ? null : this.expr(s.init);
       const comps = [];
       const base = this.uniq(s.name);
       for (let i = 0; i < n; i++) {
         const name = `${base}_${i}`;
-        const v = vals === null ? glslZero(ct) : (vals.length === 1 ? vals[0] : vals[i]);
-        this.stmts.push(`(let ${name} ${ct} ${v})`);
+        const v = vals === null ? glslZero(cts[i]) : (vals.length === 1 ? vals[0] : vals[i]);
+        this.stmts.push(`(let ${name} ${cts[i]} ${v})`);
         comps.push(`(var ${name})`);
       }
       this.bind(s.name, comps);
@@ -1211,9 +1251,11 @@ class GlslLowerer {
     this.push();
     for (const p of f.params) {
       const n = glslNComp(p.ty);
-      const ct = glslCompTy(p.ty);
+      /* 按格取类型（见 `glslCompTys`）：结构体形参摊成 N 个标量，各自的类型可以不同。 */
+      const cts = glslCompTys(p.ty);
       const comps = [];
       for (let i = 0; i < n; i++) {
+        const ct = cts[i];
         const local = `${p.name}_${i}`;
         if (p.dir === 'in') {
           ps.push(`(${local} ${ct})`);
@@ -1231,6 +1273,15 @@ class GlslLowerer {
       this.bind(p.name, comps);
     }
     const retN = f.ret.k === 'void' ? 0 : glslNComp(f.ret);
+    /* 返回一个结构体时，返回值装的是方言的 `glsl_vN` —— 那是 **N 个 real**。分量类型不全
+     * 一样的结构体（`Segs` 前四格 real、第五格 int）塞进去会把 int 悄悄变成 real，
+     * 所以明着骂。要收它得给那个专用结构体逐格写类型，是下一格的事。 */
+    if (f.ret.k === 'struct') {
+      const rcts = glslCompTys(f.ret);
+      if (rcts.some((x) => x !== rcts[0])) {
+        glslNyi(`返回分量类型不一样的结构体（${f.ret.name} 摊平是 ${rcts.join(' / ')}）`);
+      }
+    }
     let ret;
     if (outs.length === 0) {
       ret = retN === 0 ? 'void' : retN === 1 ? glslCompTy(f.ret) : glslStructName(retN);

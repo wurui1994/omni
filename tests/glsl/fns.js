@@ -18,6 +18,7 @@ import { loadGrammarTable } from '../../src/core/glr/load.js';
 import { lexText } from '../../src/core/glr/lex.js';
 import { glrParse } from '../../src/core/glr/driver.js';
 import { Diagnostics, SourceFile } from '../../src/core/source/diag.js';
+import { glslPreprocess, glslTypeNames } from '../../src/core/frontend-glsl/pp.js';
 import { glslCheck } from '../../src/core/frontend-glsl/check.js';
 import { glslLower } from '../../src/core/frontend-glsl/lower.js';
 
@@ -42,7 +43,8 @@ mkdirSync(OUT, { recursive: true });
 function lower(src) {
   const diags = new Diagnostics();
   const file = new SourceFile('probe.frag', src);
-  const toks = lexText(g.lex, file, diags);
+  /* 与产品那条路同一趟：预处理（对象宏）+ 类型名重判（`struct N {…}` 之后的 `N`）。 */
+  const toks = glslTypeNames(glslPreprocess(g.lex, lexText(g.lex, file, diags), diags));
   diags.throwIfErrors();
   const tree = glrParse(tb, toks, diags);
   diags.throwIfErrors();
@@ -294,6 +296,36 @@ float probe(int k) {
 
 rejects('isnan 要 1 个实参', `
 float probe(int k) { return isnan(1.0, 2.0) ? 1.0 : 0.0; }`, '要 1 个实参');
+
+/* ---- 十、结构体（施工图 B13）：**平**的那一档，三条腿摊平之后还是同一个数 --------
+ *
+ * 分量摊平的次序就是成员的次序，成员访问是**切片**（起始格号由检查那一侧算好）。
+ * 第一条刻意让摊平之后混着 `real` 与 `int` —— 那正是 `glslCompTys` 存在的理由。 */
+
+probe('struct：构造 + 成员，摊平后混着 real/int', `
+struct IV { vec2 v; int n; };
+float probe(int k) {
+  IV a = IV(vec2(1.5, 2.5), 7);
+  return a.v.x + a.v.y * 2.0 + float(a.n) * 4.0;
+}`, [0], () => 1.5 + 2.5 * 2 + 7 * 4);
+
+probe('struct：当形参传（摊成 N 个标量）', `
+struct P { vec2 p; float w; };
+float len2(P q) { return q.p.x * q.p.x + q.p.y * q.p.y + q.w; }
+float probe(int k) { return len2(P(vec2(3.0, 4.0), 0.5)); }`, [0], () => 9 + 16 + 0.5);
+
+probe('struct：当返回值（分量类型全一样那一档）', `
+struct V2 { vec2 a; vec2 b; };
+V2 mk() { return V2(vec2(1.0, 2.0), vec2(4.0, 8.0)); }
+float probe(int k) { V2 v = mk(); return v.a.x + v.a.y * 2.0 + v.b.x * 4.0 + v.b.y * 8.0; }`,
+  [0], () => 1 + 2 * 2 + 4 * 4 + 8 * 8);
+
+/* 返回值装的是方言的 `glsl_vN`（N 个 real），所以分量类型不全一样的结构体会把 int
+ * 悄悄变成 real —— 明着骂，不悄悄算。 */
+rejects('返回分量类型不一样的结构体', `
+struct Segs { vec2 s0; int n; };
+Segs mk() { return Segs(vec2(1.0), 2); }
+float probe(int k) { Segs s = mk(); return float(s.n); }`, '返回分量类型不一样的结构体');
 
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail > 0 ? 1 : 0);
