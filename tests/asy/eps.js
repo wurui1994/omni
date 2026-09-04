@@ -276,8 +276,12 @@ function oracle(n, p) {
 
 /** 我们那一份：`omni run <例子>`，图在 stdout 上。 */
 function mine(p) {
+  // **在草稿目录里跑**（不是仓库根）：例子里的 `shipout("名字")` 会自己落一份 `名字.eps`
+  // （asy 的规矩，见 ADR-0014），跑在根上就往仓库里撒文件。参考那一侧本来就在 WORK 里跑。
+  // 数据文件（galleon.obj / filesurface.dat 那些）靠 ASYMPTOTE_DIR 找，不受这一步影响。
+  mkdirSync(WORK, { recursive: true });
   const r = spawnSync('node', [join(ROOT, 'src', 'core', 'cli.js'), 'run', p],
-    { cwd: ROOT, env, encoding: 'utf8', timeout: LIMIT, maxBuffer: 1 << 28 });
+    { cwd: WORK, env, encoding: 'utf8', timeout: LIMIT, maxBuffer: 1 << 28 });
   // 超时被打死的那种：`signal` 是 SIGTERM。这一格要与"跑完了但没出图"分开 ——
   // 一趟全量 194 个例子，只要有几个卡住整轴就没法反复问，所以默认一个例子最多 LIMIT 毫秒，
   // 超时的归成"慢"、排在最后单独跑（`OMNI_EPS_T=60000 node tests/asy/eps.js <目录> <名字…>`）。
