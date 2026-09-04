@@ -235,7 +235,7 @@ class GlslLowerer {
     if (e.k === 'swizzle') {
       const subj = this.expr(e.of);
       /* 分量已经各自是一个 `(var tN)`，所以重排不必再绑。 */
-      return e.idx.map((i) => subj[i]);
+      return e.idx.map((ix) => subj[ix]);
     }
     if (e.k === 'matcol') {
       /* `m[col]`：矩阵是**列优先**摊平的（`mat2(a,b,c,d)` = 第 0 列 (a,b)、第 1 列 (c,d)），
@@ -479,9 +479,12 @@ class GlslLowerer {
       if (rows.length === 1) return A(rows[0], cols[0]);
       let sum = null;
       for (let i = 0; i < cols.length; i++) {
-        const sub = det(rows.slice(1), cols.filter((_, j) => j !== i));
-        const p = this.let_(ct, `(bin "*" ${A(rows[0], cols[i])} ${sub})`);
-        const signed = i % 2 === 0 ? p : this.let_(ct, `(un "-" ${p})`);
+        /* 闭包捕的必须是**体内的一个 const**，不是循环变量本身：JS 的 `let` 每轮一个新
+         * 绑定，C 那边不是 —— 自编译那侧按这条骂，而且骂得对。 */
+        const ci = i;
+        const sub = det(rows.slice(1), cols.filter((_, j) => j !== ci));
+        const p = this.let_(ct, `(bin "*" ${A(rows[0], cols[ci])} ${sub})`);
+        const signed = ci % 2 === 0 ? p : this.let_(ct, `(un "-" ${p})`);
         sum = sum === null ? signed : this.let_(ct, `(bin "+" ${sum} ${signed})`);
       }
       return sum;
@@ -493,8 +496,10 @@ class GlslLowerer {
     const out = [];
     for (let col = 0; col < n; col++) {
       for (let row = 0; row < n; row++) {
-        const minor = det(all.filter((r) => r !== col), all.filter((c) => c !== row));
-        const signed = (row + col) % 2 === 0 ? minor : this.let_(ct, `(un "-" ${minor})`);
+        const cc = col;
+        const rr = row;
+        const minor = det(all.filter((r) => r !== cc), all.filter((c) => c !== rr));
+        const signed = (rr + cc) % 2 === 0 ? minor : this.let_(ct, `(un "-" ${minor})`);
         out.push(this.let_(ct, `(bin "/" ${signed} ${d})`));
       }
     }
@@ -505,8 +510,13 @@ class GlslLowerer {
     const name = e.name;
     const ct = 'real';
     const args = e.args.map((a) => this.expr(a));
-    const wide = Math.max(...args.map((a) => a.length));
-    const at = (k, i) => (args[k].length === 1 ? args[k][0] : args[k][i]);
+    /* `Math.max(...xs)` 的展开自编译子集不收 —— 显式取最大。 */
+    let wide = 0;
+    for (const a of args) if (a.length > wide) wide = a.length;
+    /* `at` 的两个形参**刻意不叫 `k`/`i`**：自编译那侧「闭包捕获循环变量」那条检查是按
+     * **函数**粒度 + 按名字判的，箭头里出现 `i` 就会把这个函数里所有 `for (let i …)`
+     * 一起骂（量过：`emit_llvm.js` 里改个名字，14 条错变 2 条）。错开就没这回事。 */
+    const at = (ak, ai) => (args[ak].length === 1 ? args[ak][0] : args[ak][ai]);
     /* 向量比较那一族（规范 8.6）。这一层的向量是**摊成分量**的，所以「逐格比出一串 bool」
      * 就是它 —— 不需要方言有掩码类型。`all`/`any` 用 `&&`/`||` 把那串折起来：
      * 两边都是已经算好的 `(var …)`，短路与否看不出差别（GLSL 那两个算符在这一层
@@ -755,8 +765,8 @@ class GlslLowerer {
         d = d === null ? p : this.let_(ct, `(bin "+" ${d} ${p})`);
       }
       const two = this.let_(ct, `(bin "*" (real 2.0) ${d})`);
-      return I.map((c, i) => {
-        const s = this.let_(ct, `(bin "*" ${two} ${N[i]})`);
+      return I.map((c, ix) => {
+        const s = this.let_(ct, `(bin "*" ${two} ${N[ix]})`);
         return this.let_(ct, `(bin "-" ${c} ${s})`);
       });
     }
@@ -812,7 +822,7 @@ class GlslLowerer {
     }
     if (name === 'matrixCompMult') {
       /* 8.5：**逐格**乘，不是矩阵乘。摊平之后就是两串一格一格乘起来。 */
-      return args[0].map((c, i) => this.let_(ct, `(bin "*" ${c} ${args[1][i]})`));
+      return args[0].map((c, ix) => this.let_(ct, `(bin "*" ${c} ${args[1][ix]})`));
     }
     if (name === 'outerProduct') {
       /* 8.5：`c` 长 R、`r` 长 C，结果是 `matCxR`，第 col 列 = c * r[col]（列优先摊平）。 */
@@ -876,15 +886,15 @@ class GlslLowerer {
   callWithOut(e, f) {
     const args = [];
     const backs = [];
-    e.args.forEach((a, i) => {
-      const p = f.params[i];
+    e.args.forEach((a, ax) => {
+      const p = f.params[ax];
       const comps = this.expr(a);
       if (p.dir === 'in' || p.dir === 'inout') for (const c of comps) args.push(c);
       if (p.dir !== 'in') {
         /* 写回的落点：`ref` 就是那几个变量名，`swizzle` 是挑出来的那几格。 */
         const target = a.k === 'ref' ? this.find(a.name)
           : a.k === 'swizzle' ? this.swizzleTarget(a) : null;
-        if (target === null) throw new OmniError(`glsl: ${e.name} 的第 ${i + 1} 个实参不是左值`);
+        if (target === null) throw new OmniError(`glsl: ${e.name} 的第 ${ax + 1} 个实参不是左值`);
         for (const t of target) backs.push(t);
       }
     });
@@ -924,7 +934,7 @@ class GlslLowerer {
   swizzleTarget(lhs) {
     if (lhs.of.k !== 'ref') throw new OmniError('glsl: swizzle 左值的底必须是一个名字');
     const base = this.find(lhs.of.name);
-    return lhs.idx.map((i) => base[i]);
+    return lhs.idx.map((ix) => base[ix]);
   }
 
   incdec(e) {
@@ -1634,11 +1644,11 @@ export function glslTriProgram(vertMod, fragMod, w, h, uni) {
   /* quad 扫描（次序与第四片一样）。 */
   const QX = [0, 1, 0, 1];
   const QY = [0, 0, 1, 1];
-  const evalAt = (i) => {
-    const a = attrs[i];
+  const evalAt = (ax) => {
+    const a = attrs[ax];
     if (a.interp === 'flat') return `(fld (var v2) c${a.fld})`;
-    const lin = `(bin "+" (bin "+" (fld (var p${i}) c0) (bin "*" (fld (var p${i}) c1) (var px)))`
-      + ` (bin "*" (fld (var p${i}) c2) (var py)))`;
+    const lin = `(bin "+" (bin "+" (fld (var p${ax}) c0) (bin "*" (fld (var p${ax}) c1) (var px)))`
+      + ` (bin "*" (fld (var p${ax}) c2) (var py)))`;
     if (a.interp !== 'smooth') return lin;
     const oow = '(bin "+" (bin "+" (fld (var pw) c0) (bin "*" (fld (var pw) c1) (var px)))'
       + ' (bin "*" (fld (var pw) c2) (var py)))';

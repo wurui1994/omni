@@ -147,7 +147,7 @@ class GlslLlvmEmitter {
       /* 局部量**不能叫 `of`** —— 那是自编译子集词法里的关键字（`for … of`）。
        * 节点属性叫 `e.of` 没关系，受限的只有绑定名。 */
       const subj = this.expr(e.of);
-      return e.idx.map((i) => subj[i]);
+      return e.idx.map((ix) => subj[ix]);
     }
     if (e.k === 'splat') {
       const v = this.expr(e.of)[0];
@@ -242,12 +242,23 @@ class GlslLlvmEmitter {
   builtin(e) {
     const name = e.name;
     const args = e.args.map((a) => this.expr(a));
-    const wide = Math.max(...args.map((a) => a.length));
-    const at = (k, i) => (args[k].length === 1 ? args[k][0] : args[k][i]);
+    /* `Math.max(...xs)` 的展开自编译子集不收 —— 显式取最大。 */
+    let wide = 0;
+    for (const a of args) if (a.length > wide) wide = a.length;
+    /* `at` 的两个形参**刻意不叫 `k`/`i`**：自编译那侧的「闭包捕获循环变量」是按
+     * **函数**粒度 + 按名字判的，箭头函数里出现 `i` 就会把这个函数里所有
+     * `for (let i …)` 都骂一遍（量过：改个名字 13 条错变 9 条）。形参名错开就没这回事。 */
+    const at = (ak, ai) => (args[ak].length === 1 ? args[ak][0] : args[ak][ai]);
     const fn = LL_INTRIN.get(name);
     if (fn !== undefined) {
       const out = [];
-      for (let i = 0; i < wide; i++) out.push(this.call1(fn, args.map((_, k) => at(k, i))));
+      for (let i = 0; i < wide; i++) {
+        /* 这儿刻意**不写** `args.map((_, k) => at(k, i))`：闭包捕获 `for` 的循环变量，
+         * 自编译那个子集不收（JS 的 `let` 每轮一个新绑定，C 那边不是）。显式循环取。 */
+        const lane = [];
+        for (let k = 0; k < args.length; k++) lane.push(at(k, i));
+        out.push(this.call1(fn, lane));
+      }
       return out;
     }
     if (name === 'length' || name === 'distance' || name === 'dot') {
@@ -462,8 +473,10 @@ class GlslLlvmEmitter {
       throw new OmniError('glsl/llvm: 这一片只收「只有 main」的着色器（自定义函数下一片）');
     }
     /* 入口那几条 load：`in` 的第 0/1 格是 x/y，后面依次是每个 uniform 的每一格。 */
-    const load = (i) => {
-      const p = i === 0 ? '%in' : this.emit(`getelementptr ${LL_VEC}, ptr %in, i64 ${i}`);
+    /* 形参**刻意不叫 `i`**：见 `builtin()` 里 `at` 上面那段（闭包捕获那条检查是按
+     * 函数粒度 + 按名字判的）。 */
+    const load = (slotIx) => {
+      const p = slotIx === 0 ? '%in' : this.emit(`getelementptr ${LL_VEC}, ptr %in, i64 ${slotIx}`);
       return this.emit(`load ${LL_VEC}, ptr ${p}, align 4`);
     };
     let slot = 0;
