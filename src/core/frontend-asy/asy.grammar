@@ -90,8 +90,14 @@
     (skip space)
     (comment "//" (* (not "\n")))
     (block-comment "/*" "*/")
-    (token LIT (+ digit) (? "." (* digit)) (? (or "e" "E") (? (set "+-")) (+ digit)))
-    (token LIT "." (+ digit) (? (or "e" "E") (? (set "+-")) (+ digit)))
+    ;; 指数只认**小写 e** —— camp.l:392 那一行的四个分支里写的都是 `e`，大写 E 从来不是
+    ;; 指数标记。这不是抄漏，是有用处的：`E` 在 plain 里是**东**那个方向常量，而 asy 有
+    ;; 隐式相乘（`2pi` 就是 `2*pi`），所以 `2.5E+0.1*N` 是 `2.5*E + 0.1*N`。
+    ;; 量出来的（fano.asy:25 `label("6", z6, 2.5E+0.1*N)`）：收大写 E 的那一版把 `2.5E+0`
+    ;; 吃成一个浮点，对齐向量成了 `2.5*0.1*N = (0,0.25)`，发出去的
+    ;; `\ASYalign(…)(-0.5,0)` 与参考的 `(0,-0.48)` 差一格 —— 整份 EPS 差 2 个数就是它。
+    (token LIT (+ digit) (? "." (* digit)) (? "e" (? (set "+-")) (+ digit)))
+    (token LIT "." (+ digit) (? "e" (? (set "+-")) (+ digit)))
     (token ID (or alpha "_") (* (or alnum "_")))
     ;; 双引号串是 **verbatim** 的：只有 `\"` 是转义，别处的反斜杠原样留着 —— asy 要把串
     ;; 直接塞进 TeX。量过（od -c）：`"a\tb"` 是 a \ t b 四个字符，`"a\\b"` 是 a \ \ b；
