@@ -203,6 +203,9 @@ double omni_r_hypot(double x, double y);
 /* 那个「C99 ∩ Math.*」交集的**例外**（ADR-0019 路 2）：`Math.*` 里没有 nextafter，
    JS 那侧是手写的，权威在这一条上。 */
 double omni_r_nextafter(double x, double y);
+/* 位重解释（ADR-0019 路 1）：64 对 64，两个方向都精确。位不动，只换一种读法。 */
+int64_t omni_r_bits(double x);
+double omni_r_frombits(int64_t i);
 
 /* omni_arr.c —— 可增长数组（asy 的 `T[]`）。句柄是**指针**（buf 是按值的 {len, ptr}，
    push 改不了别名看到的那个长度），len/cap/items 都在被指向的头里。四种元素各一份单态，

@@ -1572,6 +1572,27 @@ class CoreLowerer {
       if (n.items.length !== 2 + want) return this.err(n, `(rmath "${fn}") 要 ${want} 个参数`);
       return { kind: 'Builtin', name: `rmath_${fn}`, args, type: REAL, argType: REAL };
     }
+    /* `(realbits E)` / `(bitsreal E)` —— **位重解释**，不是转换（ADR-0019 路 1）。
+     *
+     * 为什么方言要它：GLSL 的 `floatBitsToInt` / `intBitsToFloat` 是 GraphEq 那份着色器
+     * 拼 nextUp/nextDown 的原料，而「把浮点的位模式当整数」用别的算符**做不出来**。
+     *
+     * 为什么不挂在 `rmath` 上：`rmath` 规定参数与返回都是 `real`，这两个一头是 `int`。
+     *
+     * 宽度：方言的 `real` 是 f64、`int` 是 64 位，所以这一对是**双向精确**的（每个 f64
+     * 的位模式都是一个 int64，反过来也是）。**注意它不是 GLSL 那两个内建的语义** ——
+     * 规范里那两个是 32 位的，因为规范假定 `float` 是 f32。差别写在 GLSL 那一侧。 */
+    if (h === 'realbits' || h === 'bitsreal') {
+      if (n.items.length !== 2) return this.err(n, `(${h} E) 要 1 个参数`);
+      const v = this.expr(n.items[1]);
+      if (v === null) return null;
+      const want = h === 'realbits' ? 'real' : 'int';
+      if (v.type.k !== want) {
+        return this.err(n.items[1], `(${h}) 的参数要是 ${want}，这里是 ${coreTypeText(v.type)}`);
+      }
+      if (h === 'realbits') return { kind: 'Builtin', name: 'realbits', args: [v], type: INT, argType: REAL };
+      return { kind: 'Builtin', name: 'bitsreal', args: [v], type: REAL, argType: INT };
+    }
     // 字符串上的三条：长度、子串、找子串。OIR 侧三个 `Builtin` 早就在（Omni 自己的
     // `s.length` / `s.substr(i,n)` / `s.indexOf(t)` 就是它们），所以 run / run-c /
     // interp / interp --mir 四条腿一行没改就通了；LLVM 那条腿要三条 ABI（见 RT_OPS）。

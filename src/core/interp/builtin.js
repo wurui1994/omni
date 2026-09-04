@@ -988,6 +988,20 @@ export function applyBuiltin(I, e, a) {
     case 'to_string': return strOf(e.argType.k, a[0]);
     case 'to_string_g': return fmtRealG(a[0], a[1]);
     case 'trunc': return truncReal(a[0]);
+    /* 位重解释（ADR-0019 路 1）：位不动，只换一种读法。int 在这条腿上是 BigInt，
+     * getBigInt64/setBigInt64 正好是 int64 那一格 —— 两个方向都不用再截，也不用查范围
+     * （每个 f64 的位模式都是一个合法 int64）。 */
+    case 'realbits': {
+      const rbv = new DataView(new ArrayBuffer(8));
+      rbv.setFloat64(0, a[0]);
+      return rbv.getBigInt64(0);
+    }
+    case 'bitsreal': {
+      const rbv = new DataView(new ArrayBuffer(8));
+      rbv.setBigInt64(0, a[0]);
+      return rbv.getFloat64(0);
+    }
+
     case 'chr': return chrOf(a[0]);
     case 'fail': rtError(a[0]); return undefined;
     case 'repr': return reprOf(a[0]);

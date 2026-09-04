@@ -1195,6 +1195,9 @@ class CEmitter {
       case 'to_string': return `omni_str_${e.argType.k}(${a[0]})`;
       case 'to_string_g': return `omni_str_realg(${a[0]}, ${a[1]})`;
       case 'trunc': return `omni_trunc(${a[0]})`;
+      // 位重解释（ADR-0019 路 1）：位不动，只换一种读法。
+      case 'realbits': return `omni_r_bits(${a[0]})`;
+      case 'bitsreal': return `omni_r_frombits(${a[0]})`;
       case 'chr': return `omni_chr(${a[0]})`;
       case 'fail': return `omni_fail(${a[0]})`;
       case 'repr': return `omni_repr_real(${a[0]})`;

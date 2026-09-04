@@ -18,6 +18,7 @@
    可以是 intrinsic，但 fmod / round 不是，统一包一层最省事。 */
 #include "omni.h"
 #include <math.h>
+#include <string.h>
 
 double omni_r_sqrt(double x) { return sqrt(x); }
 double omni_r_pow(double x, double y) { return pow(x, y); }
@@ -56,5 +57,16 @@ double omni_r_hypot(double x, double y) { return hypot(x, y); }
    为什么能要求逐字节 —— 与上面那些超越函数不同，nextafter 是**精确运算**
    （IEEE-754 5.3.1 的 nextUp/nextDown），不存在「哪家 libm 的最后一位」这回事。 */
 double omni_r_nextafter(double x, double y) { return nextafter(x, y); }
+
+/* 位重解释（ADR-0019 路 1）：`(realbits E)` / `(bitsreal E)`。**不是**转换 —— 位不动，
+   只换一种读法。走 memcpy 而不是指针别名：后者在 -O2 下是严格别名违规（编译器有权
+   假定 double* 与 int64_t* 不指向同一处），memcpy 是标准认可的那一手，而且各家编译器
+   都会把这 8 个字节的 memcpy 折成一条寄存器搬运。
+
+   宽度是 64 对 64，所以两个方向都精确。GLSL 那两个内建是 32 位的（规范假定 float 是
+   f32），差别由 GLSL 那一侧的注释交代。 */
+int64_t omni_r_bits(double x) { int64_t i; memcpy(&i, &x, sizeof i); return i; }
+double omni_r_frombits(int64_t i) { double x; memcpy(&x, &i, sizeof x); return x; }
+
 
 

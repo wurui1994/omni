@@ -666,6 +666,9 @@ class JsEmitter {
       case 'to_string': return `$str_${e.argType.k}(${a[0]})`;
       case 'to_string_g': return `$str_real_g(${a[0]}, ${a[1]})`;
       case 'trunc': return `$trunc(${a[0]})`;
+      // 位重解释（ADR-0019 路 1）：位不动，只换一种读法。
+      case 'realbits': return `$realbits(${a[0]})`;
+      case 'bitsreal': return `$bitsreal(${a[0]})`;
       case 'chr': return `$chr(${a[0]})`;
       case 'fail': return `$rt_error(${a[0]})`;
       case 'repr': return `$repr_real(${a[0]})`;

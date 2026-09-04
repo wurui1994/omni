@@ -82,4 +82,14 @@
     (print (bin ">" (rmath "nextafter" (un "-" (real 1.0)) (real 0.0)) (un "-" (real 1.0))))
     ;; 0 要单列：±0 往两侧都跳到最小非正规数，符号跟着 y
     (print (bin ">" (rmath "nextafter" (real 0.0) (real 1.0)) (real 0.0)))
-    (print (bin "<" (rmath "nextafter" (real 0.0) (un "-" (real 1.0))) (real 0.0)))))
+    (print (bin "<" (rmath "nextafter" (real 0.0) (un "-" (real 1.0))) (real 0.0)))
+    ;; `(realbits E)` / `(bitsreal E)` —— **位重解释**，不是转换（ADR-0019 路 1）。
+    ;; 64 对 64，两个方向都精确，所以来回一趟必须原样回来。
+    (print (bin "==" (bitsreal (realbits (real 2.5))) (real 2.5)))
+    ;; 位模式钉死：1.0 是 0x3FF0000000000000。这一条压的是**字节层面**的读法 ——
+    ;; 五条腿里有 BigInt、有 int64_t、有 LLVM 的 i64，谁记反了这个数就不对。
+    (print (realbits (real 1.0)))
+    ;; 两个新算子互相印证：位模式加一 == 往 +inf 挪一格。这一条比各自单独测有用得多，
+    ;; 因为它把「手写的 nextafter」与「位重解释」拴在了一起 —— 只错一个就红。
+    (print (bin "==" (bitsreal (bin "+" (realbits (real 1.0)) (int 1)))
+      (rmath "nextafter" (real 1.0) (real 2.0))))))

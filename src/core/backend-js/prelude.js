@@ -494,6 +494,20 @@ const $trunc = (x) => {
   return BigInt(t);
 };
 
+// 位重解释（ADR-0019 路 1）：位不动，只换一种读法。int 在这条腿上是 BigInt，而
+// getBigInt64/setBigInt64 正好就是 int64 那一格，所以两个方向都不用再截。
+// **不是** $trunc 那种转换：这儿没有范围检查，因为每个 f64 的位模式都是一个合法 int64。
+const $realbits = (x) => {
+  const bdv = new DataView(new ArrayBuffer(8));
+  bdv.setFloat64(0, x);
+  return bdv.getBigInt64(0);
+};
+const $bitsreal = (i) => {
+  const bdv = new DataView(new ArrayBuffer(8));
+  bdv.setBigInt64(0, i);
+  return bdv.getFloat64(0);
+};
+
 // ---------------------------------------------------------------- 字符串
 // Omni 的 string 是 **UTF-8 字节序列**：length / byteAt / substr 都按字节。
 // JS 里字符串是 UTF-16，所以这里过一层编码，用单条 memo 让循环扫描保持 O(1) 摊还。
