@@ -14,6 +14,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { loadGrammarTable } from '../../src/core/glr/load.js';
+import { glslPreprocess, glslTypeNames } from '../../src/core/frontend-glsl/pp.js';
 import { lexText } from '../../src/core/glr/lex.js';
 import { glrParse } from '../../src/core/glr/driver.js';
 import { Diagnostics, SourceFile } from '../../src/core/source/diag.js';
@@ -42,7 +43,9 @@ const { g, tb } = loadGrammarTable(GRAMMAR);
 function mod(src, stage, name = 'probe') {
   const diags = new Diagnostics();
   const file = new SourceFile(name, src);
-  const toks = lexText(g.lex, file, diags);
+  /* 与产品那条路同一趟：预处理（对象宏）+ 类型名重判（`struct N {…}` 之后的 `N`）。
+   * 少了重判，`IV x;` 里的 `IV` 还是 `ID`，结构体那一档根本分析不出来。 */
+  const toks = glslTypeNames(glslPreprocess(g.lex, lexText(g.lex, file, diags), diags));
   diags.throwIfErrors();
   const tree = glrParse(tb, toks, diags);
   diags.throwIfErrors();
@@ -289,6 +292,58 @@ void main() { c = vec4(a); }
 ]) {
   let msg = null;
   try { mod(src, 'frag'); } catch (e) { msg = e.message; }
+  if (msg === null) bad(`该拒却收了：${name}`, '    一声没响');
+  else if (!msg.includes(want)) bad(`拒得不对：${name}`, `    要含「${want}」\n    实际：${msg.split('\n')[0]}`);
+  else ok(`拒：${name}`);
+}
+
+/* 结构体（施工图 B13）：**平**的那一档。正面查「登记上了 + 成员访问的类型对」，
+ * 负面把不收的那些逐条钉住。名字能进类型位靠 `pp.js` 的 `glslTypeNames()`。 */
+{
+  const src = `#version 330 core
+struct IV { vec2 v; int n; };
+out vec4 c;
+void main() { IV a = IV(vec2(1.0, 2.0), 3); c = vec4(a.v, float(a.n), 1.0); }
+`;
+  try {
+    const m = mod(src, 'frag');
+    eq('结构体：表里登记了一个', m.structs.map((s) => s.name), ['IV']);
+    eq('结构体：成员的类型与次序', m.structs[0].fields.map((f) => `${f.name}:${glslTyText(f.ty)}`),
+      ['v:vec2', 'n:int']);
+  } catch (e) { bad('结构体：正面这一份过不去', `    ${String(e.message ?? e).split('\n')[0]}`); }
+}
+
+for (const [name, src, want] of [
+  ['嵌套结构体（语义拒，不是语法拒）', `#version 330 core
+struct A { float a; };
+struct B { A a; };
+out vec4 c;
+void main() { c = vec4(1.0); }
+`, '只收**平**结构体'],
+  ['成员名重复', `#version 330 core
+struct A { float a; float a; };
+out vec4 c;
+void main() { c = vec4(1.0); }
+`, "有两个成员叫 'a'"],
+  ['结构体定义两次', `#version 330 core
+struct A { float a; };
+struct A { float b; };
+out vec4 c;
+void main() { c = vec4(1.0); }
+`, "定义了两次"],
+  ['取一个没有的成员', `#version 330 core
+struct A { float a; };
+out vec4 c;
+void main() { A x = A(1.0); c = vec4(x.b); }
+`, "没有成员 'b'"],
+  ['构造的实参个数不对', `#version 330 core
+struct A { float a; float b; };
+out vec4 c;
+void main() { A x = A(1.0); c = vec4(x.a); }
+`, '要 2 个实参'],
+]) {
+  let msg = null;
+  try { mod(src, 'frag'); } catch (e) { msg = String(e.message ?? e); }
   if (msg === null) bad(`该拒却收了：${name}`, '    一声没响');
   else if (!msg.includes(want)) bad(`拒得不对：${name}`, `    要含「${want}」\n    实际：${msg.split('\n')[0]}`);
   else ok(`拒：${name}`);

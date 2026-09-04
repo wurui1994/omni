@@ -46,6 +46,8 @@ export const GLSL_FLOAT = { k: 'float' };
 
 const glslVec = (n, base) => ({ k: 'vec', n, base });
 const glslMat = (cols, rows) => ({ k: 'mat', cols, rows });
+/** 结构体（施工图 B13）：**平**的那一档 —— 成员是标量/向量/矩阵。名义类型，按名字比。 */
+const glslStruct = (name, fields) => ({ k: 'struct', name, fields });
 
 /** 打印出来给报错用。 */
 export function glslTyText(t) {
@@ -54,6 +56,9 @@ export function glslTyText(t) {
     return `${p}${t.n}`;
   }
   if (t.k === 'mat') return t.cols === t.rows ? `mat${t.cols}` : `mat${t.cols}x${t.rows}`;
+  /* 结构体是**名义**类型：GLSL 里两个成员完全一样但名字不同的结构体不能互相赋值，
+   * 所以拿名字当身份 —— `glslSame` 比的就是这个字符串。 */
+  if (t.k === 'struct') return t.name;
   return t.k;
 }
 
@@ -73,21 +78,34 @@ function glslElem(t) {
   return t;
 }
 
-/** 有几格：标量 1、`vecN` N、`matCxR` C*R。 */
+/** 有几格：标量 1、`vecN` N、`matCxR` C*R、结构体是各成员之和（**摊平**数）。 */
 function glslCount(t) {
   if (t.k === 'vec') return t.n;
   if (t.k === 'mat') return t.cols * t.rows;
+  if (t.k === 'struct') {
+    let n = 0;
+    for (const f of t.fields) n += glslCount(f.ty);
+    return n;
+  }
   return 1;
 }
 
-/** 语法树里的 `(ty-vec 3)` 一类 -> 上面那种形状。 */
-function glslTyOf(node, err) {
+/** 语法树里的 `(ty-vec 3)` 一类 -> 上面那种形状。`structs` 只在收 `(ty-name N)` 时要。 */
+function glslTyOf(node, err, structs) {
   const h = glslHead(node);
   if (h === 'ty-void') return GLSL_VOID;
   if (h === 'ty-bool') return GLSL_BOOL;
   if (h === 'ty-int') return GLSL_INT;
   if (h === 'ty-uint') throw err(node, 'uint 这一刀不收（两份尺子里都没有）');
   if (h === 'ty-float') return GLSL_FLOAT;
+  if (h === 'ty-name') {
+    /* 名字能走到这儿说明 `pp.js` 的 `glslTypeNames()` 已经把它重判成 `TYPENAME` 了 ——
+     * 也就是前面真有一条 `struct N {…};`。查不到只可能是这一层没登记上。 */
+    const nm = glslAtom(node.items[1]);
+    const t = structs === undefined ? undefined : structs.get(nm);
+    if (t === undefined) throw err(node, `没见过的结构体类型 '${nm}'`);
+    return t;
+  }
   const n = Number(node.items[1].value);
   if (h === 'ty-vec') return glslVec(n, 'float');
   if (h === 'ty-ivec') return glslVec(n, 'int');
@@ -355,10 +373,18 @@ class GlslChecker {
     this.consts = new Map();
     this.funcs = new Map();
     this.locs = new Map();
+    /* 结构体表（施工图 B13）：名字 -> `{k:'struct', name, fields}`。
+     * 名字能进类型位是 `pp.js` 的 `glslTypeNames()` 把它重判成 `TYPENAME` 了。 */
+    this.structs = new Map();
     this.scopes = [];
     this.curFunc = null;
     this.builtinIn = stage === 'vert' ? GLSL_VERT_IN : GLSL_FRAG_IN;
     this.builtinOut = stage === 'vert' ? GLSL_VERT_OUT : GLSL_FRAG_OUT;
+  }
+
+  /** 语法树里的类型 -> 类型对象。走这一层是为了把结构体表带上。 */
+  tyOf(node) {
+    return glslTyOf(node, (n, m) => this.err(n, m), this.structs);
   }
 
   err(node, msg) {
@@ -440,6 +466,8 @@ class GlslChecker {
     return {
       stage: this.stage,
       version: this.version,
+      /* 结构体表带出去：降级与快路那两侧都要按成员**摊平**（施工图 B13）。 */
+      structs: [...this.structs.values()],
       uniforms: [...this.uniforms].map(([name, ty]) => ({ name, ty })),
       ins: [...this.ins].map(([name, v]) => ({ name, ty: v.ty, interp: v.interp })),
       outs: [...this.outs].map(([name, v]) => ({ name, ty: v.ty, interp: v.interp })),
@@ -481,11 +509,38 @@ class GlslChecker {
       this.profile = profile;
       return;
     }
+    if (h === 'struct-decl') {
+      /* 平结构体（施工图 B13）。按 `grapheq.glsl` 那两个的形状收：
+       *   struct IV   { vec2 v; vec2 g; vec2 f; };
+       *   struct Segs { vec2 s0; vec2 s1; int n; };
+       * **嵌套不在这儿拒不了** —— 语法里 `field` 的类型可以是 `TYPENAME`，所以那条限制
+       * 是语义的，就在这儿骂（语法保持上下文无关，别把语义塞进产生式）。 */
+      const name = glslAtom(node.items[1]);
+      if (this.structs.has(name)) throw this.err(node, `结构体 '${name}' 定义了两次`);
+      const items = glslFlatten(node.items[2], 'fields-add', 'fields');
+      const fields = [];
+      const seen = new Set();
+      for (const f of items) {
+        const fname = glslAtom(f.items[2]);
+        if (seen.has(fname)) throw this.err(f, `结构体 '${name}' 里有两个成员叫 '${fname}'`);
+        seen.add(fname);
+        const fty = this.tyOf(f.items[1]);
+        if (fty.k === 'void') throw this.err(f, `结构体成员 '${fname}' 不能是 void`);
+        if (fty.k === 'struct') {
+          throw this.err(f, `这一片只收**平**结构体：成员 '${fname}' 又是一个结构体 `
+            + `('${fty.name}')。嵌套要连着「成员是数组」一起做，那是另一片`);
+        }
+        fields.push({ name: fname, ty: fty });
+      }
+      if (fields.length === 0) throw this.err(node, `结构体 '${name}' 一个成员都没有`);
+      this.structs.set(name, glslStruct(name, fields));
+      return;
+    }
     if (h === 'uniform' || h === 'uniform-at') {
       const at = h === 'uniform-at';
       const name = glslAtom(node.items[at ? 3 : 2]);
       this.claim(name, node);
-      this.uniforms.set(name, glslTyOf(node.items[at ? 2 : 1], (n, m) => this.err(n, m)));
+      this.uniforms.set(name, this.tyOf(node.items[at ? 2 : 1]));
       if (at) this.claimLoc('uniform', name, node.items[1], node);
       return;
     }
@@ -494,7 +549,7 @@ class GlslChecker {
       const isIn = h === 'in-var' || h === 'in-at';
       const name = glslAtom(node.items[3]);
       this.claim(name, node);
-      const ty = glslTyOf(node.items[2], (n, m) => this.err(n, m));
+      const ty = this.tyOf(node.items[2]);
       /* 插值方式：`flat`/`smooth`/`noperspective`，没写就是 `smooth`（GLSL 的默认）。
        * llvmpipe 那边这一格是 `enum lp_interp`，是编 shader 变体时定死的常量。
        * `centroid`/`sample` 在规范里是**取样位置**而不是插值方式 —— 我们只有一个取样点
@@ -515,7 +570,7 @@ class GlslChecker {
     if (h === 'const-decl') {
       const name = glslAtom(node.items[2]);
       this.claim(name, node);
-      const ty = glslTyOf(node.items[1], (n, m) => this.err(n, m));
+      const ty = this.tyOf(node.items[1]);
       this.push();
       const init = this.coerce(this.expr(node.items[3]), ty, node);
       this.pop();
@@ -524,11 +579,11 @@ class GlslChecker {
     }
     if (h === 'func' || h === 'func-proto') {
       const name = glslAtom(node.items[2]);
-      const ret = glslTyOf(node.items[1], (n, m) => this.err(n, m));
+      const ret = this.tyOf(node.items[1]);
       const params = glslFlatten(node.items[3], 'params-add', 'params').map((p) => ({
         dir: glslHead(p.items[1]) === 'dir-out' ? 'out'
           : glslHead(p.items[1]) === 'dir-inout' ? 'inout' : 'in',
-        ty: glslTyOf(p.items[2], (n, m) => this.err(n, m)),
+        ty: this.tyOf(p.items[2]),
         name: glslAtom(p.items[3]),
       }));
       if (h === 'func-proto') {
@@ -574,7 +629,7 @@ class GlslChecker {
     if (h === 'block') return this.block(node);
     if (h === 'expr-stmt') return { k: 'expr', e: this.expr(node.items[1]) };
     if (h === 'local' || h === 'local-init' || h === 'local-const') {
-      const ty = glslTyOf(node.items[1], (n, m) => this.err(n, m));
+      const ty = this.tyOf(node.items[1]);
       const name = glslAtom(node.items[2]);
       const init = node.items.length > 3 ? this.coerce(this.expr(node.items[3]), ty, node) : null;
       if (h === 'local-const' && init === null) throw this.err(node, `const '${name}' 没有初值`);
@@ -847,6 +902,17 @@ class GlslChecker {
      * 出来的节点属性还叫 `of`（受限的只有绑定名）。 */
     const subj = this.expr(node.items[1]);
     const s = glslAtom(node.items[2]);
+    /* 结构体的成员访问走这一条（施工图 B13）：`.v` 是名字，不是 swizzle 那串字母。
+     * `idx` 是**摊平之后的起始格号** —— 降级那一侧按它切片，与 `matcol` 同一个套路。 */
+    if (subj.ty.k === 'struct') {
+      let at = 0;
+      for (const f of subj.ty.fields) {
+        if (f.name === s) return { k: 'field', ty: f.ty, of: subj, at, name: s };
+        at += glslCount(f.ty);
+      }
+      throw this.err(node, `${subj.ty.name} 没有成员 '${s}'（有 `
+        + `${subj.ty.fields.map((f) => f.name).join('、')}）`);
+    }
     if (subj.ty.k !== 'vec') {
       throw this.err(node, `'.${s}' 只能取向量的分量，这儿是 ${glslTyText(subj.ty)}`);
     }
@@ -873,9 +939,19 @@ class GlslChecker {
    *      少了更是错；只有「一个标量」那条例外）
    */
   construct(node) {
-    const ty = glslTyOf(node.items[1], (n, m) => this.err(n, m));
+    const ty = this.tyOf(node.items[1]);
     const args = glslFlatten(node.items[2], 'args-add', 'args').map((a) => this.expr(a));
     if (ty.k === 'void') throw this.err(node, 'void 不能构造');
+    /* 结构体的构造（规范 5.4.3）：**一个实参对一个成员**，按次序，类型要能当那个成员用。
+     * 不铺开、不摊平 —— 那两条是向量/矩阵的规则，结构体没有。 */
+    if (ty.k === 'struct') {
+      if (args.length !== ty.fields.length) {
+        throw this.err(node, `${ty.name}(...) 要 ${ty.fields.length} 个实参`
+          + `（一个成员一个：${ty.fields.map((f) => f.name).join('、')}），给了 ${args.length}`);
+      }
+      const vals = args.map((a, ax) => this.coerce(a, ty.fields[ax].ty, node));
+      return { k: 'construct', ty, args: vals };
+    }
     if (glslIsScalar(ty)) {
       if (args.length !== 1) throw this.err(node, `${glslTyText(ty)}(...) 要正好一个实参`);
       const a = args[0];
