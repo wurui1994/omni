@@ -177,12 +177,34 @@ export function readLine() {
 
 /** 结果是 [status, stdout, stderr]；mode 'c' 全捕获 / 'o' stdout 直通 / 'i' 全直通 */
 export function spawn(cmd, argv, mode) {
+  return spawnRun(cmd, argv, mode, null);
+}
+
+/**
+ * 与 `spawn` 只差一格：把 `input` 那段文本**喂进子进程的 stdin**（空串 = 不喂）。
+ *
+ * 为什么另开一个而不是给 `spawn` 加参数：`spawn` 有二十来个调用点，而它在**封闭 ABI**
+ * 上——改形状要二十处一起动，多一条只是多一条。加它的理由是 ADR-0019 决策八：
+ * 「IR 走 stdin，磁盘上一个字节都不写」。
+ *
+ * 一个前提写在明处：这一侧**先把 input 写完再读 stdout**，所以被调的那一边要先把 stdin
+ * 读干再往 stdout 写（`glsl_host.c` 的 `slurp_stdin` 正是这样）。不满足、而且两个方向都
+ * 超过一个管道缓冲（64 KB）时会死锁。
+ */
+export function spawnIn(cmd, argv, mode, input) {
+  return spawnRun(cmd, argv, mode, input === undefined || input === '' ? null : input);
+}
+
+function spawnRun(cmd, argv, mode, feed) {
   const stdio = mode === 'c' ? ['ignore', 'pipe', 'pipe']
     : mode === 'o' ? ['ignore', 'inherit', 'pipe']
-      : 'inherit';
+      : ['inherit', 'inherit', 'inherit'];
+  if (feed !== null) stdio[0] = 'pipe';
   // maxBuffer 必须显式给：node 的默认是 1 MiB，而 C 侧的实现没有这个上限。
   // `omni bootstrap` 要收下另一代编译器 1.7 MB 的 stdout，默认值会 ENOBUFS。
-  const r = node('node:child_process').spawnSync(cmd, argv, { encoding: 'utf8', stdio, maxBuffer: 1 << 28 });
+  const opts = { encoding: 'utf8', stdio, maxBuffer: 1 << 28 };
+  if (feed !== null) opts.input = feed;
+  const r = node('node:child_process').spawnSync(cmd, argv, opts);
   if (r.error !== undefined && r.error !== null) throw new Error(`cannot spawn: ${r.error.message}`);
   return [r.status === null ? 128 : r.status, r.stdout === null ? '' : r.stdout, r.stderr === null ? '' : r.stderr];
 }

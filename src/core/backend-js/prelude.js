@@ -1737,16 +1737,27 @@ function $js_proc_read_line() {
   const s = new TextDecoder().decode(new Uint8Array(bytes));
   return s.endsWith("\r") ? s.slice(0, -1) : s;
 }
-function $js_proc_spawn(cmd, args, mode) {
+function $js_proc_spawn(cmd, args, mode) { return $js_spawn_run(cmd, args, mode, null); }
+/* 与上面那条只差一格：把第 4 个参数那段文本喂进子进程的 stdin（空串 = 不喂）。
+   ADR-0019 决策八：IR 走 stdin，磁盘上一个字节都不写。
+   先写完 input 再读 stdout —— 被调那侧要先把 stdin 读干（glsl_host.c 的 slurp_stdin
+   正是这样），不然两个方向都超过一个管道缓冲（64 KB）时会死锁。 */
+function $js_proc_spawn_in(cmd, args, mode, input) {
+  const s = $js_asS16(input);
+  return $js_spawn_run(cmd, args, mode, s === "" ? null : s);
+}
+function $js_spawn_run(cmd, args, mode, feed) {
   const m = $js_asS16(mode);
   const stdio = m === "c" ? ["ignore", "pipe", "pipe"]
     : m === "o" ? ["ignore", "inherit", "pipe"]
-      : "inherit";
+      : ["inherit", "inherit", "inherit"];
+  if (feed !== null) stdio[0] = "pipe";
   // maxBuffer 必须显式给：node 的默认是 1 MiB，而 C 侧的实现没有这个上限。
   // omni bootstrap 要收下另一代编译器 1.7 MB 的 stdout，默认值会 ENOBUFS。
+  const opts = { encoding: "utf8", stdio, maxBuffer: 1 << 28 };
+  if (feed !== null) opts.input = feed;
   const r = $node("node:child_process").spawnSync(
-    $js_asS16(cmd), $js_arr_of(args).map((x) => $js_asS16(x)),
-    { encoding: "utf8", stdio, maxBuffer: 1 << 28 });
+    $js_asS16(cmd), $js_arr_of(args).map((x) => $js_asS16(x)), opts);
   if (r.error !== undefined && r.error !== null) $rt_error("cannot spawn: " + r.error.message);
   return [r.status === null ? 128 : r.status, r.stdout === null ? "" : r.stdout, r.stderr === null ? "" : r.stderr];
 }

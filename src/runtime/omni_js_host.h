@@ -33,7 +33,8 @@ static omni_dyn omni_js_proc_args(void) { \
   out->len = n; \
   return omni_js_arr_wrap(out); \
 } \
-static omni_dyn omni_js_proc_spawn(omni_dyn cmd, omni_dyn args, omni_dyn mode) { \
+/* 两个入口共用的那一段。`inp` 非 NULL 就喂进子进程的 stdin。 */ \
+static omni_dyn omni_js_spawn_core(omni_dyn cmd, omni_dyn args, omni_dyn mode, const char *inp) { \
   LT a = omni_js_arr_of(args); \
   char **argv = (char **)omni_alloc((size_t)(a->len + 2) * sizeof(char *)); \
   omni_str c = omni_s16_to_utf8(omni_js_as_s16(cmd)); \
@@ -45,7 +46,7 @@ static omni_dyn omni_js_proc_spawn(omni_dyn cmd, omni_dyn args, omni_dyn mode) {
   omni_s16 m = omni_js_as_s16(mode); \
   if (m.len != 1) omni_error("spawn mode must be one of 'c' / 'o' / 'i'"); \
   omni_str out, err; \
-  int status = omni_host_spawn(argv[0], argv, (int)m.p[0], &out, &err); \
+  int status = omni_host_spawn(argv[0], argv, (int)m.p[0], inp, &out, &err); \
   LT r = LT##_new(); \
   LT##_reserve(r, 3); \
   r->items[0] = omni_dyn_of_real((double)status); \
@@ -53,6 +54,15 @@ static omni_dyn omni_js_proc_spawn(omni_dyn cmd, omni_dyn args, omni_dyn mode) {
   r->items[2] = omni_dyn_of_s16(omni_s16_of_utf8(err)); \
   r->len = 3; \
   return omni_js_arr_wrap(r); \
+} \
+static omni_dyn omni_js_proc_spawn(omni_dyn cmd, omni_dyn args, omni_dyn mode) { \
+  return omni_js_spawn_core(cmd, args, mode, NULL); \
+} \
+/* 第 4 个参数**总是一段字符串**：空串 = 不喂（照旧 /dev/null 或继承）。刻意不收 */ \
+/* `undefined` —— 那要一个"这个 dyn 是不是 undefined"的判据，收空串就是纯数据。 */ \
+static omni_dyn omni_js_proc_spawn_in(omni_dyn cmd, omni_dyn args, omni_dyn mode, omni_dyn input) { \
+  omni_str ins = omni_s16_to_utf8(omni_js_as_s16(input)); \
+  return omni_js_spawn_core(cmd, args, mode, ins.len == 0 ? NULL : omni_cstr(ins)); \
 }
 
 #endif /* OMNI_JS_HOST_H */

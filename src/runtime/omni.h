@@ -519,7 +519,8 @@ void omni_host_dir_close(void *d);
 int omni_host_user_argc(void);
 const char *omni_host_user_arg(int i);
 omni_dyn omni_host_str_of_cstr(const char *p);
-int omni_host_spawn(const char *cmd, char *const *argv, int mode, omni_str *out, omni_str *err);
+int omni_host_spawn(const char *cmd, char *const *argv, int mode, const char *in,
+                    omni_str *out, omni_str *err);
 
 /* omni_hash.c —— 键的显示形式，只在 "key not found" 的错误消息里用，都是冷路径 */
 omni_str omni_kstr_int(int64_t k);

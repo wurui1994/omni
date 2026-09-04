@@ -269,6 +269,11 @@ export const JS_ABI = {
   js_proc_read_line: { js: '$js_proc_read_line', c: 'omni_js_proc_read_line', arity: 0 },
   // 结果是 [status, stdout, stderr]；mode 'c' 全捕获 / 'o' stdout 直通 / 'i' 全直通
   js_proc_spawn: { js: '$js_proc_spawn', c: 'omni_js_proc_spawn', arity: 3 },
+  /* 与上面那条的差别只有一格：**把第 4 个参数那段文本喂进子进程的 stdin**。
+     刻意**另开一条**而不是给 `js_proc_spawn` 加参数 —— 那条有二十来个调用点，
+     改签名就得二十处一起动，而封闭 ABI 上"改形状"比"多一条"贵得多。
+     加它的理由是 ADR-0019 决策八：「IR 走 stdin，磁盘上一个字节都不写」。 */
+  js_proc_spawn_in: { js: '$js_proc_spawn_in', c: 'omni_js_proc_spawn_in', arity: 4 },
   js_os_tmpdir: { js: '$js_os_tmpdir', c: 'omni_js_os_tmpdir', arity: 0 },
   // 墙上时钟毫秒。要计的是"这一步花了多久"，大头是子进程（clang、另一代编译器），
   // 所以必须是墙上时间而不是 CPU 时间。

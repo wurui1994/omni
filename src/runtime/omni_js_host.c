@@ -374,17 +374,25 @@ static omni_str omni_host_slurp(int fd) {
   return omni_str_new(buf, (int64_t)len);
 }
 
-int omni_host_spawn(const char *cmd, char *const *argv, int mode, omni_str *out, omni_str *err) {
-  int po[2] = {-1, -1}, pe[2] = {-1, -1};
+/* `in` 非 NULL 就把它写进子进程的 stdin（ADR-0019 决策八：IR 走管道，磁盘不写）。
+   写全了再读 stdout，靠的是一个前提：**被调的那一侧要先把 stdin 读干再往 stdout 写**
+   （`glsl_host.c` 的 `slurp_stdin` 正是这样）。不满足那个前提、而且两边都超过一个管道
+   缓冲（64 KB）的时候会死锁 —— 所以这一条写在这儿，不是"以后再说"。 */
+int omni_host_spawn(const char *cmd, char *const *argv, int mode, const char *in,
+                    omni_str *out, omni_str *err) {
+  int po[2] = {-1, -1}, pe[2] = {-1, -1}, pi[2] = {-1, -1};
   bool cap_out = mode == 'c';
   bool cap_err = mode == 'c' || mode == 'o';
+  bool feed = in != NULL;
   if (cap_out && pipe(po) != 0) omni_error("cannot create a pipe");
   if (cap_err && pipe(pe) != 0) omni_error("cannot create a pipe");
+  if (feed && pipe(pi) != 0) omni_error("cannot create a pipe");
 
   pid_t pid = fork();
   if (pid < 0) omni_error("cannot fork");
   if (pid == 0) {
-    if (mode != 'i') {
+    if (feed) { dup2(pi[0], 0); close(pi[0]); close(pi[1]); }
+    else if (mode != 'i') {
       int devnull = open("/dev/null", O_RDONLY);
       if (devnull >= 0) { dup2(devnull, 0); close(devnull); }
     }
@@ -395,6 +403,18 @@ int omni_host_spawn(const char *cmd, char *const *argv, int mode, omni_str *out,
   }
   if (cap_out) close(po[1]);
   if (cap_err) close(pe[1]);
+  if (feed) {
+    close(pi[0]);
+    /* 子进程可能提前退（execvp 失败就是 127），那时候写会拿到 EPIPE ——
+       忽略它，退出码那一步会把真相报出来。 */
+    size_t n = strlen(in), off = 0;
+    while (off < n) {
+      ssize_t w = write(pi[1], in + off, n - off);
+      if (w < 0) { if (errno == EINTR) continue; break; }
+      off += (size_t)w;
+    }
+    close(pi[1]);
+  }
 
   omni_str o = omni_str_new("", 0), e = omni_str_new("", 0);
   if (cap_out) o = omni_host_slurp(po[0]);
