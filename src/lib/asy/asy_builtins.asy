@@ -2318,6 +2318,15 @@ private void asy__measure(labelrec[] ls) {
     // drawlabel.cc:124 直接 `b += position`），至少还能出图。
     string log = "";
     if (rc == 0) log = _readtext(dir + "/m.log");
+    // **先把换行去掉**（这一刀）：TeX 的 .log 每 79 列硬折一次，而且折的时候**不插空格** ——
+    // 于是 `>dim(7.92493pt)dim` 可能被折成 `>dim(7.9249` + 换行 + `3pt)dim`，`find(">dim(")`
+    // 就少认一格、后面整批错位一位。量出来的样子（缓存里那一格）：`$S$` 记的是
+    // `87.45552 7.33333 2.66666`，而 TeX 自己的回答是 `wd 7.92493pt ht 8.2pt dp 0.0pt`
+    // —— 宽是两截粘起来的、深凭空多出 2.67pt。那 2.67 的深度会顺着 drawlabel 的
+    // `Depth/(height+depth)` 挪标签：buildcycle 整份 EPS 只差 1 个数，就是这一处
+    // （`\ASYalign(…)(-0.5,-0.733334)` 该是 `(-0.5,-1.0)`）。
+    // 去掉换行正好把折断的数拼回去（TeX 折行不加空格，所以拼回来是原样）。
+    log = replace(log, "\n", "");
     int at = 0;
     int k = 0;
     while (k < keys.length) {
