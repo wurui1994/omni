@@ -3297,6 +3297,67 @@ llvmpipe 的输入是 **NIR**（已经被 mesa 的前端降过：SSA、结构化
 
 <!-- ADR-0019 决策十-END -->
 
+## 落地：决策十第 1 步 —— 分量带类型，`fast.js` 15/0，**133.8 MPix/s**（没变慢）
+
+`emit_llvm.js` 整份重写。一个分量从「一段 `<8 x float>` 的文本」变成 `{ v, t }`，
+`t` 三个字母：
+
+```
+'f' -> <8 x float>    'i' -> <8 x i32>（有符号）    'b' -> <8 x i1>
+```
+
+照 gallivm 的分法（`lp_bld_type.h:83-138` 的 `lp_type`、`lp_bld_nir_soa.c:259-310` 的
+`get_flt_bld`/`get_int_bld`）。类型不猜 —— `llCompTys(ty)` 从检查那一侧的类型逐格算出来，
+与 `lower.js` 的 `glslCompTys` 同一个公式（结构体前四格 'f'、第五格 'i' 那种）。
+
+三条转换边各自一条指令，写在 `toF`/`toI`/`toB` 里：
+
+- `int -> float`：`sitofp`
+- `float -> int`：`fptosi` —— **往零截，正好是规范 5.4.1**。上一版用 `llvm.trunc`
+  绕（而更早连绕都没有，是空操作）；现在它就是那条指令，不需要"想办法"。
+- `-> bool`：`fcmp une` / `icmp ne`；`bool -> float/int`：`select` / `zext`
+
+### 兑到的钱：一批以前**一条都收不了**的东西，一次全通
+
+`bench-bool.frag` 加了一段整数用例，四条路（参照实现 / v1 clang AOT / v2 ORC / C 宿主）
+答案全同。数一下出来的 IR：
+
+```
+  2 fptosi      5 sitofp      2 bitcast
+  1 srem        1 shl         1 ashr
+  1 and <8 x i32>   3 or <8 x i32>   2 xor <8 x i32>
+ 12 icmp       13 fcmp        3 and <8 x i1>      0 llvm.trunc
+```
+
+- `%`（`srem`）、`<< >>`（`shl`/`ashr`）、`& | ^`、`~` —— 上一版在快路上**一条都收不了**
+- `floatBitsToInt`/`intBitsToFloat` —— 上一版只能骂 NYI，现在是**一条 `bitcast`**
+- `int(x)` 截断 —— `llvm.trunc` 那条绕路没了，是 `fptosi`
+- 整数上的 `abs`/`min`/`max` 走 `icmp` + `select`，**不转成 float 再算**（那在大整数上掉精度）
+- bool 的 `&&`/`||`/`!`/`^^` 是 `and`/`or`/`xor` on i1，不再是「乘 / max / 1-x」那套
+  在浮点域里模拟掩码
+
+用例里那条位转换是**来回一趟**（`intBitsToFloat(floatBitsToInt(x)) - x`）—— 刻意选
+与宽度无关的性质，因为参照腿是 f64/i64、快路是 f32/i32，"转过去再转回来"两边都是恒等，
+但 `nextUp` 那种就不是（那一条留给两张参考图各自对账）。
+
+### 性能：**130.21 -> 133.8 MPix/s**
+
+下限门（100）照旧，而且比上一版还快一点。这一格值得记下来，因为上一版那段注释赌的是
+反面 —— 它说「float-bool 那套在 -O2 之后大多不留痕迹，所以不给分量带类型标签」。
+量出来是：**带上类型不但没慢，还快了**。理由不难猜（少了一圈 `select 1.0/0.0` 再
+`fcmp une` 折回去），但重点是那段注释里"代价由下限门盯着"这句话生效了 ——
+只不过它盯出来的结论是"当初该带类型"。
+
+### 还没做的三步，与它们为什么是同一件事
+
+`if` 现在**仍然**是「快照两支的绑定再 select」。所以 `break`/`continue`/`return`/
+`discard`/循环照旧接不了 —— 不是缺七个特性，是缺**一个落点**：值在 SSA 里，
+掩码盖不住它。llvmpipe 的办法是可变量一律 `alloca`、写走
+`store(select(exec_mask, val, load(ptr)))`（`lp_bld_ir_common.c:200-224`）。
+第 3 步搬 `alloca`、第 4 步上掩码栈，那七个特性一起下来。
+
+<!-- ADR-0019 决策十第 1 步-END -->
+
 ## 还没定的（下一步按这个顺序）
 
 1. ~~摸 mesa 那边的边界~~ —— 「量：读 llvmpipe」那一节。

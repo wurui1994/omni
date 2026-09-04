@@ -1,52 +1,58 @@
-// Omni — GLSL -> LLVM IR（**8 道 f32 SoA**）。ADR-0019 决策六「快路」的第 2 步。
+// src/core/frontend-glsl/emit_llvm.js —— GLSL 的 checked 树 -> 一份 `.ll`（8 道 f32 SoA）
 //
-// 与 `lower.js`（标量摊分量 -> 核心方言）是**两条路**，刻意的：
+// ADR-0019 决策六「快路」+ **决策十第 1 步**（分量带类型）。
 //
-//   `lower.js`   一次一个片元、`real` 是 f64、经过核心方言 -> 五条腿。**参照实现**：
-//                差分门与 oracle 靠它，JS 腿与解释器腿只有它。
-//   这一份       一次 8 个片元、每格 `<8 x float>`、直接发 LLVM IR。**快路**：
-//                量到的天花板 178 MPix/s（`soa_ceiling.c` 那一节），而标量路是 0.70。
+// ---- 表示：一个分量 = `{ v, t }`，不是一段裸文本 ------------------------------------
 //
-// 为什么直接发 IR 而不是给方言加向量：三个量出来的数（决策六）——
-// 我们自己的形状先丢了 45 倍、宽度值 5.5 倍、精度只值 6%。也就是说要拿的是**形状**，
-// 而方言的形状是「一次一个片元 + 每片元一个结构体」，改它等于重写方言。
+// 这一版照 llvmpipe 的 gallivm 改（`mesa/src/gallium/auxiliary/gallivm/`）。它那边
+// `struct lp_type`（`lp_bld_type.h:83-138`）把 `floating / sign / width / length` 记在
+// 值上，SoA 上下文里并排放着 24 个 builder（`lp_bld_nir_soa.c:159-257`），取哪一个由
+// `get_flt_bld` / `get_int_bld`（同文件 259-310）按「位宽 + 有无符号」挑。那份头文件
+// 的原话正是上一版踩的坑：
 //
-// 表示（与 clang 自己发出来的形状对齐，见 ADR「快路第一步」那一节）：
+//   The LLVM type system can't conveniently express all the things we care about on
+//   the types used for intermediate computations, such as signed vs unsigned…
 //
-//   - 一个 GLSL 值 = **分量数组**，每格是一段 `<8 x float>` 的 IR 值文本
-//   - 标量也是 `<8 x float>`：splat 之后一律同型，省掉「标量/向量」两套路径
-//   - `min`/`max`/`sqrt` -> `llvm.minnum/maxnum/sqrt.v8f32`
-//   - 常量 -> `splat (float 0x…)`；LLVM 的 `float` 字面量用 16 位十六进制（双精度位模式）
+// 上一版把每个分量都当 `<8 x float>`，`int` 是「值恰好是整数的 float」、`bool` 是
+// 「值只取 0.0/1.0 的 float」。代价不是理论上的：`int(x)` 一直没截断（量出来是真 bug）、
+// `floatBitsToInt` 根本落不下来、位运算与整数取模也进不来。所以现在每个分量带一个
+// 一个字母的类型：
 //
-// 这一片**只收 `bench-simple` 那一档**（算术、swizzle、构造、`sin`/`cos`/`min`/`max`/
-// `sqrt`/`length`、uniform、`gl_FragCoord.xy`、一个 `out vec4`）。别的明着抛 ——
-// 快路宁可少收，不能悄悄算错：正确性由「与参照实现逐像素对账」那道门管。
+//   'f' -> `<8 x float>`   'i' -> `<8 x i32>`（有符号）   'b' -> `<8 x i1>`
+//
+// 于是 `int(x)` 是一条 `fptosi`（往零截，正好是规范 5.4.1）、`floatBitsToInt` 是一条
+// `bitcast`、`&&` 是一条 `and` —— 都不用"想办法"。
+//
+// bool 用 `<8 x i1>` 也是照它：`lp_bld_nir_soa.c:5942-5945` 的 bool builder 是
+// `lp_uint_type(type)` 再 `width /= 32`，而 `if_cond`（同文件 2030-2038）把它 `SExt`
+// 成整通道掩码。i1 与掩码之间在 LLVM 里是零成本的（`select` 直接吃 i1）。
+//
+// ---- 还没照它做的（决策十第 3–5 步，各自有待办）-------------------------------------
+//
+// - 可变量还在 SSA 里，不是 `alloca` + 掩码写（`lp_bld_ir_common.c:200-224`）。
+//   所以 `if` 仍然是"快照两支的绑定再 select"，而 `break`/`continue`/`return`/循环
+//   **结构上接不了** —— 那要掩码栈，不是一条 `select`。
+// - 没有 `lp_build_skip_branch`（整块没人活着就跳过）。
 
 import { OmniError } from '../source/diag.js';
 
 /** 一道多少：8 道 f32 = 一个 256 位寄存器（M1 上是两条 128 位，clang 自己拆）。 */
 export const GLSL_LANES = 8;
 
-const LL_VEC = `<${GLSL_LANES} x float>`;
+const LL_F = `<${GLSL_LANES} x float>`;
+const LL_I = `<${GLSL_LANES} x i32>`;
+const LL_B = `<${GLSL_LANES} x i1>`;
 
-/** 分量个数（这一档只有标量、vecN 与平结构体）。 */
-function llNComp(t) {
-  if (t.k === 'vec') return t.n;
-  if (t.k === 'float' || t.k === 'int' || t.k === 'bool') return 1;
-  /* 结构体（施工图 B13）：各成员之和。快路这边**连类型数组都不要** —— 所有分量都是
-   * `<8 x float>`，`int` 在这条路上就是「值恰好是整数的 float」，所以摊平的格数够了。 */
-  if (t.k === 'struct') {
-    let n = 0;
-    for (const f of t.fields) n += llNComp(f.ty);
-    return n;
-  }
-  /* 数组（施工图 B14）：n 份元素接起来，第 k 格占 `k*w` 起那 w 格。 */
-  if (t.k === 'array') return t.n * llNComp(t.of);
-  throw new OmniError(`glsl/llvm: 这一片收不了的类型 ${t.k}`);
+/** 分量类型字母 -> LLVM 类型文本。 */
+function llTy(t) {
+  if (t === 'f') return LL_F;
+  if (t === 'i') return LL_I;
+  if (t === 'b') return LL_B;
+  throw new OmniError(`glsl/llvm: 认不出的分量类型 '${t}'`);
 }
 
 /** LLVM 的 `float` 字面量：十六进制的**双精度位模式**（末 29 位必须是 0）。 */
-function llFloat(v) {
+function llFloatBits(v) {
   const b = new DataView(new ArrayBuffer(8));
   b.setFloat64(0, Math.fround(v));
   const hi = b.getUint32(0).toString(16).padStart(8, '0');
@@ -54,16 +60,74 @@ function llFloat(v) {
   return `0x${hi}${lo}`;
 }
 
-/** `splat (float …)`：clang 就是这么发的，读起来也短。 */
-const llSplat = (v) => `splat (float ${llFloat(v)})`;
+/** 三种常量分量。`splat (T v)` 是 clang 自己发的写法，读起来也短。 */
+const llF = (v) => ({ v: `splat (float ${llFloatBits(v)})`, t: 'f' });
+const llI = (n) => ({ v: `splat (i32 ${n})`, t: 'i' });
+const llB = (b) => ({ v: `splat (i1 ${b ? 'true' : 'false'})`, t: 'b' });
 
-/** GLSL 内建 -> LLVM intrinsic（都有 `.v8f32` 的向量形）。 */
+/** 这个 GLSL 类型的**标量**落成哪个字母。矩阵的分量一律是 float（GLSL 没有整数矩阵）。 */
+function llScalarT(t) {
+  const b = t.k === 'vec' ? t.base : t.k === 'mat' ? 'float' : t.k;
+  if (b === 'float') return 'f';
+  if (b === 'int') return 'i';
+  if (b === 'bool') return 'b';
+  throw new OmniError(`glsl/llvm: 这一片收不了的分量类型 ${b}`);
+}
+
+/** 分量个数。 */
+function llNComp(t) {
+  if (t.k === 'vec') return t.n;
+  if (t.k === 'mat') return t.cols * t.rows;
+  if (t.k === 'array') return t.n * llNComp(t.of);
+  if (t.k === 'struct') {
+    let n = 0;
+    for (const f of t.fields) n += llNComp(f.ty);
+    return n;
+  }
+  if (t.k === 'float' || t.k === 'int' || t.k === 'bool') return 1;
+  throw new OmniError(`glsl/llvm: 这一片收不了的类型 ${t.k}`);
+}
+
+/**
+ * **每一格**的类型字母。与 `lower.js` 的 `glslCompTys` 是同一个公式 —— 结构体的分量
+ * 类型不是一种（`struct Segs { vec2 s0; vec2 s1; int n; }` 前四格 'f'、第五格 'i'），
+ * 上一版"每格都是 float"就是在这儿把 `int` 那一格弄丢的。
+ */
+function llCompTys(t) {
+  if (t.k === 'struct') {
+    const out = [];
+    for (const f of t.fields) for (const x of llCompTys(f.ty)) out.push(x);
+    return out;
+  }
+  if (t.k === 'array') {
+    const one = llCompTys(t.of);
+    const out = [];
+    for (let i = 0; i < t.n; i++) for (const x of one) out.push(x);
+    return out;
+  }
+  const s = llScalarT(t);
+  const out = [];
+  for (let i = 0; i < llNComp(t); i++) out.push(s);
+  return out;
+}
+
+/** 一个类型的零值分量（`decl` 不带初值、`out` 的初值都用它）。 */
+function llZero(t) {
+  if (t === 'f') return llF(0);
+  if (t === 'i') return llI(0);
+  return llB(false);
+}
+
+/** GLSL 内建 -> LLVM intrinsic（都有 `.v8f32` 的向量形，实参与结果都是 float）。 */
 const LL_INTRIN = new Map([
   ['sin', 'llvm.sin'], ['cos', 'llvm.cos'], ['sqrt', 'llvm.sqrt'],
   ['abs', 'llvm.fabs'], ['floor', 'llvm.floor'], ['ceil', 'llvm.ceil'],
   ['pow', 'llvm.pow'], ['exp', 'llvm.exp'], ['log', 'llvm.log'],
   ['min', 'llvm.minnum'], ['max', 'llvm.maxnum'],
 ]);
+
+/** 两个实参的那几个 intrinsic（`declare` 的形参个数按它算）。 */
+const LL_INTRIN2 = new Set(['llvm.pow', 'llvm.minnum', 'llvm.maxnum']);
 
 class GlslLlvmEmitter {
   constructor(mod) {
@@ -76,11 +140,11 @@ class GlslLlvmEmitter {
 
   fresh() { this.n++; return `%v${this.n}`; }
 
-  /** 发一条指令，回它的结果名。 */
-  emit(txt) {
+  /** 发一条指令，回一个类型为 `t` 的分量。 */
+  emit(txt, t) {
     const r = this.fresh();
     this.body.push(`  ${r} = ${txt}`);
-    return r;
+    return { v: r, t };
   }
 
   bind(name, comps) { this.scopes[this.scopes.length - 1].set(name, comps); }
@@ -95,7 +159,6 @@ class GlslLlvmEmitter {
     throw new OmniError(`glsl/llvm: 赋值给没见过的名字 '${name}'`);
   }
 
-
   find(name) {
     for (let i = this.scopes.length - 1; i >= 0; i--) {
       const c = this.scopes[i].get(name);
@@ -104,52 +167,120 @@ class GlslLlvmEmitter {
     throw new OmniError(`glsl/llvm: 找不到名字 '${name}'`);
   }
 
-  bin(op, a, b) {
-    const ins = op === '+' ? 'fadd' : op === '-' ? 'fsub' : op === '*' ? 'fmul' : 'fdiv';
-    return this.emit(`${ins} ${LL_VEC} ${a}, ${b}`);
+  /* ------------------------------------------------------------ 类型之间的三条边 */
+
+  /** -> `<8 x float>`。`int` 走 `sitofp`、`bool` 走 `select`（规范：true 是 1.0）。 */
+  toF(c) {
+    if (c.t === 'f') return c;
+    if (c.t === 'i') return this.emit(`sitofp ${LL_I} ${c.v} to ${LL_F}`, 'f');
+    return this.emit(`select ${LL_B} ${c.v}, ${LL_F} ${llF(1).v}, ${LL_F} ${llF(0).v}`, 'f');
   }
 
+  /** -> `<8 x i32>`。float 走 `fptosi`（**往零截**，正好是规范 5.4.1）、bool 走 `zext`。 */
+  toI(c) {
+    if (c.t === 'i') return c;
+    if (c.t === 'f') return this.emit(`fptosi ${LL_F} ${c.v} to ${LL_I}`, 'i');
+    return this.emit(`zext ${LL_B} ${c.v} to ${LL_I}`, 'i');
+  }
+
+  /** -> `<8 x i1>`。"非零即真"，与 C 同一条。 */
+  toB(c) {
+    if (c.t === 'b') return c;
+    if (c.t === 'f') return this.emit(`fcmp une ${LL_F} ${c.v}, ${llF(0).v}`, 'b');
+    return this.emit(`icmp ne ${LL_I} ${c.v}, ${llI(0).v}`, 'b');
+  }
+
+  /** 两个分量拉到同一个类型：有 float 就都 float，否则有 int 就都 int。 */
+  same(a, b) {
+    if (a.t === b.t) return [a, b];
+    if (a.t === 'f' || b.t === 'f') return [this.toF(a), this.toF(b)];
+    return [this.toI(a), this.toI(b)];
+  }
+
+  /* ------------------------------------------------------------ 算术 / 比较 / 逻辑 */
+
+  /** `+ - * / %`。按类型挑指令 —— 整数走 `add`/`sdiv`/`srem`，不是浮点那一套。 */
+  arith(op, ac, bc) {
+    const pair = this.same(ac, bc);
+    const a = pair[0];
+    const b = pair[1];
+    if (a.t === 'b') throw new OmniError(`glsl/llvm: bool 上没有 '${op}'`);
+    if (a.t === 'f') {
+      if (op === '%') throw new OmniError('glsl/llvm: % 只对整数（规范 5.9）');
+      const ins = op === '+' ? 'fadd' : op === '-' ? 'fsub' : op === '*' ? 'fmul' : 'fdiv';
+      return this.emit(`${ins} ${LL_F} ${a.v}, ${b.v}`, 'f');
+    }
+    const ins = op === '+' ? 'add' : op === '-' ? 'sub' : op === '*' ? 'mul'
+      : op === '/' ? 'sdiv' : 'srem';
+    return this.emit(`${ins} ${LL_I} ${a.v}, ${b.v}`, 'i');
+  }
+
+  /**
+   * 比较 -> `<8 x i1>`。
+   *
+   * 浮点用**有序**那一档（`olt`/`oeq`…），`!=` 用 `une` —— 与 C 的 `==`/`!=` 对 NaN
+   * 的结果一致（NaN != NaN 是真）。整数用 `icmp` 的有符号那一档。
+   */
+  cmp(op, ac, bc) {
+    const pair = this.same(ac, bc);
+    const a = pair[0];
+    const b = pair[1];
+    if (a.t === 'f') {
+      const pf = { '<': 'olt', '<=': 'ole', '>': 'ogt', '>=': 'oge', '==': 'oeq', '!=': 'une' }[op];
+      if (pf === undefined) throw new OmniError(`glsl/llvm: 认不出的比较 '${op}'`);
+      return this.emit(`fcmp ${pf} ${LL_F} ${a.v}, ${b.v}`, 'b');
+    }
+    if (a.t === 'b') {
+      if (op !== '==' && op !== '!=') throw new OmniError(`glsl/llvm: bool 上只有 == 与 !=，给的是 '${op}'`);
+      return this.emit(`icmp ${op === '==' ? 'eq' : 'ne'} ${LL_B} ${a.v}, ${b.v}`, 'b');
+    }
+    const pi = { '<': 'slt', '<=': 'sle', '>': 'sgt', '>=': 'sge', '==': 'eq', '!=': 'ne' }[op];
+    if (pi === undefined) throw new OmniError(`glsl/llvm: 认不出的比较 '${op}'`);
+    return this.emit(`icmp ${pi} ${LL_I} ${a.v}, ${b.v}`, 'b');
+  }
+
+  /** `&& || ^^` —— i1 上的 `and`/`or`/`xor`。**两边都算**：SIMD 上没有短路
+   * （llvmpipe 也一样，两支都算再靠掩码取）。 */
+  logic(op, ac, bc) {
+    const a = this.toB(ac);
+    const b = this.toB(bc);
+    const ins = op === '&&' ? 'and' : op === '||' ? 'or' : 'xor';
+    return this.emit(`${ins} ${LL_B} ${a.v}, ${b.v}`, 'b');
+  }
+
+  /** `select`：两支拉到同一类型再发。 */
+  select(mc, ac, bc) {
+    const m = this.toB(mc);
+    const pair = this.same(ac, bc);
+    const a = pair[0];
+    const b = pair[1];
+    const tt = llTy(a.t);
+    return this.emit(`select ${LL_B} ${m.v}, ${tt} ${a.v}, ${tt} ${b.v}`, a.t);
+  }
+
+  /** 一元 `-`。 */
+  neg(c) {
+    if (c.t === 'f') return this.emit(`fneg ${LL_F} ${c.v}`, 'f');
+    if (c.t === 'i') return this.emit(`sub ${LL_I} ${llI(0).v}, ${c.v}`, 'i');
+    throw new OmniError('glsl/llvm: bool 上没有一元 -');
+  }
+
+  /** 调一个 float intrinsic（实参全先拉成 float）。 */
   call1(fn, args) {
     this.need.add(fn);
-    const as = args.map((a) => `${LL_VEC} ${a}`).join(', ');
-    return this.emit(`call ${LL_VEC} @${fn}.v${GLSL_LANES}f32(${as})`);
+    const as = [];
+    for (const a of args) as.push(`${LL_F} ${this.toF(a).v}`);
+    return this.emit(`call ${LL_F} @${fn}.v${GLSL_LANES}f32(${as.join(', ')})`, 'f');
   }
 
-  /* ---- bool 在快路里是「值只取 0.0 / 1.0 的 <8 x float>」 -----------------------
-   *
-   * 为什么不是 `<${GLSL_LANES} x i1>`：这一份从头到尾的表示是「一个分量 = 一段
-   * `<8 x float>` 的值文本」（标量也 splat 成同型，就为了省掉两套路径）。给 bool 单开
-   * 一种宽度就得给每个分量带上类型标签，那是把这二十来处全改一遍。
-   *
-   * 代价是不是真的：`select(c, 1.0, 0.0)` 后面紧跟 `fcmp une …, 0.0` 是 InstCombine
-   * 的标准折叠，会还原成 `c` 本身 —— 也就是说这种表示在 -O2 / ORC 之后大多不留痕迹。
-   * 「大多」不是「一定」，所以这一格的代价由**下限门**盯着（`fast.js` 那条 100 MPix/s）：
-   * 真掉下去了就说明折叠没发生，那时候再加类型标签，而不是现在先猜。
-   *
-   * 逻辑算符在这个表示下是算术：`&&` 是乘、`||` 是 max、`!` 是 `1 - x`。两边都是
-   * 0.0/1.0，所以在 f32 上全部精确，也不会有 NaN 冒出来（值只从 select 来）。 */
+  /* ------------------------------------------------------------ 表达式 */
 
-  /** 一个 float-bool 分量 -> `<8 x i1>` 掩码。 */
-  mask(c) {
-    return this.emit(`fcmp une ${LL_VEC} ${c}, ${llSplat(0)}`);
-  }
-
-  /** `<8 x i1>` 掩码 -> float-bool 分量。 */
-  fromMask(m) {
-    return this.emit(`select <${GLSL_LANES} x i1> ${m}, ${LL_VEC} ${llSplat(1)}, ${LL_VEC} ${llSplat(0)}`);
-  }
-
-  /** 比较：`==`/`!=` 用**无序**那一档（与 C 的 `==`/`!=` 对 NaN 的结果一致）。 */
-  cmp(op, a, b) {
-    const pred = { '<': 'olt', '<=': 'ole', '>': 'ogt', '>=': 'oge', '==': 'oeq', '!=': 'une' }[op];
-    return this.fromMask(this.emit(`fcmp ${pred} ${LL_VEC} ${a}, ${b}`));
-  }
-
-  /** 一个表达式 -> 分量数组（每格一段 `<8 x float>` 的值文本）。 */
+  /** 一个表达式 -> 分量数组（每格一个 `{ v, t }`）。 */
   expr(e) {
     if (e.k === 'lit') {
-      if (e.ty.k === 'bool') return [llSplat(e.v ? 1 : 0)];
-      return [llSplat(Number(e.v))];
+      if (e.ty.k === 'bool') return [llB(e.v ? true : false)];
+      if (e.ty.k === 'int') return [llI(String(e.v))];
+      return [llF(Number(e.v))];
     }
     if (e.k === 'ref') return this.find(e.name);
     if (e.k === 'swizzle') {
@@ -165,126 +296,142 @@ class GlslLlvmEmitter {
       return out;
     }
     if (e.k === 'field') {
-      /* 结构体的成员（施工图 B13）：分量表里连着的那一段，起始格号由检查那一侧算好放在
-       * `at` 上。与 `lower.js` 那条是同一个切片，只是这边每格是 `<8 x float>`。 */
+      /* 结构体的成员（B13）：分量表里连着的那一段，起始格号由检查那一侧算好放在 `at` 上。 */
       const subj = this.expr(e.of);
       return subj.slice(e.at, e.at + llNComp(e.ty));
     }
-    if (e.k === 'aindex') {
-      /* 数组取一格（施工图 B14）。常量下标是切片；**变量下标是 select 链** ——
-       * 这一层与 `lower.js` 那边的 `if` + `set` 是同一条决策落在两种形状上：
-       * SoA 下 8 道各自的 `i` 不一样，分支跳不了，只能每格都算一次 `select`。 */
-      const subj = this.expr(e.of);
-      const w = llNComp(e.ty);
-      if (e.at.k === 'lit') return subj.slice(e.at.v * w, e.at.v * w + w);
-      const idx = this.expr(e.at)[0];
-      const acc = [];
-      for (let j = 0; j < w; j++) acc.push(llSplat(0));
-      for (let k = 0; k < e.of.ty.n; k++) {
-        /* `int` 在这条路上就是「值恰好是整数的 float」，所以下标比较用 `fcmp oeq`。 */
-        const m = this.emit(`fcmp oeq ${LL_VEC} ${idx}, ${llSplat(k)}`);
-        for (let j = 0; j < w; j++) {
-          acc[j] = this.emit(`select <${GLSL_LANES} x i1> ${m}, ${LL_VEC} ${subj[k * w + j]}, ${LL_VEC} ${acc[j]}`);
-        }
-      }
-      return acc;
-    }
+    if (e.k === 'aindex') return this.aindex(e);
     if (e.k === 'construct') {
-      const out = [];
-      for (const a of e.args) for (const c of this.expr(a)) out.push(c);
-      return out;
+      /* 构造是「按源码次序把实参的分量接起来」，但**每一格要按目标类型摆正** ——
+       * `ivec2(1.0, 2.0)` 的两格是 int。检查那一侧已经把类型定好了，这儿只做转换。 */
+      const raw = [];
+      for (const a of e.args) for (const c of this.expr(a)) raw.push(c);
+      return this.fit(raw, e.ty);
     }
     if (e.k === 'cast' || e.k === 'convert') {
-      /* 整数在这条路上是「值恰好是整数的 `<8 x float>`」，所以 `float(i)` 一条指令都不用。
-       * 反过来 `int(x)` **要真截一次**：GLSL 5.4.1 是往**零**的方向截，而 f32 里
-       * 1.7 与 1.0 是两个不同的位模式 —— 不截的话下标比较（`fcmp oeq idx, 1.0`）
-       * 与参照实现那边的 `toint` 会给出不同的答案。用 `llvm.trunc`（往零，不是 floor）。
-       *
-       * bool 那两个方向都不用发指令：`float(b)` 要的 1.0/0.0 正好就是 float-bool 的
-       * 表示；`bool(x)` 只有 `x` 不是 0.0/1.0 时才要归一 —— 那一条走 `mask` 再回来。 */
       const v = this.expr(e.of);
-      if (e.ty.k === 'bool' && e.of.ty !== undefined && e.of.ty.k !== 'bool') {
-        return v.map((c) => this.fromMask(this.mask(c)));
-      }
-      if (e.ty.k === 'int' && e.of.ty !== undefined && e.of.ty.k === 'float') {
-        this.need.add('llvm.trunc');
-        return v.map((c) => this.emit(`call ${LL_VEC} @llvm.trunc.v${GLSL_LANES}f32(${LL_VEC} ${c})`));
-      }
-      return v;
+      return this.fit(v, e.ty);
     }
-    if (e.k === 'neg') {
-      return this.expr(e.a).map((c) => this.emit(`fneg ${LL_VEC} ${c}`));
+    if (e.k === 'neg') return this.expr(e.a).map((c) => this.neg(c));
+    if (e.k === 'not') {
+      /* `!b` —— i1 上的 `xor … true`。上一版是 `1 - x`（float-bool 那套的残留）。 */
+      const a = this.toB(this.expr(e.a)[0]);
+      return [this.emit(`xor ${LL_B} ${a.v}, ${llB(true).v}`, 'b')];
     }
-    if (e.k === 'bin') {
-      /* 比较与逻辑：结果是 float-bool（见 `mask`/`cmp` 上面那段）。
-       * `&&`/`||` 在这里**两边都算** —— SIMD 上没有短路这回事（llvmpipe 也一样：
-       * 两支都算、靠掩码取）。值只取 0.0/1.0，所以 `*`/`max` 就是与/或。 */
-      if (e.op === '<' || e.op === '<=' || e.op === '>' || e.op === '>='
-        || e.op === '==' || e.op === '!=') {
-        const a = this.expr(e.a);
-        const b = this.expr(e.b);
-        if (a.length === 1 && b.length === 1) return [this.cmp(e.op, a[0], b[0])];
-        /* 向量的 `==`/`!=` 回一个标量 bool：逐格比完折起来（`==` 用与、`!=` 用或）。 */
-        const n = Math.max(a.length, b.length);
-        let acc = null;
-        for (let i = 0; i < n; i++) {
-          const c = this.cmp(e.op, a.length === 1 ? a[0] : a[i], b.length === 1 ? b[0] : b[i]);
-          acc = acc === null ? c
-            : (e.op === '==' ? this.bin('*', acc, c) : this.call1('llvm.maxnum', [acc, c]));
-        }
-        return [acc];
-      }
-      if (e.op === '&&') {
-        return [this.bin('*', this.expr(e.a)[0], this.expr(e.b)[0])];
-      }
-      if (e.op === '||') {
-        return [this.call1('llvm.maxnum', [this.expr(e.a)[0], this.expr(e.b)[0]])];
-      }
-      if (e.op === '^^') {
-        return [this.cmp('!=', this.expr(e.a)[0], this.expr(e.b)[0])];
-      }
-      if (e.op !== '+' && e.op !== '-' && e.op !== '*' && e.op !== '/') {
-        throw new OmniError(`glsl/llvm: 这一片只收 + - * / 与比较、逻辑，给的是 ${e.op}`);
-      }
-      const a = this.expr(e.a);
-      const b = this.expr(e.b);
-      const n = Math.max(a.length, b.length);
-      const out = [];
-      for (let i = 0; i < n; i++) {
-        out.push(this.bin(e.op, a.length === 1 ? a[0] : a[i], b.length === 1 ? b[0] : b[i]));
-      }
-      return out;
+    if (e.k === 'bnot') {
+      /* `~x` —— 整数上的 `xor … -1`。上一版根本收不了（int 是 float）。 */
+      const a = this.toI(this.expr(e.a)[0]);
+      return [this.emit(`xor ${LL_I} ${a.v}, ${llI(-1).v}`, 'i')];
     }
-    if (e.k === 'not') return [this.bin('-', llSplat(1), this.expr(e.a)[0])];
+    if (e.k === 'bin') return this.bin(e);
     if (e.k === 'sel') {
-      /* `c ? a : b` -> 一条 `select`。**两支都算** —— 与 `lower.js` 那条路不同
-       * （那边刻意只算一支，理由写在它的 `sel()` 头上）。这一层没得选：8 道里可能
-       * 有的走这支、有的走那支。所以「不该走的那一支里有除零」在快路上会真的算出
-       * Inf/NaN —— 但 `select` 是逐道取值，算出来的那一格不会被选中，传不出去。 */
-      const m = this.mask(this.expr(e.c)[0]);
+      /* `c ? a : b` -> 一条 `select`。**两支都算** —— 8 道里可能有的走这支、有的走那支，
+       * 所以"不该走的那支里有除零"会真的算出 Inf/NaN，但那一格选不中，传不出去。 */
+      const m = this.expr(e.c)[0];
       const a = this.expr(e.a);
       const b = this.expr(e.b);
-      const n = Math.max(a.length, b.length);
+      const n = a.length > b.length ? a.length : b.length;
       const out = [];
       for (let i = 0; i < n; i++) {
-        out.push(this.emit(`select <${GLSL_LANES} x i1> ${m}, `
-          + `${LL_VEC} ${a.length === 1 ? a[0] : a[i]}, ${LL_VEC} ${b.length === 1 ? b[0] : b[i]}`));
+        out.push(this.select(m, a.length === 1 ? a[0] : a[i], b.length === 1 ? b[0] : b[i]));
       }
       return out;
     }
     if (e.k === 'builtin') return this.builtin(e);
     if (e.k === 'bits') {
-      /* 位转换（规范 8.4）在快路上还没接（ADR-0019 路 3）：这一层每格是 `<8 x float>`，
-       * 而 `int` 在这条路上是「值恰好是整数的 float」—— 位模式那一步要的是真
-       * `<8 x i32>`，所以要先给分量带一个类型标记。**明着骂**而不是悄悄当恒等：
-       * 悄悄过去的结果是一张安静地不一样的图（与 `int(x)` 那个旧 bug 同一个形状）。 */
-      throw new OmniError(`glsl/llvm: ${e.name} 还没接（ADR-0019 路 3：快路的分量要先带`
-        + ' float / i32 的类型标记，才能落成 bitcast）');
+      /* 位转换（规范 8.4）—— **一条 `bitcast`**。这就是决策十第 1 步兑的钱：上一版这儿
+       * 只能骂 NYI，因为 `int` 不是真的 `<8 x i32>`。
+       *
+       * 宽度这一格与参照腿**不同**（那边是 f64/i64，见 `check.js` 的注释）：这一层是
+       * f32/i32，正好是规范说的 32 位。两边对着两张不同的参考图。 */
+      const a = this.expr(e.args[0]);
+      if (e.name === 'floatBitsToInt') {
+        return a.map((c) => this.emit(`bitcast ${LL_F} ${this.toF(c).v} to ${LL_I}`, 'i'));
+      }
+      return a.map((c) => this.emit(`bitcast ${LL_I} ${this.toI(c).v} to ${LL_F}`, 'f'));
     }
     /* 赋值是**表达式**（`fragColor = …` 出来是 `{k:'expr', e:{k:'assign'}}`）。 */
     if (e.k === 'assign') return this.assign(e);
-
     throw new OmniError(`glsl/llvm: 这一片收不了的表达式 ${e.k}`);
+  }
+
+  /** 把一串分量按目标类型逐格摆正（构造与转换都走这一处）。 */
+  fit(comps, ty) {
+    const want = llCompTys(ty);
+    const out = [];
+    for (let i = 0; i < comps.length; i++) {
+      const w = want.length === 1 ? want[0] : want[i];
+      const c = comps[i];
+      out.push(w === 'f' ? this.toF(c) : w === 'i' ? this.toI(c) : this.toB(c));
+    }
+    return out;
+  }
+
+  /** 数组取一格（B14）。常量下标是切片；变量下标是 select 链（8 道的下标不一样）。 */
+  aindex(e) {
+    const subj = this.expr(e.of);
+    const w = llNComp(e.ty);
+    if (e.at.k === 'lit') return subj.slice(e.at.v * w, e.at.v * w + w);
+    const idx = this.toI(this.expr(e.at)[0]);
+    const cts = llCompTys(e.ty);
+    const acc = [];
+    for (let j = 0; j < w; j++) acc.push(llZero(cts[j]));
+    for (let k = 0; k < e.of.ty.n; k++) {
+      /* 下标现在是**真整数**，所以这儿是 `icmp eq` —— 上一版用 `fcmp oeq` 是因为
+       * 那时候 `int` 是 float，而那正是 `int(x)` 那个 bug 的同一个根。 */
+      const m = this.emit(`icmp eq ${LL_I} ${idx.v}, ${llI(k).v}`, 'b');
+      for (let j = 0; j < w; j++) acc[j] = this.select(m, subj[k * w + j], acc[j]);
+    }
+    return acc;
+  }
+
+  bin(e) {
+    const op = e.op;
+    if (op === '<' || op === '<=' || op === '>' || op === '>='
+      || op === '==' || op === '!=') {
+      const a = this.expr(e.a);
+      const b = this.expr(e.b);
+      if (a.length === 1 && b.length === 1) return [this.cmp(op, a[0], b[0])];
+      /* 向量的 `==`/`!=` 回**一个** bool（规范 5.9）：逐格比完折起来。
+       * 逐格出掩码的是 `equal`/`notEqual` 那一族，不是这儿。 */
+      const n = a.length > b.length ? a.length : b.length;
+      let acc = null;
+      for (let i = 0; i < n; i++) {
+        const c = this.cmp(op, a.length === 1 ? a[0] : a[i], b.length === 1 ? b[0] : b[i]);
+        acc = acc === null ? c : this.logic(op === '==' ? '&&' : '||', acc, c);
+      }
+      return [acc];
+    }
+    if (op === '&&' || op === '||' || op === '^^') {
+      return [this.logic(op, this.expr(e.a)[0], this.expr(e.b)[0])];
+    }
+    if (op === '&' || op === '|' || op === '^' || op === '<<' || op === '>>') {
+      /* 位运算与移位（规范 5.9，只对整数）。上一版一条都收不了。
+       * 移位用**算术**右移（`ashr`）—— GLSL 的 `int` 是有符号的。 */
+      const a = this.expr(e.a);
+      const b = this.expr(e.b);
+      const n = a.length > b.length ? a.length : b.length;
+      const ins = op === '&' ? 'and' : op === '|' ? 'or' : op === '^' ? 'xor'
+        : op === '<<' ? 'shl' : 'ashr';
+      const out = [];
+      for (let i = 0; i < n; i++) {
+        const x = this.toI(a.length === 1 ? a[0] : a[i]);
+        const y = this.toI(b.length === 1 ? b[0] : b[i]);
+        out.push(this.emit(`${ins} ${LL_I} ${x.v}, ${y.v}`, 'i'));
+      }
+      return out;
+    }
+    if (op !== '+' && op !== '-' && op !== '*' && op !== '/' && op !== '%') {
+      throw new OmniError(`glsl/llvm: 这一片收不了的算符 ${op}`);
+    }
+    const a = this.expr(e.a);
+    const b = this.expr(e.b);
+    const n = a.length > b.length ? a.length : b.length;
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      out.push(this.arith(op, a.length === 1 ? a[0] : a[i], b.length === 1 ? b[0] : b[i]));
+    }
+    return out;
   }
 
   builtin(e) {
@@ -297,6 +444,23 @@ class GlslLlvmEmitter {
      * **函数**粒度 + 按名字判的，箭头函数里出现 `i` 就会把这个函数里所有
      * `for (let i …)` 都骂一遍（量过：改个名字 13 条错变 9 条）。形参名错开就没这回事。 */
     const at = (ak, ai) => (args[ak].length === 1 ? args[ak][0] : args[ak][ai]);
+    /* 整数上的 `abs`/`min`/`max`（规范 8.3）：**不能**转成 float 再算 —— 那在大整数上
+     * 会掉精度。上一版没有这一支（int 就是 float，所以问题看不见）。 */
+    const isInt = args.length > 0 && args[0][0].t === 'i';
+    if (isInt && (name === 'abs' || name === 'min' || name === 'max')) {
+      const out = [];
+      for (let i = 0; i < wide; i++) {
+        if (name === 'abs') {
+          const x = at(0, i);
+          out.push(this.select(this.cmp('<', x, llI(0)), this.neg(x), x));
+        } else {
+          const x = at(0, i);
+          const y = at(1, i);
+          out.push(this.select(this.cmp(name === 'min' ? '<' : '>', x, y), x, y));
+        }
+      }
+      return out;
+    }
     const fn = LL_INTRIN.get(name);
     if (fn !== undefined) {
       const out = [];
@@ -314,15 +478,15 @@ class GlslLlvmEmitter {
       const b = name === 'dot' || name === 'distance' ? args[1] : null;
       let sum = null;
       for (let i = 0; i < a.length; i++) {
-        const x = name === 'distance' ? this.bin('-', a[i], b[i]) : a[i];
+        const x = name === 'distance' ? this.arith('-', a[i], b[i]) : a[i];
         const y = name === 'dot' ? b[i] : x;
-        const p = this.bin('*', x, y);
-        sum = sum === null ? p : this.bin('+', sum, p);
+        const p = this.arith('*', x, y);
+        sum = sum === null ? p : this.arith('+', sum, p);
       }
       return [name === 'dot' ? sum : this.call1('llvm.sqrt', [sum])];
     }
     if (name === 'fract') {
-      return args[0].map((c) => this.bin('-', c, this.call1('llvm.floor', [c])));
+      return args[0].map((c) => this.arith('-', c, this.call1('llvm.floor', [c])));
     }
     if (name === 'clamp') {
       const out = [];
@@ -336,54 +500,52 @@ class GlslLlvmEmitter {
       /* 照规范那个形状：`x*(1-a) + y*a`（不写成 x + (y-x)*a —— 浮点下不等价）。 */
       const out = [];
       for (let i = 0; i < wide; i++) {
-        const a0 = at(2, i);
-        const one = this.bin('-', llSplat(1), a0);
-        out.push(this.bin('+', this.bin('*', at(0, i), one), this.bin('*', at(1, i), a0)));
+        const a0 = this.toF(at(2, i));
+        const one = this.arith('-', llF(1), a0);
+        out.push(this.arith('+', this.arith('*', at(0, i), one), this.arith('*', at(1, i), a0)));
       }
       return out;
     }
     if (name === 'normalize') {
       let sum = null;
       for (const c of args[0]) {
-        const p = this.bin('*', c, c);
-        sum = sum === null ? p : this.bin('+', sum, p);
+        const p = this.arith('*', c, c);
+        sum = sum === null ? p : this.arith('+', sum, p);
       }
       const len = this.call1('llvm.sqrt', [sum]);
-      return args[0].map((c) => this.bin('/', c, len));
+      return args[0].map((c) => this.arith('/', c, len));
     }
     if (name === 'smoothstep') {
       const out = [];
       for (let i = 0; i < wide; i++) {
-        const num = this.bin('-', at(2, i), at(0, i));
-        const den = this.bin('-', at(1, i), at(0, i));
-        let t = this.bin('/', num, den);
-        t = this.call1('llvm.maxnum', [t, llSplat(0)]);
-        t = this.call1('llvm.minnum', [t, llSplat(1)]);
-        const tt = this.bin('*', t, t);
-        const three = this.bin('-', llSplat(3), this.bin('*', llSplat(2), t));
-        out.push(this.bin('*', tt, three));
+        const num = this.arith('-', at(2, i), at(0, i));
+        const den = this.arith('-', at(1, i), at(0, i));
+        let t = this.arith('/', num, den);
+        t = this.call1('llvm.maxnum', [t, llF(0)]);
+        t = this.call1('llvm.minnum', [t, llF(1)]);
+        const tt = this.arith('*', t, t);
+        const three = this.arith('-', llF(3), this.arith('*', llF(2), t));
+        out.push(this.arith('*', tt, three));
       }
       return out;
     }
     if (name === 'step') {
-      /* 掩码 + select：`x < edge ? 0 : 1`。这一片里唯一用到比较的地方。 */
+      /* 规范 8.3：`x < edge ? 0.0 : 1.0`。 */
       const out = [];
       for (let i = 0; i < wide; i++) {
-        const m = this.emit(`fcmp olt ${LL_VEC} ${at(1, i)}, ${at(0, i)}`);
-        out.push(this.emit(`select <${GLSL_LANES} x i1> ${m}, ${LL_VEC} ${llSplat(0)}, ${LL_VEC} ${llSplat(1)}`));
+        out.push(this.select(this.cmp('<', at(1, i), at(0, i)), llF(0), llF(1)));
       }
       return out;
     }
     if (name === 'isnan') {
       /* NaN 是唯一「无序于自己」的值 —— 一条 `fcmp uno`。 */
-      return args[0].map((c) => this.fromMask(this.emit(`fcmp uno ${LL_VEC} ${c}, ${c}`)));
+      return args[0].map((c) => this.emit(`fcmp uno ${LL_F} ${this.toF(c).v}, ${this.toF(c).v}`, 'b'));
     }
     if (name === 'isinf') {
       /* `|x| == +Inf`。参照实现那条路写的是 `x == x && (x-x) != 0` —— 那是因为方言的
        * `real` 是 f64，写死「最大有限值」会跟 f32 差一个数。这里宽度是定的（f32），
        * 直接与 +Inf 比，两条在数学上完全等价，所以对账门照旧成立。 */
-      return args[0].map((c) => this.fromMask(
-        this.emit(`fcmp oeq ${LL_VEC} ${this.call1('llvm.fabs', [c])}, ${llSplat(Infinity)}`)));
+      return args[0].map((c) => this.cmp('==', this.call1('llvm.fabs', [c]), llF(Infinity)));
     }
     const vcmp = { lessThan: '<', lessThanEqual: '<=', greaterThan: '>', greaterThanEqual: '>=', equal: '==', notEqual: '!=' }[name];
     if (vcmp !== undefined) {
@@ -394,14 +556,17 @@ class GlslLlvmEmitter {
     if (name === 'all' || name === 'any') {
       let acc = null;
       for (const c of args[0]) {
-        acc = acc === null ? c
-          : (name === 'all' ? this.bin('*', acc, c) : this.call1('llvm.maxnum', [acc, c]));
+        acc = acc === null ? this.toB(c) : this.logic(name === 'all' ? '&&' : '||', acc, c);
       }
-      return [acc === null ? llSplat(name === 'all' ? 1 : 0) : acc];
+      return [acc === null ? llB(name === 'all') : acc];
     }
-    if (name === 'not') return args[0].map((c) => this.bin('-', llSplat(1), c));
+    if (name === 'not') {
+      return args[0].map((c) => this.emit(`xor ${LL_B} ${this.toB(c).v}, ${llB(true).v}`, 'b'));
+    }
     throw new OmniError(`glsl/llvm: 这一片还没接的内建 ${name}`);
   }
+
+  /* ------------------------------------------------------------ 语句 */
 
   stmt(s) {
     if (s.k === 'empty') return;
@@ -418,13 +583,14 @@ class GlslLlvmEmitter {
       return;
     }
     if (s.k === 'decl') {
-      /* SSA：局部量就是「当前那几格值」。没有 `alloca` —— 这一片不收循环里的赋值，
-       * 所以不需要 phi（要收的时候连着循环一起做，见开工单第 2 步的「for 只收常量次数」）。 */
+      /* SSA：局部量就是「当前那几格值」。**还没有 `alloca`** —— 那是决策十第 3 步，
+       * 也是 `break`/`continue`/`return`/循环的前提。 */
       const n = llNComp(s.ty);
-      const vals = s.init === null ? null : this.expr(s.init);
+      const cts = llCompTys(s.ty);
+      const vals = s.init === null ? null : this.fit(this.expr(s.init), s.ty);
       const comps = [];
       for (let i = 0; i < n; i++) {
-        comps.push(vals === null ? llSplat(0) : (vals.length === 1 ? vals[0] : vals[i]));
+        comps.push(vals === null ? llZero(cts[i]) : (vals.length === 1 ? vals[0] : vals[i]));
       }
       this.bind(s.name, comps);
       return;
@@ -435,21 +601,16 @@ class GlslLlvmEmitter {
   }
 
   /**
-   * `if` —— **没有分支**，落成掩码 + `select`（llvmpipe 也是这么干的）。
+   * `if` —— 现在还是「掩码 + 快照两支的绑定再 select」。
    *
-   * 做法：算出掩码，两支各跑一遍（各自压一层作用域，所以支内的声明出不来），
-   * 然后把**两支之后不一样的那些绑定**逐分量 `select` 回来。
-   *
-   *   if (c) x = a; else x = b;   ->  %m = fcmp …；x = select %m, a, b
-   *
-   * 为什么必须两支都算：8 道里可能有的走这支、有的走那支。代价与语义都写在 `sel()`
-   * 上面那段里 —— 不该走的那支会真算出 Inf/NaN，但那一格选不中。
-   *
-   * `break`/`continue`/`return`/`discard` 在支里现在**明着不收**：那些要的是「掩码
-   * 一路带下去」（llvmpipe 的 exec mask 栈），不是一条 `select` 能兑的。循环也一样。
+   * **这一段是决策十第 3–4 步要换掉的**：llvmpipe 的做法是可变量都在 `alloca` 里、
+   * 写走 `lp_exec_mask_store`（`lp_bld_ir_common.c:200-224`），`if` 只是往掩码栈上压
+   * 一层（`lp_bld_nir_soa.c:2030-2051`），外面再套一条「整块没人活着就跳过」的真分支。
+   * 那套架构里 `break`/`continue`/`return`/循环是同一个机制的不同用法；这套里它们
+   * **结构上接不了** —— 值在 SSA 里，没有一个能被掩码盖住的落点。
    */
   ifStmt(s) {
-    const m = this.mask(this.expr(s.c)[0]);
+    const m = this.toB(this.expr(s.c)[0]);
     const snap = () => {
       const out = new Map();
       for (let i = 0; i < this.scopes.length; i++) {
@@ -474,13 +635,12 @@ class GlslLlvmEmitter {
     };
     const yes = runBranch(s.then);
     const no = runBranch(s.else);
-    /* 合并：两支给的分量数组一样（同一个字符串）就不发指令 —— `if` 只改了几格的话，
+    /* 合并：两支给的分量一样（同一个对象）就不发指令 —— `if` 只改了几格的话，
      * 别的名字一条 `select` 都不该多出来。 */
     for (const [key, tv] of yes) {
       const ev = no.get(key);
       if (ev === undefined || ev === tv) continue;
-      const merged = tv.map((c, i) => (c === ev[i] ? c
-        : this.emit(`select <${GLSL_LANES} x i1> ${m}, ${LL_VEC} ${c}, ${LL_VEC} ${ev[i]}`)));
+      const merged = tv.map((c, i) => (c === ev[i] ? c : this.select(m, c, ev[i])));
       const cut = key.indexOf('\u0000');
       this.scopes[Number(key.slice(0, cut))].set(key.slice(cut + 1), merged);
     }
@@ -488,7 +648,7 @@ class GlslLlvmEmitter {
 
   assign(e) {
     if (e.op !== '=') throw new OmniError(`glsl/llvm: 这一片只收 =，给的是 ${e.op}`);
-    const vals = this.expr(e.rhs);
+    const vals = this.fit(this.expr(e.rhs), e.ty === undefined ? e.lhs.ty : e.ty);
     if (e.lhs.k === 'ref') {
       const cur = this.find(e.lhs.name);
       const next = cur.map((_, i) => (vals.length === 1 ? vals[0] : vals[i]));
@@ -518,13 +678,12 @@ class GlslLlvmEmitter {
       } else {
         /* 变量下标：**每一格都要碰**（8 道里选中的那一道才换）。这是「不落成内存」
          * 那条决策的代价，也是 `check.js` 里那条 32 格上限存在的理由。 */
-        const idx = this.expr(ai.at)[0];
+        const idx = this.toI(this.expr(ai.at)[0]);
         for (let k = 0; k < ai.of.ty.n; k++) {
-          const m = this.emit(`fcmp oeq ${LL_VEC} ${idx}, ${llSplat(k)}`);
+          const m = this.emit(`icmp eq ${LL_I} ${idx.v}, ${llI(k).v}`, 'b');
           for (let li = 0; li < lanes.length; li++) {
             const slot = k * w + lanes[li];
-            const v = vals.length === 1 ? vals[0] : vals[li];
-            cur[slot] = this.emit(`select <${GLSL_LANES} x i1> ${m}, ${LL_VEC} ${v}, ${LL_VEC} ${cur[slot]}`);
+            cur[slot] = this.select(m, vals.length === 1 ? vals[0] : vals[li], cur[slot]);
           }
         }
       }
@@ -547,6 +706,9 @@ class GlslLlvmEmitter {
    * 或者走内存，而「IR 里的 `<8 x float>` 参数」与「C 里的 `ext_vector_type(8)` 参数」
    * 在这一格上不必一致。指针没有这个问题：ABI 面只剩一个地址。
    * 入口多几条 `load` —— 一批 8 个像素，摊下来看不见。
+   *
+   * **缓冲一律是 `<8 x float>`**（驱动那侧就是 `float` 数组）。所以 int/bool 的 uniform
+   * 在入口处要转一次 —— 那不是"表示的妥协"，是 ABI：驱动递进来的字节就是 float。
    */
   run() {
     const m = this.mod;
@@ -555,37 +717,46 @@ class GlslLlvmEmitter {
     if (m.funcs.length !== 1 || m.funcs[0].name !== 'main') {
       throw new OmniError('glsl/llvm: 这一片只收「只有 main」的着色器（自定义函数下一片）');
     }
-    /* 入口那几条 load：`in` 的第 0/1 格是 x/y，后面依次是每个 uniform 的每一格。 */
     /* 形参**刻意不叫 `i`**：见 `builtin()` 里 `at` 上面那段（闭包捕获那条检查是按
      * 函数粒度 + 按名字判的）。 */
     const load = (slotIx) => {
-      const p = slotIx === 0 ? '%in' : this.emit(`getelementptr ${LL_VEC}, ptr %in, i64 ${slotIx}`);
-      return this.emit(`load ${LL_VEC}, ptr ${p}, align 4`);
+      const p = slotIx === 0 ? '%in' : this.emit(`getelementptr ${LL_F}, ptr %in, i64 ${slotIx}`, 'f').v;
+      return this.emit(`load ${LL_F}, ptr ${p}, align 4`, 'f');
     };
     let slot = 0;
     const x = load(slot++);
     const y = load(slot++);
-    this.bind('gl_FragCoord', [x, y, llSplat(0), llSplat(1)]);
+    this.bind('gl_FragCoord', [x, y, llF(0), llF(1)]);
     for (const u of m.uniforms) {
+      const cts = llCompTys(u.ty);
       const comps = [];
-      for (let i = 0; i < llNComp(u.ty); i++) comps.push(load(slot++));
+      for (let i = 0; i < llNComp(u.ty); i++) {
+        const raw = load(slot++);
+        comps.push(cts[i] === 'f' ? raw : cts[i] === 'i' ? this.toI(raw) : this.toB(raw));
+      }
       this.bind(u.name, comps);
     }
     for (const c of m.consts) this.bind(c.name, this.expr(c.init));
     const o = m.outs[0];
     const on = llNComp(o.ty);
-    this.bind(o.name, new Array(on).fill(llSplat(0)));
+    const zeros = [];
+    for (let i = 0; i < on; i++) zeros.push(llF(0));
+    this.bind(o.name, zeros);
     this.stmt(m.funcs[0].body);
-    /* 写回：四格连着存。 */
+    /* 写回：四格连着存，都按 float 存（缓冲的类型是定的）。 */
     const vals = this.find(o.name);
     for (let i = 0; i < on; i++) {
-      const p = i === 0 ? '%out' : this.emit(`getelementptr ${LL_VEC}, ptr %out, i64 ${i}`);
-      this.body.push(`  store ${LL_VEC} ${vals[i]}, ptr ${p}, align 4`);
+      const p = i === 0 ? '%out' : this.emit(`getelementptr ${LL_F}, ptr %out, i64 ${i}`, 'f').v;
+      this.body.push(`  store ${LL_F} ${this.toF(vals[i]).v}, ptr ${p}, align 4`);
     }
-    const decls = [...this.need].sort()
-      .map((f) => `declare ${LL_VEC} @${f}.v${GLSL_LANES}f32(${new Array(f === 'llvm.pow' || f === 'llvm.minnum' || f === 'llvm.maxnum' ? 2 : 1).fill(LL_VEC).join(', ')})`);
-    return `; GLSL -> LLVM IR（${GLSL_LANES} 道 f32 SoA）—— ADR-0019 决策六快路\n`
-      + `; in = [x, y, uniform 每一格…]；out = [r, g, b, a]，都是 ${LL_VEC}\n`
+    const decls = [...this.need].sort().map((f) => {
+      const nArgs = LL_INTRIN2.has(f) ? 2 : 1;
+      const ps = [];
+      for (let i = 0; i < nArgs; i++) ps.push(LL_F);
+      return `declare ${LL_F} @${f}.v${GLSL_LANES}f32(${ps.join(', ')})`;
+    });
+    return `; GLSL -> LLVM IR（${GLSL_LANES} 道 SoA，分量带类型 f32/i32/i1）—— ADR-0019 决策十\n`
+      + `; in = [x, y, uniform 每一格…]；out = [r, g, b, a]，缓冲都是 ${LL_F}\n`
       + `define void @glsl_frag8(ptr %in, ptr %out) {\n${this.body.join('\n')}\n  ret void\n}\n\n`
       + `${decls.join('\n')}\n`;
   }

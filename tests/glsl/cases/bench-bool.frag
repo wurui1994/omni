@@ -59,11 +59,26 @@ void main() {
     tab[pick].y = 0.875;               // 变量下标 + swizzle 当左值：只动那一格
     float av = tab[pick].x + tab[pick].y * 0.5 + tab[1].x * 0.25 + tab[0].y * 0.125;
 
-    // float -> int 是**真截一次**（GLSL 5.4.1：往零）。快路上 int 是「值恰好是整数的
-    // float」，所以这一格要发 `llvm.trunc` —— 不发的话 1.7 会当下标去比 1.0，
-    // 与参照实现那边的 `toint` 给出不同的答案。
+    // float -> int 是**真截一次**（GLSL 5.4.1：往零）。决策十第 1 步之后这在快路上是
+    // 一条 `fptosi` —— 之前是「值恰好是整数的 float」，所以这一格一直是错的。
     int cut = int(uv.x * 2.9);
     float cv = tab[cut].x + float(cut) * 0.0625;
 
-    fragColor = vec4(checker, min(safe, 1.0), flags + band, sv + av * 0.5 + cv * 0.25);
+    // 整数那一族（决策十第 1 步兑的钱）：分量带类型之后 `%`、位运算、移位、`~` 才落得
+    // 下来。上一版这些在快路上一条都收不了（int 是 float，位模式无从谈起）。
+    int ia = int(uv.y * 7.0);
+    int ib = ia % 3;                    // srem
+    int ic = (ia << 2) | 1;             // shl / or
+    int id = ic & 6;                    // and
+    int ie = ~ia ^ 5;                   // xor
+    int ig = ic >> 1;                   // ashr（GLSL 的 int 是有符号的）
+    float ivv = float(ib) * 0.5 + float(id) * 0.25
+        + float(ie) * 0.125 + float(ig) * 0.0625;
+
+    // 位转换来回一趟。**这一条与宽度无关**，所以四条路都该给同一个数 —— 参照腿是
+    // f64/i64、快路是 f32/i32，但「转过去再转回来」两边都是恒等。
+    float rt = intBitsToFloat(floatBitsToInt(uv.y)) - uv.y;
+
+    fragColor = vec4(checker, min(safe, 1.0), flags + band,
+        sv + av * 0.5 + cv * 0.25 + ivv * 0.03125 + rt);
 }
