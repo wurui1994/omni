@@ -9654,3 +9654,41 @@ grestore
 cardioid 那一笔两边都该发或都不该发那三句。
 
 <!-- ADR-0014 近似单位的笔变换-END -->
+
+### 第十八刀（量清，未改）：interpolate1 —— 六张图挤进了一份产物（`shipout("名字")` 没落盘）
+
+矢量那七份里最扎眼的是 `interpolate1`（token 6300 vs 59678）。数一数两边的算符：
+
+```
+              参考    我们
+curveto          1       8
+lineto         330    2847
+stroke          71     781
+newpath         79     843
+moveto          92     995
+%%BoundingBox  178 274 433 517      0 291 613 500
+```
+
+**先纠一句自己的话**：一开始读成"我们把一条折线拆成了几百笔"，不对 —— 折线段数（lineto）
+与笔数（stroke）是**同比例**涨的（8.6 倍 / 11 倍），不是一笔拆多笔。
+
+真凶是别的：这个例子里有**六次 `shipout("runge1")` … `shipout("runge6")`**。asy 的规矩是
+`shipout(prefix)` 把那张图写成 `prefix.eps`，而 `-o interpolate1` 那一份只装**退出时那次
+隐式 shipout**（所以参考只有一张图：71 笔、界 178..433 宽 255）。我们这一侧
+`shipout(prefix)` 的 prefix **没落到盘上**，六张图全顺着同一个输出流叠出来了（781 笔、
+界 0..613）。
+
+所以要改的是输出那一层：`shipout(prefix)` 该按 asy 的规矩写 `<prefix>.<格式>`，
+主输出只留隐式那一次。仓库里带 `shipout("…")` 的例子有四个
+（interpolate1 / strokepath / triads / xstitch），这一格一改四个一起动。
+
+**试改了一半，退了**（半成品不留）。改法是给 `asy__shipbegin` 加一格"这一张要去哪儿"，
+在 `_shipout` 里按 `prefix + "." + 格式` 传进去。跑出来两条没对上，都要在下一刀里一起收：
+
+- **落盘的名字少了后缀**：`runge1.` 而不是 `runge1.eps` —— 隐式那一趟的 `asy__outformat()`
+  回的是空串（EPS 是兜底那一档，见那一格的注释），拼名字时得先把空串兜成 `eps`。
+- **stdout 那一份没变**（还是 781 笔、界 0..613）：plain 的 `shipout(prefix, pic, …)` 走的是
+  **picture 那一路**（`shipout(picture)`，asy_builtins.asy:3155 一带），不是 `_shipout(frame)`。
+  prefix 要在那一路上也接住 —— 两条路都得改，不然只是多写了几个空文件。
+
+<!-- ADR-0014 interpolate1把折线拆成几百笔-END -->
