@@ -128,14 +128,119 @@ static void bench(frag8_fn frag, int size, int reps) {
   printf("ms %.3f\nMPix/s %.2f\nsum %llu\n", best, (double)size * size / best / 1000.0, sum);
 }
 
+/* `glsl_frag8` -> `glsl_frag8_<idx>`。
+ *
+ * 常驻宿主要在**同一个 LLJIT** 里编很多个变体，而每份 IR 里的入口都叫 `glsl_frag8` ——
+ * 同名符号加第二遍就是重复定义。真 JIT 里变体本来就有自己的名字（llvmpipe 是「按状态
+ * 做键」），所以这里给每个变体一个唯一名，而不是去开一堆 JITDylib：
+ * 后者要走 ExecutionSession 那套异步 lookup，代价与收益不成比例。
+ *
+ * 只做**记号级**替换：这个名字在我们发射的 IR 里只出现在 `define` 那一行。 */
+static char *rename_frag(const char *src, size_t len, int idx, size_t *out_len) {
+  const char *pat = "glsl_frag8";
+  const size_t plen = 10;
+  char suffix[24];
+  snprintf(suffix, sizeof(suffix), "glsl_frag8_%d", idx);
+  const size_t slen = strlen(suffix);
+  /* 每处最多长 slen - plen 字节，按最坏情况一次分配够。 */
+  char *out = (char *)malloc(len + (len / plen + 1) * (slen - plen) + 1);
+  if (out == NULL) return NULL;
+  size_t o = 0;
+  for (size_t i = 0; i < len;) {
+    if (i + plen <= len && memcmp(src + i, pat, plen) == 0) {
+      memcpy(out + o, suffix, slen);
+      o += slen;
+      i += plen;
+      continue;
+    }
+    out[o++] = src[i++];
+  }
+  out[o] = 0;
+  *out_len = o;
+  return out;
+}
+
+/* 一份 IR -> 一个函数指针。`*compile_ms` 只量 Lookup（ORC 惰性物化，编译在那儿）。 */
+static frag8_fn jit_variant(LLVMOrcLLJITRef jit, LLVMOrcJITDylibRef jd,
+                            const char *ir, size_t len, int idx,
+                            double *parse_ms, double *compile_ms) {
+  size_t rlen = 0;
+  char *renamed = idx < 0 ? NULL : rename_frag(ir, len, idx, &rlen);
+  const char *body = renamed == NULL ? ir : renamed;
+  const size_t blen = renamed == NULL ? len : rlen;
+
+  LLVMContextRef ctx = LLVMContextCreate();
+  /* MemoryBuffer 接管这段字节的所有权（不复制），所以不能提前 free。 */
+  LLVMMemoryBufferRef mb = LLVMCreateMemoryBufferWithMemoryRange((char *)body, blen, "<stdin>", 0);
+  LLVMModuleRef mod = NULL;
+  char *msg = NULL;
+  double t0 = now_ms();
+  if (LLVMParseIRInContext(ctx, mb, &mod, &msg) != 0) {
+    fprintf(stderr, "omni-glsl-jit: 不是合法 IR: %s\n", msg == NULL ? "?" : msg);
+    LLVMDisposeMessage(msg);
+    return NULL;
+  }
+  *parse_ms = now_ms() - t0;
+
+  LLVMOrcThreadSafeContextRef tsc = LLVMOrcCreateNewThreadSafeContext();
+  LLVMOrcThreadSafeModuleRef tsm = LLVMOrcCreateNewThreadSafeModule(mod, tsc);
+  LLVMErrorRef err = LLVMOrcLLJITAddLLVMIRModule(jit, jd, tsm);
+  if (err != NULL) { fail_err(err, "cannot add module"); return NULL; }
+
+  char sym[24];
+  if (idx < 0) snprintf(sym, sizeof(sym), "glsl_frag8");
+  else snprintf(sym, sizeof(sym), "glsl_frag8_%d", idx);
+  LLVMOrcJITTargetAddress addr = 0;
+  double t1 = now_ms();
+  err = LLVMOrcLLJITLookup(jit, &addr, sym);
+  if (err != NULL) { fail_err(err, "cannot materialize"); return NULL; }
+  *compile_ms = now_ms() - t1;
+  return (frag8_fn)addr;
+}
+
+/**
+ * 常驻宿主：**一次进程，连着吃很多份 IR**。这才是 llvmpipe 的真实形态 —— 它在 GL 驱动
+ * 里活着，用户改一个开关就要一个新变体。
+ *
+ * 协议（stdin）：重复的 `<十进制字节数>\n<那么多字节 IR>`，读到 EOF 为止。
+ * 每份印一行 `variant I compile_ms X parse_ms Y`，末尾印 `variants N`。
+ */
+static int serve(LLVMOrcLLJITRef jit, LLVMOrcJITDylibRef jd) {
+  int idx = 0;
+  for (;;) {
+    long need = 0;
+    if (scanf("%ld", &need) != 1) break;
+    int ch = getchar();                      /* 吃掉长度后面那个换行 */
+    if (ch == EOF) break;
+    if (need <= 0) break;
+    char *ir = (char *)malloc((size_t)need + 1);
+    if (ir == NULL) return 71;
+    size_t got = fread(ir, 1, (size_t)need, stdin);
+    if (got != (size_t)need) {
+      fprintf(stderr, "omni-glsl-jit: 第 %d 份 IR 只读到 %zu / %ld 字节\n", idx, got, need);
+      return 66;
+    }
+    ir[need] = 0;
+    double pms = 0;
+    double cms = 0;
+    frag8_fn frag = jit_variant(jit, jd, ir, (size_t)need, idx, &pms, &cms);
+    if (frag == NULL) return 65;
+    /* 调一次，确认这个变体真的能跑（而且把「拿到的是活地址」这件事钉住）。 */
+    f8 in[4], out[4];
+    for (int l = 0; l < 8; l++) { in[0][l] = SX[l]; in[1][l] = SY[l]; }
+    in[2] = (f8)1024.0f;
+    in[3] = (f8)1024.0f;
+    frag(in, out);
+    printf("variant %d compile_ms %.3f parse_ms %.3f c0 %.9g\n", idx, cms, pms, (double)out[0][0]);
+    fflush(stdout);
+    idx++;
+  }
+  printf("variants %d\n", idx);
+  return 0;
+}
+
 int main(int argc, char **argv) {
   const char *mode = argc > 1 ? argv[1] : "--bench";
-  size_t len = 0;
-  char *text = slurp_stdin(&len);
-  if (text == NULL || len == 0) {
-    fprintf(stderr, "omni-glsl-jit: stdin 上没有 IR\n");
-    return 66;
-  }
 
   double t_init0 = now_ms();
   LLVMInitializeNativeTarget();
@@ -144,19 +249,6 @@ int main(int argc, char **argv) {
   LLVMErrorRef err = LLVMOrcCreateLLJIT(&jit, NULL);
   if (err != NULL) return fail_err(err, "cannot create LLJIT");
   double init_ms = now_ms() - t_init0;
-
-  LLVMContextRef ctx = LLVMContextCreate();
-  /* MemoryBuffer 接管 text 的所有权（不复制），所以不能提前 free。 */
-  LLVMMemoryBufferRef mb = LLVMCreateMemoryBufferWithMemoryRange(text, len, "<stdin>", 0);
-  LLVMModuleRef mod = NULL;
-  char *msg = NULL;
-  double t_parse0 = now_ms();
-  if (LLVMParseIRInContext(ctx, mb, &mod, &msg) != 0) {
-    fprintf(stderr, "omni-glsl-jit: stdin 上的不是合法 IR: %s\n", msg == NULL ? "?" : msg);
-    LLVMDisposeMessage(msg);
-    return 65;
-  }
-  double parse_ms = now_ms() - t_parse0;
 
   LLVMOrcJITDylibRef jd = LLVMOrcLLJITGetMainJITDylib(jit);
   LLVMOrcDefinitionGeneratorRef gen = NULL;
@@ -167,23 +259,27 @@ int main(int argc, char **argv) {
   if (err != NULL) return fail_err(err, "cannot create process symbol generator");
   LLVMOrcJITDylibAddGenerator(jd, gen);
 
-  LLVMOrcThreadSafeContextRef tsc = LLVMOrcCreateNewThreadSafeContext();
-  LLVMOrcThreadSafeModuleRef tsm = LLVMOrcCreateNewThreadSafeModule(mod, tsc);
-  err = LLVMOrcLLJITAddLLVMIRModule(jit, jd, tsm);
-  if (err != NULL) return fail_err(err, "cannot add module");
+  if (strcmp(mode, "--serve") == 0) {
+    fprintf(stderr, "init_ms %.3f\n", init_ms);
+    printf("init_ms %.3f\n", init_ms);
+    fflush(stdout);
+    return serve(jit, jd);
+  }
 
-  /* **这一句就是编译**（ORC 惰性物化），所以 `compile_ms` 只量它。 */
-  LLVMOrcJITTargetAddress addr = 0;
-  double t_c0 = now_ms();
-  err = LLVMOrcLLJITLookup(jit, &addr, "glsl_frag8");
-  if (err != NULL) return fail_err(err, "cannot materialize glsl_frag8");
-  double compile_ms = now_ms() - t_c0;
+  size_t len = 0;
+  char *text = slurp_stdin(&len);
+  if (text == NULL || len == 0) {
+    fprintf(stderr, "omni-glsl-jit: stdin 上没有 IR\n");
+    return 66;
+  }
+  double parse_ms = 0;
+  double compile_ms = 0;
+  /* 单份模式：`idx < 0` 表示不改名，符号照旧是 `glsl_frag8`。 */
+  frag8_fn frag = jit_variant(jit, jd, text, len, -1, &parse_ms, &compile_ms);
+  if (frag == NULL) return 65;
 
   fprintf(stderr, "init_ms %.3f\nparse_ms %.3f\ncompile_ms %.3f\n", init_ms, parse_ms, compile_ms);
   printf("compile_ms %.3f\n", compile_ms);
-
-  /* 按指针调用 —— 这一格才是与 llvmpipe 等效的地方。 */
-  frag8_fn frag = (frag8_fn)addr;
 
   if (strcmp(mode, "--samples") == 0) {
     samples(frag, argc > 2 ? (float)atoi(argv[2]) : 1024.0f);

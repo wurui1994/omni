@@ -416,6 +416,40 @@ if (lc === null) {
         + '    超了先看是不是发射的 IR 体量涨了 —— 成本跟机器码体量成正比。');
     }
     process.stdout.write(`  数    C 宿主 ${RES}²：${mp === null ? '?' : mp[1]} MPix/s（按指针调用，与 exec 一个二进制同一个数）\n`);
+
+    /* ---- 常驻宿主：一次进程连着吃 N 份 IR ------------------------------------------
+     *
+     * 这才是 llvmpipe 的真实形态 —— 它在 GL 驱动里活着，用户改一个开关就要一个新变体。
+     * 协议是「长度前缀 + IR 字节」重复 N 遍（见 `glsl_host.c` 的 `serve()`）。
+     * 每份 IR 里的 `glsl_frag8` 会被宿主改名成 `glsl_frag8_<i>` —— 同一个 LLJIT 里
+     * 同名符号加第二遍就是重复定义，而真 JIT 的变体本来就有自己的名字。
+     *
+     * **第 0 个不算**：那一趟是冷的（量到 40 ms，LLVM 的编译机器在热身）。
+     * 稳态是第 1 个往后那些，llvmpipe 付的也是稳态。 */
+    const N = 6;
+    let feed = '';
+    for (let i = 0; i < N; i++) feed += `${Buffer.byteLength(ir)}\n${ir}`;
+    const sv = spawnSync(host, ['--serve'], { input: feed, encoding: 'utf8', maxBuffer: 1 << 26 });
+    const lines = (sv.stdout ?? '').trim().split('\n');
+    const vs = lines.map((l) => /^variant (\d+) compile_ms (\S+) parse_ms (\S+) c0 (\S+)$/.exec(l)).filter(Boolean);
+    if (sv.status !== 0 || vs.length !== N) {
+      bad('常驻宿主跑不动', `    exit=${sv.status}、认出 ${vs.length}/${N} 个变体\n    ${(sv.stderr ?? '').trim().split('\n').slice(0, 4).join('\n    ')}`);
+    } else {
+      const c0s = new Set(vs.map((m) => m[4]));
+      if (c0s.size !== 1) bad('常驻宿主：各变体答案不一样', `    c0 出现了 ${[...c0s].join(' / ')}`);
+      else ok(`常驻宿主：${N} 个变体在**同一个进程**里各编各的，答案全同（c0 ${[...c0s][0]}）`);
+      const warm = vs.slice(1).map((m) => Number(m[2]));
+      const avg = warm.reduce((a, b) => a + b, 0) / warm.length;
+      const cold = Number(vs[0][2]);
+      if (avg <= BUDGET) {
+        ok(`常驻宿主稳态：每个变体 ${avg.toFixed(1)} ms（第 0 个冷的是 ${cold.toFixed(1)}）≤ 预算 ${BUDGET} ms`);
+      } else {
+        bad(`常驻宿主稳态：每个变体 ${avg.toFixed(1)} ms > 预算 ${BUDGET} ms`,
+          `    第 0 个（冷）是 ${cold.toFixed(1)} ms —— 稳态才是 llvmpipe 付的那个数。`);
+      }
+      const parses = vs.slice(1).map((m) => Number(m[3]));
+      process.stdout.write(`  数    常驻宿主解析 IR：第 0 份 ${vs[0][3]} ms、之后 ${Math.max(...parses).toFixed(3)} ms 以内（LLVM 的解析器也在热身）\n`);
+    }
   }
 }
 
