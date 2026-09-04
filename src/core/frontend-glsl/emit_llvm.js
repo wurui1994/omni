@@ -364,7 +364,60 @@ class GlslLlvmEmitter {
       return;
     }
     if (s.k === 'assign') { this.assign(s.e); return; }
+    if (s.k === 'if') { this.ifStmt(s); return; }
     throw new OmniError(`glsl/llvm: 这一片收不了的语句 ${s.k}`);
+  }
+
+  /**
+   * `if` —— **没有分支**，落成掩码 + `select`（llvmpipe 也是这么干的）。
+   *
+   * 做法：算出掩码，两支各跑一遍（各自压一层作用域，所以支内的声明出不来），
+   * 然后把**两支之后不一样的那些绑定**逐分量 `select` 回来。
+   *
+   *   if (c) x = a; else x = b;   ->  %m = fcmp …；x = select %m, a, b
+   *
+   * 为什么必须两支都算：8 道里可能有的走这支、有的走那支。代价与语义都写在 `sel()`
+   * 上面那段里 —— 不该走的那支会真算出 Inf/NaN，但那一格选不中。
+   *
+   * `break`/`continue`/`return`/`discard` 在支里现在**明着不收**：那些要的是「掩码
+   * 一路带下去」（llvmpipe 的 exec mask 栈），不是一条 `select` 能兑的。循环也一样。
+   */
+  ifStmt(s) {
+    const m = this.mask(this.expr(s.c)[0]);
+    const snap = () => {
+      const out = new Map();
+      for (let i = 0; i < this.scopes.length; i++) {
+        for (const [k, v] of this.scopes[i]) out.set(`${i}\u0000${k}`, v);
+      }
+      return out;
+    };
+    const put = (state) => {
+      for (const [key, v] of state) {
+        const cut = key.indexOf('\u0000');
+        this.scopes[Number(key.slice(0, cut))].set(key.slice(cut + 1), v);
+      }
+    };
+    const before = snap();
+    const runBranch = (sub) => {
+      this.scopes.push(new Map());
+      if (sub !== null && sub !== undefined) this.stmt(sub);
+      this.scopes.pop();
+      const st = snap();
+      put(before);
+      return st;
+    };
+    const yes = runBranch(s.then);
+    const no = runBranch(s.else);
+    /* 合并：两支给的分量数组一样（同一个字符串）就不发指令 —— `if` 只改了几格的话，
+     * 别的名字一条 `select` 都不该多出来。 */
+    for (const [key, tv] of yes) {
+      const ev = no.get(key);
+      if (ev === undefined || ev === tv) continue;
+      const merged = tv.map((c, i) => (c === ev[i] ? c
+        : this.emit(`select <${GLSL_LANES} x i1> ${m}, ${LL_VEC} ${c}, ${LL_VEC} ${ev[i]}`)));
+      const cut = key.indexOf('\u0000');
+      this.scopes[Number(key.slice(0, cut))].set(key.slice(cut + 1), merged);
+    }
   }
 
   assign(e) {

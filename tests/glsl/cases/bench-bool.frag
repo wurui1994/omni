@@ -5,8 +5,9 @@
 // `fast_driver.c` 那一版的 in 布局是钉死的，换签名就得连驱动一起改。
 //
 // 这一份刻意把每一种 bool 的来路都用上：比较、`&&`/`||`/`!`、`?:`、`isnan`/`isinf`、
-// `lessThan` 那一族与 `all`/`any`。NaN/Inf 从 `sqrt(-1)` 与 `-log(0)` 来（方言那条路上
-// 造不出它们，见 fns.js 里那一节）。
+// `lessThan` 那一族与 `all`/`any`，外加 `if` / `else if` / `else`（快路上落成掩码 +
+// `select`，没有分支）。NaN/Inf 从 `sqrt(-1)` 与 `-log(0)` 来（方言那条路上造不出它们，
+// 见 fns.js 里那一节）。
 out vec4 fragColor;
 uniform vec2 u_resolution;
 void main() {
@@ -30,5 +31,16 @@ void main() {
     bvec2 lt = lessThan(uv, vec2(0.75, 0.75));
     float band = all(lt) ? 0.75 : (any(lt) ? 0.5 : 0.25);
 
-    fragColor = vec4(checker, min(safe, 1.0), flags + band, 1.0);
+    // if / else if / else —— 快路上落成掩码 + select（没有分支）
+    float step2 = 0.0;
+    if (uv.x + uv.y > 1.5) {
+        step2 = 0.5;
+    } else if (uv.x > uv.y) {
+        float half2 = uv.x * 0.5;   // 支内的声明出不了这一支
+        step2 = half2;
+    } else {
+        step2 = 0.125;
+    }
+
+    fragColor = vec4(checker, min(safe, 1.0), flags + band, step2 + 0.5);
 }
