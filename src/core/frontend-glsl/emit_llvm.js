@@ -210,7 +210,8 @@ class GlslLlvmEmitter {
       return;
     }
     const old = this.emit(`load ${tt}, ptr ${b.ptrs[ix]}, align 32`, t);
-    const res = this.emit(`select ${LL_B} ${this.execMask.v}, ${tt} ${val.v}, ${tt} ${old.v}`, t);
+    const c = this.maskToI1(this.execMask);
+    const res = this.emit(`select ${LL_B} ${c.v}, ${tt} ${val.v}, ${tt} ${old.v}`, t);
     this.body.push(`  store ${tt} ${res.v}, ptr ${b.ptrs[ix]}, align 32`);
   }
 
@@ -222,7 +223,27 @@ class GlslLlvmEmitter {
    *
    * `break`/`cont`/`ret` 三层放在 `alloca` 里而不是 SSA 值里，因为它们要**跨迭代**活着
    * （循环回边那一侧读的是上一轮写进去的）。`cond` 不用，它进出 `if` 就还原。
+   *
+   * **掩码的类型是 `<8 x i32>`（全 1 / 全 0），不是 `<8 x i1>`** —— 照 llvmpipe 的
+   * `int_vec_type`（`lp_bld_ir_common.h:56`）。第一版图省事用了 i1，结果 `break` 之后
+   * 下一圈的掩码不生效（量出来的指纹：`jj` 对、`cnt` 多跑三圈）。这一格正是决策十说的
+   * 「不自己简化」——它那边一直是整通道掩码，我们照抄。
    */
+
+  /** 掩码 -> `<8 x i1>`（`select` 要的形）。 */
+  maskToI1(m) {
+    return this.emit(`icmp ne ${LL_I} ${m.v}, zeroinitializer`, 'b');
+  }
+
+  /** `<8 x i1>` -> 掩码（符号扩展成全 1 / 全 0，与 `if_cond` 里那条 `SExt` 同）。 */
+  i1ToMask(c) {
+    return this.emit(`sext ${LL_B} ${c.v} to ${LL_I}`, 'm');
+  }
+
+  /** 掩码取反。 */
+  maskNot(m) {
+    return this.emit(`xor ${LL_I} ${m.v}, ${llI(-1).v}`, 'm');
+  }
 
   /** 几层与在一起。全是 null（八道全活）就回 null，省掉一堆 `and`。 */
   update() {
@@ -232,46 +253,64 @@ class GlslLlvmEmitter {
     if (this.brkPtr !== null) negs.push(this.brkPtr);
     if (this.retPtr !== null) negs.push(this.retPtr);
     for (const p of negs) {
-      const cur = this.emit(`load ${LL_B}, ptr ${p}, align 32`, 'b');
-      const inv = this.emit(`xor ${LL_B} ${cur.v}, ${llB(true).v}`, 'b');
-      m = m === null ? inv : this.emit(`and ${LL_B} ${m.v}, ${inv.v}`, 'b');
+      const cur = this.emit(`load ${LL_I}, ptr ${p}, align 32`, 'm');
+      const inv = this.maskNot(cur);
+      m = m === null ? inv : this.emit(`and ${LL_I} ${m.v}, ${inv.v}`, 'm');
     }
     this.execMask = m;
   }
 
   /** 往一层掩码（`break`/`cont`/`ret` 那三个落点之一）里**并进**当前活着的那些道。 */
   raise(ptr) {
-    const cur = this.emit(`load ${LL_B}, ptr ${ptr}, align 32`, 'b');
-    const add = this.execMask === null ? llB(true) : this.execMask;
-    const next = this.emit(`or ${LL_B} ${cur.v}, ${add.v}`, 'b');
-    this.body.push(`  store ${LL_B} ${next.v}, ptr ${ptr}, align 32`);
+    const cur = this.emit(`load ${LL_I}, ptr ${ptr}, align 32`, 'm');
+    const add = this.execMask === null ? llI(-1) : this.execMask;
+    const next = this.emit(`or ${LL_I} ${cur.v}, ${add.v}`, 'm');
+    this.body.push(`  store ${LL_I} ${next.v}, ptr ${ptr}, align 32`);
     this.update();
   }
 
-  /** 开一个 `<8 x i1>` 的掩码落点，初值全 0（"还没有道走这条路"）。 */
+  /** 开一个掩码落点，初值全 0（"还没有道走这条路"）。 */
   maskPtr(tag) {
     this.n++;
     const p = `%m${this.n}_${tag}`;
-    this.allocas.push(`  ${p} = alloca ${LL_B}, align 32`);
-    this.body.push(`  store ${LL_B} zeroinitializer, ptr ${p}, align 32`);
+    this.allocas.push(`  ${p} = alloca ${LL_I}, align 32`);
+    this.body.push(`  store ${LL_I} zeroinitializer, ptr ${p}, align 32`);
+    return p;
+  }
+
+  /**
+   * 开一个循环的 `break` 落点。初值**不是 0，是「进循环时已经不活着的那些道」** ——
+   * 照 `lp_exec_bgnloop`：新循环的 break 掩码从**当前那一份**起算，旧的压栈保存。
+   *
+   * 少这一格会错，而且错法不直观：外层循环最后那一圈（条件已经不成立、整段本该被掩掉）
+   * 一进内层循环，`brkPtr`/`contPtr` 就被换成内层那两个全 0 的，于是 `update()` 算出来
+   * 又是"八道全活"——内层循环就真的跑了一遍，把数组改了。量出来的指纹正是这个：
+   * `for (int i = 2; i < 3; i++)` 的体跑了**两轮**，第二轮本该全掩掉却生效了。
+   */
+  loopBrkPtr() {
+    const p = this.maskPtr('brk');
+    if (this.execMask !== null) {
+      const dead = this.maskNot(this.execMask);
+      this.body.push(`  store ${LL_I} ${dead.v}, ptr ${p}, align 32`);
+    }
     return p;
   }
 
   /** 进一层 `if`：`cond &= c`。 */
   pushMask(cond) {
-    const c = this.toB(cond);
+    const c = this.i1ToMask(this.toB(cond));
     this.condStack.push({ cond: c, outer: this.condMask });
     this.condMask = this.condMask === null ? c
-      : this.emit(`and ${LL_B} ${this.condMask.v}, ${c.v}`, 'b');
+      : this.emit(`and ${LL_I} ${this.condMask.v}, ${c.v}`, 'm');
     this.update();
   }
 
   /** 进 `else`：把最内那一层的条件取反再与外层合。 */
   invertMask() {
     const top = this.condStack[this.condStack.length - 1];
-    const inv = this.emit(`xor ${LL_B} ${top.cond.v}, ${llB(true).v}`, 'b');
+    const inv = this.maskNot(top.cond);
     this.condMask = top.outer === null ? inv
-      : this.emit(`and ${LL_B} ${top.outer.v}, ${inv.v}`, 'b');
+      : this.emit(`and ${LL_I} ${top.outer.v}, ${inv.v}`, 'm');
     this.update();
   }
 
@@ -282,10 +321,10 @@ class GlslLlvmEmitter {
     this.update();
   }
 
-  /** 「还有道活着吗」——一条真分支的判据（`<8 x i1>` 折成 i8 再比 0）。 */
+  /** 「还有道活着吗」——一条真分支的判据。 */
   anyActive(m) {
-    if (m === null) return null;
-    const bits = this.emit(`bitcast ${LL_B} ${m.v} to i${GLSL_LANES}`, 'x');
+    const c = this.maskToI1(m);
+    const bits = this.emit(`bitcast ${LL_B} ${c.v} to i${GLSL_LANES}`, 'x');
     return this.emit(`icmp ne i${GLSL_LANES} ${bits.v}, 0`, 'x');
   }
 
@@ -796,14 +835,14 @@ class GlslLlvmEmitter {
     if (kind === 'for' && s.init !== null && s.init !== undefined) this.stmt(s.init);
     const outerBrk = this.brkPtr;
     const outerCont = this.contPtr;
-    const brk = this.maskPtr('brk');
+    const brk = this.loopBrkPtr();
     const cont = this.maskPtr('cont');
     const head = this.label('loop');
     const end = this.label('endloop');
     this.body.push(`  br label %${head}`);
     this.body.push(`${head}:`);
     /* 每一轮开头把 cont 清掉 —— 它只管这一轮（`lp_exec_endloop` 也是在这儿重置的）。 */
-    this.body.push(`  store ${LL_B} zeroinitializer, ptr ${cont}, align 32`);
+    this.body.push(`  store ${LL_I} zeroinitializer, ptr ${cont}, align 32`);
     this.brkPtr = brk;
     this.contPtr = cont;
     this.update();
@@ -840,15 +879,14 @@ class GlslLlvmEmitter {
 
   /** 还留在循环里的那些道：外层 cond & 没 break & 没 return。 */
   aliveMask(brk) {
-    const cur = this.emit(`load ${LL_B}, ptr ${brk}, align 32`, 'b');
-    let m = this.emit(`xor ${LL_B} ${cur.v}, ${llB(true).v}`, 'b');
+    const cur = this.emit(`load ${LL_I}, ptr ${brk}, align 32`, 'm');
+    let m = this.maskNot(cur);
     if (this.condMask !== null) {
-      m = this.emit(`and ${LL_B} ${this.condMask.v}, ${m.v}`, 'b');
+      m = this.emit(`and ${LL_I} ${this.condMask.v}, ${m.v}`, 'm');
     }
     if (this.retPtr !== null) {
-      const r = this.emit(`load ${LL_B}, ptr ${this.retPtr}, align 32`, 'b');
-      const nr = this.emit(`xor ${LL_B} ${r.v}, ${llB(true).v}`, 'b');
-      m = this.emit(`and ${LL_B} ${m.v}, ${nr.v}`, 'b');
+      const r = this.emit(`load ${LL_I}, ptr ${this.retPtr}, align 32`, 'm');
+      m = this.emit(`and ${LL_I} ${m.v}, ${this.maskNot(r).v}`, 'm');
     }
     return m;
   }
@@ -913,9 +951,9 @@ class GlslLlvmEmitter {
       const idx = this.toI(this.expr(ai.at)[0]);
       const outer = this.execMask;
       for (let k = 0; k < ai.of.ty.n; k++) {
-        const eq = this.emit(`icmp eq ${LL_I} ${idx.v}, ${llI(k).v}`, 'b');
+        const eq = this.i1ToMask(this.emit(`icmp eq ${LL_I} ${idx.v}, ${llI(k).v}`, 'b'));
         this.execMask = outer === null ? eq
-          : this.emit(`and ${LL_B} ${outer.v}, ${eq.v}`, 'b');
+          : this.emit(`and ${LL_I} ${outer.v}, ${eq.v}`, 'm');
         for (let li = 0; li < lanes.length; li++) {
           this.maskStore(b, k * w + lanes[li], vals.length === 1 ? vals[0] : vals[li]);
         }

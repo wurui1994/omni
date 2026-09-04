@@ -87,6 +87,20 @@ void main() {
     // 答案与参照腿不一样。用例与诊断记在 ADR-0019「决策十第 4 步」那一节，
     // 补上之前不放进这一份 —— 放进来就是一条红门，而红门不该长期挂着。
 
+    // iv_join4 的插入排序逐字搬过来：嵌套 for、break、内层游标同时当读写下标。
+    // 这一条压的是「新循环的 break 掩码要从『进来时已经不活着的那些道』起算」——
+    // 少那一格的时候，外层最后那一圈（本该全掩掉）一进内层就又活了，数组被改。
+    vec2 srt[4];
+    srt[0] = vec2(3.0, 0.0); srt[1] = vec2(1.0, 0.0);
+    srt[2] = vec2(4.0, 0.0); srt[3] = vec2(2.0, 0.0);
+    for (int i = 1; i < 4; i++) {
+        vec2 key = srt[i];
+        int j = i - 1;
+        for (; j >= 0; j--) { if (srt[j].x <= key.x) break; srt[j + 1] = srt[j]; }
+        srt[j + 1] = key;
+    }
+    float sortv = srt[0].x + srt[1].x * 10.0 + srt[2].x * 100.0 + srt[3].x * 1000.0;
+
     // continue：偶数格跳过（`for` 的 step 在 continue 之后照样执行，与 C 同）
     float accv = 0.0;
     for (int n = 0; n < 6; n++) {
@@ -106,5 +120,5 @@ void main() {
 
     fragColor = vec4(checker, min(safe, 1.0), flags + band,
         sv + av * 0.5 + cv * 0.25 + ivv * 0.03125 + rt
-        + accv * 0.01 + wv * 0.1 + dv * 0.05);
+        + sortv * 0.001 + accv * 0.01 + wv * 0.1 + dv * 0.05);
 }
