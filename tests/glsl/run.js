@@ -16,6 +16,8 @@
 //   fns.js    —— 内建补全：8.1/8.3 剩下几条 + 8.4 几何三条 + 8.5 矩阵五条（第二十三片）
 //   fast.js   —— 快路（8 道 f32 -> LLVM IR）与参照实现逐取样点对账（决策六）
 //   oracle.js —— 与**真 GL** 比像素（第十片；没有 python3+moderngl 就跳过）
+//   examples.js —— GraphEq 那 31 个 preset 与真 GPU 渲的参考图比像素
+//                  （尺子在仓库外面，拿不到就整门跳过；OMNI_GRAPHEQ 可以指别处）
 //
 //   node tests/glsl/run.js
 
@@ -25,7 +27,8 @@ import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const PARTS = ['parse.js', 'check.js', 'lower.js', 'render.js', 'bench.js',
-  'interp.js', 'raster.js', 'stmt.js', 'ops.js', 'mat.js', 'fns.js', 'pp.js', 'fast.js', 'oracle.js'];
+  'interp.js', 'raster.js', 'stmt.js', 'ops.js', 'mat.js', 'fns.js', 'pp.js', 'fast.js',
+  'oracle.js', 'examples.js'];
 
 let bad = 0;
 for (const p of PARTS) {
