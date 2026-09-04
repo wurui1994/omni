@@ -15819,3 +15819,66 @@ $ node src/core/cli.js c mir /tmp/isys/m.c -isystem /tmp/isys/inc   # 编译那�
 
 
 
+
+## 落地：三条 C 命令的缺口（`run x.c` / `c tcc x.c` / `-run` 的 `clock`）
+
+三条命令、三个不同层的缺口，量出来的原话在下面。
+
+### 一、`omni run x.c` 走错了前端
+
+```
+$ omni run BBP_Formula.c
+BBP_Formula.c:4:1: error: unexpected character: "#"
+  #include <math.h>
+```
+
+`compileFront` 那张按扩展名分派的表里 **没有 `.c` 这一格**，于是掉到 `compileProgram`
+（omni 的前端）上，它的词法器当然不认 `#`。补的不是词法器，是那张表。
+
+**默认走哪条**：`.c` 走**编 + 链 + 跑**（自带 C 前端 + 自带代码生成 + 自带链接器），
+**不是**解释器。理由是量出来的（同一份 BBP）：
+
+```
+自带前端 + 自带链接器（编 1.4 s，跑 1.0 s）   omni run x.c        2.6 s
+clang -O0 编出来的                                                0.4 s
+MIR 解释器（omni c tcc -run）                                    24.7 s
+```
+
+解释器那条是 **oracle**（一条一条往上补 libc，慢一个数量级），要它就明说
+`omni c run x.c`。
+
+### 二、`c tcc x.c` 把源码当目标文件读了
+
+```
+$ omni c tcc BBP_Formula.c
+macho: 还不会给 34460 号架构写可执行文件
+```
+
+34460 是把**源码的第 18、19 个字节**当 ELF 的 `e_machine` 读出来的数。根因：tcc 的
+「编 + 链一步走」我们只做了「链」—— `cmd-tcc.js` 把 `.c` 原样递给了 `macho-link`。
+
+补两格（`tccPrepLink`）：
+
+1. 先把每个 `.c` 编成临时 `.o`（容器永远是 ELF —— tcc 的 `-c` 在所有目标上都写 ELF）；
+2. 补上 tcc 在 `tcc_add_runtime` 里加的那份**默认 libc**：macOS 上是 libSystem，
+   我们经 SDK 的 `libc.tbd` 拿导出表（`macho_load_tbd` 早就有了）。少这一格的时候
+   `_printf`/`_clock` 全报「符号没有定义」—— 那不是链接器的毛病，是没人把 libc 递给它。
+
+还有一格是**执行位**：我们自己写字节，没人 chmod。tcc 在 `tcc_output_file` 里是
+`chmod 0777`，我们在 `c tcc` 这一层补 `chmod +x`（`omni c link` 是更底层的命令，
+不动它的行为）。
+
+于是 `omni c tcc x.c` 出的 `a.out`（50976 字节）**自己的链接器链出来、自己跑起来**，
+1000 位 pi 与 clang 那份逐字符相同。
+
+### 三、`-run` 缺 `clock`
+
+`interp/libc.js` 补两条：`clock`、`time`。**一处明写的偏离**：宿主层只有墙上时钟
+（`nowMs`，那是刻意的），所以 `clock()` 给的是墙上时间而不是处理器时间 ——
+程序拿它算「这段花了多久」时两者几乎一样。这两条与 `%p` 同类：**没法与 tcc 逐字节对账**
+（每跑一次都不同），文件头那份清单里加了它们。
+
+### 顺带：`c link` 多一格 `-q`
+
+`run` 的 stdout 归**被跑的程序**（与 `.asy` 那条路同一条规矩），而 `runCFile` 内部要链
+一次。所以给三条链接命令加了 `-q`（不印产物摘要），只有内部调用用它。

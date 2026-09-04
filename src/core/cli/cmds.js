@@ -63,6 +63,9 @@ const LINK_COMMON = [
   { name: '-g', arity: 0, brief: '保留 .stab/.stabstr' },
   { name: '-gdwarf', arity: 0, brief: '保留 dwarf 那几节' },
   { name: '--dwarf', arity: 1, value: 'N', brief: 'dwarf 版本' },
+  /* `-q`：不印那行产物摘要。给的是**上层命令**用的（`omni run x.c` 内部要链一次，
+   * 而 `run` 的 stdout 归被跑的程序）—— 交互着用的时候没必要给。 */
+  { name: '-q', arity: 0, brief: '不印产物摘要（给上层命令内部调用用）' },
 ];
 const LINK_ELF_ONLY = [
   { name: '--static', arity: 0, brief: '（-f elf）静态，不出 .interp/.dynamic' },

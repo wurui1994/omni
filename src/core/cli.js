@@ -2167,6 +2167,85 @@ function runGlslFrag(path, rest) {
   return 0;
 }
 
+/**
+ * 那份**默认 libc** —— tcc 在 `tcc_add_runtime` 里加的东西。
+ *
+ * macOS 上是 libSystem，我们经 SDK 的 `libc.tbd` 拿它的导出表（`macho_load_tbd`，
+ * 已经有了）。少这一格的时候 `_printf`/`_clock` 全报「符号没有定义」——
+ * 而那不是链接器的毛病，是**没人把 libc 递给它**。
+ *
+ * 别的目标先不猜：linux 上还要 `crt1.o`/`crti.o` 那一串，摆法没量过，
+ * 猜错了不如让「符号没有定义」照实说。
+ */
+function cDefaultLibs(os) {
+  if (os !== 'osx') return [];
+  return ['-lc', '-L', sdkUsrLib()];
+}
+
+/**
+ * tcc 的「编 + 链一步走」：`tcc x.c` 是把 x.c 编成一个临时目标文件再链，
+ * 而我们的 `c link` 只吃 `.o`。少这一层的时候，`.c` 被当成目标文件读进去 ——
+ * 量出来的指纹就是那句 `macho: 还不会给 34460 号架构写可执行文件`
+ * （34460 是把源码第 18、19 个字节当 ELF 的 `e_machine` 读出来的）。
+ *
+ * 为什么不在 `cmd-tcc.js` 里做：那一份是**纯翻译**（不碰文件系统、可测），
+ * 而这一步要真编译、要落临时文件。
+ */
+function tccPrepLink(argv) {
+  const val = (n) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : undefined; };
+  const arch = val('--arch') ?? 'arm64';
+  const os = val('--os') ?? 'osx';
+  const out = [];
+  let nSrc = 0;
+  for (const a of argv) {
+    if (!a.endsWith('.c')) { out.push(a); continue; }
+    /* 目标文件的容器**永远是 ELF**（tcc 的 `-c` 在所有目标上都写 ELF，见 ADR-0017）。 */
+    const obj = join(workDirFor('c-tcc', hash16(a)), `${basename(a, '.c')}.o`);
+    mkdirAll(dirname(obj));
+    cObj(a, obj, arch, incDirs(argv), defArgs(argv), 'elf', os, sysIncDirs(argv));
+    vStep(`c front end + codegen  ${a} -> ${obj}`);
+    out.push(obj);
+    nSrc++;
+  }
+  if (!argv.includes('-nostdlib')) out.push(...cDefaultLibs(os));
+  return { argv: out, nSrc, out: val('-o') ?? 'a.out', os };
+}
+
+/**
+ * `omni run x.c` —— **编 + 链 + 跑**（自带的 C 前端 + 自带的代码生成 + 自带的链接器）。
+ *
+ * 为什么默认不是解释器：那一条是 **oracle**（`omni c run`），libc 一条一条往上补，
+ * 而且慢一个数量级 —— BBP 那份量出来 24.5 s，这条路 1.0 s（clang -O0 是 0.4 s）。
+ * 要解释执行就明说：`omni c run x.c`。
+ *
+ * 产物摊在工作目录里（`-q` 让链接那一步别印产物摘要）：`run` 的 stdout 归被跑的程序，
+ * 与 `.asy` 那条路同一条规矩。
+ */
+function runCFile(path, argv) {
+  const ai = argv.indexOf('--arch');
+  const si = argv.indexOf('--os');
+  const arch = ai >= 0 ? argv[ai + 1] : 'arm64';
+  const os = si >= 0 ? argv[si + 1] : 'osx';
+  const fmt = os === 'osx' ? 'macho' : os === 'win32' ? 'pe' : 'elf';
+  const dir = workDirFor('run-c-exe', hash16(path));
+  mkdirAll(dir);
+  const obj = join(dir, `${basename(path, '.c')}.o`);
+  const exe = join(dir, basename(path, '.c'));
+  const { flags, prog } = cSplitArgs(argv);
+  cObj(path, obj, arch, incDirs(flags), defArgs(flags), 'elf', os, sysIncDirs(flags));
+  vStep(`c front end + codegen  ${path} -> ${obj}`);
+  const rc = main(['c', 'link', obj, '-o', exe, '-f', fmt, '--arch', arch, '--os', os,
+    ...cDefaultLibs(os), '-q']);
+  if (rc !== 0) return rc;
+  /* tcc 在 `tcc_output_file` 里给可执行文件补执行位（chmod 0777）—— 我们自己写字节，
+   * 所以这一格得自己补，不然只能看着 `Permission denied`。 */
+  if (os !== 'win32') spawn('chmod', ['+x', exe], 'c');
+  vStep(`link  ${exe}`);
+  const st = spawn(exe, prog, 'i')[0];
+  vStep(`exec ${exe}  exit=${st}`);
+  return st;
+}
+
 function main(argv) {
   /* 分派走命令树（ADR-0018 决策四）：走到哪个节点、那个节点认识哪些带值开关，都由
    * `cli/cmds.js` 那份数据说 —— 顶层不再认识 `--image-base` / `-isystem` 这种语言与格式
@@ -2219,6 +2298,13 @@ function main(argv) {
       'macho-link': ['c', 'macho-link'], 'pe-link': ['c', 'pe-link'],
     };
     if (AT[t.key] === undefined) throw new OmniError(`c tcc: 还翻不到 '${t.key}'`);
+    /* 链接那三条要先把 `.c` 编成 `.o`（tcc 的「编 + 链一步走」），并补上默认 libc。 */
+    if (t.key === 'elf-link' || t.key === 'macho-link' || t.key === 'pe-link') {
+      const p = tccPrepLink(t.argv);
+      const rc = main([...AT[t.key], ...p.argv]);
+      if (rc === 0 && p.os !== 'win32') spawn('chmod', ['+x', p.out], 'c');
+      return rc;
+    }
     return main([...AT[t.key], ...t.argv]);
   }
   const { args } = splitArgv(node, rest, (m) => new OmniError(m));
@@ -2364,6 +2450,10 @@ function main(argv) {
        * 前端由扩展名选，与别处同一条规矩 —— 变的只是「执行」在这一门语言里是什么意思：
        * 片元着色器没有 main 可跑，它的「跑一遍」就是把每个像素算出来。 */
       if (path.endsWith('.frag') || path.endsWith('.glsl')) return runGlslFrag(path, rest);
+      /* `.c`：**编 + 链 + 跑**，走自带的 C 前端 + 代码生成 + 链接器（见 `runCFile`）。
+       * 从前这儿没有这一格，`.c` 一路掉到 omni 的前端上，报的是
+       * `unexpected character: "#"` —— 前端由扩展名选那条规矩漏了 C 这一门。 */
+      if (path.endsWith('.c')) return runCFile(path, rest);
       // 一个源文件一份产物那条路（第七十五刀）：产物按源文件名躺在一个**共用目录**里，
       // 跑的是 node 自己的 ESM 模块图 —— 复用与增量都在那个目录上，不在这一趟里。
       // **这是默认**（第一百〇四刀）：它是唯一一条"改一个文件只重编一份"的路，
@@ -2838,9 +2928,11 @@ function main(argv) {
         installName: ni >= 0 ? rest[ni + 1] : undefined,
       });
       writeBinary(out, r.bytes);
-      stdout(`${out} (${r.bytes.length} 字节，${r.ncmds} 条加载命令，${r.nsects} 节，`
-        + `入口偏移 0x${r.entryoff.toString(16)}`
-        + `${r.members.length === 0 ? '' : `，拉了 ${r.members.length} 个库成员`})\n`);
+      if (!rest.includes('-q')) {
+        stdout(`${out} (${r.bytes.length} 字节，${r.ncmds} 条加载命令，${r.nsects} 节，`
+          + `入口偏移 0x${r.entryoff.toString(16)}`
+          + `${r.members.length === 0 ? '' : `，拉了 ${r.members.length} 个库成员`})\n`);
+      }
       return 0;
     }
     // 一个源文件一份产物（第七十五刀）：`<名字>.sx` 与 `<名字>.js` 摊在一个目录里，

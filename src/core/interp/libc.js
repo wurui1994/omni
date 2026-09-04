@@ -26,7 +26,7 @@
 // 第二十一片补上了 `%a`（见 `aText`）—— 于是这份清单只剩 `%p` 一格。
 
 import { memLoad, memStore, printBytes, flushOut, memSize, memGrow } from './builtin.js';
-import { stderrBytes as hostStderr, stdoutBytes as hostStdout, readBinary, writeBinary, removeFile, env as hostEnv, spawn as hostSpawn } from '../host/native.js';
+import { stderrBytes as hostStderr, stdoutBytes as hostStdout, readBinary, writeBinary, removeFile, env as hostEnv, spawn as hostSpawn, nowMs } from '../host/native.js';
 
 /**
  * `exit` 抛的那个信号（第六刀第十七片）。
@@ -1564,6 +1564,24 @@ const LIBC = {
   dispatch_semaphore_create: () => 1n,
   dispatch_semaphore_wait: () => 0n,
   dispatch_semaphore_signal: () => 0n,
+  /* ---- 时间那两条。
+   *
+   * `clock()` 的单位是 `CLOCKS_PER_SEC`（macOS 的 `<time.h>` 里是 1e6，也就是微秒），
+   * `time(t)` 是 Unix 纪元的秒；`t` 不是 NULL 的话还要往那儿写一份。
+   *
+   * **一处明写的偏离**：宿主层只有墙上时钟（`nowMs`，那是刻意的 —— 见 `native.js` 里
+   * 那段注释），所以 `clock()` 给的是墙上时间而不是处理器时间。程序拿它算「这段花了
+   * 多久」时两者几乎一样；真要区分 CPU 时间得给宿主层加一个 op，那时再说。
+   *
+   * 这两条**没法与 tcc 逐字节对账**（每跑一次都不同），与 `%p` 是同一类 —— 那份清单
+   * 在文件头上。 */
+  clock: () => BigInt(Math.round(nowMs() * 1000)),
+  time: (a) => {
+    const secs = BigInt(Math.floor(nowMs() / 1000));
+    const p = BigInt(a[0]);
+    if (p !== 0n) memStore('i64', p, 0, secs);
+    return secs;
+  },
   /* ---- 动态装载那三条（第八刀第二十四片）。解释器里**没有动态装载器**：线性内存里
    * 放不下一个宿主的 dylib，而一个宿主函数的地址在这套指针上也没有意义。
    *
