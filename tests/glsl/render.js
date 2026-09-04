@@ -227,6 +227,63 @@ for (const [tag, extra] of [['C', ['--backend', 'c']], ['LLVM', ['--backend', 'l
   }
 }
 
+/* 七、导数那三条（规范 8.9）：`dFdx` / `dFdy` / `fwidth`。
+ *
+ * 用的是 `cases/deriv-quad.frag`（r 与 g 是非线性的、b 是线性的 —— 见那份的头注）。
+ * 这一支盯的是**按 quad 差分**这条：门自己按 quad 的左列 / 下行算一遍，与印出来的比。
+ * 参考腿在这一格上的落法与快路完全不同（那边一次 shufflevector，这边"再跑一趟探邻居"），
+ * 所以三条腿逐字节相同这件事在这儿格外值钱。 */
+{
+  const DW = 8;
+  const DH = 8;
+  const gsrc = readFileSync(join(CASES, 'deriv-quad.frag'), 'utf8');
+  const gd = new Diagnostics();
+  const gtoks = lexText(g.lex, new SourceFile('deriv-quad.frag', gsrc), gd);
+  gd.throwIfErrors();
+  const gmod = glslCheck(glrParse(tb, gtoks, gd), 'frag');
+  const gpath = join(OUT, 'deriv.sx');
+  writeFileSync(gpath, glslProgram(gmod, DW, DH, {}));
+  const gr = spawnSync(process.execPath, [CLI, 'run', gpath], { encoding: 'utf8', maxBuffer: 1 << 26 });
+  if (gr.status !== 0) {
+    bad('导数那一支跑不动', `    ${(gr.stderr ?? '').trim().split('\n').slice(0, 6).join('\n    ')}`);
+  } else {
+    const to8 = (v) => Math.round(Math.min(1, Math.max(0, v)) * 255);
+    const gn = gr.stdout.trim().split('\n').map(Number);
+    const off = [];
+    for (let i = 0; i + 4 < gn.length; i += 5) {
+      const x = gn[i];
+      const y = gn[i + 1];
+      /* quad 的左列与下行（`gl_FragCoord` 的中心是 +0.5）。 */
+      const qx = x - (x % 2);
+      const qy = y - (y % 2);
+      const wantR = to8((((qx + 1.5) * (qx + 1.5)) - ((qx + 0.5) * (qx + 0.5))) / 256);
+      const wantG = to8((((qy + 1.5) * (qy + 1.5)) - ((qy + 0.5) * (qy + 0.5))) / 256);
+      const wantB = to8(1 / 8);
+      if (gn[i + 2] !== wantR || gn[i + 3] !== wantG || gn[i + 4] !== wantB) {
+        off.push(`(${x},${y}) 要 ${wantR},${wantG},${wantB}，得 ${gn[i + 2]},${gn[i + 3]},${gn[i + 4]}`);
+      }
+    }
+    if (gn.length !== DW * DH * 5) {
+      bad('导数：印出来的数不对', `    要 ${DW * DH * 5} 个，得 ${gn.length}`);
+    } else if (off.length > 0) {
+      bad('导数按 quad 差分这一条不对', `    ${off.slice(0, 4).join('\n    ')}`);
+    } else {
+      ok(`导数：${DW}×${DH} 每个像素的 dFdx/dFdy/fwidth 都与门自己按 quad 算的相同`);
+    }
+    for (const [tag, extraArgs] of [['C', ['--backend', 'c']], ['LLVM', ['--backend', 'llvm']]]) {
+      const rc = spawnSync(process.execPath, [CLI, 'run', gpath, ...extraArgs],
+        { encoding: 'utf8', maxBuffer: 1 << 26 });
+      if (rc.status !== 0) {
+        bad(`导数：${tag} 腿跑不动`, `    ${(rc.stderr ?? '').trim().split('\n').slice(0, 4).join('\n    ')}`);
+      } else if (rc.stdout.trim() !== gr.stdout.trim()) {
+        bad(`导数：${tag} 腿与 JS 腿不一样`, '    8 位像素对不上');
+      } else {
+        ok(`导数：${tag} 腿与 JS 腿逐字节相同`);
+      }
+    }
+  }
+}
+
 rmSync(OUT, { recursive: true, force: true });
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail > 0 ? 1 : 0);

@@ -215,8 +215,16 @@ const GLSL_BUILTINS = new Map([
    * 从 `grapheq.glsl` 那 772 行里量出来的：`isnan` 7 次、`isinf` 5 次，是那份真实
    * 着色器最要紧的缺口。 */
   ['isnan', 'gen1b'], ['isinf', 'gen1b'],
+  /* 导数那三条（规范 8.9，只有片元着色器有）。类型上与 `gen1` 一模一样
+   * （`float -> float`、`vecN -> vecN`），所以借那一格；特别的是**语义**：
+   * 它们要看邻居像素，所以在 `call` 那儿还要记一格 `mod.deriv`（两条腿据它换形状）。
+   * `fwidth(p)` 是 `abs(dFdx(p)) + abs(dFdy(p))`，不是另一种导数 —— 两条腿都按这个式子展开。 */
+  ['dFdx', 'gen1'], ['dFdy', 'gen1'], ['fwidth', 'gen1'],
 
 ]);
+
+/** 导数那三条：只有片元着色器有，而且要看邻居像素（规范 8.9）。 */
+const GLSL_DERIV = new Set(['dFdx', 'dFdy', 'fwidth']);
 
 /** `atan` 与 `step` 的第一个参数也可以是标量而第二个是向量吗 —— GLSL 里可以，这儿也收。 */
 function glslGenType(name, tys, node, err) {
@@ -439,6 +447,10 @@ class GlslChecker {
      * 参考腿据它开那一格模块级 `glsl_killed` —— 没有 discard 的着色器降出来的字节
      * 因此与从前**一字不差**（这一格是"不用就不付"）。 */
     this.discard = false;
+    /* 这个模块里有没有用导数（`dFdx`/`dFdy`/`fwidth`，规范 8.9）。它比 `discard` 更"贵"：
+     * 导数是**按 2×2 quad 定义的**，所以两条腿都要为它换形状（快路把 8 道排成 quad、
+     * 参考腿多两个 quad 基准参数与一次"探邻居"的重跑）。没用到就一格都不改。 */
+    this.deriv = false;
     this.builtinIn = stage === 'vert' ? GLSL_VERT_IN : GLSL_FRAG_IN;
     this.builtinOut = stage === 'vert' ? GLSL_VERT_OUT : GLSL_FRAG_OUT;
   }
@@ -547,6 +559,8 @@ class GlslChecker {
       /* 这个模块里有没有 `discard`（见 `stmt` 里那一格）。两条腿据它决定要不要开那一层
        * kill —— 没有的话降出来的东西与从前一字不差。 */
       discard: this.discard,
+      /* 用了导数没有（`dFdx`/`dFdy`/`fwidth`）。两条腿据它换形状 —— 见 `deriv` 那一格。 */
+      deriv: this.deriv,
     };
   }
 
@@ -1213,6 +1227,14 @@ class GlslChecker {
       return { k: 'bits', ty, name, args };
     }
     if (GLSL_BUILTINS.has(name)) {
+      /* 导数那三条只有片元有（规范 8.9），而且要记一格「这个模块用了导数」——
+       * 两条腿据它换形状（快路把 8 道排成 quad、参考腿多两个 quad 基准参数）。 */
+      if (GLSL_DERIV.has(name)) {
+        if (this.stage !== 'frag') {
+          throw this.err(node, `${name} 只能写在片元着色器里（规范 8.9：导数要看邻居像素）`);
+        }
+        this.deriv = true;
+      }
       const ty = glslGenType(name, args.map((a) => a.ty), node, (n, m) => this.err(n, m));
       /* 内建里 `int` 实参一律先提成 `float`（`sin(1)` 在 GLSL 里合法）。 */
       const fixed = args.map((a) => (a.ty.k === 'int' ? this.coerce(a, GLSL_FLOAT, node) : a));

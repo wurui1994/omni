@@ -140,6 +140,9 @@ class GlslLowerer {
      * （两边各有一个 `sdCircle` 是很正常的事），并到一个方言模块里就撞了。
      * 于是顶点那一侧加一个前缀，片元那一侧不加（片元是主角，名字好看一点）。 */
     this.prefix = '';
+    /* 导数那两格状态（见 `deriv()`）：探针调用要原样再递一遍的实参、以及站点编号。 */
+    this.probeTail = '';
+    this.derivN = 0;
     this.out = [];          // 顶层那几行
     this.structs = new Set();
     /** `out`/`inout` 形参那一族要的**专用返回结构体**（第二十五片）：字段类型不都是 real，
@@ -573,6 +576,62 @@ class GlslLowerer {
     return out;
   }
 
+  /**
+   * 一格导数（规范 8.9）：`dFdx` / `dFdy` / `fwidth` 的**一个分量**。
+   *
+   * 这一腿是一个像素一趟的标量代码，邻居的值拿不到 —— 所以办法是**再跑一趟这个着色器**：
+   * 入口多两个形参（`quad_x`/`quad_y`：这个像素所在 2×2 quad 左下那格的中心坐标）
+   * 加一个 `probe`（要探第几处导数的操作数，`-1` 是真跑那一趟）。真跑那一趟走到第 k 处
+   * 导数时，用 `(quad_x+1, frag_y)` 与 `(quad_x, frag_y)` 各调一次自己（`probe = k`）；
+   * 被调那一趟走到第 k 处就把操作数的值放进 `glsl_probe` 那一格全局，差一下就是 `dFdx`。
+   * `dFdy` 同理，换成 `(frag_x, quad_y+1)` 与 `(frag_x, quad_y)`。
+   *
+   * 与快路对得上的两点（那边是一次 `shufflevector`，见 emit_llvm.js 的道号表）：
+   *   - 取的是 **fine** 那一档：x 方向用自己那一行（`frag_y` 不动）、y 方向用自己那一列；
+   *   - 差的是**quad 的两列 / 两行**，不是"自己与右边一个"。所以同一个 quad 里左右两个
+   *     像素拿到的是同一个值 —— 那正是 quad 的语义，也是快路 shuffle 出来的东西。
+   *
+   * 代价：一处导数两次（`fwidth` 四次）整份着色器重跑。这一腿是**尺子**不是性能路径，
+   * 那笔账认了；快路那边一次 shuffle。
+   * 嵌套导数（探针那一趟里又遇到导数）回 0 —— 规范里那本来就是未定义的。
+   */
+  deriv(name, comp) {
+    if (this.mod.ins.length > 0) {
+      glslNyi('导数 + varying（插值在入口外头，探针那一趟拿不到邻居的插值结果）');
+    }
+    const k = this.derivN;
+    this.derivN = this.derivN + 1;
+    const d = this.fresh('dd');
+    this.stmts.push(`(let ${d} real (real 0.0))`);
+    /* 探针那一趟：走到这一处就把操作数放进那一格全局。 */
+    this.stmts.push(`(if (bin "==" (var probe) (int ${k})) (do (set glsl_probe ${comp})))`);
+    const call = (x, y) => `(expr (call glsl_frag ${x} ${y} ${this.probeTail} (int ${k})))`;
+    const qxR = '(bin "+" (var quad_x) (real 1.0))';
+    const qyU = '(bin "+" (var quad_y) (real 1.0))';
+    const body = [];
+    const dx = this.fresh('px');
+    const dy = this.fresh('py');
+    if (name === 'dFdx' || name === 'fwidth') {
+      body.push(call(qxR, '(var frag_y)'));
+      body.push(`(let ${dx} real (var glsl_probe))`);
+      body.push(call('(var quad_x)', '(var frag_y)'));
+      body.push(`(set ${dx} (bin "-" (var ${dx}) (var glsl_probe)))`);
+    }
+    if (name === 'dFdy' || name === 'fwidth') {
+      body.push(call('(var frag_x)', qyU));
+      body.push(`(let ${dy} real (var glsl_probe))`);
+      body.push(call('(var frag_x)', '(var quad_y)'));
+      body.push(`(set ${dy} (bin "-" (var ${dy}) (var glsl_probe)))`);
+    }
+    if (name === 'dFdx') body.push(`(set ${d} (var ${dx}))`);
+    else if (name === 'dFdy') body.push(`(set ${d} (var ${dy}))`);
+    else {
+      body.push(`(set ${d} (bin "+" (rmath "fabs" (var ${dx})) (rmath "fabs" (var ${dy}))))`);
+    }
+    this.stmts.push(`(if (bin "<" (var probe) (int 0)) (do ${body.join(' ')}))`);
+    return `(var ${d})`;
+  }
+
   builtin(e) {
     const name = e.name;
     const ct = 'real';
@@ -584,6 +643,14 @@ class GlslLowerer {
      * **函数**粒度 + 按名字判的，箭头里出现 `i` 就会把这个函数里所有 `for (let i …)`
      * 一起骂（量过：`emit_llvm.js` 里改个名字，14 条错变 2 条）。错开就没这回事。 */
     const at = (ak, ai) => (args[ak].length === 1 ? args[ak][0] : args[ak][ai]);
+    /* 导数那三条（规范 8.9）。这一腿是**一个像素一趟的标量代码**，所以邻居的值只能
+     * "再跑一趟着色器"拿 —— 这一格就是那个探针（`glslDeriv`）。
+     * 为什么不能像快路那样一次 shuffle：那边一批 8 道本来就是两个 quad，邻居在同一批里。 */
+    if (name === 'dFdx' || name === 'dFdy' || name === 'fwidth') {
+      const out = [];
+      for (let i = 0; i < wide; i++) out.push(this.deriv(name, at(0, i)));
+      return out;
+    }
     /* 向量比较那一族（规范 8.6）。这一层的向量是**摊成分量**的，所以「逐格比出一串 bool」
      * 就是它 —— 不需要方言有掩码类型。`all`/`any` 用 `&&`/`||` 把那串折起来：
      * 两边都是已经算好的 `(var …)`，短路与否看不出差别（GLSL 那两个算符在这一层
@@ -1170,7 +1237,9 @@ class GlslLowerer {
        * 像素。设一格标志则不管写在多深都对：出图那一头见它是真就不写这个像素。
        * 设过之后后面照算 —— 不可观测（这个像素根本不写回），而快路那边是把那些道掩掉，
        * 两条腿的**输出**因此一模一样。 */
-      this.stmts.push('(set glsl_killed (bool true))');
+      this.stmts.push(this.mod.deriv === true
+        ? '(if (bin "<" (var probe) (int 0)) (do (set glsl_killed (bool true))))'
+        : '(set glsl_killed (bool true))');
       return;
     }
     if (s.k === 'for') {
@@ -1475,6 +1544,10 @@ class GlslLowerer {
    *
    * `gl_FragCoord` 只给 `.xy` 两格真值，`.z`/`.w` 是 0/1（这一档没有深度、没有透视）。
    * 出来的是 `out vec4` 那一个 —— 多渲染目标这一刀不收。
+   *
+   * 用了导数（`mod.deriv`）时多三个形参：`quad_x`/`quad_y`（这个像素所在 2×2 quad
+   * 左下那格的中心）与 `probe`（探第几处导数，-1 是真跑那一趟）—— 见 `deriv()`。
+   * **只有用了才加**：没用导数的着色器降出来的字节与从前一字不差。
    */
   entry() {
     const m = this.mod;
@@ -1485,6 +1558,9 @@ class GlslLowerer {
       throw new OmniError(`glsl: out 得是 vec4，这儿是 ${glslTyText(o.ty)}`);
     }
     const ps = ['(frag_x real)', '(frag_y real)'];
+    if (m.deriv === true) ps.push('(quad_x real)', '(quad_y real)');
+    /* 探针那一趟要把这些原样再递一遍：quad 的基准与每一格 uniform（`probe` 单独在最后）。 */
+    const tail = m.deriv === true ? ['(var quad_x)', '(var quad_y)'] : [];
     this.push();
     this.bind('gl_FragCoord', ['(var frag_x)', '(var frag_y)', '(real 0.0)', '(real 1.0)']);
     /* varying（`in`）：**插值好的值当参数递进来**。插的那一步不在这个函数里 ——
@@ -1507,14 +1583,25 @@ class GlslLowerer {
       for (let i = 0; i < n; i++) {
         ps.push(`(${u.name}_${i} ${ct})`);
         comps.push(`(var ${u.name}_${i})`);
+        tail.push(`(var ${u.name}_${i})`);
       }
       this.bind(u.name, comps);
     }
+    /* `probe` 排在**最后**：探针那一趟只换它一个（见 `deriv()`）。 */
+    if (m.deriv === true) ps.push('(probe int)');
+    this.probeTail = tail.join(' ');
+    this.derivN = 0;
     this.stmts = [];
     /* `discard` 那一格：每个像素进来先清零。它是模块级的（跨函数要看得见），
      * 而这个函数**一个像素调一次** —— 不清的话上一个像素的 kill 会粘到下一个，
-     * 指纹是"第一个被杀的像素之后整幅图全空"。 */
-    if (m.discard === true) this.stmts.push('(set glsl_killed (bool false))');
+     * 指纹是"第一个被杀的像素之后整幅图全空"。
+     * 探针那一趟（`probe >= 0`）**不许动它**：那一趟是替真跑的那个像素去看邻居的，
+     * 邻居被 discard 与这个像素写不写回无关。 */
+    if (m.discard === true) {
+      this.stmts.push(m.deriv === true
+        ? '(if (bin "<" (var probe) (int 0)) (do (set glsl_killed (bool false))))'
+        : '(set glsl_killed (bool false))');
+    }
     /* 模块级 const 在入口里落成局部量（这一档没有别的函数用得到它们）。 */
     for (const c of m.consts) {
       const n = glslNComp(c.ty);
@@ -1642,6 +1729,10 @@ class GlslLowerer {
      * bool 的零是 false —— 正好是"这个像素还活着"。 */
     const gs = this.mod !== undefined && this.mod !== null && this.mod.discard === true
       ? ['  (global glsl_killed bool)'] : [];
+    /* 导数的探针把操作数的值放这一格里带回来（见 `deriv()`）。同样只有用了才出现。 */
+    if (this.mod !== undefined && this.mod !== null && this.mod.deriv === true) {
+      gs.push('  (global glsl_probe real)');
+    }
     const body = [...decls, ...gs, ...this.outStructs, ...this.out].join('\n\n');
     return `(module\n${body}${mainTxt === '' ? '' : `\n\n${mainTxt}`}\n)\n`;
   }
@@ -1731,6 +1822,11 @@ const GLSL_TO8_FN = `  (fn glsl_to8 ((v real)) int
  * 它会把外面也画上。
  */
 export function glslTriProgram(vertMod, fragMod, w, h, uni) {
+  /* 导数在这条路上要重新插值一遍邻居的 varying，而插值住在入口**外面**（一个三角形
+   * 一次的 setup）——探针那一趟拿不到。明着骂，不给一个悄悄错的答案。 */
+  if (fragMod.deriv === true) {
+    glslNyi('导数 + 三角形那条路（邻居的 varying 要重新插值，探针拿不到）');
+  }
   const L = new GlslLowerer();
   L.emitModule(vertMod, 'v_');
   L.emitModule(fragMod, '');
@@ -1936,6 +2032,12 @@ export function glslTriProgram(vertMod, fragMod, w, h, uni) {
  */
 export function glslRenderMain(mod, w, h, uni) {
   const args = ['(var px)', '(var py)'];
+  /* 用了导数的着色器：入口多两个 quad 基准（见 `deriv()`）。`qx`/`qy` 正是这一段
+   * 循环里的 quad 左下角像素下标，加 0.5 就是它的中心 —— 这段本来就按 quad 走。 */
+  if (mod.deriv === true) {
+    args.push('(bin "+" (toreal (var qx)) (real 0.5))');
+    args.push('(bin "+" (toreal (var qy)) (real 0.5))');
+  }
   for (const u of mod.uniforms) {
     const vals = uni[u.name];
     if (vals === undefined) throw new OmniError(`glsl: uniform '${u.name}' 没给值`);
@@ -1947,11 +2049,12 @@ export function glslRenderMain(mod, w, h, uni) {
       args.push(glslCompTy(u.ty) === 'int' ? `(int ${Math.trunc(v)})` : `(real ${glslNum(v)})`);
     }
   }
+  /* 真跑那一趟：`probe = -1`（探针那几趟由 `deriv()` 自己发，见那儿）。 */
+  if (mod.deriv === true) args.push('(int -1)');
   const call = `(call glsl_frag ${args.join(' ')})`;
   /* quad 里那四格的偏移，顺序照 llvmpipe 的 `quad_offset_x/y`。 */
   const QX = [0, 1, 0, 1];
-  const QY = [0, 0, 1, 1];
-  /* 在画布里 —— 出了界的那几格照样算，只是不印（见函数头）。 */
+  const QY = [0, 0, 1, 1];  /* 在画布里 —— 出了界的那几格照样算，只是不印（见函数头）。 */
   const bounds = `(bin "&&" (bin "<" (var px) (real ${glslNum(w)}))`
     + ` (bin "<" (var py) (real ${glslNum(h)})))`;
   /* `discard` 掉的像素也不印 —— 那正是"不写回帧缓冲"在这一腿上的样子（快路那边是驱动
@@ -2017,6 +2120,11 @@ export function glslProgram(mod, w, h, uni) {
  */
 export function glslBenchMain(mod, w, h, uni, iters) {
   const args = ['(var px)', '(var py)'];
+  /* 与 `glslRenderMain` 同一套：用了导数就多两个 quad 基准，`probe = -1` 在最后。 */
+  if (mod.deriv === true) {
+    args.push('(bin "+" (toreal (var qx)) (real 0.5))');
+    args.push('(bin "+" (toreal (var qy)) (real 0.5))');
+  }
   for (const u of mod.uniforms) {
     const vals = uni[u.name];
     if (vals === undefined) throw new OmniError(`glsl: uniform '${u.name}' 没给值`);
@@ -2024,6 +2132,7 @@ export function glslBenchMain(mod, w, h, uni, iters) {
       args.push(glslCompTy(u.ty) === 'int' ? `(int ${Math.trunc(v)})` : `(real ${glslNum(v)})`);
     }
   }
+  if (mod.deriv === true) args.push('(int -1)');
   const call = `(call glsl_frag ${args.join(' ')})`;
   const QX = [0, 1, 0, 1];
   const QY = [0, 0, 1, 1];

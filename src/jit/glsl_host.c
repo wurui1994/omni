@@ -279,29 +279,47 @@ typedef struct {
   int next;            /* 下一块的起始行 —— 只用 __atomic_fetch_add 动它 */
 } render_job;
 
+/* 一批 8 道的摆法：**两个 2×2 quad**（与 emit_llvm.js 的 run() 一字对齐）
+ *
+ *     道号：  0 1   4 5      像素：(x,y)   (x+1,y)   (x+2,y)   (x+3,y)
+ *             2 3   6 7            (x,y+1) (x+1,y+1) (x+2,y+1) (x+3,y+1)
+ *
+ * 为什么不是横着一排 8 个：导数（dFdx/dFdy/fwidth）在规范里是**按 quad 定义**的，
+ * 摆成 quad 之后着色器那边各只要一次 shufflevector。llvmpipe 一直是这个摆法。
+ * 这里的"下一行"按 gl_FragCoord.y 算（规范 7.1：原点在左下，y 往上增），所以是 py+1。 */
+static const int LANE_DX[8] = { 0, 1, 0, 1, 2, 3, 2, 3 };
+static const int LANE_DY[8] = { 0, 0, 1, 1, 0, 0, 1, 1 };
+
 /** 渲一块行（`[y0, y1)`）。写的是各自不相交的行，所以一把锁都不要。 */
 static void render_rows(render_job *j, int y0, int y1) {
-  const f8 lane = { 0, 1, 2, 3, 4, 5, 6, 7 };
+  const f8 vdx = { 0, 1, 0, 1, 2, 3, 2, 3 };
+  const f8 vdy = { 0, 0, 1, 1, 0, 0, 1, 1 };
   int w = j->w;
-  for (int py = y0; py < y1; py++) {
+  /* 一趟走两行（quad 的高）。块的起点都是 RENDER_BLOCK 的倍数、而它是偶数，
+     所以 y0 一定是偶数 —— quad 不会被切开。 */
+  for (int py = y0; py < y1; py += 2) {
     f8 in[OMNI_MAX_SLOTS], out[OMNI_OUT_SLOTS];
-    in[1] = (f8)((float)py + 0.5f);
     for (int u = 0; u < j->nUni; u++) in[2 + u] = (f8)j->uni[u];
-    unsigned char *row = j->rgba + (size_t)(j->h - 1 - py) * (size_t)w * 4;
-    for (int px = 0; px < w; px += 8) {
-      in[0] = (f8)((float)px + 0.5f) + lane;
+    for (int px = 0; px < w; px += 4) {          /* 一趟四列 = 两个 quad 的宽 */
+      in[0] = (f8)((float)px + 0.5f) + vdx;
+      in[1] = (f8)((float)py + 0.5f) + vdy;
       j->frag(in, out);
-      int n = w - px < 8 ? w - px : 8;
-      for (int l = 0; l < n; l++) {
+      for (int l = 0; l < 8; l++) {
+        int x = px + LANE_DX[l];
+        int y = py + LANE_DY[l];
+        /* 边上多算的那些道**照样算、不写回**：quad 是整个进整个出的，
+           这与"宽高不是 2 的倍数"那一档在参考腿上的做法是同一条。 */
+        if (x >= w || y >= j->h) continue;
         /* 被 `discard` 杀掉的那一道：这个像素**一个字节都不动**（缓冲是清零的，
          * 所以它留着背景）。判据写成 `== 0.0f` 而不是 `< 0.5f`：这一格是着色器
          * 发出来的常量 0 或 1，不是算出来的数。 */
         if (out[OMNI_COV_SLOT][l] == 0.0f) continue;
+        unsigned char *row = j->rgba + (size_t)(j->h - 1 - y) * (size_t)w * 4;
         for (int c = 0; c < 4; c++) {
           float v = out[c][l];
           /* NaN 落到 0：`v > 0` 对 NaN 是假，所以这个写法顺带把 NaN 也夹住了。 */
           v = v > 0.0f ? (v < 1.0f ? v : 1.0f) : 0.0f;
-          row[(size_t)(px + l) * 4 + c] = (unsigned char)(v * 255.0f + 0.5f);
+          row[(size_t)x * 4 + c] = (unsigned char)(v * 255.0f + 0.5f);
         }
       }
     }

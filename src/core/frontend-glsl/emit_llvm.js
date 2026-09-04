@@ -134,6 +134,21 @@ const LL_INTRIN = new Map([
 /** 两个实参的那几个 intrinsic（`declare` 的形参个数按它算）。 */
 const LL_INTRIN2 = new Set(['llvm.pow', 'llvm.minnum', 'llvm.maxnum']);
 
+/* 导数用的四张道号表（规范 8.9）。一批 8 道排成**两个 2×2 quad**：
+ *
+ *     道号：  0 1   4 5      像素：(x,y)   (x+1,y)   (x+2,y)   (x+3,y)
+ *             2 3   6 7            (x,y+1) (x+1,y+1) (x+2,y+1) (x+3,y+1)
+ *
+ * `dFdx` 要「同一行里右边那个」减「左边那个」：`l|1` 减 `l&~1`。
+ * `dFdy` 要「同一列里下边那个」减「上边那个」：`l|2` 减 `l&~2`。
+ * 这里的"下"按 `gl_FragCoord.y` 算（规范 7.1：原点在左下，y 往上增）——
+ * 驱动那一侧就是照这个摆的（`glsl_host.c` 的 render_rows）。
+ */
+const LL_DDX_R = [1, 1, 3, 3, 5, 5, 7, 7];
+const LL_DDX_L = [0, 0, 2, 2, 4, 4, 6, 6];
+const LL_DDY_D = [2, 3, 2, 3, 6, 7, 6, 7];
+const LL_DDY_U = [0, 1, 0, 1, 4, 5, 4, 5];
+
 class GlslLlvmEmitter {
   constructor(mod) {
     this.mod = mod;
@@ -535,6 +550,21 @@ class GlslLlvmEmitter {
     return this.emit(`call ${LL_F} @${fn}.v${GLSL_LANES}f32(${as.join(', ')})`, 'f');
   }
 
+  /**
+   * 一次道间搬运（`shufflevector`）。`mask` 是 8 个道号。
+   *
+   * 导数就靠它：一批 8 道**排成两个 2×2 quad**（见 `run()` 头上那段 ABI），
+   * 于是"右边的道"与"下边的道"都只是一次 shuffle。第二个操作数给 `poison` ——
+   * 只从一个向量里取。
+   */
+  shuf(c, mask) {
+    const f = this.toF(c);
+    const ix = [];
+    for (const m of mask) ix.push(`i32 ${m}`);
+    return this.emit(`shufflevector ${LL_F} ${f.v}, ${LL_F} poison, `
+      + `<${GLSL_LANES} x i32> <${ix.join(', ')}>`, 'f');
+  }
+
   /* ------------------------------------------------------------ 表达式 */
 
   /** 一个表达式 -> 分量数组（每格一个 `{ v, t }`）。 */
@@ -734,6 +764,37 @@ class GlslLlvmEmitter {
           const x = at(0, i);
           const y = at(1, i);
           out.push(this.select(this.cmp(name === 'min' ? '<' : '>', x, y), x, y));
+        }
+      }
+      return out;
+    }
+    /* 导数那三条（规范 8.9）。**一批 8 道排成两个 2×2 quad**（见 `run()` 头上那段 ABI）：
+     *
+     *   道 0,1 = 第一个 quad 的上一行（x, x+1）   道 2,3 = 它的下一行（y+1）
+     *   道 4..7 = 第二个 quad（x+2, x+3），同一个摆法
+     *
+     * 于是 `dFdx` 是「同一行里右边减左边」、`dFdy` 是「同一列里下边减上边」——
+     * 各一次 `shufflevector` 加一次减法（llvmpipe 的 `lp_build_ddx_ddy` 就是这么做的）。
+     * 取的是 **fine** 那一档（每个道用自己那一行/那一列），不是 coarse（整 quad 一个值）：
+     * 参考腿那边照的也是 fine，两条腿要对得上。
+     * `fwidth(p)` 按规范就是 `abs(dFdx(p)) + abs(dFdy(p))`，不是第三种导数。
+     */
+    if (name === 'dFdx' || name === 'dFdy' || name === 'fwidth') {
+      const out = [];
+      for (let i = 0; i < wide; i++) {
+        const v = at(0, i);
+        const parts = [];
+        if (name === 'dFdx' || name === 'fwidth') {
+          parts.push(this.arith('-', this.shuf(v, LL_DDX_R), this.shuf(v, LL_DDX_L)));
+        }
+        if (name === 'dFdy' || name === 'fwidth') {
+          parts.push(this.arith('-', this.shuf(v, LL_DDY_D), this.shuf(v, LL_DDY_U)));
+        }
+        if (parts.length === 1) {
+          out.push(parts[0]);
+        } else {
+          out.push(this.arith('+', this.call1('llvm.fabs', [parts[0]]),
+            this.call1('llvm.fabs', [parts[1]])));
         }
       }
       return out;
@@ -1264,6 +1325,15 @@ class GlslLlvmEmitter {
    * 覆盖度那一格**永远写**（没有 `discard` 的着色器存常量全 1）：驱动那一侧因此只有一种
    * ABI，不必按"这份着色器有没有 discard"分两条读法。
    *
+   * **一批 8 道的摆法是两个 2×2 quad**（不是横着一排 8 个像素）：
+   *
+   *     道号：  0 1   4 5      像素：(x,y)   (x+1,y)   (x+2,y)   (x+3,y)
+   *             2 3   6 7            (x,y+1) (x+1,y+1) (x+2,y+1) (x+3,y+1)
+   *
+   * 为什么这么摆：导数（`dFdx`/`dFdy`/`fwidth`）与纹理的 LOD 在规范里就是**按 quad 定义**
+   * 的，摆成 quad 之后它们各只要一次 `shufflevector`。llvmpipe 一直是这个摆法。
+   * 代价是驱动那一侧的写回要按道号查位置（见 `glsl_host.c` 的 `render_rows`）。
+   *
    * **为什么全走指针**：第一版把 `<8 x float>` 直接当参数传，结果读出来整体错位一格 ——
    * 32 字节向量在 AArch64 上不是原生寄存器类型（NEON 是 16 字节），它要拆成两个 q
    * 或者走内存，而「IR 里的 `<8 x float>` 参数」与「C 里的 `ext_vector_type(8)` 参数」
@@ -1348,6 +1418,7 @@ class GlslLlvmEmitter {
     });
     return `; GLSL -> LLVM IR（${GLSL_LANES} 道 SoA，分量带类型 f32/i32/i1）—— ADR-0019 决策十\n`
       + `; in = [x, y, uniform 每一格…]；out = [r, g, b, a, 覆盖度]，缓冲都是 ${LL_F}\n`
+      + `; 一批 8 道 = 两个 2×2 quad（道 0,1/2,3 是第一个 quad 的上下两行）—— 导数要它\n`
       + `; 覆盖度：1.0 = 这一道写回、0.0 = 被 discard 杀掉（照 llvmpipe 的 kill 掩码）\n`
       + `; 可变量在 alloca 里、写过掩码（照 lp_exec_mask_store）—— mem2reg 会把大部分提回 SSA\n`
       + `define void @glsl_frag8(ptr %in, ptr %out) {\n`

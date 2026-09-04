@@ -226,6 +226,9 @@ for (const [name, src, stage, want] of [
   /* `discard` 只有片元着色器有（规范 6.4）。片元那一档现在**收**它 —— 这一行盯的是
    * "别在顶点里悄悄收下"（那会让一份顶点着色器编过却没有任何 kill 的落处）。 */
   ['顶点里 discard', 'void main() { discard; }', 'vert', 'discard 只能写在片元着色器里'],
+  /* 导数那三条也只有片元有（规范 8.9）。片元那一档收 —— 见 render.js / vispy_draw.js。 */
+  ['顶点里 dFdx', 'void main() { gl_Position = vec4(dFdx(1.0)); }', 'vert',
+    'dFdx 只能写在片元着色器里'],
   ['版本不是 330', 'void main() { }', 'frag', '只收 #version 330'],
 ]) {
   const head = name === '版本不是 330' ? '#version 400 core\n' : '#version 330 core\n';
