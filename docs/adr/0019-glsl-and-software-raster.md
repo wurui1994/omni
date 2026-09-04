@@ -3077,6 +3077,36 @@ interp --mir / run-llvm）全同。能这么要求是因为 nextafter 是精确�
 
 <!-- ADR-0019 落地：路 2-END -->
 
+## 开工单：把 `floatBitsToInt` / `intBitsToFloat` 接上（路 2 的后半截）
+
+`nextafter` 有了，但**着色器里不写 `nextafter`** —— 它写的是那两个位转换内建，
+自己拼出 nextUp/nextDown：
+
+```glsl
+int i = floatBitsToInt(x);  i = (x > 0.0) ? (i + 1) : (i - 1);  return intBitsToFloat(i);
+```
+
+所以还差一格。量过了：**方言里没有位重解释**（`sexpr/lower.js` 里搜不到 bitcast；
+MIR 有 `CVT_BITCAST`，但那是 C 前端经 arm64/x64 用的，OIR 这一层没有出口）。
+
+两条路，还没选：
+
+1. **给方言加一对位重解释**（`(realbits E)` -> int、`(bitsreal E)` -> real）。
+   与 `nextafter` 同一个形状的六处改动，但**不能挂在 `rmath` 上** —— `rmath` 规定
+   参数与返回都是 `real`，而这两个一头是 `int`。要一个新的方言形式。
+   方言的 `int` 是 64 位，f64 的位模式精确装得下，所以语义是干净的。
+2. **在 GLSL 降级那一层把那两个内建落成 `nextafter`** —— 不做模式匹配，而是
+   *不*支持 `floatBitsToInt`，改为把 GLSL 那一档的 `nextUp`/`nextDown` **当内建收**。
+   便宜，但**它改的是尺子**：那样我们跑的就不是 GraphEq 那份源码了，
+   而「拿真实着色器灌进去、它停在哪儿就补哪一格」这条方法正是靠不改源码才有效。
+   所以这条路**基本要否掉** —— 记在这儿是为了说明为什么不选它。
+
+倾向路 1。开工前要先确认的一格：那两个内建在**快路**上怎么落（路 3 的分量类型标记），
+两边要同时能落，否则四条路里会有一条编不出来 —— 而这一次「答案不必相同」是许可的
+（f64 vs f32，见上面那节），「编不出来」不是。
+
+<!-- ADR-0019 开工单：位重解释-END -->
+
 ## 还没定的（下一步按这个顺序）
 
 1. ~~摸 mesa 那边的边界~~ —— 「量：读 llvmpipe」那一节。
