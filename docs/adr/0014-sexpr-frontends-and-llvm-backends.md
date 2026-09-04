@@ -8925,3 +8925,58 @@ arrows3 1580  cheese 2640  cones 1377  magnetic 1481  near_earth 1266     （单
 `interpolate1` 一样：**缩规模到两边都在限内**，两侧跑同一份缩小后的源码，对照仍成立。
 
 <!-- ADR-0014 逐个查清出不了图的-END -->
+
+## 量：那 48 份"没出图"是**产物缓存不一致**，不是降级的 bug
+
+前面查 `patch.external` 那条错时我一路往 `genSym` / `recNew` 里找，方向错了。真凶是缓存：
+
+**证据是决定性的**：`src/core/frontend-asy/lower.js` 的**内容一个字节都没变**
+（加了几行调试打印又撤掉，`git diff` 是空的），只有 **mtime 变了**。而 mtime 进
+`.omni-cache/asy-mods` 的键，于是整摊产物作废、全部重编 —— 重编之后那 48 份**全都出图了**，
+`RiemannSurface` 的 stderr 只剩一句 plain.asy 的版本警告。
+
+对得上之前那个自相矛盾的现场：
+
+```
+.omni-cache/asy-mods/three__fee66ef8.sx:1333   （盘上的单元，旧编译器生成）
+  (fldset (var this) external (mkclo asy__mvw_asy__m_patch_externaltriangular (var this)))
+
+omni_weak.sx:3714                              （weak 那一段，当前编译器现生成）
+  (fldset (var this) external (mkclo asy__me4ebc841_asy__anon173 (var this)))
+      anon173 的体是 point 的；anon175 / anon176 根本没发出来
+```
+
+两边**不是同一个编译器生成的**：单元那一份是从缓存里读回来的，weak 那一段每趟现生成。
+`genSym` 的计数器 `nsym` 存在单元里（接口回填时 `iface.js:275` 会把它读回来），于是
+「盘上那份已经用掉的号」与「这一趟新生成的号」撞了 —— 这正是 `genSym` 注释里点名警告的
+那一条，只是它当时说的入口是默认实参的包装，没想到**单元与 weak 分开缓存**也是一个入口。
+
+**要修的是缓存的键**：weak 那一段与各单元必须共用一个作废条件（要么 weak 一起进缓存、
+要么单元的键里带上 weak 的生成版本）。现在的样子是"单元命中缓存 + weak 现生成"，
+两边对 `nsym` 的认识可以不一致，而不一致的后果不是报错而是**撞名**——最坏的一种。
+
+### 于是这一轴的数完全变了（这才是真实水位）
+
+```
+                缓存不一致那一趟   缓存一致之后
+一样                    23              24
+只有数值差              51              51
+结构不同                30              85
+没出图                  57               8
+超过 5000ms              2              21
+不计分（没参考）        50              24
+```
+
+「没出图」从 57 掉到 8：**三维那一族本来就画得出来**，之前是被缓存坑了。剩下的差距是
+**结构不同**（85 份），而且差的方向很一致 —— 我们发的记号比 asy 多得多：
+
+```
+RiemannSurface       参考 3655  我们 11454
+RiemannSphere        参考 1218  我们 37831
+SierpinskiGasket     参考 4067  我们 311326
+BezierPatch          参考 1142  我们  356   （这一份反过来，我们少）
+```
+
+也就是说下一刀不是"把三维做出来"，是**把三维的补片合并 / 细分口径对上 asy**。
+
+<!-- ADR-0014 缓存不一致那 48 份-END -->

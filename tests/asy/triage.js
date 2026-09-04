@@ -122,6 +122,29 @@ function allNames(dir) {
     .map((x) => x.slice(0, -4)).sort();
 }
 
+/** 这个例子在工作目录里到底出了哪份 EPS。
+ *
+ * **不能只认 `<名>.eps`**：有些例子自己调 `shipout("别的名字")`，出来的图就不叫例子名。
+ * 量出来的：`triads.asy:37` 是 `shipout("triadpqk"); erase();`，于是产物是
+ * `triadpqk.eps` —— 只认 `<名>.eps` 会把它记成"没出图"，那是我的量法错，不是例子的问题。
+ * `pdb.asy:164` 的 `shipout(options=options)` 同一类。
+ * 所以：先认同名那份，没有就取目录里**最大的**那份 `.eps`（多页的例子会出好几份）。
+ */
+function epsIn(dir, name) {
+  const same = join(dir, `${name}.eps`);
+  if (existsSync(same) && statSync(same).size > 0) return same;
+  if (!existsSync(dir)) return null;
+  let best = null;
+  let bestSz = 0;
+  for (const f of readdirSync(dir)) {
+    if (!f.endsWith('.eps')) continue;
+    const p = join(dir, f);
+    const sz = statSync(p).size;
+    if (sz > bestSz) { best = p; bestSz = sz; }
+  }
+  return bestSz > 0 ? best : null;
+}
+
 /* ---------------------------------------------------------------- 并行计时 */
 
 /** 一个例子跑一趟，回 `{ms, ok, killed}`。硬上限 LIMIT，超了 SIGKILL。 */
@@ -354,8 +377,8 @@ if (mode === 'static') {
   let made = 0;
   const miss = [];
   await timeAll(todo, 'asy', dir, (r) => {
-    const src = join(WORK, r.name, `${r.name}.eps`);
-    if (existsSync(src) && statSync(src).size > 0) {
+    const src = epsIn(join(WORK, r.name), r.name);
+    if (src !== null) {
       renameSync(src, join(REF, `${r.name}.eps`));
       made++;
     } else miss.push(r.name);
@@ -367,8 +390,8 @@ if (mode === 'static') {
     const still = [];
     for (const nm of miss) {
       const r2 = await runOne(nm, 'asy', dir);
-      const src = join(WORK, nm, `${nm}.eps`);
-      if (existsSync(src) && statSync(src).size > 0) {
+      const src = epsIn(join(WORK, nm), nm);
+      if (src !== null) {
         renameSync(src, join(REF, `${nm}.eps`));
         made++;
         process.stderr.write(`       ${nm.padEnd(24)} ${String(r2.ms).padStart(6)}ms 出图了（并行冤枉的）\n`);
