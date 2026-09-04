@@ -302,3 +302,48 @@ JS 这条腿上有三件事必须专门解决，它们都是"一批一段、装�
   整个自编译是它的二十倍。阶段 2 的"实参是槽位数组上的一个窗口"直接冲的就是这条。
 
 
+
+## 量：MIR 解释器为什么慢 —— profile 摆在这儿（下一刀的入口）
+
+尺子：`BBP_Formula.c`（1000 位 pi，纯整数 + 少量 double，`~/Workspace/history/.../CalculatePi`）。
+同一台机器、同一份源码，三条路：
+
+```
+clang -O0 编出来的                      0.4 s
+自带 C 前端 + 自带链接器（omni run x.c）  1.0 s（编 1.4 s 另计）
+MIR 解释器（omni c tcc -run）           24.7 s     ← 慢 25 倍 / 62 倍
+```
+
+`node --prof` 的结果（22141 个 tick）：
+
+```
+21.2%  libnode.dylib                      ← BigInt 的分配与 GC 全在这儿
+19.1%  interp.js:492  binOp(o, kind, …)   ← 通用的 64 位那条
+11.8%  interp.js:490  bin32 的那个闭包
+13.9%  interp.js:315  callFunc
+10.7%  interp.js:445  LOAD
+ 6.9%  interp.js:124  bin32 自己
+ 5.4%  interp.js:512  比较
+ 4.6%  interp.js:448  STORE
+```
+
+### 两个原因，量级不同
+
+1. **整数是 BigInt**（`F.v[i] = 0n`、`W32 = BigInt.asIntN(32, x)`）。BigInt 的每一次
+   运算都在**堆上分配**一个对象 —— 那 21% 的 libnode 就是它加上 GC。这是**量级**那一档
+   （2～5 倍），而不是常数因子。
+   要动它得先答一个问题：i32 用 Number 表示之后，回绕（`asIntN(32)`）、无符号比较、
+   与线性内存 / libc 边界上的换算，各处都得跟着改 —— 而这条腿的身份是 **oracle**
+   （它给的答案是别的腿的标准），所以「快一点」不能换来「答案不一样」。
+2. **每执行一次就在字符串上 switch**：`binOp(op, kind, a, b)` 先比两次 `kind` 再 switch
+   `op`。这是**常数因子**那一档（估 10～20%）：闭包在**编译期**就该把那一格运算挑好
+   （`bin32` 已经按类型分了一次，但 op 还是运行期挑）。
+
+### 基线该是什么
+
+用户给的口径：**编译成 JS 之后的执行速度**。这条口径对 C 现在还落不下来 ——
+C 的终点是 MIR，而 `backend-js` 吃的是 OIR，中间没有那一段。所以要么
+(a) 拿 `.sx`/`.omni` 写同一个算法，量「JS 后端 vs MIR 解释器」的比值；
+要么 (b) 给 MIR 加一条 JS 后端。**(a) 是量，(b) 是新腿** —— 先量再定。
+
+<!-- ADR-0013 MIR解释器profile-END -->
