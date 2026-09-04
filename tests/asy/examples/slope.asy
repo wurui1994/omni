@@ -31,7 +31,11 @@ real[] G(real t, real[] y) {
 
 real lambda=sqrt(0.5);
 real[] tau,error,error2;
-int n=25;
+// OMNI 改过：原例是 n=25。这一格是**指数**的：`dt=(b-a)*lambda^(n-i)`、lambda=sqrt(0.5)，
+// 所以 i 小的时候步长小到 2^-12，而每一轮还要再做一次步长 1e-2*dt 的"精确解"积分
+// （步数再多 100 倍）。真 asy 自己在这台机器上就要 >5s（串行量到 5028ms），缩到 12 之后
+// 曲线还是同一条（少了最左边那几个点），两侧跑**同一份**源码，对照仍成立。
+int n=12;
 
 real order=3;
 
