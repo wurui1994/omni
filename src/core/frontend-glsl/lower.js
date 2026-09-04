@@ -563,8 +563,11 @@ class GlslLowerer {
     if (rm !== undefined && !(name === 'atan' && args.length === 2)) {
       const out = [];
       for (let i = 0; i < wide; i++) {
-        const xs = args.map((_, k) => at(k, i)).join(' ');
-        out.push(this.let_(ct, `(rmath "${rm}" ${xs})`));
+        /* 这儿刻意**不写** `args.map((_, k) => at(k, i))`：那是**真**捕获了 `for` 的循环
+         * 变量（JS 的 `let` 每轮一个新绑定，C 那边不是），自编译那侧骂得对。显式循环取。 */
+        const lane = [];
+        for (let k = 0; k < args.length; k++) lane.push(at(k, i));
+        out.push(this.let_(ct, `(rmath "${rm}" ${lane.join(' ')})`));
       }
       return out;
     }

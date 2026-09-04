@@ -2409,6 +2409,42 @@ bound(fn) = 形参 + fn 自己声明的名字（不含内层函数里声明的�
 
 <!-- ADR-0019 撑大子集开工单-END -->
 
+## 落地：子集撑大了 —— GLSL 前端自编译债 **19 -> 0**，一个变量名都没改
+
+按上一节那张单子做的，动的是 `frontend-js/lower.js`：
+
+- 新增 `shallowRefs` / `declNamesLocal` / `boundNames` / `directNestedFns` / `freeNames`
+  —— 自由变量那一问（约 60 行，含注释）。
+- `forStmt()` 的拒绝从「循环变量是不是 cell」改成「**这个循环体（含 test/update）里**的
+  闭包有没有真的自由引用它」。cell 分配一个字没动 —— 它保守是对的，只是不该接硬拒绝。
+
+结果：
+
+- `pp.js` / `check.js` / `emit_llvm.js` / `lower.js` 自编译债**全部 0**。
+- 三个探针的行为正好反过来了：内层闭包自带同名局部量的那个**不再骂**（假红没了），
+  真捕获的那个**照旧骂**，body-local const 那个照旧过。
+- `lower.js` 里剩的最后 1 条是**真捕获**（`args.map((_, k) => at(k, i))`），照 `emit_llvm.js`
+  同一个改法换成显式内层循环 —— 这一处不是「迁就子集」，那是 `let` 每轮一个新绑定
+  与 C 不一致的真隐患，骂得对。
+
+### 门
+
+- 棘轮 **4/0**（重名 0、`import * as` 0、缺 op 8、没有第四类）
+- glsl 14/14、js-roundtrip 226/0、js-exec 绿、glr 20/0
+- mir / incr / bootstrap 照旧红，**红的理由与改动无关**：逐条数过，只有那 5 个
+  `stdoutBytes`/`stderrBytes`/`readBinary`/`writeBinary`/`removeFile`
+  「不在原生宿主面里」—— 就是棘轮盯的那 8 处旧债
+
+### 棘轮当场抓到我一处新债
+
+新加的 `declNames` 与 `link.js` 里那个同名 —— 模块作用域的名字在整份程序里唯一，
+棘轮第一条断言（`重名 多了：0 -> 1`）当场就红，还指出了是哪两个文件。改名
+`declNamesLocal` 之后回到 4/0。**这一条本来就是它存在的理由**：不许出现新债，也不许
+出现新类别。
+
+<!-- ADR-0019 子集撑大了-END -->
+
+
 
 
 

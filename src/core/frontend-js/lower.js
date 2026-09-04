@@ -129,6 +129,80 @@ function capturedNames(stmts) {
   return out;
 }
 
+/* ---- 精确那一问：这个名字**真的**被内层闭包捕获了吗（只有 `for` 那条拒绝用它） ----
+ *
+ * 上面那几个是**保守**的（宁可多算），对 cell 分配无害 —— 多一个 cell 只是多一层下标。
+ * 但 `forStmt()` 把这个保守结论接到了一条**硬拒绝**上，保守 + 硬拒绝 = 假红。
+ * 量到过（十二行复现）：内层闭包里只要有个**同名**的局部量，外层那个循环变量就被骂
+ * 「被闭包捕获」，而那个循环体里一个闭包都没有。
+ *
+ * 所以拒绝那一条问的是**自由变量**：
+ *
+ *   free(fn) = ( fn 体内、不进内层函数的标识符 ∪ ⋃ free(g) ) - bound(fn)
+ *   bound(fn) = 形参 + fn 自己声明的名字（**不含**内层函数里声明的）
+ *
+ * 过度估计的方向要挑对：`bound` 少收一个 -> `free` 多一个 -> 可能假红（只是烦）；
+ * `bound` 多收一个 -> `free` 少一个 -> **漏掉真捕获，语义会错**。所以 `bound` 只收
+ * 明摆着是绑定的那些，拿不准的一律不收。
+ */
+
+const isFnNode = (n) => n.type === 'Arrow' || n.type === 'FuncExpr' || n.type === 'FuncDecl';
+
+/** 子树里的标识符，**遇到内层函数就停**。 */
+function shallowRefs(node, out = new Set(), top = true) {
+  if (!node || typeof node !== 'object') return out;
+  if (!top && isFnNode(node)) return out;
+  if (node.type === 'Ident' && typeof node.name === 'string') out.add(node.name);
+  eachChild(node, (x) => shallowRefs(x, out, false));
+  return out;
+}
+
+/** 子树里的**声明名**，遇到内层函数就停（但那个函数自己的名字要收 —— 它绑在外面）。
+ *
+ * 名字里带 `Local` 是因为 `link.js` 已经有一个 `declNames` —— 模块作用域的名字在整份
+ * 程序里唯一（棘轮的第一条断言就是它，这一处当场被抓到过）。 */
+function declNamesLocal(node, out, sink, top = true) {
+  if (!node || typeof node !== 'object') return out;
+  if (node.type === 'FuncDecl' && typeof node.id === 'string') out.add(node.id);
+  if (node.type === 'ClassDecl' && typeof node.id === 'string') out.add(node.id);
+  if (!top && isFnNode(node)) return out;
+  if (node.type === 'VarDecl' && Array.isArray(node.decls)) {
+    for (const d of node.decls) for (const n of patternNames(d.id, sink, node.span)) out.add(n);
+  }
+  if (node.param && (node.type === 'Catch' || node.type === 'CatchClause')) {
+    for (const n of patternNames(node.param, sink, node.span)) out.add(n);
+  }
+  eachChild(node, (x) => declNamesLocal(x, out, sink, false));
+  return out;
+}
+
+/** `fn` 自己绑的名字。`sink` 吞掉诊断：这一问不报错，拿不准的名字宁可不收。 */
+function boundNames(fn) {
+  const out = new Set();
+  const sink = { err() {} };
+  for (const p of fn.params ?? []) for (const n of patternNames(p, sink, fn.span)) out.add(n);
+  if (typeof fn.id === 'string') out.add(fn.id);
+  declNamesLocal(fn.body, out, sink);
+  return out;
+}
+
+/** 直接嵌在 `fn` 里的那些函数（不含 `fn` 自己）。 */
+function directNestedFns(fn) {
+  const out = [];
+  eachChild(fn, (x) => nestedFns(x, out));
+  return out;
+}
+
+/** `fn` 里**自由**出现的名字。 */
+function freeNames(fn, out = new Set()) {
+  const bound = boundNames(fn);
+  const mine = shallowRefs(fn);
+  for (const g of directNestedFns(fn)) freeNames(g, mine);
+  for (const n of mine) if (!bound.has(n)) out.add(n);
+  return out;
+}
+
+
 /**
  * 这个**源码层**的语句会不会把控制流带走（switch 的穿透检查用）。
  * 带花括号的 case 体（`case 'x': { …; return 0; }`）是一个 Block，所以要往里看一层；
@@ -911,8 +985,16 @@ class Lower {
     }
     // `for (let i = …)` 的绑定在 JS 里是**每轮一个新的**，而这里的循环变量只有一个 cell。
     // 闭包捕获它就会两边（其实是和 JS 自己）分叉，所以直接拒绝，不悄悄给出 var 的语义。
-    for (const [n, ent] of this.fn.scopes[this.fn.scopes.length - 1]) {
-      if (ent.kind === 'cell') {
+    //
+    // 问的是**自由变量**（`freeNames` 上面那段）：从前这儿看的是 `ent.kind === 'cell'`，
+    // 而 cell 是**保守**算出来的 —— 内层闭包里有个同名局部量就够让外层循环变量变 cell，
+    // 于是「体里一个闭包都没有」的循环也会被骂。保守分析不该接到硬拒绝上。
+    const capturedHere = new Set();
+    for (const part of [s.body, s.test, s.update]) {
+      for (const g of nestedFns(part)) freeNames(g, capturedHere);
+    }
+    for (const [n] of this.fn.scopes[this.fn.scopes.length - 1]) {
+      if (capturedHere.has(n)) {
         this.err(s.span, `'${n}' is a for-loop variable captured by a closure; copy it into a body-local const first`);
       }
     }
