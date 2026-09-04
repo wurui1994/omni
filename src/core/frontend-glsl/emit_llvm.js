@@ -404,6 +404,11 @@ class GlslLlvmEmitter {
       return;
     }
     if (s.k === 'expr') { this.expr(s.e); return; }
+    /* 一条声明里多个变量（B15）：几条 `decl` 挨着走，**不压作用域**。 */
+    if (s.k === 'multi') {
+      for (const d of s.list) this.stmt(d);
+      return;
+    }
     if (s.k === 'decl') {
       /* SSA：局部量就是「当前那几格值」。没有 `alloca` —— 这一片不收循环里的赋值，
        * 所以不需要 phi（要收的时候连着循环一起做，见开工单第 2 步的「for 只收常量次数」）。 */

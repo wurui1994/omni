@@ -413,5 +413,27 @@ float probe(int k) { vec2 s[2]; return s[2].x; }`, '取不到第 2 格');
 rejects('数组摊平格数超上限', `
 float probe(int k) { mat4 big[4]; return big[0][0].x; }`, '超过 32');
 
+/* ---- 十二、一条声明里多个变量（施工图 B15）-------------------------------------------
+ *
+ * 合成产物里那 4 行的形状（`float lo = m[0].x, hi = m[cnt - 1].y;`）。要紧的一格是
+ * **次序**：前一个的名字对后一个是可见的，所以第二条用例拿 `a` 去算 `b`。 */
+
+probe('一条声明里三个变量', `
+float probe(int k) {
+  float a = 1.0, b = 2.0, c = 4.0;
+  return a + b * 10.0 + c * 100.0;
+}`, [0], () => 1 + 20 + 400);
+
+probe('后一个能用前一个（次序）', `
+float probe(int k) {
+  vec2 m[2];
+  m[0] = vec2(3.0, 5.0); m[1] = vec2(7.0, 11.0);
+  float lo = m[0].x, hi = m[k].y, mid = lo + hi;
+  return mid;
+}`, [0, 1], (k) => 3 + [5, 11][k]);
+
+rejects('一条声明里两个变量类型不合', `
+float probe(int k) { float a = 1.0, b = vec2(1.0); return a + b; }`, '要一个 float');
+
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail > 0 ? 1 : 0);

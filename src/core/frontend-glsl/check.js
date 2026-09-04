@@ -667,6 +667,24 @@ class GlslChecker {
       this.declare(name, ty, node);
       return { k: 'decl', name, ty, init: null, isConst: false };
     }
+    /* 一条声明里多个变量（B15）：`float lo = m[0].x, hi = m[cnt - 1].y;`。
+     * 摊成一串 `decl` —— 次序要紧：前一个的名字对后一个**是可见的**（GLSL 与 C 同规矩），
+     * 所以一边 `declare` 一边往下走，不是先收齐名字再算初值。 */
+    if (h === 'local-multi') {
+      const ty = this.tyOf(node.items[1]);
+      const first = glslAtom(node.items[2]);
+      const list = [];
+      const init0 = this.coerce(this.expr(node.items[3]), ty, node);
+      this.declare(first, ty, node);
+      list.push({ k: 'decl', name: first, ty, init: init0, isConst: false });
+      for (const m of glslFlatten(node.items[4], 'more-add', 'more')) {
+        const nm = glslAtom(m.items[1]);
+        const init = this.coerce(this.expr(m.items[2]), ty, m);
+        this.declare(nm, ty, m);
+        list.push({ k: 'decl', name: nm, ty, init, isConst: false });
+      }
+      return { k: 'multi', list };
+    }
     if (h === 'ret') {
       const f = this.curFunc;
       if (f.ret.k === 'void') throw this.err(node, `${f.name} 是 void，return 不能带值`);

@@ -1107,6 +1107,12 @@ class GlslLowerer {
       return;
     }
     if (s.k === 'expr') { this.expr(s.e); return; }
+    /* 一条声明里多个变量（B15）：就是几条 `decl` 挨着走。**不压作用域** ——
+     * 那几个名字绑在当前这一层，跟单个声明一样。 */
+    if (s.k === 'multi') {
+      for (const d of s.list) this.stmt(d);
+      return;
+    }
     if (s.k === 'decl') {
       const n = glslNComp(s.ty);
       /* 按格取类型：结构体的分量类型不是一种（`glslCompTys` 上面那段）。 */

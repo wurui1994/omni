@@ -228,6 +228,14 @@ const SHAPES = [
       && s.includes('(index (name s) (int-lit 0))')
       && s.includes('(index (name s) (name i))'),
   },
+  /* 一条声明里多个变量（B15）—— 合成产物里那 4 行的形状。 */
+  {
+    name: '一条声明里三个变量',
+    src: 'void main() { float a = 1.0, b = 2.0, c = 3.0; }\n',
+    want: (s) => s.includes('(local-multi (ty-float) a (float-lit 1.0)')
+      && s.includes('(one b (float-lit 2.0))')
+      && s.includes('(one c (float-lit 3.0))'),
+  },
 ];
 
 for (const c of SHAPES) {
