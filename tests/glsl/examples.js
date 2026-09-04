@@ -118,10 +118,24 @@ function pngRgba(path) {
 rmSync(OUT, { recursive: true, force: true });
 mkdirSync(OUT, { recursive: true });
 
-/* PRESETS 那份是 CommonJS（`module.exports = …`），所以要走 `default`。 */
-const mod = await import(MATH);
-const presets = (mod.default ?? mod).PRESETS;
-if (!Array.isArray(presets)) {
+/**
+ * 取 PRESETS。走**另一个 node 进程**印一份 JSON，而不是在这儿 `await import(…)` ——
+ * 两个理由：
+ *   1. `grapheq-math.js` 是 CommonJS（`module.exports = …`），`import()` 回来的形状
+ *      要看互操作（这儿得写 `.default`），而 `require` 那一侧没有这个不确定；
+ *   2. **动态 `import()` 不在自编译子集里**（`tests/js-roundtrip` 会红），而这一门自己
+ *      也在那条轴上。第一版就是那么写的，`js-roundtrip` 当场抓出来了。
+ */
+function loadPresets() {
+  const src = 'const M = require(process.argv[1]);'
+    + ' process.stdout.write(JSON.stringify(M.PRESETS ?? []));';
+  const r = spawnSync('node', ['-e', src, MATH], { encoding: 'utf8', maxBuffer: 1 << 24 });
+  if (r.status !== 0) return null;
+  return JSON.parse(r.stdout);
+}
+
+const presets = loadPresets();
+if (presets === null || !Array.isArray(presets) || presets.length === 0) {
   bad('取 PRESETS', '    grapheq-math.js 没给出 PRESETS');
   process.exit(1);
 }

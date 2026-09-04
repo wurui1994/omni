@@ -152,6 +152,9 @@ class GlslLlvmEmitter {
     this.contPtr = null;        // continue（当前最内层循环）
     this.retPtr = null;         // return（当前函数）
     this.labels = 0;            // 基本块编号
+    /* 落点读缓存的世代（见 `loadVar`）。每发一条 `br` / 一个标签就 +1 —— 缓存住的是
+     * SSA 值，跨基本块不能用。 */
+    this.epoch = 0;
     this.fnByName = new Map();  // 用户函数（内联用）
     for (const f of mod.funcs) this.fnByName.set(f.name, f);
     this.inlining = [];         // 正在内联的函数名（GLSL 不许递归，撞上就骂）
@@ -186,6 +189,8 @@ class GlslLlvmEmitter {
   /** 开 N 个落点（每格一个 `alloca`），回一个 `{ kind:'var', ptrs, tys }`。 */
   allocVar(name, tys, init) {
     const ptrs = [];
+    const cache = [];
+    const ep = [];
     for (let i = 0; i < tys.length; i++) {
       const p = `%p${this.n + 1}_${name.replace(/[^A-Za-z0-9_]/g, '_')}`;
       this.n++;
@@ -196,15 +201,36 @@ class GlslLlvmEmitter {
       const raw = init === null ? llZero(tys[i]) : (init.length === 1 ? init[0] : init[i]);
       const v = tys[i] === 'f' ? this.toF(raw) : tys[i] === 'i' ? this.toI(raw) : this.toB(raw);
       this.body.push(`  store ${llTy(tys[i])} ${v.v}, ptr ${p}, align 32`);
+      /* 刚写进去的就是这一格现在的内容 —— 记下来，下一次读不必再 load。 */
+      cache.push(v);
+      ep.push(this.epoch);
     }
-    return { kind: 'var', ptrs, tys };
+    return { kind: 'var', ptrs, tys, cache, ep };
   }
 
-  /** 从落点读出那几格。 */
+  /**
+   * 从落点读出那几格。**同一个基本块里读过一次就不再 load**。
+   *
+   * 为什么这么做：量出来 `load` 占发出去的 IR 的三成（`hair` 82354 行里 25814 条），
+   * 而 JIT 的代价是按行线性的。gallivm 那一侧本来就不是每读一次就 load ——
+   * 它把 SSA 值存在 `lp_bld_nir` 的 `ssa_defs` 表里，只有真正的变量才落 `alloca`。
+   * 所以这一格是**更靠近**它，不是更远。
+   *
+   * 为什么按 `epoch` 失效：缓存住的是一条 **SSA 值**，而 SSA 值只在它自己那个基本块
+   * （及被它支配的块）里能用。循环的回边一过，上一轮那条值就不支配这一轮了 ——
+   * 所以每发一条 `br` 或一个标签，`epoch` 就 +1，跨块的缓存一律作废。
+   * 掩码那三层（`brk`/`cont`/`ret`）不走这条路，它们在 `update()` 里照旧每次 load。
+   */
   loadVar(b) {
     const out = [];
     for (let i = 0; i < b.ptrs.length; i++) {
-      out.push(this.emit(`load ${llTy(b.tys[i])}, ptr ${b.ptrs[i]}, align 32`, b.tys[i]));
+      if (b.cache !== undefined && b.ep[i] === this.epoch && b.cache[i] !== null) {
+        out.push(b.cache[i]);
+        continue;
+      }
+      const v = this.emit(`load ${llTy(b.tys[i])}, ptr ${b.ptrs[i]}, align 32`, b.tys[i]);
+      if (b.cache !== undefined) { b.cache[i] = v; b.ep[i] = this.epoch; }
+      out.push(v);
     }
     return out;
   }
@@ -216,12 +242,28 @@ class GlslLlvmEmitter {
     const val = t === 'f' ? this.toF(valc) : t === 'i' ? this.toI(valc) : this.toB(valc);
     if (this.execMask === null) {
       this.body.push(`  store ${tt} ${val.v}, ptr ${b.ptrs[ix]}, align 32`);
+      if (b.cache !== undefined) { b.cache[ix] = val; b.ep[ix] = this.epoch; }
       return;
     }
-    const old = this.emit(`load ${tt}, ptr ${b.ptrs[ix]}, align 32`, t);
+    const old = this.loadVar1(b, ix);
     const c = this.maskToI1(this.execMask);
     const res = this.emit(`select ${LL_B} ${c.v}, ${tt} ${val.v}, ${tt} ${old.v}`, t);
     this.body.push(`  store ${tt} ${res.v}, ptr ${b.ptrs[ix]}, align 32`);
+    /* 写回去的那条值就是这一格现在的内容（`select` 已经把掩码折进去了）。 */
+    if (b.cache !== undefined) { b.cache[ix] = res; b.ep[ix] = this.epoch; }
+  }
+
+  /** 读一格（`maskStore` 里那个「读旧值」也走缓存）。 */
+  loadVar1(b, ix) {
+    if (b.cache !== undefined && b.ep[ix] === this.epoch && b.cache[ix] !== null) return b.cache[ix];
+    const v = this.emit(`load ${llTy(b.tys[ix])}, ptr ${b.ptrs[ix]}, align 32`, b.tys[ix]);
+    if (b.cache !== undefined) { b.cache[ix] = v; b.ep[ix] = this.epoch; }
+    return v;
+  }
+
+  /** 发一条 `br` 或一个标签之后调它：跨基本块的 SSA 缓存一律作废。 */
+  blockEdge() {
+    this.epoch++;
   }
 
   /* ------------------------------------------------ 掩码：`lp_exec_mask` 的那几层
@@ -857,6 +899,7 @@ class GlslLlvmEmitter {
     const end = this.label('endloop');
     this.body.push(`  br label %${head}`);
     this.body.push(`${head}:`);
+    this.blockEdge();
     /* 每一轮开头把 cont 清掉 —— 它只管这一轮（`lp_exec_endloop` 也是在这儿重置的）。 */
     this.body.push(`  store ${LL_I} zeroinitializer, ptr ${cont}, align 32`);
     this.brkPtr = brk;
@@ -877,6 +920,7 @@ class GlslLlvmEmitter {
     const any = this.anyActive(this.aliveMask(brk));
     this.body.push(`  br i1 ${any.v}, label %${head}, label %${end}`);
     this.body.push(`${end}:`);
+    this.blockEdge();
     this.brkPtr = outerBrk;
     this.contPtr = outerCont;
     this.update();
