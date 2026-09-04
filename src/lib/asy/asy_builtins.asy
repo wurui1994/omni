@@ -1789,6 +1789,9 @@ struct drawop {
   // 这一格是**上一格填充的续**（`fill(f, path[] g, p)` 拆出来的第 2..n 条）：
   // 出图时不发 newpath、也不发笔与 fill，攒到这一组最后一条再发。见 emitop。
   bool merge = false;
+  // 位图（kind == 5，`_image`）：像素按行存，**行 0 是下边那一行**（PostScript 的 image
+  // 第一条扫描线落在 ImageMatrix 的 y=0 上）。目标平行四边形躺在 `g` 的四个结点上。
+  pen[][] img;
 }
 
 struct picture {
@@ -2919,6 +2922,133 @@ void emitshade(drawop o, real s) {
   grestorepen();
 }
 
+/* ---------------------------------------------------------------- 位图那一格
+ * `_image(…)` 出图。结构照 dvips 出来的参考**逐字抄**（`.omni-cache/epsref/laserlattice.eps`
+ * 那一块，asy 三维那一族嵌进去的图也是同一块，只是 W/H 与 concat 矩阵不同）：
+ *
+ *   gsave
+ *   [ a b c d tx ty] concat            % 单位正方形 -> 目标平行四边形
+ *   /DeviceRGB setcolorspace
+ *   << /ImageType 1 /Width W /Height H /BitsPerComponent 8 /Decode [0 1 0 1 0 1 ]
+ *      /ImageMatrix [W 0 0 H 0 0]
+ *      /DataSource currentfile 1 (~>) /SubFileDecode filter /ASCII85Decode filter >>
+ *   image
+ *   <ASCII85 的字节…>~>
+ *   grestore
+ *
+ * **Flate 那一行我们不发**：`/ASCII85Decode` 单独就是合法的 EPS，字节数约是原始像素的
+ * 1.25 倍（与参考同一量级）。参考那边多一层 `/FlateDecode`，所以那一段数据两边**逐字节
+ * 对不上是必然的** —— 位图那一档的判据本来就得是"解出来比像素"，不是比 token（ADR-0014）。
+ *
+ * 第一条扫描线落在 `ImageMatrix` 的 y=0 上，也就是**下**边那一行：`data[0]` 先发
+ * （asy 的 `image(real[][] f, …)` 里 f[0] 也是最下面那一行，palette.asy 不翻转）。
+ */
+private string asy__a85tab =
+  "!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstu";
+
+private int asy__b255(real v) {
+  int k = round(v * 255);
+  if (k < 0) return 0;
+  if (k > 255) return 255;
+  return k;
+}
+
+// 一格 pen -> 三个字节（DeviceRGB）。灰与 cmyk 先换成 rgb：那块图的色空间是
+// /DeviceRGB，一格一格换比在字典里换色空间省事，而且与 `colorof` 那一份口径一致。
+private int[] asy__pixrgb(pen p) {
+  int[] o;
+  if (p.iscmyk) {
+    o.push(asy__b255((1 - p.cyan) * (1 - p.black)));
+    o.push(asy__b255((1 - p.magenta) * (1 - p.black)));
+    o.push(asy__b255((1 - p.yellow) * (1 - p.black)));
+    return o;
+  }
+  if (p.isrgb) {
+    o.push(asy__b255(p.red));
+    o.push(asy__b255(p.green));
+    o.push(asy__b255(p.blue));
+    return o;
+  }
+  o.push(asy__b255(p.gray));
+  o.push(asy__b255(p.gray));
+  o.push(asy__b255(p.gray));
+  return o;
+}
+
+// 4 个字节 -> 5 个字符（85 进制，高位先出）。`n` 是这一组真有几个字节：不足 4 的那一组
+// 按 0 补齐、只发 n+1 个字符（PostScript 的 ASCII85 就是这条），而且**不缩成 z**。
+private string asy__a85grp(int b0, int b1, int b2, int b3, int n) {
+  int v = ((b0 * 256 + b1) * 256 + b2) * 256 + b3;
+  if (n == 4 && v == 0) return "z";
+  int c4 = v % 85; v = v # 85;
+  int c3 = v % 85; v = v # 85;
+  int c2 = v % 85; v = v # 85;
+  int c1 = v % 85; v = v # 85;
+  string s = substr(asy__a85tab, v, 1) + substr(asy__a85tab, c1, 1)
+    + substr(asy__a85tab, c2, 1) + substr(asy__a85tab, c3, 1)
+    + substr(asy__a85tab, c4, 1);
+  return substr(s, 0, n + 1);
+}
+
+// 像素流 -> 一行一行印出去（末尾那句 `~>` 是 SubFileDecode 的结束记号）
+private void asy__emitpixels(pen[][] data, int w, int h) {
+  string line = "";
+  int[] g = new int[4];
+  int gn = 0;
+  for (int j = 0; j < h; ++j) {
+    pen[] row = data[j];
+    for (int i = 0; i < w; ++i) {
+      int[] px = asy__pixrgb(row[i]);
+      for (int k = 0; k < 3; ++k) {
+        g[gn] = px[k];
+        gn = gn + 1;
+        if (gn == 4) {
+          line = line + asy__a85grp(g[0], g[1], g[2], g[3], 4);
+          gn = 0;
+          if (length(line) >= 76) { asy__out(line); line = ""; }
+        }
+      }
+    }
+  }
+  if (gn > 0) {
+    for (int k = gn; k < 4; ++k) g[k] = 0;
+    line = line + asy__a85grp(g[0], g[1], g[2], g[3], gn);
+  }
+  asy__out(line + "~>");
+}
+
+// 一格位图（kind == 5）。目标矩形躺在 `o.g` 的前四个结点上（P00 -- P10 -- P11 -- P01），
+// 于是 concat 的矩阵就是"把单位正方形送到这四个角"的那一个 —— 旋转过的图（参考里
+// laserlattice 那块就是）跟着白捡。`s` 是出图那一层的缩放，与 emitpath 同一个口径。
+private void asy__emitimg(drawop o, real s) {
+  pen[][] d = o.img;
+  int h = d.length;
+  if (h == 0) return;
+  int w = d[0].length;
+  if (w == 0) return;
+  pair p00 = o.g.nodes[0].point * s;
+  pair p10 = o.g.nodes[1].point * s;
+  pair p01 = o.g.nodes[3].point * s;
+  pair ax = p10 - p00;
+  pair ay = p01 - p00;
+  asy__out("gsave");
+  asy__out("[" + ps6(ax.x) + " " + ps6(ax.y) + " " + ps6(ay.x) + " " + ps6(ay.y)
+    + " " + ps6(p00.x) + " " + ps6(p00.y) + "] concat");
+  asy__out("/DeviceRGB setcolorspace");
+  asy__out("<<");
+  asy__out("/ImageType 1");
+  asy__out("/Width " + string(w));
+  asy__out("/Height " + string(h));
+  asy__out("/BitsPerComponent 8");
+  asy__out("/Decode [0 1 0 1 0 1 ]");
+  asy__out("/ImageMatrix [" + string(w) + " 0 0 " + string(h) + " 0 0]");
+  asy__out("/DataSource currentfile 1 (~>) /SubFileDecode filter /ASCII85Decode filter");
+  asy__out(">>");
+  asy__out("image");
+  asy__emitpixels(d, w, h);
+  asy__out("grestore");
+}
+
 // 一格 drawop 的 EPS（shipout(picture) 与 _shipout(frame) 共用；两处只有缩放不同）
 //
 // `cont`/`last` 是**一组填充**里的位置（见 drawop.merge）：asy 那边 `fill(f, path[] g, p)`
@@ -2927,6 +3057,7 @@ void emitshade(drawop o, real s) {
 // 于是靠这两个标记把一组重新拼回去：中间那些只攒路径，笔与 `fill`/`eofill` 留到最后一条。
 void emitop(drawop o, real s, bool cont = false, bool last = true) {
   if (o.kind == 2) { emitshade(o, s); return; }
+  if (o.kind == 5) { asy__emitimg(o, s); return; }
   // 裁剪的两格（drawclipbegin.h:52 / drawclipend.h:45）：`gsave` + 超路径 + clip，
   // 配对的那一格只发 `grestore`。空路径时只有 gsave / grestore（那份 C++ 的 `empty()` 那一支）。
   if (o.kind == 3) {
@@ -5851,6 +5982,9 @@ frame operator *(transform t, frame f) {
     q.sh = asy__shtrans(t, o.sh);
     // endclip 那一对省不省 gsave/grestore 是**这一帧自己的形状**决定的，与变换无关
     q.nosave = o.nosave;
+    // 位图（kind == 5）：像素**不跟着变**，变的只有那四个角（`g`）—— concat 的矩阵是从
+    // 变换后的四个角算出来的（见 asy__emitimg），所以旋转/翻转跟着白捡。
+    q.img = o.img;
     // 笔只吃**去掉平移**的那一半（drawelement.h:302 `transformed(shiftless(t),pentype)`）——
     // 量过：`min(shift(3,4)*f)` 是路径搬过去再 ±0.25，笔那一格没有跟着平移。
     // 渐变那一档例外：drawfill.cc 的几个 `transformed` 传 pentype 原件，不过一遍 transpen。
@@ -8808,24 +8942,74 @@ void _labelpath(frame f, string s, string size, path g, string justify,
   abort("_labelpath 还没做（沿路径排字要真的 TeX 输出层）");
 }
 
+// 一格位图进 frame（这一刀）。有效变换是 `t * matrix(initial, final)`
+// —— runpicture.in:395-411 三个重载都是这么拼的，而 drawimage.h:26 的界用的正是
+// `t*(0,0)` 与 `t*(1,1)`，也就是说 initial/final 只用来**造那个变换**。
+// 四个角都算出来（不只两个）：旋转过的图（laserlattice 参考里那块就是）跟着白捡。
+private void asy__imgop(frame f, pen[][] data, pair initial, pair final, transform t) {
+  int h = data.length;
+  if (h == 0) return;
+  if (data[0].length == 0) return;
+  pair p00 = t * initial;
+  pair p10 = t * (final.x, initial.y);
+  pair p11 = t * final;
+  pair p01 = t * (initial.x, final.y);
+  drawop o;
+  o.kind = 5;
+  o.g = p00--p10--p11--p01--cycle;
+  o.p = currentpen;
+  o.img = data;
+  f.ops.push(o);
+}
+
+// 值 -> 色板那一格的映射照 psfile.cc:604 抄：`step = (色板格数-1)/(max-min)`，
+// 下标是 `(int)((v-min)*step)`（截断），两头夹住。空色板按 min..max 铺灰。
 void _image(frame f, real[][] data, pair initial, pair final,
             pen[] palette = new pen[], transform t = identity(), bool copy = true,
             bool antialias = false)
 {
-  abort("_image 还没做（图像要真的输出层）");
+  int h = data.length;
+  if (h == 0) return;
+  int w = data[0].length;
+  if (w == 0) return;
+  real mn = data[0][0];
+  real mx = mn;
+  for (int i = 0; i < h; ++i)
+    for (int j = 0; j < w; ++j) {
+      real v = data[i][j];
+      if (v > mx) mx = v;
+      else if (v < mn) mn = v;
+    }
+  pen[][] px = new pen[h][w];
+  int n = palette.length;
+  real sp = mx == mn ? 0 : (n == 0 ? 1 : n - 1) / (mx - mn);
+  for (int i = 0; i < h; ++i)
+    for (int j = 0; j < w; ++j) {
+      real u = (data[i][j] - mn) * sp;
+      if (n == 0) { px[i][j] = gray(u); continue; }
+      int k = (int) u;
+      if (k < 0) k = 0;
+      if (k >= n) k = n - 1;
+      px[i][j] = palette[k];
+    }
+  asy__imgop(f, px, initial, final, t);
 }
 
 void _image(frame f, pen[][] data, pair initial, pair final,
             transform t = identity(), bool copy = true, bool antialias = false)
 {
-  abort("_image 还没做（图像要真的输出层）");
+  asy__imgop(f, data, initial, final, t);
 }
 
 void _image(frame f, pen F(int, int), int width, int height,
             pair initial, pair final, transform t = identity(),
             bool antialias = false)
 {
-  abort("_image 还没做（图像要真的输出层）");
+  if (width <= 0 || height <= 0) return;
+  pen[][] px = new pen[height][width];
+  for (int j = 0; j < height; ++j)
+    for (int i = 0; i < width; ++i) px[j][i] = F(i, j);
+  asy__imgop(f, px, initial, final, t);
 }
 
 /* ---------------------------------------------------------------- 第六十七刀
