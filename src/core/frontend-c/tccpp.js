@@ -1161,7 +1161,15 @@ export class Cpp {
   /** `__LINE__` / `__FILE__` / `__COUNTER__`（`tccpp.c:3363-3400`） */
   substSpecial(out, v) {
     if (v === TOK___LINE__ || v === TOK___COUNTER__) {
-      const n = v === TOK___LINE__ ? this.file.lineNum : this.ppCounter++;
+      /* `ppCounter++` 摊到语句上：三目的分支是**惰性求值**的位置，那儿的副作用要一个
+         临时量才降得下去（自编译子集的规矩）。只有 `__COUNTER__` 那一支才动它。 */
+      let n = 0;
+      if (v === TOK___LINE__) {
+        n = this.file.lineNum;
+      } else {
+        n = this.ppCounter;
+        this.ppCounter++;
+      }
       out.add2Spc(TOK_PPNUM, String(n));
       return;
     }

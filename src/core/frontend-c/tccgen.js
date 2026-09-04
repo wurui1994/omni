@@ -2403,6 +2403,8 @@ export class CGen {  /**
       this.f = scratch;
       let k = null;
       let fix = null;
+      /* 收尾（`this.f = outer`）**抄在两条路上**而不是写一个 `finally`：
+         `finally` 不在自编译子集里（ADR-0011），而这一格的收尾只有一句。 */
       try {
         const v = this.decay(this.exprEq());
         const kaddr = v.mem !== null ? this.kintOf(v.mem.addr) : null;
@@ -2421,8 +2423,10 @@ export class CGen {  /**
            * 落在暂存区里，算出来的是那一块里的一个地址。 */
           if (k !== null && this.native) fix = this.anonFixOf(k);
         }
-      } finally {
         this.f = outer;
+      } catch (e) {
+        this.f = outer;
+        throw e;
       }
       if (fix !== null) {
         this.putSymBytes(dest.addr + off, fix);
@@ -4619,7 +4623,16 @@ export class CGen {  /**
       let defLevel = this.levelOf('break');
       let at = 0;
       for (let j = 0; j < sw.labels.length; j++) {
-        const lv = trampOf.has(j) ? trampOf.get(j) : caseAt[at++];
+        /* `at++` 不能写在三目的分支里：那一侧是**惰性求值**的位置，降级器要给它一个
+           临时量才行（自编译子集的规矩）。这儿把递增摊到语句上，语义一字不差 ——
+           只有走 `caseAt` 那一支才动 `at`。 */
+        let lv = 0;
+        if (trampOf.has(j)) {
+          lv = trampOf.get(j);
+        } else {
+          lv = caseAt[at];
+          at++;
+        }
         sw.labels[j].lv = lv;
         if (sw.labels[j].def) defLevel = lv;
       }
@@ -6482,11 +6495,16 @@ export class CGen {  /**
      * 把那段记号挂在类型上（tcc 的 `vla_array_str`），不当场发指令。 */
     const saveVla = this.vlaMode;
     this.vlaMode = 3;
+    /* 收尾抄在两条路上而不是写一个 `finally` —— 那个不在自编译子集里（ADR-0011）。 */
+    let out = null;
     try {
-      return this.funcParamsBody();
-    } finally {
+      out = this.funcParamsBody();
+    } catch (e) {
       this.vlaMode = saveVla;
+      throw e;
     }
+    this.vlaMode = saveVla;
+    return out;
   }
 
   funcParamsBody() {

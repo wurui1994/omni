@@ -1149,8 +1149,15 @@ export function elfExeImage(inp) {
           if (p < 0) take = false;
           else {
             const version = d[p++];
-            if ((version === 1 || version === 3) && d[p++] === 0x7a
-              && d[p++] === 0x52 && d[p++] === 0) {
+            /* 这一串本来是 `(v===1||v===3) && d[p++]===0x7a && d[p++]===0x52 && d[p++]===0`。
+               `&&` 右边是**惰性求值**的位置，那儿的 `p++` 要一个临时量才降得下去
+               （自编译子集的规矩）。摊成逐条 `if`：短路的语义与 `p` 前进的时机
+               都与原来一字不差 —— 每个 `p++` 各由自己那一条 `if` 挡着。 */
+            let cieOk = version === 1 || version === 3;
+            if (cieOk) cieOk = d[p++] === 0x7a;
+            if (cieOk) cieOk = d[p++] === 0x52;
+            if (cieOk) cieOk = d[p++] === 0;
+            if (cieOk) {
               uleb();                                        // code_alignment_factor
               uleb();                                        // data_alignment_factor（sleb）
               p++;                                           // 返回地址列
@@ -1326,10 +1333,17 @@ export function elfExeImage(inp) {
   /* 有 `.interp` 就多两个段头：0 号是 PT_PHDR、1 号是 PT_INTERP，PT_LOAD 从 2 号起。 */
   const phfill = INTERP >= 0 ? 2 : 0;
   phnum += phfill;
-  const dynaIdx = DYNA >= 0 ? phnum++ : 0;
-  const tlsIdx = tls ? phnum++ : 0;
-  const ehfrIdx = EHFH >= 0 ? phnum++ : 0;
-  const relroIdx = relro ? phnum++ : 0;
+  /* 这四格本来写成 `X ? phnum++ : 0`。三目的分支是**惰性求值**的位置，那儿的 `phnum++`
+     要一个临时量才降得下去（自编译子集的规矩）。摊成 `if`：号码与 `phnum` 的最终值
+     都与原来一字不差 —— 只有那一支成立时才占一个段头。 */
+  let dynaIdx = 0;
+  if (DYNA >= 0) { dynaIdx = phnum; phnum++; }
+  let tlsIdx = 0;
+  if (tls) { tlsIdx = phnum; phnum++; }
+  let ehfrIdx = 0;
+  if (EHFH >= 0) { ehfrIdx = phnum; phnum++; }
+  let relroIdx = 0;
+  if (relro) { relroIdx = phnum; phnum++; }
   const phdrs = [];
   for (let i = 0; i < phnum; i++) {
     phdrs.push({

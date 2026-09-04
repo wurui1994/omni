@@ -190,7 +190,8 @@ function declNamesLocal(node, out, sink, top = true) {
 /** `fn` 自己绑的名字。`sink` 吞掉诊断：这一问不报错，拿不准的名字宁可不收。 */
 function boundNames(fn) {
   const out = new Set();
-  const sink = { err() {} };
+  /* 写成属性里放一个箭头函数，不用方法简写 —— 对象字面量里的方法与访问器还没降。 */
+  const sink = { err: () => {} };
   for (const p of fn.params ?? []) for (const n of patternNames(p, sink, fn.span)) out.add(n);
   if (typeof fn.id === 'string') out.add(fn.id);
   declNamesLocal(fn.body, out, sink);
