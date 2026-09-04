@@ -2912,6 +2912,17 @@ class AsyLower {
     for (const [hnm, text] of HELPERS) {
       if (this.used.has(hnm) && !baseUsed.has(hnm)) weak.push(text);
     }
+    // `_mainname()` 那一格**无条件登记**（这一刀）。从前是"谁调它谁登记"（calls.js），
+    // 而调它的是 asy_builtins（outprefix 那一句）—— 库命中产物缓存的那一趟根本不降它，
+    // 于是 arrGen 里没这一格，下面那句 `(set asy__mainname_v …)` 就不发，名字留空。
+    // 空名字在 TeX 那条路上退成前缀 "t"（asy_builtins.asy:6903），产物正文里于是是
+    // `(t_.dvi)` 而参考是 `(<例子名>_.dvi)`。量出来的：examples 里 52 份只差这一处
+    // （42 份"1 处数值不同"整个是它）。判据是同一趟里 equilateral 对、Pythagoras 错 ——
+    // 差的是"这一趟有没有重编到库"，与例子本身无关，所以不能靠"用到了才登记"。
+    if (!this.arrGen.has('asy__mainname')) {
+      this.arrGen.set('asy__mainname__v', '  (global asy__mainname_v string)');
+      this.arrGen.set('asy__mainname', '  (fn asy__mainname () string\n    (ret (var asy__mainname_v)))');
+    }
     // 元素是记录的数组 helper：正文是降级过程中按同一个工厂生成的，顺序按第一次用到
     for (const [akey, text] of this.arrGen) {
       if (!baseArr.has(akey)) weak.push(text);
@@ -2964,9 +2975,9 @@ class AsyLower {
     // 塞进 `main` 而不是下面那个 `body`：模块路（link.js）是从 `sections.main` **重拼**
     // 一遍 main 的，只改 body 的话那条路上一句都不发 —— 量出来的样子是 `_mainname()`
     // 回空串（同一个例子单体路对、模块路空）。
-    if (this.arrGen.has('asy__mainname')) {
-      main.unshift(`(set asy__mainname_v (str ${JSON.stringify(this.rootModName())}))`);
-    }
+    // 无条件发（上面那格已经保证全局与 getter 都在）：从前这里按 arrGen 有没有那一格分，
+    // 而那一格取决于"这一趟有没有重编到调它的那份库"，与例子无关 —— 见上面那段账。
+    main.unshift(`(set asy__mainname_v (str ${JSON.stringify(this.rootModName())}))`);
     this.sections = { ids, secs, weak, weakLib, keys, main, tail: '', skipped, unitWhy };
     const body = [];
     for (const s of main) body.push(`    ${s}`);
