@@ -3358,6 +3358,60 @@ llvmpipe 的输入是 **NIR**（已经被 mesa 的前端降过：SSA、结构化
 
 <!-- ADR-0019 决策十第 1 步-END -->
 
+## 落地：决策十第 3 步 —— 可变量搬进 `alloca`，`if` 改写在掩码上（**合并那一步没了**）
+
+三样东西：
+
+**一、落点**。`allocVar` / `loadVar` / `maskStore`。写走的是 llvmpipe 那三行
+（`lp_bld_ir_common.c:200-224` 的 `lp_exec_mask_store`）：
+
+```
+dst = load ptr;  res = select(exec_mask, val, dst);  store res, ptr
+```
+
+绑定分成两种：`{kind:'val'}`（uniform / `gl_FragCoord` / `const` —— 只读，留在 SSA）
+与 `{kind:'var', ptrs, tys}`（局部量与 `out` —— 有落点）。声明处那一次 store **不过掩码**，
+因为它是这一格的第一次写，掩码外的道读到它也传不出去。
+
+**二、掩码栈**。`pushMask` / `invertMask` / `popMask`，照
+`lp_bld_nir_soa.c:2030-2051` 的 `if_cond` / `else_stmt` / `endif_stmt`：
+进 `if` 是 `exec &= cond`，进 `else` 是 `exec = outer & ~cond`，出去恢复 outer。
+
+**三、`if` 里那段"合并"删掉了**。上一版要「快照两支的所有绑定、逐个比较、只把变了的
+`select` 回来」，现在是：
+
+```js
+ifStmt(s) {
+  this.pushMask(this.expr(s.c)[0]);
+  if (s.then …) this.stmt(s.then);
+  if (s.else …) { this.invertMask(); this.stmt(s.else); }
+  this.popMask();
+}
+```
+
+"哪几格变了"这件事由 `select` 在 store 那一处自己解决 —— 不需要在编译器里再算一遍。
+数组的变量下标赋值也顺势并进来了：以前是"每一格生一条 select 链"，现在是"每个元素
+压一条 `idx == k` 的掩码再写"，与 `if` 同一个机制。
+
+### 量：`alloca` **没有变慢**
+
+1024²：**133.8 -> 131.33 MPix/s**（v2 132.33、C 宿主 126.49），下限门 100 照旧，
+`fast.js` 15/0、glsl 14/14、棘轮未动。
+
+这一格开工前特意写了「`alloca` 让 mem2reg 多干活，可能有代价，量出来再说」——
+量出来是**在噪声里**。理由就是 llvmpipe 依赖的那一条：`alloca` + `load`/`store` 在
+-O2 下会被 mem2reg/SROA 提回 SSA，只有真正跨控制流的那几个留在内存里。
+所以"为了控制流而落到内存"这笔账，是编译器替我们付的。
+
+### 于是第 4 步现在是**加法**，不是改造
+
+`break`/`continue`/`return`/`discard`/`for`/`while`/`do-while`/`switch` 要的都是
+"再往掩码栈上压一层，并且那一层要能跨迭代活着"——也就是几个 `alloca` 存的掩码
+（`lp_exec_mask` 的 `break_mask` / `cont_mask` / `ret_mask`，`lp_bld_ir_common.h:50-103`）。
+落点已经有了，`if` 已经在掩码上了，所以它们不再需要动现有的任何一段。
+
+<!-- ADR-0019 决策十第 3 步-END -->
+
 ## 还没定的（下一步按这个顺序）
 
 1. ~~摸 mesa 那边的边界~~ —— 「量：读 llvmpipe」那一节。

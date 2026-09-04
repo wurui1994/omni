@@ -133,9 +133,15 @@ class GlslLlvmEmitter {
   constructor(mod) {
     this.mod = mod;
     this.n = 0;                 // SSA 计数
+    this.allocas = [];          // 入口块那几条 `alloca`（决策十第 3 步）
     this.body = [];             // 函数体那几行
-    this.scopes = [new Map()];  // 名字 -> 分量数组
+    this.scopes = [new Map()];  // 名字 -> 绑定（值或落点）
     this.need = new Set();      // 要 declare 的 intrinsic
+    /* 当前的执行掩码（`null` = 八道全活）。照 `lp_exec_mask`
+     * （`lp_bld_ir_common.h:50-103`）：它是 cond / break / cont / ret 几层合成的结果。
+     * 这一步只上 cond 那一层，别的几层是第 4 步。 */
+    this.execMask = null;
+    this.condStack = [];        // 每层 `if` 压一条：{ cond, outer }
   }
 
   fresh() { this.n++; return `%v${this.n}`; }
@@ -147,16 +153,90 @@ class GlslLlvmEmitter {
     return { v: r, t };
   }
 
-  bind(name, comps) { this.scopes[this.scopes.length - 1].set(name, comps); }
+  /* ------------------------------------------------ 落点：`alloca` + 掩码写
+   *
+   * 照 llvmpipe：可变的东西**一律在内存里**，写要过掩码
+   * （`lp_bld_ir_common.c:200-224` 的 `lp_exec_mask_store`）：
+   *
+   *   dst = load ptr;  res = select(exec_mask, val, dst);  store res, ptr
+   *
+   * 为什么不留在 SSA 里：留在 SSA 里就没有一个"能被掩码盖住的落点"，于是 `if` 只能靠
+   * 「快照两支的绑定再 select」，而 `break`/`continue`/`return`/循环**结构上接不了**
+   * （那些要的是"掩码一路带下去"）。`alloca` 之后 -O2 的 mem2reg/SROA 会把大部分
+   * 提回 SSA —— llvmpipe 也是靠这一点，不是靠自己少发 load/store。
+   */
 
-  /** 赋值要改**声明它的那一层**。写进当前层的话，出了 `{}` 就丢 ——
-   * `out` 是在函数那一层绑的，而 `main` 的体是一个 block（第一版就栽在这儿：
-   * 快路输出全 0，因为 `fragColor = …` 只改了内层那一份）。 */
-  assignTo(name, comps) {
-    for (let i = this.scopes.length - 1; i >= 0; i--) {
-      if (this.scopes[i].has(name)) { this.scopes[i].set(name, comps); return; }
+  /** 开 N 个落点（每格一个 `alloca`），回一个 `{ kind:'var', ptrs, tys }`。 */
+  allocVar(name, tys, init) {
+    const ptrs = [];
+    for (let i = 0; i < tys.length; i++) {
+      const p = `%p${this.n + 1}_${name.replace(/[^A-Za-z0-9_]/g, '_')}`;
+      this.n++;
+      this.allocas.push(`  ${p} = alloca ${llTy(tys[i])}, align 32`);
+      ptrs.push(p);
+      /* 初值**不过掩码**：它是这一格的第一次写，掩码外的道读到它也无所谓
+       * （那些道读了也传不出去）。llvmpipe 那边同理，声明处是直白的 store。 */
+      const raw = init === null ? llZero(tys[i]) : (init.length === 1 ? init[0] : init[i]);
+      const v = tys[i] === 'f' ? this.toF(raw) : tys[i] === 'i' ? this.toI(raw) : this.toB(raw);
+      this.body.push(`  store ${llTy(tys[i])} ${v.v}, ptr ${p}, align 32`);
     }
-    throw new OmniError(`glsl/llvm: 赋值给没见过的名字 '${name}'`);
+    return { kind: 'var', ptrs, tys };
+  }
+
+  /** 从落点读出那几格。 */
+  loadVar(b) {
+    const out = [];
+    for (let i = 0; i < b.ptrs.length; i++) {
+      out.push(this.emit(`load ${llTy(b.tys[i])}, ptr ${b.ptrs[i]}, align 32`, b.tys[i]));
+    }
+    return out;
+  }
+
+  /** 往一个落点写一格，过掩码。 */
+  maskStore(b, ix, valc) {
+    const t = b.tys[ix];
+    const tt = llTy(t);
+    const val = t === 'f' ? this.toF(valc) : t === 'i' ? this.toI(valc) : this.toB(valc);
+    if (this.execMask === null) {
+      this.body.push(`  store ${tt} ${val.v}, ptr ${b.ptrs[ix]}, align 32`);
+      return;
+    }
+    const old = this.emit(`load ${tt}, ptr ${b.ptrs[ix]}, align 32`, t);
+    const res = this.emit(`select ${LL_B} ${this.execMask.v}, ${tt} ${val.v}, ${tt} ${old.v}`, t);
+    this.body.push(`  store ${tt} ${res.v}, ptr ${b.ptrs[ix]}, align 32`);
+  }
+
+  /* ------------------------------------------------ 掩码栈（`lp_exec_mask_cond_*`） */
+
+  /** 进一层 `if`：`exec &= cond`。 */
+  pushMask(cond) {
+    const c = this.toB(cond);
+    this.condStack.push({ cond: c, outer: this.execMask });
+    this.execMask = this.execMask === null ? c
+      : this.emit(`and ${LL_B} ${this.execMask.v}, ${c.v}`, 'b');
+  }
+
+  /** 进 `else`：把最内那一层的条件取反再与外层合。 */
+  invertMask() {
+    const top = this.condStack[this.condStack.length - 1];
+    const inv = this.emit(`xor ${LL_B} ${top.cond.v}, ${llB(true).v}`, 'b');
+    this.execMask = top.outer === null ? inv
+      : this.emit(`and ${LL_B} ${top.outer.v}, ${inv.v}`, 'b');
+  }
+
+  /** 出这一层 `if`：恢复外层掩码。 */
+  popMask() {
+    const top = this.condStack.pop();
+    this.execMask = top.outer;
+  }
+
+  bind(name, comps) {
+    this.scopes[this.scopes.length - 1].set(name, { kind: 'val', comps });
+  }
+
+  /** 开一个可变绑定（落点在内存里）。 */
+  bindVar(name, tys, init) {
+    this.scopes[this.scopes.length - 1].set(name, this.allocVar(name, tys, init));
   }
 
   find(name) {
@@ -165,6 +245,19 @@ class GlslLlvmEmitter {
       if (c !== undefined) return c;
     }
     throw new OmniError(`glsl/llvm: 找不到名字 '${name}'`);
+  }
+
+  /** 读一个名字的那几格（不可变的直接给值，可变的从落点 load）。 */
+  readName(name) {
+    const b = this.find(name);
+    return b.kind === 'val' ? b.comps : this.loadVar(b);
+  }
+
+  /** 一个名字必须是可变的（要往里写）。 */
+  varOf(name) {
+    const b = this.find(name);
+    if (b.kind !== 'var') throw new OmniError(`glsl/llvm: '${name}' 不能赋值`);
+    return b;
   }
 
   /* ------------------------------------------------------------ 类型之间的三条边 */
@@ -282,7 +375,7 @@ class GlslLlvmEmitter {
       if (e.ty.k === 'int') return [llI(String(e.v))];
       return [llF(Number(e.v))];
     }
-    if (e.k === 'ref') return this.find(e.name);
+    if (e.k === 'ref') return this.readName(e.name);
     if (e.k === 'swizzle') {
       /* 局部量**不能叫 `of`** —— 那是自编译子集词法里的关键字（`for … of`）。
        * 节点属性叫 `e.of` 没关系，受限的只有绑定名。 */
@@ -583,16 +676,11 @@ class GlslLlvmEmitter {
       return;
     }
     if (s.k === 'decl') {
-      /* SSA：局部量就是「当前那几格值」。**还没有 `alloca`** —— 那是决策十第 3 步，
-       * 也是 `break`/`continue`/`return`/循环的前提。 */
-      const n = llNComp(s.ty);
-      const cts = llCompTys(s.ty);
-      const vals = s.init === null ? null : this.fit(this.expr(s.init), s.ty);
-      const comps = [];
-      for (let i = 0; i < n; i++) {
-        comps.push(vals === null ? llZero(cts[i]) : (vals.length === 1 ? vals[0] : vals[i]));
-      }
-      this.bind(s.name, comps);
+      /* 局部量是一个**落点**（决策十第 3 步）：`alloca` 一格一个，写走掩码。
+       * 上一版是"当前那几格 SSA 值"，那样掩码盖不住它。 */
+      const tys = llCompTys(s.ty);
+      const vals = s.init === null ? null : this.expr(s.init);
+      this.bindVar(s.name, tys, vals);
       return;
     }
     if (s.k === 'assign') { this.assign(s.e); return; }
@@ -601,93 +689,73 @@ class GlslLlvmEmitter {
   }
 
   /**
-   * `if` —— 现在还是「掩码 + 快照两支的绑定再 select」。
+   * `if` —— 往掩码栈上压一层，两支都走一遍（`lp_bld_nir_soa.c:2030-2051` 的
+   * `if_cond` / `else_stmt` / `endif_stmt`）。
    *
-   * **这一段是决策十第 3–4 步要换掉的**：llvmpipe 的做法是可变量都在 `alloca` 里、
-   * 写走 `lp_exec_mask_store`（`lp_bld_ir_common.c:200-224`），`if` 只是往掩码栈上压
-   * 一层（`lp_bld_nir_soa.c:2030-2051`），外面再套一条「整块没人活着就跳过」的真分支。
-   * 那套架构里 `break`/`continue`/`return`/循环是同一个机制的不同用法；这套里它们
-   * **结构上接不了** —— 值在 SSA 里，没有一个能被掩码盖住的落点。
+   * **合并那一步没有了**：值都在落点里，写都过掩码，所以"哪几格变了"这件事由
+   * `select` 在 store 那一处自己解决。上一版要「快照两支的绑定、逐个比较、只 select
+   * 变了的」，那是因为值在 SSA 里 —— 而那也正是 `break`/`continue`/循环接不了的原因。
+   *
+   * 还没做的一格：llvmpipe 在这外面还套一条 `lp_build_skip_branch`（整块没有一个道
+   * 活着就跳过去），只在"单块且指令数 < 8"时才不套。那是纯性能，留给下一步。
    */
   ifStmt(s) {
-    const m = this.toB(this.expr(s.c)[0]);
-    const snap = () => {
-      const out = new Map();
-      for (let i = 0; i < this.scopes.length; i++) {
-        for (const [k, v] of this.scopes[i]) out.set(`${i}\u0000${k}`, v);
-      }
-      return out;
-    };
-    const put = (state) => {
-      for (const [key, v] of state) {
-        const cut = key.indexOf('\u0000');
-        this.scopes[Number(key.slice(0, cut))].set(key.slice(cut + 1), v);
-      }
-    };
-    const before = snap();
-    const runBranch = (sub) => {
-      this.scopes.push(new Map());
-      if (sub !== null && sub !== undefined) this.stmt(sub);
-      this.scopes.pop();
-      const st = snap();
-      put(before);
-      return st;
-    };
-    const yes = runBranch(s.then);
-    const no = runBranch(s.else);
-    /* 合并：两支给的分量一样（同一个对象）就不发指令 —— `if` 只改了几格的话，
-     * 别的名字一条 `select` 都不该多出来。 */
-    for (const [key, tv] of yes) {
-      const ev = no.get(key);
-      if (ev === undefined || ev === tv) continue;
-      const merged = tv.map((c, i) => (c === ev[i] ? c : this.select(m, c, ev[i])));
-      const cut = key.indexOf('\u0000');
-      this.scopes[Number(key.slice(0, cut))].set(key.slice(cut + 1), merged);
+    this.pushMask(this.expr(s.c)[0]);
+    if (s.then !== null && s.then !== undefined) this.stmt(s.then);
+    if (s.else !== null && s.else !== undefined) {
+      this.invertMask();
+      this.stmt(s.else);
     }
+    this.popMask();
   }
 
   assign(e) {
     if (e.op !== '=') throw new OmniError(`glsl/llvm: 这一片只收 =，给的是 ${e.op}`);
-    const vals = this.fit(this.expr(e.rhs), e.ty === undefined ? e.lhs.ty : e.ty);
-    if (e.lhs.k === 'ref') {
-      const cur = this.find(e.lhs.name);
-      const next = cur.map((_, i) => (vals.length === 1 ? vals[0] : vals[i]));
-      this.assignTo(e.lhs.name, next);
-      return next;
-    }
-    if (e.lhs.k === 'swizzle' && e.lhs.of.k === 'ref') {
-      const cur = [...this.find(e.lhs.of.name)];
-      e.lhs.idx.forEach((ix, k) => { cur[ix] = vals.length === 1 ? vals[0] : vals[k]; });
-      this.assignTo(e.lhs.of.name, cur);
+    const lhs = e.lhs;
+    const vals = this.expr(e.rhs);
+    if (lhs.k === 'ref') {
+      const b = this.varOf(lhs.name);
+      for (let i = 0; i < b.ptrs.length; i++) {
+        this.maskStore(b, i, vals.length === 1 ? vals[0] : vals[i]);
+      }
       return vals;
     }
-    /* 数组（B14）：`s[i] = v` 与 `m[i].y = v`。整条数组的分量表原地换几格再整体绑回去。 */
-    const ai = e.lhs.k === 'aindex' ? e.lhs
-      : (e.lhs.k === 'swizzle' && e.lhs.of.k === 'aindex' ? e.lhs.of : null);
+    if (lhs.k === 'swizzle' && lhs.of.k === 'ref') {
+      const b = this.varOf(lhs.of.name);
+      for (let li = 0; li < lhs.idx.length; li++) {
+        this.maskStore(b, lhs.idx[li], vals.length === 1 ? vals[0] : vals[li]);
+      }
+      return vals;
+    }
+    /* 数组（B14）：`s[i] = v` 与 `m[i].y = v`。 */
+    const ai = lhs.k === 'aindex' ? lhs
+      : (lhs.k === 'swizzle' && lhs.of.k === 'aindex' ? lhs.of : null);
     if (ai !== null && ai.of.k === 'ref') {
-      const cur = [...this.find(ai.of.name)];
+      const b = this.varOf(ai.of.name);
       const w = llNComp(ai.ty);
       const lanes = [];
-      if (e.lhs.k === 'aindex') for (let j = 0; j < w; j++) lanes.push(j);
-      else for (const ix of e.lhs.idx) lanes.push(ix);
+      if (lhs.k === 'aindex') for (let j = 0; j < w; j++) lanes.push(j);
+      else for (const ix of lhs.idx) lanes.push(ix);
       if (ai.at.k === 'lit') {
-        /* 常量下标：就是往那几格里写，一条 `select` 都不用。 */
+        /* 常量下标：往那几格里写，一条掩码都不用多加。 */
         for (let li = 0; li < lanes.length; li++) {
-          cur[ai.at.v * w + lanes[li]] = vals.length === 1 ? vals[0] : vals[li];
+          this.maskStore(b, ai.at.v * w + lanes[li], vals.length === 1 ? vals[0] : vals[li]);
         }
-      } else {
-        /* 变量下标：**每一格都要碰**（8 道里选中的那一道才换）。这是「不落成内存」
-         * 那条决策的代价，也是 `check.js` 里那条 32 格上限存在的理由。 */
-        const idx = this.toI(this.expr(ai.at)[0]);
-        for (let k = 0; k < ai.of.ty.n; k++) {
-          const m = this.emit(`icmp eq ${LL_I} ${idx.v}, ${llI(k).v}`, 'b');
-          for (let li = 0; li < lanes.length; li++) {
-            const slot = k * w + lanes[li];
-            cur[slot] = this.select(m, vals.length === 1 ? vals[0] : vals[li], cur[slot]);
-          }
+        return vals;
+      }
+      /* 变量下标：每个元素压一条 `idx == k`。这与「不落成内存」那一版的 select 链是
+       * 同一个代价（每一格都要碰），只是现在它写在掩码这一层，与 `if` 同一个机制。 */
+      const idx = this.toI(this.expr(ai.at)[0]);
+      const outer = this.execMask;
+      for (let k = 0; k < ai.of.ty.n; k++) {
+        const eq = this.emit(`icmp eq ${LL_I} ${idx.v}, ${llI(k).v}`, 'b');
+        this.execMask = outer === null ? eq
+          : this.emit(`and ${LL_B} ${outer.v}, ${eq.v}`, 'b');
+        for (let li = 0; li < lanes.length; li++) {
+          this.maskStore(b, k * w + lanes[li], vals.length === 1 ? vals[0] : vals[li]);
         }
       }
-      this.assignTo(ai.of.name, cur);
+      this.execMask = outer;
       return vals;
     }
     throw new OmniError('glsl/llvm: 这一片的左值只收名字、它的 swizzle、以及数组取一格');
@@ -741,10 +809,12 @@ class GlslLlvmEmitter {
     const on = llNComp(o.ty);
     const zeros = [];
     for (let i = 0; i < on; i++) zeros.push(llF(0));
-    this.bind(o.name, zeros);
+    /* `out` 是**可变的**，所以它也是一个落点 —— 上一版把它当 SSA 值，于是
+     * `if (…) fragColor = …` 要靠合并那一步才写得回去。 */
+    this.bindVar(o.name, llCompTys(o.ty), zeros);
     this.stmt(m.funcs[0].body);
     /* 写回：四格连着存，都按 float 存（缓冲的类型是定的）。 */
-    const vals = this.find(o.name);
+    const vals = this.readName(o.name);
     for (let i = 0; i < on; i++) {
       const p = i === 0 ? '%out' : this.emit(`getelementptr ${LL_F}, ptr %out, i64 ${i}`, 'f').v;
       this.body.push(`  store ${LL_F} ${this.toF(vals[i]).v}, ptr ${p}, align 4`);
@@ -757,7 +827,9 @@ class GlslLlvmEmitter {
     });
     return `; GLSL -> LLVM IR（${GLSL_LANES} 道 SoA，分量带类型 f32/i32/i1）—— ADR-0019 决策十\n`
       + `; in = [x, y, uniform 每一格…]；out = [r, g, b, a]，缓冲都是 ${LL_F}\n`
-      + `define void @glsl_frag8(ptr %in, ptr %out) {\n${this.body.join('\n')}\n  ret void\n}\n\n`
+      + `; 可变量在 alloca 里、写过掩码（照 lp_exec_mask_store）—— mem2reg 会把大部分提回 SSA\n`
+      + `define void @glsl_frag8(ptr %in, ptr %out) {\n`
+      + `${this.allocas.join('\n')}\n${this.body.join('\n')}\n  ret void\n}\n\n`
       + `${decls.join('\n')}\n`;
   }
 }
