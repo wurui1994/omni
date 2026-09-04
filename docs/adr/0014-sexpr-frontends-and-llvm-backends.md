@@ -9621,3 +9621,36 @@ fano 那一句发出来的 TeX 与参考**逐字相同**。改的只有 asy 自�
 文件走的，别的前端各有一份），语法哈希一变 AST 缓存自己整片失效。
 
 <!-- ADR-0014 E是东不是指数-END -->
+
+### 第十七刀（查清，未改）：矢量那一档剩下 7 份，四份是同一条 —— 参考在**近似单位**的笔变换上多了一层 gsave
+
+"只有数值差"清零之后，`结构不同` 88 份里**只有 7 份的参考是矢量**（其余 81 份是
+`位图块数 1 vs 0`，等三维光栅那一刀）：`alignedaxis` / `cardioid` / `gamma` /
+`interpolate1` / `laserlattice` / `lmfit1` / `logdown`。
+
+其中四份（alignedaxis、cardioid、gamma、lmfit1）的首处差是同一个形状
+（"参考 newpath vs 我们 gsave" 或反过来）。把 cardioid 的 token 摊开看清楚了：
+
+```
+参考                              我们
+… stroke                          … stroke
+gsave                             newpath
+newpath -10.9796015 0 moveto      -10.9796015 0 moveto
+109.80307 0 lineto                109.80307 0 lineto
+[ 1 0 0 1 0 0] concat             stroke
+stroke
+grestore
+```
+
+参考在这一笔外面多了一层 `gsave` + **单位矩阵的 concat** + `grestore`。按 asy 自己的代码
+这一层本不该有：`drawelement.h:322` 的 `penSave` 是 `if(!pentype.getTransform().isIdentity())`，
+`psfile.h:330` 的 `concat` 也 `if(t.isIdentity()) return;`。**两处都挡单位**，可它还是印了
+`[ 1 0 0 1 0 0]` —— 所以那个变换**不是**单位，只是印到 6 位有效数字之后看着像单位
+（`isIdentity()` 是精确比较，`write(transform)` 是 6 位）。
+
+也就是说：这四份的差不在"画法"，而在**那支笔的变换里有一点数值噪声**（graph.asy 的轴/刻度
+那一路把 picture 的缩放乘到笔上），asy 那边差了个 1e-16 量级的零头，我们这边正好是精确的
+单位。往下要做的是把那一路的算术顺序对齐（不是去凑一个 epsilon）—— 判据很硬：
+cardioid 那一笔两边都该发或都不该发那三句。
+
+<!-- ADR-0014 近似单位的笔变换-END -->
