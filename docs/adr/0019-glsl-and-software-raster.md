@@ -3210,6 +3210,93 @@ IV u_y;
 
 <!-- ADR-0019 落地：GLSL 位转换 + atan 重载-END -->
 
+## 决策十（更正前面的做法）：快路照 **llvmpipe 的 gallivm** 重写，不再一格一格补
+
+前面几片是「拿真实着色器灌进去、门停在哪儿补哪一格」。那条方法**对参照腿有效**
+（方言是通用语言，补一格就是补一格），但**对快路是错的** —— 快路每补一格都撞在同一堵墙上：
+
+- `int(x)` 不截断（`int` 被表示成「值恰好是整数的 float」）
+- `floatBitsToInt` 落不下来（同一个原因）
+- `if` 只能靠「快照两支的绑定再 select」，于是 `break`/`continue`/`return`/循环
+  **结构上就接不了**
+- 模块级变量（下一格）在 SSA 里没有落点
+
+这四条不是四个缺口，是**一个**：我们给快路自己发明了一套表示，而它撑不住 GLSL。
+llvmpipe 已经把这件事做完了，源码在 `/Users/wurui/Documents/Lang/reference/mesa`
+（`src/gallium/auxiliary/gallivm/`）。**照它做，不自己简化。**
+
+### 它的四根柱子（都读过，附行号）
+
+**一、值是带类型的**（`lp_bld_type.h:83-138`）。`struct lp_type` 是
+`floating / fixed / sign / norm / width:14 / length:14` 六个位段，`lp_build_context`
+（同文件 146-176）把它连同 `elem_type` / `vec_type` / `int_elem_type` / `int_vec_type` /
+`undef` / `zero` / `one` 一起带着。文件里那句话正是我们踩的坑：
+
+> The LLVM type system can't conveniently express all the things we care about on the
+> types used for intermediate computations, such as signed vs unsigned…
+
+于是 SoA 上下文里**并排放着 24 个 builder**（`lp_bld_nir_soa.c:159-257`）：
+`base`（f32）、`uint`/`int`、`uint8`/`int8`、`uint16`/`int16`、`half`、`dbl`、
+`uint64`/`int64`、`bool`，再加它们各自的 `scalar_*` 版本。取哪一个由
+`get_flt_bld` / `get_int_bld`（同文件 259-310）按 **(位宽, 有无符号, 是否 divergent)** 挑。
+
+`int` 在那儿是**真的 `<N x i32>`**。所以 `int(x)` 是一条 `fptosi`、`floatBitsToInt`
+是一条 `bitcast`，两条都不需要"想办法"。
+
+**二、bool 是整数掩码，不是 0.0/1.0**（`lp_bld_nir_soa.c:5942-5945`）：
+`bool_type = lp_uint_type(type); bool_type.width /= 32;`。而 `if_cond`
+（同文件 2030-2038）把它 `SExt` 成 `int_vec_type` —— 也就是**全 1 / 全 0**的通道掩码。
+我们现在那套 `fcmp` 出 i1、再 `select` 成 1.0/0.0、再 `fcmp une … 0.0` 折回去，
+是在浮点域里模拟掩码。InstCombine 大多能折掉，但**语义上它挡住了位运算与整数**。
+
+**三、可变的东西一律在 `alloca` 里，写要过掩码**（`lp_bld_ir_common.c:200-224`）：
+
+```c
+dst = LLVMBuildLoad2(builder, LLVMTypeOf(val), dst_ptr, "");
+res = lp_build_select(bld_store, exec_mask, val, dst);
+LLVMBuildStore(builder, res, dst_ptr);
+```
+
+**这一条是全部控制流的地基。** 有了它，`break`/`continue`/`return`/循环都只是
+"再压一层掩码"，不需要我们那套"快照两支的绑定、逐个比较、只 select 变了的"。
+我们那套之所以接不了 `break`，就是因为值在 SSA 里、没有一个"落点"能被掩码盖住。
+
+**四、掩码是一个栈，另外还有一条"没人活着就跳过"的真分支**
+（`lp_bld_ir_common.h:50-103`）：`exec_mask` 由 `cond_mask`、`break_mask`、`cont_mask`、
+`ret_mask`、`switch_mask` 合成，`function_stack` 让它跨函数调用也成立。
+
+而 `if` 并不是"一律 flatten 成 select"：`if_cond` 里除了压掩码，还调
+`lp_build_skip_branch(bld, flatten)` —— **整块没有一个通道活着就跳过去**。
+只有"单个基本块且指令数 < 8"才 flatten（`lp_should_flatten_cf_list`，
+`lp_bld_nir_soa.c:5783-5792`）。循环就是 `lp_exec_bgnloop` + 体 + `lp_exec_endloop`
+（同文件 5809-5817），一条真循环，不是展开。
+
+### 于是快路要改的顺序（每一步都有门）
+
+1. **分量带类型**。把 `emit_llvm.js` 里"每格都是 `<8 x float>`"换成"每格是
+   `{ ll, ty }`"，`ty` 取 `f32` / `i32` / `bool`。照 `get_flt_bld`/`get_int_bld` 那样
+   按类型挑指令（`fadd`/`add`、`fcmp`/`icmp`、`fptosi`/`sitofp`/`bitcast`）。
+   做完这一步，`int(x)`、`floatBitsToInt`、位运算、整数除模**一次性全通**。
+2. **bool 换成 `<8 x i1>`（存的时候 SExt 成 `<8 x i32>`）**，去掉 1.0/0.0 那层模拟。
+3. **可变量搬进 `alloca`，写走 `maskStore`**。这一步不加新功能，但它是第 4 步的前提。
+4. **掩码栈 + `skip_branch`**：`if`/`else` 重写在掩码栈上，然后 `break`/`continue`/
+   `return`/`discard`/`for`/`while`/`do-while`/`switch` **一起**落下来 ——
+   它们在这套架构里是同一个机制的不同用法，不是七个特性。
+5. **模块级变量**：有了 `alloca`，它就是一个函数外的落点，不需要新决策。
+
+**验收口径不变**：四条路答案全同（f32 那一侧），以及 `examples_256` 那 31 对图。
+性能下限门（1024² ≥ 100 MPix/s）在第 3 步之后要重新量一次 —— `alloca` 让
+mem2reg 多干活，可能有代价，**量出来再说，不预设**。
+
+### 一条边界，写清楚
+
+llvmpipe 的输入是 **NIR**（已经被 mesa 的前端降过：SSA、结构化控制流、类型明确），
+我们的输入是自己的 checked GLSL 树。所以**借的是它的 gallivm 那一层**（值的表示、
+掩码、alloca 的纪律），**不借它的前端**。这条边界不划清的话，下一步会变成"要不要引入 NIR"，
+而那是另一个决策（而且答案大概是不 —— 我们自己的树已经带类型了）。
+
+<!-- ADR-0019 决策十-END -->
+
 ## 还没定的（下一步按这个顺序）
 
 1. ~~摸 mesa 那边的边界~~ —— 「量：读 llvmpipe」那一节。
@@ -3265,6 +3352,7 @@ IV u_y;
     （六处改动，`backend-c` 一字未改）。`tests/sexpr` 78/0，**五条腿逐字节相同**。
 26. **路 3：快路的分量带类型标记** —— float 还是 i32。碰的是每一处产生分量的地方，
     关在 `emit_llvm.js` 里。做完这一格，`floatBitsToInt` 在快路上就是一条 `bitcast`。
+    **被决策十收掉了** —— 它是那五步里的第 1 步，见「决策十」。
 27. **GLSL 那两个内建接到方言的位重解释上** —— 方言侧已经有了（`realbits`/`bitsreal`，
     见「落地：路 1」）。GLSL 那一层要写清一条：`floatBitsToInt` 在**参照腿**上是
     **64 位**的（`real` 是 f64），不是规范说的 32 位 —— 规范假定 `float` 是 f32，
