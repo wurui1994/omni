@@ -137,12 +137,20 @@ class GlslLlvmEmitter {
     this.body = [];             // 函数体那几行
     this.scopes = [new Map()];  // 名字 -> 绑定（值或落点）
     this.need = new Set();      // 要 declare 的 intrinsic
-    /* 当前的执行掩码（`null` = 八道全活）。照 `lp_exec_mask`
-     * （`lp_bld_ir_common.h:50-103`）：它是 cond / break / cont / ret 几层合成的结果。
-     * 这一步只上 cond 那一层，别的几层是第 4 步。 */
+    /* 当前的执行掩码（`null` = 八道全活）。它是 `update()` 从下面几层合成出来的 ——
+     * 照 `lp_exec_mask`（`lp_bld_ir_common.h:50-103`）。 */
     this.execMask = null;
+    this.condMask = null;       // if 那一层（进出就还原，所以是 SSA 值）
     this.condStack = [];        // 每层 `if` 压一条：{ cond, outer }
+    /* 这三层放在 `alloca` 里 —— 它们要**跨迭代**活着。null = 现在不在那个语境里。 */
+    this.brkPtr = null;         // break（当前最内层循环 / switch）
+    this.contPtr = null;        // continue（当前最内层循环）
+    this.retPtr = null;         // return（当前函数）
+    this.labels = 0;            // 基本块编号
   }
+
+  /** 一个新的基本块标签。 */
+  label(tag) { this.labels++; return `L${this.labels}_${tag}`; }
 
   fresh() { this.n++; return `%v${this.n}`; }
 
@@ -206,28 +214,79 @@ class GlslLlvmEmitter {
     this.body.push(`  store ${tt} ${res.v}, ptr ${b.ptrs[ix]}, align 32`);
   }
 
-  /* ------------------------------------------------ 掩码栈（`lp_exec_mask_cond_*`） */
+  /* ------------------------------------------------ 掩码：`lp_exec_mask` 的那几层
+   *
+   * 照 `lp_exec_mask`（`lp_bld_ir_common.h:50-103`）：执行掩码不是一个值，是**几层的
+   * 合成** —— `cond`（if 栈）、`break`、`cont`、`ret`。`update()` 就是它的
+   * `lp_exec_mask_update`：把几层与在一起。
+   *
+   * `break`/`cont`/`ret` 三层放在 `alloca` 里而不是 SSA 值里，因为它们要**跨迭代**活着
+   * （循环回边那一侧读的是上一轮写进去的）。`cond` 不用，它进出 `if` 就还原。
+   */
 
-  /** 进一层 `if`：`exec &= cond`。 */
+  /** 几层与在一起。全是 null（八道全活）就回 null，省掉一堆 `and`。 */
+  update() {
+    let m = this.condMask;
+    const negs = [];
+    if (this.contPtr !== null) negs.push(this.contPtr);
+    if (this.brkPtr !== null) negs.push(this.brkPtr);
+    if (this.retPtr !== null) negs.push(this.retPtr);
+    for (const p of negs) {
+      const cur = this.emit(`load ${LL_B}, ptr ${p}, align 32`, 'b');
+      const inv = this.emit(`xor ${LL_B} ${cur.v}, ${llB(true).v}`, 'b');
+      m = m === null ? inv : this.emit(`and ${LL_B} ${m.v}, ${inv.v}`, 'b');
+    }
+    this.execMask = m;
+  }
+
+  /** 往一层掩码（`break`/`cont`/`ret` 那三个落点之一）里**并进**当前活着的那些道。 */
+  raise(ptr) {
+    const cur = this.emit(`load ${LL_B}, ptr ${ptr}, align 32`, 'b');
+    const add = this.execMask === null ? llB(true) : this.execMask;
+    const next = this.emit(`or ${LL_B} ${cur.v}, ${add.v}`, 'b');
+    this.body.push(`  store ${LL_B} ${next.v}, ptr ${ptr}, align 32`);
+    this.update();
+  }
+
+  /** 开一个 `<8 x i1>` 的掩码落点，初值全 0（"还没有道走这条路"）。 */
+  maskPtr(tag) {
+    this.n++;
+    const p = `%m${this.n}_${tag}`;
+    this.allocas.push(`  ${p} = alloca ${LL_B}, align 32`);
+    this.body.push(`  store ${LL_B} zeroinitializer, ptr ${p}, align 32`);
+    return p;
+  }
+
+  /** 进一层 `if`：`cond &= c`。 */
   pushMask(cond) {
     const c = this.toB(cond);
-    this.condStack.push({ cond: c, outer: this.execMask });
-    this.execMask = this.execMask === null ? c
-      : this.emit(`and ${LL_B} ${this.execMask.v}, ${c.v}`, 'b');
+    this.condStack.push({ cond: c, outer: this.condMask });
+    this.condMask = this.condMask === null ? c
+      : this.emit(`and ${LL_B} ${this.condMask.v}, ${c.v}`, 'b');
+    this.update();
   }
 
   /** 进 `else`：把最内那一层的条件取反再与外层合。 */
   invertMask() {
     const top = this.condStack[this.condStack.length - 1];
     const inv = this.emit(`xor ${LL_B} ${top.cond.v}, ${llB(true).v}`, 'b');
-    this.execMask = top.outer === null ? inv
+    this.condMask = top.outer === null ? inv
       : this.emit(`and ${LL_B} ${top.outer.v}, ${inv.v}`, 'b');
+    this.update();
   }
 
-  /** 出这一层 `if`：恢复外层掩码。 */
+  /** 出这一层 `if`：恢复外层。 */
   popMask() {
     const top = this.condStack.pop();
-    this.execMask = top.outer;
+    this.condMask = top.outer;
+    this.update();
+  }
+
+  /** 「还有道活着吗」——一条真分支的判据（`<8 x i1>` 折成 i8 再比 0）。 */
+  anyActive(m) {
+    if (m === null) return null;
+    const bits = this.emit(`bitcast ${LL_B} ${m.v} to i${GLSL_LANES}`, 'x');
+    return this.emit(`icmp ne i${GLSL_LANES} ${bits.v}, 0`, 'x');
   }
 
   bind(name, comps) {
@@ -445,6 +504,20 @@ class GlslLlvmEmitter {
     }
     /* 赋值是**表达式**（`fragColor = …` 出来是 `{k:'expr', e:{k:'assign'}}`）。 */
     if (e.k === 'assign') return this.assign(e);
+    if (e.k === 'incdec') {
+      /* `i++` / `--j`。**读一次、算一次、写回去**，写那一步过掩码（走 `assign` 同一条路，
+       * 形状与 `i = i + 1` 一字不差）。只收标量 —— GLSL 里向量上也能写，但尺子里没有。 */
+      const before = this.expr(e.a);
+      if (before.length !== 1) throw new OmniError('glsl/llvm: ++/-- 这一片只收标量');
+      const one = before[0].t === 'i' ? llI(1) : llF(1);
+      const op = e.op === 'pre-inc' || e.op === 'post-inc' ? '+' : '-';
+      const next = this.arith(op, before[0], one);
+      this.assign({ op: '=', lhs: e.a, rhs: { k: 'pre', comps: [next] } });
+      /* 后缀回**改之前**那个值；前缀回改之后的。 */
+      return e.op === 'post-inc' || e.op === 'post-dec' ? before : [next];
+    }
+    /* 内部用：一串已经算好的分量当表达式递给 `assign`（`incdec` 用它，不是语法里的东西）。 */
+    if (e.k === 'pre') return e.comps;
     throw new OmniError(`glsl/llvm: 这一片收不了的表达式 ${e.k}`);
   }
 
@@ -685,7 +758,99 @@ class GlslLlvmEmitter {
     }
     if (s.k === 'assign') { this.assign(s.e); return; }
     if (s.k === 'if') { this.ifStmt(s); return; }
+    if (s.k === 'break') {
+      if (this.brkPtr === null) throw new OmniError('glsl/llvm: break 不在循环里');
+      this.raise(this.brkPtr);
+      return;
+    }
+    if (s.k === 'continue') {
+      if (this.contPtr === null) throw new OmniError('glsl/llvm: continue 不在循环里');
+      this.raise(this.contPtr);
+      return;
+    }
+    if (s.k === 'ret') {
+      if (s.e !== null && s.e !== undefined) {
+        throw new OmniError('glsl/llvm: 带值的 return 还没接（这一片只有 main，是 void）');
+      }
+      if (this.retPtr === null) throw new OmniError('glsl/llvm: return 不在函数里');
+      this.raise(this.retPtr);
+      return;
+    }
+    if (s.k === 'while') { this.loopStmt(s, 'while'); return; }
+    if (s.k === 'dowhile') { this.loopStmt(s, 'do'); return; }
+    if (s.k === 'for') { this.loopStmt(s, 'for'); return; }
     throw new OmniError(`glsl/llvm: 这一片收不了的语句 ${s.k}`);
+  }
+
+  /**
+   * 循环 —— 一条**真循环**（`lp_exec_bgnloop` / `lp_exec_endloop`，用法见
+   * `lp_bld_nir_soa.c:5809-5817`），不是展开。
+   *
+   * 条件落成「开头（`do while` 是末尾）的一次 `break`」—— 与 NIR 把 `for` 降成
+   * `loop { if (!c) break; …; step }` 是同一个形状。回边的判据是「**还有道活着吗**」，
+   * 所以八道里跑得最久的那一道决定圈数（llvmpipe 也是这样，SIMD 上没有别的办法）。
+   */
+  loopStmt(s, kind) {
+    /* `for` 的 init 声明的名字要活到循环结束，所以这一层作用域套在外面。 */
+    this.scopes.push(new Map());
+    if (kind === 'for' && s.init !== null && s.init !== undefined) this.stmt(s.init);
+    const outerBrk = this.brkPtr;
+    const outerCont = this.contPtr;
+    const brk = this.maskPtr('brk');
+    const cont = this.maskPtr('cont');
+    const head = this.label('loop');
+    const end = this.label('endloop');
+    this.body.push(`  br label %${head}`);
+    this.body.push(`${head}:`);
+    /* 每一轮开头把 cont 清掉 —— 它只管这一轮（`lp_exec_endloop` 也是在这儿重置的）。 */
+    this.body.push(`  store ${LL_B} zeroinitializer, ptr ${cont}, align 32`);
+    this.brkPtr = brk;
+    this.contPtr = cont;
+    this.update();
+    if (kind !== 'do') this.loopCond(s.c);
+    this.stmt(s.body);
+    if (kind === 'for' && s.step !== null && s.step !== undefined) {
+      /* `continue` 之后 `for` 的 step **照样执行**（与 C 同）。办法是算 step 的时候
+       * 把 cont 那一层从掩码里摘掉。 */
+      this.contPtr = null;
+      this.update();
+      this.expr(s.step);
+      this.contPtr = cont;
+      this.update();
+    }
+    if (kind === 'do') this.loopCond(s.c);
+    const any = this.anyActive(this.aliveMask(brk));
+    this.body.push(`  br i1 ${any.v}, label %${head}, label %${end}`);
+    this.body.push(`${end}:`);
+    this.brkPtr = outerBrk;
+    this.contPtr = outerCont;
+    this.update();
+    this.scopes.pop();
+  }
+
+  /** 循环条件 = 「条件不成立的那些道 break 掉」。`for (;;)` 的条件是 null。 */
+  loopCond(c) {
+    if (c === null || c === undefined) return;
+    const v = this.toB(this.expr(c)[0]);
+    const inv = this.emit(`xor ${LL_B} ${v.v}, ${llB(true).v}`, 'b');
+    this.pushMask(inv);
+    this.raise(this.brkPtr);
+    this.popMask();
+  }
+
+  /** 还留在循环里的那些道：外层 cond & 没 break & 没 return。 */
+  aliveMask(brk) {
+    const cur = this.emit(`load ${LL_B}, ptr ${brk}, align 32`, 'b');
+    let m = this.emit(`xor ${LL_B} ${cur.v}, ${llB(true).v}`, 'b');
+    if (this.condMask !== null) {
+      m = this.emit(`and ${LL_B} ${this.condMask.v}, ${m.v}`, 'b');
+    }
+    if (this.retPtr !== null) {
+      const r = this.emit(`load ${LL_B}, ptr ${this.retPtr}, align 32`, 'b');
+      const nr = this.emit(`xor ${LL_B} ${r.v}, ${llB(true).v}`, 'b');
+      m = this.emit(`and ${LL_B} ${m.v}, ${nr.v}`, 'b');
+    }
+    return m;
   }
 
   /**
@@ -812,6 +977,9 @@ class GlslLlvmEmitter {
     /* `out` 是**可变的**，所以它也是一个落点 —— 上一版把它当 SSA 值，于是
      * `if (…) fragColor = …` 要靠合并那一步才写得回去。 */
     this.bindVar(o.name, llCompTys(o.ty), zeros);
+    /* `return` 那一层（`lp_exec_mask` 的 `ret_mask`）：`main` 里 `return;` 之后那些道
+     * 就不再写 `out` 了 —— 靠掩码，不靠跳转。 */
+    this.retPtr = this.maskPtr('ret');
     this.stmt(m.funcs[0].body);
     /* 写回：四格连着存，都按 float 存（缓冲的类型是定的）。 */
     const vals = this.readName(o.name);

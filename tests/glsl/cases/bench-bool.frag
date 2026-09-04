@@ -79,6 +79,32 @@ void main() {
     // f64/i64、快路是 f32/i32，但「转过去再转回来」两边都是恒等。
     float rt = intBitsToFloat(floatBitsToInt(uv.y)) - uv.y;
 
+    // ---- 循环那一族（决策十第 4 步）------------------------------------------------
+    // 快路上这些是**真循环 + 掩码栈**（lp_exec_bgnloop/endloop 那一套）。上一版一条都
+    // 接不了：值在 SSA 里，掩码盖不住，所以 break/continue 无处落。
+    //
+    // **还差一条**：嵌套 for + break + 数组变量下标（iv_join4 的插入排序）在快路上给的
+    // 答案与参照腿不一样。用例与诊断记在 ADR-0019「决策十第 4 步」那一节，
+    // 补上之前不放进这一份 —— 放进来就是一条红门，而红门不该长期挂着。
+
+    // continue：偶数格跳过（`for` 的 step 在 continue 之后照样执行，与 C 同）
+    float accv = 0.0;
+    for (int n = 0; n < 6; n++) {
+        if (n % 2 == 0) continue;
+        accv = accv + float(n);
+    }
+
+    // while 与 do-while：**每道各自的圈数不一样**（lim 由像素位置决定），
+    // 所以这一条压的正是「回边的判据是『还有道活着吗』」
+    int lim = int(uv.x * 4.0);
+    int w = 0;
+    float wv = 0.0;
+    while (w < lim) { wv = wv + 1.0; w = w + 1; }
+    int d = 0;
+    float dv = 0.0;
+    do { dv = dv + 2.0; d = d + 1; } while (d < lim);
+
     fragColor = vec4(checker, min(safe, 1.0), flags + band,
-        sv + av * 0.5 + cv * 0.25 + ivv * 0.03125 + rt);
+        sv + av * 0.5 + cv * 0.25 + ivv * 0.03125 + rt
+        + accv * 0.01 + wv * 0.1 + dv * 0.05);
 }

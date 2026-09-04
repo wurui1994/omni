@@ -3412,6 +3412,81 @@ ifStmt(s) {
 
 <!-- ADR-0019 决策十第 3 步-END -->
 
+## 落地：决策十第 4 步 —— 掩码栈 + 真循环，`while` / `do while` / `for` / `continue` 过了
+
+### 掩码不再是一个值，是几层的合成
+
+照 `lp_exec_mask`（`lp_bld_ir_common.h:50-103`）重排了：
+
+- `condMask` —— `if` 那一层，SSA 值（进出 `if` 就还原）
+- `brkPtr` / `contPtr` / `retPtr` —— `alloca` 存的 `<8 x i1>`，因为它们要**跨迭代**活着
+- `update()` = `lp_exec_mask_update`：`exec = cond & ~brk & ~cont & ~ret`
+- `raise(ptr)` = 把「当前还活着的那些道」并进某一层（`break` / `continue` / `return` 都是它）
+
+### 循环是**真循环**，条件是「开头的一次 break」
+
+`loopStmt` 一个函数收三种（`while` / `do while` / `for`），照
+`lp_exec_bgnloop`/`lp_exec_endloop`（用法见 `lp_bld_nir_soa.c:5809-5817`）：
+
+```
+  br label %head
+head:
+  store zeroinitializer -> contPtr      ; cont 只管这一轮
+  <cond 不成立的那些道 raise(brkPtr)>    ; do while 的这一步在体后面
+  <body>
+  <step>                                ; continue 之后 for 的 step 照样执行 ——
+                                        ; 算它的时候把 cont 那一层摘掉
+  %alive = condMask & ~brk & ~ret
+  %any   = icmp ne (bitcast %alive to i8), 0
+  br i1 %any, label %head, label %end
+end:
+```
+
+回边的判据是**「还有道活着吗」**（`<8 x i1>` 折成 `i8` 再比 0）。所以八道里跑得最久的
+那一道决定圈数 —— SIMD 上没有别的办法，llvmpipe 也是这样。
+
+顺带补了 `++` / `--`（`incdec`）：读一次、算一次、写回去，写那一步过掩码 ——
+形状与 `i = i + 1` 一字不差。它以前**根本走不到**（没有循环）。
+
+### 门：`bench-bool.frag` 加了三段，四条路答案全同
+
+`for` + `continue` + `%`、`while`、`do while`。后两段刻意让 `lim` 由像素位置决定，
+**每道各自的圈数不一样** —— 压的正是回边那条判据。1024² 上 127.19 MPix/s（下限门 100）。
+
+### 还差一条：嵌套 `for` + `break` + 数组变量下标
+
+`iv_join4` 的插入排序在快路上给的答案与参照腿**不一样**（三条参照腿之间是对的，
+`fns.js` 里那一条早就绿）。用例是这一段：
+
+```glsl
+vec2 srt[4];
+srt[0] = vec2(3.0, 0.0); srt[1] = vec2(1.0, 0.0);
+srt[2] = vec2(4.0, 0.0); srt[3] = vec2(2.0, 0.0);
+for (int i = 1; i < 4; i++) {
+  vec2 key = srt[i];
+  int j = i - 1;
+  for (; j >= 0; j--) { if (srt[j].x <= key.x) break; srt[j + 1] = srt[j]; }
+  srt[j + 1] = key;
+}
+```
+
+量出来的差：把四格按 `1, 10, 100, 1000` 加权之后，参照是 **4321**（也就是 `[1,2,3,4]`，
+对的），快路是 **3211**（`[1,1,2,3]`）—— 差 1110，而且**八道完全一样**，
+所以不是分道发散，是这一段本身错。
+
+已经排除的：`while`/`do while`/`for`+`continue`/`%`/`++` 都对（那三段在门里）。
+所以嫌疑集中在「嵌套循环 + `break` + 同一条语句里既读又写同一个数组的变量下标」这三样的
+交叉处。已经看出来一处**确定要修但解释不了这个现象**的地方：`maskPtr('brk')` 把新循环的
+break 层初始化成全 0，而 `lp_exec_bgnloop` 是从**当前的** break 掩码起（已经跳出外层的道
+应该继续算跳出）。这一份用例的外层循环是道间一致的，所以那一处不是这个差的原因 ——
+记下来是免得下次把它当成同一件事。
+
+**用例先不放进 `bench-bool.frag`**：放进去就是一条长期挂着的红门。下一步第一件事是把它
+放进去看着它红，然后读那份 IR（`br`/`store`/`select` 的次序）而不是继续推理 ——
+上一次「78 条全红」的教训是同一个：形状对不上的时候，去看机器写出来的东西，别猜。
+
+<!-- ADR-0019 决策十第 4 步-END -->
+
 ## 还没定的（下一步按这个顺序）
 
 1. ~~摸 mesa 那边的边界~~ —— 「量：读 llvmpipe」那一节。
