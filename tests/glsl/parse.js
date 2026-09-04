@@ -219,6 +219,15 @@ const SHAPES = [
     src: 'struct IV { vec2 v; };\nvoid main() { float L = length(vec2(1.0)); }\n',
     want: (s) => s.includes('(call length'),
   },
+  /* 数组（B14）第 1 步。收的正是 `grapheq.glsl` 那 3 处的形状，一个字不多。
+   * 取下标那一侧**没有新规则** —— 复用第十八片给 `m[0]` 取矩阵列时加的 `index`。 */
+  {
+    name: '局部数组声明 + 常量下标 + 变量下标',
+    src: 'void main() { vec2 s[4]; s[0] = vec2(1.0); int i = 2; s[i] = s[i - 1]; }\n',
+    want: (s) => s.includes('(local-arr (ty-vec 2) s 4)')
+      && s.includes('(index (name s) (int-lit 0))')
+      && s.includes('(index (name s) (name i))'),
+  },
 ];
 
 for (const c of SHAPES) {
@@ -238,6 +247,11 @@ const REJECT = [
    * 语法保持上下文无关，别把语义塞进产生式里。 */
   { name: 'struct 顺带声明一个变量', src: 'struct S { float a; } s;\nvoid main() { }\n' },
   { name: '成员是数组', src: 'struct S { float a[3]; };\nvoid main() { }\n' },
+  /* 数组只收最窄那一档（见 `local-decl` 上的注释）：带初值、大小不是字面量、
+   * 模块作用域的，全不收。 */
+  { name: '数组带初值', src: 'void main() { vec2 s[4] = vec2(0.0); }\n' },
+  { name: '数组大小不是字面量', src: 'void main() { const int N = 4; vec2 s[N]; }\n' },
+  { name: '模块作用域的数组', src: 'vec2 s[4];\nvoid main() { }\n' },
 ];
 for (const c of REJECT) {
   const s = shape(c.src);

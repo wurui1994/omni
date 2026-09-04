@@ -327,5 +327,91 @@ struct Segs { vec2 s0; int n; };
 Segs mk() { return Segs(vec2(1.0), 2); }
 float probe(int k) { Segs s = mk(); return float(s.n); }`, '返回分量类型不一样的结构体');
 
+/* ---- 十一、数组（施工图 B14）：**变量下标**那一档 ------------------------------------
+ *
+ * 摊平模型里没有内存，所以：常量下标 = 切片；变量下标 = n 条 `if`（读写都是）。
+ * 三条腿都得给同一个数 —— 这一节要压的正是「下标算出来才知道」那些形状，
+ * 因为 `grapheq.glsl` 的 `iv_join4()` 全是这种：`s[j + 1] = s[j]`、`m[cnt - 1].y = …`。 */
+
+probe('数组：常量下标读写', `
+float probe(int k) {
+  vec2 s[4];
+  s[0] = vec2(1.0, 2.0); s[1] = vec2(4.0, 8.0);
+  return s[0].x + s[0].y * 2.0 + s[1].x * 4.0 + s[1].y * 8.0;
+}`, [0], () => 1 + 2 * 2 + 4 * 4 + 8 * 8);
+
+probe('数组：没赋过值的格子是 0', `
+float probe(int k) {
+  vec2 s[4];
+  return s[2].x + s[3].y + 1.0;
+}`, [0], () => 1);
+
+probe('数组：变量下标读', `
+float probe(int k) {
+  vec2 s[4];
+  s[0] = vec2(1.0, 0.0); s[1] = vec2(2.0, 0.0);
+  s[2] = vec2(4.0, 0.0); s[3] = vec2(8.0, 0.0);
+  return s[k].x;
+}`, [0, 1, 2, 3], (k) => [1, 2, 4, 8][k]);
+
+probe('数组：变量下标写', `
+float probe(int k) {
+  vec2 s[4];
+  s[k] = vec2(9.0, 0.0);
+  return s[0].x + s[1].x * 2.0 + s[2].x * 4.0 + s[3].x * 8.0;
+}`, [0, 1, 2, 3], (k) => 9 * [1, 2, 4, 8][k]);
+
+probe('数组：算出来的下标（grapheq 的 m[cnt - 1]）', `
+float probe(int k) {
+  vec2 m[4];
+  m[0] = vec2(1.0, 2.0); m[1] = vec2(3.0, 4.0); m[2] = vec2(5.0, 6.0);
+  int cnt = k + 1;
+  return m[cnt - 1].y;
+}`, [0, 1, 2], (k) => [2, 4, 6][k]);
+
+/* 左边是「变量下标 + swizzle」—— `grapheq.glsl` 的 `m[cnt-1].y = max(m[cnt-1].y, …)`
+ * 就是这一条。只写那一格，别的格子一个都不能动。 */
+probe('数组：变量下标 + swizzle 当左值', `
+float probe(int k) {
+  vec2 m[4];
+  m[0] = vec2(1.0, 2.0); m[1] = vec2(3.0, 4.0);
+  m[k].y = 99.0;
+  return m[0].x + m[0].y * 10.0 + m[1].x * 100.0 + m[1].y * 1000.0;
+}`, [0, 1], (k) => (k === 0 ? 1 + 99 * 10 + 3 * 100 + 4 * 1000 : 1 + 2 * 10 + 3 * 100 + 99 * 1000));
+
+probe('数组：下标越界一格都不写、读出来是 0', `
+float probe(int k) {
+  vec2 s[2];
+  s[0] = vec2(1.0, 0.0); s[1] = vec2(2.0, 0.0);
+  s[k] = vec2(7.0, 0.0);
+  return s[0].x * 10.0 + s[1].x + s[k].x * 100.0;
+}`, [0, 1, 5], (k) => {
+  if (k === 0) return 7 * 10 + 2 + 7 * 100;
+  if (k === 1) return 1 * 10 + 7 + 7 * 100;
+  return 1 * 10 + 2 + 0;
+});
+
+/* 整段插入排序 —— `iv_join4()` 的前半截逐字搬过来（`s[j].x <= key.x` 就停、
+ * 否则往后挪一格）。这一条压的是「内层 `for` 的游标当下标，读和写都是」。 */
+probe('数组：按 lo 插入排序（iv_join4 的前半截）', `
+float probe(int k) {
+  vec2 s[4];
+  s[0] = vec2(3.0, 0.0); s[1] = vec2(1.0, 0.0);
+  s[2] = vec2(4.0, 0.0); s[3] = vec2(2.0, 0.0);
+  for (int i = 1; i < 4; i++) {
+    vec2 key = s[i];
+    int j = i - 1;
+    for (; j >= 0; j--) { if (s[j].x <= key.x) break; s[j + 1] = s[j]; }
+    s[j + 1] = key;
+  }
+  return s[0].x + s[1].x * 10.0 + s[2].x * 100.0 + s[3].x * 1000.0;
+}`, [0], () => 1 + 2 * 10 + 3 * 100 + 4 * 1000);
+
+rejects('数组常量下标越界', `
+float probe(int k) { vec2 s[2]; return s[2].x; }`, '取不到第 2 格');
+
+rejects('数组摊平格数超上限', `
+float probe(int k) { mat4 big[4]; return big[0][0].x; }`, '超过 32');
+
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail > 0 ? 1 : 0);

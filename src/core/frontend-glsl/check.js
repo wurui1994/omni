@@ -49,6 +49,16 @@ const glslMat = (cols, rows) => ({ k: 'mat', cols, rows });
 /** 结构体（施工图 B13）：**平**的那一档 —— 成员是标量/向量/矩阵。名义类型，按名字比。 */
 const glslStruct = (name, fields) => ({ k: 'struct', name, fields });
 
+/** 数组（B14）。`of` 是元素类型、`n` 是常量大小。**结构性**类型（不像结构体那样名义）——
+ * `vec2[4]` 与 `vec2[4]` 是同一个类型，`glslTyText` 出的字符串就是身份。 */
+const glslArray = (of, n) => ({ k: 'array', of, n });
+
+/** 摊平后最多几格。`grapheq.glsl` 那 3 处都是 `vec2[4]` = 8 格，32 留了四倍余量。
+ * 这个数不是保守起见随手写的：它是「变量下标落成 select 链」那条决策的代价上限。 */
+const GLSL_ARR_MAX_CELLS = 32;
+
+
+
 /** 打印出来给报错用。 */
 export function glslTyText(t) {
   if (t.k === 'vec') {
@@ -59,6 +69,7 @@ export function glslTyText(t) {
   /* 结构体是**名义**类型：GLSL 里两个成员完全一样但名字不同的结构体不能互相赋值，
    * 所以拿名字当身份 —— `glslSame` 比的就是这个字符串。 */
   if (t.k === 'struct') return t.name;
+  if (t.k === 'array') return `${glslTyText(t.of)}[${t.n}]`;
   return t.k;
 }
 
@@ -78,10 +89,11 @@ function glslElem(t) {
   return t;
 }
 
-/** 有几格：标量 1、`vecN` N、`matCxR` C*R、结构体是各成员之和（**摊平**数）。 */
+/** 有几格：标量 1、`vecN` N、`matCxR` C*R、结构体是各成员之和、数组是 n 份（**摊平**数）。 */
 function glslCount(t) {
   if (t.k === 'vec') return t.n;
   if (t.k === 'mat') return t.cols * t.rows;
+  if (t.k === 'array') return t.n * glslCount(t.of);
   if (t.k === 'struct') {
     let n = 0;
     for (const f of t.fields) n += glslCount(f.ty);
@@ -636,6 +648,25 @@ class GlslChecker {
       this.declare(name, ty, node);
       return { k: 'decl', name, ty, init, isConst: h === 'local-const' };
     }
+    /* 数组（B14）。语法只给最窄那一档（局部、常量大小、不带初值），所以这儿要骂的
+     * 只剩三条 —— 加上那条**上限**，它是决策：变量下标落成 select 链，格数一大就线性
+     * 劣化，所以宁可当场骂 NYI，也不悄悄生出上千路 select。 */
+    if (h === 'local-arr') {
+      const of = this.tyOf(node.items[1]);
+      const name = glslAtom(node.items[2]);
+      const n = Number(glslAtom(node.items[3]));
+      if (of.k === 'void') throw this.err(node, `'${name}' 不能是 void 的数组`);
+      if (of.k === 'array') throw this.err(node, `'${name}'：元素是数组这一档不收`);
+      if (!Number.isInteger(n) || n < 1) throw this.err(node, `数组 '${name}' 的大小要是正整数`);
+      const ty = glslArray(of, n);
+      const cells = glslCount(ty);
+      if (cells > GLSL_ARR_MAX_CELLS) {
+        throw this.err(node, `数组 '${name}' 摊平后 ${cells} 格，超过 ${GLSL_ARR_MAX_CELLS}`
+          + ' —— 变量下标落成 select 链，格数一大就线性劣化，这一档先不收');
+      }
+      this.declare(name, ty, node);
+      return { k: 'decl', name, ty, init: null, isConst: false };
+    }
     if (h === 'ret') {
       const f = this.curFunc;
       if (f.ret.k === 'void') throw this.err(node, `${f.name} 是 void，return 不能带值`);
@@ -839,10 +870,14 @@ class GlslChecker {
   }
 
   /**
-   * `m[K]`（矩阵取**列**）与 `v[K]`（向量取一格）。
+   * `a[i]`（数组取一格）、`m[K]`（矩阵取**列**）、`v[K]`（向量取一格）。
    *
-   * 下标**必须是整数字面量**：动态下标要方言里有真数组才做得对，这一刀没有 ——
-   * 不挡住的话它只会在某个下标上悄悄取错一格。
+   * **数组**的下标可以是任意 `int` 表达式 —— `grapheq.glsl` 的 `m[cnt - 1]`、`s[j + 1]`
+   * 是数据算出来的，挡住就等于挡住那份真实着色器。落法见降级那一侧（常量下标 = 切片、
+   * 变量下标 = select 链）。
+   *
+   * **向量与矩阵**的下标仍然必须是整数字面量：它们摊平之后是「哪几格」的静态问题，
+   * 动态下标要么走数组那条路，要么在某个下标上悄悄取错一格。
    *
    * 矩阵是**列优先**（规范 5.6）：`m[0]` 是第 0 列，也就是 `mat2(a,b,c,d)` 里的 `(a,b)`。
    * 记成行就是转置，而转置在图上看不出「错」，只看得出「转过来了」。
@@ -853,8 +888,19 @@ class GlslChecker {
      * 节点上的**属性**仍然叫 `of` —— 属性名不受那条限制。 */
     const subj = this.expr(node.items[1]);
     const at = this.expr(node.items[2]);
+    if (subj.ty.k === 'array') {
+      if (at.ty.k !== 'int') {
+        throw this.err(node, `数组下标要是 int，这儿是 ${glslTyText(at.ty)}`);
+      }
+      /* 常量下标当场查越界；变量下标查不了，GLSL 规范里那也是未定义行为，
+       * 我们在降级那侧夹到 [0, n-1]（不越界读别人的格子）。 */
+      if (at.k === 'lit' && (at.v < 0 || at.v >= subj.ty.n)) {
+        throw this.err(node, `${glslTyText(subj.ty)} 只有 ${subj.ty.n} 格，取不到第 ${at.v} 格`);
+      }
+      return { k: 'aindex', ty: subj.ty.of, of: subj, at };
+    }
     if (at.k !== 'lit' || at.ty.k !== 'int') {
-      throw this.err(node, '下标必须是整数字面量（动态下标要方言里有真数组，这一刀没有）');
+      throw this.err(node, '下标必须是整数字面量（动态下标只有数组收，见 B14）');
     }
     const k = at.v;
     if (subj.ty.k === 'mat') {
@@ -890,6 +936,9 @@ class GlslChecker {
       if (seen.size !== e.idx.length) throw this.err(at, 'swizzle 里同一格出现两次，不能当左值');
       return e;
     }
+    /* `s[i] = ...` 与 `m[cnt - 1].y = ...`（后者是 swizzle 套在这上面，走上面那一支）。
+     * 数组本身是局部变量，所以不必再查 uniform/in 那些不可写的来源。 */
+    if (e.k === 'aindex') return e;
     throw this.err(at, '左边这个东西不能赋值');
   }
 

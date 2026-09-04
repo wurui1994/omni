@@ -139,6 +139,13 @@ const TYPES = [
   ['三元两支同型', 'float f = u_t < 1.0 ? 2.0 : 3.0;', 'float'],
   ['三元一支 int 一支 float', 'float f = u_t < 1.0 ? 2 : 3.0;', 'float'],
   ['pow(vec3, vec3) 回 vec3', 'vec3 c = pow(vec3(1.0), vec3(2.0));', 'vec3'],
+  /* 数组（B14）。类型文本是 `元素[n]` —— 数组是**结构性**类型（不像结构体那样名义），
+   * 所以两个 `vec2[4]` 是同一个类型。 */
+  ['数组声明的类型是 vec2[4]', 'vec2 s[4];', 'vec2[4]'],
+  ['常量下标取出元素类型', 'vec2 s[4]; vec2 e = s[2];', 'vec2'],
+  ['变量下标也取出元素类型', 'vec2 s[4]; int i = 1; vec2 e = s[i];', 'vec2'],
+  ['算出来的下标（grapheq 的 m[cnt-1]）', 'vec2 m[4]; int cnt = 2; vec2 e = m[cnt - 1];', 'vec2'],
+  ['下标之后再 swizzle', 'vec2 m[4]; int cnt = 2; float f = m[cnt - 1].y;', 'float'],
 ];
 for (const [name, expr, want] of TYPES) {
   try {
@@ -191,6 +198,11 @@ const REJECT = [
    * 那要方言里有真数组才做得对。越界那一条是新加的：常量下标能在编译期查。 */
   ['动态下标还挡着', 'int i = 0;\n  float f = u_res[i];', '整数字面量'],
   ['常量下标越界要骂', 'float f = u_res[2];', '取不到第 2 格'],
+  /* 数组（B14）该拒的。**变量下标不在这儿** —— 数组正是为它开的口。 */
+  ['数组常量下标越界', 'vec2 s[4]; vec2 e = s[4];', '取不到第 4 格'],
+  ['数组下标不是 int', 'vec2 s[4]; vec2 e = s[u_t];', '数组下标要是 int'],
+  ['数组摊平格数超上限', 'mat4 big[4];', '超过 32'],
+  ['void 的数组', 'void v[2];', 'void 的数组'],
   ['! 只对 bool', 'bool b = !u_t;', '! 要一个 bool'],
   ['向量不能用 <', 'bool b = u_res < u_res;', '只比标量'],
   ['swizzle 重复格不能当左值', 'vec3 c = vec3(0.0); c.xx = u_res;', '同一格出现两次'],

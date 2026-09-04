@@ -50,6 +50,9 @@ function glslCompTy(t) {
 function glslNComp(t) {
   if (t.k === 'vec') return t.n;
   if (t.k === 'mat') return t.cols * t.rows;
+  /* 数组是 n 份元素接起来（B14）：第 k 格占 `k*w` 起那 w 格，w = 元素的格数。
+   * 与矩阵取列是同一个公式，只是「列」换成了「元素」。 */
+  if (t.k === 'array') return t.n * glslNComp(t.of);
   /* 结构体是各成员之和 —— 与 `check.js` 的 `glslCount` 同一个公式（施工图 B13）。 */
   if (t.k === 'struct') {
     let n = 0;
@@ -74,6 +77,14 @@ function glslCompTys(t) {
   if (t.k === 'struct') {
     const out = [];
     for (const f of t.fields) for (const x of glslCompTys(f.ty)) out.push(x);
+    return out;
+  }
+  /* 数组（B14）：元素那一串重复 n 遍。元素是结构体时这一条要紧 —— 不然 `Segs a[2]`
+   * 的第五格会被当成 `real`。 */
+  if (t.k === 'array') {
+    const one = glslCompTys(t.of);
+    const out = [];
+    for (let i = 0; i < t.n; i++) for (const x of one) out.push(x);
     return out;
   }
   const ct = glslCompTy(t);
@@ -283,6 +294,13 @@ class GlslLowerer {
       const subj = this.expr(e.of);
       const rows = e.of.ty.rows;
       return subj.slice(e.col * rows, e.col * rows + rows);
+    }
+    if (e.k === 'aindex') {
+      /* 数组取一格（B14）。**常量下标就是切片**，与 `matcol`／`field` 一个样。 */
+      const subj = this.expr(e.of);
+      const w = glslNComp(e.ty);
+      if (e.at.k === 'lit') return subj.slice(e.at.v * w, e.at.v * w + w);
+      return this.dynIndex(subj, w, e);
     }
     if (e.k === 'neg') {
       const a = this.expr(e.a);
@@ -954,10 +972,50 @@ class GlslLowerer {
     return out;
   }
 
+  /**
+   * 数组的**变量**下标（B14）。摊平模型里没有内存，所以取一格落成「n 条 `if`」：
+   *
+   *   (let a0 real 0.0) (let a1 real 0.0)          ← 元素有几格就几个格子
+   *   (if (== idx 0) (do (set a0 s_0) (set a1 s_1)))
+   *   (if (== idx 1) (do (set a0 s_2) (set a1 s_3)))
+   *   …
+   *
+   * 为什么是 `if` + `set` 而不是「表达式级的 select」：方言里没有表达式级条件，
+   * `sign`/`trunc`/`refract` 那几个内建也都是这个手法。**快路**那一层才落成掩码 + select
+   * （SoA 下八个像素的 idx 不一样，不能分支）—— 两边的答案一样，形状不一样。
+   *
+   * 下标越界时一格都不写：读出来是 0，而不是读到别人的格子。GLSL 规范里越界是未定义，
+   * 这个选择的好处是**可复现**（三条腿都给 0），坏处是与真 GL 上的垃圾值不同 ——
+   * 而拿垃圾值比像素本来就没意义。
+   */
+  dynIndex(subj, w, e) {
+    const idx = this.expr(e.at)[0];
+    const cts = glslCompTys(e.ty);
+    const n = e.of.ty.n;
+    const names = [];
+    for (let j = 0; j < w; j++) {
+      const nm = this.fresh('ai');
+      this.stmts.push(`(let ${nm} ${cts[j]} ${glslZero(cts[j])})`);
+      names.push(nm);
+    }
+    for (let k = 0; k < n; k++) {
+      const sets = [];
+      for (let j = 0; j < w; j++) sets.push(`(set ${names[j]} ${subj[k * w + j]})`);
+      this.stmts.push(`(if (bin "==" ${idx} (int ${k})) (do ${sets.join(' ')}))`);
+    }
+    const out = [];
+    for (const nm of names) out.push(`(var ${nm})`);
+    return out;
+  }
+
   assign(e) {
     const lhs = e.lhs;
+    /* 数组的**变量**下标没有静态落点 —— 那条路要按元素逐个 `if` 地写回去。
+     * `s[i] = v` 与 `m[cnt - 1].y = v` 都在里面（后者是 swizzle 套在 aindex 上）。 */
+    if (this.isDynLhs(lhs)) return this.dynAssign(e);
     const target = lhs.k === 'ref' ? this.find(lhs.name)
-      : lhs.k === 'swizzle' ? this.swizzleTarget(lhs) : null;
+      : lhs.k === 'swizzle' ? this.swizzleTarget(lhs)
+        : lhs.k === 'aindex' ? this.constIndexTarget(lhs) : null;
     if (target === null) throw new OmniError('glsl: 降不了的左值');
     let vals;
     if (e.op === '=') vals = this.expr(e.rhs);
@@ -972,12 +1030,61 @@ class GlslLowerer {
     return target;
   }
 
+  /** 左边是「数组 + 变量下标」吗（自己是，或者 swizzle 的底是）。 */
+  isDynLhs(lhs) {
+    if (lhs.k === 'aindex') return lhs.at.k !== 'lit';
+    if (lhs.k === 'swizzle' && lhs.of.k === 'aindex') return lhs.of.at.k !== 'lit';
+    return false;
+  }
+
+  /** `s[K] = …`（K 是常量）的左边：分量表里连着的那 w 格。 */
+  constIndexTarget(lhs) {
+    if (lhs.of.k !== 'ref') throw new OmniError('glsl: 数组左值的底必须是一个名字');
+    const base = this.find(lhs.of.name);
+    const w = glslNComp(lhs.ty);
+    return base.slice(lhs.at.v * w, lhs.at.v * w + w);
+  }
+
+  /**
+   * `s[i] = v` / `m[i].y = v`（i 是算出来的）。落成 n 条 `if`，每条把值写进那一个元素。
+   * 越界时哪条都不成立，于是一格都不改 —— 与 `dynIndex` 读那一侧是同一个选择。
+   */
+  dynAssign(e) {
+    const lhs = e.lhs;
+    const ai = lhs.k === 'aindex' ? lhs : lhs.of;
+    if (ai.of.k !== 'ref') throw new OmniError('glsl: 数组左值的底必须是一个名字');
+    const base = this.find(ai.of.name);
+    const w = glslNComp(ai.ty);
+    const lanes = [];
+    if (lhs.k === 'aindex') for (let j = 0; j < w; j++) lanes.push(j);
+    else for (const ix of lhs.idx) lanes.push(ix);
+    /* 下标先算（源码次序：左边在右边之前），再算右边。 */
+    const idx = this.expr(ai.at)[0];
+    let vals;
+    if (e.op === '=') vals = this.expr(e.rhs);
+    else vals = this.bin({ k: 'bin', ty: e.ty, op: e.op, a: lhs, b: e.rhs });
+    const n = ai.of.ty.n;
+    for (let k = 0; k < n; k++) {
+      const sets = [];
+      for (let li = 0; li < lanes.length; li++) {
+        const v = vals.length === 1 ? vals[0] : vals[li];
+        sets.push(`(set ${glslVarName(base[k * w + lanes[li]])} ${v})`);
+      }
+      this.stmts.push(`(if (bin "==" ${idx} (int ${k})) (do ${sets.join(' ')}))`);
+    }
+    return vals;
+  }
+
   /** `v.xy = …` 的左边：回那几格**变量名**（顺序按 swizzle）。 */
   swizzleTarget(lhs) {
-    if (lhs.of.k !== 'ref') throw new OmniError('glsl: swizzle 左值的底必须是一个名字');
-    const base = this.find(lhs.of.name);
+    /* 底可以是一个名字，也可以是「数组 + 常量下标」（`s[0].y = …`）。
+     * 变量下标那一支不走这儿 —— 见 `isDynLhs`。 */
+    const base = lhs.of.k === 'ref' ? this.find(lhs.of.name)
+      : lhs.of.k === 'aindex' ? this.constIndexTarget(lhs.of) : null;
+    if (base === null) throw new OmniError('glsl: swizzle 左值的底必须是一个名字');
     return lhs.idx.map((ix) => base[ix]);
   }
+
 
   incdec(e) {
     const target = this.expr(e.a);
