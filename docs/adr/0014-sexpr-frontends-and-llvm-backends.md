@@ -9843,3 +9843,116 @@ asy 那边的路径是清楚的（`drawelement.h:301` 的 `transpen(t) = transfo
 把"延后节点画出来的那一份"与"`t*frame` 搬过来的那一份"分清，别让前者的笔跟着变。
 
 <!-- ADR-0014 笔变换两边都错-END -->
+
+## 量：上一刀的结论是错的 —— 那份账不是"谁该带笔变换"，是**最后 1 个 bit**
+
+<!-- ADR-0014 一个 bit-BEGIN -->
+
+上一刀猜"哪些元素该带笔变换这份账我们记错了"。**猜错了。** 拿真 asy 当尺子量一遍就知道：
+
+```asy
+// /tmp/aa3.asy：alignedaxis 原文 + 在 pic1 上插一格探针
+pic1.add(new void (frame f, transform t, transform T, pair lb, pair rt) {
+    transform tinv=inverse(t);
+    transform s=shiftless(t*T*tinv);          // graph.asy:1206 那句用的就是它
+    write("id? ", s==identity);
+  });
+```
+
+```
+             t                    T          shiftless(t*T*tinv) 是精确单位？
+  真 asy   (0,0,25,0,0,1.25)   identity      true
+  我们     (0,0,25,0,0,1.25)   identity      false      <- 印出来一模一样
+```
+
+`t` 印出来两边一个样，判据也一样（`asy__istrans` 照抄 drawelement.h:324 比六个数），
+差的是 **`t.xx` 的最后一个 bit**：`(t.xx-25)*1e18` 真 asy 是 0，我们是 7105.4（= 25+2ulp）。
+`t.xx` 是 `size(pic1,100,100,point(pic1,SW),point(pic1,NE))` 算出来的
+`100/(point(NE).x-point(SW).x)`；Log 轴上那个差是 `log10(1e-4)`：
+
+```
+             log10(1e-4)+4        log(1e-4)/log(10)+4
+  真 asy     0                    8.88e-16
+  我们       8.88e-16             8.88e-16
+```
+
+**根因一行**：`asy_builtins.asy` 里摆了一份 `real log10(real x) { return log(x)/log(10); }`，
+把已经在 rmath 白名单里（builtins.tab:54，转手宿主的 `log10`）的那一格盖住了。宿主的
+`log10` 对 10 的整数次幂是精确的，`log/log` 差 1 ulp —— 这 1 ulp 一路放大成：
+`userMin.x` 差一点 → `xunitsize` 差 2 ulp → `shiftless(t*T*tinv)` 不再是**精确**单位 →
+每根刻度都套一层 `gsave` / `[ 1 0 0 1 0 0] concat` / `grestore`（印出来还是"单位"的样子，
+因为 `ps()` 只印 9 位有效数字）。删掉那一行就完了：`alignedaxis` 的 `] concat` 从 78 处
+回到 4 处，与参考**逐处对上**（参考那 4 处是 TeX 的 `\special{ps:…}`，不是笔变换）。
+
+### 第二处：`f == g` 在我们这儿**永远是假**
+
+同一趟里露出来的另一格，比上面那个更值钱。graph.asy:1922：
+
+```asy
+  if(T == identity)                    // 取样在**变换后**的坐标上均匀
+    return graph(join)(new pair(real x) {
+        return (x,pic.scale.y.T(f(pic.scale.x.Tinv(x))));},
+      pic.scale.x.T(a),pic.scale.x.T(b),n);
+  else                                 // 取样在原坐标上均匀，再 Scale
+```
+
+把 graph.asy 抄一份到 `/tmp` 插一句 `write("PROBE T==identity: ",T == identity)`：真 asy
+`true`，我们 `false` —— 于是 Log 轴的曲线取样从"对数均匀"变成"线性均匀"，`alignedaxis`
+792 处数值差就是它（参考 `-100,-99,-98,…`，我们 `-100,-49.89,-42.42,…`）。
+
+asy 的语义量清楚了（`/tmp/clo.asy`）：
+
+```
+  f == f                        true     具名函数
+  mk() == mk()                  false    同一个 lambda 求值两次（捕获空的也算）
+  mk2(2) == mk2(2)              false
+```
+
+我们那边全是 `false`。原因在 `sexpr/lower.js` 的 `fnRef`：`(fnref f)` 生成一个**薄适配器**
+闭包，而 `MakeClosure` 每求值一次就 `omni_mk_ref_f()` 一次、每次新造一条记录。改法：
+给这一格记上 `single`，四条腿（backend-js / backend-c / interp / mir.interp + backend-llvm）
+见 `single` 就发**单件**。lambda 那一族**不能**跟着改 —— 上面那张表说了它们该是 `false`。
+
+单件还有一层坑，第一版栽在这里：缓存挂在造它的那个小函数身上（`m.$one`）**不够**。
+一个程序是**多份产物**拼起来的（ESM 多模块），而这个适配器是"谁取地址谁发一份" ——
+`omni_mk_ref_asy__…_identity` 在 `graph` 那份产物里发了一次、在例子那份里又发了一次，
+各自的缓存于是两个不同对象，跨产物比还是假（量过：`grep -c` 三份产物里各一份）。
+所以缓存要进**运行时那一份模块**的一张全局表（prelude 的 `$fnOne(key, mk)`，
+`omni_rt.js` 全程只有一份）。
+
+### 顺手：dvips 那行 `-O` 是 6 位**有效数字**
+
+`picture.cc:540` 拼的是 `"-O"+String(hoffset)+"bp,…"`，`String(double)` 是默认精度的
+ostringstream —— 6 位有效数字。我们按定点 6 位写成 `-O25.368455bp,121.631230bp`，
+参考是 `-O25.3685bp,121.631bp`。图的字节一样（dvips 自己按分辨率量化），差的只有它回印在
+`%DVIPSCommandLine` 注释里的那一行。换成 `string(x, 6)`。
+
+### 这一刀的账
+
+```
+                     改之前            改之后
+  alignedaxis    结构不同(8026)      一样
+  logdown        界 201 vs 205       一样
+  cardioid       结构不同(4257)      结构不同(4257)   <- 还差，见下
+  gamma          结构不同(9728)      结构不同(9728)
+  lmfit1         结构不同(4865)      结构不同(4865)
+  laserlattice   结构不同(6273)      结构不同(6273)
+  tests/asy/run.js                   259 passed / 0 failed
+```
+
+剩下那四个是**同一条线的另一头**：`cardioid` 里参考的 `shiftless(t*T*tinv)` 不是精确单位
+（`(s.xx-1)*1e18 = -111`，于是两条轴线各套一层 `gsave`+`[ 1 0 0 1 0 0] concat`），我们算出来
+精确是单位、一处不发。两边的 `t.xx` 差 2 ulp：
+
+```
+  cardioid 第二趟 fit 的 t.xx（size(0,100) 那条 LP 解出来的）
+    真 asy   36.380187647154116348
+    我们     比它小 1.42e-14（约 2 ulp）
+```
+
+`t.xx` 来自 `calculateScaling`（plain_scaling.asy:202）——**纯 asy** 的两变量单纯形
+（simplex2.asy）。第一趟 fit 两边**逐 bit 相同**，第二趟（加了轴标签之后）才分叉，
+所以嫌疑落在"喂给 LP 的那批 coord"上。下一刀从这里量：先对 `m`/`M` 两张 coord 表，
+对上了再往单纯形里面走。
+
+<!-- ADR-0014 一个 bit-END -->

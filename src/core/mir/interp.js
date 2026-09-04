@@ -1064,7 +1064,11 @@ class MirInterp {
       const names = def.captures;
       const args = rdArgs(f.b[i]);
       const isJs = this.js;
+      // 带 `single` 的那一格（`(fnref f)` 的薄适配器）是**单件**：同一个具名函数取出来的值
+      // 必须是同一个东西，不然 `f == g` 这种按身份比的式子永远为假。与三个后端同一条规矩。
+      const single = def.single === true && names.length === 0;
       return (F) => {
+        if (single && def.$one !== undefined) { F.v[i] = def.$one; return next; }
         // 捕获在这里**按值拷进记录**（ADR-0010）：不靠宿主的词法作用域，那是按引用捕获的，
         // 循环里造的闭包会在两个后端给出不同答案。
         const caps = new Map();
@@ -1076,6 +1080,7 @@ class MirInterp {
         F.v[i] = isJs
           ? wrapFn((self, callArgs) => I.callFunc(bodyNo, caps, [callArgs]))
           : wrapFn((self, callArgs) => I.callFunc(bodyNo, caps, callArgs));
+        if (single) def.$one = F.v[i];
         return next;
       };
     }

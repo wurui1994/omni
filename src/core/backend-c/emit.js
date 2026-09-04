@@ -345,9 +345,15 @@ class CEmitter {
     const ps = c.captures.map((f) => `${cTypeName(f.type)} c_${f.name}`);
     this.line(`static omni_fn ${c.make}(${ps.length ? ps.join(', ') : 'void'}) {`);
     this.indent++;
+    // 带 `single` 的那一格（`(fnref f)` 的薄适配器）发**单件**：同一个具名函数取出来的值
+    // 必须是同一个东西，不然 `f == g` 这种按身份比的式子永远为假。量过 asy：具名函数
+    // `f == f` 真，而同一个 lambda 求值两次（捕获空的也算）是假 —— 只有这一格缓存。
+    if (c.single === true && ps.length === 0) this.line('static omni_fn one = NULL;');
+    if (c.single === true && ps.length === 0) this.line('if (one != NULL) return one;');
     this.line(`struct ${c.mangled}_env *e = (struct ${c.mangled}_env *)omni_alloc(sizeof *e);`);
     this.line(`e->fp = (omni_fnptr)${c.mangled};`);
     for (const f of c.captures) this.line(`e->c_${f.name} = c_${f.name};`);
+    if (c.single === true && ps.length === 0) this.line('one = (omni_fn)e;');
     this.line('return (omni_fn)e;');
     this.indent--;
     this.line('}');

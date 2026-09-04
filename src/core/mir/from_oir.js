@@ -74,6 +74,8 @@ class ToMir {
         make: c.make, funcName: c.mangled,
         captures: c.captures.map((x) => x.name),
         capTypes: c.captures.map((x) => this.ty(x.type)),
+        // `(fnref f)` 的薄适配器要发**单件**（见 sexpr/lower.js 的 fnRef）
+        single: c.single === true,
       });
     }
     this.closureNo = new Map();

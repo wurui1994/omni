@@ -6378,7 +6378,14 @@ path[] _strokepath(path g, pen p=currentpen) {
 // ---------------- graph/math 那一批余量（第六十七刀）
 // 答得出的照 run*.in 的定义写出来，算法重而 import 时又用不到的体是 abort（签名在，
 // graph.asy / math.asy 那几句才降得下来）。
-real log10(real x) { return log(x) / log(10); }
+// `log10` **不在这里写**：它已经在 rmath 白名单里（builtins.tab），转手宿主的 log10。
+// 曾经这里摆过一份 `log(x)/log(10)` —— 它比宿主的 log10 差 1 ulp，而这 1 ulp 会一路
+// 放大成结构差：`log10(1e-4)` 得 -3.9999999999999996 而不是 -4，于是 Log 轴的 userMin
+// 差一点、`size(pic,100,100,point(pic,SW),point(pic,NE))` 算出的 xunitsize 就是
+// 25.000000000000007 而不是 25，`shiftless(t*T*tinv)`（graph.asy:1206 那句）于是不再是
+// **精确**单位 —— asy 那边 `penSave` 比的是六个数（drawelement.h:324），差一点就每条
+// 刻度线都套一层 `gsave`/`[ 1 0 0 1 0 0] concat`/`grestore`。
+// 量出来的：alignedaxis 参考 0 处笔变换，我们 78 处；改回宿主的 log10 之后 t.xx 精确是 25。
 // search 的字符串那一份（二元的实数那份在上面）：同一套二分
 int search(string[] a, string key) {
   int lo = -1;
@@ -7303,8 +7310,13 @@ private bool asy__texship(string prefix, frame f, box bx, real ox, real oy, real
   }
   real ho = -128.4 + ox;
   real vo = -124.8 + 792 - (h + 1) - oy;
+  // 这两个数进 dvips 的样子是**6 位有效数字**，不是定点 6 位：picture.cc:540 拼的是
+  // `"-O"+String(hoffset)+"bp,…"`，而 `String(double)` 走的是默认精度的 ostringstream
+  // （6 位有效数字、去掉末尾的零）。量出来的：alignedaxis 参考那行 %DVIPSCommandLine 是
+  // `-O25.3685bp,121.631bp`，我们定点 6 位写成 `-O25.368455bp,121.631230bp` —— 图的字节
+  // 一样（dvips 自己按分辨率量化），差的只有它回印在注释里的那一行。
   string cmd = "cd " + dir + " && dvips -R -Pdownload35 -D600"
-    + " -O" + asy__f6(ho) + "bp," + asy__f6(vo) + "bp -T612bp,792bp -q"
+    + " -O" + string(ho, 6) + "bp," + string(vo, 6) + "bp -T612bp,792bp -q"
     + " -o" + pre + "_.ps " + pre + "_.dvi";
   if (_runproc(cmd) != 0) return false;
   // dvips 出来的是**整页** PostScript（`%!PS-Adobe-2.0`、`%%BoundingBox: 0 0 612 792`）。

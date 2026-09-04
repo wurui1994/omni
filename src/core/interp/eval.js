@@ -436,6 +436,9 @@ class Interp {
   makeClosure(e, env, frame) {
     const def = this.closures.get(e.make);
     if (def === undefined) throw new OmniError(`interp: no such closure '${e.make}'`);
+    // 带 `single` 的那一格（`(fnref f)` 的薄适配器）是**单件**：同一个具名函数取出来的值
+    // 必须是同一个东西，不然 `f == g` 这种按身份比的式子永远为假。与两个后端同一条规矩。
+    if (def.single === true && def.captures.length === 0 && def.$one !== undefined) return def.$one;
     const caps = new Map();
     for (let i = 0; i < def.captures.length; i++) {
       const a = e.args[i];
@@ -448,7 +451,9 @@ class Interp {
     // **实参表**：JS 域的函数体只有一个形参，绑的就是整条表，所以要再包一层；Omni 域的
     // 函数体形参是按位置绑的，那条表本身就是位置实参。判据在模块上（lower.js 的 js: true）。
     if (this.mod.js === true) return wrapFn((self, args) => this.callFunc(body, caps, [args]));
-    return wrapFn((self, args) => this.callFunc(body, caps, args));
+    const fv = wrapFn((self, args) => this.callFunc(body, caps, args));
+    if (def.single === true && def.captures.length === 0) def.$one = fv;
+    return fv;
   }
 
   assign(e, env, frame) {

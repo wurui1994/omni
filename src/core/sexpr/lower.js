@@ -844,7 +844,10 @@ class CoreLowerer {
     for (const [nm, c] of this.closures) {
       if (qi++ < base.closures) continue;
       if (this.sigOnly.clos.has(nm)) continue;   // 造它的那个小函数由定义它的那份产物发
-      clos.push({ id: c.id, mangled: c.mangled, make: c.make, captures: c.captures });
+      clos.push({
+        id: c.id, mangled: c.mangled, make: c.make, captures: c.captures,
+        single: c.single === true,
+      });
     }
     const fnTys = [];
     let fi = 0;
@@ -1458,6 +1461,11 @@ class CoreLowerer {
         // 名字按**被取地址的那个函数**起（同上：不能用"第几个"编号）
         id, mangled: `omni_clo_ref_${nm}`, make: `omni_mk_ref_${nm}`,
         captures: [], params: ps, ret: d.ret, type: t, node: n,
+        // **同一个函数取出来的值要是同一个东西**：`(fnref f)` 每求值一次就造一条新记录的话
+        // `f == f` 就是假。asy 那边量过：具名函数 `f == f` 真，而同一个 lambda 求值两次
+        // （`mk() == mk()`，捕获空的也算）是假 —— 所以这一格只给"取具名函数地址"的适配器
+        // 记上标记，lambda 那一族照旧一次一条。后端见 single 就发一份缓存起来的单件。
+        single: true,
       });
       this.lifted.push({
         name: key, mangled: `omni_clo_ref_${nm}`, ret: d.ret, params: ps,

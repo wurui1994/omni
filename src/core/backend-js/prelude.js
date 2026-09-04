@@ -679,6 +679,18 @@ function $callFn(f, ...args) {
   if (f === null) $rt_error("call of a null function value");
   return f.fp(f, ...args);
 }
+// 「具名函数当值用」那一份**单件**（(fnref f) 的薄适配器，见 sexpr/lower.js 的 fnRef）。
+// 为什么要按名字进这张全局表、而不是把缓存挂在造它的那个小函数上：一个程序由**多份产物**
+// 拼起来（ESM 多模块），而这个薄适配器是"谁取地址谁发一份"——同一个具名函数在 graph 那份
+// 产物里发一次、在例子那份里又发一次，各自的缓存于是两个不同对象，f == g 还是假。
+// 量出来的：graph.asy:1922 的 if(T == identity) 走错分支，Log 轴的取样从"对数均匀"
+// 变成"线性均匀"（alignedaxis 792 处数值差）。这张表在运行时那一份模块里，全程只有一份。
+const $fnOnes = new Map();
+function $fnOne(key, mk) {
+  let o = $fnOnes.get(key);
+  if (o === undefined) { o = mk(); $fnOnes.set(key, o); }
+  return o;
+}
 // 成员派发的兜底（ADR-0011 决策 12）：派发器的形参个数是表里的最大值，末尾多出来的
 // undefined 等于没给 —— 削掉再调，C 侧的 omni_js_call_n 是同一套。
 function $js_call_n(f, args) {

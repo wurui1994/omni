@@ -232,6 +232,18 @@ class JsEmitter {
   closureMake(c) {
     const ps = c.captures.map((f) => `c_${f.name}`);
     const fields = c.captures.map((f) => `c_${f.name}: c_${f.name}`);
+    // 带 `single` 的那一格（`(fnref f)` 的薄适配器）发**单件**：同一个具名函数取出来的值
+    // 必须是同一个东西，不然 `f == g` 这种按身份比的式子永远为假 —— graph.asy:1922 的
+    // `if(T == identity)` 正是这一格（走错分支的话 Log 轴的取样从"对数均匀"变成"线性均匀"）。
+    // 量过 asy：具名函数 `f == f` 真，而同一个 lambda 求值两次（`mk() == mk()`，捕获空的
+    // 也算）是假 —— 所以只有这一格缓存，lambda 那一族照旧一次一条。
+    // 缓存不挂在造它的那个小函数身上、而是进运行时那张全局表（`$fnOne`）：一个程序由
+    // **多份产物**拼起来，而这个适配器是"谁取地址谁发一份"—— 挂在自己身上的话 graph 那份
+    // 与例子那份各有一个缓存，跨产物比还是假。
+    if (c.single === true && ps.length === 0) {
+      this.line(`${this.ex()}function ${c.make}() { return $fnOne(${JSON.stringify(c.make)}, () => ({ fp: ${c.mangled} })); }`);
+      return;
+    }
     this.line(`${this.ex()}function ${c.make}(${ps.join(', ')}) { return { fp: ${c.mangled}${fields.length ? `, ${fields.join(', ')}` : ''} }; }`);
   }
 

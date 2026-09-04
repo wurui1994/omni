@@ -561,8 +561,20 @@ class LlvmEmitter {
       let k = 0;
       while (k < ts.length) { ps.push(`${ts[k]} %c${k}`); k++; }
       const rec = `%clo_${i}`;
+      // 带 `single` 的那一格（`(fnref f)` 的薄适配器）发**单件**：同一个具名函数取出来的
+      // 值必须是同一个东西，不然 `f == g` 这种按身份比的式子永远为假。与另外几条腿同一条规矩。
+      const single = c.single === true && ts.length === 0;
+      if (single) this.line(`@one_${c.make} = private global ptr null`);
       this.line(`define private ptr @${c.make}(${ps.join(', ')}) {`);
       this.line('entry:');
+      if (single) {
+        this.line(`  %o = load ptr, ptr @one_${c.make}`);
+        this.line('  %z = icmp eq ptr %o, null');
+        this.line('  br i1 %z, label %mk, label %hit');
+        this.line('hit:');
+        this.line('  ret ptr %o');
+        this.line('mk:');
+      }
       this.line(`  %szp = getelementptr ${rec}, ptr null, i64 1`);
       this.line('  %sz = ptrtoint ptr %szp to i64');
       this.line('  %e = call ptr @omni_ll_alloc(i64 %sz)');
@@ -574,6 +586,7 @@ class LlvmEmitter {
         this.line(`  store ${ts[k]} %c${k}, ptr %p${k}`);
         k++;
       }
+      if (single) this.line(`  store ptr %e, ptr @one_${c.make}`);
       this.line('  ret ptr %e');
       this.line('}');
       this.line('');
