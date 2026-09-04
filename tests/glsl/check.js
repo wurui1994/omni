@@ -205,6 +205,9 @@ const REJECT = [
   ['! 只对 bool', 'bool b = !u_t;', '! 要一个 bool'],
   ['向量不能用 <', 'bool b = u_res < u_res;', '只比标量'],
   ['swizzle 重复格不能当左值', 'vec3 c = vec3(0.0); c.xx = u_res;', '同一格出现两次'],
+  /* 采样器（规范 4.1.7）是不透明类型：只收 uniform，局部量拒。 */
+  ['采样器不能是局部量', 'sampler2D s;', '采样器只能是 uniform'],
+  ['texture 的第一个实参要是采样器', 'vec4 c = texture(u_res, u_res);', '要是采样器'],
 ];
 for (const [name, body, want] of REJECT) {
   if (want === null) continue;
@@ -229,6 +232,15 @@ for (const [name, src, stage, want] of [
   /* 导数那三条也只有片元有（规范 8.9）。片元那一档收 —— 见 render.js / vispy_draw.js。 */
   ['顶点里 dFdx', 'void main() { gl_Position = vec4(dFdx(1.0)); }', 'vert',
     'dFdx 只能写在片元着色器里'],
+  /* `texture` 的坐标要对上采样器的维数（规范 8.7）。这两条要一个采样器 uniform，
+   * 所以放在这张"整份源码"的表里，不是上面那张共用前言的。 */
+  ['sampler2D 的坐标要 vec2', 'uniform sampler2D t;\nout vec4 c;\n'
+    + 'void main() { c = texture(t, 0.5); }', 'frag', '坐标要是 vec2'],
+  ['sampler1D 的坐标要 float', 'uniform sampler1D t;\nout vec4 c;\n'
+    + 'void main() { c = texture(t, vec2(0.5)); }', 'frag', '坐标要是 float'],
+  /* 维数对不上的老写法也拒：`texture2D` 收的是 sampler2D。 */
+  ['texture2D 不收 sampler1D', 'uniform sampler1D t;\nout vec4 c;\n'
+    + 'void main() { c = texture2D(t, vec2(0.5)); }', 'frag', '要 sampler2D'],
   ['版本不是 330', 'void main() { }', 'frag', '只收 #version 330'],
 ]) {
   const head = name === '版本不是 330' ? '#version 400 core\n' : '#version 330 core\n';

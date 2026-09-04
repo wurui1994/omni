@@ -69,10 +69,6 @@ const BUDGET = new Map([
   /* 同一档：`transforms/translate.glsl:14` 与 `:29` 是 `vec3(x,y,z) + translate_translate);`
    * —— **多一个右括号**。也是 vispy 自己的笔误，不是我们缺特性。 */
   ['transforms/translate.glsl', 'vispy 自己多写了一个 `)`（第 14、29 行）—— 真 GL 编译器一样拒'],
-  /* 采样器那一族（`sampler1D`/`sampler2D` + `texture()`）。llvmpipe 那边是
-   * `lp_bld_sample*` 一整块（软件纹理取样、双线性、mip），这一刀还没到那儿。 */
-  ['colormaps/user.glsl', '纹理：`uniform sampler1D` 与 texture() 还没接（llvmpipe 的 lp_bld_sample*）'],
-  ['colormaps/colormaps.glsl', '纹理：同上（`uniform sampler2D`）'],
 ]);
 
 const dir = vispyDir();

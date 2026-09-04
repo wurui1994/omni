@@ -99,6 +99,10 @@
       "vec2" "vec3" "vec4" "ivec2" "ivec3" "ivec4" "bvec2" "bvec3" "bvec4"
       "mat2" "mat3" "mat4"
       "mat2x2" "mat2x3" "mat2x4" "mat3x2" "mat3x3" "mat3x4" "mat4x2" "mat4x3" "mat4x4"
+      ;; 采样器（规范 4.1.7）：不透明类型，只能当 `uniform`（与函数形参）。
+      ;; 收 1D 与 2D 两个 —— vispy 的 `colormaps/user.glsl` 用 sampler1D，
+      ;; 别处（真实着色器里最常见的）用 sampler2D。
+      "sampler1D" "sampler2D"
       ;; `layout` **不在这儿**：关键字表里的每个词都得是某条规则用到的终结符（不然构表
       ;; 就骂），而 `layout(location = N)` 这一刀不收。收了却不用，等于留一个哑符号。
       "uniform" "in" "out" "inout" "const" "flat" "smooth" "noperspective"
@@ -207,6 +211,10 @@
   (rule type
     (-> ("void") (ty-void))
     (-> ("bool") (ty-bool))
+    ;; 采样器（规范 4.1.7）。它是**不透明**的：不能算、不能构造、不能当返回值 ——
+    ;; 那些都在检查那一侧拦。语法这一层它就是一个类型名。
+    (-> ("sampler1D") (ty-sampler 1))
+    (-> ("sampler2D") (ty-sampler 2))
     (-> ("int") (ty-int))
     (-> ("uint") (ty-uint))
     (-> ("float") (ty-float))

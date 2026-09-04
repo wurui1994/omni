@@ -251,6 +251,17 @@ const SHAPES = [
     want: (s) => s.includes('(local-multi0 (ty-float) a')
       && s.includes('(one b (float-lit 2.0))') && s.includes('(one c)'),
   },
+  /* 采样器（规范 4.1.7）：两个维数都收，是不透明类型。取样那一块（`texture` 一族的
+   * 双线性、寻址方式）还没做 —— 但**类型与调用的形状**在这一层已经是真的了。
+   * `texture1D` 是 120 的老写法，vispy 的 colormaps/user.glsl 用它。 */
+  {
+    name: '采样器 uniform 与 texture 调用',
+    src: 'uniform sampler2D tex2;\nuniform sampler1D tex1;\n'
+      + 'void main() { vec4 a = texture(tex2, vec2(0.5)); vec4 b = texture1D(tex1, 0.5); }\n',
+    want: (s) => s.includes('(uniform (ty-sampler 2) tex2)')
+      && s.includes('(uniform (ty-sampler 1) tex1)')
+      && s.includes('(call texture ') && s.includes('(call texture1D '),
+  },
 ];
 
 for (const c of SHAPES) {
@@ -261,7 +272,6 @@ for (const c of SHAPES) {
 
 /* ---- 四、该拒的要拒。语法不收的东西**必须报错**，不能悄悄分析成别的形状。 */
 const REJECT = [
-  { name: '采样器（这一刀不收）', src: 'uniform sampler2D t;\nvoid main() { }\n' },
   { name: '缺分号', src: 'void main() { float x = 1.0 }\n' },
   /* 平结构体收了，别的形状照旧不收 —— 见 `struct-decl` 那条规则上的注释。
    *

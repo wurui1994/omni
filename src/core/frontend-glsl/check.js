@@ -74,6 +74,8 @@ export function glslTyText(t) {
    * 所以拿名字当身份 —— `glslSame` 比的就是这个字符串。 */
   if (t.k === 'struct') return t.name;
   if (t.k === 'array') return `${glslTyText(t.of)}[${t.n}]`;
+  /* 采样器（规范 4.1.7）：`sampler1D` / `sampler2D`。 */
+  if (t.k === 'sampler') return `sampler${t.dim}D`;
   return t.k;
 }
 
@@ -144,6 +146,10 @@ function glslTyOf(node, err, structs) {
     return t;
   }
   const n = Number(node.items[1].value);
+  /* 采样器（规范 4.1.7）：**不透明**类型。`n` 是维数（1 或 2）。
+   * 它只能当 uniform（与函数形参），不能算、不能构造、不能当返回值 —— 那几条在
+   * 声明与表达式那两处拦（见 `decl` 的 uniform 那一格与 `binary`）。 */
+  if (h === 'ty-sampler') return { k: 'sampler', dim: n };
   if (h === 'ty-vec') return glslVec(n, 'float');
   if (h === 'ty-ivec') return glslVec(n, 'int');
   if (h === 'ty-bvec') return glslVec(n, 'bool');
@@ -225,6 +231,15 @@ const GLSL_BUILTINS = new Map([
 
 /** 导数那三条：只有片元着色器有，而且要看邻居像素（规范 8.9）。 */
 const GLSL_DERIV = new Set(['dFdx', 'dFdy', 'fwidth']);
+
+/**
+ * 纹理取样（规范 8.7）。四个名字都收：`texture` 是 330 的写法，
+ * `texture1D`/`texture2D` 是 120 的老写法 —— vispy 的 `colormaps/user.glsl` 用后者，
+ * 而"照实收现有语料"是这一层的规矩（不收就得让用它的人改源码）。
+ * 类型不走 `GLSL_BUILTINS` 那张表：第一个实参是**不透明**的采样器，那张表的泛型
+ * 规则（"参数里最宽的那个"）在它身上说不通。
+ */
+const GLSL_TEX = new Set(['texture', 'texture1D', 'texture2D']);
 
 /** `atan` 与 `step` 的第一个参数也可以是标量而第二个是向量吗 —— GLSL 里可以，这儿也收。 */
 function glslGenType(name, tys, node, err) {
@@ -451,6 +466,9 @@ class GlslChecker {
      * 导数是**按 2×2 quad 定义的**，所以两条腿都要为它换形状（快路把 8 道排成 quad、
      * 参考腿多两个 quad 基准参数与一次"探邻居"的重跑）。没用到就一格都不改。 */
     this.deriv = false;
+    /* 用了纹理取样没有（`texture` 一族）。两条腿现在还只到"类型这一层"，
+     * 真取样是下一格 —— 所以降级那两侧见它就明着骂（见 lower.js / emit_llvm.js）。 */
+    this.tex = false;
     this.builtinIn = stage === 'vert' ? GLSL_VERT_IN : GLSL_FRAG_IN;
     this.builtinOut = stage === 'vert' ? GLSL_VERT_OUT : GLSL_FRAG_OUT;
   }
@@ -500,6 +518,14 @@ class GlslChecker {
   pop() { this.scopes.pop(); }
 
   declare(name, ty, node) {
+    /* 采样器是不透明类型（规范 4.1.7）：这一刀只收它当 **uniform** —— 局部量与形参都拒。
+     * 规范里形参是允许的（`vec4 f(sampler2D s)`），拒它是**这一刀的窄化**：
+     * 现有语料（vispy 那 102 份、两份尺子）里一处都没有，而收了就得在两条腿上
+     * 都能"把一个纹理句柄传进函数"。真遇上再放宽。 */
+    if (ty.k === 'sampler') {
+      throw this.err(node, `'${name}' 是 ${glslTyText(ty)}：采样器只能是 uniform`
+        + '（局部量与形参这一刀不收）');
+    }
     const top = this.scopes[this.scopes.length - 1];
     if (top.has(name)) throw this.err(node, `'${name}' 在同一层里声明过两次`);
     top.set(name, ty);
@@ -561,6 +587,8 @@ class GlslChecker {
       discard: this.discard,
       /* 用了导数没有（`dFdx`/`dFdy`/`fwidth`）。两条腿据它换形状 —— 见 `deriv` 那一格。 */
       deriv: this.deriv,
+      /* 用了纹理取样没有（`texture` 一族）。降级两侧现在见它就明着骂 —— 真取样是下一格。 */
+      tex: this.tex,
     };
   }
 
@@ -685,7 +713,7 @@ class GlslChecker {
       const list = this.byName.get(src) ?? [];
       const dup = list.find((g) => g.sig === sig);
       const isBuiltin = GLSL_BUILTINS.has(src) || GLSL_VEC_CMP.has(src) || GLSL_VEC_RED.has(src)
-        || GLSL_MAT_FNS.has(src) || GLSL_BITS.has(src) || src === 'not';
+        || GLSL_MAT_FNS.has(src) || GLSL_BITS.has(src) || GLSL_TEX.has(src) || src === 'not';
       if (h === 'func-proto') {
         if (dup === undefined) {
           const f = { name: (list.length === 0 && !isBuiltin) ? src : `${src}__${sig}`,
@@ -1225,6 +1253,34 @@ class GlslChecker {
       const to = from === 'float' ? 'int' : 'float';
       const ty = isScalar ? (to === 'int' ? GLSL_INT : GLSL_FLOAT) : glslVec(at.n, to);
       return { k: 'bits', ty, name, args };
+    }
+    if (GLSL_TEX.has(name)) {
+      /* 纹理取样（规范 8.7）。收四个名字：`texture`（330 的写法）与
+       * `texture1D`/`texture2D`（120 的老写法，vispy 的 colormaps/user.glsl 用后者）。
+       * 类型这一层的规矩很短：第一个实参必须是**对得上维数的采样器**、第二个是
+       * `float`（1D）或 `vec2`（2D），回 `vec4`。
+       * 采样器只有 uniform 与形参两种来处，所以这儿不必查"它是不是常量"。
+       * **顶点里也收**：`texture()` 在顶点着色器里是合法的（没有隐式导数，按 LOD 0 取）——
+       * 与 `dFdx` 那一族不同，那三条才是片元专属的。 */
+      if (args.length !== 2) throw this.err(node, `${name} 要 2 个实参，给了 ${args.length}`);
+      const st = args[0].ty;
+      if (st.k !== 'sampler') {
+        throw this.err(node, `${name} 的第一个实参要是采样器，给了 ${glslTyText(st)}`);
+      }
+      const wantDim = name === 'texture' ? st.dim : (name === 'texture1D' ? 1 : 2);
+      if (st.dim !== wantDim) {
+        throw this.err(node, `${name} 要 sampler${wantDim}D，给了 ${glslTyText(st)}`);
+      }
+      const ct = args[1].ty;
+      const okCoord = st.dim === 1 ? (ct.k === 'float' || ct.k === 'int')
+        : (ct.k === 'vec' && ct.n === 2 && ct.base === 'float');
+      if (!okCoord) {
+        throw this.err(node, `${name} 的坐标要是 ${st.dim === 1 ? 'float' : 'vec2'}，`
+          + `给了 ${glslTyText(ct)}`);
+      }
+      this.tex = true;
+      const coord = st.dim === 1 ? this.coerce(args[1], GLSL_FLOAT, node) : args[1];
+      return { k: 'tex', ty: glslVec(4, 'float'), name, args: [args[0], coord] };
     }
     if (GLSL_BUILTINS.has(name)) {
       /* 导数那三条只有片元有（规范 8.9），而且要记一格「这个模块用了导数」——

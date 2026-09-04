@@ -1350,6 +1350,16 @@ class GlslLlvmEmitter {
     /* 用户函数不再是拦路虎 —— 它们**内联**（见 `inlineCall`），所以这儿只要求有 `main`。 */
     const mainFn = this.fnByName.get('main');
     if (mainFn === undefined) throw new OmniError('glsl/llvm: 没有 main');
+    /* 纹理（规范 8.7）：类型这一层收了，取样还没做 —— 那要一整块（双线性、寻址方式、
+     * 纹理数据怎么进 ABI），是下一格。明着骂，别悄悄给一个黑图。 */
+    if (m.tex === true) {
+      throw new OmniError('glsl/llvm: 纹理取样还没做（类型收了；取样那一块见 ADR-0019）');
+    }
+    for (const u of m.uniforms) {
+      if (u.ty.k === 'sampler') {
+        throw new OmniError(`glsl/llvm: 采样器 uniform '${u.name}'（纹理那一块还没做）`);
+      }
+    }
     /* 形参**刻意不叫 `i`**：见 `builtin()` 里 `at` 上面那段（闭包捕获那条检查是按
      * 函数粒度 + 按名字判的）。 */
     const load = (slotIx) => {

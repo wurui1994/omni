@@ -1705,6 +1705,17 @@ class GlslLowerer {
      * 函数**，所以要的是方言的全局（`tests/sexpr` 的 `12-globals` 那一档）——
      * 那是另一格，不是这一格。明着骂，别悄悄漏。 */
     const gvs = mod.globals === undefined ? [] : mod.globals;
+    /* 纹理（规范 8.7）：类型这一层收了（`sampler1D`/`sampler2D` 与 `texture` 一族），
+     * 但**取样还没做** —— 那要一整块（双线性、寻址方式、纹理数据怎么进来），是下一格。
+     * 明着骂，别悄悄给一个黑图。 */
+    if (mod.tex === true) {
+      glslNyi('纹理取样（类型收了，取样那一块还没做 —— llvmpipe 的 lp_bld_sample*）');
+    }
+    for (const u of mod.uniforms) {
+      if (u.ty.k === 'sampler') {
+        glslNyi(`采样器 uniform '${u.name}'（纹理那一块还没做）`);
+      }
+    }
     if (gvs.length > 0) {
       throw new OmniError(`glsl: 模块级变量（'${gvs[0].name}'）在参照腿上还没接 ——`
         + ' 这一层的函数是真的方言函数，要的是方言的全局（ADR-0019 决策十第 5 步）');
