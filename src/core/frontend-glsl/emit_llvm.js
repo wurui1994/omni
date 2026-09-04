@@ -959,17 +959,76 @@ class GlslLlvmEmitter {
    * `select` 在 store 那一处自己解决。上一版要「快照两支的绑定、逐个比较、只 select
    * 变了的」，那是因为值在 SSA 里 —— 而那也正是 `break`/`continue`/循环接不了的原因。
    *
-   * 还没做的一格：llvmpipe 在这外面还套一条 `lp_build_skip_branch`（整块没有一个道
-   * 活着就跳过去），只在"单块且指令数 < 8"时才不套。那是纯性能，留给下一步。
+   * 外面那一条「整块没有一个道活着就跳过去」是 `lp_build_skip_branch`，见 `branch()`。
    */
   ifStmt(s) {
     this.pushMask(this.expr(s.c)[0]);
-    if (s.then !== null && s.then !== undefined) this.stmt(s.then);
+    this.branch(s.then);
     if (s.else !== null && s.else !== undefined) {
       this.invertMask();
-      this.stmt(s.else);
+      this.branch(s.else);
     }
     this.popMask();
+  }
+
+  /**
+   * 一支的体：**小块直接摊平，大块套一条「没人活着就跳过」的真分支**。
+   *
+   * 这是 llvmpipe 的 `lp_build_skip_branch`。判据抄 `lp_should_flatten_cf_list`
+   * （`lp_bld_nir_soa.c:5783-5792`）：**单块、且指令数 < 8** 才摊平，否则套分支。
+   * 两头都实：块小的时候一条分支的开销比它省下的多；块大的时候八道常常整块都不活
+   * （相邻像素高度一致），跳过去是白赚的。
+   *
+   * 掩码**照旧带着** —— 分支只是「这一块一个道都不活，别算了」，里面每一处写还是要过
+   * 掩码：跳不过去的时候，活着的那几道之外的道不能被改。
+   */
+  branch(body) {
+    if (body === null || body === undefined) return;
+    /* 八道全活（`execMask === null`）时没什么可跳的。 */
+    if (this.execMask === null || this.flatEnough(body)) {
+      this.stmt(body);
+      return;
+    }
+    const yes = this.label('skip');
+    const end = this.label('endskip');
+    const any = this.anyActive(this.execMask);
+    this.body.push(`  br i1 ${any.v}, label %${yes}, label %${end}`);
+    this.body.push(`${yes}:`);
+    this.blockEdge();
+    this.stmt(body);
+    this.body.push(`  br label %${end}`);
+    this.body.push(`${end}:`);
+    this.blockEdge();
+  }
+
+  /**
+   * 「单块且指令数 < 8」——`lp_should_flatten_cf_list` 的判据，按语句棵数近似。
+   * 里面套了 `if`/循环/`switch` 的**不算单块**，一律不摊平。
+   */
+  flatEnough(s) {
+    const n = this.stmtWeight(s, 0);
+    return n >= 0 && n < 8;
+  }
+
+  /** 语句棵数；碰到嵌套的控制流回 -1（「不是单块」）。 */
+  stmtWeight(s, acc) {
+    if (s === null || s === undefined) return acc;
+    const k = s.k;
+    if (k === 'if' || k === 'while' || k === 'do' || k === 'for' || k === 'switch') return -1;
+    if (k === 'block') {
+      let n = acc;
+      for (const x of s.body) {
+        n = this.stmtWeight(x, n);
+        if (n < 0) return -1;
+      }
+      return n;
+    }
+    if (k === 'multi') {
+      let n = acc;
+      for (const d of s.list) n = this.stmtWeight(d, n);
+      return n;
+    }
+    return acc + 1;
   }
 
   /**
