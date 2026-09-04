@@ -42,7 +42,8 @@ import { readSexpr } from './sexpr/read.js';
 import { lowerCoreSexpr } from './sexpr/lower.js';
 import { printSexpr } from './sexpr/print.js';
 import { readGrammar } from './glr/grammar.js';
-import { buildTable, dumpTable, tableText, tableFromText, TABLE_FORMAT } from './glr/table.js';
+import { dumpTable } from './glr/table.js';
+import { loadGrammarTable } from './glr/load.js';
 import { lexText } from './glr/lex.js';
 import { glrParse } from './glr/driver.js';
 import { lowerToMir } from './mir/from_oir.js';
@@ -2929,26 +2930,12 @@ function countNodes(n) {
  * 写法是"先写临时文件再 rename"：几条腿并行跑时不会读到半截文件。
  */
 function loadGrammar(path) {
-  const diags = new Diagnostics();
-  const text = readText(path);
-  const g = readGrammar(readSexpr(new SourceFile(path, text), diags), diags);
-  diags.throwIfErrors();
-  const dir = join(cacheRoot(), 'glr', hash16(`${TABLE_FORMAT}|${text}`));
-  const cpath = join(dir, 'table.txt');
-  if (exists(cpath)) {
-    const hit = tableFromText(readText(cpath), g);
-    if (hit !== null) {
-      vStep(`grammar ${g.name}  ${hit.states.length} states, cache hit ${cpath}`);
-      return hit;
-    }
+  const { g, tb, hit, cachePath } = loadGrammarTable(path);
+  if (hit) vStep(`grammar ${g.name}  ${tb.states.length} states, cache hit ${cachePath}`);
+  else {
+    vStep(`grammar ${g.name}  ${tb.states.length} states, ${tb.conflicts.length} conflicts left to GLR`);
+    vStep(`grammar ${g.name}  table cached at ${cachePath}`);
   }
-  const tb = buildTable(g);
-  vStep(`grammar ${g.name}  ${tb.states.length} states, ${tb.conflicts.length} conflicts left to GLR`);
-  mkdirAll(dir);
-  const tmp = join(workDirFor('glr-w', hash16(path)), 'table.txt');
-  writeText(tmp, tableText(tb));
-  rename(tmp, cpath);
-  vStep(`grammar ${g.name}  table cached at ${cpath}`);
   return tb;
 }
 

@@ -13,9 +13,7 @@ import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { readSexpr } from '../../src/core/sexpr/read.js';
-import { readGrammar } from '../../src/core/glr/grammar.js';
-import { buildTable } from '../../src/core/glr/table.js';
+import { loadGrammarTable } from '../../src/core/glr/load.js';
 import { lexText } from '../../src/core/glr/lex.js';
 import { glrParse } from '../../src/core/glr/driver.js';
 import { Diagnostics, SourceFile } from '../../src/core/source/diag.js';
@@ -35,11 +33,10 @@ const eq = (name, got, want) => {
   else bad(name, `    want ${JSON.stringify(want)}\n    got  ${JSON.stringify(got)}`);
 };
 
-const gdiags = new Diagnostics();
-const gtext = readFileSync(GRAMMAR, 'utf8');
-const g = readGrammar(readSexpr(new SourceFile(GRAMMAR, gtext), gdiags), gdiags);
-gdiags.throwIfErrors();
-const tb = buildTable(g);
+/* 表走带缓存的装载（ADR-0019 决策八第 1 步）：构表在这份语法上是 559 ms、
+ * 命中缓存是 8 ms。**构表本身**由 `parse.js` 那一支盯（它刻意每趟现算），
+ * 这里只是要一张能用的表。 */
+const { g, tb } = loadGrammarTable(GRAMMAR);
 
 /** 一段源码 -> 带类型的模块。语法错与类型错都抛。 */
 function mod(src, stage, name = 'probe') {

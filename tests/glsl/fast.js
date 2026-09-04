@@ -22,9 +22,7 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 
-import { readSexpr } from '../../src/core/sexpr/read.js';
-import { readGrammar } from '../../src/core/glr/grammar.js';
-import { buildTable } from '../../src/core/glr/table.js';
+import { loadGrammarTable } from '../../src/core/glr/load.js';
 import { lexText } from '../../src/core/glr/lex.js';
 import { glrParse } from '../../src/core/glr/driver.js';
 import { Diagnostics, SourceFile } from '../../src/core/source/diag.js';
@@ -50,10 +48,9 @@ const SX = [0.5, 511.5, 0.5, 511.5, 100.5, 1023.5, 37.5, 700.5];
 const SY = [0.5, 0.5, 511.5, 511.5, 200.5, 1023.5, 900.5, 13.5];
 const RES = 1024;
 
-const gdiags = new Diagnostics();
-const g = readGrammar(readSexpr(new SourceFile(GRAMMAR, readFileSync(GRAMMAR, 'utf8')), gdiags), gdiags);
-gdiags.throwIfErrors();
-const tb = buildTable(g);
+/* 表走带缓存的装载（ADR-0019 决策八第 1 步）：构表在这份语法上是 559 ms、
+ * 命中缓存是 8 ms。十四支门各构一遍表，等于每跑一趟全套白花 14 × 559 ms。 */
+const { g, tb } = loadGrammarTable(GRAMMAR);
 
 rmSync(OUT, { recursive: true, force: true });
 mkdirSync(OUT, { recursive: true });
