@@ -2968,6 +2968,70 @@ float nextUp(float x) {
 
 <!-- ADR-0019 量：intBitsToFloat 要 f32-END -->
 
+## 量：那三条路的代价，以及一个把问题**变小**的发现 —— 两张参考图对着两种宽度
+
+上一节列了三条路但没量。量完之后，问题的形状变了。
+
+### 发现：`_cpu.png` 是 **f64** 的图，`_glsl.png` 是 **f32** 的图
+
+读 GraphEq 自己两条引擎的取整那一步：
+
+```js
+// html/grapheq-math.js:76-77 —— CPU 引擎，JS 的 number 就是 f64
+const _nudgeUp   = (x) => (x === 0) ? 0 : (Number.isFinite(x) ? nextAfter(x, +Infinity) : x);
+const _nudgeDown = (x) => (x === 0) ? 0 : (Number.isFinite(x) ? nextAfter(x, -Infinity) : x);
+```
+
+```glsl
+// 合成产物 141-154 行 —— 着色器，highp float 就是 f32
+int i = floatBitsToInt(x);  i = (x > 0.0) ? (i + 1) : (i - 1);  return intBitsToFloat(i);
+```
+
+**同一个算法，两种宽度。** 而 `bench_cpu_vs_glsl.py --examples` 写的正好是两张图
+（`examples_256/<id>_cpu.png` 与 `<id>_glsl.png`）。于是对账口径不该是「一张参考图」：
+
+- 我们的**三条参照腿**（`real` 是 f64）该跟 **`_cpu.png`** 比 —— 它们本来就是 f64 引擎。
+- 我们的**快路**（每格 `<8 x float>`，f32）该跟 **`_glsl.png`** 比。
+
+这一格把「f64 不够精确」从**缺陷**改成了**分工**。上一节写的「f64 的 x 取 nextUp
+得到的不是 GL 上那个数」还是对的，但那不再是问题 —— 那正是 `_cpu.png` 的定义。
+
+### 代价，数出来的
+
+- **路 1（方言加一格 f32）**：`real` 出现在核心那条流水线的 **19 个文件、261 处**
+  （`hir/types.js` 19、`sexpr/lower.js` 46、`backend-llvm/emit.js` 42、
+  `backend-js/prelude.js` 40、`backend-c/emit.js` 14、`interp/builtin.js` 19、
+  `module/load.js` 12、`mir/*` 17、`host/native.js` 9……）。不是每处都要改，但那是爆炸半径。
+  **而且按上面那个发现，它根本不需要** —— 参照腿要的是 f64 的 nextafter，不是 f32。
+- **路 2（给方言开一个 `nextafter`）**：本来想挂在 `rmath` 上，但那扇门是关着的 ——
+  `sexpr/lower.js:98` 写明 `rmath` 的名单是「C99 math.h 与 ECMA-262 Math 的**交集**」，
+  理由是「标准库有的东西不重造」。`nextafter` 在 C99 里有、在 `Math.*` 里**没有**，
+  所以它进不了 `rmath`，得另开一个 op（JS 那侧要手写：`DataView` 上把 f64 当 i64 加一）。
+  代价是 **6 个文件**（`sexpr/lower.js` + 四个后端 + 解释器），比路 1 小一个数量级。
+  方言的 `int` 是 **64 位**，所以 f64 的位模式在这条路上是**精确**表示得下的。
+- **路 3（只在快路上做）**：`bitcast <8 x float> to <8 x i32>` 是一条指令，但快路的
+  `int` 现在是「值恰好是整数的 float」—— 要让这一格成立，得给分量**带一个类型标记**
+  （float 还是 i32）。改动关在 `emit_llvm.js` 一个文件里，但它碰的是**每一处产生分量**
+  的地方。不是一行，是那个文件的一次表示重构。
+
+### 于是下一步是：**路 2 + 路 3，各自对一张参考图**
+
+不是三选一 —— 那两条路服务的是两张不同的参考图，都要：
+
+- **路 2** 让三条参照腿能跑完整份 `grapheq.glsl`，出的图跟 `_cpu.png` 比。
+- **路 3** 让快路出的图跟 `_glsl.png` 比。
+- 两者之间**不再要求逐字节相同** —— 这是本轮唯一一处放弃「四条路答案全同」的地方，
+  而放弃它的理由是**参照物本身就是两个**，不是我们做不到。这句话要写在门上，
+  否则下一个人看到那条断言被拆开会以为是妥协。
+
+GLSL 那两个内建怎么落，也跟着定了：`floatBitsToInt`/`intBitsToFloat` **按当前腿的
+`float` 宽度**解释 —— 参照腿上是 f64 位模式（走路 2 的新 op），快路上是 f32 位模式
+（走路 3 的 bitcast）。这不符合 GLSL 规范的字面（规范说 32 位），**故意的**：
+规范假定 `float` 是 f32，而我们在参照腿上不是。检查那一侧要为此写一条注释，
+不能让后来的人以为是抄错了。
+
+<!-- ADR-0019 量：三条路的代价-END -->
+
 ## 还没定的（下一步按这个顺序）
 
 1. ~~摸 mesa 那边的边界~~ —— 「量：读 llvmpipe」那一节。
@@ -3013,6 +3077,14 @@ float nextUp(float x) {
     就不再有保证。下一步是量三条路各自的代价（方言加一格 f32 / 只开两个内建后门 /
     只在快路上做），**先量再定**。它排在 22（PNG）**之前** —— 没有它，
     渲染出来的图与参考图对不上，而对不上就没法立门。
+    ~~量完了~~ —— 见「量：那三条路的代价」。结论是**不加 f32**：参照腿要的是 f64 的
+    `nextafter`（路 2，6 个文件），快路要的是分量带类型标记（路 3，`emit_llvm.js`
+    一个文件的表示重构）。两条都做，各自对一张参考图（`_cpu.png` / `_glsl.png`）。
+25. **路 2：方言的 `nextafter`** —— 进不了 `rmath`（那扇门是「C99 ∩ ECMA-262 Math」，
+    `Math.nextafter` 不存在），要另开一个 op。JS 那侧手写：`DataView` 上把 f64 当 i64
+    加减一。方言的 `int` 是 64 位，所以 f64 的位模式精确装得下。
+26. **路 3：快路的分量带类型标记** —— float 还是 i32。碰的是每一处产生分量的地方，
+    关在 `emit_llvm.js` 里。做完这一格，`floatBitsToInt` 在快路上就是一条 `bitcast`。
 
 
 
