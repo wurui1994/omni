@@ -1625,10 +1625,24 @@ class Lower {
       return undefExpr();
     }
     if (args.length > spec.argc) {
+      /* `fold`：这个名字在 JS 里收可变实参，而 ABI 的 op 是定长的。**能不能摊开**取决于
+         语义是不是可结合的两两归约 —— `String.fromCharCode(a, b, c)` 就是三次单实参调用
+         用 `+` 接起来（规范 22.1.2.1 逐个码元拼串），所以这一格摊得开、而且逐字符相同。 */
+      if (spec.fold !== undefined && spec.argc === 1) {
+        let out = null;
+        for (const a of args) {
+          const one = op(spec.op, [this.expr(a)], spec.lit ?? {});
+          out = out === null ? one : op(spec.fold, [out, one]);
+        }
+        return out;
+      }
       this.err(span, `'${what}' takes at most ${spec.argc} argument(s), got ${args.length}`);
       return undefExpr();
     }
     const lowered = [];
+    /* `pre`：op 的**头几个实参是定死的字符串**（不是 `lit` —— 那一格是发射器认的字面量，
+       这里是普通的运行期实参）。`Math.imul` 就是这样接到 `js_i32_op` 上的。 */
+    if (spec.pre !== undefined) for (const v of spec.pre) lowered.push(s16(v));
     for (let i = 0; i < spec.argc; i++) lowered.push(i < args.length ? this.expr(args[i]) : undefExpr());
     return op(spec.op, lowered, spec.lit ?? {});
   }
@@ -1885,6 +1899,11 @@ const STATIC_CALLS = {
   // fround（ADR-0017 第一刀）：MIR 的 f32 语义就是"按 double 算完再舍一次到单精度"，
   // 而闭包解释器要在**我们自己编出来的**编译器里也这么算 —— 所以它必须进封闭 ABI。
   'Math.fround': { op: 'js_math', argc: 2, lit: { op: 'F' } },
+  // pow 与 `**` 是同一件事（规范里两者都是 ToNumber 之后求幂），所以它就是那条算术 op
+  'Math.pow': { op: 'js_arith', argc: 2, lit: { op: 'p' } },
+  // imul 是**32 位乘法**，不是 `Math.*` 那一族：它属于 i32 那三条 op（ADR-0013 第三刀）。
+  // `a * b` 先在 double 里丢精度，再折回 i32 已经错了 —— 这正是 `js_i32_op` 的 '*' 那一格。
+  'Math.imul': { op: 'js_i32_op', argc: 2, pre: ['*'] },
   'Object.keys': { op: 'js_obj_keys', argc: 1 },
   'Object.values': { op: 'js_obj_values', argc: 1 },
   'Object.entries': { op: 'js_obj_entries', argc: 1 },
@@ -1892,7 +1911,7 @@ const STATIC_CALLS = {
   'Object.hasOwn': { op: 'js_obj_has', argc: 2 },
   'Array.isArray': { op: 'js_arr_is_array', argc: 1 },
   'Array.from': { op: 'js_arr_from', argc: 1 },
-  'String.fromCharCode': { op: 'js_str_of_char_code', argc: 1 },
+  'String.fromCharCode': { op: 'js_str_of_char_code', argc: 1, fold: 'js_add' },
   'String.fromCodePoint': { op: 'js_str_of_code_point', argc: 1 },
   'Number.isNaN': { op: 'js_num_is_nan', argc: 1 },
   'Number.isFinite': { op: 'js_num_is_finite', argc: 1 },

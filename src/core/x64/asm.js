@@ -53,7 +53,9 @@ export class CodeBuf {
     this.relocs = [];
   }
 
-  get pos() { return this.buf.length; }
+  /** 现在写到第几个字节。**方法而不是取值器**：访问器不在自编译子集里（ADR-0011），
+   *  而这一条要在自己编出来的编译器里也能用。 */
+  pos() { return this.buf.length; }
 
   /** 塞一串字节（编码器出来的那种数组）。 */
   emit(...parts) {
@@ -82,7 +84,7 @@ export class CodeBuf {
   place(l) {
     this.chkLabel(l);
     if (this.labels[l] !== undefined) throw new OmniError(`x64: ${l} 号标签落了两次`);
-    this.labels[l] = this.pos;
+    this.labels[l] = this.pos();
     return this;
   }
 
@@ -95,10 +97,10 @@ export class CodeBuf {
    */
   toLabel(l, make) {
     this.chkLabel(l);
-    const start = this.pos;
+    const start = this.pos();
     const bytes = make(0);
     this.emit(bytes);
-    const end = this.pos;
+    const end = this.pos();
     /* 四字节的偏移格在这条指令的**最后四个字节**上 —— `E9`/`0F 8x`/`E8` 三种都是。 */
     const at = end - 4;
     const target = this.labels[l];
@@ -129,42 +131,42 @@ export class CodeBuf {
   callSym(name) {
     const bytes = callRel(0);
     this.emit(bytes);
-    this.relocs.push({ at: this.pos - 4, kind: RELOC.BRANCH, sym: name });
+    this.relocs.push({ at: this.pos() - 4, kind: RELOC.BRANCH, sym: name });
     return this;
   }
 
   /** `jmp <符号>`（尾调用用得上）。 */
   jmpSym(name) {
     this.emit(jmpRel(0));
-    this.relocs.push({ at: this.pos - 4, kind: RELOC.BRANCH, sym: name });
+    this.relocs.push({ at: this.pos() - 4, kind: RELOC.BRANCH, sym: name });
     return this;
   }
 
   /** `lea reg, [rip + <符号>]` —— x86_64 上取一个全局地址的那一条。 */
   leaSym(reg, name) {
     this.emit(leaRip(8, reg, 0));
-    this.relocs.push({ at: this.pos - 4, kind: RELOC.SIGNED, sym: name });
+    this.relocs.push({ at: this.pos() - 4, kind: RELOC.SIGNED, sym: name });
     return this;
   }
 
   /** `mov reg, [rip + <符号>]`：直接读一个全局，不先取址。 */
   loadSym(size, reg, name) {
     this.emit(movRRip(size, reg, 0));
-    this.relocs.push({ at: this.pos - 4, kind: RELOC.SIGNED, sym: name });
+    this.relocs.push({ at: this.pos() - 4, kind: RELOC.SIGNED, sym: name });
     return this;
   }
 
   /** `mov [rip + <符号>], reg`。 */
   storeSym(size, name, reg) {
     this.emit(movRipR(size, 0, reg));
-    this.relocs.push({ at: this.pos - 4, kind: RELOC.SIGNED, sym: name });
+    this.relocs.push({ at: this.pos() - 4, kind: RELOC.SIGNED, sym: name });
     return this;
   }
 
   /** `mov reg, [rip + <符号>@GOTPCREL]`：取出来的是那个**外部**符号的真地址。 */
   loadSymGot(reg, name) {
     this.emit(movRRip(8, reg, 0));
-    this.relocs.push({ at: this.pos - 4, kind: RELOC.GOT_LOAD, sym: name });
+    this.relocs.push({ at: this.pos() - 4, kind: RELOC.GOT_LOAD, sym: name });
     return this;
   }
 

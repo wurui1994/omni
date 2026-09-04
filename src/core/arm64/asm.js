@@ -51,8 +51,9 @@ export class Arm64CodeBuf {
     this.relocs = [];
   }
 
-  /** 下一条指令的字节位置。 */
-  get pos() {
+  /** 下一条指令的字节位置。**方法而不是取值器**：访问器不在自编译子集里（ADR-0011），
+   *  而这一条要在自己编出来的编译器里也能用。 */
+  pos() {
     return this.words.length * 4;
   }
 
@@ -83,7 +84,7 @@ export class Arm64CodeBuf {
     if (this.labels[l] !== undefined) {
       throw new OmniError(`arm64: 标签 ${l} 已经在 ${this.labels[l]} 落过了`);
     }
-    this.labels[l] = this.pos;
+    this.labels[l] = this.pos();
     return this;
   }
 
@@ -100,7 +101,7 @@ export class Arm64CodeBuf {
   toLabel(l, make) {
     this.chkLabel(l);
     const at = this.words.length;
-    const here = this.pos;
+    const here = this.pos();
     const target = this.labels[l];
     if (target !== undefined) return this.word(make(target - here));
     this.words.push(0);
@@ -121,37 +122,37 @@ export class Arm64CodeBuf {
 
   /** `bl <sym>`。 */
   blSym(sym, addend = 0) {
-    this.relocs.push({ at: this.pos, kind: RELOC_ARM64.BRANCH26, sym, addend });
+    this.relocs.push({ at: this.pos(), kind: RELOC_ARM64.BRANCH26, sym, addend });
     return this.word(bl(0));
   }
 
   /** `adrp Rd, <sym>@PAGE`。 */
   adrpSym(rd, sym, addend = 0) {
-    this.relocs.push({ at: this.pos, kind: RELOC_ARM64.PAGE21, sym, addend });
+    this.relocs.push({ at: this.pos(), kind: RELOC_ARM64.PAGE21, sym, addend });
     return this.word(adrp(rd, 0));
   }
 
   /** `add Rd, Rn, <sym>@PAGEOFF`。 */
   addSymOff(rd, rn, sym, addend = 0) {
-    this.relocs.push({ at: this.pos, kind: RELOC_ARM64.PAGEOFF12, sym, addend });
+    this.relocs.push({ at: this.pos(), kind: RELOC_ARM64.PAGEOFF12, sym, addend });
     return this.word(addImm(1, rd, rn, 0));
   }
 
   /** `ldr Rt, [Rn, <sym>@PAGEOFF]`。`size` 照 `encode.js` 的口径是宽度的对数。 */
   ldrSymOff(size, rt, rn, sym, addend = 0) {
-    this.relocs.push({ at: this.pos, kind: RELOC_ARM64.PAGEOFF12, sym, addend });
+    this.relocs.push({ at: this.pos(), kind: RELOC_ARM64.PAGEOFF12, sym, addend });
     return this.word(ldrU(size, rt, rn, 0));
   }
 
   /** `adrp Rd, <sym>@GOTPAGE`（外部数据符号那一对的头一条，见 `RELOC_ARM64.GOT_PAGE21`）。 */
   adrpSymGot(rd, sym) {
-    this.relocs.push({ at: this.pos, kind: RELOC_ARM64.GOT_PAGE21, sym, addend: 0 });
+    this.relocs.push({ at: this.pos(), kind: RELOC_ARM64.GOT_PAGE21, sym, addend: 0 });
     return this.word(adrp(rd, 0));
   }
 
   /** `ldr Rt, [Rn, <sym>@GOTPAGEOFF]`。取出来的就是那个符号的真地址。 */
   ldrSymGot(rt, rn, sym) {
-    this.relocs.push({ at: this.pos, kind: RELOC_ARM64.GOT_PAGEOFF12, sym, addend: 0 });
+    this.relocs.push({ at: this.pos(), kind: RELOC_ARM64.GOT_PAGEOFF12, sym, addend: 0 });
     return this.word(ldrU(3, rt, rn, 0));
   }
 

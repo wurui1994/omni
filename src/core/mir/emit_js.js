@@ -65,7 +65,9 @@ function jsConstText(c) {
     if (c.text === 'nan') return 'NaN';
     // 用 JS 自己的往返表示：`1e400` 之类的文本进来也不会变成 `Infinity` 以外的东西
     const n = Number(c.text);
-    return Object.is(n, -0) ? '-0' : String(n);
+    // 负零要发成 `-0`（`String(-0)` 是 "0"，那会把符号丢掉）。判据用 `1/n < 0` 而不是
+    // `Object.is(n, -0)`：后者不在封闭 ABI 里（ADR-0011 决策 2），而这两个式子等价。
+    return n === 0 && 1 / n < 0 ? '-0' : String(n);
   }
   if (c.kind === 'bool') return c.text === 'true' ? 'true' : 'false';
   if (c.kind === 'str') return JSON.stringify(c.text);

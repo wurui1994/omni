@@ -374,6 +374,16 @@ function cMir(path, incs, defs, args, sysIncs) {
  * 夹在 `.pdata` 与后面那个函数的 `.rela.text` 之间；第一个函数里就有调用 →
  * `.rela.text` 最前。
  */
+/** 一串数里最小的那个。
+ *
+ * 为什么不写 `Math.min(...xs)`：封闭 ABI 的 op 是**定长**的，展开表达不了（决策 2），
+ * 所以这一格自己摊成循环。空串回 `Infinity`，与 `Math.min()` 一致。 */
+function minOfNums(xs) {
+  let m = Infinity;
+  for (const v of xs) if (v < m) m = v;
+  return m;
+}
+
 function relaSeq(blob) {
   const seq = {};
   /* 「第几个函数」这根轴上只数**出过代码**的函数（第一百二十八片）：没有函数体的那些
@@ -384,15 +394,15 @@ function relaSeq(blob) {
   for (let k = 0; k < nf; k++) emitted.push(emitted[k] + (blob.offsets[k] >= 0 ? 1 : 0));
   const fold = (n) => emitted[Math.max(0, Math.min(n, nf))];
   if (blob.dataRelocs.length > 0) {
-    seq.data = fold(Math.min(...blob.dataRelocs.map((r) => r.after ?? 0)));
+    seq.data = fold(minOfNums(blob.dataRelocs.map((r) => r.after ?? 0)));
   }
   /* `.rela.data.ro` 同一把尺子（第一百二十二片）：只读那一段里第一条重定位落在
    * 第几个函数之前。与 `.rela.data` 撞在同一格时，只读那一节的号大，排后面。 */
   if (blob.roRelocs !== undefined && blob.roRelocs.length > 0) {
-    seq.rodata = fold(Math.min(...blob.roRelocs.map((r) => r.after ?? 0))) + 0.01;
+    seq.rodata = fold(minOfNums(blob.roRelocs.map((r) => r.after ?? 0))) + 0.01;
   }
   if (blob.relocs.length > 0) {
-    const at = Math.min(...blob.relocs.map((r) => r.at));
+    const at = minOfNums(blob.relocs.map((r) => r.at));
     const starts = blob.offsets.filter((o) => o >= 0);
     let j = 0;
     while (j + 1 < starts.length && starts[j + 1] <= at) j++;

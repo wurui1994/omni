@@ -1529,14 +1529,14 @@ export function genModule(mod, opts) {
       i++;
       continue;
     }
-    offsets.push(buf.pos);
+    offsets.push(buf.pos());
     buf.place(labels[i]);
     new x64FnGen(mod, f, buf, labels, strSyms).gen();
     if (wantUw) {
-      uwFuncs.push({ start: offsets[i], end: buf.pos });
+      uwFuncs.push({ start: offsets[i], end: buf.pos() });
       if (nEmit === 0) {
-        buf.emit(new Array((-buf.pos) & 3).fill(0));
-        uwOffs = buf.pos;
+        buf.emit(new Array((-buf.pos()) & 3).fill(0));
+        uwOffs = buf.pos();
         buf.emit(unwindInfoX64());
       }
     }

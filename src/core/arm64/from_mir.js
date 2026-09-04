@@ -1240,7 +1240,7 @@ export function genArm64Module(mod) {
       i++;
       continue;
     }
-    offsets.push(buf.pos);
+    offsets.push(buf.pos());
     buf.place(labels[i]);
     new FnGen(mod, f, buf, labels, strSyms).gen();
     i++;

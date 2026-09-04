@@ -417,8 +417,10 @@ export function cFormat(fmt, va) {
         out += padTo(up ? body.toUpperCase() : body, sign, spec);
         continue;
       }
-      /* 负号看的是 `x < 0` 之外还有 `-0.0`：C 印 `-0.000000`，而 `-0 < 0` 是假。 */
-      const neg = x < 0 || Object.is(x, -0);
+      /* 负号看的是 `x < 0` 之外还有 `-0.0`：C 印 `-0.000000`，而 `-0 < 0` 是假。
+       * 判据写成 `1/x < 0` 而不是 `Object.is(x, -0)`：后者不在封闭 ABI 里（决策 2），
+       * 而 `1/-0` 是 -Infinity、`1/+0` 是 +Infinity —— 同一件事，只用已有的算符。 */
+      const neg = x < 0 || (x === 0 && 1 / x < 0);
       /* 浮点这一格的「精度」已经在 `fText`/`aText` 里用掉了（小数位数 / 有效数字 /
        * 十六进制位数），不能再让 `padTo` 拿它去补前导零 —— 所以按非数字对待。 */
       spec.numeric = false;
@@ -2023,8 +2025,10 @@ const LIBC = {
   },
 };
 
-/** 这个名字在 libc 里有吗（降级器**不**问这一句：链接期缺符号是运行期的错）。 */
-export function hasLibc(name) { return Object.prototype.hasOwnProperty.call(LIBC, name); }
+/** 这个名字在 libc 里有吗（降级器**不**问这一句：链接期缺符号是运行期的错）。
+ *  用 `Object.hasOwn` 而不是 `Object.prototype.hasOwnProperty.call`：这个值域里的对象
+ *  没有原型链，两者是同一件事，而前者在封闭 ABI 里（决策 2）。 */
+export function hasLibc(name) { return Object.hasOwn(LIBC, name); }
 
 /**
  * 程序结束时要做的事（第八刀第十片）：还开着的流一律落盘。

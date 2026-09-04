@@ -96,6 +96,12 @@ function ceEval(tk, texts) {
     return r.v;
   };
 
+  /* `unary` 与 `expr` 是**互相递归**的，所以其中一个必须先占个名字再填。
+   * 这不是风格，是自编译子集的要求：降级器按词法顺序解析名字，「后面那个 `const`」
+   * 它看不见（真 JS 里靠 TDZ 只在运行期挡，编译期那个绑定是在的）。互相递归下
+   * 换顺序也解决不了，所以先 `let … = null`、后面再赋上。 */
+  let expr = null;
+
   const unary = () => {
     const t = peek();
     if (t === null) return fail('#if 的表达式在这儿断了');
@@ -138,7 +144,7 @@ function ceEval(tk, texts) {
   /* 优先级表。`||`/`&&` 要短路（`#if defined(X) && X > 2` 里 X 没定义时右边不能骂）。 */
   const LEVELS = [['||'], ['&&'], ['|'], ['^'], ['&'], ['==', '!='],
     ['<', '>', '<=', '>='], ['<<', '>>'], ['+', '-'], ['*', '/', '%']];
-  const expr = (lv) => {
+  expr = (lv) => {
     if (lv >= LEVELS.length) return unary();
     let v = expr(lv + 1);
     for (;;) {
@@ -204,6 +210,10 @@ export function glslPreprocess(lexSpec, toks, diags, opts) {
    * `macros` 是**共用的** —— `#include "math/constants.glsl"` 之后那些宏得能用，
    * 那正是 vispy 那 73 份的用法。
    */
+  /* `run` 与 `include` 互相递归（include 进来的那一份还要再走一趟 run），
+   * 所以先占名字再填 —— 与 `ceEval` 里 `expr` 那一处同一个理由。 */
+  let include = null;
+
   const run = (input, stack) => {
     const out = [];
     /* 条件栈（`#if` 一族）。每一层三格：
@@ -365,7 +375,7 @@ export function glslPreprocess(lexSpec, toks, diags, opts) {
    *   3. 找不到就骂，把「谁 include 的」一起说出来。
    */
   const seen = new Set();
-  const include = (name, t, stack) => {
+  include = (name, t, stack) => {
     if (open === undefined) {
       diags.error(t.span, 'glsl 的预处理这一片只收 #version 与对象宏 #define，不收 "#include"'
         + '（这一趟没给 include 的查找口子）');
