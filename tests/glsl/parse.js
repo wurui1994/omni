@@ -24,6 +24,7 @@ import { lexText } from '../../src/core/glr/lex.js';
 import { glrParse } from '../../src/core/glr/driver.js';
 import { printSexpr } from '../../src/core/sexpr/print.js';
 import { Diagnostics, SourceFile } from '../../src/core/source/diag.js';
+import { glslTypeNames } from '../../src/core/frontend-glsl/pp.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
@@ -51,7 +52,7 @@ function parse(name) {
   const path = join(CASES, name);
   const diags = new Diagnostics();
   const file = new SourceFile(path, readFileSync(path, 'utf8'));
-  const toks = lexText(g.lex, file, diags);
+  const toks = glslTypeNames(lexText(g.lex, file, diags));
   if (diags.errorCount() > 0) return { err: `词法：${diags.format()}` };
   const tree = glrParse(tb, toks, diags);
   if (diags.errorCount() > 0) return { err: `分析：${diags.format()}`, toks: toks.length };
@@ -90,7 +91,7 @@ const text = (n) => printSexpr([n]);
 function shape(src) {
   const diags = new Diagnostics();
   const file = new SourceFile('probe.frag', src);
-  const toks = lexText(g.lex, file, diags);
+  const toks = glslTypeNames(lexText(g.lex, file, diags));
   if (diags.errorCount() > 0) return `词法错：${diags.format()}`;
   const tree = glrParse(tb, toks, diags);
   if (diags.errorCount() > 0) return `分析错：${diags.format()}`;
@@ -202,6 +203,22 @@ const SHAPES = [
     src: 'void main() { discard; }\n',
     want: (s) => s.includes('(discard)'),
   },
+  /* 结构体（施工图 B13）。名字进类型位靠的是 `pp.js` 的 `glslTypeNames()` 把后面的
+   * `IV` 重判成 `TYPENAME` —— 语法这一层看到的是两种不同的记号，所以没有歧义。 */
+  {
+    name: 'struct 声明 + 用它当类型 + 构造',
+    src: 'struct IV { vec2 v; int n; };\nIV mk() { return IV(vec2(1.0), 3); }\nvoid main() { IV a = mk(); }\n',
+    want: (s) => s.includes('(struct-decl IV (fields-add (fields-add (fields) (field (ty-vec 2) v)) (field (ty-int) n)))')
+      && s.includes('(construct (ty-name IV)')
+      && s.includes('(local-init (ty-name IV) a'),
+  },
+  /* **上一次就栽在这一格**：给 `type` 加 `(-> (ID) …)` 之后 `length(v)` 被当成构造。
+   * 现在声明了结构体也不会 —— `length` 没被重判，它还是 `ID`，走的是调用那条规则。 */
+  {
+    name: '声明了 struct 之后 length(v) 还是调用（上一次的回归点）',
+    src: 'struct IV { vec2 v; };\nvoid main() { float L = length(vec2(1.0)); }\n',
+    want: (s) => s.includes('(call length'),
+  },
 ];
 
 for (const c of SHAPES) {
@@ -212,9 +229,15 @@ for (const c of SHAPES) {
 
 /* ---- 四、该拒的要拒。语法不收的东西**必须报错**，不能悄悄分析成别的形状。 */
 const REJECT = [
-  { name: '结构体（这一刀不收）', src: 'struct S { float a; };\nvoid main() { }\n' },
   { name: '采样器（这一刀不收）', src: 'uniform sampler2D t;\nvoid main() { }\n' },
   { name: '缺分号', src: 'void main() { float x = 1.0 }\n' },
+  /* 平结构体收了，别的形状照旧不收 —— 见 `struct-decl` 那条规则上的注释。
+   *
+   * **嵌套结构体不在这儿拒**：`field -> (type ID ";")` 里 `type` 可以是 `TYPENAME`，
+   * 所以「成员是另一个结构体」在语法上是通的。那条限制是**语义**的，由检查那一侧骂 ——
+   * 语法保持上下文无关，别把语义塞进产生式里。 */
+  { name: 'struct 顺带声明一个变量', src: 'struct S { float a; } s;\nvoid main() { }\n' },
+  { name: '成员是数组', src: 'struct S { float a[3]; };\nvoid main() { }\n' },
 ];
 for (const c of REJECT) {
   const s = shape(c.src);

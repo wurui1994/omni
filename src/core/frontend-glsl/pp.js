@@ -96,3 +96,38 @@ export function glslPreprocess(lexSpec, toks, diags) {
   }
   return out;
 }
+
+/**
+ * **词法反馈**：`struct IV { … };` 之后，所有值为 `IV` 的 `ID` token 重判成 `TYPENAME`
+ * （ADR-0019 施工图 B13 第 1 步）。
+ *
+ * 为什么要有这一步：上一次给语法加 `type -> (ID)`，让**任何**标识符都可能是类型 ——
+ * 构表零冲突，但 12 组只剩 1 组绿（`length(v)` 被当成构造）。教训是「LR 表没冲突
+ * ≠ 语法没歧义」。这次让**这一层**决定谁是类型，语法里 `type -> TYPENAME` 与
+ * `expr -> ID` 就不再打架。真 GLSL 编译器也是这么做的。
+ *
+ * `TYPENAME` **只由这一步产出，词法器里根本没有它** —— `grammar.js` 只单向检查
+ * 「词法器产出的 token 必须是终结符」，所以不必编一条永不匹配的假词法规则。
+ *
+ * `struct` 后面紧跟的那个名字**不重判**：语法那条规则写的是 `("struct" ID "{" …)`。
+ */
+export function glslTypeNames(toks) {
+  if (toks === null || toks === undefined) return toks;
+  const names = new Set();
+  const out = [];
+  let afterStruct = false;
+  for (const t of toks) {
+    if (afterStruct) {
+      afterStruct = false;
+      if (t.type === 'ID') { names.add(t.node.value); out.push(t); continue; }
+      /* `struct` 后面不是标识符 —— 交给语法去骂，这一层不抢着报错。 */
+    }
+    if (t.type === '"struct"') { afterStruct = true; out.push(t); continue; }
+    if (t.type === 'ID' && names.has(t.node.value)) {
+      out.push({ ...t, type: 'TYPENAME' });
+      continue;
+    }
+    out.push(t);
+  }
+  return out;
+}

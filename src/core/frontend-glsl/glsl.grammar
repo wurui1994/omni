@@ -69,6 +69,14 @@
 
   (start unit)
 
+  ;; `TYPENAME` 是**只由 `pp.js` 的 `glslTypeNames()` 产出**的终结符 —— 词法器里没有它
+  ;; （`(tokens …)` 就是为这种「语法认它、词法不产它」的记号准备的）。
+  ;;
+  ;; 为什么非得这么做：上一次给 `type` 加 `(-> (ID) …)`，让**任何**标识符都可能是类型 ——
+  ;; 构表零冲突，但 12 组只剩 1 组绿（`length(v)` 被当成构造）。**LR 表没冲突 ≠ 语法没歧义。**
+  ;; 让 token 那一层决定谁是类型（真 GLSL 编译器的做法），这处歧义就根本不存在。
+  (tokens TYPENAME)
+
   ;; ---- 词法 --------------------------------------------------------------------
   (lex
     (skip space)
@@ -96,6 +104,7 @@
       "uniform" "in" "out" "inout" "const" "flat" "smooth" "noperspective"
       "layout" "precision" "highp" "mediump" "lowp" "invariant" "centroid" "sample"
       "if" "else" "for" "while" "do" "switch" "case" "default"
+      "struct"
       "return" "break" "continue" "discard" "true" "false")
     (punct INC "++")
     (punct DEC "--")
@@ -148,6 +157,13 @@
     (-> ("precision" prec type ";") (precision))
     ;; `invariant gl_Position;` —— 同上：收下、不改变任何计算。
     (-> ("invariant" ID ";") (invariant $2))
+    ;; 结构体（施工图 B13）。**平**的那一档：成员是标量/向量/矩阵，没有嵌套、没有数组成员，
+    ;; 也不收 `struct S { … } s;`（声明顺带定义一个变量）—— 按 grapheq.glsl 数出来的
+    ;; 那两个 struct 的形状收。
+    ;;
+    ;; 名字进 `TYPENAME` 那条路：`pp.js` 的 `glslTypeNames()` 把后面出现的同名 `ID`
+    ;; 重判成 `TYPENAME`。所以这里第二格写的是 `ID`（重判发生在它**之后**）。
+    (-> ("struct" ID "{" fields "}" ";") (struct-decl $2 $4))
     ;; 模块级 `const float PI = 3.14159;`（第二档要）
     (-> ("const" type ID "=" expr ";") (const-decl $2 $3 $5))
     ;; 函数定义与原型。原型收了是因为 GLSL 里「先声明后定义」合法，尺子里虽然没有，
@@ -166,6 +182,14 @@
     (-> ("highp") (prec-high))
     (-> ("mediump") (prec-medium))
     (-> ("lowp") (prec-low)))
+
+  ;; 结构体的成员表。成员**不带限定符**，也不收数组成员 —— 见 `struct-decl` 那条上的注释。
+  (rule fields
+    (-> (field) (fields-add (fields) $1))
+    (-> (fields field) (fields-add $1 $2)))
+
+  (rule field
+    (-> (type ID ";") (field $1 $2)))
 
   (rule interp
     (-> ("flat") (interp-flat))
@@ -205,7 +229,11 @@
     (-> ("mat3x4") (ty-mat 3 4))
     (-> ("mat4x2") (ty-mat 4 2))
     (-> ("mat4x3") (ty-mat 4 3))
-    (-> ("mat4x4") (ty-mat 4 4)))
+    (-> ("mat4x4") (ty-mat 4 4))
+    ;; 用户定义的结构体名（施工图 B13）。`TYPENAME` **只由 `pp.js` 的
+    ;; `glslTypeNames()` 产出** —— 词法器里没有它。让那一层决定谁是类型，
+    ;; 语法里就不会有「`ID` 到底是类型还是名字」那处歧义（上一次栽在这儿）。
+    (-> (TYPENAME) (ty-name $1)))
 
   (rule params
     (-> () (params))
