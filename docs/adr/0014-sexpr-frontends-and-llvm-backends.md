@@ -9393,3 +9393,54 @@ ASCII85 十几行，三角形光栅 + z 缓冲是 ADR-0019 那条软光栅路上
 它不是这 15 个的解。
 
 <!-- ADR-0014 超5s那18个量清-END -->
+
+### 下一刀的施工图：位图那一格（`_image` 先落地，三维光栅跟着白捡）
+
+这一格没做，但**尺子与接线点已经量清了**，写在这里让下一趟是机械活。
+
+真 asy 出一张图的 PostScript 长这样（从 `.omni-cache/epsref/laserlattice.eps:1723` 抄下来的，
+三维那 101 份位图参考里也是同一块，只是 W/H 与 concat 矩阵不同）：
+
+```postscript
+gsave
+[ 0 167.281403 200.840934 0 -221.134906 62.6173011] concat   % 单位正方形 -> 目标矩形
+/DeviceRGB setcolorspace
+<<
+/ImageType 1
+/Width 256
+/Height 256
+/BitsPerComponent 8
+/Decode [0 1 0 1 0 1 ]
+/ImageMatrix [256 0 0 256 0 0]
+/DataSource currentfile 1 (~>) /SubFileDecode filter /ASCII85Decode filter
+/FlateDecode filter
+>>
+image
+<ASCII85 的字节…>~>
+grestore
+```
+
+**Flate 那一行可以先不发**：`/ASCII85Decode` 单独就是合法的 EPS，尺寸约是原始像素的 1.25 倍
+（256x256x3 = 197KB -> 246KB，与参考同一量级）。真要对齐尺寸再补一个"只发 stored 块的
+zlib 流"（`78 01` + `00 LEN NLEN 原字节` + adler32，三十行）。**逐字节对不上是必然的**
+（那一段是压缩后的字节），所以位图那 101 份的判据本来就得换成"解出来比像素"——
+这一条与"补光栅"是同一刀的两半。
+
+接线点（这一趟读出来的，五处）：
+
+- `src/lib/asy/asy_builtins.asy` 的 `struct drawop`（:1781）加一格 `kind == 5`：
+  目标矩形照旧放 `g`（一条矩形 path，界那一段与裁剪一族已经会用它），像素放一格新字段。
+- `emitop`（:2929 一族）加 `kind == 5` 的分支，照上面那块发。
+- 界那一段（:1879 `bool wide = o.kind == 0;` 那一族）：kind 5 不带笔宽，界就是 `g` 的界。
+- 变换那一段（:5857 `q.p = o.kind == 2 ? … : shiftless(t) * o.p;`）：kind 5 的像素不跟着变，
+  变的只有 `g`（于是 concat 矩阵是从变换后的矩形算出来的）。
+- SVG 那一路（:7229 一族）：kind 5 先按"不画"处理并记一条 `nope`，别静静地少一块。
+
+`_image` 的三个重载（:8811/:8818/:8824）都落在这一格上：`pen[][]`、`real[][] + palette`、
+`pen F(int,int)`。laserlattice.asy 那一份要的是前两个（palette.asy:32/41）。
+
+做完这一格，三维那条路只差"把 patch 光栅化成那块像素"（三角形 + z 缓冲 + asy 的默认头灯），
+而那是 ADR-0019 软光栅那条路上的东西 —— 输出从十几 MB 的矢量变成一张 624x588 的图，
+第十一刀量到的那 15 个的时间与口径一起收。
+
+<!-- ADR-0014 位图那一格的施工图-END -->
