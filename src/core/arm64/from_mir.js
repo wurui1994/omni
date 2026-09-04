@@ -37,7 +37,7 @@ import {
   ldpPost, ldrU, ldrsU, lslv, lsrv, movReg, movSp, movk, movz, msub, mul, mvn, neg, orrReg,
   retArm64, scvtf, sdiv, stpPre, strU, subImm, subReg, sxtb, sxth, sxtw, ucvtf, udiv
 } from './encode.js';
-import { Arm64CodeBuf as CodeBuf } from './asm.js';
+import { Arm64CodeBuf } from './asm.js';
 import {
   OP, REF_NONE, isConstRef, T_I32, T_I64, T_BOOL, T_VOID, T_F32, T_F64,
   typeKind, isFloatType, intBits, memKindNo, memOff, MLOAD_KINDS, MSTORE_KINDS,
@@ -209,7 +209,7 @@ class FnGen {
   constructor(mod, f, buf, callLabels, strSyms) {
     this.mod = mod;
     this.f = f;
-    this.buf = buf === undefined ? new CodeBuf() : buf;
+    this.buf = buf === undefined ? new Arm64CodeBuf() : buf;
     this.callLabels = callLabels === undefined ? null : callLabels;
     this.strSyms = strSyms === undefined ? null : strSyms;
     /* 出参区（第二十二片）：`sp + 0` 起的一块，专给「要走栈的实参」。
@@ -1069,7 +1069,7 @@ const GLOAD_EMIT = {
 };
 const STORE_SIZE = { i64: 3, i32: 2, f64: 3, f32: 2 };
 
-/** 一个 MIR 函数 -> 一段 arm64 机器码（`CodeBuf`，已回填）。不认 CALL —— 单个函数
+/** 一个 MIR 函数 -> 一段 arm64 机器码（`Arm64CodeBuf`，已回填）。不认 CALL —— 单个函数
  * 里没有别的函数的落点，要发调用得走 `genArm64Module`。 */
 export function genArm64Func(mod, f) {
   const g = new FnGen(mod, f);
@@ -1227,7 +1227,7 @@ export function genArm64Module(mod) {
     /* 结尾那一格是**一个元素宽**的零（`wstrConst` 不加它）—— 整块预置成 0，不用再补。 */
   }
 
-  const buf = new CodeBuf();
+  const buf = new Arm64CodeBuf();
   const labels = [];
   for (let i = 0; i < mod.funcs.length; i++) labels.push(buf.label());
   const offsets = [];

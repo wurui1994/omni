@@ -221,8 +221,11 @@ function zeroOfCode(t) {
  * 已经返回的帧上 longjmp 是 C 的未定义行为。这里不装作能做：那个异常会一路飘到
  * `runMirModule`，在那儿变成一条明确的运行期错误。
  */
-class LongJmp {
+/* 继承 `Error`：封闭子集里 `instanceof` 只对 Error 及其子类成立（ADR-0011 决策 15），
+ * 而这个类的判断正是靠 `instanceof`（帧要认出"这是给我的那一跳"）。 */
+class LongJmp extends Error {
   constructor(target, pc, val) {
+    super('longjmp');
     this.target = target;
     this.pc = pc;
     this.val = val;
@@ -334,11 +337,15 @@ class MirInterp {
     if (this.usesSetjmp) {
       /* longjmp 的落点（见 `LongJmp` 那一段）。抛出的那一刻 `pc` 还停在正在执行的
        * 那条指令上 —— 也就是调 setjmp 的那条 CALL —— 所以写回它的值、再往下一条走。
-       * 中间那些帧的 `depth`/`cur` 复原被异常跳过了，在这儿一次收回。 */
-      for (;;) {
+       * 中间那些帧的 `depth`/`cur` 复原被异常跳过了，在这儿一次收回。
+       *
+       * 「跑完了」用一个旗子传出来、`break` 落在 try 外面：封闭子集不许 `break`
+       * 跨过 try 的边界（那条规则是为了 C 后端的落法，见 ADR-0011）。 */
+      let done = false;
+      while (!done) {
         try {
           while (pc >= 0 && pc < n) pc = prog[pc](F);
-          break;
+          done = true;
         } catch (e) {
           if (!(e instanceof LongJmp) || e.target !== F) throw e;
           this.depth = myDepth;
