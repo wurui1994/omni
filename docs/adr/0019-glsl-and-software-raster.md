@@ -3596,8 +3596,8 @@ inside = 4175   outside = 3948   frontier = 69
 
 1. `switch`（快路还没接；`grapheq.glsl` 里没有，但 GLSL 有）
 2. `discard`
-3. `lp_build_skip_branch`（整块没人活着就跳过）—— 纯性能
-4. **PNG + `omni run x.frag -o out.png`**（决策九）—— 现在真的只剩这一格了
+3. ~~`lp_build_skip_branch`（整块没人活着就跳过）~~ —— 做完了，见那一节（中位 3.2x -> 2.38x）
+4. ~~**PNG + `omni run x.frag -o out.png`**（决策九）~~ —— 做完了
 5. 参照腿的模块级变量（要方言的全局），以及 `aliveMask` 那层冗余
 
 <!-- ADR-0019 决策十第 5 步-END -->
