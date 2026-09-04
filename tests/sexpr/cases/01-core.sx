@@ -65,4 +65,21 @@
     (print (rmath "fmod" (un "-" (real 7.5)) (real 2.0)))
     (print (rmath "fmod" (real 7.5) (un "-" (real 2.0))))
     ;; 结果照常参与运算，不是只能直接 print
-    (print (bin "<" (rmath "sqrt" (real 2.0)) (real 1.4142136)))))
+    (print (bin "<" (rmath "sqrt" (real 2.0)) (real 1.4142136)))
+    ;; nextafter —— 那个交集的**例外**（ADR-0019 路 2）：`Math.*` 里没有它，JS 那侧是
+    ;; 手写的（位模式当 i64 加减一）。它凭什么还能进这个"五条腿逐字节"的名单：它是
+    ;; **精确运算**（IEEE-754 5.3.1 的 nextUp/nextDown），不像超越函数那样有"哪家 libm
+    ;; 的最后一位"的问题。
+    ;;
+    ;; 用例的形状要小心：`print` 只印 6 位有效数字，直接印 `nextafter(1, 2)` 与印 `1`
+    ;; 一模一样 —— 那样这条用例**根本压不住**手写那一份是不是真的挪了一格。所以印**差值**
+    ;; 与比较的结果，让那一个 ulp 露出来。
+    (print (bin "-" (rmath "nextafter" (real 1.0) (real 2.0)) (real 1.0)))
+    (print (bin "-" (rmath "nextafter" (real 1.0) (real 0.0)) (real 1.0)))
+    ;; x == y 时回 y（C99），不是"往某个方向挪一格"
+    (print (bin "==" (rmath "nextafter" (real 2.5) (real 2.5)) (real 2.5)))
+    ;; 负数那一侧：往 0 走是**变大**（位模式反而减一）
+    (print (bin ">" (rmath "nextafter" (un "-" (real 1.0)) (real 0.0)) (un "-" (real 1.0))))
+    ;; 0 要单列：±0 往两侧都跳到最小非正规数，符号跟着 y
+    (print (bin ">" (rmath "nextafter" (real 0.0) (real 1.0)) (real 0.0)))
+    (print (bin "<" (rmath "nextafter" (real 0.0) (un "-" (real 1.0))) (real 0.0)))))

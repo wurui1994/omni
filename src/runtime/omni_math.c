@@ -49,3 +49,12 @@ double omni_r_log1p(double x) { return log1p(x); }
 double omni_r_cbrt(double x) { return cbrt(x); }
 double omni_r_hypot(double x, double y) { return hypot(x, y); }
 
+/* `nextafter` —— 那个「C99 ∩ Math.*」交集的**例外**（ADR-0019 路 2）：`Math.*` 里
+   没有它，而区间算术要「往上/往下挪一个 ulp」才能保证结果是真超集。
+
+   这一条是**权威**：JS 那侧（`$js_math` 的 'W'）是手写的，它要与这里逐字节对上。
+   为什么能要求逐字节 —— 与上面那些超越函数不同，nextafter 是**精确运算**
+   （IEEE-754 5.3.1 的 nextUp/nextDown），不存在「哪家 libm 的最后一位」这回事。 */
+double omni_r_nextafter(double x, double y) { return nextafter(x, y); }
+
+

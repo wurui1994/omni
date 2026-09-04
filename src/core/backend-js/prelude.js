@@ -1336,6 +1336,25 @@ function $js_math(op, a, b) {
   if (op === "o") return x % y;   // JS 的 % 在 number 上就是 C 的 fmod
   if (op === "2") return Math.atan2(x, y);
   if (op === "Y") return Math.hypot(x, y);
+  /* nextafter（ADR-0019 路 2）—— Math.* 里**没有**它，所以这一处是手写的，不是像上面
+     那些一样转手宿主。权威是 C 的 nextafter（omni_math.c 与 omni_js_num.c 的 'W'），
+     这一份要与它逐字节对上；能这么要求是因为它是**精确运算**（IEEE-754 5.3.1 的
+     nextUp/nextDown），与超越函数那一档（只保证容差）不同。
+
+     位模式的把戏：把 f64 当**有符号** i64 读。x > 0 时位模式加一就是往 +inf 挪一格；
+     x < 0 时符号位已经置上，位模式加一是 |x| 变大、也就是往 -inf 挪。于是方向是
+     (y > x) === (x > 0) ? +1 : -1。x 是 0 要单列 —— ±0 往两侧都跳到最小非正规数。
+
+     注意：这个文件整体是一段**模板字面量**，所以注释里一个反引号都不能有。 */
+  if (op === "W") {
+    if (Number.isNaN(x) || Number.isNaN(y)) return NaN;
+    if (x === y) return y;
+    if (x === 0) return y > 0 ? 5e-324 : -5e-324;
+    const ndv = new DataView(new ArrayBuffer(8));
+    ndv.setFloat64(0, x);
+    ndv.setBigInt64(0, ndv.getBigInt64(0) + (((y > x) === (x > 0)) ? 1n : -1n));
+    return ndv.getFloat64(0);
+  }
   $rt_error("unknown Math op '" + op + "'");
 }
 
@@ -1368,6 +1387,7 @@ const $r_log10 = (x) => $js_math("Q", x, 0);
 const $r_log1p = (x) => $js_math("P", x, 0);
 const $r_cbrt = (x) => $js_math("B", x, 0);
 const $r_hypot = (x, y) => $js_math("Y", x, y);
+const $r_nextafter = (x, y) => $js_math("W", x, y);
 
 // ------------------------------------------------- JSON.stringify（ADR-0011）
 // 不能直接用宿主的 JSON.stringify：这边的对象是 Map、int 是 BigInt，宿主会当成

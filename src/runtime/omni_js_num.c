@@ -237,6 +237,9 @@ omni_dyn omni_js_math(int op, omni_dyn a, omni_dyn b) {
   if (op == 'o') return omni_dyn_of_real(fmod(x, y));
   if (op == '2') return omni_dyn_of_real(atan2(x, y));
   if (op == 'Y') return omni_dyn_of_real(hypot(x, y));
+  /* nextafter（ADR-0019 路 2）：`Math.*` 里没有它，所以 prelude 那边是**手写**的
+     （把 f64 的位模式当 i64 加减一）。这一条是权威，那一份要与它逐字节对上。 */
+  if (op == 'W') return omni_dyn_of_real(nextafter(x, y));
   omni_errorf("unknown Math op '%c'", op);
   return omni_dyn_null();
 }

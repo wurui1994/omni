@@ -171,6 +171,9 @@ export const JS_ABI = {
   //     'E' exp / 'X' expm1 / 'O' log / 'Q' log10 / 'P' log1p / 'B' cbrt / 'Y' hypot
   //     'F' fround（ADR-0017 第一刀）：C 那边是一次 `(float)` 强制转换。MIR 的 f32
   //     语义（每步之后舍一次到单精度）靠它，而闭包解释器要在自举出来的编译器里也这么算。
+  //     'W' nextafter（ADR-0019 路 2）：**JS 侧是手写的** —— `Math.*` 里没有 nextafter，
+  //     而区间算术要「往上/往下挪一个 ulp」，用别的算符做不出来。权威是 C 的 `nextafter`；
+  //     它是精确运算（IEEE-754 5.3.1 的 nextUp/nextDown），所以两侧可以要求逐字节相同。
   js_math: { js: '$js_math', c: 'omni_js_math', arity: 2, lit: ['op'] },
 
   // ---------------------------------------------------------------- JSON

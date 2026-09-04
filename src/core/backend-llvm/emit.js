@@ -146,6 +146,9 @@ const RT_OPS = new Map([
   ['rmath_log1p.real', { sym: 'omni_r_log1p', ret: 'double', params: ['double'] }],
   ['rmath_cbrt.real', { sym: 'omni_r_cbrt', ret: 'double', params: ['double'] }],
   ['rmath_hypot.real', { sym: 'omni_r_hypot', ret: 'double', params: ['double', 'double'] }],
+  // 那个「C99 ∩ Math.*」交集的例外（ADR-0019 路 2）：libm 的 nextafter。
+  // 这条腿上它照旧是一个真符号 —— 与别的 rmath 一样，没有特殊处。
+  ['rmath_nextafter.real', { sym: 'omni_r_nextafter', ret: 'double', params: ['double', 'double'] }],
   // 字符串上的三条（核心方言的 `(slen …)` / `(ssub …)` / `(sfind …)`，ADR-0014 决策 1）。
   // 全走真符号：omni_index_of 本来就是，另两个是 omni_str.c 里给 static inline 加的外壳
   // （理由写在那里 —— 取长度和取子串各只有一份实现，两条腿不会分叉）。

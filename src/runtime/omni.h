@@ -200,6 +200,9 @@ double omni_r_log10(double x);
 double omni_r_log1p(double x);
 double omni_r_cbrt(double x);
 double omni_r_hypot(double x, double y);
+/* 那个「C99 ∩ Math.*」交集的**例外**（ADR-0019 路 2）：`Math.*` 里没有 nextafter，
+   JS 那侧是手写的，权威在这一条上。 */
+double omni_r_nextafter(double x, double y);
 
 /* omni_arr.c —— 可增长数组（asy 的 `T[]`）。句柄是**指针**（buf 是按值的 {len, ptr}，
    push 改不了别名看到的那个长度），len/cap/items 都在被指向的头里。四种元素各一份单态，

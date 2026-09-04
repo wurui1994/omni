@@ -3032,6 +3032,51 @@ GLSL 那两个内建怎么落，也跟着定了：`floatBitsToInt`/`intBitsToFlo
 
 <!-- ADR-0019 量：三条路的代价-END -->
 
+## 落地：路 2 —— 方言有 `nextafter` 了，**五条腿逐字节相同**
+
+六处改动，与量出来的一样：
+
+- `sexpr/lower.js`：`RMATH` 加 `['nextafter', 2]`，并在那张表上写清它**是那个交集的例外**
+- `runtime/omni_math.c` + `omni.h`：`omni_r_nextafter`（转手 libm）—— **权威在这一条**
+- `backend-llvm/emit.js`：`RT_OPS` 一行，与别的 rmath 一样是一个真符号
+- `backend-js/prelude.js`：`$js_math` 的 `'W'` —— **手写**（把 f64 当有符号 i64 加减一）
+- `runtime/omni_js_num.c`：`omni_js_math` 的 `'W'`（转手 libm）
+- `interp/builtin.js` + `hir/js_abi.js`：op 码表与它的说明
+
+`backend-c/emit.js` 一个字没改 —— 它按 `rmath_` 前缀转名字，新的一条自动就通了。
+
+### 方向那一格，值得写下来
+
+把 f64 当**有符号** i64 读之后：
+
+- `x > 0`：位模式加一 = 往 `+inf` 挪一格
+- `x < 0`：符号位已经置上，位模式加一 = `|x|` 变大 = 往 `-inf` 挪
+
+所以方向是 `(y > x) === (x > 0) ? +1 : -1`，四种组合各验一遍才对。`x` 是 0 要单列
+（±0 往两侧都跳到最小非正规数，符号跟着 `y`）；`x === y` 回 `y`（C99 的原话）。
+
+### 门：`01-core.sx` 加了六条，`tests/sexpr` **78/0**
+
+**用例的形状差点写废**：`print` 只印 6 位有效数字，直接印 `nextafter(1.0, 2.0)` 与印 `1`
+一模一样 —— 那样这条用例根本压不住「手写那一份是不是真的挪了一格」。改成印**差值**
+（`2.22045e-16` / `-1.11022e-16`）与比较的结果。
+
+这一条过了意味着：**手写的 JS 版与 libm 逐字节相同**，五条腿（run / run-c / interp /
+interp --mir / run-llvm）全同。能这么要求是因为 nextafter 是精确运算（IEEE-754 5.3.1），
+不像超越函数那样有「哪家 libm 的最后一位」的问题 —— 这句话写在 `omni_math.c` 那一条上面。
+
+### 栽的那一跤：`prelude.js` 整体是一段**模板字面量**
+
+第一版注释里写了 `` `Math.*` `` —— 那个反引号把模板字面量**当场截断**，于是
+`prelude.js` 自己都解析不过，`tests/sexpr` **78 条全红**，每条的报错都是
+`SyntaxError: Unexpected identifier 'Math'`。
+
+一分钟就查出来了（报错直接指着那一行），但教训值得记：**那个文件里一个反引号都不能有**，
+连注释里也不行。已经在那段注释的末尾写明了。顺带说明一件事 —— 「78 条全红」这种形状
+几乎一定不是 78 个 bug，而是一处把整条路掐断了，先去看第一条的报错内容而不是数红的条数。
+
+<!-- ADR-0019 落地：路 2-END -->
+
 ## 还没定的（下一步按这个顺序）
 
 1. ~~摸 mesa 那边的边界~~ —— 「量：读 llvmpipe」那一节。
@@ -3083,6 +3128,8 @@ GLSL 那两个内建怎么落，也跟着定了：`floatBitsToInt`/`intBitsToFlo
 25. **路 2：方言的 `nextafter`** —— 进不了 `rmath`（那扇门是「C99 ∩ ECMA-262 Math」，
     `Math.nextafter` 不存在），要另开一个 op。JS 那侧手写：`DataView` 上把 f64 当 i64
     加减一。方言的 `int` 是 64 位，所以 f64 的位模式精确装得下。
+    ~~做完了~~ —— 见「落地：路 2」。收进 `rmath` 并在表上注明它是那个交集的**例外**
+    （六处改动，`backend-c` 一字未改）。`tests/sexpr` 78/0，**五条腿逐字节相同**。
 26. **路 3：快路的分量带类型标记** —— float 还是 i32。碰的是每一处产生分量的地方，
     关在 `emit_llvm.js` 里。做完这一格，`floatBitsToInt` 在快路上就是一条 `bitcast`。
 

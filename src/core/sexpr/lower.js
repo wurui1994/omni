@@ -106,6 +106,12 @@ const RMATH = new Map([
   ['asinh', 1], ['acosh', 1], ['atanh', 1],
   ['exp', 1], ['expm1', 1], ['log', 1], ['log10', 1], ['log1p', 1],
   ['cbrt', 1], ['hypot', 2],
+  /* **这一条是那个交集的例外**（ADR-0019 路 2）：`nextafter` 在 C99 math.h 里有，
+   * 在 `Math.*` 里**没有** —— 所以 JS 那侧是手写的（`$js_math` 的 'W'：把 f64 的位模式
+   * 当 i64 加减一）。为什么还是收它：GraphEq 的区间算术靠「往上/往下挪一个 ulp」保证
+   * 结果是真超集，而那件事**用别的算符做不出来**。所以这不是「标准库有的东西重造一遍」，
+   * 是「标准库只有一半」。权威是 C 的 libm，JS 那侧要与它逐字节对上。 */
+  ['nextafter', 2],
 ]);
 
 class CoreLowerer {
