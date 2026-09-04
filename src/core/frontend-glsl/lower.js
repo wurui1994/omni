@@ -928,10 +928,16 @@ class GlslLowerer {
     if (hasOut) return this.callWithOut(e, f);
     const args = [];
     for (const a of e.args) for (const c of this.expr(a)) args.push(c);
-    const n = glslNComp(e.ty);
-    /* 回矩阵与回向量走同一条路：`(struct glsl_vN …)` 里 N = 分量个数
-     * （`mat2` 是 4 格，正好与 `vec4` 用同一个结构体 —— 它俩在这一层就是「四个 real」）。 */
     const callTxt = `(call glsl_${this.prefix}${e.name} ${args.join(' ')})`;
+    /* **void 的函数**：没有值，所以它是一条语句，不是一个中间量。方言里语句位的表达式
+     * 是 `(expr E)` 那一条。少这一格的时候，`glslCompTy(void)` 当场骂"降不了的分量类型
+     * void" —— 而 vispy 那种 `void clip(...)`（里头 discard）正是这一档。
+     * 快路上没有这个坑：那边函数是**内联**的，压根没有"调用的类型"这回事。 */
+    if (e.ty.k === 'void') {
+      this.stmts.push(`(expr ${callTxt})`);
+      return [];
+    }
+    const n = glslNComp(e.ty);
     if (n === 1) return [this.let_(glslCompTy(e.ty), callTxt)];
     /* 回向量的函数：方言里回一个结构体（值语义），这儿当场拆成 N 格。
      * 一次调用一个 `(new)` —— 将来嫌它慢，办法是把这类函数内联，不是改这一层的形状。 */
@@ -1155,6 +1161,16 @@ class GlslLowerer {
         this.stmts.push(`(fldset (var ${sn}) c${i} ${vals[i]})`);
       }
       this.stmts.push(`(ret (var ${sn}))`);
+      return;
+    }
+    if (s.k === 'discard') {
+      /* `discard`（规范 6.4）：这一腿一个像素一趟、标量代码，所以它只是**一格模块级
+       * bool**（`glsl_killed`）。为什么不当场 `(ret …)`：`discard` 常写在用户函数里
+       * （vispy 的 `antialias/cap*.glsl` 就是），那里 `ret` 只出得了那个函数，出不了这个
+       * 像素。设一格标志则不管写在多深都对：出图那一头见它是真就不写这个像素。
+       * 设过之后后面照算 —— 不可观测（这个像素根本不写回），而快路那边是把那些道掩掉，
+       * 两条腿的**输出**因此一模一样。 */
+      this.stmts.push('(set glsl_killed (bool true))');
       return;
     }
     if (s.k === 'for') {
@@ -1495,6 +1511,10 @@ class GlslLowerer {
       this.bind(u.name, comps);
     }
     this.stmts = [];
+    /* `discard` 那一格：每个像素进来先清零。它是模块级的（跨函数要看得见），
+     * 而这个函数**一个像素调一次** —— 不清的话上一个像素的 kill 会粘到下一个，
+     * 指纹是"第一个被杀的像素之后整幅图全空"。 */
+    if (m.discard === true) this.stmts.push('(set glsl_killed (bool false))');
     /* 模块级 const 在入口里落成局部量（这一档没有别的函数用得到它们）。 */
     for (const c of m.consts) {
       const n = glslNComp(c.ty);
@@ -1618,7 +1638,11 @@ class GlslLowerer {
       for (let i = 0; i < n; i++) fs.push(`(c${i} real)`);
       return `  (struct ${glslStructName(n)} ${fs.join(' ')})`;
     });
-    const body = [...decls, ...this.outStructs, ...this.out].join('\n\n');
+    /* `discard` 那一格（只有模块里真有它才出现）。方言的全局是**零初始化**的，
+     * bool 的零是 false —— 正好是"这个像素还活着"。 */
+    const gs = this.mod !== undefined && this.mod !== null && this.mod.discard === true
+      ? ['  (global glsl_killed bool)'] : [];
+    const body = [...decls, ...gs, ...this.outStructs, ...this.out].join('\n\n');
     return `(module\n${body}${mainTxt === '' ? '' : `\n\n${mainTxt}`}\n)\n`;
   }
 
@@ -1859,15 +1883,19 @@ export function glslTriProgram(vertMod, fragMod, w, h, uni) {
     /* 覆盖 **且** 在画布里才算 —— 不覆盖的像素**连片元都不调**（真的光栅化就该这样，
      * 也正好省掉那一次着色）。 */
     const cov = '(bin "&&" (bin "&&" (var in0) (var in1)) (var in2))';
+    /* `discard`：着色器已经调了（覆盖度是光栅化的事，kill 是着色器的事，两回事），
+     * 所以这一格是**印之前**再问一句。没有 discard 时印那一段照旧直接跟在调用后面。 */
+    const pr = ' (print (toint (bin "-" (var px) (real 0.5))))'
+      + ' (print (toint (bin "-" (var py) (real 0.5))))'
+      + ' (print (call glsl_to8 (fld (var c) c0)))'
+      + ' (print (call glsl_to8 (fld (var c) c1)))'
+      + ' (print (call glsl_to8 (fld (var c) c2)))';
     inner.push(`(if (bin "&&" ${cov} (bin "&&" (bin "<" (var px) (real ${glslNum(w)}))`
       + ` (bin "<" (var py) (real ${glslNum(h)}))))`
       + ' (do'
       + ` (set c (call glsl_frag ${args.join(' ')}))`
-      + ' (print (toint (bin "-" (var px) (real 0.5))))'
-      + ' (print (toint (bin "-" (var py) (real 0.5))))'
-      + ' (print (call glsl_to8 (fld (var c) c0)))'
-      + ' (print (call glsl_to8 (fld (var c) c1)))'
-      + ' (print (call glsl_to8 (fld (var c) c2)))))');
+      + (fragMod.discard === true ? ` (if (un "!" (var glsl_killed)) (do${pr}))` : pr)
+      + '))');
   }
   s.push('    (let qy int (int 0))');
   s.push(`    (while (bin "<" (var qy) (int ${Math.ceil(h / 2) * 2}))`);
@@ -1923,16 +1951,21 @@ export function glslRenderMain(mod, w, h, uni) {
   /* quad 里那四格的偏移，顺序照 llvmpipe 的 `quad_offset_x/y`。 */
   const QX = [0, 1, 0, 1];
   const QY = [0, 0, 1, 1];
+  /* 在画布里 —— 出了界的那几格照样算，只是不印（见函数头）。 */
+  const bounds = `(bin "&&" (bin "<" (var px) (real ${glslNum(w)}))`
+    + ` (bin "<" (var py) (real ${glslNum(h)})))`;
+  /* `discard` 掉的像素也不印 —— 那正是"不写回帧缓冲"在这一腿上的样子（快路那边是驱动
+   * 看覆盖度那一格跳过它）。没有 discard 的着色器这个条件与从前一字不差。 */
+  const cond = mod.discard === true
+    ? `(bin "&&" ${bounds} (un "!" (var glsl_killed)))` : bounds;
   const inner = [];
   for (let k = 0; k < 4; k++) {
     inner.push(`(set px (bin "+" (toreal (var qx)) (real ${QX[k] + 0.5})))`);
     inner.push(`(set py (bin "+" (toreal (var qy)) (real ${QY[k] + 0.5})))`);
     inner.push(`(set c ${call})`);
-    /* 出了画布的那几格照样算（上面那三句），只是不印 —— 见函数头。
-     * 一格一个 `print`，不拼成一行：方言的 `+` 是「同型相加」，`int + string`
+    /* 一格一个 `print`，不拼成一行：方言的 `+` 是「同型相加」，`int + string`
      * 不在它的规矩里，而绕过去（先 `toreal` 再拼）只会让这段更难看。 */
-    inner.push(`(if (bin "&&" (bin "<" (var px) (real ${glslNum(w)}))`
-      + ` (bin "<" (var py) (real ${glslNum(h)})))`
+    inner.push(`(if ${cond}`
       + ' (do'
       + ' (print (toint (bin "-" (var px) (real 0.5))))'
       + ' (print (toint (bin "-" (var py) (real 0.5))))'
@@ -1994,13 +2027,18 @@ export function glslBenchMain(mod, w, h, uni, iters) {
   const call = `(call glsl_frag ${args.join(' ')})`;
   const QX = [0, 1, 0, 1];
   const QY = [0, 0, 1, 1];
+  const bnd = `(bin "&&" (bin "<" (var px) (real ${glslNum(w)}))`
+    + ` (bin "<" (var py) (real ${glslNum(h)})))`;
+  /* `discard` 掉的像素不进校验和 —— 与 `glslRenderMain` 那边"不印"是同一件事，
+   * 两条路算的还是同一个东西（那条门比的就是"校验和 == 印出来那些数的和"）。 */
+  const bcond = mod.discard === true
+    ? `(bin "&&" ${bnd} (un "!" (var glsl_killed)))` : bnd;
   const inner = [];
   for (let k = 0; k < 4; k++) {
     inner.push(`(set px (bin "+" (toreal (var qx)) (real ${QX[k] + 0.5})))`);
     inner.push(`(set py (bin "+" (toreal (var qy)) (real ${QY[k] + 0.5})))`);
     inner.push(`(set c ${call})`);
-    inner.push(`(if (bin "&&" (bin "<" (var px) (real ${glslNum(w)}))`
-      + ` (bin "<" (var py) (real ${glslNum(h)})))`
+    inner.push(`(if ${bcond}`
       + ' (do'
       + ' (set acc (bin "+" (var acc) (call glsl_to8 (fld (var c) c0))))'
       + ' (set acc (bin "+" (var acc) (call glsl_to8 (fld (var c) c1))))'

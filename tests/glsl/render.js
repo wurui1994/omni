@@ -157,6 +157,76 @@ for (const [tag, extra] of [['C', ['--backend', 'c']], ['LLVM', ['--backend', 'l
   }
 }
 
+/* 六、`discard`（ADR-0019 那一节）：**被杀的像素一个都不印**。
+ *
+ * 用的是 `cases/vispy-clip.frag`（视口 (32,32,64,64) + 圆心 (64,64) 半径 40，两处
+ * discard，一处在用户函数里）。这一支盯三件事：
+ *   - 活下来的像素集合与门自己算的**一模一样**（多印一个是"kill 没生效"、少印一个是
+ *     "kill 粘住了" —— 后者正是那格模块级 `glsl_killed` 忘了每个像素清零的指纹）；
+ *   - 剩下的像素颜色对（填充色量化成 38,140,242）；
+ *   - C 腿与 LLVM 腿与 JS 腿逐字节相同。
+ *
+ * 128×128 是例子里那些常量定的（视口与半径都是绝对像素），所以这一支不缩小画布。 */
+{
+  const DW = 128;
+  const DH = 128;
+  const dsrc = readFileSync(join(CASES, 'vispy-clip.frag'), 'utf8');
+  const dd = new Diagnostics();
+  const dtoks = lexText(g.lex, new SourceFile('vispy-clip.frag', dsrc), dd);
+  dd.throwIfErrors();
+  const dmod = glslCheck(glrParse(tb, dtoks, dd), 'frag');
+  const dpath = join(OUT, 'discard.sx');
+  writeFileSync(dpath, glslProgram(dmod, DW, DH, {}));
+  const dr = spawnSync(process.execPath, [CLI, 'run', dpath], { encoding: 'utf8', maxBuffer: 1 << 26 });
+  if (dr.status !== 0) {
+    bad('discard 那一支跑不动', `    ${(dr.stderr ?? '').trim().split('\n').slice(0, 6).join('\n    ')}`);
+  } else {
+    const dn = dr.stdout.trim() === '' ? [] : dr.stdout.trim().split('\n').map(Number);
+    /* 门自己算一遍"谁活着"：与着色器里那两句同一份判据。 */
+    const want = new Set();
+    for (let y = 0; y < DH; y++) {
+      for (let x = 0; x < DW; x++) {
+        const fx = x + 0.5;
+        const fy = y + 0.5;
+        if (fx < 32 || fx > 96 || fy < 32 || fy > 96) continue;
+        if (Math.hypot(fx - 64, fy - 64) > 40) continue;
+        want.add(`${x},${y}`);
+      }
+    }
+    const got = new Set();
+    let wrongColor = null;
+    for (let i = 0; i + 4 < dn.length; i += 5) {
+      got.add(`${dn[i]},${dn[i + 1]}`);
+      if (wrongColor === null && (dn[i + 2] !== 38 || dn[i + 3] !== 140 || dn[i + 4] !== 242)) {
+        wrongColor = `(${dn[i]},${dn[i + 1]}) 是 ${dn[i + 2]},${dn[i + 3]},${dn[i + 4]}`;
+      }
+    }
+    const extraPix = [...got].filter((k) => !want.has(k));
+    const missPix = [...want].filter((k) => !got.has(k));
+    if (dn.length % 5 !== 0) {
+      bad('discard：印出来的数不是 5 的倍数', `    ${dn.length} 个`);
+    } else if (extraPix.length > 0 || missPix.length > 0) {
+      bad('discard 掉的像素集合不对', `    多印了 ${extraPix.length} 个（${extraPix.slice(0, 4).join(' ')}）、`
+        + `少印了 ${missPix.length} 个（${missPix.slice(0, 4).join(' ')}）`);
+    } else if (wrongColor !== null) {
+      bad('discard：活下来的像素颜色不对', `    ${wrongColor}（要 38,140,242）`);
+    } else {
+      ok(`discard：${DW}×${DH} 里活下来 ${got.size} 个像素，与门自己算的一模一样`);
+    }
+    for (const [tag, extraArgs] of [['C', ['--backend', 'c']], ['LLVM', ['--backend', 'llvm']]]) {
+      const rc = spawnSync(process.execPath, [CLI, 'run', dpath, ...extraArgs],
+        { encoding: 'utf8', maxBuffer: 1 << 26 });
+      if (rc.status !== 0) {
+        bad(`discard：${tag} 腿跑不动`, `    ${(rc.stderr ?? '').trim().split('\n').slice(0, 4).join('\n    ')}`);
+      } else if (rc.stdout.trim() !== dr.stdout.trim()) {
+        bad(`discard：${tag} 腿与 JS 腿不一样`, '    活下来的像素或颜色对不上');
+      } else {
+        ok(`discard：${tag} 腿与 JS 腿逐字节相同`);
+      }
+    }
+  }
+}
+
 rmSync(OUT, { recursive: true, force: true });
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail > 0 ? 1 : 0);

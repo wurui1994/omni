@@ -22,7 +22,7 @@
  *
  *   void glsl_frag8(const f8 *in, f8 *out)
  *     in  = [x, y, uniform 每一格…]，每格 8 道 f32
- *     out = [r, g, b, a]
+ *     out = [r, g, b, a, 覆盖度]（覆盖度：1.0 写回、0.0 被 discard 杀掉）
  *
  *   用法：
  *     omni-glsl-jit --samples RES        < frag.ll
@@ -90,7 +90,7 @@ static const float SX[8] = { 0.5f, 511.5f, 0.5f, 511.5f, 100.5f, 1023.5f, 37.5f,
 static const float SY[8] = { 0.5f, 0.5f, 511.5f, 511.5f, 200.5f, 1023.5f, 900.5f, 13.5f };
 
 static void samples(frag8_fn frag, float res) {
-  f8 in[4], out[4];
+  f8 in[4], out[5];
   for (int l = 0; l < 8; l++) { in[0][l] = SX[l]; in[1][l] = SY[l]; }
   in[2] = (f8)res;
   in[3] = (f8)res;
@@ -110,7 +110,7 @@ static void bench(frag8_fn frag, int size, int reps) {
     sum = 0;
     double t0 = now_ms();
     for (int py = 0; py < size; py++) {
-      f8 in[4], out[4];
+      f8 in[4], out[5];
       f8 rowacc = (f8)0.0f;
       in[1] = (f8)((float)py + 0.5f);
       in[2] = (f8)(float)size;
@@ -230,7 +230,7 @@ static int serve(LLVMOrcLLJITRef jit, LLVMOrcJITDylibRef jd) {
     frag8_fn frag = jit_variant(jit, jd, ir, (size_t)need, idx, &pms, &cms);
     if (frag == NULL) return 65;
     /* 调一次，确认这个变体真的能跑（而且把「拿到的是活地址」这件事钉住）。 */
-    f8 in[4], out[4];
+    f8 in[4], out[5];
     for (int l = 0; l < 8; l++) { in[0][l] = SX[l]; in[1][l] = SY[l]; }
     in[2] = (f8)1024.0f;
     in[3] = (f8)1024.0f;
@@ -248,6 +248,17 @@ int png_write_rgba(const char *path, const unsigned char *rgba, int w, int h);
 
 /** 一批最多多少格 `in`：x、y 加上 uniform 的每一格。够 `grapheq.glsl` 用（它是 17）。 */
 #define OMNI_MAX_SLOTS 64
+
+/**
+ * `out` 有**五格**：r/g/b/a 加一格覆盖度（ADR-0019 那一节）。
+ *
+ * 覆盖度是 `discard` 的落法（照 llvmpipe 的 kill 掩码）：着色器把"这一道要不要写回"
+ * 交回来，1.0 写、0.0 不写。被杀的像素**一个字节都不动** —— 缓冲一开始是清零的，
+ * 所以它留着背景（透明黑），这与 GL 里"discard 掉的片元不进帧缓冲"是同一件事。
+ * 没有 discard 的着色器存的是常量全 1，所以这一侧只有一种读法。
+ */
+#define OMNI_OUT_SLOTS 5
+#define OMNI_COV_SLOT 4
 
 /**
  * 一条**行块队列**：所有线程从同一个计数器上抢 `RENDER_BLOCK` 行。
@@ -273,7 +284,7 @@ static void render_rows(render_job *j, int y0, int y1) {
   const f8 lane = { 0, 1, 2, 3, 4, 5, 6, 7 };
   int w = j->w;
   for (int py = y0; py < y1; py++) {
-    f8 in[OMNI_MAX_SLOTS], out[4];
+    f8 in[OMNI_MAX_SLOTS], out[OMNI_OUT_SLOTS];
     in[1] = (f8)((float)py + 0.5f);
     for (int u = 0; u < j->nUni; u++) in[2 + u] = (f8)j->uni[u];
     unsigned char *row = j->rgba + (size_t)(j->h - 1 - py) * (size_t)w * 4;
@@ -282,6 +293,10 @@ static void render_rows(render_job *j, int y0, int y1) {
       j->frag(in, out);
       int n = w - px < 8 ? w - px : 8;
       for (int l = 0; l < n; l++) {
+        /* 被 `discard` 杀掉的那一道：这个像素**一个字节都不动**（缓冲是清零的，
+         * 所以它留着背景）。判据写成 `== 0.0f` 而不是 `< 0.5f`：这一格是着色器
+         * 发出来的常量 0 或 1，不是算出来的数。 */
+        if (out[OMNI_COV_SLOT][l] == 0.0f) continue;
         for (int c = 0; c < 4; c++) {
           float v = out[c][l];
           /* NaN 落到 0：`v > 0` 对 NaN 是假，所以这个写法顺带把 NaN 也夹住了。 */
@@ -328,7 +343,9 @@ static int render_threads(void) {
 static int render(frag8_fn frag, int w, int h, const char *path,
                   const float *uni, int nUni) {
   if (w <= 0 || h <= 0 || 2 + nUni > OMNI_MAX_SLOTS) return 64;
-  unsigned char *rgba = (unsigned char *)malloc((size_t)w * (size_t)h * 4);
+  /* **清零**（不是 malloc）：被 `discard` 杀掉的像素一个字节都不写，留下的就是这里的零 ——
+   * 透明黑，与 GL 里"没有片元写到那儿"是同一件事。 */
+  unsigned char *rgba = (unsigned char *)calloc((size_t)w * (size_t)h * 4, 1);
   if (rgba == NULL) return 70;
   render_job job;
   job.frag = frag;

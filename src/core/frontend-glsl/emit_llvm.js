@@ -151,6 +151,12 @@ class GlslLlvmEmitter {
     this.brkPtr = null;         // break（当前最内层循环 / switch）
     this.contPtr = null;        // continue（当前最内层循环）
     this.retPtr = null;         // return（当前函数）
+    /* `discard` 那一层（llvmpipe 的 kill 掩码）。它与上面三层同一个机制，差别有两处：
+     *   - 它**一个片元一层**，不随循环/函数进出（所以只在片元入口开一次）；
+     *   - 它不只把后面的道掩掉，还要**递给驱动**：被杀的道那个像素不写回。
+     * 只有模块里真有 `discard` 时才开（`mod.discard`），没有就是 null —— 没用到的
+     * 着色器发出来的 IR 与从前一字不差。 */
+    this.killPtr = null;
     this.labels = 0;            // 基本块编号
     /* 落点读缓存的世代（见 `loadVar`）。每发一条 `br` / 一个标签就 +1 —— 缓存住的是
      * SSA 值，跨基本块不能用。 */
@@ -303,6 +309,9 @@ class GlslLlvmEmitter {
     if (this.contPtr !== null) negs.push(this.contPtr);
     if (this.brkPtr !== null) negs.push(this.brkPtr);
     if (this.retPtr !== null) negs.push(this.retPtr);
+    /* kill 也算一层：`discard` 之后那些道不该再写任何落点。GLSL 规范说 discard 之后
+     * 这个片元"不再被处理"，掩掉它是最贴的落法（也与 lp_build_mask 一样）。 */
+    if (this.killPtr !== null) negs.push(this.killPtr);
     for (const p of negs) {
       const cur = this.emit(`load ${LL_I}, ptr ${p}, align 32`, 'm');
       const inv = this.maskNot(cur);
@@ -884,6 +893,13 @@ class GlslLlvmEmitter {
       this.raise(this.retPtr);
       return;
     }
+    if (s.k === 'discard') {
+      /* `discard`（规范 6.4）：把当前活着的那些道并进 kill 那一层。与 `break` 一模一样的
+       * 一句 —— 差别全在"哪一层"以及"谁读它"：这一层在入口末尾变成递给驱动的覆盖度。 */
+      if (this.killPtr === null) throw new OmniError('glsl/llvm: discard 只在片元入口里有 kill 那一层');
+      this.raise(this.killPtr);
+      return;
+    }
     if (s.k === 'while') { this.loopStmt(s, 'while'); return; }
     if (s.k === 'dowhile') { this.loopStmt(s, 'do'); return; }
     if (s.k === 'for') { this.loopStmt(s, 'for'); return; }
@@ -1243,7 +1259,10 @@ class GlslLlvmEmitter {
    *   void glsl_frag8(ptr in, ptr out)
    *
    *   `in`  指向连着的 `<8 x float>`：`[x, y, uniform 的每一格…]`
-   *   `out` 指向连着的四格（r/g/b/a）
+   *   `out` 指向连着的**五格**：r/g/b/a 加一格**覆盖度**（1.0 写回 / 0.0 被 discard 杀掉）
+   *
+   * 覆盖度那一格**永远写**（没有 `discard` 的着色器存常量全 1）：驱动那一侧因此只有一种
+   * ABI，不必按"这份着色器有没有 discard"分两条读法。
    *
    * **为什么全走指针**：第一版把 `<8 x float>` 直接当参数传，结果读出来整体错位一格 ——
    * 32 字节向量在 AArch64 上不是原生寄存器类型（NEON 是 16 字节），它要拆成两个 q
@@ -1300,6 +1319,8 @@ class GlslLlvmEmitter {
     /* `return` 那一层（`lp_exec_mask` 的 `ret_mask`）：`main` 里 `return;` 之后那些道
      * 就不再写 `out` 了 —— 靠掩码，不靠跳转。 */
     this.retPtr = this.maskPtr('ret');
+    /* `discard` 那一层：只有模块里真有它才开（没有的话下面那格覆盖度是常量全 1）。 */
+    if (m.discard === true) this.killPtr = this.maskPtr('kill');
     this.stmt(mainFn.body);
     /* 写回：四格连着存，都按 float 存（缓冲的类型是定的）。 */
     const vals = this.readName(o.name);
@@ -1307,6 +1328,18 @@ class GlslLlvmEmitter {
       const p = i === 0 ? '%out' : this.emit(`getelementptr ${LL_F}, ptr %out, i64 ${i}`, 'f').v;
       this.body.push(`  store ${LL_F} ${this.toF(vals[i]).v}, ptr ${p}, align 4`);
     }
+    /* **第五格是覆盖度**：1.0 = 这一道写回、0.0 = 被 `discard` 杀掉。
+     * 为什么落在 out 里而不是另开一个出参：ABI 面只剩一个地址这条纪律不动（见上面那段），
+     * 而"写不写回"本来就是这一批像素的输出之一。没有 discard 的着色器存的是常量全 1 ——
+     * 一批 8 个像素一条 store，量不出来，换来的是驱动那一侧**只有一种 ABI**。 */
+    const covp = this.emit(`getelementptr ${LL_F}, ptr %out, i64 4`, 'f').v;
+    let cov = llF(1).v;
+    if (this.killPtr !== null) {
+      const cur = this.emit(`load ${LL_I}, ptr ${this.killPtr}, align 32`, 'm');
+      const c = this.maskToI1(cur);
+      cov = this.emit(`select ${LL_B} ${c.v}, ${LL_F} ${llF(0).v}, ${LL_F} ${llF(1).v}`, 'f').v;
+    }
+    this.body.push(`  store ${LL_F} ${cov}, ptr ${covp}, align 4`);
     const decls = [...this.need].sort().map((f) => {
       const nArgs = LL_INTRIN2.has(f) ? 2 : 1;
       const ps = [];
@@ -1314,7 +1347,8 @@ class GlslLlvmEmitter {
       return `declare ${LL_F} @${f}.v${GLSL_LANES}f32(${ps.join(', ')})`;
     });
     return `; GLSL -> LLVM IR（${GLSL_LANES} 道 SoA，分量带类型 f32/i32/i1）—— ADR-0019 决策十\n`
-      + `; in = [x, y, uniform 每一格…]；out = [r, g, b, a]，缓冲都是 ${LL_F}\n`
+      + `; in = [x, y, uniform 每一格…]；out = [r, g, b, a, 覆盖度]，缓冲都是 ${LL_F}\n`
+      + `; 覆盖度：1.0 = 这一道写回、0.0 = 被 discard 杀掉（照 llvmpipe 的 kill 掩码）\n`
       + `; 可变量在 alloca 里、写过掩码（照 lp_exec_mask_store）—— mem2reg 会把大部分提回 SSA\n`
       + `define void @glsl_frag8(ptr %in, ptr %out) {\n`
       + `${this.allocas.join('\n')}\n${this.body.join('\n')}\n  ret void\n}\n\n`

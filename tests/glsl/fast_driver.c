@@ -42,7 +42,9 @@ static const float SX[8] = { 0.5f, 511.5f, 0.5f, 511.5f, 100.5f, 1023.5f, 37.5f,
 static const float SY[8] = { 0.5f, 0.5f, 511.5f, 511.5f, 200.5f, 1023.5f, 900.5f, 13.5f };
 
 static void samples(float res) {
-  f8 in[4], out[4];
+  /* `out` 五格：r/g/b/a 加一格覆盖度（`discard` 的落法，见 emit_llvm.js 的 run()）。
+   * 这一份只印颜色 —— 取样点上的对账问的是"算出来的值"，写不写回是驱动那一侧的事。 */
+  f8 in[4], out[5];
   for (int l = 0; l < 8; l++) { in[0][l] = SX[l]; in[1][l] = SY[l]; }
   in[2] = (f8)res;
   in[3] = (f8)res;
@@ -60,7 +62,7 @@ static void bench(int size, int reps) {
     sum = 0;
     double t0 = now_ms();
     for (int py = 0; py < size; py++) {
-      f8 in[4], out[4];
+      f8 in[4], out[5];
       f8 rowacc = (f8)0.0f;          /* 一行的校验和整条向量地攒 */
       in[1] = (f8)((float)py + 0.5f);
       in[2] = (f8)(float)size;

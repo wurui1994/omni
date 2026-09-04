@@ -24,7 +24,7 @@
 ;;
 ;; 第一刀刻意**不收**的（都是尺子里没有的，不是忘了）：
 ;;   - 纹理与采样器（`sampler2D`、`texture()`）
-;;   - 结构体、数组、`switch`、`do`、`discard`
+;;   - 结构体、数组、`switch`、`do`、`discard`（后四样后来都补上了）
 ;;   - `layout(location = N)` 里那个括号（关键字收了，括号形式没收 —— 两份尺子都没用）
 ;;   - 预处理：`#version` 整行当**一个 token** 原样收下，`#define`/`#if` 一律不收。
 ;;     GLSL 的预处理是另一套（不是 C 的那一套），要接就该单独一刀。
@@ -271,9 +271,9 @@
     (-> ("return" ";") (ret-void))
     (-> ("break" ";") (brk))
     (-> ("continue" ";") (cont))
-    ;; `discard` 这一刀**不实现**，但它在语法里有一条 —— 不然 `discard;` 会被当成
-    ;; 「一个叫 discard 的变量」悄悄收下（量过：出来是 `(expr-stmt (name discard))`）。
-    ;; 有了这一条，「不收」这句话由降级那一侧明着说，而不是靠语法碰巧不认。
+    ;; `discard`（规范 6.4）。语法里单开一条而不是让它落进"一个叫 discard 的变量"——
+    ;; 量过：没有这一条时出来是 `(expr-stmt (name discard))`，那种错法很难看出来。
+    ;; 两条腿上的语义见 check.js 那一格（llvmpipe 的 kill 掩码）。
     (-> ("discard" ";") (discard))
     ;; `(prec THEN)` 必须**紧跟在 RHS 之后**（`grammar.js:133` 那个 while 只在动作之前扫），
     ;; 写在动作后面等于没写 —— 量过：`-a * b` 会分成 `(neg (mul a b))`。

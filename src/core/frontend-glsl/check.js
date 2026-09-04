@@ -21,7 +21,7 @@
  *
  * ## 这一片**不做**的
  *
- * 降级（那是第三片）、常量折叠、死代码、`discard`（认得，但明着拒 —— 见 `glslStmt`）。
+ * 降级（那是第三片）、常量折叠、死代码。
  */
 
 import { OmniError } from '../source/diag.js';
@@ -435,6 +435,10 @@ class GlslChecker {
     this.structs = new Map();
     this.scopes = [];
     this.curFunc = null;
+    /* 这个模块里有没有 `discard`（规范 6.4）。两条腿都要它：快路据它开那一层 kill 掩码，
+     * 参考腿据它开那一格模块级 `glsl_killed` —— 没有 discard 的着色器降出来的字节
+     * 因此与从前**一字不差**（这一格是"不用就不付"）。 */
+    this.discard = false;
     this.builtinIn = stage === 'vert' ? GLSL_VERT_IN : GLSL_FRAG_IN;
     this.builtinOut = stage === 'vert' ? GLSL_VERT_OUT : GLSL_FRAG_OUT;
   }
@@ -540,6 +544,9 @@ class GlslChecker {
       consts: [...this.consts].map(([name, v]) => ({ name, ty: v.ty, init: v.init })),
       funcs: [...this.funcs.values()],
       globals: [...this.globals.values()],
+      /* 这个模块里有没有 `discard`（见 `stmt` 里那一格）。两条腿据它决定要不要开那一层
+       * kill —— 没有的话降出来的东西与从前一字不差。 */
+      discard: this.discard,
     };
   }
 
@@ -699,7 +706,7 @@ class GlslChecker {
       for (const p of params) this.declare(p.name, p.ty, node);
       f.body = this.block(node.items[4]);
       this.pop();
-      this.curFunc = null;
+    this.curFunc = null;
       return;
     }
     if (h === 'global' || h === 'global-init') {
@@ -800,8 +807,18 @@ class GlslChecker {
     if (h === 'brk') return { k: 'break' };
     if (h === 'cont') return { k: 'continue' };
     if (h === 'discard') {
-      /* 语法里有这一条**就是为了在这儿骂**：不收的话它会被当成一个变量名悄悄收下。 */
-      throw this.err(node, 'discard 这一刀不收（两份尺子里都没有）');
+      /* `discard`（规范 6.4）：**只有片元着色器有**，顶点着色器里写它是错的。
+       * 这一片只认它、记一格「这个模块里有 discard」——语义在两条腿上各落一次，
+       * 而两边落的是**同一个模型**（llvmpipe 的 kill 掩码）：
+       *   - 快路（emit_llvm.js）：多一层掩码（`killPtr`），与 break/cont/ret 同一个机制；
+       *     写回颜色时把它当覆盖度递给驱动，被杀的道不写回。
+       *   - 参考腿（lower.js）：一个像素一趟、标量代码，所以只要一格模块级 bool
+       *     `glsl_killed` —— 出图那一头见它是真就不印这个像素。
+       * 两条腿"接着算下去"的行为不同（快路把被杀的道掩掉、参考腿照算），但那不可观测：
+       * 被杀的像素根本不写回。 */
+      if (this.stage !== 'frag') throw this.err(node, 'discard 只能写在片元着色器里（规范 6.4）');
+      this.discard = true;
+      return { k: 'discard' };
     }
     if (h === 'if' || h === 'if-else') {
       const c = this.cond(node.items[1], node);

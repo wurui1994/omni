@@ -4389,3 +4389,70 @@ vispy 140 份：解析过      39      79
 找不到要骂 —— 查找口子是门里现搭的一张表，不落文件）。
 
 <!-- ADR-0019 include与库模式-END -->
+
+## `discard`：照 llvmpipe 的 kill 掩码，两条腿各落一次
+
+`discard`（规范 6.4）从第一刀起就在语法里有一条、在检查器里明着拒。这一节把它补上。
+
+### 模型只有一个：kill 是**又一层掩码**
+
+llvmpipe 那边 `discard` 不是跳转，是 `lp_build_mask_update` —— 往一层掩码里并进当前
+活着的那些道，最后写颜色时用它。我们两条腿照的是同一个模型，落法各自不同：
+
+- **快路（`emit_llvm.js`）**：多一层 `killPtr`，与 `brkPtr`/`contPtr`/`retPtr` 是同一个
+  机制（`maskPtr` + `raise` + 进 `update()` 的取反那一串）。`discard` 就是
+  `raise(this.killPtr)` —— 与 `break` **一模一样的一句**，差别全在"哪一层、谁读它"。
+- **参考腿（`lower.js`）**：一个像素一趟、标量代码，所以它只是**一格模块级 bool**
+  （`(global glsl_killed bool)`）。为什么不当场 `(ret …)`：`discard` 常写在用户函数里
+  （vispy 的 `antialias/cap*.glsl`、`transforms/viewport-clipping.glsl` 都是），那里
+  `ret` 只出得了那个函数、出不了这个像素。
+
+两条腿"接着算下去"的行为**刻意不同**（快路把被杀的道掩掉、参考腿照算），因为那不可观测：
+被杀的像素根本不写回。可观测的那一面（哪些像素写、写什么颜色）在门里是逐字节对齐的。
+
+### ABI：`out` 从四格变五格，第五格是**覆盖度**
+
+`void glsl_frag8(ptr in, ptr out)` 的 `out` 现在是 `[r, g, b, a, 覆盖度]`：1.0 = 这一道
+写回、0.0 = 被 `discard` 杀掉。三条纪律：
+
+- **永远写这一格**（没有 discard 的着色器存常量全 1）：驱动那一侧因此只有一种读法，
+  不必按"这份着色器有没有 discard"分岔。一批 8 个像素一条 store，量不出来。
+- 驱动（`src/jit/glsl_host.c`）见 0.0 就**一个字节都不写**那个像素。缓冲从 `malloc`
+  改成 `calloc` —— 被杀的像素留下的是零（透明黑），与 GL 里"没有片元写到那儿"同义。
+  这与"填充色的 alpha 是 0"**不是一回事**：那种情况 RGB 还是填充色。
+- `tests/glsl/fast_driver.c` 那一份也跟着从 `out[4]` 改成 `out[5]`（同一个 ABI，
+  两处实现就得同时改 —— 这正是"ABI 只有一份"的代价，也是它的好处）。
+
+### 顺带补上的一格：**参考腿收 void 函数的调用**
+
+`vispy` 那种 `void clip(vec4 viewport, vec2 pos)`（里头 discard）第一次把参考腿的
+一个洞照出来了：`call()` 无条件算 `glslCompTy(e.ty)`，遇上 `void` 当场骂
+"降不了的分量类型 void"。快路上没有这个坑 —— 那边函数是内联的，压根没有"调用的类型"。
+落法是方言现成的 `(expr E)`（语句位的表达式）。
+
+### 门
+
+- `tests/glsl/render.js` 多一支（参考腿）：`cases/vispy-clip.frag` 在 128×128 上
+  **活下来 3984 个像素，与门自己算的一模一样**，三条腿（JS/C/LLVM）逐字节相同。
+  "少印"与"多印"是两种不同的错：少印是那格 `glsl_killed` 忘了每个像素清零
+  （指纹：第一个被杀的像素之后整幅图全空 —— 这个错真犯过一次），多印是 kill 没生效。
+- `tests/glsl/vispy_draw.js` 多一份（快路）：同一个例子渲成 PNG，5 个取样点，
+  被杀的点四个通道全零、活着的点是填充色。
+- `tests/glsl/check.js`：`discard` 那一行从"明着拒"改成"顶点着色器里才拒"（规范 6.4）。
+
+### 量
+
+```
+vispy 102 份 .glsl        补之前   补之后
+  过                        93       97
+  在预算里                   9        5
+```
+
+预算里剩下的 5 份，两份是**不该修的**：`antialias/cap-round.glsl` 是 vispy 自己拼错了
+函数名（第 27 行 `lenght`，真 GL 编译器一样拒），`colormaps/user.glsl` 要 `sampler1D`。
+另外三份是语法零头（`uniform sampler2D` 一族、`float a, b;`、`f(void)`）。
+`transforms/azimuthal-equidistant.glsl` 从预算里删了 —— 它已经过了。
+
+`tests/glsl` 全套 **17/17 组绿**。
+
+<!-- ADR-0019 discard 的 kill 掩码-END -->

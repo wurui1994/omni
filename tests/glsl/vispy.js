@@ -62,18 +62,17 @@ function vispyDir() {
  * 这张表的长度就是「照着 llvmpipe 补齐」还剩多少。
  */
 const BUDGET = new Map([
-  /* `discard`（片段被丢掉）。llvmpipe 那边是一条 kill 掩码（`lp_bld_nir` 的
-   * `discard` 落成 `mask_update`），两份尺子里现在都还没有它 —— 那是下一刀。 */
-  ['antialias/cap-round.glsl', 'discard：llvmpipe 是 kill 掩码，两份尺子里都还没接'],
-  ['antialias/cap.glsl', 'discard：同上'],
-  ['antialias/caps.glsl', 'discard：同上'],
-  ['colormaps/user.glsl', 'discard：同上'],
-  ['transforms/viewport-clipping.glsl', 'discard：同上'],
+  /* **vispy 自己的笔误**，不是我们缺特性：`antialias/cap-round.glsl:27` 写的是
+   * `lenght(vec2(dx,dy))`。任何 GL 编译器都会拒它（那一份显然没被真编过），
+   * 所以这一行**永远留着** —— 它是"照实拒"的证据，不是待办。 */
+  ['antialias/cap-round.glsl', 'vispy 自己拼错了函数名（第 27 行 `lenght`）—— 真 GL 编译器一样拒'],
+  /* 采样器那一族（`sampler1D`/`sampler2D` + `texture()`）。llvmpipe 那边是
+   * `lp_bld_sample*` 一整块（软件纹理取样、双线性、mip），这一刀还没到那儿。 */
+  ['colormaps/user.glsl', '纹理：`uniform sampler1D` 与 texture() 还没接（llvmpipe 的 lp_bld_sample*）'],
   /* GLSL 1.20 的老写法与几处语法：都是「照着 llvmpipe 补齐」剩下的零头。 */
   ['colormaps/colormaps.glsl', '语法：`uniform sampler2D` / 老式限定符那一族还没接'],
   ['math/double.glsl', '语法：一条声明里多个变量（`float a, b;`）还没接'],
   ['transforms/translate.glsl', '语法：空实参表的函数声明（`f()` 与 `f(void)`）'],
-  ['transforms/azimuthal-equidistant.glsl', '缺内建：这一族的球面函数还没进表'],
 ]);
 
 const dir = vispyDir();

@@ -193,7 +193,6 @@ const REJECT = [
   ['没见过的名字', 'float f = nope;', "没见过的名字 'nope'"],
   ['没见过的函数', 'float f = nope(1.0);', "没见过的函数 'nope'"],
   ['内建函数实参个数不对', 'float f = sin(1.0, 2.0);', 'sin 要 1 个实参'],
-  ['discard 明着拒', 'discard;', 'discard 这一刀不收'],
   /* 下标本身收了（第十八片：`m[0]` 取列、`v[0]` 取一格）。还挡着的是**动态**下标 ——
    * 那要方言里有真数组才做得对。越界那一条是新加的：常量下标能在编译期查。 */
   ['动态下标还挡着', 'int i = 0;\n  float f = u_res[i];', '整数字面量'],
@@ -224,6 +223,9 @@ for (const [name, src, stage, want] of [
   ['顶点里读 gl_FragCoord', 'void main() { gl_Position = gl_FragCoord; }', 'vert', '是片元着色器的内建变量'],
   ['片元里读 gl_VertexID', 'out vec4 c;\nvoid main() { c = vec4(float(gl_VertexID)); }', 'frag', '是顶点着色器的内建变量'],
   ['自己声明内建名字', 'out vec4 gl_FragCoord;\nvoid main() { }', 'frag', '是内建变量，不能自己声明'],
+  /* `discard` 只有片元着色器有（规范 6.4）。片元那一档现在**收**它 —— 这一行盯的是
+   * "别在顶点里悄悄收下"（那会让一份顶点着色器编过却没有任何 kill 的落处）。 */
+  ['顶点里 discard', 'void main() { discard; }', 'vert', 'discard 只能写在片元着色器里'],
   ['版本不是 330', 'void main() { }', 'frag', '只收 #version 330'],
 ]) {
   const head = name === '版本不是 330' ? '#version 400 core\n' : '#version 330 core\n';
