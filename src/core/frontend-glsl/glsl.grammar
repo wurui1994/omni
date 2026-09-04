@@ -171,7 +171,10 @@
     (-> (type ID "(" params ")" block) (func $1 $2 $4 $6))
     (-> (type ID "(" params ")" ";") (func-proto $1 $2 $4))
     ;; 模块级变量（不带限定符）。GLSL 里这是「全局，各调用共享」，尺子没用。
-    (-> (type ID ";") (global $1 $2)))
+    (-> (type ID ";") (global $1 $2))
+    ;; 带初值那一档。规范要求全局的初值是**常量表达式**，所以「什么时候算」没有歧义 ——
+    ;; 每个调用开头算一次。gen_shader 生的 `float g_domainEmpty = 0.0;` 正是这一档。
+    (-> (type ID "=" expr ";") (global-init $1 $2 $4)))
 
   ;; `layout(location = N)`。这一刀只认 `location` 这一个键 —— 别的（`std140`、`binding`…）
   ;; 要连着 uniform block 一起做，那是另一片。

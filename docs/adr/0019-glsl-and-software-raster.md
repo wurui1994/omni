@@ -3774,6 +3774,82 @@ $ omni run /tmp/p1.frag -o /tmp/p2.png --size 256 \
 
 <!-- ADR-0019 落地：omni run frag-END -->
 
+## 量：31 个 preset 对着真 GL —— **26 张逐字节相同**，顺带抓出内联的一个真 bug
+
+第一次把 GraphEq 的 31 个 preset 整条路跑通（`gen_shader.mjs` -> 我们的前端 -> 快路 -> PNG），
+与 `examples_256/<id>_glsl.png`（moderngl 在真 GPU 上渲的那张）逐像素比。三轮：
+
+- 第一轮 **31/31 前端就进不去**：`float g_domainEmpty = 0.0;` —— 模块级变量**带初值**。
+  语法只有 `type ID ;` 那一档。加一条 `(-> (type ID "=" expr ";") (global-init …))`：
+  规范要求全局的初值是常量表达式，所以「什么时候算」不是一个选择 —— 每个调用开头算一次，
+  与不带初值那一档取零是同一个位置（`emit_llvm.js` 里也就多一个 `this.expr(gv.init)`）。
+- 第二轮 30/31 出图（`tan` 还没接进快路），但**只有 15 张对**。错的那 15 张差 22%～43%，
+  一眼能看出来：`parabola` 的右半张与参考图一模一样，**左半张整片是白的**。
+- 第三轮（修完下面那个 bug）：**26/30 逐字节相同**，剩 4 张见下。
+
+### 那个 bug：`inlineCall` 把调用者的 `ret` 掩码丢了
+
+```js
+const savedRet = this.retPtr;
+this.retPtr = this.maskPtr('ret');   // 被调者要一份新的 —— 对
+// …但调用者已经 return 掉的那些道，从此不再被掩
+```
+
+`update()` 算的是 `condMask & ~cont & ~brk & ~ret`。换掉 `retPtr` 之后那一项指向一份
+**全 0** 的新掩码，于是被调者体内八道又全活。
+
+指纹（`i_pow_const`）：
+
+```c
+if (n == 2.0) { … 三条 return，每道都走掉一条 … }
+if (a.y <= 0.0) { g_domainEmpty = 1.0; return NaN; }   // 这句被掩住了，对
+return i_exp(i_mul(vec2(n, n), i_log(a)));             // 这一条本该整段掩掉
+```
+
+最后那一条的 `i_log` **里面**也有一句 `g_domainEmpty = 1.0;`。一进 `i_log`，
+调用者的 `ret` 没了 —— 那句照写。于是 x<0 的半张图全是「定域为空 = 确定为假」= 白。
+
+修法与 llvmpipe 一致（它只有**一个** exec 掩码栈，因为 NIR 早就把函数全内联平了）：
+把调用点那一刻的 `execMask` **压成一层 `cond`**，被调者的新 `ret` 只往上叠。
+顺带把 `brkPtr`/`contPtr` 在被调者体内换成 null —— 被调者的体不在调用者那个循环里，
+而那两层已经折进压下去的这一层了。
+
+### 怎么找到的（这一段是方法，不是结果）
+
+四次最小复现**全都没复现出来**：嵌套 `if` 里的 return、return 之后的条件写全局、
+形参是常量的分支、深一层内联、分支里调带 return 的函数 —— 五个 8×1 的探针全绿。
+每次都是「像是这个」，然后被自己的探针否掉。
+
+真正定位靠两步：
+
+1. **把探针插进真源码**，而不是另写一份：把 `main` 的尾巴换成
+   `fragColor = vec4(p.x / 25.0, p.y / 25.0, g_domainEmpty, 1.0)`，16 列一列一个 `cx`。
+   一眼看出**区间值全对、`g_domainEmpty` 在 x<0 那半边全是 1**。
+   错的不是算术，是「谁该写」。
+2. **读 IR**（1613 行，grep 那个 slot 的 store）。`store … %p34_g_domainEmpty` 的掩码是
+   `cond & ~m53_ret`，而 `m53_ret` 那一刻明明已经全 1 —— 说明写的不是这一处，
+   是内联进来的 `i_log` 里那一处，它的掩码根本没有 `m53_ret`。
+
+教训写下来：**8 位通道就够当示波器用**。把中间量塞进颜色通道渲一张 8×1 的图，
+比手推 400 行掩码 IR 靠得住得多（后者这一刀里已经错过一次）。
+
+### 剩下那 4 张
+
+```
+lattice      99 px (0.15%)   floor(x) = floor(y)
+sin-roots   510 px (0.78%)   sin(x*y) > 0
+sincos-gt   250 px (0.38%)   sin(x) * cos(y) > 0
+sincos-eq     6 px (0.01%)   sin(x) + sin(y) = 0
+```
+
+都是**曲线/网格线上的一层像素**，不是整片。还没查，先记着：`i_sin`/`i_cos` 里那个
+`k % 2 == 0` 是**负数取模**（GLSL 330 说负操作数的 `%` 是未定义的，我们发 `srem`，
+GPU 上可能不是），而 `lattice` 一条 `sin` 都没有 —— 所以至少是两个原因。
+这四张的参考图 `_cpu` 与 `_glsl` 是互相**逐字节相同**的，所以差的是我们这一侧。
+
+<!-- ADR-0019 31个preset对真GL-END -->
+
+
 
 ## 还没定的（下一步按这个顺序）
 

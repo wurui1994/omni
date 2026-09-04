@@ -646,18 +646,24 @@ class GlslChecker {
       this.curFunc = null;
       return;
     }
-    if (h === 'global') {
+    if (h === 'global' || h === 'global-init') {
       /* 模块级变量（B16）。GLSL 里它是**每个调用各一份**（不是共享的全局）——
        * 一个片元的 `u_x` 与另一个片元的 `u_x` 无关。所以在快路上它就是 `main` 那一层的
        * 一个落点，函数内联之后自然看得见（ADR-0019 决策十第 5 步）。
        *
-       * 只收**不带初值**的那一档：`grapheq.glsl` 那两个（`IV u_x; IV u_y;`）都是这样，
-       * 带初值要定"什么时候算"（规范说是常量初值），没有用例就不开。 */
+       * 带初值那一档也收：规范要求全局的初值是**常量表达式**，所以「什么时候算」不是
+       * 一个选择 —— 每个调用开头算一次，与不带初值那一档取零是同一个位置。 */
       const name = glslAtom(node.items[2]);
       this.claim(name, node);
       const ty = this.tyOf(node.items[1]);
       if (ty.k === 'void') throw this.err(node, `'${name}' 不能是 void`);
-      this.globals.set(name, { name, ty });
+      let init = null;
+      if (h === 'global-init') {
+        this.push();
+        init = this.coerce(this.expr(node.items[3]), ty, node);
+        this.pop();
+      }
+      this.globals.set(name, { name, ty, init });
       return;
     }
 

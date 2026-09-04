@@ -947,8 +947,32 @@ class GlslLlvmEmitter {
     const savedScopes = this.scopes;
     const savedRet = this.retPtr;
     const savedSlot = this.retSlot;
+    const savedBrk = this.brkPtr;
+    const savedCont = this.contPtr;
+    /**
+     * **调用点那一刻还活着的道，压成一层 `cond`。**
+     *
+     * 被调者要一份新的 `ret` 落点（它自己的 `return` 只该掩它自己），但调用者已经
+     * `return`/`break`/`continue` 掉的那些道**必须继续掩着** —— 上一版只换 `retPtr`，
+     * 于是 `update()` 里那一项没了，被调者体内八道又全活。
+     *
+     * 量出来的指纹（GraphEq 的 `i_pow_const`）：`if (n == 2.0) { … return … }` 之后
+     * 每道都已经 return，尾巴上那条 `i_exp(i_mul(…, i_log(a)))` 本该整段掩掉，
+     * 而 `i_log` 里那句 `g_domainEmpty = 1.0` 照写 —— 于是 x<0 的半张图全变成
+     * 「定域为空 = 确定为假」。31 个 preset 里 15 个因此错，`parabola` 差 42%。
+     *
+     * `brkPtr`/`contPtr` 换成 null：被调者的体**不在**调用者那个循环里。它们那两层
+     * 已经折进压下去的这一层了，不会丢。
+     */
+    const pushedEntry = this.execMask !== null;
+    if (pushedEntry) {
+      this.condStack.push({ cond: this.execMask, outer: this.condMask });
+      this.condMask = this.execMask;
+    }
     this.scopes = [savedScopes[0], new Map()];
     this.retPtr = this.maskPtr('ret');
+    this.brkPtr = null;
+    this.contPtr = null;
     this.retSlot = f.ret.k === 'void' ? null
       : this.allocVar(`${e.name}_ret`, llCompTys(f.ret), null);
     for (let i = 0; i < f.params.length; i++) {
@@ -972,7 +996,9 @@ class GlslLlvmEmitter {
     this.scopes = savedScopes;
     this.retPtr = savedRet;
     this.retSlot = savedSlot;
-    this.update();
+    this.brkPtr = savedBrk;
+    this.contPtr = savedCont;
+    if (pushedEntry) this.popMask(); else this.update();
     for (const b of backs) {
       this.assign({ op: '=', lhs: b.node, rhs: { k: 'pre', comps: b.comps } });
     }
@@ -1077,9 +1103,13 @@ class GlslLlvmEmitter {
     for (const c of m.consts) this.bind(c.name, this.expr(c.init));
     /* 模块级变量（B16 / 决策十第 5 步）：GLSL 里它**每个调用各一份**，所以它就是这一层的
      * 一个落点 —— 与局部量一模一样，只是绑在第 0 层，内联进来的函数也看得见。
-     * 不带初值，所以初值是零（规范说未初始化的全局是 0）。 */
+     * 不带初值时初值是零（规范说未初始化的全局是 0）；带初值那一档规范要求初值是
+     * **常量表达式**，所以在这儿算一次就够，不必操心"什么时候算"。 */
     const gvs = m.globals === undefined ? [] : m.globals;
-    for (const gv of gvs) this.bindVar(gv.name, llCompTys(gv.ty), null);
+    for (const gv of gvs) {
+      const gi = gv.init === undefined || gv.init === null ? null : this.expr(gv.init);
+      this.bindVar(gv.name, llCompTys(gv.ty), gi);
+    }
     const o = m.outs[0];
     const on = llNComp(o.ty);
     const zeros = [];
