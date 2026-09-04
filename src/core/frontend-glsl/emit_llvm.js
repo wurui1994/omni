@@ -118,9 +118,14 @@ function llZero(t) {
   return llB(false);
 }
 
-/** GLSL 内建 -> LLVM intrinsic（都有 `.v8f32` 的向量形，实参与结果都是 float）。 */
+/**
+ * GLSL 内建 -> LLVM intrinsic（都有 `.v8f32` 的向量形，实参与结果都是 float）。
+ *
+ * `llvm.tan` 是 LLVM 19 才有的（本机 23）。向量形没有硬件指令，后端会拆成 8 次
+ * `tanf` 调用 —— 与 `sin`/`cos` 在这台机器上是同一种落法（也是调库），所以不特殊。
+ */
 const LL_INTRIN = new Map([
-  ['sin', 'llvm.sin'], ['cos', 'llvm.cos'], ['sqrt', 'llvm.sqrt'],
+  ['sin', 'llvm.sin'], ['cos', 'llvm.cos'], ['tan', 'llvm.tan'], ['sqrt', 'llvm.sqrt'],
   ['abs', 'llvm.fabs'], ['floor', 'llvm.floor'], ['ceil', 'llvm.ceil'],
   ['pow', 'llvm.pow'], ['exp', 'llvm.exp'], ['log', 'llvm.log'],
   ['min', 'llvm.minnum'], ['max', 'llvm.maxnum'],
