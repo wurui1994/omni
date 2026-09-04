@@ -56,6 +56,17 @@ const ternary = (cond, then, otherwise) => dyn('Ternary', { cond, then, otherwis
 const truthy = (e) => ({ kind: 'Builtin', name: 'js_truthy', args: [e], type: BOOL });
 const boolOp = (name, args, extra = {}) => ({ kind: 'Builtin', name, args, type: BOOL, ...extra });
 const notB = (e) => ({ kind: 'Un', op: '!', operand: e, type: BOOL });
+/**
+ * `a >>> b`（与 `>>>=`）：**不走 `js_bitop`，走 i32 那三条**（ADR-0013 第三刀那一组）。
+ *
+ * 理由是语义，不是省事：`js_bitop` 那一族只对 bigint 成立（方言的 int 就是 int64），
+ * 而 JS 里的 `>>>` **是 32 位、而且对 BigInt 直接 TypeError** —— 它本来就不属于
+ * 64 位那一族。ECMAScript 的定义是 `ToUint32(a) >>> (ToUint32(b) & 31)`，落到已有的
+ * 两条 op 上正好是一层套一层：`u>>` 算出规范形 int32，`tou` 再把那些位当无符号读回来。
+ * 这两条 op 的三份实现（`host/native.js`、`backend-js/prelude.js`、`omni_js_host.c`）
+ * 早就对齐了，所以这儿一行都不用新加运行时。
+ */
+const ushr = (a, b) => op('js_i32_tou', [op('js_i32_op', [s16('u>>'), a, b])]);
 const block = (stmts) => ({ kind: 'Block', stmts });
 const exprStmt = (expr) => ({ kind: 'ExprStmt', expr });
 const localStmt = (name, init) => ({ kind: 'Local', name, type: D, init });
@@ -1416,6 +1427,7 @@ class Lower {
         return op('js_bitop', [A(), B()], { op: e.op });
       case '<<': return op('js_bitop', [A(), B()], { op: '<' });
       case '>>': return op('js_bitop', [A(), B()], { op: '>' });
+      case '>>>': return ushr(A(), B());
       case 'in': return op('js_obj_has', [B(), A()]);
       case 'instanceof': {
         // instanceof 查 $cls 链（决策 15），所以只对 Error 与 Error 的子类有意义
@@ -1758,6 +1770,7 @@ class Lower {
       case '&': case '|': case '^': return op('js_bitop', [a, b], { op: o });
       case '<<': return op('js_bitop', [a, b], { op: '<' });
       case '>>': return op('js_bitop', [a, b], { op: '>' });
+      case '>>>': return ushr(a, b);
       default:
         this.err(span, `compound assignment '${o}=' is not supported`);
         return a;

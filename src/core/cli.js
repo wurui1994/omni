@@ -2175,7 +2175,9 @@ function runGlslFrag(path, rest) {
     set[kv.slice(0, eq)] = { w: nums[0], h: nums[1], data: nums.slice(2) };
   }
   const root = join(installDir(), '..', '..', '..');
-  const r = glslRenderToPng(root, path, out, w, h, set, findCC(), env);
+  /* `env` 是宿主函数，**不能当值传** —— 封闭 ABI 里它只有"被调用"这一种用法。
+     包一层箭头函数：递过去的是普通闭包，里面那一句才是那次调用。 */
+  const r = glslRenderToPng(root, path, out, w, h, set, findCC(), (n) => env(n));
   stdout(`${r.out}  ${w}x${h}  uniform ${r.uniforms.length} 个  ir ${r.irLines} 行\n`);
   return 0;
 }

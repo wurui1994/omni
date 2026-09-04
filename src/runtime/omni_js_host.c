@@ -320,8 +320,6 @@ omni_dyn omni_js_proc_stderr_bytes(omni_dyn s) {
  *     而 JS 的 `(a/b)|0` 回的是 INT32_MIN / 0。所以这两格单列。
  *   - 有符号溢出也是 UB，所以加减乘一律在 `uint32_t` 上算完再折回来。
  */
-static int32_t dyn_i32(omni_dyn v) { return (int32_t)omni_dyn_as_real(v); }
-
 /** ECMAScript 的 ToInt32：非有限回 0，其余对 2^32 取模再看符号。 */
 static int32_t to_int32(double d) {
   if (!isfinite(d)) return 0;
@@ -330,6 +328,12 @@ static int32_t to_int32(double d) {
   if (m >= 2147483648.0) m -= 4294967296.0;
   return (int32_t)m;
 }
+
+/* 进来那一格也要走 ToInt32，**不能直接 `(int32_t)double`**：C 的这个转换在超出 i32
+ * 范围时是未定义行为（这台机器上是饱和），而 JS 的 `a >>> b`、`a | b` 一律先按
+ * 2^32 取模。分叉的指纹很具体：`2147483648 >>> 0` 在 JS 上是 2147483648，
+ * 饱和那一版会给 2147483647 —— `>>>` 接进前端那天就是这么露出来的。 */
+static int32_t dyn_i32(omni_dyn v) { return to_int32(omni_dyn_as_real(v)); }
 
 omni_dyn omni_js_i32_op(omni_dyn op, omni_dyn a, omni_dyn b) {
   omni_s16 s = omni_js_as_s16(op);
