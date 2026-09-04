@@ -347,3 +347,32 @@ C 的终点是 MIR，而 `backend-js` 吃的是 OIR，中间没有那一段。�
 要么 (b) 给 MIR 加一条 JS 后端。**(a) 是量，(b) 是新腿** —— 先量再定。
 
 <!-- ADR-0013 MIR解释器profile-END -->
+
+### 开工单：把 `binOp` 变成**闭包工厂**（那 19% 的入口）
+
+profile 里 `interp.js:492` 的 `binOp(o, kind, l(F), r(F))` 占 19.1% —— 它每执行一次
+都要「比两次 `kind` + switch 一次 `op`」。而 MIR 的每条指令**类型和运算在编译期就定了**，
+这两层判断本该只做一次。
+
+形状（`interp/builtin.js`）：
+
+```js
+/** (op, kind) -> 一个两参数的函数。算术本身一处不动，动的只是「什么时候挑」。 */
+export function binFn(op, kind) { … switch … return (a, b) => …; }
+/** 老口子照旧（OIR 那条腿还在用），实现改成走上面那个。 */
+export function binOp(op, kind, a, b) { return binFn(op, kind)(a, b); }
+```
+
+三条要注意的：
+
+1. **`binOp` 不能因此变慢** —— OIR 解释器的热路也在它上面。所以 `binFn` 要按
+   `kind + op` 缓存（`Map`），不然每次调用多一个闭包分配。
+2. **两条腿必须仍然逐位相同**：立一条门，把每个 `(op, kind)` × 一组边界操作数
+   （0、±1、INT_MIN、INT_MAX、移位 0/31/32/63、除零）都拿 `binFn` 与 `binOp` 对一遍。
+   这不是多余的 —— 「dispatch 抄错一格」是静默的错答案，而这条腿是 **oracle**。
+3. 同样的做法适用于 `cmpOp`（5.4%）与 `bin32`（6.9% + 11.8%）。
+
+**预期收益 10～20%**（常数因子那一档）。真正的量级还是「i32 别用 BigInt」——
+那一格要先答「oracle 的答案不能变」，见上一节。
+
+<!-- ADR-0013 binOp闭包工厂开工单-END -->
