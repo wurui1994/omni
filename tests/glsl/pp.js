@@ -143,20 +143,115 @@ rejects('同一个宏定义两次', SHELL(`
 #define TWO 3.0
 float probe(int k) { return TWO; }`), '定义了两次');
 
-rejects('#if', SHELL(`
+/* ---- `#if` 一族（ADR-0019 A11 第二档）。同样用「与手写展开逐字节相同」这把尺子：
+ * 收下的那一支要与「把没选中的那几支删掉」的源码一模一样。 */
+
+same('#if 1 / #if 0 选支', `
 #if 1
 float probe(int k) { return 1.0; }
-#endif`), '不收 "#if"');
+#endif
+#if 0
+float dead(int k) { return 0.0; }
+#endif`, `
+float probe(int k) { return 1.0; }`);
 
-rejects('#ifdef', SHELL(`
+same('#ifdef / #else', `
+#define FOO
 #ifdef FOO
 float probe(int k) { return 1.0; }
-#endif`), '不收 "#ifdef"');
+#else
+float probe(int k) { return 2.0; }
+#endif`, `
+float probe(int k) { return 1.0; }`);
 
-rejects('#undef', SHELL(`
+same('#ifndef 走 else 那一支', `
+#define FOO
+#ifndef FOO
+float probe(int k) { return 1.0; }
+#else
+float probe(int k) { return 2.0; }
+#endif`, `
+float probe(int k) { return 2.0; }`);
+
+same('#elif 链只收第一条真的', `
+#define LEVEL 2
+#if LEVEL == 1
+float probe(int k) { return 1.0; }
+#elif LEVEL == 2
+float probe(int k) { return 2.0; }
+#elif LEVEL == 2
+float probe(int k) { return 3.0; }
+#else
+float probe(int k) { return 4.0; }
+#endif`, `
+float probe(int k) { return 2.0; }`);
+
+same('#if 里的 defined 与算术（短路：X 没定义时右边不求值）', `
+#if defined(FOO) && FOO > 1
+float probe(int k) { return 1.0; }
+#elif !defined FOO
+float probe(int k) { return 2.0; }
+#endif`, `
+float probe(int k) { return 2.0; }`);
+
+same('没定义过的宏在 #if 里当 0（glcpp 的行为）', `
+#if GL_ES
+float probe(int k) { return 1.0; }
+#else
+float probe(int k) { return 2.0; }
+#endif`, `
+float probe(int k) { return 2.0; }`);
+
+same('不收的那一层里面的 #define 与嵌套 #if 都不生效', `
+#if 0
+#define TWO 999.0
+#if 1
+float dead(int k) { return TWO; }
+#endif
+#endif
+float probe(int k) { return 2.0; }`, `
+float probe(int k) { return 2.0; }`);
+
+same('#undef 之后名字不再被换', `
+#define TWO 999.0
+#undef TWO
+float probe(int k) { float TWO = 2.0; return TWO; }`, `
+float probe(int k) { float TWO = 2.0; return TWO; }`);
+
+same('#undef 之后可以重新 #define（不算重定义）', `
 #define TWO 2.0
 #undef TWO
-float probe(int k) { return 1.0; }`), '不收 "#undef"');
+#define TWO 3.0
+float probe(int k) { return TWO; }`, `
+float probe(int k) { return 3.0; }`);
+
+same('#pragma / #line / #extension 收下并忽略（mesa 的做法）', `
+#pragma optimize(on)
+#extension GL_OES_standard_derivatives : enable
+#line 100
+float probe(int k) { return 1.0; }`, `
+float probe(int k) { return 1.0; }`);
+
+rejects('#endif 落了单', SHELL(`
+float probe(int k) { return 1.0; }
+#endif`), '没有配对的 #if');
+
+rejects('#if 少了 #endif', SHELL(`
+#if 1
+float probe(int k) { return 1.0; }`), '少了 1 个 #endif');
+
+rejects('#if 的条件不是常量表达式', SHELL(`
+#if 1.5
+float probe(int k) { return 1.0; }
+#endif`), '#if');
+
+rejects('#extension … : require 一个没有的扩展', SHELL(`
+#extension GL_ARB_gpu_shader_fp64 : require
+float probe(int k) { return 1.0; }`), 'require');
+
+rejects('不认识的指令', SHELL(`
+#nosuchthing 1
+float probe(int k) { return 1.0; }`), '不收');
 
 /* 没给查找口子的时候 `#include` 照旧骂 —— `pp.js` 自己不碰文件系统。 */
 rejects('#include（这一趟没给查找口子）', SHELL(`

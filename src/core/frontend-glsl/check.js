@@ -79,6 +79,27 @@ export function glslTyText(t) {
 
 const glslSame = (a, b) => glslTyText(a) === glslTyText(b);
 
+/* ---- 函数重载（GLSL 规范 6.1）的两个小工具 ----------------------------------
+ * `glslSigKey` 是**身份**：同一个名字下两份重载，形参类型串相同就是同一份
+ * （规范说返回类型不参与重载，所以键里没有它）。它也是发出去的名字的后缀，
+ * 所以要是个合法标识符 —— `vec3` -> `vec3`、`vec2[4]` -> `vec2_4`。
+ * `glslSigText` 是给人看的那一份（错误消息里）。 */
+function glslSigKey(params) {
+  return params.map((p) => glslTyText(p.ty).replace(/\[(\d+)\]/g, '_$1')).join('_');
+}
+
+function glslSigText(params) {
+  return params.map((p) => glslTyText(p.ty)).join(', ');
+}
+
+/** 能不能隐式转过去。与 `coerce` **逐条对齐**（那一份是真的转，这一份只是问）。 */
+function glslCanCoerce(from, to) {
+  if (glslSame(from, to)) return true;
+  if (to.k === 'float' && from.k === 'int') return true;
+  return to.k === 'vec' && to.base === 'float'
+    && from.k === 'vec' && from.base === 'int' && from.n === to.n;
+}
+
 /** 标量吗（`float`/`int`/`bool`）。 */
 const glslIsScalar = (t) => t.k === 'float' || t.k === 'int' || t.k === 'bool';
 
@@ -406,6 +427,8 @@ class GlslChecker {
     this.consts = new Map();
     this.globals = new Map();   // 模块级变量（B16）：每个调用各一份，不是共享的
     this.funcs = new Map();
+    /** 源码名 -> 所有重载（GLSL 规范 6.1）。挑哪一份由实参类型定，见 `pickOverload`。 */
+    this.byName = new Map();
     this.locs = new Map();
     /* 结构体表（施工图 B13）：名字 -> `{k:'struct', name, fields}`。
      * 名字能进类型位是 `pp.js` 的 `glslTypeNames()` 把它重判成 `TYPENAME` 了。 */
@@ -622,7 +645,7 @@ class GlslChecker {
       return;
     }
     if (h === 'func' || h === 'func-proto') {
-      const name = glslAtom(node.items[2]);
+      const src = glslAtom(node.items[2]);
       const ret = this.tyOf(node.items[1]);
       const params = glslFlatten(node.items[3], 'params-add', 'params').map((p) => ({
         dir: glslHead(p.items[1]) === 'dir-out' ? 'out'
@@ -630,22 +653,47 @@ class GlslChecker {
         ty: this.tyOf(p.items[2]),
         name: glslAtom(p.items[3]),
       }));
+      /* **函数重载**（GLSL 规范 6.1，mesa/llvmpipe 全支持）：同一个名字可以有多份，
+       * 按形参类型区分。所以「一个名字一个函数」这个假设在这儿散开成两张表：
+       *   `byName`  源码名 -> 所有重载（调用点按实参类型挑）
+       *   `funcs`   **发出去的名字** -> 函数（降级与快路那两侧照旧按名字唯一）
+       * 发出去的名字：第一份保留源码名，后面的加 `__形参签名`；名字撞上内建的话
+       * 一律加签名（`vispy` 的 `math/functions.glsl` 就重载了 `atan`）。
+       * 这样单份的那些着色器降出来一个字节都不变。 */
+      const sig = glslSigKey(params);
+      const list = this.byName.get(src) ?? [];
+      const dup = list.find((g) => g.sig === sig);
+      const isBuiltin = GLSL_BUILTINS.has(src) || GLSL_VEC_CMP.has(src) || GLSL_VEC_RED.has(src)
+        || GLSL_MAT_FNS.has(src) || GLSL_BITS.has(src) || src === 'not';
       if (h === 'func-proto') {
-        if (!this.funcs.has(name)) this.funcs.set(name, { name, ret, params, body: null });
+        if (dup === undefined) {
+          const f = { name: (list.length === 0 && !isBuiltin) ? src : `${src}__${sig}`,
+            src, sig, ret, params, body: null };
+          list.push(f);
+          this.byName.set(src, list);
+          this.funcs.set(f.name, f);
+        }
         return;
       }
-      if (GLSL_BUILTINS.has(name) || GLSL_VEC_CMP.has(name) || GLSL_VEC_RED.has(name)
-        || GLSL_MAT_FNS.has(name) || GLSL_BITS.has(name) || name === 'not') {
-        throw this.err(node, `'${name}' 是内建函数，不能重定义`);
+      if (dup !== undefined && dup.body !== null) {
+        throw this.err(node, `'${src}(${glslSigText(params)})' 定义了两次`);
       }
-
-      const had = this.funcs.get(name);
-      if (had !== undefined && had.body !== null) throw this.err(node, `'${name}' 定义了两次`);
-      const f = { name, ret, params, body: null };
+      const f = dup !== undefined ? dup
+        : { name: (list.length === 0 && !isBuiltin) ? src : `${src}__${sig}`,
+          src, sig, ret, params, body: null };
+      if (dup === undefined) {
+        list.push(f);
+        this.byName.set(src, list);
+      } else {
+        /* 原型与定义的返回类型/形参方向必须一致 —— 那是规范要求，也是「原型在前」
+         * 这件事唯一能出错的地方。 */
+        f.ret = ret;
+        f.params = params;
+      }
       /* 先登记再查体：GLSL 里递归是**非法**的，但登记在前才能让「递归」这件事在
        * 名字解析这一层就被看见（现在的表现是「函数体里调到自己」——留到降级那一侧拦，
        * 因为那儿才知道调用图）。 */
-      this.funcs.set(name, f);
+      this.funcs.set(f.name, f);
       this.curFunc = f;
       this.push();
       for (const p of params) this.declare(p.name, p.ty, node);
@@ -1109,6 +1157,11 @@ class GlslChecker {
   call(node) {
     const name = glslAtom(node.items[1]);
     const args = glslFlatten(node.items[2], 'args-add', 'args').map((a) => this.expr(a));
+    /* **用户函数先挑**（GLSL 规范 6.1 的重载解析）：用户可以重载内建
+     * （vispy 的 `math/functions.glsl` 就重载了 `atan`），所以按实参类型能挑出一份
+     * 就走那一份；挑不出来才落到下面那几族内建。 */
+    const user = this.pickOverload(name, args, node);
+    if (user !== null) return user;
     const vty = glslVecCmpType(name, args.map((a) => a.ty), node, (n, m) => this.err(n, m));
     if (vty !== null) {
       /* 这一族**不提升实参**：`lessThan(ivec2, ivec2)` 是整数比较，
@@ -1145,24 +1198,54 @@ class GlslChecker {
       const fixed = args.map((a) => (a.ty.k === 'int' ? this.coerce(a, GLSL_FLOAT, node) : a));
       return { k: 'builtin', ty, name, args: fixed };
     }
-    const f = this.funcs.get(name);
-    if (f === undefined) throw this.err(node, `没见过的函数 '${name}'`);
-    if (f.params.length !== args.length) {
-      throw this.err(node, `${name} 要 ${f.params.length} 个实参，给了 ${args.length}`);
+    throw this.err(node, `没见过的函数 '${name}'`);
+  }
+
+  /**
+   * 重载解析（GLSL 规范 6.1）。回 null 表示「这个名字不是用户函数」——
+   * 那时调用点继续往内建那几族找。
+   *
+   * 挑的次序与规范一致：**先按形参个数**过一遍，再要「逐个同型」的那一份，
+   * 最后才要「每一格都能隐式转过去」的那一份。剩下多份就是歧义，明着骂 ——
+   * 悄悄挑一份是这一格最坏的选择（两条腿会挑到不同的那一份）。
+   */
+  pickOverload(name, args, node) {
+    const list = this.byName.get(name);
+    if (list === undefined) return null;
+    const arity = list.filter((f) => f.params.length === args.length);
+    if (arity.length === 0) {
+      const ns = [...new Set(list.map((f) => f.params.length))].sort().join('/');
+      throw this.err(node, `${name} 的形参个数是 ${ns}，给了 ${args.length}`);
     }
+    if (arity.length === 1) return this.applyCall(arity[0], name, args, node);
+    const exact = arity.filter((f) => f.params.every((p, i) => glslSame(p.ty, args[i].ty)));
+    if (exact.length === 1) return this.applyCall(exact[0], name, args, node);
+    const conv = arity.filter((f) => f.params.every((p, i) => p.dir === 'in'
+      && glslCanCoerce(args[i].ty, p.ty)));
+    if (conv.length === 1) return this.applyCall(conv[0], name, args, node);
+    const given = args.map((a) => glslTyText(a.ty)).join(', ');
+    const cands = arity.map((f) => `${name}(${glslSigText(f.params)})`).join('、');
+    if (conv.length === 0) {
+      throw this.err(node, `${name}(${given}) 对不上任何一份重载：${cands}`);
+    }
+    throw this.err(node, `${name}(${given}) 有多份重载都能对上（歧义）：${cands}`);
+  }
+
+  /** 挑定一份重载之后的实参检查。发出去的名字是 `f.name`（重载过的带签名后缀）。 */
+  applyCall(f, src, args, node) {
     const fixed = args.map((a, i) => {
       const p = f.params[i];
       if (p.dir === 'in') return this.coerce(a, p.ty, node);
       /* `out`/`inout` 的实参：**必须同型**（要写回去，隐式转换没法反着来），
        * 而且必须是能写的左值 —— `f(1.0)` 那种「写回哪儿去」的问题得当场拦。 */
       if (!glslSame(a.ty, p.ty)) {
-        throw this.err(node, `${name} 的第 ${i + 1} 个实参是 ${p.dir}，要正好是 `
+        throw this.err(node, `${src} 的第 ${i + 1} 个实参是 ${p.dir}，要正好是 `
           + `${glslTyText(p.ty)}，给的是 ${glslTyText(a.ty)}`);
       }
       if (a.k === 'ref') {
         if (a.kind === 'uniform' || a.kind === 'in' || a.kind === 'const'
           || a.kind === 'builtin-in') {
-          throw this.err(node, `${name} 的第 ${i + 1} 个实参是 ${p.dir}，`
+          throw this.err(node, `${src} 的第 ${i + 1} 个实参是 ${p.dir}，`
             + `但 '${a.name}' 是 ${a.kind}，写不进去`);
         }
         return a;
@@ -1170,13 +1253,13 @@ class GlslChecker {
       if (a.k === 'swizzle') {
         const seen = new Set(a.idx);
         if (seen.size !== a.idx.length) {
-          throw this.err(node, `${name} 的第 ${i + 1} 个实参里 swizzle 同一格出现两次，写不进去`);
+          throw this.err(node, `${src} 的第 ${i + 1} 个实参里 swizzle 同一格出现两次，写不进去`);
         }
         return a;
       }
-      throw this.err(node, `${name} 的第 ${i + 1} 个实参是 ${p.dir}，要给一个能写的左值`);
+      throw this.err(node, `${src} 的第 ${i + 1} 个实参是 ${p.dir}，要给一个能写的左值`);
     });
-    return { k: 'call', ty: f.ret, name, args: fixed };
+    return { k: 'call', ty: f.ret, name: f.name, args: fixed };
   }
 
   unary(node, h) {

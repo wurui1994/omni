@@ -1,15 +1,20 @@
-// Omni — GLSL 的预处理：**只有对象宏**（ADR-0019 施工图 A11 的最窄那一档）
+// Omni — GLSL 的预处理（ADR-0019 施工图 A11）
 //
-// 为什么只做对象宏：拿 `grapheq.glsl` 那 772 行数出来的 —— 8 处 `#define` 全是对象宏，
-// 一个函数宏都没有，也没有 `#if`/`#ifdef`/`#include`。所以这一片收的正好是「那一份要什么」，
-// 别的一律**明着骂**（宁可少收，不能悄悄按别的意思编）。
+// 收的这一档照着 mesa/llvmpipe 的 `glcpp`：**对象宏 + `#if` 一族 + `#include`**，
+// 加上收下并忽略的 `#pragma`/`#line`/`#extension`。**函数宏还不收**（明着骂）——
+// 那一格是下一刀，理由见下面那条错误消息。
+//
+// 起点是 `grapheq.glsl` 那 772 行数出来的最窄一档（8 处对象宏、无 `#if`、无 `#include`）；
+// 后来 vispy 那 73 份逼出了 `#include`（网状 include 图）与 `#if` 一族
+// （`#ifdef GL_ES`、include guard、`#if defined(X) && X > 1`）。
 //
 // 位置：在词法之后、语法之前。`glsl.grammar` 里 `#` 开头到行尾是**一个 `VERSION` token**
-// （那条 token 规则本来是为 `#version` 写的），所以 `#define` 那些行现在就已经是一个个
+// （那条 token 规则本来是为 `#version` 写的），所以指令行现在就已经是一个个
 // token 摆在流里了 —— 这一片要做的就是把它们摘出来、把用到的地方换掉。
 //
 // 展开是**定义时**展开（`#define NO_GAP vec2(BIG, -BIG)` 里的 `BIG` 在读到这一行时就换掉），
 // 不是使用时。对象宏且不许重定义的话，两种时机等价，而定义时展开天然没有递归问题。
+// `#if` 里的展开是另一份（按**文本**再展开一次，见 `ceEval`）：那儿要的是整数常量表达式。
 //
 // 替换进来的 token 的 span 指向一个合成源文件（`… 的 #define BIG`）—— 报错时指的是宏体
 // 里的那一段，而不是使用处。这比让它指向别处的字节要诚实。
@@ -33,6 +38,141 @@ const INCLUDE = /^#\s*include\s*(?:"([^"]*)"|<([^>]*)>)\s*$/;
 /** 套多深就当是环（真的环由 `stack` 认，这一条是兜底）。 */
 const INCLUDE_MAX = 32;
 
+/** 一条指令的名字：`#  ifdef` -> `ifdef`。 */
+const DIRECTIVE = /^#\s*([A-Za-z_]\w*)?/;
+
+/* ------------------------------------------------ `#if` 的条件表达式（ADR-0019 A11 第二档）
+ * 照着 mesa/llvmpipe 的 `glcpp` 那一档来：**整数常量表达式**加 `defined`。
+ * 浮点、字符串、逗号、赋值都不在里面（GLSL 规范 3.4 就是这么写的）。
+ *
+ * 三条与 C 一致的规矩：
+ *   - `defined(X)` 与 `defined X` 两种写法都收。
+ *   - **没定义过的标识符当 0**（glcpp 的行为；GLSL 规范说它是错，而 mesa 只警告）。
+ *     悄悄当 0 是这一格唯一能与真实着色器对上的选择 —— vispy 那些 `#if GL_ES` 就靠它。
+ *   - 非零为真。除零在**常量表达式**里是错，所以骂而不是给 0。
+ */
+const CE_TOK = /^(?:\s+|\/\/[^\n]*|\/\*[\s\S]*?\*\/)+|^(?:0[xX][0-9a-fA-F]+|\d+)[uU]?|^[A-Za-z_]\w*|^(?:<<|>>|<=|>=|==|!=|&&|\|\||[-+*/%&|^~!<>()])/;
+
+/** 把条件表达式切成记号（空白与注释直接丢）。 */
+function ceLex(text) {
+  const out = [];
+  let s = text;
+  while (s.length > 0) {
+    const m = CE_TOK.exec(s);
+    if (m === null) return null;      // 不认识的字符 —— 让调用方骂
+    const tk = m[0];
+    s = s.slice(tk.length);
+    if (/^\s|^\/\//.test(tk) || tk.startsWith('/*')) continue;
+    out.push(tk);
+  }
+  return out;
+}
+
+/**
+ * 条件表达式的求值。递归下降，优先级与 C 相同（从 `||` 到一元）。
+ *
+ * @param {string[]} tk 记号
+ * @param {Map<string, string>} texts 宏名 -> 宏体**文本**（`#if` 里要按文本再展开一次，
+ *   与 token 那份分开：token 那份是给源码用的，这儿要的是「整数常量表达式」的文本）
+ * @returns {{v: number} | {err: string}}
+ */
+function ceEval(tk, texts) {
+  let p = 0;
+  let bad = null;
+  const peek = () => (p < tk.length ? tk[p] : null);
+  const take = () => tk[p++];
+  const fail = (m) => { if (bad === null) bad = m; return 0; };
+
+  /* 标识符：`defined` 先接手，其余按宏展开（展开后再整段求值一次，深度设上限防环）。 */
+  const ident = (name, depth) => {
+    if (depth > 32) return fail(`'${name}' 在 #if 里展开得太深，当成环了`);
+    const body = texts.get(name);
+    if (body === undefined) return 0;          // 没定义过 -> 0（glcpp 的行为）
+    const sub = ceLex(body);
+    if (sub === null) return fail(`宏 '${name}' 的宏体在 #if 里不是整数常量表达式：${body.trim()}`);
+    if (sub.length === 0) return fail(`宏 '${name}' 的宏体是空的，不能用在 #if 里`);
+    const r = ceEval(sub, texts);
+    if (r.err !== undefined) return fail(r.err);
+    return r.v;
+  };
+
+  const unary = () => {
+    const t = peek();
+    if (t === null) return fail('#if 的表达式在这儿断了');
+    if (t === '!') { take(); return unary() === 0 ? 1 : 0; }
+    if (t === '~') { take(); return ~unary(); }
+    if (t === '-') { take(); return -unary(); }
+    if (t === '+') { take(); return unary(); }
+    if (t === '(') {
+      take();
+      const v = expr(0);
+      if (peek() !== ')') return fail("#if 的表达式少一个 ')'");
+      take();
+      return v;
+    }
+    if (/^\d/.test(t)) {
+      take();
+      const n = t.replace(/[uU]$/, '');
+      return n.startsWith('0x') || n.startsWith('0X') ? parseInt(n, 16) : parseInt(n, 10);
+    }
+    if (/^[A-Za-z_]/.test(t)) {
+      take();
+      if (t === 'defined') {
+        /* `defined(X)` 与 `defined X`。 */
+        const paren = peek() === '(';
+        if (paren) take();
+        const name = peek();
+        if (name === null || !/^[A-Za-z_]/.test(name)) return fail("defined 后面要一个宏名");
+        take();
+        if (paren) {
+          if (peek() !== ')') return fail("defined( 后面少一个 ')'");
+          take();
+        }
+        return texts.has(name) ? 1 : 0;
+      }
+      return ident(t, 0);
+    }
+    return fail(`#if 的表达式里不认识 ${JSON.stringify(t)}`);
+  };
+
+  /* 优先级表。`||`/`&&` 要短路（`#if defined(X) && X > 2` 里 X 没定义时右边不能骂）。 */
+  const LEVELS = [['||'], ['&&'], ['|'], ['^'], ['&'], ['==', '!='],
+    ['<', '>', '<=', '>='], ['<<', '>>'], ['+', '-'], ['*', '/', '%']];
+  const expr = (lv) => {
+    if (lv >= LEVELS.length) return unary();
+    let v = expr(lv + 1);
+    for (;;) {
+      const t = peek();
+      if (t === null || LEVELS[lv].indexOf(t) < 0) return v;
+      take();
+      const r = expr(lv + 1);
+      if (t === '||') v = (v !== 0 || r !== 0) ? 1 : 0;
+      else if (t === '&&') v = (v !== 0 && r !== 0) ? 1 : 0;
+      else if (t === '|') v = v | r;
+      else if (t === '^') v = v ^ r;
+      else if (t === '&') v = v & r;
+      else if (t === '==') v = v === r ? 1 : 0;
+      else if (t === '!=') v = v !== r ? 1 : 0;
+      else if (t === '<') v = v < r ? 1 : 0;
+      else if (t === '>') v = v > r ? 1 : 0;
+      else if (t === '<=') v = v <= r ? 1 : 0;
+      else if (t === '>=') v = v >= r ? 1 : 0;
+      else if (t === '<<') v = v << r;
+      else if (t === '>>') v = v >> r;
+      else if (t === '+') v = v + r;
+      else if (t === '-') v = v - r;
+      else if (t === '*') v = v * r;
+      else if (t === '/') { if (r === 0) return fail('#if 的表达式里除以 0'); v = Math.trunc(v / r); }
+      else if (t === '%') { if (r === 0) return fail('#if 的表达式里对 0 取余'); v = v % r; }
+    }
+  };
+
+  const v = expr(0);
+  if (bad !== null) return { err: bad };
+  if (p !== tk.length) return { err: `#if 的表达式后面还剩 ${JSON.stringify(tk.slice(p).join(' '))}` };
+  return { v };
+}
+
 /**
  * 对象宏的展开 + `#include`。
  *
@@ -48,6 +188,8 @@ const INCLUDE_MAX = 32;
 export function glslPreprocess(lexSpec, toks, diags, opts) {
   if (toks === null || toks === undefined) return toks;
   const macros = new Map();
+  /** 宏体的**文本**那一份：只给 `#if` 用（见 `ceEval`）。 */
+  const texts = new Map();
   const open = opts === undefined || opts === null ? undefined : opts.open;
 
   /** 把一段宏体文本切成 token（用的是**同一个**词法规格，所以宏体里的写法与源码里一致）。 */
@@ -64,8 +206,30 @@ export function glslPreprocess(lexSpec, toks, diags, opts) {
    */
   const run = (input, stack) => {
     const out = [];
+    /* 条件栈（`#if` 一族）。每一层三格：
+     *   `on`   这一层现在收不收
+     *   `took` 这一层已经有分支被收过了（`#elif` 靠它）
+     *   `up`   外层收不收（外层不收，整层都不收，条件也不求值）
+     * 不收的时候**只认条件指令**：里面的 `#define` 不生效、里面的错误不报 ——
+     * 那正是 include guard 与 `#ifdef GL_ES` 的意义所在。 */
+    const cond = [];
+    const on = () => cond.length === 0 || cond[cond.length - 1].on;
+
+    /** `#if`/`#elif` 的条件求值 + 报错。不收的层里不求值（也就不会骂）。 */
+    const evalCond = (text, t) => {
+      const tk = ceLex(text);
+      if (tk === null || tk.length === 0) {
+        diags.error(t.span, `#if 的条件读不成整数常量表达式：${text.trim()}`);
+        return false;
+      }
+      const r = ceEval(tk, texts);
+      if (r.err !== undefined) { diags.error(t.span, r.err); return false; }
+      return r.v !== 0;
+    };
+
     for (const t of input) {
       if (t.type !== 'VERSION') {
+        if (!on()) continue;
         /* 只有 `ID` 会是宏名 —— 关键字与类型名在这个语法里都是**关键字 token**，
          * 所以 `#define float double` 这种改不动类型名，那是对的（GLSL 也不许）。 */
         const body = t.type === 'ID' ? macros.get(t.node.value) : undefined;
@@ -74,7 +238,70 @@ export function glslPreprocess(lexSpec, toks, diags, opts) {
         continue;
       }
       const text = t.node.value;
-      if (/^#\s*version\b/.test(text)) { out.push(t); continue; }
+      const dm = DIRECTIVE.exec(text);
+      const dir = dm === null || dm[1] === undefined ? '' : dm[1];
+      /* ---- 条件那五条：**不管这一层收不收都要认**，否则嵌套的层数就数错了。 */
+      if (dir === 'ifdef' || dir === 'ifndef' || dir === 'if') {
+        const up = on();
+        let v = false;
+        if (up) {
+          if (dir === 'if') {
+            v = evalCond(text.replace(/^#\s*if\b/, ''), t);
+          } else {
+            const m = /^#\s*ifn?def\s+([A-Za-z_]\w*)\s*$/.exec(text);
+            if (m === null) {
+              diags.error(t.span, `${dir} 后面要一个宏名：${text.trim()}`);
+            } else {
+              v = texts.has(m[1]) === (dir === 'ifdef');
+            }
+          }
+        }
+        cond.push({ on: up && v, took: v, up });
+        continue;
+      }
+      if (dir === 'elif' || dir === 'else') {
+        const top = cond.length > 0 ? cond[cond.length - 1] : null;
+        if (top === null) { diags.error(t.span, `#${dir} 没有配对的 #if`); continue; }
+        if (dir === 'else') {
+          top.on = top.up && !top.took;
+          top.took = true;
+          continue;
+        }
+        /* `#elif`：前面已经有分支收过了就整条跳过（连条件都不求值 —— C 与 GLSL 同）。 */
+        if (top.took) { top.on = false; continue; }
+        const v = top.up && evalCond(text.replace(/^#\s*elif\b/, ''), t);
+        top.on = v;
+        top.took = v;
+        continue;
+      }
+      if (dir === 'endif') {
+        if (cond.length === 0) { diags.error(t.span, '#endif 没有配对的 #if'); continue; }
+        cond.pop();
+        continue;
+      }
+      if (!on()) continue;
+      if (dir === 'version') { out.push(t); continue; }
+      /* `#pragma` / `#line` / `#extension`：**照 mesa 的做法收下并忽略**。
+       * 为什么不骂：`#extension GL_OES_standard_derivatives : enable` 在 vispy 那些
+       * 着色器里到处都是，而它要的那几个内建（`dFdx`/`dFdy`）本来就在我们的表里；
+       * 骂它等于把一堆本来能编的着色器挡在门外。真要 `: require` 一个我们没有的扩展，
+       * 那才该骂 —— 那一格留在下面。 */
+      if (dir === 'pragma' || dir === 'line') continue;
+      if (dir === 'extension') {
+        const m = /^#\s*extension\s+([A-Za-z_0-9]+)\s*:\s*([A-Za-z]+)/.exec(text);
+        if (m !== null && m[2] === 'require' && m[1] !== 'all') {
+          diags.error(t.span, `#extension ${m[1]} : require —— 这一档没有这个扩展`
+            + '（enable/warn/disable 会被收下并忽略）');
+        }
+        continue;
+      }
+      if (dir === 'undef') {
+        const m = /^#\s*undef\s+([A-Za-z_]\w*)\s*$/.exec(text);
+        if (m === null) { diags.error(t.span, `#undef 后面要一个宏名：${text.trim()}`); continue; }
+        macros.delete(m[1]);
+        texts.delete(m[1]);
+        continue;
+      }
       const inc = INCLUDE.exec(text);
       if (inc !== null) {
         out.push(...include(inc[1] === undefined ? inc[2] : inc[1], t, stack));
@@ -82,10 +309,9 @@ export function glslPreprocess(lexSpec, toks, diags, opts) {
       }
       const m = DEFINE.exec(text);
       if (m === null) {
-        /* `#undef`/`#if`/`#ifdef`/`#else`/`#endif`/`#pragma`/`#extension`/`#line`
-         * 都落在这儿。骂得具体一点：说清「收的是哪一档」，而不是「语法错误」。 */
-        diags.error(t.span, `glsl 的预处理这一片只收 #version、对象宏 #define 与 #include，`
-          + `不收 ${JSON.stringify(text.trim().split(/\s+/)[0])}`);
+        /* 剩下的都是真不认识的指令。骂得具体一点：说清「收的是哪一档」。 */
+        diags.error(t.span, `glsl 的预处理收 #version / #define / #undef / #if 一族 /`
+          + ` #include / #pragma / #line / #extension，不收 ${JSON.stringify(dir === '' ? text.trim() : `#${dir}`)}`);
         continue;
       }
       const name = m[1];
@@ -103,11 +329,11 @@ export function glslPreprocess(lexSpec, toks, diags, opts) {
         continue;
       }
       if (macros.has(name)) {
-        /* GLSL 要求先 `#undef` 再重定义，而 `#undef` 这一片不收 —— 所以重定义一定是错的。
+        /* GLSL 要求先 `#undef` 再重定义 —— 现在 `#undef` 收了，所以这一条是真的「重定义」。
          *
          * **include 进来的那一份例外**：同一份被两条链 include 到（`math/functions.glsl`
          * 在 vispy 里就是），第二遍整份跳过（见 `include`），所以走不到这儿。 */
-        diags.error(t.span, `宏 '${name}' 定义了两次（GLSL 要求先 #undef，而这一片不收 #undef）`);
+        diags.error(t.span, `宏 '${name}' 定义了两次（GLSL 要求先 #undef）`);
         continue;
       }
       /* 宏体里已经定义过的宏在这里就换掉（定义时展开）。 */
@@ -119,6 +345,10 @@ export function glslPreprocess(lexSpec, toks, diags, opts) {
         else body.push(...sub);
       }
       macros.set(name, body);
+      texts.set(name, rest);
+    }
+    if (cond.length > 0) {
+      diags.error(input[input.length - 1].span, `#if 少了 ${cond.length} 个 #endif`);
     }
     return out;
   };
