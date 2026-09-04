@@ -48,5 +48,22 @@ void main() {
     Sample sm = Sample(uv, 0.25);
     float sv = sm.uv.x * 0.5 + sm.uv.y * 0.25 + sm.w;
 
-    fragColor = vec4(checker, min(safe, 1.0), flags + band, sv);
+    // 数组（B14）：常量下标是切片、变量下标是 select 链（8 道各自的下标不一样）。
+    // `pick` 刻意由比较造出来 —— 它在每条腿上都**正好是整数**，不经过 float->int 截断
+    // （那一格是另一个待办：快路上 int 就是「值恰好是整数的 float」）。
+    vec2 tab[3];
+    tab[0] = vec2(0.125, 0.25);
+    tab[1] = vec2(0.5, 0.75);
+    tab[2] = uv;
+    int pick = uv.x < 0.33 ? 0 : (uv.x < 0.66 ? 1 : 2);
+    tab[pick].y = 0.875;               // 变量下标 + swizzle 当左值：只动那一格
+    float av = tab[pick].x + tab[pick].y * 0.5 + tab[1].x * 0.25 + tab[0].y * 0.125;
+
+    // float -> int 是**真截一次**（GLSL 5.4.1：往零）。快路上 int 是「值恰好是整数的
+    // float」，所以这一格要发 `llvm.trunc` —— 不发的话 1.7 会当下标去比 1.0，
+    // 与参照实现那边的 `toint` 给出不同的答案。
+    int cut = int(uv.x * 2.9);
+    float cv = tab[cut].x + float(cut) * 0.0625;
+
+    fragColor = vec4(checker, min(safe, 1.0), flags + band, sv + av * 0.5 + cv * 0.25);
 }

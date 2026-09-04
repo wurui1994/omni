@@ -40,6 +40,8 @@ function llNComp(t) {
     for (const f of t.fields) n += llNComp(f.ty);
     return n;
   }
+  /* 数组（施工图 B14）：n 份元素接起来，第 k 格占 `k*w` 起那 w 格。 */
+  if (t.k === 'array') return t.n * llNComp(t.of);
   throw new OmniError(`glsl/llvm: 这一片收不了的类型 ${t.k}`);
 }
 
@@ -168,20 +170,45 @@ class GlslLlvmEmitter {
       const subj = this.expr(e.of);
       return subj.slice(e.at, e.at + llNComp(e.ty));
     }
+    if (e.k === 'aindex') {
+      /* 数组取一格（施工图 B14）。常量下标是切片；**变量下标是 select 链** ——
+       * 这一层与 `lower.js` 那边的 `if` + `set` 是同一条决策落在两种形状上：
+       * SoA 下 8 道各自的 `i` 不一样，分支跳不了，只能每格都算一次 `select`。 */
+      const subj = this.expr(e.of);
+      const w = llNComp(e.ty);
+      if (e.at.k === 'lit') return subj.slice(e.at.v * w, e.at.v * w + w);
+      const idx = this.expr(e.at)[0];
+      const acc = [];
+      for (let j = 0; j < w; j++) acc.push(llSplat(0));
+      for (let k = 0; k < e.of.ty.n; k++) {
+        /* `int` 在这条路上就是「值恰好是整数的 float」，所以下标比较用 `fcmp oeq`。 */
+        const m = this.emit(`fcmp oeq ${LL_VEC} ${idx}, ${llSplat(k)}`);
+        for (let j = 0; j < w; j++) {
+          acc[j] = this.emit(`select <${GLSL_LANES} x i1> ${m}, ${LL_VEC} ${subj[k * w + j]}, ${LL_VEC} ${acc[j]}`);
+        }
+      }
+      return acc;
+    }
     if (e.k === 'construct') {
       const out = [];
       for (const a of e.args) for (const c of this.expr(a)) out.push(c);
       return out;
     }
     if (e.k === 'cast' || e.k === 'convert') {
-      /* 这一档只有 int <-> float，而两边都已经是 `<8 x float>` —— 整数在这条路上
-       * 就是「值恰好是整数的 float」。`int` 的位运算不在这一片里（明着不收）。
+      /* 整数在这条路上是「值恰好是整数的 `<8 x float>`」，所以 `float(i)` 一条指令都不用。
+       * 反过来 `int(x)` **要真截一次**：GLSL 5.4.1 是往**零**的方向截，而 f32 里
+       * 1.7 与 1.0 是两个不同的位模式 —— 不截的话下标比较（`fcmp oeq idx, 1.0`）
+       * 与参照实现那边的 `toint` 会给出不同的答案。用 `llvm.trunc`（往零，不是 floor）。
        *
        * bool 那两个方向都不用发指令：`float(b)` 要的 1.0/0.0 正好就是 float-bool 的
        * 表示；`bool(x)` 只有 `x` 不是 0.0/1.0 时才要归一 —— 那一条走 `mask` 再回来。 */
       const v = this.expr(e.of);
       if (e.ty.k === 'bool' && e.of.ty !== undefined && e.of.ty.k !== 'bool') {
         return v.map((c) => this.fromMask(this.mask(c)));
+      }
+      if (e.ty.k === 'int' && e.of.ty !== undefined && e.of.ty.k === 'float') {
+        this.need.add('llvm.trunc');
+        return v.map((c) => this.emit(`call ${LL_VEC} @llvm.trunc.v${GLSL_LANES}f32(${LL_VEC} ${c})`));
       }
       return v;
     }
@@ -461,7 +488,37 @@ class GlslLlvmEmitter {
       this.assignTo(e.lhs.of.name, cur);
       return vals;
     }
-    throw new OmniError('glsl/llvm: 这一片的左值只收名字与它的 swizzle');
+    /* 数组（B14）：`s[i] = v` 与 `m[i].y = v`。整条数组的分量表原地换几格再整体绑回去。 */
+    const ai = e.lhs.k === 'aindex' ? e.lhs
+      : (e.lhs.k === 'swizzle' && e.lhs.of.k === 'aindex' ? e.lhs.of : null);
+    if (ai !== null && ai.of.k === 'ref') {
+      const cur = [...this.find(ai.of.name)];
+      const w = llNComp(ai.ty);
+      const lanes = [];
+      if (e.lhs.k === 'aindex') for (let j = 0; j < w; j++) lanes.push(j);
+      else for (const ix of e.lhs.idx) lanes.push(ix);
+      if (ai.at.k === 'lit') {
+        /* 常量下标：就是往那几格里写，一条 `select` 都不用。 */
+        for (let li = 0; li < lanes.length; li++) {
+          cur[ai.at.v * w + lanes[li]] = vals.length === 1 ? vals[0] : vals[li];
+        }
+      } else {
+        /* 变量下标：**每一格都要碰**（8 道里选中的那一道才换）。这是「不落成内存」
+         * 那条决策的代价，也是 `check.js` 里那条 32 格上限存在的理由。 */
+        const idx = this.expr(ai.at)[0];
+        for (let k = 0; k < ai.of.ty.n; k++) {
+          const m = this.emit(`fcmp oeq ${LL_VEC} ${idx}, ${llSplat(k)}`);
+          for (let li = 0; li < lanes.length; li++) {
+            const slot = k * w + lanes[li];
+            const v = vals.length === 1 ? vals[0] : vals[li];
+            cur[slot] = this.emit(`select <${GLSL_LANES} x i1> ${m}, ${LL_VEC} ${v}, ${LL_VEC} ${cur[slot]}`);
+          }
+        }
+      }
+      this.assignTo(ai.of.name, cur);
+      return vals;
+    }
+    throw new OmniError('glsl/llvm: 这一片的左值只收名字、它的 swizzle、以及数组取一格');
   }
 
   /**
