@@ -2001,6 +2001,10 @@ struct labelrec {
   // 不补的话 UnFill 那种「白底压掉下面的线」在 .tex 里整段没有，
   // 量出来的：buildcycle 与 venn3 的首处结构差就是参考 `gsave` 对我们的颜色那一句。
   int kind = 0;
+  // 这一格在**图形那一列**的哪个位置之后（= 塞进来时 `f.ops.length`）。TeX 那条路要按它分层：
+  // asy 的 frame 只有一列 drawElement，"画—标签—再画"天然分得开；这一层拆成了两列，
+  // 交错的次序只剩这一格记着。见 asy__texship 的分层那一段（texfile.cc:153-180 的 beginlayer）。
+  int at = 0;
   string s;
   string sz;
   transform t;
@@ -2065,6 +2069,8 @@ void label(frame f, string s, string size, transform t, pair position, pair alig
   r.position = position;
   r.align = align;
   r.p = pencopy(p);
+  // 记下这一格落在图形那一列的哪儿（分层要用它，见 labelrec.at）
+  r.at = f.ops.length;
   f.labs.push(r);
 }
 
@@ -2433,12 +2439,19 @@ void erase(frame f) {
 // 这个名字与用户自己的 `add` 组成同一个重载集 —— 前端按**期望类型**挑重载那一刀补上了，
 // 所以 `fold3(add,1,2,3)` 那种写法照样通（cases/42-fntype 钉着）。
 void add(frame dest, frame src) {
+  // 搬之前记住 dest 里已经有多少格图形：src 的标签记的位置是**在 src 里**的，
+  // 搬过来要整段后移这么多，不然分层那一步会把它们全算到第一层去（见 labelrec.at）。
+  int base = dest.ops.length;
   for (int i = 0; i < src.ops.length; ++i) dest.ops.push(src.ops[i]);
   // 标签也要跟过来。量出来的：plain_Label.asy:304-310 的 filltype 那一支是
   // 「先 label 到一个临时 frame d，再 add(f,d,filltype)」，不搬的话带 UnFill/Fill 的标签
   // 整条丢掉 —— buildcycle.asy:22 的 `label("$f > 0$",…,UnFill)` 就是这么没的
   // （参考的 %%DocumentFonts 有 CMR12，我们只有 CMMI12，因为那个 `0` 没人排）。
-  for (int i = 0; i < src.labs.length; ++i) dest.labs.push(src.labs[i]);
+  for (int i = 0; i < src.labs.length; ++i) {
+    labelrec q = src.labs[i];
+    q.at = q.at + base;
+    dest.labs.push(q);
+  }
   if (src.haslabel) dest.haslabel = true;
 }
 
@@ -2641,6 +2654,16 @@ pen asy__dashadjfn(pen p, real arclen, bool cyclic) { return p; }
 // 是 1，于是这笔笔笔都要 gsave；而 concat 印出来按 9 位有效数字又正好是 `[ 1 0 0 1 0 0]`。
 // 量过 spline 的 x/y 轴：参考里每一条刻度线都套着 gsave/…/grestore。
 bool asy__istrans(pen p) {
+  // 判据照 asy 的字面：`!pentype.getTransform().isIdentity()`（drawelement.h:322）。
+  //
+  // 试过换成"只看带没带变换"（`return p.hastrans;`）—— 参考里坐标轴那两笔外面确实套着
+  // `gsave` + `[ 1 0 0 1 0 0] concat` + `grestore`（cardioid_0.eps:224-235），说明 asy 那边
+  // 那个矩阵不是精确单位（graph.asy 的轴走 `pic.add(…)`，笔上乘过 t 又乘过 inverse(t)，
+  // 剩 1e-16；`write(transform)` 只印 6 位，看着像单位）。但**换过去是各有输赢**：
+  // cardioid 的首处差从结构挪成了数值（4257 -> 4277 token，参考 4339），而 alignedaxis
+  // 反而从 8026 涨到 9367（参考 6590）—— 我们这边 `hastrans` 为真的地方比 asy 那边
+  // "矩阵带零头"的地方**多**。所以退回来：这一格要的是"哪些笔真带了变换"这份账，
+  // 不是把判据放宽。
   if (!p.hastrans) return false;
   transform t = p.pentrans;
   return !(t.x == 0 && t.y == 0 && t.xx == 1 && t.xy == 0 && t.yx == 0 && t.yy == 1);
@@ -6045,6 +6068,8 @@ frame operator *(transform t, frame f) {
     labelrec r = f.labs[i];
     labelrec q;
     q.kind = r.kind;
+    // 交错的位置跟着搬（变换不动图形那一列的次序，见 labelrec.at）
+    q.at = r.at;
     // 裁剪那两格照 drawclipbegin.h:83 的 transformed 搬：只有路径与笔跟着变。
     if (r.kind != 0) {
       for (int j = 0; j < r.gs.length; ++j) q.gs.push(t * r.gs[j]);

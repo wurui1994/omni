@@ -9770,3 +9770,41 @@ strokepath 70983/73225、textpath 31328/17925、tiling 863/1607、tvgen 77/12576
 每层出一份 `_N.eps`、.tex 里照上面那三行发。
 
 <!-- ADR-0014 批量补四个缺口-END -->
+
+### 第二十一刀（试了，退回来了）：那三句"空动作"的 gsave/concat/grestore
+
+矢量档剩下四份（alignedaxis / cardioid / gamma / lmfit1）的首处差都是这一坨。**先证伪了
+上一格的猜测**：以为是 TeX 那条路的分层（`beginlayer`），拿 `asy -k` 把 cardioid 的中间产物
+留下来一看 —— `cardioid_.tex` 里只有**一句** `\includegraphics{cardioid_0.eps}`、盘上也只有
+一份 `_0.eps`，根本没分层。那三句在**底图自己**里（`cardioid_0.eps:224-235`）：
+
+```postscript
+gsave
+newpath -10.9796015 0 moveto
+ 109.80307 0 lineto
+[ 1 0 0 1 0 0] concat
+stroke
+grestore
+```
+
+顺序对上 `drawpath::draw` 的 penSave -> penTranslate -> 路径 -> penConcat -> stroke ->
+penRestore：也就是说 asy 那边 `pentype.getTransform()` **不是**精确单位（`drawelement.h:322`
+与 `psfile.h:330` 两处都是精确比较，挡得住真单位），只是 `write(transform)` 印 6 位有效数字，
+看着像单位。零头从哪儿来：graph.asy 的轴走 `pic.add(…)` 那条延后的路，笔上乘过一次 `t`
+又乘过一次 `inverse(t)`，剩下 1e-16。我们这一侧那两次乘**精确抵消**。
+
+试的改法是把判据从"是不是单位"换成"带没带变换"（`asy__istrans` 回 `p.hastrans`，
+`asy__penconcat` 也不挡单位）。**量下来各有输赢，退回来了**：
+
+```
+                 cardioid（参考 4339）      alignedaxis（参考 6590）
+  改前            4257，首处差是结构          8026
+  放宽判据        4277，首处差挪成数值        9367   <- 反而更远
+```
+
+也就是说**我们这边 `hastrans` 为真的地方比 asy 那边"矩阵带零头"的地方多**。要收这一格得先
+有"哪些笔真带了变换、带的是什么"这份账（graph.asy 的轴那一路到底乘了几次、乘在哪儿），
+不是把判据放宽。这一趟留下的是 `labelrec.at`（标签在图形那一列里的位置，分层与排错都要它）
+与 EPS 轴的现场清理（例子自己 `shipout("名字")` 落下来的那几份跑完就擦，别留在仓库里）。
+
+<!-- ADR-0014 笔带没带变换-END -->
