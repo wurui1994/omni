@@ -1593,6 +1593,15 @@ class GlslLowerer {
 
   /** 一个模块（顶点或片元）的全部函数 + 入口。名字加 `prefix`。 */
   emitModule(mod, prefix) {
+    /* 模块级变量（B16）在**参照腿**上还没接。快路那边它就是 `main` 那一层的一个落点
+     * （函数内联之后自然看得见，ADR-0019 决策十第 5 步），但这一层的函数是**真的方言
+     * 函数**，所以要的是方言的全局（`tests/sexpr` 的 `12-globals` 那一档）——
+     * 那是另一格，不是这一格。明着骂，别悄悄漏。 */
+    const gvs = mod.globals === undefined ? [] : mod.globals;
+    if (gvs.length > 0) {
+      throw new OmniError(`glsl: 模块级变量（'${gvs[0].name}'）在参照腿上还没接 ——`
+        + ' 这一层的函数是真的方言函数，要的是方言的全局（ADR-0019 决策十第 5 步）');
+    }
     this.mod = mod;
     this.prefix = prefix;
     this.names = new Map();

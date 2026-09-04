@@ -147,6 +147,10 @@ class GlslLlvmEmitter {
     this.contPtr = null;        // continue（当前最内层循环）
     this.retPtr = null;         // return（当前函数）
     this.labels = 0;            // 基本块编号
+    this.fnByName = new Map();  // 用户函数（内联用）
+    for (const f of mod.funcs) this.fnByName.set(f.name, f);
+    this.inlining = [];         // 正在内联的函数名（GLSL 不许递归，撞上就骂）
+    this.retSlot = null;        // 当前函数的返回值落点（void 时是 null）
   }
 
   /** 一个新的基本块标签。 */
@@ -529,6 +533,7 @@ class GlslLlvmEmitter {
       return out;
     }
     if (e.k === 'builtin') return this.builtin(e);
+    if (e.k === 'call') return this.inlineCall(e);
     if (e.k === 'bits') {
       /* 位转换（规范 8.4）—— **一条 `bitcast`**。这就是决策十第 1 步兑的钱：上一版这儿
        * 只能骂 NYI，因为 `int` 不是真的 `<8 x i32>`。
@@ -808,8 +813,14 @@ class GlslLlvmEmitter {
       return;
     }
     if (s.k === 'ret') {
+      /* 带值的 `return`：先把值写进这一层的返回落点（过掩码），再往 `retPtr` 上并一层。
+       * 与 `break` 是同一个机制 —— 差别只在"哪一层掩码"。 */
       if (s.e !== null && s.e !== undefined) {
-        throw new OmniError('glsl/llvm: 带值的 return 还没接（这一片只有 main，是 void）');
+        if (this.retSlot === null) throw new OmniError('glsl/llvm: void 函数里 return 带了值');
+        const vals = this.expr(s.e);
+        for (let i = 0; i < this.retSlot.ptrs.length; i++) {
+          this.maskStore(this.retSlot, i, vals.length === 1 ? vals[0] : vals[i]);
+        }
       }
       if (this.retPtr === null) throw new OmniError('glsl/llvm: return 不在函数里');
       this.raise(this.retPtr);
@@ -912,6 +923,62 @@ class GlslLlvmEmitter {
     this.popMask();
   }
 
+  /**
+   * 用户函数 —— **内联展开**。
+   *
+   * 这是照 llvmpipe 的：mesa 在把 NIR 交给 gallivm 之前就跑了 `nir_inline_functions`，
+   * 真生成函数调用（`LP_RESV_FUNC_ARGS`：exec mask + context 两个保留参数，
+   * `lp_bld_nir.h:40-44`）只有 CL 内核那一路 —— 图形着色器全内联。
+   *
+   * 内联在这套掩码架构里几乎是免费的：形参就是几个落点（`alloca`），`return` 就是往
+   * `retPtr` 上并一层掩码 —— 与 `break` 同一个机制。递归不用管终止性：GLSL 明着禁止
+   * 递归（规范 6.1），撞上就骂。
+   */
+  inlineCall(e) {
+    const f = this.fnByName.get(e.name);
+    if (f === undefined) throw new OmniError(`glsl/llvm: 没见过的函数 '${e.name}'`);
+    if (this.inlining.indexOf(e.name) >= 0) {
+      throw new OmniError(`glsl/llvm: '${e.name}' 递归了（GLSL 不许递归，规范 6.1）`);
+    }
+    /* 实参在**调用者**的作用域里算。 */
+    const argVals = e.args.map((a) => this.expr(a));
+    /* 被调者只看得见模块那一层（uniform / const），看不见调用者的局部量 —— 所以换掉
+     * 整条作用域链，只留第 0 层。 */
+    const savedScopes = this.scopes;
+    const savedRet = this.retPtr;
+    const savedSlot = this.retSlot;
+    this.scopes = [savedScopes[0], new Map()];
+    this.retPtr = this.maskPtr('ret');
+    this.retSlot = f.ret.k === 'void' ? null
+      : this.allocVar(`${e.name}_ret`, llCompTys(f.ret), null);
+    for (let i = 0; i < f.params.length; i++) {
+      const p = f.params[i];
+      /* `out` 形参进去时不带值（规范 6.1.1），`in`/`inout` 带。 */
+      const init = p.dir === 'out' ? null : argVals[i];
+      this.scopes[1].set(p.name, this.allocVar(`${e.name}_${p.name}`, llCompTys(p.ty), init));
+    }
+    this.inlining.push(e.name);
+    this.update();
+    this.stmt(f.body);
+    this.inlining.pop();
+    /* `out`/`inout` 要写回调用者的左值。值先读出来 —— 这时候还在被调者的作用域里。 */
+    const backs = [];
+    for (let i = 0; i < f.params.length; i++) {
+      const p = f.params[i];
+      if (p.dir === 'in') continue;
+      backs.push({ node: e.args[i], comps: this.loadVar(this.scopes[1].get(p.name)) });
+    }
+    const out = this.retSlot === null ? [] : this.loadVar(this.retSlot);
+    this.scopes = savedScopes;
+    this.retPtr = savedRet;
+    this.retSlot = savedSlot;
+    this.update();
+    for (const b of backs) {
+      this.assign({ op: '=', lhs: b.node, rhs: { k: 'pre', comps: b.comps } });
+    }
+    return out;
+  }
+
   assign(e) {
     if (e.op !== '=') throw new OmniError(`glsl/llvm: 这一片只收 =，给的是 ${e.op}`);
     const lhs = e.lhs;
@@ -985,9 +1052,9 @@ class GlslLlvmEmitter {
     const m = this.mod;
     if (m.stage !== 'frag') throw new OmniError('glsl/llvm: 这一片只收片元');
     if (m.outs.length !== 1) throw new OmniError(`glsl/llvm: 只收一个 out（给了 ${m.outs.length}）`);
-    if (m.funcs.length !== 1 || m.funcs[0].name !== 'main') {
-      throw new OmniError('glsl/llvm: 这一片只收「只有 main」的着色器（自定义函数下一片）');
-    }
+    /* 用户函数不再是拦路虎 —— 它们**内联**（见 `inlineCall`），所以这儿只要求有 `main`。 */
+    const mainFn = this.fnByName.get('main');
+    if (mainFn === undefined) throw new OmniError('glsl/llvm: 没有 main');
     /* 形参**刻意不叫 `i`**：见 `builtin()` 里 `at` 上面那段（闭包捕获那条检查是按
      * 函数粒度 + 按名字判的）。 */
     const load = (slotIx) => {
@@ -1008,6 +1075,11 @@ class GlslLlvmEmitter {
       this.bind(u.name, comps);
     }
     for (const c of m.consts) this.bind(c.name, this.expr(c.init));
+    /* 模块级变量（B16 / 决策十第 5 步）：GLSL 里它**每个调用各一份**，所以它就是这一层的
+     * 一个落点 —— 与局部量一模一样，只是绑在第 0 层，内联进来的函数也看得见。
+     * 不带初值，所以初值是零（规范说未初始化的全局是 0）。 */
+    const gvs = m.globals === undefined ? [] : m.globals;
+    for (const gv of gvs) this.bindVar(gv.name, llCompTys(gv.ty), null);
     const o = m.outs[0];
     const on = llNComp(o.ty);
     const zeros = [];
@@ -1018,7 +1090,7 @@ class GlslLlvmEmitter {
     /* `return` 那一层（`lp_exec_mask` 的 `ret_mask`）：`main` 里 `return;` 之后那些道
      * 就不再写 `out` 了 —— 靠掩码，不靠跳转。 */
     this.retPtr = this.maskPtr('ret');
-    this.stmt(m.funcs[0].body);
+    this.stmt(mainFn.body);
     /* 写回：四格连着存，都按 float 存（缓冲的类型是定的）。 */
     const vals = this.readName(o.name);
     for (let i = 0; i < on; i++) {

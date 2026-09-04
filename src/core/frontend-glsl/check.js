@@ -400,6 +400,7 @@ class GlslChecker {
     this.ins = new Map();
     this.outs = new Map();
     this.consts = new Map();
+    this.globals = new Map();   // 模块级变量（B16）：每个调用各一份，不是共享的
     this.funcs = new Map();
     this.locs = new Map();
     /* 结构体表（施工图 B13）：名字 -> `{k:'struct', name, fields}`。
@@ -468,6 +469,7 @@ class GlslChecker {
       if (t !== undefined) return { ty: t, kind: 'local' };
     }
     if (this.consts.has(name)) return { ty: this.consts.get(name).ty, kind: 'const' };
+    if (this.globals.has(name)) return { ty: this.globals.get(name).ty, kind: 'global' };
     if (this.uniforms.has(name)) return { ty: this.uniforms.get(name), kind: 'uniform' };
     if (this.ins.has(name)) return { ty: this.ins.get(name).ty, kind: 'in' };
     if (this.outs.has(name)) return { ty: this.outs.get(name).ty, kind: 'out' };
@@ -502,6 +504,7 @@ class GlslChecker {
       outs: [...this.outs].map(([name, v]) => ({ name, ty: v.ty, interp: v.interp })),
       consts: [...this.consts].map(([name, v]) => ({ name, ty: v.ty, init: v.init })),
       funcs: [...this.funcs.values()],
+      globals: [...this.globals.values()],
     };
   }
 
@@ -639,7 +642,21 @@ class GlslChecker {
       this.curFunc = null;
       return;
     }
-    if (h === 'global') throw this.err(node, '模块级变量这一刀不收（尺子里没有；要的是 uniform 或 const）');
+    if (h === 'global') {
+      /* 模块级变量（B16）。GLSL 里它是**每个调用各一份**（不是共享的全局）——
+       * 一个片元的 `u_x` 与另一个片元的 `u_x` 无关。所以在快路上它就是 `main` 那一层的
+       * 一个落点，函数内联之后自然看得见（ADR-0019 决策十第 5 步）。
+       *
+       * 只收**不带初值**的那一档：`grapheq.glsl` 那两个（`IV u_x; IV u_y;`）都是这样，
+       * 带初值要定"什么时候算"（规范说是常量初值），没有用例就不开。 */
+      const name = glslAtom(node.items[2]);
+      this.claim(name, node);
+      const ty = this.tyOf(node.items[1]);
+      if (ty.k === 'void') throw this.err(node, `'${name}' 不能是 void`);
+      this.globals.set(name, { name, ty });
+      return;
+    }
+
     throw this.err(node, `认不出的顶层声明 ${h}`);
   }
 
