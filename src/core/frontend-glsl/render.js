@@ -10,7 +10,7 @@
 
 import { spawn, spawnIn, exists, mkdirAll, readText } from '../host/native.js';
 import { cacheRoot } from '../host/cache.js';
-import { join } from '../host/path.js';
+import { join, dirname } from '../host/path.js';
 import { hash16 } from '../host/hash.js';
 import { OmniError } from '../source/diag.js';
 import { Diagnostics, SourceFile } from '../source/diag.js';
@@ -22,6 +22,19 @@ import { glslCheck } from './check.js';
 import { glslEmitLlvm } from './emit_llvm.js';
 
 /** GLSL 的类型有几格（与 `emit_llvm.js` 的 `llNComp` 同一个公式，这儿只要摊平数）。 */
+/**
+ * `#include` 的查找：**只找引用者所在的目录**（相对路径），这一档最窄。
+ *
+ * 为什么不是一串 `-I`：现在的用例（`omni run x.frag`）里 include 的都是同一份着色器
+ * 拆出来的邻居。要一串搜索路径的那天（拿 vispy 的 `glsl/` 当根就是）再从 CLI 递进来 ——
+ * 这一格是**注入**给预处理器的（`pp.js` 不碰文件系统），多一条路径不动它一行。
+ */
+function glslOpenInclude(name, from) {
+  const p = join(dirname(from), name);
+  if (!exists(p)) return null;
+  return { path: p, text: readText(p) };
+}
+
 function glslRenderNComp(t) {
   if (t.k === 'vec') return t.n;
   if (t.k === 'mat') return t.cols * t.rows;
@@ -98,7 +111,7 @@ export function glslRenderToPng(root, path, out, w, h, set, cc, envGet) {
   const diags = new Diagnostics();
   const src = readText(path);
   const toks = glslTypeNames(glslPreprocess(table.g.lex,
-    lexText(table.g.lex, new SourceFile(path, src), diags), diags));
+    lexText(table.g.lex, new SourceFile(path, src), diags), diags, { open: glslOpenInclude }));
   diags.throwIfErrors();
   const tree = glrParse(table.tb, toks, diags);
   diags.throwIfErrors();

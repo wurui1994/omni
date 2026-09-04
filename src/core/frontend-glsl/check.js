@@ -491,12 +491,20 @@ class GlslChecker {
 
   /* ---------------------------------------------------------- 顶层 */
 
-  unit(tree) {
+  unit(tree, lib) {
     for (const d of glslFlatten(tree, 'unit-add', 'unit')) this.decl(d);
-    if (!this.funcs.has('main')) throw this.err(null, '没有 main');
-    const m = this.funcs.get('main');
-    if (m.ret.k !== 'void' || m.params.length !== 0) {
-      throw this.err(null, 'main 得是 void main()');
+    /* 库模式（`#include` 进来的那种函数库）不要求 main —— 见 `glslCheck` 的注释。 */
+    if (lib === true) {
+      const m0 = this.funcs.get('main');
+      if (m0 !== undefined && (m0.ret.k !== 'void' || m0.params.length !== 0)) {
+        throw this.err(null, 'main 得是 void main()');
+      }
+    } else {
+      if (!this.funcs.has('main')) throw this.err(null, '没有 main');
+      const m = this.funcs.get('main');
+      if (m.ret.k !== 'void' || m.params.length !== 0) {
+        throw this.err(null, 'main 得是 void main()');
+      }
     }
     return {
       stage: this.stage,
@@ -1314,10 +1322,16 @@ class GlslChecker {
  *
  * @param tree `glrParse` 出来的那棵
  * @param stage `'vert'` 或 `'frag'`——**由调用方给**，见 `GlslChecker` 的构造器
+ * @param {{lib?: boolean}} [opts] `lib: true` 是**库模式**：不要求有 `main`。
+ *   为什么要有这一档：量 vispy 那 140 份时，24 份卡在「没有 main」——而它们本来就是
+ *   **函数库**（`#include` 进来用的 `math/functions.glsl` 那种）。「整份着色器」与
+ *   「一份库」是两件事，检查器该分得开；分不开的时候这个语料上一句话都说不出来。
+ *   库模式下**别的检查一条不少**（类型、名字、返回值都照查）。
  */
-export function glslCheck(tree, stage) {
+export function glslCheck(tree, stage, opts) {
   if (stage !== 'vert' && stage !== 'frag') {
     throw new OmniError(`glsl: stage 要是 'vert' 或 'frag'，给的是 '${stage}'`);
   }
-  return new GlslChecker(stage).unit(tree);
+  const lib = opts !== undefined && opts !== null && opts.lib === true;
+  return new GlslChecker(stage).unit(tree, lib);
 }

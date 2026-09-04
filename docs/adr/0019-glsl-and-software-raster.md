@@ -4343,3 +4343,49 @@ markers 24、colormaps 18、antialias 11、arrows 13、arrowheads 9、math 8…
 4. `attribute`/`varying`：先记着，等有第二把尺子要它再说
 
 <!-- ADR-0019 vispy量特性缺口-END -->
+
+## 落地：`#include` + 检查器的库模式 —— vispy 解析 39 -> **79**，检查 0 -> **42**
+
+上一节量出来的头两格，一起做。
+
+### `#include`（`pp.js`）
+
+`ARB_shading_language_include` 的两种写法都收（`"…"` 与 `<…>`）。三条规矩写在明处：
+
+- **文件只进来一次**（第二遍整份跳过）。GLSL 那边没有 `#pragma once`，而 include 图
+  是网状的（vispy 的 `math/functions.glsl` 被好几份引），重复进来就会「宏定义了两次」
+  「函数定义了两次」。C 那边靠 include guard，而 guard 要 `#ifndef` —— 这一片还不收它，
+  所以规矩定在这一层。
+- **认环就骂**，把整条链印出来；另有一个 32 层的兜底。
+- **宏跨 include 共用**：`#include "math/constants.glsl"` 之后那些宏能用 —— 那正是
+  vispy 那 73 份的用法。
+
+**文件查找是注入的**（`opts.open`）：`pp.js` 一行文件系统都不碰，IO 在调用方
+（`render.js` 现在给的是「引用者所在目录」这一档；要 `-I` 那一串的那天从 CLI 递进来，
+不动预处理器一行）。没给这个口子的时候照旧骂「不收 #include」—— 那条老门还在。
+
+### 检查器的库模式（`glslCheck(tree, stage, { lib: true })`）
+
+不要求有 `main`，**别的检查一条不少**。为什么要分这一档：vispy 那 24 份卡在「没有 main」
+的本来就是**函数库**（`#include` 进来用的）。「整份着色器」与「一份库」是两件事，
+分不开的时候这个语料上一句话都说不出来。
+
+### 量
+
+```
+                       补之前   补之后
+vispy 140 份：解析过      39      79
+              检查过       0      42（库模式）
+```
+
+`omni run x.frag` 这条路也通了（`/tmp/inc/main.frag` `#include "lib.glsl"`，
+宏与函数都从库里进来，68 行 IR、出图）。
+
+剩下的堆（下一格的入口）：`#ifdef` 那一族 31 份、`attribute`/`varying` 那一族 16 份、
+`$` 模板 11 份（vispy 自己的语法，拒得对）、colormaps/antialias/transforms 的检查错
+各 10~15 份（要逐条看，还没归因）。
+
+门：`tests/glsl/pp.js` **19/0**（新增 4 条：宏与函数都能用、菱形只进一次、成环要骂、
+找不到要骂 —— 查找口子是门里现搭的一张表，不落文件）。
+
+<!-- ADR-0019 include与库模式-END -->

@@ -146,21 +146,87 @@ float probe(int k) { return TWO; }`), '定义了两次');
 rejects('#if', SHELL(`
 #if 1
 float probe(int k) { return 1.0; }
-#endif`), '只收 #version 与对象宏');
+#endif`), '不收 "#if"');
 
 rejects('#ifdef', SHELL(`
 #ifdef FOO
 float probe(int k) { return 1.0; }
-#endif`), '只收 #version 与对象宏');
+#endif`), '不收 "#ifdef"');
 
 rejects('#undef', SHELL(`
 #define TWO 2.0
 #undef TWO
-float probe(int k) { return 1.0; }`), '只收 #version 与对象宏');
+float probe(int k) { return 1.0; }`), '不收 "#undef"');
 
-rejects('#include', SHELL(`
+/* 没给查找口子的时候 `#include` 照旧骂 —— `pp.js` 自己不碰文件系统。 */
+rejects('#include（这一趟没给查找口子）', SHELL(`
 #include "x.glsl"
-float probe(int k) { return 1.0; }`), '只收 #version 与对象宏');
+float probe(int k) { return 1.0; }`), '不收 "#include"');
+
+/**
+ * `#include` 的三条：**进来的宏与函数都能用**、**同一份只进来一次**、**成环要骂**。
+ *
+ * 查找口子是这儿现搭的一张表（`pp.js` 不碰文件系统），所以这一门不落任何文件。
+ */
+function ppInclude(name, src, tab) {
+  const d = new Diagnostics();
+  const open = (n) => (tab[n] === undefined ? null : { path: n, text: tab[n] });
+  try {
+    const toks = glslPreprocess(g.lex, lexText(g.lex, new SourceFile('probe.frag', src), d), d, { open });
+    d.throwIfErrors();
+    return { toks };
+  } catch (e) {
+    return { err: String(e.message) };
+  }
+}
+
+{
+  const src = SHELL(`
+#include "lib.glsl"
+float probe(int k) { return HALF + lib_one(); }`);
+  const r = ppInclude('include', src, {
+    'lib.glsl': '#define HALF 0.5\nfloat lib_one() { return 1.0; }\n',
+  });
+  if (r.err !== undefined) bad('#include：进来的宏与函数', `    ${r.err.split('\n')[0]}`);
+  else {
+    const txt = r.toks.map((t) => (t.node === undefined ? t.type : String(t.node.value))).join(' ');
+    if (txt.includes('lib_one') && txt.includes('0.5')) ok('#include：进来的宏与函数都能用');
+    else bad('#include：进来的宏与函数', `    展开出来是：${txt.slice(0, 120)}`);
+  }
+}
+
+{
+  /* 同一份被两条链引到 —— 第二遍整份跳过，不然「宏定义了两次」。 */
+  const r = ppInclude('twice', SHELL(`
+#include "a.glsl"
+#include "b.glsl"
+float probe(int k) { return HALF; }`), {
+    'a.glsl': '#include "c.glsl"\n',
+    'b.glsl': '#include "c.glsl"\n',
+    'c.glsl': '#define HALF 0.5\n',
+  });
+  if (r.err === undefined) ok('#include：同一份只进来一次（菱形也行）');
+  else bad('#include：同一份只进来一次', `    ${r.err.split('\n')[0]}`);
+}
+
+{
+  const r = ppInclude('cycle', SHELL(`
+#include "a.glsl"
+float probe(int k) { return 1.0; }`), {
+    'a.glsl': '#include "b.glsl"\n',
+    'b.glsl': '#include "a.glsl"\n',
+  });
+  if (r.err !== undefined && r.err.includes('成环')) ok('#include：成环要骂［成环］');
+  else bad('#include：成环要骂', `    ${r.err === undefined ? '收了' : r.err.split('\n')[0]}`);
+}
+
+{
+  const r = ppInclude('missing', SHELL(`
+#include "nope.glsl"
+float probe(int k) { return 1.0; }`), {});
+  if (r.err !== undefined && r.err.includes('找不到')) ok('#include：找不到要骂［找不到］');
+  else bad('#include：找不到要骂', `    ${r.err === undefined ? '收了' : r.err.split('\n')[0]}`);
+}
 
 rejects('拿关键字当宏名', SHELL(`
 #define float double
