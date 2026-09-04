@@ -99,6 +99,29 @@ const cPaths = [
   },
 ];
 
+/**
+ * 第三组：**纯 i32**（`bench/i32only.c`）。它在这儿是为了让「i32 用什么装」这一刀的
+ * 收益**可见且不退化** —— 那一刀在这份上是 23 倍（604 -> 26 ms 的执行段），
+ * 而在 `fib.c`（混着 i64）上是负的。两份都留着，形状才完整。
+ */
+const iPaths = [
+  {
+    name: 'C -> 本机（自带前端 + 自带链接器）',
+    argv: [NODE, [CLI, 'run', join('bench', 'i32only.c')]],
+    note: '含 C 前端 + 代码生成 + 链接',
+  },
+  {
+    name: 'C -> JS（MIR 编成 JS）',
+    argv: [NODE, [CLI, 'run', join('bench', 'i32only.c'), '--backend', 'js']],
+    note: '含 C 前端 + MIR + 发 JS + new Function',
+  },
+  {
+    name: 'C -> MIR 解释器',
+    argv: [NODE, [CLI, 'run', join('bench', 'i32only.c'), '--backend', 'interp']],
+    note: '含 C 前端 + MIR',
+  },
+];
+
 /** clang 那两条（有就加上）：`-O0` 是「不优化的本机」，`-O2` 是「优化过的本机」。 */
 function withClang(list, cfile, tag) {
   if (spawnSync('which', ['clang'], { encoding: 'utf8' }).status !== 0) return list;
@@ -179,6 +202,7 @@ function group(title, list) {
 process.stdout.write(`node 空转 ${IDLE.toFixed(0)} ms —— 「净」列已减掉它（clang 那几条不经过 node，净=整趟）\n`);
 let n = group('fib(27) + sumTo(2e6)：算术与调用', withClang(paths, 'bench/fib.c', 'fib'));
 n += group('sieve(2e6) + 20 万次字符串 + 插排：内存密集', withClang(cPaths, 'bench/sieve.c', 'sieve'));
+n += group('2e7 次纯 i32 运算：值表示那一刀的净口径', withClang(iPaths, 'bench/i32only.c', 'i32'));
 
 rmSync(OUT, { recursive: true, force: true });
 process.stdout.write(`\n${n} 条路，${bad} 条红\n`);

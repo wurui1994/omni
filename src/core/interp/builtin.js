@@ -564,6 +564,45 @@ export function memStoreFn(kind) {
   if (f === undefined) throw new Error(`memStoreFn: 不认识的访问 ${kind}`);
   return f;
 }
+
+/* -------------------------------------------- **number 口径**的那一组（ADR-0013）
+ * 同一块内存、同一个 `memChk`、同一个字节序，只差「整数以什么装出入」：上面那两张表
+ * 一律 BigInt（方言只有一格整数，i64），这两张按 **JS number** 收发。
+ *
+ * 为什么要加这一组而不是在调用点换算：`emit_js.js` 发出来的 JS 里 i32 是 number
+ * （那是 ADR-0013 量出来的量级来源），而 `BigInt(v)` / `Number(v)` 每次访问都要一次
+ * 转换 —— 内存密集的程序里那就是主要成本，加这一组正是为了把它去掉。
+ *
+ * 边界划在哪儿：**只有 32 位及以下**（i8/i16/i32）进这一组，i64 仍旧只有 BigInt 那一份
+ * （number 装不下 64 位）。浮点两条本来就是 number，这里不重复列 —— 调用方直接用上面那张。
+ */
+const MEM_LD_N = {
+  i8s: (a, o) => linDv.getInt8(memChk(a, o, 1)),
+  i8u: (a, o) => linDv.getUint8(memChk(a, o, 1)),
+  i16s: (a, o) => linDv.getInt16(memChk(a, o, 2), true),
+  i16u: (a, o) => linDv.getUint16(memChk(a, o, 2), true),
+  i32s: (a, o) => linDv.getInt32(memChk(a, o, 4), true),
+  /* `i32u` 的结果类型是 i32（规范形是符号扩展过的），所以 `| 0` 回到那个形 ——
+   * 与 BigInt 那张表里 `asIntN(32)` 收尾是同一件事。 */
+  i32u: (a, o) => linDv.getUint32(memChk(a, o, 4), true) | 0,
+};
+const MEM_ST_N = {
+  i8: (a, o, v) => { linDv.setUint8(memChk(a, o, 1), v & 0xff); },
+  i16: (a, o, v) => { linDv.setUint16(memChk(a, o, 2), v & 0xffff, true); },
+  /* `setUint32` 收的是无符号，而 i32 的规范形是有符号 —— `>>> 0` 是那一次换算
+   * （与 BigInt 那张的 `asUintN(32)` 对应）。 */
+  i32: (a, o, v) => { linDv.setUint32(memChk(a, o, 4), v >>> 0, true); },
+};
+
+/** number 口径的读；不在这一组里（i64/f32/f64/f80）回 null，让调用方退回 BigInt 那张。 */
+export function memLoadFnN(kind) {
+  const f = MEM_LD_N[kind];
+  return f === undefined ? null : f;
+}
+export function memStoreFnN(kind) {
+  const f = MEM_ST_N[kind];
+  return f === undefined ? null : f;
+}
 /** 树遍历那条腿（interp/eval.js）的入口：一次调用一次查表。 */
 export function memLoad(kind, addr, off) { return memLoadFn(kind)(addr, off); }
 export function memStore(kind, addr, off, v) { memStoreFn(kind)(addr, off, v); return v; }

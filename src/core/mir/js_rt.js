@@ -12,8 +12,8 @@
  */
 
 import {
-  memInit, memData, memSize, memGrow, memLoadFn, memStoreFn, flushOut, failRt,
-  InterpFail, InterpUncaught,
+  memInit, memData, memSize, memGrow, memLoadFn, memStoreFn, memLoadFnN, memStoreFnN,
+  flushOut, failRt, InterpFail, InterpUncaught,
 } from '../interp/builtin.js';
 import { callLibc, hasLibc, ExitCall, setFnPtrCaller, libcAtExit } from '../interp/libc.js';
 import { evalJs, stderr } from '../host/native.js';
@@ -25,6 +25,8 @@ export const RT = {
   memGrow,
   memLoadFn,
   memStoreFn,
+  memLoadFnN,
+  memStoreFnN,
   callLibc,
   hasLibc,
   ExitCall,
