@@ -28,7 +28,7 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const PARTS = ['parse.js', 'check.js', 'lower.js', 'render.js', 'bench.js',
   'interp.js', 'raster.js', 'stmt.js', 'ops.js', 'mat.js', 'fns.js', 'pp.js', 'fast.js',
-  'oracle.js', 'examples.js', 'vispy.js'];
+  'oracle.js', 'examples.js', 'vispy.js', 'vispy_draw.js'];
 
 let bad = 0;
 for (const p of PARTS) {
