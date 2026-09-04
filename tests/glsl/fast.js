@@ -16,7 +16,7 @@
 //
 //   node tests/glsl/fast.js
 
-import { readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -328,6 +328,94 @@ if (typeof host === 'string' && emitDrv.status === 0) {
       bad('bool：v2 与 v1 不是同一个答案',
         `    v1 ${JSON.stringify(b1.stdout.trim().slice(0, 80))}\n    v2 ${JSON.stringify(o2.trim().slice(0, 80))}`);
     } else ok('bool：v2（ORC）与 v1 逐字节相同');
+  }
+}
+
+/* ---- 六、C 写的运行宿主（`src/jit/glsl_host.c`）—— 决策八那三条硬约束 -------------
+ *
+ * **一个进程、不落盘、按指针调用。** IR 从 **stdin** 进去（`spawnSync` 的 `input`，
+ * 磁盘上一个字节都不写），宿主在自己进程里 JIT，`Lookup` 拿到地址强转成函数指针，
+ * 框架直接 call 它。
+ *
+ * 这一段与第四段（`omni-jit` + `.ll` 文件 + spawn）的区别不是快慢，是**架构**：
+ * 那一条用文件与进程当接口，这一条用一个函数指针。llvmpipe 是后者。
+ *
+ * `compile_ms` 取**多趟的最小值**：第一趟是冷的（量到 32 ms），常驻宿主的真实成本是热态
+ * 那个（约 5 ms）。llvmpipe 也是常驻的 —— 它在 GL 驱动里。 */
+const LLVM_CONFIGS = [process.env.OMNI_LLVM_CONFIG, 'llvm-config',
+  '/opt/homebrew/opt/llvm/bin/llvm-config', '/usr/local/opt/llvm/bin/llvm-config'].filter(Boolean);
+
+function findLlvmConfig() {
+  for (const lc of LLVM_CONFIGS) {
+    if (spawnSync(lc, ['--version'], { encoding: 'utf8' }).status === 0) return lc;
+  }
+  return null;
+}
+
+/** 编出 C 宿主。按 [编译器, LLVM 版本, 源码] 做内容寻址缓存 —— 编它要一秒多。 */
+function buildGlslHost(lc) {
+  const src = join(root, 'src', 'jit', 'glsl_host.c');
+  const text = readFileSync(src, 'utf8');
+  const ver = spawnSync(lc, ['--version'], { encoding: 'utf8' }).stdout.trim();
+  const inc = spawnSync(lc, ['--includedir'], { encoding: 'utf8' }).stdout.trim();
+  const lib = spawnSync(lc, ['--libdir'], { encoding: 'utf8' }).stdout.trim();
+  /* 键里带上源码正文：改一行 C 就换一个目录，不会读到旧的宿主。 */
+  let h = 0;
+  for (const s of [cc, ver, text]) for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  const dir = join(root, '.omni-cache', 'glsl-host', `${(h >>> 0).toString(16)}`);
+  const exe = join(dir, 'omni-glsl-jit');
+  if (existsSync(exe)) return exe;
+  mkdirSync(dir, { recursive: true });
+  const r = spawnSync(cc, ['-O2', '-w', '-I', inc, src, '-L', lib, '-lLLVM', '-lm',
+    `-Wl,-rpath,${lib}`, '-o', exe], { encoding: 'utf8' });
+  if (r.status !== 0) return { err: (r.stderr ?? '').trim().split('\n').slice(0, 6).join('\n    ') };
+  return exe;
+}
+
+const lc = findLlvmConfig();
+if (lc === null) {
+  process.stdout.write('  skip C 运行宿主：找不到 llvm-config（OMNI_LLVM_CONFIG 可指一个）\n');
+} else {
+  const host = buildGlslHost(lc);
+  if (typeof host !== 'string') {
+    bad('C 运行宿主编不出来', `    ${host.err}`);
+  } else {
+    ok('C 运行宿主编出来了（glsl_host.c + libLLVM）');
+    const ir = glslEmitLlvm(mod);
+    /** 跑一趟：IR 走 **stdin**，回 [退出码, stdout, compile_ms]。 */
+    const runHost = (args) => {
+      const r = spawnSync(host, args, { input: ir, encoding: 'utf8', maxBuffer: 1 << 26 });
+      const m = /compile_ms (\S+)/.exec(r.stdout ?? '');
+      return [r.status, (r.stdout ?? '').replace(/compile_ms \S+\n/, ''), m === null ? NaN : Number(m[1]), r.stderr ?? ''];
+    };
+
+    const [sc, sout, , serr] = runHost(['--samples', String(RES)]);
+    if (sc !== 0) bad('C 宿主跑不动', `    exit=${sc}\n    ${serr.trim().split('\n').slice(0, 4).join('\n    ')}`);
+    else if (v1Samples === null) bad('C 宿主没法与 v1 比', '    v1 那一段没跑出数来');
+    else if (sout.trim() !== v1Samples.trim()) {
+      bad('C 宿主与 v1（clang AOT）不是同一个答案',
+        `    同一份 IR 换装载方式，输出必须逐字节相同\n    v1 ${JSON.stringify(v1Samples.trim().slice(0, 70))}\n    宿主 ${JSON.stringify(sout.trim().slice(0, 70))}`);
+    } else ok('C 宿主与 v1 逐字节相同（IR 走管道，磁盘上一个字节都没写）');
+
+    /* 热态编译预算。取 5 趟最小值：第一趟冷（约 32 ms），常驻宿主付的是热态那个。 */
+    let best = Infinity;
+    let mp = null;
+    for (let i = 0; i < 5; i++) {
+      const [bc, bout, cms] = runHost(['--bench', String(RES), '1']);
+      if (bc !== 0) { best = NaN; break; }
+      if (cms < best) best = cms;
+      if (mp === null) mp = /MPix\/s (\S+)/.exec(bout);
+    }
+    const BUDGET = Number(process.env.OMNI_GLSL_JIT_BUDGET ?? 20);
+    if (!(best >= 0)) bad('C 宿主的 bench 跑不动', '    退出码非 0');
+    else if (best <= BUDGET) {
+      ok(`C 宿主热态编一个变体：${best.toFixed(1)} ms ≤ 预算 ${BUDGET} ms（llvmpipe 是 1～20 ms，也是常驻的）`);
+    } else {
+      bad(`C 宿主热态编一个变体：${best.toFixed(1)} ms > 预算 ${BUDGET} ms`,
+        '    这是**运行时**每换一个变体要付的钱（一个进程、不落盘、按指针调用）。\n'
+        + '    超了先看是不是发射的 IR 体量涨了 —— 成本跟机器码体量成正比。');
+    }
+    process.stdout.write(`  数    C 宿主 ${RES}²：${mp === null ? '?' : mp[1]} MPix/s（按指针调用，与 exec 一个二进制同一个数）\n`);
   }
 }
 
