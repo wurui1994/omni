@@ -674,7 +674,15 @@ export function asyExpKeep(old, neu) {
   const b = neu.ps;
   if (a === undefined || b === undefined || a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) {
-    if (a[i].exp !== true || b[i].exp === true) continue;
+    // **新那份也是 explicit 时照样留旧**（这一刀把 `|| b[i].exp === true` 那半句去掉了）。
+    // 判据本来就是第二条 —— "写下来的类型名不一样"才说明两份在 asy 那边是两个类型；
+    // "新那份不是 explicit"从来不是必要条件，只是当初量到的那两对（plain_arrows.asy:552/561、
+    // plain_filldraw.asy:56/61）恰好长那样。plain_Label.asy:498/505 那一对**两份都是
+    // explicit**（`explicit path g` 与 `explicit guide g`），于是漏了：留下的是转发那份、
+    // 它转发的目标是自己。量出来的样子是 Gouraud.asy 与 sinxlex.asy 跑起来
+    // `RangeError: Maximum call stack size exceeded`，栈里全是 `asy__ov6_label`
+    // （而这一轴的错因分类只看 stderr 第一行，于是记成"没出图 —— warning …"，很能骗人）。
+    if (a[i].exp !== true) continue;
     if (a[i].src === null || a[i].src === undefined) continue;
     if (b[i].src === null || b[i].src === undefined) continue;
     if (a[i].src !== b[i].src) return true;

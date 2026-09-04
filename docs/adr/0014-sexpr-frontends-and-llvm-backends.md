@@ -9261,3 +9261,48 @@ cast 表也按类型字符串配）。这不是"再补一处"能收的，是一�
 所以是缓存那一层的事，不是命名那一层的事。
 
 <!-- ADR-0014 类名带前缀-END -->
+
+### 第九刀：**"没出图"里有两个是栈溢出** —— guide/path 塌成一份时"留旧那份"漏了一档
+
+`没出图` 那 8 个里，Gouraud 与 sinxlex 的错因记的是 `warning: using possibly incompatible
+version of plain.asy` —— 那是**分类看错了**：错因分类只读 stderr 的第一行，而真正的错在后面：
+
+```
+RangeError: Maximum call stack size exceeded
+    at s_asy__m9f39b3e5_asy__ov6_label (plain__8c9b5de0.js:4744)   （栈里全是它）
+```
+
+发出来的那份正文是一句自调用：
+
+```js
+export function s_asy__m9f39b3e5_asy__ov6_label(v_pic, v_L, v_g, v_align, v_p, v_filltype) {
+  s_asy__m9f39b3e5_asy__ov6_label(v_pic, v_L, v_g, v_align, v_p, v_filltype);
+}
+```
+
+源头是 asy 那边的一对（plain_Label.asy:498 与 :505）：`explicit path g` 那份做实事，
+`explicit guide g` 那份的正文就是 `label(pic,L,(path) g,…)` 一句转发。我们这一层
+`guide` 是 `path` 的 typedef（asy_builtins.asy:739），两份签名塌成一个，按"后来的替换先来的"
+留下的是**转发那份**，而它转发的目标就是自己。
+
+这一格**本来就有**（第四十七刀的 `asyExpKeep`：同签名相撞时若"旧那份某格是 explicit 且
+两格写下来的类型名不同"就留旧），注释里甚至点名了 498/505 这一对 —— 但条件里多了半句
+`|| b[i].exp === true`（要求新那份**不是** explicit）。498/505 恰好**两份都是** explicit，
+于是漏了。去掉那半句：判据回到"写下来的类型名不一样"这一条本身，它才是"在 asy 那边是两个
+类型、在这一层塌成一个"的判据。
+
+量（干净产物缓存，`OMNI_EPS_T=5000`）：
+
+```
+              一样   只有数值差   结构不同   没出图   超 5s
+改前            66        9          87        8       19
+改后            68        9          87        6       19
+```
+
+`tests/asy/run.js` 259 passed / 0 failed（含 strict 那 30 多条逐字对照的诊断）。
+
+剩下的 6 个"没出图"里 4 个是明摆着的功能缺口（`_image` / `_strokepath` / `textpath` /
+`postscript` / `_eval`），galleon 那个是 `call of a null function value`（obj.asy 那一路，
+还没查）。
+
+<!-- ADR-0014 guide塌成一份时留旧漏了一档-END -->
