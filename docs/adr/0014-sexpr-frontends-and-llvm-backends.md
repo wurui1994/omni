@@ -9808,3 +9808,38 @@ penRestore：也就是说 asy 那边 `pentype.getTransform()` **不是**精确�
 与 EPS 轴的现场清理（例子自己 `shipout("名字")` 落下来的那几份跑完就擦，别留在仓库里）。
 
 <!-- ADR-0014 笔带没带变换-END -->
+
+### 第二十二刀（量清，未改）：笔变换那笔账 —— **两边都错，方向相反**
+
+矢量档剩下六份，首处差全是那坨 `gsave … [ … ] concat … grestore`，而且**两个方向都有**：
+
+```
+                 参考长度  我们长度   首处差
+  alignedaxis      6590     8026     参考 newpath vs 我们 gsave   <- 我们多发
+  lmfit1           3482     4865     参考 newpath vs 我们 gsave   <- 我们多发
+  cardioid         4339     4257     参考 gsave vs 我们 newpath   <- 我们少发
+  gamma           11217     9728     参考 gsave vs 我们 newpath   <- 我们少发
+  laserlattice     7054     6273     参考 gsave vs 我们 newpath   <- 我们少发
+  logdown          5158     4420     界就差了（201 vs 205）
+```
+
+数一数那一坨在两边各有几处（`grep -c '] concat'`）：
+
+```
+              参考   我们
+  cardioid       4     0
+  alignedaxis    4    78
+```
+
+**参考两边都是 4**（两条轴线 + 两个箭头那一族），而我们一个不发或者**每根刻度都发**。
+所以这不是"判据松紧"的事（上一刀放宽判据两头都更差就是这个原因），是**哪些元素该带笔变换**
+这份账我们记错了：`alignedaxis` 里我们把 78 根刻度全带上了，`cardioid` 里两条轴线一个没带。
+
+asy 那边的路径是清楚的（`drawelement.h:301` 的 `transpen(t) = transformed(shiftless(t), pentype)`，
+四个调用点：drawpath.cc:224、drawfill.cc:58、drawclipbegin.h:85、drawlabel.cc:271），
+库这一层（plain_picture.asy / graph.asy）**没有**给笔加变换的地方 —— 也就是说那 4 处的
+变换全是"元素被 `transformed(t)` 搬过一次"留下的，而刻度那 78 处**不该**被搬（asy 的
+延后节点是拿 `t` 当场画进最终 frame 的，笔不经手）。下一刀就按这条对账：
+把"延后节点画出来的那一份"与"`t*frame` 搬过来的那一份"分清，别让前者的笔跟着变。
+
+<!-- ADR-0014 笔变换两边都错-END -->
