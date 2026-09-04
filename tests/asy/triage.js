@@ -20,7 +20,7 @@
 //
 // 计时结果落在 `.omni-cache/tritime/<who>.json`，可续跑。
 
-import { readFileSync, existsSync, readdirSync, mkdirSync, writeFileSync, rmSync, statSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync, mkdirSync, writeFileSync, rmSync, statSync, renameSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -302,7 +302,42 @@ if (mode === 'static') {
     console.log(`---- ok（${okr.length} 份）最慢十个：`
       + okr.slice(0, 10).map((r) => `${r.name} ${r.mine.ms}`).join('  '));
   }
+} else if (mode === 'gen') {
+  /* 生成 oracle：把真 asy 出的 EPS 落进 `.omni-cache/epsref/`（`eps.js` 只读那儿）。
+   *
+   * 为什么不用 `eps.js` 的 `OMNI_EPS_GEN=1`：那一份是**串行**的，量过 5 分多钟。
+   * 这一份并行跑，而且**先看 `time asy` 量到的结果**，真 asy 自己出不了图的直接跳过 ——
+   * 那些例子在 5s 预算下本来就不进对照，何必再等它一遍超时。 */
+  const dir = process.argv[3] === undefined ? EXDIR : process.argv[3];
+  const REF = join(ROOT, '.omni-cache', 'epsref');
+  mkdirSync(REF, { recursive: true });
+  const q = join(TIMEDIR, 'asy.json');
+  const A = existsSync(q) ? JSON.parse(readFileSync(q, 'utf8')) : {};
+  const all = allNames(dir);
+  const todo = all.filter((n) => {
+    if (existsSync(join(REF, `${n}.eps`)) && statSync(join(REF, `${n}.eps`)).size > 0) return false;
+    const a = A[n];
+    return a === undefined || (a.ok && !a.killed);
+  });
+  console.log(`oracle：要生成 ${todo.length} 个（共 ${all.length}，`
+    + `已有 ${all.filter((n) => existsSync(join(REF, `${n}.eps`))).length}，`
+    + `真 asy 自己出不了图、跳过的 ${all.length - todo.length
+      - all.filter((n) => existsSync(join(REF, `${n}.eps`))).length}）`);
+  rmSync(WORK, { recursive: true, force: true });
+  mkdirSync(WORK, { recursive: true });
+  const t0 = Date.now();
+  let made = 0;
+  let miss = 0;
+  await timeAll(todo, 'asy', dir, (r) => {
+    const src = join(WORK, r.name, `${r.name}.eps`);
+    if (existsSync(src) && statSync(src).size > 0) {
+      renameSync(src, join(REF, `${r.name}.eps`));
+      made++;
+    } else miss++;
+  });
+  rmSync(WORK, { recursive: true, force: true });
+  console.log(`\noracle：生成 ${made} 份、没出图 ${miss} 份，墙上 ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 } else {
-  console.error('用法：node tests/asy/triage.js static|time|report [asy|mine] [目录]');
+  console.error('用法：node tests/asy/triage.js static|time|report|gen [asy|mine] [目录]');
   process.exit(2);
 }
