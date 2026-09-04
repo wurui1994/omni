@@ -220,7 +220,14 @@ function why(r) {
   // `array index out of range` 在 stderr 上 —— 两边都要看。
   const ls = `${r.out}\n${r.err}`.split('\n').filter((l) => l.trim() !== '');
   const ab = ls.filter((l) => l.trim().startsWith('abort:'));
-  const es = r.err.split('\n').filter((l) => l.trim() !== '');
+  // **warning 不算错因**（这一刀）：`warning: using possibly incompatible version of plain.asy`
+  // 是每个例子都印的一句，它排在 stderr 第一行，于是把真正的错遮住了 —— 量出来的样子是
+  // Gouraud 与 sinxlex 记成"没出图 —— warning …"，而真错是 `RangeError: Maximum call
+  // stack size exceeded`（guide/path 塌成一份那一格，见 ADR-0014）。一条 warning 都不剩时
+  // 才退回去用它（那说明确实只有 warning）。
+  const raw = r.err.split('\n').filter((l) => l.trim() !== '');
+  const hard = raw.filter((l) => !l.trim().startsWith('warning:'));
+  const es = hard.length > 0 ? hard : raw;
   const one = ab.length > 0 ? ab[0].trim()
     : (es.length === 0 ? `没有错误输出（退出 ${r.status}）` : es[0].trim());
   return one
