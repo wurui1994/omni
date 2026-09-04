@@ -2200,6 +2200,62 @@ llvmpipe 那一侧：**1～20 ms**，同一个进程、一个字节都不落盘�
 
 <!-- ADR-0019 自编译债清一半-END -->
 
+## 量：`lower.js` 剩那 19 条**不是债，是 `frontend-js/lower.js` 的一个 bug**
+
+按上一节说的「先读实现再改」做了。判据在 `src/core/frontend-js/lower.js`：
+
+```js
+/** 这一层函数里，会被内层函数引用到的名字 —— 它们的局部量要装进 cell */
+function capturedNames(stmts) {
+  const out = new Set();
+  for (const s of stmts) for (const fn of nestedFns(s)) refNames(fn, out);
+  return out;                                  // <- 没有减掉内层函数**自己声明**的名字
+}
+```
+
+`refNames` 收的是内层函数里**提到的每一个标识符**，包括它自己的形参与局部量。
+`declare()` 拿这个集合决定「这个名字要不要装 cell」，`forStmt()` 再看循环变量是不是 cell。
+于是：**内层闭包里只要有一个同名的局部量，外层同名的循环变量就被判成「被捕获」。**
+
+### 十二行的最小复现
+
+```js
+export function f(n) {
+  const g = (cols) => {
+    let sum = null;
+    for (let i = 0; i < cols.length; i++) sum = cols[i];   // 这个 i 是 g 自己的
+    return sum;
+  };
+  const all = [];
+  for (let i = 0; i < n; i++) all.push(i);                 // 这一行被骂「被闭包捕获」
+  return g(all);
+}
+```
+
+这个循环体里**一个闭包都没有**。把外层那个 `i` 改名成 `k` 就干净了 —— 名字撞车而已。
+四个探针都对上这条解释（含「body-local const 那条提示其实是有效的」：真捕获时改 `const`
+确实能过）。
+
+### 两个后果，第二个更贵
+
+1. **假红**：`for` 循环被无理由拒掉，逼着人改名字。这一条只是烦。
+2. **多余的装箱**：`declare()` 会把外层每一个同名局部量都变成 `[init]` 那种一格数组
+   （`arrLit([init])`），读写都要过一层下标。整个**自编译出来的编译器**里到处都是
+   `i`/`k`/`c` 这种名字 —— 也就是说这个过近似在给全程序加装箱。这一条是真代价，
+   而且从来没被量过。
+
+### 为什么这一片不顺手修
+
+修法是清楚的：`capturedNames` 要算**自由变量**，减掉内层函数自己的绑定（形参 + 它的
+`let`/`const`/`var`/函数声明，递归）。但这一处是**所有自编译都要过的那条路**，改它
+要连着 `js-roundtrip`、`bootstrap`、棘轮三道门一起看，还该顺手量一下「少装箱之后
+自编译出来的 C 有多大差别」——那是独立一片，不是 GLSL 这一片的尾巴。
+
+`lower.js` 剩的 19 条**就停在这儿**，不靠改名字掩过去：它们是这个 bug 的现场证据。
+
+<!-- ADR-0019 capturedNames-bug-END -->
+
+
 
 
 
