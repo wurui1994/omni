@@ -10,6 +10,8 @@
 // 见 fns.js 里那一节）。
 out vec4 fragColor;
 uniform vec2 u_resolution;
+// 平结构体（B13）：成员是 vec2 + float，摊平之后 3 格
+struct Sample { vec2 uv; float w; };
 void main() {
     vec2 uv = gl_FragCoord.xy / u_resolution;
 
@@ -42,5 +44,9 @@ void main() {
         step2 = 0.125;
     }
 
-    fragColor = vec4(checker, min(safe, 1.0), flags + band, step2 + 0.5);
+    // 平结构体（B13）：构造 + 成员访问，在快路上就是分量表的切片
+    Sample sm = Sample(uv, 0.25);
+    float sv = sm.uv.x * 0.5 + sm.uv.y * 0.25 + sm.w;
+
+    fragColor = vec4(checker, min(safe, 1.0), flags + band, sv);
 }

@@ -26,6 +26,7 @@ import { loadGrammarTable } from '../../src/core/glr/load.js';
 import { lexText } from '../../src/core/glr/lex.js';
 import { glrParse } from '../../src/core/glr/driver.js';
 import { Diagnostics, SourceFile } from '../../src/core/source/diag.js';
+import { glslPreprocess, glslTypeNames } from '../../src/core/frontend-glsl/pp.js';
 import { glslCheck } from '../../src/core/frontend-glsl/check.js';
 import { glslLower } from '../../src/core/frontend-glsl/lower.js';
 import { glslEmitLlvm } from '../../src/core/frontend-glsl/emit_llvm.js';
@@ -58,7 +59,8 @@ mkdirSync(OUT, { recursive: true });
 function checked(path) {
   const src = readFileSync(path, 'utf8');
   const diags = new Diagnostics();
-  const toks = lexText(g.lex, new SourceFile(path, src), diags);
+  /* 与产品那条路同一趟：预处理（对象宏）+ 类型名重判（`struct N {…}` 之后的 `N`）。 */
+  const toks = glslTypeNames(glslPreprocess(g.lex, lexText(g.lex, new SourceFile(path, src), diags), diags));
   diags.throwIfErrors();
   const tree = glrParse(tb, toks, diags);
   diags.throwIfErrors();
@@ -321,7 +323,7 @@ if (typeof host === 'string' && emitDrv.status === 0) {
       }
       if (want.length !== got.length) bad('bool：两边的数不一样多', `    参照 ${want.length} 个、快路 ${got.length} 个`);
       else if (bads.length > 0) bad('bool：v1 与参照实现对账', bads.slice(0, 6).map((s) => `    ${s}`).join('\n'));
-      else ok('bool：v1 与参照实现逐取样点对账（比较 / && || ! / ?: / isnan / isinf / lessThan / all any / if else）');
+      else ok('bool：v1 与参照实现逐取样点对账（比较 / && || ! / ?: / isnan / isinf / lessThan / all any / if else / struct）');
     }
     if (c2 !== 0) bad('bool：v2（ORC）跑不动', `    exit=${c2}\n    ${e2.trim().split('\n').slice(0, 4).join('\n    ')}`);
     else if (b1.status === 0 && o2.trim() !== b1.stdout.trim()) {

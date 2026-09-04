@@ -29,10 +29,17 @@ export const GLSL_LANES = 8;
 
 const LL_VEC = `<${GLSL_LANES} x float>`;
 
-/** 分量个数（这一档只有标量与 vecN）。 */
+/** 分量个数（这一档只有标量、vecN 与平结构体）。 */
 function llNComp(t) {
   if (t.k === 'vec') return t.n;
   if (t.k === 'float' || t.k === 'int' || t.k === 'bool') return 1;
+  /* 结构体（施工图 B13）：各成员之和。快路这边**连类型数组都不要** —— 所有分量都是
+   * `<8 x float>`，`int` 在这条路上就是「值恰好是整数的 float」，所以摊平的格数够了。 */
+  if (t.k === 'struct') {
+    let n = 0;
+    for (const f of t.fields) n += llNComp(f.ty);
+    return n;
+  }
   throw new OmniError(`glsl/llvm: 这一片收不了的类型 ${t.k}`);
 }
 
@@ -154,6 +161,12 @@ class GlslLlvmEmitter {
       const out = [];
       for (let i = 0; i < llNComp(e.ty); i++) out.push(v);
       return out;
+    }
+    if (e.k === 'field') {
+      /* 结构体的成员（施工图 B13）：分量表里连着的那一段，起始格号由检查那一侧算好放在
+       * `at` 上。与 `lower.js` 那条是同一个切片，只是这边每格是 `<8 x float>`。 */
+      const subj = this.expr(e.of);
+      return subj.slice(e.at, e.at + llNComp(e.ty));
     }
     if (e.k === 'construct') {
       const out = [];
