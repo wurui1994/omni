@@ -274,14 +274,12 @@ class GlslLowerer {
 
   bin(e) {
     if (e.a.ty.k === 'mat' || e.b.ty.k === 'mat') return this.matBin(e);
+    /* 短路那两个要在**算右边之前**接住：下面两行一执行，右边的中间量就已经落进外层
+     * 语句流了 —— 那就是「两边都算」，正是短路要避免的。 */
+    if (e.op === '&&' || e.op === '||') return this.andor(e);
     const a = this.expr(e.a);
     const b = this.expr(e.b);
     const ct = glslCompTy(e.ty);
-    if (e.op === '&&' || e.op === '||') {
-      /* 短路：两边都只能是「不需要 let」的表达式。这一片里 `&&`/`||` 两侧都是比较，
-       * 而比较本身会绑 let —— 于是这一条会撞上。撞上就骂，不悄悄改成非短路的。 */
-      glslNyi('&& 与 ||（短路语义要把右边整段搬进 if，这一片没做）');
-    }
     if (e.op === '^^') {
       /* 逻辑异或（GLSL 有，C 没有）。bool 上 `a != b` 就是它，而且不涉及短路。 */
       return [this.let_('bool', `(bin "!=" ${a[0]} ${b[0]})`)];
@@ -323,8 +321,36 @@ class GlslLowerer {
   }
 
   /**
-   * 三元 `c ? a : b`。**两支各自的中间量要留在自己那一支里** ——
-   * GLSL 的 `? :` 只算一支（规范 5.9），把两支的 `let` 都提到 if 外面就变成两支都算了。
+   * `a && b` / `a || b` —— **短路**（规范 5.9）。落法：左边算出来存一个格子，
+   * 右边**整段**（连它的中间量一起）搬进一个 `if`，只有该算的时候才算：
+   *
+   *   a && b -> (let m bool A) (if (var m)        (do …B 的中间量… (set m B)))
+   *   a || b -> (let m bool A) (if (un "!" (var m)) (do …B 的中间量… (set m B)))
+   *
+   * 为什么非得短路：`x != 0.0 && 1.0/x > 2.0` 在 GLSL 里是**安全**写法，改成两边都算
+   * 就会在 x=0 那一格上算出 Inf。这与 `sel()` 是同一件事的同一种落法。
+   *
+   * 快路（`emit_llvm.js`）那条**没得选**：8 道里两支都可能要走，所以它两边都算、
+   * 靠 `select` 逐道取值挡住。两条路的语义差别只在「不该走的那支有没有副作用」上，
+   * 而 GLSL 的表达式里没有副作用能逃出这一层（赋值与自增都是语句化过的）。
+   */
+  andor(e) {
+    const m = this.fresh('m');
+    const a = this.expr(e.a)[0];
+    this.stmts.push(`(let ${m} bool ${a})`);
+    const save = this.stmts;
+    this.stmts = [];
+    const b = this.expr(e.b)[0];
+    this.stmts.push(`(set ${m} ${b})`);
+    const body = this.stmts;
+    this.stmts = save;
+    const cond = e.op === '&&' ? `(var ${m})` : `(un "!" (var ${m}))`;
+    this.stmts.push(`(if ${cond} (do ${body.join(' ')}))`);
+    return [`(var ${m})`];
+  }
+
+  /**
+   * 三元 `c ? a : b`。**两支各自的中间量要留在自己那一支里** ——   * GLSL 的 `? :` 只算一支（规范 5.9），把两支的 `let` 都提到 if 外面就变成两支都算了。
    * 那不只是慢：`1.0/x` 那种在不该走的那一支里可能是除零。
    */
   sel(e) {

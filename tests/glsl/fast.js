@@ -164,16 +164,24 @@ if (bench.status === 0) {
  * 只有着色器过 JIT，所以「框架搬进宿主、靠进程符号搜索连过去」是后面一格。这里先把
  * 「着色器 IR 过 ORC 出的答案与过 clang 出的答案一致」钉住。
  *
- * 两处只有真跑起来才会发现的坑（ADR-0019「量：v2 的编译耗时」那一节）：
+ * 三处只有真跑起来才会发现的坑（ADR-0019「量：v2 的编译耗时」那一节）：
  *   - clang 出的 `declare @glsl_frag8` 与我们的 `define` 在**同一份 `.ll`** 里算重复定义
  *   - clang 带的 `"probe-stack"="__chkstk_darwin"` 会让 ORC 直接
  *     `LLVM ERROR: Unsupported stack probing method` 而 abort
- * 所以拼之前要剥这两样。我们自己发射的 IR 一个函数属性都不带，不需要剥。 */
+ *   - 两边**都** `declare` 的 intrinsic（驱动的量化用 `llvm.maxnum.v8f32`、我们的 `||`
+ *     也用它）：文本 IR 里两条 `declare` 的属性列表不一样就算 `invalid redefinition`
+ * 所以拼之前要剥这三样。我们自己发射的 IR 一个函数属性都不带，不需要剥。 */
 
 /** 把 clang 出的驱动 IR 改造成「能与我们的 frag 拼在一份 `.ll` 里」的样子。 */
-function jitReady(text) {
+function jitReady(text, frag) {
+  /* frag 里已经 declare 过的，驱动那一侧就得让位 —— 留下的是**没有属性**那一条。 */
+  const mine = new Set([...frag.matchAll(/^declare\s+.*?(@[\w.]+)\(/gm)].map((m) => m[1]));
   return text.split('\n')
     .filter((l) => !/^declare\s+void\s+@glsl_frag8\b/.test(l))
+    .filter((l) => {
+      const m = /^declare\s+.*?(@[\w.]+)\(/.exec(l);
+      return m === null || !mine.has(m[1]);
+    })
     .join('\n')
     .replaceAll('"probe-stack"="__chkstk_darwin" ', '');
 }
@@ -212,7 +220,8 @@ if (emitDrv.status !== 0) {
 } else if (typeof host !== 'string') {
   process.stdout.write(`  skip v2（ORC）：${host.why}\n`);
 } else {
-  writeFileSync(combPath, `${jitReady(readFileSync(drvLl, 'utf8'))}\n${readFileSync(llPath, 'utf8')}`);
+  const frag = readFileSync(llPath, 'utf8');
+  writeFileSync(combPath, `${jitReady(readFileSync(drvLl, 'utf8'), frag)}\n${frag}`);
   const [code, out, , err] = jitRun(host, combPath, ['samples', String(RES)]);
   if (code !== 0) {
     bad('v2（ORC）跑不动', `    exit=${code}\n    ${err.trim().split('\n').slice(0, 4).join('\n    ')}`);
@@ -261,6 +270,67 @@ if (emitDrv.status !== 0) {
       const mp = /MPix\/s (\S+)/.exec(bout);
       process.stdout.write(`  数    v2（ORC）${RES}²：${mp === null ? '?' : mp[1]} MPix/s（v1 那条的下限门是 ${FLOOR}）\n`);
     }
+  }
+}
+
+/* ---- 五、bool 那一格：三条路在同一份带 bool 的着色器上对齐 ----------------------
+ *
+ * `bench-bool.frag` 把 bool 的每一种来路都用上（比较、`&&`/`||`/`!`、`?:`、
+ * `isnan`/`isinf`、`lessThan` 那一族、`all`/`any`）。三条路各自算一遍：
+ *
+ *   参照实现（f64、只算 `?:` 的一支）  vs  v1（clang AOT）  vs  v2（ORC）
+ *
+ * 与参照实现比是**容差**（f32 对 f64），v1 与 v2 之间是**逐字节**。
+ * `?:` 在快路上两支都算，所以这一份里故意留了一处「不该走的那支会出 Inf」
+ * （`uv.x > 0.0 ? 1.0/uv.x : 0.0`）—— `select` 是逐道取值，算出来的那格选不中。
+ *
+ * uniform 签名必须与 `bench-simple.frag` 一样（`fast_driver.c` 的 in 布局是钉死的）。 */
+if (typeof host === 'string' && emitDrv.status === 0) {
+  const bmod = checked(join(CASES, 'bench-bool.frag'));
+
+  const blib = glslLower(bmod).trimEnd();
+  const bdrv = SX.map((x, i) => `    (let p${i} glsl_v4 (call glsl_frag (real ${x}) (real ${SY[i]}) (real ${RES}.0) (real ${RES}.0)))\n`
+    + `    (print (fld (var p${i}) c0))\n    (print (fld (var p${i}) c1))\n`
+    + `    (print (fld (var p${i}) c2))\n    (print (fld (var p${i}) c3))`).join('\n');
+  const bsx = join(OUT, 'bool-ref.sx');
+  writeFileSync(bsx, `${blib.slice(0, -1)}\n  (main\n${bdrv})\n)\n`);
+  const bref = spawnSync(process.execPath, [CLI, 'run', bsx], { encoding: 'utf8', maxBuffer: 1 << 26 });
+
+  const bll = join(OUT, 'bool.ll');
+  writeFileSync(bll, glslEmitLlvm(bmod));
+  const bexe = join(OUT, 'bool-fast');
+  const bbuild = spawnSync(cc, ['-O2', '-w', DRIVER, bll, '-lm', '-o', bexe], { encoding: 'utf8' });
+
+  if (bref.status !== 0) {
+    bad('bool：参照实现跑不动', `    ${(bref.stderr ?? '').trim().split('\n').slice(0, 4).join('\n    ')}`);
+  } else if (bbuild.status !== 0) {
+    bad('bool：快路编不过', `    ${(bbuild.stderr ?? '').trim().split('\n').slice(0, 6).join('\n    ')}`);
+  } else {
+    ok('bool：三条路都编出来了（参照实现 + emit_llvm）');
+    const want = bref.stdout.trim().split('\n').map(Number);
+    const b1 = spawnSync(bexe, ['samples', String(RES)], { encoding: 'utf8' });
+    const bcomb = join(OUT, 'bool-comb.ll');
+    const bfrag = readFileSync(bll, 'utf8');
+    writeFileSync(bcomb, `${jitReady(readFileSync(drvLl, 'utf8'), bfrag)}\n${bfrag}`);
+    const [c2, o2, , e2] = jitRun(host, bcomb, ['samples', String(RES)]);
+
+    if (b1.status !== 0) bad('bool：v1 跑不动', `    ${(b1.stderr ?? '').trim().slice(0, 200)}`);
+    else {
+      const got = b1.stdout.trim().split('\n').flatMap((l) => l.trim().split(/\s+/).map(Number));
+      const bads = [];
+      for (let i = 0; i < want.length && i < got.length; i++) {
+        const rel = Math.abs(want[i] - got[i]) / Math.max(1e-6, Math.abs(want[i]));
+        if (!(rel <= 1e-5)) bads.push(`第 ${i} 个（像素 ${Math.floor(i / 4)} 通道 ${i % 4}）：参照 ${want[i]}、快路 ${got[i]}`);
+      }
+      if (want.length !== got.length) bad('bool：两边的数不一样多', `    参照 ${want.length} 个、快路 ${got.length} 个`);
+      else if (bads.length > 0) bad('bool：v1 与参照实现对账', bads.slice(0, 6).map((s) => `    ${s}`).join('\n'));
+      else ok('bool：v1 与参照实现逐取样点对账（比较 / && || ! / ?: / isnan / isinf / lessThan / all any）');
+    }
+    if (c2 !== 0) bad('bool：v2（ORC）跑不动', `    exit=${c2}\n    ${e2.trim().split('\n').slice(0, 4).join('\n    ')}`);
+    else if (b1.status === 0 && o2.trim() !== b1.stdout.trim()) {
+      bad('bool：v2 与 v1 不是同一个答案',
+        `    v1 ${JSON.stringify(b1.stdout.trim().slice(0, 80))}\n    v2 ${JSON.stringify(o2.trim().slice(0, 80))}`);
+    } else ok('bool：v2（ORC）与 v1 逐字节相同');
   }
 }
 

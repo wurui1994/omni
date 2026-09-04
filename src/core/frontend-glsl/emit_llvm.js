@@ -106,10 +106,40 @@ class GlslLlvmEmitter {
     return this.emit(`call ${LL_VEC} @${fn}.v${GLSL_LANES}f32(${as})`);
   }
 
+  /* ---- bool 在快路里是「值只取 0.0 / 1.0 的 <8 x float>」 -----------------------
+   *
+   * 为什么不是 `<${GLSL_LANES} x i1>`：这一份从头到尾的表示是「一个分量 = 一段
+   * `<8 x float>` 的值文本」（标量也 splat 成同型，就为了省掉两套路径）。给 bool 单开
+   * 一种宽度就得给每个分量带上类型标签，那是把这二十来处全改一遍。
+   *
+   * 代价是不是真的：`select(c, 1.0, 0.0)` 后面紧跟 `fcmp une …, 0.0` 是 InstCombine
+   * 的标准折叠，会还原成 `c` 本身 —— 也就是说这种表示在 -O2 / ORC 之后大多不留痕迹。
+   * 「大多」不是「一定」，所以这一格的代价由**下限门**盯着（`fast.js` 那条 100 MPix/s）：
+   * 真掉下去了就说明折叠没发生，那时候再加类型标签，而不是现在先猜。
+   *
+   * 逻辑算符在这个表示下是算术：`&&` 是乘、`||` 是 max、`!` 是 `1 - x`。两边都是
+   * 0.0/1.0，所以在 f32 上全部精确，也不会有 NaN 冒出来（值只从 select 来）。 */
+
+  /** 一个 float-bool 分量 -> `<8 x i1>` 掩码。 */
+  mask(c) {
+    return this.emit(`fcmp une ${LL_VEC} ${c}, ${llSplat(0)}`);
+  }
+
+  /** `<8 x i1>` 掩码 -> float-bool 分量。 */
+  fromMask(m) {
+    return this.emit(`select <${GLSL_LANES} x i1> ${m}, ${LL_VEC} ${llSplat(1)}, ${LL_VEC} ${llSplat(0)}`);
+  }
+
+  /** 比较：`==`/`!=` 用**无序**那一档（与 C 的 `==`/`!=` 对 NaN 的结果一致）。 */
+  cmp(op, a, b) {
+    const pred = { '<': 'olt', '<=': 'ole', '>': 'ogt', '>=': 'oge', '==': 'oeq', '!=': 'une' }[op];
+    return this.fromMask(this.emit(`fcmp ${pred} ${LL_VEC} ${a}, ${b}`));
+  }
+
   /** 一个表达式 -> 分量数组（每格一段 `<8 x float>` 的值文本）。 */
   expr(e) {
     if (e.k === 'lit') {
-      if (e.ty.k === 'bool') throw new OmniError('glsl/llvm: 这一片不收 bool');
+      if (e.ty.k === 'bool') return [llSplat(e.v ? 1 : 0)];
       return [llSplat(Number(e.v))];
     }
     if (e.k === 'ref') return this.find(e.name);
@@ -130,15 +160,49 @@ class GlslLlvmEmitter {
     }
     if (e.k === 'cast' || e.k === 'convert') {
       /* 这一档只有 int <-> float，而两边都已经是 `<8 x float>` —— 整数在这条路上
-       * 就是「值恰好是整数的 float」。`int` 的位运算不在这一片里（明着不收）。 */
-      return this.expr(e.of);
+       * 就是「值恰好是整数的 float」。`int` 的位运算不在这一片里（明着不收）。
+       *
+       * bool 那两个方向都不用发指令：`float(b)` 要的 1.0/0.0 正好就是 float-bool 的
+       * 表示；`bool(x)` 只有 `x` 不是 0.0/1.0 时才要归一 —— 那一条走 `mask` 再回来。 */
+      const v = this.expr(e.of);
+      if (e.ty.k === 'bool' && e.of.ty !== undefined && e.of.ty.k !== 'bool') {
+        return v.map((c) => this.fromMask(this.mask(c)));
+      }
+      return v;
     }
     if (e.k === 'neg') {
       return this.expr(e.a).map((c) => this.emit(`fneg ${LL_VEC} ${c}`));
     }
     if (e.k === 'bin') {
+      /* 比较与逻辑：结果是 float-bool（见 `mask`/`cmp` 上面那段）。
+       * `&&`/`||` 在这里**两边都算** —— SIMD 上没有短路这回事（llvmpipe 也一样：
+       * 两支都算、靠掩码取）。值只取 0.0/1.0，所以 `*`/`max` 就是与/或。 */
+      if (e.op === '<' || e.op === '<=' || e.op === '>' || e.op === '>='
+        || e.op === '==' || e.op === '!=') {
+        const a = this.expr(e.a);
+        const b = this.expr(e.b);
+        if (a.length === 1 && b.length === 1) return [this.cmp(e.op, a[0], b[0])];
+        /* 向量的 `==`/`!=` 回一个标量 bool：逐格比完折起来（`==` 用与、`!=` 用或）。 */
+        const n = Math.max(a.length, b.length);
+        let acc = null;
+        for (let i = 0; i < n; i++) {
+          const c = this.cmp(e.op, a.length === 1 ? a[0] : a[i], b.length === 1 ? b[0] : b[i]);
+          acc = acc === null ? c
+            : (e.op === '==' ? this.bin('*', acc, c) : this.call1('llvm.maxnum', [acc, c]));
+        }
+        return [acc];
+      }
+      if (e.op === '&&') {
+        return [this.bin('*', this.expr(e.a)[0], this.expr(e.b)[0])];
+      }
+      if (e.op === '||') {
+        return [this.call1('llvm.maxnum', [this.expr(e.a)[0], this.expr(e.b)[0]])];
+      }
+      if (e.op === '^^') {
+        return [this.cmp('!=', this.expr(e.a)[0], this.expr(e.b)[0])];
+      }
       if (e.op !== '+' && e.op !== '-' && e.op !== '*' && e.op !== '/') {
-        throw new OmniError(`glsl/llvm: 这一片只收 + - * /，给的是 ${e.op}`);
+        throw new OmniError(`glsl/llvm: 这一片只收 + - * / 与比较、逻辑，给的是 ${e.op}`);
       }
       const a = this.expr(e.a);
       const b = this.expr(e.b);
@@ -146,6 +210,23 @@ class GlslLlvmEmitter {
       const out = [];
       for (let i = 0; i < n; i++) {
         out.push(this.bin(e.op, a.length === 1 ? a[0] : a[i], b.length === 1 ? b[0] : b[i]));
+      }
+      return out;
+    }
+    if (e.k === 'not') return [this.bin('-', llSplat(1), this.expr(e.a)[0])];
+    if (e.k === 'sel') {
+      /* `c ? a : b` -> 一条 `select`。**两支都算** —— 与 `lower.js` 那条路不同
+       * （那边刻意只算一支，理由写在它的 `sel()` 头上）。这一层没得选：8 道里可能
+       * 有的走这支、有的走那支。所以「不该走的那一支里有除零」在快路上会真的算出
+       * Inf/NaN —— 但 `select` 是逐道取值，算出来的那一格不会被选中，传不出去。 */
+      const m = this.mask(this.expr(e.c)[0]);
+      const a = this.expr(e.a);
+      const b = this.expr(e.b);
+      const n = Math.max(a.length, b.length);
+      const out = [];
+      for (let i = 0; i < n; i++) {
+        out.push(this.emit(`select <${GLSL_LANES} x i1> ${m}, `
+          + `${LL_VEC} ${a.length === 1 ? a[0] : a[i]}, ${LL_VEC} ${b.length === 1 ? b[0] : b[i]}`));
       }
       return out;
     }
@@ -232,6 +313,32 @@ class GlslLlvmEmitter {
       }
       return out;
     }
+    if (name === 'isnan') {
+      /* NaN 是唯一「无序于自己」的值 —— 一条 `fcmp uno`。 */
+      return args[0].map((c) => this.fromMask(this.emit(`fcmp uno ${LL_VEC} ${c}, ${c}`)));
+    }
+    if (name === 'isinf') {
+      /* `|x| == +Inf`。参照实现那条路写的是 `x == x && (x-x) != 0` —— 那是因为方言的
+       * `real` 是 f64，写死「最大有限值」会跟 f32 差一个数。这里宽度是定的（f32），
+       * 直接与 +Inf 比，两条在数学上完全等价，所以对账门照旧成立。 */
+      return args[0].map((c) => this.fromMask(
+        this.emit(`fcmp oeq ${LL_VEC} ${this.call1('llvm.fabs', [c])}, ${llSplat(Infinity)}`)));
+    }
+    const vcmp = { lessThan: '<', lessThanEqual: '<=', greaterThan: '>', greaterThanEqual: '>=', equal: '==', notEqual: '!=' }[name];
+    if (vcmp !== undefined) {
+      const out = [];
+      for (let i = 0; i < wide; i++) out.push(this.cmp(vcmp, at(0, i), at(1, i)));
+      return out;
+    }
+    if (name === 'all' || name === 'any') {
+      let acc = null;
+      for (const c of args[0]) {
+        acc = acc === null ? c
+          : (name === 'all' ? this.bin('*', acc, c) : this.call1('llvm.maxnum', [acc, c]));
+      }
+      return [acc === null ? llSplat(name === 'all' ? 1 : 0) : acc];
+    }
+    if (name === 'not') return args[0].map((c) => this.bin('-', llSplat(1), c));
     throw new OmniError(`glsl/llvm: 这一片还没接的内建 ${name}`);
   }
 
