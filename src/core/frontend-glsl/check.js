@@ -452,12 +452,33 @@ class GlslChecker {
     const h = glslHead(node);
     if (h === 'version') {
       const line = glslAtom(node.items[1]);
-      const m = /^#version\s+(\d+)/.exec(line);
+      const m = /^#\s*version\s+(\d+)\s*(\w+)?/.exec(line);
       if (m === null) throw this.err(node, `读不懂的版本行 '${line}'`);
       const v = Number(m[1]);
-      /* 认不出的版本**要骂**：悄悄按 330 编，等于把「这份源码用了 400 的东西」藏起来。 */
-      if (v !== 330) throw this.err(node, `只收 #version 330，给的是 ${v}`);
+      const profile = m[2] === undefined ? '' : m[2];
+      /* 认不出的版本**要骂**：悄悄按 330 编，等于把「这份源码用了 400 的东西」藏起来。
+       *
+       * 收两档：
+       *   `330` / `330 core` —— 桌面版，尺子那两份 python 脚本用的
+       *   `300 es`           —— GLSL ES 3.0，`grapheq.glsl` 用的
+       *
+       * 这两档在**这个子集里**没有需要分开处理的地方：ES 300 与 330 core 的语法、
+       * 内建面、`in`/`out` 接口都对得上（ES 没有 `gl_FragColor`，而我们本来就只走 `out`）。
+       * 唯一真差别是**精度限定符在 ES 上是有语义的**（`mediump` 在移动 GPU 上可能是 fp16），
+       * 而这一层一律按一种精度算 —— 那与 330 那一档的做法一致（`precision` 收下、不改计算），
+       * 也与我们的参照实现（f64）和快路（f32）本来就不同宽度这件事同一个立场。
+       * 「按 fp16 算」要的是另一条腿，不在这一刀里。
+       *
+       * `300` 不带 `es` 要骂：桌面 GLSL 没有 300 这个版本号，收下它等于替源码猜。 */
+      if (v === 300 && profile !== 'es') {
+        throw this.err(node, `#version 300 只存在于 GLSL ES（要写 '#version 300 es'），给的 profile 是 ${JSON.stringify(profile)}`);
+      }
+      if (v !== 330 && v !== 300) throw this.err(node, `只收 #version 330 与 #version 300 es，给的是 ${v}`);
+      if (v === 330 && profile !== '' && profile !== 'core') {
+        throw this.err(node, `#version 330 这一档只收 core profile，给的是 ${JSON.stringify(profile)}`);
+      }
       this.version = v;
+      this.profile = profile;
       return;
     }
     if (h === 'uniform' || h === 'uniform-at') {

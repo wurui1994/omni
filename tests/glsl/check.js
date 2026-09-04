@@ -222,6 +222,33 @@ for (const [name, src, stage, want] of [
   else ok(`拒：${name}`);
 }
 
+/* 版本行收两档：`330`/`330 core`（桌面，两份尺子用的）与 `300 es`（GLSL ES 3.0，
+ * `grapheq.glsl` 用的）。这两档在这个子集里没有需要分开处理的地方 —— 唯一真差别是
+ * 精度限定符在 ES 上有语义，而这一层一律按一种精度算（与 330 那一档同一个做法）。 */
+for (const [name, head] of [
+  ['#version 330', '#version 330\n'],
+  ['#version 330 core', '#version 330 core\n'],
+  ['#version 300 es', '#version 300 es\n'],
+]) {
+  try {
+    mod(`${head}out vec4 c;\nvoid main() { c = vec4(1.0); }\n`, 'frag');
+    ok(`收：${name}`);
+  } catch (e) { bad(`该收却拒了：${name}`, `    ${String(e.message ?? e).split('\n')[0]}`); }
+}
+
+for (const [name, head, want] of [
+  ['#version 300 不带 es', '#version 300\n', "只存在于 GLSL ES"],
+  ['#version 300 core', '#version 300 core\n', "只存在于 GLSL ES"],
+  ['#version 330 es', '#version 330 es\n', '只收 core profile'],
+  ['#version 400 core', '#version 400 core\n', '只收 #version 330 与 #version 300 es'],
+]) {
+  let msg = null;
+  try { mod(`${head}out vec4 c;\nvoid main() { c = vec4(1.0); }\n`, 'frag'); } catch (e) { msg = e.message; }
+  if (msg === null) bad(`该拒却收了：${name}`, '    一声没响');
+  else if (!msg.includes(want)) bad(`拒得不对：${name}`, `    要含「${want}」\n    实际：${msg.split('\n')[0]}`);
+  else ok(`拒：${name}`);
+}
+
 /* 没有 main 也要骂。 */
 {
   let msg = null;
