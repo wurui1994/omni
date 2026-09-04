@@ -68,6 +68,7 @@ const BUDGET = new Map([
   ['antialias/cap.glsl', 'discard：同上'],
   ['antialias/caps.glsl', 'discard：同上'],
   ['colormaps/user.glsl', 'discard：同上'],
+  ['transforms/viewport-clipping.glsl', 'discard：同上'],
   /* GLSL 1.20 的老写法与几处语法：都是「照着 llvmpipe 补齐」剩下的零头。 */
   ['colormaps/colormaps.glsl', '语法：`uniform sampler2D` / 老式限定符那一族还没接'],
   ['math/double.glsl', '语法：一条声明里多个变量（`float a, b;`）还没接'],
