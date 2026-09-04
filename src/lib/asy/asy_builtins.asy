@@ -3080,8 +3080,11 @@ private void asy__emitimg(drawop o, real s) {
   pair ax = p10 - p00;
   pair ay = p01 - p00;
   asy__out("gsave");
-  asy__out("[" + ps6(ax.x) + " " + ps6(ax.y) + " " + ps6(ay.x) + " " + ps6(ay.y)
-    + " " + ps6(p00.x) + " " + ps6(p00.y) + "] concat");
+  // `[` 之后有一个空格 —— asy 那边 `write(transform)` 就是这么印的（`[ 1 0 0 1 0 0]`），
+  // 按"数与算符"的流比的时候 `[0` 与 `[` + `0` 是两回事（量出来的：laserlattice 的首处差
+  // 就是 `#3730 参考 [ vs 我们 [0`）。
+  asy__out("[ " + ps(ax.x) + " " + ps(ax.y) + " " + ps(ay.x) + " " + ps(ay.y)
+    + " " + ps(p00.x) + " " + ps(p00.y) + "] concat");
   asy__out("/DeviceRGB setcolorspace");
   asy__out("<<");
   asy__out("/ImageType 1");

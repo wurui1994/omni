@@ -158,8 +158,9 @@ function pullImages(text) {
   const keep = [];
   for (const ln of out) {
     const t = ln.trim();
-    // 编码那两行摘掉：滤镜是编码细节，像素在上面单独比
-    if (t.startsWith('/DataSource') || t === '/FlateDecode') continue;
+    // 编码那两行摘掉：滤镜是编码细节，像素在上面单独比。参考那边 Flate 那一行是
+    // `/FlateDecode filter`（后面还跟着 filter），所以按前缀认，不是整行相等。
+    if (t.startsWith('/DataSource') || t.startsWith('/FlateDecode')) continue;
     keep.push(ln);
   }
   return { text: keep.join('\n'), imgs };
