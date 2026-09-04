@@ -25,6 +25,7 @@
 // 会被反复问，所以这一格是必须的。
 import { readFileSync, existsSync, readdirSync, mkdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { inflateSync } from 'node:zlib';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -116,6 +117,100 @@ function srcStamp() {
   walk(join(ROOT, 'src', 'lib'));
   stampMemo = h16(parts.join('|'));
   return stampMemo;
+}
+
+/**
+ * 位图那一档的口径（这一刀）：EPS 里 `/ImageType 1 … image <ASCII85>~>` 那几块**不比字节流，
+ * 比解出来的像素**。
+ *
+ * 为什么必须换：参考那一侧多一层 `/FlateDecode`（asy 压过），我们只发 `/ASCII85Decode` ——
+ * 那一段字节两边**必然不同**，按 token 比等于把"图对不对"永远判成"结构不同"。而解出来
+ * 之后是能逐字节对账的（量过：laserlattice 四块 256x256 的图与参考逐字节相同）。
+ *
+ * 回两样：把数据段与**编码那两行**（`/DataSource …` 与 `/FlateDecode`）摘掉之后的正文
+ * （于是 Width/Height/BitsPerComponent/Decode/ImageMatrix 与 concat 矩阵照旧参与比较 ——
+ * 那些是真的几何），以及每一块图解出来的像素。
+ */
+function pullImages(text) {
+  const imgs = [];
+  const out = [];
+  const lines = text.split('\n');
+  let i = 0;
+  while (i < lines.length) {
+    const ln = lines[i];
+    if (ln.trim() !== 'image') { out.push(ln); i++; continue; }
+    // `image` 之后一直到 `~>` 为止是数据段
+    out.push(ln);
+    i++;
+    const data = [];
+    while (i < lines.length && lines[i].indexOf('~>') < 0) { data.push(lines[i]); i++; }
+    if (i < lines.length) { data.push(lines[i].slice(0, lines[i].indexOf('~>'))); i++; }
+    // 这一块要不要 inflate：往上找最近那几行里有没有 FlateDecode
+    let flate = false;
+    for (let k = out.length - 1; k >= 0 && k > out.length - 12; k--) {
+      if (out[k].indexOf('FlateDecode') >= 0) flate = true;
+    }
+    let raw = a85(data.join(''));
+    if (flate) { try { raw = inflateSync(raw); } catch { raw = Buffer.alloc(0); } }
+    imgs.push(raw);
+    out.push('%IMGDATA');
+  }
+  const keep = [];
+  for (const ln of out) {
+    const t = ln.trim();
+    // 编码那两行摘掉：滤镜是编码细节，像素在上面单独比
+    if (t.startsWith('/DataSource') || t === '/FlateDecode') continue;
+    keep.push(ln);
+  }
+  return { text: keep.join('\n'), imgs };
+}
+
+/** ASCII85 解码（`z` 是四个零字节，末组按 'u' 补齐） */
+function a85(s) {
+  const out = [];
+  let t = 0;
+  let n = 0;
+  for (const ch of s) {
+    if (ch === '~') break;
+    if (ch === 'z' && n === 0) { out.push(0, 0, 0, 0); continue; }
+    const c = ch.charCodeAt(0);
+    if (c < 33 || c > 117) continue;
+    t = t * 85 + (c - 33);
+    n++;
+    if (n === 5) {
+      out.push(Math.floor(t / 16777216) & 255, (t >>> 16) & 255, (t >>> 8) & 255, t & 255);
+      t = 0;
+      n = 0;
+    }
+  }
+  if (n > 0) {
+    for (let k = n; k < 5; k++) t = t * 85 + 84;
+    const b = [Math.floor(t / 16777216) & 255, (t >>> 16) & 255, (t >>> 8) & 255, t & 255];
+    for (let k = 0; k < n - 1; k++) out.push(b[k]);
+  }
+  return Buffer.from(out);
+}
+
+/** 两侧的位图逐块比。回 null 表示一样，否则回那句话。 */
+function cmpImages(a, b) {
+  if (a.length !== b.length) return `位图块数 ${a.length} vs ${b.length}`;
+  for (let k = 0; k < a.length; k++) {
+    if (a[k].length !== b[k].length) {
+      return `第 ${k} 块位图字节数 ${a[k].length} vs ${b[k].length}`;
+    }
+    let diff = 0;
+    let mx = 0;
+    let at = -1;
+    for (let i = 0; i < a[k].length; i++) {
+      const d = Math.abs(a[k][i] - b[k][i]);
+      if (d !== 0) { diff++; if (at < 0) at = i; }
+      if (d > mx) mx = d;
+    }
+    if (diff !== 0) {
+      return `第 ${k} 块位图 ${diff}/${a[k].length} 个字节不同（最大差 ${mx}，首处第 ${at} 个）`;
+    }
+  }
+  return null;
 }
 
 /** 一份 EPS -> "数 + 运算符"的流。第三格只用来打诊断（原样那一串）。 */
@@ -299,11 +394,21 @@ for (const n of names) {
     if (r.slow) o = { kind: 'slow', note: `超过 ${LIMIT}ms` };
     else if (r.out.indexOf('%%EOF') < 0) o = { kind: 'nogo', note: why(r) };
     else {
-      const c = cmp(toks(readFileSync(rp, 'utf8')), toks(r.out));
-      if (c.bad === 0) o = { kind: 'same', note: '' };
+      // 位图那几块先摘出来单独比（见 pullImages）：滤镜不同，字节流两边必然不同，
+      // 但解出来的像素是能逐字节对账的。
+      const R = pullImages(readFileSync(rp, 'utf8'));
+      const M = pullImages(r.out);
+      const ib = cmpImages(R.imgs, M.imgs);
+      const c = cmp(toks(R.text), toks(M.text));
+      if (c.bad === 0 && ib === null) o = { kind: 'same', note: '' };
+      else if (c.bad === 0) o = { kind: 'num', note: `矢量那半边一样，${ib}` };
       else if (c.len[0] !== c.len[1]) {
-        o = { kind: 'struct', note: `长度 ${c.len[0]} vs ${c.len[1]}，首处 ${c.first}` };
-      } else o = { kind: 'num', note: `${c.bad} 处数值不同，首处 ${c.first}` };
+        o = { kind: 'struct',
+          note: `长度 ${c.len[0]} vs ${c.len[1]}，首处 ${c.first}${ib === null ? '' : `；${ib}`}` };
+      } else {
+        o = { kind: 'num',
+          note: `${c.bad} 处数值不同，首处 ${c.first}${ib === null ? '' : `；${ib}`}` };
+      }
     }
     remember(n, p, o);
   }
