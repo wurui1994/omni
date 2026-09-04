@@ -43,6 +43,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+/* 多线程渲一帧（行块队列）要这两个：pthread 与 `_SC_NPROCESSORS_ONLN`。 */
+#include <pthread.h>
+#include <unistd.h>
 
 typedef float f8 __attribute__((ext_vector_type(8)));
 typedef void (*frag8_fn)(const f8 *in, f8 *out);
@@ -247,30 +250,36 @@ int png_write_rgba(const char *path, const unsigned char *rgba, int w, int h);
 #define OMNI_MAX_SLOTS 64
 
 /**
- * 渲染一帧写 PNG。
+ * 一条**行块队列**：所有线程从同一个计数器上抢 `RENDER_BLOCK` 行。
  *
- * uniform 的值由**命令行**按声明次序逐格给 —— 宿主不认识 GLSL，不该去猜哪个 uniform
- * 占几格。谁知道布局？发 IR 的那一侧（`omni run`）。这条分工与「IR 走 stdin」是同一个
- * 道理：宿主只做"一个进程、不落盘、按指针调用"这三件事。
+ * 为什么是动态抢而不是「一人一段」：像素的代价**不均匀**（掩码一收，一整块就便宜），
+ * 平分行数会让某个线程干两倍的活。llvmpipe 那一侧也是一个共享的 tile 队列（`lp_rast`
+ * 的调度器），这儿抄的是它那条「谁空谁取下一块」。
  *
- * **行序要翻**：`gl_FragCoord.y = 0` 是画布最下面（见 ADR「量：gl_FragCoord.y 与缓冲
- * 行序」），而 PNG 的第 0 行是最上面。所以第 py 行写到 `h - 1 - py`。
+ * 线程数：`OMNI_GLSL_THREADS` 优先，否则 `_SC_NPROCESSORS_ONLN`（夹在 1～64）。
  */
-static int render(frag8_fn frag, int w, int h, const char *path,
-                  const float *uni, int nUni) {
-  if (w <= 0 || h <= 0 || 2 + nUni > OMNI_MAX_SLOTS) return 64;
-  unsigned char *rgba = (unsigned char *)malloc((size_t)w * (size_t)h * 4);
-  if (rgba == NULL) return 70;
+#define RENDER_BLOCK 8
+
+typedef struct {
+  frag8_fn frag;
+  int w, h, nUni;
+  const float *uni;
+  unsigned char *rgba;
+  int next;            /* 下一块的起始行 —— 只用 __atomic_fetch_add 动它 */
+} render_job;
+
+/** 渲一块行（`[y0, y1)`）。写的是各自不相交的行，所以一把锁都不要。 */
+static void render_rows(render_job *j, int y0, int y1) {
   const f8 lane = { 0, 1, 2, 3, 4, 5, 6, 7 };
-  double t0 = now_ms();
-  for (int py = 0; py < h; py++) {
+  int w = j->w;
+  for (int py = y0; py < y1; py++) {
     f8 in[OMNI_MAX_SLOTS], out[4];
     in[1] = (f8)((float)py + 0.5f);
-    for (int u = 0; u < nUni; u++) in[2 + u] = (f8)uni[u];
-    unsigned char *row = rgba + (size_t)(h - 1 - py) * (size_t)w * 4;
+    for (int u = 0; u < j->nUni; u++) in[2 + u] = (f8)j->uni[u];
+    unsigned char *row = j->rgba + (size_t)(j->h - 1 - py) * (size_t)w * 4;
     for (int px = 0; px < w; px += 8) {
       in[0] = (f8)((float)px + 0.5f) + lane;
-      frag(in, out);
+      j->frag(in, out);
       int n = w - px < 8 ? w - px : 8;
       for (int l = 0; l < n; l++) {
         for (int c = 0; c < 4; c++) {
@@ -282,6 +291,67 @@ static int render(frag8_fn frag, int w, int h, const char *path,
       }
     }
   }
+}
+
+static void *render_worker(void *p) {
+  render_job *j = (render_job *)p;
+  for (;;) {
+    int y0 = __atomic_fetch_add(&j->next, RENDER_BLOCK, __ATOMIC_RELAXED);
+    if (y0 >= j->h) return NULL;
+    int y1 = y0 + RENDER_BLOCK < j->h ? y0 + RENDER_BLOCK : j->h;
+    render_rows(j, y0, y1);
+  }
+}
+
+static int render_threads(void) {
+  const char *e = getenv("OMNI_GLSL_THREADS");
+  long n = e != NULL && *e != '\0' ? strtol(e, NULL, 10) : sysconf(_SC_NPROCESSORS_ONLN);
+  if (n < 1) n = 1;
+  if (n > 64) n = 64;
+  return (int)n;
+}
+
+/**
+ * 渲染一帧写 PNG。
+ *
+ * uniform 的值由**命令行**按声明次序逐格给 —— 宿主不认识 GLSL，不该去猜哪个 uniform
+ * 占几格。谁知道布局？发 IR 的那一侧（`omni run`）。这条分工与「IR 走 stdin」是同一个
+ * 道理：宿主只做"一个进程、不落盘、按指针调用"这三件事。
+ *
+ * **行序要翻**：`gl_FragCoord.y = 0` 是画布最下面（见 ADR「量：gl_FragCoord.y 与缓冲
+ * 行序」），而 PNG 的第 0 行是最上面。所以第 py 行写到 `h - 1 - py`。
+ *
+ * **多线程**：行块队列（见 `render_job`）。每道 8 个像素的那个函数是纯的（局部量都在
+ * 它自己的栈上，模块级变量在快路上也是 `alloca`），所以并行不改一个字节 —— 那一条由
+ * `tests/glsl/examples.js` 钉着（27 张图与真 GPU 逐字节相同，线程数换了照样相同）。
+ */
+static int render(frag8_fn frag, int w, int h, const char *path,
+                  const float *uni, int nUni) {
+  if (w <= 0 || h <= 0 || 2 + nUni > OMNI_MAX_SLOTS) return 64;
+  unsigned char *rgba = (unsigned char *)malloc((size_t)w * (size_t)h * 4);
+  if (rgba == NULL) return 70;
+  render_job job;
+  job.frag = frag;
+  job.w = w;
+  job.h = h;
+  job.nUni = nUni;
+  job.uni = uni;
+  job.rgba = rgba;
+  job.next = 0;
+  int nt = render_threads();
+  double t0 = now_ms();
+  if (nt <= 1) {
+    render_rows(&job, 0, h);
+  } else {
+    pthread_t th[64];
+    int made = 0;
+    for (int i = 0; i < nt - 1; i++) {
+      if (pthread_create(&th[made], NULL, render_worker, &job) == 0) made++;
+    }
+    render_worker(&job);   /* 主线程也是一个工人 */
+    for (int i = 0; i < made; i++) pthread_join(th[i], NULL);
+    nt = made + 1;
+  }
   double ms = now_ms() - t0;
   int rc = png_write_rgba(path, rgba, w, h);
   free(rgba);
@@ -290,7 +360,7 @@ static int render(frag8_fn frag, int w, int h, const char *path,
     return 74;
   }
   fprintf(stderr, "render_ms %.3f\n", ms);
-  printf("render_ms %.3f\n%s %dx%d\n", ms, path, w, h);
+  printf("render_ms %.3f\nthreads %d\n%s %dx%d\n", ms, nt, path, w, h);
   return 0;
 }
 
