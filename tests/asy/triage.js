@@ -242,6 +242,28 @@ if (mode === 'static') {
   mkdirSync(WORK, { recursive: true });
   const t0 = Date.now();
   const rows = await timeAll(names, who, dir, save);
+  /* **超时的一律串行复核**（量出来必须有这一步）：并行时被打死的那些里有一大半是
+   * 被并行度冤枉的 —— 这台机器 8 个逻辑核里只有 4 个性能核，而 asy 排标签要跑 LaTeX、
+   * TeX 的临时文件还会互相撞。量到的两组例子：
+   *   我们这一侧：BezierSaddle 6 路 >5049ms / 单跑 1902ms，gamma >5042 / 2323，
+   *               SierpinskiGasket >5046 / 4231，label3zoom >5023 / 3844
+   *   真 asy 那一侧：arrows3 / cheese / cones / magnetic / near_earth 并行时记成"报错"，
+   *               串行全是 exit=0、EPS 照出
+   * 所以"超过 LIMIT"这个结论只有**串行**下才作数。复核只跑被打死的那几个，代价很小。 */
+  const suspect = rows.filter((r) => r.killed).map((r) => r.name);
+  const fixed = [];
+  if (suspect.length > 0) {
+    process.stderr.write(`  ---- 串行复核 ${suspect.length} 个超时的（并行会冤枉例子）\n`);
+    for (const nm of suspect) {
+      const r2 = await runOne(nm, who, dir);
+      save(r2);
+      const i = rows.findIndex((x) => x.name === nm);
+      rows[i] = r2;
+      if (!r2.killed) fixed.push(`${nm} ${r2.ms}ms`);
+      process.stderr.write(`       ${nm.padEnd(24)} ${(r2.killed ? `>${LIMIT}` : String(r2.ms)).padStart(6)}ms`
+        + ` ${r2.eps ? 'eps' : (r2.ok ? 'ok ' : '--')}\n`);
+    }
+  }
   const wall = Date.now() - t0;
   rows.sort((a, b) => b.ms - a.ms);
   rmSync(WORK, { recursive: true, force: true });
@@ -252,7 +274,8 @@ if (mode === 'static') {
     + `（并行 ${JOBS}，CPU 时间之和 ${(sum / 1000).toFixed(1)}s）`
     + `，超过 ${LIMIT}ms 被打死的 ${kill.length} 个`);
   console.log(`  最慢十个：${rows.slice(0, 10).map((r) => `${r.name} ${r.killed ? '>' : ''}${r.ms}`).join('  ')}`);
-  if (kill.length > 0) console.log(`  被打死的：${kill.map((r) => r.name).join(' ')}`);
+  if (fixed.length > 0) console.log(`  并行冤枉的（串行其实在限内）：${fixed.join('  ')}`);
+  if (kill.length > 0) console.log(`  真超时的（串行复核过）：${kill.map((r) => r.name).join(' ')}`);
 } else if (mode === 'report') {
   /* 把两侧量到的数与静态分类拼成一张表。零成本，随时可看。 */
   const dir = process.argv[3] === undefined ? EXDIR : process.argv[3];
@@ -306,37 +329,61 @@ if (mode === 'static') {
   /* 生成 oracle：把真 asy 出的 EPS 落进 `.omni-cache/epsref/`（`eps.js` 只读那儿）。
    *
    * 为什么不用 `eps.js` 的 `OMNI_EPS_GEN=1`：那一份是**串行**的，量过 5 分多钟。
-   * 这一份并行跑，而且**先看 `time asy` 量到的结果**，真 asy 自己出不了图的直接跳过 ——
-   * 那些例子在 5s 预算下本来就不进对照，何必再等它一遍超时。 */
+   *
+   * **一个都不跳过**：从前这儿会先看 `time asy` 的结果、真 asy 出不了图的就不试 ——
+   * 那是错的。理由有两条，都是量出来的：
+   *   1. "真 asy 出不了图"这个判据本身会被**并行度污染**。arrows3 / cheese / cones /
+   *      magnetic / near_earth 这五个要跑 LaTeX 排标签，6 路并行时 TeX 的临时文件互相
+   *      撞，于是被记成"报错"；串行重跑全是 exit=0、EPS 照出。
+   *   2. 就算真的出不了，那也是**要分析和处置**的一格（缺哪个外部工具、缺哪份数据、
+   *      还是要缩规模），不是跳过就算完。
+   * 所以这儿一律试一遍，出不了图的按名字记下来，交给上层去逐个处置。
+   * asy 那一侧的上限**照旧是 LIMIT**（不放开）：oracle 也得在同一条线内出得来，
+   * 出不来就说明这个例子要缩规模，而不是把尺子放宽。 */
   const dir = process.argv[3] === undefined ? EXDIR : process.argv[3];
   const REF = join(ROOT, '.omni-cache', 'epsref');
   mkdirSync(REF, { recursive: true });
-  const q = join(TIMEDIR, 'asy.json');
-  const A = existsSync(q) ? JSON.parse(readFileSync(q, 'utf8')) : {};
   const all = allNames(dir);
-  const todo = all.filter((n) => {
-    if (existsSync(join(REF, `${n}.eps`)) && statSync(join(REF, `${n}.eps`)).size > 0) return false;
-    const a = A[n];
-    return a === undefined || (a.ok && !a.killed);
-  });
-  console.log(`oracle：要生成 ${todo.length} 个（共 ${all.length}，`
-    + `已有 ${all.filter((n) => existsSync(join(REF, `${n}.eps`))).length}，`
-    + `真 asy 自己出不了图、跳过的 ${all.length - todo.length
-      - all.filter((n) => existsSync(join(REF, `${n}.eps`))).length}）`);
+  const has = (n) => existsSync(join(REF, `${n}.eps`)) && statSync(join(REF, `${n}.eps`)).size > 0;
+  const todo = all.filter((n) => !has(n));
+  console.log(`oracle：要试 ${todo.length} 个（共 ${all.length}，已有 ${all.length - todo.length}），`
+    + `上限 ${LIMIT}ms、并行 ${JOBS}`);
   rmSync(WORK, { recursive: true, force: true });
   mkdirSync(WORK, { recursive: true });
   const t0 = Date.now();
   let made = 0;
-  let miss = 0;
+  const miss = [];
   await timeAll(todo, 'asy', dir, (r) => {
     const src = join(WORK, r.name, `${r.name}.eps`);
     if (existsSync(src) && statSync(src).size > 0) {
       renameSync(src, join(REF, `${r.name}.eps`));
       made++;
-    } else miss++;
+    } else miss.push(r.name);
   });
+  /* 没出图的**串行再试一遍**（与 `time` 那一模式同一条规矩）：并行时 LaTeX 的临时文件
+     会撞，量到过五个例子被冤枉。上限照旧不放开。 */
+  if (miss.length > 0) {
+    process.stderr.write(`  ---- 串行复核 ${miss.length} 个没出图的\n`);
+    const still = [];
+    for (const nm of miss) {
+      const r2 = await runOne(nm, 'asy', dir);
+      const src = join(WORK, nm, `${nm}.eps`);
+      if (existsSync(src) && statSync(src).size > 0) {
+        renameSync(src, join(REF, `${nm}.eps`));
+        made++;
+        process.stderr.write(`       ${nm.padEnd(24)} ${String(r2.ms).padStart(6)}ms 出图了（并行冤枉的）\n`);
+      } else {
+        still.push(`${nm}${r2.killed ? `(超${LIMIT}ms)` : '(exit)'}`);
+        process.stderr.write(`       ${nm.padEnd(24)} ${(r2.killed ? `>${LIMIT}` : String(r2.ms)).padStart(6)}ms 仍没出图\n`);
+      }
+    }
+    miss.length = 0;
+    for (const s of still) miss.push(s);
+  }
   rmSync(WORK, { recursive: true, force: true });
-  console.log(`\noracle：生成 ${made} 份、没出图 ${miss} 份，墙上 ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+  console.log(`\noracle：生成 ${made} 份，没出图 ${miss.length} 份，`
+    + `墙上 ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+  if (miss.length > 0) console.log(`  没出图的（要逐个处置，不是跳过）：${miss.join(' ')}`);
 } else {
   console.error('用法：node tests/asy/triage.js static|time|report|gen [asy|mine] [目录]');
   process.exit(2);

@@ -8867,3 +8867,61 @@ SierpinskiGasket      5003ms       编不过（clang 拒了 C 后端发出来的
 那是下一刀，不是换后端。
 
 <!-- ADR-0014 examples 的时间-END -->
+
+## 落地：把「真 asy 出不了图」逐个查清 —— 21 个是我自己量错了
+
+上一节里我按 `time asy` 的结果把 42 个例子归成"真 asy 自己不行、不进对照"，并且在
+`triage.js gen` 里**跳过**了它们。那是错的，两条理由都量出来了。
+
+### 错法一：并行度会把"出不了图"这个判据也污染掉
+
+串行、同一个 5s 上限重量那 42 个，**21 个其实出图了**：
+
+```
+AiryDisk 3833  Klein 2906  SierpinskiSponge 1658  bars3 2703  cos3 1880
+curvedlabel3 2063  elevation 1742  equilchord 1169  exp3 1963  extrudedcontour 3577
+fin 1405  gamma3 3230  genusthree 2104  genustwo 2267  hyperboloid 1484  trefoilknot 4832
+arrows3 1580  cheese 2640  cones 1377  magnetic 1481  near_earth 1266     （单位 ms，全 exit=0）
+```
+
+原因很具体：这些例子要跑 LaTeX 排标签，而**并行时 TeX 的临时文件互相撞** —— 我给了每个
+例子独立的 cwd，但 TeX 那一趟的临时文件不在 cwd 里。于是 asy 退非零，被记成"报错"。
+
+修法进了两处，规矩是「**超时/失败一律串行复核**」：`time` 模式在并行趟之后把被打死的
+那些一个个串行重跑（`triage.js` 那一段），`gen` 模式对没出图的那些同样再串行试一遍。
+上限**照旧不放开** —— 复核只是去掉并行噪声，不是把尺子放宽。
+
+于是 oracle 从 170 份涨到 **195 份**。
+
+### 错法二：出不了图也得逐个说清原因，不能记一句"不行"
+
+剩下 25 份，每一条都有实证的错因（`asy -noV -f eps` 的原话）：
+
+- **本来就不该出图**（例子自己没有图）
+  - `cpkcolors`：261 行、**0 处绘图** —— 是一张颜色表，被别人 `import`
+  - `odetest`：43 行、0 处绘图 —— 只 `write` 数值
+- **例子自己钉死了非 EPS 的管线**
+  - `annotation`：第 2 行 `settings.outformat="pdf"`
+  - `layers`：第 2 行 `settings.tex="pdflatex"` + `usepackage("ocgx2")`；
+    `-f eps` 走的是 latex→dvips，于是 `plain_shipout.asy:126 runtime: shipout failed`
+  - `poster` / `slidedemo`：`import slide` + `orientation=Landscape` —— 幻灯是**多页**，
+    EPS 一份只能装一页
+  - `NURBScurve` / `NURBSsphere` / `NURBSsurface`：NURBS 要 PRC，同一条 `shipout failed`
+- **环境缺件**（不是例子的问题，也不是我们的问题）
+  - `contextfonts`：`Cannot execute context` —— 没装 ConTeXt 引擎
+  - `teapotIBL`：`EXR file not found: /snowyField/diffuse.exr` —— IBL 图目录要另外下载
+  - `triceratops`：`Cannot open file "triceratops.obj"` —— 模型文件没随例子发
+    （例子目录里只有 `galleon.obj` / `uhrturm.obj`）
+  - `mosaic` / `worksheet`：`kpathsea: Running mktextfm pplr7t` / `phvr7t` ——
+    这台机器装的是 texlive-basic，缺 URW Palladio / Helvetica 的 Type1 字体，
+    METAFONT 现造，慢到超限。**这一格的时间读数因此不稳**（同一个例子两趟能从
+    282ms 的 `shipout failed` 变成 >5000ms），字体一装就好
+- **还要继续查的**：`curvedlabel` / `spectrum` / `electromagnetic` / `functionshading` /
+  `slope` / `filesurface` / `smoothelevation` / `pdb` / `BezierSurface` / `spring` /
+  `triads` / `lowupint` / `fequlogo`（`_texpath` 那一路）
+
+后一批里 `filesurface` / `functionshading` / `slope` / `smoothelevation` / `pdb` 是
+**串行也确实超 5s** 的（5021 / 5089 / 5028 / 5041 / 5066 ms），处置办法与 `splitpatch`
+`interpolate1` 一样：**缩规模到两边都在限内**，两侧跑同一份缩小后的源码，对照仍成立。
+
+<!-- ADR-0014 逐个查清出不了图的-END -->
