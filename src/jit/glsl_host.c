@@ -26,6 +26,7 @@
  *
  *   用法：
  *     omni-glsl-jit --samples RES        < frag.ll
+ *     omni-glsl-jit --render W H OUT.png [uniform 每一格…]  < frag.ll
  *     omni-glsl-jit --bench SIZE REPS    < frag.ll
  *
  *   印出来的 `compile_ms` 是**只量 Lookup 那一句**：ORC 是惰性物化的，编译就发生在那儿。
@@ -239,6 +240,60 @@ static int serve(LLVMOrcLLJITRef jit, LLVMOrcJITDylibRef jd) {
   return 0;
 }
 
+/* 渲染整幅 + 写一张 PNG（ADR-0019 决策九）。写盘那一步在 `png.c` 里。 */
+int png_write_rgba(const char *path, const unsigned char *rgba, int w, int h);
+
+/** 一批最多多少格 `in`：x、y 加上 uniform 的每一格。够 `grapheq.glsl` 用（它是 17）。 */
+#define OMNI_MAX_SLOTS 64
+
+/**
+ * 渲染一帧写 PNG。
+ *
+ * uniform 的值由**命令行**按声明次序逐格给 —— 宿主不认识 GLSL，不该去猜哪个 uniform
+ * 占几格。谁知道布局？发 IR 的那一侧（`omni run`）。这条分工与「IR 走 stdin」是同一个
+ * 道理：宿主只做"一个进程、不落盘、按指针调用"这三件事。
+ *
+ * **行序要翻**：`gl_FragCoord.y = 0` 是画布最下面（见 ADR「量：gl_FragCoord.y 与缓冲
+ * 行序」），而 PNG 的第 0 行是最上面。所以第 py 行写到 `h - 1 - py`。
+ */
+static int render(frag8_fn frag, int w, int h, const char *path,
+                  const float *uni, int nUni) {
+  if (w <= 0 || h <= 0 || 2 + nUni > OMNI_MAX_SLOTS) return 64;
+  unsigned char *rgba = (unsigned char *)malloc((size_t)w * (size_t)h * 4);
+  if (rgba == NULL) return 70;
+  const f8 lane = { 0, 1, 2, 3, 4, 5, 6, 7 };
+  double t0 = now_ms();
+  for (int py = 0; py < h; py++) {
+    f8 in[OMNI_MAX_SLOTS], out[4];
+    in[1] = (f8)((float)py + 0.5f);
+    for (int u = 0; u < nUni; u++) in[2 + u] = (f8)uni[u];
+    unsigned char *row = rgba + (size_t)(h - 1 - py) * (size_t)w * 4;
+    for (int px = 0; px < w; px += 8) {
+      in[0] = (f8)((float)px + 0.5f) + lane;
+      frag(in, out);
+      int n = w - px < 8 ? w - px : 8;
+      for (int l = 0; l < n; l++) {
+        for (int c = 0; c < 4; c++) {
+          float v = out[c][l];
+          /* NaN 落到 0：`v > 0` 对 NaN 是假，所以这个写法顺带把 NaN 也夹住了。 */
+          v = v > 0.0f ? (v < 1.0f ? v : 1.0f) : 0.0f;
+          row[(size_t)(px + l) * 4 + c] = (unsigned char)(v * 255.0f + 0.5f);
+        }
+      }
+    }
+  }
+  double ms = now_ms() - t0;
+  int rc = png_write_rgba(path, rgba, w, h);
+  free(rgba);
+  if (rc != 0) {
+    fprintf(stderr, "omni-glsl-jit: 写 %s 失败（png_write_rgba 回 %d）\n", path, rc);
+    return 74;
+  }
+  fprintf(stderr, "render_ms %.3f\n", ms);
+  printf("render_ms %.3f\n%s %dx%d\n", ms, path, w, h);
+  return 0;
+}
+
 int main(int argc, char **argv) {
   const char *mode = argc > 1 ? argv[1] : "--bench";
 
@@ -283,6 +338,16 @@ int main(int argc, char **argv) {
 
   if (strcmp(mode, "--samples") == 0) {
     samples(frag, argc > 2 ? (float)atoi(argv[2]) : 1024.0f);
+  } else if (strcmp(mode, "--render") == 0) {
+    /* omni-glsl-jit --render W H OUT.png [uniform 的每一格…] < frag.ll */
+    if (argc < 5) {
+      fprintf(stderr, "用法：omni-glsl-jit --render W H OUT.png [uniform 每一格…]\n");
+      return 64;
+    }
+    float uni[OMNI_MAX_SLOTS];
+    int nUni = 0;
+    for (int a = 5; a < argc && nUni < OMNI_MAX_SLOTS - 2; a++) uni[nUni++] = (float)atof(argv[a]);
+    return render(frag, atoi(argv[2]), atoi(argv[3]), argv[4], uni, nUni);
   } else {
     bench(frag, argc > 2 ? atoi(argv[2]) : 1024, argc > 3 ? atoi(argv[3]) : 3);
   }

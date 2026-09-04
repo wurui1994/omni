@@ -357,7 +357,9 @@ function findLlvmConfig() {
 /** 编出 C 宿主。按 [编译器, LLVM 版本, 源码] 做内容寻址缓存 —— 编它要一秒多。 */
 function buildGlslHost(lc) {
   const src = join(root, 'src', 'jit', 'glsl_host.c');
-  const text = readFileSync(src, 'utf8');
+  /* PNG 写盘（决策九）单独一份，宿主链进来 —— 不引 zlib。 */
+  const pngSrc = join(root, 'src', 'jit', 'png.c');
+  const text = readFileSync(src, 'utf8') + readFileSync(pngSrc, 'utf8');
   const ver = spawnSync(lc, ['--version'], { encoding: 'utf8' }).stdout.trim();
   const inc = spawnSync(lc, ['--includedir'], { encoding: 'utf8' }).stdout.trim();
   const lib = spawnSync(lc, ['--libdir'], { encoding: 'utf8' }).stdout.trim();
@@ -368,7 +370,7 @@ function buildGlslHost(lc) {
   const exe = join(dir, 'omni-glsl-jit');
   if (existsSync(exe)) return exe;
   mkdirSync(dir, { recursive: true });
-  const r = spawnSync(cc, ['-O2', '-w', '-I', inc, src, '-L', lib, '-lLLVM', '-lm',
+  const r = spawnSync(cc, ['-O2', '-w', '-I', inc, src, pngSrc, '-L', lib, '-lLLVM', '-lm',
     `-Wl,-rpath,${lib}`, '-o', exe], { encoding: 'utf8' });
   if (r.status !== 0) return { err: (r.stderr ?? '').trim().split('\n').slice(0, 6).join('\n    ') };
   return exe;
