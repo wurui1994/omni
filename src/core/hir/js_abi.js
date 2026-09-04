@@ -277,6 +277,10 @@ export const JS_ABI = {
   js_proc_args: { js: '$js_proc_args', c: 'omni_js_proc_args', arity: 0 },
   js_proc_cwd: { js: '$js_proc_cwd', c: 'omni_js_proc_cwd', arity: 0 },
   js_proc_env: { js: '$js_proc_env', c: 'omni_js_proc_env', arity: 1 },
+  /* 写宿主的一格环境（与上一条成一对，ADR-0015）。为什么要有"写"：CLI 的 `-f svg`
+   * 除了设自己进程里那一格，还要让 spawn 出去的 node / 链好的可执行文件都看见 ——
+   * 子进程继承环境，所以设一次就够，产物本身不必记住格式。 */
+  js_proc_set_env: { js: '$js_proc_set_env', c: 'omni_js_proc_set_env', arity: 2 },
   js_proc_stdout_write: { js: '$js_proc_stdout_write', c: 'omni_js_proc_stdout_write', arity: 1 },
   js_proc_stderr_write: { js: '$js_proc_stderr_write', c: 'omni_js_proc_stderr_write', arity: 1 },
   js_proc_exit_code: { js: '$js_proc_exit_code', c: 'omni_js_proc_exit_code', arity: 1 },

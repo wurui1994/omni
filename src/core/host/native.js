@@ -114,6 +114,16 @@ export function env(name) {
   return process.env[name];
 }
 
+/**
+ * 往宿主的环境里**设**一格。与 `env` 是一对，加它的理由是 ADR-0015 那一节：
+ * asy 的输出格式是**运行期**的值，CLI 的 `-f svg` 要做的事就是"设那一格"，
+ * 之后不论是本进程 eval 的 JS、spawn 出去的 node、还是链好的可执行文件，
+ * 读到的都是同一格（子进程继承环境）—— 产物里一个字节都不用记住格式。
+ */
+export function setEnv(name, value) {
+  process.env[name] = value;
+}
+
 export function stdout(s) {
   process.stdout.write(s);
   return undefined;

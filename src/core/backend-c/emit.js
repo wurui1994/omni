@@ -1204,6 +1204,7 @@ class CEmitter {
       case 'int_of_string': return `omni_int_of_string(${a[0]})`;
       case 'real_of_string': return `omni_real_of_string(${a[0]})`;
       case 'read_text': return `omni_read_text(${a[0]})`;
+      case 'get_env': return `omni_get_env(${a[0]})`;
       case 'write_text': return `omni_write_text(${a[0]}, ${a[1]})`;
       case 'run_proc': return `omni_run_proc(${a[0]})`;
       case 'len':

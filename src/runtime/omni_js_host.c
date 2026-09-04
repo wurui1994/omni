@@ -266,6 +266,17 @@ omni_dyn omni_js_proc_env(omni_dyn name) {
   return v ? s16_of_cstr(v) : omni_dyn_undef();
 }
 
+/* process.env.X = v 的单点写入（ADR-0015：`-f svg` 设的就是这一格）。
+   setenv 自己会把键与值各抄一份，所以 cpath 那两块临时内存不必留着。
+   第三个参数 1 = 覆盖已有的那一格 —— JS 侧 `process.env.X = v` 就是覆盖。
+   为什么要有"写"：格式是运行期的值，CLI 设一次，spawn 出去的子进程都继承。 */
+omni_dyn omni_js_proc_set_env(omni_dyn name, omni_dyn value) {
+  char *n = cpath(name);
+  char *v = cpath(value);
+  if (setenv(n, v, 1) != 0) omni_errorf("cannot set env '%s': %s", n, strerror(errno));
+  return omni_dyn_undef();
+}
+
 omni_dyn omni_js_proc_stdout_write(omni_dyn s) {
   omni_str u = omni_s16_to_utf8(omni_js_as_s16(s));
   if (u.len) fwrite(u.p, 1, (size_t)u.len, stdout);

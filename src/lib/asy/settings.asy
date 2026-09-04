@@ -16,7 +16,14 @@
 //                  interactiveView(1654)
 //   boolrefSetting: bw(1804) gray(1806) xasy(1839)
 
-string outformat = "";
+// `outformat` 的初值**从宿主来**，不是钉死的空串：真 asy 里这一格是 settings.cc 从 argv
+// 填的（`-f svg` 之后 `settings.outformat` 读出来就是 "svg"），也就是说它从来是**运行期**
+// 的值。我们这一侧那格运行期的值住在宿主的环境里（`_getsetting` -> 方言的 `(getenv E)`），
+// `_shipout` 读的是同一格 —— 所以程序里读 `settings.outformat` 与真正出的格式一定一致。
+// 没给 `-f` 就是空串，与真 asy 的默认档一样。
+// 还差一格：程序里 `settings.outformat = "pdf"` 只改这个变量，改不到宿主那一格 ——
+// 真 asy 那边两者是同一个 C++ 全局。要补得让这个名字变成"写宿主"的口子（ADR-0015）。
+string outformat = _getsetting("OMNI_ASY_OUTFORMAT");
 string autoimport = "";
 string command = "";
 string user = "";

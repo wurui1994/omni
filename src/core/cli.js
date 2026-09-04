@@ -10,7 +10,7 @@
 
 import {
   writeText, readText, exists, readDir, mtimeMs, fileSize, mkdirAll, rename,
-  args as procArgs, env, stdout, stderr, setExitCode, spawn, evalJs, hasJsEngine, nowMs,
+  args as procArgs, env, setEnv, stdout, stderr, setExitCode, spawn, evalJs, hasJsEngine, nowMs,
   cwd, installDir, isDir, writeBinary, readBinary,
 } from './host/native.js';
 import { join, basename, dirname, isAbsolute, resolve } from './host/path.js';
@@ -2170,6 +2170,48 @@ function runGlslFrag(path, rest) {
 }
 
 /**
+ * `omni run x.asy -f svg` / `omni run x.asy -o x.svg`（ADR-0015 那一节）。
+ *
+ * 这一段做的事只有一件：**设宿主的两格设置**（格式、落地文件名）。往下所有腿都是
+ * 从那两格读的 —— 本进程 eval 的 JS 读 `process.env`、spawn 出去的 node 与链好的
+ * 可执行文件继承环境。所以：
+ *   - 产物缓存的印记（`jsCacheStamp`）**一个字都不用改**：格式不进产物；
+ *   - 同一份编好的东西，`-f svg` 与不带 `-f` 跑的是同一个文件，只是设置不同。
+ * 这是量出来的判据：格式一旦住进某个模块的变量（或者往源码头上贴一句
+ * `asy__defaultformat = "svg";`），缓存就得按格式分叉 —— 那就是"被模块锁定"。
+ *
+ * 与真 asy 的对照：真 asy 的 `-f` 由 settings.cc 填 `settings::outformat`，
+ * 那也是个运行期的全局。`-o x.svg` 猜格式是**我们的加法**（真 asy 的 `-o` 只定名字），
+ * 理由是这一层只认两种格式，后缀已经把话说全了。
+ *
+ * 只认 eps 与 svg：别的（pdf/png…）这一层真的没有，猜一个"最像的"出去等于悄悄给错东西。
+ */
+function asyRunSetup(path, rest) {
+  if (!path.endsWith('.asy')) return;
+  const oi = rest.indexOf('-o');
+  const out = oi >= 0 ? rest[oi + 1] : null;
+  const fi = rest.indexOf('--format');
+  let fmt = fi >= 0 ? rest[fi + 1] : null;
+  if (fmt === null && out !== null) {
+    const dot = out.lastIndexOf('.');
+    const ext = dot < 0 ? '' : out.slice(dot + 1);
+    if (ext === 'svg') fmt = 'svg';
+    else if (ext === 'eps' || ext === 'ps') fmt = 'eps';
+    else {
+      throw new OmniError(`run ${basename(path)}: 从 '-o ${out}' 猜不出格式`
+        + '（这一层只有 .eps/.ps 与 .svg）—— 要么换个后缀，要么显式给 -f eps|svg');
+    }
+  }
+  if (fmt !== null && fmt !== 'eps' && fmt !== 'svg') {
+    throw new OmniError(`run ${basename(path)}: 没有 -f ${fmt} 这一格 —— `
+      + 'asy 这一层只出 eps 与 svg（真 asy 的 pdf/png 是再交给 gs/ImageMagick 的，'
+      + '那一路还没做）');
+  }
+  if (fmt !== null) setEnv('OMNI_ASY_OUTFORMAT', fmt);
+  if (out !== null) setEnv('OMNI_ASY_OUTNAME', out);
+}
+
+/**
  * 那份**默认 libc** —— tcc 在 `tcc_add_runtime` 里加的东西。
  *
  * macOS 上是 libSystem，我们经 SDK 的 `libc.tbd` 拿它的导出表（`macho_load_tbd`，
@@ -2576,6 +2618,14 @@ function main(argv) {
     const nf = mod.funcs === undefined ? 0 : mod.funcs.length;
     stdout(`ok  ${path}：${nf} 个函数（前端 + 检查器，没出产物）\n`);
     return 0;
+  }
+
+  /* `.asy` 的 `-f FMT` / `-o NAME`：设宿主那两格（格式与落地文件），见 asyRunSetup。
+   * 摆在 switch **之前**而不是 `case 'run'` 里：`--backend llvm/interp/c` 会把 `run` 换成
+   * 另一条 case（`run-llvm`/`interp`/`run-c`），摆在里头那几条腿就看不见 `-f` 了。
+   * 判据用 `node.key`（用户敲的那个动词），不是被改写过的 `cmd`。 */
+  if (node.key === 'run' && path !== undefined && path.endsWith('.asy')) {
+    asyRunSetup(path, rest);
   }
 
   switch (cmd) {

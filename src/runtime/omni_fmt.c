@@ -79,6 +79,15 @@ omni_str omni_read_text(omni_str path) {
   return omni_str_new(buf, (int64_t)got);
 }
 
+/* `(getenv E)`：读宿主的一格环境设置。没这一格回空串 —— "没设"是常态，调用方拿它当
+   "用默认值"（asy 的输出格式就是这么读的，见 ADR-0015）。getenv 回的那块内存是
+   environ 自己的，omni_str_new 会照抄一份，所以不用管它的生命周期。 */
+omni_str omni_get_env(omni_str name) {
+  const char *v = getenv(omni_cstr(name));
+  if (!v) return omni_str_new("", 0);
+  return omni_str_new(v, (int64_t)strlen(v));
+}
+
 /* `(writetext P E)`：整份写一份文本文件。回写进去的字节数。 */
 int64_t omni_write_text(omni_str path, omni_str text) {
   char *p = omni_cstr(path);

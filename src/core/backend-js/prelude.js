@@ -563,6 +563,12 @@ function $read_text(p) {
     $rt_error("cannot read '" + p + "': " + (e && e.code ? e.code : String(e)));
   }
 }
+// (getenv E)：读宿主的一格环境设置，没设就是空串（与 omni_get_env 一一对应）。
+// 这一格是"运行期才定的值"的唯一入口 —— asy 的输出格式走它（ADR-0015）。
+function $get_env(n) {
+  var v = process.env[n];
+  return v === undefined || v === null ? "" : v;
+}
 // (writetext P E)：整份写一份文本文件，回写进去的字节数。与 omni_write_text 一一对应。
 function $write_text(p, t) {
   try {
@@ -1754,6 +1760,8 @@ function $js_fs_realpath(p) { return $node("node:fs").realpathSync($js_asS16(p))
 function $js_proc_args() { return process.argv.slice(2); }
 function $js_proc_cwd() { return process.cwd(); }
 function $js_proc_env(n) { return process.env[$js_asS16(n)]; }
+// 写宿主的一格环境（ADR-0015）：-f svg 设的就是它，子进程继承。
+function $js_proc_set_env(n, v) { process.env[$js_asS16(n)] = $js_asS16(v); return undefined; }
 function $js_proc_stdout_write(s) { $print_raw($js_asS16(s)); return undefined; }
 function $js_proc_stderr_write(s) {
   // stdout 先落盘：诊断与正常输出的相对次序在快照测试里是要对上的（C 侧同样先 fflush）

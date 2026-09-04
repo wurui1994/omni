@@ -710,6 +710,21 @@ export function asyCall(L, n) {
     if (p === null) return null;
     return { code: `(readtext ${p.code})`, type: 'string' };
   }
+  // `_getsetting(name)`：读宿主的一格设置，**运行期**读，没设就是空串。方言的 `(getenv E)`。
+  // 与上面 `_searchpath` 刻意相反：那一格是编译期印成字面量的（路径进了产物缓存的键），
+  // 这一格**不能**是编译期的 —— 输出格式是运行期的值。真 asy 里格式根本不进程序：
+  // settings.cc 从 argv 填 settings::outformat，`_shipout` 的 C++ 侧当场去读那个全局。
+  // 我们没有"C++ 侧的全局"，宿主的环境格就是那个位置（ADR-0015）。
+  // 因此 `jsCacheStamp()` 一个字都不用改：同一份产物，换个格式再跑一趟就换个输出。
+  if (nm === '_getsetting') {
+    const raw = asyCallArgs(L, n);
+    if (raw === null) return null;
+    if (raw.length !== 1) return L.err(n, `'_getsetting' 要 1 个实参，给了 ${raw.length} 个`);
+    if (raw[0].lines !== null) for (const s of raw[0].lines) L.pre.push(s);
+    const p = L.coerce(raw[0].v, 'string', raw[0].node, "'_getsetting' 的实参");
+    if (p === null) return null;
+    return { code: `(getenv ${p.code})`, type: 'string' };
+  }
   // `_writetext(name, text)` / `_runproc(cmd)`：方言的 `(writetext P E)` / `(runproc CMD)`。
   // 名字带下划线是同一条规矩（base/ 里没有这两个名字）。**只有 lib/asy 里的 TeX 那一段
   // 用得到**：asy 的标签是 latex 排的、EPS 的最后一段字节是 dvips 写的，那条路上要

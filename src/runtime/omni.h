@@ -167,6 +167,8 @@ omni_str omni_str_string(omni_str v);
 omni_str omni_repr_real(double v);
 /* `(readtext E)`：整份读一份文本文件（读不到是运行期错误） */
 omni_str omni_read_text(omni_str path);
+/* `(getenv E)`：读宿主的一格环境设置，没设就是空串（**不报错**：没设是常态） */
+omni_str omni_get_env(omni_str name);
 /* `(writetext P E)`：整份写一份文本文件（写不下去是运行期错误），回写进去的字节数 */
 int64_t omni_write_text(omni_str path, omni_str text);
 /* `(runproc CMD)`：`/bin/sh -c CMD`，回退出码（跑不起来也回非 0，不报错） */
@@ -506,6 +508,7 @@ omni_dyn omni_js_i32_wrap(omni_dyn v);
 omni_dyn omni_js_fs_realpath(omni_dyn path);
 omni_dyn omni_js_proc_cwd(void);
 omni_dyn omni_js_proc_env(omni_dyn name);
+omni_dyn omni_js_proc_set_env(omni_dyn name, omni_dyn value);
 omni_dyn omni_js_proc_stdout_write(omni_dyn s);
 omni_dyn omni_js_proc_stderr_write(omni_dyn s);
 omni_dyn omni_js_proc_exit_code(omni_dyn n);

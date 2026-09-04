@@ -21,7 +21,7 @@
 //   ASYMPTOTE_DIR=<真 base> node tests/asy/svg.js <examples 目录> [名字…]
 //   OMNI_SVG_T=<毫秒>   一个例子最多跑多久（默认 3000）
 //   OMNI_SVG_N=<个数>   不给名字时只取前 N 个（默认 40 —— 这一轴要能反复问）
-import { readFileSync, existsSync, readdirSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync, mkdirSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -109,24 +109,38 @@ function wellformed(s) {
 }
 
 /**
- * 一趟 `omni run`。SVG 那一路靠在源文件前面加一句 `asy__defaultformat = "svg";`
- * （见 asy_builtins.asy 的那一格）—— 例子本身一个字不改，副本落在缓存目录里，
- * cwd 仍是 examples 目录，读数据文件的那些例子照旧能读到。
+ * 一趟 `omni run`。格式由 **`-f FMT`** 给 —— 那是运行期的一格宿主设置（ADR-0015），
+ * 例子本身一个字不改、也不做副本：编出来的东西与格式无关，同一份产物两种格式各跑一趟。
+ * 从前这儿是往源文件头上贴一句 `asy__defaultformat = "svg";` 再跑副本，那等于让
+ * 「编出来的东西」记住格式 —— 设计上的错，连测法一起改掉了。
  */
 function run(p, n, fmt) {
-  let file = p;
-  if (fmt === 'svg') {
-    mkdirSync(WORK, { recursive: true });
-    file = join(WORK, `${n}.asy`);
-    writeFileSync(file, `asy__defaultformat = "svg";\n${readFileSync(p, 'utf8')}`);
-  }
-  const r = spawnSync('node', [join(ROOT, 'src', 'core', 'cli.js'), 'run', file],
+  const r = spawnSync('node', [join(ROOT, 'src', 'core', 'cli.js'), 'run', p, '-f', fmt],
     { cwd: exDir, env, encoding: 'utf8', timeout: LIMIT, maxBuffer: 1 << 28 });
   const slow = r.signal === 'SIGTERM' || (r.error !== undefined && r.error !== null);
   if (slow) {
     spawnSync('pkill', ['-f', `${join(ROOT, '.omni-cache', 'asy-mods')}/main-`], { encoding: 'utf8' });
   }
   return { out: r.stdout ?? '', err: r.stderr ?? '', slow };
+}
+
+/**
+ * `-f svg` 与 `-o 名字.svg` 必须是**同一件事**（后缀猜格式），而且图落在那个文件里、
+ * 程序自己 write 的字仍旧走 stdout。这一条就是"格式没被模块锁定"的门：
+ * 两趟跑的是同一份产物（缓存的印记里没有格式），出来的字节要一样。
+ */
+function sameByOutName(p, n) {
+  mkdirSync(WORK, { recursive: true });
+  const out = join(WORK, `${n}.svg`);
+  const r = spawnSync('node', [join(ROOT, 'src', 'core', 'cli.js'), 'run', p, '-o', out],
+    { cwd: exDir, env, encoding: 'utf8', timeout: LIMIT, maxBuffer: 1 << 28 });
+  if (r.signal === 'SIGTERM' || (r.error !== undefined && r.error !== null)) return null;
+  if (!existsSync(out)) return `-o ${n}.svg 没落下文件`;
+  const viaOut = readFileSync(out, 'utf8');
+  const viaF = onlySvg(run(p, n, 'svg').out);
+  if (onlySvg(viaOut) !== viaF) return `-f svg 与 -o ${n}.svg 出来的字节不一样`;
+  if (viaOut.indexOf('<?xml') !== 0) return `-o ${n}.svg 落下的不是纯 SVG（前面混进了别的）`;
+  return null;
 }
 
 /** stdout 里那一段 SVG（例子自己 write 的东西落在前面） */
@@ -183,6 +197,7 @@ let ok = 0;
 let nogo = 0;
 let slow = 0;
 let partial = 0;
+let outname = 0;              // `-o 名字.svg` 那一条查过几份
 const bad = [];
 for (const n of names) {
   const p = join(exDir, `${n}.asy`);
@@ -196,6 +211,13 @@ for (const n of names) {
   const m = /viewBox="0 0 ([-\d.]+) ([-\d.]+)"/.exec(svg);
   if (m === null) { bad.push(`${n}: 没有 viewBox`); continue; }
   const svgwh = [Number(m[1]), Number(m[2])];
+  // `-f svg` == `-o 名字.svg`：头三份出得了图的例子上各查一趟就够（这一条问的是那两条
+  // 路子通不通、字节一不一样，与例子本身无关；每份多跑一趟 node 是真金白银）。
+  if (outname < 3) {
+    outname++;
+    const why = sameByOutName(p, n);
+    if (why !== null) bad.push(`${n}: ${why}`);
+  }
   const re = run(p, n, 'eps');
   const eps = onlyEps(re.out);
   if (eps.indexOf('%%EOF') < 0) { partial++; ok++; continue; }   // 只验了良构
@@ -217,6 +239,7 @@ for (const n of names) {
 rmSync(WORK, { recursive: true, force: true });
 console.log(`SVG 那一轴：对得上 ${ok}、对不上 ${bad.length}`
   + `（出不了图、这一轴不计分的 ${nogo} 份；超过 ${LIMIT}ms 的 ${slow} 份；`
-  + `只验了良构与画布的 ${partial} 份 —— EPS 那一路走的是 dvips，图元数天然不可比）`);
+  + `只验了良构与画布的 ${partial} 份 —— EPS 那一路走的是 dvips，图元数天然不可比；`
+  + `另外在 ${outname} 份上查过 -f svg == -o 名字.svg）`);
 for (const b of bad) console.log(`  ${b}`);
 process.exit(bad.length === 0 ? 0 : 1);

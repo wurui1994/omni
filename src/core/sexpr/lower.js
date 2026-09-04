@@ -1739,6 +1739,22 @@ class CoreLowerer {
       }
       return { kind: 'Builtin', name: 'read_text', args: [p], argType: STRING, type: STRING };
     }
+    // `(getenv E)`：读宿主的一格环境设置，没有这一格就是空串（**不是**运行期错误 ——
+    // "没设"是常态，调用方要能拿它当"用默认值"）。方言里读宿主设置只有这一个口子。
+    // 为什么要有：被降级的语言那一侧有些值是**运行期**才定的，不属于任何模块 ——
+    // asy 的输出格式（真 asy 是 settings.cc 从 argv 填 settings::outformat，程序里读的是
+    // 那个运行期全局）就是这一格。把它塞进某个模块的变量、或往源码头上贴一句，都等于
+    // 让"编出来的东西"记住格式；这条原语让格式重新回到运行期（ADR-0015 那一节）。
+    // 三条腿一份语义：$get_env / omni_get_env / env()。
+    if (h === 'getenv') {
+      if (n.items.length !== 2) return this.err(n, '(getenv E)');
+      const p = this.expr(n.items[1]);
+      if (p === null) return null;
+      if (p.type.k !== 'string') {
+        return this.err(n.items[1], `(getenv E) 的参数要是 string，这里是 ${coreTypeText(p.type)}`);
+      }
+      return { kind: 'Builtin', name: 'get_env', args: [p], argType: STRING, type: STRING };
+    }
     // `(writetext P E)`：把 string E **整份**写成一份文本文件，回写进去的字节数。
     // 与 `(readtext E)` 是同一层的一对 —— 方言仍旧不认识"文件"，只认识"名字 <-> 文本"。
     // 为什么要有：asy 的标签是 TeX 排的（texfile.cc 生一份 `<名>_.tex`，再 latex + dvips），

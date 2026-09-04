@@ -11,7 +11,7 @@
 // 语言子集里的东西：不用 TextEncoder（自己按 UTF-8 编）、不用 new Function、不用正则字面量
 // 以外的正则。
 
-import { stdout, stdoutBytes, typeTag, fmtReal, fmtRealG, fmtFixed, fmtSci, fmtGen, reprReal, callJsOp, readText, writeText, spawn } from '../host/native.js';
+import { stdout, stdoutBytes, typeTag, fmtReal, fmtRealG, fmtFixed, fmtSci, fmtGen, reprReal, callJsOp, readText, writeText, spawn, env } from '../host/native.js';
 import { JS_ABI, JS_MEMBERS } from '../hir/js_abi.js';
 import { OmniError } from '../source/diag.js';
 
@@ -1053,6 +1053,12 @@ export function applyBuiltin(I, e, a) {
     // `(readtext E)`：整份读一份文本文件。三条腿一份语义（JS 那边 $read_text、
     // C 那边 omni_read_text）—— 读不到就是运行期错误，不回空串。
     case 'read_text': return readTextOrFail(a[0]);
+    // `(getenv E)`：读宿主的一格环境设置。没设就是空串 —— 三条腿一份语义
+    // （$get_env / omni_get_env）。asy 的输出格式走的是这一格（ADR-0015）。
+    case 'get_env': {
+      const ev = env(a[0]);
+      return ev === undefined || ev === null ? '' : ev;
+    }
     // `(writetext P E)` / `(runproc CMD)`：另外两个"对外面"的口子。语义与 JS/C 两侧一字不差。
     case 'write_text': return writeTextOrFail(a[0], a[1]);
     case 'run_proc': return runProc(a[0]);

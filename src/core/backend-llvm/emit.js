@@ -113,6 +113,8 @@ const RT_OPS = new Map([
   // `(readtext E)`：整份读一份文本文件。omni_read_text 是 omni.h 里的真符号，
   // 收发都是 omni_str = [2 x i64]（与 to_string.* 那三条同一个拼法）。
   ['read_text.string', { sym: 'omni_read_text', ret: '[2 x i64]', params: ['[2 x i64]'] }],
+  // `(getenv E)`：读宿主的一格环境设置（没设回空串）。与上一条同一个拼法。
+  ['get_env.string', { sym: 'omni_get_env', ret: '[2 x i64]', params: ['[2 x i64]'] }],
   // `(writetext P E)` / `(runproc CMD)`：另外两个"对外面"的口子，回的都是 i64
   // （写进去的字节数 / 子进程的退出码）。
   ['write_text.string', { sym: 'omni_write_text', ret: 'i64', params: ['[2 x i64]', '[2 x i64]'] }],

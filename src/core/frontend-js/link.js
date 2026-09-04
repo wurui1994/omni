@@ -58,6 +58,9 @@ const NATIVE_OPS = {
   args: 'js_proc_args',
   cwd: 'js_proc_cwd',
   env: 'js_proc_env',
+  /* 与 `env` 成一对的写那一侧（ADR-0015）：`-f svg` 就是"设宿主的一格" —— 格式因此
+   * 不住在任何模块里，同一份产物换个设置再跑就换个输出。 */
+  setEnv: 'js_proc_set_env',
   stdout: 'js_proc_stdout_write',
   stderr: 'js_proc_stderr_write',
   setExitCode: 'js_proc_exit_code',

@@ -192,8 +192,18 @@ env: OMNI_CC、OMNI_CLANG、OMNI_LLVM_CONFIG`,
       help: `.frag/.glsl 走另一条腿（ADR-0019 决策九）：一帧一张 PNG，要 -o。
 uniform 由 --set 给，没给的按 0；一个名字对一串数，逗号分开。
 
-  omni run x.frag -o out.png --size 512 --set u_resolution=512,512`,
+  omni run x.frag -o out.png --size 512 --set u_resolution=512,512
+
+.asy 的出图格式与落地文件都是**运行期的一格宿主设置**（ADR-0015）——
+产物缓存的印记里没有它们，同一份编好的东西换个设置再跑就换个输出：
+
+  omni run x.asy                 图印到 stdout（EPS）
+  omni run x.asy -f svg          图印到 stdout（SVG）
+  omni run x.asy -o x.svg        格式按后缀猜（svg），图落到 x.svg
+                                 —— 程序自己 write(...) 的字还是走 stdout`,
       flags: [F_MODE, F_WORK, F_BACKEND, F_INC, F_LEG_INTERP, F_LEG_MIR, F_OUT,
+        { name: '--format', alias: '-f', arity: 1, value: 'FMT',
+          brief: '（asy）出图格式 eps|svg；不给就看 -o 的后缀' },
         { name: '--size', arity: 1, value: 'N[xM]', brief: '（glsl）画布大小，默认 256' },
         { name: '--set', arity: 1, value: 'NAME=v,…', brief: '（glsl）给一个 uniform 赋值，可重复' }],
     },

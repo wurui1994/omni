@@ -2462,6 +2462,41 @@ void asy__out(string s) {
   if (asy__tobuf) asy__bufs = asy__bufs + s + '\n';
   else write(s);
 }
+// 出图落到哪儿：宿主的一格设置（CLI 的 `-o 名字`）。空串 = 印到 stdout，也就是这一层
+// 一直以来的默认。与格式那一格同一条道理（ADR-0015）：这是**运行期**的值，不是编译期
+// 的选项 —— 同一份产物，`-o a.svg` 与不带 `-o` 跑的是同一个文件。
+// 注意只有**图**走这一格：程序自己 `write(...)` 的字还是照旧去 stdout（真 asy 也是
+// 这样分的：图进文件，write 进终端）。
+string asy__outname() { return _getsetting("OMNI_ASY_OUTNAME"); }
+// 出什么格式：同一格宿主设置（CLI 的 `-f FMT`，或者从 `-o 名字`的后缀猜出来的）。
+// 隐式出图那一趟（例子结尾）走的 format 是空串 —— plain 那边不把 settings.outformat
+// 递下来（真 asy 是 C++ 那一层自己去看 settings::outformat），这一格就是那个位置。
+// **格式是运行期的值**，不住在任何模块的变量里。这一条是量出来的教训（ADR-0015）：
+// 格式一旦住进某个模块的变量（或者往源码头上贴一句 `asy__defaultformat = "svg";`），
+// "编出来的东西"就记住了格式 —— 同一份程序出两种格式得编两遍，产物缓存要按格式分叉。
+// 读宿主则相反：一份产物，`-f svg` 与不带 `-f` 跑的是同一个文件，只是那一格设置不同。
+string asy__outformat() { return _getsetting("OMNI_ASY_OUTFORMAT"); }
+// SVG 那个出口住在文件后面（它要 svgd / svggrad / 那一串属性拼装），而 `shipout(picture)`
+// 在前面就要用它。这一层的老办法是**函数变量**（asy__dashadjfn / asy__arclenfn 同一个
+// 套路）：这儿声明一格，定义之后装进去。装进去之前是 null，那时只走 EPS。
+typedef void asy__svgfn(drawop[], labelrec[], box, real, real, real);
+asy__svgfn asy__svgcorefn = null;
+// 一份图的前后各一句。回的是那个名字（空串就是"直接印"，两句都是空动作）。
+string asy__shipbegin() {
+  string on = asy__outname();
+  if (on != "") {
+    asy__tobuf = true;
+    asy__bufs = "";
+  }
+  return on;
+}
+void asy__shipend(string on) {
+  if (on == "") return;
+  asy__tobuf = false;
+  string doc = asy__bufs;
+  asy__bufs = "";
+  _writetext(on, doc);
+}
 // 坐标是 **%.9g**，这一条量反过一次，要说准：psfile.h:160 是裸的
 // `*out << " " << x`，看着像"ostream 默认 6 位"，但同一个流在 psfile.h:30 写
 // `%%HiResBoundingBox` 时做过 `std::setprecision(9)` —— **precision 是粘的**，
@@ -2950,10 +2985,20 @@ real asy__excess(real paper, real len) {
 bool asy__shipped = false;
 void shipout(picture pic) {
   asy__shipped = true;
+  string asy__on = asy__shipbegin();
   real s = fitscale(pic);
   box bx = picbox(pic, s);
   real w = bx.r - bx.l;
   real h = bx.t - bx.b;
+  // SVG 那一路（`-f svg`）。这一份出口是"不 import plain 时"走的，标签那一列在这条路上
+  // 本来就没有（这一层的 picture 不攒 labelrec），所以递一个空的进去。
+  // 不套纸（612x792）—— SVG 的画布就是图本身，与 `_shipout` 那一份同一条。
+  if (asy__svgcorefn != null && asy__outformat() == "svg") {
+    labelrec[] asy__nolabs;
+    asy__svgcorefn(pic.ops, asy__nolabs, bx, w, h, s);
+    asy__shipend(asy__on);
+    return;
+  }
   real ox = 0.5 * asy__excess(612, w);
   real oy = 0.5 * asy__excess(792, h);
   asy__out("%!PS-Adobe-3.0 EPSF-3.0");
@@ -2975,6 +3020,7 @@ void shipout(picture pic) {
   asy__out("grestore");
   asy__out("showpage");
   asy__out("%%EOF");
+  asy__shipend(asy__on);
 }
 
 // 刻意**不给** `void shipout()` 与 `void shipout(string)`：plain_shipout.asy:120 那份
@@ -6709,6 +6755,11 @@ private string asy__texdir = "/tmp/omni-asytex";
 // 底图。与 shipout 那份的差别只有两处：界是 bx 原样（不是居中之后的），没有那对
 // gsave/translate（dvips 负责摆）。
 private string asy__baseeps(frame f, box bx) {
+  // 存旧的那一对再改（不是钉成 false）：外面可能已经在攒了 —— `-o 文件` 那一路就是
+  // 整份图先攒起来再落盘，而带标签的图正是经这一趟拿底图的。钉成 false 的时候
+  // dvips 出来的那份字节会绕过缓冲直接印到 stdout，文件里落一份空的。
+  bool asy__basesave = asy__tobuf;
+  string asy__basekeep = asy__bufs;
   asy__tobuf = true;
   asy__bufs = "";
   asy__out("%!PS-Adobe-3.0 EPSF-3.0");
@@ -6727,9 +6778,9 @@ private string asy__baseeps(frame f, box bx) {
            i + 1 >= f.ops.length || !f.ops[i + 1].merge);
   asy__out("showpage");
   asy__out("%%EOF");
-  asy__tobuf = false;
   string s = asy__bufs;
-  asy__bufs = "";
+  asy__tobuf = asy__basesave;
+  asy__bufs = asy__basekeep;
   return s;
 }
 
@@ -7120,11 +7171,11 @@ private string asy__svgfillattrs(pen p) {
 }
 // 一条超路径（path[]）出成**一个** d。分成几个 <path> 是错的：偶奇/非零环绕要看
 // 所有子路径一起算（挖洞那一类全靠这个），拆开之后洞就填上了。
-private string asy__svgds(path[] gs) {
+private string asy__svgds(path[] gs, real s) {
   string d = "";
   for (int j = 0; j < gs.length; ++j) {
     if (j > 0) d = d + " ";
-    d = d + asy__svgd(gs[j], 1);
+    d = d + asy__svgd(gs[j], s);
   }
   return d;
 }
@@ -7138,20 +7189,23 @@ private int asy__svggradid = 0;
 // radial 的 fr 是 SVG 2 才有的（1.1 没有内圈半径），这儿照发 —— 现在的渲染器都认。
 // lattice(1)/gouraud(4)/tensor(7) 这三种 SVG 没有原生对应（要么切网格、要么写 mesh），
 // 这一版按那一格自己的笔纯色填，不装作画对了。
-private string asy__svggrad(shadeinfo h) {
+private string asy__svggrad(shadeinfo h, real s) {
   if (h.st != 2 && h.st != 3) return "";
   asy__svggradid = asy__svggradid + 1;
   string id = "g" + string(asy__svggradid);
   string stops = '<stop offset="0" stop-color="' + asy__svgcolor(h.pena) + '"/>'
     + '<stop offset="1" stop-color="' + asy__svgcolor(h.penb) + '"/>';
+  // 坐标与半径与路径同一个缩放（frame 那一路 s 恒是 1，picture 那一路是 fitscale）
+  pair za = s * h.za;
+  pair zb = s * h.zb;
   if (h.st == 2)
     asy__out('<linearGradient id="' + id + '" gradientUnits="userSpaceOnUse"'
-      + ' x1="' + ps(h.za.x) + '" y1="' + ps(h.za.y) + '"'
-      + ' x2="' + ps(h.zb.x) + '" y2="' + ps(h.zb.y) + '">' + stops + "</linearGradient>");
+      + ' x1="' + ps(za.x) + '" y1="' + ps(za.y) + '"'
+      + ' x2="' + ps(zb.x) + '" y2="' + ps(zb.y) + '">' + stops + "</linearGradient>");
   else
     asy__out('<radialGradient id="' + id + '" gradientUnits="userSpaceOnUse"'
-      + ' cx="' + ps(h.zb.x) + '" cy="' + ps(h.zb.y) + '" r="' + ps(h.rb) + '"'
-      + ' fx="' + ps(h.za.x) + '" fy="' + ps(h.za.y) + '" fr="' + ps(h.ra) + '">'
+      + ' cx="' + ps(zb.x) + '" cy="' + ps(zb.y) + '" r="' + ps(s * h.rb) + '"'
+      + ' fx="' + ps(za.x) + '" fy="' + ps(za.y) + '" fr="' + ps(s * h.ra) + '">'
       + stops + "</radialGradient>");
   return "url(#" + id + ")";
 }
@@ -7159,22 +7213,26 @@ private string asy__svggrad(shadeinfo h) {
 // 一张图出成 SVG。裁剪按 SVG 的办法做：进裁剪开一个 <clipPath> 加一层 <g clip-path>，
 // 出裁剪关掉那一层 —— 与 PS 那边 gsave/clip/grestore 的嵌套一一对应。
 // axial/radial 走 <linearGradient>/<radialGradient>（见 asy__svggrad），其余网格类纯色填。
-private void asy__svgship(frame f, box bx, real w, real h) {
+//
+// 收的是 `drawop[]` 而不是 frame：两个出口都要它 —— `_shipout(frame)`（引了 plain 的
+// 那一路）与 `shipout(picture)`（这一层自己的短路）。picture 那一路的坐标要过一道
+// fitscale，所以缩放是个参数（frame 那一路恒是 1，与从前一字不差）。
+private void asy__svgcore(drawop[] ops, labelrec[] labs, box bx, real w, real h, real s) {
   asy__out('<?xml version="1.0" encoding="UTF-8"?>');
   asy__out('<svg xmlns="http://www.w3.org/2000/svg" version="1.1"'
     + ' width="' + ps(w) + 'pt" height="' + ps(h) + 'pt"'
     + ' viewBox="0 0 ' + ps(w) + " " + ps(h) + '">');
   asy__out('<g transform="translate(' + ps(-bx.l) + " " + ps(bx.t) + ') scale(1 -1)">');
   int depth = 0;               // 开着的 <g clip-path> 层数
-  for (int i = 0; i < f.ops.length; ++i) {
-    drawop o = f.ops[i];
+  for (int i = 0; i < ops.length; ++i) {
+    drawop o = ops[i];
     if (o.kind == 3) {
       if (o.sh.gs.length == 0) { asy__out("<g>"); depth = depth + 1; continue; }
       asy__svgclipid = asy__svgclipid + 1;
       string id = "c" + string(asy__svgclipid);
       asy__out('<clipPath id="' + id + '"'
         + (o.p.evenodd ? ' clip-rule="evenodd"' : ' clip-rule="nonzero"') + ">");
-      asy__out('<path d="' + asy__svgds(o.sh.gs) + '"/>');
+      asy__out('<path d="' + asy__svgds(o.sh.gs, s) + '"/>');
       asy__out("</clipPath>");
       asy__out('<g clip-path="url(#' + id + ')">');
       depth = depth + 1;
@@ -7182,19 +7240,19 @@ private void asy__svgship(frame f, box bx, real w, real h) {
     }
     if (o.kind == 4) { if (depth > 0) { asy__out("</g>"); depth = depth - 1; } continue; }
     if (o.kind == 2) {
-      string paint = asy__svggrad(o.sh);
+      string paint = asy__svggrad(o.sh, s);
       string at = paint == ""
         ? asy__svgfillattrs(o.p)
         : ' fill="' + paint + '" stroke="none"'
           + (o.p.evenodd ? ' fill-rule="evenodd"' : ' fill-rule="nonzero"');
       if (o.sh.gs.length > 0)
-        asy__out('<path d="' + asy__svgds(o.sh.gs) + '"' + at + "/>");
+        asy__out('<path d="' + asy__svgds(o.sh.gs, s) + '"' + at + "/>");
       continue;
     }
     pen q = o.p;
     if (o.kind == 0 && q.dashpat.length > 0)
       q = asy__dashadjfn(q, asy__arclenfn(o.g), o.g.cyclic);
-    asy__out('<path d="' + asy__svgd(o.g, 1) + '"'
+    asy__out('<path d="' + asy__svgd(o.g, s) + '"'
       + (o.kind == 0 ? asy__svgstrokeattrs(q) : asy__svgfillattrs(o.p)) + "/>");
   }
   while (depth > 0) { asy__out("</g>"); depth = depth - 1; }
@@ -7202,8 +7260,8 @@ private void asy__svgship(frame f, box bx, real w, real h) {
   // 标签：文字不进翻转的那一组，自己换算。基线在盒子底往上 depth 那一条。
   // 宽高深是问过 latex 的（与 EPS 那一路同一份数），但字形是 SVG 的字体排的，
   // 所以数学符号会走形 —— 这一条写在这儿，不装作没有。
-  for (int i = 0; i < f.labs.length; ++i) {
-    labelrec r = f.labs[i];
+  for (int i = 0; i < labs.length; ++i) {
+    labelrec r = labs[i];
     if (r.kind != 0 || r.s == "") continue;
     pair al = inverse(r.t) * r.align;
     real s0 = abs(al.x) > abs(al.y) ? abs(al.x) : abs(al.y);
@@ -7212,7 +7270,8 @@ private void asy__svgship(frame f, box bx, real w, real h) {
     real vert = r.height + r.depth;
     al = (al.x * r.width, al.y * vert);
     al = r.t * al;
-    pair p = r.position + al;
+    // 位置随图缩放，字号与量出来的宽高深不随（那三个是 latex 给的绝对尺寸）
+    pair p = s * r.position + al;
     real sx = p.x - bx.l;
     real sy = bx.t - (p.y + r.depth);
     asy__out('<text x="' + ps(sx) + '" y="' + ps(sy) + '"'
@@ -7221,20 +7280,24 @@ private void asy__svgship(frame f, box bx, real w, real h) {
   }
   asy__out("</svg>");
 }
-// 隐式出图（例子结尾那一趟）走的 format 是空串 —— plain 那边不把 settings.outformat
-// 递下来（真 asy 是 C++ 那一层自己去看 settings::outformat）。这一格就是那个兜底：
-// 摆一句 `asy__defaultformat = "svg";` 在最前头，整份例子不动就出 SVG。
-string asy__defaultformat = "";
+private void asy__svgship(frame f, box bx, real w, real h) {
+  asy__svgcore(f.ops, f.labs, bx, w, h, 1);
+}
+// 装进前面那一格（见 asy__svgcorefn 那一段）：`shipout(picture)` 在文件前面要它。
+asy__svgcorefn = asy__svgcore;
+// 隐式出图（例子结尾那一趟）走的 format 是空串，兜底那一格在前面（asy__outformat）。
 
 void _shipout(string prefix="", frame f, frame preamble=null, string format="",
               bool wait=false, bool view=true, transform t=identity()) {
   box bx = framebox(f);
   real w = bx.r - bx.l;
   real h = bx.t - bx.b;
+  string asy__on = asy__shipbegin();
   // SVG 那一路：framebox 已经把标签量过了，尺寸与 EPS 那一路是同一份数。
   // 不套纸（612x792）—— SVG 的画布就是图本身，没有"摆在信纸中间"这回事。
-  if ((format == "" ? asy__defaultformat : format) == "svg") {
+  if ((format == "" ? asy__outformat() : format) == "svg") {
     asy__svgship(f, bx, w, h);
+    asy__shipend(asy__on);
     return;
   }
   real ox = 0.5 * asy__excess(612, w);
@@ -7246,7 +7309,10 @@ void _shipout(string prefix="", frame f, frame preamble=null, string format="",
     anylab = true;
     break;
   }
-  if (anylab && asy__texship(prefix, f, bx, ox, oy, w, h)) return;
+  if (anylab && asy__texship(prefix, f, bx, ox, oy, w, h)) {
+    asy__shipend(asy__on);
+    return;
+  }
   asy__out("%!PS-Adobe-3.0 EPSF-3.0");
   asy__out("%%BoundingBox: " + string(floor(ox)) + " " + string(floor(oy)) + " "
         + string(ceil(ox + w)) + " " + string(ceil(oy + h)));
@@ -7266,6 +7332,7 @@ void _shipout(string prefix="", frame f, frame preamble=null, string format="",
   asy__out("grestore");
   asy__out("showpage");
   asy__out("%%EOF");
+  asy__shipend(asy__on);
 }
 // 三维那两条出口（runpicture.in:486/512）。真 asy 一条走 PRC/v3d 的写盘与 GPU 渲染，
 // 一条是 `f->shipout3(prefix,format)` 的短形。这一层两条都没有，所以体是 abort ——

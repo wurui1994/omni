@@ -245,3 +245,71 @@ export function omni_init_plain() { … }   // 只有这一份是按单元生成
 （上一节那条 —— 它的代价就是"同一份源码按格式各编一份"）。
 
 <!-- ADR-0015 更正：格式是运行期值不能被模块锁定-END -->
+
+### 落地：`(getenv E)` 一条原语 + `_getsetting` 一个口子 + CLI 的 `-f/-o`
+
+按上一节那四步做完了。**每一步都只有一处，没有一处是"往源码里插句子"**：
+
+1. **方言多一条 `(getenv E)`**（`sexpr/lower.js`，内建名 `get_env`，string -> string）。
+   没设那一格回**空串**，不是运行期错误 —— 与 `(readtext E)` 刻意相反：那边分不清
+   「空文件」与「没这个文件」所以读不到就抛，而"没设"在这一条上是常态（调用方拿它
+   当"用默认值"）。五条腿各一份实现，与 `read_text` 一格对一格：
+   `interp/builtin.js` 的 `get_env`、`backend-js` 的 `$get_env`、`backend-c` 的
+   `omni_get_env`（`omni_fmt.c`，getenv + omni_str_new 抄一份）、`backend-llvm` 的
+   `get_env.string -> omni_get_env`（收发都是 `[2 x i64]`）。
+   门：`tests/sexpr/cases/37-getenv.sx` —— **五方一致**（没人设过的那一格回空串、
+   `PATH` 非空；不依赖任何一格具体的值，所以在别人机器上也成立）。
+2. **写那一侧也补了一条封闭 ABI**：`setEnv` -> `js_proc_set_env`（六处齐：`host/native.js`
+   + `link.js` 的 NATIVE_OPS + `js_abi.js` + `prelude.js` 的 `$js_proc_set_env`
+   + `omni_js_host.c` 的 `setenv(n, v, 1)` + `omni.h`）。为什么要"写"：CLI 设一次，
+   本进程 eval 的 JS、spawn 出去的 node、链好的可执行文件**都**看见（子进程继承环境）。
+   注意方言里**没有**写那一侧 —— 设环境是驱动的事，程序自己不设。
+3. **asy 侧的绑定是 `_getsetting(name)`**（`frontend-asy/calls.js`，降成 `(getenv …)`）。
+   名字带下划线照 asy 自己的规矩（`_draw`/`_eval`/`_shipout`/`_readlines` 那一族都是
+   "C++ 那一侧的口子"）。它与旁边的 `_searchpath` 刻意**相反**：那一格是编译期印成
+   字面量的（路径进了产物缓存的键），这一格必须是运行期的。
+4. **两格设置，都从宿主读**（`asy_builtins.asy`）：
+   - `asy__outformat()` = `_getsetting("OMNI_ASY_OUTFORMAT")` —— `asy__defaultformat`
+     那个变量**删掉了**；
+   - `asy__outname()` = `_getsetting("OMNI_ASY_OUTNAME")` —— `-o 名字` 那一格。
+   `settings.asy` 的 `string outformat` 初值也从同一格来，所以程序里读
+   `settings.outformat` 与真正出的格式一定一致（真 asy 那边两者是同一个 C++ 全局）。
+5. **CLI 只做一件事：设那两格**（`cli.js` 的 `asyRunSetup`，`cmds.js` 的 `--format/-f`）。
+   `-o x.svg` 在没给 `-f` 时按后缀猜（`.svg` / `.eps`/`.ps`），猜不出就**报错**而不是
+   悄悄出 EPS。摆在 `switch (cmd)` 之前而不是 `case 'run'` 里：`--backend llvm` 会把
+   `run` 换成 `run-llvm`，摆在里头那几条腿就看不见 `-f`。
+
+**检验（这一刀真正要证的那一条）**：`jsCacheStamp()` 一个字都没改。同一份编好的产物，
+`-f svg` 与不带 `-f` 跑的是**同一个文件**，只是宿主那一格设置不同 —— 换格式不重编。
+量出来的（同一个三行的 `fill((0,0)--(1,0)--(1,1)--cycle)`，`--verbose` 看那一行）：
+
+```
+run -f svg   asy units -> .omni-cache/asy-mods       exec 178ms   （第一趟，编）
+run          asy mods 命中  6 份产物一份没动  [5ms]  exec  66ms
+run -f svg   asy mods 命中  6 份产物一份没动  [4ms]  exec  66ms
+run -f eps   asy mods 命中  6 份产物一份没动  [4ms]  exec  67ms
+```
+
+换格式那两趟连一份产物都没重编 —— 从前那条编译期方案在这儿一定是"重编一遍"。
+
+顺带填上的两个坑（都是"图落到文件里"这条路上现出来的）：
+
+- `-o 名字` 落盘走 `asy__out` 那个既有的缓冲开关（`asy__tobuf`/`asy__bufs`），末尾一次
+  `_writetext`。**程序自己 `write(...)` 的字仍旧走 stdout** —— 图进文件、文字进终端，
+  与真 asy 分得一样。
+- `asy__baseeps` 从前在末尾把 `asy__tobuf` **钉成 false** 并清空缓冲。带标签的图正是
+  经它拿底图的，于是 `-o x.eps` 时 dvips 出来的那段字节会绕过缓冲直接印到 stdout、
+  文件里落一份空的。改成存旧值再还原。
+- SVG 那个出口从前只有 `_shipout(frame)`（引了 plain 的那一路）有；不 import plain 时走的是
+  这一层自己的 `shipout(picture)`，`-f svg` 在那条路上**没有效果**（量到过：一个三行的
+  `draw((0,0)--(1,0)--(1,1)--cycle)` 加 `-f svg` 照旧出 EPS）。把 SVG 那段抽成
+  `asy__svgcore(drawop[] ops, labelrec[] labs, box, w, h, real s)` —— 多的那个 `s` 是
+  picture 那一路的 `fitscale`（frame 那一路恒是 1，字节与从前一致），两个出口共用一份。
+  前向引用用**函数变量**（`asy__svgcorefn`，与 `asy__dashadjfn`/`asy__arclenfn` 同一个套路）：
+  SVG 那一段住在文件后面，而 `shipout(picture)` 在前面。
+
+还差一格，写在这儿不装作没有：程序里 `settings.outformat = "pdf"` 只改那个模块变量，
+改不到宿主那一格（真 asy 那边两者是同一个 C++ 全局）。要补就得让那个名字变成"写宿主"的
+口子（方言里现在**刻意没有** `setenv`）—— 等真有例子这么写的时候再动。
+
+<!-- ADR-0015 -f svg 落地：getenv 原语 + _getsetting + CLI-END -->
