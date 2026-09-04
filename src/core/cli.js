@@ -66,6 +66,8 @@ import { loadProgram, MODE_BY_EXT } from './module/load.js';
 import { startRepl } from './repl.js';
 import { interpret } from './interp/eval.js';
 import { interpretMir, runMirModule } from './mir/interp.js';
+import { emitMirJs } from './mir/emit_js.js';
+import { runMirJs } from './mir/js_rt.js';
 import { bootstrapSelf } from './bootstrap.js';
 
 /**
@@ -2368,10 +2370,14 @@ function main(argv) {
      */
     if (path !== undefined && path !== null && path.endsWith('.c')) {
       if (form === 'mir') cmd = 'c-mir';
+      /* `js`：MIR -> JS 源码（ADR-0013）。它与 `emit mir` 是同一条腿的两个出口 ——
+       * 一个是给人读的 IR，一个是给 V8 吃的产物。**声明了就得能用**：`run x.c
+       * --backend js` 跑的就是这段文本，那 `emit js x.c` 就得能把它印出来。 */
+      else if (form === 'js') cmd = 'c-emit-js';
       else {
         throw new OmniError(`emit ${form} x.c: 没有这一条 —— C 的终点是 MIR，`
-          + '不经过 OIR，所以 `.c` 只有 `omni emit mir`（要目标文件用 `omni c obj`，'
-          + '要可执行文件用 `omni build`）');
+          + '不经过 OIR，所以 `.c` 只有 `omni emit mir`（IR）与 `omni emit js`'
+          + '（MIR -> JS 源码）；要目标文件用 `omni c obj`，要可执行文件用 `omni build`');
       }
     }
   }
@@ -2396,12 +2402,32 @@ function main(argv) {
       if (cmd === 'run') {
         if (native) return runCFile(path, rest);
         if (b === 'interp') cmd = 'c-run';
+        /* `js`：C -> MIR -> **JS 源码** -> `new Function`（ADR-0013）。
+         * 这一条是 JS 宿主上 C 的**快**路：解释器落在 10 倍上，这一条贴着「编成 JS」
+         * 那条 1.5 倍的基线 —— 差别不是 dispatch，是「不再有解释循环」。
+         * 它也是**浏览器里跑 C** 的那条路。 */
+        else if (b === 'js') cmd = 'c-run-js';
         else {
           throw new OmniError(`run x.c: 没有 --backend ${b} 这一条 —— C 的终点是 MIR，`
-            + '只有 native（默认：编 + 链 + 跑）与 interp（MIR 解释器，oracle）两条');
+            + '只有 native（默认：编 + 链 + 跑）、js（MIR -> JS 源码，node 宿主上最快的那条）'
+            + '与 interp（MIR 解释器，oracle）三条');
         }
       } else if (native) {
         return buildCFile(path, rest);
+      } else if (b === 'js') {
+        /* `build --backend js`：出一份**能直接 `node` 跑**的 JS。它不是自足的 ——
+         * 线性内存与 libc 走这棵树里的 `mir/js_rt.js`（那一份只是转发表，实现在
+         * `interp/builtin.js` 与 `interp/libc.js`）。为什么不内联那两份进产物：
+         * 那就是两处实现，而「五方逐字节相同」这道门要求只有一份。 */
+        const oi = rest.indexOf('-o');
+        const out = oi >= 0 ? rest[oi + 1] : `${basename(path, '.c')}.js`;
+        const { flags, prog } = cSplitArgs(rest);
+        const mir = cMir(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags));
+        const text = emitMirJs(mir, { rtImport: join(installDir(), '..', 'mir', 'js_rt.js') });
+        writeText(out, text);
+        stderr(`omni: built ${out} (${text.length} 字节，MIR -> JS；`
+          + '运行时来自这棵树里的 mir/js_rt.js)\n');
+        return 0;
       } else if (b === 'interp') {
         /* `.c` 那条腿的解释器吃 **MIR**（不经过 OIR），所以 `--backend interp` 的产物
          * 就是那份 MIR。**声明了就得能用** —— `build --help` 里列了它，那它就得落一个文件，
@@ -2415,15 +2441,18 @@ function main(argv) {
           + '喂回去跑还差「可回读的 IR」那一格，见 ADR-0018)\n');
         return 0;
       } else {
-        throw new OmniError(`build x.c: 没有 --backend ${b} 这一条 —— C 只有 native`
-          + '（编 + 链）与 interp（出 MIR）两条');
+        throw new OmniError(`build x.c: 没有 --backend ${b} 这一条 —— C 有 native`
+          + '（编 + 链）、js（MIR -> JS 源码）与 interp（出 MIR）三条');
       }
     }
     const MAP = {
       run: { c: 'run-c', llvm: 'run-llvm', jit: 'run-jit', interp: 'interp', js: 'run' },
       build: { llvm: 'build-llvm', c: 'build', native: 'build', js: 'build-js', interp: 'build-interp' },
     };
-    if (b !== null && cmd !== 'c-run') {
+    /* `.c` 那几条已经在上面按扩展名定完了（`c-run` / `c-run-js`），**不能再进这张表** ——
+     * 这张表是 OIR 那条腿的。少这一句就是「backend 又抢在扩展名前面」那个老 bug 的
+     * 第四次（前三次分别在 run / build / emit 上）。 */
+    if (b !== null && cmd !== 'c-run' && cmd !== 'c-run-js') {
       const t = MAP[cmd][b];
       if (t === undefined) {
         /**
@@ -2796,10 +2825,32 @@ function main(argv) {
       stdout(printMir(cMir(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags))));
       return 0;
     }
+    case 'c-emit-js': {
+      const { flags, prog } = cSplitArgs(rest);
+      stdout(emitMirJs(cMir(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags))));
+      return 0;
+    }
     case 'c-run': {
       const { flags, prog } = cSplitArgs(rest);
       const mod = cMir(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags));
       return runMirModule({ structs: [], enums: [], classes: [], js: false }, mod);
+    }
+    /**
+     * `c-run-js`：C -> MIR -> **JS 源码** -> 本进程里 `new Function`（ADR-0013）。
+     *
+     * 与 `c-run` 的区别只有最后一步：那一条把 MIR 编成一串闭包再跑一个 pc 循环，
+     * 这一条把 MIR 编成 JS 源码交给 V8。量出来的差距是 6～8 倍，而它不来自 dispatch
+     * （特化 dispatch 量过是 0 收益），来自「值不再装箱进 `F.v[]`、槽是真的 `let`」。
+     *
+     * 退出码的口径与 `runMirModule` 同一套（`$run()` 里收摊），所以两条腿在
+     * 「stdout 逐字节 + 退出码」这两项上可比 —— `tests/mir/js-parity` 比的就是这两项。
+     */
+    case 'c-run-js': {
+      const { flags, prog } = cSplitArgs(rest);
+      const mir = cMir(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags));
+      const js = emitMirJs(mir);
+      vStep(`backend js (from mir)  ${js.length} bytes`);
+      return runMirJs(js);
     }
     /* `c-obj`：C -> 真机器码 -> 一个 `.o`（第九刀第二十六片）。
      * 链接留给外面（`clang a.o -o a`）—— 可执行文件的写出还没到。 */

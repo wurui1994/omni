@@ -434,6 +434,50 @@ for (const f of pick('sys')) {
   runCase('sys', f);
 }
 
+// ------------------------------------------------------------ 4.6 gen/ 再跑一遍：编成 JS 那条腿
+
+/**
+ * 同一批用例，第三条腿：**C -> MIR -> JS 源码 -> `new Function`**（ADR-0013）。
+ *
+ * 为什么单开一组而不是把 `runCase` 改成三方比：这一组**不需要 tcc**（比的是我们自己
+ * 两条腿），所以没装 tcc 的机器上它照样是一道门。而它要的正是解释器已经证过的那件事
+ * —— 解释器与 `tcc -run` 逐字节相同（第 4 组），所以「新腿 == 解释器」就等于
+ * 「新腿 == tcc」，中间不必再跑一遍 tcc。
+ *
+ * 比三项：**退出码 + stdout + stderr**，都逐字节。发 JS 这条路上最容易分叉的是
+ * 值表示（i32 的回绕、无符号比较、i64 与 Number 的边界）与线性内存的读写，而那些
+ * 分叉全都会在这三项里露出来 —— 静默的错答案是这条腿最大的风险（它是 oracle 的对照物）。
+ */
+function cRunJs(path, incDirs = []) {
+  const args = [CLI, 'run', path, '--backend', 'js'];
+  for (const d of incDirs) args.push('-I', d);
+  const r = spawnSync(process.execPath, args, { encoding: 'utf8' });
+  return { code: r.status, out: r.stdout ?? '', err: r.stderr ?? '' };
+}
+
+function jsLegCase(group, f, incDirs = []) {
+  const nm = `${group}/${basename(f, '.c')}`;
+  const name = `${nm} [js leg == interp]`;
+  const path = join(here, group, f);
+  const want = cRun(path, incDirs);
+  const got = cRunJs(path, incDirs);
+  if (got.code !== want.code) {
+    bad(name, `    退出码不同：interp=${want.code} js=${got.code}\n${got.err}`);
+    return;
+  }
+  if (got.out !== want.out) {
+    bad(name, `    stdout 不同：\n--- interp ---\n${want.out}--- js ---\n${got.out}`);
+    return;
+  }
+  if (got.err !== want.err) {
+    bad(name, `    stderr 不同：\n--- interp ---\n${want.err}--- js ---\n${got.err}`);
+    return;
+  }
+  ok(`${name} [exit ${want.code}${want.out.length > 0 ? ` + ${want.out.length}B stdout` : ''}]`);
+}
+
+for (const f of pick('gen')) jsLegCase('gen', f);
+
 // ------------------------------------------------------------ 5. gen-bad/：边界与语法错误
 
 for (const f of pick('gen-bad')) {
