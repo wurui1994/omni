@@ -224,6 +224,23 @@ class GlslLowerer {
    * 副作用：往 `this.stmts` 里攒 `let`。
    */
   expr(e) {
+    if (e.k === 'tex') {
+      /* 纹理取样（规范 8.7）。数学在两个方言助手里（`GLSL_TEX_FNS`），这儿只把
+       * 「采样器那三格（w/h/off）+ 坐标」递进去。采样器的名字在入口处绑的正是那三格。
+       * 纹素数据是一格共用的 `(buf real)` 形参 —— 一个模块里所有采样器共用一片，
+       * 各自的 `off` 区分（与快路那边 `%tex` 那一片的摆法一模一样）。 */
+      const s = this.expr(e.args[0]);
+      const c = this.expr(e.args[1]);
+      this.need(4);
+      const r = this.fresh('tx');
+      const call = c.length === 1
+        ? `(call glsl_tex1d (var glsl_texbuf) ${s[0]} ${s[2]} ${c[0]})`
+        : `(call glsl_tex2d (var glsl_texbuf) ${s[0]} ${s[1]} ${s[2]} ${c[0]} ${c[1]})`;
+      this.stmts.push(`(let ${r} ${glslStructName(4)} ${call})`);
+      const out = [];
+      for (let i = 0; i < 4; i++) out.push(this.let_('real', `(fld (var ${r}) c${i})`));
+      return out;
+    }
     if (e.k === 'lit') {
       if (e.ty.k === 'float') return [`(real ${glslNum(e.v)})`];
       if (e.ty.k === 'int') return [`(int ${e.v})`];
@@ -1577,6 +1594,19 @@ class GlslLowerer {
       this.bind(v.name, comps);
     }
     for (const u of m.uniforms) {
+      /* 采样器（规范 4.1.7）：**三格**参数 —— 宽、高、这张图在共用那片纹素里的起点。
+       * 名字绑到那三格上，`texture` 那一处就直接把它们递给助手（见 `expr` 的 `tex`）。
+       * 为什么不是"一格句柄"：方言里没有不透明句柄这回事，而三个数就够定位一张图。 */
+      if (u.ty.k === 'sampler') {
+        const cs = [];
+        for (const part of ['w', 'h', 'off']) {
+          ps.push(`(${u.name}_${part} real)`);
+          cs.push(`(var ${u.name}_${part})`);
+          tail.push(`(var ${u.name}_${part})`);
+        }
+        this.bind(u.name, cs);
+        continue;
+      }
       const n = glslNComp(u.ty);
       const ct = glslCompTy(u.ty);
       const comps = [];
@@ -1586,6 +1616,11 @@ class GlslLowerer {
         tail.push(`(var ${u.name}_${i})`);
       }
       this.bind(u.name, comps);
+    }
+    /* 纹素数据是**一片共用的缓冲**（各张图靠 `off` 区分）—— 与快路那边 `%tex` 一样。 */
+    if (m.tex === true) {
+      ps.push('(glsl_texbuf (buf real))');
+      tail.push('(var glsl_texbuf)');
     }
     /* `probe` 排在**最后**：探针那一趟只换它一个（见 `deriv()`）。 */
     if (m.deriv === true) ps.push('(probe int)');
@@ -1705,16 +1740,10 @@ class GlslLowerer {
      * 函数**，所以要的是方言的全局（`tests/sexpr` 的 `12-globals` 那一档）——
      * 那是另一格，不是这一格。明着骂，别悄悄漏。 */
     const gvs = mod.globals === undefined ? [] : mod.globals;
-    /* 纹理（规范 8.7）：类型这一层收了（`sampler1D`/`sampler2D` 与 `texture` 一族），
-     * 但**取样还没做** —— 那要一整块（双线性、寻址方式、纹理数据怎么进来），是下一格。
-     * 明着骂，别悄悄给一个黑图。 */
+    /* 纹理取样（规范 8.7）：真取样在三个方言助手里（`GLSL_TEX_FNS`），只有用了才发。 */
     if (mod.tex === true) {
-      glslNyi('纹理取样（类型收了，取样那一块还没做 —— llvmpipe 的 lp_bld_sample*）');
-    }
-    for (const u of mod.uniforms) {
-      if (u.ty.k === 'sampler') {
-        glslNyi(`采样器 uniform '${u.name}'（纹理那一块还没做）`);
-      }
+      this.need(4);
+      this.out.push(GLSL_TEX_FNS);
     }
     if (gvs.length > 0) {
       throw new OmniError(`glsl: 模块级变量（'${gvs[0].name}'）在参照腿上还没接 ——`
@@ -1810,6 +1839,63 @@ const GLSL_TO8_FN = `  (fn glsl_to8 ((v real)) int
     (if (bin "<" (var x) (real 0.0)) (do (set x (real 0.0))))
     (if (bin ">" (var x) (real 1.0)) (do (set x (real 1.0))))
     (ret (toint (rmath "round" (bin "*" (var x) (real 255.0))))))`;
+
+/**
+ * 纹理取样（规范 8.7）：**双线性 + clamp-to-edge**，没有 mip。
+ *
+ * 三个助手，只有模块真用了 `texture` 一族时才发：
+ *   `glsl_texclamp(i, n)`             纹素下标夹到 [0, n-1]
+ *   `glsl_texel(t, off, w, i, j, c)`  一个纹素的一个通道（RGBA 连着放，行优先）
+ *   `glsl_tex2d(t, w, h, off, u, v)`  双线性；`glsl_tex1d` 就是 h=1、v=0.5 的它
+ *
+ * 纹素中心在 `(i+0.5)/w`，所以 `x = u*w - 0.5` 之后 `floor` 出左边那一格 ——
+ * 这与 GL 的 `GL_LINEAR` 一字对应，也是快路那边同一份公式（两条腿各写一遍，由门对账）。
+ *
+ * 通道那一层是一个 `while` 加四个 `if`：方言的 `fldset` 要**字面**字段名，
+ * 拿不到"第 c 格"这种写法。四份展开更长，但那是方言的规矩，不是这儿的选择。
+ */
+const GLSL_TEX_FNS = `  (fn glsl_texclamp ((i int) (n int)) int
+    (if (bin "<" (var i) (int 0)) (do (ret (int 0))))
+    (if (bin ">" (var i) (bin "-" (var n) (int 1))) (do (ret (bin "-" (var n) (int 1)))))
+    (ret (var i)))
+
+  (fn glsl_texel ((t (buf real)) (off int) (w int) (i int) (j int) (c int)) real
+    (ret (bget (var t) (bin "+" (var off)
+      (bin "+" (bin "*" (bin "+" (bin "*" (var j) (var w)) (var i)) (int 4)) (var c))))))
+
+  (fn glsl_tex2d ((t (buf real)) (w real) (h real) (off real) (u real) (v real)) glsl_v4
+    (let x real (bin "-" (bin "*" (var u) (var w)) (real 0.5)))
+    (let y real (bin "-" (bin "*" (var v) (var h)) (real 0.5)))
+    (let x0 real (rmath "floor" (var x)))
+    (let y0 real (rmath "floor" (var y)))
+    (let fx real (bin "-" (var x) (var x0)))
+    (let fy real (bin "-" (var y) (var y0)))
+    (let iw int (toint (var w)))
+    (let ih int (toint (var h)))
+    (let o int (toint (var off)))
+    (let i0 int (call glsl_texclamp (toint (var x0)) (var iw)))
+    (let i1 int (call glsl_texclamp (bin "+" (toint (var x0)) (int 1)) (var iw)))
+    (let j0 int (call glsl_texclamp (toint (var y0)) (var ih)))
+    (let j1 int (call glsl_texclamp (bin "+" (toint (var y0)) (int 1)) (var ih)))
+    (let r glsl_v4 (new glsl_v4))
+    (let c int (int 0))
+    (while (bin "<" (var c) (int 4)) (do
+      (let a real (call glsl_texel (var t) (var o) (var iw) (var i0) (var j0) (var c)))
+      (let b real (call glsl_texel (var t) (var o) (var iw) (var i1) (var j0) (var c)))
+      (let d real (call glsl_texel (var t) (var o) (var iw) (var i0) (var j1) (var c)))
+      (let f real (call glsl_texel (var t) (var o) (var iw) (var i1) (var j1) (var c)))
+      (let top real (bin "+" (var a) (bin "*" (var fx) (bin "-" (var b) (var a)))))
+      (let bot real (bin "+" (var d) (bin "*" (var fx) (bin "-" (var f) (var d)))))
+      (let val real (bin "+" (var top) (bin "*" (var fy) (bin "-" (var bot) (var top)))))
+      (if (bin "==" (var c) (int 0)) (do (fldset (var r) c0 (var val))))
+      (if (bin "==" (var c) (int 1)) (do (fldset (var r) c1 (var val))))
+      (if (bin "==" (var c) (int 2)) (do (fldset (var r) c2 (var val))))
+      (if (bin "==" (var c) (int 3)) (do (fldset (var r) c3 (var val))))
+      (set c (bin "+" (var c) (int 1)))))
+    (ret (var r)))
+
+  (fn glsl_tex1d ((t (buf real)) (w real) (off real) (u real)) glsl_v4
+    (ret (call glsl_tex2d (var t) (var w) (real 1.0) (var off) (var u) (real 0.5))))`;
 
 /**
  * 顶点 + 片元 + 插值，一整条：**一个三角形铺满画布**那一路。
@@ -2041,15 +2127,34 @@ export function glslTriProgram(vertMod, fragMod, w, h, uni) {
  * @param h 画布高
  * @param uni `{名字: [每一格的数]}`——uniform 的值，由调用方给
  */
-export function glslRenderMain(mod, w, h, uni) {
-  const args = ['(var px)', '(var py)'];
-  /* 用了导数的着色器：入口多两个 quad 基准（见 `deriv()`）。`qx`/`qy` 正是这一段
-   * 循环里的 quad 左下角像素下标，加 0.5 就是它的中心 —— 这段本来就按 quad 走。 */
-  if (mod.deriv === true) {
-    args.push('(bin "+" (toreal (var qx)) (real 0.5))');
-    args.push('(bin "+" (toreal (var qy)) (real 0.5))');
-  }
+/**
+ * uniform 的实参（参考腿的两个 main 共用）。
+ *
+ * 数值 uniform 就是它那几格数。**采样器**是三格 —— 宽、高、这张图在共用纹素缓冲里的
+ * 起点（与入口那侧 `(<名>_w) (<名>_h) (<名>_off)` 一一对应）。纹素本身推进 `texData`，
+ * 由调用方在 main 开头铺成一个 `(buf real)`。
+ *
+ * `uni[名字]` 对采样器给的是 `{ w, h, data: [每个纹素四格 RGBA…] }`（1D 的 h 是 1）。
+ */
+function glslUniArgs(mod, uni, args, texData) {
   for (const u of mod.uniforms) {
+    if (u.ty.k === 'sampler') {
+      const t = uni[u.name];
+      if (t === undefined || t.data === undefined) {
+        throw new OmniError(`glsl: 采样器 '${u.name}' 没给纹理（要 { w, h, data }）`);
+      }
+      const tw = t.w;
+      const th = u.ty.dim === 1 ? 1 : t.h;
+      if (t.data.length !== tw * th * 4) {
+        throw new OmniError(`glsl: 采样器 '${u.name}' 要 ${tw * th * 4} 个数`
+          + `（${tw}×${th} 的 RGBA），给了 ${t.data.length}`);
+      }
+      args.push(`(real ${glslNum(tw)})`);
+      args.push(`(real ${glslNum(th)})`);
+      args.push(`(real ${glslNum(texData.length)})`);
+      for (const v of t.data) texData.push(v);
+      continue;
+    }
     const vals = uni[u.name];
     if (vals === undefined) throw new OmniError(`glsl: uniform '${u.name}' 没给值`);
     const n = glslNComp(u.ty);
@@ -2060,6 +2165,29 @@ export function glslRenderMain(mod, w, h, uni) {
       args.push(glslCompTy(u.ty) === 'int' ? `(int ${Math.trunc(v)})` : `(real ${glslNum(v)})`);
     }
   }
+}
+
+/** 那片共用纹素缓冲的建法（`texData` 空就一行都不发）。 */
+function glslTexBufLines(texData) {
+  if (texData.length === 0) return [];
+  const out = [`(let glsl_texbuf (buf real) (bnew (buf real) (int ${texData.length})))`];
+  for (let i = 0; i < texData.length; i++) {
+    out.push(`(bset (var glsl_texbuf) (int ${i}) (real ${glslNum(texData[i])}))`);
+  }
+  return out;
+}
+
+export function glslRenderMain(mod, w, h, uni) {
+  const args = ['(var px)', '(var py)'];
+  /* 用了导数的着色器：入口多两个 quad 基准（见 `deriv()`）。`qx`/`qy` 正是这一段
+   * 循环里的 quad 左下角像素下标，加 0.5 就是它的中心 —— 这段本来就按 quad 走。 */
+  if (mod.deriv === true) {
+    args.push('(bin "+" (toreal (var qx)) (real 0.5))');
+    args.push('(bin "+" (toreal (var qy)) (real 0.5))');
+  }
+  const texData = [];
+  glslUniArgs(mod, uni, args, texData);
+  if (mod.tex === true) args.push('(var glsl_texbuf)');
   /* 真跑那一趟：`probe = -1`（探针那几趟由 `deriv()` 自己发，见那儿）。 */
   if (mod.deriv === true) args.push('(int -1)');
   const call = `(call glsl_frag ${args.join(' ')})`;
@@ -2095,6 +2223,7 @@ export function glslRenderMain(mod, w, h, uni) {
 
   (main
     (let c ${glslStructName(4)} (new ${glslStructName(4)}))
+    ${glslTexBufLines(texData).join('\n    ')}
     (let px real (real 0.0))
     (let py real (real 0.0))
     (let qy int (int 0))
@@ -2136,13 +2265,9 @@ export function glslBenchMain(mod, w, h, uni, iters) {
     args.push('(bin "+" (toreal (var qx)) (real 0.5))');
     args.push('(bin "+" (toreal (var qy)) (real 0.5))');
   }
-  for (const u of mod.uniforms) {
-    const vals = uni[u.name];
-    if (vals === undefined) throw new OmniError(`glsl: uniform '${u.name}' 没给值`);
-    for (const v of vals) {
-      args.push(glslCompTy(u.ty) === 'int' ? `(int ${Math.trunc(v)})` : `(real ${glslNum(v)})`);
-    }
-  }
+  const texData = [];
+  glslUniArgs(mod, uni, args, texData);
+  if (mod.tex === true) args.push('(var glsl_texbuf)');
   if (mod.deriv === true) args.push('(int -1)');
   const call = `(call glsl_frag ${args.join(' ')})`;
   const QX = [0, 1, 0, 1];
@@ -2175,6 +2300,7 @@ export function glslBenchMain(mod, w, h, uni, iters) {
     (let px real (real 0.0))
     (let py real (real 0.0))
     (let acc int (int 0))
+    ${glslTexBufLines(texData).join('\n    ')}
     (let it int (int 0))
     (while (bin "<" (var it) (int ${iters}))
       (do

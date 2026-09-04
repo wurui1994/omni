@@ -191,8 +191,10 @@ env: OMNI_CC、OMNI_CLANG、OMNI_LLVM_CONFIG`,
       brief: '编译并执行',
       help: `.frag/.glsl 走另一条腿（ADR-0019 决策九）：一帧一张 PNG，要 -o。
 uniform 由 --set 给，没给的按 0；一个名字对一串数，逗号分开。
+采样器（sampler1D/2D）由 --tex 给：宽、高、然后 W×H×4 个 RGBA 分量（行优先）。
 
   omni run x.frag -o out.png --size 512 --set u_resolution=512,512
+  omni run x.frag -o out.png --tex u_tex=2,2,1,0,0,1,0,1,0,1,0,0,1,1,1,1,1,1
 
 .asy 的出图格式与落地文件都是**运行期的一格宿主设置**（ADR-0015）——
 产物缓存的印记里没有它们，同一份编好的东西换个设置再跑就换个输出：
@@ -205,7 +207,9 @@ uniform 由 --set 给，没给的按 0；一个名字对一串数，逗号分开
         { name: '--format', alias: '-f', arity: 1, value: 'FMT',
           brief: '（asy）出图格式 eps|svg；不给就看 -o 的后缀' },
         { name: '--size', arity: 1, value: 'N[xM]', brief: '（glsl）画布大小，默认 256' },
-        { name: '--set', arity: 1, value: 'NAME=v,…', brief: '（glsl）给一个 uniform 赋值，可重复' }],
+        { name: '--set', arity: 1, value: 'NAME=v,…', brief: '（glsl）给一个 uniform 赋值，可重复' },
+        { name: '--tex', arity: 1, value: 'NAME=W,H,v,…',
+          brief: '（glsl）给一个采样器一张图：宽、高、W×H×4 个 RGBA 分量，可重复' }],
     },
     {
       name: 'build', key: 'build', usage: 'FILE -o NAME',

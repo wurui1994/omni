@@ -85,10 +85,11 @@ function pngRead(path) {
 }
 
 /** 渲一份。`omni run x.frag -o png --size N` 就是决策九那条路。 */
-function render(name, size) {
+function render(name, size, extra) {
   const out = join(OUT, `${name}.png`);
   const r = spawnSync(process.execPath,
-    [CLI, 'run', join(CASES, `${name}.frag`), '-o', out, '--size', String(size)],
+    [CLI, 'run', join(CASES, `${name}.frag`), '-o', out, '--size', String(size),
+      ...(extra === undefined ? [] : extra)],
     { encoding: 'utf8' });
   if (r.status !== 0) throw new Error((r.stderr ?? '').trim().split('\n')[0]);
   return pngRead(out);
@@ -107,10 +108,11 @@ const near = (got, want, tol) => got.every((v, i) => Math.abs(v - want[i]) <= to
  * @param {string} name 例子名
  * @param {number} size 画布边长
  * @param {[number, number, number[], string][]} probes `[x, y, 期望 RGBA, 这个点是什么]`
+ * @param {string[]} [extra] 额外的命令行参数（`--set` / `--tex` 那些）
  */
-function draw(name, size, probes) {
+function draw(name, size, probes, extra) {
   let img = null;
-  try { img = render(name, size); } catch (e) { bad(name, `    ${e.message}`); return; }
+  try { img = render(name, size, extra); } catch (e) { bad(name, `    ${e.message}`); return; }
   if (img.w !== size || img.h !== size) {
     bad(name, `    画布是 ${img.w}×${img.h}，要 ${size}×${size}`);
     return;
@@ -192,6 +194,26 @@ draw('deriv-quad', 8, [
   [7, 0, [14, 14, 32, 255], '右上角：qx=6、qy=6'],
   [4, 4, [10, 6, 32, 255], '中间：qx=4、qy=2（图像第 4 行是像素 y=3）'],
 ]);
+
+/* ---- 六、纹理取样（规范 8.7）：快路那一侧 --------------------------------------
+ * 用的是 `cases/tex-bilinear.frag`（同一份用例的参考腿那一侧在 `render.js` 里，那边
+ * 由门自己按公式算一遍逐像素对）。这一支盯的是快路那三件新东西真的接上了：
+ *   - ABI 的**第三个指针** `%tex`（纹素从命令行经宿主的 `--tex` 一路递到函数指针）
+ *   - 采样器在 `in` 里占的那三格（宽、高、这张图在纹素里的起点）
+ *   - 逐道 gather：一批八道各读各的纹素
+ *
+ * 纹理 2×2：红 绿 / 蓝 白（行优先）。画布 4×4，坐标 `gl_FragCoord.xy / 4`。
+ * 期望值手算（图像第 y 行是 `gl_FragCoord.y = 3.5 - y`，`bx = (x+0.5)/2 - 0.5`）：
+ * x=0 与 x=3、以及 fragY=0.5 与 3.5 那两行都落在**边外** —— clamp-to-edge 夹住，
+ * 所以四个角就是四个纹素本身（这是"夹住了、没绕回去"的判据）。 */
+draw('tex-bilinear', 4, [
+  [0, 3, [255, 0, 0, 255], '左下角：u/v 都在边外，夹到纹素 (0,0) = 红'],
+  [3, 3, [0, 255, 0, 255], '右下角：夹到纹素 (1,0) = 绿'],
+  [0, 0, [0, 0, 255, 255], '左上角：夹到纹素 (0,1) = 蓝'],
+  [3, 0, [255, 255, 255, 255], '右上角：夹到纹素 (1,1) = 白'],
+  [1, 3, [191, 64, 0, 255], '底行 x=1：横向权重 0.25，红→绿之间'],
+  [1, 2, [159, 64, 64, 255], '四格之间：横 0.25、纵 0.25，四个纹素都参与'],
+], ['--tex', 'u_tex=2,2,1,0,0,1,0,1,0,1,0,0,1,1,1,1,1,1']);
 
 rmSync(OUT, { recursive: true, force: true });
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);

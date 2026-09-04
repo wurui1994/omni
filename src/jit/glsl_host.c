@@ -20,13 +20,17 @@
  *
  * ABI（与 `emit_llvm.js` 的 `run()` 一字对齐）：
  *
- *   void glsl_frag8(const f8 *in, f8 *out)
+ *   void glsl_frag8(const f8 *in, f8 *out, const float *tex)
  *     in  = [x, y, uniform 每一格…]，每格 8 道 f32
  *     out = [r, g, b, a, 覆盖度]（覆盖度：1.0 写回、0.0 被 discard 杀掉）
+ *     tex = 所有纹理的纹素，一段连着的 f32（RGBA、行优先）。**不是**每格 8 道：
+ *           取样是逐道 gather 的，读到的地址各不相同，所以这一侧就是普通标量数组。
+ *           哪张图多大、从哪儿开始，由采样器在 `in` 里占的那三格（宽、高、起点）说。
+ *           没有采样器的着色器传 NULL —— 那时这个指针一次也不会被读。
  *
  *   用法：
  *     omni-glsl-jit --samples RES        < frag.ll
- *     omni-glsl-jit --render W H OUT.png [uniform 每一格…]  < frag.ll
+ *     omni-glsl-jit --render W H OUT.png [uniform 每一格…] [--tex 纹素…]  < frag.ll
  *     omni-glsl-jit --bench SIZE REPS    < frag.ll
  *
  *   印出来的 `compile_ms` 是**只量 Lookup 那一句**：ORC 是惰性物化的，编译就发生在那儿。
@@ -48,7 +52,7 @@
 #include <unistd.h>
 
 typedef float f8 __attribute__((ext_vector_type(8)));
-typedef void (*frag8_fn)(const f8 *in, f8 *out);
+typedef void (*frag8_fn)(const f8 *in, f8 *out, const float *tex);
 
 static double now_ms(void) {
   struct timespec t;
@@ -94,7 +98,7 @@ static void samples(frag8_fn frag, float res) {
   for (int l = 0; l < 8; l++) { in[0][l] = SX[l]; in[1][l] = SY[l]; }
   in[2] = (f8)res;
   in[3] = (f8)res;
-  frag(in, out);
+  frag(in, out, NULL);
   for (int l = 0; l < 8; l++) {
     printf("%.9g %.9g %.9g %.9g\n", out[0][l], out[1][l], out[2][l], out[3][l]);
   }
@@ -117,7 +121,7 @@ static void bench(frag8_fn frag, int size, int reps) {
       in[3] = (f8)(float)size;
       for (int px = 0; px < size; px += 8) {
         in[0] = (f8)((float)px + 0.5f) + lane;
-        frag(in, out);
+        frag(in, out, NULL);
         for (int c = 0; c < 4; c++) {
           f8 v = __builtin_elementwise_max(out[c], (f8)0.0f);
           v = __builtin_elementwise_min(v, (f8)1.0f);
@@ -229,12 +233,13 @@ static int serve(LLVMOrcLLJITRef jit, LLVMOrcJITDylibRef jd) {
     double cms = 0;
     frag8_fn frag = jit_variant(jit, jd, ir, (size_t)need, idx, &pms, &cms);
     if (frag == NULL) return 65;
-    /* 调一次，确认这个变体真的能跑（而且把「拿到的是活地址」这件事钉住）。 */
+    /* 调一次，确认这个变体真的能跑（而且把「拿到的是活地址」这件事钉住）。
+       纹理传 NULL：这条协议上没有纹素这一串，所以带采样器的变体不该走 `--serve`。 */
     f8 in[4], out[5];
     for (int l = 0; l < 8; l++) { in[0][l] = SX[l]; in[1][l] = SY[l]; }
     in[2] = (f8)1024.0f;
     in[3] = (f8)1024.0f;
-    frag(in, out);
+    frag(in, out, NULL);
     printf("variant %d compile_ms %.3f parse_ms %.3f c0 %.9g\n", idx, cms, pms, (double)out[0][0]);
     fflush(stdout);
     idx++;
@@ -275,6 +280,7 @@ typedef struct {
   frag8_fn frag;
   int w, h, nUni;
   const float *uni;
+  const float *tex;    /* 所有纹理的纹素，一段连着的 f32；没采样器就是 NULL */
   unsigned char *rgba;
   int next;            /* 下一块的起始行 —— 只用 __atomic_fetch_add 动它 */
 } render_job;
@@ -303,7 +309,7 @@ static void render_rows(render_job *j, int y0, int y1) {
     for (int px = 0; px < w; px += 4) {          /* 一趟四列 = 两个 quad 的宽 */
       in[0] = (f8)((float)px + 0.5f) + vdx;
       in[1] = (f8)((float)py + 0.5f) + vdy;
-      j->frag(in, out);
+      j->frag(in, out, j->tex);
       for (int l = 0; l < 8; l++) {
         int x = px + LANE_DX[l];
         int y = py + LANE_DY[l];
@@ -359,7 +365,7 @@ static int render_threads(void) {
  * `tests/glsl/examples.js` 钉着（27 张图与真 GPU 逐字节相同，线程数换了照样相同）。
  */
 static int render(frag8_fn frag, int w, int h, const char *path,
-                  const float *uni, int nUni) {
+                  const float *uni, int nUni, const float *tex) {
   if (w <= 0 || h <= 0 || 2 + nUni > OMNI_MAX_SLOTS) return 64;
   /* **清零**（不是 malloc）：被 `discard` 杀掉的像素一个字节都不写，留下的就是这里的零 ——
    * 透明黑，与 GL 里"没有片元写到那儿"是同一件事。 */
@@ -371,6 +377,7 @@ static int render(frag8_fn frag, int w, int h, const char *path,
   job.h = h;
   job.nUni = nUni;
   job.uni = uni;
+  job.tex = tex;
   job.rgba = rgba;
   job.next = 0;
   int nt = render_threads();
@@ -444,15 +451,29 @@ int main(int argc, char **argv) {
   if (strcmp(mode, "--samples") == 0) {
     samples(frag, argc > 2 ? (float)atoi(argv[2]) : 1024.0f);
   } else if (strcmp(mode, "--render") == 0) {
-    /* omni-glsl-jit --render W H OUT.png [uniform 的每一格…] < frag.ll */
+    /* omni-glsl-jit --render W H OUT.png [uniform 的每一格…] [--tex 纹素…] < frag.ll
+     *
+     * `--tex` 之后那些数是**所有纹理的纹素**（RGBA、行优先、各张连着放）。
+     * 采样器在 uniform 那一串里占三格（宽、高、这张图在纹素里的起点），
+     * 所以这两串合起来就把"哪张图、多大、在哪儿"说全了。 */
     if (argc < 5) {
-      fprintf(stderr, "用法：omni-glsl-jit --render W H OUT.png [uniform 每一格…]\n");
+      fprintf(stderr, "用法：omni-glsl-jit --render W H OUT.png [uniform 每一格…] [--tex 纹素…]\n");
       return 64;
     }
     float uni[OMNI_MAX_SLOTS];
     int nUni = 0;
-    for (int a = 5; a < argc && nUni < OMNI_MAX_SLOTS - 2; a++) uni[nUni++] = (float)atof(argv[a]);
-    return render(frag, atoi(argv[2]), atoi(argv[3]), argv[4], uni, nUni);
+    int a = 5;
+    for (; a < argc && strcmp(argv[a], "--tex") != 0; a++) {
+      if (nUni < OMNI_MAX_SLOTS - 2) uni[nUni++] = (float)atof(argv[a]);
+    }
+    float *tex = NULL;
+    if (a < argc) {
+      int nTex = argc - a - 1;
+      tex = (float *)malloc((size_t)(nTex > 0 ? nTex : 1) * sizeof(float));
+      if (tex == NULL) return 70;
+      for (int k = 0; k < nTex; k++) tex[k] = (float)atof(argv[a + 1 + k]);
+    }
+    return render(frag, atoi(argv[2]), atoi(argv[3]), argv[4], uni, nUni, tex);
   } else {
     bench(frag, argc > 2 ? atoi(argv[2]) : 1024, argc > 3 ? atoi(argv[3]) : 3);
   }

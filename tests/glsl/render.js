@@ -284,6 +284,83 @@ for (const [tag, extra] of [['C', ['--backend', 'c']], ['LLVM', ['--backend', 'l
   }
 }
 
+/* 八、纹理取样（规范 8.7）：**双线性 + clamp-to-edge**。
+ *
+ * 用的是 `cases/tex-bilinear.frag`（2×2 的 RGBA 铺到 4×4 画布，见那份的头注）。
+ * 门这一侧**自己再写一遍双线性** —— 不是抄参考腿那段方言，而是照公式直接算：
+ * 纹素中心在 `(i+0.5)/w`，所以 `x = u*w - 0.5`，`floor` 出左边那一格、余数当权重，
+ * 下标夹到 `[0, n-1]`。两份独立的实现同一个答案，这才叫"量过"。
+ *
+ * 4×4 十六个像素落点覆盖三档（中心、两格中间、边外要夹住），一格都不用挑。 */
+{
+  const TW = 4;
+  const TH = 4;
+  /* 2×2：红 绿 / 蓝 白（行优先，一格四个数 RGBA）。 */
+  const TEX = { w: 2, h: 2, data: [1, 0, 0, 1, 0, 1, 0, 1, 0, 0, 1, 1, 1, 1, 1, 1] };
+  const tsrc = readFileSync(join(CASES, 'tex-bilinear.frag'), 'utf8');
+  const td = new Diagnostics();
+  const ttoks = lexText(g.lex, new SourceFile('tex-bilinear.frag', tsrc), td);
+  td.throwIfErrors();
+  const tmod = glslCheck(glrParse(tb, ttoks, td), 'frag');
+  const tpath = join(OUT, 'tex.sx');
+  writeFileSync(tpath, glslProgram(tmod, TW, TH, { u_tex: TEX }));
+  const tr = spawnSync(process.execPath, [CLI, 'run', tpath], { encoding: 'utf8', maxBuffer: 1 << 26 });
+  if (tr.status !== 0) {
+    bad('纹理那一支跑不动', `    ${(tr.stderr ?? '').trim().split('\n').slice(0, 6).join('\n    ')}`);
+  } else {
+    /* 门自己那一份双线性（照规范 8.7 的公式写，与两条腿都无关）。 */
+    const at = (i, j, ch) => TEX.data[(j * TEX.w + i) * 4 + ch];
+    const clampIx = (i, n) => (i < 0 ? 0 : (i > n - 1 ? n - 1 : i));
+    const bilinear = (u, v, ch) => {
+      const bx = u * TEX.w - 0.5;
+      const by = v * TEX.h - 0.5;
+      const x0 = Math.floor(bx);
+      const y0 = Math.floor(by);
+      const fx = bx - x0;
+      const fy = by - y0;
+      const i0 = clampIx(x0, TEX.w);
+      const i1 = clampIx(x0 + 1, TEX.w);
+      const j0 = clampIx(y0, TEX.h);
+      const j1 = clampIx(y0 + 1, TEX.h);
+      const top = at(i0, j0, ch) + fx * (at(i1, j0, ch) - at(i0, j0, ch));
+      const bot = at(i0, j1, ch) + fx * (at(i1, j1, ch) - at(i0, j1, ch));
+      return top + fy * (bot - top);
+    };
+    const to8 = (v) => Math.round(Math.min(1, Math.max(0, v)) * 255);
+    const tn = tr.stdout.trim().split('\n').map(Number);
+    const off = [];
+    for (let i = 0; i + 4 < tn.length; i += 5) {
+      const x = tn[i];
+      const y = tn[i + 1];
+      const u = (x + 0.5) / TW;
+      const v = (y + 0.5) / TH;
+      const want = [to8(bilinear(u, v, 0)), to8(bilinear(u, v, 1)), to8(bilinear(u, v, 2))];
+      if (tn[i + 2] !== want[0] || tn[i + 3] !== want[1] || tn[i + 4] !== want[2]) {
+        off.push(`(${x},${y}) 要 ${want.join(',')}，得 ${tn[i + 2]},${tn[i + 3]},${tn[i + 4]}`);
+      }
+    }
+    if (tn.length !== TW * TH * 5) {
+      bad('纹理：印出来的数不对', `    要 ${TW * TH * 5} 个，得 ${tn.length}`);
+    } else if (off.length > 0) {
+      bad('纹理双线性对不上门自己算的', `    ${off.slice(0, 4).join('\n    ')}`);
+    } else {
+      ok(`纹理：${TW}×${TH} 每个像素的双线性取样都与门自己按公式算的相同（含边上夹住那几格）`);
+    }
+    for (const [tag, extraArgs] of [['C', ['--backend', 'c']], ['LLVM', ['--backend', 'llvm']]]) {
+      const rc = spawnSync(process.execPath, [CLI, 'run', tpath, ...extraArgs],
+        { encoding: 'utf8', maxBuffer: 1 << 26 });
+      if (rc.status !== 0) {
+        bad(`纹理：${tag} 腿跑不动`, `    ${(rc.stderr ?? '').trim().split('\n').slice(0, 4).join('\n    ')}`);
+      } else if (rc.stdout.trim() !== tr.stdout.trim()) {
+        bad(`纹理：${tag} 腿与 JS 腿不一样`, '    8 位像素对不上');
+      } else {
+        ok(`纹理：${tag} 腿与 JS 腿逐字节相同`);
+      }
+    }
+  }
+}
+
 rmSync(OUT, { recursive: true, force: true });
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail > 0 ? 1 : 0);
+

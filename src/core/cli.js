@@ -2163,6 +2163,17 @@ function runGlslFrag(path, rest) {
     if (eq <= 0) throw new OmniError(`run: --set 要 NAME=v[,v…]，给的是 '${kv}'`);
     set[kv.slice(0, eq)] = kv.slice(eq + 1).split(',').map((s) => Number(s));
   }
+  /* `--tex NAME=W,H,r,g,b,a,…` —— 采样器的值。与 `--set` 分开一个开关，因为它的形状
+   * 不一样：前两个数是宽高，后面是 W×H×4 个纹素分量（RGBA、行优先）。1D 的高给 1。 */
+  for (let i = 0; i < rest.length; i++) {
+    if (rest[i] !== '--tex') continue;
+    const kv = rest[i + 1] === undefined ? '' : rest[i + 1];
+    const eq = kv.indexOf('=');
+    if (eq <= 0) throw new OmniError(`run: --tex 要 NAME=W,H,v…，给的是 '${kv}'`);
+    const nums = kv.slice(eq + 1).split(',').map((s) => Number(s));
+    if (nums.length < 3) throw new OmniError(`run: --tex ${kv.slice(0, eq)} 至少要 W,H 加一个纹素`);
+    set[kv.slice(0, eq)] = { w: nums[0], h: nums[1], data: nums.slice(2) };
+  }
   const root = join(installDir(), '..', '..', '..');
   const r = glslRenderToPng(root, path, out, w, h, set, findCC(), env);
   stdout(`${r.out}  ${w}x${h}  uniform ${r.uniforms.length} 个  ir ${r.irLines} 行\n`);

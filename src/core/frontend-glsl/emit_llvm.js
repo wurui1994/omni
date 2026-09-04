@@ -565,6 +565,79 @@ class GlslLlvmEmitter {
       + `<${GLSL_LANES} x i32> <${ix.join(', ')}>`, 'f');
   }
 
+  /**
+   * 一次**逐道 gather**：`idx` 是 8 个 i32 下标，回那 8 个 float（从 `%tex` 那片里取）。
+   *
+   * 为什么要逐道：八道各自落在不同的纹素上，而 LLVM 的 `load` 一次只读一个地址。
+   * llvmpipe 那边同样是 gather（它有真 gather 指令可用），形状一样。
+   * 八条 `extractelement` + `getelementptr` + `load` + `insertelement` —— 直白但正确；
+   * 想快就得把这一段换成运行时的一个符号，那是另一格。
+   */
+  gather(idx) {
+    let out = null;
+    for (let l = 0; l < GLSL_LANES; l++) {
+      const ix = this.emit(`extractelement ${LL_I} ${idx.v}, i32 ${l}`, 'x');
+      const p = this.emit(`getelementptr float, ptr %tex, i32 ${ix.v}`, 'x');
+      const val = this.emit(`load float, ptr ${p.v}, align 4`, 'x');
+      const base = out === null ? 'poison' : out.v;
+      out = this.emit(`insertelement ${LL_F} ${base}, float ${val.v}, i32 ${l}`, 'f');
+    }
+    return out;
+  }
+
+  /**
+   * 纹理取样（规范 8.7）：**双线性 + clamp-to-edge**，没有 mip。
+   *
+   * 采样器在这一层就是三格 float（宽、高、这张图在 `%tex` 那片里的起点），与参考腿
+   * 那侧 `(<名>_w) (<名>_h) (<名>_off)` 一一对应；纹素连着放、RGBA、行优先。
+   * 公式与参考腿那份（`GLSL_TEX_FNS`）**一字对应**：纹素中心在 `(i+0.5)/w`，
+   * 所以 `x = u*w - 0.5` 之后 `floor` 出左边那一格。两条腿各写一遍，由门对账。
+   *
+   * 1D 就是 `h = 1`、`v = 0.5` 的 2D（与参考腿同一条化简）。
+   */
+  texSample(e) {
+    const s = this.expr(e.args[0]);
+    const c = this.expr(e.args[1]);
+    const is1d = c.length === 1;
+    const w = this.toF(s[0]);
+    const h = is1d ? llF(1) : this.toF(s[1]);
+    const u = this.toF(c[0]);
+    const v = is1d ? llF(0.5) : this.toF(c[1]);
+    const x = this.arith('-', this.arith('*', u, w), llF(0.5));
+    const y = this.arith('-', this.arith('*', v, h), llF(0.5));
+    const x0 = this.call1('llvm.floor', [x]);
+    const y0 = this.call1('llvm.floor', [y]);
+    const fx = this.arith('-', x, x0);
+    const fy = this.arith('-', y, y0);
+    const iw = this.toI(w);
+    const ih = this.toI(h);
+    const off = this.toI(this.toF(s[2]));
+    /* 夹到 [0, n-1]：clamp-to-edge。 */
+    const clamp1 = (ii, nn) => {
+      const lo = this.select(this.cmp('<', ii, llI(0)), llI(0), ii);
+      const hi = this.arith('-', nn, llI(1));
+      return this.select(this.cmp('>', lo, hi), hi, lo);
+    };
+    const i0 = clamp1(this.toI(x0), iw);
+    const i1 = clamp1(this.arith('+', this.toI(x0), llI(1)), iw);
+    const j0 = clamp1(this.toI(y0), ih);
+    const j1 = clamp1(this.arith('+', this.toI(y0), llI(1)), ih);
+    /* 一个纹素一个通道的下标：off + (j*w + i)*4 + c。 */
+    const at4 = (ii, jj, ch) => this.arith('+', off,
+      this.arith('+', this.arith('*', this.arith('+', this.arith('*', jj, iw), ii), llI(4)),
+        llI(ch)));
+    const mix2 = (a, b, t) => this.arith('+', a, this.arith('*', t, this.arith('-', b, a)));
+    const out = [];
+    for (let ch = 0; ch < 4; ch++) {
+      const t00 = this.gather(at4(i0, j0, ch));
+      const t10 = this.gather(at4(i1, j0, ch));
+      const t01 = this.gather(at4(i0, j1, ch));
+      const t11 = this.gather(at4(i1, j1, ch));
+      out.push(mix2(mix2(t00, t10, fx), mix2(t01, t11, fx), fy));
+    }
+    return out;
+  }
+
   /* ------------------------------------------------------------ 表达式 */
 
   /** 一个表达式 -> 分量数组（每格一个 `{ v, t }`）。 */
@@ -630,6 +703,7 @@ class GlslLlvmEmitter {
       return out;
     }
     if (e.k === 'builtin') return this.builtin(e);
+    if (e.k === 'tex') return this.texSample(e);
     if (e.k === 'call') return this.inlineCall(e);
     if (e.k === 'bits') {
       /* 位转换（规范 8.4）—— **一条 `bitcast`**。这就是决策十第 1 步兑的钱：上一版这儿
@@ -1317,10 +1391,13 @@ class GlslLlvmEmitter {
   /**
    * 片元入口。签名**只有两个指针**（驱动那一侧照这个声明）：
    *
-   *   void glsl_frag8(ptr in, ptr out)
+   *   void glsl_frag8(ptr in, ptr out, ptr tex)
    *
    *   `in`  指向连着的 `<8 x float>`：`[x, y, uniform 的每一格…]`
    *   `out` 指向连着的**五格**：r/g/b/a 加一格**覆盖度**（1.0 写回 / 0.0 被 discard 杀掉）
+   *   `tex` 指向一片 **`float`**（不是 `<8 x float>`）：所有纹理的纹素连着放、RGBA、行优先。
+   *         采样器在 `in` 里占三格（宽、高、这张图在这片里的起点），见 `texSample`。
+   *         没有纹理的着色器这个指针不看（驱动可以递 NULL）。
    *
    * 覆盖度那一格**永远写**（没有 `discard` 的着色器存常量全 1）：驱动那一侧因此只有一种
    * ABI，不必按"这份着色器有没有 discard"分两条读法。
@@ -1350,16 +1427,6 @@ class GlslLlvmEmitter {
     /* 用户函数不再是拦路虎 —— 它们**内联**（见 `inlineCall`），所以这儿只要求有 `main`。 */
     const mainFn = this.fnByName.get('main');
     if (mainFn === undefined) throw new OmniError('glsl/llvm: 没有 main');
-    /* 纹理（规范 8.7）：类型这一层收了，取样还没做 —— 那要一整块（双线性、寻址方式、
-     * 纹理数据怎么进 ABI），是下一格。明着骂，别悄悄给一个黑图。 */
-    if (m.tex === true) {
-      throw new OmniError('glsl/llvm: 纹理取样还没做（类型收了；取样那一块见 ADR-0019）');
-    }
-    for (const u of m.uniforms) {
-      if (u.ty.k === 'sampler') {
-        throw new OmniError(`glsl/llvm: 采样器 uniform '${u.name}'（纹理那一块还没做）`);
-      }
-    }
     /* 形参**刻意不叫 `i`**：见 `builtin()` 里 `at` 上面那段（闭包捕获那条检查是按
      * 函数粒度 + 按名字判的）。 */
     const load = (slotIx) => {
@@ -1371,6 +1438,14 @@ class GlslLlvmEmitter {
     const y = load(slot++);
     this.bind('gl_FragCoord', [x, y, llF(0), llF(1)]);
     for (const u of m.uniforms) {
+      /* 采样器（规范 4.1.7）在 `in` 里占**三格**：宽、高、这张图在 `%tex` 里的起点
+       * （与参考腿那侧的三个形参一一对应）。纹素本身在 `%tex` 那片里，见 `texSample`。 */
+      if (u.ty.k === 'sampler') {
+        const cs = [];
+        for (let i = 0; i < 3; i++) cs.push(load(slot++));
+        this.bind(u.name, cs);
+        continue;
+      }
       const cts = llCompTys(u.ty);
       const comps = [];
       for (let i = 0; i < llNComp(u.ty); i++) {
@@ -1431,7 +1506,7 @@ class GlslLlvmEmitter {
       + `; 一批 8 道 = 两个 2×2 quad（道 0,1/2,3 是第一个 quad 的上下两行）—— 导数要它\n`
       + `; 覆盖度：1.0 = 这一道写回、0.0 = 被 discard 杀掉（照 llvmpipe 的 kill 掩码）\n`
       + `; 可变量在 alloca 里、写过掩码（照 lp_exec_mask_store）—— mem2reg 会把大部分提回 SSA\n`
-      + `define void @glsl_frag8(ptr %in, ptr %out) {\n`
+      + `define void @glsl_frag8(ptr %in, ptr %out, ptr %tex) {\n`
       + `${this.allocas.join('\n')}\n${this.body.join('\n')}\n  ret void\n}\n\n`
       + `${decls.join('\n')}\n`;
   }

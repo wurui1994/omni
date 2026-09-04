@@ -118,10 +118,32 @@ export function glslRenderToPng(root, path, out, w, h, set, cc, envGet) {
   const mod = glslCheck(tree, 'frag');
   const ir = glslEmitLlvm(mod);
 
-  /* uniform 摊成一串数，**按声明次序** —— 宿主那侧就是照这个次序往 `in` 里填。 */
+  /* uniform 摊成一串数，**按声明次序** —— 宿主那侧就是照这个次序往 `in` 里填。
+   *
+   * 采样器占**三格**（宽、高、这张图在纹素那一串里的起点），纹素本身另走 `--tex`
+   * 那一串。这与参考腿的 `glslUniArgs` 是同一套布局，所以同一个 `set` 两条腿都吃。 */
   const vals = [];
   const names = [];
+  const tex = [];
   for (const u of mod.uniforms) {
+    if (u.ty.k === 'sampler') {
+      const t = set[u.name];
+      if (t === undefined || t.data === undefined) {
+        throw new OmniError(`glsl render: 采样器 '${u.name}' 没给纹理（要 { w, h, data }）`);
+      }
+      const tw = t.w;
+      const th = u.ty.dim === 1 ? 1 : t.h;
+      if (t.data.length !== tw * th * 4) {
+        throw new OmniError(`glsl render: 采样器 '${u.name}' 要 ${tw * th * 4} 个数`
+          + `（${tw}×${th} 的 RGBA），给了 ${t.data.length}`);
+      }
+      names.push(`${u.name}[${tw}x${th}]`);
+      vals.push(tw);
+      vals.push(th);
+      vals.push(tex.length);
+      for (const v of t.data) tex.push(v);
+      continue;
+    }
     const n = glslRenderNComp(u.ty);
     const given = set[u.name];
     if (given !== undefined && given.length !== n) {
@@ -138,6 +160,11 @@ export function glslRenderToPng(root, path, out, w, h, set, cc, envGet) {
   const exe = glslRenderBuildHost(root, lc, cc);
   const argv = ['--render', String(w), String(h), out];
   for (const v of vals) argv.push(String(v));
+  /* 纹素跟在一个 `--tex` 哨兵后面 —— 两串数长度都不定，中间要有个界。 */
+  if (tex.length > 0) {
+    argv.push('--tex');
+    for (const v of tex) argv.push(String(v));
+  }
   /* IR 走 stdin —— 决策八那一条。 */
   const r = spawnIn(exe, argv, 'c', ir);
   if (r[0] !== 0) {
