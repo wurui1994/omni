@@ -2031,6 +2031,11 @@ struct frame {
   triple max3v = (0, 0, 0);
   pair minr = (0, 0);
   pair maxr = (0, 0);
+  // 三维那一层的**几何**（位图那一档要它）：真正的 op 表挂在旁边一张登记册上
+  // （`asy__f3tab`，见 asy__push3 那一段）—— 不能直接放这儿，因为 `path3` 与
+  // `triple[][]` 都在这个文件后面才定义，而 asy 的名字解析是顺着来的。
+  // -1 是"还没有三维内容"。
+  int f3id = -1;
   // 攒过标签没有（runlabel.in:220 的 `labels(frame)`）
   bool haslabel = false;
   labelrec[] labs;
@@ -2042,6 +2047,10 @@ frame asy__newframe() {
   frame f;
   return f;
 }
+
+// 帧与帧合并时，三维那张 op 表也要搬。真身要 `path3` 才写得出来，而 path3 在这个
+// 文件后面才有名字 —— 所以这里先摆一个桩，三维那一段再接上（与 asy__dashhook 同一招）。
+void asy__merge3fn(frame dest, frame src) {}
 
 void addop(frame f, int kind, path g, pen p) {
   drawop o;
@@ -2484,6 +2493,11 @@ void add(frame dest, frame src) {
     dest.labs.push(q);
   }
   if (src.haslabel) dest.haslabel = true;
+  // 三维那张 op 表也要跟过来（位图那一档要它）。**界那几格这一刀故意不搬** ——
+  // 现在 `add(f,g)` 之后 `min3(f)` 回的是 (0,0,0)，改了会动到已经对上的例子；
+  // 等 shipout3 那条路落地时与它一起改（ADR 第六节记了这一条）。
+  // 真身在三维那一段（`path3` 有名字之后）接上，见 asy__merge3hook。
+  asy__merge3fn(dest, src);
 }
 
 bool fits(picture pic, real s) {
@@ -6556,6 +6570,8 @@ void prepend(frame dest, frame src) {
   for (int i = 0; i < dest.labs.length; ++i) ol.push(dest.labs[i]);
   dest.labs = ol;
   if (src.haslabel) dest.haslabel = true;
+  // 三维那张 op 表：与 add 同一条（界那几格照旧不搬，理由见那边的注释）
+  asy__merge3fn(dest, src);
 }
 
 string readline(string prompt="", string name="", bool tabcompletion=false) {  abort("readline 还没做（这一层不读 stdin 的交互行）"); return "";
@@ -9647,6 +9663,51 @@ void _image(frame f, pen F(int, int), int width, int height,
  * graph3 / solids 树的正文能跑到底，界与投影算得出真数。真出图是另一刀。
  */
 
+// 三维那一层的**几何**：一格 op（位图那一档要它 —— 见 ADR「位图那 83 个的施工图」
+// 第六节）。从前这些内建的函数体只有一句 `asy__add3`，也就是**只吃界、不留图**，
+// 于是 `shipout3` 那条路（3D 出位图）无从下手。
+// 材质那几个数（p/opacity/shininess/metallic/fresnel0/lightOn/colors）是
+// runpicture.in 的签名里本来就有的，一并存下来 —— 以后自己着色要的正是它们。
+//
+// 表挂在旁边这张登记册上、不放在 `frame` 里：`frame` 定义在这个文件前面，
+// 那时 `path3` 与 `triple[][]` 还没有名字（asy 的解析是顺着来的）。
+// 帧上只留一个 `f3id`，-1 是"没有三维内容"。
+struct drawop3 {
+  int kind = 0;            // 0 = path3 描边，1 = Bezier 面片，2 = 三角面片
+  path3 g3;
+  triple[][] P3;
+  triple center = (0, 0, 0);
+  pen[] p;
+  pen[] colors;
+  bool straight = false;
+  bool lightOn = true;
+  real opacity = 1;
+  real shininess = 0;
+  real metallic = 0;
+  real fresnel0 = 0;
+  int interaction = 0;
+}
+private drawop3[][] asy__f3tab;
+private int asy__f3id(frame f) {
+  if (f.f3id < 0) {
+    f.f3id = asy__f3tab.length;
+    asy__f3tab.push(new drawop3[]);
+  }
+  return f.f3id;
+}
+void asy__push3(frame f, drawop3 o) { asy__f3tab[asy__f3id(f)].push(o); }
+drawop3[] asy__ops3(frame f) {
+  return f.f3id < 0 ? new drawop3[] : asy__f3tab[f.f3id];
+}
+// 上面那个桩（asy__merge3fn，在 add(frame,frame) / prepend 里被调）接上真身
+private void asy__merge3hook() {
+  asy__merge3fn = new void(frame dest, frame src) {
+    drawop3[] s = asy__ops3(src);
+    for (int i = 0; i < s.length; ++i) asy__push3(dest, s[i]);
+  };
+}
+asy__merge3hook();
+
 void asy__add3(frame f, triple v)
 {
   real rx = v.z == 0 ? 0 : v.x / v.z;
@@ -9697,6 +9758,17 @@ void _draw(frame f, path3 g, triple center = (0, 0, 0), pen[] p,
            int interaction = 0)
 {
   asy__add3(f, g);
+  drawop3 o;
+  o.kind = 0;
+  o.g3 = g;
+  o.center = center;
+  o.p = p;
+  o.opacity = opacity;
+  o.shininess = shininess;
+  o.metallic = metallic;
+  o.fresnel0 = fresnel0;
+  o.interaction = interaction;
+  asy__push3(f, o);
 }
 
 /* Bezier 面片与三角面片（runpicture.in:660/674） */
@@ -9706,6 +9778,20 @@ void draw(frame f, triple[][] P, triple center, bool straight, pen[] p,
           bool primitive = false)
 {
   asy__add3(f, P);
+  drawop3 o;
+  o.kind = 1;
+  o.P3 = P;
+  o.center = center;
+  o.straight = straight;
+  o.p = p;
+  o.opacity = opacity;
+  o.shininess = shininess;
+  o.metallic = metallic;
+  o.fresnel0 = fresnel0;
+  o.lightOn = lightOn;
+  o.colors = colors;
+  o.interaction = interaction;
+  asy__push3(f, o);
 }
 
 void drawbeziertriangle(frame f, triple[][] P, triple center, bool straight,
@@ -9714,6 +9800,20 @@ void drawbeziertriangle(frame f, triple[][] P, triple center, bool straight,
                         int interaction, int digits, bool primitive = false)
 {
   asy__add3(f, P);
+  drawop3 o;
+  o.kind = 2;
+  o.P3 = P;
+  o.center = center;
+  o.straight = straight;
+  o.p = p;
+  o.opacity = opacity;
+  o.shininess = shininess;
+  o.metallic = metallic;
+  o.fresnel0 = fresnel0;
+  o.lightOn = lightOn;
+  o.colors = colors;
+  o.interaction = interaction;
+  asy__push3(f, o);
 }
 
 /* NURBS 曲线与曲面（runpicture.in:687/697） */
