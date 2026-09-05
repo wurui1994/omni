@@ -9928,7 +9928,12 @@ private void asy__merge3hook() {
         x = v.x * near / d;
         y = v.y * near / d;
       }
-      return ((x - xmn) / dx * oW, (y - ymn) / dy * oH);
+      // **y 要倒过来画。** 位图那一格的行序是**自下而上**（asy 那边是 glReadPixels
+      // 读回来的，OpenGL 的第 0 行在下），而 gs 的 ppmraw 是**自上而下**写的。
+      // 量出来的（无标签尺子）：原样只有 887/9938 个参考像素落在我们 1px 邻域内，
+      // 上下翻过来是 8006/9938。所以不在字节上翻（那要动 95 万个字符），
+      // 而是在这一格把图倒着画 —— gs 自上而下写出来的就正好是要的那个序。
+      return ((x - xmn) / dx * oW, oH - (y - ymn) / dy * oH);
     }
     string nl = '\n';
     string doc = "%!PS-Adobe-3.0 EPSF-3.0" + nl
