@@ -139,18 +139,24 @@ function pullImages(text) {
   while (i < lines.length) {
     const ln = lines[i];
     if (ln.trim() !== 'image') { out.push(ln); i++; continue; }
-    // `image` 之后一直到 `~>` 为止是数据段
+    // `image` 之后是数据段。滤镜有两种：参考走 ASCII85（结束记号 `~>`），
+    // 我们三维那条路走 ASCIIHex（结束记号 `>`）—— 十六进制是让 shell 转的，
+    // 这一层一个字节都不碰（见 ADR「位图那 83 个」第八节）。
     out.push(ln);
     i++;
-    const data = [];
-    while (i < lines.length && lines[i].indexOf('~>') < 0) { data.push(lines[i]); i++; }
-    if (i < lines.length) { data.push(lines[i].slice(0, lines[i].indexOf('~>'))); i++; }
-    // 这一块要不要 inflate：往上找最近那几行里有没有 FlateDecode
+    // 往上找最近那几行的滤镜与 Flate
+    let hex = false;
     let flate = false;
     for (let k = out.length - 1; k >= 0 && k > out.length - 12; k--) {
+      if (out[k].indexOf('ASCIIHexDecode') >= 0) hex = true;
       if (out[k].indexOf('FlateDecode') >= 0) flate = true;
     }
-    let raw = a85(data.join(''));
+    const eod = hex ? '>' : '~>';
+    const data = [];
+    while (i < lines.length && lines[i].indexOf(eod) < 0) { data.push(lines[i]); i++; }
+    if (i < lines.length) { data.push(lines[i].slice(0, lines[i].indexOf(eod))); i++; }
+    let raw = hex ? Buffer.from(data.join('').replace(/[^0-9a-fA-F]/g, ''), 'hex')
+      : a85(data.join(''));
     if (flate) { try { raw = inflateSync(raw); } catch { raw = Buffer.alloc(0); } }
     imgs.push(raw);
     out.push('%IMGDATA');

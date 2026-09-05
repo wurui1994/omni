@@ -1799,11 +1799,11 @@ struct drawop {
   // 逐字照发的一段 PostScript（kind == 6，`postscript(frame, string)`）。带 min/max 的那一份
   // 把界放在 `g` 上（一条矩形），不带的那一份 `g` 是空的 —— 界不参与。
   string psraw = "";
-  // 裸字节的位图（kind == 7）：三维那条路渲出来的一整张图（drawimage.h:107 的
-  // drawRawImage）。与 kind == 5 的差别只在**像素怎么存**：那边是 pen[][]，
-  // 一张 372x400 就是 148800 个 pen；这边按 RGB 顺序存成一条 int[]，
-  // 目标矩形照旧躺在 `g` 的四个结点上。
-  int[] raw;
+  // 裸位图（kind == 7）：三维那条路渲出来的一整张图（drawimage.h:107 的 drawRawImage）。
+  // 与 kind == 5 的差别在**像素怎么存**：那边是 pen[][]，一张 372x400 就是 148800 个 pen；
+  // 这边存的是**十六进制文本**（`xxd -p` 出来的那份，见 ADR 第八节）——
+  // 我们这一层一个字节都不碰，读进来原样贴进 EPS，filter 用 /ASCIIHexDecode。
+  string rawhex = "";
   int rw = 0;
   int rh = 0;
 }
@@ -3151,11 +3151,20 @@ private void asy__emitbytes(int[] b) {
   asy__out(line + "~>");
 }
 
-// 一格裸字节位图（kind == 7）：dict 与 kind == 5 逐字一样，只有数据段的来源不同。
+// 一个字节 -> 两位十六进制（小写，与 `xxd -p` 一致）
+string asy__hex2(int v) {
+  string d = "0123456789abcdef";
+  int b = v < 0 ? 0 : (v > 255 ? 255 : v);
+  return substr(d, b # 16, 1) + substr(d, b % 16, 1);
+}
+
+// 一格裸位图（kind == 7）：dict 与 kind == 5 的差别只有 filter —— 数据是十六进制文本，
+// 所以是 /ASCIIHexDecode（EOD 记号 `>`），不是 /ASCII85Decode。
 private void asy__emitraw(drawop o, real s) {
   int w = o.rw;
   int h = o.rh;
   if (w == 0 || h == 0) return;
+  if (length(o.rawhex) == 0) return;
   pair p00 = o.g.nodes[0].point * s;
   pair p10 = o.g.nodes[1].point * s;
   pair p01 = o.g.nodes[3].point * s;
@@ -3172,10 +3181,11 @@ private void asy__emitraw(drawop o, real s) {
   asy__out("/BitsPerComponent 8");
   asy__out("/Decode [0 1 0 1 0 1 ]");
   asy__out("/ImageMatrix [" + string(w) + " 0 0 " + string(h) + " 0 0]");
-  asy__out("/DataSource currentfile 1 (~>) /SubFileDecode filter /ASCII85Decode filter");
+  asy__out("/DataSource currentfile 1 (>) /SubFileDecode filter /ASCIIHexDecode filter");
   asy__out(">>");
   asy__out("image");
-  asy__emitbytes(o.raw);
+  asy__out(o.rawhex);
+  asy__out(">");
   asy__out("grestore");
 }
 
@@ -8107,6 +8117,12 @@ string defaultformat3="prc";                     // runpicture.in:121
 // 这一趟量的是"甲"那条出路（见 ADR「位图那 83 个的施工图」第五节）：`shipout3` 只当
 // 记录器 —— 把 3D 那一帧的内容盒子（three.asy:2906 的 `S.width-defaultrender.margin`）
 // 记下来，看 three.asy:2920 那句 `return F` 之后隐式 shipout 还剩不剩东西可印。
+// 位图那一档的像素：投影 + 发一份临时 EPS + gs 光栅化 + 十六进制读回。
+// 真身要 `drawop3` 才写得出来，而它在三维那一节才有名字 —— 先摆一个桩
+// （与 asy__merge3fn 同一招），回空串就表示"没渲出来"，调用方用背景色兜底。
+string asy__r3hexfn(frame f, int oW, int oH, int fw, int fh, real angle, real zoom,
+                    triple m, triple M, pair shift, real expand) { return ""; }
+
 real asy__r3w = 0;
 real asy__r3h = 0;
 bool asy__r3on = false;
@@ -8155,15 +8171,22 @@ void shipout3(string prefix, frame f, string format="",
     bg = (int) (255 * background[1] + 0.5);
     bb = (int) (255 * background[2] + 0.5);
   }
-  int[] buf = new int[fw * fh * 3];
-  for (int i = 0; i < buf.length; i += 3) {
-    buf[i] = br; buf[i + 1] = bg; buf[i + 2] = bb;
-  }
+  // 一整张白（或背景色）的十六进制，按倍增拼 —— 44 万个字节的十六进制是 89 万个字符，
+  // 一格一格拼是二次的，倍增是 20 次拷贝。gs 那条路走通时这一份只当兜底。
+  string px = asy__hex2(br) + asy__hex2(bg) + asy__hex2(bb);
+  string hex = px;
+  int need = fw * fh;
+  int have = 1;
+  while (have * 2 <= need) { hex = hex + hex; have = have * 2; }
+  while (have < need) { hex = hex + px; have = have + 1; }
+  // 像素：投影 + gs 那一段在三维那一节（`drawop3` 要在那儿才有名字），走下面这个桩。
+  string got = asy__r3hexfn(f, oW, oH, fw, fh, angle, zoom, m, M, shift, expand);
+  if (length(got) == fw * fh * 3 * 2) hex = got;
   drawop o;
   o.kind = 7;
   o.rw = fw;
   o.rh = fh;
-  o.raw = buf;
+  o.rawhex = hex;
   o.p = currentpen;
   o.g = (0, 0) -- (oW, 0) -- (oW, oH) -- (0, oH) -- cycle;
   // 照 glrender.cc:531 那一段：**另起一张空 picture**，只放这一格位图，再 shipout。
@@ -9817,6 +9840,102 @@ private void asy__merge3hook() {
   asy__merge3fn = new void(frame dest, frame src) {
     drawop3[] s = asy__ops3(src);
     for (int i = 0; i < s.length; ++i) asy__push3(dest, s[i]);
+  };
+  // 位图那一档的像素（asy__r3hexfn 的真身）：投影照 renderBase.cc:111 的 setDimensions
+  // 与 :154 的 setProjection（施工图第八节）。帧坐标已经在视图空间（相机在原点、朝 -z），
+  // 不用再乘 modelview。angle 是**度**（three.asy:2908 用度版 aTan/Tan；C 那边
+  // renderBase.cc:47 是 `Angle = args.angle * radians`），正交时是 0。
+  // 这一刀只画 path3 那一类（面片先不画）—— 线画那一族就能量出效果。
+  asy__r3hexfn = new string(frame f, int oW, int oH, int fw, int fh, real angle,
+                           real zoom, triple m, triple M, pair shift, real expand) {
+    bool ortho = angle == 0;
+    real Zmax = M.z;
+    real Hh = ortho ? 0 : -tan(0.5 * angle * pi / 180) * Zmax;
+    real aspect = fw / fh;
+    real zm = zoom == 0 ? 1 : zoom;
+    real zoominv = 1 / zm;
+    real xshift = shift.x * zm;
+    real yshift = shift.y * zm;
+    real xmn; real xmx; real ymn; real ymx;
+    if (ortho) {
+      real xsize = M.x - m.x;
+      real ysize = M.y - m.y;
+      if (xsize < ysize * aspect) {
+        real r = 0.5 * ysize * aspect * zoominv;
+        real X0 = 2 * r * xshift;
+        real Y0 = ysize * zoominv * yshift;
+        xmn = -r - X0; xmx = r - X0;
+        ymn = m.y * zoominv - Y0; ymx = M.y * zoominv - Y0;
+      } else {
+        real r = 0.5 * xsize * zoominv / aspect;
+        real X0 = xsize * zoominv * xshift;
+        real Y0 = 2 * r * yshift;
+        xmn = m.x * zoominv - X0; xmx = M.x * zoominv - X0;
+        ymn = -r - Y0; ymx = r - Y0;
+      }
+    } else {
+      real r = Hh * zoominv;
+      real rA = r * aspect;
+      real X0 = 2 * rA * xshift;
+      real Y0 = 2 * r * yshift;
+      xmn = -rA - X0; xmx = rA - X0;
+      ymn = -r - Y0; ymx = r - Y0;
+    }
+    real near = -Zmax;
+    real dx = xmx - xmn;
+    real dy = ymx - ymn;
+    if (dx == 0) dx = 1;
+    if (dy == 0) dy = 1;
+    pair pj(triple v) {
+      real x = v.x;
+      real y = v.y;
+      if (!ortho) {
+        real d = -v.z;
+        if (d < 1e-12) d = 1e-12;
+        x = v.x * near / d;
+        y = v.y * near / d;
+      }
+      return ((x - xmn) / dx * oW, (y - ymn) / dy * oH);
+    }
+    string nl = '\n';
+    string doc = "%!PS-Adobe-3.0 EPSF-3.0" + nl
+      + "%%BoundingBox: 0 0 " + string(oW) + " " + string(oH) + nl
+      + "%%EndComments" + nl + "0.5 setlinewidth 1 setlinecap 1 setlinejoin" + nl;
+    drawop3[] ops = asy__ops3(f);
+    int nstroke = 0;
+    for (int i = 0; i < ops.length; ++i) {
+      if (ops[i].kind != 0) continue;
+      path3 g = ops[i].g3;
+      int n = g.nodes.length;
+      if (n < 2) continue;
+      pair a0 = pj(g.nodes[0].point);
+      doc = doc + ps(a0.x) + " " + ps(a0.y) + " moveto" + nl;
+      for (int k = 1; k < n; ++k) {
+        pair c1 = pj(g.nodes[k - 1].post);
+        pair c2 = pj(g.nodes[k].pre);
+        pair pk = pj(g.nodes[k].point);
+        doc = doc + ps(c1.x) + " " + ps(c1.y) + " " + ps(c2.x) + " " + ps(c2.y)
+          + " " + ps(pk.x) + " " + ps(pk.y) + " curveto" + nl;
+      }
+      doc = doc + "stroke" + nl;
+      nstroke = nstroke + 1;
+    }
+    doc = doc + "showpage" + nl + "%%EOF" + nl;
+    if (nstroke == 0) return "";
+    // P6 的头是 `P6\n<w> <h>\n255\n`，长度按实际数字位数算；`xxd -p | tr -d` 那一步
+    // 让 shell 把字节转成 ASCII —— `_readtext` 是按 utf8 读的，二进制读不回来。
+    string dir = ".omni-cache/r3";
+    string hdr = "P6" + nl + string(fw) + " " + string(fh) + nl + "255" + nl;
+    int skip = length(hdr);
+    if (_runproc("mkdir -p " + dir + " && rm -f " + dir + "/r3.*") != 0) return "";
+    _writetext(dir + "/r3.eps", doc);
+    if (_runproc("cd " + dir + " && gs -q -dNOPAUSE -dBATCH"
+          + " -sDEVICE=ppmraw -g" + string(fw) + "x" + string(fh)
+          + " -r" + string((int) (72 * expand))
+          + " -sOutputFile=r3.ppm r3.eps 2>/dev/null"
+          + " && tail -c +" + string(skip + 1) + " r3.ppm | xxd -p | tr -d '\n' > r3.hex") != 0)
+      return "";
+    return _readtext(dir + "/r3.hex");
   };
 }
 asy__merge3hook();
