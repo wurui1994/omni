@@ -1053,6 +1053,11 @@ export function applyBuiltin(I, e, a) {
     // `(readtext E)`：整份读一份文本文件。三条腿一份语义（JS 那边 $read_text、
     // C 那边 omni_read_text）—— 读不到就是运行期错误，不回空串。
     case 'read_text': return readTextOrFail(a[0]);
+    // `(r3render PATH)`：三维那一档的光栅化。**权威在 C**（runtime/omni_r3.c，照
+    // reference 的 glrender.cc/renderBase.cc 与两份 glsl 转写）。这条腿（JS 宿主）暂时
+    // 回空串 = "这儿没有光栅化器"，调用方（asy 侧的 asy__r3hexfn）会走 gs 那条旧路。
+    // 等 C 那份定稿再照抄成 JS，届时两边要逐字节对上。
+    case 'r3_render': return '';
     // `(getenv E)`：读宿主的一格环境设置。没设就是空串 —— 三条腿一份语义
     // （$get_env / omni_get_env）。asy 的输出格式走的是这一格（ADR-0015）。
     case 'get_env': {

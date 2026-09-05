@@ -774,6 +774,18 @@ export function asyCall(L, n) {
     const head = nm === '_writetext' ? 'writetext' : 'runproc';
     return { code: `(${head} ${cs.join(' ')})`, type: 'int' };
   }
+  // `_r3render(path)`：方言的 `(r3render PATH)` —— 三维那一档的光栅化。把一份场景清单
+  // 交给运行时（runtime/omni_r3.c 照 reference 的 glrender.cc/renderBase.cc 与两份 glsl
+  // 转写），回十六进制的 RGB 字节。回空串表示这条腿上没有光栅化器（JS 宿主那三条）。
+  if (nm === '_r3render') {
+    const raw = asyCallArgs(L, n);
+    if (raw === null) return null;
+    if (raw.length !== 1) return L.err(n, `'${nm}' 要 1 个实参，给了 ${raw.length} 个`);
+    if (raw[0].lines !== null) for (const s of raw[0].lines) L.pre.push(s);
+    const v = L.coerce(raw[0].v, 'string', raw[0].node, `'${nm}' 的实参`);
+    if (v === null) return null;
+    return { code: `(r3render ${v.code})`, type: 'string' };
+  }
   if (lateMem !== null) return L.err(n, lateMem);
   if (L.funcs.has(nm)) {
     return L.err(n, `'${nm}' 在这里还看不见 —— 它声明在后面，而 asy 的名字解析是顺序的（那边报 "no matching variable"）`);

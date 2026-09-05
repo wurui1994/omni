@@ -173,6 +173,10 @@ omni_str omni_get_env(omni_str name);
 int64_t omni_write_text(omni_str path, omni_str text);
 /* `(runproc CMD)`：`/bin/sh -c CMD`，回退出码（跑不起来也回非 0，不报错） */
 int64_t omni_run_proc(omni_str cmd);
+/* `(r3render PATH)`：读一份三维场景清单，光栅化成位图，回十六进制的 RGB 字节
+   （读不到或清单不合格回空串）。实现在 omni_r3.c —— 照 reference 的
+   renderBase.cc / glrender.cc / tile.h 与 base/shaders 下的两份 glsl 转写。 */
+omni_str omni_r3_render(omni_str path);
 
 /* omni_math.c —— 转手 libm（那份文件的头注里写了逐字节/容差的分界） */
 double omni_r_sqrt(double x);

@@ -119,6 +119,8 @@ const RT_OPS = new Map([
   // （写进去的字节数 / 子进程的退出码）。
   ['write_text.string', { sym: 'omni_write_text', ret: 'i64', params: ['[2 x i64]', '[2 x i64]'] }],
   ['run_proc.string', { sym: 'omni_run_proc', ret: 'i64', params: ['[2 x i64]'] }],
+  // `(r3render PATH)`：三维那一档的光栅化（runtime/omni_r3.c）。收发同 read_text。
+  ['r3_render.string', { sym: 'omni_r3_render', ret: '[2 x i64]', params: ['[2 x i64]'] }],
   // real 上的数学函数。刻意 call 运行时的包装而不是发 LLVM 的 intrinsic：`llvm.sqrt.f64`
   // 有 intrinsic，`fmod` / `round` 没有对得上的，统一走一层符号，五条腿就是同一份 libm。
   ['rmath_sqrt.real', { sym: 'omni_r_sqrt', ret: 'double', params: ['double'] }],

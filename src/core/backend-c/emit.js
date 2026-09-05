@@ -1213,6 +1213,9 @@ class CEmitter {
       case 'get_env': return `omni_get_env(${a[0]})`;
       case 'write_text': return `omni_write_text(${a[0]}, ${a[1]})`;
       case 'run_proc': return `omni_run_proc(${a[0]})`;
+      // `(r3render PATH)`：三维那一档的光栅化（runtime/omni_r3.c，照 reference 的
+      // glrender.cc/renderBase.cc/tile.h 与两份 glsl 转写）。C 与 LLVM 两条腿的权威。
+      case 'r3_render': return `omni_r3_render(${a[0]})`;
       case 'len':
         return recv.k === 'string' ? `omni_str_len(${a[0]})` : `${cTypeName(recv)}_len(${a[0]})`;
       case 'push': case 'add': case 'pop': case 'clear':

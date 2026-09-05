@@ -1802,6 +1802,21 @@ class CoreLowerer {
       }
       return { kind: 'Builtin', name: 'run_proc', args: [c], argType: STRING, type: INT };
     }
+    // `(r3render PATH)`：把一份"三维场景清单"光栅化成位图，回十六进制的 RGB 字节。
+    // 这是**准确性关键**的那一层（ADR-0014 第十九节）：asy 的三维图是 OpenGL 画出来的
+    // 位图，逐字节对齐要的是同一套光栅化（逐采样 Z-buffer + 4 采样 MSAA）与同一套
+    // 片元着色（fragment.glsl 的 PBR，float 精度）。这些照 reference 的 C++/GLSL 转写在
+    // runtime/omni_r3.c 里，C 与 LLVM 两条腿直接用它 —— 不再靠 gs 子进程（gs 的 shfill
+    // 不反锯齿，那条路上位图永远差一圈边）。JS 那条腿暂时回空串，由调用方走旧路。
+    if (h === 'r3render') {
+      if (n.items.length !== 2) return this.err(n, '(r3render PATH)');
+      const c = this.expr(n.items[1]);
+      if (c === null) return null;
+      if (c.type.k !== 'string') {
+        return this.err(n.items[1], `(r3render PATH) 的参数要是 string，这里是 ${coreTypeText(c.type)}`);
+      }
+      return { kind: 'Builtin', name: 'r3_render', args: [c], argType: STRING, type: STRING };
+    }
     // `(toreal E)` / `(toint E)`：int <-> real 的**显式**转换。同一条纪律：类型不推导、
     // 不插隐式转换，所以两个方向都得写出来。OIR 侧两个都是现成的（Cast int->real、
     // trunc real->int），方言这边原先没开口 —— 而 asy 的 `1/3` 是实数除法、`(int) 3.7`

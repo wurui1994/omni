@@ -729,6 +729,7 @@ class JsEmitter {
       case 'get_env': return `$get_env(${a[0]})`;
       case 'write_text': return `$write_text(${a[0]}, ${a[1]})`;
       case 'run_proc': return `$run_proc(${a[0]})`;
+      case 'r3_render': return `$r3_render(${a[0]})`;
       case 'len':
         if (recv.k === 'string') return `$slen(${a[0]})`;
         return recv.k === 'list' ? `${a[0]}.length` : `${a[0]}.size`;
