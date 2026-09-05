@@ -11515,6 +11515,20 @@ plain_picture.asy:741：
 `rm -rf .omni-cache/asy-mods` 之后六个全绿。改了库里被广泛引用的东西之后，
 第一趟一定要清缓存再量。
 
+#### 接着往下的两条（都有两行的尺子，还没做）
+
+1. **`oW` 还差 1pt。** 七行尺子上封套两侧逐字节相同（`255 380 356 411`，宽 101），
+   而位图是 400（参考）对 404（我们）—— 即 `oW` 100 对 101。封套 101 = 位图 100
+   + 笔宽 0.5×2，参考这条对得上；我们位图 101 而封套还是 101，说明这两处
+   不是从同一个量算出来的。正交这一支的 `S.width=ceil(lambda.x+2*margin.x)`
+   取的是 `max3-min3`（three.asy:2836），三维的界里**不含笔宽** ——
+   先量我们这一格是不是把笔宽算进去了。`cylinder` 那个"封套差 1"很可能是同一条。
+2. **退化情形会报错**：最小的四行尺子
+   （`import three; size(100); currentprojection=orthographic(1,0,10,up=Y); draw(O--X);`）
+   在我们这边直接 `warning [unbounded]: y scaling in picture unbounded` + 非零退出，
+   asy 那边照出图（`400x4`）。一条水平线的 y 界是零宽，`size(100)` 那一步除零了。
+   这一条与位图无关，是二维 fit 那一层的洞，但它挡住了最干净的那把尺子，值得先补。
+
 `label(picture,Label,path3,…)` 那一格照 three_surface.asy:2160 是
 `label(pic,L,point(g,position),light,name,interaction)` —— 与 `$A$` 走的是同一格，
 而 `$A$` 是好的，所以它不是嫌疑。
