@@ -10109,3 +10109,58 @@ JS 这边没有硬件 fma，所以顺手写了一份精确的（Dekker 的 twoPr
 先把这张表按文件读全，再一次性改，再全量量一遍。这一刀只把读法与第一张表留在这里。
 
 <!-- ADR-0014 FMA-END -->
+
+## 量：非三维那一档只剩 8 个，其中 3 个不是 ulp 的事
+
+<!-- ADR-0014 剩下八个-BEGIN -->
+
+全量之后把"结构不同"的 87 个按"参考里有没有位图块"分一刀：**79 个有**（位图块数 1~3 vs 我们 0）
+—— 那是三维那一族，真 asy 用 OpenGL 栅格化成一张 `/ImageType 1` 贴进 EPS（`sphere` 是
+800x804 的 RGB），我们出的是矢量。这一档**逐字节永远对不上**（要复现 asy 的 GL 渲染管线），
+能追的目标只有"跑得出、图看着对"，不是"一样"。剩下 8 个是真能追的：
+
+```
+  cardioid / gamma / lmfit1 / laserlattice / slope   FMA 那一格（见上一节）
+  tiling      参考 `<< /PatternType 1 … >>`，我们发的是 `0 setgray` —— PostScript 图案没做
+  strokepath  界就差（105 vs 119）
+  textpath    界就差（251 vs 336）
+```
+
+`tiling` 那一格查清了，缺的是三处（不是一处）：
+
+1. `gsave(frame)` / `grestore(frame)` 在这一层是**空体**，而 patterns.asy:16-18 靠它们把
+   图案的画法包起来。改法：发一条 `kind == 6`（逐字照发）的 `gsave` / `grestore`。
+2. `_shipout` 收下了 `preamble` 这个形参但**没发**。参考里那段 `<< … >> matrix makepattern
+   /checker exch def` 就在 `translate` 之后、正文之前 —— 也就是 preamble 那一帧的 ops。
+3. `setpen` 少一格：psfile.cc:248 是 `if(!p.fillpattern().empty() && p.fillpattern() !=
+   lastpen.fillpattern()) out << p.fillpattern() << " setpattern"; else setcolor(p);`
+   我们只有 `setcolor` 那一支。
+
+而 1/2/3 之前还有一处更基础的欠账，`tiling` 只是第一个撞上它的例子：**`format` 没有实现
+精度**。`asy__fmt1` 现在只是"把 `%…` 那一格换成这个数的默认写法"，所以
+
+```
+  format("%.6f",-14.173228346456694,"C")
+    真 asy   -14.173228
+    我们     -14.1732283464567
+```
+
+这一格的账比 tiling 大得多：`graph.asy` 的刻度标签走的是 `format(defaultformat,x)` 而
+`defaultformat` 是 `$%.4g$` —— 现在能对上纯属巧合（整数刻度上 `string(x)` 与 `%.4g`
+恰好一样）。要做对得两层：
+
+- 一层是 C 的 `snprintf` 那一格（`%[flags][width][.prec]{f,e,E,g,G}` 与整数那几个，
+  整数还要插 `ll`，runstring.in:273）。`string(x,n)` 已经是 `%.{n}g` 的语义（量过：
+  与真 asy 的 `format("%.17g")` 逐字符相同），缺的是 `f`/`e` 与 flags/width。
+  **但这一格搭不在 `string(x,n)` 上**：核心方言的 `(tostr E N)` 要求 N 是**字面量**
+  （`string(x, p)` 里 p 是变量时当场报 "(tostr E N) 的 N 要是 int 字面量"），而 `format`
+  的精度是从格式串里解析出来的、运行期才知道。所以这一格要在核心方言里加一条
+  「精度是运行期整数」的数值转换：JS 那侧转手 `toFixed`/`toExponential`/`toPrecision`
+  （规范里都是正确舍入的），C 那侧转手 `snprintf("%.*f")` —— 与 `nextafter` 那条
+  例外同一个套路（sexpr/lower.js 的表 + omni_math.c + prelude 的 `$js_math` + 
+  interp/builtin.js + backend-llvm 的 extern 表，共 6 处）。
+- 另一层是 asy 在 snprintf 之后自己那一段（runstring.in:353-418）：`\phantom{+}`、
+  抹掉假的符号、去掉末尾的零与小数点（`#` 时不去）、把 `e+05` 翻成 `\times10^{5}`。
+  这一段是纯字符串处理，照抄就行。
+
+<!-- ADR-0014 剩下八个-END -->
