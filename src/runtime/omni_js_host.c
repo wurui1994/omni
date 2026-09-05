@@ -422,6 +422,18 @@ omni_dyn omni_js_now_ms(void) {
   return omni_dyn_of_real((double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6);
 }
 
+/* 本地时间的日历字段，14 位数字 YYYYMMDDHHMMSS（`__DATE__` / `__TIME__` 要它）。
+   一次 localtime、一个字符串：六个字段必须是同一个瞬间的（tcc 在那儿也只 time() 一次），
+   而排版归编译器（frontend-c/tccpp.js）。node 那侧是 host/native.js 的 localStamp。 */
+omni_dyn omni_js_local_stamp(void) {
+  time_t t = time(NULL);
+  struct tm lt;
+  localtime_r(&t, &lt);
+  char buf[16];
+  size_t n = strftime(buf, sizeof buf, "%Y%m%d%H%M%S", &lt);
+  return s16_of_bytes(buf, (int64_t)n);
+}
+
 /* "运行中的程序镜像所在目录"。JS 侧是 dirname(process.argv[1])，C 侧是
    dirname(argv[0])。从这里怎么走到 runtime/ 与 lib/ 是调用方的事 —— 两代的布局
    本来就不同（C0 是 src/core 下的脚本，C1 是一个可执行文件）。

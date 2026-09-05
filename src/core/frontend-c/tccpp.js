@@ -70,6 +70,8 @@ import {
 import {
   predefs, COMPILE_DEFS,
 } from './tccdefs.js';
+// `__DATE__` / `__TIME__` 的时钟。走宿主 op 而不是 `new Date()` —— 见下面那一段。
+import { localStamp } from '../host/native.js';
 
 const CH_EOF = -1;
 const SPC = 32; // ' '
@@ -1182,14 +1184,19 @@ export class Cpp {
      * `snprintf` 的原样：`"%s %2d %d"`（月份缩写、日**空格**右对齐到两位、四位年）
      * 与 `"%02d:%02d:%02d"`，取的是**本地时间**（`localtime`）。
      *
+     * 时钟从宿主 op 来（`localStamp`，14 位 YYYYMMDDHHMMSS），不是 `new Date()` ——
+     * 后者不在我们自己那个 JS 前端认的构造之列，写在这儿会让自举那一路编不过。
+     * 一次调用拿全六个字段，所以它们必然是同一个瞬间的（与 tcc 的一次 `time()` 同义）。
+     *
      * 它们的值随时钟走，所以逐字节比对的那些门不能用它们 —— 与 tcc 比的是「日期这一
      * 串相同、时间差在几秒内」（`tests/c/datetime.js`）。 */
     if (v === TOK___DATE__ || v === TOK___TIME__) {
-      const d = new Date();
-      const p2 = (n) => String(n).padStart(2, '0');
+      const st = localStamp();
+      const mo = Number.parseInt(st.slice(4, 6), 10);
+      const day = Number.parseInt(st.slice(6, 8), 10);
       out.add2Spc(TOK_STR, v === TOK___DATE__
-        ? `${MONTH_ABBR[d.getMonth()]} ${String(d.getDate()).padStart(2, ' ')} ${d.getFullYear()}`
-        : `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`);
+        ? `${MONTH_ABBR[mo - 1]} ${String(day).padStart(2, ' ')} ${st.slice(0, 4)}`
+        : `${st.slice(8, 10)}:${st.slice(10, 12)}:${st.slice(12, 14)}`);
       return;
     }
     this.err(`'${this.tokStr(v, null)}' is not supported yet`);

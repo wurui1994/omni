@@ -516,6 +516,9 @@ bool omni_js_proc_stdin_is_tty(void);
 omni_dyn omni_js_proc_read_line(void);
 omni_dyn omni_js_os_tmpdir(void);
 omni_dyn omni_js_now_ms(void);
+/* 本地时间的日历字段，14 位数字 YYYYMMDDHHMMSS（`__DATE__` / `__TIME__` 要它）。
+   一次读、一个字符串：六个字段必须是同一个瞬间的，而排版是编译器那边的事。 */
+omni_dyn omni_js_local_stamp(void);
 omni_dyn omni_js_install_dir(void);
 /* 宿主里跑一段生成的 JS（omni run 与 REPL 的快路径）。原生构建里没有 JS 引擎，
    所以这两个只会报错 —— 见 omni_js_host.c 的说明。has_engine 就是那个"先问一句"：

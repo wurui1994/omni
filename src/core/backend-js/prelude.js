@@ -1958,6 +1958,14 @@ function $js_spawn_run(cmd, args, mode, feed) {
 }
 function $js_os_tmpdir() { return $node("node:os").tmpdir(); }
 function $js_now_ms() { return Date.now(); }
+// 本地时间的日历字段，14 位数字 YYYYMMDDHHMMSS。与 host/native.js 的 localStamp 逐字对齐
+// （那份是 node 上的真实现，这份是拼进产物的）。C 侧是 omni_js_local_stamp 的 strftime。
+function $js_local_stamp() {
+  const d = new Date();
+  const p2 = (n) => String(n).padStart(2, "0");
+  return "" + d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate())
+    + p2(d.getHours()) + p2(d.getMinutes()) + p2(d.getSeconds());
+}
 // "运行中的程序镜像所在目录"。JS 侧是脚本所在目录，C 侧是可执行文件所在目录 ——
 // 从这里怎么走到 runtime/ 与 lib/ 是调用方的事（两代的布局本来就不同）。
 function $js_install_dir() {

@@ -280,6 +280,26 @@ export function nowMs() {
 }
 
 /**
+ * **本地时间**的日历字段，14 位数字：`YYYYMMDDHHMMSS`（月 01-12、日 01-31，全部补零）。
+ *
+ * 为什么是一个字符串而不是一串数：`__DATE__` / `__TIME__` 要六个字段是**同一个瞬间**的
+ * （tcc 在那儿只 `time()` 一次），一个字段一次调用会横跨秒边界；而回一个 list 就要走
+ * `list<dynamic>` 那套宏（那一格只在生成的 TU 里存在，见 omni_js_host.h）。
+ * 排版**不在这里**做 —— tcc 那两句 snprintf 的格式是编译器的事（frontend-c/tccpp.js），
+ * 宿主只负责"读一次时钟"。
+ *
+ * 为什么非要一个宿主 op：`new Date()` 不在我们自己那个 JS 前端认的构造之列（只认
+ * Array / Map / Set / Error 与本文件里声明的类），tccpp.js 里直接写它会让**自举那一路**
+ * 编不过（tests/mir 的 lower/cli.js 当场报 'new Date' is not supported）。
+ */
+export function localStamp() {
+  const d = new Date();
+  const p2 = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}`
+    + `${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}`;
+}
+
+/**
  * "运行中的程序镜像所在目录"。node 上是这个文件所在的目录（src/host），C 侧是可执行
  * 文件所在目录 —— 从这里怎么走到 runtime/ 与 lib/ 是调用方的事，两代的布局本来就不同。
  */
