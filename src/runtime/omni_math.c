@@ -50,6 +50,18 @@ double omni_r_log1p(double x) { return log1p(x); }
 double omni_r_cbrt(double x) { return cbrt(x); }
 double omni_r_hypot(double x, double y) { return hypot(x, y); }
 
+/* `fma` —— 那个交集的**第二条例外**（ADR-0019 路 2、ADR-0014 第十五节）：`Math.*` 里
+   没有它，而「一次舍入的 a*b+c」用别的算符做不出来（分两步算差最后一位）。
+
+   为什么要它：参考实现（asy）是 C++ 编译出来的，`a*b + c*d` 这类式子在 arm64 上被
+   收缩成一条 `fmadd`（例如 pair.h:139 的 `abs2()` 里 `x*x+y*y`）。要与那份字节对上，
+   我们这一侧也得有单次舍入的 fma。
+
+   这一条是**权威**：JS 那侧（prelude 里 Dekker 拆分 + two-sum）要与它逐字节对上。
+   能这么要求的理由与 `nextafter` 一样 —— fma 是**精确运算**（IEEE-754 5.4.1 只舍一次），
+   与上面那些超越函数（只保证容差）不同。 */
+double omni_r_fma(double x, double y, double z) { return fma(x, y, z); }
+
 /* `nextafter` —— 那个「C99 ∩ Math.*」交集的**例外**（ADR-0019 路 2）：`Math.*` 里
    没有它，而区间算术要「往上/往下挪一个 ulp」才能保证结果是真超集。
 

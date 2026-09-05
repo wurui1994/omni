@@ -205,6 +205,10 @@ double omni_r_hypot(double x, double y);
 /* 那个「C99 ∩ Math.*」交集的**例外**（ADR-0019 路 2）：`Math.*` 里没有 nextafter，
    JS 那侧是手写的，权威在这一条上。 */
 double omni_r_nextafter(double x, double y);
+/* 交集的**第二条例外**（ADR-0014 第十五节）：`Math.*` 里没有 fma，而「一次舍入的
+   a*b+c」用别的算符做不出来。参考实现在 arm64 上把 `a*b+c*d` 收缩成一条 fmadd，
+   要与它逐字节对上就得有这一条。JS 那侧手写（Dekker + two-sum），权威在这里。 */
+double omni_r_fma(double x, double y, double z);
 /* 位重解释（ADR-0019 路 1）：64 对 64，两个方向都精确。位不动，只换一种读法。 */
 int64_t omni_r_bits(double x);
 double omni_r_frombits(int64_t i);
