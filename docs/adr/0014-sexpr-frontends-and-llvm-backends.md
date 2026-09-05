@@ -10164,3 +10164,69 @@ JS 这边没有硬件 fma，所以顺手写了一份精确的（Dekker 的 twoPr
   这一段是纯字符串处理，照抄就行。
 
 <!-- ADR-0014 剩下八个-END -->
+
+## 落地：`format` 照 runstring.in 写全，`tiling` 逐字节对上
+
+<!-- ADR-0014 format 与图案-BEGIN -->
+
+上一节把 `format` 记成"欠账"，这一节把它补了。**没有加核心方言的东西** —— 方言里
+`(sfix E N)` / `(ssci E N)` / `(sgen E N)` / `(sgenk E N)` 早就有（ADR-0016 第八刀与
+第三十/三十一刀：C 的 `%.*f` / `%.*e` / `%.*g` / `%#.*g`，精度**可以是运行期整数**，
+舍入定的是"就近取偶"= C 的 printf，四条腿各一份）。缺的只是 asy 前端到它们的口子：
+
+- `calls.js` 加四个下划线内建 `_sfix` / `_ssci` / `_sgen` / `_sgenk`（与 `_readtext`、
+  `_runproc` 同一条规矩：base/ 里没有这些名字，只有 lib/asy 用得到）。
+- `asy_builtins.asy` 里 `format` 照 runstring.in:246/301 写全：先解析
+  `%[flags][width][.prec]{f,F,e,E,g,G}` 落到那四条上，再照 runstring.in:353-418 做后处理
+  （`\phantom{+}`、抹掉假的符号、去掉末尾的零与小数点、把 `e+05` 翻成
+  `separator + 10^{5}`）。整数那一份同一段解析，但没有后处理。
+
+拿真 asy 逐字节对过 14 组（`/tmp/fm.asy`），**一处不差**：
+
+```
+  format("%.6f",-14.173228346456694,"C")  [-14.173228]
+  format("$%.4g$",1.0/3)                  [$0.3333$]
+  format("$%.4g$",123456.0)               [$1.235\!\times\!10^{5}$]
+  format("$%.4g$",0.0)                    [$0$]
+  format("%5.2f",3.14159)                 [ 3.14]
+  format("%-8.3e$",1234.5)                [1.234e+03$]
+  format("%+.2f",2.5)                     [+2.5]
+  format("100%% of %.1f",7.25)            [100% of 7.2]
+  format(defaultformat,6.02214076e23)     [$6.022\!\times\!10^{23}$]
+  format("$%#.4g$",1.5)                   [$1.500$]
+```
+
+从前那一版只是"把 `%…` 换成这个数的默认写法"，所以 `%.6f` 给的是 15 位有效数字。
+要紧的不是 tiling，是 `graph.asy` 的刻度标签 —— 它走的就是 `format(defaultformat,x)`
+（`$%.4g$`），从前能对上纯属整数刻度上的巧合。
+
+`tiling` 那三处也补齐了，现在与参考**逐字节相同**：
+
+1. `gsave(frame)` / `grestore(frame)` 从空体改成发一条 `kind == 6`（逐字照发）的
+   `gsave` / `grestore`。
+2. `_shipout` 把 `preamble` 那一帧的 ops 发在 `translate` 之后、正文之前
+   （plain_shipout.asy:126 递的是 `currentpatterns`）。
+3. `setpen` 在颜色之前分岔（psfile.cc:248）：笔带图案且与上一支不同就发
+   `<名字> setpattern`、不发颜色。
+4. 顺手一处：`samecolor` 要把"一支带图案、一支不带"算成不同（图案在 asy 那边就是一种
+   颜色空间）。不加这一格，`filldraw(unitcircle,pattern("checker"))` 之后那句 `0 setgray`
+   会被"颜色没变"吞掉 —— 这是最后那一行差。
+
+这一刀的账（EPS 那一轴，5s 上限）：
+
+```
+                   改之前   改之后
+  一样               80       81      <- tiling 进来了
+  结构不同           87       85      <- tiling 与 logdown 出去了
+  没出图              1        1      （tvgen，要 _eval）
+  超过 5s            21       22
+  tests/asy/run.js        259 passed / 0 failed
+```
+
+**非位图的"结构不同"只剩 7 个**：五个是 FMA 那一格（上一节），`strokepath` 与 `textpath`
+是界差。`strokepath` 那个差正好是 `linewidth(1cm)` 的一半（14.17 = (119-105.5) 那一档），
+所以嫌疑在 `currentpicture.addPath(g,p)` 那条路上（plain_bounds.asy:218 的 pathpenBounds
+按 `min(p)`/`max(p)` 外扩）；`textpath` 那个是 `texpath(…, tex=false)` —— 那一支走的是
+troff，不是 latex，我们这一层根本没有那条腿。
+
+<!-- ADR-0014 format 与图案-END -->

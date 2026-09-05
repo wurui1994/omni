@@ -2615,6 +2615,11 @@ string colorof(pen p) {
 }
 
 bool samecolor(pen a, pen b) {
+  // 图案在 asy 那边就是**一种颜色空间**（pen.h，见 patternval 那条），所以"一支带图案、
+  // 一支不带"算颜色不同 —— psfile.cc 的 setcolor 比的是 colorspace()。
+  // 量出来的：tiling 里 `filldraw(unitcircle, pattern("checker"))` 先按图案填、再用黑笔描边，
+  // 参考在描边前发了一句 `0 setgray`；不比这一格的话那一句就被"颜色没变"吞掉了。
+  if ((a.patternval != "") != (b.patternval != "")) return false;
   if (a.iscmyk != b.iscmyk || a.isrgb != b.isrgb) return false;
   if (a.iscmyk)
     return a.cyan == b.cyan && a.magenta == b.magenta
@@ -2686,7 +2691,12 @@ void asy__pentranslate(pen p, real s) {
 }
 
 void setpen(pen p) {
-  if (!lastvalid || !samecolor(p, lastpen)) asy__out(colorof(p));
+  // 图案那一格在颜色**之前**分岔（psfile.cc:248）：笔带了图案、而且与上一支笔的图案不同，
+  // 就发一句 `<名字> setpattern`，**不发颜色**；否则照旧走颜色那一支（哪怕两支笔的图案一样，
+  // asy 也是回去问颜色的 —— 照它的字面）。
+  if (p.patternval != "" && (!lastvalid || p.patternval != lastpen.patternval)) {
+    asy__out(p.patternval + " setpattern");
+  } else if (!lastvalid || !samecolor(p, lastpen)) asy__out(colorof(p));
   if (!lastvalid || p.width != lastpen.width) asy__out(ps(p.width) + " Setlinewidth");
   if (!lastvalid || p.cap != lastpen.cap) asy__out(string(p.cap) + " setlinecap");
   if (!lastvalid || p.join != lastpen.join) asy__out(string(p.join) + " setlinejoin");
@@ -3908,38 +3918,245 @@ pair dir(path g, int i, int sign=0, bool normalize=true) {
   return normalize ? unit(d) : d;
 }
 
-// (2) format：runstring.in:246/301 的两个内建。C++ 那边是走 printf 的格式串（还带
-// TeX 数学模式与千分位 separator）。这里只做"把 % 那一格换成这个数的默认写法"这一层：
-// 精度、指数写法、separator 都还没有，记在这儿。base 里 defaultformat 的那条链要它。
-string asy__fmt1(string fmt, string sx) {
+// (2) format：runstring.in:246/301 的两个内建。C++ 那边一句 `snprintf(f, x)` 加一段
+// 自己的后处理（runstring.in:353-418），这一层照那两段写：
+//
+//   1. 一个数值转换 `%[flags][width][.prec]{f,F,e,E,g,G}` 落到方言的 sfix/ssci/sgen/sgenk
+//      上（前端的 `_sfix`/`_ssci`/`_sgen`/`_sgenk` 四个口子）。**精度是运行期整数** ——
+//      `string(x, n)` 那一条（`(tostr E N)`）的 N 必须是字面量，而 format 的精度是从格式串
+//      里解析出来的，所以搭不上去。四条腿的舍入都是"就近取偶"= C 的 printf。
+//   2. asy 自己那一段：`\phantom{+}`、抹掉假的符号、去掉末尾的零与小数点（`#` 时不去）、
+//      把 `e+05` 翻成 `separator + 10^{5}`。
+//
+// 从前这里只是"把 % 那一格换成这个数的默认写法"，于是 `format("%.6f",-14.173228346456694)`
+// 给的是 `-14.1732283464567`（真 asy `-14.173228`）。patterns.asy 的 tiling 头一个撞上它，
+// 而更要紧的是 graph.asy 的刻度标签走的就是 `format(defaultformat,x)`（`$%.4g$`）——
+// 从前能对上纯属整数刻度上的巧合。
+private bool asy__digitc(string c) { return c != "" && find("0123456789", c) >= 0; }
+private bool asy__alphac(string c) {
+  return c != "" && find("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ", c) >= 0;
+}
+
+// 一个数值转换。spec 是从 `%` 到那个转换字母（含）的一段。
+private string asy__conv1(string spec, real x) {
+  int m = length(spec);
+  int i = 1;
+  bool fminus = false;
+  bool fplus = false;
+  bool fspace = false;
+  bool fhash = false;
+  bool fzero = false;
+  while (i < m) {
+    string c = substr(spec, i, 1);
+    if (c == "-") { fminus = true; ++i; continue; }
+    if (c == "+") { fplus = true; ++i; continue; }
+    if (c == " ") { fspace = true; ++i; continue; }
+    if (c == "#") { fhash = true; ++i; continue; }
+    if (c == "0") { fzero = true; ++i; continue; }
+    break;
+  }
+  int width = 0;
+  while (i < m && asy__digitc(substr(spec, i, 1))) {
+    width = width * 10 + find("0123456789", substr(spec, i, 1));
+    ++i;
+  }
+  // 没写 `.` 时 C 的默认精度是 6；写了 `.` 而后面没数字是 0
+  int prec = 6;
+  if (i < m && substr(spec, i, 1) == ".") {
+    ++i;
+    prec = 0;
+    while (i < m && asy__digitc(substr(spec, i, 1))) {
+      prec = prec * 10 + find("0123456789", substr(spec, i, 1));
+      ++i;
+    }
+  }
+  if (prec > 30) prec = 30;              // 方言那四条的上界（缓冲有个头）
+  string conv = substr(spec, m - 1, 1);
+  bool neg = x < 0 || asy__negzero(x);
+  real a = neg ? -x : x;
+  string body;
+  if (conv == "f" || conv == "F") body = _sfix(a, prec);
+  else if (conv == "e" || conv == "E") body = _ssci(a, prec);
+  else if (conv == "g" || conv == "G") body = fhash ? _sgenk(a, prec) : _sgen(a, prec);
+  else body = _sgen(a, prec);            // 别的转换字母（`%s`/`%d` 配实数）在 C 那边是 UB
+  if (conv == "E" || conv == "G") body = replace(body, "e", "E");
+  string sign = neg ? "-" : (fplus ? "+" : (fspace ? " " : ""));
+  string s = sign + body;
+  if (length(s) < width) {
+    if (fminus) { while (length(s) < width) s = s + " "; }
+    else if (fzero) {
+      string b2 = body;
+      while (length(sign) + length(b2) < width) b2 = "0" + b2;
+      s = sign + b2;
+    } else { while (length(s) < width) s = " " + s; }
+  }
+  return s;
+}
+
+// 整数那一份（runstring.in:246）：同一段 spec 解析，但**没有**后处理那一段。
+// `%d`/`%i` 之外的（`%x`/`%o`/`%c`…）这一刀不做，落回十进制并把它记在这儿。
+string format(string fmt, int x, string locale="") {
   int n = length(fmt);
   string out = "";
   int i = 0;
-  bool done = false;
+  int start = -1;
   while (i < n) {
-    string c = substr(fmt, i, 1);
-    if (c != "%" || done) { out = out + c; ++i; continue; }
-    if (i + 1 < n && substr(fmt, i + 1, 1) == "%") { out = out + "%"; i = i + 2; continue; }
-    // 跳过这一条 % 规格：标志/宽度/精度/长度，直到那个转换字母
-    int j = i + 1;
-    while (j < n) {
-      string d = substr(fmt, j, 1);
-      ++j;
-      if (d != "-" && d != "+" && d != " " && d != "#" && d != "." && d != "*"
-          && d != "0" && d != "1" && d != "2" && d != "3" && d != "4"
-          && d != "5" && d != "6" && d != "7" && d != "8" && d != "9"
-          && d != "l" && d != "h" && d != "L") break;
+    string curr = substr(fmt, i, 1);
+    if (curr == "%") {
+      ++i;
+      if (i >= n || substr(fmt, i, 1) != "%") { start = i - 1; break; }
     }
-    out = out + sx;
-    i = j;
-    done = true;
+    if (i < n) out = out + substr(fmt, i, 1);
+    ++i;
   }
-  return out;
+  if (start < 0) return out;
+  int p = start + 1;
+  while (p < n) {
+    string c = substr(fmt, p, 1);
+    if (c == "*" || c == "$") return out;
+    if (asy__alphac(c)) { ++p; break; }
+    ++p;
+  }
+  string spec = substr(fmt, start, p - start);
+  int m = length(spec);
+  int j = 1;
+  bool fminus = false;
+  bool fplus = false;
+  bool fspace = false;
+  bool fzero = false;
+  while (j < m) {
+    string c = substr(spec, j, 1);
+    if (c == "-") { fminus = true; ++j; continue; }
+    if (c == "+") { fplus = true; ++j; continue; }
+    if (c == " ") { fspace = true; ++j; continue; }
+    if (c == "#") { ++j; continue; }
+    if (c == "0") { fzero = true; ++j; continue; }
+    break;
+  }
+  int width = 0;
+  while (j < m && asy__digitc(substr(spec, j, 1))) {
+    width = width * 10 + find("0123456789", substr(spec, j, 1));
+    ++j;
+  }
+  int prec = -1;
+  if (j < m && substr(spec, j, 1) == ".") {
+    ++j;
+    prec = 0;
+    while (j < m && asy__digitc(substr(spec, j, 1))) {
+      prec = prec * 10 + find("0123456789", substr(spec, j, 1));
+      ++j;
+    }
+  }
+  bool neg = x < 0;
+  string digs = string(neg ? -x : x);
+  while (prec > 0 && length(digs) < prec) digs = "0" + digs;
+  string sign = neg ? "-" : (fplus ? "+" : (fspace ? " " : ""));
+  string s = sign + digs;
+  if (length(s) < width) {
+    if (fminus) { while (length(s) < width) s = s + " "; }
+    else if (fzero && prec < 0) {
+      while (length(sign) + length(digs) < width) digs = "0" + digs;
+      s = sign + digs;
+    } else { while (length(s) < width) s = " " + s; }
+  }
+  return out + s + substr(fmt, p, n - p);
 }
-string format(string fmt, int x, string locale="") { return asy__fmt1(fmt, string(x)); }
+
 string format(string fmt, bool forcemath=false, string separator, real x,
               string locale="") {
-  return asy__fmt1(fmt, string(x));
+  // runstring.in:304 那句临时的绕法（github issue #29）
+  if (fmt == "%") return "";
+  // `tex` 那一档：真 asy 看 `getSetting<string>("tex") != "none"`，我们这一层的标签一律走
+  // latex（见 asy__texship），所以恒真。
+  bool texify = forcemath;
+  int n = length(fmt);
+  string out = "";
+  int i = 0;
+  int start = -1;
+  string prev = "";
+  while (i < n) {
+    string curr = substr(fmt, i, 1);
+    if (curr == "$" && prev != "\\") texify = true;
+    prev = curr;
+    if (curr == "%") {
+      ++i;
+      if (i >= n || substr(fmt, i, 1) != "%") { start = i - 1; break; }
+    }
+    if (i < n) out = out + substr(fmt, i, 1);
+    ++i;
+  }
+  if (start < 0) return out;
+  // 至多一个实参：`*`（宽度来自实参）与 `$`（位置参数）当场放弃
+  int p = start + 1;
+  while (p < n) {
+    string c = substr(fmt, p, 1);
+    if (c == "*" || c == "$") return out;
+    if (asy__alphac(c)) { ++p; break; }
+    ++p;
+  }
+  int tail = p;
+  string f = substr(fmt, start, tail - start);
+  string buf = asy__conv1(f, x);
+  bool trailingzero = find(f, "#") >= 0;
+  bool plus = find(f, "+") >= 0;
+  bool space = find(f, " ") >= 0;
+  int bn = length(buf);
+  int q = 0;
+  if (bn > 0 && substr(buf, 0, 1) == " " && texify) { out = out + "\phantom{+}"; ++q; }
+  // 抹掉假的符号（`-0.000000` 那种）
+  string c0 = q < bn ? substr(buf, q, 1) : "";
+  if (c0 == "-" || c0 == "+") {
+    int k = q + 1;
+    bool allzero = true;
+    while (k < bn) {
+      string d = substr(buf, k, 1);
+      if (!asy__digitc(d) && d != ".") break;
+      if (asy__digitc(d) && d != "0") { allzero = false; break; }
+      ++k;
+    }
+    if (allzero) {
+      ++q;
+      if ((plus || space) && texify) out = out + "\phantom{+}";
+    }
+  }
+  int p0 = q;
+  int r = q;
+  bool dp = false;
+  while (r < bn) {
+    string d = substr(buf, r, 1);
+    if (!(d == " " || asy__digitc(d) || d == "." || d == "+" || d == "-")) break;
+    if (d == ".") dp = true;
+    ++r;
+  }
+  if (dp) {   // 去掉末尾的零与小数点
+    --r;
+    int nz = 0;
+    while (r > q && substr(buf, r, 1) == "0") { --r; ++nz; }
+    if (substr(buf, r, 1) == ".") { --r; ++nz; }
+    while (q <= r) { out = out + substr(buf, q, 1); ++q; }
+    if (!trailingzero) q = q + nz;
+  }
+  bool zero = r == p0 && r < bn && substr(buf, r, 1) == "0" && !trailingzero;
+  // `E+/E-/e+/e-` 翻成 TeX
+  while (q < bn) {
+    string d = substr(buf, q, 1);
+    string d1 = q + 1 < bn ? substr(buf, q + 1, 1) : "";
+    if (texify && (d == "E" || d == "e") && (d1 == "+" || d1 == "-")) {
+      if (!zero) out = out + separator + "10^{";
+      bool pl = d1 == "+";
+      ++q;
+      if (pl) ++q;
+      if (q < bn && substr(buf, q, 1) == "-") { out = out + "-"; ++q; }
+      while (q < bn && substr(buf, q, 1) == "0"
+             && (zero || (q + 1 < bn && asy__digitc(substr(buf, q + 1, 1))))) ++q;
+      while (q < bn && asy__digitc(substr(buf, q, 1))) { out = out + substr(buf, q, 1); ++q; }
+      if (!zero) out = out + "}";
+      break;
+    }
+    out = out + d;
+    ++q;
+  }
+  return out + substr(fmt, tail, n - tail);
 }
 
 // (1) min/max：builtin.cc:543 的 addOrderedOps —— 对每个**有序**的基本类型（int/real/
@@ -5098,13 +5315,25 @@ asy__dashadjfn = asy__dashadj1;
 void begingroup(frame f) { }
 void endgroup(frame f) { }
 bool is3D(frame f) { return false; }
-// (1) `gsave`/`grestore`（runpicture.in:276/281）：往 frame 里塞一条 EPS 的图形状态
-// 存/取。这一层的 frame 只攒 drawop、没有"往里塞一段 PostScript 正文"这一层
-// （postscript(frame,…) 是 abort 的那一档），所以这两个也是空的 —— 与 begingroup/endgroup
-// 同一条。用它的只有 patterns.asy:16 的 tiling，而那一句下面紧跟着 postscript()，
-// 真跑到那儿会在 postscript 上 abort，不会悄悄画错。
-void gsave(frame f) { }
-void grestore(frame f) { }
+// (1) `gsave`/`grestore`（runpicture.in:276/281）：往 frame 里塞一条 EPS 的图形状态存/取。
+// 落成 `kind == 6`（逐字照发的那一格，与 postscript(frame,string) 同一种 drawop）——
+// 它没有路径，所以不进界（opbox 对空路径给空盒）。
+// 用它的是 patterns.asy:16-18 的 tiling：图案的画法要被 `gsave`/`grestore` 包起来，
+// 参考里那段 `<< … /PaintProc {pop` 之后紧跟的就是这一条 gsave。
+void gsave(frame f) {
+  drawop o;
+  o.kind = 6;
+  o.psraw = "gsave";
+  o.p = currentpen;
+  f.ops.push(o);
+}
+void grestore(frame f) {
+  drawop o;
+  o.kind = 6;
+  o.psraw = "grestore";
+  o.p = currentpen;
+  f.ops.push(o);
+}
 
 // (1) frame 上的那一批画图内建（runpicture.in）。`fill(frame, path[], …)` 是**一个**填充：
 // asy 那边一组路径连着 fillrule 才是一个区域（挖洞靠它），drawfill.cc:49-52 只发一句
@@ -7623,6 +7852,15 @@ void _shipout(string prefix="", frame f, frame preamble=null, string format="",
   asy__out("gsave");
   asy__out(" " + ps(ox - bx.l) + " " + ps(oy - bx.b) + " translate");
   lastvalid = false;
+  // 前言那一帧（plain_shipout.asy:126 把 `currentpatterns` 递到这儿）：**在 translate 之后、
+  // 正文之前**发。参考里 tiling 那段 `<< … >> matrix makepattern /checker exch def` 就在
+  // 这个位置。界不算它 —— framebox 只量 f（真 asy 也一样：图案的定义不占地方）。
+  if (preamble != null) {
+    for (int i = 0; i < preamble.ops.length; ++i)
+      emitop(preamble.ops[i], 1, preamble.ops[i].merge,
+             i + 1 >= preamble.ops.length || !preamble.ops[i + 1].merge);
+    lastvalid = false;
+  }
   for (int i = 0; i < f.ops.length; ++i)
     emitop(f.ops[i], 1, f.ops[i].merge,
            i + 1 >= f.ops.length || !f.ops[i + 1].merge);

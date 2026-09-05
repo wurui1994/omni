@@ -717,6 +717,27 @@ export function asyCall(L, n) {
     if (p === null) return null;
     return { code: `(readtext ${p.code})`, type: 'string' };
   }
+  // `_sfix(x,n)` / `_ssci(x,n)` / `_sgen(x,n)` / `_sgenk(x,n)`：C 的 `%.*f` / `%.*e` /
+  // `%.*g` / `%#.*g`，**精度是运行期整数**。方言里这四条早就有（ADR-0016 第八/三十/三十一刀
+  // 的 sfix/ssci/sgen/sgenk，四条腿各一份、舍入定的是"就近取偶"= C 的 printf）。
+  //
+  // 为什么要走这个口子而不是 `string(x, n)`：那一条是 `(tostr E N)`，N **必须是字面量**
+  // （量出来的报错："(tostr E N) 的 N 要是 int 字面量"），而 `format("%.6f", x)` 的精度是从
+  // 格式串里解析出来的、运行期才知道。asy 那边 `format` 底下就是 `snprintf(f, x)`
+  // （runstring.in:351），f 是运行期拼出来的串 —— 所以这一层也得有运行期精度这一格。
+  //
+  // 名字带下划线是同一条规矩（base/ 里没有这四个名字，只有 lib/asy 的 `format` 用它们）。
+  if (nm === '_sfix' || nm === '_ssci' || nm === '_sgen' || nm === '_sgenk') {
+    const op = { _sfix: 'sfix', _ssci: 'ssci', _sgen: 'sgen', _sgenk: 'sgenk' }[nm];
+    const raw = asyCallArgs(L, n);
+    if (raw === null) return null;
+    if (raw.length !== 2) return L.err(n, `'${nm}' 要 2 个实参，给了 ${raw.length} 个`);
+    for (const a of raw) if (a.lines !== null) for (const s of a.lines) L.pre.push(s);
+    const x = L.coerce(raw[0].v, 'real', raw[0].node, `'${nm}' 的第 1 个实参`);
+    const p = L.coerce(raw[1].v, 'int', raw[1].node, `'${nm}' 的第 2 个实参`);
+    if (x === null || p === null) return null;
+    return { code: `(${op} ${x.code} ${p.code})`, type: 'string' };
+  }
   // `_getsetting(name)`：读宿主的一格设置，**运行期**读，没设就是空串。方言的 `(getenv E)`。
   // 与上面 `_searchpath` 刻意相反：那一格是编译期印成字面量的（路径进了产物缓存的键），
   // 这一格**不能**是编译期的 —— 输出格式是运行期的值。真 asy 里格式根本不进程序：
