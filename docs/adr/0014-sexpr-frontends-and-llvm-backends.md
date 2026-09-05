@@ -10873,10 +10873,21 @@ NURBS / 球柱盘管，各带自己的材质），`asy__add3` 退回去只管界
    那几个内建根本不被调，op 表恒空，所以行为零变化；`render=-1` 时
    `draw(f,unitbox)` 记下 1076 格、`add` 搬过去还是 1076、再加个 `unitsphere` 变 1204。
    **界那几格仍然不搬**（改了会动到已经对上的例子），与第 1 步一起改。
-1. `shipout3` 实现 EPS 那一支：按第二节那套算法出外壳（那一层现在就能逐字节对上），
-   2D 帧按第 0 步的 op 表投影（投影矩阵从收到的 `m`/`M`/`angle`/`zoom`/`shift`/`t`
-   自己搭 —— `currentprojection` 是 three.asy 的变量，这一层看不见），
-   像素走第四节的 gs；`settings.render` 改成 -1。
+1. `shipout3` 实现 EPS 那一支 —— **外壳已落地**（`settings.render` 已改成 -1）：
+   新增 `drawop` 的 `kind == 7`（裸字节位图，drawimage.h:107 的 drawRawImage），
+   dict 与 `kind == 5` 逐字一样、像素换成一条按 RGB 排好的 `int[]`；
+   `shipout3` 照 glrender.cc:531 另起一张空 picture 只放这一格再 shipout。
+   billboard 的外壳与参考**逐字节一样**（BoundingBox / HiRes / `[ 93 0 0 100 0 0] concat`
+   / `/Width 372 /Height 400` / `/ImageMatrix`）。`oW/oH = ceil(w)` 的判据是
+   "w 是整数尺寸减 defaultrender.margin=0.02"。
+   **像素还是背景色**，于是这一族的判决从"结构不同 —— 位图块数 1 vs 0"变成了可量的数：
+   billboard 36666/446400、sacone3D 216896/385200、stroke3 191875/483936、
+   label3 84860/1961568、roll 552954/1008000（这几个的**矢量那半边已经逐字节一样**）。
+   还差两件：(a) 像素交给 gs —— 要先把 op 表投影成 2D 帧（投影矩阵从收到的
+   `m`/`M`/`angle`/`zoom`/`shift`/`t` 自己搭，`currentprojection` 这一层看不见）；
+   (b) sacylinder3D / cylinder / shellsqrtx01 的 `oW` 比参考大 1 —— 根子是球/柱/盘/管
+   这几个原语的三维界在这一层是拿变换阵作用在单位立方体八个角上**估**的
+   （`asy__addbox3`），估宽了 `S.width` 跟着宽。
 2. eps.js 加"GPU 参考位图"这一档的判据（几何逐字节 + 像素容差），把 83 个的现状量出来；
 3. 逐族收像素：先线画（billboard/stroke3/label3 这一族），再曲面（PBR 着色那一套）。
 
