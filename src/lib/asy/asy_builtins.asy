@@ -1799,6 +1799,13 @@ struct drawop {
   // 逐字照发的一段 PostScript（kind == 6，`postscript(frame, string)`）。带 min/max 的那一份
   // 把界放在 `g` 上（一条矩形），不带的那一份 `g` 是空的 —— 界不参与。
   string psraw = "";
+  // 裸字节的位图（kind == 7）：三维那条路渲出来的一整张图（drawimage.h:107 的
+  // drawRawImage）。与 kind == 5 的差别只在**像素怎么存**：那边是 pen[][]，
+  // 一张 372x400 就是 148800 个 pen；这边按 RGB 顺序存成一条 int[]，
+  // 目标矩形照旧躺在 `g` 的四个结点上。
+  int[] raw;
+  int rw = 0;
+  int rh = 0;
 }
 
 struct picture {
@@ -3120,6 +3127,58 @@ private void asy__emitpixels(pen[][] data, int w, int h) {
   asy__out(line + "~>");
 }
 
+// 裸字节 -> ASCII85（kind == 7 用）。与 asy__emitpixels 同一条，只是像素来源换成
+// 一条按 RGB 排好的 int[]：三维那条路一张 372x400 的图是 446400 个字节，
+// 走 pen[][] 的话要 148800 个 pen 对象，这一层扛不住。
+private void asy__emitbytes(int[] b) {
+  string line = "";
+  int[] g = new int[4];
+  int gn = 0;
+  int n = b.length;
+  for (int i = 0; i < n; ++i) {
+    g[gn] = b[i];
+    gn = gn + 1;
+    if (gn == 4) {
+      line = line + asy__a85grp(g[0], g[1], g[2], g[3], 4);
+      gn = 0;
+      if (length(line) >= 76) { asy__out(line); line = ""; }
+    }
+  }
+  if (gn > 0) {
+    for (int k = gn; k < 4; ++k) g[k] = 0;
+    line = line + asy__a85grp(g[0], g[1], g[2], g[3], gn);
+  }
+  asy__out(line + "~>");
+}
+
+// 一格裸字节位图（kind == 7）：dict 与 kind == 5 逐字一样，只有数据段的来源不同。
+private void asy__emitraw(drawop o, real s) {
+  int w = o.rw;
+  int h = o.rh;
+  if (w == 0 || h == 0) return;
+  pair p00 = o.g.nodes[0].point * s;
+  pair p10 = o.g.nodes[1].point * s;
+  pair p01 = o.g.nodes[3].point * s;
+  pair ax = p10 - p00;
+  pair ay = p01 - p00;
+  asy__out("gsave");
+  asy__out("[ " + ps(ax.x) + " " + ps(ax.y) + " " + ps(ay.x) + " " + ps(ay.y)
+    + " " + ps(p00.x) + " " + ps(p00.y) + "] concat");
+  asy__out("/DeviceRGB setcolorspace");
+  asy__out("<<");
+  asy__out("/ImageType 1");
+  asy__out("/Width " + string(w));
+  asy__out("/Height " + string(h));
+  asy__out("/BitsPerComponent 8");
+  asy__out("/Decode [0 1 0 1 0 1 ]");
+  asy__out("/ImageMatrix [" + string(w) + " 0 0 " + string(h) + " 0 0]");
+  asy__out("/DataSource currentfile 1 (~>) /SubFileDecode filter /ASCII85Decode filter");
+  asy__out(">>");
+  asy__out("image");
+  asy__emitbytes(o.raw);
+  asy__out("grestore");
+}
+
 // 一格位图（kind == 5）。目标矩形躺在 `o.g` 的前四个结点上（P00 -- P10 -- P11 -- P01），
 // 于是 concat 的矩阵就是"把单位正方形送到这四个角"的那一个 —— 旋转过的图（参考里
 // laserlattice 那块就是）跟着白捡。`s` 是出图那一层的缩放，与 emitpath 同一个口径。
@@ -3164,6 +3223,7 @@ private void asy__emitimg(drawop o, real s) {
 void emitop(drawop o, real s, bool cont = false, bool last = true) {
   if (o.kind == 2) { emitshade(o, s); return; }
   if (o.kind == 5) { asy__emitimg(o, s); return; }
+  if (o.kind == 7) { asy__emitraw(o, s); return; }
   // 逐字照发（kind == 6）：`postscript(frame, string)` 那一路。asy 那边也是原样进产物
   // （drawVerbatim），所以这儿一个字都不动。
   if (o.kind == 6) { asy__out(o.psraw); return; }
@@ -8050,6 +8110,14 @@ string defaultformat3="prc";                     // runpicture.in:121
 real asy__r3w = 0;
 real asy__r3h = 0;
 bool asy__r3on = false;
+// 三维那条路的出口（EPS 那一支）。几何全部照 glrender.cc:531-543 与
+// renderBase.cc:932 那两段（施工图第二节，四项与参考逐字节对上）：
+//   oW/oH   = ceil(收到的 w/h)            —— initDisplay 的形参是 int
+//   expand  = render<0 ? -2*render : render，再乘 antialias（默认 2）-> 默认 4
+//   full    = ceil(expand*oW) x ceil(expand*oH)
+//   位图铺在 (0,0)-(oW,oH) 上，于是 concat 就是 [ oW 0 0 oH 0 0]
+// **像素这一刀还是背景色**（施工图第四节：下一步交给 gs 光栅化矢量那一份）——
+// 先把外壳与判据打通，让 83 个从"位图块数 1 vs 0"变成"多少个字节不同"。
 void shipout3(string prefix, frame f, string format="",
               real width, real height, real angle, real zoom,
               triple m, triple M, pair shift, pair margin, real[][] t,
@@ -8058,6 +8126,43 @@ void shipout3(string prefix, frame f, string format="",
   asy__r3w = width;
   asy__r3h = height;
   asy__r3on = true;
+  // oW/oH：**四舍五入**，不是 ceil。量出来的：billboard 的 92.98/99.98 两种取法都给
+  // 93/100，但 sacylinder3D / cylinder / shellsqrtx01 上 ceil 会大 1pt
+  // （%%HiResBoundingBox 差 0.5，位图字节数也跟着差一圈）—— 换成 (int)(x+0.5) 才对上。
+  int oW = (int) (width + 0.5);
+  int oH = (int) (height + 0.5);
+  if (oW <= 0) oW = 1;
+  if (oH <= 0) oH = 1;
+  // expand = (render<0 ? -2*render : render) * antialias。**这一层读不到 settings**
+  // （它是另一个模块，plain 才 import 它），而我们的默认是 render=-1、asy 的 antialias
+  // 默认是 2，所以这里是 -2*(-1)*2 = 4。例子自己把 render 设成别的值时这一格会不对 ——
+  // 等这一层能读到 settings（或者 three.asy 把它一起传过来）再补。
+  real expand = 4;
+  int fw = (int) ceil(expand * oW);
+  int fh = (int) ceil(expand * oH);
+  // 背景：Light.background() 回的是 RGB 三个数（没给时是白）
+  int br = 255; int bg = 255; int bb = 255;
+  if (background.length >= 3) {
+    br = (int) (255 * background[0] + 0.5);
+    bg = (int) (255 * background[1] + 0.5);
+    bb = (int) (255 * background[2] + 0.5);
+  }
+  int[] buf = new int[fw * fh * 3];
+  for (int i = 0; i < buf.length; i += 3) {
+    buf[i] = br; buf[i + 1] = bg; buf[i + 2] = bb;
+  }
+  drawop o;
+  o.kind = 7;
+  o.rw = fw;
+  o.rh = fh;
+  o.raw = buf;
+  o.p = currentpen;
+  o.g = (0, 0) -- (oW, 0) -- (oW, oH) -- (0, oH) -- cycle;
+  // 照 glrender.cc:531 那一段：**另起一张空 picture**，只放这一格位图，再 shipout。
+  // `add(picture,frame)` 在 plain 那一层，这一层直接往 ops 里塞。
+  picture P;
+  P.ops.push(o);
+  shipout(P);
 }
 void shipout3(string prefix, frame f, string format=defaultformat3) {
   abort("shipout3 还没做（PRC/v3d 那一路不在这一层）");

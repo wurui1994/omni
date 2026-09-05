@@ -35,12 +35,10 @@ string tex = "latex";
 // 非 0 时整张 EPS 都是 shipout3 出的（真 asy 那边是 GPU 渲染那条路）。
 // 这一轴上 83 个"参考是位图、我们出矢量"的差全部出自这一行。真 asy 的默认是 -1。
 //
-// **暂时仍钉在 0**，理由是量出来的：把它改成 -1 之后 shipout3 确实被调到了
-// （见 asy_builtins 的 asy__r3w/asy__r3h），但 three.asy:2920 紧接着
-// `if(!preview && !v3d) return F;` 回的是一张**空帧** —— billboard 的输出变成 0 字节。
-// 也就是说 shipout3 必须自己把整份 EPS 写出来，光当记录器不够。
-// 施工图（外壳的算法已经与参考逐项对上）见 ADR「位图那 83 个的施工图」那一节。
-real render = 0;
+// **改成 -1 了**（与真 asy 一致）：shipout3 的 EPS 那一支已经落地（外壳按
+// glrender/renderBase 那两段算，四项与参考逐字节对上；像素这一刀还是背景色，
+// 下一步交给 gs 光栅化矢量那一份）。施工图见 ADR「位图那 83 个」那一节。
+real render = -1;
 pair viewportmargin = (0, 0);
 int verbose = 0;
 
