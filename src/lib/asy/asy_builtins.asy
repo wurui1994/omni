@@ -1700,6 +1700,86 @@ void addpt(box bx, pair z) {
 // 两份都错，而且错得不一样。
 private real asy__Fuzz2 = 1000.0 * realEpsilon;      // bound.cc:13
 private real asy__Fuzz4 = asy__Fuzz2 * asy__Fuzz2;   // path.cc:22
+/*
+ * `bound` 那一族的**标量骨架**（bound.h:16 的 Split 与 bound.cc:32..86）：Bezier 面片上
+ * 一个分量的**真极值**，靠细分求，不是拿控制点凸包顶。
+ *
+ * 摆在这么前面是因为它有三个用处、而最早的那个在 `minbezier`（runarray.in:2200）：
+ *   界（drawsurface.cc:72）、`minbezier/maxbezier`、比（drawsurface.cc:138，那一支
+ *   要 triple 版，在文件后面）。asy 的名字解析是顺着来的，所以早声明。
+ */
+private real asy__Fuzz = sqrt(asy__Fuzz2);      // bound.cc:14
+private int asy__rmaxdepth = 53;                // bound.cc:15 的 DBL_MANT_DIG
+// `max`/`min`/`abs`（实数那几格）在这个文件里声明得比这儿晚，所以这一族里不用它们
+private real asy__rm(bool mx, real a, real b) {
+  return mx ? (a > b ? a : b) : (a < b ? a : b);
+}
+
+private real[] asy__splitr(real z0, real c0, real c1, real z1) {
+  real m0 = 0.5 * (z0 + c0);
+  real m1 = 0.5 * (c0 + c1);
+  real m2 = 0.5 * (c1 + z1);
+  real m3 = 0.5 * (m0 + m1);
+  real m4 = 0.5 * (m1 + m2);
+  real m5 = 0.5 * (m3 + m4);
+  return new real[] {m0, m1, m2, m3, m4, m5};
+}
+
+// bound.cc:32 / :38（四个角 / 另外十二个控制点）
+private real asy__scornerbound(real[] P, bool mx) {
+  real b = asy__rm(mx, P[0], P[3]);
+  b = asy__rm(mx, b, P[12]);
+  return asy__rm(mx, b, P[15]);
+}
+
+private real asy__scontrolbound(real[] P, bool mx) {
+  int[] k = {1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14};
+  real b = asy__rm(mx, P[1], P[2]);
+  for (int i = 2; i < k.length; ++i) b = asy__rm(mx, b, P[k[i]]);
+  return b;
+}
+
+// bound.cc:52 的 bound（标量版，十六个控制点的面片）
+private real asy__sbound(real[] P, bool mx, real b, real fuzz, int depth) {
+  real bb = asy__rm(mx, b, asy__scornerbound(P, mx));
+  real sgn = mx ? 1 : -1;
+  if (sgn * (bb - asy__scontrolbound(P, mx)) >= -fuzz || depth == 0) return bb;
+  int d = depth - 1;
+  real fz = fuzz * 2;
+  real[] c0 = asy__splitr(P[0], P[1], P[2], P[3]);
+  real[] c1 = asy__splitr(P[4], P[5], P[6], P[7]);
+  real[] c2 = asy__splitr(P[8], P[9], P[10], P[11]);
+  real[] c3 = asy__splitr(P[12], P[13], P[14], P[15]);
+  real[] c4 = asy__splitr(P[12], P[8], P[4], P[0]);
+  real[] c5 = asy__splitr(c3[0], c2[0], c1[0], c0[0]);
+  real[] c6 = asy__splitr(c3[3], c2[3], c1[3], c0[3]);
+  real[] c7 = asy__splitr(c3[5], c2[5], c1[5], c0[5]);
+  real[] c8 = asy__splitr(c3[4], c2[4], c1[4], c0[4]);
+  real[] c9 = asy__splitr(c3[2], c2[2], c1[2], c0[2]);
+  real[] c10 = asy__splitr(P[15], P[11], P[7], P[3]);
+  real[] s0 = {c4[5], c5[5], c6[5], c7[5], c4[3], c5[3], c6[3], c7[3],
+               c4[0], c5[0], c6[0], c7[0], P[12], c3[0], c3[3], c3[5]};
+  bb = asy__sbound(s0, mx, bb, fz, d);
+  real[] s1 = {P[0], c0[0], c0[3], c0[5], c4[2], c5[2], c6[2], c7[2],
+               c4[4], c5[4], c6[4], c7[4], c4[5], c5[5], c6[5], c7[5]};
+  bb = asy__sbound(s1, mx, bb, fz, d);
+  real[] s2 = {c0[5], c0[4], c0[2], P[3], c7[2], c8[2], c9[2], c10[2],
+               c7[4], c8[4], c9[4], c10[4], c7[5], c8[5], c9[5], c10[5]};
+  bb = asy__sbound(s2, mx, bb, fz, d);
+  real[] s3 = {c7[5], c8[5], c9[5], c10[5], c7[3], c8[3], c9[3], c10[3],
+               c7[0], c8[0], c9[0], c10[0], c3[5], c3[4], c3[2], P[15]};
+  return asy__sbound(s3, mx, bb, fz, d);
+}
+
+// run::norm（bound.h:87）：L∞ 范数
+private real asy__norminf(real[] v) {
+  real n = 0;
+  for (int i = 0; i < v.length; ++i) {
+    real t = v[i] < 0 ? -v[i] : v[i];
+    if (t > n) n = t;
+  }
+  return n;
+}
 // sqrt(1+x)-1，小 x 上不掉精度（path.cc:36）
 private real asy__sqrt1pxm1(real x) { return x / (sqrt(1 + x) + 1); }
 // path.cc:point(double t) 的 de Casteljau，取一个分量（pair 的加乘是逐分量的，
@@ -8660,24 +8740,35 @@ real change2(triple[][] a) {
   }
   return M;
 }
-triple minbezier(triple[][] P, triple b) {
-  for (int i = 0; i < P.length; ++i) {
+/*
+ * `minbezier` / `maxbezier`（runarray.in:2200/2212）：**不是控制点凸包**，是对
+ * x/y/z 三个分量各跑一遍细分求真极值，fuzz 是 `Fuzz*norm(A,N)`（每个分量各自的 L∞）。
+ *
+ * 这一对是 `three_surface.asy:280/286` 的 `patch.min()/max()` 用的，也就是
+ * `surface.min()/max()`、`tube` 那一格传给 `drawTube` 的 min/max 全从这儿来。
+ * 原先按凸包算 —— 凸包偏大，界就偏大。
+ *
+ * 十个控制点的三角面片走的是 `boundtri`（bound.cc:102，要 Splittri 那一大张表），
+ * 还没搬，那一支仍按凸包 —— 记一笔。
+ */
+private triple asy__bezbound(triple[][] P, triple b, bool mx) {
+  real[] cx; real[] cy; real[] cz;
+  for (int i = 0; i < P.length; ++i)
     for (int j = 0; j < P[i].length; ++j) {
       triple v = P[i][j];
-      b = (min(b.x, v.x), min(b.y, v.y), min(b.z, v.z));
+      cx.push(v.x); cy.push(v.y); cz.push(v.z);
     }
+  if (cx.length != 16) {
+    for (int i = 0; i < cx.length; ++i)
+      b = (asy__rm(mx, b.x, cx[i]), asy__rm(mx, b.y, cy[i]), asy__rm(mx, b.z, cz[i]));
+    return b;
   }
-  return b;
+  return (asy__sbound(cx, mx, b.x, asy__Fuzz * asy__norminf(cx), asy__rmaxdepth),
+          asy__sbound(cy, mx, b.y, asy__Fuzz * asy__norminf(cy), asy__rmaxdepth),
+          asy__sbound(cz, mx, b.z, asy__Fuzz * asy__norminf(cz), asy__rmaxdepth));
 }
-triple maxbezier(triple[][] P, triple b) {
-  for (int i = 0; i < P.length; ++i) {
-    for (int j = 0; j < P[i].length; ++j) {
-      triple v = P[i][j];
-      b = (max(b.x, v.x), max(b.y, v.y), max(b.z, v.z));
-    }
-  }
-  return b;
-}
+triple minbezier(triple[][] P, triple b) { return asy__bezbound(P, b, false); }
+triple maxbezier(triple[][] P, triple b) { return asy__bezbound(P, b, true); }
 // 透视投影下的 x/y 比（picture.cc:135 的 xratio / yratio）
 pair minratio(triple[][] P, pair b) {
   for (int i = 0; i < P.length; ++i) {
@@ -10071,16 +10162,7 @@ private void asy__merge3hook() {
 }
 asy__merge3hook();
 
-/*
- * `bound` 那一族的**骨架**（bound.h:16 的 Split 与 bound.cc:32..86）：Bezier 上一个
- * 标量分量的**真极值**，靠细分求，不是拿控制点凸包顶。
- * 界（drawsurface.cc:72）与比（drawsurface.cc:138）两处都用它，所以摆在这儿。
- */
-private real asy__Fuzz = sqrt(asy__Fuzz2);      // bound.cc:14
-private int asy__rmaxdepth = 53;                // bound.cc:15 的 DBL_MANT_DIG
-private real asy__rm(bool mx, real a, real b) { return mx ? max(a, b) : min(a, b); }
-
-// bound.h:16 的 Split（de Casteljau 一刀两半）：回 m0..m5 六个点
+// bound.h:16 的 Split 的 triple 版（标量版与其余那几格在文件前面，`minbezier` 要它）
 private triple[] asy__split3(triple z0, triple c0, triple c1, triple z1) {
   triple m0 = 0.5 * (z0 + c0);
   triple m1 = 0.5 * (c0 + c1);
@@ -10089,69 +10171,6 @@ private triple[] asy__split3(triple z0, triple c0, triple c1, triple z1) {
   triple m4 = 0.5 * (m1 + m2);
   triple m5 = 0.5 * (m3 + m4);
   return new triple[] {m0, m1, m2, m3, m4, m5};
-}
-
-private real[] asy__splitr(real z0, real c0, real c1, real z1) {
-  real m0 = 0.5 * (z0 + c0);
-  real m1 = 0.5 * (c0 + c1);
-  real m2 = 0.5 * (c1 + z1);
-  real m3 = 0.5 * (m0 + m1);
-  real m4 = 0.5 * (m1 + m2);
-  real m5 = 0.5 * (m3 + m4);
-  return new real[] {m0, m1, m2, m3, m4, m5};
-}
-
-// bound.cc:32 / :38（四个角 / 另外十二个控制点）
-private real asy__scornerbound(real[] P, bool mx) {
-  real b = asy__rm(mx, P[0], P[3]);
-  b = asy__rm(mx, b, P[12]);
-  return asy__rm(mx, b, P[15]);
-}
-
-private real asy__scontrolbound(real[] P, bool mx) {
-  int[] k = {1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14};
-  real b = asy__rm(mx, P[1], P[2]);
-  for (int i = 2; i < k.length; ++i) b = asy__rm(mx, b, P[k[i]]);
-  return b;
-}
-
-// bound.cc:52 的 bound（标量版，十六个控制点的面片）
-private real asy__sbound(real[] P, bool mx, real b, real fuzz, int depth) {
-  real bb = asy__rm(mx, b, asy__scornerbound(P, mx));
-  real sgn = mx ? 1 : -1;
-  if (sgn * (bb - asy__scontrolbound(P, mx)) >= -fuzz || depth == 0) return bb;
-  int d = depth - 1;
-  real fz = fuzz * 2;
-  real[] c0 = asy__splitr(P[0], P[1], P[2], P[3]);
-  real[] c1 = asy__splitr(P[4], P[5], P[6], P[7]);
-  real[] c2 = asy__splitr(P[8], P[9], P[10], P[11]);
-  real[] c3 = asy__splitr(P[12], P[13], P[14], P[15]);
-  real[] c4 = asy__splitr(P[12], P[8], P[4], P[0]);
-  real[] c5 = asy__splitr(c3[0], c2[0], c1[0], c0[0]);
-  real[] c6 = asy__splitr(c3[3], c2[3], c1[3], c0[3]);
-  real[] c7 = asy__splitr(c3[5], c2[5], c1[5], c0[5]);
-  real[] c8 = asy__splitr(c3[4], c2[4], c1[4], c0[4]);
-  real[] c9 = asy__splitr(c3[2], c2[2], c1[2], c0[2]);
-  real[] c10 = asy__splitr(P[15], P[11], P[7], P[3]);
-  real[] s0 = {c4[5], c5[5], c6[5], c7[5], c4[3], c5[3], c6[3], c7[3],
-               c4[0], c5[0], c6[0], c7[0], P[12], c3[0], c3[3], c3[5]};
-  bb = asy__sbound(s0, mx, bb, fz, d);
-  real[] s1 = {P[0], c0[0], c0[3], c0[5], c4[2], c5[2], c6[2], c7[2],
-               c4[4], c5[4], c6[4], c7[4], c4[5], c5[5], c6[5], c7[5]};
-  bb = asy__sbound(s1, mx, bb, fz, d);
-  real[] s2 = {c0[5], c0[4], c0[2], P[3], c7[2], c8[2], c9[2], c10[2],
-               c7[4], c8[4], c9[4], c10[4], c7[5], c8[5], c9[5], c10[5]};
-  bb = asy__sbound(s2, mx, bb, fz, d);
-  real[] s3 = {c7[5], c8[5], c9[5], c10[5], c7[3], c8[3], c9[3], c10[3],
-               c7[0], c8[0], c9[0], c10[0], c3[5], c3[4], c3[2], P[15]};
-  return asy__sbound(s3, mx, bb, fz, d);
-}
-
-// run::norm（bound.h:87 那一段）：L∞ 范数
-private real asy__norminf(real[] v) {
-  real n = 0;
-  for (int i = 0; i < v.length; ++i) n = max(n, abs(v[i]));
-  return n;
 }
 
 void asy__add3(frame f, triple v)

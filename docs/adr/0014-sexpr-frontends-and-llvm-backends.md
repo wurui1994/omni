@@ -11323,6 +11323,18 @@ shellsqrtx01 那三个"oW 大 1"的症状**，也可能是 laserlattice 那个 m
 与 `real[][] * frame` 里那趟界（还按"旧包围盒八个角"重算，不是逐个 drawelement）
 都还没搬。
 
+`minbezier` / `maxbezier`（runarray.in:2200/2212）也照着改了 —— 它们是
+`three_surface.asy:280/286` 的 `patch.min()/max()` 用的，`surface.min()/max()`
+与 `tube` 传给 `drawTube` 的 min/max 全从这儿来，原先按凸包算。
+**这一格量下来这三个例子一个数都没动**（cylinder / shellsqrtx01 / sacylinder3D 照旧），
+无标签尺子也没动；留着是因为它是逐句照抄的正解，且七个原本"一样"的三维例子
+（sacone / sacylinder / spheresilhouette / hyperboloidsilhouette / Coons /
+Gouraud / tensor）重跑之后仍然"一样"。十个控制点的三角面片那一支仍按凸包。
+
+**摆放位置有个坎**：这一族要早于 `minbezier`（文件 8700 行附近）声明，
+而实数的 `max`/`min`/`abs` 在这个文件里比它更晚 —— 所以 `asy__rm` 与
+`asy__norminf` 里是手写的比较，不是 `max`/`min`。
+
 **下一刀的活**：拿这个把第 0 步的 op 表投影成 2D（面片按控制点投影后细分，
 路径按结点+控制点投影），按深度排一遍（画家算法，先不做 Z-buffer），
 发一份 `oW x oH` 的临时 EPS，交给 gs 出像素，读回字节塞进 `kind == 7` 那一格。
