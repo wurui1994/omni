@@ -8011,9 +8011,24 @@ void shipout3(string prefix, frame f, string format="",
 void shipout3(string prefix, frame f, string format=defaultformat3) {
   abort("shipout3 还没做（PRC/v3d 那一路不在这一层）");
 }
-// _eval 两条（builtin.cc）：一条吃源码串，一条吃 `quote{}` 攒的 code。两条都要真去
-// 再编一遍源码，这一层没有，所以体是 abort —— 签名在，plain 的 eval 那两支才降得下来。
+// _eval 两条（builtin.cc）：一条吃源码串，一条吃 `quote{}` 攒的 code。真去再编一遍源码
+// 这一层没有，所以非空的那一支仍然是 abort —— 签名在，plain 的 eval 那两支才降得下来。
+//
+// **空程序那一支要放行**：plain.asy:238 的 `usersetting()` 就是 `eval(settings.user,true)`，
+// 而 `settings.user` 是命令行 `-u` 那一格，默认是空串 —— 于是那句只是 `_eval(";", true)`。
+// asy 那边编一段空源码什么都不做；我们从前一律 abort，于是**只要例子调了 usersetting()
+// 就整张图都出不来**。量出来的：tvgen.asy:1048 就这一句，它是这一轴上唯一"没出图"的那个。
+// 判据是去掉空白与分号之后还剩不剩东西。
+private bool asy__evalempty(string s) {
+  for (int i = 0; i < length(s); ++i) {
+    string c = substr(s, i, 1);
+    if (c == " " || c == '\t' || c == '\n' || c == '\r' || c == ";") continue;
+    return false;
+  }
+  return true;
+}
 void _eval(string s, bool embedded, bool interactiveWrite=false) {
+  if (asy__evalempty(s)) return;
   abort("_eval 还没做（要把一段源码在当前环境里再编一遍）");
 }
 void _eval(code s, bool embedded, bool interactiveWrite=false) {
