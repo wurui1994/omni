@@ -1,0 +1,7 @@
+;; 缓冲越界那句话。与数组那两条同一个理由：$bget/$bset 也换成了哨兵快路。
+;; 消息的形状与 list 那句一样（"buffer index out of range: N (length L)"），
+;; 而它在五条腿上各有一份实现。
+(module
+  (main
+    (let b (buf real) (bnew (buf real) (int 2)))
+    (print (bget (var b) (int 3)))))

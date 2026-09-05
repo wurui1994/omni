@@ -302,15 +302,25 @@ function $bnew(n) {
   for (let i = 0; i < len; i++) o.push(0);
   return o;
 }
+// 下标那两个与 $aget/$aset 同一条快路（undefined 当哨兵，见下面数组那一段的长注释）：
+// 缓冲的元素只有 int / real 两种，零值都是 0，所以"读回来是 undefined"就是"不在界内"。
 function $bget(a, i) {
+  const v = a[i];
+  return v === undefined ? $bslow(a, i) : v;
+}
+function $bslow(a, i) {
   const n = typeof i === "number" ? i : Number(i);
   if (n < 0 || n >= a.length) $rt_error("buffer index out of range: " + n + " (length " + a.length + ")");
   return a[n];
 }
 function $bset(a, i, v) {
-  const n = typeof i === "number" ? i : Number(i);
-  if (n < 0 || n >= a.length) $rt_error("buffer index out of range: " + n + " (length " + a.length + ")");
-  a[n] = v;
+  if (a[i] === undefined) {
+    const n = typeof i === "number" ? i : Number(i);
+    if (n < 0 || n >= a.length) $rt_error("buffer index out of range: " + n + " (length " + a.length + ")");
+    a[n] = v;
+    return v;
+  }
+  a[i] = v;
   return v;
 }
 
@@ -341,18 +351,34 @@ function $anew(n, zero, cp) {
 // 这四个是**最热的一格**：量过 interpolate1.asy（标签尺寸都命中缓存的那一趟），
 // $aget 9.2%、$anew 3.8%、$aset 3.7%、$alen 2.7%、$acopy 1.8%，加上 $nullCheck 1.1%
 // 一共占掉近四分之一。所以 null 检查与 $acopy 都在这儿**手展开**，不再多跳一层函数。
-// int 换成规范化的 number|BigInt 之后（见文件头）：$alen 直接回 a.length（不再造 BigInt），
-// 下标在 typeof 是 number 时直接用（不再 Number(i)）。
+// int 换成规范化的 number|BigInt 之后（见文件头）：$alen 直接回 a.length（不再造 BigInt）。
+//
+// 边界检查用 **undefined 当哨兵**：数组是密的（$anew 一个个 push 出来），而方言的每种
+// 元素类型都有零值，所以"读回来是 undefined"等价于"这个下标不在界内"。于是热路上只剩
+// 一次读 + 一次比。三种情形落到慢路，那儿照老规矩重算一遍 —— **消息一个字不变**：
+//   下标越界 / 负数        a[i] 是 undefined -> 慢路报那句话
+//   下标是 BigInt          a[5n] 取的是属性 "5"，值对；大到印不成下标时是 undefined -> 慢路
+//   元素真的是 undefined   只有 arr<dynamic> 装得进（JS 前端的 js_undef）-> 慢路照样交出去
+// 量出来的（三对角消元内核，best of 5）：94.9ms -> 34.6ms，手写 a[i] 的天花板是 31.3ms。
 // （注意这一整份是 String.raw 里的正文 —— 反引号会把它截断，注释里也不能写。）
 function $alen(a) { if (a === null) $rt_error("null reference"); return a.length; }
 function $aget(a, i) {
   if (a === null) $rt_error("null reference");
+  const v = a[i];
+  return v === undefined ? $agetslow(a, i) : v;
+}
+function $agetslow(a, i) {
   const n = typeof i === "number" ? i : Number(i);
   if (n < 0 || n >= a.length) $rt_error("array index out of range: " + n + " (length " + a.length + ")");
   return a[n];
 }
 function $aset(a, i, v, cp) {
   if (a === null) $rt_error("null reference");
+  if (a[i] === undefined) return $asetslow(a, i, v, cp);
+  a[i] = cp === true && Array.isArray(v) ? v.slice() : v;
+  return v;
+}
+function $asetslow(a, i, v, cp) {
   const n = typeof i === "number" ? i : Number(i);
   if (n < 0 || n >= a.length) $rt_error("array index out of range: " + n + " (length " + a.length + ")");
   a[n] = cp === true && Array.isArray(v) ? v.slice() : v;
