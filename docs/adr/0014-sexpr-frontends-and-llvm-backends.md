@@ -11762,6 +11762,54 @@ width/height/margin 与 LP 出来的 lambda/s）逐位相同：
 settings.asy 里订正 —— 真正差的就是上面那一格 int 截断，改完之后这一族的矢量半边
 逐字节一样。
 
+### 十三、laserlattice 那个"结构不同"追到了根：`inverse()` 里的 FMA
+
+这一轴上最后一个"结构不同"是 laserlattice（长度 7054 vs 6273，首处 #3767 参考 `gsave`
+我们 `newpath`）。顺着看下来：
+
+1. 参考在**每一条刻度线**外面套 `gsave / newpath … / [ 1 0 0 1 0 0] concat / stroke /
+   grestore` —— 那是 drawelement.h:322-342 的 penSave/penTranslate/penConcat/penRestore，
+   闸门是 `!pentype.getTransform().isIdentity()`（比的是六个数）。
+2. 我们的 `asy__istrans` 判据与它逐字一样，但**我们那个矩阵是精确单位**，asy 的带
+   1e-18 的零头，于是它套我们不套。零头来自 graph.asy 的轴：笔上乘过 `t` 又乘过
+   `inverse(t)`。
+3. 两侧同一份源码的尺子（/tmp/omni-shade/inv2.asy，`t=scale(1.234567)*rotate(17)*shift(3,4)`，
+   印六个数到 17 位）—— **只有一个数不同**：
+
+   - `inverse(t).x`：asy `-3.0000000000000004`，我们 `-2.9999999999999996`
+   - 其余五个（xx/xy/yx/yy/y）与 `t` 本身的六个、`rotate(17)`、`radians/cos/sin`
+     全部逐位相同
+
+   于是 `t*inverse(t)` 那边是 `vxy=-7.3125821024300836e-18`、`vyx=6.1236416667481093e-18`，
+   我们是**精确的 0**。
+
+4. 我们的 `inverse` 与 `operator *` 与 transform.h:77/128 逐字一样，输入也逐位一样 ——
+   差的只能是**求值方式**：`(t.xy*t.y - t.yy*t.x)*d` 这种 `a*b - c*d` 在 arm64 上被
+   编译器收缩成一次 FMA（一次舍入），JS 这边是两次舍入。这与 cardioid / gamma /
+   lmfit1 那几个"最后一位"是同一个根。
+
+要对上就得在这几处按 FMA 的口径算（Dekker 拆分 + two-sum 那套，或者给运行时加一个
+准确的 `fma`）。判据已经是现成的：改完之后 `inverse(t).x` 应当变成
+`-3.0000000000000004`、`t*inverse(t)` 的两个零头应当与上面那两个数逐位相同。
+
+**改完了**（`asy__fma` + `inverse` 与 `transform*transform` 六格都按它算）。收缩的方向
+是量出来的、不是猜的：四个矩阵格先试"后一个乘法收进加法"，`t*inverse(t)` 的两个零头
+与 asy **正好互换**；换成"前一个乘法收进加法"就逐位对上了。现在：
+
+- `inverse(t)` 六个数与 asy 逐位相同
+- `t*inverse(t)` 六个数（含 `vxy=-7.3125821024300836e-18`、`vyx=6.1236416667481093e-18`、
+  `vx=-5.4263478899979402e-16`、`vy=1.04860324304125e-15`）与 asy 逐位相同
+- `t*T*inverse(t)` 六个里五个对上，只剩 `yx`（asy …165、我们 …153）
+
+**但这一刀在这一轴上一个例子都没动**（laserlattice / cardioid / gamma / lmfit1 的 token
+数与首处差位置，改前改后逐字相同；alignedaxis 改前就已经"一样"）。开销也没动
+（AiryDisk 22.6s 对 24.1s，同一噪声带内）。留着它的理由是：这两个函数现在与参考
+逐位同口径，"我们的算术不一样"这条不确定从盘面上去掉了；那四个例子的 gsave 闸门
+差在别处（graph.asy 的轴那条链上还有别的算术，下一刀顺着 `shiftless(t*T*tinv)`
+的六个数两侧对量）。
+
+
+
 
 
 

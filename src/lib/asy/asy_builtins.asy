@@ -279,15 +279,38 @@ pair operator *(transform t, pair p) {
   return (t.x + t.xx * p.x + t.xy * p.y, t.y + t.yx * p.x + t.yy * p.y);
 }
 
+// 精确的 `a*b + c`（**一次**舍入）：Dekker 拆分求准确积，再 two-sum 把尾巴收回来。
+// 为什么要它：clang 在 arm64 上把 `a*b + c*d` 这类式子收缩成一条 fmadd（一次舍入），
+// 我们这边是两次 —— 差在最后一位。追到的一处（两侧同一份源码的尺子 inv2.asy，
+// `t=scale(1.234567)*rotate(17)*shift(3,4)`）：`inverse(t).x` asy 是
+// -3.0000000000000004、我们是 -2.9999999999999996，六个数里只有这一个不同；
+// 于是 `t*inverse(t)` asy 留 1e-18 的零头、我们是精确的 0，
+// `!pentype.getTransform().isIdentity()`（drawelement.h:322）那道闸门就一边开一边关，
+// laserlattice 整份 EPS 于是"结构不同"。
+private real asy__fma(real a, real b, real c) {
+  real p = a * b;
+  real SPLIT = 134217729;                 // 2^27 + 1
+  real ca = SPLIT * a; real ah = ca - (ca - a); real al = a - ah;
+  real cb = SPLIT * b; real bh = cb - (cb - b); real bl = b - bh;
+  real e = ((ah * bh - p) + ah * bl + al * bh) + al * bl;   // p + e == a*b（精确）
+  real s = p + c;
+  real bs = s - p;
+  real t = (p - (s - bs)) + (c - bs);                       // s + t == p + c（精确）
+  return s + (t + e);
+}
+
 // 复合：`(s*sc)*p == s*(sc*p)`（量过 shift(3,4)*scale(2) 作用在 (1,1) 上是 (5,6)）
+// 六格都按 **fma** 的口径算（transform.h:77 在 arm64 上被收缩成 fmadd）：
+// 平移那两格是 `t.x + t.xx*s.x + t.xy*s.y`，从左往右两次收缩；四个矩阵格是
+// `a*b + c*d`，后一个乘法收进加法。判据见 asy__fma 上面那段（`t*inverse(t)` 的零头）。
 transform operator *(transform a, transform b) {
   return xform(
-    a.x + a.xx * b.x + a.xy * b.y,
-    a.y + a.yx * b.x + a.yy * b.y,
-    a.xx * b.xx + a.xy * b.yx,
-    a.xx * b.xy + a.xy * b.yy,
-    a.yx * b.xx + a.yy * b.yx,
-    a.yx * b.xy + a.yy * b.yy);
+    asy__fma(a.xy, b.y, asy__fma(a.xx, b.x, a.x)),
+    asy__fma(a.yy, b.y, asy__fma(a.yx, b.x, a.y)),
+    asy__fma(a.xx, b.xx, a.xy * b.yx),
+    asy__fma(a.xx, b.xy, a.xy * b.yy),
+    asy__fma(a.yx, b.xx, a.yy * b.yx),
+    asy__fma(a.yx, b.xy, a.yy * b.yy));
 }
 
 // 绕一点转：先挪到原点、转、再挪回去（量过 rotate(90,(1,1))*(2,1) = (1,2)）
@@ -317,9 +340,10 @@ transform shiftless(transform t) {
 // 再迭代两轮之后 x 方向的比例从 76.8297643074162 走成了 76.8297643074111。
 // 顺带把 -0 那一格也对上了：`(xy*y-yy*x)*d` 在 x=y=0 时给 +0，而 `-(ixx*x+ixy*y)` 给 -0。
 transform inverse(transform t) {
-  real d = t.xx * t.yy - t.xy * t.yx;
+  real d = asy__fma(t.xx, t.yy, -(t.xy * t.yx));
   d = 1.0 / d;
-  return xform((t.xy * t.y - t.yy * t.x) * d, (t.yx * t.x - t.xx * t.y) * d,
+  return xform(asy__fma(t.xy, t.y, -(t.yy * t.x)) * d,
+               asy__fma(t.yx, t.x, -(t.xx * t.y)) * d,
                t.yy * d, -t.xy * d, -t.yx * d, t.xx * d);
 }
 
