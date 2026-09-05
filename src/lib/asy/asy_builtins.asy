@@ -9824,9 +9824,12 @@ void _image(frame f, pen F(int, int), int width, int height,
 // 那时 `path3` 与 `triple[][]` 还没有名字（asy 的解析是顺着来的）。
 // 帧上只留一个 `f3id`，-1 是"没有三维内容"。
 struct drawop3 {
-  int kind = 0;            // 0 = path3 描边，1 = Bezier 面片，2 = 三角面片
+  // 0 = path3 描边，1 = Bezier 面片，2 = 三角面片，3 = 管子（粗线在三维那边的样子）
+  int kind = 0;
   path3 g3;
   triple[][] P3;
+  triple[] Q3;             // kind 3：管子的中心折线（drawTube 的 g）
+  real width = 0;          // kind 3：管子的直径（drawTube 的 width）
   triple center = (0, 0, 0);
   pen[] p;
   pen[] colors;
@@ -9989,6 +9992,21 @@ private void asy__merge3hook() {
       nink = nink + 1;
     }
     doc = doc + "0 setgray" + nl;
+    // 管子（kind == 3）：先按中心折线描一道 —— 真 asy 那边是实心的管面，
+    // 这一刀只要"线在哪儿"，够判断坐标对不对了。
+    for (int i = 0; i < ops.length; ++i) {
+      if (ops[i].kind != 3) continue;
+      triple[] Q = ops[i].Q3;
+      if (Q.length < 2) continue;
+      pair a0 = pj(Q[0]);
+      doc = doc + ps(a0.x) + " " + ps(a0.y) + " moveto" + nl;
+      for (int k = 1; k < Q.length; ++k) {
+        pair pk = pj(Q[k]);
+        doc = doc + ps(pk.x) + " " + ps(pk.y) + " lineto" + nl;
+      }
+      doc = doc + "stroke" + nl;
+      nink = nink + 1;
+    }
     for (int i = 0; i < ops.length; ++i) {
       if (ops[i].kind != 0) continue;
       path3 g = ops[i].g3;
@@ -10176,6 +10194,20 @@ void drawTube(frame f, triple[] g, real width, pen[] p, real opacity,
 {
   asy__add3(f, min);
   asy__add3(f, max);
+  // 粗线在三维那边就是**管子**：几何要留下来（位图那一档要它）。
+  // 注意这一条的界是**实参给的** min/max，而 g 是中心折线 —— 两者是不是同一套坐标，
+  // 正是"界 ~68 而 op ~0.5"那 x136 的关键（ADR「位图那 83 个」第八节末）。
+  drawop3 o;
+  o.kind = 3;
+  o.Q3 = g;
+  o.width = width;
+  o.p = p;
+  o.opacity = opacity;
+  o.shininess = shininess;
+  o.metallic = metallic;
+  o.fresnel0 = fresnel0;
+  o.lightOn = lightOn;
+  asy__push3(f, o);
 }
 
 /* 一个像素与三角网（runpicture.in:735/741） */
@@ -10302,6 +10334,11 @@ frame operator *(real[][] t, frame f)
     if (o.kind == 0) {
       // `node3` 是 path3 体里声明的类型、体外看不见，所以走现成的 `real[][] * path3`
       q.g3 = t * o.g3;
+    } else if (o.kind == 3) {
+      q.width = o.width;
+      triple[] Q;
+      for (int a = 0; a < o.Q3.length; ++a) Q.push(t * o.Q3[a]);
+      q.Q3 = Q;
     } else {
       triple[][] P;
       for (int a = 0; a < o.P3.length; ++a) {
