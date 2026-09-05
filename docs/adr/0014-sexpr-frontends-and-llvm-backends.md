@@ -10909,13 +10909,25 @@ billboard 那 0.5% 就是这条路量出来的。
 **管子这一段已经齐了，不用给宿主加新原语**（这一趟查清的）：
 `_writetext(path, text)` 写临时文件、`_runproc(cmd)` 起进程、`_readtext(path)` 读回来
 —— 这三样 `asy__strokepathgs` / `_texpath` / `asy__textpathgroff` 已经在用。
-唯一的坎是 `_readtext` 只能读文本，而 `ppmraw` 是二进制；**改用
-`-sDEVICE=ppm`**（P3，十进制 ASCII）就绕过去了，代价是文件大三四倍、多一步解十进制：
+坎在 `_readtext` 是**按 utf8 读**的（backend-js/prelude.js:685 的
+`readFileSync(p, "utf8")`，C 那边 omni_read_text 虽然是 "rb"，但四条腿要一份语义），
+所以二进制的 `ppmraw` 不能直接读回来。
+
+**绕法：让 shell 把字节转成 ASCII，我们这一层一个字节都不碰。**
 
 ```
-  gs -q -dNOPAUSE -dBATCH -sDEVICE=ppm -g<fullW>x<fullH> -r<72*expand> \
+  gs -q -dNOPAUSE -dBATCH -sDEVICE=ppmraw -g<fullW>x<fullH> -r<72*expand> \
      -sOutputFile=r.ppm r.eps
+  tail -c +<P6头长度+1> r.ppm | xxd -p > r.hex
 ```
+
+`r.hex` 是纯十六进制文本，读回来**原样贴进 EPS**、把那一格的
+`/ASCII85Decode filter` 换成 `/ASCIIHexDecode filter`（EOD 记号是 `>`）即可 ——
+不必在这一层解 44 万个十进制数，也不必逐字节做 ASCII85。
+判据上不吃亏：eps.js 的口径里 `/DataSource …` 那一行本来就被剔掉（它才带 filter 的名字），
+比的是**解出来的像素**；eps.js 需要顺手认一下 ASCIIHexDecode。
+（选十六进制而不是 P3 十进制：P3 要在这一层解 44 万个 token，风险不明；
+十六进制是"读进来就是答案"。）
 
 ### 九、下一刀的顺序（修正后）
 
