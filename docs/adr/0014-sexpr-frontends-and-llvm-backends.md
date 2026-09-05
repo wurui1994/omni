@@ -10001,10 +10001,111 @@ for(int i=0; i < 30; ++i) { real t=2*pi*i/100; write(cos(t), sin(t), exp(t), log
 → LP 的解差 2 ulp → `shiftless(t*T*tinv)` 是不是**精确**单位翻个面 → 两条轴线那一对
 `gsave`/`[ 1 0 0 1 0 0] concat`/`grestore` 有或没有 → 判成"结构不同"。
 
-**能不能修**：能，而且方向是清楚的 —— macOS libm 在这一点上是正确舍入的，所以
-"自己写一份**正确舍入**的 cos/sin/log/exp"就能对上（不是"更精确"，是"正确舍入"这个
-可判定的目标）。代价是一整套双-double 或定点大整数的约减 + 多项式，而且要过一遍
-"会不会把三维那一族拖慢"。**这一刀不做**：三维栅格 shipout 那一格按着 80 多个例子，
-先做那个。这里只把账记清楚 —— 别再把这四个当成"我们画错了"去查。
+**能不能修**：**修不了，而且方向也不是"正确舍入"** —— 这一句是这一刀后来自己纠的。
+第一反应是"macOS libm 在这一点上是正确舍入的，那自己写一份正确舍入的 cos 就能对上"。
+再量一遍就知道这个前提是错的：拿 Python 的 `decimal`（60 位）当尺子，`|x|<0.5` 这一段
+2000 个样本里 **macOS libm 的 cos 错 43 个、sin 错 37 个**（都是差 1 ulp）。也就是说
+两份 libm 都不是正确舍入的，只是错的地方不一样。写一份正确舍入的实现，与 macOS libm
+仍然会有 ~2% 的点对不上 —— 那不是尺子。
+
+（顺手量的另外两条，都记在这里免得下次再走一遍：
+ - V8 与 macOS libm 在 [-20,20] 上 2 万个样本里 cos 差 896 处、sin 差 903 处（4.5%）；
+ - 自己写的双-double（约 107 位，基本是正确舍入）与 macOS libm 差 830 / 20000 —— 
+   与 V8 差得**一样多**，再一次说明 libm 不是正确舍入的那一份。而且它慢 118 倍。）
+
+**真正能对上的是另一条腿**：`run-llvm` / `run-c` 那两条转手的就是 libm。量过
+`/tmp/tr.asy`（30 个 `cos`/`sin`/`exp`/`log`）：`run-llvm` 与真 asy **0 处不同**，
+JS 那条腿 2 处不同。所以"超越函数这一族要与 asy 逐字节对上"这件事，在 LLVM 那条腿上
+是免费的；EPS 这一轴现在跑的是 JS 腿，将来要么给它加一条 LLVM 腿，要么承认这一档只按容差比
+（`tests/asy/run.js` 早就是这么做的，见那一节的容差说明）。
 
 <!-- ADR-0014 哪份 libm-END -->
+
+## 量：那四个例子的**真正**根因是 clang 的 FMA 合并（试出来了，但这一刀退回去了）
+
+<!-- ADR-0014 FMA-BEGIN -->
+
+上一刀把账记在 libm 头上，**记错了一半**。把 `cardioid` 换到 `run-llvm`（libm 那条腿）
+再比，差还在：`polargraph(f,0,2pi,operator ..)` 的 103 个结点里十几处**控制点**差 1 ulp，
+而结点本身对得上。也就是说差的不是 `cos`，是 `..` 那个 MetaPost 解算器。
+
+拿一条最小的路径当靶子：`(0,0)..(1,2)..(3,1)..(4,4)`（坐标都是精确可表示的整数，
+libm 只经手 `sin`/`cos`/`atan2`，而 llvm 腿上那几个与 asy 逐 bit 相同）。
+把 knot.cc 的算法在 Python 里照抄一遍（psi、d、方程、消元、回代、velocity、控制点），
+得到的是**我们的**数，不是 asy 的。逐段查过这些都与源码字面一致：
+`velocity`（knot.cc:61）、`eqnprop::mid`（:259）、`curlSpec::eqnOut/eqnIn`（:155/:169）、
+`ref`/`backsub`（:405/:435）、`psiprop::mid`（:235）、`inverse`（transform.h:128）。
+连 `pair` 的除法都对着改了一处（`t = 1/(w.x²+w.y²)` 先取倒数再乘，pair.h:124 —— 
+我们原来是逐个除，那**是**一处真差别，已修）。
+
+**真因**：参考那份 asy 是 clang 在 arm64 上编的，默认 `-ffp-contract=fast` —— 一条语句里的
+`x - y*z` 被合成一条 FMA，少一次舍入。我们三条腿都是 `-ffp-contract=off`（cli.js 的
+ccFlags，那是"逐个运算的语义"要的），所以差的就是这几次舍入。
+
+验法：把 7 个可能被合成的位置各开/关，128 种组合里**只有一种**让那条路径的六个控制点
+与真 asy 逐 bit 相同：
+
+```
+  合成的是这两处：
+    knot.cc:426  q.piv - q.pre*lasteqn.post   与   q.aug - q.pre*lasteqn.aug   （消元）
+    knot.cc:72   3.0 + c*ct + d*cf                                            （velocity 的分母）
+  没合成的：pair 的乘除、方程的 -B*psi[j]-D*psi[j+1]、回代的 -q.post*lastTheta+q.aug、
+            velocity 的分子那三处
+```
+
+JS 这边没有硬件 fma，所以顺手写了一份精确的（Dekker 的 twoProduct + twoSum，
+拿宿主硬件 fma 验过 5 万组、含 `c ≈ -a*b` 的抵消档，零处不同）：
+
+```
+  p = a*b;  (ah,al) = split(a);  (bh,bl) = split(b)      // split: 2^27+1 那个把戏
+  e = ((ah*bh - p) + ah*bl + al*bh) + al*bl              // a*b = p + e，精确
+  s = p + c;  z = s - p;  r = (p - (s - z)) + (c - z)    // p + c = s + r，精确
+  return s + (r + e)
+```
+
+**结果是各有输赢，所以退回去了**：
+
+```
+                                        改之前        改之后
+  (0,0)..(1,2)..(3,1)..(4,4) 六个控制点   2 处对        6 处全对
+  五点那条（案例 C）                      少数对        13/14 对
+  124-join-specs 的 {curl 3}..{curl 0.5}  在容差内      **出容差**（run.js 258/1 红）
+  cardioid（run-llvm 对参考）             ~300 行差     12 行差（但仍不是"一样"）
+  EPS 那一轴                              80            80（一个没动）
+```
+
+把三条路径（A / C / F）一起当约束再枚举 8 个位置 × 2，最好的组合是 17/20，**没有一种全中**。
+说明"哪几处被合成"这份账还没记全（clang 的合并是按 SSA 的表达式树来的，源码上看不出的
+临时量也算），而按 17/20 那一组上车会把一条绿的轴弄红。规矩是"净负的改动不上车"，所以
+`asy__fma` 与那两处调用一起退了；`pair` 除法那一处**留下**（它与源码字面对齐，与 FMA 无关）。
+
+**下一刀从哪儿接**：不用再猜了 —— 这一刀最后把它**读**出来了。参考树里的 `knot.cc`
+能直接编（`clang++ -std=c++17 -O2 -S -g -I. knot.cc`，一次就过），把 `.loc` 与
+`fmadd/fmsub/fnmadd/fnmsub` 对起来数，40 条 FMA 落在这些行上：
+
+```
+  knot.cc:72   x2   velocity 的分母   3.0 + c*ct + d*cf                （猜对了）
+  knot.cc:74   x3   velocity 的分子   st-b*sf、sf-b*st、2.0 + a*…      （猜漏了三处）
+  knot.cc:106  x3   reduceAngle
+  knot.cc:107  x3   reduceAngle
+  knot.cc:163/164   curlSpec::eqnOut  alpha*chi+3-beta、(3-alpha)*chi+beta
+  knot.cc:176/177   curlSpec::eqnIn   (3-beta)*chi+alpha、beta*chi+3-alpha
+  knot.cc:277  x1   eqnprop::mid      -B*psi[j]-D*psi[j+1]             （猜成"没合"）
+  knot.cc:336/337   recalc（闭合的消元）                               （猜对了）
+  knot.cc:346/347   recalc 的最后一步
+  knot.cc:372/373 x2 solveForTheta0   a+=c*q.aug、b+=c*q.w
+  knot.cc:394  x2   backsubCyclic     -q.post*lastTheta+q.aug+q.w*theta0
+  knot.cc:426/427   ref::mid（非闭合的消元）                           （猜对了）
+  knot.cc:453  x1   backsub::mid      -q.post*lastTheta+q.aug          （猜成"没合"）
+  pair.h:75    x4   operator*(pair,pair)  两个分量各一条，内联了两处
+  pair.h:124/125/126 operator/(pair,pair) 分母与两个分量
+  pair.h:141   x4   abs2()            x*x + y*y（length 走它）
+```
+
+也就是说：**基本上每一处 `a*b ± c` 都被合并了**，我按"猜哪几处"上车才会各有输赢。
+真要对齐，得把这张表照抄一遍（`pair` 的乘/除/模也在里头 —— 那三个是全库通用的，
+一改就动所有输出），而且同一件事在 asy 的**每一个 .cc** 里都成立
+（drawpath.cc、picture.cc、simplex.cc…）。所以这不是一刀，是一件"FMA 对齐"的活：
+先把这张表按文件读全，再一次性改，再全量量一遍。这一刀只把读法与第一张表留在这里。
+
+<!-- ADR-0014 FMA-END -->

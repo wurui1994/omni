@@ -144,10 +144,18 @@ export const HELPERS = new Map([
     ;; 量出来的：(1,1)/(1e200,1e200) 是 (0,0)（分母平方和溢出成 inf），
     ;; (1e300,1)/1e300 是 (nan,0)（右边那个实数先被提成 (1e300,0)，t 还是 inf）。
     ;; 后一条同时证明了 asy **没有** pair/real 这个重载：实数是先转成 pair 的。
-    (let t real (bin "+" (bin "*" (lane (var b) 0) (lane (var b) 0)) (bin "*" (lane (var b) 1) (lane (var b) 1))))
+    ;; **先取倒数再乘**，不是逐个除（pair.h:124 的 \`double t = 1.0/(w.x*w.x+w.y*w.y)\`）——
+    ;; \`x*(1/t)\` 与 \`x/t\` 差最后一个 bit，而这一个 bit 会一路长大：dz[j]/dz[j-1] 是
+    ;; MetaPost 那个转角 psi 的输入（knot.cc:235），psi 差 1 ulp -> theta 差 -> 控制点差 ->
+    ;; 路径的界差 -> size() 那条 LP 的解差 2 ulp -> \`shiftless(t*T*tinv)\` 是不是**精确**
+    ;; 单位翻面 -> 轴线那一对 gsave/concat 有或没有。量过 (0,0)..(1,2)..(3,1)..(4,4)：
+    ;; 改之前 postcontrol(1).x 是 1.7759794648838543，参考 …45。
+    ;; 溢出那两条量出来的结论仍然成立：t=1/inf=0，0*inf=nan、0*有限=0。
+    (let t real (bin "/" (real 1.0)
+      (bin "+" (bin "*" (lane (var b) 0) (lane (var b) 0)) (bin "*" (lane (var b) 1) (lane (var b) 1)))))
     (ret (vlit ${ASY_PAIR_TY}
-      (bin "/" (bin "+" (bin "*" (lane (var a) 0) (lane (var b) 0)) (bin "*" (lane (var a) 1) (lane (var b) 1))) (var t))
-      (bin "/" (bin "-" (bin "*" (lane (var a) 1) (lane (var b) 0)) (bin "*" (lane (var a) 0) (lane (var b) 1))) (var t)))))`],
+      (bin "*" (var t) (bin "+" (bin "*" (lane (var a) 0) (lane (var b) 0)) (bin "*" (lane (var a) 1) (lane (var b) 1))))
+      (bin "*" (var t) (bin "+" (un "-" (bin "*" (lane (var a) 0) (lane (var b) 1))) (bin "*" (lane (var b) 0) (lane (var a) 1)))))))`],
   ['asy__pabs', `  (fn asy__pabs ((a ${ASY_PAIR_TY})) real
     ;; 模。也是朴素那一份 —— 量过 abs((1e200,1e200)) 是 inf，所以不是 hypot。
     (ret (rmath "sqrt" (bin "+" (bin "*" (lane (var a) 0) (lane (var a) 0)) (bin "*" (lane (var a) 1) (lane (var a) 1))))))`],
