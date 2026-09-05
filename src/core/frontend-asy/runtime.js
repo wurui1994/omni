@@ -127,6 +127,32 @@ export const HELPERS = new Map([
         (set r (bin "*" (var r) (var a)))
         (set i (bin "+" (var i) (int 1)))))
     (ret (var r)))`],
+  ['asy__rpowi', `  (fn asy__rpowi ((x real) (n int)) real
+    ;; real^**int** 不是 pow(x,(double)n)：asy 那条重载是 mathop.h:191 的**反复平方**
+    ;; （\`if(y&1) r*=x; if((y>>=1)==0) return r; x*=x;\`），而且按指数的**静态类型**分路。
+    ;; 量出来的（asy 自己当尺子，x=sqrt(0.5)）：
+    ;;   int k=5;  x^k  -> 0.17677669529663698   （反复平方）
+    ;;   real e=5; x^e  -> 0.17677669529663695   （libm 的 pow）
+    ;;   int k=4;  x^k  -> 0.25000000000000011 对 x^4.0 的 0.25000000000000006
+    ;; 差最后一两位，但 slope 的 dt=lambda^(n-i) 正落在这上面：那点差经 ODE 放大到
+    ;; y 轴范围的 1e-12，fit 的缩放 s 于是与参考不同，t*inverse(t) 不再**正好**是单位，
+    ;; 于是每一笔都多套一层 gsave/concat/grestore（asy 那边比的是六个数的精确相等）。
+    ;; 头三条特例照抄 mathop.h：y==0 给 1、x==0 且 y>0 给 0、y<0 先取倒数再算正指数。
+    (if (bin "==" (var n) (int 0)) (do (ret (real 1.0))))
+    (let a real (var x))
+    (let m int (var n))
+    (if (bin "<" (var m) (int 0))
+      (do
+        (set m (un "-" (var m)))
+        (set a (bin "/" (real 1.0) (var a))))
+      (do (if (bin "==" (var a) (real 0.0)) (do (ret (real 0.0))))))
+    (let r real (real 1.0))
+    (while (bin ">" (var m) (int 0))
+      (do
+        (if (bin "==" (bin "%" (var m) (int 2)) (int 1)) (do (set r (bin "*" (var r) (var a)))))
+        (set m (bin "/" (var m) (int 2)))
+        (if (bin ">" (var m) (int 0)) (do (set a (bin "*" (var a) (var a)))))))
+    (ret (var r)))`],
   ['asy__boolstr', `  (fn asy__boolstr ((b bool)) string
     ;; asy 在 bool 后面**总是补一个空格**（量过：write(false) 是 6 字节 "false "，
     ;; write("a",false) 是 "afalse "，所以不是对齐到 5，是算符自带的尾空格）

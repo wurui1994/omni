@@ -2200,10 +2200,16 @@ export function asyArith(L, n, op, a, b) {
       L.used.add('asy__ipow');
       return { code: `(call asy__ipow ${a.code} ${b.code})`, type: 'int' };
     }
-    // 有一边是 real 就走 pow（量过：`2.0^3` 是 8、`2^0.5` 是 1.4142135623731）
+    // 有一边是 real 就走幂。**指数的静态类型是 int 时不是 pow**：asy 那条重载
+    // （mathop.h:191）是反复平方，与 libm 的 pow 差最后一两位 —— 见 asy__rpowi 里量的那三条。
     const av = asyCoerce(L, a, 'real', n, "'^' 的左边");
+    if (av === null) return null;
+    if (b0.type === 'int') {
+      L.used.add('asy__rpowi');
+      return { code: `(call asy__rpowi ${av.code} ${b0.code})`, type: 'real' };
+    }
     const bv = asyCoerce(L, b, 'real', n, "'^' 的右边");
-    if (av === null || bv === null) return null;
+    if (bv === null) return null;
     return { code: `(rmath "pow" ${av.code} ${bv.code})`, type: 'real' };
   }
   if (op === '/') {
