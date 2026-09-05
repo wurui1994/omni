@@ -10892,6 +10892,15 @@ NURBS / 球柱盘管，各带自己的材质），`asy__add3` 退回去只管界
 `(v.x*near/(-v.z), v.y*near/(-v.z))`，正交时直接取 `(v.x, v.y)`；再把
 `[xmin,xmax] -> [0,oW]`、`[ymin,ymax] -> [0,oH]`。
 
+**角度的单位钉死了**：three.asy:2908 是
+`real fov=P.infinity ? 0 : 2aTan(Tan(0.5*P.angle)*P.zoom)` —— `aTan`/`Tan` 是 asy 的
+**度**版本，所以传给 `shipout3` 的 `angle` 是**度**；C 那边
+`renderBase.cc:47` 就是 `Angle = args.angle * radians`，:82 再用 `tan(0.5*Angle)`。
+也就是这一层要写 `H = -tan(0.5 * angle * pi / 180) * Zmax`。`P.infinity`（正交）时
+`fov` 是 0，正好对上 `H = 0` 与 `ortho(...)` 那一支。
+
+于是投影这一段现在是**纯实现**了，没有待查的口径。
+
 **下一刀的活**：拿这个把第 0 步的 op 表投影成 2D（面片按控制点投影后细分，
 路径按结点+控制点投影），按深度排一遍（画家算法，先不做 Z-buffer），
 发一份 `oW x oH` 的临时 EPS，交给 gs 出像素，读回字节塞进 `kind == 7` 那一格。
