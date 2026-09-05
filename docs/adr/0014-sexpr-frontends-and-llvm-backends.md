@@ -10919,12 +10919,15 @@ NURBS / 球柱盘管，各带自己的材质），`asy__add3` 退回去只管界
    label3 84860/1961568、roll 552954/1008000（这几个的**矢量那半边已经逐字节一样**）。
    还差两件：(a) 像素交给 gs —— 要先把 op 表投影成 2D 帧（投影矩阵从收到的
    `m`/`M`/`angle`/`zoom`/`shift`/`t` 自己搭，`currentprojection` 这一层看不见）；
-   (b) sacylinder3D / cylinder / shellsqrtx01 的 `oW` 比参考大 1。
-   **先别照"球柱盘管的界是估的"这条改**：`drawSphere`/`drawCylinder`（drawsurface.h:400/423）
+   (b) sacylinder3D / cylinder / shellsqrtx01 的 `oW` 比参考大 1。**量清了**：
+   我们收到的 `w` 是 62.979999999999997，参考那边反推是 61.98 —— 也就是 `S.width`
+   我们 63、asy 62。两边跑的是同一份 three.asy，而那一句是
+   `S.width=ceil(lambda.x+2*S.viewportmargin.x)`（three.asy:2836），
+   所以差的**不是模型，是投影出来的 `lambda.x` 在整数附近差最后几位、被 `ceil`
+   放大成 1** —— 与 `t*inverse(t)` 那一族同一个性质。
+   （别去改球柱盘管的界：`drawSphere`/`drawCylinder`，drawsurface.h:400/423，
    继承的是 `drawPRC`，只有 `settings.prc` 那条路才走它们；prc=false 时圆柱是当
-   **Bezier 面片**画的（我们的 `kind == 1`），而面片的界两边都是控制点凸包。
-   所以这三个大 1 的根子还没量清 —— 下一刀先把它们的 `w`/`h` 印出来与参考反推的
-   （sacylinder3D 是 61.98）比，再决定改哪儿。
+   Bezier 面片画的，面片的界两边都是控制点凸包。）下一刀要量的是 `lambda.x` 本身。
 2. eps.js 加"GPU 参考位图"这一档的判据（几何逐字节 + 像素容差），把 83 个的现状量出来；
 3. 逐族收像素：先线画（billboard/stroke3/label3 这一族），再曲面（PBR 着色那一套）。
 

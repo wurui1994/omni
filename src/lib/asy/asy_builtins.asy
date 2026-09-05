@@ -8130,10 +8130,13 @@ void shipout3(string prefix, frame f, string format="",
   // 也就是"整数尺寸减 0.02"，所以 ceil 正好还原那个整数（billboard 92.98 -> 93、
   // sacylinder3D 的参考 61.98 -> 62）。四舍五入在 92.98 上也对，但那是巧合。
   // **sacylinder3D / cylinder / shellsqrtx01 那三个我们还是大 1**，根子还没量清：
-  // 我们收到的 w 本身就偏大（参考那边反推是 61.98）。**先别照"球柱盘管的界是估的"
-  // 那条去改** —— drawSphere/drawCylinder（drawsurface.h:400/423）继承的是 drawPRC，
-  // 只有 settings.prc 那条路才走它们；prc=false 时圆柱是当 Bezier 面片画的，
-  // 而面片的界两边都是控制点凸包。下一刀先把这三个的 w/h 印出来对一下再决定改哪儿。
+  // 我们收到的 w 是 **62.979999999999997**（印出来的），参考那边反推是 61.98 ——
+  // 也就是 `S.width` 我们 63、asy 62。两边跑的是同一份 three.asy，而那一句是
+  // `S.width=ceil(lambda.x+2*S.viewportmargin.x)`（three.asy:2836）：所以差的不是模型，
+  // 是投影出来的 `lambda.x` 在整数附近差最后几位、被 `ceil` 放大成 1 —— 与前面
+  // `t*inverse(t)` 那一族同一个性质。**别去改球柱盘管的界**（drawSphere/drawCylinder
+  // 继承 drawPRC，只有 settings.prc 那条路才走它们；prc=false 时圆柱是当 Bezier 面片画的）。
+  // 下一刀要量的是 lambda.x 本身。
   int oW = (int) ceil(width);
   int oH = (int) ceil(height);
   if (oW <= 0) oW = 1;
