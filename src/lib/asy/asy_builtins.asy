@@ -7033,6 +7033,14 @@ private path[] asy__tpparse(string ln, real hs, real vs) {
   while (i < n) {
     string ch = substr(ln, i, 1);
     if (ch == " " || ch == '\t' || ch == '\r') { i = i + 1; continue; }
+    // gs 在这一行的末尾还会印一句提示：`>>showpage, press <return> to continue<<`。
+    // 里头 "continue" 的那个 **c** 会被当成 closepath，把最后那一组**未闭合**的节点
+    // 冲出来，变成一条多余的子路径。asy 那边的扫描是 `buf >> c; if(c == '>') break;`
+    // （runlabel.in:146）—— 一见 '>' 就停，未闭合的那一组于是被丢掉（那边的注释写着
+    // "Discard noncyclic paths"）。
+    // 量出来的：strokepath.asy 我们 525 条子路径 / 16 个 curveto，参考 524 / 12 ——
+    // 差的正是尾巴上那 4 个 C（`M … C C C C L …` 后面没有 c）。
+    if (ch == ">") break;
     if (ch != "M" && ch != "L" && ch != "C" && ch != "c") { i = i + 1; continue; }
     string op = ch;
     i = i + 1;
@@ -7196,17 +7204,35 @@ private path[] asy__strokepathgs(path g, pen p) {
   string ASYinit = "/ASYX currentpoint pop def /ASYY currentpoint exch pop def ";
   // 路径与笔那两段要**字符串**，而 emitpath/setpen 是往 asy__out 去的 —— 借 asy__baseeps
   // 那个存旧再改的办法把它们接下来。
+  //
+  // 笔的状态也要**从头来**：`setpen` 是增量的（只发与 lastpen 不同的那几句，psfile.cc 的
+  // 规矩），而主图那边往往刚把同一支笔发过 —— 于是这一份 .ps 里一句 `Setlinewidth` 都没有，
+  // gs 拿默认的 1.0 线宽去算外轮廓。量出来的：strokepath.asy 的第一个点我们 186.327、
+  // 参考 199.9976，差 13.67 = 14.17-0.5，正是"半个 1cm"换成"半个 1.0"。
+  // asy 那边 `_strokepath` 开的是一份**新** psfile（runlabel.in:423），lastpen 是
+  // initialpen，所以每一句都发；这一层的 psfile 状态是全局的，所以要自己存取一遍。
   bool save = asy__tobuf;
   string keep = asy__bufs;
+  pen keeppen = pencopy(lastpen);
+  bool keepvalid = lastvalid;
   asy__tobuf = true;
   asy__bufs = "";
+  lastvalid = false;
   setpen(p);
   emitpath(g, 1, true);
   string body = asy__bufs;
   asy__tobuf = save;
   asy__bufs = keep;
+  lastpen = keeppen;
+  lastvalid = keepvalid;
   string t = "%!PS-Adobe-3.0 EPSF-3.0" + nl
     + "%%BoundingBox: 0 0 612 792" + nl
+    // `Setlinewidth` 是主前言里定义的那个过程（psfile.cc 的 prologue，见 asy__shipout），
+    // 而 setpen 发的是 `<w> Setlinewidth` —— 这一份 .ps 自己也得有它，不然 gs 撞上
+    // undefined 直接不出东西（量到过：外轮廓变成空的，整张图只剩 30 个 token）。
+    // asy 那边 `_strokepath` 开的是一份完整的 psfile，前言本来就带着这一句。
+    + "/Setlinewidth {0 exch dtransform dup abs 1 lt {pop 0}{round} ifelse" + nl
+    + "idtransform setlinewidth pop} bind def" + nl
     + ASYx + nl + ASYy + nl
     + "/stroke {" + ASYinit + forall + "} bind def" + nl
     + body
