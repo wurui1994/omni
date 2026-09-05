@@ -50,7 +50,20 @@ real render = -1;
 // 的二维界，asy 的那个 LP 会把 s 压小、给 margin 腾出位置（它的 lambda.x 落在 98~99），
 // 我们的 `scaling` 没压（lambda.x=99.506，与 asy 的未缩界逐位相同）。
 // 所以这一格要与 `pic2.scaling` 那个 LP 一起改，单改一边就是双算。
-pair viewportmargin = (0, 0);
+//
+// 又量了一遍（透视、无标签的两行尺子 `draw((-1,-1,-1)--(1,1,1),blue)` + 一条对角线，
+// `size(100,0)`、`perspective(4,3,2)`）—— 这一趟把两边**都**问了，两笔账才对上：
+//   margin=(0,0) + ceil：画布 400x248 与参考同，但 ink 铺满 x[0..399]（参考 x[3..395]）
+//   margin=(0.5,0.5) + ceil：ink 的边距对了，画布却变成 404x252
+//   **margin=(0.5,0.5) + 截断**：画布 400x248、ink x[4..395] —— 两项都对上
+// 第二笔是 `oW/oH` 那一格：glrender.cc:1222 的 `initDisplay(args.width,args.height)`
+// 形参是 int、实参是 double，**C++ 隐式转换向零截断**（不是 ceil；norender.cc:22
+// 那条另一条路才是 ceil）。见 shipout3 里那一处。
+// 显式 `scene(currentpicture,100,0)` 两边一模一样（都印 width=101、height=63、
+// margin=(0.5,0.5)），所以 scene 那一段本来就同口径。
+// 仍未清的账：sacylinder3D 那一族的 `lambda` 我们比 asy 大约 1pt（`pic2.scaling`
+// 那个 LP 没给 margin 腾位置），画布因此还差 1。
+pair viewportmargin = (0.5, 0.5);
 int verbose = 0;
 
 bool prc = false;

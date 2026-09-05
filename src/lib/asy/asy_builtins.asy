@@ -8345,8 +8345,17 @@ void shipout3(string prefix, frame f, string format="",
   // `t*inverse(t)` 那一族同一个性质。**别去改球柱盘管的界**（drawSphere/drawCylinder
   // 继承 drawPRC，只有 settings.prc 那条路才走它们；prc=false 时圆柱是当 Bezier 面片画的）。
   // 下一刀要量的是 lambda.x 本身。
-  int oW = (int) ceil(width);
-  int oH = (int) ceil(height);
+  // **oW/oH 是 C++ 的 int 转换（截断），不是 ceil。** glrender.cc:1222 那一句
+  // `initDisplay(args.width,args.height)` 的形参是 `int`、实参是 `double`（同一份
+  // args 在 norender.cc:22 是 `(int)ceil(args.width)`，那儿是另一格）——
+  // C++ 的隐式转换向零截断。收到的 w 是 `S.width - defaultrender.margin`
+  // （整数减 0.02），所以截断回的是**整数减一**……不对：S.width 里已经含了
+  // `2*viewportmargin`（three.asy:2734 的 `ceil(lambda+2*margin)`），
+  // 两笔账合起来才对得上。两侧量出来的（透视两行尺子 p1，`size(100,0)`）：
+  // S.width=101 -> w=100.98 -> 截断 100，参考的画布正是 400px/4=100pt；
+  // 从前 `ceil` 给 101，画布就大 1pt。
+  int oW = (int) width;
+  int oH = (int) height;
   if (oW <= 0) oW = 1;
   if (oH <= 0) oH = 1;
   // expand = (render<0 ? -2*render : render) * antialias。**这一层读不到 settings**

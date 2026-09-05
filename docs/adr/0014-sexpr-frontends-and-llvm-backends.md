@@ -11726,6 +11726,35 @@ dst 这一层拿不到（PostScript 没有 alpha，gs 10 的 PS 解释器也不�
 逐字节对得上（上面那把尺子两侧都是 `128,219,128`），几层透明面叠着时偏保守。
 sacylinder3D（`lightgreen+opacity(0.5)` 的圆柱）265451 -> **234214**。
 
+### 十二、`viewportmargin` 与 `oW` 那一格：两笔账要一起改
+
+从前记着"`settings.viewportmargin` 的真默认是 (0.5,0.5)，但单独改会更差"。这一刀把
+另一半找齐了 —— **`oW/oH` 不是 `ceil(w)`，是 C++ 的 `int` 截断**：
+glrender.cc:1222 的 `initDisplay(args.width,args.height)` 形参是 `int`、实参是 `double`
+（同一份 args 在 norender.cc:22 才是 `(int)ceil`）。
+
+透视、无标签的两行尺子（`size(100,0)`、`perspective(4,3,2)`、两条对角线），两侧都问：
+
+- `margin=(0,0)` + `ceil`：画布 400x248 与参考同，但 ink 铺满 x[0..399]（参考 x[3..395]）
+- `margin=(0.5,0.5)` + `ceil`：ink 的边距对了，画布却变成 404x252
+- **`margin=(0.5,0.5)` + 截断**：画布 400x248、ink x[4..395] —— 两项都对上
+
+顺带量清一件事：显式 `scene(currentpicture,100,0)` 两边**一模一样**（都印 width=101、
+height=63、margin=(0.5,0.5)），所以 scene 那一段本来就同口径。
+
+改完之后（三维那一族的位图）：
+
+- billboard：ink 盖住参考 64.6% -> **78.2%**，字节差 42914 -> 35407
+- label3：48.1% -> **89.0%**，105574 -> 41688
+- stroke3：64824 字节差，"只有我们"从 1873 -> **16**
+- shellsqrtx01：97.6% -> 97.9%，38814 -> 34110
+- sacylinder3D：最大通道差 255 -> **217**
+- 原先"一样"的那三个照旧一样，矢量半边全部仍逐字节一样
+
+仍未清的账：sacylinder3D 那一族的 `lambda` 我们比 asy 大约 1pt（`pic2.scaling` 那个 LP
+没给 margin 腾位置），画布还差 1。
+
+
 
 
 
