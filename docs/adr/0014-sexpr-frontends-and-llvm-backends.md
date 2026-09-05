@@ -11481,6 +11481,40 @@ drawelement 重新求界）、管子那一格的 ratio、以及像素层的 PBR 
 `picture.add(void(picture,transform3))`、`transform3 * picture`、
 `picture.add(picture, bool group, bool above)`。尺子就用上面这七行，两秒一趟。
 
+**修好了 —— 是 `add(frame, frame)` 不搬三维的界。** 链子的最后一站是
+plain_picture.asy:741：
+
+```
+  add(void d(picture, transform3)) ->
+    add(new void(frame f, transform3 t, picture pic2, projection P) {
+          picture opic=new picture; d(opic,t);
+          add(f, opic.fit3(identity4,pic2,P));   // <- 就是 add(frame,frame)
+        }, exact, above);
+```
+
+我们那一格**只搬 op 表、不搬 `min3v/max3v/minr/maxr`** —— 那是当初 shipout3 还没
+落地时故意留的（`add(frame,frame)` 的注释里写着"等 shipout3 落地时一起改"）。
+现在补上（`src.has3` 时并 min/max 与两个比）。asy 那边帧的界是逐个 drawelement
+走出来的，所以合并才是正解。
+
+```
+  七行尺子      参考 %%BoundingBox: 255 380 356 411   位图 400x124
+                我们（修前）        255 395 356 396         404x4
+                我们（修后）        255 380 356 411         404x124   <- 封套逐字节相同
+  shellsqrtx01  16 处数值不同 -> **8 处**；位图 388x492 -> 424x604，
+                **高 604 与参考相同**、封套的 y（320..471）也相同；
+                x 反过来大了（oW 106 对 95），那是另一笔
+  cylinder / sacylinder3D  照旧"矢量那半边一样"
+```
+
+九个原本"一样"的例子重跑后仍然"一样"。
+
+**又踩了一次模块缓存那个坑，这一次的表现不一样，记下来**：`.omni-cache/asy-mods`
+半新半旧时，六个例子报的是 `error: 捕获 '…' 要 light，这里是 asy__mNfNbNeN_picture`
+—— 一个**闭包捕获的类型错**，看着像是我改出来的编译错误，其实是缓存不一致。
+`rm -rf .omni-cache/asy-mods` 之后六个全绿。改了库里被广泛引用的东西之后，
+第一趟一定要清缓存再量。
+
 `label(picture,Label,path3,…)` 那一格照 three_surface.asy:2160 是
 `label(pic,L,point(g,position),light,name,interaction)` —— 与 `$A$` 走的是同一格，
 而 `$A$` 是好的，所以它不是嫌疑。

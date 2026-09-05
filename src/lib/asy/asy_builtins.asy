@@ -2635,10 +2635,10 @@ void add(frame dest, frame src) {
     dest.labs.push(q);
   }
   if (src.haslabel) dest.haslabel = true;
-  // 三维那张 op 表也要跟过来（位图那一档要它）。**界那几格这一刀故意不搬** ——
-  // 现在 `add(f,g)` 之后 `min3(f)` 回的是 (0,0,0)，改了会动到已经对上的例子；
-  // 等 shipout3 那条路落地时与它一起改（ADR 第六节记了这一条）。
-  // 真身在三维那一段（`path3` 有名字之后）接上，见 asy__merge3hook。
+  // 三维那张 op 表与**界**都要跟过来（位图那一档要它们）。界那几格原先故意没搬 ——
+  // 那一笔已经作废：`add(picture,picture,triple)` 落到这一格上，不搬界的话子图整段
+  // 被裁掉（七行的尺子：参考位图 400x124、我们 404x4）。真身在三维那一段
+  // （`path3` 有名字之后）接上，见 asy__merge3hook。
   asy__merge3fn(dest, src);
 }
 
@@ -10054,6 +10054,26 @@ private void asy__merge3hook() {
   asy__merge3fn = new void(frame dest, frame src) {
     drawop3[] s = asy__ops3(src);
     for (int i = 0; i < s.length; ++i) asy__push3(dest, s[i]);
+    // **界那几格也要搬**（原先故意没搬，见 add(frame,frame) 那儿的注释）。
+    // 缩到七行的尺子（/tmp/nl/ar3.asy）：子图里一条 30 单位的线经
+    // `add(currentpicture, opic, (0.8,0,0))` 加进来，参考的位图是 400x124（31pt 高）、
+    // 我们是 404x4（1pt）—— op 表进来了、界没进来，于是整段被裁掉。
+    // 链子：three.asy:2396 -> plain_picture.asy:741 的
+    // `add(void d(picture,transform3))` -> `add(f, opic.fit3(identity4,pic2,P))`
+    // -> 就是这一格 `add(frame,frame)`。asy 那边帧的界是逐个 drawelement 走出来的，
+    // 所以合并才是正解。
+    if (src.has3) {
+      if (!dest.has3) {
+        dest.has3 = true;
+        dest.min3v = src.min3v; dest.max3v = src.max3v;
+        dest.minr = src.minr; dest.maxr = src.maxr;
+      } else {
+        dest.min3v = minbound(dest.min3v, src.min3v);
+        dest.max3v = maxbound(dest.max3v, src.max3v);
+        dest.minr = (min(dest.minr.x, src.minr.x), min(dest.minr.y, src.minr.y));
+        dest.maxr = (max(dest.maxr.x, src.maxr.x), max(dest.maxr.y, src.maxr.y));
+      }
+    }
   };
   // 位图那一档的像素（asy__r3hexfn 的真身）：投影照 renderBase.cc:111 的 setDimensions
   // 与 :154 的 setProjection（施工图第八节）。帧坐标已经在视图空间（相机在原点、朝 -z），
