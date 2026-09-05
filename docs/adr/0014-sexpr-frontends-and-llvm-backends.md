@@ -10864,7 +10864,41 @@ NURBS / 球柱盘管，各带自己的材质），`asy__add3` 退回去只管界
 但三维 op 表一加进来，搬运这一段必须同时补上（op 表与界一起搬），否则位图那一档
 会在"帧被合并过"的例子上悄悄丢内容。
 
-### 七、下一刀的顺序（修正后）
+### 八、投影那一段的配方（读出来了，下一刀照着写）
+
+`shipout3` 收到的帧坐标**已经在视图空间**（three.asy:2889-2895 用 `min3(f)/max3(f)`
+加 `zcenter±r` 拼出 `m`/`M`，相机在原点、朝 −z），所以不用再乘 modelview。
+剩下的就是 `renderBase.cc` 的 `setDimensions`（:111）+ `setProjection`（:154）：
+
+```
+  Zmin = m.z, Zmax = M.z            （都是负数）
+  H      = 正交 ? 0 : -tan(0.5*Angle)*Zmax                   （renderBase.cc:82）
+  aspect = Width/Height
+  zoom   = P.zoom（离屏时 zoomFactor=1）,  zoominv = 1/zoom
+  xshift = (X/Width  + Shift.x*Xfactor)*zoom                 （离屏时 X=Y=0）
+  yshift = (Y/Height + Shift.y*Yfactor)*zoom
+
+  透视：r = H*zoominv;  rAspect = r*aspect
+        X0 = 2*rAspect*xshift;  Y0 = 2*r*yshift
+        xmin = -rAspect - X0;  xmax = rAspect - X0
+        ymin = -r - Y0;        ymax = r - Y0
+  正交：按 `xsize < ysize*aspect` 分两支（:122-141），一支把 x 撑满、一支把 y 撑满
+
+  投影 = 正交 ? ortho(xmin,xmax,ymin,ymax,-Zmax,-Zmin)
+              : frustum(xmin,xmax,ymin,ymax,-Zmax,-Zmin)
+```
+
+于是一个点 `v` 落到屏上是：near = −Zmax，透视时先投到近平面
+`(v.x*near/(-v.z), v.y*near/(-v.z))`，正交时直接取 `(v.x, v.y)`；再把
+`[xmin,xmax] -> [0,oW]`、`[ymin,ymax] -> [0,oH]`。
+
+**下一刀的活**：拿这个把第 0 步的 op 表投影成 2D（面片按控制点投影后细分，
+路径按结点+控制点投影），按深度排一遍（画家算法，先不做 Z-buffer），
+发一份 `oW x oH` 的临时 EPS，交给
+`gs -q -dNOPAUSE -dBATCH -sDEVICE=ppmraw -g<fullW>x<fullH> -r<72*expand>`
+出 P6，读回字节塞进 `kind == 7` 那一格。billboard 那 0.5% 就是这条路量出来的。
+
+### 九、下一刀的顺序（修正后）
 
 0. ~~**给 frame 一份真正的三维 op 表**~~ —— **已落地**：`drawop3`（kind = path3 描边 /
    Bezier 面片 / 三角面片，带 p/colors/straight/lightOn/opacity/shininess/metallic/
