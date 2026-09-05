@@ -10866,9 +10866,17 @@ NURBS / 球柱盘管，各带自己的材质），`asy__add3` 退回去只管界
 
 ### 七、下一刀的顺序（修正后）
 
-0. **给 frame 一份真正的三维 op 表**（第六节那件事）—— 没有它，乙无从下手；
+0. ~~**给 frame 一份真正的三维 op 表**~~ —— **已落地**：`drawop3`（kind = path3 描边 /
+   Bezier 面片 / 三角面片，带 p/colors/straight/lightOn/opacity/shininess/metallic/
+   fresnel0/interaction），表挂在 `asy__f3tab`、帧上只留 `f3id`，`add`/`prepend`
+   走 `asy__merge3fn` 那个桩一起搬。量过：`render=0` 时 three.asy 的 `is3D()` 是假、
+   那几个内建根本不被调，op 表恒空，所以行为零变化；`render=-1` 时
+   `draw(f,unitbox)` 记下 1076 格、`add` 搬过去还是 1076、再加个 `unitsphere` 变 1204。
+   **界那几格仍然不搬**（改了会动到已经对上的例子），与第 1 步一起改。
 1. `shipout3` 实现 EPS 那一支：按第二节那套算法出外壳（那一层现在就能逐字节对上），
-   2D 帧按第六节存下来的 op 表投影，像素走第四节的 gs；`settings.render` 改成 -1；
+   2D 帧按第 0 步的 op 表投影（投影矩阵从收到的 `m`/`M`/`angle`/`zoom`/`shift`/`t`
+   自己搭 —— `currentprojection` 是 three.asy 的变量，这一层看不见），
+   像素走第四节的 gs；`settings.render` 改成 -1。
 2. eps.js 加"GPU 参考位图"这一档的判据（几何逐字节 + 像素容差），把 83 个的现状量出来；
 3. 逐族收像素：先线画（billboard/stroke3/label3 这一族），再曲面（PBR 着色那一套）。
 
