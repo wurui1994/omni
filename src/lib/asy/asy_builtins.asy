@@ -10818,6 +10818,37 @@ frame operator *(real[][] t, frame f)
     }
     asy__push3(g, q);
   }
+  // **界也要照 asy 逐个 drawelement 重算，不能拿"旧包围盒的八个角过变换"。**
+  // 旋转之后八角盒是真界的**超集**，`lambda.x` 于是系统性偏大。量出来的（七行尺子
+  // /tmp/nl/ar3.asy 与 cylinder / shellsqrtx01）：真实路径上 `embed` 的 P.infinity 那一支
+  // （three.asy:2830-2841）先做 `S.f = modelview*S.f` 再取 `max3-min3` 当 lambda，
+  // 所以这一格的松紧直接决定 `S.width`、`oW` 与封套。
+  //
+  // 但**只有当这一帧的界完全来自 op 表里的几何时**才能这么算：`drawTube` 的界是实参
+  // 给的 min/max（管面比中心折线宽）、`drawpixel` / 三角网格 / NURBS 也只记界，
+  // 那几种情况下走 op 表会把界**缩小**。所以先用未变换的几何自检 —— 拿同一族
+  // `asy__add3/asy__addpatch3/asy__addtri3` 走一遍 f 的 op 表，与 f 记下的界比：
+  // 一致才按变换后的几何重算，否则留着上面那个八角盒。
+  if (f.has3 && s.length > 0) {
+    frame b0;
+    for (int i = 0; i < s.length; ++i) {
+      if (s[i].kind == 0) asy__add3(b0, s[i].g3);
+      else if (s[i].kind == 1) asy__addpatch3(b0, s[i].P3, s[i].straight);
+      else if (s[i].kind == 2) asy__addtri3(b0, s[i].P3, s[i].straight);
+      else asy__add3(b0, s[i].Q3);
+    }
+    if (b0.has3 && b0.min3v == f.min3v && b0.max3v == f.max3v) {
+      drawop3[] gs0 = asy__ops3(g);
+      frame b1;
+      for (int i = 0; i < gs0.length; ++i) {
+        if (gs0[i].kind == 0) asy__add3(b1, gs0[i].g3);
+        else if (gs0[i].kind == 1) asy__addpatch3(b1, gs0[i].P3, gs0[i].straight);
+        else if (gs0[i].kind == 2) asy__addtri3(b1, gs0[i].P3, gs0[i].straight);
+        else asy__add3(b1, gs0[i].Q3);
+      }
+      if (b1.has3) { g.min3v = b1.min3v; g.max3v = b1.max3v; }
+    }
+  }
   // **比（minr/maxr）不能拿"界的八个角"来算。** x/z 是非线性的，盒角的比与真几何的比
   // 不是一回事：无标签尺子（`import three; size(100);
   // currentprojection=perspective(1,-2,1); draw(unitbox);`）量出来 —— 按盒角算，
