@@ -147,76 +147,109 @@ function epsIn(dir, name) {
 
 /* ---------------------------------------------------------------- 并行计时 */
 
-/** 一个例子跑一趟，回 `{ms, ok, killed}`。硬上限 LIMIT，超了 SIGKILL。 */
-function runOne(name, who, dir) {
-  return new Promise((resolve) => {
-    const p = join(dir, `${name}.asy`);
-    const t0 = Date.now();
-    const base = existsSync(ASYBASE) ? ASYBASE : join(dir, '..', 'base');
-    const env = {
-      ...process.env,
-      OMNI_ASY_MODS: '1',
-      ASYMPTOTE_DIR: `${base}:${dir}`,
-    };
-    let ch;
-    if (who === 'asy') {
-      /* 每个例子一个自己的工作目录：真 asy 要往 cwd 写 `<名>.eps`，并行时会撞。 */
-      const w = join(WORK, name);
-      mkdirSync(w, { recursive: true });
-      ch = spawn(ASY, ['-noV', '-f', 'eps', '-o', name, p], { cwd: w, env, detached: true });
-    } else {
-      ch = spawn('node', [join(ROOT, 'src', 'core', 'cli.js'), 'run', p],
-        { cwd: ROOT, env, detached: true });
-    }
-    let outLen = 0;
-    let eps = false;
-    ch.stdout.on('data', (b) => {
-      outLen += b.length;
-      if (!eps && b.indexOf('%!PS-Adobe') >= 0) eps = true;
-    });
-    ch.stderr.on('data', () => {});
-    let killed = false;
-    const timer = setTimeout(() => {
-      killed = true;
-      /* **必须 `detached: true` + 杀进程组**：`omni run` 会再 spawn 一个 node 去跑
-       * ESM 启动器，只杀直接的孩子会留一个满载的 node 在后台啃 CPU，后面的例子于是
-       * 越跑越慢。而 `detached` 是前提 —— 没有它，孩子在**我们自己**的进程组里，
-       * `kill(-pid)` 要么打不着、要么把量它的这个进程一起打死（量到过：跑到 141/220
-       * 时整个 node 收到 SIGPIPE 退了）。 */
-      try { process.kill(-ch.pid, 'SIGKILL'); } catch { /* 组已经空了 */ }
-    }, LIMIT);
-    ch.on('close', (code) => {
-      clearTimeout(timer);
-      resolve({ name, ms: Date.now() - t0, ok: !killed && code === 0, killed, outLen, eps });
-    });
-    ch.on('error', () => {
-      clearTimeout(timer);
-      resolve({ name, ms: Date.now() - t0, ok: false, killed: false, outLen: 0, eps: false });
-    });
+/** 一个例子跑一趟，跑完把 `{ms, ok, killed}` 交给 `done`。硬上限 LIMIT，超了 SIGKILL。
+ *
+ *  **刻意不用 Promise / async**：这份文件也要过 js-roundtrip 那道门槛 ——
+ *  `tests/js-roundtrip/run.js` 扫**全仓库**的 .js，要求我们自己的 JS 前端读得懂每一份，
+ *  而那个前端既没有 `async`/`await`，`new Promise` 也不在它认的构造之列（认的只有
+ *  Array / Map / Set / Error 与本文件里声明的类）。回调是这里唯一同时满足两边的写法。 */
+function runOne(name, who, dir, done) {
+  const p = join(dir, `${name}.asy`);
+  const t0 = Date.now();
+  const base = existsSync(ASYBASE) ? ASYBASE : join(dir, '..', 'base');
+  const env = {
+    ...process.env,
+    OMNI_ASY_MODS: '1',
+    ASYMPTOTE_DIR: `${base}:${dir}`,
+  };
+  let ch;
+  if (who === 'asy') {
+    /* 每个例子一个自己的工作目录：真 asy 要往 cwd 写 `<名>.eps`，并行时会撞。 */
+    const w = join(WORK, name);
+    mkdirSync(w, { recursive: true });
+    ch = spawn(ASY, ['-noV', '-f', 'eps', '-o', name, p], { cwd: w, env, detached: true });
+  } else {
+    ch = spawn('node', [join(ROOT, 'src', 'core', 'cli.js'), 'run', p],
+      { cwd: ROOT, env, detached: true });
+  }
+  let outLen = 0;
+  let eps = false;
+  ch.stdout.on('data', (b) => {
+    outLen += b.length;
+    if (!eps && b.indexOf('%!PS-Adobe') >= 0) eps = true;
+  });
+  ch.stderr.on('data', () => {});
+  let killed = false;
+  let settled = false;
+  const timer = setTimeout(() => {
+    killed = true;
+    /* **必须 `detached: true` + 杀进程组**：`omni run` 会再 spawn 一个 node 去跑
+     * ESM 启动器，只杀直接的孩子会留一个满载的 node 在后台啃 CPU，后面的例子于是
+     * 越跑越慢。而 `detached` 是前提 —— 没有它，孩子在**我们自己**的进程组里，
+     * `kill(-pid)` 要么打不着、要么把量它的这个进程一起打死（量到过：跑到 141/220
+     * 时整个 node 收到 SIGPIPE 退了）。 */
+    try { process.kill(-ch.pid, 'SIGKILL'); } catch { /* 组已经空了 */ }
+  }, LIMIT);
+  /* close 与 error 都可能来（spawn 失败之后也会有 close），只认第一次。 */
+  ch.on('close', (code) => {
+    clearTimeout(timer);
+    if (settled) return;
+    settled = true;
+    done({ name, ms: Date.now() - t0, ok: !killed && code === 0, killed, outLen, eps });
+  });
+  ch.on('error', () => {
+    clearTimeout(timer);
+    if (settled) return;
+    settled = true;
+    done({ name, ms: Date.now() - t0, ok: false, killed: false, outLen: 0, eps: false });
   });
 }
 
-/** 一个 JOBS 大小的池子，谁空谁取下一个。每跑完一个就落盘 —— 被打断不丢已经量到的。 */
-async function timeAll(names, who, dir, save) {
+/** 一个 JOBS 大小的池子，谁空谁取下一个；全跑完把结果交给 `done`。
+ *  每跑完一个就落盘 —— 被打断不丢已经量到的。 */
+function timeAll(names, who, dir, save, done) {
   const out = [];
   let next = 0;
-  const worker = async () => {
-    for (;;) {
-      const i = next;
-      next++;
-      if (i >= names.length) return;
-      const r = await runOne(names[i], who, dir);
+  let live = 0;
+  const step = () => {
+    if (next >= names.length) {
+      if (live === 0) done(out);
+      return;
+    }
+    const i = next;
+    next++;
+    live++;
+    runOne(names[i], who, dir, (r) => {
+      live--;
       out.push(r);
       save(r);
       const tag = r.killed ? `>${LIMIT}` : String(r.ms);
       process.stderr.write(`  ${String(out.length).padStart(3)}/${names.length} `
         + `${r.name.padEnd(24)} ${tag.padStart(6)}ms ${r.eps ? 'eps' : (r.ok ? 'ok ' : '--')}\n`);
-    }
+      step();
+    });
   };
-  const ws = [];
-  for (let i = 0; i < Math.min(JOBS, names.length); i++) ws.push(worker());
-  await Promise.all(ws);
-  return out;
+  const n = Math.min(JOBS, names.length);
+  if (n === 0) {
+    done(out);
+    return;
+  }
+  for (let i = 0; i < n; i++) step();
+}
+
+/** 一串名字**串行**跑一遍（每个跑完调 each，全跑完调 done）。超时复核那两处要它。 */
+function runSerial(names, who, dir, each, done) {
+  const go = (k) => {
+    if (k >= names.length) {
+      done();
+      return;
+    }
+    runOne(names[k], who, dir, (r) => {
+      each(r);
+      go(k + 1);
+    });
+  };
+  go(0);
 }
 
 /* ---------------------------------------------------------------- 主 */
@@ -264,41 +297,42 @@ if (mode === 'static') {
   rmSync(WORK, { recursive: true, force: true });
   mkdirSync(WORK, { recursive: true });
   const t0 = Date.now();
-  const rows = await timeAll(names, who, dir, save);
-  /* **超时的一律串行复核**（量出来必须有这一步）：并行时被打死的那些里有一大半是
-   * 被并行度冤枉的 —— 这台机器 8 个逻辑核里只有 4 个性能核，而 asy 排标签要跑 LaTeX、
-   * TeX 的临时文件还会互相撞。量到的两组例子：
-   *   我们这一侧：BezierSaddle 6 路 >5049ms / 单跑 1902ms，gamma >5042 / 2323，
-   *               SierpinskiGasket >5046 / 4231，label3zoom >5023 / 3844
-   *   真 asy 那一侧：arrows3 / cheese / cones / magnetic / near_earth 并行时记成"报错"，
-   *               串行全是 exit=0、EPS 照出
-   * 所以"超过 LIMIT"这个结论只有**串行**下才作数。复核只跑被打死的那几个，代价很小。 */
-  const suspect = rows.filter((r) => r.killed).map((r) => r.name);
-  const fixed = [];
-  if (suspect.length > 0) {
-    process.stderr.write(`  ---- 串行复核 ${suspect.length} 个超时的（并行会冤枉例子）\n`);
-    for (const nm of suspect) {
-      const r2 = await runOne(nm, who, dir);
-      save(r2);
-      const i = rows.findIndex((x) => x.name === nm);
-      rows[i] = r2;
-      if (!r2.killed) fixed.push(`${nm} ${r2.ms}ms`);
-      process.stderr.write(`       ${nm.padEnd(24)} ${(r2.killed ? `>${LIMIT}` : String(r2.ms)).padStart(6)}ms`
-        + ` ${r2.eps ? 'eps' : (r2.ok ? 'ok ' : '--')}\n`);
+  timeAll(names, who, dir, save, (rows) => {
+    /* **超时的一律串行复核**（量出来必须有这一步）：并行时被打死的那些里有一大半是
+     * 被并行度冤枉的 —— 这台机器 8 个逻辑核里只有 4 个性能核，而 asy 排标签要跑 LaTeX、
+     * TeX 的临时文件还会互相撞。量到的两组例子：
+     *   我们这一侧：BezierSaddle 6 路 >5049ms / 单跑 1902ms，gamma >5042 / 2323，
+     *               SierpinskiGasket >5046 / 4231，label3zoom >5023 / 3844
+     *   真 asy 那一侧：arrows3 / cheese / cones / magnetic / near_earth 并行时记成"报错"，
+     *               串行全是 exit=0、EPS 照出
+     * 所以"超过 LIMIT"这个结论只有**串行**下才作数。复核只跑被打死的那几个，代价很小。 */
+    const suspect = rows.filter((r) => r.killed).map((r) => r.name);
+    const fixed = [];
+    if (suspect.length > 0) {
+      process.stderr.write(`  ---- 串行复核 ${suspect.length} 个超时的（并行会冤枉例子）\n`);
     }
-  }
-  const wall = Date.now() - t0;
-  rows.sort((a, b) => b.ms - a.ms);
-  rmSync(WORK, { recursive: true, force: true });
-  const kill = rows.filter((r) => r.killed);
-  const sum = rows.reduce((a, r) => a + r.ms, 0);
-  console.log(`\n${who}：这一趟量了 ${rows.length} 个（共 ${all.length}，缓存里已有 `
-    + `${all.length - names.length}），墙上 ${(wall / 1000).toFixed(1)}s`
-    + `（并行 ${JOBS}，CPU 时间之和 ${(sum / 1000).toFixed(1)}s）`
-    + `，超过 ${LIMIT}ms 被打死的 ${kill.length} 个`);
-  console.log(`  最慢十个：${rows.slice(0, 10).map((r) => `${r.name} ${r.killed ? '>' : ''}${r.ms}`).join('  ')}`);
-  if (fixed.length > 0) console.log(`  并行冤枉的（串行其实在限内）：${fixed.join('  ')}`);
-  if (kill.length > 0) console.log(`  真超时的（串行复核过）：${kill.map((r) => r.name).join(' ')}`);
+    runSerial(suspect, who, dir, (r2) => {
+      save(r2);
+      const i = rows.findIndex((x) => x.name === r2.name);
+      rows[i] = r2;
+      if (!r2.killed) fixed.push(`${r2.name} ${r2.ms}ms`);
+      process.stderr.write(`       ${r2.name.padEnd(24)} ${(r2.killed ? `>${LIMIT}` : String(r2.ms)).padStart(6)}ms`
+        + ` ${r2.eps ? 'eps' : (r2.ok ? 'ok ' : '--')}\n`);
+    }, () => {
+      const wall = Date.now() - t0;
+      rows.sort((a, b) => b.ms - a.ms);
+      rmSync(WORK, { recursive: true, force: true });
+      const kill = rows.filter((r) => r.killed);
+      const sum = rows.reduce((a, r) => a + r.ms, 0);
+      console.log(`\n${who}：这一趟量了 ${rows.length} 个（共 ${all.length}，缓存里已有 `
+        + `${all.length - names.length}），墙上 ${(wall / 1000).toFixed(1)}s`
+        + `（并行 ${JOBS}，CPU 时间之和 ${(sum / 1000).toFixed(1)}s）`
+        + `，超过 ${LIMIT}ms 被打死的 ${kill.length} 个`);
+      console.log(`  最慢十个：${rows.slice(0, 10).map((r) => `${r.name} ${r.killed ? '>' : ''}${r.ms}`).join('  ')}`);
+      if (fixed.length > 0) console.log(`  并行冤枉的（串行其实在限内）：${fixed.join('  ')}`);
+      if (kill.length > 0) console.log(`  真超时的（串行复核过）：${kill.map((r) => r.name).join(' ')}`);
+    });
+  });
 } else if (mode === 'report') {
   /* 把两侧量到的数与静态分类拼成一张表。零成本，随时可看。 */
   const dir = process.argv[3] === undefined ? EXDIR : process.argv[3];
@@ -376,37 +410,39 @@ if (mode === 'static') {
   const t0 = Date.now();
   let made = 0;
   const miss = [];
-  await timeAll(todo, 'asy', dir, (r) => {
+  timeAll(todo, 'asy', dir, (r) => {
     const src = epsIn(join(WORK, r.name), r.name);
     if (src !== null) {
       renameSync(src, join(REF, `${r.name}.eps`));
       made++;
     } else miss.push(r.name);
-  });
-  /* 没出图的**串行再试一遍**（与 `time` 那一模式同一条规矩）：并行时 LaTeX 的临时文件
-     会撞，量到过五个例子被冤枉。上限照旧不放开。 */
-  if (miss.length > 0) {
-    process.stderr.write(`  ---- 串行复核 ${miss.length} 个没出图的\n`);
+  }, () => {
+    /* 没出图的**串行再试一遍**（与 `time` 那一模式同一条规矩）：并行时 LaTeX 的临时文件
+       会撞，量到过五个例子被冤枉。上限照旧不放开。 */
+    const retry = miss.slice();
     const still = [];
-    for (const nm of miss) {
-      const r2 = await runOne(nm, 'asy', dir);
-      const src = epsIn(join(WORK, nm), nm);
-      if (src !== null) {
-        renameSync(src, join(REF, `${nm}.eps`));
-        made++;
-        process.stderr.write(`       ${nm.padEnd(24)} ${String(r2.ms).padStart(6)}ms 出图了（并行冤枉的）\n`);
-      } else {
-        still.push(`${nm}${r2.killed ? `(超${LIMIT}ms)` : '(exit)'}`);
-        process.stderr.write(`       ${nm.padEnd(24)} ${(r2.killed ? `>${LIMIT}` : String(r2.ms)).padStart(6)}ms 仍没出图\n`);
-      }
+    if (retry.length > 0) {
+      process.stderr.write(`  ---- 串行复核 ${retry.length} 个没出图的\n`);
     }
-    miss.length = 0;
-    for (const s of still) miss.push(s);
-  }
-  rmSync(WORK, { recursive: true, force: true });
-  console.log(`\noracle：生成 ${made} 份，没出图 ${miss.length} 份，`
-    + `墙上 ${((Date.now() - t0) / 1000).toFixed(1)}s`);
-  if (miss.length > 0) console.log(`  没出图的（要逐个处置，不是跳过）：${miss.join(' ')}`);
+    runSerial(retry, 'asy', dir, (r2) => {
+      const src = epsIn(join(WORK, r2.name), r2.name);
+      if (src !== null) {
+        renameSync(src, join(REF, `${r2.name}.eps`));
+        made++;
+        process.stderr.write(`       ${r2.name.padEnd(24)} ${String(r2.ms).padStart(6)}ms 出图了（并行冤枉的）\n`);
+      } else {
+        still.push(`${r2.name}${r2.killed ? `(超${LIMIT}ms)` : '(exit)'}`);
+        process.stderr.write(`       ${r2.name.padEnd(24)} ${(r2.killed ? `>${LIMIT}` : String(r2.ms)).padStart(6)}ms 仍没出图\n`);
+      }
+    }, () => {
+      miss.length = 0;
+      for (const s of still) miss.push(s);
+      rmSync(WORK, { recursive: true, force: true });
+      console.log(`\noracle：生成 ${made} 份，没出图 ${miss.length} 份，`
+        + `墙上 ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+      if (miss.length > 0) console.log(`  没出图的（要逐个处置，不是跳过）：${miss.join(' ')}`);
+    });
+  });
 } else {
   console.error('用法：node tests/asy/triage.js static|time|report|gen [asy|mine] [目录]');
   process.exit(2);
