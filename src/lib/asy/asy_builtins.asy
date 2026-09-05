@@ -3229,6 +3229,17 @@ private int[] asy__pixrgb(pen p) {
   return o;
 }
 
+// 同一格换算，但**不量化成字节**：着色（fragment.glsl）整段在 0..1 上算，
+// 量化只该发生在最后写像素那一步。位图那一档的 PBR 用这一份。
+private real[] asy__penrgb(pen p) {
+  if (p.iscmyk)
+    return new real[] {(1 - p.cyan) * (1 - p.black),
+                       (1 - p.magenta) * (1 - p.black),
+                       (1 - p.yellow) * (1 - p.black)};
+  if (p.isrgb) return new real[] {p.red, p.green, p.blue};
+  return new real[] {p.gray, p.gray, p.gray};
+}
+
 // 4 个字节 -> 5 个字符（85 进制，高位先出）。`n` 是这一组真有几个字节：不足 4 的那一组
 // 按 0 补齐、只发 n+1 个字符（PostScript 的 ASCII85 就是这条），而且**不缩成 z**。
 private string asy__a85grp(int b0, int b1, int b2, int b3, int n) {
@@ -8279,6 +8290,11 @@ triple asy__r3m = (0, 0, 0);
 triple asy__r3M = (0, 0, 0);
 real[][] asy__r3t;
 real[][] asy__r3tup;
+// 光：`Light.position` 与 `Light.diffuse`（three.asy:2913）。位置在 plain_prethree.asy:187
+// 已经过 `unit()`，而且**不再乘视图变换** —— glrender.cc:931-937 是原样发给 shader 的
+// uniform，帧坐标也已经在视图空间，两边同一套坐标。diffuse 每格是 rgba 四个数。
+triple[] asy__r3lights;
+real[][] asy__r3ldiff;
 // 真 billboard 那一趟里，op 表头一格的首点（查 m/M 与 op 是不是同一套坐标）
 triple asy__r3op0 = (0, 0, 0);
 int asy__r3nops = 0;
@@ -8304,6 +8320,8 @@ void shipout3(string prefix, frame f, string format="",
   asy__r3M = M;
   asy__r3t = t;
   asy__r3tup = tup;
+  asy__r3lights = lights;
+  asy__r3ldiff = diffuse;
   // oW/oH = ceil(w)。判据是这么定下来的：收到的 w 是 `S.width - defaultrender.margin`，
   // 也就是"整数尺寸减 0.02"，所以 ceil 正好还原那个整数（billboard 92.98 -> 93、
   // sacylinder3D 的参考 61.98 -> 62）。四舍五入在 92.98 上也对，但那是巧合。
@@ -10226,15 +10244,212 @@ private void asy__merge3hook() {
     // `draw((0,0,0)--(1,0,0),blue+8)`）：`p0=0,0,0  p1=0,0,255  p2=0,0,0`，
     // 而参考的位图里就是**平的** `0,0,255`（不带光照）。原先一律取 p[0]，
     // 于是整族画成黑的（`0,0,0`×24123 对参考的 `0,0,255`×11282 + `255,0,0`×11128）。
-    int[] opcolor(drawop3 o) {
-      if (o.p.length == 0) return new int[] {0, 0, 0};
-      if (!o.lightOn && o.p.length > 1) return asy__pixrgb(o.p[1]);
-      return asy__pixrgb(o.p[0]);
+    //
+    // **着光那一支照 base/shaders/GL/fragment.glsl 逐字转写**（:155 NDF_TRG、
+    // :163 GGX_Geom、:171 Geom、:177 Fresnel、:184 BRDF、:209-245 main）。
+    // 粗糙度照 vertex.glsl:96-97：`Roughness = 1 - shininess`、`Roughness2 = Roughness^2`。
+    // 光的方向与颜色是 shipout3 收到的 `Light.position`/`Light.diffuse`（三维那两格
+    // 全局量）—— 位置在 plain_prethree.asy:187 已经 unit 过，glrender.cc:931-937
+    // 原样发给 shader，不再乘视图变换。
+    // 与真 asy 只差**一片一色**：那边是逐片元，这边每片算一次（法向取面片中心）。
+    // `gl_FrontFacing`（:225）这一层没有正反面，等价的做法是把法向翻到朝观察者。
+    int nlt = asy__r3lights.length;
+    triple cross3(triple a, triple b) {
+      return (a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
+    }
+    real mx0(real a) { return a > 0 ? a : 0; }
+    real[] shade(drawop3 o, triple nrm, triple pos) {
+      real[] em = o.p.length > 1 ? asy__penrgb(o.p[1]) : new real[] {0, 0, 0};
+      if (o.p.length == 0) return new real[] {0, 0, 0};
+      if (!o.lightOn || nlt == 0) return em;
+      real[] Dif = asy__penrgb(o.p[0]);
+      real[] Spc = o.p.length > 2 ? asy__penrgb(o.p[2]) : new real[] {0, 0, 0};
+      real R2 = (1 - o.shininess) * (1 - o.shininess);
+      real alpha2 = R2 * R2;
+      real ap = 1 + R2;
+      real kg = 0.125 * ap * ap;
+      triple vd = ortho ? (0, 0, 1) : -unit(pos);
+      // fragment.glsl:224 的 `normal=normalize(Normal)` —— **这一句不能漏**：
+      // 面片中心的法向是叉乘出来的，长度是任意的，不归一化整条 BRDF 全走偏
+      // （量出来的样子是 cosTheta 上千、整面片压成饱和色）。
+      real nl = length(nrm);
+      if (nl == 0) return em;
+      triple n = (1 / nl) * nrm;
+      if (dot(n, vd) < 0) n = -n;
+      real[] c = new real[] {em[0], em[1], em[2]};
+      real omegain = mx0(dot(vd, n));
+      real Gv = omegain / (omegain * (1 - kg) + kg);
+      for (int i = 0; i < nlt; ++i) {
+        triple L = asy__r3lights[i];
+        real cosTheta = mx0(dot(n, L));
+        if (cosTheta == 0) continue;
+        real[] lc = asy__r3ldiff[i];
+        triple h = unit(L + vd);
+        real ndoth = mx0(dot(n, h));
+        real den = ndoth * ndoth * (alpha2 - 1) + 1;
+        real D = den != 0 ? alpha2 / (den * den) : 0;
+        real omegaln = cosTheta;
+        real G = Gv * (omegaln / (omegaln * (1 - kg) + kg));
+        real fa = 1 - mx0(dot(h, vd));
+        real fb = fa * fa;
+        real F = o.fresnel0 + (1 - o.fresnel0) * fb * fb * fa;
+        real denom = 4 * omegain * omegaln;
+        real raw = denom > 0 ? (D * G) / denom : 0;
+        for (int j = 0; j < 3; ++j) {
+          real diel = Dif[j] + (raw * Spc[j] - Dif[j]) * F;
+          real brdf = diel + (raw * Dif[j] - diel) * o.metallic;
+          c[j] = c[j] + brdf * cosTheta * lc[j];
+        }
+      }
+      return c;
+    }
+    // 四个角上的法向照 bezierpatch.h:45 的 `normal()`：一阶 `3(left1-middle) x
+    // 3(right1-middle)` 不够就退二阶（bezierPP）、三阶（bezierPPP，triple.h:417/423）。
+    triple nrm7(triple l3, triple l2, triple l1, triple mid,
+                triple r1, triple r2, triple r3, real eps) {
+      triple lp = 3 * (l1 - mid);
+      triple rp = 3 * (r1 - mid);
+      triple n = cross3(rp, lp);
+      if (dot(n, n) > eps) return n;
+      triple lpp = 3 * (mid + l2) - 6 * l1;
+      triple rpp = 3 * (mid + r2) - 6 * r1;
+      n = cross3(rpp, lp) + cross3(rp, lpp);
+      if (dot(n, n) > eps) return n;
+      triple lppp = l3 - mid + 3 * (l1 - l2);
+      triple rppp = r3 - mid + 3 * (r1 - r2);
+      n = cross3(rpp, lpp) + cross3(rppp, lp) + cross3(rp, lppp);
+      if (dot(n, n) > eps) return n;
+      n = cross3(rppp, lpp) + cross3(rpp, lppp);
+      if (dot(n, n) > eps) return n;
+      return cross3(rppp, lppp);
+    }
+    // bezierpatch.cc:70-73 的 epsilon：控制点到 p[0] 的最大距离平方乘 DBL_EPSILON
+    real ceps(triple[][] P, int rows) {
+      triple p0 = P[0][0];
+      real e = 0;
+      for (int i = 0; i < rows; ++i)
+        for (int j = 0; j < P[i].length; ++j) {
+          triple d = P[i][j] - p0;
+          real q = dot(d, d);
+          if (q > e) e = q;
+        }
+      return e * 2.220446049250313e-16;
+    }
+    // 四边面片四个角的法向（bezierpatch.cc:79-101，含两级退路）。
+    // 次序与下面 /ShadingType 7 的 c1..c4 对齐：p0、p12、p15、p3。
+    triple[] corner4(triple[][] P) {
+      triple p0 = P[0][0]; triple p3 = P[0][3];
+      triple p12 = P[3][0]; triple p15 = P[3][3];
+      real eps = ceps(P, 4);
+      triple n0 = nrm7(p3, P[0][2], P[0][1], p0, P[1][0], P[2][0], p12, eps);
+      if (dot(n0, n0) <= eps) {
+        n0 = nrm7(p3, P[0][2], P[0][1], p0, P[3][1], P[3][2], p15, eps);
+        if (dot(n0, n0) <= eps)
+          n0 = nrm7(p15, P[2][3], P[1][3], p3, P[1][0], P[2][0], p12, eps);
+      }
+      triple n1 = nrm7(p0, P[1][0], P[2][0], p12, P[3][1], P[3][2], p15, eps);
+      if (dot(n1, n1) <= eps) {
+        n1 = nrm7(p0, P[1][0], P[2][0], p12, P[2][3], P[1][3], p3, eps);
+        if (dot(n1, n1) <= eps)
+          n1 = nrm7(p3, P[0][2], P[0][1], p0, P[3][1], P[3][2], p15, eps);
+      }
+      triple n2 = nrm7(p12, P[3][1], P[3][2], p15, P[2][3], P[1][3], p3, eps);
+      if (dot(n2, n2) <= eps) {
+        n2 = nrm7(p12, P[3][1], P[3][2], p15, P[0][2], P[0][1], p0, eps);
+        if (dot(n2, n2) <= eps)
+          n2 = nrm7(p0, P[1][0], P[2][0], p12, P[2][3], P[1][3], p3, eps);
+      }
+      triple n3 = nrm7(p15, P[2][3], P[1][3], p3, P[0][2], P[0][1], p0, eps);
+      if (dot(n3, n3) <= eps) {
+        n3 = nrm7(p15, P[2][3], P[1][3], p3, P[1][0], P[2][0], p12, eps);
+        if (dot(n3, n3) <= eps)
+          n3 = nrm7(p12, P[3][1], P[3][2], p15, P[0][2], P[0][1], p0, eps);
+      }
+      return new triple[] {n0, n1, n2, n3};
+    }
+    // 三角面片三个角的法向（bezierpatch.cc:573-575）。十个点按行长 1/2/3/4 排，
+    // 与 p[0..9] 的对应是 P[0][0]=p0、P[1][0]=p1、P[1][1]=p2、P[2][*]=p3..p5、P[3][*]=p6..p9。
+    triple[] corner3(triple[][] P) {
+      triple p0 = P[0][0]; triple p6 = P[3][0]; triple p9 = P[3][3];
+      real eps = ceps(P, 4);
+      return new triple[] {
+        nrm7(p9, P[2][2], P[1][1], p0, P[1][0], P[2][0], p6, eps),
+        nrm7(p0, P[1][0], P[2][0], p6, P[3][1], P[3][2], p9, eps),
+        nrm7(p6, P[3][1], P[3][2], p9, P[2][2], P[1][1], p0, eps)};
+    }
+    string setrgb(real[] c) {
+      real r = c[0] < 0 ? 0 : (c[0] > 1 ? 1 : c[0]);
+      real g = c[1] < 0 ? 0 : (c[1] > 1 ? 1 : c[1]);
+      real b = c[2] < 0 ? 0 : (c[2] > 1 ? 1 : c[2]);
+      return ps(r) + " " + ps(g) + " " + ps(b) + " setrgbcolor" + nl;
+    }
+    // 一片一个平色不够：真 asy 是逐片元着色。这一层能给到的最接近的形状是 PostScript
+    // 的**张量面片着色**（/ShadingType 7，psfile.cc:451 那一格 —— asy 自己矢量那条路
+    // 画曲面用的就是它）：十六个控制点原样投下去，四个角各算一次 BRDF，片内由
+    // gs 按双线性补齐。几何还是同一条曲边（与从前那句 `fill` 一样），颜色从平色
+    // 变成了渐变。DataSource 的次序照 tenshade：边标记 0、**倒着走**的十二个边界点、
+    // 四个内部点、四个角的颜色（c1=p11、c2=p14、c3=p44、c4=p41）。
+    string wp(triple v) { pair q = pj(v); return " " + ps(q.x) + " " + ps(q.y); }
+    string wc(real[] c) {
+      real r = c[0] < 0 ? 0 : (c[0] > 1 ? 1 : c[0]);
+      real g = c[1] < 0 ? 0 : (c[1] > 1 ? 1 : c[1]);
+      real b = c[2] < 0 ? 0 : (c[2] > 1 ? 1 : c[2]);
+      return " " + ps(r) + " " + ps(g) + " " + ps(b);
+    }
+    // 一条三次 Bezier 在 t=1/2 处对半分（bound.h:16 的 Split 同一套七个点）：
+    // 左半是 z0,m0,m3,m5，右半是 m5,m4,m2,z1。
+    triple[] splitc(triple z0, triple c0, triple c1, triple z1) {
+      triple m0 = 0.5 * (z0 + c0); triple m1 = 0.5 * (c0 + c1);
+      triple m2 = 0.5 * (c1 + z1);
+      triple m3 = 0.5 * (m0 + m1); triple m4 = 0.5 * (m1 + m2);
+      triple m5 = 0.5 * (m3 + m4);
+      return new triple[] {z0, m0, m3, m5, m4, m2, z1};
+    }
+    // 一块面片对半分成四块（先按行分 u、再按列分 v）
+    triple[][][] split4(triple[][] Q) {
+      triple[][] L; triple[][] R;
+      for (int i = 0; i < 4; ++i) {
+        triple[] s = splitc(Q[i][0], Q[i][1], Q[i][2], Q[i][3]);
+        L.push(new triple[] {s[0], s[1], s[2], s[3]});
+        R.push(new triple[] {s[3], s[4], s[5], s[6]});
+      }
+      triple[][][] out;
+      triple[][][] half = new triple[][][] {L, R};
+      for (int k = 0; k < 2; ++k) {
+        triple[][] H = half[k];
+        triple[][] A; triple[][] B;
+        for (int j = 0; j < 4; ++j) {
+          triple[] s = splitc(H[0][j], H[1][j], H[2][j], H[3][j]);
+          A.push(new triple[] {s[0], s[1], s[2], s[3]});
+          B.push(new triple[] {s[3], s[4], s[5], s[6]});
+        }
+        // A/B 现在是「列优先」的（A[j][i]），转回 A[i][j]
+        triple[][] A2; triple[][] B2;
+        for (int i = 0; i < 4; ++i) {
+          triple[] ra; triple[] rb;
+          for (int j = 0; j < 4; ++j) { ra.push(A[j][i]); rb.push(B[j][i]); }
+          A2.push(ra); B2.push(rb);
+        }
+        out.push(A2); out.push(B2);
+      }
+      return out;
+    }
+    // 一块面片的着色记录（/ShadingType 7）
+    string sh7(drawop3 o, triple[][] Q) {
+      triple[] cn = corner4(Q);
+      return "<< /ShadingType 7 /ColorSpace /DeviceRGB /DataSource [ 0"
+        + wp(Q[0][0]) + wp(Q[1][0]) + wp(Q[2][0])
+        + wp(Q[3][0]) + wp(Q[3][1]) + wp(Q[3][2])
+        + wp(Q[3][3]) + wp(Q[2][3]) + wp(Q[1][3])
+        + wp(Q[0][3]) + wp(Q[0][2]) + wp(Q[0][1])
+        + wp(Q[1][1]) + wp(Q[2][1]) + wp(Q[2][2]) + wp(Q[1][2])
+        + wc(shade(o, cn[0], Q[0][0])) + wc(shade(o, cn[1], Q[3][0]))
+        + wc(shade(o, cn[2], Q[3][3])) + wc(shade(o, cn[3], Q[0][3]))
+        + " ] >> shfill" + nl;
     }
     for (int a = 0; a < idx.length; ++a) {
       drawop3 o3 = ops[idx[a]];
       triple[][] P = o3.P3;
-      int[] rgb = opcolor(o3);
       void edge(triple c1, triple c2, triple e) {
         pair a1 = pj(c1); pair a2 = pj(c2); pair a3 = pj(e);
         doc = doc + ps(a1.x) + " " + ps(a1.y) + " " + ps(a2.x) + " " + ps(a2.y)
@@ -10246,27 +10461,85 @@ private void asy__merge3hook() {
       // 三角面片）。按 4x4 那套下标去读三角面片会整格漏掉，所以分开写。
       if (o3.kind == 2) {
         if (P.length < 4 || P[3].length < 4) continue;
-        doc = doc + ps(rgb[0] / 255) + " " + ps(rgb[1] / 255) + " " + ps(rgb[2] / 255)
-          + " setrgbcolor" + nl;
+        bool lit = o3.lightOn && nlt > 0 && o3.p.length > 0;
+        // 曲边先当裁剪框（几何一个字不动），再用 /ShadingType 4 的三角网上色。
+        // 三角网的边是直的，铺不满曲边那圈鼓出去的地方 —— 所以把三个角**从重心
+        // 向外放大**再画：颜色在三角形上是线性的，顶点按同一个倍数外推颜色，
+        // 片内那一份场一点不变（越界的那几格由 clamp 收回来）。
+        if (lit) doc = doc + "gsave" + nl;
+        doc = doc + (lit ? "" : setrgb(shade(o3, (0, 0, 1), (0, 0, 0))));
         pair t00 = pj(P[0][0]);
         doc = doc + ps(t00.x) + " " + ps(t00.y) + " moveto" + nl;
         edge(P[1][0], P[2][0], P[3][0]);
         edge(P[3][1], P[3][2], P[3][3]);
         edge(P[2][2], P[1][1], P[0][0]);
-        doc = doc + "closepath fill" + nl;
+        if (!lit) { doc = doc + "closepath fill" + nl; nink = nink + 1; continue; }
+        doc = doc + "closepath clip" + nl;
+        triple[] nn = corner3(P);
+        triple A = P[0][0]; triple B = P[3][0]; triple C = P[3][3];
+        real[] cA = shade(o3, nn[0], A);
+        real[] cB = shade(o3, nn[1], B);
+        real[] cC = shade(o3, nn[2], C);
+        triple ctr = (1.0 / 3.0) * (A + B + C);
+        real s = 1.6;
+        real[] cbar = new real[] {(cA[0] + cB[0] + cC[0]) / 3,
+                                  (cA[1] + cB[1] + cC[1]) / 3,
+                                  (cA[2] + cB[2] + cC[2]) / 3};
+        real[] xA = new real[3]; real[] xB = new real[3]; real[] xC = new real[3];
+        for (int j = 0; j < 3; ++j) {
+          xA[j] = cbar[j] + s * (cA[j] - cbar[j]);
+          xB[j] = cbar[j] + s * (cB[j] - cbar[j]);
+          xC[j] = cbar[j] + s * (cC[j] - cbar[j]);
+        }
+        doc = doc + "<< /ShadingType 4 /ColorSpace /DeviceRGB /DataSource [ 0"
+          + wp(ctr + s * (A - ctr)) + wc(xA) + " 0"
+          + wp(ctr + s * (B - ctr)) + wc(xB) + " 0"
+          + wp(ctr + s * (C - ctr)) + wc(xC) + " ] >> shfill" + nl + "grestore" + nl;
         nink = nink + 1;
         continue;
       }
       if (P.length < 4 || P[0].length < 4) continue;
-      doc = doc + ps(rgb[0] / 255) + " " + ps(rgb[1] / 255) + " " + ps(rgb[2] / 255)
-        + " setrgbcolor" + nl;
-      pair q00 = pj(P[0][0]);
-      doc = doc + ps(q00.x) + " " + ps(q00.y) + " moveto" + nl;
-      edge(P[0][1], P[0][2], P[0][3]);
-      edge(P[1][3], P[2][3], P[3][3]);
-      edge(P[3][2], P[3][1], P[3][0]);
-      edge(P[2][0], P[1][0], P[0][0]);
-      doc = doc + "closepath fill" + nl;
+      if (!(o3.lightOn && nlt > 0 && o3.p.length > 0)) {
+        doc = doc + setrgb(shade(o3, (0, 0, 1), (0, 0, 0)));
+        pair q00 = pj(P[0][0]);
+        doc = doc + ps(q00.x) + " " + ps(q00.y) + " moveto" + nl;
+        edge(P[0][1], P[0][2], P[0][3]);
+        edge(P[1][3], P[2][3], P[3][3]);
+        edge(P[3][2], P[3][1], P[3][0]);
+        edge(P[2][0], P[1][0], P[0][0]);
+        doc = doc + "closepath fill" + nl;
+        nink = nink + 1;
+        continue;
+      }
+      // 片内的镜面高光是**尖的**：一块面片只在四个角上取色，屏幕上很大的那些面片
+      // 会把高光那一道整格抹平（量出来的样子：sacylinder3D 绿通道对得上、红蓝两通道
+      // 少 30 —— 少的正是镜面那一份）。真 asy 在 GPU 那边是按 `res` 把面片细分到
+      // 一像素以内再逐片元着色（bezierpatch.cc 的 init(res)/render），这一层照同一个
+      // 判据来：**按投影后的屏幕尺寸**对半细分，每块子面片自己算角上的法向与颜色。
+      // 小面片（AiryDisk 那 16 万块，每块只几个像素）一次都不分，开销不变。
+      real xlo = 0; real xhi = 0; real ylo = 0; real yhi = 0;
+      for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j) {
+          pair q = pj(P[i][j]);
+          if (i == 0 && j == 0) { xlo = q.x; xhi = q.x; ylo = q.y; yhi = q.y; }
+          else {
+            if (q.x < xlo) xlo = q.x; if (q.x > xhi) xhi = q.x;
+            if (q.y < ylo) ylo = q.y; if (q.y > yhi) yhi = q.y;
+          }
+        }
+      real sz = (xhi - xlo) > (yhi - ylo) ? xhi - xlo : yhi - ylo;
+      int lev = 0;
+      while (sz > 8 && lev < 3) { sz = 0.5 * sz; lev = lev + 1; }
+      triple[][][] cur = new triple[][][] {P};
+      for (int L = 0; L < lev; ++L) {
+        triple[][][] nxt;
+        for (int i = 0; i < cur.length; ++i) {
+          triple[][][] four = split4(cur[i]);
+          for (int k = 0; k < 4; ++k) nxt.push(four[k]);
+        }
+        cur = nxt;
+      }
+      for (int i = 0; i < cur.length; ++i) doc = doc + sh7(o3, cur[i]);
       nink = nink + 1;
     }
     // 管子（kind == 3）与 path3（kind == 0）这两支**也要用各自的笔色**。
@@ -10274,13 +10547,17 @@ private void asy__merge3hook() {
     // `draw((0,0,0)--(1,0,0),blue+8)` 与 `red+8`）：参考的位图里是
     // `0,0,255`×11282 与 `255,0,0`×11128（**平色、不带光照**），我们那边是
     // `0,0,0`×24123，一片黑。
+    // 着光的那一支（`lightOn`）法向取**朝观察者** —— 管子在 GL 那边是实体，
+    // 退成一条描边之后能给的最接近的形状就是正中那条母线（法向正对相机）。
+    real[] shadeline(drawop3 o, triple pos) {
+      triple vd = ortho ? (0, 0, 1) : -unit(pos);
+      return shade(o, vd, pos);
+    }
     for (int i = 0; i < ops.length; ++i) {
       if (ops[i].kind != 3) continue;
       triple[] Q = ops[i].Q3;
       if (Q.length < 2) continue;
-      int[] c3 = opcolor(ops[i]);
-      doc = doc + ps(c3[0] / 255) + " " + ps(c3[1] / 255) + " " + ps(c3[2] / 255)
-        + " setrgbcolor" + nl;
+      doc = doc + setrgb(shadeline(ops[i], Q[Q.length # 2]));
       pair a0 = pj(Q[0]);
       doc = doc + ps(a0.x) + " " + ps(a0.y) + " moveto" + nl;
       for (int k = 1; k < Q.length; ++k) {
@@ -10295,9 +10572,7 @@ private void asy__merge3hook() {
       path3 g = ops[i].g3;
       int n = g.nodes.length;
       if (n < 2) continue;
-      int[] c0 = opcolor(ops[i]);
-      doc = doc + ps(c0[0] / 255) + " " + ps(c0[1] / 255) + " " + ps(c0[2] / 255)
-        + " setrgbcolor" + nl;
+      doc = doc + setrgb(shadeline(ops[i], g.nodes[n # 2].point));
       pair a0 = pj(g.nodes[0].point);
       doc = doc + ps(a0.x) + " " + ps(a0.y) + " moveto" + nl;
       for (int k = 1; k < n; ++k) {

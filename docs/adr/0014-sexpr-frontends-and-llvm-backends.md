@@ -11656,5 +11656,53 @@ billboard 那 0.5% 就是这条路量出来的。
 2. eps.js 加"GPU 参考位图"这一档的判据（几何逐字节 + 像素容差），把 83 个的现状量出来；
 3. 逐族收像素：先线画（billboard/stroke3/label3 这一族），再曲面（PBR 着色那一套）。
 
+### 十、PBR 着色（fragment.glsl 那一份）与张量面片着色
+
+第 3 步的"曲面"这一档落地了，三件事：
+
+**(a) BRDF 照 `base/shaders/GL/fragment.glsl` 逐字转写**（:155 NDF_TRG、:163 GGX_Geom、
+:171 Geom、:177 Fresnel、:184 BRDF、:209-245 main）。粗糙度照 vertex.glsl:96-97：
+`Roughness = 1 - shininess`、`Roughness2 = Roughness²`。光的方向与颜色就是 `shipout3`
+本来就收着、从前扔掉的那两格 `Light.position` / `Light.diffuse`（three.asy:2913）——
+位置在 plain_prethree.asy:187 已经 `unit()` 过，glrender.cc:931-937 原样发给 shader 当
+uniform，**不再乘视图变换**，与我们那份已经在视图空间的帧坐标是同一套坐标。
+`gl_FrontFacing`（:225）这一层没有正反面，等价的做法是把法向翻到朝观察者。
+
+**漏了 `normalize` 会整格走偏**：fragment.glsl:224 是 `normal=normalize(Normal)`，
+而叉乘出来的法向长度是任意的 —— 第一版忘了这一句，量出来 cosTheta 上千、整片
+压成饱和色（cylinder 的曲面一片 `0,255,0`×105229）。补上之后重合 ink 上的平均通道差
+38.5 -> 15.6。
+
+**两侧对照的尺子**：正对相机的一块平面片、green 笔、Headlamp 默认光 —— 参考与我们都是
+**`1,183,1`**（手算也是 183），BRDF 这一份**逐字节对上**。球面那一份（unitsphere 走的是
+三角面片）5x5 采样两侧差 2~4：`185/219/246` 对 `183/216/242`。
+
+**(b) 一片一色不够，用 PostScript 的张量面片着色**（`/ShadingType 7`，psfile.cc:451
+那一格 —— asy 自己矢量那条路画曲面用的就是它）：十六个控制点原样投下去、四个角各算
+一次 BRDF（角上的法向照 bezierpatch.h:45 的 `normal()` 与 bezierpatch.cc:79-101 那两级
+退路），片内交给 gs 双线性补齐。几何还是同一条曲边，所以矢量那半边照旧逐字节一样，
+而 ink 反而更满（曲边缝里那点漏白没了）。三角面片（kind 2）那一支用 `/ShadingType 4`：
+曲边先当裁剪框，三个角**从重心向外放大 1.6 倍**再画 —— 颜色在三角形上是线性的，
+顶点按同一个倍数外推，片内那一份场一点不变。
+
+**(c) 高光是尖的，所以按屏幕尺寸细分**。真 asy 在 GPU 那边按 `res` 把面片细分到一像素
+以内再逐片元着色（bezierpatch.cc 的 `init(res)`/`render`）；这一层照同一个判据：投影后
+最长边超过 8px 就对半分（最多三级），每块子面片自己算角上的法向与颜色。小面片
+（AiryDisk 那 16 万块，每块几个像素）一次都不分，所以**开销没变**。
+
+量出来的（`OMNI_EPS_FRESH=1 OMNI_EPS_T=120000`）：
+
+- cylinder：位图字节差 128057 -> 92782，ink 盖住参考 98.3% -> **99.9%**
+- shellsqrtx01：40907 -> 38779，97.7% -> 97.6%
+- sacylinder3D：265044 -> 265246，99.0% -> **100.0%**
+- AiryDisk：220929/5807232（3.8%），ink 95.3%，仍是 ~15s；bars3 ~13s
+- 原先"一样"的那几个（hyperboloidsilhouette / spheresilhouette / Gouraud / fermi /
+  quilt / integraltest）**照旧一样**
+
+sacylinder3D 的字节数没动，但它的 ink 满了 —— 逐像素采样看得出两侧的高频花纹对不上
+（那个例子的曲面上还压着网格线），差的不再是着色公式，而是画家算法与 Z-buffer 在互相
+穿插的几何上的次序。这一格留给下一刀。
+
+
 
 
