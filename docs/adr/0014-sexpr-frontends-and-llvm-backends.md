@@ -11886,9 +11886,13 @@ axt.asy 印的第二个 `PT t`。
 ### 十四、下一刀的三段（照源码转写的顺序）
 
 1. **coord 的两半怎么攒**：`base/plain_bounds.asy` 的 `addPoint`/`addBox`/`addPath` 与
-   `plain_picture.asy` 里调它们的地方，逐句核 user 与 truesize（笔的 `min(p)/max(p)`
-   算 truesize，这一格同时影响 x 与 y —— 与 gamma 那两个方向都差 1 ulp 的形状对得上）。
-   `calculateScaling` 与 `simplex` 本身是 asy 源码、我们直接在用，出错只可能在喂进去的数上。
+   `plain_picture.asy` 里调它们的地方 —— **订正：这两份是 asy 自己的源码、我们直接在用**，
+   所以那一段不可能是我们写错，能错的只有它调的那几个内建。两个主要嫌疑都已排除：
+   `min/max(path)`（界与求根那一族已按 fmadd 铺满）、`min/max(pen)`（两侧量过，
+   默认笔都是 `±0.25`、`linewidth=0.5`，逐位相同）。剩下的嫌疑是归并时
+   `min(g)+min(p)` 那类加法（也在 asy 源码里）与刻度那一族坐标（`graph.asy` 的 `ticks`
+   同样是 asy 源码 —— 那就只能落在它调的 `unit`/`length`/三角函数这些内建上）。
+   `calculateScaling` 与 `simplex` 同理：出错只可能在喂进去的数上。
 2. **`internalbounds` 那一路的 padding**（path.cc:546）。
 3. **gsave/concat 的开合规则整段搬**：`drawelement.h:296-342` 的 `transpen`/`penSave`/
    `penTranslate`/`penConcat`/`penRestore` 加 `psfile.h:295-330`（含 `translate` 对 (0,0)
