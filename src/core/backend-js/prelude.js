@@ -402,6 +402,15 @@ function $fmt_g(x, P) {
   if (x === Infinity) return "inf";
   if (x === -Infinity) return "-inf";
   if (x === 0) return Object.is(x, -0) ? "-0" : "0";
+  // 整数快路。位数不超过 P 时 exp < P，%.*g 于是走定点那一支，而整数没有小数部分可去 ——
+  // 结果就是 String(x)。1e21 那道界是因为再大 String 会印成指数形式。
+  // 与下面那条慢路差分对过：整数 -2000..2000、10 的各次幂附近、2^53 两侧，
+  // 加上一批非整数，P 取 1/2/3/4/5/6/7/9/15/17 —— 40610 组**一处不差**。
+  // 出图时每个坐标都过这儿（profile 里 $fmt_g 占 6.7%），而坐标里整数是常客。
+  if (Number.isInteger(x) && Math.abs(x) < 1e21) {
+    const s = String(x);
+    if (s.length - (x < 0 ? 1 : 0) <= P) return s;
+  }
   const exp = Number(x.toExponential(P - 1).split("e")[1]);
   if (exp >= -4 && exp < P) {
     let s = x.toFixed(Math.max(0, P - 1 - exp));

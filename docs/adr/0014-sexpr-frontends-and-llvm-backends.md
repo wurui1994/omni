@@ -10432,4 +10432,31 @@ function $aget(a, i) {
 **验的是外部尺子**，不是套件：`/tmp/cyc.asy` 八行，`a[0]/a[4]/a[5]/a[7]/a[-1]/a[-5]/a[-6]`、
 `a[-sequence(5)]`（int[] 下标那一路）、二维的 `m[2][1]`，与 `asy -noV` 逐行相同。
 
+### 三刀之后的 profile 是平的 —— 这一轮到此为止
+
+再量一次 AiryDisk（4.64s，`--cpu-prof`，子进程那一份）：
+
+```
+   686ms 14.8%  $alen          <- 主要是 cycidx（344ms）与 lexless（158ms）
+   471ms 10.2%  spawnSync      <- latex/dvips 排标签，真 asy 也付这笔，不是我们的
+   325ms  7.0%  $aget
+   312ms  6.7%  $fmt_g         <- $str_real_g，出图时每个坐标一次
+   247ms  5.3%  (garbage collector)
+   167ms  3.6%  $apush
+   165ms  3.6%  s_asy__cycidx_arr_real
+   134ms  2.9%  $aset
+   125ms  2.7%  $vcopy         <- pair 是 2 元数组，值语义每次拷一个数组
+```
+
+没有一格超过 15%，而最大的那两格一个是外部进程、一个是"很多地方都在调的 `alen`"。
+量过一版"把 `alen`/`aget` 在调用点内联"（三种元素种类混流的内核，best of 5）：
+共享 helper 80.1ms、只内联 alen 80.6ms、两个都内联 87.1ms —— **内联反而更慢**，
+V8 自己已经把这两个小函数处理得很好。所以这一轮停在这儿：
+剩下的每一格都 ≤ 7%，而且各自要动的东西比前三刀多。
+
+下一轮如果还要压，按性价比排是：`$fmt_g` 的整数快路（`Number.isInteger(x)` 且位数
+不超过 P 时直接 `String(x)`，与 `%.*g` 恒等，约 2-3%）、`pair` 不再用数组表示（能一起
+砍掉 `$vcopy` 与一部分 GC，但要动向量那一整层）、`alen` 的循环不变量提升（要先有
+"这个循环里没人改这个数组"的判据）。
+
 <!-- ADR-0014 界内短路-END -->
