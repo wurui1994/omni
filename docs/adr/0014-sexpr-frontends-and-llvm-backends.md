@@ -11877,6 +11877,28 @@ axt.asy 印的第二个 `PT t`。
 `$\Gamma(x)$` 是 `±30.374904109589046 / ±7.4731008717310097` —— **两侧逐位相同**。
 所以 gamma 的那 1 ulp 还在几何这一侧（曲线本身的取值/界，或刻度那一族的坐标）。
 
+**界与求根这一族也铺满了**（照源码转写，不等例子报错）：`path.cc:462` 的 `derivative`
+（`fma(3,z0p-z1m,z1-z0)`、`fma(2,z0+z1m,-(4*z0p))`）与 `:82` 的 `-r2-2.0*factor`
+（`fma(-2,factor,-r2)`，三份副本一起）。这两刀本身没移动例子 —— 也就是说 **gamma 的
+那 1 ulp 不在这一族里**（其余的 `0.5*b/a`、`b*factor`、`factor*sqrt1pxm1(x)`、
+`-2.0*c/denom` 都是纯乘除，没有加法可收缩）。
+
+### 十四、下一刀的三段（照源码转写的顺序）
+
+1. **coord 的两半怎么攒**：`base/plain_bounds.asy` 的 `addPoint`/`addBox`/`addPath` 与
+   `plain_picture.asy` 里调它们的地方，逐句核 user 与 truesize（笔的 `min(p)/max(p)`
+   算 truesize，这一格同时影响 x 与 y —— 与 gamma 那两个方向都差 1 ulp 的形状对得上）。
+   `calculateScaling` 与 `simplex` 本身是 asy 源码、我们直接在用，出错只可能在喂进去的数上。
+2. **`internalbounds` 那一路的 padding**（path.cc:546）。
+3. **gsave/concat 的开合规则整段搬**：`drawelement.h:296-342` 的 `transpen`/`penSave`/
+   `penTranslate`/`penConcat`/`penRestore` 加 `psfile.h:295-330`（含 `translate` 对 (0,0)
+   的短路、`concat` 自己那道单位闸门）。lmfit1 是"我们套、参考不套"，方向相反，
+   最可能落在这一段的条件上。
+
+性能红线：`asy__fma` 只进界/求根这类每段几次的路，**不进** `transform*pair` 那种每个
+控制点都过的热路（量过：那一处改了也不动结果）。
+
+
 
 
 
