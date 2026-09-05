@@ -11425,6 +11425,66 @@ drawelement 重新求界）、管子那一格的 ratio、以及像素层的 PBR 
 下一刀就查这一格：先确认 `label(picture, Label, path3, align, pen)` 在
 装着的 three.asy 里是哪一支，再看它落到我们哪个内建上。
 
+**上面这一段又要订正一次 —— 缩到最小的例子推翻了它。** 尺子（`/tmp/nl/ar.asy`，
+一跑两秒）：
+
+```
+  import three;
+  size(100);
+  currentprojection=orthographic(1,0,10,up=Y);
+  draw(O--X);
+  label("$A$",(0.2,0,0));            // 对照：直接落的三维标签
+  arrow("$B$",(0.8,0,0),Y,0.75cm,red);
+```
+
+```
+  参考   封套 255 375 356 416   位图 400x164   （41pt 高）
+  我们   封套 255 391 356 400   位图 404x36    （9pt 高）
+```
+
+解出来看：我们那张上 **`$A$` 在**（直接落的三维标签这条路是通的），
+箭头只剩一个红点、`$B$` 完全没有。所以不是"path3 上的标签那一格"，
+而是 **`arrow` 里那个子图 `opic` 整格没搬过来**：
+`add(pic,opic,b)`（three.asy:2396）走的是
+`dest.add(new void(picture f, transform3 t) { f.add(shift(t*position)*src,group,above); })`
+—— 这一族（`picture.add(void(picture,transform3))`、`transform3 * picture`、
+`picture.add(picture,bool,bool)`）都是 asy 自己的 `plain_picture.asy`（我们这一侧
+`src/lib/asy` 里一个字都没有），所以缺的是它们踩到的某个**内建**。
+
+**再缩一层 —— 第一次缩错了，第二次缩对了。**
+
+先跑的那份（`/tmp/nl/ar2.asy`）子图里放的是 `(0,0,0)--(0,0.5,0)`，两侧都只有 1pt 高，
+我据此写下"`add(picture,picture,triple)` 不是它"——**那一笔是错的**：
+`add(pic,opic,b)` 是把 `opic` **不经过 `size(100)` 那次缩放**加进去的
+（`f.add(shift(t*position)*src)` 里 `src` 是按单位变换 fit 的），所以 0.5 个单位
+落到纸上就是 0.5pt，两侧都看不见 —— 那份尺子测不出东西来。
+
+把子图里的线加长到 30 个单位（`/tmp/nl/ar3.asy`），就干净地复现了：
+
+```
+  import three; size(100); currentprojection=orthographic(1,0,10,up=Y);
+  draw(O--X);
+  picture opic; draw(opic,(0,0,0)--(0,30,0),blue);
+  add(currentpicture,opic,(0.8,0,0));
+```
+
+```
+  参考   封套 255 380 356 411   位图 400x124   （31pt 高）
+  我们   封套 255 395 356 396   位图 404x4     （1pt 高）
+```
+
+**`add(picture, picture, triple)` 就是它**：子图那条 30 单位的线在我们这边
+一点都没进到帧里。这也解释了 `arrow` —— 它的箭杆长 `0.75cm = 21.26bp`，
+在子图里是 21 个单位、加进来之后就是纸上的 21pt，正是参考那 41pt 里的大头。
+
+下一刀就实现/修这一条链（都是 asy 自己的 `plain_picture.asy` 在调，缺的是内建）：
+`picture.add(void(picture,transform3))`、`transform3 * picture`、
+`picture.add(picture, bool group, bool above)`。尺子就用上面这七行，两秒一趟。
+
+`label(picture,Label,path3,…)` 那一格照 three_surface.asy:2160 是
+`label(pic,L,point(g,position),light,name,interaction)` —— 与 `$A$` 走的是同一格，
+而 `$A$` 是好的，所以它不是嫌疑。
+
 顺带看清另外两笔（都是像素层的，不是几何层）：
 - 参考上方那片背面是**黑的**（PBR 着色 + 光照），我们是平的绿；
 - `draw(p3,blue)` 那条曲线参考是蓝的、我们是黑的 —— 面片/路径的颜色我们取
