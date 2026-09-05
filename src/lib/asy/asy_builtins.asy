@@ -8135,6 +8135,9 @@ triple asy__r3m = (0, 0, 0);
 triple asy__r3M = (0, 0, 0);
 real[][] asy__r3t;
 real[][] asy__r3tup;
+// 真 billboard 那一趟里，op 表头一格的首点（查 m/M 与 op 是不是同一套坐标）
+triple asy__r3op0 = (0, 0, 0);
+int asy__r3nops = 0;
 // 三维那条路的出口（EPS 那一支）。几何全部照 glrender.cc:531-543 与
 // renderBase.cc:932 那两段（施工图第二节，四项与参考逐字节对上）：
 //   oW/oH   = ceil(收到的 w/h)            —— initDisplay 的形参是 int
@@ -9929,6 +9932,13 @@ private void asy__merge3hook() {
       // 所以 1px = 1/expand pt。GL 那边画线是 1 个采样宽，粗一倍就多一圈 ink。
       + ps(1 / expand) + " setlinewidth 1 setlinecap 1 setlinejoin" + nl;
     drawop3[] ops = asy__ops3(f);
+    // 量口：op 表头一格的首点（与 m/M 对量级，见 ADR 第八节末）
+    asy__r3nops = ops.length;
+    if (ops.length > 0) {
+      if (ops[0].kind == 0) asy__r3op0 = ops[0].g3.nodes[0].point;
+      else if (ops[0].kind == 3) { if (ops[0].Q3.length > 0) asy__r3op0 = ops[0].Q3[0]; }
+      else if (ops[0].P3.length > 0 && ops[0].P3[0].length > 0) asy__r3op0 = ops[0].P3[0][0];
+    }
     int nink = 0;
     // 面片（kind == 1/2）先按深度排：视图空间里 z 越负越远，画家算法从远画到近。
     // 键取 16 个控制点 z 的平均（够用；真 asy 那边是 GPU 的 Z-buffer）。
