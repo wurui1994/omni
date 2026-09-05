@@ -11064,6 +11064,19 @@ op 表没跟上，或者跟的不是同一个。
 或者导出那一路（`Export`）用的 `Width/Height` 与 `setProjection` 时的不是同一对。
 判据不变：ink 的包围盒撑到 `0..370 / 8..390`。
 
+**读过了：没有再调**。`updateProjection`（:193）只是 `projMat*viewMat`，
+`frustum`/`ortho`（:198/:205）就是直接塞 `glm::frustum`/`glm::ortho`，
+`capzoom`（:349）只夹 `Zoom` 的上下限。也就是说 `setDimensions` 算出来的
+`xmin..ymax` 就是最终视口，我这一份与它是一致的 —— 按这套算法 asy **也**该把
+内容放在 37% 上，可参考那幅是铺满的。矛盾还在，所以下一刀该查的是**剩下那两个口径**：
+
+- `setProjection` 那一刻的 `Width`/`Height` 是不是 `fullWidth/fullHeight`
+  （分块导出时 glrender 会按 tile 分批，`aspect` 会因此不同）；
+- `Export` 那一路是不是**重新**设过一次投影（它自己算过 `Aspect` 与 `w/h`，
+  glrender.cc:531-543 那一段就在改 `w`/`h`）。
+
+这两处任一处让视口小 2.4 倍，数就对上了。
+
 **下一刀的活**：拿这个把第 0 步的 op 表投影成 2D（面片按控制点投影后细分，
 路径按结点+控制点投影），按深度排一遍（画家算法，先不做 Z-buffer），
 发一份 `oW x oH` 的临时 EPS，交给 gs 出像素，读回字节塞进 `kind == 7` 那一格。
