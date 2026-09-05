@@ -11902,6 +11902,38 @@ axt.asy 印的第二个 `PT t`。
 性能红线：`asy__fma` 只进界/求根这类每段几次的路，**不进** `transform*pair` 那种每个
 控制点都过的热路（量过：那一处改了也不动结果）。
 
+### 十五、把 `fma` 收进宿主交集（ADR-0019 路 2 的第二条例外）
+
+顺着 gamma 那 1 ulp 追到底，最后一处是 `length(pair)`：参考 pair.h:144 是
+`sqrt(abs2())` = `sqrt(x*x+y*y)`（**不是 hypot** —— 我们 runtime.js:185 的
+`asy__pabs` 也是朴素那一份，注释里量过 `abs((1e200,1e200))` 是 inf，这一格本来就对），
+而 `x*x+y*y` 在 arm64 上被 clang 收缩成一条 `fma(y,y,x*x)`。我们那份 s-expr 是
+`(bin "+" (bin "*" x x) (bin "*" y y))`，两次舍入 —— 差就在这儿。
+
+**这不该在 asy 层补**：`asy__fma`（Dekker + two-sum）十几个浮点操作，`length` 是热路
+（每个控制点、每次 `unit`/`ticks` 都过），在那儿手写会拖慢一大片。正确的落点是宿主层
+加一个 `fma` 原语 —— 与 `nextafter` 完全同构的一条例外：C99 math.h 里有、`Math.*` 里
+没有，而它是**精确运算**（IEEE-754 单次舍入），所以两侧可以要求逐字节一致；C/LLVM 腿上
+它就是一条 `fmadd`，只有 JS 腿要软件模拟。
+
+七个落点（都照 `nextafter` / `realbits` 的先例平行加一条）：
+
+- `src/core/sexpr/lower.js` 的 `RMATH`：加 `['fma', 3]`（注意是三元 —— `js_math` 的
+  abi 是 `arity: 2`，塞不进去，要新开一条 abi 项）
+- `src/core/hir/js_abi.js`：新开 `js_fma`（arity 3）
+- `src/core/backend-js/prelude.js`：手写 Dekker 拆分 + two-sum（就是现在 asy 层那份
+  `asy__fma` 的正文）
+- `src/runtime/omni_math.c` + `omni.h`：`omni_r_fma` → libm 的 `fma`（**权威**）
+- `src/core/backend-llvm/emit.js`：`rmath_fma.real` → `omni_r_fma`
+- `src/core/interp/builtin.js`：opcode 表加一格
+- `src/core/frontend-asy/runtime.js`：`asy__pabs`/`asy__tabs` 改成
+  `sqrt(fma(y,y,x*x))`（triple 那份是 `fma(z,z,fma(y,y,x*x))`，照 C 的左结合）
+
+做完之后 asy 层那份 `asy__fma` 就只留给"每段几次"的界/求根那一族，或者干脆换成宿主的。
+判据：gamma 第二趟 fit 的 `t.xx/t.yy` 应当变成 `35.813002677154202`/`23.962767768312805`，
+`t*T*inverse(t)` 跟着变成非单位、gsave 闸门打开。
+
+
 
 
 
