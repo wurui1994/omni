@@ -10392,3 +10392,44 @@ function $aget(a, i) {
 （`rt/arr-neg` 走的是 `aset`：读那条与写那条各有自己的快路与慢路，两侧要各钉一条。）
 
 <!-- ADR-0014 哨兵-END -->
+
+## 已落地：在界内的下标不去问 cyclic 登记册（AiryDisk 10.4s -> 4.4s）
+
+<!-- ADR-0014 界内短路-BEGIN -->
+
+前两刀之后再量一次 AiryDisk（`--cpu-prof`，按**调用者**分账）：
+
+```
+  s_asy__cycis_arr_real   自己                       3.12s  19.8%
+    └ 它调的 $aget 1.47s (9.3%) / $alen 1.14s (7.2%) / $iadd 0.60s (3.8%)
+  s_asy__cycidx_*         自己 + $alen                1.4s     9%
+                                                     ----
+                                                     约 49%
+```
+
+也就是说：`.cyclic` 那本旁挂登记册（第六十五刀，见上面 `cycHelper` 那一节）占掉了将近一半。
+根因**不是**"每次下标多一次调用"，是那一格 memo：`cycis` 命中不了就线性扫一遍登记册，
+而登记册非空（plain_paths 把一批 `real[]` 标成 cyclic），两个数组交替下标时 memo 全是未命中，
+于是**每次下标都扫一遍**（`while` 的条件里还每轮重读一次 `alen`）。
+
+改法一句，而且语义上恒等：**在界内的下标与 cyclic 无关**。asy 那边是
+`if(cyclic && len > 0) n=imod(n,len);`（runarray.in:104），而 `imod(i,n)` 在 `0 <= i < n`
+上就是 `i`（`asy__mod` 只在余数与除数反号时补一个 `n`）。所以 `cycidx` 先看一眼在不在界内，
+在就直接回，不去问登记册：
+
+```
+(fn asy__cycidx_arr_real ((a (arr real)) (i int)) int
+  (let n int (alen (var a)))
+  (if (bin "&&" (bin ">=" (var i) (int 0)) (bin "<" (var i) (var n))) (do (ret (var i))))
+  …原来那三句…
+```
+
+绕圈（负下标、越过末尾）是少数，让少数去付那个钱。
+
+**量**（min of 3）：`sinc` 9.68s -> 6.05s、`AiryDisk` 10.39s -> 4.37s。
+三刀累计：`sinc` 17.34 -> 6.05（2.9×）、`AiryDisk` 31.86 -> 4.37（7.3×）。
+
+**验的是外部尺子**，不是套件：`/tmp/cyc.asy` 八行，`a[0]/a[4]/a[5]/a[7]/a[-1]/a[-5]/a[-6]`、
+`a[-sequence(5)]`（int[] 下标那一路）、二维的 `m[2][1]`，与 `asy -noV` 逐行相同。
+
+<!-- ADR-0014 界内短路-END -->

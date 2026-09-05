@@ -978,9 +978,17 @@ class AsyLower {
         (set i (bin "+" (var i) (int 1)))))
     (if (var on) (do (apush (var ${nm.reg}) (var a))))
     (ret))`);
+    // 下标本体。**在界内的下标与 cyclic 无关** —— asy 那边是
+    // `if(cyclic && len > 0) n=imod(n,len);`（runarray.in:104），而 imod(i,n) 在
+    // 0 <= i < n 上就是 i（asy__mod 只在余数与除数反号时补一个 n）。所以先看一眼在不在界内，
+    // 在就直接回，不去问登记册。量过 AiryDisk 的 profile（这一句之前）：
+    // asy__cycis_arr_real 自己 19.8%，加上它调的 $aget/$alen/$iadd 一共约 40% ——
+    // 那本登记册非空（plain_paths 把一批 real[] 标成 cyclic），一格 memo 在两个数组之间
+    // 来回时全是未命中，于是每次下标都线性扫一遍。绕圈才是少数，让少数去付那个钱。
     this.arrGen.set(nm.idx, `  (fn ${nm.idx} ((a ${ct}) (i int)) int
-    (if (bin "==" (alen (var ${nm.reg})) (int 0)) (do (ret (var i))))
     (let n int (alen (var a)))
+    (if (bin "&&" (bin ">=" (var i) (int 0)) (bin "<" (var i) (var n))) (do (ret (var i))))
+    (if (bin "==" (alen (var ${nm.reg})) (int 0)) (do (ret (var i))))
     (if (bin ">" (var n) (int 0))
       (do (if (call ${nm.is} (var a)) (do (ret (call asy__mod (var i) (var n)))))))
     (ret (var i)))`);
