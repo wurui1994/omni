@@ -151,6 +151,9 @@ const RT_OPS = new Map([
   // 那个「C99 ∩ Math.*」交集的例外（ADR-0019 路 2）：libm 的 nextafter。
   // 这条腿上它照旧是一个真符号 —— 与别的 rmath 一样，没有特殊处。
   ['rmath_nextafter.real', { sym: 'omni_r_nextafter', ret: 'double', params: ['double', 'double'] }],
+  // 交集的**第二条例外**（ADR-0014 第十五节）：libm 的 fma。这条腿上也是一个真符号
+  // （clang 把 omni_r_fma 里那句编成一条 fmadd）。
+  ['rmath_fma.real', { sym: 'omni_r_fma', ret: 'double', params: ['double', 'double', 'double'] }],
   // 位重解释（ADR-0019 路 1）。两个名字各来一条 —— 与 `trunc` / `trunc.real` 同一个理由
   // （按接收者单态化的那一步会给名字接一个后缀）。
   ['realbits', { sym: 'omni_r_bits', ret: 'i64', params: ['double'] }],
