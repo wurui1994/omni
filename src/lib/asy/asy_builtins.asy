@@ -9969,23 +9969,18 @@ private void asy__merge3hook() {
     if (nink == 0) return "";
     // P6 的头是 `P6\n<w> <h>\n255\n`，长度按实际数字位数算；`xxd -p | tr -d` 那一步
     // 让 shell 把字节转成 ASCII —— `_readtext` 是按 utf8 读的，二进制读不回来。
-    // 中间产物放**绝对路径**下（与 asy__dimfile 的 /tmp/omni-asytex 同一条理由）。
-    // **这一刀还是没渲出来**，量出来的：/tmp/omni-r3 压根没建起来，也就是这个函数
-    // 走到这儿之前就 return 了 —— `nink == 0`，op 表是空的。原因已经定位：
-    // three.asy:2883 有一句 `if(P.absolute) f=modelview*f`，**帧的变换算子**（t*f）
-    // 会造一张新帧，而这一刀只在 `add`/`prepend` 里搬了 op 表，变换那一处没搬 ——
-    // 于是传进 shipout3 的那张帧上一格 op 都没有。下一刀先补那一处（搬的时候
-    // 还要把变换作用到几何上），这一段才能真的跑起来。
+    // P6 的头**不是**固定长度：gs 会多写一行 `# Image generated …` 的注释
+    // （量出来的：446468 字节的 ppm 里头占 68 个，按 `P6\n<w> <h>\n255\n` 算只有 15）。
+    // 所以不算头长，直接取**最后** w*h*3 个字节 —— 那一定是像素。
     string dir = "/tmp/omni-r3";
-    string hdr = "P6" + nl + string(fw) + " " + string(fh) + nl + "255" + nl;
-    int skip = length(hdr);
+    int nbytes = fw * fh * 3;
     if (_runproc("mkdir -p " + dir + " && rm -f " + dir + "/r3.*") != 0) return "";
     _writetext(dir + "/r3.eps", doc);
     if (_runproc("cd " + dir + " && gs -q -dNOPAUSE -dBATCH"
           + " -sDEVICE=ppmraw -g" + string(fw) + "x" + string(fh)
           + " -r" + string((int) (72 * expand))
           + " -sOutputFile=r3.ppm r3.eps 2>/dev/null"
-          + " && tail -c +" + string(skip + 1) + " r3.ppm | xxd -p | tr -d '\n' > r3.hex") != 0)
+          + " && tail -c " + string(nbytes) + " r3.ppm | xxd -p | tr -d '\n' > r3.hex") != 0)
       return "";
     return _readtext(dir + "/r3.hex");
   };
@@ -10244,6 +10239,38 @@ frame operator *(real[][] t, frame f)
                       k == 0 ? f.min3v.z : f.max3v.z);
           asy__add3(g, t * c);
         }
+  }
+  // 三维那张 op 表也要跟过来，而且要**把变换作用到几何上** —— 这一处不搬的话，
+  // three.asy:2883 的 `if(P.absolute) f=modelview*f` 一走，传给 shipout3 的那张帧上
+  // 一格 op 都没有（量出来的：/tmp/omni-r3 压根没建起来、位图永远是兜底的白底）。
+  drawop3[] s = asy__ops3(f);
+  for (int i = 0; i < s.length; ++i) {
+    drawop3 o = s[i];
+    drawop3 q;
+    q.kind = o.kind;
+    q.center = t * o.center;
+    q.p = o.p;
+    q.colors = o.colors;
+    q.straight = o.straight;
+    q.lightOn = o.lightOn;
+    q.opacity = o.opacity;
+    q.shininess = o.shininess;
+    q.metallic = o.metallic;
+    q.fresnel0 = o.fresnel0;
+    q.interaction = o.interaction;
+    if (o.kind == 0) {
+      // `node3` 是 path3 体里声明的类型、体外看不见，所以走现成的 `real[][] * path3`
+      q.g3 = t * o.g3;
+    } else {
+      triple[][] P;
+      for (int a = 0; a < o.P3.length; ++a) {
+        triple[] row;
+        for (int b = 0; b < o.P3[a].length; ++b) row.push(t * o.P3[a][b]);
+        P.push(row);
+      }
+      q.P3 = P;
+    }
+    asy__push3(g, q);
   }
   return g;
 }
