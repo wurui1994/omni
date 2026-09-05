@@ -4,8 +4,62 @@
 // 否则四后端差分测试立刻会红。数值/打印/字符串规格见 docs/adr/0005-value-semantics.md。
 
 export const JS_PRELUDE = String.raw`
-const $W = (x) => BigInt.asIntN(64, x);
+// ---------------------------------------------------------------- int 的表示
+// 方言的 int 是 **i64**（回绕、精确），而 JS 只有 number（安全到 2^53-1）与 BigInt。
+// 从前一律用 BigInt，量出来是最大的一块成本：同一个内核换成 number 快 3 倍
+// （再去掉下标那两道检查还有 2.4 倍，见 ADR-0014 的"天花板"那一节）。
+//
+// 现在的表示是**规范化的 number|BigInt**：
+//   |v| <= 2^53-1  ->  number（整数值）
+//   否则            ->  BigInt
+// 两种表示的取值范围**不重叠**，所以规范形唯一 —— 三等号仍然对（不会同时存在 1 与 1n）、
+// Map 的键仍然唯一（SameValueZero 下 -0 与 0 同键）、印出来的字仍然一样。
+// 规范化的唯一入口是 $CN；每个会越界的运算算完都过它一次。
+// （这一整份是 String.raw 模板的正文：注释里也不许出现反引号。）
+const $ISAFE = 9007199254740991;          // 2^53-1
+const $ISAFEn = 9007199254740991n;
+const $CN = (v) => (typeof v === "bigint"
+  ? (v <= $ISAFEn && v >= -$ISAFEn ? Number(v) : v) : v);
+const $B = (x) => (typeof x === "bigint" ? x : BigInt(x));
 const $INT_MIN = -(2n ** 63n);
+
+// + - * 的快路：两个 number 时直接算，结果落在安全范围里就是**精确**的
+// （IEEE 是正确舍入的：真值 >= 2^53+1 时算出来必然 >= 2^53，所以这一查是充分的）。
+// 不过关就回 BigInt 重算一遍再规范化。
+function $iadd(a, b) {
+  if (typeof a === "number" && typeof b === "number") {
+    const r = a + b;
+    if (r <= $ISAFE && r >= -$ISAFE) return r;
+  }
+  return $CN(BigInt.asIntN(64, $B(a) + $B(b)));
+}
+function $isub(a, b) {
+  if (typeof a === "number" && typeof b === "number") {
+    const r = a - b;
+    if (r <= $ISAFE && r >= -$ISAFE) return r;
+  }
+  return $CN(BigInt.asIntN(64, $B(a) - $B(b)));
+}
+function $imul(a, b) {
+  if (typeof a === "number" && typeof b === "number") {
+    const r = a * b;
+    if (r <= $ISAFE && r >= -$ISAFE) return r;
+  }
+  return $CN(BigInt.asIntN(64, $B(a) * $B(b)));
+}
+function $ineg(a) {
+  if (typeof a === "number") return a === 0 ? 0 : -a;
+  return $CN(BigInt.asIntN(64, -a));
+}
+// 位运算一律走 BigInt：JS 的 & | ^ << >> 会把操作数截成 int32，number 那条路直接是错的。
+// asy 那边位运算是 nope（builtins.tab 里 AND/OR/XOR 都还没做），所以这一档不在热路上。
+function $ishl(a, b) { return $CN(BigInt.asIntN(64, $B(a) << ($B(b) & 63n))); }
+function $ishr(a, b) { return $CN($B(a) >> ($B(b) & 63n)); }
+function $iushr(a, b) { return $CN(BigInt.asIntN(64, BigInt.asUintN(64, $B(a)) >> ($B(b) & 63n))); }
+function $iand(a, b) { return $CN($B(a) & $B(b)); }
+function $ior(a, b) { return $CN($B(a) | $B(b)); }
+function $ixor(a, b) { return $CN($B(a) ^ $B(b)); }
+function $inot(a) { return $CN(BigInt.asIntN(64, ~$B(a))); }
 
 // 运行期错误的去处：默认是"打一行、退 70"（与 C 侧 omni_error 逐字对齐）。
 // REPL 的 js 引擎会装一个钩子进来 —— 它 throw，于是一批跑挂了只掀翻那一批，不掀翻会话。
@@ -25,33 +79,66 @@ function $rt_error(msg) {
   process.exit(70);
 }
 
+// 截断除（C 的 /）。两个 number 的快路借取模走：a % b 在整数上是**精确**的（fmod
+// 对整数操作数不丢位），a - r 是 b 的整数倍，于是 (a-r)/b 的商正好可表示、除法精确。
+// 直接写 Math.trunc(a/b) 不行：a/b 是先舍入的浮点商，贴着整数边界时会被舍到隔壁。
+// 上界那一查保证 a - r 不越过 2^53-1（|a-r| <= |a|+|b|）。
 function $div(a, b) {
-  if (b === 0n) $rt_error("division by zero");
-  if (a === $INT_MIN && b === -1n) return $INT_MIN;  // 与 C 的溢出行为对齐
-  return a / b;
+  if (typeof a === "number" && typeof b === "number") {
+    if (b === 0) $rt_error("division by zero");
+    if (Math.abs(a) + Math.abs(b) <= $ISAFE) {
+      const q = (a - (a % b)) / b;
+      return q === 0 ? 0 : q;
+    }
+  }
+  const A = $B(a), B2 = $B(b);
+  if (B2 === 0n) $rt_error("division by zero");
+  if (A === $INT_MIN && B2 === -1n) return $CN($INT_MIN);  // 与 C 的溢出行为对齐
+  return $CN(A / B2);
 }
 
 function $mod(a, b) {
+  if (typeof a === "number" && typeof b === "number") {
+    if (b === 0) $rt_error("division by zero");
+    const r = a % b;
+    return r === 0 ? 0 : r;
+  }
+  const A = $B(a), B2 = $B(b);
+  if (B2 === 0n) $rt_error("division by zero");
+  if (A === $INT_MIN && B2 === -1n) return 0;
+  return $CN(A % B2);
+}
+
+// dynamic 那一格里的 int **一律 BigInt**（$dynTag 靠 typeof 分 int 与 real，
+// 1 与 1.0 在 number 上分不开），所以那半边有自己的三个：回卷、除、取余，都不规范化。
+// 静态那半边的入口是 $iadd/$div/$mod，两半在装箱边界（emit 的 Box -> $B）上接。
+const $DW = (x) => BigInt.asIntN(64, x);
+function $ddiv(a, b) {
+  if (b === 0n) $rt_error("division by zero");
+  if (a === $INT_MIN && b === -1n) return $INT_MIN;
+  return a / b;
+}
+function $dmod(a, b) {
   if (b === 0n) $rt_error("division by zero");
   if (a === $INT_MIN && b === -1n) return 0n;
   return a % b;
 }
 
 // 无符号那三个（ADR-0016 第六十一刀）。位是同一份，只是当无符号 64 位读：
-// $U 把那一格的位读成 0..2^64-1，算完再 $W 回规范形（有符号 64 位）。
+// $U 把那一格的位读成 0..2^64-1，算完再回卷成有符号 64 位、规范化。
 // 除零那句话与有符号那两个一模一样：五条腿上是同一句。
 // $INT_MIN / -1 那道特例这儿不需要 —— 无符号除法没有溢出。
 // （这段里不能出现反引号：整份 prelude 是一个 String.raw 模板。）
-const $U = (x) => BigInt.asUintN(64, x);
+const $U = (x) => BigInt.asUintN(64, $B(x));
 
 function $udiv(a, b) {
-  if (b === 0n) $rt_error("division by zero");
-  return $W($U(a) / $U(b));
+  if ($B(b) === 0n) $rt_error("division by zero");
+  return $CN(BigInt.asIntN(64, $U(a) / $U(b)));
 }
 
 function $umod(a, b) {
-  if (b === 0n) $rt_error("division by zero");
-  return $W($U(a) % $U(b));
+  if ($B(b) === 0n) $rt_error("division by zero");
+  return $CN(BigInt.asIntN(64, $U(a) % $U(b)));
 }
 
 function $fmod(a, b) { return a % b; }
@@ -111,7 +198,7 @@ function $tchk(a) {
   if (a === 0) $rt_error("null pointer dereference");
   return a;
 }
-function $pload_i(a) { return $mdv.getBigInt64(a, true); }
+function $pload_i(a) { return $CN($mdv.getBigInt64(a, true)); }
 function $pload_r(a) { return $mdv.getFloat64(a, true); }
 function $pload_b(a) { return $mdv.getUint8(a) !== 0; }
 // 指针自己落进内存（ADR-0016 第十六刀）：fat 是三个字 {addr, base, end}，次序与
@@ -122,7 +209,7 @@ function $pload_p(a) {
     Number($mdv.getBigInt64(a + 16, true))];
 }
 function $pload_t(a) { return Number($mdv.getBigInt64(a, true)); }
-function $pstore_i(a, v) { $mdv.setBigInt64(a, $W(v), true); }
+function $pstore_i(a, v) { $mdv.setBigInt64(a, BigInt.asIntN(64, $B(v)), true); }
 function $pstore_r(a, v) { $mdv.setFloat64(a, v, true); }
 function $pstore_b(a, v) { $mdv.setUint8(a, v ? 1 : 0); }
 function $pstore_p(a, p) {
@@ -156,22 +243,22 @@ function $lin_data(off, bytes) {
   }
   $linBy.set(bytes, off);
 }
-function $lin_size() { return BigInt($linMem === null ? 0 : $linMem.byteLength / 65536); }
+function $lin_size() { return $linMem === null ? 0 : $linMem.byteLength / 65536; }
 function $lin_grow(n) {
   if ($linMem === null) $rt_error("memory access without a memory");
   const add = Number(n);
   const old = $linMem.byteLength / 65536;
-  if (add < 0) return -1n;
+  if (add < 0) return -1;
   const want = old + add;
-  if (want > 65536) return -1n;
-  if ($linMax !== 0 && want > $linMax) return -1n;
-  if (add === 0) return BigInt(old);
+  if (want > 65536) return -1;
+  if ($linMax !== 0 && want > $linMax) return -1;
+  if (add === 0) return old;
   const nb = new ArrayBuffer(want * 65536);
   new Uint8Array(nb).set($linBy);
   $linMem = nb;
   $linDv = new DataView($linMem);
   $linBy = new Uint8Array($linMem);
-  return BigInt(old);
+  return old;
 }
 function $lin_at(addr, off, bytes) {
   if ($linMem === null) $rt_error("memory access without a memory");
@@ -182,24 +269,24 @@ function $lin_at(addr, off, bytes) {
   }
   return a;
 }
-function $lin_ld_i8s(a, o) { return BigInt($linDv.getInt8($lin_at(a, o, 1))); }
-function $lin_ld_i8u(a, o) { return BigInt($linDv.getUint8($lin_at(a, o, 1))); }
-function $lin_ld_i16s(a, o) { return BigInt($linDv.getInt16($lin_at(a, o, 2), true)); }
-function $lin_ld_i16u(a, o) { return BigInt($linDv.getUint16($lin_at(a, o, 2), true)); }
-function $lin_ld_i32s(a, o) { return BigInt($linDv.getInt32($lin_at(a, o, 4), true)); }
-function $lin_ld_i32u(a, o) { return BigInt($linDv.getUint32($lin_at(a, o, 4), true)); }
-function $lin_ld_i64(a, o) { return $linDv.getBigInt64($lin_at(a, o, 8), true); }
+function $lin_ld_i8s(a, o) { return $linDv.getInt8($lin_at(a, o, 1)); }
+function $lin_ld_i8u(a, o) { return $linDv.getUint8($lin_at(a, o, 1)); }
+function $lin_ld_i16s(a, o) { return $linDv.getInt16($lin_at(a, o, 2), true); }
+function $lin_ld_i16u(a, o) { return $linDv.getUint16($lin_at(a, o, 2), true); }
+function $lin_ld_i32s(a, o) { return $linDv.getInt32($lin_at(a, o, 4), true); }
+function $lin_ld_i32u(a, o) { return $linDv.getUint32($lin_at(a, o, 4), true); }
+function $lin_ld_i64(a, o) { return $CN($linDv.getBigInt64($lin_at(a, o, 8), true)); }
 function $lin_ld_f32(a, o) { return $linDv.getFloat32($lin_at(a, o, 4), true); }
 function $lin_ld_f64(a, o) { return $linDv.getFloat64($lin_at(a, o, 8), true); }
-function $lin_st_i8(a, o, v) { $linDv.setUint8($lin_at(a, o, 1), Number(BigInt.asUintN(8, v))); return v; }
-function $lin_st_i16(a, o, v) { $linDv.setUint16($lin_at(a, o, 2), Number(BigInt.asUintN(16, v)), true); return v; }
-function $lin_st_i32(a, o, v) { $linDv.setUint32($lin_at(a, o, 4), Number(BigInt.asUintN(32, v)), true); return v; }
-function $lin_st_i64(a, o, v) { $linDv.setBigInt64($lin_at(a, o, 8), BigInt.asIntN(64, v), true); return v; }
+function $lin_st_i8(a, o, v) { $linDv.setUint8($lin_at(a, o, 1), Number(BigInt.asUintN(8, $B(v)))); return v; }
+function $lin_st_i16(a, o, v) { $linDv.setUint16($lin_at(a, o, 2), Number(BigInt.asUintN(16, $B(v))), true); return v; }
+function $lin_st_i32(a, o, v) { $linDv.setUint32($lin_at(a, o, 4), Number(BigInt.asUintN(32, $B(v))), true); return v; }
+function $lin_st_i64(a, o, v) { $linDv.setBigInt64($lin_at(a, o, 8), BigInt.asIntN(64, $B(v)), true); return v; }
 function $lin_st_f32(a, o, v) { $linDv.setFloat32($lin_at(a, o, 4), v, true); return v; }
 function $lin_st_f64(a, o, v) { $linDv.setFloat64($lin_at(a, o, 8), v, true); return v; }
 
 function $psub(p, q, size) {
-  if (p[1] !== q[1] || p[2] !== q[2]) $rt_error("pointer difference across different blocks");  return BigInt((p[0] - q[0]) / size);
+  if (p[1] !== q[1] || p[2] !== q[2]) $rt_error("pointer difference across different blocks");  return (p[0] - q[0]) / size;
 }
 // 走到块外**不报错**（只有解引用才报）：jancy 的 p += i 是合法的，*p 才是那句
 // out-of-bounds（type_ptr_data.rst 里的例子就是先加再解引用）。
@@ -207,21 +294,21 @@ function $padd(p, k, size) { return [p[0] + Number(k) * size, p[1], p[2]]; }
 
 // 缓冲（ADR-0014 门槛 7 第一阶段）：一段连续的 int/real + 一个长度，引用语义。
 // 越界的消息与 list 那句同一个形状 —— 那句已经在三份实现里对齐过，照它写就不必再对一次。
-function $bnew(n, isInt) {
+// int 换成规范化的 number|BigInt 之后（见文件头）两种元素的零值都是 0，所以不再问元素类型。
+function $bnew(n) {
   const len = Number(n);
   if (len < 0) $rt_error("buffer length cannot be negative: " + len);
-  const z = isInt ? 0n : 0;
   const o = [];
-  for (let i = 0; i < len; i++) o.push(z);
+  for (let i = 0; i < len; i++) o.push(0);
   return o;
 }
 function $bget(a, i) {
-  const n = Number(i);
+  const n = typeof i === "number" ? i : Number(i);
   if (n < 0 || n >= a.length) $rt_error("buffer index out of range: " + n + " (length " + a.length + ")");
   return a[n];
 }
 function $bset(a, i, v) {
-  const n = Number(i);
+  const n = typeof i === "number" ? i : Number(i);
   if (n < 0 || n >= a.length) $rt_error("buffer index out of range: " + n + " (length " + a.length + ")");
   a[n] = v;
   return v;
@@ -254,19 +341,19 @@ function $anew(n, zero, cp) {
 // 这四个是**最热的一格**：量过 interpolate1.asy（标签尺寸都命中缓存的那一趟），
 // $aget 9.2%、$anew 3.8%、$aset 3.7%、$alen 2.7%、$acopy 1.8%，加上 $nullCheck 1.1%
 // 一共占掉近四分之一。所以 null 检查与 $acopy 都在这儿**手展开**，不再多跳一层函数。
-// （真正的大头是 int 在 JS 侧是 BigInt：量过 a[Number(bigint)] 比 a[number] 慢 12 倍，
-//  BigInt 的加法带回绕比 Number 慢 3.2 倍。那是另一刀的事，见 ADR-0014。
-//  注意这一整份是 String.raw 里的正文 —— 反引号会把它截断，注释里也不能写。）
-function $alen(a) { if (a === null) $rt_error("null reference"); return BigInt(a.length); }
+// int 换成规范化的 number|BigInt 之后（见文件头）：$alen 直接回 a.length（不再造 BigInt），
+// 下标在 typeof 是 number 时直接用（不再 Number(i)）。
+// （注意这一整份是 String.raw 里的正文 —— 反引号会把它截断，注释里也不能写。）
+function $alen(a) { if (a === null) $rt_error("null reference"); return a.length; }
 function $aget(a, i) {
   if (a === null) $rt_error("null reference");
-  const n = Number(i);
+  const n = typeof i === "number" ? i : Number(i);
   if (n < 0 || n >= a.length) $rt_error("array index out of range: " + n + " (length " + a.length + ")");
   return a[n];
 }
 function $aset(a, i, v, cp) {
   if (a === null) $rt_error("null reference");
-  const n = Number(i);
+  const n = typeof i === "number" ? i : Number(i);
   if (n < 0 || n >= a.length) $rt_error("array index out of range: " + n + " (length " + a.length + ")");
   a[n] = cp === true && Array.isArray(v) ? v.slice() : v;
   return v;
@@ -470,7 +557,7 @@ function $str_repeat(s, n) { return Number(n) <= 0 ? "" : s.repeat(Number(n)); }
 
 // (sbase E 进制) —— E 的位当**无符号 64 位**读（C 的 %x 的规矩），数字小写。
 // BigInt.toString(radix) 给的就是 0-9a-z，与 omni_str_base 的那张表同一套。
-function $str_base(v, b) { return (v < 0n ? v + 18446744073709551616n : v).toString(Number(b)); }
+function $str_base(v, b) { return $U(v).toString(Number(b)); }
 
 // (supper S) —— **只动 ASCII 的 a-z**。刻意不用 toUpperCase()：那是 Unicode 的
 // （德文 sharp s 会变成两个字符），而 C 那侧的 toupper 还看 locale，两条路对不上。
@@ -491,20 +578,22 @@ const $trunc = (x) => {
   if (t < -9223372036854775808 || t >= 9223372036854775808) {
     $rt_error("real " + $fmt_real(x) + " is out of int range");
   }
-  return BigInt(t);
+  // t 已经是整数值：安全范围内直接就是规范形（顺手把 -0 归成 0），否则过一趟 BigInt
+  if (t >= -$ISAFE && t <= $ISAFE) return t === 0 ? 0 : t;
+  return $CN(BigInt(t));
 };
 
-// 位重解释（ADR-0019 路 1）：位不动，只换一种读法。int 在这条腿上是 BigInt，而
-// getBigInt64/setBigInt64 正好就是 int64 那一格，所以两个方向都不用再截。
+// 位重解释（ADR-0019 路 1）：位不动，只换一种读法。getBigInt64/setBigInt64 正好就是
+// int64 那一格，所以两个方向都不用再截 —— 只在出口过一次 $CN、入口过一次 $B（见文件头）。
 // **不是** $trunc 那种转换：这儿没有范围检查，因为每个 f64 的位模式都是一个合法 int64。
 const $realbits = (x) => {
   const bdv = new DataView(new ArrayBuffer(8));
   bdv.setFloat64(0, x);
-  return bdv.getBigInt64(0);
+  return $CN(bdv.getBigInt64(0));
 };
 const $bitsreal = (i) => {
   const bdv = new DataView(new ArrayBuffer(8));
-  bdv.setBigInt64(0, i);
+  bdv.setBigInt64(0, $B(i));
   return bdv.getFloat64(0);
 };
 
@@ -518,11 +607,11 @@ function $bytes(s) {
   if (s !== $memoS) { $memoS = s; $memoB = $enc.encode(s); }
   return $memoB;
 }
-function $slen(s) { return BigInt($bytes(s).length); }
+function $slen(s) { return $bytes(s).length; }
 function $byteAt(s, i) {
-  const b = $bytes(s), n = Number(i);
+  const b = $bytes(s), n = typeof i === "number" ? i : Number(i);
   if (n < 0 || n >= b.length) $rt_error("string index out of range: " + n + " (length " + b.length + ")");
-  return BigInt(b[n]);
+  return b[n];
 }
 function $substr(s, start, len) {
   const b = $bytes(s), st = Number(start), ln = Number(len);
@@ -535,9 +624,9 @@ function $indexOf(s, needle) {
   const b = $bytes(s), nb = $enc.encode(needle);
   outer: for (let i = 0; i + nb.length <= b.length; i++) {
     for (let j = 0; j < nb.length; j++) if (b[i + j] !== nb[j]) continue outer;
-    return BigInt(i);
+    return i;
   }
-  return -1n;
+  return -1;
 }
 function $chr(n) {
   const c = Number(n);
@@ -548,7 +637,7 @@ function $int_of_string(s) {
   if (!/^[+-]?[0-9]+$/.test(s)) $rt_error('invalid integer: "' + s + '"');
   const v = BigInt(s);
   if (v < $INT_MIN || v > 0x7fffffffffffffffn) $rt_error('invalid integer: "' + s + '"');
-  return v;
+  return $CN(v);
 }
 function $real_of_string(s) {
   if (!/^[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?$/.test(s)) $rt_error('invalid real: "' + s + '"');
@@ -576,7 +665,7 @@ function $write_text(p, t) {
   } catch (e) {
     $rt_error("cannot write '" + p + "': " + (e && e.code ? e.code : String(e)));
   }
-  return BigInt($node("node:buffer").Buffer.byteLength(t, "utf8"));
+  return $node("node:buffer").Buffer.byteLength(t, "utf8");
 }
 // (runproc CMD)：/bin/sh -c CMD，回退出码。两个流全捕获后丢掉 —— 这一层的 stdout 是
 // 图本身，被调程序的絮絮叨叨混进去就把图弄坏了。跑不起来也回非 0，不抛。
@@ -584,27 +673,31 @@ function $run_proc(cmd) {
   try {
     var r = $node("node:child_process").spawnSync("/bin/sh", ["-c", cmd],
       { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 28 });
-    if (r.error) return 127n;
-    return BigInt(r.status === null ? 128 : r.status);
+    if (r.error) return 127;
+    return r.status === null ? 128 : r.status;
   } catch (e) {
-    return 127n;
+    return 127;
   }
 }
 // ---------------------------------------------------------------- 容器
 // list -> Array，dict -> Map（插入序，ADR-0006 的硬约束），set -> Set
-function $keyStr(k) {
-  if (typeof k === "bigint") return k.toString();
-  if (typeof k === "number") return $fmt_real(k);
-  if (typeof k === "boolean") return k ? "true" : "false";
+// 键的显示形式（只在 "key not found" 那句里用，冷路径）要**按静态类型**给：int 换成
+// 规范化的 number|BigInt 之后，宿主的 typeof 分不开 int 与 real 了（1 与 1.0 都是 number），
+// 而 C 侧 omni_kstr_int 走 %lld、omni_kstr_real 走 %g —— 10000000000 两边一个是
+// "10000000000" 一个是 "1e+10"。所以 kk 由发射方按 dict 的键类型填。
+function $keyStr(k, kk) {
+  if (kk === "int") return k.toString();
+  if (kk === "real") return $fmt_real(k);
+  if (kk === "bool") return k ? "true" : "false";
   return '"' + k + '"';
 }
 function $listGet(a, i) {
-  const n = Number(i);
+  const n = typeof i === "number" ? i : Number(i);
   if (n < 0 || n >= a.length) $rt_error("list index out of range: " + n + " (length " + a.length + ")");
   return a[n];
 }
 function $listSet(a, i, v) {
-  const n = Number(i);
+  const n = typeof i === "number" ? i : Number(i);
   if (n < 0 || n >= a.length) $rt_error("list index out of range: " + n + " (length " + a.length + ")");
   a[n] = v;
   return v;
@@ -613,11 +706,17 @@ function $listPop(a) {
   if (!a.length) $rt_error("pop from empty list");
   return a.pop();
 }
-function $dictGet(m, k) {
-  if (!m.has(k)) $rt_error("key not found: " + $keyStr(k));
+function $dictGet(m, k, kk) {
+  if (!m.has(k)) $rt_error("key not found: " + $keyStr(k, kk));
   return m.get(k);
 }
 function $dictSet(m, k, v) { m.set(k, v); return v; }
+// 深装箱（ADR-0008）里 dict 那一支：键照抄，值逐个换表示。见 backend-js/emit.js 的 boxDeepJs。
+function $mapVals(m, f) {
+  const o = new Map();
+  for (const kv of m) o.set(kv[0], f(kv[1]));
+  return o;
+}
 
 // ---------------------------------------------------------------- dynamic
 // 直接用 JS 原生值：null / boolean / BigInt(int) / number(real) / string / Array / Map，
@@ -753,18 +852,18 @@ function $js_num2(op, a, b) {
 function $js_add(a, b) {
   if ($dynTag(a) === "string" || $dynTag(b) === "string") return $js_str(a) + $js_str(b);
   $js_num2("+", a, b);
-  return $dynTag(a) === "int" ? $W(a + b) : a + b;
+  return $dynTag(a) === "int" ? $DW(a + b) : a + b;
 }
 // 幂的 int 那一支：平方求幂，每一步都回卷。回卷是模 2^64 的环同态，所以这与
 // "先算精确值再回卷"逐位相同，而且不会为了 2n ** 1000000n 去开一块天文数字的内存。
 function $js_ipow(a, b) {
   if (b < 0n) $rt_error("exponent must not be negative in '**' with bigint operands");
   let r = 1n;
-  let x = $W(a);
+  let x = $DW(a);
   let n = b;
   while (n > 0n) {
-    if ((n & 1n) === 1n) r = $W(r * x);
-    x = $W(x * x);
+    if ((n & 1n) === 1n) r = $DW(r * x);
+    x = $DW(x * x);
     n >>= 1n;
   }
   return r;
@@ -773,17 +872,17 @@ function $js_arith(op, a, b) {
   $js_num2(op, a, b);
   const isInt = $dynTag(a) === "int";
   switch (op) {
-    case "-": return isInt ? $W(a - b) : a - b;
-    case "*": return isInt ? $W(a * b) : a * b;
-    case "/": return isInt ? $div(a, b) : a / b;
-    case "%": return isInt ? $mod(a, b) : $fmod(a, b);
+    case "-": return isInt ? $DW(a - b) : a - b;
+    case "*": return isInt ? $DW(a * b) : a * b;
+    case "/": return isInt ? $ddiv(a, b) : a / b;
+    case "%": return isInt ? $dmod(a, b) : $fmod(a, b);
     case "p": return isInt ? $js_ipow(a, b) : a ** b;
     default: $rt_error("unknown arithmetic op '" + op + "'");
   }
 }
 function $js_neg(a) {
   const t = $dynTag(a);
-  if (t === "int") return $W(-a);
+  if (t === "int") return $DW(-a);
   if (t === "real") return -a;
   $rt_error("cannot negate " + t);
 }
@@ -796,7 +895,7 @@ function $js_bitop(op, a, b) {
     case "&": return a & b;
     case "|": return a | b;
     case "^": return a ^ b;
-    case "<": return $W(a << (b & 63n));
+    case "<": return $DW(a << (b & 63n));
     case ">": return a >> (b & 63n);
     default: $rt_error("unknown bitwise op '" + op + "'");
   }
@@ -805,7 +904,7 @@ function $js_bitop(op, a, b) {
 function $js_bitnot(a) {
   const t = $dynTag(a);
   if (t !== "int") $rt_error("bitwise '~' requires a bigint operand, found " + t);
-  return $W(~a);
+  return $DW(~a);
 }
 function $js_cmp(op, a, b) {
   const ta = $dynTag(a), tb = $dynTag(b);
@@ -2044,7 +2143,7 @@ function $js_buf_get_i64(b, at, le) {
 function $js_buf_set_i64(b, at, x, le) {
   const v = $js_bytes(b, ".setBigInt64");
   if ($dynTag(x) !== "int") $rt_error(".setBigInt64 expects a bigint, found " + $dynTag(x));
-  v.dv.setBigInt64($js_buf_at(v, at, 8, ".setBigInt64"), $W(x), $js_truthy(le));
+  v.dv.setBigInt64($js_buf_at(v, at, 8, ".setBigInt64"), $DW(x), $js_truthy(le));
   return undefined;
 }
 function $js_buf_get_f64(b, at, le) {
@@ -2192,7 +2291,7 @@ function $dynLen(v) {
   const t = $dynTag(v);
   if (t === "list") return BigInt(v.length);
   if (t === "dict") return BigInt(v.size);
-  if (t === "string") return $slen(v);
+  if (t === "string") return BigInt($slen(v));
   $rt_error("dynamic value of tag " + t + " has no length");
 }
 function $dynIter(v) {
@@ -2212,11 +2311,11 @@ function $dynKeys(v) { return [...$dynAs(v, "dict").keys()]; }
 function $dynArith(op, a, b) {
   const ta = $dynTag(a), tb = $dynTag(b);
   if (ta === "int" && tb === "int") {
-    if (op === "+") return $W(a + b);
-    if (op === "-") return $W(a - b);
-    if (op === "*") return $W(a * b);
-    if (op === "/") return $div(a, b);
-    return $mod(a, b);
+    if (op === "+") return $DW(a + b);
+    if (op === "-") return $DW(a - b);
+    if (op === "*") return $DW(a * b);
+    if (op === "/") return $ddiv(a, b);
+    return $dmod(a, b);
   }
   if ((ta === "int" || ta === "real") && (tb === "int" || tb === "real")) {
     const x = ta === "int" ? Number(a) : a;
@@ -2237,7 +2336,7 @@ function $dynDiv(a, b) { return $dynArith("/", a, b); }
 function $dynMod(a, b) { return $dynArith("%", a, b); }
 function $dynNeg(a) {
   const t = $dynTag(a);
-  if (t === "int") return $W(-a);
+  if (t === "int") return $DW(-a);
   if (t === "real") return -a;
   $rt_error("cannot apply unary '-' to " + t);
 }

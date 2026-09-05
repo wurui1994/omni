@@ -1,18 +1,28 @@
 // Omni stage0 — JS 后端：OIR -> ES2020
 //
 // 语义映射（这是永久兼容层，不能"差不多"，见 ADR-0005 / ADR-0006）：
-//   int    = i64 -> BigInt，+ - * << 经 BigInt.asIntN(64) 回绕
+//   int    = i64 -> **规范化的 number|BigInt**：|v| <= 2^53-1 用 number，否则 BigInt
+//            （两个值域不重叠，所以规范形唯一，=== 与 Map 的键都还对；见 prelude 的文件头）
+//            + - * 走 $iadd/$isub/$imul：两个 number 时一句浮点加 + 一次范围查，不碰 BigInt
 //   real   = f64 -> number
 //   string = UTF-8 字节序列 -> JS 字符串 + 字节视图（length/byteAt/substr 按字节）
 //   struct = 值类型 -> 赋值/传参/返回都深拷贝
 //   class  = 引用类型 -> 普通对象；字段访问带 null 检查（C 侧同样检查，避免段错误 vs 异常的分叉）
 //   list/dict/set -> Array / Map / Set（Map 天然保持插入序）
-//   dynamic -> JS 原生值（null/boolean/BigInt/number/string/Array/Map）
+//   dynamic -> JS 原生值（null/boolean/BigInt/number/string/Array/Map）；这一格里的 int
+//              **一律 BigInt**（$dynTag 靠 typeof 分 int 与 real），装箱那条边界上转
 
 import { JS_PRELUDE } from './prelude.js';
 import { typeKey, loopLabelNeeds } from '../hir/types.js';
 import { JS_ABI, JS_ALL, JS_MEMBERS } from '../hir/js_abi.js';
 import { C_ABI } from '../hir/c_abi.js';
+
+/** int 字面量：落在 2^53-1 之内的发普通数，越界的发 BigInt —— 与运行期的规范形同一条界。 */
+const I_SAFE = 9007199254740991n;
+function jsIntLit(v) {
+  const b = BigInt(v);
+  return (b <= I_SAFE && b >= -I_SAFE) ? b.toString() : `${b}n`;
+}
 
 /** 数组的元素存进去要不要先拷一份（$anew/$aset/$apush 的末位实参）。只有向量要 ——
  *  它是值语义，而 C 与 LLVM 两条腿存的是副本。类与**数组**元素是引用语义，拷了就分叉
@@ -257,13 +267,13 @@ class JsEmitter {
   }
 
   /**
-   * tagged union（ADR-0012）。表示是一个扁平对象：`$t` 是标签（BigInt，与 C 侧的
-   * int64_t tag 同一个值域），载荷字段直接摊在同一层 —— 同一时刻只有一个变体活着，
+   * tagged union（ADR-0012）。表示是一个扁平对象：`$t` 是标签（一个普通数），
+   * 载荷字段直接摊在同一层 —— 同一时刻只有一个变体活着，
    * 所以两个变体的同名字段在运行期不会同时存在。
    */
   enumDecl(e) {
     const v0 = e.variants[0];
-    const init = ['$t: 0n', ...v0.fields.map((f) => `${f.name}: ${this.zero(f.type)}`)].join(', ');
+    const init = ['$t: 0', ...v0.fields.map((f) => `${f.name}: ${this.zero(f.type)}`)].join(', ');
     this.line(`${this.ex()}function $new_E${e.name}() { return { ${init} }; }`);
     // 值语义的拷贝：先看标签才知道有哪些载荷字段要拷
     this.line(`${this.ex()}function $cp_E${e.name}(v) {`);
@@ -272,7 +282,7 @@ class JsEmitter {
     this.indent++;
     for (const [i, v] of e.variants.entries()) {
       const fs = ['$t: v.$t', ...v.fields.map((f) => `${f.name}: ${this.copyOf(f.type, `v.${f.name}`)}`)];
-      this.line(`case ${i}n: return { ${fs.join(', ')} };`);
+      this.line(`case ${i}: return { ${fs.join(', ')} };`);
     }
     this.indent--;
     this.line('}');
@@ -291,6 +301,24 @@ class JsEmitter {
     return src;
   }
 
+  /** 深装箱（ADR-0008）在这条腿上只剩一件事：把容器里的 int 换成 dynamic 那一格的
+   *  表示（BigInt）。里面没有 int 时整条是恒等，什么都不发。 */
+  boxDeepJs(t, src) {
+    const lane = this.boxLane(t.k === 'list' ? t.elem : t.val);
+    if (lane === null) return src;
+    return t.k === 'list' ? `${src}.map(${lane})` : `$mapVals(${src}, ${lane})`;
+  }
+
+  /** 一个元素的装箱函数；null = 恒等 */
+  boxLane(t) {
+    if (t.k === 'int') return '$B';
+    if (t.k === 'list' || t.k === 'dict') {
+      const inner = this.boxDeepJs(t, 'x');
+      return inner === 'x' ? null : `(x) => ${inner}`;
+    }
+    return null;
+  }
+
   classDecl(c) {
     const init = c.fields.map((f) => `${f.name}: ${this.zero(f.type)}`).join(', ');
     this.line(`${this.ex()}function $new_C${c.name}() { return { ${init} }; }`);
@@ -298,7 +326,7 @@ class JsEmitter {
 
   zero(t) {
     switch (t.k) {
-      case 'int': return '0n';
+      case 'int': return '0';
       case 'real': return '0';
       case 'bool': return 'false';
       case 'string': return '""';
@@ -313,7 +341,7 @@ class JsEmitter {
       case 'vec': return `$vsplat(${this.zero(t.elem)}, ${t.lanes})`;
       // 数组（第十六刀：结构体的数组字段）。空数组，不是 null —— `$anew` 就是
       // ArrNew 那条路发的东西，元素零值当实参传进去。
-      case 'arr': return `$anew(0n, ${this.zero(t.elem)}, ${jsElemCopy(t)})`;
+      case 'arr': return `$anew(0, ${this.zero(t.elem)}, ${jsElemCopy(t)})`;
       // 指针（ADR-0016）：零值是空指针。fat 的空是 [0,0,0]（三个字都在，只是都为 0），
       // thin 的空就是 0 —— 与 PtrNull 那条路发的东西一模一样。
       case 'ptr': return '[0, 0, 0]';
@@ -469,7 +497,7 @@ class JsEmitter {
   expr(e) {
     switch (e.kind) {
       case 'Const':
-        if (e.type.k === 'int') return `${e.value}n`;
+        if (e.type.k === 'int') return jsIntLit(e.value);
         if (e.type.k === 'real') return fmtRealLit(e.value);
         if (e.type.k === 'bool') return String(e.value);
         return JSON.stringify(e.value);
@@ -477,7 +505,7 @@ class JsEmitter {
       case 'ZeroEnum': return `$new_E${e.type.name}()`;
       case 'MakeEnum': {
         const v = e.type.variants[e.tag];
-        const fs = [`$t: ${e.tag}n`, ...e.args.map((a, i) => `${v.fields[i].name}: ${this.rvalue(a, a.type)}`)];
+        const fs = [`$t: ${e.tag}`, ...e.args.map((a, i) => `${v.fields[i].name}: ${this.rvalue(a, a.type)}`)];
         return `{ ${fs.join(', ')} }`;
       }
       case 'EnumTag': return `${this.expr(e.object)}.$t`;
@@ -501,8 +529,8 @@ class JsEmitter {
       case 'VecLane': return `${this.expr(e.vec)}[${e.lane}]`;
       case 'VecHsum': return `$vhsum(${this.expr(e.vec)}, ${this.laneOp('+', e.type)})`;
       // 缓冲四条（门槛 7 第一阶段）：表示是数组，引用语义 —— 所以 rvalue 不拷它
-      case 'BufNew': return `$bnew(${this.expr(e.count)}, ${e.type.elem.k === 'int'})`;
-      case 'BufLen': return `BigInt(${this.expr(e.buf)}.length)`;
+      case 'BufNew': return `$bnew(${this.expr(e.count)})`;
+      case 'BufLen': return `${this.expr(e.buf)}.length`;
       case 'BufGet': return `$bget(${this.expr(e.buf)}, ${this.expr(e.index)})`;
       case 'BufSet': return `$bset(${this.expr(e.buf)}, ${this.expr(e.index)}, ${this.expr(e.value)})`;
       // 指针（ADR-0016）：这条腿是 arena 模拟。fat 是三元组 [addr, base, end]，thin 是一个数。
@@ -534,9 +562,9 @@ class JsEmitter {
         : `$padd(${this.expr(e.ptr)}, ${this.expr(e.delta)}, ${e.size})`;
       case 'PtrField': return e.ptr.type.k === 'tptr'
         ? `(${this.expr(e.ptr)} + ${e.off})`
-        : `$padd(${this.expr(e.ptr)}, ${e.off}n, 1)`;
+        : `$padd(${this.expr(e.ptr)}, ${e.off}, 1)`;
       case 'PtrSub': return e.a.type.k === 'tptr'
-        ? `BigInt((${this.expr(e.a)} - ${this.expr(e.b)}) / ${e.size})`
+        ? `((${this.expr(e.a)} - ${this.expr(e.b)}) / ${e.size})`
         : `$psub(${this.expr(e.a)}, ${this.expr(e.b)}, ${e.size})`;
       // 只比**地址那一个字**。fat 是个三元数组，`===` 比的是引用（两个指向同一格的
       // 指针各是一份拷贝，引用永远不等），所以必须显式取 [0]。跨块也有定义：不等。
@@ -566,12 +594,17 @@ class JsEmitter {
           return e.uns === true ? `Number($U(${this.expr(e.expr)}))` : `Number(${this.expr(e.expr)})`;
         }
         throw new Error(`js.cast: ${e.from.k}->${e.type.k}`);
-      // 装箱在 JS 里是恒等操作：dynamic 就是原生值（ADR-0006 第 2 节）
-      case 'Box': return this.expr(e.expr);
+      // 装箱：dynamic 就是原生值（ADR-0006 第 2 节），只有 int 要换一种表示 ——
+      // 静态的 int 是规范化的 number|BigInt，而 dynamic 里的 int **一律 BigInt**
+      // （$dynTag 靠 typeof 分 int 与 real，1 与 1.0 在 number 上分不开）。
+      case 'Box': return e.from.k === 'int' ? `$B(${this.expr(e.expr)})` : this.expr(e.expr);
       case 'Logic': return `(${this.expr(e.left)} ${e.op} ${this.expr(e.right)})`;
       case 'Un':
         // 一元负号也会溢出：-INT64_MIN == INT64_MIN，必须回绕（C 侧走 omni_neg）
-        if (e.op === '-' && e.type.k === 'int') return `$W(-${this.expr(e.operand)})`;
+        if (e.op === '-' && e.type.k === 'int') return `$ineg(${this.expr(e.operand)})`;
+        // 按位取反：宿主的 ~ 在 number 上先截成 int32（~3037000500 给 1257966795，
+        // 不是 -3037000501），所以 int 这一档必须走 BigInt 那条
+        if (e.op === '~' && e.type.k === 'int') return `$inot(${this.expr(e.operand)})`;
         return `(${e.op}${this.expr(e.operand)})`;
       case 'Cmp': {
         if (e.opType.k === 'dynamic') {
@@ -593,8 +626,8 @@ class JsEmitter {
       case 'Ternary': return `(${this.expr(e.cond)} ? ${this.expr(e.then)} : ${this.expr(e.otherwise)})`;
       case 'Assign': return `(${this.expr(e.target)} = ${this.rvalue(e.value, e.type)})`;
       case 'IndexGet': {
-        const fn = e.recvType.k === 'list' ? '$listGet' : '$dictGet';
-        return `${fn}(${this.expr(e.obj)}, ${this.expr(e.index)})`;
+        if (e.recvType.k === 'list') return `$listGet(${this.expr(e.obj)}, ${this.expr(e.index)})`;
+        return `$dictGet(${this.expr(e.obj)}, ${this.expr(e.index)}, ${JSON.stringify(e.recvType.key.k)})`;
       }
       case 'IndexSet': {
         const fn = e.recvType.k === 'list' ? '$listSet' : '$dictSet';
@@ -631,17 +664,23 @@ class JsEmitter {
   binCode(op, opType, a, b) {
     if (opType.k === 'int') {
       switch (op) {
-        case '+': case '-': case '*': return `$W(${a} ${op} ${b})`;
+        // int 是规范化的 number|BigInt（见 prelude 的文件头）：两个 number 时
+        // $iadd/$isub/$imul 走一句浮点加 + 一次范围查，不碰 BigInt。
+        case '+': return `$iadd(${a}, ${b})`;
+        case '-': return `$isub(${a}, ${b})`;
+        case '*': return `$imul(${a}, ${b})`;
         case '/': return `$div(${a}, ${b})`;
         case '%': return `$mod(${a}, ${b})`;
-        case '<<': return `$W(${a} << (${b} & 63n))`;
-        case '>>': return `(${a} >> (${b} & 63n))`;
+        case '<<': return `$ishl(${a}, ${b})`;
+        case '>>': return `$ishr(${a}, ${b})`;
         // 无符号那三个（第六十一刀）：位当无符号 64 位读，算完回规范形。
         // `u>>` 的移位数照旧只取低 6 位 —— 与 `>>` 同一条规矩。
         case 'u/': return `$udiv(${a}, ${b})`;
         case 'u%': return `$umod(${a}, ${b})`;
-        case 'u>>': return `$W($U(${a}) >> (${b} & 63n))`;
-        case '&': case '|': case '^': return `(${a} ${op} ${b})`;
+        case 'u>>': return `$iushr(${a}, ${b})`;
+        case '&': return `$iand(${a}, ${b})`;
+        case '|': return `$ior(${a}, ${b})`;
+        case '^': return `$ixor(${a}, ${b})`;
         default: throw new Error(`js.bin int: ${op}`);
       }
     }
@@ -692,7 +731,7 @@ class JsEmitter {
       case 'run_proc': return `$run_proc(${a[0]})`;
       case 'len':
         if (recv.k === 'string') return `$slen(${a[0]})`;
-        return recv.k === 'list' ? `BigInt(${a[0]}.length)` : `BigInt(${a[0]}.size)`;
+        return recv.k === 'list' ? `${a[0]}.length` : `${a[0]}.size`;
       case 'push': return `${a[0]}.push(${a[1]})`;
       case 'add': return `${a[0]}.add(${a[1]})`;
       case 'pop': return `$listPop(${a[0]})`;
@@ -700,7 +739,7 @@ class JsEmitter {
       case 'contains':
         if (recv.k === 'list') return `${a[0]}.includes(${a[1]})`;
         return `${a[0]}.has(${a[1]})`;
-      case 'dictGet': return `$dictGet(${a[0]}, ${a[1]})`;
+      case 'dictGet': return `$dictGet(${a[0]}, ${a[1]}, ${JSON.stringify(recv.key.k)})`;
       case 'dictSet': return `$dictSet(${a[0]}, ${a[1]}, ${a[2]})`;
       case 'remove': return `${a[0]}.delete(${a[1]})`;
       case 'keys': return `[...${a[0]}.keys()]`;
@@ -710,7 +749,7 @@ class JsEmitter {
       case 'indexOf': return `$indexOf(${a[0]}, ${a[1]})`;
       case 'join': return `${a[0]}.join(${a[1]})`;
       case 'tag': return `$dynTag(${a[0]})`;
-      case 'asInt': return `$dynAs(${a[0]}, "int")`;
+      case 'asInt': return `$CN($dynAs(${a[0]}, "int"))`;
       case 'asReal': return `$dynAs(${a[0]}, "real")`;
       case 'asBool': return `$dynAs(${a[0]}, "bool")`;
       case 'asString': return `$dynAs(${a[0]}, "string")`;
@@ -723,8 +762,10 @@ class JsEmitter {
       case 'dynPush': return `$dynPush(${a[0]}, ${a[1]})`;
       case 'dynHas': return `$dynHas(${a[0]}, ${a[1]})`;
       case 'dynKeys': return `$dynKeys(${a[0]})`;
-      // 深装箱在 JS 侧是恒等：这里的 dynamic 是无标签的，list<int> 本来就是一个数组（ADR-0008）
-      case 'boxDeep': return a[0];
+      // 深装箱（ADR-0008）：容器在这条腿上就是宿主的 Array / Map，dynamic 又是无标签的，
+      // 所以只剩"把里面的 int 换成 BigInt"这一件事（见 Box 那条）。元素里没有 int 时
+      // 整条就是恒等，一个字都不发。
+      case 'boxDeep': return this.boxDeepJs(e.argType, a[0]);
       case 'dynAdd': return `$dynAdd(${a[0]}, ${a[1]})`;
       case 'dynSub': return `$dynSub(${a[0]}, ${a[1]})`;
       case 'dynMul': return `$dynMul(${a[0]}, ${a[1]})`;

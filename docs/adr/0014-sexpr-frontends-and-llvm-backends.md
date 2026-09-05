@@ -10288,3 +10288,61 @@ Map 的键仍然唯一、`String()` 仍然一样。
 字面量、`+ - * << >>`、以及指针/线性内存那几个 `getBigInt64` 的口子。
 
 <!-- ADR-0014 天花板-END -->
+
+## 已落地：JS 那条腿的 int 换成规范化的 number|BigInt（sinc 1.5×、AiryDisk 1.8×）
+
+<!-- ADR-0014 int-规范形-BEGIN -->
+
+上一节记的账，这一刀落地。两个文件：`src/core/backend-js/prelude.js` 与
+`src/core/backend-js/emit.js`。
+
+**表示**：`|v| <= 2^53-1` 用 number，否则用 BigInt。两个值域**不重叠**，所以规范形唯一 ——
+三等号仍然对（不会同时存在 `1` 与 `1n`）、Map 的键仍然唯一、印出来的字仍然一样。
+规范化的唯一入口是 `$CN`；每个会越界的运算算完过它一次。
+
+**静态那半边**（asy / sexpr / jnc / C 前端走的路）：
+
+- `+ - *` -> `$iadd/$isub/$imul`：两个 number 时一句浮点加 + 一次范围查就回，
+  不碰 BigInt（IEEE 是正确舍入的，所以"结果落在 2^53-1 内"这一查是充分的）。
+- `/ %` -> `$div/$mod`：number 快路借取模走 —— `a % b` 在整数上精确，`a - r` 是 `b`
+  的整数倍，于是 `(a-r)/b` 的商正好可表示。**不能**写 `Math.trunc(a/b)`：那是先舍入的
+  浮点商，贴着整数边界会被舍到隔壁。
+- 位运算 -> `$ishl/$ishr/$iushr/$iand/$ior/$ixor/$inot`，**一律经 BigInt**：宿主的
+  `& | ^ ~ << >>` 会把操作数截成 int32。
+- `alen` 直接回 `a.length`（不再造 BigInt），下标 `typeof i === "number"` 时直接用。
+- 字面量：`jsIntLit` 在 2^53-1 之内发普通数，越界发 `…n`。enum 的标签、零值、`BufLen`、
+  `list.length` / `set.size` 全部跟着换成普通数。
+
+**dynamic 那半边仍然一律 BigInt**（`$dynTag` 靠 `typeof` 分 int 与 real，`1` 与 `1.0`
+在 number 上分不开），所以那边有自己的三个：`$DW`（回卷不规范化）、`$ddiv`、`$dmod`。
+两半在装箱边界上接：`Box` 从 int 来时发 `$B(...)`，`asInt` 回来时发 `$CN(...)`，
+`boxDeep` 对含 int 的容器发一层 `.map($B)` / `$mapVals(…, $B)`（不含 int 时仍是恒等）。
+
+**踩到的三个坑，每个都是一条尺子抓出来的**：
+
+1. `~` 忘了换。`tests/oracle/int64_wrap` 第 1912 行：`~3037000500` 我们给 1257966795、
+   参照给 -3037000501，差正好 2^32 —— 宿主的 `~` 在 number 上先截 int32。
+   一元 `-` 记得改、`~` 漏了，靠 oracle 那把 Python 尺子当场抓住。
+2. `$js_arith` 里的 `%` 走了静态那份 `$mod`，于是 dynamic 里冒出一个 number：
+   `tests/oir` 的 `asUintN/umod` 报 "BigInt.asIntN expects a bigint, found real"。
+   这就是"两半必须各有一套"的由来。
+3. dict 的 `key not found` 那句话。C 侧 int 键走 `%lld`、real 键走 `%g`，而 number
+   之后 `typeof` 分不开了 —— 10000000000 一边印 "10000000000" 一边印 "1e+10"。
+   改法是把**键的静态类型**发到调用点：`$dictGet(m, k, "int")`。
+
+**量出来的**（examples，warm，模块产物缓存已命中）：
+
+```
+                     BigInt      number|BigInt
+  sinc               17.34s  ->  11.43s    1.52x
+  linearregression    8.27s  ->   6.53s    1.27x
+  AiryDisk           31.86s  ->  17.50s    1.82x
+```
+
+微基准里 BigInt 那一层是 3.0×，整例子上是 1.3–1.8× —— 差的那部分是 real 的数学与
+输出，不在这一层。全套门槛（sexpr 79、oir 607、oracle 7、run 133、c 292、jnc 145、
+js-exec 13、wat 15、cabi 4、asy 259）都是绿的。
+
+下一刀仍然是上一节记的那 2.4×：`$aget`/`$aset` 里的空指针与边界检查。
+
+<!-- ADR-0014 int-规范形-END -->
