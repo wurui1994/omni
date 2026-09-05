@@ -9932,17 +9932,34 @@ private void asy__merge3hook() {
     for (int a = 0; a < idx.length; ++a) {
       drawop3 o3 = ops[idx[a]];
       triple[][] P = o3.P3;
-      if (P.length < 4 || P[0].length < 4) continue;
       int[] rgb = o3.p.length > 0 ? asy__pixrgb(o3.p[0]) : new int[] {0, 0, 0};
-      doc = doc + ps(rgb[0] / 255) + " " + ps(rgb[1] / 255) + " " + ps(rgb[2] / 255)
-        + " setrgbcolor" + nl;
-      pair q00 = pj(P[0][0]);
-      doc = doc + ps(q00.x) + " " + ps(q00.y) + " moveto" + nl;
       void edge(triple c1, triple c2, triple e) {
         pair a1 = pj(c1); pair a2 = pj(c2); pair a3 = pj(e);
         doc = doc + ps(a1.x) + " " + ps(a1.y) + " " + ps(a2.x) + " " + ps(a2.y)
           + " " + ps(a3.x) + " " + ps(a3.y) + " curveto" + nl;
       }
+      // **三角面片（kind == 2）的控制点是三角排布**：四行、长度 1/2/3/4（十个点）。
+      // 量出来的：`draw(f,unitbox)` 在 render!=0 时是 kind0=4、kind1=48、**kind2=1024**
+      // —— 粗线在三维那边是当**管子**画的（12 条棱的侧面是四边面片，接头的球帽是
+      // 三角面片）。按 4x4 那套下标去读三角面片会整格漏掉，所以分开写。
+      if (o3.kind == 2) {
+        if (P.length < 4 || P[3].length < 4) continue;
+        doc = doc + ps(rgb[0] / 255) + " " + ps(rgb[1] / 255) + " " + ps(rgb[2] / 255)
+          + " setrgbcolor" + nl;
+        pair t00 = pj(P[0][0]);
+        doc = doc + ps(t00.x) + " " + ps(t00.y) + " moveto" + nl;
+        edge(P[1][0], P[2][0], P[3][0]);
+        edge(P[3][1], P[3][2], P[3][3]);
+        edge(P[2][2], P[1][1], P[0][0]);
+        doc = doc + "closepath fill" + nl;
+        nink = nink + 1;
+        continue;
+      }
+      if (P.length < 4 || P[0].length < 4) continue;
+      doc = doc + ps(rgb[0] / 255) + " " + ps(rgb[1] / 255) + " " + ps(rgb[2] / 255)
+        + " setrgbcolor" + nl;
+      pair q00 = pj(P[0][0]);
+      doc = doc + ps(q00.x) + " " + ps(q00.y) + " moveto" + nl;
       edge(P[0][1], P[0][2], P[0][3]);
       edge(P[1][3], P[2][3], P[3][3]);
       edge(P[3][2], P[3][1], P[3][0]);
