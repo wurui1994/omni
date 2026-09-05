@@ -11823,6 +11823,26 @@ settings.asy 里订正 —— 真正差的就是上面那一格 int 截断，改
 - 做尺子时的一个坑：我们这一层 `shipout()`（无参）在那一刻**不出图**（计数器全 0），
   `shipout("名字")` 才真emit。以后写这类量口要用带名字的那一支。
 
+**再收一层，位置钉死了。** 先把 cardioid 的量级摸清（它不是 laserlattice 那种成片刻度）：
+`^stroke$` 两侧都是 5、`newpath` 两侧都是 13 —— 图形本身一样；差的是
+`^gsave$`（参考 2、我们 0）与 `concat`（参考 6、我们 2）。也就是**只有那两支轴的笔**
+在参考那边非单位。
+
+再用 graph.asy 用的那个五参 `pic.add(new void(frame,transform t,transform T,pair,pair))`
+两侧同一份源码印 t/T/u=t*T*inverse(t)（/tmp/omni-shade/axt.asy，就是 cardioid 那张图）：
+
+- **第一趟** fit：两侧 `t.xx` 逐位相同（36.380187647154195）、`T` 是单位、
+  `u` 是单位、`shiftless(u)` 也是单位 —— 两边都不该套 gsave，对上了
+- **第二趟** fit（延迟定尺寸那一趟）：`t.xx` asy 是 **36.380187647154116**、
+  我们是 **36.380187647154102** —— 差在最后两位
+
+于是链条清楚了：第二趟的**缩放因子**差最后几个 ulp，`inverse(t)` 的倒数于是落在不同的
+舍入上，`t*T*inverse(t)` 在 asy 那边不是精确单位、在我们这边是 —— 闸门就一边开一边关。
+下一刀该量的是这个第二趟的 s：它由 `calculateScaling`（LP）吃第一趟 fit 出来的 coords
+得到，而 cardioid 那张图的 coords 里含 latex 量的标签尺寸。**尺子已经现成**：
+axt.asy 印的第二个 `PT t`。
+
+
 
 
 
