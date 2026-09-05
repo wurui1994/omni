@@ -1554,6 +1554,23 @@ const $r_log1p = (x) => $js_math("P", x, 0);
 const $r_cbrt = (x) => $js_math("B", x, 0);
 const $r_hypot = (x, y) => $js_math("Y", x, y);
 const $r_nextafter = (x, y) => $js_math("W", x, y);
+/* fma —— 交集的第二条例外（ADR-0014 第十五节）。Math.* 里没有它，所以这一份是手写的，
+   不像上面那些转手宿主。权威是 C 的 omni_r_fma（libm，一条 fmadd）；能要求逐字节是因为
+   fma 是精确运算（IEEE-754 5.4.1 只舍一次）。
+   做法：Dekker 拆分求准确积（p + e == a*b），再 two-sum 收回 p+c 的尾巴 t，
+   最后 s + (t + e) 只舍一次。
+   边界写在明处：SPLIT*a 在 |a| 接近 realMax 时会溢出、次正规上 e 会损失，这两档与硬件
+   fma 不一致；要它的场合（几何界、Bezier 求值）都在正常量级里。 */
+const $r_fma = (a, b, c) => {
+  const p = a * b;
+  const SPLIT = 134217729;
+  const ca = SPLIT * a, ah = ca - (ca - a), al = a - ah;
+  const cb = SPLIT * b, bh = cb - (cb - b), bl = b - bh;
+  const e = ((ah * bh - p) + ah * bl + al * bh) + al * bl;
+  const s = p + c, bs = s - p;
+  const t = (p - (s - bs)) + (c - bs);
+  return s + (t + e);
+};
 
 // ------------------------------------------------- JSON.stringify（ADR-0011）
 // 不能直接用宿主的 JSON.stringify：这边的对象是 Map、int 是 BigInt，宿主会当成
