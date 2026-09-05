@@ -184,7 +184,10 @@ export const HELPERS = new Map([
       (bin "*" (var t) (bin "+" (un "-" (bin "*" (lane (var a) 0) (lane (var b) 1))) (bin "*" (lane (var b) 0) (lane (var a) 1)))))))`],
   ['asy__pabs', `  (fn asy__pabs ((a ${ASY_PAIR_TY})) real
     ;; 模。也是朴素那一份 —— 量过 abs((1e200,1e200)) 是 inf，所以不是 hypot。
-    (ret (rmath "sqrt" (bin "+" (bin "*" (lane (var a) 0) (lane (var a) 0)) (bin "*" (lane (var a) 1) (lane (var a) 1))))))`],
+    ;; x*x+y*y 按 fma 算（ADR-0014 第十五节）：pair.h:139 的 abs2() 在 arm64 上被 clang
+    ;; 收缩成一条 fmadd，分两步算差最后一位，而这一位会顺着 length -> unit -> 界 -> LP 的
+    ;; 缩放因子一路放大（gamma 那个 gsave 闸门就是这么来的）。
+    (ret (rmath "sqrt" (rmath "fma" (lane (var a) 1) (lane (var a) 1) (bin "*" (lane (var a) 0) (lane (var a) 0))))))`],
   ['asy__pconj', `  (fn asy__pconj ((a ${ASY_PAIR_TY})) ${ASY_PAIR_TY}
     (ret (vlit ${ASY_PAIR_TY} (lane (var a) 0) (un "-" (lane (var a) 1)))))`],
   // dot / cross / realmult 在 pair 上也有（量过：dot((1,2),(3,4))=11、cross 给**实数** -2、
