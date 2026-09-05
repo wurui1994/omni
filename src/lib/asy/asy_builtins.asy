@@ -8126,11 +8126,15 @@ void shipout3(string prefix, frame f, string format="",
   asy__r3w = width;
   asy__r3h = height;
   asy__r3on = true;
-  // oW/oH：**四舍五入**，不是 ceil。量出来的：billboard 的 92.98/99.98 两种取法都给
-  // 93/100，但 sacylinder3D / cylinder / shellsqrtx01 上 ceil 会大 1pt
-  // （%%HiResBoundingBox 差 0.5，位图字节数也跟着差一圈）—— 换成 (int)(x+0.5) 才对上。
-  int oW = (int) (width + 0.5);
-  int oH = (int) (height + 0.5);
+  // oW/oH = ceil(w)。判据是这么定下来的：收到的 w 是 `S.width - defaultrender.margin`，
+  // 也就是"整数尺寸减 0.02"，所以 ceil 正好还原那个整数（billboard 92.98 -> 93、
+  // sacylinder3D 的参考 61.98 -> 62）。四舍五入在 92.98 上也对，但那是巧合。
+  // **sacylinder3D / cylinder / shellsqrtx01 那三个我们还是大 1**，根子不在这一格：
+  // 我们收到的 w 本身就偏大（~62.5），因为球/柱/盘/管这几个原语的三维界在这一层是
+  // 拿变换阵作用在单位立方体八个角上**估**的（asy__addbox3）—— 估宽了，S.width 跟着宽。
+  // 那是另一刀（给这几个原语算准界）。
+  int oW = (int) ceil(width);
+  int oH = (int) ceil(height);
   if (oW <= 0) oW = 1;
   if (oH <= 0) oH = 1;
   // expand = (render<0 ? -2*render : render) * antialias。**这一层读不到 settings**
