@@ -11528,6 +11528,27 @@ plain_picture.asy:741：
    我们的 `lambda.x` 越过了 100 —— 下一刀就把 `lambda`（`max3(S.f)-min3(S.f)`）
    与 `fitscale` 定出来的那个 scale 一起印出来，看多出来的是笔宽那 0.5
    还是二分收敛的那一点。`cylinder` 的"封套差 1"很可能是同一条。
+
+   **量到了**（七行尺子，`m`/`M` 在正交这一支里已经含 `viewportmargin`）：
+
+```
+   width=100.98  height=30.98
+   m.x=-50.0236352273078  M.x=50.0236352273078   -> x 界宽 100.0473
+   m.y=-15.25             M.y=15.25              -> y 界宽 30.5
+```
+
+   两条读数：
+   - **y 那一格是整整的 `30 + 0.5`** —— 子图里那条线是 30 个单位，多出来的 0.5
+     正好是默认笔宽（`linewidth(currentpen)=0.5`）。也就是说**笔宽跑进了三维的界**。
+     `viewportmargin(pair)` 在 `settings.viewportmargin=(0,0)`、`viewportsize=0` 时
+     该回 `(0,0)`，所以不是它加的；嫌疑在我们的 `min3/max3`（或 `_draw(frame,path3,…)`）
+     上 —— 二维那边 `strokebounds` 要撑笔宽，三维**不该**撑。
+   - x 那一格是 `99.547 + 0.5`，而 `size(100)` 想要的是二维总宽 100，
+     即 scale 该是 `99.5`。我们的 scale 是 **99.547**，还差 0.047 ——
+     这一笔与笔宽无关，是 `fitscale` 那个二分（或它用的 `picbox`）定标偏了。
+
+   所以这一条要拆成两刀：先把笔宽从三维界里去掉（y 那 0.5 立刻归零），
+   再查 scale 那 0.047。
 2. **退化情形会报错**：最小的四行尺子
    （`import three; size(100); currentprojection=orthographic(1,0,10,up=Y); draw(O--X);`）
    在我们这边直接 `warning [unbounded]: y scaling in picture unbounded` + 非零退出，
