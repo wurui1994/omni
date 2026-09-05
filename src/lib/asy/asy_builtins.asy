@@ -1881,15 +1881,19 @@ private real asy__norminf(real[] v) {
 // sqrt(1+x)-1，小 x 上不掉精度（path.cc:36）
 private real asy__sqrt1pxm1(real x) { return x / (sqrt(1 + x) + 1); }
 // path.cc:point(double t) 的 de Casteljau，取一个分量（pair 的加乘是逐分量的，
-// 所以拆开算与整对算逐位一样）
+// 所以拆开算与整对算逐位一样）。
+// 六句 `one_t*x + t*y` 都按 **fma** 的口径算：arm64 上 clang 把它们收缩成 fmadd，
+// 差最后一位。追出来的（两侧同一份源码量心形线）：`min(g).y` asy 是
+// -1.2990381472196539、我们原先是 -1.2990381472196542，而节点与控制点逐位相同 ——
+// 差就出在这个极值的代回上。那 1 ulp 会顺着 LP 的缩放因子放大成 gsave 闸门的开关。
 real asy__bez(real a, real b, real c, real d, real t) {
   real one_t = 1.0 - t;
-  real ab = one_t * a + t * b;
-  real bc = one_t * b + t * c;
-  real cd = one_t * c + t * d;
-  real abc = one_t * ab + t * bc;
-  real bcd = one_t * bc + t * cd;
-  return one_t * abc + t * bcd;
+  real ab = asy__fma(one_t, a, t * b);
+  real bc = asy__fma(one_t, b, t * c);
+  real cd = asy__fma(one_t, c, t * d);
+  real abc = asy__fma(one_t, ab, t * bc);
+  real bcd = asy__fma(one_t, bc, t * cd);
+  return asy__fma(one_t, abc, t * bcd);
 }
 // path.cc:46 的 quadraticroots，只报 bounds() 用得到的那一面：返回要试的 t，
 // 顺序与 C++ 那边的 t1、t2 一致（MANY 与 ONE 只报 t1，NONE 报空）。
