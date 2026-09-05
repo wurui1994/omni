@@ -2124,9 +2124,36 @@ private real asy__ptnum(string s) {
       i = i + 1;
     }
   }
+  // 指数那一段（`6.10352e-05`）。gs 的 `12 string cvs` 印很小的数时用指数形式，
+  // 少了这一段就把 `6.10352e-05` 读成 `6.10352`。量出来的：`$\sqrt{x^2}$` 那条横线
+  // （TeX 的 rule，经 dvips 的 `/V`）四个角的 y 是 6.10352e-05 与 -3.99994，
+  // 高 4 个单位；读丢指数之后变成 6.10352 与 -3.99994，高 10.1035 —— textpath.asy
+  // 的那一个数值差（参考 -65.9638965、我们 -76.6883786）就是它。
+  int ex = 0;
+  if (i < n && (substr(s, i, 1) == "e" || substr(s, i, 1) == "E")) {
+    i = i + 1;
+    int esign = 1;
+    if (i < n && substr(s, i, 1) == "-") { esign = -1; i = i + 1; }
+    else if (i < n && substr(s, i, 1) == "+") { i = i + 1; }
+    int ev = 0;
+    while (i < n) {
+      string c = substr(s, i, 1);
+      if (c < "0" || c > "9") break;
+      ev = ev * 10 + (find("0123456789", c) + 0);
+      i = i + 1;
+    }
+    ex = esign * ev;
+  }
+  // 尾数是**整数**（逐位攒的，精确），最后只做一次乘或一次除 —— 十进制的位数
+  // 落在 15 位以内时这样是正确舍入的，逐位乘 0.1 会攒误差。
+  int d = k - ex;
   real p = 1;
-  for (int j = 0; j < k; ++j) p = p * 10;
-  return sign * (m / p);
+  if (d >= 0) {
+    for (int j = 0; j < d; ++j) p = p * 10;
+    return sign * (m / p);
+  }
+  for (int j = 0; j < -d; ++j) p = p * 10;
+  return sign * (m * p);
 }
 
 // 量过的尺寸记在这儿，按（用户导言 + 字号 + 串）做键。
@@ -7136,7 +7163,15 @@ path[][] _texpath(string[] s, pen[] p) {
   // 后面那六句是 texfile.h:50 latexfontencoding —— `font(pen)` 回的那串
   // `\usefont{\ASYencoding}{…}` 全靠它，少了这一段 latex 就是一片 undefined control sequence
   // （量过：tp.out 是空的，一条轮廓也出不来，而 latex 在 nonstopmode 下照样退出 0）。
+  // 头上那四句（ASYbox/ASYdimen/ASYprefix/ASYbase）也是 miniprologue 的一部分
+  // （texfile.h:38 的 beginprologue）——**要照抄**：少了它们这份 .tex 与 asy 那份不是同一份，
+  // 而 `\sqrt` 那条横线（TeX 的 rule，走 dvips 的 /V）会落在别的位置上。
   string t = "\documentclass[12pt]{article}" + nl + u
+    + "\newbox\ASYbox" + nl
+    + "\newdimen\ASYdimen" + nl
+    + "\def\ASYprefix{}" + nl
+    + "\long\def\ASYbase#1#2{\leavevmode\setbox\ASYbox=\hbox{#1}%\ASYdimen=\ht\ASYbox%" + nl
+    + "\setbox\ASYbox=\hbox{#2}\lower\ASYdimen\box\ASYbox}" + nl
     + "\pagestyle{empty}" + nl + "\textheight=2048pt" + nl + "\textwidth=2048pt" + nl
     + "\begin{document}" + nl
     + "\makeatletter%" + nl
@@ -7147,10 +7182,15 @@ path[][] _texpath(string[] s, pen[] p) {
     + "\makeatother%" + nl;
   for (int i = 0; i < n; ++i) {
     if (i != 0) t = t + "\newpage" + nl;
-    t = t + font(p[i]) + "%" + nl;
+    // **次序照 texfile.cc 的 setfont：先 `\fontsize…\selectfont`、再字体命令**。
+    // 反过来写会让 `$\sqrt{x^2}$` 那条横线换个高度：量出来的（textpath.asy 的第一个
+    // 数值差）参考 -65.9638965、我们 -76.6883786，解析回来的那条子路径 miny
+    // 参考 -4.50492172、我们 -5.2373368 —— 别的三条子路径逐字相同。
+    // 两个数也照那边印六位小数、行尾带 `%`。
     real fs = asy__psize(p[i]) / asy__tex2ps;
-    t = t + "\fontsize{" + string(fs) + "}{"
-      + string(asy__plskip(p[i]) / asy__tex2ps) + "}\selectfont" + nl;
+    t = t + "\fontsize{" + asy__f6(fs) + "}{"
+      + asy__f6(asy__plskip(p[i]) / asy__tex2ps) + "}\selectfont%" + nl;
+    t = t + font(p[i]) + "%" + nl;
     t = t + "\special{ps:" + nl + ASYx + nl + ASYy + nl + "/ASY1 true def" + nl
       + "/show {" + ASY1 + "currentpoint newpath moveto false charpath " + forall
       + "} bind def" + nl
