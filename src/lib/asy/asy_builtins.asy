@@ -10242,15 +10242,6 @@ private void asy__addpatch3(frame f, triple[][] P, bool straight)
   asy__add3(f, (X, Y, Z));
 }
 
-// 变换阵作用在单位立方体的八个角上（球/柱/盘那几个原语的界就是这么估的）
-private void asy__addbox3(frame f, real[][] t)
-{
-  for (int i = -1; i <= 1; i += 2)
-    for (int j = -1; j <= 1; j += 2)
-      for (int k = -1; k <= 1; k += 2)
-        asy__add3(f, t * ((i, j, k)));
-}
-
 /* Bezier 曲线（runpicture.in:648） */
 void _draw(frame f, path3 g, triple center = (0, 0, 0), pen[] p,
            real opacity, real shininess, real metallic, real fresnel0,
@@ -10329,24 +10320,33 @@ void draw(frame f, triple[][] P, real[] uknot, real[] vknot,
   asy__add3(f, P);
 }
 
-/* 球 / 柱 / 盘 / 管（runpicture.in:703-730） */
+/*
+ * 球 / 柱 / 盘（runpicture.in:703-730）：**这三格一点界都不出。**
+ *
+ * 它们在 asy 那边是 `drawSphere` / `drawCylinder` / `drawDisk`，都从 `drawPRC` 继承
+ * （drawsurface.h:400/423），而 `drawPRC` 没有覆写 `bounds` —— `drawElement` 的默认
+ * 那一格是**空的**（drawelement.h:126 `virtual void bounds(const double*, bbox3&) {}`），
+ * `ratio` 也是空的（:130）。它们是 PRC 专用的原语，界由同一处那份 surface 出。
+ *
+ * 原先这儿走 `asy__addbox3(f, t)`（把单位立方体八个角过变换塞进界）—— 那是**多加**的，
+ * asy 根本没这一份。**量下来一个数都没动**（cylinder / shellsqrtx01 / sacylinder3D
+ * 照旧，七个原本"一样"的三维例子重跑后仍"一样"）—— 那三个例子走的不是这条路。
+ * 留着是因为它是照 drawPRC 的正解；`asy__addbox3` 因此没人用了，一并删掉。
+ */
 void drawSphere(frame f, real[][] t, bool half = false, pen[] p, real opacity,
                 real shininess, real metallic, real fresnel0, bool lightOn,
                 int type)
 {
-  asy__addbox3(f, t);
 }
 
 void drawCylinder(frame f, real[][] t, pen[] p, real opacity, real shininess,
                   real metallic, real fresnel0, bool lightOn, bool core = false)
 {
-  asy__addbox3(f, t);
 }
 
 void drawDisk(frame f, real[][] t, pen[] p, real opacity, real shininess,
               real metallic, real fresnel0, bool lightOn)
 {
-  asy__addbox3(f, t);
 }
 
 void drawTube(frame f, triple[] g, real width, pen[] p, real opacity,
