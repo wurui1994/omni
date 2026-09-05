@@ -8121,7 +8121,8 @@ string defaultformat3="prc";                     // runpicture.in:121
 // 真身要 `drawop3` 才写得出来，而它在三维那一节才有名字 —— 先摆一个桩
 // （与 asy__merge3fn 同一招），回空串就表示"没渲出来"，调用方用背景色兜底。
 string asy__r3hexfn(frame f, int oW, int oH, int fw, int fh, real angle, real zoom,
-                    triple m, triple M, pair shift, real expand) { return ""; }
+                    triple m, triple M, pair shift, real expand,
+                    real[][] tv) { return ""; }
 
 real asy__r3w = 0;
 real asy__r3h = 0;
@@ -8180,7 +8181,7 @@ void shipout3(string prefix, frame f, string format="",
   while (have * 2 <= need) { hex = hex + hex; have = have * 2; }
   while (have < need) { hex = hex + px; have = have + 1; }
   // 像素：投影 + gs 那一段在三维那一节（`drawop3` 要在那儿才有名字），走下面这个桩。
-  string got = asy__r3hexfn(f, oW, oH, fw, fh, angle, zoom, m, M, shift, expand);
+  string got = asy__r3hexfn(f, oW, oH, fw, fh, angle, zoom, m, M, shift, expand, t);
   if (length(got) == fw * fh * 3 * 2) hex = got;
   drawop o;
   o.kind = 7;
@@ -9847,7 +9848,8 @@ private void asy__merge3hook() {
   // renderBase.cc:47 是 `Angle = args.angle * radians`），正交时是 0。
   // 这一刀只画 path3 那一类（面片先不画）—— 线画那一族就能量出效果。
   asy__r3hexfn = new string(frame f, int oW, int oH, int fw, int fh, real angle,
-                           real zoom, triple m, triple M, pair shift, real expand) {
+                           real zoom, triple m, triple M, pair shift, real expand,
+                           real[][] tv) {
     bool ortho = angle == 0;
     real Zmax = M.z;
     real Hh = ortho ? 0 : -tan(0.5 * angle * pi / 180) * Zmax;
@@ -9887,6 +9889,11 @@ private void asy__merge3hook() {
     if (dx == 0) dx = 1;
     if (dy == 0) dy = 1;
     pair pj(triple v) {
+      // **`tv`（shipout3 收到的 t）不能就这么乘上去**：试过了，billboard 从
+      // 45859/446400 变成 443484/446400（首处就是第 0 个像素，整幅都糊了）。
+      // 它是 `tinv*inv` 那一对里的一个，含义要先弄清再用 —— 现在的 ink 位置
+      // （x 105..260 / y 130..295，参考铺满 0..370 / 8..390）说明差的是**一个均匀的
+      // 2.35 倍缩放**，不是缺一次线性变换。下一刀从 near/H 那两格查。
       real x = v.x;
       real y = v.y;
       if (!ortho) {
