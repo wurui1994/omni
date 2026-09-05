@@ -10720,3 +10720,97 @@ hyperboloidsilhouette 与 spheresilhouette（三维轮廓，数值差），
 `PaletteTicks` 进了 weak 段，而它**默认实参里**要的 `operator cast(string)->Label`
 没跟着进来。189 个例子里没有一个踩到（这一轴"没出图"是 0），所以只记账。
 
+## 施工图：位图那 83 个 —— 根子是**一行** `settings.render = 0`
+
+这一轴上"结构不同"的 100 个里 83 个的摘要是 `位图块数 1 vs 0`：参考是一整张位图，
+我们出的是矢量。从前把它记成"这一轴的边界"。**那是回避，不是结论** —— 这一趟把整条路
+量到了根上，它是一条可施工的路。
+
+### 一、闸门只有一个：`settings.render != 0`
+
+three.asy:2866-2877（我们跑的就是这份源码）：
+
+```
+  bool preview=settings.render > 0 && !prconly();
+  if(prc || v3d) { … } else preview=false;
+  if(preview || (!prc && settings.render != 0) || v3d) {
+     …
+     real w=S.width-defaultrender.margin;
+     real h=S.height-defaultrender.margin;
+     shipout3(prefix,f,format,w,h,fov,P.zoom,m,M,…);
+     if(!preview && !v3d) return F;      // 矢量那条路**根本不走**
+  }
+```
+
+出 EPS 时 prc/v3d 都是假、preview 于是也是假，闸门就剩 `settings.render != 0` 一条。
+真 asy 的默认是 **-1**（自动），所以 3D 的 EPS **整张都是 shipout3 出的**。
+我们这边 `src/lib/asy/settings.asy:37` 把它钉成 **0**（当初的理由是"没有 OpenGL"），
+于是同一份 three.asy 落到矢量那条路 —— 83 个例子的差**全部**出自这一行。
+我们的 `shipout3` 现在是 `abort("还没做")`（asy_builtins.asy:8031）。
+
+### 二、外壳的几何是**完全确定**的，而且已经对着 billboard 的参考验过
+
+- `w = S.width - defaultrender.margin`、`h = S.height - defaultrender.margin`（three.asy:2906）
+- renderBase.cc:932 `initDisplay`：`expand = render<0 ? -2*render : render`（format 空/eps/pdf 时
+  乘 -2，别的乘 -1），`if(antialias) expand *= 2` —— 默认 render=-1、antialias=2 → **expand=4**；
+  `fullWidth=ceil(expand*w)`、`fullHeight=ceil(expand*h)`
+- glrender.cc:531-543：**另起一张空 picture**，`w=oWidth, h=oHeight`，
+  `Aspect=fullWidth/fullHeight`，`if(w > h*Aspect) w=(int)(h*Aspect+0.5); else h=(int)(w/Aspect+0.5)`，
+  然后 `drawRawImage(data, fullWidth, fullHeight, transform(0,0,w,0,0,h), antialias)`，
+  `pic.shipout(...)`
+- drawimage.h:117：`gsave` + `concat(t)` + `rawimage(raw,width,height,antialias)` + `grestore`
+
+拿 billboard 的参考逐项对：`/Width 372 /Height 400` = 4×93、4×100 ✓；
+`[ 93 0 0 100 0 0] concat` ✓；`259 345.5 translate` 正是 93×100 的盒子按 letter 居中
+（与我们 `asy__excess` 那条规矩逐字相同）✓。也就是说**外壳这一层我们现在就能逐字节出**
+—— `/ImageType 1` 那一段我们已经有了（laserlattice 四块 256×256 与参考逐字节相同）。
+
+### 三、像素来自 GPU，所以判据必须改（这一条要先说清）
+
+glrender.cc:523 是 `glReadPixels` —— 参考那张位图是 **GL/Vulkan 光栅化 + asy 自己那套
+PBR 着色器**（base/webgl/asygl-*.js 里那份 fragment shader 的同一套）出的。
+逐字节复现 GPU 的光栅化与着色**不是一个可达的目标**，这一点不能含糊。
+所以这一档的判据要分两层，而且要写在 eps.js 的注释里：
+
+- **几何逐字节**：块数、`/Width` `/Height` `/BitsPerComponent` `/Decode` `/ImageMatrix`、
+  外面那句 `concat`、以及 `%%BoundingBox` —— 这些都是上面那套规则算出来的，必须一模一样
+- **像素按容差**：给出"多少个字节不同、最大差多少、平均差多少"，判据是阈值，
+  与数值那一栏的 `TOL=1e-3` 同一个性质（"摇骰子"那 7 个不计分也是同一类先例）
+
+### 四、像素怎么来：**让 gs 光栅化，不自己写 Z-buffer**
+
+这一层已经在用外部工具当尺子（latex/dvips 量标签、gs 交字形轮廓、groff 排 textpath），
+位图这一档照同一条路走最省：
+
+1. 把 3D 那一帧照现在的矢量路子画进一份**临时 EPS**，纸就是 `w × h` 那个盒子；
+2. `gs -q -dNOPAUSE -dBATCH -sDEVICE=ppmraw -g<fullWidth>x<fullHeight> -r<72*expand>`
+   出 P6 的 RGB（asy 自己出 png 时走的也是 gs，picture.cc:875）；
+3. 读回那 `fullWidth*fullHeight*3` 个字节，按 `_image` 那一档已经能出的
+   `/ImageType 1` 块发出去，外面套 `[w 0 0 h 0 0] concat`。
+
+这样第一版就能把 83 个从"位图块数 1 vs 0"变成"像素差多少" —— **可量、可改进**。
+面片的 PBR 着色、GL 的抗锯齿口径是后面的事，不影响这一步落地。
+
+**这条路先量过了才写下来**（billboard，线画那一族）：
+
+```
+  参考那块位图解出来      372 x 400 RGB，白底，非白像素 13841
+  我们现在的矢量 EPS 交给 gs
+  （gs -dEPSCrop -r288 -sDEVICE=ppmraw）  非白像素 13777
+```
+
+差 64 个像素、**0.5%** —— 也就是说"矢量交给 gs 光栅化"这一版在线画这一族上一上来
+就落在容差量级里（我们的盒子还比参考矮 1pt：99 对 100，那 1pt 本身就够解释这点差）。
+所以第 4 步不是"先凑一版将来重写"，它就是这一档的实现。
+
+### 五、下一刀的顺序
+
+1. `settings.render` 的默认改成 -1，`shipout3` 实现 EPS 那一支（外壳先对上，像素走 gs）；
+   要先解决的一处结构问题：three.asy:2919 那句 `if(!preview && !v3d) return F;` 意味着
+   **矢量那条路根本不走**，所以 `shipout3` 必须自己把整份 EPS 写出来 ——
+   投影出来的那张 2D 帧得在 shipout3 里自己拼（现在是 three.asy 在它后面拼的）。
+2. eps.js 加"GPU 参考位图"这一档的判据（几何逐字节 + 像素容差），把 83 个的现状量出来；
+3. 逐族收像素：先线画（billboard/stroke3/label3 这一族），再曲面（PBR 着色那一套）。
+
+
+
