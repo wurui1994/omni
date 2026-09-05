@@ -10816,7 +10816,7 @@ PBR 着色器**（base/webgl/asygl-*.js 里那份 fragment shader 的同一套�
 就落在容差量级里（我们的盒子还比参考矮 1pt：99 对 100，那 1pt 本身就够解释这点差）。
 所以第 4 步不是"先凑一版将来重写"，它就是这一档的实现。
 
-### 五、下一刀的顺序
+### 五、判据与像素这两件事定下来之后，剩下的是控制流
 
 1. `settings.render` 的默认改成 -1，`shipout3` 实现 EPS 那一支（外壳先对上，像素走 gs）；
    要先解决的一处结构问题：three.asy:2919 那句 `if(!preview && !v3d) return F;` 意味着
@@ -10828,11 +10828,40 @@ PBR 着色器**（base/webgl/asygl-*.js 里那份 fragment shader 的同一套�
      `asy__r3w`/`asy__r3h`），指望矢量那条路照跑。量出来的：`render` 改成 -1 之后
      billboard 的输出是 **0 字节** —— three.asy:2920 回的那张 `F.f` 在那一刻还是空帧，
      后面的隐式 shipout 无从下手。所以 `shipout3` 必须自己把整份 EPS 写出来。
-   - **乙**：把三维帧的投影在这一层做一份（`project` 我们已经有），
-     `shipout3` 自己拼 2D 帧 -> 临时 EPS -> gs -> 位图块。代价是与 three.asy
-     的投影逻辑重复一份，好处是不依赖 three.asy 的控制流。
+   - **乙**：把三维帧的投影在这一层做一份，`shipout3` 自己拼 2D 帧 -> 临时 EPS ->
+     gs -> 位图块。
    量出来的那 0.5% 是拿现有矢量输出（render=0 那条路）测的，所以乙拼出来的 2D 帧
    只要与它一致，那个数就是现成的。`settings.render` 在乙落地之前**仍钉在 0**。
+
+### 六、乙的前置条件（这一趟才发现）：三维帧现在**只存界、不存图**
+
+乙看着像"把投影抄一份"，其实前面还缺一层。量出来的：这一层所有三维绘制内建
+（asy_builtins.asy:9695 起）的**函数体只有一句** `asy__add3(f, …)`，而
+`asy__add3`（:9650）干的是更新 `f.min3v/max3v/minr/maxr` —— 也就是说
+
+```
+  _draw(frame, path3, …)                    只吃进了结点的界
+  draw(frame, triple[][], …)（Bezier 面片）  同上
+  drawbeziertriangle / NURBS 曲线曲面        同上
+  drawSphere / drawCylinder / drawDisk / drawTube  连界都是拿变换阵作用在单位立方体
+                                                   八个角上估的（asy__addbox3）
+```
+
+**几何一个都没留下来**。render=0 那条路之所以能出图，是因为投影发生在 three.asy 里
+（`pic.add(new void(frame f, transform t) { draw(f, t*project(g,P), p); })` ——
+原始的 path3 存在 picture 的闭包里，从来不需要经过帧）。
+
+所以乙的第 0 步是：**给 frame 一份真正的三维 op 表**（path3 / 面片 / 三角面片 /
+NURBS / 球柱盘管，各带自己的材质），`asy__add3` 退回去只管界。顺带一件好事：
+那些内建的形参里 `pen[] p, opacity, shininess, metallic, fresnel0, lightOn, pen[] colors`
+本来就在（runpicture.in 的签名照抄过来的），现在全被丢掉 —— 而它们正是 PBR 着色
+要的那几个数。存下来这一步同时把"以后要不要自己着色"的路留着。
+
+### 七、下一刀的顺序（修正后）
+
+0. **给 frame 一份真正的三维 op 表**（第六节那件事）—— 没有它，乙无从下手；
+1. `shipout3` 实现 EPS 那一支：按第二节那套算法出外壳（那一层现在就能逐字节对上），
+   2D 帧按第六节存下来的 op 表投影，像素走第四节的 gs；`settings.render` 改成 -1；
 2. eps.js 加"GPU 参考位图"这一档的判据（几何逐字节 + 像素容差），把 83 个的现状量出来；
 3. 逐族收像素：先线画（billboard/stroke3/label3 这一族），再曲面（PBR 着色那一套）。
 
