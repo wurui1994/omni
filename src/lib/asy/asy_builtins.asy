@@ -8129,10 +8129,11 @@ void shipout3(string prefix, frame f, string format="",
   // oW/oH = ceil(w)。判据是这么定下来的：收到的 w 是 `S.width - defaultrender.margin`，
   // 也就是"整数尺寸减 0.02"，所以 ceil 正好还原那个整数（billboard 92.98 -> 93、
   // sacylinder3D 的参考 61.98 -> 62）。四舍五入在 92.98 上也对，但那是巧合。
-  // **sacylinder3D / cylinder / shellsqrtx01 那三个我们还是大 1**，根子不在这一格：
-  // 我们收到的 w 本身就偏大（~62.5），因为球/柱/盘/管这几个原语的三维界在这一层是
-  // 拿变换阵作用在单位立方体八个角上**估**的（asy__addbox3）—— 估宽了，S.width 跟着宽。
-  // 那是另一刀（给这几个原语算准界）。
+  // **sacylinder3D / cylinder / shellsqrtx01 那三个我们还是大 1**，根子还没量清：
+  // 我们收到的 w 本身就偏大（参考那边反推是 61.98）。**先别照"球柱盘管的界是估的"
+  // 那条去改** —— drawSphere/drawCylinder（drawsurface.h:400/423）继承的是 drawPRC，
+  // 只有 settings.prc 那条路才走它们；prc=false 时圆柱是当 Bezier 面片画的，
+  // 而面片的界两边都是控制点凸包。下一刀先把这三个的 w/h 印出来对一下再决定改哪儿。
   int oW = (int) ceil(width);
   int oH = (int) ceil(height);
   if (oW <= 0) oW = 1;

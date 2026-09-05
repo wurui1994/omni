@@ -10919,9 +10919,12 @@ NURBS / 球柱盘管，各带自己的材质），`asy__add3` 退回去只管界
    label3 84860/1961568、roll 552954/1008000（这几个的**矢量那半边已经逐字节一样**）。
    还差两件：(a) 像素交给 gs —— 要先把 op 表投影成 2D 帧（投影矩阵从收到的
    `m`/`M`/`angle`/`zoom`/`shift`/`t` 自己搭，`currentprojection` 这一层看不见）；
-   (b) sacylinder3D / cylinder / shellsqrtx01 的 `oW` 比参考大 1 —— 根子是球/柱/盘/管
-   这几个原语的三维界在这一层是拿变换阵作用在单位立方体八个角上**估**的
-   （`asy__addbox3`），估宽了 `S.width` 跟着宽。
+   (b) sacylinder3D / cylinder / shellsqrtx01 的 `oW` 比参考大 1。
+   **先别照"球柱盘管的界是估的"这条改**：`drawSphere`/`drawCylinder`（drawsurface.h:400/423）
+   继承的是 `drawPRC`，只有 `settings.prc` 那条路才走它们；prc=false 时圆柱是当
+   **Bezier 面片**画的（我们的 `kind == 1`），而面片的界两边都是控制点凸包。
+   所以这三个大 1 的根子还没量清 —— 下一刀先把它们的 `w`/`h` 印出来与参考反推的
+   （sacylinder3D 是 61.98）比，再决定改哪儿。
 2. eps.js 加"GPU 参考位图"这一档的判据（几何逐字节 + 像素容差），把 83 个的现状量出来；
 3. 逐族收像素：先线画（billboard/stroke3/label3 这一族），再曲面（PBR 着色那一套）。
 
