@@ -10059,6 +10059,10 @@ private void asy__merge3hook() {
     if (_runproc("cd " + dir + " && gs -q -dNOPAUSE -dBATCH"
           + " -sDEVICE=ppmraw -g" + string(fw) + "x" + string(fh)
           + " -r" + string((int) (72 * expand))
+          // **要反锯齿**：参考那一侧的边是带灰阶的（量出来的一行剖面：
+          // 239 207 159 111 79 32 32 64 95 159 191 223），GL 那边开着多重采样；
+          // gs 默认是硬边（我们那一行全是 0）。少了这一格，每条棱两侧都多算一圈差。
+          + " -dGraphicsAlphaBits=4 -dTextAlphaBits=4"
           + " -sOutputFile=r3.ppm r3.eps 2>/dev/null"
           + " && tail -c " + string(nbytes) + " r3.ppm | xxd -p | tr -d '\n' > r3.hex") != 0)
       return "";
