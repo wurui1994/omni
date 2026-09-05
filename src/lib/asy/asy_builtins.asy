@@ -7259,10 +7259,71 @@ private path[] asy__strokepathgs(path g, pen p) {
 }
 asy__strokepathfn = asy__strokepathgs;
 
-// runlabel.in:243 那份 `_texpath` 的公开名字（plain_Label.asy 的 `textpath` 就是它）。
-// 机制在上面那一份里，这儿只是把名字接上 —— 从前这一格是 abort，`textpath.asy` 因此出不了图。
+// runlabel.in:355-420 那份 `textpath`（`tex=false` 那条路，plain_Label.asy:660 的
+// `g=tex ? _texpath(s,p) : textpath(s,p)`）。排版不走 TeX 而是 **groff**
+// （settings.cc:1951 的 `textcommand`，选项 `-e -P -b16`），再让 gs 把字形摊成路径。
+// 次序照那边：
+//   1. 一份 roff：每个标签四段 —— textprologue（".EQ\ndelim $$\n.EN"）、笔的 font 串、
+//      正文、textepilogue（".bp"，一页一个标签）
+//   2. 一份 .ps，开头是 showpath（runlabel.in:80）：ASYx/ASYy，再把 **stroke 与 fill
+//      两个都换成"打印当前路径"** —— `-dNoOutputFonts` 把字形变成真路径，走的是 fill
+//   3. `groff … | gs -q -dNoOutputFonts … -sOutputFile=- -` 的输出**追加**到那份 .ps
+//   4. 再跑一趟 gs 读它，打印出来的 M/L/C/c 按 hscale=0.1 解析（runlabel.in:420 的
+//      `readpath(psname,keep,0.1)`，vsign 默认 1）
+// 从前这一格直接转手 `_texpath` —— 于是 `.fam T\n.ps 12` 被当成 LaTeX 字体命令、
+// `$ sqrt {x sup 2} $` 被当成 LaTeX 数学式，textpath.asy 的界因此小了一大截
+// （我们 336..455，参考 251..540）。
+private path[][] asy__textpathgroff(string[] s, pen[] p) {
+  path[][] out;
+  int n = s.length < p.length ? s.length : p.length;
+  for (int i = 0; i < n; ++i) { path[] e; out.push(e); }
+  if (n == 0) return out;
+  string dir = "/tmp/omni-asytex";
+  string nl = '\n';
+  string txt = "";
+  for (int i = 0; i < n; ++i) {
+    txt = txt + ".EQ" + nl + "delim $$" + nl + ".EN" + nl
+      + font(p[i]) + nl + s[i] + nl + ".bp" + nl;
+  }
+  string ASYx = "/ASYx {( ) print ASYX sub 12 string cvs print} bind def";
+  string ASYy = "/ASYy {( ) print ASYY sub 12 string cvs print} bind def";
+  string forall = "{(M) print ASYy ASYx} {(L) print ASYy ASYx}"
+    + " {(C) print ASYy ASYx ASYy ASYx ASYy ASYx} {(c) print} pathforall";
+  string ASYinit = "/ASYX currentpoint pop def /ASYY currentpoint exch pop def ";
+  // runlabel.in:65 的 ASY1 与 68-72 的 endpath：**第一次**用到时才记原点，
+  // 之后每条路径都接着打印；末尾补一格 (M) 与当前点，再把路径清掉。
+  string ASY1 = "ASY1 {" + ASYinit + "/ASY1 false def} if ";
+  string endp = ASY1 + forall + " (M) print currentpoint ASYy ASYx "
+    + "currentpoint newpath moveto} bind def";
+  string head = ASYx + nl + ASYy + nl + "/ASY1 true def" + nl
+    + "/stroke {strokepath " + endp + nl
+    + "/fill {closepath " + endp + nl;
+  if (_runproc("mkdir -p " + dir + " && rm -f " + dir + "/tg.*") != 0) return out;
+  _writetext(dir + "/tg.roff", txt);
+  _writetext(dir + "/tg.head", head);
+  if (_runproc("cd " + dir + " && cp tg.head tg.ps"
+      + " && groff -e -P -b16 tg.roff 2>/dev/null | gs -q -dNoOutputFonts -dNOPAUSE"
+      + " -dBATCH -P -sDEVICE=ps2write -sOutputFile=- - >> tg.ps 2>/dev/null") != 0) return out;
+  if (_runproc("cd " + dir + " && gs -q -dBATCH -P -sDEVICE=ps2write"
+      + " -sOutputFile=/dev/null tg.ps > tg.out 2>/dev/null") != 0) return out;
+  string o = _readtext(dir + "/tg.out");
+  int i = 0;
+  int k = 0;
+  int len = length(o);
+  while (i < len && k < n) {
+    int e = find(o, nl, i);
+    if (e < 0) e = len;
+    string ln = substr(o, i, e - i);
+    i = e + 1;
+    if (length(ln) == 0) continue;
+    out[k] = asy__tpparse(ln, 0.1, 0.1);
+    k = k + 1;
+  }
+  return out;
+}
+// plain_Label.asy 的 `textpath(string[], pen[])` 就是上面那一份（tex=false 那条路）。
 path[][] textpath(string[] s, pen[] p) {
-  return _texpath(s, p);
+  return asy__textpathgroff(s, p);
 }
 // runpicture.in 的 `_shipout`：**真 plain 那条出口**。plain_shipout.asy:117 走到这儿，
 // 手上的 frame 坐标已经是最终的（`pic.fit()` 已经按 size(…) 缩过），所以这里的缩放固定为 1。
