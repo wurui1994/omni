@@ -10580,3 +10580,94 @@ strokepath / textpath 这两刀之后是 81 -> 82，而"只有数值差"那一�
 3 个末位浮点、20 个还超 3s 的、1 个没出图。
 
 <!-- ADR-0014 轴现状-END -->
+
+## 已落地：那 20 个"慢"里挖出两条真差 —— `real^int` 与 `unit`
+
+上一节的口径是"能靠读源码对上的差已清零"。那句话只对**跑进 3s 的那些**成立：
+把 20 个超时的拿 30s 重跑，露出 5 条可碰的（slope / interpolate1 /
+laserlattice / hyperboloidsilhouette / spheresilhouette）。从最像"数得清"的
+slope 入手（`参考 51 vs 我们 50`，一个 2D 例子），一层层量下去挖出两条**语义**差，
+都不是浮点噪声：
+
+### 一、`real ^ int` 是反复平方，不是 `pow(x,(double)n)`
+
+asy 的 `^` 在 real 上是**两个重载**，按指数的**静态类型**分路 ——
+`mathop.h:191` 的 `pow(T x, Int y)` 是二进制幂（`if(y&1) r*=x; if((y>>=1)==0) return r; x*=x;`），
+只有指数是 real 时才落到 libm 的 `pow`。拿 asy 自己当尺子（`x=sqrt(0.5)`）：
+
+```
+  int k=5;  x^k -> 0.17677669529663698     （反复平方）
+  real e=5; x^e -> 0.17677669529663695     （libm 的 pow）
+  int k=4;  x^k -> 0.25000000000000011  对 x^4.0 的 0.25000000000000006
+```
+
+差最后一两位。而 slope 的 `dt=lambda^(n-i)` 正落在这上面，那点差经 24 次 ODE
+积分放大到 y 轴范围的 1e-12，`picture.fit` 的缩放 `s` 于是与参考不是同一个 double，
+`t*inverse(t)` 不再**正好**是单位（`transform::isIdentity` 比的是六个数的精确相等），
+于是每一笔描边都多套一层 `gsave` / `[ 1 0 0 1 0 0] concat` / `grestore`。
+一条 `asy__rpowi` 补上之后：slope 从 3761 对 4522 个 token、401 处差，变成
+**3761 对 3761、0 处差**；interpolate1 顺带一起对上（它也吃这条）。
+
+顺手量清了同一条链上剩下的那一处，**归到已知的 FMA 那一族**：
+`sum += A[k]*B[k][i]`（`runarray.in:1439` 的 `real[]*real[][]`）在参考里是
+FMA 收缩过的 —— RK3BS 第一步的 highOrder 我们给 `0.30732465610797188`，
+asy 给 `…194`，Python 的 `math.fma` 逐位重现了后者。1e-16，这一趟没有改变 fit 的缩放。
+
+### 二、`unit` 是先取倒数再逐分量乘
+
+`pair.h:164` / `triple.h:281`：`scale=1.0/z.length(); pair(z.x*scale,z.y*scale)`。
+与 `z/length(z)` 在浮点上不是一回事，量出来的（两侧现在逐字节相同）：
+
+```
+  unit((62.762791874221662,0)).x = 0.99999999999999989      （不是 1）
+  unit((3,-4))                   = (0.60000000000000009, -0.80000000000000004)
+```
+
+挡的那一道也照抄 `fpclassify(scale) == FP_NORMAL`：长度是 0、非规格化、inf、nan
+一律回 `z0=(0,0)`，**不是"回 z"** —— 所以 `unit((1e308,1e308))` 是 `(0,0)`（length
+溢出成 inf）。非负数上这一条就是 `realMin <= scale <= realMax`。
+
+去处是 laserlattice：刻度方向本该是那个"差一位的 1"，于是刻度长比 `Ticksize`
+少一个 ulp，那一个 ulp 进了 picture 的 coord 表 —— `calculateScaling` 收到的
+truesize 从 `5.9192913385826778` 变回参考的 `5.9192913385826769`，
+**816 个约束输入现在两侧逐个相同**。
+
+### laserlattice 还差最后一层：帧的 min.x 上一个 ulp（下一刀）
+
+量到的现场（最小复现：一张 image + `yaxis(...,LeftRight,RightTicks)`，
+`size(p,250,250,IgnoreAspect)`）：
+
+```
+                        width               xgrow                 min(f).x
+  真 asy   250.00000000000023   0.99999999999999911   -146.60109682440847
+  我们     250.00000000000026   0.999999999999999     -146.6010968244085
+```
+
+`calculateTransform = scale(fit(t),xsize,ysize,keepAspect)*t`，LP 那一半（`t`）两侧
+已经完全相同，差在后一半的 `xgrow=xsize/width`，而 width 来自**帧的包围盒**。
+这一趟排掉了三个嫌疑：那一格的笔变换两侧都是精确单位（所以不是笔的盒子）、
+`inverse` 与 `transform*pair` 两侧逐字相同（形状都照抄过）、image 与两个标签都不是
+min.x 的来源（去掉它们差还在）。剩下的嫌疑在**描边的界**：asy 的
+`drawPathPenBase::strokebounds`（drawpath.cc:170）是 `p.internalbounds(pentype.bounds())`
+加上逐结点的 `join()` 与两端的 `cap()`，我们这一层是"按半宽外扩"一句（`widen`）。
+那是下一刀的工地，不是一个 ulp 的补丁。
+
+### 这一轴的账
+
+`.omni-cache/epsres` 里当前的结论（**注意这不是同一条时限下的一趟**：慢的那些是拿
+30s/120s 单独追的，所以"超时"那一栏在这份账里没有意义）：
+
+```
+  一样 86（+2 是这一刀的 slope 与 interpolate1）   只有数值差 0   结构不同 100
+```
+
+「结构不同」那一栏涨到 100 是同一个老原因：原来超时没算分的落了地，其中
+绝大多数是三维/位图。可碰的剩 4 个：laserlattice（上面那一层）、
+hyperboloidsilhouette 与 spheresilhouette（三维轮廓，数值差），
+加上 cardioid / gamma / lmfit1 那三个末位浮点（FMA + `cos` 的最后一位）。
+
+顺带记一条**量法上的坑**（这一趟被它骗了一次）：`.omni-cache/epsres` 的结论键里
+有编译器印记，但那一趟如果是在**手改过的 base 库**（我把 graph.asy / plain_*.asy
+拷到 /tmp 加探针，再放进 `ASYMPTOTE_DIR` 的最前面）下跑的，写进去的
+"没出图"会被后面**同一个印记**的正常一趟当成缓存直接采信 —— 23 个例子一起
+记成"未声明的变量"。带探针跑完之后要 `OMNI_EPS_FRESH=1` 重量一趟。
