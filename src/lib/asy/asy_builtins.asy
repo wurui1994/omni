@@ -10074,6 +10074,11 @@ struct drawop3 {
   path3 g3;
   triple[][] P3;
   triple[] Q3;             // kind 3：管子的中心折线（drawTube 的 g）
+  // kind 4：三角网里的**一个**三角（drawTessellation 那条路，runpicture.in:741）。
+  // 三个顶点、三个法向（没给法向时空着，用面法向）、三个顶点色（没给时空着）。
+  triple[] T3;
+  triple[] N3;
+  pen[] VC;
   real width = 0;          // kind 3：管子的直径（drawTube 的 width）
   triple center = (0, 0, 0);
   pen[] p;
@@ -10237,6 +10242,9 @@ private void asy__merge3hook() {
         triple[] Q = ops[i].Q3;
         for (int a = 0; a < Q.length; ++a) { zs = zs + Q[a].z; cnt = cnt + 1; }
         zs = zs + zbias * cnt;
+      } else if (ops[i].kind == 4) {
+        triple[] T = ops[i].T3;
+        for (int a = 0; a < T.length; ++a) { zs = zs + T[a].z; cnt = cnt + 1; }
       } else {
         triple[][] P = ops[i].P3;
         for (int a = 0; a < P.length; ++a)
@@ -10516,6 +10524,10 @@ private void asy__merge3hook() {
     }
     for (int a = 0; a < idx.length; ++a) {
       drawop3 o3 = ops[idx[a]];
+      // **看不见的笔一格都不画**（pen.h 的 INVISIBLE 颜色空间）。量出来的：
+      // `draw((-1,-1,0)--(-1,-1,0),invisible)` 在参考的位图里什么都没有，
+      // 我们那边却落了几点近黑（管子与它的球帽照旧出几何、着色又给了颜色）。
+      if (o3.p.length > 0 && o3.p[0].isinvisible) continue;
       if (o3.kind == 3) {
         triple[] Q = o3.Q3;
         if (Q.length < 2) continue;
@@ -10545,6 +10557,37 @@ private void asy__merge3hook() {
             + " " + ps(pk.x) + " " + ps(pk.y) + " curveto" + nl;
         }
         doc = doc + "stroke" + nl;
+        nink = nink + 1;
+        continue;
+      }
+      // 三角网那一族（kind 4，drawTessellation 那条路）：直边三角，
+      // 三个顶点各算一次 BRDF，/ShadingType 4 在片内线性插值 —— 与 GL 那边
+      // 逐片元的差别只剩片内那一点非线性。顶点色（Gouraud）顶掉 diffuse
+      // （fragment.glsl 的 COLOR 那一支是 `diffuse=color`，不点灯时当 emissive）。
+      if (o3.kind == 4) {
+        triple[] T = o3.T3;
+        if (T.length < 3) continue;
+        triple fn = cross3(T[1] - T[0], T[2] - T[0]);
+        real[][] cc;
+        for (int j = 0; j < 3; ++j) {
+          triple nj = o3.N3.length == 3 ? o3.N3[j] : fn;
+          if (o3.VC.length == 3) {
+            drawop3 q;
+            q.kind = o3.kind;
+            q.p = new pen[] {o3.VC[j],
+                             o3.lightOn ? (o3.p.length > 1 ? o3.p[1] : black) : o3.VC[j],
+                             o3.p.length > 2 ? o3.p[2] : black};
+            q.lightOn = o3.lightOn;
+            q.opacity = o3.opacity;
+            q.shininess = o3.shininess;
+            q.metallic = o3.metallic;
+            q.fresnel0 = o3.fresnel0;
+            cc.push(shade(q, nj, T[j]));
+          } else cc.push(shade(o3, nj, T[j]));
+        }
+        doc = doc + "<< /ShadingType 4 /ColorSpace /DeviceRGB /DataSource [ 0"
+          + wp(T[0]) + wc(cc[0]) + " 0" + wp(T[1]) + wc(cc[1])
+          + " 0" + wp(T[2]) + wc(cc[2]) + " ] >> shfill" + nl;
         nink = nink + 1;
         continue;
       }
@@ -10928,6 +10971,29 @@ void draw(frame f, triple[] v, int[][] vi, triple center = (0, 0, 0),
           int[][] ci = new int[][], int interaction)
 {
   asy__add3(f, v);
+  // **三角网也要落到位图上**（原先只出界、一个三角都不画）。
+  // 这是 drawTessellation 那条路（three_surface.asy:1766）：`render.tessellate` 打开、
+  // 曲面带索引时，整张曲面就是这一族三角，一个面片都不出。
+  // 一个三角一格 op —— 画家算法要按三角排深度（真 asy 那边是逐片元的 Z-buffer）。
+  for (int k = 0; k < vi.length; ++k) {
+    if (vi[k].length < 3) continue;
+    drawop3 o;
+    o.kind = 4;
+    o.T3 = new triple[] {v[vi[k][0]], v[vi[k][1]], v[vi[k][2]]};
+    if (k < ni.length && ni[k].length >= 3 && n.length > 0)
+      o.N3 = new triple[] {n[ni[k][0]], n[ni[k][1]], n[ni[k][2]]};
+    if (k < ci.length && ci[k].length >= 3 && c.length > 0)
+      o.VC = new pen[] {c[ci[k][0]], c[ci[k][1]], c[ci[k][2]]};
+    o.center = center;
+    o.p = p;
+    o.opacity = opacity;
+    o.shininess = shininess;
+    o.metallic = metallic;
+    o.fresnel0 = fresnel0;
+    o.lightOn = lightOn;
+    o.interaction = interaction;
+    asy__push3(f, o);
+  }
 }
 
 /* 分组与变换的记号（runpicture.in:296-317）：这一层不分组，所以是空的 */
@@ -11204,6 +11270,17 @@ frame operator *(real[][] t, frame f)
       triple[] Q;
       for (int a = 0; a < o.Q3.length; ++a) Q.push(t * o.Q3[a]);
       q.Q3 = Q;
+    } else if (o.kind == 4) {
+      // 三角网那一族：点过变换，法向**只过线性那一格**（平移不作用在法向上；
+      // 这一层拿不到逆转置，非均匀缩放时会偏一点，正交/均匀缩放下是准的）
+      triple[] T;
+      for (int a = 0; a < o.T3.length; ++a) T.push(t * o.T3[a]);
+      q.T3 = T;
+      triple[] N;
+      triple o0 = t * (0, 0, 0);
+      for (int a = 0; a < o.N3.length; ++a) N.push(t * o.N3[a] - o0);
+      q.N3 = N;
+      q.VC = o.VC;
     } else {
       triple[][] P;
       for (int a = 0; a < o.P3.length; ++a) {
