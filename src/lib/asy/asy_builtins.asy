@@ -9900,7 +9900,10 @@ private void asy__merge3hook() {
     string nl = '\n';
     string doc = "%!PS-Adobe-3.0 EPSF-3.0" + nl
       + "%%BoundingBox: 0 0 " + string(oW) + " " + string(oH) + nl
-      + "%%EndComments" + nl + "0.5 setlinewidth 1 setlinecap 1 setlinejoin" + nl;
+      + "%%EndComments" + nl
+      // 线宽取**一个像素**：这一份 EPS 是 oW x oH pt、按 72*expand dpi 光栅化，
+      // 所以 1px = 1/expand pt。GL 那边画线是 1 个采样宽，粗一倍就多一圈 ink。
+      + ps(1 / expand) + " setlinewidth 1 setlinecap 1 setlinejoin" + nl;
     drawop3[] ops = asy__ops3(f);
     int nink = 0;
     // 面片（kind == 1/2）先按深度排：视图空间里 z 越负越远，画家算法从远画到近。
