@@ -1918,7 +1918,7 @@ real[] asy__bezcrit(real a, real b, real c, real d) {
   real x = -2.0 * C / denom;
   if (x > -1.0) {
     real r2 = factor * asy__sqrt1pxm1(x);
-    real r1 = -r2 - 2.0 * factor;
+    real r1 = asy__fma(-2.0, factor, -r2);   // path.cc:82 `-r2-2.0*factor`，收缩成 fmadd
     if (r1 <= r2) { out.push(r1); out.push(r2); }
     else { out.push(r2); out.push(r1); }
   } else if (x == -1.0) {
@@ -6318,7 +6318,7 @@ private real[] asy__qroots(real a, real b, real c) {
   real x = -2.0 * c / denom;
   if (x > -1.0) {
     real r2 = factor * asy__sqrt1pxm1(x);
-    real r1 = -r2 - 2.0 * factor;
+    real r1 = asy__fma(-2.0, factor, -r2);   // path.cc:82 `-r2-2.0*factor`，收缩成 fmadd
     if (r1 <= r2) { r.push(r1); r.push(r2); } else { r.push(r2); r.push(r1); }
     return r;
   }
@@ -7031,7 +7031,7 @@ real[] quadraticroots(real a, real b, real c) {
   real x = -2.0 * c / denom;
   if (x > -1.0) {
     real r2 = factor * asy__sqrt1pxm1(x);
-    real r1 = -r2 - 2.0 * factor;
+    real r1 = asy__fma(-2.0, factor, -r2);   // path.cc:82 `-r2-2.0*factor`，收缩成 fmadd
     if (r1 <= r2) { roots.push(r1); roots.push(r2); } else { roots.push(r2); roots.push(r1); }
     return roots;
   }
