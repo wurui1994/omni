@@ -1740,7 +1740,21 @@ private real asy__scontrolbound(real[] P, bool mx) {
 }
 
 // bound.cc:52 的 bound（标量版，十六个控制点的面片）
+//
+// **这一格现在走的是控制点凸包，不是细分。** 细分那一版逐句照抄过、也确实把封套
+// 对上了（cylinder / shellsqrtx01 / sacylinder3D 的矢量半边曾经全部逐字节相同），
+// 但它是**热路径**：`minbezier/maxbezier`（每片面片、三个分量各一遍）、
+// `asy__addpatch3`、`minratio/maxratio`、以及 `angle()` 每轮的帧乘法都要过它。
+// 在这一层（解释执行的 asy）跑 Bezier 细分，AiryDisk 从 4.4s 涨到 73s、bars3 跑不完。
+// 真要它就得把 `bound/boundtri` 做成**运行时的原生内建**（JS 那一侧），
+// 而不是 asy 层的递归。递归那一版留在下面没人调，等原生版落地时照它搬。
 private real asy__sbound(real[] P, bool mx, real b, real fuzz, int depth) {
+  real bb = asy__rm(mx, b, P[0]);
+  for (int i = 1; i < P.length; ++i) bb = asy__rm(mx, bb, P[i]);
+  return bb;
+}
+
+private real asy__sbound_subdivide(real[] P, bool mx, real b, real fuzz, int depth) {
   real bb = asy__rm(mx, b, asy__scornerbound(P, mx));
   real sgn = mx ? 1 : -1;
   if (sgn * (bb - asy__scontrolbound(P, mx)) >= -fuzz || depth == 0) return bb;
@@ -1787,7 +1801,15 @@ private real asy__scontrolboundtri(real[] P, bool mx) {
 // bound.cc:102 的 boundtri（标量版，十个控制点的三角面片）。
 // `Splittri`（bound.h:30）那三十来个中间点在这儿摊开写 —— asy 那边是模板，
 // 我们这一侧没有模板，实数版与 triple 版各写一遍。
+// bound.cc:102 的 boundtri（标量版，十个控制点的三角面片）——
+// 同上，现在走凸包；细分那一版在 `asy__sboundtri_subdivide` 里，没人调。
 private real asy__sboundtri(real[] P, bool mx, real b, real fuzz, int depth) {
+  real bb = asy__rm(mx, b, P[0]);
+  for (int i = 1; i < P.length; ++i) bb = asy__rm(mx, bb, P[i]);
+  return bb;
+}
+
+private real asy__sboundtri_subdivide(real[] P, bool mx, real b, real fuzz, int depth) {
   real bb = asy__rm(mx, b, asy__scornerboundtri(P, mx));
   real sgn = mx ? 1 : -1;
   if (sgn * (bb - asy__scontrolboundtri(P, mx)) >= -fuzz || depth == 0) return bb;
@@ -10179,18 +10201,53 @@ private void asy__merge3hook() {
       idx.push(i);
       key.push(zs / cnt);
     }
-    for (int a = 1; a < idx.length; ++a) {
-      int ii = idx[a]; real kk = key[a];
-      int b = a - 1;
-      while (b >= 0 && key[b] > kk) { idx[b + 1] = idx[b]; key[b + 1] = key[b]; b = b - 1; }
-      idx[b + 1] = ii; key[b + 1] = kk;
+    // **排序必须是 O(n log n)。** 原先这儿是插入排序 —— AiryDisk 有约 16 万片面片，
+    // 那是 1.3e10 次搬动，量出来这一格吃掉约 35s（整条位图路 73s 里的大头；
+    // gs 自己只 0.75s，字符串拼接与 `string(x,9)` 各自 150 万次也只有 1~2s）。
+    // 换成自底向上的归并（稳定，与插入排序在等键时的次序一致）。
+    int m = idx.length;
+    if (m > 1) {
+      int[] ti = new int[m];
+      real[] tk = new real[m];
+      int w = 1;
+      while (w < m) {
+        int lo = 0;
+        while (lo < m) {
+          int mid = lo + w;
+          int hi = mid + w;
+          if (mid > m) mid = m;
+          if (hi > m) hi = m;
+          int a = lo; int b = mid; int o = lo;
+          while (a < mid && b < hi) {
+            if (key[b] < key[a]) { ti[o] = idx[b]; tk[o] = key[b]; b = b + 1; }
+            else { ti[o] = idx[a]; tk[o] = key[a]; a = a + 1; }
+            o = o + 1;
+          }
+          while (a < mid) { ti[o] = idx[a]; tk[o] = key[a]; a = a + 1; o = o + 1; }
+          while (b < hi) { ti[o] = idx[b]; tk[o] = key[b]; b = b + 1; o = o + 1; }
+          lo = lo + 2 * w;
+        }
+        for (int i = 0; i < m; ++i) { idx[i] = ti[i]; key[i] = tk[i]; }
+        w = 2 * w;
+      }
     }
     // 面片：把边界那四条三次曲线投出来填平色。**平色不是着色** —— 真 asy 那边是
     // PBR 的片元着色，这一刀只把"哪儿有东西、什么颜色"落到位图上。
+    // 这一格的颜色取哪一支笔：`material.p` 是 `{diffuse, emissive, specular}`
+    // （three.asy 的 struct material）。**不点灯的那一族用 emissive** —— three.asy
+    // 画细线/管子时是 `emissive(p)`，diffuse 是黑的。量出来的（/tmp/nl/col.asy，
+    // `draw((0,0,0)--(1,0,0),blue+8)`）：`p0=0,0,0  p1=0,0,255  p2=0,0,0`，
+    // 而参考的位图里就是**平的** `0,0,255`（不带光照）。原先一律取 p[0]，
+    // 于是整族画成黑的（`0,0,0`×24123 对参考的 `0,0,255`×11282 + `255,0,0`×11128）。
+    int[] opcolor(drawop3 o) {
+      if (o.p.length == 0) return new int[] {0, 0, 0};
+      if (!o.lightOn && o.p.length > 1) return asy__pixrgb(o.p[1]);
+      return asy__pixrgb(o.p[0]);
+    }
     for (int a = 0; a < idx.length; ++a) {
       drawop3 o3 = ops[idx[a]];
       triple[][] P = o3.P3;
-      int[] rgb = o3.p.length > 0 ? asy__pixrgb(o3.p[0]) : new int[] {0, 0, 0};
+      int[] rgb = opcolor(o3);
       void edge(triple c1, triple c2, triple e) {
         pair a1 = pj(c1); pair a2 = pj(c2); pair a3 = pj(e);
         doc = doc + ps(a1.x) + " " + ps(a1.y) + " " + ps(a2.x) + " " + ps(a2.y)
@@ -10225,13 +10282,18 @@ private void asy__merge3hook() {
       doc = doc + "closepath fill" + nl;
       nink = nink + 1;
     }
-    doc = doc + "0 setgray" + nl;
-    // 管子（kind == 3）：先按中心折线描一道 —— 真 asy 那边是实心的管面，
-    // 这一刀只要"线在哪儿"，够判断坐标对不对了。
+    // 管子（kind == 3）与 path3（kind == 0）这两支**也要用各自的笔色**。
+    // 原先这儿是一句 `0 setgray` 把后面全画成黑的 —— 量出来的（/tmp/nl/col.asy：
+    // `draw((0,0,0)--(1,0,0),blue+8)` 与 `red+8`）：参考的位图里是
+    // `0,0,255`×11282 与 `255,0,0`×11128（**平色、不带光照**），我们那边是
+    // `0,0,0`×24123，一片黑。
     for (int i = 0; i < ops.length; ++i) {
       if (ops[i].kind != 3) continue;
       triple[] Q = ops[i].Q3;
       if (Q.length < 2) continue;
+      int[] c3 = opcolor(ops[i]);
+      doc = doc + ps(c3[0] / 255) + " " + ps(c3[1] / 255) + " " + ps(c3[2] / 255)
+        + " setrgbcolor" + nl;
       pair a0 = pj(Q[0]);
       doc = doc + ps(a0.x) + " " + ps(a0.y) + " moveto" + nl;
       for (int k = 1; k < Q.length; ++k) {
@@ -10246,6 +10308,9 @@ private void asy__merge3hook() {
       path3 g = ops[i].g3;
       int n = g.nodes.length;
       if (n < 2) continue;
+      int[] c0 = opcolor(ops[i]);
+      doc = doc + ps(c0[0] / 255) + " " + ps(c0[1] / 255) + " " + ps(c0[2] / 255)
+        + " setrgbcolor" + nl;
       pair a0 = pj(g.nodes[0].point);
       doc = doc + ps(a0.x) + " " + ps(a0.y) + " moveto" + nl;
       for (int k = 1; k < n; ++k) {
@@ -10583,7 +10648,16 @@ private real asy__cornerbound(triple[] P, bool mx, int which) {
 }
 
 // path3.cc:803 的 bound（十六个控制点的面片）
+// path3.cc:803 的 bound（十六个控制点的面片，比那一版）——
+// 同上，现在走凸包；细分那一版在 `asy__pbound_subdivide` 里，没人调。
 private real asy__pbound(triple[] P, bool mx, int which, real b, real fuzz, int depth) {
+  real bb = asy__rm(mx, b, asy__rf(which, P[0]));
+  for (int i = 1; i < P.length; ++i) bb = asy__rm(mx, bb, asy__rf(which, P[i]));
+  return bb;
+}
+
+private real asy__pbound_subdivide(triple[] P, bool mx, int which, real b, real fuzz,
+                                   int depth) {
   real bb = asy__rm(mx, b, asy__cornerbound(P, mx, which));
   real sgn = mx ? 1 : -1;
   if (sgn * (bb - asy__ratiobound(P, mx, which)) >= -fuzz || depth == 0) return bb;
@@ -10621,8 +10695,17 @@ private real asy__cornerboundtri(triple[] P, bool mx, int which) {
 }
 
 // path3.cc:860 的 boundtri（十个控制点的三角面片，比那一版）
+// path3.cc:860 的 boundtri（十个控制点的三角面片，比那一版）——
+// 同上，现在走凸包；细分那一版在 `asy__pboundtri_subdivide` 里，没人调。
 private real asy__pboundtri(triple[] P, bool mx, int which, real b, real fuzz,
                             int depth) {
+  real bb = asy__rm(mx, b, asy__rf(which, P[0]));
+  for (int i = 1; i < P.length; ++i) bb = asy__rm(mx, bb, asy__rf(which, P[i]));
+  return bb;
+}
+
+private real asy__pboundtri_subdivide(triple[] P, bool mx, int which, real b,
+                                      real fuzz, int depth) {
   real bb = asy__rm(mx, b, asy__cornerboundtri(P, mx, which));
   real sgn = mx ? 1 : -1;
   if (sgn * (bb - asy__ratiobound(P, mx, which)) >= -fuzz || depth == 0) return bb;
@@ -10818,33 +10901,39 @@ frame operator *(real[][] t, frame f)
     }
     asy__push3(g, q);
   }
-  // **界也要照 asy 逐个 drawelement 重算，不能拿"旧包围盒的八个角过变换"。**
-  // 旋转之后八角盒是真界的**超集**，`lambda.x` 于是系统性偏大。量出来的（七行尺子
-  // /tmp/nl/ar3.asy 与 cylinder / shellsqrtx01）：真实路径上 `embed` 的 P.infinity 那一支
-  // （three.asy:2830-2841）先做 `S.f = modelview*S.f` 再取 `max3-min3` 当 lambda，
-  // 所以这一格的松紧直接决定 `S.width`、`oW` 与封套。
+  // **界这一格不能在这儿逐个 drawelement 重算 —— 试过，性能塌了。**
+  // 上一刀在这里加了"走一遍 op 表求真界"（先自检、再按变换后的几何算），
+  // 封套那一层确实对上了（七行尺子逐字节相同、cylinder/shellsqrtx01 的矢量半边对上），
+  // **但 `real[][] * frame` 是热路径**：`angle()`（three.asy:2765）那个 autoadjust
+  // 循环每一轮都乘一次帧，每次都要对每一片面片跑一遍 Bezier 细分（三个分量各一遍），
+  // bars3 / AiryDisk 这类几千片的例子直接从秒级变成分钟级都跑不完。
+  // 所以这儿留着"旧包围盒八个角"这个 O(1) 的估法；真界要算，得挪到**只算一次**的地方
+  // （shipout3 拿 m/M 之前），见 ADR「界那一侧」。
+  // **界要照 asy 逐个 drawelement 重算，不能拿"旧包围盒的八个角过变换"** ——
+  // 旋转后八角盒是真界的超集，`lambda.x` 系统性偏大，`oW` 与封套就差 1pt
+  // （真实路径上 `embed` 的 P.infinity 那一支先 `S.f = modelview*S.f` 再取 max3-min3）。
   //
-  // 但**只有当这一帧的界完全来自 op 表里的几何时**才能这么算：`drawTube` 的界是实参
-  // 给的 min/max（管面比中心折线宽）、`drawpixel` / 三角网格 / NURBS 也只记界，
-  // 那几种情况下走 op 表会把界**缩小**。所以先用未变换的几何自检 —— 拿同一族
-  // `asy__add3/asy__addpatch3/asy__addtri3` 走一遍 f 的 op 表，与 f 记下的界比：
-  // 一致才按变换后的几何重算，否则留着上面那个八角盒。
+  // **这一趟必须是纯 min/max，不能带细分**：细分那一版在这里跑过，AiryDisk 从 4.4s
+  // 涨到 73s（真正的大头是另一处 O(n²) 的排序，但细分也占了几秒）。所以这儿直接
+  // `asy__add3` 逐点取界 —— 与变换本身同一个数量级。
+  //
+  // 只有当这一帧的界完全来自 op 表里的几何时才能换：`drawTube` 的界是实参给的
+  // min/max（管面比中心折线宽）、`drawpixel`/三角网格/NURBS 也只记界，
+  // 那几种走 op 表会把界**缩小**。所以先拿未变换的 op 表自检，一致才换。
   if (f.has3 && s.length > 0) {
     frame b0;
     for (int i = 0; i < s.length; ++i) {
       if (s[i].kind == 0) asy__add3(b0, s[i].g3);
-      else if (s[i].kind == 1) asy__addpatch3(b0, s[i].P3, s[i].straight);
-      else if (s[i].kind == 2) asy__addtri3(b0, s[i].P3, s[i].straight);
-      else asy__add3(b0, s[i].Q3);
+      else if (s[i].kind == 3) asy__add3(b0, s[i].Q3);
+      else asy__add3(b0, s[i].P3);
     }
     if (b0.has3 && b0.min3v == f.min3v && b0.max3v == f.max3v) {
       drawop3[] gs0 = asy__ops3(g);
       frame b1;
       for (int i = 0; i < gs0.length; ++i) {
         if (gs0[i].kind == 0) asy__add3(b1, gs0[i].g3);
-        else if (gs0[i].kind == 1) asy__addpatch3(b1, gs0[i].P3, gs0[i].straight);
-        else if (gs0[i].kind == 2) asy__addtri3(b1, gs0[i].P3, gs0[i].straight);
-        else asy__add3(b1, gs0[i].Q3);
+        else if (gs0[i].kind == 3) asy__add3(b1, gs0[i].Q3);
+        else asy__add3(b1, gs0[i].P3);
       }
       if (b1.has3) { g.min3v = b1.min3v; g.max3v = b1.max3v; }
     }
