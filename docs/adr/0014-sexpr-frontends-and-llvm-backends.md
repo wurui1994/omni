@@ -11842,6 +11842,23 @@ settings.asy 里订正 —— 真正差的就是上面那一格 int 截断，改
 得到，而 cardioid 那张图的 coords 里含 latex 量的标签尺寸。**尺子已经现成**：
 axt.asy 印的第二个 `PT t`。
 
+**又收了两层，落到一条曲线的 y 极值上。**
+
+先把标签这条支路排除：同一张图去掉标签（`xaxis(above=true)`/`yaxis(above=true)`，
+不带文字），两侧的 `t.xx` **第一趟就差**（asy 38.297566631496153、我们 38.297566631496146）
+—— 所以与 latex 量的标签尺寸无关，是几何/LP 自己。
+
+再往里一层，量那条心形线本身（`polargraph(f,0,2pi,operator ..)--cycle`）：
+
+- `length(g)`、`point(g,1)`、`postcontrol(g,1)`、`max(g)`、`min(g).x` —— **全部逐位相同**
+- 只有 **`min(g).y`**：asy `-1.2990381472196539`、我们 `-1.2990381472196542`（差 1 ulp）
+
+也就是说节点与控制点一模一样，差的是**界那一步算出来的极值**（path.cc 的 `bounds`：
+三次的导数求根再代回去）。那 1 ulp 顺着 LP 的 s -> `inverse(t)` -> `t*T*inverse(t)`
+一路放大成 gsave 闸门的开关。下一刀就照 path.cc 的 `bounds`/`quadraticroots` 逐句对
+求根与代回的算式（很可能又是同一族的收缩/舍入次序）。尺子：上面那两个 `min(g).y`。
+
+
 
 
 
