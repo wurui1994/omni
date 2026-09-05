@@ -10230,3 +10230,61 @@ JS 这边没有硬件 fma，所以顺手写了一份精确的（Dekker 的 twoPr
 troff，不是 latex，我们这一层根本没有那条腿。
 
 <!-- ADR-0014 format 与图案-END -->
+
+## 量：天花板在哪儿 —— 手写 JS 是 8 倍，其中 3 倍是 BigInt、2.4 倍是那两道检查
+
+<!-- ADR-0014 天花板-BEGIN -->
+
+用户的两句话把这一节的做法定了：**"这种局部改法没有意义，BigInt 压根不该用"**、
+**"性能要先用 JS 写一个等效，知道上限在哪里，然后针对性优化"**。所以先量天花板。
+
+拿的是最热的那个内核（`asy__solvesection` 的三对角消元 + 回代，2000 个未知量 × 300 遍），
+三版同一个算法：
+
+```
+  A  我们生成代码的形状（int 是 BigInt、下标经 $aget/$aset 的空指针 + 边界检查）  51ms
+  C  只把 int 换成 number，$aget/$aset 照旧                                    17ms   -> 3.0x
+  B  全手写 JS（number 下标、直接 a[i]）                                        7ms   -> 再 2.4x
+                                                                          合计 7.3x（另一次量到 8.1x）
+```
+
+也就是说：**BigInt 三倍，那两道检查再两倍半**。顺序不能反 —— 先去 BigInt，之后那两道
+检查才在 profile 里露出来（上一轮"内联访问器无效"那一刀量的就是这件事，见前面）。
+
+### 先问清楚：有没有非用 BigInt 不可的地方
+
+拿真 asy 量了一遍它自己的 int 语义（`/tmp/iv.asy`）：
+
+```
+  int b=4611686018427387904; write(b);   4611686018427387904     <- 2^62 存得住、印得准
+  write(b*2);                            Integer overflow        <- **报错，不回绕**
+  int a=9223372036854775807;             Trying to use uninitialized value  <- 字面量就溢出了
+```
+
+所以 asy 的 int 是"精确 64 位 + 溢出报错"，**不是** C 的回绕。方言这一侧仍然要 i64
+（`tests/oracle/int64_wrap` 拿 Python 当尺子要求逐位回绕，C 与 jnc 两个前端真需要它）。
+两边合起来，结论是：**BigInt 只在 |v| > 2^53-1 时是必需的**，而真程序里那是万分之一的路径
+（下标、计数、长度全在 2^53 以内）。
+
+### 改法（这一节只记账与设计，落地是下一刀）
+
+`int` 在 JS 那条腿上收成**规范化的 number|BigInt**：`|v| <= 2^53-1` 时是 number，
+否则是 BigInt。规范化是关键 —— 两种表示的取值范围不重叠，于是 `===` 仍然对、
+Map 的键仍然唯一、`String()` 仍然一样。
+
+- `+ - *`：先按 number 算，`Math.abs(r) <= 2^53-1` 就是精确的（IEEE 是正确舍入的：
+  真值 ≥ 2^53+1 时算出来必然 ≥ 2^53），不过关就回 BigInt 重算一遍再规范化。
+- `/ %`：安全整数上 `Math.trunc(a/b)` 要补一次修正（`q*b` 与 `a` 反号或超出时挪一格），
+  或者干脆超过 2^31 就走 BigInt —— 它比 `+` 冷得多。
+- 位运算：JS 的 `& | ^ << >>` 会把操作数截成 int32，所以**一律走 BigInt** 再规范化。
+  asy 那边位运算是 `nope`（builtins.tab 里 AND/OR/XOR 都是"还没做"），代价为零。
+- `alen`：回 number（现在是 `BigInt(a.length)`，**每次下标都分配一个 BigInt**）。
+- `aget/aset`：`typeof i === "number"` 时直接用，不再 `Number(i)`。
+
+**范围收窄了才敢动**：prelude 里 80 处 `BigInt`、23 处 `typeof … === "bigint"`，
+逐个看下来**几乎全在 `dynamic` 那一族**（`$dtype`/`$dynEq`/`$js_*`），那是 JS 前端的动态值，
+与 asy / sexpr 那条 int 路无关。所以 `dynamic` 的 int **仍然是 BigInt**，只在装箱/拆箱
+那条边界上转一次；核心 int 路要改的只有 `$W`/`$U`/`$alen`/`$aget`/`$aset`/`$apush`、
+字面量、`+ - * << >>`、以及指针/线性内存那几个 `getBigInt64` 的口子。
+
+<!-- ADR-0014 天花板-END -->
