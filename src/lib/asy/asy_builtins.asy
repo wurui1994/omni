@@ -10259,45 +10259,164 @@ void beginTransform(frame f, string geometry = "", string color = "",
 void endTransform(frame f) { }
 
 /* x/z 与 y/z 的比（picture.cc:339 的 ratio；投影层的 fit 要它） */
+/*
+ * `bound` 那一族（bound.cc 与 path3.cc:760..839，逐句照抄）：Bezier 上 x/z 与 y/z 的
+ * **真极值**，靠细分求。
+ *
+ * 为什么必须是它、不能拿控制点凸包顶：x/z 非线性，控制点凸包比真曲面**胖**
+ * （管子截面那四个控制点在半径 1.13w 上，真曲面只到 w）。凸包顶喂给
+ * three.asy:2765 的 angle()，fov 就偏大、图偏小。量出来的（无标签尺子）：
+ * 参考 ≈ 我们 ×0.993 + 1.3，也就是差 0.68% —— 只描中心线时那 ~1.05px 的 x 偏
+ * 就是这一格（ADR「位图那 83 个」）。
+ *
+ * 终止判据里的 `m(-1.0,1.0)` 就是"取 max 时是 +1、取 min 时是 -1"，这里写成 sgn。
+ */
+private real asy__Fuzz = sqrt(asy__Fuzz2);      // bound.cc:14
+private int asy__rmaxdepth = 53;                // bound.cc:15 的 DBL_MANT_DIG
+private real asy__rf(int which, triple v) { return which == 0 ? v.x / v.z : v.y / v.z; }
+private real asy__rm(bool mx, real a, real b) { return mx ? max(a, b) : min(a, b); }
+
+// bound.h:16 的 Split（de Casteljau 一刀两半）：回 m0..m5 六个点
+private triple[] asy__split3(triple z0, triple c0, triple c1, triple z1) {
+  triple m0 = 0.5 * (z0 + c0);
+  triple m1 = 0.5 * (c0 + c1);
+  triple m2 = 0.5 * (c1 + z1);
+  triple m3 = 0.5 * (m0 + m1);
+  triple m4 = 0.5 * (m1 + m2);
+  triple m5 = 0.5 * (m3 + m4);
+  return new triple[] {m0, m1, m2, m3, m4, m5};
+}
+
+// path3.cc:770 的 ratiobound：控制网包围盒的那个"支配顶点"上取 f
+private real asy__ratiobound(triple[] P, bool mx, int which) {
+  real MX = -P[0].x;
+  real MY = -P[0].y;
+  real Z = P[0].z;
+  real MZ = -Z;
+  for (int i = 1; i < P.length; ++i) {
+    triple v = P[i];
+    MX = asy__rm(mx, MX, -v.x);
+    MY = asy__rm(mx, MY, -v.y);
+    Z = asy__rm(mx, Z, v.z);
+    MZ = asy__rm(mx, MZ, -v.z);
+  }
+  return asy__rm(mx, asy__rf(which, (-MX, -MY, Z)), asy__rf(which, (-MX, -MY, -MZ)));
+}
+
+// path3.cc:760 的 cornerbound（面片的四个角是 0/3/12/15）
+private real asy__cornerbound(triple[] P, bool mx, int which) {
+  real b = asy__rm(mx, asy__rf(which, P[0]), asy__rf(which, P[3]));
+  b = asy__rm(mx, b, asy__rf(which, P[12]));
+  return asy__rm(mx, b, asy__rf(which, P[15]));
+}
+
+// path3.cc:803 的 bound（十六个控制点的面片）
+private real asy__pbound(triple[] P, bool mx, int which, real b, real fuzz, int depth) {
+  real bb = asy__rm(mx, b, asy__cornerbound(P, mx, which));
+  real sgn = mx ? 1 : -1;
+  if (sgn * (bb - asy__ratiobound(P, mx, which)) >= -fuzz || depth == 0) return bb;
+  int d = depth - 1;
+  real fz = fuzz * 2;
+  triple[] c0 = asy__split3(P[0], P[1], P[2], P[3]);
+  triple[] c1 = asy__split3(P[4], P[5], P[6], P[7]);
+  triple[] c2 = asy__split3(P[8], P[9], P[10], P[11]);
+  triple[] c3 = asy__split3(P[12], P[13], P[14], P[15]);
+  triple[] c4 = asy__split3(P[12], P[8], P[4], P[0]);
+  triple[] c5 = asy__split3(c3[0], c2[0], c1[0], c0[0]);
+  triple[] c6 = asy__split3(c3[3], c2[3], c1[3], c0[3]);
+  triple[] c7 = asy__split3(c3[5], c2[5], c1[5], c0[5]);
+  triple[] c8 = asy__split3(c3[4], c2[4], c1[4], c0[4]);
+  triple[] c9 = asy__split3(c3[2], c2[2], c1[2], c0[2]);
+  triple[] c10 = asy__split3(P[15], P[11], P[7], P[3]);
+  triple[] s0 = {c4[5], c5[5], c6[5], c7[5], c4[3], c5[3], c6[3], c7[3],
+                 c4[0], c5[0], c6[0], c7[0], P[12], c3[0], c3[3], c3[5]};
+  bb = asy__pbound(s0, mx, which, bb, fz, d);
+  triple[] s1 = {P[0], c0[0], c0[3], c0[5], c4[2], c5[2], c6[2], c7[2],
+                 c4[4], c5[4], c6[4], c7[4], c4[5], c5[5], c6[5], c7[5]};
+  bb = asy__pbound(s1, mx, which, bb, fz, d);
+  triple[] s2 = {c0[5], c0[4], c0[2], P[3], c7[2], c8[2], c9[2], c10[2],
+                 c7[4], c8[4], c9[4], c10[4], c7[5], c8[5], c9[5], c10[5]};
+  bb = asy__pbound(s2, mx, which, bb, fz, d);
+  triple[] s3 = {c7[5], c8[5], c9[5], c10[5], c7[3], c8[3], c9[3], c10[3],
+                 c7[0], c8[0], c9[0], c10[0], c3[5], c3[4], c3[2], P[15]};
+  return asy__pbound(s3, mx, which, bb, fz, d);
+}
+
+// bound.cc:140 的 bound（一段三次曲线）
+private real asy__cbound(triple z0, triple c0, triple c1, triple z1,
+                         bool mx, int which, real b, real fuzz, int depth) {
+  real bb = asy__rm(mx, b, asy__rm(mx, asy__rf(which, z0), asy__rf(which, z1)));
+  real sgn = mx ? 1 : -1;
+  triple[] Q = {z0, c0, c1, z1};
+  if (sgn * (bb - asy__ratiobound(Q, mx, which)) >= -fuzz || depth == 0) return bb;
+  int d = depth - 1;
+  real fz = fuzz * 2;
+  triple[] s = asy__split3(z0, c0, c1, z1);
+  bb = asy__cbound(z0, s[0], s[3], s[5], mx, which, bb, fz, d);
+  return asy__cbound(s[5], s[4], s[2], z1, mx, which, bb, fz, d);
+}
+
+// 面片（4x4）那一格的比：drawsurface.cc:138。直面片只取四个角，别的十六个都进细分。
+private pair asy__patchratio(triple[][] P, bool straight, bool mx, real fuzz, pair b) {
+  triple[] C;
+  for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j) C.push(P[i][j]);
+  if (straight) {
+    real x = asy__rm(mx, b.x, asy__rf(0, C[0]));
+    real y = asy__rm(mx, b.y, asy__rf(1, C[0]));
+    int[] k = {3, 12, 15};
+    for (int i = 0; i < 3; ++i) {
+      x = asy__rm(mx, x, asy__rf(0, C[k[i]]));
+      y = asy__rm(mx, y, asy__rf(1, C[k[i]]));
+    }
+    return (x, y);
+  }
+  return (asy__pbound(C, mx, 0, b.x, fuzz, asy__rmaxdepth),
+          asy__pbound(C, mx, 1, b.y, fuzz, asy__rmaxdepth));
+}
+
 pair minratio(frame f) { return f.minr; }
 pair maxratio(frame f) { return f.maxr; }
 
-/* path3 上的同一对（runpath3d.in:352/357，path3.cc:326）：这一层按节点与控制点取界 */
-pair minratio(path3 g)
+/*
+ * path3 上的同一对（runpath3d.in:352/357，path3.cc:326）：直段只取结点，曲段走 bound。
+ * **fuzz 那一格有一点不逐字节**：asy 是 `Fuzz*(max()-min()).length()`，而它的 max()/min()
+ * 也是细分求的真界；这里拿结点+控制点的凸包当那个尺度。fuzz 只进终止判据，
+ * 两边都落在真极值的 fuzz 之内（~1e-4 相对），不改量级。
+ */
+private pair asy__pathratio(path3 g, bool mx)
 {
-  if (g.nodes.length == 0) { abort("minratio: 空的 path3"); return (0, 0); }
-  pair b = (0, 0);
-  bool first = true;
-  for (int i = 0; i < g.nodes.length; ++i) {
+  int n = g.nodes.length;
+  if (n == 0) { abort("ratio: 空的 path3"); return (0, 0); }
+  triple lo = g.nodes[0].point;
+  triple hi = lo;
+  for (int i = 0; i < n; ++i) {
     triple[] vs = {g.nodes[i].point, g.nodes[i].pre, g.nodes[i].post};
-    for (int k = 0; k < 3; ++k) {
-      triple v = vs[k];
-      real rx = v.z == 0 ? 0 : v.x / v.z;
-      real ry = v.z == 0 ? 0 : v.y / v.z;
-      b = first ? (rx, ry) : (min(b.x, rx), min(b.y, ry));
-      first = false;
-    }
+    for (int k = 0; k < 3; ++k) { lo = minbound(lo, vs[k]); hi = maxbound(hi, vs[k]); }
   }
-  return b;
+  real fuzz = asy__Fuzz * abs(hi - lo);
+  triple v0 = g.nodes[0].point;
+  pair B = (asy__rf(0, v0), asy__rf(1, v0));
+  // 每个结点都进（asy 那边直段取 point(i)、末端在 i==length 那一趟取到）
+  for (int i = 1; i < n; ++i) {
+    triple v = g.nodes[i].point;
+    B = (asy__rm(mx, B.x, asy__rf(0, v)), asy__rm(mx, B.y, asy__rf(1, v)));
+  }
+  int L = g.cyclic ? n : n - 1;
+  for (int i = 0; i < L; ++i) {
+    if (g.nodes[i].straight) continue;
+    int j = (i + 1 == n) ? 0 : i + 1;
+    triple z0 = g.nodes[i].point;
+    triple c0 = g.nodes[i].post;
+    triple c1 = g.nodes[j].pre;
+    triple z1 = g.nodes[j].point;
+    B = (asy__cbound(z0, c0, c1, z1, mx, 0, B.x, fuzz, asy__rmaxdepth),
+         asy__cbound(z0, c0, c1, z1, mx, 1, B.y, fuzz, asy__rmaxdepth));
+  }
+  return B;
 }
 
-pair maxratio(path3 g)
-{
-  if (g.nodes.length == 0) { abort("maxratio: 空的 path3"); return (0, 0); }
-  pair b = (0, 0);
-  bool first = true;
-  for (int i = 0; i < g.nodes.length; ++i) {
-    triple[] vs = {g.nodes[i].point, g.nodes[i].pre, g.nodes[i].post};
-    for (int k = 0; k < 3; ++k) {
-      triple v = vs[k];
-      real rx = v.z == 0 ? 0 : v.x / v.z;
-      real ry = v.z == 0 ? 0 : v.y / v.z;
-      b = first ? (rx, ry) : (max(b.x, rx), max(b.y, ry));
-      first = false;
-    }
-  }
-  return b;
-}
+pair minratio(path3 g) { return asy__pathratio(g, false); }
+pair maxratio(path3 g) { return asy__pathratio(g, true); }
 
 /*
  * unstraighten（runpath3d.in:176，path3.cc 的同名成员）：把直段的控制点摆回 1/3、2/3,
@@ -10386,6 +10505,8 @@ frame operator *(real[][] t, frame f)
   // （drawpixel、三角网格 draw、drawSphere/Cylinder/Disk），改成走 op 表会整格丢掉。
   drawop3[] gs = asy__ops3(g);
   if (gs.length > 0) {
+    // fuzz 照 picture.cc:344：整张图的 3D 界的对角线长乘 Fuzz，一趟只算一次。
+    real fuzz = asy__Fuzz * abs(g.max3v - g.min3v);
     pair rmn; pair rmx;
     bool first = true;
     void acc(triple v) {
@@ -10397,16 +10518,26 @@ frame operator *(real[][] t, frame f)
     }
     for (int i = 0; i < gs.length; ++i) {
       if (gs[i].kind == 0) {
-        for (int k = 0; k < gs[i].g3.nodes.length; ++k) {
-          acc(gs[i].g3.nodes[k].point);
-          acc(gs[i].g3.nodes[k].pre);
-          acc(gs[i].g3.nodes[k].post);
-        }
-      } else if (gs[i].kind == 3) {
-        for (int k = 0; k < gs[i].Q3.length; ++k) acc(gs[i].Q3[k]);
+        // drawpath3.h:84 -> path3.cc:326
+        if (gs[i].g3.nodes.length == 0) continue;
+        if (first) { acc(gs[i].g3.nodes[0].point); }
+        pair lo = asy__pathratio(gs[i].g3, false);
+        pair hi = asy__pathratio(gs[i].g3, true);
+        rmn = (min(rmn.x, lo.x), min(rmn.y, lo.y));
+        rmx = (max(rmx.x, hi.x), max(rmx.y, hi.y));
+      } else if (gs[i].kind == 1) {
+        // drawsurface.cc:138
+        if (gs[i].P3.length < 4 || gs[i].P3[0].length < 4) continue;
+        if (first) { acc(gs[i].P3[0][0]); }
+        rmn = asy__patchratio(gs[i].P3, gs[i].straight, false, fuzz, rmn);
+        rmx = asy__patchratio(gs[i].P3, gs[i].straight, true, fuzz, rmx);
       } else {
+        // **还没照 asy 走的两格**：三角面片（drawsurface.cc:391 的 boundtri，要 Splittri
+        // 那一大张表）与管子那一格，暂时按控制点凸包顶取 —— 凸包只会**偏大**，
+        // 所以只有当极值真落在这两族上时才会差。记一笔，别忘。
         for (int a = 0; a < gs[i].P3.length; ++a)
           for (int b = 0; b < gs[i].P3[a].length; ++b) acc(gs[i].P3[a][b]);
+        for (int k = 0; k < gs[i].Q3.length; ++k) acc(gs[i].Q3[k]);
       }
     }
     if (!first) { g.minr = rmn; g.maxr = rmx; }

@@ -11246,6 +11246,34 @@ drawelement 走**的。
 参考的灰阶边把"非白"的像素铺得更宽。所以判据里那个"盖住参考的百分比"
 要与"宽/重心"一起看，不能只看一个数。
 
+#### `bound()` 那一族搬过来了：相机那一行从 7e-5 收到 1.6e-5
+
+照 bound.cc 与 path3.cc:760..839 逐句搬（`Split`、`ratiobound`、`cornerbound`、
+面片那版 `bound(triple*)`、曲线那版 `bound(z0,c0,c1,z1)`），常数是
+`Fuzz2=1000·DBL_EPSILON`、`Fuzz=sqrt(Fuzz2)`、`maxdepth=DBL_MANT_DIG=53`；
+fuzz 的尺度照 picture.cc:344（整图 3D 界的对角线）与 path3.cc:328（单条路径的）。
+接上的三处：`minratio/maxratio(path3)`（原先是结点+控制点取界）、
+`real[][] * frame` 里那趟比的走法（path3 走 path3.cc:326、四边面片走
+drawsurface.cc:138，直面片只取四个角）。
+
+外部尺子（`asy -v` 的 `adjusting camera to`）：
+
+```
+  真 asy   (1.46748578691304,-1.57210972363774,1.38829476581149)
+  搬之前   (1.46741999391348,-1.57218765289644,1.38820470029364)   差 6.6e-5 / 7.8e-5 / 9.0e-5
+  搬之后   (1.46747884241054,-1.57212552246025,1.38827011266895)   差 6.9e-6 / 1.6e-5 / 2.5e-5
+```
+
+**还没搬的两格**：三角面片（drawsurface.cc:391 的 `boundtri`，要 `Splittri` 那一大张表）
+与管子那一格，还按控制点凸包顶取。凸包只会偏大，所以只有极值真落在这两族上时才差。
+
+**这一刀不动像素那一层**（叠图重合 5617 -> 5504，掉了 2%）。这说明那 ~1.05px 的 x 偏
+**不在 ratio 上** —— ratio 现在只差 1e-5，撑不出 0.68%。也把两条排掉了：
+`frustum(xmin,xmax,ymin,ymax,-Zmax,-Zmin)` 是 glm 的原版（renderBase.cc:160），
+近面就是 -Zmax，Zmax 在公式里整格约掉；`update()` 里那个 viewMat 在批处理这条路上
+是单位阵（cx=cy=0、rotateMat=I，两次 translate 抵掉，renderBase.cc:175）。
+下一刀先量"是不是一个均匀平移"：给 pj 加 +1.1px 看重合跳不跳。
+
 **下一刀的活**：拿这个把第 0 步的 op 表投影成 2D（面片按控制点投影后细分，
 路径按结点+控制点投影），按深度排一遍（画家算法，先不做 Z-buffer），
 发一份 `oW x oH` 的临时 EPS，交给 gs 出像素，读回字节塞进 `kind == 7` 那一格。
