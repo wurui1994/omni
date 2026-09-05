@@ -1771,6 +1771,61 @@ private real asy__sbound(real[] P, bool mx, real b, real fuzz, int depth) {
   return asy__sbound(s3, mx, bb, fz, d);
 }
 
+// bound.cc:88 / :93（三角面片：三个角是 0/6/9，另外七个是控制点）
+private real asy__scornerboundtri(real[] P, bool mx) {
+  real b = asy__rm(mx, P[0], P[6]);
+  return asy__rm(mx, b, P[9]);
+}
+
+private real asy__scontrolboundtri(real[] P, bool mx) {
+  int[] k = {1, 2, 3, 4, 5, 7, 8};
+  real b = asy__rm(mx, P[1], P[2]);
+  for (int i = 2; i < k.length; ++i) b = asy__rm(mx, b, P[k[i]]);
+  return b;
+}
+
+// bound.cc:102 的 boundtri（标量版，十个控制点的三角面片）。
+// `Splittri`（bound.h:30）那三十来个中间点在这儿摊开写 —— asy 那边是模板，
+// 我们这一侧没有模板，实数版与 triple 版各写一遍。
+private real asy__sboundtri(real[] P, bool mx, real b, real fuzz, int depth) {
+  real bb = asy__rm(mx, b, asy__scornerboundtri(P, mx));
+  real sgn = mx ? 1 : -1;
+  if (sgn * (bb - asy__scontrolboundtri(P, mx)) >= -fuzz || depth == 0) return bb;
+  int d = depth - 1;
+  real fz = fuzz * 2;
+  real l003 = P[0]; real p102 = P[1]; real p012 = P[2]; real p201 = P[3];
+  real p111 = P[4]; real p021 = P[5]; real r300 = P[6]; real p210 = P[7];
+  real p120 = P[8]; real u030 = P[9];
+  real u021 = 0.5 * (u030 + p021); real u120 = 0.5 * (u030 + p120);
+  real p033 = 0.5 * (p021 + p012); real p231 = 0.5 * (p120 + p111);
+  real p330 = 0.5 * (p120 + p210); real p123 = 0.5 * (p012 + p111);
+  real l012 = 0.5 * (p012 + l003); real p312 = 0.5 * (p111 + p201);
+  real r210 = 0.5 * (p210 + r300); real l102 = 0.5 * (l003 + p102);
+  real p303 = 0.5 * (p102 + p201); real r201 = 0.5 * (p201 + r300);
+  real u012 = 0.5 * (u021 + p033); real u210 = 0.5 * (u120 + p330);
+  real l021 = 0.5 * (p033 + l012); real p4xx = 0.5 * p231 + 0.25 * (p111 + p102);
+  real r120 = 0.5 * (p330 + r210); real px4x = 0.5 * p123 + 0.25 * (p111 + p210);
+  real pxx4 = 0.25 * (p021 + p111) + 0.5 * p312;
+  real l201 = 0.5 * (l102 + p303); real r102 = 0.5 * (p303 + r201);
+  real l210 = 0.5 * (px4x + l201); real r012 = 0.5 * (px4x + r102);
+  real l300 = 0.5 * (l201 + r102);
+  real r021 = 0.5 * (pxx4 + r120); real u201 = 0.5 * (u210 + pxx4);
+  real r030 = 0.5 * (u210 + r120);
+  real u102 = 0.5 * (u012 + p4xx); real l120 = 0.5 * (l021 + p4xx);
+  real l030 = 0.5 * (u012 + l021);
+  real l111 = 0.5 * (p123 + l102); real r111 = 0.5 * (p312 + r210);
+  real u111 = 0.5 * (u021 + p231);
+  real c111 = 0.25 * (p033 + p330 + p303 + p111);
+  real[] L = {l003, l102, l012, l201, l111, l021, l300, l210, l120, l030};
+  bb = asy__sboundtri(L, mx, bb, fz, d);
+  real[] R = {l300, r102, r012, r201, r111, r021, r300, r210, r120, r030};
+  bb = asy__sboundtri(R, mx, bb, fz, d);
+  real[] U = {l030, u102, u012, u201, u111, u021, r030, u210, u120, u030};
+  bb = asy__sboundtri(U, mx, bb, fz, d);
+  real[] C = {r030, u201, r021, u102, c111, r012, l030, l120, l210, l300};
+  return asy__sboundtri(C, mx, bb, fz, d);
+}
+
 // run::norm（bound.h:87）：L∞ 范数
 private real asy__norminf(real[] v) {
   real n = 0;
@@ -8758,6 +8813,12 @@ private triple asy__bezbound(triple[][] P, triple b, bool mx) {
       triple v = P[i][j];
       cx.push(v.x); cy.push(v.y); cz.push(v.z);
     }
+  if (cx.length == 10) {
+    // 十个控制点的三角面片：bound.cc:102 的 boundtri（bounddouble(N) 按 N 分派）
+    return (asy__sboundtri(cx, mx, b.x, asy__Fuzz * asy__norminf(cx), asy__rmaxdepth),
+            asy__sboundtri(cy, mx, b.y, asy__Fuzz * asy__norminf(cy), asy__rmaxdepth),
+            asy__sboundtri(cz, mx, b.z, asy__Fuzz * asy__norminf(cz), asy__rmaxdepth));
+  }
   if (cx.length != 16) {
     for (int i = 0; i < cx.length; ++i)
       b = (asy__rm(mx, b.x, cx[i]), asy__rm(mx, b.y, cy[i]), asy__rm(mx, b.z, cz[i]));
@@ -8786,6 +8847,10 @@ triple maxbezier(triple[][] P, triple b) { return asy__bezbound(P, b, true); }
 real asy__pboundfn(triple[] P, bool mx, int which, real b, real fuzz, int depth) {
   return b;
 }
+// 三角面片那一支的同一手法（path3.cc:860 的 boundtri）
+real asy__pboundtrifn(triple[] P, bool mx, int which, real b, real fuzz, int depth) {
+  return b;
+}
 
 // norm(A,N)（run::norm 的 triple 版）：这里取所有分量绝对值的最大 —— fuzz 只进
 // 终止判据的尺度，与逐字节无关；真要对齐再核对 runtime 那一格取的是长度还是分量。
@@ -8803,8 +8868,14 @@ private pair asy__ratio2(triple[][] P, pair b, bool mx) {
   triple[] A;
   for (int i = 0; i < P.length; ++i)
     for (int j = 0; j < P[i].length; ++j) A.push(P[i][j]);
+  if (A.length == 10) {
+    // 三角面片：path3.cc:860 的 boundtri（boundtriple(N) 按 N 分派）
+    real fuzz = asy__Fuzz * asy__norm3(A);
+    return (asy__pboundtrifn(A, mx, 0, b.x, fuzz, asy__rmaxdepth),
+            asy__pboundtrifn(A, mx, 1, b.y, fuzz, asy__rmaxdepth));
+  }
   if (A.length != 16) {
-    // 十个控制点的三角面片走 boundtri（bound.cc:102），还没搬 —— 那一支仍按凸包
+    // 别的点数（NURBS 之类）暂时按凸包
     for (int i = 0; i < A.length; ++i) {
       triple v = A[i];
       b = (mx ? max(b.x, v.x / v.z) : min(b.x, v.x / v.z),
@@ -10273,6 +10344,34 @@ private void asy__addpatch3(frame f, triple[][] P, bool straight)
   asy__add3(f, (X, Y, Z));
 }
 
+// 三角面片那一格的界（drawsurface.cc 里 drawBezierTriangle::bounds，与四边那格同构：
+// 直面片只取三个角 0/6/9，其余对 x/y/z 各跑一遍 boundtri）
+private void asy__addtri3(frame f, triple[][] P, bool straight)
+{
+  real[] cx; real[] cy; real[] cz;
+  for (int i = 0; i < P.length; ++i)
+    for (int j = 0; j < P[i].length; ++j) {
+      triple v = P[i][j];
+      cx.push(v.x); cy.push(v.y); cz.push(v.z);
+    }
+  if (cx.length != 10) { asy__add3(f, P); return; }
+  if (straight) {
+    asy__add3(f, (cx[0], cy[0], cz[0]));
+    asy__add3(f, (cx[6], cy[6], cz[6]));
+    asy__add3(f, (cx[9], cy[9], cz[9]));
+    return;
+  }
+  real fx = asy__Fuzz * asy__norminf(cx);
+  real fy = asy__Fuzz * asy__norminf(cy);
+  real fz = asy__Fuzz * asy__norminf(cz);
+  asy__add3(f, (asy__sboundtri(cx, false, cx[0], fx, asy__rmaxdepth),
+                asy__sboundtri(cy, false, cy[0], fy, asy__rmaxdepth),
+                asy__sboundtri(cz, false, cz[0], fz, asy__rmaxdepth)));
+  asy__add3(f, (asy__sboundtri(cx, true, cx[0], fx, asy__rmaxdepth),
+                asy__sboundtri(cy, true, cy[0], fy, asy__rmaxdepth),
+                asy__sboundtri(cz, true, cz[0], fz, asy__rmaxdepth)));
+}
+
 /* Bezier 曲线（runpicture.in:648） */
 void _draw(frame f, path3 g, triple center = (0, 0, 0), pen[] p,
            real opacity, real shininess, real metallic, real fresnel0,
@@ -10320,7 +10419,7 @@ void drawbeziertriangle(frame f, triple[][] P, triple center, bool straight,
                         real fresnel0, bool lightOn, pen[] colors,
                         int interaction, int digits, bool primitive = false)
 {
-  asy__add3(f, P);
+  asy__addtri3(f, P, straight);
   drawop3 o;
   o.kind = 2;
   o.P3 = P;
@@ -10495,9 +10594,57 @@ private real asy__pbound(triple[] P, bool mx, int which, real b, real fuzz, int 
   return asy__pbound(s3, mx, which, bb, fz, d);
 }
 
-// 把前向桩装上（`minratio/maxratio(triple[][])` 那两格要它 —— 见上面那一段的说明）。
-// **这一行不许省**：省了就等于那两格回到控制点凸包。
+// path3.cc:842 / :849（三角面片的三个角 0/6/9，另外七个控制点）
+private real asy__cornerboundtri(triple[] P, bool mx, int which) {
+  real b = asy__rm(mx, asy__rf(which, P[0]), asy__rf(which, P[6]));
+  return asy__rm(mx, b, asy__rf(which, P[9]));
+}
+
+// path3.cc:860 的 boundtri（十个控制点的三角面片，比那一版）
+private real asy__pboundtri(triple[] P, bool mx, int which, real b, real fuzz,
+                            int depth) {
+  real bb = asy__rm(mx, b, asy__cornerboundtri(P, mx, which));
+  real sgn = mx ? 1 : -1;
+  if (sgn * (bb - asy__ratiobound(P, mx, which)) >= -fuzz || depth == 0) return bb;
+  int d = depth - 1;
+  real fz = fuzz * 2;
+  triple l003 = P[0]; triple p102 = P[1]; triple p012 = P[2]; triple p201 = P[3];
+  triple p111 = P[4]; triple p021 = P[5]; triple r300 = P[6]; triple p210 = P[7];
+  triple p120 = P[8]; triple u030 = P[9];
+  triple u021 = 0.5 * (u030 + p021); triple u120 = 0.5 * (u030 + p120);
+  triple p033 = 0.5 * (p021 + p012); triple p231 = 0.5 * (p120 + p111);
+  triple p330 = 0.5 * (p120 + p210); triple p123 = 0.5 * (p012 + p111);
+  triple l012 = 0.5 * (p012 + l003); triple p312 = 0.5 * (p111 + p201);
+  triple r210 = 0.5 * (p210 + r300); triple l102 = 0.5 * (l003 + p102);
+  triple p303 = 0.5 * (p102 + p201); triple r201 = 0.5 * (p201 + r300);
+  triple u012 = 0.5 * (u021 + p033); triple u210 = 0.5 * (u120 + p330);
+  triple l021 = 0.5 * (p033 + l012); triple p4xx = 0.5 * p231 + 0.25 * (p111 + p102);
+  triple r120 = 0.5 * (p330 + r210); triple px4x = 0.5 * p123 + 0.25 * (p111 + p210);
+  triple pxx4 = 0.25 * (p021 + p111) + 0.5 * p312;
+  triple l201 = 0.5 * (l102 + p303); triple r102 = 0.5 * (p303 + r201);
+  triple l210 = 0.5 * (px4x + l201); triple r012 = 0.5 * (px4x + r102);
+  triple l300 = 0.5 * (l201 + r102);
+  triple r021 = 0.5 * (pxx4 + r120); triple u201 = 0.5 * (u210 + pxx4);
+  triple r030 = 0.5 * (u210 + r120);
+  triple u102 = 0.5 * (u012 + p4xx); triple l120 = 0.5 * (l021 + p4xx);
+  triple l030 = 0.5 * (u012 + l021);
+  triple l111 = 0.5 * (p123 + l102); triple r111 = 0.5 * (p312 + r210);
+  triple u111 = 0.5 * (u021 + p231);
+  triple c111 = 0.25 * (p033 + p330 + p303 + p111);
+  triple[] L = {l003, l102, l012, l201, l111, l021, l300, l210, l120, l030};
+  bb = asy__pboundtri(L, mx, which, bb, fz, d);
+  triple[] R = {l300, r102, r012, r201, r111, r021, r300, r210, r120, r030};
+  bb = asy__pboundtri(R, mx, which, bb, fz, d);
+  triple[] U = {l030, u102, u012, u201, u111, u021, r030, u210, u120, u030};
+  bb = asy__pboundtri(U, mx, which, bb, fz, d);
+  triple[] C = {r030, u201, r021, u102, c111, r012, l030, l120, l210, l300};
+  return asy__pboundtri(C, mx, which, bb, fz, d);
+}
+
+// 把两个前向桩装上（`minratio/maxratio(triple[][])` 那两格要它们 —— 见上面的说明）。
+// **这两行不许省**：省了就等于那两格回到控制点凸包，而且不会报错。
 asy__pboundfn = asy__pbound;
+asy__pboundtrifn = asy__pboundtri;
 
 // bound.cc:140 的 bound（一段三次曲线）
 private real asy__cbound(triple z0, triple c0, triple c1, triple z1,
@@ -10688,10 +10835,29 @@ frame operator *(real[][] t, frame f)
         if (first) { acc(gs[i].P3[0][0]); }
         rmn = asy__patchratio(gs[i].P3, gs[i].straight, false, fuzz, rmn);
         rmx = asy__patchratio(gs[i].P3, gs[i].straight, true, fuzz, rmx);
+      } else if (gs[i].kind == 2) {
+        // 三角面片：drawsurface.cc:391 -> path3.cc:860 的 boundtri
+        triple[] A;
+        for (int a = 0; a < gs[i].P3.length; ++a)
+          for (int b = 0; b < gs[i].P3[a].length; ++b) A.push(gs[i].P3[a][b]);
+        if (A.length == 0) continue;
+        if (first) { acc(A[0]); }
+        if (A.length == 10) {
+          if (gs[i].straight) {
+            int[] k = {0, 6, 9};
+            for (int a = 0; a < 3; ++a) acc(A[k[a]]);
+          } else {
+            rmn = (asy__pboundtri(A, false, 0, rmn.x, fuzz, asy__rmaxdepth),
+                   asy__pboundtri(A, false, 1, rmn.y, fuzz, asy__rmaxdepth));
+            rmx = (asy__pboundtri(A, true, 0, rmx.x, fuzz, asy__rmaxdepth),
+                   asy__pboundtri(A, true, 1, rmx.y, fuzz, asy__rmaxdepth));
+          }
+        } else {
+          for (int a = 0; a < A.length; ++a) acc(A[a]);
+        }
       } else {
-        // **还没照 asy 走的两格**：三角面片（drawsurface.cc:391 的 boundtri，要 Splittri
-        // 那一大张表）与管子那一格，暂时按控制点凸包顶取 —— 凸包只会**偏大**，
-        // 所以只有当极值真落在这两族上时才会差。记一笔，别忘。
+        // 管子那一格（kind == 3）暂时按中心折线的点取 —— asy 那边 drawTube 有自己的
+        // ratio，还没核对。凸包只会**偏大**，所以只有极值真落在它上面时才差。
         for (int a = 0; a < gs[i].P3.length; ++a)
           for (int b = 0; b < gs[i].P3[a].length; ++b) acc(gs[i].P3[a][b]);
         for (int k = 0; k < gs[i].Q3.length; ++k) acc(gs[i].Q3[k]);

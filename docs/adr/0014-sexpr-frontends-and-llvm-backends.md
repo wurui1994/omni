@@ -11366,6 +11366,31 @@ hyperboloidsilhouette / Coons / Gouraud / tensor / transparency / colorplanes）
 在 `asy__pbound` 定义之后一行装上（与 `asy__merge3fn` / `asy__r3hexfn` 同一手法）。
 **那一行赋值不许省** —— 省了就等于回到凸包，而且不会报错。
 
+#### `boundtri` 也搬了：cylinder 的矢量半边也对上了
+
+`Splittri`（bound.h:30）那三十来个中间点 + `boundtri`（bound.cc:102 的标量版与
+path3.cc:860 的比那版），实数版与 triple 版各写一遍（asy 那边是模板）。
+接上的四处：`minbezier/maxbezier` 的十点分支、`minratio/maxratio(triple[][])` 的
+十点分支、`drawbeziertriangle` 的界、`real[][] * frame` 那趟比的 kind==2 分支。
+
+```
+  cylinder      **矢量那半边一样**（上一刀还是 6 处数值不同）
+                位图 404x404（与参考同尺寸），ink 重合 108807、盖住参考 98.3%
+  sacylinder3D  照旧"矢量那半边一样"，盖住参考 99.0%
+  shellsqrtx01  还是 16 处，封套差 1（`%%BoundingBox:258` 对 257）
+```
+
+无标签尺子上封套没变，叠图 5504 -> 5478。九个原本"一样"的例子仍然"一样"。
+
+**到这儿两个例子（cylinder / sacylinder3D）的第一层判据满足了**：矢量那半边
+（封套、oW/oH、位图块数与坐标）逐字节相同，剩下的只有像素。
+
+还没搬的：`real[][] * frame` 里那趟**界**（仍按"旧包围盒八个角"重算，不是逐个
+drawelement 重新求界）、管子那一格的 ratio、以及像素层的 PBR 着色。
+`shellsqrtx01` 那 1pt 还没定位（它是 `graph3` 的旋转面，位图字节数差得也大：
+688560 对 572688，即 404x568 对 404x472 —— **高差了 96px = 24pt**，
+不是舍入那一档的事，下一刀先量它）。
+
 **下一刀的活**：拿这个把第 0 步的 op 表投影成 2D（面片按控制点投影后细分，
 路径按结点+控制点投影），按深度排一遍（画家算法，先不做 Z-buffer），
 发一份 `oW x oH` 的临时 EPS，交给 gs 出像素，读回字节塞进 `kind == 7` 那一格。
