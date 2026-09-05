@@ -8133,6 +8133,8 @@ real asy__r3ang = 0;
 real asy__r3zoom = 0;
 triple asy__r3m = (0, 0, 0);
 triple asy__r3M = (0, 0, 0);
+real[][] asy__r3t;
+real[][] asy__r3tup;
 // 三维那条路的出口（EPS 那一支）。几何全部照 glrender.cc:531-543 与
 // renderBase.cc:932 那两段（施工图第二节，四项与参考逐字节对上）：
 //   oW/oH   = ceil(收到的 w/h)            —— initDisplay 的形参是 int
@@ -8153,6 +8155,8 @@ void shipout3(string prefix, frame f, string format="",
   asy__r3zoom = zoom;
   asy__r3m = m;
   asy__r3M = M;
+  asy__r3t = t;
+  asy__r3tup = tup;
   // oW/oH = ceil(w)。判据是这么定下来的：收到的 w 是 `S.width - defaultrender.margin`，
   // 也就是"整数尺寸减 0.02"，所以 ceil 正好还原那个整数（billboard 92.98 -> 93、
   // sacylinder3D 的参考 61.98 -> 62）。四舍五入在 92.98 上也对，但那是巧合。
