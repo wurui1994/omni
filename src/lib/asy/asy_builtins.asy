@@ -8127,6 +8127,12 @@ string asy__r3hexfn(frame f, int oW, int oH, int fw, int fh, real angle, real zo
 real asy__r3w = 0;
 real asy__r3h = 0;
 bool asy__r3on = false;
+// 位图那一档在查投影的缩放（施工图第八节末尾那几条）：shipout3 收到什么就记什么，
+// 好让一份小脚本在 shipout() 之后把它们印出来对账。
+real asy__r3ang = 0;
+real asy__r3zoom = 0;
+triple asy__r3m = (0, 0, 0);
+triple asy__r3M = (0, 0, 0);
 // 三维那条路的出口（EPS 那一支）。几何全部照 glrender.cc:531-543 与
 // renderBase.cc:932 那两段（施工图第二节，四项与参考逐字节对上）：
 //   oW/oH   = ceil(收到的 w/h)            —— initDisplay 的形参是 int
@@ -8143,6 +8149,10 @@ void shipout3(string prefix, frame f, string format="",
   asy__r3w = width;
   asy__r3h = height;
   asy__r3on = true;
+  asy__r3ang = angle;
+  asy__r3zoom = zoom;
+  asy__r3m = m;
+  asy__r3M = M;
   // oW/oH = ceil(w)。判据是这么定下来的：收到的 w 是 `S.width - defaultrender.margin`，
   // 也就是"整数尺寸减 0.02"，所以 ceil 正好还原那个整数（billboard 92.98 -> 93、
   // sacylinder3D 的参考 61.98 -> 62）。四舍五入在 92.98 上也对，但那是巧合。
