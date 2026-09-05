@@ -10071,6 +10071,89 @@ private void asy__merge3hook() {
 }
 asy__merge3hook();
 
+/*
+ * `bound` 那一族的**骨架**（bound.h:16 的 Split 与 bound.cc:32..86）：Bezier 上一个
+ * 标量分量的**真极值**，靠细分求，不是拿控制点凸包顶。
+ * 界（drawsurface.cc:72）与比（drawsurface.cc:138）两处都用它，所以摆在这儿。
+ */
+private real asy__Fuzz = sqrt(asy__Fuzz2);      // bound.cc:14
+private int asy__rmaxdepth = 53;                // bound.cc:15 的 DBL_MANT_DIG
+private real asy__rm(bool mx, real a, real b) { return mx ? max(a, b) : min(a, b); }
+
+// bound.h:16 的 Split（de Casteljau 一刀两半）：回 m0..m5 六个点
+private triple[] asy__split3(triple z0, triple c0, triple c1, triple z1) {
+  triple m0 = 0.5 * (z0 + c0);
+  triple m1 = 0.5 * (c0 + c1);
+  triple m2 = 0.5 * (c1 + z1);
+  triple m3 = 0.5 * (m0 + m1);
+  triple m4 = 0.5 * (m1 + m2);
+  triple m5 = 0.5 * (m3 + m4);
+  return new triple[] {m0, m1, m2, m3, m4, m5};
+}
+
+private real[] asy__splitr(real z0, real c0, real c1, real z1) {
+  real m0 = 0.5 * (z0 + c0);
+  real m1 = 0.5 * (c0 + c1);
+  real m2 = 0.5 * (c1 + z1);
+  real m3 = 0.5 * (m0 + m1);
+  real m4 = 0.5 * (m1 + m2);
+  real m5 = 0.5 * (m3 + m4);
+  return new real[] {m0, m1, m2, m3, m4, m5};
+}
+
+// bound.cc:32 / :38（四个角 / 另外十二个控制点）
+private real asy__scornerbound(real[] P, bool mx) {
+  real b = asy__rm(mx, P[0], P[3]);
+  b = asy__rm(mx, b, P[12]);
+  return asy__rm(mx, b, P[15]);
+}
+
+private real asy__scontrolbound(real[] P, bool mx) {
+  int[] k = {1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14};
+  real b = asy__rm(mx, P[1], P[2]);
+  for (int i = 2; i < k.length; ++i) b = asy__rm(mx, b, P[k[i]]);
+  return b;
+}
+
+// bound.cc:52 的 bound（标量版，十六个控制点的面片）
+private real asy__sbound(real[] P, bool mx, real b, real fuzz, int depth) {
+  real bb = asy__rm(mx, b, asy__scornerbound(P, mx));
+  real sgn = mx ? 1 : -1;
+  if (sgn * (bb - asy__scontrolbound(P, mx)) >= -fuzz || depth == 0) return bb;
+  int d = depth - 1;
+  real fz = fuzz * 2;
+  real[] c0 = asy__splitr(P[0], P[1], P[2], P[3]);
+  real[] c1 = asy__splitr(P[4], P[5], P[6], P[7]);
+  real[] c2 = asy__splitr(P[8], P[9], P[10], P[11]);
+  real[] c3 = asy__splitr(P[12], P[13], P[14], P[15]);
+  real[] c4 = asy__splitr(P[12], P[8], P[4], P[0]);
+  real[] c5 = asy__splitr(c3[0], c2[0], c1[0], c0[0]);
+  real[] c6 = asy__splitr(c3[3], c2[3], c1[3], c0[3]);
+  real[] c7 = asy__splitr(c3[5], c2[5], c1[5], c0[5]);
+  real[] c8 = asy__splitr(c3[4], c2[4], c1[4], c0[4]);
+  real[] c9 = asy__splitr(c3[2], c2[2], c1[2], c0[2]);
+  real[] c10 = asy__splitr(P[15], P[11], P[7], P[3]);
+  real[] s0 = {c4[5], c5[5], c6[5], c7[5], c4[3], c5[3], c6[3], c7[3],
+               c4[0], c5[0], c6[0], c7[0], P[12], c3[0], c3[3], c3[5]};
+  bb = asy__sbound(s0, mx, bb, fz, d);
+  real[] s1 = {P[0], c0[0], c0[3], c0[5], c4[2], c5[2], c6[2], c7[2],
+               c4[4], c5[4], c6[4], c7[4], c4[5], c5[5], c6[5], c7[5]};
+  bb = asy__sbound(s1, mx, bb, fz, d);
+  real[] s2 = {c0[5], c0[4], c0[2], P[3], c7[2], c8[2], c9[2], c10[2],
+               c7[4], c8[4], c9[4], c10[4], c7[5], c8[5], c9[5], c10[5]};
+  bb = asy__sbound(s2, mx, bb, fz, d);
+  real[] s3 = {c7[5], c8[5], c9[5], c10[5], c7[3], c8[3], c9[3], c10[3],
+               c7[0], c8[0], c9[0], c10[0], c3[5], c3[4], c3[2], P[15]};
+  return asy__sbound(s3, mx, bb, fz, d);
+}
+
+// run::norm（bound.h:87 那一段）：L∞ 范数
+private real asy__norminf(real[] v) {
+  real n = 0;
+  for (int i = 0; i < v.length; ++i) n = max(n, abs(v[i]));
+  return n;
+}
+
 void asy__add3(frame f, triple v)
 {
   real rx = v.z == 0 ? 0 : v.x / v.z;
@@ -10104,6 +10187,40 @@ private void asy__add3(frame f, path3 g)
     asy__add3(f, g.nodes[i].pre);
     asy__add3(f, g.nodes[i].post);
   }
+}
+
+// 四边面片那一格的**界**（drawsurface.cc:72）：直面片只取四个角，其余对 x/y/z
+// 三个分量各跑一遍细分，fuzz 是 `Fuzz*norm(c,16)`（L∞ 范数），每个分量各自算。
+// 原先这儿走的是 `asy__add3(f, P)`（控制点凸包）—— 凸包偏大。量出来（cylinder）：
+// 位图从 412x400 变成 412x404，**高对上了参考的 404**；宽还是 412 对 404，
+// 那 8px（2pt）另有来处（见 ADR「界那一侧」）。
+private void asy__addpatch3(frame f, triple[][] P, bool straight)
+{
+  if (P.length < 4 || P[0].length < 4 || P[3].length < 4) { asy__add3(f, P); return; }
+  if (straight) {
+    asy__add3(f, P[0][0]);
+    asy__add3(f, P[0][3]);
+    asy__add3(f, P[3][0]);
+    asy__add3(f, P[3][3]);
+    return;
+  }
+  real[] cx; real[] cy; real[] cz;
+  for (int i = 0; i < 4; ++i)
+    for (int j = 0; j < 4; ++j) {
+      triple v = P[i][j];
+      cx.push(v.x); cy.push(v.y); cz.push(v.z);
+    }
+  real fx = asy__Fuzz * asy__norminf(cx);
+  real fy = asy__Fuzz * asy__norminf(cy);
+  real fz = asy__Fuzz * asy__norminf(cz);
+  real x = asy__sbound(cx, false, cx[0], fx, asy__rmaxdepth);
+  real X = asy__sbound(cx, true, cx[0], fx, asy__rmaxdepth);
+  real y = asy__sbound(cy, false, cy[0], fy, asy__rmaxdepth);
+  real Y = asy__sbound(cy, true, cy[0], fy, asy__rmaxdepth);
+  real z = asy__sbound(cz, false, cz[0], fz, asy__rmaxdepth);
+  real Z = asy__sbound(cz, true, cz[0], fz, asy__rmaxdepth);
+  asy__add3(f, (x, y, z));
+  asy__add3(f, (X, Y, Z));
 }
 
 // 变换阵作用在单位立方体的八个角上（球/柱/盘那几个原语的界就是这么估的）
@@ -10140,7 +10257,7 @@ void draw(frame f, triple[][] P, triple center, bool straight, pen[] p,
           bool lightOn, pen[] colors, int interaction, int digits,
           bool primitive = false)
 {
-  asy__add3(f, P);
+  asy__addpatch3(f, P, straight);
   drawop3 o;
   o.kind = 1;
   o.P3 = P;
@@ -10271,21 +10388,7 @@ void endTransform(frame f) { }
  *
  * 终止判据里的 `m(-1.0,1.0)` 就是"取 max 时是 +1、取 min 时是 -1"，这里写成 sgn。
  */
-private real asy__Fuzz = sqrt(asy__Fuzz2);      // bound.cc:14
-private int asy__rmaxdepth = 53;                // bound.cc:15 的 DBL_MANT_DIG
 private real asy__rf(int which, triple v) { return which == 0 ? v.x / v.z : v.y / v.z; }
-private real asy__rm(bool mx, real a, real b) { return mx ? max(a, b) : min(a, b); }
-
-// bound.h:16 的 Split（de Casteljau 一刀两半）：回 m0..m5 六个点
-private triple[] asy__split3(triple z0, triple c0, triple c1, triple z1) {
-  triple m0 = 0.5 * (z0 + c0);
-  triple m1 = 0.5 * (c0 + c1);
-  triple m2 = 0.5 * (c1 + z1);
-  triple m3 = 0.5 * (m0 + m1);
-  triple m4 = 0.5 * (m1 + m2);
-  triple m5 = 0.5 * (m3 + m4);
-  return new triple[] {m0, m1, m2, m3, m4, m5};
-}
 
 // path3.cc:770 的 ratiobound：控制网包围盒的那个"支配顶点"上取 f
 private real asy__ratiobound(triple[] P, bool mx, int which) {

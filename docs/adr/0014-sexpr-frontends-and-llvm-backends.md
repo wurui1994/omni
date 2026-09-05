@@ -11294,32 +11294,34 @@ drawsurface.cc:138，直面片只取四个角）。
 shellsqrtx01 那三个"oW 大 1"的症状**，也可能是 laserlattice 那个 min.x 的 1 ulp。
 标量版用得上已经搬好的那套细分骨架（`Split` 换成实数版即可）。
 
-**试过一遍了，退回来了 —— 但拿到了一个很有用的数。** 把标量版搬好、
-`draw(frame,triple[][],…)` 那一格从 `asy__add3(f,P)`（凸包）换成
-`asy__addpatch3`（drawsurface.cc:72 那一套：直面片取四角、其余三个分量各细分一遍，
-`fuzz = Fuzz*norm(c,16)`），那三个例子的封套从"多 1"变成"**少 1**"：
+**搬完之后量出来的（订正一次我自己的错话）。** 我先前在这儿写过"那三个例子的封套
+从多 1 变成少 1"，还列了"（原先 256/259/275）"—— **那三个数是凭记忆写的、不是量的，
+是错的**。重新量（`OMNI_EPS_FRESH=1`，两侧都跑）：
+
+- 封套那一行**换前换后一模一样**：cylinder 参考 255 / 我们 254，
+  shellsqrtx01 参考 258 / 我们 257，sacylinder3D 参考 274.5 / 我们 274。
+  也就是说封套的差**不在面片的界上**；
+- 真正动了的是**位图的尺寸**。cylinder：
 
 ```
-  cylinder       参考 %%BoundingBox:255   我们 254   （原先 256）
-  shellsqrtx01   参考 258                 我们 257   （原先 259）
-  sacylinder3D   参考 %%HiRes:274.5       我们 274   （原先 275）
+  参考   /Width 404  /Height 404   （489648 字节）
+  凸包   /Width 412  /Height 400   （494400）
+  真界   /Width 412  /Height 404   （499344）   <- 高对上了
 ```
 
-无标签尺子上封套一个字节都没变（`%%BoundingBox: 256 345 355 446` 与参考相同），
-叠图重合也没动（5504）。
+  `cylinder` 的"数值不同"从 14 处降到 8 处。shellsqrtx01 与 sacylinder3D 这一格没动。
 
-**所以真值夹在"凸包"与"面片真界"之间** —— asy 那边一定还往外加了点什么，
-而不是我们这一格算大了。下一次从这三条查（都还没量）：
-1. 三角面片仍按凸包（`boundtri` 没搬）—— 但凸包偏大，方向不对，先排它；
-2. `strokebounds`：二维那边 `pen` 的线宽是要把界撑开的（`internalbounds` +
-   `join()` + `cap()`），三维出位图这条路上那一格封套是**二维图**的界，
-   笔宽那一份可能没算进来；
-3. `drawSphere/drawCylinder/drawDisk` 这三格我们只按"单位立方体八个角过变换"估界
-   （asy 那边 PRC 之外也是这么估的，但要核对是不是同一个盒子）——
+所以这一刀是**对的、留下**：高从 400 变成 404、与参考相同，是"凸包偏大 -> lambda 偏大"
+被修掉的直接证据。剩下的宽 412 对 404（8px = 2pt）与封套那 1pt 另有来处，
+下一次从这两条查（都还没量）：
+1. `strokebounds`：二维那边 `pen` 的线宽要把界撑开（`internalbounds` + `join()` +
+   `cap()`），我们这一层还是 `widen`；
+2. `drawSphere/drawCylinder/drawDisk` 三格只按"单位立方体八个角过变换"估界 ——
    cylinder / sacylinder3D 正好都是柱面那一族。
 
-代码已经退回（`git checkout HEAD -- src/lib/asy/asy_builtins.asy`），
-只留这一笔记录：**没验证过就往前推的界，不如一个准确的负结果。**
+还有：三角面片的 `boundtri`（drawsurface.cc:391，要 `Splittri` 那一大张表）
+与 `real[][] * frame` 里那趟界（还按"旧包围盒八个角"重算，不是逐个 drawelement）
+都还没搬。
 
 **下一刀的活**：拿这个把第 0 步的 op 表投影成 2D（面片按控制点投影后细分，
 路径按结点+控制点投影），按深度排一遍（画家算法，先不做 Z-buffer），
