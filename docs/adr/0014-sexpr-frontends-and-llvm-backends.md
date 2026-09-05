@@ -11335,6 +11335,37 @@ Gouraud / tensor）重跑之后仍然"一样"。十个控制点的三角面片�
 而实数的 `max`/`min`/`abs` 在这个文件里比它更晚 —— 所以 `asy__rm` 与
 `asy__norminf` 里是手写的比较，不是 `max`/`min`。
 
+#### 真正管封套与位图尺寸的是 `minratio/maxratio(triple[][])`
+
+上面两刀（面片的界、minbezier）都只动了一点。**管封套的那一格在别处**：
+`three.asy:2734` 的 `S.width/S.height` 是从 **pic2**（二维图）的界来的，而三维元素
+往 pic2 里落界走的是 `three_surface.asy:293/301` 的 `patch.min(projection)/max(projection)`
+—— 透视时那两行是 `maxratio(Q, d*bound)/d`，也就是 `minratio/maxratio(triple[][])`。
+我们这一对原先是控制点凸包；asy 那边（runarray.in:2224/2236）是
+`boundtriple(N)`：对面片细分求 x/z、y/z 的真极值，`fuzz = Fuzz*norm(A,N)`。
+
+换过来之后（三个例子，两侧都重跑）：
+
+```
+  sacylinder3D  **矢量那半边一样**（原先 6 处数值不同，首处就是封套）
+                位图 ink 248x400 重合 87410，盖住参考的 99.0%
+  cylinder      6 处（原先 8 处）；封套的 x 对上了，首处退到 y 那半点
+                位图 412x400 -> 404x400，**宽对上了参考的 404**（高还差 4px）
+  shellsqrtx01  没动
+```
+
+九个原本"一样"的例子（sacone / sacylinder / spheresilhouette /
+hyperboloidsilhouette / Coons / Gouraud / tensor / transparency / colorplanes）
+重跑之后仍然"一样"。
+
+**sacylinder3D 是第一个"几何层逐字节相同"的三维位图例子** —— 两层判据里的第一层
+在它身上已经满足，剩下的是像素（平色 vs PBR）。
+
+摆放上又碰到顺序问题：真身 `asy__pbound` 住在 `path3` 那一段旁边（文件后面），
+所以 `minratio/maxratio(triple[][])` 前面放了个前向桩 `asy__pboundfn`、
+在 `asy__pbound` 定义之后一行装上（与 `asy__merge3fn` / `asy__r3hexfn` 同一手法）。
+**那一行赋值不许省** —— 省了就等于回到凸包，而且不会报错。
+
 **下一刀的活**：拿这个把第 0 步的 op 表投影成 2D（面片按控制点投影后细分，
 路径按结点+控制点投影），按深度排一遍（画家算法，先不做 Z-buffer），
 发一份 `oW x oH` 的临时 EPS，交给 gs 出像素，读回字节塞进 `kind == 7` 那一格。

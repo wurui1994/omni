@@ -8769,25 +8769,56 @@ private triple asy__bezbound(triple[][] P, triple b, bool mx) {
 }
 triple minbezier(triple[][] P, triple b) { return asy__bezbound(P, b, false); }
 triple maxbezier(triple[][] P, triple b) { return asy__bezbound(P, b, true); }
-// 透视投影下的 x/y 比（picture.cc:135 的 xratio / yratio）
-pair minratio(triple[][] P, pair b) {
-  for (int i = 0; i < P.length; ++i) {
-    for (int j = 0; j < P[i].length; ++j) {
-      triple v = P[i][j];
-      b = (min(b.x, v.x / v.z), min(b.y, v.y / v.z));
-    }
-  }
+/*
+ * 透视投影下的 x/z、y/z 比（runarray.in:2224/2236 的 `minratio/maxratio(triplearray2*)`）：
+ * **不是控制点凸包**，是 `boundtriple(N)` 那一支 —— 对 Bezier 面片细分求 x/z 与 y/z 的
+ * 真极值，`fuzz = Fuzz*norm(A,N)`。
+ *
+ * 这一对是三维出图**最要紧的一格**：three_surface.asy:293/301 的
+ * `patch.min(projection)/max(projection)` 走它（透视时 `maxratio(Q,d*bound)/d`），
+ * 于是 `pic2` 的二维界、`S.width/S.height`（three.asy:2734）、`oW/oH`、
+ * 位图尺寸与封套全从这儿来。
+ *
+ * 真身 `asy__pbound` 在文件后面（它要 `path3` 那一段的邻居），asy 的名字解析是顺序的，
+ * 所以这儿放一个前向桩、下面装上（与 `asy__merge3fn` / `asy__r3hexfn` 同一手法）。
+ * 桩本身**不能当兜底**：装不上就等于回到凸包，所以下面那一行赋值不许省。
+ */
+real asy__pboundfn(triple[] P, bool mx, int which, real b, real fuzz, int depth) {
   return b;
 }
-pair maxratio(triple[][] P, pair b) {
-  for (int i = 0; i < P.length; ++i) {
-    for (int j = 0; j < P[i].length; ++j) {
-      triple v = P[i][j];
-      b = (max(b.x, v.x / v.z), max(b.y, v.y / v.z));
-    }
+
+// norm(A,N)（run::norm 的 triple 版）：这里取所有分量绝对值的最大 —— fuzz 只进
+// 终止判据的尺度，与逐字节无关；真要对齐再核对 runtime 那一格取的是长度还是分量。
+private real asy__norm3(triple[] A) {
+  real n = 0;
+  for (int i = 0; i < A.length; ++i) {
+    real t = abs(A[i].x); if (t > n) n = t;
+    t = abs(A[i].y); if (t > n) n = t;
+    t = abs(A[i].z); if (t > n) n = t;
   }
-  return b;
+  return n;
 }
+
+private pair asy__ratio2(triple[][] P, pair b, bool mx) {
+  triple[] A;
+  for (int i = 0; i < P.length; ++i)
+    for (int j = 0; j < P[i].length; ++j) A.push(P[i][j]);
+  if (A.length != 16) {
+    // 十个控制点的三角面片走 boundtri（bound.cc:102），还没搬 —— 那一支仍按凸包
+    for (int i = 0; i < A.length; ++i) {
+      triple v = A[i];
+      b = (mx ? max(b.x, v.x / v.z) : min(b.x, v.x / v.z),
+           mx ? max(b.y, v.y / v.z) : min(b.y, v.y / v.z));
+    }
+    return b;
+  }
+  real fuzz = asy__Fuzz * asy__norm3(A);
+  return (asy__pboundfn(A, mx, 0, b.x, fuzz, asy__rmaxdepth),
+          asy__pboundfn(A, mx, 1, b.y, fuzz, asy__rmaxdepth));
+}
+
+pair minratio(triple[][] P, pair b) { return asy__ratio2(P, b, false); }
+pair maxratio(triple[][] P, pair b) { return asy__ratio2(P, b, true); }
 // ---- 数组那几格（runarray.in 里按元素类型注册的一族）：三维那一层要 triple 那一版 ----
 triple[][] transpose(triple[][] a) {
   int n = a.length;
@@ -10463,6 +10494,10 @@ private real asy__pbound(triple[] P, bool mx, int which, real b, real fuzz, int 
                  c7[0], c8[0], c9[0], c10[0], c3[5], c3[4], c3[2], P[15]};
   return asy__pbound(s3, mx, which, bb, fz, d);
 }
+
+// 把前向桩装上（`minratio/maxratio(triple[][])` 那两格要它 —— 见上面那一段的说明）。
+// **这一行不许省**：省了就等于那两格回到控制点凸包。
+asy__pboundfn = asy__pbound;
 
 // bound.cc:140 的 bound（一段三次曲线）
 private real asy__cbound(triple z0, triple c0, triple c1, triple z1,
