@@ -11408,8 +11408,22 @@ drawelement 重新求界）、管子那一格的 ratio、以及像素层的 PBR 
 
 所以这一条是 **`arrow(string, triple, triple, real, pen)`（three.asy 的那一格）
 把标签那一半漏掉了**，不是界的算法问题 —— 别的标签都进得来（我们位图上看得见），
-只有挂在 `arrow` 上的那个没有。下一刀从 three.asy 的 `arrow` 与我们这一侧的
-label3 那一族对着查。
+只有挂在 `arrow` 上的那个没有。
+
+**链子已经顺到底了**（都是 asy 自己的 base 代码，所以缺的是我们某个内建）：
+
+```
+  arrow(pic,L,b,dir,…)                      three.asy:2411
+    -> draw(opic, L, a--O, align, p, arrow, margin, …)   :2353（arrowbar3 那一格）
+         -> if(L.s != "") label(opic, L, g, align, (pen) p);   :2368
+    -> add(pic, opic, b)                    :2396
+         -> dest.add(new void(picture f, transform3 t) { f.add(shift(t*position)*src,…) })
+```
+
+`add(pic,opic,b)` 那一步是好的 —— 同一个 `opic` 里的**箭头我们画出来了**，
+只有 `label(opic, L, g, align, pen)`（path3 上的标签那一格）没落地。
+下一刀就查这一格：先确认 `label(picture, Label, path3, align, pen)` 在
+装着的 three.asy 里是哪一支，再看它落到我们哪个内建上。
 
 顺带看清另外两笔（都是像素层的，不是几何层）：
 - 参考上方那片背面是**黑的**（PBR 着色 + 光照），我们是平的绿；
