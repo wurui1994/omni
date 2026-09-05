@@ -1898,9 +1898,9 @@ real asy__bez(real a, real b, real c, real d, real t) {
 // path.cc:46 的 quadraticroots，只报 bounds() 用得到的那一面：返回要试的 t，
 // 顺序与 C++ 那边的 t1、t2 一致（MANY 与 ONE 只报 t1，NONE 报空）。
 real[] asy__bezcrit(real a, real b, real c, real d) {
-  // path.cc:462 的 derivative(a,b,c, z0,c0,c1,z1)
-  real A = d - a + 3.0 * (b - c);
-  real B = 2.0 * (a + c) - 4.0 * b;
+  // path.cc:462 的 derivative(a,b,c, z0,c0,c1,z1)，按 arm64 上收缩成 fmadd 的次序算
+  real A = asy__fma(3.0, b - c, d - a);
+  real B = asy__fma(2.0, a + c, -(4.0 * b));
   real C = b - a;
   real[] out;
   if (fabs(A) <= asy__Fuzz2 * fabs(B) + asy__Fuzz4 * fabs(C)) {
