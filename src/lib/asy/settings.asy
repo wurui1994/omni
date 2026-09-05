@@ -39,6 +39,17 @@ string tex = "latex";
 // glrender/renderBase 那两段算，四项与参考逐字节对上；像素这一刀还是背景色，
 // 下一步交给 gs 光栅化矢量那一份）。施工图见 ADR「位图那 83 个」那一节。
 real render = -1;
+// **真 asy 的默认是 (0.5,0.5)，我们这里先留 (0,0) —— 这是一笔互相抵消的账。**
+// 量出来的：`asy -noV` 印 settings.viewportmargin 是 `0.5,0.5`（外部尺子，确定）。
+// 三维那条路上它进封套：three.asy:2596 的
+// `viewportmargin(lambda)=maxbound(0.5*(viewportsize-lambda),viewportmargin)`
+// 在 viewportsize=0 时就回这一格，:2733 落到 S.viewportmargin、
+// :2734 `S.width=ceil(lambda.x+2*margin.x)`。
+// **但单独改成 0.5 会更差**（七行尺子 /tmp/nl/ar3.asy：参考 400x124，
+// 我们从 404x124 变成 408x128）—— 因为 :2731 那个 lambda 是**按 pic2.scaling(s) 缩过**
+// 的二维界，asy 的那个 LP 会把 s 压小、给 margin 腾出位置（它的 lambda.x 落在 98~99），
+// 我们的 `scaling` 没压（lambda.x=99.506，与 asy 的未缩界逐位相同）。
+// 所以这一格要与 `pic2.scaling` 那个 LP 一起改，单改一边就是双算。
 pair viewportmargin = (0, 0);
 int verbose = 0;
 
