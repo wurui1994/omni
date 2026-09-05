@@ -11751,8 +11751,17 @@ height=63、margin=(0.5,0.5)），所以 scene 那一段本来就同口径。
 - sacylinder3D：最大通道差 255 -> **217**
 - 原先"一样"的那三个照旧一样，矢量半边全部仍逐字节一样
 
-仍未清的账：sacylinder3D 那一族的 `lambda` 我们比 asy 大约 1pt（`pic2.scaling` 那个 LP
-没给 margin 腾位置），画布还差 1。
+仍未清的账：sacylinder3D 那一族的画布还差 1pt —— **不是 `pic2.scaling` 那个 LP**。
+两侧同一份源码的尺子（那个圆柱 + 一条虚线，`size(0,100)`，印 `scene(...)` 的
+width/height/margin 与 LP 出来的 lambda/s）逐位相同：
+
+- asy：width=64 height=101 margin=(0.5,0.5) lambda=(62.3078704041567,100) s=0.866467310429487
+- 我们：width=64 height=101 margin=(0.5,0.5) lambda=(62.3078704041566,100) s=0.866467310429487
+
+（lambda 差最后 1 个 ulp。）所以"我们的 `scaling` 没压 s"那条旧诊断是**错的**，已在
+settings.asy 里订正 —— 真正差的就是上面那一格 int 截断，改完之后这一族的矢量半边
+逐字节一样。
+
 
 
 

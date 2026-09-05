@@ -39,30 +39,26 @@ string tex = "latex";
 // glrender/renderBase 那两段算，四项与参考逐字节对上；像素这一刀还是背景色，
 // 下一步交给 gs 光栅化矢量那一份）。施工图见 ADR「位图那 83 个」那一节。
 real render = -1;
-// **真 asy 的默认是 (0.5,0.5)，我们这里先留 (0,0) —— 这是一笔互相抵消的账。**
-// 量出来的：`asy -noV` 印 settings.viewportmargin 是 `0.5,0.5`（外部尺子，确定）。
+// **真 asy 的默认是 (0.5,0.5)，这里也是**（量出来的：`asy -noV` 印 `0.5,0.5`）。
 // 三维那条路上它进封套：three.asy:2596 的
 // `viewportmargin(lambda)=maxbound(0.5*(viewportsize-lambda),viewportmargin)`
 // 在 viewportsize=0 时就回这一格，:2733 落到 S.viewportmargin、
 // :2734 `S.width=ceil(lambda.x+2*margin.x)`。
-// **但单独改成 0.5 会更差**（七行尺子 /tmp/nl/ar3.asy：参考 400x124，
-// 我们从 404x124 变成 408x128）—— 因为 :2731 那个 lambda 是**按 pic2.scaling(s) 缩过**
-// 的二维界，asy 的那个 LP 会把 s 压小、给 margin 腾出位置（它的 lambda.x 落在 98~99），
-// 我们的 `scaling` 没压（lambda.x=99.506，与 asy 的未缩界逐位相同）。
-// 所以这一格要与 `pic2.scaling` 那个 LP 一起改，单改一边就是双算。
 //
-// 又量了一遍（透视、无标签的两行尺子 `draw((-1,-1,-1)--(1,1,1),blue)` + 一条对角线，
-// `size(100,0)`、`perspective(4,3,2)`）—— 这一趟把两边**都**问了，两笔账才对上：
-//   margin=(0,0) + ceil：画布 400x248 与参考同，但 ink 铺满 x[0..399]（参考 x[3..395]）
-//   margin=(0.5,0.5) + ceil：ink 的边距对了，画布却变成 404x252
-//   **margin=(0.5,0.5) + 截断**：画布 400x248、ink x[4..395] —— 两项都对上
-// 第二笔是 `oW/oH` 那一格：glrender.cc:1222 的 `initDisplay(args.width,args.height)`
-// 形参是 int、实参是 double，**C++ 隐式转换向零截断**（不是 ceil；norender.cc:22
-// 那条另一条路才是 ceil）。见 shipout3 里那一处。
-// 显式 `scene(currentpicture,100,0)` 两边一模一样（都印 width=101、height=63、
-// margin=(0.5,0.5)），所以 scene 那一段本来就同口径。
-// 仍未清的账：sacylinder3D 那一族的 `lambda` 我们比 asy 大约 1pt（`pic2.scaling`
-// 那个 LP 没给 margin 腾位置），画布因此还差 1。
+// 从前这一格留 (0,0)，理由记成"asy 的 `pic2.scaling` 那个 LP 会把 s 压小、给 margin
+// 腾位置，我们的没压"。**那条诊断是错的，已订正。** 两侧同一份源码的尺子
+// （/tmp/omni-shade/lam.asy：sacylinder3D 那个圆柱 + 一条虚线，`size(0,100)`，
+// 印 `scene(...)` 的 width/height/margin 与 `pic2.scaling` 出来的 lambda 与 s）：
+//   asy：width=64 height=101 margin=(0.5,0.5) lambda=(62.3078704041567,100) s=0.866467310429487
+//   我们：width=64 height=101 margin=(0.5,0.5) lambda=(62.3078704041566,100) s=0.866467310429487
+// 逐位相同（lambda 差最后 1 个 ulp）—— LP 与 scene 那一段本来就同口径。
+//
+// 真正差的是另一笔：`oW/oH` **不是 ceil，是 C++ 的 int 截断**（glrender.cc:1222 的
+// `initDisplay(args.width,args.height)` 形参 int、实参 double；norender.cc:22 那条
+// 另一条路才是 ceil）。两笔一起改才对：透视两行尺子（`size(100,0)`）三种组合
+//   margin=(0,0) + ceil：画布 400x248 对，但 ink 铺满 x[0..399]（参考 x[3..395]）
+//   margin=(0.5,0.5) + ceil：ink 边距对，画布 404x252
+//   **margin=(0.5,0.5) + 截断**：画布 400x248、ink x[4..395] —— 两项都对
 pair viewportmargin = (0.5, 0.5);
 int verbose = 0;
 
