@@ -10671,3 +10671,52 @@ hyperboloidsilhouette 与 spheresilhouette（三维轮廓，数值差），
 拷到 /tmp 加探针，再放进 `ASYMPTOTE_DIR` 的最前面）下跑的，写进去的
 "没出图"会被后面**同一个印记**的正常一趟当成缓存直接采信 —— 23 个例子一起
 记成"未声明的变量"。带探针跑完之后要 `OMNI_EPS_FRESH=1` 重量一趟。
+
+## 已落地：mintimes/maxtimes 从采样改成精确解 —— 两个 silhouette 逐字节对上
+
+上一节把 hyperboloidsilhouette / spheresilhouette 记成"三维轮廓的数值差"。**记错了**：
+它不是三维的事，也不是末位浮点，是这一层的一处**近似**。
+
+`solids.asy:17` 的 `tangent()` 拿 `mintimes(p)[1]` / `maxtimes(p)[1]` 当迭代的支点。
+真 asy 的这一对是 `path::bounds()`（path.cc:472）解导数零点时**顺手记下的时刻**
+（`times` 那一份 bbox），精确；我们这一层原先是"每段 32 个样点、取最好的那个样点"。
+代价不是"偏一点"：hyperboloidsilhouette 的首处坐标从参考的 -3.77470652 变成
+-3.77948357，相对 1.3e-3，**刚好越过这一轴 1e-3 的容差**。
+
+照 path.cc:472 重写，几处必须照抄的细节：
+
+- 先 `box.add(point(len))`，`times` 四格都初始化成 `len`；
+- 直段 `continue`；曲段解 x、y 两条二次，用的是包围盒那一份 `asy__bezcrit`
+  （path.cc:46 的 quadraticroots + `sqrt1pxm1`，阈值是相对的 Fuzz2/Fuzz4），
+  goodroot 是**闭**区间 `0<=t<=1`，顺序是 `x.t1、x.t2、y.t1、y.t2`；
+- 每次加的是**整个点**（x 的根那一点也参与 y 的比较），而且 x 那一对是
+  `if (< left) … else if (> right)`（bbox.h:97 的 `addnonempty`，**不是**两条独立的 if）
+  —— 并列的两格谁先更新决定平手时记下哪个时刻。
+
+拿 asy 当尺子量了 7 条路径的四个时刻：**6 条逐位相同**。剩下那条
+`(0,0)..(1,1)..(2,0)..cycle` 差在别处，顺手量清了（**新的一条已知差**，还没修）：
+
+```
+  postcontrol(p,0)   真 asy (-0.066312251800762917, 0.54914526845258893)
+                     我们   (-0.066312251800762889, 0.54914526845258882)
+```
+
+也就是**闭合 guide 解出来的控制点**最后一两位 —— `asy__solvecyclic` 那一支
+（knot.cc 的 cyclicCompute）。这一轴上目前没有例子卡在它上面（cardioid 那三个
+走的是非闭合的 polargraph），所以先记下不动。
+
+这一刀之后：hyperboloidsilhouette 与 spheresilhouette 都是"一样"，
+**这一轴 86 -> 88**。path3 那一对还是采样的（只有 three_surface 的 min3/max3 用它）。
+
+### 顺手撞到的一处真缺口（未修，也没有例子卡在它上面）
+
+拿 `yaxis(p,LeftRight,NoTicks)` 做最小复现时，我们这边报
+
+```
+  omni_weak.sx: 未声明的函数 'asy__m9f39b3e5_asy__cast227_Label'
+      (let format Label (call asy__m9f39b3e5_asy__cast227_Label (str "")))
+```
+
+`PaletteTicks` 进了 weak 段，而它**默认实参里**要的 `operator cast(string)->Label`
+没跟着进来。189 个例子里没有一个踩到（这一轴"没出图"是 0），所以只记账。
+
