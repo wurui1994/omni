@@ -9911,9 +9911,15 @@ private void asy__merge3hook() {
     pair pj(triple v) {
       // **`tv`（shipout3 收到的 t）不能就这么乘上去**：试过了，billboard 从
       // 45859/446400 变成 443484/446400（首处就是第 0 个像素，整幅都糊了）。
-      // 它是 `tinv*inv` 那一对里的一个，含义要先弄清再用 —— 现在的 ink 位置
-      // （x 105..260 / y 130..295，参考铺满 0..370 / 8..390）说明差的是**一个均匀的
-      // 2.35 倍缩放**，不是缺一次线性变换。下一刀从 near/H 那两格查。
+      // 它是 `tinv*inv` 那一对里的一个 —— 帧坐标已经在视图空间，这里不需要它。
+      // 曾经把"图偏小"记成这一格公式的事（"差一个均匀的 2.35 倍缩放、从 near/H 那两格查"）
+      // —— **那一笔是错的**。把 glFrustum 展开一遍就够了：
+      //   screen_x = (x·near/(-z) - xmin) / (xmax - xmin) · W，
+      // 而 xmin/xmax = ∓tan(0.5·fov)·|Zmax|·aspect、near = |Zmax| —— Zmax 整格约掉，
+      // 只剩 tan(0.5·fov)、zoom、aspect 三个量。偏小的是 **fov**，而 fov 偏大是因为
+      // three.asy:2765 的 angle() 收到的 minratio/maxratio 按"界的八个角"算
+      // （订正见 `real[][] * frame` 那一处）。订正之后无标签尺子上 ink 占宽
+      // 67.7% -> 100.0%（参考 99.2%），这一格公式一个字没动。
       real x = v.x;
       real y = v.y;
       if (!ortho) {
@@ -10359,6 +10365,42 @@ frame operator *(real[][] t, frame f)
       q.P3 = P;
     }
     asy__push3(g, q);
+  }
+  // **比（minr/maxr）不能拿"界的八个角"来算。** x/z 是非线性的，盒角的比与真几何的比
+  // 不是一回事：无标签尺子（`import three; size(100);
+  // currentprojection=perspective(1,-2,1); draw(unitbox);`）量出来 —— 按盒角算，
+  // three.asy:2765 的 angle() 收到的比是 48.65/107.89 = 0.451，于是 fov 定成 48.67°；
+  // 而**真几何**的 y/z 只到 0.257/0.360（取到 y 极值的那个点在 z = -189.28，不在近面），
+  // 于是 autoadjust 那个循环把"盒角"摆正了、真图形却偏在一边，位图上 ink 只占宽 67.7%
+  // （参考是 99.0%）。asy 那边 picture.cc 的 ratio 是**逐个 drawelement 走**的，
+  // 所以这里照它走 op 表。界（min3v/max3v）仍按盒角 —— 还有几格内建只记界不留图
+  // （drawpixel、三角网格 draw、drawSphere/Cylinder/Disk），改成走 op 表会整格丢掉。
+  drawop3[] gs = asy__ops3(g);
+  if (gs.length > 0) {
+    pair rmn; pair rmx;
+    bool first = true;
+    void acc(triple v) {
+      real rx = v.z == 0 ? 0 : v.x / v.z;
+      real ry = v.z == 0 ? 0 : v.y / v.z;
+      if (first) { rmn = (rx, ry); rmx = (rx, ry); first = false; return; }
+      rmn = (min(rmn.x, rx), min(rmn.y, ry));
+      rmx = (max(rmx.x, rx), max(rmx.y, ry));
+    }
+    for (int i = 0; i < gs.length; ++i) {
+      if (gs[i].kind == 0) {
+        for (int k = 0; k < gs[i].g3.nodes.length; ++k) {
+          acc(gs[i].g3.nodes[k].point);
+          acc(gs[i].g3.nodes[k].pre);
+          acc(gs[i].g3.nodes[k].post);
+        }
+      } else if (gs[i].kind == 3) {
+        for (int k = 0; k < gs[i].Q3.length; ++k) acc(gs[i].Q3[k]);
+      } else {
+        for (int a = 0; a < gs[i].P3.length; ++a)
+          for (int b = 0; b < gs[i].P3[a].length; ++b) acc(gs[i].P3[a][b]);
+      }
+    }
+    if (!first) { g.minr = rmn; g.maxr = rmx; }
   }
   return g;
 }
