@@ -3841,9 +3841,32 @@ string font(pen p = currentpen) {
 }
 
 // (1) 还差的几个非泛型内建：base 里点名要，语义在参考实现里是一句话。
-// unit：runpair.in:178 —— 零向量回零（C++ 那边 length==0 时原样返回）。
-pair unit(pair z) { real r = length(z); return r == 0 ? z : z / r; }
-triple unit(triple v) { real r = length(v); return r == 0 ? v : v / r; }
+// unit：**先取倒数再逐分量乘**（pair.h:164 的 `scale=1.0/z.length(); pair(z.x*scale,z.y*scale)`），
+// 不是逐分量除。这两条在浮点上不是一回事：a=62.762791874221662 时
+// `a/sqrt(a*a)` 正好是 1，而 `a*(1.0/sqrt(a*a))` 是 0.99999999999999989。
+// 量出来的代价：laserlattice 的刻度方向本该是那个"差一位的 1"，于是刻度长
+// Ticksize*0.99999999999999989 比 Ticksize 少一个 ulp；那一个 ulp 进了图的包围盒，
+// 使 picture.fit 的 xgrow=xsize/width 差 3 个 ulp，于是 t*inverse(t) 不再正好是单位，
+// 参考里每一笔刻度都套着 gsave/[ 1 0 0 1 0 0] concat/grestore、我们一层都不套 ——
+// 7054 对 6273 个 token 的结构差，根子就在这一个乘法上。
+// 挡的那一道也照抄：`fpclassify(scale) == FP_NORMAL` —— 0、非规格化、inf、nan
+// 一律回 z0（默认 (0,0)），不是"回 z"。非负数上这就是 realMin <= scale <= realMax。
+pair unit(pair z) {
+  real scale = length(z);
+  if (scale >= realMin && scale <= realMax) {
+    scale = 1.0 / scale;
+    return (z.x * scale, z.y * scale);
+  }
+  return (0, 0);
+}
+triple unit(triple v) {
+  real scale = length(v);
+  if (scale >= realMin && scale <= realMax) {
+    scale = 1.0 / scale;
+    return (v.x * scale, v.y * scale, v.z * scale);
+  }
+  return (0, 0, 0);
+}
 
 // identity(n)：runarray.in:1247，n x n 单位阵。
 real[][] identity(int n) {
