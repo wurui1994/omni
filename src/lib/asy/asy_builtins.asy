@@ -8028,12 +8028,20 @@ void _shipout(string prefix="", frame f, frame preamble=null, string format="",
 // 签名在，three.asy:2624/2911 那三句才降得下来（`picture *f` 在 asy 那边就是 frame，
 // realarray2 就是 real[][]：transform3 是 three.asy 里的 typedef，这一层看不见它）。
 string defaultformat3="prc";                     // runpicture.in:121
+// 这一趟量的是"甲"那条出路（见 ADR「位图那 83 个的施工图」第五节）：`shipout3` 只当
+// 记录器 —— 把 3D 那一帧的内容盒子（three.asy:2906 的 `S.width-defaultrender.margin`）
+// 记下来，看 three.asy:2920 那句 `return F` 之后隐式 shipout 还剩不剩东西可印。
+real asy__r3w = 0;
+real asy__r3h = 0;
+bool asy__r3on = false;
 void shipout3(string prefix, frame f, string format="",
               real width, real height, real angle, real zoom,
               triple m, triple M, pair shift, pair margin, real[][] t,
               real[][] tup, real[] background, triple[] lights, real[][] diffuse,
               bool view=true) {
-  abort("shipout3 还没做（PRC/v3d 那一路不在这一层）");
+  asy__r3w = width;
+  asy__r3h = height;
+  asy__r3on = true;
 }
 void shipout3(string prefix, frame f, string format=defaultformat3) {
   abort("shipout3 还没做（PRC/v3d 那一路不在这一层）");

@@ -30,10 +30,16 @@ string user = "";
 // TeX 引擎的默认档：settings.cc 的 engineSetting 默认 "latex"
 string tex = "latex";
 
-// 3D 渲染的分辨率倍数。0 就是"不渲染"—— plain_shipout.asy 里
-// `settings.render != 0` 是"要不要走 3D 那条路"的判据，所以这个 0 很要紧：
-// 2D 那条路全靠它。真 asy 的默认是 -1（自动），但自动那一档要问显示设备，
-// 我们这边还没有 OpenGL，所以先钉在 0。
+// 3D 渲染的分辨率倍数。这个值是**唯一**决定 3D 出位图还是出矢量的闸门：
+// three.asy:2877 出 EPS 时 prc/v3d/preview 全假，就剩 `settings.render != 0`，
+// 非 0 时整张 EPS 都是 shipout3 出的（真 asy 那边是 GPU 渲染那条路）。
+// 这一轴上 83 个"参考是位图、我们出矢量"的差全部出自这一行。真 asy 的默认是 -1。
+//
+// **暂时仍钉在 0**，理由是量出来的：把它改成 -1 之后 shipout3 确实被调到了
+// （见 asy_builtins 的 asy__r3w/asy__r3h），但 three.asy:2920 紧接着
+// `if(!preview && !v3d) return F;` 回的是一张**空帧** —— billboard 的输出变成 0 字节。
+// 也就是说 shipout3 必须自己把整份 EPS 写出来，光当记录器不够。
+// 施工图（外壳的算法已经与参考逐项对上）见 ADR「位图那 83 个的施工图」那一节。
 real render = 0;
 pair viewportmargin = (0, 0);
 int verbose = 0;

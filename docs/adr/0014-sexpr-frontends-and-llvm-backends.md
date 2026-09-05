@@ -10760,10 +10760,23 @@ three.asy:2866-2877（我们跑的就是这份源码）：
   `pic.shipout(...)`
 - drawimage.h:117：`gsave` + `concat(t)` + `rawimage(raw,width,height,antialias)` + `grestore`
 
-拿 billboard 的参考逐项对：`/Width 372 /Height 400` = 4×93、4×100 ✓；
-`[ 93 0 0 100 0 0] concat` ✓；`259 345.5 translate` 正是 93×100 的盒子按 letter 居中
-（与我们 `asy__excess` 那条规矩逐字相同）✓。也就是说**外壳这一层我们现在就能逐字节出**
-—— `/ImageType 1` 那一段我们已经有了（laserlattice 四块 256×256 与参考逐字节相同）。
+拿 billboard 的参考逐项对，**而且这一趟把 shipout3 收到的那两个数也印出来了**
+（`settings.render` 临时改成 -1，`shipout3` 只记录不画）：
+
+```
+  shipout3 收到的      w = 92.980000000000004   h = 99.980000000000004
+                       （= S.width/S.height 93/100 减 defaultrender.margin 0.02）
+  oWidth/oHeight       ceil 成整数 -> 93 x 100        （initDisplay 的形参就是 int）
+  fullWidth/Height     ceil(4*93) x ceil(4*100) = 372 x 400   与参考的 /Width /Height 一样
+  concat               [ 93 0 0 100 0 0]                      与参考一样
+  BoundingBox          93x100 按 letter 居中 -> 259 345.5     与参考一样
+```
+
+四项全中 —— 也就是说**外壳这一层我们现在就能逐字节出**（`/ImageType 1` 那一段我们已经
+有了：laserlattice 四块 256×256 与参考逐字节相同）。**这一步是"ceil 之后再乘"**，
+不是"乘完再 ceil"（92.98×4 = 371.92 也 ceil 成 372，碰巧一样；但 concat 那一格
+必须是 93 才对得上，所以 oWidth 是 ceil(w)，不是 w）。
+
 
 ### 三、像素来自 GPU，所以判据必须改（这一条要先说清）
 
@@ -10807,8 +10820,19 @@ PBR 着色器**（base/webgl/asygl-*.js 里那份 fragment shader 的同一套�
 
 1. `settings.render` 的默认改成 -1，`shipout3` 实现 EPS 那一支（外壳先对上，像素走 gs）；
    要先解决的一处结构问题：three.asy:2919 那句 `if(!preview && !v3d) return F;` 意味着
-   **矢量那条路根本不走**，所以 `shipout3` 必须自己把整份 EPS 写出来 ——
-   投影出来的那张 2D 帧得在 shipout3 里自己拼（现在是 three.asy 在它后面拼的）。
+   **矢量那条路根本不走**（那时 `F.f` 还是空帧），所以 `shipout3` 必须自己把整份 EPS
+   写出来 —— 而它收到的是**三维**那张帧，投影成 2D 是 three.asy 后半段的活
+   （`scene()` 里那些 `pic.add(new void(frame f, transform t){…project…})`）。
+   两条出路，下一刀先在这两条里选 —— **甲已经试过了，光当记录器不行**：
+   - **甲（量过，不成立）**：`shipout3` 只当记录器（把 `w`/`h` 记进
+     `asy__r3w`/`asy__r3h`），指望矢量那条路照跑。量出来的：`render` 改成 -1 之后
+     billboard 的输出是 **0 字节** —— three.asy:2920 回的那张 `F.f` 在那一刻还是空帧，
+     后面的隐式 shipout 无从下手。所以 `shipout3` 必须自己把整份 EPS 写出来。
+   - **乙**：把三维帧的投影在这一层做一份（`project` 我们已经有），
+     `shipout3` 自己拼 2D 帧 -> 临时 EPS -> gs -> 位图块。代价是与 three.asy
+     的投影逻辑重复一份，好处是不依赖 three.asy 的控制流。
+   量出来的那 0.5% 是拿现有矢量输出（render=0 那条路）测的，所以乙拼出来的 2D 帧
+   只要与它一致，那个数就是现成的。`settings.render` 在乙落地之前**仍钉在 0**。
 2. eps.js 加"GPU 参考位图"这一档的判据（几何逐字节 + 像素容差），把 83 个的现状量出来；
 3. 逐族收像素：先线画（billboard/stroke3/label3 这一族），再曲面（PBR 着色那一套）。
 
