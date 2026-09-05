@@ -9459,28 +9459,71 @@ bool[] concat(bool[] a, bool[] b)
 }
 
 /*
- * mintimes / maxtimes（runpath.in:386/395 与 runpath3d.in:337）：逐分量取到极值的
- * **时刻**。真 asy 是在算包围盒时顺手记下来的（path.h 的 times.leftBound 那几格，解的是
- * 导数的零点）；这一层与 min/max(path3) 同一条路子 —— 采样取极值，所以时刻是近似的
- * （每段 32 个样点）。代价写在明处：强弯的段上时刻可能偏一点。
+ * mintimes / maxtimes（runpath.in:386/395）：逐分量取到极值的**时刻**。
+ * 真 asy 是在算包围盒时顺手记下来的（path.cc:472 的 `path::bounds()` 把 times 那一份
+ * bbox 一起填了，解的是导数的零点），所以时刻是**精确**的。
+ *
+ * 原先这一层是"每段 32 个样点、取最好的那个样点"—— 近似。代价不是"偏一点"：
+ * solids.asy:17 的 `tangent()` 拿 `mintimes(p)[1]` 当迭代的支点，采样的时刻使
+ * hyperboloidsilhouette 的第一处坐标从参考的 -3.77470652 变成 -3.77948357
+ * （相对 1.3e-3，正好越过这一轴 1e-3 的容差）。所以这里照 path.cc:472 重写：
+ *   - 先 `box.add(point(len))`，times 四格都初始化成 len
+ *   - 逐段 addpoint(i)；直段跳过；曲段解 x 与 y 两条二次（asy__bezcrit，与包围盒同一份），
+ *     goodroot 的闭区间 0<=t<=1，**按 x 的 t1/t2、再 y 的 t1/t2 这个顺序**
+ *   - 每次都是 addnonempty(point(i+t), t)：加的是**整个点**（x 的根那一点也参与 y 的比较），
+ *     而且 x 那一对是 `if (< left) … else if (> right)`（不是两条独立的 if）——
+ *     并列的两格谁先更新会决定平手时记下的是哪个时刻。
+ * path3 那一对还是采样的（min3/max3 那一族用它，这一轴上还没有例子踩到）。
  */
-private real[] asy__times(path g, bool wantMax)
-{
-  int n = length(g);
-  real[] t = {0, 0};
-  pair best = point(g, 0.0);
-  int m = n * 32;
-  for (int i = 1; i <= m; ++i) {
-    real ti = n * (i / m);
-    pair z = point(g, ti);
-    if (wantMax ? z.x > best.x : z.x < best.x) { best = (z.x, best.y); t[0] = ti; }
-    if (wantMax ? z.y > best.y : z.y < best.y) { best = (best.x, z.y); t[1] = ti; }
+private struct asy__tbox {
+  real l; real b; real r; real t;
+  real tl; real tb; real tr; real tt;
+}
+// bbox.h:97 的 addnonempty：那个 else if 是照抄的，不是笔误。
+private void asy__tadd(asy__tbox bx, pair z, real u) {
+  if (z.x < bx.l) { bx.l = z.x; bx.tl = u; }
+  else if (z.x > bx.r) { bx.r = z.x; bx.tr = u; }
+  if (z.y < bx.b) { bx.b = z.y; bx.tb = u; }
+  else if (z.y > bx.t) { bx.t = z.y; bx.tt = u; }
+}
+private asy__tbox asy__pathtbox(path g) {
+  asy__tbox bx = new asy__tbox;
+  int nn = g.nodes.length;
+  int len = length(g);
+  pair z = point(g, (real) len);
+  bx.l = z.x; bx.r = z.x; bx.b = z.y; bx.t = z.y;
+  bx.tl = len; bx.tb = len; bx.tr = len; bx.tt = len;
+  for (int i = 0; i < len; ++i) {
+    asy__tadd(bx, point(g, (real) i), i);
+    if (g.nodes[i].straight) continue;
+    int j = i + 1 == nn ? 0 : i + 1;
+    pair p0 = g.nodes[i].point;
+    pair p1 = g.nodes[i].post;
+    pair p2 = g.nodes[j].pre;
+    pair p3 = g.nodes[j].point;
+    for (real u : asy__bezcrit(p0.x, p1.x, p2.x, p3.x)) {
+      if (u < 0.0 || u > 1.0) continue;
+      asy__tadd(bx, point(g, i + u), i + u);
+    }
+    for (real u : asy__bezcrit(p0.y, p1.y, p2.y, p3.y)) {
+      if (u < 0.0 || u > 1.0) continue;
+      asy__tadd(bx, point(g, i + u), i + u);
+    }
   }
-  return t;
+  return bx;
 }
 
-real[] mintimes(path g) { return asy__times(g, false); }
-real[] maxtimes(path g) { return asy__times(g, true); }
+real[] mintimes(path g) {
+  if (g.nodes.length == 0) return new real[] {0, 0};
+  asy__tbox bx = asy__pathtbox(g);
+  return new real[] {bx.tl, bx.tb};
+}
+real[] maxtimes(path g) {
+  if (g.nodes.length == 0) return new real[] {0, 0};
+  asy__tbox bx = asy__pathtbox(g);
+  return new real[] {bx.tr, bx.tt};
+}
+
 
 private real[] asy__times3(path3 g, bool wantMax)
 {
