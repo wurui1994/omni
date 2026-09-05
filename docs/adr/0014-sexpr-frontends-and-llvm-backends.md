@@ -10460,3 +10460,73 @@ V8 自己已经把这两个小函数处理得很好。所以这一轮停在这�
 "这个循环里没人改这个数组"的判据）。
 
 <!-- ADR-0014 界内短路-END -->
+
+## 已落地：strokepath 逐字节对上，textpath 从"结构不同"降到一个数
+
+<!-- ADR-0014 gs 那两条路-BEGIN -->
+
+这两个例子都走"写一份 .ps、让 gs 把路径打印出来、再解析回 path"那条路
+（runlabel.in 的 `showpath` / `readpath`）。三个根因，都是**拿 asy 自己的中间产物当尺子**
+读出来的 —— `asy -k` 会把 `<名>_.ps` / `<名>_.roff` 留在原地，直接 diff。
+
+### 一、笔的状态是全局的，写小 .ps 之前要重置
+
+`asy__strokepathgs` 调 `setpen(p)` 把笔写进那份小 .ps，但 `setpen` 是**增量**的
+（只发与 `lastpen` 不同的那几句），而主图往往刚把同一支笔发过 —— 于是小 .ps 里
+一句 `Setlinewidth` 都没有，gs 拿默认 1.0 线宽算外轮廓：
+
+```
+  第一个点   我们 186.327   参考 199.9976   差 13.67 = 14.17 - 0.5
+```
+
+正是"半个 1cm"换成"半个 1.0"。asy 那边是 `ps.resetpen(); ps.setpen(p);`
+（runlabel.in:436）—— 它开的是一份**新** psfile，`lastpen` 是 `initialpen`，所以每句都发。
+照它把 `lastpen`/`lastvalid` 存取一遍。
+
+顺带撞上第二件：`Setlinewidth` 是**主前言**里定义的过程，小 .ps 没有它，gs 撞 undefined
+直接不出东西（当场量到：整张图只剩 30 个 token）。把那两行定义也写进去。
+改完两份 .ps 的笔块与路径文本逐字相同，gs 的原始输出 **39464 字节逐字节相同**。
+
+### 二、gs 那句提示里的 `c` 不是 closepath
+
+gs 在路径流那一行的末尾还会印一句 `>>showpath, press <return> to continue<<`——
+**"continue" 里的那个 c** 被我们当成了 closepath，把最后一组**未闭合**的节点冲出来，
+多一条子路径。asy 的扫描是 `buf >> c; if(c == '>') break;`（runlabel.in:146），
+一见 `>` 就停，未闭合的那组丢掉（那边注释：*Discard noncyclic paths*）。
+
+判据是把 asy 的状态机在 Python 里照抄一遍跑同一份 gs 输出：
+
+```
+  子路径 524   直线节点 2099   曲线节点 12     <- Python 复现 asy 的算法
+  closepath 524  lineto 2099  curveto 12      <- 参考 EPS 的计数
+  我们改前     525                    16       <- 多的正是那 4 个 C 的未闭合尾巴
+```
+
+**strokepath 于此逐字节对上。**
+
+### 三、`tex=false` 那条路要真的走 groff
+
+plain_Label.asy:660 是 `g = tex ? _texpath(s,p) : textpath(s,p)`，而我们那一格从前直接
+转手 `_texpath` —— `.fam T\n.ps 12` 于是被当成 LaTeX 字体命令、`$ sqrt {x sup 2} $`
+被当成 LaTeX 数学式。照 runlabel.in:355-420 补上（设置见 settings.cc:1951-1957）：
+
+```
+  roff：每个标签四段 —— ".EQ\ndelim $$\n.EN" / 笔的 font 串 / 正文 / ".bp"
+  .ps ：开头是 showpath —— ASYx/ASYy，再把 **stroke 与 fill 两个都**换成"打印当前路径"
+        （-dNoOutputFonts 把字形摊成真路径，走的是 fill 不是 stroke）
+  管子：groff -e -P -b16 … | gs -q -dNoOutputFonts … -sOutputFile=- -   追加到那份 .ps
+  再跑：gs 读那份 .ps，M/L/C/c 按 hscale=0.1 解析
+```
+
+尺子：asy 自己的 `textpath_.roff` 与我们的 `tg.roff` **逐字节相同**；两份 .ps 只差
+`%%Invocation`（asy 多一个 `-dSAFER`）与 `%%CreationDate` 两行注释；各跑一趟 gs，
+路径流 **2370 字节逐字节相同**。
+
+textpath 于是从"结构不同（参考 1662 token、我们 2852）"变成**只有数值差 3 处**，
+而那 3 处是同一个数：一条宽 bar 的下沿，参考 `-65.9638965`、我们 `-76.6883786`。
+两支单独比都对得上（latex 那支 17 条 lineto 首点逐字相同；groff 那支
+`Label("test",fontcommand('.fam T\n.ps 12'))` 整段逐字相同）—— 所以这一个数是**四个
+标签放在一起**时才出的，怀疑在 `stringcache`/`stringlist` 那一批的组成与
+`/ASY1 true def`（原点只在整份 .ps 的第一条路径上记一次）之间。留给下一刀。
+
+<!-- ADR-0014 gs 那两条路-END -->
