@@ -158,7 +158,18 @@ function pullImages(text) {
     let raw = hex ? Buffer.from(data.join('').replace(/[^0-9a-fA-F]/g, ''), 'hex')
       : a85(data.join(''));
     if (flate) { try { raw = inflateSync(raw); } catch { raw = Buffer.alloc(0); } }
-    imgs.push(raw);
+    // 宽高从上面那几行的字典里取（`/Width 396` / `/Height 400`）—— 有了它才能把这一块
+    // 当**图**看（ink 的包围盒、逐像素重合），而不只是一串字节。GPU 参考位图的判据
+    // 是两层的：几何逐字节，像素按容差（见 ADR「位图那 83 个」）。
+    let w = 0;
+    let h = 0;
+    for (let k = out.length - 1; k >= 0 && k > out.length - 20; k--) {
+      const mw = out[k].match(/\/Width\s+(\d+)/);
+      if (mw !== null && w === 0) w = Number(mw[1]);
+      const mh = out[k].match(/\/Height\s+(\d+)/);
+      if (mh !== null && h === 0) h = Number(mh[1]);
+    }
+    imgs.push({ raw, w, h });
     out.push('%IMGDATA');
   }
   const keep = [];
@@ -198,23 +209,59 @@ function a85(s) {
   return Buffer.from(out);
 }
 
+/**
+ * 一块位图的"墨"：非白的像素。GPU 参考那一侧是 PBR 着色、我们这一侧是平色，
+ * 所以**像素值**不可能逐字节对上；能对账的是"哪儿有东西"。
+ */
+function inkmask(g) {
+  const n = g.w * g.h;
+  const m = new Uint8Array(n);
+  const px = g.raw.length >= n * 3 ? 3 : 1;
+  for (let i = 0; i < n; i++) {
+    let dark = false;
+    for (let c = 0; c < px; c++) if (g.raw[i * px + c] < 250) dark = true;
+    m[i] = dark ? 1 : 0;
+  }
+  return m;
+}
+
 /** 两侧的位图逐块比。回 null 表示一样，否则回那句话。 */
 function cmpImages(a, b) {
   if (a.length !== b.length) return `位图块数 ${a.length} vs ${b.length}`;
   for (let k = 0; k < a.length; k++) {
-    if (a[k].length !== b[k].length) {
-      return `第 ${k} 块位图字节数 ${a[k].length} vs ${b[k].length}`;
+    if (a[k].raw.length !== b[k].raw.length) {
+      return `第 ${k} 块位图字节数 ${a[k].raw.length} vs ${b[k].raw.length}`;
     }
     let diff = 0;
     let mx = 0;
     let at = -1;
-    for (let i = 0; i < a[k].length; i++) {
-      const d = Math.abs(a[k][i] - b[k][i]);
+    for (let i = 0; i < a[k].raw.length; i++) {
+      const d = Math.abs(a[k].raw[i] - b[k].raw[i]);
       if (d !== 0) { diff++; if (at < 0) at = i; }
       if (d > mx) mx = d;
     }
     if (diff !== 0) {
-      return `第 ${k} 块位图 ${diff}/${a[k].length} 个字节不同（最大差 ${mx}，首处第 ${at} 个）`;
+      // 容差那一层：ink 的逐像素重合。**"多少个字节不同"不是判据** ——
+      // 量过（billboard）：图从"画错地方"改成"画对地方"时，字节差反而从
+      // 45859 涨到 67378，因为我们开始在参考画的位置上填平色了。
+      let tol = '';
+      if (a[k].w > 0 && a[k].h > 0 && b[k].w === a[k].w && b[k].h === a[k].h) {
+        const A = inkmask(a[k]);
+        const B = inkmask(b[k]);
+        let both = 0;
+        let oa = 0;
+        let ob = 0;
+        for (let i = 0; i < A.length; i++) {
+          if (A[i] === 1 && B[i] === 1) both++;
+          else if (A[i] === 1) oa++;
+          else if (B[i] === 1) ob++;
+        }
+        const pct = oa + both === 0 ? 100 : (both / (oa + both) * 100);
+        tol = `；ink ${a[k].w}x${a[k].h} 重合 ${both}（只有参考 ${oa}、只有我们 ${ob}，`
+          + `盖住参考的 ${pct.toFixed(1)}%）`;
+      }
+      return `第 ${k} 块位图 ${diff}/${a[k].raw.length} 个字节不同`
+        + `（最大差 ${mx}，首处第 ${at} 个）${tol}`;
     }
   }
   return null;
