@@ -1749,12 +1749,6 @@ private real asy__scontrolbound(real[] P, bool mx) {
 // 真要它就得把 `bound/boundtri` 做成**运行时的原生内建**（JS 那一侧），
 // 而不是 asy 层的递归。递归那一版留在下面没人调，等原生版落地时照它搬。
 private real asy__sbound(real[] P, bool mx, real b, real fuzz, int depth) {
-  real bb = asy__rm(mx, b, P[0]);
-  for (int i = 1; i < P.length; ++i) bb = asy__rm(mx, bb, P[i]);
-  return bb;
-}
-
-private real asy__sbound_subdivide(real[] P, bool mx, real b, real fuzz, int depth) {
   real bb = asy__rm(mx, b, asy__scornerbound(P, mx));
   real sgn = mx ? 1 : -1;
   if (sgn * (bb - asy__scontrolbound(P, mx)) >= -fuzz || depth == 0) return bb;
@@ -1802,14 +1796,7 @@ private real asy__scontrolboundtri(real[] P, bool mx) {
 // `Splittri`（bound.h:30）那三十来个中间点在这儿摊开写 —— asy 那边是模板，
 // 我们这一侧没有模板，实数版与 triple 版各写一遍。
 // bound.cc:102 的 boundtri（标量版，十个控制点的三角面片）——
-// 同上，现在走凸包；细分那一版在 `asy__sboundtri_subdivide` 里，没人调。
 private real asy__sboundtri(real[] P, bool mx, real b, real fuzz, int depth) {
-  real bb = asy__rm(mx, b, P[0]);
-  for (int i = 1; i < P.length; ++i) bb = asy__rm(mx, bb, P[i]);
-  return bb;
-}
-
-private real asy__sboundtri_subdivide(real[] P, bool mx, real b, real fuzz, int depth) {
   real bb = asy__rm(mx, b, asy__scornerboundtri(P, mx));
   real sgn = mx ? 1 : -1;
   if (sgn * (bb - asy__scontrolboundtri(P, mx)) >= -fuzz || depth == 0) return bb;
@@ -10419,12 +10406,20 @@ private void asy__addpatch3(frame f, triple[][] P, bool straight)
   real fx = asy__Fuzz * asy__norminf(cx);
   real fy = asy__Fuzz * asy__norminf(cy);
   real fz = asy__Fuzz * asy__norminf(cz);
-  real x = asy__sbound(cx, false, cx[0], fx, asy__rmaxdepth);
-  real X = asy__sbound(cx, true, cx[0], fx, asy__rmaxdepth);
-  real y = asy__sbound(cy, false, cy[0], fy, asy__rmaxdepth);
-  real Y = asy__sbound(cy, true, cy[0], fy, asy__rmaxdepth);
-  real z = asy__sbound(cz, false, cz[0], fz, asy__rmaxdepth);
-  real Z = asy__sbound(cz, true, cz[0], fz, asy__rmaxdepth);
+  // **种子要用帧上已经攒到的界，不是这一片自己的第一个控制点。** asy 那边
+  // `bounds(t, bbox3& b)` 收的就是**累积**的盒子（drawsurface.cc:72），
+  // `bound()` 的终止判据是 `m(-1,1)*(b - controlbound) >= -fuzz` ——
+  // 有了累积的界，绝大多数面片在**第 0 层**就返回了，只有真正撑出界的那几片才细分。
+  // 用这一片自己的点当种子，等于每片都从零开始往下切：量出来 AiryDisk 从 13s 变几十秒。
+  real sx = f.has3 ? f.min3v.x : cx[0]; real sX = f.has3 ? f.max3v.x : cx[0];
+  real sy = f.has3 ? f.min3v.y : cy[0]; real sY = f.has3 ? f.max3v.y : cy[0];
+  real sz = f.has3 ? f.min3v.z : cz[0]; real sZ = f.has3 ? f.max3v.z : cz[0];
+  real x = asy__sbound(cx, false, sx, fx, asy__rmaxdepth);
+  real X = asy__sbound(cx, true, sX, fx, asy__rmaxdepth);
+  real y = asy__sbound(cy, false, sy, fy, asy__rmaxdepth);
+  real Y = asy__sbound(cy, true, sY, fy, asy__rmaxdepth);
+  real z = asy__sbound(cz, false, sz, fz, asy__rmaxdepth);
+  real Z = asy__sbound(cz, true, sZ, fz, asy__rmaxdepth);
   asy__add3(f, (x, y, z));
   asy__add3(f, (X, Y, Z));
 }
@@ -10449,12 +10444,16 @@ private void asy__addtri3(frame f, triple[][] P, bool straight)
   real fx = asy__Fuzz * asy__norminf(cx);
   real fy = asy__Fuzz * asy__norminf(cy);
   real fz = asy__Fuzz * asy__norminf(cz);
-  asy__add3(f, (asy__sboundtri(cx, false, cx[0], fx, asy__rmaxdepth),
-                asy__sboundtri(cy, false, cy[0], fy, asy__rmaxdepth),
-                asy__sboundtri(cz, false, cz[0], fz, asy__rmaxdepth)));
-  asy__add3(f, (asy__sboundtri(cx, true, cx[0], fx, asy__rmaxdepth),
-                asy__sboundtri(cy, true, cy[0], fy, asy__rmaxdepth),
-                asy__sboundtri(cz, true, cz[0], fz, asy__rmaxdepth)));
+  // 种子同上：用帧上累积的界，绝大多数三角面片在第 0 层就返回
+  real sx = f.has3 ? f.min3v.x : cx[0]; real sX = f.has3 ? f.max3v.x : cx[0];
+  real sy = f.has3 ? f.min3v.y : cy[0]; real sY = f.has3 ? f.max3v.y : cy[0];
+  real sz = f.has3 ? f.min3v.z : cz[0]; real sZ = f.has3 ? f.max3v.z : cz[0];
+  asy__add3(f, (asy__sboundtri(cx, false, sx, fx, asy__rmaxdepth),
+                asy__sboundtri(cy, false, sy, fy, asy__rmaxdepth),
+                asy__sboundtri(cz, false, sz, fz, asy__rmaxdepth)));
+  asy__add3(f, (asy__sboundtri(cx, true, sX, fx, asy__rmaxdepth),
+                asy__sboundtri(cy, true, sY, fy, asy__rmaxdepth),
+                asy__sboundtri(cz, true, sZ, fz, asy__rmaxdepth)));
 }
 
 /* Bezier 曲线（runpicture.in:648） */
@@ -10649,15 +10648,7 @@ private real asy__cornerbound(triple[] P, bool mx, int which) {
 
 // path3.cc:803 的 bound（十六个控制点的面片）
 // path3.cc:803 的 bound（十六个控制点的面片，比那一版）——
-// 同上，现在走凸包；细分那一版在 `asy__pbound_subdivide` 里，没人调。
 private real asy__pbound(triple[] P, bool mx, int which, real b, real fuzz, int depth) {
-  real bb = asy__rm(mx, b, asy__rf(which, P[0]));
-  for (int i = 1; i < P.length; ++i) bb = asy__rm(mx, bb, asy__rf(which, P[i]));
-  return bb;
-}
-
-private real asy__pbound_subdivide(triple[] P, bool mx, int which, real b, real fuzz,
-                                   int depth) {
   real bb = asy__rm(mx, b, asy__cornerbound(P, mx, which));
   real sgn = mx ? 1 : -1;
   if (sgn * (bb - asy__ratiobound(P, mx, which)) >= -fuzz || depth == 0) return bb;
@@ -10696,16 +10687,8 @@ private real asy__cornerboundtri(triple[] P, bool mx, int which) {
 
 // path3.cc:860 的 boundtri（十个控制点的三角面片，比那一版）
 // path3.cc:860 的 boundtri（十个控制点的三角面片，比那一版）——
-// 同上，现在走凸包；细分那一版在 `asy__pboundtri_subdivide` 里，没人调。
 private real asy__pboundtri(triple[] P, bool mx, int which, real b, real fuzz,
                             int depth) {
-  real bb = asy__rm(mx, b, asy__rf(which, P[0]));
-  for (int i = 1; i < P.length; ++i) bb = asy__rm(mx, bb, asy__rf(which, P[i]));
-  return bb;
-}
-
-private real asy__pboundtri_subdivide(triple[] P, bool mx, int which, real b,
-                                      real fuzz, int depth) {
   real bb = asy__rm(mx, b, asy__cornerboundtri(P, mx, which));
   real sgn = mx ? 1 : -1;
   if (sgn * (bb - asy__ratiobound(P, mx, which)) >= -fuzz || depth == 0) return bb;
@@ -10924,16 +10907,18 @@ frame operator *(real[][] t, frame f)
     frame b0;
     for (int i = 0; i < s.length; ++i) {
       if (s[i].kind == 0) asy__add3(b0, s[i].g3);
-      else if (s[i].kind == 3) asy__add3(b0, s[i].Q3);
-      else asy__add3(b0, s[i].P3);
+      else if (s[i].kind == 1) asy__addpatch3(b0, s[i].P3, s[i].straight);
+      else if (s[i].kind == 2) asy__addtri3(b0, s[i].P3, s[i].straight);
+      else asy__add3(b0, s[i].Q3);
     }
     if (b0.has3 && b0.min3v == f.min3v && b0.max3v == f.max3v) {
       drawop3[] gs0 = asy__ops3(g);
       frame b1;
       for (int i = 0; i < gs0.length; ++i) {
         if (gs0[i].kind == 0) asy__add3(b1, gs0[i].g3);
-        else if (gs0[i].kind == 3) asy__add3(b1, gs0[i].Q3);
-        else asy__add3(b1, gs0[i].P3);
+        else if (gs0[i].kind == 1) asy__addpatch3(b1, gs0[i].P3, gs0[i].straight);
+        else if (gs0[i].kind == 2) asy__addtri3(b1, gs0[i].P3, gs0[i].straight);
+        else asy__add3(b1, gs0[i].Q3);
       }
       if (b1.has3) { g.min3v = b1.min3v; g.max3v = b1.max3v; }
     }
