@@ -373,6 +373,9 @@ struct pen {
   int basealignval = 0;
   real opacityval = 1;
   string blend = "Compatible";
+  // pen.h:126 的 `Transparency::isdefault`：`a+b` 里 b **设过**透明度才盖住 a
+  // （pen.h:800 那一句 `q.transparency.isdefault ? p.transparency : q.transparency`）。
+  bool transpset = false;
   bool iscmyk = false;
   real cyan = 0;
   real magenta = 0;
@@ -451,6 +454,7 @@ pen pencopy(pen p) {
   q.basealignval = p.basealignval;
   q.opacityval = p.opacityval;
   q.blend = p.blend;
+  q.transpset = p.transpset;
   q.iscmyk = p.iscmyk;
   q.cyan = p.cyan;
   q.magenta = p.magenta;
@@ -631,6 +635,12 @@ pen operator +(pen a, pen b) {
     q.setcolor = true;
   }
   if (b.evenodd) q.evenodd = true;
+  // 透明度照 pen.h:800：右边设过才盖住左边（默认那一格不算"设过"）
+  if (b.transpset) {
+    q.opacityval = b.opacityval;
+    q.blend = b.blend;
+    q.transpset = true;
+  }
   if (b.cap != 1) q.cap = b.cap;
   if (b.join != 1) q.join = b.join;
   if (b.miter != 10) q.miter = b.miter;
@@ -3594,7 +3604,7 @@ int fillrule(pen p) { return p.fillruleval; }
 pen basealign(int n) { pen p; p.basealignval = n; return p; }
 int basealign(pen p = currentpen) { return p.basealignval; }
 pen opacity(real opacity=1.0, string blend="Compatible") {
-  pen p; p.opacityval = opacity; p.blend = blend; return p;
+  pen p; p.opacityval = opacity; p.blend = blend; p.transpset = true; return p;
 }
 real opacity(pen p) { return p.opacityval; }
 pen invisible() { pen p; p.isinvisible = true; return p; }
@@ -8295,6 +8305,8 @@ real[][] asy__r3tup;
 // uniform，帧坐标也已经在视图空间，两边同一套坐标。diffuse 每格是 rgba 四个数。
 triple[] asy__r3lights;
 real[][] asy__r3ldiff;
+// 画布底色（`Light.background()`，没给时是白）。透明那一档要拿它当 dst。
+real[] asy__r3bg = new real[] {1, 1, 1};
 // 真 billboard 那一趟里，op 表头一格的首点（查 m/M 与 op 是不是同一套坐标）
 triple asy__r3op0 = (0, 0, 0);
 int asy__r3nops = 0;
@@ -8350,7 +8362,8 @@ void shipout3(string prefix, frame f, string format="",
     br = (int) (255 * background[0] + 0.5);
     bg = (int) (255 * background[1] + 0.5);
     bb = (int) (255 * background[2] + 0.5);
-  }
+    asy__r3bg = new real[] {background[0], background[1], background[2]};
+  } else asy__r3bg = new real[] {1, 1, 1};
   // 一整张白（或背景色）的十六进制，按倍增拼 —— 44 万个字节的十六进制是 89 万个字符，
   // 一格一格拼是二次的，倍增是 20 次拷贝。gs 那条路走通时这一份只当兜底。
   string px = asy__hex2(br) + asy__hex2(bg) + asy__hex2(bb);
@@ -10191,17 +10204,35 @@ private void asy__merge3hook() {
       else if (ops[0].P3.length > 0 && ops[0].P3[0].length > 0) asy__r3op0 = ops[0].P3[0][0];
     }
     int nink = 0;
-    // 面片（kind == 1/2）先按深度排：视图空间里 z 越负越远，画家算法从远画到近。
-    // 键取 16 个控制点 z 的平均（够用；真 asy 那边是 GPU 的 Z-buffer）。
+    // **所有 op 一起按深度排。** 视图空间里 z 越负越远，画家算法从远画到近；
+    // 键取各自控制点/节点 z 的平均（真 asy 那边是 GPU 的 Z-buffer，glrender.cc:1355
+    // 只开 GL_DEPTH_TEST、没有 polygon offset）。
+    // 原先是"先所有面片、再所有管子、再所有 path3"三趟 —— 那等于把线一律画在最上面，
+    // 于是曲面**背面**的网格线也会透出来（sacylinder3D 那种曲面上压网格的例子里，
+    // 逐像素采样两侧的高频花纹对不上就是这一处）。
+    // 线（kind 0/3）与它贴着的曲面同深度，所以给线一点**朝相机的偏置**：
+    // 与曲面共面的网格线仍在上面，真正被挡住的线（深度差远大于偏置）才被盖掉。
+    // 偏置取整个场景深度跨度的千分之一（glrender 那边靠的是线与三角形光栅化的差别）。
+    real zbias = 0.001 * (M.z - m.z);
+    if (zbias <= 0) zbias = 1e-9;
     int[] idx;
     real[] key;
     for (int i = 0; i < ops.length; ++i) {
-      if (ops[i].kind == 0) continue;
-      triple[][] P = ops[i].P3;
       real zs = 0;
       int cnt = 0;
-      for (int a = 0; a < P.length; ++a)
-        for (int b = 0; b < P[a].length; ++b) { zs = zs + P[a][b].z; cnt = cnt + 1; }
+      if (ops[i].kind == 0) {
+        path3 g = ops[i].g3;
+        for (int a = 0; a < g.nodes.length; ++a) { zs = zs + g.nodes[a].point.z; cnt = cnt + 1; }
+        zs = zs + zbias * cnt;
+      } else if (ops[i].kind == 3) {
+        triple[] Q = ops[i].Q3;
+        for (int a = 0; a < Q.length; ++a) { zs = zs + Q[a].z; cnt = cnt + 1; }
+        zs = zs + zbias * cnt;
+      } else {
+        triple[][] P = ops[i].P3;
+        for (int a = 0; a < P.length; ++a)
+          for (int b = 0; b < P[a].length; ++b) { zs = zs + P[a][b].z; cnt = cnt + 1; }
+      }
       if (cnt == 0) continue;
       idx.push(i);
       key.push(zs / cnt);
@@ -10258,7 +10289,7 @@ private void asy__merge3hook() {
       return (a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
     }
     real mx0(real a) { return a > 0 ? a : 0; }
-    real[] shade(drawop3 o, triple nrm, triple pos) {
+    real[] shadeop(drawop3 o, triple nrm, triple pos) {
       real[] em = o.p.length > 1 ? asy__penrgb(o.p[1]) : new real[] {0, 0, 0};
       if (o.p.length == 0) return new real[] {0, 0, 0};
       if (!o.lightOn || nlt == 0) return em;
@@ -10302,6 +10333,22 @@ private void asy__merge3hook() {
         }
       }
       return c;
+    }
+    // 透明那一档：GL 那边是 source-over（fragment.glsl:245 的 `vec4(color,diffuse.a)`
+    // 加 glrender.cc:1099 那一趟 blend），`alpha*src + (1-alpha)*dst`。
+    // 两侧对照的尺子（一块正对相机的面片）：不透明两侧都是 `1,183,1`，
+    // 加 `opacity(0.5)` 之后参考是 `128,219,128` —— 正好 `0.5*src + 0.5*255`。
+    // **dst 这一层拿不到**：PostScript 没有 alpha，gs 10 的 PS 解释器也不认
+    // `.setfillconstantalpha`（量过，undefined）。所以拿**画布底色**当 dst ——
+    // 底下没别的东西时逐字节对得上，几层透明面叠着时偏保守。
+    real[] shade(drawop3 o, triple nrm, triple pos) {
+      real[] c = shadeop(o, nrm, pos);
+      real al = o.opacity;
+      if (al >= 1) return c;
+      if (al < 0) al = 0;
+      return new real[] {al * c[0] + (1 - al) * asy__r3bg[0],
+                         al * c[1] + (1 - al) * asy__r3bg[1],
+                         al * c[2] + (1 - al) * asy__r3bg[2]};
     }
     // 四个角上的法向照 bezierpatch.h:45 的 `normal()`：一阶 `3(left1-middle) x
     // 3(right1-middle)` 不够就退二阶（bezierPP）、三阶（bezierPPP，triple.h:417/423）。
@@ -10447,8 +10494,51 @@ private void asy__merge3hook() {
         + wc(shade(o, cn[2], Q[3][3])) + wc(shade(o, cn[3], Q[0][3]))
         + " ] >> shfill" + nl;
     }
+    // 管子（kind == 3）与 path3（kind == 0）这两支**也要用各自的笔色**。
+    // 原先这儿是一句 `0 setgray` 把后面全画成黑的 —— 量出来的（/tmp/nl/col.asy：
+    // `draw((0,0,0)--(1,0,0),blue+8)` 与 `red+8`）：参考的位图里是
+    // `0,0,255`×11282 与 `255,0,0`×11128（**平色、不带光照**），我们那边是
+    // `0,0,0`×24123，一片黑。
+    // 着光的那一支（`lightOn`）法向取**朝观察者** —— 管子在 GL 那边是实体，
+    // 退成一条描边之后能给的最接近的形状就是正中那条母线（法向正对相机）。
+    real[] shadeline(drawop3 o, triple pos) {
+      triple vd = ortho ? (0, 0, 1) : -unit(pos);
+      return shade(o, vd, pos);
+    }
     for (int a = 0; a < idx.length; ++a) {
       drawop3 o3 = ops[idx[a]];
+      if (o3.kind == 3) {
+        triple[] Q = o3.Q3;
+        if (Q.length < 2) continue;
+        doc = doc + setrgb(shadeline(o3, Q[Q.length # 2]));
+        pair a0 = pj(Q[0]);
+        doc = doc + ps(a0.x) + " " + ps(a0.y) + " moveto" + nl;
+        for (int k = 1; k < Q.length; ++k) {
+          pair pk = pj(Q[k]);
+          doc = doc + ps(pk.x) + " " + ps(pk.y) + " lineto" + nl;
+        }
+        doc = doc + "stroke" + nl;
+        nink = nink + 1;
+        continue;
+      }
+      if (o3.kind == 0) {
+        path3 g = o3.g3;
+        int n = g.nodes.length;
+        if (n < 2) continue;
+        doc = doc + setrgb(shadeline(o3, g.nodes[n # 2].point));
+        pair a0 = pj(g.nodes[0].point);
+        doc = doc + ps(a0.x) + " " + ps(a0.y) + " moveto" + nl;
+        for (int k = 1; k < n; ++k) {
+          pair c1 = pj(g.nodes[k - 1].post);
+          pair c2 = pj(g.nodes[k].pre);
+          pair pk = pj(g.nodes[k].point);
+          doc = doc + ps(c1.x) + " " + ps(c1.y) + " " + ps(c2.x) + " " + ps(c2.y)
+            + " " + ps(pk.x) + " " + ps(pk.y) + " curveto" + nl;
+        }
+        doc = doc + "stroke" + nl;
+        nink = nink + 1;
+        continue;
+      }
       triple[][] P = o3.P3;
       void edge(triple c1, triple c2, triple e) {
         pair a1 = pj(c1); pair a2 = pj(c2); pair a3 = pj(e);
@@ -10540,49 +10630,6 @@ private void asy__merge3hook() {
         cur = nxt;
       }
       for (int i = 0; i < cur.length; ++i) doc = doc + sh7(o3, cur[i]);
-      nink = nink + 1;
-    }
-    // 管子（kind == 3）与 path3（kind == 0）这两支**也要用各自的笔色**。
-    // 原先这儿是一句 `0 setgray` 把后面全画成黑的 —— 量出来的（/tmp/nl/col.asy：
-    // `draw((0,0,0)--(1,0,0),blue+8)` 与 `red+8`）：参考的位图里是
-    // `0,0,255`×11282 与 `255,0,0`×11128（**平色、不带光照**），我们那边是
-    // `0,0,0`×24123，一片黑。
-    // 着光的那一支（`lightOn`）法向取**朝观察者** —— 管子在 GL 那边是实体，
-    // 退成一条描边之后能给的最接近的形状就是正中那条母线（法向正对相机）。
-    real[] shadeline(drawop3 o, triple pos) {
-      triple vd = ortho ? (0, 0, 1) : -unit(pos);
-      return shade(o, vd, pos);
-    }
-    for (int i = 0; i < ops.length; ++i) {
-      if (ops[i].kind != 3) continue;
-      triple[] Q = ops[i].Q3;
-      if (Q.length < 2) continue;
-      doc = doc + setrgb(shadeline(ops[i], Q[Q.length # 2]));
-      pair a0 = pj(Q[0]);
-      doc = doc + ps(a0.x) + " " + ps(a0.y) + " moveto" + nl;
-      for (int k = 1; k < Q.length; ++k) {
-        pair pk = pj(Q[k]);
-        doc = doc + ps(pk.x) + " " + ps(pk.y) + " lineto" + nl;
-      }
-      doc = doc + "stroke" + nl;
-      nink = nink + 1;
-    }
-    for (int i = 0; i < ops.length; ++i) {
-      if (ops[i].kind != 0) continue;
-      path3 g = ops[i].g3;
-      int n = g.nodes.length;
-      if (n < 2) continue;
-      doc = doc + setrgb(shadeline(ops[i], g.nodes[n # 2].point));
-      pair a0 = pj(g.nodes[0].point);
-      doc = doc + ps(a0.x) + " " + ps(a0.y) + " moveto" + nl;
-      for (int k = 1; k < n; ++k) {
-        pair c1 = pj(g.nodes[k - 1].post);
-        pair c2 = pj(g.nodes[k].pre);
-        pair pk = pj(g.nodes[k].point);
-        doc = doc + ps(c1.x) + " " + ps(c1.y) + " " + ps(c2.x) + " " + ps(c2.y)
-          + " " + ps(pk.x) + " " + ps(pk.y) + " curveto" + nl;
-      }
-      doc = doc + "stroke" + nl;
       nink = nink + 1;
     }
     doc = doc + "showpage" + nl + "%%EOF" + nl;

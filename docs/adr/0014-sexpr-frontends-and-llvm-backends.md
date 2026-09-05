@@ -11703,6 +11703,30 @@ sacylinder3D 的字节数没动，但它的 ink 满了 —— 逐像素采样看
 （那个例子的曲面上还压着网格线），差的不再是着色公式，而是画家算法与 Z-buffer 在互相
 穿插的几何上的次序。这一格留给下一刀。
 
+### 十一、次序与透明
+
+**(a) 所有 op 一起排深度。** 原先是"先所有面片、再所有管子、再所有 path3"三趟 ——
+那等于把线一律画在最上面，曲面**背面**的网格线也会透出来。改成一趟统一排序，
+线（kind 0/3）加一点朝相机的偏置（场景深度跨度的千分之一）：与曲面共面的网格线仍在
+上面，真正被挡住的才被盖掉。cylinder 92782 -> 91298。
+
+**(b) 透明照 source-over 做。** 两侧对照的尺子最省事：同一块正对相机的面片，
+不透明两边都是 `1,183,1`；加 `opacity(0.5)` 之后参考是 `128,219,128` ——
+正好 `0.5*src + 0.5*255`（fragment.glsl:245 的 `vec4(color,diffuse.a)` 加
+glrender.cc:1099 那一趟 blend）。
+
+先补的是**笔上那一格**：`opacity(0.5)` 造出来的透明度过不了 `+`。
+pen.h:126 的 `Transparency::isdefault` 我们没有，于是 pen.h:800 那句
+`q.transparency.isdefault ? p.transparency : q.transparency` 无从照做 ——
+`opacity(green+opacity(0.5))` 量出来是 1，整条透明的路根本没启动。加了 `transpset`
+之后 material.opacity 就对了。
+
+dst 这一层拿不到（PostScript 没有 alpha，gs 10 的 PS 解释器也不认
+`.setfillconstantalpha`，量过是 undefined），所以拿**画布底色**当 dst：底下没别的东西时
+逐字节对得上（上面那把尺子两侧都是 `128,219,128`），几层透明面叠着时偏保守。
+sacylinder3D（`lightgreen+opacity(0.5)` 的圆柱）265451 -> **234214**。
+
+
 
 
 
