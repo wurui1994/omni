@@ -270,7 +270,11 @@ transform rotate(real angle) {
   return xform(0, 0, c, -s, s, c);
 }
 
-// 作用在点上；先摆出来是因为绕点旋转要用它
+// 作用在点上；先摆出来是因为绕点旋转要用它。
+// **量过一次、退回来了**：参考那份 asy 的这一句（transform.h:71）被 clang 合成了 4 条
+// fmadd（`clang++ -O2 -S` 单独编这一句就能看到），照它换成精确 fma（Dekker）之后
+// laserlattice 的帧 min.x **一个 bit 都没动**（还是 -146.6010968244085 对参考的
+// …847）—— 那个 ulp 不在这一句上。别再从这里试。
 pair operator *(transform t, pair p) {
   return (t.x + t.xx * p.x + t.xy * p.y, t.y + t.yx * p.x + t.yy * p.y);
 }
