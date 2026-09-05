@@ -10894,9 +10894,19 @@ NURBS / 球柱盘管，各带自己的材质），`asy__add3` 退回去只管界
 
 **下一刀的活**：拿这个把第 0 步的 op 表投影成 2D（面片按控制点投影后细分，
 路径按结点+控制点投影），按深度排一遍（画家算法，先不做 Z-buffer），
-发一份 `oW x oH` 的临时 EPS，交给
-`gs -q -dNOPAUSE -dBATCH -sDEVICE=ppmraw -g<fullW>x<fullH> -r<72*expand>`
-出 P6，读回字节塞进 `kind == 7` 那一格。billboard 那 0.5% 就是这条路量出来的。
+发一份 `oW x oH` 的临时 EPS，交给 gs 出像素，读回字节塞进 `kind == 7` 那一格。
+billboard 那 0.5% 就是这条路量出来的。
+
+**管子这一段已经齐了，不用给宿主加新原语**（这一趟查清的）：
+`_writetext(path, text)` 写临时文件、`_runproc(cmd)` 起进程、`_readtext(path)` 读回来
+—— 这三样 `asy__strokepathgs` / `_texpath` / `asy__textpathgroff` 已经在用。
+唯一的坎是 `_readtext` 只能读文本，而 `ppmraw` 是二进制；**改用
+`-sDEVICE=ppm`**（P3，十进制 ASCII）就绕过去了，代价是文件大三四倍、多一步解十进制：
+
+```
+  gs -q -dNOPAUSE -dBATCH -sDEVICE=ppm -g<fullW>x<fullH> -r<72*expand> \
+     -sOutputFile=r.ppm r.eps
+```
 
 ### 九、下一刀的顺序（修正后）
 
