@@ -9902,7 +9902,52 @@ private void asy__merge3hook() {
       + "%%BoundingBox: 0 0 " + string(oW) + " " + string(oH) + nl
       + "%%EndComments" + nl + "0.5 setlinewidth 1 setlinecap 1 setlinejoin" + nl;
     drawop3[] ops = asy__ops3(f);
-    int nstroke = 0;
+    int nink = 0;
+    // 面片（kind == 1/2）先按深度排：视图空间里 z 越负越远，画家算法从远画到近。
+    // 键取 16 个控制点 z 的平均（够用；真 asy 那边是 GPU 的 Z-buffer）。
+    int[] idx;
+    real[] key;
+    for (int i = 0; i < ops.length; ++i) {
+      if (ops[i].kind == 0) continue;
+      triple[][] P = ops[i].P3;
+      real zs = 0;
+      int cnt = 0;
+      for (int a = 0; a < P.length; ++a)
+        for (int b = 0; b < P[a].length; ++b) { zs = zs + P[a][b].z; cnt = cnt + 1; }
+      if (cnt == 0) continue;
+      idx.push(i);
+      key.push(zs / cnt);
+    }
+    for (int a = 1; a < idx.length; ++a) {
+      int ii = idx[a]; real kk = key[a];
+      int b = a - 1;
+      while (b >= 0 && key[b] > kk) { idx[b + 1] = idx[b]; key[b + 1] = key[b]; b = b - 1; }
+      idx[b + 1] = ii; key[b + 1] = kk;
+    }
+    // 面片：把边界那四条三次曲线投出来填平色。**平色不是着色** —— 真 asy 那边是
+    // PBR 的片元着色，这一刀只把"哪儿有东西、什么颜色"落到位图上。
+    for (int a = 0; a < idx.length; ++a) {
+      drawop3 o3 = ops[idx[a]];
+      triple[][] P = o3.P3;
+      if (P.length < 4 || P[0].length < 4) continue;
+      int[] rgb = o3.p.length > 0 ? asy__pixrgb(o3.p[0]) : new int[] {0, 0, 0};
+      doc = doc + ps(rgb[0] / 255) + " " + ps(rgb[1] / 255) + " " + ps(rgb[2] / 255)
+        + " setrgbcolor" + nl;
+      pair q00 = pj(P[0][0]);
+      doc = doc + ps(q00.x) + " " + ps(q00.y) + " moveto" + nl;
+      void edge(triple c1, triple c2, triple e) {
+        pair a1 = pj(c1); pair a2 = pj(c2); pair a3 = pj(e);
+        doc = doc + ps(a1.x) + " " + ps(a1.y) + " " + ps(a2.x) + " " + ps(a2.y)
+          + " " + ps(a3.x) + " " + ps(a3.y) + " curveto" + nl;
+      }
+      edge(P[0][1], P[0][2], P[0][3]);
+      edge(P[1][3], P[2][3], P[3][3]);
+      edge(P[3][2], P[3][1], P[3][0]);
+      edge(P[2][0], P[1][0], P[0][0]);
+      doc = doc + "closepath fill" + nl;
+      nink = nink + 1;
+    }
+    doc = doc + "0 setgray" + nl;
     for (int i = 0; i < ops.length; ++i) {
       if (ops[i].kind != 0) continue;
       path3 g = ops[i].g3;
@@ -9918,13 +9963,20 @@ private void asy__merge3hook() {
           + " " + ps(pk.x) + " " + ps(pk.y) + " curveto" + nl;
       }
       doc = doc + "stroke" + nl;
-      nstroke = nstroke + 1;
+      nink = nink + 1;
     }
     doc = doc + "showpage" + nl + "%%EOF" + nl;
-    if (nstroke == 0) return "";
+    if (nink == 0) return "";
     // P6 的头是 `P6\n<w> <h>\n255\n`，长度按实际数字位数算；`xxd -p | tr -d` 那一步
     // 让 shell 把字节转成 ASCII —— `_readtext` 是按 utf8 读的，二进制读不回来。
-    string dir = ".omni-cache/r3";
+    // 中间产物放**绝对路径**下（与 asy__dimfile 的 /tmp/omni-asytex 同一条理由）。
+    // **这一刀还是没渲出来**，量出来的：/tmp/omni-r3 压根没建起来，也就是这个函数
+    // 走到这儿之前就 return 了 —— `nink == 0`，op 表是空的。原因已经定位：
+    // three.asy:2883 有一句 `if(P.absolute) f=modelview*f`，**帧的变换算子**（t*f）
+    // 会造一张新帧，而这一刀只在 `add`/`prepend` 里搬了 op 表，变换那一处没搬 ——
+    // 于是传进 shipout3 的那张帧上一格 op 都没有。下一刀先补那一处（搬的时候
+    // 还要把变换作用到几何上），这一段才能真的跑起来。
+    string dir = "/tmp/omni-r3";
     string hdr = "P6" + nl + string(fw) + " " + string(fh) + nl + "255" + nl;
     int skip = length(hdr);
     if (_runproc("mkdir -p " + dir + " && rm -f " + dir + "/r3.*") != 0) return "";
