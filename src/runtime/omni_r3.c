@@ -904,9 +904,19 @@ omni_str omni_r3_render(omni_str path) {
   S.res = 0;
 
   r3tris tris; memset(&tris, 0, sizeof tris);
-  /* 材质表：清单里每条 mat 存一格，后面的图元指到最近那一格 */
+  /* 材质表：清单里每条 mat 存一格，后面的图元指到最近那一格。
+   * **容量在解析前一次算好，之后绝不 realloc** —— 图元里存的是 `const r3mat *`，
+   * 一 realloc 全部变成野指针。量到过的后果（cylinder）：5053 条 mat 让数组搬了十几次，
+   * 早先的三角于是读到垃圾 alpha，8896 片里 2942 片被当成透明的，整个圆柱几乎不见
+   * （ink 只剩 4.4%）。所以先数一遍有多少条 mat。 */
   r3mat *mats = NULL;
-  size_t nmat = 0, matcap = 0;
+  size_t nmat = 0, matcap = 1;
+  for (const char *q = text; q < L.end; ++q)
+    if ((q == text || q[-1] == '\n') && q + 3 < L.end
+        && q[0] == 'm' && q[1] == 'a' && q[2] == 't' && (q[3] == ' ' || q[3] == '\t'))
+      matcap++;
+  mats = (r3mat *) malloc(matcap * sizeof(r3mat));
+  if (!mats) { free(text); return omni_str_new((char *) "", 0); }
   /* 线段（曲线在 C 这边细分，见 r3_add_bez） */
   r3lines lns; memset(&lns, 0, sizeof lns);
 
@@ -950,12 +960,7 @@ omni_str omni_r3_render(omni_str path) {
       }
     } else if (strcmp(kw, "mat") == 0) {
       double v[14]; if (!r3_nums(&L, v, 14)) { ok = 0; break; }
-      if (nmat + 1 > matcap) {
-        size_t cap = matcap == 0 ? 32 : matcap * 2;
-        r3mat *nm = (r3mat *) realloc(mats, cap * sizeof(r3mat));
-        if (!nm) { ok = 0; break; }
-        mats = nm; matcap = cap;
-      }
+      if (nmat + 1 > matcap) { ok = 0; break; }   /* 容量在解析前一次算好，见下面那段 */
       r3mat *M = mats + nmat++;
       memset(M, 0, sizeof *M);
       for (int i = 0; i < 4; ++i) M->diffuse[i] = v[i];
@@ -1043,6 +1048,15 @@ omni_str omni_r3_render(omni_str path) {
         if (pass == 0)
           for (size_t i = 0; i + 1 < lns.n; i += 2)
             r3_raster_line(&S, &fb, lns.p[i], lns.p[i + 1], lns.mat[i / 2]);
+      }
+      /* 量口：`OMNI_R3_DEBUG=1` 时把三角/线段/透明片元的条数印到 stderr。
+       * 只有这一处对外说话 —— 三维那一档出问题时先看这三个数。 */
+      if (getenv("OMNI_R3_DEBUG")) {
+        size_t ntr = tris.n / 3, ntrans = 0;
+        for (size_t i = 0; i + 2 < tris.n; i += 3)
+          if (tris.mat[i / 3]->diffuse[3] < 1.0) ntrans++;
+        fprintf(stderr, "r3: %dx%d 三角 %zu（透明 %zu）线段 %zu 片元 %zu\n",
+                S.fw, S.fh, ntr, ntrans, lns.n / 2, fb.nfrag);
       }
       /* 透明片元按深度**由远到近** source-over 盖到不透明层上（每个采样点各自一条链） */
       if (fb.nfrag > 0) {
