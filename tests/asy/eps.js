@@ -335,7 +335,12 @@ function mine(p) {
   // 例子自己 `shipout("名字")` 落下来的那几份（asy 的规矩，见 ADR-0014）跑完就地擦掉，
   // 别留在仓库里。
   const before = new Set(readdirSync(ROOT));
-  const r = spawnSync('node', [join(ROOT, 'src', 'core', 'cli.js'), 'run', p],
+  // 走哪条腿：默认 `run`（JS 宿主）。三维那一档的光栅化器在 C 运行时里
+  // （runtime/omni_r3.c，ADR-0014"三维那一档换路"那一节），所以要量三维就得
+  // `OMNI_EPS_LEG=run-c`；JS 那三条腿上 `(r3render …)` 回空串、走 gs 那条旧路。
+  const leg = process.env.OMNI_EPS_LEG === undefined || process.env.OMNI_EPS_LEG === ''
+    ? 'run' : process.env.OMNI_EPS_LEG;
+  const r = spawnSync('node', [join(ROOT, 'src', 'core', 'cli.js'), leg, p],
     { cwd: ROOT, env, encoding: 'utf8', timeout: LIMIT, maxBuffer: 1 << 28 });
   for (const f of readdirSync(ROOT)) {
     if (before.has(f)) continue;
