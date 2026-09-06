@@ -53,6 +53,22 @@ char *omni_arena_end = NULL;
 
 #define OMNI_BLOCK_MIN ((size_t)1 << 20)  /* 1 MiB：小到不浪费，大到几乎不触发慢路径 */
 
+/* 量口（`OMNI_MEM_DEBUG=1`）：退出时印"一共开了多少块、多少字节"。
+ * arena 永不回收，所以"申请了多少"就是峰值 —— 三维那一族在 run-c 上被 OOM 杀掉时
+ * （量到过：BezierPatch 7.6s 申请 43GB），先看这两个数落在哪一档。
+ * 平时一个原子变量都不加：计数只在开新块那条慢路径上动，热路径（bump 指针）一个字不改。 */
+static size_t omni_arena_nblock = 0;
+static size_t omni_arena_bytes = 0;
+static int omni_arena_reported = 0;
+
+static void omni_arena_report(void) {
+  if (omni_arena_reported) return;
+  omni_arena_reported = 1;
+  fprintf(stderr, "omni_mem: arena 块 %zu、字节 %zu（%.1f MiB）\n",
+          omni_arena_nblock, omni_arena_bytes,
+          (double) omni_arena_bytes / (double) (1u << 20));
+}
+
 /* 开一个新块。请求超过块大小时按请求开（大数组也走 arena，不另设 large-object 路径）。 */
 static void omni_arena_new_block(size_t n) {
   size_t cap = n + OMNI_ALIGN > OMNI_BLOCK_MIN ? n + OMNI_ALIGN : OMNI_BLOCK_MIN;
@@ -65,6 +81,21 @@ static void omni_arena_new_block(size_t n) {
   omni_arena_head = b;  /* 保持全局可达，LeakSanitizer 才不会把它当泄漏 */
   omni_arena_ptr = base;
   omni_arena_end = base + cap;
+  if (omni_arena_nblock == 0 && getenv("OMNI_MEM_DEBUG")) atexit(omni_arena_report);
+  omni_arena_nblock++;
+  omni_arena_bytes += cap;
+  /* `OMNI_MEM_DEBUG=2`：每翻一倍就印一行。被 SIGKILL（OOM）打死时 atexit 不会跑，
+   * 只有这条能看出"涨到哪一档"—— 三维那一族就是这么量出来的。 */
+  {
+    static size_t next = OMNI_BLOCK_MIN * 16;
+    if (omni_arena_bytes >= next) {
+      const char *d = getenv("OMNI_MEM_DEBUG");
+      if (d && d[0] == '2')
+        fprintf(stderr, "omni_mem: %.0f MiB（块 %zu）\n",
+                (double) omni_arena_bytes / (double) (1u << 20), omni_arena_nblock);
+      next *= 2;
+    }
+  }
 }
 
 void *omni_alloc_slow(size_t n) {
