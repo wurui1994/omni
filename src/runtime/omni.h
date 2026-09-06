@@ -102,6 +102,13 @@ void *omni_nullck(void *p);
    所以尺寸只能由知道它的容器代码传进来。语义等价于 realloc。 */
 void *omni_grow(void *p, size_t oldBytes, size_t newBytes);
 
+/* arena 的"作用域"：mark 记下当前位置，release 把之后开的块整块还回去。
+   **契约**：release 之后那一段里分配的东西一律不能再碰 —— 只用在"回标量"的地方
+   （asy 的面片求界就是：四叉递归、每层新建 15 个数组、最后只回一个 real）。
+   嵌套用栈（上限 64），满了 mark 回 -1、release 什么都不做（退化成永不回收）。 */
+int64_t omni_arena_mark(void);
+int64_t omni_arena_release(int64_t mark);
+
 /* ---------------------------------------------------------------- 分配器
  * arena（bump 指针）。理由见 omni_mem.c 的文件头。分配是整个运行时最热的函数，
  * 所以快路径必须内联；慢路径（开新块）在 .c 里。
@@ -173,8 +180,7 @@ omni_str omni_get_env(omni_str name);
 int64_t omni_write_text(omni_str path, omni_str text);
 /* `(runproc CMD)`：`/bin/sh -c CMD`，回退出码（跑不起来也回非 0，不报错） */
 int64_t omni_run_proc(omni_str cmd);
-/* `(r3render PATH)`：读一份三维场景清单，光栅化成位图，回十六进制的 RGB 字节
-   （读不到或清单不合格回空串）。实现在 omni_r3.c —— 照 reference 的
+/* `(r3render PATH)`：读一份三维场景清单，光栅化成位图，回十六进制的 RGB 字节   （读不到或清单不合格回空串）。实现在 omni_r3.c —— 照 reference 的
    renderBase.cc / glrender.cc / tile.h 与 base/shaders 下的两份 glsl 转写。 */
 omni_str omni_r3_render(omni_str path);
 

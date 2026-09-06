@@ -777,6 +777,23 @@ export function asyCall(L, n) {
   // `_r3render(path)`：方言的 `(r3render PATH)` —— 三维那一档的光栅化。把一份场景清单
   // 交给运行时（runtime/omni_r3.c 照 reference 的 glrender.cc/renderBase.cc 与两份 glsl
   // 转写），回十六进制的 RGB 字节。回空串表示这条腿上没有光栅化器（JS 宿主那三条）。
+  // `_arenamark()` / `_arenarelease(m)`：分配器的作用域（方言的 `(arenamark)` /
+  // `(arenarelease E)`）。**只许用在"回标量"的地方** —— release 之后那一段里分配的
+  // 东西一律不能再碰。库里现在只有面片求界那一处用它（四叉递归、每层新建 15 个数组，
+  // 最后只回一个 real；不圈的话 BezierPatch 在 run-c 上堆到 32 GiB 被 OOM 杀掉）。
+  if (nm === '_arenamark' || nm === '_arenarelease') {
+    const raw = asyCallArgs(L, n);
+    if (raw === null) return null;
+    const want = nm === '_arenamark' ? 0 : 1;
+    if (raw.length !== want) {
+      return L.err(n, `'${nm}' 要 ${want} 个实参，给了 ${raw.length} 个`);
+    }
+    if (want === 0) return { code: '(arenamark)', type: 'int' };
+    if (raw[0].lines !== null) for (const s of raw[0].lines) L.pre.push(s);
+    const v = L.coerce(raw[0].v, 'int', raw[0].node, `'${nm}' 的实参`);
+    if (v === null) return null;
+    return { code: `(arenarelease ${v.code})`, type: 'int' };
+  }
   if (nm === '_r3render') {
     const raw = asyCallArgs(L, n);
     if (raw === null) return null;

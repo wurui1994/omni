@@ -1058,6 +1058,9 @@ export function applyBuiltin(I, e, a) {
     // 回空串 = "这儿没有光栅化器"，调用方（asy 侧的 asy__r3hexfn）会走 gs 那条旧路。
     // 等 C 那份定稿再照抄成 JS，届时两边要逐字节对上。
     case 'r3_render': return '';
+    // arena 的作用域：这条腿（JS 宿主）有 GC，是空操作
+    case 'arena_mark': return -1n;
+    case 'arena_release': return 0n;
     // `(getenv E)`：读宿主的一格环境设置。没设就是空串 —— 三条腿一份语义
     // （$get_env / omni_get_env）。asy 的输出格式走的是这一格（ADR-0015）。
     case 'get_env': {

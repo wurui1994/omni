@@ -1786,6 +1786,11 @@ private real asy__sbound(real[] P, bool mx, real b, real fuzz, int depth) {
   real bb = asy__rm(mx, b, asy__scornerbound(P, mx));
   real sgn = mx ? 1 : -1;
   if (sgn * (bb - asy__scontrolbound(P, mx)) >= -fuzz || depth == 0) return bb;
+  // **每一层自己圈一格作用域**：这一层新建的 15 个数组在四个子调用回来之后就死了，
+  // 而子调用回的只是一个 real。不圈在这儿而圈在外面没用 —— 一次顶层调用自己就要
+  // 递归十几层、几百万次，垃圾是**在调用里**堆起来的（量到过：BezierPatch 那份
+  // 退化面片在 run-c 上堆到 32 GiB 被 OOM 杀掉）。圈上之后活着的只有 O(深度) 份。
+  int mk = _arenamark();
   int d = depth - 1;
   real fz = fuzz * 2;
   real[] c0 = asy__splitr(P[0], P[1], P[2], P[3]);
@@ -1810,7 +1815,9 @@ private real asy__sbound(real[] P, bool mx, real b, real fuzz, int depth) {
   bb = asy__sbound(s2, mx, bb, fz, d);
   real[] s3 = {c7[5], c8[5], c9[5], c10[5], c7[3], c8[3], c9[3], c10[3],
                c7[0], c8[0], c9[0], c10[0], c3[5], c3[4], c3[2], P[15]};
-  return asy__sbound(s3, mx, bb, fz, d);
+  real r = asy__sbound(s3, mx, bb, fz, d);
+  _arenarelease(mk);
+  return r;
 }
 
 // bound.cc:88 / :93（三角面片：三个角是 0/6/9，另外七个是控制点）
@@ -10922,12 +10929,18 @@ private void asy__addpatch3(frame f, triple[][] P, bool straight)
   real sx = f.has3 ? f.min3v.x : cx[0]; real sX = f.has3 ? f.max3v.x : cx[0];
   real sy = f.has3 ? f.min3v.y : cy[0]; real sY = f.has3 ? f.max3v.y : cy[0];
   real sz = f.has3 ? f.min3v.z : cz[0]; real sZ = f.has3 ? f.max3v.z : cz[0];
+  // 求界这一段**圈进分配器的作用域**：`asy__sbound` 是四叉递归、每层新建 15 个
+  // `real[]`，回的却只是一个 real（什么都不逃逸）。不圈的话 C 那条腿上（arena 永不
+  // 回收）BezierPatch 那份退化面片会堆到 32 GiB 被 OOM 杀掉；JS 那三条腿有 GC，
+  // `_arenamark` 回 -1、`_arenarelease` 是空操作。
+  int mk = _arenamark();
   real x = asy__sbound(cx, false, sx, fx, asy__rmaxdepth);
   real X = asy__sbound(cx, true, sX, fx, asy__rmaxdepth);
   real y = asy__sbound(cy, false, sy, fy, asy__rmaxdepth);
   real Y = asy__sbound(cy, true, sY, fy, asy__rmaxdepth);
   real z = asy__sbound(cz, false, sz, fz, asy__rmaxdepth);
   real Z = asy__sbound(cz, true, sZ, fz, asy__rmaxdepth);
+  _arenarelease(mk);
   asy__add3(f, (x, y, z));
   asy__add3(f, (X, Y, Z));
 }
@@ -10956,12 +10969,17 @@ private void asy__addtri3(frame f, triple[][] P, bool straight)
   real sx = f.has3 ? f.min3v.x : cx[0]; real sX = f.has3 ? f.max3v.x : cx[0];
   real sy = f.has3 ? f.min3v.y : cy[0]; real sY = f.has3 ? f.max3v.y : cy[0];
   real sz = f.has3 ? f.min3v.z : cz[0]; real sZ = f.has3 ? f.max3v.z : cz[0];
-  asy__add3(f, (asy__sboundtri(cx, false, sx, fx, asy__rmaxdepth),
-                asy__sboundtri(cy, false, sy, fy, asy__rmaxdepth),
-                asy__sboundtri(cz, false, sz, fz, asy__rmaxdepth)));
-  asy__add3(f, (asy__sboundtri(cx, true, sX, fx, asy__rmaxdepth),
-                asy__sboundtri(cy, true, sY, fy, asy__rmaxdepth),
-                asy__sboundtri(cz, true, sZ, fz, asy__rmaxdepth)));
+  // 同上：求界这一段圈进分配器的作用域（回的都是 real，什么都不逃逸）
+  int mk = _arenamark();
+  triple lo = (asy__sboundtri(cx, false, sx, fx, asy__rmaxdepth),
+               asy__sboundtri(cy, false, sy, fy, asy__rmaxdepth),
+               asy__sboundtri(cz, false, sz, fz, asy__rmaxdepth));
+  triple hi = (asy__sboundtri(cx, true, sX, fx, asy__rmaxdepth),
+               asy__sboundtri(cy, true, sY, fy, asy__rmaxdepth),
+               asy__sboundtri(cz, true, sZ, fz, asy__rmaxdepth));
+  _arenarelease(mk);
+  asy__add3(f, lo);
+  asy__add3(f, hi);
 }
 
 /* Bezier 曲线（runpicture.in:648） */

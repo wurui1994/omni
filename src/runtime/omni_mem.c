@@ -40,6 +40,10 @@ void *omni_grow(void *p, size_t oldBytes, size_t newBytes) {
   return q;
 }
 
+/* ASan 那条路上没有 arena，mark/release 就是空操作（回 -1，release 什么都不做）。 */
+int64_t omni_arena_mark(void) { return -1; }
+int64_t omni_arena_release(int64_t m) { (void)m; return 0; }
+
 #else
 
 typedef struct omni_arena_block {
@@ -101,6 +105,46 @@ static void omni_arena_new_block(size_t n) {
 void *omni_alloc_slow(size_t n) {
   omni_arena_new_block(n);
   return omni_alloc(n);
+}
+
+/* ------------------------------------------------------------------ mark/release
+ * arena 本来"永不单独释放"，代价是**回标量的深递归**会把垃圾一路堆上去：
+ * 量到过 —— asy 的面片求界（asy__sbound，四叉递归、每层新建 15 个数组）在
+ * BezierPatch 上堆到 32 GiB 被 OOM 杀掉，而同一份代码在 JS 腿上有 GC 就没事。
+ * 所以开一格"作用域"：mark 记下当前位置，release 把之后开的块整块还回去。
+ * **契约**：release 之后，那一段里分配的东西一律不能再碰 —— 只用在"回标量"的地方
+ * （asy__sbound 回一个 real，什么都不逃逸）。嵌套用栈，满了就退化成"不回收"（回 -1）。*/
+typedef struct {
+  omni_arena_block *head;
+  char *ptr;
+  char *end;
+} omni_arena_savepoint;
+
+#define OMNI_MARK_MAX 64
+static omni_arena_savepoint omni_marks[OMNI_MARK_MAX];
+static int omni_nmark = 0;
+
+int64_t omni_arena_mark(void) {
+  if (omni_nmark >= OMNI_MARK_MAX) return -1;
+  omni_marks[omni_nmark].head = omni_arena_head;
+  omni_marks[omni_nmark].ptr = omni_arena_ptr;
+  omni_marks[omni_nmark].end = omni_arena_end;
+  return (int64_t)(omni_nmark++);
+}
+
+int64_t omni_arena_release(int64_t m) {
+  if (m < 0 || m >= (int64_t)omni_nmark) return 0;
+  omni_arena_savepoint *k = &omni_marks[(int)m];
+  while (omni_arena_head != k->head) {
+    omni_arena_block *b = omni_arena_head;
+    omni_arena_head = b->next;
+    free(b->base);
+    free(b);
+  }
+  omni_arena_ptr = k->ptr;
+  omni_arena_end = k->end;
+  omni_nmark = (int)m;
+  return 0;
 }
 
 char *omni_alloc_bytes_slow(int64_t n) {

@@ -1817,6 +1817,25 @@ class CoreLowerer {
       }
       return { kind: 'Builtin', name: 'r3_render', args: [c], argType: STRING, type: STRING };
     }
+    // `(arenamark)` / `(arenarelease E)`：分配器的"作用域"。C 那条腿是 arena
+    // （bump 指针、永不单独释放），于是**回标量的深递归**会把垃圾一路堆上去 ——
+    // 量到过：asy 的面片求界（四叉递归、每层新建 15 个数组）在 BezierPatch 上堆到
+    // 32 GiB 被 OOM 杀掉，而同一份代码在 JS 腿上有 GC 就没事。
+    // **契约**：release 之后，那一段里分配的东西一律不能再碰 —— 只许用在"回标量"处。
+    // JS 那三条腿是空操作（mark 回 -1）。
+    if (h === 'arenamark') {
+      if (n.items.length !== 1) return this.err(n, '(arenamark)');
+      return { kind: 'Builtin', name: 'arena_mark', args: [], argType: INT, type: INT };
+    }
+    if (h === 'arenarelease') {
+      if (n.items.length !== 2) return this.err(n, '(arenarelease E)');
+      const c = this.expr(n.items[1]);
+      if (c === null) return null;
+      if (c.type.k !== 'int') {
+        return this.err(n.items[1], `(arenarelease E) 的参数要是 int，这里是 ${coreTypeText(c.type)}`);
+      }
+      return { kind: 'Builtin', name: 'arena_release', args: [c], argType: INT, type: INT };
+    }
     // `(toreal E)` / `(toint E)`：int <-> real 的**显式**转换。同一条纪律：类型不推导、
     // 不插隐式转换，所以两个方向都得写出来。OIR 侧两个都是现成的（Cast int->real、
     // trunc real->int），方言这边原先没开口 —— 而 asy 的 `1/3` 是实数除法、`(int) 3.7`
