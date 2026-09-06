@@ -48,6 +48,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* ------------------------------------------------------------------ 三维向量
  * 与 reference 的 triple 一样是 double。**着色那一段才降到 float** ——
@@ -1015,6 +1016,7 @@ static int r3_tri_transparent(const r3tris *t, size_t i) {
 }
 
 omni_str omni_r3_render(omni_str path) {
+  clock_t t0 = clock(), t1 = t0, t2 = t0;
   r3_pick_samples();
   char *cpath = omni_cstr(path);
   FILE *f = fopen(cpath, "rb");
@@ -1168,6 +1170,7 @@ omni_str omni_r3_render(omni_str path) {
   }
 
   omni_str out = omni_str_new((char *) "", 0);
+  t1 = clock();                                 /* 解析 + 细分到这里为止 */
   if (ok && ended && header && S.fw > 0 && S.fh > 0) {
     S.res2 = S.res * S.res;
     r3_set_dimensions(&S);
@@ -1233,11 +1236,15 @@ omni_str omni_r3_render(omni_str path) {
                         r3_tri_vcol(&tris, t));
         }
       free(ord);
-      /* 量口：`OMNI_R3_DEBUG=1` 时把三角/线段/混色次数印到 stderr。
+      t2 = clock();                             /* 光栅化到这里为止 */
+      /* 量口：`OMNI_R3_DEBUG=1` 时把三角/线段/混色次数与**三段耗时**印到 stderr。
        * 只有这一处对外说话 —— 三维那一档出问题时先看这几个数。 */
       if (getenv("OMNI_R3_DEBUG"))
-        fprintf(stderr, "r3: %dx%d 三角 %zu（透明 %zu）线段 %zu 混色 %zu\n",
-                S.fw, S.fh, ntr, ntrans, lns.n / 2, fb.nblend);
+        fprintf(stderr, "r3: %dx%d 三角 %zu（透明 %zu）线段 %zu 混色 %zu"
+                " 解析 %.2fs 光栅 %.2fs\n",
+                S.fw, S.fh, ntr, ntrans, lns.n / 2, fb.nblend,
+                (double) (t1 - t0) / CLOCKS_PER_SEC,
+                (double) (t2 - t1) / CLOCKS_PER_SEC);
 
       /* 解析（多重采样求平均，**四舍五入**）+ dealias + 十六进制。
        * 行序照 glReadPixels：**第 0 行在下**。
