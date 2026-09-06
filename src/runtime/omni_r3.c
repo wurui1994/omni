@@ -113,6 +113,11 @@ typedef struct {
   r3v *pos;
   r3v *nrm;
   const r3mat **mat;
+  /* 逐顶点色（rgba，一片三角 12 个 float）。只有清单里出现过 `pcol` 才分配 ——
+   * vertex.glsl:77 的那一支：`mat.parameters[3]`（lightOn）非零时顶点色当 diffuse、
+   * 为零时加到 emissive 上。 */
+  float *col;
+  int usecol;
   size_t n, cap;
 } r3tris;
 
@@ -150,18 +155,34 @@ static int r3tris_grow(r3tris *t, size_t need) {
   const r3mat **mat = (const r3mat **) realloc(t->mat, (cap / 3 + 1) * sizeof(const r3mat *));
   if (!mat) return 0;
   t->mat = mat;
+  if (t->usecol) {
+    float *col = (float *) realloc(t->col, cap * 4 * sizeof(float));
+    if (!col) return 0;
+    t->col = col;
+  }
   t->cap = cap;
+  return 1;
+}
+
+/* 一片三角进表。`c` 是 12 个 float（三个顶点的 rgba），没有顶点色时给 NULL。 */
+static int r3tris_pushc(r3tris *t, r3v a, r3v na, r3v b, r3v nb, r3v c, r3v nc,
+                        const r3mat *m, const float *vc) {
+  if (!r3tris_grow(t, 3)) return 0;
+  t->mat[t->n / 3] = m;
+  if (t->usecol) {
+    float *o = t->col + t->n * 4;
+    if (vc) for (int i = 0; i < 12; ++i) o[i] = vc[i];
+    else for (int i = 0; i < 12; ++i) o[i] = -1.0f;   /* -1 = 这一片没有顶点色 */
+  }
+  t->pos[t->n] = a; t->nrm[t->n] = na; t->n++;
+  t->pos[t->n] = b; t->nrm[t->n] = nb; t->n++;
+  t->pos[t->n] = c; t->nrm[t->n] = nc; t->n++;
   return 1;
 }
 
 static int r3tris_push(r3tris *t, r3v a, r3v na, r3v b, r3v nb, r3v c, r3v nc,
                        const r3mat *m) {
-  if (!r3tris_grow(t, 3)) return 0;
-  t->mat[t->n / 3] = m;
-  t->pos[t->n] = a; t->nrm[t->n] = na; t->n++;
-  t->pos[t->n] = b; t->nrm[t->n] = nb; t->n++;
-  t->pos[t->n] = c; t->nrm[t->n] = nc; t->n++;
-  return 1;
+  return r3tris_pushc(t, a, na, b, nb, c, nc, m, NULL);
 }
 
 /* ------------------------------------------------------------------ 面片细分
@@ -281,31 +302,62 @@ static void r3_corner_normals(const r3scene *s, const r3v *p, r3v n[4]) {
 static int r3_render_patch(const r3scene *s, r3tris *t, const r3v *p,
                            r3v P0, r3v P1, r3v P2, r3v P3,
                            r3v N0, r3v N1, r3v N2, r3v N3,
-                           const r3mat *mat, int depth) {
+                           const r3mat *mat, const float *C, int depth) {
   double h, v;
   r3_distance(p, &h, &v);
   /* res2 <= 0（清单里没给 res）或者判据不是有限数时**当成平的** —— 不然一片就能
    * 递归到深度上限，4^12 次。深度上限压到 8（最坏 65536 片），原版没有上限，
    * 靠的是判据必然收敛。 */
   if (!(s->res2 > 0 && h == h && v == v) || (h < s->res2 && v < s->res2) || depth >= 8) {
+    if (C) {
+      float a[12], b[12];
+      for (int i = 0; i < 4; ++i) {
+        a[i] = C[i]; a[4 + i] = C[4 + i]; a[8 + i] = C[8 + i];
+        b[i] = C[i]; b[4 + i] = C[8 + i]; b[8 + i] = C[12 + i];
+      }
+      if (!r3tris_pushc(t, P0, N0, P1, N1, P2, N2, mat, a)) return 0;
+      if (!r3tris_pushc(t, P0, N0, P2, N2, P3, N3, mat, b)) return 0;
+      return 1;
+    }
     if (!r3tris_push(t, P0, N0, P1, N1, P2, N2, mat)) return 0;
     if (!r3tris_push(t, P0, N0, P2, N2, P3, N3, mat)) return 0;
     return 1;
   }
   r3v q[4][16];
   r3_split4(p, q);
+  /* 顶点色跟着一起细分（bezierpatch.cc:529-533 那五行：边中点取两端平均、
+   * 中心取 c0 与 c2 的平均），四块的角色照 :542-545 那四行分派。 */
+  float cc[5][4], sub[4][16];
+  if (C) {
+    for (int i = 0; i < 4; ++i) {
+      cc[0][i] = 0.5f * (C[i] + C[4 + i]);
+      cc[1][i] = 0.5f * (C[4 + i] + C[8 + i]);
+      cc[2][i] = 0.5f * (C[8 + i] + C[12 + i]);
+      cc[3][i] = 0.5f * (C[12 + i] + C[i]);
+      cc[4][i] = 0.5f * (cc[0][i] + cc[2][i]);
+    }
+    for (int i = 0; i < 4; ++i) {
+      sub[0][i] = C[i];       sub[0][4 + i] = cc[0][i]; sub[0][8 + i] = cc[4][i]; sub[0][12 + i] = cc[3][i];
+      sub[1][i] = cc[0][i];   sub[1][4 + i] = C[4 + i]; sub[1][8 + i] = cc[1][i]; sub[1][12 + i] = cc[4][i];
+      sub[2][i] = cc[4][i];   sub[2][4 + i] = cc[1][i]; sub[2][8 + i] = C[8 + i]; sub[2][12 + i] = cc[2][i];
+      sub[3][i] = cc[3][i];   sub[3][4 + i] = cc[4][i]; sub[3][8 + i] = cc[2][i]; sub[3][12 + i] = C[12 + i];
+    }
+  }
   /* 四块的角与法向都从各自的控制网重算（与原版一样：细分后的角法向由子网决定） */
   for (int k = 0; k < 4; ++k) {
     r3v n[4];
     r3_corner_normals(s, q[k], n);
     if (!r3_render_patch(s, t, q[k], q[k][0], q[k][12], q[k][15], q[k][3],
-                         n[0], n[1], n[2], n[3], mat, depth + 1)) return 0;
+                         n[0], n[1], n[2], n[3], mat, C ? sub[k] : NULL,
+                         depth + 1)) return 0;
   }
   return 1;
 }
 
-/* 一片面片进表：先算 epsilon（bezierpatch.cc:70）与四角法向，再递归 */static int r3_add_patch(r3scene *s, r3tris *t, const r3v *p, int straight,
-                        const r3mat *mat) {
+/* 一片面片进表：先算 epsilon（bezierpatch.cc:70）与四角法向，再递归。
+ * `C` 是四个角的 rgba（16 个 float，角序与 P0..P3 一样），没有顶点色时给 NULL。 */
+static int r3_add_patch(r3scene *s, r3tris *t, const r3v *p, int straight,
+                        const r3mat *mat, const float *C) {
   double eps = 0;
   for (int i = 1; i < 16; ++i) {
     double d = r3v_abs2(r3v_sub(p[i], p[0]));
@@ -317,11 +369,21 @@ static int r3_render_patch(const r3scene *s, r3tris *t, const r3v *p,
   r3_corner_normals(s, p, n);
   r3v P0 = p[0], P1 = p[12], P2 = p[15], P3 = p[3];
   if (straight) {
+    if (C) {
+      float a[12], b[12];
+      for (int i = 0; i < 4; ++i) {
+        a[i] = C[i]; a[4 + i] = C[4 + i]; a[8 + i] = C[8 + i];
+        b[i] = C[i]; b[4 + i] = C[8 + i]; b[8 + i] = C[12 + i];
+      }
+      if (!r3tris_pushc(t, P0, n[0], P1, n[1], P2, n[2], mat, a)) return 0;
+      if (!r3tris_pushc(t, P0, n[0], P2, n[2], P3, n[3], mat, b)) return 0;
+      return 1;
+    }
     if (!r3tris_push(t, P0, n[0], P1, n[1], P2, n[2], mat)) return 0;
     if (!r3tris_push(t, P0, n[0], P2, n[2], P3, n[3], mat)) return 0;
     return 1;
   }
-  return r3_render_patch(s, t, p, P0, P1, P2, P3, n[0], n[1], n[2], n[3], mat, 0);
+  return r3_render_patch(s, t, p, P0, P1, P2, P3, n[0], n[1], n[2], n[3], mat, C, 0);
 }
 
 /* ------------------------------------------------------------------ 三角面片
@@ -399,23 +461,38 @@ static void r3_tri_split4(const r3v *p, r3v out[4][10]) {
 
 static int r3_render_tri(const r3scene *s, r3tris *t, const r3v *p,
                          r3v P0, r3v P1, r3v P2, r3v N0, r3v N1, r3v N2,
-                         const r3mat *mat, int depth) {
+                         const r3mat *mat, const float *C, int depth) {
   double d = r3_tri_distance(p);
   if (!(s->res2 > 0 && d == d) || d < s->res2 || depth >= 8)
-    return r3tris_push(t, P0, N0, P1, N1, P2, N2, mat);
+    return r3tris_pushc(t, P0, N0, P1, N1, P2, N2, mat, C);
   r3v q[4][10];
   r3_tri_split4(p, q);
+  /* 顶点色跟着细分（bezierpatch.cc:805-807 三行边中点，:814-817 四块的分派） */
+  float cc[3][4], sub[4][12];
+  if (C) {
+    for (int i = 0; i < 4; ++i) {
+      cc[0][i] = 0.5f * (C[4 + i] + C[8 + i]);
+      cc[1][i] = 0.5f * (C[8 + i] + C[i]);
+      cc[2][i] = 0.5f * (C[i] + C[4 + i]);
+    }
+    for (int i = 0; i < 4; ++i) {
+      sub[0][i] = C[i];      sub[0][4 + i] = cc[2][i]; sub[0][8 + i] = cc[1][i];
+      sub[1][i] = cc[2][i];  sub[1][4 + i] = C[4 + i]; sub[1][8 + i] = cc[0][i];
+      sub[2][i] = cc[1][i];  sub[2][4 + i] = cc[0][i]; sub[2][8 + i] = C[8 + i];
+      sub[3][i] = cc[0][i];  sub[3][4 + i] = cc[1][i]; sub[3][8 + i] = cc[2][i];
+    }
+  }
   for (int k = 0; k < 4; ++k) {
     r3v n[3];
     r3_tri_normals(s, q[k], n);
     if (!r3_render_tri(s, t, q[k], q[k][0], q[k][6], q[k][9],
-                       n[0], n[1], n[2], mat, depth + 1)) return 0;
+                       n[0], n[1], n[2], mat, C ? sub[k] : NULL, depth + 1)) return 0;
   }
   return 1;
 }
 
 static int r3_add_tri3(r3scene *s, r3tris *t, const r3v *p, int straight,
-                       const r3mat *mat) {
+                       const r3mat *mat, const float *C) {
   double eps = 0;
   for (int i = 1; i < 10; ++i) {
     double q = r3v_abs2(r3v_sub(p[i], p[0]));
@@ -424,8 +501,8 @@ static int r3_add_tri3(r3scene *s, r3tris *t, const r3v *p, int straight,
   s->epsilon = eps * DBL_EPSILON;
   r3v n[3];
   r3_tri_normals(s, p, n);
-  if (straight) return r3tris_push(t, p[0], n[0], p[6], n[1], p[9], n[2], mat);
-  return r3_render_tri(s, t, p, p[0], p[6], p[9], n[0], n[1], n[2], mat, 0);
+  if (straight) return r3tris_pushc(t, p[0], n[0], p[6], n[1], p[9], n[2], mat, C);
+  return r3_render_tri(s, t, p, p[0], p[6], p[9], n[0], n[1], n[2], mat, C, 0);
 }
 
 /* ------------------------------------------------------------------ 曲线
@@ -593,9 +670,11 @@ static void r3_brdf(const r3shade *S, r3f viewDir, r3f lightDir, float out[3]) {
   }
 }
 
-/* fragment.glsl:232 main —— 一个片元的颜色（不含 alpha 那一格的合成） */
+/* fragment.glsl:232 main —— 一个片元的颜色（不含 alpha 那一格的合成）。
+ * `vcol` 是插值出来的逐顶点色（rgba，没有时给 NULL）：vertex.glsl:77 那一支 ——
+ * lightOn 非零时它当 diffuse，为零时加到 emissive 上。 */
 static void r3_shade(const r3scene *s, const r3mat *mat, r3v nrm, r3v viewPos,
-                     int frontFacing, float out[3]) {
+                     int frontFacing, const float *vcol, float out[3]) {
   r3shade S;
   S.normal = r3f_norm(r3f_mk((float) nrm.x, (float) nrm.y, (float) nrm.z));
   if (!frontFacing) S.normal = r3f_mk(-S.normal.x, -S.normal.y, -S.normal.z);
@@ -609,7 +688,12 @@ static void r3_shade(const r3scene *s, const r3mat *mat, r3v nrm, r3v viewPos,
     S.Specular[i] = (float) mat->specular[i];
     out[i] = (float) mat->emissive[i];
   }
+  if (vcol) {
+    if (mat->lightOn) for (int i = 0; i < 3; ++i) S.Diffuse[i] = vcol[i];
+    else for (int i = 0; i < 3; ++i) out[i] += vcol[i];
+  }
   if (!mat->lightOn) return;
+
 
   r3f viewDir;
   if (s->ortho) viewDir = r3f_mk(0.0f, 0.0f, 1.0f);
@@ -702,9 +786,10 @@ static void r3_window(const r3fb *fb, r3clip c, double *x, double *y, double *z)
   *z = c.z * inv * 0.5 + 0.5;                 /* glDepthRange 默认 0..1 */
 }
 
-/* 一片三角进帧缓冲。位置是视图空间，法向按重心插值，着色在像素中心算一次。 */
+/* 一片三角进帧缓冲。位置是视图空间，法向按重心插值，着色在像素中心算一次。
+ * `VC` 是三个顶点的 rgba（12 个 float，没有顶点色时给 NULL）。 */
 static void r3_raster_tri(const r3scene *s, r3fb *fb, const r3v *P, const r3v *N,
-                          const r3mat *mat) {
+                          const r3mat *mat, const float *VC) {
   r3clip c[3];
   double wx[3], wy[3], wz[3], iw[3];
   for (int i = 0; i < 3; ++i) {
@@ -737,12 +822,19 @@ static void r3_raster_tri(const r3scene *s, r3fb *fb, const r3v *P, const r3v *N
   if (y1 > fb->fh) y1 = fb->fh;
 
   float alpha = (float) mat->diffuse[3];
+  if (VC) {
+    /* 顶点色带 alpha 时，透明与否看**这一片**的三个顶点（bezierpatch.cc:867
+     * `transparent |= c0[3]+c1[3]+c2[3] < 3.0`）。混色用的是插值出来的那一格。 */
+    alpha = VC[3] < VC[7] ? VC[3] : VC[7];
+    if (VC[11] < alpha) alpha = VC[11];
+  }
   int opaque = !(alpha < 1.0f);
   for (int y = y0; y < y1; ++y) {
     for (int x = x0; x < x1; ++x) {
       int shaded = 0;
       unsigned char cr = 0, cg = 0, cb = 0;
       float frgb[3] = { 0, 0, 0 };
+      float ablend = alpha;
       for (int k = 0; k < R3_NS; ++k) {
         double sx = x + R3_SAMPLE[k][0];
         double sy = y + R3_SAMPLE[k][1];
@@ -770,7 +862,15 @@ static void r3_raster_tri(const r3scene *s, r3fb *fb, const r3v *P, const r3v *N
                            r3v_add(r3v_add(r3v_scl(q0, P[0]), r3v_scl(q1, P[1])),
                                    r3v_scl(q2, P[2])));
           float rgb[3];
-          r3_shade(s, mat, nrm, vp, front, rgb);
+          float vc[4];
+          if (VC) {
+            for (int i = 0; i < 4; ++i)
+              vc[i] = (float) ((q0 * VC[i] + q1 * VC[4 + i] + q2 * VC[8 + i]) / qs);
+            ablend = vc[3];
+            if (ablend < 0.0f) ablend = 0.0f;
+            if (ablend > 1.0f) ablend = 1.0f;
+          }
+          r3_shade(s, mat, nrm, vp, front, VC ? vc : NULL, rgb);
           for (int i = 0; i < 3; ++i) {
             float v = rgb[i];
             if (v < 0.0f) v = 0.0f;
@@ -789,7 +889,7 @@ static void r3_raster_tri(const r3scene *s, r3fb *fb, const r3v *P, const r3v *N
           for (int ch = 0; ch < 3; ++ch) {
             float src = frgb[ch];
             float dst = o[ch] / 255.0f;
-            float v = src * alpha + dst * (1.0f - alpha);
+            float v = src * ablend + dst * (1.0f - ablend);
             if (v < 0.0f) v = 0.0f;
             if (v > 1.0f) v = 1.0f;
             o[ch] = (unsigned char) (int) (v * 255.0f + 0.5f);
@@ -900,6 +1000,20 @@ static int r3_nums(r3lex *L, double *out, int n) {
 }
 
 /* ------------------------------------------------------------------ 入口 */
+/* 这一片三角的顶点色（没有就是 NULL）。-1 是"这一片没顶点色"的记号（见 r3tris_pushc）*/
+static const float *r3_tri_vcol(const r3tris *t, size_t i) {
+  if (!t->usecol || !t->col) return NULL;
+  const float *c = t->col + i * 12;
+  return c[3] >= 0.0f ? c : NULL;
+}
+
+/* 透明与否：材质的 alpha 或者顶点色的 alpha 任一 < 1（bezierpatch.cc:867） */
+static int r3_tri_transparent(const r3tris *t, size_t i) {
+  if (t->mat[i]->diffuse[3] < 1.0) return 1;
+  const float *c = r3_tri_vcol(t, i);
+  return c && (c[3] < 1.0f || c[7] < 1.0f || c[11] < 1.0f);
+}
+
 omni_str omni_r3_render(omni_str path) {
   r3_pick_samples();
   char *cpath = omni_cstr(path);
@@ -936,6 +1050,12 @@ omni_str omni_r3_render(omni_str path) {
       matcap++;
   mats = (r3mat *) malloc(matcap * sizeof(r3mat));
   if (!mats) { free(text); return omni_str_new((char *) "", 0); }
+  /* 清单里出现过 `pcol` 才给顶点色开数组（一片三角 48 字节，能省就省）。 */
+  for (const char *q = text; q < L.end; ++q)
+    if ((q == text || q[-1] == '\n') && q + 4 < L.end
+        && q[0] == 'p' && q[1] == 'c' && q[2] == 'o' && q[3] == 'l'
+        && (q[4] == ' ' || q[4] == '\t')) { tris.usecol = 1; break; }
+  float pend[16]; int npend = 0;
   /* 线段（曲线在 C 这边细分，见 r3_add_bez） */
   r3lines lns; memset(&lns, 0, sizeof lns);
 
@@ -987,19 +1107,33 @@ omni_str omni_r3_render(omni_str path) {
       for (int i = 0; i < 3; ++i) M->specular[i] = v[7 + i];
       M->shininess = v[10]; M->metallic = v[11]; M->fresnel0 = v[12];
       M->lightOn = v[13] != 0;
+    } else if (strcmp(kw, "pcol") == 0) {
+      /* 逐顶点色：`pcol n r g b a …`（n = 4 给 patch、3 给 btri），
+       * 只作用在**紧接着的那一条** patch/btri 上。 */
+      double n; if (!r3_num(&L, &n)) { ok = 0; break; }
+      int nc = (int) n;
+      if (nc != 3 && nc != 4) { ok = 0; break; }
+      double v[16];
+      if (!r3_nums(&L, v, nc * 4)) { ok = 0; break; }
+      for (int i = 0; i < nc * 4; ++i) pend[i] = (float) v[i];
+      npend = nc;
     } else if (strcmp(kw, "patch") == 0) {
       double st; double cp[48];
       if (!r3_num(&L, &st) || !r3_nums(&L, cp, 48) || nmat == 0) { ok = 0; break; }
       r3v p[16];
       for (int i = 0; i < 16; ++i) p[i] = r3v_mk(cp[3 * i], cp[3 * i + 1], cp[3 * i + 2]);
-      if (!r3_add_patch(&S, &tris, p, st != 0, mats + (nmat - 1))) { ok = 0; break; }
+      if (!r3_add_patch(&S, &tris, p, st != 0, mats + (nmat - 1),
+                        npend == 4 ? pend : NULL)) { ok = 0; break; }
+      npend = 0;
     } else if (strcmp(kw, "btri") == 0) {
       /* 三角面片（管子的接头）：十个控制点，编号照 bezierpatch.cc:652 那张图 */
       double st; double cp[30];
       if (!r3_num(&L, &st) || !r3_nums(&L, cp, 30) || nmat == 0) { ok = 0; break; }
       r3v p[10];
       for (int i = 0; i < 10; ++i) p[i] = r3v_mk(cp[3 * i], cp[3 * i + 1], cp[3 * i + 2]);
-      if (!r3_add_tri3(&S, &tris, p, st != 0, mats + (nmat - 1))) { ok = 0; break; }
+      if (!r3_add_tri3(&S, &tris, p, st != 0, mats + (nmat - 1),
+                       npend == 3 ? pend : NULL)) { ok = 0; break; }
+      npend = 0;
     } else if (strcmp(kw, "tri") == 0) {
       double v[9]; if (!r3_nums(&L, v, 9) || nmat == 0) { ok = 0; break; }
       r3v a = r3v_mk(v[0], v[1], v[2]);
@@ -1059,14 +1193,14 @@ omni_str omni_r3_render(omni_str path) {
       size_t ntr = tris.n / 3, ntrans = 0;
       size_t *ord = NULL;
       for (size_t t = 0; t < ntr; ++t)
-        if (tris.mat[t]->diffuse[3] < 1.0) ntrans++;
+        if (r3_tri_transparent(&tris, t)) ntrans++;
       if (ntrans > 0) ord = (size_t *) malloc(ntrans * sizeof(size_t));
       if (ntrans > 0 && ord) {
         double *key = (double *) malloc(ntrans * sizeof(double));
         size_t n = 0;
         if (key) {
           for (size_t t = 0; t < ntr; ++t) {
-            if (!(tris.mat[t]->diffuse[3] < 1.0)) continue;
+            if (!r3_tri_transparent(&tris, t)) continue;
             ord[n] = t;
             key[n] = (tris.pos[3 * t].z + tris.pos[3 * t + 1].z + tris.pos[3 * t + 2].z) / 3.0;
             n++;
@@ -1086,15 +1220,17 @@ omni_str omni_r3_render(omni_str path) {
         } else { free(ord); ord = NULL; ntrans = 0; }
       }
       for (size_t t = 0; t < ntr; ++t) {
-        if (tris.mat[t]->diffuse[3] < 1.0) continue;
-        r3_raster_tri(&S, &fb, tris.pos + 3 * t, tris.nrm + 3 * t, tris.mat[t]);
+        if (r3_tri_transparent(&tris, t)) continue;
+        r3_raster_tri(&S, &fb, tris.pos + 3 * t, tris.nrm + 3 * t, tris.mat[t],
+                      r3_tri_vcol(&tris, t));
       }
       for (size_t i = 0; i + 1 < lns.n; i += 2)
         r3_raster_line(&S, &fb, lns.p[i], lns.p[i + 1], lns.mat[i / 2]);
       if (ord)
         for (size_t k = 0; k < ntrans; ++k) {
           size_t t = ord[k];
-          r3_raster_tri(&S, &fb, tris.pos + 3 * t, tris.nrm + 3 * t, tris.mat[t]);
+          r3_raster_tri(&S, &fb, tris.pos + 3 * t, tris.nrm + 3 * t, tris.mat[t],
+                        r3_tri_vcol(&tris, t));
         }
       free(ord);
       /* 量口：`OMNI_R3_DEBUG=1` 时把三角/线段/混色次数印到 stderr。
@@ -1151,7 +1287,7 @@ omni_str omni_r3_render(omni_str path) {
     free(fb.col);
   }
 
-  free(tris.pos); free(tris.nrm); free((void *) tris.mat);
+  free(tris.pos); free(tris.nrm); free((void *) tris.mat); free(tris.col);
   free(lns.p); free((void *) lns.mat);
   free(mats);
   free(text);

@@ -10314,13 +10314,26 @@ private void asy__merge3hook() {
       for (int i = 0; i < ops.length; ++i) {
         drawop3 o3 = ops[i];
         if (o3.p.length > 0 && invisible(o3.p[0])) continue;
+        // 逐顶点色（`s.colors(...)` 那一族）。角序与 C 那边的 C0..C3 一样：
+        // p[0]、p[12]、p[15]、p[3]（也就是 P[0][0]、P[3][0]、P[3][3]、P[0][3]），
+        // 正是 asy 那边"从左下角逆时针"的次序，直接照发不用重排。
+        string pcline(pen[] cs, int n) {
+          if (cs.length < n) return "";
+          string s = "pcol " + string(n);
+          for (int i = 0; i < n; ++i) {
+            real[] c = asy__penrgb(cs[i]);
+            s = s + " " + sn(c[0]) + " " + sn(c[1]) + " " + sn(c[2])
+              + " " + sn(opacity(cs[i]));
+          }
+          return s + nl;
+        }
         if (o3.kind == 1) {
           triple[][] P = o3.P3;
           if (P.length < 4 || P[0].length < 4) continue;
           string s = "patch " + (o3.straight ? "1" : "0");
           for (int a = 0; a < 4; ++a)
             for (int b = 0; b < 4; ++b) s = s + sv(P[a][b]);
-          pp.push(mline(o3) + s + nl);
+          pp.push(mline(o3) + pcline(o3.colors, 4) + s + nl);
           nink = nink + 1;
         } else if (o3.kind == 2) {
           // 三角面片（管子的接头：球帽与圆盘）。十个控制点按 bezierpatch.cc:652 那张图的
@@ -10328,7 +10341,7 @@ private void asy__merge3hook() {
           // —— 我们这边是按行长 1/2/3/4 存的，对应 P[0][0]、P[1][0]、P[1][1]、P[2][0..2]、P[3][0..3]。
           triple[][] P = o3.P3;
           if (P.length < 4 || P[3].length < 4) continue;
-          pp.push(mline(o3) + "btri " + (o3.straight ? "1" : "0")
+          pp.push(mline(o3) + pcline(o3.colors, 3) + "btri " + (o3.straight ? "1" : "0")
             + sv(P[0][0]) + sv(P[1][0]) + sv(P[1][1])
             + sv(P[2][0]) + sv(P[2][1]) + sv(P[2][2])
             + sv(P[3][0]) + sv(P[3][1]) + sv(P[3][2]) + sv(P[3][3]) + nl);
