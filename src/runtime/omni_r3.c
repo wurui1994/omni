@@ -643,34 +643,19 @@ static const float R3_SAMPLE[R3_NS][2] = {
 };
 
 /* 透明那一档：GL 那边是把片元攒进逐像素的链表（fragment.glsl 的 TRANSPARENT 分支
- * 往 fragment[]/depth[] 里写），再按深度合成。这里照同一套：透明片元**不写深度**
- * （彼此不遮挡），只在比不透明层近的时候记一条，最后由远到近 source-over。 */
-typedef struct { float d, r, g, b, a; int next; } r3frag;
-
+ * 往 fragment[]/depth[] 里写），再按深度合成。
+ * **这里改成按三角排序、直接混色**，不攒链表 —— 攒链表的那一版在 BezierPatch
+ * 那个例子上被系统 OOM 杀掉（Killed: 9）：一片铺满画面的半透明曲面，
+ * 片元数 = 覆盖的采样点数 x 层数，1 百万像素 x 16 采样就是上千万条。
+ * 代价：只有"透明面互相穿插"时与逐片元排序不同（同一个采样点上的次序），
+ * 那种情形要靠分块渲染（tile.h）才能既准又省内存 —— 下一刀。
+ * 不变的是：透明三角**不写深度**（彼此不遮挡），只在比不透明层近时混色。 */
 typedef struct {
   int fw, fh;
   float *depth;          /* fw*fh*R3_NS，初值 1（远） */
   unsigned char *col;    /* fw*fh*R3_NS*3 */
-  int *head;             /* fw*fh*R3_NS，透明片元链表的头（-1 表示空） */
-  r3frag *frag;
-  size_t nfrag, capfrag;
-  int oom;
+  size_t nblend;         /* 混过色的采样点次数（量口） */
 } r3fb;
-
-static int r3fb_push_frag(r3fb *fb, size_t idx, float d, const float rgb[3], float a) {
-  if (fb->nfrag == fb->capfrag) {
-    size_t cap = fb->capfrag == 0 ? 4096 : fb->capfrag * 2;
-    r3frag *p = (r3frag *) realloc(fb->frag, cap * sizeof(r3frag));
-    if (!p) { fb->oom = 1; return 0; }
-    fb->frag = p; fb->capfrag = cap;
-  }
-  r3frag *f = fb->frag + fb->nfrag;
-  f->d = d; f->r = rgb[0]; f->g = rgb[1]; f->b = rgb[2]; f->a = a;
-  f->next = fb->head[idx];
-  fb->head[idx] = (int) fb->nfrag;
-  fb->nfrag++;
-  return 1;
-}
 
 typedef struct { double x, y, z, w; } r3clip;
 
@@ -775,8 +760,17 @@ static void r3_raster_tri(const r3scene *s, r3fb *fb, const r3v *P, const r3v *N
           shaded = 1;
         }
         if (!opaque) {
-          /* 透明片元只记一条，**不写深度** —— 与 GL 那边同一套（互不遮挡） */
-          if (!r3fb_push_frag(fb, idx, (float) z, frgb, alpha)) return;
+          /* 透明：直接混色，**不写深度**（三角已按由远到近的次序进来） */
+          unsigned char *o = fb->col + idx * 3;
+          for (int ch = 0; ch < 3; ++ch) {
+            float src = frgb[ch];
+            float dst = o[ch] / 255.0f;
+            float v = src * alpha + dst * (1.0f - alpha);
+            if (v < 0.0f) v = 0.0f;
+            if (v > 1.0f) v = 1.0f;
+            o[ch] = (unsigned char) (int) (v * 255.0f + 0.5f);
+          }
+          fb->nblend++;
           continue;
         }
         fb->depth[idx] = (float) z;
@@ -1026,63 +1020,63 @@ omni_str omni_r3_render(omni_str path) {
     fb.fw = S.fw; fb.fh = S.fh;
     fb.depth = (float *) malloc(np * sizeof(float));
     fb.col = (unsigned char *) malloc(np * 3);
-    fb.head = (int *) malloc(np * sizeof(int));
-    if (fb.depth && fb.col && fb.head) {
+    if (fb.depth && fb.col) {
       unsigned char b0 = (unsigned char) (int) (S.bg[0] * 255.0 + 0.5);
       unsigned char b1 = (unsigned char) (int) (S.bg[1] * 255.0 + 0.5);
       unsigned char b2 = (unsigned char) (int) (S.bg[2] * 255.0 + 0.5);
       for (size_t i = 0; i < np; ++i) {
         fb.depth[i] = 1.0f;
-        fb.head[i] = -1;
         fb.col[3 * i] = b0; fb.col[3 * i + 1] = b1; fb.col[3 * i + 2] = b2;
       }
-      /* 两趟：先不透明（定死深度），再透明（只攒片元，不写深度）。
-       * GL 那边也是分开的两个缓冲（bezierpatch.cc 的 triangleData / transparentData）。*/
-      for (int pass = 0; pass < 2; ++pass) {
-        for (size_t i = 0; i + 2 < tris.n; i += 3) {
-          const r3mat *m = tris.mat[i / 3];
-          int trans = m->diffuse[3] < 1.0;
-          if (trans != pass) continue;
-          r3_raster_tri(&S, &fb, tris.pos + i, tris.nrm + i, m);
+      /* 两趟：先不透明（定死深度），再透明（不写深度、直接混色）。
+       * GL 那边也是分开的两个缓冲（bezierpatch.cc 的 triangleData / transparentData）。
+       * 透明那一趟要**由远到近**，所以先按三角的视图空间平均 z 升序排（z 越负越远）。*/
+      size_t ntr = tris.n / 3, ntrans = 0;
+      size_t *ord = NULL;
+      for (size_t t = 0; t < ntr; ++t)
+        if (tris.mat[t]->diffuse[3] < 1.0) ntrans++;
+      if (ntrans > 0) ord = (size_t *) malloc(ntrans * sizeof(size_t));
+      if (ntrans > 0 && ord) {
+        double *key = (double *) malloc(ntrans * sizeof(double));
+        size_t n = 0;
+        if (key) {
+          for (size_t t = 0; t < ntr; ++t) {
+            if (!(tris.mat[t]->diffuse[3] < 1.0)) continue;
+            ord[n] = t;
+            key[n] = (tris.pos[3 * t].z + tris.pos[3 * t + 1].z + tris.pos[3 * t + 2].z) / 3.0;
+            n++;
+          }
+          /* 插入排序换成简单的归并太啰嗦，这里用标准库的 qsort 不方便带键 ——
+           * 透明三角一般不多，用希尔排序（O(n^1.3) 量级）就够，且不额外分配。 */
+          for (size_t gap = n / 2; gap > 0; gap /= 2)
+            for (size_t i = gap; i < n; ++i) {
+              size_t vi = ord[i]; double vk = key[i];
+              size_t j = i;
+              while (j >= gap && key[j - gap] > vk) {
+                ord[j] = ord[j - gap]; key[j] = key[j - gap]; j -= gap;
+              }
+              ord[j] = vi; key[j] = vk;
+            }
+          free(key);
+        } else { free(ord); ord = NULL; ntrans = 0; }
+      }
+      for (size_t t = 0; t < ntr; ++t) {
+        if (tris.mat[t]->diffuse[3] < 1.0) continue;
+        r3_raster_tri(&S, &fb, tris.pos + 3 * t, tris.nrm + 3 * t, tris.mat[t]);
+      }
+      for (size_t i = 0; i + 1 < lns.n; i += 2)
+        r3_raster_line(&S, &fb, lns.p[i], lns.p[i + 1], lns.mat[i / 2]);
+      if (ord)
+        for (size_t k = 0; k < ntrans; ++k) {
+          size_t t = ord[k];
+          r3_raster_tri(&S, &fb, tris.pos + 3 * t, tris.nrm + 3 * t, tris.mat[t]);
         }
-        if (pass == 0)
-          for (size_t i = 0; i + 1 < lns.n; i += 2)
-            r3_raster_line(&S, &fb, lns.p[i], lns.p[i + 1], lns.mat[i / 2]);
-      }
-      /* 量口：`OMNI_R3_DEBUG=1` 时把三角/线段/透明片元的条数印到 stderr。
-       * 只有这一处对外说话 —— 三维那一档出问题时先看这三个数。 */
-      if (getenv("OMNI_R3_DEBUG")) {
-        size_t ntr = tris.n / 3, ntrans = 0;
-        for (size_t i = 0; i + 2 < tris.n; i += 3)
-          if (tris.mat[i / 3]->diffuse[3] < 1.0) ntrans++;
-        fprintf(stderr, "r3: %dx%d 三角 %zu（透明 %zu）线段 %zu 片元 %zu\n",
-                S.fw, S.fh, ntr, ntrans, lns.n / 2, fb.nfrag);
-      }
-      /* 透明片元按深度**由远到近** source-over 盖到不透明层上（每个采样点各自一条链） */
-      if (fb.nfrag > 0) {
-        for (size_t i = 0; i < np; ++i) {
-          if (fb.head[i] < 0) continue;
-          /* 链不长（同一采样点上的透明层数），插入排序按 d 降序 */
-          int order[64]; int n = 0;
-          for (int j = fb.head[i]; j >= 0 && n < 64; j = fb.frag[j].next) order[n++] = j;
-          for (int a = 1; a < n; ++a) {
-            int v = order[a]; int b = a - 1;
-            while (b >= 0 && fb.frag[order[b]].d < fb.frag[v].d) { order[b + 1] = order[b]; b--; }
-            order[b + 1] = v;
-          }
-          float c[3];
-          for (int ch = 0; ch < 3; ++ch) c[ch] = fb.col[i * 3 + ch] / 255.0f;
-          for (int a = 0; a < n; ++a) {
-            const r3frag *f = fb.frag + order[a];
-            const float sc[3] = { f->r, f->g, f->b };
-            for (int ch = 0; ch < 3; ++ch) c[ch] = sc[ch] * f->a + c[ch] * (1.0f - f->a);
-          }
-          for (int ch = 0; ch < 3; ++ch) {
-            float v = c[ch] < 0 ? 0 : (c[ch] > 1 ? 1 : c[ch]);
-            fb.col[i * 3 + ch] = (unsigned char) (int) (v * 255.0f + 0.5f);
-          }
-        }
-      }
+      free(ord);
+      /* 量口：`OMNI_R3_DEBUG=1` 时把三角/线段/混色次数印到 stderr。
+       * 只有这一处对外说话 —— 三维那一档出问题时先看这几个数。 */
+      if (getenv("OMNI_R3_DEBUG"))
+        fprintf(stderr, "r3: %dx%d 三角 %zu（透明 %zu）线段 %zu 混色 %zu\n",
+                S.fw, S.fh, ntr, ntrans, lns.n / 2, fb.nblend);
 
       /* 解析（多重采样求平均）+ 十六进制。行序照 glReadPixels：**第 0 行在下**。 */
       size_t nb = (size_t) S.fw * S.fh * 3;
@@ -1106,8 +1100,6 @@ omni_str omni_r3_render(omni_str path) {
     }
     free(fb.depth);
     free(fb.col);
-    free(fb.head);
-    free(fb.frag);
   }
 
   free(tris.pos); free(tris.nrm); free((void *) tris.mat);
