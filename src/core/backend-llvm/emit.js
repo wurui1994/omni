@@ -153,6 +153,10 @@ const RT_OPS = new Map([
   ['rmath_log1p.real', { sym: 'omni_r_log1p', ret: 'double', params: ['double'] }],
   ['rmath_cbrt.real', { sym: 'omni_r_cbrt', ret: 'double', params: ['double'] }],
   ['rmath_hypot.real', { sym: 'omni_r_hypot', ret: 'double', params: ['double', 'double'] }],
+  // 交集的**第二条例外**（ADR-0014 第十五节）：单次舍入的 fma。三个参数，
+  // 走的还是 C 的那一份（omni_r_fma）—— 与 run-c 同一个符号，两条腿自然同字节。
+  ['rmath_fma.real',
+    { sym: 'omni_r_fma', ret: 'double', params: ['double', 'double', 'double'] }],
   // 那个「C99 ∩ Math.*」交集的例外（ADR-0019 路 2）：libm 的 nextafter。
   // 这条腿上它照旧是一个真符号 —— 与别的 rmath 一样，没有特殊处。
   ['rmath_nextafter.real', { sym: 'omni_r_nextafter', ret: 'double', params: ['double', 'double'] }],

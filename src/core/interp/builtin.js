@@ -996,6 +996,21 @@ export function applyBuiltin(I, e, a) {
   if (RMATH_OP.has(e.name)) {
     return callJsOp('js_math', [RMATH_OP.get(e.name), a[0], a.length > 1 ? a[1] : 0]);
   }
+  // 交集的**第二条例外**（ADR-0014 第十五节）：单次舍入的 fma。js_math 那条宿主 op
+  // 只收两个参数，所以这一支单独走。算法与 backend-js/prelude.js 的 `$r_fma` 同一份
+  // （Dekker 拆分求准确积 + two-sum），权威是 C 的 omni_r_fma；能要求逐字节是因为
+  // fma 是精确运算（IEEE-754 5.4.1 只舍一次）。
+  if (e.name === 'rmath_fma') {
+    const [x, y, z] = a;
+    const p = x * y;
+    const SPLIT = 134217729;
+    const cx = SPLIT * x, xh = cx - (cx - x), xl = x - xh;
+    const cy = SPLIT * y, yh = cy - (cy - y), yl = y - yh;
+    const err = ((xh * yh - p) + xh * yl + xl * yh) + xl * yl;
+    const s = p + z, bs = s - p;
+    const t = (p - (s - bs)) + (z - bs);
+    return s + (t + err);
+  }
   switch (e.name) {
     case 'print': printLine(strOf(e.argType.k, a[0])); return undefined;
     // `(write E)` —— 不补换行（ADR-0016 第四刀）。与 print 共用同一个缓冲区，
