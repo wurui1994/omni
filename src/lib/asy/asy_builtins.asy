@@ -10152,6 +10152,30 @@ void asy__push3(frame f, drawop3 o) { asy__f3tab[asy__f3id(f)].push(o); }
 drawop3[] asy__ops3(frame f) {
   return f.f3id < 0 ? new drawop3[] : asy__f3tab[f.f3id];
 }
+// 三维那两格比值（x/z 与 y/z）**照当前的三维盒子重算**。
+// 与 asy__add3 里那份增量累计的区别：这一份只看盒子，不看历史 —— 合并两张
+// 坐标系不同的帧时，历史里的值没有意义（见 asy__merge3fn 里的注）。
+private void asy__ratio3(frame f) {
+  if (!f.has3) return;
+  bool first = true;
+  real nx = 0; real ny = 0; real mx = 0; real my = 0;
+  for (int i = 0; i <= 1; ++i)
+    for (int j = 0; j <= 1; ++j)
+      for (int k = 0; k <= 1; ++k) {
+        real x = (i == 0 ? f.min3v.x : f.max3v.x);
+        real y = (j == 0 ? f.min3v.y : f.max3v.y);
+        real z = (k == 0 ? f.min3v.z : f.max3v.z);
+        real rx = z == 0 ? 0 : x / z;
+        real ry = z == 0 ? 0 : y / z;
+        if (first) { nx = rx; ny = ry; mx = rx; my = ry; first = false; }
+        else {
+          nx = min(nx, rx); ny = min(ny, ry);
+          mx = max(mx, rx); my = max(my, ry);
+        }
+      }
+  f.minr = (nx, ny); f.maxr = (mx, my);
+}
+
 // 上面那个桩（asy__merge3fn，在 add(frame,frame) / prepend 里被调）接上真身
 private void asy__merge3hook() {
   asy__merge3fn = new void(frame dest, frame src) {
@@ -10169,13 +10193,17 @@ private void asy__merge3hook() {
       if (!dest.has3) {
         dest.has3 = true;
         dest.min3v = src.min3v; dest.max3v = src.max3v;
-        dest.minr = src.minr; dest.maxr = src.maxr;
       } else {
         dest.min3v = minbound(dest.min3v, src.min3v);
         dest.max3v = maxbound(dest.max3v, src.max3v);
-        dest.minr = (min(dest.minr.x, src.minr.x), min(dest.minr.y, src.minr.y));
-        dest.maxr = (max(dest.maxr.x, src.maxr.x), max(dest.maxr.y, src.maxr.y));
       }
+      // x/z 与 y/z 那两格**照合并后的盒子重算**，不是把两边存着的比值取 min/max。
+      // 为什么：存着的那份可能是**另一套坐标**里算的 —— 子帧在图片坐标里攒起来时
+      // 内容常常整片落在 z=0 上（`asy__add3` 那儿 z==0 记 0），把这些 0 混进视图空间
+      // 那份真比值里，min/max 出来就是 0。踩出来的样子（triangles.asy、
+      // 一片 z=0 的三角网）：three.asy:2765 的 angle() 拿到 r=R≈0，
+      // 于是 fov 算成 0.042 度、整幅图缩成一个点，位图上一点 ink 都没有。
+      asy__ratio3(dest);
     }
   };
   // 位图那一档的像素（asy__r3hexfn 的真身）：投影照 renderBase.cc:111 的 setDimensions
@@ -11345,8 +11373,24 @@ private pair asy__patchratio(triple[][] P, bool straight, bool mx, real fuzz, pa
           asy__pbound(C, mx, 1, b.y, fuzz, asy__rmaxdepth));
 }
 
-pair minratio(frame f) { return f.minr; }
-pair maxratio(frame f) { return f.maxr; }
+// x/z 与 y/z 的比（picture.cc:339 的 ratio）。平时用的是逐图元累计的那一份
+// （见 asy__ratio3 上面的注与下面 bound 那一族：面片走真 Bezier 极值，比盒子准）。
+// **兜底那一支**：累计出来的四个数全是 0，而三维盒子明明不在原点上 —— 那说明这些
+// 比值是在**另一套坐标**里攒的（内容整片落在 z=0 的图片坐标里，asy__add3 那儿
+// z==0 记 0），拿它喂 three.asy:2765 的 angle() 会把 fov 算成 0。
+// 踩出来的样子（triangles.asy 那片 z=0 的三角网）：fov 0.042 度、整幅图缩成一点、
+// 位图上一点 ink 都没有。这一支照三维盒子重算。
+private bool asy__ratiodead(frame f) {
+  if (!f.has3) return false;
+  real e = 1e-12;
+  return abs(f.minr.x) < e && abs(f.minr.y) < e
+    && abs(f.maxr.x) < e && abs(f.maxr.y) < e
+    && (abs(f.min3v.x) > e || abs(f.max3v.x) > e
+        || abs(f.min3v.y) > e || abs(f.max3v.y) > e)
+    && (abs(f.min3v.z) > e || abs(f.max3v.z) > e);
+}
+pair minratio(frame f) { if (asy__ratiodead(f)) asy__ratio3(f); return f.minr; }
+pair maxratio(frame f) { if (asy__ratiodead(f)) asy__ratio3(f); return f.maxr; }
 
 /*
  * path3 上的同一对（runpath3d.in:352/357，path3.cc:326）：直段只取结点，曲段走 bound。
