@@ -604,11 +604,35 @@ static const float R3_SAMPLE[R3_NS][2] = {
   { 0.125f, 0.875f }, { 0.375f, 0.875f }, { 0.625f, 0.875f }, { 0.875f, 0.875f }
 };
 
+/* 透明那一档：GL 那边是把片元攒进逐像素的链表（fragment.glsl 的 TRANSPARENT 分支
+ * 往 fragment[]/depth[] 里写），再按深度合成。这里照同一套：透明片元**不写深度**
+ * （彼此不遮挡），只在比不透明层近的时候记一条，最后由远到近 source-over。 */
+typedef struct { float d, r, g, b, a; int next; } r3frag;
+
 typedef struct {
   int fw, fh;
   float *depth;          /* fw*fh*R3_NS，初值 1（远） */
   unsigned char *col;    /* fw*fh*R3_NS*3 */
+  int *head;             /* fw*fh*R3_NS，透明片元链表的头（-1 表示空） */
+  r3frag *frag;
+  size_t nfrag, capfrag;
+  int oom;
 } r3fb;
+
+static int r3fb_push_frag(r3fb *fb, size_t idx, float d, const float rgb[3], float a) {
+  if (fb->nfrag == fb->capfrag) {
+    size_t cap = fb->capfrag == 0 ? 4096 : fb->capfrag * 2;
+    r3frag *p = (r3frag *) realloc(fb->frag, cap * sizeof(r3frag));
+    if (!p) { fb->oom = 1; return 0; }
+    fb->frag = p; fb->capfrag = cap;
+  }
+  r3frag *f = fb->frag + fb->nfrag;
+  f->d = d; f->r = rgb[0]; f->g = rgb[1]; f->b = rgb[2]; f->a = a;
+  f->next = fb->head[idx];
+  fb->head[idx] = (int) fb->nfrag;
+  fb->nfrag++;
+  return 1;
+}
 
 typedef struct { double x, y, z, w; } r3clip;
 
@@ -665,10 +689,13 @@ static void r3_raster_tri(const r3scene *s, r3fb *fb, const r3v *P, const r3v *N
   if (x1 > fb->fw) x1 = fb->fw;
   if (y1 > fb->fh) y1 = fb->fh;
 
+  float alpha = (float) mat->diffuse[3];
+  int opaque = !(alpha < 1.0f);
   for (int y = y0; y < y1; ++y) {
     for (int x = x0; x < x1; ++x) {
       int shaded = 0;
       unsigned char cr = 0, cg = 0, cb = 0;
+      float frgb[3] = { 0, 0, 0 };
       for (int k = 0; k < R3_NS; ++k) {
         double sx = x + R3_SAMPLE[k][0];
         double sy = y + R3_SAMPLE[k][1];
@@ -701,12 +728,18 @@ static void r3_raster_tri(const r3scene *s, r3fb *fb, const r3v *P, const r3v *N
             float v = rgb[i];
             if (v < 0.0f) v = 0.0f;
             if (v > 1.0f) v = 1.0f;
+            frgb[i] = v;
             int q = (int) (v * 255.0f + 0.5f);
             if (i == 0) cr = (unsigned char) q;
             else if (i == 1) cg = (unsigned char) q;
             else cb = (unsigned char) q;
           }
           shaded = 1;
+        }
+        if (!opaque) {
+          /* 透明片元只记一条，**不写深度** —— 与 GL 那边同一套（互不遮挡） */
+          if (!r3fb_push_frag(fb, idx, (float) z, frgb, alpha)) return;
+          continue;
         }
         fb->depth[idx] = (float) z;
         unsigned char *o = fb->col + idx * 3;
@@ -955,21 +988,58 @@ omni_str omni_r3_render(omni_str path) {
 
     size_t np = (size_t) S.fw * S.fh * R3_NS;
     r3fb fb;
+    memset(&fb, 0, sizeof fb);
     fb.fw = S.fw; fb.fh = S.fh;
     fb.depth = (float *) malloc(np * sizeof(float));
     fb.col = (unsigned char *) malloc(np * 3);
-    if (fb.depth && fb.col) {
+    fb.head = (int *) malloc(np * sizeof(int));
+    if (fb.depth && fb.col && fb.head) {
       unsigned char b0 = (unsigned char) (int) (S.bg[0] * 255.0 + 0.5);
       unsigned char b1 = (unsigned char) (int) (S.bg[1] * 255.0 + 0.5);
       unsigned char b2 = (unsigned char) (int) (S.bg[2] * 255.0 + 0.5);
       for (size_t i = 0; i < np; ++i) {
         fb.depth[i] = 1.0f;
+        fb.head[i] = -1;
         fb.col[3 * i] = b0; fb.col[3 * i + 1] = b1; fb.col[3 * i + 2] = b2;
       }
-      for (size_t i = 0; i + 2 < tris.n; i += 3)
-        r3_raster_tri(&S, &fb, tris.pos + i, tris.nrm + i, tris.mat[i / 3]);
-      for (size_t i = 0; i + 1 < nline; i += 2)
-        r3_raster_line(&S, &fb, lines[i], lines[i + 1], linemat[i / 2]);
+      /* 两趟：先不透明（定死深度），再透明（只攒片元，不写深度）。
+       * GL 那边也是分开的两个缓冲（bezierpatch.cc 的 triangleData / transparentData）。*/
+      for (int pass = 0; pass < 2; ++pass) {
+        for (size_t i = 0; i + 2 < tris.n; i += 3) {
+          const r3mat *m = tris.mat[i / 3];
+          int trans = m->diffuse[3] < 1.0;
+          if (trans != pass) continue;
+          r3_raster_tri(&S, &fb, tris.pos + i, tris.nrm + i, m);
+        }
+        if (pass == 0)
+          for (size_t i = 0; i + 1 < nline; i += 2)
+            r3_raster_line(&S, &fb, lines[i], lines[i + 1], linemat[i / 2]);
+      }
+      /* 透明片元按深度**由远到近** source-over 盖到不透明层上（每个采样点各自一条链） */
+      if (fb.nfrag > 0) {
+        for (size_t i = 0; i < np; ++i) {
+          if (fb.head[i] < 0) continue;
+          /* 链不长（同一采样点上的透明层数），插入排序按 d 降序 */
+          int order[64]; int n = 0;
+          for (int j = fb.head[i]; j >= 0 && n < 64; j = fb.frag[j].next) order[n++] = j;
+          for (int a = 1; a < n; ++a) {
+            int v = order[a]; int b = a - 1;
+            while (b >= 0 && fb.frag[order[b]].d < fb.frag[v].d) { order[b + 1] = order[b]; b--; }
+            order[b + 1] = v;
+          }
+          float c[3];
+          for (int ch = 0; ch < 3; ++ch) c[ch] = fb.col[i * 3 + ch] / 255.0f;
+          for (int a = 0; a < n; ++a) {
+            const r3frag *f = fb.frag + order[a];
+            const float sc[3] = { f->r, f->g, f->b };
+            for (int ch = 0; ch < 3; ++ch) c[ch] = sc[ch] * f->a + c[ch] * (1.0f - f->a);
+          }
+          for (int ch = 0; ch < 3; ++ch) {
+            float v = c[ch] < 0 ? 0 : (c[ch] > 1 ? 1 : c[ch]);
+            fb.col[i * 3 + ch] = (unsigned char) (int) (v * 255.0f + 0.5f);
+          }
+        }
+      }
 
       /* 解析（多重采样求平均）+ 十六进制。行序照 glReadPixels：**第 0 行在下**。 */
       size_t nb = (size_t) S.fw * S.fh * 3;
@@ -993,6 +1063,8 @@ omni_str omni_r3_render(omni_str path) {
     }
     free(fb.depth);
     free(fb.col);
+    free(fb.head);
+    free(fb.frag);
   }
 
   free(tris.pos); free(tris.nrm); free((void *) tris.mat);
