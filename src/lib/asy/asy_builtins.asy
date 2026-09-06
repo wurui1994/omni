@@ -10318,29 +10318,18 @@ private void asy__merge3hook() {
           pp.push(mline(o3) + "tri" + sv(T[0]) + sv(T[1]) + sv(T[2]) + nl);
           nink = nink + 1;
         } else if (o3.kind == 0) {
-          // path3：GL 那边是 GL_LINES（1 采样宽）。这里按 t 均匀取点把三次段拉直 ——
-          // beziercurve.cc 的自适应细分还没转写，先用固定 16 段。
+          // path3：GL 那边是 GL_LINES。**细分交给 C**（beziercurve.cc:62 的
+          // `Straightness < res2` 递归），这里一段发四个控制点就行 —— 从前是固定
+          // 16 段，既不是原版的判据、清单也大。
           path3 g = o3.g3;
           int L = g.nodes.length;
           if (L < 2) continue;
-          string s = "";
-          int cnt = 0;
-          for (int a = 0; a + 1 < L; ++a) {
-            triple z0 = g.nodes[a].point; triple c0 = g.nodes[a].post;
-            triple c1 = g.nodes[a + 1].pre; triple z1 = g.nodes[a + 1].point;
-            int N = 16;
-            for (int k = (a == 0 ? 0 : 1); k <= N; ++k) {
-              real t = k / N; real u = 1 - t;
-              triple q = u * u * u * z0 + 3 * u * u * t * c0 + 3 * u * t * t * c1
-                + t * t * t * z1;
-              s = s + sv(q);
-              cnt = cnt + 1;
-            }
-          }
-          if (cnt >= 2) {
-            pp.push(mline(o3) + "line " + string(cnt) + s + nl);
-            nink = nink + 1;
-          }
+          string s = mline(o3);
+          for (int a = 0; a + 1 < L; ++a)
+            s = s + "bez" + sv(g.nodes[a].point) + sv(g.nodes[a].post)
+              + sv(g.nodes[a + 1].pre) + sv(g.nodes[a + 1].point) + nl;
+          pp.push(s);
+          nink = nink + 1;
         }
       }
       pp.push("end" + nl);

@@ -428,6 +428,44 @@ static int r3_add_tri3(r3scene *s, r3tris *t, const r3v *p, int straight,
   return r3_render_tri(s, t, p, p[0], p[6], p[9], n[0], n[1], n[2], mat, 0);
 }
 
+/* ------------------------------------------------------------------ 曲线
+ * beziercurve.cc:62 的递归：`Straightness(p0,p1,p2,p3) < res2` 就是一段直线，
+ * 否则对半分（同一套 m0..m5）。线段攒进这个表，投影矩阵定了之后再光栅化。 */
+typedef struct { r3v *p; const r3mat **mat; size_t n, cap; } r3lines;
+
+static int r3lines_push(r3lines *L, r3v a, r3v b, const r3mat *m) {
+  if (L->n + 2 > L->cap) {
+    size_t cap = L->cap == 0 ? 256 : L->cap * 2;
+    r3v *p = (r3v *) realloc(L->p, cap * sizeof(r3v));
+    if (!p) return 0;
+    L->p = p;
+    const r3mat **mm = (const r3mat **) realloc(L->mat, (cap / 2 + 1) * sizeof(const r3mat *));
+    if (!mm) return 0;
+    L->mat = mm; L->cap = cap;
+  }
+  L->mat[L->n / 2] = m;
+  L->p[L->n++] = a;
+  L->p[L->n++] = b;
+  return 1;
+}
+
+static int r3_add_bez(const r3scene *s, r3lines *L, const r3v *p,
+                      const r3mat *m, int depth) {
+  double st = r3_straightness(p[0], p[1], p[2], p[3]);
+  if (!(s->res2 > 0 && st == st) || st < s->res2 || depth >= 12)
+    return r3lines_push(L, p[0], p[3], m);
+  r3v m0 = r3v_scl(0.5, r3v_add(p[0], p[1]));
+  r3v m1 = r3v_scl(0.5, r3v_add(p[1], p[2]));
+  r3v m2 = r3v_scl(0.5, r3v_add(p[2], p[3]));
+  r3v m3 = r3v_scl(0.5, r3v_add(m0, m1));
+  r3v m4 = r3v_scl(0.5, r3v_add(m1, m2));
+  r3v m5 = r3v_scl(0.5, r3v_add(m3, m4));
+  r3v s0[4] = { p[0], m0, m3, m5 };
+  r3v s1[4] = { m5, m4, m2, p[3] };
+  if (!r3_add_bez(s, L, s0, m, depth + 1)) return 0;
+  return r3_add_bez(s, L, s1, m, depth + 1);
+}
+
 /* ------------------------------------------------------------------ 视景体与投影
  * renderBase.cc:111 setDimensions 照抄。Width/Height 这里就是 fw/fh
  * （Export 里是 `setDimensions(fullWidth,fullHeight,…)`，glrender.cc:488）。
@@ -869,10 +907,8 @@ omni_str omni_r3_render(omni_str path) {
   /* 材质表：清单里每条 mat 存一格，后面的图元指到最近那一格 */
   r3mat *mats = NULL;
   size_t nmat = 0, matcap = 0;
-  /* 线段先攒起来（要等投影矩阵定了才画） */
-  r3v *lines = NULL;
-  size_t nline = 0, linecap = 0;
-  const r3mat **linemat = NULL;
+  /* 线段（曲线在 C 这边细分，见 r3_add_bez） */
+  r3lines lns; memset(&lns, 0, sizeof lns);
 
   int ok = 1, ended = 0, header = 0;
   char kw[32];
@@ -947,29 +983,22 @@ omni_str omni_r3_render(omni_str path) {
       r3v c = r3v_mk(v[6], v[7], v[8]);
       r3v n = r3v_cross(r3v_sub(b, a), r3v_sub(c, a));
       if (!r3tris_push(&tris, a, n, b, n, c, n, mats + (nmat - 1))) { ok = 0; break; }
+    } else if (strcmp(kw, "bez") == 0) {
+      /* 一段三次曲线（四个控制点）：细分照 beziercurve.cc:62 在这边做 */
+      double cp[12];
+      if (!r3_nums(&L, cp, 12) || nmat == 0) { ok = 0; break; }
+      r3v p[4];
+      for (int i = 0; i < 4; ++i) p[i] = r3v_mk(cp[3 * i], cp[3 * i + 1], cp[3 * i + 2]);
+      if (!r3_add_bez(&S, &lns, p, mats + (nmat - 1), 0)) { ok = 0; break; }
     } else if (strcmp(kw, "line") == 0) {
       double cnt; if (!r3_num(&L, &cnt) || nmat == 0) { ok = 0; break; }
       int n = (int) cnt;
       if (n < 2) { ok = 0; break; }
-      for (int i = 0; i + 1 < n; ++i) { /* 攒 n-1 段 */ }
       r3v prev = r3v_mk(0, 0, 0);
       for (int i = 0; i < n; ++i) {
         double v[3]; if (!r3_nums(&L, v, 3)) { ok = 0; break; }
         r3v q = r3v_mk(v[0], v[1], v[2]);
-        if (i > 0) {
-          if (nline + 2 > linecap) {
-            size_t cap = linecap == 0 ? 256 : linecap * 2;
-            r3v *nl = (r3v *) realloc(lines, cap * sizeof(r3v));
-            if (!nl) { ok = 0; break; }
-            lines = nl;
-            const r3mat **lm = (const r3mat **) realloc(linemat, (cap / 2 + 1) * sizeof(const r3mat *));
-            if (!lm) { ok = 0; break; }
-            linemat = lm; linecap = cap;
-          }
-          linemat[nline / 2] = mats + (nmat - 1);
-          lines[nline++] = prev;
-          lines[nline++] = q;
-        }
+        if (i > 0 && !r3lines_push(&lns, prev, q, mats + (nmat - 1))) { ok = 0; break; }
         prev = q;
       }
     } else if (strcmp(kw, "end") == 0) {
@@ -1012,8 +1041,8 @@ omni_str omni_r3_render(omni_str path) {
           r3_raster_tri(&S, &fb, tris.pos + i, tris.nrm + i, m);
         }
         if (pass == 0)
-          for (size_t i = 0; i + 1 < nline; i += 2)
-            r3_raster_line(&S, &fb, lines[i], lines[i + 1], linemat[i / 2]);
+          for (size_t i = 0; i + 1 < lns.n; i += 2)
+            r3_raster_line(&S, &fb, lns.p[i], lns.p[i + 1], lns.mat[i / 2]);
       }
       /* 透明片元按深度**由远到近** source-over 盖到不透明层上（每个采样点各自一条链） */
       if (fb.nfrag > 0) {
@@ -1068,7 +1097,7 @@ omni_str omni_r3_render(omni_str path) {
   }
 
   free(tris.pos); free(tris.nrm); free((void *) tris.mat);
-  free(lines); free((void *) linemat);
+  free(lns.p); free((void *) lns.mat);
   free(mats);
   free(text);
   return out;
