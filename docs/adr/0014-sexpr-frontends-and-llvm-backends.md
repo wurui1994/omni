@@ -12197,6 +12197,29 @@ node 自己；换成运行时的量口之后这个数就对上了 —— 11 MiB�
 于是 `d < fuzz` 永远不成立、一路递归到 53 层（每层还要构造记录 -> 32 GiB）。
 最小复现留在 `/tmp/omni-shade/bpA.asy`（十行，就是那份退化面片 + 一句 draw）。
 
+**根因看清了（读码 + 上面那些数一起对上的）**：`asy__sbound`（asy_builtins.asy:1785，
+bound.cc 的 `bound` 那一格）是**四叉递归**，每一层都要新建 15 个 `real[]`
+（11 个长 7 的 split + 4 个长 16 的子面片），一次调用就是一千多字节。
+终止判据 `sgn*(bb - controlbound) >= -fuzz` 里 fuzz 每层翻倍，所以控制点"鼓得远"的
+面片（BezierPatch 那份的内部点 (1,0,±1) 就鼓在角点之外）要切十几层才收敛 ——
+调用次数是百万量级，**乘上每次那一千多字节就是几十 GB**。
+
+**这不是判据抄错，是"asy 层的递归 + arena 永不回收"撞在一起**：同一份 asy 代码在
+JS 那条腿上跑得完（25s 出图），因为 V8 会把那些临时数组回收掉。文件里 1783 行那句
+早就写着"真要它就得把 `bound/boundtri` 做成运行时的原生内建，而不是 asy 层的递归"。
+
+**下一刀的两条路**（我倾向第 1 条，它同时解决内存与速度）：
+
+1. **给 arena 加 mark/release，在这一处用**：`asy__sbound` 回的是一个 `real`，
+   **什么都不逃逸** —— 在 `asy__addpatch3`/`asy__addtri3` 里把那六次调用整体
+   圈起来，出了作用域整块丢掉。要加的是运行时的两个口子
+   （`omni_arena_mark` / `omni_arena_release`）+ 方言的 `(arenamark)`/`(arenarelease E)`
+   + asy 侧 `_arenamark()`/`_arenarelease(m)`（JS 那条腿是空操作）。
+   风险点写清：release 之后不能再碰那段里分配的东西，所以只用在"回标量"的地方。
+2. 把 `bound/boundtri` 做成原生内建（1783 行那句的原意）：省掉 asy 层的分配与解释开销，
+   但要在两条腿上各写一份并逐位对上。
+
+
 
 
 
