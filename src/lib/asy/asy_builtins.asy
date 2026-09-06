@@ -8408,14 +8408,22 @@ void shipout3(string prefix, frame f, string format="",
     bb = (int) (255 * background[2] + 0.5);
     asy__r3bg = new real[] {background[0], background[1], background[2]};
   } else asy__r3bg = new real[] {1, 1, 1};
-  // 一整张白（或背景色）的十六进制，按倍增拼 —— 44 万个字节的十六进制是 89 万个字符，
-  // 一格一格拼是二次的，倍增是 20 次拷贝。gs 那条路走通时这一份只当兜底。
+  // 一整张背景色的十六进制。**按二进制拼**：`need` 份 px 拆成若干个 2^k 段，
+  // 拷贝量 O(n log n)、拼接次数只有 log2(need) 次。
+  // 从前是"倍增 + 尾巴一格一格补"，那条尾巴在 C 那条腿上是**平方级**的 ——
+  // omni_str 不可变，每补一格就整份重拷。量出来的：size(10cm) 那一族（fw=fh=1132、
+  // need=128 万）在 run-c 上 arena 堆到 32 GiB 被 OOM 杀掉，图一张都出不来；
+  // 而 JS 腿的 `+=` 是 rope，看不出来。这一格是那 8 份"没出图"的真根因。
   string px = asy__hex2(br) + asy__hex2(bg) + asy__hex2(bb);
-  string hex = px;
+  string hex = "";
   int need = fw * fh;
-  int have = 1;
-  while (have * 2 <= need) { hex = hex + hex; have = have * 2; }
-  while (have < need) { hex = hex + px; have = have + 1; }
+  string chunk = px;
+  int remain = need;
+  while (remain > 0) {
+    if (remain % 2 == 1) hex = hex + chunk;
+    remain = (int) (remain / 2);
+    if (remain > 0) chunk = chunk + chunk;
+  }
   // 像素：投影 + gs 那一段在三维那一节（`drawop3` 要在那儿才有名字），走下面这个桩。
   string got = asy__r3hexfn(f, oW, oH, fw, fh, angle, zoom, m, M, shift, expand, t);
   if (length(got) == fw * fh * 3 * 2) hex = got;
@@ -11201,6 +11209,9 @@ private real asy__pbound(triple[] P, bool mx, int which, real b, real fuzz, int 
   real bb = asy__rm(mx, b, asy__cornerbound(P, mx, which));
   real sgn = mx ? 1 : -1;
   if (sgn * (bb - asy__ratiobound(P, mx, which)) >= -fuzz || depth == 0) return bb;
+  // 每层自己圈一格作用域（与 asy__sbound 同一条理由：这一层的 15 个数组在四个子调用
+  // 回来之后就死了，而子调用回的只是一个 real）
+  int mk = _arenamark();
   int d = depth - 1;
   real fz = fuzz * 2;
   triple[] c0 = asy__split3(P[0], P[1], P[2], P[3]);
@@ -11225,7 +11236,9 @@ private real asy__pbound(triple[] P, bool mx, int which, real b, real fuzz, int 
   bb = asy__pbound(s2, mx, which, bb, fz, d);
   triple[] s3 = {c7[5], c8[5], c9[5], c10[5], c7[3], c8[3], c9[3], c10[3],
                  c7[0], c8[0], c9[0], c10[0], c3[5], c3[4], c3[2], P[15]};
-  return asy__pbound(s3, mx, which, bb, fz, d);
+  real r = asy__pbound(s3, mx, which, bb, fz, d);
+  _arenarelease(mk);
+  return r;
 }
 
 // path3.cc:842 / :849（三角面片的三个角 0/6/9，另外七个控制点）
