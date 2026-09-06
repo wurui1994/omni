@@ -10256,9 +10256,15 @@ private void asy__merge3hook() {
     // 细分交给 C：这里发的是**原始的十六个控制点**，比旧路（自己先细分到 64 倍再发
     // ShadingType 7）小得多。
     {
-        string sn(real v) { return string(v, 17); }
+      string sn(real v) { return string(v, 17); }
       string sv(triple v) { return " " + sn(v.x) + " " + sn(v.y) + " " + sn(v.z); }
-      string scn = "r3 1" + nl
+      // **清单是攒成一段段再合的**，不是一路 `s = s + …`：那一句在 C 那条腿上是
+      // 每次重新分配再拷一遍（omni_str 不可变），面片一多就是 O(n^2) ——
+      // 量出来的：cylinder 那个例子（solids 的旋转面）在 run-c 上 100s 都写不出清单，
+      // 而清单本身只有几百 KB。JS 那条腿看不出来（V8 的 += 是 rope）。
+      // 合并按**两两归并**（log n 趟），总拷贝量 O(n log n)。
+      string[] pp;
+      pp.push("r3 1" + nl
         + "size " + string(oW) + " " + string(oH) + " " + string(fw) + " " + string(fh) + nl
         + "proj " + (ortho ? "ortho" : "persp") + " " + sn(angle) + " " + sn(zoom) + nl
         + "box" + sv(m) + sv(M) + nl
@@ -10268,11 +10274,11 @@ private void asy__merge3hook() {
         // 单位下的大小**：Distance/Straightness 都是用户单位的距离平方，这样就是
         // "细分到片内起伏不到一个像素"。参考那边这一格由 drawsurface 传进来，
         // 具体取值还没量到，先用这个；量到了再换。
-        + "res " + sn((M.x - m.x) / fw) + nl;
+        + "res " + sn((M.x - m.x) / fw) + nl);
       for (int i = 0; i < asy__r3lights.length; ++i) {
         real[] d = i < asy__r3ldiff.length ? asy__r3ldiff[i] : new real[] {1, 1, 1, 1};
-        scn = scn + "light" + sv(asy__r3lights[i]) + " " + sn(d[0]) + " " + sn(d[1])
-          + " " + sn(d[2]) + nl;
+        pp.push("light" + sv(asy__r3lights[i]) + " " + sn(d[0]) + " " + sn(d[1])
+          + " " + sn(d[2]) + nl);
       }
       string mline(drawop3 o) {
         real[] df = o.p.length > 0 ? asy__penrgb(o.p[0]) : new real[] {0, 0, 0};
@@ -10293,7 +10299,7 @@ private void asy__merge3hook() {
           string s = "patch " + (o3.straight ? "1" : "0");
           for (int a = 0; a < 4; ++a)
             for (int b = 0; b < 4; ++b) s = s + sv(P[a][b]);
-          scn = scn + mline(o3) + s + nl;
+          pp.push(mline(o3) + s + nl);
           nink = nink + 1;
         } else if (o3.kind == 2) {
           // 三角面片（管子的接头：球帽与圆盘）。十个控制点按 bezierpatch.cc:652 那张图的
@@ -10301,15 +10307,15 @@ private void asy__merge3hook() {
           // —— 我们这边是按行长 1/2/3/4 存的，对应 P[0][0]、P[1][0]、P[1][1]、P[2][0..2]、P[3][0..3]。
           triple[][] P = o3.P3;
           if (P.length < 4 || P[3].length < 4) continue;
-          scn = scn + mline(o3) + "btri " + (o3.straight ? "1" : "0")
+          pp.push(mline(o3) + "btri " + (o3.straight ? "1" : "0")
             + sv(P[0][0]) + sv(P[1][0]) + sv(P[1][1])
             + sv(P[2][0]) + sv(P[2][1]) + sv(P[2][2])
-            + sv(P[3][0]) + sv(P[3][1]) + sv(P[3][2]) + sv(P[3][3]) + nl;
+            + sv(P[3][0]) + sv(P[3][1]) + sv(P[3][2]) + sv(P[3][3]) + nl);
           nink = nink + 1;
         } else if (o3.kind == 4) {
           triple[] T = o3.T3;
           if (T.length < 3) continue;
-          scn = scn + mline(o3) + "tri" + sv(T[0]) + sv(T[1]) + sv(T[2]) + nl;
+          pp.push(mline(o3) + "tri" + sv(T[0]) + sv(T[1]) + sv(T[2]) + nl);
           nink = nink + 1;
         } else if (o3.kind == 0) {
           // path3：GL 那边是 GL_LINES（1 采样宽）。这里按 t 均匀取点把三次段拉直 ——
@@ -10332,13 +10338,21 @@ private void asy__merge3hook() {
             }
           }
           if (cnt >= 2) {
-            scn = scn + mline(o3) + "line " + string(cnt) + s + nl;
+            pp.push(mline(o3) + "line " + string(cnt) + s + nl);
             nink = nink + 1;
           }
         }
       }
-      scn = scn + "end" + nl;
+      pp.push("end" + nl);
       if (nink > 0) {
+        // 两两归并（log n 趟）—— 见上面那段注释：一路 `s = s + …` 在 C 那条腿上是 O(n^2)
+        while (pp.length > 1) {
+          string[] nx;
+          for (int i = 0; i + 1 < pp.length; i += 2) nx.push(pp[i] + pp[i + 1]);
+          if (pp.length % 2 == 1) nx.push(pp[pp.length - 1]);
+          pp = nx;
+        }
+        string scn = pp.length > 0 ? pp[0] : "";
         string dir3 = "/tmp/omni-r3";
         if (_runproc("mkdir -p " + dir3) == 0) {
           _writetext(dir3 + "/r3.scn", scn);
