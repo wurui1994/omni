@@ -14,11 +14,8 @@
  */
 #include "omni.h"
 
-/* class 引用的显式空检查：C 侧不能让它变成段错误，否则和 JS 后端的诊断分叉 */
-void *omni_nullck(void *p) {
-  if (!p) omni_error("null reference");
-  return p;
-}
+/* class 引用的显式空检查（`omni_nullck`）挪去 omni.h 当 static inline 了 ——
+   它是生成代码里最密的一个调用，跨编译单元内联不了就只剩纯调用开销（见那儿的注）。 */
 
 #ifdef OMNI_NO_ARENA
 

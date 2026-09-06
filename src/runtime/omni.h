@@ -97,7 +97,15 @@ OMNI_NORETURN void omni_errorf(const char *fmt, ...);
 OMNI_NORETURN void omni_fail(omni_str msg);
 
 /* omni_mem.c */
-void *omni_nullck(void *p);
+/* class 引用的显式空检查。**必须内联**：它是生成代码里最密的一个调用 ——
+   每次读写 class 字段、每次数组下标都要过一遍。剖过 bars3 的二进制
+   （/usr/bin/sample，14s 窗口）：`omni_nullck` 以 1971 个栈顶样本排第一，
+   而函数体只有一条判断 —— 跨编译单元 clang 内联不了，全是纯调用开销。
+   放在头里之后调用点只剩一条 cbz + 慢路径跳转。 */
+static inline void *omni_nullck(void *p) {
+  if (!p) omni_error("null reference");
+  return p;
+}
 /* 增长：调用方必须传旧字节数 —— arena 不给每次分配加尺寸头（小对象上太贵），
    所以尺寸只能由知道它的容器代码传进来。语义等价于 realloc。 */
 void *omni_grow(void *p, size_t oldBytes, size_t newBytes);
