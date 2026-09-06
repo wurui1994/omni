@@ -3672,7 +3672,13 @@ pen cmyk(real c, real m, real y, real k) {
 }
 pen cmyk(pen p) { pen q = p; q.iscmyk = true; return q; }
 pen interp(pen a, pen b, real t) {
-  pen p = a;
+  // **必须 pencopy**：`struct pen` 是引用语义（asy 的 struct），从前这儿写的是
+  // `pen p = a;` 再改 p 的字段 —— 改的是 **a 自己**。踩出来的样子（twoSpheres）：
+  // `Gradient(green+opacity(0.6), white, …)` 里 interp(white, green, t) 把**全局的
+  // white 笔**染成了绿的，随后 `light.background()`（plain_prethree.asy:212 的
+  // `background == nullpen ? white : background`）回的就是绿 —— 整张画布底色变绿，
+  // 位图 1858830 个像素只有我们有 ink。真 asy 那边 pen 是值类型，没有这一格。
+  pen p = pencopy(a);
   p.red = a.red + (b.red - a.red) * t;
   p.green = a.green + (b.green - a.green) * t;
   p.blue = a.blue + (b.blue - a.blue) * t;
