@@ -634,13 +634,37 @@ static void r3_shade(const r3scene *s, const r3mat *mat, r3v nrm, r3v viewPos,
  *   239 207 175 159 127 …（绿是 1,183,1，背景 255）
  * 换成覆盖率是 1/16、3/16、5/16、6/16、8/16 —— **十六分之一一档**，
  * 4 采样只能给出 0、1/4、1/2、3/4、1（我们从前那一版就是 191、128）。 */
-#define R3_NS 16
-static const float R3_SAMPLE[R3_NS][2] = {
-  { 0.125f, 0.125f }, { 0.375f, 0.125f }, { 0.625f, 0.125f }, { 0.875f, 0.125f },
-  { 0.125f, 0.375f }, { 0.375f, 0.375f }, { 0.625f, 0.375f }, { 0.875f, 0.375f },
-  { 0.125f, 0.625f }, { 0.375f, 0.625f }, { 0.625f, 0.625f }, { 0.875f, 0.625f },
-  { 0.125f, 0.875f }, { 0.375f, 0.875f }, { 0.625f, 0.875f }, { 0.875f, 0.875f }
+#define R3_NS 4
+/* **4x MSAA 的标准点位**（相对像素左下角）。
+ * 从前这儿写的是 16 个点（4x4 网格），那是被 psfile.cc:74 的 `dealias` 骗了：
+ * EPS 那一侧 asy 会把位图再过一遍 **2x2 前向平均**（`antialias=2`，见 outImage），
+ * 于是 4 个采样 x 2x2 平均 = 16 档覆盖率、x 投影 8 个值各 2 个 —— 正是标定量到的样子。
+ * 真正的管子是：4x MSAA -> 解析（四舍五入）-> dealias（截断）。 */
+static float R3_SAMPLE[R3_NS][2] = {
+  { 0.625f, 0.125f }, { 0.125f, 0.375f }, { 0.875f, 0.625f }, { 0.375f, 0.875f }
 };
+
+/* 对照用：=grid 是 2x2 规则网格、=alt 是另一条对角线的那一族（配对方式反过来）。
+ * 哪一族是对的**量出来的**：一段 26.57 度的 1bp 管子（rulers/ln2.asy），
+ * alt 那族给出 159,32,32,159、参考是 191,63,63,191；换成上面这族之后
+ * **整张位图 0 字节不同**。（两族的 x/y 投影都是 {1,3,5,7}/8，竖边横边分不出来。） */
+static void r3_pick_samples(void) {
+  const char *e = getenv("OMNI_R3_SAMPLES");
+  if (!e) return;
+  if (strcmp(e, "grid") == 0) {
+    static const float q[2] = { 0.25f, 0.75f };
+    for (int j = 0; j < 2; ++j)
+      for (int i = 0; i < 2; ++i) {
+        R3_SAMPLE[j * 2 + i][0] = q[i];
+        R3_SAMPLE[j * 2 + i][1] = q[j];
+      }
+  } else if (strcmp(e, "alt") == 0) {
+    static const float m[4][2] = {
+      { 0.375f, 0.125f }, { 0.875f, 0.375f }, { 0.125f, 0.625f }, { 0.625f, 0.875f }
+    };
+    for (int k = 0; k < 4; ++k) { R3_SAMPLE[k][0] = m[k][0]; R3_SAMPLE[k][1] = m[k][1]; }
+  }
+}
 
 /* 透明那一档：GL 那边是把片元攒进逐像素的链表（fragment.glsl 的 TRANSPARENT 分支
  * 往 fragment[]/depth[] 里写），再按深度合成。
@@ -668,17 +692,13 @@ static r3clip r3_project(const r3scene *s, r3v v) {
   return c;
 }
 
-/* 裁剪坐标 -> 窗口坐标。**两个方向各减半个像素** —— 这一格是量出来的，不是推的：
- * 拿真 asy 当尺子，同一个满幅方块在 size(40)/60/61/100 四档上，参考位图的边一律落在
- * 「第 1 个像素半覆盖（值 128）、第 W-2 个像素半覆盖」，也就是内容的连续区间是
- * [1.5, W-2.5]；而按 glViewport 的教科书公式 (ndc*0.5+0.5)*W 算出来是
- * [1.967, W-1.97]（视景体 61 单位、内容 60 单位、W=240 那一档）。**宽度对得上**
- * （236.07 vs 236），差的只是一个**与尺寸无关的恒定 -0.5 像素**。
- * 所以这里照量到的口径写；根因（驱动的采样点位 vs glViewport 的口径）另案追。 */
+/* 裁剪坐标 -> 窗口坐标：glViewport 的教科书公式，**不再减半个像素**。
+ * 那半个像素本来是 dealias 挪出来的（2x2 前向平均把画面整体挪了 +0.5），
+ * 现在 dealias 自己实现了（见文件末尾的 r3_dealias），这里就该照标准口径写。 */
 static void r3_window(const r3fb *fb, r3clip c, double *x, double *y, double *z) {
   double inv = 1.0 / c.w;
-  *x = (c.x * inv * 0.5 + 0.5) * fb->fw - 0.5;
-  *y = (c.y * inv * 0.5 + 0.5) * fb->fh - 0.5;
+  *x = (c.x * inv * 0.5 + 0.5) * fb->fw;
+  *y = (c.y * inv * 0.5 + 0.5) * fb->fh;
   *z = c.z * inv * 0.5 + 0.5;                 /* glDepthRange 默认 0..1 */
 }
 
@@ -695,6 +715,10 @@ static void r3_raster_tri(const r3scene *s, r3fb *fb, const r3v *P, const r3v *N
   }
   double area = (wx[1] - wx[0]) * (wy[2] - wy[0]) - (wx[2] - wx[0]) * (wy[1] - wy[0]);
   if (area == 0.0) return;
+  { const char *e = getenv("OMNI_R3_DEBUG");
+    if (e && e[0] == '3')
+      fprintf(stderr, "tri (%.3f,%.3f) (%.3f,%.3f) (%.3f,%.3f)\n",
+              wx[0], wy[0], wx[1], wy[1], wx[2], wy[2]); }
   int front = area > 0.0;                      /* GL 默认正面是逆时针 */
   double inv2a = 1.0 / area;
 
@@ -877,6 +901,7 @@ static int r3_nums(r3lex *L, double *out, int n) {
 
 /* ------------------------------------------------------------------ 入口 */
 omni_str omni_r3_render(omni_str path) {
+  r3_pick_samples();
   char *cpath = omni_cstr(path);
   FILE *f = fopen(cpath, "rb");
   if (!f) return omni_str_new((char *) "", 0);
@@ -1078,24 +1103,48 @@ omni_str omni_r3_render(omni_str path) {
         fprintf(stderr, "r3: %dx%d 三角 %zu（透明 %zu）线段 %zu 混色 %zu\n",
                 S.fw, S.fh, ntr, ntrans, lns.n / 2, fb.nblend);
 
-      /* 解析（多重采样求平均）+ 十六进制。行序照 glReadPixels：**第 0 行在下**。 */
+      /* 解析（多重采样求平均，**四舍五入**）+ dealias + 十六进制。
+       * 行序照 glReadPixels：**第 0 行在下**。
+       * dealias 是 psfile.cc:74 的那一趟（`antialias=2` 默认打开）：
+       * 除最后一行、最后一列，每个像素换成它与右、下、右下三格的**平均（截断）**。
+       * 两侧对齐的凭据（一条 1bp 竖线，size(120)）：几何 [190.4,194.4]，
+       * 解析后 raw = …255,128,0,0,0,128,255…，dealias 后 191,64,0,0,64,191 ——
+       * 参考位图逐字节就是这一串。 */
       size_t nb = (size_t) S.fw * S.fh * 3;
-      char *hex = omni_alloc_bytes(nb * 2 + 1);
-      static const char *D = "0123456789abcdef";
-      size_t o = 0;
-      for (int y = 0; y < S.fh; ++y) {
+      unsigned char *img = (unsigned char *) malloc(nb);
+      if (!img) { free(fb.depth); free(fb.col); free(tris.pos); free(tris.nrm);
+                  free((void *) tris.mat); free(lns.p); free((void *) lns.mat);
+                  free(mats); free(text); return out; }
+      for (int y = 0; y < S.fh; ++y)
         for (int x = 0; x < S.fw; ++x) {
           size_t base = ((size_t) y * S.fw + x) * R3_NS;
           for (int ch = 0; ch < 3; ++ch) {
             unsigned sum = 0;
             for (int k = 0; k < R3_NS; ++k) sum += fb.col[(base + k) * 3 + ch];
-            unsigned v = (sum + R3_NS / 2) / R3_NS;
-            hex[o++] = D[(v >> 4) & 15];
-            hex[o++] = D[v & 15];
+            img[((size_t) y * S.fw + x) * 3 + ch]
+              = (unsigned char) ((sum + R3_NS / 2) / R3_NS);
           }
         }
+      {
+        size_t nw = (size_t) S.fw * 3;
+        for (int y = 0; y + 1 < S.fh; ++y)
+          for (int x = 0; x + 1 < S.fw; ++x) {
+            unsigned char *a = img + (size_t) y * nw + (size_t) x * 3;
+            for (int ch = 0; ch < 3; ++ch)
+              a[ch] = (unsigned char) (((unsigned) a[ch] + (unsigned) a[ch + 3]
+                                        + (unsigned) a[ch + nw]
+                                        + (unsigned) a[ch + nw + 3]) / 4);
+          }
+      }
+      char *hex = omni_alloc_bytes(nb * 2 + 1);
+      static const char *D = "0123456789abcdef";
+      size_t o = 0;
+      for (size_t i = 0; i < nb; ++i) {
+        hex[o++] = D[(img[i] >> 4) & 15];
+        hex[o++] = D[img[i] & 15];
       }
       hex[o] = 0;
+      free(img);
       out = omni_str_new(hex, (int64_t) o);
     }
     free(fb.depth);

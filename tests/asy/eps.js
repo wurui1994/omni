@@ -115,6 +115,10 @@ function srcStamp() {
   };
   walk(join(ROOT, 'src', 'core'));
   walk(join(ROOT, 'src', 'lib'));
+  // 运行时（C）也要算进去 —— 三维那张位图是 src/runtime/omni_r3.c 画的，
+  // 不算它的话改了光栅化还在报上一趟的缓存数（踩过一次：改完采样点位，
+  // 六个例子里五个都是缓存里的旧数）。
+  walk(join(ROOT, 'src', 'runtime'));
   stampMemo = h16(parts.join('|'));
   return stampMemo;
 }
