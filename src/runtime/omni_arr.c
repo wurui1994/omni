@@ -85,8 +85,9 @@ OMNI_ARR_IMPL(str, omni_str)
  * 所以这一份只管字节：长度/容量/增长/越界消息都在这里（与上面四份逐字同一套话），
  * 元素的**读写**留给两条腿各自去做 —— 那是一条 load / 一条 store，与它们发局部变量
  * 读写用的是同一份代码，不存在"数组里的向量和局部变量里的向量不一样"的可能。
- * `_at`/`_push`/`_pop` 回的是**格子的地址**，值从不经过这里。 */
-struct omni_arr_blob_s { int64_t len; int64_t cap; int64_t esz; char *items; };
+ * `_at`/`_push`/`_pop` 回的是**格子的地址**，值从不经过这里。
+ * 结构体本身挪到 omni.h 了（`_len_i`/`_at_i` 要它）—— 下面那两个外部符号留着给
+ * run-llvm 那条腿 call，实现就是转调那两个 inline，逻辑只有一份。 */
 
 static void omni_arr_blob_reserve(omni_arr_blob a, int64_t n) {
   if (n <= a->cap) return;
@@ -110,14 +111,9 @@ omni_arr_blob omni_arr_blob_new(int64_t n, int64_t esz, const void *zero) {
   return a;
 }
 
-int64_t omni_arr_blob_len(omni_arr_blob a) { omni_nullck(a); return a->len; }
+int64_t omni_arr_blob_len(omni_arr_blob a) { return omni_arr_blob_len_i(a); }
 
-void *omni_arr_blob_at(omni_arr_blob a, int64_t i) {
-  omni_nullck(a);
-  if (i < 0 || i >= a->len)
-    omni_errorf("array index out of range: %lld (length %lld)", (long long)i, (long long)a->len);
-  return a->items + a->esz * i;
-}
+void *omni_arr_blob_at(omni_arr_blob a, int64_t i) { return omni_arr_blob_at_i(a, i); }
 
 void *omni_arr_blob_push(omni_arr_blob a) {
   omni_nullck(a);

@@ -136,9 +136,13 @@ class CEmitter {
       const n = cArrOps(t);
       const el = cTypeName(t.elem);
       out.push(`static inline omni_arr_blob ${n}_new(int64_t n, ${el} zero) { return omni_arr_blob_new(n, (int64_t)sizeof(${el}), &zero); }`);
-      out.push(`static inline int64_t ${n}_len(omni_arr_blob a) { return omni_arr_blob_len(a); }`);
-      out.push(`static inline ${el} ${n}_get(omni_arr_blob a, int64_t i) { return *(${el} *)omni_arr_blob_at(a, i); }`);
-      out.push(`static inline ${el} ${n}_set(omni_arr_blob a, int64_t i, ${el} v) { *(${el} *)omni_arr_blob_at(a, i) = v; return v; }`);
+      // `_i` 那两个是 omni.h 里的 static inline（见那儿的注）：这一族 wrapper 本来就是
+      // static inline，可它转手调的 `omni_arr_blob_len/at` 在另一个编译单元，
+      // clang 内联不到底 —— 剖 bars3 时 `omni_arr_blob_at` 1431 个栈顶样本、`_len` 677。
+      // 换成 `_i` 之后一路内联到位；外部符号照旧留着给 run-llvm 那条腿 call。
+      out.push(`static inline int64_t ${n}_len(omni_arr_blob a) { return omni_arr_blob_len_i(a); }`);
+      out.push(`static inline ${el} ${n}_get(omni_arr_blob a, int64_t i) { return *(${el} *)omni_arr_blob_at_i(a, i); }`);
+      out.push(`static inline ${el} ${n}_set(omni_arr_blob a, int64_t i, ${el} v) { *(${el} *)omni_arr_blob_at_i(a, i) = v; return v; }`);
       out.push(`static inline ${el} ${n}_push(omni_arr_blob a, ${el} v) { *(${el} *)omni_arr_blob_push(a) = v; return v; }`);
       out.push(`static inline ${el} ${n}_pop(omni_arr_blob a) { return *(${el} *)omni_arr_blob_pop(a); }`);
     }

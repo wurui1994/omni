@@ -257,6 +257,27 @@ OMNI_ARR_DECL(str, omni_str)
    理由（生成的结构体在运行时里不可见、而两条腿必须共用同一份增长逻辑）见 omni_arr.c。 */
 typedef struct omni_arr_blob_s *omni_arr_blob;
 
+/* 结构体摊在头里、`_i` 那两个是 static inline —— 只为让 **C 那条腿**的
+   `<类型>_len/_get/_set`（backend-c 逐形状生成的 static inline wrapper）真的内联到底。
+   剖过 bars3：`omni_arr_blob_at` 1431 个栈顶样本、`omni_arr_blob_len` 677，
+   函数体各只有一两条判断，跨编译单元全是纯调用开销。
+   **外部符号照旧留着**（下面那两条声明，实现在 omni_arr.c 里转调这两个 inline）：
+   run-llvm 那条腿发的是 `call omni_arr_blob_at`，符号一没就链不上。 */
+struct omni_arr_blob_s { int64_t len; int64_t cap; int64_t esz; char *items; };
+
+static inline int64_t omni_arr_blob_len_i(omni_arr_blob a) {
+  omni_nullck(a);
+  return a->len;
+}
+
+static inline void *omni_arr_blob_at_i(omni_arr_blob a, int64_t i) {
+  omni_nullck(a);
+  if (i < 0 || i >= a->len)
+    omni_errorf("array index out of range: %lld (length %lld)", (long long) i,
+                (long long) a->len);
+  return a->items + a->esz * i;
+}
+
 omni_arr_blob omni_arr_blob_new(int64_t n, int64_t esz, const void *zero);
 int64_t omni_arr_blob_len(omni_arr_blob a);
 void *omni_arr_blob_at(omni_arr_blob a, int64_t i);
