@@ -12136,6 +12136,23 @@ asy 侧 `asy__r3hexfn` 只负责把 op 表写成一份场景清单（**原始的
 
 EPS 那一轴现在能选腿：`OMNI_EPS_LEG=run-c`。
 
+### 量到的一条腿差：run-c 上大例子会被 OOM 杀掉，根子是 arena 永不回收
+
+BezierPatch（两条 `2bp` 粗线画在面片上的曲线，管子那一族）在 run-c 上
+**清单一个字都没写出来就死了**（直接跑那份 a.out 是 `Killed: 9`，SIGKILL），
+而同一份例子在 `run`（JS 宿主）上 25s 内出图（2.4MB 的 EPS）。
+
+所以不是光栅化器、也不是几何算错：`src/runtime/omni_mem.c` 的分配器是
+**arena（bump 指针）、永不单独释放**（ADR-0001 把 arena 排在 ARC 之前的那条决策）。
+asy 的三维几何是"大量短命临时对象"（tube 的 Split、每片面片的控制点数组），
+在 arena 上就是内存单调增长；JS 那条腿有 GC，所以看不见。
+
+这条不是三维那一档的账，是 C/LLVM 两条腿在**长跑程序**上的账。下一刀的选择：
+(1) 给容器/数组这一族加引用计数或标记清扫；(2) 给 asy 的三维几何加"作用域 arena"
+（一趟 shipout 结束整块丢掉）；(3) 先把 tube 那一族的临时分配减下来。
+量口是现成的：`/usr/bin/time -l` 看峰值 RSS，或者跑 BezierPatch 看还死不死。
+
+
 
 
 
