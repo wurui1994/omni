@@ -252,7 +252,7 @@ class CEmitter {
     this.out.push(this.opts.amalgamate ? amalgamate().trim() : RUNTIME_INCLUDE);
     this.line();
     for (const t of containers) this.line(`OMNI_REF_DECL(${cTypeName(t)})`);
-    for (const c of classes) this.line(`OMNI_REF_DECL(c_${c.name})`);
+    for (const c of classes) this.line(`OMNI_REF_DECL(ct_${c.name})`);
     this.line();
     // 字符串字面量池的落点：只需要 omni.h 里的 omni_s16，所以放在最前面（内容最后回填）
     this.s16At = this.out.length;
@@ -497,7 +497,7 @@ class CEmitter {
   }
 
   classBody(c) {
-    this.line(`struct c_${c.name}_s {`);
+    this.line(`struct ct_${c.name}_s {`);
     this.indent++;
     for (const f of c.fields) this.line(`${cTypeName(this.noteVec(f.type))} f_${f.name};`);
     this.indent--;
@@ -720,9 +720,9 @@ class CEmitter {
   }
 
   classNew(c) {
-    this.line(`static c_${c.name} omni_new_C_${c.name}(void) {`);
+    this.line(`static ct_${c.name} omni_new_C_${c.name}(void) {`);
     this.indent++;
-    this.line(`c_${c.name} o = (c_${c.name})omni_alloc(sizeof(struct c_${c.name}_s));`);
+    this.line(`ct_${c.name} o = (ct_${c.name})omni_alloc(sizeof(struct ct_${c.name}_s));`);
     for (const f of c.fields) this.line(`o->f_${f.name} = ${this.zeroExpr(f.type)};`);
     this.line('return o;');
     this.indent--;

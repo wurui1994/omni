@@ -279,7 +279,12 @@ export function cTypeName(t) {
     case 'void': return 'void';
     case 'dynamic': return 'omni_dyn';
     case 'struct': return `s_${t.name}`;
-    case 'class': return `c_${t.name}`;
+    // 类名用 `ct_` 而不是 `c_`：变量在 C 那条腿上是 `c_<名字>`，而 asy 里
+    // 「变量与类型同名」是常态（three.asy 的 `light light=currentlight`、
+    // `material material`、`render render`…）。撞上之后形参表里后一个同类型形参
+    // 会被 C 解析成 "unknown type name 'c_light'" —— 三维那一族在 run-c 上
+    // 一份都出不来，根子就是这一格。
+    case 'class': return `ct_${t.name}`;
     case 'enum': return `e_${t.name}`;
     // 所有函数值在 C 里是同一个指针类型；签名只出现在调用处的强制转换里
     case 'fn': return 'omni_fn';

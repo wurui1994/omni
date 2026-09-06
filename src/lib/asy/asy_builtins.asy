@@ -10246,6 +10246,105 @@ private void asy__merge3hook() {
       else if (ops[0].P3.length > 0 && ops[0].P3[0].length > 0) asy__r3op0 = ops[0].P3[0][0];
     }
     int nink = 0;
+    // ---------------------------------------------------------------- 新路（权威）
+    // 把 op 表写成一份**场景清单**，交给运行时的光栅化器（runtime/omni_r3.c，照
+    // reference 的 glrender.cc / renderBase.cc / bezierpatch 与两份 glsl 转写）。
+    // 那边是逐采样 Z-buffer + 4 采样多重采样 + 逐片元 PBR —— 也就是真 asy 的口径。
+    // 下面 gs 那条路只在**这个口子回空串**时走（JS 宿主那三条腿还没有光栅化器）：
+    // 量过，gs 不给 shfill 反锯齿（`fill` 的边 255 227 153、`shfill` 的边 255 1 1），
+    // 面片每片外溢整像素，那条路上位图永远差一圈边。
+    // 细分交给 C：这里发的是**原始的十六个控制点**，比旧路（自己先细分到 64 倍再发
+    // ShadingType 7）小得多。
+    {
+        string sn(real v) { return string(v, 17); }
+      string sv(triple v) { return " " + sn(v.x) + " " + sn(v.y) + " " + sn(v.z); }
+      string scn = "r3 1" + nl
+        + "size " + string(oW) + " " + string(oH) + " " + string(fw) + " " + string(fh) + nl
+        + "proj " + (ortho ? "ortho" : "persp") + " " + sn(angle) + " " + sn(zoom) + nl
+        + "box" + sv(m) + sv(M) + nl
+        + "shift " + sn(shift.x) + " " + sn(shift.y) + nl
+        + "bg " + sn(asy__r3bg[0]) + " " + sn(asy__r3bg[1]) + " " + sn(asy__r3bg[2]) + nl
+        // res 是细分判据（bezierpatch.cc:41 的 res2 = res*res）。取**一个像素在用户
+        // 单位下的大小**：Distance/Straightness 都是用户单位的距离平方，这样就是
+        // "细分到片内起伏不到一个像素"。参考那边这一格由 drawsurface 传进来，
+        // 具体取值还没量到，先用这个；量到了再换。
+        + "res " + sn((M.x - m.x) / fw) + nl;
+      for (int i = 0; i < asy__r3lights.length; ++i) {
+        real[] d = i < asy__r3ldiff.length ? asy__r3ldiff[i] : new real[] {1, 1, 1, 1};
+        scn = scn + "light" + sv(asy__r3lights[i]) + " " + sn(d[0]) + " " + sn(d[1])
+          + " " + sn(d[2]) + nl;
+      }
+      string mline(drawop3 o) {
+        real[] df = o.p.length > 0 ? asy__penrgb(o.p[0]) : new real[] {0, 0, 0};
+        real[] em = o.p.length > 1 ? asy__penrgb(o.p[1]) : new real[] {0, 0, 0};
+        real[] sp = o.p.length > 2 ? asy__penrgb(o.p[2]) : new real[] {0, 0, 0};
+        return "mat " + sn(df[0]) + " " + sn(df[1]) + " " + sn(df[2]) + " " + sn(o.opacity)
+          + " " + sn(em[0]) + " " + sn(em[1]) + " " + sn(em[2])
+          + " " + sn(sp[0]) + " " + sn(sp[1]) + " " + sn(sp[2])
+          + " " + sn(o.shininess) + " " + sn(o.metallic) + " " + sn(o.fresnel0)
+          + " " + (o.lightOn && asy__r3lights.length > 0 ? "1" : "0") + nl;
+      }
+      for (int i = 0; i < ops.length; ++i) {
+        drawop3 o3 = ops[i];
+        if (o3.p.length > 0 && invisible(o3.p[0])) continue;
+        if (o3.kind == 1) {
+          triple[][] P = o3.P3;
+          if (P.length < 4 || P[0].length < 4) continue;
+          string s = "patch " + (o3.straight ? "1" : "0");
+          for (int a = 0; a < 4; ++a)
+            for (int b = 0; b < 4; ++b) s = s + sv(P[a][b]);
+          scn = scn + mline(o3) + s + nl;
+          nink = nink + 1;
+        } else if (o3.kind == 2) {
+          // 三角面片（管子的接头）：先只发三个角当直三角 —— C 那边的
+          // BezierTriangle::render 还没转写（bezierpatch.cc:561）。
+          triple[][] P = o3.P3;
+          if (P.length < 4 || P[3].length < 4) continue;
+          scn = scn + mline(o3) + "tri" + sv(P[0][0]) + sv(P[3][0]) + sv(P[3][3]) + nl;
+          nink = nink + 1;
+        } else if (o3.kind == 4) {
+          triple[] T = o3.T3;
+          if (T.length < 3) continue;
+          scn = scn + mline(o3) + "tri" + sv(T[0]) + sv(T[1]) + sv(T[2]) + nl;
+          nink = nink + 1;
+        } else if (o3.kind == 0) {
+          // path3：GL 那边是 GL_LINES（1 采样宽）。这里按 t 均匀取点把三次段拉直 ——
+          // beziercurve.cc 的自适应细分还没转写，先用固定 16 段。
+          path3 g = o3.g3;
+          int L = g.nodes.length;
+          if (L < 2) continue;
+          string s = "";
+          int cnt = 0;
+          for (int a = 0; a + 1 < L; ++a) {
+            triple z0 = g.nodes[a].point; triple c0 = g.nodes[a].post;
+            triple c1 = g.nodes[a + 1].pre; triple z1 = g.nodes[a + 1].point;
+            int N = 16;
+            for (int k = (a == 0 ? 0 : 1); k <= N; ++k) {
+              real t = k / N; real u = 1 - t;
+              triple q = u * u * u * z0 + 3 * u * u * t * c0 + 3 * u * t * t * c1
+                + t * t * t * z1;
+              s = s + sv(q);
+              cnt = cnt + 1;
+            }
+          }
+          if (cnt >= 2) {
+            scn = scn + mline(o3) + "line " + string(cnt) + s + nl;
+            nink = nink + 1;
+          }
+        }
+      }
+      scn = scn + "end" + nl;
+      if (nink > 0) {
+        string dir3 = "/tmp/omni-r3";
+        if (_runproc("mkdir -p " + dir3) == 0) {
+          _writetext(dir3 + "/r3.scn", scn);
+          string hex = _r3render(dir3 + "/r3.scn");
+          if (hex != "") return hex;
+        }
+      }
+      nink = 0;
+    }
+
     // **所有 op 一起按深度排。** 视图空间里 z 越负越远，画家算法从远画到近；
     // 键取各自控制点/节点 z 的平均（真 asy 那边是 GPU 的 Z-buffer，glrender.cc:1355
     // 只开 GL_DEPTH_TEST、没有 polygon offset）。
