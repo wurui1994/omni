@@ -304,8 +304,7 @@ static int r3_render_patch(const r3scene *s, r3tris *t, const r3v *p,
   return 1;
 }
 
-/* 一片面片进表：先算 epsilon（bezierpatch.cc:70）与四角法向，再递归 */
-static int r3_add_patch(r3scene *s, r3tris *t, const r3v *p, int straight,
+/* 一片面片进表：先算 epsilon（bezierpatch.cc:70）与四角法向，再递归 */static int r3_add_patch(r3scene *s, r3tris *t, const r3v *p, int straight,
                         const r3mat *mat) {
   double eps = 0;
   for (int i = 1; i < 16; ++i) {
@@ -323,6 +322,110 @@ static int r3_add_patch(r3scene *s, r3tris *t, const r3v *p, int straight,
     return 1;
   }
   return r3_render_patch(s, t, p, P0, P1, P2, P3, n[0], n[1], n[2], n[3], mat, 0);
+}
+
+/* ------------------------------------------------------------------ 三角面片
+ * 管子的接头（球帽、圆盘）就是这一族，粗线在三维那边一定会走到。
+ * 控制点十个，编号照 bezierpatch.cc:652 那张图：
+ *   0=003(角) 1=102 2=012 3=201 4=111 5=021 6=300(角) 7=210 8=120 9=030(角)
+ * 判据是 bezierpatch.h:195 的 Distance：内点离三角形重心多远 + 三条边有多直。 */
+static double r3_tri_distance(const r3v *p) {
+  const double third = 1.0 / 3.0;
+  r3v p0 = p[0], p6 = p[6], p9 = p[9];
+  r3v ctr = r3v_scl(third, r3v_add(r3v_add(p0, p6), p9));
+  double d = r3v_abs2(r3v_sub(ctr, p[4]));
+  double t;
+  t = r3_straightness(p0, p[1], p[3], p6); if (t > d) d = t;
+  t = r3_straightness(p0, p[2], p[5], p9); if (t > d) d = t;
+  t = r3_straightness(p6, p[7], p[8], p9); if (t > d) d = t;
+  return d;
+}
+
+/* 三个角的法向（bezierpatch.cc:767-769 的那三句，套在整片上） */
+static void r3_tri_normals(const r3scene *s, const r3v *p, r3v n[3]) {
+  n[0] = r3_normal(s, p[9], p[5], p[2], p[0], p[1], p[3], p[6]);
+  n[1] = r3_normal(s, p[0], p[1], p[3], p[6], p[7], p[8], p[9]);
+  n[2] = r3_normal(s, p[6], p[7], p[8], p[9], p[5], p[2], p[0]);
+}
+
+/* 一刀四分（bezierpatch.cc:706-765 逐句照抄，名字都留着好对照） */
+static void r3_tri_split4(const r3v *p, r3v out[4][10]) {
+  r3v l003 = p[0], p102 = p[1], p012 = p[2], p201 = p[3], p111 = p[4];
+  r3v p021 = p[5], r300 = p[6], p210 = p[7], p120 = p[8], u030 = p[9];
+  #define H(a, b) r3v_scl(0.5, r3v_add((a), (b)))
+  r3v u021 = H(u030, p021);
+  r3v u120 = H(u030, p120);
+  r3v p033 = H(p021, p012);
+  r3v p231 = H(p120, p111);
+  r3v p330 = H(p120, p210);
+  r3v p123 = H(p012, p111);
+  r3v l012 = H(p012, l003);
+  r3v p312 = H(p111, p201);
+  r3v r210 = H(p210, r300);
+  r3v l102 = H(l003, p102);
+  r3v p303 = H(p102, p201);
+  r3v r201 = H(p201, r300);
+  r3v u012 = H(u021, p033);
+  r3v u210 = H(u120, p330);
+  r3v l021 = H(p033, l012);
+  r3v p4xx = r3v_add(r3v_scl(0.5, p231), r3v_scl(0.25, r3v_add(p111, p102)));
+  r3v r120 = H(p330, r210);
+  r3v px4x = r3v_add(r3v_scl(0.5, p123), r3v_scl(0.25, r3v_add(p111, p210)));
+  r3v pxx4 = r3v_add(r3v_scl(0.25, r3v_add(p021, p111)), r3v_scl(0.5, p312));
+  r3v l201 = H(l102, p303);
+  r3v r102 = H(p303, r201);
+  r3v l210 = H(px4x, l201);
+  r3v r012 = H(px4x, r102);
+  r3v l300 = H(l201, r102);
+  r3v r021 = H(pxx4, r120);
+  r3v u201 = H(u210, pxx4);
+  r3v r030 = H(u210, r120);
+  r3v u102 = H(u012, p4xx);
+  r3v l120 = H(l021, p4xx);
+  r3v l030 = H(u012, l021);
+  r3v l111 = H(p123, l102);
+  r3v r111 = H(p312, r210);
+  r3v u111 = H(u021, p231);
+  r3v c111 = r3v_scl(0.25, r3v_add(r3v_add(p033, p330), r3v_add(p303, p111)));
+  #undef H
+  r3v L[10] = { l003, l102, l012, l201, l111, l021, l300, l210, l120, l030 };
+  r3v R[10] = { l300, r102, r012, r201, r111, r021, r300, r210, r120, r030 };
+  r3v U[10] = { l030, u102, u012, u201, u111, u021, r030, u210, u120, u030 };
+  r3v C[10] = { r030, u201, r021, u102, c111, r012, l030, l120, l210, l300 };
+  for (int i = 0; i < 10; ++i) {
+    out[0][i] = L[i]; out[1][i] = R[i]; out[2][i] = U[i]; out[3][i] = C[i];
+  }
+}
+
+static int r3_render_tri(const r3scene *s, r3tris *t, const r3v *p,
+                         r3v P0, r3v P1, r3v P2, r3v N0, r3v N1, r3v N2,
+                         const r3mat *mat, int depth) {
+  double d = r3_tri_distance(p);
+  if (!(s->res2 > 0 && d == d) || d < s->res2 || depth >= 8)
+    return r3tris_push(t, P0, N0, P1, N1, P2, N2, mat);
+  r3v q[4][10];
+  r3_tri_split4(p, q);
+  for (int k = 0; k < 4; ++k) {
+    r3v n[3];
+    r3_tri_normals(s, q[k], n);
+    if (!r3_render_tri(s, t, q[k], q[k][0], q[k][6], q[k][9],
+                       n[0], n[1], n[2], mat, depth + 1)) return 0;
+  }
+  return 1;
+}
+
+static int r3_add_tri3(r3scene *s, r3tris *t, const r3v *p, int straight,
+                       const r3mat *mat) {
+  double eps = 0;
+  for (int i = 1; i < 10; ++i) {
+    double q = r3v_abs2(r3v_sub(p[i], p[0]));
+    if (q > eps) eps = q;
+  }
+  s->epsilon = eps * DBL_EPSILON;
+  r3v n[3];
+  r3_tri_normals(s, p, n);
+  if (straight) return r3tris_push(t, p[0], n[0], p[6], n[1], p[9], n[2], mat);
+  return r3_render_tri(s, t, p, p[0], p[6], p[9], n[0], n[1], n[2], mat, 0);
 }
 
 /* ------------------------------------------------------------------ 视景体与投影
@@ -797,6 +900,13 @@ omni_str omni_r3_render(omni_str path) {
       r3v p[16];
       for (int i = 0; i < 16; ++i) p[i] = r3v_mk(cp[3 * i], cp[3 * i + 1], cp[3 * i + 2]);
       if (!r3_add_patch(&S, &tris, p, st != 0, mats + (nmat - 1))) { ok = 0; break; }
+    } else if (strcmp(kw, "btri") == 0) {
+      /* 三角面片（管子的接头）：十个控制点，编号照 bezierpatch.cc:652 那张图 */
+      double st; double cp[30];
+      if (!r3_num(&L, &st) || !r3_nums(&L, cp, 30) || nmat == 0) { ok = 0; break; }
+      r3v p[10];
+      for (int i = 0; i < 10; ++i) p[i] = r3v_mk(cp[3 * i], cp[3 * i + 1], cp[3 * i + 2]);
+      if (!r3_add_tri3(&S, &tris, p, st != 0, mats + (nmat - 1))) { ok = 0; break; }
     } else if (strcmp(kw, "tri") == 0) {
       double v[9]; if (!r3_nums(&L, v, 9) || nmat == 0) { ok = 0; break; }
       r3v a = r3v_mk(v[0], v[1], v[2]);

@@ -10296,11 +10296,15 @@ private void asy__merge3hook() {
           scn = scn + mline(o3) + s + nl;
           nink = nink + 1;
         } else if (o3.kind == 2) {
-          // 三角面片（管子的接头）：先只发三个角当直三角 —— C 那边的
-          // BezierTriangle::render 还没转写（bezierpatch.cc:561）。
+          // 三角面片（管子的接头：球帽与圆盘）。十个控制点按 bezierpatch.cc:652 那张图的
+          // 编号发（0=003、1=102、2=012、3=201、4=111、5=021、6=300、7=210、8=120、9=030）
+          // —— 我们这边是按行长 1/2/3/4 存的，对应 P[0][0]、P[1][0]、P[1][1]、P[2][0..2]、P[3][0..3]。
           triple[][] P = o3.P3;
           if (P.length < 4 || P[3].length < 4) continue;
-          scn = scn + mline(o3) + "tri" + sv(P[0][0]) + sv(P[3][0]) + sv(P[3][3]) + nl;
+          scn = scn + mline(o3) + "btri " + (o3.straight ? "1" : "0")
+            + sv(P[0][0]) + sv(P[1][0]) + sv(P[1][1])
+            + sv(P[2][0]) + sv(P[2][1]) + sv(P[2][2])
+            + sv(P[3][0]) + sv(P[3][1]) + sv(P[3][2]) + sv(P[3][3]) + nl;
           nink = nink + 1;
         } else if (o3.kind == 4) {
           triple[] T = o3.T3;
