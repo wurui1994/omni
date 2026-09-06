@@ -284,7 +284,10 @@ static int r3_render_patch(const r3scene *s, r3tris *t, const r3v *p,
                            const r3mat *mat, int depth) {
   double h, v;
   r3_distance(p, &h, &v);
-  if ((h < s->res2 && v < s->res2) || depth >= 12) {
+  /* res2 <= 0（清单里没给 res）或者判据不是有限数时**当成平的** —— 不然一片就能
+   * 递归到深度上限，4^12 次。深度上限压到 8（最坏 65536 片），原版没有上限，
+   * 靠的是判据必然收敛。 */
+  if (!(s->res2 > 0 && h == h && v == v) || (h < s->res2 && v < s->res2) || depth >= 8) {
     if (!r3tris_push(t, P0, N0, P1, N1, P2, N2, mat)) return 0;
     if (!r3tris_push(t, P0, N0, P2, N2, P3, N3, mat)) return 0;
     return 1;
@@ -755,6 +758,11 @@ omni_str omni_r3_render(omni_str path) {
     } else if (strcmp(kw, "res") == 0) {
       double v; if (!r3_num(&L, &v)) { ok = 0; break; }
       S.res = v;
+      /* **res2 必须在这儿就算出来**：面片细分是在解析过程中跑的（读到一条 patch
+       * 就递归），而不是解析完之后。原先只在末尾算一次，于是细分时 res2 还是 0 ——
+       * 没有一片是"平的"，每片都递归到深度上限（量出来：vN 那把尺子 17 片面片
+       * × 4^12 ≈ 2.8 亿次，跑到 8 秒还没完）。 */
+      S.res2 = S.res * S.res;
     } else if (strcmp(kw, "light") == 0) {
       double v[6]; if (!r3_nums(&L, v, 6)) { ok = 0; break; }
       if (S.nlight < R3_MAXLIGHT) {
