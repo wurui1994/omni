@@ -1726,14 +1726,20 @@ static void r3_raster_pix(const r3scene *s, r3fb *fb, const r3v *P, const r3v *N
         if (ablend > 1.0f) ablend = 1.0f;
       }
       r3_shade(s, mat, nrm, vp, front, VC ? vc : NULL, rgb);
-      for (int i = 0; i < 3; ++i) {
-        if (rgb[i] < 0.0f) rgb[i] = 0.0f;
-        if (rgb[i] > 1.0f) rgb[i] = 1.0f;
-      }
       if (phase == 0) {
+        /* 不透明那一格照旧夹到 [0,1]（它对应的是写进 RGBA8 帧缓冲的那一步） */
+        for (int i = 0; i < 3; ++i) {
+          if (rgb[i] < 0.0f) rgb[i] = 0.0f;
+          if (rgb[i] > 1.0f) rgb[i] = 1.0f;
+        }
         fb->pdep[pix] = (float) z;
         for (int i = 0; i < 3; ++i) fb->pcol[pix * 3 + i] = rgb[i];
       } else {
+        /* **透明片元不夹**：参考那边片元存在 SSBO 的 vec4 里（fragment.glsl 写、
+           blend.glsl 读），`mix()` 是在**没夹过**的值上做的，只有最后写帧缓冲那一步才夹。
+           量到的原形（探针 sph_trans1 的高光，(495,484)）：近的那片是过曝的高光，
+           夹到 1 之后混出来是 0.856 → 218，而参考是 **255** —— 不夹的话
+           mix(0.712, >1, 0.5) 超过 1，写出去就是 255。 */
         float *f = fb->tfrag + (size_t) (--fb->tcnt[pix]) * 5;
         f[0] = rgb[0]; f[1] = rgb[1]; f[2] = rgb[2];
         f[3] = ablend; f[4] = (float) z;
@@ -2195,18 +2201,32 @@ omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
               float acc[3];
               for (int ch = 0; ch < 3; ++ch)
                 acc[ch] = od != 0.0f ? fb.pcol[i * 3 + ch] : (float) S.bg[ch];
+              int dbg = r3_pix_x >= 0
+                        && (int) (i % (size_t) S.fw) == r3_pix_x
+                        && (int) (i / (size_t) S.fw) == r3_pix_y;
+              if (dbg) {
+                fprintf(stderr, "r3pix %d,%d（逐像素那一路）：%zu 个片元，"
+                        "不透明深度 %.9g 底色 %.6f %.6f %.6f\n",
+                        r3_pix_x, r3_pix_y, cnt, (double) od,
+                        (double) acc[0], (double) acc[1], (double) acc[2]);
+                for (size_t a = 0; a < cnt; ++a) {
+                  const float *f = base + a * 5;
+                  fprintf(stderr, "  #%zu rgb %.6f %.6f %.6f alpha %.6f 深度 %.9g\n",
+                          a, (double) f[0], (double) f[1], (double) f[2],
+                          (double) f[3], (double) f[4]);
+                }
+              }
               /* 被不透明层挡住的片元跳掉（blend.glsl:104-106，判据是 `>=`） */
               size_t k = 0;
               if (od != 0.0f) while (k < cnt && base[k * 5 + 4] >= od) ++k;
               for (size_t a = k; a < cnt; ++a) {
                 const float *f = base + a * 5;
                 float al = f[3];
-                for (int ch = 0; ch < 3; ++ch) {
-                  float v = f[ch] * al + acc[ch] * (1.0f - al);
-                  if (v < 0.0f) v = 0.0f;
-                  if (v > 1.0f) v = 1.0f;
-                  acc[ch] = v;
-                }
+                /* **层与层之间不夹**（`mix()` 就是这一句，GLSL 不夹）：夹了的话
+                   过曝的高光会在混色里被削掉，见上面 r3_raster_pix 里那段注。
+                   最后 r3_unorm8 会夹。 */
+                for (int ch = 0; ch < 3; ++ch)
+                  acc[ch] = f[ch] * al + acc[ch] * (1.0f - al);
               }
               unsigned char q0 = r3_unorm8(acc[0]);
               unsigned char q1 = r3_unorm8(acc[1]);
