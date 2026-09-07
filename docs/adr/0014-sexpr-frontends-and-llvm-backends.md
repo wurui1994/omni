@@ -12488,6 +12488,16 @@ sacylinder3D 6449 → 6467（略差 18 个字节）；`flat_trans`/`edge_trans` 
   - `sph_vcol`（真渐变）：17362。
   下一刀就盯这一条：同一份几何，pen 给 alpha 时只差 30 个字节、顶点色给 alpha 时差 16314。
 
+**第十五刀（已做）：收不透明底色那一趟放宽到"任一采样点被覆盖"**（`OMNI_R3_OPQANY`，
+默认开）。GL 开着多重采样时，只要有一个采样点被覆盖就会跑一次 fragment shader，
+于是 `opaqueColor[pixel]`/`opaqueDepth[pixel]` 就被写，而 `gl_FragCoord` 仍是**像素中心**
+（重心可能是负的，颜色与深度都是外推的）。我们从前也按中心判覆盖，于是"透明面压在
+不透明图元的边上"那一族（虚线、箭头、点、线框）底色退成了背景。
+透明那一趟**不能**这么放（量过：一格只有 1/4 采样点被覆盖时参考没有片元）。
+账：sacylinder3D **6467 → 1488**、vectorfieldsphere **112976 → 67387**、
+twoSpheres 219606 → **209791**、探针 `sph_trans` **429 → 27**；
+`flat_trans`/`edge_trans` 仍逐字节相同，不透明的例子一个字节不差。
+
 **第十四刀（已做）：`Epsilon`（消裂缝的内收）的透明判据要连顶点色的 alpha 一起看。**
 参考那边 `BezierPatch::init` 里 `Epsilon = transparent ? 0 : FillFactor*res`，而那一位
 `transparent` 是 `queue(...)` 传进来的 —— 在 drawsurface 那层它是"材质的 alpha **或顶点色的

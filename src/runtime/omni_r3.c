@@ -1317,6 +1317,10 @@ static int r3_pix_x = -1, r3_pix_y = -1;
    **256 是量出来的**（探针 sph_trans1）：16 → 7155、**256 → 30**、4096 → 477、不吸 → 483。
    正好对上 GL 常见的 8 位子像素精度。 */
 static double r3_snap = 256.0;
+/* 收不透明底色那一趟放宽到"任一采样点被覆盖"（`OMNI_R3_OPQANY`，**默认开**）。
+   见 r3_raster_pix 里那段注。量出来的：sacylinder3D 6467 → 1488、
+   vectorfieldsphere 112976 → 67387、twoSpheres 219606 → 209791。 */
+static int r3_opqany = 1;
 /* 透明那一趟走**逐像素**的链（照 count.glsl / blend.glsl 的结构，见 r3_raster_pix 的
    头注）。**默认开** —— 量出来的账（八个三维例子）：sacylinder3D 18813 → 6449、
    triangles 10574 → 183、twoSpheres 435546 → 296130，没有透明的那几个一个字节不差。
@@ -1717,16 +1721,35 @@ static void r3_raster_pix(const r3scene *s, r3fb *fb, const r3v *P, const r3v *N
     for (int x = x0; x < x1; ++x) {
       double px = x + 0.5, py = y + 0.5;
       double a0 = ((wx1 - px) * (wy2 - py) - (wx2 - px) * (wy1 - py)) * inv2a;
-      if (a0 < 0.0 || (a0 == 0.0 && !tb0)) continue;
       double a1 = ((wx2 - px) * (wy0 - py) - (wx0 - px) * (wy2 - py)) * inv2a;
-      if (a1 < 0.0 || (a1 == 0.0 && !tb1)) continue;
       double a2 = 1.0 - a0 - a1;
       /* 第三条判据用**真正的第三条边函数**，不用 `1-a0-a1`：后者的"恰好为 0"与
          "采样点正好落在 v0->v1 那条边上"不是一回事（差一次舍入），而填充规则的
          tie-break 只在恰好为 0 时起作用。插值照旧用 a2（与原来逐位相同）。
          量出来的：flat_trans 那条对角线 1740 -> 0。 */
       double e2 = ((wx0 - px) * (wy1 - py) - (wx1 - px) * (wy0 - py)) * inv2a;
-      if (e2 < 0.0 || (e2 == 0.0 && !tb2)) continue;
+      int inside = !(a0 < 0.0 || (a0 == 0.0 && !tb0))
+                   && !(a1 < 0.0 || (a1 == 0.0 && !tb1))
+                   && !(e2 < 0.0 || (e2 == 0.0 && !tb2));
+      if (!inside) {
+        /* **收不透明底色那一趟（phase 0）可以放宽到"任一采样点被覆盖"**
+           （`OMNI_R3_OPQANY=1`）：GL 开着多重采样时，只要有一个采样点被覆盖就会跑
+           一次 fragment shader、于是 `opaqueColor[pixel]`/`opaqueDepth[pixel]` 就被写，
+           而 `gl_FragCoord` 仍是**像素中心**（重心可能是负的，颜色与深度是外推的）。
+           透明那一趟不能这么放（量过：一格只有 1/4 采样点被覆盖时参考没有片元）。 */
+        if (!(phase == 0 && r3_opqany)) continue;
+        int any = 0;
+        for (int k = 0; k < R3_NS && !any; ++k) {
+          double sx = x + R3_SAMPLE[k][0], sy = y + R3_SAMPLE[k][1];
+          double b0 = ((wx1 - sx) * (wy2 - sy) - (wx2 - sx) * (wy1 - sy)) * inv2a;
+          if (b0 < 0.0) continue;
+          double b1 = ((wx2 - sx) * (wy0 - sy) - (wx0 - sx) * (wy2 - sy)) * inv2a;
+          if (b1 < 0.0) continue;
+          if (1.0 - b0 - b1 < 0.0) continue;
+          any = 1;
+        }
+        if (!any) continue;
+      }
       double z = a0 * wz0 + a1 * wz1 + a2 * wz2;
       size_t pix = (size_t) y * (size_t) fb->fw + (size_t) x;
       if (phase == 0) {
@@ -1970,6 +1993,8 @@ omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
     if (e) r3_oitpix = strcmp(e, "0") != 0; }
   { const char *e = getenv("OMNI_R3_SNAP");
     if (e) r3_snap = atof(e); }
+  { const char *e = getenv("OMNI_R3_OPQANY");
+    if (e) r3_opqany = strcmp(e, "0") != 0; }
   { const char *e = getenv("OMNI_R3_PIX");
     if (e) {
       char *q = NULL;
