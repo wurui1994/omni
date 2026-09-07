@@ -1384,7 +1384,14 @@ export function asyAssignIndex(L, node, lhs, rhs, op) {
     + ` (bin ">=" (var ${iv}) (alen (var ${av}))))`
     + ` (do (set ${iv} (call ${L.cycHelper(a.type).idx} (var ${av}) (var ${iv})))))`);
   const grow = L.arrHelper('grow', el);
-  const head2 = `(expr (call ${grow} (var ${av}) (var ${iv})))`;
+  // **只有真要长的时候才进那个 helper。** 判据与 `asy__grow_元素` 体里的 while
+  // 一字相同（`(alen a) <= i`），所以长出来的长度与填进去的零值都不变；差别只在
+  // "界内那一路不再是一次跨模块的真调用"。为什么值得：剖 pdb（run-c，-O0）——
+  // `asy__grow_real` **1.09 亿次调用**、自用 5.3s 排第二，而它绝大多数执行就是
+  // "判据一次不成立就返回"（模块级定长缓冲 `asy__cb16*`/`asy__cb10*` 那种逐格填的
+  // 循环，下标本来就在界内）。`alen` 在 C 那条腿上是宏（omni.h 的 OMNI__ALEN）。
+  const head2 = `(if (bin "<=" (alen (var ${av})) (var ${iv}))`
+    + ` (do (expr (call ${grow} (var ${av}) (var ${iv})))))`;
   const cur = `(aget (var ${av}) (var ${iv}))`;
   // 数组与下标都已经绑成临时量了，所以"写进去的那个值"能原地读回来（求值次数不变）——
   // 赋值当表达式那一档（`A[i][f(m)] = A[i][g(m)] = 1`，fin.asy:51）靠这一格

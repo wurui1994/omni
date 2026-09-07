@@ -1576,17 +1576,26 @@ const $r_nextafter = (x, y) => $js_math("W", x, y);
    fma 是精确运算（IEEE-754 5.4.1 只舍一次）。
    做法：Dekker 拆分求准确积（p + e == a*b），再 two-sum 收回 p+c 的尾巴 t，
    最后 s + (t + e) 只舍一次。
-   边界写在明处：SPLIT*a 在 |a| 接近 realMax 时会溢出、次正规上 e 会损失，这两档与硬件
-   fma 不一致；要它的场合（几何界、Bezier 求值）都在正常量级里。 */
+   **溢出那一档退回朴素式** a*b + c：Dekker 的拆分在 |a*b| 溢出时算的是 inf - inf = nan，
+   而真 fma 是"先精确、再舍一次"，1e400 舍出来就是 inf。踩过的原形：abs((1e200,1e200))
+   （asy__pabs = sqrt(fma(y,y,x*x))）在 asy 与 run-c/run-llvm 上都是 inf，这条腿从前出 nan
+   （tests/asy/cases/10-pairs）。朴素式在这一档是对的：|a*b| 已经超出 realMax，
+   再加一个有限的 c 也还在那之上，舍出来仍是 inf。
+   次正规上 e 会损失那一条照旧留着（与硬件 fma 不一致，要它的场合都在正常量级里）。
+   这份文件是 String.raw 模板，注释里**不许出现反引号**。 */
 const $r_fma = (a, b, c) => {
   const p = a * b;
+  if (!Number.isFinite(p) || !Number.isFinite(c)) return p + c;
   const SPLIT = 134217729;
   const ca = SPLIT * a, ah = ca - (ca - a), al = a - ah;
   const cb = SPLIT * b, bh = cb - (cb - b), bl = b - bh;
   const e = ((ah * bh - p) + ah * bl + al * bh) + al * bl;
   const s = p + c, bs = s - p;
   const t = (p - (s - bs)) + (c - bs);
-  return s + (t + e);
+  const r = s + (t + e);
+  // SPLIT * a 在 |a| 接近 realMax 时也会溢出（真积却可能是有限的），那时 e 是 nan、
+  // 结果被污染。这一档同样退回朴素式 —— 精度差一位，但不会把有限值变成 nan。
+  return Number.isNaN(r) && !Number.isNaN(s) ? s : r;
 };
 
 // ------------------------------------------------- JSON.stringify（ADR-0011）

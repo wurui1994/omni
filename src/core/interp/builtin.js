@@ -1010,13 +1010,17 @@ export function applyBuiltin(I, e, a) {
   if (e.name === 'rmath_fma') {
     const [x, y, z] = a;
     const p = x * y;
+    // 溢出/非有限那一档退回朴素式（与 $r_fma 同一条，理由见那儿）：Dekker 的拆分
+    // 在这儿算的是 inf - inf = nan，而真 fma 先精确再舍一次，1e400 舍出来是 inf。
+    if (!Number.isFinite(p) || !Number.isFinite(z)) return p + z;
     const SPLIT = 134217729;
     const cx = SPLIT * x, xh = cx - (cx - x), xl = x - xh;
     const cy = SPLIT * y, yh = cy - (cy - y), yl = y - yh;
     const err = ((xh * yh - p) + xh * yl + xl * yh) + xl * yl;
     const s = p + z, bs = s - p;
     const t = (p - (s - bs)) + (z - bs);
-    return s + (t + err);
+    const r = s + (t + err);
+    return Number.isNaN(r) && !Number.isNaN(s) ? s : r;
   }
   switch (e.name) {
     case 'print': printLine(strOf(e.argType.k, a[0])); return undefined;

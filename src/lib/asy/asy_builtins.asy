@@ -11777,6 +11777,11 @@ private real[] asy__cb16z = new real[16];
 private real[] asy__cb10x = new real[10];
 private real[] asy__cb10y = new real[10];
 private real[] asy__cb10z = new real[10];
+// `asy__sbound2tri` 的四格出参也复用一份（从前是 `real[] ob = {0,0,0,0}`，
+// 也就是**每片三角一次 arena 分配** —— pdb 上 256 万次）。安全的理由与上面那六个
+// 缓冲同一条：`asy__addtri3` 不重入，三次调用各自读完再进下一次，
+// 而退回递归那一支（`asy__sboundtri`）不碰这一格。
+private real[] asy__ob4 = new real[4];
 
 private void asy__addpatch3(frame f, triple[][] P, bool straight)
 {
@@ -11895,7 +11900,7 @@ private void asy__addtri3(frame f, triple[][] P, bool straight)
   // 同上：求界这一段圈进分配器的作用域（回的都是 real，什么都不逃逸）
   int mk = _arenamark();
   // 六个界一趟算（asy__sbound2tri），只有跑出 fuzz 的那一侧才退回递归那份
-  real[] ob = {0, 0, 0, 0};
+  real[] ob = asy__ob4;
   asy__sbound2tri(cx, sx, sX, fx, ob);
   real lx = ob[2] != 0 ? asy__sboundtri(cx, false, sx, fx, asy__rmaxdepth) : ob[0];
   real hx = ob[3] != 0 ? asy__sboundtri(cx, true, sX, fx, asy__rmaxdepth) : ob[1];
@@ -12229,9 +12234,13 @@ private pair asy__pboundtri2(triple[] P, bool mx, pair b, real fuzz, int depth) 
   // 把 `mx` 提到循环外分成两支，顺带省掉每次的那个分支。**逐位不变**：写的就是
   // `asy__rm` 展开后的同一串比较，顺序也没动。
   real b0; real b1; real r0; real r1;
-  real p0x = P[0].x; real p0y = P[0].y; real p0z = P[0].z;
-  real a0 = asy__rf(0, P[0]); real a6 = asy__rf(0, P[6]); real a9 = asy__rf(0, P[9]);
-  real e0 = asy__rf(1, P[0]); real e6 = asy__rf(1, P[6]); real e9 = asy__rf(1, P[9]);
+  triple q0 = P[0]; triple q6 = P[6]; triple q9 = P[9];
+  real p0x = q0.x; real p0y = q0.y; real p0z = q0.z;
+  // `asy__rf` 也在这儿**手工摊开**（同上一条理由）：它就是 `v.x/v.z` / `v.y/v.z`，
+  // 而剖 pdb 它被调 **3838 万次**（自用 1.94s），十次里九次出自这一族的这十处。
+  // 逐位不变 —— 写的是同一个除法，被除数与除数一个字没换。
+  real a0 = p0x / p0z; real a6 = q6.x / q6.z; real a9 = q9.x / q9.z;
+  real e0 = p0y / p0z; real e6 = q6.y / q6.z; real e9 = q9.y / q9.z;
   real MX = -p0x; real MY = -p0y; real Z = p0z; real MZ = -Z;
   if (mx) {
     real t0 = a0 > a6 ? a0 : a6; real c0 = t0 > a9 ? t0 : a9;
@@ -12248,9 +12257,10 @@ private pair asy__pboundtri2(triple[] P, bool mx, pair b, real fuzz, int depth) 
       Z = Z > vz ? Z : vz;
       MZ = MZ > nz ? MZ : nz;
     }
-    triple w0 = (-MX, -MY, Z); triple w1 = (-MX, -MY, -MZ);
-    real g0 = asy__rf(0, w0); real h0 = asy__rf(0, w1);
-    real g1 = asy__rf(1, w0); real h1 = asy__rf(1, w1);
+    // 同上：`asy__rf` 摊开成除法（w0=(-MX,-MY,Z)、w1=(-MX,-MY,-MZ)，于是四个商
+    // 就是下面这四句；括号是为了不赌一元负号与 `/` 的优先级）
+    real g0 = (-MX) / Z; real h0 = (-MX) / (-MZ);
+    real g1 = (-MY) / Z; real h1 = (-MY) / (-MZ);
     r0 = g0 > h0 ? g0 : h0;
     r1 = g1 > h1 ? g1 : h1;
   } else {
@@ -12267,9 +12277,9 @@ private pair asy__pboundtri2(triple[] P, bool mx, pair b, real fuzz, int depth) 
       Z = Z < vz ? Z : vz;
       MZ = MZ < nz ? MZ : nz;
     }
-    triple w0 = (-MX, -MY, Z); triple w1 = (-MX, -MY, -MZ);
-    real g0 = asy__rf(0, w0); real h0 = asy__rf(0, w1);
-    real g1 = asy__rf(1, w0); real h1 = asy__rf(1, w1);
+    // 同上：`asy__rf` 摊开成除法
+    real g0 = (-MX) / Z; real h0 = (-MX) / (-MZ);
+    real g1 = (-MY) / Z; real h1 = (-MY) / (-MZ);
     r0 = g0 < h0 ? g0 : h0;
     r1 = g1 < h1 ? g1 : h1;
   }
