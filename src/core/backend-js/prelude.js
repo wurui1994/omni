@@ -730,7 +730,7 @@ function $run_proc(cmd) {
 // (r3render PATH)：三维那一档的光栅化。权威在 C（runtime/omni_r3.c，照 reference 的
 // glrender.cc/renderBase.cc 与两份 glsl 转写）。这条腿回空串 = "这儿没有光栅化器"，
 // 调用方会走 gs 那条旧路。等 C 那份定稿再照抄成 JS，届时两边要逐字节对上。
-function $r3_render(p) { return ""; }
+function $r3_render(p, nums) { return ""; }
 // ---------------------------------------------------------------- 容器
 // list -> Array，dict -> Map（插入序，ADR-0006 的硬约束），set -> Set
 // 键的显示形式（只在 "key not found" 那句里用，冷路径）要**按静态类型**给：int 换成

@@ -1605,7 +1605,25 @@ static void r3_raster_line(const r3scene *s, r3fb *fb, r3v a, r3v b,
 }
 
 /* ------------------------------------------------------------------ 清单解析 */
-typedef struct { const char *p, *end; } r3lex;
+/* 清单的读头。`nums`/`nn`/`ni` 是**数走内存那一路**（清单头一行是 `r3 2` 时）：
+   文本只留关键字与结构，数按顺序放在 asy 侧传进来的 `real[]` 里，`r3_num` 按游标取。
+   为什么：面片一片就是 48 个 double，走文本要格式化一遍再解析一遍（量过：pdb 的清单
+   65MB、解析 0.82s，asy 侧拼串又是一大块）。`r3 1`（数写在文本里）照旧收 ——
+   手写的清单单测、以及 `OMNI_R3_TEXT=1` 那条调试路都靠它。 */
+typedef struct {
+  const char *p, *end;
+  const double *nums;
+  int64_t nn, ni;
+  int ver;
+} r3lex;
+
+/* 关键字后面那一个字节算不算"词到这儿为止"。**换行也要算**：`r3 2` 那一路
+   数不在文本里，于是 mat / pcol 那两行就是光秃秃的 `"mat\n"` —— 只认空白的旧判据
+   会把它们全数不着，`matcap` 停在 1、材质表被写爆（图元里存的是 `const r3mat *`）。
+   踩过一次：位图差从 18813 涨到 233985，且透明误判让 OIT 那一趟白跑（慢十几倍）。 */
+static int r3_kwend(char c) {
+  return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
 
 static void r3_skipws(r3lex *L) {
   while (L->p < L->end && (*L->p == ' ' || *L->p == '\t' || *L->p == '\r' || *L->p == '\n'))
@@ -1632,6 +1650,12 @@ static int r3_word(r3lex *L, char *buf, size_t cap) {
    （剖 pdb：`sn` 1022 万次调用、自用 3.34s，`OMNI_PROFILE=1` 排前列），
    而位模式两侧都便宜、而且是**精确**的（不像十进制要靠 17 位才round-trip）。 */
 static int r3_num(r3lex *L, double *out) {
+  /* `r3 2`：数在数组里，按顺序取；文本那侧这一格根本没有记号。 */
+  if (L->ver >= 2) {
+    if (L->ni >= L->nn) return 0;
+    *out = L->nums[L->ni++];
+    return 1;
+  }
   char buf[64];
   if (!r3_word(L, buf, sizeof buf)) return 0;
   if (buf[0] == 'x') {
@@ -1681,7 +1705,7 @@ static int r3_tri_transparent(const r3tris *t, size_t i) {
   return c && (c[3] < 1.0f || c[7] < 1.0f || c[11] < 1.0f);
 }
 
-omni_str omni_r3_render(omni_str path) {
+omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
   clock_t t0 = clock(), t1 = t0, t2 = t0;
   r3_pick_samples();
   char *cpath = omni_cstr(path);
@@ -1697,7 +1721,15 @@ omni_str omni_r3_render(omni_str path) {
   fclose(f);
   text[got] = 0;
 
-  r3lex L; L.p = text; L.end = text + got;
+  r3lex L;
+  L.p = text;
+  L.end = text + got;
+  /* 头一行 `r3 2` = 数走 `nums` 那条内存的路；`r3 1` = 数写在文本里（手写的清单、
+     以及 `OMNI_R3_TEXT=1` 那条调试路）。这儿只看版本号，记号照旧由下面的循环吃掉。 */
+  L.ver = (got >= 4 && text[0] == 'r' && text[1] == '3' && text[2] == ' ' && text[3] == '2') ? 2 : 1;
+  L.nums = nums == NULL ? NULL : (const double *) nums->items;
+  L.nn = nums == NULL ? 0 : nums->len;
+  L.ni = 0;
   r3scene S;
   memset(&S, 0, sizeof S);
   S.zoom = 1;
@@ -1714,7 +1746,7 @@ omni_str omni_r3_render(omni_str path) {
   size_t nmat = 0, matcap = 1;
   for (const char *q = text; q < L.end; ++q)
     if ((q == text || q[-1] == '\n') && q + 3 < L.end
-        && q[0] == 'm' && q[1] == 'a' && q[2] == 't' && (q[3] == ' ' || q[3] == '\t'))
+        && q[0] == 'm' && q[1] == 'a' && q[2] == 't' && r3_kwend(q[3]))
       matcap++;
   mats = (r3mat *) malloc(matcap * sizeof(r3mat));
   if (!mats) { free(text); return omni_str_new((char *) "", 0); }
@@ -1722,7 +1754,7 @@ omni_str omni_r3_render(omni_str path) {
   for (const char *q = text; q < L.end; ++q)
     if ((q == text || q[-1] == '\n') && q + 4 < L.end
         && q[0] == 'p' && q[1] == 'c' && q[2] == 'o' && q[3] == 'l'
-        && (q[4] == ' ' || q[4] == '\t')) { tris.usecol = 1; break; }
+        && r3_kwend(q[4])) { tris.usecol = 1; break; }
   float pend[16]; int npend = 0;
   /* 逐顶点**法向**（`tnrm` 那一行，与 pcol 一样只作用在紧接着的那一条 tri 上）：
    * 三角网那一族（drawTriangles，`render(tessellate=true)` 走它）自带平滑法向，
@@ -1740,7 +1772,11 @@ omni_str omni_r3_render(omni_str path) {
   char kw[32];
   while (ok && r3_word(&L, kw, sizeof kw)) {
     if (strcmp(kw, "r3") == 0) {
-      double v; if (!r3_num(&L, &v) || v != 1) { ok = 0; break; }
+      /* 版本号**永远在文本里**（`r3 1` / `r3 2`）：v2 时 r3_num 是从数组取的，
+         而这一格必须先于数组那条路读出来。 */
+      char vw[8];
+      if (!r3_word(&L, vw, sizeof vw)) { ok = 0; break; }
+      if (strcmp(vw, "1") != 0 && strcmp(vw, "2") != 0) { ok = 0; break; }
       header = 1;
     } else if (strcmp(kw, "size") == 0) {
       double v[4]; if (!r3_nums(&L, v, 4)) { ok = 0; break; }

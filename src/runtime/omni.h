@@ -208,9 +208,19 @@ omni_str omni_get_env(omni_str name);
 int64_t omni_write_text(omni_str path, omni_str text);
 /* `(runproc CMD)`：`/bin/sh -c CMD`，回退出码（跑不起来也回非 0，不报错） */
 int64_t omni_run_proc(omni_str cmd);
-/* `(r3render PATH)`：读一份三维场景清单，光栅化成位图，回十六进制的 RGB 字节   （读不到或清单不合格回空串）。实现在 omni_r3.c —— 照 reference 的
-   renderBase.cc / glrender.cc / tile.h 与 base/shaders 下的两份 glsl 转写。 */
-omni_str omni_r3_render(omni_str path);
+/* `(r3render PATH NUMS)`：读一份三维场景清单，光栅化成位图，回十六进制的 RGB 字节
+   （读不到或清单不合格回空串）。实现在 omni_r3.c —— 照 reference 的
+   renderBase.cc / glrender.cc / tile.h 与 base/shaders 下的两份 glsl 转写。
+   清单头一行是 `r3 2` 时，文本里只有关键字与结构，**数按出现次序放在 NUMS 里**
+   （`real[]`，也就是下面那个 blob 结构体）——一片面片就是 48 个 double，
+   走文本要格式化再解析两遍。`r3 1` 是老格式（数写在文本里），NUMS 可以是空。
+   参数写成 `struct omni_arr_f64_s *` 而不是 `omni_arr_f64`：那个 typedef 在下面几十行，
+   而这一段声明按文件次序在前（照 omni.h 里"按实现文件分段"的排法，不动次序）。
+   **前面那一句 `struct omni_arr_f64_s;` 是必需的**：C 里在函数原型里头一次提到某个
+   struct 标签，那个标签只活在原型作用域里 —— 于是它与下面 file scope 的那一个是
+   两个不同的类型，omni_r3.c 里的定义会报 "conflicting types"（踩过一次）。 */
+struct omni_arr_f64_s;
+omni_str omni_r3_render(omni_str path, struct omni_arr_f64_s *nums);
 
 /* omni_math.c —— 转手 libm（那份文件的头注里写了逐字节/容差的分界） */
 double omni_r_sqrt(double x);

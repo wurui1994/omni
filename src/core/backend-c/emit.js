@@ -1370,7 +1370,7 @@ class CEmitter {
       case 'run_proc': return `omni_run_proc(${a[0]})`;
       // `(r3render PATH)`：三维那一档的光栅化（runtime/omni_r3.c，照 reference 的
       // glrender.cc/renderBase.cc/tile.h 与两份 glsl 转写）。C 与 LLVM 两条腿的权威。
-      case 'r3_render': return `omni_r3_render(${a[0]})`;
+      case 'r3_render': return `omni_r3_render(${a[0]}, ${a[1]})`;
       // 分配器的作用域（omni_mem.c 的 mark/release）。release 回 0 只是为了让它
       // 在方言里是个表达式 —— 调用方把它当语句用。
       case 'arena_mark': return 'omni_arena_mark()';

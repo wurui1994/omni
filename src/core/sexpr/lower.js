@@ -1822,20 +1822,30 @@ class CoreLowerer {
       }
       return { kind: 'Builtin', name: 'run_proc', args: [c], argType: STRING, type: INT };
     }
-    // `(r3render PATH)`：把一份"三维场景清单"光栅化成位图，回十六进制的 RGB 字节。
+    // `(r3render PATH NUMS)`：把一份"三维场景清单"光栅化成位图，回十六进制的 RGB 字节。
+    // `NUMS` 是清单里那些**数**（`(arr real)`）：清单文本只留关键字与结构，数走这条内存的路
+    // —— 面片的控制点一片就是 48 个 double，走文本要格式化再解析两遍（量过：pdb 的清单
+    // 65MB、解析 0.82s、asy 侧拼串又是一大块）。**不需要给方言加新 op**：blob 结构体已经
+    // 摊进 omni.h，C 那条腿上数组就是那个结构体的指针，运行时直接读 `->items`。
+    // 老格式（数写在文本里）留着：`OMNI_R3_TEXT=1` 时 asy 侧照旧发 `r3 1`，运行时按头一行分流。
     // 这是**准确性关键**的那一层（ADR-0014 第十九节）：asy 的三维图是 OpenGL 画出来的
     // 位图，逐字节对齐要的是同一套光栅化（逐采样 Z-buffer + 4 采样 MSAA）与同一套
     // 片元着色（fragment.glsl 的 PBR，float 精度）。这些照 reference 的 C++/GLSL 转写在
     // runtime/omni_r3.c 里，C 与 LLVM 两条腿直接用它 —— 不再靠 gs 子进程（gs 的 shfill
     // 不反锯齿，那条路上位图永远差一圈边）。JS 那条腿暂时回空串，由调用方走旧路。
     if (h === 'r3render') {
-      if (n.items.length !== 2) return this.err(n, '(r3render PATH)');
+      if (n.items.length !== 3) return this.err(n, '(r3render PATH NUMS)');
       const c = this.expr(n.items[1]);
       if (c === null) return null;
       if (c.type.k !== 'string') {
-        return this.err(n.items[1], `(r3render PATH) 的参数要是 string，这里是 ${coreTypeText(c.type)}`);
+        return this.err(n.items[1], `(r3render PATH NUMS) 的第一个参数要是 string，这里是 ${coreTypeText(c.type)}`);
       }
-      return { kind: 'Builtin', name: 'r3_render', args: [c], argType: STRING, type: STRING };
+      const nu = this.expr(n.items[2]);
+      if (nu === null) return null;
+      if (nu.type.k !== 'arr' || nu.type.elem.k !== 'real') {
+        return this.err(n.items[2], `(r3render PATH NUMS) 的第二个参数要是 (arr real)，这里是 ${coreTypeText(nu.type)}`);
+      }
+      return { kind: 'Builtin', name: 'r3_render', args: [c, nu], argType: STRING, type: STRING };
     }
     // `(arenamark)` / `(arenarelease E)`：分配器的"作用域"。C 那条腿是 arena
     // （bump 指针、永不单独释放），于是**回标量的深递归**会把垃圾一路堆上去 ——

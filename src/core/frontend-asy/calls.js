@@ -829,11 +829,14 @@ export function asyCall(L, n) {
   if (nm === '_r3render') {
     const raw = asyCallArgs(L, n);
     if (raw === null) return null;
-    if (raw.length !== 1) return L.err(n, `'${nm}' 要 1 个实参，给了 ${raw.length} 个`);
-    if (raw[0].lines !== null) for (const s of raw[0].lines) L.pre.push(s);
-    const v = L.coerce(raw[0].v, 'string', raw[0].node, `'${nm}' 的实参`);
+    if (raw.length !== 2) return L.err(n, `'${nm}' 要 2 个实参（清单路径、数组），给了 ${raw.length} 个`);
+    for (const r of raw) if (r.lines !== null) for (const s of r.lines) L.pre.push(s);
+    const v = L.coerce(raw[0].v, 'string', raw[0].node, `'${nm}' 的第一个实参`);
     if (v === null) return null;
-    return { code: `(r3render ${v.code})`, type: 'string' };
+    // 第二个实参是清单里那些**数**（`real[]`，见方言那一格的注）：文本只留关键字与结构。
+    const nu = L.coerce(raw[1].v, 'real[]', raw[1].node, `'${nm}' 的第二个实参`);
+    if (nu === null) return null;
+    return { code: `(r3render ${v.code} ${nu.code})`, type: 'string' };
   }
   if (lateMem !== null) return L.err(n, lateMem);
   if (L.funcs.has(nm)) {

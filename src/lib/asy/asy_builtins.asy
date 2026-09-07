@@ -10991,32 +10991,43 @@ private void asy__merge3hook() {
       // pdb 的清单 80MB → 84.7MB、解析 0.97s → 1.05s，两头都变差。
       // `(real)((int) v) == v` 是整数判据（先夹一道量级免得转换溢出）；
       // **-0 单独一条** —— 它等于 0，写成 `"0"` 就把符号丢了，而 0 的符号会顺着运算传下去。
+      // **数不走文本，走内存。** 清单头一行是 `r3 2` 时：文本只留关键字与结构，
+      // 每一个数按出现次序推进 `nums`（`real[]`），随清单路径一起交给 `_r3render`；
+      // 运行时那侧 `r3_num` 按游标取（omni_r3.c 的 r3lex.nums）。为什么：一片面片就是
+      // 48 个 double，走文本要格式化一遍再解析一遍 —— 量过 pdb 的清单 65MB、解析 0.82s，
+      // asy 侧拼串又是一大块。位模式那一套（`_rhex`、`x` 前缀）因此在这一路上根本不用。
+      // `OMNI_R3_TEXT=1` 退回老格式（`r3 1`，数写在文本里）：**手写的清单单测、
+      // 以及"直接看 r3.scn"那条调试路都靠它**，所以两条路都留着。
+      // `sn` 在老格式里**自带前导空格**（新格式里回空串），于是所有调用点一个样子。
+      bool txt = _getsetting("OMNI_R3_TEXT") != "";
+      real[] nums;
       string sn(real v) {
-        if (nofmt) return "0";
-        if (v == 0) return 1 / v < 0 ? "x8000000000000000" : "0";
-        if (v > -1e15 && v < 1e15 && (real) ((int) v) == v) return string((int) v);
-        return "x" + _rhex(v);
+        if (!txt) { nums.push(nofmt ? 0 : v); return ""; }
+        if (nofmt) return " 0";
+        if (v == 0) return 1 / v < 0 ? " x8000000000000000" : " 0";
+        if (v > -1e15 && v < 1e15 && (real) ((int) v) == v) return " " + string((int) v);
+        return " x" + _rhex(v);
       }
-      string sv(triple v) { return " " + sn(v.x) + " " + sn(v.y) + " " + sn(v.z); }
+      string sv(triple v) { return sn(v.x) + sn(v.y) + sn(v.z); }
       // **清单是攒成一段段再合的**，不是一路 `s = s + …`：那一句在 C 那条腿上是
       // 每次重新分配再拷一遍（omni_str 不可变），面片一多就是 O(n^2) ——
       // 量出来的：cylinder 那个例子（solids 的旋转面）在 run-c 上 100s 都写不出清单，
       // 而清单本身只有几百 KB。JS 那条腿看不出来（V8 的 += 是 rope）。
       // 合并按**两两归并**（log n 趟），总拷贝量 O(n log n)。
       string[] pp;
-      pp.push("r3 1" + nl
-        + "size " + string(oW) + " " + string(oH) + " " + string(fw) + " " + string(fh) + nl
-        + "proj " + (ortho ? "ortho" : "persp") + " " + sn(angle) + " " + sn(zoom) + nl
+      pp.push("r3 " + (txt ? "1" : "2") + nl
+        + "size" + sn(oW) + sn(oH) + sn(fw) + sn(fh) + nl
+        + "proj " + (ortho ? "ortho" : "persp") + sn(angle) + sn(zoom) + nl
         + "box" + sv(m) + sv(M) + nl
-        + "shift " + sn(shift.x) + " " + sn(shift.y) + nl
-        + "bg " + sn(asy__r3bg[0]) + " " + sn(asy__r3bg[1]) + " " + sn(asy__r3bg[2]) + nl
+        + "shift" + sn(shift.x) + sn(shift.y) + nl
+        + "bg" + sn(asy__r3bg[0]) + sn(asy__r3bg[1]) + sn(asy__r3bg[2]) + nl
         // res 这一格现在**只是个兜底**：真正的判据由运行时逐片自己算
         // （runtime/omni_r3.c 的 r3_res_for，照 drawsurface.cc:297-316 与
         // renderBase.cc:245-251：`s = 片内最小 z / 场景最大 z`，
         // `res = √2 · s · hypot(视景体宽, 高) / hypot(fw, fh)`）——
         // 一个全局值做不到透视下"远处一个像素对应更多用户单位"这一层。
         // 留着这一行是为了清单格式不变、以及运行时算不出视景体时还有个值可用。
-        + "res " + sn((M.x - m.x) / fw) + nl);
+        + "res" + sn((M.x - m.x) / fw) + nl);
       // **这条光的方向不是嫌疑人，查过了。** 拿探针把 three.asy 传给 shipout3 的
       // `Light.position[0]` 印出来，两条腿逐位相同、也与我们发的这一行相同
       //（`orthographic(5,4,3)` 那把尺子：0.44773576836617329 0.4972609476841367
@@ -11031,18 +11042,17 @@ private void asy__merge3hook() {
       // 而不是光的方向。验法：正对着的相机 + 手动给一个偏的 `currentlight`，看差是否跟着涨。
       for (int i = 0; i < asy__r3lights.length; ++i) {
         real[] d = i < asy__r3ldiff.length ? asy__r3ldiff[i] : new real[] {1, 1, 1, 1};
-        pp.push("light" + sv(asy__r3lights[i]) + " " + sn(d[0]) + " " + sn(d[1])
-          + " " + sn(d[2]) + nl);
+        pp.push("light" + sv(asy__r3lights[i]) + sn(d[0]) + sn(d[1]) + sn(d[2]) + nl);
       }
       string mline(drawop3 o) {
         real[] df = o.p.length > 0 ? asy__penrgb(o.p[0]) : new real[] {0, 0, 0};
         real[] em = o.p.length > 1 ? asy__penrgb(o.p[1]) : new real[] {0, 0, 0};
         real[] sp = o.p.length > 2 ? asy__penrgb(o.p[2]) : new real[] {0, 0, 0};
-        return "mat " + sn(df[0]) + " " + sn(df[1]) + " " + sn(df[2]) + " " + sn(o.opacity)
-          + " " + sn(em[0]) + " " + sn(em[1]) + " " + sn(em[2])
-          + " " + sn(sp[0]) + " " + sn(sp[1]) + " " + sn(sp[2])
-          + " " + sn(o.shininess) + " " + sn(o.metallic) + " " + sn(o.fresnel0)
-          + " " + (o.lightOn && asy__r3lights.length > 0 ? "1" : "0") + nl;
+        return "mat" + sn(df[0]) + sn(df[1]) + sn(df[2]) + sn(o.opacity)
+          + sn(em[0]) + sn(em[1]) + sn(em[2])
+          + sn(sp[0]) + sn(sp[1]) + sn(sp[2])
+          + sn(o.shininess) + sn(o.metallic) + sn(o.fresnel0)
+          + sn(o.lightOn && asy__r3lights.length > 0 ? 1 : 0) + nl;
       }
       // **同一条 mat 行不重复发。** 一次 `draw(surface, …)` 里所有面片共享同一个 material，
       // 逐片再发一遍就是十万行一模一样的字（pdb 里 119576 条 mat，一行十四个数）。
@@ -11082,7 +11092,12 @@ private void asy__merge3hook() {
         lastsc[3] = o.fresnel0;
         for (int i = 0; i < 3; ++i) if (i < np) lastpc[i] = o.p[i];
         string s = mline(o);
-        if (s == lastmat[0]) return "";
+        // **二次去重只在老格式里做。** v2 那一路 `mline` 已经把十四个数推进 `nums` 了，
+        // 再把这一行丢掉就是文本与数组错位（要能退还得给 `nums` 加一道截断）；
+        // 而 v2 里 `sn` 回空串，`s` 恒等于 `"mat" + nl`，这一比一定成立 ——
+        // 不挡住就等于把第一条之后的 mat 全丢了。少去掉的那一档是"两支不同的笔渲染成
+        // 同一行 rgb"，运行时看的本来就是最近一条 mat，多发一条无害。
+        if (txt && s == lastmat[0]) return "";
         lastmat[0] = s;
         return s;
       }
@@ -11094,11 +11109,10 @@ private void asy__merge3hook() {
         // 正是 asy 那边"从左下角逆时针"的次序，直接照发不用重排。
         string pcline(pen[] cs, int n) {
           if (cs.length < n) return "";
-          string s = "pcol " + string(n);
+          string s = "pcol" + sn(n);
           for (int i = 0; i < n; ++i) {
             real[] c = asy__penrgb(cs[i]);
-            s = s + " " + sn(c[0]) + " " + sn(c[1]) + " " + sn(c[2])
-              + " " + sn(opacity(cs[i]));
+            s = s + sn(c[0]) + sn(c[1]) + sn(c[2]) + sn(opacity(cs[i]));
           }
           return s + nl;
         }
@@ -11109,7 +11123,7 @@ private void asy__merge3hook() {
           // 重新分配再把已攒的部分拷一遍（omni_str 不可变），一片面片 16 圈就是十几 KB 的
           // memmove。剖 sinc（run-c）：`_platform_memmove` 295 个栈顶样本排第一，
           // 全在 `omni_str_cat` 底下。拼接的次序一字不变，所以清单逐字节相同。
-          pp.push(matline(o3) + pcline(o3.colors, 4) + "patch " + (o3.straight ? "1" : "0"));
+          pp.push(matline(o3) + pcline(o3.colors, 4) + "patch" + sn(o3.straight ? 1 : 0));
           for (int a = 0; a < 4; ++a)
             for (int b = 0; b < 4; ++b) pp.push(sv(P[a][b]));
           pp.push(nl);
@@ -11123,7 +11137,7 @@ private void asy__merge3hook() {
           // 逐段 push，**不要**先拼成一整行：`a + sv(...) + sv(...) + …` 是把一条
           // 600 字节的串重新分配 + 拷贝十来遍（omni_str 不可变），pdb 那 119576 片
           // 就是 0.7 GB 的 memmove。合并交给下面的两两归并（结果逐字节一样）。
-          pp.push(matline(o3) + pcline(o3.colors, 3) + "btri " + (o3.straight ? "1" : "0"));
+          pp.push(matline(o3) + pcline(o3.colors, 3) + "btri" + sn(o3.straight ? 1 : 0));
           pp.push(sv(P[0][0])); pp.push(sv(P[1][0])); pp.push(sv(P[1][1]));
           pp.push(sv(P[2][0])); pp.push(sv(P[2][1])); pp.push(sv(P[2][2]));
           pp.push(sv(P[3][0])); pp.push(sv(P[3][1])); pp.push(sv(P[3][2]));
@@ -11138,10 +11152,14 @@ private void asy__merge3hook() {
           // 整张曲面变成分片平坦的。量出来的（filesurface）：位图颜色种数
           // 参考 201728、只发点那一版我们 2514。
           // 法向那一行是 `tnrm`（九个数），颜色沿用 `pcol 3`（与 btri 同一格）。
+          // **先算 mat/pcol 再算 tnrm**：v2 那一路数是按 `sn` 的调用次序进 `nums` 的，
+          // 而清单里这三条的次序是 mat、pcol、tnrm —— 从前把 `tn` 先算出来，
+          // 文本次序没变，数组次序却成了 tnrm 在前，正好错位九个数。
+          string mt = matline(o3) + pcline(o3.VC, 3);
           string tn = "";
           if (o3.N3.length >= 3)
             tn = "tnrm" + sv(o3.N3[0]) + sv(o3.N3[1]) + sv(o3.N3[2]) + nl;
-          pp.push(matline(o3) + pcline(o3.VC, 3) + tn + "tri");
+          pp.push(mt + tn + "tri");
           pp.push(sv(T[0])); pp.push(sv(T[1])); pp.push(sv(T[2]));
           pp.push(nl);
           nink = nink + 1;
@@ -11178,7 +11196,7 @@ private void asy__merge3hook() {
         string dir3 = asy__r3dir();
         if (_runproc("mkdir -p " + dir3) == 0) {
           _writetext(dir3 + "/r3.scn", scn);
-          string hex = _r3render(dir3 + "/r3.scn");
+          string hex = _r3render(dir3 + "/r3.scn", nums);
           if (hex != "") return hex;
         }
       }

@@ -119,8 +119,9 @@ const RT_OPS = new Map([
   // （写进去的字节数 / 子进程的退出码）。
   ['write_text.string', { sym: 'omni_write_text', ret: 'i64', params: ['[2 x i64]', '[2 x i64]'] }],
   ['run_proc.string', { sym: 'omni_run_proc', ret: 'i64', params: ['[2 x i64]'] }],
-  // `(r3render PATH)`：三维那一档的光栅化（runtime/omni_r3.c）。收发同 read_text。
-  ['r3_render.string', { sym: 'omni_r3_render', ret: '[2 x i64]', params: ['[2 x i64]'] }],
+  // `(r3render PATH NUMS)`：三维那一档的光栅化（runtime/omni_r3.c）。字符串收发同 read_text，
+  // 第二个参数是 `(arr real)` —— 这条腿上数组就是 `ptr`（见 LL_TYPES 的 T_ARR）。
+  ['r3_render.string', { sym: 'omni_r3_render', ret: '[2 x i64]', params: ['[2 x i64]', 'ptr'] }],
   // arena 的作用域（omni_mem.c 的 mark/release）
   ['arena_mark.int', { sym: 'omni_arena_mark', ret: 'i64', params: [] }],
   ['arena_release.int', { sym: 'omni_arena_release', ret: 'i64', params: ['i64'] }],
