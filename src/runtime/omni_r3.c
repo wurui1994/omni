@@ -1780,6 +1780,31 @@ static void r3_raster_line(const r3scene *s, r3fb *fb, r3v a, r3v b,
 
   for (int y = y0; y < y1; ++y) {
     for (int x = x0; x < x1; ++x) {
+      /* 逐像素那一路要的"这一格的不透明色与深度"（`fb->pdep` 开着才做）：**线也要收** ——
+         不然透明面片压在线上时，混色的底色会退成背景。判据与下面逐采样那一段同一条，
+         只把采样点换成像素中心（与 r3_raster_pix 一致）。 */
+      if (fb->pdep) {
+        double sx = x + 0.5, sy = y + 0.5;
+        double t = ((sx - ax) * dx + (sy - ay) * dy) / (len * len);
+        if (t >= 0.0 && t <= 1.0) {
+          double qx = ax + t * dx, qy = ay + t * dy;
+          double ex = sx - qx, ey = sy - qy;
+          double d = ex * nx + ey * ny;
+          if (d <= 0.5 && d >= -0.5 && sqrt(ex * ex + ey * ey) <= 0.5) {
+            double z = az + t * (bz - az);
+            size_t pix = (size_t) y * fb->fw + x;
+            if (fb->pdep[pix] == 0.0f || z < (double) fb->pdep[pix]) {
+              fb->pdep[pix] = (float) z;
+              for (int i = 0; i < 3; ++i) {
+                float v = (float) mat->emissive[i];
+                if (v < 0.0f) v = 0.0f;
+                if (v > 1.0f) v = 1.0f;
+                fb->pcol[pix * 3 + i] = v;
+              }
+            }
+          }
+        }
+      }
       for (int k = 0; k < R3_NS; ++k) {
         double sx = x + R3_SAMPLE[k][0];
         double sy = y + R3_SAMPLE[k][1];
@@ -2138,6 +2163,17 @@ omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
       size_t ntr = tris.n / 3, ntrans = 0;
       for (size_t t = 0; t < ntr; ++t)
         if (r3_tri_transparent(&tris, t)) ntrans++;
+      /* 逐像素那一路要的两格（见 r3_raster_pix 的头注）**在画之前就开好** ——
+         线那一趟也要往里收（不然透明面片压在线上时底色会退成背景）。 */
+      if (r3_oitpix && ntrans > 0) {
+        size_t npx0 = (size_t) S.fw * S.fh;
+        fb.pcol = (float *) calloc(npx0 * 3, sizeof(float));
+        fb.pdep = (float *) calloc(npx0, sizeof(float));
+        if (!fb.pcol || !fb.pdep) {
+          free(fb.pcol); fb.pcol = NULL;
+          free(fb.pdep); fb.pdep = NULL;
+        }
+      }
       for (size_t t = 0; t < ntr; ++t) {
         if (r3_tri_transparent(&tris, t)) continue;
         r3_raster_tri(&S, &fb, tris.pos + 3 * t, tris.nrm + 3 * t, tris.mat[t],
@@ -2152,8 +2188,9 @@ omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
          * 一格一个值；没有透明片元的格子它 `discard`，所以那些格子照旧是
          * 不透明那一趟多重采样的结果 —— 这里也只碰 cnt > 0 的格子）。 */
         size_t npx = (size_t) S.fw * S.fh;
-        fb.pcol = (float *) calloc(npx * 3, sizeof(float));
-        fb.pdep = (float *) calloc(npx, sizeof(float));
+        /* pcol/pdep 在上面（画之前）就开好了，这儿只在那一步失败时补一次 */
+        if (!fb.pcol) fb.pcol = (float *) calloc(npx * 3, sizeof(float));
+        if (!fb.pdep) fb.pdep = (float *) calloc(npx, sizeof(float));
         fb.tcnt = (unsigned *) calloc(npx + 1, sizeof(unsigned));
         if (fb.pcol && fb.pdep && fb.tcnt) {
           for (size_t t = 0; t < ntr; ++t) {
