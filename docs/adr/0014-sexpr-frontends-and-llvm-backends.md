@@ -12436,6 +12436,32 @@ JS 那三条腿不受影响（`r3render` 在那边回空串、走 gs 那条老�
   轮廓那一圈（`sph_trans1` 的 27804 里多涂 1730 个像素）。
 - run-llvm 与 run-c 逐字节一致。
 
+**第十二刀（同一趟里做完的）：透明片元与层间混色都不夹。**
+参考那边片元存在 SSBO 的 `vec4` 里（fragment.glsl 写、blend.glsl 读），`mix()` 是在
+**没夹过**的值上做的，只有最后写帧缓冲那一步才夹。我们从前在存片元之前就把颜色夹到
+`[0,1]`、层与层之间又夹一次，于是**过曝的高光在混色里被削掉**。
+原形（`sph_trans1` 的高光 (495,484)，用 `OMNI_R3_PIX` 看的）：两个片元，
+近的那片是 1.0+ 的过曝高光；夹过之后混出来 0.856 → 218，参考是 **255**，
+不夹的话 `mix(0.712, >1, 0.5)` 超过 1、写出去就是 255。改完：
+- `sph_trans1` **27804 → 483**（最大差 1）、`sph_trans` 31674 → **429**；
+- twoSpheres 296130 → **271403**、vectorfieldsphere 123019 → **113056**。
+
+顺带补了一格：逐像素那一路的不透明底色**也收线**（`pcol`/`pdep` 提到画之前分配，
+线按像素中心往里收）—— 透明面片压在线上时底色本该是线的颜色，从前退成了背景。
+八个例子上这一格是中性的，但它是个真缺口。
+
+**这一轴现在的账**（run-c，逐字节）：
+- 探针全绿的：`flat_light`、`flat_nolight`、`flat_trans`、`edge_opaque`、`edge_trans`。
+- 还有差的：`sph_nolight` 48、`sph_light` 1098、`sph_obl` 1104（BRDF 最后一位）、
+  `sph_trans1` 483、`sph_trans` 429、**`sph_vcol` 17468**（逐顶点色 + 逐顶点 alpha 的球，
+  `s.colors(palette(...Gradient(green+opacity(0.6),white,...)))`）。
+- 例子：sacylinder3D 6449、splitpatch 139061、twistedtubes 4233、trefoilknot 58332、
+  hyperboloid 6749、filesurface 17548、triangles 183、twoSpheres 271403、
+  vectorfieldsphere 113056。
+- **下一刀该查 `sph_vcol` 那一类**（0.9%、最大差 29）：怀疑面片细分时四个角的顶点色
+  怎么插值 —— 我们是双线性，asy 那边可能是照 Bezier 细分的中点走。
+  twoSpheres 的 271403 与 vectorfieldsphere 的 113056 大概同一个根。
+
 ## 第十刀：把三维那一轴的残差**分类**（六个探针），并修掉 float→unorm8 那一位
 
 例子上的残差（sacylinder3D 18813、twoSpheres 435546…）是好几件事叠在一起，直接盯着例子
