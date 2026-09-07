@@ -753,6 +753,24 @@ export function asyCall(L, n) {
     if (p === null) return null;
     return { code: `(getenv ${p.code})`, type: 'string' };
   }
+  // `_writeraw(s)`：方言的 `(write E)` —— 往 stdout 发字节，**不补换行**（ADR-0016 第四刀，
+  // 落点见 backend-c/emit.js:1204、interp/builtin.js:1016、backend-js/emit.js:703）。
+  // 为什么要它：`write(file, …)` 那一族的 suffix 可以是 `none`/`flush`，也就是"这一次不换行"。
+  // 从前这一层只有 `print`（自带换行），只能按行攒（asy_builtins.asy 的 asy__obuf），代价是
+  // 两条：**尾巴那一行会多一个换行**（参考 `AB`、我们 `AB\n`）；**与单参数 `write(x)` 混用时
+  // 次序会反**（`write(stdout,"A"); write("B");` 参考印 `AB`，我们印 `B\nA\n`）。两条都量过。
+  if (nm === '_writeraw') {
+    const raw = asyCallArgs(L, n);
+    if (raw === null) return null;
+    if (raw.length !== 1) return L.err(n, `'_writeraw' 要 1 个实参，给了 ${raw.length} 个`);
+    if (raw[0].lines !== null) for (const s of raw[0].lines) L.pre.push(s);
+    const v = L.coerce(raw[0].v, 'string', raw[0].node, "'_writeraw' 的实参");
+    if (v === null) return null;
+    // 方言里 `(write E)` 是**语句**（sexpr/lower.js:1148 回的是 ExprStmt），不是表达式，
+    // 所以往 L.pre 里发一条语句、这一格本身回 0（`void` 的位置上没人用这个值）。
+    L.pre.push(`(write ${v.code})`);
+    return { code: '(int 0)', type: 'int' };
+  }
   // `_writetext(name, text)` / `_runproc(cmd)`：方言的 `(writetext P E)` / `(runproc CMD)`。
   // 名字带下划线是同一条规矩（base/ 里没有这两个名字）。**只有 lib/asy 里的 TeX 那一段
   // 用得到**：asy 的标签是 latex 排的、EPS 的最后一段字节是 dvips 写的，那条路上要

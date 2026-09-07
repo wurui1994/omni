@@ -3613,11 +3613,8 @@ void atupdate(asy__thunk f) { asy__updatefn = f; }
 asy__thunk atupdate() { return asy__updatefn; }
 void atexit(asy__thunk f) { asy__exitfn = f; }
 asy__thunk atexit() { return asy__exitfn; }
-// stdout 那一格缓冲的尾巴（没有换行结尾的那一段）要在退出时冲出去 —— 见 asy__fput。
-// 这一格在这里只是**占位**：真正装进去的那个闭包写在 asy__fput 后面（那时 asy__obuf
-// 才声明过）。少了它，`write(stdout,"x")` 这种不带换行的输出会被整段吞掉 ——
-// 量过（`asy -noV`）：`write(stdout,"A"); write("B");` 参考印的是 `AB\n`，
-// 我们从前只印 `B\n`，差分探针（往 base 里插 write 再比两边）也因此一句都看不见。
+// 退出时要冲的缓冲：现在没有（stdout 那一路已经是直写，见 asy__fput 与 `_writeraw`），
+// 这一格与 asy__atexitrun 里的判空一起留着，将来若再出现"攒到退出才发"的缓冲可以挂进来。
 asy__thunk asy__obufflushfn = null;
 // 退出钩子真的会跑：降级那一层在 `(main …)` 的**最后一句**插一条 `(call asy__atexitrun)`
 // （lower.js 的 chunk 尾巴）。asy 那边这一条是 C++ 的 `run::cleanup`/exitFunction 调的，
@@ -4160,7 +4157,19 @@ private bool asy__bbhit(pair[] a, pair[] b, real fuzz) {
     && ay0 - fuzz <= by1 && by0 - fuzz <= ay1;
 }
 
-// 细分找交点。`cap` 是**这一对段上最多圈几个**：0 = 不限（intersections 那一路要全部），
+// 一段的界盒对角线长度 —— path.cc:998 的收敛判据要它
+private real asy__bbdiag(pair[] a) {
+  real x0 = a[0].x; real x1 = a[0].x; real y0 = a[0].y; real y1 = a[0].y;
+  for (int i = 1; i < 4; ++i) {
+    if (a[i].x < x0) x0 = a[i].x;
+    if (a[i].x > x1) x1 = a[i].x;
+    if (a[i].y < y0) y0 = a[i].y;
+    if (a[i].y > y1) y1 = a[i].y;
+  }
+  return length((x1 - x0, y1 - y0));
+}
+
+
 // >0 = 攒够就收（intersect 那一路只要第一个，照 path.cc:1050 的 maxcount=9）。
 // 不设上限的话两条**几乎重合**的曲线会把这棵树全展开：每一层四个孩子的界盒都相交，
 // 12 层就是 4^12 ≈ 1.7e7 次调用 —— 量到过 hyperboloidsilhouette 卡在这里超过 120s
@@ -4172,7 +4181,10 @@ private void asy__ixrec(real[][] out, pair[] a, real ta0, real ta1,
                         int cap) {
   if (cap > 0 && out.length >= cap) return;
   if (!asy__bbhit(a, b, fuzz)) return;
-  if (depth <= 0) {
+  // **两个界盒一起缩到 fuzz 以内就收**（path.cc:998 的
+  // `(maxp-minp).length()+(maxq-minq).length() <= fuzz || depth == 0`）。
+  // 从前这儿只看 depth，于是不管界盒多小都要一路劈到 12 层。
+  if (asy__bbdiag(a) + asy__bbdiag(b) <= fuzz || depth <= 0) {
     real[] r;
     r.push((ta0 + ta1) / 2);
     r.push((tb0 + tb1) / 2);
@@ -5123,42 +5135,23 @@ void warning(string s, string t, bool position=false) {
 
 // (1) `write(file, …)` 那一族（builtin.cc:474 的 addWrite：
 // `void write(file file=stdout, string s="", T x, void suffix(file)=endl, ... T[])`）。
-// 核心方言只有 `(print …)`，而 print 自己补换行 —— 所以这里把写进去的东西**攒在
-// file.buf 里**，攒出整行才交给 print。这样面向行的输出与 asy 逐字节一样；
-// 一行没写完就退出时那一截会丢，这条差别记在这儿（asy 那边会 flush 出去）。
+// stdout 那一路走方言的 `(write E)`（前端的 `_writeraw`）—— **不补换行**，所以
+// `write(stdout,"A",none)` 那种"半行"与 asy 逐字节一样。
+// 从前这里只有 `print`（自带换行），只能按行攒，代价是两条（都量过）：尾巴那一行会多一个
+// 换行（参考 `AB`、我们 `AB\n`）；与单参数 `write(x)` 混用时次序会反（参考 `AB`，
+// 我们 `B\nA\n`）。`(write E)` 与 `print` 在四条腿上共用同一个输出缓冲区，所以交替调用
+// 的次序是对的（backend-c/emit.js:1204、interp/builtin.js:1016、backend-js/emit.js:703）。
 typedef void asy__suffix(file);
 void flush(file f) { }
-// stdout 那一路的行缓冲是**一份**，不挂在 file 那一格上：asy 的 stdout 只有一个
-// （plain_constants.asy:64 的 `restricted file stdout=output();`，而 `output()` 每次
-// 回来的是新的一格 file，包的却是同一个 stdout）。挂在格子上的时候，
-// `write(output(), "false ", none)` 那半行就跟着那一格一起扔了 —— 量出来是整段没了。
-private string asy__obuf = "";
 void asy__fput(file f, string s) {
   if (f.fd != 1) { f.buf = f.buf + s; return; }
-  asy__obuf = asy__obuf + s;
-  // 注意：asy 的双引号串**不处理转义**（"\n" 是两个字节 \ 和 n），要真换行得用单引号串。
-  int k = find(asy__obuf, '\n');
-  while (k >= 0) {
-    write(substr(asy__obuf, 0, k));
-    asy__obuf = substr(asy__obuf, k + 1, length(asy__obuf) - k - 1);
-    k = find(asy__obuf, '\n');
-  }
+  // `_writeraw` 是靠往前端的语句流里发一条 `(write E)` 实现的（calls.js 那一格），
+  // 也就是说这条写**会被提到外围表达式之前**。这里它是独立语句，提前等于原地；
+  // 但别把 `_writeraw(...)` 塞进表达式中间，那样它相对同一表达式里其它副作用会前移。
+  _writeraw(s);
 }
-// 上面那格占位（asy__obufflushfn）真正装的东西。这一层唯一的 stdout 出口是核心方言的
-// `print`，它**总补一个换行**，所以按行攒：攒到 '\n' 就发一行。剩下那截没有换行结尾的
-// 尾巴从前就留在 asy__obuf 里烂掉了，现在退出时发出去。
-// **这一条差别写在明处**：尾巴那一行会多带一个换行（参考是 `AB`，我们是 `AB\n`）——
-// 要一字不差得给核心方言添一路"不补换行的输出"，那要动解释器与四个后端。
-// **还有一条**：`write(x)`（只一个实参）走的是前端内建那一族、不经过 asy__obuf
-// （见下面 output() 后面那一段的注释），所以"没换行的 write(stdout,…)"与"单参数
-// write(…)"混在一起时**次序会反**：参考 `write(stdout,"A"); write("B");` 印 `AB`，
-// 我们印 `B\nA\n`。往 base 里插差分探针时因此要让每条探针自己带换行（`write(s)` 或
-// `write(stdout, s, endl)`），这样两边次序一致。
-asy__obufflushfn = new void() {
-  if (asy__obuf == "") return;
-  write(asy__obuf);
-  asy__obuf = "";
-};
+// stdout 那一路不再按行攒（见上面 asy__fput），所以 asy__obufflushfn 保持 null ——
+// 它那一格与 asy__atexitrun 里的判空一起留着：将来若有别的"退出时要冲的缓冲"可以复用。
 void none(file f) { }
 void endl(file f) { asy__fput(f, '\n'); }
 void newl(file f) { asy__fput(f, '\n'); }
@@ -6806,7 +6799,18 @@ private void asy__ixline(real[] S, real[] T, path g, pair p, pair q, real fuzz) 
 //
 // 去重照 path.cc:897 改成**按点**（从前是按时间差 1e-7）：闭路上 t=0 与 t=length 是同一点、
 // 时间差一整圈，按时间比永远不算重复，于是同一个交点报两遍。
-real[][] intersections(path p, path q, real fuzz=-1) {
+// path.cc:959 的 intersections。`cap` 是**这一趟最多要几个**：
+//   1  = runpath.in 的 `intersect`（原版传 single=true：第一个交点一出来整个栈就回去，
+//        path.cc:1055 那四句 `if(single || depth <= mindepth) return true;`）
+//   10 = `intersections` 自己（原版 maxcount=9，:1050/1058：一对**单段**上攒够 9 个
+//        就不再往下劈）
+// 少了这一格的代价是量出来的：`intersect` 从前也走 cap=0 那一路，两条相距 epsilon 的
+// 切片会把 4^12 ≈ 1.7e7 的树全展开 —— solids 那一族（cylinder / cones / hyperboloid /
+// hyperboloidsilhouette / pdb）全卡在这里。cylinder 一趟 16m58s，而 `r3:` 那一行说
+// 解析 0.05s、光栅 0.06s，也就是说时间一分钱都不在光栅器上；栈采样（362/362 个样本）
+// 一条线下来是 revolution.skeleton -> transverse -> tangent -> intersect -> intersections
+// -> asy__ixrec。
+private real[][] asy__ixpq(path p, path q, real fuzz, int cap) {
   int np = length(p);
   int nq = length(q);
   real sc = 1;
@@ -6838,11 +6842,13 @@ real[][] intersections(path p, path q, real fuzz=-1) {
       raw.push(g);
     }
   } else for (int i = 0; i < np; ++i) {
+    if (cap > 0 && raw.length >= cap) break;
     pair[] a = asy__segctl(p, i);
     for (int j = 0; j < nq; ++j) {
+      if (cap > 0 && raw.length >= cap) break;
       pair[] b = asy__segctl(q, j);
       real[][] cand;
-      asy__ixrec(cand, a, 0, 1, b, 0, 1, f, 12, 0);
+      asy__ixrec(cand, a, 0, 1, b, 0, 1, f, 12, cap);
       real[][] seed;
       for (int k = 0; k < cand.length; ++k) {
         bool near = false;
@@ -6853,7 +6859,15 @@ real[][] intersections(path p, path q, real fuzz=-1) {
       }
       for (int k = 0; k < seed.length; ++k) {
         real[] r = asy__ixnewton(a, b, seed[k][0], seed[k][1], tol);
-        if (r.length == 0) continue;
+        // **Newton 收不住就用种子**，不要丢。原版根本不做 Newton：细分到
+        // `(maxp-minp).length()+(maxq-minq).length() <= fuzz` 就把这一格的中点当交点
+        // （path.cc:998-1006）。调用方传松 fuzz 时（solids.asy:10 的 `fuzz=1.0e-5`）两条
+        // 曲线只是"相距 fuzz 以内"、根本没有真交点，Newton 永远到不了 1e-12·scale。
+        // 从前这里 `continue` 掉，代价量出来是：把 solids.asy 抄一份到 CWD 里加 write
+        // （两条腿跑同一份），每片切片的 sp/sm 逐位相同（1e-14 以内），而
+        // `tangent(sp,sm,·)` 参考回长度 2、我们回 0 —— 于是 solids 的 silhouette 该攒
+        // 64 个切点，我们只攒到 3 个（lenG 63 对 2），hyperboloidsilhouette 整条轮廓塌掉。
+        if (r.length == 0) r = new real[] {seed[k][0], seed[k][1]};
         real[] g;
         g.push(i + r[0]);
         g.push(j + r[1]);
@@ -6875,6 +6889,10 @@ real[][] intersections(path p, path q, real fuzz=-1) {
   }
   return out;
 }
+real[][] intersections(path p, path q, real fuzz=-1) {
+  return asy__ixpq(p, q, fuzz, 10);
+}
+
 // runpath.in 的 intersect = `intersections(..., single=true, exact=true)`，也就是与
 // intersections **同一条**路：两条里有一条是"一段直线或一个点"时走解析的 asy__ixline。
 // 这一格从前是另写一份（包围盒细分 + Newton，fuzz=1e-9·sc），于是走 exact 那一支本该
@@ -6882,8 +6900,9 @@ real[][] intersections(path p, path q, real fuzz=-1) {
 // `intersect(unitcircle,(0,0)--2*z1)` 参考 `0 0.5`、我们 `0 0.49999999999999989`，
 // 顺着 subpath 把弧的结点推歪 7 ulp，最后落成 polararea 的 gsave 闸门。
 // 定义挪到 intersections 后面（asy 只认前面声明过的名字）。
+// **single=true 那一格现在真的传下去了**（cap=1）：见 asy__ixpq 头上那段量口。
 real[] intersect(path p, path q, real fuzz=-1) {
-  real[][] I = intersections(p, q, fuzz);
+  real[][] I = asy__ixpq(p, q, fuzz, 1);
   if (I.length == 0) return new real[];
   return I[0];
 }
@@ -10685,10 +10704,12 @@ private void asy__merge3hook() {
         + "box" + sv(m) + sv(M) + nl
         + "shift " + sn(shift.x) + " " + sn(shift.y) + nl
         + "bg " + sn(asy__r3bg[0]) + " " + sn(asy__r3bg[1]) + " " + sn(asy__r3bg[2]) + nl
-        // res 是细分判据（bezierpatch.cc:41 的 res2 = res*res）。取**一个像素在用户
-        // 单位下的大小**：Distance/Straightness 都是用户单位的距离平方，这样就是
-        // "细分到片内起伏不到一个像素"。参考那边这一格由 drawsurface 传进来，
-        // 具体取值还没量到，先用这个；量到了再换。
+        // res 这一格现在**只是个兜底**：真正的判据由运行时逐片自己算
+        // （runtime/omni_r3.c 的 r3_res_for，照 drawsurface.cc:297-316 与
+        // renderBase.cc:245-251：`s = 片内最小 z / 场景最大 z`，
+        // `res = √2 · s · hypot(视景体宽, 高) / hypot(fw, fh)`）——
+        // 一个全局值做不到透视下"远处一个像素对应更多用户单位"这一层。
+        // 留着这一行是为了清单格式不变、以及运行时算不出视景体时还有个值可用。
         + "res " + sn((M.x - m.x) / fw) + nl);
       for (int i = 0; i < asy__r3lights.length; ++i) {
         real[] d = i < asy__r3ldiff.length ? asy__r3ldiff[i] : new real[] {1, 1, 1, 1};

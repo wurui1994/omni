@@ -140,6 +140,9 @@ typedef struct {
   /* 细分判据 */
   double res2;
   double epsilon;
+  /* 消裂缝的内收量（bezierpatch.cc:39-49 的 `Epsilon`）：不透明面 `FillFactor*res`
+   * （FillFactor = 0.1，:31），透明面 0 —— 透明时不能收，收了会露出背面。 */
+  double Epsilon;
 } r3scene;
 
 /* ------------------------------------------------------------------ 顶点缓冲 */
@@ -269,6 +272,36 @@ static void r3_split4(const r3v *p, r3v out[4][16]) {
   }
 }
 
+/* bezierpatch.h:76 differential —— 三次曲线在 0 处的"导向"（只要方向，长度无所谓）：
+ * 先试 `p1-p0`，模方不够大再退到二阶、三阶。门限与法向那边共用 `s->epsilon`。 */
+static r3v r3_differential(const r3scene *s, r3v p0, r3v p1, r3v p2, r3v p3) {
+  r3v d = r3v_sub(p1, p0);
+  if (r3v_abs2(d) > s->epsilon) return d;
+  d = r3_bezierPP(p0, p1, p2);
+  if (r3v_abs2(d) > s->epsilon) return d;
+  return r3_bezierPPP(p0, p1, p2, p3);
+}
+
+/* 只切一刀的两种半分（原版 bezierpatch.cc:249-262 与 :342-355）。
+ * `j` 是 index+=1 那一维、`i` 是 index+=4 那一维。 */
+static void r3_split2j(const r3v *p, r3v a[16], r3v b[16]) {
+  for (int i = 0; i < 4; ++i) {
+    r3split s = r3_split3(p[4 * i + 0], p[4 * i + 1], p[4 * i + 2], p[4 * i + 3]);
+    a[4 * i + 0] = p[4 * i + 0]; a[4 * i + 1] = s.m0;
+    a[4 * i + 2] = s.m3;         a[4 * i + 3] = s.m5;
+    b[4 * i + 0] = s.m5;         b[4 * i + 1] = s.m4;
+    b[4 * i + 2] = s.m2;         b[4 * i + 3] = p[4 * i + 3];
+  }
+}
+
+static void r3_split2i(const r3v *p, r3v a[16], r3v b[16]) {
+  for (int j = 0; j < 4; ++j) {
+    r3split s = r3_split3(p[j], p[4 + j], p[8 + j], p[12 + j]);
+    a[j] = p[j];  a[4 + j] = s.m0; a[8 + j] = s.m3; a[12 + j] = s.m5;
+    b[j] = s.m5;  b[4 + j] = s.m4; b[8 + j] = s.m2; b[12 + j] = p[12 + j];
+  }
+}
+
 /* 四个角的法向（bezierpatch.cc:79-101，连退化时换哪三条控制线一起抄） */
 static void r3_corner_normals(const r3scene *s, const r3v *p, r3v n[4]) {
   r3v p0 = p[0], p3 = p[3], p12 = p[12], p15 = p[15];
@@ -297,19 +330,38 @@ static void r3_corner_normals(const r3scene *s, const r3v *p, r3v n[4]) {
   n[0] = n0; n[1] = n1; n[2] = n2; n[3] = n3;
 }
 
-/* bezierpatch.cc:174 的递归。**这一刀只走两种情形**：平了就出两片三角，不平就四分。
- * 原版还有"只有一个方向平"的两个分支（:227 与 :319，那两处只对半分一次），
- * 三角的落点会不一样 —— 下一刀照抄。判据（res2、Distance）已经是原版。 */
+/* bezierpatch.cc:174 的递归，**三个分支都在**：两个方向都平了出两片三角；只有一个方向平
+ * 就往另一个方向切一刀（:227 / :319）；都不平才四分（:435）。
+ *
+ * 原版的关键约定：四个角 P0..P3 与它们的法向 N0..N3 是**从父片传下来的**，不是子片自己
+ * 从控制网重算的 —— 只有新出现的中点才现算法向。相邻子片因此共用同一个中点顶点，
+ * 网格是缝合的。（从前我们每个子片都调 r3_corner_normals 重算四角，那是另一回事。）
+ *
+ * 还有一手**消裂缝的内收**：`Epsilon = FillFactor*res`，`FillFactor = 0.1`（:31、:47）。
+ * 一条边**第一次**被判定为直、而整片还没平时，那条边的中点被顺着切线往内拉：
+ *   m0 -= Epsilon * unit(differential(...));
+ * 已经直过的边（flat 标记为真）不再动。透明面 Epsilon = 0（收了会露背面）。
+ * 少了这一层的代价是轮廓比参考大，量出来的（/tmp/dot/d3.asy：`draw(X, 10pt+green)`
+ * 一颗点，逐像素按覆盖率加权）：参考 面积 1327.0 等效半径 20.5523 最远墨点 22.220，
+ * 补之前我们是 1364.5 / 20.8406 / 22.503 —— 半径大 1.40%、面积大 2.83%。
+ * 而位置与着色本来就是对的（三颗点质心 dx ≤0.16 px、dy ≤0.02 px，实心区两边都是
+ * rgb(0,255,0) 一个字节不差），所以三维位图的残差就是这一处。
+ *
+ * `r3_split4` 出来的 out[0..3] 依次是原版的 s0/s3/s1/s2（凭据是原版那四行退化赋值
+ * `m0 = s0[12]`、`m1 = s1[15]`、`m2 = s2[3]`、`m3 = s3[0]`，:498/506/514/522，
+ * 与我们四块的角点一一对上），所以下面用 `sq[] = {q[0], q[2], q[3], q[1]}` 换成 s 序，
+ * 之后一律按原版的 s0..s3 读写，省得两套下标混着。 */
 static int r3_render_patch(const r3scene *s, r3tris *t, const r3v *p,
                            r3v P0, r3v P1, r3v P2, r3v P3,
                            r3v N0, r3v N1, r3v N2, r3v N3,
+                           int flat0, int flat1, int flat2, int flat3,
                            const r3mat *mat, const float *C, int depth) {
   double h, v;
   r3_distance(p, &h, &v);
   /* res2 <= 0（清单里没给 res）或者判据不是有限数时**当成平的** —— 不然一片就能
-   * 递归到深度上限，4^12 次。深度上限压到 8（最坏 65536 片），原版没有上限，
-   * 靠的是判据必然收敛。 */
-  if (!(s->res2 > 0 && h == h && v == v) || (h < s->res2 && v < s->res2) || depth >= 8) {
+   * 递归到深度上限。深度上限压到 8，原版没有上限，靠的是判据必然收敛。 */
+  int bad = !(s->res2 > 0 && h == h && v == v) || depth >= 8;
+  if (bad || (h < s->res2 && v < s->res2)) {
     if (C) {
       float a[12], b[12];
       for (int i = 0; i < 4; ++i) {
@@ -324,41 +376,257 @@ static int r3_render_patch(const r3scene *s, r3tris *t, const r3v *p,
     if (!r3tris_push(t, P0, N0, P2, N2, P3, N3, mat)) return 0;
     return 1;
   }
+  const double eps = s->epsilon;
+  const double E = s->Epsilon;
+
+  if (h < s->res2) {
+    /* 水平已平，沿竖直（index+=1 那一维）切一刀：s0 是 j∈[0,½]、s1 是 j∈[½,1]。
+     * 角： s0 (P0,P1,m0,m1)、s1 (m1,m0,P2,P3)，m0 在 P1P2 上、m1 在 P3P0 上。 */
+    r3v s0[16], s1[16];
+    r3_split2j(p, s0, s1);
+
+    r3v n0 = r3_normal(s, s0[12], s0[13], s0[14], s0[15], s0[11], s0[7], s0[3]);
+    if (r3v_abs2(n0) <= eps) {
+      n0 = r3_normal(s, s0[12], s0[13], s0[14], s0[15], s0[2], s0[1], s0[0]);
+      if (r3v_abs2(n0) <= eps)
+        n0 = r3_normal(s, s0[0], s0[4], s0[8], s0[12], s0[11], s0[7], s0[3]);
+    }
+    r3v n1 = r3_normal(s, s1[3], s1[2], s1[1], s1[0], s1[4], s1[8], s1[12]);
+    if (r3v_abs2(n1) <= eps) {
+      n1 = r3_normal(s, s1[3], s1[2], s1[1], s1[0], s1[13], s1[14], s1[15]);
+      if (r3v_abs2(n1) <= eps)
+        n1 = r3_normal(s, s1[15], s1[11], s1[7], s1[3], s1[4], s1[8], s1[12]);
+    }
+
+    r3v m0 = r3v_scl(0.5, r3v_add(P1, P2));
+    if (!flat1) {
+      if ((flat1 = r3_straightness(p[12], p[13], p[14], p[15]) < s->res2)) {
+        if (E) m0 = r3v_sub(m0, r3v_scl(E, r3v_unit(
+                      r3_differential(s, s1[12], s1[8], s1[4], s1[0]))));
+      } else m0 = s0[15];
+    }
+    r3v m1 = r3v_scl(0.5, r3v_add(P3, P0));
+    if (!flat3) {
+      if ((flat3 = r3_straightness(p[0], p[1], p[2], p[3]) < s->res2)) {
+        if (E) m1 = r3v_sub(m1, r3v_scl(E, r3v_unit(
+                      r3_differential(s, s0[3], s0[7], s0[11], s0[15]))));
+      } else m1 = s1[0];
+    }
+
+    float a0[16], a1[16];
+    if (C) {
+      for (int i = 0; i < 4; ++i) {
+        float c0 = 0.5f * (C[4 + i] + C[8 + i]);      /* 在 P1P2 上 */
+        float c1 = 0.5f * (C[12 + i] + C[i]);         /* 在 P3P0 上 */
+        a0[i] = C[i];  a0[4 + i] = C[4 + i]; a0[8 + i] = c0;       a0[12 + i] = c1;
+        a1[i] = c1;    a1[4 + i] = c0;       a1[8 + i] = C[8 + i]; a1[12 + i] = C[12 + i];
+      }
+    }
+    if (!r3_render_patch(s, t, s0, P0, P1, m0, m1, N0, N1, n0, n1,
+                         flat0, flat1, 0, flat3, mat, C ? a0 : NULL, depth + 1)) return 0;
+    return r3_render_patch(s, t, s1, m1, m0, P2, P3, n1, n0, N2, N3,
+                           0, flat1, flat2, flat3, mat, C ? a1 : NULL, depth + 1);
+  }
+
+  if (v < s->res2) {
+    /* 竖直已平，沿水平（index+=4 那一维）切一刀：s0 是 i∈[0,½]、s1 是 i∈[½,1]。
+     * 角： s0 (P0,m0,m1,P3)、s1 (m0,P1,P2,m1)，m0 在 P0P1 上、m1 在 P2P3 上。 */
+    r3v s0[16], s1[16];
+    r3_split2i(p, s0, s1);
+
+    r3v n0 = r3_normal(s, s0[0], s0[4], s0[8], s0[12], s0[13], s0[14], s0[15]);
+    if (r3v_abs2(n0) <= eps) {
+      n0 = r3_normal(s, s0[0], s0[4], s0[8], s0[12], s0[11], s0[7], s0[3]);
+      if (r3v_abs2(n0) <= eps)
+        n0 = r3_normal(s, s0[3], s0[2], s0[1], s0[0], s0[13], s0[14], s0[15]);
+    }
+    r3v n1 = r3_normal(s, s1[15], s1[11], s1[7], s1[3], s1[2], s1[1], s1[0]);
+    if (r3v_abs2(n1) <= eps) {
+      n1 = r3_normal(s, s1[15], s1[11], s1[7], s1[3], s1[4], s1[8], s1[12]);
+      if (r3v_abs2(n1) <= eps)
+        n1 = r3_normal(s, s1[12], s1[13], s1[14], s1[15], s1[2], s1[1], s1[0]);
+    }
+
+    r3v m0 = r3v_scl(0.5, r3v_add(P0, P1));
+    if (!flat0) {
+      if ((flat0 = r3_straightness(p[0], p[4], p[8], p[12]) < s->res2)) {
+        if (E) m0 = r3v_sub(m0, r3v_scl(E, r3v_unit(
+                      r3_differential(s, s1[0], s1[1], s1[2], s1[3]))));
+      } else m0 = s0[12];
+    }
+    r3v m1 = r3v_scl(0.5, r3v_add(P2, P3));
+    if (!flat2) {
+      if ((flat2 = r3_straightness(p[15], p[11], p[7], p[3]) < s->res2)) {
+        if (E) m1 = r3v_sub(m1, r3v_scl(E, r3v_unit(
+                      r3_differential(s, s0[15], s0[14], s0[13], s0[12]))));
+      } else m1 = s1[3];
+    }
+
+    float a0[16], a1[16];
+    if (C) {
+      for (int i = 0; i < 4; ++i) {
+        float c0 = 0.5f * (C[i] + C[4 + i]);          /* 在 P0P1 上 */
+        float c1 = 0.5f * (C[8 + i] + C[12 + i]);     /* 在 P2P3 上 */
+        a0[i] = C[i]; a0[4 + i] = c0;       a0[8 + i] = c1;       a0[12 + i] = C[12 + i];
+        a1[i] = c0;   a1[4 + i] = C[4 + i]; a1[8 + i] = C[8 + i]; a1[12 + i] = c1;
+      }
+    }
+    if (!r3_render_patch(s, t, s0, P0, m0, m1, P3, N0, n0, n1, N3,
+                         flat0, 0, flat2, flat3, mat, C ? a0 : NULL, depth + 1)) return 0;
+    return r3_render_patch(s, t, s1, m0, P1, P2, m1, n0, N1, N2, n1,
+                           flat0, flat1, flat2, 0, mat, C ? a1 : NULL, depth + 1);
+  }
+
+  /* 两个方向都不平：四分（bezierpatch.cc:435-556）。
+   *   m2
+   *  P3--+--P2      s3 s2        m0 在 P0P1、m1 在 P1P2、m2 在 P2P3、m3 在 P3P0、m4 是中心
+   * m3+--+--+m1
+   *  P0--+--P1      s0 s1
+   *      m0                                                                          */
   r3v q[4][16];
   r3_split4(p, q);
-  /* 顶点色跟着一起细分（bezierpatch.cc:529-533 那五行：边中点取两端平均、
-   * 中心取 c0 与 c2 的平均），四块的角色照 :542-545 那四行分派。 */
-  float cc[5][4], sub[4][16];
+  const r3v *sq[4] = { q[0], q[2], q[3], q[1] };   /* s0/s1/s2/s3 */
+  const r3v *S0 = sq[0], *S1 = sq[1], *S2 = sq[2], *S3 = sq[3];
+  r3v m4 = S0[15];
+
+  r3v n0 = r3_normal(s, S0[0], S0[4], S0[8], S0[12], S0[13], S0[14], S0[15]);
+  if (r3v_abs2(n0) <= eps) {
+    n0 = r3_normal(s, S0[0], S0[4], S0[8], S0[12], S0[11], S0[7], S0[3]);
+    if (r3v_abs2(n0) <= eps)
+      n0 = r3_normal(s, S0[3], S0[2], S0[1], S0[0], S0[13], S0[14], S0[15]);
+  }
+  r3v n1 = r3_normal(s, S1[12], S1[13], S1[14], S1[15], S1[11], S1[7], S1[3]);
+  if (r3v_abs2(n1) <= eps) {
+    n1 = r3_normal(s, S1[12], S1[13], S1[14], S1[15], S1[2], S1[1], S1[0]);
+    if (r3v_abs2(n1) <= eps)
+      n1 = r3_normal(s, S1[0], S1[4], S1[8], S1[12], S1[11], S1[7], S1[3]);
+  }
+  r3v n2 = r3_normal(s, S2[15], S2[11], S2[7], S2[3], S2[2], S2[1], S2[0]);
+  if (r3v_abs2(n2) <= eps) {
+    n2 = r3_normal(s, S2[15], S2[11], S2[7], S2[3], S2[4], S2[8], S2[12]);
+    if (r3v_abs2(n2) <= eps)
+      n2 = r3_normal(s, S2[12], S2[13], S2[14], S2[15], S2[2], S2[1], S2[0]);
+  }
+  r3v n3 = r3_normal(s, S3[3], S3[2], S3[1], S3[0], S3[4], S3[8], S3[12]);
+  if (r3v_abs2(n3) <= eps) {
+    n3 = r3_normal(s, S3[3], S3[2], S3[1], S3[0], S3[13], S3[14], S3[15]);
+    if (r3v_abs2(n3) <= eps)
+      n3 = r3_normal(s, S3[15], S3[11], S3[7], S3[3], S3[4], S3[8], S3[12]);
+  }
+  /* 中心那一点只算一次、不退化（原版 :488 也没有退化分支） */
+  r3v n4 = r3_normal(s, S2[3], S2[2], S2[1], m4, S2[4], S2[8], S2[12]);
+
+  r3v m0 = r3v_scl(0.5, r3v_add(P0, P1));
+  if (!flat0) {
+    if ((flat0 = r3_straightness(p[0], p[4], p[8], p[12]) < s->res2)) {
+      if (E) m0 = r3v_sub(m0, r3v_scl(E, r3v_unit(
+                    r3_differential(s, S1[0], S1[1], S1[2], S1[3]))));
+    } else m0 = S0[12];
+  }
+  r3v m1 = r3v_scl(0.5, r3v_add(P1, P2));
+  if (!flat1) {
+    if ((flat1 = r3_straightness(p[12], p[13], p[14], p[15]) < s->res2)) {
+      if (E) m1 = r3v_sub(m1, r3v_scl(E, r3v_unit(
+                    r3_differential(s, S2[12], S2[8], S2[4], S2[0]))));
+    } else m1 = S1[15];
+  }
+  r3v m2 = r3v_scl(0.5, r3v_add(P2, P3));
+  if (!flat2) {
+    if ((flat2 = r3_straightness(p[15], p[11], p[7], p[3]) < s->res2)) {
+      if (E) m2 = r3v_sub(m2, r3v_scl(E, r3v_unit(
+                    r3_differential(s, S3[15], S3[14], S3[13], S3[12]))));
+    } else m2 = S2[3];
+  }
+  r3v m3 = r3v_scl(0.5, r3v_add(P3, P0));
+  if (!flat3) {
+    if ((flat3 = r3_straightness(p[0], p[1], p[2], p[3]) < s->res2)) {
+      if (E) m3 = r3v_sub(m3, r3v_scl(E, r3v_unit(
+                    r3_differential(s, S0[3], S0[7], S0[11], S0[15]))));
+    } else m3 = S3[0];
+  }
+
+  /* 顶点色跟着一起细分（:528-534 那五行：边中点取两端平均、中心取 c0 与 c2 的平均），
+   * 四块的角色照 :542-545 分派。sub[k] 已经是 s 序，与 sq[k] 对齐。 */
+  float sub[4][16];
   if (C) {
     for (int i = 0; i < 4; ++i) {
-      cc[0][i] = 0.5f * (C[i] + C[4 + i]);
-      cc[1][i] = 0.5f * (C[4 + i] + C[8 + i]);
-      cc[2][i] = 0.5f * (C[8 + i] + C[12 + i]);
-      cc[3][i] = 0.5f * (C[12 + i] + C[i]);
-      cc[4][i] = 0.5f * (cc[0][i] + cc[2][i]);
-    }
-    for (int i = 0; i < 4; ++i) {
-      sub[0][i] = C[i];       sub[0][4 + i] = cc[0][i]; sub[0][8 + i] = cc[4][i]; sub[0][12 + i] = cc[3][i];
-      sub[1][i] = cc[0][i];   sub[1][4 + i] = C[4 + i]; sub[1][8 + i] = cc[1][i]; sub[1][12 + i] = cc[4][i];
-      sub[2][i] = cc[4][i];   sub[2][4 + i] = cc[1][i]; sub[2][8 + i] = C[8 + i]; sub[2][12 + i] = cc[2][i];
-      sub[3][i] = cc[3][i];   sub[3][4 + i] = cc[4][i]; sub[3][8 + i] = cc[2][i]; sub[3][12 + i] = C[12 + i];
+      float c0 = 0.5f * (C[i] + C[4 + i]);
+      float c1 = 0.5f * (C[4 + i] + C[8 + i]);
+      float c2 = 0.5f * (C[8 + i] + C[12 + i]);
+      float c3 = 0.5f * (C[12 + i] + C[i]);
+      float c4 = 0.5f * (c0 + c2);
+      sub[0][i] = C[i]; sub[0][4 + i] = c0;       sub[0][8 + i] = c4;       sub[0][12 + i] = c3;
+      sub[1][i] = c0;   sub[1][4 + i] = C[4 + i]; sub[1][8 + i] = c1;       sub[1][12 + i] = c4;
+      sub[2][i] = c4;   sub[2][4 + i] = c1;       sub[2][8 + i] = C[8 + i]; sub[2][12 + i] = c2;
+      sub[3][i] = c3;   sub[3][4 + i] = c4;       sub[3][8 + i] = c2;       sub[3][12 + i] = C[12 + i];
     }
   }
-  /* 四块的角与法向都从各自的控制网重算（与原版一样：细分后的角法向由子网决定） */
-  for (int k = 0; k < 4; ++k) {
-    r3v n[4];
-    r3_corner_normals(s, q[k], n);
-    if (!r3_render_patch(s, t, q[k], q[k][0], q[k][12], q[k][15], q[k][3],
-                         n[0], n[1], n[2], n[3], mat, C ? sub[k] : NULL,
-                         depth + 1)) return 0;
+
+  if (!r3_render_patch(s, t, S0, P0, m0, m4, m3, N0, n0, n4, n3,
+                       flat0, 0, 0, flat3, mat, C ? sub[0] : NULL, depth + 1)) return 0;
+  if (!r3_render_patch(s, t, S1, m0, P1, m1, m4, n0, N1, n1, n4,
+                       flat0, flat1, 0, 0, mat, C ? sub[1] : NULL, depth + 1)) return 0;
+  if (!r3_render_patch(s, t, S2, m4, m1, P2, m2, n4, n1, N2, n2,
+                       0, flat1, flat2, 0, mat, C ? sub[2] : NULL, depth + 1)) return 0;
+  return r3_render_patch(s, t, S3, m3, m4, m2, P3, n3, n4, n2, N3,
+                         0, 0, flat2, flat3, mat, C ? sub[3] : NULL, depth + 1);
+}
+
+/* **每一片自己的 res**（原版 bezierpatch.h:185 `init(pixelResolution*ratio)`）。
+ * ratio 是 drawsurface.cc:297-316 那三行，配 renderBase.cc:245-251 的实参：
+ *   b = (xmin, ymin, Zmin)、B = (xmax, ymax, Zmax)   —— 视景体的横竖界 + 场景 z 界
+ *   size2 = hypot(Width, Height)                     —— 光栅目标的像素尺寸
+ *   perspective = ortho ? 0 : 1/Zmax
+ *   s = perspective ? Min.z * perspective : 1        —— Min 是**这一片控制点**的 bbox
+ *   ratio = |(s*(B.x-b.x), s*(B.y-b.y))| / size2
+ * pixelResolution = 1.0（render.h:30）。所以
+ *   res = s * hypot(xmax-xmin, ymax-ymin) / hypot(fw, fh)，s = (片内最小 z) / M.z
+ * 两边都是负数，s >= 1：越靠后的片 res 越大、细分越粗 —— 透视下远处一个像素对应更多
+ * 用户单位，正是这一格的意思。
+ *
+ * 从前这儿用的是清单里那个全局 `res = (M.x-m.x)/fw`（asy_builtins.asy:10670 那一格自己
+ * 也写着"具体取值还没量到"）。量出来的代价（/tmp/dot/d7.asy 六颗 10pt 的点，逐像素按
+ * 覆盖率加权）：六颗的面积一律比参考大 1.07%~1.43%（半径大 0.5%~0.7%），
+ * 而**位置只差 0.16 px 以内** —— 也就是说错的不是投影，是细分的粗细与内收量。 */
+static double r3_res_for(const r3scene *s, const r3v *p, int n) {
+  double sc = 1.0;
+  if (!s->ortho && s->M.z != 0.0) {
+    double zmin = p[0].z;
+    for (int i = 1; i < n; ++i) if (p[i].z < zmin) zmin = p[i].z;
+    sc = zmin / s->M.z;
   }
-  return 1;
+  double w = sc * (s->xmax - s->xmin), h = sc * (s->ymax - s->ymin);
+  double d = hypot((double) s->fw, (double) s->fh);
+  /* **再乘一个 √2**（= 一个像素的对角线）。这一格是**标定出来的**，不是从上面那串公式
+   * 推出来的：把 res 乘 k 扫一遍，一个不打光的大球（/tmp/dot/s2.asy，
+   * `draw(unitsphere,yellow,light=nolight)`，位图 4320000 字节）的差是
+   *   k=1.0 → 2708 字节   k=1.2 → 428   k=1.33/1.4/1.5/1.6 → **40**（四档输出完全相同）
+   *   k=1.8 → 4268        k=2.0 → 5994   k=3.0 → 8291
+   * 六颗 10pt 的点（d7.asy）同一趟：k=1 时六颗面积一律大 1.0~2.1%，k>=1.5 之后
+   * 六颗的面积比都落在 1.0000~1.002。两把尺子的平台交集是 [1.33, 1.6]，取 √2。
+   * 也就是说判据是"片内起伏不到**一个像素的对角线**"，而不是一个像素边长。
+   * 平台里另外两个候选（1.44 = hypot(fw,fh)/((fw+fh)/2)、1.5）分不出来 —— 想分开得找一把
+   * 长宽比很偏的尺子，试过 2400x600 那一张，但它有别的残差（7100 字节起）盖住了这一项。
+   * `OMNI_R3_RES` 留着重新标定用。 */
+  return d > 0 ? M_SQRT2 * hypot(w, h) / d : 0.0;
+}
+
+/* 这一片的三个细分参数一起落地：res / res2 / Epsilon（透明面不内收，见 :43-47） */
+static void r3_set_res(r3scene *s, const r3v *p, int n, const r3mat *mat) {
+  double r = r3_res_for(s, p, n);
+  { const char *e = getenv("OMNI_R3_RES");        /* 标定用：res 乘一个系数 */
+    if (e) r *= atof(e); }
+  if (r > 0) { s->res = r; s->res2 = r * r; }
+  s->Epsilon = (mat && mat->diffuse[3] < 1.0) ? 0.0 : 0.1 * s->res;
+  { const char *e = getenv("OMNI_R3_FILL");      /* 标定用：临时换 FillFactor */
+    if (e) s->Epsilon = (mat && mat->diffuse[3] < 1.0) ? 0.0 : atof(e) * s->res; }
 }
 
 /* 一片面片进表：先算 epsilon（bezierpatch.cc:70）与四角法向，再递归。
  * `C` 是四个角的 rgba（16 个 float，角序与 P0..P3 一样），没有顶点色时给 NULL。 */
 static int r3_add_patch(r3scene *s, r3tris *t, const r3v *p, int straight,
                         const r3mat *mat, const float *C) {
+  r3_set_res(s, p, 16, mat);
   double eps = 0;
   for (int i = 1; i < 16; ++i) {
     double d = r3v_abs2(r3v_sub(p[i], p[0]));
@@ -384,7 +652,8 @@ static int r3_add_patch(r3scene *s, r3tris *t, const r3v *p, int straight,
     if (!r3tris_push(t, P0, n[0], P2, n[2], P3, n[3], mat)) return 0;
     return 1;
   }
-  return r3_render_patch(s, t, p, P0, P1, P2, P3, n[0], n[1], n[2], n[3], mat, C, 0);
+  return r3_render_patch(s, t, p, P0, P1, P2, P3, n[0], n[1], n[2], n[3],
+                         0, 0, 0, 0, mat, C, 0);
 }
 
 /* ------------------------------------------------------------------ 三角面片
@@ -460,40 +729,82 @@ static void r3_tri_split4(const r3v *p, r3v out[4][10]) {
   }
 }
 
+/* bezierpatch.cc:636 的递归。与四边面片同一套约定：三个角 P0..P2 与法向 N0..N2 是父级
+ * 传下来的，只有三条边的中点现算；`flat0..2` 记住"这条边已经判直过了"，第一次判直时把中点
+ * 顺着切线往内收 Epsilon（:774-799，内收方向是**两个 differential 之和**）。
+ * 四块的次序 l/r/u/c 与 r3_tri_split4 的 out[0..3] 一一对上（:762-765）。
+ * `c` 那一块（中心）的控制点在原版里被复用成三个中点法向的取样，所以下面一律拿 cq 索引：
+ *   cq[0]=r030 cq[1]=u201 cq[2]=r021 cq[3]=u102 cq[4]=c111 cq[5]=r012
+ *   cq[6]=l030 cq[7]=l120 cq[8]=l210 cq[9]=l300                                     */
 static int r3_render_tri(const r3scene *s, r3tris *t, const r3v *p,
                          r3v P0, r3v P1, r3v P2, r3v N0, r3v N1, r3v N2,
+                         int flat0, int flat1, int flat2,
                          const r3mat *mat, const float *C, int depth) {
   double d = r3_tri_distance(p);
   if (!(s->res2 > 0 && d == d) || d < s->res2 || depth >= 8)
     return r3tris_pushc(t, P0, N0, P1, N1, P2, N2, mat, C);
   r3v q[4][10];
   r3_tri_split4(p, q);
-  /* 顶点色跟着细分（bezierpatch.cc:805-807 三行边中点，:814-817 四块的分派） */
-  float cc[3][4], sub[4][12];
+  const r3v *cq = q[3];
+  const double E = s->Epsilon;
+
+  /* 三个新中点的法向。原版这三句没有退化回退（:767-769 就三行） */
+  r3v n0 = r3_normal(s, cq[9], cq[5], cq[2], cq[0], cq[1], cq[3], cq[6]);
+  r3v n1 = r3_normal(s, cq[0], cq[1], cq[3], cq[6], cq[7], cq[8], cq[9]);
+  r3v n2 = r3_normal(s, cq[6], cq[7], cq[8], cq[9], cq[5], cq[2], cq[0]);
+
+  r3v m0 = r3v_scl(0.5, r3v_add(P1, P2));
+  if (!flat0) {
+    if ((flat0 = r3_straightness(p[6], p[7], p[8], p[9]) < s->res2)) {
+      if (E) m0 = r3v_sub(m0, r3v_scl(E, r3v_unit(r3v_add(
+                    r3_differential(s, cq[0], cq[2], cq[5], cq[9]),
+                    r3_differential(s, cq[0], cq[1], cq[3], cq[6])))));
+    } else m0 = cq[0];
+  }
+  r3v m1 = r3v_scl(0.5, r3v_add(P2, P0));
+  if (!flat1) {
+    if ((flat1 = r3_straightness(p[0], p[2], p[5], p[9]) < s->res2)) {
+      if (E) m1 = r3v_sub(m1, r3v_scl(E, r3v_unit(r3v_add(
+                    r3_differential(s, cq[6], cq[3], cq[1], cq[0]),
+                    r3_differential(s, cq[6], cq[7], cq[8], cq[9])))));
+    } else m1 = cq[6];
+  }
+  r3v m2 = r3v_scl(0.5, r3v_add(P0, P1));
+  if (!flat2) {
+    if ((flat2 = r3_straightness(p[0], p[1], p[3], p[6]) < s->res2)) {
+      if (E) m2 = r3v_sub(m2, r3v_scl(E, r3v_unit(r3v_add(
+                    r3_differential(s, cq[9], cq[8], cq[7], cq[6]),
+                    r3_differential(s, cq[9], cq[5], cq[2], cq[0])))));
+    } else m2 = cq[9];
+  }
+
+  /* 顶点色跟着细分（:804-807 三行边中点，:814-817 四块的分派） */
+  float sub[4][12];
   if (C) {
     for (int i = 0; i < 4; ++i) {
-      cc[0][i] = 0.5f * (C[4 + i] + C[8 + i]);
-      cc[1][i] = 0.5f * (C[8 + i] + C[i]);
-      cc[2][i] = 0.5f * (C[i] + C[4 + i]);
-    }
-    for (int i = 0; i < 4; ++i) {
-      sub[0][i] = C[i];      sub[0][4 + i] = cc[2][i]; sub[0][8 + i] = cc[1][i];
-      sub[1][i] = cc[2][i];  sub[1][4 + i] = C[4 + i]; sub[1][8 + i] = cc[0][i];
-      sub[2][i] = cc[1][i];  sub[2][4 + i] = cc[0][i]; sub[2][8 + i] = C[8 + i];
-      sub[3][i] = cc[0][i];  sub[3][4 + i] = cc[1][i]; sub[3][8 + i] = cc[2][i];
+      float c0 = 0.5f * (C[4 + i] + C[8 + i]);
+      float c1 = 0.5f * (C[8 + i] + C[i]);
+      float c2 = 0.5f * (C[i] + C[4 + i]);
+      sub[0][i] = C[i]; sub[0][4 + i] = c2;       sub[0][8 + i] = c1;
+      sub[1][i] = c2;   sub[1][4 + i] = C[4 + i]; sub[1][8 + i] = c0;
+      sub[2][i] = c1;   sub[2][4 + i] = c0;       sub[2][8 + i] = C[8 + i];
+      sub[3][i] = c0;   sub[3][4 + i] = c1;       sub[3][8 + i] = c2;
     }
   }
-  for (int k = 0; k < 4; ++k) {
-    r3v n[3];
-    r3_tri_normals(s, q[k], n);
-    if (!r3_render_tri(s, t, q[k], q[k][0], q[k][6], q[k][9],
-                       n[0], n[1], n[2], mat, C ? sub[k] : NULL, depth + 1)) return 0;
-  }
-  return 1;
+
+  if (!r3_render_tri(s, t, q[0], P0, m2, m1, N0, n2, n1,
+                     0, flat1, flat2, mat, C ? sub[0] : NULL, depth + 1)) return 0;
+  if (!r3_render_tri(s, t, q[1], m2, P1, m0, n2, N1, n0,
+                     flat0, 0, flat2, mat, C ? sub[1] : NULL, depth + 1)) return 0;
+  if (!r3_render_tri(s, t, q[2], m1, m0, P2, n1, n0, N2,
+                     flat0, flat1, 0, mat, C ? sub[2] : NULL, depth + 1)) return 0;
+  return r3_render_tri(s, t, q[3], m0, m1, m2, n0, n1, n2,
+                       0, 0, 0, mat, C ? sub[3] : NULL, depth + 1);
 }
 
 static int r3_add_tri3(r3scene *s, r3tris *t, const r3v *p, int straight,
                        const r3mat *mat, const float *C) {
+  r3_set_res(s, p, 10, mat);
   double eps = 0;
   for (int i = 1; i < 10; ++i) {
     double q = r3v_abs2(r3v_sub(p[i], p[0]));
@@ -503,7 +814,7 @@ static int r3_add_tri3(r3scene *s, r3tris *t, const r3v *p, int straight,
   r3v n[3];
   r3_tri_normals(s, p, n);
   if (straight) return r3tris_pushc(t, p[0], n[0], p[6], n[1], p[9], n[2], mat, C);
-  return r3_render_tri(s, t, p, p[0], p[6], p[9], n[0], n[1], n[2], mat, C, 0);
+  return r3_render_tri(s, t, p, p[0], p[6], p[9], n[0], n[1], n[2], 0, 0, 0, mat, C, 0);
 }
 
 /* ------------------------------------------------------------------ 曲线
@@ -554,8 +865,21 @@ static void r3_set_dimensions(r3scene *s) {
   if (Height <= 0) Height = 1;
   double aspect = ((double) Width) / Height;
   double zoom = s->zoom == 0 ? 1 : s->zoom;
-  double xshift = s->shiftx * zoom;
-  double yshift = s->shifty * zoom;
+  /* **viewportshift 不乘 zoom。** renderBase.cc:119 那一行是
+   *   xshift = (X / Width + Shift.getx() * Xfactor) * zoom
+   * 里面的 `* zoom` 是给 `X / Width`（交互时的像素平移量，确实要随 zoom 缩放）用的；
+   * 而离屏导出那条路上 `home()`（renderBase.cc:495）已经把 X/Y 置 0，剩下的只有
+   * Shift 那一项。asy 自己给出了这一项的单位：three.asy:2940 把同一个 shift 换算成
+   * target 偏移时写的是 `P.viewportshift.x*lambda.x/P.zoom` —— **除以** zoom，
+   * 也就是说 viewportshift 是以"缩放后的视口"为单位的，换到相机单位要除 zoom；
+   * 而下面 `rAspect` 里已经带了一个 zoominv，两者恰好抵消，所以这里一个 zoom 都不乘。
+   *
+   * 量出来的（label3zoom，唯一一个 zoom != 1 且 viewportshift != 0 的例子）：
+   * 乘了 zoom 时 frustum 中心在 x/(-z) 上是 -0.686，而画出来的 22614 片三角占
+   * [-0.4166, +0.4162] —— 两个区间不相交，整幅位图是空的（判据：ink 重合 0、
+   * 盖住参考 0.0%，参考有 827930 个墨点）。不乘之后中心变成 -0.1225，落在物体里。 */
+  double xshift = s->shiftx;
+  double yshift = s->shifty;
   double zoominv = 1.0 / zoom;
   double Zmax = s->M.z, Zmin = s->m.z;
   double H = s->ortho ? 0.0 : -tan(0.5 * s->angle * M_PI / 180.0) * Zmax;
@@ -587,6 +911,16 @@ static void r3_set_dimensions(r3scene *s) {
   /* glrender.cc:493/495：near/far 是 -Zmax / -Zmin */
   s->znear = -Zmax;
   s->zfar = -Zmin;
+  /* 量口：`OMNI_R3_DEBUG` 打开时把 frustum 的输入与输出都印出来。三维那一档"物体跑到
+   * 画布外"这类问题，先看这一行 —— 输入（angle/zoom/m/M/aspect）与输出（xmin..zfar）
+   * 分开印，就能判断是"收到的数不对"还是"这一段算错了"。 */
+  if (getenv("OMNI_R3_DEBUG"))
+    fprintf(stderr, "r3dim: %dx%d aspect %.17g ortho %d angle %.17g zoom %.17g\n"
+            "       m (%.17g %.17g %.17g) M (%.17g %.17g %.17g)\n"
+            "       H %.17g x [%.17g %.17g] y [%.17g %.17g] z [%.17g %.17g]\n",
+            Width, Height, aspect, s->ortho ? 1 : 0, s->angle, zoom,
+            s->m.x, s->m.y, s->m.z, s->M.x, s->M.y, s->M.z,
+            H, s->xmin, s->xmax, s->ymin, s->ymax, s->znear, s->zfar);
 }
 
 /* glm::ortho / glm::frustum（右手、深度 [-1,1]），列主序 P[col][row] */
@@ -1128,6 +1462,10 @@ omni_str omni_r3_render(omni_str path) {
   r3lines lns; memset(&lns, 0, sizeof lns);
 
   int ok = 1, ended = 0, header = 0;
+  /* **视景体要在读几何之前就算出来**：每一片的 res 用的是 xmin..ymax（r3_res_for），
+   * 而细分是边解析边跑的。清单里 size/proj/box/shift 都在几何之前，所以第一条几何
+   * 到达时算一次就够；末尾那一趟看这个标记，不重算（也就不会重复打 r3dim）。 */
+  int dimset = 0;
   char kw[32];
   while (ok && r3_word(&L, kw, sizeof kw)) {
     if (strcmp(kw, "r3") == 0) {
@@ -1190,6 +1528,7 @@ omni_str omni_r3_render(omni_str path) {
       if (!r3_num(&L, &st) || !r3_nums(&L, cp, 48) || nmat == 0) { ok = 0; break; }
       r3v p[16];
       for (int i = 0; i < 16; ++i) p[i] = r3v_mk(cp[3 * i], cp[3 * i + 1], cp[3 * i + 2]);
+      if (!dimset) { r3_set_dimensions(&S); dimset = 1; }
       if (!r3_add_patch(&S, &tris, p, st != 0, mats + (nmat - 1),
                         npend == 4 ? pend : NULL)) { ok = 0; break; }
       npend = 0;
@@ -1199,6 +1538,7 @@ omni_str omni_r3_render(omni_str path) {
       if (!r3_num(&L, &st) || !r3_nums(&L, cp, 30) || nmat == 0) { ok = 0; break; }
       r3v p[10];
       for (int i = 0; i < 10; ++i) p[i] = r3v_mk(cp[3 * i], cp[3 * i + 1], cp[3 * i + 2]);
+      if (!dimset) { r3_set_dimensions(&S); dimset = 1; }
       if (!r3_add_tri3(&S, &tris, p, st != 0, mats + (nmat - 1),
                        npend == 3 ? pend : NULL)) { ok = 0; break; }
       npend = 0;
@@ -1215,6 +1555,10 @@ omni_str omni_r3_render(omni_str path) {
       if (!r3_nums(&L, cp, 12) || nmat == 0) { ok = 0; break; }
       r3v p[4];
       for (int i = 0; i < 4; ++i) p[i] = r3v_mk(cp[3 * i], cp[3 * i + 1], cp[3 * i + 2]);
+      /* 曲线也是一段一段各自算 res（beziercurve.h:54 同一格，ratio 由 drawpath3.cc
+       * 传进来，公式与面片那边一字不差）。 */
+      if (!dimset) { r3_set_dimensions(&S); dimset = 1; }
+      r3_set_res(&S, p, 4, mats + (nmat - 1));
       if (!r3_add_bez(&S, &lns, p, mats + (nmat - 1), 0)) { ok = 0; break; }
     } else if (strcmp(kw, "line") == 0) {
       double cnt; if (!r3_num(&L, &cnt) || nmat == 0) { ok = 0; break; }
@@ -1238,8 +1582,7 @@ omni_str omni_r3_render(omni_str path) {
   omni_str out = omni_str_new((char *) "", 0);
   t1 = clock();                                 /* 解析 + 细分到这里为止 */
   if (ok && ended && header && S.fw > 0 && S.fh > 0) {
-    S.res2 = S.res * S.res;
-    r3_set_dimensions(&S);
+    if (!dimset) r3_set_dimensions(&S);
     r3_projection(&S);
 
     size_t np = (size_t) S.fw * S.fh * R3_NS;
