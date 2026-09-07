@@ -1862,21 +1862,33 @@ static void r3_raster_line(const r3scene *s, r3fb *fb, r3v a, r3v b,
       if (fb->pdep) {
         double sx = x + 0.5, sy = y + 0.5;
         double t = ((sx - ax) * dx + (sy - ay) * dy) / (len * len);
-        if (t >= 0.0 && t <= 1.0) {
-          double qx = ax + t * dx, qy = ay + t * dy;
-          double ex = sx - qx, ey = sy - qy;
-          double d = ex * nx + ey * ny;
-          if (d <= 0.5 && d >= -0.5 && sqrt(ex * ex + ey * ey) <= 0.5) {
-            double z = az + t * (bz - az);
-            size_t pix = (size_t) y * fb->fw + x;
-            if (fb->pdep[pix] == 0.0f || z < (double) fb->pdep[pix]) {
-              fb->pdep[pix] = (float) z;
-              for (int i = 0; i < 3; ++i) {
-                float v = (float) mat->emissive[i];
-                if (v < 0.0f) v = 0.0f;
-                if (v > 1.0f) v = 1.0f;
-                fb->pcol[pix * 3 + i] = v;
-              }
+        double qx = ax + t * dx, qy = ay + t * dy;
+        double ex = sx - qx, ey = sy - qy;
+        double d = ex * nx + ey * ny;
+        int hit = t >= 0.0 && t <= 1.0 && d <= 0.5 && d >= -0.5
+                  && sqrt(ex * ex + ey * ey) <= 0.5;
+        /* **线也按"任一采样点被覆盖"收**（与三角那边同一条，见 r3_raster_pix 的头注）：
+           中心不在带子里、但有采样点在，GL 一样会跑一次 fragment shader 并写
+           `opaqueColor[pixel]`，深度取的还是中心处（外推）。
+           量到的原形（twoSpheres 顶上的线框，y=2..3、x≈1130）：参考是 0/32/111/127 的
+           深线，我们是 79/127/207/223 —— 底色退成了背景，线被冲淡。 */
+        /* 线这一路**没有**跟着三角放宽到"任一采样点被覆盖"：量过，那样 sacylinder3D
+           1488 → 1492（略差）、twoSpheres 一个字节不动。线上剩下的差是**另一件事** ——
+           twoSpheres 顶上那条 box 边（y=2..3、x≈1130）参考是 0/32/111/127 的渐变、
+           我们是 255 与 0 的硬边，而且我们的线在 x=1132 处还没开始、参考已经有色：
+           也就是**线的端点与线宽判据**与 GL 不一样（GL 是"菱形出口"规则的 1 像素宽带，
+           我们多了一个到线段的圆盘判据）。那一档要单独开一刀，且会动到所有线的输出
+           （现在很多全是线的图逐字节相同），所以先记着、不动。 */
+        if (hit) {
+          double z = az + t * (bz - az);
+          size_t pix = (size_t) y * fb->fw + x;
+          if (fb->pdep[pix] == 0.0f || z < (double) fb->pdep[pix]) {
+            fb->pdep[pix] = (float) z;
+            for (int i = 0; i < 3; ++i) {
+              float v = (float) mat->emissive[i];
+              if (v < 0.0f) v = 0.0f;
+              if (v > 1.0f) v = 1.0f;
+              fb->pcol[pix * 3 + i] = v;
             }
           }
         }
