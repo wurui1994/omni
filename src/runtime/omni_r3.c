@@ -1299,6 +1299,11 @@ static int r3_tcenter = 0;
    （排完序之后：颜色、alpha、深度，以及混出来的那三个字节）。查"参考在这一格上
    一层都没混、我们混了"那一类只能靠它 —— 整幅位图的统计问不出更多。 */
 static int r3_pix_x = -1, r3_pix_y = -1;
+/* 透明那一趟走**逐像素**的链（照 count.glsl / blend.glsl 的结构，见 r3_raster_pix 的
+   头注）。**默认开** —— 量出来的账（八个三维例子）：sacylinder3D 18813 → 6449、
+   triangles 10574 → 183、twoSpheres 435546 → 296130，没有透明的那几个一个字节不差。
+   `OMNI_R3_OITPIX=0` 退回逐采样点那一路（那一份也留着，探针 flat_trans 上它是 0）。 */
+static int r3_oitpix = 1;
 
 static void r3_pick_samples(void) {
   const char *e = getenv("OMNI_R3_SAMPLES");
@@ -1334,8 +1339,11 @@ typedef struct {
   float *depth;          /* fw*fh*R3_NS，初值 1（远） */
   unsigned char *col;    /* fw*fh*R3_NS*3 */
   float *colf;           /* 老路那一趟的浮点累加（只在退回老路时分配） */
-  unsigned *tcnt;        /* 逐采样点的片元数；前缀和之后当写指针（OIT 那两趟） */
+  unsigned *tcnt;        /* 片元数；前缀和之后当写指针（OIT 那两趟）。
+                            逐采样点那一路一格一个采样点，逐像素那一路（oitpix）一格一像素 */
   float *tfrag;          /* 片元表：每条 5 个 float（r, g, b, a, 深度） */
+  float *pcol;           /* 逐像素那一路：那一格的不透明色（参考的 opaqueColor[pixel]） */
+  float *pdep;           /* 同上的深度（参考的 opaqueDepth[pixel]，0 = 没有不透明层） */
   int tmode;             /* 0 = 直接混（老路） 1 = 只数 2 = 只填 */
   size_t nblend;         /* 混过色的采样点次数（量口） */
 } r3fb;
@@ -1616,6 +1624,119 @@ static void r3_raster_tri(const r3scene *s, r3fb *fb, const r3v *P, const r3v *N
   }
 }
 
+/* **逐像素那一路**（`OMNI_R3_OITPIX=1`，照 count.glsl / blend.glsl 的结构）。
+ * 参考的透明是逐**像素**存链的（count.glsl 的下标就是 `gl_FragCoord` 的整数坐标），
+ * 混色的底色是那一格的不透明色或纯背景（blend.glsl:101），混完只写一个值；
+ * 而我们原来那一路是逐**采样点**的。一格只被部分采样点覆盖时两者必然不同，
+ * 而透明那一族的残差正好全长在这种格子上（见 r3_raster_tri 里那段注的账）。
+ *
+ * 这一份**不动原来的热路**：覆盖只按像素中心判、着色也在中心算一次。
+ *   phase 0：过不透明三角，收"那一格的颜色与深度"（pcol/pdep，
+ *            对应参考的 opaqueColor[pixel] / opaqueDepth[pixel]；pdep 为 0 = 没有不透明层）
+ *   phase 1：过透明三角，只数（tcnt 是逐像素的）
+ *   phase 2：过透明三角，填片元（倒着填，与逐采样那一路同一条理由）
+ * 着色那几行与 r3_raster_tri 里的**一字相同**（透视校正的重心、法向与视点插值、
+ * 顶点色那一支），只是没有采样点循环。 */
+static void r3_raster_pix(const r3scene *s, r3fb *fb, const r3v *P, const r3v *N,
+                          const r3mat *mat, const float *VC, int phase) {
+  r3clip c[3];
+  double wx[3], wy[3], wz[3], iw[3];
+  for (int i = 0; i < 3; ++i) {
+    c[i] = r3_project(s, P[i]);
+    if (c[i].w <= 1e-12) return;
+    r3_window(fb, c[i], wx + i, wy + i, wz + i);
+    iw[i] = 1.0 / c[i].w;
+  }
+  double area = (wx[1] - wx[0]) * (wy[2] - wy[0]) - (wx[2] - wx[0]) * (wy[1] - wy[0]);
+  if (area == 0.0) return;
+  int front = area > 0.0;
+  double inv2a = 1.0 / area;
+  double xlo = wx[0], xhi = wx[0], ylo = wy[0], yhi = wy[0];
+  for (int i = 1; i < 3; ++i) {
+    if (wx[i] < xlo) xlo = wx[i];
+    if (wx[i] > xhi) xhi = wx[i];
+    if (wy[i] < ylo) ylo = wy[i];
+    if (wy[i] > yhi) yhi = wy[i];
+  }
+  int x0 = (int) floor(xlo), x1 = (int) ceil(xhi);
+  int y0 = (int) floor(ylo), y1 = (int) ceil(yhi);
+  if (x0 < 0) x0 = 0;
+  if (y0 < 0) y0 = 0;
+  if (x1 > fb->fw) x1 = fb->fw;
+  if (y1 > fb->fh) y1 = fb->fh;
+  const double wx0 = wx[0], wx1 = wx[1], wx2 = wx[2];
+  const double wy0 = wy[0], wy1 = wy[1], wy2 = wy[2];
+  const double wz0 = wz[0], wz1 = wz[1], wz2 = wz[2];
+  float alpha = (float) mat->diffuse[3];
+  if (VC) {
+    alpha = VC[3] < VC[7] ? VC[3] : VC[7];
+    if (VC[11] < alpha) alpha = VC[11];
+  }
+  /* **GL 的填充规则（top-left）**：判据正好落在 0 上时，只有"左/上边"那一侧算覆盖。
+     两个相邻三角共享的那条边在各自里方向相反，于是这样的采样点**只被一个三角**认领。
+     原来三条都写 `>= 0`：正方形那条对角线正好穿过像素中心，那 1989 个格子于是混了
+     **两层**（探针 flat_trans：参考 242、我们 240）。判据只在"恰好为 0"时起作用，
+     其余一个字不动，所以不透明那一路的覆盖集合不受影响。 */
+  /* 方向量过：这一档（`dy > 0`，或水平边时 `dx < 0`）在探针上比反过来那档好 ——
+     flat_trans 1740 对 3171。 */
+  int tb0 = (wy[2] - wy[1]) > 0.0 || ((wy[2] - wy[1]) == 0.0 && (wx[2] - wx[1]) < 0.0);
+  int tb1 = (wy[0] - wy[2]) > 0.0 || ((wy[0] - wy[2]) == 0.0 && (wx[0] - wx[2]) < 0.0);
+  int tb2 = (wy[1] - wy[0]) > 0.0 || ((wy[1] - wy[0]) == 0.0 && (wx[1] - wx[0]) < 0.0);
+  for (int y = y0; y < y1; ++y)
+    for (int x = x0; x < x1; ++x) {
+      double px = x + 0.5, py = y + 0.5;
+      double a0 = ((wx1 - px) * (wy2 - py) - (wx2 - px) * (wy1 - py)) * inv2a;
+      if (a0 < 0.0 || (a0 == 0.0 && !tb0)) continue;
+      double a1 = ((wx2 - px) * (wy0 - py) - (wx0 - px) * (wy2 - py)) * inv2a;
+      if (a1 < 0.0 || (a1 == 0.0 && !tb1)) continue;
+      double a2 = 1.0 - a0 - a1;
+      if (a2 < 0.0 || (a2 == 0.0 && !tb2)) continue;
+      double z = a0 * wz0 + a1 * wz1 + a2 * wz2;
+      size_t pix = (size_t) y * (size_t) fb->fw + (size_t) x;
+      if (phase == 0) {
+        /* 不透明那一格：GL_LESS。pdep 为 0 表示这一格还没有不透明层 */
+        if (fb->pdep[pix] != 0.0f && !(z < (double) fb->pdep[pix])) continue;
+      } else if (phase == 1) {
+        fb->tcnt[pix]++;
+        continue;
+      }
+      /* 透视校正 + 着色（与 r3_raster_tri 里那一段一字相同） */
+      double q0 = a0 * iw[0], q1 = a1 * iw[1], q2 = a2 * iw[2];
+      double qs = q0 + q1 + q2;
+      if (qs == 0.0) { q0 = a0; q1 = a1; q2 = a2; qs = 1.0; }
+      r3v nrm = r3v_scl(1.0 / qs,
+                        r3v_add(r3v_add(r3v_scl(q0, N[0]), r3v_scl(q1, N[1])),
+                                r3v_scl(q2, N[2])));
+      r3v vp = r3v_scl(1.0 / qs,
+                       r3v_add(r3v_add(r3v_scl(q0, P[0]), r3v_scl(q1, P[1])),
+                               r3v_scl(q2, P[2])));
+      float rgb[3];
+      float vc[4];
+      float ablend = alpha;
+      if (VC) {
+        for (int i = 0; i < 4; ++i)
+          vc[i] = (float) ((q0 * VC[i] + q1 * VC[4 + i] + q2 * VC[8 + i]) / qs);
+        ablend = vc[3];
+        if (ablend < 0.0f) ablend = 0.0f;
+        if (ablend > 1.0f) ablend = 1.0f;
+      }
+      r3_shade(s, mat, nrm, vp, front, VC ? vc : NULL, rgb);
+      for (int i = 0; i < 3; ++i) {
+        if (rgb[i] < 0.0f) rgb[i] = 0.0f;
+        if (rgb[i] > 1.0f) rgb[i] = 1.0f;
+      }
+      if (phase == 0) {
+        fb->pdep[pix] = (float) z;
+        for (int i = 0; i < 3; ++i) fb->pcol[pix * 3 + i] = rgb[i];
+      } else {
+        float *f = fb->tfrag + (size_t) (--fb->tcnt[pix]) * 5;
+        f[0] = rgb[0]; f[1] = rgb[1]; f[2] = rgb[2];
+        f[3] = ablend; f[4] = (float) z;
+        fb->nblend++;
+      }
+    }
+}
+
 /* 折线：GL 的线宽默认 1 个采样（glrender.cc 里没有 glLineWidth），
  * 也就是窗口坐标里一条 1 单位宽的带。拿两片三角铺它，颜色取 emissive。 */
 static void r3_raster_line(const r3scene *s, r3fb *fb, r3v a, r3v b,
@@ -1778,6 +1899,8 @@ omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
     if (e) r3_tcenter = strcmp(e, "0") != 0; }
   { const char *e = getenv("OMNI_R3_TGATE");
     if (e) r3_tgate = strcmp(e, "0") != 0; }
+  { const char *e = getenv("OMNI_R3_OITPIX");
+    if (e) r3_oitpix = strcmp(e, "0") != 0; }
   { const char *e = getenv("OMNI_R3_PIX");
     if (e) {
       char *q = NULL;
@@ -2011,7 +2134,90 @@ omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
       }
       for (size_t i = 0; i + 1 < lns.n; i += 2)
         r3_raster_line(&S, &fb, lns.p[i], lns.p[i + 1], lns.mat[i / 2]);
-      if (ntrans > 0) {
+      if (ntrans > 0 && r3_oitpix) {
+        /* **逐像素那一路**（`OMNI_R3_OITPIX=1`，见 r3_raster_pix 的头注）：
+         * 收不透明那一格的色与深度 -> 数透明片元 -> 填 -> 按深度降序混，
+         * 混出来的一个值写进这一格的**全部**采样点（参考那边 blend.glsl 也是
+         * 一格一个值；没有透明片元的格子它 `discard`，所以那些格子照旧是
+         * 不透明那一趟多重采样的结果 —— 这里也只碰 cnt > 0 的格子）。 */
+        size_t npx = (size_t) S.fw * S.fh;
+        fb.pcol = (float *) calloc(npx * 3, sizeof(float));
+        fb.pdep = (float *) calloc(npx, sizeof(float));
+        fb.tcnt = (unsigned *) calloc(npx + 1, sizeof(unsigned));
+        if (fb.pcol && fb.pdep && fb.tcnt) {
+          for (size_t t = 0; t < ntr; ++t) {
+            if (r3_tri_transparent(&tris, t)) continue;
+            r3_raster_pix(&S, &fb, tris.pos + 3 * t, tris.nrm + 3 * t, tris.mat[t],
+                          r3_tri_vcol(&tris, t), 0);
+          }
+          for (size_t t = 0; t < ntr; ++t) {
+            if (!r3_tri_transparent(&tris, t)) continue;
+            r3_raster_pix(&S, &fb, tris.pos + 3 * t, tris.nrm + 3 * t, tris.mat[t],
+                          r3_tri_vcol(&tris, t), 1);
+          }
+          size_t total = 0;
+          for (size_t i = 0; i < npx; ++i) total += fb.tcnt[i];
+          if (total > 0) fb.tfrag = (float *) malloc(total * 5 * sizeof(float));
+          if (total > 0 && fb.tfrag) {
+            size_t run = 0;
+            for (size_t i = 0; i < npx; ++i) {
+              run += fb.tcnt[i];
+              fb.tcnt[i] = (unsigned) run;         /* 段末（写指针往前退） */
+            }
+            fb.tcnt[npx] = (unsigned) total;
+            for (size_t t = 0; t < ntr; ++t) {
+              if (!r3_tri_transparent(&tris, t)) continue;
+              r3_raster_pix(&S, &fb, tris.pos + 3 * t, tris.nrm + 3 * t, tris.mat[t],
+                            r3_tri_vcol(&tris, t), 2);
+            }
+            for (size_t i = 0; i < npx; ++i) {
+              size_t beg = fb.tcnt[i];
+              size_t cnt = (size_t) fb.tcnt[i + 1] - beg;
+              if (cnt == 0) continue;
+              float *base = fb.tfrag + beg * 5;
+              for (size_t a = 1; a < cnt; ++a) {   /* 按深度降序的插入排序 */
+                float tmp[5];
+                for (int q = 0; q < 5; ++q) tmp[q] = base[a * 5 + q];
+                size_t b = a;
+                while (b > 0 && tmp[4] > base[(b - 1) * 5 + 4]) {
+                  for (int q = 0; q < 5; ++q) base[b * 5 + q] = base[(b - 1) * 5 + q];
+                  --b;
+                }
+                for (int q = 0; q < 5; ++q) base[b * 5 + q] = tmp[q];
+              }
+              /* 底色：那一格有不透明层就用它的色，否则用背景（blend.glsl:101） */
+              float od = fb.pdep[i];
+              float acc[3];
+              for (int ch = 0; ch < 3; ++ch)
+                acc[ch] = od != 0.0f ? fb.pcol[i * 3 + ch] : (float) S.bg[ch];
+              /* 被不透明层挡住的片元跳掉（blend.glsl:104-106，判据是 `>=`） */
+              size_t k = 0;
+              if (od != 0.0f) while (k < cnt && base[k * 5 + 4] >= od) ++k;
+              for (size_t a = k; a < cnt; ++a) {
+                const float *f = base + a * 5;
+                float al = f[3];
+                for (int ch = 0; ch < 3; ++ch) {
+                  float v = f[ch] * al + acc[ch] * (1.0f - al);
+                  if (v < 0.0f) v = 0.0f;
+                  if (v > 1.0f) v = 1.0f;
+                  acc[ch] = v;
+                }
+              }
+              unsigned char q0 = r3_unorm8(acc[0]);
+              unsigned char q1 = r3_unorm8(acc[1]);
+              unsigned char q2 = r3_unorm8(acc[2]);
+              for (int sk = 0; sk < R3_NS; ++sk) {
+                unsigned char *o = fb.col + (i * R3_NS + (size_t) sk) * 3;
+                o[0] = q0; o[1] = q1; o[2] = q2;
+              }
+            }
+          }
+        }
+        free(fb.pcol); fb.pcol = NULL;
+        free(fb.pdep); fb.pdep = NULL;
+        free(fb.tcnt); fb.tcnt = NULL;
+        free(fb.tfrag); fb.tfrag = NULL;
+      } else if (ntrans > 0) {
         /* 透明：**逐采样点**收片元、按深度降序排完再混（照 shaders/blend.glsl）。
          * 三步：数 -> 前缀和 -> 填。三角按**原来的次序**过（不预排）—— 参考那边
          * 片元是按画的次序 append 的，插入排序用的是严格 `>`，所以深度相等的
