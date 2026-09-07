@@ -1607,6 +1607,26 @@ class CoreLowerer {
       if (h === 'realbits') return { kind: 'Builtin', name: 'realbits', args: [v], type: INT, argType: REAL };
       return { kind: 'Builtin', name: 'bitsreal', args: [v], type: REAL, argType: INT };
     }
+    /* `(refid E)` —— 一个**数组引用的身份整数**。同一次运行里：同一个引用永远回同一个数、
+     * 两个不同的引用回不同的数（空引用回 0）。**不保证跨运行稳定、不保证连续、不保证有序** ——
+     * 它只是"能拿来做散列桶下标"的那种身份数。
+     *
+     * 为什么方言要它：身份**比较**这一层早就有（`(bin "==" a b)`，也就是 asy 的 `alias`），
+     * 缺的是身份**散列**。asy 前端的 `.cyclic` 是一本按身份查的登记册（见
+     * frontend-asy/lower.js 的 cycHelper），只能线性扫；剖 pdb 出来
+     * `asy__cycis_arr_pen` 93.6 万次调用、自用 3.44s 排前四，而且全是"扫满整册"的否定回答
+     * （查的数组是 `copy(m.p)` 新建的，从来不在册里）。有了这一格就能把登记册分桶。
+     *
+     * 只收数组：现在只有这一处要它，别的引用类型（struct/class/闭包）要用再开。 */
+    if (h === 'refid') {
+      if (n.items.length !== 2) return this.err(n, '(refid E) 要 1 个参数');
+      const v = this.expr(n.items[1]);
+      if (v === null) return null;
+      if (v.type.k !== 'arr') {
+        return this.err(n.items[1], `(refid) 的参数要是数组，这里是 ${coreTypeText(v.type)}`);
+      }
+      return { kind: 'Builtin', name: 'refid', args: [v], type: INT, argType: v.type };
+    }
     // 字符串上的三条：长度、子串、找子串。OIR 侧三个 `Builtin` 早就在（Omni 自己的
     // `s.length` / `s.substr(i,n)` / `s.indexOf(t)` 就是它们），所以 run / run-c /
     // interp / interp --mir 四条腿一行没改就通了；LLVM 那条腿要三条 ABI（见 RT_OPS）。

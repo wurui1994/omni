@@ -16,6 +16,7 @@
 
    这些包装存在的理由是 LLVM 那条腿：它要 call 一个**真符号**，libm 的 sqrt 在 IR 里
    可以是 intrinsic，但 fmod / round 不是，统一包一层最省事。 */
+#define OMNI_REFID_IMPL_TU 1
 #include "omni.h"
 #include <math.h>
 #include <string.h>
@@ -79,6 +80,11 @@ double omni_r_nextafter(double x, double y) { return nextafter(x, y); }
    f32），差别由 GLSL 那一侧的注释交代。 */
 int64_t omni_r_bits(double x) { int64_t i; memcpy(&i, &x, sizeof i); return i; }
 double omni_r_frombits(int64_t i) { double x; memcpy(&x, &i, sizeof x); return x; }
+
+/* `(refid E)` 的真符号（run-llvm 那条腿 call 它；C 那条腿走 omni.h 里的宏，
+   一次强转、不付调用）。指针值就是身份 —— arena 里的块不会搬家，所以这个数在
+   一次运行里是稳的。**不承诺跨运行稳定**，所以它只配当散列桶的下标。 */
+int64_t omni_refid(const void *p) { return (int64_t)(intptr_t)p; }
 
 
 

@@ -720,6 +720,8 @@ class JsEmitter {
       // 位重解释（ADR-0019 路 1）：位不动，只换一种读法。
       case 'realbits': return `$realbits(${a[0]})`;
       case 'bitsreal': return `$bitsreal(${a[0]})`;
+      // 引用的身份整数：这条腿上是一张 WeakMap 发的号（prelude 的 $refid）
+      case 'refid': return `$refid(${a[0]})`;
       case 'chr': return `$chr(${a[0]})`;
       case 'fail': return `$rt_error(${a[0]})`;
       case 'repr': return `$repr_real(${a[0]})`;

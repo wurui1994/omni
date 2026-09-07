@@ -1063,8 +1063,12 @@ function exeCacheDir() {
   return join(cacheRoot(), 'asy-exe');
 }
 function exeCacheStamp(cc) {
-  // 编译器与**它的 flags** 都在印记里：`OMNI_OPT=2` 与默认 -O0 是两个可执行文件
-  return `e1|${jsCacheStamp()}|cc:${cc}|${ccFlags(cc).join(' ')}`;
+  // 编译器与**它的 flags** 都在印记里：`OMNI_OPT=2` 与默认 -O0 是两个可执行文件。
+  // **`OMNI_PROFILE` 也得在**：它改的是生成的 C（插桩），不是 flags；不进印记的话
+  // 开过一次 profile 之后，后面不带开关的运行会命中缓存、复用那份**带插桩**的二进制，
+  // 于是量出来的时间被抬高、stderr 还多出 prof 那几行 —— 正是拿这条腿量性能时最坑的一种。
+  const prof = env('OMNI_PROFILE') === '1' ? '|prof' : '';
+  return `e1|${jsCacheStamp()}|cc:${cc}|${ccFlags(cc).join(' ')}${prof}`;
 }
 function exeCacheGet(path, cc) {
   if (env('OMNI_NO_EXECACHE') === '1') return null;
@@ -1889,6 +1893,17 @@ function findCC() {
  * 而 clang -O2 在这些几百行的翻译单元上就是纯粹的等待（量过：run-c 一次 0.42s -> 0.28s，
  * 五条腿 × 四十个用例乘起来就是半分钟）。要性能数字的场合显式开：`OMNI_OPT=2`。
  * 语义不因此改变 —— 逐个运算的语义靠的是下面那条 `-ffp-contract=off`，与档位无关。
+ *
+ * **三维那一档反过来：跑的时间远大于编的时间，而且档位是逐字节中性的**（2026-09-07 量的）。
+ * pdb（119576 个三角）每趟 shipout 的 asy 层前置 / 解析 / 光栅：
+ *   -O0   5.87s / 13.17s   0.82s   0.28s
+ *   -O1   1.47s /  3.59s   0.38s   0.08s     ← 约 4 倍
+ *   -O2   1.07s /  2.90s   0.36s   0.07s
+ * 八个例子（sacylinder3D / splitpatch / twistedtubes / trefoilknot / hyperboloid /
+ * filesurface / triangles / twoSpheres）在 -O1 上位图不同字节数与 -O0 **一个不差** ——
+ * 有 `-ffp-contract=off` 兜着，档位不动浮点结果。代价是编译变慢（判据上一个例子
+ * 3.1s→8.7s，全是 clang 的时间）。所以"默认哪一档"是按**例子的规模**分的两件事，
+ * 要改默认值得先想清楚这一点（ADR 级）。
  */
 function optFlag() {
   const o = env('OMNI_OPT');

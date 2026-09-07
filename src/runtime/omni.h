@@ -121,6 +121,15 @@ void *omni_nullck(void *p);
    所以尺寸只能由知道它的容器代码传进来。语义等价于 realloc。 */
 void *omni_grow(void *p, size_t oldBytes, size_t newBytes);
 
+/* `(refid E)` —— 引用的**身份整数**。这条腿上数组就是指针，所以就是一次强转；
+   不保证跨运行稳定、不保证连续，只保证"同一次运行里同一个引用同一个数"。
+   真符号留着给 run-llvm 那条腿（它发的是 `call omni_refid`）；定义它的那个 TU
+   在 include 之前定义 OMNI_REFID_IMPL_TU 把下面这个宏关掉。 */
+int64_t omni_refid(const void *p);
+#ifndef OMNI_REFID_IMPL_TU
+#define omni_refid(p) ((int64_t)(intptr_t)(const void *)(p))
+#endif
+
 /* arena 的"作用域"：mark 记下当前位置，release 把之后开的块整块还回去。
    **契约**：release 之后那一段里分配的东西一律不能再碰 —— 只用在"回标量"的地方
    （asy 的面片求界就是：四叉递归、每层新建 15 个数组、最后只回一个 real）。

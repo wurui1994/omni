@@ -945,61 +945,78 @@ class AsyLower {
     if (this.arrGen.has(nm.is)) return nm;
     const ct = asyCore(at);
     this.used.add('asy__mod');
-    // 登记册本身也是一个顶层项（`(global …)`），跟 helper 一起发
-    this.arrGen.set(nm.reg, `  (global ${nm.reg} (arr ${ct}))`);
+    // 登记册是**按身份散列的桶**（`(arr (arr T))`，256 个桶；空着表示这个类型
+    // 一个数组都没标过，`idx`/`acopy` 那两处就靠 `alen == 0` 早退）。
+    // 从前是一条线性册，剖 pdb 出来 `asy__cycis_arr_pen` 93.6 万次调用、自用 3.44s
+    // 排前四：调用者是 `acopy_pen`（`material.operator init(material)` 里的
+    // `p = copy(m.p)`，每个 material 一份新的三格 pen[]），查的数组**从来不在册里**，
+    // 于是每次都扫满整册（`cycset_arr_pen` 6987 次 → 册长约七千；两趟 shipout 翻倍，
+    // 正好对上第二趟慢一倍）。分桶之后否定回答也只扫一个桶。
+    // 桶号用方言的 `(refid E)`（引用的身份整数）：C 那条腿是指针值、JS/解释器那边是
+    // 发号本。**先右移四位**再取低八位 —— arena 里的块按 8/16 字节对齐，低几位是常数，
+    // 不移的话只会用上其中几个桶。
+    this.arrGen.set(nm.reg, `  (global ${nm.reg} (arr (arr ${ct})))`);
     // 上一次问过的那一个记一格。下标操作绝大多数是"在同一个数组上循环"，所以这一格
-    // 把线性扫变成一次身份比较。量过 sinc.asy：登记册非空时 `asy__cycis_arr_real`
-    // 自己占 12.1%（709ms / 5.9s），全花在这条扫描上。
+    // 把散列 + 桶内扫变成一次身份比较。量过 sinc.asy：登记册非空时 `asy__cycis_arr_real`
+    // 自己占 12.1%（709ms / 5.9s），全花在扫描上。
     // set 那边一改就把这一格清掉（置成空引用，与任何真数组都不相等），所以答案不会过期。
     this.arrGen.set(`${nm.is}__memo_a`, `  (global ${nm.is}__la ${ct})`);
     this.arrGen.set(`${nm.is}__memo_b`, `  (global ${nm.is}__lb bool)`);
-    // **倒着扫**（从末尾往前）。量过 bars3：`three.asy` 的 `draw(surface, material, pen)`
-    // 每调一次都新建一对一元数组（`new material[]{surfacepen}` / `new pen[]{meshpen}`）
-    // 并标成 cyclic —— 一趟下来 `cycreg_arr_pen` 攒到 **15461** 格、`cycreg_arr_material`
-    // 15458 格（lldb 在 r3_raster_tri 上断下来读的）。而这些数组**刚 push 进去就要用**：
-    // 正着扫要走满 15k 格才碰到它，倒着扫第一格就是。整趟从 O(n²) 塌成 O(n)。
-    // 剖 bars3（宏化之后那一版）：`asy__cycis_arr_pen` 875 个栈顶样本排第一。
+    // 桶内**倒着扫**：`three.asy` 的 `draw(surface, material, pen)` 每调一次都新建一对
+    // 一元数组（`new material[]{surfacepen}` / `new pen[]{meshpen}`）并标成 cyclic，
+    // 而这些数组**刚 push 进去就要用**，倒着扫第一格就是。
+    //
+    // **试过"命中就换到末尾"（自组织），没有收益，别再试**（那是分桶之前）：
+    // pdb 每趟 8.70s→9.21s、第二趟 20.52→21.51，反而更慢 —— 因为那 93.6 万次全是
+    // 否定回答，根本走不到"命中"那一支。治它的是上面这层分桶。
     this.arrGen.set(nm.is, `  (fn ${nm.is} ((a ${ct})) bool
     (if (bin "==" (var ${nm.is}__la) (var a)) (do (ret (var ${nm.is}__lb))))
+    (let nb int (alen (var ${nm.reg})))
+    (if (bin "==" (var nb) (int 0)) (do (ret (bool false))))
+    (let b (arr ${ct}) (aget (var ${nm.reg})
+      (bin "&" (bin ">>" (refid (var a)) (int 4)) (bin "-" (var nb) (int 1)))))
     (let f bool (bool false))
-    (let i int (bin "-" (alen (var ${nm.reg})) (int 1)))
+    (let i int (bin "-" (alen (var b)) (int 1)))
     (while (bin ">=" (var i) (int 0))
       (do
-        (if (bin "==" (aget (var ${nm.reg}) (var i)) (var a)) (do (set f (bool true)) (set i (int 0))))
+        (if (bin "==" (aget (var b) (var i)) (var a)) (do (set f (bool true)) (set i (int 0))))
         (set i (bin "-" (var i) (int 1)))))
     (set ${nm.is}__la (var a))
     (set ${nm.is}__lb (var f))
     (ret (var f)))`);
-    // 取消标记就把那一格换成空引用：它跟任何真数组都不相等，所以 is 那边照旧对。
-    //
-    // 置上（on）那一路**只回头看末尾 32 格**就 push，不再整册查重：查重是为了不留重复，
-    // 而"整册查重"对一个**新建**的数组必然扫满全册 —— 上面那 15461 次 draw 每次两下，
-    // 就是 `cycset` 自己的 O(n²)（剖出来 342 + 302 个栈顶样本）。允许重复是安全的：
-    //   - `is` 只要"找到一个"就答 true，多几份答案不变；
-    //   - 取消（!on）那一路改成**整册扫、把每一个匹配都清掉**（原来是清掉第一个就 return），
-    //     所以 `set(a,false)` 之后 `is(a)` 照旧是 false。
-    // 代价只有内存：同一个数组隔着 32 格以上再标一次会多占一格。asy 里 `x.cyclic=true`
-    // 都是每个数组一次（plain_paths:165 / plain_pens:148,152 / plain_strings:238），
-    // 而窗口盖住的正是"刚建出来就标"这一族。
+    // 第一次标记时把 256 个桶铺出来（在这之前 `alen == 0` 就是"没标过"这一格）。
+    // **空册上取消标记直接回**：不然一句 `x.cyclic = false` 就把桶铺出来了，
+    // 「这个元素类型一个数组都没标过」那条早退从此永久失效（`idx`/`acopy` 两处都靠它）。
+    // 置上（on）那一路在**桶内**查重再 push —— 分桶之后查重是 O(桶长)，
+    // 所以不必再像从前那样"只回头看末尾 32 格"（那是为了躲整册查重的 O(n²)）。
+    // 取消（!on）把桶里每一个匹配都清成空引用：它跟任何真数组都不相等，`is` 照旧对。
     this.arrGen.set(nm.set, `  (fn ${nm.set} ((a ${ct}) (on bool)) void
     (set ${nm.is}__la (null ${ct}))
     (set ${nm.is}__lb (bool false))
-    (let n int (alen (var ${nm.reg})))
-    (let i int (bin "-" (var n) (int 1)))
-    (let lo int (int 0))
-    (if (bin ">" (var n) (int 32)) (do (set lo (bin "-" (var n) (int 32)))))
+    (if (bin "==" (alen (var ${nm.reg})) (int 0))
+      (do
+        (if (bin "==" (var on) (bool false)) (do (ret)))
+        (let k int (int 0))
+        (while (bin "<" (var k) (int 256))
+          (do
+            (apush (var ${nm.reg}) (anew (arr ${ct}) (int 0)))
+            (set k (bin "+" (var k) (int 1)))))))
+    (let nb int (alen (var ${nm.reg})))
+    (let b (arr ${ct}) (aget (var ${nm.reg})
+      (bin "&" (bin ">>" (refid (var a)) (int 4)) (bin "-" (var nb) (int 1)))))
+    (let i int (int 0))
     (if (var on)
       (do
-        (while (bin ">=" (var i) (var lo))
+        (while (bin "<" (var i) (alen (var b)))
           (do
-            (if (bin "==" (aget (var ${nm.reg}) (var i)) (var a)) (do (ret)))
-            (set i (bin "-" (var i) (int 1)))))
-        (apush (var ${nm.reg}) (var a))
+            (if (bin "==" (aget (var b) (var i)) (var a)) (do (ret)))
+            (set i (bin "+" (var i) (int 1)))))
+        (apush (var b) (var a))
         (ret)))
     (set i (int 0))
-    (while (bin "<" (var i) (var n))
+    (while (bin "<" (var i) (alen (var b)))
       (do
-        (if (bin "==" (aget (var ${nm.reg}) (var i)) (var a)) (do (aset (var ${nm.reg}) (var i) (null ${ct}))))
+        (if (bin "==" (aget (var b) (var i)) (var a)) (do (aset (var b) (var i) (null ${ct}))))
         (set i (bin "+" (var i) (int 1)))))
     (ret))`);
     // 下标本体。**在界内的下标与 cyclic 无关** —— asy 那边是

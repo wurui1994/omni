@@ -19,6 +19,13 @@ import { OmniError } from '../source/diag.js';
 // 这个写法会先读到一个越界的正字面量（一元负号是后加的），词法器当场就报 invalid integer
 const INT_MIN = -9223372036854775807n - 1n;
 
+// `(refid E)` 的号码本。**Map 而不是 WeakMap** —— WeakMap 不在语言子集里（这份文件
+// 自己也要能被 JS 前端降级、被 C 后端编译），代价是查过的引用不会被回收。
+// 这条腿是开发腿（真正跑量的是 run-c，那边 refid 就是指针值、不留任何账），
+// 所以留着这份账是划得来的。号从 1 起，空引用是 0（见下面 case 'refid'）。
+const refIds = new Map();
+let refIdN = 0n;
+
 /**
  * 解释出来的程序自己的运行期错误。**不是** OmniError：编译器的错误退 1 并原样打印，
  * 而被解释的程序的运行期错误必须和编译出来的程序一模一样 —— `omni: runtime error: ...`
@@ -1058,6 +1065,16 @@ export function applyBuiltin(I, e, a) {
       const rbv = new DataView(new ArrayBuffer(8));
       rbv.setBigInt64(0, a[0]);
       return rbv.getFloat64(0);
+    }
+    /* 引用的身份整数（`(refid E)`）：这条腿上没有指针，拿上面那本号码本**发号**
+     * （第一次问才给，从 1 起，空引用 0）。与 C 那条腿的指针值不是同一批数 ——
+     * 语义只承诺"同一次运行里同一个引用同一个数"。 */
+    case 'refid': {
+      const o = a[0];
+      if (o === null || o === undefined) return 0n;
+      let v = refIds.get(o);
+      if (v === undefined) { v = ++refIdN; refIds.set(o, v); }
+      return v;
     }
 
     case 'chr': return chrOf(a[0]);

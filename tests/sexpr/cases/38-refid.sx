@@ -1,0 +1,23 @@
+;; `(refid E)`：引用的**身份整数**。同一次运行里同一个引用回同一个数、不同引用回不同的数。
+;;
+;; 为什么方言要它：身份**比较**早就有（`(bin "==" a b)`，也就是 asy 的 alias），缺的是身份
+;; **散列**。asy 前端那本 `.cyclic` 登记册是按身份查的，从前只能线性扫 —— 剖 pdb 出来
+;; `asy__cycis_arr_pen` 93.6 万次调用、自用 3.44s 排前四，而且全是"扫满整册"的否定回答。
+;; 有了这一格就能分桶：pdb 每趟 shipout 前置 7.78s→6.91s、第二趟 18.25s→15.04s。
+;;
+;; 落点：C 那条腿是指针值（omni.h 里的宏，一次强转）、run-llvm 是 `omni_refid` 这个真符号、
+;; JS 与解释器是一本号码本（WeakMap / Map 发号）。所以**各条腿的数不是同一批** ——
+;; 这份用例因此只印"比出来的关系"，一个具体的号都不印。
+(module
+  (main
+    (let a (arr int) (anew (arr int) (int 3)))
+    (let b (arr int) (var a))
+    (let c (arr int) (anew (arr int) (int 3)))
+    ;; 同一个引用：两次问、两条路（自己与别名）都得是同一个数
+    (print (bin "==" (refid (var a)) (refid (var a))))
+    (print (bin "==" (refid (var a)) (refid (var b))))
+    ;; 两个不同的数组：号不一样（长度、内容都一样也不行 —— 这是身份，不是值）
+    (print (bin "!=" (refid (var a)) (refid (var c))))
+    ;; 空引用是 0
+    (let z (arr int) (null (arr int)))
+    (print (bin "==" (refid (var z)) (int 0)))))

@@ -166,6 +166,11 @@ const RT_OPS = new Map([
   ['realbits.real', { sym: 'omni_r_bits', ret: 'i64', params: ['double'] }],
   ['bitsreal', { sym: 'omni_r_frombits', ret: 'double', params: ['i64'] }],
   ['bitsreal.int', { sym: 'omni_r_frombits', ret: 'double', params: ['i64'] }],
+  // 引用的身份整数（`(refid E)`）。数组在这条腿上就是 `ptr`（见 LL_TYPES 的 T_ARR），
+  // 所以是一次 ptrtoint —— 但走真符号 `omni_refid`（C 那条腿上它是 omni.h 里的宏，
+  // 不付调用）。单态化后的名字是 `refid.arr`（argType.k），裸名那条一起留着。
+  ['refid', { sym: 'omni_refid', ret: 'i64', params: ['ptr'] }],
+  ['refid.arr', { sym: 'omni_refid', ret: 'i64', params: ['ptr'] }],
   // 字符串上的三条（核心方言的 `(slen …)` / `(ssub …)` / `(sfind …)`，ADR-0014 决策 1）。
   // 全走真符号：omni_index_of 本来就是，另两个是 omni_str.c 里给 static inline 加的外壳
   // （理由写在那里 —— 取长度和取子串各只有一份实现，两条腿不会分叉）。

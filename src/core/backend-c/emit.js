@@ -60,6 +60,13 @@ class CEmitter {
     this.out = [];
     this.indent = 0;
     this.tmp = 0;
+    // 函数级计时（第八十八刀，见 profTable）：`--profile` 或 `OMNI_PROFILE=1` 打开。
+    // 关着时 profTable 什么都不发、func/Return 里那两句也不发 —— 生成的 C 逐字节不变。
+    this.prof = opts.profile === true
+      || (typeof process !== 'undefined' && process.env !== undefined
+        && process.env.OMNI_PROFILE === '1');
+    this.profId = -1;
+    this.profRetT = 'void';
     // 循环标签栈（第四十刀）。C 里没有带标签的 break，多层跳只能是 goto，而且 break 与
     // continue 要**两个**标签：break 的落点在循环之后，continue 的落点在循环体末尾
     // （落到那儿再自然往下走，`for` 的步进就还会跑）。用不着的那个不发，免得 -Wunused-label。
@@ -308,6 +315,7 @@ class CEmitter {
     // 不给初值 —— C 的静态存储本来就零，而真正的初值是 omni_main 最前面那几句赋值
     // （字符串的"零"是个池子里的空串常量，那不是常量表达式，只能在运行时赋）。
     for (const g of this.mod.globals ?? []) this.line(`static ${cTypeName(g.type)} g_${g.name};`);
+    this.profTable();
     for (const f of this.mod.funcs) this.line(`${this.proto(f)};`);
     this.line();
     for (const c of closures) this.closureMake(c);
@@ -335,7 +343,8 @@ class CEmitter {
     // argc/argv 要存下来：process.argv 与"我装在哪"（import.meta.url 的对应物）都要它。
     // 退出码走 omni_host_exit_code —— process.exitCode 是个可写的槽，不是返回值。
     // 入口过一层 omni_run_entry：那一层把活挪到一条大栈的线程上（见 omni_js_host.c）。
-    this.line(`int main(int argc, char **argv) { omni_host_init(argc, argv);${memInit} omni_run_entry(${this.mod.entry}); omni_js_check_uncaught(); fflush(stdout); return omni_host_exit_code(); }`);
+    const profReg = this.prof && this.mod.funcs.length > 0 ? ' atexit(omni_prof_dump);' : '';
+    this.line(`int main(int argc, char **argv) { omni_host_init(argc, argv);${profReg}${memInit} omni_run_entry(${this.mod.entry}); omni_js_check_uncaught(); fflush(stdout); return omni_host_exit_code(); }`);
     this.out[this.s16At] = this.s16PoolLines().join('\n');
     // 三段各自 concat 一次：封闭 ABI 里 `concat` 的 arity 是 2（js_abi.js），
     // 写成 `concat(a, b)` 两个实参在自举出来的编译器上不是同一件事
@@ -769,6 +778,103 @@ class CEmitter {
       default: throw new Error(`c.zero: ${t.k}`);
     }
   }
+  /**
+   * `OMNI_PROFILE=1` 时发一小段**自带的**函数级计时（第八十八刀）。全部发在生成的 C 里，
+   * 不动运行时、也不要操作系统的 profiler 权限（macOS 上 `sample` attach 不到我们
+   * 那个 `.omni-cache/work/run-<哈希>` 目录里的 `a.out`）。关着时这一段一个字节都不发。
+   *
+   * 记的是**含子调用**的时间 + 调用次数：递归靠 depth 只给最外层那一次计时，
+   * 不然一层套一层会把同一段时间数好几遍。自用时间要维护影子栈，第一刀不做 ——
+   * "谁热"这个问题含子时间就够答了。
+   * 出口在 atexit：按 ns 降序印到 **stderr**（与 `OMNI_R3_DEBUG` 那几个量口同一条路，
+   * 不会混进 stdout 的图）。
+   */
+  profTable() {
+    if (!this.prof) return;
+    const n = this.mod.funcs.length;
+    if (n === 0) return;
+    this.line('#include <time.h>');
+    this.line(`#define OMNI_PROF_N ${n}`);
+    this.line('static unsigned long long omni_prof_ns[OMNI_PROF_N];');
+    this.line('static unsigned long long omni_prof_self[OMNI_PROF_N];');
+    this.line('static unsigned long long omni_prof_calls[OMNI_PROF_N];');
+    this.line('static unsigned long long omni_prof_beg[OMNI_PROF_N];');
+    this.line('static int omni_prof_depth[OMNI_PROF_N];');
+    // 影子栈：算**自用时间**（减掉子调用）。只按"含子时间"排会被"调用极密但单次极便宜"
+    // 的那些带跑 —— 踩过：`asy__rm`（两行的 min/max）含子 7.9s 排到第五，
+    // 手工摊开之后 pdb 只降 0.3s/趟，因为那 7.9s 绝大部分是**插桩自己**的两次
+    // clock_gettime（3.2 亿次调用）。自用时间也含插桩，但至少不再把子树的开销记到父亲头上。
+    this.line('#define OMNI_PROF_STK 65536');
+    this.line('static int omni_prof_sp = 0;');
+    this.line('static int omni_prof_ovf = 0;');
+    this.line('static int omni_prof_stkf[OMNI_PROF_STK];');
+    this.line('static unsigned long long omni_prof_stkt[OMNI_PROF_STK];');
+    this.line('static unsigned long long omni_prof_stkc[OMNI_PROF_STK];');
+    this.line('static const char *omni_prof_name[OMNI_PROF_N] = {');
+    this.indent++;
+    for (const f of this.mod.funcs) this.line(`${JSON.stringify(f.mangled)},`);
+    this.indent--;
+    this.line('};');
+    this.line('static unsigned long long omni_prof_now(void) {');
+    this.line('  struct timespec ts;');
+    this.line('  clock_gettime(CLOCK_MONOTONIC, &ts);');
+    this.line('  return (unsigned long long) ts.tv_sec * 1000000000ull + (unsigned long long) ts.tv_nsec;');
+    this.line('}');
+    this.line('static void omni_prof_enter(int i) {');
+    this.line('  omni_prof_calls[i]++;');
+    this.line('  if (omni_prof_depth[i]++ == 0) omni_prof_beg[i] = omni_prof_now();');
+    this.line('  if (omni_prof_sp < OMNI_PROF_STK) {');
+    this.line('    int s = omni_prof_sp;');
+    this.line('    omni_prof_stkf[s] = i;');
+    this.line('    omni_prof_stkc[s] = 0;');
+    this.line('    omni_prof_stkt[s] = omni_prof_now();');
+    this.line('  } else {');
+    this.line('    omni_prof_ovf = 1;   /* 越界那一层拿不到子树回填，自用时间从此偏大 */');
+    this.line('  }');
+    this.line('  omni_prof_sp++;');
+    this.line('}');
+    this.line('static void omni_prof_exit(int i) {');
+    this.line('  if (--omni_prof_depth[i] == 0) omni_prof_ns[i] += omni_prof_now() - omni_prof_beg[i];');
+    this.line('  if (omni_prof_sp > 0) {');
+    this.line('    omni_prof_sp--;');
+    this.line('    if (omni_prof_sp < OMNI_PROF_STK) {');
+    this.line('      int s = omni_prof_sp;');
+    this.line('      unsigned long long dt = omni_prof_now() - omni_prof_stkt[s];');
+    this.line('      omni_prof_self[omni_prof_stkf[s]] += dt - omni_prof_stkc[s];');
+    this.line('      if (s > 0) omni_prof_stkc[s - 1] += dt;');
+    this.line('    }');
+    this.line('  }');
+    this.line('}');
+    this.line('static void omni_prof_dump(void) {');
+    this.line('  int ord[OMNI_PROF_N];');
+    this.line('  int m = 0;');
+    this.line('  for (int i = 0; i < OMNI_PROF_N; i++) if (omni_prof_calls[i]) ord[m++] = i;');
+    this.line('  for (int a = 1; a < m; a++) {');
+    this.line('    int v = ord[a], b = a;');
+    this.line('    while (b > 0 && omni_prof_self[ord[b - 1]] < omni_prof_self[v]) { ord[b] = ord[b - 1]; b--; }');
+    this.line('    ord[b] = v;');
+    this.line('  }');
+    // 只印前 40 条会把"排名靠后但正是我要找的那一条"藏起来 —— 追 `cycis_arr_pen` 的
+    // 调用者时踩过：两个候选（`cycidx_arr_pen` / `acopy_pen`）都在四十名之外，
+    // 光看榜首分不出是哪一条路把它叫了 93 万次。`OMNI_PROF_GREP` 按名字过滤（此时不限名次），
+    // `OMNI_PROF_TOP` 改榜长。
+    this.line('  const char *omni_pf = getenv("OMNI_PROF_GREP");');
+    this.line('  const char *omni_pt = getenv("OMNI_PROF_TOP");');
+    this.line('  int omni_ptop = omni_pt && omni_pt[0] ? atoi(omni_pt) : 40;');
+    this.line('  fprintf(stderr, "prof: %d 个函数被调用过（自用 ms / 含子 ms / 次数，按自用降序）\\n", m);');
+    this.line('  if (omni_prof_ovf) fprintf(stderr, "prof: 影子栈超过 %d 层，自用时间不可信（深层子树被记到父亲头上）\\n", OMNI_PROF_STK);');
+    this.line('  for (int a = 0; a < m; a++) {');
+    this.line('    int i = ord[a];');
+    this.line('    if (omni_pf && omni_pf[0]) { if (!strstr(omni_prof_name[i], omni_pf)) continue; }');
+    this.line('    else if (a >= omni_ptop) break;');
+    this.line('    fprintf(stderr, "prof: %10.3f %10.3f %12llu  %s\\n",');
+    this.line('            omni_prof_self[i] / 1000000.0, omni_prof_ns[i] / 1000000.0,');
+    this.line('            omni_prof_calls[i], omni_prof_name[i]);');
+    this.line('  }');
+    this.line('}');
+    this.line();
+  }
+
   proto(f) {
     // 闭包体的第一个形参是闭包记录自己：既是"环境"，也是被 self 指针解释的那块内存
     const self = f.closureId === undefined ? [] : ['omni_fn self_'];
@@ -777,6 +883,13 @@ class CEmitter {
     this.noteVec(f.ret);
     for (const p of f.params) this.noteVec(p.type);
     const params = [...self, ...f.params.map((p) => `${cTypeName(p.type)} v_${p.name}`)];
+    // **别在这儿加 `inline`/`always_inline` —— 试过，没用**（第九十一刀，退掉了）：
+    // 生成的 C 用 `-O0` 编（不许开 -O2，那会盖住性能问题），clang 在 -O0 下给每个函数挂
+    // `optnone`，而**往 optnone 的调用者里内联是禁掉的** —— 被调方标什么都不起作用。
+    // 量出来：pdb 上给"体不超过两句、且体里不出现自己名字"的函数发
+    // `static inline __attribute__((always_inline))`，36.0s -> 38.5s（没变好）。
+    // 真要消掉热路径上那些调用（`asy__rm` 3.2 亿次、`triple * real` 各 2578 万次），
+    // 只有两条路：**发射器自己在调用点摊开**，或者把编译等级提到 `-O1`（那是 ADR 级的决定）。
     return `static ${cTypeName(f.ret)} ${f.mangled}(${params.length ? params.join(', ') : 'void'})`;
   }
 
@@ -788,10 +901,17 @@ class CEmitter {
       if (c.captures.length) this.line(`struct ${c.mangled}_env *self = (struct ${c.mangled}_env *)self_;`);
       else this.line('(void)self_;');
     }
+    // 计时那一对（见 profTable）：出口不靠 `__attribute__((cleanup))`（tcc 上不保准），
+    // 而是**每条 return 之前**各发一句 —— return 也是我们自己发的，两边一起改就行。
+    this.profId = this.prof ? this.mod.funcs.indexOf(f) : -1;
+    this.profRetT = cTypeName(f.ret);
+    if (this.profId >= 0) this.line(`omni_prof_enter(${this.profId});`);
     for (const s of f.body.stmts) this.stmt(s);
+    if (this.profId >= 0) this.line(`omni_prof_exit(${this.profId});`);
     this.indent--;
     this.line('}');
     this.line();
+    this.profId = -1;
   }
 
   stmt(s) {
@@ -855,6 +975,23 @@ class CEmitter {
       }
       case 'ForIn': this.forIn(s); break;
       case 'Return':
+        // 计时打开时，每条 return 之前先结账（见 profTable）。带值那一支要先把值
+        // 求出来存进临时量 —— 表达式里可能还会调别的函数，不能先停表。
+        if (this.profId >= 0) {
+          if (s.value) {
+            this.line('{');
+            this.indent++;
+            this.line(`${this.profRetT} omni_pr_ = ${this.expr(s.value)};`);
+            this.line(`omni_prof_exit(${this.profId});`);
+            this.line('return omni_pr_;');
+            this.indent--;
+            this.line('}');
+          } else {
+            this.line(`omni_prof_exit(${this.profId});`);
+            this.line('return;');
+          }
+          break;
+        }
         this.line(s.value ? `return ${this.expr(s.value)};` : 'return;');
         break;
       case 'Break': this.line(this.jump(s, 'break')); break;
@@ -1219,6 +1356,9 @@ class CEmitter {
       // 位重解释（ADR-0019 路 1）：位不动，只换一种读法。
       case 'realbits': return `omni_r_bits(${a[0]})`;
       case 'bitsreal': return `omni_r_frombits(${a[0]})`;
+      // 引用的身份整数：这条腿上数组就是指针，所以是一次强转（omni.h 里是宏，
+      // 真符号留着给 run-llvm 那条腿）。
+      case 'refid': return `omni_refid(${a[0]})`;
       case 'chr': return `omni_chr(${a[0]})`;
       case 'fail': return `omni_fail(${a[0]})`;
       case 'repr': return `omni_repr_real(${a[0]})`;

@@ -632,6 +632,19 @@ const $bitsreal = (i) => {
   return bdv.getFloat64(0);
 };
 
+// 引用的身份整数（方言的 refid）。JS 这边没有指针，所以拿一张 WeakMap **发号**：
+// 第一次问才给号（从 1 起），空引用是 0。与 C 那条腿的"指针值"不是同一批数 ——
+// 语义只承诺"同一次运行里同一个引用同一个数、不同引用不同数"，两边都满足；
+// 唯一的用处（asy 那本 cyclic 登记册的散列桶下标）也只要这一条。
+const $refids = new WeakMap();
+let $refidn = 0;
+const $refid = (o) => {
+  if (o === null || o === undefined) return 0;
+  let v = $refids.get(o);
+  if (v === undefined) { v = ++$refidn; $refids.set(o, v); }
+  return v;
+};
+
 // ---------------------------------------------------------------- 字符串
 // Omni 的 string 是 **UTF-8 字节序列**：length / byteAt / substr 都按字节。
 // JS 里字符串是 UTF-16，所以这里过一层编码，用单条 memo 让循环扫描保持 O(1) 摊还。
