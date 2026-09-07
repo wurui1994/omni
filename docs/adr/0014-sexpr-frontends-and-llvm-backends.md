@@ -12479,10 +12479,25 @@ sacylinder3D 6449 → 6467（略差 18 个字节）；`flat_trans`/`edge_trans` 
   大概也是它。
   **吸到子像素网格之后又量了一次**：那一格**还是 4 个片元**（前面两片深度
   0.528446376 / 0.528419435 —— 差在第五位，是**两片不同的三角**，不是同一条边被认领两次），
-  `sph_vcol` 只从 17468 掉到 17362。所以剩下的这一类是**细分的拓扑**：
-  相邻两片面片各自细分，深度不一样时接缝上会出 T 形结点，一格的中心于是被盖两次
-  （或漏掉）。下一刀该逐句对 `bezierpatch.cc` 的 `render` 里那几个 `flat` 标记与
-  四分/二分的选法 —— 那是这一轴上最后一块结构性的差。
+  `sph_vcol` 只从 17468 掉到 17362。
+  **又用三个探针把范围收窄了**（都是同一颗 `unitsphere`、128 条 `btri`，几何一模一样）：
+  - `sph_copy`（`surface s=surface(unitsphere); draw(s,lightgray+opacity(0.5))`）：**30**
+    —— 与 `sph_trans1` 一样，所以 `surface()` 那层拷贝不是原因。
+  - `sph_vc1`（同一条 palette 链，但 Gradient 两端同色、于是顶点色处处相同）：**16314**
+    —— 所以也不是渐变的取值，是**逐顶点色那条路本身**。
+  - `sph_vcol`（真渐变）：17362。
+  下一刀就盯这一条：同一份几何，pen 给 alpha 时只差 30 个字节、顶点色给 alpha 时差 16314。
+
+**第十四刀（已做）：`Epsilon`（消裂缝的内收）的透明判据要连顶点色的 alpha 一起看。**
+参考那边 `BezierPatch::init` 里 `Epsilon = transparent ? 0 : FillFactor*res`，而那一位
+`transparent` 是 `queue(...)` 传进来的 —— 在 drawsurface 那层它是"材质的 alpha **或顶点色的
+alpha** 有一个 < 1"（bezierpatch.cc:867 `transparent |= c0[3]+c1[3]+c2[3] < 3.0`）。
+我们从前只看材质，于是"笔不透明、alpha 全在顶点色里"这一族（`s.colors(palette(...))`）
+走了**内收**那一路，几何与参考差开。改法：`r3_set_res` 多收 `(C, nc)`，
+四角/三角的 alpha 有一个 < 1 就把 `Epsilon` 归 0。
+账：`sph_vc1` **16314 → 67**、`sph_vcol` **17362 → 49**（都是最大差 1）、
+twoSpheres **271202 → 219606**；`sph_vc2`/`sph_trans1` 仍是 30，
+其余例子一个字节不差（`node tests/asy/run.js` 263 条全绿）。
 
 ## 第十刀：把三维那一轴的残差**分类**（六个探针），并修掉 float→unorm8 那一位
 

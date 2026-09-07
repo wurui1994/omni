@@ -680,15 +680,28 @@ static double r3_res_for(const r3scene *s, const r3v *p, int n) {
   return d > 0 ? hypot(w, h) / d : 0.0;
 }
 
-/* 这一片的三个细分参数一起落地：res / res2 / Epsilon（透明面不内收，见 :43-47） */
-static void r3_set_res(r3scene *s, const r3v *p, int n, const r3mat *mat) {
+/* 这一片的三个细分参数一起落地：res / res2 / Epsilon（透明面不内收，见 :43-47）。
+ * `nc` 是顶点色的个数（四边 4、三角 3、没有 0）：**透明与否要连顶点色的 alpha 一起看** ——
+ * 参考那边 `BezierPatch::init` 里的 `transparent` 是 `queue(...)` 传进来的，
+ * 而那一位在 drawsurface 那层是"材质的 alpha 或顶点色的 alpha 有一个 < 1"
+ * （bezierpatch.cc:867 的 `transparent |= c0[3]+c1[3]+c2[3] < 3.0`）。
+ * 我们从前只看材质，于是"笔不透明、alpha 全在顶点色里"这一档（`s.colors(palette(...))`
+ * 那一族）走了**内收**那一路，几何就与参考差开了。量出来的（探针，同一颗球 128 条 btri）：
+ *   `sph_vc2`（笔带 opacity(0.5) + 同色顶点色）30 —— 与不带顶点色的 `sph_trans1` 一样；
+ *   `sph_vc1`（默认笔 + 顶点色带 alpha，颜色处处相同）16314；`sph_vcol`（真渐变）17362。
+ * 这一条就是那两个数的来源。 */
+static void r3_set_res(r3scene *s, const r3v *p, int n, const r3mat *mat,
+                       const float *C, int nc) {
   double r = r3_res_for(s, p, n);
   { const char *e = getenv("OMNI_R3_RES");        /* 标定用：res 乘一个系数 */
     if (e) r *= atof(e); }
   if (r > 0) { s->res = r; s->res2 = r * r; }
-  s->Epsilon = (mat && mat->diffuse[3] < 1.0) ? 0.0 : 0.1 * s->res;
+  int trans = mat && mat->diffuse[3] < 1.0;
+  if (!trans && C)
+    for (int i = 0; i < nc; ++i) if (C[i * 4 + 3] < 1.0f) { trans = 1; break; }
+  s->Epsilon = trans ? 0.0 : 0.1 * s->res;
   { const char *e = getenv("OMNI_R3_FILL");      /* 标定用：临时换 FillFactor */
-    if (e) s->Epsilon = (mat && mat->diffuse[3] < 1.0) ? 0.0 : atof(e) * s->res; }
+    if (e) s->Epsilon = trans ? 0.0 : atof(e) * s->res; }
   /* **0.1 就是最优，量过。** 斜相机那把尺子（`size(200);
    * currentprojection=orthographic(5,4,3); draw(unitsphere,green);`，1929600 字节）：
    *   0 → 56832 / 和 433893；0.05 → 56506 / 433583；**0.1 → 56381 / 433456**；
@@ -701,7 +714,7 @@ static void r3_set_res(r3scene *s, const r3v *p, int n, const r3mat *mat) {
  * `C` 是四个角的 rgba（16 个 float，角序与 P0..P3 一样），没有顶点色时给 NULL。 */
 static int r3_add_patch(r3scene *s, r3tris *t, const r3v *p, int straight,
                         const r3mat *mat, const float *C) {
-  r3_set_res(s, p, 16, mat);
+  r3_set_res(s, p, 16, mat, C, 4);
   double eps = 0;
   for (int i = 1; i < 16; ++i) {
     double d = r3v_abs2(r3v_sub(p[i], p[0]));
@@ -879,7 +892,7 @@ static int r3_render_tri(const r3scene *s, r3tris *t, const r3v *p,
 
 static int r3_add_tri3(r3scene *s, r3tris *t, const r3v *p, int straight,
                        const r3mat *mat, const float *C) {
-  r3_set_res(s, p, 10, mat);
+  r3_set_res(s, p, 10, mat, C, 3);
   double eps = 0;
   for (int i = 1; i < 10; ++i) {
     double q = r3v_abs2(r3v_sub(p[i], p[0]));
@@ -2135,7 +2148,7 @@ omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
       /* 曲线也是一段一段各自算 res（beziercurve.h:54 同一格，ratio 由 drawpath3.cc
        * 传进来，公式与面片那边一字不差）。 */
       if (!dimset) { r3_set_dimensions(&S); dimset = 1; }
-      r3_set_res(&S, p, 4, mats + (nmat - 1));
+      r3_set_res(&S, p, 4, mats + (nmat - 1), NULL, 0);   /* 曲线没有顶点色 */
       if (!r3_add_bez(&S, &lns, p, mats + (nmat - 1), 0)) { ok = 0; break; }
     } else if (strcmp(kw, "line") == 0) {
       double cnt; if (!r3_num(&L, &cnt) || nmat == 0) { ok = 0; break; }
