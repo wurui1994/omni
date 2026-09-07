@@ -1295,6 +1295,10 @@ static float R3_SAMPLE[R3_NS][2] = {
      （40932 → 27804），但把"透明平面片的软边"弄坏（0 → 5967）。 */
 static int r3_tgate = 0;
 static int r3_tcenter = 0;
+/* `OMNI_R3_PIX=x,y`：把这一格上**每个采样点收到的透明片元**印到 stderr
+   （排完序之后：颜色、alpha、深度，以及混出来的那三个字节）。查"参考在这一格上
+   一层都没混、我们混了"那一类只能靠它 —— 整幅位图的统计问不出更多。 */
+static int r3_pix_x = -1, r3_pix_y = -1;
 
 static void r3_pick_samples(void) {
   const char *e = getenv("OMNI_R3_SAMPLES");
@@ -1774,6 +1778,12 @@ omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
     if (e) r3_tcenter = strcmp(e, "0") != 0; }
   { const char *e = getenv("OMNI_R3_TGATE");
     if (e) r3_tgate = strcmp(e, "0") != 0; }
+  { const char *e = getenv("OMNI_R3_PIX");
+    if (e) {
+      char *q = NULL;
+      long vx = strtol(e, &q, 10);
+      if (q && *q == ',') { r3_pix_x = (int) vx; r3_pix_y = (int) strtol(q + 1, NULL, 10); }
+    } }
   char *cpath = omni_cstr(path);
   FILE *f = fopen(cpath, "rb");
   if (!f) return omni_str_new((char *) "", 0);
@@ -2061,6 +2071,23 @@ omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
               unsigned char *o = fb.col + i * 3;
               float acc[3];
               for (int ch = 0; ch < 3; ++ch) acc[ch] = o[ch] / 255.0f;
+              int dbg = 0;
+              if (r3_pix_x >= 0) {
+                size_t pix = i / R3_NS;
+                dbg = (int) (pix % (size_t) S.fw) == r3_pix_x
+                      && (int) (pix / (size_t) S.fw) == r3_pix_y;
+              }
+              if (dbg) {
+                fprintf(stderr, "r3pix %d,%d 采样点 %d：%zu 个片元，底色 %u %u %u\n",
+                        r3_pix_x, r3_pix_y, (int) (i % R3_NS), cnt,
+                        (unsigned) o[0], (unsigned) o[1], (unsigned) o[2]);
+                for (size_t a = 0; a < cnt; ++a) {
+                  const float *f = base + a * 5;
+                  fprintf(stderr, "  #%zu rgb %.6f %.6f %.6f alpha %.6f 深度 %.9g\n",
+                          a, (double) f[0], (double) f[1], (double) f[2],
+                          (double) f[3], (double) f[4]);
+                }
+              }
               for (size_t a = 0; a < cnt; ++a) {   /* mix(out, color, color.a) */
                 const float *f = base + a * 5;
                 float al = f[3];
@@ -2073,6 +2100,9 @@ omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
               }
               for (int ch = 0; ch < 3; ++ch)
                 o[ch] = r3_unorm8(acc[ch]);
+              if (dbg)
+                fprintf(stderr, "  -> %u %u %u\n",
+                        (unsigned) o[0], (unsigned) o[1], (unsigned) o[2]);
             }
           }
         } else if (!oit) {
@@ -2153,6 +2183,21 @@ omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
               = (unsigned char) ((sum + R3_NS / 2) / R3_NS);
           }
         }
+      /* `OMNI_R3_PIX=x,y` 的第二段：把那一格（与右、下、右下三个邻居 —— 下面那趟
+         2x2 盒子取平均要用到它们）在**取平均之后、模糊之前**的字节印出来。
+         查"这一格的颜色是自己来的还是被邻居带过来的"就靠这一段。 */
+      if (r3_pix_x >= 0 && r3_pix_x + 1 < S.fw && r3_pix_y + 1 < S.fh && r3_pix_y >= 0) {
+        for (int dy = 0; dy < 2; ++dy)
+          for (int dx = 0; dx < 2; ++dx) {
+            int x = r3_pix_x + dx, y = r3_pix_y + dy;
+            size_t base = ((size_t) y * S.fw + x) * R3_NS;
+            fprintf(stderr, "r3pix (%d,%d) 采样点", x, y);
+            for (int k = 0; k < R3_NS; ++k)
+              fprintf(stderr, " %u", (unsigned) fb.col[(base + k) * 3]);
+            fprintf(stderr, "  平均后 %u\n",
+                    (unsigned) img[((size_t) y * S.fw + x) * 3]);
+          }
+      }
       {
         size_t nw = (size_t) S.fw * 3;
         for (int y = 0; y + 1 < S.fh; ++y)
