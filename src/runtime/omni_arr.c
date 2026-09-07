@@ -12,12 +12,15 @@
  * 元素类型手工单态化成四份（int/real/bool/string）而不是 void* 泛型：装箱要分配，
  * 而且生成的 C 与 IR 都会多一层看不懂的转换。四份是 X 宏展开的，代码只有一份。
  *
- * 分配走 arena（omni_alloc/omni_grow，不回收）—— 与 list 那套同一个约定，见 ADR-0007。 */
+ * 分配走 arena（omni_alloc/omni_grow，不回收）—— 与 list 那套同一个约定，见 ADR-0007。
+ *
+ * `OMNI_ARR_IMPL_TU`：omni.h 里 `_len/_get/_set` 那三样有一批**同名的转发宏**
+ * （见那儿的注：-O0 与 tcc 都不内联，所以下标必须在预处理期展开）。
+ * 这个 TU 要定义的正是那三个真符号，所以在 include 之前把那一段关掉。 */
+#define OMNI_ARR_IMPL_TU 1
 #include "omni.h"
 
 #define OMNI_ARR_IMPL(SUF, T)                                                        \
-  struct omni_arr_##SUF##_s { int64_t len; int64_t cap; T *items; };                 \
-                                                                                     \
   static void omni_arr_##SUF##_reserve(omni_arr_##SUF a, int64_t n) {                 \
     if (n <= a->cap) return;                                                          \
     int64_t c = a->cap ? a->cap * 2 : 4;                                              \

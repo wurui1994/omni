@@ -1368,7 +1368,11 @@ export function asyAssignIndex(L, node, lhs, rhs, op) {
   L.pre.push(`(let ${iv} int ${idx.code})`);
   // 绕圈下标（第六十五刀，见 cycHelper）：`.cyclic` 置上时按长度取模。写侧与读侧同一条
   // （runarray.in:803 那一段），取模之后落在范围内，下面那句 grow 自然就是空转。
-  L.pre.push(`(set ${iv} (call ${L.cycHelper(a.type).idx} (var ${av}) (var ${iv})))`);
+  // "在界内就原样"那一句摊在这儿（与读侧 asyCycIdx 同一条理由：-O0 下那是一次真调用）——
+  // 数组与下标都已经是临时量，所以这一层没有求值次序的事。
+  L.pre.push(`(if (bin "||" (bin "<" (var ${iv}) (int 0))`
+    + ` (bin ">=" (var ${iv}) (alen (var ${av}))))`
+    + ` (do (set ${iv} (call ${L.cycHelper(a.type).idx} (var ${av}) (var ${iv})))))`);
   const grow = L.arrHelper('grow', el);
   const head2 = `(expr (call ${grow} (var ${av}) (var ${iv})))`;
   const cur = `(aget (var ${av}) (var ${iv}))`;

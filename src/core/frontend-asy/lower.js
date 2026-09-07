@@ -953,30 +953,54 @@ class AsyLower {
     // set 那边一改就把这一格清掉（置成空引用，与任何真数组都不相等），所以答案不会过期。
     this.arrGen.set(`${nm.is}__memo_a`, `  (global ${nm.is}__la ${ct})`);
     this.arrGen.set(`${nm.is}__memo_b`, `  (global ${nm.is}__lb bool)`);
+    // **倒着扫**（从末尾往前）。量过 bars3：`three.asy` 的 `draw(surface, material, pen)`
+    // 每调一次都新建一对一元数组（`new material[]{surfacepen}` / `new pen[]{meshpen}`）
+    // 并标成 cyclic —— 一趟下来 `cycreg_arr_pen` 攒到 **15461** 格、`cycreg_arr_material`
+    // 15458 格（lldb 在 r3_raster_tri 上断下来读的）。而这些数组**刚 push 进去就要用**：
+    // 正着扫要走满 15k 格才碰到它，倒着扫第一格就是。整趟从 O(n²) 塌成 O(n)。
+    // 剖 bars3（宏化之后那一版）：`asy__cycis_arr_pen` 875 个栈顶样本排第一。
     this.arrGen.set(nm.is, `  (fn ${nm.is} ((a ${ct})) bool
     (if (bin "==" (var ${nm.is}__la) (var a)) (do (ret (var ${nm.is}__lb))))
     (let f bool (bool false))
-    (let i int (int 0))
-    (while (bin "<" (var i) (alen (var ${nm.reg})))
+    (let i int (bin "-" (alen (var ${nm.reg})) (int 1)))
+    (while (bin ">=" (var i) (int 0))
       (do
-        (if (bin "==" (aget (var ${nm.reg}) (var i)) (var a)) (do (set f (bool true)) (set i (alen (var ${nm.reg})))))
-        (set i (bin "+" (var i) (int 1)))))
+        (if (bin "==" (aget (var ${nm.reg}) (var i)) (var a)) (do (set f (bool true)) (set i (int 0))))
+        (set i (bin "-" (var i) (int 1)))))
     (set ${nm.is}__la (var a))
     (set ${nm.is}__lb (var f))
     (ret (var f)))`);
-    // 取消标记就把那一格换成空引用：它跟任何真数组都不相等，所以 is 那边照旧对
+    // 取消标记就把那一格换成空引用：它跟任何真数组都不相等，所以 is 那边照旧对。
+    //
+    // 置上（on）那一路**只回头看末尾 32 格**就 push，不再整册查重：查重是为了不留重复，
+    // 而"整册查重"对一个**新建**的数组必然扫满全册 —— 上面那 15461 次 draw 每次两下，
+    // 就是 `cycset` 自己的 O(n²)（剖出来 342 + 302 个栈顶样本）。允许重复是安全的：
+    //   - `is` 只要"找到一个"就答 true，多几份答案不变；
+    //   - 取消（!on）那一路改成**整册扫、把每一个匹配都清掉**（原来是清掉第一个就 return），
+    //     所以 `set(a,false)` 之后 `is(a)` 照旧是 false。
+    // 代价只有内存：同一个数组隔着 32 格以上再标一次会多占一格。asy 里 `x.cyclic=true`
+    // 都是每个数组一次（plain_paths:165 / plain_pens:148,152 / plain_strings:238），
+    // 而窗口盖住的正是"刚建出来就标"这一族。
     this.arrGen.set(nm.set, `  (fn ${nm.set} ((a ${ct}) (on bool)) void
     (set ${nm.is}__la (null ${ct}))
     (set ${nm.is}__lb (bool false))
-    (let i int (int 0))
-    (while (bin "<" (var i) (alen (var ${nm.reg})))
+    (let n int (alen (var ${nm.reg})))
+    (let i int (bin "-" (var n) (int 1)))
+    (let lo int (int 0))
+    (if (bin ">" (var n) (int 32)) (do (set lo (bin "-" (var n) (int 32)))))
+    (if (var on)
       (do
-        (if (bin "==" (aget (var ${nm.reg}) (var i)) (var a))
+        (while (bin ">=" (var i) (var lo))
           (do
-            (if (un "!" (var on)) (do (aset (var ${nm.reg}) (var i) (null ${ct}))))
-            (ret)))
+            (if (bin "==" (aget (var ${nm.reg}) (var i)) (var a)) (do (ret)))
+            (set i (bin "-" (var i) (int 1)))))
+        (apush (var ${nm.reg}) (var a))
+        (ret)))
+    (set i (int 0))
+    (while (bin "<" (var i) (var n))
+      (do
+        (if (bin "==" (aget (var ${nm.reg}) (var i)) (var a)) (do (aset (var ${nm.reg}) (var i) (null ${ct}))))
         (set i (bin "+" (var i) (int 1)))))
-    (if (var on) (do (apush (var ${nm.reg}) (var a))))
     (ret))`);
     // 下标本体。**在界内的下标与 cyclic 无关** —— asy 那边是
     // `if(cyclic && len > 0) n=imod(n,len);`（runarray.in:104），而 imod(i,n) 在

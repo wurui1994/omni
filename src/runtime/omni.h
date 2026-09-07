@@ -97,15 +97,26 @@ OMNI_NORETURN void omni_errorf(const char *fmt, ...);
 OMNI_NORETURN void omni_fail(omni_str msg);
 
 /* omni_mem.c */
-/* class 引用的显式空检查。**必须内联**：它是生成代码里最密的一个调用 ——
-   每次读写 class 字段、每次数组下标都要过一遍。剖过 bars3 的二进制
-   （/usr/bin/sample，14s 窗口）：`omni_nullck` 以 1971 个栈顶样本排第一，
-   而函数体只有一条判断 —— 跨编译单元 clang 内联不了，全是纯调用开销。
-   放在头里之后调用点只剩一条 cbz + 慢路径跳转。 */
-static inline void *omni_nullck(void *p) {
-  if (!p) omni_error("null reference");
-  return p;
-}
+/* class 引用的显式空检查。**必须是宏，不能是 `static inline`** ——
+   它是生成代码里最密的一个调用（每次读写 class 字段、每次数组下标都要过一遍）。
+
+   为什么 `static inline` 不够：这条腿默认 **-O0**（cli.js:1895，故意的 —— 见那儿的注），
+   而 -O0 的 clang **一个 `static inline` 都不内联**，照旧发一次真调用；tcc 更是从来不内联。
+   于是"挪进头文件"只换来了一个 static 符号，调用开销一分没省。剖过 bars3 的二进制
+   （/usr/bin/sample，8s 窗口，挪进头之后）：`omni_nullck` 仍以 1099 个栈顶样本排第一，
+   `omni_arr_blob_at_i` 853、`omni_arr_blob_len_i` 409 —— 三个函数体各只有一两条判断，
+   合起来 35% 的 CPU 全是纯调用开销。**宏在预处理期展开，不看优化档**，两个编译器都一样。
+
+   用 GNU 语句表达式（`({ … })`）而不是 `?:`：入参只求值一次。clang 与 tcc 都收
+   （量过：`arm64-osx-tcc -c` 与 `clang -O0` 各编一遍都过）。 */
+OMNI_NORETURN void omni_err_null(void);
+/* 真符号照旧留着：run-llvm 那条腿发的是 `call omni_nullck`，符号一没就链不上
+   （量到过：`node tests/sexpr/run.js 05-arrays` 的 llvm 腿 `Undefined symbols: _omni_nullck`）。
+   定义它的那个 TU（omni_error.c）在 include 之前定义 OMNI_NULLCK_IMPL_TU 把下面那个宏关掉。 */
+void *omni_nullck(void *p);
+#ifndef OMNI_NULLCK_IMPL_TU
+#define omni_nullck(p) (__extension__({ void *omni__n = (void *)(p); if (!omni__n) omni_err_null(); omni__n; }))
+#endif
 /* 增长：调用方必须传旧字节数 —— arena 不给每次分配加尺寸头（小对象上太贵），
    所以尺寸只能由知道它的容器代码传进来。语义等价于 realloc。 */
 void *omni_grow(void *p, size_t oldBytes, size_t newBytes);
@@ -239,7 +250,10 @@ typedef struct omni_arr_f64_s *omni_arr_f64;
 typedef struct omni_arr_b8_s *omni_arr_b8;
 typedef struct omni_arr_str_s *omni_arr_str;
 
-#define OMNI_ARR_DECL(SUF, T)                               \
+/* 结构体也摊在头里（原来在 omni_arr.c）：下面那一批**转发宏**要它。
+   真符号照旧留着 —— run-llvm 那条腿发的是 `call omni_arr_f64_get`，符号一没就链不上。 */
+#define OMNI_ARR_DECL(SUF, T)                                        \
+  struct omni_arr_##SUF##_s { int64_t len; int64_t cap; T *items; }; \
   omni_arr_##SUF omni_arr_##SUF##_new(int64_t n, T zero);   \
   int64_t omni_arr_##SUF##_len(omni_arr_##SUF a);           \
   T omni_arr_##SUF##_get(omni_arr_##SUF a, int64_t i);      \
@@ -252,31 +266,75 @@ OMNI_ARR_DECL(f64, double)
 OMNI_ARR_DECL(b8, bool)
 OMNI_ARR_DECL(str, omni_str)
 
+/* 下标那三样的**宏**版本。理由与 omni_nullck 同一条（见那儿）：这四族是跨编译单元的
+   真符号，-O0 的 clang 与 tcc 都内联不了 —— 每次 `a[i]` 都是一次真调用。
+   剖 bars3（宏化 blob 之后那一版）：`omni_arr_f64_get` 276 个栈顶样本、`_len` 263，
+   函数体各只有一两条判断。越界那句话与四族里原来的逐字相同（omni_err_range）。
+
+   宏名与真符号**同名**，所以定义真符号的那个 TU（omni_arr.c）在 include 之前
+   `#define OMNI_ARR_IMPL_TU` 把这一段关掉。其余消费方（生成的 .c 与别的运行时 .c）
+   自动走展开的这一份，调用点一处不用改。 */
+#define OMNI__ALEN(HT, a) (__extension__({ \
+  HT omni__a = (a); \
+  if (!omni__a) omni_err_null(); \
+  omni__a->len; }))
+
+#define OMNI__AGET(HT, a, i) (__extension__({ \
+  HT omni__a = (a); int64_t omni__i = (i); \
+  if (!omni__a) omni_err_null(); \
+  if (omni__i < 0 || omni__i >= omni__a->len) omni_err_range(omni__i, omni__a->len); \
+  omni__a->items[omni__i]; }))
+
+/* 值那一格收成变参：`omni_str` 之类的复合字面量里有逗号，而花括号在预处理器眼里不括逗号 */
+#define OMNI__ASET(HT, ET, a, i, ...) (__extension__({ \
+  HT omni__a = (a); int64_t omni__i = (i); ET omni__v = (__VA_ARGS__); \
+  if (!omni__a) omni_err_null(); \
+  if (omni__i < 0 || omni__i >= omni__a->len) omni_err_range(omni__i, omni__a->len); \
+  omni__a->items[omni__i] = omni__v; omni__v; }))
+
+#ifndef OMNI_ARR_IMPL_TU
+#define omni_arr_i64_len(a)          OMNI__ALEN(omni_arr_i64, (a))
+#define omni_arr_i64_get(a, i)       OMNI__AGET(omni_arr_i64, (a), (i))
+#define omni_arr_i64_set(a, i, ...)  OMNI__ASET(omni_arr_i64, int64_t, (a), (i), __VA_ARGS__)
+#define omni_arr_f64_len(a)          OMNI__ALEN(omni_arr_f64, (a))
+#define omni_arr_f64_get(a, i)       OMNI__AGET(omni_arr_f64, (a), (i))
+#define omni_arr_f64_set(a, i, ...)  OMNI__ASET(omni_arr_f64, double, (a), (i), __VA_ARGS__)
+#define omni_arr_b8_len(a)           OMNI__ALEN(omni_arr_b8, (a))
+#define omni_arr_b8_get(a, i)        OMNI__AGET(omni_arr_b8, (a), (i))
+#define omni_arr_b8_set(a, i, ...)   OMNI__ASET(omni_arr_b8, bool, (a), (i), __VA_ARGS__)
+#define omni_arr_str_len(a)          OMNI__ALEN(omni_arr_str, (a))
+#define omni_arr_str_get(a, i)       OMNI__AGET(omni_arr_str, (a), (i))
+#define omni_arr_str_set(a, i, ...)  OMNI__ASET(omni_arr_str, omni_str, (a), (i), __VA_ARGS__)
+#endif
+
 /* 聚合元素（asy 的 `pair[]`，元素是逐形状生成的向量结构体）走这一份按字节的实现：
    头里多一个 esz，`_at`/`_push`/`_pop` 回**格子的地址**，值的读写由两条腿各自 load/store。
    理由（生成的结构体在运行时里不可见、而两条腿必须共用同一份增长逻辑）见 omni_arr.c。 */
 typedef struct omni_arr_blob_s *omni_arr_blob;
 
-/* 结构体摊在头里、`_i` 那两个是 static inline —— 只为让 **C 那条腿**的
-   `<类型>_len/_get/_set`（backend-c 逐形状生成的 static inline wrapper）真的内联到底。
-   剖过 bars3：`omni_arr_blob_at` 1431 个栈顶样本、`omni_arr_blob_len` 677，
-   函数体各只有一两条判断，跨编译单元全是纯调用开销。
-   **外部符号照旧留着**（下面那两条声明，实现在 omni_arr.c 里转调这两个 inline）：
+/* 结构体摊在头里、`_i` 那两个是**宏** —— 只为让 **C 那条腿**的
+   `<类型>_len/_get/_set`（backend-c 逐形状生成的同名宏）真的展开到底。
+   理由与 omni_nullck 同一条（见那儿）：-O0 的 clang 与 tcc 都不内联 `static inline`，
+   所以"挪进头"省不下调用。剖过 bars3（挪进头之后那一版）：`omni_arr_blob_at_i`
+   853 个栈顶样本、`omni_arr_blob_len_i` 409，函数体各只有一两条判断。
+   **外部符号照旧留着**（下面那两条声明，实现在 omni_arr.c 里转调这两个宏）：
    run-llvm 那条腿发的是 `call omni_arr_blob_at`，符号一没就链不上。 */
 struct omni_arr_blob_s { int64_t len; int64_t cap; int64_t esz; char *items; };
 
-static inline int64_t omni_arr_blob_len_i(omni_arr_blob a) {
-  omni_nullck(a);
-  return a->len;
-}
+/* 越界那句话在 omni_arr.c 里（noreturn）：4954 个 nullck / 上万个下标点各展开一份
+   omni_errorf 的实参会把预处理后的那份 .c 撑爆，而这是纯冷路径。 */
+OMNI_NORETURN void omni_err_range(int64_t i, int64_t len);
 
-static inline void *omni_arr_blob_at_i(omni_arr_blob a, int64_t i) {
-  omni_nullck(a);
-  if (i < 0 || i >= a->len)
-    omni_errorf("array index out of range: %lld (length %lld)", (long long) i,
-                (long long) a->len);
-  return a->items + a->esz * i;
-}
+#define omni_arr_blob_len_i(a) (__extension__({ \
+  omni_arr_blob omni__a = (a); \
+  if (!omni__a) omni_err_null(); \
+  omni__a->len; }))
+
+#define omni_arr_blob_at_i(a, i) (__extension__({ \
+  omni_arr_blob omni__a = (a); int64_t omni__i = (i); \
+  if (!omni__a) omni_err_null(); \
+  if (omni__i < 0 || omni__i >= omni__a->len) omni_err_range(omni__i, omni__a->len); \
+  (void *)(omni__a->items + omni__a->esz * omni__i); }))
 
 omni_arr_blob omni_arr_blob_new(int64_t n, int64_t esz, const void *zero);
 int64_t omni_arr_blob_len(omni_arr_blob a);
@@ -588,13 +646,16 @@ omni_str omni_kstr_string(omni_str s);
 /* ================================================ 热路径：static inline */
 
 /* i64 算术：C 的有符号溢出是 UB，这里全部走无符号回绕，
-   以便和 JS 后端的 BigInt.asIntN(64) 逐位一致 */
-static inline int64_t omni_add(int64_t a, int64_t b) { return (int64_t)((uint64_t)a + (uint64_t)b); }
-static inline int64_t omni_sub(int64_t a, int64_t b) { return (int64_t)((uint64_t)a - (uint64_t)b); }
-static inline int64_t omni_mul(int64_t a, int64_t b) { return (int64_t)((uint64_t)a * (uint64_t)b); }
-static inline int64_t omni_neg(int64_t a) { return (int64_t)(0u - (uint64_t)a); }
-static inline int64_t omni_shl(int64_t a, int64_t b) { return (int64_t)((uint64_t)a << (b & 63)); }
-static inline int64_t omni_shr(int64_t a, int64_t b) { return a >> (b & 63); }
+   以便和 JS 后端的 BigInt.asIntN(64) 逐位一致。
+   写成**宏**而不是 `static inline`：理由与 omni_nullck 同一条（-O0 与 tcc 都不内联），
+   而 `i = i + 1` 这种循环变量递增是生成代码里最密的算术 —— 剖 bars3：`omni_add`
+   264 个栈顶样本，函数体就一条加法。每个实参只出现一次，所以不必用语句表达式。 */
+#define omni_add(a, b) ((int64_t)((uint64_t)(a) + (uint64_t)(b)))
+#define omni_sub(a, b) ((int64_t)((uint64_t)(a) - (uint64_t)(b)))
+#define omni_mul(a, b) ((int64_t)((uint64_t)(a) * (uint64_t)(b)))
+#define omni_neg(a)    ((int64_t)(0u - (uint64_t)(a)))
+#define omni_shl(a, b) ((int64_t)((uint64_t)(a) << ((b) & 63)))
+#define omni_shr(a, b) ((int64_t)((int64_t)(a) >> ((b) & 63)))
 
 static inline int64_t omni_div(int64_t a, int64_t b) {
   if (b == 0) omni_error("division by zero");

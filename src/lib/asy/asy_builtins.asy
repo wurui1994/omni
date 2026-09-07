@@ -493,6 +493,16 @@ pen pencopy(pen p) {
 pen asy__defpen;
 pen currentpen;
 
+// 笔宽也是**用的时候才落地**的（pen.h:425 的 `width()`）：笔自己没设过就读 defaultpen 的
+// 那一份。少了这一层的代价量出来是：`defaultpen(0.75mm); draw((0,0)--(1,0), blue);`
+// 参考发 `2.12598425 Setlinewidth`、我们发 `0.5`（bbox 也跟着差：参考 y
+// 394.437008..396.562992、我们 395.25..395.75）。三维那一侧更贵 —— arrows3 里
+// three.asy 拿 `linewidth(p)` 当管子半径，读成 0.5 之后整帧的 z 界只有 ±0.25 而
+// 参考是 ±1.0629921259842372（正好是 0.75mm 的一半），`pic.scaling` 于是给出
+// 另一个 t，最后 %%BoundingBox 宽 329 对参考 333。
+// `setwidth` 那一格就是 pen.h 的 DEFWIDTH 哨兵（`operator +` 已经在用它）。
+real asy__penw(pen p) { return p.setwidth ? p.width : asy__defpen.width; }
+
 // 字号/行距是**用的时候才落地**的（pen.h:433 的 `size()` 与 :463 的 `Lineskip()`）：
 // 笔自己那一格是 0 就读 **defaultpen 的**那一份。这一层的 `fontsizeval` 是构造时就算好的
 // denormalized 值 —— 于是 `currentpen`（声明那一刻就冻住 12pt）在
@@ -915,15 +925,24 @@ path reverse(path g) {
   return h;
 }
 
+// pair.h:111 的 `pair / double` 是**先取倒数再逐分量乘**；而 asy 语言里 `pair / 3`
+// 走的是 pair.h:119 的复数除法（int 先当 pair）。两者差 1 ULP，直线段的三等分
+// 控制点是 C++ 侧算的，必须照 pair.h:111 那一版。
+private pair asy__pdivr(pair z, real t) {
+  real r = 1.0 / t;
+  return (z.x * r, z.y * r);
+}
+
 // 直线段：控制点按 asy 的存法摆在三等分点上，straight 挂在**左**端那个结上
 // （psfile 见到它发 lineto，见 psfile.h:303 那一段）。
 void pushstraight(path g, pair z) {
   int n = g.nodes.length;
   pair a = g.nodes[n - 1].point;
   knot k = knotat(z);
+  pair step = asy__pdivr(z - a, 3.0);
   g.nodes[n - 1].straight = true;
-  g.nodes[n - 1].post = a + (z - a) / 3;
-  k.pre = z - (z - a) / 3;
+  g.nodes[n - 1].post = a + step;
+  k.pre = z - step;
   g.nodes.push(k);
 }
 
@@ -1174,7 +1193,7 @@ private void asy__solvesection(path g, spec[] si, spec[] so, int a, int b) {
   // knot.cc:597 的 encodeStraight：两个方程、两边都是 0 —— 那就是直着过去。
   // 张力不是 1 时**不算直线段**（那两个控制点各自往里收 1/tension，knot.cc:606 的 else 支）。
   if (m == 1 && homog) {
-    pair step = (z[1] - z[0]) / 3;
+    pair step = asy__pdivr(z[1] - z[0], 3.0);
     int ia = asy__nwrap(g, a);
     int ib = asy__nwrap(g, b);
     real at = g.nodes[ia].tout;
@@ -1186,8 +1205,8 @@ private void asy__solvesection(path g, spec[] si, spec[] so, int a, int b) {
       return;
     }
     g.nodes[ia].straight = false;
-    g.nodes[ia].post = z[0] + step / at;
-    g.nodes[ib].pre = z[1] - step / bt;
+    g.nodes[ia].post = z[0] + asy__pdivr(step, at);
+    g.nodes[ib].pre = z[1] - asy__pdivr(step, bt);
     return;
   }
   real[] th = new real[m + 1];
@@ -1638,7 +1657,7 @@ private path asy__closepath(path a) {
   if (a.nodes[n - 1].straight) {
     pair z0 = h.nodes[n - 1].point;
     pair z1 = h.nodes[0].point;
-    pair d = (z1 - z0) / 3;
+    pair d = asy__pdivr(z1 - z0, 3.0);
     h.nodes[n - 1].post = z0 + d;
     h.nodes[0].pre = z1 - d;
   } else {
@@ -1889,25 +1908,26 @@ private real asy__norminf(real[] v) {
 private real asy__sqrt1pxm1(real x) { return x / (sqrt(1 + x) + 1); }
 // path.cc:point(double t) 的 de Casteljau，取一个分量（pair 的加乘是逐分量的，
 // 所以拆开算与整对算逐位一样）。
-// 六句 `one_t*x + t*y` 都按 **fma** 的口径算：arm64 上 clang 把它们收缩成 fmadd，
-// 差最后一位。追出来的（两侧同一份源码量心形线）：`min(g).y` asy 是
-// -1.2990381472196539、我们原先是 -1.2990381472196542，而节点与控制点逐位相同 ——
-// 差就出在这个极值的代回上。那 1 ulp 会顺着 LP 的缩放因子放大成 gsave 闸门的开关。
+// 六句 `one_t*x + t*y` **不收缩成 fma** —— 量出来的：拿 centroidfg 的
+// `graph(x^3-x+2,-1,1,operator ..)` 逐段代回 24 个点，用 clang 编的四个版本
+// （fma(one_t,x,t*y)、fma(t,y,one_t*x)、`#pragma clang fp contract(off)` 的裸乘加、
+// Bernstein 幂形式）对参考的 24 个值：裸乘加 24/24 中，两种 fma 摆法各错 5、6 个，
+// 幂形式错 8 个。所以参考那个二进制在这一处没有收缩。
 real asy__bez(real a, real b, real c, real d, real t) {
   real one_t = 1.0 - t;
-  real ab = asy__fma(one_t, a, t * b);
-  real bc = asy__fma(one_t, b, t * c);
-  real cd = asy__fma(one_t, c, t * d);
-  real abc = asy__fma(one_t, ab, t * bc);
-  real bcd = asy__fma(one_t, bc, t * cd);
-  return asy__fma(one_t, abc, t * bcd);
+  real ab = one_t * a + t * b;
+  real bc = one_t * b + t * c;
+  real cd = one_t * c + t * d;
+  real abc = one_t * ab + t * bc;
+  real bcd = one_t * bc + t * cd;
+  return one_t * abc + t * bcd;
 }
 // path.cc:46 的 quadraticroots，只报 bounds() 用得到的那一面：返回要试的 t，
 // 顺序与 C++ 那边的 t1、t2 一致（MANY 与 ONE 只报 t1，NONE 报空）。
 real[] asy__bezcrit(real a, real b, real c, real d) {
-  // path.cc:462 的 derivative(a,b,c, z0,c0,c1,z1)，按 arm64 上收缩成 fmadd 的次序算
-  real A = asy__fma(3.0, b - c, d - a);
-  real B = asy__fma(2.0, a + c, -(4.0 * b));
+  // path.cc:462 的 derivative(a,b,c, z0,c0,c1,z1)，与 asy__bez 同一个口径：不收缩
+  real A = (d - a) + 3.0 * (b - c);
+  real B = 2.0 * (a + c) - 4.0 * b;
   real C = b - a;
   real[] out;
   if (fabs(A) <= asy__Fuzz2 * fabs(B) + asy__Fuzz4 * fabs(C)) {
@@ -1925,7 +1945,7 @@ real[] asy__bezcrit(real a, real b, real c, real d) {
   real x = -2.0 * C / denom;
   if (x > -1.0) {
     real r2 = factor * asy__sqrt1pxm1(x);
-    real r1 = asy__fma(-2.0, factor, -r2);   // path.cc:82 `-r2-2.0*factor`，收缩成 fmadd
+    real r1 = -r2 - 2.0 * factor;            // path.cc:82，与 asy__bez 同口径：不收缩
     if (r1 <= r2) { out.push(r1); out.push(r2); }
     else { out.push(r2); out.push(r1); }
   } else if (x == -1.0) {
@@ -2046,7 +2066,7 @@ void fill(path[] g) { asy__fillall(currentpicture, g, currentpen); }
 // ±0.5*linewidth*(maxx,maxy) 加上笔那个变换的平移，maxx/maxy 是线性部分两行的模长
 // （恒等时就是 1）。min/max(pen) 用的是同一份算法，但它们声明在后面，所以这里现写。
 void widen(box eb, pen p) {
-  real hw = 0.5 * p.width;
+  real hw = 0.5 * asy__penw(p);
   real mx = 1;
   real my = 1;
   real sx = 0;
@@ -2726,9 +2746,24 @@ real fitscale(picture pic) {
 // 那条路上底图得先落到盘上（`<前缀>_0.eps`）给 `\includegraphics` 引，而这一层的 write
 // 只能往 stdout 去。所以给它一个开关 —— 攒进 `asy__bufs` 还是直接印。
 bool asy__tobuf = false;
-string asy__bufs = "";
+// 攒的时候**一行一格**，不要往一个串上顺次接：`asy__bufs = asy__bufs + s` 是 O(总长²)。
+// 量出来的：PythagoreanTree 那份图 1.5 MB、十万来行，`-o 文件` 那一路从 2.4s 变成 60s
+// 还没跑完；而 genusthree 同样 1.8 MB 却没事 —— 它的字节几乎全在**一行**十六进制里，
+// asy__out 只调了几十次。所以攒进数组，读的时候两两归并（log n 遍，总拷贝 = 总长 x log n）。
+private string[] asy__bufc;
+string asy__bufget() {
+  while (asy__bufc.length > 1) {
+    string[] nx;
+    for (int i = 0; i + 1 < asy__bufc.length; i += 2) nx.push(asy__bufc[i] + asy__bufc[i + 1]);
+    if (asy__bufc.length % 2 == 1) nx.push(asy__bufc[asy__bufc.length - 1]);
+    asy__bufc = nx;
+  }
+  return asy__bufc.length == 0 ? "" : asy__bufc[0];
+}
+void asy__bufclear() { asy__bufc = new string[]; }
+void asy__bufput(string s) { asy__bufc = s == "" ? new string[] : new string[] {s}; }
 void asy__out(string s) {
-  if (asy__tobuf) asy__bufs = asy__bufs + s + '\n';
+  if (asy__tobuf) asy__bufc.push(s + '\n');
   else write(s);
 }
 // 出图落到哪儿：宿主的一格设置（CLI 的 `-o 名字`）。空串 = 印到 stdout，也就是这一层
@@ -2761,15 +2796,15 @@ string asy__shipbegin(string want = "") {
   string on = want == "" ? asy__outname() : want;
   if (on != "") {
     asy__tobuf = true;
-    asy__bufs = "";
+    asy__bufclear();
   }
   return on;
 }
 void asy__shipend(string on) {
   if (on == "") return;
   asy__tobuf = false;
-  string doc = asy__bufs;
-  asy__bufs = "";
+  string doc = asy__bufget();
+  asy__bufclear();
   _writetext(on, doc);
 }
 // 坐标是 **%.9g**，这一条量反过一次，要说准：psfile.h:160 是裸的
@@ -2938,7 +2973,8 @@ void setpen(pen p) {
   if (p.patternval != "" && (!lastvalid || p.patternval != lastpen.patternval)) {
     asy__out(p.patternval + " setpattern");
   } else if (!lastvalid || !samecolor(p, lastpen)) asy__out(colorof(p));
-  if (!lastvalid || p.width != lastpen.width) asy__out(ps(p.width) + " Setlinewidth");
+  if (!lastvalid || asy__penw(p) != asy__penw(lastpen))
+    asy__out(ps(asy__penw(p)) + " Setlinewidth");
   if (!lastvalid || p.cap != lastpen.cap) asy__out(string(p.cap) + " setlinecap");
   if (!lastvalid || p.join != lastpen.join) asy__out(string(p.join) + " setlinejoin");
   if (!lastvalid || p.miter != lastpen.miter) asy__out(ps(p.miter) + " setmiterlimit");
@@ -3697,46 +3733,232 @@ void resetdefaultpen() { pen q; asy__defpen = q; }   // runtime.in:350
 // intersect/intersections 6、tridiagonal 1）。
 
 // 三次 Bezier 在 t 处的速率 |B'(t)|
-private real asy__bspeed(pair z0, pair c0, pair c1, pair z1, real t) {
-  real r = 1 - t;
-  pair d = 3*r*r*(c0 - z0) + 6*r*t*(c1 - c0) + 3*t*t*(z1 - c1);
-  return length(d);
+// path.cc:581 的 ds：三次贝塞尔速率的 1/3（derivative 给的 a、b、c 已经把常因子 3 摘掉）
+private real asy__ds(pair A, pair B, pair C, real t) {
+  real dx = A.x * t * t + B.x * t + C.x;    // path.h:412 quadratic
+  real dy = A.y * t * t + B.y * t + C.y;
+  return sqrt(dx * dx + dy * dy);
 }
 
-// 5 点 Gauss-Legendre（区间 [a,b]）
-private real asy__gl5(pair z0, pair c0, pair c1, pair z1, real a, real b) {
-  real h = (b - a) / 2;
-  real m = (a + b) / 2;
-  real x1 = 0.906179845938664;
-  real x2 = 0.538469310105683;
-  real w0 = 0.568888888888889;
-  real w1 = 0.236926885056189;
-  real w2 = 0.478628670499366;
-  return h * (w0 * asy__bspeed(z0, c0, c1, z1, m)
-    + w1 * (asy__bspeed(z0, c0, c1, z1, m - h*x1) + asy__bspeed(z0, c0, c1, z1, m + h*x1))
-    + w2 * (asy__bspeed(z0, c0, c1, z1, m - h*x2) + asy__bspeed(z0, c0, c1, z1, m + h*x2)));
+// simpson.cc:15 的自适应 Simpson，逐行照抄（C 里那个 TABLE 数组换成七个平行数组、
+// 指针换成下标）。栈深 nest = DBL_MANT_DIG = 53。
+// 从前这一层是 5 点 Gauss-Legendre + 二分到 1e-15 —— 数值上够用，但**不是**参考那套
+// 求积，弧长差 1e-15 量级；polararea 的弧标签就栽在这上面。
+private real asy__simpson(pair A, pair B, pair C, real a, real b,
+                          real acc, real dxmax) {
+  int nest = 53;
+  bool[] tleft = new bool[nest];
+  real[] tpsum = new real[nest];
+  real[] tf1t = new real[nest];
+  real[] tf2t = new real[nest];
+  real[] tf3t = new real[nest];
+  real[] tdat = new real[nest];
+  real[] testr = new real[nest];
+  real sixth = 1.0 / 6.0;
+  bool success = true;
+  int p = 0;
+  int pstop = nest - 1;
+  tleft[p] = true;
+  tpsum[p] = 0.0;
+  real alpha = a;
+  real da = b - a;
+  real[] fv = new real[5];
+  fv[0] = asy__ds(A, B, C, alpha);
+  fv[2] = asy__ds(A, B, C, alpha + 0.5 * da);
+  fv[4] = asy__ds(A, B, C, alpha + da);
+  real wt = sixth * da;
+  real est = wt * (fv[0] + 4.0 * fv[2] + fv[4]);
+  real area = est;
+  real integral = 0;
+  while (true) {
+    real dx = 0.5 * da;
+    real arg = alpha + 0.5 * dx;
+    fv[1] = asy__ds(A, B, C, arg);
+    fv[3] = asy__ds(A, B, C, arg + dx);
+    wt = sixth * dx;
+    real estl = wt * (fv[0] + 4.0 * fv[1] + fv[2]);
+    real estr = wt * (fv[2] + 4.0 * fv[3] + fv[4]);
+    integral = estl + estr;
+    real diff = est - integral;
+    area = area - diff;
+    if (p >= pstop) success = false;
+    if (!success || (fabs(diff) <= acc * fabs(area) && da <= dxmax)) {
+      // 接受这一段。是右半就把这一层收掉，是左半就转去做右半。
+      while (true) {
+        if (!tleft[p]) {
+          alpha = alpha + da;
+          tleft[p] = true;
+          tpsum[p] = integral;
+          fv[0] = tf1t[p];
+          fv[2] = tf2t[p];
+          fv[4] = tf3t[p];
+          da = tdat[p];
+          est = testr[p];
+          break;
+        }
+        integral = integral + tpsum[p];
+        p = p - 1;
+        if (p <= 0) return integral;
+      }
+    } else {
+      // 升一层，把右半要用的东西存下来
+      p = p + 1;
+      da = dx;
+      est = estl;
+      tleft[p] = false;
+      tf1t[p] = fv[2];
+      tf2t[p] = fv[3];
+      tf3t[p] = fv[4];
+      tdat[p] = dx;
+      testr[p] = estr;
+      fv[4] = fv[2];
+      fv[2] = fv[1];
+    }
+  }
+  return integral;
 }
 
-// 二分细化到两次求积一致
-private real asy__arcpart(pair z0, pair c0, pair c1, pair z1,
-                          real a, real b, int depth) {
-  real whole = asy__gl5(z0, c0, c1, z1, a, b);
-  real m = (a + b) / 2;
-  real half = asy__gl5(z0, c0, c1, z1, a, m) + asy__gl5(z0, c0, c1, z1, m, b);
-  if (depth <= 0) return half;
-  if (abs(whole - half) <= 1e-15 * (abs(half) + 1e-15)) return half;
-  return asy__arcpart(z0, c0, c1, z1, a, m, depth - 1)
-    + asy__arcpart(z0, c0, c1, z1, m, b, depth - 1);
-}
-
+// path.cc:601 的 cubiclength（goal < 0 那一路）：3 × ∫ds
 real arclength(pair z0, pair c0, pair c1, pair z1) {
-  return asy__arcpart(z0, c0, c1, z1, 0, 1, 24);
+  pair A = z1 - z0 + 3.0 * (c0 - c1);      // path.cc:463 derivative
+  pair B = 2.0 * (z0 + c1) - 4.0 * c0;
+  pair C = c0 - z0;
+  return 3.0 * asy__simpson(A, B, C, 0.0, 1.0, realEpsilon, 1.0);
 }
 
 // 第 i 段的弧长（直线段直接取弦长 —— 与 asy 同）
 private real asy__seglen(path p, int i) {
   if (straight(p, i)) return length(point(p, i + 1) - point(p, i));
   return arclength(point(p, i), postcontrol(p, i), precontrol(p, i + 1), point(p, i + 1));
+}
+
+// simpson.cc:104 的 unsimpson：反解上限 b 使 ∫ds 达到给定值。返回解出来的 b。
+// （C 那边 b、area 都是引用参数，这一层只需要 b。）
+private real asy__unsimpson(pair A, pair B, pair C, real integral,
+                            real a, real b0, real acc, real dxmax, real dxmin) {
+  int nest = 53;
+  bool[] tleft = new bool[nest];
+  real[] tpsum = new real[nest];
+  real[] tf1t = new real[nest];
+  real[] tf2t = new real[nest];
+  real[] tf3t = new real[nest];
+  real[] tdat = new real[nest];
+  real[] testr = new real[nest];
+  real sixth = 1.0 / 6.0;
+  real b = b0;
+  int p = 0;
+  int pstop = nest - 1;
+  tpsum[p] = 0.0;
+  real alpha = a;
+  real parea = 0.0;
+  real pdiff = 0.0;
+  real[] fv = new real[5];
+  real da = 0, est = 0, area = 0, wt = 0;
+  while (true) {
+    tleft[p] = true;
+    da = b - alpha;
+    fv[0] = asy__ds(A, B, C, alpha);
+    fv[2] = asy__ds(A, B, C, alpha + 0.5 * da);
+    fv[4] = asy__ds(A, B, C, alpha + da);
+    wt = sixth * da;
+    est = wt * (fv[0] + 4.0 * fv[2] + fv[4]);
+    area = est;
+    bool cont = true;
+    while (cont) {
+      real dx = 0.5 * da;
+      real arg = alpha + 0.5 * dx;
+      fv[1] = asy__ds(A, B, C, arg);
+      fv[3] = asy__ds(A, B, C, arg + dx);
+      wt = sixth * dx;
+      real estl = wt * (fv[0] + 4.0 * fv[1] + fv[2]);
+      real estr = wt * (fv[2] + 4.0 * fv[3] + fv[4]);
+      real sum = estl + estr;
+      real diff = est - sum;
+      area = parea + sum;
+      real b2 = alpha + da;
+      if (fabs(fabs(integral - area) - fabs(pdiff)) + fabs(diff)
+          <= fv[4] * acc * (b2 - a)) return b2;
+      bool raise = true;
+      if (fabs(integral - area) > fabs(pdiff + diff)) {
+        if (integral <= area) {
+          p = 0;
+          tleft[p] = true;
+          tpsum[p] = parea;
+        } else if ((fabs(diff) <= fv[4] * acc * da || dx <= dxmin) && da <= dxmax) {
+          pdiff = pdiff + diff;
+          while (true) {
+            if (!tleft[p]) {
+              parea = parea + sum;
+              alpha = alpha + da;
+              tleft[p] = true;
+              tpsum[p] = sum;
+              fv[0] = tf1t[p];
+              fv[2] = tf2t[p];
+              fv[4] = tf3t[p];
+              da = tdat[p];
+              est = testr[p];
+              break;
+            }
+            sum = sum + tpsum[p];
+            parea = parea - tpsum[p];
+            p = p - 1;
+            if (p <= 0) {
+              p = 0;
+              parea = sum;
+              tpsum[p] = sum;
+              alpha = alpha + da;
+              b = b + (b - a);
+              cont = false;
+              break;
+            }
+          }
+          raise = false;                 // C 里那句 continue
+        }
+      }
+      if (!cont) break;                  // 外层重开一轮
+      if (!raise) continue;
+      if (p >= pstop) return b;          // 嵌套用尽：asy 报错，这一层把当前 b 回去
+      p = p + 1;
+      da = dx;
+      est = estl;
+      tpsum[p] = 0.0;
+      tleft[p] = false;
+      tf1t[p] = fv[2];
+      tf2t[p] = fv[3];
+      tf3t[p] = fv[4];
+      tdat[p] = dx;
+      testr[p] = estr;
+      fv[4] = fv[2];
+      fv[2] = fv[1];
+    }
+  }
+  return b;
+}
+
+// path.cc:601 的 cubiclength：goal < 0 回整段长；否则够不到也回整段长，
+// 够得到就回 **-t**（负号是那边区分两种返回值的办法）。
+private real asy__cubiclen(path p, int i, real goal) {
+  pair z0 = point(p, i);
+  pair z1 = point(p, i + 1);
+  real L;
+  if (straight(p, i)) {
+    L = length(z1 - z0);
+    if (goal < 0 || L == 0 || goal >= L) return L;
+    return -goal / L;
+  }
+  pair c0 = postcontrol(p, i);
+  pair c1 = precontrol(p, i + 1);
+  pair A = z1 - z0 + 3.0 * (c0 - c1);
+  pair B = 2.0 * (z0 + c1) - 4.0 * c0;
+  pair C = c0 - z0;
+  real integral = asy__simpson(A, B, C, 0.0, 1.0, realEpsilon, 1.0);
+  L = 3.0 * integral;
+  if (goal < 0 || goal >= L) return L;
+  real t = goal / L;
+  real g = goal * (1.0 / 3.0);
+  real dxmin = sqrt(realEpsilon);
+  t = asy__unsimpson(A, B, C, g, 0.0, t, 100.0 * realEpsilon, 1.0, dxmin);
+  return -t;
 }
 
 real arclength(path p) {
@@ -3746,26 +3968,31 @@ real arclength(path p) {
   return s;
 }
 
+// path.cc:638 的 arctime。cached_length 这一层没有（每条路都当"还没算过"），
+// 于是那两处缓存捷径自然跳过 —— 结果与走满循环那一路相同。
 real arctime(path p, real L) {
   int segs = length(p);
   if (segs <= 0) return 0;
-  if (L <= 0) return 0;
-  real rem = L;
-  for (int i = 0; i < segs; ++i) {
-    real seg = asy__seglen(p, i);
-    if (rem > seg) { rem = rem - seg; continue; }
-    if (seg <= 0) return i;
-    pair z0 = point(p, i);
-    pair c0 = postcontrol(p, i);
-    pair c1 = precontrol(p, i + 1);
-    pair z1 = point(p, i + 1);
-    real lo = 0;
-    real hi = 1;
-    for (int k = 0; k < 52; ++k) {
-      real mid = (lo + hi) / 2;
-      if (asy__arcpart(z0, c0, c1, z1, 0, mid, 16) < rem) lo = mid; else hi = mid;
-    }
-    return i + (lo + hi) / 2;
+  int nn = cyclic(p) ? segs : segs + 1;      // C 那边的 path::n（结点数）
+  real goal = L;
+  if (cyclic(p)) {
+    if (goal == 0) return 0;
+    if (goal < 0) return -arctime(reverse(p), -goal);
+  } else {
+    if (goal <= 0) return 0;
+  }
+  real l;
+  for (int i = 0; i < nn - 1; ++i) {
+    l = asy__cubiclen(p, i, goal);
+    if (l < 0) return -l + i;
+    goal = goal - l;
+    if (goal <= 0) return i + 1;
+  }
+  if (cyclic(p)) {
+    l = asy__cubiclen(p, nn - 1, goal);
+    if (l < 0) return -l + nn - 1;
+    goal = goal - l;
+    return arctime(p, goal) + nn;
   }
   return segs;
 }
@@ -3815,51 +4042,100 @@ path subpath(path p, int a, int b) {
   return h;
 }
 
+// path.cc:373 的 split：`x+(y-x)*t`（pair * double 是逐分量乘）
+private pair asy__psplit(real t, pair x, pair y) {
+  pair d = y - x;
+  return (x.x + d.x * t, x.y + d.y * t);
+}
+// path.cc:375 的 splitCubic：在 t 处把一段切成两段，回 [left, mid, right] 三个结。
+// 直线段那一支**不做 de Casteljau**，而是把两半的控制点重新摆到各自的三等分点上
+// （third = 1/3，逐分量乘），mid 也标成直线段。
+private knot[] asy__splitcubic(real t, knot left0, knot right0) {
+  knot left = knotcopy(left0);
+  knot right = knotcopy(right0);
+  knot mid;
+  real third = 1.0 / 3.0;
+  if (left.straight) {
+    mid.point = asy__psplit(t, left.point, right.point);
+    pair dl = mid.point - left.point;
+    pair deltaL = (third * dl.x, third * dl.y);
+    left.post = left.point + deltaL;
+    mid.pre = mid.point - deltaL;
+    pair dr = right.point - mid.point;
+    pair deltaR = (third * dr.x, third * dr.y);
+    mid.post = mid.point + deltaR;
+    right.pre = right.point - deltaR;
+    mid.straight = true;
+  } else {
+    pair x = asy__psplit(t, left.post, right.pre);        // m1
+    left.post = asy__psplit(t, left.point, left.post);    // m0
+    right.pre = asy__psplit(t, right.pre, right.point);   // m2
+    mid.pre = asy__psplit(t, left.post, x);               // m3
+    mid.post = asy__psplit(t, x, right.pre);              // m4
+    mid.point = asy__psplit(t, mid.pre, mid.post);        // m5
+    mid.straight = false;
+  }
+  knot[] out;
+  out.push(left);
+  out.push(mid);
+  out.push(right);
+  return out;
+}
+// asy 的 `path(solvedKnot n0, solvedKnot n1)`：两个结的开路
+private path asy__path2(knot k0, knot k1) {
+  path h;
+  h.nodes.push(knotcopy(k0));
+  h.nodes.push(knotcopy(k1));
+  return h;
+}
+
+// path.cc:398 的 subpath(double,double)，逐行照抄。
+// 从前这一层是"先在 t1 处切、再把 t0 按 t0/t1 缩放后切第二刀"，与那边**切的次序不同**
+// （那边是先切 a-floor(a)、再在剩下那段上切 (b-a)/(ceil(b)-a)），而且漏了直线段那一支。
+// 量出来的：`arc((0,0),6,22.5,60)` 的结点差 1 ulp，顺着 arclength 与 min/max 一路传，
+// 最后落成 polararea 的 gsave 闸门。
 path subpath(path p, real a, real b) {
-  int segs = length(p);
-  if (segs <= 0) return pathcopy(p);
-  if (a > b) return reverse(subpath(p, b, a));
+  int n = p.nodes.length;
+  if (n == 0) return pathcopy(p);
+  if (a > b) {
+    int len = length(p);
+    return subpath(reverse(p), len - a, len - b);
+  }
   real ta = a;
   real tb = b;
+  knot aL, aR, bL, bR;
   if (!p.cyclic) {
-    if (ta < 0) ta = 0;
-    if (tb < 0) tb = 0;
-    if (ta > segs) ta = segs;
-    if (tb > segs) tb = segs;
+    if (ta < 0) { ta = 0; if (tb < 0) tb = 0; }
+    if (tb > n - 1) { tb = n - 1; if (ta > tb) ta = tb; }
+    aL = p.nodes[(int) floor(ta)];
+    aR = p.nodes[(int) ceil(ta)];
+    bL = p.nodes[(int) floor(tb)];
+    bR = p.nodes[(int) ceil(tb)];
+  } else {
+    aL = p.nodes[asy__nwrap(p, (int) floor(ta))];
+    aR = p.nodes[asy__nwrap(p, (int) ceil(ta))];
+    bL = p.nodes[asy__nwrap(p, (int) floor(tb))];
+    bR = p.nodes[asy__nwrap(p, (int) ceil(tb))];
   }
-  // `point(path,real)` 声明在这一段**后面**（名字解析是顺序的），所以这里直接用
-  // de Casteljau 取那一点
   if (ta == tb) {
-    int i0 = floor(ta);
-    if (i0 >= segs) i0 = segs - 1;
-    real s0 = ta - i0;
-    pair[] q0 = asy__subbez(point(p, i0), postcontrol(p, i0),
-                            precontrol(p, i0 + 1), point(p, i0 + 1), s0, s0);
-    return pathof(q0[0]);
+    // asy 那边是 `path(point(a))`；`point(path,real)` 声明在后面，这里照它的算法展开
+    real s0 = ta - floor(ta);
+    return pathof((asy__bez(aL.point.x, aL.post.x, aR.pre.x, aR.point.x, s0),
+                   asy__bez(aL.point.y, aL.post.y, aR.pre.y, aR.point.y, s0)));
   }
-  int ia = floor(ta);
-  real fa = ta - ia;
-  int ib = floor(tb);
-  real fb = tb - ib;
-  if (fb == 0) { ib = ib - 1; fb = 1; }
-  path h;
-  for (int i = ia; i <= ib; ++i) {
-    real t0 = i == ia ? fa : 0;
-    real t1 = i == ib ? fb : 1;
-    pair[] q = asy__subbez(point(p, i), postcontrol(p, i),
-                           precontrol(p, i + 1), point(p, i + 1), t0, t1);
-    if (i == ia) {
-      knot k = knotat(q[0]);
-      k.post = q[1];
-      k.straight = straight(p, i);
-      h.nodes.push(k);
-    } else {
-      h.nodes[h.nodes.length - 1].post = q[1];
-      h.nodes[h.nodes.length - 1].straight = straight(p, i);
+  path h = subpath(p, (int) ceil(ta), (int) floor(tb));
+  if (ta > floor(ta)) {
+    if (tb < ceil(ta)) {
+      knot[] s = asy__splitcubic(ta - floor(ta), aL, aR);
+      knot[] s2 = asy__splitcubic((tb - ta) / (ceil(tb) - ta), s[1], s[2]);
+      return asy__path2(s2[0], s2[1]);
     }
-    knot e = knotat(q[3]);
-    e.pre = q[2];
-    h.nodes.push(e);
+    knot[] s = asy__splitcubic(ta - floor(ta), aL, aR);
+    h = asy__path2(s[1], s[2]) & h;
+  }
+  if (ceil(tb) > tb) {
+    knot[] s = asy__splitcubic(tb - floor(tb), bL, bR);
+    h = h & asy__path2(s[0], s[1]);
   }
   return h;
 }
@@ -3975,32 +4251,7 @@ private real[] asy__ixnewton(pair[] a, pair[] b, real t0, real s0, real tol) {
 // 量出来的理由：solids.asy:14 的 tangent 拿两片相距 epsilon 的切片来问这一句，
 // 两条几乎重合的曲线会把细分树全展开 —— hyperboloidsilhouette 与 spheresilhouette
 // 从前双双超 120s，真 asy 是 0.33s。
-real[] intersect(path p, path q, real fuzz=-1) {
-  int np = length(p);
-  int nq = length(q);
-  real sc = 1;
-  for (int i = 0; i <= np; ++i) { real m = length(point(p, i)); if (m > sc) sc = m; }
-  for (int j = 0; j <= nq; ++j) { real m = length(point(q, j)); if (m > sc) sc = m; }
-  real f = fuzz < 0 ? 1e-9 * sc : fuzz;
-  real tol = 1e-12 * sc;
-  for (int i = 0; i < np; ++i) {
-    pair[] a = asy__segctl(p, i);
-    for (int j = 0; j < nq; ++j) {
-      pair[] b = asy__segctl(q, j);
-      real[][] cand;
-      asy__ixrec(cand, a, 0, 1, b, 0, 1, f, 12, 9);
-      for (int k = 0; k < cand.length; ++k) {
-        real[] r = asy__ixnewton(a, b, cand[k][0], cand[k][1], tol);
-        if (r.length == 0) continue;
-        real[] g;
-        g.push(i + r[0]);
-        g.push(j + r[1]);
-        return g;
-      }
-    }
-  }
-  return new real[];
-}
+// intersect(path,path) 的定义挪到 intersections 后面了（同一条路，见那边的注）。
 
 // 笔尖（pen.h 的 `pen::P`）。笔这一格在 `struct pen` 里只能是个 int —— `struct pen`
 // 排在 `struct path` **前面**（字段的类型只能是前面声明过的记录），所以真正的路径存在
@@ -4107,7 +4358,7 @@ string[] sort(string[] a) {
 // 11.9551681195517、lineskip() 14.346201743462、font() 那串默认字体命令、
 // linetype().length 0；`currentpen=linewidth(2)+squarecap+fontsize(20)` 之后
 // 是 2 / 0 / 20 / 24。
-real linewidth(pen p = currentpen) { return p.width; }
+real linewidth(pen p = currentpen) { return asy__penw(p); }
 
 // (1) 字号（runtime.in:590/596）：pen 上存一格。默认那一格是 **12pt 换成 bp**
 // 的那个数（量过 `fontsize(currentpen)` 是 11.9551681195517 = 12*72/72.27）。
@@ -4217,49 +4468,100 @@ pair point(path g, real t) {
   real s = u - i;
   knot a = g.nodes[i];
   knot b = g.nodes[i + 1 == n ? 0 : i + 1];
-  real r = 1 - s;
-  return r*r*r*a.point + 3*r*r*s*a.post + 3*r*s*s*b.pre + s*s*s*b.point;
+  // path.cc:240 是 de Casteljau 的六步线性插值，不是 Bernstein 幂形式；两者数学等价
+  // 但舍入不同。逐分量走 asy__bez —— 那一份连 arm64 上 fmadd 的收缩都对齐了，
+  // 而且 bounds() 的极值代回用的就是它，两处必须同一套算法。
+  return (asy__bez(a.point.x, a.post.x, b.pre.x, b.point.x, s),
+          asy__bez(a.point.y, a.post.y, b.pre.y, b.point.y, s));
 }
 
-// dir：runpath.in:89/94。切向 = 三次 Bezier 的导数（常因子 3 归一化时无所谓）。
-// 结点上 sign<0 取入向、sign>0 取出向、sign==0 取两向的单位向量之和（C++ 那边是同一条）。
-pair dir(path g, real t, bool normalize=true) {
-  int n = g.nodes.length;
-  if (n == 0) { abort("dir: 空路径"); return (0, 0); }
-  int segs = g.cyclic ? n : n - 1;
-  if (segs <= 0) return (0, 0);
-  real u = t;
-  if (g.cyclic) {
-    while (u < 0) u = u + segs;
-    while (u >= segs) u = u - segs;
-  } else {
-    if (u < 0) u = 0;
-    if (u > segs) u = segs;
-  }
-  int i = floor(u);
-  if (i >= segs) i = segs - 1;
-  real s = u - i;
-  knot a = g.nodes[i];
-  knot b = g.nodes[i + 1 == n ? 0 : i + 1];
-  real r = 1 - s;
-  pair d = 3*r*r*(a.post - a.point) + 6*r*s*(b.pre - a.post) + 3*s*s*(b.point - b.pre);
-  if (d == (0, 0)) d = b.point - a.point;
-  return normalize ? unit(d) : d;
+// dir：runpath.in:89/94，实现全在 path.h:202-269。之前这一层是"三次 Bezier 的
+// Bernstein 导数形式 + 一个 d==0 的兜底"，与 C++ 那边差三处，量 polararea 的
+// `arc((0,0),2.5,0,54)` 全露出来了：
+//   1. 结点上的入/出向：非闭合路径 `predir(t<=0)` 与 `postdir(t>=n-1)` 参考**回零向量**
+//      （path.h:209/224），我们回的是另一侧的切向 —— `dir(a,0,-1)` 参考 (0,0)、我们给出向。
+//   2. 段内那一条用**单项式** `a t²+b t+c`（path.h:259-262），不是 Bernstein 形式，舍
+//      不一样（量到 ~1e-16 相对差，会顺着标签对齐放大）。
+//   3. 退化时是**三级** epsilon 回退（一阶导 → 二阶导 → 三阶导），判据是
+//      `abs2 > Fuzz2*max(|c0-z0|², |c1-z0|², |z1-z0|²)`，不是 `d == 0`。
+// 下面照 path.h 逐行抄。
+private real asy__dirnorm(pair z0, pair c0, pair c1, pair z1) {
+  pair u = c0 - z0, v = c1 - z0, w = z1 - z0;   // path.h:202 norm(...)
+  real a = u.x * u.x + u.y * u.y;
+  real b = v.x * v.x + v.y * v.y;
+  real c = w.x * w.x + w.y * w.y;
+  real m = b > c ? b : c;                       // camp::max(a, camp::max(b, c))
+  if (a > m) m = a;
+  return asy__Fuzz2 * m;
 }
+// path.h:208 predir(Int t)
+private pair asy__predir(path g, int t, bool normalize) {
+  int n = g.nodes.length;
+  if (!g.cyclic && t <= 0) return (0, 0);
+  pair z1 = point(g, t);
+  pair c1 = precontrol(g, t);
+  pair d = 3.0 * (z1 - c1);
+  if (!normalize) return d;
+  pair z0 = point(g, t - 1);
+  pair c0 = postcontrol(g, t - 1);
+  real eps = asy__dirnorm(z0, c0, c1, z1);
+  if (d.x * d.x + d.y * d.y > eps) return unit(d);
+  d = 2.0 * c1 - c0 - z1;
+  if (d.x * d.x + d.y * d.y > eps) return unit(d);
+  return unit(z1 - z0 + 3.0 * (c0 - c1));
+}
+// path.h:223 postdir(Int t)
+private pair asy__postdir(path g, int t, bool normalize) {
+  int n = g.nodes.length;
+  if (!g.cyclic && t >= n - 1) return (0, 0);
+  pair c0 = postcontrol(g, t);
+  pair z0 = point(g, t);
+  pair d = 3.0 * (c0 - z0);
+  if (!normalize) return d;
+  pair z1 = point(g, t + 1);
+  pair c1 = precontrol(g, t + 1);
+  real eps = asy__dirnorm(z0, c0, c1, z1);
+  if (d.x * d.x + d.y * d.y > eps) return unit(d);
+  d = z0 - 2.0 * c0 + c1;
+  if (d.x * d.x + d.y * d.y > eps) return unit(d);
+  return unit(z1 - z0 + 3.0 * (c0 - c1));
+}
+// path.h:238 dir(Int t, Int sign)
 pair dir(path g, int i, int sign=0, bool normalize=true) {
   int n = g.nodes.length;
   if (n == 0) { abort("dir: 空路径"); return (0, 0); }
-  if (sign < 0) {
-    if (i == 0 && !g.cyclic) return dir(g, 0.0, normalize);
-    real ti = i == 0 ? n : i;
-    return dir(g, ti, normalize);
+  if (sign == 0) {
+    pair v = asy__predir(g, i, normalize) + asy__postdir(g, i, normalize);
+    return normalize ? unit(v) : 0.5 * v;
   }
-  if (sign > 0) { real ti = i; return dir(g, ti, normalize); }
-  pair din = dir(g, i, -1, true);
-  pair dout = dir(g, i, 1, true);
-  pair d = din + dout;
-  if (d == (0, 0)) d = dout;
-  return normalize ? unit(d) : d;
+  if (sign > 0) return asy__postdir(g, i, normalize);
+  return asy__predir(g, i, normalize);
+}
+// path.h:247 dir(double t)
+pair dir(path g, real t, bool normalize=true) {
+  int n = g.nodes.length;
+  if (n == 0) { abort("dir: 空路径"); return (0, 0); }
+  if (!g.cyclic) {
+    if (t <= 0) return asy__postdir(g, 0, normalize);
+    if (t >= n - 1) return asy__predir(g, n - 1, normalize);
+  }
+  int i = floor(t);
+  real s = t - i;
+  if (s == 0) return dir(g, i, 0, normalize);
+  pair z0 = point(g, i);
+  pair c0 = postcontrol(g, i);
+  pair c1 = precontrol(g, i + 1);
+  pair z1 = point(g, i + 1);
+  pair A = 3.0 * (z1 - z0) + 9.0 * (c0 - c1);
+  pair B = 6.0 * (z0 + c1) - 12.0 * c0;
+  pair C = 3.0 * (c0 - z0);
+  pair d = A * s * s + B * s + C;
+  if (!normalize) return d;
+  real eps = asy__dirnorm(z0, c0, c1, z1);
+  if (d.x * d.x + d.y * d.y > eps) return unit(d);
+  d = 2.0 * A * s + B;
+  if (d.x * d.x + d.y * d.y > eps) return unit(d);
+  return unit(A);
 }
 
 // (2) format：runstring.in:246/301 的两个内建。C++ 那边一句 `snprintf(f, x)` 加一段
@@ -4653,7 +4955,13 @@ real asy__pathbound(path g, bool xaxis, bool lo) {
     real d = xaxis ? q.point.x : q.point.y;
     for (real t : asy__bezcrit(a, b, c, d)) {
       if (t < 0.0 || t > 1.0) continue;  // path.h:449 goodroot，闭区间
-      real v = asy__bez(a, b, c, d, t);
+      // path.cc:495 是 `addpoint(box, i+t)` —— 时间**先加上段号再取小数**，
+      // 大段号上这一步会掉几位（i=78 时掉 6 位）。要逐位对上就得照样round-trip 一次：
+      // 量出来的（centroidfg 的 graph(x^3-x+2)）：直接用 t 代回给 1.6150998286049079，
+      // 走 (i+t)-i 给 1.6150998286049081 = 参考。
+      real u = i + t;
+      real s = u - i;
+      real v = asy__bez(a, b, c, d, s);
       if (lo ? v < m : v > m) m = v;
     }
   }
@@ -4917,7 +5225,7 @@ string string(pen p) {
   if (p.dashoffset != 0) s = s + ps(p.dashoffset);
   if (!p.dashscale) s = s + " bp";
   if (!p.dashadjust) s = s + " fixed";
-  if (p.width != 0.5) s = s + ", linewidth=" + ps(p.width);
+  if (p.setwidth) s = s + ", linewidth=" + ps(p.width);
   if (p.cap != 1) s = s + ", linecap=" + (p.cap == 0 ? "square" : "extended");
   if (p.join != 1) s = s + ", linejoin=" + (p.join == 0 ? "miter" : "bevel");
   if (p.miter != 10) s = s + ", miterlimit=" + ps(p.miter);
@@ -5984,8 +6292,10 @@ triple point(path3 g, real t) {
   real s = u - i;
   knot3 a = g.nodes[i];
   knot3 b = g.nodes[i + 1 == n ? 0 : i + 1];
-  real r = 1 - s;
-  return r*r*r*a.point + 3*r*r*s*a.post + 3*r*s*s*b.pre + s*s*s*b.point;
+  // path3.cc:48 与二维那份同构：de Casteljau 六步，逐分量走 asy__bez
+  return (asy__bez(a.point.x, a.post.x, b.pre.x, b.point.x, s),
+          asy__bez(a.point.y, a.post.y, b.pre.y, b.point.y, s),
+          asy__bez(a.point.z, a.post.z, b.pre.z, b.point.z, s));
 }
 
 triple dir(path3 g, real t, bool normalize=true) {
@@ -6192,7 +6502,10 @@ real arclength(path3 p) {
 // straightness（runpath3d.in:183/189，公式在 triple.h:398 的 Straightness）：
 // c0、c1 离 z0--z1 的 1/3、2/3 两点的距离**平方**里大的那个。tube.asy:19 的 Split 用它。
 real straightness(triple z0, triple c0, triple c1, triple z1) {
-  triple v = (z1 - z0) / 3;
+  // triple.h:401 是 `third*(z1-z0)`（third = 1.0/3.0，逐分量乘），不是逐分量除
+  real third = 1.0 / 3.0;
+  triple dz = z1 - z0;
+  triple v = (third * dz.x, third * dz.y, third * dz.z);
   triple a = c0 - v - z0;
   triple b = z1 - v - c1;
   real la = dot(a, a);
@@ -6231,30 +6544,47 @@ real arctime(path3 p, real L) {
   return segs;
 }
 
-// 包围盒：控制点的逐分量下/上界（真 asy 是解导数的零点，这一层用控制点的凸包界 ——
-// 那是个**外界**，够画图用，与 asy 的数不一定同）
-triple min(path3 g) {
+// 包围盒：path3.cc:282 的 bounds()，与二维那份（asy__pathbound）**逐行同构** ——
+// 每段解一次导数的零点，把根代回去比。
+// 从前这一层图省事用控制点的凸包界。那是个**外界**：`octant1x.external()` 经模型视图变换后
+// y 下界给的是控制点 -0.82242055141180104，而真值是段内极值 -0.74926864926535519。
+// 这一格是三维那一族"只有数值差"的总闸门 —— 它顺着 min(path3,projection) 喂进 pic2 的
+// 用户界，再顺着 LP 的缩放因子变成三维视口宽度（unitoctant：149 vs 156）。
+private real asy__pathbound3(path3 g, int axis, bool lo) {
   int n = g.nodes.length;
-  if (n == 0) { abort("min: 空的 path3"); return (0, 0, 0); }
-  triple m = g.nodes[0].point;
+  real sel(triple v) { return axis == 0 ? v.x : (axis == 1 ? v.y : v.z); }
+  real m = sel(g.nodes[0].point);
+  int segs = g.cyclic ? n : n - 1;
   for (int i = 0; i < n; ++i) {
-    m = minbound(m, g.nodes[i].point);
-    m = minbound(m, g.nodes[i].pre);
-    m = minbound(m, g.nodes[i].post);
+    real v = sel(g.nodes[i].point);
+    if (lo ? v < m : v > m) m = v;
+  }
+  for (int i = 0; i < segs; ++i) {
+    if (g.nodes[i].straight) continue;          // path3.cc:297
+    knot3 p = g.nodes[i];
+    knot3 q = g.nodes[i + 1 == n ? 0 : i + 1];
+    real a = sel(p.point), b = sel(p.post), c = sel(q.pre), d = sel(q.point);
+    for (real t : asy__bezcrit(a, b, c, d)) {
+      if (t < 0.0 || t > 1.0) continue;         // path3.h 的 goodroot，闭区间
+      real u = i + t;                           // addpoint(box, i+t) 先 round-trip
+      real s = u - i;
+      real v = asy__bez(a, b, c, d, s);
+      if (lo ? v < m : v > m) m = v;
+    }
   }
   return m;
 }
 
+triple min(path3 g) {
+  if (g.nodes.length == 0) { abort("min: 空的 path3"); return (0, 0, 0); }
+  return (asy__pathbound3(g, 0, true), asy__pathbound3(g, 1, true),
+          asy__pathbound3(g, 2, true));
+}
+
 triple max(path3 g) {
-  int n = g.nodes.length;
-  if (n == 0) { abort("max: 空的 path3"); return (0, 0, 0); }
-  triple m = g.nodes[0].point;
-  for (int i = 0; i < n; ++i) {
-    m = maxbound(m, g.nodes[i].point);
-    m = maxbound(m, g.nodes[i].pre);
-    m = maxbound(m, g.nodes[i].post);
-  }
-  return m;
+  if (g.nodes.length == 0) { abort("max: 空的 path3"); return (0, 0, 0); }
+  return (asy__pathbound3(g, 0, false), asy__pathbound3(g, 1, false),
+          asy__pathbound3(g, 2, false));
 }
 
 path3[] concat(path3[] a, path3[] b) {
@@ -6331,7 +6661,7 @@ private real[] asy__qroots(real a, real b, real c) {
   real x = -2.0 * c / denom;
   if (x > -1.0) {
     real r2 = factor * asy__sqrt1pxm1(x);
-    real r1 = asy__fma(-2.0, factor, -r2);   // path.cc:82 `-r2-2.0*factor`，收缩成 fmadd
+    real r1 = -r2 - 2.0 * factor;            // path.cc:82，与 asy__bez 同口径：不收缩
     if (r1 <= r2) { r.push(r1); r.push(r2); } else { r.push(r2); r.push(r1); }
     return r;
   }
@@ -6544,6 +6874,18 @@ real[][] intersections(path p, path q, real fuzz=-1) {
     out.insert(at, g);
   }
   return out;
+}
+// runpath.in 的 intersect = `intersections(..., single=true, exact=true)`，也就是与
+// intersections **同一条**路：两条里有一条是"一段直线或一个点"时走解析的 asy__ixline。
+// 这一格从前是另写一份（包围盒细分 + Newton，fuzz=1e-9·sc），于是走 exact 那一支本该
+// 给准准整数/0.5 的地方给出 1e-16 的零头。量出来的（`arc((0,0),2.5,0,54)`）：
+// `intersect(unitcircle,(0,0)--2*z1)` 参考 `0 0.5`、我们 `0 0.49999999999999989`，
+// 顺着 subpath 把弧的结点推歪 7 ulp，最后落成 polararea 的 gsave 闸门。
+// 定义挪到 intersections 后面（asy 只认前面声明过的名字）。
+real[] intersect(path p, path q, real fuzz=-1) {
+  real[][] I = intersections(p, q, fuzz);
+  if (I.length == 0) return new real[];
+  return I[0];
 }
 // runpath.in:235：路径 p 与过 a、b 的那条**无穷长**直线的所有交点时间，升序。
 // 量过 8 个探针（三次样条闭路、圆、折线；水平/竖直/斜线/不相交/切过顶点），
@@ -7044,7 +7386,7 @@ real[] quadraticroots(real a, real b, real c) {
   real x = -2.0 * c / denom;
   if (x > -1.0) {
     real r2 = factor * asy__sqrt1pxm1(x);
-    real r1 = asy__fma(-2.0, factor, -r2);   // path.cc:82 `-r2-2.0*factor`，收缩成 fmadd
+    real r1 = -r2 - 2.0 * factor;            // path.cc:82，与 asy__bez 同口径：不收缩
     if (r1 <= r2) { roots.push(r1); roots.push(r2); } else { roots.push(r2); roots.push(r1); }
     return roots;
   }
@@ -7571,17 +7913,17 @@ private path[] asy__strokepathgs(path g, pen p) {
   // asy 那边 `_strokepath` 开的是一份**新** psfile（runlabel.in:423），lastpen 是
   // initialpen，所以每一句都发；这一层的 psfile 状态是全局的，所以要自己存取一遍。
   bool save = asy__tobuf;
-  string keep = asy__bufs;
+  string keep = asy__bufget();
   pen keeppen = pencopy(lastpen);
   bool keepvalid = lastvalid;
   asy__tobuf = true;
-  asy__bufs = "";
+  asy__bufclear();
   lastvalid = false;
   setpen(p);
   emitpath(g, 1, true);
-  string body = asy__bufs;
+  string body = asy__bufget();
   asy__tobuf = save;
-  asy__bufs = keep;
+  asy__bufput(keep);
   lastpen = keeppen;
   lastvalid = keepvalid;
   string t = "%!PS-Adobe-3.0 EPSF-3.0" + nl
@@ -7715,9 +8057,9 @@ private string asy__baseeps(frame f, box bx) {
   // 整份图先攒起来再落盘，而带标签的图正是经这一趟拿底图的。钉成 false 的时候
   // dvips 出来的那份字节会绕过缓冲直接印到 stdout，文件里落一份空的。
   bool asy__basesave = asy__tobuf;
-  string asy__basekeep = asy__bufs;
+  string asy__basekeep = asy__bufget();
   asy__tobuf = true;
-  asy__bufs = "";
+  asy__bufclear();
   asy__out("%!PS-Adobe-3.0 EPSF-3.0");
   asy__out("%%BoundingBox: " + string(floor(bx.l)) + " " + string(floor(bx.b)) + " "
         + string(ceil(bx.r)) + " " + string(ceil(bx.t)));
@@ -7734,9 +8076,9 @@ private string asy__baseeps(frame f, box bx) {
            i + 1 >= f.ops.length || !f.ops[i + 1].merge);
   asy__out("showpage");
   asy__out("%%EOF");
-  string s = asy__bufs;
+  string s = asy__bufget();
   asy__tobuf = asy__basesave;
-  asy__bufs = asy__basekeep;
+  asy__bufput(asy__basekeep);
   return s;
 }
 
@@ -8115,7 +8457,7 @@ private string asy__svgd(path g, real s) {
 // cap/join 的编号与 PostScript 一致（0 butt/miter、1 round、2 square/bevel）
 private string asy__svgstrokeattrs(pen p) {
   string a = ' stroke="' + asy__svgcolor(p) + '" fill="none"';
-  a = a + ' stroke-width="' + ps(p.width == 0 ? 0.5 : p.width) + '"';
+  a = a + ' stroke-width="' + ps(asy__penw(p) == 0 ? 0.5 : asy__penw(p)) + '"';
   a = a + ' stroke-linecap="' + (p.cap == 1 ? "round" : (p.cap == 2 ? "square" : "butt")) + '"';
   a = a + ' stroke-linejoin="' + (p.join == 1 ? "round" : (p.join == 2 ? "bevel" : "miter")) + '"';
   a = a + ' stroke-miterlimit="' + ps(p.miter == 0 ? 10 : p.miter) + '"';
@@ -9230,13 +9572,37 @@ private bool asy__lexless(real[] a, real[] b) {
   return a.length < b.length;
 }
 real[][] sort(real[][] a) {
-  real[][] r = new real[a.length][];
-  for (int i = 0; i < a.length; ++i) r[i] = a[i];
-  for (int i = 1; i < r.length; ++i) {
-    real[] v = r[i];
-    int j = i - 1;
-    while (j >= 0 && asy__lexless(v, r[j])) { r[j + 1] = r[j]; --j; }
-    r[j + 1] = v;
+  int n = a.length;
+  real[][] r = new real[n][];
+  for (int i = 0; i < n; ++i) r[i] = a[i];
+  if (n < 2) return r;
+  // **自底向上归并**，不是插入排。插入排是 O(n²) 次比较 + O(n²) 次搬运，而这一族的键是
+  // **整行**（asy__lexless 逐个分量比）—— 量过 AiryDisk（run-c，7s 窗口）：
+  // `asy__lexless` 775 个栈顶样本、`sort` 自己 672，合起来 24% 的 CPU。
+  // 归并同样**稳定**（右边只在**严格**更小时才先取），所以相等的行之间次序与插入排一致，
+  // 出来的排列一模一样。真 asy 那边是 `std::stable_sort`，也是归并那一族。
+  // 两个缓冲逐趟对调 —— asy 的数组是引用（量过：`b = a; b[0] = 9` 之后 `a[0]` 是 9），
+  // 所以这一下只是换两个句柄，不拷贝。
+  real[][] t = new real[n][];
+  for (int w = 1; w < n; w = 2 * w) {
+    for (int lo = 0; lo < n; lo = lo + 2 * w) {
+      int mid = lo + w;
+      int hi = lo + 2 * w;
+      if (mid > n) mid = n;
+      if (hi > n) hi = n;
+      int i = lo;
+      int j = mid;
+      int k = lo;
+      while (i < mid && j < hi) {
+        if (asy__lexless(r[j], r[i])) { t[k] = r[j]; ++j; } else { t[k] = r[i]; ++i; }
+        ++k;
+      }
+      while (i < mid) { t[k] = r[i]; ++i; ++k; }
+      while (j < hi) { t[k] = r[j]; ++j; ++k; }
+    }
+    real[][] s = r;
+    r = t;
+    t = s;
   }
   return r;
 }
@@ -10358,10 +10724,14 @@ private void asy__merge3hook() {
         if (o3.kind == 1) {
           triple[][] P = o3.P3;
           if (P.length < 4 || P[0].length < 4) continue;
-          string s = "patch " + (o3.straight ? "1" : "0");
+          // 十六个控制点**逐个 push**，不是 `s = s + sv(...)` 攒起来：那一句每转一圈都要
+          // 重新分配再把已攒的部分拷一遍（omni_str 不可变），一片面片 16 圈就是十几 KB 的
+          // memmove。剖 sinc（run-c）：`_platform_memmove` 295 个栈顶样本排第一，
+          // 全在 `omni_str_cat` 底下。拼接的次序一字不变，所以清单逐字节相同。
+          pp.push(mline(o3) + pcline(o3.colors, 4) + "patch " + (o3.straight ? "1" : "0"));
           for (int a = 0; a < 4; ++a)
-            for (int b = 0; b < 4; ++b) s = s + sv(P[a][b]);
-          pp.push(mline(o3) + pcline(o3.colors, 4) + s + nl);
+            for (int b = 0; b < 4; ++b) pp.push(sv(P[a][b]));
+          pp.push(nl);
           nink = nink + 1;
         } else if (o3.kind == 2) {
           // 三角面片（管子的接头：球帽与圆盘）。十个控制点按 bezierpatch.cc:652 那张图的
@@ -10386,11 +10756,11 @@ private void asy__merge3hook() {
           path3 g = o3.g3;
           int L = g.nodes.length;
           if (L < 2) continue;
-          string s = mline(o3);
+          // 逐段 push，理由同上面那族（`s = s + "bez" …` 是 O(段数²) 的 memmove）
+          pp.push(mline(o3));
           for (int a = 0; a + 1 < L; ++a)
-            s = s + "bez" + sv(g.nodes[a].point) + sv(g.nodes[a].post)
-              + sv(g.nodes[a + 1].pre) + sv(g.nodes[a + 1].point) + nl;
-          pp.push(s);
+            pp.push("bez" + sv(g.nodes[a].point) + sv(g.nodes[a].post)
+              + sv(g.nodes[a + 1].pre) + sv(g.nodes[a + 1].point) + nl);
           nink = nink + 1;
         }
       }
@@ -10945,11 +11315,23 @@ private void asy__add3(frame f, triple[][] v)
 
 private void asy__add3(frame f, path3 g)
 {
-  for (int i = 0; i < g.nodes.length; ++i) {
+  int n = g.nodes.length;
+  if (n == 0) return;
+  bool had = f.has3;
+  triple pm = f.min3v, pM = f.max3v;      // 这条路之前的界
+  for (int i = 0; i < n; ++i) {
     asy__add3(f, g.nodes[i].point);
     asy__add3(f, g.nodes[i].pre);
     asy__add3(f, g.nodes[i].post);
   }
+  // drawpath3.h:73 的 bounds 用的是 `tg.min()` / `tg.max()` —— **精确**的 path3 包围盒
+  // （path3.cc:282，每段解导数零点），不是控制点凸包。凸包偏大：octant1x.external()
+  // 过模型视图之后 y 下界给的是控制点 -0.82242055141180104，真值是段内极值
+  // -0.74926864926535519。上面那一圈只为把 minr/maxr（perspective 要的比值界，asy 那边
+  // 是 path3::ratio 的细分）攒上，min3v/max3v 在这儿按精确界重摆。
+  triple mn = min(g), mx = max(g);
+  f.min3v = had ? minbound(pm, mn) : mn;
+  f.max3v = had ? maxbound(pM, mx) : mx;
 }
 
 // 四边面片那一格的**界**（drawsurface.cc:72）：直面片只取四个角，其余对 x/y/z
@@ -11545,6 +11927,7 @@ frame operator *(real[][] t, frame f)
       if (s[i].kind == 0) asy__add3(b0, s[i].g3);
       else if (s[i].kind == 1) asy__addpatch3(b0, s[i].P3, s[i].straight);
       else if (s[i].kind == 2) asy__addtri3(b0, s[i].P3, s[i].straight);
+      else if (s[i].kind == 4) asy__add3(b0, s[i].T3);   // 三角网的顶点在 T3
       else asy__add3(b0, s[i].Q3);
     }
     if (b0.has3 && b0.min3v == f.min3v && b0.max3v == f.max3v) {
@@ -11554,6 +11937,7 @@ frame operator *(real[][] t, frame f)
         if (gs0[i].kind == 0) asy__add3(b1, gs0[i].g3);
         else if (gs0[i].kind == 1) asy__addpatch3(b1, gs0[i].P3, gs0[i].straight);
         else if (gs0[i].kind == 2) asy__addtri3(b1, gs0[i].P3, gs0[i].straight);
+        else if (gs0[i].kind == 4) asy__add3(b1, gs0[i].T3);
         else asy__add3(b1, gs0[i].Q3);
       }
       if (b1.has3) { g.min3v = b1.min3v; g.max3v = b1.max3v; }
@@ -11622,6 +12006,15 @@ frame operator *(real[][] t, frame f)
         for (int a = 0; a < gs[i].P3.length; ++a)
           for (int b = 0; b < gs[i].P3[a].length; ++b) acc(gs[i].P3[a][b]);
         for (int k = 0; k < gs[i].Q3.length; ++k) acc(gs[i].Q3[k]);
+        // **三角网（kind == 4）的顶点在 T3 里，不在 P3/Q3。** 漏掉它的后果不是"比值偏
+        // 一点"，而是整帧一个点都没累计：`first` 一直为 true，于是 minr/maxr 保持着上面
+        // 按**旧包围盒八个角**算出来的那份。盒角是对称的，`minratio+maxratio` 抵消成 0，
+        // three.asy:2809 的 autoadjust 循环一次也不挪，fov 只好开大。
+        // 量出来的（triangles.asy 砍到 `draw(v,vi,red)` 三行）：P.angle 参考
+        // 3.7058255503748927、我们 4.1125471320170872，camera.x 参考 1.5746087294642044、
+        // 我们 -3.75e-14；tan 之比 0.9011 正好是位图上量到的缩小率（ink 框 1005x303
+        // 对参考 1118x333）。平三角上 x/z 是两个线性函数的比，极值必在顶点上，取顶点即精确。
+        for (int k = 0; k < gs[i].T3.length; ++k) acc(gs[i].T3[k]);
       }
     }
     if (!first) { g.minr = rmn; g.maxr = rmx; }

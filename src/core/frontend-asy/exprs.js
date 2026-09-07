@@ -1460,17 +1460,33 @@ export function asyIndex(L, n) {
  * 下标绕圈（第六十五刀）：`a.cyclic` 置上之后按长度取模。接收者要求**两次**（一次算
  * 下标、一次真取），所以不是一个裸变量读时先绑个临时量。绑不下（这个位置没有 pre）时
  * 只好照旧不绕 —— 那种位置的接收者本来也只能是变量读。
+ *
+ * **在界内的那一句摊在调用点上**（性能，不是语义）：`cycidx` 的第一句就是
+ * "0 <= i < alen(a) 就原样回"（见 lower.js 的 cycHelper），而 -O0 下那是一次真调用 ——
+ * 剖 AiryDisk（run-c，8s 窗口）：`asy__cycidx_arr_real` 677 个栈顶样本、
+ * `_arr_arr_real` 383，合起来 16% 的 CPU 花在"进去、比一下、回来"。
+ * 把那一句摊出来之后，绝大多数下标一次调用都不发；越界（真要绕圈）才进去。
+ * 只在下标表达式**明显没有副作用**时这么做 —— 它要提前到 pre 里求值，
+ * 带 call/赋值的下标（`a[find(s)]`）照旧原地发调用，求值次序一字不动。
  */
+const CYC_PURE = (code) => !/\(call |\(set |\(apush |\(aset |\(cnew /.test(code);
+
 export function asyCycIdx(L, a, icode) {
   const h = L.cycHelper(a.type);
-  if (/^\(var [A-Za-z0-9_]+\)$/.test(a.code)) {
-    return `(call ${h.idx} ${a.code} ${icode})`;
+  const isVar = /^\(var [A-Za-z0-9_]+\)$/.test(a.code);
+  if (!Array.isArray(L.pre)) return isVar ? `(call ${h.idx} ${a.code} ${icode})` : icode;
+  if (!isVar) {
+    const tv = `asy__cy${L.unit.ntmp++}`;
+    L.pre.push(`(let ${tv} ${asyCore(a.type)} ${a.code})`);
+    a.code = `(var ${tv})`;
   }
-  if (!Array.isArray(L.pre)) return icode;
-  const tv = `asy__cy${L.unit.ntmp++}`;
-  L.pre.push(`(let ${tv} ${asyCore(a.type)} ${a.code})`);
-  a.code = `(var ${tv})`;
-  return `(call ${h.idx} (var ${tv}) ${icode})`;
+  if (!CYC_PURE(icode)) return `(call ${h.idx} ${a.code} ${icode})`;
+  const iv = `asy__ci${L.unit.ntmp++}`;
+  L.pre.push(`(let ${iv} int ${icode})`);
+  L.pre.push(`(if (bin "||" (bin "<" (var ${iv}) (int 0))`
+    + ` (bin ">=" (var ${iv}) (alen ${a.code})))`
+    + ` (do (set ${iv} (call ${h.idx} ${a.code} (var ${iv})))))`);
+  return `(var ${iv})`;
 }
 
 /**

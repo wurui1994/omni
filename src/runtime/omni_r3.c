@@ -788,7 +788,15 @@ static void r3_window(const r3fb *fb, r3clip c, double *x, double *y, double *z)
 }
 
 /* 一片三角进帧缓冲。位置是视图空间，法向按重心插值，着色在像素中心算一次。
- * `VC` 是三个顶点的 rgba（12 个 float，没有顶点色时给 NULL）。 */
+ * `VC` 是三个顶点的 rgba（12 个 float，没有顶点色时给 NULL）。
+ *
+ * **这个函数是三维那一档的热点本体** —— 剖 elevation（run-c，8s 窗口）：
+ * `r3_raster_tri` 4115 个栈顶样本，占整趟 CPU 的 61%（`r3_shade` 只有 48、`r3_brdf` 44 ——
+ * 贵的不是着色，是覆盖测试）。下面那几处手工提取都是 **-O2 会替你做的**公共子表达式
+ * 消除，而这条腿默认 -O0（cli.js:1895，故意的：不拿优化档盖住性能问题），所以只能自己做。
+ * **算式的形状与次序一字不动** —— 浮点重结合会挪动边界像素，而位图那一轴是逐字节对齐的，
+ * 所以只提取、不重排：`(wx[1]-sx)*(wy[2]-sy)` 里 `(wy[2]-sy)` 与 x 无关，提出来得到的是
+ * 同一个 double，两个乘法与那一个减法照旧。 */
 static void r3_raster_tri(const r3scene *s, r3fb *fb, const r3v *P, const r3v *N,
                           const r3mat *mat, const float *VC) {
   r3clip c[3];
@@ -801,8 +809,10 @@ static void r3_raster_tri(const r3scene *s, r3fb *fb, const r3v *P, const r3v *N
   }
   double area = (wx[1] - wx[0]) * (wy[2] - wy[0]) - (wx[2] - wx[0]) * (wy[1] - wy[0]);
   if (area == 0.0) return;
-  { const char *e = getenv("OMNI_R3_DEBUG");
-    if (e && e[0] == '3')
+  /* 量口只读一次环境：getenv 是对整张环境表的线性扫，而这个函数一趟要进十万次 */
+  { static int dbg3 = -1;
+    if (dbg3 < 0) { const char *e = getenv("OMNI_R3_DEBUG"); dbg3 = (e && e[0] == '3') ? 1 : 0; }
+    if (dbg3)
       fprintf(stderr, "tri (%.3f,%.3f) (%.3f,%.3f) (%.3f,%.3f)\n",
               wx[0], wy[0], wx[1], wy[1], wx[2], wy[2]); }
   int front = area > 0.0;                      /* GL 默认正面是逆时针 */
@@ -822,6 +832,14 @@ static void r3_raster_tri(const r3scene *s, r3fb *fb, const r3v *P, const r3v *N
   if (x1 > fb->fw) x1 = fb->fw;
   if (y1 > fb->fh) y1 = fb->fh;
 
+  /* 内层循环要的量全部搬进标量：-O0 下 `wx[1]` 每次都是一条带下标计算的栈读 */
+  const double wx0 = wx[0], wx1 = wx[1], wx2 = wx[2];
+  const double wy0 = wy[0], wy1 = wy[1], wy2 = wy[2];
+  const double wz0 = wz[0], wz1 = wz[1], wz2 = wz[2];
+  const int fw = fb->fw;
+  float *const depth = fb->depth;
+  unsigned char *const col = fb->col;
+
   float alpha = (float) mat->diffuse[3];
   if (VC) {
     /* 顶点色带 alpha 时，透明与否看**这一片**的三个顶点（bezierpatch.cc:867
@@ -831,26 +849,74 @@ static void r3_raster_tri(const r3scene *s, r3fb *fb, const r3v *P, const r3v *N
   }
   int opaque = !(alpha < 1.0f);
   for (int y = y0; y < y1; ++y) {
-    for (int x = x0; x < x1; ++x) {
+    /* **这一行只扫三角真正压到的那几列。**
+       量到的账（elevation，`OMNI_R3_DEBUG=1`）：1600x1200 的帧、33384 片三角、光栅 4.31s；
+       而 sinc 的三角更多（39171）却只要 0.45s —— 差别在**包围盒**：细分出来的斜长三角，
+       包围盒面积远大于三角面积，整行的列都在白算四个采样。
+       三角是凸的，所以它落在带 [y, y+1] 里的那一段，横向不会超出"带里的顶点"与
+       "三条边与这两条水平线的交点"这几个 x。左右各再放宽 1 个像素：那几处除法的舍入
+       误差在 1e-13 像素量级，1 个像素是十三个数量级的余量。
+       于是这个区间是真覆盖集的**超集** —— 区间外的采样点三条判据里必有一条为负，
+       原来也是被 continue 掉的，所以判据一字没动、结果逐字节相同。 */
+    double rlo = 1e300, rhi = -1e300;
+    { const double byl = y, byh = y + 1.0;
+      for (int e = 0; e < 3; ++e) {
+        const int i = e, j = (e + 1) % 3;
+        const double yi = wy[i], yj = wy[j], xi = wx[i];
+        if (yi >= byl && yi <= byh) {
+          if (xi < rlo) rlo = xi;
+          if (xi > rhi) rhi = xi;
+        }
+        const double dyE = yj - yi;
+        if (dyE == 0.0) continue;
+        for (int q = 0; q < 2; ++q) {
+          const double t = ((q == 0 ? byl : byh) - yi) / dyE;
+          if (t < 0.0 || t > 1.0) continue;
+          const double xq = xi + t * (wx[j] - xi);
+          if (xq < rlo) rlo = xq;
+          if (xq > rhi) rhi = xq;
+        }
+      } }
+    if (rhi < rlo) continue;                   /* 这一带整个碰不到三角 */
+    int rx0 = (int) floor(rlo) - 1, rx1 = (int) ceil(rhi) + 1;
+    if (rx0 < x0) rx0 = x0;
+    if (rx1 > x1) rx1 = x1;
+
+    /* 只跟 y 有关的三个差：提到 x 循环外面。值与原来逐位相同（同一次减法） */
+    double sxo[R3_NS], dy0[R3_NS], dy1[R3_NS], dy2[R3_NS];
+    for (int k = 0; k < R3_NS; ++k) {
+      double sy = y + R3_SAMPLE[k][1];
+      sxo[k] = R3_SAMPLE[k][0];
+      dy0[k] = wy0 - sy;
+      dy1[k] = wy1 - sy;
+      dy2[k] = wy2 - sy;
+    }
+    const size_t rowbase = (size_t) y * (size_t) fw;
+    for (int x = rx0; x < rx1; ++x) {
       int shaded = 0;
       unsigned char cr = 0, cg = 0, cb = 0;
       float frgb[3] = { 0, 0, 0 };
       float ablend = alpha;
+      const size_t pixbase = (rowbase + (size_t) x) * R3_NS;
       for (int k = 0; k < R3_NS; ++k) {
-        double sx = x + R3_SAMPLE[k][0];
-        double sy = y + R3_SAMPLE[k][1];
-        double b0 = ((wx[1] - sx) * (wy[2] - sy) - (wx[2] - sx) * (wy[1] - sy)) * inv2a;
-        double b1 = ((wx[2] - sx) * (wy[0] - sy) - (wx[0] - sx) * (wy[2] - sy)) * inv2a;
+        double sx = x + sxo[k];
+        /* 三个判据**逐个算、逐个否**：原来是把 b0/b1/b2 全算出来再一起比。
+           `||` 只短路比较，不短路上面那三行的计算 —— 而包围盒里过半的采样点是
+           第一条边就出去的（三角面积约是包围盒的一半）。次序与值一字不动。 */
+        double b0 = ((wx1 - sx) * dy2[k] - (wx2 - sx) * dy1[k]) * inv2a;
+        if (b0 < 0.0) continue;
+        double b1 = ((wx2 - sx) * dy0[k] - (wx0 - sx) * dy2[k]) * inv2a;
+        if (b1 < 0.0) continue;
         double b2 = 1.0 - b0 - b1;
-        if (b0 < 0.0 || b1 < 0.0 || b2 < 0.0) continue;
-        double z = b0 * wz[0] + b1 * wz[1] + b2 * wz[2];
-        size_t idx = ((size_t) y * fb->fw + x) * R3_NS + k;
-        if (!(z < fb->depth[idx])) continue;   /* GL_LESS */
+        if (b2 < 0.0) continue;
+        double z = b0 * wz0 + b1 * wz1 + b2 * wz2;
+        size_t idx = pixbase + (size_t) k;
+        if (!(z < depth[idx])) continue;       /* GL_LESS */
         if (!shaded) {
           /* 像素中心的重心（GL 默认在像素中心求插值，覆盖与否由采样点决定） */
           double px = x + 0.5, py = y + 0.5;
-          double a0 = ((wx[1] - px) * (wy[2] - py) - (wx[2] - px) * (wy[1] - py)) * inv2a;
-          double a1 = ((wx[2] - px) * (wy[0] - py) - (wx[0] - px) * (wy[2] - py)) * inv2a;
+          double a0 = ((wx1 - px) * (wy2 - py) - (wx2 - px) * (wy1 - py)) * inv2a;
+          double a1 = ((wx2 - px) * (wy0 - py) - (wx0 - px) * (wy2 - py)) * inv2a;
           double a2 = 1.0 - a0 - a1;
           /* 透视校正：属性按 1/w 加权 */
           double q0 = a0 * iw[0], q1 = a1 * iw[1], q2 = a2 * iw[2];
@@ -886,7 +952,7 @@ static void r3_raster_tri(const r3scene *s, r3fb *fb, const r3v *P, const r3v *N
         }
         if (!opaque) {
           /* 透明：直接混色，**不写深度**（三角已按由远到近的次序进来） */
-          unsigned char *o = fb->col + idx * 3;
+          unsigned char *o = col + idx * 3;
           for (int ch = 0; ch < 3; ++ch) {
             float src = frgb[ch];
             float dst = o[ch] / 255.0f;
@@ -898,8 +964,8 @@ static void r3_raster_tri(const r3scene *s, r3fb *fb, const r3v *P, const r3v *N
           fb->nblend++;
           continue;
         }
-        fb->depth[idx] = (float) z;
-        unsigned char *o = fb->col + idx * 3;
+        depth[idx] = (float) z;
+        unsigned char *o = col + idx * 3;
         o[0] = cr; o[1] = cg; o[2] = cb;
       }
     }

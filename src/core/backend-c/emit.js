@@ -136,13 +136,20 @@ class CEmitter {
       const n = cArrOps(t);
       const el = cTypeName(t.elem);
       out.push(`static inline omni_arr_blob ${n}_new(int64_t n, ${el} zero) { return omni_arr_blob_new(n, (int64_t)sizeof(${el}), &zero); }`);
-      // `_i` 那两个是 omni.h 里的 static inline（见那儿的注）：这一族 wrapper 本来就是
-      // static inline，可它转手调的 `omni_arr_blob_len/at` 在另一个编译单元，
-      // clang 内联不到底 —— 剖 bars3 时 `omni_arr_blob_at` 1431 个栈顶样本、`_len` 677。
-      // 换成 `_i` 之后一路内联到位；外部符号照旧留着给 run-llvm 那条腿 call。
-      out.push(`static inline int64_t ${n}_len(omni_arr_blob a) { return omni_arr_blob_len_i(a); }`);
-      out.push(`static inline ${el} ${n}_get(omni_arr_blob a, int64_t i) { return *(${el} *)omni_arr_blob_at_i(a, i); }`);
-      out.push(`static inline ${el} ${n}_set(omni_arr_blob a, int64_t i, ${el} v) { *(${el} *)omni_arr_blob_at_i(a, i) = v; return v; }`);
+      // 读写那三个是**宏**，不是 `static inline`。理由与 omni.h 里的 omni_nullck 同一条：
+      // 这条腿默认 -O0（cli.js:1895），而 -O0 的 clang 一个 `static inline` 都不内联、
+      // tcc 从来不内联 —— 于是"wrapper 转调头里的 `_i`"这一层只是又加了一次真调用。
+      // 剖 bars3（上一版）：`omni_arr_blob_at_i` 853 个栈顶样本、`_len_i` 409、
+      // `omni_nullck` 1099，再加这一族 wrapper 自己（`omni_arr_arr_Cpen_len` 255、
+      // `_get` 232 …），合起来是四成 CPU 的纯调用开销。宏在预处理期展开，不看优化档。
+      // 外部符号（`omni_arr_blob_len/at`）照旧留着给 run-llvm 那条腿 call。
+      out.push(`#define ${n}_len(a) omni_arr_blob_len_i(a)`);
+      out.push(`#define ${n}_get(a, i) (*(${el} *)omni_arr_blob_at_i((a), (i)))`);
+      // 值那一格收成变参：这一族的元素是**聚合**，写进去的值常常是复合字面量
+      // （`(omni_vec_real_2){{0.0, 0.0}}`）—— 花括号在预处理器眼里不括逗号，
+      // 三参宏会当成"实参给多了"。`__VA_ARGS__` 把逗号一起吞掉。
+      // （下标那一格不会有：它是 int。）
+      out.push(`#define ${n}_set(a, i, ...) (__extension__({ ${el} omni__v = (__VA_ARGS__); *(${el} *)omni_arr_blob_at_i((a), (i)) = omni__v; omni__v; }))`);
       out.push(`static inline ${el} ${n}_push(omni_arr_blob a, ${el} v) { *(${el} *)omni_arr_blob_push(a) = v; return v; }`);
       out.push(`static inline ${el} ${n}_pop(omni_arr_blob a) { return *(${el} *)omni_arr_blob_pop(a); }`);
     }
@@ -196,9 +203,13 @@ class CEmitter {
       const w = t.lanes;
       out.push(`typedef struct { ${el} l[${w}]; } ${n};`);
       out.push(`static inline ${n} ${n}_splat(${el} x) { ${n} r; for (int i = 0; i < ${w}; i++) r.l[i] = x; return r; }`);
-      // 取道走函数而不是就地 `.l[i]`：`f(x).l[2]` 是在非左值结构体的数组成员上取下标，
-      // C99 里那是没定义的（形参是左值，所以搬进函数就没这个问题）
-      out.push(`static inline ${el} ${n}_lane(${n} v, int i) { return v.l[i]; }`);
+      // 取道走**宏**而不是就地 `.l[i]`：`f(x).l[2]` 是在非左值结构体的数组成员上取下标，
+      // C99 里那是没定义的 —— 语句表达式里先绑到一个局部（那是左值）就没这个问题，
+      // 与从前搬进函数是同一个理由，但不发调用。
+      // 为什么不是 `static inline`：这条腿默认 -O0（cli.js:1895），-O0 的 clang 一个
+      // `static inline` 都不内联、tcc 从来不内联。剖 elevation：`omni_vec_real_4_lane`
+      // 58 个栈顶样本，函数体就一条取下标 —— pair/triple 的每一次分量读都要过它。
+      out.push(`#define ${n}_lane(v, i) (__extension__({ ${n} omni__l = (v); omni__l.l[(i)]; }))`);
       for (const op of C_VEC_OPS) {
         const lane = this.binCode(op[0], t.elem, 'a.l[i]', 'b.l[i]');
         out.push(`static inline ${n} ${n}_${op[1]}(${n} a, ${n} b) { ${n} r; for (int i = 0; i < ${w}; i++) r.l[i] = ${lane}; return r; }`);

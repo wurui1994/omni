@@ -298,9 +298,28 @@ function scanString(src, pos, quote, verbatim = false) {
       continue;
     }
     i += 2;
-    if (e === 't') { out += '\t'; continue; }
+    // camp.l 的 `<cstring>` 那一段（:257-294）就是这张表。缺 `\b` 的代价是真的：
+    // plain_strings.asy:252 的 `progress()` 转圈写的是 `write(stdout,'\b'+spinner[...])`，
+    // `\b` 掉成字母 b 之后，genusthree/genustwo 的 EPS 里 `%%EOF` 后面多出一个 ` b`，
+    // 判据按"多一个 token"记成结构不同。
+    if (e === 'a') { out += '\u0007'; continue; }
+    if (e === 'b') { out += '\b'; continue; }
+    if (e === 'f') { out += '\f'; continue; }
     if (e === 'n') { out += '\n'; continue; }
     if (e === 'r') { out += '\r'; continue; }
+    if (e === 't') { out += '\t'; continue; }
+    if (e === 'v') { out += '\v'; continue; }
+    if (e >= '0' && e <= '7') {
+      // 八进制：一位、两位，或首位在 0..3 时的三位（camp.l:265-280 三条规则，长的先中）
+      let oct = e;
+      if ((src[i] ?? '') >= '0' && (src[i] ?? '') <= '7') {
+        oct += src[i];
+        i++;
+        if (e <= '3' && (src[i] ?? '') >= '0' && (src[i] ?? '') <= '7') { oct += src[i]; i++; }
+      }
+      out += String.fromCharCode(Number.parseInt(oct, 8));
+      continue;
+    }
     if (e === 'x') {
       const cc = Number.parseInt(src.slice(i, i + 2), 16);
       if (Number.isInteger(cc)) { out += String.fromCharCode(cc); i += 2; continue; }

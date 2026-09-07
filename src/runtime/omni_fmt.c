@@ -110,13 +110,22 @@ int64_t omni_write_text(omni_str path, omni_str text) {
    量出来过 —— `echo LEAK; echo LEAK 1>&2 >/dev/null 2>&1` 照样把第一个 LEAK 印出来，
    而 `printf ok > f >/dev/null 2>&1` 后面那个重定向赢了，f 里什么都没有。
    `(` 与 `)` 之间垫一个换行：CMD 末尾要是个 `#注释`，`)` 会被注掉。
-   跑不起来（system 回 -1）回 127，与 JS 那条腿一致。 */
+   跑不起来（system 回 -1）回 127，与 JS 那条腿一致。
+
+  **stdin 也必须重定向** —— 而且不是"讲究"，是量出来的病：asy 的 `_texpath` 要拿 gs 跑
+  一份 .ps 换轮廓，gs 打了 `-P` 仍会在行尾印 `>>showpage, press <return> to continue<<`
+  然后**读一行 stdin** 等回车。`system()` 的两个流是继承的，stdin 于是还是那个终端 ——
+  永不 EOF，于是 `run-c tests/asy/examples/bars3.asy` 输出全写完（6 MB，连 `%%EOF` 都在）
+  却永远不退出，`timeout 60` 只能杀掉（参考 asy 自己 3.585s）。给 `< /dev/null` 就 4.7s
+  正常收工，量得清清楚楚。
+  JS 那条腿（backend-js/prelude.js 的 `$run_proc`）用 `stdio: ["ignore", ...]`，天生没有
+  这一格；C 这边的 `system()` 没有那个开关，所以只能在命令行上补 —— 与另外两个流同一处。 */
 int64_t omni_run_proc(omni_str cmd) {
   char *c = omni_cstr(cmd);
   size_t n = strlen(c);
   size_t cap = n + 40;
   char *line = omni_alloc_bytes((int64_t)cap);
-  snprintf(line, cap, "( %s\n) >/dev/null 2>&1", c);
+  snprintf(line, cap, "( %s\n) </dev/null >/dev/null 2>&1", c);
   int r = system(line);
   if (r == -1) return 127;
   if (WIFEXITED(r)) return WEXITSTATUS(r);

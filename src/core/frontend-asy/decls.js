@@ -1293,6 +1293,59 @@ export function asySettingsIn(L, u, off) {
   L.at = keep;
 }
 
+/**
+ * 这一句带 `private` 吗。树形与 autounravel 同一种（`(modified (mods "private"…) DEC)`）。
+ *
+ * 文件级的 `private` 在 asy 里是**不外导**：量过（`asy -noV`）
+ *   privmod.asy: `private real hidden=111; real shown=222;`
+ *   主文件 `import privmod; write(shown); write(hidden);`
+ *   → 印 222，然后报 `no matching variable 'hidden'`。
+ * 这一层原先一格都没记，于是私有的名字跟着 import 漏出去。漏出去的后果不是"多认一个
+ * 名字"这么轻 —— 它会**盖掉**别的库里同名的公开量（后来的盖住先来的）：
+ * three.asy:2100 的 `private real epsilon=1000*realEpsilon;` 漏到 graph3.asy 里，
+ * 盖掉 graph_settings.asy:14 那个 `10*realEpsilon`，于是 graph3.asy:573 的
+ * `fuzz=X*epsilon*max(…)` 大了 100 倍 → x 轴第一格的刻度值带上 -2.22e-12 的残差 →
+ * graph.asy:380 的零点吸附（门槛只有 `10*realEpsilon*norm`）失灵 → 标签从 `$0$` 变成
+ * `$-2.22\times10^{-12}$` → 图界被撑开 → 轴标签外推多 16pt → bars3 的
+ * %%BoundingBox 窄 1pt、位图窄 4px。一个没实现的修饰，十步之后变成图上整 1pt。
+ */
+export function asyPrivMod(L, n) {
+  let cur = n;
+  while (isList(cur) && head(cur) === 'modified') {
+    for (const m of L.flat(cur.items[1], 'mods')) {
+      if (isAtom(m) && m.value === 'private') return true;
+    }
+    cur = cur.items[2];
+  }
+  return false;
+}
+
+/**
+ * 把第 i 条顶层项登记出来的那些格子打上"不外导"的记号。
+ *
+ * 用的是现成的 `ap`（原本给 autoplain 那一并用的，语义一模一样："这一格再被别人
+ * import 时不往外导"，见 asyModMerge 里那两处 `c.ap === true` 的跳过）。
+ * 按**位置**认格子：收表这两遍里 `at` 就是 `off+i`，一句一个位置，所以不必把 priv
+ * 一路穿进 asySig / asyGlobalNames / recordDec 那几条各自不同的路。
+ * 只认**这个单元自己**声明的（`unit === u.id`）—— import 进来的那些格子 at 是 import
+ * 那一句的位置，可能与这一句撞上。
+ */
+function asyPrivMark(L, u, at) {
+  for (const list of L.funcs.values()) {
+    for (const c of list) if (c.unit === u.id && c.at === at) c.ap = true;
+  }
+  for (const list of L.globals.values()) {
+    for (const g of list) if (g.unit === u.id && g.at === at) g.ap = true;
+  }
+  for (const list of L.oinits.values()) {
+    for (const c of list) if (c.unit === u.id && c.at === at) c.ap = true;
+  }
+  for (const e of L.recVis.values()) {
+    if (e.at === at && e.rec !== undefined && e.rec !== null
+        && e.rec.unit === u.id) e.ap = true;
+  }
+}
+
 export function asyDeclPass(L, u) {  const rs = u.rs;
   const off = L.atOff;
   asyBuiltinsIn(L, u, off);
@@ -1315,6 +1368,11 @@ export function asyDeclPass(L, u) {  const rs = u.rs;
     else if (head(r) === 'vardec') asyGlobalNames(L, r, off + i);
   }
   asyFnSlots(L, u, rs);
+  // 文件级 `private` 的那些格子在这里打记号（见 asyPrivMod 的注）。放在 asyFnSlots
+  // 之后：函数值的那一格插槽（decls.js 里 fnSlots 挂进 L.globals 的那个 g）也要跟着私有。
+  for (let i = 0; i < rs.length; i++) {
+    if (asyPrivMod(L, rs[i])) asyPrivMark(L, u, off + i);
+  }
   // 重载的名字在这里定：核心方言没有重载，所以第 2 个及以后的候选要改名。
   // 第一个保留原名 —— 绝大多数函数不重载，输出的文本因此跟以前一样好读。
   // 数的只有**这个单元自己的**候选：import 进来的那些名字在它们自己的单元里早定好了。

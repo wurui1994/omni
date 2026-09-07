@@ -332,7 +332,7 @@ function oracle(n, p) {
   return out;
 }
 
-/** 我们那一份：`omni run <例子>`，图在 stdout 上。 */
+/** 我们那一份：`omni run <例子>`，图落到一份文件（与参考那一侧同一条口子）。 */
 function mine(p) {
   // cwd 仍是仓库根（产物缓存 `.omni-cache` 与 `ASYMPTOTE_DIR` 里的相对目录都按它算 ——
   // 试过挪到草稿目录，189 个例子全报 `no such file: tests/asy/examples/…`，退回来了）。
@@ -344,8 +344,17 @@ function mine(p) {
   // `OMNI_EPS_LEG=run-c`；JS 那三条腿上 `(r3render …)` 回空串、走 gs 那条旧路。
   const leg = process.env.OMNI_EPS_LEG === undefined || process.env.OMNI_EPS_LEG === ''
     ? 'run' : process.env.OMNI_EPS_LEG;
+  // **图走文件、程序的 write 走 stdout** —— 参考那一侧本来就是这么分的（上面 `-f eps -o n`）。
+  // 从前我们两样都从 stdout 出去，例子印的字于是混进图里：印在**前面**的靠 onlyEps 切掉，
+  // 印在**后面**的切不掉。量出来的：genusthree / genustwo 用 smoothcontour3，它逐块调
+  // plain_strings.asy:252 的 `progress()` 转圈（`' '` 与 `'\b'+spinner[…]`），那几个字节
+  // 退出时才 flush，落在 `%%EOF` 后面 —— 判据于是记成"多一个 token、结构不同"。
+  mkdirSync(WORK, { recursive: true });
+  const pic = join(WORK, 'mine.eps');
+  rmSync(pic, { force: true });
   const r = spawnSync('node', [join(ROOT, 'src', 'core', 'cli.js'), leg, p],
-    { cwd: ROOT, env, encoding: 'utf8', timeout: LIMIT, maxBuffer: 1 << 28 });
+    { cwd: ROOT, env: { ...env, OMNI_ASY_OUTNAME: pic, OMNI_ASY_OUTFORMAT: 'eps' },
+      encoding: 'utf8', timeout: LIMIT, maxBuffer: 1 << 28 });
   for (const f of readdirSync(ROOT)) {
     if (before.has(f)) continue;
     if (!f.endsWith('.eps') && !f.endsWith('.svg') && !f.endsWith('.pdf')) continue;
@@ -363,7 +372,14 @@ function mine(p) {
     spawnSync('pkill', ['-f', `${join(ROOT, '.omni-cache', 'asy-mods')}/main-`],
       { encoding: 'utf8' });
   }
-  return { out: onlyEps(r.stdout ?? ''), err: r.stderr ?? '', status: r.status, slow };
+  // 文件没落下来（abort、或者这条腿还不认这个例子）时退回 stdout：`why()` 要靠
+  // `abort:` 那一行归类，而 abort 走的是 write 那条路。
+  let out = '';
+  if (existsSync(pic) && statSync(pic).size > 0) {
+    out = readFileSync(pic, 'latin1');
+    rmSync(pic, { force: true });
+  } else out = onlyEps(r.stdout ?? '');
+  return { out, err: r.stderr ?? '', status: r.status, slow, said: r.stdout ?? '' };
 }
 
 /**
@@ -385,8 +401,9 @@ function onlyEps(s) {
  */
 function why(r) {
   // `abort:` 那一行落在 **stdout** 上（asy 的 abort 走的是 write 那条路），而运行期那条
-  // `array index out of range` 在 stderr 上 —— 两边都要看。
-  const ls = `${r.out}\n${r.err}`.split('\n').filter((l) => l.trim() !== '');
+  // `array index out of range` 在 stderr 上 —— 两边都要看。`said` 是这一腿的 stdout 原样
+  // （图现在走文件，`out` 里是图，不再带例子印的字）。
+  const ls = `${r.said ?? r.out}\n${r.err}`.split('\n').filter((l) => l.trim() !== '');
   const ab = ls.filter((l) => l.trim().startsWith('abort:'));
   // **warning 不算错因**（这一刀）：`warning: using possibly incompatible version of plain.asy`
   // 是每个例子都印的一句，它排在 stderr 第一行，于是把真正的错遮住了 —— 量出来的样子是
@@ -473,6 +490,17 @@ for (const n of names) {
       const M = pullImages(r.out);
       const ib = cmpImages(R.imgs, M.imgs);
       const c = cmp(toks(R.text), toks(M.text));
+      // 只印不判的量口：`OMNI_EPS_DUMP=<名字>` 把**判据真正比的那两串 token** 各写一份
+      // 到 .omni-cache/epsdump/。追"首处 #N"必须看这一份 —— 拿原始 .eps 自己切 token
+      // 会把位图那几块（这里已经换成 %IMGDATA）与摘掉的编码行算进去，位置对不上，
+      // 我为此错判过一次（把 laserlattice 的结构差认成 /FlateDecode 滤镜的事）。
+      if (process.env.OMNI_EPS_DUMP === n) {
+        const dd = join(ROOT, '.omni-cache', 'epsdump');
+        mkdirSync(dd, { recursive: true });
+        writeFileSync(join(dd, `${n}.ref.txt`), toks(R.text).join('\n'));
+        writeFileSync(join(dd, `${n}.our.txt`), toks(M.text).join('\n'));
+        console.log(`  [dump] ${n}: ${dd}/${n}.{ref,our}.txt`);
+      }
       if (c.bad === 0 && ib === null) o = { kind: 'same', note: '' };
       else if (c.bad === 0) o = { kind: 'num', note: `矢量那半边一样，${ib}` };
       else if (c.len[0] !== c.len[1]) {
