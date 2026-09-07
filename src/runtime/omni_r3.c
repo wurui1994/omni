@@ -1327,6 +1327,11 @@ static int r3_opqany = 1;
    也就是说参考那一格的语义更接近"**取最近**（GL_LESS）+ 任一采样点覆盖"——
    即 r3_raster_pix 的 phase 0 那一份。开关留着，别再从这一头重挖。 */
 static int r3_opqinline = 0;
+/* 线的覆盖去掉圆盘判据、只留矩形带（`OMNI_R3_LINERECT`）。**量过、更差，默认关**：
+   twoSpheres 209791 → 223767、hyperboloid 6749 → **19563**、sacylinder3D 与 twistedtubes
+   不变。也就是说"到线段的欧氏距离 ≤ 0.5"那个圆盘判据反而更接近参考（原版 glrender 的线
+   在端点上就是圆的），twoSpheres 顶上那条边的差是**另一件事**，别再从这一头挖。 */
+static int r3_linerect = 0;
 /* 透明那一趟走**逐像素**的链（照 count.glsl / blend.glsl 的结构，见 r3_raster_pix 的
    头注）。**默认开** —— 量出来的账（八个三维例子）：sacylinder3D 18813 → 6449、
    triangles 10574 → 183、twoSpheres 435546 → 296130，没有透明的那几个一个字节不差。
@@ -1902,7 +1907,11 @@ static void r3_raster_line(const r3scene *s, r3fb *fb, r3v a, r3v b,
         double px = ax + t * dx, py = ay + t * dy;
         double ex = sx - px, ey = sy - py;
         if (ex * nx + ey * ny > 0.5 || ex * nx + ey * ny < -0.5) continue;
-        if (sqrt(ex * ex + ey * ey) > 0.5) continue;
+        /* 圆盘判据（到线段的欧氏距离 ≤ 0.5）会把**端点附近**削成圆头 ——
+           `OMNI_R3_LINERECT=1` 去掉它，只留"横向 ≤ 0.5 + 沿线 t∈[0,1]"那个矩形带
+           （GL 的线就是以线段为中轴、宽 1 的矩形，端点由菱形出口规则定）。
+           量出来的账见 r3_linerect 那一行上面。 */
+        if (!r3_linerect && sqrt(ex * ex + ey * ey) > 0.5) continue;
         double z = az + t * (bz - az);
         size_t idx = ((size_t) y * fb->fw + x) * R3_NS + k;
         if (!(z < fb->depth[idx])) continue;
@@ -2031,6 +2040,8 @@ omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
     if (e) r3_opqany = strcmp(e, "0") != 0; }
   { const char *e = getenv("OMNI_R3_OPQINLINE");
     if (e) r3_opqinline = strcmp(e, "0") != 0; }
+  { const char *e = getenv("OMNI_R3_LINERECT");
+    if (e) r3_linerect = strcmp(e, "0") != 0; }
   { const char *e = getenv("OMNI_R3_PIX");
     if (e) {
       char *q = NULL;
