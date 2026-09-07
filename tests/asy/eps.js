@@ -26,7 +26,7 @@
 import { readFileSync, existsSync, readdirSync, mkdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { inflateSync } from 'node:zlib';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -321,10 +321,24 @@ function cmp(a, b) {
  */
 function oracle(n, p) {
   const out = join(REF, `${n}.eps`);
-  if (existsSync(out) && statSync(out).size > 0) return out;
-  if (process.env.OMNI_EPS_GEN !== '1' || !existsSync(ASY)) return null;
+  // **例子改过就得重生成**。这一格从前只看"文件在不在"，于是改过的例子拿旧参考比 ——
+  // 量出来的：smoothelevation 在 00:35 生成参考、00:40 把网格从 20×20 缩到 6×6，
+  // 之后这一轴一直报"位图 36% 不同、ink 只盖住参考 84.6%"，而同一份源码两侧现场各跑一趟
+  // 是 ink 623062 对 623449、逐行最大差 6 —— 那 36% 全是参考过期，不是我们画错。
+  // 同一次扫出 bars3 / filesurface / smoothelevation 三份是这种。
+  // 所以：源码比参考新就当没有参考（有真 asy 就顺手补，**不看 OMNI_EPS_GEN** ——
+  // 过期的参考会把结论悄悄弄反，比多跑一次 asy 贵得多）。
+  const fresh = existsSync(out) && statSync(out).size > 0
+    && statSync(out).mtimeMs >= statSync(p).mtimeMs;
+  if (fresh) return out;
+  const stale = existsSync(out);
+  if (!existsSync(ASY)) return null;
+  if (!stale && process.env.OMNI_EPS_GEN !== '1') return null;
+  if (stale) console.log(`  （${n}：参考比例子旧，重新生成）`);
   mkdirSync(WORK, { recursive: true });
-  const r = spawnSync(ASY, ['-noV', '-f', 'eps', '-o', n, p],
+  // 例子的路径要**绝对**：这一趟的 cwd 是 WORK，而调用方给的 exDir 常是相对仓库根的
+  // （`node tests/asy/eps.js tests/asy/examples …`），照原样传进去 asy 找不到文件。
+  const r = spawnSync(ASY, ['-noV', '-f', 'eps', '-o', n, resolve(p)],
     { cwd: WORK, encoding: 'utf8', timeout: 60000 });
   const made = join(WORK, `${n}.eps`);
   if (r.status !== 0 || !existsSync(made) || statSync(made).size === 0) return null;
@@ -352,9 +366,13 @@ function mine(p) {
   mkdirSync(WORK, { recursive: true });
   const pic = join(WORK, 'mine.eps');
   rmSync(pic, { force: true });
+  const t0 = Date.now();
   const r = spawnSync('node', [join(ROOT, 'src', 'core', 'cli.js'), leg, p],
     { cwd: ROOT, env: { ...env, OMNI_ASY_OUTNAME: pic, OMNI_ASY_OUTFORMAT: 'eps' },
       encoding: 'utf8', timeout: LIMIT, maxBuffer: 1 << 28 });
+  // 每个例子的墙上时间发到 stderr（`TIME <名字> <毫秒>`）—— 判据自己的输出格式不动，
+  // 要看耗时排行就 `2> 某个文件` 再排序。缓存命中的那些不会出现在这儿（本来就没跑）。
+  process.stderr.write(`TIME ${p.replace(/^.*\//, '').replace(/\.asy$/, '')} ${Date.now() - t0}\n`);
   for (const f of readdirSync(ROOT)) {
     if (before.has(f)) continue;
     if (!f.endsWith('.eps') && !f.endsWith('.svg') && !f.endsWith('.pdf')) continue;
@@ -440,13 +458,19 @@ if (process.env.OMNI_EPS_FRESH === '1' && process.argv.length <= 3) {
   rmSync(join(ROOT, '.omni-cache', 'asy-mods'), { recursive: true, force: true });
 }
 
-/** 这个例子上一趟的结论还作数吗（编译器没变、例子没变） */
+/** 参考那一份的印记（没有就是 0）。换了参考，旧结论作废。 */
+function refStamp(n) {
+  const q = join(REF, `${n}.eps`);
+  return existsSync(q) ? statSync(q).mtimeMs : 0;
+}
+
+/** 这个例子上一趟的结论还作数吗（编译器没变、例子没变、参考没换） */
 function cached(n, p) {
   if (process.env.OMNI_EPS_FRESH === '1') return null;
   const q = join(RES, `${n}.json`);
   if (!existsSync(q)) return null;
   const st = statSync(p);
-  const want = `${srcStamp()}|${st.mtimeMs}|${st.size}`;
+  const want = `${srcStamp()}|${st.mtimeMs}|${st.size}|${refStamp(n)}`;
   try {
     const o = JSON.parse(readFileSync(q, 'utf8'));
     return o.stamp === want ? o : null;
@@ -456,7 +480,7 @@ function cached(n, p) {
 function remember(n, p, o) {
   const st = statSync(p);
   writeFileSync(join(RES, `${n}.json`),
-    `${JSON.stringify({ ...o, stamp: `${srcStamp()}|${st.mtimeMs}|${st.size}` })}\n`);
+    `${JSON.stringify({ ...o, stamp: `${srcStamp()}|${st.mtimeMs}|${st.size}|${refStamp(n)}` })}\n`);
 }
 
 let same = 0;

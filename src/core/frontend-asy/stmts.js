@@ -18,7 +18,7 @@ import {
   ASY_NOPE, DOT_BAD, CAP_BAD, ASY_ARRELEM_TEXT, ASY_FILLER, asyOpText, asyIsArr, asyElem, asyIsFn, asyFnSplit, asyFldSym, asyCore, ASY_NULL,
 } from './types.js';
 import { ZERO } from './runtime.js';
-import { asyArgs, asyCall, asyOpUser, asyOpBuiltinSig, asyIdxOpCall, asyVisible, asyUserCall } from './calls.js';
+import { asyArgs, asyCall, asyOpUser, asyOpBuiltinSig, asyIdxOpCall, asyVisible, asyUserCall, asyFnValDefsOf } from './calls.js';
 // 装不装箱那一问走 `L.needsBox`（实现在 exprs.js）：直接 import 回去就是
 // exprs <-> stmts 的环，自举那条腿的加载器不收（见 lower.js 的 needsBox 与 modStmt）。
 import { asyUnravelTy } from './modules.js';
@@ -722,6 +722,16 @@ export function asyVardec(L, n, statik) {
     // 标量的全局是零初始化的，所以没有初值的声明什么都不发；**聚合不行**（第三十刀）——
     // 记录要 `new`、数组要 `anew`，零就是 null，一读就是 null reference。
     const g = L.fileLevel && L.scopes.length === 1 ? L.gvarAt(nm) : null;
+    // 函数型变量由**具名函数**赋进来时，记一条"少给实参该补谁那一份默认值"
+    // （第八十七刀，见 calls.js 的 asyFnValDefsOf）。局部那一档记在作用域里
+    // （markFnValDef，与 markGuide 同一条路，作用域一 pop 一起没）；文件级那一格
+    // 在 scopes 里查不到，记在它自己那条 gvar 记录上（与 `g.gd` 同一条）。
+    // 判不准时写 null 把旧那一条清掉 —— 同名重新声明时旧记号不能留。
+    if (asyIsFn(t)) {
+      const fvd = d.items[2] === undefined ? null : asyFnValDefsOf(L, d.items[2], t);
+      if (g !== null) g.fv = fvd;
+      else L.markFnValDef(lnm, fvd);
+    }
     // 写着 `guide` 的那一格记一条：往它里面存的时候**不**钉死（第八十四刀）。
     // 局部量记在作用域里（markGuide），文件级那一格记在它自己那条记录上 ——
     // 文件级变量在 scopes 里查不到（见 asyAssign 里 `t === null` 那一支）。

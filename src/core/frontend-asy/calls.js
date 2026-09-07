@@ -2288,6 +2288,93 @@ export function asyDefWrapper(L, n, nm, d, f, reinit) {
   return wname;
 }
 
+/** 表达式里一个**裸名字**的名字（`(name-exp (name x))` 与光秃秃的原子都认）；不是裸名字回 null */
+function asyLeafName(x) {
+  if (isAtom(x)) return typeof x.value === 'string' ? x.value : null;
+  if (!isList(x)) return null;
+  if (head(x) === 'name-exp' && x.items.length === 2) return asyLeafName(x.items[1]);
+  if (head(x) === 'name' && x.items.length === 2) return asyLeafName(x.items[1]);
+  return null;
+}
+
+/** 两棵语法树一模一样吗（只给下面比默认值用） */
+function asySameNode(a, b) {
+  if (isAtom(a) && isAtom(b)) return a.value === b.value;
+  if (!isList(a) || !isList(b)) return false;
+  if (head(a) !== head(b) || a.items.length !== b.items.length) return false;
+  for (let i = 1; i < a.items.length; i++) if (!asySameNode(a.items[i], b.items[i])) return false;
+  return true;
+}
+
+/**
+ * `函数类型 变量 = 初值;` 里，被赋进来的那个**具名函数**自己那一份默认实参
+ * （第八十七刀）。造不出来回 null —— 那时照旧用类型上那一份（asyFnValDefWrap）。
+ *
+ * asy 的默认值跟着**函数值**走，我们是调用处按类型补。这一格是那条语义的静态近似，
+ * 只在能一眼看准时才用（判据保守，判不准就退回原样，不会降错）：
+ *  - 初值里只有**裸名字**（`?:` 两支都收，括号在语法里已经消掉了）；调用、字段、
+ *    算符、匿名函数一概不认。
+ *  - 每个名字在当前位置只有**一份**与这个类型一模一样的候选。
+ *  - 多个名字时：同一个单元、形参个数相同、而且类型上**每一格带默认值的槽**它们的
+ *    默认值语法树逐个相同。
+ *  - 类型上带默认值的槽，被赋的函数也得有默认值（不然少给实参时补不出来）。
+ *
+ * 原型是 examples/splitpatch.asy：
+ *   `triple[][][] Split(triple[][] P, real u=0)=depth % 2 == 0 ? hsplit : vsplit;`
+ * 而 `hsplit(triple[][] P, real v=0.5)` / `vsplit(triple[][] P, real u=0.5)`
+ * （three_surface.asy:1130/1157）自己的默认都是 **0.5**。按类型那一份补会切在 0 上，
+ * 出来的"半片"是退化的一行/一列 —— 位图差 50.8%（ink 重合 99.9%，形状是对的）。
+ * 最小尺子：`real h(real x, real y=0.5){return y;} real H(real x, real y=0)=h; write(H(1));`
+ * asy 印 0.5。
+ */
+export function asyFnValDefsOf(L, init, ft) {
+  if (L.fnDefs === undefined || !L.fnDefs.has(ft)) return null;
+  const info = L.fnDefs.get(ft);
+  const names = [];
+  const stack = [init];
+  while (stack.length > 0) {
+    const x = stack.pop();
+    if (isList(x) && head(x) === 'cond' && x.items.length === 4) {
+      stack.push(x.items[2]);
+      stack.push(x.items[3]);
+      continue;
+    }
+    const nm = asyLeafName(x);
+    if (nm === null) return null;
+    names.push(nm);
+  }
+  if (names.length === 0) return null;
+  let pick = null;
+  for (const nm of names) {
+    const cs = asyVisible(L, nm);
+    let hit = null;
+    for (const c of cs) {
+      if (L.candFnType(c) !== ft) continue;
+      if (hit !== null) return null;          // 同型两份，分不出用哪一份的默认值
+      hit = c;
+    }
+    if (hit === null || hit.ps === undefined) return null;
+    if (pick === null) { pick = hit; continue; }
+    if (hit.unit !== pick.unit || hit.ps.length !== pick.ps.length) return null;
+    for (let i = 0; i < info.ps.length; i++) {
+      if (info.ps[i].def === null || info.ps[i].def === undefined) continue;
+      const a = pick.ps[i] === undefined ? null : pick.ps[i].def;
+      const b = hit.ps[i] === undefined ? null : hit.ps[i].def;
+      if (a === null || a === undefined || b === null || b === undefined) return null;
+      if (!asySameNode(a, b)) return null;
+    }
+  }
+  for (let i = 0; i < info.ps.length; i++) {
+    if (info.ps[i].def === null || info.ps[i].def === undefined) continue;
+    if (pick.ps[i] === undefined || pick.ps[i].def === null
+      || pick.ps[i].def === undefined) return null;
+  }
+  return {
+    ps: pick.ps, types: pick.params, sym: pick.sym,
+    at: pick.dat === undefined ? pick.at : pick.dat, unit: pick.unit,
+  };
+}
+
 /**
  * 函数**类型**上带默认值时的那份包装（见 asyFnTypeOf 的 fnDefs）。回包装的名字，
  * 造不出来（没有记默认值、后面那几格里有一格没有默认值、默认值降不下来）就回 null。
@@ -2301,12 +2388,39 @@ export function asyDefWrapper(L, n, nm, d, f, reinit) {
  *   `int f(int a, int b=0, int c=0){return a*100+b*10+c;}` -> asy 印 300，我们印 350。
  * base 里这两份是一致的（`using envelope=path(frame dest, frame src=dest, …)` 与
  * plain_boxes 里那几个 `path box(frame dest, frame src=dest, …)` 抄的是同一串），
- * 所以这一刀先按类型那一份补；要一样得给带默认值的函数另开一个"认记号"的入口。
+ * 所以这一刀先按类型那一份补。
+ *
+ * **已经按 asy 的语义走了**（第八十七刀，见 asyFnValDefsOf）：
+ * `函数类型 变量 = 具名函数;`（`?:` 两支也算）时补的是**被赋函数自己**那一份 ——
+ * 局部那一格记在作用域里、文件级那一格记在它的 gvar 记录上（`fv`）。
+ * examples/splitpatch.asy 的 `Split` 就是这一格，位图差 1462555 → 139063（50.8% → 4.8%）。
+ * 用例：cases/167-fnval-defaults（局部、`?:` 两支、文件级三种形状）。
+ *
+ * 还留着一处有意的偏差：初值不是具名函数时（匿名函数、调用回来的值…）退回类型那一份。
+ * **asy 那边这是错**：量过 `real M(real x, real y=0)= new real(real a, real b)
+ * {return b+1000;}; M(1);` 报 `Trying to use uninitialized value`（指的正是那一格
+ * 默认值）—— 也就是类型上写的 `y=0` 只是类型的一部分、不当默认值使。我们那时印 1000，
+ * 属于"比 asy 多收一门语言"。真要全对齐得让**函数值带上自己的默认值**
+ * （运行时给函数值挂一张默认值表）。
  */
 function asyFnValDefWrap(L, n, nm, ft, s, use) {
-  const info = L.fnDefs.get(ft);
-  if (info === undefined) return null;
-  const key = `fv|${ft}|${use.join(',')}`;
+  // 这一格变量是由具名函数赋进来的吗（asyFnValDefsOf 记下的那一条：局部的在作用域里，
+  // 文件级的在 gvar 记录的 `fv` 上）—— 是就补**被赋函数自己**那一份默认值，
+  // 键上带它的符号，与按类型那一份分开缓存。
+  let over = null;
+  if (typeof nm === 'string') {
+    if (L.fnValDef !== undefined) over = L.fnValDef(nm);
+    if (over === null && L.gvarHere !== undefined) {
+      const gv = L.gvarHere(nm);
+      if (gv !== null && gv !== undefined && gv.fv !== undefined && gv.fv !== null) {
+        over = gv.fv;
+      }
+    }
+  }
+  const info = over !== null ? over : L.fnDefs.get(ft);
+  if (info === undefined || info === null) return null;
+  const key = over !== null
+    ? `fv|${ft}|${use.join(',')}|${over.sym}` : `fv|${ft}|${use.join(',')}`;
   const had = L.wrapNames.get(key);
   if (had !== undefined) return had;
   // 名字由「函数类型 + 给了哪几格」决定（第七十五刀）：以前是个全程序计数器，顺序依赖。

@@ -168,6 +168,24 @@ static int r3tris_grow(r3tris *t, size_t need) {
   return 1;
 }
 
+/* 顶点法向进表前先归一 —— **vertex.glsl 里那句 `Normal=normalize(normal*normMat)`**。
+ * 为什么要紧：`bezierpatch.h:45` 的 normal() 回的是**没归一**的叉乘，模长随那一片的
+ * 大小变（球面上相邻顶点能差几倍）。GL 是"逐顶点归一 -> 插值 -> 逐片元再归一"，
+ * 我们从前是"直接插值没归一的 -> 逐像素归一"，插出来的方向被模长大的那个顶点带偏。
+ * 表现正是量到的样子：平面片逐位相同（法向都平行，归一与否无差），球面上从球心
+ * （法向 (0,0,1)，逐位相同）往外平滑变大。
+ * 量出来的（`size(100,0); currentprojection=orthographic(0,0,1); draw(unitsphere,red);`
+ * 渲成 400x400 逐字节比，480000 字节）：归一前 90930 字节不同、绝对值和 385189；
+ * 归一后 **209 / 888**（最大差 16）。平面片那把尺子两边都是 0。
+ * 判据上（tests/asy/eps.js，位图不同字节数 前 -> 后）：roll 242997->324、
+ * torus 142479->687、cylinder 91051->1126、cones 87622->2911、sphere 341812->56381、
+ * hyperboloid 300689->34570、BezierPatch 274160->32057、sacylinder3D 161772->46126。 */
+static r3v r3v_unit0(r3v v) {
+  double m = r3v_abs2(v);
+  if (m <= 0.0) return v;
+  return r3v_scl(1.0 / sqrt(m), v);
+}
+
 /* 一片三角进表。`c` 是 12 个 float（三个顶点的 rgba），没有顶点色时给 NULL。 */
 static int r3tris_pushc(r3tris *t, r3v a, r3v na, r3v b, r3v nb, r3v c, r3v nc,
                         const r3mat *m, const float *vc) {
@@ -178,9 +196,9 @@ static int r3tris_pushc(r3tris *t, r3v a, r3v na, r3v b, r3v nb, r3v c, r3v nc,
     if (vc) for (int i = 0; i < 12; ++i) o[i] = vc[i];
     else for (int i = 0; i < 12; ++i) o[i] = -1.0f;   /* -1 = 这一片没有顶点色 */
   }
-  t->pos[t->n] = a; t->nrm[t->n] = na; t->n++;
-  t->pos[t->n] = b; t->nrm[t->n] = nb; t->n++;
-  t->pos[t->n] = c; t->nrm[t->n] = nc; t->n++;
+  t->pos[t->n] = a; t->nrm[t->n] = r3v_unit0(na); t->n++;
+  t->pos[t->n] = b; t->nrm[t->n] = r3v_unit0(nb); t->n++;
+  t->pos[t->n] = c; t->nrm[t->n] = r3v_unit0(nc); t->n++;
   return 1;
 }
 
@@ -216,7 +234,10 @@ static r3v r3_normal(const r3scene *s, r3v l3, r3v l2, r3v l1, r3v mid,
   return r3v_cross(rppp, lppp);
 }
 
-/* bezierpatch.h:89 Distance —— 水平/竖直两个方向各自的"平坦度" */
+/* bezierpatch.h:89 Distance —— 水平/竖直两个方向各自的"平坦度"
+ * （逐行对过：h 是 Flatness(p0,p12,p3,p15) + 四条 4/8 列的 Straightness，
+ *  v 是 Flatness(p0,p3,p12,p15) + 四条 1/2 行的 —— 参数次序与 x/y 的对应都一致，
+ *  **h/v 没有反**；查 sphere 那 2.8% 时排除过这一格。） */
 static void r3_distance(const r3v *p, double *h, double *v) {
   r3v p0 = p[0], p3 = p[3], p12 = p[12], p15 = p[15];
   double H = r3_flatness(p0, p12, p3, p15);
@@ -351,6 +372,18 @@ static void r3_corner_normals(const r3scene *s, const r3v *p, r3v n[4]) {
  * `m0 = s0[12]`、`m1 = s1[15]`、`m2 = s2[3]`、`m3 = s3[0]`，:498/506/514/522，
  * 与我们四块的角点一一对上），所以下面用 `sq[] = {q[0], q[2], q[3], q[1]}` 换成 s 序，
  * 之后一律按原版的 s0..s3 读写，省得两套下标混着。 */
+/* 面片/三角面片递归的深度上限。原版没有上限（靠判据必然收敛），我们留一个是为了
+ * 清单里 res 缺失或判据出 NaN 时不至于一路递归下去。
+ * **量过：它就是纯保险，平时碰不到。** 斜相机那把敏感的尺子
+ * （`size(200); currentprojection=orthographic(5,4,3); draw(unitsphere,green);`）上
+ * 上限取 8 / 10 / 12，位图**一个字节都不差**（都是 56381/1929600、和 433456）。
+ * 所以斜相机剩下那 2.8% 与深度上限无关。`OMNI_R3_DEPTH` 留着标定用。 */
+static int r3_depthcap(void) {
+  const char *e = getenv("OMNI_R3_DEPTH");
+  if (e) { int v = atoi(e); if (v > 0) return v; }
+  return 8;
+}
+
 static int r3_render_patch(const r3scene *s, r3tris *t, const r3v *p,
                            r3v P0, r3v P1, r3v P2, r3v P3,
                            r3v N0, r3v N1, r3v N2, r3v N3,
@@ -360,7 +393,7 @@ static int r3_render_patch(const r3scene *s, r3tris *t, const r3v *p,
   r3_distance(p, &h, &v);
   /* res2 <= 0（清单里没给 res）或者判据不是有限数时**当成平的** —— 不然一片就能
    * 递归到深度上限。深度上限压到 8，原版没有上限，靠的是判据必然收敛。 */
-  int bad = !(s->res2 > 0 && h == h && v == v) || depth >= 8;
+  int bad = !(s->res2 > 0 && h == h && v == v) || depth >= r3_depthcap();
   if (bad || (h < s->res2 && v < s->res2)) {
     if (C) {
       float a[12], b[12];
@@ -595,20 +628,56 @@ static double r3_res_for(const r3scene *s, const r3v *p, int n) {
     for (int i = 1; i < n; ++i) if (p[i].z < zmin) zmin = p[i].z;
     sc = zmin / s->M.z;
   }
+  /* **宽高取的是"视景体"（setDimensions 出来的小写 xmin/xmax），不是场景盒 —— 试过，
+   * 换成场景盒整体变坏。** renderBase.cc:103-105 里那三行用的是大写 `Xmin/Xmax`
+   * （构造函数从 `args.m/args.M` 存的场景盒），照抄过来量下来是：
+   *   torus 687 → 30150、roll 324 → 32423、cylinder 1126 → 6131、
+   *   vertexshading 4792 → 72040、colorpatch 51847 → 77416、BezierPatch 32057 → 49374、
+   *   conicurv 41246 → 68601（ink 覆盖 99.1% → 92.9%），
+   *   而斜相机那把球尺子几乎不动（56381 → 56384）、正对着的 510 一动不动。
+   * 也就是说那三行不是这一格的出处（真正的出处是 drawsurface.cc:297-316 那一族），
+   * 已经退回视景体这一版。斜相机那 2.8% 与这一格无关。 */
   double w = sc * (s->xmax - s->xmin), h = sc * (s->ymax - s->ymin);
   double d = hypot((double) s->fw, (double) s->fh);
-  /* **再乘一个 √2**（= 一个像素的对角线）。这一格是**标定出来的**，不是从上面那串公式
-   * 推出来的：把 res 乘 k 扫一遍，一个不打光的大球（/tmp/dot/s2.asy，
-   * `draw(unitsphere,yellow,light=nolight)`，位图 4320000 字节）的差是
-   *   k=1.0 → 2708 字节   k=1.2 → 428   k=1.33/1.4/1.5/1.6 → **40**（四档输出完全相同）
-   *   k=1.8 → 4268        k=2.0 → 5994   k=3.0 → 8291
-   * 六颗 10pt 的点（d7.asy）同一趟：k=1 时六颗面积一律大 1.0~2.1%，k>=1.5 之后
-   * 六颗的面积比都落在 1.0000~1.002。两把尺子的平台交集是 [1.33, 1.6]，取 √2。
-   * 也就是说判据是"片内起伏不到**一个像素的对角线**"，而不是一个像素边长。
-   * 平台里另外两个候选（1.44 = hypot(fw,fh)/((fw+fh)/2)、1.5）分不出来 —— 想分开得找一把
-   * 长宽比很偏的尺子，试过 2400x600 那一张，但它有别的残差（7100 字节起）盖住了这一项。
-   * `OMNI_R3_RES` 留着重新标定用。 */
-  return d > 0 ? M_SQRT2 * hypot(w, h) / d : 0.0;
+  /* **就是上面那串公式，不乘任何系数。** 这一格我一度乘过 √2（"一个像素的对角线"），
+   * 是拿一把尺子标出来的；第二把尺子把它推翻了，记在这儿免得再犯：
+   *   不打光的大球（`draw(unitsphere,yellow,light=nolight)`，位图 4320000 字节）：
+   *     系数 1.0 → 2763 字节不同；1.33~1.6 → 40；2.0 → 5994
+   *   一条 2bp 的三维线（`draw((-3,0,0)--(3,0,0),linewidth(2bp))`，三维里是根细管）：
+   *     系数 ≤1.0 → 墨量比 1.0009（对上）；≥1.414 → **0.7394**，管子细了 26%
+   * 两把尺子没有公共的系数 —— 说明"乘个常数"这条路本身不对（真正的公式大概不是
+   * 每片乘 `s = 片内最小z / 场景最大z` 这么简单）。在两害之间取按**看得见的误差**算：
+   * 细管窄 26% 是肉眼可见的（conicurv 的 ink 重合只有 63.9%，那张图全是 2bp 的线和圆），
+   * 而大球那 2763 字节是 0.064% 的着色噪声。所以留 1.0，也就是原版公式的逐句转写。
+   * `OMNI_R3_RES` 留着重新标定用。
+   *
+   * **第三把尺子（逐像素，比上面两把都可信）**：`size(100,0);
+   * currentprojection=orthographic(0,0,1); draw(unitsphere,red);`，两边都渲成 400x400
+   * 再逐字节比（480000 字节）：
+   *   系数 0.25 → 92329 字节不同、最大 64、绝对值和 352039
+   *   系数 0.35 → 89254 / 63 / 256889
+   *   系数 0.5  → 88136 / 60 / 251946      ← 浅谷底
+   *   系数 0.75 → 89149 / 79 / 339601
+   *   系数 1.0  → 90930 / 79 / 385189
+   *   系数 1.5  → 101005 / 176 / 820207
+   *   系数 2.0  → 104208 / 176 / 823836
+   * 两条结论：
+   *  1. **谷底很浅、而且不收敛到 0** —— 再细分下去（0.25）反而更差。所以剩下的球面
+   *     着色差**不是细分密度**造成的，换系数治不了它。
+   *  2. 球心（法向正好是 (0,0,1)）两边逐位相同（183,1,1），平面片也逐位相同；差是
+   *     **随法向偏离视线方向平滑增大**的 —— 后来查明就是顶点法向没归一（见
+   *     `r3v_unit0` 上面那段），补上之后同一把尺子从 90930/385189 掉到 209/888。
+   *     **所以上面那张系数表是"法向没归一"时候量的，已经作废**。
+   *     归一之后在**斜相机**那把尺子上重量过（`size(200);
+   *     currentprojection=orthographic(5,4,3); draw(unitsphere,green);`，1929600 字节）：
+   *       0.5 → 53446 / 和 377671；0.7 → 55259 / 402020；1.0 → 56381 / 433456；
+   *       1.4 → 101788 / 935415
+   *     0.5~1.0 之间几乎是平的（差 5%），1.4 才明显变坏 —— 也就是说斜相机剩下的那 2.8%
+   *     **不是系数问题**。同一个球正对着看只差 510/1920000，光的方向、BRDF、render 参数
+   *     都单独排除过（见 asy_builtins.asy 光那一行上面的注释），下一刀该比的是
+   *     **三角化的拓扑**（r3_render_patch 每一层发三角的顺序/对角线选法对 bezierpatch.cc）。
+   * 这一格仍留 1.0：它是原版公式的逐句转写。 */
+  return d > 0 ? hypot(w, h) / d : 0.0;
 }
 
 /* 这一片的三个细分参数一起落地：res / res2 / Epsilon（透明面不内收，见 :43-47） */
@@ -620,6 +689,12 @@ static void r3_set_res(r3scene *s, const r3v *p, int n, const r3mat *mat) {
   s->Epsilon = (mat && mat->diffuse[3] < 1.0) ? 0.0 : 0.1 * s->res;
   { const char *e = getenv("OMNI_R3_FILL");      /* 标定用：临时换 FillFactor */
     if (e) s->Epsilon = (mat && mat->diffuse[3] < 1.0) ? 0.0 : atof(e) * s->res; }
+  /* **0.1 就是最优，量过。** 斜相机那把尺子（`size(200);
+   * currentprojection=orthographic(5,4,3); draw(unitsphere,green);`，1929600 字节）：
+   *   0 → 56832 / 和 433893；0.05 → 56506 / 433583；**0.1 → 56381 / 433456**；
+   *   0.2 → 57005 / 434138
+   * 原版的 FillFactor 正好落在谷底，而且整个摆幅只有 450 字节 —— 只占那 2.8% 残差的
+   * 0.8%，所以消裂缝这一格也不是它。 */
 }
 
 /* 一片面片进表：先算 epsilon（bezierpatch.cc:70）与四角法向，再递归。
@@ -741,7 +816,7 @@ static int r3_render_tri(const r3scene *s, r3tris *t, const r3v *p,
                          int flat0, int flat1, int flat2,
                          const r3mat *mat, const float *C, int depth) {
   double d = r3_tri_distance(p);
-  if (!(s->res2 > 0 && d == d) || d < s->res2 || depth >= 8)
+  if (!(s->res2 > 0 && d == d) || d < s->res2 || depth >= r3_depthcap())
     return r3tris_pushc(t, P0, N0, P1, N1, P2, N2, mat, C);
   r3v q[4][10];
   r3_tri_split4(p, q);
@@ -863,7 +938,52 @@ static void r3_set_dimensions(r3scene *s) {
   int Width = s->fw, Height = s->fh;
   if (Width <= 0) Width = 1;
   if (Height <= 0) Height = 1;
-  double aspect = ((double) Width) / Height;
+  /* **视景体的长宽比不是导出位图的长宽比。** 离屏那一路的 Width/Height 是这么来的
+   * （renderBase.cc:932-996，逐句照抄）：
+   *   fullW/fullH = ceil(expand * 内容尺寸)（expand=4，见 shipout3）
+   *   oldW/oldH   = ceil(内容尺寸 * devicePixelRatio)
+   *   w,h         = min(oldW, 屏幕宽), min(oldH, 屏幕高)，再过一遍 fitAspect（按内容长宽比 ceil）
+   *   Width       = max(w, min(1024, fullW))、Height = max(h, min(768, fullH))   ← 分块的下限
+   *   最后再按 fullW/fullH 用 ceil 套回长宽比
+   * 于是 `aspect = Width/Height` 与 `fullW/fullH` 差一个 ceil 的零头（约 1/768）。
+   *
+   * **这一格是"斜相机那 2.8%"的真根因**（与相机方向无关，是画布尺寸的事）。量出来的
+   * （不打光的球、`orthographic(5,4,3)`、画布 800x804）：按位图长宽比 7920/1929600
+   * 字节不同、"最高一列"795.5020px；按上面这一串是 **64/1929600**、796.5059px ——
+   * 与参考一模一样（旧版正好差 1.004px，就是 1/768 那个零头）。
+   * 判据上：sphere 56381 → 482、hyperboloid 34570 → 6747、conicurv 41246 → 13215。
+   *
+   * 两处只能"照量出来的填"：`devicePixelRatio`（这台机器是 2，`OMNI_R3_DPR` 可改）
+   * 与屏幕尺寸（没用上 —— 出图的画布都比工作区小）。**asy 自己在这一格上依赖显示器**，
+   * 这不是我们引进的不确定性。内容项顶上来的时候（画布 > 512pt 宽或 > 384pt 高，
+   * 例如 cheese 1600x1572、twoSpheres 2268x1968）算出来的 aspect **正好等于位图长宽比**，
+   * 也就是回到旧行为 —— 这 12 个例子本来就是对的，所以那一项不能省。
+   * `OMNI_R3_ASPECT=full` 退回"直接用位图长宽比"那一版（复现上面那组对照数）。 */
+  double aspect;
+  { const char *ef = getenv("OMNI_R3_ASPECT");
+    double A = ((double) Width) / Height;
+    if (ef && strcmp(ef, "full") == 0) aspect = A;
+    else {
+      double dpr = 2.0;
+      { const char *e = getenv("OMNI_R3_DPR"); if (e) dpr = atof(e); }
+      double expand = 4.0;
+      int oW = (int) (Width / expand + 0.5), oH = (int) (Height / expand + 0.5);
+      int w = (int) ceil(oW * dpr), h = (int) ceil(oH * dpr);
+      /* fitAspect（renderBase.cc:384）那两个 ceil **要留一点余量**：asy 那边的 `Aspect`
+       * 是 `args.width/args.height`（**pt** 那一对，例如 566.98/491.98），我们手上只有
+       * 位图那一对（2268/1968）。数学上相等的地方，两种除法的最后一位不一样 ——
+       * twoSpheres 上 `1134/A` 真值正好是 984，位图那一对算出来是 984.0000000000001，
+       * ceil 就跳到 985，长宽比整整差 0.1%（那个例子的位图差从 2377487 涨到 2391039）。
+       * 减 1e-9 只吃掉这种"整数上方一丁点"的情形，真该进位的（764.179 那类）不受影响。 */
+      if (w > h * A) w = (int) ceil(h * A - 1e-9); else h = (int) ceil(w / A - 1e-9);
+      int tw = Width < 1024 ? Width : 1024;
+      int th = Height < 768 ? Height : 768;
+      int W0 = w > tw ? w : tw;
+      int H0 = h > th ? h : th;
+      if ((double) W0 / H0 > A) W0 = (int) ceil(H0 * A - 1e-9);
+      else H0 = (int) ceil(W0 / A - 1e-9);
+      aspect = (double) W0 / H0;
+    } }
   double zoom = s->zoom == 0 ? 1 : s->zoom;
   /* **viewportshift 不乘 zoom。** renderBase.cc:119 那一行是
    *   xshift = (X / Width + Shift.getx() * Xfactor) * zoom
@@ -924,6 +1044,68 @@ static void r3_set_dimensions(r3scene *s) {
 }
 
 /* glm::ortho / glm::frustum（右手、深度 [-1,1]），列主序 P[col][row] */
+/* **待查（下一刀从这儿起）：远处的几何整体外移约 1% 的画布宽。**
+ * 量口（/tmp/cc/D.asy：`draw(circle(O,2),linewidth(2bp))`，perspective(10,-5,5.44)，
+ * 位图 1200x536）：一条水平扫描线上，圆的**右**半边两条腿一样（参考 (1094,1108)、
+ * 我们 (1093,1108)），**左**半边（远侧）整段左移 11~13 px 而宽度不变（17 px）：
+ *   y=134  参考 (102,118)  我们 (89,105)
+ *   y=268  参考 (17,25)    我们 (6,14)
+ *   y=402  参考 (103,117)  我们 (92,106)
+ * 也就是说管子的中心线（就是那个圆）在远侧被推出去了 13 px，而近侧对得上。
+ * 判据里这一项就是 conicurv 的 ink 只重合 64% 的主因（那张图两个 2bp 的圆占了大半墨量；
+ * 按元素拆开量：两个圆 72.1%、细线与方框 92.9%、箭头带标签 95.5%）。
+ * 已经排除的：笔宽/管子半径（8bp、20bp 的直管墨量比 1.0003/1.0010）、虚线
+ * （1226.93 对 1229.72）、res 系数（撤回 √2 之后这一项只从 63.9% 动到 64.1%）、
+ * **管子本身**（把圆换成默认细笔，同一处照样左移 14~16 px：y=133 参考 (106,110) 对
+ * 我们 (90,93)、y=266 参考 (21,23) 对 (6,8)，而右侧 (1190,1192) 逐像素相同）。
+ * **范围已经缩到"只有透视这一路"**：同一个圆换成 `orthographic(10,-5,5.44)` 之后
+ * 盖住参考 0.947、三条扫描线的段全部落在 1 px 内（y=132 参考 (82,85)/(1113,1117) 对
+ * 我们 (82,85)/(1113,1116)）—— 也就是说视图旋转与 x/y 的定标都是对的，差在视景体/透视除法
+ * 这一段（下面这个矩阵，或 r3_set_dimensions 给的 znear/zfar/H）。
+ * 矢量那半边是**一样**的，所以 asy 侧算出来的投影没问题。
+ * 还排除了两条（别重复走）：
+ *   - **不是曲线细分太细**。把 res 乘 2/4/8 扫一遍（细笔的圆，y=266 那一行）：我们的左端
+ *     从 x=6 只挪到 9~11 就饱和了（k=4 与 k=8 输出相同），参考在 21~23，盖住参考也只从
+ *     0.225 涨到 0.294。所以那 12 px 不是弦割出来的。
+ *   - **不是单点的投影**。四个 8pt 的点摆在圆上的 0/90/180/270（同一投影、同一画布）：
+ *     四个质心的 dx 分别 -0.78 / -1.14 / +0.43 / +1.17 px —— 单点都在 1.2 px 内。
+ * 也就是说：点投得对、ortho 对得上、细分不是主因，但**圆在两个基点之间的那一段**差 12 px。
+ * 下一刀该去比对"曲线在 3D 里怎么细分成折线"这一段的输入（r3_add_bez 收到的四个控制点）
+ * 与 asy 侧 `bez` 清单里那四个数，以及 GL 那边 beziercurve.cc:62 的 Straightness 判据。
+ *
+ * **又一条排除（范围已经收到最窄）：asy 侧的几何与投影两条腿逐位相同。**
+ * 同一个圆，两条腿都打印 `project(point(c,t))` 扫 64 个 t：最左点都在 t=2.8125、
+ * x 都是 -2.02152083708767（15 位全同）；控制点也一样（(2,0,0)、(2,1.10456949966159,0)、
+ * (1.10456949966159,2,0)、(0,2,0)）。也就是说这 12 px **完全产生在我们的 r3 位图这一路里**。
+ * 再加上"点（btri 做的 8pt 圆点）都在 1.2 px 内"这一条 —— btri 那一路对、bez 那一路差，
+ * 而两者读的是同一个视图矩阵。所以下一刀的落点很窄：清单里 `bez` 那四个控制点是怎么写出来的
+ * （asy_builtins 那一格），以及 r3_add_bez 之后 r3_raster_line 怎么把折线画出来。
+ *
+ * 再排掉一条、并留下一条**关键线索**：
+ *   - 视图变换对 pre/point/post **三个域都作用了**（asy_builtins.asy:7085 的
+ *     `real[][] * path3` 逐个乘），不是"只变换结点没变换控制点"那种。
+ *   - res 扫到 k=4/8 时整个四分之一圆塌成**一根弦**（输出饱和不再变），此时我们的最左端
+ *     在 x=9~11，而参考在 21~23 —— 也就是说**参考那条圆比我们控制点连成的弦还要靠里**。
+ *     这一条说明差的不是"细分够不够"：那条曲线在位图里被画小了约 1~2%，而同一张图里的
+ *     点（btri）与 ortho 下的同一个圆都对得上，所以也不是全局缩放。
+ *   - 建议的下一步：把清单里那条 `bez` 的四个控制点抄出来，手算 r3_project + r3_window，
+ *     与位图里实际落墨的位置对一遍 —— 一步就能判出是"清单里的数不对"还是"r3 画错了"。
+ *
+ * **上面这一步做了，结论是"清单里的数不对"。** 照清单的 `size/proj/box/shift` 复算一遍
+ * r3_set_dimensions + r3_projection + r3_window（在 python 里手算，1000 个 t 扫三段）：
+ * 最左窗口 x = **7.817**（第 2 段 t=0.802），与我们位图实测的 6~8 一致，而参考在 21~23。
+ * 也就是说光栅器与投影是**忠于清单**的，差在清单里 `bez` 那几行的数（或它用的变换）
+ * —— 而同一张清单里 `btri` 做的点是对的（1.2 px 内）。两者在 asy_builtins 里是两段
+ * 不同的代码：`btri` 走 o3.P3、`bez` 走 `t * o3.g3`（:11905）。下一刀就比这两条路径拿到的
+ * 同一个三维点（比如同时画 `dot((0,2,0))` 与过该点的圆）在清单里的坐标是否逐位相同。
+ *
+ * **顺带发现一个独立的 bug（还没修）：闭合 path3 的收尾段没进清单。**
+ * asy_builtins.asy:10789 是 `for (int a = 0; a + 1 < L; ++a)`，对 cyclic 的 path3
+ * （`circle(O,2)` 有 4 个结点）只发 3 条 `bez`（实测 `grep -c '^bez'` = 3），
+ * 少的是 3→0 那一段。位图上那一段的墨看着还在（墨量 7752 对参考 7666），
+ * 所以它大概不是上面那 12 px 的原因，但这一条本身该修。
+ * 注意三颗点那把尺子（/tmp/dot/d7.asy）测到的位置差 ≤0.16 px —— 那三颗点的深度只差
+ * 15%，而这个圆的深度差约 75%，所以那把尺子盖不住这一项，别拿它当反证。 */
 static void r3_projection(r3scene *s) {
   double l = s->xmin, r = s->xmax, b = s->ymin, t = s->ymax;
   double n = s->znear, f = s->zfar;
@@ -1031,6 +1213,26 @@ static void r3_shade(const r3scene *s, const r3mat *mat, r3v nrm, r3v viewPos,
 
 
   r3f viewDir;
+  /* **"斜相机那 2.8%"已经修了，根子是视景体的长宽比 —— 与相机方向无关。**
+   * 见 r3_set_dimensions 里 `aspect` 那一段（那儿记着全部对照数）：离屏那一路的
+   * Width/Height 不是导出位图的尺寸，`aspect` 与 fullW/fullH 差一个 ceil 的零头。
+   * 判据上 sphere 56381 → 482、hyperboloid 34570 → 6747、conicurv 41246 → 13215。
+   *
+   * 这一段留着的是**这条路上排除掉的那些**，别重新挖：
+   * - 光的方向：探针证明两条腿逐位相同。
+   * - `frontFacing`：把绕向判据反过来会整个球翻掉（56381 → 671905、最大差 255）。
+   * - 把几何转过去 vs 把相机转过去（`orthographic(0,0,1)` + `rotate(37,(1,1,1))*unitsphere`
+   *   对 `orthographic(5,4,3)` + unitsphere）：444/1920000 对 56381/1929600。
+   *   **当时据此判定"面片细分/三角化/法向那一侧已经对了、问题在相机侧"—— 结论是对的，
+   *   但差的那一格不是着色，是视景体。** 转几何那一版画布是 800x800（ceil 恰好整除）、
+   *   转相机那一版是 800x804（不整除），所以这把尺子量到的其实是长宽比那个零头。
+   * - FillFactor（0 与 0.1）：不打光的球上两份**逐字节相同**；深度上限 8~14 也相同；
+   *   采样点位三族（当前 / alt / 2x2 网格）7920 / 9104 / 8972，当前这族最好。
+   * - res 系数：从 4.0 扫到 0.0625，单调但很浅（7920 → 6508），**不是细分密度**。
+   *   顺带一条教训：按 ink 面积反推"参考的网格比我们细 6 倍"是错的 —— 用亚像素轮廓
+   *   加自相关量出两边弦长是 22px vs 24px（同一档细分）。面积差不能当内接多边形的证据。 */
+
+
   if (s->ortho) viewDir = r3f_mk(0.0f, 0.0f, 1.0f);
   else {
     r3f vp = r3f_mk((float) viewPos.x, (float) viewPos.y, (float) viewPos.z);
@@ -1085,20 +1287,28 @@ static void r3_pick_samples(void) {
   }
 }
 
-/* 透明那一档：GL 那边是把片元攒进逐像素的链表（fragment.glsl 的 TRANSPARENT 分支
- * 往 fragment[]/depth[] 里写），再按深度合成。
- * **这里改成按三角排序、直接混色**，不攒链表 —— 攒链表的那一版在 BezierPatch
- * 那个例子上被系统 OOM 杀掉（Killed: 9）：一片铺满画面的半透明曲面，
- * 片元数 = 覆盖的采样点数 x 层数，1 百万像素 x 16 采样就是上千万条。
- * 代价：只有"透明面互相穿插"时与逐片元排序不同（同一个采样点上的次序），
- * 那种情形要靠分块渲染（tile.h）才能既准又省内存 —— 下一刀。
- * 不变的是：透明三角**不写深度**（彼此不遮挡），只在比不透明层近时混色。 */
+/* 透明那一档：参考那边是 `shaders/blend.glsl` —— **逐像素**存一串透明片元
+ * （count.glsl 数、offset 定位、fragment[] 存 vec4、depth[] 存深度），混之前
+ * 在这个像素上**按深度降序排一遍**，再 `mix(out, color, color.a)` 逐个混上去，
+ * 起点是这个像素的不透明色（没有不透明层就是背景色），深度 >= 不透明层的片元跳过。
+ * 这里照着做：两趟过一遍透明三角 —— 先数（tmode=1）、前缀和、再填（tmode=2），
+ * 最后逐采样点排序 + 混色。片元条数超过上限（OMNI_R3_OITMAX，默认 24M 条 ≈ 480MB）
+ * 就退回老路：按三角质心 z 全局排一次、直接往 colf 上混。
+ * 从前只有老路，量出来的差就是"同一个采样点上两片透明面的先后与参考相反"那一批。
+ * （老路那一版之所以存在：更早还试过 16 采样 + 逐片元链表，BezierPatch 上被系统
+ * OOM 杀掉。现在 R3_NS 是 4，而且按数出来的条数**精确**分配，不再是那个量级。）
+ * 不变的是：透明三角**不写深度**（彼此不遮挡），只在比不透明层近时参与。 */
 typedef struct {
   int fw, fh;
   float *depth;          /* fw*fh*R3_NS，初值 1（远） */
   unsigned char *col;    /* fw*fh*R3_NS*3 */
+  float *colf;           /* 老路那一趟的浮点累加（只在退回老路时分配） */
+  unsigned *tcnt;        /* 逐采样点的片元数；前缀和之后当写指针（OIT 那两趟） */
+  float *tfrag;          /* 片元表：每条 5 个 float（r, g, b, a, 深度） */
+  int tmode;             /* 0 = 直接混（老路） 1 = 只数 2 = 只填 */
   size_t nblend;         /* 混过色的采样点次数（量口） */
 } r3fb;
+
 
 typedef struct { double x, y, z, w; } r3clip;
 
@@ -1149,7 +1359,10 @@ static void r3_raster_tri(const r3scene *s, r3fb *fb, const r3v *P, const r3v *N
     if (dbg3)
       fprintf(stderr, "tri (%.3f,%.3f) (%.3f,%.3f) (%.3f,%.3f)\n",
               wx[0], wy[0], wx[1], wy[1], wx[2], wy[2]); }
-  int front = area > 0.0;                      /* GL 默认正面是逆时针 */
+  /* GL 默认正面是逆时针。**方向对了，量过**：把这一句反过来（斜相机的球那把尺子）
+   * 从 56381/1929600、和 433456 变成 671905、和 69222498（最大差 255，整个球都翻了）。
+   * 所以位图 y 朝下并没有让绕向差个符号，`frontFacing` 这一格不是斜相机残差的来源。 */
+  int front = area > 0.0;
   double inv2a = 1.0 / area;
 
   double xlo = wx[0], xhi = wx[0], ylo = wy[0], yhi = wy[0];
@@ -1246,6 +1459,8 @@ static void r3_raster_tri(const r3scene *s, r3fb *fb, const r3v *P, const r3v *N
         double z = b0 * wz0 + b1 * wz1 + b2 * wz2;
         size_t idx = pixbase + (size_t) k;
         if (!(z < depth[idx])) continue;       /* GL_LESS */
+        /* 只数那一趟：不用着色，数完就走（着色是这里最贵的一段） */
+        if (fb->tmode == 1 && !opaque) { fb->tcnt[idx]++; fb->nblend++; continue; }
         if (!shaded) {
           /* 像素中心的重心（GL 默认在像素中心求插值，覆盖与否由采样点决定） */
           double px = x + 0.5, py = y + 0.5;
@@ -1285,15 +1500,40 @@ static void r3_raster_tri(const r3scene *s, r3fb *fb, const r3v *P, const r3v *N
           shaded = 1;
         }
         if (!opaque) {
-          /* 透明：直接混色，**不写深度**（三角已按由远到近的次序进来） */
-          unsigned char *o = col + idx * 3;
-          for (int ch = 0; ch < 3; ++ch) {
-            float src = frgb[ch];
-            float dst = o[ch] / 255.0f;
-            float v = src * ablend + dst * (1.0f - ablend);
-            if (v < 0.0f) v = 0.0f;
-            if (v > 1.0f) v = 1.0f;
-            o[ch] = (unsigned char) (int) (v * 255.0f + 0.5f);
+          /* 只填那一趟：片元进这个采样点自己那一段。
+           * **倒着填**（前缀和是"段末"，写指针往前退）—— 参考那边是
+           * `listIndex = atomicAdd(offset[element], -1u) - 1u`（fragment.glsl:295），
+           * 于是同一像素上片元在表里的次序是画的次序的**反序**；blend.glsl 的插入排序
+           * 用严格 `>`，深度相等的那几片就保持这个反序。 */
+          if (fb->tmode == 2) {
+            float *f = fb->tfrag + (size_t) (--fb->tcnt[idx]) * 5;
+            f[0] = frgb[0]; f[1] = frgb[1]; f[2] = frgb[2];
+            f[3] = ablend; f[4] = (float) z;
+            continue;
+          }
+          /* 老路：按三角次序直接混色，**不写深度**。
+           * 有 colf 时在**浮点**里累加：每层混完不再落回 8 位。
+           * 源色也用着色算出来的浮点 —— 试过按"GL 定点色缓冲先把片元色转成
+           * 缓冲精度再混"（GL 4.6 §17.3.6）那一条改，sacylinder3D 的不同字节
+           * 从 46130 涨到 99066，退回来了。 */
+          if (fb->colf) {
+            float *o = fb->colf + idx * 3;
+            for (int ch = 0; ch < 3; ++ch) {
+              float v = frgb[ch] * ablend + o[ch] * (1.0f - ablend);
+              if (v < 0.0f) v = 0.0f;
+              if (v > 1.0f) v = 1.0f;
+              o[ch] = v;
+            }
+          } else {
+            unsigned char *o = col + idx * 3;
+            for (int ch = 0; ch < 3; ++ch) {
+              float src = frgb[ch];
+              float dst = o[ch] / 255.0f;
+              float v = src * ablend + dst * (1.0f - ablend);
+              if (v < 0.0f) v = 0.0f;
+              if (v > 1.0f) v = 1.0f;
+              o[ch] = (unsigned char) (int) (v * 255.0f + 0.5f);
+            }
           }
           fb->nblend++;
           continue;
@@ -1458,6 +1698,11 @@ omni_str omni_r3_render(omni_str path) {
         && q[0] == 'p' && q[1] == 'c' && q[2] == 'o' && q[3] == 'l'
         && (q[4] == ' ' || q[4] == '\t')) { tris.usecol = 1; break; }
   float pend[16]; int npend = 0;
+  /* 逐顶点**法向**（`tnrm` 那一行，与 pcol 一样只作用在紧接着的那一条 tri 上）：
+   * 三角网那一族（drawTriangles，`render(tessellate=true)` 走它）自带平滑法向，
+   * 拿面法向顶的话整张曲面是分片平坦的 —— 量出来的：filesurface 的位图颜色种数
+   * 参考 201728、我们只有 2514。 */
+  r3v pendn[3]; int npendn = 0;
   /* 线段（曲线在 C 这边细分，见 r3_add_bez） */
   r3lines lns; memset(&lns, 0, sizeof lns);
 
@@ -1542,13 +1787,28 @@ omni_str omni_r3_render(omni_str path) {
       if (!r3_add_tri3(&S, &tris, p, st != 0, mats + (nmat - 1),
                        npend == 3 ? pend : NULL)) { ok = 0; break; }
       npend = 0;
+    } else if (strcmp(kw, "tnrm") == 0) {
+      /* 逐顶点法向，九个数（三个顶点各一个），只作用在紧接着的那一条 tri 上 */
+      double v[9]; if (!r3_nums(&L, v, 9)) { ok = 0; break; }
+      for (int i = 0; i < 3; ++i)
+        pendn[i] = r3v_mk(v[3 * i], v[3 * i + 1], v[3 * i + 2]);
+      npendn = 3;
     } else if (strcmp(kw, "tri") == 0) {
       double v[9]; if (!r3_nums(&L, v, 9) || nmat == 0) { ok = 0; break; }
       r3v a = r3v_mk(v[0], v[1], v[2]);
       r3v b = r3v_mk(v[3], v[4], v[5]);
       r3v c = r3v_mk(v[6], v[7], v[8]);
-      r3v n = r3v_cross(r3v_sub(b, a), r3v_sub(c, a));
-      if (!r3tris_push(&tris, a, n, b, n, c, n, mats + (nmat - 1))) { ok = 0; break; }
+      /* 有 `tnrm` 就用逐顶点法向（drawTriangles 自带的那份），没有才退回面法向。
+       * 逐顶点色照 `pcol 3` 那一格走，与 btri 同一条路。 */
+      r3v na, nb, nc;
+      if (npendn == 3) { na = pendn[0]; nb = pendn[1]; nc = pendn[2]; }
+      else {
+        r3v n = r3v_cross(r3v_sub(b, a), r3v_sub(c, a));
+        na = n; nb = n; nc = n;
+      }
+      if (!r3tris_pushc(&tris, a, na, b, nb, c, nc, mats + (nmat - 1),
+                        npend == 3 ? pend : NULL)) { ok = 0; break; }
+      npend = 0; npendn = 0;
     } else if (strcmp(kw, "bez") == 0) {
       /* 一段三次曲线（四个控制点）：细分照 beziercurve.cc:62 在这边做 */
       double cp[12];
@@ -1599,38 +1859,11 @@ omni_str omni_r3_render(omni_str path) {
         fb.depth[i] = 1.0f;
         fb.col[3 * i] = b0; fb.col[3 * i + 1] = b1; fb.col[3 * i + 2] = b2;
       }
-      /* 两趟：先不透明（定死深度），再透明（不写深度、直接混色）。
-       * GL 那边也是分开的两个缓冲（bezierpatch.cc 的 triangleData / transparentData）。
-       * 透明那一趟要**由远到近**，所以先按三角的视图空间平均 z 升序排（z 越负越远）。*/
+      /* 三趟：先不透明（定死深度）、再线段、最后透明（不写深度）。
+       * GL 那边也是分开的两个缓冲（bezierpatch.cc 的 triangleData / transparentData）。*/
       size_t ntr = tris.n / 3, ntrans = 0;
-      size_t *ord = NULL;
       for (size_t t = 0; t < ntr; ++t)
         if (r3_tri_transparent(&tris, t)) ntrans++;
-      if (ntrans > 0) ord = (size_t *) malloc(ntrans * sizeof(size_t));
-      if (ntrans > 0 && ord) {
-        double *key = (double *) malloc(ntrans * sizeof(double));
-        size_t n = 0;
-        if (key) {
-          for (size_t t = 0; t < ntr; ++t) {
-            if (!r3_tri_transparent(&tris, t)) continue;
-            ord[n] = t;
-            key[n] = (tris.pos[3 * t].z + tris.pos[3 * t + 1].z + tris.pos[3 * t + 2].z) / 3.0;
-            n++;
-          }
-          /* 插入排序换成简单的归并太啰嗦，这里用标准库的 qsort 不方便带键 ——
-           * 透明三角一般不多，用希尔排序（O(n^1.3) 量级）就够，且不额外分配。 */
-          for (size_t gap = n / 2; gap > 0; gap /= 2)
-            for (size_t i = gap; i < n; ++i) {
-              size_t vi = ord[i]; double vk = key[i];
-              size_t j = i;
-              while (j >= gap && key[j - gap] > vk) {
-                ord[j] = ord[j - gap]; key[j] = key[j - gap]; j -= gap;
-              }
-              ord[j] = vi; key[j] = vk;
-            }
-          free(key);
-        } else { free(ord); ord = NULL; ntrans = 0; }
-      }
       for (size_t t = 0; t < ntr; ++t) {
         if (r3_tri_transparent(&tris, t)) continue;
         r3_raster_tri(&S, &fb, tris.pos + 3 * t, tris.nrm + 3 * t, tris.mat[t],
@@ -1638,20 +1871,133 @@ omni_str omni_r3_render(omni_str path) {
       }
       for (size_t i = 0; i + 1 < lns.n; i += 2)
         r3_raster_line(&S, &fb, lns.p[i], lns.p[i + 1], lns.mat[i / 2]);
-      if (ord)
-        for (size_t k = 0; k < ntrans; ++k) {
-          size_t t = ord[k];
-          r3_raster_tri(&S, &fb, tris.pos + 3 * t, tris.nrm + 3 * t, tris.mat[t],
-                        r3_tri_vcol(&tris, t));
+      if (ntrans > 0) {
+        /* 透明：**逐采样点**收片元、按深度降序排完再混（照 shaders/blend.glsl）。
+         * 三步：数 -> 前缀和 -> 填。三角按**原来的次序**过（不预排）—— 参考那边
+         * 片元是按画的次序 append 的，插入排序用的是严格 `>`，所以深度相等的
+         * 保持 append 次序；预排会把这个次序打乱。 */
+        size_t cap = (size_t) 24 * 1024 * 1024;    /* 片元条数上限（每条 20 字节） */
+        { const char *e = getenv("OMNI_R3_OITMAX");
+          if (e) cap = (size_t) strtoull(e, NULL, 10); }
+        size_t total = 0;
+        int oit = 0;
+        /* np+1 格：最后一格放总数，填完之后第 i 段就是 [tcnt[i], tcnt[i+1]) */
+        fb.tcnt = (unsigned *) calloc(np + 1, sizeof(unsigned));
+        if (fb.tcnt) {
+          fb.tmode = 1;
+          for (size_t t = 0; t < ntr; ++t) {
+            if (!r3_tri_transparent(&tris, t)) continue;
+            r3_raster_tri(&S, &fb, tris.pos + 3 * t, tris.nrm + 3 * t, tris.mat[t],
+                          r3_tri_vcol(&tris, t));
+          }
+          fb.tmode = 0;
+          for (size_t i = 0; i < np; ++i) total += fb.tcnt[i];
+          if (total == 0) oit = 1;                 /* 一片都没落上，什么都不用做 */
+          else if (total <= cap) {
+            fb.tfrag = (float *) malloc(total * 5 * sizeof(float));
+            oit = fb.tfrag != NULL;
+          }
         }
-      free(ord);
+        if (oit && total > 0) {
+          size_t run = 0;
+          for (size_t i = 0; i < np; ++i) {
+            run += fb.tcnt[i];
+            fb.tcnt[i] = (unsigned) run;           /* 段末（写指针往前退） */
+          }
+          fb.tcnt[np] = (unsigned) total;
+          fb.tmode = 2;
+          for (size_t t = 0; t < ntr; ++t) {
+            if (!r3_tri_transparent(&tris, t)) continue;
+            r3_raster_tri(&S, &fb, tris.pos + 3 * t, tris.nrm + 3 * t, tris.mat[t],
+                          r3_tri_vcol(&tris, t));
+          }
+          fb.tmode = 0;
+          /* 填完之后 tcnt[i] 退到了第 i 段的**开头**，下一格就是这一段的末尾 */
+          for (size_t i = 0; i < np; ++i) {
+            size_t beg = fb.tcnt[i];
+            size_t cnt = (size_t) fb.tcnt[i + 1] - beg;
+            if (cnt > 0) {
+              float *base = fb.tfrag + beg * 5;
+              for (size_t a = 1; a < cnt; ++a) {   /* 按深度降序的插入排序 */
+                float tmp[5];
+                for (int q = 0; q < 5; ++q) tmp[q] = base[a * 5 + q];
+                size_t b = a;
+                while (b > 0 && tmp[4] > base[(b - 1) * 5 + 4]) {
+                  for (int q = 0; q < 5; ++q) base[b * 5 + q] = base[(b - 1) * 5 + q];
+                  --b;
+                }
+                for (int q = 0; q < 5; ++q) base[b * 5 + q] = tmp[q];
+              }
+              unsigned char *o = fb.col + i * 3;
+              float acc[3];
+              for (int ch = 0; ch < 3; ++ch) acc[ch] = o[ch] / 255.0f;
+              for (size_t a = 0; a < cnt; ++a) {   /* mix(out, color, color.a) */
+                const float *f = base + a * 5;
+                float al = f[3];
+                for (int ch = 0; ch < 3; ++ch) {
+                  float v = f[ch] * al + acc[ch] * (1.0f - al);
+                  if (v < 0.0f) v = 0.0f;
+                  if (v > 1.0f) v = 1.0f;
+                  acc[ch] = v;
+                }
+              }
+              for (int ch = 0; ch < 3; ++ch)
+                o[ch] = (unsigned char) (int) (acc[ch] * 255.0f + 0.5f);
+            }
+          }
+        } else if (!oit) {
+          /* 退回老路（片元太多或分配不下）：按三角质心的视图空间平均 z 升序排一次
+           * （z 越负越远），直接往 colf 上混。同一个采样点上的先后可能与参考相反。 */
+          size_t *ord = (size_t *) malloc(ntrans * sizeof(size_t));
+          double *key = ord ? (double *) malloc(ntrans * sizeof(double)) : NULL;
+          if (key) {
+            size_t n = 0;
+            for (size_t t = 0; t < ntr; ++t) {
+              if (!r3_tri_transparent(&tris, t)) continue;
+              ord[n] = t;
+              key[n] = (tris.pos[3 * t].z + tris.pos[3 * t + 1].z
+                        + tris.pos[3 * t + 2].z) / 3.0;
+              n++;
+            }
+            for (size_t gap = n / 2; gap > 0; gap /= 2)   /* 希尔排序，不额外分配 */
+              for (size_t i = gap; i < n; ++i) {
+                size_t vi = ord[i]; double vk = key[i];
+                size_t j = i;
+                while (j >= gap && key[j - gap] > vk) {
+                  ord[j] = ord[j - gap]; key[j] = key[j - gap]; j -= gap;
+                }
+                ord[j] = vi; key[j] = vk;
+              }
+            free(key);
+            fb.colf = (float *) malloc(np * 3 * sizeof(float));
+            if (fb.colf)
+              for (size_t i = 0; i < np * 3; ++i) fb.colf[i] = fb.col[i] / 255.0f;
+            for (size_t k = 0; k < n; ++k) {
+              size_t t = ord[k];
+              r3_raster_tri(&S, &fb, tris.pos + 3 * t, tris.nrm + 3 * t, tris.mat[t],
+                            r3_tri_vcol(&tris, t));
+            }
+            if (fb.colf) {
+              for (size_t i = 0; i < np * 3; ++i)
+                fb.col[i] = (unsigned char) (int) (fb.colf[i] * 255.0f + 0.5f);
+              free(fb.colf);
+              fb.colf = NULL;
+            }
+          }
+          free(ord);
+        }
+        free(fb.tcnt); fb.tcnt = NULL;
+        free(fb.tfrag); fb.tfrag = NULL;
+      }
+
       t2 = clock();                             /* 光栅化到这里为止 */
       /* 量口：`OMNI_R3_DEBUG=1` 时把三角/线段/混色次数与**三段耗时**印到 stderr。
        * 只有这一处对外说话 —— 三维那一档出问题时先看这几个数。 */
       if (getenv("OMNI_R3_DEBUG"))
         fprintf(stderr, "r3: %dx%d 三角 %zu（透明 %zu）线段 %zu 混色 %zu"
-                " 解析 %.2fs 光栅 %.2fs\n",
+                " 进来之前 %.2fs 解析 %.2fs 光栅 %.2fs\n",
                 S.fw, S.fh, ntr, ntrans, lns.n / 2, fb.nblend,
+                (double) t0 / CLOCKS_PER_SEC,
                 (double) (t1 - t0) / CLOCKS_PER_SEC,
                 (double) (t2 - t1) / CLOCKS_PER_SEC);
 

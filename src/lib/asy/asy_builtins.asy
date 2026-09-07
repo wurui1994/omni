@@ -2486,6 +2486,9 @@ private void asy__dimsave() {
   if (asy__mkey.length > 4000) return;
   string s = "";
   for (int i = 0; i < asy__mkey.length; ++i) {
+    // `G:` 那一族是引外部图的标签（见 asy__measure 里加记号那一段）：三个数由盘上那份
+    // EPS 决定、键里却看不出来，落盘就会被下一个例子捡去用。只在内存里活一趟。
+    if (substr(asy__mkey[i], 0, 2) == "G:") continue;
     s = s + "K" + string(length(asy__mkey[i])) + ":" + asy__mkey[i]
       + "V" + string(length(asy__mpt[i])) + ":" + asy__mpt[i] + ";";
   }
@@ -2517,6 +2520,13 @@ private void asy__measure(labelrec[] ls) {
     // `defaultpen(font(...))` 之后量出来的还是上一份字体的盒子。
     string k = ukey + string(fs) + ":" + string(ls2) + ":" + fn + ":"
       + string(length(r.s)) + ":" + r.s;
+    // 引外部图那一族（`\includegraphics{…}`，addViews / addStereoViews 的每一格视图）
+    // **不进盘上那格记忆**：它的三个数是那份 EPS 的界，而键里只有 TeX 那句话。
+    // 名字是 `<outname>+<序号>`（three.asy:3028），跨例子是同一串 —— 量出来的：
+    // stereoscopic 的两格视图捡了上一趟 threeviews 的 279.0425x281.04999，
+    // addViews 于是按错的格子摆位，合成图的界成了 563x283（参考 243x149）。
+    // 键前面加一个记号，`asy__dimsave` 认得它、不落盘；同一趟里的去重照旧（那时文件在手）。
+    if (find(r.s, "\includegraphics") >= 0) k = "G:" + k;
     wkey.push(k);
     if (asy__mfind(k) >= 0) continue;
     bool dup = false;
@@ -2549,7 +2559,16 @@ private void asy__measure(labelrec[] ls) {
     // （量过：`"x\\y"` 是 4 个字符、`'p\nq'` 是 3 个）。所以反斜杠写一个就是一个，
     // 换行得用 '\n'。第一版写成 "\\documentclass" 加 "\n"，生出来的 .tex 整份是一行
     // 字面量 —— latex 照样退出 0，三个数全量成了 0，界只差了一点点，很能骗人。
-    string t = "\documentclass[12pt]{article}" + nl + u
+    // graphicx 要在**量这一趟**也载上：`\includegraphics` 也是一条标签
+    // （three.asy:3042 的 `graphic(prefix,"hiresbb")`），它的三个数就是那张 EPS 的界。
+    // 少了这一句那是未定义控制序列，latex 在 nonstopmode 下照样退 0、三个数量成 0 ——
+    // addViews 那一族于是把 N 张子图全摆在同一点上。真 asy 那条管子用的是整份前言
+    // （texfile.h:63-120，含 graphicx），这里对齐它。\paperwidth 那对 let 与
+    // asy__texpre 同因：graphicx 会碰 \paperwidth，article 下它是 \dimen 而不是宏。
+    string t = "\documentclass[12pt]{article}" + nl
+      + "\let\paperwidthsave\paperwidth\let\paperwidth\undefined" + nl
+      + "\usepackage{graphicx}" + nl
+      + "\let\paperwidth\paperwidthsave" + nl + u
       + "\newbox\ASYbox" + nl + "\newdimen\ASYdimen" + nl + "\pagestyle{empty}" + nl
       + "\begin{document}" + nl
       // texfile.h:174-181：管道那一路 `\begin{document}` 之后紧跟 latexfontencoding。
@@ -2668,7 +2687,14 @@ box framebox(frame f) {
   return bx;
 }
 
-bool empty(frame f) { return f.ops.length == 0; }
+// `empty(frame)`：**三维那一半也要算**。从前只看 `f.ops`（二维 op 表），于是一张只装
+// 三维内容的帧被判成空 —— `f3id` 是三维几何的登记号（-1 = 没有），`has3` 是"只记了界"
+// 那几格内建（drawSphere/Cylinder/Disk、drawpixel、三角网）留下的标记，两者都要看。
+// 量出来的（`picture pic; unitsize(pic,1cm); draw(pic,unitsphere,green);
+// frame f=pic.fit(currentprojection);`）：参考 `empty(f)`=0，我们从前=1。
+// 后果是 three.asy:3110 那条路（addViews / addStereoViews）把每个视角都当空的跳过，
+// threeviews / stereoscopic 于是整张空图（0 块位图、BoundingBox 落到默认 302）。
+bool empty(frame f) { return f.ops.length == 0 && f.f3id < 0 && !f.has3; }
 
 // 空 frame 的 box 四个数都是 0，所以下面三个不用特判空
 pair min(frame f) {
@@ -3705,20 +3731,58 @@ pen cmyk(real c, real m, real y, real k) {
 }
 pen cmyk(pen p) { pen q = p; q.iscmyk = true; return q; }
 pen interp(pen a, pen b, real t) {
-  // **必须 pencopy**：`struct pen` 是引用语义（asy 的 struct），从前这儿写的是
+  // **必须不改 a、b**：`struct pen` 是引用语义（asy 的 struct），从前这儿写的是
   // `pen p = a;` 再改 p 的字段 —— 改的是 **a 自己**。踩出来的样子（twoSpheres）：
   // `Gradient(green+opacity(0.6), white, …)` 里 interp(white, green, t) 把**全局的
   // white 笔**染成了绿的，随后 `light.background()`（plain_prethree.asy:212 的
   // `background == nullpen ? white : background`）回的就是绿 —— 整张画布底色变绿，
   // 位图 1858830 个像素只有我们有 ink。真 asy 那边 pen 是值类型，没有这一格。
-  pen p = pencopy(a);
-  p.red = a.red + (b.red - a.red) * t;
-  p.green = a.green + (b.green - a.green) * t;
-  p.blue = a.blue + (b.blue - a.blue) * t;
-  p.gray = a.gray + (b.gray - a.gray) * t;
-  p.width = a.width + (b.width - a.width) * t;
-  p.isrgb = a.isrgb || b.isrgb;
-  p.setcolor = a.setcolor || b.setcolor;
+  //
+  // 两条规矩都是量出来的（`asy -noV` 印 colorspace/colors/linewidth/linecap/opacity）：
+  //  1. **颜色空间取两支里大的那一档**，两边各自先升上去、再逐分量线性插值。
+  //     `interp(white, green, t)` 是 rgb (t,1,t) —— 灰的那支升成 (g,g,g)，不是三道各插。
+  //     `interp(gray(0.25), cmyk(1,0,0,0), 0)` 是 cmyk (0,0,0,0.75)；
+  //     `interp(green, cmyk(1,0,0,0), 0)` 是 cmyk (1,0,1,0)。
+  //     从前这儿是 red/green/blue/gray **各自**插值、`isrgb = a.isrgb || b.isrgb`，
+  //     于是 interp(green+opacity(0.6), white, t) 出来是 (0,1-t,0)（朝黑走），
+  //     twoSpheres 的两个球整块偏暗：位图 9139544/10968048 个字节不同。
+  //  2. **非颜色那些格照 `a+b`**（右边设过的盖住左边，没设过的留左边的）：
+  //     `interp(red+1bp, blue+5bp, t)` 宽度恒 5、`interp(red+3bp, blue, t)` 恒 3、
+  //     `interp(red+dashed, blue, t)` 留虚线、`interp(red+squarecap, blue, t)` 留方帽、
+  //     `interp(green+opacity(0.6), white, t)` 的 opacity 恒 0.6。宽度**不插值**。
+  pen p = a + b;
+  int ca = asy__pcs(a);
+  int cb = asy__pcs(b);
+  int cs = ca > cb ? ca : cb;
+  if (cs == 4) {
+    real[] u = asy__tocmyk(a, ca);
+    real[] v = asy__tocmyk(b, cb);
+    real c = u[0] + (v[0] - u[0]) * t;
+    real m = u[1] + (v[1] - u[1]) * t;
+    real y = u[2] + (v[2] - u[2]) * t;
+    real k = u[3] + (v[3] - u[3]) * t;
+    p.cyan = c; p.magenta = m; p.yellow = y; p.black = k;
+    p.iscmyk = true; p.setcolor = true;
+    // cmyk 那一档同时留一份 rgb（EPS 只发 rgb/gray，与 cmyk(real,…) 同一条换算）
+    p.isrgb = true;
+    p.red = (1 - c) * (1 - k);
+    p.green = (1 - m) * (1 - k);
+    p.blue = (1 - y) * (1 - k);
+  } else if (cs == 3) {
+    real ar = a.isrgb ? a.red : (ca == 2 ? a.gray : 0);
+    real ag = a.isrgb ? a.green : (ca == 2 ? a.gray : 0);
+    real ab = a.isrgb ? a.blue : (ca == 2 ? a.gray : 0);
+    real br = b.isrgb ? b.red : (cb == 2 ? b.gray : 0);
+    real bg = b.isrgb ? b.green : (cb == 2 ? b.gray : 0);
+    real bb = b.isrgb ? b.blue : (cb == 2 ? b.gray : 0);
+    p.red = ar + (br - ar) * t;
+    p.green = ag + (bg - ag) * t;
+    p.blue = ab + (bb - ab) * t;
+    p.isrgb = true; p.iscmyk = false; p.setcolor = true;
+  } else if (cs == 2) {
+    p.gray = a.gray + (b.gray - a.gray) * t;
+    p.isrgb = false; p.iscmyk = false; p.setcolor = true;
+  }
   return p;
 }
 void resetdefaultpen() { pen q; asy__defpen = q; }   // runtime.in:350
@@ -4137,7 +4201,11 @@ path subpath(path p, real a, real b) {
   return h;
 }
 
-// Bezier 段的包围盒（四个控制点的凸包界）相交判定 —— 细分求交的剪枝就靠它
+// Bezier 段的包围盒相交判定 —— 细分求交的剪枝就靠它。
+// **用四个控制点的凸包界，不是真界盒。** 原版那边是 `p.max()/p.min()`（path.cc:983-986，
+// 端点 + 导数为零的临界点），凸包界只是它的超集，会多下探一些格子。试过照原版换成真界盒
+// （asy__bezcrit 解两个二次），三把尺子（两片切片 fuzz=1e-5 / 默认 fuzz、两个圆）的输出
+// **一个字都没变**，而每个递归结点要多解两个二次 —— 所以留凸包界。
 private bool asy__bbhit(pair[] a, pair[] b, real fuzz) {
   real ax0 = a[0].x; real ax1 = a[0].x; real ay0 = a[0].y; real ay1 = a[0].y;
   for (int i = 1; i < 4; ++i) {
@@ -4157,7 +4225,23 @@ private bool asy__bbhit(pair[] a, pair[] b, real fuzz) {
     && ay0 - fuzz <= by1 && by0 - fuzz <= ay1;
 }
 
-// 一段的界盒对角线长度 —— path.cc:998 的收敛判据要它
+// 一段三次曲线对半（path.h 的 `Split3`，逐句：m0=0.5*(z0+c0)、m1=0.5*(c0+c1)、
+// m2=0.5*(c1+z1)、m3=0.5*(m0+m1)、m4=0.5*(m1+m2)、m5=0.5*(m3+m4)）。
+// `lo` 要前半段 [0,½]，否则后半段 [½,1]。**只用中点平均**，不要写成 lerp。
+private pair[] asy__halfbez(pair[] a, bool lo) {
+  pair m0 = 0.5 * (a[0] + a[1]);
+  pair m1 = 0.5 * (a[1] + a[2]);
+  pair m2 = 0.5 * (a[2] + a[3]);
+  pair m3 = 0.5 * (m0 + m1);
+  pair m4 = 0.5 * (m1 + m2);
+  pair m5 = 0.5 * (m3 + m4);
+  pair[] out;
+  if (lo) { out.push(a[0]); out.push(m0); out.push(m3); out.push(m5); }
+  else { out.push(m5); out.push(m4); out.push(m2); out.push(a[3]); }
+  return out;
+}
+
+// 一段的界盒对角线长度 —— path.cc:998 的收敛判据要它（同上，凸包界）
 private real asy__bbdiag(pair[] a) {
   real x0 = a[0].x; real x1 = a[0].x; real y0 = a[0].y; real y1 = a[0].y;
   for (int i = 1; i < 4; ++i) {
@@ -4193,10 +4277,14 @@ private void asy__ixrec(real[][] out, pair[] a, real ta0, real ta1,
   }
   real tam = (ta0 + ta1) / 2;
   real tbm = (tb0 + tb1) / 2;
-  pair[] a0 = asy__subbez(a[0], a[1], a[2], a[3], 0, 0.5);
-  pair[] a1 = asy__subbez(a[0], a[1], a[2], a[3], 0.5, 1);
-  pair[] b0 = asy__subbez(b[0], b[1], b[2], b[3], 0, 0.5);
-  pair[] b1 = asy__subbez(b[0], b[1], b[2], b[3], 0.5, 1);
+  // **对半要按 Split3 那样取中点平均**（path.h 的 `Split3`：`m0=0.5*(z0+c0)` …），
+  // 不要走通用的 `asy__subbez(…,0,0.5)`（那一份是 `z0+(c0-z0)*t` 的 lerp，t=0.5 时与
+  // 中点平均差最后一位）。这一层的控制点决定后面每一级界盒判定的结果，差一位就可能
+  // 挑到不同的格子，最后落在不同的交点时间上。
+  pair[] a0 = asy__halfbez(a, true);
+  pair[] a1 = asy__halfbez(a, false);
+  pair[] b0 = asy__halfbez(b, true);
+  pair[] b1 = asy__halfbez(b, false);
   asy__ixrec(out, a0, ta0, tam, b0, tb0, tbm, fuzz, depth - 1, cap);
   asy__ixrec(out, a0, ta0, tam, b1, tbm, tb1, fuzz, depth - 1, cap);
   asy__ixrec(out, a1, tam, ta1, b0, tb0, tbm, fuzz, depth - 1, cap);
@@ -4210,45 +4298,6 @@ private pair[] asy__segctl(path p, int i) {
   q.push(precontrol(p, i + 1));
   q.push(point(p, i + 1));
   return q;
-}
-
-private pair asy__bezat(pair[] a, real t) {
-  real r = 1 - t;
-  return r*r*r*a[0] + 3*r*r*t*a[1] + 3*r*t*t*a[2] + t*t*t*a[3];
-}
-
-private pair asy__bezdt(pair[] a, real t) {
-  real r = 1 - t;
-  return 3*r*r*(a[1] - a[0]) + 6*r*t*(a[2] - a[1]) + 3*t*t*(a[3] - a[2]);
-}
-
-// 两段之间的 Newton 收尾：解 P(t) - Q(s) = 0。细分只用来**把交点圈出来**（浅一点就够），
-// 收到机器精度靠这一步 —— 全靠细分要 30 多层，段对多的图（examples/coag）就跑不完了。
-private real[] asy__ixnewton(pair[] a, pair[] b, real t0, real s0, real tol) {
-  real t = t0;
-  real s = s0;
-  for (int k = 0; k < 40; ++k) {
-    pair F = asy__bezat(a, t) - asy__bezat(b, s);
-    if (length(F) <= tol) break;
-    pair dp = asy__bezdt(a, t);
-    pair dq = asy__bezdt(b, s);
-    real det = -dp.x * dq.y + dq.x * dp.y;
-    if (abs(det) < 1e-300) break;
-    // Δ = -J^{-1} F 已经把负号算进 dt/ds 里了（下面是加）
-    real dt = (dq.y * F.x - dq.x * F.y) / det;
-    real ds = (dp.y * F.x - dp.x * F.y) / det;
-    t = t + dt;
-    s = s + ds;
-    if (t < 0) t = 0;
-    if (t > 1) t = 1;
-    if (s < 0) s = 0;
-    if (s > 1) s = 1;
-  }
-  real[] r;
-  if (length(asy__bezat(a, t) - asy__bezat(b, s)) > tol) return r;
-  r.push(t);
-  r.push(s);
-  return r;
 }
 
 // `intersections(path, path)` 从前摆在这儿，第九十五刀挪到了 asy__lineix / asy__addix
@@ -6797,6 +6846,31 @@ private void asy__ixline(real[] S, real[] T, path g, pair p, pair q, real fuzz) 
 //     整条走 asy__ixline —— 解多项式，不细分。
 //   - 一般情形：包围盒细分**圈出**每个交点（12 层，段内约 2e-4），再 Newton 收到机器精度。
 //
+// **一般情形这一支是"等价算法"，不是逐句转写 —— 剩下的差都落在这一点上。**
+// 原版的递归是在**子路**上劈（path.cc:1013-1046：先按结点数对半 `subpath(0,lp/2)`，
+// 到单段才用 Split3 对半），带着 scale/offset 记账把 (0.5,0.5) 换算回全局时间，所以它
+// 给出的交点时间是**二进制分数**；我们是逐段自己劈 + Newton 精修，落点差在 1e-9 量级。
+// 量出来的（spheresilhouette，`r.silhouette()` 里弧与轮廓的接缝）：同一个切点，
+// 参考 x = 0.466312020255156、我们 0.46631201830255 —— 差 4e-9。这一点本身无关紧要，
+// 坏在下游有一处**精确相等**的判据（three.asy:1253）：
+//   if(g.nodes[i] == g.nodes[i+1] && !g.control[i].active)
+//     g.control[i]=control(g.nodes[i],g.nodes[i],straight=true);
+// 参考那边弧的终点与 G 的首结点差 1 ulp（打印到 15 位看不出来），这一句不触发，接缝留成
+// 一段退化的**样条**；我们两边逐位相等，这一句触发、标成 straight，EPS 里就从 `curveto`
+// 变成 `lineto`，53 段里曲的从 4 段变 3 段，整条 token 流错位 —— 判据报"结构不同"。
+// 画面上没有差别（退化段不落墨，那个例子的 ink 一直是重合的）。
+// 想彻底对上默认 fuzz 那一路，得把这一支改成 path.cc:959-1094 的逐句转写（子路对半 +
+// scale/offset 记账 + 每级按点去重）。**但先别急着做 —— 量过一轮，账不划算：**
+//   - spheresilhouette 那个"结构不同"**不是这一层带来的**。切点是 solids.asy:16-27 的
+//     `tangent()` 迭代出来的：最多 100 轮旋转，收敛条件是 `|angle| <= sqrtEpsilon`
+//     （1.5e-8）—— 也就是说那个点**按构造只定到 1e-8**，两条腿落在容差内的不同定点上。
+//     要对上得让 mintimes/maxtimes/rotate/angle/degrees 全部逐位一致，与求交无关。
+//   - pdb / near_earth 那 0.5bp 的界也不在这一层：这一节改了两轮（Newton 精修 → 回中点），
+//     pdb 的 `%%HiResBoundingBox` 两轮都还是 205（参考 205.5）、画布两轮都还是 804x800
+//     （参考 800x800）—— 对这一层的改动完全不敏感。那一路是 three.asy:2836 的
+//     `ceil(lambda.x + 2*viewportmargin.x)` 吃曲面的三维界，与 near_earth 同一族。
+// 所以逐句转写现在只能买到"默认 fuzz 下交点时间从 1e-8 收到逐位"，没有已知的下游收益。
+//
 // 去重照 path.cc:897 改成**按点**（从前是按时间差 1e-7）：闭路上 t=0 与 t=length 是同一点、
 // 时间差一整圈，按时间比永远不算重复，于是同一个交点报两遍。
 // path.cc:959 的 intersections。`cap` 是**这一趟最多要几个**：
@@ -6817,7 +6891,6 @@ private real[][] asy__ixpq(path p, path q, real fuzz, int cap) {
   for (int i = 0; i <= np; ++i) { real m = length(point(p, i)); if (m > sc) sc = m; }
   for (int j = 0; j <= nq; ++j) { real m = length(point(q, j)); if (m > sc) sc = m; }
   real f = fuzz < 0 ? 1e-9 * sc : fuzz;
-  real tol = 1e-12 * sc;
   real fuzz2 = max(asy__fuzzFactor * f * f, asy__Fuzz2);
   real[][] raw;
   // exact：p 是一段直线（或一个点）
@@ -6848,7 +6921,9 @@ private real[][] asy__ixpq(path p, path q, real fuzz, int cap) {
       if (cap > 0 && raw.length >= cap) break;
       pair[] b = asy__segctl(q, j);
       real[][] cand;
-      asy__ixrec(cand, a, 0, 1, b, 0, 1, f, 12, cap);
+      // 深度上限照原版：`maxdepth = DBL_MANT_DIG = 53`（bound.cc:15）。真正的收敛判据是
+      // 上面那条界盒对角线 <= fuzz，53 只是兜底；`cap` 那一格保证不会真的展开成 4^53。
+      asy__ixrec(cand, a, 0, 1, b, 0, 1, f, 53, cap);
       real[][] seed;
       for (int k = 0; k < cand.length; ++k) {
         bool near = false;
@@ -6858,19 +6933,15 @@ private real[][] asy__ixpq(path p, path q, real fuzz, int cap) {
         if (!near) seed.push(cand[k]);
       }
       for (int k = 0; k < seed.length; ++k) {
-        real[] r = asy__ixnewton(a, b, seed[k][0], seed[k][1], tol);
-        // **Newton 收不住就用种子**，不要丢。原版根本不做 Newton：细分到
-        // `(maxp-minp).length()+(maxq-minq).length() <= fuzz` 就把这一格的中点当交点
-        // （path.cc:998-1006）。调用方传松 fuzz 时（solids.asy:10 的 `fuzz=1.0e-5`）两条
-        // 曲线只是"相距 fuzz 以内"、根本没有真交点，Newton 永远到不了 1e-12·scale。
-        // 从前这里 `continue` 掉，代价量出来是：把 solids.asy 抄一份到 CWD 里加 write
-        // （两条腿跑同一份），每片切片的 sp/sm 逐位相同（1e-14 以内），而
-        // `tangent(sp,sm,·)` 参考回长度 2、我们回 0 —— 于是 solids 的 silhouette 该攒
-        // 64 个切点，我们只攒到 3 个（lenG 63 对 2），hyperboloidsilhouette 整条轮廓塌掉。
-        if (r.length == 0) r = new real[] {seed[k][0], seed[k][1]};
+        // **不做 Newton 精修 —— 直接用细分格子的中点。** 原版就是这样（path.cc:998-1006：
+        // 界盒对角线之和小于 fuzz 就把这一格的 (0.5,0.5) 换算回去），所以它给出的交点时间
+        // 是**二进制分数**。量出来的（两片相距 1e-7 的切片、fuzz=1e-5）：参考
+        // `19.1600646972656` = 19 + 5245/32768，正好是第 15 层的格子中点；我们从前 Newton
+        // 精修到 19.2605483659837，差 0.1 —— 空间上都在 fuzz 以内，但下游有精确相等的判据
+        // （three.asy:1253）与 ceil（画布尺寸），差一点就翻。
         real[] g;
-        g.push(i + r[0]);
-        g.push(j + r[1]);
+        g.push(i + seed[k][0]);
+        g.push(j + seed[k][1]);
         raw.push(g);
       }
     }
@@ -7241,6 +7312,31 @@ pen rgb(pen p) {
   return q;
 }
 
+// runtime.in `gray(pen)` → pen.h:583 `togrey()`：rgb 那一档按亮度加权
+//   （`0.299r + 0.587g + 0.114b`），cmyk 先 cmyktorgb 再走同一条。
+// 量过（`asy -noV`）：`gray(green)` 是 0.587、`gray(cmyk(1,0,0,0))` 是 0.701
+// （那支笔的 rgb 是 (0,1,1)）、`gray(gray(0.25))` 还是 0.25。
+// stdlib 里没人用它（那边只有 `gray(real)`），补上是为了这一族三个齐。
+pen gray(pen p) {
+  pen q = pencopy(p);
+  if (q.iscmyk) {
+    real sat = 1 - q.black;
+    q.red = (1 - q.cyan) * sat;
+    q.green = (1 - q.magenta) * sat;
+    q.blue = (1 - q.yellow) * sat;
+    q.cyan = 0; q.magenta = 0; q.yellow = 0; q.black = 0;
+    q.iscmyk = false;
+    q.isrgb = true;
+  }
+  if (q.isrgb) {
+    q.gray = 0.299 * q.red + 0.587 * q.green + 0.114 * q.blue;
+    q.red = 0; q.green = 0; q.blue = 0;
+    q.isrgb = false;
+  }
+  q.setcolor = true;
+  return q;
+}
+
 // runpath.in:281：一族路径的段数之和（量过 `{(0,0)--(1,1)--(2,0), (0,0)--(1,0)}` 是 5）。
 // 注意与 `size(path)` 一样，这里数的是**结点数**（我们的 path 上 size 就是那个，见 :479）。
 int size(path[] p) {
@@ -7287,7 +7383,21 @@ int seconds(string t="", string format="") {
 // 读的是 a[0]、a[2]、a[3] 与 a[4]）。这一层没有时钟，所以全是 0：回一份长度对的零比
 // abort 好 —— 那边只是把它减一减报个耗时。这条差别写在明处：cputime() 出来的都是 0。
 real[] _cputime() { return new real[] {0, 0, 0, 0, 0}; }
-int delete(string s) { abort("delete(string) 还没做（这一层不动文件系统）"); return 0; }
+// `delete(string)`：删文件，删成回 0、没删成回 -1（runfile.in 的那一格）。
+// 调用点是 three.asy:3278 的 `delete(file3[i])`：`file3` 攒的是"渲成外部图再插回去"
+// 那条路落下的临时文件 —— PRC/v3d 那两格我们不写，但 **addViews 那一格我们写**
+// （three.asy:3031 `file3.push(prefix+"."+format)`，就是 shipout3 的 `!view` 分支
+// 落下的 `out+N.eps`）。所以这一格必须真删，不然每跑一次都在工作目录里留几份垃圾。
+// 名字带单引号的不敢下手（拼不出安全的命令行），照 asy 的约定回 -1。
+//
+// 从前这儿是 `abort("还没做")`，后果不是"报错退出"而是**伪装成画错**：
+// threeviews / stereoscopic 走 `addViews` 时在这儿 abort，流程却没停下来，
+// 下游拿着空数组继续跑（`array index out of range: 0 (length 0)`），
+// 最后吐一张 30 个 token 的空图 —— 判据把它记成"结构不同"，真故障就藏起来了。
+int delete(string s) {
+  if (s == "" || find(s, "'") >= 0) return -1;
+  return _runproc("rm -f '" + s + "'") == 0 ? 0 : -1;
+}
 real dirtime(path p, pair z) { abort("dirtime 还没做（要解三次方程找切向）"); return 0; }
 // runtime.in:32 的 windingnumber(array*, pair)：逐条路径的绕数**相加**
 int windingnumber(path[] p, pair z) {
@@ -8691,6 +8801,15 @@ string asy__r3hexfn(frame f, int oW, int oH, int fw, int fh, real angle, real zo
                     triple m, triple M, pair shift, real expand,
                     real[][] tv) { return ""; }
 
+// 三维那一档的草稿目录。清单（`r3.scn`）与 gs 那条老路的临时文件（`r3.eps`/`r3.ppm`）
+// 都落在这儿，而**两条路都用固定名字**，gs 那条还会 `rm -f <目录>/r3.*` ——
+// 于是同时跑两趟（比如一边全量、一边拿尺子量一张）会互相删对方的清单。
+// `OMNI_R3_DIR` 就是为这种时候留的：并发的那一侧指到别处去，判据那一侧不用动。
+private string asy__r3dir() {
+  string d = _getsetting("OMNI_R3_DIR");
+  return d == "" ? "/tmp/omni-r3" : d;
+}
+
 real asy__r3w = 0;
 real asy__r3h = 0;
 bool asy__r3on = false;
@@ -8801,6 +8920,30 @@ void shipout3(string prefix, frame f, string format="",
   o.rawhex = hex;
   o.p = currentpen;
   o.g = (0, 0) -- (oW, 0) -- (oW, oH) -- (0, oH) -- cycle;
+  // `view=false` 那一路（addViews / addStereoViews / 预览）**不印到主输出上**：
+  // three.asy:3025-3043 的 embedder 在 `settings.render != 0 && !view` 时，把这一格渲成
+  // 盘上一份 `<prefix>.eps`，再拿 `label(f, graphic(prefix,"hiresbb"))` 用
+  // `\includegraphics` 把它贴回帧里（贴回来的那张帧才是 addViews 摆格子的料）。
+  // 从前这里一律 `shipout(P)`，于是 N 张子图各自往主输出印一遍、后一张盖前一张，
+  // 而真正要的那张合成图（只有标签、没有 ops）整个是空的 —— threeviews 与
+  // stereoscopic 两个"没出图"就是这么来的。
+  if (!view) {
+    frame bf;
+    bf.ops.push(o);
+    string pre = prefix == "" ? "out" : prefix;
+    // 落盘的那一份走**普通 shipout 的老路**（`_shipout`：套 612x792 的纸、居中、带那对
+    // gsave/translate），不是 0 起点的底图。dvips 把被引 EPS 的界**原样**写进合成图里，
+    // 所以那份界也是要对的账：参考的 s+0.eps 是 `%%HiResBoundingBox: 251.5 322.5
+    // 359.5 468.5`，正是 0.5*asy__excess(612,108) / 0.5*asy__excess(792,147) ——
+    // 与这一层居中那两句同一个式子。0 起点那一版画得对（ink 99.6%）但这一处是 0。
+    // 格式钉成 eps：那边是 `nativeformat()`（three.asy:3030），与主输出的格式无关。
+    _shipout(pre, bf, format="eps");
+    // 量标签那一趟（asy__measure）与 dvips 那一趟都在 asy__texdir 里跑，
+    // `\includegraphics{<prefix>}` 是靠 kpathsea 找的 —— 那个目录里看不见 CWD，
+    // 所以同一份再放一格进去。
+    _runproc("mkdir -p " + asy__texdir + " && cp '" + pre + ".eps' '" + asy__texdir + "/'");
+    return;
+  }
   // 照 glrender.cc:531 那一段：**另起一张空 picture**，只放这一格位图，再 shipout。
   // `add(picture,frame)` 在 plain 那一层，这一层直接往 ops 里塞。
   picture P;
@@ -9311,19 +9454,35 @@ real asy__pboundtrifn(triple[] P, bool mx, int which, real b, real fuzz, int dep
   return b;
 }
 
-// norm(A,N)（run::norm 的 triple 版）：这里取所有分量绝对值的最大 —— fuzz 只进
-// 终止判据的尺度，与逐字节无关；真要对齐再核对 runtime 那一格取的是长度还是分量。
+// norm(A,N)：runarray.in:353 的 `run::norm(triple*, size_t)` —— `sqrt(max abs2)`，
+// 也就是**控制点里最长那个的长度**，不是"分量绝对值的最大"。差别不大但会改判据：
+// 视景空间里一个点 (100,20,-900) 分量最大 900、长度 906.3，取分量的话 fuzz 偏小、
+// 细分多走几层、界比参考更极端 —— pdb 的画布就因此高了 1pt（800x804 对 800x800）。
 private real asy__norm3(triple[] A) {
-  real n = 0;
+  real m = 0;
   for (int i = 0; i < A.length; ++i) {
-    real t = abs(A[i].x); if (t > n) n = t;
-    t = abs(A[i].y); if (t > n) n = t;
-    t = abs(A[i].z); if (t > n) n = t;
+    triple v = A[i];
+    real t = v.x * v.x + v.y * v.y + v.z * v.z;
+    if (t > m) m = t;
   }
-  return n;
+  return sqrt(m);
 }
 
 private pair asy__ratio2(triple[][] P, pair b, bool mx) {
+  /*
+   * **剩下的 0.5bp（pdb / near_earth / shellmethod）就卡在这一格上，是 `ceil` 放大的
+   * 4e-13。** 最小尺子（/tmp 里跑过）：
+   *   `import three; size(200); currentprojection=perspective(30,30,15);
+   *    dot((0,0,0)); dot((1,1,1)); draw((0,0,0)--(1,1,1));`
+   * three.asy:2730 那儿两条腿的二维界：
+   *   参考 m2.x=-1.4999999999996168  M2.x=1.5000000000003986 → lambda.x=3.0000000000000155
+   *   我们 m2.x=-1.5                 M2.x=1.5                → lambda.x=3
+   * 真值就是 3（点对称），参考那份是它自己细分累的噪声；`ceil(lambda.x+2*0.5)` 一翻
+   * 就是 5 对 4，画布差 1pt、`%%HiResBoundingBox` 差 0.5。
+   * 要跟就得让 `asy__pbound`/`asy__pboundtri` 走**逐位相同的细分树**（同样的输入控制点、
+   * 同样的 fuzz、同样的终止深度）—— 我们这份在角点上就精确命中、根本没往下递归。
+   * 属 ADR 级取向（"要不要连它的近似噪声一起复制"），别当 bug 挖。
+   */
   triple[] A;
   for (int i = 0; i < P.length; ++i)
     for (int j = 0; j < P[i].length; ++j) A.push(P[i][j]);
@@ -10602,7 +10761,24 @@ private void asy__merge3hook() {
     bool ortho = angle == 0;
     real Zmax = M.z;
     real Hh = ortho ? 0 : -tan(0.5 * angle * pi / 180) * Zmax;
-    real aspect = fw / fh;
+    // **视景体的长宽比不是位图的长宽比**（与 omni_r3.c 的 r3_set_dimensions 同一格，
+    // 那儿记着完整的尺子与全部对照数）：离屏那一路的 Width/Height 走
+    // renderBase.cc:932-996 那一串 —— 内容尺寸乘设备像素比、与分块下限（1024x768）取大、
+    // 再按 fullW/fullH 用 ceil 套回长宽比，与 fw/fh 差一个 ceil 的零头（约 1/768）。
+    // 斜相机那 2.8% 就是这一格：按 fw/fh 时不打光的球差 7920 字节，按这一版差 64。
+    real aA = fw / fh;
+    int adpr = 2;                       // 这台机器量出来是 2（asy 自己在这一格上依赖显示器）
+    int aoW = (int) (fw / 4 + 0.5); int aoH = (int) (fh / 4 + 0.5);
+    int aw = ceil(aoW * adpr); int ah = ceil(aoH * adpr);
+    // 两个 ceil 都减 1e-9：asy 那边的 Aspect 是 pt 那一对，数学上是整数的地方位图那一对
+    // 会算出 984.0000000000001，ceil 跳一位就把长宽比整整带偏 0.1%（见 omni_r3.c 的注释）
+    if (aw > ah * aA) aw = ceil(ah * aA - 1e-9); else ah = ceil(aw / aA - 1e-9);
+    int atw = fw < 1024 ? fw : 1024;
+    int ath = fh < 768 ? fh : 768;
+    int aW = aw > atw ? aw : atw;
+    int aH = ah > ath ? ah : ath;
+    if (aW / aH > aA) aW = ceil(aH * aA - 1e-9); else aH = ceil(aW / aA - 1e-9);
+    real aspect = aW / aH;
     real zm = zoom == 0 ? 1 : zoom;
     real zoominv = 1 / zm;
     real xshift = shift.x * zm;
@@ -10690,7 +10866,10 @@ private void asy__merge3hook() {
     // 细分交给 C：这里发的是**原始的十六个控制点**，比旧路（自己先细分到 64 倍再发
     // ShadingType 7）小得多。
     {
-      string sn(real v) { return string(v, 17); }
+      // `OMNI_R3_NOFMT=1` 时不做数字格式化（**只用来量口**：清单里的数全成 0，
+      // 图当然是废的）—— 拿它把"格式化 double"与"拼串 + 上游的投影"分开算账。
+      bool nofmt = _getsetting("OMNI_R3_NOFMT") != "";
+      string sn(real v) { return nofmt ? "0" : string(v, 17); }
       string sv(triple v) { return " " + sn(v.x) + " " + sn(v.y) + " " + sn(v.z); }
       // **清单是攒成一段段再合的**，不是一路 `s = s + …`：那一句在 C 那条腿上是
       // 每次重新分配再拷一遍（omni_str 不可变），面片一多就是 O(n^2) ——
@@ -10711,6 +10890,18 @@ private void asy__merge3hook() {
         // 一个全局值做不到透视下"远处一个像素对应更多用户单位"这一层。
         // 留着这一行是为了清单格式不变、以及运行时算不出视景体时还有个值可用。
         + "res " + sn((M.x - m.x) / fw) + nl);
+      // **这条光的方向不是嫌疑人，查过了。** 拿探针把 three.asy 传给 shipout3 的
+      // `Light.position[0]` 印出来，两条腿逐位相同、也与我们发的这一行相同
+      //（`orthographic(5,4,3)` 那把尺子：0.44773576836617329 0.4972609476841367
+      // 0.74314482547739424）；renderBase.cc:42 是 `Lights = args.lights`，不再变换。
+      // 真正的现象记在这儿免得重挖：同一个 `draw(unitsphere,...)`，
+      //   `orthographic(0,0,1)` → 209/480000 字节不同、和 888
+      //   `perspective(4,3,2)`  → 187/484800、和 916
+      //   `orthographic(5,4,3)` → 56381/1929600、和 433456（最大差 80）
+      //   `render(compression=Zero,merge=true)` 加不加，一个字节都不差
+      // 相机越斜、这条光相对视线越偏（正对时约 (0.236,-0.236,0.943)，斜着是上面那个），
+      // 差就越大 —— 所以下一刀该比的是**光偏离视线时的 BRDF**（r3_brdf 的 GGX 那几项），
+      // 而不是光的方向。验法：正对着的相机 + 手动给一个偏的 `currentlight`，看差是否跟着涨。
       for (int i = 0; i < asy__r3lights.length; ++i) {
         real[] d = i < asy__r3ldiff.length ? asy__r3ldiff[i] : new real[] {1, 1, 1, 1};
         pp.push("light" + sv(asy__r3lights[i]) + " " + sn(d[0]) + " " + sn(d[1])
@@ -10760,15 +10951,30 @@ private void asy__merge3hook() {
           // —— 我们这边是按行长 1/2/3/4 存的，对应 P[0][0]、P[1][0]、P[1][1]、P[2][0..2]、P[3][0..3]。
           triple[][] P = o3.P3;
           if (P.length < 4 || P[3].length < 4) continue;
-          pp.push(mline(o3) + pcline(o3.colors, 3) + "btri " + (o3.straight ? "1" : "0")
-            + sv(P[0][0]) + sv(P[1][0]) + sv(P[1][1])
-            + sv(P[2][0]) + sv(P[2][1]) + sv(P[2][2])
-            + sv(P[3][0]) + sv(P[3][1]) + sv(P[3][2]) + sv(P[3][3]) + nl);
+          // 逐段 push，**不要**先拼成一整行：`a + sv(...) + sv(...) + …` 是把一条
+          // 600 字节的串重新分配 + 拷贝十来遍（omni_str 不可变），pdb 那 119576 片
+          // 就是 0.7 GB 的 memmove。合并交给下面的两两归并（结果逐字节一样）。
+          pp.push(mline(o3) + pcline(o3.colors, 3) + "btri " + (o3.straight ? "1" : "0"));
+          pp.push(sv(P[0][0])); pp.push(sv(P[1][0])); pp.push(sv(P[1][1]));
+          pp.push(sv(P[2][0])); pp.push(sv(P[2][1])); pp.push(sv(P[2][2]));
+          pp.push(sv(P[3][0])); pp.push(sv(P[3][1])); pp.push(sv(P[3][2]));
+          pp.push(sv(P[3][3]));
+          pp.push(nl);
           nink = nink + 1;
         } else if (o3.kind == 4) {
           triple[] T = o3.T3;
           if (T.length < 3) continue;
-          pp.push(mline(o3) + "tri" + sv(T[0]) + sv(T[1]) + sv(T[2]) + nl);
+          // 三角网（drawTriangles，`render(tessellate=true)` 走它）**自带逐顶点法向与
+          // 逐顶点色**，两样都要发：只发三个点的话 C 那边只能拿面法向 + 材质色，
+          // 整张曲面变成分片平坦的。量出来的（filesurface）：位图颜色种数
+          // 参考 201728、只发点那一版我们 2514。
+          // 法向那一行是 `tnrm`（九个数），颜色沿用 `pcol 3`（与 btri 同一格）。
+          string tn = "";
+          if (o3.N3.length >= 3)
+            tn = "tnrm" + sv(o3.N3[0]) + sv(o3.N3[1]) + sv(o3.N3[2]) + nl;
+          pp.push(mline(o3) + pcline(o3.VC, 3) + tn + "tri");
+          pp.push(sv(T[0])); pp.push(sv(T[1])); pp.push(sv(T[2]));
+          pp.push(nl);
           nink = nink + 1;
         } else if (o3.kind == 0) {
           // path3：GL 那边是 GL_LINES。**细分交给 C**（beziercurve.cc:62 的
@@ -10779,9 +10985,14 @@ private void asy__merge3hook() {
           if (L < 2) continue;
           // 逐段 push，理由同上面那族（`s = s + "bez" …` 是 O(段数²) 的 memmove）
           pp.push(mline(o3));
-          for (int a = 0; a + 1 < L; ++a)
+          // 段数 = cyclic 时 L、否则 L-1（length(path3) 就是这么定的）；cyclic 的收尾段
+          // 是 L-1 → 0，从前写成 `a + 1 < L` 把它整段漏掉了（circle(O,2) 只发 3 条 bez）
+          int nseg = g.cyclic ? L : L - 1;
+          for (int a = 0; a < nseg; ++a) {
+            int b = a + 1 == L ? 0 : a + 1;
             pp.push("bez" + sv(g.nodes[a].point) + sv(g.nodes[a].post)
-              + sv(g.nodes[a + 1].pre) + sv(g.nodes[a + 1].point) + nl);
+              + sv(g.nodes[b].pre) + sv(g.nodes[b].point) + nl);
+          }
           nink = nink + 1;
         }
       }
@@ -10795,7 +11006,7 @@ private void asy__merge3hook() {
           pp = nx;
         }
         string scn = pp.length > 0 ? pp[0] : "";
-        string dir3 = "/tmp/omni-r3";
+        string dir3 = asy__r3dir();
         if (_runproc("mkdir -p " + dir3) == 0) {
           _writetext(dir3 + "/r3.scn", scn);
           string hex = _r3render(dir3 + "/r3.scn");
@@ -11278,7 +11489,7 @@ private void asy__merge3hook() {
     // P6 的头**不是**固定长度：gs 会多写一行 `# Image generated …` 的注释
     // （量出来的：446468 字节的 ppm 里头占 68 个，按 `P6\n<w> <h>\n255\n` 算只有 15）。
     // 所以不算头长，直接取**最后** w*h*3 个字节 —— 那一定是像素。
-    string dir = "/tmp/omni-r3";
+    string dir = asy__r3dir();
     int nbytes = fw * fh * 3;
     if (_runproc("mkdir -p " + dir + " && rm -f " + dir + "/r3.*") != 0) return "";
     _writetext(dir + "/r3.eps", doc);
@@ -11801,7 +12012,36 @@ pair maxratio(frame f) { if (asy__ratiodead(f)) asy__ratio3(f); return f.maxr; }
  * 也是细分求的真界；这里拿结点+控制点的凸包当那个尺度。fuzz 只进终止判据，
  * 两边都落在真极值的 fuzz 之内（~1e-4 相对），不改量级。
  */
-private pair asy__pathratio(path3 g, bool mx)
+/*
+ * **参考这一格的比值比"真几何的极值"更极端，原因查清了，照抄。**
+ *
+ * 两条线索合起来才对得上：
+ *  1. `path3.cc:335` 是 `for(Int i=0; i <= n; ++i)`，n 是**段数** —— 末一趟按
+ *     path3.h:141 的 adjustedIndex 夹完，拿到的是 `(p_末, p_末.post, p_末.pre, p_末)`。
+ *  2. asy 的 `_draw` 把一条 path3 **按段拆开存**（一段一个 drawPath3）。所以第 1 条的
+ *     "末一趟"落在**每一段的末点**上，而单段路径末结点的 post 就是它自己，于是那一趟
+ *     算的是 `(z1, z1, c1, z1)` —— 一条从段末点鼓向该段第二控制点再回来的真三次曲线，
+ *     比值比真曲线更极端。
+ *
+ * 量出来的（`import three; size(300,0); currentprojection=perspective(10,-5,5.44);
+ * draw(circle(O,2));`，坐标取自清单）：
+ *   `maxratio(path3)`（真闭合路径，四段）        = 0.1625684615162967   ← 只算真段
+ *   `maxratio(frame)`（同一条路径画进帧里）      = 0.16686989133706773  ← 多了幽灵段
+ * 后者 = 真段的 0.1625684615162967 再并上第 3 个结点的幽灵段，逐位相同；旋转起点（四种）
+ * 帧里那份不变，正是"每段末点都算一遍"的样子。
+ * 少算这一格的后果：fov 我们 8.3542444575912125 对参考 8.4559010545009059，
+ * 整幅位图放大 1.19%（ink 框左边我们 6、参考 20，右边两边都在 1192）。
+ * 代价可控：幽灵段收敛很快（这把尺子上 13 次递归、深度 3；真段是 28 次、深度 4）。
+ *
+ * **只有帧里那一份带幽灵段。** 直接问 `maxratio(path3)` 时 asy 不拆段（整条路径一次
+ * `path3::ratio`，末一趟对闭合路径只是重算第 0 段、对不闭合路径才有幽灵段），量到的就是
+ * 真段那个 0.1625684615162967；所以下面用 `ph` 分开：`minratio/maxratio(path3)` 传 false,
+ * 走帧的 op 表（`real[][] * frame`）时传 true。
+ *
+ * fuzz 那一格仍是近似：asy 是每条单段路径拿**自己**的精确界算 `Fuzz*(max-min).length()`,
+ * 这里沿用整条路径的控制点凸包对角线。判据只进终止比较，这把尺子上逐位相同。
+ */
+private pair asy__pathratio(path3 g, bool mx, bool ph = false)
 {
   int n = g.nodes.length;
   if (n == 0) { abort("ratio: 空的 path3"); return (0, 0); }
@@ -11829,6 +12069,10 @@ private pair asy__pathratio(path3 g, bool mx)
     triple z1 = g.nodes[j].point;
     B = (asy__cbound(z0, c0, c1, z1, mx, 0, B.x, fuzz, asy__rmaxdepth),
          asy__cbound(z0, c0, c1, z1, mx, 1, B.y, fuzz, asy__rmaxdepth));
+    // 幽灵段（见上面的说明）：单段路径末结点的 post 就是它自己。只有帧里那一份算它。
+    if (ph)
+      B = (asy__cbound(z1, z1, c1, z1, mx, 0, B.x, fuzz, asy__rmaxdepth),
+           asy__cbound(z1, z1, c1, z1, mx, 1, B.y, fuzz, asy__rmaxdepth));
   }
   return B;
 }
@@ -11991,8 +12235,8 @@ frame operator *(real[][] t, frame f)
         // drawpath3.h:84 -> path3.cc:326
         if (gs[i].g3.nodes.length == 0) continue;
         if (first) { acc(gs[i].g3.nodes[0].point); }
-        pair lo = asy__pathratio(gs[i].g3, false);
-        pair hi = asy__pathratio(gs[i].g3, true);
+        pair lo = asy__pathratio(gs[i].g3, false, true);
+        pair hi = asy__pathratio(gs[i].g3, true, true);
         rmn = (min(rmn.x, lo.x), min(rmn.y, lo.y));
         rmx = (max(rmx.x, hi.x), max(rmx.y, hi.y));
       } else if (gs[i].kind == 1) {

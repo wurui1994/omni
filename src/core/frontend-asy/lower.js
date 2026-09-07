@@ -1158,6 +1158,35 @@ class AsyLower {
   }
 
   /**
+   * 这一格函数型变量是由**具名函数**赋进来的（第八十七刀）：少给实参时该补
+   * **被赋那个函数自己**那一份默认值，而不是类型上那一份。
+   *
+   * asy 的默认值是跟着**函数值**走的（application.h:76 的 defaultArg 在调用处压一个
+   * `push_default` 记号，被调方 runtime.in:276 的 pushDefault 换成真值），我们的是
+   * 调用处按类型补（asyFnValDefWrap）。这一格是那条语义的**静态近似**：初值里出现的
+   * 具名函数全都同型、且这几格默认值逐个一样时，就用它们那一份。
+   * 记法与 markGuide 同一条（键上加源码里不可能出现的前缀，作用域一 pop 一起没）；
+   * 查的时候在**第一个有这个名字的层**上停 —— 遮住的语义跟着 lookup。
+   */
+  markFnValDef(nm, info) {
+    const top = this.scopes[this.scopes.length - 1];
+    if (info === null) top.delete(`\u0000fv:${nm}`);
+    else top.set(`\u0000fv:${nm}`, info);
+  }
+
+  fnValDef(nm) {
+    let i = this.scopes.length - 1;
+    while (i >= 0) {
+      if (this.scopes[i].has(nm)) {
+        const v = this.scopes[i].get(`\u0000fv:${nm}`);
+        return v === undefined ? null : v;
+      }
+      i--;
+    }
+    return null;
+  }
+
+  /**
    * `unravel x;` 摊出来的名字：类型照旧进 scopes（查得到），另存一条"它其实是谁的哪个
    * 字段"。那一条的键上加了一个源码里不可能出现的前缀，所以作用域一 pop 两条一起没。
    */
