@@ -1187,6 +1187,23 @@ static void r3_brdf(const r3shade *S, r3f viewDir, r3f lightDir, float out[3]) {
   }
 }
 
+/* GL 的 float -> unorm8（规范 2.3.5.2「Conversion from Floating-Point to
+ * Normalized Fixed-Point」）：`round(f × 255)`，而那个**乘积按精确值算** ——
+ * 不是"先把乘积舍进 float、再加 0.5 取整"。硬件那一格是定点转换，不是一次浮点乘。
+ *
+ * 这一位真差过：`currentlight=nolight` 的 lightgray（0.9）——
+ *   (float) 0.9 = 0.899999976158142，精确乘 255 是 229.49999394 → 该出 **229**；
+ *   而在 float 里算 `v * 255.0f`，结果被舍成正好 **229.5**，+0.5f 取整就成了 230。
+ * 探针（一片正对相机的平面片，/tmp 里那两份）：不打光那一版 1896075/1920000 个字节
+ * 全差 1（参考 229、我们 230），打光那一版本来就逐字节相同。
+ *
+ * NaN 归 0（从前是 `if (v<0) v=0; if (v>1) v=1;`，NaN 两条都不成立、再 (int) 是 UB）。 */
+static unsigned char r3_unorm8(float v) {
+  if (!(v > 0.0f)) return 0;
+  if (v > 1.0f) v = 1.0f;
+  return (unsigned char) (int) ((double) v * 255.0 + 0.5);
+}
+
 /* fragment.glsl:232 main —— 一个片元的颜色（不含 alpha 那一格的合成）。
  * `vcol` 是插值出来的逐顶点色（rgba，没有时给 NULL）：vertex.glsl:77 那一支 ——
  * lightOn 非零时它当 diffuse，为零时加到 emissive 上。 */
@@ -1269,6 +1286,10 @@ static float R3_SAMPLE[R3_NS][2] = {
  * 哪一族是对的**量出来的**：一段 26.57 度的 1bp 管子（rulers/ln2.asy），
  * alt 那族给出 159,32,32,159、参考是 191,63,63,191；换成上面这族之后
  * **整张位图 0 字节不同**。（两族的 x/y 投影都是 {1,3,5,7}/8，竖边横边分不出来。） */
+/* 透明那一趟的覆盖判据（见 r3_raster_tri 里那段注）。**默认逐采样点**（0）——
+   `OMNI_R3_TCENTER=1` 换成"只看像素中心"。两种口径的账都量过，记在那段注里。 */
+static int r3_tcenter = 0;
+
 static void r3_pick_samples(void) {
   const char *e = getenv("OMNI_R3_SAMPLES");
   if (!e) return;
@@ -1445,18 +1466,45 @@ static void r3_raster_tri(const r3scene *s, r3fb *fb, const r3v *P, const r3v *N
       float frgb[3] = { 0, 0, 0 };
       float ablend = alpha;
       const size_t pixbase = (rowbase + (size_t) x) * R3_NS;
+      /* **透明那一族的覆盖口径：还没定案，两头的账都在这儿**（`OMNI_R3_TCENTER=1`
+         切到"只看像素中心，中心在里面就整格算"）。探针在 /tmp/r3probe 那几份：
+         - 一颗 opacity(0.5) 的球（正交正对）：逐采样 40932/1920000（轮廓那一圈 2321 个
+           像素参考是**纯白**、我们涂了色，紧里面一圈我们又偏浅 —— 216 对 235 那一族，
+           像是少混了一层）；换成中心判据 27804，多涂的像素 2614 → 1730。
+         - 两颗相交的透明球：56154 → 31674，多涂 1484 → 674。
+         - 一片 opacity(0.5) 的平面片（边不落在像素边界上）：逐采样**逐字节相同**、
+           中心判据反而差 5967（最大差 3）。
+         最后这一条否掉了"透明那一趟不做多重采样"这个解释：平面片的边在参考里是软的。
+         所以默认仍是逐采样点，球上那一圈是**另一件事**（下一刀：拿一个只有单片
+         near-edge-on 面片的探针，看是不是细分出来的窄条在 GL 那边被剔掉了）。 */
+      int tc_in = 0;
+      double tcz = 0.0;
+      if (r3_tcenter && !opaque) {
+        double px = x + 0.5, py = y + 0.5;
+        double c0 = ((wx1 - px) * (wy2 - py) - (wx2 - px) * (wy1 - py)) * inv2a;
+        double c1 = ((wx2 - px) * (wy0 - py) - (wx0 - px) * (wy2 - py)) * inv2a;
+        double c2 = 1.0 - c0 - c1;
+        if (c0 < 0.0 || c1 < 0.0 || c2 < 0.0) continue;
+        tc_in = 1;
+        tcz = c0 * wz0 + c1 * wz1 + c2 * wz2;
+      }
       for (int k = 0; k < R3_NS; ++k) {
-        double sx = x + sxo[k];
-        /* 三个判据**逐个算、逐个否**：原来是把 b0/b1/b2 全算出来再一起比。
-           `||` 只短路比较，不短路上面那三行的计算 —— 而包围盒里过半的采样点是
-           第一条边就出去的（三角面积约是包围盒的一半）。次序与值一字不动。 */
-        double b0 = ((wx1 - sx) * dy2[k] - (wx2 - sx) * dy1[k]) * inv2a;
-        if (b0 < 0.0) continue;
-        double b1 = ((wx2 - sx) * dy0[k] - (wx0 - sx) * dy2[k]) * inv2a;
-        if (b1 < 0.0) continue;
-        double b2 = 1.0 - b0 - b1;
-        if (b2 < 0.0) continue;
-        double z = b0 * wz0 + b1 * wz1 + b2 * wz2;
+        double z;
+        if (tc_in) {
+          z = tcz;                               /* 中心那一格的深度，四个采样点共用 */
+        } else {
+          double sx = x + sxo[k];
+          /* 三个判据**逐个算、逐个否**：原来是把 b0/b1/b2 全算出来再一起比。
+             `||` 只短路比较，不短路上面那三行的计算 —— 而包围盒里过半的采样点是
+             第一条边就出去的（三角面积约是包围盒的一半）。次序与值一字不动。 */
+          double b0 = ((wx1 - sx) * dy2[k] - (wx2 - sx) * dy1[k]) * inv2a;
+          if (b0 < 0.0) continue;
+          double b1 = ((wx2 - sx) * dy0[k] - (wx0 - sx) * dy2[k]) * inv2a;
+          if (b1 < 0.0) continue;
+          double b2 = 1.0 - b0 - b1;
+          if (b2 < 0.0) continue;
+          z = b0 * wz0 + b1 * wz1 + b2 * wz2;
+        }
         size_t idx = pixbase + (size_t) k;
         if (!(z < depth[idx])) continue;       /* GL_LESS */
         /* 只数那一趟：不用着色，数完就走（着色是这里最贵的一段） */
@@ -1492,10 +1540,10 @@ static void r3_raster_tri(const r3scene *s, r3fb *fb, const r3v *P, const r3v *N
             if (v < 0.0f) v = 0.0f;
             if (v > 1.0f) v = 1.0f;
             frgb[i] = v;
-            int q = (int) (v * 255.0f + 0.5f);
-            if (i == 0) cr = (unsigned char) q;
-            else if (i == 1) cg = (unsigned char) q;
-            else cb = (unsigned char) q;
+            unsigned char q = r3_unorm8(v);
+            if (i == 0) cr = q;
+            else if (i == 1) cg = q;
+            else cb = q;
           }
           shaded = 1;
         }
@@ -1532,7 +1580,7 @@ static void r3_raster_tri(const r3scene *s, r3fb *fb, const r3v *P, const r3v *N
               float v = src * ablend + dst * (1.0f - ablend);
               if (v < 0.0f) v = 0.0f;
               if (v > 1.0f) v = 1.0f;
-              o[ch] = (unsigned char) (int) (v * 255.0f + 0.5f);
+              o[ch] = r3_unorm8(v);
             }
           }
           fb->nblend++;
@@ -1562,13 +1610,9 @@ static void r3_raster_line(const r3scene *s, r3fb *fb, r3v a, r3v b,
 
   unsigned char cr, cg, cbb;
   {
-    float v;
-    v = (float) mat->emissive[0]; if (v < 0) v = 0; if (v > 1) v = 1;
-    cr = (unsigned char) (int) (v * 255.0f + 0.5f);
-    v = (float) mat->emissive[1]; if (v < 0) v = 0; if (v > 1) v = 1;
-    cg = (unsigned char) (int) (v * 255.0f + 0.5f);
-    v = (float) mat->emissive[2]; if (v < 0) v = 0; if (v > 1) v = 1;
-    cbb = (unsigned char) (int) (v * 255.0f + 0.5f);
+    cr = r3_unorm8((float) mat->emissive[0]);
+    cg = r3_unorm8((float) mat->emissive[1]);
+    cbb = r3_unorm8((float) mat->emissive[2]);
   }
 
   int x0 = (int) floor((ax < bx ? ax : bx) - 1);
@@ -1708,6 +1752,8 @@ static int r3_tri_transparent(const r3tris *t, size_t i) {
 omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
   clock_t t0 = clock(), t1 = t0, t2 = t0;
   r3_pick_samples();
+  { const char *e = getenv("OMNI_R3_TCENTER");
+    if (e) r3_tcenter = strcmp(e, "0") != 0; }
   char *cpath = omni_cstr(path);
   FILE *f = fopen(cpath, "rb");
   if (!f) return omni_str_new((char *) "", 0);
@@ -1914,9 +1960,11 @@ omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
     fb.depth = (float *) malloc(np * sizeof(float));
     fb.col = (unsigned char *) malloc(np * 3);
     if (fb.depth && fb.col) {
-      unsigned char b0 = (unsigned char) (int) (S.bg[0] * 255.0 + 0.5);
-      unsigned char b1 = (unsigned char) (int) (S.bg[1] * 255.0 + 0.5);
-      unsigned char b2 = (unsigned char) (int) (S.bg[2] * 255.0 + 0.5);
+      /* 底色也走同一条 float -> unorm8（glClearColor 收的是 float，清出来的那一格
+         也是 unorm8）。bg 常常是 1 或 0，但 0.9 那类值上这一条同样要算对。 */
+      unsigned char b0 = r3_unorm8((float) S.bg[0]);
+      unsigned char b1 = r3_unorm8((float) S.bg[1]);
+      unsigned char b2 = r3_unorm8((float) S.bg[2]);
       for (size_t i = 0; i < np; ++i) {
         fb.depth[i] = 1.0f;
         fb.col[3 * i] = b0; fb.col[3 * i + 1] = b1; fb.col[3 * i + 2] = b2;
@@ -2004,7 +2052,7 @@ omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
                 }
               }
               for (int ch = 0; ch < 3; ++ch)
-                o[ch] = (unsigned char) (int) (acc[ch] * 255.0f + 0.5f);
+                o[ch] = r3_unorm8(acc[ch]);
             }
           }
         } else if (!oit) {
@@ -2041,7 +2089,7 @@ omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
             }
             if (fb.colf) {
               for (size_t i = 0; i < np * 3; ++i)
-                fb.col[i] = (unsigned char) (int) (fb.colf[i] * 255.0f + 0.5f);
+                fb.col[i] = r3_unorm8(fb.colf[i]);
               free(fb.colf);
               fb.colf = NULL;
             }
