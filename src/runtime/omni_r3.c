@@ -1299,6 +1299,11 @@ static int r3_tcenter = 0;
    （排完序之后：颜色、alpha、深度，以及混出来的那三个字节）。查"参考在这一格上
    一层都没混、我们混了"那一类只能靠它 —— 整幅位图的统计问不出更多。 */
 static int r3_pix_x = -1, r3_pix_y = -1;
+/* 顶点吸到子像素网格的分母（`OMNI_R3_SNAP`，0 = 不吸）。只作用在逐像素那一路上 ——
+   见 r3_raster_pix 里那段注（相邻三角共享边上的"两片都认领"）。
+   **256 是量出来的**（探针 sph_trans1）：16 → 7155、**256 → 30**、4096 → 477、不吸 → 483。
+   正好对上 GL 常见的 8 位子像素精度。 */
+static double r3_snap = 256.0;
 /* 透明那一趟走**逐像素**的链（照 count.glsl / blend.glsl 的结构，见 r3_raster_pix 的
    头注）。**默认开** —— 量出来的账（八个三维例子）：sacylinder3D 18813 → 6449、
    triangles 10574 → 183、twoSpheres 435546 → 296130，没有透明的那几个一个字节不差。
@@ -1647,6 +1652,19 @@ static void r3_raster_pix(const r3scene *s, r3fb *fb, const r3v *P, const r3v *N
     r3_window(fb, c[i], wx + i, wy + i, wz + i);
     iw[i] = 1.0 / c[i].w;
   }
+  /* **顶点坐标先吸到子像素网格上**（`OMNI_R3_SNAP`，默认 256 = GL 常见的 1/256 px；
+     0 关掉）。为什么要它：相邻两片三角共享的那条边，在浮点里两边算出来的边函数
+     不是同一个数 —— 于是紧贴着边的那个像素中心可能**两片都认领**（或都不认领）。
+     量到的原形（探针 sph_vcol 的 (388,4)）：那一格收到 **4 个片元** ——
+     前面两片几乎一样（深度 0.52843684 / 0.528417289）、背面两片也几乎一样，
+     混出来 24，而参考是 72（只两层）。GL 那边顶点是定点的（子像素网格），
+     共享边两侧逐位相同，配上 top-left 规则就是"不漏不重"。 */
+  if (r3_snap > 0) {
+    for (int i = 0; i < 3; ++i) {
+      wx[i] = floor(wx[i] * r3_snap + 0.5) / r3_snap;
+      wy[i] = floor(wy[i] * r3_snap + 0.5) / r3_snap;
+    }
+  }
   double area = (wx[1] - wx[0]) * (wy[2] - wy[0]) - (wx[2] - wx[0]) * (wy[1] - wy[0]);
   if (area == 0.0) return;
   int front = area > 0.0;
@@ -1937,6 +1955,8 @@ omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
     if (e) r3_tgate = strcmp(e, "0") != 0; }
   { const char *e = getenv("OMNI_R3_OITPIX");
     if (e) r3_oitpix = strcmp(e, "0") != 0; }
+  { const char *e = getenv("OMNI_R3_SNAP");
+    if (e) r3_snap = atof(e); }
   { const char *e = getenv("OMNI_R3_PIX");
     if (e) {
       char *q = NULL;
