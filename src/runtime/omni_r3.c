@@ -1346,6 +1346,16 @@ static int r3_opqinline = 0;
    不变。也就是说"到线段的欧氏距离 ≤ 0.5"那个圆盘判据反而更接近参考（原版 glrender 的线
    在端点上就是圆的），twoSpheres 顶上那条边的差是**另一件事**，别再从这一头挖。 */
 static int r3_linerect = 0;
+/* 线宽的标定系数（`OMNI_R3_LINEW`，1 = 一个采样单位）。见 r3_raster_line 里那段注。
+   **扫过、没用**：big_line 上 1.0 / 1.25 / 1.5 三档结果**完全一样**（6516 个字节差、
+   ink 4539，因为采样点偏移是 0.25/0.75，hw ∈ [0.5,0.75] 落在同一档），2.0 反而更差
+   （20079，且小画布的 lw0 从 0 涨到 4797）。
+   **缺的那 2160 个像素不是线宽能补的**：位图只有 4 列，参考涂了 6699（≈2.95 列）、
+   我们 4539（=2 列整）—— 参考的线不是对称的圆盘/带，而是 GL 那种**沿主轴步进**的
+   光栅化（每步 1~2 列，取决于亚像素位置），平均下来 2.95 列。
+   下一刀就照 GL 的线光栅化重写（沿主轴步进 + 采样点覆盖），判据用 big_line 的
+   "盖住参考 67.8%"。 */
+static double r3_linew = 1.0;
 /* varying（法向、视点、顶点色）的插值在 float 里做（`OMNI_R3_FINTERP`）。
    **量过、几乎无差别，默认关**：sph_light 1098 → 1104、sph_obl 1104 → 1098、
    sph_nolight 48 不变。所以那一档 ±1（splitpatch 的 139061 里 95% 只差 1）**不是
@@ -1883,7 +1893,13 @@ static void r3_raster_line(const r3scene *s, r3fb *fb, r3v a, r3v b,
   double dx = bx - ax, dy = by - ay;
   double len = sqrt(dx * dx + dy * dy);
   if (len == 0.0) return;
-  double nx = -dy / len * 0.5, ny = dx / len * 0.5;
+  /* 线的半宽（`OMNI_R3_LINEW` 是标定用的系数，默认 1 = 一个采样单位的宽度）。
+     大画布上参考的线**更宽**：探针 big_line（`size(20cm)` 的一条对角线，位图 4x2268）
+     我们涂了 4539 个像素、参考 6699（我们 ≈2.0px 宽、参考 ≈2.95px），
+     而 800 画布上那两个线探针是逐字节相同的 —— 也就是线宽在参考里与画布尺寸有关。
+     这一格还没定式，先留系数把账量出来。 */
+  double hw = 0.5 * r3_linew;
+  double nx = -dy / len, ny = dx / len;      /* 单位法向；宽度判据用 hw */
 
   unsigned char cr, cg, cbb;
   {
@@ -1912,8 +1928,8 @@ static void r3_raster_line(const r3scene *s, r3fb *fb, r3v a, r3v b,
         double qx = ax + t * dx, qy = ay + t * dy;
         double ex = sx - qx, ey = sy - qy;
         double d = ex * nx + ey * ny;
-        int hit = t >= 0.0 && t <= 1.0 && d <= 0.5 && d >= -0.5
-                  && sqrt(ex * ex + ey * ey) <= 0.5;
+        int hit = t >= 0.0 && t <= 1.0 && d <= hw && d >= -hw
+                  && sqrt(ex * ex + ey * ey) <= hw;
         /* **线也按"任一采样点被覆盖"收**（与三角那边同一条，见 r3_raster_pix 的头注）：
            中心不在带子里、但有采样点在，GL 一样会跑一次 fragment shader 并写
            `opaqueColor[pixel]`，深度取的还是中心处（外推）。
@@ -1948,12 +1964,12 @@ static void r3_raster_line(const r3scene *s, r3fb *fb, r3v a, r3v b,
         if (t < 0.0 || t > 1.0) continue;
         double px = ax + t * dx, py = ay + t * dy;
         double ex = sx - px, ey = sy - py;
-        if (ex * nx + ey * ny > 0.5 || ex * nx + ey * ny < -0.5) continue;
-        /* 圆盘判据（到线段的欧氏距离 ≤ 0.5）会把**端点附近**削成圆头 ——
-           `OMNI_R3_LINERECT=1` 去掉它，只留"横向 ≤ 0.5 + 沿线 t∈[0,1]"那个矩形带
-           （GL 的线就是以线段为中轴、宽 1 的矩形，端点由菱形出口规则定）。
+        if (ex * nx + ey * ny > hw || ex * nx + ey * ny < -hw) continue;
+        /* 圆盘判据（到线段的欧氏距离 ≤ hw）会把**端点附近**削成圆头 ——
+           `OMNI_R3_LINERECT=1` 去掉它，只留"横向 ≤ hw + 沿线 t∈[0,1]"那个矩形带
+           （GL 的线就是以线段为中轴的矩形，端点由菱形出口规则定）。
            量出来的账见 r3_linerect 那一行上面。 */
-        if (!r3_linerect && sqrt(ex * ex + ey * ey) > 0.5) continue;
+        if (!r3_linerect && sqrt(ex * ex + ey * ey) > hw) continue;
         double z = az + t * (bz - az);
         size_t idx = ((size_t) y * fb->fw + x) * R3_NS + k;
         if (!(z < fb->depth[idx])) continue;
@@ -2084,6 +2100,8 @@ omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
     if (e) r3_opqinline = strcmp(e, "0") != 0; }
   { const char *e = getenv("OMNI_R3_LINERECT");
     if (e) r3_linerect = strcmp(e, "0") != 0; }
+  { const char *e = getenv("OMNI_R3_LINEW");
+    if (e) r3_linew = atof(e); }
   { const char *e = getenv("OMNI_R3_FINTERP");
     if (e) r3_finterp = strcmp(e, "0") != 0; }
   { const char *e = getenv("OMNI_R3_NORMMUL");
