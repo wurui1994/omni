@@ -1356,6 +1356,8 @@ static int r3_linerect = 0;
    下一刀就照 GL 的线光栅化重写（沿主轴步进 + 采样点覆盖），判据用 big_line 的
    "盖住参考 67.8%"。 */
 static double r3_linew = 1.0;
+/* 线的覆盖按 GL 那种**轴对齐带**判（`OMNI_R3_LINEAXIS`）。见 r3_raster_line 里那段注。 */
+static int r3_lineaxis = 0;
 /* varying（法向、视点、顶点色）的插值在 float 里做（`OMNI_R3_FINTERP`）。
    **量过、几乎无差别，默认关**：sph_light 1098 → 1104、sph_obl 1104 → 1098、
    sph_nolight 48 不变。所以那一档 ±1（splitpatch 的 139061 里 95% 只差 1）**不是
@@ -1368,6 +1370,13 @@ static int r3_finterp = 0;
 static int r3_oitpix = 1;
 
 static void r3_pick_samples(void) {
+  /* **采样点位这三族重量过了（2026-09-07 晚，法向已归一、透明已改成逐像素之后）——
+     当前这一族仍然最好，而且不是一点点**：
+       sph_light：当前 **1098**、alt（旋转网格）11127、grid（2x2 规则网格）10074
+       sph_nolight：当前 **48**、alt 8124、grid 7128
+       big_line：当前 6516、alt 6516、grid 20097
+     所以"参考用的是 GL 的旋转网格"这个猜法**否掉**了（memory 里那张旧表也就此更新）。
+     big_line 那 2160 个像素的缺口在三族下一模一样 —— 与采样点位无关，是线宽那一档。 */
   const char *e = getenv("OMNI_R3_SAMPLES");
   if (!e) return;
   if (strcmp(e, "grid") == 0) {
@@ -1959,8 +1968,22 @@ static void r3_raster_line(const r3scene *s, r3fb *fb, r3v a, r3v b,
       for (int k = 0; k < R3_NS; ++k) {
         double sx = x + R3_SAMPLE[k][0];
         double sy = y + R3_SAMPLE[k][1];
+        double t, z;
+        if (r3_lineaxis) {
+          /* **GL 的线光栅化是"轴对齐"的带**（`OMNI_R3_LINEAXIS=1`）：先按 |dx| 与 |dy|
+             定主轴，再沿主轴取参数、在**另一根轴上**量偏移是否 ≤ 半宽。
+             与"垂直距离 ≤ 半宽"差一个 1/cos θ：45° 的线轴对齐带宽是垂直带的 √2 倍。
+             对得上探针 big_line 的数：那条对角线参考涂了 ≈2.95 列、我们（垂直带）2 列，
+             2 × 1.414 = 2.83 —— 就是这一条。 */
+          double off;
+          if (fabs(dx) >= fabs(dy)) { t = (sx - ax) / dx; off = sy - (ay + t * dy); }
+          else { t = (sy - ay) / dy; off = sx - (ax + t * dx); }
+          if (t < 0.0 || t > 1.0) continue;
+          if (off > hw || off < -hw) continue;
+          z = az + t * (bz - az);
+        } else {
         /* 采样点到线段的投影参数与横向距离 */
-        double t = ((sx - ax) * dx + (sy - ay) * dy) / (len * len);
+        t = ((sx - ax) * dx + (sy - ay) * dy) / (len * len);
         if (t < 0.0 || t > 1.0) continue;
         double px = ax + t * dx, py = ay + t * dy;
         double ex = sx - px, ey = sy - py;
@@ -1970,7 +1993,8 @@ static void r3_raster_line(const r3scene *s, r3fb *fb, r3v a, r3v b,
            （GL 的线就是以线段为中轴的矩形，端点由菱形出口规则定）。
            量出来的账见 r3_linerect 那一行上面。 */
         if (!r3_linerect && sqrt(ex * ex + ey * ey) > hw) continue;
-        double z = az + t * (bz - az);
+        z = az + t * (bz - az);
+        }
         size_t idx = ((size_t) y * fb->fw + x) * R3_NS + k;
         if (!(z < fb->depth[idx])) continue;
         fb->depth[idx] = (float) z;
@@ -2102,6 +2126,8 @@ omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
     if (e) r3_linerect = strcmp(e, "0") != 0; }
   { const char *e = getenv("OMNI_R3_LINEW");
     if (e) r3_linew = atof(e); }
+  { const char *e = getenv("OMNI_R3_LINEAXIS");
+    if (e) r3_lineaxis = strcmp(e, "0") != 0; }
   { const char *e = getenv("OMNI_R3_FINTERP");
     if (e) r3_finterp = strcmp(e, "0") != 0; }
   { const char *e = getenv("OMNI_R3_NORMMUL");
