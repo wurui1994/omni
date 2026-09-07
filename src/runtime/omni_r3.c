@@ -1321,6 +1321,12 @@ static double r3_snap = 256.0;
    见 r3_raster_pix 里那段注。量出来的：sacylinder3D 6467 → 1488、
    vectorfieldsphere 112976 → 67387、twoSpheres 219606 → 209791。 */
 static int r3_opqany = 1;
+/* 不透明底色在不透明那一趟里顺手收（`OMNI_R3_OPQINLINE=1`）：按**绘制顺序、后写覆盖
+   先写**（照 GL 的 SSBO 写）。**量过、更差，所以默认关**：sacylinder3D 1488 → 2530、
+   twoSpheres 209791 → 217479、vectorfieldsphere 67387 → 71482。
+   也就是说参考那一格的语义更接近"**取最近**（GL_LESS）+ 任一采样点覆盖"——
+   即 r3_raster_pix 的 phase 0 那一份。开关留着，别再从这一头重挖。 */
+static int r3_opqinline = 0;
 /* 透明那一趟走**逐像素**的链（照 count.glsl / blend.glsl 的结构，见 r3_raster_pix 的
    头注）。**默认开** —— 量出来的账（八个三维例子）：sacylinder3D 18813 → 6449、
    triangles 10574 → 183、twoSpheres 435546 → 296130，没有透明的那几个一个字节不差。
@@ -1502,6 +1508,7 @@ static void r3_raster_tri(const r3scene *s, r3fb *fb, const r3v *P, const r3v *N
     const size_t rowbase = (size_t) y * (size_t) fw;
     for (int x = rx0; x < rx1; ++x) {
       int shaded = 0;
+      int opqwrote = 0;
       unsigned char cr = 0, cg = 0, cb = 0;
       float frgb[3] = { 0, 0, 0 };
       float ablend = alpha;
@@ -1598,6 +1605,21 @@ static void r3_raster_tri(const r3scene *s, r3fb *fb, const r3v *P, const r3v *N
             else cb = q;
           }
           shaded = 1;
+        }
+        /* **逐像素那一路的不透明底色就在这一趟收**（`OMNI_R3_OPQINLINE=0` 退回
+           r3_raster_pix 的 phase 0）。与参考同一条：GL 那边 fragment shader 只要有一个
+           采样点通过深度测试就会跑一次，于是 `opaqueColor[pixel]`/`opaqueDepth[pixel]`
+           被写 —— **按绘制顺序、后写覆盖先写**（不是"取最近"），深度取 `gl_FragCoord.z`
+           （像素中心处的插值）、颜色就是这一片在中心处的着色（上面那个 frgb）。 */
+        if (opaque && fb->pdep && r3_opqinline && !opqwrote) {
+          double px = x + 0.5, py = y + 0.5;
+          double c0 = ((wx1 - px) * (wy2 - py) - (wx2 - px) * (wy1 - py)) * inv2a;
+          double c1 = ((wx2 - px) * (wy0 - py) - (wx0 - px) * (wy2 - py)) * inv2a;
+          double c2 = 1.0 - c0 - c1;
+          size_t pix = rowbase + (size_t) x;
+          fb->pdep[pix] = (float) (c0 * wz0 + c1 * wz1 + c2 * wz2);
+          for (int i = 0; i < 3; ++i) fb->pcol[pix * 3 + i] = frgb[i];
+          opqwrote = 1;
         }
         if (!opaque) {
           /* 只填那一趟：片元进这个采样点自己那一段。
@@ -1995,6 +2017,8 @@ omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
     if (e) r3_snap = atof(e); }
   { const char *e = getenv("OMNI_R3_OPQANY");
     if (e) r3_opqany = strcmp(e, "0") != 0; }
+  { const char *e = getenv("OMNI_R3_OPQINLINE");
+    if (e) r3_opqinline = strcmp(e, "0") != 0; }
   { const char *e = getenv("OMNI_R3_PIX");
     if (e) {
       char *q = NULL;
@@ -2251,11 +2275,13 @@ omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
         if (!fb.pdep) fb.pdep = (float *) calloc(npx, sizeof(float));
         fb.tcnt = (unsigned *) calloc(npx + 1, sizeof(unsigned));
         if (fb.pcol && fb.pdep && fb.tcnt) {
-          for (size_t t = 0; t < ntr; ++t) {
-            if (r3_tri_transparent(&tris, t)) continue;
-            r3_raster_pix(&S, &fb, tris.pos + 3 * t, tris.nrm + 3 * t, tris.mat[t],
-                          r3_tri_vcol(&tris, t), 0);
-          }
+          /* phase 0（收不透明底色）：`r3_opqinline` 开着时不透明那一趟已经顺手收过了 */
+          if (!r3_opqinline)
+            for (size_t t = 0; t < ntr; ++t) {
+              if (r3_tri_transparent(&tris, t)) continue;
+              r3_raster_pix(&S, &fb, tris.pos + 3 * t, tris.nrm + 3 * t, tris.mat[t],
+                            r3_tri_vcol(&tris, t), 0);
+            }
           for (size_t t = 0; t < ntr; ++t) {
             if (!r3_tri_transparent(&tris, t)) continue;
             r3_raster_pix(&S, &fb, tris.pos + 3 * t, tris.nrm + 3 * t, tris.mat[t],

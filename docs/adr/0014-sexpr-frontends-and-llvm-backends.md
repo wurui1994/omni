@@ -12498,6 +12498,12 @@ sacylinder3D 6449 → 6467（略差 18 个字节）；`flat_trans`/`edge_trans` 
 twoSpheres 219606 → **209791**、探针 `sph_trans` **429 → 27**；
 `flat_trans`/`edge_trans` 仍逐字节相同，不透明的例子一个字节不差。
 
+**同一刀里试过、更差的一档（第四条负结果）**：把不透明底色改成**在不透明那一趟里顺手收**
+（`OMNI_R3_OPQINLINE=1`，按绘制顺序、后写覆盖先写 —— 照 GL 的 SSBO 写语义）：
+sacylinder3D 1488 → **2530**、twoSpheres 209791 → **217479**、
+vectorfieldsphere 67387 → **71482**。所以参考那一格更接近"**取最近（GL_LESS）+
+任一采样点覆盖**"，也就是 `r3_raster_pix` 的 phase 0 那一份。开关留着，别再从这一头重挖。
+
 **第十四刀（已做）：`Epsilon`（消裂缝的内收）的透明判据要连顶点色的 alpha 一起看。**
 参考那边 `BezierPatch::init` 里 `Epsilon = transparent ? 0 : FillFactor*res`，而那一位
 `transparent` 是 `queue(...)` 传进来的 —— 在 drawsurface 那层它是"材质的 alpha **或顶点色的
