@@ -1690,7 +1690,12 @@ static void r3_raster_pix(const r3scene *s, r3fb *fb, const r3v *P, const r3v *N
       double a1 = ((wx2 - px) * (wy0 - py) - (wx0 - px) * (wy2 - py)) * inv2a;
       if (a1 < 0.0 || (a1 == 0.0 && !tb1)) continue;
       double a2 = 1.0 - a0 - a1;
-      if (a2 < 0.0 || (a2 == 0.0 && !tb2)) continue;
+      /* 第三条判据用**真正的第三条边函数**，不用 `1-a0-a1`：后者的"恰好为 0"与
+         "采样点正好落在 v0->v1 那条边上"不是一回事（差一次舍入），而填充规则的
+         tie-break 只在恰好为 0 时起作用。插值照旧用 a2（与原来逐位相同）。
+         量出来的：flat_trans 那条对角线 1740 -> 0。 */
+      double e2 = ((wx0 - px) * (wy1 - py) - (wx1 - px) * (wy0 - py)) * inv2a;
+      if (e2 < 0.0 || (e2 == 0.0 && !tb2)) continue;
       double z = a0 * wz0 + a1 * wz1 + a2 * wz2;
       size_t pix = (size_t) y * (size_t) fb->fw + (size_t) x;
       if (phase == 0) {
