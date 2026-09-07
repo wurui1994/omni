@@ -1625,9 +1625,35 @@ static int r3_word(r3lex *L, char *buf, size_t cap) {
   return 1;
 }
 
+/* 一个数。十进制照旧收（手写的清单单测里全是十进制），另外收一种
+   **`x` 开头的十六进制位模式** —— 那就是这个 double 的 64 位原样，asy 那侧
+   `_rhex`（= 方言的 `(sbase (realbits v) 16)`）写的。
+   为什么加这一路：`string(v, 17)` 那一次 snprintf 是清单构建里最贵的一格
+   （剖 pdb：`sn` 1022 万次调用、自用 3.34s，`OMNI_PROFILE=1` 排前列），
+   而位模式两侧都便宜、而且是**精确**的（不像十进制要靠 17 位才round-trip）。 */
 static int r3_num(r3lex *L, double *out) {
   char buf[64];
   if (!r3_word(L, buf, sizeof buf)) return 0;
+  if (buf[0] == 'x') {
+    /* 整词都得是十六进制：只判"有没有数字"不够 —— strtoull 会吞前导空白、收 `+`/`-`，
+       超过 16 位还会回 ULLONG_MAX 而不报错，于是 `x-1` / `x1zz` / `x1ffffffffffffffff`
+       会静默变成一个毫无关系的 double（位模式差一位就是完全另一个数）。 */
+    int nd = 0;
+    for (const char *q = buf + 1; *q != 0; ++q) {
+      int hex = (*q >= '0' && *q <= '9') || (*q >= 'a' && *q <= 'f') || (*q >= 'A' && *q <= 'F');
+      if (!hex) return 0;
+      nd++;
+    }
+    if (nd < 1 || nd > 16) return 0;
+    char *e = NULL;
+    unsigned long long b = strtoull(buf + 1, &e, 16);
+    if (e != buf + 1 + nd) return 0;
+    uint64_t u = (uint64_t) b;
+    double v;
+    memcpy(&v, &u, sizeof v);
+    *out = v;
+    return 1;
+  }
   char *e = NULL;
   double v = strtod(buf, &e);
   if (e == buf) return 0;

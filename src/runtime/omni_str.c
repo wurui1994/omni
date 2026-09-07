@@ -48,15 +48,26 @@ omni_str omni_str_join(const omni_str *items, int64_t n, omni_str sep) {
 }
 
 omni_str omni_str_fmt(const char *fmt, ...) {
+  /* **先往栈上那块写，够用就只格式化一遍**。从前是 `vsnprintf(NULL,0,…)` 先量长度、
+     再写一遍 —— 对 `%.17g` 来说那次 double->十进制的转换做了**两次**。
+     量出来（pdb，`OMNI_PROFILE=1`）：三维清单里的 `sn` = `string(v,17)` 被调 1022 万次、
+     自用 5.9s 排第一，而它的时间几乎全在这两遍上。这条路是整条 C 腿公用的
+     （`string(real)` / `string(int)` / `format` 都过它），所以收益不止三维那一路。
+     输出逐字节不变：同一个 vsnprintf、同一个格式串。 */
+  char tmp[256];
   va_list ap;
   va_start(ap, fmt);
-  int n = vsnprintf(NULL, 0, fmt, ap);
+  int n = vsnprintf(tmp, sizeof tmp, fmt, ap);
   va_end(ap);
   if (n < 0) omni_error("formatting failed");
   char *buf = omni_alloc_bytes((int64_t)n + 1);
-  va_start(ap, fmt);
-  vsnprintf(buf, (size_t)n + 1, fmt, ap);
-  va_end(ap);
+  if ((size_t)n < sizeof tmp) {
+    memcpy(buf, tmp, (size_t)n + 1);
+  } else {
+    va_start(ap, fmt);
+    vsnprintf(buf, (size_t)n + 1, fmt, ap);
+    va_end(ap);
+  }
   return omni_str_new(buf, n);
 }
 

@@ -1785,11 +1785,38 @@ private real asy__scornerbound(real[] P, bool mx) {
   return asy__rm(mx, b, P[15]);
 }
 
+// bound.cc:96 的 controlbound（四边面片版：十六个控制点里**除四个角**那十二个）。
+// 与 `asy__scontrolboundtri` 同一条：索引是常量，`int[] k = {…}` 那一句每次调用都新建
+// 一个数组（arena 分配），摊开成直接下标。`asy__rm` 也摊开（mx 提到外面）。
+// **逐位不变**：归约顺序照旧 1,2,4,5,6,7,8,9,10,11,13,14。
 private real asy__scontrolbound(real[] P, bool mx) {
-  int[] k = {1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14};
-  real b = asy__rm(mx, P[1], P[2]);
-  for (int i = 2; i < k.length; ++i) b = asy__rm(mx, b, P[k[i]]);
-  return b;
+  real p1 = P[1]; real p2 = P[2]; real p4 = P[4]; real p5 = P[5];
+  real p6 = P[6]; real p7 = P[7]; real p8 = P[8]; real p9 = P[9];
+  real p10 = P[10]; real p11 = P[11]; real p13 = P[13]; real p14 = P[14];
+  if (mx) {
+    real b = p1 > p2 ? p1 : p2;
+    b = b > p4 ? b : p4;
+    b = b > p5 ? b : p5;
+    b = b > p6 ? b : p6;
+    b = b > p7 ? b : p7;
+    b = b > p8 ? b : p8;
+    b = b > p9 ? b : p9;
+    b = b > p10 ? b : p10;
+    b = b > p11 ? b : p11;
+    b = b > p13 ? b : p13;
+    return b > p14 ? b : p14;
+  }
+  real b = p1 < p2 ? p1 : p2;
+  b = b < p4 ? b : p4;
+  b = b < p5 ? b : p5;
+  b = b < p6 ? b : p6;
+  b = b < p7 ? b : p7;
+  b = b < p8 ? b : p8;
+  b = b < p9 ? b : p9;
+  b = b < p10 ? b : p10;
+  b = b < p11 ? b : p11;
+  b = b < p13 ? b : p13;
+  return b < p14 ? b : p14;
 }
 
 // bound.cc:52 的 bound（标量版，十六个控制点的面片）
@@ -1845,11 +1872,29 @@ private real asy__scornerboundtri(real[] P, bool mx) {
   return asy__rm(mx, b, P[9]);
 }
 
+// bound.cc:96 的 controlboundtri：**除三个角点（0/6/9）之外**那七个控制点上取界。
+// 索引是常量，**别用 `int[] k = {…}` 加循环** —— 那一句每次调用都新建一个数组
+// （1557 万次调用就是 1557 万次 arena 分配），量出来自用 6.58s 排第二。
+// `asy__rm` 也一并摊开（`mx` 提到外面分两支，顺带省掉每次那个分支）：
+// 它是 `mx ? (a>b?a:b) : (a<b?a:b)`，-O0 下被调方标 inline 没用（见 emit.js 的 proto()）。
+// **逐位不变**：归约顺序照旧 1,2,3,4,5,7,8。
 private real asy__scontrolboundtri(real[] P, bool mx) {
-  int[] k = {1, 2, 3, 4, 5, 7, 8};
-  real b = asy__rm(mx, P[1], P[2]);
-  for (int i = 2; i < k.length; ++i) b = asy__rm(mx, b, P[k[i]]);
-  return b;
+  real p1 = P[1]; real p2 = P[2]; real p3 = P[3]; real p4 = P[4];
+  real p5 = P[5]; real p7 = P[7]; real p8 = P[8];
+  if (mx) {
+    real b = p1 > p2 ? p1 : p2;
+    b = b > p3 ? b : p3;
+    b = b > p4 ? b : p4;
+    b = b > p5 ? b : p5;
+    b = b > p7 ? b : p7;
+    return b > p8 ? b : p8;
+  }
+  real b = p1 < p2 ? p1 : p2;
+  b = b < p3 ? b : p3;
+  b = b < p4 ? b : p4;
+  b = b < p5 ? b : p5;
+  b = b < p7 ? b : p7;
+  return b < p8 ? b : p8;
 }
 
 // bound.cc:102 的 boundtri（标量版，十个控制点的三角面片）。
@@ -2247,6 +2292,14 @@ struct frame {
   triple max3v = (0, 0, 0);
   pair minr = (0, 0);
   pair maxr = (0, 0);
+  // 「这一帧的三维界是否**完全来自 op 表里的几何**」的缓存（第八十九刀）：
+  // 0 = 还没算过、1 = 是、2 = 不是。`real[][] * frame` 换真界之前要拿它做自检
+  // （drawTube/drawpixel/三角网格/drawSphere 那几格只记界不留图，走 op 表会把界缩小），
+  // 而**这是帧自己的性质、与乘什么变换无关** —— 从前每乘一次帧就重算一遍自检，
+  // 于是每片面片的界被算了几十遍。量出来的（pdb，OMNI_PROFILE=1）：帧被乘了 16 次，
+  // `asy__addtri3` 4184064 次、`asy__pboundtri` 7450312 次，而那张图只有 119576 片。
+  // 往帧上再加东西时要作废它，见 asy__push3。
+  int b3fromops = 0;
   // 三维那一层的**几何**（位图那一档要它）：真正的 op 表挂在旁边一张登记册上
   // （`asy__f3tab`，见 asy__push3 那一段）—— 不能直接放这儿，因为 `path3` 与
   // `triple[][]` 都在这个文件后面才定义，而 asy 的名字解析是顺着来的。
@@ -7138,10 +7191,51 @@ real[][] operator *(real[][] a, real[][] b) {
 }
 triple operator *(real[][] t, triple v) {
   if (t.length != 4) abort("real[][]*triple: 要 4x4");
-  real[] b = {v.x, v.y, v.z, 1};
-  real[] r = t * b;
-  if (r[3] == 0) abort("real[][]*triple: 第四行算出来是 0");
-  return (r[0] / r[3], r[1] / r[3], r[2] / r[3]);
+  // **不要 `real[] b = {v.x, v.y, v.z, 1}; real[] r = t * b;`**（第九十二刀）：
+  // 那是每次调用两次 arena 分配（齐次向量 + 结果），而这一格在三维那一路上被调
+  // 2578 万次（pdb，`OMNI_PROFILE=1` 自用时间排第三）。直接把四行点积摊开。
+  // **逐位不变**：保留 `0 +` 的起头与 `* 1` 的末项，与 `real[][] * real[]` 里
+  // `sum` 从 0 开始逐项累加的顺序完全一致（`0 + (-0.0)` 是 +0.0，这一格不能省）。
+  real x = v.x; real y = v.y; real z = v.z;
+  real[] t0 = t[0]; real[] t1 = t[1]; real[] t2 = t[2]; real[] t3 = t[3];
+  real r0 = 0 + t0[0] * x + t0[1] * y + t0[2] * z + t0[3] * 1;
+  real r1 = 0 + t1[0] * x + t1[1] * y + t1[2] * z + t1[3] * 1;
+  real r2 = 0 + t2[0] * x + t2[1] * y + t2[2] * z + t2[3] * 1;
+  real r3 = 0 + t3[0] * x + t3[1] * y + t3[2] * z + t3[3] * 1;
+  if (r3 == 0) abort("real[][]*triple: 第四行算出来是 0");
+  return (r0 / r3, r1 / r3, r2 / r3);
+}
+
+// 4x4 摊成十六格**标量**。`real[][] * triple` 每次调用要摸二十次数组（4 行 + 16 格，
+// 每一格都带越界预检与一次取长度），而三维那一路上它被调 2578 万次（pdb，自用 3.5s
+// 排前三）。把矩阵在**循环外**摊成一个记录，逐点就只剩十六次字段读。
+// 表达式次序与上面那份一字不差（`0 +` 起头、`* 1` 末项、同一条 r3 判据），所以逐位相同。
+struct asy__m16 {
+  real a00; real a01; real a02; real a03;
+  real a10; real a11; real a12; real a13;
+  real a20; real a21; real a22; real a23;
+  real a30; real a31; real a32; real a33;
+}
+
+asy__m16 asy__m16of(real[][] t) {
+  if (t.length != 4) abort("real[][]*triple: 要 4x4");
+  real[] t0 = t[0]; real[] t1 = t[1]; real[] t2 = t[2]; real[] t3 = t[3];
+  asy__m16 m;
+  m.a00 = t0[0]; m.a01 = t0[1]; m.a02 = t0[2]; m.a03 = t0[3];
+  m.a10 = t1[0]; m.a11 = t1[1]; m.a12 = t1[2]; m.a13 = t1[3];
+  m.a20 = t2[0]; m.a21 = t2[1]; m.a22 = t2[2]; m.a23 = t2[3];
+  m.a30 = t3[0]; m.a31 = t3[1]; m.a32 = t3[2]; m.a33 = t3[3];
+  return m;
+}
+
+triple asy__m16mul(asy__m16 m, triple v) {
+  real x = v.x; real y = v.y; real z = v.z;
+  real r0 = 0 + m.a00 * x + m.a01 * y + m.a02 * z + m.a03 * 1;
+  real r1 = 0 + m.a10 * x + m.a11 * y + m.a12 * z + m.a13 * 1;
+  real r2 = 0 + m.a20 * x + m.a21 * y + m.a22 * z + m.a23 * 1;
+  real r3 = 0 + m.a30 * x + m.a31 * y + m.a32 * z + m.a33 * 1;
+  if (r3 == 0) abort("real[][]*triple: 第四行算出来是 0");
+  return (r0 / r3, r1 / r3, r2 / r3);
 }
 
 // 4x4 齐次变换作用在**整条 path3** 上（three.asy:1951 的 `t*p[i]`）。位置在这儿是
@@ -7149,11 +7243,15 @@ triple operator *(real[][] t, triple v) {
 path3 operator *(real[][] t, path3 p) {
   path3 h;
   h.cyclic = p.cyclic;
+  // 矩阵摊在循环外（见 asy__m16of）：一个节点要乘三个点，逐点省二十次数组访问。
+  // 空路径上不摊 —— asy__m16of 会对不是 4x4 的 t 直接 abort，而空路径本来一个点都不乘。
+  asy__m16 m;
+  if (p.nodes.length > 0) m = asy__m16of(t);
   for (int i = 0; i < p.nodes.length; ++i) {
     knot3 k;
-    k.pre = t * p.nodes[i].pre;
-    k.point = t * p.nodes[i].point;
-    k.post = t * p.nodes[i].post;
+    k.pre = asy__m16mul(m, p.nodes[i].pre);
+    k.point = asy__m16mul(m, p.nodes[i].point);
+    k.post = asy__m16mul(m, p.nodes[i].post);
     k.straight = p.nodes[i].straight;
     h.nodes.push(k);
   }
@@ -10692,7 +10790,8 @@ private int asy__f3id(frame f) {
   }
   return f.f3id;
 }
-void asy__push3(frame f, drawop3 o) { asy__f3tab[asy__f3id(f)].push(o); }
+// 往帧上加一格三维 op：`b3fromops` 那个缓存要作废（界与 op 表的关系变了）
+void asy__push3(frame f, drawop3 o) { f.b3fromops = 0; asy__f3tab[asy__f3id(f)].push(o); }
 drawop3[] asy__ops3(frame f) {
   return f.f3id < 0 ? new drawop3[] : asy__f3tab[f.f3id];
 }
@@ -10734,6 +10833,11 @@ private void asy__merge3hook() {
     // -> 就是这一格 `add(frame,frame)`。asy 那边帧的界是逐个 drawelement 走出来的，
     // 所以合并才是正解。
     if (src.has3) {
+      // 界一动就把那个自检的答案作废（与 `asy__add3` 里同一处理）。**不作废会丢界**：
+      // src 的界不是从 op 表算出来的时（drawTube/drawpixel/三角网只记界、op 表可能是空的），
+      // 上面那个 push 循环一次都不跑，`dest.b3fromops` 就留在旧的 1 上；
+      // 之后 `real[][] * frame` 会据此跳过自检、拿"只由 op 表算出来的界"覆盖掉合并进来的这一段。
+      dest.b3fromops = 0;
       if (!dest.has3) {
         dest.has3 = true;
         dest.min3v = src.min3v; dest.max3v = src.max3v;
@@ -10868,8 +10972,31 @@ private void asy__merge3hook() {
     {
       // `OMNI_R3_NOFMT=1` 时不做数字格式化（**只用来量口**：清单里的数全成 0，
       // 图当然是废的）—— 拿它把"格式化 double"与"拼串 + 上游的投影"分开算账。
+      // 试过把这一格挪到文件级、好让 `sn` 不捕获任何东西（省一层闭包间接）——
+      // **没有收益**（pdb 每趟 9.94s → 9.87s，噪声内）：嵌套函数在这一层一律发成闭包。
+      //
+      // 数发的是**位模式的十六进制**（`x` 前缀），不是 `string(v, 17)`：清单是我们自己
+      // 与运行时之间的格式，十进制那 17 位只是为了 round-trip，而位模式本来就是精确的。
+      // 从前那一句是清单构建里最贵的一格（剖 pdb：`sn` 1022 万次调用、自用 5.9s→3.34s
+      // 之后仍排前列，全在 snprintf("%.17g") 上）。运行时那侧十进制照旧收
+      // （omni_r3.c 的 r3_num），所以手写的清单单测一个字都不用改。
       bool nofmt = _getsetting("OMNI_R3_NOFMT") != "";
-      string sn(real v) { return nofmt ? "0" : string(v, 17); }
+      // `OMNI_R3_NODEDUP=1` 关掉下面那格"mat 行不重复发"（**只用来查账**：图不变，
+      // 清单会大一截）。查过一次：twoSpheres 两边都是 435542 个字节不同，
+      // 也就是去重这一刀在透明那一族上也是逐字节中性的。与 nofmt 一样在这儿读一次 ——
+      // 逐 op 去问宿主的环境是每个面片一次 getenv，那比它省下来的多。
+      bool nodedup = _getsetting("OMNI_R3_NODEDUP") != "";
+      // 整数值那一族**照旧写十进制**：清单里 0/1/2/-1 极多（每条 mat 十四个数里大半是），
+      // 位模式反而更长（`1` → `x3ff0000000000000`，十七个字节）。量出来的：只发位模式时
+      // pdb 的清单 80MB → 84.7MB、解析 0.97s → 1.05s，两头都变差。
+      // `(real)((int) v) == v` 是整数判据（先夹一道量级免得转换溢出）；
+      // **-0 单独一条** —— 它等于 0，写成 `"0"` 就把符号丢了，而 0 的符号会顺着运算传下去。
+      string sn(real v) {
+        if (nofmt) return "0";
+        if (v == 0) return 1 / v < 0 ? "x8000000000000000" : "0";
+        if (v > -1e15 && v < 1e15 && (real) ((int) v) == v) return string((int) v);
+        return "x" + _rhex(v);
+      }
       string sv(triple v) { return " " + sn(v.x) + " " + sn(v.y) + " " + sn(v.z); }
       // **清单是攒成一段段再合的**，不是一路 `s = s + …`：那一句在 C 那条腿上是
       // 每次重新分配再拷一遍（omni_str 不可变），面片一多就是 O(n^2) ——
@@ -10917,6 +11044,48 @@ private void asy__merge3hook() {
           + " " + sn(o.shininess) + " " + sn(o.metallic) + " " + sn(o.fresnel0)
           + " " + (o.lightOn && asy__r3lights.length > 0 ? "1" : "0") + nl;
       }
+      // **同一条 mat 行不重复发。** 一次 `draw(surface, …)` 里所有面片共享同一个 material，
+      // 逐片再发一遍就是十万行一模一样的字（pdb 里 119576 条 mat，一行十四个数）。
+      // 运行时那侧图元指的本来就是"最近一条 mat"（omni_r3.c 的 `mats + (nmat - 1)`），
+      // 所以少发一条不影响任何一片；第一条一定会发（`lastmat[0]` 起头是空串）。
+      // 记在**一格数组**里而不是普通局部：嵌套函数捕获这一层不保证按引用，
+      // 而数组的内容是共享的（引用本身按值抄也一样对）。
+      string[] lastmat = {""};
+      // 上一条 mat 的**输入**（三支笔按值 + 五个标量）。有了这一格就连"重新算一遍
+      // penrgb + 十四次 sn + 十几次拼串"都省了 —— `mat` 那一行只跟这几样有关，
+      // 而一次 draw 里所有面片是同一个 material，所以绝大多数 op 走的是这条早退。
+      // `pen[] == pen[]` 在 asy 里是**逐元素**的（回 bool[]，不是身份比较，量过），
+      // 所以这儿逐支笔比（`pen == pen` 是按值的单个 bool）；长度也进键，
+      // 免得"第二支笔缺席"与"第二支笔正好是默认笔"混成一样。
+      int[] lastn = {-1};
+      pen[] lastpc = new pen[3];
+      real[] lastsc = {2, 2, 2, 2};
+      int[] lastlt = {-1};
+      string matline(drawop3 o) {
+        if (nodedup) return mline(o);   // 只用来查账，见上面 nodedup 那一格
+        int np = o.p.length;
+        int lt = o.lightOn ? 1 : 0;
+        bool same = np == lastn[0] && lt == lastlt[0]
+          && o.opacity == lastsc[0] && o.shininess == lastsc[1]
+          && o.metallic == lastsc[2] && o.fresnel0 == lastsc[3];
+        if (same) {
+          for (int i = 0; i < np && i < 3; ++i) {
+            if (!(o.p[i] == lastpc[i])) { same = false; break; }
+          }
+        }
+        if (same) return "";
+        lastn[0] = np;
+        lastlt[0] = lt;
+        lastsc[0] = o.opacity;
+        lastsc[1] = o.shininess;
+        lastsc[2] = o.metallic;
+        lastsc[3] = o.fresnel0;
+        for (int i = 0; i < 3; ++i) if (i < np) lastpc[i] = o.p[i];
+        string s = mline(o);
+        if (s == lastmat[0]) return "";
+        lastmat[0] = s;
+        return s;
+      }
       for (int i = 0; i < ops.length; ++i) {
         drawop3 o3 = ops[i];
         if (o3.p.length > 0 && invisible(o3.p[0])) continue;
@@ -10940,7 +11109,7 @@ private void asy__merge3hook() {
           // 重新分配再把已攒的部分拷一遍（omni_str 不可变），一片面片 16 圈就是十几 KB 的
           // memmove。剖 sinc（run-c）：`_platform_memmove` 295 个栈顶样本排第一，
           // 全在 `omni_str_cat` 底下。拼接的次序一字不变，所以清单逐字节相同。
-          pp.push(mline(o3) + pcline(o3.colors, 4) + "patch " + (o3.straight ? "1" : "0"));
+          pp.push(matline(o3) + pcline(o3.colors, 4) + "patch " + (o3.straight ? "1" : "0"));
           for (int a = 0; a < 4; ++a)
             for (int b = 0; b < 4; ++b) pp.push(sv(P[a][b]));
           pp.push(nl);
@@ -10954,7 +11123,7 @@ private void asy__merge3hook() {
           // 逐段 push，**不要**先拼成一整行：`a + sv(...) + sv(...) + …` 是把一条
           // 600 字节的串重新分配 + 拷贝十来遍（omni_str 不可变），pdb 那 119576 片
           // 就是 0.7 GB 的 memmove。合并交给下面的两两归并（结果逐字节一样）。
-          pp.push(mline(o3) + pcline(o3.colors, 3) + "btri " + (o3.straight ? "1" : "0"));
+          pp.push(matline(o3) + pcline(o3.colors, 3) + "btri " + (o3.straight ? "1" : "0"));
           pp.push(sv(P[0][0])); pp.push(sv(P[1][0])); pp.push(sv(P[1][1]));
           pp.push(sv(P[2][0])); pp.push(sv(P[2][1])); pp.push(sv(P[2][2]));
           pp.push(sv(P[3][0])); pp.push(sv(P[3][1])); pp.push(sv(P[3][2]));
@@ -10972,7 +11141,7 @@ private void asy__merge3hook() {
           string tn = "";
           if (o3.N3.length >= 3)
             tn = "tnrm" + sv(o3.N3[0]) + sv(o3.N3[1]) + sv(o3.N3[2]) + nl;
-          pp.push(mline(o3) + pcline(o3.VC, 3) + tn + "tri");
+          pp.push(matline(o3) + pcline(o3.VC, 3) + tn + "tri");
           pp.push(sv(T[0])); pp.push(sv(T[1])); pp.push(sv(T[2]));
           pp.push(nl);
           nink = nink + 1;
@@ -10984,7 +11153,7 @@ private void asy__merge3hook() {
           int L = g.nodes.length;
           if (L < 2) continue;
           // 逐段 push，理由同上面那族（`s = s + "bez" …` 是 O(段数²) 的 memmove）
-          pp.push(mline(o3));
+          pp.push(matline(o3));
           // 段数 = cyclic 时 L、否则 L-1（length(path3) 就是这么定的）；cyclic 的收尾段
           // 是 L-1 → 0，从前写成 `a + 1 < L` 把它整段漏掉了（circle(O,2) 只发 3 条 bez）
           int nseg = g.cyclic ? L : L - 1;
@@ -11521,6 +11690,7 @@ private triple[] asy__split3(triple z0, triple c0, triple c1, triple z1) {
 
 void asy__add3(frame f, triple v)
 {
+  f.b3fromops = 0;   // 界动了，那个自检的答案要重算（见 struct frame 的 b3fromops）
   real rx = v.z == 0 ? 0 : v.x / v.z;
   real ry = v.z == 0 ? 0 : v.y / v.z;
   if (!f.has3) {
@@ -11529,6 +11699,12 @@ void asy__add3(frame f, triple v)
     f.minr = (rx, ry); f.maxr = (rx, ry);
     return;
   }
+  // **试过把下面这六次调用摊开（minbound/maxbound/min/max），没有收益，别再试。**
+  // 这一格 pdb 上被调 524 万次，六次调用就是三千万次真调用（-O0 下 static 不内联），
+  // 剖出来这一族自用合计 3.2s —— 但摊开之后 pdb 5.87s→5.95s / 12.86s→13.05s，
+  // 略微更差（七个例子逐字节不变，所以摊开本身是对的，只是不值）。
+  // 与"六界融合"那一刀同一个教训：自用时间里有很大一块是插桩自己的两回 clock_gettime，
+  // 高频叶子被撑大了。到这一步，剩下的每调用开销已经不是钱所在。
   f.min3v = minbound(f.min3v, v);
   f.max3v = maxbound(f.max3v, v);
   f.minr = (min(f.minr.x, rx), min(f.minr.y, ry));
@@ -11571,9 +11747,25 @@ private void asy__add3(frame f, path3 g)
 // 原先这儿走的是 `asy__add3(f, P)`（控制点凸包）—— 凸包偏大。量出来（cylinder）：
 // 位图从 412x400 变成 412x404，**高对上了参考的 404**；宽还是 412 对 404，
 // 那 8px（2pt）另有来处（见 ADR「界那一侧」）。
+// 求界那三格分量的**工作缓冲**（模块级、长度固定，复用）。从前 `asy__addpatch3` /
+// `asy__addtri3` 每片都新建三个数组再逐个 push —— pdb 上这两个合起来两百多万次调用，
+// 也就是六七百万次 arena 分配加增长搬家。**四边（16 格）与三角（10 格）各一套**：
+// `asy__norminf` 与 `asy__sbound*` 读的是 `.length`，两族共用一套会把多出来的格子算进去。
+// 复用安全的理由：这两个函数不重入（体里不会再调到自己），而递归那一支
+// （`asy__sbound*` 里的 L/R/U/C）照旧现造 —— 那是真需要的数据，也只在少数片上走。
+private real[] asy__cb16x = new real[16];
+private real[] asy__cb16y = new real[16];
+private real[] asy__cb16z = new real[16];
+private real[] asy__cb10x = new real[10];
+private real[] asy__cb10y = new real[10];
+private real[] asy__cb10z = new real[10];
+
 private void asy__addpatch3(frame f, triple[][] P, bool straight)
 {
-  if (P.length < 4 || P[0].length < 4 || P[3].length < 4) { asy__add3(f, P); return; }
+  // 退化的面片（哪一行不足四格都算）交给逐点取界那一路。四行都要查 ——
+  // 下面填缓冲的双层循环按 j<4 读 P[1]/P[2]，只查首末两行的话那两行短了就会越界。
+  if (P.length < 4 || P[0].length < 4 || P[1].length < 4
+      || P[2].length < 4 || P[3].length < 4) { asy__add3(f, P); return; }
   if (straight) {
     asy__add3(f, P[0][0]);
     asy__add3(f, P[0][3]);
@@ -11581,11 +11773,13 @@ private void asy__addpatch3(frame f, triple[][] P, bool straight)
     asy__add3(f, P[3][3]);
     return;
   }
-  real[] cx; real[] cy; real[] cz;
+  real[] cx = asy__cb16x; real[] cy = asy__cb16y; real[] cz = asy__cb16z;
+  int k = 0;
   for (int i = 0; i < 4; ++i)
     for (int j = 0; j < 4; ++j) {
       triple v = P[i][j];
-      cx.push(v.x); cy.push(v.y); cz.push(v.z);
+      cx[k] = v.x; cy[k] = v.y; cz[k] = v.z;
+      k = k + 1;
     }
   real fx = asy__Fuzz * asy__norminf(cx);
   real fy = asy__Fuzz * asy__norminf(cy);
@@ -11614,17 +11808,59 @@ private void asy__addpatch3(frame f, triple[][] P, bool straight)
   asy__add3(f, (X, Y, Z));
 }
 
+// 一个分量上**第 0 层的两个界**（min 与 max 一趟算完），结果写进 out：
+//   out[0] = min 那一侧的界、out[1] = max 那一侧的界、
+//   out[2]/out[3] 非零表示"控制点跑出角界超过 fuzz，这一侧要退回递归那份"。
+// 为什么要它：`asy__addtri3` 从前对 min/max × x/y/z 各调一次 `asy__sboundtri`，
+// 每次再各调一次 `asy__scornerboundtri` / `asy__scontrolboundtri` —— 剖 pdb 出来
+// 这三样合起来自用 9s（1557 万次 sboundtri）。而绝大多数三角面片在第 0 层就返回，
+// 那一层的活是"三个角点取极值 + 七个控制点取极值"，两侧共用同一批读数。
+// **逐位一致**：`asy__rm(mx, b, 角界)` 摊成两支（种子在前、角界在后，次序照原样）、
+// 角界照 0/6/9、控制界照 1,2,3,4,5,7,8、判据照 `sgn * (bb - ctrl) >= -fuzz`
+// （min 那支写成 `-(blo - kmin)`，与 `-1 * x` 逐位相同）。跑出 fuzz 的那一侧
+// 退回 `asy__sboundtri`，参数一个字不改，所以那一路也逐位相同。
+private void asy__sbound2tri(real[] P, real slo, real shi, real fuzz, real[] out) {
+  real p0 = P[0]; real p1 = P[1]; real p2 = P[2]; real p3 = P[3]; real p4 = P[4];
+  real p5 = P[5]; real p6 = P[6]; real p7 = P[7]; real p8 = P[8]; real p9 = P[9];
+  real cmin = p0 < p6 ? p0 : p6;
+  cmin = cmin < p9 ? cmin : p9;
+  real cmax = p0 > p6 ? p0 : p6;
+  cmax = cmax > p9 ? cmax : p9;
+  real blo = slo < cmin ? slo : cmin;
+  real bhi = shi > cmax ? shi : cmax;
+  real kmin = p1 < p2 ? p1 : p2;
+  kmin = kmin < p3 ? kmin : p3;
+  kmin = kmin < p4 ? kmin : p4;
+  kmin = kmin < p5 ? kmin : p5;
+  kmin = kmin < p7 ? kmin : p7;
+  kmin = kmin < p8 ? kmin : p8;
+  real kmax = p1 > p2 ? p1 : p2;
+  kmax = kmax > p3 ? kmax : p3;
+  kmax = kmax > p4 ? kmax : p4;
+  kmax = kmax > p5 ? kmax : p5;
+  kmax = kmax > p7 ? kmax : p7;
+  kmax = kmax > p8 ? kmax : p8;
+  out[0] = blo;
+  out[1] = bhi;
+  out[2] = -(blo - kmin) >= -fuzz ? 0 : 1;
+  out[3] = bhi - kmax >= -fuzz ? 0 : 1;
+}
+
 // 三角面片那一格的界（drawsurface.cc 里 drawBezierTriangle::bounds，与四边那格同构：
 // 直面片只取三个角 0/6/9，其余对 x/y/z 各跑一遍 boundtri）
 private void asy__addtri3(frame f, triple[][] P, bool straight)
 {
-  real[] cx; real[] cy; real[] cz;
+  real[] cx = asy__cb10x; real[] cy = asy__cb10y; real[] cz = asy__cb10z;
+  int n = 0;
+  for (int i = 0; i < P.length; ++i) n = n + P[i].length;
+  if (n != 10) { asy__add3(f, P); return; }
+  int k = 0;
   for (int i = 0; i < P.length; ++i)
     for (int j = 0; j < P[i].length; ++j) {
       triple v = P[i][j];
-      cx.push(v.x); cy.push(v.y); cz.push(v.z);
+      cx[k] = v.x; cy[k] = v.y; cz[k] = v.z;
+      k = k + 1;
     }
-  if (cx.length != 10) { asy__add3(f, P); return; }
   if (straight) {
     asy__add3(f, (cx[0], cy[0], cz[0]));
     asy__add3(f, (cx[6], cy[6], cz[6]));
@@ -11640,12 +11876,19 @@ private void asy__addtri3(frame f, triple[][] P, bool straight)
   real sz = f.has3 ? f.min3v.z : cz[0]; real sZ = f.has3 ? f.max3v.z : cz[0];
   // 同上：求界这一段圈进分配器的作用域（回的都是 real，什么都不逃逸）
   int mk = _arenamark();
-  triple lo = (asy__sboundtri(cx, false, sx, fx, asy__rmaxdepth),
-               asy__sboundtri(cy, false, sy, fy, asy__rmaxdepth),
-               asy__sboundtri(cz, false, sz, fz, asy__rmaxdepth));
-  triple hi = (asy__sboundtri(cx, true, sX, fx, asy__rmaxdepth),
-               asy__sboundtri(cy, true, sY, fy, asy__rmaxdepth),
-               asy__sboundtri(cz, true, sZ, fz, asy__rmaxdepth));
+  // 六个界一趟算（asy__sbound2tri），只有跑出 fuzz 的那一侧才退回递归那份
+  real[] ob = {0, 0, 0, 0};
+  asy__sbound2tri(cx, sx, sX, fx, ob);
+  real lx = ob[2] != 0 ? asy__sboundtri(cx, false, sx, fx, asy__rmaxdepth) : ob[0];
+  real hx = ob[3] != 0 ? asy__sboundtri(cx, true, sX, fx, asy__rmaxdepth) : ob[1];
+  asy__sbound2tri(cy, sy, sY, fy, ob);
+  real ly = ob[2] != 0 ? asy__sboundtri(cy, false, sy, fy, asy__rmaxdepth) : ob[0];
+  real hy = ob[3] != 0 ? asy__sboundtri(cy, true, sY, fy, asy__rmaxdepth) : ob[1];
+  asy__sbound2tri(cz, sz, sZ, fz, ob);
+  real lz = ob[2] != 0 ? asy__sboundtri(cz, false, sz, fz, asy__rmaxdepth) : ob[0];
+  real hz = ob[3] != 0 ? asy__sboundtri(cz, true, sZ, fz, asy__rmaxdepth) : ob[1];
+  triple lo = (lx, ly, lz);
+  triple hi = (hx, hy, hz);
   _arenarelease(mk);
   asy__add3(f, lo);
   asy__add3(f, hi);
@@ -11950,6 +12193,76 @@ private real asy__pboundtri(triple[] P, bool mx, int which, real b, real fuzz,
   return asy__pboundtri(C, mx, which, bb, fz, d);
 }
 
+// x/z 与 y/z 那两格**共用同一趟循环**（第九十刀）：`asy__ratiobound` 里那个 for
+// 把 MX/MY/Z/MZ 四个量一起累出来，`which` 只在最后一行挑分量 —— 所以对固定的 mx，
+// which=0 与 which=1 可以一趟算完。`asy__cornerboundtri` 同理（三个角的归约与 which 无关，
+// 只是取的分量不同）。
+// 为什么值得：`real[][] * frame` 里算比值那一段（下面 12300 附近）对每片面片调
+// `asy__pboundtri` **四次**（min/max × x/y），量出来 pdb 上是 7450312 次、18.2s，
+// 而那张图只有 119576 片 —— 绝大多数调用在第 0 层就返回，花的全是"进出函数 + 传数组"
+// 与重复做的除法。这一格把它减半到"每片每个 mx 一次"。
+// **逐位不变**：同样的除法、同样的比较、每个分量上 `asy__rm` 的归约顺序都没动；
+// 真需要往下细分的那一支（少见）照旧调原来那个逐分量的递归版本。
+private pair asy__pboundtri2(triple[] P, bool mx, pair b, real fuzz, int depth) {
+  // `asy__rm` **在这儿手工摊开**（第九十一刀）：它是 `mx ? (a>b?a:b) : (a<b?a:b)`，
+  // 一趟调用里要用四十来次，而 `-O0` 下被调方标 inline 是没用的（clang 给函数挂 optnone、
+  // 往 optnone 的调用者里内联被禁 —— 试过 always_inline，pdb 36.0s→38.5s，见 emit.js
+  // 的 proto() 注释）。量出来 `asy__rm` 全程被调 3.2 亿次、7.9s，这一处是最密的来源。
+  // 把 `mx` 提到循环外分成两支，顺带省掉每次的那个分支。**逐位不变**：写的就是
+  // `asy__rm` 展开后的同一串比较，顺序也没动。
+  real b0; real b1; real r0; real r1;
+  real p0x = P[0].x; real p0y = P[0].y; real p0z = P[0].z;
+  real a0 = asy__rf(0, P[0]); real a6 = asy__rf(0, P[6]); real a9 = asy__rf(0, P[9]);
+  real e0 = asy__rf(1, P[0]); real e6 = asy__rf(1, P[6]); real e9 = asy__rf(1, P[9]);
+  real MX = -p0x; real MY = -p0y; real Z = p0z; real MZ = -Z;
+  if (mx) {
+    real t0 = a0 > a6 ? a0 : a6; real c0 = t0 > a9 ? t0 : a9;
+    real t1 = e0 > e6 ? e0 : e6; real c1 = t1 > e9 ? t1 : e9;
+    b0 = b.x > c0 ? b.x : c0;
+    b1 = b.y > c1 ? b.y : c1;
+    for (int i = 1; i < P.length; ++i) {
+      triple v = P[i];
+      real nx = -v.x; real ny = -v.y; real vz = v.z; real nz = -vz;
+      // **照 `asy__rm` 原样写**（`MX > nx ? MX : nx`），不要写成 `if (nx > MX) MX = nx;`
+      // —— 遇到 NaN 时两者不同（z=0 那一格的除法会出 inf/nan）
+      MX = MX > nx ? MX : nx;
+      MY = MY > ny ? MY : ny;
+      Z = Z > vz ? Z : vz;
+      MZ = MZ > nz ? MZ : nz;
+    }
+    triple w0 = (-MX, -MY, Z); triple w1 = (-MX, -MY, -MZ);
+    real g0 = asy__rf(0, w0); real h0 = asy__rf(0, w1);
+    real g1 = asy__rf(1, w0); real h1 = asy__rf(1, w1);
+    r0 = g0 > h0 ? g0 : h0;
+    r1 = g1 > h1 ? g1 : h1;
+  } else {
+    real t0 = a0 < a6 ? a0 : a6; real c0 = t0 < a9 ? t0 : a9;
+    real t1 = e0 < e6 ? e0 : e6; real c1 = t1 < e9 ? t1 : e9;
+    b0 = b.x < c0 ? b.x : c0;
+    b1 = b.y < c1 ? b.y : c1;
+    for (int i = 1; i < P.length; ++i) {
+      triple v = P[i];
+      real nx = -v.x; real ny = -v.y; real vz = v.z; real nz = -vz;
+      // 同上：照 `asy__rm` 原样写，NaN 上两种写法不同
+      MX = MX < nx ? MX : nx;
+      MY = MY < ny ? MY : ny;
+      Z = Z < vz ? Z : vz;
+      MZ = MZ < nz ? MZ : nz;
+    }
+    triple w0 = (-MX, -MY, Z); triple w1 = (-MX, -MY, -MZ);
+    real g0 = asy__rf(0, w0); real h0 = asy__rf(0, w1);
+    real g1 = asy__rf(1, w0); real h1 = asy__rf(1, w1);
+    r0 = g0 < h0 ? g0 : h0;
+    r1 = g1 < h1 ? g1 : h1;
+  }
+  real sgn = mx ? 1 : -1;
+  bool d0 = sgn * (b0 - r0) >= -fuzz || depth == 0;
+  bool d1 = sgn * (b1 - r1) >= -fuzz || depth == 0;
+  if (d0 && d1) return (b0, b1);
+  return (d0 ? b0 : asy__pboundtri(P, mx, 0, b.x, fuzz, depth),
+          d1 ? b1 : asy__pboundtri(P, mx, 1, b.y, fuzz, depth));
+}
+
 // 把两个前向桩装上（`minratio/maxratio(triple[][])` 那两格要它们 —— 见上面的说明）。
 // **这两行不许省**：省了就等于那两格回到控制点凸包，而且不会报错。
 asy__pboundfn = asy__pbound;
@@ -12108,6 +12421,17 @@ frame operator *(real[][] t, frame f)
   frame g;
   for (int i = 0; i < f.ops.length; ++i) g.ops.push(f.ops[i]);
   g.haslabel = f.haslabel;
+  // 三维那张 op 表也要跟过来，而且要**把变换作用到几何上** —— 这一处不搬的话，
+  // three.asy:2883 的 `if(P.absolute) f=modelview*f` 一走，传给 shipout3 的那张帧上
+  // 一格 op 都没有（量出来的：/tmp/omni-r3 压根没建起来、位图永远是兜底的白底）。
+  drawop3[] s = asy__ops3(f);
+  // 矩阵**在循环外**摊成十六格标量（asy__m16of），逐点走 asy__m16mul —— 逐位与
+  // `t * 点` 相同，但省掉每点二十次数组访问（那一格 pdb 里被调 2578 万次、自用 3.5s）。
+  // 只在真有三维内容时才摊：`real[][] * frame` 也会落在没有三维内容的帧上，
+  // 而 asy__m16of 会对不是 4x4 的 t 直接 abort。
+  bool has3d = f.has3 || s.length > 0;
+  asy__m16 tm;
+  if (has3d) tm = asy__m16of(t);
   if (f.has3) {
     // 界要按变换过的八个角重算（轴对齐盒子变换之后不再是原来那个盒子）
     for (int i = 0; i <= 1; ++i)
@@ -12116,18 +12440,37 @@ frame operator *(real[][] t, frame f)
           triple c = (i == 0 ? f.min3v.x : f.max3v.x,
                       j == 0 ? f.min3v.y : f.max3v.y,
                       k == 0 ? f.min3v.z : f.max3v.z);
-          asy__add3(g, t * c);
+          asy__add3(g, asy__m16mul(tm, c));
         }
   }
-  // 三维那张 op 表也要跟过来，而且要**把变换作用到几何上** —— 这一处不搬的话，
-  // three.asy:2883 的 `if(P.absolute) f=modelview*f` 一走，传给 shipout3 的那张帧上
-  // 一格 op 都没有（量出来的：/tmp/omni-r3 压根没建起来、位图永远是兜底的白底）。
-  drawop3[] s = asy__ops3(f);
+  // **自检提到循环之前**：它只看未变换的 op 表（`s`）与 `f`，与这趟循环无关。提上来之后
+  // 变换后的界能**在同一趟里**攒出来（下面那个 `b1`），不必再走第二遍 op 表 ——
+  // 那第二遍在 pdb 上是 237 万次派发加逐 op 读字段。判据与结论一个字都没改，
+  // 为什么要自检见下面那段长注释（`drawTube`/`drawpixel`/三角网只记界，走 op 表会缩小）。
+  bool fromops = false;
+  if (f.has3 && s.length > 0) {
+    // 自检**只做一次**并缓存在帧上（`b3fromops`，见 struct frame 那一段）：
+    // 「界是否完全来自 op 表里的几何」与乘什么变换无关。从前每乘一次帧都重走一遍，
+    // 于是每片的界被算了几十遍 —— pdb 上 `asy__addtri3` 418 万次对 11.9 万片。
+    if (f.b3fromops == 0) {
+      frame b0;
+      for (int i = 0; i < s.length; ++i) {
+        if (s[i].kind == 0) asy__add3(b0, s[i].g3);
+        else if (s[i].kind == 1) asy__addpatch3(b0, s[i].P3, s[i].straight);
+        else if (s[i].kind == 2) asy__addtri3(b0, s[i].P3, s[i].straight);
+        else if (s[i].kind == 4) asy__add3(b0, s[i].T3);   // 三角网的顶点在 T3
+        else asy__add3(b0, s[i].Q3);
+      }
+      f.b3fromops = b0.has3 && b0.min3v == f.min3v && b0.max3v == f.max3v ? 1 : 2;
+    }
+    fromops = f.b3fromops == 1;
+  }
+  frame b1;
   for (int i = 0; i < s.length; ++i) {
     drawop3 o = s[i];
     drawop3 q;
     q.kind = o.kind;
-    q.center = t * o.center;
+    q.center = asy__m16mul(tm, o.center);
     q.p = o.p;
     q.colors = o.colors;
     q.straight = o.straight;
@@ -12142,30 +12485,44 @@ frame operator *(real[][] t, frame f)
       q.g3 = t * o.g3;
     } else if (o.kind == 3) {
       q.width = o.width;
+      // **试过"先 `new triple[n]` 开好格子再写"代替 push，没有收益，别再试。**
+      // 想的是 push 到空数组上要 0→1→2→4 地搬家（这一处 pdb 一趟走 119576 个 op，
+      // 剖出来 `real[][] * frame` 自用 4.0s、含子 29.4s 排前二）。量出来 pdb
+      // 7.78s→7.54s / 18.25s→18.51s，噪声内 —— 分配器是 arena（bump），
+      // 小块搬家便宜，真正的钱在下面那 25.8M 次 `t * 一个点` 上。
       triple[] Q;
-      for (int a = 0; a < o.Q3.length; ++a) Q.push(t * o.Q3[a]);
+      for (int a = 0; a < o.Q3.length; ++a) Q.push(asy__m16mul(tm, o.Q3[a]));
       q.Q3 = Q;
     } else if (o.kind == 4) {
       // 三角网那一族：点过变换，法向**只过线性那一格**（平移不作用在法向上；
       // 这一层拿不到逆转置，非均匀缩放时会偏一点，正交/均匀缩放下是准的）
       triple[] T;
-      for (int a = 0; a < o.T3.length; ++a) T.push(t * o.T3[a]);
+      for (int a = 0; a < o.T3.length; ++a) T.push(asy__m16mul(tm, o.T3[a]));
       q.T3 = T;
       triple[] N;
-      triple o0 = t * (0, 0, 0);
-      for (int a = 0; a < o.N3.length; ++a) N.push(t * o.N3[a] - o0);
+      triple o0 = asy__m16mul(tm, (0, 0, 0));
+      for (int a = 0; a < o.N3.length; ++a) N.push(asy__m16mul(tm, o.N3[a]) - o0);
       q.N3 = N;
       q.VC = o.VC;
     } else {
       triple[][] P;
       for (int a = 0; a < o.P3.length; ++a) {
         triple[] row;
-        for (int b = 0; b < o.P3[a].length; ++b) row.push(t * o.P3[a][b]);
+        for (int b = 0; b < o.P3[a].length; ++b) row.push(asy__m16mul(tm, o.P3[a][b]));
         P.push(row);
       }
       q.P3 = P;
     }
     asy__push3(g, q);
+    // 变换后的界就在这一趟里攒（判据由上面的自检定好）。次序与从前"走第二遍 op 表"
+    // 完全一样（同一批 op、同一个顺序），所以种子与答案都一样。
+    if (fromops) {
+      if (q.kind == 0) asy__add3(b1, q.g3);
+      else if (q.kind == 1) asy__addpatch3(b1, q.P3, q.straight);
+      else if (q.kind == 2) asy__addtri3(b1, q.P3, q.straight);
+      else if (q.kind == 4) asy__add3(b1, q.T3);
+      else asy__add3(b1, q.Q3);
+    }
   }
   // **界这一格不能在这儿逐个 drawelement 重算 —— 试过，性能塌了。**
   // 上一刀在这里加了"走一遍 op 表求真界"（先自检、再按变换后的几何算），
@@ -12187,26 +12544,10 @@ frame operator *(real[][] t, frame f)
   // min/max（管面比中心折线宽）、`drawpixel`/三角网格/NURBS 也只记界，
   // 那几种走 op 表会把界**缩小**。所以先拿未变换的 op 表自检，一致才换。
   if (f.has3 && s.length > 0) {
-    frame b0;
-    for (int i = 0; i < s.length; ++i) {
-      if (s[i].kind == 0) asy__add3(b0, s[i].g3);
-      else if (s[i].kind == 1) asy__addpatch3(b0, s[i].P3, s[i].straight);
-      else if (s[i].kind == 2) asy__addtri3(b0, s[i].P3, s[i].straight);
-      else if (s[i].kind == 4) asy__add3(b0, s[i].T3);   // 三角网的顶点在 T3
-      else asy__add3(b0, s[i].Q3);
-    }
-    if (b0.has3 && b0.min3v == f.min3v && b0.max3v == f.max3v) {
-      drawop3[] gs0 = asy__ops3(g);
-      frame b1;
-      for (int i = 0; i < gs0.length; ++i) {
-        if (gs0[i].kind == 0) asy__add3(b1, gs0[i].g3);
-        else if (gs0[i].kind == 1) asy__addpatch3(b1, gs0[i].P3, gs0[i].straight);
-        else if (gs0[i].kind == 2) asy__addtri3(b1, gs0[i].P3, gs0[i].straight);
-        else if (gs0[i].kind == 4) asy__add3(b1, gs0[i].T3);
-        else asy__add3(b1, gs0[i].Q3);
-      }
-      if (b1.has3) { g.min3v = b1.min3v; g.max3v = b1.max3v; }
-    }
+    // 自检与 b1 的累加都挪到上面了（见循环前那段）；这儿只剩"把攒出来的界装上"。
+    if (fromops && b1.has3) { g.min3v = b1.min3v; g.max3v = b1.max3v; }
+    // 结论跟着走：op 表是同一套（只是过了变换），所以 g 的答案与 f 一样
+    g.b3fromops = f.b3fromops;
   }
   // **比（minr/maxr）不能拿"界的八个角"来算。** x/z 是非线性的，盒角的比与真几何的比
   // 不是一回事：无标签尺子（`import three; size(100);
@@ -12257,10 +12598,10 @@ frame operator *(real[][] t, frame f)
             int[] k = {0, 6, 9};
             for (int a = 0; a < 3; ++a) acc(A[k[a]]);
           } else {
-            rmn = (asy__pboundtri(A, false, 0, rmn.x, fuzz, asy__rmaxdepth),
-                   asy__pboundtri(A, false, 1, rmn.y, fuzz, asy__rmaxdepth));
-            rmx = (asy__pboundtri(A, true, 0, rmx.x, fuzz, asy__rmaxdepth),
-                   asy__pboundtri(A, true, 1, rmx.y, fuzz, asy__rmaxdepth));
+            // x/z 与 y/z 一趟算完（见 asy__pboundtri2）：从前这儿是四次调用，
+            // pdb 上 745 万次、18.2s，而那张图只有 119576 片
+            rmn = asy__pboundtri2(A, false, rmn, fuzz, asy__rmaxdepth);
+            rmx = asy__pboundtri2(A, true, rmx, fuzz, asy__rmaxdepth);
           }
         } else {
           for (int a = 0; a < A.length; ++a) acc(A[a]);

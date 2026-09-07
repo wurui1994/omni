@@ -812,6 +812,20 @@ export function asyCall(L, n) {
     if (v === null) return null;
     return { code: `(arenarelease ${v.code})`, type: 'int' };
   }
+  // `_rhex(x)`：一个 real 的**位模式**，十六进制（方言的 `(sbase (realbits E) 16)`）。
+  // 只给三维那一档的场景清单用：那边的数要精确 round-trip，从前写的是 `string(v, 17)`，
+  // 而那一次 snprintf 是清单构建里最贵的一格（剖 pdb：`sn` 1022 万次调用、自用 3.34s）。
+  // 位模式是**精确**的，写读两侧都只是十六位的移位。运行时那侧认 `x` 前缀
+  // （omni_r3.c 的 r3_num，十进制照旧收，手写的清单单测不用改）。
+  if (nm === '_rhex') {
+    const raw = asyCallArgs(L, n);
+    if (raw === null) return null;
+    if (raw.length !== 1) return L.err(n, `'_rhex' 要 1 个实参，给了 ${raw.length} 个`);
+    if (raw[0].lines !== null) for (const s of raw[0].lines) L.pre.push(s);
+    const v = L.coerce(raw[0].v, 'real', raw[0].node, "'_rhex' 的实参");
+    if (v === null) return null;
+    return { code: `(sbase (realbits ${v.code}) (int 16))`, type: 'string' };
+  }
   if (nm === '_r3render') {
     const raw = asyCallArgs(L, n);
     if (raw === null) return null;
