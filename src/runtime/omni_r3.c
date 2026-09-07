@@ -1147,11 +1147,25 @@ static void r3_projection(r3scene *s) {
  * 最后一位由它定；这里用 double 就会与参考差最后几位。 */
 typedef struct { float x, y, z; } r3f;
 
+/* `normalize` 用"一次倒数 + 三次乘"（照 GLSL 编译出来的样子）而不是三次除法
+   （`OMNI_R3_NORMMUL`）。**量过、默认关**：sph_light 1098 → 1101、sph_nolight 48 不变。
+   声明放这儿是因为 r3f_norm 在下面就要用它。
+   **连这一条也动不了那 ±1**，加上 FINTERP（float 插值）那一条也不动 ——
+   BRDF 的每一句都与 fragment.glsl 逐行对过（NDF/Geom/Fresnel/mix 的顺序一字不差），
+   所以那一档（sph_light 的 1098、splitpatch 的 139061 里 95% 只差 1）现在的判断是
+   **GPU 自己的浮点近似**（rsqrt、除法、超越函数的实现细节），在 CPU 上不可能逐位复现。
+   把它当这一轴的**地板**，别再往这儿花时间。 */
+static int r3_normmul = 0;
+
 static float r3f_dot(r3f a, r3f b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 static r3f r3f_mk(float x, float y, float z) { r3f v; v.x = x; v.y = y; v.z = z; return v; }
 static r3f r3f_norm(r3f a) {
   float n = sqrtf(r3f_dot(a, a));
-  return n == 0.0f ? a : r3f_mk(a.x / n, a.y / n, a.z / n);
+  if (n == 0.0f) return a;
+  /* GLSL 的 `normalize(v)` 编译出来是 `v * inversesqrt(dot(v,v))` —— **一次倒数、三次乘**，
+     而不是三次除法。这两条在最后一位上不一样（`OMNI_R3_NORMMUL=1` 切到前者）。 */
+  if (r3_normmul) { float inv = 1.0f / n; return r3f_mk(a.x * inv, a.y * inv, a.z * inv); }
+  return r3f_mk(a.x / n, a.y / n, a.z / n);
 }
 static float r3f_max(float a, float b) { return a > b ? a : b; }
 
@@ -2072,6 +2086,8 @@ omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
     if (e) r3_linerect = strcmp(e, "0") != 0; }
   { const char *e = getenv("OMNI_R3_FINTERP");
     if (e) r3_finterp = strcmp(e, "0") != 0; }
+  { const char *e = getenv("OMNI_R3_NORMMUL");
+    if (e) r3_normmul = strcmp(e, "0") != 0; }
   { const char *e = getenv("OMNI_R3_PIX");
     if (e) {
       char *q = NULL;

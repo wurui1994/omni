@@ -12488,6 +12488,18 @@ sacylinder3D 6449 → 6467（略差 18 个字节）；`flat_trans`/`edge_trans` 
   - `sph_vcol`（真渐变）：17362。
   下一刀就盯这一条：同一份几何，pen 给 alpha 时只差 30 个字节、顶点色给 alpha 时差 16314。
 
+**这一轴的地板：那一档 ±1 是 GPU 自己的浮点近似，不是我们的算术。**
+`sph_light` 的 1098、`sph_obl` 的 1104、splitpatch 的 139061（其中 **95% 只差 1**）、
+vectorfieldsphere 的 62%、twoSpheres 的 81% 都是同一档。逐句对过 `fragment.glsl` 的
+BRDF（`NDF_TRG`/`GGX_Geom`/`Fresnel`/两次 `mix` 的顺序与我们的 `r3_brdf` 一字不差），
+又试了两条、都不动：
+- **varying 在 float 里插值**（`OMNI_R3_FINTERP=1`，GL 那边顶点属性与插值全是 float）：
+  sph_light 1098 → 1104、sph_obl 1104 → 1098、sph_nolight 48 不变。
+- **`normalize` 换成"一次倒数 + 三次乘"**（GLSL 编译出来就是 `v * inversesqrt(dot(v,v))`，
+  `OMNI_R3_NORMMUL=1`）：sph_light 1098 → 1101。
+所以剩下的是 GPU 的 rsqrt / 除法 / 超越函数的实现细节，在 CPU 上不可能逐位复现 ——
+**当这一轴的地板看，别再往这儿花时间**。两个开关都留着（默认关）。
+
 **第十五刀（已做）：收不透明底色那一趟放宽到"任一采样点被覆盖"**（`OMNI_R3_OPQANY`，
 默认开）。GL 开着多重采样时，只要有一个采样点被覆盖就会跑一次 fragment shader，
 于是 `opaqueColor[pixel]`/`opaqueDepth[pixel]` 就被写，而 `gl_FragCoord` 仍是**像素中心**
