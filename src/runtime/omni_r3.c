@@ -1358,6 +1358,22 @@ static int r3_linerect = 0;
 static double r3_linew = 1.0;
 /* 线的覆盖按 GL 那种**轴对齐带**判（`OMNI_R3_LINEAXIS`）。见 r3_raster_line 里那段注。 */
 static int r3_lineaxis = 0;
+/* 深度缓冲的初值（`OMNI_R3_DEPTHFAR`，默认 1 = GL 的远平面）。
+   **诊断结果记在这儿**：探针 big_line（`size(20cm)`、`(-2,-2,-1)--(2,2,1)`、
+   `orthographic(1,1,1)`）我们的线只覆盖 y=377..1889（长 1512），参考是 17..2249（长 2232）
+   —— 短 32%，而 `OMNI_R3_DEPTHFAR=1e30` 一个字节都不动，**所以不是远平面挡的**。
+   注意那条线的方向 (4,4,2) 与视线 (1,1,1) 只差 16°，几乎**沿着视线**，投影长度按
+   1/sin 放大误差 —— 这是个病态探针，别拿它当主判据；twoSpheres 顶上那条 box 边
+   不沿视线。下一刀该先做一条**不沿视线的斜线**的探针 —— 已经做了，结论很干净：
+   - `diag`（`size(20cm)`、`orthographic(0,0,1)`、`(-1,-1,0)--(1,1,0)`，屏幕上 45°）：
+     **逐字节相同**。
+   - `diag2`（`size(20cm)`、`orthographic(1,1,1)`、`(-1,1,0)--(1,-1,0)`，与视线垂直、
+     屏幕上水平）：1488/27216，**只有参考 486、我们 0**，盖住参考 90.3% ——
+     参考的线比我们**长约 10%**（两端各少约 120 列）。
+   所以线宽、斜率、线光栅化本身都不是问题：**斜相机下我们的线端被截短了**
+   （沿视线那条短 32%、垂直视线那条短 10%、正对着的一条不差）。下一刀去查
+   `r3_add_bez` 的细分与线段端点在斜相机下的投影/裁剪，判据用 `diag2` 的 90.3%。 */
+static float r3_depthfar = 1.0f;
 /* varying（法向、视点、顶点色）的插值在 float 里做（`OMNI_R3_FINTERP`）。
    **量过、几乎无差别，默认关**：sph_light 1098 → 1104、sph_obl 1104 → 1098、
    sph_nolight 48 不变。所以那一档 ±1（splitpatch 的 139061 里 95% 只差 1）**不是
@@ -2128,6 +2144,8 @@ omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
     if (e) r3_linew = atof(e); }
   { const char *e = getenv("OMNI_R3_LINEAXIS");
     if (e) r3_lineaxis = strcmp(e, "0") != 0; }
+  { const char *e = getenv("OMNI_R3_DEPTHFAR");
+    if (e) r3_depthfar = (float) atof(e); }
   { const char *e = getenv("OMNI_R3_FINTERP");
     if (e) r3_finterp = strcmp(e, "0") != 0; }
   { const char *e = getenv("OMNI_R3_NORMMUL");
@@ -2350,7 +2368,7 @@ omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
       unsigned char b1 = r3_unorm8((float) S.bg[1]);
       unsigned char b2 = r3_unorm8((float) S.bg[2]);
       for (size_t i = 0; i < np; ++i) {
-        fb.depth[i] = 1.0f;
+        fb.depth[i] = r3_depthfar;
         fb.col[3 * i] = b0; fb.col[3 * i + 1] = b1; fb.col[3 * i + 2] = b2;
       }
       /* 三趟：先不透明（定死深度）、再线段、最后透明（不写深度）。
