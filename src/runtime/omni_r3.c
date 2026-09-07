@@ -1286,8 +1286,14 @@ static float R3_SAMPLE[R3_NS][2] = {
  * 哪一族是对的**量出来的**：一段 26.57 度的 1bp 管子（rulers/ln2.asy），
  * alt 那族给出 159,32,32,159、参考是 191,63,63,191；换成上面这族之后
  * **整张位图 0 字节不同**。（两族的 x/y 投影都是 {1,3,5,7}/8，竖边横边分不出来。） */
-/* 透明那一趟的覆盖判据（见 r3_raster_tri 里那段注）。**默认逐采样点**（0）——
-   `OMNI_R3_TCENTER=1` 换成"只看像素中心"。两种口径的账都量过，记在那段注里。 */
+/* 透明那一趟的覆盖判据（见 r3_raster_tri 里那段注）。**两条都默认关**，逐采样点那一份
+   仍是权威 —— 这两个开关留着是因为它们各自的账已经量出来了，别再重挖：
+   - `r3_tgate`（`OMNI_R3_TGATE=1`）：中心不在三角里就把这一片在这一格上整片丢掉，
+     写哪几个采样点照旧逐采样判。球上**大坏**（40932 → 541353，最大差 116）：
+     细分出来的小三角很多，一格的中心只落在其中一个里，其余的贡献全被丢了。
+   - `r3_tcenter`（`OMNI_R3_TCENTER=1`）：中心在里面就四个采样点全算。球上好一些
+     （40932 → 27804），但把"透明平面片的软边"弄坏（0 → 5967）。 */
+static int r3_tgate = 0;
 static int r3_tcenter = 0;
 
 static void r3_pick_samples(void) {
@@ -1479,19 +1485,26 @@ static void r3_raster_tri(const r3scene *s, r3fb *fb, const r3v *P, const r3v *N
          的平面片不透明时**逐字节相同**，透明时 8754/67200 但最大差只有 3、多涂 4 个像素。
          **最有用的一组数**（同一颗球、打光，按"非纯白"数墨迹）：不透明那两份
          494760 对 494760 一个像素不差；透明那两份 497016（参考）对 499337（我们），
-         参考没有一个像素是我们没涂的，而两边的透明轮廓都比自己的不透明轮廓大
-         （参考 +3140、我们 +4577）。所以不是"谁的几何大一圈"，是透明那一趟的合成把边上
-         的格子往外带、我们带得更多 —— 下一刀从 3140 对 4577 这个数进。 */
+         参考没有一个像素是我们没涂的。挑一格看透（x=381、y=1）：不透明两边都是 239，
+         透明**参考是 255、我们 244** —— 也就是说同一份几何、同样的覆盖，参考的透明那一趟
+         在这一格上一层都没混。第三条解释（"中心不在三角里就整片丢掉"，`OMNI_R3_TGATE=1`）
+         也否掉了：球上 40932 → **541353**（最大差 116），因为细分出来的小三角很多，
+         一格的中心只落在其中一个里、其余的贡献全被丢。
+         下一刀该造的是**逐像素的片元转储**（给定 x,y 印出每个采样点上收到的片元：
+         深度、alpha、颜色），拿 (381,1) 与 (400,1) 对着看 —— 光靠整幅位图的统计
+         已经问不出更多了。 */
       int tc_in = 0;
       double tcz = 0.0;
-      if (r3_tcenter && !opaque) {
+      if (!opaque && (r3_tgate || r3_tcenter)) {
         double px = x + 0.5, py = y + 0.5;
         double c0 = ((wx1 - px) * (wy2 - py) - (wx2 - px) * (wy1 - py)) * inv2a;
         double c1 = ((wx2 - px) * (wy0 - py) - (wx0 - px) * (wy2 - py)) * inv2a;
         double c2 = 1.0 - c0 - c1;
         if (c0 < 0.0 || c1 < 0.0 || c2 < 0.0) continue;
-        tc_in = 1;
-        tcz = c0 * wz0 + c1 * wz1 + c2 * wz2;
+        if (r3_tcenter) {
+          tc_in = 1;
+          tcz = c0 * wz0 + c1 * wz1 + c2 * wz2;
+        }
       }
       for (int k = 0; k < R3_NS; ++k) {
         double z;
@@ -1759,6 +1772,8 @@ omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
   r3_pick_samples();
   { const char *e = getenv("OMNI_R3_TCENTER");
     if (e) r3_tcenter = strcmp(e, "0") != 0; }
+  { const char *e = getenv("OMNI_R3_TGATE");
+    if (e) r3_tgate = strcmp(e, "0") != 0; }
   char *cpath = omni_cstr(path);
   FILE *f = fopen(cpath, "rb");
   if (!f) return omni_str_new((char *) "", 0);
