@@ -1332,6 +1332,11 @@ static int r3_opqinline = 0;
    不变。也就是说"到线段的欧氏距离 ≤ 0.5"那个圆盘判据反而更接近参考（原版 glrender 的线
    在端点上就是圆的），twoSpheres 顶上那条边的差是**另一件事**，别再从这一头挖。 */
 static int r3_linerect = 0;
+/* varying（法向、视点、顶点色）的插值在 float 里做（`OMNI_R3_FINTERP`）。
+   **量过、几乎无差别，默认关**：sph_light 1098 → 1104、sph_obl 1104 → 1098、
+   sph_nolight 48 不变。所以那一档 ±1（splitpatch 的 139061 里 95% 只差 1）**不是
+   "double 插值 vs float 插值"**，得往 r3_shade 内部的运算顺序去找（逐句对 fragment.glsl）。 */
+static int r3_finterp = 0;
 /* 透明那一趟走**逐像素**的链（照 count.glsl / blend.glsl 的结构，见 r3_raster_pix 的
    头注）。**默认开** —— 量出来的账（八个三维例子）：sacylinder3D 18813 → 6449、
    triangles 10574 → 183、twoSpheres 435546 → 296130，没有透明的那几个一个字节不差。
@@ -1583,17 +1588,40 @@ static void r3_raster_tri(const r3scene *s, r3fb *fb, const r3v *P, const r3v *N
           double q0 = a0 * iw[0], q1 = a1 * iw[1], q2 = a2 * iw[2];
           double qs = q0 + q1 + q2;
           if (qs == 0.0) { q0 = a0; q1 = a1; q2 = a2; qs = 1.0; }
-          r3v nrm = r3v_scl(1.0 / qs,
-                            r3v_add(r3v_add(r3v_scl(q0, N[0]), r3v_scl(q1, N[1])),
-                                    r3v_scl(q2, N[2])));
-          r3v vp = r3v_scl(1.0 / qs,
-                           r3v_add(r3v_add(r3v_scl(q0, P[0]), r3v_scl(q1, P[1])),
-                                   r3v_scl(q2, P[2])));
-          float rgb[3];
+          r3v nrm, vp;
           float vc[4];
+          if (r3_finterp) {
+            /* **varying 的插值在 float 里做**（`OMNI_R3_FINTERP=1`）：GL 那边顶点属性与
+               插值全是 float，我们从前在 double 里插完再转 float —— 差就落在最后一位上。
+               splitpatch 那 139061 个差字节里 **95% 只差 1**，sph_light 的 1098 也是这一档，
+               所以这一格值得单独量。 */
+            float f0 = (float) q0, f1 = (float) q1, f2 = (float) q2;
+            float fs = f0 + f1 + f2;
+            if (fs == 0.0f) fs = 1.0f;
+            float nx = ((float) N[0].x * f0 + (float) N[1].x * f1 + (float) N[2].x * f2) / fs;
+            float ny = ((float) N[0].y * f0 + (float) N[1].y * f1 + (float) N[2].y * f2) / fs;
+            float nz = ((float) N[0].z * f0 + (float) N[1].z * f1 + (float) N[2].z * f2) / fs;
+            float vx = ((float) P[0].x * f0 + (float) P[1].x * f1 + (float) P[2].x * f2) / fs;
+            float vy = ((float) P[0].y * f0 + (float) P[1].y * f1 + (float) P[2].y * f2) / fs;
+            float vz = ((float) P[0].z * f0 + (float) P[1].z * f1 + (float) P[2].z * f2) / fs;
+            nrm = r3v_mk(nx, ny, nz);
+            vp = r3v_mk(vx, vy, vz);
+            if (VC)
+              for (int i = 0; i < 4; ++i)
+                vc[i] = (VC[i] * f0 + VC[4 + i] * f1 + VC[8 + i] * f2) / fs;
+          } else {
+            nrm = r3v_scl(1.0 / qs,
+                          r3v_add(r3v_add(r3v_scl(q0, N[0]), r3v_scl(q1, N[1])),
+                                  r3v_scl(q2, N[2])));
+            vp = r3v_scl(1.0 / qs,
+                         r3v_add(r3v_add(r3v_scl(q0, P[0]), r3v_scl(q1, P[1])),
+                                 r3v_scl(q2, P[2])));
+            if (VC)
+              for (int i = 0; i < 4; ++i)
+                vc[i] = (float) ((q0 * VC[i] + q1 * VC[4 + i] + q2 * VC[8 + i]) / qs);
+          }
+          float rgb[3];
           if (VC) {
-            for (int i = 0; i < 4; ++i)
-              vc[i] = (float) ((q0 * VC[i] + q1 * VC[4 + i] + q2 * VC[8 + i]) / qs);
             ablend = vc[3];
             if (ablend < 0.0f) ablend = 0.0f;
             if (ablend > 1.0f) ablend = 1.0f;
@@ -2042,6 +2070,8 @@ omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
     if (e) r3_opqinline = strcmp(e, "0") != 0; }
   { const char *e = getenv("OMNI_R3_LINERECT");
     if (e) r3_linerect = strcmp(e, "0") != 0; }
+  { const char *e = getenv("OMNI_R3_FINTERP");
+    if (e) r3_finterp = strcmp(e, "0") != 0; }
   { const char *e = getenv("OMNI_R3_PIX");
     if (e) {
       char *q = NULL;
