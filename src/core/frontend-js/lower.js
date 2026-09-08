@@ -2215,6 +2215,13 @@ class Lower {
         keys.push(null);
         return null;
       }
+      /* `{ x = 1 }` 只有当**解构模式**用才有意义（`({x = 1} = o)`）；真当对象字面量用时
+       * 这儿报错 —— 解析器为了那条解构路先收下了它（见 parser 的 shorthandDefault）。 */
+      if (p.shorthandDefault === true) {
+        this.err(p.span, "'=' in an object literal is only valid in a destructuring pattern");
+        keys.push(null);
+        return null;
+      }
       keys.push(p.computed ? this.expr(p.key) : s16(this.keyName(p.key, p.span)));
       /* 方法简写 `{ m() {} }` 就是一格函数值属性（可写、可枚举）—— 与
        * `{ m: function() {} }` 在这个值域里没有区别（差的那一格是 home object，
@@ -3153,16 +3160,40 @@ class Lower {
    * 字符串或自定义可迭代对象上是那份摊开的数组，而规范说是原值。
    */
   destructAssign(pat, e) {
+    return this.destructInto(pat, this.expr(e.value), e.span);
+  }
+
+  /** 解构赋值的一层：把 srcExpr 落进临时量，再按模式往各个可赋值位置写。交出那格临时量。 */
+  destructInto(pat, srcExpr, span) {
     const tv = this.temp();
-    const src = pat.type === 'ArrayPattern' ? op('js_iter', [this.expr(e.value)]) : this.expr(e.value);
-    this.emitPre(exprStmt(assign(varRef(tv), src)), e.span);
+    const src = pat.type === 'ArrayPattern' ? op('js_iter', [srcExpr]) : srcExpr;
+    this.emitPre(exprStmt(assign(varRef(tv), src)), span);
     const put = (leaf, value) => {
-      if (leaf.type !== 'Ident' && leaf.type !== 'Member') {
-        this.err(e.span, 'a default value or a nested pattern in a destructuring assignment is not supported');
+      /* 默认值（`[a = 1] = xs`、`({x = 2} = o)`）：只有 undefined 才用默认（规范如此）。
+       * 先把取到的值落进临时量，再按它决定写哪一个 —— 默认表达式于是只在需要时才算。 */
+      if (leaf.type === 'AssignPattern') {
+        const t = this.temp();
+        this.emitPre(exprStmt(assign(varRef(t), value)), span);
+        this.emitPre({
+          kind: 'If',
+          cond: boolOp('js_eq', [varRef(t), undefExpr()], { strict: true }),
+          then: block([exprStmt(assign(varRef(t), this.expr(leaf.right)))]),
+          otherwise: null,
+        }, span);
+        put(leaf.left, varRef(t));
         return;
       }
-      const lv = this.lvalue(leaf, e.span);
-      if (lv) this.emitPre(exprStmt(lv.set(value)), e.span);
+      // 嵌套模式（`[[a], {b}] = xs`）：这一格的值当新的源，再来一层
+      if (leaf.type === 'ArrayPattern' || leaf.type === 'ObjectPattern') {
+        this.destructInto(leaf, value, span);
+        return;
+      }
+      if (leaf.type !== 'Ident' && leaf.type !== 'Member') {
+        this.err(span, `cannot assign to '${leaf.type}' in a destructuring assignment`);
+        return;
+      }
+      const lv = this.lvalue(leaf, span);
+      if (lv) this.emitPre(exprStmt(lv.set(value)), span);
     };
     if (pat.type === 'ArrayPattern') {
       pat.elements.forEach((el, i) => {
@@ -3173,22 +3204,22 @@ class Lower {
       }
       return varRef(tv);
     }
-    for (const p of pat.props) {
-      if (p.computed) {
-        this.err(e.span, 'computed keys in a destructuring assignment are not supported');
-        continue;
-      }
-      put(p.value, op('js_obj_get', [varRef(tv), s16(this.keyName(p.key, e.span))]));
-    }
+    /** 计算键：键先落进临时量（要用两次 —— 取值、rest 里删掉），也保住求值次序 */
+    const keyOf = (p) => {
+      if (!p.computed) return s16(this.keyName(p.key, span));
+      const kt = this.temp();
+      this.emitPre(exprStmt(assign(varRef(kt), this.expr(p.key))), span);
+      return varRef(kt);
+    };
+    const keys = pat.props.map((p) => keyOf(p));
+    pat.props.forEach((p, i) => put(p.value, op('js_obj_get', [varRef(tv), keys[i]])));
     if (pat.rest) {
       // 剩下的那一份：整份抄一遍再把取过的键删掉（与 bindPattern 那边同一条路）
       const rv = this.temp();
       this.emitPre(exprStmt(assign(varRef(rv),
-        op('js_obj_assign', [op('js_obj_new', []), varRef(tv)]))), e.span);
-      for (const p of pat.props) {
-        if (p.computed) continue;
-        this.emitPre(exprStmt(op('js_obj_delete',
-          [varRef(rv), s16(this.keyName(p.key, e.span))])), e.span);
+        op('js_obj_assign', [op('js_obj_new', []), varRef(tv)]))), span);
+      for (const k of keys) {
+        this.emitPre(exprStmt(op('js_obj_delete', [varRef(rv), k])), span);
       }
       put(pat.rest, varRef(rv));
     }

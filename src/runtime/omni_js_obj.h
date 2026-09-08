@@ -280,6 +280,17 @@ static omni_dyn omni_js_obj_entries(omni_dyn o) { \
    undefined / null 当空对象（JS 就是这么规定的），其余非对象是错误。 */ \
 static omni_dyn omni_js_obj_assign(omni_dyn dst, omni_dyn src) { \
   if (src.tag == OMNI_DYN_UNDEF || src.tag == OMNI_DYN_NULL) return dst; \
+  /* 源是数组或字符串：抄的是它的**自有可枚举键**（下标那几格，数组还有旁表里那些名字）——
+     { ...[1,2] } 是 {"0":1,"1":2}。判据与 prelude 的 $js_obj_assign 相同（量出来的：
+     从前这一支落到 omni_js_dict_of 上、当场报 "list is not an object"）。 */ \
+  if (src.tag == OMNI_DYN_LIST || src.tag == OMNI_DYN_STR16) { \
+    LT es = omni_js_arr_of(omni_js_obj_entries(src)); \
+    for (int64_t i = 0; i < es->len; i++) { \
+      LT p = omni_js_arr_of(es->items[i]); \
+      omni_js_obj_set(dst, p->items[0], p->items[1]); \
+    } \
+    return dst; \
+  } \
   DT s = omni_js_dict_of(src); \
   DT d = omni_js_dict_of(dst); \
   for (int64_t i = 0; i < s->n; i++) if (s->live[i]) DT##_set(d, s->keys[i], s->vals[i]); \

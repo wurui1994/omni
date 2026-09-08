@@ -1012,9 +1012,21 @@ class JsParser {
         } else if (this.eat(':')) {
           props.push({ kind: 'init', key, computed, method: false, value: this.assignExpr(), span: this.spanFrom(pStart) });
         } else {
-          // 简写 `{ x }`。`{ x = 1 }` 只在解构里合法，这里当错误更好：对象字面量里它没有意义
-          if (this.at('=')) this.error(this.cur().span, "'=' in an object literal is only valid in a destructuring pattern");
-          props.push({ kind: 'init', key, computed, method: false, shorthand: true, value: { type: 'Ident', name: key.name, span: key.span }, span: this.spanFrom(pStart) });
+          /* 简写 `{ x }`；`{ x = 1 }` 只有在**解构模式**里才有意义 —— 这儿先收下并记一格
+           * shorthandDefault，toPattern 会把它变成 AssignPattern（`({x = 1} = o)`）。
+           * 真当对象字面量用时由降级器当场报错，见 objectLit。 */
+          const self = { type: 'Ident', name: key.name, span: key.span };
+          if (this.at('=')) {
+            this.next();
+            const dflt = this.assignExpr();
+            props.push({
+              kind: 'init', key, computed, method: false, shorthand: true, shorthandDefault: true,
+              value: { type: 'Assign', op: '=', target: self, value: dflt, span: this.spanFrom(pStart) },
+              span: this.spanFrom(pStart),
+            });
+          } else {
+            props.push({ kind: 'init', key, computed, method: false, shorthand: true, value: self, span: this.spanFrom(pStart) });
+          }
         }
       }
       if (!this.eat(',')) break;

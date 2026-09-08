@@ -181,3 +181,24 @@ console.log(`ok ${JSON.stringify(Object.entries([7]))} ${Object.keys("ab").join(
 const okp = [1, 2];
 okp.foo = "x";
 console.log(`ok ${Object.keys(okp).join(",")} ${Object.values(okp).join(",")}`);
+
+/* 没有声明的解构赋值（`[a] = xs` / `({x} = o)`）从前不收默认值、嵌套模式与计算键；
+   现在与声明那边同一套（默认值只在 undefined 时用，嵌套再来一层）。
+   对象字面量里展开**数组或字符串**抄的是它的自有可枚举键 —— 这一格 node 与规范一致，
+   qjs 在字符串上给 {}（它自己的怪癖），所以字符串那一格只放在这条五腿用例里。 */
+let da, db, dc;
+[da = 1, [db = 2] = [], ...dc] = [undefined, [], 3, 4];
+console.log(`de ${da} ${db} ${dc.join(",")}`);
+let dx, dy;
+({ dx, dy = 6 } = { dx: 5 });
+console.log(`de ${dx} ${dy}`);
+[dx, dy] = [dy, dx];
+console.log(`de ${dx} ${dy}`);
+const dkey = "kk";
+const dobj = {};
+({ [dkey]: dobj.got = 9 } = {});
+console.log(`de ${dobj.got}`);
+let dn1, dnRest;
+({ p: { q: dn1 } = { q: 7 }, ...dnRest } = { z: 1 });
+console.log(`de ${dn1} ${JSON.stringify(dnRest)}`);
+console.log(`sp ${JSON.stringify({ ...[1, 2] })} ${JSON.stringify({ ..."ab" })} ${JSON.stringify({ ...{ a: 1 } })}`);

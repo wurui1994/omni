@@ -1922,6 +1922,14 @@ function $js_obj_descs(o) {
 // { ...src, k: v } 的 src 那一步。undefined / null 当空对象（JS 就是这么规定的）。
 function $js_obj_assign(dst, src) {
   if (src === undefined || src === null) return dst;
+  /* 源是数组或字符串：抄的是它的**自有可枚举键**（下标那几格，数组还有旁表里那些名字）——
+     { ...[1,2] } 是 {"0":1,"1":2}、{ ..."ab" } 是 {"0":"a","1":"b"}。从前这一支落到
+     $js_dict_of 上、当场报 "list is not an object"（量出来的）。 */
+  const ts = $dynTag(src);
+  if (ts === "list" || ts === "string") {
+    for (const kv of $js_obj_entries(src)) $js_obj_set(dst, kv[0], kv[1]);
+    return dst;
+  }
   if ($js_isobj(dst) || $js_isobj(src)) {
     const ks = $js_isobj(src) ? $js_own_keys(src, "e") : [...$js_dict_of(src).keys()];
     for (const k of ks) $js_obj_set(dst, k, $js_obj_get(src, k));
