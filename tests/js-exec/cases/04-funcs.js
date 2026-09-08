@@ -91,3 +91,13 @@ function nestedMk() {
 console.log(`this ${nestedMk().inner().deep()}/${nestedMk().v}`);
 const withArrow = { v: 3, m() { const a = () => this.v; return a(); } };
 console.log(`this ${withArrow.m()}`);
+/* `f(...a)` 交出的实参表要是**一份新的** list：js_iter 在 list 上是恒等，一段就交回去的话
+   rest 形参就是调用方那个数组，往上 push 会改到它（silent）。`Array.of(...a)` 同一处。 */
+function restPush(...xs) { xs.push(99); return xs.length; }
+const src = [1, 2, 3];
+console.log(`rest ${restPush(...src)} ${src.length} ${restPush(0, ...src)} ${src.length}`);
+const ofCopy = Array.of(...src);
+ofCopy.push(4);
+console.log(`rest ${src.join(",")} ${ofCopy.join(",")} ${src === ofCopy}`);
+function firstTwo(a, b, ...rest) { rest.push(7); return `${a}/${b}/${rest.length}`; }
+console.log(`rest ${firstTwo(...src)} ${src.length}`);

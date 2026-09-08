@@ -2664,15 +2664,21 @@ class Lower {
     }
     const parts = [];
     let run = [];
+    let firstIsSpread = false;
     for (const a of this.seq(args, (a) => (a.type === 'Spread' ? { spread: this.expr(a.arg) } : this.expr(a)))) {
       if (a && a.spread !== undefined) {
         if (run.length) { parts.push(arrLit(run)); run = []; }
+        if (parts.length === 0) firstIsSpread = true;
         parts.push(op('js_iter', [a.spread]));
         continue;
       }
       run.push(a);
     }
     if (run.length) parts.push(arrLit(run));
+    /* `f(...a)` / `Array.of(...a)` 交出的实参表必须是**一份新的** list：js_iter 在 list 上
+     * 是恒等，一段就交回去的话 rest 形参（或 Array.of 的结果）就是 a 自己，往上 push
+     * 会改到调用方的数组（量出来的 silent 分叉：`Array.of(...a)` 之后 a 多了一格）。 */
+    if (firstIsSpread) parts.unshift(arrLit([]));
     const joined = parts.reduce((a, b) => op('js_arr_concat', [a, b]));
     return { kind: 'Builtin', name: 'asList', args: [joined], type: listType(D) };
   }
