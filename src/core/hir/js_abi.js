@@ -272,6 +272,10 @@ export const JS_ABI = {
   // 只长 exec 一格：量过，仓库里正则当值的用法就是 `re.exec(s)` 的循环。
   js_re_new: { js: '$js_re_new', c: 'omni_js_re_new', arity: 2 },
   js_re_exec: { js: '$js_re_exec', c: 'omni_js_re_exec', arity: 2 },
+  /* 正则对象的 lastIndex（ADR-0020 P4）。它本来就在两侧的三元组里（src/flags/li）——
+     缺的只是"能读能写"。写的那一条不走成员表：`r.lastIndex = 0` 降成 js_idx_set，
+     所以 idx_set 里认这一格（regexp 上只有这一个可写的属性）。 */
+  js_re_last_index: { js: '$js_re_last_index', c: 'omni_js_re_last_index', arity: 1 },
 
   // ------------------------------------------- 字节缓冲（ArrayBuffer / 两种视图）
   // interp/builtin.js 用它们模拟指针内存（ADR-0016）：一块 arena，"地址"就是偏移。
@@ -469,6 +473,7 @@ export const JS_TAG_C = {
 export const JS_PROPS = {
   length: { list: 'js_arr_len', string: 'js_str_len', bytes: 'js_buf_len' },
   size: { Map: 'js_map_size', Set: 'js_set_size' },
+  lastIndex: { regexp: 'js_re_last_index' },
   // ArrayBuffer 与 DataView 上都叫 byteLength；这一格里三者是同一种值，所以同一个 op
   byteLength: { bytes: 'js_buf_len' },
 };

@@ -1440,6 +1440,13 @@ function $js_idx_set(o, k, v) {
     case "object": $js_setp(o, k, v); return v;
     // t[i] = x：写进那一格字节（低 8 位），值仍是右边那个数（JS 的赋值表达式语义）
     case "bytes": $js_buf_set_u8(o, k, v); return v;
+    // 正则上只有 lastIndex 可写（ADR-0020 P4）：别的名字照旧当场报，"成员表缺一格"
+    // 这件事要留在明处
+    case "regexp": {
+      if ($js_str(k) !== "lastIndex") $rt_error("cannot assign to '" + $js_str(k) + "' of a regexp");
+      o.li = $js_idx(v, 0);
+      return v;
+    }
     default: $rt_error("cannot assign to an index of a " + $dynTag(o));
   }
 }
@@ -2890,6 +2897,10 @@ function $js_re_find(re, s, start) {
 }
 // 正则当值：造一格与 C 侧同形的三元组（source / flags / lastIndex）
 function $js_re_new(src, flags) { return new $JsRe($js_asS16(src), $js_asS16(flags)); }
+function $js_re_last_index(r) {
+  if ($dynTag(r) !== "regexp") $rt_error($dynTag(r) + " is not a regexp");
+  return r.li;
+}
 // 正则对象上的 exec，照 ECMA-262 22.2.7.2：带 g 才用 lastIndex，找到就把它推到匹配的末尾
 // （**不加 1** —— 空匹配在 JS 里就是停在原地，那是调用方的事，这里不许自己"修好"），
 // 没找到就归 0。不带 g 的一律从 0 起，也不动 lastIndex。

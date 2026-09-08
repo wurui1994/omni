@@ -188,6 +188,16 @@ static omni_dyn omni_js_re_exec(omni_dyn rd, omni_dyn sd) { \
                                    : omni_dyn_of_s16(omni_s16_slice(s, caps[2 * i], caps[2 * i + 1]))); \
   } \
   return omni_js_arr_wrap(out); \
+} \
+static omni_js_re_obj *omni_js_re_want(omni_dyn rd) { \
+  if (rd.tag != OMNI_DYN_RE) omni_errorf("%s is not a regexp", omni_dyn_tag_name(rd.tag)); \
+  return (omni_js_re_obj *)rd.u.ref; \
+} \
+static omni_dyn omni_js_re_last_index(omni_dyn rd) { \
+  return omni_dyn_of_real((double)omni_js_re_want(rd)->li); \
+} \
+static void omni_js_re_set_last_index(omni_dyn rd, omni_dyn v) { \
+  omni_js_re_want(rd)->li = omni_js_arr_i(v); \
 }
 
 #endif
