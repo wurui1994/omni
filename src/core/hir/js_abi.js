@@ -427,7 +427,9 @@ export const JS_ABI = {
   js_take_pending: { js: '$js_take_pending', c: 'omni_js_take_pending', arity: 0 },
   // 异常对象就是普通对象：{ $cls: [类名…], message }。is_a 查 $cls 链，不认的值给 false
   // （`e instanceof X` 里的 e 可能是任何被抛出来的东西，包括字符串）
-  js_err_new: { js: '$js_err_new', c: 'omni_js_err_new', arity: 2 },
+  // new Error(msg, opts)（决策 15 + ADR-0020 P4）：cls 是 ["TypeError","Error"] 这样的
+  // 链（js_is_a 顺着它认 catch 的类型），name 就是链头，opts 只看 cause 那一格。
+  js_err_new: { js: '$js_err_new', c: 'omni_js_err_new', arity: 3 },
   js_is_a: { js: '$js_is_a', c: 'omni_js_is_a', arity: 2, ret: 'bool' },
 };
 

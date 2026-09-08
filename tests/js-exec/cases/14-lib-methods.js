@@ -49,5 +49,19 @@ JSON.parse('{"a":[1]}', (k, v) => { keys.push(k); return v; });
 console.log(`reviver ${keys.join("|")}`);
 console.log(`reviver ${JSON.parse("[1,2]", (k, v) => v).join(",")}`);
 
+// Error 那一家：name 是 $cls 链的头，catch/instanceof 顺着链认，cause 只在给了时才有
+const te = new TypeError("t");
+console.log(`err ${te.name} ${te.message} ${te instanceof TypeError} ${te instanceof Error}`);
+console.log(`err ${new RangeError("r").name} ${new SyntaxError("s").name} ${new Error("e").name}`);
+console.log(`err ${new Error("m", { cause: 1 }).cause} ${new Error("m").cause}`);
+const ag = new AggregateError([te], "many");
+console.log(`err ${ag.name} ${ag.message} ${ag.errors.length} ${ag instanceof Error}`);
+try {
+  throw new TypeError("thrown");
+} catch (err) {
+  console.log(`err ${err.name} ${err.message} ${err instanceof TypeError}`);
+}
+
+
 
 

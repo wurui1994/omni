@@ -2553,10 +2553,17 @@ function $js_check_uncaught() {
   process.exit(70);
 }
 // 异常对象就是普通对象：{ $cls: [类名…，最派生的在前], message }（ADR-0011 决策 15）
-function $js_err_new(msg, cls) {
+function $js_err_new(msg, cls, opts) {
   const o = $js_obj_new();
   $js_obj_set(o, "$cls", cls);
+  $js_obj_set(o, "name", cls[0]);
   $js_obj_set(o, "message", msg);
+  // { cause } 那一格（ES2022）：只有真给了才挂 —— 没给时 JS 里连这个属性都没有。
+  // 两种载体都收：这条腿上的对象字面量是真对象（P1），C 那条腿上还是 dict。
+  const ot = $dynTag(opts);
+  if ((ot === "dict" || ot === "object") && $js_obj_has(opts, "cause")) {
+    $js_obj_set(o, "cause", $js_obj_get(opts, "cause"));
+  }
   return o;
 }
 function $js_is_a(v, n) {

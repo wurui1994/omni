@@ -680,6 +680,7 @@ class Lower {
       ? op('js_err_new', [
         ctor ? undefExpr() : op('js_arr_get', [argsDyn(), constReal(0)]),
         arrLit([s16(s.id), s16('Error')]),
+        undefExpr(),
       ])
       : op('js_obj_new', []);
     const stmts = [localStmt(self.name, arrLit([init]))];
@@ -1754,7 +1755,7 @@ class Lower {
          *   - 别的走**真原型链**（js_instanceof：先问 Symbol.hasInstance，再顺着
          *     右边那个类对象的 prototype 往上找）。右边是任意表达式也行。 */
         const rhs = e.right.type === 'Ident' ? e.right.name : null;
-        const isErr = rhs === 'Error' || (rhs && this.classes.get(rhs)?.isError);
+        const isErr = (rhs !== null && ERROR_CTORS.has(rhs)) || (rhs && this.classes.get(rhs)?.isError);
         if (isErr) return op('js_is_a', [A(), s16(rhs)]);
         return op('js_instanceof', [A(), B()]);
       }
@@ -2165,10 +2166,31 @@ class Lower {
       }
       return op('js_buf_view', [as[0], as[1] ?? undefExpr(), as[2] ?? undefExpr()]);
     }
-    // new Error(msg)：异常对象就是 { $cls: ["Error"], message }（决策 15）
-    if (n === 'Error' && !this.lookup(n) && !this.classes.has(n)) {
-      const msg = e.args.length ? this.expr(e.args[0]) : s16('');
-      return op('js_err_new', [msg, arrLit([s16('Error')])]);
+    // new Error(msg, opts) 与它那一家（决策 15 + ADR-0020 P4）：异常对象就是
+    // { $cls: [类名…, "Error"], name, message }，opts 只看 cause 那一格。
+    // AggregateError 的实参顺序不一样（errors 在前），errors 那一格另外挂。
+    if (ERROR_CTORS.has(n) && !this.lookup(n) && !this.classes.has(n)) {
+      const sp = e.args.find((a) => a.type === 'Spread');
+      if (sp !== undefined) {
+        this.err(sp.span, `spread is not supported in a 'new ${n}' call`);
+        return undefExpr();
+      }
+      const chain = n === 'Error' ? arrLit([s16('Error')]) : arrLit([s16(n), s16('Error')]);
+      if (n !== 'AggregateError') {
+        const msg = e.args.length ? this.expr(e.args[0]) : s16('');
+        const opts = e.args.length > 1 ? this.expr(e.args[1]) : undefExpr();
+        return op('js_err_new', [msg, chain, opts]);
+      }
+      // errors 先落一格临时量：实参在 JS 里是从左往右求值的
+      const errs = this.temp();
+      this.emitPre(exprStmt(assign(varRef(errs),
+        e.args.length ? this.expr(e.args[0]) : op('js_arr_new', []))), e.span);
+      const msg = e.args.length > 1 ? this.expr(e.args[1]) : s16('');
+      const opts = e.args.length > 2 ? this.expr(e.args[2]) : undefExpr();
+      const t = this.temp();
+      this.emitPre(exprStmt(assign(varRef(t), op('js_err_new', [msg, chain, opts]))), e.span);
+      this.emitPre(exprStmt(op('js_obj_set', [varRef(t), s16('errors'), varRef(errs)])), e.span);
+      return varRef(t);
     }
     // 类的构造：Error 子类走老路（造实例的函数），别的走原型链那条新路（P1-f）
     if (n && this.classes.has(n) && !this.lookup(n)) {
@@ -2505,6 +2527,14 @@ const CONST_PROPS = {
   'Math.SQRT2': 1.4142135623730951,
   'Math.SQRT1_2': 0.7071067811865476,
 };
+
+/* 内建的异常构造器（ADR-0020 P4）。都落到同一个 js_err_new 上，区别只有 $cls 链的头
+ * 与 name —— 这个值域里没有真原型链上的 Error.prototype，catch 认的是那条链。
+ * AggregateError 的实参顺序是 (errors, message, opts)，在 newExpr 里单独走一支。 */
+const ERROR_CTORS = new Set([
+  'Error', 'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError',
+  'EvalError', 'URIError', 'AggregateError',
+]);
 
 const GLOBAL_CALLS = {
   String: { op: 'js_str', argc: 1 },

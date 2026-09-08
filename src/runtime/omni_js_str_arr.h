@@ -108,10 +108,15 @@ static omni_dyn omni_js_idx_set(omni_dyn o, omni_dyn k, omni_dyn v) { \
 /* 异常对象就是普通对象：{ $cls: [类名…，最派生的在前], message }（ADR-0011 决策 15）。
    `x instanceof C` 查 $cls 链 —— 被抛出来的可以是任何值（字符串也行），所以不认的
    一律给 false，不报错。 */ \
-static omni_dyn omni_js_err_new(omni_dyn msg, omni_dyn cls) { \
+static omni_dyn omni_js_err_new(omni_dyn msg, omni_dyn cls, omni_dyn opts) { \
   omni_dyn o = omni_js_obj_new(); \
+  omni_dyn cause = omni_dyn_of_s16(omni_js_s16_lit("cause")); \
   omni_js_obj_set(o, omni_dyn_of_s16(omni_js_s16_lit("$cls")), cls); \
+  omni_js_obj_set(o, omni_dyn_of_s16(omni_js_s16_lit("name")), omni_js_arr_geti(cls, 0)); \
   omni_js_obj_set(o, omni_dyn_of_s16(omni_js_s16_lit("message")), msg); \
+  if (opts.tag == OMNI_DYN_DICT && omni_js_obj_has(opts, cause)) { \
+    omni_js_obj_set(o, cause, omni_js_obj_get(opts, cause)); \
+  } \
   return o; \
 } \
 static bool omni_js_is_a(omni_dyn v, omni_dyn n) { \
