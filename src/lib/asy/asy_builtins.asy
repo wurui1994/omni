@@ -10870,6 +10870,13 @@ private void asy__merge3hook() {
     // renderBase.cc:932-996 那一串 —— 内容尺寸乘设备像素比、与分块下限（1024x768）取大、
     // 再按 fullW/fullH 用 ceil 套回长宽比，与 fw/fh 差一个 ceil 的零头（约 1/768）。
     // 斜相机那 2.8% 就是这一格：按 fw/fh 时不打光的球差 7920 字节，按这一版差 64。
+    //
+    // **这一份是 gs 那条老路（JS 三条腿）自己在用的，与 C 那份已经不一样了，别当同一格看。**
+    // C 那边后来补上了 initDisplay 里"屏幕工作区那一夹"（renderBase.cc:971-972，
+    // 这台机器 1512x945），`size(20cm)` 那一族因此从 1134/984 变成 1090/945
+    // （box3 的位图差 90228 → 2148、big_line 与 diag2 变成逐字节相同）。这一份没跟着改：
+    // 三维那一轴的判据走 run-c，改它只动 JS 腿上那条不参与对账的输出，而且要连
+    // `Aspect` 用哪一对一起重量（照抄 args.width/args.height 反而更差，账在 omni_r3.c）。
     real aA = fw / fh;
     int adpr = 2;                       // 这台机器量出来是 2（asy 自己在这一格上依赖显示器）
     int aoW = (int) (fw / 4 + 0.5); int aoH = (int) (fh / 4 + 0.5);
