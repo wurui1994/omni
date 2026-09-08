@@ -12715,6 +12715,35 @@ op 的次序、种子、答案都没变（同一批 op、同一个顺序）。�
 各在循环外摊一次（帧里没有三维内容、路径为空时不摊 —— `asy__m16of` 对非 4x4 会 abort）。
 `real[][] * triple` 本身留着不动：别处还在用它，而且它是这两份的口径来源。
 
+### 顺手把"从来没被判过的那 89 个"补齐了 —— 判据的 3s 预算是这一轴最大的盲区
+
+`tests/asy/eps.js` 默认一个例子最多 3s，超了记 `slow` 并**覆盖**上一次的真结论。而整族三维
+例子都超 3s，于是 `.omni-cache/epsres` 里长期有 80 来个 `slow` —— 那不是"通过"，是"没量过"，
+占这一轴 40%。这一趟按名字列表 + `OMNI_EPS_T=120000` 补齐（89 个，真跑了 89 个）：
+
+**一样 7、只有数值差 81、结构不同 1、没出图 0。**
+
+- 缓存里唯一那条 `nogo`（`spring2: cannot write …`）是**过期的**：现场跑 spring0/spring2
+  两个都逐字节相同。（手跑记得 `ASYMPTOTE_DIR` 尾巴上挂例子目录 —— eps.js 自己挂的是
+  `<base>:<exDir>`，漏了会得到"模块 spring 找不到"这种与真问题无关的假故障。）
+- 唯一的"结构不同"仍是 `spheresilhouette`（solids 的 `tangent()` 1e-8 收敛定点，已定性）。
+- 7 个"画布差半个点"的一个不多一个不少：pdb / near_earth / shellmethod / soccerball /
+  sphericalharmonic / sqrtx01y1 / xxsq01 —— 它们的位图尺寸因此对不上，连逐像素都比不了。
+  这一类的链子已经定位到 `three.asy:2836` 的 `ceil(lambda+2*viewportmargin)`：参考那边
+  `bound()` 自己的细分累出 4e-13 的噪声，被 ceil 放大成 1pt，而我们算的是精确值。
+  要跟就得让 `asy__pbound` 走**逐位相同的细分树**（结构已经与 path3.cc:803 一致，
+  差在喂进去的控制点那一整条链）—— 属 ADR 级取向，下一刀从这儿起。
+- 位图差比例最大的十个（都是 ink 盖住参考 ~100%、差在像素值）：Klein 10.87%、
+  condor 9.35%、RiemannSurfaceRoot 8.85%、epix 7.53%、teapot 6.24%、cyclohexane 5.24%、
+  spiral3 5.12%、splinecontours 4.30%、sphereskeleton 4.10%、sinc 3.96%。
+  epix / arrows3 / pipes / linearregression 最大差 255 且覆盖率 96.7~99.9% ——
+  那几个里有细线与箭头的抗锯齿档跳（1/8 覆盖率那一档，位置差半个采样就整档跳）。
+
+顺手量到的一条：`dash1` 探针（`size(200)` + 正交 + `draw((-1,0,0)--(1,0,0),linetype("10 10",10))`）
+**逐字节相同** —— 三维虚线的切分（`three.asy:2300-2318` 的 `adjust`+`arctime`+`subpath`，
+跑的是 asy 自己那份源码）没问题；pseudosphere 那处相位差来自 `revolution` 背面轮廓的弧长
+让 `asy__patlen` 里 `(int)(…+0.5)` 那个 round 跳了一格，与 spheresilhouette 同族。
+
 ## 第十六刀（已做）：视景体长宽比 —— **漏掉的是"屏幕工作区那一夹"**，以及"别再反解"
 
 这一刀的过程本身就是教训，所以连错的两步一起记。
