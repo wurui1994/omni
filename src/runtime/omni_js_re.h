@@ -219,6 +219,17 @@ static omni_js_re_obj *omni_js_re_want(omni_dyn rd) { \
 static omni_dyn omni_js_re_last_index(omni_dyn rd) { \
   return omni_dyn_of_real((double)omni_js_re_want(rd)->li); \
 } \
+/* source / flags：正则对象身上那两格只读属性 */ \
+static omni_dyn omni_js_re_source(omni_dyn rd) { \
+  return omni_dyn_of_s16(omni_js_re_want(rd)->src); \
+} \
+static omni_dyn omni_js_re_flags(omni_dyn rd) { \
+  return omni_dyn_of_s16(omni_js_re_want(rd)->flags); \
+} \
+/* 正则对象上的 test：与 exec 共用那套 lastIndex 行为 */ \
+static bool omni_js_re_test_o(omni_dyn rd, omni_dyn sd) { \
+  return omni_js_re_exec(rd, sd).tag != OMNI_DYN_NULL; \
+} \
 static void omni_js_re_set_last_index(omni_dyn rd, omni_dyn v) { \
   omni_js_re_want(rd)->li = omni_js_arr_i(v); \
 }

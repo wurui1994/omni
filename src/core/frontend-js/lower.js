@@ -2622,6 +2622,23 @@ class Lower {
         + ' the string and (year, month, day, ...) forms are not lowered');
       return undefExpr();
     }
+    /* new RegExp(src[, flags])（ADR-0011 决策 10）：模式与旗标是**运行期的串** ——
+     * 字面量那条路在 expr() 里，这一支是"现搭一格正则对象"。第二个实参缺席就是无旗标。 */
+    if (n === 'RegExp' && !this.lookup(n) && !this.classes.has(n)) {
+      const sp = e.args.find((a) => a.type === 'Spread');
+      if (sp !== undefined) {
+        this.err(sp.span, "spread is not supported in a 'new RegExp' call");
+        return undefExpr();
+      }
+      if (e.args.length < 1 || e.args.length > 2) {
+        this.err(e.span, "'new RegExp(src[, flags])' takes one or two arguments");
+        return undefExpr();
+      }
+      return op('js_re_new', [
+        op('js_str', [this.expr(e.args[0])]),
+        e.args.length > 1 ? op('js_str', [this.expr(e.args[1])]) : s16(''),
+      ]);
+    }
     /* new Promise(executor)（ADR-0020 P2）：状态与回调表在隐藏槽里，then / catch /
      * finally 住在 realm 的 promP 上。executor 立刻同步跑，它抛出来的东西当 reject。 */
     if (n === 'Promise' && !this.lookup(n) && !this.classes.has(n)) {

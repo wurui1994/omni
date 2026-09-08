@@ -30,10 +30,17 @@
    （收 (match, offset, string)），是串就走 $ 展开 —— 两样都借 omni_js_re_* 那两格
    （RE 那段比这一段先展开），caps 现搭一格 {at, at+len}、没有编号组。 */ \
 static omni_dyn omni_js_str_replace(omni_dyn sd, omni_dyn patd, omni_dyn repl) { \
-  omni_s16 s = omni_js_as_s16(sd), p = omni_js_as_s16(patd); \
-  int64_t at = omni_s16_index_of(s, p, 0); \
+  omni_s16 s, p; \
+  int64_t at; \
   omni_s16_buf out = { 0, 0, 0 }; \
   int64_t caps[2]; \
+  /* 运行期的正则（new RegExp(...) 存进变量再用）：转给正则那一支 */ \
+  if (patd.tag == OMNI_DYN_RE) { \
+    return omni_js_re_replace(omni_js_re_source(patd), omni_js_re_flags(patd), sd, repl); \
+  } \
+  s = omni_js_as_s16(sd); \
+  p = omni_js_as_s16(patd); \
+  at = omni_s16_index_of(s, p, 0); \
   if (at < 0) return omni_dyn_of_s16(s); \
   caps[0] = at; \
   caps[1] = at + p.len; \

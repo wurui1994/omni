@@ -1142,6 +1142,8 @@ function $js_str_replace_all(s, pat, rep) {
    （收 (match, offset, string)）或带 $ 的串（$$ / $& / 前后文那两个 —— 串模式没有编号组）。
    正则那一支不走这儿：降级器把它发成 js_re_replace（regexCall）。 */
 function $js_str_replace(s, pat, rep) {
+  // 运行期的正则（new RegExp(...) 存进变量再用）：转给正则那一支，语义一字不差
+  if ($dynTag(pat) === "regexp") return $js_re_replace($js_re_source(pat), $js_re_flags(pat), s, rep);
   const v = $js_asS16(s), p = $js_asS16(pat);
   const at = v.indexOf(p);
   if (at < 0) return v;
@@ -3857,6 +3859,17 @@ function $js_re_last_index(r) {
   if ($dynTag(r) !== "regexp") $rt_error($dynTag(r) + " is not a regexp");
   return r.li;
 }
+// source / flags：正则对象身上那两格只读属性（new RegExp(src, flags) 也从它们回读）
+function $js_re_source(r) {
+  if ($dynTag(r) !== "regexp") $rt_error($dynTag(r) + " is not a regexp");
+  return r.src;
+}
+function $js_re_flags(r) {
+  if ($dynTag(r) !== "regexp") $rt_error($dynTag(r) + " is not a regexp");
+  return r.flags;
+}
+// 正则对象上的 test：与 exec 共用那套 lastIndex 行为
+function $js_re_test_o(rd, sd) { return $js_re_exec(rd, sd) !== null; }
 // exec / .match（不带 g）的结果：一格 list，外加 index / input / groups 三格**属性**
 // （list 上挂属性走旁表，见 $js_xprops —— 所以"list 带不了属性"那句注释已经过时了）。
 // groups 只在模式里有具名组时才有，没有就整格 undefined（JS 就是这样）。

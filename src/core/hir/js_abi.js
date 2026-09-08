@@ -367,6 +367,11 @@ export const JS_ABI = {
      缺的只是"能读能写"。写的那一条不走成员表：`r.lastIndex = 0` 降成 js_idx_set，
      所以 idx_set 里认这一格（regexp 上只有这一个可写的属性）。 */
   js_re_last_index: { js: '$js_re_last_index', c: 'omni_js_re_last_index', arity: 1 },
+  // source / flags：正则身上那两格只读属性
+  js_re_source: { js: '$js_re_source', c: 'omni_js_re_source', arity: 1 },
+  js_re_flags: { js: '$js_re_flags', c: 'omni_js_re_flags', arity: 1 },
+  // 正则对象上的 test：与 exec 共用 lastIndex 行为（"exec 出来不是 null"）
+  js_re_test_o: { js: '$js_re_test_o', c: 'omni_js_re_test_o', arity: 2, ret: 'bool' },
 
   // ------------------------------------------- 字节缓冲（ArrayBuffer / 两种视图）
   // interp/builtin.js 用它们模拟指针内存（ADR-0016）：一块 arena，"地址"就是偏移。
@@ -571,6 +576,8 @@ export const JS_PROPS = {
   length: { list: 'js_arr_len', string: 'js_str_len', bytes: 'js_buf_len' },
   size: { Map: 'js_map_size', Set: 'js_set_size' },
   lastIndex: { regexp: 'js_re_last_index' },
+  source: { regexp: 'js_re_source' },
+  flags: { regexp: 'js_re_flags' },
   // ArrayBuffer 与 DataView 上都叫 byteLength；这一格里三者是同一种值，所以同一个 op
   byteLength: { bytes: 'js_buf_len' },
 };
@@ -615,6 +622,10 @@ export const JS_METHODS = {
   reverse: { on: { list: 'js_arr_reverse' } },
   fill: { on: { list: 'js_arr_fill', bytes: 'js_buf_fill' } },
   exec: { on: { regexp: 'js_re_exec' } },
+  /* 正则**对象**上的 test（`const re = new RegExp(s); re.test(x)`）：字面量那条路由
+     lower.js 静态发成 js_re_test（模式与旗标是编译期常量），这一格是运行期的接收者。
+     它与 exec 共用一套 lastIndex 行为 —— 就是"exec 出来不是 null"。 */
+  test: { on: { regexp: 'js_re_test_o' } },
   isWellFormed: { on: { string: 'js_str_is_well_formed' } },
   toWellFormed: { on: { string: 'js_str_to_well_formed' } },
   // 字节缓冲上的那几个（DataView / Uint8Array 的方法）
