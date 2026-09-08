@@ -12744,6 +12744,70 @@ op 的次序、种子、答案都没变（同一批 op、同一个顺序）。�
 跑的是 asy 自己那份源码）没问题；pseudosphere 那处相位差来自 `revolution` 背面轮廓的弧长
 让 `asy__patlen` 里 `(int)(…+0.5)` 那个 round 跳了一格，与 spheresilhouette 同族。
 
+### 转向：参考位图是 **Vulkan** 画的，"±1 是地板"那个结论作废
+
+判据里那 89 个补齐之后，我把剩下的差分成"地板 + 7 个画布差半点"，并写下"CPU 上不可能
+逐位复现 GPU 的 rsqrt/除法"。**这个结论是错的，撤回。** 问一句 `asy -version` 就知道：
+
+```
+ENABLED OPTIONS:  V3D  WebGL  Vulkan  GSL  FFTW3  XDR  CURL  LSP  Readline  GC  threads
+DISABLED OPTIONS: OpenGL  SSBO  Eigen  Sigsegv
+```
+
+**这台机器上 asy 的 OpenGL 是关的**，所以 189 份参考里所有三维位图都出自
+`vkrender.cc` + MoltenVK，跑在这颗 Apple GPU 上。此前照 `glrender.cc` 读的语义
+（`count.glsl`/`blend.glsl`/`fragment.glsl` 的逐像素 OIT 链、填充规则）**恰好仍然成立** ——
+Vulkan 那一路用的是同一批 `shaders/*.glsl` 源文件；但"地板"这个说法只在
+"我们坚持用 CPU 光栅器"的前提下成立。**目标是完全一致，那就该走同一颗 GPU。**
+
+于是取向变成：
+
+- **主路**：抄 `vkrender.cc` 那条 Vulkan 路（同一份 shader 源码、同一个 glslang、
+  同样的管线状态与绘制顺序、同样问设备要的 MSAA 采样数），像素由同一颗 GPU 产生
+- **`src/runtime/omni_r3.c`（CPU 光栅器）降级为备选**：没有 GPU / 没装 Vulkan 时用
+- GL 那条线保留为另一个选项（Linux/Windows 上 GL ≥ 4.3 能开 SSBO 时）；
+  macOS 的 GL 封顶 4.1 拿不到 SSBO，asy 的 GL 路在这儿会走另一套分支，
+  它的输出与现有 189 份参考不是同一份，参考要整批重生成 —— 所以本机首选 Vulkan
+
+本机工具链齐全，不用装东西：vulkan-headers/loader 1.4.357、MoltenVK 1.4.2、
+glslang 16.5.0（asy 链的就是这份 brew 包）、shaderc 的 `glslc`、`spirv-dis`。
+已查清的管线事实：shader 是**运行期**用 glslang 编成 SPIR-V 的（vkrender.cc:1478-1509）；
+MSAA 采样数是**问设备要的最大值**（vkrender.cc:996 `getMaxMSAASamples`），透明那一趟与
+`disableMultisample` 降到 1（:3379）；深度 `eD32Sfloat`（:3693）；导出走 `Export()`（:4709）
+并按分块递归调 `drawFrame()`（:4634）。`initDisplay`/`setDimensions`/`fitAspect` 在
+`renderBase.cc`，GL 与 Vulkan **共用** —— 今天补的"屏幕工作区那一夹"两条路都算。
+另外 `Aspect = args.width/args.height` 在 **vkrender.cc:343** 也有一份：
+我记在 `omni_r3.c` 里那个"照抄 args.width/height 反而更差"的谜，大概就是因为我对的是
+glrender.cc 那一份，而那条路在这台机器上根本没启用 —— 下一步到 vkrender 这一侧去对。
+
+**从源码编 asy 的配方（macOS + homebrew，踩过三个坑）**：
+
+```sh
+cd reference/asymptote
+PKG_CONFIG_PATH=/opt/homebrew/opt/readline/lib/pkgconfig:/opt/homebrew/lib/pkgconfig \
+cmake -S . -B build-omni -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DENABLE_ASY_CXXTEST=OFF -DENABLE_DOCGEN=OFF -DENABLE_ASYMPTOTE_PDF_DOCGEN=OFF \
+  -DENABLE_LSP=OFF -DENABLE_FFTW3=OFF \
+  -DBISON_EXECUTABLE=/opt/homebrew/opt/bison/bin/bison
+cmake --build build-omni -j 8
+```
+
+- 树里那份现成的 `build/` 是从 `/Users/wurui/Documents/Projects/asymptote` 配的，**路径不对、不可复用**
+- readline 与 bison 都是 keg-only：前者要 `PKG_CONFIG_PATH`，后者要显式指路 ——
+  Apple 自带的 bison 2.3 不认 `--header=`，`camp.y` 那一步会直接失败
+- `find_package(FFTW3 CONFIG)` 在 homebrew 上找不到 `FFTW3Config.cmake`，只能先关掉；
+  渲染不碰 fftw，但**这份构建不能当 `fft` 那类例子的 oracle**
+
+**接下来的顺序**（每一步都有明确判据）：
+
+1. `./build-omni/asy -version` 确认 Vulkan 在、GL 关（与安装版同构）
+2. 同一个例子（先 `box3`，再 `pdb`）用两个 asy 各出一份 EPS **逐字节比**：
+   相同才说明源码构建与那 189 份参考同源；不同就先对齐构建参数（LTO、`-O` 档、`-ffp-contract`）
+3. 用这份可插桩的 asy 直接打印 `initDisplay`/`three.asy:2730` 那一串
+   （`m2/M2/lambda/oldWidth/screenWidth/Width/Height/Aspect`），与我们这侧逐位对照 ——
+   那 7 个"画布差半点"应该一步定位，比在我们这边反解快一个数量级
+4. 再决定接线形状：把 Vulkan 那条路做成我们运行时能调的渲染入口
+
 ## 第十六刀（已做）：视景体长宽比 —— **漏掉的是"屏幕工作区那一夹"**，以及"别再反解"
 
 这一刀的过程本身就是教训，所以连错的两步一起记。
