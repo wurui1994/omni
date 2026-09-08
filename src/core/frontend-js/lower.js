@@ -1603,10 +1603,36 @@ class Lower {
       // 编译器自己靠它装 JS 前奏（backend-js/prelude.js），所以这一支必须能降。
       const tag = e.tag.type === 'Member' ? this.staticPath(e.tag) : null;
       if (tag === 'String.raw' && e.exprs.length === 0) return s16(e.quasis[0].raw);
-      this.err(e.span, tag === 'String.raw'
-        ? 'String.raw`…` with a substitution is not supported'
-        : 'tagged templates are not supported');
-      return undefExpr();
+      /* `String.raw` 带插值：原文那几段与值交替拼起来 —— 精确，不必绕道去造 strings 对象。 */
+      if (tag === 'String.raw') {
+        let out = s16(e.quasis[0].raw);
+        for (let i = 0; i < e.exprs.length; i++) {
+          out = op('js_add', [out, this.expr(e.exprs[i])]);
+          out = op('js_add', [out, s16(e.quasis[i + 1].raw)]);
+        }
+        return out;
+      }
+      /* 一般的带标签模板（ADR-0020 P3）：`t\`a${x}\`` 就是 `t(strings, x)`，其中 strings
+       * 是那几段字面量的数组、身上再挂一格 `raw`（原文那一份）。数组身上挂属性这个值域
+       * 支持（js_obj_set 对 list 走旁表），所以不必为它新造一种值。
+       * 每次求值都新造一个 strings —— 规范里同一处模板站点该复用同一个数组（用它当
+       * WeakMap 键的库会看出差别），那一格记在 ADR-0020，等模板站点缓存那一片。 */
+      const strings = op('js_obj_set', [
+        arrLit(e.quasis.map((q) => s16(q.cooked))),
+        s16('raw'),
+        arrLit(e.quasis.map((q) => s16(q.raw))),
+      ]);
+      const items = [strings, ...e.exprs.map((x) => this.expr(x))];
+      const argl = box({ kind: 'ListLit', type: listType(D), items }, listType(D));
+      if (e.tag.type === 'Member' && !this.staticPath(e.tag)) {
+        // 成员标签（`o.tag\`…\``）：接收者是 o
+        return this.onObject(e.tag.object, e.tag.optional, (obj) => {
+          const t = this.temp();
+          const fn = this.memberOn(assign(varRef(t), obj), e.tag);
+          return op('js_call_this', [fn, varRef(t), argl]);
+        });
+      }
+      return op('js_call_this', [this.expr(e.tag), undefExpr(), argl]);
     }
     let out = s16(e.quasis[0].cooked);
     for (let i = 0; i < e.exprs.length; i++) {
@@ -2220,13 +2246,63 @@ class Lower {
     return null;
   }
 
+  /**
+   * 没有声明的解构赋值：`[a, b] = xs` / `({x, y} = o)`（ADR-0020 P3）。
+   *
+   * 与 bindPattern 的差别只有一处：那边**声明**新名字，这边往**已经存在的可赋值位置**写 ——
+   * 所以每个叶子都过 lvalue，于是成员目标（`[o.a, o.b] = xs`）也能写。
+   * 摊成一串 emitPre 语句加一个值：赋值表达式的值是右边那个东西。
+   *
+   * 一处已知偏差：数组模式那一格的值是 js_iter 的结果 —— 数组身上它是恒等（与规范一致），
+   * 字符串或自定义可迭代对象上是那份摊开的数组，而规范说是原值。
+   */
+  destructAssign(pat, e) {
+    const tv = this.temp();
+    const src = pat.type === 'ArrayPattern' ? op('js_iter', [this.expr(e.value)]) : this.expr(e.value);
+    this.emitPre(exprStmt(assign(varRef(tv), src)), e.span);
+    const put = (leaf, value) => {
+      if (leaf.type !== 'Ident' && leaf.type !== 'Member') {
+        this.err(e.span, 'a default value or a nested pattern in a destructuring assignment is not supported');
+        return;
+      }
+      const lv = this.lvalue(leaf, e.span);
+      if (lv) this.emitPre(exprStmt(lv.set(value)), e.span);
+    };
+    if (pat.type === 'ArrayPattern') {
+      pat.elements.forEach((el, i) => {
+        if (el) put(el, op('js_idx_get', [varRef(tv), constReal(i)]));
+      });
+      if (pat.rest) {
+        put(pat.rest, op('js_arr_slice', [varRef(tv), constReal(pat.elements.length), undefExpr()]));
+      }
+      return varRef(tv);
+    }
+    for (const p of pat.props) {
+      if (p.computed) {
+        this.err(e.span, 'computed keys in a destructuring assignment are not supported');
+        continue;
+      }
+      put(p.value, op('js_obj_get', [varRef(tv), s16(this.keyName(p.key, e.span))]));
+    }
+    if (pat.rest) {
+      // 剩下的那一份：整份抄一遍再把取过的键删掉（与 bindPattern 那边同一条路）
+      const rv = this.temp();
+      this.emitPre(exprStmt(assign(varRef(rv),
+        op('js_obj_assign', [op('js_obj_new', []), varRef(tv)]))), e.span);
+      for (const p of pat.props) {
+        if (p.computed) continue;
+        this.emitPre(exprStmt(op('js_obj_delete',
+          [varRef(rv), s16(this.keyName(p.key, e.span))])), e.span);
+      }
+      put(pat.rest, varRef(rv));
+    }
+    return varRef(tv);
+  }
+
   assignExpr(e) {
     const t = e.target;
     if (e.op === '=') {
-      if (t.type === 'ArrayPattern' || t.type === 'ObjectPattern') {
-        this.err(e.span, 'destructuring assignment without a declaration is not supported');
-        return undefExpr();
-      }
+      if (t.type === 'ArrayPattern' || t.type === 'ObjectPattern') return this.destructAssign(t, e);
       // 简单赋值不需要临时量：接收者只算一次
       if (t.type === 'Member') {
         const path = this.staticPath(t);
