@@ -49,4 +49,9 @@ const char *omni_gl_error(void);
 int omni_gl_shaders_selftest(const char *shader_dir, int nlights, int nmaterials,
                              int orthographic);
 
+/* 标定用：一个铺满视口的三角，材质只填 emissive=(0.2,0.4,0.6)。Nlights 0 时
+   fragment.glsl:248 直走 `outColor = emissive`，所以读回必须逐像素是 51/102/153。
+   回 0 = 过。用来验属性按名字绑、int 属性走 I 版、UBO 手绑三步都对。 */
+int omni_gl_geom_selftest(const char *shader_dir);
+
 #endif /* OMNI_GL_H */

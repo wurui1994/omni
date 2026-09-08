@@ -245,6 +245,151 @@ int omni_gl_shaders_selftest(const char *shader_dir, int nlights, int nmaterials
   return bad;
 }
 
+/* 第三块的第一步：**一个三角形**。
+ *
+ * 判据取得很硬：`fragment.glsl:248` 在 `NORMAL` 且 `Nlights == 0` 时是
+ * `outColor = emissive;` —— 不经光照、不经色调映射。所以把 UBO 里那个材质的
+ * `emissive` 设成 (0.2,0.4,0.6,1)，读回来的像素**必须**是
+ * round(255*0.2)=51、round(255*0.4)=102、round(255*0.6)=153。
+ * 三个通道刻意互不相同：通道错位、std140 偏移算错、材质下标取错、
+ * 或误走了 `m.emissive` 那一支，都会立刻现形，不会"看着像对"。
+ *
+ * 同时验的四件事：属性按名字绑（GL 那份 shader 没有 `layout(location=)`）、
+ * `material` 是 `in int` 必须走 `glVertexAttribIPointer`、
+ * 无 `binding=` 的 UBO 要 `glGetUniformBlockIndex`+`glUniformBlockBinding`+
+ * `glBindBufferBase` 三步手绑、`projViewMat` 的列主序与我们送的一致。 */
+int omni_gl_geom_selftest(const char *shader_dir)
+{
+  if (ctx_init() != 0) return -1;
+  if (!glsl_version_cached) {
+    const char *sl = (const char *) glGetString(GL_SHADING_LANGUAGE_VERSION);
+    if (!sl) return fail("拿不到 GL_SHADING_LANGUAGE_VERSION");
+    glsl_version_cached = (int) (100 * atof(sl) + 0.5);
+  }
+
+  /* material[1]（不透明那档）：common + NORMAL + OPAQUE，光照数取 0 */
+  const char *defs[] = { "MATERIAL", "ORTHOGRAPHIC", "Nlights 0", "Nmaterials 1",
+                         "NORMAL", "OPAQUE" };
+  GLuint pr = make_program(shader_dir, "vertex.glsl", "fragment.glsl",
+                           defs, (int) (sizeof defs / sizeof defs[0]));
+  if (!pr) return -1;
+
+  const int W = 4, H = 2;
+  GLuint fbo = 0, crb = 0, drb = 0;
+  glGenFramebuffers(1, &fbo);
+  glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+  glGenRenderbuffers(1, &crb);
+  glBindRenderbuffer(GL_RENDERBUFFER, crb);
+  glRenderbufferStorageMultisample(GL_RENDERBUFFER, 4, GL_RGBA8, W, H);
+  glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, crb);
+  glGenRenderbuffers(1, &drb);
+  glBindRenderbuffer(GL_RENDERBUFFER, drb);
+  glRenderbufferStorageMultisample(GL_RENDERBUFFER, 4, GL_DEPTH_COMPONENT32F, W, H);
+  glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, drb);
+  if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+    return fail("FBO 不完整");
+  glViewport(0, 0, W, H);
+  glClearColor(1, 1, 1, 1);
+  glClearDepth(1.0);
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+  glUseProgram(pr);
+
+  /* uniform：单位矩阵。GL 的 mat 是列主序，单位阵看不出行列序问题，
+     所以这一步只验"三角没跑出视口"；行列序留到接真实 projViewMat 时再验。 */
+  const GLfloat I4[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
+  const GLfloat I3[9] = { 1,0,0, 0,1,0, 0,0,1 };
+  GLint u = glGetUniformLocation(pr, "projViewMat");
+  if (u < 0) return fail("拿不到 projViewMat");
+  glUniformMatrix4fv(u, 1, GL_FALSE, I4);
+  u = glGetUniformLocation(pr, "normMat");
+  if (u >= 0) glUniformMatrix3fv(u, 1, GL_FALSE, I3);
+
+  /* UBO：std140 下 `struct Material{vec4 diffuse,emissive,specular; vec4 parameters;}`
+     就是四个 vec4 紧排 = 64 字节，全 16 字节对齐。 */
+  GLfloat mat[16] = {
+    0.9f, 0.9f, 0.9f, 1.0f,      /* diffuse   —— Nlights 0 时用不上 */
+    0.2f, 0.4f, 0.6f, 1.0f,      /* emissive  ←—— 判据就看它 */
+    0.0f, 0.0f, 0.0f, 1.0f,      /* specular  */
+    0.0f, 0.0f, 0.0f, 0.0f       /* parameters */
+  };
+  GLuint ubo = 0;
+  glGenBuffers(1, &ubo);
+  glBindBuffer(GL_UNIFORM_BUFFER, ubo);
+  glBufferData(GL_UNIFORM_BUFFER, sizeof mat, mat, GL_STATIC_DRAW);
+  GLuint blk = glGetUniformBlockIndex(pr, "MaterialBuffer");
+  if (blk == GL_INVALID_INDEX) return fail("找不到 uniform block MaterialBuffer");
+  glUniformBlockBinding(pr, blk, 0);
+  glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo);
+
+  /* 覆盖整幅的三角（NDC 直给，projViewMat 是单位阵） */
+  const GLfloat pos[9] = { -1,-1,0,  3,-1,0,  -1,3,0 };
+  const GLfloat nrm[9] = { 0,0,1,  0,0,1,  0,0,1 };
+  const GLint   mid[3] = { 0, 0, 0 };
+
+  GLuint vao = 0, vp = 0, vn = 0, vm = 0;
+  glGenVertexArrays(1, &vao);
+  glBindVertexArray(vao);
+  GLint a = glGetAttribLocation(pr, "position");
+  if (a < 0) return fail("拿不到属性 position");
+  glGenBuffers(1, &vp);
+  glBindBuffer(GL_ARRAY_BUFFER, vp);
+  glBufferData(GL_ARRAY_BUFFER, sizeof pos, pos, GL_STATIC_DRAW);
+  glVertexAttribPointer((GLuint) a, 3, GL_FLOAT, GL_FALSE, 0, NULL);
+  glEnableVertexAttribArray((GLuint) a);
+
+  a = glGetAttribLocation(pr, "normal");
+  if (a >= 0) {
+    glGenBuffers(1, &vn);
+    glBindBuffer(GL_ARRAY_BUFFER, vn);
+    glBufferData(GL_ARRAY_BUFFER, sizeof nrm, nrm, GL_STATIC_DRAW);
+    glVertexAttribPointer((GLuint) a, 3, GL_FLOAT, GL_FALSE, 0, NULL);
+    glEnableVertexAttribArray((GLuint) a);
+  }
+
+  a = glGetAttribLocation(pr, "material");
+  if (a >= 0) {
+    glGenBuffers(1, &vm);
+    glBindBuffer(GL_ARRAY_BUFFER, vm);
+    glBufferData(GL_ARRAY_BUFFER, sizeof mid, mid, GL_STATIC_DRAW);
+    /* **整数属性必须用 I 版**；用 glVertexAttribPointer 不报错但值全错 */
+    glVertexAttribIPointer((GLuint) a, 1, GL_INT, 0, NULL);
+    glEnableVertexAttribArray((GLuint) a);
+  }
+
+  glEnable(GL_DEPTH_TEST);
+  glDepthFunc(GL_LESS);
+  glDrawArrays(GL_TRIANGLES, 0, 3);
+
+  /* 解析 + 读回 */
+  GLuint rfbo = 0, rtex = 0;
+  glGenFramebuffers(1, &rfbo);
+  glGenTextures(1, &rtex);
+  glBindTexture(GL_TEXTURE_2D, rtex);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+  glBindFramebuffer(GL_FRAMEBUFFER, rfbo);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rtex, 0);
+  glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, rfbo);
+  glBlitFramebuffer(0, 0, W, H, 0, 0, W, H, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+  glBindFramebuffer(GL_READ_FRAMEBUFFER, rfbo);
+  glPixelStorei(GL_PACK_ALIGNMENT, 1);
+  unsigned char px[4 * 2 * 3];
+  glReadPixels(0, 0, W, H, GL_RGB, GL_UNSIGNED_BYTE, px);
+
+  GLenum e = glGetError();
+  printf("  三角读回：");
+  for (int i = 0; i < 6; ++i) printf(" %d", px[i]);
+  printf(" …（应为 51 102 153 重复）\n");
+  int bad = 0;
+  for (int i = 0; i < W * H; ++i) {
+    if (px[i * 3] != 51 || px[i * 3 + 1] != 102 || px[i * 3 + 2] != 153) { bad = 1; break; }
+  }
+  if (e != GL_NO_ERROR) { fail("GL 报错 0x%x", (unsigned) e); bad = 1; }
+  glDeleteProgram(pr);
+  return bad;
+}
+
 int omni_gl_render(const omni_gl_req *req, unsigned char *out_rgb)
 {
   if (req->version != OMNI_GL_REQ_VERSION)
@@ -332,10 +477,14 @@ int main(void)
   printf("GL_MAX_SAMPLES  %d\n", inf.max_samples);
 
   const char *sd = getenv("OMNI_GL_SHADERS");
-  if (!sd) sd = "/opt/homebrew/share/asymptote/shaders";
+  if (!sd) sd = "/opt/homebrew/share/asymptote/shaders/GL";
   printf("shader 目录     %s\n", sd);
   int bad = omni_gl_shaders_selftest(sd, 2, 48, 1);
   printf(bad == 0 ? "八个 program 全部编过并链成\n" : "有 %d 个没过\n", bad);
+
+  int gbad = omni_gl_geom_selftest(sd);
+  if (gbad != 0) printf("一个三角那一步没过：%s\n", omni_gl_error() ? omni_gl_error() : "像素不符");
+  else printf("一个三角：属性/UBO/片元输出三处全对\n");
 
   omni_gl_req req;
   memset(&req, 0, sizeof req);
