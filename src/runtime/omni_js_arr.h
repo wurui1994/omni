@@ -163,6 +163,15 @@ static omni_dyn omni_js_arr_unshift(omni_dyn a, omni_dyn v) { \
   l->items[0] = v; \
   return omni_dyn_of_real((double)l->len); \
 } \
+/* shift：摘掉头一格并交出来（空数组给 undefined）。判据与 prelude 的 $js_arr_shift 相同。 */ \
+static omni_dyn omni_js_arr_shift(omni_dyn a) { \
+  LT l = omni_js_arr_of(a); \
+  if (l->len == 0) return omni_dyn_undef(); \
+  omni_dyn head = l->items[0]; \
+  for (int64_t i = 1; i < l->len; i++) l->items[i - 1] = l->items[i]; \
+  l->len--; \
+  return head; \
+} \
 OMNI_JS_ARR_2(LT, DT)
 
 /* js_wrap_fn（ADR-0013 决策 3）：解释器造函数值走这一条。传进来的 f 是解释器自己那个
@@ -214,7 +223,17 @@ static omni_dyn omni_js_arr_slice(omni_dyn a, omni_dyn s, omni_dyn e) { \
   return omni_js_arr_wrap(out); \
 } \
 static omni_dyn omni_js_arr_concat(omni_dyn a, omni_dyn b) { \
-  LT x = omni_js_arr_of(a), y = omni_js_arr_of(b); \
+  /* 实参**不是数组**时当一格元素追上去（规范 23.1.3.1 的 IsConcatSpreadable）：
+     [1].concat([2], 3) 是 [1,2,3]。判据与 prelude 的 $js_arr_concat 相同。 */ \
+  LT x = omni_js_arr_of(a); \
+  if (b.tag != OMNI_DYN_LIST) { \
+    LT one = LT##_new(); \
+    LT##_reserve(one, x->len + 1); \
+    for (int64_t i = 0; i < x->len; i++) one->items[one->len++] = x->items[i]; \
+    one->items[one->len++] = b; \
+    return omni_js_arr_wrap(one); \
+  } \
+  LT y = omni_js_arr_of(b); \
   LT out = LT##_new(); \
   LT##_reserve(out, x->len + y->len); \
   for (int64_t i = 0; i < x->len; i++) out->items[out->len++] = x->items[i]; \
@@ -512,6 +531,69 @@ static omni_dyn omni_js_arr_with(omni_dyn a, omni_dyn i, omni_dyn v) { \
   for (int64_t j = 0; j < l->len; j++) out->items[j] = l->items[j]; \
   out->len = l->len; \
   out->items[k] = v; \
+  return omni_js_arr_wrap(out); \
+} \
+/* splice / toSpliced：第二格是**整串实参**摊成的一格 list —— 实参个数是语义的一部分
+   （splice(1) 删到底、splice(1, undefined) 一格都不删），定长的形参表达不了。
+   与 prelude 的 $js_arr_splice 同一套夹取：起点认负数、删数夹到 [0, len-start]。
+   splice 就地改（items/len/cap 整格换掉），toSpliced 交一份新的出去。 */ \
+static omni_dyn omni_js_arr_splice_(omni_dyn a, omni_dyn argsv, bool copy) { \
+  LT l = omni_js_arr_of(a); \
+  LT args = omni_js_arr_of(argsv); \
+  int64_t len = l->len; \
+  int64_t start = 0; \
+  if (args->len > 0) { \
+    int64_t rel = omni_js_arr_i(args->items[0]); \
+    if (rel < 0) start = len + rel > 0 ? len + rel : 0; \
+    else start = rel < len ? rel : len; \
+  } \
+  int64_t dc; \
+  if (args->len == 0) dc = 0; \
+  else if (args->len == 1) dc = len - start; \
+  else { \
+    dc = omni_js_arr_i(args->items[1]); \
+    if (dc < 0) dc = 0; \
+    if (dc > len - start) dc = len - start; \
+  } \
+  int64_t ins = args->len > 2 ? args->len - 2 : 0; \
+  LT rem = LT##_new(); \
+  LT##_reserve(rem, dc); \
+  for (int64_t i = 0; i < dc; i++) rem->items[i] = l->items[start + i]; \
+  rem->len = dc; \
+  LT out = LT##_new(); \
+  LT##_reserve(out, len - dc + ins); \
+  int64_t k = 0; \
+  for (int64_t i = 0; i < start; i++) out->items[k++] = l->items[i]; \
+  for (int64_t i = 0; i < ins; i++) out->items[k++] = args->items[2 + i]; \
+  for (int64_t i = start + dc; i < len; i++) out->items[k++] = l->items[i]; \
+  out->len = k; \
+  if (copy) return omni_js_arr_wrap(out); \
+  l->items = out->items; \
+  l->len = out->len; \
+  l->cap = out->cap; \
+  return omni_js_arr_wrap(rem); \
+} \
+static omni_dyn omni_js_arr_splice(omni_dyn a, omni_dyn args) { \
+  return omni_js_arr_splice_(a, args, false); \
+} \
+static omni_dyn omni_js_arr_to_spliced(omni_dyn a, omni_dyn args) { \
+  return omni_js_arr_splice_(a, args, true); \
+} \
+/* keys / values（数组那一支）：迭代器在这个值域里就是一格 list，与 entries 同一个口径 */ \
+static omni_dyn omni_js_arr_keys(omni_dyn a) { \
+  LT l = omni_js_arr_of(a); \
+  LT out = LT##_new(); \
+  LT##_reserve(out, l->len); \
+  for (int64_t i = 0; i < l->len; i++) out->items[i] = omni_dyn_of_real((double)i); \
+  out->len = l->len; \
+  return omni_js_arr_wrap(out); \
+} \
+static omni_dyn omni_js_arr_values(omni_dyn a) { \
+  LT l = omni_js_arr_of(a); \
+  LT out = LT##_new(); \
+  LT##_reserve(out, l->len); \
+  for (int64_t i = 0; i < l->len; i++) out->items[i] = l->items[i]; \
+  out->len = l->len; \
   return omni_js_arr_wrap(out); \
 } \
 static omni_dyn omni_js_arr_entries(omni_dyn a) { \

@@ -136,3 +136,14 @@ const lb = [1, 2];
 lb.foo = "x";
 lb["length"] = 1;
 console.log(`len ${lb.join(",")} ${lb.foo} ${lb.length}`);
+
+/* splice / toSpliced / shift / keys / values / 非数组的 concat / Array(...) 的调用形态。
+   实参个数是 splice 语义的一部分：splice(1) 删到底，而定长派发器会补 undefined、
+   一格都不删 —— 所以这两格的实参整串摊成一格 list 交给 op（见 js_abi 的 js_arr_splice）。 */
+const sp = [1, 2, 3, 4, 5];
+console.log(`spl ${sp.splice(1, 2).join(",")} ${sp.join(",")} ${sp.splice(-1).join(",")} ${sp.join(",")}`);
+const sp2 = [1, 2, 3];
+console.log(`spl ${sp2.splice(1, 0, 9, 8).length}| ${sp2.join(",")} ${[1, 2, 3].splice(1).join(",")}`);
+console.log(`spl ${[1, 2, 3].toSpliced(1, 1).join(",")} ${[1, 2, 3].toSpliced(1, 0, 9).join(",")}`);
+console.log(`sh ${[1, 2].shift()} ${[].shift()} ${[...[1, 2, 3].keys()].join(",")} ${[...[4, 5].values()].join(",")}`);
+console.log(`cat ${[1].concat([2], 3).join(",")} ${[1].concat("x").join(",")} ${Array(1, 2).join(",")}`);

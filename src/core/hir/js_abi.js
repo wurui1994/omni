@@ -113,6 +113,8 @@ export const JS_ABI = {
   // 取到 undefined。**只收一个实参**：可变实参的形状与 push 一样要走派发器，
   // 而源码里只有一处、只插一格，等真有第二处再长那一格。
   js_arr_unshift: { js: '$js_arr_unshift', c: 'omni_js_arr_unshift', arity: 2 },
+  // shift：摘掉头一格并交出来（空数组给 undefined）。pop / unshift 都在，独缺这一格。
+  js_arr_shift: { js: '$js_arr_shift', c: 'omni_js_arr_shift', arity: 1 },
   js_arr_slice: { js: '$js_arr_slice', c: 'omni_js_arr_slice', arity: 3 },
   js_arr_concat: { js: '$js_arr_concat', c: 'omni_js_arr_concat', arity: 2 },
   js_arr_reverse: { js: '$js_arr_reverse', c: 'omni_js_arr_reverse', arity: 1 },
@@ -158,6 +160,11 @@ export const JS_ABI = {
      "宿主抛的错"这一格，所以照 js_buf_* 那一族的规矩当场 rt_error（两条腿逐字相同）。 */
   js_arr_to_reversed: { js: '$js_arr_to_reversed', c: 'omni_js_arr_to_reversed', arity: 1 },
   js_arr_with: { js: '$js_arr_with', c: 'omni_js_arr_with', arity: 3 },
+  /* splice / toSpliced（ES2023 的后者）：实参个数**是语义的一部分**（`splice(1)` 删到底，
+     `splice(1, undefined)` 一格都不删），所以第二格收的是**整串实参摊成的一格 list**，
+     不是定长的 start/deleteCount —— 降级器那儿照 push_all 的做法拼这一格。 */
+  js_arr_splice: { js: '$js_arr_splice', c: 'omni_js_arr_splice', arity: 2 },
+  js_arr_to_spliced: { js: '$js_arr_to_spliced', c: 'omni_js_arr_to_spliced', arity: 2 },
 
   // ------------------------------------------------- 普通对象 / Map / Set
   // 对象 -> dict<string, dynamic>，键是属性名的 UTF-8（进出转码）。
@@ -456,6 +463,11 @@ export const JS_ABI = {
   // 而且**不认** 0x / Infinity 以外的那些 strtod 扩展（C 那份为此手划前缀再 strtod）。
   js_num_parse_float: { js: '$js_num_parse_float', c: 'omni_js_num_parse_float', arity: 1 },
   js_arr_entries: { js: '$js_arr_entries', c: 'omni_js_arr_entries', arity: 1 },
+  /* keys / values（数组那一支）：这个值域里"迭代器"就是一格 list（entries 从来就是这样），
+     所以 `[...a.keys()]` 与 `for (const i of a.keys())` 成立，而 `a.keys().next()`
+     还是 loud —— 真迭代器对象要等 P2 那条线。 */
+  js_arr_keys: { js: '$js_arr_keys', c: 'omni_js_arr_keys', arity: 1 },
+  js_arr_values: { js: '$js_arr_values', c: 'omni_js_arr_values', arity: 1 },
 
   // ------------------------------------------------- for-of 与 o[k]（lower.js 用）
   // iter：数组原样返回（下标迭代是活的），字符串按码点切，Map 给 [k,v]，Set 给元素。
@@ -660,6 +672,7 @@ export const JS_METHODS = {
   push: { on: { list: 'js_arr_push' } },
   pop: { on: { list: 'js_arr_pop' } },
   unshift: { on: { list: 'js_arr_unshift' } },
+  shift: { on: { list: 'js_arr_shift' } },
   /* 串上的 concat 就是 `+`：接收者已经是串，规范里两者都是 ToString 之后拼起来
      （22.1.3.5 / 13.15.3），所以这一格直接接到那条算术 op 上，不另开一格。 */
   concat: { on: { list: 'js_arr_concat', string: 'js_add' } },
@@ -728,8 +741,8 @@ export const JS_METHODS = {
   isDisjointFrom: { on: { Set: 'js_set_is_disjoint' } },
   has: { on: { Map: 'js_map_has', Set: 'js_set_has' } },
   delete: { on: { Map: 'js_map_delete', Set: 'js_set_delete' } },
-  keys: { on: { Map: 'js_map_keys' } },
-  values: { on: { Map: 'js_map_values' } },
+  keys: { on: { Map: 'js_map_keys', list: 'js_arr_keys' } },
+  values: { on: { Map: 'js_map_values', list: 'js_arr_values' } },
 
   // Number。toString 的接收者还有 int（这个值域里的 bigint）与 bool ——
   // 它们本来落到"取属性再当函数调"的兜底上，于是 (5n).toString() 给出 [object Number]。

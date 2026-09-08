@@ -2102,9 +2102,10 @@ class Lower {
       if (tag === 'String.raw' && e.exprs.length === 0) return s16(e.quasis[0].raw);
       /* `String.raw` 带插值：原文那几段与值交替拼起来 —— 精确，不必绕道去造 strings 对象。 */
       if (tag === 'String.raw') {
+        const raws = this.seq(e.exprs, (x) => this.expr(x));
         let out = s16(e.quasis[0].raw);
-        for (let i = 0; i < e.exprs.length; i++) {
-          out = op('js_add', [out, this.expr(e.exprs[i])]);
+        for (let i = 0; i < raws.length; i++) {
+          out = op('js_add', [out, raws[i]]);
           out = op('js_add', [out, s16(e.quasis[i + 1].raw)]);
         }
         return out;
@@ -2119,7 +2120,7 @@ class Lower {
         s16('raw'),
         arrLit(e.quasis.map((q) => s16(q.raw))),
       ]);
-      const items = [strings, ...e.exprs.map((x) => this.expr(x))];
+      const items = [strings, ...this.seq(e.exprs, (x) => this.expr(x))];
       const argl = box({ kind: 'ListLit', type: listType(D), items }, listType(D));
       if (e.tag.type === 'Member' && !this.staticPath(e.tag)) {
         // 成员标签（`o.tag\`…\``）：接收者是 o
@@ -2131,9 +2132,15 @@ class Lower {
       }
       return op('js_call_this', [this.expr(e.tag), undefExpr(), argl]);
     }
+    /* 插值一律走 seq（与实参表同一招）：其中一格要 sink（成员调用会把接收者提成临时量、
+     * 会抛的 op 要 guard）时，**它前面那些格先落进临时量** —— 不然提出去的那一句跑在
+     * 前面，次序就反了。量出来的静默分叉：
+     *   `${s.splice(1,0,9,8).length}| ${s.join(",")}` 里 join 被提到了 splice 前面，
+     * 于是印的是插入前的内容（两把尺子都是插入后的）。 */
+    const vals = this.seq(e.exprs, (x) => this.expr(x));
     let out = s16(e.quasis[0].cooked);
-    for (let i = 0; i < e.exprs.length; i++) {
-      out = op('js_add', [out, this.expr(e.exprs[i])]);
+    for (let i = 0; i < vals.length; i++) {
+      out = op('js_add', [out, vals[i]]);
       out = op('js_add', [out, s16(e.quasis[i + 1].cooked)]);
     }
     return out;
@@ -2537,6 +2544,11 @@ class Lower {
           return op('js_src_eval', [this.expr(e.args[0])]);
         }
         if (c.name === 'Function') return this.fnFromSrc(e);
+        /* Array(...) 与 new Array(...) 同义（规范 23.1.1.1：Array 当函数调用时也走
+         * 同一条构造）。从前只认 new 那一形，`Array(1, 2)` 报的是 unresolved function。 */
+        if (c.name === 'Array' && !this.lookup(c.name) && !this.classes.has(c.name)) {
+          return this.newExpr(e);
+        }
         // 原生宿主面：名字直接就是一个 ABI op（决策 17）
         const nat = this.natives.get(c.name);
         if (nat) return this.abiCall({ op: nat, argc: JS_ALL[nat].arity }, e.args, e.span, c.name);
@@ -2595,6 +2607,15 @@ class Lower {
       }
       const re = this.regexCall(c, e);
       if (re) return re;
+      /* splice / toSpliced：收可变实参，而且**实参个数是语义的一部分** —— 走不了定长的
+       * 成员派发器（那条路把缺席的实参补成 undefined，`splice(1)`（删到底）就变成
+       * `splice(1, undefined)`（一格都不删））。整串实参摊成一格 list 交给 op，
+       * 与 push 的可变实参那一支同一招。 */
+      if (!c.computed && (c.name === 'splice' || c.name === 'toSpliced')) {
+        const o = c.name === 'splice' ? 'js_arr_splice' : 'js_arr_to_spliced';
+        return this.onObject(c.object, c.optional,
+          (recv) => op(o, [recv, box(this.argList(e.args), listType(D))]));
+      }
       if (!c.computed && Object.hasOwn(JS_METHODS, c.name)) return this.methodCall(c, e);
       /* 兜底：属性里存着的函数值。**接收者要传下去**（ADR-0020 P1）—— `o.m()` 里的
        * this 就是 o，这是原型上的方法、call/apply/bind、方法借用全都依赖的一格。

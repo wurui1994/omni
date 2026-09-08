@@ -1392,6 +1392,8 @@ function $js_arr_push_dyn(a, items) {
 }
 function $js_arr_pop(a) { return $js_arr_of(a).pop(); }
 function $js_arr_unshift(a, v) { return $js_arr_of(a).unshift(v); }
+// shift：摘掉头一格并交出来（空数组给 undefined）
+function $js_arr_shift(a) { return $js_arr_of(a).shift(); }
 // a.at(i)：负下标从尾部数，越界 undefined（a[-1] 是取属性，不是这一条）
 function $js_arr_at(a, i) {
   const l = $js_arr_of(a);
@@ -1403,7 +1405,11 @@ function $js_arr_slice(a, s, e) {
   const l = $js_arr_of(a);
   return l.slice($js_idx(s, 0), $js_idx(e, l.length));
 }
-function $js_arr_concat(a, b) { return $js_arr_of(a).concat($js_arr_of(b)); }
+/* concat 的实参**不是数组**时当一格元素追上去（规范 23.1.3.1 的 IsConcatSpreadable）：
+   [1].concat([2], 3) 是 [1,2,3]。从前这儿一律 $js_arr_of，非数组当场报错（量出来的）。 */
+function $js_arr_concat(a, b) {
+  return $js_arr_of(a).concat($dynTag(b) === "list" ? $js_arr_of(b) : [b]);
+}
 function $js_arr_reverse(a) { $js_arr_of(a).reverse(); return a; }
 function $js_arr_fill(a, v, s, e) {
   const l = $js_arr_of(a);
@@ -1567,6 +1573,18 @@ function $js_arr_sort(a, f) { $js_arr_of(a).sort((x, y) => $js_arr_cmp(f, x, y))
 function $js_arr_to_sorted(a, f) { return $js_arr_sort($js_arr_of(a).slice(), f); }
 // toReversed / with：同一族的另外两格 —— 拷一份再改，原数组不动
 function $js_arr_to_reversed(a) { return $js_arr_of(a).slice().reverse(); }
+/* splice / toSpliced：第二格是**整串实参**摊成的一格 list（实参个数是语义的一部分 ——
+   splice(1) 删到底，splice(1, undefined) 一格都不删）。这条腿上直接把那串实参
+   apply 给宿主的 splice，夹取与"删到底"那些边界就是宿主的；C 那份是手划的同一套。 */
+function $js_arr_splice(a, args) {
+  const l = $js_arr_of(a);
+  return l.splice.apply(l, $js_arr_of(args));
+}
+function $js_arr_to_spliced(a, args) {
+  const l = $js_arr_of(a).slice();
+  l.splice.apply(l, $js_arr_of(args));
+  return l;
+}
 function $js_arr_with(a, i, v) {
   const l = $js_arr_of(a).slice();
   let k = $js_idx(i, 0);
@@ -1577,6 +1595,9 @@ function $js_arr_with(a, i, v) {
   return l;
 }
 function $js_arr_entries(a) { return $js_arr_of(a).map((v, i) => [i, v]); }
+// keys / values（数组那一支）：迭代器在这个值域里就是一格 list，与 entries 同一个口径
+function $js_arr_keys(a) { return $js_arr_of(a).map((v, i) => i); }
+function $js_arr_values(a) { return $js_arr_of(a).slice(); }
 // split 的字符串分隔符形式（正则形式是 $js_re_split）。空分隔符按码元切，不按码点。
 // split 的字符串分隔符形式（正则形式是 $js_re_split）。空分隔符按码元切，不按码点。
 // 第三个实参是 limit：结果长度的上界（规范 22.1.3.23）—— 从前这一格被丢掉了，
@@ -2337,6 +2358,9 @@ function $mkRealm() {
   $natm(r.arrP, "toString", 0, (t) => $js_arr_join(t, undefined));
   $natm(r.arrP, "slice", 2, (t, a) => $js_arr_slice(t, a[0], a[1]));
   $natm(r.arrP, "concat", 1, (t, a) => $js_arr_concat(t, a[0]));
+  // splice / toSpliced 收可变实参，而且**实参个数是语义的一部分**，所以整串传下去
+  $natm(r.arrP, "splice", 2, (t, a) => $js_arr_splice(t, a));
+  $natm(r.arrP, "toSpliced", 2, (t, a) => $js_arr_to_spliced(t, a));
   $natm(r.arrP, "indexOf", 1, (t, a) => $js_arr_index_of(t, a[0]));
   $natm(r.arrP, "includes", 1, (t, a) => $js_arr_includes(t, a[0]));
   $natm(r.arrP, "map", 1, (t, a) => $js_arr_map(t, a[0]));
