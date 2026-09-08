@@ -160,7 +160,11 @@ function protoGlobalName(id) {
 }
 
 /** 类对象上放"初始化实例的那个闭包"的内部键。`new C()` 与（以后的）`super(...)` 都查它。 */
-const CLASS_INIT_KEY = '$init';
+/* 类对象上那格"初始化实例的闭包"用的是一个**符号键**（不是字符串 "$init"）：
+ * 符号键不进 Object.getOwnPropertyNames，也不进 JSON —— 从前它是字符串键，
+ * `Object.getOwnPropertyNames(B)` 里于是多出一格 $init（量出来的静默分叉）。 */
+const CLASS_INIT_WK = 'omni.classInit';
+const classInitKey = () => op('js_sym_wk', [], { wk: CLASS_INIT_WK });
 
 /**
  * 对象字面量里的方法/访问器拼回一个函数节点（ADR-0020 P1）。
@@ -839,6 +843,21 @@ class Lower {
     // prototype 与 constructor 互指，两条都不可枚举
     out.push(exprStmt(this.defHidden(classG(), s16('prototype'), protoG())));
     out.push(exprStmt(this.defHidden(protoG(), s16('constructor'), classG())));
+    /* 类对象身上的 name 与 length（规范 10.2.9 / 15.7.14）：都不可枚举。类在这个值域里
+     * 不是函数（`typeof A` 给 "object"，见 ADR-0020），但这两格是**普通自有属性**，
+     * 挂上去就对得上 —— 从前 `E.name` 是 undefined（量出来的静默分叉）。
+     * length 是构造器声明的形参个数（有默认值或 rest 的那些不算，规范如此）。 */
+    const ctorM = s.members.find((m) => m.kind === 'method' && !m.static && !m.computed
+      && m.key && this.keyName(m.key, m.span) === 'constructor');
+    let clen = 0;
+    if (ctorM) {
+      for (const p of ctorM.params) {
+        if (p.type !== 'Ident') break;
+        clen++;
+      }
+    }
+    out.push(exprStmt(this.defHidden(classG(), s16('length'), constReal(clen))));
+    out.push(exprStmt(this.defHidden(classG(), s16('name'), s16(s.id))));
 
     let ctor = null;
     const fields = [];
@@ -886,7 +905,7 @@ class Lower {
         out.push(exprStmt(this.defHidden(target(), key(), fn)));
       }
     }
-    out.push(exprStmt(this.defHidden(classG(), s16(CLASS_INIT_KEY), this.classInitClosure(s, ctor, fields))));
+    out.push(exprStmt(this.defHidden(classG(), classInitKey(), this.classInitClosure(s, ctor, fields))));
     return out;
   }
 
@@ -918,7 +937,7 @@ class Lower {
          * 所以整条实参表原样转给父类的 `$init`。写了构造器的那些由 `super(...)` 自己发。 */
         if (!ctor && sup !== null) {
           pre.push(exprStmt(op('js_call_this', [
-            op('js_obj_get', [globalRef(this.globals.get(sup).name), s16(CLASS_INIT_KEY)]),
+            op('js_obj_get', [globalRef(this.globals.get(sup).name), classInitKey()]),
             this.readEntry(this.lookup('this')),
             argsDyn(),
           ])));
@@ -2528,7 +2547,7 @@ class Lower {
         const sup = this.fn.classOf ? this.classes.get(this.fn.classOf)?.superName : null;
         if (sup) {
           const call = op('js_call_this', [
-            op('js_obj_get', [globalRef(this.globals.get(sup).name), s16(CLASS_INIT_KEY)]),
+            op('js_obj_get', [globalRef(this.globals.get(sup).name), classInitKey()]),
             this.readEntry(this.lookup('this')),
             box(this.argList(e.args), listType(D)),
           ]);
@@ -3037,7 +3056,7 @@ class Lower {
       this.emitPre(exprStmt(assign(varRef(t),
         op('js_obj_new_p', [globalRef(this.globals.get(protoGlobalName(n)).name)]))), e.span);
       this.emitPre(exprStmt(op('js_call_this', [
-        op('js_obj_get', [globalRef(this.globals.get(n).name), s16(CLASS_INIT_KEY)]),
+        op('js_obj_get', [globalRef(this.globals.get(n).name), classInitKey()]),
         varRef(t),
         box(this.argList(e.args), listType(D)),
       ])), e.span);

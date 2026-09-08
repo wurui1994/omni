@@ -2234,10 +2234,11 @@ function $js_nt_take() {
 }
 function $js_fn_construct(f, args) {
   /* 右边是一格**类对象**（new this() / new ctorFromMap()）：类对象不是函数值，
-     构造要走它身上那两格 —— prototype 当原型、$init 初始化实例（见降级器的 classDecl）。
+     构造要走它身上那两格 —— prototype 当原型、初始化实例那格闭包（键是符号
+     Symbol.omni.classInit，见降级器的 classInitKey）。
      形状与 newExpr 里静态那条路一样，只是这儿的类是运行期拿到的。 */
   if ($js_isobj(f)) {
-    const init = $js_getp(f, "$init", undefined);
+    const init = $js_getp(f, $js_sym_wk("omni.classInit"), undefined);
     if ($dynTag(init) === "function") {
       const o = $js_obj_new_p($js_getp(f, "prototype", undefined));
       const r0 = $callThis(init, o, $js_arr_of(args));
@@ -3693,6 +3694,12 @@ function $js_json_val(v, rep, gap, depth) {
   }
   const t = $dynTag(v);
   if (t === "undefined" || t === "function") return undefined;
+  /* 类对象在 JS 里**是函数**，JSON.stringify(SomeClass) 于是是 undefined。这个值域里类是
+     一格真对象，靠它身上那格符号键（omni.classInit，见 lower.js 的 classInitKey）认出来 ——
+     从前印的是 {}（量出来的静默分叉）。 */
+  if (t === "object" && $js_getp(v, $js_sym_wk("omni.classInit"), undefined) !== undefined) {
+    return undefined;
+  }
   if (t === "null") return "null";
   if (t === "bool") return v ? "true" : "false";
   if (t === "real") return Number.isFinite(v) ? $js_str(v) : "null";
