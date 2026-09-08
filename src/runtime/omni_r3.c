@@ -2942,6 +2942,13 @@ omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
               /* 被不透明层挡住的片元跳掉（blend.glsl:104-106，判据是 `>=`） */
               size_t k = 0;
               if (od != 0.0f) while (k < cnt && base[k * 5 + 4] >= od) ++k;
+              /* 混出来的一个值写进这一格的全部采样点。
+                 **试过"底色逐采样点各算一遍"（各采样点拿自己的旧色当底），量出来全线大跌**：
+                 pseudosphere 58555→246260、twoSpheres 560→112111、sacylinder3D 1488→10351、
+                 vectorfieldsphere 2009→64325。原因是片元表是**按格心**收的一份：
+                 拿它去逐个采样点混，等于把这一层铺到它压根没盖住的采样点上，
+                 底色也从"整格的不透明色"变成"那个采样点自己的（常是背景）"。
+                 想要参考那种亚像素效果得**逐采样点各收一份片元表**，不是只换底色 —— 别再试这一刀。 */
               for (size_t a = k; a < cnt; ++a) {
                 const float *f = base + a * 5;
                 float al = f[3];
