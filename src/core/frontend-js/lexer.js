@@ -20,6 +20,10 @@ export const KEYWORDS_JS = new Set([
   'export', 'extends', 'finally', 'for', 'function', 'if', 'import', 'in',
   'instanceof', 'let', 'new', 'of', 'return', 'static', 'switch', 'this',
   'throw', 'try', 'typeof', 'var', 'void', 'while',
+  // 生成器（ADR-0020 P2）：`yield` 进关键字表，`function*` 与 `yield*` 由解析器认。
+  // `async` / `await` **刻意不进**：它们在 JS 里是上下文相关的（可以当普通标识符），
+  // 而这个值域里还没有 async 函数 —— 等那一刀再说。
+  'yield',
 ]);
 
 /**

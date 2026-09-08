@@ -45,6 +45,8 @@ function opPrec(op) {
 function prec(n) {
   switch (n.type) {
     case 'Seq': return PREC.Seq;
+    // yield 的优先级比赋值还低（ADR-0020 P2）：`x = yield v` 要能原样打回去
+    case 'Yield': return PREC.Seq;
     case 'Assign': return PREC.Assign;
     case 'Arrow': return PREC.Arrow;
     case 'Cond': return PREC.Cond;
@@ -182,10 +184,19 @@ class Gen {
       }
 
       case 'FuncExpr': {
-        this.emit(`function${n.id ? ` ${n.id}` : ''}`);
+        this.emit(`function${n.generator === true ? '*' : ''}${n.id ? ` ${n.id}` : ''}`);
         this.params(n.params, n.rest, false);
         this.emit(' ');
         this.block(n.body);
+        return;
+      }
+
+      case 'Yield': {
+        this.emit(n.delegate === true ? 'yield*' : 'yield');
+        if (n.arg !== null && n.arg !== undefined) {
+          this.emit(' ');
+          this.expr(n.arg, PREC.Assign);
+        }
         return;
       }
 
@@ -487,7 +498,7 @@ class Gen {
       }
 
       case 'FuncDecl': {
-        this.emit(`function ${s.id}`);
+        this.emit(`function${s.generator === true ? '*' : ''} ${s.id}`);
         this.params(s.params, s.rest, false);
         this.emit(' ');
         this.block(s.body);

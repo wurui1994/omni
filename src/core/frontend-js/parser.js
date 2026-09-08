@@ -193,11 +193,12 @@ class JsParser {
 
   funcDecl() {
     const start = this.expect('function');
-    if (this.at('*')) this.error(this.cur().span, 'generator functions are not supported');
+    // `function*`（ADR-0020 P2）：生成器只是函数上的一格标记，体的解析一模一样
+    const generator = !!this.eat('*');
     const id = this.identName('function name');
     const { params, rest } = this.paramList();
     const body = this.block();
-    return { type: 'FuncDecl', id, params, rest, body, span: this.spanFrom(start) };
+    return { type: 'FuncDecl', id, params, rest, body, generator, span: this.spanFrom(start) };
   }
 
   classDecl() {
@@ -605,6 +606,19 @@ class JsParser {
   }
 
   assignExpr() {
+    /* `yield` / `yield*`（ADR-0020 P2）：优先级最低（比赋值还低），所以在这一层的最前面
+       认。`yield` 后面可以什么都没有（`yield;` / `yield }`），那时值是 undefined ——
+       靠"同一行还有没有能开始表达式的 token"判断。解析器不跟踪"在不在生成器体里"，
+       那一条由降级器查（它知道自己在哪个函数里）。 */
+    if (this.at('yield')) {
+      const start = this.next();
+      const delegate = !!this.eat('*');
+      const t = this.cur();
+      const bare = t.nl === true || t.kind === 'eof'
+        || (t.kind === 'punct' && [')', ']', '}', ',', ';', ':'].includes(t.value));
+      const arg = bare && !delegate ? null : this.assignExpr();
+      return { type: 'Yield', arg, delegate, span: this.spanFrom(start) };
+    }
     if (this.arrowAhead()) return this.arrow();
     const left = this.conditional();
     const t = this.cur();
@@ -838,11 +852,11 @@ class JsParser {
         case 'this': this.next(); return { type: 'This', span: t.span };
         case 'function': {
           const start = this.next();
-          if (this.at('*')) this.error(this.cur().span, 'generator functions are not supported');
+          const generator = !!this.eat('*');
           const id = this.cur().kind === 'ident' ? this.next().value : null;
           const { params, rest } = this.paramList();
           const body = this.block();
-          return { type: 'FuncExpr', id, params, rest, body, span: this.spanFrom(start) };
+          return { type: 'FuncExpr', id, params, rest, body, generator, span: this.spanFrom(start) };
         }
         case 'class': {
           const start = this.next();
