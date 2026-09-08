@@ -354,7 +354,7 @@ class Lower {
       if (s.type === 'FuncDecl') continue;
       stmts.push(...this.stmt(s));
     }
-    main.body = block([...this.fn.prelude, ...stmts]);
+    main.body = block([...this.fn.prelude, ...stmts, ...this.jobsTail()]);
     this.fn = null;
     this.funcs.push(main);
     return {
@@ -1736,6 +1736,15 @@ class Lower {
     return 'undefined';
   }
 
+  /**
+   * main（或 REPL 的一批）末尾要不要排一次微任务队列。
+   * 只有这个模块真用到 Promise 时才补 —— js_jobs_run 是 JS-only 的 op（P1_JS_ONLY），
+   * 无条件补的话每个 JS 程序的 C 那条腿都会当场断掉。
+   */
+  jobsTail() {
+    return this.usesJobs === true ? [exprStmt(op('js_jobs_run', []))] : [];
+  }
+
   /** 模板串：从第一段字符串开始一路 js_add —— 有一边是字符串，js_add 就是拼接 */
   template(e) {
     if (e.tag) {
@@ -2177,6 +2186,8 @@ class Lower {
   }
 
   abiCall(spec, args, span, what) {
+    // Promise 那几格用到了作业队列：main 末尾要补一次 js_jobs_run（见 module 那一处）
+    if (spec.op.startsWith('js_promise_')) this.usesJobs = true;
     if (args.some((a) => a.type === 'Spread')) {
       this.err(span, `spread is not supported in a '${what}' call`);
       return undefExpr();
@@ -2346,6 +2357,16 @@ class Lower {
       this.err(e.span, "'new Date' takes no argument or a millisecond timestamp here;"
         + ' the string and (year, month, day, ...) forms are not lowered');
       return undefExpr();
+    }
+    /* new Promise(executor)（ADR-0020 P2）：状态与回调表在隐藏槽里，then / catch /
+     * finally 住在 realm 的 promP 上。executor 立刻同步跑，它抛出来的东西当 reject。 */
+    if (n === 'Promise' && !this.lookup(n) && !this.classes.has(n)) {
+      if (e.args.length !== 1 || e.args[0].type === 'Spread') {
+        this.err(e.span, "'new Promise' takes exactly one argument (the executor)");
+        return undefExpr();
+      }
+      this.usesJobs = true;
+      return op('js_promise_new', [this.expr(e.args[0])]);
     }
     /* new Proxy(target, handler)（ADR-0020 P4）：代理与普通对象是同一种值，
      * 差别只在属性访问的五个入口上多问一句陷阱（见 prelude 的 $js_px_trap）。 */
@@ -2582,7 +2603,9 @@ const STATIC_NS = new Set(['JSON', 'Math', 'Object', 'Array', 'String', 'Number'
   // ADR-0020 P1：Symbol 与 Reflect 的静态面（Symbol.iterator、Reflect.ownKeys …）
   'Symbol', 'Reflect',
   // ADR-0020 P4：Date.now()
-  'Date']);
+  'Date',
+  // ADR-0020 P2：Promise.resolve / reject / all
+  'Promise']);
 
 /* `new X(...)` 认的内建构造器（newExpr 里一支支写着）。这张表只给 `typeof X` 用 ——
  * 它们在 JS 里都是函数值，而这个值域里还不能把它们当值传，所以答案是编译期定死的。 */
@@ -2679,6 +2702,11 @@ const STATIC_CALLS = {
   'Number.parseFloat': { op: 'js_num_parse_float', argc: 1 },
   // Date.now()：就是宿主时钟那一格 op，不必造一格 Date 对象
   'Date.now': { op: 'js_now_ms', argc: 0 },
+  // Promise 的三个静态面（ADR-0020 P2）。用到它们就要在 main 末尾排一次微任务队列，
+  // 所以 abiCall 里对这几个 op 打一下 usesJobs
+  'Promise.resolve': { op: 'js_promise_resolved', argc: 1 },
+  'Promise.reject': { op: 'js_promise_rejected', argc: 1 },
+  'Promise.all': { op: 'js_promise_all', argc: 1 },
   'BigInt.asIntN': { op: 'js_bigint_as_int_n', argc: 2 },
   'BigInt.asUintN': { op: 'js_bigint_as_uint_n', argc: 2 },
   'process.cwd': { op: 'js_proc_cwd', argc: 0 },
@@ -2838,7 +2866,7 @@ export class JsFrontSession {
     }
     const main = {
       name: entry, mangled: entry, ret: { k: 'void' }, params: [],
-      body: block([...L.fn.prelude, ...stmts]),
+      body: block([...L.fn.prelude, ...stmts, ...L.jobsTail()]),
     };
     L.fn = null;
     L.funcs.push(main);

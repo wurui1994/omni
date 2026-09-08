@@ -1854,6 +1854,7 @@ function $mkRealm() {
     reP: new $JSObj(objP, "RegExp"),
     iterP: new $JSObj(objP, "Iterator"),
     dateP: new $JSObj(objP, "Date"),
+    promP: new $JSObj(objP, "Promise"),
     // globalThis（ADR-0020 P4）：这个值域里没有全局环境记录（模块的顶层名字是模块局部的），
     // 所以它就是**一格普通的真对象**，每个 realm 一份。挂上去的东西读得回来，
     // 内建（Math / JSON …）不在它身上 —— 那是画出来的边界。
@@ -1911,7 +1912,139 @@ function $mkRealm() {
   $natm(r.dateP, "getUTCMinutes", 0, (t) => new Date($js_date_ms(t)).getUTCMinutes());
   $natm(r.dateP, "getUTCSeconds", 0, (t) => new Date($js_date_ms(t)).getUTCSeconds());
   $natm(r.dateP, "getUTCMilliseconds", 0, (t) => new Date($js_date_ms(t)).getUTCMilliseconds());
+  /* Promise（ADR-0020 P2 的前半）：状态与回调表都在隐藏槽里（$st / $val / $cbs）。
+     then / catch / finally 住在 promP 上，所以 p.then(f) 走的是普通的"取属性 + 带
+     接收者调用"那条路，不必进成员表。await 与 async 函数还没有 —— 那要状态机改写。 */
+  $natm(r.promP, "then", 2, (t, a) => $js_prom_react(t, a[0], a[1]));
+  $natm(r.promP, "catch", 1, (t, a) => $js_prom_react(t, undefined, a[0]));
+  $natm(r.promP, "finally", 1, (t, a) => {
+    /* 规范的 finally 不是"调一下就完"：onFinally 的结果要先 resolve 一遍，再把原来的
+       值/异常接回去（22.2.6.3 的 thenFinally / catchFinally）—— 于是它比 then 多两拍。
+       少了这两拍，两条独立链的交错次序就与 qjs 不同。 */
+    const f = a[0];
+    return $js_prom_react(t,
+      $nat("", 1, (tt, aa) => {
+        const v = aa[0];
+        return $js_prom_react($js_promise_resolved($callThis(f, undefined, [])),
+          $nat("", 1, () => v), undefined);
+      }),
+      $nat("", 1, (tt, aa) => {
+        const e = aa[0];
+        return $js_prom_react($js_promise_resolved($callThis(f, undefined, [])),
+          $nat("", 1, () => { $js_throw(e); return undefined; }), undefined);
+      }));
+  });
   return r;
+}
+/* ---------------------------------------- 作业队列（微任务）与 Promise
+   这个值域里**没有事件循环**：队列是一格数组，降级器在 main 末尾补一句 js_jobs_run
+   把它排空 —— "调用栈空了"这件事只有那一处可观测。所以 setTimeout 那一族不在这一档里，
+   只有微任务；而"程序结束时还没结算的 promise"就静静地留在那儿（与 node 一样）。 */
+const $JOBS = [];
+function $js_job(f) { $JOBS.push(f); }
+function $js_jobs_run() {
+  while ($JOBS.length > 0) {
+    const f = $JOBS.shift();
+    f();
+    // 作业里抛出来的东西没人接手（JS 里那是 unhandledRejection）：清掉槽，
+    // 别让它冒到下一个作业上
+    if ($js_pending()) $js_take_pending();
+  }
+  return undefined;
+}
+function $js_prom_new() {
+  const p = $js_obj_new_p($realm().promP);
+  $js_def_data(p, "$st", 0, true, false, true);
+  $js_def_data(p, "$val", undefined, true, false, true);
+  // $cbs 是**宿主数组**（不进 JS 域）：每一项是 { f, r, child }
+  $js_def_data(p, "$cbs", [], true, false, true);
+  return p;
+}
+function $js_prom_is(v) { return $js_isobj(v) && v.ps.has("$st"); }
+function $js_prom_get(p, k) { return p.ps.get(k).v; }
+function $js_prom_put(p, k, v) { p.ps.get(k).v = v; }
+function $js_prom_schedule(p, cb) {
+  $js_job(() => {
+    const st = $js_prom_get(p, "$st"), val = $js_prom_get(p, "$val");
+    const h = st === 1 ? cb.f : cb.r;
+    if (h === undefined || h === null) { $js_prom_settle(cb.child, st, val); return; }
+    const out = $callThis(h, undefined, [val]);
+    if ($js_pending()) { $js_prom_settle(cb.child, 2, $js_take_pending()); return; }
+    $js_prom_settle(cb.child, 1, out);
+  });
+}
+// 注册一对处理器，返回子 promise。已经结算的也要**排队**，不能当场调 —— 微任务的次序
+// （先把同步代码跑完）就是靠这一条。
+function $js_prom_react(p, f, r) {
+  if (!$js_prom_is(p)) $rt_error("this is not a Promise");
+  const child = $js_prom_new();
+  const cb = { f, r, child };
+  if ($js_prom_get(p, "$st") === 0) $js_prom_get(p, "$cbs").push(cb);
+  else $js_prom_schedule(p, cb);
+  return child;
+}
+function $js_prom_settle(p, st, val) {
+  if ($js_prom_get(p, "$st") !== 0) return;
+  /* resolve 收到一格 promise 就跟着它走（thenable 只认我们自己这一族）。
+     规范里这一步**多花一拍**（NewPromiseResolveThenableJob）：先排一个作业，
+     在作业里才去注册。少了这一拍，两条独立链的交错次序就与 qjs 不同 —— 量出来过。 */
+  if (st === 1 && $js_prom_is(val)) {
+    $js_job(() => {
+      $js_prom_react(val,
+        $nat("", 1, (t, a) => { $js_prom_settle(p, 1, a[0]); return undefined; }),
+        $nat("", 1, (t, a) => { $js_prom_settle(p, 2, a[0]); return undefined; }));
+    });
+    return;
+  }
+  $js_prom_put(p, "$st", st);
+  $js_prom_put(p, "$val", val);
+  const cbs = $js_prom_get(p, "$cbs");
+  for (let i = 0; i < cbs.length; i++) $js_prom_schedule(p, cbs[i]);
+  $js_prom_put(p, "$cbs", []);
+}
+function $js_promise_new(exec) {
+  const p = $js_prom_new();
+  const res = $nat("resolve", 1, (t, a) => { $js_prom_settle(p, 1, a[0]); return undefined; });
+  const rej = $nat("reject", 1, (t, a) => { $js_prom_settle(p, 2, a[0]); return undefined; });
+  $callThis(exec, undefined, [res, rej]);
+  // executor 自己抛了：照规范当作 reject
+  if ($js_pending()) $js_prom_settle(p, 2, $js_take_pending());
+  return p;
+}
+function $js_promise_resolved(v) {
+  if ($js_prom_is(v)) return v;
+  const p = $js_prom_new();
+  $js_prom_settle(p, 1, v);
+  return p;
+}
+function $js_promise_rejected(e) {
+  const p = $js_prom_new();
+  $js_prom_settle(p, 2, e);
+  return p;
+}
+// Promise.all：不是 promise 的元素当已结算的值收下；任何一格 reject 就整体 reject。
+function $js_promise_all(items) {
+  const xs = [...$js_iter(items)];
+  const out = $js_promise_new($nat("", 2, (t, a) => {
+    const res = a[0], rej = a[1];
+    const vals = [];
+    let left = xs.length;
+    if (left === 0) { $callThis(res, undefined, [vals]); return undefined; }
+    for (let i = 0; i < xs.length; i++) vals.push(undefined);
+    for (let i = 0; i < xs.length; i++) {
+      const at = i;
+      $js_prom_react($js_promise_resolved(xs[at]),
+        $nat("", 1, (tt, aa) => {
+          vals[at] = aa[0];
+          left--;
+          if (left === 0) $callThis(res, undefined, [vals]);
+          return undefined;
+        }),
+        $nat("", 1, (tt, aa) => { $callThis(rej, undefined, [aa[0]]); return undefined; }));
+    }
+    return undefined;
+  }));
+  return out;
 }
 // Date 的隐藏槽。取到的不是数就说明接收者不是这一族的对象 —— 报一句，别悄悄算出 NaN。
 function $js_date_ms(t) {

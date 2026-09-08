@@ -207,6 +207,15 @@ export const JS_ABI = {
      属性访问的五个入口上多问一句陷阱（get / set / has / deleteProperty / ownKeys）。
      apply/construct 与规范那套不变量校验都不做 —— 见 prelude 里 $js_px_trap 的说明。 */
   js_proxy_new: { js: '$js_proxy_new', c: 'omni_js_proxy_new', arity: 2 },
+  /* Promise 与作业队列（ADR-0020 P2 的前半）。then / catch / finally 不在这张表里 ——
+     它们住在 realm 的 promP 上，`p.then(f)` 走的是"取属性 + 带接收者调用"那条通用路。
+     js_jobs_run 由降级器补在 main 的**末尾**（只在这个模块真用到 Promise 时才补）：
+     这个值域里没有事件循环，"调用栈空了"只有那一处可观测。 */
+  js_promise_new: { js: '$js_promise_new', c: 'omni_js_promise_new', arity: 1, throws: true },
+  js_promise_resolved: { js: '$js_promise_resolved', c: 'omni_js_promise_resolved', arity: 1 },
+  js_promise_rejected: { js: '$js_promise_rejected', c: 'omni_js_promise_rejected', arity: 1 },
+  js_promise_all: { js: '$js_promise_all', c: 'omni_js_promise_all', arity: 1, throws: true },
+  js_jobs_run: { js: '$js_jobs_run', c: 'omni_js_jobs_run', arity: 0, ret: 'void', throws: true },
 
   js_map_new: { js: '$js_map_new', c: 'omni_js_map_new', arity: 0 },
   js_map_size: { js: '$js_map_size', c: 'omni_js_map_size', arity: 1 },
@@ -593,6 +602,8 @@ const P1_JS_ONLY = [
   'js_instanceof', 'js_to_prim', 'js_iter_proto', 'js_iter_next', 'js_for_in_keys',
   'js_sym_new', 'js_sym_for', 'js_sym_key_for', 'js_sym_desc', 'js_sym_str',
   'js_sym_wk', 'js_realm_proto', 'js_global_this', 'js_date_new', 'js_proxy_new',
+  'js_promise_new', 'js_promise_resolved', 'js_promise_rejected', 'js_promise_all',
+  'js_jobs_run',
 ];
 for (const n of P1_JS_ONLY) JS_ABI[n].noC = true;
 
