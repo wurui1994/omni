@@ -2009,6 +2009,13 @@ class Lower {
         const rhs = e.right.type === 'Ident' ? e.right.name : null;
         const isErr = (rhs !== null && ERROR_CTORS.has(rhs)) || (rhs && this.classes.get(rhs)?.isError);
         if (isErr) return op('js_is_a', [A(), s16(rhs)]);
+        /* 右边是内建构造器的名字（`x instanceof Object` / `... instanceof Array`）：
+         * 这个值域里那些构造器**取不出函数值来**（封闭 ABI），但 instanceof 真正要的只是
+         * 它的 prototype —— 直接拿 realm 上那一格比原型链（js_instanceof_p）。 */
+        if (rhs !== null && REALM_CTORS.has(rhs) && !this.lookup(rhs) && !this.globals.has(rhs)
+          && !this.classes.has(rhs)) {
+          return op('js_instanceof_p', [A(), op('js_realm_proto', [], { proto: rhs })]);
+        }
         return op('js_instanceof', [A(), B()]);
       }
       default:
@@ -2889,6 +2896,13 @@ const CONST_PROPS = {
 const ERROR_CTORS = new Set([
   'Error', 'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError',
   'EvalError', 'URIError', 'AggregateError',
+]);
+
+/* realm 上有原型的那些内建构造器（ADR-0020）。它们**取不出函数值来**（封闭 ABI，
+ * 决策 2），但 `x instanceof Object` 只要那一格 prototype —— 见 binary 里的 instanceof。
+ * Error 那一族不在这儿：它们走 `$cls` 链（决策 15）。 */
+const REALM_CTORS = new Set([
+  'Object', 'Function', 'Array', 'String', 'Number', 'Boolean', 'Symbol', 'RegExp', 'Map', 'Set',
 ]);
 
 const GLOBAL_CALLS = {

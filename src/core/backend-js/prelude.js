@@ -1962,6 +1962,18 @@ function $mkRealm() {
     return { fp: (self, args) => $callThis(t, bt, [...pre, ...args]), fp2: (ig, args) => $callThis(t, bt, [...pre, ...args]), $nm: "bound", $ln: 0 };
   });
   // Symbol.toStringTag 决定 [object X] 里的 X；没有就看 [[Class]]。
+  /* "借内建方法"那一格（ADR-0020）：Array.prototype.join.call(a, "|")。数组的方法平时是
+     **按标签派发**的（JS_METHODS，编译期就展开成 $js_arr_join），所以原型上本来一个都没有。
+     这儿把借得最多的那几个摆上去 —— 整张表要等"派发器生成一份注册表"那一步，现在
+     摆的是量到过的这些；表外的名字还是 undefined（借它就会当场报"不是函数"）。 */
+  $natm(r.arrP, "join", 1, (t, a) => $js_arr_join(t, a[0]));
+  $natm(r.arrP, "slice", 2, (t, a) => $js_arr_slice(t, a[0], a[1]));
+  $natm(r.arrP, "concat", 1, (t, a) => $js_arr_concat(t, a[0]));
+  $natm(r.arrP, "indexOf", 1, (t, a) => $js_arr_index_of(t, a[0]));
+  $natm(r.arrP, "includes", 1, (t, a) => $js_arr_includes(t, a[0]));
+  $natm(r.arrP, "map", 1, (t, a) => $js_arr_map(t, a[0]));
+  $natm(r.arrP, "filter", 1, (t, a) => $js_arr_filter(t, a[0]));
+  $natm(r.arrP, "forEach", 1, (t, a) => $js_arr_for_each(t, a[0]));
   $natm(r.iterP, "next", 0, () => $rt_error("Iterator.prototype.next is abstract"));
   // Symbol 的两格：description 是访问器（规范如此），toString 给 "Symbol(desc)"
   $js_def_acc(r.symP, "description", $nat("description", 0, (t) => $dynAsSym(t).d), undefined, false, true);
@@ -2453,6 +2465,23 @@ function $js_instanceof(v, ctor) {
     : ($dynTag(ctor) === "function" ? $js_fn_proto(ctor) : undefined);
   if (!$js_isobj(proto)) $rt_error("right-hand side of 'instanceof' is not callable");
   let cur = $js_isobj(v) ? v.pr : null;
+  while (cur !== null && cur !== undefined) {
+    if (cur === proto) return true;
+    cur = $js_isobj(cur) ? cur.pr : null;
+  }
+  return false;
+}
+/* x instanceof Object / Array / …（ADR-0020）：右边给的是 realm 上那一格 prototype 本身
+   （那些构造器在这个值域里取不出函数值来）。原始值一律为假 —— 规范如此：
+   1 instanceof Number 是 false。数组、Map、正则那些"不是 $JSObj 但有原型"的值从
+   $js_proto_of_prim 起步走链，所以 [] instanceof Array / Object 都是真。 */
+function $js_instanceof_p(v, proto) {
+  const t = $dynTag(v);
+  let cur = null;
+  if (t === "object") cur = v.pr;
+  else if (t === "list" || t === "dict" || t === "Map" || t === "Set" || t === "regexp"
+    || t === "bytes" || t === "function" || t === "TextEncoder") cur = $js_proto_of_prim(v);
+  else return false;
   while (cur !== null && cur !== undefined) {
     if (cur === proto) return true;
     cur = $js_isobj(cur) ? cur.pr : null;

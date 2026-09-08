@@ -9,5 +9,9 @@
 # 已经绿的（删掉的）：proto-chain、class-static-field —— 字面量里的 __proto__ 与
 #   Object.prototype 上那几个名字（hasOwnProperty/valueOf…）通了之后绿的。
 # 已经绿的（删掉的）：iter-protocol —— 后缀自增能在惰性位置（三元分支）里降了之后绿的。
-this-call-apply-bind.js  # Array.prototype.join.call 这种"借内建方法"还没通
-class-extends.js         # instanceof Object 与 Object.prototype.toString 的 tag
+# 已经绿的（删掉的）：this-call-apply-bind —— Array.prototype 上摆了借得最多的那几个方法
+#   （数组的方法平时按标签派发，原型上本来一个都没有）。
+# 已经绿的（删掉的）：class-extends —— "右边是内建构造器的名字"那种 instanceof 走
+#   js_instanceof_p（拿 realm 上那一格 prototype 比原型链）之后绿的。
+#
+# 现在**一条不剩**。往后新增的用例一时红着，就在这儿记一行，并写清欠的是哪一格。

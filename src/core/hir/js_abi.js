@@ -178,6 +178,10 @@ export const JS_ABI = {
   // 改函数签名 —— 改签名要动闭包记录、MakeClosure 与两个后端的调用约定。
   js_this_take: { js: '$js_this_take', c: 'omni_js_this_take', arity: 0 },
   js_instanceof: { js: '$js_instanceof', c: 'omni_js_instanceof', arity: 2, ret: 'bool' },
+  /* `x instanceof Object`（ADR-0020）：右边是内建构造器的名字时，这个值域里取不出那格
+     函数值来（封闭 ABI），而 instanceof 真正要的只是它的 prototype —— 所以直接拿
+     realm 上那一格比原型链。原始值一律为假（规范如此）。 */
+  js_instanceof_p: { js: '$js_instanceof_p', c: 'omni_js_instanceof_p', arity: 2, ret: 'bool' },
   // hint: 'n' number / 's' string / 'd' default（规范的 ToPrimitive）
   js_to_prim: { js: '$js_to_prim', c: 'omni_js_to_prim', arity: 1, lit: ['hint'] },
   // 迭代器协议：拿迭代器、走一步（结果是 { value, done } 那一格对象）
@@ -640,7 +644,7 @@ const P1_JS_ONLY = [
   'js_obj_own_keys', 'js_obj_freeze', 'js_obj_seal', 'js_obj_prevent_ext',
   'js_obj_is_frozen', 'js_obj_is_sealed', 'js_obj_is_ext', 'js_obj_to_string',
   'js_obj_from_entries',
-  'js_instanceof', 'js_to_prim', 'js_iter_proto', 'js_iter_next', 'js_for_in_keys',
+  'js_instanceof', 'js_instanceof_p', 'js_to_prim', 'js_iter_proto', 'js_iter_next', 'js_for_in_keys',
   'js_sym_new', 'js_sym_for', 'js_sym_key_for', 'js_sym_desc', 'js_sym_str',
   'js_sym_wk', 'js_realm_proto', 'js_global_this', 'js_date_new', 'js_proxy_new',
   'js_promise_new', 'js_promise_resolved', 'js_promise_rejected', 'js_promise_all',
