@@ -22,6 +22,12 @@ bool omni_js_num_is_nan(omni_dyn v) { return v.tag == OMNI_DYN_REAL && isnan(v.u
 
 bool omni_js_num_is_finite(omni_dyn v) { return v.tag == OMNI_DYN_REAL && isfinite(v.u.r); }
 
+/* **全局的** isNaN / isFinite：先 ToNumber，再问那一格（isNaN("x") 是 true、
+   isFinite("3") 是 true）。判据与 prelude 的 $js_global_is_* 相同。 */
+bool omni_js_global_is_nan(omni_dyn v) { return omni_js_num_is_nan(omni_js_num_of(v)); }
+
+bool omni_js_global_is_finite(omni_dyn v) { return omni_js_num_is_finite(omni_js_num_of(v)); }
+
 bool omni_js_num_is_integer(omni_dyn v) {
   return v.tag == OMNI_DYN_REAL && isfinite(v.u.r) && v.u.r == trunc(v.u.r);
 }

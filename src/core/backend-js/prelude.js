@@ -3430,6 +3430,10 @@ function $js_num_is_finite(v) { return $dynTag(v) === "real" && Number.isFinite(
 function $js_num_is_integer(v) { return $dynTag(v) === "real" && Number.isInteger(v); }
 // isSafeInteger：整数**且**绝对值不超过 2^53-1（超出那一档 double 上相邻两数差 2）
 function $js_num_is_safe_integer(v) { return $dynTag(v) === "real" && Number.isSafeInteger(v); }
+/* **全局的** isNaN / isFinite：先 ToNumber，再问那一格（isNaN("x") 是 true、
+   isFinite("3") 是 true）。与 Number 上那两格不是一回事，所以各占一格 op。 */
+function $js_global_is_nan(v) { return $js_num_is_nan($js_num_of(v)); }
+function $js_global_is_finite(v) { return $js_num_is_finite($js_num_of(v)); }
 function $js_num_of(v) {
   switch ($dynTag(v)) {
     case "real": return v;

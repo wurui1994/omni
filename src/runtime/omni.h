@@ -607,6 +607,9 @@ bool omni_js_num_is_nan(omni_dyn v);
 bool omni_js_num_is_finite(omni_dyn v);
 bool omni_js_num_is_integer(omni_dyn v);
 bool omni_js_num_is_safe_integer(omni_dyn v);
+/* **全局的** isNaN / isFinite：先 ToNumber（与 Number 上那两格不是一回事） */
+bool omni_js_global_is_nan(omni_dyn v);
+bool omni_js_global_is_finite(omni_dyn v);
 omni_dyn omni_js_num_of(omni_dyn v);
 omni_dyn omni_js_num_parse_int(omni_dyn s, omni_dyn radix);
 omni_dyn omni_js_num_parse_float(omni_dyn s);

@@ -171,6 +171,9 @@ console.log(`uri ${encodeURIComponent("-_.!~*'()")} ${decodeURIComponent("%e6%97
 console.log(`ra ${"x-y-z".replaceAll("-", (m) => "+")} ${"a1b1".replaceAll("1", (m, i) => i)}`);
 console.log(`ra ${"a.b".replaceAll(".", "[$&]")} ${"ab".replaceAll("", "-")} ${"aa".replaceAll("a", "$$")}`);
 console.log(`ra ${"abc".replace("b", (m) => m + m)} ${"abc".replace("b", "<$&>")}`);
+// 全局的 isNaN / isFinite 先 ToNumber；Number 上那两格不转（各一格 op）
+console.log(`nan ${isNaN("x")} ${isNaN("3")} ${isFinite("3")} ${isFinite("x")} ${isNaN(NaN)}`);
+console.log(`nan ${Number.isNaN("x")} ${Number.isFinite("3")} ${isFinite(null)} ${isNaN(undefined)}`);
 
 
 

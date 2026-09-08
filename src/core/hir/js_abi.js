@@ -354,6 +354,10 @@ export const JS_ABI = {
   js_num_is_finite: { js: '$js_num_is_finite', c: 'omni_js_num_is_finite', arity: 1, ret: 'bool' },
   js_num_is_integer: { js: '$js_num_is_integer', c: 'omni_js_num_is_integer', arity: 1, ret: 'bool' },
   js_num_is_safe_integer: { js: '$js_num_is_safe_integer', c: 'omni_js_num_is_safe_integer', arity: 1, ret: 'bool' },
+  /* **全局的** isNaN / isFinite 与 Number 上那两格不是一回事：它们先 ToNumber
+     （isNaN("x") 是 true、isFinite("3") 是 true），所以各占一格 op。 */
+  js_global_is_nan: { js: '$js_global_is_nan', c: 'omni_js_global_is_nan', arity: 1, ret: 'bool' },
+  js_global_is_finite: { js: '$js_global_is_finite', c: 'omni_js_global_is_finite', arity: 1, ret: 'bool' },
   js_num_of: { js: '$js_num_of', c: 'omni_js_num_of', arity: 1 },
   js_bigint_of: { js: '$js_bigint_of', c: 'omni_js_bigint_of', arity: 1 },
   js_bigint_as_int_n: { js: '$js_bigint_as_int_n', c: 'omni_js_bigint_as_int_n', arity: 2 },

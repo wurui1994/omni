@@ -3525,6 +3525,9 @@ const GLOBAL_CALLS = {
   Boolean: { op: 'js_truthy', argc: 1, len: 1 },
   parseInt: { op: 'js_num_parse_int', argc: 2, len: 2 },
   parseFloat: { op: 'js_num_parse_float', argc: 1, len: 1 },
+  // 全局的 isNaN / isFinite 先 ToNumber（Number 上那两格不转，是另外的 op）
+  isNaN: { op: 'js_global_is_nan', argc: 1, len: 1 },
+  isFinite: { op: 'js_global_is_finite', argc: 1, len: 1 },
   // 四个 URI 函数是同一条 op 上的四个 op 码（见 hir/js_abi.js 的 js_uri）
   encodeURIComponent: { op: 'js_uri', argc: 1, lit: { op: 'e' }, len: 1 },
   encodeURI: { op: 'js_uri', argc: 1, lit: { op: 'E' }, len: 1 },
