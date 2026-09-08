@@ -71,6 +71,9 @@ struct omni_re_s {
   re_range *ranges;
   int head;        /* 整个模式的头节点，-1 = 空模式（匹配空串） */
   int ngroups;
+  /* 具名捕获组的名字，按组号索引（1..ngroups），没名字的那一格 p == NULL。
+     `(?<y>…)` 只影响"结果上挂什么"，匹配本身与普通捕获组一模一样。 */
+  omni_s16 *gnames;
   bool global, multiline, icase;
 };
 
@@ -96,6 +99,7 @@ typedef struct {
   re_range *ranges;
   int nr, rcap;
   int ngroups;
+  omni_s16 *gnames;   /* 按组号索引，长度 OMNI_RE_MAX_CAPS；没名字的 p == NULL */
 } re_parse;
 
 OMNI_NORETURN static void re_err(re_parse *ps, const char *msg) {
@@ -306,7 +310,30 @@ static int re_atom(re_parse *ps) {
         } else if (k == '<') {
           uint16_t k2 = ps->i + 2 < ps->n ? ps->p[ps->i + 2] : 0;
           if (k2 == '=' || k2 == '!') re_err(ps, "lookbehind is not supported");
-          re_err(ps, "named capture group is not supported");
+          /* 具名捕获组 `(?<name>…)`：匹配上与普通捕获组没有区别，名字只决定
+             "结果对象的 groups 上挂哪一格"。名字收 [A-Za-z0-9_$]（规范收的是完整的
+             标识符字符集，这一档先按 ASCII 走，超出的当场报）。 */
+          ps->i += 2;
+          int64_t ns = ps->i;
+          while (ps->i < ps->n && ps->p[ps->i] != '>') {
+            uint16_t nc = ps->p[ps->i];
+            bool ok = (nc >= 'a' && nc <= 'z') || (nc >= 'A' && nc <= 'Z')
+              || (nc >= '0' && nc <= '9') || nc == '_' || nc == '$';
+            if (!ok) re_err(ps, "a capture group name takes [A-Za-z0-9_$] only");
+            ps->i++;
+          }
+          if (ps->i >= ps->n) re_err(ps, "unterminated capture group name");
+          if (ps->i == ns) re_err(ps, "an empty capture group name");
+          group = ++ps->ngroups;
+          if (group >= OMNI_RE_MAX_CAPS) omni_error("regexp: too many capturing groups");
+          for (int gi = 1; gi < group; gi++) {
+            if (ps->gnames[gi].p != NULL
+                && omni_s16_eq(ps->gnames[gi], omni_s16_of_units(ps->p + ns, ps->i - ns))) {
+              re_err(ps, "duplicate capture group name");
+            }
+          }
+          ps->gnames[group] = omni_s16_of_units(ps->p + ns, ps->i - ns);
+          ps->i++;   /* 吃掉 '>' */
         } else {
           re_err(ps, "unsupported group modifier after '(?'");
         }
@@ -490,6 +517,8 @@ omni_re omni_re_compile(omni_s16 pattern, omni_s16 flags) {
   ps.ranges = (re_range *)omni_alloc((size_t)ps.rcap * sizeof(re_range));
   ps.nr = 0;
   ps.ngroups = 0;
+  ps.gnames = (omni_s16 *)omni_alloc(OMNI_RE_MAX_CAPS * sizeof(omni_s16));
+  for (int gi = 0; gi < OMNI_RE_MAX_CAPS; gi++) { ps.gnames[gi].p = NULL; ps.gnames[gi].len = 0; }
 
   re->head = re_alt(&ps);
   if (ps.i != ps.n) re_err(&ps, "unmatched ')'");
@@ -497,10 +526,16 @@ omni_re omni_re_compile(omni_s16 pattern, omni_s16 flags) {
   re->nodes = ps.nodes;
   re->ranges = ps.ranges;
   re->ngroups = ps.ngroups;
+  re->gnames = ps.gnames;
   return re;
 }
 
 int omni_re_groups(omni_re re) { return re->ngroups; }
+/* 第 i 个捕获组的名字（1..ngroups）；没名字的返回 p == NULL 的那一格 */
+omni_s16 omni_re_group_name(omni_re re, int i) {
+  if (i < 1 || i > re->ngroups) { omni_s16 z; z.p = NULL; z.len = 0; return z; }
+  return re->gnames[i];
+}
 bool omni_re_global(omni_re re) { return re->global; }
 bool omni_re_multiline(omni_re re) { return re->multiline; }
 

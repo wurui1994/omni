@@ -2907,11 +2907,26 @@ function $js_re_last_index(r) {
   if ($dynTag(r) !== "regexp") $rt_error($dynTag(r) + " is not a regexp");
   return r.li;
 }
+// exec / .match（不带 g）的结果：一格 list，外加 index / input / groups 三格**属性**
+// （list 上挂属性走旁表，见 $js_xprops —— 所以"list 带不了属性"那句注释已经过时了）。
+// groups 只在模式里有具名组时才有，没有就整格 undefined（JS 就是这样）。
+function $js_re_result(m, str) {
+  const out = [];
+  for (let i = 0; i < m.length; i++) out.push(m[i] === undefined ? undefined : m[i]);
+  $js_obj_set(out, "index", m.index);
+  $js_obj_set(out, "input", str);
+  if (m.groups !== undefined) {
+    const g = $js_obj_new();
+    const names = Object.keys(m.groups);
+    for (let i = 0; i < names.length; i++) $js_obj_set(g, names[i], m.groups[names[i]]);
+    $js_obj_set(out, "groups", g);
+  }
+  return out;
+}
 // 正则对象上的 exec，照 ECMA-262 22.2.7.2：带 g 才用 lastIndex，找到就把它推到匹配的末尾
 // （**不加 1** —— 空匹配在 JS 里就是停在原地，那是调用方的事，这里不许自己"修好"），
 // 没找到就归 0。不带 g 的一律从 0 起，也不动 lastIndex。
-// 结果是一格 list：整体匹配在 0、捕获组依次在后。JS 的 exec 结果上还挂着 index / input，
-// 而这个值域里 list 带不了属性（决策 18）—— 那两个取不到，是画出来的边界。
+// 结果是一格 list（整体匹配在 0、捕获组依次在后），外加 index / input / groups 三格属性。
 function $js_re_exec(rd, sd) {
   if ($dynTag(rd) !== "regexp") $rt_error($dynTag(rd) + " is not a regexp");
   const s = $js_asS16(sd);
@@ -2923,9 +2938,7 @@ function $js_re_exec(rd, sd) {
     return null;
   }
   if (g) rd.li = m.index + m[0].length;
-  const out = [];
-  for (let i = 0; i < m.length; i++) out.push(m[i] === undefined ? undefined : m[i]);
-  return out;
+  return $js_re_result(m, s);
 }
 
 // ------------------------- 字节缓冲：ArrayBuffer / Uint8Array / DataView（ADR-0011）
@@ -3061,12 +3074,16 @@ function $js_re_test(pat, flags_, s) {
   if (flags.includes("g")) $rt_error("regexp: .test on a /g/ regexp is not supported (lastIndex has no home here)");
   return $js_re_find($js_re_get(pat, flags), $js_asS16(s), 0) !== null;
 }
+// .match：带 g 是"所有整体匹配的字符串"，不带 g 就是一次 exec（结果上挂着
+// index / input / groups —— 见 $js_re_result）
 function $js_re_match(pat, flags_, s) {
   const flags = $js_asS16(flags_);
+  const re = $js_re_get(pat, flags), str = $js_asS16(s);
   if (!flags.includes("g")) {
-    $rt_error("regexp: .match without /g/ is not supported (the result object has index/input on it)");
+    const m = $js_re_find(re, str, 0);
+    return m === null ? null : $js_re_result(m, str);
   }
-  const re = $js_re_get(pat, flags), str = $js_asS16(s), out = [];
+  const out = [];
   let at = 0;
   for (;;) {
     const m = $js_re_find(re, str, at);

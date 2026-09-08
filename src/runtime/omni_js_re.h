@@ -24,6 +24,36 @@ static omni_s16 omni_js_re_grp(omni_s16 s, const int64_t *caps, int i) { \
   if (caps[2 * i] < 0) { omni_s16 e; e.p = s.p; e.len = 0; return e; } \
   return omni_s16_slice(s, caps[2 * i], caps[2 * i + 1]); \
 } \
+static omni_dyn omni_js_re_result(omni_re re, omni_s16 s, const int64_t *caps) { \
+  int ng = omni_re_groups(re); \
+  bool named = false; \
+  LT out = LT##_new(); \
+  omni_dyn arr; \
+  LT##_reserve(out, ng + 1); \
+  out->items[0] = omni_dyn_of_s16(omni_s16_slice(s, caps[0], caps[1])); \
+  for (int i = 1; i <= ng; i++) { \
+    out->items[i] = caps[2 * i] < 0 ? omni_dyn_undef() \
+                                    : omni_dyn_of_s16(omni_s16_slice(s, caps[2 * i], caps[2 * i + 1])); \
+  } \
+  out->len = ng + 1; \
+  arr = omni_js_arr_wrap(out); \
+  omni_js_obj_set(arr, omni_dyn_of_s16(omni_js_s16_lit("index")), omni_dyn_of_real((double)caps[0])); \
+  omni_js_obj_set(arr, omni_dyn_of_s16(omni_js_s16_lit("input")), omni_dyn_of_s16(s)); \
+  for (int i = 1; i <= ng; i++) { \
+    if (omni_re_group_name(re, i).p != NULL) named = true; \
+  } \
+  if (named) { \
+    omni_dyn g = omni_js_obj_new(); \
+    for (int i = 1; i <= ng; i++) { \
+      omni_s16 nm = omni_re_group_name(re, i); \
+      if (nm.p == NULL) continue; \
+      omni_js_obj_set(g, omni_dyn_of_s16(nm), caps[2 * i] < 0 ? omni_dyn_undef() \
+        : omni_dyn_of_s16(omni_s16_slice(s, caps[2 * i], caps[2 * i + 1]))); \
+    } \
+    omni_js_obj_set(arr, omni_dyn_of_s16(omni_js_s16_lit("groups")), g); \
+  } \
+  return arr; \
+} \
 static omni_s16 omni_js_re_sub(omni_s16 repl, omni_s16 s, const int64_t *caps, int ng) { \
   omni_s16_buf out = {0}; \
   for (int64_t i = 0; i < repl.len; i++) { \
@@ -93,13 +123,15 @@ static omni_dyn omni_js_re_replace(omni_dyn pat, omni_dyn flags, omni_dyn sd, om
 } \
 static omni_dyn omni_js_re_match(omni_dyn pat, omni_dyn flags, omni_dyn sd) { \
   omni_re re = omni_js_re_get(pat, flags); \
-  if (!omni_re_global(re)) { \
-    omni_error("regexp: .match without /g/ is not supported (the result object has index/input on it)"); \
-  } \
   omni_s16 s = omni_js_as_s16(sd); \
   int64_t caps[2 * OMNI_RE_MAX_CAPS]; \
-  LT out = LT##_new(); \
+  LT out; \
   int64_t at = 0; \
+  if (!omni_re_global(re)) { \
+    if (!omni_re_search(re, s, 0, caps)) return omni_dyn_null(); \
+    return omni_js_re_result(re, s, caps); \
+  } \
+  out = LT##_new(); \
   while (at <= s.len && omni_re_search(re, s, at, caps)) { \
     LT##_push(out, omni_dyn_of_s16(omni_s16_slice(s, caps[0], caps[1]))); \
     at = caps[1] > caps[0] ? caps[1] : caps[1] + 1; \
@@ -166,8 +198,6 @@ static omni_dyn omni_js_re_exec(omni_dyn rd, omni_dyn sd) { \
   omni_s16 s; \
   int64_t caps[2 * OMNI_RE_MAX_CAPS]; \
   int64_t at; \
-  int ng, i; \
-  LT out; \
   if (rd.tag != OMNI_DYN_RE) { \
     omni_errorf("%s is not a regexp", omni_dyn_tag_name(rd.tag)); \
   } \
@@ -180,14 +210,7 @@ static omni_dyn omni_js_re_exec(omni_dyn rd, omni_dyn sd) { \
     return omni_dyn_null(); \
   } \
   if (omni_re_global(re)) r->li = caps[1]; \
-  ng = omni_re_groups(re); \
-  out = LT##_new(); \
-  LT##_push(out, omni_dyn_of_s16(omni_s16_slice(s, caps[0], caps[1]))); \
-  for (i = 1; i <= ng; i++) { \
-    LT##_push(out, caps[2 * i] < 0 ? omni_dyn_undef() \
-                                   : omni_dyn_of_s16(omni_s16_slice(s, caps[2 * i], caps[2 * i + 1]))); \
-  } \
-  return omni_js_arr_wrap(out); \
+  return omni_js_re_result(re, s, caps); \
 } \
 static omni_js_re_obj *omni_js_re_want(omni_dyn rd) { \
   if (rd.tag != OMNI_DYN_RE) omni_errorf("%s is not a regexp", omni_dyn_tag_name(rd.tag)); \

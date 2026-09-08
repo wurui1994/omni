@@ -557,6 +557,9 @@ typedef struct omni_re_s *omni_re;
 #define OMNI_RE_MAX_CAPS 33
 omni_re omni_re_compile(omni_s16 pattern, omni_s16 flags);
 int omni_re_groups(omni_re re);
+/* 第 i 个捕获组的名字（1..ngroups）；没名字的那一格 p == NULL。
+   具名组只决定结果对象的 groups 上挂什么，匹配本身与普通捕获组一样。 */
+omni_s16 omni_re_group_name(omni_re re, int i);
 bool omni_re_global(omni_re re);
 bool omni_re_multiline(omni_re re);
 bool omni_re_search(omni_re re, omni_s16 s, int64_t start, int64_t *caps);
