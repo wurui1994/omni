@@ -1758,6 +1758,40 @@ function $js_iter(v) {
     default: $rt_error($dynTag(v) + " is not iterable");
   }
 }
+/* for-of 的惰性形态（ADR-0020）：一格迭代把手 —— 真迭代器（生成器、带 Symbol.iterator 的
+   对象）才需要它，内建容器照旧摊成 list（它们本来就是抽干的语义，而且是热路径）。
+   v 是"当前那一格"，d 是"已经完了"。 */
+class $JsIterH {
+  constructor(it) {
+    this.it = it;
+    this.v = undefined;
+    this.d = false;
+  }
+}
+function $js_iter_open(v) {
+  return $dynTag(v) === "object" ? new $JsIterH($js_iter_proto(v)) : $js_iter(v);
+}
+// 每轮**恰好一次** next（cond 在体之前跑，continue 也走 step 再 cond）
+function $js_iter_done(h, i) {
+  if (!(h instanceof $JsIterH)) return $js_idx(i, 0) >= h.length;
+  if (h.d) return true;
+  const r = $js_iter_next(h.it);
+  if ($js_truthy($js_getp(r, "done", undefined))) { h.d = true; h.v = undefined; return true; }
+  h.v = $js_getp(r, "value", undefined);
+  return false;
+}
+function $js_iter_cur(h, i) {
+  return h instanceof $JsIterH ? h.v : $js_idx_get(h, i);
+}
+/* 循环出口补一次 return()：正常跑完时迭代器已经 done，这一格就是空操作；break 出来才真调
+   （带 finally 的生成器于是跑得到清理）。从 for-of 里 return / 带标签跳到外层去还是漏掉 ——
+   那要给循环出口挂一格清理协议，记在 ADR-0020 里。 */
+function $js_iter_close(h) {
+  if (!(h instanceof $JsIterH) || h.d) return;
+  h.d = true;
+  const rf = $js_getp(h.it, "return", undefined);
+  if ($dynTag(rf) === "function") $callThis(rf, h.it, []);
+}
 // o[k]：数组按下标、字符串按码元（只读）、普通对象按属性名。
 // Map/Set 上的 o[k] 在 JS 里是属性访问而不是条目，量过的源码里没有，所以报错。
 function $js_idx_get(o, k) {

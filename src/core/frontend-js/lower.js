@@ -1606,7 +1606,7 @@ class Lower {
    * 惰性那一格还没有（生成器是 P2）：现在两条都是**先收齐再走**。可观察的差别是
    * "循环体里改容器"—— 记在 ADR-0020 里，等 P2 的生成器把惰性形态带进来。
    */
-  forOf(s, seqOf = () => op('js_iter', [this.expr(s.right)])) {
+  forOf(s, seqOf = () => op('js_iter_open', [this.expr(s.right)])) {
     /* 没有声明的 for-of / for-in（`for (x of xs)`、`for (k in o)`）：每轮往一个**已经
      * 存在的**名字上写。目标只收名字 —— 成员目标（`for (o.k of xs)`）要把接收者提成
      * 临时量（走 sink），而这儿是循环体里的一句，提出去就跑到循环外面了。 */
@@ -1618,12 +1618,16 @@ class Lower {
     const it = this.declare('_it').name;
     const i = this.declare('_i').name;
     const pre = [localStmt(it, seqOf()), localStmt(i, constReal(0))];
-    const cond = boolOp('js_cmp', [varRef(i), op('js_p_length', [varRef(it)])], { op: '<' });
+    /* 惰性（ADR-0020）：把手可能是 list，也可能是一格真迭代器。cond 那一步**就是**
+     * "往前走一格"（每轮恰好一次 next —— cond 在体之前跑，continue 也走 step 再 cond），
+     * 取值另有 js_iter_cur。循环后面补一次 close：正常跑完时迭代器已经 done、那是空操作，
+     * break 出来才真调 it.return()。 */
+    const cond = notB(boolOp('js_iter_done', [varRef(it), varRef(i)]));
     const step = assign(varRef(i), op('js_add', [varRef(i), constReal(1)]));
     this.fn.loops++;
     this.fn.oloops++;
     this.fn.targets.push({ ol: this.fn.oloops, cont: true });
-    const elem = () => op('js_idx_get', [varRef(it), varRef(i)]);
+    const elem = () => op('js_iter_cur', [varRef(it), varRef(i)]);
     let inner;
     if (s.declKind) {
       inner = this.bindPattern(s.left, elem());
@@ -1636,7 +1640,11 @@ class Lower {
     this.fn.oloops--;
     this.fn.loops--;
     this.popScope();
-    return [block([...pre, { kind: 'For', init: null, cond, step, body: block([...inner, ...body.stmts]) }])];
+    return [block([
+      ...pre,
+      { kind: 'For', init: null, cond, step, body: block([...inner, ...body.stmts]) },
+      exprStmt(op('js_iter_close', [varRef(it)])),
+    ])];
   }
 
   /**

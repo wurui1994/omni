@@ -235,6 +235,18 @@ export const JS_ABI = {
   /* `x instanceof Object`（ADR-0020）：右边是内建构造器的名字时，这个值域里取不出那格
      函数值来（封闭 ABI），而 instanceof 真正要的只是它的 prototype —— 所以直接拿
      realm 上那一格比原型链。原始值一律为假（规范如此）。 */
+  /* for-of 的惰性形态（ADR-0020）：`js_iter_open` 交出"list 或一格迭代把手"，
+     `js_iter_done` 往前走一步（真迭代器才走，list 只是比下标）、`js_iter_cur` 取当前那一格、
+     `js_iter_close` 在循环出口补一次 `return()`。这一刀图的是两件事：
+       - **别抽干**：`for (const v of fib()) { if (v > 20) break; }` 从前会一路 next 到 done，
+         无穷生成器上就是**挂住**（量出来的：30s 超时）；
+       - 提前退出时该调 `it.return()`，带 finally 的生成器于是跑得到清理。
+     内建容器（list / string / Map / Set / bytes）照旧摊成 list —— 它们本来就是抽干的语义，
+     而且是热路径（自举出来的编译器满是数组遍历）。C 那侧只有 list 这一支。 */
+  js_iter_open: { js: '$js_iter_open', c: 'omni_js_iter_open', arity: 1, throws: true },
+  js_iter_done: { js: '$js_iter_done', c: 'omni_js_iter_done', arity: 2, ret: 'bool', throws: true },
+  js_iter_cur: { js: '$js_iter_cur', c: 'omni_js_iter_cur', arity: 2 },
+  js_iter_close: { js: '$js_iter_close', c: 'omni_js_iter_close', arity: 1, ret: 'void', throws: true },
   js_instanceof_p: { js: '$js_instanceof_p', c: 'omni_js_instanceof_p', arity: 2, ret: 'bool' },
   /* 是不是"真对象"（规范的 Type(v) is Object）。用处只有一处：构造器 `return {…}` 时
      `new C()` 的值是**返回的那一格**，返回别的（数、undefined）就还是实例（规范 10.2.2

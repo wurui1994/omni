@@ -233,6 +233,15 @@ static omni_dyn omni_js_iter(omni_dyn v) { \
       return omni_dyn_undef(); \
   } \
 } \
+/* for-of 的惰性形态（ADR-0020）：C 这侧只有 list 那一支 —— 真迭代器（生成器、带
+   Symbol.iterator 的对象）是 JS 那条腿独有的，走到这儿本来就是 "not iterable"。
+   所以把手就是那个 list，done 只是比下标，close 是空操作。 */ \
+static omni_dyn omni_js_iter_open(omni_dyn v) { return omni_js_iter(v); } \
+static bool omni_js_iter_done(omni_dyn h, omni_dyn i) { \
+  return omni_js_arr_i(i) >= omni_js_arr_of(h)->len; \
+} \
+static omni_dyn omni_js_iter_cur(omni_dyn h, omni_dyn i) { return omni_js_arr_at(h, i); } \
+static void omni_js_iter_close(omni_dyn h) { (void)h; } \
 /* String.raw 的**普通调用**形态（tag 形态在降级器那儿就折成字面量了）：段数看 raw.length，
    最后一段后面不再拼插值；插值不够就当没有，不是拼 "undefined"。 */ \
 static omni_dyn omni_js_str_raw(omni_dyn strs, omni_dyn subs) { \
