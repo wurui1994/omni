@@ -822,7 +822,7 @@ class Lower {
         continue;
       }
       const what = m.computed ? null : this.keyName(m.key, m.span);
-      const key = () => (m.computed ? this.expr(m.key) : s16(what));
+      const key = () => (m.computed ? this.expr(m.key) : this.propKey(what));
       const target = m.static ? classG : protoG;
       if (m.kind === 'field') {
         /* static 字段直接落在类对象上（可枚举、可写）；实例字段进 $init。
@@ -893,7 +893,7 @@ class Lower {
         // 字段在构造器体**之前**、形参绑定之前（规范：字段初始化器看不见构造器的形参）
         for (const f of fields) {
           const fname = f.computed ? null : this.keyName(f.key, f.span);
-          const fkey = f.computed ? this.expr(f.key) : s16(fname);
+          const fkey = f.computed ? this.expr(f.key) : this.propKey(fname);
           const fval = f.value ? this.expr(f.value) : undefExpr();
           // 私有名那一格不可枚举（理由同 classProtoStmts 里那段说明）
           pre.push(exprStmt(fname !== null && fname.startsWith('#')
@@ -905,8 +905,16 @@ class Lower {
     });
   }
 
-  /** 这个静态路径（或它的某个前缀）在 STATIC_PROPS 里注册过吗（ADR-0020 P1-f） */
-  staticPrefix(node) {
+  /* 私有名（`#x`）的键：一格**符号**，不是字符串 —— 于是 `o["#x"]` 取不到、
+   * `Object.getOwnPropertyNames` 也列不出来（qjs 就是这样，量过）。同名共用一格
+   * （js_sym_for 的注册表），代价写在明处：`Object.getOwnPropertySymbols` 还看得见它，
+   * 而且两个类里同名的 `#x` 是同一格键（规范靠词法作用域禁掉跨类访问，这儿没那一层）。 */
+  privKey(name) { return op('js_sym_for', [s16(name)]); }
+
+  /** 名字是私有名就给符号键，否则给字符串键 */
+  propKey(name) { return name.startsWith('#') ? this.privKey(name) : s16(name); }
+
+  /** 这个静态路径（或它的某个前缀）在 STATIC_PROPS 里注册过吗（ADR-0020 P1-f） */  staticPrefix(node) {
     let cur = node;
     while (cur && cur.type === 'Member' && !cur.computed) {
       const p = this.staticPath(cur);
@@ -2018,7 +2026,7 @@ class Lower {
           this.err(e.span, "'delete' needs a member expression");
           return undefExpr();
         }
-        const key = t.computed ? this.expr(t.prop) : s16(t.name);
+        const key = t.computed ? this.expr(t.prop) : this.propKey(t.name);
         return op('js_obj_delete', [this.expr(t.object), key]);
       }
       default:
@@ -2050,7 +2058,14 @@ class Lower {
       case '<<': return op('js_bitop', [A(), B()], { op: '<' });
       case '>>': return op('js_bitop', [A(), B()], { op: '>' });
       case '>>>': return ushr(A(), B());
-      case 'in': return op('js_obj_has', [B(), A()]);
+      case 'in': {
+        /* `#x in o`（ES2022 的 brand check）：左边不是表达式而是一个**私有名** ——
+         * 它的键是符号（见 privKey），问的是"自有"而不是沿原型链，所以走 has_own。 */
+        if (e.left.type === 'Ident' && typeof e.left.name === 'string' && e.left.name.startsWith('#')) {
+          return op('js_obj_has_own', [B(), this.privKey(e.left.name)]);
+        }
+        return op('js_obj_has', [B(), A()]);
+      }
       case 'instanceof': {
         /* 两条路（ADR-0020 P1-f）：
          *   - Error 与它的子类查 `$cls` 链（决策 15，那是 throw/catch 的现役机制）；
@@ -2201,7 +2216,7 @@ class Lower {
   memberOn(obj, e) {
     if (e.computed) return op('js_idx_get', [obj, this.expr(e.prop)]);
     if (Object.hasOwn(JS_PROPS, e.name)) return op(`js_p_${e.name}`, [obj]);
-    return op('js_obj_get', [obj, s16(e.name)]);
+    return op('js_obj_get', [obj, this.propKey(e.name)]);
   }
 
   /**
@@ -2393,7 +2408,7 @@ class Lower {
         // 不是 ABI 表里那个成员，而是用户自己的同名方法 —— 接收者照样要传（P1）。
         // recv 用两次，所以先落进临时量（理由同上面那处 js_call_this）。
         const t = this.temp();
-        const f = op('js_obj_get', [assign(varRef(t), recv), s16(name)]);
+        const f = op('js_obj_get', [assign(varRef(t), recv), this.propKey(name)]);
         return op('js_call_this', [f, varRef(t), box(this.argList(e.args), listType(D))]);
       }
       const args = [recv];
@@ -2798,7 +2813,7 @@ class Lower {
       }
       const t = this.temp();
       this.emitPre(exprStmt(assign(varRef(t), this.expr(node.object))), span);
-      let key = () => s16(node.name);
+      let key = () => this.propKey(node.name);
       if (node.computed) {
         const k = this.temp();
         this.emitPre(exprStmt(assign(varRef(k), this.expr(node.prop))), span);
@@ -2878,7 +2893,7 @@ class Lower {
           if (!spec) { this.err(e.span, `cannot assign to '${path}'`); return undefExpr(); }
           return op(spec.op, [this.expr(e.value)]);
         }
-        const key = t.computed ? this.expr(t.prop) : s16(t.name);
+        const key = t.computed ? this.expr(t.prop) : this.propKey(t.name);
         return op('js_idx_set', [this.expr(t.object), key, this.expr(e.value)]);
       }
       const lv = this.lvalue(t, e.span);
