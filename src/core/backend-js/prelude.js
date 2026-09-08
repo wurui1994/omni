@@ -1940,8 +1940,9 @@ function $realm() {
 function $mkRealm() {
   const objP = new $JSObj(null, "Object");
   const funP = new $JSObj(objP, "Function");
+  const iterP = new $JSObj(objP, "Iterator");
   const r = {
-    objP, funP,
+    objP, funP, iterP,
     arrP: new $JSObj(objP, "Array"),
     strP: new $JSObj(objP, "String"),
     numP: new $JSObj(objP, "Number"),
@@ -1951,10 +1952,14 @@ function $mkRealm() {
     mapP: new $JSObj(objP, "Map"),
     setP: new $JSObj(objP, "Set"),
     reP: new $JSObj(objP, "RegExp"),
-    iterP: new $JSObj(objP, "Iterator"),
     dateP: new $JSObj(objP, "Date"),
     promP: new $JSObj(objP, "Promise"),
-    genP: new $JSObj(objP, "Generator"),
+    /* 生成器的原型链上有 Iterator.prototype（规范如此）—— ES2025 的那批 helper
+       （take / map / filter …）就住在那儿，所以这一格不能是 objP。
+       helper 自己交出来的迭代器另有一格原型（%IteratorHelperPrototype%），
+       它的原型又是 Iterator.prototype，于是 helper 可以接着往下链。 */
+    genP: new $JSObj(iterP, "Generator"),
+    iterHelpP: new $JSObj(iterP, "Iterator Helper"),
     agenP: new $JSObj(objP, "AsyncGenerator"),
     // globalThis（ADR-0020 P4）：这个值域里没有全局环境记录（模块的顶层名字是模块局部的），
     // 所以它就是**一格普通的真对象**，每个 realm 一份。挂上去的东西读得回来，
@@ -2014,6 +2019,20 @@ function $mkRealm() {
   $natm(r.strP, "charCodeAt", 1, (t, a) => $js_str_char_code_at(t, a[0]));
   $natm(r.strP, "repeat", 1, (t, a) => $js_str_repeat(t, a[0]));
   $natm(r.iterP, "next", 0, () => $rt_error("Iterator.prototype.next is abstract"));
+  /* ES2025 的那批 helper 就摆在这儿 —— 生成器与 helper 自己造的迭代器都从原型链上拿到它。
+     Symbol.iterator 给 this 自己（规范如此），for-of 与展开于是也能吃 helper 的结果。 */
+  $natm(r.iterP, "take", 1, (t, a) => $js_it_take(t, a[0]));
+  $natm(r.iterP, "drop", 1, (t, a) => $js_it_drop(t, a[0]));
+  $natm(r.iterP, "map", 1, (t, a) => $js_it_map(t, a[0]));
+  $natm(r.iterP, "filter", 1, (t, a) => $js_it_filter(t, a[0]));
+  $natm(r.iterP, "flatMap", 1, (t, a) => $js_it_flat_map(t, a[0]));
+  $natm(r.iterP, "toArray", 0, (t) => $js_it_to_array(t));
+  $natm(r.iterP, "forEach", 1, (t, a) => $js_it_for_each(t, a[0]));
+  $natm(r.iterP, "reduce", 1, (t, a) => $js_it_reduce(t, a[0], a[1]));
+  $natm(r.iterP, "some", 1, (t, a) => $js_it_some(t, a[0]));
+  $natm(r.iterP, "every", 1, (t, a) => $js_it_every(t, a[0]));
+  $natm(r.iterP, "find", 1, (t, a) => $js_it_find(t, a[0]));
+  $js_def_data(r.iterP, $js_sym_wk("iterator"), $nat("[Symbol.iterator]", 0, (t) => t), true, false, true);
   // Symbol 的两格：description 是访问器（规范如此），toString 给 "Symbol(desc)"
   $js_def_acc(r.symP, "description", $nat("description", 0, (t) => $dynAsSym(t).d), undefined, false, true);
   $natm(r.symP, "toString", 0, (t) => $js_sym_str(t));
@@ -2306,6 +2325,74 @@ function $js_gen_res(v, done) {
   $js_def_data(o, "done", done === true, true, true, true);
   return o;
 }
+/* Iterator helpers（ES2025）：住在 Iterator.prototype 上，所以生成器（原型链上有它）与
+   helper 自己造出来的迭代器都接得下去。惰性的那五格（take / drop / map / filter / flatMap）
+   各造一格新迭代器，next 才去拉上游；终结的那几格就地把上游拉完或短路。短路时**关掉上游**
+   （调它的 return）—— 规范如此，而且量得出来：带 finally 的生成器在 take(3) 拉完之后就
+   该跑 finally。两处边界：空 reduce 与负的 take/drop 在规范里是 TypeError / RangeError，
+   这个值域里是当场报错（没有"可 catch 的宿主错"这一格）。 */
+function $js_it_close(t) {
+  const f = $js_getp(t, "return", undefined);
+  if (f !== undefined && f !== null) $callThis(f, t, []);
+}
+function $js_it_pull(t) { return $js_iter_next(t); }
+function $js_it_done(r) { return $js_truthy($js_getp(r, "done", undefined)); }
+function $js_it_val(r) { return $js_getp(r, "value", undefined); }
+/* helper 交出来的迭代器：next 拉一格，return 把**上游**也关掉（规范里 return 就是这么
+   一层层链下去的 —— 少了这一格，g().map(f).take(3) 拉完之后生成器的 finally 不会跑，
+   量出来过）。关掉之后 next 一律 done。 */
+function $js_it_new(next, up) {
+  let closed = false;
+  const o = $js_obj_new_p($realm().iterHelpP);
+  $js_def_data(o, "next", $nat("next", 0, () => (closed ? $js_gen_res(undefined, true) : next())),
+    true, false, true);
+  $js_def_data(o, "return", $nat("return", 0, () => {
+    if (!closed) {
+      closed = true;
+      if (up !== undefined) $js_it_close(up);
+    }
+    return $js_gen_res(undefined, true);
+  }), true, false, true);
+  return o;
+}
+// 上游是真对象就按协议拿它的迭代器（惰性）；数组 / 串那些先收成数组，再按下标喂
+function $js_it_src(v) {
+  if ($dynTag(v) === "object") return $js_iter_proto(v);
+  const xs = $js_iter(v);
+  let k = 0;
+  return $js_it_new(() => (k < xs.length ? $js_gen_res(xs[k++], false) : $js_gen_res(undefined, true)));
+}
+function $js_it_count(n, who) {
+  const k = Math.trunc($js_real(n, who));
+  if (!(k >= 0)) $rt_error(who + " count must not be negative");
+  return k;
+}
+function $js_it_take(t, n) {
+  let left = $js_it_count(n, "take");
+  let fin = false;
+  return $js_it_new(() => {
+    if (fin) return $js_gen_res(undefined, true);
+    if (left <= 0) { fin = true; $js_it_close(t); return $js_gen_res(undefined, true); }
+    left--;
+    const r = $js_it_pull(t);
+    if ($js_it_done(r)) { fin = true; return $js_gen_res(undefined, true); }
+    return $js_gen_res($js_it_val(r), false);
+  }, t);
+}
+function $js_it_drop(t, n) {
+  let left = $js_it_count(n, "drop");
+  let fin = false;
+  return $js_it_new(() => {
+    if (fin) return $js_gen_res(undefined, true);
+    while (left > 0) {
+      left--;
+      if ($js_it_done($js_it_pull(t))) { fin = true; return $js_gen_res(undefined, true); }
+    }
+    const r = $js_it_pull(t);
+    if ($js_it_done(r)) { fin = true; return $js_gen_res(undefined, true); }
+    return $js_gen_res($js_it_val(r), false);
+  }, t);
+}
 function $js_gen_new(step) {
   const g = $js_obj_new_p($realm().genP);
   $js_def_data(g, "$stp", step, true, false, true);
@@ -2313,6 +2400,111 @@ function $js_gen_new(step) {
   return g;
 }
 function $js_gen_is(v) { return $js_isobj(v) && v.ps.has("$stp"); }
+// 惰性的另外三格：回调收 (value, counter)（counter 从 0 起，与 map/filter 那批同一约定）
+function $js_it_map(t, f) {
+  let i = 0, fin = false;
+  return $js_it_new(() => {
+    if (fin) return $js_gen_res(undefined, true);
+    const r = $js_it_pull(t);
+    if ($js_it_done(r)) { fin = true; return $js_gen_res(undefined, true); }
+    const v = $callFn(f, [$js_it_val(r), i]);
+    i++;
+    return $js_gen_res(v, false);
+  }, t);
+}
+function $js_it_filter(t, f) {
+  let i = 0, fin = false;
+  return $js_it_new(() => {
+    while (!fin) {
+      const r = $js_it_pull(t);
+      if ($js_it_done(r)) { fin = true; break; }
+      const v = $js_it_val(r);
+      const keep = $js_truthy($callFn(f, [v, i]));
+      i++;
+      if (keep) return $js_gen_res(v, false);
+    }
+    return $js_gen_res(undefined, true);
+  }, t);
+}
+function $js_it_flat_map(t, f) {
+  let i = 0, fin = false, inner = null;
+  return $js_it_new(() => {
+    for (;;) {
+      if (fin) return $js_gen_res(undefined, true);
+      if (inner !== null) {
+        const ir = $js_it_pull(inner);
+        if (!$js_it_done(ir)) return $js_gen_res($js_it_val(ir), false);
+        inner = null;
+      }
+      const r = $js_it_pull(t);
+      if ($js_it_done(r)) { fin = true; return $js_gen_res(undefined, true); }
+      inner = $js_it_src($callFn(f, [$js_it_val(r), i]));
+      i++;
+    }
+  }, t);
+}
+// 终结的那几格：就地把上游拉完，或短路（短路时关掉上游）
+function $js_it_to_array(t) {
+  const out = [];
+  for (;;) {
+    const r = $js_it_pull(t);
+    if ($js_it_done(r)) return out;
+    out.push($js_it_val(r));
+  }
+}
+function $js_it_for_each(t, f) {
+  let i = 0;
+  for (;;) {
+    const r = $js_it_pull(t);
+    if ($js_it_done(r)) return undefined;
+    $callFn(f, [$js_it_val(r), i]);
+    i++;
+  }
+}
+function $js_it_reduce(t, f, init) {
+  let acc = init, i = 0;
+  // 缺初值就拿头一个当初值（counter 于是从 1 起）；空的在规范里是 TypeError
+  if (init === undefined) {
+    const r0 = $js_it_pull(t);
+    if ($js_it_done(r0)) $rt_error("reduce of empty iterator with no initial value");
+    acc = $js_it_val(r0);
+    i = 1;
+  }
+  for (;;) {
+    const r = $js_it_pull(t);
+    if ($js_it_done(r)) return acc;
+    acc = $callFn(f, [acc, $js_it_val(r), i]);
+    i++;
+  }
+}
+function $js_it_some(t, f) {
+  let i = 0;
+  for (;;) {
+    const r = $js_it_pull(t);
+    if ($js_it_done(r)) return false;
+    if ($js_truthy($callFn(f, [$js_it_val(r), i]))) { $js_it_close(t); return true; }
+    i++;
+  }
+}
+function $js_it_every(t, f) {
+  let i = 0;
+  for (;;) {
+    const r = $js_it_pull(t);
+    if ($js_it_done(r)) return true;
+    if (!$js_truthy($callFn(f, [$js_it_val(r), i]))) { $js_it_close(t); return false; }
+    i++;
+  }
+}
+function $js_it_find(t, f) {
+  let i = 0;
+  for (;;) {
+    const r = $js_it_pull(t);
+    if ($js_it_done(r)) return undefined;
+    const v = $js_it_val(r);
+    if ($js_truthy($callFn(f, [v, i]))) { $js_it_close(t); return v; }
+    i++;
+  }
+}
 function $js_gen_step(g, v, mode) {
   if (!$js_gen_is(g)) $rt_error("this is not a generator");
   const st = g.ps.get("$gst").v;
