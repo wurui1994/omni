@@ -321,6 +321,12 @@ export const JS_ABI = {
   // 里都不溢出；别的运算碰上这一格会响 —— 那是画出来的边界，不是悄悄算错。
   js_bigint_as_uint_n: { js: '$js_bigint_as_uint_n', c: 'omni_js_bigint_as_uint_n', arity: 2 },
   js_num_to_precision: { js: '$js_num_to_precision', c: 'omni_js_num_to_precision', arity: 2 },
+  /* toFixed / toExponential：JS 那侧转手宿主（即是规范）。C 那份**当场报错**而不是
+     凑一个近似 —— 两者在**恰好一半**上不一样（(2.5).toFixed(0) 是 "3"，而 C 的 %.Nf
+     就近取偶给 "2"），要对上得走十进制那条路。它们进不了 P1_JS_ONLY：成员派发器
+     （js_m_toFixed）是运行期派发的，C 那张表里躲不开这个名字，所以只能在运行期喊。 */
+  js_num_to_fixed: { js: '$js_num_to_fixed', c: 'omni_js_num_to_fixed', arity: 2 },
+  js_num_to_exp: { js: '$js_num_to_exp', c: 'omni_js_num_to_exp', arity: 2 },
   js_num_to_string: { js: '$js_num_to_string', c: 'omni_js_num_to_string', arity: 2 },
   // op: 'a' abs / 't' trunc / 'f' floor / 'c' ceil / 'M' max / 'm' min
   //     后加的四个只给核心方言的 (rmath …) 用：'s' sqrt / 'r' round（C 的离零舍入，
@@ -695,6 +701,8 @@ export const JS_METHODS = {
     },
   },
   toPrecision: { on: { real: 'js_num_to_precision' } },
+  toFixed: { on: { real: 'js_num_to_fixed' } },
+  toExponential: { on: { real: 'js_num_to_exp' } },
 };
 /* ADR-0020 P1 那一族（真对象 / Symbol / 迭代器协议）**现在只有 JS 侧的实现**。
  * 名字列在这一处清单里，`noC` 由下面这几行打上 —— 一处清单胜过四十行里各写一遍，

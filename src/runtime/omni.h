@@ -606,6 +606,9 @@ omni_dyn omni_js_bigint_as_int_n(omni_dyn bits, omni_dyn v);
 omni_dyn omni_js_bigint_as_uint_n(omni_dyn bits, omni_dyn v);
 omni_dyn omni_js_math(int op, omni_dyn a, omni_dyn b);
 omni_dyn omni_js_num_to_precision(omni_dyn v, omni_dyn digits);
+/* toFixed / toExponential：C 那侧当场报错（舍入口径与 JS 不同，见 omni_js_num.c） */
+omni_dyn omni_js_num_to_fixed(omni_dyn v, omni_dyn digits);
+omni_dyn omni_js_num_to_exp(omni_dyn v, omni_dyn digits);
 omni_dyn omni_js_num_to_string(omni_dyn v, omni_dyn radix);
 
 /* omni_js_host.c —— node 宿主面（ADR-0011 落地顺序第 4 步）。

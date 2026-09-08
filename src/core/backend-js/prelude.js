@@ -3074,6 +3074,22 @@ function $js_num_to_precision(v, digits) {
   if (p < 1 || p > 100) $rt_error("toPrecision() argument must be between 1 and 100, got " + p);
   return $js_real(v, "toPrecision").toPrecision(p);
 }
+/* toFixed / toExponential：转手宿主的同名方法即是规范。**只有 JS 这一侧** —— 它们在
+   恰好一半上进位（1.5.toFixed(0) 是 "2"、2.5 是 "3"），而 C 的 %.Nf 就近取偶（2.5 给
+   "2"），要在 C 里对上得走十进制那条路（见 interp/libc.js 里那段量口）。所以这两格
+   进 P1_JS_ONLY：C 那条腿当场报错，不给一个"多数时候对"的答案。 */
+function $js_num_to_fixed(v, digits) {
+  const d = digits === undefined ? 0 : $js_real(digits, "toFixed");
+  if (d < 0 || d > 100) $rt_error("toFixed() argument must be between 0 and 100, got " + d);
+  return $js_real(v, "toFixed").toFixed(d);
+}
+function $js_num_to_exp(v, digits) {
+  const x = $js_real(v, "toExponential");
+  if (digits === undefined) return x.toExponential();
+  const d = $js_real(digits, "toExponential");
+  if (d < 0 || d > 100) $rt_error("toExponential() argument must be between 0 and 100, got " + d);
+  return x.toExponential(d);
+}
 function $js_num_to_string(v, radix) {
   const r = radix === undefined ? 10 : $js_real(radix, "toString");
   if (r < 2 || r > 36) $rt_error("toString() radix must be between 2 and 36, got " + r);

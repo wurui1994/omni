@@ -306,6 +306,25 @@ omni_dyn omni_js_math(int op, omni_dyn a, omni_dyn b) {
   return omni_dyn_null();
 }
 
+/* toFixed / toExponential：这一侧**当场报错**，不凑近似。理由是舍入口径：JS 在
+   **恰好一半**上进位（(2.5).toFixed(0) 是 "3"），而 C 的 %.Nf 就近取偶给 "2" ——
+   两者只差这一处，而那一处恰恰是会被人量到的。要在 C 里对上得走十进制那条路（把 double
+   的精确十进制展开写出来再舍），那是另一刀。成员派发是运行期的，C 那张表里躲不开这个
+   名字（进不了 P1_JS_ONLY），所以只能在这儿喊。 */
+omni_dyn omni_js_num_to_fixed(omni_dyn v, omni_dyn digits) {
+  (void)v;
+  (void)digits;
+  omni_error("toFixed is not implemented on the C leg (ADR-0020 P1-c)");
+  return omni_dyn_undef();
+}
+
+omni_dyn omni_js_num_to_exp(omni_dyn v, omni_dyn digits) {
+  (void)v;
+  (void)digits;
+  omni_error("toExponential is not implemented on the C leg (ADR-0020 P1-c)");
+  return omni_dyn_undef();
+}
+
 /* Number.prototype.toPrecision（ECMA-262）。编译器用 toPrecision(17) 把 double 写进
    生成的 C，所以这条的每一位都算在自举的不动点里。
    不走 %g：%g 的指数是两位（"1e-07"），而且什么时候切指数形式的界也和规范不同。 */
