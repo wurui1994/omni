@@ -12,8 +12,9 @@
 
 #include <stdarg.h>
 #include <stddef.h>
+#include <stdint.h>
 
-#define OMNI_GL_REQ_VERSION 1
+#define OMNI_GL_REQ_VERSION 2
 
 /* 上下文能力。`glsl_version` 是照 glrender.cc:1305 算的
    `(int)(100*atof(glGetString(GL_SHADING_LANGUAGE_VERSION))+0.5)`，
@@ -53,5 +54,71 @@ int omni_gl_shaders_selftest(const char *shader_dir, int nlights, int nmaterials
    fragment.glsl:248 直走 `outColor = emissive`，所以读回必须逐像素是 51/102/153。
    回 0 = 过。用来验属性按名字绑、int 属性走 I 版、UBO 手绑三步都对。 */
 int omni_gl_geom_selftest(const char *shader_dir);
+
+/* ── 场景（照抄 render.h 的内存布局，一个字节都别改） ──────────────────────
+ *
+ * asy 3.14 的顶点结构（render.h:51-71）。glmCommon.h **没有**定义
+ * `GLM_FORCE_DEFAULT_ALIGNED_GENTYPES`，所以 vec3 是 12 字节 align 4、
+ * 全部字段紧排、结构体不补洞：28 / 44 / 20。
+ *
+ * 注意 `omni_gl_cvertex` 前三个字段的偏移与 `omni_gl_mvertex` 完全一致
+ * （0/12/24）—— glrender.cc:1006 设 normal 指针时对两者都写
+ * `offsetof(MaterialVertex, normal)`，这个"巧合"是照抄的一部分，别动字段次序。 */
+typedef struct { float position[3]; float normal[3]; int32_t material; } omni_gl_mvertex;
+typedef struct { float position[3]; float normal[3]; int32_t material;
+                 float color[4]; } omni_gl_cvertex;
+typedef struct { float position[3]; float width; int32_t material; } omni_gl_pvertex;
+
+/* Material（material.h）：四个 vec4 紧排 = 64 字节，std140 下正好逐字段对齐。 */
+typedef struct {
+  float diffuse[4];
+  float emissive[4];
+  float specular[4];
+  float parameters[4];   /* (shininess, metallic, fresnel0, 未用) */
+} omni_gl_material;
+
+/* 一条 buffer：顶点数组 + uint32 索引。空的（nindices==0）整条跳过，
+   与 `drawBuffer` 开头 `if(data.indices.empty()) return;` 一致。 */
+typedef struct {
+  const void *verts;
+  size_t nverts;
+  const uint32_t *indices;
+  size_t nindices;
+} omni_gl_buffer;
+
+/* 一帧。六条 buffer 与 asy 的六个全局 buffer 一一对应，绘制次序写死在
+   `omni_gl_draw` 里（glrender.cc:1123 `drawBuffers()` 的 ssbo==0 那一路）。
+   矩阵一律 **double + 列主序**，与 asy 的 `glm::dmat4` 相同；上传时才截成 float
+   （glrender.cc:911 `value_ptr(mat4(projViewMat))`）。 */
+typedef struct {
+  int version;
+  int width, height;
+  int samples;          /* MSAA；超过 GL_MAX_SAMPLES 会自动夹到上限 */
+  float bg[4];
+
+  double projViewMat[16];
+  double viewMat[16];
+  double normMat[9];
+
+  const omni_gl_material *materials;
+  int nmaterials;       /* = materials.size()，就是 `#define Nmaterials` 的值 */
+  const float *light_dirs;    /* 3*nlights */
+  const float *light_colors;  /* 3*nlights */
+  int nlights;
+  int orthographic;
+
+  omni_gl_buffer point;        /* PointVertex,    pixelShader,       GL_POINTS */
+  omni_gl_buffer line;         /* MaterialVertex, materialShader,    GL_LINES */
+  omni_gl_buffer material;     /* MaterialVertex, materialShader,    GL_TRIANGLES */
+  omni_gl_buffer color;        /* ColorVertex,    colorShader,       GL_TRIANGLES */
+  omni_gl_buffer triangle;     /* ColorVertex,    generalShader,     GL_TRIANGLES */
+  omni_gl_buffer transparent;  /* ColorVertex,    transparentShader, GL_TRIANGLES */
+} omni_gl_scene;
+
+/* 画一帧并把像素按 RGB8 紧排写进 out_rgb（width*height*3）。
+   `shader_dir` 要指到 **shaders/GL**（根 shaders/ 那份是 Vulkan 的，Apple GL 4.1 编不过）。
+   行序与 GL 一致：out_rgb[0] 是**左下角**。 */
+int omni_gl_draw(const char *shader_dir, const omni_gl_scene *sc,
+                 unsigned char *out_rgb);
 
 #endif /* OMNI_GL_H */

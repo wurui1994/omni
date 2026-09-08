@@ -158,6 +158,11 @@ static GLuint make_shader(const char *dir, const char *file, GLenum type,
   return sh;
 }
 
+/* 属性 location：asy **不**用 glGetAttribLocation，而是链接前按名字绑死
+   （shaders.h:31 的枚举 + shaders.cc:37-41 的 glBindAttribLocation）。
+   照抄这个次序，编号才与它一致。 */
+enum { A_POS = 0, A_NRM = 1, A_MAT = 2, A_COL = 3, A_WID = 4 };
+
 /* 照 `compileAndLinkShader`：顶点 + 片元两个，链成一个 program。 */
 static GLuint make_program(const char *dir, const char *vert, const char *frag,
                            const char *const *defs, int ndefs)
@@ -169,6 +174,12 @@ static GLuint make_program(const char *dir, const char *vert, const char *frag,
   GLuint pr = glCreateProgram();
   glAttachShader(pr, vs);
   glAttachShader(pr, fs);
+  /* 必须在 glLinkProgram **之前**（shaders.cc:37-41） */
+  glBindAttribLocation(pr, A_POS, "position");
+  glBindAttribLocation(pr, A_NRM, "normal");
+  glBindAttribLocation(pr, A_MAT, "material");
+  glBindAttribLocation(pr, A_COL, "color");
+  glBindAttribLocation(pr, A_WID, "width");
   glLinkProgram(pr);
   GLint ok = 0;
   glGetProgramiv(pr, GL_LINK_STATUS, &ok);
@@ -390,6 +401,353 @@ int omni_gl_geom_selftest(const char *shader_dir)
   return bad;
 }
 
+/* ── 第三块：真几何（照抄 glrender.cc 的 drawBuffers/drawBuffer/setUniformsOpenGL） ──
+ *
+ * 本机 `ssbo == 0`，所以走的是**没有次序无关透明**那一路：
+ *   initShaders 里一次性 `glEnable(GL_BLEND)` +
+ *   `glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)`（glrender.cc:288-292），
+ *   **之后整帧再也不 glDisable(GL_BLEND)** —— 不透明那几趟也是开着混合画的
+ *   （alpha=1 时等价，但 alpha 写脏就会露出来，照抄别"优化"）。
+ * 一帧的次序（glrender.cc:1123-1152）：
+ *   points → lines → materials → colors → triangles → [透明：排序 + 关深度写 + 一趟]
+ * `Opaque` 是 bool 当下标：**只要场景里有任何透明物**，连不透明那几趟也用不带
+ * `OPAQUE` 宏的变体。 */
+
+typedef struct {
+  GLuint pixel, material[2], color[2], general[2], transparent;
+  char dir[512];
+  int nlights, nmaterials, ortho;
+  int built;
+} gl_progset;
+
+static gl_progset progs;
+
+static GLuint one_prog(const char *dir, const char *const *common, int ncommon,
+                       const char *const *extra, int nextra)
+{
+  const char *st[10];
+  int n = 0;
+  for (int i = 0; i < ncommon; ++i) st[n++] = common[i];
+  for (int i = 0; i < nextra; ++i) st[n++] = extra[i];
+  return make_program(dir, "vertex.glsl", "fragment.glsl", st, n);
+}
+
+/* asy 的 `initShaders`：Nlights/Nmaterials 是 **#define**，所以它们一变就得重编
+ * （glrender.cc:424-428 的 deleteShaders()+initShaders()）。这儿同样按三元键缓存。
+ * `nmaterials = materials.size()`（glrender.cc:246），不是某个上限。 */
+static int build_progs(const char *dir, int nlights, int nmaterials, int ortho)
+{
+  if (progs.built && progs.nlights == nlights && progs.nmaterials == nmaterials &&
+      progs.ortho == ortho && strcmp(progs.dir, dir) == 0)
+    return 0;
+  if (progs.built) {
+    glDeleteProgram(progs.pixel);
+    glDeleteProgram(progs.material[0]); glDeleteProgram(progs.material[1]);
+    glDeleteProgram(progs.color[0]);    glDeleteProgram(progs.color[1]);
+    glDeleteProgram(progs.general[0]);  glDeleteProgram(progs.general[1]);
+    glDeleteProgram(progs.transparent);
+    memset(&progs, 0, sizeof progs);
+  }
+
+  static char lights[32], mats[32];
+  snprintf(lights, sizeof lights, "Nlights %d", nlights);
+  snprintf(mats, sizeof mats, "Nmaterials %d", nmaterials > 0 ? nmaterials : 1);
+  const char *common[4];
+  int nc = 0;
+  common[nc++] = "MATERIAL";
+  if (ortho) common[nc++] = "ORTHOGRAPHIC";
+  common[nc++] = lights;
+  common[nc++] = mats;
+
+  /* 这一串 extra 就是那个只 push 不 pop 的栈（glrender.cc:265-352） */
+  const char *e_pixel[] = { "WIDTH" };
+  const char *e_mat0[]  = { "NORMAL" };
+  const char *e_mat1[]  = { "NORMAL", "OPAQUE" };
+  const char *e_col0[]  = { "NORMAL", "COLOR" };
+  const char *e_col1[]  = { "NORMAL", "COLOR", "OPAQUE" };
+  const char *e_gen0[]  = { "NORMAL", "COLOR", "GENERAL" };
+  const char *e_gen1[]  = { "NORMAL", "COLOR", "GENERAL", "OPAQUE" };
+  const char *e_tr[]    = { "NORMAL", "COLOR", "GENERAL", "TRANSPARENT" };
+
+  progs.pixel       = one_prog(dir, common, nc, e_pixel, 1);
+  progs.material[0] = one_prog(dir, common, nc, e_mat0, 1);
+  progs.material[1] = one_prog(dir, common, nc, e_mat1, 2);
+  progs.color[0]    = one_prog(dir, common, nc, e_col0, 2);
+  progs.color[1]    = one_prog(dir, common, nc, e_col1, 3);
+  progs.general[0]  = one_prog(dir, common, nc, e_gen0, 3);
+  progs.general[1]  = one_prog(dir, common, nc, e_gen1, 4);
+  progs.transparent = one_prog(dir, common, nc, e_tr, 4);
+  if (!progs.pixel || !progs.material[0] || !progs.material[1] ||
+      !progs.color[0] || !progs.color[1] || !progs.general[0] ||
+      !progs.general[1] || !progs.transparent)
+    return -1;   /* omni_gl_err 里已经有具体是哪一个编不过 */
+
+  snprintf(progs.dir, sizeof progs.dir, "%s", dir);
+  progs.nlights = nlights;
+  progs.nmaterials = nmaterials;
+  progs.ortho = ortho;
+  progs.built = 1;
+  return 0;
+}
+
+/* 全局材质 UBO（asy 的 `materialsBuffer`，binding 0）。 */
+static GLuint materials_ubo = 0;
+
+/* 照 `setUniformsOpenGL`（glrender.cc:891-956）。
+   矩阵在 CPU 侧是 double，上传前才 `mat4(...)` 截成 float —— 这一步的截断次序
+   要与 asy 相同，别在 double 域里先做别的运算。 */
+static void set_uniforms(GLuint pr, const omni_gl_scene *sc, int normal)
+{
+  glUseProgram(pr);
+
+  GLfloat m[16];
+  for (int i = 0; i < 16; ++i) m[i] = (GLfloat) sc->projViewMat[i];
+  GLint u = glGetUniformLocation(pr, "projViewMat");
+  if (u >= 0) glUniformMatrix4fv(u, 1, GL_FALSE, m);
+
+  for (int i = 0; i < 16; ++i) m[i] = (GLfloat) sc->viewMat[i];
+  u = glGetUniformLocation(pr, "viewMat");
+  if (u >= 0) glUniformMatrix4fv(u, 1, GL_FALSE, m);
+
+  if (normal) {
+    GLfloat n3[9];
+    for (int i = 0; i < 9; ++i) n3[i] = (GLfloat) sc->normMat[i];
+    u = glGetUniformLocation(pr, "normMat");
+    if (u >= 0) glUniformMatrix3fv(u, 1, GL_FALSE, n3);
+    /* `uniform uint width` 是帧缓冲宽度（SSBO 索引用），非 pixelShader 才发 */
+    u = glGetUniformLocation(pr, "width");
+    if (u >= 0) glUniform1ui(u, (GLuint) sc->width);
+  }
+
+  u = glGetUniformLocation(pr, "nlights");
+  if (u >= 0) glUniform1ui(u, (GLuint) sc->nlights);
+  for (int i = 0; i < sc->nlights; ++i) {
+    char nm[64];
+    snprintf(nm, sizeof nm, "lights[%d].direction", i);
+    u = glGetUniformLocation(pr, nm);
+    if (u >= 0) glUniform3f(u, sc->light_dirs[3*i], sc->light_dirs[3*i+1],
+                            sc->light_dirs[3*i+2]);
+    snprintf(nm, sizeof nm, "lights[%d].color", i);
+    u = glGetUniformLocation(pr, nm);
+    if (u >= 0) glUniform3f(u, sc->light_colors[3*i], sc->light_colors[3*i+1],
+                            sc->light_colors[3*i+2]);
+  }
+
+  /* MaterialBuffer 没有 `binding=`，要手绑三步 */
+  GLuint blk = glGetUniformBlockIndex(pr, "MaterialBuffer");
+  if (blk != GL_INVALID_INDEX) {
+    glUniformBlockBinding(pr, blk, 0);
+    glBindBufferBase(GL_UNIFORM_BUFFER, 0, materials_ubo);
+  }
+}
+
+/* 照 `drawBuffer`（glrender.cc:958-1054）。
+   `kind`：0 = PointVertex（pixelShader）、1 = MaterialVertex、2 = ColorVertex。
+   stride/offset 全部照抄，特别是 **normal 的 offset 对两种结构都写 12**，
+   以及 material 必须走 `glVertexAttribIPointer`。 */
+static int draw_buffer(const omni_gl_buffer *b, GLuint pr, int kind,
+                       GLenum drawType, const omni_gl_scene *sc,
+                       const uint32_t *idx_override)
+{
+  if (b->nindices == 0) return 0;
+  int normal = (kind != 0);
+  int color = (kind == 2);
+  GLsizei stride = kind == 2 ? 44 : (kind == 1 ? 28 : 20);
+  size_t vsz = (size_t) stride * b->nverts;
+
+  GLuint vb = 0, ib = 0;
+  glGenBuffers(1, &vb);
+  glBindBuffer(GL_ARRAY_BUFFER, vb);
+  glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr) vsz, b->verts, GL_STATIC_DRAW);
+  glGenBuffers(1, &ib);
+  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ib);
+  glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+               (GLsizeiptr) (b->nindices * sizeof(uint32_t)),
+               idx_override ? idx_override : b->indices, GL_STATIC_DRAW);
+
+  set_uniforms(pr, sc, normal);
+
+  glVertexAttribPointer(A_POS, 3, GL_FLOAT, GL_FALSE, stride, (void *) 0);
+  glEnableVertexAttribArray(A_POS);
+
+  if (normal && sc->nlights > 0) {
+    /* offsetof(MaterialVertex, normal) == offsetof(ColorVertex, normal) == 12 */
+    glVertexAttribPointer(A_NRM, 3, GL_FLOAT, GL_FALSE, stride, (void *) 12);
+    glEnableVertexAttribArray(A_NRM);
+  }
+  if (!normal) {
+    glVertexAttribPointer(A_WID, 1, GL_FLOAT, GL_FALSE, stride, (void *) 12);
+    glEnableVertexAttribArray(A_WID);
+  }
+  glVertexAttribIPointer(A_MAT, 1, GL_INT, stride,
+                         (void *) (size_t) (normal ? 24 : 16));
+  glEnableVertexAttribArray(A_MAT);
+  if (color) {
+    glVertexAttribPointer(A_COL, 4, GL_FLOAT, GL_FALSE, stride, (void *) 28);
+    glEnableVertexAttribArray(A_COL);
+  }
+
+  glDrawElements(drawType, (GLsizei) b->nindices, GL_UNSIGNED_INT, (void *) 0);
+
+  glDisableVertexAttribArray(A_POS);
+  if (normal && sc->nlights > 0) glDisableVertexAttribArray(A_NRM);
+  if (!normal) glDisableVertexAttribArray(A_WID);
+  glDisableVertexAttribArray(A_MAT);
+  if (color) glDisableVertexAttribArray(A_COL);
+  glBindBuffer(GL_UNIFORM_BUFFER, 0);
+  glBindBuffer(GL_ARRAY_BUFFER, 0);
+  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+  glDeleteBuffers(1, &vb);
+  glDeleteBuffers(1, &ib);
+  return 0;
+}
+
+/* 照 `sortTriangles.cc`：键是 `projView` 的**第 2 列**前三个分量点乘顶点位置
+   （注意是列不是行、也不含平移项 —— 常数项对排序无影响），
+   三角形的键取三顶点之和，**升序**。qsort 粒度 3 个 uint32。 */
+static double *sort_zbuf = NULL;
+
+static int tri_compare(const void *p, const void *P)
+{
+  const uint32_t *a = (const uint32_t *) p, *b = (const uint32_t *) P;
+  double za = sort_zbuf[a[0]] + sort_zbuf[a[1]] + sort_zbuf[a[2]];
+  double zb = sort_zbuf[b[0]] + sort_zbuf[b[1]] + sort_zbuf[b[2]];
+  return za < zb ? -1 : 1;
+}
+
+static uint32_t *sort_transparent(const omni_gl_scene *sc)
+{
+  const omni_gl_buffer *b = &sc->transparent;
+  const omni_gl_cvertex *v = (const omni_gl_cvertex *) b->verts;
+  sort_zbuf = (double *) malloc(b->nverts * sizeof(double));
+  uint32_t *idx = (uint32_t *) malloc(b->nindices * sizeof(uint32_t));
+  if (!sort_zbuf || !idx) { free(sort_zbuf); sort_zbuf = NULL; free(idx); return NULL; }
+  double Tz0 = sc->projViewMat[8], Tz1 = sc->projViewMat[9], Tz2 = sc->projViewMat[10];
+  for (size_t i = 0; i < b->nverts; ++i)
+    sort_zbuf[i] = Tz0 * v[i].position[0] + Tz1 * v[i].position[1]
+                 + Tz2 * v[i].position[2];
+  memcpy(idx, b->indices, b->nindices * sizeof(uint32_t));
+  qsort(idx, b->nindices / 3, 3 * sizeof(uint32_t), tri_compare);
+  free(sort_zbuf);
+  sort_zbuf = NULL;
+  return idx;
+}
+
+int omni_gl_draw(const char *shader_dir, const omni_gl_scene *sc,
+                 unsigned char *out_rgb)
+{
+  if (sc->version != OMNI_GL_REQ_VERSION)
+    return fail("场景结构版本不符：插件要 %d，宿主给 %d",
+                OMNI_GL_REQ_VERSION, sc->version);
+  if (sc->width <= 0 || sc->height <= 0)
+    return fail("尺寸不合格 %dx%d", sc->width, sc->height);
+  if (ctx_init() != 0) return -1;
+  if (!glsl_version_cached) {
+    const char *sl = (const char *) glGetString(GL_SHADING_LANGUAGE_VERSION);
+    if (!sl) return fail("拿不到 GL_SHADING_LANGUAGE_VERSION");
+    glsl_version_cached = (int) (100 * atof(sl) + 0.5);
+  }
+
+  /* Nlights：`nlights == 0 ? 0 : max(Nlights, nlights)`（glrender.cc:245）。
+     导出是一帧一次，所以就等于 nlights。 */
+  if (build_progs(shader_dir, sc->nlights, sc->nmaterials, sc->orthographic) != 0)
+    return -1;
+
+  /* VAO 只生成一次并一直绑着（glrender.cc:213-215） */
+  static GLuint vao = 0;
+  if (!vao) { glGenVertexArrays(1, &vao); glBindVertexArray(vao); }
+
+  if (!materials_ubo) glGenBuffers(1, &materials_ubo);
+  glBindBuffer(GL_UNIFORM_BUFFER, materials_ubo);
+  glBufferData(GL_UNIFORM_BUFFER,
+               (GLsizeiptr) (sizeof(omni_gl_material) *
+                             (sc->nmaterials > 0 ? sc->nmaterials : 1)),
+               sc->materials, GL_STATIC_DRAW);
+  glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+  int ns = sc->samples > 0 ? sc->samples : 1;
+  int maxs = 1;
+  glGetIntegerv(GL_MAX_SAMPLES, &maxs);
+  if (ns > maxs) ns = maxs;
+
+  GLuint fbo = 0, crb = 0, drb = 0;
+  glGenFramebuffers(1, &fbo);
+  glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+  glGenRenderbuffers(1, &crb);
+  glBindRenderbuffer(GL_RENDERBUFFER, crb);
+  glRenderbufferStorageMultisample(GL_RENDERBUFFER, ns, GL_RGBA8,
+                                   sc->width, sc->height);
+  glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                            GL_RENDERBUFFER, crb);
+  glGenRenderbuffers(1, &drb);
+  glBindRenderbuffer(GL_RENDERBUFFER, drb);
+  glRenderbufferStorageMultisample(GL_RENDERBUFFER, ns, GL_DEPTH_COMPONENT32F,
+                                   sc->width, sc->height);
+  glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                            GL_RENDERBUFFER, drb);
+  if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+    return fail("多重采样 FBO 不完整（%dx%d, %d 采样）", sc->width, sc->height, ns);
+
+  /* ssbo == 0：混合开一次就不关了（glrender.cc:288-292） */
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  glEnable(GL_DEPTH_TEST);            /* glrender.cc:1349 */
+  glEnable(GL_PROGRAM_POINT_SIZE);    /* glrender.cc:1352，gl_PointSize 才生效 */
+
+  glViewport(0, 0, sc->width, sc->height);
+  glClearColor(sc->bg[0], sc->bg[1], sc->bg[2], sc->bg[3]);
+  glClearDepth(1.0);
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+  /* Opaque 是 bool 当下标（glrender.cc:1127） */
+  int Opaque = sc->transparent.nindices == 0;
+  int transparent = !Opaque;
+
+  draw_buffer(&sc->point, progs.pixel, 0, GL_POINTS, sc, NULL);
+  draw_buffer(&sc->line, progs.material[Opaque], 1, GL_LINES, sc, NULL);
+  draw_buffer(&sc->material, progs.material[Opaque], 1, GL_TRIANGLES, sc, NULL);
+  draw_buffer(&sc->color, progs.color[Opaque], 2, GL_TRIANGLES, sc, NULL);
+  draw_buffer(&sc->triangle, progs.general[Opaque], 2, GL_TRIANGLES, sc, NULL);
+
+  if (transparent) {
+    uint32_t *idx = sort_transparent(sc);
+    if (!idx) return fail("透明排序时内存不够");
+    glDepthMask(GL_FALSE);      /* 透明那一趟不写深度 */
+    draw_buffer(&sc->transparent, progs.transparent, 2, GL_TRIANGLES, sc, idx);
+    glDepthMask(GL_TRUE);
+    free(idx);
+  }
+
+  /* 解析 + 读回 */
+  GLuint rfbo = 0, rtex = 0;
+  glGenFramebuffers(1, &rfbo);
+  glGenTextures(1, &rtex);
+  glBindTexture(GL_TEXTURE_2D, rtex);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, sc->width, sc->height, 0,
+               GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+  glBindFramebuffer(GL_FRAMEBUFFER, rfbo);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                         rtex, 0);
+  if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+    return fail("解析用的 FBO 不完整");
+  glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, rfbo);
+  glBlitFramebuffer(0, 0, sc->width, sc->height, 0, 0, sc->width, sc->height,
+                    GL_COLOR_BUFFER_BIT, GL_NEAREST);
+  glBindFramebuffer(GL_READ_FRAMEBUFFER, rfbo);
+  glPixelStorei(GL_PACK_ALIGNMENT, 1);
+  glReadPixels(0, 0, sc->width, sc->height, GL_RGB, GL_UNSIGNED_BYTE, out_rgb);
+
+  GLenum e = glGetError();
+  glDeleteFramebuffers(1, &rfbo);
+  glDeleteTextures(1, &rtex);
+  glDeleteRenderbuffers(1, &crb);
+  glDeleteRenderbuffers(1, &drb);
+  glDeleteFramebuffers(1, &fbo);
+  if (e != GL_NO_ERROR) return fail("GL 报错 0x%x", (unsigned) e);
+  return 0;
+}
+
 int omni_gl_render(const omni_gl_req *req, unsigned char *out_rgb)
 {
   if (req->version != OMNI_GL_REQ_VERSION)
@@ -485,6 +843,49 @@ int main(void)
   int gbad = omni_gl_geom_selftest(sd);
   if (gbad != 0) printf("一个三角那一步没过：%s\n", omni_gl_error() ? omni_gl_error() : "像素不符");
   else printf("一个三角：属性/UBO/片元输出三处全对\n");
+
+  /* 第三块整条路：走 omni_gl_draw（八个 program + 六条 buffer + 排序 + 混合），
+     用 materialData 那一条送一个铺满的三角，判据同样是 51/102/153。 */
+  {
+    omni_gl_scene sc;
+    memset(&sc, 0, sizeof sc);
+    sc.version = OMNI_GL_REQ_VERSION;
+    sc.width = 4; sc.height = 2; sc.samples = 4;
+    sc.bg[0] = sc.bg[1] = sc.bg[2] = sc.bg[3] = 1.0f;
+    static const double I4[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
+    static const double I3[9] = { 1,0,0, 0,1,0, 0,0,1 };
+    memcpy(sc.projViewMat, I4, sizeof I4);
+    memcpy(sc.viewMat, I4, sizeof I4);
+    memcpy(sc.normMat, I3, sizeof I3);
+    omni_gl_material mt;
+    memset(&mt, 0, sizeof mt);
+    mt.diffuse[0] = mt.diffuse[1] = mt.diffuse[2] = 0.9f; mt.diffuse[3] = 1.0f;
+    mt.emissive[0] = 0.2f; mt.emissive[1] = 0.4f; mt.emissive[2] = 0.6f;
+    mt.emissive[3] = 1.0f;
+    sc.materials = &mt; sc.nmaterials = 1;
+    sc.nlights = 0; sc.orthographic = 1;
+    omni_gl_mvertex mv[3] = {
+      { { -1,-1, 0 }, { 0,0,1 }, 0 },
+      { {  3,-1, 0 }, { 0,0,1 }, 0 },
+      { { -1, 3, 0 }, { 0,0,1 }, 0 },
+    };
+    static const uint32_t ix[3] = { 0, 1, 2 };
+    sc.material.verts = mv; sc.material.nverts = 3;
+    sc.material.indices = ix; sc.material.nindices = 3;
+    unsigned char p2[4 * 2 * 3];
+    memset(p2, 0x5a, sizeof p2);
+    if (omni_gl_draw(sd, &sc, p2) != 0)
+      printf("omni_gl_draw 失败：%s\n", omni_gl_error());
+    else {
+      int ok = 1;
+      for (int i = 0; i < 4 * 2; ++i)
+        if (p2[i*3] != 51 || p2[i*3+1] != 102 || p2[i*3+2] != 153) { ok = 0; break; }
+      printf("omni_gl_draw（materialData 一条三角）：%s ——", ok ? "对" : "不对");
+      for (int i = 0; i < 6; ++i) printf(" %d", p2[i]);
+      printf("\n");
+      if (!ok) bad++;
+    }
+  }
 
   omni_gl_req req;
   memset(&req, 0, sizeof req);
