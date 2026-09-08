@@ -1005,6 +1005,16 @@ function $js_eq(strict, a, b) {
     // 两个 bigint 之间精确比（Number() 在 2^53 以上丢位，C 侧的 int_cmp 也是精确的）
     if (ta === "int" && tb === "int") return a === b;
     if (num(ta) && num(tb)) return Number(a) === Number(b);
+    // 对象 == 原始值：先把对象 ToPrimitive（规范 IsLooselyEqual 第 10、11 步），再比一次。
+    // ADR-0020 P1 —— 从前这个值域里没有"能转成原始值的对象"，所以这一格不存在。
+    const prim = (t) => t === "string" || t === "int" || t === "real" || t === "bool" || t === "symbol";
+    if (ta === "object" && prim(tb)) return $js_eq(false, $js_to_prim("d", a), b);
+    if (prim(ta) && tb === "object") return $js_eq(false, a, $js_to_prim("d", b));
+    // 字符串与数、布尔与别的：照规范都先转成数（这一格从前也不在，补齐）
+    if (ta === "string" && num(tb)) return $js_num_of(a) === Number(b);
+    if (num(ta) && tb === "string") return Number(a) === $js_num_of(b);
+    if (ta === "bool") return $js_eq(false, a ? 1 : 0, b);
+    if (tb === "bool") return $js_eq(false, a, b ? 1 : 0);
   }
   if (ta !== tb) return false;
   if (ta === "undefined" || ta === "null") return true;
@@ -1269,6 +1279,8 @@ function $js_idx_get(o, k) {
     case "list": return $js_num_key(k) ? $js_arr_get(o, k) : $js_obj_get(o, k);
     case "string": return $js_str_index(o, k);
     case "dict": return $js_obj_get(o, k);
+    // 真对象（ADR-0020 P1）：o[k] 与 o.k 是同一条路 —— 沿原型链、触发访问器。
+    case "object": return $js_getp(o, k, undefined);
     default: $rt_error("cannot index a " + $dynTag(o));
   }
 }
@@ -1286,6 +1298,7 @@ function $js_idx_set(o, k, v) {
       return v;
     }
     case "dict": $js_obj_set(o, k, v); return v;
+    case "object": $js_setp(o, k, v); return v;
     default: $rt_error("cannot assign to an index of a " + $dynTag(o));
   }
 }
@@ -1320,7 +1333,10 @@ function $js_key(k) {
   }
 }
 function $js_prop(k) { return $js_asS16(k); }
-function $js_obj_new() { return new Map(); }
+// 对象字面量与 new Object 那一格：**现在造的是真对象**（ADR-0020 P1）。
+// dict（宿主 Map）那一格留着 —— Omni 自己的 dict<string,dynamic> 还是它，而 Map/Set
+// 也躺在同一个标签上；这一族 op 因此两种都收，见下面每个函数头一句。
+function $js_obj_new() { return new $JSObj($realm().objP); }
 // JS 里数组也是对象，身上可以挂字段（asy 前端的 do-while 就往那一格更新列表上挂一个 dw）。
 // 这个值域里 list 只是一个数组、没有属性槽，所以额外属性放在**一张按同一性索引的旁表**里：
 // 键就是 $js_key 给引用值发的那个号。list 本身于是不为此多一个字段，没挂过属性的
@@ -1334,6 +1350,7 @@ function $js_xprops(o, make) {
   return d;
 }
 function $js_obj_get(o, k) {
+  if ($js_isobj(o)) return $js_getp(o, k, undefined);
   if ($dynTag(o) === "list") {
     const x = $js_xprops(o, false), key = $js_prop(k);
     return x === undefined || !x.has(key) ? undefined : x.get(key);
@@ -1343,11 +1360,13 @@ function $js_obj_get(o, k) {
 }
 // set 返回对象本身，这样对象字面量可以降级成一串链式调用，不需要临时变量
 function $js_obj_set(o, k, v) {
+  if ($js_isobj(o)) { $js_setp(o, k, v); return o; }
   if ($dynTag(o) === "list") { $js_xprops(o, true).set($js_prop(k), v); return o; }
   $js_dict_of(o).set($js_prop(k), v);
   return o;
 }
 function $js_obj_has(o, k) {
+  if ($js_isobj(o)) return $js_obj_has_p(o, k);
   if ($dynTag(o) === "list") {
     const x = $js_xprops(o, false);
     return x === undefined ? false : x.has($js_prop(k));
@@ -1355,18 +1374,37 @@ function $js_obj_has(o, k) {
   return $js_dict_of(o).has($js_prop(k));
 }
 function $js_obj_delete(o, k) {
+  if ($js_isobj(o)) return $js_obj_del_p(o, k);
   if ($dynTag(o) === "list") {
     const x = $js_xprops(o, false);
     return x === undefined ? true : x.delete($js_prop(k));
   }
   return $js_dict_of(o).delete($js_prop(k));
 }
-function $js_obj_keys(o) { return [...$js_dict_of(o).keys()]; }
-function $js_obj_values(o) { return [...$js_dict_of(o).values()]; }
-function $js_obj_entries(o) { return [...$js_dict_of(o)].map(([k, v]) => [k, v]); }
+// Object.keys/values/entries：真对象上只算**自有、可枚举、字符串键**的（规范如此），
+// dict 那一格照旧是全部键（那是 Omni 的 dict，没有描述符这一层）。
+function $js_obj_keys(o) {
+  if ($js_isobj(o)) return $js_own_keys(o, "e");
+  return [...$js_dict_of(o).keys()];
+}
+function $js_obj_values(o) {
+  if ($js_isobj(o)) return $js_own_keys(o, "e").map((k) => $js_getp(o, k, undefined));
+  return [...$js_dict_of(o).values()];
+}
+function $js_obj_entries(o) {
+  if ($js_isobj(o)) return $js_own_keys(o, "e").map((k) => [k, $js_getp(o, k, undefined)]);
+  return [...$js_dict_of(o)].map(([k, v]) => [k, v]);
+}
 // { ...src, k: v } 的 src 那一步。undefined / null 当空对象（JS 就是这么规定的）。
 function $js_obj_assign(dst, src) {
   if (src === undefined || src === null) return dst;
+  if ($js_isobj(dst) || $js_isobj(src)) {
+    const ks = $js_isobj(src) ? $js_own_keys(src, "e") : [...$js_dict_of(src).keys()];
+    for (const k of ks) $js_obj_set(dst, k, $js_obj_get(src, k));
+    // Symbol 键也抄（Object.assign 抄自有可枚举的**所有**键，含 Symbol）
+    if ($js_isobj(src)) for (const s of $js_own_keys(src, "y")) $js_obj_set(dst, s, $js_obj_get(src, s));
+    return dst;
+  }
   const d = $js_dict_of(dst);
   for (const [k, v] of $js_dict_of(src)) d.set(k, v);
   return dst;
@@ -2108,6 +2146,20 @@ function $js_json_val(v, rep, gap, depth) {
     return first ? "{}" : out + $js_json_nl(gap, depth) + "}";
   }
   if (t === "Map" || t === "Set") return "{}";
+  // 真对象（ADR-0020 P1）：自有、可枚举、字符串键，取值走 [[Get]]（访问器要被触发）。
+  // toJSON 还没接（P4 那一片）。
+  if (t === "object") {
+    let out = "{", first = true;
+    const sep = $js_json_nl(gap, depth + 1);
+    for (const k of $js_own_keys(v, "e")) {
+      const s = $js_json_val($js_json_apply(rep, k, $js_getp(v, k, undefined)), rep, gap, depth + 1);
+      if (s === undefined) continue;
+      if (!first) out += ",";
+      first = false;
+      out += sep + $js_json_quote(k) + (gap > 0 ? ": " : ":") + s;
+    }
+    return first ? "{}" : out + $js_json_nl(gap, depth) + "}";
+  }
   $rt_error("do not know how to serialize a " + t);
 }
 function $js_json_stringify(v, rep, indent) {
@@ -2284,7 +2336,8 @@ function $js_take_pending() {
 // 不是 ABI op，是 prelude 自己的助手：REPL 的 js 引擎与整程序的 uncaught 检查共用它，
 // 两条路因此说同一句话（解释器那边对应 interp/builtin.js 的 jsErrText）。
 function $js_err_text(v) {
-  if ($dynTag(v) === "dict") {
+  const t = $dynTag(v);
+  if (t === "dict" || t === "object") {
     const cls = $js_obj_get(v, "$cls");
     if ($dynTag(cls) === "list" && cls.length > 0) {
       const msg = $js_obj_get(v, "message");
@@ -2308,7 +2361,8 @@ function $js_err_new(msg, cls) {
   return o;
 }
 function $js_is_a(v, n) {
-  if ($dynTag(v) !== "dict") return false;
+  const t = $dynTag(v);
+  if (t !== "dict" && t !== "object") return false;
   const c = $js_obj_get(v, "$cls");
   if ($dynTag(c) !== "list") return false;
   for (let i = 0; i < c.length; i++) if ($js_eq(true, c[i], n)) return true;

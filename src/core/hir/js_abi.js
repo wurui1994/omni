@@ -507,6 +507,28 @@ export const JS_METHODS = {
   toString: { on: { real: 'js_num_to_string' } },
   toPrecision: { on: { real: 'js_num_to_precision' } },
 };
+/* ADR-0020 P1 那一族（真对象 / Symbol / 迭代器协议）**现在只有 JS 侧的实现**。
+ * 名字列在这一处清单里，`noC` 由下面这几行打上 —— 一处清单胜过四十行里各写一遍，
+ * 而且 C 侧补齐之后只删一段。
+ *
+ * 谁看这一位：`backend-c/emit.js` 生成 `omni_js_call_op` 那张按名字派发的表时跳过它们
+ * （不然生成的 C 引用一堆还不存在的 `omni_js_*`，`tests/oir` 立刻红）。于是"两边还没齐"
+ * 这件事是**机器可见**的，不是注释里的一句承诺。
+ *
+ * 代价写在明处：这一族 op 现在只在 node 宿主（JS 后端与解释器）上成立。降级器一旦开始
+ * 发它们，C 那条腿上的 JS 程序就会在链接期缺符号 —— 所以 C 孪生必须在"降级器翻过去"
+ * 之前落地（ADR-0020 的 P1-c）。 */
+const P1_JS_ONLY = [
+  'js_obj_new_p', 'js_obj_proto_get', 'js_obj_proto_set', 'js_getp', 'js_setp',
+  'js_obj_has_p', 'js_obj_del_p', 'js_obj_has_own', 'js_obj_def', 'js_obj_desc',
+  'js_obj_own_keys', 'js_obj_freeze', 'js_obj_seal', 'js_obj_prevent_ext',
+  'js_obj_is_frozen', 'js_obj_is_sealed', 'js_obj_is_ext', 'js_obj_to_string',
+  'js_call_this', 'js_instanceof', 'js_to_prim', 'js_iter_proto', 'js_iter_next',
+  'js_sym_new', 'js_sym_for', 'js_sym_key_for', 'js_sym_desc', 'js_sym_str',
+  'js_sym_wk', 'js_realm_proto',
+];
+for (const n of P1_JS_ONLY) JS_ABI[n].noC = true;
+
 /* 派生：把上面两张表摊成和 JS_ABI 同形的条目（多一个 member 字段给生成器用），
  * 发射器查 op 名字时两张表合起来看。表写错了在这里就炸，不用等 C 编译器。 */
 export const JS_MEMBERS = {};

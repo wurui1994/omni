@@ -646,6 +646,9 @@ class CEmitter {
     const byLen = new Map();
     for (const [name, abi] of Object.entries(JS_ABI)) {
       if (name === 'js_call_op' || abi.raw === true) continue;  // 不自递归；raw 的签名不统一
+      // `noC`：C 侧还没落地的那一族（ADR-0020 P1 的真对象 / Symbol）。列在
+      // hir/js_abi.js 的 P1_JS_ONLY 里 —— 派发表里带上它们就是引用一堆不存在的符号。
+      if (abi.noC === true) continue;
       if (!byLen.has(name.length)) byLen.set(name.length, []);
       byLen.get(name.length).push([name, abi]);
     }
