@@ -2475,9 +2475,21 @@ static unsigned char *r3_gl_image(const r3scene *S, const r3tris *t,
     sc.bg[0] = (float) S->bg[0]; sc.bg[1] = (float) S->bg[1];
     sc.bg[2] = (float) S->bg[2]; sc.bg[3] = 1.0f;
     /* 顶点位置已经是**视图空间**（清单那一侧就转好了），所以 projViewMat 只放投影、
-       viewMat 与 normMat 是单位阵。S->P 与 glm 同型（P[列][行]）。 */
+       viewMat 与 normMat 是单位阵。S->P 与 glm 同型（P[列][行]）。
+       **深度那一行要换成 [0,1] 那一档**：asy 的投影矩阵是 `glm::ortho`，而
+       `glmCommon.h` 定了 `GLM_FORCE_DEPTH_ZERO_TO_ONE`（renderBase.cc:233），
+       也就是 clip z ∈ [0,1]；我们 `r3_projection` 写的是经典 GL 的 [-1,1]（CPU 光栅器
+       按那一档标定的，不动）。这儿把 z 那一行按 `z' = 0.5z + 0.5w` 折过去 ——
+       等价于重算一遍 glm 的那个矩阵，而不用碰 CPU 那条腿。
+       **量出来是噪声级**：pseudosphere 254152 → 254173（+21 个字节）、big_sph 一个不变。
+       默认还是折（照 asy），理由是"参考里若有 z-fight，只有同一档深度约定才复现得出来"；
+       `OMNI_R3_DEPTH01=0` 退回不折（标定用）。 */
     for (int c = 0; c < 4; ++c)
       for (int r = 0; r < 4; ++r) sc.projViewMat[c * 4 + r] = S->P[c][r];
+    { const char *e = getenv("OMNI_R3_DEPTH01");
+      if (!(e && strcmp(e, "0") == 0))
+        for (int c = 0; c < 4; ++c)
+          sc.projViewMat[c * 4 + 2] = 0.5 * S->P[c][2] + 0.5 * S->P[c][3]; }
     for (int k = 0; k < 16; ++k) sc.viewMat[k] = (k % 5 == 0) ? 1.0 : 0.0;
     for (int k = 0; k < 9; ++k) sc.normMat[k] = (k % 4 == 0) ? 1.0 : 0.0;
     sc.materials = ms; sc.nmaterials = (int) nuniq;
