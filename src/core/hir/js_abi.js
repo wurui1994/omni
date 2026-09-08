@@ -196,6 +196,8 @@ export const JS_ABI = {
   js_obj_to_string: { js: '$js_obj_to_string', c: 'omni_js_obj_to_string', arity: 1 },
   // Object.fromEntries：吃一串 [k, v]（数组 / Map / 任何可迭代的），出一格真对象
   js_obj_from_entries: { js: '$js_obj_from_entries', c: 'omni_js_obj_from_entries', arity: 1 },
+  // getOwnPropertyDescriptors（复数）：每一格自有属性一份描述符，装进一格新对象
+  js_obj_descs: { js: '$js_obj_descs', c: 'omni_js_obj_descs', arity: 1 },
   // 带接收者的调用。ADR-0011 那一代的 this 是捕获的 cell，所以对编译出来的函数这是
   // 空操作；原型上的内建方法必须靠它拿到接收者（prelude 里那一格 fp2）。
   js_call_this: { js: '$js_call_this', c: 'omni_js_call_this', arity: 3 },
@@ -425,6 +427,8 @@ export const JS_ABI = {
   js_str_split: { js: '$js_str_split', c: 'omni_js_str_split', arity: 3 },
   // substring：两头夹到 [0, len]、start > end 换过来，不认负下标（slice 那一格认）
   js_str_substring: { js: '$js_str_substring', c: 'omni_js_str_substring', arity: 3 },
+  // substr（Annex B）：起点认负数，第二格是长度
+  js_str_substr: { js: '$js_str_substr', c: 'omni_js_str_substr', arity: 3 },
   js_utf8_bytes: { js: '$js_utf8_bytes', c: 'omni_js_utf8_bytes', arity: 1 },
   js_num_parse_int: { js: '$js_num_parse_int', c: 'omni_js_num_parse_int', arity: 2 },
   // parseFloat：与 Number(s) 不是一回事 —— 吃最长的合法前缀，后面有垃圾也不报错，
@@ -621,6 +625,7 @@ export const JS_METHODS = {
   // 分隔符是字符串的那一支在这里；正则那一支由 lower.js 静态发成 js_re_split
   split: { on: { string: 'js_str_split' } },
   substring: { on: { string: 'js_str_substring' } },
+  substr: { on: { string: 'js_str_substr' } },
 
   // 两种接收者都有的。形参个数取多的那支（string 的 indexOf 还带 from），
   // list 分支只吃前面几个
@@ -733,7 +738,7 @@ const P1_JS_ONLY = [
   'js_reflect_set',
   'js_obj_own_keys', 'js_obj_freeze', 'js_obj_seal', 'js_obj_prevent_ext',
   'js_obj_is_frozen', 'js_obj_is_sealed', 'js_obj_is_ext', 'js_obj_to_string',
-  'js_obj_from_entries',
+  'js_obj_from_entries', 'js_obj_descs',
   'js_instanceof', 'js_instanceof_p', 'js_to_prim', 'js_iter_proto', 'js_iter_next', 'js_for_in_keys',
   'js_sym_new', 'js_sym_for', 'js_sym_key_for', 'js_sym_desc', 'js_sym_str',
   'js_sym_wk', 'js_realm_proto', 'js_global_this', 'js_date_new', 'js_proxy_new',

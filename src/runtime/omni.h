@@ -545,6 +545,8 @@ bool omni_js_str_includes(omni_dyn s, omni_dyn needle);
 bool omni_js_str_starts_with(omni_dyn s, omni_dyn pre, omni_dyn pos);
 bool omni_js_str_ends_with(omni_dyn s, omni_dyn suf);
 omni_dyn omni_js_str_of_char_code(omni_dyn u);
+/* substr（Annex B）：起点认负数，第二格是长度 */
+omni_dyn omni_js_str_substr(omni_dyn s, omni_dyn a, omni_dyn n);
 omni_dyn omni_js_str_of_code_point(omni_dyn cp);
 /* isWellFormed / toWellFormed（ES2024）：落单的代理项算"不良"，后者替成 U+FFFD */
 bool omni_js_str_is_well_formed(omni_dyn s);

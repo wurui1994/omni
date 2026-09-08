@@ -193,6 +193,23 @@ bool omni_js_str_ends_with(omni_dyn s, omni_dyn suf) {
 /* String.fromCharCode / fromCodePoint 在 JS 里是变长的；这里只收一个实参，
    多实参由降级拆成若干次 js_add —— ABI 里不引入变长 op，省得两个后端各自
    对"实参个数"做一套约定。 */
+/* substr（Annex B）：起点认负数（从末尾数），第二格是**长度**不是终点。
+   与 prelude 那份对着写。 */
+omni_dyn omni_js_str_substr(omni_dyn s, omni_dyn a, omni_dyn n) {
+  omni_s16 v = want_s16(s);
+  int64_t st = to_int_arg(a, 0);
+  int64_t len;
+  if (st < 0) {
+    st = v.len + st;
+    if (st < 0) st = 0;
+  }
+  if (st > v.len) st = v.len;
+  len = (n.tag == OMNI_DYN_UNDEF) ? v.len - st : to_int_arg(n, 0);
+  if (len <= 0) return omni_dyn_of_s16(omni_s16_slice(v, 0, 0));
+  if (st + len > v.len) len = v.len - st;
+  return omni_dyn_of_s16(omni_s16_slice(v, st, st + len));
+}
+
 omni_dyn omni_js_str_of_char_code(omni_dyn u) {
   return omni_dyn_of_s16(omni_s16_of_code_unit(to_int_arg(u, 0)));
 }

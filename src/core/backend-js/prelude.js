@@ -1417,6 +1417,14 @@ function $js_str_split(s, sep, limit) {
   const n = Math.trunc($js_real(limit, "split"));
   return n < 0 ? parts : parts.slice(0, n);
 }
+// substr（Annex B，但到处都还在用）：起点认负数（从末尾数），第二格是**长度**不是终点
+function $js_str_substr(s, a, n) {
+  const v = $js_asS16(s);
+  let st = $js_idx(a, 0);
+  if (st < 0) st = Math.max(v.length + st, 0);
+  const len = n === undefined ? v.length - st : $js_idx(n, 0);
+  return len <= 0 ? "" : v.slice(st, st + len);
+}
 // substring：两头都夹到 [0, len]，start > end 就换过来（规范 22.1.3.24）——
 // 与 slice 的差别是它**不认负下标**（负的一律当 0）
 function $js_str_substring(s, a, b) {
@@ -1615,17 +1623,35 @@ function $js_obj_delete(o, k) {
 }
 // Object.keys/values/entries：真对象上只算**自有、可枚举、字符串键**的（规范如此），
 // dict 那一格照旧是全部键（那是 Omni 的 dict，没有描述符这一层）。
+/* Object.keys / values / entries 也认**串**（规范里它先 ToObject，串于是成了类数组）：
+   键是下标的十进制串、值是一个个码元。量过：qjs 的 Object.keys("ab") 是 ["0","1"]。 */
+function $js_str_idx_keys(s) {
+  const v = $js_asS16(s), out = [];
+  for (let i = 0; i < v.length; i++) out.push($js_str(i));
+  return out;
+}
 function $js_obj_keys(o) {
   if ($js_isobj(o)) return $js_own_keys(o, "e");
+  if ($dynTag(o) === "string") return $js_str_idx_keys(o);
   return [...$js_dict_of(o).keys()];
 }
 function $js_obj_values(o) {
   if ($js_isobj(o)) return $js_own_keys(o, "e").map((k) => $js_getp(o, k, undefined));
+  if ($dynTag(o) === "string") return [...$js_asS16(o)].map((c) => c);
   return [...$js_dict_of(o).values()];
 }
 function $js_obj_entries(o) {
   if ($js_isobj(o)) return $js_own_keys(o, "e").map((k) => [k, $js_getp(o, k, undefined)]);
+  if ($dynTag(o) === "string") return $js_str_idx_keys(o).map((k, i) => [k, $js_asS16(o)[i]]);
   return [...$js_dict_of(o)].map(([k, v]) => [k, v]);
+}
+/* Object.getOwnPropertyDescriptors（复数）：每一格自有属性一份描述符，装进一格新对象。
+   单数那一格是 js_obj_desc，这儿只是把它按 own_keys 走一遍。 */
+function $js_obj_descs(o) {
+  const out = $js_obj_new();
+  if (!$js_isobj(o)) return out;
+  for (const k of $js_own_keys(o, "a")) $js_setp(out, k, $js_obj_desc(o, k), undefined);
+  return out;
 }
 // { ...src, k: v } 的 src 那一步。undefined / null 当空对象（JS 就是这么规定的）。
 function $js_obj_assign(dst, src) {

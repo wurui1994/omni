@@ -125,7 +125,18 @@ static bool omni_js_obj_has(omni_dyn o, omni_dyn k) { \
 static bool omni_js_obj_delete(omni_dyn o, omni_dyn k) { \
   return omni_js_obj_deletek(o, omni_js_prop(k)); \
 } \
+/* Object.keys / values / entries 也认**串**（规范里先 ToObject，串成了类数组）：
+   键是下标的十进制串、值是一个个码元。与 prelude 那份对着写。 */ \
+static omni_dyn omni_js_str_idx_keys(omni_s16 v) { \
+  LT out = LT##_new(); \
+  LT##_reserve(out, v.len); \
+  for (int64_t i = 0; i < v.len; i++) { \
+    out->items[out->len++] = omni_js_str(omni_dyn_of_real((double)i)); \
+  } \
+  return omni_js_arr_wrap(out); \
+} \
 static omni_dyn omni_js_obj_keys(omni_dyn o) { \
+  if (o.tag == OMNI_DYN_STR16) return omni_js_str_idx_keys(o.u.s16); \
   DT d = omni_js_dict_of(o); \
   LT out = LT##_new(); \
   LT##_reserve(out, d->count); \
@@ -135,6 +146,15 @@ static omni_dyn omni_js_obj_keys(omni_dyn o) { \
   return omni_js_arr_wrap(out); \
 } \
 static omni_dyn omni_js_obj_values(omni_dyn o) { \
+  if (o.tag == OMNI_DYN_STR16) { \
+    omni_s16 v = o.u.s16; \
+    LT sout = LT##_new(); \
+    LT##_reserve(sout, v.len); \
+    for (int64_t i = 0; i < v.len; i++) { \
+      sout->items[sout->len++] = omni_dyn_of_s16(omni_s16_slice(v, i, i + 1)); \
+    } \
+    return omni_js_arr_wrap(sout); \
+  } \
   DT d = omni_js_dict_of(o); \
   LT out = LT##_new(); \
   LT##_reserve(out, d->count); \
@@ -142,6 +162,20 @@ static omni_dyn omni_js_obj_values(omni_dyn o) { \
   return omni_js_arr_wrap(out); \
 } \
 static omni_dyn omni_js_obj_entries(omni_dyn o) { \
+  if (o.tag == OMNI_DYN_STR16) { \
+    omni_s16 v = o.u.s16; \
+    LT sout = LT##_new(); \
+    LT##_reserve(sout, v.len); \
+    for (int64_t i = 0; i < v.len; i++) { \
+      LT p2 = LT##_new(); \
+      LT##_reserve(p2, 2); \
+      p2->items[0] = omni_js_str(omni_dyn_of_real((double)i)); \
+      p2->items[1] = omni_dyn_of_s16(omni_s16_slice(v, i, i + 1)); \
+      p2->len = 2; \
+      sout->items[sout->len++] = omni_js_arr_wrap(p2); \
+    } \
+    return omni_js_arr_wrap(sout); \
+  } \
   DT d = omni_js_dict_of(o); \
   LT out = LT##_new(); \
   LT##_reserve(out, d->count); \

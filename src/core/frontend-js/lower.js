@@ -3036,6 +3036,8 @@ const STATIC_CALLS = {
   'Object.setPrototypeOf': { op: 'js_obj_proto_set', argc: 2 },
   'Object.defineProperty': { op: 'js_obj_def', argc: 3 },
   'Object.getOwnPropertyDescriptor': { op: 'js_obj_desc', argc: 2 },
+  // 复数那一格（ES2017）：每一格自有属性一份描述符
+  'Object.getOwnPropertyDescriptors': { op: 'js_obj_descs', argc: 1, len: 1 },
   'Object.getOwnPropertyNames': { op: 'js_obj_own_keys', argc: 1, lit: { sel: 's' } },
   'Object.getOwnPropertySymbols': { op: 'js_obj_own_keys', argc: 1, lit: { sel: 'y' } },
   'Object.freeze': { op: 'js_obj_freeze', argc: 1, len: 1 },
