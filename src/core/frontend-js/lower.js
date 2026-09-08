@@ -831,6 +831,7 @@ class Lower {
       const srec = this.classes.get(sup);
       if (!srec || srec.isError) {
         this.err(s.span, `'extends ${sup}': ${srec ? 'extending an Error subclass is not supported yet' : `'${sup}' is not a class declared in this file`}`);
+        return [];   // 父类的原型槽不存在，往下走就是内部崩（量出来的：class G extends Array {}）
       }
     }
     const protoG = () => globalRef(this.globals.get(protoGlobalName(s.id)).name);
@@ -3162,16 +3163,20 @@ class Lower {
         return { kind: 'Call', func: rec.mangled, name: n, args: [this.argList(e.args)], type: D };
       }
       /* 分配一格以类原型为原型的对象，再拿它当**接收者**跑 $init。摊成两句（emitPre）
-       * 而不是一个表达式：临时量要用三次（造、当接收者、当结果）。 */
+       * 而不是一个表达式：临时量要用三次（造、当接收者、当结果）。
+       * 构造器 `return {…}` 时值是**返回的那一格**（规范 10.2.2 第 13 步）；返回别的
+       * （数、undefined）还是实例 —— 从前 $init 的返回值整个被丢掉，`new F()` 于是
+       * 悄悄给出空实例（量出来的：class F { constructor() { return {custom:1}; } }）。 */
       const t = this.temp();
       this.emitPre(exprStmt(assign(varRef(t),
         op('js_obj_new_p', [globalRef(this.globals.get(protoGlobalName(n)).name)]))), e.span);
-      this.emitPre(exprStmt(op('js_call_this', [
+      const r = this.temp();
+      this.emitPre(exprStmt(assign(varRef(r), op('js_call_this', [
         op('js_obj_get', [globalRef(this.globals.get(n).name), classInitKey()]),
         varRef(t),
         box(this.argList(e.args), listType(D)),
-      ])), e.span);
-      return varRef(t);
+      ]))), e.span);
+      return ternary(boolOp('js_is_obj', [varRef(r)]), varRef(r), varRef(t));
     }
     /* 兜底：**普通函数当构造器**（ADR-0020）。`new f(a)` = 造一格以 f.prototype 为原型的
      * 对象、拿它当接收者跑 f、f 返回对象就用那一格。f.prototype 住在运行期的一张 side

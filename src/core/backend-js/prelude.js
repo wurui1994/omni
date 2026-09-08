@@ -2021,6 +2021,10 @@ class $JSObj {
   }
 }
 function $js_isobj(v) { return v instanceof $JSObj; }
+/* 规范意义上的"Type(v) is Object"：不是那七格原始值就算。用处只有构造器的 return ——
+   返回数组、返回函数也算对象，所以判据不能只认 $JSObj。 */
+const $JS_PRIMS = new Set(["null", "undefined", "bool", "int", "real", "string", "symbol"]);
+function $js_is_object(v) { return !$JS_PRIMS.has($dynTag(v)); }
 // 属性键规范成两种：字符串（UTF-16 码元）或 $JSSym（按同一性）。数字键走 ToString ——
 // o[1] 与 o["1"] 是同一格属性，这一条不做对齐后面数组索引全错。
 function $js_pkey(k) {

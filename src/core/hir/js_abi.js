@@ -236,6 +236,10 @@ export const JS_ABI = {
      函数值来（封闭 ABI），而 instanceof 真正要的只是它的 prototype —— 所以直接拿
      realm 上那一格比原型链。原始值一律为假（规范如此）。 */
   js_instanceof_p: { js: '$js_instanceof_p', c: 'omni_js_instanceof_p', arity: 2, ret: 'bool' },
+  /* 是不是"真对象"（规范的 Type(v) is Object）。用处只有一处：构造器 `return {…}` 时
+     `new C()` 的值是**返回的那一格**，返回别的（数、undefined）就还是实例（规范 10.2.2
+     第 13 步）。真对象这一族本来就是 JS 那条腿独有的（P1_JS_ONLY），所以它也是。 */
+  js_is_obj: { js: '$js_is_object', c: 'omni_js_is_object', arity: 1, ret: 'bool' },
   // hint: 'n' number / 's' string / 'd' default（规范的 ToPrimitive）
   js_to_prim: { js: '$js_to_prim', c: 'omni_js_to_prim', arity: 1, lit: ['hint'] },
   // 迭代器协议：拿迭代器、走一步（结果是 { value, done } 那一格对象）
@@ -787,7 +791,7 @@ const P1_JS_ONLY = [
   'js_obj_own_keys', 'js_obj_freeze', 'js_obj_seal', 'js_obj_prevent_ext',
   'js_obj_is_frozen', 'js_obj_is_sealed', 'js_obj_is_ext', 'js_obj_to_string',
   'js_obj_from_entries', 'js_obj_descs',
-  'js_instanceof', 'js_instanceof_p', 'js_to_prim', 'js_iter_proto', 'js_iter_next', 'js_for_in_keys',
+  'js_instanceof', 'js_instanceof_p', 'js_is_obj', 'js_to_prim', 'js_iter_proto', 'js_iter_next', 'js_for_in_keys',
   'js_sym_new', 'js_sym_for', 'js_sym_key_for', 'js_sym_desc', 'js_sym_str',
   'js_sym_wk', 'js_realm_proto', 'js_global_this', 'js_date_new', 'js_proxy_new',
   'js_promise_new', 'js_promise_resolved', 'js_promise_rejected', 'js_promise_all',
