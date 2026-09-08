@@ -60,6 +60,11 @@ export const JS_ABI = {
   /* String.raw 的**普通调用**形态（第二格是插值摊成的一格数组）。tag 形态在降级器那儿
      就折成字面量了 —— 原文那几段与值交替相加，不必绕道造 strings 对象。 */
   js_str_raw: { js: '$js_str_raw', c: 'omni_js_str_raw', arity: 2 },
+  /* 四个 URI 全局函数（规范 19.2.6）合成一条 op，op 码：
+       'e' encodeURIComponent / 'E' encodeURI / 'd' decodeURIComponent / 'D' decodeURI
+     两条腿是同一套手划的 UTF-8 编解码，不转手宿主 —— 宿主在畸形输入上抛的是 URIError，
+     这个值域里没有"宿主抛的错"，所以先自己查一遍再动手（报错文本两侧逐字相同）。 */
+  js_uri: { js: '$js_uri', c: 'omni_js_uri', arity: 1, lit: ['op'] },
   js_str_pad_start: { js: '$js_str_pad_start', c: 'omni_js_str_pad_start', arity: 3 },
   js_str_pad_end: { js: '$js_str_pad_end', c: 'omni_js_str_pad_end', arity: 3 },
   // replaceAll：**只收字符串模式**。正则那一支要 lastIndex 与替换串里的 $1，

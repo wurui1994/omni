@@ -551,6 +551,9 @@ omni_dyn omni_js_str_of_code_point(omni_dyn cp);
 /* isWellFormed / toWellFormed（ES2024）：落单的代理项算"不良"，后者替成 U+FFFD */
 bool omni_js_str_is_well_formed(omni_dyn s);
 omni_dyn omni_js_str_to_well_formed(omni_dyn s);
+/* 四个 URI 全局函数（op 码 'e' encodeURIComponent / 'E' encodeURI /
+   'd' decodeURIComponent / 'D' decodeURI，见 hir/js_abi.js 的 js_uri） */
+omni_dyn omni_js_uri(int op, omni_dyn s);
 
 /* omni_js_re.c —— JS 的 RegExp（手写回溯匹配器，ADR-0011）。
    编译器源码里的正则全是字面量，而且没有一处读写 lastIndex（`.test` 用的都是无 g 的

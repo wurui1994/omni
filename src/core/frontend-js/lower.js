@@ -3419,6 +3419,11 @@ const GLOBAL_CALLS = {
   Boolean: { op: 'js_truthy', argc: 1, len: 1 },
   parseInt: { op: 'js_num_parse_int', argc: 2, len: 2 },
   parseFloat: { op: 'js_num_parse_float', argc: 1, len: 1 },
+  // 四个 URI 函数是同一条 op 上的四个 op 码（见 hir/js_abi.js 的 js_uri）
+  encodeURIComponent: { op: 'js_uri', argc: 1, lit: { op: 'e' }, len: 1 },
+  encodeURI: { op: 'js_uri', argc: 1, lit: { op: 'E' }, len: 1 },
+  decodeURIComponent: { op: 'js_uri', argc: 1, lit: { op: 'd' }, len: 1 },
+  decodeURI: { op: 'js_uri', argc: 1, lit: { op: 'D' }, len: 1 },
   // Symbol(desc)（ADR-0020 P1）。**不是构造器** —— `new Symbol()` 在 JS 里是 TypeError，
   // 这儿也就只有调用这一条路。
   Symbol: { op: 'js_sym_new', argc: 1 },

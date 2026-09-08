@@ -159,6 +159,11 @@ console.log(`raw ${String.raw({ raw: ["x", "y"] }, 7)} ${String.raw({ raw: ["a"]
 // JSON.stringify 的**数组** replacer（白名单）：只留名单里的键，按名单的次序
 console.log(`json ${JSON.stringify({ b: 1, a: 2, c: 3 }, ["a", "b"])} ${JSON.stringify({ b: 1, a: 2 }, ["b", "a", "b"])}`);
 console.log(`json ${JSON.stringify({ a: 1 }, ["zz"])} ${JSON.stringify([{ a: 1, b: 2 }], ["a"])}`);
+// 四个 URI 全局函数：encodeURI 多留一族保留字符，decodeURI 反过来不换那一族
+console.log(`uri ${encodeURIComponent("a b&c=d/e?f")} ${encodeURI("http://x.y/a b?c=d#g")}`);
+console.log(`uri ${encodeURIComponent("héllo 日 𝒳")} ${decodeURIComponent("a%20b%26c")} ${decodeURI("a%20b%26c")}`);
+console.log(`uri ${decodeURIComponent(encodeURIComponent("héllo 日 𝒳 %"))} ${encodeURIComponent(";/?:@&=+$,#")}`);
+console.log(`uri ${encodeURIComponent("-_.!~*'()")} ${decodeURIComponent("%e6%97%a5")} ${encodeURIComponent(123)}|${encodeURIComponent("")}|`);
 
 
 

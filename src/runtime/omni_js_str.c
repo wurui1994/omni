@@ -253,3 +253,120 @@ omni_dyn omni_js_str_to_well_formed(omni_dyn s) {
   }
   return omni_dyn_of_s16(omni_s16_buf_done(&b));
 }
+
+/* 四个 URI 全局函数（规范 19.2.6）。op 码：'e' encodeURIComponent / 'E' encodeURI /
+   'd' decodeURIComponent / 'D' decodeURI —— 与 prelude 的 $js_uri 同一套判据：
+   手划 UTF-8 编解码，畸形输入先自己查出来（宿主那边是 URIError，这个值域里没有）。 */
+static const char *URI_KEEP = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.!~*'()";
+static const char *URI_RESERVED = ";/?:@&=+$,#";
+static const char *URI_HEX = "0123456789ABCDEF";
+
+static bool uri_in(const char *set, uint16_t u) {
+  if (u > 0x7F) return false;
+  for (const char *p = set; *p; p++) if ((uint16_t)(unsigned char)*p == u) return true;
+  return false;
+}
+
+static void uri_pct(omni_s16_buf *b, int byte) {
+  omni_s16_buf_add_unit(b, '%');
+  omni_s16_buf_add_unit(b, (uint16_t)(unsigned char)URI_HEX[(byte >> 4) & 15]);
+  omni_s16_buf_add_unit(b, (uint16_t)(unsigned char)URI_HEX[byte & 15]);
+}
+
+// v.p[i] 是 '%'：读出那一组两位十六进制的字节值
+static int uri_byte(omni_s16 v, int64_t i) {
+  if (i + 2 >= v.len) omni_error("URI malformed");
+  int h = -1, l = -1;
+  for (int k = 0; k < 16; k++) {
+    uint16_t u = (uint16_t)(unsigned char)URI_HEX[k];
+    uint16_t lo = (uint16_t)(unsigned char)("0123456789abcdef"[k]);
+    if (v.p[i + 1] == u || v.p[i + 1] == lo) h = k;
+    if (v.p[i + 2] == u || v.p[i + 2] == lo) l = k;
+  }
+  if (h < 0 || l < 0) omni_error("URI malformed");
+  return h * 16 + l;
+}
+
+static omni_dyn uri_enc(omni_s16 v, bool keep_reserved) {
+  omni_s16_buf b = { NULL, 0, 0 };
+  for (int64_t i = 0; i < v.len; i++) {
+    uint16_t u = v.p[i];
+    if (uri_in(URI_KEEP, u) || (keep_reserved && uri_in(URI_RESERVED, u))) {
+      omni_s16_buf_add_unit(&b, u);
+      continue;
+    }
+    // 落单的代理项就是畸形；配好对的合成码点
+    int64_t cp = u;
+    if (u >= 0xD800 && u <= 0xDBFF) {
+      if (i + 1 >= v.len || v.p[i + 1] < 0xDC00 || v.p[i + 1] > 0xDFFF) omni_error("URI malformed");
+      cp = 0x10000 + ((int64_t)(u - 0xD800) << 10) + (v.p[i + 1] - 0xDC00);
+      i++;
+    } else if (u >= 0xDC00 && u <= 0xDFFF) {
+      omni_error("URI malformed");
+    }
+    if (cp < 0x80) {
+      uri_pct(&b, (int)cp);
+    } else if (cp < 0x800) {
+      uri_pct(&b, (int)(0xC0 | (cp >> 6)));
+      uri_pct(&b, (int)(0x80 | (cp & 63)));
+    } else if (cp < 0x10000) {
+      uri_pct(&b, (int)(0xE0 | (cp >> 12)));
+      uri_pct(&b, (int)(0x80 | ((cp >> 6) & 63)));
+      uri_pct(&b, (int)(0x80 | (cp & 63)));
+    } else {
+      uri_pct(&b, (int)(0xF0 | (cp >> 18)));
+      uri_pct(&b, (int)(0x80 | ((cp >> 12) & 63)));
+      uri_pct(&b, (int)(0x80 | ((cp >> 6) & 63)));
+      uri_pct(&b, (int)(0x80 | (cp & 63)));
+    }
+  }
+  return omni_dyn_of_s16(omni_s16_buf_done(&b));
+}
+
+static omni_dyn uri_dec(omni_s16 v, bool keep_reserved) {
+  omni_s16_buf b = { NULL, 0, 0 };
+  for (int64_t i = 0; i < v.len; i++) {
+    if (v.p[i] != '%') { omni_s16_buf_add_unit(&b, v.p[i]); continue; }
+    int64_t start = i;
+    int b0 = uri_byte(v, i);
+    i += 2;
+    if (b0 < 0x80) {
+      if (keep_reserved && uri_in(URI_RESERVED, (uint16_t)b0)) {
+        for (int64_t k = start; k <= i; k++) omni_s16_buf_add_unit(&b, v.p[k]);
+      } else {
+        omni_s16_buf_add_unit(&b, (uint16_t)b0);
+      }
+      continue;
+    }
+    // 首字节定长度：C2..DF 两字节、E0..EF 三字节、F0..F4 四字节（C0/C1 是过长编码）
+    int n;
+    if (b0 >= 0xC2 && b0 <= 0xDF) n = 1;
+    else if (b0 >= 0xE0 && b0 <= 0xEF) n = 2;
+    else if (b0 >= 0xF0 && b0 <= 0xF4) n = 3;
+    else { omni_error("URI malformed"); }
+    int64_t cp = b0 & (n == 1 ? 31 : n == 2 ? 15 : 7);
+    for (int k = 0; k < n; k++) {
+      i++;
+      if (i >= v.len || v.p[i] != '%') omni_error("URI malformed");
+      int by = uri_byte(v, i);
+      i += 2;
+      if (by < 0x80 || by > 0xBF) omni_error("URI malformed");
+      cp = (cp << 6) | (by & 63);
+    }
+    // 过长编码、代理项区间、超出 10FFFF 一律算畸形
+    if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) omni_error("URI malformed");
+    if (n == 2 && cp < 0x800) omni_error("URI malformed");
+    if (n == 3 && cp < 0x10000) omni_error("URI malformed");
+    omni_s16 one = omni_s16_of_code_point(cp);
+    for (int64_t k = 0; k < one.len; k++) omni_s16_buf_add_unit(&b, one.p[k]);
+  }
+  return omni_dyn_of_s16(omni_s16_buf_done(&b));
+}
+
+omni_dyn omni_js_uri(int op, omni_dyn s) {
+  omni_s16 v = want_s16(omni_js_str(s));
+  if (op == 'e') return uri_enc(v, false);
+  if (op == 'E') return uri_enc(v, true);
+  if (op == 'd') return uri_dec(v, false);
+  return uri_dec(v, true);
+}

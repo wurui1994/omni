@@ -1126,8 +1126,88 @@ function $js_str_raw(strs, subs) {
   }
   return out;
 }
-// isWellFormed / toWellFormed（ES2024）：落单的代理项（没配对的 D800..DFFF）算"不良",
-// toWellFormed 把每个落单的替成 U+FFFD。C 那份是手划码元的同一套判据。
+/* 四个 URI 全局函数（规范 19.2.6）。op 码：'e' encodeURIComponent / 'E' encodeURI /
+   'd' decodeURIComponent / 'D' decodeURI。手划 UTF-8 编解码（不转手宿主的同名函数）——
+   宿主在畸形输入上抛的是 URIError，这个值域里没有"宿主抛的错"，所以自己先查一遍，
+   两条腿的报错文本才逐字相同。encodeURI 多留一族保留字符，decodeURI 反过来**不换**
+   那一族（原样留着 %XX 的三个字符）。 */
+const $JS_URI_KEEP = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.!~*'()";
+const $JS_URI_RESERVED = ";/?:@&=+$,#";
+const $JS_URI_HEX = "0123456789ABCDEF";
+function $js_uri_pct(b) { return "%" + $JS_URI_HEX[(b >> 4) & 15] + $JS_URI_HEX[b & 15]; }
+// s[i] 是 '%'：读出那一组两位十六进制的字节值
+function $js_uri_byte(s, i) {
+  if (i + 2 >= s.length) $rt_error("URI malformed");
+  const h = $JS_URI_HEX.indexOf(s[i + 1].toUpperCase());
+  const l = $JS_URI_HEX.indexOf(s[i + 2].toUpperCase());
+  if (h < 0 || l < 0) $rt_error("URI malformed");
+  return h * 16 + l;
+}
+function $js_uri_enc(s, keep) {
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (keep.indexOf(c) >= 0) { out = out + c; continue; }
+    // 落单的代理项在这儿就是畸形：配好对的 codePointAt 给的是 > 0xFFFF 的码点
+    const cp = s.codePointAt(i);
+    if (cp >= 0xD800 && cp <= 0xDFFF) $rt_error("URI malformed");
+    if (cp > 0xFFFF) i++;
+    if (cp < 0x80) out = out + $js_uri_pct(cp);
+    else if (cp < 0x800) out = out + $js_uri_pct(0xC0 | (cp >> 6)) + $js_uri_pct(0x80 | (cp & 63));
+    else if (cp < 0x10000) {
+      out = out + $js_uri_pct(0xE0 | (cp >> 12)) + $js_uri_pct(0x80 | ((cp >> 6) & 63))
+        + $js_uri_pct(0x80 | (cp & 63));
+    } else {
+      out = out + $js_uri_pct(0xF0 | (cp >> 18)) + $js_uri_pct(0x80 | ((cp >> 12) & 63))
+        + $js_uri_pct(0x80 | ((cp >> 6) & 63)) + $js_uri_pct(0x80 | (cp & 63));
+    }
+  }
+  return out;
+}
+function $js_uri_dec(s, keep) {
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] !== "%") { out = out + s[i]; continue; }
+    const start = i;
+    const b0 = $js_uri_byte(s, i);
+    i += 2;
+    if (b0 < 0x80) {
+      const c = String.fromCharCode(b0);
+      out = out + (keep.indexOf(c) >= 0 ? s.slice(start, i + 1) : c);
+      continue;
+    }
+    // 首字节定长度：C2..DF 两字节、E0..EF 三字节、F0..F4 四字节（C0/C1 是过长编码）
+    let n = 0;
+    if (b0 >= 0xC2 && b0 <= 0xDF) n = 1;
+    else if (b0 >= 0xE0 && b0 <= 0xEF) n = 2;
+    else if (b0 >= 0xF0 && b0 <= 0xF4) n = 3;
+    else $rt_error("URI malformed");
+    let cp = b0 & (n === 1 ? 31 : n === 2 ? 15 : 7);
+    for (let k = 0; k < n; k++) {
+      i++;
+      if (i >= s.length || s[i] !== "%") $rt_error("URI malformed");
+      const b = $js_uri_byte(s, i);
+      i += 2;
+      if (b < 0x80 || b > 0xBF) $rt_error("URI malformed");
+      cp = (cp << 6) | (b & 63);
+    }
+    // 过长编码、代理项区间、超出 10FFFF 一律算畸形
+    if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) $rt_error("URI malformed");
+    if (n === 2 && cp < 0x800) $rt_error("URI malformed");
+    if (n === 3 && cp < 0x10000) $rt_error("URI malformed");
+    out = out + String.fromCodePoint(cp);
+  }
+  return out;
+}
+function $js_uri(op, x) {
+  const s = $js_asS16($js_str(x));
+  if (op === "e") return $js_uri_enc(s, $JS_URI_KEEP);
+  if (op === "E") return $js_uri_enc(s, $JS_URI_KEEP + $JS_URI_RESERVED);
+  if (op === "d") return $js_uri_dec(s, "");
+  return $js_uri_dec(s, $JS_URI_RESERVED);
+}
+
+// isWellFormed / toWellFormed（ES2024）：落单的代理项（没配对的 D800..DFFF）算"不良",// toWellFormed 把每个落单的替成 U+FFFD。C 那份是手划码元的同一套判据。
 function $js_str_is_well_formed(s) { return $js_asS16(s).isWellFormed(); }
 function $js_str_to_well_formed(s) { return $js_asS16(s).toWellFormed(); }
 function $js_str_pad_start(s, n, fill) {
