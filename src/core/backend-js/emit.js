@@ -243,6 +243,12 @@ class JsEmitter {
   closureMake(c) {
     const ps = c.captures.map((f) => `c_${f.name}`);
     const fields = c.captures.map((f) => `c_${f.name}: c_${f.name}`);
+    /* fn.name / fn.length（ADR-0020）：函数在这个值域里还不是真对象，这两格就存在闭包
+       记录里，由 Function.prototype 上的两个访问器读（prelude 的 $js_fn_name）。
+       只有 JS 前端会填 fnName —— 别的前端的记录照旧只有 fp 与捕获。 */
+    if (c.fnName !== undefined) {
+      fields.unshift(`$nm: ${JSON.stringify(c.fnName)}`, `$ln: ${c.fnLen ?? 0}`);
+    }
     // 带 `single` 的那一格（`(fnref f)` 的薄适配器）发**单件**：同一个具名函数取出来的值
     // 必须是同一个东西，不然 `f == g` 这种按身份比的式子永远为假 —— graph.asy:1922 的
     // `if(T == identity)` 正是这一格（走错分支的话 Log 轴的取样从"对数均匀"变成"线性均匀"）。

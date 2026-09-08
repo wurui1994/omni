@@ -1802,6 +1802,18 @@ function $js_call_this(f, thisv, args) { return $callThis(f, thisv, $js_arr_of(a
 function $nat(name, len, fn) {
   return { fp: (self, args) => fn(undefined, args), fp2: (t, args) => fn(t, args), $nm: name, $ln: len };
 }
+/* fn.name / fn.length（ADR-0020）：函数在这个值域里还不是**真对象**，所以这两格不是
+   自有属性，而是 Function.prototype 上的两个访问器 —— 接收者是闭包记录（{fp, $nm, $ln, …}），
+   记录里那两格由降级器与发射器一起填（lower.js 的 closureOf / emit.js 的 closureMake）。
+   没填的（比如箭头，规范里它的 name 来自赋值目标）给 "" 与 0。 */
+function $js_fn_name(f) {
+  const g = $js_asFn(f);
+  return typeof g.$nm === "string" ? g.$nm : "";
+}
+function $js_fn_len(f) {
+  const g = $js_asFn(f);
+  return typeof g.$ln === "number" ? g.$ln : 0;
+}
 function $natm(o, name, len, fn) {
   $js_def_data(o, name, $nat(name, len, fn), true, false, true);
   return o;
@@ -1879,6 +1891,9 @@ function $mkRealm() {
   $natm(objP, "toLocaleString", 0, (t) => $js_str(t));
   $natm(funP, "call", 1, (t, a) => $callThis(t, a[0], a.slice(1)));
   $natm(funP, "apply", 2, (t, a) => $callThis(t, a[0], a[1] === undefined || a[1] === null ? [] : $js_arr_of(a[1])));
+  // name / length：函数还不是真对象，这两格住在 Function.prototype 上（见 $js_fn_name）
+  $js_def_acc(funP, "name", $nat("name", 0, (t) => $js_fn_name(t)), undefined, false, true);
+  $js_def_acc(funP, "length", $nat("length", 0, (t) => $js_fn_len(t)), undefined, false, true);
   $natm(funP, "bind", 1, (t, a) => {
     const bt = a[0], pre = a.slice(1);
     return { fp: (self, args) => $callThis(t, bt, [...pre, ...args]), fp2: (ig, args) => $callThis(t, bt, [...pre, ...args]), $nm: "bound", $ln: 0 };

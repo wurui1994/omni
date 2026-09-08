@@ -212,6 +212,16 @@ function mentionsThis(node) {
 
 const isFnNode = (n) => n.type === 'Arrow' || n.type === 'FuncExpr' || n.type === 'FuncDecl';
 
+/** fn.length（ADR-0020）：**第一个带默认值的形参之前**有几个（规范如此，rest 不算） */
+function fnArity(params) {
+  let n = 0;
+  for (const p of params) {
+    if (p.type === 'AssignPattern') break;
+    n += 1;
+  }
+  return n;
+}
+
 /** 子树里的标识符，**遇到内层函数就停**。 */
 function shallowRefs(node, out = new Set(), top = true) {
   if (!node || typeof node !== 'object') return out;
@@ -308,6 +318,8 @@ class Lower {
     this.globals = new Map();
     /** 顶层函数声明：名字 -> mangled。互相递归靠的就是先收一遍再降级 */
     this.topFns = new Map();
+    /** 顶层函数的形参个数（fn.length 要它；topFnValue 那边已经看不到形参表） */
+    this.topFnLens = new Map();
     /** 初始化式是正则字面量的模块级 const：名字 -> {body, flags}（ADR-0011 决策 10） */
     this.regexConsts = new Map();
     this.used = new Set();
@@ -387,6 +399,8 @@ class Lower {
       case 'FuncDecl':
         if (this.topFns.has(s.id)) this.err(s.span, `duplicate function '${s.id}'`);
         this.topFns.set(s.id, this.mangle('u_', s.id));
+        // fn.length 要形参个数（ADR-0020）：顶层函数取值时（topFnValue）已经看不到形参表了
+        this.topFnLens.set(s.id, fnArity(s.params));
         break;
       case 'VarDecl':
         for (const d of s.decls) {
@@ -633,7 +647,14 @@ class Lower {
     node = this.genFix(node);
     const id = this.closures.length;
     const mangled = this.mangle('l_', label);
-    const rec = { id, mangled, make: `omni_mk_${mangled}`, captures: [] };
+    /* fn.name / fn.length（ADR-0020）：名字优先用调用点给的（方法名），其次是函数
+     * 表达式自己的名字；箭头没有（规范里它的 name 来自赋值目标，那一格还没做）。 */
+    const rec = {
+      id, mangled, make: `omni_mk_${mangled}`, captures: [],
+      fnName: extra.fnName !== undefined ? extra.fnName
+        : (typeof node.id === 'string' ? node.id : ''),
+      fnLen: fnArity(node.params),
+    };
     this.closures.push(rec);   // 先占位：体里的嵌套闭包会往后追加，id 不能变
     // 箭头的表达式体等价于 { return expr; }
     const bodyStmts = node.type === 'Arrow' && node.expression
@@ -704,7 +725,7 @@ class Lower {
     const stmts = [localStmt(self.name, arrLit([init]))];
     for (const [name, m] of methods) {
       stmts.push(exprStmt(op('js_obj_set',
-        [this.readEntry(self), s16(name), this.closureExpr(m, `${s.id}_${name}`)])));
+        [this.readEntry(self), s16(name), this.closureExpr(m, `${s.id}_${name}`, { fnName: name })])));
     }
     if (ctor) {
       ctor.params.forEach((p, i) => stmts.push(...this.bindParam(p, i, ctor.span)));
@@ -794,7 +815,7 @@ class Lower {
       }
       if (what === 'constructor' && !m.static) { ctor = m; continue; }
       const label = `${s.id}_${m.static ? 'static_' : ''}${what ?? 'computed'}`;
-      const fn = this.closureExpr(fnNodeOfProp(m), label, { classOf: s.id });
+      const fn = this.closureExpr(fnNodeOfProp(m), label, { classOf: s.id, fnName: what ?? '' });
       if (m.kind === 'get' || m.kind === 'set') {
         let desc = op('js_obj_set', [op('js_obj_new', []), s16(m.kind), fn]);
         desc = op('js_obj_set', [desc, s16('configurable'), constBool(true)]);
@@ -912,7 +933,10 @@ class Lower {
     if (hit) return this.makeClosure(hit);
     const id = this.closures.length;
     const mangled = this.mangle('a_', name);
-    const rec = { id, mangled, make: `omni_mk_${mangled}`, captures: [] };
+    const rec = {
+      id, mangled, make: `omni_mk_${mangled}`, captures: [],
+      fnName: name, fnLen: this.topFnLens.get(name) ?? 0,
+    };
     this.closures.push(rec);
     this.funcs.push({
       name: `${name}#value`,
@@ -1888,7 +1912,8 @@ class Lower {
        * 而它只被 `super` 用到，那在 P1-f）。解析器把方法摊成 params/rest/body
        * （没有 value 那一格），所以这儿要先拼回一个函数节点。 */
       out = op('js_obj_set', [out, key, p.method
-        ? this.closureExpr(fnNodeOfProp(p), p.computed ? 'method' : this.keyName(p.key, p.span))
+        ? this.closureExpr(fnNodeOfProp(p), p.computed ? 'method' : this.keyName(p.key, p.span),
+          { fnName: p.computed ? '' : this.keyName(p.key, p.span) })
         : this.expr(p.value)]);
     }
     return out;
