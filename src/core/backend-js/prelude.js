@@ -2606,6 +2606,38 @@ function $mkRealm() {
   $natm(r.dateP, "getUTCMinutes", 0, (t) => new Date($js_date_ms(t)).getUTCMinutes());
   $natm(r.dateP, "getUTCSeconds", 0, (t) => new Date($js_date_ms(t)).getUTCSeconds());
   $natm(r.dateP, "getUTCMilliseconds", 0, (t) => new Date($js_date_ms(t)).getUTCMilliseconds());
+  /* 写的那一族（setFullYear / setMonth / … / setTime）：Date 在这个值域里是"一格真对象 +
+     隐藏槽 $ms"，所以每一格都是"现搭一个宿主 Date、改完再把毫秒写回槽里"，交出新的毫秒
+     （规范如此）。从前整族缺失，d.setFullYear(2000) 在运行期是 "undefined is not a function"。 */
+  const dset = (name, hostName, argc) => {
+    $natm(r.dateP, name, argc, (t, a) => {
+      const d = new Date($js_date_ms(t));
+      const as = [];
+      for (let i = 0; i < argc; i++) {
+        if (a[i] === undefined) break;
+        as.push(Math.trunc($js_real($js_num_of(a[i]), name)));
+      }
+      d[hostName](...as);
+      const ms = d.getTime();
+      $js_setp(t, "$ms", ms, t);
+      return ms;
+    });
+  };
+  dset("setTime", "setTime", 1);
+  dset("setFullYear", "setFullYear", 3);
+  dset("setMonth", "setMonth", 2);
+  dset("setDate", "setDate", 1);
+  dset("setHours", "setHours", 4);
+  dset("setMinutes", "setMinutes", 3);
+  dset("setSeconds", "setSeconds", 2);
+  dset("setMilliseconds", "setMilliseconds", 1);
+  dset("setUTCFullYear", "setUTCFullYear", 3);
+  dset("setUTCMonth", "setUTCMonth", 2);
+  dset("setUTCDate", "setUTCDate", 1);
+  dset("setUTCHours", "setUTCHours", 4);
+  dset("setUTCMinutes", "setUTCMinutes", 3);
+  dset("setUTCSeconds", "setUTCSeconds", 2);
+  dset("setUTCMilliseconds", "setUTCMilliseconds", 1);
   /* Promise（ADR-0020 P2 的前半）：状态与回调表都在隐藏槽里（$st / $val / $cbs）。
      then / catch / finally 住在 promP 上，所以 p.then(f) 走的是普通的"取属性 + 带
      接收者调用"那条路，不必进成员表。await 与 async 函数还没有 —— 那要状态机改写。 */

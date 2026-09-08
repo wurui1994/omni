@@ -31,3 +31,20 @@ console.log(fromStr.getTime(), fromStr.toISOString(), Date.parse("2024-01-15T00:
 console.log(new Date("nope").getTime(), Number.isNaN(Date.parse("nope")));
 console.log(new Date(0) instanceof Date, new Date(0) instanceof Object, ({}) instanceof Date);
 console.log(new Date("2024-01-15T00:00:00Z").getUTCFullYear(), new Date(86400000).getTime());
+/* 写的那一族（setFullYear / setMonth / setHours / setTime / setUTC*）：Date 在这个值域里是
+   "真对象 + 隐藏槽 $ms"，所以每一格都是"现搭一个宿主 Date、改完把毫秒写回槽里"，
+   交出新的毫秒。从前整族缺失，d.setFullYear(2000) 是运行期 "undefined is not a function"。 */
+const w = new Date(0);
+console.log(w.setFullYear(2000) === w.getTime(), w.getFullYear());
+w.setMonth(5, 20);
+console.log(w.getMonth(), w.getDate());
+w.setHours(3, 4, 5, 6);
+console.log(w.getHours(), w.getMinutes(), w.getSeconds(), w.getMilliseconds());
+const t2 = new Date(0);
+t2.setTime(86400000);
+console.log(t2.getTime(), t2.toISOString());
+const u2 = new Date(0);
+u2.setUTCFullYear(1999);
+u2.setUTCMonth(11);
+u2.setUTCDate(31);
+console.log(u2.toISOString(), typeof u2.setDate(2));
