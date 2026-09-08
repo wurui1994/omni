@@ -77,6 +77,16 @@ static omni_dyn omni_js_arr_from(omni_dyn v, omni_dyn f) { \
     src = omni_js_map_entries(v); \
   } else if (v.tag == OMNI_DYN_SET) { \
     src = omni_js_set_items(v); \
+  } else if (v.tag == OMNI_DYN_BYTES) { \
+    /* Uint8Array：一格一个字节的数（omni_js_iter 那一支在这一段之后才定义，所以这儿
+       自己摊一遍，与它一字一句对着写） */ \
+    int64_t bn = omni_js_arr_i(omni_js_buf_len(v)); \
+    LT bl = LT##_new(); \
+    LT##_reserve(bl, bn); \
+    for (int64_t i = 0; i < bn; i++) { \
+      bl->items[bl->len++] = omni_js_buf_get_u8(v, omni_dyn_of_real((double)i)); \
+    } \
+    src = omni_js_arr_wrap(bl); \
   } else if (v.tag == OMNI_DYN_DICT) { \
     omni_dyn n = omni_js_obj_get(v, omni_dyn_of_s16(omni_js_s16_lit("length"))); \
     int64_t k = (n.tag == OMNI_DYN_UNDEF) ? 0 : omni_js_arr_i(n); \
@@ -149,6 +159,16 @@ static omni_dyn omni_js_iter(omni_dyn v) { \
     case OMNI_DYN_LIST: return v; \
     case OMNI_DYN_MAP: return omni_js_map_entries(v); \
     case OMNI_DYN_SET: return omni_js_set_items(v); \
+    /* Uint8Array 也可迭代（[...u8] / for-of / Array.from）：一格一个字节的数 */ \
+    case OMNI_DYN_BYTES: { \
+      LT out = LT##_new(); \
+      int64_t n = omni_js_arr_i(omni_js_buf_len(v)); \
+      LT##_reserve(out, n); \
+      for (int64_t i = 0; i < n; i++) { \
+        out->items[out->len++] = omni_js_buf_get_u8(v, omni_dyn_of_real((double)i)); \
+      } \
+      return omni_js_arr_wrap(out); \
+    } \
     case OMNI_DYN_STR16: { \
       omni_s16 s = v.u.s16; \
       LT out = LT##_new(); \

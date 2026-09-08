@@ -1476,6 +1476,8 @@ function $js_iter(v) {
     case "Map": return $js_map_entries(v);
     case "Set": return $js_set_items(v);
     case "string": return [...v];
+    // Uint8Array 也可迭代（[...u8] / for-of / Array.from）：一格一个字节的数
+    case "bytes": return [...$js_bytes(v, "iteration").u8];
     // ADR-0020 P1：真对象按**协议**迭代（Symbol.iterator + next），不按标签硬派发。
     // 收成一个数组回去：for-of 的降级现在吃的是数组，把"惰性"这一格留给 P2
     // （生成器那一刀之后，for-of 才有真正的惰性形态）。

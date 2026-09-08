@@ -128,6 +128,17 @@ console.log(`wf ${"ab".isWellFormed()} ${"\ud800".isWellFormed()} ${"\ud800\udc0
 const wf = "\ud800x".toWellFormed();
 console.log(`wf ${wf.length} ${wf.charCodeAt(0) === 0xfffd} ${"ab".toWellFormed()} ${"\ud800\udc00".toWellFormed().length}`);
 
+// Uint8Array 可迭代（[...u8] / for-of / Array.from）：一格一个字节的数。
+// C 那份走 omni_js_iter 里新加的 BYTES 那一支，所以这两行也要在五条腿上量。
+const ub = new Uint8Array(3);
+ub[0] = 1;
+ub[1] = 2;
+ub[2] = 255;
+console.log(`iter ${[...ub].join(",")} ${Array.from(ub).length} ${Array.from(ub, (x) => x + 1).join(",")}`);
+let usum = 0;
+for (const byte of ub) usum = usum + byte;
+console.log(`iter ${usum} ${[...new Uint8Array(0)].length}`);
+
 
 
 
