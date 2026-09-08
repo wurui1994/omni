@@ -13095,3 +13095,46 @@ diag2（2268x4）反解出 dealias 前的横截面：参考 `[255,0,0,255]`（�
 red, light=nolight)`，400x400）。这一片的几何**没有细分自由度**（判平之后就是四角两片三角），
 所以 GL 主路对 `asy -novulkan` 还差 2694/480000（最大差 48、1347 个像素全在三条边上）
 这件事只能是**光栅化那一层**：采样点位置、或者送上去的 float 顶点值。下一刀从这儿量。
+
+### 第十八刀：照 asy 的导出流水（分块 + 单采样）——三维那一轴第一次逐字节相同
+
+工作方式换了：不再从像素猜，而是**把参考真正发给 GL 的调用记下来逐条对**。
+工具是 `/tmp/glspy`（不进仓库）——一个用 macOS `__DATA,__interpose` 段替换 GL 入口的
+dylib，记 `glViewport` / `glUniformMatrix4fv` / `glBufferData` / `glDrawElements` /
+`glEnable` / `glVertexAttrib*Pointer` / `glShaderSource` /
+`glRenderbufferStorageMultisample` / `glBlitFramebuffer` / `glReadPixels`，
+并且能把每次 `glReadPixels` 的像素按 `PACK_ROW_LENGTH/SKIP_ROWS/SKIP_PIXELS`
+抠出来落 `.raw` —— 于是可以比**dealias 之前的帧缓冲**，中间一层解码都不用碰。
+（两个坑：要 fat（node 是 arm64e、我们的运行时是 arm64）；注进 node 会让编译器探测失败，
+先暖一趟缓存再注入、并给 `OMNI_CC`。）
+
+同一个 `.asy`（一片平三角，1600x308）两边对下来，只有三处不同，全部照源码改：
+
+1. **导出是分块的**（glrender.cc:454-520 + `tile.h`）。帧缓冲只有 `Width×Height`
+   （renderBase.cc:1005-1013，就是我们的 `dispW/dispH`），最终图 `fullW×fullH`；
+   `maxTileW=min(1024,Width)`、`numCols=ceil(fullW/maxTileW)`、`tileW=ceil(fullW/numCols)`、
+   `border=min(min(1,(numCols-1)/2),(numRows-1)/2)`，网格再用**去边宽**重算；
+   每块自己 `glViewport(0,0,tw,th)` + 自己一套 `frustum/ortho(tileLeft…)`，
+   读回**去边内区**拼进整张。参考流水：`viewport 800 154` 四趟、每趟 projViewMat
+   第 0 列 **20.6942406**、第 2 列头两位 ±1；我们从前是一趟 1600x308、第 0 列
+   10.3471203（正好是前者的一半）。**数学上等价、浮点上不等价** —— 边上的采样点会翻面，
+   平三角那 1347 个差像素全在三条边上就是这一档。
+2. **离屏导出根本没有多重采样**（glrender.cc:1269-1276）：
+   `if(!View) glfwWindowHint(GLFW_VISIBLE,0); else { … glfwWindowHint(GLFW_SAMPLES,multisample); }`
+   —— `multisample=4` 那一档**只给看得见的窗口**，导出走 `!View`，一个采样；后面那些
+   `glEnable/glDisable(GL_MULTISAMPLE)` 在单采样帧缓冲上是空操作。参考位图里逐字节
+   只有 `00` 与 `ff` 两个值，正是单采样的样子。参考图的抗锯齿全来自
+   "4 倍分辨率渲（render 2 × antialias 2）+ psfile 的 dealias 2x2 + 缩回去"。
+3. `ns<=1` 改走**朴素 renderbuffer + 直接 readPixels**（不建 1 采样的多重采样
+   renderbuffer、也不 blit）：本机驱动上 `…Multisample(…,1,…)` 仍出半调，
+   我们边上 511 个像素是 (255,128,128)，参考在同样位置是纯白或纯红。
+
+**账**（GL 腿对 `asy -novulkan`）：平三角探针四块各 **0 字节差**、最终 EPS 位图
+1478400 字节全同。十一个例子：pseudosphere 254152 → **354**、hyperboloid → 90、
+twoSpheres → 155、vectorfieldsphere → 73、vertexshading → **29**（最大差 1）、
+splitpatch → **21**、triangles → 99、filesurface → 215、colorpatch → 276、
+sacylinder3D → 1080、smoothelevation → 2729 —— 十一个都是"ink 盖住参考 100.0%"。
+
+留的退档：`OMNI_R3_TILE=0`（退回一趟）、`OMNI_GL_SAMPLES=4`（退回旧采样档）。
+**CPU 备选那条腿不动**：它按 Vulkan 参考标定、还是 R3_NS=4 的多重采样，
+上面这三条结论不能套到那条腿上。
