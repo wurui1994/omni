@@ -124,6 +124,9 @@ typedef struct {
 
 typedef struct {
   int oW, oH, fw, fh;
+  /* pt 那一对的**原值**（清单的 `wh` 行 = asy 的 `args.width/args.height`）。
+     `oW/oH` 是它被 `(int)` 截过之后的（`initDisplay` 的形参）。0 = 清单里没这一行。 */
+  double ptw, pth;
   int ortho;
   double angle, zoom;
   r3v m, M;
@@ -1013,22 +1016,37 @@ static void r3_set_dimensions(r3scene *s) {
        量出来的账（box3 探针：`size(20cm)` + `orthographic(1,1,1)` 的 box 线框，2268x1968）：
        1134/984 → 90228/13390272 个字节不同、ink 只盖住参考 92.65%；反解出来的最优值在
        1.15345 附近（1212 字节、99.95%）—— 与 1090/945 只差 1e-5。 */
-    double wpt = s->M.x - s->m.x, hpt = s->M.y - s->m.y;
-    int havept = wpt > 0 && hpt > 0
-                 && 4 * (int) wpt == Width && 4 * (int) hpt == Height
-                 && !(ef && strcmp(ef, "old") == 0);
+    double wpt = s->ptw, hpt = s->pth;
+    int havept = wpt > 0 && hpt > 0 && !(ef && strcmp(ef, "old") == 0);
     if (ef && strcmp(ef, "full") == 0) aspect = A;
     else if (forced > 0) aspect = forced;
     else if (havept) {
-      double dpr = 2.0;
-      { const char *e = getenv("OMNI_R3_DPR"); if (e) dpr = atof(e); }
-      int screenW = 1512, screenH = 945;
+      /* **这三个机器常量是量出来的，不是猜的**（`/tmp/ppb_probe.c` 那一段 GLFW 探针，
+         照 renderBase.cc:24-45 与 :975-990 原样问的）：这台机器
+           videomode 1440x900、physical 286x179mm → ppi = 1440/(286/25.4) = 127.88811188811188
+           pixelsPerBp = ppi/72 = **1.776223776223776**（不是设备像素比 2.0）
+           工作区（glfwGetMonitorWorkarea）= **1440 x 769**
+         从前这三处我全猜错了（dpr=2.0、1512x945），三个错凑在一起才让"照抄
+         `args.width/args.height` 反而更差"看起来成立 —— 那个结论作废。
+         拿真值重算 box3（contentW/H = 567/492、位图 2268x1968、pt 那一对 567.98/492.98）：
+           oldW = ceil(567×1.7762238) = 1008、oldH = ceil(492×1.7762238) = 874
+           w = min(1008,1440) = 1008、h = min(874,769) = **769**（工作区夹住了）
+           fitAspect：1008 > 769×(567.98/492.98)=885.99 → w = ceil(885.99) = 886
+           Width = max(886, min(1024,2268)) = 1024、Height = max(769, min(768,1968)) = 769
+           1024/769 = 1.3316 > 2268/1968 → Width = ceil(769×(2268/1968)) = 887
+           **aspect = 887/769 = 1.15344603**，而反解扫描的最优值是 1.15345 —— 对上了。
+         `OMNI_R3_PPB` / `OMNI_R3_SCREEN=w,h` 可改（换机器就得重量一次）。 */
+      double ppb = 1.776223776223776;
+      { const char *e = getenv("OMNI_R3_PPB"); if (e) ppb = atof(e); }
+      int screenW = 1440, screenH = 769;
       { const char *e = getenv("OMNI_R3_SCREEN");
         if (e) { int a = 0, b = 0; if (sscanf(e, "%d,%d", &a, &b) == 2 && a > 0 && b > 0)
                  { screenW = a; screenH = b; } } }
+      /* `Aspect = args.width/args.height`（pt 那一对；glrender.cc:1220 / vkrender.cc:343） */
       double Aspect = wpt / hpt;
-      int w = (int) ceil((double) (int) wpt * dpr);
-      int h = (int) ceil((double) (int) hpt * dpr);
+      /* `contentWidth/Height` 是 pt 那一对截断成 int（initDisplay 的形参是 int） */
+      int w = (int) ceil((double) (int) wpt * ppb);
+      int h = (int) ceil((double) (int) hpt * ppb);
       if (w > screenW) w = screenW;
       if (h > screenH) h = screenH;
       if (w > h * Aspect) w = (int) ceil(h * Aspect); else h = (int) ceil(w / Aspect);
@@ -1036,8 +1054,10 @@ static void r3_set_dimensions(r3scene *s) {
       int th = Height < 768 ? Height : 768;
       int W0 = w > tw ? w : tw;
       int H0 = h > th ? h : th;
-      if ((double) W0 / H0 > A) W0 = (int) ceil(H0 * A);
-      else H0 = (int) ceil(W0 / A);
+      /* 最后一步照 renderBase.cc:1010-1013 的写法（注意是 `Height * fullW/fullH`，
+         不是 `Height / (fullH/fullW)` —— 两者在 double 里不是同一个数） */
+      if ((double) W0 / H0 > A) W0 = (int) ceil(H0 * ((double) Width / Height));
+      else H0 = (int) ceil(W0 * ((double) Height / Width));
       aspect = (double) W0 / H0;
     } else {
       double dpr = 2.0;
@@ -2304,6 +2324,9 @@ omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
     } else if (strcmp(kw, "size") == 0) {
       double v[4]; if (!r3_nums(&L, v, 4)) { ok = 0; break; }
       S.oW = (int) v[0]; S.oH = (int) v[1]; S.fw = (int) v[2]; S.fh = (int) v[3];
+    } else if (strcmp(kw, "wh") == 0) {
+      double v[2]; if (!r3_nums(&L, v, 2)) { ok = 0; break; }
+      S.ptw = v[0]; S.pth = v[1];
     } else if (strcmp(kw, "proj") == 0) {
       char m[16]; double v[2];
       if (!r3_word(&L, m, sizeof m) || !r3_nums(&L, v, 2)) { ok = 0; break; }

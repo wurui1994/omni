@@ -8895,7 +8895,10 @@ string defaultformat3="prc";                     // runpicture.in:121
 // 位图那一档的像素：投影 + 发一份临时 EPS + gs 光栅化 + 十六进制读回。
 // 真身要 `drawop3` 才写得出来，而它在三维那一节才有名字 —— 先摆一个桩
 // （与 asy__merge3fn 同一招），回空串就表示"没渲出来"，调用方用背景色兜底。
-string asy__r3hexfn(frame f, int oW, int oH, int fw, int fh, real angle, real zoom,
+// **头两个形参是 pt 那一对的 real**（asy 那边的 `args.width/args.height`），不是截断过的 int：
+// `renderBase.cc::initDisplay` 的 `Aspect` 用的就是这一对（glrender.cc/vkrender.cc 里
+// `Aspect = args.width/args.height`），而 `contentWidth/Height` 是它们截断成 int 之后的。
+string asy__r3hexfn(frame f, real ptw, real pth, int fw, int fh, real angle, real zoom,
                     triple m, triple M, pair shift, real expand,
                     real[][] tv) { return ""; }
 
@@ -9009,7 +9012,7 @@ void shipout3(string prefix, frame f, string format="",
     if (remain > 0) chunk = chunk + chunk;
   }
   // 像素：投影 + gs 那一段在三维那一节（`drawop3` 要在那儿才有名字），走下面这个桩。
-  string got = asy__r3hexfn(f, oW, oH, fw, fh, angle, zoom, m, M, shift, expand, t);
+  string got = asy__r3hexfn(f, width, height, fw, fh, angle, zoom, m, M, shift, expand, t);
   if (length(got) == fw * fh * 3 * 2) hex = got;
   drawop o;
   o.kind = 7;
@@ -10859,9 +10862,13 @@ private void asy__merge3hook() {
   // 不用再乘 modelview。angle 是**度**（three.asy:2908 用度版 aTan/Tan；C 那边
   // renderBase.cc:47 是 `Angle = args.angle * radians`），正交时是 0。
   // 这一刀只画 path3 那一类（面片先不画）—— 线画那一族就能量出效果。
-  asy__r3hexfn = new string(frame f, int oW, int oH, int fw, int fh, real angle,
+  asy__r3hexfn = new string(frame f, real ptw, real pth, int fw, int fh, real angle,
                            real zoom, triple m, triple M, pair shift, real expand,
                            real[][] tv) {
+    // 截断成 int 的那一对：`initDisplay(int contentWidth, int contentHeight)` 收到的就是它，
+    // 清单的 `size` 行也发这一对（renderBase.cc:957/972）
+    int oW = (int) ptw;
+    int oH = (int) pth;
     bool ortho = angle == 0;
     real Zmax = M.z;
     real Hh = ortho ? 0 : -tan(0.5 * angle * pi / 180) * Zmax;
@@ -11024,6 +11031,11 @@ private void asy__merge3hook() {
       string[] pp;
       pp.push("r3 " + (txt ? "1" : "2") + nl
         + "size" + sn(oW) + sn(oH) + sn(fw) + sn(fh) + nl
+        // pt 那一对的**原值**（asy 的 `args.width/args.height`）。视景体长宽比那一段要它：
+        // `renderBase.cc::initDisplay` 里第一次 `fitAspect` 用的 `Aspect` 就是这一对
+        // （glrender.cc / vkrender.cc 里 `Aspect = args.width/args.height`），而 `size` 行
+        // 那两个已经被 `(int)` 截过。没有这一行时运行时退回按位图反推的老版。
+        + "wh" + sn(ptw) + sn(pth) + nl
         + "proj " + (ortho ? "ortho" : "persp") + sn(angle) + sn(zoom) + nl
         + "box" + sv(m) + sv(M) + nl
         + "shift" + sn(shift.x) + sn(shift.y) + nl
