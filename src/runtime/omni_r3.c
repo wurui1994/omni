@@ -735,6 +735,61 @@ static double r3_bound16(const double *P, int mx, double b, double fuzz, int dep
   return r3_bound16(s3, mx, b, fuzz, depth);
 }
 
+/* 三角面片那一份（bound.cc:88-128 + bound.h:30-66 的 Splittri，逐句转写） */
+static double r3_cornerboundtri(const double *P, int mx) {
+  double b = r3_mm(mx, P[0], P[6]);
+  return r3_mm(mx, b, P[9]);
+}
+
+static double r3_controlboundtri(const double *P, int mx) {
+  double b = r3_mm(mx, P[1], P[2]);
+  b = r3_mm(mx, b, P[3]);
+  b = r3_mm(mx, b, P[4]);
+  b = r3_mm(mx, b, P[5]);
+  b = r3_mm(mx, b, P[7]);
+  return r3_mm(mx, b, P[8]);
+}
+
+static double r3_boundtri(const double *P, int mx, double b, double fuzz, int depth) {
+  b = r3_mm(mx, b, r3_cornerboundtri(P, mx));
+  if (r3_mm(mx, -1.0, 1.0) * (b - r3_controlboundtri(P, mx)) >= -fuzz || depth == 0)
+    return b;
+  --depth;
+  fuzz *= 2;
+  /* Splittri（bound.h:42-65），名字一字不改，方便对照 */
+  double l003 = P[0], p102 = P[1], p012 = P[2], p201 = P[3], p111 = P[4];
+  double p021 = P[5], r300 = P[6], p210 = P[7], p120 = P[8], u030 = P[9];
+  double u021 = 0.5 * (u030 + p021), u120 = 0.5 * (u030 + p120);
+  double p033 = 0.5 * (p021 + p012), p231 = 0.5 * (p120 + p111),
+         p330 = 0.5 * (p120 + p210);
+  double p123 = 0.5 * (p012 + p111);
+  double l012 = 0.5 * (p012 + l003), p312 = 0.5 * (p111 + p201),
+         r210 = 0.5 * (p210 + r300);
+  double l102 = 0.5 * (l003 + p102), p303 = 0.5 * (p102 + p201),
+         r201 = 0.5 * (p201 + r300);
+  double u012 = 0.5 * (u021 + p033), u210 = 0.5 * (u120 + p330);
+  double l021 = 0.5 * (p033 + l012), p4xx = 0.5 * p231 + 0.25 * (p111 + p102);
+  double r120 = 0.5 * (p330 + r210), px4x = 0.5 * p123 + 0.25 * (p111 + p210);
+  double pxx4 = 0.25 * (p021 + p111) + 0.5 * p312;
+  double l201 = 0.5 * (l102 + p303), r102 = 0.5 * (p303 + r201);
+  double l210 = 0.5 * (px4x + l201), r012 = 0.5 * (px4x + r102),
+         l300 = 0.5 * (l201 + r102);
+  double r021 = 0.5 * (pxx4 + r120), u201 = 0.5 * (u210 + pxx4),
+         r030 = 0.5 * (u210 + r120);
+  double u102 = 0.5 * (u012 + p4xx), l120 = 0.5 * (l021 + p4xx),
+         l030 = 0.5 * (u012 + l021);
+  double l111 = 0.5 * (p123 + l102), r111 = 0.5 * (p312 + r210);
+  double u111 = 0.5 * (u021 + p231), c111 = 0.25 * (p033 + p330 + p303 + p111);
+  double l[10] = { l003, p102, p012, p201, l111, p021, l300, l210, l120, l030 };
+  b = r3_boundtri(l, mx, b, fuzz, depth);
+  double r[10] = { l300, r102, r012, r201, r111, r021, r300, r210, r120, r030 };
+  b = r3_boundtri(r, mx, b, fuzz, depth);
+  double u[10] = { l030, u102, u012, u201, u111, u021, r030, u210, u120, u030 };
+  b = r3_boundtri(u, mx, b, fuzz, depth);
+  double c[10] = { r030, u201, r021, u102, c111, r012, l030, l120, l210, l300 };
+  return r3_boundtri(c, mx, b, fuzz, depth);
+}
+
 /* 这一片是不是"直"的（straight 时 asy 只用四角，见 drawsurface.cc:77-91）。
    由调用方在进 r3_set_res 之前摆好 —— 与 r3tris 的 cursrc 同一个套路。 */
 static int r3_cur_straight = 0;
@@ -744,15 +799,17 @@ static double r3_res_for(const r3scene *s, const r3v *p, int n) {
   if (!s->ortho && s->M.z != 0.0) {
     double zmin = p[0].z;
     for (int i = 1; i < n; ++i) if (p[i].z < zmin) zmin = p[i].z;
-    /* 十六个控制点、又不是直面片时，改用真 Bezier 界（上面那段注） */
-    int use = n == 16 && !r3_cur_straight;
+    /* 十六个控制点、又不是直面片时，改用真 Bezier 界（上面那段注）；
+       十个控制点（三角面片）走 boundtri 那一份 */
+    int use = (n == 16 || n == 10) && !r3_cur_straight;
     { const char *e = getenv("OMNI_R3_ZBOUND");
       if (e && strcmp(e, "0") == 0) use = 0; }
     if (use) {
       double cz[16];
-      for (int i = 0; i < 16; ++i) cz[i] = p[i].z;
-      double fuzz = sqrt(R3_FUZZ2) * r3_absmax(cz, 16);
-      zmin = r3_bound16(cz, 0, cz[0], fuzz, DBL_MANT_DIG);
+      for (int i = 0; i < n; ++i) cz[i] = p[i].z;
+      double fuzz = sqrt(R3_FUZZ2) * r3_absmax(cz, n);
+      zmin = n == 16 ? r3_bound16(cz, 0, cz[0], fuzz, DBL_MANT_DIG)
+                     : r3_boundtri(cz, 0, cz[0], fuzz, DBL_MANT_DIG);
     }
     sc = zmin / s->M.z;
   }
@@ -1033,7 +1090,9 @@ static int r3_render_tri(const r3scene *s, r3tris *t, const r3v *p,
 
 static int r3_add_tri3(r3scene *s, r3tris *t, const r3v *p, int straight,
                        const r3mat *mat, const float *C) {
+  r3_cur_straight = straight;
   r3_set_res(s, p, 10, mat, C, 3);
+  r3_cur_straight = 0;
   double eps = 0;
   for (int i = 1; i < 10; ++i) {
     double q = r3v_abs2(r3v_sub(p[i], p[0]));
