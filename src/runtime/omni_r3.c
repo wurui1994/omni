@@ -408,6 +408,14 @@ static int r3_render_patch(const r3scene *s, r3tris *t, const r3v *p,
   /* res2 <= 0（清单里没给 res）或者判据不是有限数时**当成平的** —— 不然一片就能
    * 递归到深度上限。深度上限压到 8，原版没有上限，靠的是判据必然收敛。 */
   int bad = !(s->res2 > 0 && h == h && v == v) || depth >= r3_depthcap();
+  /* 标定口：`OMNI_R3_PATCHDBG=1` 把每一片的判据与四角印出来（`平`/`分` 是这一层的判定）。
+     线主导的探针上只有几片，够看；大图上别开。 */
+  if (getenv("OMNI_R3_PATCHDBG"))
+    fprintf(stderr, "r3patch d%d h %.6g v %.6g res2 %.6g -> %s"
+            "  P0 y %.6g P1 y %.6g P2 y %.6g P3 y %.6g\n",
+            depth, h, v, s->res2,
+            (bad || (h < s->res2 && v < s->res2)) ? "平" : "分",
+            P0.y, P1.y, P2.y, P3.y);
   if (bad || (h < s->res2 && v < s->res2)) {
     if (C) {
       float a[12], b[12];
@@ -1231,6 +1239,11 @@ static void r3_set_dimensions(r3scene *s) {
 static void r3_projection(r3scene *s) {
   double l = s->xmin, r = s->xmax, b = s->ymin, t = s->ymax;
   double n = s->znear, f = s->zfar;
+  /* 标定口：`OMNI_R3_ZPAD=比例` 把近远面各往外推一点。**为什么要有这一格**：场景盒是
+     按图元的极值算的，所以管子/球的最近最远那些点**正好压在近远面上**，转成 float32
+     之后可能落到面外被 GL 裁掉。这一格是用来判定"细管子那点墨是不是被近远面裁掉的"。 */
+  { const char *e = getenv("OMNI_R3_ZPAD");
+    if (e) { double k = atof(e) * (f - n); n -= k; f += k; } }
   memset(s->P, 0, sizeof(s->P));
   if (s->ortho) {
     s->P[0][0] = 2.0 / (r - l);
