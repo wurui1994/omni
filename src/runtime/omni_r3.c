@@ -647,11 +647,113 @@ static int r3_render_patch(const r3scene *s, r3tris *t, const r3v *p,
  * 也写着"具体取值还没量到"）。量出来的代价（/tmp/dot/d7.asy 六颗 10pt 的点，逐像素按
  * 覆盖率加权）：六颗的面积一律比参考大 1.07%~1.43%（半径大 0.5%~0.7%），
  * 而**位置只差 0.16 px 以内** —— 也就是说错的不是投影，是细分的粗细与内收量。 */
+/* ---------------------------------------------------------------- 真 Bezier 界
+ * asy 算 `Min/Max`（drawsurface.cc:113-126）用的**不是控制点极值**，而是 `bound()`
+ * 那一趟带 Fuzz 的自适应细分（bound.cc:52-86）：先看四角，再与十二个内控制点比
+ * `m(-1,1)*(b - controlbound) >= -fuzz`，不够紧就把面片切四块递归，每层 `fuzz *= 2`。
+ * 这一格影响 `res`：`s = Min.z * perspective`，控制点极值比真界更靠外（更负），
+ * 于是我们的 res 偏大、细分偏粗。常量照 bound.cc:13-15：
+ *   Fuzz2 = 1000*DBL_EPSILON、Fuzz = sqrt(Fuzz2)、maxdepth = DBL_MANT_DIG
+ * `run::norm` 是**取绝对值最大**（bound.cc:20-27），不是欧氏范数。
+ * 三角面片那一份（boundtri，bound.cc:102-128）还没转写 —— 那一路仍用控制点极值，
+ * 记在这儿。`OMNI_R3_ZBOUND=0` 退回全用控制点极值（标定用）。 */
+#define R3_FUZZ2 (1000.0 * DBL_EPSILON)
+
+static double r3_absmax(const double *a, int n) {
+  double r = 0.0;
+  for (int i = 0; i < n; ++i) { double v = a[i] < 0 ? -a[i] : a[i]; if (v > r) r = v; }
+  return r;
+}
+
+/* m：0 = min、1 = max（照原版把函数指针 `m` 传进去的那一套） */
+static double r3_mm(int mx, double a, double b) {
+  if (mx) return a > b ? a : b;
+  return a < b ? a : b;
+}
+
+static double r3_cornerbound(const double *P, int mx) {
+  double b = r3_mm(mx, P[0], P[3]);
+  b = r3_mm(mx, b, P[12]);
+  return r3_mm(mx, b, P[15]);
+}
+
+static double r3_controlbound(const double *P, int mx) {
+  double b = r3_mm(mx, P[1], P[2]);
+  b = r3_mm(mx, b, P[4]);
+  b = r3_mm(mx, b, P[5]);
+  b = r3_mm(mx, b, P[6]);
+  b = r3_mm(mx, b, P[7]);
+  b = r3_mm(mx, b, P[8]);
+  b = r3_mm(mx, b, P[9]);
+  b = r3_mm(mx, b, P[10]);
+  b = r3_mm(mx, b, P[11]);
+  b = r3_mm(mx, b, P[13]);
+  return r3_mm(mx, b, P[14]);
+}
+
+/* 一条三次曲线（标量）对半分，与 Split3 同一套 m0..m5 */
+typedef struct { double m0, m2, m3, m4, m5; } r3s1;
+static r3s1 r3_split1(double z0, double c0, double c1, double z1) {
+  r3s1 s;
+  s.m0 = 0.5 * (z0 + c0);
+  double m1 = 0.5 * (c0 + c1);
+  s.m2 = 0.5 * (c1 + z1);
+  s.m3 = 0.5 * (s.m0 + m1);
+  s.m4 = 0.5 * (m1 + s.m2);
+  s.m5 = 0.5 * (s.m3 + s.m4);
+  return s;
+}
+
+static double r3_bound16(const double *P, int mx, double b, double fuzz, int depth) {
+  b = r3_mm(mx, b, r3_cornerbound(P, mx));
+  if (r3_mm(mx, -1.0, 1.0) * (b - r3_controlbound(P, mx)) >= -fuzz || depth == 0)
+    return b;
+  --depth;
+  fuzz *= 2;
+  r3s1 c0 = r3_split1(P[0], P[1], P[2], P[3]);
+  r3s1 c1 = r3_split1(P[4], P[5], P[6], P[7]);
+  r3s1 c2 = r3_split1(P[8], P[9], P[10], P[11]);
+  r3s1 c3 = r3_split1(P[12], P[13], P[14], P[15]);
+  r3s1 c4 = r3_split1(P[12], P[8], P[4], P[0]);
+  r3s1 c5 = r3_split1(c3.m0, c2.m0, c1.m0, c0.m0);
+  r3s1 c6 = r3_split1(c3.m3, c2.m3, c1.m3, c0.m3);
+  r3s1 c7 = r3_split1(c3.m5, c2.m5, c1.m5, c0.m5);
+  r3s1 c8 = r3_split1(c3.m4, c2.m4, c1.m4, c0.m4);
+  r3s1 c9 = r3_split1(c3.m2, c2.m2, c1.m2, c0.m2);
+  r3s1 c10 = r3_split1(P[15], P[11], P[7], P[3]);
+  double s0[16] = { c4.m5, c5.m5, c6.m5, c7.m5, c4.m3, c5.m3, c6.m3, c7.m3,
+                    c4.m0, c5.m0, c6.m0, c7.m0, P[12], c3.m0, c3.m3, c3.m5 };
+  b = r3_bound16(s0, mx, b, fuzz, depth);
+  double s1[16] = { P[0], c0.m0, c0.m3, c0.m5, c4.m2, c5.m2, c6.m2, c7.m2,
+                    c4.m4, c5.m4, c6.m4, c7.m4, c4.m5, c5.m5, c6.m5, c7.m5 };
+  b = r3_bound16(s1, mx, b, fuzz, depth);
+  double s2[16] = { c0.m5, c0.m4, c0.m2, P[3], c7.m2, c8.m2, c9.m2, c10.m2,
+                    c7.m4, c8.m4, c9.m4, c10.m4, c7.m5, c8.m5, c9.m5, c10.m5 };
+  b = r3_bound16(s2, mx, b, fuzz, depth);
+  double s3[16] = { c7.m5, c8.m5, c9.m5, c10.m5, c7.m3, c8.m3, c9.m3, c10.m3,
+                    c7.m0, c8.m0, c9.m0, c10.m0, c3.m5, c3.m4, c3.m2, P[15] };
+  return r3_bound16(s3, mx, b, fuzz, depth);
+}
+
+/* 这一片是不是"直"的（straight 时 asy 只用四角，见 drawsurface.cc:77-91）。
+   由调用方在进 r3_set_res 之前摆好 —— 与 r3tris 的 cursrc 同一个套路。 */
+static int r3_cur_straight = 0;
+
 static double r3_res_for(const r3scene *s, const r3v *p, int n) {
   double sc = 1.0;
   if (!s->ortho && s->M.z != 0.0) {
     double zmin = p[0].z;
     for (int i = 1; i < n; ++i) if (p[i].z < zmin) zmin = p[i].z;
+    /* 十六个控制点、又不是直面片时，改用真 Bezier 界（上面那段注） */
+    int use = n == 16 && !r3_cur_straight;
+    { const char *e = getenv("OMNI_R3_ZBOUND");
+      if (e && strcmp(e, "0") == 0) use = 0; }
+    if (use) {
+      double cz[16];
+      for (int i = 0; i < 16; ++i) cz[i] = p[i].z;
+      double fuzz = sqrt(R3_FUZZ2) * r3_absmax(cz, 16);
+      zmin = r3_bound16(cz, 0, cz[0], fuzz, DBL_MANT_DIG);
+    }
     sc = zmin / s->M.z;
   }
   /* **宽高取的是"视景体"（setDimensions 出来的小写 xmin/xmax），不是场景盒 —— 试过，
@@ -751,7 +853,9 @@ static void r3_set_res(r3scene *s, const r3v *p, int n, const r3mat *mat,
  * `C` 是四个角的 rgba（16 个 float，角序与 P0..P3 一样），没有顶点色时给 NULL。 */
 static int r3_add_patch(r3scene *s, r3tris *t, const r3v *p, int straight,
                         const r3mat *mat, const float *C) {
+  r3_cur_straight = straight;      /* res 里那个 Min.z 要按"直不直"分档，见 r3_bound16 头注 */
   r3_set_res(s, p, 16, mat, C, 4);
+  r3_cur_straight = 0;
   double eps = 0;
   for (int i = 1; i < 16; ++i) {
     double d = r3v_abs2(r3v_sub(p[i], p[0]));
