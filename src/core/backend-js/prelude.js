@@ -900,6 +900,8 @@ function $js_str(v) {
     // ADR-0020 P1：真对象走 ToPrimitive（hint string），Symbol 只有显式 String() 才给字
     // —— 这一格与 JS 一致：模板与 "+" 上碰到 Symbol 是 TypeError，那两处不经过这里。
     case "object": return $js_str($js_to_prim("s", v));
+    // 数组的 String() 就是 join(",")（Array.prototype.toString），ADR-0020 P1
+    case "list": return $js_arr_prim(v);
     case "symbol": return $js_sym_str(v);
     default: $rt_error("cannot convert " + $dynTag(v) + " to string");
   }
@@ -911,9 +913,31 @@ function $js_num2(op, a, b) {
   if (ta !== tb) $rt_error("cannot mix bigint and number in '" + op + "'");
 }
 function $js_add(a, b) {
+  // 对象与数组先 ToPrimitive（规范 ApplyStringOrNumericBinaryOperator 第 1 步）。
+  // 从前这个值域里没有"能转成原始值的东西"，所以这一格空着（ADR-0020 P1）。
+  a = $js_prim("d", a);
+  b = $js_prim("d", b);
   if ($dynTag(a) === "string" || $dynTag(b) === "string") return $js_str(a) + $js_str(b);
   $js_num2("+", a, b);
   return $dynTag(a) === "int" ? $DW(a + b) : a + b;
+}
+/* 算术/比较之前把对象与数组摊成原始值。数组那一条是 Array.prototype.toString ——
+   规范里它就是 join(",")（null 与 undefined 变空串），所以 [1,2] + "" 是 "1,2"。 */
+function $js_prim(hint, v) {
+  const t = $dynTag(v);
+  if (t === "object") return $js_to_prim(hint, v);
+  if (t === "list") return $js_arr_prim(v);
+  return v;
+}
+function $js_arr_prim(v) {
+  let s = "";
+  for (let i = 0; i < v.length; i++) {
+    if (i) s += ",";
+    const x = v[i];
+    if (x === undefined || x === null) continue;
+    s += $js_asS16($js_str(x));
+  }
+  return s;
 }
 // 幂的 int 那一支：平方求幂，每一步都回卷。回卷是模 2^64 的环同态，所以这与
 // "先算精确值再回卷"逐位相同，而且不会为了 2n ** 1000000n 去开一块天文数字的内存。
@@ -930,6 +954,9 @@ function $js_ipow(a, b) {
   return r;
 }
 function $js_arith(op, a, b) {
+  // 对象与数组先 ToPrimitive（hint number），与 js_add 那一处同一条规矩
+  a = $js_prim("n", a);
+  b = $js_prim("n", b);
   $js_num2(op, a, b);
   const isInt = $dynTag(a) === "int";
   switch (op) {
@@ -968,6 +995,9 @@ function $js_bitnot(a) {
   return $DW(~a);
 }
 function $js_cmp(op, a, b) {
+  // 关系运算也先 ToPrimitive（hint number），规范 IsLessThan 第 1 步
+  a = $js_prim("n", a);
+  b = $js_prim("n", b);
   const ta = $dynTag(a), tb = $dynTag(b);
   let c;
   if (ta === "string" && tb === "string") {
@@ -1927,6 +1957,8 @@ function $js_num_of(v) {
     case "null": return 0;
     case "undefined": return NaN;
     case "string": return Number(v);
+    // 对象与数组：先 ToPrimitive（hint number）再转（ADR-0020 P1）。一元加号走的就是这儿。
+    case "object": case "list": return $js_num_of($js_prim("n", v));
     default: $rt_error("cannot convert " + $dynTag(v) + " to a number");
   }
 }
