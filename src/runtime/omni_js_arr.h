@@ -195,6 +195,13 @@ static int64_t omni_js_arr_rel(int64_t i, int64_t len) { \
   else if (i > len) i = len; \
   return i; \
 } \
+static omni_dyn omni_js_arr_at(omni_dyn a, omni_dyn i) { \
+  LT l = omni_js_arr_of(a); \
+  int64_t k = omni_js_arr_i(i); \
+  if (k < 0) k += l->len; \
+  if (k < 0 || k >= l->len) return omni_dyn_undef(); \
+  return l->items[k]; \
+} \
 static omni_dyn omni_js_arr_slice(omni_dyn a, omni_dyn s, omni_dyn e) { \
   LT l = omni_js_arr_of(a); \
   int64_t start = omni_js_arr_rel(s.tag == OMNI_DYN_UNDEF ? 0 : omni_js_arr_i(s), l->len); \
@@ -322,9 +329,12 @@ static omni_dyn omni_js_arr_find_index(omni_dyn a, omni_dyn f) { \
 } \
 OMNI_JS_ARR_4(LT, DT)
 
-/* 第四段：reduce / flatMap / sort。
+/* 第四段：reduce / reduceRight / flat / flatMap / sort / toSorted。
    sort 用自底向上的归并 —— 稳定，而且不递归。比较器返回 Number，只看符号；
-   返回 NaN 当作 0（JS 里是"未指定"，但两个后端必须选同一种未指定行为）。 */
+   返回 NaN 当作 0（JS 里是"未指定"，但两个后端必须选同一种未指定行为）。
+   toSorted 是"整段拷贝 + 就地排"，于是稳定性与比较器语义完全跟着 sort 那一份。
+   flat 一层一层摊，不递归：深度只是个计数，某一层里没有数组了就提前收工，
+   所以 Infinity 也收得下，而且深数组不会把 C 栈捅穿。 */
 #define OMNI_JS_ARR_4(LT, DT) \
 static omni_dyn omni_js_arr_reduce(omni_dyn a, omni_dyn f, omni_dyn init) { \
   LT l = omni_js_arr_of(a); \
@@ -347,6 +357,53 @@ static omni_dyn omni_js_arr_reduce(omni_dyn a, omni_dyn f, omni_dyn init) { \
     acc = omni_js_call(f, args); \
   } \
   return acc; \
+} \
+static omni_dyn omni_js_arr_reduce_right(omni_dyn a, omni_dyn f, omni_dyn init) { \
+  LT l = omni_js_arr_of(a); \
+  int64_t i = l->len - 1; \
+  omni_dyn acc; \
+  if (init.tag == OMNI_DYN_UNDEF) { \
+    if (l->len == 0) omni_error("reduce of empty array with no initial value"); \
+    acc = l->items[i]; i--; \
+  } else { \
+    acc = init; \
+  } \
+  for (; i >= 0; i--) { \
+    LT args = LT##_new(); \
+    LT##_reserve(args, 4); \
+    args->items[0] = acc; \
+    args->items[1] = l->items[i]; \
+    args->items[2] = omni_dyn_of_real((double)i); \
+    args->items[3] = a; \
+    args->len = 4; \
+    acc = omni_js_call(f, args); \
+  } \
+  return acc; \
+} \
+static omni_dyn omni_js_arr_flat(omni_dyn a, omni_dyn d) { \
+  LT src = omni_js_arr_of(a); \
+  int64_t depth = d.tag == OMNI_DYN_UNDEF ? 1 : omni_js_arr_i(d); \
+  LT out = LT##_new(); \
+  LT##_reserve(out, src->len); \
+  for (int64_t i = 0; i < src->len; i++) out->items[i] = src->items[i]; \
+  out->len = src->len; \
+  for (int64_t k = 0; k < depth; k++) { \
+    bool nested = false; \
+    LT next = LT##_new(); \
+    for (int64_t i = 0; i < out->len; i++) { \
+      omni_dyn x = out->items[i]; \
+      if (x.tag == OMNI_DYN_LIST) { \
+        LT s = (LT)x.u.ref; \
+        nested = true; \
+        for (int64_t j = 0; j < s->len; j++) LT##_push(next, s->items[j]); \
+      } else { \
+        LT##_push(next, x); \
+      } \
+    } \
+    out = next; \
+    if (!nested) break; \
+  } \
+  return omni_js_arr_wrap(out); \
 } \
 static omni_dyn omni_js_arr_flat_map(omni_dyn a, omni_dyn f) { \
   LT l = omni_js_arr_of(a); \
@@ -395,6 +452,14 @@ static omni_dyn omni_js_arr_sort(omni_dyn a, omni_dyn f) { \
     } \
   } \
   return a; \
+} \
+static omni_dyn omni_js_arr_to_sorted(omni_dyn a, omni_dyn f) { \
+  LT l = omni_js_arr_of(a); \
+  LT out = LT##_new(); \
+  LT##_reserve(out, l->len); \
+  for (int64_t i = 0; i < l->len; i++) out->items[i] = l->items[i]; \
+  out->len = l->len; \
+  return omni_js_arr_sort(omni_js_arr_wrap(out), f); \
 } \
 static omni_dyn omni_js_arr_entries(omni_dyn a) { \
   LT l = omni_js_arr_of(a); \

@@ -198,6 +198,15 @@ omni_s16 omni_s16_pad_start(omni_s16 s, int64_t want, omni_s16 fill) {
   return mk(out, want);
 }
 
+/* JS 的 padEnd：与 padStart 同一套截断规则，只是补在后面 */
+omni_s16 omni_s16_pad_end(omni_s16 s, int64_t want, omni_s16 fill) {
+  if (want <= s.len || fill.len == 0) return s;
+  uint16_t *out = alloc16(want);
+  memcpy(out, s.p, (size_t)s.len * 2);
+  for (int64_t i = s.len; i < want; i++) out[i] = fill.p[(i - s.len) % fill.len];
+  return mk(out, want);
+}
+
 /* 只折 ASCII。JS 的 toLowerCase 走完整 Unicode 大小写表，但编译器源码里只对
    ASCII 标识符与十六进制数字用它 —— 真需要更多时，测试轴会先炸出来。 */
 omni_s16 omni_s16_lower(omni_s16 s) {

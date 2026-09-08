@@ -1109,6 +1109,28 @@ function $js_str_repeat(s, n) {
 function $js_str_pad_start(s, n, fill) {
   return $js_asS16(s).padStart($js_idx(n, 0), fill === undefined ? " " : $js_asS16(fill));
 }
+function $js_str_pad_end(s, n, fill) {
+  return $js_asS16(s).padEnd($js_idx(n, 0), fill === undefined ? " " : $js_asS16(fill));
+}
+// replaceAll 的字符串模式那一支。替换串里的 $& / $1 一律当**普通字符**：
+// 宿主的 replaceAll 会认它们，所以这里不能直接转手，手写一遍才和 C 侧同样残缺。
+// 空模式照 JS 的样子在每个码元之间各插一份（"abc" 上插出 -a-b-c-）。
+function $js_str_replace_all(s, pat, rep) {
+  const v = $js_asS16(s), p = $js_asS16(pat), r = $js_asS16(rep);
+  if (p.length === 0) {
+    let out = r;
+    for (let i = 0; i < v.length; i++) out += v[i] + r;
+    return out;
+  }
+  let out = "", i = 0;
+  for (;;) {
+    const at = v.indexOf(p, i);
+    if (at < 0) break;
+    out += v.slice(i, at) + r;
+    i = at + p.length;
+  }
+  return out + v.slice(i);
+}
 function $js_str_trim(side, s) {
   const v = $js_asS16(s);
   return side === "l" ? v.trimStart() : side === "r" ? v.trimEnd() : v.trim();
@@ -1187,6 +1209,13 @@ function $js_arr_push_dyn(a, items) {
 }
 function $js_arr_pop(a) { return $js_arr_of(a).pop(); }
 function $js_arr_unshift(a, v) { return $js_arr_of(a).unshift(v); }
+// a.at(i)：负下标从尾部数，越界 undefined（a[-1] 是取属性，不是这一条）
+function $js_arr_at(a, i) {
+  const l = $js_arr_of(a);
+  let k = $js_idx(i, 0);
+  if (k < 0) k += l.length;
+  return k < 0 || k >= l.length ? undefined : l[k];
+}
 function $js_arr_slice(a, s, e) {
   const l = $js_arr_of(a);
   return l.slice($js_idx(s, 0), $js_idx(e, l.length));
@@ -1257,6 +1286,40 @@ function $js_arr_reduce(a, f, init) {
   for (; i < l.length; i++) acc = $callFn(f, [acc, l[i], i, a]);
   return acc;
 }
+function $js_arr_reduce_right(a, f, init) {
+  const l = $js_arr_of(a);
+  let i = l.length - 1, acc;
+  if (init === undefined) {
+    if (l.length === 0) $rt_error("reduce of empty array with no initial value");
+    acc = l[i]; i--;
+  } else {
+    acc = init;
+  }
+  for (; i >= 0; i--) acc = $callFn(f, [acc, l[i], i, a]);
+  return acc;
+}
+// flat：深度是个计数，一层一层摊（不递归 —— 深数组会把 C 侧的栈捅穿）。
+// 某一层里已经没有数组就提前收工，所以 Infinity 也能收。
+function $js_arr_flat(a, d) {
+  const depth = d === undefined ? 1 : $js_idx(d, 1);
+  let out = $js_arr_of(a).slice();
+  for (let k = 0; k < depth; k++) {
+    let nested = false;
+    const next = [];
+    for (let i = 0; i < out.length; i++) {
+      const x = out[i];
+      if ($dynTag(x) === "list") {
+        nested = true;
+        for (let j = 0; j < x.length; j++) next.push(x[j]);
+      } else {
+        next.push(x);
+      }
+    }
+    out = next;
+    if (!nested) break;
+  }
+  return out;
+}
 function $js_arr_flat_map(a, f) {
   const out = [];
   const l = $js_arr_of(a);
@@ -1278,6 +1341,8 @@ function $js_arr_cmp(f, x, y) {
   return Number.isNaN(d) ? 0 : (d < 0 ? -1 : (d > 0 ? 1 : 0));
 }
 function $js_arr_sort(a, f) { $js_arr_of(a).sort((x, y) => $js_arr_cmp(f, x, y)); return a; }
+// toSorted：整段拷贝再就地排，稳定性与比较器语义完全跟着 sort 那一份
+function $js_arr_to_sorted(a, f) { return $js_arr_sort($js_arr_of(a).slice(), f); }
 function $js_arr_entries(a) { return $js_arr_of(a).map((v, i) => [i, v]); }
 // split 的字符串分隔符形式（正则形式是 $js_re_split）。空分隔符按码元切，不按码点。
 function $js_str_split(s, sep) { return $js_asS16(s).split($js_asS16(sep)); }

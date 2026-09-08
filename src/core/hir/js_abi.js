@@ -55,6 +55,10 @@ export const JS_ABI = {
   js_str_slice: { js: '$js_str_slice', c: 'omni_js_str_slice', arity: 3 },
   js_str_repeat: { js: '$js_str_repeat', c: 'omni_js_str_repeat', arity: 2 },
   js_str_pad_start: { js: '$js_str_pad_start', c: 'omni_js_str_pad_start', arity: 3 },
+  js_str_pad_end: { js: '$js_str_pad_end', c: 'omni_js_str_pad_end', arity: 3 },
+  // replaceAll：**只收字符串模式**。正则那一支要 lastIndex 与替换串里的 $1，
+  // 那两样在 js_re_* 那一族里（regexp 接收者由 lower.js 静态发过去）。
+  js_str_replace_all: { js: '$js_str_replace_all', c: 'omni_js_str_replace_all', arity: 3 },
   js_str_trim: { js: '$js_str_trim', c: 'omni_js_str_trim', arity: 1, lit: ['side'] },
   js_str_lower: { js: '$js_str_lower', c: 'omni_js_str_lower', arity: 1 },
   js_str_upper: { js: '$js_str_upper', c: 'omni_js_str_upper', arity: 1 },
@@ -95,6 +99,8 @@ export const JS_ABI = {
   js_arr_fill: { js: '$js_arr_fill', c: 'omni_js_arr_fill', arity: 2 },
   js_arr_is_array: { js: '$js_arr_is_array', c: 'omni_js_arr_is_array', arity: 1, ret: 'bool' },
   js_arr_from: { js: '$js_arr_from', c: 'omni_js_arr_from', arity: 1 },
+  // a.at(i)：负下标从尾部数（`a[-1]` 在 JS 里是取属性，不是取末元素），越界 undefined
+  js_arr_at: { js: '$js_arr_at', c: 'omni_js_arr_at', arity: 2 },
   js_arr_index_of: { js: '$js_arr_index_of', c: 'omni_js_arr_index_of', arity: 2 },
   js_arr_last_index_of: { js: '$js_arr_last_index_of', c: 'omni_js_arr_last_index_of', arity: 2 },
   js_arr_includes: { js: '$js_arr_includes', c: 'omni_js_arr_includes', arity: 2, ret: 'bool' },
@@ -110,6 +116,12 @@ export const JS_ABI = {
   js_arr_reduce: { js: '$js_arr_reduce', c: 'omni_js_arr_reduce', arity: 3, throws: true },
   js_arr_flat_map: { js: '$js_arr_flat_map', c: 'omni_js_arr_flat_map', arity: 2, throws: true },
   js_arr_sort: { js: '$js_arr_sort', c: 'omni_js_arr_sort', arity: 2, throws: true },
+  js_arr_reduce_right: { js: '$js_arr_reduce_right', c: 'omni_js_arr_reduce_right', arity: 3, throws: true },
+  // flat 的深度默认 1，Infinity 也收（到不了的层自然停）。不递归调自己：
+  // 深度是个计数，用显式的两层循环摊平，省得深数组把 C 栈捅穿。
+  js_arr_flat: { js: '$js_arr_flat', c: 'omni_js_arr_flat', arity: 2 },
+  // toSorted：先整段拷贝再就地排 —— sort 那份的稳定性与比较器语义一个字不改
+  js_arr_to_sorted: { js: '$js_arr_to_sorted', c: 'omni_js_arr_to_sorted', arity: 2, throws: true },
 
   // ------------------------------------------------- 普通对象 / Map / Set
   // 对象 -> dict<string, dynamic>，键是属性名的 UTF-8（进出转码）。
@@ -450,13 +462,15 @@ export const JS_PROPS = {
 /** @type {Record<string, {on: Record<string, string>, lit?: Record<string, any>}>} */
 export const JS_METHODS = {
   // String
-  at: { on: { string: 'js_str_at' } },
+  at: { on: { list: 'js_arr_at', string: 'js_str_at' } },
   // charAt 与 at 不是一回事：越界给空串、且不认负下标（规范 22.1.3.1）
   charAt: { on: { string: 'js_str_char_at' } },
   charCodeAt: { on: { string: 'js_str_char_code_at' } },
   codePointAt: { on: { string: 'js_str_code_point_at' } },
   repeat: { on: { string: 'js_str_repeat' } },
   padStart: { on: { string: 'js_str_pad_start' } },
+  padEnd: { on: { string: 'js_str_pad_end' } },
+  replaceAll: { on: { string: 'js_str_replace_all' } },
   trim: { on: { string: 'js_str_trim' }, lit: { side: 'b' } },
   trimStart: { on: { string: 'js_str_trim' }, lit: { side: 'l' } },
   trimEnd: { on: { string: 'js_str_trim' }, lit: { side: 'r' } },
@@ -500,8 +514,11 @@ export const JS_METHODS = {
   find: { on: { list: 'js_arr_find' } },
   findIndex: { on: { list: 'js_arr_find_index' } },
   reduce: { on: { list: 'js_arr_reduce' } },
+  reduceRight: { on: { list: 'js_arr_reduce_right' } },
+  flat: { on: { list: 'js_arr_flat' } },
   flatMap: { on: { list: 'js_arr_flat_map' } },
   sort: { on: { list: 'js_arr_sort' } },
+  toSorted: { on: { list: 'js_arr_to_sorted' } },
 
   // Map / Set
   get: { on: { Map: 'js_map_get' } },
