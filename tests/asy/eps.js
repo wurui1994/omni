@@ -37,8 +37,11 @@ const WORK = join(ROOT, '.omni-cache', 'epsrun');
 const ASY = '/opt/homebrew/bin/asy';
 const ASYBASE = '/opt/homebrew/share/asymptote';
 const TOL = 1e-3;
-// 一个例子最多跑多久（毫秒）。默认 3s —— 全量 194 个，卡住几个整轴就没法反复问了。
-// 超时的归成"慢"排在最后，单独用 `OMNI_EPS_T=60000 node tests/asy/eps.js <目录> <名字…>` 追。
+// 一个例子最多跑多久（毫秒）的**下限**。默认 3s —— 全量 194 个，卡住几个整轴就没法反复问了。
+// 真正用的预算是 `budgetFor(名字)`：`max(这个下限, 2×上一趟耗时 + 2s)`，也就是"快的例子照旧
+// 被 3s 卡着、已知慢的（三维那一族 5~30s）给够"。从前只有这一个全局值，于是整族三维例子
+// 被记成 `slow` 并覆盖上一次的真结论 —— 那不是"通过"，是"没量过"（见 budgetFor 的注）。
+// 显式给 `OMNI_EPS_T=60000` 仍然一切照旧（下限抬高）。
 const LIMIT = Number(process.env.OMNI_EPS_T === undefined ? 3000 : process.env.OMNI_EPS_T);
 
 // **摇骰子的那几个，永远比不出来**：真 asy 的随机数（random.cc:10）用
@@ -347,7 +350,7 @@ function oracle(n, p) {
 }
 
 /** 我们那一份：`omni run <例子>`，图落到一份文件（与参考那一侧同一条口子）。 */
-function mine(p) {
+function mine(p, budget = LIMIT) {
   // cwd 仍是仓库根（产物缓存 `.omni-cache` 与 `ASYMPTOTE_DIR` 里的相对目录都按它算 ——
   // 试过挪到草稿目录，189 个例子全报 `no such file: tests/asy/examples/…`，退回来了）。
   // 例子自己 `shipout("名字")` 落下来的那几份（asy 的规矩，见 ADR-0014）跑完就地擦掉，
@@ -369,10 +372,11 @@ function mine(p) {
   const t0 = Date.now();
   const r = spawnSync('node', [join(ROOT, 'src', 'core', 'cli.js'), leg, p],
     { cwd: ROOT, env: { ...env, OMNI_ASY_OUTNAME: pic, OMNI_ASY_OUTFORMAT: 'eps' },
-      encoding: 'utf8', timeout: LIMIT, maxBuffer: 1 << 28 });
+      encoding: 'utf8', timeout: budget, maxBuffer: 1 << 28 });
+  const ms = Date.now() - t0;
   // 每个例子的墙上时间发到 stderr（`TIME <名字> <毫秒>`）—— 判据自己的输出格式不动，
   // 要看耗时排行就 `2> 某个文件` 再排序。缓存命中的那些不会出现在这儿（本来就没跑）。
-  process.stderr.write(`TIME ${p.replace(/^.*\//, '').replace(/\.asy$/, '')} ${Date.now() - t0}\n`);
+  process.stderr.write(`TIME ${p.replace(/^.*\//, '').replace(/\.asy$/, '')} ${ms}\n`);
   for (const f of readdirSync(ROOT)) {
     if (before.has(f)) continue;
     if (!f.endsWith('.eps') && !f.endsWith('.svg') && !f.endsWith('.pdf')) continue;
@@ -397,7 +401,7 @@ function mine(p) {
     out = readFileSync(pic, 'latin1');
     rmSync(pic, { force: true });
   } else out = onlyEps(r.stdout ?? '');
-  return { out, err: r.stderr ?? '', status: r.status, slow, said: r.stdout ?? '' };
+  return { out, err: r.stderr ?? '', status: r.status, slow, ms, said: r.stdout ?? '' };
 }
 
 /**
@@ -483,6 +487,35 @@ function remember(n, p, o) {
     `${JSON.stringify({ ...o, stamp: `${srcStamp()}|${st.mtimeMs}|${st.size}|${refStamp(n)}` })}\n`);
 }
 
+/**
+ * 这个例子**上一趟跑了多久**（毫秒，0 = 不知道）。印记作不作数都读 —— 要的只是个量级。
+ */
+function lastMs(n) {
+  const q = join(RES, `${n}.json`);
+  if (!existsSync(q)) return 0;
+  try {
+    const o = JSON.parse(readFileSync(q, 'utf8'));
+    return typeof o.ms === 'number' && o.ms > 0 ? o.ms : 0;
+  } catch { return 0; }
+}
+
+/**
+ * 这个例子这一趟给多少预算（毫秒）。
+ *
+ * **为什么要按例子给，不是一个全局的 3s**：三维那一族（pdb / teapot / soccerball …）
+ * 每个 5~30s，在 3s 的预算下**整族都记成 `slow` 并覆盖上一次的真结论** —— 于是
+ * `.omni-cache/epsres` 里长期有 80 来个 `slow`，那不是"通过"，是"没量过"，占这一轴 40%。
+ * 2026-09-08 单独补跑那 89 个才发现：一样 7、只有数值差 81、结构不同 1、没出图 0。
+ * 现在把上一趟的耗时记进结论里（`ms`），预算取 `max(LIMIT, 2×上次 + 2s)`：
+ * 快的例子照旧被 3s 卡着（跑飞了立刻能看出来），已知慢的给够，于是默认一趟也是完整的。
+ * `OMNI_EPS_T` 仍是下限，显式给大值时一切照旧。
+ */
+function budgetFor(n) {
+  const m = lastMs(n);
+  const want = m > 0 ? 2 * m + 2000 : 0;
+  return want > LIMIT ? want : LIMIT;
+}
+
 let same = 0;
 let numdiff = 0;
 let structdiff = 0;
@@ -504,8 +537,9 @@ for (const n of names) {
   let o = cached(n, p);
   if (o === null) {
     fresh++;
-    const r = mine(p);
-    if (r.slow) o = { kind: 'slow', note: `超过 ${LIMIT}ms` };
+    const budget = budgetFor(n);
+    const r = mine(p, budget);
+    if (r.slow) o = { kind: 'slow', note: `超过 ${budget}ms`, ms: budget };
     else if (r.out.indexOf('%%EOF') < 0) o = { kind: 'nogo', note: why(r) };
     else {
       // 位图那几块先摘出来单独比（见 pullImages）：滤镜不同，字节流两边必然不同，
@@ -535,7 +569,8 @@ for (const n of names) {
           note: `${c.bad} 处数值不同，首处 ${c.first}${ib === null ? '' : `；${ib}`}` };
       }
     }
-    remember(n, p, o);
+    // 耗时也记进结论里（`ms`）—— 下一趟的预算按它算（见 budgetFor）。
+    remember(n, p, { ...o, ms: o.ms ?? r.ms });
   }
   if (o.kind === 'same') { same++; continue; }
   if (o.kind === 'slow') { slow++; slows.push(n); continue; }
@@ -553,7 +588,7 @@ for (const n of names) {
 }
 rmSync(WORK, { recursive: true, force: true });
 console.log(`EPS 那一轴：一样 ${same}、只有数值差 ${numdiff}、结构不同 ${structdiff}、`
-  + `没出图 ${nogo}、超过 ${LIMIT}ms 的 ${slow}`
+  + `没出图 ${nogo}、超预算的 ${slow}`
   + `（没有参考、不计分的 ${noref} 份；摇骰子、比不出来的 ${dice} 份；`
   + `这一趟真跑了 ${fresh} 个，其余用的是缓存）`);
 for (const b of bad) console.log(`  ${b}`);
