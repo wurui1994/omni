@@ -6,9 +6,9 @@
 // 于是 lower.js 完全不需要知道模块这回事（它见到 import 仍然是报错的，那是安全网）。
 //
 // 几条刻意的限制（都是量过源码之后定的）：
-//   - 只有具名导入（`import { a, b } from './m.js'`）；默认导入、`* as` 命名空间导入、
-//     `export default`、`export … from …` 全部报错 —— 量过：仓库里一处都没有。
-//   - `import { a as b }` 摊成模块级的 `const b = a;`（不做重命名，也就不需要作用域分析）。
+//   - `export … from …` 报错 —— 量过：仓库里一处都没有。
+//   - `import { a as b }` / `export { x as y }` / `export default …` / `import def` 都摊成模块级
+//     的一句绑定（不做重命名，也就不需要作用域分析）；`import * as ns` 摊成一格取值器对象。
 //   - 模块级的名字**跨文件重名就报错**：拼在一起之后它们是同一个作用域。改名比在这里
 //     做一遍带作用域的重写便宜得多，而且改完源码更好读。
 //   - `node:*` 的导入一律报错，让它去走封闭 ABI（ADR-0011 决策 2）。
@@ -173,13 +173,6 @@ function scan(m, diags) {
           diags.error(s.span, `'${s.source}' is not a relative module path`);
           break;
         }
-        for (const sp of s.specifiers) {
-          // 默认导入收得下（下面按 'default' 这一格找过去）；命名空间导入还没有
-          if (sp.kind === 'namespace') {
-            diags.error(s.span, 'a namespace import (import * as ns) is not supported;'
-              + ' import the names you need');
-          }
-        }
         const target = resolvePath(base, s.source);
         // 原生模块：只登记"名字 -> op"，文件本身不加载、不拼进来
         if (target.endsWith(NATIVE_SUFFIX)) {
@@ -325,6 +318,38 @@ export function linkJs(entry, read, diags) {
       const target = mods.get(imp.path);
       if (!target) continue;   // 读不到，上面已经报过
       for (const sp of imp.specs) {
+        /* 命名空间导入（`import * as ns from "m"`）：摊成一格**取值器对象** ——
+         * `const ns = { get A() { return A; }, … };`。规范要的是**活绑定**，所以每一格都得是
+         * getter（`ns.mut` 要看得见后来的改动）。这一格因此只在 JS 那条腿上成立：
+         * 取值器要真对象，C 那边发射时会拒（ADR-0020 P1-c）。 */
+        if (sp.kind === 'namespace') {
+          const props = [];
+          for (const [exported, local] of target.exports) {
+            props.push({
+              kind: 'get',
+              key: { type: 'Ident', name: exported, span: imp.span },
+              computed: false,
+              params: [],
+              rest: null,
+              body: {
+                type: 'Block',
+                body: [{ type: 'Return', arg: { type: 'Ident', name: local, span: imp.span }, span: imp.span }],
+                span: imp.span,
+              },
+              span: imp.span,
+            });
+          }
+          body.push({
+            type: 'VarDecl',
+            kind: 'const',
+            decls: [{
+              id: { type: 'Ident', name: sp.local, span: imp.span },
+              init: { type: 'Object', props, span: imp.span },
+            }],
+            span: imp.span,
+          });
+          continue;
+        }
         /* 默认导入（`import def from "m"`）：'default' 那一格记的是导出方那个专属名字，
          * 这儿摊成一句 `const def = <那个名字>;` —— 与命名的改名导入同一招。 */
         if (sp.kind === 'default') {
