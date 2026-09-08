@@ -1548,7 +1548,8 @@ class Lower {
     const path = this.staticPath(e);
     if (path) {
       const spec = STATIC_PROPS[path];
-      if (spec) return op(spec.op, []);
+      // lit 也要带上：well-known Symbol（Symbol.iterator …）就是"名字是编译期常量"的 op
+      if (spec) return op(spec.op, [], spec.lit ?? {});
       if (path.startsWith('process.env.')) return op('js_proc_env', [s16(path.slice('process.env.'.length))]);
       this.err(e.span, `'${path}' is not in the closed ABI (ADR-0011 decision 2)`);
       return undefExpr();
@@ -1983,7 +1984,9 @@ class Lower {
  * 表里没有的路径一律报错 —— 封闭 ABI 的意思就是"没写进表的东西降不下去"。
  * console.log 只是给测试用的糖（量过：编译器源码里 0 处 console.*）。
  */
-const STATIC_NS = new Set(['JSON', 'Math', 'Object', 'Array', 'String', 'Number', 'BigInt', 'process', 'console']);
+const STATIC_NS = new Set(['JSON', 'Math', 'Object', 'Array', 'String', 'Number', 'BigInt', 'process', 'console',
+  // ADR-0020 P1：Symbol 与 Reflect 的静态面（Symbol.iterator、Reflect.ownKeys …）
+  'Symbol', 'Reflect']);
 
 const STATIC_CALLS = {
   'JSON.stringify': { op: 'js_json_stringify', argc: 3 },
@@ -2006,8 +2009,36 @@ const STATIC_CALLS = {
   'Object.keys': { op: 'js_obj_keys', argc: 1 },
   'Object.values': { op: 'js_obj_values', argc: 1 },
   'Object.entries': { op: 'js_obj_entries', argc: 1 },
-  // 这个值域里的对象没有原型链，所以 hasOwn 就是 js_obj_has（`in` 用的也是它）
-  'Object.hasOwn': { op: 'js_obj_has', argc: 2 },
+  'Object.assign': { op: 'js_obj_assign', argc: 2 },
+  /* ---- 真对象那一族（ADR-0020 P1）。`hasOwn` 从前接的是 js_obj_has，而那一条现在
+     沿原型链走（`in` 的语义）—— 自有属性得问 js_obj_has_own，不然继承来的键也算"自有"。 */
+  'Object.hasOwn': { op: 'js_obj_has_own', argc: 2 },
+  'Object.create': { op: 'js_obj_new_p', argc: 1 },
+  'Object.getPrototypeOf': { op: 'js_obj_proto_get', argc: 1 },
+  'Object.setPrototypeOf': { op: 'js_obj_proto_set', argc: 2 },
+  'Object.defineProperty': { op: 'js_obj_def', argc: 3 },
+  'Object.getOwnPropertyDescriptor': { op: 'js_obj_desc', argc: 2 },
+  'Object.getOwnPropertyNames': { op: 'js_obj_own_keys', argc: 1, lit: { kind: 's' } },
+  'Object.getOwnPropertySymbols': { op: 'js_obj_own_keys', argc: 1, lit: { kind: 'y' } },
+  'Object.freeze': { op: 'js_obj_freeze', argc: 1 },
+  'Object.seal': { op: 'js_obj_seal', argc: 1 },
+  'Object.preventExtensions': { op: 'js_obj_prevent_ext', argc: 1 },
+  'Object.isFrozen': { op: 'js_obj_is_frozen', argc: 1 },
+  'Object.isSealed': { op: 'js_obj_is_sealed', argc: 1 },
+  'Object.isExtensible': { op: 'js_obj_is_ext', argc: 1 },
+  'Symbol.for': { op: 'js_sym_for', argc: 1 },
+  'Symbol.keyFor': { op: 'js_sym_key_for', argc: 1 },
+  'Reflect.getPrototypeOf': { op: 'js_obj_proto_get', argc: 1 },
+  'Reflect.setPrototypeOf': { op: 'js_obj_proto_set', argc: 2 },
+  'Reflect.defineProperty': { op: 'js_obj_def', argc: 3 },
+  'Reflect.getOwnPropertyDescriptor': { op: 'js_obj_desc', argc: 2 },
+  'Reflect.ownKeys': { op: 'js_obj_own_keys', argc: 1, lit: { kind: 'a' } },
+  'Reflect.has': { op: 'js_obj_has_p', argc: 2 },
+  'Reflect.get': { op: 'js_getp', argc: 2 },
+  'Reflect.set': { op: 'js_setp', argc: 3 },
+  'Reflect.deleteProperty': { op: 'js_obj_del_p', argc: 2 },
+  'Reflect.isExtensible': { op: 'js_obj_is_ext', argc: 1 },
+  'Reflect.preventExtensions': { op: 'js_obj_prevent_ext', argc: 1 },
   'Array.isArray': { op: 'js_arr_is_array', argc: 1 },
   'Array.from': { op: 'js_arr_from', argc: 1 },
   'String.fromCharCode': { op: 'js_str_of_char_code', argc: 1, fold: 'js_add' },
@@ -2029,6 +2060,16 @@ const STATIC_CALLS = {
 const STATIC_PROPS = {
   'process.argv': { op: 'js_proc_args' },
   'process.stdin.isTTY': { op: 'js_proc_stdin_is_tty' },
+  /* well-known Symbol（ADR-0020 P1）：名字是编译期常量，所以走 lit。
+     协议靠它们才立得住 —— for-of 找 Symbol.iterator、模板与 `+` 找 Symbol.toPrimitive、
+     Object.prototype.toString 找 Symbol.toStringTag、instanceof 找 Symbol.hasInstance。 */
+  'Symbol.iterator': { op: 'js_sym_wk', lit: { name: 'iterator' } },
+  'Symbol.asyncIterator': { op: 'js_sym_wk', lit: { name: 'asyncIterator' } },
+  'Symbol.toPrimitive': { op: 'js_sym_wk', lit: { name: 'toPrimitive' } },
+  'Symbol.toStringTag': { op: 'js_sym_wk', lit: { name: 'toStringTag' } },
+  'Symbol.hasInstance': { op: 'js_sym_wk', lit: { name: 'hasInstance' } },
+  'Symbol.species': { op: 'js_sym_wk', lit: { name: 'species' } },
+  'Symbol.unscopables': { op: 'js_sym_wk', lit: { name: 'unscopables' } },
 };
 
 const STATIC_SETS = {
@@ -2040,6 +2081,9 @@ const GLOBAL_CALLS = {
   Number: { op: 'js_num_of', argc: 1 },
   BigInt: { op: 'js_bigint_of', argc: 1 },
   parseInt: { op: 'js_num_parse_int', argc: 2 },
+  // Symbol(desc)（ADR-0020 P1）。**不是构造器** —— `new Symbol()` 在 JS 里是 TypeError，
+  // 这儿也就只有调用这一条路。
+  Symbol: { op: 'js_sym_new', argc: 1 },
 };
 
 /**
