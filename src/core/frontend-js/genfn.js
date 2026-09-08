@@ -34,11 +34,10 @@
  *     `yield* e;` / `return await e;`。别的位置（实参里、二元运算里、条件里）报一句
  *     能照着改的错。
  *   - 切段要穿过的结构：块、if、while、do-while、for、for-of、for-in、for await、
- *     `try { … } finally { … }` 与 `try { … } catch (e) { … }`（finally 体自己不许再有
- *     yield / await；catch 与 finally **一起**的那一种还不行）。
- *   - **已知的洞**：切开的 try/finally 里真抛出来的异常不会跑 finally（挂起槽会把 step
- *     直接送出去；catch 那一路是通的 —— 驱动会把那格值送回来，见 tryCatch）。
- *     it.return / it.throw 那两条路是跑的。
+ *     以及 try / catch / finally（三种形状都收；finally 体自己不许再有 yield / await，
+ *     也不许有 break/continue/return —— 它要发两份）。
+ *   - 抛进来的那一格（it.throw 与"体里抛出来的"是同一件事）先看有没有活着的 catch，
+ *     再看 finally，都没有才原样往上冒 —— 见 modePrologue 与 tryStmt。
  */
 
 /** 遍历子节点（与 lower.js 的同名函数同形：跳过 span 与 type） */
@@ -535,95 +534,88 @@ class Split {
     return exit;
   }
 
-  /* try { … } finally { … }，try 体里有 yield 的那一种。
+  /* try / catch / finally，try 体里有 yield / await 的那一种。三种形状同一段代码：
    *
-   * finally 体发**两份**：一份在正常走完那条路上，一份在"非正常出去"那一段（unw）上 ——
-   * 状态机是平的，没有别的办法让两条路都经过它。所以 finally 体自己不许有 yield，
-   * 也不许有 break/continue/return（不然两份就不是同一件事了）。
+   *   cur:    _g_cat = catchB（有 catch）；_g_fin = unw（有 finally）；-> bodyB
+   *   bodyB:  try 体（切段）。正常走完就把那两格摘下来 -> norm 或 join
+   *   catchB: 进来时 _g_cat 已经被 step 开头那一段清了、值在 _g_ex 上 -> 绑参数、跑体
+   *   norm:   finally 体（正常那一份）-> join
+   *   unw:    finally 体（"非正常出去"那一份）-> 把 return/throw 接回去
    *
-   * `_g_fin` 记着"现在活着的 finally 在哪一段"：it.return / it.throw 进来时看它一眼，
-   * 有就先跑 finally（step 的开头那两个 if）。 */
+   * finally 体因此**发两份**（状态机是平的，没有别的办法让两条路都经过它），所以它自己
+   * 不许有 yield / await，也不许有 break/continue/return。
+   *
+   * `_g_fin` / `_g_cat` 记着"现在活着的 finally / catch 在哪一段"：it.return / it.throw
+   * 与"体里抛出来的东西"进来时看它们一眼（step 开头那几个 if，见 modePrologue）。 */
   tryStmt(s, cur, ctx) {
     const sp = s.span;
-    if (s.handler && s.finalizer) {
-      this.err(sp, "a try with **both** catch and finally around a 'yield' / 'await' is not supported yet");
-      return cur;
-    }
-    if (s.handler) return this.tryCatch(s, cur, ctx);
-    if (!s.finalizer) {
+    if (!s.handler && !s.finalizer) {
       this.err(sp, "'yield' inside a try needs a catch or finally clause to be lowered");
       return cur;
     }
-    if (ctx.fin >= 0) {
-      this.err(sp, 'a nested try/finally around a yield is not supported in a generator');
-      return cur;
-    }
-    if (hasSuspend(s.finalizer)) {
-      this.err(sp, "'yield' inside a finally block is not supported");
-      return cur;
-    }
-    if (hasFreeBC(s.finalizer) || hasFreeReturn(s.finalizer)) {
-      this.err(sp, "'break' / 'continue' / 'return' inside a generator's finally block is not supported");
-      return cur;
-    }
-    const bodyB = this.newBlock();
-    const unw = this.newBlock();
-    const norm = this.newBlock();
-    const join = this.newBlock();
-    this.emit(cur, exprStmt(assign(ident(FIN, sp), num(unw, sp), sp), sp));
-    this.goto(cur, bodyB, sp);
-    const x = this.stmts(s.block.body, bodyB, { ...ctx, fin: unw });
-    if (x >= 0) {
-      this.emit(x, exprStmt(assign(ident(FIN, sp), num(0, sp), sp), sp));
-      this.goto(x, norm, sp);
-    }
-    this.emit(norm, s.finalizer);
-    this.goto(norm, join, sp);
-    this.emit(unw, exprStmt(assign(ident(FIN, sp), num(0, sp), sp), sp));
-    this.emit(unw, s.finalizer);
-    this.emit(unw, ifSt(bin('===', ident(UNW, sp), num(2, sp), sp),
-      block([{ type: 'Throw', arg: ident(RV, sp), span: sp }], sp), null, sp));
-    this.emit(unw, ret(genRes(ident(RV, sp), true, sp), sp));
-    this.term[unw] = true;
-    return join;
-  }
-
-  /* try { … } catch (e) { … }，try 体里有 yield / await 的那一种（ADR-0020 P2）。
-   *
-   * 这个值域里的异常是"挂起槽 + 提前 return"（ADR-0007）：体里抛出来的东西会让 step
-   * 直接返回，挂起槽还是满的。所以接手这件事要**驱动**帮一把 —— 它看见挂起槽满了就把
-   * 那一格值送回 step（mode 3），step 开头那一段按 `_g_cat` 跳到 catch 段去
-   * （见 modePrologue）。没有活着的 catch 时机器原样抛回来，于是照旧往上冒。
-   *
-   * catch 与 finally **一起**的还不行（上面那一句报错）：那要两层不变量一起维护。 */
-  tryCatch(s, cur, ctx) {
-    const sp = s.span;
-    if (ctx.cat >= 0) {
+    if (s.handler && ctx.cat >= 0) {
       this.err(sp, 'a nested try/catch around a yield / await is not supported in a generator');
+      return cur;
+    }
+    if (s.finalizer && ctx.fin >= 0) {
+      this.err(sp, 'a nested try/finally around a yield / await is not supported in a generator');
       return cur;
     }
     if (s.param && s.param.type !== 'Ident') {
       this.err(sp, "a destructuring catch parameter is not supported around a 'yield' / 'await'");
       return cur;
     }
+    if (s.finalizer && hasSuspend(s.finalizer)) {
+      this.err(sp, "'yield' / 'await' inside a finally block is not supported");
+      return cur;
+    }
+    if (s.finalizer && (hasFreeBC(s.finalizer) || hasFreeReturn(s.finalizer))) {
+      this.err(sp, "'break' / 'continue' / 'return' inside a generator's finally block is not supported");
+      return cur;
+    }
     const bodyB = this.newBlock();
-    const catchB = this.newBlock();
+    const catchB = s.handler ? this.newBlock() : -1;
+    const unw = s.finalizer ? this.newBlock() : -1;
+    const norm = s.finalizer ? this.newBlock() : -1;
     const join = this.newBlock();
-    this.emit(cur, exprStmt(assign(ident(CAT, sp), num(catchB, sp), sp), sp));
+    const setState = (b, name, v) => this.emit(b, exprStmt(assign(ident(name, sp), num(v, sp), sp), sp));
+    if (catchB >= 0) setState(cur, CAT, catchB);
+    if (unw >= 0) setState(cur, FIN, unw);
     this.goto(cur, bodyB, sp);
-    const x = this.stmts(s.block.body, bodyB, { ...ctx, cat: catchB });
+    const after = unw >= 0 ? norm : join;
+    const x = this.stmts(s.block.body, bodyB, {
+      ...ctx, cat: catchB >= 0 ? catchB : ctx.cat, fin: unw >= 0 ? unw : ctx.fin,
+    });
     if (x >= 0) {
-      // 正常走完：把那格 catch 摘下来（不然后面抛的东西会跳回这儿）
-      this.emit(x, exprStmt(assign(ident(CAT, sp), num(0, sp), sp), sp));
-      this.goto(x, join, sp);
+      if (catchB >= 0) setState(x, CAT, 0);
+      if (unw >= 0) setState(x, FIN, 0);
+      this.goto(x, after, sp);
     }
-    /* catch 段。进来的时候 `_g_cat` 已经被 step 开头那一段清掉了、值放在 `_g_ex` 上。 */
-    if (s.param) {
-      this.hoist.push(s.param.name);
-      this.emit(catchB, exprStmt(assign(ident(s.param.name, sp), ident(EX, sp), sp), sp));
+    if (catchB >= 0) {
+      if (s.param) {
+        this.hoist.push(s.param.name);
+        this.emit(catchB, exprStmt(assign(ident(s.param.name, sp), ident(EX, sp), sp), sp));
+      }
+      // catch 体仍在 finally 的保护下（里面的 return 要先跑 finally），但不再被自己接住
+      const c = this.stmts(s.handler.body, catchB, {
+        ...ctx, cat: ctx.cat, fin: unw >= 0 ? unw : ctx.fin,
+      });
+      if (c >= 0) {
+        if (unw >= 0) setState(c, FIN, 0);
+        this.goto(c, after, sp);
+      }
     }
-    const c = this.stmts(s.handler.body, catchB, ctx);
-    if (c >= 0) this.goto(c, join, sp);
+    if (unw >= 0) {
+      this.emit(norm, s.finalizer);
+      this.goto(norm, join, sp);
+      setState(unw, FIN, 0);
+      if (catchB >= 0) setState(unw, CAT, 0);
+      this.emit(unw, s.finalizer);
+      this.emit(unw, ifSt(bin('===', ident(UNW, sp), num(2, sp), sp),
+        block([{ type: 'Throw', arg: ident(RV, sp), span: sp }], sp), null, sp));
+      this.emit(unw, ret(genRes(ident(RV, sp), true, sp), sp));
+      this.term[unw] = true;
+    }
     return join;
   }
 }
@@ -642,7 +634,8 @@ function checkNames(node, err) {
 
 const STEP = '_g_step';
 
-/** step 的开头两句：it.return(v) 与 it.throw(e) 进来时先看有没有 finally 要跑 */
+/** step 的开头几句：it.return(v) / it.throw(e) / "体里抛出来的送回来" 进来时先看一眼
+ *  有没有活着的 catch 或 finally 要接手（`_g_cat` / `_g_fin`）。 */
 function modePrologue(sp) {
   const unwindTo = (kind) => block([
     exprStmt(assign(ident(UNW, sp), num(kind, sp), sp), sp),
@@ -650,24 +643,26 @@ function modePrologue(sp) {
     exprStmt(assign(ident(ST, sp), ident(FIN, sp), sp), sp),
   ], sp);
   const noFin = bin('===', ident(FIN, sp), num(0, sp), sp);
+  /* 抛进来的那一格（it.throw 与"体里抛出来的"是同一件事）：
+   *   有活着的 catch  -> 跳到 catch 段，值放在 _g_ex 上
+   *   否则有 finally  -> 跑 finally，跑完把异常接回去（unw 段）
+   *   都没有          -> 原样抛回去，让它继续往调用者那边冒 */
+  const toCatch = block([
+    exprStmt(assign(ident(EX, sp), ident(SENT, sp), sp), sp),
+    exprStmt(assign(ident(ST, sp), ident(CAT, sp), sp), sp),
+    exprStmt(assign(ident(CAT, sp), num(0, sp), sp), sp),
+  ], sp);
+  const thrownIn = block([
+    ifSt(bin('!==', ident(CAT, sp), num(0, sp), sp), toCatch,
+      block([
+        ifSt(noFin, block([{ type: 'Throw', arg: ident(SENT, sp), span: sp }], sp), unwindTo(2), sp),
+      ], sp), sp),
+  ], sp);
   return [
     ifSt(bin('===', ident(MODE, sp), num(1, sp), sp), block([
       ifSt(noFin, block([ret(genRes(ident(SENT, sp), true, sp), sp)], sp), unwindTo(1), sp),
     ], sp), null, sp),
-    ifSt(bin('===', ident(MODE, sp), num(2, sp), sp), block([
-      ifSt(noFin, block([{ type: 'Throw', arg: ident(SENT, sp), span: sp }], sp), unwindTo(2), sp),
-    ], sp), null, sp),
-    /* mode 3 = 体里抛出来的东西被驱动送回来接手。有活着的 catch 就跳过去（值放在 _g_ex
-       上），没有就原样抛回去 —— 于是挂起槽还是满的，照旧往调用者那边冒。 */
-    ifSt(bin('===', ident(MODE, sp), num(3, sp), sp), block([
-      ifSt(bin('===', ident(CAT, sp), num(0, sp), sp),
-        block([{ type: 'Throw', arg: ident(SENT, sp), span: sp }], sp),
-        block([
-          exprStmt(assign(ident(EX, sp), ident(SENT, sp), sp), sp),
-          exprStmt(assign(ident(ST, sp), ident(CAT, sp), sp), sp),
-          exprStmt(assign(ident(CAT, sp), num(0, sp), sp), sp),
-        ], sp), sp),
-    ], sp), null, sp),
+    ifSt(bin('===', ident(MODE, sp), num(2, sp), sp), thrownIn, null, sp),
   ];
 }
 

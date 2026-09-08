@@ -2185,7 +2185,7 @@ function $js_gen_step(g, v, mode) {
      接着跑（mode 3，见 genfn.js 的 tryCatch）。没有的话机器原样抛回来 —— 挂起槽还是满的，
      生成器就此完，让它继续往调用者那边冒。 */
   if ($js_pending()) {
-    r = $callThis(g.ps.get("$stp").v, undefined, [$js_take_pending(), 3]);
+    r = $callThis(g.ps.get("$stp").v, undefined, [$js_take_pending(), 2]);
     if ($js_pending()) { g.ps.get("$gst").v = 2; return undefined; }
   }
   if ($js_truthy($js_getp(r, "done", undefined))) g.ps.get("$gst").v = 2;
@@ -2212,9 +2212,9 @@ function $js_async_run(step) {
   const p = $js_prom_new();
   const tick = (v, mode) => {
     let r = $callThis(step, undefined, [v, mode]);
-    // 体里抛出来的：机器里有活着的 catch 就送回去接手，没有就成了这格 promise 的 reject
+    // 体里抛出来的：有 catch / finally 接手就送回去（mode 2），没有就成了这格 promise 的 reject
     if ($js_pending()) {
-      r = $callThis(step, undefined, [$js_take_pending(), 3]);
+      r = $callThis(step, undefined, [$js_take_pending(), 2]);
       if ($js_pending()) { $js_prom_settle(p, 2, $js_take_pending()); return undefined; }
     }
     if ($js_truthy($js_getp(r, "done", undefined))) {
@@ -2250,7 +2250,7 @@ function $js_agen_step(g, v, mode) {
     let r = $callThis(g.ps.get("$stp").v, undefined, [sv, sm]);
     // 体里抛出来的：有活着的 catch 就送回去接手，没有就成了这一次 next 的 reject
     if ($js_pending()) {
-      r = $callThis(g.ps.get("$stp").v, undefined, [$js_take_pending(), 3]);
+      r = $callThis(g.ps.get("$stp").v, undefined, [$js_take_pending(), 2]);
       if ($js_pending()) {
         g.ps.get("$gst").v = 2;
         $js_prom_settle(p, 2, $js_take_pending());

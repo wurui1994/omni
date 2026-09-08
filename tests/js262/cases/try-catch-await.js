@@ -57,3 +57,44 @@ async function h() {
   }
 }
 h();
+
+// catch 与 finally 一起：抛进来的那一格先看 catch，再看 finally（step 开头那一段）
+async function both() {
+  try {
+    await Promise.reject(new Error("boom"));
+  } catch (e) {
+    console.log("both caught", e.message);
+    return "from catch";
+  } finally {
+    console.log("both fin");
+  }
+}
+both().then((v) => console.log(v));
+
+// catch 里 yield，finally 收尾
+function* genf() {
+  try {
+    yield 1;
+    throw new Error("in try");
+  } catch (e) {
+    console.log("genf caught", e.message);
+    yield 2;
+  } finally {
+    console.log("genf fin");
+  }
+  yield 3;
+}
+console.log([...genf()].join(","));
+
+// 一路顺的时候 finally 也要跑，return 的值不受它影响
+async function ok() {
+  try {
+    const v = await Promise.resolve(7);
+    return v * 2;
+  } catch (e) {
+    return -1;
+  } finally {
+    console.log("ok fin");
+  }
+}
+ok().then((v) => console.log("ok", v));
