@@ -975,19 +975,64 @@ static void r3_set_dimensions(r3scene *s) {
   double aspect;
   { const char *ef = getenv("OMNI_R3_ASPECT");
     double A = ((double) Width) / Height;
+    /* `OMNI_R3_ASPECT` 还收一个**数**（标定用）：直接拿它当视景体长宽比。
+       是为了反解"参考那一侧到底用了哪个 aspect" —— 见 r3_depthfar 上面那段账。 */
+    double forced = ef ? atof(ef) : 0.0;
+    /* **这一段现在是照 renderBase.cc:932-1001 的 initDisplay 逐句抄的**（那份源码在
+       reference/asymptote 下）。要点，以及每一处从前抄错在哪儿：
+         Aspect     = args.width/args.height     ← glrender.cc:1220，**pt 那一对 double**
+         initDisplay(args.width, args.height)    ← 形参是 int，C++ **向零截断**
+         oldW/oldH  = ceil(contentW/H * dpr)
+         w,h        = min(oldW, screenW), min(oldH, screenH)   ← **屏幕工作区真的会夹**
+         fitAspect(w,h)                          ← 用上面那个 pt 的 Aspect
+         Width      = max(w, min(1024, fullW))、Height = max(h, min(768, fullH))
+         最后一步套长宽比用的是 **(double)fullW/fullH**（renderBase.cc:992-995），不是 Aspect
+       内容的真尺寸（args.width/height）就在 m/M 里 —— 正交那一路它就是相机坐标里 box 的
+       x/y 跨度。判据 `fw == 4*(int)wpt && fh == 4*(int)hpt`（shipout3 那边 `oW=(int)width`、
+       `fw=ceil(4*oW)`）对得上才用；透视那一路对不上（m/M 不是画布尺寸），退回下面的老版，
+       `OMNI_R3_ASPECT=old` 也能强制退回。
+       **从前漏掉的是"屏幕工作区那一夹"**（老注释里写着"没用上 —— 画布都比工作区小"，
+       那句话只对小画布成立）。这台机器的工作区是 1512x945（`OMNI_R3_SCREEN=w,h` 可改），
+       而 `size(20cm)` 那一族的 oldHeight 是 984 > 945，于是 h 被夹到 945、w 跟着 fitAspect
+       缩到 1091，最后 aspect = 1090/945 = 1.1534392，而不是 1134/984 = 1.1524390。
+       量出来的账（box3 探针：`size(20cm)` + `orthographic(1,1,1)` 的 box 线框，2268x1968）：
+       1134/984 → 90228/13390272 个字节不同、ink 只盖住参考 92.65%；反解出来的最优值在
+       1.15345 附近（1212 字节、99.95%）—— 与 1090/945 只差 1e-5。 */
+    double wpt = s->M.x - s->m.x, hpt = s->M.y - s->m.y;
+    int havept = wpt > 0 && hpt > 0
+                 && 4 * (int) wpt == Width && 4 * (int) hpt == Height
+                 && !(ef && strcmp(ef, "old") == 0);
     if (ef && strcmp(ef, "full") == 0) aspect = A;
-    else {
+    else if (forced > 0) aspect = forced;
+    else if (havept) {
+      double dpr = 2.0;
+      { const char *e = getenv("OMNI_R3_DPR"); if (e) dpr = atof(e); }
+      int screenW = 1512, screenH = 945;
+      { const char *e = getenv("OMNI_R3_SCREEN");
+        if (e) { int a = 0, b = 0; if (sscanf(e, "%d,%d", &a, &b) == 2 && a > 0 && b > 0)
+                 { screenW = a; screenH = b; } } }
+      double Aspect = wpt / hpt;
+      int w = (int) ceil((double) (int) wpt * dpr);
+      int h = (int) ceil((double) (int) hpt * dpr);
+      if (w > screenW) w = screenW;
+      if (h > screenH) h = screenH;
+      if (w > h * Aspect) w = (int) ceil(h * Aspect); else h = (int) ceil(w / Aspect);
+      int tw = Width < 1024 ? Width : 1024;
+      int th = Height < 768 ? Height : 768;
+      int W0 = w > tw ? w : tw;
+      int H0 = h > th ? h : th;
+      if ((double) W0 / H0 > A) W0 = (int) ceil(H0 * A);
+      else H0 = (int) ceil(W0 / A);
+      aspect = (double) W0 / H0;
+    } else {
       double dpr = 2.0;
       { const char *e = getenv("OMNI_R3_DPR"); if (e) dpr = atof(e); }
       double expand = 4.0;
       int oW = (int) (Width / expand + 0.5), oH = (int) (Height / expand + 0.5);
       int w = (int) ceil(oW * dpr), h = (int) ceil(oH * dpr);
-      /* fitAspect（renderBase.cc:384）那两个 ceil **要留一点余量**：asy 那边的 `Aspect`
-       * 是 `args.width/args.height`（**pt** 那一对，例如 566.98/491.98），我们手上只有
-       * 位图那一对（2268/1968）。数学上相等的地方，两种除法的最后一位不一样 ——
-       * twoSpheres 上 `1134/A` 真值正好是 984，位图那一对算出来是 984.0000000000001，
-       * ceil 就跳到 985，长宽比整整差 0.1%（那个例子的位图差从 2377487 涨到 2391039）。
-       * 减 1e-9 只吃掉这种"整数上方一丁点"的情形，真该进位的（764.179 那类）不受影响。 */
+      /* 反推那一路的两个 ceil **各减 1e-9**：这一支手上只有位图那一对整数，数学上是整数的
+       * 地方会算出 984.0000000000001，ceil 跳一位就把长宽比带偏 0.1%（twoSpheres 那次
+       * 2377487 → 2391039）。上面那一支用的是 pt 那一对，没有这个毛病，所以不减。 */
       if (w > h * A) w = (int) ceil(h * A - 1e-9); else h = (int) ceil(w / A - 1e-9);
       int tw = Width < 1024 ? Width : 1024;
       int th = Height < 768 ? Height : 768;
@@ -1370,9 +1415,24 @@ static int r3_lineaxis = 0;
    - `diag2`（`size(20cm)`、`orthographic(1,1,1)`、`(-1,1,0)--(1,-1,0)`，与视线垂直、
      屏幕上水平）：1488/27216，**只有参考 486、我们 0**，盖住参考 90.3% ——
      参考的线比我们**长约 10%**（两端各少约 120 列）。
-   所以线宽、斜率、线光栅化本身都不是问题：**斜相机下我们的线端被截短了**
-   （沿视线那条短 32%、垂直视线那条短 10%、正对着的一条不差）。下一刀去查
-   `r3_add_bez` 的细分与线段端点在斜相机下的投影/裁剪，判据用 `diag2` 的 90.3%。 */
+   **上面那句"斜相机下线端被截短"是错的，撤回。**逐像素量完是这样（diag2，位图 2268x4）：
+   参考的墨在 x=296..1970（三行，每行 1675），我们在 x=377..1889（三行，每行 1513），
+   **两边都以 x=1133 为中心、厚度与像素值逐行相同（191/128/191）** —— 不是端点被切，
+   是整条线**等比短了 1.107 倍**，也就是视口定标差一个系数。
+   算得上：这两个探针的画布是**退化的**（只画一条直线，asy 自己就报
+   `y scaling in picture unbounded`），BoundingBox 是 567x1 pt、位图 2268x4，长宽比 567:1。
+   我们的 `r3_set_dimensions` 算出 aspect=567、`xsize(567.93) < ysize(1.5)*aspect`
+   走第一支，r=425.26，线的半宽 283.96 占 66.8% → 1514 px（就是量到的 1513）；
+   要凑上参考的 1675 得 aspect≈512（=2048/4），也就是参考那边的视口宽被卡在 2048
+   （离屏分块那一格与显示器有关，见上面 aspect 那一大段）。
+   **再做两个不退化的斜相机线探针，两个都逐字节相同**（所以线这条路本身没问题）：
+   - `oblx`：`size(10cm)`、`orthographic(1,1,1)`、`(-1,1,0)--(1,-1,0)` 加 `(-1,-1,0)--(1,1,0)`
+     （屏幕上一个 X，两轴都有尺寸）→ **一样**。
+   - `oblz`：同相机，`(-2,-2,-1)--(2,2,1)`（几乎沿视线那条，big_line 的方向）加一条横线
+     撑开 y → **一样**。
+   结论：`diag2`/`big_line` 那点差属于**退化画布上的视口分块尺寸**，不是线光栅化、
+   不是端点裁剪、不是 `r3_add_bez`；真实例子（twoSpheres 顶上那条 box 边）剩下的差
+   是上面 r3_raster_line 里记的"线端与线宽判据（菱形出口规则）"那一档。别再往这儿挖。 */
 static float r3_depthfar = 1.0f;
 /* varying（法向、视点、顶点色）的插值在 float 里做（`OMNI_R3_FINTERP`）。
    **量过、几乎无差别，默认关**：sph_light 1098 → 1104、sph_obl 1104 → 1098、
