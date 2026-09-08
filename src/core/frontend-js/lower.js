@@ -606,6 +606,8 @@ class Lower {
     if (opts.pre) stmts.push(...opts.pre());
     // 这一帧属于哪个类（`super.m()` 与 `super(...)` 要靠它找父类，ADR-0020 P1-f）
     if (opts.classOf) this.fn.classOf = opts.classOf;
+    // 静态方法：super 指着**父类对象**而不是父类原型（见 superProtoRef）
+    if (opts.staticSuper === true) this.fn.staticSuper = true;
     // 箭头没有自己的 arguments（规范如此）—— `arguments` 那一格要认得出来
     this.fn.isArrowFn = opts.isArrow === true;
     params.forEach((p, i) => stmts.push(...this.bindParam(p, i, span)));
@@ -838,7 +840,11 @@ class Lower {
       }
       if (what === 'constructor' && !m.static) { ctor = m; continue; }
       const label = `${s.id}_${m.static ? 'static_' : ''}${what ?? 'computed'}`;
-      const fn = this.closureExpr(fnNodeOfProp(m), label, { classOf: s.id, fnName: what ?? '' });
+      /* staticSuper：静态方法里的 `super.m()` 指的是**父类对象**上的 m，不是父类原型上的
+       * （规范 里 static 的 [[HomeObject]] 就是类对象本身）。superProtoRef 认这一位。 */
+      const fn = this.closureExpr(fnNodeOfProp(m), label, {
+        classOf: s.id, fnName: what ?? '', staticSuper: m.static === true,
+      });
       if (m.kind === 'get' || m.kind === 'set') {
         let desc = op('js_obj_set', [op('js_obj_new', []), s16(m.kind), fn]);
         desc = op('js_obj_set', [desc, s16('configurable'), constBool(true)]);
@@ -917,7 +923,15 @@ class Lower {
       this.err(span, "'super' is only available inside a method of a derived class");
       return null;
     }
+    // 静态方法里的 super 指着**父类对象**（它的 [[HomeObject]] 是类对象，不是原型）
+    if (this.fn.staticSuper === true) return globalRef(this.globals.get(sup).name);
     return globalRef(this.globals.get(protoGlobalName(sup)).name);
+  }
+
+  /** `super.x` / `super.m()` 里那格**接收者**：静态方法里没有 this，就交 undefined。 */
+  superRecv() {
+    const ent = this.lookup('this');
+    return ent ? this.readEntry(ent) : undefExpr();
   }
 
   /** 闭包值的构造表达式（在**外层**栈帧里求值） */
@@ -2093,7 +2107,7 @@ class Lower {
     // `super.x`（不是调用）：从父类原型上取一格属性（ADR-0020 P1-f）
     if (!e.computed && e.object.type === 'Ident' && e.object.name === 'super' && !this.lookup('super')) {
       const sp = this.superProtoRef(e.span);
-      return sp === null ? undefExpr() : op('js_getp', [sp, s16(e.name)]);
+      return sp === null ? undefExpr() : op('js_getp', [sp, s16(e.name), this.superRecv()]);
     }
     const path = this.staticPath(e);
     if (path) {
@@ -2291,7 +2305,7 @@ class Lower {
         const sp = this.superProtoRef(e.span);
         if (sp === null) return undefExpr();
         return op('js_call_this', [
-          op('js_getp', [sp, s16(c.name)]),
+          op('js_getp', [sp, s16(c.name), this.superRecv()]),
           this.readEntry(this.lookup('this')),
           box(this.argList(e.args), listType(D)),
         ]);
@@ -3020,7 +3034,7 @@ const STATIC_CALLS = {
   'Reflect.getOwnPropertyDescriptor': { op: 'js_obj_desc', argc: 2 },
   'Reflect.ownKeys': { op: 'js_obj_own_keys', argc: 1, lit: { sel: 'a' }, len: 1 },
   'Reflect.has': { op: 'js_obj_has_p', argc: 2, len: 2 },
-  'Reflect.get': { op: 'js_getp', argc: 2, len: 2 },
+  'Reflect.get': { op: 'js_getp', argc: 3, len: 2 },
   'Reflect.set': { op: 'js_setp', argc: 3, len: 3 },
   'Reflect.deleteProperty': { op: 'js_obj_del_p', argc: 2 },
   'Reflect.isExtensible': { op: 'js_obj_is_ext', argc: 1 },

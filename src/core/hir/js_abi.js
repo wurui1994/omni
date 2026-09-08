@@ -168,7 +168,10 @@ export const JS_ABI = {
   js_obj_proto_get: { js: '$js_obj_proto_get', c: 'omni_js_obj_proto_get', arity: 1 },
   js_obj_proto_set: { js: '$js_obj_proto_set', c: 'omni_js_obj_proto_set', arity: 2 },
   // 取/设属性的**完整语义**：沿原型链、触发访问器、按可写性决定落不落自有槽。
-  js_getp: { js: '$js_getp', c: 'omni_js_getp', arity: 2 },
+  /* 取属性（沿原型链）。**第三格是接收者**：访问器要拿它当 this ——
+     `super.v` 与 `Reflect.get(t, k, recv)` 都靠这一格（少了它，super 上的 getter
+     会拿原型当 this，量出来是 undefined）。缺席就是 o 自己。 */
+  js_getp: { js: '$js_getp', c: 'omni_js_getp', arity: 3 },
   js_setp: { js: '$js_setp', c: 'omni_js_setp', arity: 3 },
   js_obj_has_p: { js: '$js_obj_has_p', c: 'omni_js_obj_has_p', arity: 2, ret: 'bool' },
   js_obj_del_p: { js: '$js_obj_del_p', c: 'omni_js_obj_del_p', arity: 2, ret: 'bool' },
