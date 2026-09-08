@@ -2003,10 +2003,43 @@ function $js_spawn_run(cmd, args, mode, feed) {
   // omni bootstrap 要收下另一代编译器 1.7 MB 的 stdout，默认值会 ENOBUFS。
   const opts = { encoding: "utf8", stdio, maxBuffer: 1 << 28 };
   if (feed !== null) opts.input = feed;
+  // 时限是剩下的那一段（run 在 spawn 之前还编了一趟）。到点回 124，见 $js_run_timeout。
+  if ($js_deadline_ms > 0) {
+    const left = $js_deadline_ms - Date.now();
+    opts.timeout = left > 0 ? left : 1;
+    opts.killSignal = "SIGKILL";
+  }
   const r = $node("node:child_process").spawnSync(
     $js_asS16(cmd), $js_arr_of(args).map((x) => $js_asS16(x)), opts);
-  if (r.error !== undefined && r.error !== null) $rt_error("cannot spawn: " + r.error.message);
+  if (r.error !== undefined && r.error !== null) {
+    if (r.error.code === "ETIMEDOUT") {
+      return [124, r.stdout === null || r.stdout === undefined ? "" : r.stdout,
+        r.stderr === null || r.stderr === undefined ? "" : r.stderr];
+    }
+    $rt_error("cannot spawn: " + r.error.message);
+  }
   return [r.status === null ? 128 : r.status, r.stdout === null ? "" : r.stdout, r.stderr === null ? "" : r.stderr];
+}
+/* 一趟"跑"的墙上时限（omni run --timeout）。ms <= 0 = 撤掉时限。
+   两种"跑"要两套手段，而且两种只有宿主能中断（与 host/native.js 的 runTimeout 逐字对齐）：
+   子进程那一路是 spawnSync 的 timeout（到点杀孩子、回 124）；本进程那一路（evalJs、
+   解释器）在同一根线程上同步跑完，事件循环一格都不转 —— 只有 worker 那根线程能开枪，
+   所以它自己把那句话写进 fd 2 再 SIGKILL（退出码 137，被杀的进程没机会再设退出码）。
+   worker 那把枪晚 500ms：子进程那一路到点先返回，那段窗口留给上面那层印字与退出。 */
+let $js_deadline_ms = 0;
+function $js_run_timeout(ms, msg) {
+  const m = Number(ms);
+  if (!(m > 0)) { $js_deadline_ms = 0; return undefined; }
+  $js_deadline_ms = Date.now() + m;
+  const src = "const d = process.getBuiltinModule('node:worker_threads').workerData;"
+    + "setTimeout(() => {"
+    + "process.getBuiltinModule('node:fs').writeSync(2, d.msg);"
+    + "process.kill(process.pid, 'SIGKILL');"
+    + "}, d.ms);";
+  const w = new ($node("node:worker_threads").Worker)(src,
+    { eval: true, workerData: { ms: m + 500, msg: $js_asS16(msg) } });
+  w.unref();
+  return undefined;
 }
 function $js_os_tmpdir() { return $node("node:os").tmpdir(); }
 function $js_now_ms() { return Date.now(); }

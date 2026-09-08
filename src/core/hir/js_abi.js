@@ -297,6 +297,12 @@ export const JS_ABI = {
   // 墙上时钟毫秒。要计的是"这一步花了多久"，大头是子进程（clang、另一代编译器），
   // 所以必须是墙上时间而不是 CPU 时间。
   js_now_ms: { js: '$js_now_ms', c: 'omni_js_now_ms', arity: 0 },
+  /* 一趟"跑"的墙上时限（`omni run --timeout`）：第一个参数是毫秒（<= 0 = 撤掉），
+     第二个是到点要印的那句话 —— 印字的人不一定还是编译器自己（本进程那一路是看门狗
+     线程 / SIGALRM 处理函数在印），所以文本得先交给宿主。
+     为什么这一格非在宿主不可：`run` 的"跑"有两种形态，子进程那一路能靠 spawn 的时限，
+     本进程那一路（`js_eval`、解释器）是同一根线程上的同步循环 —— 定时器一格都不转。 */
+  js_run_timeout: { js: '$js_run_timeout', c: 'omni_js_run_timeout', arity: 2 },
   // 本地时间的日历字段，14 位数字 YYYYMMDDHHMMSS（见 host/native.js 的 localStamp）。
   // `__DATE__` / `__TIME__` 要它：六个字段得是同一个瞬间的，而排版归编译器。
   js_local_stamp: { js: '$js_local_stamp', c: 'omni_js_local_stamp', arity: 0 },

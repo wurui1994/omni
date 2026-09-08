@@ -11,7 +11,7 @@
 import {
   writeText, readText, exists, readDir, mtimeMs, fileSize, mkdirAll, rename,
   args as procArgs, env, setEnv, stdout, stderr, setExitCode, spawn, evalJs, hasJsEngine, nowMs,
-  cwd, installDir, isDir, writeBinary, readBinary,
+  cwd, installDir, isDir, writeBinary, readBinary, runTimeout,
 } from './host/native.js';
 import { join, basename, dirname, isAbsolute, resolve } from './host/path.js';
 import { cacheRoot } from './host/cache.js';
@@ -2403,6 +2403,52 @@ function buildCFile(path, rest) {
   return 0;
 }
 
+/* ---- `omni run --timeout SEC`（整趟的墙上时限）
+ *
+ * 默认 **30 秒**：一条会挂住的腿（asy 里一个不收敛的循环、等 stdin 的子进程）从前是
+ * 「终端上一直坐着」，而这是**跑**这个动词最该有的一格保护。`--timeout 0` 撤掉它。
+ *
+ * 时限本身由宿主拿着（`runTimeout`）—— 只有它能中断两种"跑"：子进程那一路是
+ * `spawnSync` 的时限，本进程那一路（`evalJs` / 解释器）是另一根线程上的看门狗。
+ * 这儿留一份**同样的截止时刻**，用来在回到这一层的时候判断"这一趟是不是被时限打断的"：
+ * 子进程被杀之后 `spawn` 是**正常返回**的，退出码分不出"超时"与"程序自己失败了"。
+ *
+ * 印字的人有两个（子进程那一路是这儿、本进程那一路是看门狗），但那句话只有一份 ——
+ * 文本是造好之后交给宿主的，不是两边各写一遍。
+ */
+const RUN_TIMEOUT_DEFAULT_S = 30;
+let RUN_DEADLINE = 0;
+let RUN_TIMEOUT_MSG = '';
+
+function armRunTimeout(rest) {
+  const i = rest.indexOf('--timeout');
+  const raw = i >= 0 ? rest[i + 1] : null;
+  let sec = RUN_TIMEOUT_DEFAULT_S;
+  if (raw !== null && raw !== undefined) {
+    /* `30s` 也收：写时限的人十个有九个会带那个单位。 */
+    const t = raw.endsWith('s') ? raw.slice(0, -1) : raw;
+    sec = Number(t);
+    if (t === '' || !(sec >= 0) || sec === Infinity) {
+      throw new OmniError(`run: --timeout 要一个秒数（0 = 不限），拿到的是 '${raw}'`);
+    }
+  }
+  if (sec === 0) return;
+  RUN_TIMEOUT_MSG = `omni: 超时 —— 这一趟跑过了 ${sec}s（--timeout），已中止\n`;
+  RUN_DEADLINE = nowMs() + sec * 1000;
+  runTimeout(sec * 1000, RUN_TIMEOUT_MSG);
+}
+
+/**
+ * 回到这一层了：到点了就是被时限打断的那一趟（子进程那一路）。印那句话、回 124。
+ *
+ * 本进程那一路走不到这儿 —— 看门狗那一枪之后没有"之后"，那句话由它自己印。
+ */
+function runTimedOut() {
+  if (RUN_DEADLINE === 0 || nowMs() < RUN_DEADLINE) return false;
+  stderr(RUN_TIMEOUT_MSG);
+  return true;
+}
+
 function main(argv) {
   /* 分派走命令树（ADR-0018 决策四）：走到哪个节点、那个节点认识哪些带值开关，都由
    * `cli/cmds.js` 那份数据说 —— 顶层不再认识 `--image-base` / `-isystem` 这种语言与格式
@@ -2508,6 +2554,10 @@ function main(argv) {
       }
     }
   }
+  /* `run` 的时限（默认 30s，见 armRunTimeout）。摆在这儿而不是各条腿里：`--backend` 会
+   * 把 `run` 换成另一条 case（`run-c`/`interp`/`c-run`…），而判据是**用户敲的那个动词**
+   * （`node.key`）—— 一条腿都不能漏，漏掉的那条就是「按了 --timeout 却还在挂着」。 */
+  if (node.key === 'run') armRunTimeout(rest);
   /* `run`/`build --backend B`（决策一）：同样先只做翻译。 */
   if (cmd === 'run' || cmd === 'build') {
     const bi = rest.indexOf('--backend');
@@ -3399,7 +3449,10 @@ function replacer(key, value) {
 }
 
 try {
-  setExitCode(main(procArgs()));
+  /* 超时那一格摆在这儿（而不是 `run` 那二十来个 return 上）：这是所有腿唯一的汇合点，
+   * 于是「按了 --timeout 却没人报告」不可能漏掉一条。见 armRunTimeout。 */
+  const st = main(procArgs());
+  setExitCode(runTimedOut() ? 124 : st);
 } catch (e) {
   if (e instanceof OmniError) {
     stderr(e.message + '\n');

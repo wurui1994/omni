@@ -636,6 +636,9 @@ bool omni_js_proc_stdin_is_tty(void);
 omni_dyn omni_js_proc_read_line(void);
 omni_dyn omni_js_os_tmpdir(void);
 omni_dyn omni_js_now_ms(void);
+/* 一趟"跑"的墙上时限（`omni run --timeout`）：毫秒 <= 0 = 撤掉。这一侧只有一把闹钟 ——
+   有正在 wait 的子进程就杀它（超时那句话归上面那层印），没有就自己印完 _exit(124)。 */
+omni_dyn omni_js_run_timeout(omni_dyn ms, omni_dyn msg);
 /* 本地时间的日历字段，14 位数字 YYYYMMDDHHMMSS（`__DATE__` / `__TIME__` 要它）。
    一次读、一个字符串：六个字段必须是同一个瞬间的，而排版是编译器那边的事。 */
 omni_dyn omni_js_local_stamp(void);

@@ -253,6 +253,47 @@ export function spawnIn(cmd, argv, mode, input) {
   return spawnRun(cmd, argv, mode, input === undefined || input === '' ? null : input);
 }
 
+/**
+ * 一趟"跑"的墙上时限（`omni run --timeout`）。`ms <= 0` = 撤掉时限。
+ *
+ * 为什么这一格必须在宿主里：`run` 的"跑"有**两种**形态，而两种都只有宿主能中断 ——
+ *   - 子进程：`spawn` 出 node / 链好的可执行文件。时限就是 `spawnSync` 的 `timeout`，
+ *     到点它替我们把孩子杀掉，然后**正常返回**（回 124），上面那层还活着去印那句话。
+ *   - 本进程：`evalJs` 与解释器在**同一根线程**上同步跑完。那时候事件循环一格都不转，
+ *     `setTimeout` 永远不会响 —— 只有另一根线程能在那时候动手。所以是 worker：
+ *     它有自己的线程与事件循环，到点自己把那句话写进 fd 2，再给整个进程一枪。
+ *
+ * 两个出口的退出码**不一样**，而且没法一样：子进程那一路是 124（与 timeout(1) 同一个
+ * 约定），本进程那一路只能 SIGKILL（137）—— 被杀的进程没有机会再设自己的退出码。
+ *
+ * worker 那把枪比时限晚 GRACE 毫秒：子进程那一路到点先返回，那段窗口留给上面那层
+ * 印字与退出，不然两边会抢着说话。
+ */
+const TIMEOUT_GRACE_MS = 500;
+let DEADLINE_MS = 0;
+
+export function runTimeout(ms, msg) {
+  if (ms <= 0) {
+    DEADLINE_MS = 0;
+    return undefined;
+  }
+  DEADLINE_MS = Date.now() + ms;
+  /* worker 的源码里不能用 `require`（父这边是 ESM，eval 出来的 worker 也是），
+   * 所以两处都走 `process.getBuiltinModule` —— 与这个文件顶上的 `node()` 同一条路。
+   * 直接 `writeSync(2, …)` 而不是 `console.error`：写的是真的那个 fd，不过 worker
+   * 自己那条转发到父进程的管子（枪响之后没人再去抽它）。 */
+  const src = "const d = process.getBuiltinModule('node:worker_threads').workerData;"
+    + 'setTimeout(() => {'
+    + "process.getBuiltinModule('node:fs').writeSync(2, d.msg);"
+    + "process.kill(process.pid, 'SIGKILL');"
+    + '}, d.ms);';
+  const { Worker } = node('node:worker_threads');
+  const w = new Worker(src, { eval: true, workerData: { ms: ms + TIMEOUT_GRACE_MS, msg } });
+  /* unref 只是"别拿它吊着父进程的事件循环"——线程照跑，定时器照响。 */
+  w.unref();
+  return undefined;
+}
+
 function spawnRun(cmd, argv, mode, feed) {
   const stdio = mode === 'c' ? ['ignore', 'pipe', 'pipe']
     : mode === 'o' ? ['ignore', 'inherit', 'pipe']
@@ -262,8 +303,23 @@ function spawnRun(cmd, argv, mode, feed) {
   // `omni bootstrap` 要收下另一代编译器 1.7 MB 的 stdout，默认值会 ENOBUFS。
   const opts = { encoding: 'utf8', stdio, maxBuffer: 1 << 28 };
   if (feed !== null) opts.input = feed;
+  /* 时限是**剩下的那一段**，不是全额：`run` 在 spawn 之前还编了一趟。已经到点就给 1ms
+   * （给 0 在 node 那边等于"不限"）。 */
+  if (DEADLINE_MS > 0) {
+    const left = DEADLINE_MS - Date.now();
+    opts.timeout = left > 0 ? left : 1;
+    opts.killSignal = 'SIGKILL';
+  }
   const r = node('node:child_process').spawnSync(cmd, argv, opts);
-  if (r.error !== undefined && r.error !== null) throw new Error(`cannot spawn: ${r.error.message}`);
+  if (r.error !== undefined && r.error !== null) {
+    /* 时限那一枪不是"起不来"：node 把它记成 ETIMEDOUT。回 124 —— 与 timeout(1) 同一个
+     * 约定，让上面那层能把"超时"和"程序自己失败了"分开说。 */
+    if (r.error.code === 'ETIMEDOUT') {
+      return [124, r.stdout === null || r.stdout === undefined ? '' : r.stdout,
+        r.stderr === null || r.stderr === undefined ? '' : r.stderr];
+    }
+    throw new Error(`cannot spawn: ${r.error.message}`);
+  }
   return [r.status === null ? 128 : r.status, r.stdout === null ? '' : r.stdout, r.stderr === null ? '' : r.stderr];
 }
 

@@ -72,6 +72,9 @@ const NATIVE_OPS = {
   spawnIn: 'js_proc_spawn_in',
   tmpDir: 'js_os_tmpdir',
   nowMs: 'js_now_ms',
+  /* `omni run --timeout` 的那一格：两种"跑"（子进程 / 本进程）都只有宿主能中断，
+   * 所以时限本身是宿主状态，不是 CLI 里的一个变量。 */
+  runTimeout: 'js_run_timeout',
   localStamp: 'js_local_stamp',
   installDir: 'js_install_dir',
   evalJs: 'js_eval',

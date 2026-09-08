@@ -202,10 +202,18 @@ uniform 由 --set 给，没给的按 0；一个名字对一串数，逗号分开
   omni run x.asy                 图印到 stdout（EPS）
   omni run x.asy -f svg          图印到 stdout（SVG）
   omni run x.asy -o x.svg        格式按后缀猜（svg），图落到 x.svg
-                                 —— 程序自己 write(...) 的字还是走 stdout`,
+                                 —— 程序自己 write(...) 的字还是走 stdout
+
+--timeout 管的是**整趟 run**（编 + 跑一起算，不是只算跑），默认 30 秒，
+--timeout 0 撤掉它。到点的两条出口不一样，而且没法一样：跑在子进程里
+（.asy 的默认路、.c、.frag、原生可执行文件）是先杀孩子再印那句话，退出码 124
+（与 timeout(1) 同一个约定）；跑在本进程里（--interp 与编成 JS 直接 eval 那条）
+只能开枪，退出码 137 —— 被 SIGKILL 的进程没有机会再设自己的退出码。`,
       flags: [F_MODE, F_WORK, F_BACKEND, F_INC, F_LEG_INTERP, F_LEG_MIR, F_OUT,
         { name: '--format', alias: '-f', arity: 1, value: 'FMT',
           brief: '（asy）出图格式 eps|svg；不给就看 -o 的后缀' },
+        { name: '--timeout', arity: 1, value: 'SEC',
+          brief: '整趟的墙上时限，默认 30；0 = 不限' },
         { name: '--size', arity: 1, value: 'N[xM]', brief: '（glsl）画布大小，默认 256' },
         { name: '--set', arity: 1, value: 'NAME=v,…', brief: '（glsl）给一个 uniform 赋值，可重复' },
         { name: '--tex', arity: 1, value: 'NAME=W,H,v,…',

@@ -18,6 +18,7 @@
 #include <fcntl.h>
 #include <math.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -422,6 +423,55 @@ omni_dyn omni_js_now_ms(void) {
   return omni_dyn_of_real((double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6);
 }
 
+/* ---- 一趟"跑"的墙上时限（`omni run --timeout`，node 那侧是 host/native.js 的 runTimeout）
+
+   这一侧只有一把闹钟，两种"跑"都靠它：
+     - 本进程那一路（解释器）：处理函数把那句话写进 fd 2，然后 _exit(124)。
+       不 fflush —— 信号处理函数里能用的只有异步信号安全的那几个（write 是，fflush 不是）。
+     - 子进程那一路：正在 wait 的孩子记在 host_timeout_child 里，处理函数把**它**杀掉就
+       回来 —— waitpid 会拿到 EINTR 之后重进，于是 omni_host_spawn 正常返回，那句话由
+       上面那层（cli.js 的 runTimedOut）去印。两边都印就说两遍了。
+
+   闹钟的分辨率是秒，所以时限向上取整到秒；node 那侧是毫秒。差别写在明处，不假装一致。 */
+
+static volatile pid_t host_timeout_child = -1;
+static char host_timeout_msg[256];
+static size_t host_timeout_msg_len = 0;
+
+static void host_timeout_alarm(int sig) {
+  (void)sig;
+  pid_t kid = host_timeout_child;
+  if (kid > 0) {
+    kill(kid, SIGKILL);
+    return;
+  }
+  if (host_timeout_msg_len) {
+    ssize_t ignored = write(2, host_timeout_msg, host_timeout_msg_len);
+    (void)ignored;
+  }
+  _exit(124);
+}
+
+omni_dyn omni_js_run_timeout(omni_dyn ms, omni_dyn msg) {
+  double m = omni_dyn_as_real(ms);
+  if (!(m > 0.0)) {
+    alarm(0);
+    return omni_dyn_undef();
+  }
+  omni_str u = omni_s16_to_utf8(omni_js_as_s16(msg));
+  size_t n = (size_t)u.len;
+  if (n > sizeof(host_timeout_msg)) n = sizeof(host_timeout_msg);
+  memcpy(host_timeout_msg, u.p, n);
+  host_timeout_msg_len = n;
+  struct sigaction sa;
+  memset(&sa, 0, sizeof sa);
+  sa.sa_handler = host_timeout_alarm;
+  sigaction(SIGALRM, &sa, NULL);
+  unsigned secs = (unsigned)((m + 999.0) / 1000.0);
+  alarm(secs == 0 ? 1 : secs);
+  return omni_dyn_undef();
+}
+
 /* 本地时间的日历字段，14 位数字 YYYYMMDDHHMMSS（`__DATE__` / `__TIME__` 要它）。
    一次 localtime、一个字符串：六个字段必须是同一个瞬间的（tcc 在那儿也只 time() 一次），
    而排版归编译器（frontend-c/tccpp.js）。node 那侧是 host/native.js 的 localStamp。 */
@@ -585,9 +635,16 @@ int omni_host_spawn(const char *cmd, char *const *argv, int mode, const char *in
   if (cap_err) close(pe[0]);
 
   int st = 0;
+  /* 挂上"正在 wait 的是谁"：时限那把闹钟到点先杀孩子（见 host_timeout_alarm），
+     waitpid 拿到 EINTR 之后重进，于是这一趟正常返回，超时那句话由上面那层去印。 */
+  host_timeout_child = pid;
   while (waitpid(pid, &st, 0) < 0) {
-    if (errno != EINTR) omni_error("cannot wait for the child process");
+    if (errno != EINTR) {
+      host_timeout_child = -1;
+      omni_error("cannot wait for the child process");
+    }
   }
+  host_timeout_child = -1;
   *out = o;
   *err = e;
   if (WIFEXITED(st)) return WEXITSTATUS(st);
