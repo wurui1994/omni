@@ -980,17 +980,32 @@ static void r3_set_dimensions(r3scene *s) {
     double forced = ef ? atof(ef) : 0.0;
     /* **这一段现在是照 renderBase.cc:932-1001 的 initDisplay 逐句抄的**（那份源码在
        reference/asymptote 下）。要点，以及每一处从前抄错在哪儿：
-         Aspect     = args.width/args.height     ← glrender.cc:1220，**pt 那一对 double**
+         Aspect     = args.width/args.height     ← glrender.cc:1220（**但见下面那一段：
+                                                   我们这儿用的是 m/M 的比**）
          initDisplay(args.width, args.height)    ← 形参是 int，C++ **向零截断**
          oldW/oldH  = ceil(contentW/H * dpr)
          w,h        = min(oldW, screenW), min(oldH, screenH)   ← **屏幕工作区真的会夹**
-         fitAspect(w,h)                          ← 用上面那个 pt 的 Aspect
+         fitAspect(w,h)                          ← 用上面那个 Aspect
          Width      = max(w, min(1024, fullW))、Height = max(h, min(768, fullH))
          最后一步套长宽比用的是 **(double)fullW/fullH**（renderBase.cc:992-995），不是 Aspect
-       内容的真尺寸（args.width/height）就在 m/M 里 —— 正交那一路它就是相机坐标里 box 的
-       x/y 跨度。判据 `fw == 4*(int)wpt && fh == 4*(int)hpt`（shipout3 那边 `oW=(int)width`、
-       `fw=ceil(4*oW)`）对得上才用；透视那一路对不上（m/M 不是画布尺寸），退回下面的老版，
-       `OMNI_R3_ASPECT=old` 也能强制退回。
+       **这一格的 `Aspect` 用的是 m/M 的比（未取整的 `lambda+2*margin`），不是
+       `args.width/args.height`** —— 后者试过，两头都对不上。为此还把 pt 那一对经清单的
+       `wh` 行传进来量了一轮（`args.width` 就是 `S.width - defaultrender.margin`，
+       three.asy:2905，box3 上是 567.98/492.98 = 1.1521360）：
+         - box3 变成 **91926**（比不改还差）：1.1521360 比 1089/945 = 1.152381 还小一丝，
+           第一次 fitAspect 给 w=1089，最后落在 1.152381，而参考要的是 1.15345；
+         - m/M 那一对（567.929/492.042 = 1.1542289）给 w=1091、最后一步再按 fullW/fullH
+           套回 1090/945 = 1.1534392 —— 对上了。
+         - diag2 那种退化画布上差别更清楚：m/M 那一对给 **aspect 正好 512**（=1024/2，
+           第一次 fitAspect 把 w 从 1134 压到 758、于是撞上 1024 那个分块下限），
+           而按 ink 反推出来的就是 512（参考的墨占 1675 列，512 算出来 1677）；
+           pt 那一对给 378.7，画出来的线会铺满整幅。
+       为什么"未取整的那一对"才对，还没搞清楚（`args.width` 那一句是 glrender.cc:1220，
+       但 EPS 导出那条路上 args 是怎么填的没跟到底）。**别再把它换成 args.width/height** ——
+       这一条是量出来的，上面三组数就是尺子。
+       判据 `fw == 4*(int)wpt && fh == 4*(int)hpt`（shipout3 那边 `oW=(int)width`、
+       `fw=ceil(4*oW)`）对得上才用这一路；透视那一路对不上（m/M 不是画布尺寸），
+       退回下面的老版，`OMNI_R3_ASPECT=old` 也能强制退回。
        **从前漏掉的是"屏幕工作区那一夹"**（老注释里写着"没用上 —— 画布都比工作区小"，
        那句话只对小画布成立）。这台机器的工作区是 1512x945（`OMNI_R3_SCREEN=w,h` 可改），
        而 `size(20cm)` 那一族的 oldHeight 是 984 > 945，于是 h 被夹到 945、w 跟着 fitAspect
