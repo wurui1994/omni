@@ -123,6 +123,17 @@ function refNames(node, out = new Set()) {
   return out;
 }
 
+/** 这棵子树里给 `name` 赋过值吗（`n = …` / `n += …` / `n++`）—— 不进内层函数 */
+function assignsName(node, name) {
+  if (!node || typeof node !== 'object') return false;
+  if (node.type === 'Arrow' || node.type === 'FuncExpr' || node.type === 'FuncDecl') return false;
+  if ((node.type === 'Assign' || node.type === 'Update')
+    && node.target && node.target.type === 'Ident' && node.target.name === name) return true;
+  let hit = false;
+  eachChild(node, (x) => { if (!hit) hit = assignsName(x, name); });
+  return hit;
+}
+
 /** 子树里最外层的那些函数节点（不再往里钻 —— refNames 会把更深层一起收） */
 function nestedFns(node, out = []) {
   if (!node || typeof node !== 'object') return out;
@@ -698,9 +709,8 @@ class Lower {
     const bodyStmts = node.type === 'Arrow' && node.expression
       ? [{ type: 'Return', arg: node.body, span: node.span }]
       : node.body.body;
-    if (node.type === 'FuncExpr' && node.id && refNames(node).has(node.id)) {
-      this.err(node.span, `a named function expression cannot refer to itself ('${node.id}'); use a const arrow instead`);
-    }
+    // 具名函数表达式引用自己那一支在 closureExpr 里已经处理（外层一格 cell），
+    // 走到这儿的 id 只当 fn.name 用
     const f = this.funcOf(label, mangled, node.params, node.rest, bodyStmts, node.span, {
       outerScopes: this.fn.scopes,
       // 箭头的 this 是**外层**的（词法的），所以它自己不去取接收者
@@ -943,6 +953,11 @@ class Lower {
     while (cur && cur.type === 'Member' && !cur.computed) {
       const p = this.staticPath(cur);
       if (p && Object.hasOwn(STATIC_PROPS, p)) return true;
+      /* 内建函数**当值用**的那一格也算前缀（`Math.max.apply(null, xs)`、
+       * `Number.isInteger.call(null, 1)`）：STATIC_CALLS 里带 len 的那些能取成一格薄包装的
+       * 函数值（builtinFnValue），后半段就是普通的成员调用 —— call / apply / bind 住在
+       * Function.prototype 上。 */
+      if (p && Object.hasOwn(STATIC_CALLS, p) && STATIC_CALLS[p].len !== undefined) return true;
       cur = cur.object;
     }
     return false;
@@ -968,6 +983,21 @@ class Lower {
 
   /** 闭包值的构造表达式（在**外层**栈帧里求值） */
   closureExpr(node, label, extra = {}) {
+    /* 具名函数表达式引用自己（`const f = function fx(n){ … fx(n - 1) … }`）：那个名字在
+     * JS 里只在**函数体里**可见，指着这个函数本身。办法与提升的函数声明（hoistFuncDecls）
+     * 同一个：在外层开一格 cell、先填 undefined，造好闭包再写进去 —— 体里的 fx 捕获那一格。
+     * 那个名字声明在一层临时作用域里，所以出了这个表达式就看不见它（JS 也是这样）。 */
+    if (node.type === 'FuncExpr' && node.id && refNames(node).has(node.id)) {
+      this.pushScope();
+      this.fn.captured.add(node.id);
+      const ent = this.declare(node.id);
+      this.emitPre(this.declStmt(ent, undefExpr()), node.span);
+      const inner = { ...node, id: null, selfName: node.id };
+      this.emitPre(exprStmt(this.writeEntry(ent,
+        this.makeClosure(this.closureOf(inner, label, { fnName: node.id, ...extra })))), node.span);
+      this.popScope();
+      return this.readEntry(ent);
+    }
     return this.makeClosure(this.closureOf(node, label, extra));
   }
 
@@ -1471,31 +1501,63 @@ class Lower {
     if (s.init) {
       pre = s.init.type === 'VarDecl' ? this.varDecl(s.init) : [exprStmt(this.expr(s.init.expr))];
     }
-    // `for (let i = …)` 的绑定在 JS 里是**每轮一个新的**，而这里的循环变量只有一个 cell。
-    // 闭包捕获它就会两边（其实是和 JS 自己）分叉，所以直接拒绝，不悄悄给出 var 的语义。
-    //
-    // 问的是**自由变量**（`freeNames` 上面那段）：从前这儿看的是 `ent.kind === 'cell'`，
-    // 而 cell 是**保守**算出来的 —— 内层闭包里有个同名局部量就够让外层循环变量变 cell，
-    // 于是「体里一个闭包都没有」的循环也会被骂。保守分析不该接到硬拒绝上。
+    /* `for (let i = …)` 的绑定在 JS 里是**每轮一个新的**（闭包捕获的是这一轮那一格），
+     * 而 var 是函数作用域里的一格、共享才对。
+     *
+     * let 那一支的办法：循环自己照旧用外层那一格 cell（cond 与 update 读写它），**体里
+     * 另给一格同名的 cell**、每轮开头从外层抄一份进去 —— 那一句是体里的 `let`，所以每轮
+     * 都是新的一格数组，这一轮造的闭包捕获它、上一轮造的还拿着自己那一格。
+     *
+     * 体里**改**循环变量的那一格照旧拒绝：抄进来的那一份要在 update 之前抄回去，而
+     * `continue` 会跳过体的尾巴（OIR 的 Continue 直接跳到 step），抄不回去就是静默分叉。
+     *
+     * 问的是**自由变量**（`freeNames` 上面那段）：从前这儿看的是 `ent.kind === 'cell'`，
+     * 而 cell 是**保守**算出来的 —— 内层闭包里有个同名局部量就够让外层循环变量变 cell，
+     * 于是「体里一个闭包都没有」的循环也会被骂。保守分析不该接到硬拒绝上。 */
     const capturedHere = new Set();
     for (const part of [s.body, s.test, s.update]) {
       for (const g of nestedFns(part)) freeNames(g, capturedHere);
     }
-    for (const [n] of this.fn.scopes[this.fn.scopes.length - 1]) {
-      if (capturedHere.has(n)) {
-        this.err(s.span, `'${n}' is a for-loop variable captured by a closure; copy it into a body-local const first`);
+    const perIter = [];
+    const letInit = s.init && s.init.type === 'VarDecl' && s.init.kind !== 'var';
+    for (const [n, ent] of this.fn.scopes[this.fn.scopes.length - 1]) {
+      if (!capturedHere.has(n)) continue;
+      if (!letInit) continue;   // var 那一支什么也不做：共享一格正是 JS 的语义
+      if (assignsName(s.body, n)) {
+        this.err(s.span, `'${n}' is a for-loop variable that the body assigns and a closure captures;`
+          + ' copy it into a body-local const first');
+        continue;
       }
+      perIter.push([n, ent]);
     }
     const cond = s.test ? this.lazy(() => truthy(this.expr(s.test))) : { kind: 'Const', type: BOOL, value: true };
     const step = s.update ? this.lazy(() => this.exprDiscard(s.update)) : null;
     this.fn.loops++;
     this.fn.oloops++;
+    /* 每轮一格新绑定：体里另开一层作用域，同名再声明一格 cell、从外层那一格抄一份进去。
+     * 这一句是体里的 let，所以每轮执行一次、每轮一格新数组。 */
+    const fresh = [];
+    if (perIter.length > 0) {
+      this.pushScope();
+      for (const [n, outer] of perIter) {
+        const inner = this.declare(n);
+        inner.kind = 'cell';
+        fresh.push(this.declStmt(inner, this.readEntry(outer)));
+      }
+    }
     const body = this.bodyBlock(s.body);
+    if (perIter.length > 0) this.popScope();
     this.fn.oloops--;
     this.fn.loops--;
     this.popScope();
     // init 摊在 For 外面（多个声明时 OIR 的 init 放不下），所以套一层块管作用域
-    const loop = { kind: 'For', init: null, cond, step, body };
+    const loop = {
+      kind: 'For',
+      init: null,
+      cond,
+      step,
+      body: fresh.length ? block([...fresh, ...body.stmts]) : body,
+    };
     return pre.length ? [block([...pre, loop])] : [loop];
   }
 
@@ -3348,6 +3410,8 @@ const GLOBAL_CALLS = {
   String: { op: 'js_str', argc: 1, len: 1 },
   Number: { op: 'js_num_of', argc: 1, len: 1 },
   BigInt: { op: 'js_bigint_of', argc: 1, len: 1 },
+  // Boolean(x)：就是 ToBoolean（`[1,0].map(Boolean)` 这类过滤写法要它当值用）
+  Boolean: { op: 'js_truthy', argc: 1, len: 1 },
   parseInt: { op: 'js_num_parse_int', argc: 2, len: 2 },
   parseFloat: { op: 'js_num_parse_float', argc: 1, len: 1 },
   // Symbol(desc)（ADR-0020 P1）。**不是构造器** —— `new Symbol()` 在 JS 里是 TypeError，

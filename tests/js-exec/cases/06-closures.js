@@ -137,3 +137,27 @@ for (const v of [1, 2, 3]) {
   made.push(() => v);
 }
 console.log(made.map((f) => f()).join(","));
+
+// `for (let i …)` 的绑定也是**每轮一个新的**（规范 14.7.4.9 的 CreatePerIterationEnvironment）：
+// 体里另给一格同名的 cell、每轮从外层抄一份进去。var 那一支照旧共享一格。
+const li = [];
+for (let i = 0; i < 3; i++) li.push(() => i);
+console.log(`let ${li.map((f) => f()).join(",")}`);
+const vj = [];
+for (var j = 0; j < 3; j++) vj.push(() => j);
+console.log(`var ${vj.map((f) => f()).join(",")}`);
+const cont = [];
+for (let m = 0; m < 4; m++) {
+  if (m === 2) continue;
+  cont.push(() => m);
+}
+console.log(`cont ${cont.map((f) => f()).join(",")}`);
+const grid = [];
+for (let x = 0; x < 2; x++) {
+  for (let y = 0; y < 2; y++) grid.push(() => `${x}${y}`);
+}
+console.log(`grid ${grid.map((f) => f()).join(",")}`);
+// 具名函数表达式引用自己（体里那个名字指着这个函数）。
+// name / length 那两格在 tests/js262 里量 —— 函数上的属性读要真原型，C 那条腿还没有（P1-c）。
+const fact = function fx(n) { return n <= 1 ? 1 : n * fx(n - 1); };
+console.log(`fx ${fact(5)} ${fact(1)}`);

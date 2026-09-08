@@ -2176,8 +2176,12 @@ function $mkRealm() {
   // prototype：函数不是真对象，这一格从 side table 上取（第一次问起才建）
   $js_def_acc(funP, "prototype", $nat("prototype", 0, (t) => $js_fn_proto(t)), undefined, false, false);
   $natm(funP, "bind", 1, (t, a) => {
+    /* bind 出来的那一格：name 是 "bound " 加原来的名字、length 是原来的减掉预先绑上的实参
+       个数（不小于 0）—— 规范 20.2.3.2。量过 qjs 与 node 都是这样。 */
     const bt = a[0], pre = a.slice(1);
-    return { fp: (self, args) => $callThis(t, bt, [...pre, ...args]), fp2: (ig, args) => $callThis(t, bt, [...pre, ...args]), $nm: "bound", $ln: 0 };
+    const nm = "bound " + $js_str($js_fn_name(t));
+    const ln = Math.max(0, $js_real($js_fn_len(t), "bind") - pre.length);
+    return { fp: (self, args) => $callThis(t, bt, [...pre, ...args]), fp2: (ig, args) => $callThis(t, bt, [...pre, ...args]), $nm: nm, $ln: ln };
   });
   // Symbol.toStringTag 决定 [object X] 里的 X；没有就看 [[Class]]。
   /* "借内建方法"那一格（ADR-0020）：Array.prototype.join.call(a, "|")。数组的方法平时是
