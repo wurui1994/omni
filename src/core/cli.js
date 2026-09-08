@@ -14,6 +14,7 @@ import {
   cwd, installDir, isDir, writeBinary, readBinary, runTimeout,
 } from './host/native.js';
 import { join, basename, dirname, isAbsolute, resolve } from './host/path.js';
+import { installSrcEvalHook } from './host/src_eval.js';
 import { cacheRoot } from './host/cache.js';
 import { hash16 } from './host/hash.js';
 import { findCmd, splitArgv, canonicalize, ownsVerbose, renderHelp, renderLegacy } from './cli/tree.js';
@@ -2829,6 +2830,9 @@ function main(argv) {
         const js = emitJs(mod);
         vStep(`backend js  ${js.length} bytes`);
         if (cacheable) jsCachePut(path, js, lastAsyDeps);
+        // eval / Function(src) 要编译器在运行期在场（ADR-0020 P6）：跑在本进程里的这一条
+        // 装得上那格钩子，编成独立产物的场合装不上 —— 那时那两个 op 当场报错
+        installSrcEvalHook();
         evalJs(js);
         vStep('exec in-process (node host, new Function)');
         return 0;

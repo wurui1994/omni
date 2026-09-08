@@ -2177,6 +2177,17 @@ class Lower {
         if (this.topFns.has(c.name)) {
           return { kind: 'Call', func: this.topFns.get(c.name), name: c.name, args: [this.argList(e.args)], type: D };
         }
+        /* eval 与 Function(src)（ADR-0020 P6）：这两样要**编译器在运行期在场**。
+         * 落点是一格运行期的钩子（host/src_eval.js 装，prelude 的 $js_src_eval 找）——
+         * 在本进程里跑的时候（omni run / REPL）有，编成产物之后没有，那时当场报错。 */
+        if (c.name === 'eval') {
+          if (e.args.length !== 1) {
+            this.err(e.span, 'eval takes exactly 1 argument');
+            return undefExpr();
+          }
+          return op('js_src_eval', [this.expr(e.args[0])]);
+        }
+        if (c.name === 'Function') return this.fnFromSrc(e);
         // 原生宿主面：名字直接就是一个 ABI op（决策 17）
         const nat = this.natives.get(c.name);
         if (nat) return this.abiCall({ op: nat, argc: JS_ALL[nat].arity }, e.args, e.span, c.name);
@@ -2506,12 +2517,28 @@ class Lower {
     /* 兜底：**普通函数当构造器**（ADR-0020）。`new f(a)` = 造一格以 f.prototype 为原型的
      * 对象、拿它当接收者跑 f、f 返回对象就用那一格。f.prototype 住在运行期的一张 side
      * table 上（函数还不是真对象），见 prelude 的 $js_fn_proto。 */
+    if (n === 'Function' && !this.lookup('Function') && !this.globals.has('Function')) {
+      return this.fnFromSrc(e);
+    }
     const sp = e.args.find((a) => a.type === 'Spread');
     if (sp !== undefined) {
       this.err(sp.span, 'spread is not supported in a constructor call');
       return undefExpr();
     }
     return op('js_fn_construct', [this.expr(e.callee), box(this.argList(e.args), listType(D))]);
+  }
+
+  /* `new Function(a, b, "body")` 与 `Function(…)`（ADR-0020 P6）：形参名与体都是**运行期
+   * 的字符串**，所以拼源码那一步也在运行期（prelude 的 $js_src_fn），和 eval 走同一格钩子。 */
+  fnFromSrc(e) {
+    const spread = e.args.find((a) => a.type === 'Spread');
+    if (spread !== undefined) {
+      this.err(spread.span, 'spread is not supported in a Function(...) call');
+      return undefExpr();
+    }
+    const ps = e.args.slice(0, -1).map((a) => this.expr(a));
+    const body = e.args.length ? this.expr(e.args[e.args.length - 1]) : s16('');
+    return op('js_src_fn', [arrLit(ps), body]);
   }
 
   /* -------------------------------------------------------- 赋值与自增 */
@@ -2934,8 +2961,11 @@ export class JsFrontSession {
     this.no = s.no;
   }
 
-  /** 一批（parser.js 的 Program） -> 这一批新增的 OIR。诊断按批传进来。 */
-  add(program, diags) {
+  /** 一批（parser.js 的 Program） -> 这一批新增的 OIR。诊断按批传进来。
+   *
+   * `opts.valueOfLast`：最后一句是表达式语句时，把它的值当整段的**完成值**返回
+   * （入口的返回类型于是是 dynamic）。`eval` 那条路要它 —— ADR-0020 的 P6。 */
+  add(program, diags, opts = {}) {
     const L = this.L;
     L.diags = diags;
     this.no = this.no + 1;
@@ -2947,15 +2977,38 @@ export class JsFrontSession {
     for (const s of program.body) if (s.type === 'FuncDecl') L.funcDecl(s);
     for (const s of program.body) if (s.type === 'ClassDecl') L.classDecl(s);
     const entry = `omni_chunk_${this.no}`;
-    L.fn = L.newFrame(program.body, { isMain: true });
+    const wantValue = opts.valueOfLast === true;
+    /* eval 的那一段不是 main：顶层声明留在这一帧里（不外泄成宿主全局），而且"抛出来就
+     * 提前 return"那一句要带一格 undefined —— main 是 void 的，返回值那一格得是 null。 */
+    L.fn = L.newFrame(program.body, { isMain: !wantValue });
     const stmts = [];
-    for (const s of program.body) {
-      if (s.type === 'FuncDecl') continue;
+    let valueTmp = null;
+    program.body.forEach((s, i) => {
+      if (s.type === 'FuncDecl') return;
+      if (wantValue && i === program.body.length - 1 && s.type === 'ExprStmt') {
+        /* 完成值：算进一格临时量。这一句要自己走 sink 与 pending 检查那一套
+         * （stmt() 平时替每条语句做这件事，而这儿是手搓的一条）。 */
+        valueTmp = L.temp();
+        const outerSink = L.fn.sink;
+        const pre = [];
+        L.fn.sink = pre;
+        const v = L.expr(s.expr);
+        L.fn.sink = outerSink;
+        stmts.push(...L.withCheck(s, [...pre, exprStmt(assign(varRef(valueTmp), v))]));
+        return;
+      }
       stmts.push(...L.stmt(s));
+    });
+    const tail = [...L.jobsTail()];
+    if (wantValue) {
+      tail.push({ kind: 'Return', value: valueTmp === null ? undefExpr() : varRef(valueTmp) });
     }
     const main = {
-      name: entry, mangled: entry, ret: { k: 'void' }, params: [],
-      body: block([...L.fn.prelude, ...stmts, ...L.jobsTail()]),
+      name: entry,
+      mangled: entry,
+      ret: wantValue ? D : { k: 'void' },
+      params: [],
+      body: block([...L.fn.prelude, ...stmts, ...tail]),
     };
     L.fn = null;
     L.funcs.push(main);

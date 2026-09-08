@@ -237,6 +237,13 @@ export const JS_ABI = {
      一格运行期的槽，与 this 同一个路子（放的人只有 js_fn_construct，取的人是函数入口）。 */
   js_fn_construct: { js: '$js_fn_construct', c: 'omni_js_fn_construct', arity: 2, throws: true },
   js_nt_take: { js: '$js_nt_take', c: 'omni_js_nt_take', arity: 0 },
+  /* eval 与 Function(src)（ADR-0020 P6）：这两样要**编译器在运行期在场**。落点是一格运行期
+     的钩子（host/src_eval.js 装上，prelude 的 $js_src_eval 顺着宿主全局找它）—— 在本进程里
+     跑的时候（omni run / REPL）有，编成独立产物之后没有，那时当场报错而不是假装能跑。
+     名字里带 src 是为了不撞上 js_eval：那一格是**编译器自己**的宿主面（host/native.js 的
+     evalJs），跑的是宿主 JS，与这门语言的语义无关。 */
+  js_src_eval: { js: '$js_src_eval', c: 'omni_js_src_eval', arity: 1, throws: true },
+  js_src_fn: { js: '$js_src_fn', c: 'omni_js_src_fn', arity: 2, throws: true },
 
 
   js_map_new: { js: '$js_map_new', c: 'omni_js_map_new', arity: 0 },
@@ -628,7 +635,7 @@ const P1_JS_ONLY = [
   'js_jobs_run',
   'js_gen_new', 'js_gen_res', 'js_gen_awt', 'js_async_run', 'js_agen_new',
   'js_aiter', 'js_aiter_next',
-  'js_fn_construct', 'js_nt_take',
+  'js_fn_construct', 'js_nt_take', 'js_src_eval', 'js_src_fn',
 ];
 for (const n of P1_JS_ONLY) JS_ABI[n].noC = true;
 

@@ -1848,6 +1848,33 @@ function $js_fn_construct(f, args) {
   // 构造器返回一格对象就用它，别的（包括 undefined）一律给新造的那一格（规范如此）
   return $js_isobj(r) ? r : o;
 }
+/* eval 与 Function(src)（ADR-0020 P6）：这两样要**编译器在运行期在场**。
+   产物自己是自洽的一份 JS，里面没有编译器 —— 所以在本进程里跑的时候（omni run 与 REPL）
+   由宿主装一格钩子（host/src_eval.js），这儿顺着宿主全局找它。装不上的场合
+   （build 出来的产物、C 那条腿）当场报错，不假装能跑。
+   作用域：编出来的是一段**独立的模块**，看不见调用者的局部量 —— 认下来的是"全局 eval"
+   那一档（规范里的 indirect eval），拿不到的名字在编译期就报，冒出去是一格 SyntaxError。 */
+function $js_src_eval(src) {
+  const h = globalThis.$OMNI_SRC_EVAL;
+  if (typeof h !== "function") {
+    $rt_error("eval needs the compiler at run time; only 'omni run' and the REPL have it (ADR-0020 P6)");
+  }
+  try {
+    return h($js_asS16($js_str(src)));
+  } catch (e) {
+    const m = e !== null && e !== undefined && e.message !== undefined ? e.message : String(e);
+    const msg = String(m);
+    // 名字查不到是 ReferenceError，别的编译期毛病算 SyntaxError —— 与 qjs 对得上
+    const cls = msg.indexOf("unresolved") >= 0 ? "ReferenceError" : "SyntaxError";
+    $js_throw($js_err_new(msg, [cls, "Error"], undefined));
+    return undefined;
+  }
+}
+function $js_src_fn(args, body) {
+  const ps = [];
+  for (const a of $js_arr_of(args)) ps.push($js_asS16($js_str(a)));
+  return $js_src_eval("(function (" + ps.join(", ") + ") {\n" + $js_asS16($js_str(body)) + "\n})");
+}
 function $natm(o, name, len, fn) {
   $js_def_data(o, name, $nat(name, len, fn), true, false, true);
   return o;
