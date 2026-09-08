@@ -13057,3 +13057,29 @@ diag2（2268x4）反解出 dealias 前的横截面：参考 `[255,0,0,255]`（�
 顺带记两处已对上源码、还没改的分歧：`res` 公式里的 `size2` asy 用
 `hypot(Width,Height)`（`renderBase.cc:274`，initDisplay 出来的显示尺寸）、我们用
 `hypot(fw,fh)`；`OMNI_GL_ONLY` 位掩码（1/2/4/8/16 对应五条 buffer）是这一刀加的分账口。
+
+### 第十七刀补：`size2` 是显示尺寸，一句话换来两条腿一起大跌
+
+细分判据 `res = pixelResolution * size3.length()/size2` 里，`size2` 是
+**`hypot(Width,Height)`**（`renderBase.cc:274`），而 Width/Height 是 `initDisplay` 出来的
+**显示尺寸**（box3 那一档 887x769、diag2 1024x2），**不是位图尺寸**。我们一直用
+`hypot(fw,fh)`（2268x1968），比它大 2~4 倍 → res 更小 → 每一片都比参考分得更细 →
+曲面的轮廓多边形与参考不同。大画布上这是主导误差。
+
+改完（`OMNI_R3_SIZE2=full` 可退回旧行为）：
+
+- 探针 big_sph（2268x2268 的球）：CPU 备选对 Vulkan **896112 → 2034**、
+  GL 主路对 `asy -novulkan` **920982 → 38721**
+- 判据那一轴（CPU 备选对 Vulkan，八个三维例子）：
+  **twoSpheres 154304 → 560**、**hyperboloid 6747 → 3119**、**sphere 482 → 397**，
+  cylinder/torus/roll/cones/BezierPatch 基本不动（1128/687/324/2910/1346），
+  八个的 ink 都是"盖住参考 100.0%"、只有参考/只有我们的像素都是个位数
+
+这一格与"视景体长宽比"是**两件事**：长宽比那一格 GL 与 Vulkan 两条腿规矩不同（一个用位图比、
+一个用 initDisplay 的比），而 `size2` 两条腿都用显示尺寸 —— 所以 `dispW/dispH` 现在
+两条腿都算出来存进场景，只是长宽比那一步各取所需。
+
+顺带记一处**已知的有意偏差**：asy 的投影矩阵是 `glm::ortho`，而 `glmCommon.h` 定了
+`GLM_FORCE_DEPTH_ZERO_TO_ONE` —— 那是 **[0,1]** 的深度映射；我们 `r3_projection` 写的是
+经典 GL 的 [-1,1]。对不透明场景的可见像素没影响（单调变换、也不会被近远面裁掉），
+共面 z-fighting 与深度精度上可能有别，等有例子撞上再改。
