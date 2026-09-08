@@ -1,6 +1,7 @@
 // 模块（ADR-0011 落地第 6e 步）：import/export 在降级之前就被链接器解决掉
 import { VERSION, twice, banner, Counter, table, TAG, add } from './09-modules/util.js';
 import { ORDER, repeatStr as rep } from './09-modules/text.js';
+import greet, { sideBySide } from './09-modules/dflt.js';
 
 console.log(VERSION);
 console.log(String(twice(21)));
@@ -25,3 +26,6 @@ console.log([1, 2, 3].map(twice).join(","));
 
 // 改名的导出：引用方按**导出名**写
 console.log(TAG, String(add(2, 3)));
+
+// 默认导出 / 默认导入
+console.log(greet("omni"), String(sideBySide));

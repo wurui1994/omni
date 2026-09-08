@@ -119,6 +119,12 @@ function resolvePath(base, rel) {
   return out.join('/');
 }
 
+/* `export default …` 在本模块里落成的那个名字。整棵 import 树是**拼成一个程序**的、顶层
+   名字共用一个空间，所以名字里带上模块路径（非字母数字一律换成下划线）。 */
+function defaultLocal(path) {
+  return `_dflt_${path.replace(/[^A-Za-z0-9]/g, '_')}`;
+}
+
 /** 一条声明在模块作用域里绑了哪些名字 */
 function declNames(s, out = []) {
   switch (s.type) {
@@ -168,8 +174,10 @@ function scan(m, diags) {
           break;
         }
         for (const sp of s.specifiers) {
-          if (sp.kind !== 'named') {
-            diags.error(s.span, `only named imports are supported (found a ${sp.kind} import)`);
+          // 默认导入收得下（下面按 'default' 这一格找过去）；命名空间导入还没有
+          if (sp.kind === 'namespace') {
+            diags.error(s.span, 'a namespace import (import * as ns) is not supported;'
+              + ' import the names you need');
           }
         }
         const target = resolvePath(base, s.source);
@@ -222,9 +230,20 @@ function scan(m, diags) {
         }
         break;
       }
-      case 'ExportDefault':
-        diags.error(s.span, "'export default' is not supported; use a named export");
+      case 'ExportDefault': {
+        /* `export default <表达式>`（`export default function f(){}` 解析出来也是**表达式**）：
+         * 摊成一句 `const <本模块专属的名字> = 表达式;`，导出表里记在 'default' 这一格。
+         * 名字从模块路径来 —— 整棵树拼成一个程序，顶层名字共用一个空间，所以要带路径。 */
+        const local = defaultLocal(m.path);
+        m.exports.set('default', local);
+        m.body.push({
+          type: 'VarDecl',
+          kind: 'const',
+          decls: [{ id: { type: 'Ident', name: local, span: s.span }, init: s.value }],
+          span: s.span,
+        });
         break;
+      }
       default:
         m.body.push(s);
         break;
@@ -306,6 +325,25 @@ export function linkJs(entry, read, diags) {
       const target = mods.get(imp.path);
       if (!target) continue;   // 读不到，上面已经报过
       for (const sp of imp.specs) {
+        /* 默认导入（`import def from "m"`）：'default' 那一格记的是导出方那个专属名字，
+         * 这儿摊成一句 `const def = <那个名字>;` —— 与命名的改名导入同一招。 */
+        if (sp.kind === 'default') {
+          const local = target.exports.get('default');
+          if (local === undefined) {
+            diags.error(imp.span, `'${imp.path}' has no default export`);
+            continue;
+          }
+          body.push({
+            type: 'VarDecl',
+            kind: 'const',
+            decls: [{
+              id: { type: 'Ident', name: sp.local, span: imp.span },
+              init: { type: 'Ident', name: local, span: imp.span },
+            }],
+            span: imp.span,
+          });
+          continue;
+        }
         if (sp.kind !== 'named') continue;
         if (!target.exports.has(sp.imported)) {
           diags.error(imp.span, `'${imp.path}' does not export '${sp.imported}'`);
