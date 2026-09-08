@@ -2323,6 +2323,14 @@ function $mkRealm() {
     if (ms === "") return ns;
     return ns === "" ? ms : ns + ": " + ms;
   });
+  /* Error.prototype.name：规范里 name 住在**原型**上，不是实例的自有属性。取值顺着 $cls
+     那条链找第一个**内建**错误名 —— class A extends Error {} 的实例，name 是 "Error"
+     而不是 "A"（量出来的静默分叉：从前给的是链头，于是 String(a) 印 "A: m"）。
+     赋值走 setter，在实例上定一格**自有可枚举**的数据属性 —— 与规范里"给继承来的数据
+     属性赋值"的结果一致，this.name = "MyErr" 于是进得了 JSON.stringify 与 Object.keys。 */
+  $js_def_acc(r.errP, "name", $nat("get name", 0, (t) => $js_err_bname(t)),
+    $nat("set name", 1, (t, a) => { $js_def_data(t, "name", a[0], true, true, true); return undefined; }),
+    false, true);
   /* Date（ADR-0020 P4）：一格真对象，毫秒存在隐藏槽 $ms 里（不可枚举，所以
      Object.keys / JSON.stringify 看不见它）。取值面**转手宿主 Date** —— 本地时区那几格
      因此与宿主一致（qjs 也用本地时区）。只有 JS 那条腿有：C 侧还没有真对象（P1-c），
@@ -3839,21 +3847,40 @@ function $js_check_uncaught() {
 // 不然走的是 Object.prototype 那一格、印出 [object Object]（量出来的分叉）。
 function $js_err_new(msg, cls, opts) {
   const o = $js_obj_new_p($realm().errP);
-  $js_obj_set(o, "$cls", cls);
-  $js_obj_set(o, "name", cls[0]);
+  /* $cls 与 message 都是**不可枚举**的（w/e/c = true/false/true）：JS 里 message 是 own
+     但不可枚举、name 在原型上，所以 Object.keys(err) 是空的、JSON.stringify(new Error("x"))
+     是 {}。从前这儿走的是普通的 obj_set，于是 $cls 这个内部标记也跟着漏进 JSON 与 keys 里
+     （量出来的静默分叉：印出 {"$cls":["Error"],"name":"Error","message":"zero"}）。
+     name 不在这儿定：它是 errP 上的一对存取器（见 $realm 里那一处）。 */
+  $js_def_data(o, "$cls", cls, true, false, true);
   // message 缺席（new Error() / new Error(undefined)）就是空串 —— 规范里那一格只在
   // 给了非 undefined 时才设，而取不到时读出来的是原型上的 ""
-  $js_obj_set(o, "message", msg === undefined ? "" : msg);
+  $js_def_data(o, "message", msg === undefined ? "" : msg, true, false, true);
   // { cause } 那一格（ES2022）：只有真给了才挂 —— 没给时 JS 里连这个属性都没有。
   // 两种载体都收：这条腿上的对象字面量是真对象（P1），C 那条腿上还是 dict。
   const ot = $dynTag(opts);
   if ((ot === "dict" || ot === "object") && $js_obj_has(opts, "cause")) {
-    $js_obj_set(o, "cause", $js_obj_get(opts, "cause"));
+    // cause 在规范里也是不可枚举的（JSON.stringify(new Error("c", {cause:7})) 是 {}）
+    $js_def_data(o, "cause", $js_obj_get(opts, "cause"), true, false, true);
   }
   return o;
 }
-function $js_is_a(v, n) {
-  const t = $dynTag(v);
+// 内建错误名那一族：$cls 那条链里第一个落在这里面的就是 name 该给的值（子类不算）
+const $JS_ERR_NAMES = new Set([
+  "Error", "TypeError", "RangeError", "SyntaxError", "ReferenceError", "EvalError",
+  "URIError", "AggregateError",
+]);
+function $js_err_bname(t) {
+  const c = $js_getp(t, "$cls", undefined);
+  if ($dynTag(c) === "list") {
+    for (let i = 0; i < c.length; i++) {
+      const s = $js_asS16($js_str(c[i]));
+      if ($JS_ERR_NAMES.has(s)) return s;
+    }
+  }
+  return "Error";
+}
+function $js_is_a(v, n) {  const t = $dynTag(v);
   if (t !== "dict" && t !== "object") return false;
   const c = $js_obj_get(v, "$cls");
   if ($dynTag(c) !== "list") return false;

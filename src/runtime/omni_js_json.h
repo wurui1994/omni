@@ -140,6 +140,13 @@ static omni_s16 omni_js_json_val(omni_dyn v, omni_dyn rep, int64_t gap, int64_t 
       omni_s16 out = omni_js_s16_lit("{"); \
       omni_s16 sep = omni_js_json_nl(gap, depth + 1); \
       bool first = true; \
+      bool iserr = false; \
+      for (int64_t i = 0; i < d->n; i++) { \
+        if (d->live[i] && omni_s16_eq(omni_s16_of_utf8(d->keys[i]), omni_js_s16_lit("$cls"))) { \
+          iserr = true; \
+          break; \
+        } \
+      } \
       if (only.tag == OMNI_DYN_LIST) { \
         LT ks = (LT)only.u.ref; \
         for (int64_t i = 0; i < ks->len; i++) { \
@@ -161,6 +168,16 @@ static omni_s16 omni_js_json_val(omni_dyn v, omni_dyn rep, int64_t gap, int64_t 
       for (int64_t i = 0; i < d->n; i++) { \
         if (!d->live[i]) continue; \
         omni_s16 key = omni_s16_of_utf8(d->keys[i]); \
+        /* 错误对象（决策 15 的 { $cls, name, message } 那种 dict）：这四格在 JS 里都不是
+           "自有可枚举"的（name 在原型上，message / cause 是 own 但不可枚举），JSON 里
+           不该出现 —— $cls 更是内部标记。与 prelude 的 $js_err_new 把它们定成不可枚举
+           是同一个口径（量出来的静默分叉：从前印 {"$cls":["Error"],…}）。
+           白名单那一支**不跳**：带数组 replacer 的 stringify 走的是 [[Get]]，
+           不可枚举的自有属性照样进得来（量过 node 与 qjs 都是）。 */ \
+        if (iserr && (omni_s16_eq(key, omni_js_s16_lit("$cls")) \
+              || omni_s16_eq(key, omni_js_s16_lit("name")) \
+              || omni_s16_eq(key, omni_js_s16_lit("message")) \
+              || omni_s16_eq(key, omni_js_s16_lit("cause")))) continue; \
         omni_dyn x = omni_js_json_apply(rep, key, d->vals[i]); \
         omni_s16 s = omni_js_json_val(x, rep, gap, depth + 1); \
         if (!s.p) continue; \

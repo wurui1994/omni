@@ -120,3 +120,13 @@ function two() {
   }
 }
 console.log(`u ${two()}`);
+/* 错误对象上的"自有可枚举"口径：$cls 是内部标记、message 与 cause 是 own 但不可枚举、
+   name 在原型上，所以 JSON.stringify(new Error("x")) 是 {}。这一条要五条腿一起验 ——
+   C 那条腿的错误对象是 dict，JSON 那儿有一份对应的跳过（omni_js_json.h）。
+   带数组 replacer 那一格**照样看得见** message：那条路走的是 [[Get]]，不问可枚举。 */
+const e1 = new Error("boom");
+console.log(`err ${JSON.stringify(e1)} ${e1.name} ${e1.message}`);
+const e2 = new TypeError("bad");
+console.log(`err ${JSON.stringify(e2)} ${e2.name} ${JSON.stringify(new Error("c", { cause: 7 }))}`);
+e1.code = 5;
+console.log(`err ${JSON.stringify(e1)} ${JSON.stringify(e2, ["message"])}`);

@@ -452,7 +452,12 @@ class Lower {
         // 继承只支持 `extends Error`（量过：全仓库三处，全是异常类）。异常类的实例带一条
         // $cls 链，instanceof 查的就是它（ADR-0011 决策 15）
         const sup = s.superClass;
-        const isError = !!(sup && sup.type === 'Ident' && sup.name === 'Error');
+        /* Error 那一族全收（不只 `extends Error`）：`class E extends TypeError {}` 也是
+         * 异常类，实例带的 $cls 链是 [E, TypeError, Error] —— catch 的类型判断与
+         * name 都顺着它走。从前只认 Error，别的名字落到"这个文件里没声明过"那条错上，
+         * 而且报错之后还往下走、在 supProto 那儿当场崩（量出来的内部异常）。 */
+        const supErr = sup && sup.type === 'Ident' && ERROR_CTORS.has(sup.name) ? sup.name : null;
+        const isError = supErr !== null;
         /* `extends`（ADR-0020 P1-f）：Error 那一支照旧走 `$cls` 链；别的收**这个文件里
          * 声明过的类名** —— 原型链要拿到父类的原型对象与 `$init`，而那两格是模块级全局。
          * 任意表达式（`class C extends mixin(B)`）还不收，那要先有"类当值"。 */
@@ -460,7 +465,7 @@ class Lower {
         if (!isError && sup && superName === null) {
           this.err(s.span, "'extends <expression>' is not supported; extend a class declared in this file");
         }
-        this.classes.set(s.id, { mangled: this.mangle('n_', s.id), node: s, isError, superName });
+        this.classes.set(s.id, { mangled: this.mangle('n_', s.id), node: s, isError, superName, errBase: supErr });
         /* 非 Error 的类走**原型链**那条新路（ADR-0020 P1-f）：类对象与原型对象各占一格
          * 模块级全局 —— 方法只能建一次（每次 new 重建原型的话
          * `getPrototypeOf(a) === getPrototypeOf(b)` 就假了），而类名本身要在整个模块可见
@@ -762,11 +767,16 @@ class Lower {
     this.fn.isCtor = true;
     this.fn.superIsError = rec.isError;
     const self = this.declare('this');
-    // 异常类的实例是 { $cls: [类名, "Error"], message }；没写构造器时 message 就是第一个实参
+    // 异常类的实例是 { $cls: [类名, …父类, "Error"], message }；没写构造器时 message
+    // 就是第一个实参。链里带上父类那一格 —— `class E extends TypeError {}` 的实例
+    // 既 instanceof TypeError 也 instanceof Error，name 也从链上认（$js_err_bname）。
+    const errChain = rec.isError
+      ? [s.id, ...(rec.errBase && rec.errBase !== 'Error' ? [rec.errBase] : []), 'Error']
+      : [];
     const init = rec.isError
       ? op('js_err_new', [
         ctor ? undefExpr() : op('js_arr_get', [argsDyn(), constReal(0)]),
-        arrLit([s16(s.id), s16('Error')]),
+        arrLit(errChain.map((n) => s16(n))),
         undefExpr(),
       ])
       : op('js_obj_new', []);
