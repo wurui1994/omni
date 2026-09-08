@@ -271,6 +271,24 @@ static omni_dyn omni_js_set_of_list(omni_dyn init) { \
   LT l = omni_js_arr_of(init.tag == OMNI_DYN_SET ? omni_js_set_items(init) : init); \
   for (int64_t i = 0; i < l->len; i++) omni_js_set_add(s, l->items[i]); \
   return s; \
+} \
+/* Map.groupBy（ES2024）：回调**只收两个实参**（值、下标）—— 与 map/filter 那批的
+   omni_js_call3 不同，所以这儿自己拼两格实参表，不然 (v, i, arr) 那种回调在两条腿上
+   看到的第三格会不一样。每组按原顺序攒成一个数组，键按 SameValueZero 比（就是 map 的键）。 */ \
+static omni_dyn omni_js_map_group_by(omni_dyn items, omni_dyn f) { \
+  omni_dyn m = omni_js_map_new(); \
+  LT l = omni_js_arr_of(items); \
+  for (int64_t i = 0; i < l->len; i++) { \
+    const omni_dyn tmp[2] = { l->items[i], omni_dyn_of_real((double)i) }; \
+    omni_dyn k = omni_js_call(f, LT##_from(tmp, 2)); \
+    omni_dyn g = omni_js_map_get(m, k); \
+    if (g.tag != OMNI_DYN_LIST) { \
+      g = omni_js_arr_wrap(LT##_new()); \
+      omni_js_map_set(m, k, g); \
+    } \
+    LT##_push((LT)omni_dyn_as_ref(g, OMNI_DYN_LIST), l->items[i]); \
+  } \
+  return m; \
 }
 
 

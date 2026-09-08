@@ -2253,6 +2253,42 @@ function $js_promise_race(items) {
     return undefined;
   }));
 }
+/* groupBy（ES2024）：走一遍迭代，回调收 (value, index)，每组按**原顺序**攒成一个数组。
+   两处差别照规范：Object.groupBy 交出来的是一格 **null 原型**的对象、键过一遍
+   ToPropertyKey（符号照原样，别的转串）；Map.groupBy 的键按 SameValueZero 比。 */
+function $js_obj_group_by(items, f) {
+  const out = $js_obj_new_p(null);
+  const xs = $js_iter(items);
+  for (let i = 0; i < xs.length; i++) {
+    const kv = $callFn(f, [xs[i], i]);
+    const k = $dynTag(kv) === "symbol" ? kv : $js_str(kv);
+    let g = $js_getp(out, k);
+    if (g === undefined) { g = []; $js_setp(out, k, g); }
+    g.push(xs[i]);
+  }
+  return out;
+}
+function $js_map_group_by(items, f) {
+  const m = $js_map_new();
+  const xs = $js_iter(items);
+  for (let i = 0; i < xs.length; i++) {
+    const k = $callFn(f, [xs[i], i]);
+    let g = $js_map_get(m, k);
+    if (g === undefined) { g = []; $js_map_set(m, k, g); }
+    g.push(xs[i]);
+  }
+  return m;
+}
+/* Promise.try（ES2025）：f 立刻同步跑 —— 正常返回就 resolve、抛出来的东西当 reject。
+   与 new Promise(executor) 里的那一格是同一条规矩（pending 槽，ADR-0007）。 */
+function $js_promise_try(f) {
+  const p = $js_prom_new();
+  const v = $callFn(f, []);
+  if ($js_pending()) { $js_prom_settle(p, 2, $js_take_pending()); return p; }
+  // 返回的是 promise 就跟着它走（规范里这一格走 PromiseResolve）
+  $js_prom_settle(p, 1, v);
+  return p;
+}
 /* 生成器（ADR-0020 P2 的后半）：函数体已经被 genfn.js 改写成一台状态机，这儿只剩
    "包装成迭代器对象"这一层皮。step 是那台状态机（一格普通的 JS 函数值），约定：
      step(v, 0) -> 下一步（v 是 next(v) 送进去的值）

@@ -116,6 +116,12 @@ console.log(`mspread ${"a-b-c".split(...["-"]).join("|")} ${cs.indexOf(...[3])}`
 console.log(`mconcat ${[1, 2].concat([3], [4]).join(",")} ${[1, 2].concat(...[[3], [4]]).join(",")}`);
 console.log(`mconcat ${"a".concat("b", "c")} ${"a".concat(...["b", "c"])} ${[].concat(...[]).length}`);
 
+// Map.groupBy（ES2024）：回调只收两个实参（值、下标），每组按原顺序攒成数组。
+// Object.groupBy 不在这儿 —— 它造的是真对象（null 原型），那一族在 C 那侧还没有。
+const gm = Map.groupBy([1, 2, 3, 4], (x) => x % 2);
+console.log(`groupBy ${[...gm.keys()].join(",")} ${gm.get(1).join(",")} ${gm.get(0).join(",")}`);
+console.log(`groupBy ${Map.groupBy([], (x) => 1).size} ${Map.groupBy(["a"], (v, i, arr) => `${v}${i}${arr}`).size}`);
+
 
 
 

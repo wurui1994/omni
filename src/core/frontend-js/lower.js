@@ -2882,8 +2882,10 @@ const STATIC_NS = new Set(['JSON', 'Math', 'Object', 'Array', 'String', 'Number'
   'Symbol', 'Reflect',
   // ADR-0020 P4：Date.now()
   'Date',
-  // ADR-0020 P2：Promise.resolve / reject / all
-  'Promise']);
+  // ADR-0020 P2：Promise.resolve / reject / all / allSettled / any / race / try
+  'Promise',
+  // ES2024 的 Map.groupBy（`new Map(...)` 那条路不经过这儿，见 newExpr）
+  'Map']);
 
 /* `new X(...)` 认的内建构造器（newExpr 里一支支写着）。这张表只给 `typeof X` 用 ——
  * 它们在 JS 里都是函数值，而这个值域里还不能把它们当值传，所以答案是编译期定死的。 */
@@ -2959,6 +2961,9 @@ const STATIC_CALLS = {
   'Object.isSealed': { op: 'js_obj_is_sealed', argc: 1 },
   'Object.isExtensible': { op: 'js_obj_is_ext', argc: 1 },
   'Object.fromEntries': { op: 'js_obj_from_entries', argc: 1, len: 1 },
+  // groupBy（ES2024）：回调收 (value, index)，每组按原顺序攒成数组
+  'Object.groupBy': { op: 'js_obj_group_by', argc: 2, len: 2 },
+  'Map.groupBy': { op: 'js_map_group_by', argc: 2, len: 2 },
   'Symbol.for': { op: 'js_sym_for', argc: 1 },
   'Symbol.keyFor': { op: 'js_sym_key_for', argc: 1 },
   'Reflect.getPrototypeOf': { op: 'js_obj_proto_get', argc: 1 },
@@ -2991,6 +2996,8 @@ const STATIC_CALLS = {
   'Promise.allSettled': { op: 'js_promise_all_settled', argc: 1, len: 1 },
   'Promise.any': { op: 'js_promise_any', argc: 1, len: 1 },
   'Promise.race': { op: 'js_promise_race', argc: 1, len: 1 },
+  // Promise.try（ES2025）：f 同步跑，抛出来的当 reject
+  'Promise.try': { op: 'js_promise_try', argc: 1, len: 1 },
   'BigInt.asIntN': { op: 'js_bigint_as_int_n', argc: 2 },
   'BigInt.asUintN': { op: 'js_bigint_as_uint_n', argc: 2 },
   'process.cwd': { op: 'js_proc_cwd', argc: 0 },
