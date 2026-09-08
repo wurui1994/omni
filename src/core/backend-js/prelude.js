@@ -1974,6 +1974,19 @@ function $mkRealm() {
   $natm(r.arrP, "map", 1, (t, a) => $js_arr_map(t, a[0]));
   $natm(r.arrP, "filter", 1, (t, a) => $js_arr_filter(t, a[0]));
   $natm(r.arrP, "forEach", 1, (t, a) => $js_arr_for_each(t, a[0]));
+  // 字符串那边同理（String.prototype.slice.call(s, 1)）。trim 的 lit 排在实参前面。
+  $natm(r.strP, "slice", 2, (t, a) => $js_str_slice(t, a[0], a[1]));
+  $natm(r.strP, "indexOf", 1, (t, a) => $js_str_index_of(t, a[0], undefined));
+  $natm(r.strP, "includes", 1, (t, a) => $js_str_includes(t, a[0]));
+  $natm(r.strP, "startsWith", 1, (t, a) => $js_str_starts_with(t, a[0], undefined));
+  $natm(r.strP, "endsWith", 1, (t, a) => $js_str_ends_with(t, a[0]));
+  $natm(r.strP, "split", 1, (t, a) => $js_str_split(t, a[0]));
+  $natm(r.strP, "trim", 0, (t) => $js_str_trim("b", t));
+  $natm(r.strP, "toUpperCase", 0, (t) => $js_str_upper(t));
+  $natm(r.strP, "toLowerCase", 0, (t) => $js_str_lower(t));
+  $natm(r.strP, "charAt", 1, (t, a) => $js_str_char_at(t, a[0]));
+  $natm(r.strP, "charCodeAt", 1, (t, a) => $js_str_char_code_at(t, a[0]));
+  $natm(r.strP, "repeat", 1, (t, a) => $js_str_repeat(t, a[0]));
   $natm(r.iterP, "next", 0, () => $rt_error("Iterator.prototype.next is abstract"));
   // Symbol 的两格：description 是访问器（规范如此），toString 给 "Symbol(desc)"
   $js_def_acc(r.symP, "description", $nat("description", 0, (t) => $dynAsSym(t).d), undefined, false, true);
