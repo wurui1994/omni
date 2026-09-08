@@ -1394,8 +1394,13 @@ static void r3_shade(const r3scene *s, const r3mat *mat, r3v nrm, r3v viewPos,
     out[i] = (float) mat->emissive[i];
   }
   if (vcol) {
-    if (mat->lightOn) for (int i = 0; i < 3; ++i) S.Diffuse[i] = vcol[i];
-    else for (int i = 0; i < 3; ++i) out[i] += vcol[i];
+    if (mat->lightOn) {
+      for (int i = 0; i < 3; ++i) S.Diffuse[i] = vcol[i];
+      /* **`Nlights == 0` 时顶点色还要再加到 emissive 上**（vertex.glsl:66-70/81-85 那两处
+         `#if Nlights == 0  emissive += color;`）。没有光的时候 fragment.glsl 的光照循环
+         一次都不跑，`outColor` 就是 emissive —— 少了这一句，无光场景里的顶点色会整片丢掉。 */
+      if (s->nlight == 0) for (int i = 0; i < 3; ++i) out[i] += vcol[i];
+    } else for (int i = 0; i < 3; ++i) out[i] += vcol[i];
   }
   if (!mat->lightOn) return;
 
@@ -1829,7 +1834,11 @@ static void r3_raster_tri(const r3scene *s, r3fb *fb, const r3v *P, const r3v *N
                 vc[i] = (float) ((q0 * VC[i] + q1 * VC[4 + i] + q2 * VC[8 + i]) / qs);
           }
           float rgb[3];
-          if (VC) {
+          if (VC && mat->lightOn) {
+            /* alpha 取的是 **diffuse 的 alpha**（fragment.glsl:267
+               `outColor=vec4(outColor.rgb, diffuse.a)`），而 diffuse 只在 lightOn 时
+               才换成顶点色（vertex.glsl:63-74/81-89）；lightOn 为 0 时顶点色是加到
+               emissive 上的，alpha 仍是材质自己的 —— 所以这儿要分档。 */
             ablend = vc[3];
             if (ablend < 0.0f) ablend = 0.0f;
             if (ablend > 1.0f) ablend = 1.0f;
@@ -2038,9 +2047,12 @@ static void r3_raster_pix(const r3scene *s, r3fb *fb, const r3v *P, const r3v *N
       if (VC) {
         for (int i = 0; i < 4; ++i)
           vc[i] = (float) ((q0 * VC[i] + q1 * VC[4 + i] + q2 * VC[8 + i]) / qs);
-        ablend = vc[3];
-        if (ablend < 0.0f) ablend = 0.0f;
-        if (ablend > 1.0f) ablend = 1.0f;
+        /* 见 r3_raster_tri 里同一处那段注：alpha 走 diffuse.a，顶点色只在 lightOn 时是 diffuse */
+        if (mat->lightOn) {
+          ablend = vc[3];
+          if (ablend < 0.0f) ablend = 0.0f;
+          if (ablend > 1.0f) ablend = 1.0f;
+        }
       }
       r3_shade(s, mat, nrm, vp, front, VC ? vc : NULL, rgb);
       if (phase == 0) {
