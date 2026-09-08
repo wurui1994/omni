@@ -601,6 +601,14 @@ static int draw_buffer(const omni_gl_buffer *b, GLuint pr, int kind,
     glEnableVertexAttribArray(A_COL);
   }
 
+  /* 标定口：`OMNI_GL_LINEW` 临时改线宽。**量过、没用**：diag2 上 1 与 2 两档
+     墨量完全一样（1511.51 / 2269.96 两个值都不动）—— macOS 的 core profile 只支持
+     线宽 1.0，改了也被夹回去。参考那边的线也在同一个上下文里，所以**参考那 2 px
+     的墨不是线宽来的**，是几何。这一条排除掉了一整条岔路，知识留在这儿。 */
+  if (drawType == GL_LINES) {
+    const char *e = getenv("OMNI_GL_LINEW");
+    glLineWidth(e ? (GLfloat) atof(e) : 1.0f);
+  }
   glDrawElements(drawType, (GLsizei) b->nindices, GL_UNSIGNED_INT, (void *) 0);
 
   glDisableVertexAttribArray(A_POS);
