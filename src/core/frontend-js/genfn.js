@@ -34,11 +34,11 @@
  *     `yield* e;` / `return await e;`。别的位置（实参里、二元运算里、条件里）报一句
  *     能照着改的错。
  *   - 切段要穿过的结构：块、if、while、do-while、for、for-of、for-in、for await、
- *     以及 `try { … } finally { … }`（finally 体自己不许再有 yield / await）。
- *   - `try { … } catch (e) { … }` 里有 yield / await 还降不了：这个值域里的异常是"挂起槽 +
- *     提前 return"（ADR-0007），跨状态机接手要另一套形状。
- *   - **已知的洞**：切开的 try 体里真抛出来的异常不会跑 finally（挂起槽会把 step
- *     直接送出去）。it.return / it.throw 那两条路是跑的。
+ *     `try { … } finally { … }` 与 `try { … } catch (e) { … }`（finally 体自己不许再有
+ *     yield / await；catch 与 finally **一起**的那一种还不行）。
+ *   - **已知的洞**：切开的 try/finally 里真抛出来的异常不会跑 finally（挂起槽会把 step
+ *     直接送出去；catch 那一路是通的 —— 驱动会把那格值送回来，见 tryCatch）。
+ *     it.return / it.throw 那两条路是跑的。
  */
 
 /** 遍历子节点（与 lower.js 的同名函数同形：跳过 span 与 type） */
@@ -123,10 +123,12 @@ const letDecl = (name, init, sp) => ({
 /** 状态量的名字。都带 `_g_` 前缀：用户的名字撞上了就当场报（见 checkNames）。 */
 const ST = '_g_st';      // 下一个要跑的段
 const SENT = '_g_v';     // next(v) 送进来的值
-const MODE = '_g_md';    // 0 next / 1 return / 2 throw
+const MODE = '_g_md';    // 0 next / 1 return / 2 throw / 3 "体里抛出来的送回来接手"
 const UNW = '_g_un';     // 正在为哪一种"非正常出去"跑 finally（1 return / 2 throw）
 const RV = '_g_rv';      // 那一格待返回/待重抛的值
 const FIN = '_g_fin';    // 当前活着的 finally 的入口段（0 = 没有）
+const CAT = '_g_cat';    // 当前活着的 catch 的入口段（0 = 没有）
+const EX = '_g_ex';      // 接住的那一格异常值
 
 const genRes = (v, done, sp) => opCall('js_gen_res', [v, lit(done, sp)], sp);
 
@@ -234,14 +236,21 @@ class Split {
       case 'Return': return this.retStmt(s, cur, ctx);
       case 'Break': case 'Continue': {
         const to = s.type === 'Break' ? ctx.brk : ctx.cont;
+        const word = s.type === 'Break' ? 'break' : 'continue';
         if (s.label) {
-          this.err(sp, `a labeled '${s.type === 'Break' ? 'break' : 'continue'}' is not supported in a generator`);
+          this.err(sp, `a labeled '${word}' is not supported in a generator`);
           return cur;
         }
         if (to < 0) {
-          this.err(sp, `'${s.type === 'Break' ? 'break' : 'continue'}' cannot cross a yield boundary here`);
+          this.err(sp, `'${word}' cannot cross a yield boundary here`);
           return cur;
         }
+        if (ctx.fin >= 0) {
+          this.err(sp, `'${word}' out of a try/finally is not supported here; the finally block would be skipped`);
+          return cur;
+        }
+        // 跳出带 catch 的 try 体：那格 catch 得摘下来（不然后面抛的东西会跳回它）
+        if (ctx.cat >= 0) this.emit(cur, exprStmt(assign(ident(CAT, sp), num(0, sp), sp), sp));
         this.goto(cur, to, sp);
         return -1;
       }
@@ -536,12 +545,13 @@ class Split {
    * 有就先跑 finally（step 的开头那两个 if）。 */
   tryStmt(s, cur, ctx) {
     const sp = s.span;
-    if (s.handler) {
-      this.err(sp, "'yield' inside a try that has a catch clause is not supported yet (ADR-0020 P2)");
+    if (s.handler && s.finalizer) {
+      this.err(sp, "a try with **both** catch and finally around a 'yield' / 'await' is not supported yet");
       return cur;
     }
+    if (s.handler) return this.tryCatch(s, cur, ctx);
     if (!s.finalizer) {
-      this.err(sp, "'yield' inside a try needs a finally clause to be lowered");
+      this.err(sp, "'yield' inside a try needs a catch or finally clause to be lowered");
       return cur;
     }
     if (ctx.fin >= 0) {
@@ -577,6 +587,45 @@ class Split {
     this.term[unw] = true;
     return join;
   }
+
+  /* try { … } catch (e) { … }，try 体里有 yield / await 的那一种（ADR-0020 P2）。
+   *
+   * 这个值域里的异常是"挂起槽 + 提前 return"（ADR-0007）：体里抛出来的东西会让 step
+   * 直接返回，挂起槽还是满的。所以接手这件事要**驱动**帮一把 —— 它看见挂起槽满了就把
+   * 那一格值送回 step（mode 3），step 开头那一段按 `_g_cat` 跳到 catch 段去
+   * （见 modePrologue）。没有活着的 catch 时机器原样抛回来，于是照旧往上冒。
+   *
+   * catch 与 finally **一起**的还不行（上面那一句报错）：那要两层不变量一起维护。 */
+  tryCatch(s, cur, ctx) {
+    const sp = s.span;
+    if (ctx.cat >= 0) {
+      this.err(sp, 'a nested try/catch around a yield / await is not supported in a generator');
+      return cur;
+    }
+    if (s.param && s.param.type !== 'Ident') {
+      this.err(sp, "a destructuring catch parameter is not supported around a 'yield' / 'await'");
+      return cur;
+    }
+    const bodyB = this.newBlock();
+    const catchB = this.newBlock();
+    const join = this.newBlock();
+    this.emit(cur, exprStmt(assign(ident(CAT, sp), num(catchB, sp), sp), sp));
+    this.goto(cur, bodyB, sp);
+    const x = this.stmts(s.block.body, bodyB, { ...ctx, cat: catchB });
+    if (x >= 0) {
+      // 正常走完：把那格 catch 摘下来（不然后面抛的东西会跳回这儿）
+      this.emit(x, exprStmt(assign(ident(CAT, sp), num(0, sp), sp), sp));
+      this.goto(x, join, sp);
+    }
+    /* catch 段。进来的时候 `_g_cat` 已经被 step 开头那一段清掉了、值放在 `_g_ex` 上。 */
+    if (s.param) {
+      this.hoist.push(s.param.name);
+      this.emit(catchB, exprStmt(assign(ident(s.param.name, sp), ident(EX, sp), sp), sp));
+    }
+    const c = this.stmts(s.handler.body, catchB, ctx);
+    if (c >= 0) this.goto(c, join, sp);
+    return join;
+  }
 }
 
 /** 状态机占了 `_g_` 开头的名字：用户的名字撞上就当场报，而不是悄悄遮住 */
@@ -608,6 +657,17 @@ function modePrologue(sp) {
     ifSt(bin('===', ident(MODE, sp), num(2, sp), sp), block([
       ifSt(noFin, block([{ type: 'Throw', arg: ident(SENT, sp), span: sp }], sp), unwindTo(2), sp),
     ], sp), null, sp),
+    /* mode 3 = 体里抛出来的东西被驱动送回来接手。有活着的 catch 就跳过去（值放在 _g_ex
+       上），没有就原样抛回去 —— 于是挂起槽还是满的，照旧往调用者那边冒。 */
+    ifSt(bin('===', ident(MODE, sp), num(3, sp), sp), block([
+      ifSt(bin('===', ident(CAT, sp), num(0, sp), sp),
+        block([{ type: 'Throw', arg: ident(SENT, sp), span: sp }], sp),
+        block([
+          exprStmt(assign(ident(EX, sp), ident(SENT, sp), sp), sp),
+          exprStmt(assign(ident(ST, sp), ident(CAT, sp), sp), sp),
+          exprStmt(assign(ident(CAT, sp), num(0, sp), sp), sp),
+        ], sp), sp),
+    ], sp), null, sp),
   ];
 }
 
@@ -631,7 +691,7 @@ export function genToStateMachine(node, err) {
    * 而状态机的段是 if 块 —— 声明留在段里就只有那一段看得见它。 */
   const fns = node.body.body.filter((s) => s.type === 'FuncDecl');
   const rest = node.body.body.filter((s) => s.type !== 'FuncDecl');
-  const last = sx.stmts(rest, entry, { brk: -1, cont: -1, fin: -1 });
+  const last = sx.stmts(rest, entry, { brk: -1, cont: -1, fin: -1, cat: -1 });
   // 走到体的尽头就是 done（值 undefined）
   if (last >= 0) {
     sx.emit(last, ret(genRes(undef(sp), true, sp), sp));
@@ -657,6 +717,8 @@ export function genToStateMachine(node, err) {
     letDecl(UNW, num(0, sp), sp),
     letDecl(RV, undef(sp), sp),
     letDecl(FIN, num(0, sp), sp),
+    letDecl(CAT, num(0, sp), sp),
+    letDecl(EX, undef(sp), sp),
   ];
   for (const f of fns) out.push(f);
   const seen = new Set();
