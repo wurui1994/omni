@@ -175,11 +175,13 @@ export const JS_ABI = {
   js_sym_desc: { js: '$js_sym_desc', c: 'omni_js_sym_desc', arity: 1 },
   js_sym_str: { js: '$js_sym_str', c: 'omni_js_sym_str', arity: 1 },
   // well-known Symbol：名字是编译期常量（iterator / asyncIterator / toPrimitive /
-  // toStringTag / hasInstance / …）
-  js_sym_wk: { js: '$js_sym_wk', c: 'omni_js_sym_wk', arity: 0, lit: ['name'] },
+  // toStringTag / hasInstance / …）。lit 的字段名**刻意不叫 name** —— OIR 的 Builtin
+  // 节点自己有一格 `name`（op 的名字），lit 铺进去会把它盖掉（量出来的：
+  // "js.builtin: toStringTag"）。
+  js_sym_wk: { js: '$js_sym_wk', c: 'omni_js_sym_wk', arity: 0, lit: ['wk'] },
   // 内建原型（Object / Function / Array / String / Number / Boolean / Symbol /
   // Error / Map / Set / RegExp / Iterator）—— 内建方法就住在这些对象上
-  js_realm_proto: { js: '$js_realm_proto', c: 'omni_js_realm_proto', arity: 0, lit: ['name'] },
+  js_realm_proto: { js: '$js_realm_proto', c: 'omni_js_realm_proto', arity: 0, lit: ['proto'] },
 
   js_map_new: { js: '$js_map_new', c: 'omni_js_map_new', arity: 0 },
   js_map_size: { js: '$js_map_size', c: 'omni_js_map_size', arity: 1 },

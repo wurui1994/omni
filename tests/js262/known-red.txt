@@ -3,8 +3,7 @@
 #
 # 2026-09-08 的基线：12 个全红。往下走的时候一行一行删。
 # 已经绿的（删掉的）：obj-accessor（字面量访问器 + 真 this）、obj-freeze（freeze/seal 那一族）。
-# 已经绿的（删掉的）：obj-accessor（字面量访问器 + 真 this）、obj-freeze（freeze/seal 那一族）、
-# obj-key-order（键序 + for-in）、for-in（自有 + 继承来的可枚举键）。
+# 已经绿的（删掉的）：obj-accessor、obj-freeze、obj-key-order、for-in、to-primitive。
 obj-defineproperty.js    # descriptor 里的 writable/enumerable 默认值还没对齐
 proto-chain.js           # Object.create(null) 与 setPrototypeOf 之后的方法查找
 symbol-basic.js          # Symbol 当键之后 Object.keys / getOwnPropertySymbols 的口径
@@ -12,4 +11,3 @@ this-call-apply-bind.js  # Array.prototype.join.call 这种"借内建方法"还�
 iter-protocol.js         # for-of / 展开 / 解构走 Symbol.iterator 协议
 class-static-field.js    # static 字段/方法与实例字段的口径
 class-extends.js         # instanceof Object 与 Object.prototype.toString 的 tag
-to-primitive.js          # ToPrimitive 与 Symbol.toPrimitive

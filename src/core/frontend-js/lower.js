@@ -129,6 +129,15 @@ function nestedFns(node, out = []) {
     out.push(node);
     return out;
   }
+  /* 对象字面量与类里的方法/访问器**没有 type 字段**（解析器把它们摊成
+   * `{ kind, key, params, rest, body }`，parser.js:908），而它们同样是"内层函数" ——
+   * 漏掉它们，被它们引用的外层局部量就不会装 cell，捕获时就成了未定义的名字
+   * （量出来的：`[Symbol.iterator]() { let i = 0; return { next() { … i … } }; }`
+   * 报 "unresolved identifier 'i'"）。 */
+  if (Array.isArray(node.params) && node.body && node.body.type === 'Block') {
+    out.push(node);
+    return out;
+  }
   eachChild(node, (x) => nestedFns(x, out));
   return out;
 }
@@ -2299,26 +2308,26 @@ const STATIC_PROPS = {
   /* well-known Symbol（ADR-0020 P1）：名字是编译期常量，所以走 lit。
      协议靠它们才立得住 —— for-of 找 Symbol.iterator、模板与 `+` 找 Symbol.toPrimitive、
      Object.prototype.toString 找 Symbol.toStringTag、instanceof 找 Symbol.hasInstance。 */
-  'Symbol.iterator': { op: 'js_sym_wk', lit: { name: 'iterator' } },
-  'Symbol.asyncIterator': { op: 'js_sym_wk', lit: { name: 'asyncIterator' } },
-  'Symbol.toPrimitive': { op: 'js_sym_wk', lit: { name: 'toPrimitive' } },
-  'Symbol.toStringTag': { op: 'js_sym_wk', lit: { name: 'toStringTag' } },
-  'Symbol.hasInstance': { op: 'js_sym_wk', lit: { name: 'hasInstance' } },
-  'Symbol.species': { op: 'js_sym_wk', lit: { name: 'species' } },
-  'Symbol.unscopables': { op: 'js_sym_wk', lit: { name: 'unscopables' } },
+  'Symbol.iterator': { op: 'js_sym_wk', lit: { wk: 'iterator' } },
+  'Symbol.asyncIterator': { op: 'js_sym_wk', lit: { wk: 'asyncIterator' } },
+  'Symbol.toPrimitive': { op: 'js_sym_wk', lit: { wk: 'toPrimitive' } },
+  'Symbol.toStringTag': { op: 'js_sym_wk', lit: { wk: 'toStringTag' } },
+  'Symbol.hasInstance': { op: 'js_sym_wk', lit: { wk: 'hasInstance' } },
+  'Symbol.species': { op: 'js_sym_wk', lit: { wk: 'species' } },
+  'Symbol.unscopables': { op: 'js_sym_wk', lit: { wk: 'unscopables' } },
   /* 内建原型当值用（ADR-0020 P1-f）：它们现在是真对象，内建方法就住在上面。
      于是 `Object.prototype.toString.call(x)`、`Array.prototype.join.call(a, "|")`
      这类"借方法"的写法通了 —— 后半段是普通的属性读 + 带接收者的调用。 */
-  'Object.prototype': { op: 'js_realm_proto', lit: { name: 'Object' } },
-  'Function.prototype': { op: 'js_realm_proto', lit: { name: 'Function' } },
-  'Array.prototype': { op: 'js_realm_proto', lit: { name: 'Array' } },
-  'String.prototype': { op: 'js_realm_proto', lit: { name: 'String' } },
-  'Number.prototype': { op: 'js_realm_proto', lit: { name: 'Number' } },
-  'Boolean.prototype': { op: 'js_realm_proto', lit: { name: 'Boolean' } },
-  'Symbol.prototype': { op: 'js_realm_proto', lit: { name: 'Symbol' } },
-  'RegExp.prototype': { op: 'js_realm_proto', lit: { name: 'RegExp' } },
-  'Map.prototype': { op: 'js_realm_proto', lit: { name: 'Map' } },
-  'Set.prototype': { op: 'js_realm_proto', lit: { name: 'Set' } },
+  'Object.prototype': { op: 'js_realm_proto', lit: { proto: 'Object' } },
+  'Function.prototype': { op: 'js_realm_proto', lit: { proto: 'Function' } },
+  'Array.prototype': { op: 'js_realm_proto', lit: { proto: 'Array' } },
+  'String.prototype': { op: 'js_realm_proto', lit: { proto: 'String' } },
+  'Number.prototype': { op: 'js_realm_proto', lit: { proto: 'Number' } },
+  'Boolean.prototype': { op: 'js_realm_proto', lit: { proto: 'Boolean' } },
+  'Symbol.prototype': { op: 'js_realm_proto', lit: { proto: 'Symbol' } },
+  'RegExp.prototype': { op: 'js_realm_proto', lit: { proto: 'RegExp' } },
+  'Map.prototype': { op: 'js_realm_proto', lit: { proto: 'Map' } },
+  'Set.prototype': { op: 'js_realm_proto', lit: { proto: 'Set' } },
 };
 
 const STATIC_SETS = {

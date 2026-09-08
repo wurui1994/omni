@@ -1627,6 +1627,7 @@ function $js_proto_of_prim(o) {
     case "string": return r.strP;
     case "real": case "int": return r.numP;
     case "bool": return r.boolP;
+    case "symbol": return r.symP;
     case "list": return r.arrP;
     case "function": return r.funP;
     case "Map": return r.mapP;
@@ -1744,6 +1745,9 @@ function $mkRealm() {
   });
   // Symbol.toStringTag 决定 [object X] 里的 X；没有就看 [[Class]]。
   $natm(r.iterP, "next", 0, () => $rt_error("Iterator.prototype.next is abstract"));
+  // Symbol 的两格：description 是访问器（规范如此），toString 给 "Symbol(desc)"
+  $js_def_acc(r.symP, "description", $nat("description", 0, (t) => $dynAsSym(t).d), undefined, false, true);
+  $natm(r.symP, "toString", 0, (t) => $js_sym_str(t));
   return r;
 }
 function $js_obj_to_string(t) {
