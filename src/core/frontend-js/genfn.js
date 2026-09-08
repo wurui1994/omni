@@ -393,8 +393,21 @@ class Split {
     if (e.type === 'Yield' || e.type === 'Await') return this.suspend(e, null, cur, ctx);
     if (e.type === 'Assign' && e.value && (e.value.type === 'Yield' || e.value.type === 'Await')) {
       if (e.op !== '=') {
-        this.err(sp, "a compound assignment from 'yield' / 'await' is not supported; split it into two statements");
-        return cur;
+        /* `s += await f()`：摊成两句 —— 先把挂起的值接进临时量，再做那次复合赋值。
+         * 目标只收"读两次也没差别"的形状（名字，或者对象是名字的成员）；别的照旧报错。
+         * 与规范差一点：规范先读左边再 await，这儿是 await 之后才读 —— 只有"左边是访问器
+         * 且 await 期间被改过"才看得出来，记在 ADR-0020。 */
+        const okTarget = e.target.type === 'Ident'
+          || (e.target.type === 'Member' && e.target.object.type === 'Ident' && !e.target.computed);
+        if (!okTarget) {
+          this.err(sp, "a compound assignment from 'yield' / 'await' is only supported on a name or a simple member; split it into two statements");
+          return cur;
+        }
+        const t = this.temp('c');
+        return this.stmts([
+          exprStmt(assign(ident(t, sp), e.value, sp), sp),
+          exprStmt({ ...e, value: ident(t, sp) }, sp),
+        ], cur, ctx);
       }
       if (e.target.type !== 'Ident') {
         this.err(sp, "'yield' / 'await' can only be assigned to a plain name; assign it to a local first");
