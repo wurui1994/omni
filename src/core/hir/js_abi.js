@@ -37,6 +37,9 @@ export const JS_ABI = {
   js_bitnot: { js: '$js_bitnot', c: 'omni_js_bitnot', arity: 1 },
   js_cmp: { js: '$js_cmp', c: 'omni_js_cmp', arity: 2, lit: ['op'], ret: 'bool' },
   js_eq: { js: '$js_eq', c: 'omni_js_eq', arity: 2, lit: ['strict'], ret: 'bool' },
+  /* Object.is（SameValue，规范 7.2.11）：与 === 只差两格 —— NaN 与自己相同、+0 与 -0 不同。
+     两条腿都是"先处理那两格、剩下的转手严格相等"。 */
+  js_same_value: { js: '$js_same_value', c: 'omni_js_same_value', arity: 2, ret: 'bool' },
 
   // ---------------------------------------------------------------- 输出
   // JS 的 String 是 UTF-16，落到 stdout 要转回 UTF-8。收成一个 op，让"什么时候转码"

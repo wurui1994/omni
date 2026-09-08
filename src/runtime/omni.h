@@ -503,6 +503,8 @@ omni_dyn omni_js_bitop(int op, omni_dyn a, omni_dyn b);
 omni_dyn omni_js_bitnot(omni_dyn a);
 bool omni_js_cmp(int op, omni_dyn a, omni_dyn b);
 bool omni_js_eq(bool strict, omni_dyn a, omni_dyn b);
+/* Object.is（SameValue）：NaN 与自己相同、+0 与 -0 不同，其余同严格相等 */
+bool omni_js_same_value(omni_dyn a, omni_dyn b);
 /* `x === "字面量"`。JS 的 switch 降成的是一条 if-else 链（lower.js 的 switchStmt），
    而编译器自己满是 switch (e.kind) 这种四十路的字符串分派：一路走下来就是四十次
    omni_js_eq 调用。特化成能内联的一条之后，不匹配的绝大多数只花"比标签 + 比长度"。

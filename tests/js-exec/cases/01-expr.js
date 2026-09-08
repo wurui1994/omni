@@ -58,3 +58,12 @@ console.log(`${oy + 1}`, JSON.stringify(oy = 7), oy);
 console.log("2" > "10", 2 > 10, "2" > 1, "10" < 9, "" < 1);
 console.log(null >= 0, null > 0, undefined > 0, true > 0, false >= 0);
 console.log("abc" < 1, 1 < "abc", "3" >= 3, "3" <= 3);
+
+// Object.is（SameValue）：与 === 只差 NaN 与 ±0 那两格
+console.log(Object.is(NaN, NaN), Object.is(-0, 0), Object.is(0, -0), Object.is(-0, -0));
+console.log(Object.is(1, 1), Object.is("a", "a"), Object.is(null, null), Object.is(1, "1"));
+console.log(Object.is(undefined, undefined), Object.is(NaN, 0 / 0), NaN === NaN, -0 === 0);
+// bigint 字面量后面的 / 是除号，不是正则的开头（词法那一格的歧义）。
+// 值用模板串印：console.log 直接印 bigint 时 node 会带 n，而这个值域里 bigint 与方言的
+// int64 是同一个标签，C 那条腿分不开（见 prelude 的 $js_disp）。
+console.log(`${5n / 2n} ${-7n % 3n} ${7n / 2n} ${10n / 5n}`);

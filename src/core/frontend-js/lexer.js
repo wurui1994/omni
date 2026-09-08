@@ -54,7 +54,9 @@ const PUNCT_JS = [
  */
 function regexAllowed(prev) {
   if (!prev) return true;
-  if (prev.kind === 'num' || prev.kind === 'str' || prev.kind === 'regex') return false;
+  // bigint 也是字面量（`5n / 2n` 里那个 `/` 是除号）—— 漏了这一格的时候，`/ 2n, -7n %`
+  // 被当成一个正则字面量吃掉，报的是"未终结的正则"（量出来的）
+  if (prev.kind === 'num' || prev.kind === 'bigint' || prev.kind === 'str' || prev.kind === 'regex') return false;
   if (prev.kind === 'ident') return false;
   if (prev.kind === 'lit') return false;
   if (prev.kind === 'tmpl_tail' || prev.kind === 'tmpl_full') return false;

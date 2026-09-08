@@ -211,6 +211,10 @@ omni_dyn omni_js_disp(omni_dyn v) {
   if (v.tag == OMNI_DYN_REAL && v.u.r == 0.0 && signbit(v.u.r)) {
     return omni_dyn_of_s16(omni_s16_of_utf8(omni_str_new("-0", 2)));
   }
+  /* bigint 的显示文本**不带 n**（两把尺子都印 30n，这里是有意的分叉）：这个值域里
+     JS 的 bigint 与方言的 int64 是同一个标签（OMNI_DYN_INT/UINT），C 这条腿分不开
+     "JS 里的 30n" 与 "方言里的 int 30" —— 加上 n 会让方言的 println 全都变成 77n
+     （量出来的：tests/oir 的 whole program）。见 ADR-0020 的口径那一节。 */
   return omni_js_str(v);
 }
 
@@ -457,6 +461,16 @@ bool omni_js_eq(bool strict, omni_dyn a, omni_dyn b) {
     case OMNI_DYN_STR16: return omni_s16_eq(a.u.s16, b.u.s16);
     default: return a.u.ref == b.u.ref;  /* 对象/数组/函数比同一性 */
   }
+}
+
+/* Object.is（SameValue，规范 7.2.11）：与 === 只差两格 —— NaN 与自己相同、+0 与 -0 不同。
+   与 prelude 的 $js_same_value 同一套分工：处理那两格，剩下的转手严格相等。 */
+bool omni_js_same_value(omni_dyn a, omni_dyn b) {
+  if (a.tag == OMNI_DYN_REAL && b.tag == OMNI_DYN_REAL) {
+    if (isnan(a.u.r) && isnan(b.u.r)) return true;
+    if (a.u.r == 0 && b.u.r == 0) return signbit(a.u.r) == signbit(b.u.r);
+  }
+  return omni_js_eq(true, a, b);
 }
 
 /* ------------------------------------------------ 字节缓冲（ADR-0011）

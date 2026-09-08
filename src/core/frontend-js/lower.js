@@ -3292,6 +3292,8 @@ const STATIC_CALLS = {
   /* ---- 真对象那一族（ADR-0020 P1）。`hasOwn` 从前接的是 js_obj_has，而那一条现在
      沿原型链走（`in` 的语义）—— 自有属性得问 js_obj_has_own，不然继承来的键也算"自有"。 */
   'Object.hasOwn': { op: 'js_obj_has_own', argc: 2, len: 2 },
+  // Object.is（SameValue）：NaN 与自己相同、+0 与 -0 不同
+  'Object.is': { op: 'js_same_value', argc: 2, len: 2 },
   'Object.create': { op: 'js_obj_new_p', argc: 1 },
   'Object.getPrototypeOf': { op: 'js_obj_proto_get', argc: 1, len: 1 },
   'Object.setPrototypeOf': { op: 'js_obj_proto_set', argc: 2 },

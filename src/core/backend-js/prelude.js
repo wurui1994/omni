@@ -1032,8 +1032,16 @@ function $js_cmp(op, a, b) {
   }
 }
 // 编译期常量参数排在实参前面，整张 ABI 表都是这个约定（hir/js_abi.js）
-function $js_eq(strict, a, b) {
-  const ta = $dynTag(a), tb = $dynTag(b);
+/* Object.is（SameValue，规范 7.2.11）：与 === 只差两格 —— NaN 与自己相同、+0 与 -0 不同。
+   剩下的转手严格相等（C 那份一样的分工）。 */
+function $js_same_value(a, b) {
+  if ($dynTag(a) === "real" && $dynTag(b) === "real") {
+    if (Number.isNaN(a) && Number.isNaN(b)) return true;
+    if (a === 0 && b === 0) return (1 / a) === (1 / b);
+  }
+  return $js_eq(true, a, b);
+}
+function $js_eq(strict, a, b) {  const ta = $dynTag(a), tb = $dynTag(b);
   if (!strict) {
     const an = ta === "null" || ta === "undefined";
     const bn = tb === "null" || tb === "undefined";
@@ -1075,8 +1083,15 @@ function $js_idx(v, dflt) {
   return Number.isNaN(v) ? 0 : Math.trunc(v);
 }
 /* console.log 印一格值：与 ToString 只差一处 —— **-0 印成 "-0"**。String(-0) 是 "0"，
-   而 qjs 与 node 的 console.log 都印 -0（量过），所以印这条路上单独一格 op。 */
-function $js_disp(v) { return typeof v === "number" && Object.is(v, -0) ? "-0" : $js_str(v); }
+   而 qjs 与 node 的 console.log 都印 -0（量过），所以印这条路上单独一格 op。
+   bigint **不补 n**（两把尺子都印 30n，这里是有意的分叉）：C 那条腿上 JS 的 bigint 与
+   方言的 int64 是同一个标签，分不开 "30n" 与"方言里的 int 30"，补了 n 方言的 println
+   就全错（量出来的：tests/oir 的 whole program 印成 77n）。数组/对象/Map/Set/函数/Symbol
+   的**检视**格式也不在这儿追：两把尺子自己就不一致（node 印 [ 'a' ]、qjs 印 [ "a" ]，
+   嵌套深了 qjs 还印 [Array]），照 String() 走。见 ADR-0020 的口径那一节。 */
+function $js_disp(v) {
+  return typeof v === "number" && Object.is(v, -0) ? "-0" : $js_str(v);
+}
 function $js_println(v) { $print($js_disp(v)); }
 // JS 后端这边 Omni 的 string 就是宿主 string，本来就是 UTF-16 码元序列，所以是恒等
 function $js_s16(s) { return s; }
@@ -1255,12 +1270,60 @@ function $js_str_trim(side, s) {
   const v = $js_asS16(s);
   return side === "l" ? v.trimStart() : side === "r" ? v.trimEnd() : v.trim();
 }
-// 只折 ASCII：C 侧不带 Unicode 大小写表，两边必须同样残缺才不会分叉
+/* 只折 ASCII：C 侧不带 Unicode 大小写表（整个运行时的口径都是 ASCII-only —— 正则那边
+   连 u 标志与 \p{...} 都是当场拒掉的）。碰上非 ASCII **当场报错**，不再悄悄按 ASCII 折：
+   量出来的静默分叉是 "Straße".toUpperCase() 给 "STRAßE"（两把尺子都给 "STRASSE"）、
+   "é".toUpperCase() 原样不动、"ΣΟΦΟΣ".toLowerCase() 也不动。这一族要么整张表要么拒掉，
+   半张表只会在别处再撒一次谎。 */
+/* 有大小写映射的码点（0x80 以上那一段）。表是从宿主量出来的 —— 判据就一行：
+     String.fromCodePoint(cp).toLowerCase() !== ch || .toUpperCase() !== ch
+   node 与 qjs 在这上面一致。C 那份是同一批数字（omni_js_str.c 的 CASED）。
+   落在这些范围里的字符要真表才折得对（ß -> SS 这种还会变长），所以**当场报错**；
+   不在表里的非 ASCII（CJK、标点、emoji）照原样留着 —— 那才是两把尺子的答案。 */
+const $JS_CASED = "b5,c0-d6,d8-f6,f8-137,139-18c,18e-1a9,1ac-1b9,1bc-1bd,1bf,1c4-220,222-233,23a-254,256-257,259,25b-25"
+  + "c,260-261,263-266,268-26c,26f,271-272,275,27d,280,282-283,287-28c,292,29d-29e,345,370-373,376-377,37"
+  + "b-37d,37f,386,388-38a,38c,38e-3a1,3a3-3d1,3d5-3f5,3f7-3fb,3fd-481,48a-52f,531-556,561-587,10a0-10c5,"
+  + "10c7,10cd,10d0-10fa,10fd-10ff,13a0-13f5,13f8-13fd,1c80-1c8a,1c90-1cba,1cbd-1cbf,1d79,1d7d,1d8e,1e00-"
+  + "1e9b,1e9e,1ea0-1f15,1f18-1f1d,1f20-1f45,1f48-1f4d,1f50-1f57,1f59,1f5b,1f5d,1f5f-1f7d,1f80-1fb4,1fb6-"
+  + "1fbc,1fbe,1fc2-1fc4,1fc6-1fcc,1fd0-1fd3,1fd6-1fdb,1fe0-1fec,1ff2-1ff4,1ff6-1ffc,2126,212a-212b,2132,"
+  + "214e,2160-217f,2183-2184,24b6-24e9,2c00-2c70,2c72-2c73,2c75-2c76,2c7e-2ce3,2ceb-2cee,2cf2-2cf3,2d00-"
+  + "2d25,2d27,2d2d,a640-a66d,a680-a69b,a722-a72f,a732-a76f,a779-a787,a78b-a78d,a790-a794,a796-a7ae,a7b0-"
+  + "a7dc,a7f5-a7f6,ab53,ab70-abbf,fb00-fb06,fb13-fb17,ff21-ff3a,ff41-ff5a,10400-1044f,104b0-104d3,104d8-"
+  + "104fb,10570-1057a,1057c-1058a,1058c-10592,10594-10595,10597-105a1,105a3-105b1,105b3-105b9,105bb-105b"
+  + "c,10c80-10cb2,10cc0-10cf2,10d50-10d65,10d70-10d85,118a0-118df,16e40-16e7f,16ea0-16eb8,16ebb-16ed3,1e"
+  + "900-1e943";
+let $jsCased = null;
+function $js_cased(cp) {
+  if ($jsCased === null) {
+    $jsCased = [];
+    for (const part of $JS_CASED.split(",")) {
+      const k = part.indexOf("-");
+      const a = parseInt(k < 0 ? part : part.slice(0, k), 16);
+      $jsCased.push(a, k < 0 ? a : parseInt(part.slice(k + 1), 16));
+    }
+  }
+  for (let i = 0; i < $jsCased.length; i += 2) {
+    if (cp >= $jsCased[i] && cp <= $jsCased[i + 1]) return true;
+  }
+  return false;
+}
+function $js_str_case_ascii(v, what) {
+  for (let i = 0; i < v.length; i++) {
+    const cp = v.codePointAt(i);
+    if (cp > 0xffff) i++;
+    if (cp > 0x7f && $js_cased(cp)) {
+      $rt_error(what + ": no Unicode case table for U+" + cp.toString(16).toUpperCase() + " (ADR-0020)");
+    }
+  }
+  return v;
+}
 function $js_str_lower(s) {
-  return $js_asS16(s).replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
+  const v = $js_str_case_ascii($js_asS16(s), "toLowerCase");
+  return v.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
 }
 function $js_str_upper(s) {
-  return $js_asS16(s).replace(/[a-z]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 32));
+  const v = $js_str_case_ascii($js_asS16(s), "toUpperCase");
+  return v.replace(/[a-z]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 32));
 }
 function $js_str_index_of(s, needle, from) {
   return $js_asS16(s).indexOf($js_asS16(needle), $js_idx(from, 0));
