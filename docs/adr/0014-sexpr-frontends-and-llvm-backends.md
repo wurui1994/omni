@@ -12744,6 +12744,44 @@ op 的次序、种子、答案都没变（同一批 op、同一个顺序）。�
 跑的是 asy 自己那份源码）没问题；pseudosphere 那处相位差来自 `revolution` 背面轮廓的弧长
 让 `asy__patlen` 里 `(int)(…+0.5)` 那个 round 跳了一格，与 spheresilhouette 同族。
 
+### 取向确定：主路是**代码层面完整的 OpenGL 实现**，`omni_r3.c` 退为备选
+
+`omni_r3.c`（CPU 光栅器）只是没有 GPU 时的兜底；第一任务是在我们自己的代码里有一份
+**与 asy 一致的 OpenGL 渲染实现**。已确认的地基：
+
+- 安装版 asy 同时带 `libasyopengl.so` 与 `libasyvulkan.so`，`asy -novulkan` 就切到 GL 那条；
+  本机跑通（`Exporting … using tiles of size 800x404 / 1 tile drawn`），离屏 + 分块导出都正常
+- **两条后端输出不同**（box3 上差 42799 字节），所以主路改成 GL 之后，三维那部分参考
+  必须用 `asy -novulkan` 重生成一份 —— 拿 Vulkan 的参考判 GL 的实现永远对不上
+- 工程量差一个量级：`glrender.cc` **1468 行**，`vkrender.cc` 4942 行
+
+**照抄清单（glrender.cc:265-369，3.14 发布包那一棵）** —— 所有片元着色器都是同一个
+`shaders/fragment.glsl`，靠 `#define` 分化；顶点是 `shaders/vertex.glsl`：
+
+- `ssbo` 是**运行期能力检查**：先试编 `count.glsl`（`countShader`），编得出来才
+  `#define HAVE_SSBO`。本机 GL 封顶 4.1、构建里 SSBO 也是关的 → **`ssbo == 0`**，
+  于是走 `glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)` ——
+  **普通 alpha 混合，没有次序无关透明**。（我在 `omni_r3.c` 里照 `blend.glsl` 抄的那套
+  逐像素链是 SSBO 那一路的语义，GL 主路上**不该**用它。）
+- 各 shader 的 `#define` 组合（按源码顺序，`shaderParams` 是个栈）：
+  - 公共：`USE_IBL`（开 IBL 时）、`MATERIAL`、`ORTHOGRAPHIC`（正交时）、
+    `Nlights <N>`、`Nmaterials <N>`
+  - `pixelShader`       = 公共 + `WIDTH`
+  - `materialShader[0]` = 公共 + `NORMAL`（+ `HAVE_INTERLOCK`，非 SSBO 时不涉及）
+  - `materialShader[1]` = 上面 + `OPAQUE`
+  - `colorShader[0]`    = 公共 + `COLOR`；`colorShader[1]` = 再 + `OPAQUE`
+  - `generalShader[0]`  = 公共 + `GENERAL`（+ `WIREFRAME`，`mode != DRAWMODE_NORMAL` 时）；
+    `generalShader[1]` = 再 + `OPAQUE`
+  - `transparentShader` = 公共 + `TRANSPARENT`
+  - SSBO 那一路才有的 `compress/zero/blend`（`screen.glsl` + `compress.glsl` …）**本机不走**
+- `interlock = ssbo && GPUinterlock`，NVIDIA 30xx 上强制关 —— 非 SSBO 时恒为假
+
+**下一步（写代码）**：`src/runtime/omni_r3_gl.c` —— GLFW 离屏上下文（本机已装 glfw 3.5）、
+从 `<sysdir>/shaders/` 读同一批 `.glsl` 按上表拼 `#define` 编译、按 asy 的顺序上传
+顶点/材质/光照并绘制（不透明 → 透明，普通 alpha 混合）、分块 readback，
+对外接口与 `omni_r3_render` 一致；`OMNI_R3_BACKEND=gl|cpu` 选择，gl 为主。
+判据：先用 `asy -novulkan` 重生成三维参考，再逐个例子对。
+
 ### 有了同源 oracle 之后：三个机器常量、以及"最大差 16"那一档的改名
 
 **先把 oracle 对齐。** 装着的 asy 是 SourceForge 的 **3.14 发布包**，而 `reference/asymptote`
