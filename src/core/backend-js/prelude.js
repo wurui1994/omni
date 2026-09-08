@@ -1804,6 +1804,10 @@ function $mkRealm() {
     setP: new $JSObj(objP, "Set"),
     reP: new $JSObj(objP, "RegExp"),
     iterP: new $JSObj(objP, "Iterator"),
+    // globalThis（ADR-0020 P4）：这个值域里没有全局环境记录（模块的顶层名字是模块局部的），
+    // 所以它就是**一格普通的真对象**，每个 realm 一份。挂上去的东西读得回来，
+    // 内建（Math / JSON …）不在它身上 —— 那是画出来的边界。
+    gt: new $JSObj(objP, "Object"),
   };
   $R = r;
   $natm(objP, "hasOwnProperty", 1, (t, a) => $js_isobj(t) && t.ps.has($js_pkey(a[0])));
@@ -1956,7 +1960,9 @@ function $js_obj_from_entries(pairs) {
   for (const p of $js_iter(pairs)) $js_setp(o, $js_idx_get(p, 0), $js_idx_get(p, 1));
   return o;
 }
-function $js_realm_proto(name) {  const r = $realm();
+function $js_global_this() { return $realm().gt; }
+function $js_realm_proto(name) {
+  const r = $realm();
   switch (name) {
     case "Object": return r.objP;
     case "Function": return r.funP;

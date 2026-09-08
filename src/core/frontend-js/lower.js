@@ -1696,6 +1696,10 @@ class Lower {
       this.err(e.span, `'${e.name}' is a native host function; it can only be called, not used as a value`);
       return undefExpr();
     }
+    /* globalThis（ADR-0020 P4）：这个值域里没有全局环境记录，所以它就是一格普通的真对象
+     * （每个 realm 一份）。挂上去的东西读得回来；内建（Math / JSON …）不在它身上 ——
+     * 那是画出来的边界，不是悄悄给个空对象。用户自己声明了同名变量的话上面就接住了。 */
+    if (e.name === 'globalThis') return op('js_global_this', []);
     if (STATIC_NS.has(e.name)) {
       this.err(e.span, `'${e.name}' can only be used as a member base, e.g. ${e.name}.something`);
       return undefExpr();
@@ -1723,7 +1727,7 @@ class Lower {
   typeofIdent(e) {
     const n = e.name;
     if (n === 'undefined') return 'undefined';
-    if (n === 'NaN' || n === 'Infinity') return null;
+    if (n === 'NaN' || n === 'Infinity' || n === 'globalThis') return null;
     if (this.lookup(n) || this.globals.has(n) || this.regexConsts.has(n)) return null;
     if (n === 'arguments' && this.fn && !this.fn.isMain && !this.fn.isArrowFn) return null;
     if (this.topFns.has(n) || this.classes.has(n) || this.natives.has(n)) return 'function';
