@@ -3366,6 +3366,10 @@ const STATIC_CALLS = {
   'Reflect.deleteProperty': { op: 'js_obj_del_p', argc: 2 },
   'Reflect.isExtensible': { op: 'js_obj_is_ext', argc: 1 },
   'Reflect.preventExtensions': { op: 'js_obj_prevent_ext', argc: 1 },
+  /* Reflect.apply / Reflect.construct：就是"带 this 的调用"与"拿函数值当构造器"那两格 op
+     （第三格实参本来就是一格数组，与 js_call_this / js_fn_construct 的形状对得上）。 */
+  'Reflect.apply': { op: 'js_call_this', argc: 3, len: 3 },
+  'Reflect.construct': { op: 'js_fn_construct', argc: 2, len: 2 },
   'Array.isArray': { op: 'js_arr_is_array', argc: 1, len: 1 },
   'Array.from': { op: 'js_arr_from', argc: 2, len: 1 },
   'String.fromCharCode': { op: 'js_str_of_char_code', argc: 1, fold: 'js_add' },

@@ -1868,19 +1868,34 @@ function $js_str_idx_keys(s) {
   for (let i = 0; i < v.length; i++) out.push($js_str(i));
   return out;
 }
+/* Object.keys / values / entries 的 list 那一支：下标先按数值升序，再是**旁表**里那些
+   字符串键（JS 里数组也是对象，见 $js_xprops）。从前这一支落到 $js_dict_of 上、当场报
+   "list is not an object"（量出来的：Object.entries([7]) 该给 [["0",7]]）。 */
+function $js_arr_own_keys(a) {
+  const out = [];
+  for (let i = 0; i < a.length; i++) out.push($js_str(i));
+  const x = $js_xprops(a, false);
+  if (x !== undefined) {
+    for (const k of x.keys()) if (typeof k === "string" && !$js_isidx(k)) out.push(k);
+  }
+  return out;
+}
 function $js_obj_keys(o) {
   if ($js_isobj(o)) return $js_own_keys(o, "e");
   if ($dynTag(o) === "string") return $js_str_idx_keys(o);
+  if ($dynTag(o) === "list") return $js_arr_own_keys(o);
   return [...$js_dict_of(o).keys()];
 }
 function $js_obj_values(o) {
   if ($js_isobj(o)) return $js_own_keys(o, "e").map((k) => $js_getp(o, k, undefined));
   if ($dynTag(o) === "string") return [...$js_asS16(o)].map((c) => c);
+  if ($dynTag(o) === "list") return $js_arr_own_keys(o).map((k) => $js_idx_get(o, k));
   return [...$js_dict_of(o).values()];
 }
 function $js_obj_entries(o) {
   if ($js_isobj(o)) return $js_own_keys(o, "e").map((k) => [k, $js_getp(o, k, undefined)]);
   if ($dynTag(o) === "string") return $js_str_idx_keys(o).map((k, i) => [k, $js_asS16(o)[i]]);
+  if ($dynTag(o) === "list") return $js_arr_own_keys(o).map((k) => [k, $js_idx_get(o, k)]);
   return [...$js_dict_of(o)].map(([k, v]) => [k, v]);
 }
 /* Object.getOwnPropertyDescriptors（复数）：每一格自有属性一份描述符，装进一格新对象。
@@ -3298,6 +3313,12 @@ function $js_map_delete(m, k) { return $js_map_of(m).delete($js_key(k)); }
 function $js_map_keys(m) { return [...$js_map_of(m).values()].map((p) => p[0]); }
 function $js_map_values(m) { return [...$js_map_of(m).values()].map((p) => p[1]); }
 function $js_map_entries(m) { return [...$js_map_of(m).values()]; }
+/* Map / Set 的 forEach：回调收 (value, key, map) 与 (value, value, set)（规范 24.1.3.5
+   与 24.2.3.6 —— Set 那边两格都是元素本身）。从前整族缺失，m.forEach(...) 在运行期
+   报 "undefined is not a function"。 */
+function $js_map_for_each(m, f) {
+  for (const e of [...$js_map_of(m).values()]) $js_call3(f, e[1], e[0], m);
+}
 
 function $js_set_new() { return new $JsSet(); }
 function $js_set_size(s) { return $js_set_of(s).size; }
@@ -3305,6 +3326,11 @@ function $js_set_has(s, v) { return $js_set_of(s).has($js_key(v)); }
 function $js_set_add(s, v) { $js_set_of(s).set($js_key(v), v); return s; }
 function $js_set_delete(s, v) { return $js_set_of(s).delete($js_key(v)); }
 function $js_set_items(s) { return [...$js_set_of(s).values()]; }
+function $js_set_for_each(s, f) {
+  for (const v of [...$js_set_of(s).values()]) $js_call3(f, v, v, s);
+}
+// Set 的 entries()：每格是 [v, v]（规范 24.2.3.5 —— 键与值都是元素本身）
+function $js_set_entries(s) { return [...$js_set_of(s).values()].map((v) => [v, v]); }
 /* Set 的集合运算（ES2025）。实参只认**真 Set**（qjs 那边非 set-like 是 TypeError，
    这个值域里没有可 catch 的错，所以由 $js_set_of 当场报）。次序照规范量过的那样：
      union            先 this 的次序，再把 other 里新的接在后面

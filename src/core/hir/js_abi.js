@@ -320,6 +320,13 @@ export const JS_ABI = {
   js_map_keys: { js: '$js_map_keys', c: 'omni_js_map_keys', arity: 1 },
   js_map_values: { js: '$js_map_values', c: 'omni_js_map_values', arity: 1 },
   js_map_entries: { js: '$js_map_entries', c: 'omni_js_map_entries', arity: 1 },
+  /* Map / Set 的 forEach：回调收 (value, key, map) 与 (value, value, set)（规范 24.1.3.5、
+     24.2.3.6 —— Set 那边两格都是元素本身，不是下标）。 */
+  js_map_for_each: { js: '$js_map_for_each', c: 'omni_js_map_for_each', arity: 2, ret: 'void', throws: true },
+  js_set_for_each: { js: '$js_set_for_each', c: 'omni_js_set_for_each', arity: 2, ret: 'void', throws: true },
+  /* Set 的 entries()：每格是 [v, v]（规范 24.2.3.5 —— 键与值都是元素本身）。
+     keys / values 在 Set 上就是元素那一串，走 js_set_items。 */
+  js_set_entries: { js: '$js_set_entries', c: 'omni_js_set_entries', arity: 1 },
 
   js_set_new: { js: '$js_set_new', c: 'omni_js_set_new', arity: 0 },
   js_set_size: { js: '$js_set_size', c: 'omni_js_set_size', arity: 1 },
@@ -666,7 +673,7 @@ export const JS_METHODS = {
   indexOf: { on: { list: 'js_arr_index_of', string: 'js_str_index_of', bytes: 'js_buf_index_of' } },
   lastIndexOf: { on: { list: 'js_arr_last_index_of', string: 'js_str_last_index_of' } },
   includes: { on: { list: 'js_arr_includes', string: 'js_str_includes', bytes: 'js_buf_includes' } },
-  entries: { on: { list: 'js_arr_entries', Map: 'js_map_entries' } },
+  entries: { on: { list: 'js_arr_entries', Map: 'js_map_entries', Set: 'js_set_entries' } },
 
   // Array
   push: { on: { list: 'js_arr_push' } },
@@ -710,7 +717,7 @@ export const JS_METHODS = {
   join: { on: { list: 'js_arr_join', bytes: 'js_buf_join' } },
   map: { on: { list: 'js_arr_map' } },
   filter: { on: { list: 'js_arr_filter' } },
-  forEach: { on: { list: 'js_arr_for_each' } },
+  forEach: { on: { list: 'js_arr_for_each', Map: 'js_map_for_each', Set: 'js_set_for_each' } },
   some: { on: { list: 'js_arr_some' } },
   every: { on: { list: 'js_arr_every' } },
   find: { on: { list: 'js_arr_find' } },
@@ -741,8 +748,8 @@ export const JS_METHODS = {
   isDisjointFrom: { on: { Set: 'js_set_is_disjoint' } },
   has: { on: { Map: 'js_map_has', Set: 'js_set_has' } },
   delete: { on: { Map: 'js_map_delete', Set: 'js_set_delete' } },
-  keys: { on: { Map: 'js_map_keys', list: 'js_arr_keys' } },
-  values: { on: { Map: 'js_map_values', list: 'js_arr_values' } },
+  keys: { on: { Map: 'js_map_keys', list: 'js_arr_keys', Set: 'js_set_items' } },
+  values: { on: { Map: 'js_map_values', list: 'js_arr_values', Set: 'js_set_items' } },
 
   // Number。toString 的接收者还有 int（这个值域里的 bigint）与 bool ——
   // 它们本来落到"取属性再当函数调"的兜底上，于是 (5n).toString() 给出 [object Number]。

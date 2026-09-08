@@ -162,3 +162,22 @@ console.log(`ord ${[em.set("a", 1).size, em.size, em.set("b", 2).size].join(",")
 let cnt = 0;
 function bump() { cnt++; return cnt; }
 console.log(`ord ${[bump(), cnt, bump(), cnt].join(",")} ${JSON.stringify({ p: bump(), q: cnt })}`);
+
+/* Map / Set 的 forEach 与 Set 的 entries / keys / values（回调收 (v, k, map) 与
+   (v, v, set)），以及 Object.keys/values/entries 的**数组**那一支（下标先，旁表里的
+   字符串键在后）。这几格从前都是运行期 "undefined is not a function" 或
+   "list is not an object"。 */
+const fm = new Map([["a", 1], ["b", 2]]);
+const fmOut = [];
+fm.forEach((v, kk, mm) => fmOut.push(`${kk}=${v}/${mm.size}`));
+console.log(`fe ${fmOut.join(" ")}`);
+const fs = new Set([3, 4]);
+const fsOut = [];
+fs.forEach((v, v2, ss) => fsOut.push(`${v}=${v2}/${ss.size}`));
+console.log(`fe ${fsOut.join(" ")} ${[...fs.entries()].map((e) => e.join(":")).join(",")}`);
+console.log(`fe ${[...fs.keys()].join(",")} ${[...fs.values()].join(",")}`);
+console.log(`ok ${Object.keys([7, 8]).join(",")} ${Object.values([7, 8]).join(",")}`);
+console.log(`ok ${JSON.stringify(Object.entries([7]))} ${Object.keys("ab").join(",")}`);
+const okp = [1, 2];
+okp.foo = "x";
+console.log(`ok ${Object.keys(okp).join(",")} ${Object.values(okp).join(",")}`);

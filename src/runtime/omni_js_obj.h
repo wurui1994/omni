@@ -168,8 +168,38 @@ static omni_dyn omni_js_str_idx_keys(omni_s16 v) { \
   } \
   return omni_js_arr_wrap(out); \
 } \
+/* list 的自有键：下标先按数值升序，再是**旁表**里那些非下标形状的字符串键（JS 里数组
+   也是对象）。与 prelude 的 $js_arr_own_keys 同一套判据 —— 从前 Object.keys/values/
+   entries 的 list 那一支落到 omni_js_dict_of 上、当场报 "list is not an object"
+   （量出来的：Object.entries([7]) 该给 [["0",7]]）。 */ \
+static omni_dyn omni_js_arr_own_keys(omni_dyn a) { \
+  LT l = (LT)a.u.ref; \
+  LT out = LT##_new(); \
+  DT x = omni_js_xprops_(a, false); \
+  for (int64_t i = 0; i < l->len; i++) { \
+    LT##_push(out, omni_js_str(omni_dyn_of_real((double)i))); \
+  } \
+  if (x != NULL) { \
+    for (int64_t i = 0; i < x->n; i++) { \
+      if (!x->live[i]) continue; \
+      if (omni_js_dec_index(x->keys[i]) >= 0) continue; \
+      LT##_push(out, omni_dyn_of_s16(omni_s16_of_utf8(x->keys[i]))); \
+    } \
+  } \
+  return omni_js_arr_wrap(out); \
+} \
+/* 上面那串键各自的值。**不能用 omni_js_idx_get** —— 它在 str_arr 那一段里、比这一段后
+   展开；下标直接读元素，别的名字落回旁表（omni_js_obj_getk）。 */ \
+static omni_dyn omni_js_arr_own_get(omni_dyn a, omni_dyn key) { \
+  LT l = (LT)a.u.ref; \
+  omni_str k = omni_js_prop(key); \
+  int64_t idx = omni_js_dec_index(k); \
+  if (idx >= 0 && idx < l->len) return l->items[idx]; \
+  return omni_js_obj_getk(a, k); \
+} \
 static omni_dyn omni_js_obj_keys(omni_dyn o) { \
   if (o.tag == OMNI_DYN_STR16) return omni_js_str_idx_keys(o.u.s16); \
+  if (o.tag == OMNI_DYN_LIST) return omni_js_arr_own_keys(o); \
   DT d = omni_js_dict_of(o); \
   LT out = LT##_new(); \
   LT##_reserve(out, d->count); \
@@ -187,6 +217,15 @@ static omni_dyn omni_js_obj_values(omni_dyn o) { \
       sout->items[sout->len++] = omni_dyn_of_s16(omni_s16_slice(v, i, i + 1)); \
     } \
     return omni_js_arr_wrap(sout); \
+  } \
+  if (o.tag == OMNI_DYN_LIST) { \
+    LT ks = omni_js_arr_of(omni_js_arr_own_keys(o)); \
+    LT lout = LT##_new(); \
+    LT##_reserve(lout, ks->len); \
+    for (int64_t i = 0; i < ks->len; i++) { \
+      lout->items[lout->len++] = omni_js_arr_own_get(o, ks->items[i]); \
+    } \
+    return omni_js_arr_wrap(lout); \
   } \
   DT d = omni_js_dict_of(o); \
   LT out = LT##_new(); \
@@ -208,6 +247,20 @@ static omni_dyn omni_js_obj_entries(omni_dyn o) { \
       sout->items[sout->len++] = omni_js_arr_wrap(p2); \
     } \
     return omni_js_arr_wrap(sout); \
+  } \
+  if (o.tag == OMNI_DYN_LIST) { \
+    LT ks = omni_js_arr_of(omni_js_arr_own_keys(o)); \
+    LT lout = LT##_new(); \
+    LT##_reserve(lout, ks->len); \
+    for (int64_t i = 0; i < ks->len; i++) { \
+      LT p3 = LT##_new(); \
+      LT##_reserve(p3, 2); \
+      p3->items[0] = ks->items[i]; \
+      p3->items[1] = omni_js_arr_own_get(o, ks->items[i]); \
+      p3->len = 2; \
+      lout->items[lout->len++] = omni_js_arr_wrap(p3); \
+    } \
+    return omni_js_arr_wrap(lout); \
   } \
   DT d = omni_js_dict_of(o); \
   LT out = LT##_new(); \
@@ -316,6 +369,41 @@ static omni_dyn omni_js_set_items(omni_dyn s) { \
   LT out = LT##_new(); \
   LT##_reserve(out, d->count); \
   for (int64_t i = 0; i < d->n; i++) if (d->live[i]) out->items[out->len++] = d->vals[i]; \
+  return omni_js_arr_wrap(out); \
+} \
+/* Map / Set 的 forEach：回调收 (value, key, map) 与 (value, value, set)（规范 24.1.3.5、
+   24.2.3.6 —— Set 那边两格都是元素本身）。键是任意值，所以走 omni_js_call 现拼一格
+   三实参的表：固定三格的 omni_js_call3 第二格只收 int64 下标。 */ \
+static void omni_js_map_for_each(omni_dyn m, omni_dyn f) { \
+  LT es = omni_js_arr_of(omni_js_map_entries(m)); \
+  for (int64_t i = 0; i < es->len; i++) { \
+    LT p = omni_js_arr_of(es->items[i]); \
+    const omni_dyn tmp[3] = { p->len > 1 ? p->items[1] : omni_dyn_undef(), \
+                              p->len > 0 ? p->items[0] : omni_dyn_undef(), m }; \
+    omni_js_call(f, LT##_from(tmp, 3)); \
+  } \
+} \
+static void omni_js_set_for_each(omni_dyn s, omni_dyn f) { \
+  LT xs = omni_js_arr_of(omni_js_set_items(s)); \
+  for (int64_t i = 0; i < xs->len; i++) { \
+    const omni_dyn tmp[3] = { xs->items[i], xs->items[i], s }; \
+    omni_js_call(f, LT##_from(tmp, 3)); \
+  } \
+} \
+/* Set 的 entries()：每格是 [v, v]（规范 24.2.3.5 —— 键与值都是元素本身） */ \
+static omni_dyn omni_js_set_entries(omni_dyn s) { \
+  LT xs = omni_js_arr_of(omni_js_set_items(s)); \
+  LT out = LT##_new(); \
+  LT##_reserve(out, xs->len); \
+  for (int64_t i = 0; i < xs->len; i++) { \
+    LT pair = LT##_new(); \
+    LT##_reserve(pair, 2); \
+    pair->items[0] = xs->items[i]; \
+    pair->items[1] = xs->items[i]; \
+    pair->len = 2; \
+    out->items[i] = omni_js_arr_wrap(pair); \
+  } \
+  out->len = xs->len; \
   return omni_js_arr_wrap(out); \
 } \
 /* new Map(pairs) / new Set(items)。初值收 list，**也收同类容器**（浅拷贝）；
