@@ -6578,13 +6578,30 @@ private real asy__arcpart3(triple z0, triple c0, triple c1, triple z1,
     + asy__arcpart3(z0, c0, c1, z1, m, b, depth - 1);
 }
 
-real arclength(triple z0, triple c0, triple c1, triple z1) {
+private real asy__arclen3full(triple z0, triple c0, triple c1, triple z1) {
   return asy__arcpart3(z0, c0, c1, z1, 0, 1, 24);
+}
+
+// **`arclength(triple,triple,triple,triple)` 回的是真弧长的三分之一** —— 这不是笔误，
+// 是参考实现的事实：path3.cc:272-280 的 `derivative()` 头上写着
+// "Calculate the coefficients of a Bezier derivative **divided by 3**"，而
+// `ds()`（path3.cc:355-361）直接拿这三个系数开根号、`arcLength()` 就地做自适应 Simpson
+// 积分（:365-374），**没有把那个 3 乘回去**。量出来的（asy -noV）：
+//   arclength((0,0,0),(1/3,0,0),(2/3,0,0),(1,0,0)) = 0.333333333333333
+//   arclength((0,0,0)--(1,0,0)) = 1、arclength((0,0,0)..(0,1,0)) = 1
+// 也就是说 path3 那一支是真长度（直段取弦长、曲段走 cubiclength 自己那一趟），
+// 只有这个四点版本是 1/3。
+// 为什么非要照它：three_tube.asy:186 的 `rL=r*arclength(z0,c0,c1,z1)*tubethreshold`
+// 就吃这个值 —— 我们从前回真长度，rL 大三倍，管子的自适应切分多切了 2.8 倍
+// （四段那个探针：我们 977 个 tube 面片，参考 348），位图上就是"整条管子差 0.35%"。
+real arclength(triple z0, triple c0, triple c1, triple z1) {
+  return asy__arclen3full(z0, c0, c1, z1) / 3;
 }
 
 private real asy__seglen3(path3 p, int i) {
   if (straight(p, i)) return length(point(p, i + 1) - point(p, i));
-  return arclength(point(p, i), postcontrol(p, i), precontrol(p, i + 1), point(p, i + 1));
+  return asy__arclen3full(point(p, i), postcontrol(p, i),
+                          precontrol(p, i + 1), point(p, i + 1));
 }
 
 real arclength(path3 p) {
