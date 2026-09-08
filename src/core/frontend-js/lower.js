@@ -1197,7 +1197,15 @@ class Lower {
       // 记成编译期常量了，这里什么都不发
       if (d.id.type === 'Ident' && this.fn.isMain && this.fn.scopes.length === 1
           && this.regexConsts.has(d.id.name)) continue;
-      const init = () => (d.init ? this.expr(d.init) : undefExpr());
+      /* fn.name（ADR-0020）：规范里箭头与匿名函数表达式的 name 来自**赋值目标** ——
+       * `const g = () => {}` 的 `g.name` 是 "g"。所以这一处的初始化式要带上名字。 */
+      const init = () => {
+        if (d.init && d.id.type === 'Ident'
+          && (d.init.type === 'Arrow' || (d.init.type === 'FuncExpr' && !d.init.id))) {
+          return this.closureExpr(d.init, d.id.name, { fnName: d.id.name });
+        }
+        return d.init ? this.expr(d.init) : undefExpr();
+      };
       if (d.id.type === 'Ident') out.push(...this.defineVar(d.id.name, init));
       else out.push(...this.bindPattern(d.id, init()));
     }
@@ -1941,9 +1949,20 @@ class Lower {
       out = op('js_obj_set', [out, key, p.method
         ? this.closureExpr(fnNodeOfProp(p), p.computed ? 'method' : this.keyName(p.key, p.span),
           { fnName: p.computed ? '' : this.keyName(p.key, p.span) })
-        : this.expr(p.value)]);
+        : this.propValue(p)]);
     }
     return out;
+  }
+
+  /** 属性值。匿名函数拿**属性名**当 name（规范如此：`{ m: () => {} }` 的 m.name 是 "m"） */
+  propValue(p) {
+    const v = p.value;
+    const anon = v && (v.type === 'Arrow' || (v.type === 'FuncExpr' && !v.id));
+    if (anon && !p.computed) {
+      const n = this.keyName(p.key, p.span);
+      return this.closureExpr(v, n, { fnName: n });
+    }
+    return this.expr(v);
   }
 
   unary(e) {
@@ -2675,7 +2694,14 @@ class Lower {
         return op('js_idx_set', [this.expr(t.object), key, this.expr(e.value)]);
       }
       const lv = this.lvalue(t, e.span);
-      return lv ? lv.set(this.expr(e.value)) : undefExpr();
+      if (!lv) return undefExpr();
+      /* `later = () => {}` 的 name 也来自赋值目标（与 `const g = …` 同一条规范） */
+      const anon = e.value
+        && (e.value.type === 'Arrow' || (e.value.type === 'FuncExpr' && !e.value.id));
+      if (anon && t.type === 'Ident') {
+        return lv.set(this.closureExpr(e.value, t.name, { fnName: t.name }));
+      }
+      return lv.set(this.expr(e.value));
     }
     const lv = this.lvalue(t, e.span);
     if (!lv) return undefExpr();

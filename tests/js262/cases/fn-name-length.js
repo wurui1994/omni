@@ -28,6 +28,15 @@ class C {
 console.log(new C().hi.name, new C().hi.length);
 console.log(C.there.name, C.there.length);
 
+// 匿名函数的 name 来自**赋值目标**（规范如此）：声明、赋值、属性各一处
+const arrow = () => {};
+const anon = function () {};
+let later;
+later = () => {};
+console.log(arrow.name, anon.name, later.name);
+const holder = { m: () => {}, n: function () {} };
+console.log(holder.m.name, holder.n.name);
+
 // 内建的静态面（Object.keys / Math.max 那一族）在这个值域里**只能调用**，取不出函数值来
 // （封闭 ABI，ADR-0011 决策 2），所以它们的 name / length 不在这条用例里。
 
