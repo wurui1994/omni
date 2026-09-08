@@ -145,6 +145,10 @@ typedef struct {
   double lcol[R3_MAXLIGHT][3];
   /* 视景体（setDimensions 算出来的）*/
   double xmin, xmax, ymin, ymax, znear, zfar;
+  /* `initDisplay` 算出来的**显示尺寸**（不是位图尺寸）。细分判据里的 `size2` 要它：
+     asy 是 `hypot(Width,Height)`（renderBase.cc:274），而 Width/Height 是这一对。
+     0 = 没算出来（那一支退回按位图算，见 r3_res_for）。 */
+  int dispW, dispH;
   /* 投影矩阵，列主序（与 glm 一样：P[col][row]）*/
   double P[4][4];
   /* 细分判据 */
@@ -660,7 +664,18 @@ static double r3_res_for(const r3scene *s, const r3v *p, int n) {
    * 也就是说那三行不是这一格的出处（真正的出处是 drawsurface.cc:297-316 那一族），
    * 已经退回视景体这一版。斜相机那 2.8% 与这一格无关。 */
   double w = sc * (s->xmax - s->xmin), h = sc * (s->ymax - s->ymin);
+  /* `size2`：asy 是 `hypot(Width,Height)`，**Width/Height 是 initDisplay 出来的显示尺寸**
+   * （renderBase.cc:274，box3 上是 887x769 那一档），不是位图尺寸。我们从前一直用
+   * `hypot(fw,fh)` —— 那比它大 2~4 倍，于是 res 更小、每一片都比参考分得更细，
+   * 曲面的轮廓多边形因此与参考不同（不打光的球上 4192/480000 个字节差全是这一类）。
+   * `OMNI_R3_SIZE2=full` 退回旧的按位图算，`=数` 直接指定（标定用）。 */
   double d = hypot((double) s->fw, (double) s->fh);
+  { const char *e = getenv("OMNI_R3_SIZE2");
+    double forced = e ? atof(e) : 0.0;
+    if (e && strcmp(e, "full") == 0) { /* 用上面那个 */ }
+    else if (forced > 0) d = forced;
+    else if (s->dispW > 0 && s->dispH > 0)
+      d = hypot((double) s->dispW, (double) s->dispH); }
   /* **就是上面那串公式，不乘任何系数。** 这一格我一度乘过 √2（"一个像素的对角线"），
    * 是拿一把尺子标出来的；第二把尺子把它推翻了，记在这儿免得再犯：
    *   不打光的大球（`draw(unitsphere,yellow,light=nolight)`，位图 4320000 字节）：
@@ -1012,9 +1027,11 @@ static void r3_set_dimensions(r3scene *s) {
        两条路算出同一个值）。
        **两条腿的规矩不同**：下面那一串是拿 **Vulkan** 参考标定出来的（box3 90228→2148
        那一刀），CPU 光栅器仍旧走它；GL 这条腿走 `A`。这不矛盾 —— vkrender.cc:343 与
-       glrender.cc:1220 给 setDimensions 的 Width/Height 本来就是两个来源。 */
-    if (r3_backend_is_gl && !ef) { aspect = A; }
-    else {
+       glrender.cc:1220 给 setDimensions 的 Width/Height 本来就是两个来源。
+       **注意下面那一串照旧要算**：`initDisplay` 出来的 Width/Height 还有第二个用处 ——
+       细分判据里的 `size2 = hypot(Width,Height)`（renderBase.cc:274），见 r3_res_for。 */
+    double aspectFit = A;
+    {
     /* `OMNI_R3_ASPECT` 还收一个**数**（标定用）：直接拿它当视景体长宽比。
        是为了反解"参考那一侧到底用了哪个 aspect" —— 见 r3_depthfar 上面那段账。 */
     double forced = ef ? atof(ef) : 0.0;
@@ -1055,8 +1072,8 @@ static void r3_set_dimensions(r3scene *s) {
        1.15345 附近（1212 字节、99.95%）—— 与 1090/945 只差 1e-5。 */
     double wpt = s->ptw, hpt = s->pth;
     int havept = wpt > 0 && hpt > 0 && !(ef && strcmp(ef, "old") == 0);
-    if (ef && strcmp(ef, "full") == 0) aspect = A;
-    else if (forced > 0) aspect = forced;
+    if (ef && strcmp(ef, "full") == 0) aspectFit = A;
+    else if (forced > 0) aspectFit = forced;
     else if (havept) {
       /* **这三个机器常量是量出来的，不是猜的**（`/tmp/ppb_probe.c` 那一段 GLFW 探针，
          照 renderBase.cc:24-45 与 :975-990 原样问的）：这台机器
@@ -1095,7 +1112,8 @@ static void r3_set_dimensions(r3scene *s) {
          不是 `Height / (fullH/fullW)` —— 两者在 double 里不是同一个数） */
       if ((double) W0 / H0 > A) W0 = (int) ceil(H0 * ((double) Width / Height));
       else H0 = (int) ceil(W0 * ((double) Height / Width));
-      aspect = (double) W0 / H0;
+      aspectFit = (double) W0 / H0;
+      s->dispW = W0; s->dispH = H0;
     } else {
       double dpr = 2.0;
       { const char *e = getenv("OMNI_R3_DPR"); if (e) dpr = atof(e); }
@@ -1112,8 +1130,12 @@ static void r3_set_dimensions(r3scene *s) {
       int H0 = h > th ? h : th;
       if ((double) W0 / H0 > A) W0 = (int) ceil(H0 * A - 1e-9);
       else H0 = (int) ceil(W0 / A - 1e-9);
-      aspect = (double) W0 / H0;
-    } } }
+      aspectFit = (double) W0 / H0;
+      s->dispW = W0; s->dispH = H0;
+    } }
+    /* GL 那条腿用位图长宽比，别的（CPU 备选、或者显式给了 OMNI_R3_ASPECT）用上面那一串 */
+    aspect = (r3_backend_is_gl && !ef) ? A : aspectFit;
+  }
   double zoom = s->zoom == 0 ? 1 : s->zoom;
   /* **viewportshift 不乘 zoom。** renderBase.cc:119 那一行是
    *   xshift = (X / Width + Shift.getx() * Xfactor) * zoom
