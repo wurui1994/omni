@@ -2468,6 +2468,18 @@ static unsigned char *r3_gl_image(const r3scene *S, const r3tris *t,
 
     const char *sd = getenv("OMNI_GL_SHADERS");
     if (!sd) sd = "/opt/homebrew/share/asymptote/shaders/GL";
+    /* 标定口：`OMNI_GL_ONLY` 是位掩码，只发其中几条 buffer
+       （1=面片 2=有色 4=三角网 8=透明 16=线）。用来分账"这一片墨是谁涂的" ——
+       线主导的探针上就是靠它认出"细管子有没有真画上去"。 */
+    { const char *e = getenv("OMNI_GL_ONLY");
+      if (e) {
+        int m = atoi(e);
+        if (!(m & 1)) { sc.material.nindices = 0; }
+        if (!(m & 2)) { sc.color.nindices = 0; }
+        if (!(m & 4)) { sc.triangle.nindices = 0; }
+        if (!(m & 8)) { sc.transparent.nindices = 0; }
+        if (!(m & 16)) { sc.line.nindices = 0; }
+      } }
     img = (unsigned char *) malloc((size_t) S->fw * S->fh * 3);
     if (img && draw(sd, &sc, img) != 0) { free(img); img = NULL; }
     if (getenv("OMNI_R3_DEBUG"))
