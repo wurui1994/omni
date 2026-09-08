@@ -188,6 +188,12 @@ function mentionsThis(node) {
   if (node.type === 'This') return true;
   if (node.type === 'Ident' && node.name === 'super') return true;
   if (node.type === 'FuncExpr' || node.type === 'FuncDecl' || node.type === 'ClassDecl') return false;
+  /* 对象字面量里的方法与访问器（`{ next() { this.i } }`）也是**普通函数** —— 它们身上
+   * 没有 type，只有 method: true（见 parser 的 objectLit），所以要单独挡一道。漏了这一道
+   * 的后果是：外层函数会以为"我的体里提到了 this"、开一格 this 并装进 cell，方法于是
+   * 捕获外层那一个而不是自己的接收者 —— 量出来的：mk() 里造的对象，m.next() 里 this 是
+   * undefined。 */
+  if (node.method === true) return false;
   let hit = false;
   eachChild(node, (x) => { if (!hit) hit = mentionsThis(x); });
   return hit;
@@ -197,6 +203,7 @@ function mentionsThis(node) {
 function mentionsNewTarget(node) {
   if (!node || typeof node !== 'object') return false;
   if (node.type === 'NewTarget') return true;
+  if (node.method === true) return false;
   if (node.type === 'FuncExpr' || node.type === 'FuncDecl' || node.type === 'ClassDecl') return false;
   let hit = false;
   eachChild(node, (x) => { if (!hit) hit = mentionsNewTarget(x); });
@@ -579,15 +586,15 @@ class Lower {
     this.fn = this.newFrame(bodyStmts, opts);
     const stmts = [];
     /* `this`（ADR-0020 P1）：普通函数与方法自己在**入口**取一次接收者。
-     * 三种情况不取：
+     * 两种情况不取：
      *   - 箭头（`opts.isArrow`）：它的 this 是外层那一个，靠 cell 捕获拿到；
-     *   - 构造器（`opts.isCtor`）：那一格是 classDecl 自己造的实例；
-     *   - **外层已经有 `this`**：类的方法闭包捕获的就是构造器里那个实例（ADR-0011
-     *     决策 13）。取接收者会把它遮住 —— 而那个类的方法被当回调传出去时就没有接收者，
-     *     于是 this 变 undefined。这条腿在 P1-f（类改成原型链）之后才该翻过来。
+     *   - 构造器（`opts.isCtor`）：那一格是 classDecl 自己造的实例。
+     * 从前还有第三条"外层已经有 this 就不取"（ADR-0011 决策 13 的遗留）。P1-f 把类改成
+     * 原型链之后它就该翻过来了 —— 量出来的分叉：类方法里造的对象字面量，它自己的方法
+     * `get2()` 里 this 是**外层实例**而不是那个字面量（qjs 给 9，这边给 1）。
      * 提到 this 才发这一句：每个函数都发就是每次调用多一次 op，而量过的源码里绝大多数
      * 函数根本不提它。加进 captured 是为了内层箭头能把它当 cell 捕获下去。 */
-    if (!opts.isArrow && !opts.isCtor && !this.lookup('this')
+    if (!opts.isArrow && !opts.isCtor
       && (opts.wantThis === true || bodyStmts.some((s) => mentionsThis(s)))) {
       this.fn.captured.add('this');
       const self = this.declare('this');

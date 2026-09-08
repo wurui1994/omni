@@ -308,24 +308,58 @@ class Split {
     return next;
   }
 
-  /* `yield* e` 摊成一个 for-of：一格一格转发出去。
-   * 内层的返回值（`const x = yield* g()`）与把 throw/return 转发给内层迭代器这两件事
-   * 还没有 —— 前者报错，后者是那个洞。 */
+  /* `yield* e` 摊成**手写的迭代器协议**，而不是一个 for-of：for-of 把内层的返回值丢了，
+   * 而 `const x = yield* g()` 要的正是那一格（规范 27.5.3.7 第 7.a.iii 步 —— done 那次的
+   * value 就是 yield* 整个表达式的值）。
+   *
+   *   _di = e[Symbol.iterator]();
+   *   while (true) {
+   *     _dr = _di.next();
+   *     if (_dr.done) { target = _dr.value; break; }
+   *     yield _dr.value;
+   *   }
+   *
+   * 还差的一格（照旧）：把 it.throw / it.return 转发给内层迭代器。
+   */
   delegate(e, target, cur, ctx) {
     const sp = e.span;
-    if (target) {
-      this.err(sp, "the result value of 'yield*' is not supported; use it without assigning");
-      return cur;
-    }
-    const v = this.temp('d');
-    return this.stmt({
-      type: 'ForOf',
-      declKind: null,
-      left: ident(v, sp),
-      right: e.arg ? e.arg : undef(sp),
-      body: exprStmt({ type: 'Yield', arg: ident(v, sp), delegate: false, span: sp }, sp),
-      span: sp,
-    }, cur, ctx);
+    const it = this.temp('di');
+    const r = this.temp('dr');
+    const dot = (obj, name) => ({ type: 'Member', object: obj, name, computed: false, optional: false, span: sp });
+    const symIter = {
+      type: 'Member', computed: true, optional: false, span: sp,
+      object: e.arg ? e.arg : undef(sp),
+      prop: dot(ident('Symbol', sp), 'iterator'),
+    };
+    const body = [
+      exprStmt(assign(ident(r, sp),
+        { type: 'Call', callee: dot(ident(it, sp), 'next'), args: [], optional: false, span: sp }, sp), sp),
+      {
+        type: 'If',
+        test: dot(ident(r, sp), 'done'),
+        cons: {
+          type: 'Block',
+          body: [
+            ...(target ? [exprStmt(assign(target, dot(ident(r, sp), 'value'), sp), sp)] : []),
+            { type: 'Break', label: null, span: sp },
+          ],
+          span: sp,
+        },
+        alt: null,
+        span: sp,
+      },
+      exprStmt({ type: 'Yield', arg: dot(ident(r, sp), 'value'), delegate: false, span: sp }, sp),
+    ];
+    return this.stmts([
+      exprStmt(assign(ident(it, sp),
+        { type: 'Call', callee: symIter, args: [], optional: false, span: sp }, sp), sp),
+      {
+        type: 'While',
+        test: { type: 'Lit', value: true, span: sp },
+        body: { type: 'Block', body, span: sp },
+        span: sp,
+      },
+    ], cur, ctx);
   }
 
   /* 声明：名字提到外层函数体（切段之后它的生存期跨过好几个段），这儿只剩赋值。 */

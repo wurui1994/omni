@@ -1523,7 +1523,9 @@ function $js_idx_get(o, k) {
     // 下标是数就是元素，否则是**挂在数组身上的属性**（JS 里数组也是对象）。
     // a.foo 与 a["foo"] 于是走到同一个地方（降级器把成员赋值发成 idx_set）。
     case "list": return $js_num_key(k) ? $js_arr_get(o, k) : $js_obj_get(o, k);
-    case "string": return $js_str_index(o, k);
+    // 串上的 s[k]：下标是数才按码元，否则是**串身上的属性**（s[Symbol.iterator] /
+    // s["length"]）—— 落到那一族的原型上去找，别当成下标错。
+    case "string": return $js_num_key(k) ? $js_str_index(o, k) : $js_prim_get(o, k);
     case "dict": return $js_obj_get(o, k);
     // 真对象（ADR-0020 P1）：o[k] 与 o.k 是同一条路 —— 沿原型链、触发访问器。
     case "object": return $js_getp(o, k, undefined);
@@ -1531,7 +1533,11 @@ function $js_idx_get(o, k) {
     // 同一种值，所以 DataView 上也能下标读 —— JS 里那是普通属性（undefined）。越界照
     // .getUint8 那条路报错，不像 JS 给 undefined：两条腿一致比像 JS 更重要。
     case "bytes": return $js_buf_get_u8(o, k);
-    default: $rt_error("cannot index a " + $dynTag(o));
+    // Map/Set 上的 o[k] 照旧当场报（那在 JS 里是属性访问而不是条目，容易看错），
+    // 只放**符号键**过去 —— m[Symbol.iterator] 是协议本身，不是"把条目当下标取"。
+    default:
+      if ($dynTag(k) === "symbol") return $js_prim_get(o, k);
+      $rt_error("cannot index a " + $dynTag(o));
   }
 }
 function $js_num_key(k) {
@@ -1611,7 +1617,9 @@ function $js_xprops(o, make) {
 function $js_obj_get(o, k) {
   if ($js_isobj(o)) return $js_getp(o, k, undefined);
   if ($dynTag(o) === "list") {
-    const x = $js_xprops(o, false), key = $js_prop(k);
+    // 键用 $js_pkey 而不是 $js_prop：符号键（a[Symbol.iterator]）也要能问，
+    // 旁表里找不到就落到 Array.prototype 上（那儿现在挂着 Symbol.iterator 那一格）
+    const x = $js_xprops(o, false), key = $js_pkey(k);
     if (x !== undefined && x.has(key)) return x.get(key);
     // 数组身上没挂过这个名字：去 Array.prototype 上找（length/下标由 prim_get 管）
     return $js_prim_get(o, k);
@@ -2015,6 +2023,18 @@ function $js_nt_take() {
   return v;
 }
 function $js_fn_construct(f, args) {
+  /* 右边是一格**类对象**（new this() / new ctorFromMap()）：类对象不是函数值，
+     构造要走它身上那两格 —— prototype 当原型、$init 初始化实例（见降级器的 classDecl）。
+     形状与 newExpr 里静态那条路一样，只是这儿的类是运行期拿到的。 */
+  if ($js_isobj(f)) {
+    const init = $js_getp(f, "$init", undefined);
+    if ($dynTag(init) === "function") {
+      const o = $js_obj_new_p($js_getp(f, "prototype", undefined));
+      const r0 = $callThis(init, o, $js_arr_of(args));
+      if ($js_pending()) return undefined;
+      return $js_isobj(r0) ? r0 : o;
+    }
+  }
   const g = $js_asFn(f);
   const o = $js_obj_new_p($js_fn_proto(g));
   $js_nt_slot = g;
@@ -2245,6 +2265,12 @@ function $mkRealm() {
   $natm(r.agenP, "return", 1, (t, a) => $js_agen_step(t, a[0], 1));
   $natm(r.agenP, "throw", 1, (t, a) => $js_agen_step(t, a[0], 2));
   $js_def_data(r.agenP, $js_sym_wk("asyncIterator"), $nat("[Symbol.asyncIterator]", 0, (t) => t), true, false, true);
+  /* 原始值那一族的 Symbol.iterator（数组 / 串 / Map / Set）：交出一格**真的迭代器对象**
+     （$js_it_src 先收成数组再按下标喂）。for-of 与展开走的是 js_iter 那条快路，不经过这里；
+     手写协议（a[Symbol.iterator]().next()）与 yield* 要拿返回值时才落到这一格。 */
+  for (const p of [r.arrP, r.strP, r.mapP, r.setP]) {
+    $js_def_data(p, $js_sym_wk("iterator"), $nat("[Symbol.iterator]", 0, (t) => $js_it_src(t)), true, false, true);
+  }
   return r;
 }
 /* ---------------------------------------- 作业队列（微任务）与 Promise

@@ -77,3 +77,17 @@ function k() {
 }
 const { [k()]: got = "no", ...restC } = { kk: "yes", zz: 1 };
 console.log(`${got}/${hits}/${JSON.stringify(restC)}`);
+
+// 对象字面量里的方法拿的是**自己的接收者**：从前外层函数会以为"我体里提到了 this"、
+// 开一格 this 装进 cell，方法于是捕获外层那一个（量出来的：m.next() 里 this 是 undefined）
+function mkCounter() {
+  return { i: 0, next() { this.i = this.i + 1; return this.i; } };
+}
+const ctr = mkCounter();
+console.log(`this ${ctr.next()}/${ctr.next()}/${ctr.i}`);
+function nestedMk() {
+  return { v: 7, inner() { return { v: 8, deep() { return this.v; } }; } };
+}
+console.log(`this ${nestedMk().inner().deep()}/${nestedMk().v}`);
+const withArrow = { v: 3, m() { const a = () => this.v; return a(); } };
+console.log(`this ${withArrow.m()}`);
