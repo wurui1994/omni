@@ -359,11 +359,22 @@ static omni_dyn omni_js_map_values(omni_dyn m) { \
   } \
   return omni_js_arr_wrap(out); \
 } \
+/* entries 交出来的每一格都是**新的**两元数组：内部存的那一格不能漏出去，
+   不然 `[...m][0][0] = x` 会改到 Map 自己（prelude 那份同一条） */ \
 static omni_dyn omni_js_map_entries(omni_dyn m) { \
   DT d = omni_js_map_of(m); \
   LT out = LT##_new(); \
   LT##_reserve(out, d->count); \
-  for (int64_t i = 0; i < d->n; i++) if (d->live[i]) out->items[out->len++] = d->vals[i]; \
+  for (int64_t i = 0; i < d->n; i++) { \
+    if (!d->live[i]) continue; \
+    LT src = omni_js_arr_of(d->vals[i]); \
+    LT pair = LT##_new(); \
+    LT##_reserve(pair, 2); \
+    pair->items[0] = src->items[0]; \
+    pair->items[1] = src->items[1]; \
+    pair->len = 2; \
+    out->items[out->len++] = omni_js_arr_wrap(pair); \
+  } \
   return omni_js_arr_wrap(out); \
 } \
 static omni_dyn omni_js_set_new(void) { return omni_js_set_wrap(DT##_new()); } \

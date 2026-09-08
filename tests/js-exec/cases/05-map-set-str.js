@@ -167,3 +167,13 @@ const cs = new Set([1, 2, 3]);
 console.log(`clr ${cs.size} ${String(cs.clear())} ${cs.size} ${cs.has(2)} ${cs.add(9).size} ${[...cs].join(",")}`);
 // new Set(串)：按**码点**拆（从前只收 list，字符串当场报 "string is not an array"）
 console.log(`sfs ${[...new Set("hello")].join("")} ${new Set("aab").size} ${new Set("").size}`);
+/* entries（也是 for-of / 展开走的那一条）交出来的每一格是**新的**两元数组：内部存的那一格
+   不能漏出去，不然往那一格上写就改到 Map 自己了。 */
+const em = new Map([["a", 1]]);
+const e1 = [...em];
+const e2 = [...em];
+console.log(`ent ${e1[0] === e2[0]} ${e1[0].join(":")}`);
+e1[0][1] = 99;
+console.log(`ent ${em.get("a")} ${[...em][0].join(":")} ${e1[0].join(":")}`);
+for (const pair of em) { pair[0] = "zz"; }
+console.log(`ent ${[...em.keys()].join(",")} ${em.has("a")}`);

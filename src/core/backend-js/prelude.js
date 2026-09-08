@@ -3236,20 +3236,30 @@ function $js_obj_seal(o) {
   if ($js_isobj(o)) { o.ex = false; for (const [, sl] of o.ps) sl.c = false; }
   return o;
 }
+/* isFrozen / isSealed 只对**真对象**有意义。数组在这个值域里还不是真对象（P4 的
+   array exotic 那一片），Object.freeze(数组) 是空操作 —— 所以这儿照实说"没冻住"，
+   而不是跟着"不是对象就算冻住"那条走（那会让代码以为改不动了，是更危险的一边）。
+   原始值照规范：冻住、封住都算。 */
+function $js_obj_frozenish(o) {
+  const t = $dynTag(o);
+  return !(t === "list" || t === "dict" || t === "Map" || t === "Set" || t === "bytes");
+}
 function $js_obj_is_frozen(o) {
-  if (!$js_isobj(o)) return true;
+  if (!$js_isobj(o)) return $js_obj_frozenish(o);
   if (o.ex) return false;
   for (const [, sl] of o.ps) if (sl.c || (!sl.a && sl.w)) return false;
   return true;
 }
 function $js_obj_is_sealed(o) {
-  if (!$js_isobj(o)) return true;
+  if (!$js_isobj(o)) return $js_obj_frozenish(o);
   if (o.ex) return false;
   for (const [, sl] of o.ps) if (sl.c) return false;
   return true;
 }
 function $js_obj_prevent_ext(o) { if ($js_isobj(o)) o.ex = false; return o; }
-function $js_obj_is_ext(o) { return $js_isobj(o) ? o.ex : false; }
+// 数组 / Map / Set 还不是真对象，但它们**确实**还能往上加东西 —— 照实说"可扩展"
+// （与 isFrozen / isSealed 那两格同一口径，见 $js_obj_frozenish）
+function $js_obj_is_ext(o) { return $js_isobj(o) ? o.ex : !$js_obj_frozenish(o); }
 // defineProperty。desc 是一格真对象；缺席的字段照规范取 false/undefined。
 // 已有槽的时候只覆盖 desc 里**出现过**的字段（规范 ValidateAndApplyPropertyDescriptor）。
 function $js_obj_def(o, k, desc) {
@@ -3505,7 +3515,10 @@ function $js_map_delete(m, k) { return $js_map_of(m).delete($js_key(k)); }
 function $js_map_clear(m) { $js_map_of(m).clear(); }
 function $js_map_keys(m) { return [...$js_map_of(m).values()].map((p) => p[0]); }
 function $js_map_values(m) { return [...$js_map_of(m).values()].map((p) => p[1]); }
-function $js_map_entries(m) { return [...$js_map_of(m).values()]; }
+/* Map 的 entries（也是 for-of / 展开走的那一条）：交出来的每一格都是**新的**两元数组 ——
+   内部存的那一格不能漏出去，不然往那一格上写会改到 Map 自己（量出来的：两把尺子上
+   两次展开取到的第一格互不相等，我们从前是同一格）。 */
+function $js_map_entries(m) { return [...$js_map_of(m).values()].map((p) => [p[0], p[1]]); }
 /* Map / Set 的 forEach：回调收 (value, key, map) 与 (value, value, set)（规范 24.1.3.5
    与 24.2.3.6 —— Set 那边两格都是元素本身）。从前整族缺失，m.forEach(...) 在运行期
    报 "undefined is not a function"。 */
