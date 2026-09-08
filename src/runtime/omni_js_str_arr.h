@@ -26,6 +26,48 @@
    普通对象按属性名。Map/Set 用 o[k] 在 JS 里是访问属性而不是条目，量过的源码里
    没有这种写法，所以当场报错而不是猜。 */
 #define OMNI_JS_STR_ARR(LT, DT) \
+/* Array.from(v[, f])：mapFn 收 (value, index)（规范 23.1.2.1 —— 只有两格，所以不能用
+   固定三格的 omni_js_call3）。**类数组**（dict 上有 length）也认：按 0..length-1 取下标，
+   那是 Array.from({length:n}, f) 的用法。它落在这一段是因为要 omni_js_obj_get 与
+   omni_js_s16_lit，那两格分别在 obj / json 那两段里，都比 arr 那段后展开。 */ \
+static omni_dyn omni_js_arr_from(omni_dyn v, omni_dyn f) { \
+  LT out = LT##_new(); \
+  LT l; \
+  omni_dyn src = v; \
+  /* 先把源头摊成一格 list —— 串按**码点**（与 prelude 那份的 [...s] 一致）、Map/Set 给
+     条目、类数组（dict 上有 length）按 0..length-1 取下标。 */ \
+  if (v.tag == OMNI_DYN_STR16) { \
+    omni_s16 s = omni_js_as_s16(v); \
+    LT cps = LT##_new(); \
+    for (int64_t i = 0; i < s.len; ) { \
+      int64_t w = (s.p[i] >= 0xD800 && s.p[i] <= 0xDBFF && i + 1 < s.len \
+                   && s.p[i + 1] >= 0xDC00 && s.p[i + 1] <= 0xDFFF) ? 2 : 1; \
+      LT##_push(cps, omni_dyn_of_s16(omni_s16_slice(s, i, i + w))); \
+      i += w; \
+    } \
+    src = omni_js_arr_wrap(cps); \
+  } else if (v.tag == OMNI_DYN_MAP) { \
+    src = omni_js_map_entries(v); \
+  } else if (v.tag == OMNI_DYN_SET) { \
+    src = omni_js_set_items(v); \
+  } else if (v.tag == OMNI_DYN_DICT) { \
+    omni_dyn n = omni_js_obj_get(v, omni_dyn_of_s16(omni_js_s16_lit("length"))); \
+    int64_t k = (n.tag == OMNI_DYN_UNDEF) ? 0 : omni_js_arr_i(n); \
+    LT al = LT##_new(); \
+    for (int64_t i = 0; i < k; i++) { \
+      LT##_push(al, omni_js_obj_get(v, omni_js_str(omni_dyn_of_real((double)i)))); \
+    } \
+    src = omni_js_arr_wrap(al); \
+  } \
+  if (f.tag == OMNI_DYN_UNDEF) return omni_js_arr_slice(src, omni_dyn_undef(), omni_dyn_undef()); \
+  l = omni_js_arr_of(src); \
+  LT##_reserve(out, l->len); \
+  for (int64_t i = 0; i < l->len; i++) { \
+    const omni_dyn tmp[2] = { l->items[i], omni_dyn_of_real((double)i) }; \
+    LT##_push(out, omni_js_call(f, LT##_from(tmp, 2))); \
+  } \
+  return omni_js_arr_wrap(out); \
+} \
 static omni_dyn omni_js_str_split(omni_dyn sd, omni_dyn sepd) { \
   omni_s16 s = omni_js_as_s16(sd); \
   omni_s16 sep = omni_js_as_s16(sepd); \

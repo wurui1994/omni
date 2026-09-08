@@ -495,6 +495,8 @@ omni_dyn omni_js_fmt_gen(omni_dyn v, omni_dyn p, omni_dyn keep);
    那个是 OMNI_JS_ARR 摊出来的 static，所以它们在 omni_js_arr.h 里，不在这里。 */
 omni_dyn omni_js_str(omni_dyn v);
 void omni_js_println(omni_dyn v);
+/* console.log 印一格值：与 ToString 只差 -0 那一处（印 "-0"） */
+omni_dyn omni_js_disp(omni_dyn v);
 omni_dyn omni_js_add(omni_dyn a, omni_dyn b);
 omni_dyn omni_js_arith(int op, omni_dyn a, omni_dyn b);
 omni_dyn omni_js_bitop(int op, omni_dyn a, omni_dyn b);

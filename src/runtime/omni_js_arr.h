@@ -234,9 +234,8 @@ static omni_dyn omni_js_arr_fill(omni_dyn a, omni_dyn v) { \
   return a; \
 } \
 static bool omni_js_arr_is_array(omni_dyn v) { return v.tag == OMNI_DYN_LIST; } \
-static omni_dyn omni_js_arr_from(omni_dyn v) { \
-  return omni_js_arr_slice(v, omni_dyn_undef(), omni_dyn_undef()); \
-} \
+/* Array.from(v[, f]) 不在这一段里 —— 它要读类数组的 length（omni_js_obj_get），而那一族
+   在 omni_js_obj.h 里、比这一段**后**展开。所以它定义在那边（同名同形）。 */ \
 static omni_dyn omni_js_arr_index_of(omni_dyn a, omni_dyn v) { \
   LT l = omni_js_arr_of(a); \
   for (int64_t i = 0; i < l->len; i++) { \

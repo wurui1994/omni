@@ -24,6 +24,9 @@ export const JS_ABI = {
   js_truthy: { js: '$js_truthy', c: 'omni_js_truthy', arity: 1, ret: 'bool' },
   js_typeof: { js: '$js_typeof', c: 'omni_js_typeof', arity: 1 },
   js_str: { js: '$js_str', c: 'omni_js_str', arity: 1 },
+  /* console.log 印一格值时用的字符串化：与 ToString 只差一处 —— **-0 印成 "-0"**
+     （String(-0) 是 "0"，而 qjs 与 node 的 console.log 都印 -0，量过）。 */
+  js_disp: { js: '$js_disp', c: 'omni_js_disp', arity: 1 },
   js_add: { js: '$js_add', c: 'omni_js_add', arity: 2 },
   js_neg: { js: '$js_neg', c: 'omni_js_neg', arity: 1 },
   // op: '-' '*' '/' '%' 加 'p' 幂（JS 的 `**`）。`+` 不在这儿 —— 它要先问字符串，是 js_add。
@@ -101,7 +104,8 @@ export const JS_ABI = {
   js_arr_reverse: { js: '$js_arr_reverse', c: 'omni_js_arr_reverse', arity: 1 },
   js_arr_fill: { js: '$js_arr_fill', c: 'omni_js_arr_fill', arity: 2 },
   js_arr_is_array: { js: '$js_arr_is_array', c: 'omni_js_arr_is_array', arity: 1, ret: 'bool' },
-  js_arr_from: { js: '$js_arr_from', c: 'omni_js_arr_from', arity: 1 },
+  // Array.from(v[, mapFn])：mapFn 收 (value, index)，类数组（有 length）也认
+  js_arr_from: { js: '$js_arr_from', c: 'omni_js_arr_from', arity: 2, throws: true },
   // a.at(i)：负下标从尾部数（`a[-1]` 在 JS 里是取属性，不是取末元素），越界 undefined
   js_arr_at: { js: '$js_arr_at', c: 'omni_js_arr_at', arity: 2 },
   js_arr_index_of: { js: '$js_arr_index_of', c: 'omni_js_arr_index_of', arity: 2 },

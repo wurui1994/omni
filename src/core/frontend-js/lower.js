@@ -2394,6 +2394,14 @@ class Lower {
       for (const a of args) out = op(spec.op, [out, this.expr(a)], spec.lit ?? {});
       return out;
     }
+    /* `assocL`：与 assoc 一样是两两归约，但**从第一个实参起**、没有单位元
+       （`Object.assign(t, a, b)` 就是 assign(assign(t, a), b) —— 目标是那第一格，
+       所以不能从单位元开始）。一个实参时就是 op(a, undefined)，与从前一字不差。 */
+    if (spec.assocL === true && args.length > spec.argc) {
+      let out = this.expr(args[0]);
+      for (let i = 1; i < args.length; i++) out = op(spec.op, [out, this.expr(args[i])], spec.lit ?? {});
+      return out;
+    }
     if (args.length > spec.argc) {
       /* `fold`：这个名字在 JS 里收可变实参，而 ABI 的 op 是定长的。**能不能摊开**取决于
          语义是不是可结合的两两归约 —— `String.fromCharCode(a, b, c)` 就是三次单实参调用
@@ -2413,7 +2421,7 @@ class Lower {
       if (spec.join !== undefined && spec.argc === 1) {
         let s = null;
         for (const a of args) {
-          const one = op('js_str', [this.expr(a)]);
+          const one = op('js_disp', [this.expr(a)]);
           s = s === null ? one : op('js_add', [op('js_add', [s, s16(spec.join)]), one]);
         }
         return op(spec.op, [s === null ? s16('') : s], spec.lit ?? {});
@@ -2460,8 +2468,8 @@ class Lower {
     if (spec.join !== undefined && spec.argc === 1) {
       const str = this.closureExpr({
         type: 'Arrow', params: [idn('_r0')], rest: null, expression: true, span: sp,
-        body: { type: 'OpCall', op: 'js_str', args: [idn('_r0')], span: sp },
-      }, 'js_str');
+        body: { type: 'OpCall', op: 'js_disp', args: [idn('_r0')], span: sp },
+      }, 'js_disp');
       return op(spec.op, [op('js_arr_join', [op('js_arr_map', [head, str]), s16(spec.join)])], spec.lit ?? {});
     }
     const lowered = [];
@@ -2914,6 +2922,9 @@ const STATIC_CALLS = {
      缺的只是这张表里的名字。**Math.round 不在这儿** —— js_math 的 'r' 是 C 的 round
      （离零舍入），而 Math.round 是"半数往上"，两者在 -0.5 上就分叉。 */
   'Math.sqrt': { op: 'js_math', argc: 2, lit: { op: 's' }, len: 1 },
+  /* Math.round 是"半数往 +∞"（-2.5 -> -2），而 js_math 的 'r' 是 C 的 round（离零）——
+     两者在 -0.5 上就分叉，所以它有自己的选择子 'R'（见 prelude 那段量口）。 */
+  'Math.round': { op: 'js_math', argc: 2, lit: { op: 'R' }, len: 1 },
   // clz32：先 ToUint32 再数前导零。JS 的 Math.clz32 与 C 那份都走这一格（不是 __builtin_clz，
   // 那个在 0 上是未定义的）
   'Math.clz32': { op: 'js_math', argc: 2, lit: { op: 'Z' } },
@@ -2945,7 +2956,7 @@ const STATIC_CALLS = {
   'Object.keys': { op: 'js_obj_keys', argc: 1, len: 1 },
   'Object.values': { op: 'js_obj_values', argc: 1, len: 1 },
   'Object.entries': { op: 'js_obj_entries', argc: 1, len: 1 },
-  'Object.assign': { op: 'js_obj_assign', argc: 2, len: 2 },
+  'Object.assign': { op: 'js_obj_assign', argc: 2, len: 2, assocL: true },
   /* ---- 真对象那一族（ADR-0020 P1）。`hasOwn` 从前接的是 js_obj_has，而那一条现在
      沿原型链走（`in` 的语义）—— 自有属性得问 js_obj_has_own，不然继承来的键也算"自有"。 */
   'Object.hasOwn': { op: 'js_obj_has_own', argc: 2, len: 2 },
@@ -2980,7 +2991,7 @@ const STATIC_CALLS = {
   'Reflect.isExtensible': { op: 'js_obj_is_ext', argc: 1 },
   'Reflect.preventExtensions': { op: 'js_obj_prevent_ext', argc: 1 },
   'Array.isArray': { op: 'js_arr_is_array', argc: 1, len: 1 },
-  'Array.from': { op: 'js_arr_from', argc: 1, len: 1 },
+  'Array.from': { op: 'js_arr_from', argc: 2, len: 1 },
   'String.fromCharCode': { op: 'js_str_of_char_code', argc: 1, fold: 'js_add' },
   'String.fromCodePoint': { op: 'js_str_of_code_point', argc: 1 },
   'Number.isNaN': { op: 'js_num_is_nan', argc: 1, len: 1 },

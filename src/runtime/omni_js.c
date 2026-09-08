@@ -205,10 +205,19 @@ static omni_s16 to_s16(omni_dyn v) {
 
 omni_dyn omni_js_str(omni_dyn v) { return omni_dyn_of_s16(to_s16(v)); }
 
+/* console.log 印一格值：与 ToString 只差一处 —— **-0 印成 "-0"**（String(-0) 是 "0"，
+   而 qjs 与 node 的 console.log 都印 -0，量过）。 */
+omni_dyn omni_js_disp(omni_dyn v) {
+  if (v.tag == OMNI_DYN_REAL && v.u.r == 0.0 && signbit(v.u.r)) {
+    return omni_dyn_of_s16(omni_s16_of_utf8(omni_str_new("-0", 2)));
+  }
+  return omni_js_str(v);
+}
+
 /* 输出：JS 的 String 是 UTF-16，落到 stdout 得转回 UTF-8。这个 op 存在的意义
    是让"什么时候转码"变成一处显式的边界，而不是散落在各个打印点上。 */
 void omni_js_println(omni_dyn v) {
-  omni_str s = omni_s16_to_utf8(to_s16(v));
+  omni_str s = omni_s16_to_utf8(to_s16(omni_js_disp(v)));
   printf("%.*s\n", (int)s.len, s.p);
 }
 

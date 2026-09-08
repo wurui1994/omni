@@ -1070,7 +1070,10 @@ function $js_idx(v, dflt) {
   if ($dynTag(v) !== "real") $rt_error("string index must be a number, found " + $dynTag(v));
   return Number.isNaN(v) ? 0 : Math.trunc(v);
 }
-function $js_println(v) { $print($js_str(v)); }
+/* console.log 印一格值：与 ToString 只差一处 —— **-0 印成 "-0"**。String(-0) 是 "0"，
+   而 qjs 与 node 的 console.log 都印 -0（量过），所以印这条路上单独一格 op。 */
+function $js_disp(v) { return typeof v === "number" && Object.is(v, -0) ? "-0" : $js_str(v); }
+function $js_println(v) { $print($js_disp(v)); }
 // JS 后端这边 Omni 的 string 就是宿主 string，本来就是 UTF-16 码元序列，所以是恒等
 function $js_s16(s) { return s; }
 function $js_str_len(s) { return $js_asS16(s).length; }
@@ -1230,7 +1233,24 @@ function $js_arr_fill(a, v) { $js_arr_of(a).fill(v); return a; }
 function $js_arr_is_array(v) { return $dynTag(v) === "list"; }
 // Array.from：走一遍迭代（ADR-0020 P1）——数组是恒等、字符串按码点、Map/Set 给条目，
 // 自定义可迭代对象走 Symbol.iterator 协议。再 slice 一份，免得把原数组交出去。
-function $js_arr_from(v) { return $js_iter(v).slice(); }
+// 第二个实参是 mapFn，收 (value, index)（规范 23.1.2.1）。**类数组**（有 length、
+// 没有 Symbol.iterator）也认：按 0..length-1 取下标，那是 Array.from({length:n}, f) 的用法。
+function $js_arr_from(v, f) {
+  const xs = $js_arr_from_src(v).slice();
+  return f === undefined ? xs : xs.map((x, i) => $callFn(f, [x, i]));
+}
+function $js_arr_from_src(v) {
+  if ($dynTag(v) === "object" && !$js_has_iter(v)) {
+    const n = Math.trunc($js_real($js_getp(v, "length", undefined) ?? 0, "Array.from"));
+    const out = [];
+    for (let i = 0; i < n; i++) out.push($js_getp(v, $js_str(i), undefined));
+    return out;
+  }
+  return $js_iter(v);
+}
+function $js_has_iter(v) {
+  return $js_getp(v, $js_sym_wk("iterator"), undefined) !== undefined;
+}
 function $js_arr_index_of(a, v) { return $js_arr_of(a).findIndex((x) => $js_eq(true, x, v)); }
 function $js_arr_last_index_of(a, v) {
   const l = $js_arr_of(a);
@@ -3063,6 +3083,15 @@ function $js_math(op, a, b) {
   // C 的 round 是"离零舍入"（round(-2.5) = -3），JS 的 Math.round 是"向 +inf 舍入"
   // （-2.5 -> -2）。核心方言的 (rmath "round" …) 要的是 C 那一条。
   if (op === "r") return x < 0 ? -Math.round(-x) : Math.round(x);
+  /* JS 的 Math.round（'R'）：floor(x) 再看小数部分够不够 0.5 —— **不写 floor(x + 0.5)**，
+     那一条在 0.49999999999999994 上会给 1（加法先舍到了 0.5）。结果是 0 而 x 又是负数
+     （含 -0）时要给 **-0**，规范如此，量过：Math.round(-0.5) 是 -0。 */
+  if (op === "R") {
+    if (!Number.isFinite(x)) return x;
+    const fl = Math.floor(x);
+    const r = x - fl < 0.5 ? fl : fl + 1;
+    return r === 0 && (x < 0 || Object.is(x, -0)) ? -0 : r;
+  }
   // 超越函数：转手 Math.*（C 那边转手 libm）。op 码见 hir/js_abi.js 的注释。
   if (op === "S") return Math.sin(x);
   if (op === "C") return Math.cos(x);

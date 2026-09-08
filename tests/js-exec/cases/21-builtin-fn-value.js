@@ -25,3 +25,12 @@ const ns = [3, 9, 4];
 console.log(`spread ${Math.max(...ns)} ${Math.min(...ns)} ${Math.max(1, ...ns, 20)}`);
 console.log(`spread ${Math.max(...[])} ${Math.hypot(...[3, 4])}`);
 console.log(`spread ${String.fromCharCode(...[72, 105])}`);
+
+// 这一批也要在 C 那条腿上量：Array.from 的 mapFn 与类数组、Object.assign 的可变实参、
+// Math.round（半数往 +∞，与 C 的 round 不是一回事）、以及 console.log 印 -0。
+console.log(`from ${Array.from([1, 2], (x) => x * 2).join(",")} ${Array.from({ length: 3 }, (v, i) => i).join(",")}`);
+console.log(`from ${Array.from("ab").join(",")} ${Array.from([1, 2], (v, i) => `${v}@${i}`).join("|")}`);
+console.log(`assign ${JSON.stringify(Object.assign({}, { a: 1 }, { b: 2 }, { a: 3 }))}`);
+console.log(`round ${Math.round(-0.5)} ${Math.round(0.5)} ${Math.round(2.5)} ${Math.round(-1.5)}`);
+console.log(`round ${Math.round(0.49999999999999994)} ${Math.round(-1.2)} ${Math.round(NaN)}`);
+console.log(-0, 0, String(-0), 1 / Math.round(-0.2) < 0);

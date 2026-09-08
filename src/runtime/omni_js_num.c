@@ -235,6 +235,17 @@ omni_dyn omni_js_math(int op, omni_dyn a, omni_dyn b) {
     case 's': return omni_dyn_of_real(sqrt(x));
     /* C 的 round 就是"离零舍入"；prelude 那边为此没用 Math.round（它向 +inf 舍入） */
     case 'r': return omni_dyn_of_real(round(x));
+    /* JS 的 Math.round（'R'）：floor(x) 再看小数部分够不够 0.5 —— 不写 floor(x + 0.5)，
+       那一条在 0.49999999999999994 上会给 1（加法先舍到了 0.5）。结果是 0 而 x 又是
+       负数（含 -0）时给 **-0**，规范如此，量过：Math.round(-0.5) 是 -0。 */
+    case 'R': {
+      double fl, r;
+      if (!isfinite(x)) return omni_dyn_of_real(x);
+      fl = floor(x);
+      r = (x - fl < 0.5) ? fl : fl + 1.0;
+      if (r == 0.0 && (x < 0.0 || signbit(x))) return omni_dyn_of_real(-0.0);
+      return omni_dyn_of_real(r);
+    }
     /* 超越函数：转手 libm（JS 那边转手 Math.*）。op 码见 hir/js_abi.js 的注释 */
     case 'S': return omni_dyn_of_real(sin(x));
     case 'C': return omni_dyn_of_real(cos(x));
