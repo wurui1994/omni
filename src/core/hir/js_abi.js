@@ -66,8 +66,10 @@ export const JS_ABI = {
   /* 四个 URI 全局函数（规范 19.2.6）合成一条 op，op 码：
        'e' encodeURIComponent / 'E' encodeURI / 'd' decodeURIComponent / 'D' decodeURI
      两条腿是同一套手划的 UTF-8 编解码，不转手宿主 —— 宿主在畸形输入上抛的是 URIError，
-     这个值域里没有"宿主抛的错"，所以先自己查一遍再动手（报错文本两侧逐字相同）。 */
-  js_uri: { js: '$js_uri', c: 'omni_js_uri', arity: 1, lit: ['op'] },
+     所以先自己查一遍再动手（报错文本两侧逐字相同）。
+     throws: true —— 那一格 URIError 现在是**能 catch 的**（ADR-0020，见 prelude 的
+     $HostBad）：JS 那条腿把它翻成 pending 的 Error 值，C 那条腿照旧是硬错。 */
+  js_uri: { js: '$js_uri', c: 'omni_js_uri', arity: 1, lit: ['op'], throws: true },
   js_str_pad_start: { js: '$js_str_pad_start', c: 'omni_js_str_pad_start', arity: 3 },
   js_str_pad_end: { js: '$js_str_pad_end', c: 'omni_js_str_pad_end', arity: 3 },
   // replaceAll：**只收字符串模式**。正则那一支要 lastIndex 与替换串里的 $1，
@@ -394,14 +396,15 @@ export const JS_ABI = {
   // 量到的用法只有 interp/builtin.js 的 udiv/umod/u< 与 u>>，那几个在 [0, 2^64)
   // 里都不溢出；别的运算碰上这一格会响 —— 那是画出来的边界，不是悄悄算错。
   js_bigint_as_uint_n: { js: '$js_bigint_as_uint_n', c: 'omni_js_bigint_as_uint_n', arity: 2 },
-  js_num_to_precision: { js: '$js_num_to_precision', c: 'omni_js_num_to_precision', arity: 2 },
+  js_num_to_precision: { js: '$js_num_to_precision', c: 'omni_js_num_to_precision', arity: 2, throws: true },
   /* toFixed / toExponential：JS 那侧转手宿主（即是规范）。C 那份**当场报错**而不是
      凑一个近似 —— 两者在**恰好一半**上不一样（(2.5).toFixed(0) 是 "3"，而 C 的 %.Nf
      就近取偶给 "2"），要对上得走十进制那条路。它们进不了 P1_JS_ONLY：成员派发器
-     （js_m_toFixed）是运行期派发的，C 那张表里躲不开这个名字，所以只能在运行期喊。 */
-  js_num_to_fixed: { js: '$js_num_to_fixed', c: 'omni_js_num_to_fixed', arity: 2 },
-  js_num_to_exp: { js: '$js_num_to_exp', c: 'omni_js_num_to_exp', arity: 2 },
-  js_num_to_string: { js: '$js_num_to_string', c: 'omni_js_num_to_string', arity: 2 },
+     （js_m_toFixed）是运行期派发的，C 那张表里躲不开这个名字，所以只能在运行期喊。
+     这四条都标 throws: true —— 位数/进制越界是**能 catch 的 RangeError**（ADR-0020）。 */
+  js_num_to_fixed: { js: '$js_num_to_fixed', c: 'omni_js_num_to_fixed', arity: 2, throws: true },
+  js_num_to_exp: { js: '$js_num_to_exp', c: 'omni_js_num_to_exp', arity: 2, throws: true },
+  js_num_to_string: { js: '$js_num_to_string', c: 'omni_js_num_to_string', arity: 2, throws: true },
   // op: 'a' abs / 't' trunc / 'f' floor / 'c' ceil / 'M' max / 'm' min
   //     后加的四个只给核心方言的 (rmath …) 用：'s' sqrt / 'r' round（C 的离零舍入，
   //     不是 Math.round）/ 'p' pow / 'o' fmod

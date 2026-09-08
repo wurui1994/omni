@@ -79,6 +79,23 @@ function $rt_error(msg) {
   process.exit(70);
 }
 
+/* 宿主抛出来的、**能 catch** 的错（ADR-0020）。规范里 JSON.parse 的语法错、
+   decodeURIComponent 的畸形输入、toFixed 的越界位数都是普通的 JS 异常，不是"进程完了" ——
+   try / catch 把它围起来是真实代码里最常见的一格写法。
+   实现的形状：出错点抛一格 $HostBad（这只是**信号**，不是 JS 可见的值），入口那一层收下来
+   翻成 pending 的 Error 值。为什么不在出错点直接 $js_throw：那一族函数往往互相递归、错误点
+   十几处，靠宿主自己的 throw 把栈剥到入口最省事，也不必给每个中间返回补一次 pending 检查。
+   前提是那个 op 在 ABI 表里标了 throws: true —— 调用点的 pending 检查由它发。 */
+function $HostBad(m, k) { this.m = m; this.k = k === undefined ? "SyntaxError" : k; }
+function $js_host_err(e) {
+  if (!(e instanceof $HostBad)) throw e;
+  $js_throw($js_err_new(e.m, [e.k, "Error"], undefined));
+  return undefined;
+}
+// 值域越界那一族（toFixed / toExponential / toString 的位数与进制）：错误点就在入口那一句，
+// 不必绕信号，直接放一格 pending 的 RangeError。
+function $js_range_err(msg) { return $js_host_err(new $HostBad(msg, "RangeError")); }
+
 // 截断除（C 的 /）。两个 number 的快路借取模走：a % b 在整数上是**精确**的（fmod
 // 对整数操作数不丢位），a - r 是 b 的整数倍，于是 (a-r)/b 的商正好可表示、除法精确。
 // 直接写 Math.trunc(a/b) 不行：a/b 是先舍入的浮点商，贴着整数边界时会被舍到隔壁。
@@ -1179,10 +1196,10 @@ const $JS_URI_HEX = "0123456789ABCDEF";
 function $js_uri_pct(b) { return "%" + $JS_URI_HEX[(b >> 4) & 15] + $JS_URI_HEX[b & 15]; }
 // s[i] 是 '%'：读出那一组两位十六进制的字节值
 function $js_uri_byte(s, i) {
-  if (i + 2 >= s.length) $rt_error("URI malformed");
+  if (i + 2 >= s.length) throw new $HostBad("URI malformed", "URIError");
   const h = $JS_URI_HEX.indexOf(s[i + 1].toUpperCase());
   const l = $JS_URI_HEX.indexOf(s[i + 2].toUpperCase());
-  if (h < 0 || l < 0) $rt_error("URI malformed");
+  if (h < 0 || l < 0) throw new $HostBad("URI malformed", "URIError");
   return h * 16 + l;
 }
 function $js_uri_enc(s, keep) {
@@ -1192,7 +1209,7 @@ function $js_uri_enc(s, keep) {
     if (keep.indexOf(c) >= 0) { out = out + c; continue; }
     // 落单的代理项在这儿就是畸形：配好对的 codePointAt 给的是 > 0xFFFF 的码点
     const cp = s.codePointAt(i);
-    if (cp >= 0xD800 && cp <= 0xDFFF) $rt_error("URI malformed");
+    if (cp >= 0xD800 && cp <= 0xDFFF) throw new $HostBad("URI malformed", "URIError");
     if (cp > 0xFFFF) i++;
     if (cp < 0x80) out = out + $js_uri_pct(cp);
     else if (cp < 0x800) out = out + $js_uri_pct(0xC0 | (cp >> 6)) + $js_uri_pct(0x80 | (cp & 63));
@@ -1223,30 +1240,36 @@ function $js_uri_dec(s, keep) {
     if (b0 >= 0xC2 && b0 <= 0xDF) n = 1;
     else if (b0 >= 0xE0 && b0 <= 0xEF) n = 2;
     else if (b0 >= 0xF0 && b0 <= 0xF4) n = 3;
-    else $rt_error("URI malformed");
+    else throw new $HostBad("URI malformed", "URIError");
     let cp = b0 & (n === 1 ? 31 : n === 2 ? 15 : 7);
     for (let k = 0; k < n; k++) {
       i++;
-      if (i >= s.length || s[i] !== "%") $rt_error("URI malformed");
+      if (i >= s.length || s[i] !== "%") throw new $HostBad("URI malformed", "URIError");
       const b = $js_uri_byte(s, i);
       i += 2;
-      if (b < 0x80 || b > 0xBF) $rt_error("URI malformed");
+      if (b < 0x80 || b > 0xBF) throw new $HostBad("URI malformed", "URIError");
       cp = (cp << 6) | (b & 63);
     }
     // 过长编码、代理项区间、超出 10FFFF 一律算畸形
-    if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) $rt_error("URI malformed");
-    if (n === 2 && cp < 0x800) $rt_error("URI malformed");
-    if (n === 3 && cp < 0x10000) $rt_error("URI malformed");
+    if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) throw new $HostBad("URI malformed", "URIError");
+    if (n === 2 && cp < 0x800) throw new $HostBad("URI malformed", "URIError");
+    if (n === 3 && cp < 0x10000) throw new $HostBad("URI malformed", "URIError");
     out = out + String.fromCodePoint(cp);
   }
   return out;
 }
 function $js_uri(op, x) {
   const s = $js_asS16($js_str(x));
-  if (op === "e") return $js_uri_enc(s, $JS_URI_KEEP);
-  if (op === "E") return $js_uri_enc(s, $JS_URI_KEEP + $JS_URI_RESERVED);
-  if (op === "d") return $js_uri_dec(s, "");
-  return $js_uri_dec(s, $JS_URI_RESERVED);
+  /* 畸形输入是**能 catch 的 URIError**（ADR-0020）：enc / dec 那两段里错误点有九处，
+     所以出错点抛信号、在这儿收一次（见文件开头的 $HostBad 那一段）。 */
+  try {
+    if (op === "e") return $js_uri_enc(s, $JS_URI_KEEP);
+    if (op === "E") return $js_uri_enc(s, $JS_URI_KEEP + $JS_URI_RESERVED);
+    if (op === "d") return $js_uri_dec(s, "");
+    return $js_uri_dec(s, $JS_URI_RESERVED);
+  } catch (e) {
+    return $js_host_err(e);
+  }
 }
 
 // isWellFormed / toWellFormed（ES2024）：落单的代理项（没配对的 D800..DFFF）算"不良",// toWellFormed 把每个落单的替成 U+FFFD。C 那份是手划码元的同一套判据。
@@ -3792,7 +3815,7 @@ function $js_bigint_as_uint_n(bits, v) {
 }
 function $js_num_to_precision(v, digits) {
   const p = $js_real(digits, "toPrecision");
-  if (p < 1 || p > 100) $rt_error("toPrecision() argument must be between 1 and 100, got " + p);
+  if (p < 1 || p > 100) return $js_range_err("toPrecision() argument must be between 1 and 100, got " + p);
   return $js_real(v, "toPrecision").toPrecision(p);
 }
 /* toFixed / toExponential：转手宿主的同名方法即是规范。**只有 JS 这一侧** —— 它们在
@@ -3801,19 +3824,19 @@ function $js_num_to_precision(v, digits) {
    进 P1_JS_ONLY：C 那条腿当场报错，不给一个"多数时候对"的答案。 */
 function $js_num_to_fixed(v, digits) {
   const d = digits === undefined ? 0 : $js_real(digits, "toFixed");
-  if (d < 0 || d > 100) $rt_error("toFixed() argument must be between 0 and 100, got " + d);
+  if (d < 0 || d > 100) return $js_range_err("toFixed() argument must be between 0 and 100, got " + d);
   return $js_real(v, "toFixed").toFixed(d);
 }
 function $js_num_to_exp(v, digits) {
   const x = $js_real(v, "toExponential");
   if (digits === undefined) return x.toExponential();
   const d = $js_real(digits, "toExponential");
-  if (d < 0 || d > 100) $rt_error("toExponential() argument must be between 0 and 100, got " + d);
+  if (d < 0 || d > 100) return $js_range_err("toExponential() argument must be between 0 and 100, got " + d);
   return x.toExponential(d);
 }
 function $js_num_to_string(v, radix) {
   const r = radix === undefined ? 10 : $js_real(radix, "toString");
-  if (r < 2 || r > 36) $rt_error("toString() radix must be between 2 and 36, got " + r);
+  if (r < 2 || r > 36) return $js_range_err("toString() radix must be between 2 and 36, got " + r);
   /* 接收者也可能是 int（这个值域里的 bigint）或 bool。int 不先转 double：2^53 之上的
      int64 转过去要掉精度，而 bigint 自己就会按位印。 */
   const t = $dynTag(v);
@@ -4026,19 +4049,19 @@ function $js_json_val(v, rep, gap, depth, seen) {
   if (t === "bool") return v ? "true" : "false";
   if (t === "real") return Number.isFinite(v) ? $js_str(v) : "null";
   if (t === "string") return $js_json_quote(v);
-  if (t === "int") throw new $JsonBad("do not know how to serialize a bigint", "TypeError");
+  if (t === "int") throw new $HostBad("do not know how to serialize a bigint", "TypeError");
   /* 环（o.self = o）：规范抛 TypeError。从前这儿一路递归下去，把**宿主的栈**撑爆 ——
      那是崩，比错答案还糟。seen 是一条**当前路径上的**容器栈（不是"见过的全部"）：
      同一格对象出现在兄弟位置上是合法的（{a: x, b: x}），只有出现在自己的祖先里才是环。 */
   if (t === "list" || t === "dict" || t === "object" || t === "Map" || t === "Set") {
-    if (seen.indexOf(v) >= 0) throw new $JsonBad("circular structure in JSON", "TypeError");
+    if (seen.indexOf(v) >= 0) throw new $HostBad("circular structure in JSON", "TypeError");
     seen.push(v);
     const s = $js_json_body(v, t, rep, gap, depth, seen);
     seen.pop();
     return s;
   }
   // 剩下的（regexp / bytes / TextEncoder…）照旧当场报：照 JS 那样给 {} 会撒谎
-  throw new $JsonBad("do not know how to serialize a " + t, "TypeError");
+  throw new $HostBad("do not know how to serialize a " + t, "TypeError");
 }
 // 容器那几支的正文（拆出来只为了让 seen 的 push/pop 成对，不必在每条 return 前手写 pop）
 function $js_json_body(v, t, rep, gap, depth, seen) {
@@ -4096,7 +4119,7 @@ function $js_json_body(v, t, rep, gap, depth, seen) {
     }
     return first ? "{}" : out + $js_json_nl(gap, depth) + "}";
   }
-  throw new $JsonBad("do not know how to serialize a " + t, "TypeError");
+  throw new $HostBad("do not know how to serialize a " + t, "TypeError");
 }
 function $js_json_stringify(v, rep, indent) {
   let gap = 0;
@@ -4104,9 +4127,7 @@ function $js_json_stringify(v, rep, indent) {
   try {
     return $js_json_val($js_json_apply(rep, "", v), rep, gap, 0, []);
   } catch (e) {
-    if (!(e instanceof $JsonBad)) throw e;
-    $js_throw($js_err_new(e.m, [e.k, "Error"], undefined));
-    return undefined;
+    return $js_host_err(e);
   }
 }
 
@@ -4119,20 +4140,16 @@ function $js_json_stringify(v, rep, indent) {
 // （宿主 JSON.parse 也没有 BigInt 那一支）。重复的键后来的赢、位置留在第一次
 // 出现的地方 —— Map.set 与 C 侧 dict_set 都是这个语义。没有 reviver。
 //
-// 解析失败是**能 catch 的 SyntaxError**（ADR-0020）：try { JSON.parse(s) } catch {} 是
-// 真实代码里最常见的一格写法，从前它是硬错（omni: runtime error），整个进程就没了。
-// 这一族函数互相递归、错误点有十几处，所以内部用宿主自己的 throw 把栈剥到 parse 那一层
-// （$JsonBad 只是个信号，不是 JS 可见的值），再在那儿翻成一格 pending 的 SyntaxError。
-// js_json_parse 在 ABI 表里本来就是 throws: true，所以调用点的 pending 检查早就发了。
+// 解析失败是**能 catch 的 SyntaxError**（ADR-0020，见文件开头的 $HostBad 那一段）：
+// 出错点抛信号，$js_json_parse 那一层收下来翻成 pending 的 Error 值。
 // 游标是 { s, i } 一个记录：这一族函数互相递归，下标要共享。
-function $JsonBad(m, k) { this.m = m; this.k = k === undefined ? "SyntaxError" : k; }
-function $js_json_eoi() { throw new $JsonBad("unexpected end of JSON input"); }
+function $js_json_eoi() { throw new $HostBad("unexpected end of JSON input"); }
 function $js_json_bad(z) {
   const c = z.s.charCodeAt(z.i);
   const shown = c >= 0x20 && c < 0x7f
     ? "'" + z.s[z.i] + "'"
     : "\\u" + c.toString(16).padStart(4, "0");
-  throw new $JsonBad("unexpected token " + shown + " in JSON at position " + z.i);
+  throw new $HostBad("unexpected token " + shown + " in JSON at position " + z.i);
 }
 function $js_json_at(z) { if (z.i >= z.s.length) $js_json_eoi(); return z.s.charCodeAt(z.i); }
 function $js_json_ws(z) {
@@ -4282,12 +4299,10 @@ function $js_json_parse(text, rep) {
     v = $js_json_read(z);
     $js_json_ws(z);
     if (z.i !== z.s.length) {
-      throw new $JsonBad("unexpected non-whitespace character after JSON at position " + z.i);
+      throw new $HostBad("unexpected non-whitespace character after JSON at position " + z.i);
     }
   } catch (e) {
-    if (!(e instanceof $JsonBad)) throw e;
-    $js_throw($js_err_new(e.m, [e.k, "Error"], undefined));
-    return undefined;
+    return $js_host_err(e);
   }
   if ($dynTag(rep) === "function") {
     const root = $js_obj_new();
