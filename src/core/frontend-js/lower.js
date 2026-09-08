@@ -1307,11 +1307,16 @@ class Lower {
   }
 
   /**
-   * switch：OIR 没有 switch，摊成 if / else-if 链。两个讲究：
+   * switch：OIR 没有 switch，摊成"先算出中了第几格，再从那一格往下跑"。
    *   - 外面套一层"只跑一遍的循环"，这样 case 体里的 break 就是 OIR 的 Break，
    *     语义正好是"跳出 switch"（而不是跳出外层循环）。
-   *   - 不支持穿透（fall-through）：量过的 37 处 switch 全都不穿透。空体的 case 是
-   *     分组写法（case 'a': case 'b': body），按"或"合并到下一个有体的 case 上。
+   *   - **穿透是支持的**（ADR-0020 P4）：每个 case 自成一格，派发只算出中了哪一格
+   *     （`_m`），跑的时候每一格的守卫是 `_m <= 这一格` —— 于是"从中的那一格往下，
+   *     直到遇上 break/return"正好是 JS 的语义。分组写法（`case 'a': case 'b': body`）
+   *     不再需要特殊照顾：空体的 case 自然穿到下一格。
+   *   - default 可以在中间：都不中时 `_m` 就是它的格号，之后同样往下穿。
+   *   - 派发链是**嵌套三元**（不是 if 链）：这样 case 的判据只算到中的那一格为止，
+   *     与 JS 一致。
    */
   switchStmt(s) {
     this.pushScope();
@@ -1322,45 +1327,50 @@ class Lower {
     // 下面那层合成的 while(true) 在 OIR 里是**一层真的循环**，case 体是在它里面降的
     this.fn.oloops++;
     this.fn.switchFlags.push(null);
-    /** @type {{tests: any[], body: any[]}[]} */
+    /** @type {{test: any, body: any[]}[]} 源码次序，default 也占一格（test 是 null） */
     const groups = [];
-    let pending = [];
-    let dflt = null;
+    let dfltIdx = -1;
     for (const cs of s.cases) {
-      const isDefault = cs.test === null;
-      const tests = isDefault ? [] : [this.expr(cs.test)];
-      if (cs.body.length === 0) {
-        if (!isDefault) pending.push(...tests);
-        continue;   // 分组写法：条件攒着，等下一个有体的 case
+      if (cs.test === null) {
+        if (dfltIdx >= 0) this.err(cs.span, 'a switch has more than one default clause');
+        dfltIdx = groups.length;
       }
-      const body = cs.body.flatMap((x) => this.stmt(x));
-      this.checkNoFallThrough(cs, cs === s.cases[s.cases.length - 1]);
-      if (isDefault) dflt = block(body);
-      else { groups.push({ tests: [...pending, ...tests], body }); pending = []; }
+      const test = cs.test === null ? null : this.expr(cs.test);
+      groups.push({ test, body: cs.body.flatMap((x) => this.stmt(x)) });
     }
-    if (pending.length) this.err(s.span, 'a switch case group must end with a case that has a body');
-    let chain = dflt;
+    const m = this.declare('_m').name;
+    // 派发：从上往下第一个 === 的那一格；都不中就落到 default（没有 default 就落到"格数"，
+    // 于是下面每一格的守卫都不成立，一格都不跑）
+    let pick = constReal(dfltIdx >= 0 ? dfltIdx : groups.length);
     for (let i = groups.length - 1; i >= 0; i--) {
-      const g = groups[i];
-      let cond = boolOp('js_eq', [varRef(d), g.tests[0]], { strict: true });
-      for (const t of g.tests.slice(1)) {
-        cond = { kind: 'Logic', op: '||', left: cond, right: boolOp('js_eq', [varRef(d), t], { strict: true }), type: BOOL };
-      }
-      // OIR 的 If 只认块状的 then/otherwise，所以 else-if 要自己套一层块
-      chain = { kind: 'If', cond, then: block(g.body), otherwise: chain ? block([chain]) : null };
+      if (groups[i].test === null) continue;
+      pick = ternary(boolOp('js_eq', [varRef(d), groups[i].test], { strict: true }),
+        constReal(i), pick);
+    }
+    const runs = [];
+    for (let i = 0; i < groups.length; i++) {
+      // 空体的那一格不必生成 if：它的"体"就是穿到下一格
+      if (groups[i].body.length === 0) continue;
+      runs.push({
+        kind: 'If',
+        cond: boolOp('js_cmp', [varRef(m), constReal(i)], { op: 'l' }),
+        then: block(groups[i].body),
+        otherwise: null,
+      });
     }
     this.fn.switches--;
     this.fn.oloops--;
     this.fn.switchLoops.pop();
     const flag = this.fn.switchFlags.pop();
     this.popScope();
-    const body = block(chain ? [chain, { kind: 'Break' }] : [{ kind: 'Break' }]);
+    const body = block([...runs, { kind: 'Break' }]);
     const loop = { kind: 'While', cond: { kind: 'Const', type: BOOL, value: true }, body };
-    if (!flag) return [block([...pre, loop])];
+    if (!flag) return [block([...pre, localStmt(m, pick), loop])];
     // 里面有 continue：合成循环会把它接住，所以改成"置标志位 + break"，出来再补一次
     // continue（外面还是 switch 的话，continueStmts 会继续往上传一层）
     return [block([
       ...pre,
+      localStmt(m, pick),
       localStmt(flag, constBool(false)),
       loop,
       { kind: 'If', cond: truthy(varRef(flag)), then: block(this.continueStmts()), otherwise: null },
@@ -1451,15 +1461,6 @@ class Lower {
       then: block([...head, ...handler]),
       otherwise: null,
     }];
-  }
-
-  /** 最后一个 case 掉出去没关系（后面没有 case 可穿）；中间的必须自己结束 */
-  checkNoFallThrough(cs, isLast) {
-    if (isLast) return;
-    const last = cs.body[cs.body.length - 1];
-    if (!endsControl(last)) {
-      this.err(last?.span ?? cs.body[0]?.span, 'a switch case must not fall through; end it with break or return');
-    }
   }
 
   /* -------------------------------------------------------- 表达式 */
