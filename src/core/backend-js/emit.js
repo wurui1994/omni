@@ -258,7 +258,8 @@ class JsEmitter {
     // **多份产物**拼起来，而这个适配器是"谁取地址谁发一份"—— 挂在自己身上的话 graph 那份
     // 与例子那份各有一个缓存，跨产物比还是假。
     if (c.single === true && ps.length === 0) {
-      this.line(`${this.ex()}function ${c.make}() { return $fnOne(${JSON.stringify(c.make)}, () => ({ fp: ${c.mangled} })); }`);
+      const extra = fields.length ? `, ${fields.join(', ')}` : '';
+      this.line(`${this.ex()}function ${c.make}() { return $fnOne(${JSON.stringify(c.make)}, () => ({ fp: ${c.mangled}${extra} })); }`);
       return;
     }
     this.line(`${this.ex()}function ${c.make}(${ps.join(', ')}) { return { fp: ${c.mangled}${fields.length ? `, ${fields.join(', ')}` : ''} }; }`);

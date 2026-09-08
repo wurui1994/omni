@@ -136,6 +136,7 @@ class Gen {
       case 'Ident': this.emit(n.name); return;
       case 'This': this.emit('this'); return;
       case 'ImportMeta': this.emit('import.meta'); return;
+      case 'NewTarget': this.emit('new.target'); return;
 
       case 'Template': {
         // 数字字面量后面直接跟模板是合法的，但 `1`...` 读起来像错的；tag 一律按 Member 级别要求

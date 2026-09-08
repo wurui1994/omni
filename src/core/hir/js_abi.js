@@ -232,6 +232,11 @@ export const JS_ABI = {
   js_agen_new: { js: '$js_agen_new', c: 'omni_js_agen_new', arity: 1 },
   js_aiter: { js: '$js_aiter', c: 'omni_js_aiter', arity: 1, throws: true },
   js_aiter_next: { js: '$js_aiter_next', c: 'omni_js_aiter_next', arity: 1, throws: true },
+  /* 普通函数当构造器与 new.target（ADR-0020）。函数还不是真对象，所以 `f.prototype`
+     住在一张 side table 上（prelude 的 $FNPROTO），funP 上的访问器读它；new.target 走
+     一格运行期的槽，与 this 同一个路子（放的人只有 js_fn_construct，取的人是函数入口）。 */
+  js_fn_construct: { js: '$js_fn_construct', c: 'omni_js_fn_construct', arity: 2, throws: true },
+  js_nt_take: { js: '$js_nt_take', c: 'omni_js_nt_take', arity: 0 },
 
 
   js_map_new: { js: '$js_map_new', c: 'omni_js_map_new', arity: 0 },
@@ -623,6 +628,7 @@ const P1_JS_ONLY = [
   'js_jobs_run',
   'js_gen_new', 'js_gen_res', 'js_gen_awt', 'js_async_run', 'js_agen_new',
   'js_aiter', 'js_aiter_next',
+  'js_fn_construct', 'js_nt_take',
 ];
 for (const n of P1_JS_ONLY) JS_ABI[n].noC = true;
 

@@ -193,6 +193,16 @@ function mentionsThis(node) {
   return hit;
 }
 
+/** 这个函数体里提到 `new.target` 了吗（钻箭头，不钻普通函数 —— 与 mentionsThis 同理） */
+function mentionsNewTarget(node) {
+  if (!node || typeof node !== 'object') return false;
+  if (node.type === 'NewTarget') return true;
+  if (node.type === 'FuncExpr' || node.type === 'FuncDecl' || node.type === 'ClassDecl') return false;
+  let hit = false;
+  eachChild(node, (x) => { if (!hit) hit = mentionsNewTarget(x); });
+  return hit;
+}
+
 /* ---- 精确那一问：这个名字**真的**被内层闭包捕获了吗（只有 `for` 那条拒绝用它） ----
  *
  * 上面那几个是**保守**的（宁可多算），对 cell 分配无害 —— 多一个 cell 只是多一层下标。
@@ -581,6 +591,14 @@ class Lower {
       const self = this.declare('this');
       stmts.push(this.declStmt(self, op('js_this_take', [])));
     }
+    /* new.target（ADR-0020）：与 this 同一个路子 —— 入口取一次存进一格临时量。提到了才发
+     * 这一句。箭头也自己取（拿到的是 undefined）：那一格要跟着外层走的话得装 cell，
+     * 而量过的源码里没有"箭头里读 new.target"这种写法。 */
+    if (bodyStmts.some((s) => mentionsNewTarget(s))) {
+      const nt = this.temp();
+      stmts.push(exprStmt(assign(varRef(nt), op('js_nt_take', []))));
+      this.fn.ntLocal = nt;
+    }
     /* `pre`：在**取完接收者、绑形参之前**插几句。类的实例字段就是这么进去的
      * （ADR-0020 P1-f）：规范里字段在构造器体之前初始化，而且它们看不见构造器的形参。 */
     if (opts.pre) stmts.push(...opts.pre());
@@ -936,6 +954,11 @@ class Lower {
     const rec = {
       id, mangled, make: `omni_mk_${mangled}`, captures: [],
       fnName: name, fnLen: this.topFnLens.get(name) ?? 0,
+      /* **单件**（与 sexpr 的 fnref 同一格）：同一个具名函数取出来的值必须是同一个东西。
+       * `f === f` 要为真，而且 `f.prototype` 是按闭包记录的身份查的 side table
+       * （ADR-0020 的 js_fn_construct）—— 每次取一个新记录的话 `new f() instanceof f`
+       * 就永远是假。 */
+      single: true,
     };
     this.closures.push(rec);
     this.funcs.push({
@@ -1699,6 +1722,10 @@ class Lower {
       case 'ImportMeta':
         this.err(e.span, 'import.meta is not supported');
         return undefExpr();
+      /* new.target（ADR-0020）：函数入口用 js_nt_take 取一次存进一格临时量（与 this
+       * 同一个路子），这儿只要读它。没有那一格就是"不在函数里"或箭头 —— 给 undefined。 */
+      case 'NewTarget':
+        return this.fn.ntLocal ? varRef(this.fn.ntLocal) : undefExpr();
       default:
         this.err(e.span, `cannot lower expression '${e.type}'`);
         return undefExpr();
@@ -2476,8 +2503,15 @@ class Lower {
       ])), e.span);
       return varRef(t);
     }
-    this.err(e.span, `'new ${n ?? '<expr>'}' is not supported; only Array, Map, Set, Error and classes declared in this file`);
-    return undefExpr();
+    /* 兜底：**普通函数当构造器**（ADR-0020）。`new f(a)` = 造一格以 f.prototype 为原型的
+     * 对象、拿它当接收者跑 f、f 返回对象就用那一格。f.prototype 住在运行期的一张 side
+     * table 上（函数还不是真对象），见 prelude 的 $js_fn_proto。 */
+    const sp = e.args.find((a) => a.type === 'Spread');
+    if (sp !== undefined) {
+      this.err(sp.span, 'spread is not supported in a constructor call');
+      return undefExpr();
+    }
+    return op('js_fn_construct', [this.expr(e.callee), box(this.argList(e.args), listType(D))]);
   }
 
   /* -------------------------------------------------------- 赋值与自增 */

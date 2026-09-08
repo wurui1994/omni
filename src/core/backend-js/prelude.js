@@ -1814,6 +1814,40 @@ function $js_fn_len(f) {
   const g = $js_asFn(f);
   return typeof g.$ln === "number" ? g.$ln : 0;
 }
+/* 普通函数当构造器（ADR-0020）：new f()。函数不是真对象，所以 f.prototype 那一格
+   放在一张 side table 上（$FNPROTO），funP 上的访问器读它 —— 于是 f.prototype.m = …
+   与 x instanceof f 都成立。第一次问起才建，建的时候把 constructor 挂上去。 */
+const $FNPROTO = new WeakMap();
+function $js_fn_proto(f) {
+  const g = $js_asFn(f);
+  let p = $FNPROTO.get(g);
+  if (p === undefined) {
+    p = $js_obj_new();
+    $js_def_data(p, "constructor", g, true, false, true);
+    $FNPROTO.set(g, p);
+  }
+  return p;
+}
+/* new.target：走一格运行期的槽，与 this 同一个路子（js_this_take 那一段的说明）。
+   放的人只有 js_fn_construct，取的人是**函数入口**（读一次就清）。已知的窄口：
+   一个用 new 调起来、自己**不提** new.target 的函数，在它体内直接调另一个提 new.target
+   的普通函数时，那一格还没被清掉 —— 量过的源码里没有这种写法，先记在这儿。 */
+let $js_nt_slot = undefined;
+function $js_nt_take() {
+  const v = $js_nt_slot;
+  $js_nt_slot = undefined;
+  return v;
+}
+function $js_fn_construct(f, args) {
+  const g = $js_asFn(f);
+  const o = $js_obj_new_p($js_fn_proto(g));
+  $js_nt_slot = g;
+  const r = $callThis(g, o, $js_arr_of(args));
+  $js_nt_slot = undefined;
+  if ($js_pending()) return undefined;
+  // 构造器返回一格对象就用它，别的（包括 undefined）一律给新造的那一格（规范如此）
+  return $js_isobj(r) ? r : o;
+}
 function $natm(o, name, len, fn) {
   $js_def_data(o, name, $nat(name, len, fn), true, false, true);
   return o;
@@ -1894,6 +1928,8 @@ function $mkRealm() {
   // name / length：函数还不是真对象，这两格住在 Function.prototype 上（见 $js_fn_name）
   $js_def_acc(funP, "name", $nat("name", 0, (t) => $js_fn_name(t)), undefined, false, true);
   $js_def_acc(funP, "length", $nat("length", 0, (t) => $js_fn_len(t)), undefined, false, true);
+  // prototype：函数不是真对象，这一格从 side table 上取（第一次问起才建）
+  $js_def_acc(funP, "prototype", $nat("prototype", 0, (t) => $js_fn_proto(t)), undefined, false, false);
   $natm(funP, "bind", 1, (t, a) => {
     const bt = a[0], pre = a.slice(1);
     return { fp: (self, args) => $callThis(t, bt, [...pre, ...args]), fp2: (ig, args) => $callThis(t, bt, [...pre, ...args]), $nm: "bound", $ln: 0 };
@@ -2385,7 +2421,9 @@ function $js_realm_proto(name) {
 function $js_instanceof(v, ctor) {
   const hi = $js_isobj(ctor) ? $js_getp(ctor, $js_sym_wk("hasInstance"), undefined) : undefined;
   if (hi !== undefined && hi !== null) return $js_truthy($callThis(hi, ctor, [v]));
-  const proto = $js_isobj(ctor) ? $js_getp(ctor, "prototype", undefined) : undefined;
+  // 普通函数当构造器（ADR-0020）：它的 prototype 在 side table 上，不在属性表里
+  const proto = $js_isobj(ctor) ? $js_getp(ctor, "prototype", undefined)
+    : ($dynTag(ctor) === "function" ? $js_fn_proto(ctor) : undefined);
   if (!$js_isobj(proto)) $rt_error("right-hand side of 'instanceof' is not callable");
   let cur = $js_isobj(v) ? v.pr : null;
   while (cur !== null && cur !== undefined) {

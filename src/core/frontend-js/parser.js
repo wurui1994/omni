@@ -762,6 +762,13 @@ class JsParser {
   newOrPrimary() {
     if (!this.at('new')) return this.primary();
     const start = this.next();
+    // `new.target`（ADR-0020）：语法上是一格"元属性"，不是成员访问
+    if (this.at('.')) {
+      this.next();
+      const name = this.memberName();
+      if (name !== 'target') this.error(this.spanFrom(start), "only 'new.target' is a valid meta property");
+      return { type: 'NewTarget', span: this.spanFrom(start) };
+    }
     let callee = this.newOrPrimary();
     // 只吃成员访问，不吃调用 —— `new a.b()` 的 `()` 是 new 的实参表
     for (;;) {
