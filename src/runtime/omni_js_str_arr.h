@@ -256,10 +256,10 @@ static omni_dyn omni_js_buf_elem_at(omni_dyn b, omni_dyn i) { \
   return omni_js_arr_at(omni_js_iter(b), i); \
 } \
 static omni_dyn omni_js_buf_index_of(omni_dyn b, omni_dyn v) { \
-  return omni_js_arr_index_of(omni_js_iter(b), v); \
+  return omni_js_arr_index_of(omni_js_iter(b), v, omni_dyn_undef()); \
 } \
 static bool omni_js_buf_includes(omni_dyn b, omni_dyn v) { \
-  return omni_js_arr_includes(omni_js_iter(b), v); \
+  return omni_js_arr_includes(omni_js_iter(b), v, omni_dyn_undef()); \
 } \
 /* 下标是数就是元素，否则是**挂在数组身上的属性**（JS 里数组也是对象，见 omni_js_obj.h
    的旁表）。`a.foo` 与 `a["foo"]` 于是走到同一个地方 —— 降级器把成员赋值发成 idx_set。 */ \

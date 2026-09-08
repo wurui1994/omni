@@ -126,9 +126,10 @@ export const JS_ABI = {
   js_arr_from: { js: '$js_arr_from', c: 'omni_js_arr_from', arity: 2, throws: true },
   // a.at(i)：负下标从尾部数（`a[-1]` 在 JS 里是取属性，不是取末元素），越界 undefined
   js_arr_at: { js: '$js_arr_at', c: 'omni_js_arr_at', arity: 2 },
-  js_arr_index_of: { js: '$js_arr_index_of', c: 'omni_js_arr_index_of', arity: 2 },
-  js_arr_last_index_of: { js: '$js_arr_last_index_of', c: 'omni_js_arr_last_index_of', arity: 2 },
-  js_arr_includes: { js: '$js_arr_includes', c: 'omni_js_arr_includes', arity: 2, ret: 'bool' },
+  // 第三格是 fromIndex（负数从末尾数）：indexOf / lastIndexOf / includes 都收
+  js_arr_index_of: { js: '$js_arr_index_of', c: 'omni_js_arr_index_of', arity: 3 },
+  js_arr_last_index_of: { js: '$js_arr_last_index_of', c: 'omni_js_arr_last_index_of', arity: 3 },
+  js_arr_includes: { js: '$js_arr_includes', c: 'omni_js_arr_includes', arity: 3, ret: 'bool' },
   js_arr_join: { js: '$js_arr_join', c: 'omni_js_arr_join', arity: 2 },
   /* Uint8Array 上那几格数组方法：先摊成字节的数组再走 list 那一格。只有**结果是原始值**
      的四格（map / filter / slice 在 JS 里交出 TypedArray，摊成 list 会撒谎）。 */

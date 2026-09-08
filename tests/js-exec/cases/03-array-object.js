@@ -202,3 +202,7 @@ let dn1, dnRest;
 ({ p: { q: dn1 } = { q: 7 }, ...dnRest } = { z: 1 });
 console.log(`de ${dn1} ${JSON.stringify(dnRest)}`);
 console.log(`sp ${JSON.stringify({ ...[1, 2] })} ${JSON.stringify({ ..."ab" })} ${JSON.stringify({ ...{ a: 1 } })}`);
+// indexOf / lastIndexOf / includes 的 fromIndex（负数从末尾数，越界夹住）—— 从前整格丢掉
+console.log(`fi ${[1, 2, 3, 2].indexOf(2, 2)} ${[1, 2, 3, 2].indexOf(2, -2)} ${[1, 2, 3, 2].indexOf(2, 4)}`);
+console.log(`fi ${[1, 2, 3, 2].lastIndexOf(2, 2)} ${[1, 2, 3, 2].lastIndexOf(2, 0)} ${[1, 2, 3, 2].lastIndexOf(2, -3)}`);
+console.log(`fi ${[1, 2, 3].includes(2, 2)} ${[1, 2, 3].includes(2, -2)} ${[1, 2, 3].includes(3, 99)}`);

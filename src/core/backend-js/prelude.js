@@ -1475,16 +1475,35 @@ function $js_arr_from_src(v) {
 function $js_has_iter(v) {
   return $js_getp(v, $js_sym_wk("iterator"), undefined) !== undefined;
 }
-function $js_arr_index_of(a, v) { return $js_arr_of(a).findIndex((x) => $js_eq(true, x, v)); }
-function $js_arr_last_index_of(a, v) {
+/* 第三格是 fromIndex（规范 23.1.3.17 / .21 / .16）：负数从末尾数，越界就夹住。
+   从前这一格被丢掉了 —— [1,2,3,2].indexOf(2, 2) 给 1（该是 3），silent 的错答案。 */
+function $js_arr_from_idx(len, from, dflt) {
+  if (from === undefined) return dflt;
+  let i = Math.trunc($js_real(from, "fromIndex"));
+  if (Number.isNaN(i)) i = 0;
+  return i < 0 ? len + i : i;
+}
+function $js_arr_index_of(a, v, from) {
   const l = $js_arr_of(a);
-  for (let i = l.length - 1; i >= 0; i--) if ($js_eq(true, l[i], v)) return i;
+  let i = $js_arr_from_idx(l.length, from, 0);
+  if (i < 0) i = 0;
+  for (; i < l.length; i++) if ($js_eq(true, l[i], v)) return i;
   return -1;
 }
-function $js_arr_includes(a, v) {
+function $js_arr_last_index_of(a, v, from) {
+  const l = $js_arr_of(a);
+  let i = $js_arr_from_idx(l.length, from, l.length - 1);
+  if (i >= l.length) i = l.length - 1;
+  for (; i >= 0; i--) if ($js_eq(true, l[i], v)) return i;
+  return -1;
+}
+function $js_arr_includes(a, v, from) {
   const l = $js_arr_of(a);
   const nan = typeof v === "number" && Number.isNaN(v);
-  for (const x of l) {
+  let i = $js_arr_from_idx(l.length, from, 0);
+  if (i < 0) i = 0;
+  for (; i < l.length; i++) {
+    const x = l[i];
     if (nan ? (typeof x === "number" && Number.isNaN(x)) : $js_eq(true, x, v)) return true;
   }
   return false;
@@ -2418,8 +2437,8 @@ function $mkRealm() {
   // splice / toSpliced 收可变实参，而且**实参个数是语义的一部分**，所以整串传下去
   $natm(r.arrP, "splice", 2, (t, a) => $js_arr_splice(t, a));
   $natm(r.arrP, "toSpliced", 2, (t, a) => $js_arr_to_spliced(t, a));
-  $natm(r.arrP, "indexOf", 1, (t, a) => $js_arr_index_of(t, a[0]));
-  $natm(r.arrP, "includes", 1, (t, a) => $js_arr_includes(t, a[0]));
+  $natm(r.arrP, "indexOf", 1, (t, a) => $js_arr_index_of(t, a[0], a[1]));
+  $natm(r.arrP, "includes", 1, (t, a) => $js_arr_includes(t, a[0], a[1]));
   $natm(r.arrP, "map", 1, (t, a) => $js_arr_map(t, a[0]));
   $natm(r.arrP, "filter", 1, (t, a) => $js_arr_filter(t, a[0]));
   $natm(r.arrP, "forEach", 1, (t, a) => $js_arr_for_each(t, a[0]));

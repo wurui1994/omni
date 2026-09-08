@@ -273,24 +273,36 @@ static omni_dyn omni_js_arr_copy_within(omni_dyn a, omni_dyn t, omni_dyn s, omni
 static bool omni_js_arr_is_array(omni_dyn v) { return v.tag == OMNI_DYN_LIST; } \
 /* Array.from(v[, f]) 不在这一段里 —— 它要读类数组的 length（omni_js_obj_get），而那一族
    在 omni_js_obj.h 里、比这一段**后**展开。所以它定义在那边（同名同形）。 */ \
-static omni_dyn omni_js_arr_index_of(omni_dyn a, omni_dyn v) { \
+/* 第三格是 fromIndex（规范 23.1.3.17 / .21 / .16）：负数从末尾数，越界就夹住 */ \
+static int64_t omni_js_arr_from_idx(int64_t len, omni_dyn from, int64_t dflt) { \
+  if (from.tag == OMNI_DYN_UNDEF) return dflt; \
+  int64_t i = omni_js_arr_i(from); \
+  return i < 0 ? len + i : i; \
+} \
+static omni_dyn omni_js_arr_index_of(omni_dyn a, omni_dyn v, omni_dyn from) { \
   LT l = omni_js_arr_of(a); \
-  for (int64_t i = 0; i < l->len; i++) { \
+  int64_t i = omni_js_arr_from_idx(l->len, from, 0); \
+  if (i < 0) i = 0; \
+  for (; i < l->len; i++) { \
     if (omni_js_eq(true, l->items[i], v)) return omni_dyn_of_real((double)i); \
   } \
   return omni_dyn_of_real(-1.0); \
 } \
-static omni_dyn omni_js_arr_last_index_of(omni_dyn a, omni_dyn v) { \
+static omni_dyn omni_js_arr_last_index_of(omni_dyn a, omni_dyn v, omni_dyn from) { \
   LT l = omni_js_arr_of(a); \
-  for (int64_t i = l->len - 1; i >= 0; i--) { \
+  int64_t i = omni_js_arr_from_idx(l->len, from, l->len - 1); \
+  if (i >= l->len) i = l->len - 1; \
+  for (; i >= 0; i--) { \
     if (omni_js_eq(true, l->items[i], v)) return omni_dyn_of_real((double)i); \
   } \
   return omni_dyn_of_real(-1.0); \
 } \
-static bool omni_js_arr_includes(omni_dyn a, omni_dyn v) { \
+static bool omni_js_arr_includes(omni_dyn a, omni_dyn v, omni_dyn from) { \
   LT l = omni_js_arr_of(a); \
   bool nan = v.tag == OMNI_DYN_REAL && isnan(v.u.r); \
-  for (int64_t i = 0; i < l->len; i++) { \
+  int64_t i = omni_js_arr_from_idx(l->len, from, 0); \
+  if (i < 0) i = 0; \
+  for (; i < l->len; i++) { \
     omni_dyn x = l->items[i]; \
     if (nan ? (x.tag == OMNI_DYN_REAL && isnan(x.u.r)) : omni_js_eq(true, x, v)) return true; \
   } \
