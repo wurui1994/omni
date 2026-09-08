@@ -84,9 +84,10 @@ export const JS_ABI = {
   js_str_is_well_formed: { js: '$js_str_is_well_formed', c: 'omni_js_str_is_well_formed', arity: 1, ret: 'bool' },
   js_str_to_well_formed: { js: '$js_str_to_well_formed', c: 'omni_js_str_to_well_formed', arity: 1 },
   js_str_last_index_of: { js: '$js_str_last_index_of', c: 'omni_js_str_last_index_of', arity: 3 },
-  js_str_includes: { js: '$js_str_includes', c: 'omni_js_str_includes', arity: 2, ret: 'bool' },
+  js_str_includes: { js: '$js_str_includes', c: 'omni_js_str_includes', arity: 3, ret: 'bool' },
   js_str_starts_with: { js: '$js_str_starts_with', c: 'omni_js_str_starts_with', arity: 3, ret: 'bool' },
-  js_str_ends_with: { js: '$js_str_ends_with', c: 'omni_js_str_ends_with', arity: 2, ret: 'bool' },
+  // endsWith 的第三格是**终点**（不给就是长度）：`"abc".endsWith("b", 2)` 是 true
+  js_str_ends_with: { js: '$js_str_ends_with', c: 'omni_js_str_ends_with', arity: 3, ret: 'bool' },
   js_str_of_char_code: { js: '$js_str_of_char_code', c: 'omni_js_str_of_char_code', arity: 1 },
   js_str_of_code_point: { js: '$js_str_of_code_point', c: 'omni_js_str_of_code_point', arity: 1 },
 

@@ -174,6 +174,11 @@ console.log(`ra ${"abc".replace("b", (m) => m + m)} ${"abc".replace("b", "<$&>")
 // 全局的 isNaN / isFinite 先 ToNumber；Number 上那两格不转（各一格 op）
 console.log(`nan ${isNaN("x")} ${isNaN("3")} ${isFinite("3")} ${isFinite("x")} ${isNaN(NaN)}`);
 console.log(`nan ${Number.isNaN("x")} ${Number.isFinite("3")} ${isFinite(null)} ${isNaN(undefined)}`);
+// endsWith 的第二格是**终点**、includes 的第二格是起点（两格从前都被丢掉了）；
+// split 的分隔符不给时整串是一格
+console.log(`pos ${"abc".endsWith("b", 2)} ${"abc".endsWith("c")} ${"abc".endsWith("b")} ${"abc".endsWith("a", 1)}`);
+console.log(`pos ${"abcabc".includes("b", 2)} ${"abcabc".includes("b", 5)} ${"abc".startsWith("b", 1)}`);
+console.log(`pos ${"abc".split().length} ${"abc".split(undefined)[0]} ${"a-b-c".split("-", 2).join(",")}`);
 
 
 

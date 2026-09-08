@@ -1363,12 +1363,16 @@ function $js_str_last_index_of(s, needle, from) {
   const v = $js_asS16(s), n = $js_asS16(needle);
   return from === undefined ? v.lastIndexOf(n) : v.lastIndexOf(n, $js_idx(from, 0));
 }
-function $js_str_includes(s, needle) { return $js_asS16(s).includes($js_asS16(needle)); }
+function $js_str_includes(s, needle, pos) { return $js_asS16(s).includes($js_asS16(needle), $js_idx(pos, 0)); }
 // 第二个实参是起始位置：词法器的标点匹配靠它，而且在热路径上
 function $js_str_starts_with(s, pre, pos) {
   return $js_asS16(s).startsWith($js_asS16(pre), $js_idx(pos, 0));
 }
-function $js_str_ends_with(s, suf) { return $js_asS16(s).endsWith($js_asS16(suf)); }
+// endsWith 的第二个实参是**终点**（不给就是长度）
+function $js_str_ends_with(s, suf, end) {
+  const v = $js_asS16(s);
+  return v.endsWith($js_asS16(suf), $js_idx(end, v.length));
+}
 // 变长的 fromCharCode / fromCodePoint 由降级拆成多次 js_add，这里只收一个实参
 function $js_str_of_char_code(u) { return String.fromCharCode($js_idx(u, 0)); }
 function $js_str_of_code_point(cp) { return String.fromCodePoint($js_idx(cp, 0)); }
@@ -1626,11 +1630,13 @@ function $js_arr_entries(a) { return $js_arr_of(a).map((v, i) => [i, v]); }
 function $js_arr_keys(a) { return $js_arr_of(a).map((v, i) => i); }
 function $js_arr_values(a) { return $js_arr_of(a).slice(); }
 // split 的字符串分隔符形式（正则形式是 $js_re_split）。空分隔符按码元切，不按码点。
-// split 的字符串分隔符形式（正则形式是 $js_re_split）。空分隔符按码元切，不按码点。
 // 第三个实参是 limit：结果长度的上界（规范 22.1.3.23）—— 从前这一格被丢掉了，
 // "a-b-c".split("-", 2) 于是给出三段（silent 的错答案，量出来的）。
+// 分隔符不给（undefined）时整串是一格：'abc'.split() 是 ["abc"]（规范 22.1.3.23 第 3 步）。
 function $js_str_split(s, sep, limit) {
-  const v = $js_asS16(s), p = $js_asS16(sep);
+  const v = $js_asS16(s);
+  if (sep === undefined) return [v];
+  const p = $js_asS16(sep);
   const parts = p.length === 0 ? [...v.split("")] : v.split(p);
   if (limit === undefined) return parts;
   const n = Math.trunc($js_real(limit, "split"));
@@ -2420,9 +2426,9 @@ function $mkRealm() {
   // 字符串那边同理（String.prototype.slice.call(s, 1)）。trim 的 lit 排在实参前面。
   $natm(r.strP, "slice", 2, (t, a) => $js_str_slice(t, a[0], a[1]));
   $natm(r.strP, "indexOf", 1, (t, a) => $js_str_index_of(t, a[0], undefined));
-  $natm(r.strP, "includes", 1, (t, a) => $js_str_includes(t, a[0]));
-  $natm(r.strP, "startsWith", 1, (t, a) => $js_str_starts_with(t, a[0], undefined));
-  $natm(r.strP, "endsWith", 1, (t, a) => $js_str_ends_with(t, a[0]));
+  $natm(r.strP, "includes", 1, (t, a) => $js_str_includes(t, a[0], a[1]));
+  $natm(r.strP, "startsWith", 1, (t, a) => $js_str_starts_with(t, a[0], a[1]));
+  $natm(r.strP, "endsWith", 1, (t, a) => $js_str_ends_with(t, a[0], a[1]));
   $natm(r.strP, "split", 1, (t, a) => $js_str_split(t, a[0]));
   $natm(r.strP, "trim", 0, (t) => $js_str_trim("b", t));
   $natm(r.strP, "toUpperCase", 0, (t) => $js_str_upper(t));

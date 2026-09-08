@@ -163,8 +163,13 @@ static omni_dyn omni_js_str_substring(omni_dyn sd, omni_dyn ad, omni_dyn bd) { \
 } \
 static omni_dyn omni_js_str_split(omni_dyn sd, omni_dyn sepd, omni_dyn limitd) { \
   omni_s16 s = omni_js_as_s16(sd); \
-  omni_s16 sep = omni_js_as_s16(sepd); \
   LT out = LT##_new(); \
+  /* 分隔符不给：整串就是一格（规范 22.1.3.23 第 3 步） */ \
+  if (sepd.tag == OMNI_DYN_UNDEF) { \
+    LT##_push(out, omni_dyn_of_s16(s)); \
+    return omni_js_arr_wrap(out); \
+  } \
+  omni_s16 sep = omni_js_as_s16(sepd); \
   /* limit 是结果长度的**上界**（规范 22.1.3.23）；缺席或负数就是不限 */ \
   int64_t lim = (limitd.tag == OMNI_DYN_UNDEF) ? -1 : omni_js_arr_i(limitd); \
   if (lim == 0) return omni_js_arr_wrap(out); \

@@ -544,9 +544,10 @@ omni_dyn omni_js_str_lower(omni_dyn s);
 omni_dyn omni_js_str_upper(omni_dyn s);
 omni_dyn omni_js_str_index_of(omni_dyn s, omni_dyn needle, omni_dyn from);
 omni_dyn omni_js_str_last_index_of(omni_dyn s, omni_dyn needle, omni_dyn from);
-bool omni_js_str_includes(omni_dyn s, omni_dyn needle);
+bool omni_js_str_includes(omni_dyn s, omni_dyn needle, omni_dyn pos);
 bool omni_js_str_starts_with(omni_dyn s, omni_dyn pre, omni_dyn pos);
-bool omni_js_str_ends_with(omni_dyn s, omni_dyn suf);
+/* endsWith 的第二个实参是终点（不给就是长度） */
+bool omni_js_str_ends_with(omni_dyn s, omni_dyn suf, omni_dyn end);
 omni_dyn omni_js_str_of_char_code(omni_dyn u);
 /* substr（Annex B）：起点认负数，第二格是长度 */
 omni_dyn omni_js_str_substr(omni_dyn s, omni_dyn a, omni_dyn n);
