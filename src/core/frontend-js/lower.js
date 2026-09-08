@@ -1805,6 +1805,10 @@ class Lower {
       // lit 也要带上：well-known Symbol（Symbol.iterator …）就是"名字是编译期常量"的 op
       if (spec) return op(spec.op, [], spec.lit ?? {});
       if (path.startsWith('process.env.')) return op('js_proc_env', [s16(path.slice('process.env.'.length))]);
+      /* 常量那一族（ADR-0020 P4）：Number.EPSILON / Math.PI 这些没有运行期成分 ——
+       * 直接就是一个 real 字面量，不必为它们各开一个 op。非有限的那几个
+       * （Infinity / NaN）不在这儿：字面量要能落到 C 里，那是另一格。 */
+      if (CONST_PROPS[path] !== undefined) return constReal(CONST_PROPS[path]);
       /* 最长的**已注册前缀**（ADR-0020 P1-f）：`Object.prototype.toString` 就是
        * "取 Object.prototype 这一格，再取它的 toString" —— 内建原型现在是真对象，
        * 所以后半段是普通的属性读。这一条让 `X.prototype.m.call(…)` 那类写法通了。 */
@@ -2367,6 +2371,30 @@ const STATIC_CALLS = {
   // fround（ADR-0017 第一刀）：MIR 的 f32 语义就是"按 double 算完再舍一次到单精度"，
   // 而闭包解释器要在**我们自己编出来的**编译器里也这么算 —— 所以它必须进封闭 ABI。
   'Math.fround': { op: 'js_math', argc: 2, lit: { op: 'F' } },
+  /* 超越函数那一族（ADR-0020 P4）：选择子早就在 js_math 里（核心方言的 (rmath …) 用着），
+     缺的只是这张表里的名字。**Math.round 不在这儿** —— js_math 的 'r' 是 C 的 round
+     （离零舍入），而 Math.round 是"半数往上"，两者在 -0.5 上就分叉。 */
+  'Math.sqrt': { op: 'js_math', argc: 2, lit: { op: 's' } },
+  'Math.hypot': { op: 'js_math', argc: 2, lit: { op: 'Y' } },
+  'Math.exp': { op: 'js_math', argc: 2, lit: { op: 'E' } },
+  'Math.expm1': { op: 'js_math', argc: 2, lit: { op: 'X' } },
+  'Math.log': { op: 'js_math', argc: 2, lit: { op: 'O' } },
+  'Math.log10': { op: 'js_math', argc: 2, lit: { op: 'Q' } },
+  'Math.log1p': { op: 'js_math', argc: 2, lit: { op: 'P' } },
+  'Math.cbrt': { op: 'js_math', argc: 2, lit: { op: 'B' } },
+  'Math.sin': { op: 'js_math', argc: 2, lit: { op: 'S' } },
+  'Math.cos': { op: 'js_math', argc: 2, lit: { op: 'C' } },
+  'Math.tan': { op: 'js_math', argc: 2, lit: { op: 'T' } },
+  'Math.asin': { op: 'js_math', argc: 2, lit: { op: 'I' } },
+  'Math.acos': { op: 'js_math', argc: 2, lit: { op: 'A' } },
+  'Math.atan': { op: 'js_math', argc: 2, lit: { op: 'N' } },
+  'Math.atan2': { op: 'js_math', argc: 2, lit: { op: '2' } },
+  'Math.sinh': { op: 'js_math', argc: 2, lit: { op: 'H' } },
+  'Math.cosh': { op: 'js_math', argc: 2, lit: { op: 'D' } },
+  'Math.tanh': { op: 'js_math', argc: 2, lit: { op: 'G' } },
+  'Math.asinh': { op: 'js_math', argc: 2, lit: { op: 'J' } },
+  'Math.acosh': { op: 'js_math', argc: 2, lit: { op: 'K' } },
+  'Math.atanh': { op: 'js_math', argc: 2, lit: { op: 'L' } },
   // pow 与 `**` 是同一件事（规范里两者都是 ToNumber 之后求幂），所以它就是那条算术 op
   'Math.pow': { op: 'js_arith', argc: 2, lit: { op: 'p' } },
   // imul 是**32 位乘法**，不是 `Math.*` 那一族：它属于 i32 那三条 op（ADR-0013 第三刀）。
@@ -2454,6 +2482,24 @@ const STATIC_PROPS = {
 
 const STATIC_SETS = {
   'process.exitCode': { op: 'js_proc_exit_code' },
+};
+
+/* 没有运行期成分的那些属性（ADR-0020 P4）：直接就是一个 real 字面量。
+   非有限的那几个（Infinity / NaN）不在这儿 —— 那要发射器那边先有"非有限字面量"这一格。 */
+const CONST_PROPS = {
+  'Number.EPSILON': 2.220446049250313e-16,
+  'Number.MAX_SAFE_INTEGER': 9007199254740991,
+  'Number.MIN_SAFE_INTEGER': -9007199254740991,
+  'Number.MAX_VALUE': 1.7976931348623157e308,
+  'Number.MIN_VALUE': 5e-324,
+  'Math.PI': 3.141592653589793,
+  'Math.E': 2.718281828459045,
+  'Math.LN2': 0.6931471805599453,
+  'Math.LN10': 2.302585092994046,
+  'Math.LOG2E': 1.4426950408889634,
+  'Math.LOG10E': 0.4342944819032518,
+  'Math.SQRT2': 1.4142135623730951,
+  'Math.SQRT1_2': 0.7071067811865476,
 };
 
 const GLOBAL_CALLS = {

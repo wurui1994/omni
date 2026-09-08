@@ -2212,7 +2212,9 @@ function $js_json_quote(s) {
   return out + '"';
 }
 function $js_json_apply(rep, key, v) {
-  return rep === undefined ? v : $callFn(rep, [key, v]);
+  // replacer 只有**函数**形态才调；null 与 undefined 都是"没给"（JSON.stringify(o, null, 2)
+  // 是最常见的写法，从前 null 会掉进 $callFn 里报 "call of a null function value"）。
+  return $dynTag(rep) === "function" ? $callFn(rep, [key, v]) : v;
 }
 function $js_json_nl(gap, depth) { return gap > 0 ? "\n" + " ".repeat(gap * depth) : ""; }
 // undefined 与函数值"该省略"：在对象里跳过、在数组里变成 null。用 undefined 当哨兵。
