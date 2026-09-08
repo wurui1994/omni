@@ -1276,14 +1276,12 @@ class Lower {
         }
         return [{ kind: 'Break' }];
       case 'Continue':
-        // do-while 摊成 while(true) 之后，continue 会跳过尾部的条件检查
+        // do-while 现在摊成 For（条件在 step 里），所以 continue 正好是"去算条件"，见 doWhile
         if (s.label) return [{ kind: 'Continue', level: this.labelLevel(s, 'continue') }];
         if (this.crossesTry()) {
           const u = this.finAbrupt(3);
           if (u) return u;
           this.err(s.span, "'continue' cannot cross a try boundary; restructure the try");
-        } else if ((this.fn.doWhiles ?? 0) > 0) {
-          this.err(s.span, "'continue' inside a do-while is not lowered yet; restructure the loop");
         } else if (this.fn.loops === 0) {
           this.err(s.span, "'continue' outside a loop");
         }
@@ -1477,22 +1475,29 @@ class Lower {
     return '<error>';
   }
 
-  /** do-while：OIR 没有 do-while，摊成 while(true) { body; if (!test) break; } */
+  /**
+   * do-while：OIR 没有 do-while。摊成一个 **For**，条件放在 step 里、循环条件读一格标志：
+   *
+   *   let _dw = true;
+   *   for (; _dw; _dw = <test>) { body }
+   *
+   * 头一轮标志是 true 所以体先跑；体跑完（**或者 continue**）走 step，那儿才算 test ——
+   * 于是 `continue` 的语义正好是"去算条件"，与规范一致。从前摊的是
+   * `while (true) { body; if (!test) break; }`，continue 会跳过尾巴那一句、成了死循环，
+   * 所以那时候 do-while 里的 continue 是当场报错。
+   */
   doWhile(s) {
+    const flag = this.declare('_dw').name;
     this.fn.loops++;
     this.fn.oloops++;
-    this.fn.doWhiles = (this.fn.doWhiles ?? 0) + 1;
     const body = this.bodyBlock(s.body);
-    this.fn.doWhiles--;
+    const step = assign(varRef(flag), this.lazy(() => box(truthy(this.expr(s.test)), BOOL)));
     this.fn.oloops--;
     this.fn.loops--;
-    body.stmts.push({
-      kind: 'If',
-      cond: this.lazy(() => notB(truthy(this.expr(s.test)))),
-      then: block([{ kind: 'Break' }]),
-      otherwise: null,
-    });
-    return [{ kind: 'While', cond: { kind: 'Const', type: BOOL, value: true }, body }];
+    return [block([
+      localStmt(flag, constBool(true)),
+      { kind: 'For', init: null, cond: truthy(varRef(flag)), step, body },
+    ])];
   }
 
   forStmt(s) {
