@@ -592,6 +592,9 @@ class Lower {
        * （switch 那格 cont 是 false —— continue 不认它）。try 摊出来的那层合成循环**不**压，
        * 它不是跳转目标；跨过它就是"多跳一层"，见 Break / Continue 那两支。 */
       targets: [],
+      /* 还开着的 for-of 把手（{name, ol}）：`return` 与"带标签跳到外层去"会跳过循环后面
+       * 那一句 close，所以在那两处按内层到外层补上（见 iterCloses）。 */
+      iters: [],
       // **OIR 的**循环层数，以及每个还在作用域里的标签记下的那一层。
       // 与 loops 的差别是它把合成的循环也算进去（switch / try / do-while 各摊出一个
       // while(true)）—— OIR 的 Break/Continue 的 level 数的正是 OIR 的层数，
@@ -1289,11 +1292,13 @@ class Lower {
         if (this.fn.isCtor) {
           if (s.arg) this.err(s.span, 'a constructor cannot return a value');
           const self = this.readEntry(this.lookup('this'));
-          return this.finAbrupt(1, self) ?? [{ kind: 'Return', value: self }];
+          return this.finAbrupt(1, self) ?? [...this.iterCloses(0), { kind: 'Return', value: self }];
         }
         const rv = s.arg ? this.expr(s.arg) : undefExpr();
-        // 外面套着带 finally 的 try：先记下再 break 出去，清理跑完了才真的 return
-        return this.finAbrupt(1, rv) ?? [{ kind: 'Return', value: rv }];
+        /* 外面套着带 finally 的 try：先记下再 break 出去，清理跑完了才真的 return ——
+         * for-of 的那几次 close 就挂在**真发 Return 的那一处**（见 iterCloses 与 tryStmt），
+         * 于是次序是"先跑 finally，再关迭代器"，与规范一致。 */
+        return this.finAbrupt(1, rv) ?? [...this.iterCloses(0), { kind: 'Return', value: rv }];
       }
       case 'Labeled': {
         // 标签只打在循环上（parser 那边保证）。记下"进了这层循环之后 OIR 有多少层"，
@@ -1627,6 +1632,7 @@ class Lower {
     this.fn.loops++;
     this.fn.oloops++;
     this.fn.targets.push({ ol: this.fn.oloops, cont: true });
+    this.fn.iters.push({ name: it, ol: this.fn.oloops });
     const elem = () => op('js_iter_cur', [varRef(it), varRef(i)]);
     let inner;
     if (s.declKind) {
@@ -1636,6 +1642,7 @@ class Lower {
       inner = lv ? [exprStmt(lv.set(elem()))] : [];
     }
     const body = this.bodyBlock(s.body);
+    this.fn.iters.pop();
     this.fn.targets.pop();
     this.fn.oloops--;
     this.fn.loops--;
@@ -1757,9 +1764,17 @@ class Lower {
    */
   labelJump(s, what) {
     const u = this.finLabelAbrupt(s, what);
-    if (u) return u;
+    if (u) return u;   // 推到 finally 后面去发，close 也跟着挪（见 tryStmt 里那一段）
+    /* 跳到外层去时，中间那几层 for-of 的 close 被跳过了（它是循环后面那一句）——
+     * 按内层到外层补上。目标那一层自己的不用补：跳出去正好落在它后面。 */
+    const labs = this.fn.labels;
+    let depth = 0;
+    for (let k = labs.length - 1; k >= 0; k--) {
+      if (labs[k].name === s.label) { depth = labs[k].depth; break; }
+    }
+    const closes = depth > 0 ? this.iterCloses(depth) : [];
     const level = this.labelLevel(s, what);
-    return [what === 'break' ? { kind: 'Break', level } : { kind: 'Continue', level }];
+    return [...closes, what === 'break' ? { kind: 'Break', level } : { kind: 'Continue', level }];
   }
 
   /**
@@ -1792,6 +1807,20 @@ class Lower {
       exprStmt(assign(varRef(top.unw), constReal(j.code))),
       level > 1 ? { kind: 'Break', level } : { kind: 'Break' },
     ];
+  }
+
+  /**
+   * 跳出 for-of 时要补的那几次 `it.return()`：循环后面那一句 close 只有"落到那儿"才跑，
+   * 而 `return` 与"带标签跳到外层去"都跳过了它。按**内层到外层**发（规范的次序）。
+   * @param {number} minOL 只关掉深度比它大的那些（`0` = 全关，用于 return）
+   */
+  iterCloses(minOL) {
+    const out = [];
+    for (let k = this.fn.iters.length - 1; k >= 0; k--) {
+      const h = this.fn.iters[k];
+      if (h.ol > minOL) out.push(exprStmt(op('js_iter_close', [varRef(h.name)])));
+    }
+    return out;
   }
 
   /**
@@ -1951,7 +1980,8 @@ class Lower {
       if (unw) {
         const eq = (n) => boolOp('js_eq', [varRef(unw.unw), constReal(n)], { strict: true });
         if (unw.used.has(1)) {
-          const ret = this.finAbrupt(1, varRef(unw.rv)) ?? [{
+          // for-of 的 close 挂在真发 Return 的这一处，所以次序是"先跑 finally，再关迭代器"
+          const ret = this.finAbrupt(1, varRef(unw.rv)) ?? [...this.iterCloses(0), {
             kind: 'Return',
             value: this.fn.isMain ? null : varRef(unw.rv),
           }];

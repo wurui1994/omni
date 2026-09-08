@@ -71,3 +71,50 @@ const live = [1, 2, 3];
 const out = [];
 for (const lv of live) { out.push(lv); if (lv === 1) live.push(9); }
 console.log(out.join(","), live.length);
+
+/* 出口不只有 break：`return` 与"带标签跳到外层去"都跳过了循环后面那一句 close，
+   所以那两处按**内层到外层**补上（iterCloses）。带 finally 的 try 夹在中间时，close 挂在
+   真发 Return 的那一处 —— 于是次序是"先跑 finally，再关迭代器"，与规范一致。 */
+function mk(tag) {
+  return {
+    [Symbol.iterator]() {
+      let i = 0;
+      return {
+        next() { return { value: i++, done: i > 5 }; },
+        return() { console.log("close", tag); return { done: true }; },
+      };
+    },
+  };
+}
+function byReturn() {
+  for (const v of mk("ret")) { if (v === 1) return "r"; }
+  return "n";
+}
+console.log(byReturn());
+function byLabelBreak() {
+  L: for (const a of mk("outer")) {
+    for (const b of mk("inner")) { if (b === 1) break L; }
+  }
+  return "lb";
+}
+console.log(byLabelBreak());
+function byLabelContinue() {
+  L: for (const a of mk("o2")) {
+    for (const b of mk("i2")) { if (b === 1) continue L; }
+  }
+  return "lc";
+}
+console.log(byLabelContinue());
+function withFinally() {
+  for (const v of mk("f")) {
+    try { if (v === 1) return "rf"; } finally { console.log("fin"); }
+  }
+  return "nf";
+}
+console.log(withFinally());
+function genReturn() {
+  function* g() { try { yield 1; yield 2; } finally { console.log("gfin"); } }
+  for (const v of g()) { if (v === 1) return "rg"; }
+  return "ng";
+}
+console.log(genReturn());
