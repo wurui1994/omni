@@ -3203,7 +3203,9 @@ function $js_err_new(msg, cls, opts) {
   const o = $js_obj_new();
   $js_obj_set(o, "$cls", cls);
   $js_obj_set(o, "name", cls[0]);
-  $js_obj_set(o, "message", msg);
+  // message 缺席（new Error() / new Error(undefined)）就是空串 —— 规范里那一格只在
+  // 给了非 undefined 时才设，而取不到时读出来的是原型上的 ""
+  $js_obj_set(o, "message", msg === undefined ? "" : msg);
   // { cause } 那一格（ES2022）：只有真给了才挂 —— 没给时 JS 里连这个属性都没有。
   // 两种载体都收：这条腿上的对象字面量是真对象（P1），C 那条腿上还是 dict。
   const ot = $dynTag(opts);

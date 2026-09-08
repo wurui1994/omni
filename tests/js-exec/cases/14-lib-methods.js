@@ -109,6 +109,13 @@ console.log(`findLast ${[].findLast((x) => true)} ${[].findLastIndex((x) => true
 console.log(`copy ${cs.toReversed().join(",")} ${cs.join(",")}`);
 console.log(`copy ${cs.with(1, 9).join(",")} ${cs.with(-1, 0).join(",")} ${cs.join(",")}`);
 
+// 成员调用里的展开与 concat 的可变实参：定长的派发器按下标取头几格，concat 摊成
+// 一串调用（展开时是运行期 reduce）。C 那条腿上走的是 js_arr_at / js_arr_reduce。
+console.log(`mspread ${cs.slice(...[1, 3]).join(",")} ${"abcdef".slice(...[1, 3])}`);
+console.log(`mspread ${"a-b-c".split(...["-"]).join("|")} ${cs.indexOf(...[3])}`);
+console.log(`mconcat ${[1, 2].concat([3], [4]).join(",")} ${[1, 2].concat(...[[3], [4]]).join(",")}`);
+console.log(`mconcat ${"a".concat("b", "c")} ${"a".concat(...["b", "c"])} ${[].concat(...[]).length}`);
+
 
 
 

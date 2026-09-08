@@ -122,7 +122,8 @@ static omni_dyn omni_js_err_new(omni_dyn msg, omni_dyn cls, omni_dyn opts) { \
   omni_dyn cause = omni_dyn_of_s16(omni_js_s16_lit("cause")); \
   omni_js_obj_set(o, omni_dyn_of_s16(omni_js_s16_lit("$cls")), cls); \
   omni_js_obj_set(o, omni_dyn_of_s16(omni_js_s16_lit("name")), omni_js_arr_geti(cls, 0)); \
-  omni_js_obj_set(o, omni_dyn_of_s16(omni_js_s16_lit("message")), msg); \
+  omni_js_obj_set(o, omni_dyn_of_s16(omni_js_s16_lit("message")), \
+    msg.tag == OMNI_DYN_UNDEF ? omni_dyn_of_s16(omni_js_s16_lit("")) : msg); \
   if (opts.tag == OMNI_DYN_DICT && omni_js_obj_has(opts, cause)) { \
     omni_js_obj_set(o, cause, omni_js_obj_get(opts, cause)); \
   } \

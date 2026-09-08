@@ -2337,9 +2337,35 @@ class Lower {
       if (name === 'push' && (e.args.length !== 1 || e.args[0].type === 'Spread')) {
         return op('js_arr_push_all', [recv, box(this.argList(e.args), listType(D))]);
       }
+      /* concat 也收可变实参，而成员派发器是定长的。它是**可结合**的（一次拼一段），
+       * 所以多实参摊成一串调用、展开在运行期 reduce —— 与封闭 ABI 那边的 assoc 同一招。
+       * push 不在这儿：它有专门的 js_arr_push_all（上面那一支）。 */
+      if (name === 'concat' && (e.args.length > 1 || e.args.some((a) => a.type === 'Spread'))) {
+        if (!e.args.some((a) => a.type === 'Spread')) {
+          let out = recv;
+          for (const a of e.args) out = op('js_m_concat', [out, this.expr(a)]);
+          return out;
+        }
+        const idn = (nm) => ({ type: 'Ident', name: nm, span: e.span });
+        const f = this.closureExpr({
+          type: 'Arrow', params: [idn('_c0'), idn('_c1')], rest: null, expression: true, span: e.span,
+          body: { type: 'OpCall', op: 'js_m_concat', args: [idn('_c0'), idn('_c1')], span: e.span },
+        }, 'concat');
+        return op('js_arr_reduce', [box(this.argList(e.args), listType(D)), f, recv]);
+      }
+      /* 展开（`xs.slice(...ab)`）：op 是定长的，而展开的长度只有运行期才知道 ——
+       * 整条实参表先求成一个 list，再按下标取头几格（越界给 undefined，与"缺席的实参
+       * 补 js_undef"是同一件事）。argc 为 0 的成员用 emitPre，免得把那条表的求值丢掉。 */
       if (e.args.some((a) => a.type === 'Spread')) {
-        this.err(e.span, `spread is not supported in a '${name}' call`);
-        return undefExpr();
+        const t = this.temp();
+        const lst = assign(varRef(t), box(this.argList(e.args), listType(D)));
+        if (argc === 0) {
+          this.emitPre(exprStmt(lst), e.span);
+          return op(`js_m_${name}`, [recv]);
+        }
+        const out = [recv];
+        for (let i = 0; i < argc; i++) out.push(op('js_arr_at', [i === 0 ? lst : varRef(t), constReal(i)]));
+        return op(`js_m_${name}`, out);
       }
       if (e.args.length > argc) {
         // 不是 ABI 表里那个成员，而是用户自己的同名方法 —— 接收者照样要传（P1）。
@@ -2601,12 +2627,19 @@ class Lower {
     // { $cls: [类名…, "Error"], name, message }，opts 只看 cause 那一格。
     // AggregateError 的实参顺序不一样（errors 在前），errors 那一格另外挂。
     if (ERROR_CTORS.has(n) && !this.lookup(n) && !this.classes.has(n)) {
-      const sp = e.args.find((a) => a.type === 'Spread');
-      if (sp !== undefined) {
-        this.err(sp.span, `spread is not supported in a 'new ${n}' call`);
-        return undefExpr();
-      }
       const chain = n === 'Error' ? arrLit([s16('Error')]) : arrLit([s16(n), s16('Error')]);
+      /* 展开（`new Error(...xs)`）：整条实参表先落进一格临时量，再按下标取 —— 与
+       * 封闭 ABI 那条路同一个办法（abiSpreadCall）。 */
+      if (e.args.some((a) => a.type === 'Spread')) {
+        const lst = this.temp();
+        this.emitPre(exprStmt(assign(varRef(lst), box(this.argList(e.args), listType(D)))), e.span);
+        const at = (i) => op('js_arr_at', [varRef(lst), constReal(i)]);
+        if (n !== 'AggregateError') return op('js_err_new', [at(0), chain, at(1)]);
+        const t0 = this.temp();
+        this.emitPre(exprStmt(assign(varRef(t0), op('js_err_new', [at(1), chain, at(2)]))), e.span);
+        this.emitPre(exprStmt(op('js_obj_set', [varRef(t0), s16('errors'), at(0)])), e.span);
+        return varRef(t0);
+      }
       if (n !== 'AggregateError') {
         const msg = e.args.length ? this.expr(e.args[0]) : s16('');
         const opts = e.args.length > 1 ? this.expr(e.args[1]) : undefExpr();
@@ -2646,11 +2679,6 @@ class Lower {
      * table 上（函数还不是真对象），见 prelude 的 $js_fn_proto。 */
     if (n === 'Function' && !this.lookup('Function') && !this.globals.has('Function')) {
       return this.fnFromSrc(e);
-    }
-    const sp = e.args.find((a) => a.type === 'Spread');
-    if (sp !== undefined) {
-      this.err(sp.span, 'spread is not supported in a constructor call');
-      return undefExpr();
     }
     return op('js_fn_construct', [this.expr(e.callee), box(this.argList(e.args), listType(D))]);
   }

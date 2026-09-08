@@ -580,7 +580,9 @@ export const JS_METHODS = {
   push: { on: { list: 'js_arr_push' } },
   pop: { on: { list: 'js_arr_pop' } },
   unshift: { on: { list: 'js_arr_unshift' } },
-  concat: { on: { list: 'js_arr_concat' } },
+  /* 串上的 concat 就是 `+`：接收者已经是串，规范里两者都是 ToString 之后拼起来
+     （22.1.3.5 / 13.15.3），所以这一格直接接到那条算术 op 上，不另开一格。 */
+  concat: { on: { list: 'js_arr_concat', string: 'js_add' } },
   reverse: { on: { list: 'js_arr_reverse' } },
   fill: { on: { list: 'js_arr_fill', bytes: 'js_buf_fill' } },
   exec: { on: { regexp: 'js_re_exec' } },
