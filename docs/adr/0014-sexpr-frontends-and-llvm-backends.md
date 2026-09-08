@@ -12714,3 +12714,77 @@ op 的次序、种子、答案都没变（同一批 op、同一个顺序）。�
 同一条 `r3 == 0` 判据），所以逐位相同。落点：`real[][] * frame` 与 `real[][] * path3`
 各在循环外摊一次（帧里没有三维内容、路径为空时不摊 —— `asy__m16of` 对非 4x4 会 abort）。
 `real[][] * triple` 本身留着不动：别处还在用它，而且它是这两份的口径来源。
+
+## 第十六刀（已做）：视景体长宽比 —— **漏掉的是"屏幕工作区那一夹"**，以及"别再反解"
+
+这一刀的过程本身就是教训，所以连错的两步一起记。
+
+**错的第一步**：从两个"一条线"的探针（`diag2`：`size(20cm)`、`orthographic(1,1,1)`、
+一条与视线垂直的线；`big_line`：几乎沿视线那条）量到"我们的线比参考短 10%~32%"，
+就写下了"斜相机下线端被截短，下一刀查 `r3_add_bez` 的细分与端点裁剪"。
+**逐像素一比就知道这句是错的**：`diag2` 的墨参考在 x=296..1970、我们在 377..1889，
+**两边都以 x=1133 为中心、厚度与像素值逐行相同（191/128/191）** —— 不是端点被切，
+是整条线等比短了 1.107 倍，也就是**视口定标**差一个系数。（判据里"ink 只盖住参考
+90.3%、只有我们 0"这一行本来就在喊"我们是参考的子集"，被我读成了截短。）
+
+**错的第二步**：接着去反解"参考用了哪个 aspect"。加 `OMNI_R3_ASPECT=<数>` 扫了一圈，
+box3（`size(20cm)` + `orthographic(1,1,1)` 的 box 线框，位图 2268x1968）在 1.15345
+附近取到最小（1212/13390272，老版是 90228），于是凑出 `1135/984` 这个形状 ——
+理由是"`(int)(width*dpr)` 向零截断"。它把 box3 修到 2844，但把 sph_obl 从 1104
+打到 **353841**（那一路的 aspect 变成 768/768=1），box2/boxobl/boxtr 也一起崩。
+凑出来的形状经不起第二把尺子。
+
+**对的一步：打开真源码**。`/Users/wurui/Documents/Lang/reference/asymptote/` 下就是
+完整的 asy 源码。`renderBase.cc:932-1001` 的 `initDisplay` 一眼看到真形状：
+
+```c++
+oldWidth  = (int) std::ceil(contentWidth  * devicePixelRatio);
+oldHeight = (int) std::ceil(contentHeight * devicePixelRatio);
+int w = std::min(oldWidth,  screenWidth);      // ← 这一夹从前当成"用不上"省了
+int h = std::min(oldHeight, screenHeight);
+fitAspect(w, h);                               // Aspect = args.width/args.height（pt 那一对）
+...
+Width  = std::max(w, std::min(1024, fullWidth));
+Height = std::max(h, std::min(768,  fullHeight));
+if ((double)Width/Height > (double)fullWidth/fullHeight)   // ← 最后这一步用 fullW/fullH
+  Width = (int)std::ceil(Height * (double)fullWidth/fullHeight);
+else
+  Height = (int)std::ceil(Width * (double)fullHeight/fullWidth);
+```
+
+四处与我们从前那版不同：
+- `initDisplay(args.width, args.height)`（glrender.cc:1222）形参是 **int**，C++ 向零截断 ——
+  所以 `contentWidth` 就是 `(int)width`，不是四舍五入回来的那个数。
+- `Aspect`（成员）是 **`args.width/args.height`，pt 那一对 double**（glrender.cc:1220），
+  只在**第一次** `fitAspect` 里用。
+- **最后一步套长宽比用的是 `(double)fullWidth/fullHeight`**，位图那一对。
+  从前把这两个 Aspect 混成一个，于是要靠 `-1e-9` 去补"数学上是整数、除法差最后一位"
+  那类毛病 —— 那些补丁本来就是混用逼出来的。
+- **`screenWidth/screenHeight` 真的会夹。** 老注释里写着"没用上 —— 出图的画布都比工作区小"，
+  那句话只对小画布成立：这台机器的工作区是 **1512x945**，而 `size(20cm)` 那一族的
+  `oldHeight = ceil(492×2) = 984 > 945`。h 夹到 945、w 跟着 fitAspect 缩到 1091，
+  最后一步得 **1090/945 = 1.1534392** —— 与反解出来的 1.15345 只差 1e-5，这才是那个系数。
+
+内容的真尺寸（`args.width/height`）不用改清单格式就能拿到：正交那一路它就是相机坐标里
+box 的 x/y 跨度，判据 `fw == 4*(int)wpt && fh == 4*(int)hpt`（`shipout3` 那边是
+`oW=(int)width`、`fw=ceil(4*oW)`）。对得上才走新版；**透视那一路对不上**（m/M 不是画布
+尺寸），自动退回按位图反推的老版（连 `-1e-9` 一起留着）—— 那一档是下一刀。
+
+量出来的账（都是 run-c，`OMNI_EPS_FRESH=1`）：
+
+- box3 **90228 → 2148**（ink 盖住参考 92.65% → 99.9%）
+- big_line **6516 → 一样**、diag2 **1488 → 一样**（两个"线短了"的探针到此收口）
+- twoSpheres **209791 → 154304**（ink 只有参考 22、只有我们 1）
+- 一个字节不动的：box2 120、boxobl 192、boxtr 156、sph_obl 1104、lw 24、mix_a/b、
+  sph_* 那一族，以及 splitpatch 139061、filesurface 17548、trefoilknot 58332、
+  hyperboloid 6749、twistedtubes 4233、sacylinder3D 1488、triangles 115、
+  conicurv 13215、cheese 66308、vectorfieldsphere 67387、big_sph 896112
+  （这些画布的 oldHeight 都 ≤ 945，夹不到）
+- `tests/asy/run.js` 263 passed, 0 failed
+
+标定口：`OMNI_R3_ASPECT=old`（强制老版）/`full`（直接用位图长宽比）/`<数>`（直接指定），
+`OMNI_R3_SCREEN=w,h` 改工作区，`OMNI_R3_DPR` 改设备像素比。
+
+**这一刀留下的规矩**：三维那一轴凡是"参考那边到底怎么算"的问题，**先 grep
+reference/asymptote 的源码**，不要拿探针反解。反解能给出一个拟合值，但拟合值套不上
+第二把尺子（1135/984 就是这样死的），而源码一眼给出形状。
